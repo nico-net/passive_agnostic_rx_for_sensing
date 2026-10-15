@@ -1415,6 +1415,19 @@ static void coreset_dmrs_observe_or_defer(const cdmrs_obs_t *o, const c16_t *row
   }
 }
 
+/* ---- RECOVERY_ASYNC job slot + IQ snapshot pool (Task 6). Everything is allocated at queue start; the RT consumer allocates nothing.
+ * A snapshot holder is a full set of ring-sized owned-IQ buffers: after a slot group the consumer SWAPS its owned buffers with a free holder
+ * (pointer swap, no copy) and the holder, refcounted by the group's deferred jobs, goes to the worker, which returns it when done. */
+typedef struct { c16_t *iq[NB_ANTENNAS_RX]; _Atomic int refs; } recov_snap_t;
+typedef struct { nr_pdsch_passive_job_t job; recov_snap_t *snap; } recov_wjob_t;
+#define RECOV_SNAP_MAX 32
+static recov_snap_t g_rsnap[RECOV_SNAP_MAX];
+static int g_rsnap_free[RECOV_SNAP_MAX], g_rsnap_nfree, g_rsnap_n;
+static pthread_mutex_t g_rsnap_mu = PTHREAD_MUTEX_INITIALIZER;
+static bool g_recov_ok; /* snapshot pool allocated and the worker running */
+static _Atomic uint64_t g_recov_nosnap;
+static void recov_group_handoff(int idx, recov_wjob_t *const slots[], const nr_recov_key_t keys[], int n);
+
 static void *nr_pdsch_passive_queue_thread(void *arg)
 {
   const int idx = ((consumer_arg_t *)arg)->idx;
@@ -1685,6 +1698,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
     }
 
+    recov_wjob_t *rpend[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1]; /* RECOVERY_ASYNC: deferred jobs of this slot group, handed off at its end */
+    nr_recov_key_t rkeys[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
+    int n_rpend = 0;
     for (int gi = -1; gi < n_more; gi++) {
     if (gi >= 0) { job = more[gi]; enqueue_ns = more_ns[gi]; }
     NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
@@ -1929,7 +1945,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ds_c0);
     }
     const uint64_t dec_t0 = now_ns();
-    nr_pdsch_passive_recov_mode(nr_pdsch_recovery_enabled() && !job.layout_probe ? 1 : 0); /* RECOVERY_ASYNC: arms go to pdschRecov */
+    nr_pdsch_passive_recov_mode(g_recov_ok && owned && !job.layout_probe ? 1 : 0); /* RECOVERY_ASYNC: arms go to pdschRecov (owned IQ only: the snapshot is handed off) */
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
     const bool recov_deferred = nr_pdsch_passive_recov_deferred();
@@ -2106,13 +2122,14 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
      * Submit failed (ring full): not held, the failure is fed here as without the flag. */
     bool recov_hold = false;
     if (recov_deferred && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !gpu_health_failed) {
-      nr_pdsch_passive_job_t *wj = malloc(sizeof(*wj));
-      const nr_recov_key_t rk = {.rnti = job.rnti, .harq_pid = (uint8_t)job.grant.harq_pid, .ndi = (uint8_t)job.grant.ndi,
-                                 .abs_slot = (uint32_t)job.absolute_slot, .arm_mask = 0x1f};
+      recov_wjob_t *wj = nr_pdsch_recovery_acquire(); /* preallocated slot; NULL = full / busy, counted dropped_full */
       if (wj) {
-        *wj = job;
-        recov_hold = nr_pdsch_recovery_submit(&rk, wj) == 0;
-        if (!recov_hold) free(wj);
+        wj->job = job;
+        wj->snap = NULL;
+        rkeys[n_rpend] = (nr_recov_key_t){.rnti = job.rnti, .harq_pid = (uint8_t)job.grant.harq_pid, .ndi = (uint8_t)job.grant.ndi,
+                                          .abs_slot = (uint32_t)job.absolute_slot, .arm_mask = 0x1f};
+        rpend[n_rpend++] = wj;
+        recov_hold = true;
       }
     }
     if (dec.evm_valid && (!job.layout_probe || getenv("ISAC_PDSCH_EVM_PROBES"))
@@ -2390,7 +2407,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       /* CB0 elimination feed: AFTER this grant's TB feedback, BEFORE the BC9 / Qm steps that may re-index the context. */
       if (cb0_on) {
-        const nr_td_cb0_tb_t cb0_tb = {.tb_fed = credit_ok, .tb_pass = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, .tb_decoder = cb0_tb_decoder,
+        const nr_td_cb0_tb_t cb0_tb = {.tb_fed = credit_ok && !recov_hold, .tb_pass = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, .tb_decoder = cb0_tb_decoder,
                                        .iq_ok_after = credit_ok, .rv = job.grant.rv, .nl = dec.cw.Nl};
         nr_td_cb0_wire_feed(&job.sweep_ticket, &cb0_tb);
       }
@@ -2493,6 +2510,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       nr_td_grantwork_release(gw);
     }
     } /* slot group */
+    if (n_rpend) recov_group_handoff(idx, rpend, rkeys, n_rpend);
     if (slot_timing) {
       const uint64_t slot_t1 = now_ns();
       LOG_A(PHY, "SENSING: PDSCH_SLOT_TIME slot=%lu jobs=%d gpu_jobs=%d start_ns=%lu end_ns=%lu us=%.1f\n",
@@ -2510,13 +2528,6 @@ void nr_pdsch_passive_queue_recov_fb_stats(uint64_t out[3]);
  * The IQ is re-copied from the sample ring when the job starts (same guarded copy as the consumers'), so the consumer pays no copy; a slot that left
  * the ring meanwhile is dropped as expired. The whole decode call is repeated there with the arms enabled (the first body is deterministic and
  * fails again unless the CPU path rescues it; this keeps every thread-local of the decoder consistent) with the consumer's per-job overrides. */
-static __thread bool t_recov_snapshot;
-static bool recov_expired(const nr_recov_key_t *k)
-{
-  return !t_recov_snapshot && g_ue
-         && !nr_passive_samples_valid(atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), k->abs_slot,
-                                      g_ue->frame_parms.slots_per_frame);
-}
 /* Held-back outcome feedback of a deferred job, the same calls the consumer makes for a decoded grant (credit_ok true: the worker's IQ is a private snapshot,
  * except FAIL_NOCREDIT = IQ expired, where only the solver token is released). The hooks are the ones N consumers already call concurrently. */
 static __thread const nr_pdsch_passive_decode_result_t *t_recov_dec; /* the rescue's decode result, set by recov_run before publish */
@@ -2550,7 +2561,6 @@ static void recov_feedback(void *p, const nr_recov_key_t *k, int outcome)
     nr_pdsch_xoverhead_observe(dec->cw.qamModOrder, dec->cw.targetCodeRate, job->freq_alloc.num_rbs, (uint16_t)pdu->number_symbols,
                                (uint16_t)(get_num_dmrs_re_per_rb(pdu->dmrsConfigType, pdu->n_dmrs_cdm_groups) * get_num_dmrs(pdu->dlDmrsSymbPos)),
                                job->grant.nb_rb_oh, job->grant.tb_scaling, dec->cw.Nl, true);
-    if (dec->cw.Nl > 0 && dec->cw.Nl < 8) atomic_fetch_add_explicit(&g_nl_ok[dec->cw.Nl], 1, memory_order_relaxed);
     if (!job->sweep_ticket.settled && job->sweep_ticket.generation && dec->qm_measured)
       nr_pdsch_config_sweep_observe_qm(&job->sweep_ticket, job->grant.mcs, dec->qm_measured);
   }
@@ -2559,33 +2569,56 @@ void nr_pdsch_passive_queue_recov_fb_stats(uint64_t out[3])
 {
   for (int i = 0; i < 3; i++) out[i] = atomic_load_explicit(&g_recov_fb[i], memory_order_relaxed);
 }
+static void recov_done(void *p) /* the job's snapshot reference goes back; the last one returns the holder to the pool */
+{
+  recov_snap_t *sn = ((recov_wjob_t *)p)->snap;
+  if (sn && atomic_fetch_sub(&sn->refs, 1) == 1) {
+    pthread_mutex_lock(&g_rsnap_mu);
+    g_rsnap_free[g_rsnap_nfree++] = (int)(sn - g_rsnap);
+    pthread_mutex_unlock(&g_rsnap_mu);
+  }
+}
+/* End of a slot group on consumer idx: swap its owned-IQ buffers with a free holder and queue the group's deferred jobs on it. No holder free
+ * (or a failed submit): the held failure verdict is delivered here by the consumer (counted nosnap) -- one verdict per grant either way. */
+static void recov_group_handoff(int idx, recov_wjob_t *const slots[], const nr_recov_key_t keys[], int n)
+{
+  recov_snap_t *sn = NULL;
+  if (pthread_mutex_trylock(&g_rsnap_mu) == 0) {
+    if (g_rsnap_nfree > 0) sn = &g_rsnap[g_rsnap_free[--g_rsnap_nfree]];
+    pthread_mutex_unlock(&g_rsnap_mu);
+  }
+  if (sn) {
+    for (int a = 0; a < g_ue->frame_parms.nb_antennas_rx; a++) {
+      c16_t *t = g_owned_iq[idx][a];
+      g_owned_iq[idx][a] = sn->iq[a];
+      sn->iq[a] = t;
+    }
+    atomic_store(&sn->refs, n);
+  }
+  for (int i = 0; i < n; i++) {
+    slots[i]->snap = sn;
+    if (!sn || nr_pdsch_recovery_submit(&keys[i], slots[i])) {
+      atomic_fetch_add_explicit(&g_recov_nosnap, 1, memory_order_relaxed);
+      recov_feedback(&slots[i]->job, &keys[i], NR_RECOV_FB_FAIL);
+      recov_done(slots[i]); /* drops its snapshot reference (no-op without a holder) */
+      nr_pdsch_recovery_release(slots[i]);
+    }
+  }
+}
 static int recov_run(void *p, const nr_recov_key_t *k)
 {
-  const nr_pdsch_passive_job_t *jb = p;
+  const recov_wjob_t *wj = p;
+  const nr_pdsch_passive_job_t *jb = &wj->job;
   PHY_VARS_NR_UE *ue = g_ue;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const size_t rxF_sz = fp->samples_per_slot_wCP;
-  static __thread c16_t *rxF, *iq[NB_ANTENNAS_RX];
-  if (!rxF) {
-    rxF = malloc16_clear((size_t)fp->nb_antennas_rx * rxF_sz * sizeof(c16_t));
-    for (int a = 0; a < fp->nb_antennas_rx; a++) iq[a] = malloc16_clear(2u * (size_t)fp->samples_per_frame * sizeof(c16_t));
-  }
-  for (int a = 0; a < fp->nb_antennas_rx; a++)
-    if (!rxF || !iq[a]) return 0;
+  static __thread c16_t *rxF; /* worker-thread scratch, allocated on the worker (not an RT thread) */
+  if (!rxF) rxF = malloc16_clear((size_t)fp->nb_antennas_rx * rxF_sz * sizeof(c16_t));
+  if (!rxF || !wj->snap) return 0;
   NR_CFG_EPOCH_WORK(jb->config_epoch, &g_dropped_epoch);
-  if (!nr_cfg_epoch_work_current()) return 3; /* abandoned: the consumer drops such a grant without feedback too */
-  const size_t ring = 2u * fp->samples_per_frame, early = fp->nb_prefix_samples / fp->ofdm_offset_divisor;
-  const size_t off = get_samples_slot_timestamp(fp, jb->nr_slot_rx);
-  const size_t window = fp->nb_prefix_samples0 + fp->ofdm_symbol_size + (fp->symbols_per_slot - 1) * (fp->ofdm_symbol_size + fp->nb_prefix_samples)
-                        + fp->ofdm_symbol_size;
-  void *dst[NB_ANTENNAS_RX];
-  const void *src[NB_ANTENNAS_RX];
-  for (int a = 0; a < fp->nb_antennas_rx; a++) { dst[a] = iq[a]; src[a] = ue->common_vars.rxdata[a]; }
-  if (!nr_pdsch_copy_iq(dst, src, fp->nb_antennas_rx, ring * sizeof(c16_t), ((off + ring - early) % ring) * sizeof(c16_t), window * sizeof(c16_t),
-                        jb->absolute_slot, fp->slots_per_frame, gpu_req_producer, NULL))
-    return 2;
-  t_recov_snapshot = true; /* the snapshot is private: ring overwrite no longer matters */
-  nr_pdsch_passive_set_owned_iq(iq, jb->nr_slot_rx);
+  if (!nr_cfg_epoch_work_current()) return 3; /* abandoned: config epoch changed; the worker delivers FAIL, recov_feedback releases the token without credit */
+  /* the consumer's owned-IQ snapshot of this slot, handed off without a copy: it cannot expire */
+  nr_pdsch_passive_set_owned_iq(wj->snap->iq, jb->nr_slot_rx);
   UE_nr_rxtx_proc_t proc = {0};
   proc.frame_rx = jb->frame_rx; proc.nr_slot_rx = jb->nr_slot_rx; proc.gNB_id = jb->gNB_id;
   nr_pdsch_passive_job_t job = *jb;
@@ -2612,8 +2645,8 @@ static int recov_run(void *p, const nr_recov_key_t *k)
       nr_pdsch_recovery_count_stale();
       ret = 3;
     } else if ((t_recov_dec = &dec, nr_pdsch_recovery_publish(k, dec.tb, dec.cw.TBS)) == 0) {
-      /* LATE EVENT: the first pass was already published as CRC-FAIL (obs record, decoded/rnti_dec counters, solver and Technique D feedback
-       * all saw a failure and are NOT amended: a second record or feedback for the same grant would double count it). The rescue adds
+      /* LATE EVENT: the first pass was already published as CRC-FAIL (obs record, decoded/rnti_dec counters; its outcome feedback was held
+       * back and is delivered once, as CRC-OK, by recov_feedback). The rescue adds
        * crc_ok / rnti_ok (so the PDSCH CRC-OK totals include it), the payload consumers (RRC harvest, MAC TA), the replay capture and
        * one RECOVLATE line. */
       atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
@@ -2628,7 +2661,6 @@ static int recov_run(void *p, const nr_recov_key_t *k)
     if (!ret) ret = 1;
   }
   t_recov_dec = NULL;
-  t_recov_snapshot = false;
   return ret;
 }
 
@@ -2812,9 +2844,25 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     }
     threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name, core, 40);
   }
-  if (nr_pdsch_recovery_enabled()) { /* ISAC_PDSCH_RECOVERY_ASYNC=1, default off */
-    nr_pdsch_recovery_set_hooks(recov_run, recov_expired, recov_feedback);
-    LOG_A(PHY, "SENSING: RECOV worker %s (ISAC_PDSCH_RECOVERY_ASYNC)\n", nr_pdsch_recovery_start(0, NULL) == 0 ? "started" : "FAILED to start");
+  if (nr_pdsch_recovery_enabled() && nr_csirs_disc_enabled()) { /* ISAC_PDSCH_RECOVERY_ASYNC=1, default off; needs the owned IQ (snapshot hand-off) */
+    const char *e = getenv("ISAC_PDSCH_RECOVERY_SNAP"); /* snapshot holders, one set of ring-sized IQ buffers each */
+    g_rsnap_n = e ? atoi(e) : 8;
+    if (g_rsnap_n < 1) g_rsnap_n = 1;
+    if (g_rsnap_n > RECOV_SNAP_MAX) g_rsnap_n = RECOV_SNAP_MAX;
+    bool ok = true;
+    for (int i = 0; i < g_rsnap_n && ok; i++)
+      for (int a = 0; a < ue->frame_parms.nb_antennas_rx; a++) {
+        g_rsnap[i].iq[a] = malloc16_clear(2u * (size_t)ue->frame_parms.samples_per_frame * sizeof(c16_t));
+        ok = ok && g_rsnap[i].iq[a];
+      }
+    g_rsnap_nfree = 0;
+    for (int i = 0; i < g_rsnap_n; i++) g_rsnap_free[g_rsnap_nfree++] = i;
+    nr_pdsch_recovery_set_job_bytes(sizeof(recov_wjob_t));
+    nr_pdsch_recovery_set_hooks(recov_run, NULL, recov_feedback, recov_done);
+    g_recov_ok = ok && nr_pdsch_recovery_start(0, NULL) == 0;
+    LOG_A(PHY, "SENSING: RECOV worker %s (ISAC_PDSCH_RECOVERY_ASYNC, %d snapshot holders)\n", g_recov_ok ? "started" : "FAILED to start", g_rsnap_n);
+  } else if (nr_pdsch_recovery_enabled()) {
+    LOG_W(PHY, "SENSING: ISAC_PDSCH_RECOVERY_ASYNC needs the owned IQ (ISAC_CSIRS_DISC=1): recovery stays inline\n");
   }
   LOG_I(PHY, "SENSING: passive PDSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1);
@@ -3061,7 +3109,8 @@ void nr_pdsch_passive_queue_p99_dump(void)
     nr_pdsch_recovery_stats(rs, sizeof rs);
     uint64_t fb[3];
     nr_pdsch_passive_queue_recov_fb_stats(fb);
-    LOG_A(PHY, "SENSING: %s fb_ok=%lu fb_fail=%lu fb_nocredit=%lu\n", rs, (unsigned long)fb[0], (unsigned long)fb[1], (unsigned long)fb[2]);
+    LOG_A(PHY, "SENSING: %s fb_ok=%lu fb_fail=%lu fb_nocredit=%lu nosnap=%lu\n", rs, (unsigned long)fb[0], (unsigned long)fb[1], (unsigned long)fb[2],
+            (unsigned long)atomic_load(&g_recov_nosnap));
   }
   static int on = -1;
   if (on < 0)
@@ -3123,13 +3172,15 @@ void nr_pdsch_passive_queue_stop(void)
   if (!atomic_load_explicit(&g_running, memory_order_acquire)) {
     return;
   }
+  g_recov_ok = false; /* consumers defer nothing from here on */
   if (nr_pdsch_recovery_enabled()) {
     char rs[200];
     nr_pdsch_recovery_stop();
     nr_pdsch_recovery_stats(rs, sizeof rs);
     uint64_t fb[3];
     nr_pdsch_passive_queue_recov_fb_stats(fb);
-    LOG_A(PHY, "SENSING: %s fb_ok=%lu fb_fail=%lu fb_nocredit=%lu\n", rs, (unsigned long)fb[0], (unsigned long)fb[1], (unsigned long)fb[2]);
+    LOG_A(PHY, "SENSING: %s fb_ok=%lu fb_fail=%lu fb_nocredit=%lu nosnap=%lu\n", rs, (unsigned long)fb[0], (unsigned long)fb[1], (unsigned long)fb[2],
+            (unsigned long)atomic_load(&g_recov_nosnap));
   }
   atomic_store_explicit(&g_stop, 1, memory_order_release);
   pthread_mutex_lock(&g_lock);
@@ -3148,6 +3199,9 @@ void nr_pdsch_passive_queue_stop(void)
     free(g_consumer_gpu_llr[i]); g_consumer_gpu_llr[i] = NULL;
     free(g_consumer_gpu_rxF[i]); g_consumer_gpu_rxF[i] = NULL;
   }
+  for (int i = 0; i < g_rsnap_n; i++) /* after the consumers are joined: they swap buffers with these */
+    for (int a = 0; a < NB_ANTENNAS_RX; a++) { free(g_rsnap[i].iq[a]); g_rsnap[i].iq[a] = NULL; }
+  g_rsnap_n = 0;
   if (atomic_exchange(&g_gpu_worker_running, 0)) {
     pthread_mutex_lock(&g_gpu_wq_lock);
     pthread_cond_broadcast(&g_gpu_wq_work);
