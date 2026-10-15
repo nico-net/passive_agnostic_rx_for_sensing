@@ -4378,6 +4378,64 @@ Sources: `git show <branch>:docs/superpowers/reports/csd/<X>-20261014.md` (scanc
 
 ---
 
+### 2026-10-15 (night OTA + frozen t26f) block (`csd/otatest`, worktree `rr-csd-b`; OTA night 2026-10-14 23:36 -> 2026-10-15 02:37 at DEIB, LOW LOAD; three 2026-10-14 reports; no daytime run in this block)
+
+Sources: `rr-orchestration/ota/RESULTS-20261015-night.md` (tables, conclusions), `ota/night_agg_20261015.txt` (full per-env table, not copied here), `ota/t26f.txt`, `ota/t26f.env`; `docs/superpowers/reports/csd/ULLDPC-20261014.md`, `ANONLEN-20261014.md`, `USSHASH-20261014.md`.
+OTA label: `[MEASURED, DGX OTA, X410 34B2AF1, 2026-10-15 night, LOW LOAD, binary a9e3883aaa, cfg sd_t26ul, 150 s runs]`. **LOW LOAD: not a validation.** No OTA validation at night load (no-cell-tuning rule); n = 1-3 per env and cell: indicative only.
+Replay label: `[MEASURED, DGX replay <cap>]` = air-like replay, not OTA. Cells never merged: V = Vodafone PCI 415 (3680.01 MHz; capture `b`), T = TIM PCI 923 (3759.99 MHz, SSB offset 233; capture `tim`), M = PCI 517 (3590.19 MHz).
+
+**1. The three 2026-10-14 reports (replay only; all flags default off in the reports)**
+
+- **ULLDPC (`csd/ulldpc`, merged with ulbwp)** `[MEASURED, DGX replay b + tim, n = 3 per arm]`. UL stall cause: the UL FEP and LDPC GPU streams sat in the CSI-RS discovery SM partition (`ISAC_GPU_DISC_SMS=8`), next to discovery kernels of 4-400 ms. A stalled UL FEP call was 98-100 % in-GPU time (the kernel waited in the GPU; not preemption, not page migration). Fix `ISAC_UL_GPU_PART=rt` (UL streams in the real-time partition at the least stream priority). FEP calls > 2 ms per run: b R 26/32/40 -> Lr 0/0/0; tim R 43/68/97 -> Lr 2/1/2. UL p99: b R 404 k/438 k/802 k us -> Lr 26.4 k/28.6 k/25.7 k us; tim R 46.4 k/30.0 k/30.1 k us -> Lr 14.7 k/14.3 k/15.1 k us. `ISAC_UL_GPU_LDPC=1` (UL LDPC on the GPU, own pool, 4000 us deadline, CPU fallback): offline 1635 snapshots, 0 mismatches; replay CHECK=64 1715 compared TBs, 0 bad; not faster for a 1-CB TB (GPU 141 us vs CPU 134 us), faster for 4 CBs (143 vs 450 us). `ISAC_UL_UCI_BUDGET=8` caps UCI reservation LDPC trials: b R/F 13.3-23.2 k -> Lr 216-240; tim R/F 9.3-26.4 k -> Lr 392-960. `ISAC_UL_LOCK_SIGN` (pairwise sign test for the BWP lock; `=2` = shadow only): implemented, not validated on air, no replay locked the truth. Verdict: UL per-grant p99 < 0.5 ms NOT MET (p50 1.8-2.7 ms, p99 14-29 ms best arm); UL CRC-OK on air NOT MEASURED. Replay CRC passes (0-2 per run, 63-209-bit CRC16) are a false-pass signature `[INFERENCE]`.
+- **ANONLEN (`csd/anonlen`, merged; `ISAC_ANONLEN=1`)** `[MEASURED, DGX replay tim, scan2_arm.sh, SPEED=1, n = 6 per arm]`. Cheaper DL length sweep: empty-CCE screen once per candidate, plus learned lengths (a length locked for >= 2 RNTIs of the bank is swept alone; one full 34-length lap in 16). The cost on tim was known RNTIs with unlocked lengths swept over empty CCEs. R -> N: occasion p50 833+-19 -> 304+-39 us; occasion p99 2720+-197 -> 1695+-175 us; pass 340+-17 -> 159+-6 us; scan-thread CPU 11.2+-0.4 -> 6.3+-0.3 s; polar decodes 1.9 M -> 40 k; scan loss 0.0 -> 0.0 %; PDSCH CRC-OK 310+-85 -> 331+-48 (no significance claimed); DCI Jaccard R-N 0.948 vs R-R 0.956. On b (PCI 415): no measurable gain (its anonymous search is the async janon path). Risk: a weak UE's length lock comes later; a reconfigured length is found at most one lap later. Report verdict: 0.5 ms NOT MET.
+- **USSHASH (`csd/usshash`, merged; `ISAC_PDCCH_USS_FAST=1`, `ISAC_PDCCH_USS_TRACK_BACKOFF=4`)** `[MEASURED, DGX replay b + tim, n = 6 per arm]`. **Premise correction** `[CODE READ]`: `pdcchUssHash` is not a known-UE decoder. It is the discovery tracker: per geometry it keeps 64 strongest-candidate observations and scores all 65535 RNTIs x 3 hash ids x up to 64 samples x 7 M hypotheses at 8/16/32/64 and then every 256 observations (integer and float only; no FEP, LLR or polar). So the FEP-reuse, per-RNTI AL, RNTI-merge and TDD-skip levers do not apply to it. FAST = exact modulo fold and reciprocal multiply, same ranking (gtest `UssTrackerFast.MatchesReferenceAndFindsPlantedRnti` passes). BACKOFF = a settled geometry (stable RNTI) is rescored every 256*4 observations. Thread CPU: b 13.3+-4.6 -> 2.0+-1.2 s; tim 21.3+-0.3 -> 6.6+-0.9 s (process b 85.6 -> 73.6 s; tim 96.4 -> 85.8 s). DCI Jaccard X-R b 0.90 vs R-R 0.89, tim 0.971 vs 0.967 (inside noise). Risk: a NEW RNTI on a settled geometry is found up to ~1024 observations later. `ISAC_PDCCH_USS_CORE=12` wins over the starttest default 7. FAST and BACKOFF were measured together only.
+
+**2. Merge state**
+
+- `csd/otatest` = `a9e3883aaa` ("merge csd/usshash ..."). Contains all 2026-10-14 branches: fattails, ulfep (+ulq, uldci), scan2, ulldpc (+ulbwp), anonlen, usshash.
+- Frozen gate, 2026-10-15: `git diff --quiet sens6-frozen-2026-09-30 -- tests/passive_rx/captures tests/passive_rx/*.conf tests/passive_rx/sens6_host_snapshot_2026-09-30` returns 0 (clean).
+- Full ctest on `build_t26` `[OFFLINE VERIFIED, DGX aarch64, as reported in the ULLDPC, ANONLEN and USSHASH reports; not re-run in this block]`: only the 5 known ARM failures: `test_nr_pusch_ra0_qam64`, `test_nr_pusch_ra0_qam256`, `test_nr_td_grantwork`, `dft_test`, `test_nr_modulation`.
+
+**3. Night OTA, 2026-10-14 23:36 -> 2026-10-15 02:37 (LOW LOAD)**
+
+60 specs round-robin over 15 envs; 59 runs usable (`ab_C2_1_022046` has no run.log). Whole PDSCH decode call incl. retries, median over runs, from `RESULTS-20261015-night.md`:
+
+| cell | env | p50 us | p99 us | max ms | DECSLOW (>20 ms) per run | PDSCH stale % |
+|---|---|---|---|---|---|---|
+| T | t26e (base) | 765 | 13009 | 182 | 185 | 1.4 |
+| T | t26eF (fat tails) | 760 | 5667 | 41 | 21.5 | 0.1 |
+| T | t26eFG | 631 | 4281 | 38 | 2 | 0.1 |
+| T | t26eALL | 691 | 2546 | 28 | 10.5 | 0.0 |
+| V | t26e | 1080 | 40281 | 175 | 150 | 7.8 |
+| V | t26eF | 953 | 9297 | 35 | 16 | 0.0 |
+| V | t26eFG | 650 | 7840 | 59 | 7 | 0.0 |
+| V | t26eALL | 1059 | 12474 | 186 | 22 | 0.8 |
+| M | t26e / t26eALL | 523 / 542 | 1115 / 1061 | 23 / 8 | 2 / 0 | 0 / 0 |
+
+- Hard checks, all envs, all runs: GPU exact `bad_chest` + `bad_demod` + `mismatch` = 0; RFSTALL 0; no crash.
+- Fat-tails flags confirmed on air at low load: DECSLOW lines drop 7-90x; max 175-260 ms -> 28-59 ms (one V ALL run still 186 ms); stale ~0.
+- Sub-slot target NOT met: whole-call p50 0.5-1.1 ms; 70-89 % of calls > 500 us.
+- Scan loss (stale + full): base 2.5 % (T) / 8.2 % (V); ANONLEN/USS/ALL arms 0.0-0.1 %; t26eC (SCANCOST=1) 0.9 % / 4.2 %.
+- Rank 3/4 (t26eG, GPU exact MMSE): T crc_ok 8830 vs base 8250; V 13164 vs 2389 (load-confounded); bad = 0; no DECSLOW reduction by itself (150-222 per run).
+- UL: CRC-OK ~0 in all envs EXCEPT one V t26eG run with BWP LOCKED 217@0: 25 UL CRC-OK (n = 1), evidence that a correct BWP lock gives UL CRC on air. UL DMRS SNR medians -4.6 to -13.7 dB (one T UG run -22.8 dB). V mostly searching; T true BWP still unknown (sign test did not lock in 150 s).
+- Sync gate (t26eS): no SYNC_POOR false alarms; no RFSTALL in 59 starts.
+
+**4. Frozen env `t26f` (PROVISIONAL)**
+
+- Frozen 2026-10-15 02:50 ("freeze the working parameters"). `ota/t26f.env` is one line with 191 `ISAC_` tokens; its token set is identical to `ota/t26eALL.env`. `ISAC_RX_BRANCH_FO` is not set.
+- Contents (per `t26f.txt`): t26e (t26bPQ queue fix, `ISAC_USRP_START_TIMEOUT_MS=2200`); fat tails (`ISAC_FATTAILS=1`, `ISAC_PDSCH_RETRY_NORESTORE=1`, `ISAC_PDSCH_RETRY_PREDICT=1`); scan (`ISAC_SCANCOST=2`, `ISAC_LOG_ASYNC=1`, `ISAC_SCAN2_SLOWPASS_MS=8`, `ISAC_ANONLEN=1`, `ISAC_PDCCH_USS_FAST=1`, `ISAC_PDCCH_USS_TRACK_BACKOFF=4`); rank 3/4 GPU (`ISAC_PDSCH_MMSE_EXACT_NL34=1`, `ISAC_PDSCH_GPU_EXACT_DEMOD_MMSE3=1`); sync gate (`ISAC_CORESET_DISC_SYNCQ=1`); UL path (priority queue, 2 consumers on cores 0,1 SCHED_OTHER, snapshot pool, HARQ combine, FIT_READ, PREFIX_ENT, GPU FEP and GPU LDPC in the rt partition `ISAC_UL_GPU_PART=rt`, UCI budget 8, `ISAC_UL_LOCK_SIGN=2` = shadow only, `ISAC_UL_STALL_DIAG=1`).
+- Binary `a9e3883aaa`. Evidence: the night only (LOW LOAD, n = 2-3 per cell). Status PROVISIONAL until a daytime-load confirmation run, t26e vs t26f, same day and same cells.
+
+**5. Pending (updated 2026-10-15)**
+
+- Daytime confirmation of t26f: t26e vs t26f, same day, same cells, n >= 2 per cell. Not yet run.
+- Sub-slot p99 still NOT met: whole-call p50 0.5-1.1 ms on air (night).
+- UL CRC needs a correct BWP lock: one V run locked 217@0 and got 25 UL CRC-OK (n = 1). TIM true UL BWP unknown.
+- Whole-system analysis agent: 2026-10-15 08:00 (branch `csd/sysan`).
+- Multi-PCI agent: next.
+
+---
+
 ## 26. Working rules for any agent on this project (carried over from the old setup)
 
 - Evidence labels (§0.1) in every status statement; retract wrong claims explicitly; never quote inherited numbers.
