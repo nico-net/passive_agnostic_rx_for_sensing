@@ -884,11 +884,16 @@ constexpr int EVM_NCH = (EXT + EVM_CH - 1) / EVM_CH;     /* blocks per symbol */
 /* partial slots per (symbol, block). Pass 1: pw[4] nv; pass 2: err_l[4] qr[4] qi[4] qd[4] qx[4] cr[4] ci[4] P[4] Y[4] nterm,
  * then err_k[12] n_k[12]; pass 3: Cr[10] Ci[10]. */
 constexpr int EVM_P1 = 0, EVM_NV = 4, EVM_P2 = 5, EVM_NP2 = 37, EVM_K = EVM_P2 + EVM_NP2, EVM_P3 = EVM_K + 24, EVM_P = EVM_P3 + 20;
-struct EvmCtx {
+template <class A = double> struct EvmCtx {
   int nl, nbRx, nb, a0, a1, lmax;
-  double ideal_pow;
+  A ideal_pow;
 };
-__device__ __forceinline__ bool evm_ctx(const nr_gpu_demod_job_t &j, const Shared *sh, int m, EvmCtx &c)
+/* A: the storage / accumulator type of the EVM sums (double: the default chain; float: the FP32 pass class, no FP64 in the kernels). 2-vectors of it: */
+template <class A> struct V2;
+template <> struct V2<double> { typedef double2 t; };
+template <> struct V2<float> { typedef float2 t; };
+template <class A> __device__ __forceinline__ typename V2<A>::t mk2(A x, A y) { typename V2<A>::t v; v.x = x; v.y = y; return v; }
+template <class A> __device__ __forceinline__ bool evm_ctx(const nr_gpu_demod_job_t &j, const Shared *sh, int m, EvmCtx<A> &c)
 {
   if (!(j.sym_mask >> m & 1) || !(j.nl >= 1 && j.nl <= 4 && j.nre[m] >= 12 && j.nre[m] <= j.ext))
     return false;
@@ -899,20 +904,20 @@ __device__ __forceinline__ bool evm_ctx(const nr_gpu_demod_job_t &j, const Share
   c.a0 = j.nl == 1 ? d.mrc_rx_index : 0;
   c.a1 = j.nl == 1 ? d.mrc_rx_index + d.mrc_nb_rx : j.nbRx;
   c.lmax = (1 << (j.qm / 2)) - 1;
-  double ms = 0.0;
+  A ms = 0;
   int nlev = 0;
   for (int l = 1; l <= c.lmax; l += 2) {
-    ms += (double)l * l;
+    ms += (A)l * l;
     nlev++;
   }
-  c.ideal_pow = 2.0 * ms / nlev;
+  c.ideal_pow = (A)2 * ms / nlev;
   return true;
 }
-__device__ __forceinline__ bool evm_good(const double *S, int nl)
+template <class A> __device__ __forceinline__ bool evm_good(const A *S, int nl)
 {
   bool g = (unsigned)S[EVM_NV] >= 12;
   for (int l = 0; l < nl; l++)
-    g = g && S[EVM_P1 + l] > 0.0;
+    g = g && S[EVM_P1 + l] > (A)0;
   return g;
 }
 template <typename T> __device__ __forceinline__ void evm_slice(T x, T scale, int lmax, T &v, T &s)
@@ -925,7 +930,7 @@ template <typename T> __device__ __forceinline__ void evm_slice(T x, T scale, in
  * or double (=2, the CPU's formulas in double). Sums are always accumulated in double. Diagnostic only: the decoder's
  * LLRs never depend on it. */
 /* block sums of K float terms per thread: float warp shuffles, then the 8 warp partials in double (fixed order) */
-template <int K> __device__ void block_colsum(const float (&v0)[K], float *col, double *out)
+template <int K, class A = double> __device__ void block_colsum(const float (&v0)[K], float *col, A *out)
 {
   const int t = threadIdx.x, lane = t & 31, w = t >> 5, nw = blockDim.x >> 5;
   float v[K];
@@ -942,9 +947,9 @@ template <int K> __device__ void block_colsum(const float (&v0)[K], float *col, 
       col[w * K + k] = v[k];
   __syncthreads();
   if (t < K) {
-    double a = 0.0;
+    A a = 0;
     for (int q = 0; q < nw; q++)
-      a += (double)col[q * K + t];
+      a += (A)col[q * K + t];
     out[t] = a;
   }
   __syncthreads();
@@ -957,13 +962,13 @@ template <typename T> __device__ __forceinline__ cxT<T> cmulT(cxT<T> a, cxT<T> b
   return cxT<T>{a.r * b.r - a.i * b.i, a.r * b.i + a.i * b.r};
 }
 /* pass 1: per-RE zero forcing; block partials {pw0, pw1, nv} */
-template <typename T, int NLM> /* NLM: largest Nl of the launch (2 keeps the Nl <= 2 register footprint) */
-__global__ void k_evm1(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, double2 *xs, const Shared *sh, double *part, int erase)
+template <typename T, int NLM, typename A = double> /* NLM: largest Nl of the launch (2 keeps the Nl <= 2 register footprint) */
+__global__ void k_evm1(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, typename V2<A>::t *xs, const Shared *sh, A *part, int erase)
 {
   const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
-  __shared__ double shd[8 * 5];
+  __shared__ A shd[8 * 5];
   const int m = blockIdx.y, t = threadIdx.x;
-  EvmCtx c;
+  EvmCtx<A> c;
   if (!evm_ctx(j, sh, m, c))
     return;
   const uint32_t nre = j.nre[m], i = blockIdx.x * EVM_CH + t;
@@ -971,8 +976,8 @@ __global__ void k_evm1(__grid_constant__ const JobK jk_, const nrd_c16 *y, const
     return;
   const nrd_c16 *Y = y + (size_t)m * NR_GPU_DEMOD_MAX_RX * EXT;
   const nrd_c16 *H = h + (size_t)m * 16 * EXT;
-  double2 *X = xs + (size_t)m * 4 * EXT;
-  double v[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+  typename V2<A>::t *X = xs + (size_t)m * 4 * EXT;
+  A v[5] = {0, 0, 0, 0, 0};
   if (t < EVM_CH && i < nre) {
     const int nl = c.nl, nbRx = c.nbRx;
     long long g[NLM][NLM + 1][2] = {{{0}}}; /* [l][k < nl] = conj(h_l) h_k, [l][NLM] = conj(h_l) y */
@@ -1002,53 +1007,55 @@ __global__ void k_evm1(__grid_constant__ const JobK jk_, const nrd_c16 *y, const
         z = Y[(size_t)a * EXT + i].r == 0 && Y[(size_t)a * EXT + i].i == 0;
       ok = !z;
     }
-    double2 x[NLM];
+    typename V2<A>::t x[NLM];
     for (int l = 0; l < NLM; l++)
-      x[l] = make_double2(0, 0);
+      x[l] = mk2<A>(0, 0);
     if (nl == 1) {
-      const double g00 = (double)g[0][0][0];
-      ok = ok && g00 > 1e-9;
+      const A g00 = (A)g[0][0][0];
+      ok = ok && g00 > (A)1e-9;
       if (ok) { /* __divdc3(a, b, c, 0) == (a / c, b / c) */
-        if (sizeof(T) == sizeof(double))
+        if constexpr (std::is_same<A, float>::value)
+          x[0] = mk2<A>((float)g[0][NLM][0] / g00, (float)g[0][NLM][1] / g00);
+        else if (sizeof(T) == sizeof(double))
           x[0] = make_double2(__ddiv_rn((double)g[0][NLM][0], g00), __ddiv_rn((double)g[0][NLM][1], g00));
         else
           x[0] = make_double2((double)((float)g[0][NLM][0] / (float)g00), (double)((float)g[0][NLM][1] / (float)g00));
       }
-    } else if (sizeof(T) == sizeof(double) || NLM > 2) { /* the CPU's elimination in double (always for Nl = 3, 4) */
-      dcx G[NLM][NLM + 1]; /* column nl is b */
+    } else if (std::is_same<A, float>::value ? (NLM > 2) : (sizeof(T) == sizeof(double) || NLM > 2)) { /* the CPU's elimination (double; float for the FP32 class; always for Nl = 3, 4) */
+      cxr<A> G[NLM][NLM + 1]; /* column nl is b */
       for (int l = 0; l < nl; l++) {
         for (int k = 0; k < nl; k++)
-          G[l][k] = dcx{(double)g[l][k][0], (double)g[l][k][1]};
-        G[l][nl] = dcx{(double)g[l][NLM][0], (double)g[l][NLM][1]};
+          G[l][k] = cxr<A>{(A)g[l][k][0], (A)g[l][k][1]};
+        G[l][nl] = cxr<A>{(A)g[l][NLM][0], (A)g[l][NLM][1]};
       }
       for (int cc = 0; cc < nl && ok; cc++) {
         int piv = cc;
         for (int r = cc + 1; r < nl; r++)
           if (cabs_c(G[r][cc]) > cabs_c(G[piv][cc]))
             piv = r;
-        if (cabs_c(G[piv][cc]) <= 1e-9) {
+        if (cabs_c(G[piv][cc]) <= (A)1e-9) {
           ok = false;
           break;
         }
         if (piv != cc)
           for (int k = 0; k <= nl; k++) {
-            const dcx tt = G[cc][k];
+            const cxr<A> tt = G[cc][k];
             G[cc][k] = G[piv][k];
             G[piv][k] = tt;
           }
         for (int r = 0; r < nl; r++) {
           if (r == cc)
             continue;
-          const dcx f = divdc3(G[r][cc].r, G[r][cc].i, G[cc][cc].r, G[cc][cc].i);
+          const cxr<A> f = divdc3(G[r][cc].r, G[r][cc].i, G[cc][cc].r, G[cc][cc].i);
           for (int k = cc; k <= nl; k++) {
-            const dcx p = cmul(G[cc][k], f);
-            G[r][k] = dcx{__dsub_rn(G[r][k].r, p.r), __dsub_rn(G[r][k].i, p.i)};
+            const cxr<A> p = cmul(G[cc][k], f);
+            G[r][k] = cxr<A>{G[r][k].r - p.r, G[r][k].i - p.i};
           }
         }
       }
       for (int l = 0; l < nl && ok; l++) {
-        const dcx q = divdc3(G[l][nl].r, G[l][nl].i, G[l][l].r, G[l][l].i);
-        x[l] = make_double2(q.r, q.i);
+        const cxr<A> q = divdc3(G[l][nl].r, G[l][nl].i, G[l][l].r, G[l][l].i);
+        x[l] = mk2<A>(q.r, q.i);
       }
     } else { /* 2 x 2 Hermitian solve in float (Cramer): x = adj(G) b / det(G) */
       const float g00 = (float)g[0][0][0], g11 = (float)g[1][1][0];
@@ -1060,20 +1067,23 @@ __global__ void k_evm1(__grid_constant__ const JobK jk_, const nrd_c16 *y, const
       ok = ok && mx > 1e-9f && fabsf(det) > 1e-7f * mx * mx;
       if (ok) {
         const cxT<float> u = cmulT(g01, b1), w = cmulT(g10, b0);
-        x[0] = make_double2((double)((g11 * b0.r - u.r) / det), (double)((g11 * b0.i - u.i) / det));
-        x[1] = make_double2((double)((g00 * b1.r - w.r) / det), (double)((g00 * b1.i - w.i) / det));
+        x[0] = mk2<A>((A)((g11 * b0.r - u.r) / det), (A)((g11 * b0.i - u.i) / det));
+        x[1] = mk2<A>((A)((g00 * b1.r - w.r) / det), (A)((g00 * b1.i - w.i) / det));
       }
     }
     for (int l = 0; l < nl; l++) {
       if (!ok) {
-        X[(size_t)l * EXT + i] = make_double2(nan(""), nan(""));
+        X[(size_t)l * EXT + i] = mk2<A>(nanR(A()), nanR(A()));
         continue;
       }
       X[(size_t)l * EXT + i] = x[l];
-      v[l] = sizeof(T) == sizeof(double) || NLM > 2 ? __fma_rn(x[l].x, x[l].x, __dmul_rn(x[l].y, x[l].y))
-                                         : (double)((float)x[l].x * (float)x[l].x + (float)x[l].y * (float)x[l].y);
+      if constexpr (std::is_same<A, float>::value)
+        v[l] = x[l].x * x[l].x + x[l].y * x[l].y;
+      else
+        v[l] = sizeof(T) == sizeof(double) || NLM > 2 ? __fma_rn(x[l].x, x[l].x, __dmul_rn(x[l].y, x[l].y))
+                                           : (double)((float)x[l].x * (float)x[l].x + (float)x[l].y * (float)x[l].y);
     }
-    v[EVM_NV] = ok ? 1.0 : 0.0;
+    v[EVM_NV] = ok ? (A)1 : (A)0;
   }
   block_vsum(v, shd);
   if (t == 0)
@@ -1081,48 +1091,48 @@ __global__ void k_evm1(__grid_constant__ const JobK jk_, const nrd_c16 *y, const
       part[((size_t)m * EVM_NCH + blockIdx.x) * EVM_P + EVM_P1 + k] = v[k];
 }
 /* fold the block partials of slots [o, o+n) per symbol into sum[m][0..n) (block order) */
-__global__ void k_evm_fold(__grid_constant__ const JobK jk_, const double *part, int o, int n, double *sum)
+template <class A = double> __global__ void k_evm_fold(__grid_constant__ const JobK jk_, const A *part, int o, int n, A *sum)
 {
   const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   const int m = blockIdx.x, k = threadIdx.x;
   if (k >= n || !(j.sym_mask >> m & 1))
     return;
   const int nch = (j.nre[m] + EVM_CH - 1) / EVM_CH;
-  double a = 0.0;
+  A a = 0;
   for (int b = 0; b < nch && b < EVM_NCH; b++)
     a += part[((size_t)m * EVM_NCH + b) * EVM_P + o + k];
   sum[m * EVM_P + o + k] = a;
 }
 /* pass 2: decisions, error and LS-fit partials; per-(RE mod 12) and per-RB error sums in RE order from shared memory */
-template <typename T>
-__global__ void k_evm2(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, const double2 *xs, double2 *sd, Shared *sh,
-                       double *part, const double *sum)
+template <typename T, typename A = double>
+__global__ void k_evm2(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, const typename V2<A>::t *xs, typename V2<A>::t *sd, Shared *sh,
+                       A *part, const A *sum)
 {
   const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
-  __shared__ double shd[8 * EVM_NP2];
+  __shared__ A shd[8 * EVM_NP2];
   __shared__ float colf[8 * EVM_NP2];
   __shared__ float s_e[4][EVM_CH];  /* e2 / ideal per (layer, RE of the block), -1 = no term */
-  __shared__ double s_sc[4];
+  __shared__ A s_sc[4];
   const int m = blockIdx.y, t = threadIdx.x;
-  EvmCtx c;
+  EvmCtx<A> c;
   nr_gpu_evm_sym_t *E = &sh->evm[m];
   if (!evm_ctx(j, sh, m, c))
     return;
   const uint32_t nre = j.nre[m], i = blockIdx.x * EVM_CH + t;
   if (blockIdx.x * EVM_CH >= nre)
     return;
-  const double *S = sum + m * EVM_P;
+  const A *S = sum + m * EVM_P;
   const unsigned nv = (unsigned)S[EVM_NV];
   if (!evm_good(S, c.nl))
     return;
   if (t < 4)
-    s_sc[t] = t < c.nl ? sqrt(c.ideal_pow / (S[EVM_P1 + t] / nv)) : 0.0;
+    s_sc[t] = t < c.nl ? sqrtR(c.ideal_pow / (S[EVM_P1 + t] / nv)) : (A)0;
   __syncthreads();
   const T scale[4] = {(T)s_sc[0], (T)s_sc[1], (T)s_sc[2], (T)s_sc[3]};
   const nrd_c16 *Y = y + (size_t)m * NR_GPU_DEMOD_MAX_RX * EXT;
   const nrd_c16 *H = h + (size_t)m * 16 * EXT;
-  const double2 *X = xs + (size_t)m * 4 * EXT;
-  double2 *D = sd + (size_t)m * 4 * EXT;
+  const typename V2<A>::t *X = xs + (size_t)m * 4 * EXT;
+  typename V2<A>::t *D = sd + (size_t)m * 4 * EXT;
   const int lmax = c.lmax, nl = c.nl;
   const T inv_ideal = (T)1 / (T)c.ideal_pow;
   /* v: err_l[4] qr[4] qi[4] qd[4] qx[4] cr[4] ci[4] P[4] Y[4] nterm */
@@ -1139,7 +1149,7 @@ __global__ void k_evm2(__grid_constant__ const JobK jk_, const nrd_c16 *y, const
     for (int l = 0; l < 4; l++) {
       if (l >= nl)
         break;
-      const double2 x = X[(size_t)l * EXT + i];
+      const typename V2<A>::t x = X[(size_t)l * EXT + i];
       T vi, vq, si, sq;
       evm_slice<T>((T)x.x, scale[l], lmax, vi, si);
       evm_slice<T>((T)x.y, scale[l], lmax, vq, sq);
@@ -1152,7 +1162,7 @@ __global__ void k_evm2(__grid_constant__ const JobK jk_, const nrd_c16 *y, const
       v[16 + l] += vi * vi + vq * vq;
       sr[l] = si / scale[l];
       sqv[l] = sq / scale[l];
-      D[(size_t)l * EXT + i] = make_double2((double)sr[l], (double)sqv[l]);
+      D[(size_t)l * EXT + i] = mk2<A>((A)sr[l], (A)sqv[l]);
       v[36] += (T)1;
     }
 #pragma unroll
@@ -1204,14 +1214,14 @@ __global__ void k_evm2(__grid_constant__ const JobK jk_, const nrd_c16 *y, const
       E->n_rb[rb] = (uint16_t)n;
     }
   }
-  double *dst = part + ((size_t)m * EVM_NCH + blockIdx.x) * EVM_P + EVM_P2;
-  if (sizeof(T) == sizeof(float)) {
+  A *dst = part + ((size_t)m * EVM_NCH + blockIdx.x) * EVM_P + EVM_P2;
+  if constexpr (sizeof(T) == sizeof(float)) {
     block_colsum(*(const float(*)[EVM_NP2])v, colf, dst);
   } else {
-    double dv[EVM_NP2];
+    A dv[EVM_NP2];
 #pragma unroll
     for (int k = 0; k < EVM_NP2; k++)
-      dv[k] = (double)v[k];
+      dv[k] = (A)v[k];
     block_vsum(dv, shd);
     if (t == 0)
       for (int k = 0; k < EVM_NP2; k++)
@@ -1219,34 +1229,34 @@ __global__ void k_evm2(__grid_constant__ const JobK jk_, const nrd_c16 *y, const
   }
 }
 /* pass 3: cross-branch correlation of the LS residuals (needs the symbol's alpha_a from pass 2) */
-template <typename T>
-__global__ void k_evm3(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, const double2 *xs, const double2 *sd,
-                       const Shared *sh, double *part, const double *sum)
+template <typename T, typename A = double>
+__global__ void k_evm3(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, const typename V2<A>::t *xs, const typename V2<A>::t *sd,
+                       const Shared *sh, A *part, const A *sum)
 {
   const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
-  __shared__ double shd[8 * 20];
+  __shared__ A shd[8 * 20];
   __shared__ float colf[8 * 20];
-  __shared__ double s_ar[4][2];
+  __shared__ A s_ar[4][2];
   const int m = blockIdx.y, t = threadIdx.x;
-  EvmCtx c;
+  EvmCtx<A> c;
   if (!evm_ctx(j, sh, m, c))
     return;
   const uint32_t nre = j.nre[m], i = blockIdx.x * EVM_CH + t;
   if (blockIdx.x * EVM_CH >= nre)
     return;
-  const double *S = sum + m * EVM_P;
+  const A *S = sum + m * EVM_P;
   if (!evm_good(S, c.nl))
     return;
   if (t < c.nb) {
-    const double P = S[EVM_P2 + 28 + t];
-    s_ar[t][0] = P > 0.0 ? S[EVM_P2 + 20 + t] / P : 0.0;
-    s_ar[t][1] = P > 0.0 ? S[EVM_P2 + 24 + t] / P : 0.0;
+    const A P = S[EVM_P2 + 28 + t];
+    s_ar[t][0] = P > (A)0 ? S[EVM_P2 + 20 + t] / P : (A)0;
+    s_ar[t][1] = P > (A)0 ? S[EVM_P2 + 24 + t] / P : (A)0;
   }
   __syncthreads();
   const nrd_c16 *Y = y + (size_t)m * NR_GPU_DEMOD_MAX_RX * EXT;
   const nrd_c16 *H = h + (size_t)m * 16 * EXT;
-  const double2 *X = xs + (size_t)m * 4 * EXT;
-  const double2 *D = sd + (size_t)m * 4 * EXT;
+  const typename V2<A>::t *X = xs + (size_t)m * 4 * EXT;
+  const typename V2<A>::t *D = sd + (size_t)m * 4 * EXT;
   T v[20];
 #pragma unroll
   for (int k = 0; k < 20; k++)
@@ -1264,7 +1274,7 @@ __global__ void k_evm3(__grid_constant__ const JobK jk_, const nrd_c16 *y, const
         if (l >= c.nl)
           break;
         const nrd_c16 hh = H[((size_t)l * c.nbRx + a) * EXT + i];
-        const double2 dd = D[(size_t)l * EXT + i];
+        const typename V2<A>::t dd = D[(size_t)l * EXT + i];
         const cxT<T> p = cmulT(cxT<T>{(T)hh.r, (T)hh.i}, cxT<T>{(T)dd.x, (T)dd.y});
         hs.r += p.r;
         hs.i += p.i;
@@ -1285,14 +1295,14 @@ __global__ void k_evm3(__grid_constant__ const JobK jk_, const nrd_c16 *y, const
         v[10 + k] = p.i;
       }
   }
-  double *dst = part + ((size_t)m * EVM_NCH + blockIdx.x) * EVM_P + EVM_P3;
-  if (sizeof(T) == sizeof(float)) {
+  A *dst = part + ((size_t)m * EVM_NCH + blockIdx.x) * EVM_P + EVM_P3;
+  if constexpr (sizeof(T) == sizeof(float)) {
     block_colsum(*(const float(*)[20])v, colf, dst);
   } else {
-    double dv[20];
+    A dv[20];
 #pragma unroll
     for (int k = 0; k < 20; k++)
-      dv[k] = (double)v[k];
+      dv[k] = (A)v[k];
     block_vsum(dv, shd);
     if (t == 0)
       for (int k = 0; k < 20; k++)
@@ -1307,22 +1317,22 @@ __global__ void k_evm_zero(Shared *sh)
   }
 }
 /* export the symbol's sums for the host fold */
-__global__ void k_evm_out(__grid_constant__ const JobK jk_, Shared *sh, const double *sum)
+template <class A = double> __global__ void k_evm_out(__grid_constant__ const JobK jk_, Shared *sh, const A *sum)
 {
   const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   const int m = blockIdx.x;
   nr_gpu_evm_sym_t *E = &sh->evm[m];
-  EvmCtx c;
+  EvmCtx<A> c;
   if (threadIdx.x != 0)
     return;
   E->valid = 0;
   if (!evm_ctx(j, sh, m, c))
     return;
-  const double *S = sum + m * EVM_P;
+  const A *S = sum + m * EVM_P;
   const unsigned nv = (unsigned)S[EVM_NV];
   if (!evm_good(S, c.nl))
     return;
-  const double *V = S + EVM_P2;
+  const A *V = S + EVM_P2;
   for (int l = 0; l < c.nl; l++) {
     E->err_l[l] = V[l];
     E->qr[l] = V[4 + l];
@@ -1512,6 +1522,9 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
       || cudaFuncGetAttributes(&fa, k_tail<1, float>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_tail<2, float>) != cudaSuccess
       || cudaFuncGetAttributes(&fa, k_tail<3, float>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_tail<6, float>) != cudaSuccess
       || cudaFuncGetAttributes(&fa, k_tail<7, float>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_tail<8, float>) != cudaSuccess
+      || cudaFuncGetAttributes(&fa, k_evm1<float, 4, float>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_evm1<float, 2, float>) != cudaSuccess
+      || cudaFuncGetAttributes(&fa, k_evm2<float, float>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_evm3<float, float>) != cudaSuccess
+      || cudaFuncGetAttributes(&fa, k_evm_fold<float>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_evm_out<float>) != cudaSuccess
       || cudaFuncGetAttributes(&fa, k_evm1<float, 4>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_evm1<double, 4>) != cudaSuccess)
     return -1;
   g_ok = 1;
@@ -1779,7 +1792,21 @@ extern "C" int nr_pdsch_gpu_demod_pass_dev(int inst, const nr_gpu_demod_job_t *j
     cudaEventRecord(x.fork, s);
     cudaStreamWaitEvent(es, x.fork, 0);
     k_evm_zero<<<NSYM, 288, 0, es>>>(x.dsh);
-    if (jj.evm_fp64) {
+    if (jj.demod_fp32) { /* FP32 class: the whole EVM chain in float (storage and sums), no FP64 instruction */
+      float2 *xs = (float2 *)x.xs, *sd = (float2 *)x.sd;
+      float *part = (float *)x.part, *sum = (float *)x.sum;
+      const dim3 eg(EVM_NCH, NSYM);
+      if (jj.nl > 2)
+        k_evm1<float, 4, float><<<eg, 256, 0, es>>>(K(jj), x.y, x.h, xs, x.dsh, part, jj.evm_erase);
+      else
+        k_evm1<float, 2, float><<<eg, 256, 0, es>>>(K(jj), x.y, x.h, xs, x.dsh, part, jj.evm_erase);
+      k_evm_fold<float><<<NSYM, 64, 0, es>>>(K(jj), part, EVM_P1, 5, sum);
+      k_evm2<float, float><<<eg, 256, 0, es>>>(K(jj), x.y, x.h, xs, sd, x.dsh, part, sum);
+      k_evm_fold<float><<<NSYM, 64, 0, es>>>(K(jj), part, EVM_P2, EVM_NP2 + 24, sum);
+      k_evm3<float, float><<<eg, 256, 0, es>>>(K(jj), x.y, x.h, xs, sd, x.dsh, part, sum);
+      k_evm_fold<float><<<NSYM, 64, 0, es>>>(K(jj), part, EVM_P3, 20, sum);
+      k_evm_out<float><<<NSYM, 32, 0, es>>>(K(jj), x.dsh, sum);
+    } else if (jj.evm_fp64) {
       if (jj.nl > 2)
         k_evm1<double, 4><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.dsh, x.part, jj.evm_erase);
       else
@@ -1798,8 +1825,10 @@ extern "C" int nr_pdsch_gpu_demod_pass_dev(int inst, const nr_gpu_demod_job_t *j
       k_evm_fold<<<NSYM, 64, 0, es>>>(K(jj), x.part, EVM_P2, EVM_NP2 + 24, x.sum);
       k_evm3<float><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.sd, x.dsh, x.part, x.sum);
     }
-    k_evm_fold<<<NSYM, 64, 0, es>>>(K(jj), x.part, EVM_P3, 20, x.sum);
-    k_evm_out<<<NSYM, 32, 0, es>>>(K(jj), x.dsh, x.sum);
+    if (!jj.demod_fp32) {
+      k_evm_fold<<<NSYM, 64, 0, es>>>(K(jj), x.part, EVM_P3, 20, x.sum);
+      k_evm_out<<<NSYM, 32, 0, es>>>(K(jj), x.dsh, x.sum);
+    }
     cudaEventRecord(x.join, es);
   }
   launch_tail(jj, x, s, gx);

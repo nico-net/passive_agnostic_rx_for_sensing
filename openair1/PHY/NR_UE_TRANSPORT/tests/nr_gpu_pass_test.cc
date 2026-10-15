@@ -8,6 +8,7 @@ extern "C" {
 }
 #include <map>
 #include "nr_gpu_pass_fixture.h"
+#include "nr_gpu_pass_fp32_gate.h"
 #include "nr_gpu_platform.h"
 #include "nr_gpu_pass_post.h"
 #include <random>
@@ -1050,6 +1051,89 @@ TEST(GpuPassFp32, SignAgreementAndCrc) {
   EXPECT_GT(diff, 0) << "the float kernels never ran: the FP32 class is not selected";
 }
 
+/* The EVM chain of an FP32 class is float end to end (storage and sums). Documented tolerance against the default chain (float per-RE math, double sums): every
+ * per-symbol sum the host folds (err_l, qr, qi, qd, qx, cr, ci, P, Y) within 2e-3 relative (float sums of ~3e3 terms, pairwise tree: ~1e-6 expected). */
+TEST(GpuPassFp32, EvmChainMatchesFp64Sums) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(pass_ready(m));
+  double worst = 0;
+  for (int which = 0; which < 3; which++) { // nrb 48: Nl 1, 2 (Cramer), 4 (generic elimination)
+    const nr_gpu_pass_shape_t base = GpuPassFixture::warm_shapes()[4 * 4 * 1 + 4 * (which == 0 ? 0 : which == 1 ? 1 : 3) + 1]; // qm 4
+    nr_gpu_pass_shape_t s32 = base;
+    s32.fp32 |= NR_GPU_PASS_FP32_DEMOD;
+    ASSERT_EQ(0, m.pass_warm(&base, base.nl >= 2 ? 3 : 0, 0, 1));
+    ASSERT_EQ(0, m.pass_warm(&s32, base.nl >= 2 ? 3 : 0, 0, 1));
+    GpuPassFixture fx = GpuPassFixture::from_shape(base, 5);
+    ASSERT_TRUE(fx.tb_ok_built);
+    fx.bind();
+    std::unique_ptr<nr_gpu_demod_job_t> d0(new nr_gpu_demod_job_t()), d1(new nr_gpu_demod_job_t());
+    for (int f = 0; f < 2; f++) {
+      fx.job->shape.fp32 = f ? s32.fp32 : base.fp32;
+      fx.job->dj.demod_fp32 = f;
+      fx.job->dj.want_evm = 1;
+      fx.job->dj.want_kappa = 1;
+      fx.job->dj.evm_fp64 = 0;
+      std::vector<uint8_t> tb(fx.tb.A / 8 + 64);
+      nr_gpu_pass_result_t r{};
+      r.tb = tb.data();
+      r.demod_out = f ? d1.get() : d0.get();
+      ASSERT_EQ(0, m.pass_try(fx.job, &r)) << "nl " << base.nl << " fp32 " << f;
+    }
+    auto rel = [&](double a, double b) { return std::fabs(a - b) / std::max(1.0, std::fabs(b)); };
+    int valid = 0;
+    for (int sy : fx.data_syms) {
+      const nr_gpu_evm_sym_t &a = d0->evm[sy], &b = d1->evm[sy];
+      ASSERT_EQ(a.valid, b.valid);
+      if (!a.valid) continue;
+      valid++;
+      for (int l = 0; l < base.nl; l++)
+        for (double w : {rel(b.err_l[l], a.err_l[l]), rel(b.qr[l], a.qr[l]), rel(b.qi[l], a.qi[l]), rel(b.qd[l], a.qd[l]), rel(b.qx[l], a.qx[l])}) worst = std::max(worst, w);
+      for (int q = 0; q < a.nb; q++)
+        for (double w : {rel(b.cr[q], a.cr[q]), rel(b.ci[q], a.ci[q]), rel(b.P[q], a.P[q]), rel(b.Y[q], a.Y[q])}) worst = std::max(worst, w);
+      EXPECT_EQ(a.nv, b.nv);
+    }
+    EXPECT_GT(valid, 0) << "no EVM sums, nl " << base.nl;
+  }
+  printf("GpuPassFp32.EvmChainMatchesFp64Sums: worst relative difference %.3e\n", worst);
+  EXPECT_LE(worst, 2e-3);
+}
+/* The rate gate of the FP32 shadow checks (nr_gpu_pass_fp32_gate.h): flips above 1 % of the shadowed grants, after a minimum sample of 64, disable the pass. */
+TEST(GpuPassFp32, ShadowGateLogic) {
+  EXPECT_FALSE(nr_fp32_gate_bad(63, 63)) << "below the minimum sample";
+  EXPECT_TRUE(nr_fp32_gate_bad(64, 64));
+  EXPECT_FALSE(nr_fp32_gate_bad(200, 2)) << "exactly 1 % keeps the pass";
+  EXPECT_TRUE(nr_fp32_gate_bad(200, 3));
+  EXPECT_FALSE(nr_fp32_gate_bad(10000, 100));
+  EXPECT_TRUE(nr_fp32_gate_bad(10000, 101));
+  { // a sequence: 1 flip in 100 grants (1 %) keeps the pass, the second flip (1.98 %) trips it
+    nr_fp32_gate_t g = {};
+    int tripped = 0;
+    for (int i = 0; i < 100; i++) tripped |= nr_fp32_gate_note(&g, i == 99);
+    EXPECT_EQ(0, tripped);
+    EXPECT_EQ(1, nr_fp32_gate_note(&g, 1)) << "2 flips in 101: 1.98 % -> tripped";
+  }
+  { // an early burst is not judged before the minimum sample
+    nr_fp32_gate_t g = {};
+    for (int i = 0; i < 63; i++) EXPECT_EQ(0, nr_fp32_gate_note(&g, 1)) << i;
+    EXPECT_EQ(1, nr_fp32_gate_note(&g, 1));
+  }
+  { // 3 flips among 400 grants (0.75 %) keep the pass; one flip within the first 64 grants is judged only at the 64th
+    nr_fp32_gate_t g = {};
+    int tripped = 0;
+    for (int i = 0; i < 300; i++) tripped |= nr_fp32_gate_note(&g, 0);
+    for (int i = 0; i < 3; i++) tripped |= nr_fp32_gate_note(&g, 1);
+    for (int i = 0; i < 97; i++) tripped |= nr_fp32_gate_note(&g, 0);
+    EXPECT_EQ(0, tripped) << "3 flips in 400 = 0.75 %";
+    nr_fp32_gate_t e = {};
+    for (int i = 0; i < 63; i++) nr_fp32_gate_note(&e, i == 5);
+    EXPECT_EQ(1, nr_fp32_gate_note(&e, 0)) << "1 flip in 64 = 1.56 %";
+  }
+}
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
  * allocated or built on the launch path. */
 extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);

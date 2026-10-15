@@ -15,6 +15,7 @@
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/TOOLS/nr_gpu_mem.h"
 #include "common/utils/LOG/log.h"
+#include "nr_gpu_pass_fp32_gate.h"
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -38,6 +39,22 @@ static struct {
 
 int nr_gpu_pass_active(void) { return atomic_load_explicit(&G.on, memory_order_relaxed); }
 int nr_gpu_pass_fp32_on(void) { return G.fp32; }
+
+/* Task 5: one FP32-shadowed grant (the old path decoded it too). flip: the CRC verdict (or the decoded-block count) differs; sign_bad: > 0.1 % of the LLR signs
+ * differ. A sign failure, or CRC-verdict flips above 1 % of the shadowed grants after NR_FP32_GATE_MIN_N of them, count as a bad check and turn the pass off. 1 = disabled. */
+int nr_gpu_pass_fp32_shadow(int flip, int sign_bad)
+{
+  static nr_fp32_gate_t gate;
+  if (flip)
+    nr_gpu_pass_note(NR_GPU_PASS_EV_FP32_FLIP);
+  const int trip = nr_fp32_gate_note(&gate, flip);
+  if (sign_bad || trip) {
+    nr_gpu_pass_note(sign_bad ? NR_GPU_PASS_EV_SHADOW_FAIL_BAD : NR_GPU_PASS_EV_SHADOW_BAD);
+    nr_gpu_pass_disable(sign_bad ? "FP32 pass LLR signs disagree with the old path (> 0.1 %)" : "FP32 pass CRC verdicts flip against the old path (> 1 %)");
+    return 1;
+  }
+  return 0;
+}
 
 void nr_gpu_pass_note(int ev)
 {
@@ -361,6 +378,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
                                     .rxdataF = (c16_t *)in->rxdataF, .scope = &scope, .ssb_rm = in->ssb_rm};
   if (nr_pdsch_gpu_demod_pass_job(&call, &j->dj, &j->geo_y, &j->geo_h) != 0)
     return fb(FB_DEMOD);
+  j->llr_out_all = G.fp32; /* FP32: the shadow check of a CRC-OK pass compares LLR signs too */
   j->dj.demod_fp32 = G.fp32; /* the old GPU demod stays double; only the graph pass runs the float kernels */
   if (nr_pdsch_evm_acc.armed && !j->dj.want_evm) /* the EVM would need the CPU copy of the equaliser output */
     return fb(FB_DEMOD);
