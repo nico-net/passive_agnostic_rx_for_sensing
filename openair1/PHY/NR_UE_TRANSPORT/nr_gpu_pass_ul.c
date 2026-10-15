@@ -16,6 +16,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 int nr_get_R_ldpc_decoder(int rvidx, int E, int BG, int Z, int *llrLen, int round);
 
@@ -132,6 +133,44 @@ static struct {
 
 int nr_gpu_pass_ul_active(void) { return atomic_load_explicit(&U.on, memory_order_relaxed); }
 
+#define UL_SAMP 65536
+static uint32_t g_samp[5][UL_SAMP]; /* 0..3: grant_us by kind; 4: the pass call itself (builder + graph + wait) */
+static _Atomic uint32_t g_samp_n[5];
+static void samp_add(int k, uint32_t us)
+{
+  const uint32_t i = atomic_fetch_add_explicit(&g_samp_n[k], 1, memory_order_relaxed);
+  if (i < UL_SAMP)
+    g_samp[k][i] = us;
+}
+void nr_gpu_pass_ul_grant_us(int kind, uint32_t us)
+{
+  if (kind >= 0 && kind < 4)
+    samp_add(kind, us);
+}
+static int cmp_u32(const void *a, const void *b)
+{
+  const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+  return x < y ? -1 : x > y;
+}
+static void samp_pct(int k, uint32_t *n, uint32_t *p50, uint32_t *p99, uint32_t *mx)
+{
+  uint32_t c = atomic_load(&g_samp_n[k]);
+  c = c > UL_SAMP ? UL_SAMP : c;
+  *n = atomic_load(&g_samp_n[k]);
+  *p50 = *p99 = *mx = 0;
+  if (!c)
+    return;
+  uint32_t *t = malloc(c * sizeof(uint32_t)); /* census only: not on the decode path */
+  if (!t)
+    return;
+  memcpy(t, g_samp[k], c * sizeof(uint32_t));
+  qsort(t, c, sizeof(uint32_t), cmp_u32);
+  *p50 = t[c / 2];
+  *p99 = t[(uint32_t)((uint64_t)c * 99 / 100)];
+  *mx = t[c - 1];
+  free(t);
+}
+
 void nr_gpu_pass_ul_note(int ev)
 {
   if (ev >= 0 && ev < NR_GPU_PASS_UL_EV_N)
@@ -163,15 +202,25 @@ void nr_gpu_pass_ul_census(void)
   uint64_t o[16] = {0};
   if (U.counters)
     U.counters(o);
+  {
+    uint32_t n[5], p50[5], p99[5], mx[5];
+    for (int k = 0; k < 5; k++)
+      samp_pct(k, &n[k], &p50[k], &p99[k], &mx[k]);
+    LOG_A(PHY,
+          "SENSING: GPUPASS_UL_TIME grant_us[old n=%u p50=%u p99=%u max=%u | pass_ok n=%u p50=%u p99=%u max=%u | pass_fail n=%u p50=%u p99=%u max=%u | shadow n=%u p50=%u p99=%u max=%u] "
+          "pass_call_us[n=%u p50=%u p99=%u max=%u]\n",
+          n[0], p50[0], p99[0], mx[0], n[1], p50[1], p99[1], mx[1], n[2], p50[2], p99[2], mx[2], n[3], p50[3], p99[3], mx[3], n[4], p50[4], p99[4], mx[4]);
+  }
   LOG_A(PHY,
         "SENSING: GPUPASS_UL on=%d runs=%lu launches=%lu graph_hits=%lu module_fb[unseen=%lu busy=%lu unsup=%lu err=%lu ldpc_key=%lu] tb_fail=%lu need_cpu=%lu wait_us_p50<=%lu p99<=%lu classes=%lu | host_fb[off=%lu "
-        "tp=%lu hop=%lu ptrs=%lu scope=%lu rv=%lu cell=%lu tbparam=%lu dmrs=%lu module=%lu nomem=%lu] cache[hit=%lu miss=%lu stale=%lu put=%lu] ok=%lu fail=%lu refine=%lu shadow=%lu shadow_bad=%lu\n",
+        "tp=%lu hop=%lu ptrs=%lu scope=%lu rv=%lu cell=%lu tbparam=%lu dmrs=%lu module=%lu nomem=%lu] cache[hit=%lu miss=%lu stale=%lu put=%lu] ok=%lu fail=%lu refine=%lu shadow=%lu shadow_bad=%lu llr_inexact=%lu est_diff=%lu\n",
         atomic_load(&U.on), (unsigned long)U.runs, (unsigned long)o[0], (unsigned long)o[1], (unsigned long)o[2], (unsigned long)o[3], (unsigned long)o[4], (unsigned long)o[5],
         (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[8], (unsigned long)o[9], (unsigned long)o[10], (unsigned long)o[11], (unsigned long)U.fb[FB_OFF],
         (unsigned long)U.fb[FB_TP], (unsigned long)U.fb[FB_HOP], (unsigned long)U.fb[FB_PTRS], (unsigned long)U.fb[FB_SCOPE], (unsigned long)U.fb[FB_RV], (unsigned long)U.fb[FB_CELL],
         (unsigned long)U.fb[FB_TBPARAM], (unsigned long)U.fb[FB_DMRS], (unsigned long)U.fb[FB_MODULE], (unsigned long)U.fb[FB_NOMEM], (unsigned long)g_hyp_hit,
         (unsigned long)g_hyp_miss, (unsigned long)g_hyp_stale, (unsigned long)g_hyp_put, (unsigned long)U.ev[NR_GPU_PASS_UL_EV_OK], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_FAIL],
-        (unsigned long)U.ev[NR_GPU_PASS_UL_EV_REFINE], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_BAD]);
+        (unsigned long)U.ev[NR_GPU_PASS_UL_EV_REFINE], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_BAD], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_LLR_DIFF],
+        (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF]);
 }
 
 static int fb(int why)
@@ -182,9 +231,15 @@ static int fb(int why)
   return 1;
 }
 
+int nr_gpu_pass_ul_requested(void)
+{
+  const char *e = getenv("ISAC_UL_GPU_PASS");
+  return e && atoi(e) == 1;
+}
+
 void nr_gpu_pass_ul_prewarm(int ctx)
 {
-  if (ctx < 0 || ctx >= UL_CTX || U.ctx[ctx].job)
+  if (!nr_gpu_pass_ul_requested() || ctx < 0 || ctx >= UL_CTX || U.ctx[ctx].job)
     return;
   nr_gpu_pass_job_t *jp = (nr_gpu_pass_job_t *)aligned_alloc(64, (sizeof(*jp) + 63) & ~(size_t)63);
   int16_t *pil = (int16_t *)aligned_alloc(64, (size_t)NR_GPU_PASS_MAX_DMRS * 6 * 273 * 4 + 64);
@@ -340,9 +395,13 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
   u->on = 1;
   memset(&out->r, 0, sizeof(out->r));
   out->r.tb = in->tb;
+  struct timespec t0_, t1_;
+  clock_gettime(CLOCK_MONOTONIC, &t0_);
   const int rc = U.try_(j, &out->r);
+  clock_gettime(CLOCK_MONOTONIC, &t1_);
   if (rc != 0)
     return fb(FB_MODULE);
+  samp_add(4, (uint32_t)(((int64_t)(t1_.tv_sec - t0_.tv_sec) * 1000000000ll + (t1_.tv_nsec - t0_.tv_nsec)) / 1000));
   /* ---- what nr_rx_pusch_group_internal / nr_pusch_channel_estimation leave behind */
   const int nrx = in->nb_rx;
   out->ndmrs = nd;
@@ -361,7 +420,8 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
   }
   nvar /= (uint32_t)nd;
   out->nvar = nvar;
-  out->dmrs_snr_db = nr_ulsch_dmrs_snr_db(hacc / ((double)nrb * 12 * nrx * nd), (double)nvar);
+  out->dmrs_sig2 = hacc / ((double)nrb * 12 * nrx * nd);
+  out->dmrs_snr_db = nr_ulsch_dmrs_snr_db(out->dmrs_sig2, (double)nvar);
   {
     /* the delay of the LAST DM-RS symbol (each call of the estimator replaces pvp->delay) */
     int peak[4], est[4];

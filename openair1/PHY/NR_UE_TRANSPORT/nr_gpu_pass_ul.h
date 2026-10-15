@@ -84,11 +84,14 @@ typedef struct {
   uint32_t G, C, K, F, Z, E, tbs_bits;
   uint32_t nvar;                         /* nr_pusch_channel_estimation()'s mean noise over the DM-RS symbols (nr_rx_pusch_group_internal's nvar) */
   float dmrs_snr_db;                     /* nr_ulsch_dmrs_snr_db() of the pass (NAN as in the old path when there is no estimate) */
+  double dmrs_sig2;                      /* its first argument: the mean |H|^2 of the DM-RS estimates */
   int est_delay, est_delay_max_val;      /* pvp->delay of the last DM-RS symbol, the TA refinement's input */
   int log2_maxh;
   const int16_t *est;                    /* want_est: [ndmrs * nbRx][4096] c16, row = dmrs_index * nbRx + antenna */
 } nr_gpu_pass_ul_out_t;
 
+/* 1 when ISAC_UL_GPU_PASS=1 was asked for (before the module is up): the decoder allocates its per-context buffers only then */
+int nr_gpu_pass_ul_requested(void);
 /* before the RX fence (per decode context): the job, pilot and estimate buffers, allocated and prefaulted */
 void nr_gpu_pass_ul_prewarm(int ctx);
 /* 1 = ISAC_UL_GPU_PASS=1 and the classes are cached */
@@ -100,8 +103,11 @@ int nr_gpu_pass_ul_shadow(int mismatch);
 int nr_gpu_pass_ul_shadow_due(void);
 void nr_gpu_pass_ul_note(int ev);
 enum { NR_GPU_PASS_UL_EV_OK, NR_GPU_PASS_UL_EV_FAIL /* pass said CRC fail: the old tail decoded its LLRs */, NR_GPU_PASS_UL_EV_REFINE /* |delay| above the tolerance: the old path redid the grant */,
-       NR_GPU_PASS_UL_EV_SHADOW, NR_GPU_PASS_UL_EV_SHADOW_BAD, NR_GPU_PASS_UL_EV_N };
+       NR_GPU_PASS_UL_EV_SHADOW, NR_GPU_PASS_UL_EV_SHADOW_BAD, NR_GPU_PASS_UL_EV_SHADOW_LLR_DIFF /* LLRs not bit-equal (signs agree within the policy) */,
+       NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF /* delay / scale / DM-RS SNR differ */, NR_GPU_PASS_UL_EV_N };
 void nr_gpu_pass_ul_census(void);
+/* per-grant wall time of the whole decode call, by what carried it: 0 old path, 1 pass (TB decoded), 2 pass (CRC failed, old tail), 3 shadowed (both paths ran). Kept for the census percentiles. */
+void nr_gpu_pass_ul_grant_us(int kind, uint32_t us);
 /* class warm-up (before the RX fence), called by nr_gpu_pass_warmup() after the module is up (h = the dlopen handle); returns the classes captured */
 int nr_gpu_pass_ul_warm(void *h, int nbrx, int fp32);
 

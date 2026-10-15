@@ -518,7 +518,7 @@ static int prepare_ul(Inst &I, const nr_gpu_pass_job_t *j)
   const nr_gpu_pass_ul_t &u = j->ul;
   const int nbRx = g_cfg.nbRx, nd = j->ndmrs;
   const int ext = (12 * (int)j->shape.nrb_class + 15) & ~15;
-  if (!u.on || j->nl != 1 || nd < 1 || nd > NR_GPU_PASS_MAX_DMRS || u.nrb < 1 || u.nrb > (int)j->shape.nrb_class || u.meas_sym < 1 || u.meas_sym >= NSYM || !u.nre[u.meas_sym]) return -1;
+  if (!u.on || j->nl != 1 || nd < 1 || nd > NR_GPU_PASS_MAX_DMRS || u.nrb < 1 || u.nrb > (int)j->shape.nrb_class || u.meas_sym < 0 || u.meas_sym >= NSYM || !u.nre[u.meas_sym]) return -1;
   const bool direct = nr_gpu_model() == NR_GPU_MODEL_DIRECT;
   bool redirect = direct;
   for (int a = 0; a < nbRx; a++) redirect = redirect && u.rx[a];

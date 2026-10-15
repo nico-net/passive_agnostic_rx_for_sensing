@@ -21,6 +21,8 @@
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
 #include "nr_pdsch_gpu_ldpc_host.h" // ISAC_UL_GPU_LDPC: GPU LDPC for the PUSCH TBs (default off)
 #include "nr_pusch_gpu_fep.h" // ISAC_UL_GPU_FEP: GPU port of the UL FEP below (default off)
+#include "nr_gpu_pass_ul.h" // ISAC_UL_GPU_PASS: the whole PUSCH decode as one GPU graph (default off)
+#include "PHY/NR_TRANSPORT/nr_ulsch_passive_branch.h"
 #include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
 
 #include "nr_pusch_passive_decode.h"
@@ -141,10 +143,13 @@ typedef struct {
   float *h;
   uint32_t *k, *l;
   int16_t *uci;
+  int16_t *shadow_llr; /* GPUPASS UL shadow check: the pass's LLRs and TB while the old path decodes the same grant */
+  uint8_t *shadow_tb;
 } passive_ul_scratch_t;
 static passive_ul_scratch_t g_scratch[NR_PUSCH_PASSIVE_MAX_CTX];
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
 static __thread bool t_solver_probe;
+static __thread int t_ul_kind; /* GPUPASS UL: what carried the grant being decoded (nr_gpu_pass_ul_grant_us) */
 void nr_pusch_passive_counters(uint64_t *try_, uint64_t *crc_ok)
 {
   *try_ = atomic_load(&g_try);
@@ -305,6 +310,47 @@ static inline bool hp_crc_failed(const NR_gNB_ULSCH_t *u)
   if (!h || !h->C || h->processedSegments!=h->C) return true;
   const uint32_t bits=h->ulsch_pdu.pusch_data.tb_size*8u;
   return h->C>1 && !check_crc(h->b,lenWithCrc(1,bits),crcType(1,bits));
+}
+
+/* ---- GPUPASS Task 7 (ISAC_UL_GPU_PASS=1, default off): the per-RNTI hypothesis of the last grant that decoded. A hit sends the grant straight into the GPU pass (FEP at the
+ * cached timing advance, the cached DM-RS identity); a miss, a stale entry and anything the pass does not cover keep the old path. The entry is refreshed by every CRC-OK
+ * decode (either path) with the timing advance corrected by the delay the estimator measured, so that it follows the clock drift. */
+static void ul_hyp_apply(nr_pdcch_blind_ul_result_t *g, const ul_hyp_t *h)
+{
+  if (!h->have_dmrs || h->start_symbol != g->start_symbol || h->num_symbols != g->num_symbols) return; /* the DM-RS layout belongs to a grant of this shape only */
+  g->mapping_type = h->mapping_type;
+  g->ul_dmrs_symb_pos = h->dmrs_mask;
+  g->dmrs_config_type = h->dmrs_type;
+  g->nscid = h->nscid;
+  g->ul_dmrs_scrambling_id = h->dmrs_id;
+  g->n_dmrs_cdm_groups = h->n_cdm_groups;
+  g->dmrs_ports = h->dmrs_ports;
+}
+static int ul_seed_on(void)
+{
+  static int v = -1;
+  if (v < 0) { const char *e = getenv("ISAC_UL_GPU_PASS_SEED"); v = e && atoi(e) == 1; }
+  return v;
+}
+static void ul_hyp_store(const nr_pdcch_blind_ul_result_t *g, int32_t ta, uint32_t epoch, int64_t abs_slot, uint32_t n_ok)
+{
+  ul_hyp_t h;
+  memset(&h, 0, sizeof(h));
+  h.ta = ta;
+  h.have_dmrs = 1;
+  h.dmrs_mask = (uint16_t)g->ul_dmrs_symb_pos;
+  h.dmrs_id = g->ul_dmrs_scrambling_id;
+  h.nscid = (uint8_t)g->nscid;
+  h.dmrs_type = (uint8_t)g->dmrs_config_type;
+  h.mapping_type = (uint8_t)g->mapping_type;
+  h.n_cdm_groups = (uint8_t)g->n_dmrs_cdm_groups;
+  h.dmrs_ports = (uint16_t)g->dmrs_ports;
+  h.start_symbol = (uint8_t)g->start_symbol;
+  h.num_symbols = (uint8_t)g->num_symbols;
+  h.epoch = epoch;
+  h.abs_slot = abs_slot;
+  h.n_ok = n_ok;
+  ul_hyp_cache_put(g->rnti, &h);
 }
 
 /* ---- TIMING-ADVANCE SWEEP (ISAC_UL_TA_SWEEP="start:step:count", default off) ------------------
@@ -681,6 +727,12 @@ bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue, int ctx)
   if(!w->k) w->k=malloc16_clear(sizeof(uint32_t)*PASSIVE_UL_CFR_CAP);
   if(!w->l) w->l=malloc16_clear(sizeof(uint32_t)*PASSIVE_UL_CFR_CAP);
   if(!w->uci) w->uci=malloc16_clear(sizeof(int16_t)*PASSIVE_UL_UCI_CAP);
+  if(nr_gpu_pass_ul_requested()) { /* ISAC_UL_GPU_PASS=1: the shadow-check buffers and the pass's per-context buffers */
+    if(!w->shadow_llr) w->shadow_llr=malloc16_clear(sizeof(int16_t)*PASSIVE_UL_UCI_CAP);
+    if(!w->shadow_tb) w->shadow_tb=malloc16_clear((size_t)8 * ((3 * 8 * 6144) + 12));
+    if(!w->shadow_llr || !w->shadow_tb) return false;
+    nr_gpu_pass_ul_prewarm(ctx);
+  }
   if(!w->h || !w->k || !w->l || !w->uci) return false;
   s->length = s->cap = len;
   if (ctx == 0 && !g_ulg) ulg_warmup(&g_gnb[0]->frame_parms, g_gnb_nant);
@@ -1649,6 +1701,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
 {
   memset(out, 0, sizeof(*out));
   out->status = NR_PUSCH_PASSIVE_ERROR;
+  t_ul_kind = 0;
 
   if (ue == NULL || g == NULL || !g->plausible) {
     out->reject_reason = "no plausible grant";
@@ -1659,7 +1712,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   const bool dmrs_disc = !t_solver_probe && (nr_ul_chain_on() ||
       (getenv("ISAC_UL_DMRS_DISC") && !strcmp(getenv("ISAC_UL_DMRS_DISC"), "1")));
   nr_pdcch_blind_ul_result_t discovery_grant;
-  if (timing_disc || dmrs_disc) {
+  const bool ul_pass_env = nr_gpu_pass_ul_active();
+  if (timing_disc || dmrs_disc || ul_pass_env) {
     discovery_grant = *g;
     g = &discovery_grant;
   }
@@ -1777,6 +1831,95 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   int32_t ul_sample_offset = ta_offset_samples;
 
   const int slot_off = (slot % RU_RX_SLOT_DEPTH) * sps * symsz;
+
+  /* ---- GPUPASS Task 7 (ISAC_UL_GPU_PASS=1, default off). A grant of an RNTI with a cached hypothesis (timing advance, DM-RS layout) goes through ONE GPU graph: the FEP of the
+   * grant's symbols, the channel estimate, the equaliser, the LLRs, the rate dematching, the LDPC decoder and the CRCs (nr_gpu_pass_ul.h). The search (timing, DM-RS id) is skipped;
+   * a miss, a stale entry and every grant outside the pass's scope run the old path below, unchanged.
+   *   ul_pass 1: the TB decoded. 2: the pass ran and the CRC failed (or the zero-syndrome case): its LLRs are in pvp->llr and the old tail (CPU decode, UCI search, HARQ store)
+   *   takes over. A residual delay above the refinement tolerance sends the grant to the old path from the start (it re-places the FFT window).
+   *   ISAC_UL_GPU_PASS_CHECK=n: every n-th pass the old path decodes the grant as well; the LLRs, the CRC verdict and the TB must agree, else the pass is switched off. */
+  int ul_pass = 0, ul_shadow = 0, ul_shadow_state = 0, ul_llr_bad = 0, ul_llr_inexact = 0;
+  uint32_t ul_hyp_nok = 0;
+  nr_gpu_pass_ul_out_t uout;
+  if (ul_pass_env && !cfr_only && !t_solver_probe && !gapped && !fdra_unresolved && g_snapshot[ctx].valid && fo_hz == 0.0 && ta_idx < 0 && g->rv == 0 && !g->frequency_hopping &&
+      nant == g_gnb_nant && symsz == 4096 && sps == 14) {
+    ul_hyp_t hyp;
+    if (nr_gpu_pass_ul_hyp_lookup(g->rnti, nr_cfg_epoch_dedicated_current(), (int64_t)abs_slot, &hyp)) {
+      ul_hyp_nok = hyp.n_ok;
+      nr_pdcch_blind_ul_result_t pg = *g;
+      ul_hyp_apply(&pg, &hyp);
+      const int qm_ = nr_get_Qm_ul(pg.mcs, pg.mcs_table);
+      const uint32_t rate_ = nr_get_code_rate_ul(pg.mcs, pg.mcs_table);
+      const int nd_ = __builtin_popcount((unsigned)pg.ul_dmrs_symb_pos & (((1u << pg.num_symbols) - 1u) << pg.start_symbol));
+      const int sym_end_ = pg.start_symbol + pg.num_symbols;
+      const passive_ul_snapshot_t *sn = &g_snapshot[ctx];
+      passive_ul_scratch_t *scr_ = &g_scratch[ctx];
+      nr_gpu_pass_ul_in_t in;
+      memset(&in, 0, sizeof(in));
+      bool ok_ = qm_ > 0 && rate_ > 0 && nd_ > 0 && sym_end_ <= sps && pg.nrOfLayers == 1;
+      for (int m = pg.start_symbol; ok_ && m < sym_end_; m++) {
+        const uint32_t off = passive_ul_fep_offset(fp, slot, (unsigned char)m, hyp.ta);
+        const uint32_t rel = (off + fp->samples_per_frame - sn->origin) % fp->samples_per_frame;
+        if (rel + (uint32_t)symsz > sn->length) ok_ = false;
+        in.win[m] = (int32_t)rel;
+      }
+      if (ok_ && scr_->shadow_llr && scr_->shadow_tb) {
+        ul_shadow = nr_gpu_pass_ul_shadow_due();
+        const uint32_t tbs_ = nr_compute_tbs(qm_, rate_, pg.num_rb, pg.num_symbols, (((pg.dmrs_config_type == 0) ? 6 : 4) * pg.n_dmrs_cdm_groups) * nd_, 0, 0, pg.nrOfLayers);
+        in.rnti = pg.rnti; in.slot = slot; in.start_symbol = pg.start_symbol; in.num_symbols = pg.num_symbols; in.num_rb = pg.num_rb;
+        in.bwp_start = pg.bwp_start; in.rb_start = pg.start_rb;
+        in.ul_dmrs_symb_pos = (uint16_t)pg.ul_dmrs_symb_pos; in.dmrs_config_type = pg.dmrs_config_type; in.n_dmrs_cdm_groups_no_data = pg.n_dmrs_cdm_groups;
+        in.nscid = pg.nscid; in.dmrs_scrambling_id = pg.ul_dmrs_scrambling_id; in.dmrs_ports = (uint16_t)pg.dmrs_ports;
+        in.qam_mod_order = qm_; in.nr_of_layers = pg.nrOfLayers; in.transform_precoding = pg.transform_precoding; in.frequency_hopping = pg.frequency_hopping;
+        in.rv = pg.rv; in.bg = tbs_ ? get_BG(tbs_, rate_) : 0; in.tbs_bits = tbs_; in.tbslbrm = 0; in.data_scrambling_id = pg.data_scrambling_id;
+        in.max_ldpc_iterations = gnb->max_ldpc_iterations;
+        in.N = symsz; in.symbols_per_slot = sps; in.n_rb_ul = fp->N_RB_UL; in.first_carrier_offset = fp->first_carrier_offset; in.ncp_normal = fp->Ncp == NR_NORMAL; in.nb_rx = nant;
+        in.passive = IS_PASSIVE_RX_MODE(get_softmodem_params());
+        {
+          static int s_keep = -2;
+          if (s_keep == -2) s_keep = nr_ulsch_passive_branch_selection(true, nant, getenv("ISAC_UL_RX_BRANCH"), getenv("ISAC_RX_MRC_MODE"));
+          in.keep = in.passive && nant > 1 ? s_keep : -1;
+          in.timing_keep = in.keep;
+        }
+        for (int a = 0; a < nant; a++) {
+          in.iq[a] = (const int16_t *)sn->iq[a];
+          in.rx[a] = (int16_t *)&gnb->common_vars.rxdataF[a][slot_off];
+        }
+        in.iq_len = sn->length;
+        in.symbol_rot = (const int16_t *)(fp->symbol_rotation[link_type_ul] + (slot % fp->slots_per_subframe) * fp->symbols_per_slot);
+        in.ctx = ctx;
+        in.tb = ul_shadow ? scr_->shadow_tb : gnb->ulsch[0].harq_process->b;
+        in.llr_out = ul_shadow ? scr_->shadow_llr : gnb->pusch_vars[0].llr;
+        in.llr_out_all = ul_shadow || s_diag_on();
+        in.want_est = nr_srs_passive_enabled() || nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS) || s_diag_on();
+        if (in.tbs_bits && in.bg && nr_gpu_pass_ul_run(&in, &uout) == 0) {
+          const int d_ = uout.est_delay;
+          if (d_ != 0 && (d_ > PASSIVE_UL_DELAY_TOL || d_ < -PASSIVE_UL_DELAY_TOL)) {
+            nr_gpu_pass_ul_note(NR_GPU_PASS_UL_EV_REFINE); /* the old path re-places the FFT window */
+          } else {
+            ul_pass = uout.r.tb_ok ? 1 : 2;
+            if (ul_shadow) {
+              ul_shadow_state = uout.r.need_cpu ? 3 : ul_pass; /* 3: the pass could not tell (zero syndrome, failing CRC): nothing to compare */
+              ul_pass = 0;
+              t_ul_kind = 3;
+              /* the old path decodes the SAME hypothesis (timing advance, DM-RS layout), without its own search, or the two would not be comparable */
+              discovery_grant = pg;
+              g = &discovery_grant;
+              ul_sample_offset = hyp.ta;
+              out->ta_applied_samples = hyp.ta;
+            } else {
+              discovery_grant = pg;
+              g = &discovery_grant;
+              ul_sample_offset = hyp.ta;
+              out->ta_applied_samples = hyp.ta;
+              nr_gpu_pass_ul_note(uout.r.tb_ok ? NR_GPU_PASS_UL_EV_OK : NR_GPU_PASS_UL_EV_FAIL);
+              t_ul_kind = ul_pass;
+            }
+          }
+        }
+      }
+    }
+  }
   /* ---- FEP the grant's symbols, EXACTLY as the gNB does -----------------------------------------
    * nr_symbol_fep_ul() (bare DFT, offset convention that SUBTRACTS) followed by
    * apply_nr_rotation_symbol_RX() with fp->symbol_rotation[link_type_ul] and fp->N_RB_UL. That pair
@@ -1821,7 +1964,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       for (int sym_ = s0_; sym_ < s1_; sym_++) PASSIVE_UL_FEP_SYMBOL((off_), sym_);                \
   } while (0)
 
-  if ((timing_disc || dmrs_disc) && !gapped && !fdra_unresolved && !g->transform_precoding &&
+  if (ul_pass) {
+    /* the pass transformed the grant's symbols into the gNB grid already */
+  } else if ((timing_disc || dmrs_disc) && !gapped && !fdra_unresolved && !g->transform_precoding && !ul_shadow_state &&
       g->num_rb >= 6 && nant <= 4) {
     nr_pusch_ul_disc_epoch(nr_cfg_epoch_dedicated_current());
     const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
@@ -2055,6 +2200,23 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     atomic_fetch_add_explicit(&g_try, 1, memory_order_relaxed);
   }
   PUSCH_STAGE(4, "entering nr_rx_pusch_group_tp");
+  if (ul_pass) {
+    /* what nr_rx_pusch_group_tp leaves behind for the code below (GPUPASS Task 7): the delay, the DM-RS SNR, the scale, the estimates */
+    pvp->delay.est_delay = uout.est_delay;
+    pvp->delay.delay_max_val = uout.est_delay_max_val;
+    pvp->ulsch_power_tot = 0;
+    pvp->ulsch_noise_power_tot = 0;
+    pvp->ul_dmrs_snr_db = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? uout.dmrs_snr_db : NAN;
+    pvp->log2_maxh = uout.log2_maxh;
+    *unavp = 0;
+    if (uout.est)
+      for (int k_ = 0; k_ < uout.ndmrs; k_++)
+        for (int a_ = 0; a_ < nant; a_++) {
+          int32_t *row_ = &pvp->ul_ch_estimates[a_][symsz * uout.dmrs_sym[k_]];
+          memset(row_, 0, sizeof(*row_) * symsz);
+          memcpy(row_, uout.est + ((size_t)k_ * nant + a_) * 4096 * 2, (size_t)g->num_rb * NR_NB_SC_PER_RB * sizeof(int32_t));
+        }
+  } else {
   const int rx_rc = gapped ? nr_rx_pusch_prb_list_tp(gnb, pvp, pdup, unavp, frame, slot, prb, g->num_rb)
                            : nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
   if (rx_rc != 0) {
@@ -2106,6 +2268,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     }
   }
 
+  }
   if (utim) {
     utim_add(UTIM_RXPUSCH, t_stage);
     t_stage = utim_now();
@@ -2323,6 +2486,24 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * a probe reporting its own initialisation order rather than the receiver. */
   out->G = nr_get_G(g->num_rb, g->num_symbols, nb_dmrs_re_per_rb, n_dmrs_sym, 0,
                     pdu.qam_mod_order, g->nrOfLayers);
+  if (ul_shadow_state && ul_shadow_state != 3) {
+    /* GPUPASS shadow: the pass's LLRs against the old path's. Bit-exact is the goal and every difference is counted; the pass is only switched off when the signs of more than 0.1 % of
+     * the LLRs disagree (the policy of the FP32 DL pass) or the CRC verdict / TB bytes below differ. The known source of a difference is the GPU delay transform on rows that carry
+     * only noise (a few LSB of LS magnitude): it can pick another est_delay than the CPU idft, which moves some estimates by 1-2 LSB. */
+    if (out->G != uout.G) {
+      ul_llr_bad = 1;
+    } else {
+      const int16_t *a_ = g_scratch[ctx].shadow_llr, *b_ = pvp->llr;
+      uint32_t nd_ = 0, ns_ = 0;
+      for (uint32_t i_ = 0; i_ < out->G; i_++)
+        if (a_[i_] != b_[i_]) {
+          nd_++;
+          ns_ += (a_[i_] > 0 && b_[i_] < 0) || (a_[i_] < 0 && b_[i_] > 0);
+        }
+      ul_llr_inexact = nd_ != 0;
+      ul_llr_bad = (uint64_t)ns_ * 1000 > out->G;
+    }
+  }
 
   if (utim) {
     utim_add(UTIM_CFR, t_stage);
@@ -2412,7 +2593,40 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       }
     }
   }
-  int rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
+  int rc;
+  if (ul_pass == 1 || (ul_pass == 2 && !uout.r.need_cpu && !hqe)) {
+    /* the pass decided: leave behind what nr_ulsch_decoding would (a failed TB without a HARQ entry to store needs no soft buffer, the UCI search below decodes on its own) */
+    NR_UL_gNB_HARQ_t *hp0 = ulsch->harq_process;
+    uint32_t ok_ = 0;
+    for (uint32_t r_ = 0; r_ < uout.C; r_++) ok_ += uout.r.seg_ok[r_];
+    hp0->C = uout.C; hp0->K = uout.K; hp0->Z = uout.Z; hp0->F = uout.F;
+    hp0->processedSegments = ul_pass == 1 ? uout.C : ok_;
+    hp0->harq_to_be_cleared = false;
+    rc = 0;
+  } else
+    rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
+  if (ul_shadow_state) {
+    /* GPUPASS shadow check: the old path decoded the grant the pass decoded */
+    const NR_UL_gNB_HARQ_t *hp0 = ulsch->harq_process;
+    const bool cpu_ok = rc == 0 && !hp_crc_failed(ulsch);
+    int bad = ul_llr_bad;
+    if (ul_llr_inexact) nr_gpu_pass_ul_note(NR_GPU_PASS_UL_EV_SHADOW_LLR_DIFF);
+    {
+      /* what the rest of the decoder reads from the estimator: the delay, the scale, the DM-RS SNR (NaN == NaN); counted, not a reason to switch the pass off */
+      const float sa = uout.dmrs_snr_db, sb = pvp->ul_dmrs_snr_db;
+      const bool snr_same = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? ((isnan(sa) && isnan(sb)) || sa == sb) : true;
+      if (uout.est_delay != pvp->delay.est_delay || uout.log2_maxh != pvp->log2_maxh || !snr_same)
+        nr_gpu_pass_ul_note(NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF);
+    }
+    if (ul_shadow_state != 3) {
+      bad |= cpu_ok != (ul_shadow_state == 1);
+      if (cpu_ok && ul_shadow_state == 1) bad |= memcmp(g_scratch[ctx].shadow_tb, hp0->b, tbs >> 3) != 0;
+    }
+    if (bad) LOG_E(PHY, "SENSING: GPUPASS_UL SHADOW MISMATCH rnti=0x%x slot=%u llr_sign=%d cpu_ok=%d pass=%d tbs=%u log2_maxh %d/%d delay %d/%d\n", g->rnti, slot, ul_llr_bad, (int)cpu_ok, ul_shadow_state,
+                    tbs, uout.log2_maxh, pvp->log2_maxh, uout.est_delay, pvp->delay.est_delay);
+    nr_gpu_pass_ul_shadow(bad);
+    ul_shadow_state = 0;
+  }
 
   /* Expensive, bounded OFFLINE diagnostic, never enabled by full_auto alone.
    * Preserve descrambled LLRs and remove actual interleaved UCI positions.
@@ -2648,6 +2862,17 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   if (hp_crc_failed(ulsch)) {
     atomic_fetch_add_explicit(&g_seg_fail, 1, memory_order_relaxed);
     if (!t_solver_probe && !fdra_unresolved) nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, false);
+    if (ul_pass == 2) {
+      /* the hypothesis of the cache failed this grant: after three in a row the entry is dropped and the old path searches again */
+      ul_hyp_t h_;
+      if (ul_hyp_cache_get(g->rnti, &h_)) {
+        if (++h_.fail_streak >= 3) ul_hyp_cache_drop(g->rnti);
+        else ul_hyp_cache_put(g->rnti, &h_);
+      }
+    } else if (ul_pass_env && ul_seed_on() && !t_solver_probe && !cfr_only && !gapped && !fdra_unresolved && !g->transform_precoding && nr_cfg_epoch_work_current()) {
+      /* ISAC_UL_GPU_PASS_SEED=1 (validation only): a grant that did not decode seeds the cache as well, so that the pass (and its shadow check) runs on captures where no UL TB ever decodes */
+      ul_hyp_store(g, nr_sense_ul_ta_refined(out->ta_applied_samples, pvp->delay.est_delay), nr_cfg_epoch_dedicated_current(), (int64_t)abs_slot, 0);
+    }
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
     out->reject_reason = "segment or final transport-block CRC failed";
     if (!t_solver_probe && g->data_id_advance)
@@ -2679,6 +2904,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
 
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
+  if (ul_pass_env && !t_solver_probe && !cfr_only && !gapped && !fdra_unresolved && nr_cfg_epoch_work_current() && !g->transform_precoding)
+    ul_hyp_store(g, nr_sense_ul_ta_refined(out->ta_applied_samples, pvp->delay.est_delay), nr_cfg_epoch_dedicated_current(), (int64_t)abs_slot, ul_hyp_nok + 1);
   if (!t_solver_probe) atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
   // Reserved-MCS retransmission record (G5 review, gap-harq): only a CRC-verified, non-all-zero TB
   // (this point, past the ZERO_TB guard above) is strong enough evidence to seed/refresh this
@@ -2799,8 +3026,11 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
     }
     if (retry.attempts) g = &retry.last;
   } else {
+    const uint64_t t_ul0 = nr_gpu_pass_ul_active() ? utim_now() : 0;
     ok = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, g, ta_offset_samples, abs_slot,
                                       cfr_only, fo_hz, out);
+    if (t_ul0 && !cfr_only && !t_solver_probe && out->status != NR_PUSCH_PASSIVE_UNSUPPORTED)
+      nr_gpu_pass_ul_grant_us(t_ul_kind, (uint32_t)((utim_now() - t_ul0) / 1000));
   }
 
   if (s_diag_on() && g != NULL) {
@@ -2936,6 +3166,7 @@ void nr_pusch_passive_stats_dump(void)
           (unsigned long)atomic_load(&g_ulg_cpu_bounds), (unsigned long)atomic_load(&g_ulg_cpu_rej),
           (unsigned long)atomic_load(&g_ulg_chk), (unsigned long)atomic_load(&g_ulg_bad));
   }
+  nr_gpu_pass_ul_census();
   if (nr_pusch_gpu_ldpc_enabled()) {
     char rep[640];
     nr_pusch_gpu_ldpc_report(rep, sizeof(rep));

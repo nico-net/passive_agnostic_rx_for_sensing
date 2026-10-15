@@ -101,6 +101,7 @@ class GpuPassFixture {
  public:
   typedef std::complex<double> cd;
   static inline double noise_db = 20.0; /* SNR of small_grant()/from_shape() fixtures built from now on */
+  static inline int first_sym = 1;      /* first symbol of the grant (1: the DL tests; 0: a PUSCH that starts at the slot boundary, Task 7) */
   static constexpr int N = 4096, NCP = 288, NCP0 = 352, NSYM = 14, NRB = 273, FCO = N - NRB * 6, NANT = 4;
   static constexpr int SLOT = NCP0 + N + (NSYM - 1) * (N + NCP);
   int nrb, nl, qm, start_rb = 10;
@@ -144,7 +145,7 @@ class GpuPassFixture {
     std::mt19937 rng(seed);
     std::normal_distribution<double> G(0, 1);
     std::uniform_real_distribution<double> U(0, 1);
-    for (int l = 1; l < NSYM; l++)
+    for (int l = first_sym; l < NSYM; l++)
       if (l != f.dm_sym[0] && l != f.dm_sym[1]) f.data_syms.push_back(l);
     /* channel: flat gain + one delayed tap per (ant, layer) */
     cd g0[NANT][4], g1[NANT][4];
@@ -583,7 +584,7 @@ class GpuPassFixture {
   /* TB parameters of a grant (G from its geometry) at a target code rate with at most 8 code blocks (one encoder macro group) */
   static bool tb_params(TbInfo *t, int nrb, int nl, int qm, int seed)
   {
-    t->G = (uint32_t)nrb * 132u * qm * nl;
+    t->G = (uint32_t)nrb * 12u * (first_sym == 0 ? 12u : 11u) * qm * nl;
     const double Rt = qm <= 4 ? 0.30 : 0.25;
     int A = ((int)(t->G * Rt)) & ~7;
     for (;; A = (int)(A * 0.8) & ~7) {

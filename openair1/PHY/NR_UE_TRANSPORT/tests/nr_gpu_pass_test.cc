@@ -1168,7 +1168,7 @@ struct UlSlot {
     llr.assign((size_t)fx.tb.G + 64, 0x1111);
     memset(&in, 0, sizeof(in));
     memset(&out, 0, sizeof(out));
-    in.rnti = (uint16_t)fx.tb.rnti; in.slot = 0; in.start_symbol = 1; in.num_symbols = 13; in.num_rb = fx.nrb; in.bwp_start = 0; in.rb_start = fx.start_rb;
+    in.rnti = (uint16_t)fx.tb.rnti; in.slot = 0; in.start_symbol = fx.data_syms.front(); in.num_symbols = 14 - in.start_symbol; in.num_rb = fx.nrb; in.bwp_start = 0; in.rb_start = fx.start_rb;
     in.ul_dmrs_symb_pos = (1u << fx.dm_sym[0]) | (1u << fx.dm_sym[1]);
     in.dmrs_config_type = 0; in.n_dmrs_cdm_groups_no_data = 2; in.nscid = 0; in.dmrs_scrambling_id = 0; in.dmrs_ports = 1;
     in.qam_mod_order = fx.qm; in.nr_of_layers = 1; in.rv = 0; in.bg = fx.tb.BG; in.tbs_bits = (uint32_t)fx.tb.A; in.tbslbrm = 0; in.data_scrambling_id = (int)fx.tb.nid;
@@ -1273,7 +1273,7 @@ static UlRef ul_reference(GpuPassModule &m, GpuPassFixture &fx, int ta, int keep
     }
   std::vector<int16_t> llr((size_t)fx.tb.G + 64, 0);
   const uint32_t mask = (1u << fx.dm_sym[0]) | (1u << fx.dm_sym[1]);
-  const int n = nr_gpu_pass_ul_ref_eq(4, fx.nrb, fx.qm, keep, 0, 1, 13, mask, 2, k0, (const c16_t *)r.rxF.data(), (const c16_t *)r.est.data(), llr.data(), &r.log2_maxh, r.avg);
+  const int n = nr_gpu_pass_ul_ref_eq(4, fx.nrb, fx.qm, keep, 0, fx.data_syms.front(), 14 - fx.data_syms.front(), mask, 2, k0, (const c16_t *)r.rxF.data(), (const c16_t *)r.est.data(), llr.data(), &r.log2_maxh, r.avg);
   if (n != (int)fx.tb.G) return r;
   for (uint32_t i = 0; i < fx.tb.G; i++)
     if (fx.tb.scr[i >> 5] >> (i & 31) & 1u) llr[i] = (int16_t)(-llr[i]);
@@ -1290,12 +1290,14 @@ static UlRef ul_reference(GpuPassModule &m, GpuPassFixture &fx, int ta, int keep
 /* negative control: with g_ul_neg the reference is deliberately perturbed (a different timing advance / receive branch) and the mismatches are counted instead of failing the test */
 static bool g_ul_neg = false;
 static int g_ul_neg_count = 0, g_ul_ref_ta_delta = 0, g_ul_ref_keep_flip = 0;
-static int ul_case(GpuPassModule &m, int nrb, int qm, int seed, int ta, int keep, double noise_db, const char *what)
+static int ul_case(GpuPassModule &m, int nrb, int qm, int seed, int ta, int keep, double noise_db, const char *what, int first_sym = 1)
 {
   GpuPassFixture::noise_db = noise_db;
+  GpuPassFixture::first_sym = first_sym;
   const nr_gpu_pass_shape_t sh = {(uint16_t)nrb, 13, 1, (uint16_t)qm, 2, 1, 1};
   GpuPassFixture fx = GpuPassFixture::from_shape(sh, seed);
   GpuPassFixture::noise_db = 20.0;
+  GpuPassFixture::first_sym = 1;
   if (!fx.tb_ok_built) return 2; /* no TB for the shape */
   ul_warm_class(m, nrb, 2, fx.tb.C);
   if (::testing::Test::HasFatalFailure()) return -1;
@@ -1316,7 +1318,7 @@ static int ul_case(GpuPassModule &m, int nrb, int qm, int seed, int ta, int keep
   };
   /* the transformed symbols of the grant, then the chest, the scale and the LLRs, bit for bit */
   for (int a = 0; a < 4; a++)
-    for (int s = 1; s < 14; s++)
+    for (int s = fx.data_syms.front(); s < 14; s++)
       chk(!memcmp(&sl.rxF[2 * (size_t)a * sl.rx_stride + 2 * (size_t)s * 4096], &ref.rxF[2 * ((size_t)a * 14 + s) * 4096], 4096 * 4), "rxdataF of the pass differs from the exact FEP");
   const nr_gpu_pass_result_t &r = sl.out.r;
   for (int k = 0; k < 2; k++)
@@ -1324,6 +1326,10 @@ static int ul_case(GpuPassModule &m, int nrb, int qm, int seed, int ta, int keep
       const int row = k * 4 + a;
       chk(r.ul_delay[row][0] == ref.delay[k][a][0] && r.ul_delay[row][1] == ref.delay[k][a][1] && r.ul_delay[row][2] == ref.delay[k][a][2], "delay triple");
       chk(r.ul_acc[row] == ref.acc[k][a], "noise sum");
+      uint64_t hs = 0;
+      const int16_t *e = &ref.est[2 * ((size_t)a * 14 + fx.dm_sym[k]) * 4096];
+      for (int i = 0; i < 12 * fx.nrb; i++) hs += (uint32_t)((int)e[2 * i] * e[2 * i] + (int)e[2 * i + 1] * e[2 * i + 1]);
+      chk(r.ul_hsum[row] == hs, "sum |H|^2");
       chk(!memcmp(sl.out.est + (size_t)row * 4096 * 2, &ref.est[2 * ((size_t)a * 14 + fx.dm_sym[k]) * 4096], 12 * fx.nrb * 4), "chest estimate");
     }
   chk(sl.out.log2_maxh == ref.log2_maxh, "log2_maxh");
@@ -1363,10 +1369,11 @@ TEST(GpuPassUl, MatchesCpuDecode) {
   const int cases = getenv("NR_GPU_UL_CASES") ? atoi(getenv("NR_GPU_UL_CASES")) : 200;
   for (int seed = 0; seed < cases; seed++) {
     const int nrb = nrbs[seed % 9], qm = qms[(seed / 3) % 4], ta = tas[seed % 6], keep = (seed % 5 == 0) ? 0 : -1;
-    const double snr = (seed % 7 == 6) ? 4.0 : 20.0; /* some low-SNR slots: the CRC verdicts must agree there too */
+    const double snr = (seed % 7 == 6) ? 4.0 : (seed % 11 == 10) ? -8.0 : (seed % 13 == 12) ? -18.0 : 20.0; /* low and very low SNR slots (the live UL is at -5 .. -30 dB): the estimates and the CRC verdicts must agree there too */
     char what[160];
-    snprintf(what, sizeof(what), "seed %d nrb %d qm %d ta %d keep %d snr %.0f", seed, nrb, qm, ta, keep, snr);
-    const int r = ul_case(m, nrb, qm, seed, ta, keep, snr, what);
+    snprintf(what, sizeof(what), "seed %d nrb %d qm %d ta %d keep %d snr %.0f first %d", seed, nrb, qm, ta, keep, snr, (seed % 4 == 3) ? 0 : 1);
+    const int first = (seed % 4 == 3) ? 0 : 1; /* a quarter of the slots carry a PUSCH that starts at symbol 0 */
+    const int r = ul_case(m, nrb, qm, seed, ta, keep, snr, what, first);
     if (r == 2) { skipped++; continue; }
     ASSERT_GE(r, 0) << what;
     n++;
