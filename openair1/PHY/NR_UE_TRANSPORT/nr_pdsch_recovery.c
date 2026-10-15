@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 
 #define RQ_MAX 4096
 #define LATE_BINS 256 /* ms */
@@ -20,6 +23,7 @@ static pthread_t g_th;
 static int (*g_run_fn)(void *, const nr_recov_key_t *);
 static bool (*g_exp_fn)(const nr_recov_key_t *);
 static _Atomic uint64_t g_sub, g_resc, g_stale, g_expd, g_full, g_late[LATE_BINS];
+static bool g_nice;
 static __thread uint64_t t_cur_ns; /* submit time of the job the worker is running */
 
 /* newest (rnti, harq_pid) slot seen: 65536 hashed cells; a collision only ever discards a rescue (never delivers a wrong one) */
@@ -88,6 +92,7 @@ int nr_pdsch_recovery_arm_order(unsigned mask, int out[31])
 static void *worker(void *arg)
 {
   (void)arg;
+  if (g_nice) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
   pthread_mutex_lock(&g_mu);
   for (;;) {
     while (g_n == 0 && !g_stop) pthread_cond_wait(&g_cv, &g_mu);
@@ -111,6 +116,36 @@ static void *worker(void *arg)
   pthread_mutex_unlock(&g_mu);
   return NULL;
 }
+static void add_cores(cpu_set_t *set, const char *list)
+{
+  for (const char *p = list; *p;) {
+    char *end;
+    long c = strtol(p, &end, 10);
+    if (end == p) break;
+    if (c >= 0 && c < CPU_SETSIZE) CPU_SET((int)c, set);
+    p = *end == ',' ? end + 1 : end;
+  }
+}
+/* cores given (arg or ISAC_PDSCH_RECOVERY_CORES): exactly those. Otherwise the background little cores 10-14 minus every core the launcher
+ * pins a critical thread to (same env keys); if none is left the worker is unpinned at nice 10. */
+static void pick_cores(cpu_set_t *set, const char *cores)
+{
+  CPU_ZERO(set);
+  if (!cores) cores = getenv("ISAC_PDSCH_RECOVERY_CORES");
+  if (cores) {
+    add_cores(set, cores);
+    return;
+  }
+  cpu_set_t busy;
+  CPU_ZERO(&busy);
+  static const char *const keys[] = {"ISAC_PDSCH_CORES", "ISAC_USRP_RING_CORE", "ISAC_UE_RT_CORE", "ISAC_PUSCH_CORES", "ISAC_PDCCH_USS_CORE",
+                                     "ISAC_PDCCH_JOINT_ANON_CORE", "ISAC_PDCCH_PAR_CORE", "ISAC_CSIRS_DISC_CORE", "ISAC_CSIRS_DISC_DETECT_CORES",
+                                     "ISAC_GPU_WORKER_CORE", "ISAC_UHD_CTRL_CORES"};
+  for (unsigned i = 0; i < sizeof keys / sizeof *keys; i++)
+    if (getenv(keys[i])) add_cores(&busy, getenv(keys[i]));
+  for (int c = 10; c <= 14; c++)
+    if (!CPU_ISSET(c, &busy)) CPU_SET(c, set);
+}
 int nr_pdsch_recovery_start(int depth, const char *cores)
 {
   pthread_mutex_lock(&g_mu);
@@ -129,8 +164,17 @@ int nr_pdsch_recovery_start(int depth, const char *cores)
     pthread_mutex_unlock(&g_mu);
     return -1;
   }
+  cpu_set_t set;
+  pick_cores(&set, cores);
+  g_nice = CPU_COUNT(&set) == 0;
   g_depth = depth; g_head = g_n = 0; g_stop = false;
-  if (pthread_create(&g_th, NULL, worker, NULL)) {
+  pthread_attr_t at; /* explicit SCHED_OTHER: do not inherit an RT policy from the starting thread */
+  pthread_attr_init(&at);
+  pthread_attr_setinheritsched(&at, PTHREAD_EXPLICIT_SCHED);
+  pthread_attr_setschedpolicy(&at, SCHED_OTHER);
+  const int prc = pthread_create(&g_th, &at, worker, NULL);
+  pthread_attr_destroy(&at);
+  if (prc) {
     free(g_q); g_q = NULL;
     pthread_mutex_unlock(&g_mu);
     return -1;
@@ -138,18 +182,7 @@ int nr_pdsch_recovery_start(int depth, const char *cores)
   g_run = true;
   pthread_mutex_unlock(&g_mu);
   pthread_setname_np(g_th, "pdschRecov");
-  if (!cores) cores = getenv("ISAC_PDSCH_RECOVERY_CORES");
-  if (!cores) cores = "3,4";
-  cpu_set_t set;
-  CPU_ZERO(&set);
-  for (const char *p = cores; *p;) {
-    char *end;
-    long c = strtol(p, &end, 10);
-    if (end == p) break;
-    if (c >= 0 && c < CPU_SETSIZE) CPU_SET((int)c, &set);
-    p = *end == ',' ? end + 1 : end;
-  }
-  if (CPU_COUNT(&set)) pthread_setaffinity_np(g_th, sizeof(set), &set); /* SCHED_OTHER nice 0: the thread keeps the creator's policy only if it is not RT */
+  if (CPU_COUNT(&set)) pthread_setaffinity_np(g_th, sizeof(set), &set); /* policy stays SCHED_OTHER nice 0 (created from a non-RT context) */
   return 0;
 }
 void nr_pdsch_recovery_stop(void)

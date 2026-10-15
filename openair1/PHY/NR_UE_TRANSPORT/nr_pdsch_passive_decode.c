@@ -6316,7 +6316,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
   if (rp_on < 0) { const char *e = getenv("ISAC_PDSCH_RETRY_PREDICT"); rp_on = e && atoi(e) != 0; }
   if (rn_on < 0) { const char *e = getenv("ISAC_PDSCH_RETRY_NORESTORE"); rn_on = e && atoi(e) != 0; }
   nr_pdsch_passive_decode_status_t st;
-  if (rp_on && getenv("ISAC_PDSCH_TDRA_RETRY") && atoi(getenv("ISAC_PDSCH_TDRA_RETRY")) && grant->dci11 && grant->rnti_class == 0
+  if (t_recov_mode != 2 && rp_on && getenv("ISAC_PDSCH_TDRA_RETRY") && atoi(getenv("ISAC_PDSCH_TDRA_RETRY")) && grant->dci11 && grant->rnti_class == 0
       && !t_probe_first_seg && !t_gw_capture && !t_gw_used && !(t_quiet && !t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && !harq_combine_on()
       && dlsch_config->start_symbol <= 1 && dlsch_config->start_symbol + dlsch_config->number_symbols == 14
       && nr_retry_pred_try_first(grant->rnti)) {
@@ -6342,13 +6342,20 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
     nr_retry_pred_miss(grant->rnti);
     *dlsch_config = plain;
   }
+  if (t_recov_mode == 2) {
+    /* RECOVERY_ASYNC worker: the consumer's first pass already failed; the arms below each re-demodulate from the IQ snapshot with their own
+     * configuration and use nothing of that pass but its FO (the job's FO override) -- so no first body here. */
+    st = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
+    t_last_fep_fo = nr_slot_fep_fo_override_hz;
+  } else {
   st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
   if (t_gw_owner) { /* left before the publish point: the same inputs fail the same way, make it sticky */
     t_gw_owner = false;
     nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st);
   }
+  }
   if (rp_on && st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && grant->dci11 && grant->rnti_class == 0) nr_retry_pred_miss(grant->rnti);
-  if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && signal_geom_on() && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg && !t_gw_capture
+  if (t_recov_mode != 2 /* needs the first body's rxdataF */ && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && signal_geom_on() && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg && !t_gw_capture
       && !t_gw_used && !(t_quiet && !t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && !harq_combine_on()) {
     uint8_t n_sym = 0;
     uint16_t mask = 0;
@@ -6559,7 +6566,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
           t_decode_tdra_attempt);
     nr_pdsch_decode_wide_mrc = false;
     t_tinterp_override = saved_tint;
-    if (!recovered && (!ry || ry_bodies > 0)) {
+    if (!recovered && (!ry || ry_bodies > 0) && t_recov_mode != 2) {
       /* Restore the public result AND the thread-local decoder/LLR view
        * used by the queue's diagnostics and equivalence checks. */
       *dlsch_config = original;

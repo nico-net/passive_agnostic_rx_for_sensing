@@ -16,7 +16,7 @@ typedef struct { uint16_t rnti; uint8_t harq_pid, ndi; uint32_t abs_slot; uint32
 void nr_pdsch_recovery_set_hooks(int (*run)(void *job_owned, const nr_recov_key_t *k), bool (*expired)(const nr_recov_key_t *k));
 
 bool nr_pdsch_recovery_enabled(void); /* ISAC_PDSCH_RECOVERY_ASYNC, read once */
-/* depth <= 0: ISAC_PDSCH_RECOVERY_Q (default 32); cores NULL: ISAC_PDSCH_RECOVERY_CORES (default "3,4"). Idempotent. 0 = running. */
+/* depth <= 0: ISAC_PDSCH_RECOVERY_Q (default 32); cores NULL: ISAC_PDSCH_RECOVERY_CORES, else 10-14 minus the launcher's pinned cores (unpinned nice 10 if none left). Idempotent. 0 = running. */
 int  nr_pdsch_recovery_start(int depth, const char *cores);
 void nr_pdsch_recovery_stop(void);
 /* 0 = queued (job_owned now belongs to the worker), 1 = queue full (counted dropped_full; the caller keeps job_owned). Never blocks on the worker. */
