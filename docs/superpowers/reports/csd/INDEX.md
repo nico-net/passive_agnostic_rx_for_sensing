@@ -63,6 +63,7 @@ Evidence labels follow PROJECT_MEMORY §0.1. Nothing here is a new measurement.
 | ULINT.md | csd/ul-int @ dcdc9877db | UL-A/B/C merged onto t26b; records the first-PUSCH replay gate; first nonzero PUSCH TB CRC is the open milestone. |
 | DASHBOARD-20261013.md | csd/dashboard | Read-only, self-explaining receiver dashboard (tests/passive_rx/monitor): pages, data dependencies (log prefixes, JSON keys), gaps, DGX commands; synthetic fixtures + cloud x86 tests only, rfsim/DGX not run. |
 | ULLDPC-20261014.md | csd/ulldpc | UL LDPC on the GPU (bit-exact, own pool, deadline), UL GPU stalls = CSI-RS discovery kernels in the shared SM partition (fix: UL streams in the RT partition), UCI search bound, pairwise sign test for the UL BWP lock, single UL core plan. |
+| MPCI-DASH-REVIEW-20261015.md | csd/mpci-int | Review + integration of csd/mpci and the dashboard on csd/otatest 26d3028b5d; 5 high fixes (UHD rxshift, X410 frozen stamps, consumer passband, launcher args/cores, dashboard process attribution); flags-off non-regression within spread; c3610 fan-out replay; first OTA (LOW LOAD): 2 cells of 2 operators from one X410 claim; open: CPU DDC below real time, GPU channelizer limit at 245.76 MS/s, ring size, multi-streamer resync, RAM ~2 cells. |
 
 ## Not in the .md index
 
