@@ -20,6 +20,7 @@
 #include <stddef.h>  // NULL
 #include <stdio.h>   // fprintf (hard-refutation arming note)
 #include <stdlib.h>  // getenv/atoi (ISAC_DCI11_S1_OFF)
+#include "nr_scancost.h"
 
 /* TS 38.212 7.3.1.2.2, fields at fixed width regardless of any RRC switch:
  *   format identifier 1 | MCS 5 | NDI 1 | RV 2 | TPC for PUCCH 2 | PUCCH resource indicator 3
@@ -972,7 +973,11 @@ bool nr_dci11_layout_to_field_bits(const nr_dci11_layout_t *l, nr_dci11_field_bi
   /* HARQPID: the blob (tb2 + harq 4 + dai + pdsch_to_harq) used to be read as ONE tb2 field, so every grant got harq_pid 0
    * (HARQ soft buffers of all processes aliased, DCIRV scorer read the right bits but the decode path did not). Read the pid
    * 4 bits behind the RV (as solver_hq_of does, tb2 assumed absent) and park the rest in dai; the total is unchanged. */
-  if (getenv("ISAC_DCI11_HARQPID") != NULL && pre_ant_variable >= 4) {
+  /* ISAC_SCANCOST: the flag is read once (a getenv per call was ~12 % of the scan CPU: the solver parses every layout key) */
+  static int s_harqpid = -1;
+  const bool harqpid = nr_scancost_on() ? (s_harqpid < 0 ? (s_harqpid = getenv("ISAC_DCI11_HARQPID") != NULL) : s_harqpid)
+                                        : getenv("ISAC_DCI11_HARQPID") != NULL;
+  if (harqpid && pre_ant_variable >= 4) {
     out->tb2_bits      = 0;
     out->harq_pid_bits = 4;
     out->dai_bits      = pre_ant_variable - 4;

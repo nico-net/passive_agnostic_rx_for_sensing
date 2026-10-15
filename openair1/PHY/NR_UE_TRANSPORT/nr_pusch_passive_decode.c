@@ -19,6 +19,8 @@
 #include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the DL decoder
 #include "PHY/MODULATION/nr_modulation.h" // nr_symbol_fep_ul: the gNB uplink FEP
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
+#include "nr_pdsch_gpu_ldpc_host.h" // ISAC_UL_GPU_LDPC: GPU LDPC for the PUSCH TBs (default off)
+#include "nr_pusch_gpu_fep.h" // ISAC_UL_GPU_FEP: GPU port of the UL FEP below (default off)
 #include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
 
 #include "nr_pusch_passive_decode.h"
@@ -115,11 +117,24 @@ static int           g_gnb_nant;
 #define PASSIVE_UL_SNAPSHOT_MARGIN 8192
 typedef struct {
   c16_t *iq[PASSIVE_UL_MAX_ANT];
-  uint32_t origin, length;
+  c16_t *own[PASSIVE_UL_MAX_ANT]; /* this context's private buffers; iq points at a shared ULQ snapshot while attached */
+  uint32_t origin, length, cap;
   bool valid;
 } passive_ul_snapshot_t;
 static passive_ul_snapshot_t g_snapshot[NR_PUSCH_PASSIVE_MAX_CTX];
-static bool g_pipeline_ready;
+static bool g_pipeline_ready[NR_PUSCH_PASSIVE_MAX_CTX];
+
+/* ULFEP globals (helpers further down, next to passive_snapshot_fep) */
+#define ULG_MAX_CAND 40
+static const nr_pusch_gpu_fep_api_t *g_ulg;
+static _Atomic bool g_ulg_on;
+static int g_ulg_nant, g_ulg_check = 16;
+static c16_t *g_ulg_scr[NR_PUSCH_PASSIVE_MAX_CTX]; /* ULG_MAX_CAND x nant x N: timing-search candidates */
+static _Atomic uint64_t g_ulg_seq, g_ulg_chk, g_ulg_bad, g_ulg_cpu_bounds, g_ulg_cpu_rej, g_ulg_wait_ns; /* wait_ns: wall time inside the GPU FEP call (UTIM) */
+/* FFTs asked of the FEP, by caller: grant symbols, timing-search candidates, delay-refinement re-run (each x nant) */
+static _Atomic uint64_t g_fep_req[3];
+
+static void ulg_warmup(const NR_DL_FRAME_PARMS *fp, int nant);
 #define PASSIVE_UL_CFR_CAP (273 * NR_NB_SC_PER_RB)
 #define PASSIVE_UL_UCI_CAP (8 * ((3 * 8 * 6144) + 12))
 typedef struct {
@@ -140,6 +155,99 @@ void nr_pusch_passive_counters(uint64_t *try_, uint64_t *crc_ok)
  * a DL one that happens to share the same number. See nr_harq_init_tx.h. */
 static nr_harq_init_tx_table_t g_ul_harq_init;
 static pthread_mutex_t g_ul_harq_init_lock = PTHREAD_MUTEX_INITIALIZER;
+/* ---- UL HARQ SOFT COMBINING (ISAC_UL_HARQ_COMBINE=1, default off; ULQ) ---------------------------
+ * The UL twin of the DL harqc cache (nr_pdsch_passive_decode.c): without it every rv != 0 PUSCH was
+ * refused ("no HARQ history") and the chain mode never even booked it, although 10-30 % of the UL
+ * grants of a loaded cell are retransmissions. A CRC-failed first transmission leaves its rate-
+ * dematched soft buffer (harq_process->d, C segments at the decoder's 68*384 stride) in a small
+ * shared cache keyed by (rnti, harq pid); a later grant of the same process with the same NDI, the
+ * same TBS and rv != 0 is decoded INTO a copy of it (harq_to_be_cleared = false, so the rate
+ * de-matcher adds the new LLRs). Only the first decode call of a queue job may combine or store
+ * (nr_pusch_passive_harq_arm), so retries and solver variants never add the same LLRs twice. A busy
+ * entry is skipped, never waited on. LRU over 64 entries; a TB of more than ISAC_UL_HARQ_MAX_SEG
+ * (default 8) segments is not stored (memory bound 64 x 8 x 52 kB). */
+#define UL_HARQC_N 64
+#define UL_HARQC_STRIDE (68u * 384u)
+typedef struct {
+  _Atomic int busy;
+  bool used, soft_valid;
+  uint16_t rnti;
+  uint8_t pid, ndi, ncomb;
+  uint32_t tbs, C, cap_seg;
+  uint32_t code_rate; /* of the stored first transmission: a reserved-MCS retransmission reuses it */
+  uint8_t bg;
+  uint64_t last;
+  int16_t *d;
+} ul_harqc_t;
+static ul_harqc_t g_ul_harqc[UL_HARQC_N];
+static pthread_mutex_t g_ul_harqc_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_ul_harqc_clock;
+static _Atomic uint64_t g_hq_stored, g_hq_retx_try, g_hq_retx_ok, g_hq_rv_refused, g_hq_busy;
+/* why an rv != 0 grant found nothing to combine: no entry for (rnti,pid) / entry already decoded or never stored /
+ * NDI toggled / TBS of the retransmission differs from the stored one */
+static _Atomic uint64_t g_hq_why_none, g_hq_why_empty, g_hq_why_ndi, g_hq_why_tbs;
+static __thread bool t_hq_armed;
+static int ul_harq_combine_on(void)
+{
+  static _Atomic int on = -1;
+  if (on < 0) {
+    const char *v = getenv("ISAC_UL_HARQ_COMBINE");
+    on = (v && !strcmp(v, "1")) ? 1 : 0;
+  }
+  return on;
+}
+bool nr_pusch_passive_harq_combine_enabled(void) { return ul_harq_combine_on() == 1; }
+void nr_pusch_passive_harq_arm(bool on) { t_hq_armed = on; }
+static unsigned ul_harq_max_seg(void)
+{
+  static _Atomic int m = -1;
+  if (m < 0) {
+    const char *v = getenv("ISAC_UL_HARQ_MAX_SEG");
+    m = v ? atoi(v) : 8;
+  }
+  return (unsigned)m;
+}
+/* True when (rnti, pid) holds a soft buffer of an undecoded TB with this NDI: an rv != 0 grant is worth its FEP. */
+static bool ul_harqc_peek(uint16_t rnti, uint8_t pid, uint8_t ndi, uint32_t *tbs, uint32_t *cr, uint8_t *bg)
+{
+  int why = 0; /* 0 none, 1 empty, 2 ndi, 3 ok */
+  pthread_mutex_lock(&g_ul_harqc_lock);
+  for (int i = 0; i < UL_HARQC_N; i++) {
+    const ul_harqc_t *e = &g_ul_harqc[i];
+    if (!e->used || e->rnti != rnti || e->pid != pid) continue;
+    why = !e->soft_valid ? 1 : e->ndi != ndi ? 2 : 3;
+    if (why == 3 && tbs) { *tbs = e->tbs; *cr = e->code_rate; *bg = e->bg; }
+    break;
+  }
+  pthread_mutex_unlock(&g_ul_harqc_lock);
+  if (why < 3) atomic_fetch_add_explicit(why == 0 ? &g_hq_why_none : why == 1 ? &g_hq_why_empty : &g_hq_why_ndi, 1,
+                                         memory_order_relaxed);
+  return why == 3;
+}
+static ul_harqc_t *ul_harqc_acquire(uint16_t rnti, uint8_t pid)
+{
+  pthread_mutex_lock(&g_ul_harqc_lock);
+  ul_harqc_t *hit = NULL, *lru = NULL;
+  for (int i = 0; i < UL_HARQC_N; i++) {
+    ul_harqc_t *e = &g_ul_harqc[i];
+    if (e->used && e->rnti == rnti && e->pid == pid) { hit = e; break; }
+    if (atomic_load(&e->busy)) continue;
+    if (lru == NULL || !e->used || (lru->used && e->last < lru->last)) lru = e;
+  }
+  ul_harqc_t *e = hit ? hit : lru;
+  int expect = 0;
+  if (e == NULL || !atomic_compare_exchange_strong(&e->busy, &expect, 1)) {
+    pthread_mutex_unlock(&g_ul_harqc_lock);
+    atomic_fetch_add_explicit(&g_hq_busy, 1, memory_order_relaxed);
+    return NULL;
+  }
+  if (!hit) {
+    e->used = true; e->rnti = rnti; e->pid = pid; e->soft_valid = false; e->tbs = 0; e->ncomb = 0;
+  }
+  e->last = ++g_ul_harqc_clock;
+  pthread_mutex_unlock(&g_ul_harqc_lock);
+  return e;
+}
 /* UL DM-RS identity estimate (CP-OFDM PUSCH, type 1, port 0): same sequence family as PDSCH
  * (TS 38.211 6.4.1.1.1.1 vs 7.4.1.1.1), reference point CRB 0, so the PDSCH estimator applies
  * unchanged. Accumulated on EVERY attempted grant, CRC-OK or not (review fix round 1, finding 2) --
@@ -157,7 +265,28 @@ static _Atomic uint64_t g_seg_fail, g_zero_tb;
  * beyond a comfortable fraction of that is worth re-placing the window for rather than hoping. */
 #define PASSIVE_UL_DELAY_TOL 6
 static _Atomic uint64_t g_ta_refined;
-static _Atomic uint64_t g_uci_trials, g_uci_rescued, g_uci_unconfirmed;
+static _Atomic uint64_t g_uci_trials, g_uci_rescued, g_uci_unconfirmed, g_uci_cut, g_uci_skip_restore;
+/* ULLDPC: ISAC_UL_UCI_BUDGET=N (default 0 = unbounded, the old behaviour) bounds the UCI reservation search of ONE decode call to N LDPC
+ * trials (4-51 per call OTA); ISAC_UL_UCI_BUDGET_US=T bounds it to T us of wall time. A cut search keeps the learned footprints
+ * (tried first) and the smallest swept ones; a call that ran no trial skips the restoring re-decode. */
+static unsigned uci_budget_n(void)
+{
+  static int v = -1;
+  if (v < 0) { const char *e = getenv("ISAC_UL_UCI_BUDGET"); v = e ? atoi(e) : 0; if (v < 0) v = 0; }
+  return (unsigned)v;
+}
+static uint64_t uci_budget_us(void)
+{
+  static int v = -1;
+  if (v < 0) { const char *e = getenv("ISAC_UL_UCI_BUDGET_US"); v = e ? atoi(e) : 0; if (v < 0) v = 0; }
+  return (uint64_t)v;
+}
+static uint64_t uci_clock_us(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000 + (uint64_t)t.tv_nsec / 1000;
+}
 static bool ul_uci_safe(void)
 {
   static int on = -1;
@@ -462,6 +591,8 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue, int ctx)
    * receiver its own small pool instead, which also keeps the decode off the UE's RT pool: this
    * tree has already measured blind PDSCH decoding on the receive thread costing PBCH lock. */
   gnb->nrLDPC_coding_interface     = ue->nrLDPC_coding_interface;
+  /* ULLDPC: the gnb copy of the interface (not the UE's) decodes through the UL GPU pool when ISAC_UL_GPU_LDPC=1 */
+  gnb->nrLDPC_coding_interface.nrLDPC_coding_decoder = nr_pusch_gpu_ldpc_wrap(ue->nrLDPC_coding_interface.nrLDPC_coding_decoder);
   /* ZERO worker threads, so pushTpool() runs every task INLINE (its own documented fallback).
    *
    * A 2-thread pool deadlocked the PHY receive thread on the first live grant: threadCreate gives
@@ -529,37 +660,53 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue, int ctx)
   return true;
 }
 
-bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue)
+bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue, int ctx)
 {
-  if (!ue || !passive_gnb_prepare(ue, 0)) return false;
+  if (!ue || ctx < 0 || ctx >= NR_PUSCH_PASSIVE_MAX_CTX || !passive_gnb_prepare(ue, ctx)) return false;
   /* The solver can try DFT-s-OFDM tables. The normal gNB init generates
    * these low-PAPR pilots before RX; this private context bypasses that init. */
   const char *solver=getenv("ISAC_UL_PUSCH_SOLVER");
-  if (solver && !strcmp(solver,"1")) generate_lowpapr_typ1_refsig_sequences(SHRT_MAX);
-  passive_ul_snapshot_t *s = &g_snapshot[0];
-  if (g_pipeline_ready) return true;
-  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-  const uint32_t len = fp->samples_per_subframe + PASSIVE_UL_SNAPSHOT_MARGIN;
-  if (len >= fp->samples_per_frame) return false;
+  if (ctx == 0 && solver && !strcmp(solver,"1")) generate_lowpapr_typ1_refsig_sequences(SHRT_MAX);
+  passive_ul_snapshot_t *s = &g_snapshot[ctx];
+  if (g_pipeline_ready[ctx]) return true;
+  const uint32_t len = nr_pusch_passive_snapshot_len(&ue->frame_parms);
+  if (!len) return false;
   for (int a = 0; a < g_gnb_nant; a++) {
-    if (!s->iq[a]) s->iq[a] = malloc16_clear((size_t)len * sizeof(c16_t));
-    if (!s->iq[a]) return false;
+    if (!s->own[a]) s->own[a] = malloc16_clear((size_t)len * sizeof(c16_t));
+    if (!s->own[a]) return false;
+    s->iq[a] = s->own[a];
   }
-  passive_ul_scratch_t *w=&g_scratch[0];
+  passive_ul_scratch_t *w=&g_scratch[ctx];
   if(!w->h) w->h=malloc16_clear(sizeof(float)*2*PASSIVE_UL_MAX_ANT*PASSIVE_UL_CFR_CAP);
   if(!w->k) w->k=malloc16_clear(sizeof(uint32_t)*PASSIVE_UL_CFR_CAP);
   if(!w->l) w->l=malloc16_clear(sizeof(uint32_t)*PASSIVE_UL_CFR_CAP);
   if(!w->uci) w->uci=malloc16_clear(sizeof(int16_t)*PASSIVE_UL_UCI_CAP);
   if(!w->h || !w->k || !w->l || !w->uci) return false;
-  s->length = len;
-  g_pipeline_ready = true;
+  s->length = s->cap = len;
+  if (ctx == 0 && !g_ulg) ulg_warmup(&g_gnb[0]->frame_parms, g_gnb_nant);
+  if (g_ulg && !g_ulg_scr[ctx]) {
+    /* written here (malloc16_clear), so the GPU never first-touches an unwritten page */
+    g_ulg_scr[ctx] = malloc16_clear((size_t)ULG_MAX_CAND * g_gnb_nant * ue->frame_parms.ofdm_symbol_size * sizeof(c16_t));
+    if (!g_ulg_scr[ctx]) return false;
+  }
+  g_pipeline_ready[ctx] = true;
   return true;
 }
 
-bool nr_pusch_passive_decode_capture(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, uint64_t absolute_slot)
+uint32_t nr_pusch_passive_snapshot_len(const NR_DL_FRAME_PARMS *fp)
 {
-  if (!ue || ctx != 0 || !g_snapshot[ctx].iq[0]) return false;
-  passive_ul_snapshot_t *s = &g_snapshot[ctx];
+  const uint32_t len = fp->samples_per_subframe + PASSIVE_UL_SNAPSHOT_MARGIN;
+  return len < fp->samples_per_frame ? len : 0;
+}
+
+int nr_pusch_passive_snapshot_nant(void)
+{
+  return g_gnb_nant;
+}
+
+bool nr_pusch_passive_snapshot_copy(PHY_VARS_NR_UE *ue, uint8_t slot, uint64_t absolute_slot, c16_t *const *dst,
+                                    uint32_t cap, uint32_t *origin_out, uint32_t *len_out)
+{
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const long producer = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_acquire);
   if (!nr_pusch_queue_snapshot_fresh(producer, (long)absolute_slot, fp->slots_per_frame)) return false;
@@ -569,25 +716,49 @@ bool nr_pusch_passive_decode_capture(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, 
    * slot may already be under RF write; a negative advance beyond this window
    * is rejected by passive_snapshot_fep instead of reading partial IQ. */
   const uint32_t len = get_samples_per_slot(slot, fp) + PASSIVE_UL_SNAPSHOT_MARGIN;
-  if (len > s->length) return false;
+  if (len > cap) return false;
   for (int a = 0; a < g_gnb_nant; a++) {
     const c16_t *src = (const c16_t *)ue->common_vars.rxdata[a];
-    if (!src) return false;
+    if (!src || !dst[a]) return false;
     const uint32_t first = len < fp->samples_per_frame - origin ? len : fp->samples_per_frame - origin;
-    memcpy(s->iq[a], src + origin, (size_t)first * sizeof(c16_t));
-    if (first < len) memcpy(s->iq[a] + first, src, (size_t)(len - first) * sizeof(c16_t));
+    memcpy(dst[a], src + origin, (size_t)first * sizeof(c16_t));
+    if (first < len) memcpy(dst[a] + first, src, (size_t)(len - first) * sizeof(c16_t));
   }
   if (!nr_pusch_queue_snapshot_fresh(atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_acquire),
                                      (long)absolute_slot, fp->slots_per_frame)) return false;
+  *origin_out = origin;
+  *len_out = len;
+  return true;
+}
+
+bool nr_pusch_passive_decode_capture(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, uint64_t absolute_slot)
+{
+  if (!ue || ctx < 0 || ctx >= NR_PUSCH_PASSIVE_MAX_CTX || !g_snapshot[ctx].own[0]) return false;
+  passive_ul_snapshot_t *s = &g_snapshot[ctx];
+  for (int a = 0; a < PASSIVE_UL_MAX_ANT; a++) s->iq[a] = s->own[a];
+  uint32_t origin, len;
+  if (!nr_pusch_passive_snapshot_copy(ue, slot, absolute_slot, s->own, s->cap, &origin, &len)) return false;
   s->origin = origin;
   s->length = len;
   s->valid = true;
   return true;
 }
 
+void nr_pusch_passive_decode_attach(int ctx, c16_t *const *iq, uint32_t origin, uint32_t length)
+{
+  passive_ul_snapshot_t *s = &g_snapshot[ctx];
+  for (int a = 0; a < g_gnb_nant && a < PASSIVE_UL_MAX_ANT; a++) s->iq[a] = iq[a];
+  s->origin = origin;
+  s->length = length;
+  s->valid = true;
+}
+
 void nr_pusch_passive_decode_capture_release(int ctx)
 {
-  if (ctx >= 0 && ctx < NR_PUSCH_PASSIVE_MAX_CTX) g_snapshot[ctx].valid = false;
+  if (ctx < 0 || ctx >= NR_PUSCH_PASSIVE_MAX_CTX) return;
+  passive_ul_snapshot_t *s = &g_snapshot[ctx];
+  s->valid = false;
+  for (int a = 0; a < PASSIVE_UL_MAX_ANT; a++) s->iq[a] = s->own[a];
 }
 
 void nr_pusch_passive_decode_free(void)
@@ -741,6 +912,128 @@ static bool passive_snapshot_fep(const NR_DL_FRAME_PARMS *fp, int ctx, int ant, 
     dft(get_dft(fp->ofdm_symbol_size), (int16_t *)rot, (int16_t *)dst, 1);
   }
   return true;
+}
+
+/* ---- ULFEP: ISAC_UL_GPU_FEP=1 (default off). The FEP of a snapshot-backed grant (the UL window, the bare DFT, the
+ * OAI RX symbol rotation) runs on the GPU as one batched launch, bit for bit what passive_snapshot_fep() +
+ * apply_nr_rotation_symbol_RX() write (nr_pusch_gpu_fep.cuh). Only without a CFO de-rotation (fo_hz == 0) and with a
+ * valid snapshot; every other case, a busy/over-budget GPU and any error run the unchanged CPU code, counted in
+ * UL_GPU_FEP. ISAC_UL_GPU_FEP_CHECK=n (default 16, 0 = off): every n-th GPU call one (item, antenna) row is recomputed on
+ * the CPU and compared; a mismatch switches the GPU path off for good and the call is redone on the CPU. */
+static void ulg_warmup(const NR_DL_FRAME_PARMS *fp, int nant)
+{
+  const char *e = getenv("ISAC_UL_GPU_FEP_CHECK");
+  if (e) g_ulg_check = atoi(e);
+  const nr_pusch_gpu_fep_api_t *api = nr_pusch_gpu_fep_load();
+  if (!api || fp->ofdm_symbol_size != 4096 || nant < 1 || nant > PASSIVE_UL_MAX_ANT) return;
+  const char *p = getenv("ISAC_UL_GPU_FEP_PCT");
+  if (api->init(nant, fp->ofdm_symbol_size, fp->nb_prefix_samples, (int)fp->ofdm_offset_divisor, p ? atoi(p) : 30) != 0) {
+    LOG_W(PHY, "SENSING: UL_GPU_FEP requested but unavailable -- CPU FEP\n");
+    return;
+  }
+  g_ulg_nant = nant;
+  g_ulg = api;
+  atomic_store(&g_ulg_on, true);
+}
+
+static inline bool ulg_usable(int ctx, int nant, double fo_hz, const NR_DL_FRAME_PARMS *fp)
+{
+  return g_ulg && atomic_load_explicit(&g_ulg_on, memory_order_relaxed) && g_snapshot[ctx].valid && fo_hz == 0.0
+         && nant == g_ulg_nant && fp->ofdm_symbol_size == 4096;
+}
+
+/* One window of every antenna -> item. false = outside the bounded snapshot (the CPU path reports it). */
+static bool ulg_item(const NR_DL_FRAME_PARMS *fp, int ctx, int nant, unsigned char slot, unsigned char sym, int offset,
+                     c16_t *const *dst, bool rotate, nr_pusch_gpu_fep_item_t *it)
+{
+  const passive_ul_snapshot_t *s = &g_snapshot[ctx];
+  const uint32_t off = passive_ul_fep_offset(fp, slot, sym, offset);
+  const uint32_t rel = (off + fp->samples_per_frame - s->origin) % fp->samples_per_frame;
+  if (!s->valid || rel + fp->ofdm_symbol_size > s->length) return false;
+  memset(it, 0, sizeof(*it));
+  for (int a = 0; a < nant; a++) {
+    it->src[a] = (const int16_t *)(s->iq[a] + rel);
+    it->dst[a] = (int16_t *)dst[a];
+  }
+  if (rotate) {
+    const c16_t r = fp->symbol_rotation[link_type_ul][sym + (slot % fp->slots_per_subframe) * fp->symbols_per_slot];
+    it->rot[0] = r.r;
+    it->rot[1] = r.i;
+  }
+  it->rotate = rotate;
+  return true;
+}
+
+/* Launch the batch; every ulg_check-th call verifies one row against the CPU FEP. true = rows written and verified. */
+static bool ulg_run(const NR_DL_FRAME_PARMS *fp, int ctx, int nant, unsigned char slot, const nr_pusch_gpu_fep_item_t *it,
+                    const unsigned char *sym, const int *offset, int n, int nb_rb)
+{
+  const uint64_t w0 = utim_now();
+  const int rrc = g_ulg->run(it, n, nb_rb, fp->first_carrier_offset);
+  atomic_fetch_add_explicit(&g_ulg_wait_ns, utim_now() - w0, memory_order_relaxed);
+  if (rrc != 0) {
+    atomic_fetch_add_explicit(&g_ulg_cpu_rej, 1, memory_order_relaxed);
+    return false;
+  }
+  const uint64_t q = atomic_fetch_add_explicit(&g_ulg_seq, 1, memory_order_relaxed);
+  if (g_ulg_check > 0 && q % (uint64_t)g_ulg_check == 0) {
+    const int i = (int)((q / (uint64_t)g_ulg_check) % (uint64_t)n), a = (int)((q / (uint64_t)g_ulg_check / 7) % (uint64_t)nant);
+    c16_t ref[fp->ofdm_symbol_size] __attribute__((aligned(32)));
+    passive_snapshot_fep(fp, ctx, a, ref, sym[i], slot, offset[i], 0.0);
+    if (it[i].rotate)
+      apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe, fp->timeshift_symbol_rotation,
+                                  fp->first_carrier_offset, ref, fp->symbol_rotation[link_type_ul], nb_rb, slot, sym[i]);
+    atomic_fetch_add_explicit(&g_ulg_chk, 1, memory_order_relaxed);
+    if (memcmp(ref, it[i].dst[a], sizeof(ref)) != 0) {
+      atomic_fetch_add_explicit(&g_ulg_bad, 1, memory_order_relaxed);
+      atomic_store(&g_ulg_on, false);
+      LOG_E(PHY, "SENSING: UL_GPU_FEP MISMATCH slot=%d sym=%d ant=%d off=%d -- GPU path off, CPU FEP\n", slot, sym[i], a,
+            offset[i]);
+      return false;
+    }
+  }
+  return true;
+}
+
+/* The grant's symbols [s0, s1) of all antennas into the gNB grid rows at slot_off. */
+static bool ulg_fep_symbols(PHY_VARS_gNB *gnb, int ctx, int nant, unsigned char slot, int slot_off, int s0, int s1, int offset)
+{
+  const NR_DL_FRAME_PARMS *fp = &gnb->frame_parms;
+  const int n = s1 - s0;
+  if (n < 1 || n > 14) return false;
+  nr_pusch_gpu_fep_item_t it[14];
+  unsigned char sym[14];
+  int off[14];
+  for (int i = 0; i < n; i++) {
+    c16_t *dst[PASSIVE_UL_MAX_ANT];
+    for (int a = 0; a < nant; a++) dst[a] = &gnb->common_vars.rxdataF[a][slot_off + (s0 + i) * fp->ofdm_symbol_size];
+    sym[i] = (unsigned char)(s0 + i);
+    off[i] = offset;
+    if (!ulg_item(fp, ctx, nant, slot, sym[i], offset, dst, true, &it[i])) {
+      atomic_fetch_add_explicit(&g_ulg_cpu_bounds, 1, memory_order_relaxed);
+      return false;
+    }
+  }
+  return ulg_run(fp, ctx, nant, slot, it, sym, off, n, fp->N_RB_UL);
+}
+
+/* One symbol at n timing advances into g_ulg_scr[ctx] (candidate c, antenna a at (c * nant + a) * N). */
+static bool ulg_fep_candidates(PHY_VARS_gNB *gnb, int ctx, int nant, unsigned char slot, int sym, const int *adv, int n)
+{
+  const NR_DL_FRAME_PARMS *fp = &gnb->frame_parms;
+  if (n < 1 || n > ULG_MAX_CAND || !g_ulg_scr[ctx]) return false;
+  nr_pusch_gpu_fep_item_t it[ULG_MAX_CAND];
+  unsigned char syms[ULG_MAX_CAND];
+  for (int c = 0; c < n; c++) {
+    c16_t *dst[PASSIVE_UL_MAX_ANT];
+    for (int a = 0; a < nant; a++) dst[a] = g_ulg_scr[ctx] + ((size_t)c * nant + a) * fp->ofdm_symbol_size;
+    syms[c] = (unsigned char)sym;
+    if (!ulg_item(fp, ctx, nant, slot, syms[c], adv[c], dst, true, &it[c])) {
+      atomic_fetch_add_explicit(&g_ulg_cpu_bounds, 1, memory_order_relaxed);
+      return false;
+    }
+  }
+  return ulg_run(fp, ctx, nant, slot, it, syms, adv, n, fp->N_RB_UL);
 }
 
 /* ---- UL-LAYOUT probe (ISAC_UL_LAYOUT_LOCK=1). For one booked DCI 0_1 it correlates the CP-OFDM DM-RS (port 0,
@@ -1117,9 +1410,23 @@ bool nr_pusch_passive_layout_probe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, in
   if (nant > PASSIVE_UL_MAX_ANT) nant = PASSIVE_UL_MAX_ANT;
   const int syms[LP_NSYM] = {l0, 7, 11, l0 + 1, 12};
   for (int s = 0; s < LP_NSYM; s++)
+    for (int a = 0; a < nant; a++)
+      if (!g_lp_f[ctx][s][a] && !(g_lp_f[ctx][s][a] = malloc16_clear(sizeof(c16_t) * N))) return false;
+  bool lp_gpu = false;
+  if (ulg_usable(ctx, nant, fo_hz, fp)) { /* the 5 probe symbols x nant in one launch (bare DFT, no rotation) */
+    nr_pusch_gpu_fep_item_t it[LP_NSYM];
+    unsigned char us[LP_NSYM];
+    int uo[LP_NSYM];
+    bool inb = true;
+    for (int s = 0; s < LP_NSYM && inb; s++) {
+      us[s] = (unsigned char)syms[s];
+      uo[s] = ta;
+      inb = ulg_item(fp, ctx, nant, slot, us[s], ta, g_lp_f[ctx][s], false, &it[s]);
+    }
+    lp_gpu = inb && ulg_run(fp, ctx, nant, slot, it, us, uo, LP_NSYM, fp->N_RB_UL);
+  }
+  for (int s = 0; s < LP_NSYM && !lp_gpu; s++)
     for (int a = 0; a < nant; a++) {
-      if (!g_lp_f[ctx][s][a]) g_lp_f[ctx][s][a] = malloc16_clear(sizeof(c16_t) * N);
-      if (!g_lp_f[ctx][s][a]) return false;
       if (g_snapshot[ctx].valid) {
         if (!passive_snapshot_fep(fp, ctx, a, g_lp_f[ctx][s][a], (unsigned char)syms[s], slot, ta, fo_hz)) return false;
       } else {
@@ -1389,16 +1696,19 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     out->reject_reason = "multi-layer PUSCH";
     return false;
   }
-  if (g->rv != 0) {
+  if (g->rv != 0 && !(ul_harq_combine_on() && t_hq_armed && !t_solver_probe && !cfr_only &&
+                      ul_harqc_peek(g->rnti, g->harq_pid, g->ndi, NULL, NULL, NULL))) {
     /* No HARQ history: a passive receiver has no earlier redundancy version to combine with, so an
      * rv != 0 transmission carries only incremental parity and cannot be decoded standalone. The
-     * DM-RS-based CFR path is unaffected -- it needs only the allocation. */
+     * DM-RS-based CFR path is unaffected -- it needs only the allocation. With ISAC_UL_HARQ_COMBINE
+     * the stored soft buffer of the first transmission is that history (see ul_harqc_t). */
+    if (ul_harq_combine_on()) atomic_fetch_add_explicit(&g_hq_rv_refused, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_rej_unsup, 1, memory_order_relaxed);
     out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
     out->reject_reason = "rv != 0 with no HARQ history to combine";
     return false;
   }
-  if (nr_pusch_passive_pipeline_enabled() && (ctx!=0 || !g_pipeline_ready)) {
+  if (nr_pusch_passive_pipeline_enabled() && (ctx<0 || ctx>=NR_PUSCH_PASSIVE_MAX_CTX || !g_pipeline_ready[ctx])) {
     out->reject_reason = "UL pipeline resources not prewarmed";
     return false;
   }
@@ -1501,11 +1811,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                                     slot, (sym_));                                                \
     }                                                                                              \
   } while (0)
-#define PASSIVE_UL_FEP(off_)                                                                       \
+#define PASSIVE_UL_FEP(off_, kind_)                                                                \
   do {                                                                                             \
     const int s0_ = g->start_symbol;                                                               \
-    const int s1_ = g->start_symbol + g->num_symbols;                                              \
-    for (int sym_ = s0_; sym_ < s1_ && sym_ < sps; sym_++) PASSIVE_UL_FEP_SYMBOL((off_), sym_);   \
+    const int s1_ = g->start_symbol + g->num_symbols < sps ? g->start_symbol + g->num_symbols : sps; \
+    atomic_fetch_add_explicit(&g_fep_req[kind_], (uint64_t)(s1_ > s0_ ? s1_ - s0_ : 0) * nant, memory_order_relaxed); \
+    if (!(ulg_usable(ctx, nant, fo_hz, fp) &&                                                      \
+          ulg_fep_symbols(gnb, ctx, nant, (unsigned char)slot, slot_off, s0_, s1_, (off_))))       \
+      for (int sym_ = s0_; sym_ < s1_; sym_++) PASSIVE_UL_FEP_SYMBOL((off_), sym_);                \
   } while (0)
 
   if ((timing_disc || dmrs_disc) && !gapped && !fdra_unresolved && !g->transform_precoding &&
@@ -1564,10 +1877,25 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           const int center = phase ? best_advance : seed;
           const int span = phase ? coarse_step : radius;
           const int step = phase ? 16 : coarse_step;
-          for (int delta = -span; delta <= span; delta += step) {
+          int cand[ULG_MAX_CAND], ncand = 0;
+          for (int delta = -span; delta <= span && ncand < ULG_MAX_CAND; delta += step) {
             const int advance = center + delta;
             if (advance - ta_offset_samples < -2048 || advance - ta_offset_samples > 2048) continue;
-            PASSIVE_UL_FEP_SYMBOL(advance, first_sym);
+            cand[ncand++] = advance;
+          }
+          /* all candidates of the phase in one GPU launch when possible (scores read the scratch rows instead of the grid) */
+          const bool cand_gpu = ulg_usable(ctx, nant, fo_hz, fp) &&
+              ulg_fep_candidates(gnb, ctx, nant, (unsigned char)slot, first_sym, cand, ncand);
+          atomic_fetch_add_explicit(&g_fep_req[1], (uint64_t)ncand * nant, memory_order_relaxed);
+          for (int ci = 0; ci < ncand; ci++) {
+            const int advance = cand[ci];
+            if (cand_gpu) {
+              for (int a = 0; a < nant; ++a)
+                grid.rx[a] = (const c16_t *)((uintptr_t)(g_ulg_scr[ctx] + ((size_t)ci * nant + a) * symsz)
+                                             - (uintptr_t)first_sym * symsz * sizeof(c16_t));
+            } else {
+              PASSIVE_UL_FEP_SYMBOL(advance, first_sym);
+            }
             const uint16_t mask = 1u << first_sym;
             for (int i = 0; i < nprior; ++i) {
               int pairs = 0;
@@ -1576,6 +1904,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
               if (score > best_score) { best_score=score; best_pairs=pairs; best_advance=advance; }
             }
           }
+          if (cand_gpu)
+            for (int a = 0; a < nant; ++a) grid.rx[a] = &gnb->common_vars.rxdataF[a][slot_off];
         }
         double fa;
         if (best_score >= 0.35 && nr_pusch_ul_disc_accept(best_score, best_pairs, &fa)) {
@@ -1590,7 +1920,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         }
       }
     }
-    PASSIVE_UL_FEP(ul_sample_offset);
+    PASSIVE_UL_FEP(ul_sample_offset, 0);
     if (dmrs_disc) {
       const nr_pusch_ul_disc_result_t result = nr_pusch_ul_disc_search(&grid, g->rnti, type_a,
           prior, nprior, g->dmrs_config_type, g->nscid, g->antenna_ports_field);
@@ -1603,7 +1933,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       }
     }
   } else {
-    PASSIVE_UL_FEP(ul_sample_offset);
+    PASSIVE_UL_FEP(ul_sample_offset, 0);
   }
   out->dmrs_id = g->ul_dmrs_scrambling_id;
   out->data_id = g->data_scrambling_id;
@@ -1668,6 +1998,15 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     pthread_mutex_lock(&g_ul_harq_init_lock);
     have_ul_init_tx = nr_harq_init_tx_lookup(&g_ul_harq_init, g->rnti, g->harq_pid, g->ndi, &ul_init_tx);
     pthread_mutex_unlock(&g_ul_harq_init_lock);
+    /* ULQ: a reserved-MCS retransmission of a TB that never decoded has no init_tx record (that is written on
+     * CRC OK only) -- the stored HARQ soft buffer carries the same TB parameters. */
+    if (!have_ul_init_tx && ul_harq_combine_on() && t_hq_armed && !t_solver_probe) {
+      uint32_t stbs = 0, scr = 0; uint8_t sbg = 0;
+      if (ul_harqc_peek(g->rnti, g->harq_pid, g->ndi, &stbs, &scr, &sbg) && stbs && scr && sbg) {
+        have_ul_init_tx = true;
+        ul_init_tx.tbs = stbs; ul_init_tx.code_rate = scr; ul_init_tx.bg = sbg; ul_init_tx.nl = g->nrOfLayers;
+      }
+    }
     if (!have_ul_init_tx) {
       out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
       out->reject_reason = "reserved UL MCS with no known initial transmission on this HARQ process";
@@ -1750,7 +2089,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     if (d != 0 && (d > PASSIVE_UL_DELAY_TOL || d < -PASSIVE_UL_DELAY_TOL)) {
       atomic_fetch_add_explicit(&g_ta_refined, 1, memory_order_relaxed);
       out->ta_applied_samples = nr_sense_ul_ta_refined(ul_sample_offset, d);
-      PASSIVE_UL_FEP(out->ta_applied_samples);
+      PASSIVE_UL_FEP(out->ta_applied_samples, 2);
   if (abs_slot && !g_snapshot[ctx].valid && !nr_passive_samples_valid(
       atomic_load_explicit(&nr_ue_diag_producer_absolute_slot,memory_order_relaxed),
       (long)abs_slot,fp->slots_per_frame)) {
@@ -2055,12 +2394,30 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
 
   int ulsch_id = 0;
+  /* UL HARQ soft combining: first decode call of an armed job only (see ul_harqc_t). */
+  ul_harqc_t *hqe = NULL;
+  bool hq_retx = false;
+  if (ul_harq_combine_on() && t_hq_armed && !t_solver_probe) {
+    t_hq_armed = false;
+    hqe = ul_harqc_acquire(g->rnti, g->harq_pid);
+    if (hqe) {
+      hq_retx = g->rv != 0 && hqe->soft_valid && hqe->ndi == g->ndi && hqe->tbs == tbs && hqe->d &&
+                hqe->C <= hqe->cap_seg;
+      if (g->rv != 0 && hqe->soft_valid && hqe->ndi == g->ndi && hqe->tbs != tbs)
+        atomic_fetch_add_explicit(&g_hq_why_tbs, 1, memory_order_relaxed);
+      if (hq_retx) {
+        memcpy(ulsch->harq_process->d, hqe->d, (size_t)hqe->C * UL_HARQC_STRIDE * sizeof(int16_t));
+        ulsch->harq_process->harq_to_be_cleared = false;
+        atomic_fetch_add_explicit(&g_hq_retx_try, 1, memory_order_relaxed);
+      }
+    }
+  }
   int rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
 
   /* Expensive, bounded OFFLINE diagnostic, never enabled by full_auto alone.
    * Preserve descrambled LLRs and remove actual interleaved UCI positions.
    * A CRC win identifies a footprint candidate, not O_ACK/CSI/RRC configuration. */
-  if (getenv("ISAC_PASSIVE_REPLAY_INPUT") && getenv("ISAC_PASSIVE_REPLAY_UL_UCI")
+  if (getenv("ISAC_PASSIVE_REPLAY_INPUT") && getenv("ISAC_PASSIVE_REPLAY_UL_UCI") && !hq_retx
       && rc==0 && hp_crc_failed(ulsch) && g->nrOfLayers==1) {
     const uint32_t full_bits=out->G;
     int16_t *original=g_snapshot[ctx].valid ?
@@ -2118,7 +2475,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * prevents the correct width from passing. The existing per-identity rate
    * limiter bounds exploration; cache entries still require a verified TB CRC. */
   if (rc == 0 && hp_crc_failed(ulsch) && ucfg != NULL && ucfg->ul_uci_search > 0
-      && g->nrOfLayers == 1 && out->G > 0) {
+      && g->nrOfLayers == 1 && out->G > 0 && !hq_retx) {
     const uint32_t full_bits = out->G;
     int16_t *original = g_snapshot[ctx].valid ?
       (full_bits<=PASSIVE_UL_UCI_CAP ? g_scratch[ctx].uci : NULL) :
@@ -2126,6 +2483,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     if (original == NULL) {
       out->status = NR_PUSCH_PASSIVE_ERROR;
       out->reject_reason = "UCI recovery scratch allocation failed";
+      if (hqe) atomic_store(&hqe->busy, 0);
       return false;
     }
     memcpy(original, pvp->llr, (size_t)full_bits * sizeof(*original));
@@ -2133,8 +2491,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     /* try(): one demux + one LDPC attempt at a candidate footprint. */
     bool rescued = false;
     uint32_t won_bits = 0; unsigned won_re = 0; int won_csi = 0;
+    unsigned uci_dec = 0;
+    const unsigned uci_bn = uci_budget_n();
+    const uint64_t uci_bus = uci_budget_us(), uci_t0 = uci_bus ? uci_clock_us() : 0;
+    bool uci_cut = false;
     #define UCI_ATTEMPT(RE, CSI)                                                                   \
-      do {                                                                                         \
+      if ((uci_bn && uci_dec >= uci_bn) || (uci_bus && uci_clock_us() - uci_t0 >= uci_bus)) {      \
+        uci_cut = true;                                                                             \
+      } else do {                                                                                  \
         const uint32_t db = nr_passive_uci_probe_demux(original, full_bits, pvp->llr,               \
             g->num_rb, g->start_symbol, g->num_symbols, g->ul_dmrs_symb_pos,                        \
             nb_dmrs_re_per_rb, pdu.qam_mod_order, (RE), (CSI));                                     \
@@ -2142,6 +2506,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           atomic_fetch_add_explicit(&g_uci_trials, 1, memory_order_relaxed);                        \
           ulsch->unav_res = (RE);                                                                   \
           ulsch->harq_process->harq_to_be_cleared = true;                                           \
+          uci_dec++;                                                                                \
           rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);                               \
           if (rc == 0 && !hp_crc_failed(ulsch)) {                                                   \
             rescued = true; won_bits = db; won_re = (RE); won_csi = (CSI);                          \
@@ -2156,7 +2521,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
 
     /* 2. Otherwise explore, rate-limited, within a bounded RE budget. */
     bool explore_win = false;
-    if (!rescued && nr_passive_uci_learn_should_explore(g->rnti, (unsigned)ucfg->ul_uci_explore_every)) {
+    if (!rescued && nr_passive_uci_learn_should_explore(g->rnti, (unsigned)ucfg->ul_uci_explore_every) &&
+        nr_pusch_passive_rescue_allowed()) {
       unsigned cap = (unsigned)ucfg->ul_uci_search;
       /* ISAC_UL_UCI_SAFE=1 (default off). A TB of <= 3824 bits carries a 16-bit CRC, and this sweep runs up to
        * 2 x cap decodes: at cap 1024 that is a ~3 % false-pass probability per exploring grant (measured: 1-2 CRC passes
@@ -2174,6 +2540,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       explore_win = rescued;
     }
     #undef UCI_ATTEMPT
+    if (uci_cut) atomic_fetch_add_explicit(&g_uci_cut, 1, memory_order_relaxed);
     if (rescued && explore_win && ul_uci_safe()) {
       if (nr_cfg_epoch_work_current()) nr_passive_uci_learn_record(g->rnti, (uint16_t)won_re, won_csi != 0);
       atomic_fetch_add_explicit(&g_uci_unconfirmed, 1, memory_order_relaxed);
@@ -2194,10 +2561,41 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       /* Restore the untouched stream and re-run, so a failed search leaves no trace in the result. */
       memcpy(pvp->llr, original, (size_t)full_bits * sizeof(*original));
       ulsch->unav_res = 0;
-      ulsch->harq_process->harq_to_be_cleared = true;
-      rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
+      if ((uci_bn || uci_bus) && uci_dec == 0) { /* no trial ran: the first decode's state is the restored one */
+        atomic_fetch_add_explicit(&g_uci_skip_restore, 1, memory_order_relaxed);
+      } else {
+        ulsch->harq_process->harq_to_be_cleared = true;
+        rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
+      }
     }
     if(!g_snapshot[ctx].valid) free(original);
+  }
+
+  if (hqe) {
+    /* Keep the soft bits only while the TB is undecoded; an epoch change invalidates them. */
+    const bool tb_ok = rc == 0 && !hp_crc_failed(ulsch);
+    const uint32_t C = ulsch->harq_process->C;
+    if (hq_retx && tb_ok) atomic_fetch_add_explicit(&g_hq_retx_ok, 1, memory_order_relaxed);
+    hqe->soft_valid = false;
+    if (!tb_ok && rc == 0 && C > 0 && C <= ul_harq_max_seg() && nr_cfg_epoch_work_current()) {
+      if (hqe->cap_seg < C) {
+        free(hqe->d);
+        hqe->d = (int16_t *)malloc16((size_t)C * UL_HARQC_STRIDE * sizeof(int16_t));
+        hqe->cap_seg = hqe->d ? C : 0;
+      }
+      if (hqe->d) {
+        memcpy(hqe->d, ulsch->harq_process->d, (size_t)C * UL_HARQC_STRIDE * sizeof(int16_t));
+        hqe->soft_valid = true;
+        hqe->ndi = g->ndi;
+        hqe->tbs = tbs;
+        hqe->code_rate = (uint32_t)pdu.target_code_rate;
+        hqe->bg = (uint8_t)pdu.maintenance_parms_v3.ldpcBaseGraph;
+        hqe->C = C;
+        hqe->ncomb = hq_retx ? (uint8_t)(hqe->ncomb + 1) : 0;
+        if (!hq_retx) atomic_fetch_add_explicit(&g_hq_stored, 1, memory_order_relaxed);
+      }
+    }
+    atomic_store(&hqe->busy, 0);
   }
 
   if (utim) {
@@ -2223,6 +2621,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->est_delay     = pvp->delay.est_delay;
   if (pvp->ulsch_noise_power_tot > 0) {
     out->snr_db = 10.0f * log10f((float)pvp->ulsch_power_tot / (float)pvp->ulsch_noise_power_tot);
+  } else if (isfinite(pvp->ul_dmrs_snr_db)) {
+    out->snr_db = pvp->ul_dmrs_snr_db; /* blind receiver: no n0_subband_power, use the DMRS-based estimate */
   }
 
   /* `rc` is the LDPC coding INTERFACE return, not the CRC verdict -- nr_ulsch_decoding() returns
@@ -2497,7 +2897,7 @@ void nr_pusch_passive_stats_dump(void)
   pthread_mutex_unlock(&g_ul_harq_init_lock);
   LOG_I(PHY,
         "SENSING: pusch_passive[try=%lu crc_ok=%lu (%.1f%%) seg_fail=%lu zero_tb=%lu (%.1f%%) "
-        "ta_refined=%lu uci[trials=%lu rescued=%lu unconfirmed=%lu] "
+        "ta_refined=%lu uci[trials=%lu rescued=%lu unconfirmed=%lu cut=%lu skip_restore=%lu] "
         "health=%.1f%% unsup=%lu setup_fail=%lu] init_tx[hit=%lu evict=%lu] ul_cfr[submits=%lu re=%lu]\n",
         (unsigned long)t, (unsigned long)k, t ? (100.0 * (double)k / (double)t) : 0.0,
         (unsigned long)sf, (unsigned long)zt, t ? (100.0 * (double)zt / (double)t) : 0.0,
@@ -2505,12 +2905,42 @@ void nr_pusch_passive_stats_dump(void)
         (unsigned long)atomic_load_explicit(&g_uci_trials, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_uci_rescued, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_uci_unconfirmed, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_uci_cut, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_uci_skip_restore, memory_order_relaxed),
         (k + sf) ? (100.0 * (double)k / (double)(k + sf)) : 0.0,
         (unsigned long)atomic_load_explicit(&g_rej_unsup, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_rej_setup, memory_order_relaxed),
         (unsigned long)init_tx_hits, (unsigned long)init_tx_evicts,
         (unsigned long)atomic_load_explicit(&g_cfr_submits, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_cfr_re, memory_order_relaxed));
+  if (ul_harq_combine_on())
+    LOG_I(PHY, "SENSING: UL_HARQ stored=%lu retx_try=%lu retx_ok=%lu rv_refused=%lu[none=%lu empty=%lu ndi=%lu] tbs_mismatch=%lu busy=%lu rx_ant=%d\n",
+          (unsigned long)atomic_load(&g_hq_stored), (unsigned long)atomic_load(&g_hq_retx_try),
+          (unsigned long)atomic_load(&g_hq_retx_ok), (unsigned long)atomic_load(&g_hq_rv_refused),
+          (unsigned long)atomic_load(&g_hq_why_none), (unsigned long)atomic_load(&g_hq_why_empty),
+          (unsigned long)atomic_load(&g_hq_why_ndi), (unsigned long)atomic_load(&g_hq_why_tbs),
+          (unsigned long)atomic_load(&g_hq_busy), g_gnb_nant);
+  if (atomic_load_explicit(&g_fep_req[0], memory_order_relaxed) + atomic_load_explicit(&g_fep_req[1], memory_order_relaxed) > 0) {
+    /* FFTs requested of the UL FEP (per antenna-symbol): grant symbols / timing-search candidates / delay re-run */
+    LOG_I(PHY, "SENSING: UL_FEP_REQ grant=%lu search=%lu refine=%lu\n", (unsigned long)atomic_load(&g_fep_req[0]),
+          (unsigned long)atomic_load(&g_fep_req[1]), (unsigned long)atomic_load(&g_fep_req[2]));
+  }
+  if (g_ulg) {
+    uint64_t o[10];
+    g_ulg->stats(o);
+    LOG_I(PHY, "SENSING: UL_GPU_FEP on=%d calls=%lu items=%lu gpu_ms=%lu mean_us=%.0f max_us=%lu busy=%lu over_cap=%lu rt_defer=%lu "
+               "late=%lu err=%lu part=%lu | cpu_bounds=%lu cpu_rej=%lu check=%lu bad=%lu\n",
+          (int)atomic_load(&g_ulg_on), (unsigned long)o[0], (unsigned long)o[1], (unsigned long)(o[2] / 1000),
+          o[0] ? (double)o[2] / (double)o[0] : 0.0, (unsigned long)o[3], (unsigned long)o[4], (unsigned long)o[5],
+          (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[8], (unsigned long)o[9],
+          (unsigned long)atomic_load(&g_ulg_cpu_bounds), (unsigned long)atomic_load(&g_ulg_cpu_rej),
+          (unsigned long)atomic_load(&g_ulg_chk), (unsigned long)atomic_load(&g_ulg_bad));
+  }
+  if (nr_pusch_gpu_ldpc_enabled()) {
+    char rep[640];
+    nr_pusch_gpu_ldpc_report(rep, sizeof(rep));
+    LOG_I(PHY, "SENSING: UL_GPU_LDPC %s\n", rep);
+  }
   if (utim_enabled() && g_utim_n[UTIM_TOTAL] > 0) {
     char rep[512];
     unsigned u = 0;
@@ -2520,7 +2950,7 @@ void nr_pusch_passive_stats_dump(void)
                               g_utim_n[k] ? (double)g_utim_ns[k] / (double)g_utim_n[k] / 1000.0 : 0.0,
                               (double)g_utim_max[k] / 1000.0, (double)g_utim_ns[k] / 1e9);
     }
-    LOG_I(PHY, "SENSING: UTIM %s\n", rep);
+    LOG_I(PHY, "SENSING: UTIM %s fep_gpu_call_tot=%.2fs\n", rep, (double)atomic_load(&g_ulg_wait_ns) / 1e9);
     LOG_I(PHY,
           "SENSING: UTIM grant_total_us_hist <50=%lu <100=%lu <200=%lu <400=%lu <800=%lu <1600=%lu "
           "<3200=%lu >=3200=%lu over_slot=%lu/%lu\n",

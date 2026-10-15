@@ -208,18 +208,14 @@ int nr_dmrs_scan_slot_pool(const int16_t *const *rx, int nant, int N, int fco, i
   return nh;
 }
 
-float nr_dmrs_scan_prb_score(const int16_t *const *rx, int nant, int N, int fco, int slot, int symbol, int symbols_per_slot,
-                             int nid, int nscid, const uint16_t *crb, int n_crb)
+void nr_dmrs_scan_prb_gold(int slot, int symbol, int symbols_per_slot, int nid, int nscid, int n, uint8_t *out)
 {
-  if (!rx || nant <= 0 || !crb || n_crb <= 0 || nid < 0 || nid > 65535)
-    return 0.f;
-  int mx = 0;
-  for (int q = 0; q < n_crb; q++) if (crb[q] > mx) mx = crb[q];
-  if (mx > 274) return 0.f;
-  const int nbits = 12 * (mx + 1);
-  uint8_t *c = malloc((size_t)nbits);
-  if (!c) return 0.f;
-  nr_dmrs_scan_gold_ref(c_init_of(symbols_per_slot, slot, symbol, nid, nscid & 1), 0, nbits, c);
+  nr_dmrs_scan_gold_ref(c_init_of(symbols_per_slot, slot, symbol, nid, nscid & 1), 0, n, out);
+}
+
+float nr_dmrs_scan_prb_score_gold(const int16_t *const *rx, int nant, int N, int fco, const uint8_t *c, const uint16_t *crb,
+                                  int n_crb)
+{
   double Sr = 0, Si = 0, den = 0;
   for (int q = 0; q < n_crb; q++)
     for (int i = 0; i < 4; i++) {
@@ -237,8 +233,24 @@ float nr_dmrs_scan_prb_score(const int16_t *const *rx, int nant, int N, int fco,
       Si += r * im + im_ * re;
       den += sqrt(r * r + im_ * im_);
     }
-  free(c);
   return den > 0 ? (float)(sqrt(Sr * Sr + Si * Si) / 2.0 / den) : 0.f;
+}
+
+float nr_dmrs_scan_prb_score(const int16_t *const *rx, int nant, int N, int fco, int slot, int symbol, int symbols_per_slot,
+                             int nid, int nscid, const uint16_t *crb, int n_crb)
+{
+  if (!rx || nant <= 0 || !crb || n_crb <= 0 || nid < 0 || nid > 65535)
+    return 0.f;
+  int mx = 0;
+  for (int q = 0; q < n_crb; q++) if (crb[q] > mx) mx = crb[q];
+  if (mx > 274) return 0.f;
+  const int nbits = 12 * (mx + 1);
+  uint8_t *c = malloc((size_t)nbits);
+  if (!c) return 0.f;
+  nr_dmrs_scan_prb_gold(slot, symbol, symbols_per_slot, nid, nscid, nbits, c);
+  const float v = nr_dmrs_scan_prb_score_gold(rx, nant, N, fco, c, crb, n_crb);
+  free(c);
+  return v;
 }
 
 /* ---- per-RNTI votes ---- */

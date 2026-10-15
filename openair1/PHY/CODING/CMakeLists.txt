@@ -122,6 +122,8 @@ if(ENABLE_LDPC_CUDA)
   add_dependencies(test_nr_pdsch_gpu_ldpc pdsch_gpu ldpc)
   add_dependencies(tests test_nr_pdsch_gpu_ldpc)
   add_test(NAME test_nr_pdsch_gpu_ldpc COMMAND ./test_nr_pdsch_gpu_ldpc 2 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  # ULLDPC: the same comparison through the UL pool of libpdsch_gpu.so
+  add_test(NAME test_nr_pusch_gpu_ldpc COMMAND ./test_nr_pdsch_gpu_ldpc 2 ul WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   # GPUSHARE: green-context SM partition helper (nr_gpu_green.h); exit 77 = skipped (no device / no green contexts)
   add_executable(test_nr_gpu_green ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_green_test.cu)
   set_target_properties(test_nr_gpu_green PROPERTIES CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -197,6 +199,7 @@ if(ENABLE_LDPC_CUDA)
   set_target_properties(nr_polar_sc_cuda_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   if(ENABLE_TESTS)
     add_test(NAME nr_polar_sc_cuda_test COMMAND nr_polar_sc_cuda_test quick)
+    add_dependencies(tests nr_polar_sc_cuda_test) # was 'Not Run': the target was not built by `ninja tests`
   endif()
   # ... wired into the live candidate scan through libpolar_gpu.so, dlopen'd when NR_GPU_POLAR=1
   # (nr_polar_gpu.h). A MODULE, like pdsch_gpu/pdcch_gpu above, so nr-uesoftmodem itself keeps no

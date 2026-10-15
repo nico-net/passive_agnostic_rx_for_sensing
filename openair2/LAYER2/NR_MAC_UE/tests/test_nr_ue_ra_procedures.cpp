@@ -53,6 +53,7 @@ void nr_td_sib1_store_set(const void *, int) {}
 void nr_pdcch_sib1_prior_set(const nr_pdcch_sib1_prior_t *) {}
 void nr_passive_acq_note_sib1_tdd(const nr_tdd_pattern_t *, const nr_tdd_pattern_t *) {}
 void nr_passive_acq_note_sib1_tdd_ref_mu(int) {}
+void nr_cell_state_note_mib_barred(bool) {} // ISAC_CELL_STATE hook in nr_ue_decode_mib
 softmodem_params_t *get_softmodem_params(void)
 {
   return &softmodem_params;

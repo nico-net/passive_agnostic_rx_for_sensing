@@ -53,6 +53,7 @@ typedef struct {
 typedef struct {
   uint8_t bwp_ind, riv, tda, fh; /* widths after the 1-bit identifier (no carrier / UL-SUL indicator) */
   uint16_t n_max;                /* largest candidate N_BWP with this RIV width */
+  float ent;                     /* bits of entropy of the TDRA + FH region this split leaves (ISAC_UL_PREFIX_ENT ranking) */
 } nr_ul_layout_prefix_t;
 
 typedef struct {
@@ -103,6 +104,15 @@ bool nr_ul_layout_coherent_enabled(void);
  * which N(N+1)/2 > maxriv (the largest RIV observed), N descending, start ascending. count = size; at(idx) = the idx-th. */
 uint32_t nr_ul_layout_enum_count(int carrier_rb, int w, uint32_t maxriv);
 bool nr_ul_layout_enum_at(int carrier_rb, int w, uint32_t maxriv, uint32_t idx, uint16_t *n, uint16_t *start);
+/* ISAC_UL_LOCK_LLR=1 (default off, needs the lock): log-odds lock rule. votes/prior(0|1)/nrnti per BWP hypothesis; true and *lead = the
+ * leader when it beats every other hypothesis by the margin (see nr_pdcch_ul_layout_lock.c). The prior (solved DL BWP, SIB1 UL BWP) shifts
+ * the margin by one vote and lowers the leader's own minimum from 6 to 4 votes; it can never lock without votes. Also makes the probe booking
+ * skip grants that do not discriminate the current contenders. */
+/* ISAC_UL_LOCK_SIGN: only[a * stride + b] = probes where a detected and b did not; det[] = detections per hypothesis. */
+bool nr_ul_layout_sign_decide(const uint16_t *only, int stride, const uint32_t *det, const uint8_t *prior, const uint8_t *nrnti, int n, int *lead);
+bool nr_ul_layout_llr_decide(const uint32_t *votes, const uint8_t *prior, const uint8_t *nrnti, int n, int *lead);
+/* lock enabled, cell known and no BWP locked yet: the layout search phase (used for ISAC_PUSCH_SEARCH_PRIO) */
+bool nr_ul_layout_searching(void);
 void nr_ul_layout_lock_reset(void);
 /* Any accepted PDCCH (DL or UL format) in this slot: the slot has DL symbols, so no full-slot PUSCH lands there. */
 void nr_ul_layout_note_pdcch_slot(long abs_slot);
@@ -112,6 +122,10 @@ void nr_ul_layout_note_pdcch_slot(long abs_slot);
  *   0: banked only. */
 int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_t payload,
                         const nr_ul_layout_cell_t *cell, nr_pdcch_blind_ul_result_t *out);
+/* ISAC_UL_FIT_READ=1 (default off, needs the lock): read a grant of a FITTED but not yet locked length with the fitted layout
+ * (BWP-independent fields exact, RIV provisional). false = no fit / not enabled / not a plausible grant. */
+bool nr_ul_layout_fit_read_enabled(void);
+bool nr_ul_layout_read_fitted(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, nr_pdcch_blind_ul_result_t *out);
 static inline bool nr_ul_layout_is_probe(const nr_pdcch_blind_ul_result_t *g)
 {
   return g && (g->hyp_generation & NR_UL_LAYOUT_TAG) && (g->hyp_generation & NR_UL_LAYOUT_PROBE);

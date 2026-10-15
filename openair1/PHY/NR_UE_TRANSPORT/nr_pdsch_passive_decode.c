@@ -134,6 +134,15 @@ static int harq_combine_on(void)
   if (en < 0) en = getenv("ISAC_PDSCH_HARQ_COMBINE") && atoi(getenv("ISAC_PDSCH_HARQ_COMBINE")) ? 1 : 0;
   return en;
 }
+/* si_combine_on: ISAC_SI_SOFTCOMBINE (cached, default 0): SIB1/SI soft combining across repetitions (PCIS2 2026-10-13). Unlike ISAC_PDSCH_HARQ_COMBINE it
+ *   needs no layout bootstrap and no NDI/RV evidence: every SI-RNTI grant of a cell with the same TBS is LDPC-decoded INTO the soft buffer of the previous
+ *   undecoded one (SIB1 is the same transport block in every repetition, rv cycles 0,2,3,1), max NR_SI_COMB_MAX grants, keyed by the cell (Nid_cell). */
+static int si_combine_on(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_SI_SOFTCOMBINE") && atoi(getenv("ISAC_SI_SOFTCOMBINE")) ? 1 : 0;
+  return en;
+}
 static uint64_t g_pdtim_cpu_ns[PDTIM_N] = {0}; /* T26c: thread CPU time per stage -- wall >> cpu means preempted/blocked */
 static __thread uint64_t t_pdtim_cpu0;
 static int g_pdtim_pct = -1; /* ISAC_PDTIM_PCT */
@@ -185,6 +194,16 @@ static _Atomic uint32_t g_cls_hist[PDTIM_NCLS][PDTIM_HB];
 static _Atomic uint64_t g_cls_ns[PDTIM_NCLS], g_cls_max[PDTIM_NCLS], g_cls_gt5[PDTIM_NCLS], g_cls_gt20[PDTIM_NCLS];
 static _Atomic uint64_t g_cls_ns1[PDTIM_NCLS], g_cls_ns5[PDTIM_NCLS], g_cls_ns20[PDTIM_NCLS]; /* DECTAIL: time spent in bodies > 1 / 5 / 20 ms */
 static __thread unsigned t_pdtim_body; /* bodies of the current nr_pdsch_passive_decode() call (passive_decode_body) */
+static int retry_budget_us(void);            /* FATTAILS, below */
+static uint64_t dec_now_ns(void);
+static __thread uint64_t t_dec_body_ns, t_dec_stage_ns, t_dec_t0_ns; /* FATTAILS DECSLOW: this call's body wall and fep+chest+demod+ldpc wall */
+/* FATTAILS DECSLOW: the last nr_pdsch_passive_decode() call's bodies, their wall time and their stage time (ns) */
+void nr_pdsch_passive_decode_slow_stats(unsigned *bodies, uint64_t *body_ns, uint64_t *stage_ns)
+{
+  *bodies = t_pdtim_body;
+  *body_ns = t_dec_body_ns;
+  *stage_ns = t_dec_stage_ns;
+}
 static __thread uint32_t t_pdtim_stage_us[PDTIM_N], t_pdtim_stage_cpu_us[PDTIM_N]; /* this body's stage wall / thread-CPU times (PDTIMSLOW) */
 static _Atomic int g_pdtim_slow_left = 200;
 /* DECODETIME: per class x stage, the stage wall time (us) held by bodies of duration band <1 / 1-5 / 5-20 / >20 ms (PDTIMCLSST) */
@@ -391,6 +410,7 @@ static void pdtim_report(void)
       g_pdtim_cls = getenv("ISAC_PDTIM_CLASS") && atoi(getenv("ISAC_PDTIM_CLASS")) ? 1 : 0;
     if (g_pdtim_cls)
       pdtim_cls_note(t_pdtim_sum);
+    t_dec_stage_ns += t_pdtim_sum;
     t_pdtim_sum = t_pdtim_sum_n = 0;
   }
   if ((g_pdtim_calls % 200) != 0) {
@@ -1464,19 +1484,20 @@ static bool passive_harq_prepare(passive_harq_t *h, int n_rb_dl)
 typedef struct {
   _Atomic int busy;
   bool used, soft_valid;
-  uint16_t rnti;
-  uint8_t pid, ndi;
+  uint16_t rnti, cell; /* cell: Nid_cell for SI soft combining (ISAC_SI_SOFTCOMBINE), 0 for every other process */
+  uint8_t pid, ndi, ncomb;
   uint32_t tbs;
   uint64_t last;
   int16_t *d;
   size_t cap;
 } harqc_entry_t;
+#define NR_SI_COMB_MAX 8 /* one 160 ms SIB1 window: 8 repetitions at 20 ms */
 static harqc_entry_t g_harqc[NR_HARQC_N];
 /* g_harqc_lock and g_dl_harq_init (the reserved-MCS retransmission record that shares this lock)
  * are declared much earlier in this file, alongside g_hq_first and friends -- see the comment
  * there for why. */
 static uint64_t g_harqc_clock;
-static __thread struct { int armed; uint16_t rnti; uint8_t pid, ndi; } t_hq;
+static __thread struct { int armed; uint16_t rnti; uint8_t pid, ndi; uint16_t cell; bool si; } t_hq;
 static __thread int16_t *t_hq_d = NULL;
 /* BRANCHFO residuals measured on this thread's current grant, committed only on a TB CRC pass. */
 static __thread bool t_brfo_pending = false;
@@ -1703,13 +1724,13 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
 static __thread bool t_hq_clear = true;
 static __thread uint32_t t_hq_A = 0;
 
-static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid)
+static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid, uint16_t cell)
 {
   pthread_mutex_lock(&g_harqc_lock);
   harqc_entry_t *hit = NULL, *lru = NULL;
   for (int i = 0; i < NR_HARQC_N; i++) {
     harqc_entry_t *e = &g_harqc[i];
-    if (e->used && e->rnti == rnti && e->pid == pid) { hit = e; break; }
+    if (e->used && e->rnti == rnti && e->pid == pid && e->cell == cell) { hit = e; break; }
     if (atomic_load(&e->busy)) continue;
     if (lru == NULL || !e->used || (lru->used && e->last < lru->last)) lru = e;
   }
@@ -1720,7 +1741,7 @@ static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid)
     return NULL;
   }
   if (!hit) {
-    e->used = true; e->rnti = rnti; e->pid = pid; e->soft_valid = false; e->tbs = 0;
+    e->used = true; e->rnti = rnti; e->pid = pid; e->cell = cell; e->ncomb = 0; e->soft_valid = false; e->tbs = 0;
   }
   e->last = ++g_harqc_clock;
   pthread_mutex_unlock(&g_harqc_lock);
@@ -2011,7 +2032,7 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
   if (!t_hq.armed || t_probe_first_seg || t_quiet)
     return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
   t_hq.armed = 0; /* first call per TB only */
-  harqc_entry_t *e = harqc_acquire(t_hq.rnti, t_hq.pid);
+  harqc_entry_t *e = harqc_acquire(t_hq.rnti, t_hq.pid, t_hq.si ? t_hq.cell : 0);
   if (e == NULL) {
     atomic_fetch_add(&g_hq_busy_skip, 1);
     return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
@@ -2039,7 +2060,10 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
   if (same_ndi && cw->rv == 0 && e->tbs != 0 && e->tbs == cw->TBS)
     atomic_fetch_add(&s_rv0_retx_seen, 1);
   const bool rv0_admitted = atomic_load(&s_rv0_retx_seen) >= NR_HARQC_RV0_EVIDENCE;
-  const bool retx = same_ndi && (cw->rv != 0 || rv0_admitted);
+  /* SI soft combining: the SIB1 TB repeats unchanged, so any grant with the stored TBS combines (NDI of an SI DCI is reserved, rv 0 included), at most
+   * NR_SI_COMB_MAX in a row so a changed SIB1 cannot poison the buffer for longer than one repetition window. */
+  const bool retx = t_hq.si ? (e->soft_valid && e->tbs == cw->TBS && e->ncomb < NR_SI_COMB_MAX)
+                            : same_ndi && (cw->rv != 0 || rv0_admitted);
   uint32_t A = cw->TBS;
   if (retx && e->tbs != 0 && e->tbs != A) {
     A = e->tbs;
@@ -2062,6 +2086,16 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
   e->ndi = t_hq.ndi;
   e->tbs = A;
   e->soft_valid = !ok; /* keep the soft bits only while the TB is still undecoded */
+  if (t_hq.si) {
+    static _Atomic unsigned long n_si_first, n_si_first_ok, n_si_comb, n_si_comb_ok;
+    e->ncomb = retx ? (uint8_t)(e->ncomb + 1) : 0;
+    const unsigned long tot = atomic_fetch_add_explicit(retx ? &n_si_comb : &n_si_first, 1, memory_order_relaxed) + 1;
+    if (ok) atomic_fetch_add_explicit(retx ? &n_si_comb_ok : &n_si_first_ok, 1, memory_order_relaxed);
+    if (ok && retx)
+      LOG_I(PHY, "SENSING: SI_SOFTCOMBINE cell %u: TB CRC ok after %u combined repetitions (rv %u)\n", (unsigned)t_hq.cell, (unsigned)e->ncomb + 1u, (unsigned)cw->rv);
+    if ((tot % 64) == 0)
+      LOG_I(PHY, "SENSING: SI_SOFTCOMBINE stats first=%lu ok=%lu | combined=%lu ok=%lu\n", atomic_load(&n_si_first), atomic_load(&n_si_first_ok), atomic_load(&n_si_comb), atomic_load(&n_si_comb_ok));
+  }
   atomic_store(&e->busy, 0);
   return ok;
 }
@@ -3526,6 +3560,50 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
               dlsch_config->dlDmrsSymbPos, e[!own] > 0.0 ? 10.0 * log10(e[!own] / e[own]) : -99.0, sb, pb);
     }
   }
+  /* ISAC_PDSCH_RAW_DUMP=<path> (diagnostic, default off, TIMRANK34): append the FEP'd allocation span (all 14 symbols x nbRx,
+   * c16) of each full dedicated decode with Nl >= ISAC_PDSCH_RAW_DUMP_MINNL (default 3), once per rnti+slot, for offline
+   * DM-RS port / OCC / scrambling hypothesis tests. Record: "PRW1", int32 h[32], c16 [nbRx][14][nsc]. */
+  {
+    static _Atomic int s_rd = -1;
+    static FILE *s_rf;
+    static int s_rleft, s_rminnl;
+    static uint32_t s_rlast;
+    static pthread_mutex_t s_rmu = PTHREAD_MUTEX_INITIALIZER;
+    if (s_rd < 0) {
+      const char *p = getenv("ISAC_PDSCH_RAW_DUMP"), *mx = getenv("ISAC_PDSCH_RAW_DUMP_MAX"), *mn = getenv("ISAC_PDSCH_RAW_DUMP_MINNL");
+      s_rleft = mx ? atoi(mx) : 3000;
+      s_rminnl = mn ? atoi(mn) : 3;
+      s_rf = (p && *p) ? fopen(p, "wb") : NULL;
+      s_rd = s_rf ? 1 : 0;
+    }
+    if (s_rd && !t_quiet && !t_probe_first_seg && grant->rnti_class == 0 && cw->Nl >= s_rminnl) {
+      const uint32_t key = ((uint32_t)grant->rnti << 16) ^ ((uint32_t)proc->frame_rx << 5) ^ (uint32_t)proc->nr_slot_rx;
+      pthread_mutex_lock(&s_rmu);
+      if (s_rleft > 0 && key != s_rlast) {
+        s_rlast = key;
+        --s_rleft;
+        const int N = fp->ofdm_symbol_size, nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+        const int sc0 = fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB;
+        const int32_t h[32] = {grant->rnti, proc->frame_rx, proc->nr_slot_rx, cw->Nl, dlsch_config->dmrs_ports,
+                               dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType, dlsch_config->dlDmrsSymbPos,
+                               dlsch_config->start_symbol, dlsch_config->number_symbols, freq_alloc->first_rb, freq_alloc->num_rbs,
+                               dlsch_config->BWPStart, grant->mcs, grant->mcs_table, dlsch_config->nscid,
+                               dlsch_config->dlDmrsScramblingId, dlsch_config->dlDataScramblingId, grant->dci_len,
+                               (int32_t)(grant->dci_w[0] & 0xffffffffu), (int32_t)(grant->dci_w[0] >> 32),
+                               (int32_t)(grant->dci_w[1] & 0xffffffffu), (int32_t)(grant->dci_w[1] >> 32), N,
+                               fp->first_carrier_offset, fp->nb_antennas_rx, freq_alloc->prg, freq_alloc->n_prb_list, sc0, grant->rv,
+                               grant->harq_pid, grant->ndi};
+        fwrite("PRW1", 1, 4, s_rf);
+        fwrite(h, sizeof(h), 1, s_rf);
+        for (int a = 0; a < fp->nb_antennas_rx; a++)
+          for (int m = 0; m < 14; m++)
+            for (int k = 0; k < nsc; k++)
+              fwrite(&rxdataF[a][m * N + (sc0 + k) % N], sizeof(c16_t), 1, s_rf);
+        fflush(s_rf);
+      }
+      pthread_mutex_unlock(&s_rmu);
+    }
+  }
   static _Atomic int s_tinterp = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
   if (s_tinterp < 0) {
     const char *e = getenv("ISAC_CHEST_TINTERP");
@@ -4858,14 +4936,17 @@ gpu_llr_ready:;
         }
       }
     }
-    if ((nr_agnostic_v2() || harq_combine_on()) && atomic_load(&g_ldpc_ok) >= 100 && !t_quiet) { /* only once the layout has bootstrapped */
+    if (si_combine_on() && grant->rnti == 0xffff && !t_quiet) { /* SIB1/SI soft combining: no bootstrap (a cell that decodes nothing alone never reaches it) */
+      t_hq.armed = 1; t_hq.si = true;
+      t_hq.rnti = grant->rnti; t_hq.pid = grant->harq_pid; t_hq.ndi = grant->ndi; t_hq.cell = (uint16_t)ue->frame_parms.Nid_cell;
+    } else if ((nr_agnostic_v2() || harq_combine_on()) && atomic_load(&g_ldpc_ok) >= 100 && !t_quiet) { /* only once the layout has bootstrapped */
       t_hq.armed = 1;
       t_hq.rnti = grant->rnti;
       t_hq.pid = grant->harq_pid;
       t_hq.ndi = grant->ndi;
     }
     bool ldpc_ok = passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G);
-    t_hq.armed = 0;
+    t_hq.armed = 0; t_hq.si = false;
     /* A probe's outcome is code block 0's CRC, and every hypothesis sweep below (PT-RS density,
      * the PDSCH config feedback in the queue, the layout search) must see it: with ldpc_ok false
      * for every probe the PT-RS sweep could never latch "absent" and only 1 arm in 7 was right --
@@ -5372,6 +5453,9 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          nr_pdsch_passive_decode_result_t *out)
 {
   t_pdtim_body = 0; /* ISAC_PDTIM_CLASS: the next body is this call's first (real), later ones are retries */
+  t_dec_body_ns = t_dec_stage_ns = 0;
+  if (retry_budget_us())
+    t_dec_t0_ns = dec_now_ns();
   /* CSI-FULL hook (ISAC_CSIRS_FULL=1): this grant's own cell CSI-RS set for its PDSCH slot (nr_csirs_blind_rt.c) */
   if (!t_probe_first_seg && !t_quiet && grant->dci11 && grant->rnti_class == 0) /* ISAC_CSIRS_FULL_AB diagnostic */
     nr_csirs_full_ab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF);
@@ -5692,9 +5776,17 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                             nr_pdsch_passive_decode_result_t *out)
 {
+  struct timespec tb;
+  if (g_pdtim_on > 0)
+    clock_gettime(CLOCK_MONOTONIC, &tb);
+  const uint64_t tb0 = g_pdtim_on > 0 ? (uint64_t)tb.tv_sec * 1000000000ull + (uint64_t)tb.tv_nsec : 0;
   nr_pdsch_route_t rt = nr_pdsch_route_begin((int)freq_alloc->num_rbs, __builtin_popcount(dlsch_config->dmrs_ports), t_probe_first_seg);
   const nr_pdsch_passive_decode_status_t st = passive_decode_body_gated(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
   nr_pdsch_route_end(&rt);
+  if (tb0) {
+    clock_gettime(CLOCK_MONOTONIC, &tb);
+    t_dec_body_ns += (uint64_t)tb.tv_sec * 1000000000ull + (uint64_t)tb.tv_nsec - tb0;
+  }
   return st;
 }
 
@@ -5785,6 +5877,26 @@ static bool signal_geom_detect(const NR_DL_FRAME_PARMS *fp, const fapi_nr_dl_con
 int nr_pdsch_passive_queue_backlog_real(void) __attribute__((weak));
 static int ry_backlog(void) { return nr_pdsch_passive_queue_backlog_real ? nr_pdsch_passive_queue_backlog_real() : 0; }
 static _Atomic uint64_t g_ry_chains, g_ry_yields, g_ry_gated, g_ry_try[RY_ARMS], g_ry_ok[RY_ARMS], g_ry_seen[RY_ARMS];
+/* FATTAILS ISAC_PDSCH_RETRY_BUDGET_US=N (default 0 = off; umbrella ISAC_FATTAILS=1 -> 1000): with RETRY_YIELD, the arms after
+ * the S toggle are skipped once this decode call has run N us (counted as yields): a failed grant's long-shot arms no longer
+ * hold its consumer for several bodies. */
+static uint64_t dec_now_ns(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+static int retry_budget_us(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("ISAC_PDSCH_RETRY_BUDGET_US"), *u = getenv("ISAC_FATTAILS");
+    v = e ? atoi(e) : (u && atoi(u) ? 1000 : 0);
+    if (v < 0)
+      v = 0;
+  }
+  return v;
+}
 static int retry_yield_mode(void)
 {
   static int v = -1;
@@ -6002,7 +6114,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
         const int ry_k = (arm + 32 * cv) % RY_ARMS;
         if (ry == 2 && !ry_arm_worth(ry_k))
           continue;
-        if (ry && !(cv == 0 && arm == 2) && ry_backlog() > 0) {
+        if (ry && !(cv == 0 && arm == 2)
+            && (ry_backlog() > 0 || (retry_budget_us() && dec_now_ns() - t_dec_t0_ns > (uint64_t)retry_budget_us() * 1000ull))) {
           yielded = true; /* a full decode waits for a consumer: stop this grant's long-shot arms */
           atomic_fetch_add_explicit(&g_ry_yields, 1, memory_order_relaxed);
           break;

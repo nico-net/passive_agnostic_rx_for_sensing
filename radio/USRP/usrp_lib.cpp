@@ -1165,7 +1165,14 @@ static void usrp_ring_producer(usrp_state_t *s)
   std::chrono::steady_clock::time_point restart_issued;
   usrp_ring_recovery_state recovery((uint64_t)s->sample_rate, usrp_rx_recover_max(),
                                     usrp_rx_recover() ? usrp_rx_recover_window_max() : 0, usrp_rx_recover_window_s());
-  auto start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  /* ACQMISS (task B): ISAC_USRP_START_TIMEOUT_MS (default 5000 = unchanged). MEASURED 2026-10-09 gs2_38 (9.5 h idle) and 2026-10-13
+   * ab_K1_1_110419 (first start after a reboot): the timed START (pps + 1 s) produced no packet at all (RPC "timeout event" and
+   * "blocks timed out during flush" at device init), the consumer's first read gave up after 3 s (RFSTALL USRP_RX_START received=0)
+   * BEFORE this thread's 5 s silence limit turned into a fault, so the existing ISAC_RX_RECOVER STOP/drain/timed-START re-arm never
+   * ran. A value below 3000 (e.g. 2200 = 1 s start latency + 1.2 s margin) lets the producer fault first; the fault sets
+   * ring_restarting, which extends the consumer's deadline while the re-arm runs. Needs ISAC_RX_RECOVER=1. */
+  const int start_timeout_ms = usrp_env_int("ISAC_USRP_START_TIMEOUT_MS", 5000, 1200);
+  auto start_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(start_timeout_ms);
   while (!s->ring_stop.load(std::memory_order_relaxed) && !s->rx_stop_requested.load(std::memory_order_relaxed)) {
     const uint64_t w = recovery.write_index;
     const size_t pos = w % s->ring_cap;

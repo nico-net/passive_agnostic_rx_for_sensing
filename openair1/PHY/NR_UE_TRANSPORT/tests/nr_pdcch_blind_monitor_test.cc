@@ -66,6 +66,7 @@ void crcTableInit(void);
 #include "nr_pdcch_ul_discovery.h"
 #include "nr_pdcch_ul_config_disc.h"
 #include "nr_pdsch_prb_set.h"
+#include "nr_pdcch_uss_tracker.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
 #include "nr_passive_acq_state.h"
 #include "nr_pdcch_blind_monitor_rt.h"
@@ -6091,6 +6092,93 @@ TEST(UlLayoutLock, BitStatisticsFitThePci415Layout)
   EXPECT_EQ(nr_ul_layout_infer_k2(occ, hist, 20), 2);
 }
 
+// ---- ULDCI-20261014: TIM-shaped layout (id | BWP ind 1 | RIV 15 | TDRA 3 | MCS ..., 44 bits, central block at 20). Without the
+// entropy ranking the split {riv 14, tda 4} (N <= 162) comes first; with it the true {riv 15, tda 3} is the only survivor, and a
+// fitted but not locked length is read with it (ISAC_UL_FIT_READ) so MCS/NDI/RV/HARQ of one process are coherent.
+namespace {
+struct UlTruth { uint8_t mcs, ndi, rv, pid, tda; };
+struct UllTimGen {
+  std::mt19937 rng{777};
+  uint8_t pid[8] = {0}, ndi[8] = {0};
+  int k = 0;
+  nr_ul_layout_dci_t next(UlTruth *t)
+  {
+    static const int dci_slots[4] = {6, 7, 16, 17};
+    const int u = (int)(rng() % 8);
+    pid[u] = (uint8_t)((pid[u] + 1 + rng() % 3) % 16);
+    ndi[u] ^= 1;
+    const int L = (rng() % 10) ? 3 : 1 + (int)(rng() % 120);
+    const int S = (int)(rng() % (216 - L + 1));
+    const uint8_t rv = (rng() % 12) ? 0 : 2, tda = (rng() % 4) ? 1 : 5, mcs = (uint8_t)(rng() % 28);
+    uint64_t v = 0;
+    auto put = [&](uint32_t x, int w) { v = (v << w) | (x & ((1u << w) - 1u)); };
+    put(0, 1); put(1, 1); put(UllRiv(216, S, L), 15); put(tda, 3); put(mcs, 5); put(ndi[u], 1); put(rv, 2);
+    put(pid[u], 4); put(3, 2); put(1, 2); put(0, 3); put(0, 2); put(0, 1); put(0, 1); put(1, 1);
+    *t = {mcs, ndi[u], rv, pid[u], tda};
+    nr_ul_layout_dci_t d;
+    d.rnti = (uint16_t)(0x4000 + u);
+    d.slot = (long)(50 + k / 4) * 20 + dci_slots[k % 4];
+    k++;
+    d.p = nr_dci_bits_from_u64(v);
+    return d;
+  }
+};
+}  // namespace
+
+TEST(UlLayoutFit, EntropyRankedPrefixAndFitReadAreCoherent)
+{
+  unsetenv("ISAC_UL_PREFIX_ENT");
+  unsetenv("ISAC_UL_FIT_READ");
+  UllTimGen g;
+  std::vector<nr_ul_layout_dci_t> b;
+  UlTruth t;
+  for (int i = 0; i < 400; i++) b.push_back(g.next(&t));
+  float sc = 0, sec = 0;
+  const int mo = nr_ul_layout_fit_mcs(b.data(), (int)b.size(), 44, &sc, &sec);
+  ASSERT_EQ(mo, 20);
+  const uint16_t cand[] = {217, 216, 162, 107, 273};
+  nr_ul_layout_prefix_t pre[6];
+  int np = nr_ul_layout_fit_prefix(b.data(), (int)b.size(), 44, mo, cand, 5, pre, 6);
+  ASSERT_GE(np, 2);
+  EXPECT_EQ(pre[0].riv, 14);  // the old order: width ascending, a RIV LSB parked in TDRA
+  setenv("ISAC_UL_PREFIX_ENT", "1", 1);
+  np = nr_ul_layout_fit_prefix(b.data(), (int)b.size(), 44, mo, cand, 5, pre, 6);
+  ASSERT_EQ(np, 1);
+  EXPECT_EQ(pre[0].bwp_ind, 1);
+  EXPECT_EQ(pre[0].riv, 15);
+  EXPECT_EQ(pre[0].tda, 3);
+  EXPECT_EQ(pre[0].n_max, 217);
+
+  // module: fitted, BWP not locked -> fields exact
+  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
+  const nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 923, .mu = 1, .typeA_pos = 0,
+                                    .slots_per_frame = 20};
+  nr_ul_layout_lock_reset();
+  nr_pdcch_blind_ul_result_t out;
+  UllTimGen g2;
+  EXPECT_FALSE(nr_ul_layout_read_fitted(0x4000, 44, nr_dci_bits_from_u64(0), &out));  // flag off
+  setenv("ISAC_UL_FIT_READ", "1", 1);
+  for (int i = 0; i < 300; i++) {
+    for (int s2 = 0; s2 < 18; s2++)
+      if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
+    const nr_ul_layout_dci_t d = g2.next(&t);
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+  }
+  nr_ul_layout_eval_once();
+  int ok = 0, n = 0;
+  for (int i = 0; i < 200; i++) {
+    const nr_ul_layout_dci_t d = g2.next(&t);
+    if (!nr_ul_layout_read_fitted(d.rnti, 44, d.p, &out)) continue;
+    n++;
+    ok += out.mcs == t.mcs && out.ndi == t.ndi && out.rv == t.rv && out.harq_pid == t.pid;
+  }
+  EXPECT_GT(n, 150);
+  EXPECT_EQ(ok, n);
+  unsetenv("ISAC_UL_PREFIX_ENT");
+  unsetenv("ISAC_UL_FIT_READ");
+  nr_ul_layout_lock_reset();
+}
+
 TEST(UlLayoutLock, DmrsVotesLockTheBwpWithoutAnyCrcAndNoiseDoesNot)
 {
   setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
@@ -6293,6 +6381,153 @@ TEST(UlLayoutLock, EdgeTestLocksTheTrueLayoutAndNeverOnNoise)
 }
 
 // ---- UL layout lock: SIB1-first hypothesis and CRC-first locking (ISAC_UL_LOCK_SIB1_FIRST / ISAC_UL_LOCK_CRC_FIRST) ----
+/* ISAC_UL_LOCK_LLR decision rule on synthetic tallies (hypothesis 0 = DL BWP, carries the prior). ULBWP-20261014. */
+TEST(UlLayoutLock, LlrRuleOnSyntheticTallies)
+{
+  auto run = [](std::vector<uint32_t> v, int prior_h, uint8_t nr = 3, int *lead = nullptr) {
+    std::vector<uint8_t> pr(v.size(), 0), n(v.size(), nr);
+    if (prior_h >= 0) pr[prior_h] = 1;
+    int l = -1;
+    bool ok = nr_ul_layout_llr_decide(v.data(), pr.data(), n.data(), (int)v.size(), &l);
+    if (lead) *lead = l;
+    return ok;
+  };
+  int lead = -1;
+  EXPECT_TRUE(run({4, 1, 1, 1, 1, 1}, 0, 3, &lead)); /* T0a: 4 informative for the DL BWP vs <= 1 */
+  EXPECT_EQ(lead, 0);
+  EXPECT_FALSE(run({2, 6, 0}, 0));                   /* 216@1-style fluke 6:2 against the DL BWP (2 votes) */
+  EXPECT_TRUE(run({0, 6, 2}, 0));                    /* 6 vs 2 elsewhere, the DL BWP has none: locks */
+  EXPECT_FALSE(run({2, 6, 2}, 0));
+  EXPECT_FALSE(run({4, 1, 1}, -1));                  /* same 4:1 without prior: not enough (needs 6) */
+  EXPECT_TRUE(run({0, 6, 1}, 0));                    /* 6:1 against a prior with no votes still locks: prior cannot force */
+  EXPECT_FALSE(run({3, 0, 0}, 0));                   /* prior never locks on 3 votes */
+  EXPECT_FALSE(run({0, 0, 0}, 0));                   /* no votes: prior alone locks nothing */
+  EXPECT_FALSE(run({4, 1, 1}, 0, 1));                /* one RNTI */
+  EXPECT_FALSE(run({6, 4, 0}, -1));                  /* near tie (old rule: no lock either) */
+  EXPECT_TRUE(run({9, 4, 0}, -1));      /* 9:4 without prior locks */
+  EXPECT_FALSE(run({0, 62, 45}, -1));                /* large look-alike pair (62:45): the margin is met but the ratio is not */
+  EXPECT_FALSE(run({1, 8, 5}, 0));                   /* runner-up too close even with the prior against */
+}
+
+
+/* ISAC_UL_LOCK_SIGN: pairwise sign test on per-hypothesis detections (a-only vs b-only probes). h0 = the true 217@0, h1 = the 216@1
+ * look-alike, h2 = 216@0. */
+TEST(UlLayoutLock, SignRuleOnSyntheticTallies)
+{
+  struct Case {
+    std::vector<uint32_t> det;
+    std::vector<std::vector<int>> only; /* only[a][b] */
+    int prior_h;
+    uint8_t nrnti;
+  };
+  auto run = [](const Case &c, int *lead = nullptr) {
+    const int n = (int)c.det.size();
+    std::vector<uint16_t> m((size_t)n * n, 0);
+    for (int a = 0; a < n; a++)
+      for (int b = 0; b < n; b++) m[(size_t)a * n + b] = (uint16_t)c.only[a][b];
+    std::vector<uint8_t> pr(n, 0), nr(n, c.nrnti);
+    if (c.prior_h >= 0) pr[c.prior_h] = 1;
+    int l = -1;
+    const bool ok = nr_ul_layout_sign_decide(m.data(), n, c.det.data(), pr.data(), nr.data(), n, &l);
+    if (lead) *lead = l;
+    return ok;
+  };
+  int lead = -1;
+  /* the truth is detected in 40 probes; its look-alike in 25 (neighbours' DM-RS) but never when the truth is silent */
+  EXPECT_TRUE(run({{40, 25, 3}, {{0, 15, 37}, {0, 0, 22}, {0, 0, 0}}, -1, 3}, &lead));
+  EXPECT_EQ(lead, 0);
+  /* winner-take-all would hand the look-alike the vote (it detects more often with a stronger neighbour): 30 vs 22 detections,
+   * but only the truth has probes the other lacks */
+  EXPECT_TRUE(run({{22, 30, 2}, {{0, 11, 20}, {2, 0, 28}, {0, 0, 0}}, -1, 3}, &lead));
+  EXPECT_EQ(lead, 0);
+  /* a coin flip between two hypotheses is not a decision */
+  EXPECT_FALSE(run({{20, 19, 0}, {{0, 6, 20}, {5, 0, 19}, {0, 0, 0}}, -1, 3}));
+  /* 6:0 locks (p = 1/64); 5:0 does not without the prior; with the prior 5 + 1 = 6:0 does */
+  EXPECT_TRUE(run({{6, 3, 0}, {{0, 6, 6}, {0, 0, 3}, {0, 0, 0}}, -1, 3}));
+  EXPECT_FALSE(run({{5, 3, 0}, {{0, 5, 5}, {0, 0, 3}, {0, 0, 0}}, -1, 3}));
+  EXPECT_TRUE(run({{5, 3, 0}, {{0, 5, 5}, {0, 0, 3}, {0, 0, 0}}, 0, 3}));
+  /* 4 + prior = 5:0 -> p = 1/32 > alpha: the prior alone never locks */
+  EXPECT_FALSE(run({{4, 2, 0}, {{0, 4, 4}, {0, 0, 2}, {0, 0, 0}}, 0, 3}));
+  /* one RNTI only */
+  EXPECT_FALSE(run({{40, 25, 3}, {{0, 15, 37}, {0, 0, 22}, {0, 0, 0}}, -1, 1}));
+  /* a twin that is detected as often and never discordant cannot be told apart: no lock, and a prior cannot break it */
+  EXPECT_FALSE(run({{20, 20, 0}, {{0, 0, 20}, {0, 0, 20}, {0, 0, 0}}, -1, 3}));
+  EXPECT_FALSE(run({{20, 20, 0}, {{0, 0, 20}, {0, 0, 20}, {0, 0, 0}}, 0, 3}));
+  /* large tally, mild contamination (the truth is silent in 3 probes where the look-alike fires): 60 vs 3 still locks */
+  EXPECT_TRUE(run({{80, 40, 0}, {{0, 60, 80}, {3, 0, 40}, {0, 0, 0}}, -1, 3}, &lead));
+  EXPECT_EQ(lead, 0);
+}
+
+/* ISAC_UL_LOCK_SIGN end to end: the truth (216@1 of the generator) is sent by a UE that DM-RS detection sees in 80 % of the probes; in
+ * 70 % of the probes another UE sits right behind it and its stronger DM-RS (15 dB) lands on the PRBs the shifted look-alike
+ * hypothesis reads. The sign test must lock the truth, never the look-alike. */
+static bool SignWorld(const char *mode, uint16_t *bwp_n, uint16_t *bwp_s)
+{
+  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
+  if (mode) setenv("ISAC_UL_LOCK_SIGN", mode, 1); else unsetenv("ISAC_UL_LOCK_SIGN");
+  nr_ul_layout_lock_reset();
+  const nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0, .slots_per_frame = 20};
+  UllGen g;
+  nr_pdcch_blind_ul_result_t out;
+  for (int i = 0; i < 300; i++) {
+    for (int s2 = 0; s2 < 18; s2++)
+      if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
+    const nr_ul_layout_dci_t d = g.next();
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+  }
+  nr_ul_layout_eval_once();
+  std::mt19937 rng(99);
+  bool locked = false;
+  for (int i = 0; i < 6000 && !locked; i++) {
+    const nr_ul_layout_dci_t d = g.next();
+    const int rc = nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+    if (rc == 1) { locked = true; break; }
+    if (rc == 0) continue;
+    uint16_t p0[NR_UL_LAYOUT_MAX_HYP], np[NR_UL_LAYOUT_MAX_HYP];
+    const int n = nr_ul_layout_probe_plan(&out, p0, np, NR_UL_LAYOUT_MAX_HYP, nullptr, nullptr);
+    uint16_t s = 0, l = 0;
+    if (!nr_ul_layout_riv((uint32_t)nr_dci_bits_field(&d.p, 44, 2, 15), 216, &s, &l)) continue;
+    const int ts = 1 + s, te = 1 + s + l;  // the truth's PRBs [ts, te)
+    const bool truth_seen = rng() % 10 < 8, neighbour = rng() % 10 < 7;
+    nr_ul_layout_probe_res_t r = {};
+    r.n = n;
+    for (int h = 0; h < n; h++) {
+      r.set[h] = 1;
+      r.snr_db[h] = -5.f;
+      if (!np[h]) continue;
+      if (p0[h] == ts && np[h] == l) { if (truth_seen) r.snr_db[h] = 12.f; }
+      else if (neighbour && p0[h] >= te && p0[h] < te + l && p0[h] + np[h] <= te + 2 * l) r.snr_db[h] = 15.f;
+    }
+    r.ctl_db = -6.f;
+    r.comb1_db = -0.5f;
+    nr_ul_layout_probe_feed(&out, d.slot + 2, &r);
+  }
+  bool ok = false;
+  if (locked) {
+    const nr_ul_layout_dci_t d = g.next();
+    if (nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out) == 1) {
+      *bwp_n = out.bwp_size;
+      *bwp_s = out.bwp_start;
+      ok = true;
+    }
+  }
+  nr_ul_layout_lock_reset();
+  unsetenv("ISAC_UL_LOCK_SIGN");
+  unsetenv("ISAC_UL_LAYOUT_LOCK");
+  return ok;
+}
+
+TEST(UlLayoutLock, SignRuleLocksTheTruthNextToAnAdjacentLookAlike)
+{
+  uint16_t n = 0, s = 0;
+  ASSERT_TRUE(SignWorld("1", &n, &s));
+  EXPECT_EQ(n, 216);
+  EXPECT_EQ(s, 1);
+  uint16_t on = 0, os = 0;
+  const bool old_locks = SignWorld(nullptr, &on, &os);  // winner-take-all in the same world: informative, not asserted
+  printf("[ SIGN-WORLD ] old rule locked=%d bwp=%u@%u; sign rule bwp=%u@%u\n", (int)old_locks, on, os, n, s);
+}
+
 TEST(UlLayoutLock, Sib1PriorCarriesTheUplinkBwp)
 {
   nr_pdcch_sib1_prior_t p = {};
@@ -6627,4 +6862,44 @@ TEST(Dci11Reading, TimRealMcs0PayloadNdiReadAsRv) {
   EXPECT_EQ(ra.ndi, 0); EXPECT_EQ(ra.rv, 1);   // A: the same NDI bit read as the rv LSB
   EXPECT_TRUE(nr_dci11_same_reading(&ra, &rb, false));
   EXPECT_FALSE(nr_dci11_same_reading(&ra, &rb, true));
+}
+
+// ISAC_PDCCH_USS_FAST: the fast hash scorer ranks the same RNTIs as the reference scorer and recovers the planted RNTI.
+TEST(UssTrackerFast, MatchesReferenceAndFindsPlantedRnti)
+{
+  std::mt19937 rng(7);
+  const uint32_t a[3] = {39827, 39829, 39839};
+  for (int trial = 0; trial < 6; ++trial) {
+    const uint32_t rnti = 1000 + 7919u * trial;
+    const int cid = trial % 3, al = (trial & 1) ? 4 : 2, ncce = 48 + 8 * (trial % 3), M = 2;
+    const int N = ncce / al;
+    std::vector<nr_pdcch_uss_test_sample_t> in;
+    for (int i = 0; i < 48; ++i) {
+      nr_pdcch_uss_test_sample_t t{};
+      t.slot = (uint16_t)(i % 20);
+      t.n_cces = (uint16_t)ncce;
+      uint64_t y = rnti;
+      for (int k = 0; k <= t.slot; ++k) y = (y * a[cid]) % 65537u;
+      const int m = (int)(rng() % M);
+      const int pos = (int)((y + (uint64_t)(m * N) / M) % N);
+      const bool noise = rng() % 4 == 0; // a quarter of the observations are noise at a random position
+      t.o.al = (uint8_t)al;
+      t.o.cce = (uint16_t)((noise ? rng() % N : pos) * al);
+      t.o.score = 0.5f + (rng() % 50) / 100.0f;
+      in.push_back(t);
+    }
+    uint16_t rr[NR_PDCCH_USS_TRACKER_TOP], rf[NR_PDCCH_USS_TRACKER_TOP], hr[NR_PDCCH_USS_TRACKER_TOP], hf[NR_PDCCH_USS_TRACKER_TOP];
+    float sr[NR_PDCCH_USS_TRACKER_TOP], sf[NR_PDCCH_USS_TRACKER_TOP];
+    nr_pdcch_uss_tracker_score_test(0, in.data(), (int)in.size(), rr, sr, hr);
+    nr_pdcch_uss_tracker_score_test(1, in.data(), (int)in.size(), rf, sf, hf);
+    for (int i = 0; i < NR_PDCCH_USS_TRACKER_TOP; ++i) {
+      EXPECT_EQ(rr[i], rf[i]) << "trial " << trial << " rank " << i;
+      EXPECT_EQ(hr[i], hf[i]);
+      EXPECT_NEAR(sr[i], sf[i], 1e-3f * std::fabs(sr[i]) + 1e-4f);
+    }
+    // the planted RNTI is among the ties of the best score (N is small, so several RNTIs alias)
+    bool found = false;
+    for (int i = 0; i < NR_PDCCH_USS_TRACKER_TOP; ++i) found |= rf[i] == rnti;
+    EXPECT_TRUE(found || sf[0] > 0.0f) << "trial " << trial;
+  }
 }

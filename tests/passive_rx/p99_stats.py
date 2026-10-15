@@ -2,6 +2,7 @@
 """P99: tail decomposition of the PDSCH decode per run.log (replay or OTA), one block per run.
 Needs ISAC_PDTIM_PCT=1 ISAC_PDTIM_CLASS=1 for the class split; ISAC_METRICS=1 for the queue histograms.
 usage: p99_stats.py [--json] run.log [run.log ...]
+Also: whole-decode time per MCS bucket / layer count / CRC (EVMGRANT dec_us), DECSLOW count, GPU_CHECK_ASYNC counters.
 Reports: body counts per class (real / retry / probe) and the stage time each class holds, bodies per real grant,
 real p50/p99, per-stage p99, queue wait histogram (enqueue->dequeue) and stale %, drop reasons, retry recoveries per arm,
 retry yields (ISAC_PDSCH_RETRY_YIELD), scan-pool service, and CRC-OK per MCS bucket (EVMGRANT probe=0, all SNR / SNR>=10)."""
@@ -108,6 +109,23 @@ def stats(path):
             c[0] += int(x.group(1))
             c[1] += 1
     o['crc'] = {k: '%d/%d' % tuple(v) for k, v in sorted(crc.items())}
+    # FATTAILS: whole decode call (EVMGRANT dec_us: every body of the grant incl. recovery retries), full grants (probe=0)
+    dec = {}
+    for l in L:
+        if 'EVMGRANT' not in l or ' probe=0' not in l:
+            continue
+        x = re.search(r' crc=(\d) mcs=(\d+) .*?Nl=(\d) .*? dec_us=(\d+)', l)
+        if x:
+            for key in ('mcs' + bucket(int(x.group(2))), 'Nl' + x.group(3), 'crc' + x.group(1), 'all'):
+                dec.setdefault(key, []).append(int(x.group(4)))
+    def q(v, p):
+        return v[min(len(v) - 1, int(p * len(v)))]
+    o['dec_us'] = {k: dict(n=len(v), p50=q(sorted(v), .5), p99=q(sorted(v), .99), max=max(v), gt500=round(100.0 * sum(t > 500 for t in v) / len(v), 1))
+                   for k, v in sorted(dec.items())}
+    o['decslow'] = sum(1 for l in L if 'SENSING: DECSLOW' in l)
+    m = last(L, r'GPU_CHECK_ASYNC done=(\d+) queued=(\d+) dropped=(\d+) worker mean=(\d+) us max=(\d+) us')
+    if m:
+        o['check_async'] = dict(zip(('done', 'queued', 'dropped', 'mean_us', 'max_us'), map(int, m.groups())))
     for k in ('GPU_EXACT_CHEST', 'GPU_EXACT_DEMOD', 'GPU_EXACT_FEP'):
         m = last(L, k + r' calls=\d+ check_ok=\d+ check_bad=(\d+)')
         if m:

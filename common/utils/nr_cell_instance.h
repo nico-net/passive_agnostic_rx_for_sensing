@@ -47,7 +47,8 @@ static inline void nr_cell_path(const char *def, char *out, size_t n)
     snprintf(out, n, "%s/%s", def, tag);
 }
 
-/* mkdir -p for a directory (mode 0777 & umask), tolerant of existing dirs. */
+/* mkdir -p for a directory, tolerant of existing dirs. A directory this call creates is made sticky 01777 (csd/otatest
+ * 652a99a265: a root-run receiver must not leave /tmp/passive_rx 0755 for the user-run tests and receivers). */
 static inline void nr_cell_mkdirs(const char *dir)
 {
   char buf[512];
@@ -55,9 +56,11 @@ static inline void nr_cell_mkdirs(const char *dir)
   for (char *p = buf + 1; *p; p++)
     if (*p == '/') {
       *p = 0;
-      mkdir(buf, 0777);
+      if (mkdir(buf, 0777) == 0)
+        chmod(buf, 01777);
       *p = '/';
     }
-  mkdir(buf, 0777);
+  if (mkdir(buf, 0777) == 0)
+    chmod(buf, 01777);
 }
 #endif

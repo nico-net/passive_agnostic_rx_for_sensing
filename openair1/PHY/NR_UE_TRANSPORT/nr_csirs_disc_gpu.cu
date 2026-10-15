@@ -32,7 +32,17 @@ static cudaError_t disc_wait() {
   return rc==cudaSuccess?cudaEventSynchronize(discovery_stream.done):rc;
 }
 /* disc_copy: asynchronous memcpy on the discovery stream followed by disc_wait(); returns the CUDA status of the copy. */
+/* FATTAILS ISAC_GPU_COPY_FENCE=1 (umbrella ISAC_FATTAILS=1): wait for this stream's queued kernels BEFORE enqueuing a copy. A copy
+ * queued behind a long kernel (refine_kernel in the sweep module: one thread, up to 400 ms) holds the copy engine at its stream wait, and every
+ * other stream's copy (the PDSCH demod/EVM D2H copies) queued behind it [MEASURED, DGX replay b + nsys: PDSCH copies released
+ * at the instant refine_kernel ended, 300-400 ms late]. */
+static int copy_fence() {
+  static int v=-1;
+  if(v<0){const char *e=getenv("ISAC_GPU_COPY_FENCE");if(!e)e=getenv("ISAC_FATTAILS");v=e && atoi(e)==1;}
+  return v;
+}
 static cudaError_t disc_copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
+  if(copy_fence()) {cudaError_t f=disc_wait();if(f!=cudaSuccess) return f;}
   cudaError_t rc=cudaMemcpyAsync(dst,src,n,kind,disc_stream());
   return rc==cudaSuccess?disc_wait():rc;
 }

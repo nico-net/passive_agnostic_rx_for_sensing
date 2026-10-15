@@ -38,6 +38,33 @@ static bool eq(const nr_hyp_t *a,const nr_hyp_t *b,const void *s,void*) {
   return value(a)%*static_cast<const int*>(s)==value(b)%*static_cast<const int*>(s);
 }
 static bool possible(const nr_hyp_t *h,const void *s,void*) { return value(h)!=*static_cast<const int*>(s); }
+/* SCANCOST: keyed init == pairwise init for eq(a,b,s) := key(a,s), key(b,s) comparable and equal (incl. incomparables) */
+static int kkey(const nr_hyp_t *h,const void *s,void*,uint8_t *out) {
+  const int m=*static_cast<const int*>(s), v=value(h);
+  if (v%11==m%11) return -1;                      /* some hypotheses cannot be read on some samples */
+  const int r=v%m; memcpy(out,&r,sizeof(r)); return (int)sizeof(r);
+}
+static bool keq(const nr_hyp_t *a,const nr_hyp_t *b,const void *s,void *c) {
+  uint8_t ka[NR_HYP_KEY_MAX], kb[NR_HYP_KEY_MAX];
+  const int na=kkey(a,s,c,ka), nb=kkey(b,s,c,kb);
+  return na>=0 && nb>=0 && na==nb && !memcmp(ka,kb,(size_t)na);
+}
+TEST(HypSweep, KeyedInitMatchesPairwise) {
+  static nr_hyp_sweep_state_t a, b;
+  std::vector<nr_hyp_t> raw;
+  for (int i=0;i<700;++i) raw.push_back(hyp((i*7919)%1013));
+  int m[]={5,7,12,30,64}; const void *samples[]={&m[0],&m[1],&m[2],&m[3],&m[4]};
+  for (int ns=1; ns<=5; ++ns) {
+    const int na=nr_hyp_sweep_init(&a,raw.data(),(int)raw.size(),even,nullptr,keq,samples,ns,nullptr);
+    const int nb=nr_hyp_sweep_init_keyed(&b,raw.data(),(int)raw.size(),even,nullptr,kkey,samples,ns,nullptr);
+    ASSERT_EQ(na,nb);
+    for (int c=0;c<na;++c) {
+      EXPECT_EQ(value(&a.classes[c].hyp),value(&b.classes[c].hyp));
+      EXPECT_EQ(a.classes[c].members,b.classes[c].members);
+    }
+    EXPECT_EQ(0,memcmp(a.class_of_raw,b.class_of_raw,sizeof(a.class_of_raw)));
+  }
+}
 TEST(HypSweep, ConstraintsAndEverySample) {
   nr_hyp_t raw[]={hyp(0),hyp(2),hyp(4),hyp(1)};
   nr_hyp_sweep_state_t st;

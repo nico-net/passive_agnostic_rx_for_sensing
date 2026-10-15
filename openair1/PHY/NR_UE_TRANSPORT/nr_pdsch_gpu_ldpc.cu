@@ -16,6 +16,7 @@
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
 #include "nr_pdsch_gpu_prio.cuh"
+#include "nr_pusch_gpu_diag.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -495,6 +496,27 @@ static int acquire()
     std::this_thread::yield();
   }
 }
+
+/* GPUSHARE: build every (BG, Z, R) graph now and load both kernels (CUDA lazy loading). Shared by the DL pool init and the
+ * UL pool init (ISAC_UL_GPU_LDPC), which may run without the DL one. */
+static bool warm_common()
+{
+  static std::mutex m;
+  static bool done = false;
+  std::lock_guard<std::mutex> lk(m);
+  if (done)
+    return true;
+  for (int BG = 1; BG <= 2; BG++)
+    for (int R : {13, 15, 23, 89})
+      for (int a : {2, 3, 5, 7, 9, 11, 13, 15})
+        for (int Z = a; Z <= ZMAX; Z *= 2)
+          graph(BG, Z, R); /* nullptr for the (BG, R) pairs that do not exist: nothing cached */
+  cudaFuncAttributes fa;
+  if (cudaFuncGetAttributes(&fa, k_ldpc) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4) != cudaSuccess)
+    return false;
+  done = true;
+  return true;
+}
 } // namespace nrldpc
 
 using namespace nrldpc;
@@ -524,15 +546,7 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
         return;
     }
     g_prio = nr_pdsch_gpu_prio_on();
-    /* GPUSHARE: build every (BG, Z, R) graph now. Built lazily, each first use ran cudaMalloc + a synchronous
-     * cudaMemcpy on a decode thread: up to 69 ms each behind a busy GPU (~110 of them in a 12 s replay). */
-    for (int BG = 1; BG <= 2; BG++)
-      for (int R : {13, 15, 23, 89})
-        for (int a : {2, 3, 5, 7, 9, 11, 13, 15})
-          for (int Z = a; Z <= ZMAX; Z *= 2)
-            graph(BG, Z, R); /* nullptr for the (BG, R) pairs that do not exist: nothing cached */
-    cudaFuncAttributes fa; /* and load both kernels now, not at the first TB (CUDA lazy loading) */
-    if (cudaFuncGetAttributes(&fa, k_ldpc) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4) != cudaSuccess)
+    if (!warm_common())
       return;
     g_ok = 1;
   });
@@ -608,4 +622,287 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   }
   g_busy.fetch_and(~(1u << c));
   return rc;
+}
+
+/* ---------------------------------------------------------------------------------------------------------------------
+ * ULLDPC: ISAC_UL_GPU_LDPC=1 (default off). The same bit-exact decoder kernel for the passive PUSCH decode, in a pool of its own
+ * so the DL LDPC contexts are never taken by, or waited on for, the UL:
+ *   - UL_CTX (2) contexts, each with pinned buffers allocated AND written at warm-up (a first touch of an unwritten host page
+ *     by the GPU is a page migration that stalled other launches 20-900 ms, FATTAILS), device pointers cached;
+ *   - a low-priority stream on the discovery SM partition when ISAC_GPU_DISC_SMS gives one (else the lowest priority, and a call
+ *     defers to the CPU while an RT GPU user is in flight); chosen by a start-up test decode with a deadline, because a cluster
+ *     launch needs CLB SMs in one GPC and a small partition may not have them;
+ *   - duty cap ISAC_UL_GPU_LDPC_PCT (default 15) of each 100 ms window, over it / contexts busy / error -> the caller runs the CPU
+ *     decoder (counted);
+ *   - a hard deadline ISAC_UL_GPU_LDPC_DEADLINE_US (default 4000): the kernel only writes the context's own pinned buffers, so a
+ *     late call is abandoned (the context stays reserved until its stream drains) and the CPU decodes the TB: a GPU stall costs
+ *     the UL at most the deadline, never the stall. */
+extern "C" int nr_gpu_budget_rt_active(void); /* RT GPU users in flight (the executable's nr_gpu_budget.c) */
+namespace nrldpc {
+constexpr int UL_CTX = 2;
+struct UlState {
+  bool ok = false, part = false;
+  int kind = 0;
+  Ctx c[UL_CTX];
+  cudaEvent_t e0[UL_CTX] = {}, e1[UL_CTX] = {};
+  DJob *ddj[UL_CTX] = {};
+  int8_t *din[UL_CTX] = {};
+  uint8_t *dsnap[UL_CTX] = {};
+  int *dres[UL_CTX] = {};
+  std::atomic<unsigned> busy{0}, lost{0};
+  unsigned pct = 15;
+  uint64_t deadline_us = 4000;
+  std::atomic<uint64_t> win_start_us{0}, win_used_us{0};
+  std::atomic<uint64_t> calls{0}, cbs{0}, gpu_us{0}, max_us{0}, n_busy{0}, n_cap{0}, n_rt{0}, n_late{0}, n_deadline{0}, n_err{0}, n_reclaimed{0};
+};
+static UlState UL;
+
+static uint64_t ul_now_us()
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000 + t.tv_nsec / 1000;
+}
+
+static bool ul_alloc_ctx(int i)
+{
+  Ctx &x = UL.c[i];
+  if (cudaHostAlloc(&x.dj, sizeof(DJob) * NJ, cudaHostAllocMapped) != cudaSuccess
+      || cudaHostAlloc(&x.in, (size_t)NJ * MAXC * ZMAX, cudaHostAllocMapped) != cudaSuccess
+      || cudaHostAlloc(&x.snap, (size_t)NJ * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX, cudaHostAllocMapped) != cudaSuccess
+      || cudaHostAlloc(&x.res, sizeof(int) * 2 * NJ, cudaHostAllocMapped) != cudaSuccess
+      || cudaMalloc(&x.llr, (size_t)NJ * MAXC * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.llrRes, (size_t)NJ * MAXC * ZMAX + 16) != cudaSuccess
+      || cudaMalloc(&x.c2v, (size_t)NJ * MAXE * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.unsat, sizeof(int) * NJ * NIT) != cudaSuccess)
+    return false;
+  /* write every pinned byte now: the kernel then only ever touches resident pages */
+  memset(x.dj, 0, sizeof(DJob) * NJ);
+  memset(x.in, 0, (size_t)NJ * MAXC * ZMAX);
+  memset(x.snap, 0, (size_t)NJ * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX);
+  memset(x.res, 0, sizeof(int) * 2 * NJ);
+  cudaMemset(x.llr, 0, (size_t)NJ * MAXC * ZMAX + 16);
+  cudaMemset(x.llrRes, 0, (size_t)NJ * MAXC * ZMAX + 16);
+  cudaMemset(x.c2v, 0, (size_t)NJ * MAXE * ZMAX + 16);
+  cudaMemset(x.unsat, 0, sizeof(int) * NJ * NIT);
+  if (cudaHostGetDevicePointer((void **)&UL.din[i], x.in, 0) != cudaSuccess || cudaHostGetDevicePointer((void **)&UL.ddj[i], x.dj, 0) != cudaSuccess
+      || cudaHostGetDevicePointer((void **)&UL.dsnap[i], x.snap, 0) != cudaSuccess || cudaHostGetDevicePointer((void **)&UL.dres[i], x.res, 0) != cudaSuccess)
+    return false;
+  if (uldiag::on() && (cudaEventCreate(&UL.e0[i]) != cudaSuccess || cudaEventCreate(&UL.e1[i]) != cudaSuccess))
+    return false;
+  return true;
+}
+
+/* Launch jobs[0..n) on context i and wait up to deadline_us. 0 = done (results copied into jobs); -1 launch / CUDA error;
+ * -2 deadline: nothing was copied back and the context stays reserved (UL.lost) until its stream drains. */
+static int ul_exec(int i, nr_gpu_ldpc_job_t *jobs, int n, const Graph *const *gr, uint64_t deadline_us, uint64_t *launch_us, double *gpu_us)
+{
+  Ctx &x = UL.c[i];
+  const bool dg = uldiag::on();
+  const uint64_t t0 = ul_now_us();
+  for (int k = 0; k < n; k++) {
+    const int kc = jobs[k].BG == 1 ? 68 : 52;
+    memcpy(x.in + (size_t)k * MAXC * ZMAX, jobs[k].llr, (size_t)kc * jobs[k].Z);
+    x.dj[k] = DJob{gr[k], UL.din[i] + (size_t)k * MAXC * ZMAX, jobs[k].K, jobs[k].it_max};
+    x.res[2 * k] = x.res[2 * k + 1] = -1;
+  }
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3(n * CLB);
+  cfg.blockDim = dim3(THREADS);
+  cfg.stream = x.s;
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeClusterDimension;
+  at[0].val.clusterDim.x = CLB;
+  at[0].val.clusterDim.y = 1;
+  at[0].val.clusterDim.z = 1;
+  cfg.attrs = at;
+  cfg.numAttrs = 1;
+  bool z4 = true;
+  for (int k = 0; k < n; k++)
+    z4 = z4 && !(jobs[k].Z & 3);
+  if (dg)
+    cudaEventRecord(UL.e0[i], x.s);
+  cudaError_t e = cudaLaunchKernelEx(&cfg, z4 ? k_ldpc4 : k_ldpc, (const DJob *)UL.ddj[i], x.llr, x.llrRes, x.c2v, x.unsat, UL.dsnap[i], UL.dres[i]);
+  if (dg)
+    cudaEventRecord(UL.e1[i], x.s);
+  *launch_us = ul_now_us() - t0;
+  uint64_t spin0 = ul_now_us();
+  while (e == cudaSuccess && (e = cudaStreamQuery(x.s)) == cudaErrorNotReady) {
+    e = cudaSuccess;
+    const uint64_t now = ul_now_us();
+    if (now - t0 > deadline_us)
+      return -2;
+    if (now - spin0 > 60) { /* no busy spin: 25 us naps after 60 us */
+      const struct timespec ts = {0, 25000};
+      nanosleep(&ts, NULL);
+    }
+  }
+  if (e != cudaSuccess)
+    return -1;
+  if (dg) {
+    float ms = 0.f;
+    *gpu_us = cudaEventElapsedTime(&ms, UL.e0[i], UL.e1[i]) == cudaSuccess ? 1000.0 * ms : 0.0;
+  }
+  for (int k = 0; k < n; k++) {
+    nr_gpu_ldpc_job_t &j = jobs[k];
+    j.nsnap = x.res[2 * k];
+    j.syn0 = x.res[2 * k + 1];
+    if (j.nsnap < 0 || j.nsnap > NR_GPU_LDPC_MAX_SNAP)
+      return -1;
+    for (int s = 0; s < j.nsnap; s++)
+      memcpy(j.snap[s], x.snap + ((size_t)k * NR_GPU_LDPC_MAX_SNAP + s) * NR_GPU_LDPC_KB_MAX, j.K >> 3);
+  }
+  return 0;
+}
+
+/* start-up test decode of a clean all-zero BG2 codeword: proves the stream can run a cluster launch */
+static bool ul_selftest(int i)
+{
+  static int8_t in[52 * 64 + 16];
+  memset(in, 0, sizeof(in));
+  for (int q = 2 * 64; q < 52 * 64; q++)
+    in[q] = 24;
+  static nr_gpu_ldpc_job_t job;
+  job = nr_gpu_ldpc_job_t{};
+  job.BG = 2;
+  job.R = 15;
+  job.Z = 64;
+  job.K = 10 * 64;
+  job.it_max = 8;
+  job.llr = in;
+  const Graph *gr = graph(2, 64, 15);
+  uint64_t l = 0;
+  double g = 0;
+  return gr && ul_exec(i, &job, 1, &gr, 1000000, &l, &g) == 0 && job.nsnap > 0;
+}
+
+static int ul_acquire()
+{
+  for (int i = 0; i < UL_CTX; i++) {
+    const unsigned bit = 1u << i;
+    if (UL.busy.load() & bit) {
+      if (!(UL.lost.load() & bit) || cudaStreamQuery(UL.c[i].s) == cudaErrorNotReady)
+        continue;
+      cudaGetLastError(); /* an abandoned call that failed: the next use re-validates */
+      UL.lost.fetch_and(~bit);
+      UL.busy.fetch_and(~bit);
+      ++UL.n_reclaimed;
+    }
+    if (!(UL.busy.fetch_or(bit) & bit))
+      return i;
+  }
+  return -1;
+}
+} // namespace nrldpc
+
+extern "C" int nr_pusch_gpu_ldpc_init(int pct, int deadline_us)
+{
+  static std::mutex m;
+  std::lock_guard<std::mutex> lk(m);
+  if (UL.ok)
+    return 0;
+  int dev = 0, cl = 0;
+  if (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&cl, cudaDevAttrClusterLaunch, dev) != cudaSuccess || !cl)
+    return -1;
+  UL.pct = pct > 0 && pct <= 100 ? (unsigned)pct : 15u;
+  UL.deadline_us = deadline_us > 0 ? (uint64_t)deadline_us : 4000u;
+  if (!warm_common())
+    return -1;
+  int lo = 0, hi = 0;
+  cudaDeviceGetStreamPriorityRange(&lo, &hi);
+  for (int attempt = 0; attempt < 2 && !UL.ok; attempt++) { /* 0: discovery partition, 1: plain lowest-priority stream */
+    bool good = true;
+    for (int i = 0; i < UL_CTX && good; i++) {
+      Ctx &x = UL.c[i];
+      good = ul_alloc_ctx(i);
+      if (!good)
+        break;
+      if (attempt == 0) {
+        UL.kind = nr_pusch_gpu_ul_stream(&x.s, hi, lo, i);
+        UL.part = UL.kind != 0;
+        if (!UL.part) {
+          good = false; /* no partition configured: go straight to attempt 1 */
+          break;
+        }
+      } else {
+        UL.part = false;
+        good = cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, lo) == cudaSuccess;
+      }
+      x.sh = x.sl = x.s;
+      good = good && ul_selftest(i);
+      UL.busy.store(0);
+    }
+    if (good)
+      UL.ok = true;
+  }
+  if (UL.ok)
+    fprintf(stderr, "SENSING: UL_GPU_LDPC ready: %d contexts, %s stream, cap %u%% of each 100 ms, deadline %lu us\n", UL_CTX,
+            UL.kind == 2 ? "real-time-partition" : UL.part ? "discovery-partition" : "lowest-priority", UL.pct, (unsigned long)UL.deadline_us);
+  return UL.ok ? 0 : -1;
+}
+
+/* 0 = decoded (jobs filled); -1 contexts busy; -2 over the duty cap / RT in flight; -3 off / bad job / CUDA error; -4 deadline.
+ * On non-zero nothing in jobs is valid and the caller runs the CPU decoder. */
+extern "C" int nr_pusch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
+{
+  if (!UL.ok || n < 1 || n > NJ)
+    return -3;
+  const Graph *gr[NJ];
+  for (int k = 0; k < n; k++) {
+    const nr_gpu_ldpc_job_t &j = jobs[k];
+    if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || (j.K & 7) || (j.K >> 3) > NR_GPU_LDPC_KB_MAX || !(gr[k] = graph(j.BG, j.Z, j.R)))
+      return -3;
+  }
+  const uint64_t t0 = ul_now_us();
+  uint64_t w0 = UL.win_start_us.load();
+  if (t0 - w0 >= 100000 && UL.win_start_us.compare_exchange_strong(w0, t0))
+    UL.win_used_us.store(0);
+  if (UL.win_used_us.load() >= (uint64_t)UL.pct * 1000) {
+    ++UL.n_cap;
+    return -2;
+  }
+  if (!UL.part && nr_gpu_budget_rt_active() > 0) {
+    ++UL.n_rt;
+    return -2;
+  }
+  const int c = ul_acquire();
+  if (c < 0) {
+    ++UL.n_busy;
+    return -1;
+  }
+  const uldiag::Snap r0 = uldiag::on() ? uldiag::snap() : uldiag::Snap();
+  uint64_t launch_us = 0;
+  double gpu_us = 0;
+  const int rc = ul_exec(c, jobs, n, gr, UL.deadline_us, &launch_us, &gpu_us);
+  const uint64_t dt = ul_now_us() - t0;
+  if (rc == -2) { /* abandoned: keep the context reserved until the stream drains */
+    UL.lost.fetch_or(1u << c);
+    ++UL.n_deadline;
+    UL.win_used_us += dt;
+    if (uldiag::on())
+      uldiag::report("ldpc-deadline", dt, launch_us, gpu_us, n, r0, uldiag::snap());
+    return -4;
+  }
+  UL.busy.fetch_and(~(1u << c));
+  if (rc != 0) {
+    ++UL.n_err;
+    cudaGetLastError();
+    return -3;
+  }
+  ++UL.calls;
+  UL.cbs += (uint64_t)n;
+  UL.gpu_us += dt;
+  UL.win_used_us += dt;
+  if (dt > 2000)
+    ++UL.n_late;
+  uint64_t m = UL.max_us.load();
+  while (dt > m && !UL.max_us.compare_exchange_weak(m, dt)) {}
+  if (uldiag::on())
+    uldiag::report("ldpc", dt, launch_us, gpu_us, n, r0, uldiag::snap());
+  return 0;
+}
+
+/* calls, cbs, gpu_us, max_us, busy, over_cap, rt_defer, late(>2 ms), deadline, errors, reclaimed, partitioned */
+extern "C" void nr_pusch_gpu_ldpc_stats(uint64_t *o)
+{
+  o[0] = UL.calls; o[1] = UL.cbs; o[2] = UL.gpu_us; o[3] = UL.max_us; o[4] = UL.n_busy; o[5] = UL.n_cap; o[6] = UL.n_rt;
+  o[7] = UL.n_late; o[8] = UL.n_deadline; o[9] = UL.n_err; o[10] = UL.n_reclaimed; o[11] = UL.part;
 }

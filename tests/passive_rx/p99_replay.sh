@@ -9,7 +9,7 @@
 #    PDSCH 40, PUSCH 30), as on air. Real-time pacing (SPEED=1) by raw_iq.
 # Not emulated: DPDK/USRP producer load, the agents_freeze of the OTA window (other agents may run), live traffic beyond
 # the 12 s capture (the replay ends at EOF), radio impairments.
-# usage: [CAPSET=b|tim] [ENVFILE=...] [CFG=...] [B=build dir] [TMO=s] p99_replay.sh <name> [ENV=VAL ...]
+# usage: [WRAP="nsys profile ..."] [CAPSET=b|tim] [ENVFILE=...] [CFG=...] [B=build dir] [TMO=s] p99_replay.sh <name> [ENV=VAL ...]
 # Stats: tests/passive_rx/p99_stats.py <dir>/run.log. Takes heavy.lock (heavy.sh, HEAVY_CPUS=0-16); exits 99 without running
 # when another receiver is up. Stops with SIGINT (timeout --signal=INT).
 set -euo pipefail
@@ -35,12 +35,13 @@ R=$ROOT/replays/replay_${name}_$(date +%H%M%S); mkdir -p "$R"; echo "$R" > "$ROO
 cd "$R"
 echo "CAPSET=${CAPSET:-b} CAP=$CAP ENVFILE=${ENVFILE:-$O/ota/t26bKn.env} CFG=${CFG:-$O/ota/sd_t26ul.cfg} extra: $*" > args.txt
 # inside heavy.lock: refuse (exit 99, file rx_busy) if any other receiver runs, so timing is never taken next to one
-HEAVY_CPUS=${HEAVY_CPUS:-0-16} exec "$O/heavy.sh" bash -c 'pgrep -x nr-uesoftmodem >/dev/null && { echo busy > "$0/rx_busy"; exit 99; }
+HEAVY_CPUS=${HEAVY_CPUS:-0-16} exec "$O/heavy.sh" bash -c 'for p in $(pgrep -x nr-uesoftmodem); do sudo -n readlink /proc/$p/exe | grep -q "^/home/nicola/" && { echo busy > "$0/rx_busy"; exit 99; }; done
   exec "$@"' "$R" sudo -n timeout --signal=INT -k 120 ${TMO:-90} env \
   ISAC_MLOCK=0 ISAC_RAW_IQ_DIRECTORY="$CAP" ISAC_RAW_IQ_SAMPLES="$CAP_SAMPLES" ISAC_RAW_IQ_FIRST_TICK="$CAP_TICK" \
   ISAC_RAW_IQ_CHANNELS=4 ISAC_RAW_IQ_RATE=122880000 ISAC_RAW_IQ_CENTER="$CAPC" ISAC_RAW_IQ_SPEED=1 ISAC_RAW_IQ_SHIFT=2 \
   LD_LIBRARY_PATH="$B:/usr/local/lib" ISAC_CSIRS_DISC=1 ISAC_CSIRS_DISC_CORE=11 ISAC_CSIRS_DISC_DETECT_CORES=12,13,14 \
+  CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps \
   ISAC_RX_MRC_MODE=1 ISAC_SCAN_ANT=1 ISAC_UE_RT_CORE=5 ISAC_PDCCH_USS_CORE=7 "${base[@]}" ISAC_MLOCK=0 "$@" \
-  "$B/nr-uesoftmodem" -O "$R/replay.cfg" --passive-rx -r 217 --numerology 1 --band 78 \
+  ${WRAP:-} "$B/nr-uesoftmodem" -O "$R/replay.cfg" --passive-rx -r 217 --numerology 1 --band 78 \
   -C "$RXC" --ssb "$SSB" --ue-rxgain 38 --ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --initial-fo "$FO" --ue-fo-compensation \
   --thread-pool 8,9,15 --time-sync-I 0.01 --ntn-initial-time-drift 0 -A 90 < /dev/null > "$R/run.log" 2>&1

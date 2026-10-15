@@ -60,6 +60,8 @@ int nr_pdcch_nid_gpu_start(int max_rb);
 void nr_pdcch_nid_gpu_stop(void);
 /* ISAC_PDCCH_NID_GPU_NODROP: snapshots (one slot's pushes) refused whole because the first symbol found neither the mutex nor a free staging batch within 500 us. 0 with the flag off. */
 uint64_t nr_pdcch_nid_gpu_dropped_snapshots(void);
+void nr_pdcch_nid_gpu_rearm(void);
+uint64_t nr_pdcch_nid_gpu_passes(void);
 /* Single producer; bounded try-lock, drops if staging is full. rx points to the
  * first requested FFT symbol, with fft complex samples between symbols. */
 int nr_pdcch_nid_gpu_push(const void *rx, int fft, int fco, int slot, int sym,

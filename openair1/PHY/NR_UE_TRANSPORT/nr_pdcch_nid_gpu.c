@@ -34,7 +34,7 @@ static struct {
  int snap_slot;
  _Atomic uint64_t slot_ticks, dropped_snapshots, dropped_partial;
  uint64_t clock_us[3]; /* duty clock stamped on each batch when it is queued */
- uint32_t epoch;
+ uint32_t epoch, rearm; /* rearm: ACQMISS recovery counter, folded into the batch cfg epoch so the device window and duty restart */
  uint64_t wake, last_outside_us;
  unsigned acquire_ms, maintain_ms, recheck_ms;
  bool stop;
@@ -349,7 +349,7 @@ int nr_pdcch_nid_gpu_push(const void *rx,int fft,int fco,int slot,int sym,const 
  if(g.producer<0) {g.dropped++;pthread_mutex_unlock(&g.mu);return -1;}
  }
  nr_pdcch_nid_batch_t *b=&g.batch[g.producer];
- nr_pdcch_nid_config_t current=*cfg;current.epoch=g.epoch;
+ nr_pdcch_nid_config_t current=*cfg;current.epoch=g.epoch+(g.rearm<<24);
  if(g.n && memcmp(&b->cfg,&current,sizeof(current)))g.n=0;
  b->cfg=current;
  const nr_pdcch_nid_iq_t *src=rx;
@@ -365,6 +365,20 @@ int nr_pdcch_nid_gpu_push(const void *rx,int fft,int fco,int slot,int sym,const 
   pthread_cond_signal(&g.cv);
  }
  pthread_mutex_unlock(&g.mu);return 0;
+}
+/* nr_pdcch_nid_gpu_rearm: ACQMISS recovery. Forgets the published records and the incremental window and restarts the ACQUIRE duty (GPU priority over CSI-RS discovery) by changing the batch cfg epoch. No-op when the sweep is not running. Caller: nr_dl_traffic_probe_rt.c (ISAC_CORESET_DISC_WATCH). */
+void nr_pdcch_nid_gpu_rearm(void)
+{
+ if(!nr_pdcch_nid_gpu_running())return;
+ pthread_mutex_lock(&g.mu);
+ g.rearm++;g.result.count=0;g.generation++;g.all_verified=false;
+ pthread_mutex_unlock(&g.mu);
+}
+/* nr_pdcch_nid_gpu_passes: completed sweep passes (0 when the lock is contended). Caller: ACQMISS state line. */
+uint64_t nr_pdcch_nid_gpu_passes(void)
+{
+ if(pthread_mutex_trylock(&g.mu))return 0;
+ uint64_t n=g.passes;pthread_mutex_unlock(&g.mu);return n;
 }
 int nr_pdcch_nid_gpu_records(nr_pdcch_nid_record_t *out,int capacity,uint64_t *generation)
 {

@@ -105,3 +105,82 @@ TEST(DlTrafficProbe, GrantRegistryReturnsOnlyTheSlotsGrants) {
   EXPECT_EQ(out[0].rb0, 10); EXPECT_EQ(out[1].rb0, 40);
   EXPECT_EQ(nr_dltp_grants_for(101, 3, out, 8), 0);
 }
+
+TEST(DlTrafficProbe, CoresetDiscStateMissedVsNoTrafficVsLocked) {
+  nr_cdisc_t c = {};
+  nr_cdisc_in_t in = {0.0, 0, 0, 500, 5000, 0, 10.0, 2}; /* 5000 RB-slots over 500 probed slots: 10/slot */
+  nr_cdisc_out_t o;
+  nr_cdisc_step(&c, &in, &o);                       /* no carrier: cannot sweep yet */
+  EXPECT_EQ(c.state, NR_CDISC_SEARCHING); EXPECT_STREQ(o.reason, "carrier_pending");
+  in.carrier_ok = 1; in.now_s = 5.0;                /* armed at 5 s */
+  nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_SEARCHING); EXPECT_EQ(o.recover, 0);
+  in.now_s = 14.9; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_SEARCHING);           /* still inside the grace */
+  in.now_s = 15.1; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_MISSED); EXPECT_EQ(o.recover, 1); EXPECT_EQ(o.changed, 1);
+  in.now_s = 20.0; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_MISSED); EXPECT_EQ(o.recover, 0);   /* back-off: next at +2 x miss_s */
+  in.now_s = 35.2; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(o.recover, 1);
+  in.now_s = 80.0; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(o.recover, 0);                          /* max_recover = 2 reached */
+  in.window_rbslots = 3; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_NO_TRAFFIC);          /* 3 RB-slots in 500 probed slots: nothing to miss */
+  in.window_probed = 50; in.window_rbslots = 100; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_MISSED);              /* bursty but 2 RB-slots/slot, >= 64 total */
+  in.window_probed = 5000; in.window_rbslots = 100; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_SEARCHING);           /* 0.02/slot: neither present nor absent */
+  in.window_rbslots = 5000; in.bank_count = 1; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_LOCKED); EXPECT_EQ(c.recoveries, 0);
+}
+
+TEST(DlTrafficProbe, PdschLikeInsideCoreset0IsNotCountedForTheWatch) {
+  nr_dltp_stats_t st = {};
+  Slot s(7, 100.f);
+  s.light(3, 8, 2, 4, 400.f);     /* SIB1-like PDSCH inside CORESET#0 RBs 2..5 (symbols 3..10) */
+  s.light(3, 8, 20, 4, 400.f);    /* UE-like PDSCH outside, RBs 20..23 */
+  const float floor = s.energy();
+  nr_dltp_geom_t g = kGeom;
+  g.css0_rb0 = 2; g.css0_rb1 = 6; g.css0_nsym = 2;
+  nr_dltp_slot(s.e.data(), &g, floor, true, nullptr, 0, &st);
+  EXPECT_EQ(st.pdsch_like_ungranted, 8u);
+  EXPECT_EQ(st.pdsch_like_ungranted_nocss0, 4u);
+}
+
+TEST(DlTrafficProbe, SyncQualityClassifierThresholdsAndHysteresis) {
+  unsigned healthy[32], wander[32], mid[32];
+  for (int i = 0; i < 32; ++i) { healthy[i] = i % 5 ? 1 : 2; wander[i] = 20 + (i * 7) % 41; mid[i] = 6; }
+  int med = 0, p90 = 0;
+  EXPECT_EQ(nr_syncq_classify(healthy, 10, 0, &med, &p90), -1);   /* too few steps */
+  EXPECT_EQ(nr_syncq_classify(healthy, 32, 0, &med, &p90), 0);
+  EXPECT_LE(med, 1);
+  EXPECT_EQ(nr_syncq_classify(wander, 32, 0, &med, &p90), 2);
+  EXPECT_GT(med, NR_SYNCQ_MED_POOR);
+  EXPECT_EQ(nr_syncq_classify(mid, 32, 0, &med, &p90), 0);        /* 6 <= 8: GOOD */
+  EXPECT_EQ(nr_syncq_classify(mid, 32, 1, &med, &p90), 0);        /* below the release level 10 */
+  unsigned deg[32], hyst[32];
+  for (int i = 0; i < 32; ++i) { deg[i] = 12; hyst[i] = 12; }
+  EXPECT_EQ(nr_syncq_classify(deg, 32, 0, &med, &p90), 1);        /* DEGRADED: logged, no action */
+  EXPECT_EQ(nr_syncq_classify(hyst, 32, 1, &med, &p90), 2);       /* stays POOR until median <= 10 */
+  EXPECT_EQ(nr_syncq_classify(healthy, 32, 1, &med, &p90), 0);
+}
+
+TEST(DlTrafficProbe, CoresetDiscSyncPoorIsNotAMissAndRearmsOnRecovery) {
+  nr_cdisc_t c = {};
+  nr_cdisc_in_t in = {};
+  in.carrier_ok = 1; in.window_probed = 500; in.window_rbslots = 5000; in.miss_s = 10; in.max_recover = 3;
+  nr_cdisc_out_t o;
+  in.now_s = 0; nr_cdisc_step(&c, &in, &o);                       /* armed at 0 */
+  in.sync_poor = 1; in.now_s = 5;  nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_SYNC_POOR); EXPECT_EQ(o.reacquire, 1); EXPECT_EQ(o.recover, 0);
+  in.now_s = 9;  nr_cdisc_step(&c, &in, &o);  EXPECT_EQ(o.reacquire, 0);
+  in.now_s = 40; nr_cdisc_step(&c, &in, &o);  /* 35 s poor, far beyond the miss grace */
+  EXPECT_EQ(c.state, NR_CDISC_SYNC_POOR); EXPECT_EQ(o.reacquire, 1); EXPECT_EQ(c.recoveries, 0);
+  in.sync_poor = 0; in.now_s = 41; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(o.rearm, 1);
+  EXPECT_EQ(c.state, NR_CDISC_SEARCHING);                         /* grace restarted: poor time (36 s) excluded */
+  in.now_s = 45; nr_cdisc_step(&c, &in, &o); EXPECT_EQ(c.state, NR_CDISC_SEARCHING);
+  in.now_s = 52; nr_cdisc_step(&c, &in, &o); EXPECT_EQ(c.state, NR_CDISC_MISSED);   /* 52-36 = 16 s since arming */
+  EXPECT_EQ(o.recover, 1);
+}

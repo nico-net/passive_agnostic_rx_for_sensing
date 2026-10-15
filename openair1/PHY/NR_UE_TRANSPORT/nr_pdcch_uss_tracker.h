@@ -46,6 +46,17 @@ int nr_pdcch_uss_tracker_peek(const nr_pdcch_uss_geometry_t *geometry,
                               uint16_t *rnti,
                               int max_rnti);
 
+typedef struct {
+  uint16_t slot;
+  uint16_t n_cces;
+  nr_pdcch_uss_observation_t o;
+} nr_pdcch_uss_test_sample_t;
+
+/* Test hook: reference (fast=0) vs ISAC_PDCCH_USS_FAST (fast=1) scorer, synchronous. */
+void nr_pdcch_uss_tracker_score_test(int fast, const nr_pdcch_uss_test_sample_t *in, int n,
+                                     uint16_t rnti[NR_PDCCH_USS_TRACKER_TOP], float score[NR_PDCCH_USS_TRACKER_TOP],
+                                     uint16_t hits[NR_PDCCH_USS_TRACKER_TOP]);
+
 /* Shutdown only, after all observation/shortlist clients have stopped. */
 void nr_pdcch_uss_tracker_stop(void);
 

@@ -250,7 +250,17 @@ static cudaError_t complete() {
   return rc==cudaSuccess?cudaEventSynchronize(workspace.done):rc;
 }
 /* copy: asynchronous memcpy on the workspace stream followed by complete(); returns the CUDA status. */
+/* FATTAILS ISAC_GPU_COPY_FENCE=1 (umbrella ISAC_FATTAILS=1): wait for this stream's queued kernels BEFORE enqueuing a copy. A copy
+ * queued behind a long kernel (refine_kernel: one thread, up to 400 ms) holds the copy engine at its stream wait, and every
+ * other stream's copy (the PDSCH demod/EVM D2H copies) queued behind it [MEASURED, DGX replay b + nsys: PDSCH copies released
+ * at the instant refine_kernel ended, 300-400 ms late]. */
+static int copy_fence() {
+  static int v=-1;
+  if(v<0){const char *e=getenv("ISAC_GPU_COPY_FENCE");if(!e)e=getenv("ISAC_FATTAILS");v=e && atoi(e)==1;}
+  return v;
+}
 static cudaError_t copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
+  if(copy_fence()) {cudaError_t f=complete();if(f!=cudaSuccess) return f;}
   cudaError_t rc=cudaMemcpyAsync(dst,src,n,kind,workspace.stream);
   return rc==cudaSuccess?complete():rc;
 }
@@ -330,7 +340,8 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
       nr_csirs_disc_sweep_winner(mean.data(), &c, h, slots.size(), out + h);
       continue;
     }
-    if(cudaMemcpyAsync(dm.p,map.re,map.n_re*sizeof(*map.re),cudaMemcpyHostToDevice,stream)!=cudaSuccess
+    if((copy_fence() && complete()!=cudaSuccess)
+       || cudaMemcpyAsync(dm.p,map.re,map.n_re*sizeof(*map.re),cudaMemcpyHostToDevice,stream)!=cudaSuccess
        || cudaMemcpyAsync(ds.p,slots.data(),slots.size()*sizeof(int),cudaMemcpyHostToDevice,stream)!=cudaSuccess
        || cudaMemcpyAsync(w.di.p,indices.data(),indices.size()*sizeof(int),cudaMemcpyHostToDevice,stream)!=cudaSuccess) return -1;
     size_t packed=(size_t)slots.size()*r->n_ant*map.n_re;
@@ -344,7 +355,7 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
     else average_scores<false><<<(nc + 255) / 256, 256, 0, stream>>>(dz.p, nc, slots.size(), dmean.p);
     if (cudaGetLastError() != cudaSuccess) return -1;
     reduce_scores<<<1, 256, 0, stream>>>(dmean.p, c, h, slots.size()+previous, dw.p);
-    if (cudaGetLastError() != cudaSuccess
+    if (cudaGetLastError() != cudaSuccess || (copy_fence() && complete() != cudaSuccess)
         || cudaMemcpyAsync(out + h, dw.p, sizeof(*out), cudaMemcpyDeviceToHost, stream) != cudaSuccess
         || complete() != cudaSuccess)
       return -1;
