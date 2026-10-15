@@ -3,6 +3,7 @@
 #include "nr_pdsch_gpu_fep.h"
 #include "../TOOLS/nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include "nr_pdsch_gpu_chest.h"
+#include "PHY/TOOLS/nr_gpu_mem.h"
 #include <cuda_runtime.h>
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include "nr_dl_gpu_memory.h"
@@ -132,6 +133,11 @@ static short2 *g_ctx_ls[EXACT_CTX];    /* GPU-DEMOD chest: LS rows [64][4096] */
 static int *g_ctx_cout[EXACT_CTX];     /* GPU-DEMOD chest: delay triples + nvar (staging) */
 static nr_gpu_chest_row_t *g_ctx_rows[EXACT_CTX]; /* GPU-DEMOD chest: the job's rows (staging) */
 static std::atomic<unsigned> g_ctx_busy{0};
+/* GPUPASS (launch-only _dev entry points): 4-slot IQ window ring for the DISCRETE model (pinned host + device, allocated before
+ * the RX fence) and the chest LS scratch of the single pass in flight. */
+static const int PASS_RING = 4;
+static short2 *g_pass_h[PASS_RING], *g_pass_d[PASS_RING], *g_pass_ls;
+static std::atomic<unsigned> g_pass_next{0};
 static std::mutex g_exact_staged_lock;
 /* ctx_acquire: claims a free bit-exact FEP context (bitmask compare-and-swap over EXACT_CTX).
  *   How it works: try_only returns -1 when all are busy; otherwise it spins with yield.
@@ -780,6 +786,12 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_ctx_rows[c], NR_GPU_CHEST_MAX_ROWS * sizeof(nr_gpu_chest_row_t)));
       }
       g_ctx_prio = nr_pdsch_gpu_prio_on();
+      const size_t ring = (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2);
+      for (int k = 0; k < PASS_RING; k++) {
+        CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_pass_h[k], ring));
+        CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_pass_d[k], ring));
+      }
+      CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_pass_ls, NR_GPU_CHEST_MAX_ROWS * 4096 * sizeof(short2)));
     }
     /* Direct mode: the kernel reads the receiver's host IQ ring and writes its rxdataF in place. Only on a
      * coherent shared-memory platform (GB10: pageable access through the host page tables). */
@@ -1171,6 +1183,52 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
   g_exact_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   return 0;
 }
+/* GPUPASS: launch-only exact FEP of one slot into rxF (nr_gpu_buf_t, [ant][14][N] c16, OAI rxdataF). Enqueues on `stream` only (no wait,
+ * no result copy), so it can be captured in a graph. rxF->model DIRECT: the kernel reads the host IQ ring in place (GB10); DISCRETE:
+ * the slot window goes through one H2D into the next of PASS_RING device ring slots and the kernel reads that. The IQ window and the
+ * rotation must stay valid until the stream passes this point (direct) / are copied now (discrete). 0 or -1. */
+extern "C" int nr_pdsch_gpu_fep_dev(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF, void *stream)
+{
+  if (g_init_state != 1 || !g_exact_ok || !j || !j->rxdata || !j->symbol_rot || !rxF || !rxF->dev) return -1;
+  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
+  const uint16_t sym_mask = j->sym_mask & (uint16_t)((1u << ns) - 1u);
+  if (!sym_mask || rxF->bytes < (size_t)nant * MAX_SYM * N * sizeof(short2)) return -1;
+  nr_exact::ExactIO io = {};
+  memcpy(io.rot, j->symbol_rot, (size_t)ns * sizeof(short2));
+  int nsym = 0;
+  for (int l = 0; l < ns; l++)
+    if (sym_mask >> l & 1) io.sym_list[nsym++] = (uint16_t)l;
+  const cudaStream_t s = (cudaStream_t)stream;
+  const int early = g_cfg.nb_prefix_samples / g_cfg.ofdm_offset_divisor;
+  const uint32_t origin = (j->ring_offset + j->ring_len - early) % j->ring_len;
+  if (rxF->model == NR_GPU_MODEL_DIRECT) {
+    if (!nr_gpu_platform_shared_direct()) return -1;
+    for (int a = 0; a < nant; a++) io.rx[a] = (const short2 *)j->rxdata[a];
+    io.ring_len = j->ring_len;
+    io.origin = origin;
+  } else {
+    const size_t len = (size_t)g_samples_per_slot + N; /* the last symbol + slack, as upload_window */
+    const int k = (int)(g_pass_next.fetch_add(1) % PASS_RING);
+    for (int a = 0; a < nant; a++) {
+      short2 *dst = g_pass_h[k] + (size_t)a * len;
+      const short2 *src = (const short2 *)j->rxdata[a];
+      const size_t first = std::min<size_t>(len, j->ring_len - origin);
+      memcpy(dst, src + origin, first * sizeof(short2));
+      if (first < len) memcpy(dst + first, src, (len - first) * sizeof(short2));
+      io.rx[a] = g_pass_d[k] + (size_t)a * len;
+    }
+    if (cudaMemcpyAsync(g_pass_d[k], g_pass_h[k], (size_t)nant * len * sizeof(short2), cudaMemcpyHostToDevice, s) != cudaSuccess)
+      return -1;
+    io.ring_len = 0xffffffffu;
+    io.origin = 0;
+  }
+  io.out = (short2 *)rxF->dev;
+  io.ant_stride = (size_t)MAX_SYM * N;
+  nr_exact::k_fep_exact<<<dim3(nsym, nant), nr_exact::THREADS, 0, s>>>(io, g_cfg.nb_prefix_samples, g_cfg.nb_prefix_samples0, g_d_perm,
+                                                                      g_d_tw1024, g_d_tw4096, g_d_ts, g_cfg.n_rb_dl,
+                                                                      g_cfg.first_carrier_offset);
+  return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
+}
 extern "C" int nr_pdsch_gpu_exact_fep(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, double fo_hz,
                                       const int16_t *symbol_rot, uint16_t sym_mask, int16_t *out, size_t ant_stride)
 {
@@ -1348,6 +1406,47 @@ extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
     return -1;
   }
   return 0;
+}
+
+/* GPUPASS: launch-only bit-exact chest of up to n rows of j (see nr_pdsch_gpu_chest.h for the nvar_dev layout and the device-pointer
+ * contract). Estimates go to row.out (or est_dev + r * 4096 c16 when out is NULL), delay triples and nvar into nvar_dev. One pass in
+ * flight (shared LS scratch). 0 or -1. */
+extern "C" int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, void *stream)
+{
+  if (g_init_state != 1 || !g_exact_ok || !j || !nvar_dev || !nvar_dev->dev || nvar_dev->bytes < NR_GPU_CHEST_DEV_BYTES || n < 1
+      || n > j->n_rows || n > NR_GPU_CHEST_MAX_ROWS || j->N != 4096)
+    return -1;
+  for (int r = 0; r < n; r++)
+    if (j->rows[r].nb_rb < 1 || 12 * j->rows[r].nb_rb > 4096 || (!j->rows[r].out && (!est_dev || est_dev->bytes < (size_t)(r + 1) * 4096 * sizeof(short2))))
+      return -1;
+  const cudaStream_t s = (cudaStream_t)stream;
+  nr_gpu_chest_row_t *hrows = (nr_gpu_chest_row_t *)((char *)nvar_dev->host + NR_GPU_CHEST_DEV_ROWS_OFF);
+  memcpy(hrows, j->rows, (size_t)n * sizeof(nr_gpu_chest_row_t));
+  for (int r = 0; r < n; r++)
+    if (!hrows[r].out) hrows[r].out = (int16_t *)((short2 *)est_dev->dev + (size_t)r * 4096);
+  if (nr_gpu_buf_h2d_async(nvar_dev, NR_GPU_CHEST_DEV_ROWS_OFF, (size_t)n * sizeof(nr_gpu_chest_row_t), stream)) return -1;
+  const nr_gpu_chest_row_t *rows = (const nr_gpu_chest_row_t *)((char *)nvar_dev->dev + NR_GPU_CHEST_DEV_ROWS_OFF);
+  int *dout = (int *)nvar_dev->dev;
+  nrch::Par par;
+  par.type = j->type;
+  par.N = j->N;
+  par.dt_stride = j->dt_stride;
+  par.max_delay_comp = j->max_delay_comp;
+  par.delay_table = j->delay_table;
+  memcpy(par.filt, j->filt, sizeof(par.filt));
+  {
+    static int trim = -1;
+    if (trim < 0) trim = getenv("ISAC_PDSCH_GPU_CHEST_TRIM") && atoi(getenv("ISAC_PDSCH_GPU_CHEST_TRIM")) == 1;
+    par.trim = trim;
+  }
+  nrch::k_ls<<<n, 256, 0, s>>>(par, rows, g_pass_ls);
+  {
+    nr_exact::DelayIO io = {};
+    io.base = g_pass_ls;
+    nr_exact::k_delay_exact<<<n, nr_exact::THREADS, 0, s>>>(io, g_d_perm, g_d_tw1024, g_d_tw4096, dout);
+  }
+  nrch::k_fir<<<n, 256, 0, s>>>(par, rows, g_pass_ls, dout, (unsigned *)(dout + 3 * NR_GPU_CHEST_MAX_ROWS));
+  return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
 }
 
 /* ULFEP: GPU front end of the passive PUSCH decoder (own file, own streams; see the header comment) */

@@ -61,7 +61,7 @@ struct Ctx {
   int8_t *llr, *llrRes, *c2v; /* device [NJ][MAXC*ZMAX], [NJ][MAXC*ZMAX], [NJ][MAXE*ZMAX] */
   int *unsat;          /* device [NJ][NIT] */
 };
-static Ctx g_ctx[CTX];
+static Ctx g_ctx[CTX + 1]; /* [CTX]: the GPUPASS context (nr_pdsch_gpu_ldpc_dev), never handed out by acquire() */
 static std::atomic<unsigned> g_busy{0};
 static int g_ok, g_prio;
 static std::mutex g_gm;
@@ -548,7 +548,7 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
       return;
     int lo = 0, hi = 0;
     cudaDeviceGetStreamPriorityRange(&lo, &hi);
-    for (int i = 0; i < CTX; i++) {
+    for (int i = 0; i < CTX + 1; i++) {
       Ctx &x = g_ctx[i];
       if ((!nr_gpu_green_stream(&x.s, hi, true, i) && cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess)
           || cudaHostAlloc(&x.dj, sizeof(DJob) * NJ, cudaHostAllocMapped) != cudaSuccess
@@ -639,6 +639,50 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   }
   g_busy.fetch_and(~(1u << c));
   return rc;
+}
+
+/* GPUPASS: launch-only decode of n <= NJ code blocks. Inputs already on the device (llr_dev, NR_GPU_LDPC_DEV_IN_STRIDE per job), outputs
+ * into bits_dev (NR_GPU_LDPC_DEV_* layout); enqueues on `stream` only. jobs[k].llr / snap are not touched. Clusters need sm_90: returns
+ * -2 below CC 9 (Task 2b adds the non-cluster kernel), -1 otherwise. One pass in flight (private context). 0 or an error code. */
+extern "C" int nr_pdsch_gpu_ldpc_dev(const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, nr_gpu_buf_t *bits_dev, void *stream)
+{
+  if (!g_ok || !jobs || n < 1 || n > NJ || !llr_dev || !llr_dev->dev || llr_dev->bytes < (size_t)n * NR_GPU_LDPC_DEV_IN_STRIDE
+      || !bits_dev || !bits_dev->dev || bits_dev->bytes < NR_GPU_LDPC_DEV_BITS_BYTES)
+    return -1;
+  int dev = 0, major = 0;
+  if (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) return -1;
+  if (major < 9) return -2;
+  const Graph *gr[NJ];
+  for (int k = 0; k < n; k++) {
+    const nr_gpu_ldpc_job_t &j = jobs[k];
+    if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || (j.K & 7) || (j.K >> 3) > NR_GPU_LDPC_KB_MAX
+        || !(gr[k] = graph(j.BG, j.Z, j.R)))
+      return -1;
+  }
+  Ctx &x = g_ctx[CTX];
+  const cudaStream_t s = (cudaStream_t)stream;
+  for (int k = 0; k < n; k++)
+    x.dj[k] = DJob{gr[k], (const int8_t *)llr_dev->dev + (size_t)k * NR_GPU_LDPC_DEV_IN_STRIDE, jobs[k].K, jobs[k].it_max};
+  DJob *ddj = nullptr;
+  cudaHostGetDevicePointer((void **)&ddj, x.dj, 0);
+  uint8_t *dsnap = (uint8_t *)bits_dev->dev;
+  int *dres = (int *)((char *)bits_dev->dev + NR_GPU_LDPC_DEV_RES_OFF);
+  if (cudaMemsetAsync(dres, 0xff, 2 * NJ * sizeof(int), s) != cudaSuccess) return -1; /* the host's -1 sentinels */
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3(n * CLB);
+  cfg.blockDim = dim3(THREADS);
+  cfg.stream = s;
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeClusterDimension;
+  at[0].val.clusterDim.x = CLB;
+  at[0].val.clusterDim.y = 1;
+  at[0].val.clusterDim.z = 1;
+  cfg.attrs = at;
+  cfg.numAttrs = 1;
+  bool z4 = true;
+  for (int k = 0; k < n; k++)
+    z4 = z4 && !(jobs[k].Z & 3);
+  return cudaLaunchKernelEx(&cfg, z4 ? k_ldpc4 : k_ldpc, (const DJob *)ddj, x.llr, x.llrRes, x.c2v, x.unsat, dsnap, dres) == cudaSuccess ? 0 : -1;
 }
 
 /* ---------------------------------------------------------------------------------------------------------------------

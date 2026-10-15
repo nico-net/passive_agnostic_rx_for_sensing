@@ -8,6 +8,7 @@
 #include "nr_pdsch_gpu_demod.h"
 #include "../TOOLS/nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include "nr_pdsch_gpu_demod.cuh"
+#include "PHY/TOOLS/nr_gpu_mem.h"
 #include "nr_mmse_exact.h" /* MMSE3GPU: mode 3, the CPU's own source */
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
@@ -51,7 +52,7 @@ struct Ctx {
   Shared *dsh; /* device copy the kernels use (host-pinned memory is uncached for the GPU) */
   cudaStream_t s_rt, s2_rt, s_lo, s2_lo; /* GPUSCHED ISAC_PDSCH_GPU_PRIO: real-time and low-priority stream pairs */
 };
-static Ctx g_ctx[CTX];
+static Ctx g_ctx[CTX + 1]; /* [CTX]: the GPUPASS context (nr_pdsch_gpu_demod_dev), never handed out by acquire() */
 /* The kernels' job parameter: the job up to evm[] (outputs only, never read by a kernel). The whole job exceeds the
  * 32 KB kernel parameter space; __grid_constant__ lets the kernels address it in place as a nr_gpu_demod_job_t. */
 struct JobK {
@@ -1356,7 +1357,7 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
   int lo = 0, hi = 0;
   if (cudaDeviceGetStreamPriorityRange(&lo, &hi) != cudaSuccess)
     return -1;
-  for (int c = 0; c < CTX; c++) {
+  for (int c = 0; c < CTX + 1; c++) {
     Ctx &x = g_ctx[c];
     if ((!nr_gpu_green_stream(&x.s, hi, true, c) && cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess)
         || cudaMalloc((void **)&x.y, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT) != cudaSuccess
@@ -1422,6 +1423,32 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
     return -1;
   g_ok = 1;
   return 0;
+}
+
+/* GPUFUSE: compensation + MMSE + kappa + LLRs, one launch (shared by nr_pdsch_gpu_demod_run and nr_pdsch_gpu_demod_dev) */
+static void launch_tail(const nr_gpu_demod_job_t &jj, Ctx &x, cudaStream_t s, int gx)
+{
+  const dim3 g(gx, NSYM);
+  if (jj.qam_mode == 3 && jj.nl >= 2) /* MMSE3GPU: per-symbol s2 and gain, then the per-RE solve */
+    k_mmse3_prep<<<NSYM, 256, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  if (jj.qam_mode == 3 && jj.nl == 2)
+    k_tail<6><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  else if (jj.qam_mode == 3 && jj.nl == 3)
+    k_tail<7><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  else if (jj.qam_mode == 3 && jj.nl == 4)
+    k_tail<8><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  else if (jj.nl == 2)
+    k_tail<1><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  else if (jj.nl == 3 && jj.qam_mode == 2)
+    k_tail<2><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  else if (jj.nl == 4 && jj.qam_mode == 2)
+    k_tail<3><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  else if (jj.nl == 3)
+    k_tail<4><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  else if (jj.nl == 4)
+    k_tail<5><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  else
+    k_tail<0><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
 }
 
 extern "C" void nr_pdsch_gpu_demod_release(int c)
@@ -1508,29 +1535,7 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
       cudaEventRecord(x.join, x.s2);
   }
   if (g_prof) cudaEventRecord(x.ev[5], x.s);
-  { /* GPUFUSE: compensation + MMSE + kappa + LLRs, one launch */
-    const dim3 g(gx, NSYM);
-    if (jj.qam_mode == 3 && jj.nl >= 2) /* MMSE3GPU: per-symbol s2 and gain, then the per-RE solve */
-      k_mmse3_prep<<<NSYM, 256, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
-    if (jj.qam_mode == 3 && jj.nl == 2)
-      k_tail<6><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
-    else if (jj.qam_mode == 3 && jj.nl == 3)
-      k_tail<7><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
-    else if (jj.qam_mode == 3 && jj.nl == 4)
-      k_tail<8><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
-    else if (jj.nl == 2)
-      k_tail<1><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
-    else if (jj.nl == 3 && jj.qam_mode == 2)
-      k_tail<2><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
-    else if (jj.nl == 4 && jj.qam_mode == 2)
-      k_tail<3><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
-    else if (jj.nl == 3)
-      k_tail<4><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
-    else if (jj.nl == 4)
-      k_tail<5><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
-    else
-      k_tail<0><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
-  }
+  launch_tail(jj, x, x.s, gx);
   if (g_prof) { /* PROF: comp= is the fused tail; mmse2 / kappa / llr read 0 */
     cudaEventRecord(x.ev[6], x.s);
     cudaEventRecord(x.ev[7], x.s);
@@ -1603,4 +1608,26 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
   j->h_ext = (const int16_t *)x.hh;
   j->ctx = c;
   return 0;
+}
+
+/* GPUPASS: launch-only demod of one grant (gather, level, mask, align, MMSE, LLRs) on `stream`: no wait, no D2H of decisions/kappa,
+ * no EVM (want_evm -> -1). rxdataF/est/geo_y/geo_h/comp/mag* of the job must be device-accessible; the LLRs go to llr_dev
+ * (int16, the job's llr_off layout). Uses the module's private GPUPASS context: one pass in flight. 0 or -1. */
+extern "C" int nr_pdsch_gpu_demod_dev(const nr_gpu_demod_job_t *j, nr_gpu_buf_t *llr_dev, void *stream)
+{
+  if (!g_ok || !j || !llr_dev || !llr_dev->dev || j->want_evm || j->nbRx > NR_GPU_DEMOD_MAX_RX || j->nl > NR_GPU_DEMOD_MAX_NL
+      || j->ext > (uint32_t)EXT || j->nl * j->nbRx > 16)
+    return -1;
+  Ctx &x = g_ctx[CTX];
+  const cudaStream_t s = (cudaStream_t)stream;
+  nr_gpu_demod_job_t jj = *j;
+  jj.llr = (int16_t *)llr_dev->dev;
+  const int gx = (int)((jj.ext + 127) / 128);
+  k_gather<<<dim3(gx, NSYM), 128, 0, s>>>(K(jj), x.y, x.h);
+  k_level<<<jj.nl * jj.nbRx, 256, 0, s>>>(K(jj), x.h, x.dsh);
+  k_mask_pw<<<NSYM, 256, 0, s>>>(K(jj), x.h, x.dsh);
+  if (jj.nl == 1 && jj.align)
+    k_align<<<dim3((MAXCH + ALC - 1) / ALC, NSYM), 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  launch_tail(jj, x, s, gx);
+  return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
 }

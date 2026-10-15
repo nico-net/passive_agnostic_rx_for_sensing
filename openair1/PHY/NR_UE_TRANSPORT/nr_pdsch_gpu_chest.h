@@ -6,6 +6,8 @@
 #ifndef NR_PDSCH_GPU_CHEST_H
 #define NR_PDSCH_GPU_CHEST_H
 #include <stdint.h>
+#include <stddef.h>
+#include "PHY/TOOLS/nr_gpu_mem.h"
 #define NR_GPU_CHEST_MAX_ROWS 2048 /* rows are read from a pinned copy, not the kernel arguments */
 typedef struct {
   const int16_t *rxF;  /* c16: &rxdataF[a][symbol * N + delta] */
@@ -24,4 +26,9 @@ typedef struct {
   int delay[NR_GPU_CHEST_MAX_ROWS][3];
 } nr_gpu_chest_job_t;
 typedef int (*nr_gpu_chest_fn)(nr_gpu_chest_job_t *job);
+/* nr_pdsch_gpu_chest_dev (launch-only): layout of its nvar_dev buffer (NR_GPU_CHEST_DEV_BYTES): delay int[MAX_ROWS][3], nvar u32[MAX_ROWS],
+ * then the rows array (copied there, and H2D'd on a discrete GPU). Row pointers must be device-accessible; out == NULL = est_dev + r * 4096 c16. */
+#define NR_GPU_CHEST_DEV_ROWS_OFF (4 * NR_GPU_CHEST_MAX_ROWS * sizeof(int))
+#define NR_GPU_CHEST_DEV_BYTES (NR_GPU_CHEST_DEV_ROWS_OFF + NR_GPU_CHEST_MAX_ROWS * sizeof(nr_gpu_chest_row_t))
+typedef int (*nr_gpu_chest_dev_fn)(const nr_gpu_chest_job_t *rows, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, void *stream);
 #endif

@@ -9,6 +9,7 @@
 #define NR_PDSCH_GPU_DEMOD_H
 #include <stdint.h>
 #include <stddef.h>
+#include "PHY/TOOLS/nr_gpu_mem.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -80,6 +81,9 @@ typedef int (*nr_gpu_demod_init_fn)(int nant);
 /* 0: done, outputs written, context held (call release); < 0: nothing written, the caller runs the CPU path. */
 typedef int (*nr_gpu_demod_run_fn)(nr_gpu_demod_job_t *job);
 typedef void (*nr_gpu_demod_release_fn)(int ctx);
+/* GPUPASS launch-only variant (nr_pdsch_gpu_demod.cu): enqueues the demod of one grant on `stream`, LLRs into llr_dev; no wait, no
+ * host-side results, no EVM. 0 or -1. */
+typedef int (*nr_gpu_demod_dev_fn)(const nr_gpu_demod_job_t *job, nr_gpu_buf_t *llr_dev, void *stream);
 /* evm_pending jobs: waits for the context's EVM chain and fills job->evm (the context stays held). 0 = ok. */
 typedef int (*nr_gpu_demod_evm_wait_fn)(nr_gpu_demod_job_t *job);
 

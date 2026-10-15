@@ -8,6 +8,8 @@
 #ifndef NR_PDSCH_GPU_LDPC_H
 #define NR_PDSCH_GPU_LDPC_H
 #include <stdint.h>
+#include <stddef.h>
+#include "PHY/TOOLS/nr_gpu_mem.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -31,6 +33,16 @@ typedef struct {
   int syn0;          /* 1: stopped at a zero syndrome after the last snapshot (later iterations not run) */
   uint8_t snap[NR_GPU_LDPC_MAX_SNAP][NR_GPU_LDPC_KB_MAX];
 } nr_gpu_ldpc_job_t;
+
+/* nr_pdsch_gpu_ldpc_dev (launch-only) buffer layouts. llr_dev: job k's Kc * Z int8 inputs at k * NR_GPU_LDPC_DEV_IN_STRIDE.
+ * bits_dev: snapshots [NR_GPU_LDPC_MAX_JOBS][NR_GPU_LDPC_MAX_SNAP][NR_GPU_LDPC_KB_MAX] bytes, then int res[2 * MAX_JOBS] = {nsnap, syn0} per job. */
+#define NR_GPU_LDPC_DEV_IN_STRIDE (68 * 384)
+#define NR_GPU_LDPC_DEV_IN_BYTES ((size_t)NR_GPU_LDPC_MAX_JOBS * NR_GPU_LDPC_DEV_IN_STRIDE)
+#define NR_GPU_LDPC_DEV_RES_OFF ((size_t)NR_GPU_LDPC_MAX_JOBS * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX)
+#define NR_GPU_LDPC_DEV_BITS_BYTES (NR_GPU_LDPC_DEV_RES_OFF + 2 * NR_GPU_LDPC_MAX_JOBS * sizeof(int))
+
+/* GPUPASS launch-only decode of n code blocks from device LLRs into device snapshots; -2 below CC 9. Enqueue only. */
+typedef int (*nr_gpu_ldpc_dev_fn)(const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, nr_gpu_buf_t *bits_dev, void *stream);
 
 typedef int (*nr_gpu_ldpc_init_fn)(void);
 /* Decodes n <= NR_GPU_LDPC_MAX_JOBS code blocks (any mix of BG / Z / R) in one launch (one thread-block cluster each), synchronously.

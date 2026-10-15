@@ -15,6 +15,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "PHY/TOOLS/nr_gpu_mem.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,6 +53,15 @@ typedef struct {
   uint32_t llr_offset;           ///< out: this job's first LLR in the output buffer
   uint32_t n_llr;                ///< out: LLRs written (0 = unsupported, caller falls back to the CPU)
 } nr_gpu_pdsch_job_t;
+
+/** Launch-only exact FEP of one slot (nr_pdsch_gpu_fep_dev, nr_pdsch_gpu_exact.h GPU6 bit-exact path). */
+typedef struct {
+  const int16_t *const *rxdata; ///< per-antenna host IQ ring (ring_len samples)
+  uint32_t ring_len, ring_offset;
+  const int16_t *symbol_rot;    ///< symbols_per_slot OAI c16 {r,i}
+  uint16_t sym_mask;            ///< symbols to transform
+} nr_gpu_fep_job_t;
+typedef int (*nr_gpu_fep_dev_fn)(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF_dev, void *stream);
 
 typedef struct {
   int (*init)(const nr_gpu_fep_cfg_t *cfg);
