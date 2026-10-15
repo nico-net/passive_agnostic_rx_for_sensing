@@ -6,7 +6,9 @@
 extern "C" {
 #include "PHY/TOOLS/nr_gpu_mem.h"
 }
+#include <map>
 #include "nr_gpu_pass_fixture.h"
+#include "nr_gpu_platform.h"
 static bool have_gpu() { return nr_gpu_model() >= 0 && getenv("NR_GPU_TEST_SKIP") == nullptr; }
 
 TEST(GpuMem, RoundTripBothModels) {
@@ -101,4 +103,96 @@ TEST(GpuPassStages, DlStagesSameBitsBothModels) {
   dl_stages_case(/*nrb=*/24, /*nl=*/2, /*qm=*/4, /*seed=*/7, 0.02);
   dl_stages_case(12, 1, 6, 9, 0.02);
   dl_stages_case(24, 4, 2, 5, 0.15); // rank 4 over a 4-RX channel is ill-conditioned (nr_pdsch_gpu_fep_test): sanity only, parity is the check
+}
+
+/* The four _dev calls of one (fep slot, chest slot) captured into a CUDA graph (Relaxed: the module calls cudaHostGetDevicePointer inside),
+ * instantiated before any fence; then for three different inputs: stage on the host, replay, and compare with a plain (not captured) run of
+ * the same inputs on the same buffers. Both models. */
+static void graph_case(int force) {
+  setenv("ISAC_GPU_FORCE_DISCRETE", force ? "1" : "0", 1);
+  bool ok = false;
+  GpuPassModule &m = GpuPassModule::get(&ok);
+  ASSERT_TRUE(ok);
+  GpuPassFixture in[3] = {GpuPassFixture::small_grant(24, 2, 4, 11), GpuPassFixture::small_grant(24, 2, 4, 12), GpuPassFixture::small_grant(24, 2, 4, 13)};
+  GpuPassFixture::Pass P;
+  ASSERT_TRUE(P.setup(m, in[0], /*nvar_fixed=*/400));
+  std::map<std::pair<int, int>, cudaGraphExec_t> ge;
+  GpuPassFixture::Out ref[3], rep[3];
+  int rc_ref = 0, rc_rep = 0;
+  for (int pass = 0; pass < 2; pass++) /* 0: plain reference of all three inputs, 1: graph replays */
+    for (int i = 0; i < 3; i++) {
+      ASSERT_TRUE(P.load(in[i]));
+      int fs, cs, rc = 0;
+      ASSERT_EQ(0, P.stage(&fs, &cs));
+      if (pass == 0) {
+        ASSERT_EQ(0, P.enqueue_dev(fs, cs, P.s, &rc));
+        rc_ref = rc;
+      } else {
+        auto key = std::make_pair(fs, cs);
+        if (!ge.count(key)) {
+          cudaGraph_t g;
+          ASSERT_EQ(cudaSuccess, cudaStreamBeginCapture(P.s, cudaStreamCaptureModeRelaxed));
+          const int er = P.enqueue_dev(fs, cs, P.s, &rc);
+          ASSERT_EQ(cudaSuccess, cudaStreamEndCapture(P.s, &g));
+          ASSERT_EQ(0, er);
+          ASSERT_EQ(cudaSuccess, cudaGraphInstantiate(&ge[key], g, 0));
+          cudaGraphDestroy(g);
+        } else
+          rc = rc_ref;
+        ASSERT_EQ(cudaSuccess, cudaGraphLaunch(ge[key], P.s));
+        rc_rep = rc;
+        EXPECT_EQ(rc_ref, rc_rep);
+      }
+      ASSERT_TRUE(P.fetch(pass == 0 ? &ref[i] : &rep[i], pass == 0 ? rc : rc_ref));
+    }
+  for (int i = 0; i < 3; i++) {
+    EXPECT_TRUE(ref[i] == rep[i]) << "replayed graph differs from the plain run, input " << i << " force=" << force;
+    EXPECT_FALSE(ref[i].llr == ref[(i + 1) % 3].llr) << "inputs should differ";
+  }
+  for (auto &e : ge) cudaGraphExecDestroy(e.second);
+}
+TEST(GpuPassStages, DevCapturableAndReplayable) {
+  if (!have_gpu()) GTEST_SKIP();
+  bool ok = false, lib = false;
+  GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  graph_case(0);
+  graph_case(1);
+  unsetenv("ISAC_GPU_FORCE_DISCRETE");
+}
+
+/* Runs last: raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
+ * allocated or built on the launch path. */
+extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);
+TEST(GpuPassStages, LdpcDevNoAllocOnMiss) {
+  if (!have_gpu()) GTEST_SKIP();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  void *dl = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_NOLOAD);
+  auto misses = (unsigned (*)(void))dlsym(dl, "nr_pdsch_gpu_ldpc_dev_misses");
+  auto stats = (void (*)(uint64_t *, uint64_t *))dlsym(dl, "nr_dl_gpu_memory_stats");
+  ASSERT_TRUE(misses && stats);
+  unsetenv("ISAC_GPU_FORCE_DISCRETE");
+  nr_gpu_buf_t lin = {}, bits = {};
+  ASSERT_EQ(0, nr_gpu_buf_alloc(&lin, NR_GPU_LDPC_DEV_IN_BYTES));
+  ASSERT_EQ(0, nr_gpu_buf_alloc(&bits, NR_GPU_LDPC_DEV_BITS_BYTES));
+  nr_gpu_rx_started(); /* the fence */
+  uint64_t a0, d0, a1, d1;
+  stats(&a0, &d0);
+  const unsigned m0 = misses();
+  nr_gpu_ldpc_job_t bad = {};
+  bad.BG = 2; bad.R = 7; bad.Z = 64; bad.K = 640; bad.it_max = 8; /* R = 7 is no code rate of BG2: never built */
+  EXPECT_EQ(-1, m.ldpc(&bad, 1, &lin, &bits, nullptr));
+  EXPECT_EQ(m0 + 1, misses());
+  nr_gpu_ldpc_job_t good = bad;
+  good.R = 15;
+  EXPECT_EQ(0, m.ldpc(&good, 1, &lin, &bits, nullptr)); /* a prepared key still launches behind the fence */
+  cudaDeviceSynchronize();
+  stats(&a1, &d1);
+  EXPECT_EQ(a0, a1) << "the launch path allocated";
+  EXPECT_EQ(d0, d1) << "an allocation was attempted behind the fence";
+  EXPECT_EQ(m0 + 1, misses());
 }

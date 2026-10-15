@@ -26,6 +26,8 @@ extern "C" {
 
 struct GpuPassModule {
   void *dl = nullptr;
+  nr_gpu_fep_stage_fn fep_stage = nullptr;
+  nr_gpu_chest_stage_fn chest_stage = nullptr;
   nr_gpu_fep_dev_fn fep = nullptr;
   nr_gpu_chest_dev_fn chest = nullptr;
   nr_gpu_demod_dev_fn demod = nullptr;
@@ -49,6 +51,8 @@ struct GpuPassModule {
         const nr_gpu_fep_cfg_t cfg = {4, 4096, 288, 352, 14, 4096 - 273 * 6, 273, 122880, 8};
         auto dinit = (nr_gpu_demod_init_fn)dlsym(m.dl, "nr_pdsch_gpu_demod_init");
         auto linit = (nr_gpu_ldpc_init_fn)dlsym(m.dl, "nr_pdsch_gpu_ldpc_init");
+        m.fep_stage = (nr_gpu_fep_stage_fn)dlsym(m.dl, "nr_pdsch_gpu_fep_stage");
+        m.chest_stage = (nr_gpu_chest_stage_fn)dlsym(m.dl, "nr_pdsch_gpu_chest_stage");
         m.fep = (nr_gpu_fep_dev_fn)dlsym(m.dl, "nr_pdsch_gpu_fep_dev");
         m.chest = (nr_gpu_chest_dev_fn)dlsym(m.dl, "nr_pdsch_gpu_chest_dev");
         m.demod = (nr_gpu_demod_dev_fn)dlsym(m.dl, "nr_pdsch_gpu_demod_dev");
@@ -59,7 +63,7 @@ struct GpuPassModule {
         m.demod_rel = (decltype(m.demod_rel))dlsym(m.dl, "nr_pdsch_gpu_demod_release");
         m.ldpc_old = (decltype(m.ldpc_old))dlsym(m.dl, "nr_pdsch_gpu_ldpc_run");
         if (!m.fep) fprintf(stderr, "libpdsch_gpu.so has no nr_pdsch_gpu_fep_dev\n");
-        good = api && m.fep_old && m.chest_old && m.demod_old && m.demod_rel && m.ldpc_old && dinit && linit && m.fep && m.chest && m.demod && m.ldpc && api()->init(&cfg) == 0 && dinit(4) == 0;
+        good = api && m.fep_stage && m.chest_stage && m.fep_old && m.chest_old && m.demod_old && m.demod_rel && m.ldpc_old && dinit && linit && m.fep && m.chest && m.demod && m.ldpc && api()->init(&cfg) == 0 && dinit(4) == 0;
         if (good) linit(); /* may refuse (CC < 9): the LDPC stage then reports it */
       }
     }
@@ -178,44 +182,56 @@ class GpuPassFixture {
     return f;
   }
 
-  /* 0 = all four stages ran (LDPC may have reported -2 on CC < 9: ldpc_rc); the int16 LLRs of the grant in nr_rx_pdsch order (symbol,
-   * RE, layer, bit; positive = bit 0) go to *llr. Buffers use the model nr_gpu_model() gives now. */
-  int run_stages(std::vector<int16_t> *llr, bool old_path = false)
-  {
-    bool ok = false;
-    GpuPassModule &m = GpuPassModule::get(&ok);
-    if (!ok) return -1;
-    const int len = 12 * nrb, ext = (len + 15) & ~15, nsym = (int)data_syms.size();
-    const size_t rxsz = (size_t)NANT * NSYM * N * 4, estrow = (size_t)NSYM * N * 4;
-    nr_gpu_buf_t rxF = {}, est = {}, nvar = {}, geo = {}, scratch = {}, llrb = {}, lin = {}, bits = {};
-    int rc = -1;
+  /* Everything of one grant shape that a captured graph bakes in: fixed device buffers, a fixed host IQ ring and the four jobs. load() feeds
+   * a new input into the same addresses. nvar_fixed >= 0 pins the demod's by-value nvar (a graph cannot take it from the chest). */
+  struct Out {
+    std::vector<int16_t> rxF, llr;
+    std::vector<int> chest; /* delay triples, then nvar per row */
+    std::vector<uint8_t> snap;
+    int ldpc_rc = 0, ldpc_nsnap = 0;
+    bool operator==(const Out &o) const { return rxF == o.rxF && llr == o.llr && chest == o.chest && snap == o.snap && ldpc_rc == o.ldpc_rc && ldpc_nsnap == o.ldpc_nsnap; }
+  };
+  struct Pass {
+    GpuPassModule *m = nullptr;
+    const GpuPassFixture *fx = nullptr;
+    nr_gpu_buf_t rxF = {}, est = {}, nvar = {}, geo = {}, scratch = {}, llrb = {}, lin = {}, bits = {}, pil = {}, dt = {};
+    std::vector<nr_gpu_chest_job_t> cjv = std::vector<nr_gpu_chest_job_t>(1);
+    nr_gpu_demod_job_t dj = {};
+    nr_gpu_ldpc_job_t lj = {};
+    std::vector<int16_t> pring[NANT], prot;
+    std::vector<const int16_t *> rp;
+    nr_gpu_fep_job_t fj = {};
     cudaStream_t s = nullptr;
-    const int nrows = 2 * nl * NANT;
-    const size_t bn = (size_t)2 * NSYM * NR_GPU_DEMOD_MAX_NL * ext * 2; /* comp, mag, magb, magr: int16 each */
-    if (nr_gpu_buf_alloc(&rxF, rxsz) || nr_gpu_buf_alloc(&est, (size_t)nl * NANT * estrow) || nr_gpu_buf_alloc(&nvar, NR_GPU_CHEST_DEV_BYTES)
-        || nr_gpu_buf_alloc(&geo, (size_t)2 * 2 * NSYM * ext * 2) || nr_gpu_buf_alloc(&scratch, 4 * bn * 2)
-        || nr_gpu_buf_alloc(&llrb, (size_t)nsym * len * qm * nl * 2) || nr_gpu_buf_alloc(&lin, NR_GPU_LDPC_DEV_IN_BYTES)
-        || nr_gpu_buf_alloc(&bits, NR_GPU_LDPC_DEV_BITS_BYTES) || cudaStreamCreate(&s))
-      goto out;
+    int nrows = 0, len = 0, ext = 0, nsym = 0, nvar_fixed = -1;
+    size_t rxsz = 0, bn = 0;
+    Pass() = default;
+    Pass(const Pass &) = delete;
+    ~Pass()
     {
-      std::vector<const int16_t *> rp(NANT);
-      for (int a = 0; a < NANT; a++) rp[a] = ring[a].data();
-      nr_gpu_fep_job_t fj = {rp.data(), ring_len, ring_offset, rot.data(), 0x3fff};
-      if (old_path ? m.fep_old(rp.data(), ring_len, ring_offset, 0.0, rot.data(), 0x3fff, (int16_t *)rxF.host, (size_t)NSYM * N)
-                   : m.fep(&fj, &rxF, s))
-        goto out;
-      /* chest: rows (DM-RS symbol, layer, antenna); pilots live in a device-visible buffer too */
-      std::vector<nr_gpu_chest_job_t> keep(1);
-      nr_gpu_chest_job_t &cj = keep[0];
-      memset(&cj, 0, sizeof(cj));
-      nr_gpu_buf_t pil = {};
-      if (nr_gpu_buf_alloc(&pil, (size_t)2 * nl * 12 * nrb * 2 * 2)) goto out;
-      cj.type = 1; cj.N = N; cj.n_rows = nrows;
+      for (nr_gpu_buf_t *b : {&rxF, &est, &nvar, &geo, &scratch, &llrb, &lin, &bits, &pil, &dt}) nr_gpu_buf_free(b);
+      if (s) cudaStreamDestroy(s);
+    }
+    /* buffers (current nr_gpu_model()), jobs, fixed ring; false = failure */
+    bool setup(GpuPassModule &mod, const GpuPassFixture &f, int nvar_pin)
+    {
+      m = &mod; fx = &f; nvar_fixed = nvar_pin;
+      len = 12 * f.nrb; ext = (len + 15) & ~15; nsym = (int)f.data_syms.size(); nrows = 2 * f.nl * NANT;
+      rxsz = (size_t)NANT * NSYM * N * 4;
+      const size_t estrow = (size_t)NSYM * N * 4;
+      bn = (size_t)2 * NSYM * NR_GPU_DEMOD_MAX_NL * ext * 2; /* comp, mag, magb, magr: int16 each */
+      if (nr_gpu_buf_alloc(&rxF, rxsz) || nr_gpu_buf_alloc(&est, (size_t)f.nl * NANT * estrow) || nr_gpu_buf_alloc(&nvar, NR_GPU_CHEST_DEV_BYTES)
+          || nr_gpu_buf_alloc(&geo, (size_t)2 * 2 * NSYM * ext * 2) || nr_gpu_buf_alloc(&scratch, 4 * bn * 2)
+          || nr_gpu_buf_alloc(&llrb, (size_t)nsym * len * f.qm * f.nl * 2) || nr_gpu_buf_alloc(&lin, NR_GPU_LDPC_DEV_IN_BYTES)
+          || nr_gpu_buf_alloc(&bits, NR_GPU_LDPC_DEV_BITS_BYTES) || nr_gpu_buf_alloc(&pil, (size_t)2 * f.nl * 12 * f.nrb * 2 * 2)
+          || nr_gpu_buf_alloc(&dt, (size_t)(2 * 20 + 1) * N * 4) || cudaStreamCreate(&s))
+        return false;
+      for (int a = 0; a < NANT; a++) pring[a].assign((size_t)2 * f.ring_len, 0);
+      prot.assign(2 * NSYM, 0);
+      rp.resize(NANT);
+      for (int a = 0; a < NANT; a++) rp[a] = pring[a].data();
+      fj = {rp.data(), f.ring_len, f.ring_offset, prot.data(), 0x3fff};
       /* the OAI delay table (init_delay_table): 256 * exp(+j 2 pi k delay / N), delay -20..20 */
-      nr_gpu_buf_t dt = {};
       const int MDC = 20;
-      if (nr_gpu_buf_alloc(&dt, (size_t)(2 * MDC + 1) * N * 4)) { nr_gpu_buf_free(&pil); goto out; }
-      cj.max_delay_comp = MDC; cj.dt_stride = N;
       for (int d = -MDC; d <= MDC; d++)
         for (int i = 0; i < N; i++) {
           const double ph = 2.0 * M_PI * i * d / N;
@@ -223,6 +239,9 @@ class GpuPassFixture {
           ((int16_t *)dt.host)[2 * ((size_t)(MDC + d) * N + i) + 1] = (int16_t)std::lround(256 * std::sin(ph));
         }
       nr_gpu_buf_h2d_async(&dt, 0, dt.bytes, s);
+      nr_gpu_chest_job_t &cj = cjv[0];
+      memset(&cj, 0, sizeof(cj));
+      cj.type = 1; cj.N = N; cj.n_rows = nrows; cj.max_delay_comp = MDC; cj.dt_stride = N;
       cj.delay_table = (const int16_t *)dt.dev;
       memcpy(cj.filt[0], filt16_ul_p0, 32);
       memcpy(cj.filt[1], filt16_ul_p1p2, 32);
@@ -230,123 +249,178 @@ class GpuPassFixture {
       memcpy(cj.filt[3], filt16_ul_last, 32);
       int r = 0;
       for (int d = 0; d < 2; d++)
-        for (int l = 0; l < nl; l++) {
-          int16_t *ph = (int16_t *)pil.host + (size_t)(d * nl + l) * 12 * nrb * 2;
-          memcpy(ph, pilot[d][l].data(), pilot[d][l].size() * 2);
+        for (int l = 0; l < f.nl; l++)
           for (int a = 0; a < NANT; a++, r++) {
             nr_gpu_chest_row_t &row = cj.rows[r];
-            row.rxF = (const int16_t *)rxF.dev + 2 * ((size_t)a * NSYM * N + (size_t)dm_sym[d] * N + (l >> 1 & 1));
-            row.pil = (const int16_t *)pil.dev + (size_t)(d * nl + l) * 12 * nrb * 2;
-            row.out = (int16_t *)est.dev + 2 * ((size_t)(l * NANT + a) * NSYM * N + (size_t)dm_sym[d] * N);
-            row.k0 = (FCO + 12 * start_rb) % N;
-            row.nb_rb = nrb;
+            row.rxF = (const int16_t *)rxF.dev + 2 * ((size_t)a * NSYM * N + (size_t)f.dm_sym[d] * N + (l >> 1 & 1));
+            row.pil = (const int16_t *)pil.dev + (size_t)(d * f.nl + l) * 12 * f.nrb * 2;
+            row.out = (int16_t *)est.dev + 2 * ((size_t)(l * NANT + a) * NSYM * N + (size_t)f.dm_sym[d] * N);
+            row.k0 = (FCO + 12 * f.start_rb) % N;
+            row.nb_rb = f.nrb;
           }
-        }
-      nr_gpu_buf_h2d_async(&pil, 0, pil.bytes, s);
-      rc = old_path ? m.chest_old(&cj) : m.chest(&cj, nrows, &est, &nvar, s);
-      if (rc) { nr_gpu_buf_free(&pil); nr_gpu_buf_free(&dt); rc = -1; goto out; }
-      nr_gpu_buf_d2h_async(&nvar, 0, 4 * (size_t)NR_GPU_CHEST_MAX_ROWS * 4, s);
-      nr_gpu_buf_d2h_async(&rxF, 0, rxsz, s);
-      if (cudaStreamSynchronize(s)) { nr_gpu_buf_free(&pil); nr_gpu_buf_free(&dt); rc = -1; goto out; }
-      nr_gpu_buf_free(&pil);
-      nr_gpu_buf_free(&dt);
-      std::vector<int> old_cout;
-      if (old_path) { /* the old entry returns delay[][3] and nvar[] in the job */
-        old_cout.assign(4 * NR_GPU_CHEST_MAX_ROWS, 0);
-        memcpy(old_cout.data(), cj.delay, 3 * nrows * sizeof(int));
-        memcpy(old_cout.data() + 3 * NR_GPU_CHEST_MAX_ROWS, cj.nvar, nrows * sizeof(int));
-      }
-      const int *cout = old_path ? old_cout.data() : (const int *)nvar.host;
-      chest_out.assign(cout, cout + 3 * nrows); /* delay triples, then nvar per row, then the mean */
-      uint32_t nv = 0;
-      for (int q = 0; q < nrows; q++) {
-        chest_out.push_back(cout[3 * NR_GPU_CHEST_MAX_ROWS + q]);
-        nv += (unsigned)cout[3 * NR_GPU_CHEST_MAX_ROWS + q];
-      }
-      chest_out.push_back((int)(nv / nrows));
-      if (getenv("GP_DBG")) {
-        const int16_t *x = (const int16_t *)rxF.host;
-        const int k = (FCO + 12 * start_rb) % N;
-        for (int sy : {2, 3, 5}) printf("rxF a0 sym%d k=%d..: %d,%d %d,%d %d,%d\n", sy, k, x[2 * (sy * N + k)], x[2 * (sy * N + k) + 1], x[2 * (sy * N + k + 1)], x[2 * (sy * N + k + 1) + 1], x[2 * (sy * N + k + 2)], x[2 * (sy * N + k + 2) + 1]);
-        nr_gpu_buf_d2h_async(&est, 0, est.bytes, s);
-        cudaStreamSynchronize(s);
-        const int16_t *e = (const int16_t *)est.host;
-        for (int row = 0; row < nl * NANT; row++) printf("est row %d sym2 k=%d: %d,%d %d,%d  nvar %d\n", row, k, e[2 * ((size_t)row * NSYM * N + 2 * N)], e[2 * ((size_t)row * NSYM * N + 2 * N) + 1], e[2 * ((size_t)row * NSYM * N + 2 * N + 5)], e[2 * ((size_t)row * NSYM * N + 2 * N + 5) + 1], chest_out[3 * nrows + row]);
-      }
-      rxF_head.assign((int16_t *)rxF.host, (int16_t *)rxF.host + 2 * (size_t)NSYM * N);
       /* demod: hold the nearest DM-RS estimate; geometry = the grant's contiguous REs */
       int16_t *gy = (int16_t *)geo.host, *gh = gy + 2 * NSYM * ext;
-      for (int sy : data_syms)
+      for (int sy : f.data_syms)
         for (int i = 0; i < len; i++) {
-          const int k = (FCO + 12 * start_rb + i) % N; /* rxdataF index; the estimate row is indexed from the grant's first RE */
-          gy[2 * (sy * ext + i)] = (int16_t)k;
+          gy[2 * (sy * ext + i)] = (int16_t)((FCO + 12 * f.start_rb + i) % N); /* rxdataF index; estimates are indexed from the grant's first RE */
           gy[2 * (sy * ext + i) + 1] = 1;
           gh[2 * (sy * ext + i)] = (int16_t)i;
-          gh[2 * (sy * ext + i) + 1] = (int16_t)((sy < 7 ? dm_sym[0] : dm_sym[1]) + 1);
+          gh[2 * (sy * ext + i) + 1] = (int16_t)((sy < 7 ? f.dm_sym[0] : f.dm_sym[1]) + 1);
         }
       nr_gpu_buf_h2d_async(&geo, 0, geo.bytes, s);
-      nr_gpu_demod_job_t dj = {};
-      dj.nbRx = NANT; dj.nl = nl; dj.qm = qm; dj.N = N;
-      dj.start_symbol = data_syms.front(); dj.nb_symbols = 13; dj.first_symbol = data_syms.front();
+      dj.nbRx = NANT; dj.nl = f.nl; dj.qm = f.qm; dj.N = N;
+      dj.start_symbol = f.data_syms.front(); dj.nb_symbols = 13; dj.first_symbol = f.data_syms.front();
       dj.rx_stride = NSYM * N; dj.est_stride = NSYM * N; dj.buf = ext; dj.ext = ext;
       uint32_t off = 0;
-      for (int sy : data_syms) {
+      for (int sy : f.data_syms) {
         dj.sym_mask |= (uint16_t)(1u << sy);
         dj.nre[sy] = (uint16_t)len;
         dj.llr_off[sy] = off;
-        off += len * qm * nl;
+        off += len * f.qm * f.nl;
       }
       dj.rxdataF = (const int16_t *)rxF.dev; dj.est = (const int16_t *)est.dev;
       dj.geo_y = (const int16_t *)geo.dev; dj.geo_h = (const int16_t *)geo.dev + 2 * NSYM * ext;
       int16_t *sc = (int16_t *)scratch.dev;
       dj.comp = sc; dj.mag = sc + bn; dj.magb = sc + 2 * bn; dj.magr = sc + 3 * bn;
       dj.thr_coef = std::pow(10.0, -1.2);
-      dj.qam_mode = nl >= 2 ? 3 : 0; dj.mag_per_layer = 1; dj.nvar = (uint32_t)chest_out.back(); dj.m3_nvfac = std::pow(10.0, 2.1);
-      if (old_path) {
-        dj.llr = (int16_t *)llrb.host;
-        if (m.demod_old(&dj)) goto out;
-        m.demod_rel(dj.ctx);
-      } else if (m.demod(&dj, &llrb, s))
-        goto out;
-      nr_gpu_buf_d2h_async(&llrb, 0, llrb.bytes, s);
-      if (cudaStreamSynchronize(s)) goto out;
-      llr->assign((int16_t *)llrb.host, (int16_t *)llrb.host + (size_t)nsym * len * qm * nl);
-      /* LDPC on the first BG2 code block of the LLR stream (hard-limited to int8): bit parity only */
-      nr_gpu_ldpc_job_t lj = {};
+      dj.qam_mode = f.nl >= 2 ? 3 : 0; dj.mag_per_layer = 1; dj.m3_nvfac = std::pow(10.0, 2.1);
+      if (nvar_fixed >= 0) dj.nvar = (uint32_t)nvar_fixed;
       lj.BG = 2; lj.R = 15; lj.Z = 64; lj.K = 640; lj.it_max = 8;
-      int8_t *in = (int8_t *)lin.host;
-      for (size_t i = 0; i < (size_t)52 * 64; i++) in[i] = (int8_t)std::max(-127, std::min(127, (int)(*llr)[i % llr->size()] / 16));
-      nr_gpu_buf_h2d_async(&lin, 0, (size_t)52 * 64, s);
-      if (old_path) {
-        lj.llr = in;
-        std::vector<nr_gpu_ldpc_job_t> hold(1, lj); /* the job holds 17 KB of snapshots */
-        ldpc_rc = m.ldpc_old(hold.data(), 1);
-        if (ldpc_rc == 0) {
-          ldpc_nsnap = hold[0].nsnap;
-          snap.clear();
-          for (int q = 0; q < ldpc_nsnap; q++) snap.insert(snap.end(), hold[0].snap[q], hold[0].snap[q] + (lj.K >> 3));
-          snap.push_back((uint8_t)hold[0].syn0);
-        }
-      } else {
-      ldpc_rc = m.ldpc(&lj, 1, &lin, &bits, s);
+      if (nvar_fixed >= 0) { /* graph mode: the LDPC input cannot come from the demod (no device int16 -> int8 stage), so it is a fixed pattern */
+        uint32_t x = 12345;
+        for (size_t i = 0; i < (size_t)52 * 64; i++) { x = x * 1664525u + 1013904223u; ((int8_t *)lin.host)[i] = (int8_t)((int)(x >> 24) % 81 - 40); }
+        nr_gpu_buf_h2d_async(&lin, 0, (size_t)52 * 64, s);
+      }
+      return cudaStreamSynchronize(s) == cudaSuccess;
+    }
+    /* feeds the fixture f (same shape) into the fixed ring / rotation / pilots; the output buffers are cleared so a stage that does not run shows */
+    bool load(const GpuPassFixture &f)
+    {
+      for (int a = 0; a < NANT; a++) memcpy(pring[a].data(), f.ring[a].data(), pring[a].size() * 2);
+      memcpy(prot.data(), f.rot.data(), prot.size() * 2);
+      fj.ring_offset = f.ring_offset;
+      for (int d = 0; d < 2; d++)
+        for (int l = 0; l < f.nl; l++)
+          memcpy((int16_t *)pil.host + (size_t)(d * f.nl + l) * 12 * f.nrb * 2, f.pilot[d][l].data(), f.pilot[d][l].size() * 2);
+      nr_gpu_buf_h2d_async(&pil, 0, pil.bytes, s);
+      return cudaStreamSynchronize(s) == cudaSuccess && !cudaMemset(rxF.dev, 0, rxsz) && !cudaMemset(est.dev, 0, est.bytes)
+             && !cudaMemset(nvar.dev, 0, nvar.bytes) && !cudaMemset(llrb.dev, 0, llrb.bytes) && !cudaMemset(bits.dev, 0, bits.bytes);
+    }
+    int stage(int *fs, int *cs) { return m->fep_stage(&fj, fs) || m->chest_stage(&cjv[0], nrows, cs); }
+    /* the launch-only part, exactly what a graph captures (LDPC rc is returned through *ldpc_rc: -2 below CC 9 is not an error) */
+    int enqueue_dev(int fs, int cs, cudaStream_t st, int *ldpc_rc)
+    {
+      const int e1 = m->fep(&fj, &rxF, fs, st), e2 = m->chest(&cjv[0], nrows, &est, &nvar, cs, st), e3 = m->demod(&dj, &llrb, st);
+      if (e1 || e2 || e3) { fprintf(stderr, "enqueue_dev: fep %d chest %d demod %d (slots %d %d) last=%s\n", e1, e2, e3, fs, cs, cudaGetErrorString(cudaPeekAtLastError())); return -1; }
+      *ldpc_rc = m->ldpc(&lj, 1, &lin, &bits, st);
+      return *ldpc_rc == 0 || *ldpc_rc == -2 ? 0 : -1;
+    }
+    /* D2H of every output (on s) and a snapshot of it */
+    bool fetch(Out *o, int ldpc_rc)
+    {
+      nr_gpu_buf_d2h_async(&rxF, 0, rxsz, s);
+      nr_gpu_buf_d2h_async(&nvar, 0, nvar.bytes, s);
+      nr_gpu_buf_d2h_async(&llrb, 0, llrb.bytes, s);
+      if (ldpc_rc == 0) nr_gpu_buf_d2h_async(&bits, 0, bits.bytes, s);
+      if (cudaStreamSynchronize(s)) return false;
+      o->rxF.assign((int16_t *)rxF.host, (int16_t *)rxF.host + 2 * (size_t)NANT * NSYM * N);
+      o->llr.assign((int16_t *)llrb.host, (int16_t *)llrb.host + (size_t)nsym * len * fx->qm * fx->nl);
+      const int *c = (const int *)nvar.host;
+      o->chest.assign(c, c + 3 * nrows);
+      for (int q = 0; q < nrows; q++) o->chest.push_back(c[3 * NR_GPU_CHEST_MAX_ROWS + q]);
+      o->ldpc_rc = ldpc_rc; o->ldpc_nsnap = 0; o->snap.clear();
       if (ldpc_rc == 0) {
-        nr_gpu_buf_d2h_async(&bits, 0, bits.bytes, s);
-        if (cudaStreamSynchronize(s)) goto out;
         const int *res = (const int *)((char *)bits.host + NR_GPU_LDPC_DEV_RES_OFF);
+        o->ldpc_nsnap = res[0];
+        for (int q = 0; q < res[0]; q++)
+          o->snap.insert(o->snap.end(), (uint8_t *)bits.host + (size_t)q * NR_GPU_LDPC_KB_MAX, (uint8_t *)bits.host + (size_t)q * NR_GPU_LDPC_KB_MAX + (lj.K >> 3));
+        o->snap.push_back((uint8_t)res[1]);
+      }
+      return true;
+    }
+  };
+
+  /* 0 = all four stages ran (LDPC may have reported -2 on CC < 9: ldpc_rc); the int16 LLRs of the grant in nr_rx_pdsch order (symbol,
+   * RE, layer, bit; positive = bit 0) go to *llr. Buffers use the model nr_gpu_model() gives now. old_path: the pre-GPUPASS entry points
+   * with their own waits (DIRECT only). The nvar of the demod job is the chest mean (host sync between the stages), the LDPC input is the
+   * LLR stream hard-limited to int8. */
+  int run_stages(std::vector<int16_t> *llr, bool old_path = false)
+  {
+    bool ok = false;
+    GpuPassModule &m = GpuPassModule::get(&ok);
+    if (!ok) return -1;
+    Pass P;
+    if (!P.setup(m, *this, -1) || !P.load(*this)) return -1;
+    cudaStream_t s = P.s;
+    nr_gpu_chest_job_t &cj = P.cjv[0];
+    int fslot = 0, cslot = 0, rc;
+    if (old_path) {
+      if (m.fep_old(P.rp.data(), ring_len, ring_offset, 0.0, rot.data(), 0x3fff, (int16_t *)P.rxF.host, (size_t)NSYM * N)) return -1;
+      rc = m.chest_old(&cj);
+    } else {
+      if (P.stage(&fslot, &cslot) || m.fep(&P.fj, &P.rxF, fslot, s)) return -1;
+      rc = m.chest(&cj, P.nrows, &P.est, &P.nvar, cslot, s);
+    }
+    if (rc) return -1;
+    nr_gpu_buf_d2h_async(&P.nvar, 0, P.nvar.bytes, s);
+    nr_gpu_buf_d2h_async(&P.rxF, 0, P.rxsz, s);
+    if (cudaStreamSynchronize(s)) return -1;
+    const int nrows = P.nrows;
+    std::vector<int> cout_v(4 * NR_GPU_CHEST_MAX_ROWS, 0);
+    if (old_path) { /* the old entry returns delay[][3] and nvar[] in the job */
+      memcpy(cout_v.data(), cj.delay, 3 * nrows * sizeof(int));
+      memcpy(cout_v.data() + 3 * NR_GPU_CHEST_MAX_ROWS, cj.nvar, nrows * sizeof(int));
+    } else
+      memcpy(cout_v.data(), P.nvar.host, cout_v.size() * sizeof(int));
+    const int *cout = cout_v.data();
+    chest_out.assign(cout, cout + 3 * nrows); /* delay triples, then nvar per row, then the mean */
+    uint32_t nv = 0;
+    for (int q = 0; q < nrows; q++) {
+      chest_out.push_back(cout[3 * NR_GPU_CHEST_MAX_ROWS + q]);
+      nv += (unsigned)cout[3 * NR_GPU_CHEST_MAX_ROWS + q];
+    }
+    chest_out.push_back((int)(nv / nrows));
+    rxF_head.assign((int16_t *)P.rxF.host, (int16_t *)P.rxF.host + 2 * (size_t)NSYM * N);
+    nr_gpu_demod_job_t &dj = P.dj;
+    dj.nvar = (uint32_t)chest_out.back();
+    if (old_path) {
+      dj.llr = (int16_t *)P.llrb.host;
+      if (m.demod_old(&dj)) return -1;
+      m.demod_rel(dj.ctx);
+    } else if (m.demod(&dj, &P.llrb, s))
+      return -1;
+    nr_gpu_buf_d2h_async(&P.llrb, 0, P.llrb.bytes, s);
+    if (cudaStreamSynchronize(s)) return -1;
+    llr->assign((int16_t *)P.llrb.host, (int16_t *)P.llrb.host + (size_t)P.nsym * P.len * qm * nl);
+    /* LDPC on the first BG2 code block of the LLR stream (hard-limited to int8): bit parity only */
+    nr_gpu_ldpc_job_t &lj = P.lj;
+    int8_t *in = (int8_t *)P.lin.host;
+    for (size_t i = 0; i < (size_t)52 * 64; i++) in[i] = (int8_t)std::max(-127, std::min(127, (int)(*llr)[i % llr->size()] / 16));
+    nr_gpu_buf_h2d_async(&P.lin, 0, (size_t)52 * 64, s);
+    if (old_path) {
+      lj.llr = in;
+      std::vector<nr_gpu_ldpc_job_t> hold(1, lj); /* the job holds 17 KB of snapshots */
+      ldpc_rc = m.ldpc_old(hold.data(), 1);
+      if (ldpc_rc == 0) {
+        ldpc_nsnap = hold[0].nsnap;
+        snap.clear();
+        for (int q = 0; q < ldpc_nsnap; q++) snap.insert(snap.end(), hold[0].snap[q], hold[0].snap[q] + (lj.K >> 3));
+        snap.push_back((uint8_t)hold[0].syn0);
+      }
+    } else {
+      ldpc_rc = m.ldpc(&lj, 1, &P.lin, &P.bits, s);
+      if (ldpc_rc == 0) {
+        nr_gpu_buf_d2h_async(&P.bits, 0, P.bits.bytes, s);
+        if (cudaStreamSynchronize(s)) return -1;
+        const int *res = (const int *)((char *)P.bits.host + NR_GPU_LDPC_DEV_RES_OFF);
         ldpc_nsnap = res[0];
         snap.clear(); /* only the K/8 bytes of each written snapshot are defined, as the old entry copies them */
         for (int q = 0; q < ldpc_nsnap; q++)
-          snap.insert(snap.end(), (uint8_t *)bits.host + (size_t)q * NR_GPU_LDPC_KB_MAX, (uint8_t *)bits.host + (size_t)q * NR_GPU_LDPC_KB_MAX + (lj.K >> 3));
+          snap.insert(snap.end(), (uint8_t *)P.bits.host + (size_t)q * NR_GPU_LDPC_KB_MAX, (uint8_t *)P.bits.host + (size_t)q * NR_GPU_LDPC_KB_MAX + (lj.K >> 3));
         snap.push_back((uint8_t)res[1]);
       }
-      }
-      rc = 0;
     }
-  out:
-    if (s) cudaStreamDestroy(s);
-    nr_gpu_buf_free(&rxF); nr_gpu_buf_free(&est); nr_gpu_buf_free(&nvar); nr_gpu_buf_free(&geo); nr_gpu_buf_free(&scratch);
-    nr_gpu_buf_free(&llrb); nr_gpu_buf_free(&lin); nr_gpu_buf_free(&bits);
-    return rc;
+    return 0;
   }
 
  private:

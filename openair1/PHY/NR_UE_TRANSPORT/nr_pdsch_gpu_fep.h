@@ -61,7 +61,14 @@ typedef struct {
   const int16_t *symbol_rot;    ///< symbols_per_slot OAI c16 {r,i}
   uint16_t sym_mask;            ///< symbols to transform
 } nr_gpu_fep_job_t;
-typedef int (*nr_gpu_fep_dev_fn)(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF_dev, void *stream);
+/* GPUPASS contract (graph-capturable): call nr_pdsch_gpu_fep_stage on the HOST first (waits until the slot's previous pass has finished
+ * reading it, then copies the IQ window -- DISCRETE only -- and the per-slot origin/rotation into pinned staging; returns the slot,
+ * 0 <= slot < NR_GPU_PASS_RING), then launch or replay nr_pdsch_gpu_fep_dev(j, rxF, slot, stream), which only enqueues device work (H2D
+ * from that slot's fixed pinned memory on DISCRETE, the kernel, an event marking the slot free). A graph is captured per slot index;
+ * rxdata pointers, ring_len and sym_mask of the captured job are baked in, the window position (ring_offset) and rotation are not. */
+#define NR_GPU_PASS_RING 4
+typedef int (*nr_gpu_fep_stage_fn)(const nr_gpu_fep_job_t *j, int *slot_out);
+typedef int (*nr_gpu_fep_dev_fn)(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF_dev, int slot, void *stream);
 
 typedef struct {
   int (*init)(const nr_gpu_fep_cfg_t *cfg);

@@ -494,6 +494,18 @@ static const Graph *graph(int BG, int Z, int R)
   return d;
 }
 
+/* GPUPASS: lookup only. warm_common() (run by nr_pdsch_gpu_ldpc_init, before the RX fence) builds every valid (BG, Z, R) graph; the launch-only
+ * entry never builds, allocates or copies: a miss is counted and refused. */
+static std::atomic<unsigned> g_dev_miss{0};
+static const Graph *graph_lookup(int BG, int Z, int R)
+{
+  std::lock_guard<std::mutex> lk(g_gm);
+  auto f = g_graphs.find((BG << 16) | (Z << 7) | R);
+  if (f != g_graphs.end()) return f->second;
+  g_dev_miss.fetch_add(1);
+  return nullptr;
+}
+
 static int acquire()
 {
   for (;;) {
@@ -641,22 +653,23 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   return rc;
 }
 
+extern "C" unsigned nr_pdsch_gpu_ldpc_dev_misses(void) { return g_dev_miss.load(); }
 /* GPUPASS: launch-only decode of n <= NJ code blocks. Inputs already on the device (llr_dev, NR_GPU_LDPC_DEV_IN_STRIDE per job), outputs
  * into bits_dev (NR_GPU_LDPC_DEV_* layout); enqueues on `stream` only. jobs[k].llr / snap are not touched. Clusters need sm_90: returns
  * -2 below CC 9 (Task 2b adds the non-cluster kernel), -1 otherwise. One pass in flight (private context). 0 or an error code. */
 extern "C" int nr_pdsch_gpu_ldpc_dev(const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, nr_gpu_buf_t *bits_dev, void *stream)
 {
+  int dev = 0, major = 0; /* the CC check comes first: below sm_90 init refuses (g_ok == 0) and the documented -2 must still come out */
+  if (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) return -1;
+  if (major < 9) return -2;
   if (!g_ok || !jobs || n < 1 || n > NJ || !llr_dev || !llr_dev->dev || llr_dev->bytes < (size_t)n * NR_GPU_LDPC_DEV_IN_STRIDE
       || !bits_dev || !bits_dev->dev || bits_dev->bytes < NR_GPU_LDPC_DEV_BITS_BYTES)
     return -1;
-  int dev = 0, major = 0;
-  if (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) return -1;
-  if (major < 9) return -2;
   const Graph *gr[NJ];
   for (int k = 0; k < n; k++) {
     const nr_gpu_ldpc_job_t &j = jobs[k];
     if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || (j.K & 7) || (j.K >> 3) > NR_GPU_LDPC_KB_MAX
-        || !(gr[k] = graph(j.BG, j.Z, j.R)))
+        || !(gr[k] = graph_lookup(j.BG, j.Z, j.R)))
       return -1;
   }
   Ctx &x = g_ctx[CTX];

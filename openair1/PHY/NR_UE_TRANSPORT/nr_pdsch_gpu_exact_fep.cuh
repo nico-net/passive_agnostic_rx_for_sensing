@@ -259,6 +259,7 @@ struct ExactIO {
   size_t ant_stride; /* c16 per antenna in out; symbol sym starts at sym * N */
   short2 rot[14];    /* symbol_rotation of this slot (by value: no per-call upload) */
   uint16_t sym_list[14];
+  const uint32_t *par; /* GPUPASS: non-null = {origin, rot[14] as short2} read at execution (graph replay); null = origin / rot above */
 };
 
 /* One block per (symbol, antenna). perm: input index of each in-place DIT position (the composed
@@ -270,13 +271,13 @@ __global__ void __launch_bounds__(THREADS) k_fep_exact(const ExactIO io, int ncp
   __shared__ short2 s[N];
   const int sym = io.sym_list[blockIdx.x], ant = blockIdx.y, t = threadIdx.x;
   const short2 *in = io.rx[ant];
-  const uint32_t first = io.origin + (uint32_t)(ncp0 + sym * (N + ncp));
+  const uint32_t first = (io.par ? io.par[0] : io.origin) + (uint32_t)(ncp0 + sym * (N + ncp));
   for (int n = t; n < N; n += THREADS) s[n] = in[(first + __ldg(&perm[n])) % io.ring_len];
   __syncthreads();
   fft4096<false>(s, t, tw1024, tw4096);
   /* apply_nr_rotation_symbol_RX on the occupied subcarriers */
   const int len = (nb_rb & 1) ? (nb_rb + 1) * 6 : nb_rb * 6, start2 = (nb_rb & 1) ? fco - 6 : fco;
-  const short2 r = io.rot[sym];
+  const short2 r = io.par ? ((const short2 *)(io.par + 1))[sym] : io.rot[sym];
   const int ar = r.x, ai = (short)(-(int)r.y);
   short2 *o = io.out + (size_t)ant * io.ant_stride + (size_t)sym * N;
   for (int k = t; k < N; k += THREADS) {
