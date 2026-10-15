@@ -196,6 +196,7 @@ static _Atomic uint64_t g_cls_ns1[PDTIM_NCLS], g_cls_ns5[PDTIM_NCLS], g_cls_ns20
 static __thread unsigned t_pdtim_body; /* bodies of the current nr_pdsch_passive_decode() call (passive_decode_body) */
 static int retry_budget_us(void);            /* FATTAILS, below */
 static uint64_t dec_now_ns(void);
+static __thread uint64_t t_dec_first_ns; /* SYSAN e2e: wall of this call's first body */
 static __thread uint64_t t_dec_body_ns, t_dec_stage_ns, t_dec_t0_ns; /* FATTAILS DECSLOW: this call's body wall and fep+chest+demod+ldpc wall */
 /* FATTAILS DECSLOW: the last nr_pdsch_passive_decode() call's bodies, their wall time and their stage time (ns) */
 void nr_pdsch_passive_decode_slow_stats(unsigned *bodies, uint64_t *body_ns, uint64_t *stage_ns)
@@ -204,6 +205,7 @@ void nr_pdsch_passive_decode_slow_stats(unsigned *bodies, uint64_t *body_ns, uin
   *body_ns = t_dec_body_ns;
   *stage_ns = t_dec_stage_ns;
 }
+uint64_t nr_pdsch_passive_decode_first_body_ns(void) { return t_dec_first_ns; }
 static __thread uint32_t t_pdtim_stage_us[PDTIM_N], t_pdtim_stage_cpu_us[PDTIM_N]; /* this body's stage wall / thread-CPU times (PDTIMSLOW) */
 static _Atomic int g_pdtim_slow_left = 200;
 /* DECODETIME: per class x stage, the stage wall time (us) held by bodies of duration band <1 / 1-5 / 5-20 / >20 ms (PDTIMCLSST) */
@@ -2556,7 +2558,22 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       return out->status; /* IQ already overwritten: nothing to observe */
     }
     const uint16_t fep_syms = ssb_cand | (ssb_cand << 2); // PSS at s, SSS at s+2
-    for (int sym = 0; sym < 14; ++sym) {
+    /* SYSAN ISAC_SSB_FEP_GPU=1 (default off): these PSS/SSS symbols through the bit-exact GPU FEP (one launch for all
+     * antennas and symbols) instead of 2 x nb_antennas_rx serial CPU FFTs on this consumer: measured +150-250 us p50 on the
+     * first body of SSB-candidate slots. Same fallback rule as the main FEP below: CPU when the GPU path refuses. */
+    static int s_ssb_gpu = -1;
+    if (s_ssb_gpu < 0)
+      s_ssb_gpu = getenv("ISAC_SSB_FEP_GPU") && atoi(getenv("ISAC_SSB_FEP_GPU")) ? 1 : 0;
+    int ssb_rng[14][2], n_ssb_rng = 0;
+    for (int sym = 0; sym < 14; ++sym)
+      if ((fep_syms >> sym) & 1) {
+        ssb_rng[n_ssb_rng][0] = sym;
+        ssb_rng[n_ssb_rng++][1] = 1;
+      }
+    const bool ssb_gpu_done = s_ssb_gpu && nr_pdsch_gpu_exact_fep_ranges(ue, fp, proc->nr_slot_rx, ssb_rng, n_ssb_rng, &rxdataF[0][0],
+                                                                         fp->samples_per_slot_wCP,
+                                                                         nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata)) == 0;
+    for (int sym = 0; sym < 14 && !ssb_gpu_done; ++sym) {
       if (!((fep_syms >> sym) & 1))
         continue;
       if (fp->nb_antennas_rx > 1) {
@@ -5453,7 +5470,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          nr_pdsch_passive_decode_result_t *out)
 {
   t_pdtim_body = 0; /* ISAC_PDTIM_CLASS: the next body is this call's first (real), later ones are retries */
-  t_dec_body_ns = t_dec_stage_ns = 0;
+  t_dec_body_ns = t_dec_stage_ns = t_dec_first_ns = 0;
   if (retry_budget_us())
     t_dec_t0_ns = dec_now_ns();
   /* CSI-FULL hook (ISAC_CSIRS_FULL=1): this grant's own cell CSI-RS set for its PDSCH slot (nr_csirs_blind_rt.c) */
@@ -5786,6 +5803,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
   if (tb0) {
     clock_gettime(CLOCK_MONOTONIC, &tb);
     t_dec_body_ns += (uint64_t)tb.tv_sec * 1000000000ull + (uint64_t)tb.tv_nsec - tb0;
+    if (!t_dec_first_ns)
+      t_dec_first_ns = t_dec_body_ns;
   }
   return st;
 }
@@ -6031,6 +6050,23 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
   if (csi_population_retry < 0) {
     const char *e = getenv("ISAC_PDSCH_CSI_POPULATION_RETRY");
     csi_population_retry = e && atoi(e) != 0;
+  }
+  /* SYSAN ISAC_PDSCH_RETRY_SNR_MIN_DB=X (default off): no recovery arm when the failed first body's own EVM-SNR is below X dB.
+   * The arms re-read the configuration (S, CSI-RS, CDM, MRC), which cannot fix a grant lost in noise: [MEASURED, DGX replay b,
+   * t26f, 3 runs] chains below 3 dB were 29 % of all recovery chains and 30 % of their decode time, and rescued 2.7 % of them
+   * (22 of 567 rescues). Counted in RETRY_SNR_GATE. */
+  static float s_rsnr = -1000.f;
+  static _Atomic uint64_t s_rsnr_skip, s_rsnr_seen;
+  if (s_rsnr == -1000.f)
+    s_rsnr = getenv("ISAC_PDSCH_RETRY_SNR_MIN_DB") ? (float)atof(getenv("ISAC_PDSCH_RETRY_SNR_MIN_DB")) : -999.f;
+  if (s_rsnr > -999.f && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg) {
+    const uint64_t n = atomic_fetch_add_explicit(&s_rsnr_seen, 1, memory_order_relaxed) + 1;
+    if (out->evm_valid && out->evm_pct > 0.f && -20.0 * log10(out->evm_pct / 100.0) < s_rsnr) {
+      const uint64_t k = atomic_fetch_add_explicit(&s_rsnr_skip, 1, memory_order_relaxed) + 1;
+      if (k == 1 || k % 500 == 0)
+        LOG_A(PHY, "SENSING: RETRY_SNR_GATE skipped=%lu of %lu failed first bodies (min %.1f dB)\n", (unsigned long)k, (unsigned long)n, s_rsnr);
+      return st;
+    }
   }
   if ((!tdra_retry && !csi_retry && !cdm_retry && !wide_retry && !csi_population_retry && !tint_retry && !opr_retry && !s_scsi_on()) || st != NR_PDSCH_PASSIVE_DECODE_CRC_FAIL
       || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_gw_used || (t_quiet && !t_qam_ab_alt) || t_llr_ovr

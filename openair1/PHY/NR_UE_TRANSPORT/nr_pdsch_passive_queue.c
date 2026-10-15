@@ -132,6 +132,30 @@ static int16_t *g_consumer_gpu_rxF[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
 #define GPU_LLR_CAP (32u << 20) /* int16 per consumer: room for a full recorded multi-grant slot */
 
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
+/* SYSAN ISAC_E2E_TRACE=1 (diagnostic, default off): monotonic arrival time of each producer slot (the nrue_ru_read() return),
+ * ring of 128 slots, so a grant's latency can be measured from its slot's samples to its CRC (EVMGRANT e2e=, UL_E2E). */
+static _Atomic uint64_t g_slot_arr_ns[128];
+static _Atomic long g_slot_arr_tag[128];
+void nr_passive_note_slot_arrival(long abs_slot)
+{
+  const int k = (int)(abs_slot & 127);
+  atomic_store_explicit(&g_slot_arr_tag[k], -1, memory_order_release);
+  atomic_store_explicit(&g_slot_arr_ns[k], now_ns(), memory_order_release);
+  atomic_store_explicit(&g_slot_arr_tag[k], abs_slot, memory_order_release);
+}
+/* nr_passive_slot_arrival_ns: arrival time of abs_slot, 0 when it left the ring (> 128 slots old) or was never seen */
+uint64_t nr_passive_slot_arrival_ns(long abs_slot)
+{
+  const int k = (int)(abs_slot & 127);
+  const uint64_t t = atomic_load_explicit(&g_slot_arr_ns[k], memory_order_acquire);
+  return atomic_load_explicit(&g_slot_arr_tag[k], memory_order_acquire) == abs_slot ? t : 0;
+}
+int nr_passive_e2e_trace(void)
+{
+  static _Atomic int s = -1;
+  if (s < 0) s = getenv("ISAC_E2E_TRACE") && atoi(getenv("ISAC_E2E_TRACE")) ? 1 : 0;
+  return s;
+}
 /* release_solver: drops a queued decode variant without decoding it: returns its pending solver entry with no credit, at once.
  *   Called when a job is evicted, refused or skipped, so the solver's FIFO does not keep it as a lost CRC. Caller: enqueue_one() and queue_thread().
  */
@@ -1318,6 +1342,50 @@ static void cdmrs_run(void *arg)
     LOG_A(PHY, "SENSING: DMRS_ID_ASYNC done=%lu queued=%lu dropped=%lu\n", (unsigned long)n,
           (unsigned long)__atomic_load_n(&g_cdmrs_q.queued, __ATOMIC_RELAXED), (unsigned long)__atomic_load_n(&g_cdmrs_q.dropped, __ATOMIC_RELAXED));
 }
+/* SYSAN ISAC_PDSCH_DMRS_ID2_ASYNC=1 (default off, needs ISAC_PDSCH_DMRS_ID_ASYNC): the cell-wide dedicated DL DM-RS id
+ * observation (g_dl_dmrs_id, 1024 candidates, every C-RNTI grant until decided) runs on dmrsIdBg too. [MEASURED, DGX replay b,
+ * perf -g] it was ~20 % of the PDSCH consumers' CPU (nr_dmrs_id_accumulate + its DM-RS and Gold generation), after each decode. */
+typedef struct {
+  c16_t *row;
+  int ns, ofdm, start_sc, rb_offset, nrb, n_rb_dl, nsym, slot, sym, nscid, normal, cfg_type, nid_cell;
+} dldmrs_obs_t;
+static void dldmrs_run(void *arg)
+{
+  dldmrs_obs_t *o = arg;
+  pthread_mutex_lock(&g_dl_dmrs_id_lock[o->ns]);
+  nr_dmrs_id_2stage_t *dst = &g_dl_dmrs_id[o->ns];
+  if (!g_dl_dmrs_id_init[o->ns]) { nr_dmrs_id_2stage_init(dst, "PDSCH", o->nid_cell); g_dl_dmrs_id_init[o->ns] = true; }
+  if (nr_dmrs_id_2stage_decided(dst) < 0)
+    nr_dmrs_id_2stage_accumulate(dst, o->row, o->ofdm, o->start_sc, o->rb_offset, o->nrb, o->n_rb_dl, o->nsym, o->slot, o->sym,
+                                 o->nscid, o->normal, o->cfg_type);
+  pthread_mutex_unlock(&g_dl_dmrs_id_lock[o->ns]);
+  free(o->row);
+  free(o);
+}
+static int dldmrs_async_on(void)
+{
+  static int on = -1;
+  if (on < 0) on = cdmrs_async_on() && getenv("ISAC_PDSCH_DMRS_ID2_ASYNC") && atoi(getenv("ISAC_PDSCH_DMRS_ID2_ASYNC")) ? 1 : 0;
+  return on;
+}
+/* dldmrs_defer: queues one observation; returns false (caller runs it inline) only when async is off. Full queue: dropped, counted. */
+static bool dldmrs_defer(const dldmrs_obs_t *t, const c16_t *row)
+{
+  if (!dldmrs_async_on())
+    return false;
+  if (!nr_bgq_room(&g_cdmrs_q)) {
+    __atomic_fetch_add(&g_cdmrs_q.dropped, 1, __ATOMIC_RELAXED);
+    return true;
+  }
+  dldmrs_obs_t *j = malloc(sizeof(*j));
+  c16_t *r = malloc(sizeof(c16_t) * (size_t)t->ofdm);
+  if (!j || !r) { free(j); free(r); return true; }
+  *j = *t;
+  memcpy(r, row, sizeof(c16_t) * (size_t)t->ofdm);
+  j->row = r;
+  if (nr_bgq_push(&g_cdmrs_q, dldmrs_run, j) != 0) { free(r); free(j); }
+  return true;
+}
 static void coreset_dmrs_observe_or_defer(const cdmrs_obs_t *o, const c16_t *row)
 {
   if (!cdmrs_async_on()) {
@@ -1418,6 +1486,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       g_count--;
     }
     pthread_mutex_unlock(&g_lock);
+    const uint64_t taken_ns = nr_passive_e2e_trace() ? now_ns() : 0; /* SYSAN e2e: dequeue time */
     const uint64_t slot_t0 = slot_timing ? now_ns() : 0;
     if (s_sigt) {
       sigt_t0 = now_ns();
@@ -1895,7 +1964,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_dlsch_eq_override = -1;
     nr_pdsch_chest_occ_override = -1;
     nr_pdsch_ldpc_iters_override = -1;
-    const double dec_us = (double)(now_ns() - dec_t0) / 1000.0;
+    const uint64_t dec_t1 = now_ns();
+    const double dec_us = (double)(dec_t1 - dec_t0) / 1000.0;
     if (owned) {
       const uint64_t done = now_ns();
       const uint64_t cpu_fep = nr_pdsch_passive_last_fep_ns();
@@ -2029,9 +2099,24 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     if (dec.evm_valid && (!job.layout_probe || getenv("ISAC_PDSCH_EVM_PROBES"))
         && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
       /* ISAC_PDSCH_EVM_GRANT (T26c): one line per full decode, decoded AND failed. snr = -20 log10(evm). */
+      /* SYSAN ISAC_E2E_TRACE=1: e2e=arr2enq,qwait,pre,dec,first_body,bodies,tot,lag (us; lag = producer slots ahead at done):
+       * slot samples read -> DCI accepted (scan) -> dequeued -> decode call start (IQ copy, GPU FEP group) -> decode end */
+      char e2e[128] = "";
+      if (nr_passive_e2e_trace()) {
+        extern uint64_t nr_pdsch_passive_decode_first_body_ns(void);
+        unsigned eb = 0;
+        uint64_t ebody = 0, estage = 0;
+        nr_pdsch_passive_decode_slow_stats(&eb, &ebody, &estage);
+        const uint64_t arr = nr_passive_slot_arrival_ns(job.absolute_slot);
+#define E2E_US(a, b) ((a) && (b) && (b) >= (a) ? (long)(((b) - (a)) / 1000) : -1L)
+        snprintf(e2e, sizeof(e2e), " e2e=%ld,%ld,%ld,%ld,%ld,%u,%ld,%ld", E2E_US(arr, enqueue_ns), E2E_US(enqueue_ns, taken_ns),
+                 E2E_US(taken_ns, dec_t0), E2E_US(dec_t0, dec_t1), (long)(nr_pdsch_passive_decode_first_body_ns() / 1000), eb,
+                 E2E_US(arr, dec_t1), atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed) - job.absolute_slot);
+#undef E2E_US
+      }
       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
                  "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f probe=%d kappa=%.2f alpha=%.2f,%.2f,%.2f,%.2f "
-                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f\n",
+                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f%s\n",
             job.rnti, job.frame_rx, job.nr_slot_rx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.grant.mcs, job.grant.mcs_table,
             dec.cw.qamModOrder, dec.cw.Nl, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, dec.evm_nsym, dec.evm_pct,
             dec.evm_pct > 0.f ? -20.0 * log10(dec.evm_pct / 100.0) : 99.0, dec.br_snr_db[0], dec.br_snr_db[1], dec.br_snr_db[2],
@@ -2040,7 +2125,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
             dec.br_alpha[0], dec.br_alpha[1], dec.br_alpha[2], dec.br_alpha[3], dec.br_nvar_db[0], dec.br_nvar_db[1],
             dec.br_nvar_db[2], dec.br_nvar_db[3], dec.rho, (int)job.mrc_mode, dec.dmrs_ports, dec.n_cdm, dec.dmrs_add, eq_used, occ_used, it_used, dec_us,
             job.grant.rv, job.grant.ndi, job.grant.harq_pid, (unsigned)dec.cw.TBS, dec.layer_snr_db[0], dec.layer_snr_db[1],
-            dec.layer_snr_db[2], dec.layer_snr_db[3], (int)dec.l2maxh, dec.zabs);
+            dec.layer_snr_db[2], dec.layer_snr_db[3], (int)dec.l2maxh, dec.zabs, e2e);
       if (dec.evm_pct > 0.f && !job.layout_probe)
         nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)), (int)job.mrc_mode, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     }
@@ -2239,7 +2324,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           coreset_dmrs_observe_or_defer(&o, &rxdataF[0][sym * fp->ofdm_symbol_size]);
         }
         const int dl_ns = pdu->nscid & 1;
-        if (credit_ok && job.grant.scr_dedicated && pr_nrb > 0 && pdu->dlDmrsSymbPos
+        if (credit_ok && job.grant.scr_dedicated && pr_nrb > 0 && pdu->dlDmrsSymbPos && nr_dmrs_id_2stage_decided(&g_dl_dmrs_id[dl_ns]) < 0
+            && dldmrs_async_on()) {
+          const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+          const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
+          const dldmrs_obs_t t = {.ns = dl_ns, .ofdm = fp->ofdm_symbol_size, .start_sc = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12,
+                                  .rb_offset = pr_rb0 + (pdu->refPoint ? 0 : pdu->BWPStart), .nrb = pr_nrb, .n_rb_dl = fp->N_RB_DL,
+                                  .nsym = fp->symbols_per_slot, .slot = job.nr_slot_rx, .sym = sym, .nscid = pdu->nscid,
+                                  .normal = fp->Ncp == NR_NORMAL, .cfg_type = pdu->dmrsConfigType, .nid_cell = fp->Nid_cell};
+          dldmrs_defer(&t, &rxdataF[0][sym * fp->ofdm_symbol_size]);
+        } else if (credit_ok && job.grant.scr_dedicated && pr_nrb > 0 && pdu->dlDmrsSymbPos
             && nr_dmrs_id_2stage_decided(&g_dl_dmrs_id[dl_ns]) < 0 && pthread_mutex_trylock(&g_dl_dmrs_id_lock[dl_ns]) == 0) {
           nr_dmrs_id_2stage_t *dst = &g_dl_dmrs_id[dl_ns];
           if (!g_dl_dmrs_id_init[dl_ns]) { nr_dmrs_id_2stage_init(dst, "PDSCH", ue->frame_parms.Nid_cell); g_dl_dmrs_id_init[dl_ns] = true; }

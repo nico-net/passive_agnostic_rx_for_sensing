@@ -18,7 +18,7 @@ typedef struct {
   bool used, timed;
   long last_slot;
   double correction;
-  uint32_t scan_cursor;
+  uint32_t scan_cursor, scan_tick;
   nr_pusch_ul_disc_result_t found;
 } ul_disc_track_t;
 static ul_disc_track_t tracks[UL_DISC_TRACKS];
@@ -248,7 +248,14 @@ nr_pusch_ul_disc_result_t nr_pusch_ul_disc_search(const nr_pusch_ul_disc_grid_t 
   ul_disc_track_t *t = track(rnti);
   const nr_pusch_ul_disc_result_t cached = t->found;
   const uint32_t cursor = t->scan_cursor;
-  t->scan_cursor = cursor + UL_DISC_SCAN_PER_GRANT;
+  /* SYSAN ISAC_UL_DISC_EVERY=N (default 1 = every grant): the blind 64-id scan below (score_impl, [MEASURED, DGX replay b, perf]
+   * ~68 % of the UL consumers' CPU) runs on one grant in N per RNTI; the others try the cached result and the DL-known ids only.
+   * shortcut: discovery of an unknown UL DM-RS id takes N times more grants; upgrade to a background scan on a snapshot. */
+  static int every = -1;
+  if (every < 0) every = getenv("ISAC_UL_DISC_EVERY") && atoi(getenv("ISAC_UL_DISC_EVERY")) > 1 ? atoi(getenv("ISAC_UL_DISC_EVERY")) : 1;
+  const bool scan_now = every == 1 || (t->scan_tick++ % (uint32_t)every) == 0;
+  if (scan_now)
+    t->scan_cursor = cursor + UL_DISC_SCAN_PER_GRANT;
   pthread_mutex_unlock(&track_lock);
   int front_load[2] = {0,0};
   for (int type = 0; type < 2; ++type) {
@@ -283,7 +290,7 @@ nr_pusch_ul_disc_result_t nr_pusch_ul_disc_search(const nr_pusch_ul_disc_grid_t 
         if (best.accepted) goto publish;
       }
   }
-  if (!best.accepted) {
+  if (!best.accepted && scan_now) {
     /* A first DM-RS symbol is enough to reject almost every wrong ID, and it
      * avoids a 16-bit Cartesian product with all additional-position masks.
      * Type A begins at l0=2/3; type B begins at the allocation start. Once a
