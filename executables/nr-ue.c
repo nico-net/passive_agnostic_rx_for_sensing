@@ -1745,6 +1745,12 @@ void *UE_thread(void *arg)
       struct timespec diag_ts;
       clock_gettime(CLOCK_REALTIME, &diag_ts);
       atomic_store_explicit(&nr_ue_diag_producer_absolute_slot, absolute_slot, memory_order_relaxed);
+      { /* SYSAN ISAC_E2E_TRACE=1: slot arrival time for per-grant end-to-end latency */
+        extern int nr_passive_e2e_trace(void);
+        extern void nr_passive_note_slot_arrival(long abs_slot);
+        if (nr_passive_e2e_trace())
+          nr_passive_note_slot_arrival(absolute_slot);
+      }
       /* ISAC_UL_DBG_LOG=1 (diagnostic, default off): absolute slot -> radio timestamp once per frame,
        * so offline tools can map a DCI's source slot onto raw IQ sample indices. */
       static int s_uldbg_ts = -1;

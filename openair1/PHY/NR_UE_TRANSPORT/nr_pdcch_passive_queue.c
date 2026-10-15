@@ -176,7 +176,39 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
     proc.nr_slot_rx = job.nr_slot_rx;
     proc.gNB_id     = job.gNB_id;
 
+    extern int nr_passive_e2e_trace(void);
+    extern uint64_t nr_passive_slot_arrival_ns(long abs_slot);
+    struct timespec e0;
+    if (nr_passive_e2e_trace()) clock_gettime(CLOCK_MONOTONIC, &e0);
     nr_pdcch_blind_monitor_run_occasion(ue, &proc, true /* already off the RT thread */, job.absolute_slot);
+    if (nr_passive_e2e_trace()) {
+      /* SYSAN SCAN_E2E: slot read -> scan start (wait), scan occasion wall (run); 50-us bins, p50/p90/p99 every 4000 occasions */
+      static _Atomic uint32_t h[2][101];
+      static _Atomic uint64_t n_occ;
+      struct timespec e1;
+      clock_gettime(CLOCK_MONOTONIC, &e1);
+      const uint64_t t0 = (uint64_t)e0.tv_sec * 1000000000ull + e0.tv_nsec, t1 = (uint64_t)e1.tv_sec * 1000000000ull + e1.tv_nsec;
+      const uint64_t arr = nr_passive_slot_arrival_ns(job.absolute_slot);
+      if (arr && t0 >= arr) {
+        const uint64_t w = (t0 - arr) / 50000, r = (t1 - t0) / 50000;
+        atomic_fetch_add(&h[0][w > 100 ? 100 : w], 1);
+        atomic_fetch_add(&h[1][r > 100 ? 100 : r], 1);
+        if (atomic_fetch_add(&n_occ, 1) % 4000 == 3999) {
+          int q[2][3];
+          for (int k = 0; k < 2; k++) {
+            uint64_t tot = 0, c = 0;
+            for (int b = 0; b <= 100; b++) tot += h[k][b];
+            const double f[3] = {0.5, 0.9, 0.99};
+            for (int j = 0, b = 0; j < 3; j++) {
+              while (b < 100 && c + h[k][b] < f[j] * tot) c += h[k][b++];
+              q[k][j] = (b + 1) * 50;
+            }
+          }
+          LOG_A(PHY, "SENSING: SCAN_E2E occ=%lu wait_us p50<=%d p90<=%d p99<=%d run_us p50<=%d p90<=%d p99<=%d\n",
+                (unsigned long)atomic_load(&n_occ), q[0][0], q[0][1], q[0][2], q[1][0], q[1][1], q[1][2]);
+        }
+      }
+    }
     nr_slot_fep_fo_override_hz = saved_fo;
     atomic_fetch_add_explicit(&g_processed, 1, memory_order_relaxed);
   }
