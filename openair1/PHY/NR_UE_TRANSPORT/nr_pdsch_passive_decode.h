@@ -287,6 +287,10 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
 /* Queue-owned IQ: installed only after a guarded copy, valid until the next group.
  * FEP tasks receive these pointers explicitly; no borrowed TLS on pool workers. */
 void nr_pdsch_passive_set_owned_iq(c16_t **rx, int slot);
+/// RECOVERY_ASYNC (Task 6): per-thread mode, 1 consumer (defer the recovery arms), 2 recovery worker, 0 off; setting it clears the deferred flag.
+void nr_pdsch_passive_recov_mode(int mode);
+/// True when the last decode of this thread returned a failed first pass with its recovery arms deferred.
+bool nr_pdsch_passive_recov_deferred(void);
 c16_t **nr_pdsch_passive_iq_for_slot(int slot, c16_t **live);
 uint64_t nr_pdsch_passive_last_fep_ns(void);
 

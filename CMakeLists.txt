@@ -1017,6 +1017,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_rm_genie.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_record.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c
@@ -2492,6 +2493,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdsch_gpu_demod PRIVATE nr_phy_common UTIL)
   add_dependencies(tests test_nr_pdsch_gpu_demod)
   add_test(NAME test_nr_pdsch_gpu_demod COMMAND ./test_nr_pdsch_gpu_demod)
+
+  add_executable(test_nr_pdsch_recovery ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_recovery_test.cc
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c)
+  target_include_directories(test_nr_pdsch_recovery PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_recovery PRIVATE GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_pdsch_recovery)
+  add_test(NAME test_nr_pdsch_recovery COMMAND ./test_nr_pdsch_recovery)
 
   add_executable(test_nr_isac_ssb_source ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/nr_isac_ssb_source_test.cc)
   target_include_directories(test_nr_isac_ssb_source PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)

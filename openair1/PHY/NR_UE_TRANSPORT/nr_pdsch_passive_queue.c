@@ -103,6 +103,7 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h" // nr_dlsch_unscrambling (GPU self-check)
+#include "nr_pdsch_recovery.h" // Task 6 RECOVERY_ASYNC
 
 /* T21: fixed-size consumer-owned IQ arenas, allocated before threads start. No
  * CUDA registration or allocation. Only a slot window is copied per group. */
@@ -1928,8 +1929,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ds_c0);
     }
     const uint64_t dec_t0 = now_ns();
+    nr_pdsch_passive_recov_mode(nr_pdsch_recovery_enabled() && !job.layout_probe ? 1 : 0); /* RECOVERY_ASYNC: arms go to pdschRecov */
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
+    const bool recov_deferred = nr_pdsch_passive_recov_deferred();
+    nr_pdsch_passive_recov_mode(0);
     if (s_decslow && now_ns() - dec_t0 > 20000000ull) {
       static _Atomic int s_left = 300;
       struct rusage ru1;
@@ -2456,6 +2460,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         }
       }
     }
+    if (recov_deferred && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !gpu_health_failed) {
+      /* The failed first pass is published above as it stands; its recovery arms run on the worker (late rescue, recov_late_publish). */
+      nr_pdsch_passive_job_t *wj = malloc(sizeof(*wj));
+      const nr_recov_key_t rk = {.rnti = job.rnti, .harq_pid = (uint8_t)job.grant.harq_pid, .ndi = (uint8_t)job.grant.ndi,
+                                 .abs_slot = (uint32_t)job.absolute_slot, .arm_mask = 0x1f};
+      if (wj) {
+        *wj = job;
+        if (nr_pdsch_recovery_submit(&rk, wj)) free(wj);
+      }
+    }
     if (cb0_on) { /* decode error / unsupported: the TB path did not feed this grant (no-op when fed above) */
       const nr_td_cb0_tb_t cb0_tb = {.tb_fed = false, .tb_pass = false, .tb_decoder = cb0_tb_decoder, .iq_ok_after = credit_ok,
                                      .rv = job.grant.rv, .nl = dec.cw.Nl};
@@ -2485,6 +2499,88 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d exiting\n", idx);
   return NULL;
+}
+
+/* ---- RECOVERY_ASYNC worker side (Task 6). Runs on the pdschRecov thread, which has its own rxdataF and IQ snapshot.
+ * The IQ is re-copied from the sample ring when the job starts (same guarded copy as the consumers'), so the consumer pays no copy; a slot that left
+ * the ring meanwhile is dropped as expired. The whole decode call is repeated there with the arms enabled (the first body is deterministic and
+ * fails again unless the CPU path rescues it; this keeps every thread-local of the decoder consistent) with the consumer's per-job overrides. */
+static __thread bool t_recov_snapshot;
+static bool recov_expired(const nr_recov_key_t *k)
+{
+  return !t_recov_snapshot && g_ue
+         && !nr_passive_samples_valid(atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), k->abs_slot,
+                                      g_ue->frame_parms.slots_per_frame);
+}
+static int recov_run(void *p, const nr_recov_key_t *k)
+{
+  const nr_pdsch_passive_job_t *jb = p;
+  PHY_VARS_NR_UE *ue = g_ue;
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const size_t rxF_sz = fp->samples_per_slot_wCP;
+  static __thread c16_t *rxF, *iq[NB_ANTENNAS_RX];
+  if (!rxF) {
+    rxF = malloc16_clear((size_t)fp->nb_antennas_rx * rxF_sz * sizeof(c16_t));
+    for (int a = 0; a < fp->nb_antennas_rx; a++) iq[a] = malloc16_clear(2u * (size_t)fp->samples_per_frame * sizeof(c16_t));
+  }
+  for (int a = 0; a < fp->nb_antennas_rx; a++)
+    if (!rxF || !iq[a]) return 0;
+  NR_CFG_EPOCH_WORK(jb->config_epoch, &g_dropped_epoch);
+  if (!nr_cfg_epoch_work_current()) return 0;
+  const size_t ring = 2u * fp->samples_per_frame, early = fp->nb_prefix_samples / fp->ofdm_offset_divisor;
+  const size_t off = get_samples_slot_timestamp(fp, jb->nr_slot_rx);
+  const size_t window = fp->nb_prefix_samples0 + fp->ofdm_symbol_size + (fp->symbols_per_slot - 1) * (fp->ofdm_symbol_size + fp->nb_prefix_samples)
+                        + fp->ofdm_symbol_size;
+  void *dst[NB_ANTENNAS_RX];
+  const void *src[NB_ANTENNAS_RX];
+  for (int a = 0; a < fp->nb_antennas_rx; a++) { dst[a] = iq[a]; src[a] = ue->common_vars.rxdata[a]; }
+  if (!nr_pdsch_copy_iq(dst, src, fp->nb_antennas_rx, ring * sizeof(c16_t), ((off + ring - early) % ring) * sizeof(c16_t), window * sizeof(c16_t),
+                        jb->absolute_slot, fp->slots_per_frame, gpu_req_producer, NULL))
+    return 2;
+  t_recov_snapshot = true; /* the snapshot is private: ring overwrite no longer matters */
+  nr_pdsch_passive_set_owned_iq(iq, jb->nr_slot_rx);
+  UE_nr_rxtx_proc_t proc = {0};
+  proc.frame_rx = jb->frame_rx; proc.nr_slot_rx = jb->nr_slot_rx; proc.gNB_id = jb->gNB_id;
+  nr_pdsch_passive_job_t job = *jb;
+  job.grant.check_sample_lifetime = false;
+  job.grant.source_absolute_slot = job.absolute_slot;
+  const double saved_fo = nr_slot_fep_fo_override_hz;
+  nr_slot_fep_fo_override_hz = job.fo_hz;
+  extern __thread int nr_dlsch_mrc_mode_override, nr_dlsch_irc_override;
+  nr_dlsch_mrc_mode_override = job.mrc_mode >= 4 ? 1 : (job.mrc_mode > 0 ? job.mrc_mode : -1);
+  nr_dlsch_irc_override = job.mrc_mode == 4 ? 3 : job.mrc_mode == 5 ? 2 : job.mrc_mode == 6 ? 4 : (job.mrc_mode > 0 ? 0 : -1);
+  nr_pdsch_passive_probe_mode(false);
+  nr_pdsch_passive_ptrs_sweep_allow(job.sweep_ticket.generation == 0 || job.sweep_ticket.settled);
+  nr_pdsch_passive_recov_mode(2);
+  nr_pdsch_passive_decode_result_t dec = {0};
+  const nr_pdsch_passive_decode_status_t st = nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, (c16_t(*)[rxF_sz])rxF, &dec);
+  nr_pdsch_passive_recov_mode(0);
+  nr_dlsch_mrc_mode_override = -1;
+  nr_dlsch_irc_override = -1;
+  nr_slot_fep_fo_override_hz = saved_fo;
+  nr_pdsch_passive_set_owned_iq(NULL, -1);
+  int ret = 0;
+  if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && dec.tb && dec.cw.TBS > 0) {
+    if (!nr_cfg_epoch_work_current()) {
+      nr_pdsch_recovery_count_stale();
+    } else if (nr_pdsch_recovery_publish(k, dec.tb, dec.cw.TBS) == 0) {
+      /* LATE EVENT: the first pass was already published as CRC-FAIL (obs record, decoded/rnti_dec counters, solver and Technique D feedback
+       * all saw a failure and are NOT amended: a second record or feedback for the same grant would double count it). The rescue adds
+       * crc_ok / rnti_ok (so the PDSCH CRC-OK totals include it), the payload consumers (RRC harvest, MAC TA), the replay capture and
+       * one RECOVLATE line. */
+      atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+      atomic_fetch_add_explicit(&g_rnti_ok[job.rnti], 1, memory_order_relaxed);
+      nr_passive_rrc_harvest(dec.tb, dec.cw.TBS / 8);
+      nr_passive_mac_report_ta(job.rnti, job.rnti_class == NR_BLIND_RNTI_CLASS_RA, job.frame_rx, job.nr_slot_rx, (int)fp->numerology_index,
+                               (uint32_t)job.absolute_slot, dec.tb, dec.cw.TBS / 8);
+      nr_passive_replay_dl(&job, &dec);
+      LOG_A(PHY, "SENSING: RECOVLATE rnti=0x%04x %d.%d abs=%ld pid=%u ndi=%u tbs=%u recovered_cfg=%d\n", job.rnti, job.frame_rx, job.nr_slot_rx,
+            (long)job.absolute_slot, job.grant.harq_pid, job.grant.ndi, (unsigned)dec.cw.TBS, (int)dec.config_recovered);
+    }
+    ret = 1;
+  }
+  t_recov_snapshot = false;
+  return ret;
 }
 
 static void report_sweep(const nr_pdsch_sweep_report_t *r)
@@ -2667,6 +2763,10 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     }
     threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name, core, 40);
   }
+  if (nr_pdsch_recovery_enabled()) { /* ISAC_PDSCH_RECOVERY_ASYNC=1, default off */
+    nr_pdsch_recovery_set_hooks(recov_run, recov_expired);
+    LOG_A(PHY, "SENSING: RECOV worker %s (ISAC_PDSCH_RECOVERY_ASYNC)\n", nr_pdsch_recovery_start(0, NULL) == 0 ? "started" : "FAILED to start");
+  }
   LOG_I(PHY, "SENSING: passive PDSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1);
   return true;
@@ -2798,6 +2898,8 @@ static bool probe_last_enabled(void)
  */
 static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) /* g_lock held by the caller */
 {
+  if (nr_pdsch_recovery_enabled() && job->rnti_class < NR_BLIND_RNTI_CLASS_SI && !job->bwp_probe_entry) /* a newer TB on this HARQ process stales older late rescues */
+    nr_pdsch_recovery_note_newer(job->rnti, (uint8_t)job->grant.harq_pid, (uint8_t)job->grant.ndi, (uint32_t)job->absolute_slot);
   /* DECODE BUDGET BY SENSING VALUE (2026-09-15). Under overload the sensing pipeline wants the
    * slot's CFR coverage, so a grant narrower than 1/8 of the band is refused while the ring is
    * >= 90 % full rather than evicting an older, wider one. Narrow grants of a shared slot still
@@ -2905,6 +3007,11 @@ int nr_pdsch_passive_queue_backlog_real(void)
  *   counters. Bins in slots: < 2/4/8/12/16/18/24/32/inf. Caller: nr_pdcch_blind_monitor_rt.c (PDSCHQ summary). */
 void nr_pdsch_passive_queue_p99_dump(void)
 {
+  if (nr_pdsch_recovery_enabled()) {
+    char rs[200];
+    nr_pdsch_recovery_stats(rs, sizeof rs);
+    LOG_A(PHY, "SENSING: %s\n", rs);
+  }
   static int on = -1;
   if (on < 0)
     on = getenv("ISAC_PDTIM_CLASS") && atoi(getenv("ISAC_PDTIM_CLASS")) ? 1 : 0;
@@ -2964,6 +3071,12 @@ void nr_pdsch_passive_queue_stop(void)
 {
   if (!atomic_load_explicit(&g_running, memory_order_acquire)) {
     return;
+  }
+  if (nr_pdsch_recovery_enabled()) {
+    char rs[200];
+    nr_pdsch_recovery_stop();
+    nr_pdsch_recovery_stats(rs, sizeof rs);
+    LOG_A(PHY, "SENSING: %s\n", rs);
   }
   atomic_store_explicit(&g_stop, 1, memory_order_release);
   pthread_mutex_lock(&g_lock);

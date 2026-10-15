@@ -1569,6 +1569,12 @@ static __thread bool t_eq_snap = false;
 static __thread c16_t *t_eq_snap_buf = NULL;
 static __thread size_t t_eq_snap_cap = 0, t_eq_snap_n = 0;
 uint32_t nr_pdsch_passive_last_llr(const int16_t **p) { *p = t_last_llr; return t_last_G; }
+/* RECOVERY_ASYNC (Task 6): 1 = consumer: a failed first pass whose recovery arms would run is returned as it is and flagged deferred;
+ * 2 = the pdschRecov worker: runs the arms (S toggle first, no backlog yield). 0 = unchanged behaviour. */
+static __thread int t_recov_mode;
+static __thread bool t_recov_deferred;
+void nr_pdsch_passive_recov_mode(int mode) { t_recov_mode = mode; t_recov_deferred = false; }
+bool nr_pdsch_passive_recov_deferred(void) { return t_recov_deferred; }
 static __thread c16_t **t_owned_iq;
 static __thread int t_owned_slot = -1;
 static __thread uint64_t t_fep_done_ns;
@@ -6430,6 +6436,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
       || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_gw_used || (t_quiet && !t_qam_ab_alt) || t_llr_ovr
       || nr_agnostic_v2() || harq_combine_on())
     return st;
+  if (t_recov_mode == 1 && !t_qam_ab_alt) { /* RECOVERY_ASYNC: every arm below runs on the worker; the failed first pass stands */
+    t_recov_deferred = true;
+    return st;
+  }
   const bool try_start = tdra_retry && dlsch_config->start_symbol <= 1
                          && dlsch_config->start_symbol + dlsch_config->number_symbols == 14;
   const bool try_cdm = cdm_retry && dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1
@@ -6500,7 +6510,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
      * Type-1 ports 0/1 occupy CDM group 0; either one or two groups is legal. */
     for (int cv = 0; cv < n_csi_variants && !recovered && !yielded; cv++) {
       for (int a = 1; a <= (try_tint ? 31 : 15) && !recovered; a++) {
-        const int arm = ry && cv == 0 && a <= 2 ? 3 - a : a; /* RETRY_YIELD: the S toggle (arm 2) first */
+        const int arm = (ry || t_recov_mode == 2) && cv == 0 && a <= 2 ? 3 - a : a; /* RETRY_YIELD / worker: the S toggle (arm 2) first */
         if (cv > 0 && !(arm & 1)) continue;
         if (((arm & 1) && cv == 0 && !try_csi) || ((arm & 2) && !try_start)
             || ((arm & 4) && !try_cdm) || ((arm & 8) && !try_wide) || ((arm & 16) && !try_tint))
@@ -6508,7 +6518,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
         const int ry_k = (arm + 32 * cv) % RY_ARMS;
         if (ry == 2 && !ry_arm_worth(ry_k))
           continue;
-        if (ry && !(cv == 0 && arm == 2)
+        if (ry && t_recov_mode != 2 && !(cv == 0 && arm == 2)
             && (ry_backlog() > 0 || (retry_budget_us() && dec_now_ns() - t_dec_t0_ns > (uint64_t)retry_budget_us() * 1000ull))) {
           yielded = true; /* a full decode waits for a consumer: stop this grant's long-shot arms */
           atomic_fetch_add_explicit(&g_ry_yields, 1, memory_order_relaxed);
