@@ -1323,7 +1323,7 @@ static bool discovered_additional_poll(void)
 {
   if (nr_cfg_reconf_enabled() && s_add_disc.epoch != nr_cfg_epoch_current())
     nr_pdcch_discovered_reset();
-  if (s_add_disc.active || s_add_disc.next < s_add_disc.n || (++s_add_disc.polls & 1023) != 1)
+  if (s_add_disc.active || s_add_disc.next < s_add_disc.n || (++s_add_disc.polls & (nr_pdcch_nid_gpu_primary() ? 63 : 1023)) != 1) /* primary: the solver's id set grows within a second */
     return false;
   if (nr_pdcch_nid_gpu_enabled()) {
     /* In-process GPU stage-1/2 (T17): bank its records too, not only the walk's catalogue hand-off. */
