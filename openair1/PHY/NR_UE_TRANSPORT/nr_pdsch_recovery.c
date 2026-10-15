@@ -22,9 +22,12 @@ static bool g_run, g_stop;
 static pthread_t g_th;
 static int (*g_run_fn)(void *, const nr_recov_key_t *);
 static bool (*g_exp_fn)(const nr_recov_key_t *);
+static void (*g_fb_fn)(void *, const nr_recov_key_t *, int);
 static _Atomic uint64_t g_sub, g_resc, g_stale, g_expd, g_full, g_late[LATE_BINS];
 static bool g_nice;
-static __thread uint64_t t_cur_ns; /* submit time of the job the worker is running */
+static __thread uint64_t t_cur_ns;
+static __thread void *t_cur_job; /* job the worker is on */
+static __thread bool t_fb_done; /* submit time of the job the worker is running */
 
 /* newest (rnti, harq_pid) slot seen: 65536 hashed cells; a collision only ever discards a rescue (never delivers a wrong one) */
 static _Atomic uint64_t g_seen[65536]; /* (abs_slot + 1) << 8 | ndi; 0 = none */
@@ -43,10 +46,20 @@ static uint64_t now_ns(void)
   clock_gettime(CLOCK_MONOTONIC, &t);
   return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
-void nr_pdsch_recovery_set_hooks(int (*run)(void *, const nr_recov_key_t *), bool (*expired)(const nr_recov_key_t *))
+void nr_pdsch_recovery_set_hooks(int (*run)(void *, const nr_recov_key_t *), bool (*expired)(const nr_recov_key_t *),
+                                 void (*feedback)(void *, const nr_recov_key_t *, int))
 {
   g_run_fn = run;
   g_exp_fn = expired;
+  g_fb_fn = feedback;
+}
+/* The deferred job's learning feedback is delivered exactly once, whatever happens to it (see the header). */
+static void feedback(const nr_recov_key_t *k, int outcome)
+{
+  if (g_fb_fn && t_cur_job && !t_fb_done) {
+    t_fb_done = true;
+    g_fb_fn(t_cur_job, k, outcome);
+  }
 }
 bool nr_pdsch_recovery_enabled(void)
 {
@@ -66,13 +79,16 @@ int nr_pdsch_recovery_publish(const nr_recov_key_t *k, const uint8_t *tb, uint32
   (void)tb; (void)tbs;
   if (g_exp_fn && g_exp_fn(k)) {
     atomic_fetch_add_explicit(&g_expd, 1, memory_order_relaxed);
+    feedback(k, NR_RECOV_FB_FAIL_NOCREDIT);
     return 2;
   }
   if (stale(k)) {
     atomic_fetch_add_explicit(&g_stale, 1, memory_order_relaxed);
+    feedback(k, NR_RECOV_FB_FAIL);
     return 1;
   }
   atomic_fetch_add_explicit(&g_resc, 1, memory_order_relaxed);
+  feedback(k, NR_RECOV_FB_RESCUED);
   if (t_cur_ns) {
     uint64_t ms = (now_ns() - t_cur_ns) / 1000000ull;
     atomic_fetch_add_explicit(&g_late[ms < LATE_BINS ? ms : LATE_BINS - 1], 1, memory_order_relaxed);
@@ -101,15 +117,28 @@ static void *worker(void *arg)
     g_head = (g_head + 1) % g_depth;
     g_n--;
     pthread_mutex_unlock(&g_mu);
+    t_cur_job = e.job;
+    t_fb_done = false;
     if (g_exp_fn && g_exp_fn(&e.k)) {
       atomic_fetch_add_explicit(&g_expd, 1, memory_order_relaxed);
+      feedback(&e.k, NR_RECOV_FB_FAIL_NOCREDIT);
     } else if (stale(&e.k)) { /* a newer slot of this process is known: do not even run the arms */
       atomic_fetch_add_explicit(&g_stale, 1, memory_order_relaxed);
+      feedback(&e.k, NR_RECOV_FB_FAIL);
     } else if (g_run_fn) {
       t_cur_ns = e.t_ns;
-      if (g_run_fn(e.job, &e.k) == 2) atomic_fetch_add_explicit(&g_expd, 1, memory_order_relaxed);
+      const int r = g_run_fn(e.job, &e.k);
+      if (r == 2) {
+        atomic_fetch_add_explicit(&g_expd, 1, memory_order_relaxed);
+        feedback(&e.k, NR_RECOV_FB_FAIL_NOCREDIT);
+      } else if (r == 0) {
+        feedback(&e.k, NR_RECOV_FB_FAIL); /* no arm rescued it: the first pass's verdict stands */
+      }
       t_cur_ns = 0;
+    } else {
+      feedback(&e.k, NR_RECOV_FB_FAIL);
     }
+    t_cur_job = NULL;
     free(e.job);
     pthread_mutex_lock(&g_mu);
   }

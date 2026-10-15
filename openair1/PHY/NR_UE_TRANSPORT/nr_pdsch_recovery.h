@@ -11,9 +11,14 @@
 typedef struct { uint16_t rnti; uint8_t harq_pid, ndi; uint32_t abs_slot; uint32_t arm_mask; } nr_recov_key_t;
 
 /* Worker callbacks. run(): executes the arms of one job (job_owned), calls nr_pdsch_recovery_publish() on a rescue; returns 0 nothing
- * rescued, 1 handled (published or discarded by publish), 2 IQ expired before an arm ran. The worker frees job_owned with free().
+ * rescued, 3 abandoned, 1 handled (published or discarded by publish), 2 IQ expired before an arm ran. The worker frees job_owned with free().
  * expired(): true when the IQ of the key's slot is no longer in the sample ring. Both optional (NULL: job is only freed / never expired). */
-void nr_pdsch_recovery_set_hooks(int (*run)(void *job_owned, const nr_recov_key_t *k), bool (*expired)(const nr_recov_key_t *k));
+/* feedback(job, k, outcome): the held-back learning feedback of the job (solver, Technique D, crc_note, ...), called by the worker exactly once per
+ * submitted job with NR_RECOV_FB_*: RESCUED (publish returned 0), FAIL (first-pass verdict stands: nothing rescued, or the rescue was stale, so
+ * no CRC-OK feedback), FAIL_NOCREDIT (IQ expired: a failure on expired IQ is not evidence). run() returning 3 = abandoned, no feedback at all. */
+enum { NR_RECOV_FB_RESCUED = 0, NR_RECOV_FB_FAIL = 1, NR_RECOV_FB_FAIL_NOCREDIT = 2 };
+void nr_pdsch_recovery_set_hooks(int (*run)(void *job_owned, const nr_recov_key_t *k), bool (*expired)(const nr_recov_key_t *k),
+                                 void (*feedback)(void *job, const nr_recov_key_t *k, int outcome));
 
 bool nr_pdsch_recovery_enabled(void); /* ISAC_PDSCH_RECOVERY_ASYNC, read once */
 /* depth <= 0: ISAC_PDSCH_RECOVERY_Q (default 32); cores NULL: ISAC_PDSCH_RECOVERY_CORES, else 10-14 minus the launcher's pinned cores (unpinned nice 10 if none left). Idempotent. 0 = running. */

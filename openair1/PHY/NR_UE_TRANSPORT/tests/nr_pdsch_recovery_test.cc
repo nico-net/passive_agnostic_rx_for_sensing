@@ -19,6 +19,14 @@ static int run_hold(void *, const nr_recov_key_t *)
   return 1;
 }
 static bool exp_hook(const nr_recov_key_t *) { return g_expired; }
+static std::atomic<int> g_fb[3];
+static void fb_hook(void *, const nr_recov_key_t *, int outcome) { g_fb[outcome]++; }
+static int run_publish(void *, const nr_recov_key_t *k)
+{
+  uint8_t tb[4] = {0};
+  nr_pdsch_recovery_publish(k, tb, 32);
+  return 1;
+}
 static std::string stat()
 {
   char b[256];
@@ -35,8 +43,8 @@ static unsigned long field(const char *name)
 struct Recovery : ::testing::Test {
   void SetUp() override
   {
-    g_expired = false; g_hold = false; g_ran = 0;
-    nr_pdsch_recovery_set_hooks(run_hold, exp_hook);
+    g_expired = false; g_hold = false; g_ran = 0; for (auto &f : g_fb) f = 0;
+    nr_pdsch_recovery_set_hooks(run_hold, exp_hook, fb_hook);
   }
   void TearDown() override { g_hold = false; nr_pdsch_recovery_stop(); }
 };
@@ -103,4 +111,28 @@ TEST(RecoveryOrder, FirstArmIsTdraToggle)
   EXPECT_EQ(0x7fffffff, seen); /* every nonempty combination exactly once */
   n = nr_pdsch_recovery_arm_order(0x0d, o); /* CSI|CDM|wide: no S toggle */
   EXPECT_EQ(1, o[0]);
+}
+
+static void wait_fb(int total)
+{
+  for (int i = 0; i < 400 && g_fb[0] + g_fb[1] + g_fb[2] < total; i++) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+}
+TEST_F(Recovery, RescueFeedsHooksStaleDoesNot)
+{
+  nr_pdsch_recovery_set_hooks(run_publish, exp_hook, fb_hook);
+  nr_pdsch_recovery_start(4, "0");
+  nr_recov_key_t k{0x4610, 5, 0, 4000, 2};
+  ASSERT_EQ(0, nr_pdsch_recovery_submit(&k, malloc(8)));
+  wait_fb(1);
+  EXPECT_EQ(1, g_fb[0].load()); /* rescued -> the feedback hooks get CRC-OK */
+  nr_pdsch_recovery_note_newer(0x4610, 5, 1, 4010);
+  ASSERT_EQ(0, nr_pdsch_recovery_submit(&k, malloc(8)));
+  wait_fb(2);
+  EXPECT_EQ(1, g_fb[0].load()); /* stale -> no CRC-OK feedback, the failure verdict is delivered once */
+  EXPECT_EQ(1, g_fb[1].load());
+  g_expired = true;
+  nr_recov_key_t k2{0x4611, 5, 0, 4100, 2};
+  ASSERT_EQ(0, nr_pdsch_recovery_submit(&k2, malloc(8)));
+  wait_fb(3);
+  EXPECT_EQ(1, g_fb[2].load()); /* expired IQ -> failure without credit */
 }

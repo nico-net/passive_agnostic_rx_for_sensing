@@ -2101,6 +2101,20 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         : (st_raw == NR_PDSCH_PASSIVE_DECODE_ERROR || st_raw == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) ? st_raw
         : (probe_outcome ? NR_PDSCH_PASSIVE_DECODE_CRC_OK : NR_PDSCH_PASSIVE_DECODE_CRC_FAIL);
     nr_pdsch_passive_probe_mode(false);
+    /* RECOVERY_ASYNC: the failed first pass goes to the worker, which delivers the held-back outcome feedback of this grant exactly once
+     * (recov_feedback: CRC-OK when an arm rescues it, the failure otherwise) -- so the learning state sees one verdict per grant, as inline.
+     * Submit failed (ring full): not held, the failure is fed here as without the flag. */
+    bool recov_hold = false;
+    if (recov_deferred && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !gpu_health_failed) {
+      nr_pdsch_passive_job_t *wj = malloc(sizeof(*wj));
+      const nr_recov_key_t rk = {.rnti = job.rnti, .harq_pid = (uint8_t)job.grant.harq_pid, .ndi = (uint8_t)job.grant.ndi,
+                                 .abs_slot = (uint32_t)job.absolute_slot, .arm_mask = 0x1f};
+      if (wj) {
+        *wj = job;
+        recov_hold = nr_pdsch_recovery_submit(&rk, wj) == 0;
+        if (!recov_hold) free(wj);
+      }
+    }
     if (dec.evm_valid && (!job.layout_probe || getenv("ISAC_PDSCH_EVM_PROBES"))
         && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
       /* ISAC_PDSCH_EVM_GRANT (T26c): one line per full decode, decoded AND failed. snr = -20 log10(evm). */
@@ -2134,7 +2148,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (dec.evm_pct > 0.f && !job.layout_probe)
         nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)), (int)job.mrc_mode, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     }
-    if (job.solver_token) {
+    if (job.solver_token && !recov_hold) {
       const bool sv_credit = owned || nr_passive_credit_allowed(
           atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), job.absolute_slot, slots_per_frame);
       /* A CRC pass is evidence even on IQ that expired meanwhile (overwritten samples cannot pass a CRC but by the
@@ -2185,7 +2199,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), job.absolute_slot, slots_per_frame);
     if (!credit_ok && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
       atomic_fetch_add_explicit(&g_stale_after_decode, 1, memory_order_relaxed);
-    if (credit_ok && job.bwp_entry > 0 && st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
+    if (credit_ok && !recov_hold && job.bwp_entry > 0 && st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
       nr_pdcch_bwp_crc_result(job.bwp_entry, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     if (owned && st == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
       atomic_fetch_add(&g_drop_reason[NR_PDSCH_DROP_UNSUPPORTED], 1);
@@ -2204,7 +2218,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       /* Scrambling-identity walk eligibility + link health (final review I1): every decode path reports
        * here; the in-line decode in nr_pdcch_blind_monitor_rt.c makes the same call. */
-      if (!job.layout_probe && credit_ok)
+      if (!job.layout_probe && credit_ok && !recov_hold)
         nr_pdsch_passive_crc_note(job.rnti, job.grant.scr_dedicated, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       /* TIMING ADVANCE FROM AN OVERHEARD PDU (nr_passive_mac_ta.h). The payload of a CRC-verified
        * transport block was being discarded; a RAR carries the gNB's absolute advance for the UE it
@@ -2356,17 +2370,17 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * in nr_pdcch_blind_monitor_rt.c consulted when it chose this grant's dlDataScramblingId --
          * only for grants where that sweep's own candidate was actually used (data_id_advance),
          * so an attempt that used the PCI fallback never perturbs a sweep it did not use. */
-        if (job.data_id_advance && credit_ok)
+        if (job.data_id_advance && credit_ok && !recov_hold)
           nr_pdsch_passive_data_id_feed(job.rnti, crc);
       }
       /* Technique D scoring: the TB CRC is the only oracle that can tell a right payload
        * interpretation from a wrong one, and this is the one place it is known. */
       nr_pdsch_cfg_hypothesis_t winner;
-      if (credit_ok)
+      if (credit_ok && !recov_hold)
         nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       /* a layout-probe job never enters the CB0 wiring (cb0_on false): its outcome is exempt from note_tb_decoder (it feeds only
        * the full-TB election counters; nr_pdsch_config_sweep.h, DECODER DOMINANCE) */
-      if (credit_ok && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
+      if (credit_ok && !recov_hold && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
         char bc12[192];
         nr_pdsch_passive_bc12_census(&job.sweep_ticket, &winner, bc12, sizeof(bc12));
         LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u%s%s\n",
@@ -2382,12 +2396,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       /* BC9 census AFTER the KL feedback: it only reads the sweep and must not delay or reorder the KL path (a trial whose
        * own feedback settled the context is not counted: ticket_siblings refuses a settled context). */
-      if (credit_ok)
+      if (credit_ok && !recov_hold)
         nr_pdsch_passive_bc9_note(&job.sweep_ticket, job.rnti, job.dci_abs_slot, &job.dlsch_pdu, job.grant.nb_rb_oh,
                                   st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       /* BC9d: a TB CRC pass (not a first-code-block layout probe) proves the DCI real: only now may it feed the hard TDD /
        * DCI-adjacency exclusions. After the KL feedback and the census, before the Qm oracle (both may re-index). */
-      if (credit_ok && !job.layout_probe)
+      if (credit_ok && !recov_hold && !job.layout_probe)
         nr_pdsch_passive_bc9_confirm(&job.sweep_ticket, job.rnti, job.dci_abs_slot, ue->frame_parms.numerology_index,
                                      st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       /* Qm-oracle prune runs AFTER this job's CRC feedback above: prune_tables() compacts and
@@ -2396,7 +2410,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
        * moved (nr_pdsch_config_sweep_feedback resolves job.sweep_ticket.hypothesis against the
        * pre-prune array). Ordering this after leaves the DM-RS observe at ~682 untouched -- that one
        * runs on a separate, earlier tap and is out of scope here. */
-      if (credit_ok && !job.sweep_ticket.settled && job.sweep_ticket.generation && dec.qm_measured) {
+      if (credit_ok && !recov_hold && !job.sweep_ticket.settled && job.sweep_ticket.generation && dec.qm_measured) {
         const int kept = nr_pdsch_config_sweep_observe_qm(&job.sweep_ticket, job.grant.mcs, dec.qm_measured);
         if (kept > 0)
           LOG_A(PHY, "SENSING: Technique D Qm oracle rnti=0x%x mcs=%u qm=%u -> %d hypotheses\n",
@@ -2460,16 +2474,6 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         }
       }
     }
-    if (recov_deferred && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !gpu_health_failed) {
-      /* The failed first pass is published above as it stands; its recovery arms run on the worker (late rescue, recov_late_publish). */
-      nr_pdsch_passive_job_t *wj = malloc(sizeof(*wj));
-      const nr_recov_key_t rk = {.rnti = job.rnti, .harq_pid = (uint8_t)job.grant.harq_pid, .ndi = (uint8_t)job.grant.ndi,
-                                 .abs_slot = (uint32_t)job.absolute_slot, .arm_mask = 0x1f};
-      if (wj) {
-        *wj = job;
-        if (nr_pdsch_recovery_submit(&rk, wj)) free(wj);
-      }
-    }
     if (cb0_on) { /* decode error / unsupported: the TB path did not feed this grant (no-op when fed above) */
       const nr_td_cb0_tb_t cb0_tb = {.tb_fed = false, .tb_pass = false, .tb_decoder = cb0_tb_decoder, .iq_ok_after = credit_ok,
                                      .rv = job.grant.rv, .nl = dec.cw.Nl};
@@ -2501,6 +2505,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
   return NULL;
 }
 
+void nr_pdsch_passive_queue_recov_fb_stats(uint64_t out[3]);
 /* ---- RECOVERY_ASYNC worker side (Task 6). Runs on the pdschRecov thread, which has its own rxdataF and IQ snapshot.
  * The IQ is re-copied from the sample ring when the job starts (same guarded copy as the consumers'), so the consumer pays no copy; a slot that left
  * the ring meanwhile is dropped as expired. The whole decode call is repeated there with the arms enabled (the first body is deterministic and
@@ -2511,6 +2516,48 @@ static bool recov_expired(const nr_recov_key_t *k)
   return !t_recov_snapshot && g_ue
          && !nr_passive_samples_valid(atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), k->abs_slot,
                                       g_ue->frame_parms.slots_per_frame);
+}
+/* Held-back outcome feedback of a deferred job, the same calls the consumer makes for a decoded grant (credit_ok true: the worker's IQ is a private snapshot,
+ * except FAIL_NOCREDIT = IQ expired, where only the solver token is released). The hooks are the ones N consumers already call concurrently. */
+static __thread const nr_pdsch_passive_decode_result_t *t_recov_dec; /* the rescue's decode result, set by recov_run before publish */
+static _Atomic uint64_t g_recov_fb[3];
+static void recov_feedback(void *p, const nr_recov_key_t *k, int outcome)
+{
+  (void)k;
+  const nr_pdsch_passive_job_t *job = p;
+  const bool ok = outcome == NR_RECOV_FB_RESCUED, credit = outcome != NR_RECOV_FB_FAIL_NOCREDIT;
+  atomic_fetch_add_explicit(&g_recov_fb[outcome], 1, memory_order_relaxed);
+  NR_CFG_EPOCH_WORK(job->config_epoch, &g_dropped_epoch);
+  if (job->solver_token) nr_pdsch_solver_feedback(job->solver_token, ok, (ok || credit) && nr_cfg_epoch_work_current());
+  if (!credit || !nr_cfg_epoch_work_current()) return;
+  if (job->bwp_entry > 0) nr_pdcch_bwp_crc_result(job->bwp_entry, ok);
+  nr_pdsch_passive_crc_note(job->rnti, job->grant.scr_dedicated, ok);
+  if (job->data_id_advance) nr_pdsch_passive_data_id_feed(job->rnti, ok);
+  nr_pdcch_dci11_layout_feedback(job->sweep_ticket.layout_index, ok);
+  nr_pdsch_cfg_hypothesis_t winner;
+  if (nr_pdsch_config_sweep_feedback(&job->sweep_ticket, ok, &winner)) {
+    char bc12[192];
+    nr_pdsch_passive_bc12_census(&job->sweep_ticket, &winner, bc12, sizeof(bc12));
+    LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u%s%s\n", job->sweep_ticket.rnti, job->sweep_ticket.tda_index,
+          winner.tda_start, winner.tda_length, winner.dmrs_mask, winner.mcs_table, bc12, nr_td_cb0_wire_converged_suffix(&job->sweep_ticket));
+    nr_pdsch_passive_bc9_converged(&job->sweep_ticket, winner.k0);
+  }
+  nr_pdsch_passive_bc9_note(&job->sweep_ticket, job->rnti, job->dci_abs_slot, &job->dlsch_pdu, job->grant.nb_rb_oh, ok);
+  nr_pdsch_passive_bc9_confirm(&job->sweep_ticket, job->rnti, job->dci_abs_slot, g_ue->frame_parms.numerology_index, ok);
+  if (ok && t_recov_dec) {
+    const nr_pdsch_passive_decode_result_t *dec = t_recov_dec;
+    const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu = &job->dlsch_pdu;
+    nr_pdsch_xoverhead_observe(dec->cw.qamModOrder, dec->cw.targetCodeRate, job->freq_alloc.num_rbs, (uint16_t)pdu->number_symbols,
+                               (uint16_t)(get_num_dmrs_re_per_rb(pdu->dmrsConfigType, pdu->n_dmrs_cdm_groups) * get_num_dmrs(pdu->dlDmrsSymbPos)),
+                               job->grant.nb_rb_oh, job->grant.tb_scaling, dec->cw.Nl, true);
+    if (dec->cw.Nl > 0 && dec->cw.Nl < 8) atomic_fetch_add_explicit(&g_nl_ok[dec->cw.Nl], 1, memory_order_relaxed);
+    if (!job->sweep_ticket.settled && job->sweep_ticket.generation && dec->qm_measured)
+      nr_pdsch_config_sweep_observe_qm(&job->sweep_ticket, job->grant.mcs, dec->qm_measured);
+  }
+}
+void nr_pdsch_passive_queue_recov_fb_stats(uint64_t out[3])
+{
+  for (int i = 0; i < 3; i++) out[i] = atomic_load_explicit(&g_recov_fb[i], memory_order_relaxed);
 }
 static int recov_run(void *p, const nr_recov_key_t *k)
 {
@@ -2526,7 +2573,7 @@ static int recov_run(void *p, const nr_recov_key_t *k)
   for (int a = 0; a < fp->nb_antennas_rx; a++)
     if (!rxF || !iq[a]) return 0;
   NR_CFG_EPOCH_WORK(jb->config_epoch, &g_dropped_epoch);
-  if (!nr_cfg_epoch_work_current()) return 0;
+  if (!nr_cfg_epoch_work_current()) return 3; /* abandoned: the consumer drops such a grant without feedback too */
   const size_t ring = 2u * fp->samples_per_frame, early = fp->nb_prefix_samples / fp->ofdm_offset_divisor;
   const size_t off = get_samples_slot_timestamp(fp, jb->nr_slot_rx);
   const size_t window = fp->nb_prefix_samples0 + fp->ofdm_symbol_size + (fp->symbols_per_slot - 1) * (fp->ofdm_symbol_size + fp->nb_prefix_samples)
@@ -2563,7 +2610,8 @@ static int recov_run(void *p, const nr_recov_key_t *k)
   if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && dec.tb && dec.cw.TBS > 0) {
     if (!nr_cfg_epoch_work_current()) {
       nr_pdsch_recovery_count_stale();
-    } else if (nr_pdsch_recovery_publish(k, dec.tb, dec.cw.TBS) == 0) {
+      ret = 3;
+    } else if ((t_recov_dec = &dec, nr_pdsch_recovery_publish(k, dec.tb, dec.cw.TBS)) == 0) {
       /* LATE EVENT: the first pass was already published as CRC-FAIL (obs record, decoded/rnti_dec counters, solver and Technique D feedback
        * all saw a failure and are NOT amended: a second record or feedback for the same grant would double count it). The rescue adds
        * crc_ok / rnti_ok (so the PDSCH CRC-OK totals include it), the payload consumers (RRC harvest, MAC TA), the replay capture and
@@ -2577,8 +2625,9 @@ static int recov_run(void *p, const nr_recov_key_t *k)
       LOG_A(PHY, "SENSING: RECOVLATE rnti=0x%04x %d.%d abs=%ld pid=%u ndi=%u tbs=%u recovered_cfg=%d\n", job.rnti, job.frame_rx, job.nr_slot_rx,
             (long)job.absolute_slot, job.grant.harq_pid, job.grant.ndi, (unsigned)dec.cw.TBS, (int)dec.config_recovered);
     }
-    ret = 1;
+    if (!ret) ret = 1;
   }
+  t_recov_dec = NULL;
   t_recov_snapshot = false;
   return ret;
 }
@@ -2764,7 +2813,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name, core, 40);
   }
   if (nr_pdsch_recovery_enabled()) { /* ISAC_PDSCH_RECOVERY_ASYNC=1, default off */
-    nr_pdsch_recovery_set_hooks(recov_run, recov_expired);
+    nr_pdsch_recovery_set_hooks(recov_run, recov_expired, recov_feedback);
     LOG_A(PHY, "SENSING: RECOV worker %s (ISAC_PDSCH_RECOVERY_ASYNC)\n", nr_pdsch_recovery_start(0, NULL) == 0 ? "started" : "FAILED to start");
   }
   LOG_I(PHY, "SENSING: passive PDSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
@@ -3010,7 +3059,9 @@ void nr_pdsch_passive_queue_p99_dump(void)
   if (nr_pdsch_recovery_enabled()) {
     char rs[200];
     nr_pdsch_recovery_stats(rs, sizeof rs);
-    LOG_A(PHY, "SENSING: %s\n", rs);
+    uint64_t fb[3];
+    nr_pdsch_passive_queue_recov_fb_stats(fb);
+    LOG_A(PHY, "SENSING: %s fb_ok=%lu fb_fail=%lu fb_nocredit=%lu\n", rs, (unsigned long)fb[0], (unsigned long)fb[1], (unsigned long)fb[2]);
   }
   static int on = -1;
   if (on < 0)
@@ -3076,7 +3127,9 @@ void nr_pdsch_passive_queue_stop(void)
     char rs[200];
     nr_pdsch_recovery_stop();
     nr_pdsch_recovery_stats(rs, sizeof rs);
-    LOG_A(PHY, "SENSING: %s\n", rs);
+    uint64_t fb[3];
+    nr_pdsch_passive_queue_recov_fb_stats(fb);
+    LOG_A(PHY, "SENSING: %s fb_ok=%lu fb_fail=%lu fb_nocredit=%lu\n", rs, (unsigned long)fb[0], (unsigned long)fb[1], (unsigned long)fb[2]);
   }
   atomic_store_explicit(&g_stop, 1, memory_order_release);
   pthread_mutex_lock(&g_lock);
