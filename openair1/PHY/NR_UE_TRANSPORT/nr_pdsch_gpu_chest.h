@@ -32,6 +32,6 @@ typedef int (*nr_gpu_chest_fn)(nr_gpu_chest_job_t *job);
  * nr_pdsch_gpu_chest_dev(job, n, est_dev, nvar_dev, slot, stream), which only enqueues the rows H2D from that slot and the kernels. */
 #define NR_GPU_CHEST_DEV_BYTES (4 * NR_GPU_CHEST_MAX_ROWS * sizeof(int))
 typedef int (*nr_gpu_chest_stage_fn)(const nr_gpu_chest_job_t *job, int n, int *slot_out);
-typedef int (*nr_gpu_chest_stage_at_fn)(const nr_gpu_chest_job_t *job, int n, int slot); /* the slot chosen by the caller; n <= 256 rows */
+typedef int (*nr_gpu_chest_stage_at_fn)(const nr_gpu_chest_job_t *job, int n, int slot); /* the slot chosen by the caller; n <= 512 rows */
 typedef int (*nr_gpu_chest_dev_fn)(const nr_gpu_chest_job_t *job, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, int slot, void *stream);
 #endif

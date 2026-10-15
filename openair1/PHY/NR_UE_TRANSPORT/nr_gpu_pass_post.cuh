@@ -224,19 +224,33 @@ template <class O> __device__ void nvar_part(const nr_gpu_chest_post_par_t &p, O
   out->nvar_valid = 1;
   uint32_t nvar = 0, nvar_ant[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   const int nk = p.n_dmrs_sym * p.nl;
+  const int ns = p.nseg >= 2 ? p.nseg : 1;
   for (int k = 0; k < nk; k++) {
-    const uint32_t *q = p.nvar_rows + (size_t)k * p.nrx;
-    uint64_t acc = 0;
-    int cnt = 0;
-    for (int a = 0; a < p.nrx; a++)
-      if (q[a] > 0) {
-        acc += q[a];
-        cnt++;
-      }
-    nvar += cnt > 0 ? (uint32_t)(acc / (uint64_t)cnt) : 0;
+    /* contiguous: one row set per k. Segmented: the passive loop's weighting, nv = sum_s mean_a(q_s) * w_s, nv_ant[a] = sum_s q_s[a] * w_s, both / nrb_total */
+    uint64_t nv = 0, nv_ant[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (int s = 0; s < ns; s++) {
+      const uint64_t w = ns > 1 ? p.seg_w[s] : 1;
+      if (w == 0)
+        continue;
+      const uint32_t *q = p.nvar_rows + ((size_t)k * ns + s) * p.nrx;
+      uint64_t acc = 0;
+      int cnt = 0;
+      for (int a = 0; a < p.nrx; a++)
+        if (q[a] > 0) {
+          acc += q[a];
+          cnt++;
+        }
+      nv += (cnt > 0 ? (uint32_t)(acc / (uint64_t)cnt) : 0u) * w;
+      for (int a = 0; a < p.nrx && a < 8; a++)
+        nv_ant[a] += (uint64_t)q[a] * w;
+    }
+    const uint64_t div = ns > 1 ? (uint64_t)(p.nrb_total > 0 ? p.nrb_total : 1) : 1;
+    nvar += (uint32_t)(nv / div);
     for (int a = 0; a < 8; a++)
-      nvar_ant[a] = a < p.nrx ? q[a] : 0;
+      nvar_ant[a] = a < p.nrx ? (uint32_t)(nv_ant[a] / div) : 0;
   }
+  for (int a = 0; a < 4; a++)
+    out->nvar_ant[a] = nvar_ant[a];
   const uint32_t den = p.nvfix ? (uint32_t)(p.n_dmrs_sym * p.nl) : (uint32_t)(p.number_symbols * p.nl * p.nrx);
   const uint32_t nvar_den = den > 0 ? den : 1u;
   nvar /= nvar_den;

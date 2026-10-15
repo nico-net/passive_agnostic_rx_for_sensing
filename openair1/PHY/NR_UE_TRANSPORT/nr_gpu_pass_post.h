@@ -9,6 +9,7 @@
 /* ---- chest post: the CPU math after the GPU chest in passive_decode_body_core (non-segmented path): nvar normalisation + per-branch
  * substitution (3697-3732) and the DM-RS phase-slope CFO/SFO measurement (3740-3990). The EMA, the s_apply hook and the logging stay on
  * the host: they read `out` after the pass. */
+#define NR_GPU_POST_MAX_SEG 16
 typedef struct {
   const uint32_t *nvar_rows; /* chest nvar u32[row], row = (k * nrx + a); k = dmrs_index * nl + layer, as the GPU chest job orders them */
   int nrx, nl, n_dmrs_sym;   /* k < n_dmrs_sym * nl */
@@ -19,6 +20,12 @@ typedef struct {
   int N, n_rb_dl;            /* ofdm_symbol_size, fp->N_RB_DL */
   double dt_d, df_d;         /* seconds between the two DM-RS symbols, subcarrier spacing in Hz */
   float dt_f, df_f;          /* the same, rounded to float (the float kernel never touches FP64) */
+  /* SEGMENTED estimate (Task 4b: PRG / VRB bundles, one chest row set per segment as the passive loop's segmented path combines them): nseg >= 2 = rows are
+   * k = (dmrs_index * nl + layer), row (k * nseg + s) * nrx + a; segment s is seg_w[s] PRBs wide (0 = padding), nrb_total = the grant's PRBs. The per-(symbol,
+   * layer) nvar is sum_s mean_a(q) * w_s / nrb_total (u64 math, u32 truncation), nvar_ant[a] = sum_s q[a] * w_s / nrb_total of the last (symbol, layer).
+   * 0 (zero-initialised) = the contiguous grant, as before. */
+  int nseg, nrb_total;
+  uint16_t seg_w[NR_GPU_POST_MAX_SEG];
 } nr_gpu_chest_post_par_t;
 enum { NR_GPU_POST_FO_VALID = 1, NR_GPU_POST_SFO_MEASURED = 2, NR_GPU_POST_FO_REJECTED = 4 };
 typedef struct { /* float build (the product one) */
@@ -29,6 +36,7 @@ typedef struct { /* float build (the product one) */
   int32_t kn0, kn1;
   int64_t re[2], im[2], ksum[2]; /* the exact integer sums per half band (all the angles are functions of these) */
   float magsum[2];
+  uint32_t nvar_ant[4]; /* the chest's per-antenna noise as nr_dl_chest_nvar_ant holds it after the estimate (last DM-RS symbol and layer; width-weighted when segmented) */
 } nr_gpu_chest_post_out_t;
 /* FP64 build: everything is bit-equal to the CPU except cfo_hz / sfo_ppm, which go through atan2(): CUDA's double atan2 (2 ulp) differs from glibc's in
  * the last bits on about a quarter of the inputs. The sums above are exact, so a host that needs the CPU's bits runs the last scalar lines on them. */
@@ -40,6 +48,7 @@ typedef struct {
   int32_t kn0, kn1;
   int64_t re[2], im[2], ksum[2];
   double magsum[2];
+  uint32_t nvar_ant[4];
 } nr_gpu_chest_post_out64_t;
 typedef int (*nr_gpu_pass_chest_post_fn)(const nr_gpu_chest_post_par_t *p, nr_gpu_chest_post_out_t *out_dev, void *stream);
 typedef int (*nr_gpu_pass_chest_post64_fn)(const nr_gpu_chest_post_par_t *p, nr_gpu_chest_post_out64_t *out_dev, void *stream);

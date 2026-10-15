@@ -14,6 +14,8 @@ typedef struct {
   const UE_nr_rxtx_proc_t *proc;
   fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config;
   const freq_alloc_bitmap_t *freq_alloc;
+  const nr_prb_seg_t *seg;          /* the PRG / VRB-bundle segments of a segmented grant (seg_path), data order; NULL / nseg 0 = the contiguous grant */
+  int nseg;
   const fapi_nr_dl_cw_info_t *cw;   /* TBS, base graph, rv, Qm, Nl of the grant */
   const nr_ssb_rm_mask_t *ssb_rm;   /* what the demod gets as ssb_unav ? &ssb.dem : &no_ssb */
   c16_t *rxdataF;                   /* the caller's rxdataF[nbRx][rx_stride] */
@@ -54,7 +56,7 @@ enum { NR_GPU_PASS_EV_COMMIT, NR_GPU_PASS_EV_RETRY_OLD /* pass said CRC fail / C
        NR_GPU_PASS_EV_SHADOW_BAD, NR_GPU_PASS_EV_CONT_FAIL /* CRC fail of the pass continued into the retry arms, no old first body */,
        NR_GPU_PASS_EV_OLD_FIRST /* old first body executed although a pass was attempted */, NR_GPU_PASS_EV_SHADOW_FAIL, NR_GPU_PASS_EV_SHADOW_FAIL_BAD, NR_GPU_PASS_EV_N };
 /* gates of passive_decode_body_core that keep a grant off the pass (the first one that refuses, counted) */
-enum { NR_GPU_PASS_GATE_SEG, NR_GPU_PASS_GATE_PROBE, NR_GPU_PASS_GATE_SHARE, NR_GPU_PASS_GATE_GW, NR_GPU_PASS_GATE_PTRS, NR_GPU_PASS_GATE_TINTERP, NR_GPU_PASS_GATE_HARQ,
+enum { NR_GPU_PASS_GATE_SEG /* more segments than the largest class (16) */, NR_GPU_PASS_GATE_PROBE, NR_GPU_PASS_GATE_SHARE, NR_GPU_PASS_GATE_GW, NR_GPU_PASS_GATE_PTRS, NR_GPU_PASS_GATE_TINTERP, NR_GPU_PASS_GATE_HARQ,
        NR_GPU_PASS_GATE_LDPC_OFF, NR_GPU_PASS_GATE_CHEST_ONLY, NR_GPU_PASS_GATE_OCC, NR_GPU_PASS_GATE_NOMEM, NR_GPU_PASS_GATE_N };
 void nr_gpu_pass_gate(int gate);
 /* every ISAC_GPU_PASS_CHECK-th CRC-failing pass: also run the old first body and compare */

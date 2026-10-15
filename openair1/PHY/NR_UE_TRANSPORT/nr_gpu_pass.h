@@ -15,7 +15,8 @@
  * flight per process, whatever the number of consumer threads (the PDSCH queue has up to 5). Nothing is allocated after the RX fence: buffers, streams,
  * events and graphs exist from nr_gpu_pass_init(); an unseen shape class returns 1.
  *
- * What a pass does NOT cover (the caller keeps the old path, counted in nr_gpu_pass_stats): segmented / PRG grants, the chest cache, DM-RS type 2, a single-branch
+ * What a pass does NOT cover (the caller keeps the old path, counted in nr_gpu_pass_stats): grants of more than 16 segments (PRG / VRB-bundle grants of up to 16 segments run in the segmented classes 1, 2, 4, 8, 16: the chest estimates per segment into scratch rows and
+ * k_seg_compose lays them out in data order, the demod geometry is composed with the old path's RE gather), the chest cache, DM-RS type 2, a single-branch
  * estimate, probes, PT-RS, more than NR_GPU_PASS_MAX_CB code blocks, Z not a multiple of 4, HARQ soft combining, TBs whose decode needs the CPU decoder
  * (zero syndrome with a failing CRC: nr_gpu_pass_result_t::need_cpu), and unseen classes. */
 #ifndef NR_GPU_PASS_H
@@ -25,10 +26,12 @@
 #include "PHY/TOOLS/nr_gpu_mem.h"
 #include "nr_pdsch_gpu_demod.h"
 #include "nr_gpu_pass_post.h"
+#include "nr_pdsch_prb_set.h"
 
 #define NR_GPU_PASS_MAX_CB 32  /* code blocks per pass = NR_GPU_LDPC_MAX_JOBS */
 #define NR_GPU_PASS_MAX_DMRS 4 /* DM-RS symbols of a grant */
 #define NR_GPU_PASS_MAX_NL 4
+#define NR_GPU_PASS_MAX_SEG 16 /* segments of a segmented grant (the largest segment-count class) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +42,8 @@ extern "C" {
 typedef struct {
   uint16_t nrb_class, nsym, nl, qm, ndmrs, ncb_class;
   uint8_t fp32;
+  uint16_t nseg_class; /* Task 4b: 0 = a contiguous grant. 1, 2, 4, 8, 16 = a segmented grant (PRG / VRB bundles) of up to that many segments: the chest runs one row set per segment into
+                        * scratch rows and a compose kernel lays them out in data order (the estimate layout the demod reads); the smallest class >= the segments of the grant. */
 } nr_gpu_pass_shape_t;
 
 static inline int nr_gpu_pass_nrb_class(int nrb)
@@ -49,11 +54,42 @@ static inline int nr_gpu_pass_nrb_class(int nrb)
       return c[i];
   return 0;
 }
+static inline int nr_gpu_pass_nseg_class(int n) /* segmented-grant class: 1, 2, 4, 8, 16; 0 = none (more segments than the largest class) */
+{
+  for (int c = 1; c <= NR_GPU_PASS_MAX_SEG; c <<= 1)
+    if (n >= 1 && n <= c)
+      return c;
+  return 0;
+}
 static inline int nr_gpu_pass_ncb_class(int ncb)
 {
   for (int c = 1; c <= NR_GPU_PASS_MAX_CB; c <<= 1)
     if (ncb >= 1 && ncb <= c)
       return c;
+  return 0;
+}
+
+/* Segmented grant, demod geometry: `geo_y` (c16 [14][ext], .r = RX subcarrier, .i != 0 = valid) was built for the VIRTUAL contiguous allocation at BWP PRB 0 the old path demodulates, whose
+ * subcarrier (off0 + i) % N holds the gathered RE i, rxdataF[(off0 + gidx[i]) % N] (gidx = the REs of the segments in data order). The graph reads rxdataF itself, so every valid index is
+ * composed with that gather. 0 = done, -1 = an index outside the segments. off0 = (first_carrier_offset + BWPStart * 12) % N. */
+static inline int nr_gpu_pass_seg_remap_geo(int16_t *geo_y, int ext, uint16_t sym_mask, const uint16_t *nre, int N, int off0, const nr_prb_seg_t *seg, int nseg)
+{
+  for (int m = 0; m < 14; m++) {
+    if (!(sym_mask >> m & 1))
+      continue;
+    for (int i = 0; i < (int)nre[m]; i++) {
+      int16_t *e = geo_y + 2 * ((size_t)m * ext + i);
+      if (e[1] == 0)
+        continue;
+      const int v = ((e[0] - off0) % N + N) % N; /* virtual RE */
+      int s = 0;
+      while (s < nseg && v >= 12 * (seg[s].data_index + seg[s].n_prb))
+        s++;
+      if (s == nseg)
+        return -1;
+      e[0] = (int16_t)((off0 + seg[s].prb_start * 12 + (v - 12 * seg[s].data_index)) % N);
+    }
+  }
   return 0;
 }
 
@@ -73,6 +109,11 @@ typedef struct {
   int delta[NR_GPU_PASS_MAX_NL];                                 /* get_delta(port) of each layer */
   const int16_t *pil[NR_GPU_PASS_MAX_DMRS][NR_GPU_PASS_MAX_NL];  /* c16 pilots of (DM-RS symbol, layer): 6 * nrb values from the grant's first RB */
   int nrb, k0;                                                   /* PRBs of the grant, first LS subcarrier (bwp_start_subcarrier % N) */
+  /* ---- segmented grant (PRG / VRB-bundle segments in data order; nr_pdsch_prb_set.h). nseg == 0: the grant above. nseg >= 1: pil[][] points at the pilot sequence of RB 0
+   * (seg_pil_nrb RBs, 6 c16 each); segment s is n_prb PRBs at pilot RB pil_rb, first LS subcarrier k0, and its estimate lands at data_index * 12 of the row. nrb is the sum of
+   * the n_prb; k0 above is unused. */
+  int nseg, seg_pil_nrb;
+  struct { uint16_t n_prb, data_index; int pil_rb, k0; } seg[NR_GPU_PASS_MAX_SEG];
   /* ---- chest post: nvar normalisation + per-branch substitution, DM-RS FO/SFO sums */
   int number_symbols, nvfix, branch;                             /* branch: nr_dlsch_planned_branch() when ISAC_RX_NVAR_PERBRANCH, else -1 */
   int fo_first, fo_last;                                         /* DM-RS indices (into dmrs_sym) of the first and last DM-RS symbol, -1 = no FO measurement */

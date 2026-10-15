@@ -2185,10 +2185,12 @@ static void gch_async_submit(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, 
 /* GPUPASS: what the graph pass's chest stage needs of a grant, with the same gates as nr_pdsch_gpu_chest_grant (non-segmented contiguous grant, every antenna, GPU
  * chest and GPU delay on, no PDP diagnostic / delay share / DFT window / stage dump, no single-branch estimate): the DM-RS symbols of dmrs_mask, the delta of
  * every layer's port, the pilot sequence of every (DM-RS symbol, layer) (this thread's buffer, valid until the next call; 6 * nrb c16 from the grant's first
- * RB), the first LS subcarrier and the PRBs. DM-RS type 1 only (the graph's LS kernel arguments are those of type 1). 0 = ok, else a refusal reason (> 0). */
+ * RB), the first LS subcarrier and the PRBs. DM-RS type 1 only (the graph's LS kernel arguments are those of type 1). 0 = ok, else a refusal reason (> 0).
+ * segs != NULL (Task 4b, the PRG/VRB segmented grant, same gates as nr_pdsch_gpu_chest_grant's segmented call): the pilot sequences start at RB 0 and cover *pil_nrb_out RBs
+ * (= max over the segments of n_prb + rb_offset, the generator range of that call); the caller derives each segment's pilot offset and first subcarrier. *nrb_out = the grant's PRBs. */
 int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch,
                                    const freq_alloc_bitmap_t *freq_alloc, int Nl, uint16_t dmrs_mask, int diag, int *ndmrs, int dmrs_sym[4], int delta[4],
-                                   const int16_t *pil_out[4][4], int *k0_out, int *nrb_out)
+                                   const int16_t *pil_out[4][4], int *k0_out, int *nrb_out, const nr_prb_seg_t *segs, int nseg, int *pil_nrb_out)
 {
   if (nr_pdsch_route_cpu()) /* BATCHCPU */
     return 1;
@@ -2211,8 +2213,10 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
   if (s_stage_dump < 0)
     s_stage_dump = getenv("ISAC_PDSCH_GPU_STAGE_DUMP") != NULL;
   int contiguous = freq_alloc->num_rbs == freq_alloc->last_rb - freq_alloc->first_rb + 1 && freq_alloc->num_rbs >= 1;
-  for (int rb = freq_alloc->first_rb; contiguous && rb <= freq_alloc->last_rb; rb++)
+  for (int rb = freq_alloc->first_rb; !segs && contiguous && rb <= freq_alloc->last_rb; rb++)
     contiguous = (freq_alloc->bitmap[rb / 32] >> (rb % 32)) & 1;
+  if (segs && nseg < 1)
+    return 5;
   int nd = 0;
   for (int m = 0; m < fp->symbols_per_slot && m < 14; m++)
     nd += (dmrs_mask >> m) & 1;
@@ -2221,12 +2225,18 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
   if (config_type != NFAPI_NR_DMRS_TYPE1)
     return 4;
   if (fp->ofdm_symbol_size != 4096 || nrx > 4 || Nl < 1 || Nl > 4 || Nl > nrx || nd < 1 || nd > 4 || diag || chest_delay_share() || getenv("ISAC_CHEST_DFT_WIN")
-      || s_stage_dump || nr_dl_chest_only_ant >= 0 || !contiguous)
+      || s_stage_dump || nr_dl_chest_only_ant >= 0 || (!segs && !contiguous))
     return 5;
   if (!gch_bufs(false))
     return 6;
-  const int rb_offset = freq_alloc->first_rb + (dlsch->refPoint ? 0 : dlsch->BWPStart);
-  const int max_end = freq_alloc->num_rbs + rb_offset;
+  int max_end = 0, rb_offset = 0;
+  if (segs) { /* nr_pdsch_gpu_chest_grant's range over the segments */
+    for (int s = 0; s < nseg; s++)
+      max_end = max(max_end, segs[s].n_prb + segs[s].prb_start + (dlsch->refPoint ? 0 : dlsch->BWPStart));
+  } else {
+    rb_offset = freq_alloc->first_rb + (dlsch->refPoint ? 0 : dlsch->BWPStart);
+    max_end = freq_alloc->num_rbs + rb_offset;
+  }
   if (max_end * 6 > 3280)
     return 7;
   const float beta_dmrs_pdsch = get_beta_dmrs(dlsch->n_dmrs_cdm_groups, false);
@@ -2247,6 +2257,7 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
   }
   *ndmrs = nd;
   *nrb_out = freq_alloc->num_rbs;
+  *pil_nrb_out = segs ? max_end : freq_alloc->num_rbs;
   *k0_out = (fp->first_carrier_offset + (dlsch->BWPStart + freq_alloc->first_rb) * 12) % fp->ofdm_symbol_size;
   return 0;
 }

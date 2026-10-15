@@ -24,8 +24,8 @@ int nr_get_R_ldpc_decoder(int rvidx, int E, int BG, int Z, int *llrLen, int roun
 int nr_get_E(uint32_t G, uint8_t C, uint8_t Qm, uint8_t Nl, uint8_t r);
 
 /* where a pass was not taken (counted; the first few are logged) */
-enum { FB_OFF, FB_CELL, FB_FO, FB_CHEST, FB_DEMOD, FB_TBPARAM, FB_MODULE, FB_N };
-static const char *const fb_name[FB_N] = {"off", "cell", "fo", "chest", "demod", "tbparam", "module"};
+enum { FB_OFF, FB_CELL, FB_FO, FB_CHEST, FB_DEMOD, FB_TBPARAM, FB_MODULE, FB_SEG, FB_N };
+static const char *const fb_name[FB_N] = {"off", "cell", "fo", "chest", "demod", "tbparam", "module", "seg"};
 static __thread nr_gpu_pass_job_t *jobp_tls;
 static struct {
   nr_gpu_pass_dl_try_fn try_;
@@ -33,6 +33,7 @@ static struct {
   _Atomic int on;
   int nbrx, check;
   _Atomic uint64_t fb[FB_N], ev[NR_GPU_PASS_EV_N], gate[NR_GPU_PASS_GATE_N], runs, shadow_n, shadow_fn;
+  _Atomic uint64_t segn[5]; /* segmented grants that reached the pass, by segment-count class 1, 2, 4, 8, 16 */
 } G;
 
 int nr_gpu_pass_active(void) { return atomic_load_explicit(&G.on, memory_order_relaxed); }
@@ -98,10 +99,11 @@ static void census(void)
   else
     buf[0] = 0;
   LOG_A(PHY,
-        "SENSING: %s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
+        "SENSING: %s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu seg=%lu] seg_grants[1=%lu 2=%lu 4=%lu 8=%lu 16=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
         "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu old_first=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu]\n",
         buf, (unsigned long)G.fb[FB_OFF], (unsigned long)G.fb[FB_CELL], (unsigned long)G.fb[FB_FO], (unsigned long)G.fb[FB_CHEST],
-        (unsigned long)G.fb[FB_DEMOD], (unsigned long)G.fb[FB_TBPARAM], (unsigned long)G.fb[FB_MODULE], (unsigned long)G.ev[NR_GPU_PASS_EV_COMMIT],
+        (unsigned long)G.fb[FB_DEMOD], (unsigned long)G.fb[FB_TBPARAM], (unsigned long)G.fb[FB_MODULE], (unsigned long)G.fb[FB_SEG],
+        (unsigned long)G.segn[0], (unsigned long)G.segn[1], (unsigned long)G.segn[2], (unsigned long)G.segn[3], (unsigned long)G.segn[4], (unsigned long)G.ev[NR_GPU_PASS_EV_COMMIT],
         (unsigned long)G.ev[NR_GPU_PASS_EV_RETRY_OLD], (unsigned long)G.ev[NR_GPU_PASS_EV_ZERO_TB], (unsigned long)G.ev[NR_GPU_PASS_EV_LIFETIME],
         (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_BAD], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL_BAD],
         (unsigned long)G.ev[NR_GPU_PASS_EV_CONT_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_OLD_FIRST], (unsigned long)G.gate[0], (unsigned long)G.gate[1],
@@ -233,12 +235,62 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
           }
         }
       }
+  /* segmented (PRG / VRB-bundle) classes: segment-count classes 1, 2, 4, 8, 16 on top of the contiguous ones. Own budget
+   * (ISAC_GPU_PASS_SEG_CLASSES, default 1100): the passes with the widest grants are warmed first; a segmented grant of an unwarmed class stays on the old path (unseen). */
+  const char *se = getenv("ISAC_GPU_PASS_SEG_CLASSES");
+  const int sbudget = se ? atoi(se) : 1100;
+  int smade = 0;
+  static const int segc[] = {1, 2, 4, 8, 16};
+  if (G.stats) {
+    char buf[512];
+    G.stats(buf, sizeof(buf));
+    LOG_A(PHY, "SENSING: %s (contiguous classes only)\n", buf);
+  }
+  for (int li = 0; li < 4; li++) /* the layers that occur most first, then the DM-RS counts, the PRB classes and the segment classes */
+    for (int di = 0; di < nnd; di++)
+      for (int ni = 0; ni < 8 && smade < sbudget; ni++)
+        for (int sc = 0; sc < 5 && smade < sbudget; sc++) {
+          const int nl = nls[li], ns = segc[sc];
+          if (nl > fp->nb_antennas_rx || ns > nrbs[ni] || nd[di] * nl * fp->nb_antennas_rx * ns > 512)
+            continue;
+          int variants[2][2], nvar = 0;
+          for (int qm = 2; qm <= 6; qm += 4) {
+            int qmode = 0, align = 0;
+            if (nr_pdsch_gpu_demod_pass_variant(ue, nl, qm, &qmode, &align) != 0)
+              continue;
+            int dup = 0;
+            for (int v = 0; v < nvar; v++)
+              dup |= variants[v][0] == qmode && variants[v][1] == align;
+            if (!dup) {
+              variants[nvar][0] = qmode;
+              variants[nvar][1] = align;
+              nvar++;
+            }
+          }
+          const int cmax = nrbs[ni] * nl * 132 * 8 * 93 / 100 / 8400 + 1;
+          for (int ncb = 1; ncb <= 32 && smade < sbudget; ncb <<= 1) {
+            if (ncb / 2 >= cmax)
+              break;
+            for (int v = 0; v < nvar && smade < sbudget; v++) {
+              nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)nd[di], (uint16_t)ncb, 1, (uint16_t)ns};
+              if (warmf(&sh, variants[v][0], variants[v][1], evm) == 0)
+                smade++;
+              else
+                failed++;
+            }
+          }
+        }
   G.nbrx = fp->nb_antennas_rx;
   const char *ch = getenv("ISAC_GPU_PASS_CHECK");
   G.check = ch ? atoi(ch) : 64;
   atomic_store(&G.on, made > 0);
-  LOG_A(PHY, "SENSING: GPUPASS %s: %d shape classes x %d instances captured (EVM branch %d, %d failed), shadow check every %d passes, %s memory model\n",
-        made > 0 ? "enabled" : "NOT enabled", made, NR_GPU_PASS_RING, evm, failed, G.check, nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE");
+  LOG_A(PHY, "SENSING: GPUPASS %s: %d shape classes (+ %d segmented) x %d instances captured (EVM branch %d, %d failed), shadow check every %d passes, %s memory model\n",
+        made > 0 ? "enabled" : "NOT enabled", made, smade, NR_GPU_PASS_RING, evm, failed, G.check, nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE");
+  if (G.stats) {
+    char buf[512];
+    G.stats(buf, sizeof(buf));
+    LOG_A(PHY, "SENSING: %s\n", buf);
+  }
 }
 
 int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
@@ -266,16 +318,40 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   if (!j || !out->llr)
     return fb(FB_MODULE);
   memset(j, 0, offsetof(nr_gpu_pass_job_t, dj));
-  /* ---- channel estimate inputs */
-  int ndmrs = 0, k0 = 0, nrb = 0;
+  /* ---- channel estimate inputs. A segmented grant (PRG / VRB bundles): the chest runs per segment (classes of 1, 2, 4, 8, 16 segments) and the demod reads the
+   * estimate in data order against the virtual contiguous allocation the old path gathers; here the gather is the demod geometry's RX index map. */
+  const int nseg = in->seg ? in->nseg : 0;
+  const int nsegc = nseg > 0 ? nr_gpu_pass_nseg_class(nseg) : 0;
+  if (nseg > 0) {
+    if (!nsegc || nseg > NR_GPU_PASS_MAX_SEG)
+      return fb(FB_SEG);
+    atomic_fetch_add_explicit(&G.segn[__builtin_ctz((unsigned)nsegc)], 1, memory_order_relaxed);
+  }
+  int ndmrs = 0, k0 = 0, nrb = 0, pil_nrb = 0;
   if (nr_pdsch_gpu_chest_pass_inputs(ue, in->proc, in->dlsch_config, in->freq_alloc, cw->Nl, in->dmrs_full, in->chest_diag, &ndmrs, j->dmrs_sym, j->delta, j->pil,
-                                     &k0, &nrb) != 0)
+                                     &k0, &nrb, nseg > 0 ? in->seg : NULL, nseg, &pil_nrb) != 0)
     return fb(FB_CHEST);
   j->nbRx = fp->nb_antennas_rx;
   j->nl = cw->Nl;
   j->ndmrs = ndmrs;
   j->nrb = nrb;
   j->k0 = k0;
+  if (nseg > 0) {
+    const int bwp = in->dlsch_config->BWPStart;
+    int tot = 0;
+    j->nseg = nseg;
+    j->seg_pil_nrb = pil_nrb;
+    for (int s = 0; s < nseg; s++) {
+      const nr_prb_seg_t *g = &in->seg[s];
+      j->seg[s].n_prb = g->n_prb;
+      j->seg[s].data_index = g->data_index;
+      j->seg[s].pil_rb = g->prb_start + (in->dlsch_config->refPoint ? 0 : bwp);
+      j->seg[s].k0 = (int)((uint16_t)(fp->first_carrier_offset + (bwp + g->prb_start) * 12) % fp->ofdm_symbol_size); /* as nr_pdsch_gpu_chest_grant's rows */
+      tot += g->n_prb;
+    }
+    if (tot != nrb || tot != in->freq_alloc->num_rbs)
+      return fb(FB_SEG);
+  }
   /* ---- demod job (the old GPU demod's own refusals and geometry) */
   NR_UE_DLSCH_t dlsch = {0};
   dlsch.cw_info = *cw;
@@ -287,13 +363,18 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   harq.status = NR_ACTIVE;
   harq.first_rx = 1;
   pdsch_scope_req_t scope = {.copy_chanest_to_scope = false, .copy_rxdataF_to_scope = false, .scope_rxdataF_offset = 0};
-  nr_pdsch_gpu_demod_call_t call = {.ue = ue, .proc = in->proc, .dlsch = &dlsch, .freq_alloc = in->freq_alloc, .cfg = in->dlsch_config, .harq = &harq,
+  const freq_alloc_bitmap_t fa_virt = set_bitmap_from_start_size(0, in->freq_alloc->num_rbs); /* the old path demodulates this virtual allocation of the gathered REs */
+  nr_pdsch_gpu_demod_call_t call = {.ue = ue, .proc = in->proc, .dlsch = &dlsch, .freq_alloc = nseg > 0 ? &fa_virt : in->freq_alloc, .cfg = in->dlsch_config, .harq = &harq,
                                     .first_symbol = in->first_symbol, .probe_last_sym = -1, .est_size = in->est_size, .buf = in->rx_size_symbol,
                                     .rxdataF = (c16_t *)in->rxdataF, .scope = &scope, .ssb_rm = in->ssb_rm};
   if (nr_pdsch_gpu_demod_pass_job(&call, &j->dj, &j->geo_y, &j->geo_h) != 0)
     return fb(FB_DEMOD);
   if (nr_pdsch_evm_acc.armed && !j->dj.want_evm) /* the EVM would need the CPU copy of the equaliser output */
     return fb(FB_DEMOD);
+  if (nseg > 0) /* the virtual allocation's index map composed with the old path's RE gather (nr_gpu_pass.h); this thread's maps, rebuilt for every grant */
+    if (nr_gpu_pass_seg_remap_geo((int16_t *)j->geo_y, (int)j->dj.ext, j->dj.sym_mask, j->dj.nre, fp->ofdm_symbol_size,
+                                  (fp->first_carrier_offset + in->dlsch_config->BWPStart * NR_NB_SC_PER_RB) % fp->ofdm_symbol_size, in->seg, nseg) != 0)
+      return fb(FB_SEG);
   uint32_t G_dem = 0;
   for (int m = 0; m < 14; m++)
     if (j->dj.sym_mask >> m & 1)
@@ -348,7 +429,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   j->dt_d = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot * (double)(j->dmrs_sym[ndmrs - 1] - j->dmrs_sym[0]);
   j->df_d = (double)fp->subcarrier_spacing;
   j->shape = (nr_gpu_pass_shape_t){(uint16_t)nrbc, (uint16_t)in->dlsch_config->number_symbols, (uint16_t)cw->Nl, (uint16_t)cw->qamModOrder, (uint16_t)ndmrs,
-                                   (uint16_t)ncb, (uint8_t)!j->dj.evm_fp64};
+                                   (uint16_t)ncb, (uint8_t)!j->dj.evm_fp64, (uint16_t)nsegc};
   /* ---- the pass */
   memset(&out->r, 0, sizeof(out->r));
   out->r.tb = in->tb;

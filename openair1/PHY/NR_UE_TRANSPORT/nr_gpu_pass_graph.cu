@@ -56,6 +56,7 @@ constexpr int KBMAX = NR_GPU_LDPC_KB_MAX;
 constexpr int EXTMAX = NR_GPU_DEMOD_MAX_EXT;
 constexpr uint32_t LLR_CAP = 1500000;      /* LLRs of one pass: 273 PRB x 13 symbols x 12 x Qm 8 x 4 layers = 1362816 */
 constexpr int PIL_STRIDE = 3328;           /* c16 per (DM-RS symbol, layer) pilot row */
+constexpr int SEG_ROWS = 512;              /* chest rows of one pass: nd * nl * nrx * nseg_class (= PASS_LS_ROWS of nr_pdsch_gpu_fep.cu) */
 
 /* ---- device-accessible blocks ---- */
 struct PassBlk { /* written by the host before every replay */
@@ -66,6 +67,8 @@ struct PassBlk { /* written by the host before every replay */
   nr_gpu_rdm_seg_t rdm[MAXCB];
   nr_gpu_crc_seg_t cand[MAXCB * NSNAP]; /* every snapshot of every code block */
   nr_gpu_crc_seg_t sel[MAXCB];          /* the chosen block of every code block */
+  uint16_t seg_n[NR_GPU_PASS_MAX_SEG], seg_d[NR_GPU_PASS_MAX_SEG]; /* segmented estimate: REs (12 * PRBs) and first data RE of every segment (n == 0: padding) */
+  int dsym[NR_GPU_PASS_MAX_DMRS];       /* DM-RS symbols (the compose kernel's destination rows) */
 };
 struct ResBlk { /* written by the kernels, read by the host after the pass */
   nr_gpu_chest_post_out_t post;
@@ -85,6 +88,24 @@ __global__ void k_unscr(int16_t *llr, const PassBlk *pb)
   const uint32_t *scr = pb->scr;
   for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < G; i += gridDim.x * blockDim.x)
     if (scr[i >> 5] >> (i & 31) & 1u) llr[i] = (int16_t)(-llr[i]);
+}
+/* Segmented estimate (Task 4b): the passive loop's `memset(row, 0); memcpy(&row[data_index * 12], segment estimate, n_prb * 12)` for every (DM-RS symbol, layer, antenna) row.
+ * Block b = (k * nl + l) * nrx + a; the segment rows sit in `sc` at ((k * nl + l) * ns + s) * nrx + a (the chest row order), the data-ordered row in est[l * nrx + a]. */
+__global__ void k_seg_compose(const short2 *sc, short2 *est, const PassBlk *pb, int ns, int nl, int nrx)
+{
+  const int a = blockIdx.x % nrx, kk = blockIdx.x / nrx, l = kk % nl, k = kk / nl;
+  short2 *dst = est + (size_t)(l * nrx + a) * NSYM * N + (size_t)pb->dsym[k] * N;
+  for (int i = threadIdx.x; i < N; i += blockDim.x) {
+    short2 v = make_short2(0, 0);
+    for (int s = 0; s < ns; s++) {
+      const int d = pb->seg_d[s];
+      if (i >= d && i < d + (int)pb->seg_n[s]) {
+        v = sc[((size_t)(kk * ns + s) * nrx + a) * N + (i - d)];
+        break;
+      }
+    }
+    dst[i] = v;
+  }
 }
 /* nr_llr_norm_shift: the mean |LLR| of every 16th of llr[0, span), smallest k <= 8 with (mean >> k) <= 40 */
 __global__ void k_norm_sum(const int16_t *llr, const PassBlk *pb, ResBlk *rb)
@@ -150,10 +171,11 @@ __global__ void k_pick(const uint8_t *snaps, const int *res, const PassBlk *pb, 
 struct Key {
   uint16_t nrb, nl, ndmrs, ncb;
   uint8_t fp32, evm, qmode, align;
+  uint8_t nseg; /* 0 = a contiguous grant (the estimate rows go straight into the estimate buffer); 1, 2, 4, 8, 16 = segmented grant of up to that many segments (scratch rows + compose) */
   uint64_t pack() const
   {
     return (uint64_t)nrb | (uint64_t)nl << 9 | (uint64_t)ndmrs << 12 | (uint64_t)ncb << 15 | (uint64_t)fp32 << 22 | (uint64_t)evm << 23 | (uint64_t)qmode << 24 |
-           (uint64_t)align << 28;
+           (uint64_t)align << 28 | (uint64_t)(nseg ? 1 + __builtin_ctz((unsigned)nseg) : 0) << 29;
   }
 };
 
@@ -161,7 +183,7 @@ struct Inst {
   int id = 0;
   cudaStream_t s = nullptr, s2 = nullptr;
   cudaEvent_t done = nullptr;
-  nr_gpu_buf_t rxF = {}, est = {}, nvar = {}, geo = {}, scratch = {}, llr = {}, lin = {}, bits = {}, pil = {}, scr = {}, pb = {}, res = {};
+  nr_gpu_buf_t rxF = {}, est = {}, nvar = {}, geo = {}, scratch = {}, llr = {}, lin = {}, bits = {}, pil = {}, scr = {}, pb = {}, res = {}, segsc = {};
   nr_gpu_chest_job_t *cj = nullptr;
   nr_gpu_fep_job_t fj = {};
   const int16_t *rx[4] = {};
@@ -184,6 +206,7 @@ static nr_gpu_pass_cfg_t g_cfg = {};
 static bool g_cfg_set = false;
 static std::atomic<int> g_ready{0}, g_dead{0};
 static std::atomic<unsigned> g_busy{0};
+static std::atomic<uint64_t> g_seg_launches{0}, g_seg_classes{0}, g_used_mb{0}; /* g_used_mb: GPU memory in use by the device after the last pre-fence build */
 static std::atomic<uint64_t> g_launches{0}, g_hits{0}, g_fb_unseen{0}, g_fb_busy{0}, g_fb_unsup{0}, g_fb_err{0}, g_need_cpu{0}, g_tb_fail{0}, g_allocs{0}, g_fb_ldpckey{0};
 static std::atomic<uint64_t> g_wait_hist[32]; /* host wait, 2^i us buckets */
 constexpr uint32_t RING_LEN = 80000;
@@ -196,7 +219,7 @@ static bool guard_alloc() { return nr_gpu_allocations_allowed() != 0; }
 static void synth_job(const Key &k, nr_gpu_pass_job_t *j, std::vector<int16_t> &geo)
 {
   memset(j, 0, sizeof(*j));
-  j->shape = {k.nrb, 13, k.nl, 2, k.ndmrs, k.ncb, k.fp32};
+  j->shape = {k.nrb, 13, k.nl, 2, k.ndmrs, k.ncb, k.fp32, k.nseg};
   for (int a = 0; a < 4; a++) j->rxdata[a] = (const int16_t *)g_ring[a].host;
   j->ring_len = RING_LEN;
   j->symbol_rot = (const int16_t *)g_rot.host;
@@ -209,6 +232,13 @@ static void synth_job(const Key &k, nr_gpu_pass_job_t *j, std::vector<int16_t> &
     for (int l = 0; l < k.nl; l++) j->pil[i][l] = g_zero_pil;
   j->nrb = k.nrb;
   j->k0 = 0;
+  if (k.nseg >= 1) { /* nseg segments of w PRBs side by side */
+    const int w = std::max(1, (int)k.nrb / k.nseg);
+    j->nseg = k.nseg;
+    j->nrb = w * k.nseg;
+    j->seg_pil_nrb = j->nrb;
+    for (int s = 0; s < k.nseg; s++) j->seg[s] = {(uint16_t)w, (uint16_t)(s * w), s * w, 0};
+  }
   j->number_symbols = 13;
   j->branch = -1;
   j->fo_first = k.ndmrs > 1 ? 0 : -1;
@@ -265,6 +295,9 @@ static void synth_job(const Key &k, nr_gpu_pass_job_t *j, std::vector<int16_t> &
 static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
 {
   const int nbRx = g_cfg.nbRx, nl = j->nl, nd = j->ndmrs, ext = (int)j->dj.ext;
+  const bool segd = j->shape.nseg_class >= 1;                     /* segmented class: scratch rows + compose */
+  const int ns = segd ? j->shape.nseg_class : 1;                   /* chest row sets per (DM-RS symbol, layer): the class's segment count */
+  if (j->nseg > ns || j->nseg < 0 || (j->nseg == 0) == segd) return -1;
   const bool redirect = nr_gpu_model() == NR_GPU_MODEL_DIRECT && j->rxdataF;
   const int16_t *rxbase = redirect ? (const int16_t *)j->rxdataF : (const int16_t *)I.rxF.dev;
   const size_t rxstride = redirect ? j->rx_stride : (size_t)NSYM * N; /* c16 between antennas */
@@ -272,21 +305,26 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
   for (int a = 0; a < 4; a++) I.rx[a] = j->rxdata[a];
   I.fj = {I.rx, j->ring_len, j->ring_offset, j->symbol_rot, 0x3fff, redirect ? (int16_t *)j->rxdataF : nullptr, redirect ? (uint32_t)j->rx_stride : 0u};
   if (nr_pdsch_gpu_fep_stage_at(&I.fj, I.id) != 0) return -1;
-  /* chest rows: one per (DM-RS symbol, layer, antenna), the order of nr_pdsch_gpu_chest_grant */
+  /* chest rows: one per (DM-RS symbol, layer, segment, antenna), the order of nr_pdsch_gpu_chest_grant (ns == 1: one segment = the grant). A class with several
+   * segments estimates into scratch rows (the estimator writes a whole row) and k_seg_compose lays them out in data order. */
   nr_gpu_chest_job_t &cj = *I.cj;
   int r = 0;
+  const int pn = j->nseg ? j->seg_pil_nrb : j->nrb; /* RBs of the pilot sequence behind pil[][] */
   for (int k = 0; k < nd; k++)
     for (int l = 0; l < nl; l++) {
       int16_t *pil = (int16_t *)I.pil.host + (size_t)(k * 4 + l) * PIL_STRIDE * 2;
-      memcpy(pil, j->pil[k][l], (size_t)6 * j->nrb * sizeof(int16_t) * 2);
-      for (int a = 0; a < nbRx; a++, r++) {
-        nr_gpu_chest_row_t &row = cj.rows[r];
-        row.rxF = rxbase + 2 * ((size_t)a * rxstride + (size_t)N * j->dmrs_sym[k] + j->delta[l]);
-        row.pil = (const int16_t *)I.pil.dev + (size_t)(k * 4 + l) * PIL_STRIDE * 2;
-        row.out = (int16_t *)I.est.dev + 2 * ((size_t)(l * nbRx + a) * NSYM * N + (size_t)j->dmrs_sym[k] * N);
-        row.k0 = j->k0;
-        row.nb_rb = j->nrb;
-      }
+      memcpy(pil, j->pil[k][l], (size_t)6 * pn * sizeof(int16_t) * 2);
+      for (int sg = 0; sg < ns; sg++)
+        for (int a = 0; a < nbRx; a++, r++) {
+          nr_gpu_chest_row_t &row = cj.rows[r];
+          const bool real = j->nseg && sg < j->nseg;
+          row.rxF = rxbase + 2 * ((size_t)a * rxstride + (size_t)N * j->dmrs_sym[k] + j->delta[l]);
+          row.pil = (const int16_t *)I.pil.dev + (size_t)(k * 4 + l) * PIL_STRIDE * 2 + (real ? 12 * (size_t)j->seg[sg].pil_rb : 0);
+          row.out = segd ? (int16_t *)I.segsc.dev + 2 * (size_t)r * N
+                           : (int16_t *)I.est.dev + 2 * ((size_t)(l * nbRx + a) * NSYM * N + (size_t)j->dmrs_sym[k] * N);
+          row.k0 = j->nseg ? (real ? j->seg[sg].k0 : 0) : j->k0;
+          row.nb_rb = j->nseg ? (real ? j->seg[sg].n_prb : 1) : j->nrb; /* a padding row estimates one PRB nobody reads */
+        }
     }
   cj.n_rows = r;
   if (nr_pdsch_gpu_chest_stage_at(&cj, r, I.id) != 0) return -1;
@@ -315,6 +353,10 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
   memset(&pb.post, 0, sizeof(pb.post));
   pb.post.nvar_rows = (const uint32_t *)((char *)I.nvar.dev + 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int));
   pb.post.nrx = nbRx; pb.post.nl = nl; pb.post.n_dmrs_sym = nd;
+  if (ns > 1) {
+    pb.post.nseg = ns;
+    pb.post.nrb_total = j->nrb;
+  }
   pb.post.number_symbols = j->number_symbols; pb.post.nvfix = j->nvfix; pb.post.branch = j->branch;
   if (j->fo_first >= 0 && j->fo_last > j->fo_first) {
     pb.post.h0 = (const int16_t *)I.est.dev + 2 * (size_t)N * j->dmrs_sym[j->fo_first];
@@ -322,6 +364,13 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
   }
   pb.post.N = N; pb.post.n_rb_dl = g_cfg.n_rb_dl;
   pb.post.dt_d = j->dt_d; pb.post.df_d = j->df_d; pb.post.dt_f = (float)j->dt_d; pb.post.df_f = (float)j->df_d;
+  for (int sg = 0; sg < NR_GPU_PASS_MAX_SEG; sg++) {
+    const bool real = sg < j->nseg;
+    pb.post.seg_w[sg] = real && ns > 1 ? j->seg[sg].n_prb : 0;
+    pb.seg_n[sg] = real ? (uint16_t)(12 * j->seg[sg].n_prb) : 0;
+    pb.seg_d[sg] = real ? (uint16_t)(12 * j->seg[sg].data_index) : 0;
+  }
+  for (int k = 0; k < NR_GPU_PASS_MAX_DMRS; k++) pb.dsym[k] = k < nd ? j->dmrs_sym[k] : 0;
   pb.G = j->G; pb.span = j->norm_span; pb.norm = j->norm; pb.tbs = j->A;
   pb.ncb = (int)j->C; pb.KB = (int)(j->K >> 3);
   if (nr_gpu_model() == NR_GPU_MODEL_DIRECT) {
@@ -369,7 +418,8 @@ static int enqueue(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, cudaStrea
       nr_gpu_buf_h2d_async(&I.scr, 0, (size_t)(((size_t)12 * k.nrb * 13 * 8 * k.nl + 31) / 32) * 4, s))
     return -1;
   if (nr_pdsch_gpu_fep_dev(&I.fj, &I.rxF, I.id, s) != 0) return -1;
-  if (nr_pdsch_gpu_chest_dev(I.cj, I.cj->n_rows, &I.est, &I.nvar, I.id, s) != 0) return -1;
+  if (nr_pdsch_gpu_chest_dev(I.cj, I.cj->n_rows, k.nseg ? &I.segsc : &I.est, &I.nvar, I.id, s) != 0) return -1;
+  if (k.nseg) k_seg_compose<<<k.ndmrs * k.nl * nbRx, 256, 0, s>>>((const short2 *)I.segsc.dev, (short2 *)I.est.dev, I.PBd(), k.nseg, k.nl, nbRx);
   if (nr_gpu_pass_launch_chest_post_p(I.PBd() ? &I.PBd()->post : nullptr, &I.RBd()->post, s) != 0) return -1;
   if (nr_pdsch_gpu_demod_pass_dev(I.id, &sj->dj, &I.llr, I.dj.nvar_dev, s, I.s2) != 0) return -1;
   k_unscr<<<256, 256, 0, s>>>((int16_t *)I.llr.dev, I.PBd());
@@ -383,7 +433,7 @@ static int enqueue(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, cudaStrea
   k_pick<<<1, 128, 0, s>>>(snaps, dres, I.PBd(), I.RBd());
   if (nr_gpu_pass_launch_crc_p((const uint8_t *)I.res.dev, I.PBd()->sel, ncb, &I.PBd()->tbs, I.RBd()->seg_crc, &I.RBd()->tb_crc, s) != 0) return -1;
   if (nr_gpu_buf_d2h_async(&I.llr, 0, std::min<size_t>((size_t)LLR_CAP, (size_t)12 * k.nrb * 13 * 8 * k.nl) * 2, s) ||
-      nr_gpu_buf_d2h_async(&I.nvar, 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int), (size_t)k.ndmrs * k.nl * nbRx * sizeof(int), s) ||
+      nr_gpu_buf_d2h_async(&I.nvar, 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int), (size_t)k.ndmrs * k.nl * (k.nseg ? k.nseg : 1) * nbRx * sizeof(int), s) ||
       nr_gpu_buf_d2h_async(&I.res, 0, sizeof(ResBlk), s) || nr_gpu_buf_d2h_async(&I.est, 0, (size_t)nbRx * NSYM * N * 4, s) ||
       nr_gpu_buf_d2h_async(&I.rxF, 0, (size_t)nbRx * NSYM * N * 4, s))
     return -1;
@@ -402,13 +452,28 @@ static Key key_of(const nr_gpu_pass_job_t *j)
 {
   const nr_gpu_demod_job_t &d = j->dj;
   return Key{j->shape.nrb_class, j->shape.nl, j->shape.ndmrs, j->shape.ncb_class, j->shape.fp32, (uint8_t)(d.want_evm != 0),
-             (uint8_t)(j->shape.nl >= 2 ? d.qam_mode : 0), (uint8_t)(j->shape.nl == 1 && d.align != 0)};
+             (uint8_t)(j->shape.nl >= 2 ? d.qam_mode : 0), (uint8_t)(j->shape.nl == 1 && d.align != 0),
+             (uint8_t)j->shape.nseg_class};
+}
+
+/* the segment geometry of a job: segments tile [0, nrb) in data order, their pilots and first subcarriers lie inside the buffers */
+static bool seg_ok(const nr_gpu_pass_job_t *j)
+{
+  if (!j->nseg) return true;
+  if (j->seg_pil_nrb < 1 || 6 * j->seg_pil_nrb > PIL_STRIDE) return false;
+  int tot = 0;
+  for (int s = 0; s < j->nseg; s++) {
+    const auto &g = j->seg[s];
+    if (g.n_prb < 1 || g.data_index != tot || g.pil_rb < 0 || g.pil_rb + g.n_prb > j->seg_pil_nrb || g.k0 < 0 || g.k0 >= N || 12 * (tot += g.n_prb) > N) return false;
+  }
+  return tot == j->nrb;
 }
 
 static bool key_ok(const Key &k)
 {
   return g_cfg_set && nr_gpu_pass_nrb_class(k.nrb) == k.nrb && nr_gpu_pass_ncb_class(k.ncb) == k.ncb && k.nl >= 1 && k.nl <= 4 && k.nl <= g_cfg.nbRx &&
-         k.ndmrs >= 1 && k.ndmrs <= NR_GPU_PASS_MAX_DMRS && k.qmode <= 3;
+         k.ndmrs >= 1 && k.ndmrs <= NR_GPU_PASS_MAX_DMRS && k.qmode <= 3 && (k.nseg == 0 || nr_gpu_pass_nseg_class(k.nseg) == k.nseg) &&
+         (int)k.ndmrs * k.nl * g_cfg.nbRx * (k.nseg ? k.nseg : 1) <= SEG_ROWS;
 }
 
 /* capture + instantiate + one replay (pre-fence) of a class on every instance. Under g_mu. */
@@ -430,7 +495,7 @@ static int build(const Key &k)
     const int er = enqueue(I, k, sj, I.s);
     const cudaError_t ee = cudaStreamEndCapture(I.s, &g);
     if (er != 0 || ee != cudaSuccess || !g) {
-      fprintf(stderr, "nr_gpu_pass: capture of class nrb %u nl %u ndmrs %u ncb %u failed (enqueue %d, end %s, last %s)\n", k.nrb, k.nl, k.ndmrs, k.ncb, er,
+      fprintf(stderr, "nr_gpu_pass: capture of class nrb %u nl %u ndmrs %u ncb %u nseg %u failed (enqueue %d, end %s, last %s)\n", k.nrb, k.nl, k.ndmrs, k.ncb, k.nseg, er,
               cudaGetErrorString(ee), cudaGetErrorString(cudaGetLastError()));
       if (g) cudaGraphDestroy(g);
       rc = -1;
@@ -453,6 +518,11 @@ static int build(const Key &k)
     return -1;
   }
   g_cache[k.pack()] = e;
+  if (k.nseg) ++g_seg_classes;
+  {
+    size_t fr = 0, tot_b = 0; /* build() runs before the fence only (guard_alloc) */
+    if (cudaMemGetInfo(&fr, &tot_b) == cudaSuccess) g_used_mb = (tot_b - fr) >> 20;
+  }
   return 0;
 }
 
@@ -473,7 +543,8 @@ static int alloc_inst(int id)
       nr_gpu_buf_alloc(&I.scratch, 4 * I.bn * 2) || nr_gpu_buf_alloc(&I.llr, (size_t)LLR_CAP * 2) ||
       nr_gpu_buf_alloc(&I.lin, NR_GPU_LDPC_DEV_IN_BYTES) || nr_gpu_buf_alloc(&I.bits, NR_GPU_LDPC_DEV_BITS_BYTES) ||
       nr_gpu_buf_alloc(&I.pil, (size_t)NR_GPU_PASS_MAX_DMRS * 4 * PIL_STRIDE * 4) || nr_gpu_buf_alloc(&I.scr, (size_t)(LLR_CAP / 32 + 2) * 4) ||
-      nr_gpu_buf_alloc(&I.pb, sizeof(PassBlk)) || nr_gpu_buf_alloc(&I.res, sizeof(ResBlk)))
+      nr_gpu_buf_alloc(&I.pb, sizeof(PassBlk)) || nr_gpu_buf_alloc(&I.res, sizeof(ResBlk)) ||
+      nr_gpu_buf_alloc(&I.segsc, (size_t)SEG_ROWS * N * 4))
     return -1;
   I.cj = (nr_gpu_chest_job_t *)calloc(1, sizeof(nr_gpu_chest_job_t));
   I.lj = (nr_gpu_ldpc_job_t *)calloc(MAXCB, sizeof(nr_gpu_ldpc_job_t));
@@ -494,7 +565,7 @@ static Key default_class(int i)
   const int n = nrb[i / 4], l = i % 4 + 1;
   int c = n * l / 12;
   if (c < 1) c = 1;
-  return Key{(uint16_t)nr_gpu_pass_nrb_class(n), (uint16_t)l, 2, (uint16_t)nr_gpu_pass_ncb_class(c > 32 ? 32 : c), 1, 0, (uint8_t)(l >= 2 ? 3 : 0), 0};
+  return Key{(uint16_t)nr_gpu_pass_nrb_class(n), (uint16_t)l, 2, (uint16_t)nr_gpu_pass_ncb_class(c > 32 ? 32 : c), 1, 0, (uint8_t)(l >= 2 ? 3 : 0), 0, 0};
 }
 } // namespace nrpass
 
@@ -534,8 +605,9 @@ extern "C" int nr_gpu_pass_warm(const nr_gpu_pass_shape_t *sh, int qmode, int al
 {
   std::lock_guard<std::mutex> lk(g_mu);
   if (!g_ready || !sh) return -1;
-  const Key k{sh->nrb_class, sh->nl, sh->ndmrs, sh->ncb_class, sh->fp32, (uint8_t)(evm != 0), (uint8_t)(sh->nl >= 2 ? qmode : 0), (uint8_t)(sh->nl == 1 && align)};
-  if (!key_ok(k)) return -1;
+  const Key k{sh->nrb_class, sh->nl, sh->ndmrs, sh->ncb_class, sh->fp32, (uint8_t)(evm != 0), (uint8_t)(sh->nl >= 2 ? qmode : 0), (uint8_t)(sh->nl == 1 && align),
+                (uint8_t)sh->nseg_class};
+  if (!key_ok(k) || (int)k.nseg > (int)k.nrb) return -1;
   if (g_cache.count(k.pack())) return 0;
   return build(k);
 }
@@ -544,7 +616,7 @@ extern "C" void nr_gpu_pass_counters(uint64_t o[16])
 {
   memset(o, 0, 16 * sizeof(uint64_t));
   o[0] = g_launches; o[1] = g_hits; o[2] = g_fb_unseen; o[3] = g_fb_busy; o[4] = g_fb_unsup; o[5] = g_fb_err; o[6] = g_need_cpu; o[7] = g_tb_fail;
-  o[8] = NI; o[9] = g_cache.size(); o[10] = g_allocs; o[11] = g_fb_ldpckey;
+  o[8] = NI; o[9] = g_cache.size(); o[10] = g_allocs; o[11] = g_fb_ldpckey; o[12] = g_seg_launches; o[13] = g_seg_classes;
 }
 
 extern "C" void nr_gpu_pass_stats(char *buf, int n)
@@ -558,9 +630,10 @@ extern "C" void nr_gpu_pass_stats(char *buf, int n)
     acc += g_wait_hist[i];
     if (acc * 2 >= tot && tot) { p50 = i; break; }
   }
-  snprintf(buf, n, "GPUPASS launches=%lu graph_hits=%lu fallback=%lu (unseen=%lu busy=%lu unsup=%lu err=%lu ldpc_key=%lu) need_cpu=%lu tb_fail=%lu classes=%lu instances=%lu wait_us_p50<=%d",
+  snprintf(buf, n, "GPUPASS launches=%lu graph_hits=%lu fallback=%lu (unseen=%lu busy=%lu unsup=%lu err=%lu ldpc_key=%lu) need_cpu=%lu tb_fail=%lu classes=%lu (seg %lu) seg_launches=%lu instances=%lu wait_us_p50<=%d gpu_used_mb=%lu",
            (unsigned long)o[0], (unsigned long)o[1], (unsigned long)(o[2] + o[3] + o[4] + o[5] + o[11]), (unsigned long)o[2], (unsigned long)o[3], (unsigned long)o[4],
-           (unsigned long)o[5], (unsigned long)o[11], (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[9], (unsigned long)o[8], tot ? 1 << p50 : 0);
+           (unsigned long)o[5], (unsigned long)o[11], (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[9], (unsigned long)o[13], (unsigned long)o[12], (unsigned long)o[8],
+           tot ? 1 << p50 : 0, (unsigned long)g_used_mb.load());
 }
 
 /* test hook: marks the instances of `mask` busy (1) or frees them (0) so that a test can run on one chosen instance */
@@ -578,6 +651,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   const uint32_t ext = d.ext;
   if (!key_ok(k) || (int)k.nl != j->nl || (int)k.ndmrs != j->ndmrs || j->nbRx != g_cfg.nbRx || (int)j->nrb > (int)k.nrb || j->C < 1 || j->C > k.ncb ||
       (j->Z & 3) || (j->K & 7) || (j->K >> 3) > (uint32_t)KBMAX || j->G > LLR_CAP || j->G == 0 || ext > (uint32_t)EXTMAX || (d.want_evm && k.fp32 == (uint8_t)d.evm_fp64) ||
+      j->nseg < 0 || j->nseg > (int)k.nseg || (j->nseg == 0) != (k.nseg == 0) || !seg_ok(j) ||
       j->it_max < 1 || j->it_max > NSNAP + 1 || !j->scr || !j->geo_y || !j->geo_h || !j->symbol_rot || !j->rxdata[0]) {
     ++g_fb_unsup;
     return 1;
@@ -590,8 +664,8 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   }
   if (!e) {
     if (g_fb_unseen++ < 40 && getenv("ISAC_GPU_PASS_LOG_UNSEEN"))
-      fprintf(stderr, "GPUPASS unseen class: nrb %u (grant %d) nl %u ndmrs %u ncb %u (C %u) evm %u qmode %u align %u fp32 %u\n", k.nrb, j->nrb, k.nl, k.ndmrs, k.ncb, j->C, k.evm, k.qmode,
-              k.align, k.fp32);
+      fprintf(stderr, "GPUPASS unseen class: nrb %u (grant %d) nl %u ndmrs %u ncb %u (C %u) evm %u qmode %u align %u fp32 %u nseg %u (grant %d)\n", k.nrb, j->nrb, k.nl, k.ndmrs, k.ncb, j->C, k.evm, k.qmode,
+              k.align, k.fp32, k.nseg, j->nseg);
     return 1;
   }
   int id = -1;
@@ -619,6 +693,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   if (g_dead) { ++g_fb_err; return -1; }
   ++g_launches;
   ++g_hits;
+  if (k.nseg) ++g_seg_launches;
   {
     int b = 0;
     while (b < 31 && (1u << b) < (uint32_t)us) b++;
@@ -654,7 +729,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   r->evm_db = r->snr_db = 0.0f;
   {
     const uint32_t *q = (const uint32_t *)((const char *)I.nvar.host + 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)) + (size_t)(j->ndmrs * j->nl - 1) * g_cfg.nbRx;
-    for (int a = 0; a < 4; a++) r->nvar_ant[a] = a < g_cfg.nbRx ? q[a] : 0;
+    for (int a = 0; a < 4; a++) r->nvar_ant[a] = k.nseg > 1 ? rb.post.nvar_ant[a] : (a < g_cfg.nbRx ? q[a] : 0); /* segmented: the width-weighted mean the post kernel computed */
   }
   if (!r->need_cpu && !r->tb_ok && j->llr_out)
     memcpy(j->llr_out, I.llr.host, (size_t)j->G * 2); /* the first body's LLRs for the caller's retry arms */

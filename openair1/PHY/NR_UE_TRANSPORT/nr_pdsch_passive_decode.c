@@ -1536,6 +1536,17 @@ static void brfo_commit(void)
   pthread_mutex_unlock(&s_brfo_lock);
 }
 static __thread uint16_t t_csi_prb_map[NR_PRB_SET_MAX]; /* CSI-FULL: virtual -> physical PRB of a segmented grant */
+/* CSI-FULL: the real CRB per virtual RB of a segmented grant, for the extractor (nr_dlsch_csi_prb_map); the caller clears it after the demod */
+static void gp_seg_csi_map(const nr_prb_seg_t *seg, int nseg, const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, const freq_alloc_bitmap_t *freq_alloc)
+{
+  if (!nr_csirs_full_enabled() || !dlsch_config->numCsiRsForRateMatching)
+    return;
+  for (int s = 0; s < nseg; s++)
+    for (int r = 0; r < seg[s].n_prb && seg[s].data_index + r < NR_PRB_SET_MAX; r++)
+      t_csi_prb_map[seg[s].data_index + r] = seg[s].prb_start + r;
+  nr_dlsch_csi_prb_map = t_csi_prb_map;
+  nr_dlsch_csi_prb_map_n = freq_alloc->num_rbs;
+}
 static __thread bool t_probe_first_seg = false; /* decode segment 0 only; outcome in t_probe_seg_ok */
 static __thread bool t_probe_seg_ok = false;
 void nr_pdsch_passive_probe_mode(bool on) { t_probe_first_seg = on; t_probe_seg_ok = false; }
@@ -3106,7 +3117,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   int gp_gate = -1; /* the first gate that keeps this grant off the pass (counted: nr_gpu_pass_dl.h NR_GPU_PASS_GATE_*) */
   if (nr_gpu_pass_active()) {
     extern __thread int nr_pdsch_chest_occ_override;
-    gp_gate = seg_path ? NR_GPU_PASS_GATE_SEG
+    gp_gate = (seg_path && nseg > NR_GPU_PASS_MAX_SEG) ? NR_GPU_PASS_GATE_SEG /* more segments than the largest class; fewer run the segmented classes */
             : (t_probe_first_seg || probe_last_sym >= 0 || t_probe_no_horizon) ? NR_GPU_PASS_GATE_PROBE
             : (t_share.on || t_chest_bypass) ? NR_GPU_PASS_GATE_SHARE
             : (t_gw_used || t_gw_capture || t_llr_ovr != NULL || t_cap_req || t_tb_force_cpu) ? NR_GPU_PASS_GATE_GW
@@ -3124,7 +3135,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   if (nr_gpu_pass_active() && gp_gate < 0) {
     static const nr_ssb_rm_mask_t gp_no_ssb = {0};
     {
-      const nr_gpu_pass_dl_in_t gin = {.ue = ue, .proc = proc, .dlsch_config = dlsch_config, .freq_alloc = freq_alloc, .cw = cw,
+      const nr_gpu_pass_dl_in_t gin = {.ue = ue, .proc = proc, .dlsch_config = dlsch_config, .freq_alloc = freq_alloc, .seg = seg_path ? seg : NULL, .nseg = seg_path ? nseg : 0, .cw = cw,
                                        .ssb_rm = ssb_unav ? &ssb.dem : &gp_no_ssb, .rxdataF = &rxdataF[0][0], .rx_stride = fp->samples_per_slot_wCP,
                                        .rnti = grant->rnti, .G = G, .tbslbrm = dlsch_config->tbslbrm,
                                        .est_size = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16,
@@ -3138,7 +3149,12 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc)); /* the demod job reads whether the EVM is armed; the block below re-arms it for the old path */
       nr_pdsch_evm_acc.armed = gp_evm_armed(probe_last_sym);
       gp_tried = true;
-      if (t_gpp && nr_gpu_pass_dl_run(&gin, t_gpp) == 0) {
+      if (seg_path)
+        gp_seg_csi_map(seg, nseg, dlsch_config, freq_alloc); /* the demod geometry reads the CSI-FULL map of the virtual allocation */
+      const int gp_rc = t_gpp ? nr_gpu_pass_dl_run(&gin, t_gpp) : 1;
+      nr_dlsch_csi_prb_map = NULL; /* the old path sets and clears its own */
+      nr_dlsch_csi_prb_map_n = 0;
+      if (gp_rc == 0) {
         if (t_gpp->r.need_cpu) {
           nr_gpu_pass_note(NR_GPU_PASS_EV_RETRY_OLD); /* a block only the CPU decoder can settle: the old path decodes from scratch */
         } else if (!t_gpp->r.tb_ok) {
@@ -4506,7 +4522,7 @@ gpu_llr_ready:;
     out->nvar = nvar;
     for (int a = 0; a < NR_DL_CHEST_MAX_ANT; a++)
       nr_dl_chest_nvar_ant[a] = a < 4 ? t_gpp->nvar_ant[a] : 0;
-    if (n_dmrs_sym > 1)
+    if (n_dmrs_sym > 1 && !seg_path) /* the old DM-RS phase-slope tracker needs a frequency-ordered axis: it does not run for a segmented grant */
       gp_dmrsfo_commit(&t_gpp->r.post, (uint32_t)fp->N_RB_DL);
     t_brfo_pending = false;
     if (fp->nb_antennas_rx > 1 && n_dmrs_sym > 1)
@@ -4704,7 +4720,9 @@ gpu_llr_ready:;
    * forms Y/X on the REAL subcarriers. */
   freq_alloc_bitmap_t fa_virt;
   c16_t(*rxdataF_dem)[fp->samples_per_slot_wCP] = rxdataF;
-  if (seg_path && !gpu_llr) {
+  if (seg_path && gp_ok)
+    fa_virt = set_bitmap_from_start_size(0, freq_alloc->num_rbs); /* the pass demodulated it from the real REs: no gather, no CSI map (the demod below is skipped) */
+  if (seg_path && !gpu_llr && !gp_ok) {
     static __thread c16_t *virt = NULL;
     static __thread size_t virt_cap = 0;
     const size_t need = (size_t)fp->nb_antennas_rx * fp->samples_per_slot_wCP;
@@ -4733,13 +4751,7 @@ gpu_llr_ready:;
       }
     fa_virt = set_bitmap_from_start_size(0, freq_alloc->num_rbs);
     rxdataF_dem = (c16_t(*)[fp->samples_per_slot_wCP])virt;
-    if (nr_csirs_full_enabled() && dlsch_config->numCsiRsForRateMatching) { /* CSI-FULL: real CRB per virtual RB */
-      for (int s = 0; s < nseg; s++)
-        for (int r = 0; r < seg[s].n_prb && seg[s].data_index + r < NR_PRB_SET_MAX; r++)
-          t_csi_prb_map[seg[s].data_index + r] = seg[s].prb_start + r;
-      nr_dlsch_csi_prb_map = t_csi_prb_map;
-      nr_dlsch_csi_prb_map_n = freq_alloc->num_rbs;
-    }
+    gp_seg_csi_map(seg, nseg, dlsch_config, freq_alloc);
   }
 
   const uint64_t pdt_dem = pdtim_on ? pdtim_now() : 0;

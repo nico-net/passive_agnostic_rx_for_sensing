@@ -138,7 +138,7 @@ static std::atomic<unsigned> g_ctx_busy{0};
 static const int PASS_RING = NR_GPU_PASS_RING;
 static const int PASS_SLOTS = NR_GPU_PASS_RING + 1; /* [0, RING): graph-pass instances; [RING]: the test-only round-robin _stage helpers (never a live instance's slot) */
 static short2 *g_pass_h[PASS_SLOTS], *g_pass_d[PASS_SLOTS], *g_pass_ls[PASS_SLOTS];
-static const int PASS_LS_ROWS = 256; /* LS rows per slot: a graph pass needs at most 4 DM-RS symbols x 4 layers x 4 antennas */
+static const int PASS_LS_ROWS = 512; /* LS rows per slot: a graph pass needs nd x nl x nrx x segments rows (nr_gpu_pass_graph.cu SEG_ROWS): 2 x 4 x 4 x 16 or 3 x 4 x 4 x 8 */
 static uint32_t *g_pass_par[PASS_SLOTS];              /* per slot staging block read by the kernel (nr_exact::ExactIO::par layout) */
 static nr_gpu_chest_row_t *g_pass_rh[PASS_SLOTS], *g_pass_rd[PASS_SLOTS]; /* chest rows: pinned staging, device copy */
 static cudaEvent_t g_pass_fev[PASS_SLOTS], g_pass_cev[PASS_SLOTS];        /* recorded when a pass is done with the slot */
