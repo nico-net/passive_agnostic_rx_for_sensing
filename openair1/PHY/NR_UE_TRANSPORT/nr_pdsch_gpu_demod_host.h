@@ -5,6 +5,7 @@
 #include "PHY/defs_nr_UE.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.h"
 #include "PHY/TOOLS/nr_gpu_bgq.h"
 #include <stdlib.h>
 
@@ -35,6 +36,11 @@ typedef struct {
   const nr_ssb_rm_mask_t *ssb_rm;
 } nr_pdsch_gpu_demod_call_t;
 
+/* GPUPASS: the demod job of a grant for the graph pass (0 = done, else a refusal), and the fold of its EVM sums / kappa / used branch after the pass */
+int nr_pdsch_gpu_demod_pass_job(const nr_pdsch_gpu_demod_call_t *c, nr_gpu_demod_job_t *j, const int16_t **geo_y, const int16_t **geo_h);
+void nr_pdsch_gpu_demod_pass_fold(const nr_gpu_demod_job_t *jp, const NR_UE_DLSCH_t *dlsch);
+int nr_pdsch_gpu_demod_pass_variant(PHY_VARS_NR_UE *ue, int nl, int qm, int *qmode, int *align);
+
 /* Module warm-up (before the RX fence); 1 when ISAC_PDSCH_GPU_EXACT_DEMOD=1 is active. */
 int nr_pdsch_gpu_demod_warmup(const NR_DL_FRAME_PARMS *fp);
 /* 0: the grant is demodulated (exactly what the CPU loop would have produced); -1: the caller runs its CPU loop. */
@@ -51,6 +57,10 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, 
                              uint32_t pdsch_est_size,
                              int32_t dl_ch_estimates[][pdsch_est_size], int rxdataFsize, c16_t rxdataF[][rxdataFsize], int diag,
                              uint32_t nvar_out[14][4], uint32_t nvar_ant_out[14][4][8]);
+/* GPUPASS (nr_gpu_pass_dl.c): the graph pass's chest inputs of a grant, with nr_pdsch_gpu_chest_grant's gates; 0 = ok, else a refusal reason */
+int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch,
+                                   const freq_alloc_bitmap_t *freq_alloc, int Nl, uint16_t dmrs_mask, int diag, int *ndmrs, int dmrs_sym[4], int delta[4],
+                                   const int16_t *pil_out[4][4], int *k0_out, int *nrb_out);
 /* FATTAILS ISAC_GPU_CHECK_ASYNC=1 (nr_pdsch_gpu_demod_host.c): one low-priority worker for the GPU self-checks.
  * every(): 0 = off (inline checks as configured), N = check every N-th grant on the worker (ISAC_GPU_CHECK_ASYNC_EVERY,
  * default 256). submit(): 0 = queued (the worker runs fn(job), fn frees job), -1 = dropped (counted; caller frees).

@@ -554,9 +554,10 @@ static void post_fold(const nr_gpu_demod_job_t *jp, const NR_UE_DLSCH_t *dlsch, 
   }
 }
 
-/* GPU demodulation of the grant into the given buffers; 0 = done. EVM accumulates into nr_pdsch_evm_acc (if armed). */
-static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_coef, int align, int l2d, int16_t *llr, uint32_t llr_cap,
-                     uint32_t *dvr, int32_t *l2, c16_t *comp, c16_t *mag, c16_t *magb, c16_t *magr, uint64_t *gpu_ns)
+/* The job of a grant (everything but the device-side buffers): the host-resolved decision inputs, the RE geometry of nr_dlsch_extract_geometry (into this thread's
+ * index maps *geo) and the EVM controls. Pointers to the caller's buffers are filled from the arguments. -1 = ok, else the RF_* refusal. */
+static int build_job(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_coef, int align, int l2d, int16_t *llr, uint32_t llr_cap, c16_t *comp, c16_t *mag,
+                     c16_t *magb, c16_t *magr, nr_gpu_demod_job_t *jp, geo_tls_t **geo)
 {
   const NR_DL_FRAME_PARMS *fp = &c->ue->frame_parms;
   const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg = c->cfg;
@@ -567,77 +568,95 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   geo_tls_t *g = geo_tls(fp, c->est_size);
   if (!g)
     return RF_GEOM;
-  nr_gpu_demod_job_t j = {0};
-  j.nbRx = nbRx;
-  j.nl = nl;
-  j.qm = qm;
-  j.N = fp->ofdm_symbol_size;
-  j.start_symbol = cfg->start_symbol;
-  j.nb_symbols = cfg->number_symbols;
-  j.first_symbol = c->first_symbol;
+  *geo = g;
+  nr_gpu_demod_job_t *j = jp;
+  memset(j, 0, sizeof(*j));
+  j->nbRx = nbRx;
+  j->nl = nl;
+  j->qm = qm;
+  j->N = fp->ofdm_symbol_size;
+  j->start_symbol = cfg->start_symbol;
+  j->nb_symbols = cfg->number_symbols;
+  j->first_symbol = c->first_symbol;
   const int last = cfg->start_symbol + cfg->number_symbols - 1;
   for (int m = cfg->start_symbol; m <= last && m < NR_GPU_DEMOD_NSYM; m++)
     if (!(c->probe_last_sym >= 0 && m > c->probe_last_sym && m != last))
-      j.sym_mask |= (uint16_t)(1u << m);
-  if (last >= NR_GPU_DEMOD_NSYM || c->first_symbol < cfg->start_symbol || c->first_symbol > last || !(j.sym_mask >> c->first_symbol & 1))
+      j->sym_mask |= (uint16_t)(1u << m);
+  if (last >= NR_GPU_DEMOD_NSYM || c->first_symbol < cfg->start_symbol || c->first_symbol > last || !(j->sym_mask >> c->first_symbol & 1))
     return RF_MASK;
   uint32_t off = 0;
   const uint64_t tg = now_ns();
   for (int m = cfg->start_symbol; m <= last; m++) {
-    j.llr_off[m] = off;
-    if (!(j.sym_mask >> m & 1))
+    j->llr_off[m] = off;
+    if (!(j->sym_mask >> m & 1))
       continue;
     const uint32_t n = nr_dlsch_extract_geometry(fp, c->ue->chest_time, g->rx_idx, c->est_size, g->est_idx, ext, g->geo_y + (size_t)m * ext,
                                                  g->geo_h + (size_t)m * ext, (unsigned char)m, c->cfg, c->freq_alloc, c->ssb_rm);
     if (n > ext)
       return RF_GEOM;
-    j.nre[m] = (uint16_t)n;
+    j->nre[m] = (uint16_t)n;
     off += n * (uint32_t)qm * (uint32_t)nl;
   }
   atomic_fetch_add_explicit(&g_ns_geo, now_ns() - tg, memory_order_relaxed);
-  if (j.nre[c->first_symbol] == 0)
+  if (j->nre[c->first_symbol] == 0)
     return RF_NRE0;
   if (off > llr_cap)
     return RF_CAP;
-  j.rx_stride = fp->samples_per_slot_wCP;
-  j.est_stride = c->est_size;
-  j.buf = c->buf;
-  j.ext = ext;
-  j.rxdataF = (const int16_t *)c->rxdataF;
-  j.est = (const int16_t *)c->est;
-  j.geo_y = (const int16_t *)g->geo_y;
-  j.geo_h = (const int16_t *)g->geo_h;
-  j.comp = (int16_t *)comp;
-  j.mag = (int16_t *)mag;
-  j.magb = (int16_t *)magb;
-  j.magr = (int16_t *)magr;
-  j.llr = llr;
-  j.mode = mode;
-  j.thr_coef = thr_coef;
-  j.l2_delta = l2d;
-  j.align = align;
-  j.shift_sum = g_shift_sum;
-  j.qam_mode = nl >= 2 ? t_qmode : 0;
-  j.nvar = c->nvar;
-  if (j.qam_mode == 3) { /* nr_dlsch_mmse() mode 3's s2 factor, same env and libm */
+  j->rx_stride = fp->samples_per_slot_wCP;
+  j->est_stride = c->est_size;
+  j->buf = c->buf;
+  j->ext = ext;
+  j->rxdataF = (const int16_t *)c->rxdataF;
+  j->est = (const int16_t *)c->est;
+  j->geo_y = (const int16_t *)g->geo_y;
+  j->geo_h = (const int16_t *)g->geo_h;
+  j->comp = (int16_t *)comp;
+  j->mag = (int16_t *)mag;
+  j->magb = (int16_t *)magb;
+  j->magr = (int16_t *)magr;
+  j->llr = llr;
+  j->mode = mode;
+  j->thr_coef = thr_coef;
+  j->l2_delta = l2d;
+  j->align = align;
+  j->shift_sum = g_shift_sum;
+  j->qam_mode = nl >= 2 ? t_qmode : 0;
+  j->nvar = c->nvar;
+  if (j->qam_mode == 3) { /* nr_dlsch_mmse() mode 3's s2 factor, same env and libm */
     static double s_nvfac = -1.0;
     if (s_nvfac < 0.0) {
       const char *e = getenv("ISAC_PDSCH_MMSE_EXACT_NVAR_DB");
       s_nvfac = pow(10.0, (e ? atof(e) : 21.0) / 10.0);
     }
-    j.m3_nvfac = s_nvfac;
+    j->m3_nvfac = s_nvfac;
   }
-  j.mag_per_layer = nl >= 2 && j.qam_mode >= 2; /* modes 2 and 3: per-layer thresholds */
-  j.wide_mrc = nr_pdsch_decode_wide_mrc;
-  j.want_kappa = nr_pdsch_evm_acc.armed;
+  j->mag_per_layer = nl >= 2 && j->qam_mode >= 2; /* modes 2 and 3: per-layer thresholds */
+  j->wide_mrc = nr_pdsch_decode_wide_mrc;
+  j->want_kappa = nr_pdsch_evm_acc.armed;
   if (g_gpu_evm < 0)
     g_gpu_evm = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_EVM", 1); /* 1: GPU float, 2: GPU double, 0: CPU copy (exact, slow) */
   static int s_evm34 = -1; /* GPUFUSE: ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_NL34=1 (default off): GPU EVM for Nl = 3, 4 too (else the CPU copy) */
   if (s_evm34 < 0)
     s_evm34 = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_NL34", 0);
-  j.want_evm = nr_pdsch_evm_acc.armed && g_gpu_evm && (nl <= 2 || s_evm34 == 1);
-  j.evm_fp64 = g_gpu_evm == 2;
-  j.evm_erase = nr_dlsch_csi_erase_n > 0;
+  j->want_evm = nr_pdsch_evm_acc.armed && g_gpu_evm && (nl <= 2 || s_evm34 == 1);
+  j->evm_fp64 = g_gpu_evm == 2;
+  j->evm_erase = nr_dlsch_csi_erase_n > 0;
+  return -1;
+}
+
+/* GPU demodulation of the grant into the given buffers; 0 = done. EVM accumulates into nr_pdsch_evm_acc (if armed). */
+static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_coef, int align, int l2d, int16_t *llr, uint32_t llr_cap,
+                     uint32_t *dvr, int32_t *l2, c16_t *comp, c16_t *mag, c16_t *magb, c16_t *magr, uint64_t *gpu_ns)
+{
+  const NR_DL_FRAME_PARMS *fp = &c->ue->frame_parms;
+  const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg = c->cfg;
+  const int nl = c->dlsch->cw_info.Nl, qm = c->dlsch->cw_info.qamModOrder, nbRx = fp->nb_antennas_rx;
+  nr_gpu_demod_job_t j;
+  geo_tls_t *g = NULL;
+  const int rf = build_job(c, mode, thr_coef, align, l2d, llr, llr_cap, comp, mag, magb, magr, &j, &g);
+  if (rf >= 0)
+    return rf;
+  const int last = cfg->start_symbol + cfg->number_symbols - 1;
   j.evm_defer = t_defer_ok && j.want_evm && t_def;
   const uint64_t t0 = now_ns();
   if (g_run(&j) != 0)
@@ -1206,5 +1225,56 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
   uint64_t mx = atomic_load(&g_ns_max);
   while (dt > mx && !atomic_compare_exchange_weak(&g_ns_max, &mx, dt)) {}
   stats_log(n);
+  return 0;
+}
+
+/* GPUPASS (nr_gpu_pass_dl.c): the demod job of a grant for the graph pass, resolved exactly as nr_pdsch_gpu_demod_grant does (the same refusals, the same job fields,
+ * the same RE geometry in this thread's index maps). The device-side pointers and nvar are the pass's to fill. 0 = done (*geo_y / *geo_h: c16 [14][j->ext]),
+ * else a refusal (RF_* + 1) and the caller keeps the old path. Requires ISAC_PDSCH_GPU_EXACT_DEMOD=1 (g_on), like the old GPU demod. */
+int nr_pdsch_gpu_demod_pass_job(const nr_pdsch_gpu_demod_call_t *c, nr_gpu_demod_job_t *j, const int16_t **geo_y, const int16_t **geo_h)
+{
+  int mode = 0, align = 0, l2d = 0;
+  double thr_coef = 0.0;
+  if (nr_pdsch_route_cpu()) /* BATCHCPU */
+    return RF_N + 1;
+  const int rf = refuse(c, &mode, &thr_coef, &align, &l2d);
+  if (rf >= 0)
+    return rf + 1;
+  geo_tls_t *g = NULL;
+  const int r = build_job(c, mode, thr_coef, align, l2d, NULL, 0xffffffffu, NULL, NULL, NULL, NULL, j, &g);
+  if (r >= 0)
+    return r + 1;
+  *geo_y = (const int16_t *)g->geo_y;
+  *geo_h = (const int16_t *)g->geo_h;
+  return 0;
+}
+/* GPUPASS: the EVM sums and kappa of a finished pass into nr_pdsch_evm_acc (as post_fold after nr_pdsch_gpu_demod_run), and the branch the demod used */
+void nr_pdsch_gpu_demod_pass_fold(const nr_gpu_demod_job_t *jp, const NR_UE_DLSCH_t *dlsch)
+{
+  if (jp->used_branch_set)
+    nr_dlsch_used_branch = jp->used_branch;
+  if (nr_pdsch_evm_acc.armed)
+    post_fold(jp, dlsch, jp->nl, jp->qm, jp->nbRx, jp->start_symbol, jp->start_symbol + jp->nb_symbols - 1, jp->ext);
+}
+
+/* GPUPASS: the qam_mode / align the GPU demod resolves for (nl, qm) without a per-grant override, for the warm-up of the graph classes; 0 or -1 (refused) */
+int nr_pdsch_gpu_demod_pass_variant(PHY_VARS_NR_UE *ue, int nl, int qm, int *qmode, int *align)
+{
+  NR_UE_DLSCH_t d = {0};
+  d.cw_info.Nl = (uint8_t)nl;
+  d.cw_info.qamModOrder = (uint8_t)qm;
+  d.rnti_type = TYPE_C_RNTI_;
+  NR_DL_UE_HARQ_t h = {0};
+  h.status = NR_ACTIVE;
+  fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = {0};
+  pdsch_scope_req_t sc = {0};
+  static const nr_ssb_rm_mask_t none = {0};
+  nr_pdsch_gpu_demod_call_t c = {.ue = ue, .dlsch = &d, .harq = &h, .cfg = &cfg, .scope = &sc, .ssb_rm = &none};
+  int mode = 0, al = 0, l2d = 0;
+  double thr = 0.0;
+  if (refuse(&c, &mode, &thr, &al, &l2d) >= 0)
+    return -1;
+  *qmode = nl >= 2 ? t_qmode : 0;
+  *align = al;
   return 0;
 }

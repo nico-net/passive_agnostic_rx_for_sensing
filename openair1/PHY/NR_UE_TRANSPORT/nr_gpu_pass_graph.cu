@@ -586,7 +586,12 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     auto f = g_cache.find(k.pack());
     if (f != g_cache.end()) e = &f->second;
   }
-  if (!e) { ++g_fb_unseen; return 1; }
+  if (!e) {
+    if (g_fb_unseen++ < 40 && getenv("ISAC_GPU_PASS_LOG_UNSEEN"))
+      fprintf(stderr, "GPUPASS unseen class: nrb %u (grant %d) nl %u ndmrs %u ncb %u (C %u) evm %u qmode %u align %u fp32 %u\n", k.nrb, j->nrb, k.nl, k.ndmrs, k.ncb, j->C, k.evm, k.qmode,
+              k.align, k.fp32);
+    return 1;
+  }
   int id = -1;
   for (unsigned m = g_busy.load(); id < 0;) {
     int i = 0;

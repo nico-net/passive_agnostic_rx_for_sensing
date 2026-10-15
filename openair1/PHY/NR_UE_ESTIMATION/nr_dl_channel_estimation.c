@@ -2182,6 +2182,75 @@ static void gch_async_submit(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, 
     gch_job_free(j);
 }
 
+/* GPUPASS: what the graph pass's chest stage needs of a grant, with the same gates as nr_pdsch_gpu_chest_grant (non-segmented contiguous grant, every antenna, GPU
+ * chest and GPU delay on, no PDP diagnostic / delay share / DFT window / stage dump, no single-branch estimate): the DM-RS symbols of dmrs_mask, the delta of
+ * every layer's port, the pilot sequence of every (DM-RS symbol, layer) (this thread's buffer, valid until the next call; 6 * nrb c16 from the grant's first
+ * RB), the first LS subcarrier and the PRBs. DM-RS type 1 only (the graph's LS kernel arguments are those of type 1). 0 = ok, else a refusal reason (> 0). */
+int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch,
+                                   const freq_alloc_bitmap_t *freq_alloc, int Nl, uint16_t dmrs_mask, int diag, int *ndmrs, int dmrs_sym[4], int delta[4],
+                                   const int16_t *pil_out[4][4], int *k0_out, int *nrb_out)
+{
+  if (nr_pdsch_route_cpu()) /* BATCHCPU */
+    return 1;
+  if (atomic_load_explicit(&g_gch_on, memory_order_relaxed) < 0) {
+    const char *e = getenv("ISAC_PDSCH_GPU_EXACT_CHEST"), *c = getenv("ISAC_PDSCH_GPU_EXACT_CHEST_CHECK");
+    g_gch_check = c ? atoi(c) : 0;
+    atomic_store(&g_gch_on, e && atoi(e) == 1 && nr_pdsch_gpu_exact_chest_entry && nr_pdsch_gpu_exact_chest_entry());
+  }
+  if (!atomic_load_explicit(&g_gch_on, memory_order_relaxed) || !(nr_pdsch_gpu_exact_chest_entry ? nr_pdsch_gpu_exact_chest_entry() : NULL))
+    return 2;
+  NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const int config_type = dlsch->dmrsConfigType;
+  if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) < 0) {
+    const char *e = getenv("ISAC_CHEST_GPU_DELAY"), *c = getenv("ISAC_CHEST_GPU_DELAY_CHECK");
+    g_chest_gpu_delay_check = c ? atoi(c) : 64;
+    atomic_store(&g_chest_gpu_delay, e && atoi(e) == 1 && nr_pdsch_gpu_exact_delay_rows ? 1 : 0);
+  }
+  const int nrx = fp->nb_antennas_rx;
+  static int s_stage_dump = -1;
+  if (s_stage_dump < 0)
+    s_stage_dump = getenv("ISAC_PDSCH_GPU_STAGE_DUMP") != NULL;
+  int contiguous = freq_alloc->num_rbs == freq_alloc->last_rb - freq_alloc->first_rb + 1 && freq_alloc->num_rbs >= 1;
+  for (int rb = freq_alloc->first_rb; contiguous && rb <= freq_alloc->last_rb; rb++)
+    contiguous = (freq_alloc->bitmap[rb / 32] >> (rb % 32)) & 1;
+  int nd = 0;
+  for (int m = 0; m < fp->symbols_per_slot && m < 14; m++)
+    nd += (dmrs_mask >> m) & 1;
+  if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) != 1 || !IS_PASSIVE_RX_MODE(get_softmodem_params()) || ue->chest_freq != 0)
+    return 3;
+  if (config_type != NFAPI_NR_DMRS_TYPE1)
+    return 4;
+  if (fp->ofdm_symbol_size != 4096 || nrx > 4 || Nl < 1 || Nl > 4 || Nl > nrx || nd < 1 || nd > 4 || diag || chest_delay_share() || getenv("ISAC_CHEST_DFT_WIN")
+      || s_stage_dump || nr_dl_chest_only_ant >= 0 || !contiguous)
+    return 5;
+  if (!gch_bufs(false))
+    return 6;
+  const int rb_offset = freq_alloc->first_rb + (dlsch->refPoint ? 0 : dlsch->BWPStart);
+  const int max_end = freq_alloc->num_rbs + rb_offset;
+  if (max_end * 6 > 3280)
+    return 7;
+  const float beta_dmrs_pdsch = get_beta_dmrs(dlsch->n_dmrs_cdm_groups, false);
+  const int16_t dmrs_scaling = (int16_t)((1 / beta_dmrs_pdsch) * (1 << 14));
+  int np = 0, k = 0;
+  for (int m = 0; m < fp->symbols_per_slot && m < 14; m++) {
+    if (!((dmrs_mask >> m) & 1))
+      continue;
+    dmrs_sym[k] = m;
+    const uint32_t *gold = nr_gold_pdsch(fp->N_RB_DL, fp->symbols_per_slot, dlsch->dlDmrsScramblingId, dlsch->nscid, proc->nr_slot_rx, m);
+    for (int nl = 0; nl < Nl; nl++, np++) {
+      const int p = get_dmrs_port(nl, dlsch->dmrs_ports);
+      delta[nl] = get_delta(p, config_type);
+      nr_pdsch_dmrs_rx(fp->Ncp, gold, pil[np], 1000 + p, 0, max_end, config_type, dmrs_scaling);
+      pil_out[k][nl] = (const int16_t *)&pil[np][6 * rb_offset];
+    }
+    k++;
+  }
+  *ndmrs = nd;
+  *nrb_out = freq_alloc->num_rbs;
+  *k0_out = (fp->first_carrier_offset + (dlsch->BWPStart + freq_alloc->first_rb) * 12) % fp->ofdm_symbol_size;
+  return 0;
+}
+
 int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
                              const UE_nr_rxtx_proc_t *proc,
                              const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch,
