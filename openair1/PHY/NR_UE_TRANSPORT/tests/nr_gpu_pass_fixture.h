@@ -728,7 +728,11 @@ class GpuPassFixture {
     d.thr_coef = std::pow(10.0, -1.2);
     d.qam_mode = nl >= 2 ? 3 : 0; d.mag_per_layer = 1; d.m3_nvfac = std::pow(10.0, 2.1); /* as Pass::setup */
     j.geo_y = gy; j.geo_h = gh;
+    llr_pass.assign(tb.G + 64, 0);
+    j.llr_out = llr_pass.data();
   }
+  std::vector<int16_t> llr_pass;
+  std::vector<int16_t> llr_ref;
   std::vector<int16_t> geo_buf, rxF_ref; /* rxF_ref: the exact FEP of the stage path, [ant][14][N] c16 */
   /* the Task 2 stage path with the CPU steps between the stages = the exact path of today; fills s (tb must hold the TB bytes) */
   int run_stage_path(nr_gpu_pass_result_t *s)
@@ -771,6 +775,7 @@ class GpuPassFixture {
       const int k = nr_llr_norm_shift(llr.data(), nr_llr_norm_span(G, (uint32_t)tb.C));
       if (k > 0) for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)(llr[i] >> k);
     }
+    llr_ref = llr; /* what the retry arms of the old path re-decode */
     /* the OAI rate dematching and the pack of prep_segment (nr_pdsch_gpu_ldpc_host.c) */
     const int C = tb.C, Z = tb.Z, K = tb.K, F = tb.F, Kc = tb.BG == 2 ? 52 : 68;
     const int Kprime = lenWithCrc(C, tb.A), ctype = crcType(C, tb.A);

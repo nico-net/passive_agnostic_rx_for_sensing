@@ -2474,9 +2474,12 @@ static bool gp_hq_arms(uint16_t rnti)
 }
 /* What passive_ldpc_decode_core leaves behind for a transport block every code block of which decoded (the GPU LDPC wrapper reports decoder_used = CPU: it is
  * bit-exact with it). The TB itself is in g_harq.b, assembled by the pass. */
-static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_info_t *cw, uint32_t G, uint32_t tbslbrm)
+static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_info_t *cw, uint32_t G, uint32_t tbslbrm, bool tb_ok)
 {
-  g_harq.processedSegments = g->C;
+  uint32_t seg_ok = 0;
+  for (int r = 0; r < g->C; r++)
+    seg_ok += g->r.seg_ok[r] != 0;
+  g_harq.processedSegments = seg_ok;
   t_seg_K = g->K; t_seg_F = g->F; t_seg_C = (uint32_t)g->C; t_seg_Z = g->Z;
   t_seg_E = g->E; t_seg_R = g->R; t_seg_lbrm = tbslbrm; t_seg_BG = (uint32_t)g->BG;
   t_decoder_used_last = NRLDPC_DECODER_CPU;
@@ -2485,14 +2488,29 @@ static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_
     size_t used = 0;
     t_decode_cb[0] = 0;
     for (int r = 0; r < g->C && used + 32 < sizeof(t_decode_cb); r++)
-      used += snprintf(t_decode_cb + used, sizeof(t_decode_cb) - used, "%s%u:1", r ? "," : "", (unsigned)nr_get_E(G, (uint8_t)g->C, cw->qamModOrder, cw->Nl, (uint8_t)r));
+      used += snprintf(t_decode_cb + used, sizeof(t_decode_cb) - used, "%s%u:%c", r ? "," : "", (unsigned)nr_get_E(G, (uint8_t)g->C, cw->qamModOrder, cw->Nl, (uint8_t)r),
+                       g->r.seg_ok[r] ? '1' : '0');
   }
   for (int r = 0; r < g->C && r < NR_PDSCH_SEGIDX_MAX; r++) {
     const int cb = nr_pdsch_cbucket((uint32_t)g->C);
     atomic_fetch_add(&g_segidx_tot[r], 1);
     atomic_fetch_add(&g_segidxc_tot[cb][r], 1);
+    if (!g->r.seg_ok[r]) {
+      atomic_fetch_add(&g_segidx_fail[r], 1);
+      atomic_fetch_add(&g_segidxc_fail[cb][r], 1);
+    }
   }
-  t_seg_ok_last = (uint32_t)g->C;
+  t_seg_ok_last = seg_ok;
+  if (seg_ok != (uint32_t)g->C) { /* what passive_ldpc_decode_core counts for a TB with a failed block */
+    atomic_fetch_add(&g_ldpc_seg_fail, 1);
+    atomic_fetch_add(&g_seg_ok_sum, seg_ok);
+    atomic_fetch_add(&g_seg_tot_sum, (uint64_t)g->C);
+    return;
+  }
+  if (!tb_ok) { /* every block decoded, the reassembled TB fails its CRC */
+    atomic_fetch_add(&g_ldpc_tb_fail, 1);
+    return;
+  }
   atomic_fetch_add(&g_ldpc_ok, 1);
 }
 
@@ -3052,7 +3070,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * old path would have done is then committed below (labels gpu_llr_ready / gp_llr_done) from the pass's results. A CRC failure, a block the GPU decoder could
    * not settle, an unseen shape class, a busy pass instance or any gate that is not met leaves gp_ok false and the old path decodes from scratch, so a
    * failing grant costs the pass on top of the old path. Every ISAC_GPU_PASS_CHECK-th taken grant (default 64) is decoded by the old path too and compared. */
-  bool gp_ok = false, gp_cmp = false;
+  bool gp_ok = false, gp_cmp = false, gp_tb = false, gp_tried = false;
   static __thread nr_gpu_pass_dl_out_t *t_gpp = NULL; /* heap: 115 KB, not a TLS array */
   static __thread uint8_t *t_gp_shadow = NULL;
   static __thread size_t t_gp_shadow_cap = 0;
@@ -3073,12 +3091,19 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
                                        .branch = gp_perbranch() ? nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) : -1, .norm = gp_norm_on(),
                                        .it_max = gp_iters(), .chest_diag = chest_pdp_diag_on(), .fep_fo = fep_fo, .tb = g_harq.b};
       if (!t_gpp)
-        t_gpp = (nr_gpu_pass_dl_out_t *)aligned_alloc(64, (sizeof(nr_gpu_pass_dl_out_t) + 63) & ~(size_t)63);
+        if ((t_gpp = (nr_gpu_pass_dl_out_t *)aligned_alloc(64, (sizeof(nr_gpu_pass_dl_out_t) + 63) & ~(size_t)63)))
+          memset(t_gpp, 0, sizeof(*t_gpp));
       memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc)); /* the demod job reads whether the EVM is armed; the block below re-arms it for the old path */
       nr_pdsch_evm_acc.armed = gp_evm_armed(probe_last_sym);
+      gp_tried = true;
       if (t_gpp && nr_gpu_pass_dl_run(&gin, t_gpp) == 0) {
-        if (t_gpp->r.need_cpu || !t_gpp->r.tb_ok) {
-          nr_gpu_pass_note(NR_GPU_PASS_EV_RETRY_OLD); /* CRC failure / a block for the CPU decoder: the old path decodes (and may rescue it with its hypotheses) */
+        if (t_gpp->r.need_cpu) {
+          nr_gpu_pass_note(NR_GPU_PASS_EV_RETRY_OLD); /* a block only the CPU decoder can settle: the old path decodes from scratch */
+        } else if (!t_gpp->r.tb_ok) {
+          /* CRC failure: the pass IS the old first body (bit-identical). Its LLRs are on the host (t_gpp->llr) and the bookkeeping of a failed first decode is
+           * committed at gp_llr_done; the retry arms of the old path (RV, LBRM n_L, ...) then run on them, exactly as after a failed first body. */
+          gp_ok = true;
+          nr_gpu_pass_note(NR_GPU_PASS_EV_CONT_FAIL);
         } else {
           const uint32_t sz = cw->TBS / 8;
           bool zero = g_harq.b[sz] == 0 && g_harq.b[sz + 1] == 0;
@@ -3097,8 +3122,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
               gp_cmp = true;
             }
             nr_gpu_pass_note(NR_GPU_PASS_EV_SHADOW);
-          } else
+          } else {
             gp_ok = true;
+            gp_tb = true;
+          }
         }
       }
     }
@@ -4472,7 +4499,7 @@ gpu_llr_ready:;
    * the 75 us the measurement above already accounts for; the allocation is what is being removed. */
   const bool llr_fresh = llr_cap_tls < rx_llr_buf_sz; /* a fresh malloc16_clear buffer is already zero */
   int16_t *llr = llr_prepare(fp, rx_llr_buf_sz);
-  if (llr && !llr_fresh && !gp_ok) /* the pass leaves the LLRs on the device */
+  if (llr && !llr_fresh && !(gp_ok && gp_tb)) /* a decoded pass leaves the LLRs on the device */
     memset(llr, 0, (size_t)rx_llr_buf_sz * sizeof(int16_t));
   if (llr == NULL) {
     out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
@@ -5049,9 +5076,14 @@ gpu_llr_ready:;
     if (gp_ok) { /* the pass descrambled, normalised and decoded on the device: only the bookkeeping of the decode is left */
       zero_before = atomic_load(&g_ldpc_zero_tb);
       pdt_ldp = pdtim_on ? pdtim_now() : 0;
-      t_last_llr = NULL; t_last_G = 0;
+      if (gp_tb) {
+        t_last_llr = NULL; t_last_G = 0;
+      } else {
+        memcpy(llr, t_gpp->llr, (size_t)G * sizeof(int16_t)); /* the retry arms re-decode these */
+        t_last_llr = llr; t_last_G = G;
+      }
       atomic_fetch_add(&g_rv_census[grant->mcs >= 24][cw->rv & 3], 1);
-      gp_commit_decode(t_gpp, cw, G, dlsch_config->tbslbrm);
+      gp_commit_decode(t_gpp, cw, G, dlsch_config->tbslbrm, gp_tb);
       goto gp_llr_done;
     }
     for (uint32_t i = 0; i < G; i += 32) {
@@ -5187,7 +5219,9 @@ gpu_llr_ready:;
       t_hq.ndi = grant->ndi;
     }
   gp_llr_done:;
-    bool ldpc_ok = gp_ok ? true : passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G);
+    if (gp_tried && !gp_ok)
+      nr_gpu_pass_note(NR_GPU_PASS_EV_OLD_FIRST);
+    bool ldpc_ok = gp_ok ? gp_tb : passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G);
     t_hq.armed = 0; t_hq.si = false;
     /* A probe's outcome is code block 0's CRC, and every hypothesis sweep below (PT-RS density,
      * the PDSCH config feedback in the queue, the layout search) must see it: with ldpc_ok false
@@ -5378,7 +5412,7 @@ gpu_llr_ready:;
          * quantization and erasures can legitimately make the tail zero. Compare
          * G with the sum of dl_valid_re * Qm * Nl below to check the RE budget. */
         uint32_t llr_have = 0;
-        if (gp_ok)
+        if (gp_ok && gp_tb)
           llr_have = G; /* the LLRs are on the device */
         else
           for (int i = (int)G - 1; i >= 0; i--) {
@@ -5388,7 +5422,7 @@ gpu_llr_ready:;
         /* LLRFILL (2026-09-16): per-symbol non-zero LLR counts of the assembled buffer, one shot when
          * llr_have < 0.9 G -- which symbols/layers come out empty (rank-4 bed: llr_have 3 % of G). */
         static _Atomic int s_llrfill_left = 3;
-        if (!gp_ok && cw->Nl > 1 && (llr_have != G || getenv("ISAC_LLRFILL_ALL")) && atomic_load(&s_llrfill_left) > 0) {
+        if (!(gp_ok && gp_tb) && cw->Nl > 1 && (llr_have != G || getenv("ISAC_LLRFILL_ALL")) && atomic_load(&s_llrfill_left) > 0) {
           atomic_fetch_sub(&s_llrfill_left, 1);
           char b[400]; int u = 0; uint32_t k = 0;
           for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols && u < 360; m++) {

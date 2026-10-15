@@ -65,11 +65,12 @@ static void census(void)
     buf[0] = 0;
   LOG_A(PHY,
         "SENSING: %s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
-        "shadow=%lu shadow_bad=%lu\n",
+        "shadow=%lu shadow_bad=%lu cont_fail=%lu old_first=%lu\n",
         buf, (unsigned long)G.fb[FB_OFF], (unsigned long)G.fb[FB_CELL], (unsigned long)G.fb[FB_FO], (unsigned long)G.fb[FB_CHEST],
         (unsigned long)G.fb[FB_DEMOD], (unsigned long)G.fb[FB_TBPARAM], (unsigned long)G.fb[FB_MODULE], (unsigned long)G.ev[NR_GPU_PASS_EV_COMMIT],
         (unsigned long)G.ev[NR_GPU_PASS_EV_RETRY_OLD], (unsigned long)G.ev[NR_GPU_PASS_EV_ZERO_TB], (unsigned long)G.ev[NR_GPU_PASS_EV_LIFETIME],
-        (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_BAD]);
+        (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_BAD], (unsigned long)G.ev[NR_GPU_PASS_EV_CONT_FAIL],
+        (unsigned long)G.ev[NR_GPU_PASS_EV_OLD_FIRST]);
 }
 
 static int fb(int why)
@@ -328,6 +329,9 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   j->qm_sym = qm_sym;
   j->qm_n = qm_n > 4096 ? 4096 : qm_n;
   out->r.qm_row = out->qm_row;
+  if (!out->llr && !(out->llr = (int16_t *)malloc(1500000 * sizeof(int16_t))))
+    return fb(FB_MODULE);
+  j->llr_out = out->llr;
   atomic_fetch_add_explicit(&G.runs, 1, memory_order_relaxed);
   const int rc = G.try_(j, &out->r);
   if (rc != 0) /* unseen class / no free instance / unsupported variant / error: counted by the module */

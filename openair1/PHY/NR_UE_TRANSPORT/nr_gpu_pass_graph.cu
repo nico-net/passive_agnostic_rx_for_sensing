@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <map>
 #include <vector>
 #include <mutex>
@@ -381,7 +382,8 @@ static int enqueue(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, cudaStrea
   if (nr_gpu_pass_launch_crc_p(snaps, I.PBd()->cand, ncb * NSNAP, &I.PBd()->tbs, I.RBd()->cand_ok, &I.RBd()->dummy_tb, s) != 0) return -1;
   k_pick<<<1, 128, 0, s>>>(snaps, dres, I.PBd(), I.RBd());
   if (nr_gpu_pass_launch_crc_p((const uint8_t *)I.res.dev, I.PBd()->sel, ncb, &I.PBd()->tbs, I.RBd()->seg_crc, &I.RBd()->tb_crc, s) != 0) return -1;
-  if (nr_gpu_buf_d2h_async(&I.nvar, 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int), (size_t)k.ndmrs * k.nl * nbRx * sizeof(int), s) ||
+  if (nr_gpu_buf_d2h_async(&I.llr, 0, std::min<size_t>((size_t)LLR_CAP, (size_t)12 * k.nrb * 13 * 8 * k.nl) * 2, s) ||
+      nr_gpu_buf_d2h_async(&I.nvar, 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int), (size_t)k.ndmrs * k.nl * nbRx * sizeof(int), s) ||
       nr_gpu_buf_d2h_async(&I.res, 0, sizeof(ResBlk), s) || nr_gpu_buf_d2h_async(&I.est, 0, (size_t)nbRx * NSYM * N * 4, s) ||
       nr_gpu_buf_d2h_async(&I.rxF, 0, (size_t)nbRx * NSYM * N * 4, s))
     return -1;
@@ -651,6 +653,8 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     const uint32_t *q = (const uint32_t *)((const char *)I.nvar.host + 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)) + (size_t)(j->ndmrs * j->nl - 1) * g_cfg.nbRx;
     for (int a = 0; a < 4; a++) r->nvar_ant[a] = a < g_cfg.nbRx ? q[a] : 0;
   }
+  if (!r->need_cpu && !r->tb_ok && j->llr_out)
+    memcpy(j->llr_out, I.llr.host, (size_t)j->G * 2); /* the first body's LLRs for the caller's retry arms */
   r->qm_valid = 0;
   if (r->qm_row && nr_gpu_model() == NR_GPU_MODEL_DIRECT && j->qm_sym >= 0 && j->qm_sym < NSYM && j->qm_n > 0 && j->qm_n <= (uint32_t)N) {
     /* comp[(m * NR_GPU_DEMOD_MAX_NL + layer) * buf + i], c16 */

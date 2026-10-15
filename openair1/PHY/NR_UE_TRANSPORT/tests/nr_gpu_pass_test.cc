@@ -242,6 +242,45 @@ TEST(GpuPassDl, ConcurrentPassesUseOwnInstances) {
   EXPECT_GT(done.load(), 0);
   EXPECT_EQ((uint64_t)busy.load(), o1[3] - o0[3]);
 }
+/* A CRC failure of the pass is the old first body (the controller ruling): the pass hands the caller the final LLRs the old path would have re-decoded in its retry
+ * arms (descrambled, K38-normalised), and the per-block verdicts of the failed decode. Everything a retry arm of passive_decode_retry reads from the first body is
+ * then in place; the body continues into the arms without a second decode (counted: GPUPASS cont_fail, old_first). The body-level A/B (final TB, CRC, which arm
+ * rescued) is the replay smoke; here: LLRs and verdicts equal the stage path on forced failures. */
+TEST(GpuPassDl, CrcFailContinuesWithRetriesWithoutRedo) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try) << "libpdsch_gpu.so has no nr_gpu_pass_dl_try";
+  ASSERT_TRUE(pass_ready(m));
+  int n = 0;
+  for (auto shape : GpuPassFixture::warm_shapes()) {
+    if (shape.qm != 6 || shape.nl > 2) continue;
+    for (int from : {0, 1}) {
+      GpuPassFixture fx = GpuPassFixture::from_shape(shape, 41, from);
+      ASSERT_TRUE(fx.tb_ok_built);
+      if (fx.tb.C <= from) continue;
+      fx.bind();
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64), sb(fx.tb.A / 8 + 64);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      ASSERT_EQ(0, m.pass_try(fx.job, &g));
+      ASSERT_EQ(0, fx.run_stage_path(&s));
+      EXPECT_EQ(0, g.tb_ok);
+      EXPECT_EQ(s.tb_ok, g.tb_ok);
+      EXPECT_EQ(s.need_cpu, g.need_cpu);
+      EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok)));
+      if (!g.need_cpu) {
+        ASSERT_GE(fx.llr_ref.size(), fx.tb.G);
+        EXPECT_EQ(0, memcmp(fx.llr_ref.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << "LLRs handed to the retry arms differ from the old first body's";
+        n++;
+      }
+    }
+  }
+  EXPECT_GE(n, 4);
+}
 TEST(GpuPassDl, UnseenShapeFallsBack) {
   if (!have_gpu()) GTEST_SKIP();
   pass_model();

@@ -40,6 +40,7 @@ typedef struct {
   uint32_t nvar_ant[4];             /* the chest's per-antenna noise of the last DM-RS symbol and layer (nr_dl_chest_nvar_ant) */
   uint32_t K, F, Z, E, R;           /* TB parameters of the pass (the body's t_seg_* statics) */
   int BG;
+  int16_t *llr;                     /* heap [G]: the final LLRs of a pass whose TB failed its CRC (the retry arms re-decode them) */
 } nr_gpu_pass_dl_out_t;
 
 /* 1 = ISAC_GPU_PASS=1 and the module is up (set by nr_gpu_pass_warmup) */
@@ -50,7 +51,8 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue);
 int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out);
 /* body-side events for the census */
 enum { NR_GPU_PASS_EV_COMMIT, NR_GPU_PASS_EV_RETRY_OLD /* pass said CRC fail / CPU: the old path decodes */, NR_GPU_PASS_EV_ZERO_TB, NR_GPU_PASS_EV_LIFETIME, NR_GPU_PASS_EV_SHADOW,
-       NR_GPU_PASS_EV_SHADOW_BAD, NR_GPU_PASS_EV_N };
+       NR_GPU_PASS_EV_SHADOW_BAD, NR_GPU_PASS_EV_CONT_FAIL /* CRC fail of the pass continued into the retry arms, no old first body */,
+       NR_GPU_PASS_EV_OLD_FIRST /* old first body executed although a pass was attempted */, NR_GPU_PASS_EV_N };
 void nr_gpu_pass_note(int ev);
 /* shadow check cadence: 1 = this pass is also decoded by the old path and the verdicts compared (ISAC_GPU_PASS_CHECK=N, default 64, 0 = off) */
 int nr_gpu_pass_shadow_due(void);

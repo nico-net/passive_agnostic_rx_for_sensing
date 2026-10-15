@@ -92,6 +92,7 @@ typedef struct {
   /* ---- the symbol whose equalised layer-0 samples the host's modulation-order oracle reads (the one with the most data REs) and how many of them */
   int qm_sym;
   uint32_t qm_n;
+  int16_t *llr_out; /* optional caller buffer [G]: receives the final (descrambled, normalised) LLRs when the TB fails its CRC, so that the caller's retry arms can re-decode them */
 } nr_gpu_pass_job_t;
 
 typedef struct {
