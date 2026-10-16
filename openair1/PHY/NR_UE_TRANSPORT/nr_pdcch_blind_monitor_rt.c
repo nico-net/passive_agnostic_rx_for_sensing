@@ -9928,6 +9928,7 @@ constdiag_done:;
       const int nv = nrd > 0 && sv_budget > 0 ? nr_pdsch_solver_plan_slot(out.rnti, rw->payload, dlen, out.mcs,
                                                     cfg->dmrs_typeA_position + 2, sv_nrm > 0, rd, nrd, sv_budget, var) : 0;
       int v = 0;
+      bool tf_noted = false;
       for (; v < nv && decodes_this_occasion < cfg->pdsch_max_per_slot; v++) {
         const nr_pdcch_blind_result_t *o = &rparsed[var[v].reading];
         if (var[v].probe && nr_admit_on()) { /* ISAC_BG_LANE: a solver probe waits for an idle critical lane */
@@ -9950,6 +9951,40 @@ constdiag_done:;
         dl.start_symbol      = var[v].S;
         dl.number_symbols    = var[v].L;
         dl.dlDmrsSymbPos     = var[v].dmrs_mask;
+        dl.mcs_table         = var[v].table;
+        /* Fix A (ISAC_PDSCH_TDA_FIELD=1, default off): the TDRA field the layout solver aliased as pre-MCS bits, and the TDD-legal (S,L) rows. */
+        uint8_t tf_pos1 = 0, tf_n = 0, tf_S[2] = {0, 0}, tf_L[2] = {0, 0};
+        int8_t tf_last = 13;
+        if (rep >= 0 && !var[v].probe && nr_tda_field_on() && R != NULL && rep < (int)__atomic_load_n(&R->n_hyp, __ATOMIC_ACQUIRE)
+            && R->off[rep].tda_bits == 0 && R->off[rep].tda < 200 && dlen == R->off[rep].total) {
+          int8_t lastv = 13;
+          if (!nr_passive_acq_tdd_pdsch_last_symbols((uint32_t)abs_slot, (int)fp->numerology_index, 1, &lastv)) lastv = 13;
+          const int tpos = R->off[rep].tda;
+          if (!tf_noted) {
+            nr_tda_field_note_dci(tpos, rw->payload, dlen, lastv < 13);
+            tf_noted = true;
+          }
+          bool tdet;
+          const int nc = nr_tda_field_rows(tpos, rw->payload, dlen, lastv, 2, tf_S, tf_L, &tdet);
+          { /* TDAFIELD diagnostic: the first hooks, then 1 in 500 */
+            static _Atomic uint32_t s_tfd;
+            const uint32_t q = atomic_fetch_add(&s_tfd, 1);
+            if (q < 6 || q % 500 == 0)
+              LOG_A(PHY, "SENSING: TDAFIELD hook #%u rnti=0x%04x fs=%d.%d pos=%d last=%d rows=%d det=%d val=%u S=%u,%u L=%u,%u\n", q, out.rnti,
+                    proc->frame_rx, proc->nr_slot_rx, tpos, (int)lastv, nc, (int)tdet, (unsigned)nr_dci_bits_field(&rw->payload, dlen, tpos, 2),
+                    nc > 0 ? tf_S[0] : 0, nc > 1 ? tf_S[1] : 0, nc > 0 ? tf_L[0] : 0, nc > 1 ? tf_L[1] : 0);
+          }
+          tf_pos1 = (uint8_t)(tpos + 1);
+          tf_last = lastv;
+          tf_n = (uint8_t)nc;
+          const int tl0 = cfg->dmrs_typeA_position + 2;
+          if (nc > 0 && tf_S[0] <= tl0 && (tf_S[0] != dl.start_symbol || tf_L[0] != dl.number_symbols)) {
+            dl.start_symbol   = tf_S[0];
+            dl.number_symbols = tf_L[0];
+            dl.dlDmrsSymbPos  = nr_pdsch_solver_dmrs_mask(tl0, tf_S[0], tf_L[0], var[v].add_pos);
+          }
+          if (nc > 1 && tf_S[1] > tl0) tf_n = 1;
+        }
         dl.mcs_table         = var[v].table;
         dl.pduBitmap         = 0;
         dl.numCsiRsForRateMatching = 0;
@@ -10005,8 +10040,10 @@ constdiag_done:;
                                              .nb_rb_oh = (uint16_t)cfg->pdsch_xoverhead, .tb_scaling = 0,
                                              .bw_tbslbrm = (uint16_t)fp->N_RB_DL, .mcs_table_lbrm = (int8_t)var[v].table,
                                              .vrb_l = 0, .rnti_class = out.rnti_class, .dci11 = true,
-                                             .scr_dedicated = dl_dedicated, .dci_len = o->dci_len,
-                                             .dci_w = {o->payload.w[0], o->payload.w[1]}};
+                                             .scr_dedicated = dl_dedicated, .dci_len = tf_pos1 ? dlen : o->dci_len, /* the TDA-field learner needs the raw payload */
+                                             .dci_w = {tf_pos1 ? rw->payload.w[0] : o->payload.w[0], tf_pos1 ? rw->payload.w[1] : o->payload.w[1]},
+                                             .tda_pos1 = tf_pos1, .tda_n = tf_n, .tda_addpos = var[v].add_pos, .tda_last = tf_last,
+                                             .tda_S = {tf_S[0], tf_S[1]}, .tda_L = {tf_L[0], tf_L[1]}};
         nr_pdsch_passive_job_t job;
         memset(&job, 0, sizeof(job));
         job.dlsch_pdu = dl;

@@ -6377,7 +6377,7 @@ void nr_pdsch_retry_yield_stats(uint64_t *chains, uint64_t *yields, uint64_t *ga
   *gated = atomic_load_explicit(&g_ry_gated, memory_order_relaxed);
 }
 
-static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
+static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE *ue,
                                                              const UE_nr_rxtx_proc_t *proc,
                                                              fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
                                                              const freq_alloc_bitmap_t *freq_alloc,
@@ -6561,6 +6561,42 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
     t_quiet = saved_quiet;
     t_decode_tdra_attempt = 0;
     return st;
+  }
+  /* Fix A (ISAC_PDSCH_TDA_FIELD=1, default off): a grant in a TDD mixed slot carries a second legal (S,L) row (nr_tda_field_rows: SIB1 row picked by the
+   * DCI's TDRA field, else the other legal row). Re-decode with it; the first CRC pass is kept. Logs TDAFIELD. */
+  if (grant->tda_n > 1 && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg && !t_gw_capture && !t_gw_used
+      && !(t_quiet && !t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && !harq_combine_on() && (dlsch_config->dlDmrsSymbPos & 0x3FFFu)) {
+    if (t_recov_mode == 1) { /* RECOVERY_ASYNC: runs on the worker; the failed first pass stands */
+      t_recov_deferred = true;
+      return st;
+    }
+    const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
+    const bool saved_quiet = t_quiet;
+    const double saved_fo_override = nr_slot_fep_fo_override_hz;
+    nr_slot_fep_fo_override_hz = t_last_fep_fo;
+    t_quiet = true;
+    fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = original;
+    cfg.start_symbol = grant->tda_S[1];
+    cfg.number_symbols = grant->tda_L[1];
+    cfg.dlDmrsSymbPos = (original.dlDmrsSymbPos & ~0x3FFFu)
+                        | nr_pdsch_solver_dmrs_mask(__builtin_ctz(original.dlDmrsSymbPos & 0x3FFFu), cfg.start_symbol, cfg.number_symbols, grant->tda_addpos);
+    t_decode_tdra_attempt = 8 + 64 * 90;
+    st = passive_decode_body(ue, proc, &cfg, freq_alloc, grant, rxdataF, out);
+    if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
+    const bool ok = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+    LOG_I(PHY, "SENSING: TDAFIELD rnti=0x%04x fs=%d.%d abs=%ld S=%u L=%u -> S=%u L=%u ok=%d\n", grant->rnti, proc->frame_rx, proc->nr_slot_rx,
+          grant->source_absolute_slot, original.start_symbol, original.number_symbols, cfg.start_symbol, cfg.number_symbols, ok);
+    if (ok) {
+      *dlsch_config = cfg;
+      out->config_recovered = true;
+    } else {
+      *out = out_plain; /* as RETRY_NORESTORE: the plain view stands */
+      st = st_plain;
+    }
+    nr_slot_fep_fo_override_hz = saved_fo_override;
+    t_quiet = saved_quiet;
+    t_decode_tdra_attempt = 0;
+    if (ok) return st;
   }
   if ((!tdra_retry && !csi_retry && !cdm_retry && !wide_retry && !csi_population_retry && !tint_retry && !opr_retry && !s_scsi_on()) || st != NR_PDSCH_PASSIVE_DECODE_CRC_FAIL
       || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_gw_used || (t_quiet && !t_qam_ab_alt) || t_llr_ovr
@@ -6864,6 +6900,23 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
     t_decode_tdra_attempt = 0;
     if (won >= 0)
       out->config_recovered = true;
+  }
+  return st;
+}
+
+/* Fix A (ISAC_PDSCH_TDA_FIELD): teaches the TDRA-field detector the (S,L) of every CRC-passing dedicated decode, with the field window the monitor recorded. */
+static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
+                                                             const UE_nr_rxtx_proc_t *proc,
+                                                             fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                                             const freq_alloc_bitmap_t *freq_alloc,
+                                                             const nr_pdsch_passive_grant_t *grant,
+                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                                             nr_pdsch_passive_decode_result_t *out)
+{
+  const nr_pdsch_passive_decode_status_t st = passive_decode_retry_impl(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  if (grant->tda_pos1 && st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !t_probe_first_seg && !t_quiet && !t_gw_capture && grant->dci_len) {
+    nr_dci_bits_t pl = {{grant->dci_w[0], grant->dci_w[1], 0}};
+    nr_tda_field_note_ok(grant->tda_pos1 - 1, pl, grant->dci_len, grant->tda_last < 13, dlsch_config->start_symbol, dlsch_config->number_symbols);
   }
   return st;
 }

@@ -561,6 +561,89 @@ TEST(PdschSolver, ProvenDimsAreTriedWithEveryOwnIdentity)
   nr_pdsch_solver_reset();
 }
 
+/* Fix A: the DCI 1_1 TDRA field (ISAC_PDSCH_TDA_FIELD). Payloads are the measured TIM (PCI 923) DCIs: 47 bits, bits 16-17 right before the MCS
+ * (bits 18-22), `01` in the TDD special slot (slot 13), `00` elsewhere [MEASURED, DGX replay raw_pci923_tim_12s_tile3, RMDCI]. */
+static nr_dci_bits_t tf_bits(const char *s)
+{
+  nr_dci_bits_t b = {{0, 0, 0}};
+  const int n = (int)strlen(s);
+  for (int i = 0; i < n; i++)
+    if (s[i] == '1') b.w[0] |= UINT64_C(1) << (n - 1 - i);
+  return b;
+}
+static const char *kTimSlot13 = "11010000000000000100001100001000010001101010000";
+static const char *kTimSlot6 = "11010000000000000000001100001000010001101010000"; /* same DCI with the field `00` */
+
+TEST(TdaField, TimSpecialSlotPicksRow1AndRejectsIllegalRow0)
+{
+  nr_tda_field_reset();
+  const uint8_t S3[3] = {1, 1, 1}, L3[3] = {13, 5, 3};
+  nr_tda_field_set_rows(S3, L3, 3);
+  const nr_dci_bits_t p13 = tf_bits(kTimSlot13), p6 = tf_bits(kTimSlot6);
+  EXPECT_EQ(nr_dci_bits_field(&p13, 47, 16, 2), 1u);
+  EXPECT_EQ(nr_dci_bits_field(&p13, 47, 18, 5), 1u); /* MCS 1 right behind the field */
+  uint8_t S[2], L[2];
+  bool det = true;
+  /* before any evidence: the mixed slot (last PDSCH symbol 9) keeps only the SIB1 rows that fit, row 0 (S1 L13) is rejected */
+  EXPECT_EQ(nr_tda_field_rows(16, p13, 47, 9, 2, S, L, &det), 2);
+  EXPECT_FALSE(det);
+  EXPECT_EQ(S[0], 1); EXPECT_EQ(L[0], 5); EXPECT_EQ(L[1], 3);
+  EXPECT_EQ(nr_tda_field_rows(16, p6, 47, 13, 2, S, L, &det), 0); /* full slot, no detected field: the solver's reading stands */
+  /* evidence: `00` in 60 full slots, `01` in 20 mixed slots */
+  for (int i = 0; i < 60; i++) nr_tda_field_note_dci(16, p6, 47, false);
+  for (int i = 0; i < 20; i++) nr_tda_field_note_dci(16, p13, 47, true);
+  EXPECT_EQ(nr_tda_field_rows(16, p13, 47, 9, 2, S, L, &det), 1); /* detected: the field names the row, no second decode */
+  EXPECT_TRUE(det);
+  EXPECT_EQ(S[0], 1); EXPECT_EQ(L[0], 5);  /* value 1 -> SIB1 row 1 first, mask 0x4 (DM-RS at 2 only) */
+  EXPECT_EQ(nr_pdsch_solver_dmrs_mask(2, S[0], L[0], 1), 0x4);
+  EXPECT_EQ(nr_tda_field_rows(16, p6, 47, 13, 2, S, L, &det), 1);
+  EXPECT_EQ(S[0], 1); EXPECT_EQ(L[0], 13); /* slot 6: row 0, mask 0x804 */
+  EXPECT_EQ(nr_pdsch_solver_dmrs_mask(2, S[0], L[0], 1), 0x804);
+  /* a value that names an illegal row in a mixed slot gives no row (the solver's reading stands) */
+  EXPECT_EQ(nr_tda_field_rows(16, p6, 47, 9, 2, S, L, &det), 0);
+}
+
+TEST(TdaField, ConstantFieldIsNotAccepted)
+{
+  nr_tda_field_reset();
+  const uint8_t S3[3] = {1, 1, 1}, L3[3] = {13, 5, 3};
+  nr_tda_field_set_rows(S3, L3, 3);
+  const nr_dci_bits_t p6 = tf_bits(kTimSlot6);
+  for (int i = 0; i < 200; i++) { nr_tda_field_note_dci(16, p6, 47, i % 5 == 0); }
+  uint8_t S[2], L[2];
+  bool det = true;
+  nr_tda_field_rows(16, p6, 47, 13, 2, S, L, &det);
+  EXPECT_FALSE(det);
+}
+
+TEST(TdaField, NsaCellLearnsRowsFromCrcPasses)
+{
+  /* V (PCI 415, NSA, no SIB1 list): bit 16 = 1 <=> S0 L14 decodes, 0 <=> S1 L13 [MEASURED, DGX replay b, 448 of 449 / 1195 of 1197] */
+  nr_tda_field_reset();
+  const nr_dci_bits_t v0 = tf_bits("1100000000100000000000000100011000110010010011000"), v1 = tf_bits("1100000000100000100000000100011000110010010011000");
+  uint8_t S[2], L[2];
+  bool det = true;
+  EXPECT_EQ(nr_tda_field_rows(16, v1, 49, 13, 2, S, L, &det), 0);
+  for (int i = 0; i < 30; i++) { nr_tda_field_note_ok(16, v0, 49, false, 1, 13); nr_tda_field_note_ok(16, v1, 49, false, 0, 14); }
+  EXPECT_EQ(nr_tda_field_rows(16, v1, 49, 13, 2, S, L, &det), 1);
+  EXPECT_TRUE(det);
+  EXPECT_EQ(S[0], 0); EXPECT_EQ(L[0], 14);
+  EXPECT_EQ(nr_tda_field_rows(16, v0, 49, 13, 2, S, L, &det), 1);
+  EXPECT_EQ(S[0], 1); EXPECT_EQ(L[0], 13);
+  EXPECT_EQ(nr_tda_field_rows(16, v1, 49, 9, 2, S, L, &det), 0); /* S0 L14 does not fit a mixed slot; nothing learnt there */
+}
+
+TEST(TdaField, UncorrelatedBitIsNotAccepted)
+{
+  nr_tda_field_reset();
+  const nr_dci_bits_t v0 = tf_bits("1100000000100000000000000100011000110010010011000"), v1 = tf_bits("1100000000100000100000000100011000110010010011000");
+  for (int i = 0; i < 100; i++) { nr_tda_field_note_ok(16, i % 2 ? v1 : v0, 49, false, 1, 13); }
+  uint8_t S[2], L[2];
+  bool det = true;
+  EXPECT_EQ(nr_tda_field_rows(16, v1, 49, 13, 2, S, L, &det), 0);
+  EXPECT_FALSE(det);
+}
+
 int main(int argc, char **argv)
 {
   logInit();
