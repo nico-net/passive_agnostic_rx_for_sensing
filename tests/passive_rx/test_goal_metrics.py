@@ -1,5 +1,6 @@
 # tests/passive_rx/test_goal_metrics.py
 import os, tempfile, unittest
+import crc_margin_curve as cmc
 import goal_metrics as gm
 
 def ev(crc=1, mcs=10, tbl=0, nl=1, snr_l="20.0,-99.0,-99.0,-99.0", probe=0, rv=0, tot=400):
@@ -69,6 +70,13 @@ class GoalMetricsTest(unittest.TestCase):
         self.assertAlmostEqual(u['crc_q'], 100.0)
         self.assertEqual(u['tot_p99'], 700)
         self.assertAlmostEqual(u['drops_pct'], 2.0)
+
+class MarginCurveTest(unittest.TestCase):
+    def test_cross80(self):
+        # bins: margin -1 dB 0 % ok, +1 dB 50 %, +3 dB 90 % -> first bin >= 80 % is +3
+        rows = {-1: [10, 0], 1: [10, 5], 3: [10, 9]}
+        self.assertEqual(cmc.cross80(rows), 3)
+        self.assertIsNone(cmc.cross80({0: [10, 1]}))
 
 if __name__ == '__main__':
     unittest.main()
