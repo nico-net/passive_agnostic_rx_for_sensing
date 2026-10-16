@@ -1904,9 +1904,8 @@ int nr_tda_field_rows(int pos, nr_dci_bits_t p, int len, int last, int max, uint
     if (!mixed && !w) goto out; /* an unconfirmed field in a full slot: keep the solver's reading */
     const uint32_t v = w ? (uint32_t)nr_dci_bits_field(&p, len, pos, w) : 0xFFu;
     if (v < (uint32_t)g_tf_n && g_tf_S[v] + g_tf_L[v] - 1 <= last) { S[n] = g_tf_S[v]; L[n] = g_tf_L[v]; n++; }
-    for (int r = 0; r < g_tf_n && n < max; r++) {
-      if ((uint32_t)r == v || g_tf_S[r] + g_tf_L[r] - 1 > last) continue;
-      if (!mixed && w) continue; /* a detected field names the row in a full slot; only mixed slots try the other legal rows */
+    for (int r = 0; r < g_tf_n && n < max && !w; r++) { /* a detected field names the row: the other legal rows are tried only without it (<= 2 decodes) */
+      if (g_tf_S[r] + g_tf_L[r] - 1 > last) continue;
       S[n] = g_tf_S[r]; L[n] = g_tf_L[r]; n++;
     }
   } else if (w) { /* no list (NSA): the (S,L) learnt for (value, slot class), CRC-arbitrated */

@@ -592,16 +592,15 @@ TEST(TdaField, TimSpecialSlotPicksRow1AndRejectsIllegalRow0)
   /* evidence: `00` in 60 full slots, `01` in 20 mixed slots */
   for (int i = 0; i < 60; i++) nr_tda_field_note_dci(16, p6, 47, false);
   for (int i = 0; i < 20; i++) nr_tda_field_note_dci(16, p13, 47, true);
-  EXPECT_EQ(nr_tda_field_rows(16, p13, 47, 9, 2, S, L, &det), 2);
+  EXPECT_EQ(nr_tda_field_rows(16, p13, 47, 9, 2, S, L, &det), 1); /* detected: the field names the row, no second decode */
   EXPECT_TRUE(det);
   EXPECT_EQ(S[0], 1); EXPECT_EQ(L[0], 5);  /* value 1 -> SIB1 row 1 first, mask 0x4 (DM-RS at 2 only) */
   EXPECT_EQ(nr_pdsch_solver_dmrs_mask(2, S[0], L[0], 1), 0x4);
   EXPECT_EQ(nr_tda_field_rows(16, p6, 47, 13, 2, S, L, &det), 1);
   EXPECT_EQ(S[0], 1); EXPECT_EQ(L[0], 13); /* slot 6: row 0, mask 0x804 */
   EXPECT_EQ(nr_pdsch_solver_dmrs_mask(2, S[0], L[0], 1), 0x804);
-  /* a value that names an illegal row in a mixed slot falls back to the legal rows */
-  EXPECT_EQ(nr_tda_field_rows(16, p6, 47, 9, 2, S, L, &det), 2);
-  EXPECT_EQ(L[0], 5);
+  /* a value that names an illegal row in a mixed slot gives no row (the solver's reading stands) */
+  EXPECT_EQ(nr_tda_field_rows(16, p6, 47, 9, 2, S, L, &det), 0);
 }
 
 TEST(TdaField, ConstantFieldIsNotAccepted)
