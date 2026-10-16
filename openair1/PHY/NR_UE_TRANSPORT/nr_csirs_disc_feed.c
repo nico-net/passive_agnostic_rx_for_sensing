@@ -413,7 +413,7 @@ static void *disc_worker_main(void *unused)
     CPU_SET(g_worker.core, &set);
     pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
   }
-  nr_bg_lane_enter();
+  nr_bg_lane_enter("ISAC_CSIRS_DISC_CORE");
 
   pthread_mutex_lock(&g_worker.wake_lock);
   uint64_t seen = 0;
@@ -437,7 +437,7 @@ static void *disc_worker_main(void *unused)
     void (*hook)(nr_csirs_disc_ring_t *) = nr_csirs_disc_process_hook;
     const uint64_t t_adm = nr_admit_now_ns();
     const int work = drained > 0 || deferred || (!nr_csirs_disc_td_drain && g_worker.ring.written != g_worker.snapshot.written);
-    const int admitted = !work || nr_admit_try(NR_ADMIT_CSIRS, t_adm, t_adm + 1000000000ull, 0); /* idle wake-ups are not jobs */
+    const int admitted = !work || nr_admit_try(NR_ADMIT_CSIRS, t_adm, 0, 0); /* idle wake-ups are not jobs */
     if(nr_csirs_disc_should_run(drained, &deferred, admitted)) {
       /* TD mode has a single FD writer: this worker. The pipeline mutex
        * serializes processing with epoch reset, so no second IQ copy is needed. */

@@ -776,7 +776,7 @@ static void *bg_main(void *a)
   bg_arg_t *arg = a;
   setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
   pthread_setname_np(pthread_self(), arg->name);
-  if (!strcmp(arg->name, "dmrsIdBg")) nr_bg_lane_enter(); /* only the discovery worker; gpuCheckBg is a verifier */
+  if (!strcmp(arg->name, "dmrsIdBg")) nr_bg_lane_enter(NULL); /* only the discovery worker; gpuCheckBg is a verifier */
   nr_passive_tpool_inline = true; /* never push the CPU reference's tasks to the RT thread pool */
   nr_dl_chest_cpu_ref = true;     /* the reference estimator stays on the CPU (no GPU delay pre-pass) */
   for (;;)

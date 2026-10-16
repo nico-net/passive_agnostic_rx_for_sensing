@@ -522,7 +522,7 @@ static void dmrs_scan_run(dmrs_scan_slot_t *c, uint16_t rnti, int64_t abs_slot, 
 static void *dmrs_scan_worker(void *arg)
 {
   (void)arg;
-  nr_bg_lane_enter();
+  nr_bg_lane_enter("ISAC_DMRS_SCAN_CORE");
   for (;;) {
     pthread_mutex_lock(&g_dq_mu);
     while (g_dq_n == 0) pthread_cond_wait(&g_dq_cv, &g_dq_mu);
@@ -534,7 +534,7 @@ static void *dmrs_scan_worker(void *arg)
     dmrs_scan_slot_t *c = &g_scan_cache[j.abs_slot & 31];
     pthread_mutex_unlock(&g_scan_mu);
     const uint64_t t_adm = nr_admit_now_ns();
-    if (nr_admit_try(NR_ADMIT_DMRS_SCAN, t_adm, t_adm + 1000000000ull, 0)) { /* ISAC_BG_LANE: else the slot is dropped, the next one is fresher */
+    if (nr_admit_try(NR_ADMIT_DMRS_SCAN, t_adm, 0, 0)) { /* ISAC_BG_LANE: else the slot is dropped, the next one is fresher */
       dmrs_scan_run(c, j.rnti, j.abs_slot, j.nr_slot, j.sym, j.full, j.nant, j.N, j.fco, j.n_rb, j.sps, rx);
       nr_admit_done(NR_ADMIT_DMRS_SCAN, nr_admit_now_ns() - t_adm);
     }
@@ -1346,7 +1346,7 @@ static void cdmrs_run(void *arg)
 {
   cdmrs_obs_t *o = arg;
   const uint64_t t_adm = nr_admit_now_ns();
-  if (!nr_admit_try(NR_ADMIT_DMRS_ID, t_adm, t_adm + 1000000000ull, 0)) { /* ISAC_BG_LANE: critical lane busy, the observation is dropped */
+  if (!nr_admit_try(NR_ADMIT_DMRS_ID, t_adm, 0, 0)) { /* ISAC_BG_LANE: critical lane busy, the observation is dropped */
     free(o->row);
     free(o);
     return;
@@ -1371,7 +1371,7 @@ static void dldmrs_run(void *arg)
 {
   dldmrs_obs_t *o = arg;
   const uint64_t t_adm = nr_admit_now_ns();
-  if (!nr_admit_try(NR_ADMIT_DMRS_ID, t_adm, t_adm + 1000000000ull, 0)) {
+  if (!nr_admit_try(NR_ADMIT_DMRS_ID, t_adm, 0, 0)) {
     free(o->row);
     free(o);
     return;

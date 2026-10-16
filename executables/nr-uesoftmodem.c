@@ -754,6 +754,7 @@ int main(int argc, char **argv)
    * stop API also wakes and joins gpuFepWorker. Keep Tpool alive until all
    * consumers and discovery workers have returned. */
   nr_shutdown_step("passive_pdcch_stop_begin");
+  nr_pdcch_blind_monitor_rt_final_stats();
   nr_pdcch_passive_queue_stop();
   nr_shutdown_step("passive_pdsch_gpu_fep_stop_begin");
   nr_pdsch_passive_queue_stop();

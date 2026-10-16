@@ -122,7 +122,7 @@ static bool nodrop_acquire(void)
 static void *worker(void *unused)
 {
  (void)unused;
- nr_bg_lane_enter();
+ nr_bg_lane_enter("ISAC_PDCCH_NID_GPU_CORE");
  unsigned batches=0;
  nr_pdcch_nid_config_t previous={0};
  bool have_config=false;
@@ -188,7 +188,7 @@ static void *worker(void *unused)
   }
   if(nr_admit_on()) { /* ISAC_BG_LANE: a skipped batch is freed; the next one carries newer samples */
    const uint64_t t=nr_admit_now_ns();
-   if(!nr_admit_try(NR_ADMIT_NID,t,t+1000000000ull,g.primary)) {g.state[b]=0;batch_freed();pthread_mutex_unlock(&g.mu);continue;}
+   if(!nr_admit_try(NR_ADMIT_NID,t,0,g.primary)) {g.state[b]=0;batch_freed();pthread_mutex_unlock(&g.mu);continue;}
    admit_t0=t;
   }
   pthread_mutex_unlock(&g.mu);
@@ -208,7 +208,7 @@ static void *worker(void *unused)
   pthread_mutex_unlock(&g.mu);
   if(rc<0)goto failed;
   batches++;
-  if(!g.incremental && (batches<(unsigned)g.window || (batches-g.window)%(unsigned)g.every))continue;
+  if(!g.incremental && (batches<(unsigned)g.window || (batches-g.window)%(unsigned)g.every)){admit_t0=0;continue;}
   nr_pdcch_nid_result_t result={0};
   rc=g.ops->run(g.device,&result);
   if(admit_t0){nr_admit_done(NR_ADMIT_NID,nr_admit_now_ns()-admit_t0);admit_t0=0;}

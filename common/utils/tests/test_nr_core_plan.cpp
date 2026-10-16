@@ -253,10 +253,18 @@ TEST(BgLane,EmptyListFallsBackUnpinned){
   setenv("ISAC_BG_CORES","5,6",1);test_mark_critical({5,6});
   int c[8];EXPECT_EQ(0,nr_bg_lane_cores(c,8));
   setenv("ISAC_BG_LANE","1",1);
-  nr_bg_lane_enter();   // must not crash; unpinned nice 19
+  nr_bg_lane_enter(nullptr);   // must not crash; unpinned nice 19
   EXPECT_EQ(19,getpriority(PRIO_PROCESS,0));
   setenv("ISAC_BG_CORES","x",1);EXPECT_EQ(0,nr_bg_lane_cores(c,8));
   unsetenv("ISAC_BG_LANE");nr_core_plan_mark_critical_for_test(-1);
+}
+TEST(BgLane,PlanOffUsesEnvCores){
+  nr_core_plan_mark_critical_for_test(-1);   // plan inactive in this process: env vars define the critical lane
+  setenv("ISAC_GPU_WORKER_CORE","10",1);setenv("ISAC_PDSCH_CORES","7,8,9",1);setenv("ISAC_UE_RT_CORE","5",1);
+  setenv("ISAC_BG_CORES","2,5,7,10,11,12,999",1);
+  int c[8];int n=nr_bg_lane_cores(c,8);
+  EXPECT_EQ(3,n);EXPECT_EQ(2,c[0]);EXPECT_EQ(11,c[1]);EXPECT_EQ(12,c[2]);   // 5,7,10 critical; 999 beyond online CPUs
+  unsetenv("ISAC_GPU_WORKER_CORE");unsetenv("ISAC_PDSCH_CORES");unsetenv("ISAC_UE_RT_CORE");
 }
 TEST(EnvList,Nth){
   unsetenv("DTQ_L");

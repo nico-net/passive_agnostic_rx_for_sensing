@@ -2838,8 +2838,10 @@ static unsigned joint_anon_mm_max(int L);
  *   Posts each accepted (CORESET, length, RNTI, payload) to g_janon_hits under g_janon_mu; logs JOINT_ANON_ASYNC statistics every 2000 items.
  *   Started once by janon_start() on a SCHED_OTHER thread (ISAC_PDCCH_JOINT_ANON_CORE). Blocks on g_janon_cv when the queue is empty.
  */
-#define JANON_FRESH_NS 50000000ull /* an item older than 50 ms is stale: its CORESET has been offered newer bits */
+#define JANON_FRESH_NS 1000000000ull /* a queued item older than 1 s is dropped: its CORESET has been offered newer bits (the bits are copied, so no memory hazard) */
 /* janon_should_run: admission of one queued anonymous-solver item (ISAC_BG_LANE); suspect = reconfiguration priority token. */
+/* nr_pdcch_blind_monitor_rt_final_stats: end-of-run totals of the anonymous solver and the admission counters. Caller: nr-uesoftmodem.c shutdown. */
+void nr_pdcch_blind_monitor_rt_final_stats(void);
 static int janon_should_run(uint64_t now_ns, uint64_t deadline_ns, int suspect)
 {
   return nr_admit_try(NR_ADMIT_JANON, now_ns, deadline_ns, suspect);
@@ -2863,7 +2865,7 @@ static void *janon_worker(void *arg)
     if (CPU_COUNT(&set) > 0)
       pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
     pthread_setname_np(pthread_self(), "pdcchJanon");
-    nr_bg_lane_enter(); /* ISAC_BG_LANE: shared background core list, nice 10 */
+    nr_bg_lane_enter("ISAC_PDCCH_JOINT_ANON_CORE"); /* ISAC_BG_LANE: shared background core list, nice 10 */
   }
   for (;;) {
     pthread_mutex_lock(&g_janon_mu);
@@ -9924,7 +9926,7 @@ constdiag_done:;
         const nr_pdcch_blind_result_t *o = &rparsed[var[v].reading];
         if (var[v].probe && nr_admit_on()) { /* ISAC_BG_LANE: a solver probe waits for an idle critical lane */
           const uint64_t t_now = nr_admit_now_ns();
-          if (!nr_admit_try(NR_ADMIT_PROBE, t_now, t_now + JANON_FRESH_NS, 0)) {
+          if (!nr_admit_try(NR_ADMIT_PROBE, t_now, 0, 0)) {
             nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_THROTTLE);
             continue;
           }
@@ -10925,4 +10927,11 @@ __attribute__((constructor)) static void isac_segv_bt_install(void)
   sigaction(SIGSEGV, &sa, NULL);
   sigaction(SIGBUS, &sa, NULL);
   sigaction(SIGABRT, &sa, NULL); /* glibc fortify '*** buffer overflow detected ***' aborts in the faulting thread */
+}
+
+void nr_pdcch_blind_monitor_rt_final_stats(void)
+{
+  LOG_A(PHY, "SENSING: JOINT_ANON_ASYNC FINAL submitted=%llu done=%llu dropped=%llu hits=%llu\n", (unsigned long long)atomic_load(&g_janon_sub),
+        (unsigned long long)atomic_load(&g_janon_done), (unsigned long long)atomic_load(&g_janon_drop), (unsigned long long)atomic_load(&g_janon_found));
+  if (nr_admit_on()) { char as[640]; nr_admit_stats(as, sizeof as); LOG_A(PHY, "SENSING: %s (final)\n", as); }
 }
