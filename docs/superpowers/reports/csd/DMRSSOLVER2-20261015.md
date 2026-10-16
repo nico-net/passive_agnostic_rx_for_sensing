@@ -60,3 +60,22 @@ n=3-4 per arm; replay is not run-to-run deterministic; interleaving was kept but
 
 ## 6. ctest
 `[OFFLINE VERIFIED, DGX aarch64]` ctest -j4 on build_t26: only the known/recurring failures (test_nr_pusch_ra0_qam64, test_nr_pusch_ra0_qam256, test_nr_td_grantwork, dft_test, test_nr_modulation); test_nr_dmrs_nid_solve (incl. the 2 new tests) and the 4 test_nr_pdcch_nid_worker variants pass.
+
+## 7. Review fixes (2026-10-16)
+Changes (all still behind `ISAC_DMRS_NID_SOLVE=3`):
+1. Hint signature folds id + footprint (grid_rb, groups, sym, dur), so a widened footprint is re-served. `merged()` drops a hint in favour of a sweep record only if that record has the same id/sym/dur and covers the hint's RB range.
+2. `ISAC_DMRS_NID_SOLVE_RECHECK_MS` default 15000. The primary state (`nr_dmrs_prim_state_t`: grace anchor, last run, verified, burst) resets whenever the batch cfg (geometry or epoch) changes, with the grace restarting at the retune; the sweep result is cleared, and the solver votes are cleared when the cfg epoch changed (new cell). The detection uses its own cfg hash, because the worker's `previous` only updates on batches that run.
+3. Verification (primary only): a listed id counts as confirmed when its verified bank entry has >= 2 cumulative CRC-valid DCI accepts (new `accepts_total` in the bank entry), or 1 whose RNTI also owns another entry. Feedback is applied only when the echoed generation equals the currently served merged generation (no bit-63 shortcut). The "any listed id" semantics are gated on `nr_pdcch_nid_gpu_primary()`; mode 2 keeps "all".
+4. `hint_record` returns false when `symmask == 0`; such votes are not hinted.
+5. Tests (test_nr_dmrs_nid_solve): `VerificationNeedsTwoConfirmations`, `HintSignatureChangesWithTheFootprintOnly`, `GeometryChangeResetsTheState`. `ctest -R "dmrs_nid|pdcch_nid|pdcch_blind|coreset_bank"`: 34/34 pass [OFFLINE VERIFIED, DGX aarch64].
+A first attempt used distinct bank owners as the confirmation count; the bank holds 1 owner per dwelled entry, so nothing ever verified and the sweep kept running (tim 13-24 passes), hence the accept counter.
+
+Sanity replays, final build, solver-primary only (`_EVERY=8`, RECHECK 15 s), `[MEASURED, DGX replay <cap>, n=2]`, no off arm re-run (compare with section 2):
+| cap | first correct N_ID (s) | sweep passes | DL CRC-OK % | DL p50 / p99 us | solver CPU s |
+|---|---|---|---|---|---|
+| b run 1 / 2 | 6.47 / 7.91 | 1 / 3 | 58.5 / 53.9 | 1113 / 5480; 1080 / 4607 | 0.29 / 0.26 |
+| tim run 1 / 2 | 4.04 / 4.03 | 10 / 10 | 63.9 / 66.2 | 586 / 2868; 567 / 2868 | 0.14 / 0.14 |
+Versus off in section 2 (b 10.6 s, 47 %; tim 5.9 s, 64.7 %): no regression in first correct N_ID or CRC-OK, only id sets seen in off (62922, 10163, 1931), 0 unexpected ids. tim passes = one 10-pass burst when the 15 s re-verify fires after the replay data ended (not a cold start cost). n=2 is a sanity check, not a measurement of effect size.
+
+## 8. OTA recipe
+Run `ISAC_DMRS_NID_SOLVE=3 ISAC_DMRS_NID_SOLVE_EVERY=8` as a separate A/B arm (same cell, same env otherwise), NOT in t26f. Optionally `ISAC_DMRS_NID_SOLVE_CORE=<c>`. Compare per operator: time to the first correct N_ID (`hint served` / `PDCCH_NID_GPU pass` t= vs `t0`), `PDCCH_NID_GPU cumulative` sweep runs and kernel_ms, DL/UL decode p50/p99, CRC-OK, and any `JOINT_ANON_HIT` with an id outside the off arm's set. Unset the flag to return to t26f.

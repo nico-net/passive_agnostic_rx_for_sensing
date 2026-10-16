@@ -42,9 +42,10 @@ static struct {
  unsigned acquire_ms, maintain_ms, recheck_ms;
  bool stop;
  /* ISAC_DMRS_NID_SOLVE=3 (solver primary): the sweep runs on demand only (nr_dmrs_nid_sweep_demand); hints are the solver's top-2 ids. */
- bool primary, prim_verified;
- uint64_t primary_maintain_us, hint_sig, first_us, last_run_us, grace_us, reverify_us;
- unsigned burst;
+ bool primary;
+ uint32_t ps_epoch;
+ nr_dmrs_prim_state_t ps; /* first_us (grace anchor), last_run_us, verified, burst: reset when the batch cfg (geometry / epoch) changes */
+ uint64_t primary_maintain_us, hint_sig, grace_us, reverify_us;
  uint64_t runs, skipped; /* sweep GPU passes run / batches not uploaded (primary) */
  double kernel_ms;
  _Atomic bool running;
@@ -146,17 +147,28 @@ static void *worker(void *unused)
   wake=g.wake;
   if(g.primary) {
    nr_pdcch_nid_record_t h[2];uint64_t sig;
-   const int hn=nr_dmrs_nid_live_hints(h,2,&sig);
-   const bool resp=!geometry_changed && g.result.count>0;
-   const int published=resp || hn>0,verified=g.prim_verified;
+   int hn=nr_dmrs_nid_live_hints(h,2,&sig);
    const uint64_t now=duty_clock_us(batch_clock)+1;
-   if(!g.first_us)g.first_us=now;
+   {const nr_pdcch_nid_config_t *cf=&g.batch[b].cfg;uint64_t hsh=1469598103934665603ull; /* explicit fields, not padding bytes */
+    const uint64_t fl[]={(uint64_t)(int64_t)cf->nsc,(uint64_t)(int64_t)cf->point_a_sc,(uint64_t)(int64_t)cf->css0_crb,(uint64_t)(int64_t)cf->css0_nrb,
+                         (uint64_t)(int64_t)cf->pci,(uint64_t)(int64_t)cf->sps,(uint64_t)(int64_t)cf->dur,cf->epoch};
+    for(size_t k=0;k<sizeof(fl)/sizeof(fl[0]);k++)hsh=(hsh^fl[k])*1099511628211ull;
+    if(!g.ps.valid)g.ps_epoch=g.batch[b].cfg.epoch;
+    if(nr_dmrs_prim_cfg(&g.ps,hsh,now)) { /* retune: old cell's result, votes and confirmation are void; the grace restarts here */
+     memset(&g.result,0,sizeof(g.result));g.generation++;g.all_verified=false;
+     if(g.ps_epoch!=g.batch[b].cfg.epoch) {nr_dmrs_nid_live_reset();hn=-1;} /* new epoch = new cell: forget the votes */
+     g.ps_epoch=g.batch[b].cfg.epoch;
+     LOG_A(PHY,"SENSING: DMRS_NID_SOLVE geometry change: state reset, grace restarts\n");
+     if(hn<0)hn=0;
+    }}
+   const bool resp=g.result.count>0;
+   const int published=resp || hn>0,verified=g.ps.verified;
    nr_gpu_budget_discovery_prefer(!published);
-   if(published && !g.last_run_us)g.last_run_us=now; /* the cross-check sweep waits one maintain period for the hint to be CRC-confirmed */
-   int due=g.burst>0;
-   if(due)g.burst--;
-   else if(nr_dmrs_nid_sweep_demand(published,verified,unexplained,now,g.first_us,g.last_run_us,g.grace_us,g.primary_maintain_us,g.reverify_us)) {
-    due=1;g.burst=g.window>1?g.window-1:0;g.last_run_us=now;
+   if(published && !g.ps.last_run_us)g.ps.last_run_us=now; /* the cross-check sweep waits one maintain period for the hint to be CRC-confirmed */
+   int due=g.ps.burst>0;
+   if(due)g.ps.burst--;
+   else if(nr_dmrs_nid_sweep_demand(published,verified,unexplained,now,g.ps.first_us,g.ps.last_run_us,g.grace_us,g.primary_maintain_us,g.reverify_us)) {
+    due=1;g.ps.burst=g.window>1?g.window-1:0;g.ps.last_run_us=now;
     LOG_A(PHY,"SENSING: DMRS_NID_SOLVE sweep on demand: solver_ids=%d resp=%d verified=%d wake=%d\n",hn,resp,verified,unexplained);
    }
    if(!due) {g.skipped++;g.state[b]=0;batch_freed();pthread_mutex_unlock(&g.mu);continue;}
@@ -276,7 +288,7 @@ int nr_pdcch_nid_gpu_start(int max_rb)
   g.duty_enabled=true; /* feedback and wake edges are needed */
   g.grace_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_GRACE_MS",4000,0,60000);
   g.primary_maintain_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_MAINTAIN_MS",2000,1,600000);
-  g.reverify_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_RECHECK_MS",60000,1,600000);
+  g.reverify_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_RECHECK_MS",15000,1,600000);
  }
  g.acquire_ms=env_int("ISAC_PDCCH_NID_GPU_ACQUIRE_MS",5000,1,60000);
  g.maintain_ms=env_int("ISAC_PDCCH_NID_GPU_MAINTAIN_MS",500,1,60000);
@@ -439,7 +451,10 @@ static int merged(nr_pdcch_nid_record_t *out,int cap,uint64_t *gen,uint64_t *sig
  int n=0;
  for(int i=0;i<hn && n<cap;i++) {
   bool dup=false;
-  for(int j=0;j<g.result.count;j++)dup|=g.result.records[j].nid==h[i].nid;
+  for(int j=0;j<g.result.count;j++) { /* the sweep record replaces the hint only when it covers the hint's footprint */
+   const nr_pdcch_nid_record_t *q=g.result.records+j;
+   dup|=q->nid==h[i].nid && q->sym==h[i].sym && q->dur==h[i].dur && q->grid_rb<=h[i].grid_rb && q->grid_rb+6*q->groups>=h[i].grid_rb+6*h[i].groups;
+  }
   if(!dup)out[n++]=h[i];
  }
  for(int j=0;j<g.result.count && n<cap;j++)out[n++]=g.result.records[j];
@@ -464,7 +479,7 @@ int nr_pdcch_nid_gpu_records(nr_pdcch_nid_record_t *out,int capacity,uint64_t *g
    struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);
    LOG_A(PHY,"SENSING: DMRS_NID_SOLVE hint served n=%d nid0=%d nid1=%d t=%ld.%03ld\n",m,m>0?out[0].nid:-1,m>1?out[1].nid:-1,(long)t.tv_sec,t.tv_nsec/1000000);
   }
-  g.prim_verified=false;
+  g.ps.verified=false;
   pthread_mutex_unlock(&g.mu);return m;
  }
  if(*generation!=g.generation) {
@@ -495,14 +510,18 @@ void nr_pdcch_nid_gpu_feedback(uint32_t epoch,uint64_t generation,bool verified,
  if(!g.duty_enabled)return;
  if(pthread_mutex_trylock(&g.mu))return;
  if(g.epoch!=epoch) {
-  g.epoch=epoch;g.result.count=0;g.generation++;g.all_verified=false;g.last_outside_us=0;
+  g.epoch=epoch;g.result.count=0;g.generation++;g.all_verified=false;g.last_outside_us=0;g.ps.verified=false;
   /* Drop queued old-epoch snapshots, but never reclaim the worker's buffer. */
   for(int i=0;i<3;++i)if(g.state[i]==2)g.state[i]=0;
   batch_freed();
   if(g.producer>=0)g.n=0;
  }
  if(generation==g.generation)g.all_verified=verified;
- if(g.primary && (generation==g.generation || (generation>>63)))g.prim_verified=verified; /* any listed id confirmed by a CRC-valid DCI */
+ if(g.primary) { /* a listed id confirmed by >= 2 CRC-valid DCIs; the generation must be the one currently served */
+  nr_pdcch_nid_record_t tmp[NR_PDCCH_NID_MAX_RECORDS];uint64_t gen,sig;
+  merged(tmp,NR_PDCCH_NID_MAX_RECORDS,&gen,&sig);
+  if(generation==gen)g.ps.verified=verified;
+ }
  if(unexplained) {
   uint64_t now=g.nodrop?slot_clock_us():nr_gpu_budget_now_us();
   // The monitor reports a level on each occupied occasion. Reopen once per

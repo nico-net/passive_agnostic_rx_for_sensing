@@ -85,6 +85,28 @@ static inline int nr_dmrs_nid_top2(const uint32_t *votes, int n, uint32_t minv, 
   }
   return c;
 }
+/** Hint signature: folds one hinted record (id AND footprint) so a widened footprint is re-served. */
+static inline uint64_t nr_dmrs_nid_hint_sig(uint64_t sig, int nid, int grid_rb, int groups, int sym, int dur)
+{
+  sig = sig * 65537u + (uint64_t)nid + 1;
+  return (sig * 1000003u) ^ ((uint64_t)(grid_rb & 0x1ff) | (uint64_t)(groups & 0x1ff) << 9 | (uint64_t)(sym & 15) << 18 | (uint64_t)(dur & 3) << 22);
+}
+/** CRC-confirmation score of a banked id: >= 2 means verified. Two CRC-valid DCIs, or one whose RNTI is already an owner elsewhere. A single chance hit is 1. */
+static inline int nr_dmrs_nid_confirm_score(int confirms, int owner_seen_elsewhere)
+{
+  return confirms >= 2 || (confirms == 1 && owner_seen_elsewhere) ? 2 : confirms;
+}
+/** Only a UE-specific RNTI can tie two CORESETs together: SI-RNTI 0xFFFF, P-RNTI 0xFFFE and the RA-RNTI range (1..17920) are common to all. */
+static inline int nr_dmrs_nid_rnti_is_ue(unsigned rnti) { return rnti > 17920 && rnti < 0xFFFE; }
+/** Primary-mode scheduler state; reset on a geometry/retune change (cfg_hash differs) so the grace restarts at the retune. Returns 1 when reset. */
+typedef struct { uint64_t cfg_hash, first_us, last_run_us; int valid, verified; unsigned burst; } nr_dmrs_prim_state_t;
+static inline int nr_dmrs_prim_cfg(nr_dmrs_prim_state_t *s, uint64_t cfg_hash, uint64_t now)
+{
+  if (s->valid && s->cfg_hash == cfg_hash) return 0;
+  const int changed = s->valid;
+  *s = (nr_dmrs_prim_state_t){.cfg_hash = cfg_hash, .first_us = now, .valid = 1};
+  return changed;
+}
 /** On-demand sweep trigger: 1 when the GPU nID sweep must run now. published = a solver hint or a sweep record exists; verified = a CRC-valid
  *  DCI confirmed it; wake = unexplained PDCCH occupancy edge (always runs). No result: held for grace_us, then every call (fallback).
  *  Unverified result: every maintain_us. Verified: every recheck_us (slow re-verify). Times in us; last_run 0 = never ran. */

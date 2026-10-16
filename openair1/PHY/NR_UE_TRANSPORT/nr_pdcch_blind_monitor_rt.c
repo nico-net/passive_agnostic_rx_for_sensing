@@ -4821,6 +4821,7 @@ static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
     atomic_fetch_add_explicit(&g_bank_accepts, 1, memory_order_relaxed);
     if (reconf_lengths_enabled())
       nr_pdcch_coreset_bank_note_accept(t_bank_index, t_bank_slot);
+    nr_pdcch_coreset_bank_note_confirm(t_bank_index, t_bank_slot);
   }
   return dup;
 }

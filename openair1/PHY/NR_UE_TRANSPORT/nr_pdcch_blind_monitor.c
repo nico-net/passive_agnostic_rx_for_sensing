@@ -58,6 +58,7 @@
  */
 
 #include "nr_pdcch_nid_gpu.h"
+#include "nr_dmrs_nid_solve.h"
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_pdcch_sib1_prior.h"
 #include "nr_pdcch_coreset_bank.h"
@@ -1549,6 +1550,8 @@ int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
       const int bank = nr_pdcch_coreset_bank_add(&c, rnti);
       if (bank >= 0) {
         nr_pdcch_coreset_bank_note_accept(bank, slot);
+        nr_pdcch_coreset_bank_note_confirm(bank, s_add_disc.evidence[i].slot); /* the earlier evidence DCI (same RNTI, other slot, other payload) */
+        nr_pdcch_coreset_bank_note_confirm(bank, slot);
         LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d VERIFIED -> bank add index=%d rnti=0x%04x len=%d\n",
               s_add_disc.next + 1, s_add_disc.n, c.coreset_pdcch_dmrs_scrambling_id, bank, rnti, length);
       } else {
@@ -1592,6 +1595,41 @@ uint16_t nr_pdcch_discovered_nrnti(uint32_t slot, uint16_t nid)
   return h[(v ^ (v >> 31)) % n];
 }
 
+/* bank_confirm_score: CRC-confirmation of a verified bank entry overlapping this record (nr_dmrs_nid_confirm_score): cumulative CRC-valid DCI accepts on the entry, one accept counting twice when its owner RNTI is also an owner of another entry.
+ *   Owners are appended after publication; the lock-free reads of nowners/owners are benign (monotonic count, 16-bit values). Caller: nid_budget_feedback(). */
+static int bank_confirm_score(int nid,int sym,int dur,int rb,int groups)
+{
+  int best=0;
+  const int n=nr_pdcch_coreset_bank_count();
+  for(int i=0;i<n;++i) {
+    if(nr_pdcch_coreset_bank_state(i)!=NR_CORESET_VERIFIED)continue;
+    const nr_pdcch_blind_monitor_cfg_t *c=nr_pdcch_coreset_bank_cfg(i);
+    if(!c || c->coreset_pdcch_dmrs_scrambling_id!=nid || c->ss_first_symbol!=sym || c->coreset_duration!=dur)continue;
+    const int lo=c->bwp_start+c->coreset_rb_offset,hi=lo+6*c->coreset_freq_domain;
+    if(!(rb<hi && rb+6*groups>lo))continue;
+    const nr_pdcch_discovered_coreset_t *e=nr_pdcch_coreset_bank_entry(i);
+    int elsewhere=0;
+    const uint32_t acc=__atomic_load_n(&e->accepts_total,__ATOMIC_RELAXED);
+    const int confirms=acc>1000?1000:(int)acc;
+    const uint16_t own=__atomic_load_n(&e->nowners,__ATOMIC_RELAXED)?e->owners[0]:0;
+    if(confirms==1 && nr_dmrs_nid_rnti_is_ue(own))
+      for(int k=0;k<n && !elsewhere;++k) {
+        if(k==i || nr_pdcch_coreset_bank_state(k)==NR_CORESET_REMOVED)continue;
+        const nr_pdcch_discovered_coreset_t *o=nr_pdcch_coreset_bank_entry(k);
+        const nr_pdcch_blind_monitor_cfg_t *oc=&o->cfg;
+        if(oc->coreset_pdcch_dmrs_scrambling_id==nid)continue; /* same id: not independent */
+        const int olo=oc->bwp_start+oc->coreset_rb_offset,ohi=olo+6*oc->coreset_freq_domain;
+        const bool same_res=lo<ohi && olo<hi && oc->ss_first_symbol<sym+dur && sym<oc->ss_first_symbol+(int)oc->coreset_duration;
+        if(same_res)continue; /* same time-frequency resources under another id: an alias, not a second CORESET */
+        const int no=__atomic_load_n(&o->nowners,__ATOMIC_RELAXED);
+        for(int q=0;q<no;++q)elsewhere|=o->owners[q]==own;
+      }
+    const int sc=nr_dmrs_nid_confirm_score(confirms,elsewhere);
+    if(sc>best)best=sc;
+  }
+  return best;
+}
+
 /* Snapshot and bank checks run on the existing monitor consumer, never in the
  * RT producer or while holding the nID worker lock. */
 static void nid_budget_feedback(void)
@@ -1601,14 +1639,16 @@ static void nid_budget_feedback(void)
   int n=nr_pdcch_nid_gpu_snapshot(records,NR_PDCCH_NID_MAX_RECORDS,&generation);
   if(n<0)return;
   bool verified=n>0,any=false;
+  const bool primary=nr_pdcch_nid_gpu_primary();
   for(int i=0;i<n;++i) {
     const nr_pdcch_nid_record_t *r=records+i;
     const bool ok=nr_pdcch_coreset_bank_verified_footprint(r->grid_rb,r->groups,r->dur,r->sym,r->L,r->R,r->shift,r->nid)
         || (nr_pdcch_discovered_cover_enabled()
             && nr_pdcch_discovered_cover_banked(r->nid,r->sym,r->dur,r->grid_rb,r->groups));
-    verified&=ok;any|=ok;
+    verified&=ok;
+    if(primary && ok)any|=bank_confirm_score(r->nid,r->sym,r->dur,r->grid_rb,r->groups)>=2;
   }
-  if((generation>>63) || nr_pdcch_nid_gpu_primary())verified=any; /* solver hint set: one CRC-confirmed id is enough, a DCI-less id must not keep the sweep running */
+  if(primary)verified=any; /* solver-primary only: one id confirmed by >= 2 CRC-valid DCIs is enough; a DCI-less id must not keep the sweep running. Mode 2 keeps "all". */
   nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),generation,verified,false);
 }
 
