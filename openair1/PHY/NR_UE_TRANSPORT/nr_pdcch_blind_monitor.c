@@ -62,6 +62,7 @@
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_pdcch_sib1_prior.h"
 #include "nr_pdcch_coreset_bank.h"
+#include "nr_pdsch_solver.h"        // nr_tda_field_set_rows() (ISAC_PDSCH_TDA_FIELD)
 #include "nr_passive_acq_state.h" // nr_pdcch_crb0_grid_rb(): Point A from SIB1 (ISAC_PDCCH_POINTA_REF)
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_cfg_sources.h"
@@ -260,6 +261,7 @@ void nr_pdcch_blind_monitor_set_tda_common(const uint8_t *start, const uint8_t *
   }
   g_cfg.extract.tda_common_count      = n;
   g_css0_cfg.extract.tda_common_count = n;
+  nr_tda_field_set_rows(start, len, n); /* Fix A (ISAC_PDSCH_TDA_FIELD): the same list gives the DCI 1_1 TDRA field width and rows */
   static bool tda_logged = false;
   if (!tda_logged) {
     tda_logged = true;

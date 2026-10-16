@@ -113,6 +113,11 @@ typedef struct {
   /// common RBs its REG bundles occupy (bit c%8 of byte c/8). Filled by the blind monitor's DCI 1_1 path.
   uint8_t  pdcch_sym0, pdcch_nsym;
   uint8_t  pdcch_crb[35];
+  /// Fix A (ISAC_PDSCH_TDA_FIELD): TDRA-field window of the DCI (bit position + 1, 0 = none), the TDD last PDSCH symbol of the slot (13 = full slot / unknown),
+  /// and up to two legal (S,L) rows (tda_n); row 0 is already in the decode's configuration, row 1 is the retry. tda_addpos = dmrs-AdditionalPosition used.
+  uint8_t  tda_pos1, tda_n, tda_addpos;
+  int8_t   tda_last;
+  uint8_t  tda_S[2], tda_L[2];
 } nr_pdsch_passive_grant_t;
 
 /// Pick this RNTI's current DCI 1_1 interleaved VRB-to-PRB bundle-size hypothesis (2 or 4). The

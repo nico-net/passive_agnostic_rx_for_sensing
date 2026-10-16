@@ -1738,3 +1738,184 @@ void nr_pdsch_solver_stats(nr_pdsch_solver_stats_t *s)
   *s = g_st;
   pthread_mutex_unlock(&g_mu);
 }
+
+/* ---- Fix A: DCI 1_1 TDRA field (see nr_pdsch_solver.h) ---- */
+#define TF_NPOS 4
+#define TF_MIN 8 /* decisions need >= TF_MIN DCIs per class / OK decodes per value; purity >= 90 % */
+typedef struct { uint8_t S, L; uint32_t n; } tf_row_t;
+typedef struct {
+  int pos; /* -1 free */
+  uint32_t cls[2][4][2];      /* [w-1][value][mixed] accepted DCIs */
+  tf_row_t row[2][4][2][3];   /* [w-1][value][mixed] (S,L) of CRC-passing decodes */
+  uint8_t det_w;              /* 0 undetected, else the accepted width */
+} tf_pos_t;
+static pthread_mutex_t g_tf_mu = PTHREAD_MUTEX_INITIALIZER;
+static tf_pos_t g_tf[TF_NPOS];
+static uint8_t g_tf_S[16], g_tf_L[16];
+static int g_tf_n, g_tf_init;
+
+bool nr_tda_field_on(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDSCH_TDA_FIELD") && atoi(getenv("ISAC_PDSCH_TDA_FIELD")) ? 1 : 0;
+  return en == 1;
+}
+static void tf_init_locked(void)
+{
+  if (g_tf_init) return;
+  g_tf_init = 1;
+  for (int i = 0; i < TF_NPOS; i++) g_tf[i].pos = -1;
+}
+void nr_tda_field_reset(void)
+{
+  pthread_mutex_lock(&g_tf_mu);
+  memset(g_tf, 0, sizeof(g_tf));
+  g_tf_init = 0; g_tf_n = 0;
+  tf_init_locked();
+  pthread_mutex_unlock(&g_tf_mu);
+}
+void nr_tda_field_set_rows(const uint8_t *S, const uint8_t *L, int n)
+{
+  if (!S || !L || n < 0) return;
+  if (n > 16) n = 16;
+  pthread_mutex_lock(&g_tf_mu);
+  memcpy(g_tf_S, S, (size_t)n); memcpy(g_tf_L, L, (size_t)n);
+  g_tf_n = n;
+  pthread_mutex_unlock(&g_tf_mu);
+}
+static int tf_list_w(void) { int w = 0; while ((1 << w) < g_tf_n) w++; return w; }
+static tf_pos_t *tf_get(int pos, bool create)
+{
+  tf_init_locked();
+  int freei = -1;
+  for (int i = 0; i < TF_NPOS; i++) {
+    if (g_tf[i].pos == pos) return &g_tf[i];
+    if (g_tf[i].pos < 0 && freei < 0) freei = i;
+  }
+  if (!create || freei < 0) return NULL;
+  memset(&g_tf[freei], 0, sizeof(g_tf[freei]));
+  g_tf[freei].pos = pos;
+  return &g_tf[freei];
+}
+/* dominant (S,L) of one (w, value, class) cell: returns its count, *tot the cell's total */
+static uint32_t tf_dom(const tf_pos_t *t, int wi, int v, int m, tf_row_t *best, uint32_t *tot)
+{
+  uint32_t bn = 0, sum = 0;
+  for (int k = 0; k < 3; k++) {
+    sum += t->row[wi][v][m][k].n;
+    if (t->row[wi][v][m][k].n > bn) { bn = t->row[wi][v][m][k].n; *best = t->row[wi][v][m][k]; }
+  }
+  *tot = sum;
+  return bn;
+}
+/* dominant (S,L) of one value over both slot classes (CRC detection): count, total */
+static uint32_t tf_dom_v(const tf_pos_t *t, int wi, int v, tf_row_t *best, uint32_t *tot)
+{
+  tf_row_t a[6]; int na = 0; uint32_t sum = 0, bn = 0;
+  for (int m = 0; m < 2; m++)
+    for (int k = 0; k < 3; k++) {
+      const tf_row_t *r = &t->row[wi][v][m][k];
+      if (!r->n) continue;
+      sum += r->n;
+      int q = 0;
+      while (q < na && !(a[q].S == r->S && a[q].L == r->L)) q++;
+      if (q == na) { a[na] = *r; a[na].n = 0; na++; }
+      a[q].n += r->n;
+    }
+  for (int q = 0; q < na; q++) if (a[q].n > bn) { bn = a[q].n; *best = a[q]; }
+  *tot = sum;
+  return bn;
+}
+static void tf_eval(tf_pos_t *t)
+{
+  if (t->det_w) return;
+  const int wl = tf_list_w();
+  for (int w = 1; w <= 2 && !t->det_w; w++) {
+    if (g_tf_n > 0 && w != wl) continue;
+    const int wi = w - 1, nv = 1 << w;
+    if (g_tf_n > 0) { /* (a) value depends on the TDD slot class */
+      uint32_t tm = 0, to = 0, bm = 0, bo = 0; int dm = 0, dob = 0;
+      for (int v = 0; v < nv; v++) {
+        tm += t->cls[wi][v][1]; to += t->cls[wi][v][0];
+        if (t->cls[wi][v][1] > bm) { bm = t->cls[wi][v][1]; dm = v; }
+        if (t->cls[wi][v][0] > bo) { bo = t->cls[wi][v][0]; dob = v; }
+      }
+      if (tm >= TF_MIN && to >= TF_MIN && bm * 10 >= tm * 9 && bo * 10 >= to * 9 && dm != dob) t->det_w = (uint8_t)w;
+    }
+    if (!t->det_w) { /* (b) CRC-passing decodes of different values need different (S,L) */
+      tf_row_t r[4]; int q = 0; bool diff = false;
+      for (int v = 0; v < nv; v++) {
+        uint32_t tot, bn = tf_dom_v(t, wi, v, &r[q], &tot);
+        if (tot >= TF_MIN && bn * 10 >= tot * 9) {
+          for (int k = 0; k < q; k++) diff |= r[k].S != r[q].S || r[k].L != r[q].L;
+          q++;
+        }
+      }
+      if (q >= 2 && diff) t->det_w = (uint8_t)w;
+    }
+    if (t->det_w)
+      LOG_A(PHY, "SENSING: TDAFIELD detected pos=%d w=%d list=%d (DCIs mixed/other per value %u/%u %u/%u)\n", t->pos, w, g_tf_n,
+            t->cls[wi][0][1], t->cls[wi][0][0], t->cls[wi][1][1], t->cls[wi][1][0]);
+  }
+}
+void nr_tda_field_note_dci(int pos, nr_dci_bits_t p, int len, bool mixed)
+{
+  if (pos < 0 || len <= pos) return;
+  pthread_mutex_lock(&g_tf_mu);
+  tf_pos_t *t = tf_get(pos, true);
+  if (t) {
+    for (int w = 1; w <= 2; w++)
+      if (pos + w <= len) t->cls[w - 1][nr_dci_bits_field(&p, len, pos, w)][mixed]++;
+    tf_eval(t);
+  }
+  pthread_mutex_unlock(&g_tf_mu);
+}
+void nr_tda_field_note_ok(int pos, nr_dci_bits_t p, int len, bool mixed, int S, int L)
+{
+  if (pos < 0 || len <= pos) return;
+  pthread_mutex_lock(&g_tf_mu);
+  tf_pos_t *t = tf_get(pos, true);
+  for (int w = 1; t && w <= 2; w++) {
+    if (pos + w > len) continue;
+    tf_row_t *c = t->row[w - 1][nr_dci_bits_field(&p, len, pos, w)][mixed];
+    int k = 0;
+    while (k < 3 && !(c[k].n && c[k].S == S && c[k].L == L)) k++;
+    if (k == 3) { /* new row: take a free slot, else replace the weakest */
+      k = 0;
+      for (int j = 1; j < 3; j++) if (c[j].n < c[k].n) k = j;
+      c[k].S = (uint8_t)S; c[k].L = (uint8_t)L; c[k].n = 0;
+    }
+    c[k].n++;
+  }
+  if (t) tf_eval(t);
+  pthread_mutex_unlock(&g_tf_mu);
+}
+int nr_tda_field_rows(int pos, nr_dci_bits_t p, int len, int last, int max, uint8_t *S, uint8_t *L, bool *detected)
+{
+  int n = 0;
+  if (detected) *detected = false;
+  if (pos < 0 || len <= pos || max <= 0 || !S || !L) return 0;
+  const bool mixed = last < 13;
+  pthread_mutex_lock(&g_tf_mu);
+  tf_pos_t *t = tf_get(pos, false);
+  const int w = t ? t->det_w : 0;
+  if (detected) *detected = w > 0;
+  if (g_tf_n > 0) {
+    if (!mixed && !w) goto out; /* an unconfirmed field in a full slot: keep the solver's reading */
+    const uint32_t v = w ? (uint32_t)nr_dci_bits_field(&p, len, pos, w) : 0xFFu;
+    if (v < (uint32_t)g_tf_n && g_tf_S[v] + g_tf_L[v] - 1 <= last) { S[n] = g_tf_S[v]; L[n] = g_tf_L[v]; n++; }
+    for (int r = 0; r < g_tf_n && n < max; r++) {
+      if ((uint32_t)r == v || g_tf_S[r] + g_tf_L[r] - 1 > last) continue;
+      if (!mixed && w) continue; /* a detected field names the row in a full slot; only mixed slots try the other legal rows */
+      S[n] = g_tf_S[r]; L[n] = g_tf_L[r]; n++;
+    }
+  } else if (w) { /* no list (NSA): the (S,L) learnt for (value, slot class), CRC-arbitrated */
+    const int v = (int)nr_dci_bits_field(&p, len, pos, w);
+    tf_row_t b = {0}; uint32_t tot;
+    const uint32_t bn = tf_dom(t, w - 1, v, mixed, &b, &tot);
+    if (bn >= 3 && bn * 10 >= tot * 8 && b.S + b.L - 1 <= last) { S[0] = b.S; L[0] = b.L; n = 1; }
+  }
+out:
+  pthread_mutex_unlock(&g_tf_mu);
+  return n;
+}
