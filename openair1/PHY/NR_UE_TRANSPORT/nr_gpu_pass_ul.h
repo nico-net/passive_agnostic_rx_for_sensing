@@ -23,6 +23,7 @@ typedef struct {
   uint8_t nscid, dmrs_type, mapping_type, add_pos, front_load, n_cdm_groups, have_dmrs;
   uint8_t start_symbol, num_symbols; /* the grant shape the DM-RS fields were found for: they apply to a grant of the same shape only */
   uint16_t dmrs_ports;
+  uint8_t tp;           /* transform precoding of the grant it was found for: an entry applies to grants with the same flag only (ISAC_UL_BGDISC) */
   uint8_t fail_streak;  /* passes that failed the CRC since the last decode: the entry is dropped after three */
   uint32_t epoch;       /* nr_cfg_epoch_dedicated_current() when it was stored: a later epoch invalidates it */
   int64_t abs_slot;     /* slot index it was stored at (age) */

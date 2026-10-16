@@ -28,6 +28,7 @@
 #include "nr_pusch_passive_decode.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
 #include "nr_pusch_ul_disc.h"
+#include "nr_pusch_ul_bgdisc.h"
 #include "nr_pdsch_passive_queue.h"
 #include "nr_pusch_data_aided.h"
 #include "nr_pdsch_prb_set.h"
@@ -317,6 +318,7 @@ static inline bool hp_crc_failed(const NR_gNB_ULSCH_t *u)
  * decode (either path) with the timing advance corrected by the delay the estimator measured, so that it follows the clock drift. */
 static void ul_hyp_apply(nr_pdcch_blind_ul_result_t *g, const ul_hyp_t *h)
 {
+  if (h->tp != (uint8_t)g->transform_precoding) return;
   if (!h->have_dmrs || h->start_symbol != g->start_symbol || h->num_symbols != g->num_symbols) return; /* the DM-RS layout belongs to a grant of this shape only */
   g->mapping_type = h->mapping_type;
   g->ul_dmrs_symb_pos = h->dmrs_mask;
@@ -345,11 +347,20 @@ static void ul_hyp_store(const nr_pdcch_blind_ul_result_t *g, int32_t ta, uint32
   h.mapping_type = (uint8_t)g->mapping_type;
   h.n_cdm_groups = (uint8_t)g->n_dmrs_cdm_groups;
   h.dmrs_ports = (uint16_t)g->dmrs_ports;
+  h.tp = (uint8_t)g->transform_precoding;
   h.start_symbol = (uint8_t)g->start_symbol;
   h.num_symbols = (uint8_t)g->num_symbols;
   h.epoch = epoch;
   h.abs_slot = abs_slot;
   h.n_ok = n_ok;
+  if (n_ok && nr_ul_bgdisc_enabled()) {
+    /* a CRC pass that would CHANGE the cached DM-RS hypothesis latches only on a second pass in another slot (or another RNTI): CRC-16 alone passes ~1.5e-5 of wrong attempts */
+    ul_hyp_t cur;
+    const uint32_t key = ((uint32_t)h.dmrs_id << 8 | h.nscid << 6 | h.dmrs_type << 5 | h.tp << 4) ^ ((uint32_t)h.dmrs_mask << 16) ^ 0x80000000u;
+    const uint32_t ckey = ul_hyp_cache_get(g->rnti, &cur) && cur.have_dmrs
+        ? ((uint32_t)cur.dmrs_id << 8 | cur.nscid << 6 | cur.dmrs_type << 5 | cur.tp << 4) ^ ((uint32_t)cur.dmrs_mask << 16) ^ 0x80000000u : 0;
+    if (!nr_ul_bgdisc_latch(g->rnti, key, abs_slot, ckey)) return;
+  }
   ul_hyp_cache_put(g->rnti, &h);
 }
 
@@ -706,6 +717,8 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue, int ctx)
   return true;
 }
 
+static int ul_bg_run(const nr_ul_bgdisc_job_t *j);
+
 bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue, int ctx)
 {
   if (!ue || ctx < 0 || ctx >= NR_PUSCH_PASSIVE_MAX_CTX || !passive_gnb_prepare(ue, ctx)) return false;
@@ -713,6 +726,7 @@ bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue, int ctx)
    * these low-PAPR pilots before RX; this private context bypasses that init. */
   const char *solver=getenv("ISAC_UL_PUSCH_SOLVER");
   if (ctx == 0 && solver && !strcmp(solver,"1")) generate_lowpapr_typ1_refsig_sequences(SHRT_MAX);
+  if (ctx == 0 && nr_ul_bgdisc_enabled()) nr_ul_bgdisc_start(8, ul_bg_run);
   passive_ul_snapshot_t *s = &g_snapshot[ctx];
   if (g_pipeline_ready[ctx]) return true;
   const uint32_t len = nr_pusch_passive_snapshot_len(&ue->frame_parms);
@@ -948,10 +962,9 @@ void nr_pusch_passive_fep_symbol(const NR_DL_FRAME_PARMS *fp, const c16_t *rxdat
   dft(get_dft(N), (int16_t *)rot, (int16_t *)rxdataF, 1);
 }
 
-static bool passive_snapshot_fep(const NR_DL_FRAME_PARMS *fp, int ctx, int ant, c16_t *dst,
-                                 unsigned char symbol, unsigned char slot, int offset, double fo_hz)
+static bool passive_snapshot_fep_s(const passive_ul_snapshot_t *s, const NR_DL_FRAME_PARMS *fp, int ant, c16_t *dst,
+                                   unsigned char symbol, unsigned char slot, int offset, double fo_hz)
 {
-  const passive_ul_snapshot_t *s = &g_snapshot[ctx];
   const uint32_t off = passive_ul_fep_offset(fp, slot, symbol, offset);
   const uint32_t rel = (off + fp->samples_per_frame - s->origin) % fp->samples_per_frame;
   if (!s->valid || rel + fp->ofdm_symbol_size > s->length) return false;
@@ -964,6 +977,11 @@ static bool passive_snapshot_fep(const NR_DL_FRAME_PARMS *fp, int ctx, int ant, 
     dft(get_dft(fp->ofdm_symbol_size), (int16_t *)rot, (int16_t *)dst, 1);
   }
   return true;
+}
+static bool passive_snapshot_fep(const NR_DL_FRAME_PARMS *fp, int ctx, int ant, c16_t *dst,
+                                 unsigned char symbol, unsigned char slot, int offset, double fo_hz)
+{
+  return passive_snapshot_fep_s(&g_snapshot[ctx], fp, ant, dst, symbol, slot, offset, fo_hz);
 }
 
 /* ---- ULFEP: ISAC_UL_GPU_FEP=1 (default off). The FEP of a snapshot-backed grant (the UL window, the bare DFT, the
@@ -1611,6 +1629,36 @@ static uint32_t passive_ul_slow_time_idx(const NR_DL_FRAME_PARMS *fp,
   return (uint32_t)(prod - lag);
 }
 
+/* the DM-RS identity candidates the UL search tries first (shared by the inline search and the ISAC_UL_BGDISC worker) */
+static int ul_disc_priors(const nr_pdcch_blind_ul_result_t *g, const NR_DL_FRAME_PARMS *fp, const nr_pdcch_blind_monitor_cfg_t *cfg,
+                          const nr_pusch_ul_disc_result_t *cached, int prior[16], int maxp)
+{
+  int nprior = 0;
+#define UL_ADD_PRIOR(id_) do { int v_=(id_); if (v_ >= 0 && v_ <= 65535) { \
+      bool seen_=false; for (int j_=0;j_<nprior;j_++) seen_ |= prior[j_]==v_; \
+      if (!seen_ && nprior < maxp) prior[nprior++]=v_; } } while (0)
+    UL_ADD_PRIOR(fp->Nid_cell);
+    UL_ADD_PRIOR(g->ul_dmrs_scrambling_id);
+    if (cached->accepted) UL_ADD_PRIOR(cached->id);
+    nr_ue_ctx_t ue_ctx;
+    if (nr_ue_ctx_try_get(g->rnti, &ue_ctx)) {
+      if (ue_ctx.cfg[NR_UEP_PDSCH_SCR_ID].source != NR_UES_UNKNOWN)
+        UL_ADD_PRIOR(ue_ctx.cfg[NR_UEP_PDSCH_SCR_ID].value);
+      if (ue_ctx.cfg[NR_UEP_PDCCH_SCR_ID].source != NR_UES_UNKNOWN)
+        UL_ADD_PRIOR(ue_ctx.cfg[NR_UEP_PDCCH_SCR_ID].value);
+    }
+    if (cfg) UL_ADD_PRIOR(cfg->coreset_pdcch_dmrs_scrambling_id);
+    UL_ADD_PRIOR(nr_dmrs_id_2stage_decided(nr_pdsch_passive_dl_dmrs_id(0)));
+    UL_ADD_PRIOR(nr_dmrs_id_2stage_decided(nr_pdsch_passive_dl_dmrs_id(1)));
+    if (maxp > 8) { /* the background worker: ids latched for the other RNTIs of the cell */
+      int known[8];
+      const int nk = nr_pusch_ul_disc_known_ids(known, 8);
+      for (int k = 0; k < nk; k++) UL_ADD_PRIOR(known[k]);
+    }
+#undef UL_ADD_PRIOR
+  return nprior;
+}
+
 static bool passive_ul_apply_dmrs_disc(nr_pdcch_blind_ul_result_t *g,
                                        const nr_pusch_ul_disc_result_t *result)
 {
@@ -1631,6 +1679,101 @@ static bool passive_ul_apply_dmrs_disc(nr_pdcch_blind_ul_result_t *g,
   g->n_dmrs_cdm_groups=cdm;
   g->dmrs_ports=ports;
   return true;
+}
+
+/* ---- ISAC_UL_BGDISC worker: the inline search of nr_pusch_passive_decode_inner on a private copy of the snapshot, CPU only. Its product is the per-RNTI
+ * hypothesis (timing advance, DM-RS layout and identity) that the next grants of that RNTI decode with. 1 = dropped (config epoch changed, window too short). */
+static bool bg_fep(const NR_DL_FRAME_PARMS *fp, const passive_ul_snapshot_t *sn, int nant, c16_t *buf, int slot, int sym, int off, double fo_hz)
+{
+  const int symsz = fp->ofdm_symbol_size;
+  for (int a = 0; a < nant; a++) {
+    c16_t *dst = &buf[((size_t)a * fp->symbols_per_slot + sym) * symsz];
+    if (!passive_snapshot_fep_s(sn, fp, a, dst, (unsigned char)sym, (unsigned char)slot, off, fo_hz)) return false;
+    apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe, fp->timeshift_symbol_rotation, fp->first_carrier_offset, dst,
+                                fp->symbol_rotation[link_type_ul], fp->N_RB_UL, slot, sym);
+  }
+  return true;
+}
+static int ul_bg_run(const nr_ul_bgdisc_job_t *j)
+{
+  PHY_VARS_gNB *gnb = g_gnb[0];
+  if (!gnb || j->epoch != nr_cfg_epoch_dedicated_current()) return 1;
+  const NR_DL_FRAME_PARMS *fp = &gnb->frame_parms;
+  const int symsz = fp->ofdm_symbol_size, sps = fp->symbols_per_slot, nant = j->nant, slot = j->slot;
+  static c16_t *gbuf; /* the worker is one thread */
+  if (!gbuf) gbuf = malloc16_clear((size_t)4 * 14 * 4096 * sizeof(c16_t));
+  if (!gbuf || nant > 4 || nant < 1 || sps > 14 || symsz > 4096) return 1;
+  passive_ul_snapshot_t sn;
+  memset(&sn, 0, sizeof(sn));
+  sn.origin = j->origin; sn.length = j->length; sn.valid = true;
+  for (int a = 0; a < nant; a++) sn.iq[a] = (c16_t *)j->iq[a];
+  nr_pdcch_blind_ul_result_t g = j->grant;
+  const bool timing_disc = j->flags & 1, dmrs_disc = j->flags & 2;
+  nr_pusch_ul_disc_epoch(j->epoch);
+  const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
+  const uint8_t type_a = cfg && cfg->dmrs_typeA_position <= 1 ? cfg->dmrs_typeA_position : 0;
+  const nr_pusch_ul_disc_result_t cached = dmrs_disc ? nr_pusch_ul_disc_cached(g.rnti) : (nr_pusch_ul_disc_result_t){.id = -1};
+  int timing_mask = g.ul_dmrs_symb_pos, timing_type = g.dmrs_config_type, timing_nscid = g.nscid;
+  if (cached.accepted) {
+    timing_type = cached.dmrs_type;
+    timing_nscid = cached.nscid;
+    if (cached.mapping_type >= 0 && cached.add_pos >= 0) {
+      const int mask = nr_pdcch_blind_ul_dmrs_mask(g.num_symbols, g.start_symbol, cached.mapping_type, cached.add_pos, cached.front_load, type_a);
+      if (mask > 0) timing_mask = mask;
+    }
+  }
+  nr_pusch_ul_disc_grid_t grid = {.fft = symsz, .n_rb_carrier = fp->N_RB_UL, .first_carrier = fp->first_carrier_offset,
+                                  .rb_start = g.bwp_start + g.start_rb, .rb_count = g.num_rb, .symbols_per_slot = sps, .slot = slot,
+                                  .start_symbol = g.start_symbol, .num_symbols = g.num_symbols, .normal_cp = fp->Ncp == NR_NORMAL, .n_rx = nant};
+  for (int a = 0; a < nant; ++a) grid.rx[a] = &gbuf[(size_t)a * sps * symsz];
+  int prior[16];
+  const int nprior = ul_disc_priors(&g, fp, cfg, &cached, prior, 16);
+  int ta = j->ta_offset;
+  bool found = false;
+  if (timing_disc && timing_mask) {
+    bool tracked = false;
+    const int seed = nr_pusch_ul_disc_timing_seed(g.rnti, j->ta_offset, (long)j->abs_slot, &tracked);
+    const int first_sym = __builtin_ctz((unsigned)timing_mask);
+    if (first_sym >= g.start_symbol && first_sym < g.start_symbol + g.num_symbols) {
+      const int radius = tracked ? 256 : 2048, coarse_step = tracked ? 64 : 128;
+      int best_advance = seed, best_pairs = 0;
+      double best_score = -1;
+      for (int phase = 0; phase < 2; ++phase) {
+        const int center = phase ? best_advance : seed, span = phase ? coarse_step : radius, step = phase ? 16 : coarse_step;
+        for (int delta = -span; delta <= span; delta += step) {
+          const int advance = center + delta;
+          if (advance - j->ta_offset < -2048 || advance - j->ta_offset > 2048) continue;
+          if (!bg_fep(fp, &sn, nant, gbuf, slot, first_sym, advance, j->fo_hz)) continue; /* outside the window: not a candidate */
+          for (int i = 0; i < nprior; ++i) {
+            int pairs = 0;
+            const double score = nr_pusch_ul_disc_delay_score(&grid, (uint16_t)(1u << first_sym), timing_type, timing_nscid, prior[i], &pairs);
+            if (score > best_score) { best_score = score; best_pairs = pairs; best_advance = advance; }
+          }
+        }
+      }
+      double fa;
+      if (best_score >= 0.35 && nr_pusch_ul_disc_accept(best_score, best_pairs, &fa)) {
+        ta = best_advance;
+        found = true;
+        nr_pusch_ul_disc_timing_update(g.rnti, j->ta_offset, best_advance, best_score, (long)j->abs_slot);
+      }
+    }
+  }
+  const int s1 = g.start_symbol + g.num_symbols < sps ? g.start_symbol + g.num_symbols : sps;
+  for (int sym = g.start_symbol; sym < s1; sym++)
+    if (!bg_fep(fp, &sn, nant, gbuf, slot, sym, ta, j->fo_hz)) return 1;
+  if (dmrs_disc) {
+    const nr_pusch_ul_disc_result_t result = nr_pusch_ul_disc_search_sweep(&grid, g.rnti, type_a, prior, nprior, g.dmrs_config_type, g.nscid, g.antenna_ports_field, 0, 1024);
+    if (result.accepted && passive_ul_apply_dmrs_disc(&g, &result)) found = true;
+  }
+  if (found) {
+    ul_hyp_store(&g, ta, j->epoch, j->abs_slot, 0);
+    uint64_t h, m, st, p;
+    nr_gpu_pass_ul_cache_counts(&h, &m, &st, &p);
+    if (p % 20 == 1) LOG_I(PHY, "SENSING: UL_BGDISC_CACHE rnti=0x%04x ta=%d id=%d cache put=%lu hit=%lu miss=%lu stale=%lu\n", g.rnti, ta, g.ul_dmrs_scrambling_id,
+                           (unsigned long)p, (unsigned long)h, (unsigned long)m, (unsigned long)st);
+  }
+  return 0;
 }
 
 /* ---- Gap item 2 (PUSCH TDRA type B): the DM-RS ENERGY oracle's live half ---------------------
@@ -1713,6 +1856,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       (getenv("ISAC_UL_DMRS_DISC") && !strcmp(getenv("ISAC_UL_DMRS_DISC"), "1")));
   nr_pdcch_blind_ul_result_t discovery_grant;
   const bool ul_pass_env = nr_gpu_pass_ul_active();
+  const bool bg_on = nr_ul_bgdisc_enabled() && (timing_disc || dmrs_disc); /* ISAC_UL_BGDISC=1: the search never runs on this thread */
+  bool bg_hit = false;
   if (timing_disc || dmrs_disc || ul_pass_env) {
     discovery_grant = *g;
     g = &discovery_grant;
@@ -1968,6 +2113,26 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
 
   if (ul_pass) {
     /* the pass transformed the grant's symbols into the gNB grid already */
+  } else if (bg_on && !gapped && !fdra_unresolved && !ul_shadow_state && g->num_rb >= 6 && nant <= 4) {
+    /* the cached hypothesis if there is one; else the grant's default hypothesis now, and the worker searches for the next grants of this RNTI */
+    ul_hyp_t hy;
+    if (g_snapshot[ctx].valid && nr_gpu_pass_ul_hyp_lookup(g->rnti, nr_cfg_epoch_dedicated_current(), (int64_t)abs_slot, &hy) && hy.have_dmrs &&
+        hy.start_symbol == g->start_symbol && hy.num_symbols == g->num_symbols && hy.tp == (uint8_t)g->transform_precoding) {
+      bg_hit = true;
+      ul_hyp_nok = hy.n_ok;
+      ul_hyp_apply(&discovery_grant, &hy);
+      ul_sample_offset = hy.ta;
+      out->ta_applied_samples = hy.ta;
+    } else if (!t_solver_probe && !g->transform_precoding) { /* the worker's CP-OFDM pilot search does not apply to DFT-s-OFDM */
+      nr_ul_bgdisc_job_t job;
+      memset(&job, 0, sizeof(job));
+      job.rnti = g->rnti; job.slot = (uint8_t)slot; job.nant = (uint8_t)nant; job.flags = (uint8_t)((timing_disc ? 1 : 0) | (dmrs_disc ? 2 : 0));
+      job.epoch = nr_cfg_epoch_dedicated_current(); job.abs_slot = (int64_t)abs_slot; job.ta_offset = ta_offset_samples; job.fo_hz = fo_hz;
+      job.origin = g_snapshot[ctx].origin; job.length = g_snapshot[ctx].length; job.grant = *g;
+      for (int a = 0; a < nant; a++) job.iq[a] = g_snapshot[ctx].iq[a];
+      if (g_snapshot[ctx].valid) nr_ul_bgdisc_submit(&job);
+    }
+    PASSIVE_UL_FEP(ul_sample_offset, 0);
   } else if ((timing_disc || dmrs_disc) && !gapped && !fdra_unresolved && !g->transform_precoding && !ul_shadow_state &&
       g->num_rb >= 6 && nant <= 4) {
     nr_pusch_ul_disc_epoch(nr_cfg_epoch_dedicated_current());
@@ -1993,24 +2158,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       .start_symbol=g->start_symbol, .num_symbols=g->num_symbols,
       .normal_cp=fp->Ncp == NR_NORMAL, .n_rx=nant};
     for (int a = 0; a < nant; ++a) grid.rx[a] = &gnb->common_vars.rxdataF[a][slot_off];
-    int prior[8], nprior = 0;
-#define UL_ADD_PRIOR(id_) do { int v_=(id_); if (v_ >= 0 && v_ <= 65535) { \
-      bool seen_=false; for (int j_=0;j_<nprior;j_++) seen_ |= prior[j_]==v_; \
-      if (!seen_ && nprior < 8) prior[nprior++]=v_; } } while (0)
-    UL_ADD_PRIOR(fp->Nid_cell);
-    UL_ADD_PRIOR(g->ul_dmrs_scrambling_id);
-    if (cached.accepted) UL_ADD_PRIOR(cached.id);
-    nr_ue_ctx_t ue_ctx;
-    if (nr_ue_ctx_try_get(g->rnti, &ue_ctx)) {
-      if (ue_ctx.cfg[NR_UEP_PDSCH_SCR_ID].source != NR_UES_UNKNOWN)
-        UL_ADD_PRIOR(ue_ctx.cfg[NR_UEP_PDSCH_SCR_ID].value);
-      if (ue_ctx.cfg[NR_UEP_PDCCH_SCR_ID].source != NR_UES_UNKNOWN)
-        UL_ADD_PRIOR(ue_ctx.cfg[NR_UEP_PDCCH_SCR_ID].value);
-    }
-    if (cfg) UL_ADD_PRIOR(cfg->coreset_pdcch_dmrs_scrambling_id);
-    UL_ADD_PRIOR(nr_dmrs_id_2stage_decided(nr_pdsch_passive_dl_dmrs_id(0)));
-    UL_ADD_PRIOR(nr_dmrs_id_2stage_decided(nr_pdsch_passive_dl_dmrs_id(1)));
-#undef UL_ADD_PRIOR
+    int prior[16];
+    const int nprior = ul_disc_priors(g, fp, cfg, &cached, prior, 8);
     if (timing_disc && timing_mask) {
       bool tracked = false;
       const int seed = nr_pusch_ul_disc_timing_seed(g->rnti, ta_offset_samples, (long)abs_slot, &tracked);
@@ -2876,7 +3025,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   if (hp_crc_failed(ulsch)) {
     atomic_fetch_add_explicit(&g_seg_fail, 1, memory_order_relaxed);
     if (!t_solver_probe && !fdra_unresolved) nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, false);
-    if (ul_pass == 2) {
+    if (ul_pass == 2 || bg_hit) {
       /* the hypothesis of the cache failed this grant: after three in a row the entry is dropped and the old path searches again */
       ul_hyp_cache_note_fail(g->rnti, 3);
     } else if (ul_pass_env && ul_seed_on() && !t_solver_probe && !cfr_only && !gapped && !fdra_unresolved && !g->transform_precoding && nr_cfg_epoch_work_current()) {
@@ -2914,7 +3063,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
 
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
-  if (ul_pass_env && !t_solver_probe && !cfr_only && !gapped && !fdra_unresolved && nr_cfg_epoch_work_current() && !g->transform_precoding)
+  if ((ul_pass_env || bg_on) && !t_solver_probe && !cfr_only && !gapped && !fdra_unresolved && nr_cfg_epoch_work_current() && (!g->transform_precoding || bg_on))
     ul_hyp_store(g, nr_sense_ul_ta_refined(out->ta_applied_samples, pvp->delay.est_delay), nr_cfg_epoch_dedicated_current(), (int64_t)abs_slot, ul_hyp_nok + 1);
   if (!t_solver_probe) atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
   // Reserved-MCS retransmission record (G5 review, gap-harq): only a CRC-verified, non-all-zero TB
