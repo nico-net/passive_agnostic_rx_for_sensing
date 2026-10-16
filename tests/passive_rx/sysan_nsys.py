@@ -90,7 +90,39 @@ def main():
         json.dump(out, open(sys.argv[sys.argv.index('--json') + 1], 'w'), indent=1)
 
 
+def stalls(db_path, gap_ms=50.0, consumer_prefixes=('passivePdsch', 'passivePdcch', 'passivePusch')):
+    """Consumer kernels whose launch->start delay is >= gap_ms and is NOT explained by an earlier kernel on the same stream:
+    the GPU (or the driver) was held by someone else. Returns the kernels running at launch time and the long CUDA API calls
+    of any thread overlapping the wait."""
+    c = sqlite3.connect(db_path)
+    s = dict(c.execute('SELECT id, value FROM StringIds'))
+    tname = {t: s.get(n, '') for t, n in c.execute('SELECT globalTid, nameId FROM ThreadNames')}
+    launches = c.execute('SELECT r.start, r.globalTid, k.start, k.end, k.shortName, k.streamId FROM CUPTI_ACTIVITY_KIND_RUNTIME r '
+                         'JOIN CUPTI_ACTIVITY_KIND_KERNEL k ON k.correlationId = r.correlationId').fetchall()
+    kernels = c.execute('SELECT start, end, shortName, streamId FROM CUPTI_ACTIVITY_KIND_KERNEL').fetchall()
+    api = c.execute('SELECT start, end, globalTid, nameId FROM CUPTI_ACTIVITY_KIND_RUNTIME').fetchall()
+    c.close()
+    gap = gap_ms * 1e6
+    out = []
+    for r0, tid, k0, k1, kn, st in launches:
+        th = tname.get(tid, '')
+        if not th.startswith(consumer_prefixes) or (k0 - r0) < gap:
+            continue
+        own = [b for a, b, n, sid in kernels if sid == st and a < k0 and b > r0]
+        if own and max(own) >= k0 - gap:   # it waited for its own stream
+            continue
+        running = sorted({s.get(n, str(n)) for a, b, n, sid in kernels if a <= r0 < b and sid != st})
+        blocking = [(tname.get(t, str(t)), s.get(n, str(n)), (b - a) / 1e6) for a, b, t, n in api
+                    if t != tid and a < k0 and b > r0 and (b - a) >= gap / 10]
+        out.append({'start_ns': r0, 'dur_ms': (k0 - r0) / 1e6, 'thread': th, 'kernel': s.get(kn, str(kn)),
+                    'running_kernels': running, 'blocking_api': blocking})
+    return out
+
+
 if __name__ == '__main__' and '--bursts' not in sys.argv:
+    if '--stalls' in sys.argv:
+        g = float(sys.argv[sys.argv.index('--gap-ms') + 1]) if '--gap-ms' in sys.argv else 50.0
+        print(json.dumps(stalls(sys.argv[1], g), indent=1)); sys.exit(0)
     main()
 
 
