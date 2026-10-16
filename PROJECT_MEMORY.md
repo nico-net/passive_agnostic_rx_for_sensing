@@ -4479,6 +4479,19 @@ Replay label: `[MEASURED, DGX replay <cap>]` = air-like replay, not OTA. Cells n
 - UL blocked: V unknown per-UE data scrambling ID, T low SNR, BWP look-alike lock. [MEASURED/INFERRED per ULCAUSE-20261016] (`699b2593db`)
 
 **Phase 1 decisions** (orchestrator, 2026-10-16 night): T6 heavy lane dropped (GPU pipeline replaces CPU queueing); T5, T7 (worktree `rr-csd-int16t7`, branch `csd/int16-t7`), T8 dispatched.
+
+### 2026-10-17 night: combined DL setup t26bE frozen (LOW LOAD, provisional)
+
+Binary `csd/int16` at `cc747a25f6` (Fix A + Fix B merged, Fix B NOT enabled). Runner `rr-orchestration/ota/run_k_20261017.sh`. Report `docs/superpowers/reports/csd/COMBINED-OTA-20261017.md` (`108faf65b1`). Runs 00:50-01:35 CEST, 150 s, interleaved, n=3 per arm per cell, all 12 synced.
+- **t26bE** = t26aXE + `ISAC_PDSCH_TDA_FIELD=1` + `ISAC_GPU_LDPC_NC_MIN_CB=4` + `ISAC_RA_TDRA_SWEEP=1` + `CUDA_DEVICE_MAX_CONNECTIONS=32`; `ISAC_CSIRS_FULL_VALID` unset. Night default only.
+- On air, per cell [MEASURED, DGX OTA 2026-10-17 night LOW LOAD, cell, arm, n=3]: T crc_q X 80.8-94.0 vs B 84.6-91.4 (overlap, no claim), p99 median X 4.1 vs B 4.3 ms, drops X 0.3 vs B 0.0 %; V B crc_q 95.0-96.1, p99 3.1-8.9 ms, drops <= 0.1 %; V arms NOT load-matched (VX2/VX3 388-390 grants).
+- Fix A `ISAC_PDSCH_TDA_FIELD` (merged `777a0857dd`; `53ca1684c1`, `e33f6fe68f`): DCI 1_1 TDRA field was ignored (V 1 bit at 16, TIM 2 bits at 16-17) [MEASURED, DGX replay, n=1]. On air TIM special slot 0 -> 32-40 % of all grants; V async rescues 929 (VX1) -> 9-16 per run [MEASURED OTA].
+- Fix B `ISAC_CSIRS_FULL_VALID` (merged `cc747a25f6`; `c1f22163a6`): EXCLUDED, replay p99 x3 (b 4.3 -> 14.9, tim 2.6 -> 12.6 ms) [MEASURED, replay, n=1]; partial gain TIM 40/8 dead slots 0 -> ~55 % [replay, n=2]; 40/18 and {16,17} unchanged.
+- LDPC tiny-CB padding `eb65a0d06d`: DL param fallbacks 0 (was 30 V / 182 T) [replay, n=1]. T5 reason codes `7f460c305b`.
+- T7 (rnti,slot) predictor (`0b001f9ddb`, `csd/int16-t7`, not merged): superseded by Fix A.
+- P-FUSE (`csd/int16-fuse`, not merged): stopped at the bench gate, FP32 chest+demod p99 236-599 us at 273 PRB x 4 L [MEASURED, DGX bench GB10, n=200].
+- Latency split [MEASURED, DGX replay b, t26bE, n=1]: PDCCH scan p50 0.52 / p99 4.2 ms + decode body p50 0.5 / p99 2.6 ms; ~1.15 extra GPU decodes (probes + retries) per real grant. Latency FAILS on air.
+- Daytime retest 2026-10-17 morning, n >= 3, interleaved vs t26aXE: required before t26bE becomes the default.
 ---
 
 ## 26. Working rules for any agent on this project (carried over from the old setup)
