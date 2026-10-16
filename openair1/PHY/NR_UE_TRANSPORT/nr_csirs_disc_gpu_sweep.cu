@@ -9,6 +9,7 @@
 #include <cstring>
 #include <vector>
 #include <mutex>
+#include <climits>
 
 namespace {
 /* Word-wise recurrence from PHY/gold.h; skip Nc=1600. The frozen idsweep
@@ -48,11 +49,11 @@ __device__ float warp_sum(float x)
  *   Launched by run() and by nr_csirs_disc_gpu_sweep_prepare().
  */
 __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int *slot,
-                      int ants, int spf, nr_csirs_disc_sweep_cfg_t cfg, float *scores)
+                      int ants, int spf, nr_csirs_disc_sweep_cfg_t cfg, float *scores, int cand0 = 0, int nctot = 0)
 {
   __shared__ uint32_t gold[14][words_max];
   __shared__ float sums[4];
-  int candidate = blockIdx.x;
+  int candidate = cand0 + blockIdx.x; /* CSIRS_DISC_CHUNK: a chunk launch covers candidates [cand0, cand0+gridDim.x) of nctot */
   int id = cfg.id_first + candidate / cfg.delta_max;
   int delta = candidate % cfg.delta_max;
   int l = threadIdx.x;
@@ -105,7 +106,7 @@ __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int
     sums[warp] = total;
   __syncthreads();
   if (threadIdx.x == 0)
-    scores[(size_t)blockIdx.y * gridDim.x + candidate] = (sums[0]+sums[1]+sums[2]+sums[3]) / (map.ports*ants);
+    scores[(size_t)blockIdx.y * (nctot ? nctot : gridDim.x) + candidate] = (sums[0]+sums[1]+sums[2]+sums[3]) / (map.ports*ants);
 }
 
 /* Average occasions before computing the candidate distribution. */
@@ -205,6 +206,46 @@ template<typename T> struct Device {
     return true;
   }
 };
+/* STALLTRACE ISAC_CSIRS_DISC_CHUNK_US=<us> (default off = one launch per kernel, as before): the long background kernels (the sweep grid, the
+ * single-thread refine_kernel) are cut into host-side chunk launches of about that many us each, queued back to back on the same stream with
+ * no wait between them, so the SM partition and the stream's queue turn over every chunk. Every chunk runs the same per-block / per-unit code
+ * in the same order, so the result is bit-identical (pinned by CsirsDiscSweep.GpuChunkedBitExact). The chunk size comes from the measured
+ * time per unit of the previous job of the same kind (events around the launches; the first job uses 1-unit chunks). ISAC_CSIRS_DISC_CHUNK_UNITS=<n>
+ * (diagnostic / test) fixes the units per chunk instead. Units: sweep = (candidate, slot) block; refine = (slot, antenna[, port]). */
+struct RefineAcc {double a[NR_CSIRS_DISC_MAX_RB],b[NR_CSIRS_DISC_MAX_RB];}; /* refine accumulators carried across chunks (evidence; or signal and weight) */
+struct Pace {
+  double us_per_unit=0;cudaEvent_t a=nullptr,b=nullptr;long pending=0;
+};
+static long chunk_units(const Pace &p)
+{
+  const char *e=getenv("ISAC_CSIRS_DISC_CHUNK_UNITS");
+  if(e && atol(e)>0) return atol(e);
+  e=getenv("ISAC_CSIRS_DISC_CHUNK_US");
+  const double us=e?atof(e):0;
+  if(us<=0) return LONG_MAX;
+  return p.us_per_unit>0?std::max(1L,(long)(us/p.us_per_unit)):1L;
+}
+static void pace_start(Pace &p,cudaStream_t s)
+{
+  const char *e=getenv("ISAC_CSIRS_DISC_CHUNK_US");
+  if(!e || atof(e)<=0) return;
+  if(!p.a && (cudaEventCreate(&p.a)!=cudaSuccess || cudaEventCreate(&p.b)!=cudaSuccess)) {p.a=nullptr;return;}
+  cudaEventRecord(p.a,s);
+}
+static void pace_stop(Pace &p,cudaStream_t s,long units)
+{
+  if(!p.a || units<=0) return;
+  if(cudaEventRecord(p.b,s)==cudaSuccess) p.pending=units;
+}
+/* pace_learn: after the job's wait (the stop event is then complete) */
+static void pace_learn(Pace &p)
+{
+  float ms;
+  if(!p.pending) return;
+  if(cudaEventSynchronize(p.b)==cudaSuccess && cudaEventElapsedTime(&ms,p.a,p.b)==cudaSuccess)
+    p.us_per_unit=std::max(ms*1000.0/p.pending,0.7*p.us_per_unit);
+  p.pending=0;
+}
 struct Workspace {
   cudaStream_t stream=nullptr,stream_hi=nullptr,stream_lo=nullptr; // stream = the one of the current job (ISAC_GPU_DISC_SMS_LOW)
   cudaEvent_t done=nullptr;
@@ -220,6 +261,8 @@ struct Workspace {
   std::vector<int> slots,indices;
   std::vector<float> mean;
   nr_csirs_disc_evidence_t evidence={};
+  Device<RefineAcc> acc;
+  Pace sweep_pace,refine_pace;
   int rb=0,ant=0,capacity=0;
 } workspace;
 static std::mutex workspace_mutex;
@@ -251,7 +294,7 @@ static int prepare(int rb,int ant,int capacity)
   if(!w.dm.alloc(maps) || !w.dx.alloc(packed) || !w.grid.alloc((size_t)capacity*ant*14*12*rb)
      || !w.ds.alloc(capacity) || !w.di.alloc(capacity) || !w.dz.alloc((size_t)1024*160*capacity)
      || !w.dmean.alloc(1024*160) || !w.dw.alloc(1) || !w.meta.alloc(capacity)
-     || !w.energy.alloc(5) || !w.refined.alloc(1) || !w.result.alloc(1)) return -1;
+     || !w.energy.alloc(5) || !w.acc.alloc(1) || !w.refined.alloc(1) || !w.result.alloc(1)) return -1;
   w.mapping.resize(maps);w.slots.reserve(capacity);w.indices.reserve(capacity);w.mean.resize(1024*160);
   w.rb=rb;w.ant=ant;w.capacity=capacity;return 0;
 }
@@ -361,7 +404,14 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
     gather<<<(packed+255)/256,256,0,stream>>>(grid,r->slot_stride/2,dm.p,map.n_re,w.di.p,slots.size(),r->n_ant,r->n_rb,dx.p);
     auto device_map = map;
     device_map.re = dm.p;
-    sweep<<<dim3(nc, slots.size()), 128, 0, stream>>>(device_map, dx.p, ds.p, r->n_ant, r->slots_per_frame, c, dz.p);
+    pace_start(w.sweep_pace,stream);
+    {
+      const long ns=(long)slots.size(),per=std::max(1L,std::min((long)nc,chunk_units(w.sweep_pace)/ns)); /* candidates per chunk launch */
+      if(per>=nc) sweep<<<dim3(nc, slots.size()), 128, 0, stream>>>(device_map, dx.p, ds.p, r->n_ant, r->slots_per_frame, c, dz.p);
+      else for(int c0=0;c0<nc;c0+=per)
+        sweep<<<dim3(std::min((long)nc-c0,per), slots.size()), 128, 0, stream>>>(device_map, dx.p, ds.p, r->n_ant, r->slots_per_frame, c, dz.p, c0, nc);
+      pace_stop(w.sweep_pace,stream,(long)nc*ns);
+    }
     if (cudaGetLastError() != cudaSuccess) return -1;
     int previous=nr_csirs_disc_evidence_previous(entry,slots.size());
     if (entry) average_scores<true><<<(nc + 255) / 256, 256, 0, stream>>>(dz.p, nc, slots.size(), dmean.p, history, previous);
@@ -372,6 +422,7 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
         || cudaMemcpyAsync(out + h, dw.p, sizeof(*out), cudaMemcpyDeviceToHost, stream) != cudaSuccess
         || complete() != cudaSuccess)
       return -1;
+    pace_learn(w.sweep_pace);
     if (entry) {
       for (int i:indices) entry->last_slot=std::max(entry->last_slot,r->meta[i].abs_slot);
       entry->count=slots.size()+previous;
@@ -384,11 +435,18 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
  *   Returns 0 and updates h->rb_start and h->n_rb, or -1 when no span is found. Called from refine_kernel() (through nr_csirs_disc_refine_cpu).
  */
 __device__ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc_hyp_t *h,
-                         const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map)
+                         const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map,
+                         RefineAcc *acc, long u0, long u1, bool fin)
 {
-  double evidence[NR_CSIRS_DISC_MAX_RB]={0};
+  /* CSIRS_DISC_CHUNK: this call does the units [u0,u1) of (valid slot, antenna, port) in the original order; the evidence sums live in acc
+   * between calls; fin (the last chunk) also does the tail. u0 = 0, u1 = LONG_MAX, fin = true is the whole job in one call. */
+  double *evidence=acc->a;
+  if(u0==0) for(int i=0;i<NR_CSIRS_DISC_MAX_RB;++i) evidence[i]=0;
   uint32_t gold[14][64];
+  long unit=0;
   for(int s=0;s<r->capacity;++s) if(r->meta[s].valid && r->meta[s].abs_slot%h->period==h->offset) {
+    const long first=unit;unit+=(long)r->n_ant*map.ports;
+    if(unit<=u0 || first>=u1) continue;
     for(int l=0;l<14;++l) if(map.sym_mask&(1u<<l)) {
       uint64_t t=14*((r->meta[s].slot+win->slot_delta)%r->slots_per_frame)+l+1;
       uint32_t init=((t*(2*win->scramb_id+1)<<10)+win->scramb_id)&0x7fffffff;
@@ -396,6 +454,8 @@ __device__ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc
       for(int w=0;w<map.words;++w) gold[l][w]=generator.next();
     }
     for(int a=0;a<r->n_ant;++a) for(int p=0;p<map.ports;++p) {
+      const long ua=first+(long)a*map.ports+p;
+      if(ua<u0 || ua>=u1) continue;
       double cr[NR_CSIRS_DISC_MAX_RB]={0},ci[NR_CSIRS_DISC_MAX_RB]={0};
       int count[NR_CSIRS_DISC_MAX_RB]={0};
       const int16_t *rx=(r->grid_base+(size_t)s*r->slot_stride+(size_t)a*14*24*r->n_rb);
@@ -421,6 +481,7 @@ __device__ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc
       }
     }
   }
+  if(!fin) return 0;
   int step=h->density<2?2:1,first=h->density<2?h->density:0;
   double run=0,best=0;int start=first,bs=0,be=-1;
   for(int rb=first;rb<r->n_rb;rb+=step) {
@@ -435,19 +496,26 @@ __device__ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc
  *   Returns 0 and updates h->rb_start and h->n_rb, or -1 when the evidence is too weak. Called from refine_kernel().
  */
 __device__ static int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *r, nr_csirs_disc_hyp_t *h,
-                           const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map)
+                           const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map,
+                           RefineAcc *acc, long u0, long u1, bool fin)
 {
-  if (h->row != 1) return refine_extent(r,h,win,map);
-  double signal[NR_CSIRS_DISC_MAX_RB]={0}, weight[NR_CSIRS_DISC_MAX_RB]={0};
+  if (h->row != 1) return refine_extent(r,h,win,map,acc,u0,u1,fin);
+  /* CSIRS_DISC_CHUNK: units [u0,u1) of (valid slot, antenna); signal / weight are carried in acc (see refine_extent) */
+  double *signal=acc->a,*weight=acc->b;
+  if(u0==0) for(int i=0;i<NR_CSIRS_DISC_MAX_RB;++i) signal[i]=weight[i]=0;
   uint32_t gold[64];
   int slots=0;
+  long unit=0;
   for(int s=0;s<r->capacity;++s) if(r->meta[s].valid && r->meta[s].abs_slot%h->period==h->offset) {
     ++slots;
+    const long first=unit;unit+=r->n_ant;
+    if(unit<=u0 || first>=u1) continue;
     uint64_t t=14*((r->meta[s].slot+win->slot_delta)%r->slots_per_frame)+h->symb_l0+1;
     uint32_t init=((t*(2*win->scramb_id+1)<<10)+win->scramb_id)&0x7fffffff;
     Gold generator;generator.reset(init);
     for(int w=0;w<map.words;++w) gold[w]=generator.next();
     for(int a=0;a<r->n_ant;++a) for(int rb=0;rb<r->n_rb;++rb) {
+      if(first+a<u0 || first+a>=u1) continue;
       const int16_t *rx=(r->grid_base+(size_t)s*r->slot_stride+(size_t)a*14*24*r->n_rb);
       double ar=0,ai=0,energy=0;
       for(int i=3*rb;i<3*rb+3;++i) {
@@ -462,6 +530,7 @@ __device__ static int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *r, nr
       weight[rb]+=energy;
     }
   }
+  if(!fin) return 0;
   /* TS 38.214 5.2.2.3.1: configured startingRB/nrofRBs are multiples
    * of four. Maximize measured support over that legal grid; no width prior.
    * A capture boundary may clip the final group. */
@@ -479,9 +548,26 @@ __device__ static int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *r, nr
 
 /* refine_kernel: GPU kernel (one thread): runs the device refinement (nr_csirs_disc_refine_cpu) on the ring and stores the refined hypothesis and the result code. */
 __global__ void refine_kernel(nr_csirs_disc_ring_t ring,nr_csirs_disc_hyp_t h,nr_csirs_disc_win_t win,
-                             nr_csirs_disc_sweep_map_t map,nr_csirs_disc_hyp_t *out,int *result)
+                             nr_csirs_disc_sweep_map_t map,nr_csirs_disc_hyp_t *out,int *result,
+                             RefineAcc *acc,long u0,long u1,bool fin)
 {
-  *result=nr_csirs_disc_refine_cpu(&ring,&h,&win,map);*out=h;
+  const int rc=nr_csirs_disc_refine_cpu(&ring,&h,&win,map,acc,u0,u1,fin);
+  if(fin) {*result=rc;*out=h;}
+}
+/* refine_launch: host side: the whole refinement as one launch, or (ISAC_CSIRS_DISC_CHUNK_US / _UNITS) as chunk launches queued back to back on the
+ * stream. units = valid slots x antennas (x ports unless row 1), counted exactly as the kernel counts them. */
+static void refine_launch(const nr_csirs_disc_ring_t &ring,const nr_csirs_disc_slot_meta_t *host_meta,const nr_csirs_disc_hyp_t &h,
+                          const nr_csirs_disc_win_t &win,const nr_csirs_disc_sweep_map_t &map,cudaStream_t s)
+{
+  auto &w=workspace;
+  long valid=0;
+  for(int i=0;i<ring.capacity;++i) if(host_meta[i].valid && host_meta[i].abs_slot%h.period==h.offset) ++valid;
+  const long total=valid*ring.n_ant*(h.row==1?1:map.ports),per=chunk_units(w.refine_pace);
+  pace_start(w.refine_pace,s);
+  if(per>=total) refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,0,LONG_MAX,true);
+  else for(long u=0;u<total;u+=per)
+    refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,u,std::min(u+per,total),u+per>=total);
+  pace_stop(w.refine_pace,s,total);
 }
 
 /* energy_score: device energy statistic of one symbol: returns the energy ratio of the occupied REs against the weakest or the mean of the unoccupied subcarrier classes (EPR when epr is set).
@@ -571,7 +657,7 @@ extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
     nr_csirs_disc_ring_t ring={};ring.n_ant=ant;ring.n_rb=rb;ring.capacity=1;ring.slots_per_frame=20;
     ring.slot_stride=(size_t)ant*14*24*rb;ring.grid_base=(int16_t *)w.grid.p;ring.meta=w.meta.p;
     nr_csirs_disc_hyp_t h={};h.row=1;h.period=4;nr_csirs_disc_win_t win={};
-    refine_kernel<<<1,1,0,w.stream>>>(ring,h,win,map,w.refined.p,w.result.p);
+    refine_kernel<<<1,1,0,w.stream>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,0,LONG_MAX,true);
     energies<<<1,1,0,w.stream>>>(w.grid.p,rb,h,map,w.energy.p);
     return cudaGetLastError()==cudaSuccess && complete()==cudaSuccess?0:-1;
   } catch(...) {return -1;}
@@ -593,10 +679,11 @@ extern "C" int nr_csirs_disc_gpu_refine_entry(const nr_csirs_disc_ring_t *r,nr_c
     if(copy(w.dm.p,map.re,map.n_re*sizeof(*map.re),cudaMemcpyHostToDevice)!=cudaSuccess
        || copy(w.meta.p,r->meta,r->capacity*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
     map.re=w.dm.p;auto ring=*r;ring.grid_base=(int16_t *)grid;ring.meta=w.meta.p;
-    refine_kernel<<<1,1,0,workspace.stream>>>(ring,*h,*win,map,w.refined.p,w.result.p);
+    refine_launch(ring,r->meta,*h,*win,map,workspace.stream);
     int result=-1;
     if(cudaGetLastError()!=cudaSuccess || copy(&result,w.result.p,sizeof(int),cudaMemcpyDeviceToHost)!=cudaSuccess
        || copy(h,w.refined.p,sizeof(*h),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
+    pace_learn(w.refine_pace);
     return result;
   } catch(...) {return -1;}
 }

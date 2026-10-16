@@ -671,6 +671,42 @@ int main(int argc,char **argv)
   return RUN_ALL_TESTS();
 }
 
+/* STALLTRACE: the chunked launches of the sweep grid and of the single-thread refinement (ISAC_CSIRS_DISC_CHUNK_UNITS, same path as
+ * ISAC_CSIRS_DISC_CHUNK_US) give exactly the same bits as the one-launch default. */
+TEST(CsirsDiscSweep, GpuChunkedBitExact)
+{
+#ifdef NR_CSIRS_DISC_TEST_CUDA
+  int count=0;if(cudaGetDeviceCount(&count)!=cudaSuccess || !count) GTEST_SKIP()<<"no CUDA device";
+  void *module=nullptr;Sweep fn=gpu(&module);ASSERT_NE(fn,nullptr)<<dlerror();
+  using Refine=int (*)(const nr_csirs_disc_ring_t *,nr_csirs_disc_hyp_t *,const nr_csirs_disc_win_t *);
+  auto refine=(Refine)dlsym(module,"nr_csirs_disc_gpu_refine_entry");ASSERT_NE(refine,nullptr);
+  unsetenv("ISAC_CSIRS_DISC_CHUNK_US");
+  for(int row:{1,2,4,5,6,8,11,15,16,17,18}) {
+    auto h=hyp(row,4,52);Grid grid(64,4);grid.add(h,415,0);
+    nr_csirs_disc_sweep_cfg_t cfg={0,1024,20,32};
+    nr_csirs_disc_win_t base={},win={};win.scramb_id=415;
+    nr_csirs_disc_hyp_t rbase=h;
+    unsetenv("ISAC_CSIRS_DISC_CHUNK_UNITS");
+    ASSERT_EQ(fn(&grid.r,&h,1,&cfg,&base),1);
+    const int rc=refine(&grid.r,&rbase,&win);
+    for(const char *units:{"1","3","1000"}) {
+      setenv("ISAC_CSIRS_DISC_CHUNK_UNITS",units,1);
+      nr_csirs_disc_win_t g={};nr_csirs_disc_hyp_t rh=h;
+      ASSERT_EQ(fn(&grid.r,&h,1,&cfg,&g),1)<<row<<" units "<<units;
+      EXPECT_EQ(g.scramb_id,base.scramb_id)<<row;EXPECT_EQ(g.slot_delta,base.slot_delta)<<row;EXPECT_EQ(g.n_slots,base.n_slots)<<row;
+      EXPECT_EQ(g.z,base.z)<<row<<" units "<<units;EXPECT_EQ(g.z_second,base.z_second)<<row;
+      EXPECT_EQ(g.noise_count,base.noise_count)<<row;EXPECT_EQ(g.noise_mu,base.noise_mu)<<row;EXPECT_EQ(g.noise_sigma,base.noise_sigma)<<row;
+      ASSERT_EQ(refine(&grid.r,&rh,&win),rc)<<row<<" units "<<units;
+      if(rc==0) {EXPECT_EQ(rh.rb_start,rbase.rb_start)<<row<<" units "<<units;EXPECT_EQ(rh.n_rb,rbase.n_rb)<<row<<" units "<<units;}
+    }
+  }
+  unsetenv("ISAC_CSIRS_DISC_CHUNK_UNITS");
+  dlclose(module);
+#else
+  GTEST_SKIP()<<"CPU build; CUDA comparison available in build_gpu";
+#endif
+}
+
 TEST(CsirsDiscSweep, GpuRefinementAndConfirmation)
 {
 #ifdef NR_CSIRS_DISC_TEST_CUDA

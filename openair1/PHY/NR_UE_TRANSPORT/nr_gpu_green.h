@@ -51,7 +51,7 @@ static inline bool nr_green_low_ok(const unsigned *lo, const unsigned *disc, con
 /* nr_gpu_green_stream: creates *s (non-blocking, given priority) in this translation unit's discovery (rt = false) or
  * real-time (rt = true) green context when the flags above ask for it; returns true on success, false when off or
  * unavailable. The contexts are created once, on first use, and never destroyed. */
-static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, int idx = 0)
+static inline bool nr_gpu_green_stream_impl(cudaStream_t *s, int priority, bool rt, int idx)
 {
 #if CUDART_VERSION >= 12050
   static int state = -1; /* -1 not read, 0 off, 1 on */
@@ -189,6 +189,27 @@ static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, i
   (void)s; (void)priority; (void)rt; (void)idx;
   return false;
 #endif
+}
+/* ISAC_GPU_GREEN_LOG=1 (default off): one stderr line per call that fails (the caller then creates an ordinary stream on all SMs) and, for the first
+ * green stream of each (translation unit, rt, idx < 8), the SM mask it really lands on, so a run shows whether a consumer got its partition and whether
+ * the partitions of different translation units are disjoint (tu = address of a per-TU static: each TU has its own green contexts). */
+static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, int idx = 0)
+{
+  static int logon = -1;
+  static bool seen[2][8];
+  if (logon < 0) { const char *e = getenv("ISAC_GPU_GREEN_LOG"); logon = e && atoi(e) == 1; }
+  const bool ok = nr_gpu_green_stream_impl(s, priority, rt, idx);
+  if (!logon) return ok;
+  if (!ok) {
+    fprintf(stderr, "[GPU green] tu=%p rt=%d idx=%d prio=%d: NOT green (ordinary stream on all SMs)\n", (void *)&seen, (int)rt, idx, priority);
+  } else if (idx >= -1 && idx < 8 && !seen[rt][idx < 0 ? 0 : idx]) {
+    seen[rt][idx < 0 ? 0 : idx] = true;
+    unsigned m[4] = {};
+    const bool g = nr_green_smmask(*s, m);
+    fprintf(stderr, "[GPU green] tu=%p rt=%d idx=%d prio=%d: green stream, SMs=%d mask=%08x%08x%08x%08x\n", (void *)&seen, (int)rt, idx, priority,
+            g ? __builtin_popcount(m[0]) + __builtin_popcount(m[1]) + __builtin_popcount(m[2]) + __builtin_popcount(m[3]) : -1, m[3], m[2], m[1], m[0]);
+  }
+  return ok;
 }
 /* Only the CSI-RS GPU sweep (nr_csirs_disc_gpu_sweep.cu) uses the LOW stream; the other discovery consumers keep their DISC stream. */
 /* Dynamic discovery partition (ISAC_GPU_DISC_SMS_LOW, default off). A discovery consumer creates its normal stream and, through
