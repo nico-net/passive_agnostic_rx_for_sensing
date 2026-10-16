@@ -36,7 +36,7 @@ def curve(paths):
                 continue
             if req is None:
                 continue
-            ts = gm.true_snr_db(snr, gm.TABLES.get(tbl, gm.T64)[mcs][0])
+            ts = gm.true_snr_db(snr, gm.TABLES.get(tbl, gm.T64)[mcs][0]) if acc is dl else snr  # UL snr_db is a DM-RS SNR
             b = 'floor' if ts is None else max(-20, min(20, math.floor(ts - req))); acc[b][0] += 1; acc[b][1] += ok
     return dl, ul
 

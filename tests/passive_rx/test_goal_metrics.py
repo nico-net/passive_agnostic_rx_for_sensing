@@ -84,7 +84,8 @@ class GoalMetricsTest(unittest.TestCase):
                    "[PHY]    SENSING: PUSCHQ2 consumers=2 real[queued=200 full=4] probe[queued=1 decoded=1 full=0]\n"])
         u = gm.parse_run(p)['ul']
         self.assertEqual(u['n_q'], 1)
-        self.assertEqual(u['unqualified_floor'], 1)  # snr_db=-12 is below the QPSK floor: unknown, not 'low'
+        self.assertEqual(u['unqualified_floor'], 0)  # UL snr_db is a DM-RS SNR: no EVM floor inversion
+        self.assertEqual(u['unqualified_low_snr'], 1)
         self.assertAlmostEqual(u['crc_q'], 100.0)
         self.assertEqual(u['tot_p99'], 700)
         self.assertAlmostEqual(u['drops_pct'], 2.0)

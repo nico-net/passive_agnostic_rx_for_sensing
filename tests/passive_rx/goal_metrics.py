@@ -58,12 +58,13 @@ def pct(v, p):
 def empty():
     return {'lat': [], 'crc_all': [0, 0], 'n_q': 0, 'ok_q': 0, 'low': 0, 'retx': 0, 'floor': 0, 'drops': None, 'skipped': 0}
 
-def classify(acc, crc, mcs, tbl, rv, snr, margin):
+def classify(acc, crc, mcs, tbl, rv, snr, margin, evm=True):
+    # evm=False: UL snr_db is a DM-RS SNR, not the DL decision-directed EVM, so it is used as is
     req = required_snr_db(mcs, tbl) if rv == 0 else None
     if req is None:
         acc['retx'] += 1
         return
-    ts = true_snr_db(snr, TABLES.get(tbl, T64)[mcs][0])
+    ts = true_snr_db(snr, TABLES.get(tbl, T64)[mcs][0]) if evm else snr
     if ts is None:
         acc['floor'] += 1
     elif ts >= req + margin:
@@ -102,7 +103,7 @@ def parse_run(path, margin=2.0):
                     continue
                 ok, mcs = int(kv['ok']), int(kv['mcs'])
                 ul['crc_all'][0] += ok; ul['crc_all'][1] += 1
-                classify(ul, ok, mcs, int(kv.get('tbl', 0)), 0, float(kv['snr_db']), margin)
+                classify(ul, ok, mcs, int(kv.get('tbl', 0)), 0, float(kv['snr_db']), margin, evm=False)
             elif 'UL_E2E' in line:
                 ul['lat'].append(int(kv['tot']))
             elif 'PDSCHQ queued=' in line:

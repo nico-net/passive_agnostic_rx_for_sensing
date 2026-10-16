@@ -1,3 +1,46 @@
+# v2 (corrected SNR qualification), 2026-10-16
+
+Tool 74111e8ab3 + orchestrator fix (UL uses raw DM-RS snr_db). Qualified iff true_snr_db(min used-layer snr_l, Qm) >= required + 2 dB, where true_snr_db inverts the decision-directed EVM bias (AWGN table from evm_snr_bias_table.py, +-1.5 dB near the floor) and returns None (= "floor", never qualified) within 1 dB of the floor. Same runs/arms/exclusions as v1 below. Label [MEASURED, DGX OTA 2026-10-16, cell, arm, n runs, corrected rule].
+
+## DL medians (latency and drops unchanged from v1)
+| cell | arm (n) | grants | tot p99 | crc_all % | n_q | crc_q % | floor | low | retx | drops % |
+|---|---|---|---|---|---|---|---|---|---|---|
+| V | X (2) | 41256 | 12296 | 38 | 16906 | 69 | 16795 | 4528 | 3028 | 1.8 |
+| V | S (2) | 40009 | 11954 | 40 | 16494 | 68 | 18078 | 3233 | 2204 | 1.8 |
+| V | B (3) | 33920 | 9964 | 36 | 12422 | 67 | 15311 | 2390 | 2065 | 3.0 |
+| V | Xold (3) | 27274 | 11509 | 41 | 12247 | 67 | 10865 | 1995 | 2084 | 1.8 |
+| V | E (3) | 48471 | 12653 | 41 | 22091 | 74 | 21534 | 4390 | 3014 | 3.3 |
+| T | X (2) | 32299 | 7668 | 60 | 12175 | 92 | 17644 | 1383 | 1098 | 0.3 |
+| T | S (2) | 31704 | 10902 | 50 | 10054 | 80 | 15718 | 4847 | 1086 | 0.5 |
+| T | B (3) | 25841 | 9139 | 52 | 6893 | 91 | 16114 | 1953 | 1493 | 0.7 |
+| T | Xold (3) | 32735 | 8153 | 36 | 5976 | 94 | 18597 | 2369 | 1935 | 0.4 |
+| T | E (3) | 18109 | 10457 | 59 | 7589 | 92 | 8663 | 1101 | 499 | 0.5 |
+Per-run crc_q: V X 72/66, S 69/67, B 64/67/68, Xold 67/64/70, E 76/74/59; T X 95/88, S 94/67, B 92/76/91, Xold 94/92/94, E 92/94/92.
+
+## Corrected DL margin curves (pooled per cell+arm)
+| cell | arm | cross80_db | floor n / CRC | 0 dB | +2 | +5 | +10 | +20 |
+|---|---|---|---|---|---|---|---|---|
+| V | X | None | 33590 / 22 % | 26 % | 45 % | 64 % | 71 % | 74 % |
+| V | S | None | 36156 / 24 % | 29 % | 52 % | 63 % | 70 % | 74 % |
+| V | B | None | 47093 / 26 % | 22 % | 44 % | 61 % | 67 % | 70 % |
+| V | Xold | None | 35860 / 27 % | 21 % | 46 % | 62 % | 66 % | 76 % |
+| V | E | +18 | 71048 / 25 % | 43 % | 63 % | 76 % | 68 % | 77 % |
+| T | X | +8 | 35287 / 46 % | 23 % | 40 % | 73 % | 91 % | 100 % |
+| T | S | +6 | 31435 / 40 % | 10 % | 20 % | 78 % | 95 % | 100 % |
+| T | B | +6 | 41785 / 43 % | 36 % | 55 % | 74 % | 91 % | 100 % |
+| T | Xold | +4 | 57193 / 24 % | 58 % | 72 % | 89 % | 95 % | 100 % |
+| T | E | +4 | 22073 / 45 % | 31 % | 52 % | 82 % | 91 % | 100 % |
+
+## Reading
+- T passes the CRC criterion (91-94 % in 4 of 5 arms; S median 80 with runs 94/67); T fails latency only. 80 % is reached 4-8 dB above the Shannon + 1.5 dB model.
+- V: the ~70-75 % ceiling remains after correction (cross80 None in 4/5 arms): a real receiver error (DLCRC-ROOTCAUSE section 4, TDRA ambiguity, INFERRED).
+- Up to 46 % of grants sit on the estimator floor (CRC 22-46 %): their SNR is unknown from this estimator; a DM-RS-based SNR would qualify them.
+- UL: CRC ~0 everywhere (1-15 OK per arm of 105k-252k grants), so UL G2 is blocked by ULCAUSE, independent of the qualification rule.
+
+---
+
+# v1 (original rule; superseded for CRC, kept for latency/drops/UL)
+
 # Baseline scorecard and CRC-vs-SNR-margin calibration (Phase 0 Task 2), 2026-10-16
 
 Tools: tests/passive_rx/goal_metrics.py (b13671f919), crc_margin_curve.py (eed26b019d). margin = min used-layer SNR - required_snr_db(mcs, tbl) (Shannon gap + 1.5 dB). Latency in us. PASS = tot p99 <= 500 and crc_q >= 80 % and drops < 1 %. V = Vodafone, T = TIM, never pooled. Arms: X = t26aXE all-on, S = spread off, B = scan pinned to A725 cores, Xold = ab_x*aXE*, E = t26aE ab_q*aE*. Excluded ab_aVX3 (stopped ~60 s); ab_aTS2 anomalous (3.7k grants, no UL), not in medians.
