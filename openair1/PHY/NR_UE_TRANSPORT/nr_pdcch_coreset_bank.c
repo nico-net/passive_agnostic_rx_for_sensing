@@ -144,6 +144,8 @@ void nr_pdcch_coreset_bank_note_accept(int index, uint64_t slot)
       e->last_accept_slot = slot;
     if (e->accepts_window != UINT32_MAX)
       ++e->accepts_window;
+    if (e->accepts_total != UINT32_MAX)
+      ++e->accepts_total;
   }
   pthread_mutex_unlock(&g_coreset_bank_lock);
 }

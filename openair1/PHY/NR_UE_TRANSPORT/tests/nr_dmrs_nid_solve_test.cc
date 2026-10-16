@@ -295,3 +295,37 @@ TEST(NidPrimary, SweepRunsOnlyOnDemand)
   // unexplained occupancy wakes it even when verified
   EXPECT_EQ(nr_dmrs_nid_sweep_demand(1, 1, 1, 3000000, 0, 2000000, G, M, R), 1);
 }
+
+TEST(NidPrimary, VerificationNeedsTwoConfirmations)
+{
+  EXPECT_LT(nr_dmrs_nid_confirm_score(0, 0), 2);
+  EXPECT_LT(nr_dmrs_nid_confirm_score(1, 0), 2);  // a single chance hit does not verify
+  EXPECT_EQ(nr_dmrs_nid_confirm_score(1, 1), 2);  // one RNTI already seen elsewhere does
+  EXPECT_EQ(nr_dmrs_nid_confirm_score(2, 0), 2);  // two distinct RNTIs do
+}
+
+TEST(NidPrimary, HintSignatureChangesWithTheFootprintOnly)
+{
+  const uint64_t a = nr_dmrs_nid_hint_sig(1, 62922, 10, 6, 0, 1);
+  EXPECT_EQ(a, nr_dmrs_nid_hint_sig(1, 62922, 10, 6, 0, 1));
+  EXPECT_NE(a, nr_dmrs_nid_hint_sig(1, 62922, 10, 8, 0, 1));  // wider
+  EXPECT_NE(a, nr_dmrs_nid_hint_sig(1, 62922, 4, 6, 0, 1));   // shifted
+  EXPECT_NE(a, nr_dmrs_nid_hint_sig(1, 62922, 10, 6, 1, 1));  // other symbol
+  EXPECT_NE(a, nr_dmrs_nid_hint_sig(1, 9020, 10, 6, 0, 1));   // other id
+}
+
+TEST(NidPrimary, GeometryChangeResetsTheState)
+{
+  nr_dmrs_prim_state_t s = {};
+  EXPECT_EQ(nr_dmrs_prim_cfg(&s, 7, 1000), 0);  // first batch anchors the grace
+  EXPECT_EQ(s.first_us, 1000u);
+  s.verified = 1; s.last_run_us = 5000; s.burst = 3;
+  EXPECT_EQ(nr_dmrs_prim_cfg(&s, 7, 9000), 0);  // same cfg: nothing changes
+  EXPECT_EQ(s.verified, 1);
+  EXPECT_EQ(nr_dmrs_prim_cfg(&s, 8, 20000), 1);  // retune
+  EXPECT_EQ(s.verified, 0);
+  EXPECT_EQ(s.last_run_us, 0u);
+  EXPECT_EQ(s.burst, 0u);
+  EXPECT_EQ(s.first_us, 20000u);  // grace anchored to the retune
+  EXPECT_EQ(nr_dmrs_nid_sweep_demand(0, 0, 0, 21000, s.first_us, 0, 4000000, 2000000, 15000000), 0);
+}

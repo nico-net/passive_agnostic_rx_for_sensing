@@ -70,6 +70,7 @@ typedef struct {
   uint32_t stale_proof_hash;
   uint16_t stale_proof_rnti;
   uint32_t accepts_window;
+  uint32_t accepts_total; /* cumulative CRC-valid DCI accepts on this entry (never reset), for solver-primary confirmation */
   uint32_t verified_epoch;
   uint8_t state;
 } nr_pdcch_discovered_coreset_t;
