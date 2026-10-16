@@ -71,6 +71,19 @@ void ul_hyp_cache_put(uint16_t rnti, const ul_hyp_t *h)
   atomic_fetch_add_explicit(&g_hyp_put, 1, memory_order_relaxed);
 }
 
+int ul_hyp_cache_put_if_new(uint16_t rnti, const ul_hyp_t *h)
+{
+  pthread_mutex_lock(&g_hyp_lock);
+  for (int i = 0; i < UL_HYP_N; i++)
+    if (g_hyp[i].used && g_hyp[i].rnti == rnti && (g_hyp[i].h.n_ok > 0 || g_hyp[i].h.abs_slot >= h->abs_slot)) {
+      pthread_mutex_unlock(&g_hyp_lock); /* a decode refreshed the entry meanwhile: it is newer than the search */
+      return 0;
+    }
+  pthread_mutex_unlock(&g_hyp_lock);
+  ul_hyp_cache_put(rnti, h); /* shortcut: the check and the put are two lock sections; only the worker calls this, a decode landing between them wins on the next refresh */
+  return 1;
+}
+
 void ul_hyp_cache_drop(uint16_t rnti)
 {
   pthread_mutex_lock(&g_hyp_lock);

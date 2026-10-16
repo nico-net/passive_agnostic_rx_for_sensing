@@ -5,10 +5,15 @@
 #include <ctime>
 #include <cstdio>
 #include <random>
+#include <chrono>
+#include <cstring>
+#include <unistd.h>
 #include <vector>
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_pusch_ul_disc.h"
+#include "nr_pusch_ul_bgdisc.h"
+#include "nr_gpu_pass_ul.h"
 #include "nr_pdcch_blind_monitor.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 #include "executables/softmodem-common.h"
@@ -18,6 +23,10 @@ uint32_t *nr_gold_pdsch(int, int, int, int, int, int);
 int nr_pdsch_dmrs_rx(int, const unsigned int *, c16_t *, unsigned short, unsigned char,
                      unsigned short, uint8_t, int16_t);
 configmodule_interface_t *uniqCfg = nullptr;
+/* this test does not link nr_gpu_pass_ul.c: a recording stand-in for the per-RNTI cache the worker feeds */
+static ul_hyp_t g_put_h;
+static int g_puts;
+void ul_hyp_cache_put(uint16_t, const ul_hyp_t *h) { g_put_h = *h; g_puts++; }
 void exit_function(const char *, const char *, int, const char *, int) { std::abort(); }
 softmodem_params_t *get_softmodem_params(void) { static softmodem_params_t p; return &p; }
 }
@@ -188,6 +197,105 @@ TEST(PuschUlDisc, PerUeTimingEmaRejectsOutlier) {
   nr_pusch_ul_disc_epoch(2);
   EXPECT_EQ(nr_pusch_ul_disc_timing_seed(1,1600,13,&tracked),1600);
   EXPECT_FALSE(tracked);
+}
+
+namespace {
+Fixture *g_bg_fix;
+int g_bg_runs;
+int bg_runner(const nr_ul_bgdisc_job_t *j) {
+  ++g_bg_runs;
+  const int priors[]={415,91};
+  if (std::memcmp(j->iq[0], g_bg_fix->data[0].data(), j->length*sizeof(c16_t))) return 1; /* the worker sees the submitted samples */
+  const auto r=nr_pusch_ul_disc_search(&g_bg_fix->grid,j->rnti,0,priors,2,0,0,0);
+  if (!r.accepted) return 1;
+  ul_hyp_t h{};
+  h.ta=j->ta_offset; h.have_dmrs=1; h.dmrs_id=r.id; h.nscid=r.nscid; h.dmrs_type=r.dmrs_type; h.dmrs_mask=r.mask;
+  ul_hyp_cache_put(j->rnti,&h);
+  return 0;
+}
+nr_ul_bgdisc_job_t bg_job(Fixture &f, uint16_t rnti) {
+  nr_ul_bgdisc_job_t j{};
+  j.rnti=rnti; j.nant=4; j.length=fft*symbols; j.ta_offset=1600;
+  for (int a=0;a<4;++a) j.iq[a]=f.data[a].data();
+  return j;
+}
+}
+
+TEST(UlBgDisc, GrantNeverWaitsForSearch) {
+  nr_ul_bgdisc_stop();
+  ASSERT_EQ(nr_ul_bgdisc_start(4,nullptr),0); /* worker stopped */
+  Fixture f(7);
+  double worst=0;
+  for (int i=0;i<100;++i) {
+    auto j=bg_job(f,1000+i);
+    const auto t0=std::chrono::steady_clock::now();
+    nr_ul_bgdisc_submit(&j);
+    worst=std::max(worst,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-t0).count());
+  }
+  nr_ul_bgdisc_stats_t st; nr_ul_bgdisc_stats(&st);
+  EXPECT_EQ(st.nohyp,100u);
+  EXPECT_EQ(st.submitted,4u); /* depth 4: the rest are dropped, none blocks */
+  EXPECT_EQ(st.full,96u);
+  EXPECT_LT(worst,1.0);
+  nr_ul_bgdisc_stop();
+}
+
+TEST(UlBgDisc, WorkerFillsCache) {
+  nr_ul_bgdisc_stop(); nr_pusch_ul_disc_reset();
+  Fixture f(33);
+  const int mask=nr_pdcch_blind_ul_dmrs_mask(14,0,0,2,1,0);
+  f.add(415,1,0,mask,7.5,310);
+  g_bg_fix=&f; g_bg_runs=0; g_puts=0;
+  ASSERT_EQ(nr_ul_bgdisc_start(4,bg_runner),0);
+  auto j=bg_job(f,0x4601);
+  ASSERT_EQ(nr_ul_bgdisc_submit(&j),1);
+  EXPECT_EQ(nr_ul_bgdisc_submit(&j),0); /* same RNTI in flight */
+  for (int i=0;i<200 && g_puts==0;++i) usleep(10000);
+  nr_ul_bgdisc_stop();
+  ASSERT_EQ(g_puts,1);
+  EXPECT_EQ(g_put_h.dmrs_id,415); EXPECT_EQ(g_put_h.nscid,1); EXPECT_EQ(g_put_h.ta,1600);
+}
+
+TEST(UlBgDisc, ExpiredSnapshotDropped) {
+  nr_ul_bgdisc_stop();
+  setenv("ISAC_UL_BGDISC_MAX_AGE_MS","30",1);
+  Fixture f(8);
+  g_bg_fix=&f; g_bg_runs=0;
+  ASSERT_EQ(nr_ul_bgdisc_start(4,nullptr),0);
+  auto j=bg_job(f,5);
+  ASSERT_EQ(nr_ul_bgdisc_submit(&j),1);
+  usleep(80000);
+  ASSERT_EQ(nr_ul_bgdisc_start(4,bg_runner),0);
+  nr_ul_bgdisc_stats_t st{};
+  for (int i=0;i<200 && st.expired==0;++i) { usleep(10000); nr_ul_bgdisc_stats(&st); }
+  nr_ul_bgdisc_stop();
+  unsetenv("ISAC_UL_BGDISC_MAX_AGE_MS");
+  EXPECT_EQ(st.expired,1u);
+  EXPECT_EQ(g_bg_runs,0); /* never ran: the samples were not read */
+}
+
+TEST(UlBgDisc, SweepFindsUnpriorIdAndNoiseDoesNot) {
+  nr_pusch_ul_disc_reset();
+  Fixture f(61);
+  const int mask=nr_pdcch_blind_ul_dmrs_mask(14,0,0,2,1,0);
+  f.add(700,0,0,mask,3,100);
+  const int priors[]={1,2};
+  const auto r=nr_pusch_ul_disc_search_sweep(&f.grid,0x77,0,priors,2,0,0,0,0,1024);
+  ASSERT_TRUE(r.accepted); EXPECT_EQ(r.id,700);
+  nr_pusch_ul_disc_reset();
+  Fixture n(62);
+  EXPECT_FALSE(nr_pusch_ul_disc_search_sweep(&n.grid,0x78,0,priors,2,0,0,0,0,1024).accepted);
+}
+
+TEST(UlBgDisc, SingleFalseCrcDoesNotLatch) {
+  EXPECT_EQ(nr_ul_bgdisc_latch(1,0xA,99,0),0);       /* nothing cached: the first pass pends too */
+  EXPECT_EQ(nr_ul_bgdisc_latch(1,0xA,100,0),1);      /* its confirmation in another slot */
+  EXPECT_EQ(nr_ul_bgdisc_latch(1,0xA,101,0xA),1);    /* same as cached */
+  EXPECT_EQ(nr_ul_bgdisc_latch(1,0xB,102,0xA),0);    /* one CRC pass of a different hypothesis: not latched */
+  EXPECT_EQ(nr_ul_bgdisc_latch(1,0xB,102,0xA),0);    /* the same slot again is not a second pass */
+  EXPECT_EQ(nr_ul_bgdisc_latch(1,0xB,103,0xA),1);    /* second pass in another slot */
+  EXPECT_EQ(nr_ul_bgdisc_latch(2,0xC,200,0xA),0);
+  EXPECT_EQ(nr_ul_bgdisc_latch(3,0xC,201,0xA),1);    /* two RNTIs agree */
 }
 
 int main(int argc, char **argv) {

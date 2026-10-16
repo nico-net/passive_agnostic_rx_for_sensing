@@ -52,6 +52,12 @@ nr_pusch_ul_disc_result_t nr_pusch_ul_disc_search(const nr_pusch_ul_disc_grid_t 
                                                   int preferred_type, int preferred_nscid,
                                                   uint8_t antenna_ports_field);
 nr_pusch_ul_disc_result_t nr_pusch_ul_disc_cached(uint16_t rnti);
+/* the same search, but the blind scan covers ids [id_lo, id_lo + id_n) (ISAC_UL_BGDISC worker); stops at the first accepted id */
+nr_pusch_ul_disc_result_t nr_pusch_ul_disc_search_sweep(const nr_pusch_ul_disc_grid_t *grid, uint16_t rnti, uint8_t type_a_pos, const int *prior_ids,
+                                                        int npriors, int preferred_type, int preferred_nscid, uint8_t antenna_ports_field,
+                                                        int id_lo, int id_n);
+/* ids already latched for any RNTI (priors for the others); returns the count */
+int nr_pusch_ul_disc_known_ids(int *ids, int max);
 
 /* Applied advance = N_TA_offset + a signed arrival correction. Tracker stores
  * that signed correction, never calls it a decoded MAC timing-advance command. */

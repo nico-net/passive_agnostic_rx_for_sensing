@@ -2,6 +2,7 @@
 #include "nr_pdsch_gpu_demod_host.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_sample_lifetime.h"
+#include "PHY/TOOLS/nr_gpu_budget.h"
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
@@ -5829,6 +5830,16 @@ static nr_pdsch_passive_decode_status_t passive_decode_tintab(PHY_VARS_NR_UE *ue
  *   it first runs a quiet decode with the CSI extent inverted and logs one SENSING: CSIAB line pairing both CRCs.
  *   Callers: nr_pdsch_passive_queue.c (consumer threads, probe re-run), nr_pdcch_blind_monitor_rt.c (in-line decode), nr_passive_replay_capture.c.
  */
+static nr_pdsch_passive_decode_status_t passive_decode_entry(PHY_VARS_NR_UE *ue,
+                                                             const UE_nr_rxtx_proc_t *proc,
+                                                             fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                                             const freq_alloc_bitmap_t *freq_alloc,
+                                                             const nr_pdsch_passive_grant_t *grant,
+                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                                             nr_pdsch_passive_decode_result_t *out);
+
+/* ISAC_GPU_DISC_SMS_LOW (default off): a decode of a grant above 96 PRB is a "large real grant in flight" for the whole call, so that GPU discovery
+ * (nr_gpu_green.h) launches its next job on the smaller SM partition. Off: the plain call. */
 nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const UE_nr_rxtx_proc_t *proc,
                                                          fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -5836,6 +5847,23 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const nr_pdsch_passive_grant_t *grant,
                                                          c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                          nr_pdsch_passive_decode_result_t *out)
+{
+  static int s_low = -1;
+  if (s_low < 0) { const char *e = getenv("ISAC_GPU_DISC_SMS_LOW"); s_low = e && atoi(e) > 0; }
+  const bool large = s_low && freq_alloc->num_rbs > 96;
+  if (large) nr_gpu_budget_rt_large_begin();
+  const nr_pdsch_passive_decode_status_t st = passive_decode_entry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  if (large) nr_gpu_budget_rt_large_end();
+  return st;
+}
+
+static nr_pdsch_passive_decode_status_t passive_decode_entry(PHY_VARS_NR_UE *ue,
+                                                             const UE_nr_rxtx_proc_t *proc,
+                                                             fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                                             const freq_alloc_bitmap_t *freq_alloc,
+                                                             const nr_pdsch_passive_grant_t *grant,
+                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                                             nr_pdsch_passive_decode_result_t *out)
 {
   t_pdtim_body = 0; /* ISAC_PDTIM_CLASS: the next body is this call's first (real), later ones are retries */
   t_dec_body_ns = t_dec_stage_ns = t_dec_first_ns = 0;

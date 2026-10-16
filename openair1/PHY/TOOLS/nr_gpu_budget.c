@@ -79,6 +79,11 @@ int nr_gpu_budget_rt_begin(void) {
 void nr_gpu_budget_rt_end(void) {if(nr_gpu_budget_enabled())atomic_fetch_sub(&owner,1);}
 /* nr_gpu_budget_rt_active: number of RT GPU users in flight (0 when the budget is off). Read-only; best-effort GPU users (ISAC_UL_GPU_FEP) defer to the CPU while it is non-zero and they have no SM partition of their own. */
 int nr_gpu_budget_rt_active(void) {return nr_gpu_budget_enabled()?(int)(atomic_load(&owner)&~DISC_OWNER):0;}
+/* Dynamic discovery partition (ISAC_GPU_DISC_SMS_LOW): large (> 96 PRB) real grants in flight. Independent of ISAC_GPU_BUDGET; end() never goes below 0. */
+static _Atomic int large_active;
+void nr_gpu_budget_rt_large_begin(void) {atomic_fetch_add(&large_active,1);}
+void nr_gpu_budget_rt_large_end(void) {int v=atomic_load(&large_active);while(v>0 && !atomic_compare_exchange_weak(&large_active,&v,v-1));}
+int nr_gpu_budget_rt_large_active(void) {return atomic_load(&large_active);}
 /* nr_gpu_budget_rt_result: records the outcome of one RT GPU call: its wait time updates the maximum wait; a fallback is counted when `fallback` is set. No-op when disabled. */
 void nr_gpu_budget_rt_result(uint64_t us,int fallback) {
   if(!nr_gpu_budget_enabled())return;

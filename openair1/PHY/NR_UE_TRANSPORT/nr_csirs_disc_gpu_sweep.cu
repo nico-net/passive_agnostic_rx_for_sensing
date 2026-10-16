@@ -206,7 +206,7 @@ template<typename T> struct Device {
   }
 };
 struct Workspace {
-  cudaStream_t stream=nullptr;
+  cudaStream_t stream=nullptr,stream_hi=nullptr,stream_lo=nullptr; // stream = the one of the current job (ISAC_GPU_DISC_SMS_LOW)
   cudaEvent_t done=nullptr;
   Device<nr_csirs_disc_re_t> dm;
   Device<short2> dx,grid;
@@ -223,6 +223,15 @@ struct Workspace {
   int rb=0,ant=0,capacity=0;
 } workspace;
 static std::mutex workspace_mutex;
+extern "C" int nr_gpu_budget_rt_large_active(void) __attribute__((weak)); // the executable's nr_gpu_budget.c (weak: the module is dlopen'd)
+/* pick_stream: start of a job (workspace_mutex held): the low-SM stream while a large real grant is in flight, else the normal one. The previous job is synchronised first, so no queued kernel ever sees the switch. */
+static void pick_stream()
+{
+  auto &w=workspace;
+  if(!w.stream_lo) return;
+  cudaStream_t s=nr_gpu_green_disc_pick(w.stream_hi,w.stream_lo,nr_gpu_budget_rt_large_active?nr_gpu_budget_rt_large_active():0);
+  if(s!=w.stream){cudaStreamSynchronize(w.stream);w.stream=s;}
+}
 /* prepare: prepares the GPU sweep workspace for a carrier (rb RBs, ant antennas, capacity slots): creates the stream and completion event and grows every device buffer (mapping, packed samples, scores, metadata).
  *   Grow-only: returns at once when the existing buffers already fit. Returns 0, or -1 on failure. Callers: run(), nr_csirs_disc_gpu_sweep_prepare(), nr_csirs_disc_gpu_refine_entry().
  */
@@ -230,7 +239,11 @@ static int prepare(int rb,int ant,int capacity)
 {
   auto &w=workspace;
   if(w.rb>=rb && w.ant>=ant && w.capacity>=capacity) return 0;
-  if(!w.stream && !nr_gpu_green_stream(&w.stream,0,false) && cudaStreamCreateWithFlags(&w.stream,cudaStreamNonBlocking)!=cudaSuccess) return -1;
+  if(!w.stream_hi){
+    if(!nr_gpu_green_stream(&w.stream_hi,0,false) && cudaStreamCreateWithFlags(&w.stream_hi,cudaStreamNonBlocking)!=cudaSuccess) return -1;
+    if(!nr_gpu_green_stream(&w.stream_lo,0,false,-1)) w.stream_lo=nullptr;
+    w.stream=w.stream_hi;
+  }
   if(!w.done && cudaEventCreateWithFlags(&w.done,cudaEventBlockingSync|cudaEventDisableTiming)!=cudaSuccess) return -1;
   size_t maps=(size_t)rb*16*8*2*4; // conservative mapping capacity for all rows
   // Occupied REs <= 32 ports * 8 RE/RB (row 18).
@@ -522,6 +535,7 @@ extern "C" int nr_csirs_disc_gpu_sweep_entry(const nr_csirs_disc_ring_t *r, cons
 {
   try {
     std::lock_guard<std::mutex> guard(workspace_mutex);
+    pick_stream();
     int rc=run(r, hyps, nh, cfg, out);
     if (rc<0) memset(&workspace.evidence,0,sizeof(workspace.evidence));
     return rc;
@@ -537,6 +551,7 @@ extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
 {
   try {
     std::lock_guard<std::mutex> guard(workspace_mutex);
+    pick_stream();
     if(prepare(rb,ant,capacity)<0) return -1;
     auto &w=workspace;nr_csirs_disc_sweep_map_t map={};map.ports=1;map.n_re=1;map.words=1;map.sym_mask=1;map.begin[1]=1;map.re=w.dm.p;
     nr_csirs_disc_re_t re={};nr_csirs_disc_slot_meta_t meta={};int zero=0;
@@ -568,6 +583,7 @@ extern "C" int nr_csirs_disc_gpu_refine_entry(const nr_csirs_disc_ring_t *r,nr_c
 {
   try {
     std::lock_guard<std::mutex> guard(workspace_mutex);
+    pick_stream();
     if(prepare(r->n_rb,r->n_ant,r->capacity)<0) return -1;
     auto &w=workspace;nr_csirs_disc_hyp_t full=*h;full.rb_start=0;full.n_rb=r->n_rb;
     nr_csirs_disc_sweep_map_t map={};
@@ -592,6 +608,7 @@ extern "C" int nr_csirs_disc_gpu_confirm_entry(const nr_csirs_disc_ring_t *r,con
 {
   try {
     std::lock_guard<std::mutex> guard(workspace_mutex);
+    pick_stream();
     nr_csirs_disc_sweep_cfg_t cfg={id,1,1,32,1};nr_csirs_disc_win_t win={};
     if(run(r,h,1,&cfg,&win)!=1) return -1;
     auto &w=workspace;nr_csirs_disc_sweep_map_t map={};

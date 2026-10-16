@@ -23,6 +23,7 @@ typedef struct {
   uint8_t nscid, dmrs_type, mapping_type, add_pos, front_load, n_cdm_groups, have_dmrs;
   uint8_t start_symbol, num_symbols; /* the grant shape the DM-RS fields were found for: they apply to a grant of the same shape only */
   uint16_t dmrs_ports;
+  uint8_t tp;           /* transform precoding of the grant it was found for: an entry applies to grants with the same flag only (ISAC_UL_BGDISC) */
   uint8_t fail_streak;  /* passes that failed the CRC since the last decode: the entry is dropped after three */
   uint32_t epoch;       /* nr_cfg_epoch_dedicated_current() when it was stored: a later epoch invalidates it */
   int64_t abs_slot;     /* slot index it was stored at (age) */
@@ -33,6 +34,8 @@ typedef struct {
 int ul_hyp_cache_get(uint16_t rnti, ul_hyp_t *h);
 /* inserts or replaces the entry of the RNTI (64 entries, least recently written is evicted). Thread-safe. */
 void ul_hyp_cache_put(uint16_t rnti, const ul_hyp_t *h);
+/* the bg worker's put: skipped (0) when the entry holds a decode-refreshed (n_ok > 0) or newer-slot hypothesis */
+int ul_hyp_cache_put_if_new(uint16_t rnti, const ul_hyp_t *h);
 void ul_hyp_cache_clear(void);
 void ul_hyp_cache_drop(uint16_t rnti);
 /* the call site's lookup: counts hit / miss / stale (epoch differs or older than ISAC_UL_HYP_MAX_AGE slots, default 2000); 1 = usable hit */

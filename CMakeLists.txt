@@ -1114,6 +1114,7 @@ set(PHY_NR_PASSIVE_UL_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c
@@ -2684,6 +2685,7 @@ if(ENABLE_TESTS)
   add_executable(test_nr_pusch_ul_disc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pusch_ul_disc_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c
     ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c
     ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_dmrs_rx.c
     ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
