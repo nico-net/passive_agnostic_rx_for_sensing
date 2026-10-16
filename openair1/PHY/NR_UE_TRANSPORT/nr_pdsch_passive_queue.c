@@ -2722,8 +2722,12 @@ static int recov_run(void *p, const nr_recov_key_t *k)
       nr_passive_mac_report_ta(job.rnti, job.rnti_class == NR_BLIND_RNTI_CLASS_RA, job.frame_rx, job.nr_slot_rx, (int)fp->numerology_index,
                                (uint32_t)job.absolute_slot, dec.tb, dec.cw.TBS / 8);
       nr_passive_replay_dl(&job, &dec);
-      LOG_A(PHY, "SENSING: RECOVLATE rnti=0x%04x %d.%d abs=%ld pid=%u ndi=%u tbs=%u recovered_cfg=%d\n", job.rnti, job.frame_rx, job.nr_slot_rx,
-            (long)job.absolute_slot, job.grant.harq_pid, job.grant.ndi, (unsigned)dec.cw.TBS, (int)dec.config_recovered);
+      /* tot_us = rescue completion - slot arrival (same CLOCK_MONOTONIC as nr_passive_note_slot_arrival), -1 when the slot left the ring */
+      const uint64_t arr_ns = nr_passive_slot_arrival_ns(job.absolute_slot);
+      const uint64_t rec_now_ns = now_ns();
+      LOG_A(PHY, "SENSING: RECOVLATE rnti=0x%04x %d.%d abs=%ld pid=%u ndi=%u tbs=%u recovered_cfg=%d tot_us=%ld\n", job.rnti, job.frame_rx, job.nr_slot_rx,
+            (long)job.absolute_slot, job.grant.harq_pid, job.grant.ndi, (unsigned)dec.cw.TBS, (int)dec.config_recovered,
+            arr_ns && rec_now_ns >= arr_ns ? (long)((rec_now_ns - arr_ns) / 1000) : -1L);
     }
     if (!ret) ret = 1;
   }

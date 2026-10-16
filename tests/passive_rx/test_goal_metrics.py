@@ -13,6 +13,14 @@ def write(lines):
     f.writelines(lines); f.close(); return f.name
 
 class GoalMetricsTest(unittest.TestCase):
+    def test_recovered_latency_uses_rescue_time(self):
+        p = write([ev(crc=0, tot=300).replace("1.2 crc", "7.4 crc"),
+                   "[PHY]    SENSING: RECOVLATE rnti=0x1 7.4 abs=1 pid=0 ndi=0 tbs=96 recovered_cfg=1 tot_us=9000\n"])
+        d = gm.parse_run(p)['dl']
+        self.assertEqual(d['tot_p99'], 9000)
+        self.assertEqual(d['recovered'], 1)
+        self.assertEqual(d['recovered_tot_p99'], 9000)
+
     def test_required_snr_monotonic_and_reserved(self):
         self.assertLess(gm.required_snr_db(0, 0), gm.required_snr_db(27, 0))
         self.assertIsNone(gm.required_snr_db(29, 0))

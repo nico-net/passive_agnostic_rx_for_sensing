@@ -41,7 +41,7 @@ def true_snr_db(est_db, qm):
 
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 KV = re.compile(r'(\w+)=(\S+)')
-RECOV = re.compile(r'RECOVLATE rnti=(\S+) (\d+\.\d+) ')
+RECOV = re.compile(r'RECOVLATE rnti=(\S+) (\d+\.\d+) .*?(?:tot_us=(-?\d+))?\s*$')
 EVKEY = re.compile(r'EVMGRANT rnti=(\S+) (\d+\.\d+) ')
 
 def required_snr_db(mcs, tbl):
@@ -80,14 +80,15 @@ def summary(acc):
             'crc_all': 100.0 * acc['crc_all'][0] / n if n else None, 'n_q': acc['n_q'],
             'crc_q': 100.0 * acc['ok_q'] / acc['n_q'] if acc['n_q'] else None,
             'unqualified_low_snr': acc['low'], 'unqualified_retx': acc['retx'], 'unqualified_floor': acc['floor'],
-            'drops_pct': acc['drops'], 'skipped': acc['skipped'], 'recovered': acc.get('recovered', 0)}
+            'drops_pct': acc['drops'], 'skipped': acc['skipped'], 'recovered': acc.get('recovered', 0),
+            'recovered_tot_p99': pct(acc['rec_lat'], .99) if acc.get('rec_lat') else None}
 
 def parse_run(path, margin=2.0):
     dl, ul = empty(), empty()
     with open(path, errors='replace') as fh:
         lines = fh.readlines()
     # ISAC_PDSCH_RECOVERY_ASYNC logs EVMGRANT for the first pass (crc=0) and a RECOVLATE line when a retry arm rescues it later: credit it.
-    rec = {m.groups() for m in (RECOV.search(r) for r in lines if 'RECOVLATE' in r) if m}
+    rec = {m.group(1, 2): int(m.group(3)) if m.group(3) else -1 for m in (RECOV.search(r) for r in lines if 'RECOVLATE' in r) if m}
     dl['recovered'] = 0
     for raw in lines:
         if 'SENSING:' not in raw:
@@ -100,9 +101,11 @@ def parse_run(path, margin=2.0):
                     continue
                 crc, mcs, tbl, nl, rv = (int(kv[k]) for k in ('crc', 'mcs', 'tbl', 'Nl', 'rv'))
                 m = EVKEY.search(line)
+                tot = int(kv['e2e'].split(',')[6])
                 if not crc and m and m.groups() in rec:
                     crc = 1; dl['recovered'] += 1
-                tot = int(kv['e2e'].split(',')[6])
+                    if rec[m.groups()] >= 0:
+                        tot = rec[m.groups()]; dl.setdefault('rec_lat', []).append(tot)
                 snr = min(float(x) for x in kv['snr_l'].split(',')[:max(1, nl)])
                 dl['lat'].append(tot); dl['crc_all'][0] += crc; dl['crc_all'][1] += 1
                 classify(dl, crc, mcs, tbl, rv, snr, margin)
