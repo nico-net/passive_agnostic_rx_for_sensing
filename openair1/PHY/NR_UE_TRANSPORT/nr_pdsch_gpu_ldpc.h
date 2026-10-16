@@ -25,7 +25,7 @@ extern "C" {
 typedef struct {
   uint8_t BG, R;     /* R: 13, 23, 89 (BG1) or 15, 13, 23 (BG2): the rows nrLDPC_init() uses */
   uint16_t Z;
-  uint16_t K;        /* bits per snapshot: K of the code block (multiple of 8) */
+  uint16_t K;        /* bits per snapshot: K of the code block; bytes (K+7)>>3, tail bits of the last byte zero */
   uint8_t it_max;    /* numMaxIter */
   const int8_t *llr; /* Kc * Z decoder input (the int8 array LDPCdecoder gets); read in place by the GPU */
   /* outputs */

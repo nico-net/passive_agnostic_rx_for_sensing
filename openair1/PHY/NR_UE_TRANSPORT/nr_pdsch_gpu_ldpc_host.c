@@ -236,10 +236,6 @@ static int32_t decode_impl(gl_t *G, nrLDPC_slot_decoding_parameters_t *p, nrLDPC
     atomic_fetch_add_explicit(&G->fb_refuse, 1, memory_order_relaxed);
     return cpu(p);
   }
-  if (G->ul && (tb->K & 7)) { /* the GPU kernel's packed hard decision is byte-wise: K % 8 != 0 (Z not a multiple of 4) stays on the CPU */
-    atomic_fetch_add_explicit(&G->fb_refuse, 1, memory_order_relaxed);
-    return cpu(p);
-  }
   if (G->ul && (uint64_t)tb->K * tb_ndec(tb) < G->min_bits) {
     atomic_fetch_add_explicit(&G->fb_small, 1, memory_order_relaxed);
     return cpu(p);

@@ -34,6 +34,12 @@ static int ul_retry_run(nr_gpu_ldpc_job_t *jobs, int n)
 typedef int32_t (*ldpc_dec_fn)(t_nrLDPC_dec_params *, int8_t *, uint8_t *, t_nrLDPC_time_stats *, decode_abort_t *);
 static int never(uint8_t *b, uint32_t n, uint8_t t) { (void)b; (void)n; (void)t; return 0; }
 
+/* K bits compare (the bits of the last byte past K are not part of the block) */
+static int bits_eq(const uint8_t *a, const uint8_t *b, int K)
+{
+  return !memcmp(a, b, K >> 3) && (!(K & 7) || !(((a[K >> 3] ^ b[K >> 3]) & 0xff) >> (8 - (K & 7)) << (8 - (K & 7)) & 0xff));
+}
+
 static double gauss(void)
 {
   const double u = (drand48() + 1e-12), v = drand48();
@@ -259,7 +265,7 @@ int main(int argc, char **argv)
       return 3;
     }
     bad[0].R = 13;
-    bad[0].K = 22 * 64 + 1;
+    bad[0].K = 8449;
     if (grun(bad, 1) != NR_GPU_LDPC_E_PARAM) {
       printf("LDPC_GPU_TEST param reason wrong\n");
       return 3;
@@ -267,7 +273,7 @@ int main(int argc, char **argv)
   }
   const int reps = argc > 1 ? atoi(argv[1]) : 3;
   srand48(12345);
-  static const int zs1[] = {384, 352, 208, 112, 64, 36, 15, 2}, zs2[] = {384, 256, 96, 52, 20, 14, 6}; /* Z % 4 != 0 (14, 6: BG2 with Kb = 8) takes the scalar kernel */
+  static const int zs1[] = {384, 352, 208, 112, 64, 36, 15, 2}, zs2[] = {384, 256, 96, 52, 20, 14, 6, 15, 11, 7}; /* Z % 4 != 0 (14, 6: BG2 with Kb = 8; 15, 11, 7: Kb = 10, K % 8 != 0) takes the scalar kernel */
   static const int rs1[] = {13, 23, 89}, rs2[] = {15, 13, 23};
   t_nrLDPC_time_stats *ts = calloc(1, 1 << 16);
   decode_abort_t ab;
@@ -279,13 +285,11 @@ int main(int argc, char **argv)
   long n_cmp = 0, n_bad = 0, n_stop = 0, n_stop_bad = 0, n_ok = 0, n_fb = 0;
   double t_gpu = 0, t_cpu = 0;
   for (int BG = 1; BG <= 2; BG++)
-    for (int zi = 0; zi < (BG == 1 ? 8 : 7); zi++)
+    for (int zi = 0; zi < (BG == 1 ? 8 : 10); zi++)
       for (int ri = 0; ri < 3; ri++)
         for (int rep = 0; rep < reps; rep++) {
           const int Z = BG == 1 ? zs1[zi] : zs2[zi], R = BG == 1 ? rs1[ri] : rs2[ri], Kc = BG == 1 ? 68 : 52;
-          const int K = (BG == 1 ? 22 : (Z & 3) ? 8 : 10) * Z, ncol = ncol_of(BG, R), it_max = 8;
-          if (K & 7)
-            continue;
+          const int K = (BG == 1 ? 22 : (Z == 14 || Z == 6) ? 8 : 10) * Z, ncol = ncol_of(BG, R), it_max = 8;
           const int nj = 1 + (int)(lrand48() % 6);
           for (int k = 0; k < nj; k++) { /* all-zero codeword (valid, CRC 0) through noise of a random level, or junk */
             const int mode = (int)(lrand48() % 5);
@@ -316,10 +320,10 @@ int main(int argc, char **argv)
               memset(out, 0, sizeof(out));
               cpu(&p, inc, out, ts, &ab);
               n_cmp++;
-              if (memcmp(out, jobs[k].snap[s], K >> 3) != 0) {
+              if (!bits_eq(out, jobs[k].snap[s], K)) {
                 if (n_bad++ < 10) {
                   int q = 0;
-                  while (out[q] == jobs[k].snap[s][q])
+                  while (q < (K + 7) / 8 - 1 && out[q] == jobs[k].snap[s][q])
                     q++;
                   printf("MISMATCH BG %d Z %d R %d job %d snapshot %d (iteration %d): byte %d cpu %02x gpu %02x\n", BG, Z, R, k, s, s + 3,
                          q, out[q], jobs[k].snap[s][q]);
@@ -349,7 +353,7 @@ int main(int argc, char **argv)
             }
             const int it_gpu = hit >= 0 ? hit + 1 : it_max;
             n_ok += hit >= 0;
-            if (it_gpu != it_cpu || (hit >= 0 && memcmp(out, jobs[k].snap[hit], K >> 3) != 0)) {
+            if (it_gpu != it_cpu || (hit >= 0 && !bits_eq(out, jobs[k].snap[hit], K))) {
               if (n_stop_bad++ < 10)
                 printf("STOP MISMATCH BG %d Z %d R %d job %d: cpu numIter %d gpu %d\n", BG, Z, R, k, it_cpu, it_gpu);
             }

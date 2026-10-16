@@ -180,7 +180,7 @@ template <bool NC> __global__ void __launch_bounds__(THREADS) k_ldpc_t(const DJo
   const int Z = G.Z, M = G.M, ncol = G.ncol, gt = b * THREADS + t, gs = CB * THREADS, itm = J.it_max;
   int8_t *llr = g_llr + (size_t)c * MAXC * ZMAX, *res = g_res + (size_t)c * MAXC * ZMAX, *c2v = g_c2v + (size_t)c * MAXE * ZMAX;
   int *unsat = g_unsat + c * NIT;
-  const int KB = J.K >> 3;
+  const int KB = (J.K + 7) >> 3, ktail = J.K & 7; /* ktail: valid bits of the last byte (0 = full) */
   uint8_t *snap = g_snap + (size_t)c * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX;
   for (int n = gt; n < ncol * Z; n += gs) {
     const int8_t v = J.llr_in[n];
@@ -243,7 +243,7 @@ template <bool NC> __global__ void __launch_bounds__(THREADS) k_ldpc_t(const DJo
           const unsigned word = __byte_perm(__brev(m), 0, 0x0123); /* byte j = lanes 8j..8j+7, lane 8j at bit 7 */
           uint8_t *o = snap + (size_t)(it - 3) * NR_GPU_LDPC_KB_MAX + (w0 >> 3);
           for (int q = 0; q < 4 && (w0 >> 3) + q < KB; q++)
-            o[q] = (uint8_t)(word >> (8 * q));
+            o[q] = (uint8_t)(word >> (8 * q)) & ((w0 >> 3) + q == KB - 1 && ktail ? 0xff << (8 - ktail) : 0xff); /* tail bits zero */
         }
       }
     }
@@ -352,7 +352,7 @@ template <bool NC> __global__ void __launch_bounds__(THREADS) k_ldpc4_t(const DJ
   const int Z = G.Z, Z4 = Z >> 2, M = G.M, ncol = G.ncol, gt = b * THREADS + t, gs = CB * THREADS, itm = J.it_max;
   int8_t *llr = g_llr + (size_t)c * MAXC * ZMAX, *res = g_res + (size_t)c * MAXC * ZMAX, *c2v = g_c2v + (size_t)c * MAXE * ZMAX;
   int *unsat = g_unsat + c * NIT;
-  const int KB = J.K >> 3;
+  const int KB = J.K >> 3; /* Z % 4 == 0: K % 8 == 0 */
   uint8_t *snap = g_snap + (size_t)c * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX;
   for (int n = gt; n < (ncol * Z) >> 2; n += gs) {
     const uint32_t v = ((const uint32_t *)J.llr_in)[n];
@@ -664,7 +664,7 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   const Graph *gr[NJ];
   for (int k = 0; k < n; k++) {
     const nr_gpu_ldpc_job_t &j = jobs[k];
-    if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || (j.K & 7) || (j.K >> 3) > NR_GPU_LDPC_KB_MAX) {
+    if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || ((j.K + 7) >> 3) > NR_GPU_LDPC_KB_MAX) {
       static std::atomic<int> logged{0};
       if (logged.fetch_add(1) < 8) /* which of the four checks: a few lines per process */
         fprintf(stderr, "SENSING: GPU_LDPC param refuse BG=%d Z=%d R=%d K=%d it_max=%d (K&7=%d K>>3=%d max %d, it_max-1 max %d)\n", j.BG, j.Z, j.R, j.K,
@@ -719,7 +719,7 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
       continue;
     }
     for (int s = 0; s < j.nsnap; s++)
-      memcpy(j.snap[s], x.snap + ((size_t)k * NR_GPU_LDPC_MAX_SNAP + s) * NR_GPU_LDPC_KB_MAX, j.K >> 3);
+      memcpy(j.snap[s], x.snap + ((size_t)k * NR_GPU_LDPC_MAX_SNAP + s) * NR_GPU_LDPC_KB_MAX, (j.K + 7) >> 3);
   }
   g_busy.fetch_and(~(1u << c));
   return rc;
@@ -742,7 +742,7 @@ static int pass_set(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu
   const Graph *gr[NJ];
   for (int k = 0; k < n; k++) {
     const nr_gpu_ldpc_job_t &j = jobs[k];
-    if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || (j.K & 7) || (j.K >> 3) > NR_GPU_LDPC_KB_MAX
+    if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || ((j.K + 7) >> 3) > NR_GPU_LDPC_KB_MAX
         || !(gr[k] = graph_lookup(j.BG, j.Z, j.R)))
       return -1;
   }
@@ -901,7 +901,7 @@ static int ul_exec(int i, nr_gpu_ldpc_job_t *jobs, int n, const Graph *const *gr
     if (j.nsnap < 0 || j.nsnap > NR_GPU_LDPC_MAX_SNAP)
       return -1;
     for (int s = 0; s < j.nsnap; s++)
-      memcpy(j.snap[s], x.snap + ((size_t)k * NR_GPU_LDPC_MAX_SNAP + s) * NR_GPU_LDPC_KB_MAX, j.K >> 3);
+      memcpy(j.snap[s], x.snap + ((size_t)k * NR_GPU_LDPC_MAX_SNAP + s) * NR_GPU_LDPC_KB_MAX, (j.K + 7) >> 3);
   }
   return 0;
 }
@@ -1002,7 +1002,7 @@ extern "C" int nr_pusch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   const Graph *gr[NJ];
   for (int k = 0; k < n; k++) {
     const nr_gpu_ldpc_job_t &j = jobs[k];
-    if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || (j.K & 7) || (j.K >> 3) > NR_GPU_LDPC_KB_MAX || !(gr[k] = graph(j.BG, j.Z, j.R)))
+    if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || ((j.K + 7) >> 3) > NR_GPU_LDPC_KB_MAX || !(gr[k] = graph(j.BG, j.Z, j.R)))
       return -3;
   }
   const uint64_t t0 = ul_now_us();
