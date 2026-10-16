@@ -914,6 +914,17 @@ void nr_ul_layout_eval_once(void)
       if (!k2row[0]) k2ok = false;
     }
     pthread_mutex_lock(&mu);
+    if (gen == g_gen && !ls->fitted && !k2ok && npre > 0) {
+      /* ISAC_UL_BGDISC=1: the k2 inference of this DCI length found no free slot (returned 0); the TDRA table is the cell's, so another length's fitted k2 applies */
+      static int bg = -1;
+      if (bg < 0) bg = getenv("ISAC_UL_BGDISC") && !strcmp(getenv("ISAC_UL_BGDISC"), "1");
+      for (int o = 0; bg && o < g_nlen && !k2ok; o++)
+        if (o != l && g_len[o].fitted && g_len[o].k2row[0]) {
+          for (int r = 0; r < 16; r++) if (!k2row[r]) k2row[r] = g_len[o].k2row[r] ? g_len[o].k2row[r] : g_len[o].k2row[0];
+          k2ok = true;
+          LOG_I(PHY, "SENSING: ULLAYOUT K2_BORROW len=%u from len=%u k2_row0=%u\n", len, g_len[o].len, k2row[0]);
+        }
+    }
     if (gen == g_gen && !ls->fitted) {
       ls->mcs_off = mo;
       ls->mcs_score = sc;
