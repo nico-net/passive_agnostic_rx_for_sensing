@@ -2262,6 +2262,26 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
   return 0;
 }
 
+/* Rows beyond NR_GPU_CHEST_MAX_ROWS (PRG/VRB grants with many segments: rows = DM-RS symbols x layers x segments x antennas) run as
+ * consecutive chunks of the buffer size. Every row is independent in all three kernels, so a chunked job is bit-exact with an unchunked one. */
+#define GCH_MAX_TOTAL_ROWS (8 * 4 * 4 * 275) /* 8 DM-RS symbols x 4 layers x 4 antennas x one segment per RB */
+static __thread uint32_t *t_nv_all; /* per-row noise of the whole job */
+static int gch_flush(nr_gpu_chest_fn chest_fn, nr_gpu_chest_job_t *j, int base, int n, const nr_prb_seg_t *segs, int ns, int nrx, int fft,
+                     uint32_t pdsch_est_size, int32_t dl_ch_estimates[][pdsch_est_size], const int *nl_of, const int *sym_of)
+{
+  j->n_rows = n;
+  if (chest_fn(j) != 0)
+    return -1;
+  memcpy(t_nv_all + base, j->nvar, (size_t)n * sizeof(uint32_t));
+  if (segs)
+    for (int i = 0; i < n; i++) { /* data-ordered row: segment s at data_index * 12 (the rows were zeroed before the first chunk) */
+      const int g = base + i, a = g % nrx, s = (g / nrx) % ns, k = g / (nrx * ns);
+      c16_t *row = (c16_t *)&dl_ch_estimates[nl_of[k] * nrx + a][fft * sym_of[k]];
+      memcpy(&row[segs[s].data_index * NR_NB_SC_PER_RB], scratch + (size_t)i * 4096, (size_t)segs[s].n_prb * NR_NB_SC_PER_RB * sizeof(c16_t));
+    }
+  return 0;
+}
+
 int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
                              const UE_nr_rxtx_proc_t *proc,
                              const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch,
@@ -2326,7 +2346,7 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
                   : diag ? 5
                   : chest_delay_share() || getenv("ISAC_CHEST_DFT_WIN") || s_stage_dump ? 6
                   : nr_dl_chest_only_ant >= 0 ? 7
-                  : nrows < 1 || nrows > NR_GPU_CHEST_MAX_ROWS ? 8
+                  : nrows < 1 || nrows > GCH_MAX_TOTAL_ROWS ? 8
                   : !segs && !contiguous ? 9 : 0;
   if (why) {
     static _Atomic int logged;
@@ -2348,6 +2368,8 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
     return -1;
   if (!gch_bufs(segs != NULL))
     return -1;
+  if (!t_nv_all && !(t_nv_all = malloc(sizeof(uint32_t) * GCH_MAX_TOTAL_ROWS)))
+    return -1;
   static __thread nr_gpu_chest_job_t job;
   nr_gpu_chest_job_t *j = &job;
   j->type = config_type == NFAPI_NR_DMRS_TYPE1 ? 1 : 2;
@@ -2359,7 +2381,7 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
   memcpy(j->filt[1], filt16_ul_p1p2, sizeof(j->filt[1]));
   memcpy(j->filt[2], filt16_ul_middle, sizeof(j->filt[2]));
   memcpy(j->filt[3], filt16_ul_last, sizeof(j->filt[3]));
-  int r = 0, np = 0, sym_of[16], nl_of[16];
+  int r = 0, base = 0, np = 0, sym_of[16], nl_of[16];
   for (int m = 0; m < fp->symbols_per_slot && m < 14; m++) {
     if (!((dmrs_mask >> m) & 1))
       continue;
@@ -2372,22 +2394,31 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
       nr_pdsch_dmrs_rx(fp->Ncp, gold, pil[np], 1000 + p, 0, max_end, config_type, dmrs_scaling);
       sym_of[np] = m;
       nl_of[np] = nl;
+      if (segs) /* the data-ordered rows are assembled chunk by chunk (gch_flush) */
+        for (int a = 0; a < nrx; a++)
+          memset(&dl_ch_estimates[nl * nrx + a][fp->ofdm_symbol_size * m], 0, sizeof(c16_t) * fp->ofdm_symbol_size);
       for (int s = 0; s < ns; s++) {
         const int rb_offset = sg[s].prb_start + (dlsch->refPoint ? 0 : dlsch->BWPStart);
         const int bwp_start_subcarrier = fp->first_carrier_offset + (dlsch->BWPStart + sg[s].prb_start) * 12;
         for (int a = 0; a < nrx; a++, r++) {
-          j->rows[r].rxF = (const int16_t *)&rxdataF[a][fp->ofdm_symbol_size * m + delta];
-          j->rows[r].pil = (const int16_t *)&pil[np][(config_type == NFAPI_NR_DMRS_TYPE1 ? 6 : 4) * rb_offset];
-          j->rows[r].out = segs ? (int16_t *)(scratch + (size_t)r * 4096) : (int16_t *)&dl_ch_estimates[nl * nrx + a][fp->ofdm_symbol_size * m];
-          j->rows[r].k0 = (unsigned short)bwp_start_subcarrier % fp->ofdm_symbol_size;
-          j->rows[r].nb_rb = sg[s].n_prb;
+          if (r - base == NR_GPU_CHEST_MAX_ROWS) {
+            if (gch_flush(chest_fn, j, base, r - base, segs, ns, nrx, fp->ofdm_symbol_size, pdsch_est_size, dl_ch_estimates, nl_of, sym_of) != 0) {
+              atomic_fetch_add_explicit(&g_gch_refused, 1, memory_order_relaxed);
+              return -1;
+            }
+            base = r;
+          }
+          j->rows[r - base].rxF = (const int16_t *)&rxdataF[a][fp->ofdm_symbol_size * m + delta];
+          j->rows[r - base].pil = (const int16_t *)&pil[np][(config_type == NFAPI_NR_DMRS_TYPE1 ? 6 : 4) * rb_offset];
+          j->rows[r - base].out = segs ? (int16_t *)(scratch + (size_t)(r - base) * 4096) : (int16_t *)&dl_ch_estimates[nl * nrx + a][fp->ofdm_symbol_size * m];
+          j->rows[r - base].k0 = (unsigned short)bwp_start_subcarrier % fp->ofdm_symbol_size;
+          j->rows[r - base].nb_rb = sg[s].n_prb;
         }
       }
       np++;
     }
   }
-  j->n_rows = r;
-  if (chest_fn(j) != 0) {
+  if (gch_flush(chest_fn, j, base, r - base, segs, ns, nrx, fp->ofdm_symbol_size, pdsch_est_size, dl_ch_estimates, nl_of, sym_of) != 0) {
     atomic_fetch_add_explicit(&g_gch_refused, 1, memory_order_relaxed);
     return -1;
   }
@@ -2395,7 +2426,7 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
   for (int k = 0; k < np; k++) {
     uint64_t nv = 0, nv_ant[NR_DL_CHEST_MAX_ANT] = {0};
     for (int s = 0; s < ns; s++) {
-      const uint32_t *q = &j->nvar[(k * ns + s) * nrx];
+      const uint32_t *q = &t_nv_all[(k * ns + s) * nrx];
       uint64_t acc = 0;
       int cnt = 0;
       for (int a = 0; a < nrx; a++)
@@ -2418,15 +2449,6 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
       nvar_out[sym_of[k]][nl_of[k]] = (uint32_t)(nv / (uint64_t)freq_alloc->num_rbs);
       for (int a = 0; a < NR_DL_CHEST_MAX_ANT; a++)
         nvar_ant_out[sym_of[k]][nl_of[k]][a] = (uint32_t)(nv_ant[a] / (uint64_t)freq_alloc->num_rbs);
-      const int nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
-      for (int a = 0; a < nrx; a++) {
-        c16_t *row = (c16_t *)&dl_ch_estimates[nl_of[k] * nrx + a][fp->ofdm_symbol_size * sym_of[k]];
-        memset(row, 0, sizeof(c16_t) * fp->ofdm_symbol_size);
-        for (int s = 0; s < ns; s++)
-          memcpy(&row[sg[s].data_index * NR_NB_SC_PER_RB], scratch + (size_t)((k * ns + s) * nrx + a) * 4096,
-                 (size_t)sg[s].n_prb * NR_NB_SC_PER_RB * sizeof(c16_t));
-        (void)nsc;
-      }
     }
   }
   const uint64_t n = atomic_fetch_add_explicit(&g_gch_calls, 1, memory_order_relaxed) + 1;

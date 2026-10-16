@@ -497,6 +497,65 @@ TEST(GpuPassStages, DevEqualsOldEntryPoints) {
   dev_vs_old_case(12, 1, 6, 9);
   dev_vs_old_case(24, 4, 2, 5);
 }
+/* GPU chest rows are independent: a job of NR_GPU_CHEST_MAX_ROWS rows equals the same rows run as consecutive smaller jobs, bit for bit
+ * (nr_pdsch_gpu_chest_grant now runs jobs above the buffer size as chunks of it). */
+TEST(GpuChestChunks, FullJobEqualsSplitJobs) {
+  if (!have_gpu()) GTEST_SKIP();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  unsetenv("ISAC_GPU_FORCE_DISCRETE");
+  if (nr_gpu_model() != NR_GPU_MODEL_DIRECT) GTEST_SKIP() << "old entry point needs the DIRECT model (GB10)";
+  const int N = 4096, MDC = 20, R = NR_GPU_CHEST_MAX_ROWS;
+  nr_gpu_buf_t rx, pil, dt, out[2];
+  ASSERT_EQ(0, nr_gpu_buf_alloc(&rx, (size_t)8 * N * 4));
+  ASSERT_EQ(0, nr_gpu_buf_alloc(&pil, (size_t)8 * 6 * 273 * 4));
+  ASSERT_EQ(0, nr_gpu_buf_alloc(&dt, (size_t)(2 * MDC + 1) * N * 4));
+  ASSERT_EQ(0, nr_gpu_buf_alloc(&out[0], (size_t)R * N * 4));
+  ASSERT_EQ(0, nr_gpu_buf_alloc(&out[1], (size_t)R * N * 4));
+  std::mt19937 g(7);
+  for (size_t i = 0; i < rx.bytes / 2; i++) ((int16_t *)rx.host)[i] = (int16_t)((int)(g() % 4001) - 2000);
+  for (size_t i = 0; i < pil.bytes / 2; i++) ((int16_t *)pil.host)[i] = (int16_t)((g() & 1 ? 1 : -1) * 11585);
+  for (int d = -MDC; d <= MDC; d++)
+    for (int i = 0; i < N; i++) {
+      const double ph = 2.0 * M_PI * i * d / N;
+      ((int16_t *)dt.host)[2 * ((size_t)(MDC + d) * N + i)] = (int16_t)std::lround(256 * std::cos(ph));
+      ((int16_t *)dt.host)[2 * ((size_t)(MDC + d) * N + i) + 1] = (int16_t)std::lround(256 * std::sin(ph));
+    }
+  auto job = std::make_unique<nr_gpu_chest_job_t>();
+  auto build = [&](int variant, int first, int n) { /* rows [first, first + n) of the R-row job, outputs into out[variant] at their own offsets */
+    memset(job.get(), 0, sizeof(*job));
+    job->type = 1; job->N = N; job->n_rows = n; job->max_delay_comp = MDC; job->dt_stride = N; job->delay_table = (const int16_t *)dt.dev;
+    memcpy(job->filt[0], filt16_ul_p0, 32); memcpy(job->filt[1], filt16_ul_p1p2, 32);
+    memcpy(job->filt[2], filt16_ul_middle, 32); memcpy(job->filt[3], filt16_ul_last, 32);
+    for (int i = 0; i < n; i++) {
+      const int r = first + i;
+      job->rows[i].rxF = (const int16_t *)rx.dev + 2 * ((size_t)(r % 8) * N + (r % 3));
+      job->rows[i].pil = (const int16_t *)pil.dev + 2 * (size_t)(r % 8) * 6 * 273;
+      job->rows[i].out = (int16_t *)out[variant].dev + 2 * (size_t)r * N;
+      job->rows[i].k0 = (1000 + 12 * (r % 40)) % N;
+      job->rows[i].nb_rb = 1 + (r * 7) % 100;
+    }
+  };
+  std::vector<int> nv[2], dly[2];
+  const int cuts[3] = {0, R / 3, R}; /* full job, then two chunks with an odd split */
+  build(0, 0, R);
+  ASSERT_EQ(0, m.chest_old(job.get()));
+  nv[0].assign(job->nvar, job->nvar + R);
+  dly[0].assign(&job->delay[0][0], &job->delay[0][0] + 3 * R);
+  for (int c = 0; c < 2; c++) {
+    build(1, cuts[c], cuts[c + 1] - cuts[c]);
+    ASSERT_EQ(0, m.chest_old(job.get()));
+    for (int i = 0; i < cuts[c + 1] - cuts[c]; i++) nv[1].push_back((int)job->nvar[i]);
+    for (int i = 0; i < 3 * (cuts[c + 1] - cuts[c]); i++) dly[1].push_back(((int *)job->delay)[i]);
+  }
+  EXPECT_EQ(nv[0], nv[1]);
+  EXPECT_EQ(dly[0], dly[1]);
+  EXPECT_EQ(0, memcmp(out[0].host, out[1].host, (size_t)R * N * 4));
+  nr_gpu_buf_free(&rx); nr_gpu_buf_free(&pil); nr_gpu_buf_free(&dt); nr_gpu_buf_free(&out[0]); nr_gpu_buf_free(&out[1]);
+}
+
 TEST(GpuPassStages, DlStagesSameBitsBothModels) {
   if (!have_gpu()) GTEST_SKIP();
   bool ok = false, lib = false;
