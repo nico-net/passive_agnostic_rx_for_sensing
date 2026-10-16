@@ -47,6 +47,175 @@ static int ncol_of(int BG, int R)
 
 
 
+
+/* ---- LDPCPERCB: argv[2] == "bench" [reps]: where does the DL GPU LDPC time per code block go? (no radio)
+ *   (a) CPU pre-step per TB: deinterleave + rate dematch + int8 pack, verbatim prep_segment() of nr_pdsch_gpu_ldpc_host.c
+ *   (b) kernel time (cudaEvent on the launch-only entry nr_pdsch_gpu_ldpc_dev, own stream, all SMs)
+ *   (c) wall of nr_pdsch_gpu_ldpc_run (module-owned stream: RT_ISOLATE / DISC_SMS apply; polls with ISAC_GPU_POLL_SLEEP_US)
+ * BG1 Z=384 (K = 8448), C = 1..32 code blocks, it_max 8 or 16, decodable or noise-only LLRs, rows R = 13 / 23 / 89. */
+#include "PHY/sse_intrin.h"
+typedef int (*cuvoid)(void);
+static double nowus(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return t.tv_sec * 1e6 + t.tv_nsec / 1e3;
+}
+static int cmpd(const void *a, const void *b) { return *(double *)a < *(double *)b ? -1 : *(double *)a > *(double *)b; }
+static void stat3(double *v, int n, double *mean, double *p50, double *p99)
+{
+  qsort(v, n, sizeof(double), cmpd);
+  double s = 0;
+  for (int i = 0; i < n; i++)
+    s += v[i];
+  *mean = s / n;
+  *p50 = v[n / 2];
+  *p99 = v[(int)(0.99 * (n - 1))];
+}
+static int (*nr_rate_matching_ldpc_rx)(uint32_t, uint8_t, uint16_t, int16_t *, int16_t *, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t);
+static void (*nr_deinterleaving_ldpc)(uint32_t, uint8_t, int16_t *, int16_t *);
+typedef int (*dev_fn)(const nr_gpu_ldpc_job_t *, int, const nr_gpu_buf_t *, nr_gpu_buf_t *, void *);
+static int bench(void *g, void *h, int reps)
+{
+  int (*cMalloc)(void **, size_t) = dlsym(g, "cudaMalloc");
+  int (*cSCreate)(void **, unsigned) = dlsym(g, "cudaStreamCreateWithFlags");
+  int (*cECreate)(void **) = dlsym(g, "cudaEventCreate");
+  int (*cERec)(void *, void *) = dlsym(g, "cudaEventRecord");
+  int (*cESync)(void *) = dlsym(g, "cudaEventSynchronize");
+  int (*cEEl)(float *, void *, void *) = dlsym(g, "cudaEventElapsedTime");
+  int (*cSSync)(void *) = dlsym(g, "cudaStreamSynchronize");
+  int (*cMemcpy)(void *, const void *, size_t, int) = dlsym(g, "cudaMemcpy");
+  dev_fn dev = (dev_fn)dlsym(g, "nr_pdsch_gpu_ldpc_dev");
+  nr_gpu_ldpc_run_fn run = (nr_gpu_ldpc_run_fn)dlsym(g, "nr_pdsch_gpu_ldpc_run");
+  nr_rate_matching_ldpc_rx = dlsym(h, "nr_rate_matching_ldpc_rx");
+  nr_deinterleaving_ldpc = dlsym(h, "nr_deinterleaving_ldpc");
+  if (!nr_rate_matching_ldpc_rx || !nr_deinterleaving_ldpc || !cMalloc || !cSCreate || !cECreate || !cERec || !cESync || !cEEl || !cSSync || !cMemcpy || !dev || !run) {
+    printf("BENCH setup failed: cudart symbols via libpdsch_gpu.so not found\n");
+    return 2;
+  }
+  void *st, *e0, *e1;
+  cSCreate(&st, 1);
+  cECreate(&e0);
+  cECreate(&e1);
+  nr_gpu_buf_t lb = {.bytes = NR_GPU_LDPC_DEV_IN_BYTES, .model = NR_GPU_MODEL_DIRECT}, bb = {.bytes = NR_GPU_LDPC_DEV_BITS_BYTES, .model = NR_GPU_MODEL_DIRECT};
+  if (cMalloc(&lb.dev, lb.bytes) || cMalloc(&bb.dev, bb.bytes)) {
+    printf("BENCH cudaMalloc failed\n");
+    return 2;
+  }
+  const int Z = 384, K = 8448, nmax = NR_GPU_LDPC_MAX_JOBS;
+  static int8_t in[NR_GPU_LDPC_MAX_JOBS][68 * 384 + 64];
+  static nr_gpu_ldpc_job_t jobs[NR_GPU_LDPC_MAX_JOBS];
+  static int8_t flat[NR_GPU_LDPC_MAX_JOBS * 68 * 384];
+  double *v = malloc(sizeof(double) * reps);
+  srand48(777);
+  const char *pe = getenv("ISAC_GPU_POLL_SLEEP_US"), *ri = getenv("ISAC_GPU_RT_ISOLATE"), *ds = getenv("ISAC_GPU_DISC_SMS"), *nc = getenv("ISAC_GPU_LDPC_NOCLUSTER");
+  printf("BENCH_CFG poll_sleep_us=%s rt_isolate=%s disc_sms=%s nocluster=%s reps=%d\n", pe ? pe : "unset", ri ? ri : "unset", ds ? ds : "unset", nc ? nc : "unset", reps);
+  /* (a) CPU pre-step, E per rows set: R13 -> 25344, R23 -> 12672, R89 -> 9504 (Qm 6) */
+  {
+    const int Rs[3] = {13, 23, 89}, Es[3] = {25344, 12672, 9504};
+    int16_t *llr = malloc(sizeof(int16_t) * 32 * 25344), *d = calloc(32 * 68 * 384, sizeof(int16_t)), *e = malloc(sizeof(int16_t) * 25344);
+    for (int i = 0; i < 32 * 25344; i++)
+      llr[i] = (int16_t)(60 * gauss());
+    for (int ri2 = 0; ri2 < 3; ri2++)
+      for (int C = 1; C <= 32; C *= 2) {
+        for (int rep = 0; rep < reps; rep++) {
+          const double a = nowus();
+          for (int r = 0; r < C; r++) {
+            const int E = Es[ri2];
+            int16_t *dd = d + (size_t)r * 68 * Z;
+            nr_deinterleaving_ldpc(E, 6, e, llr + (size_t)r * E);
+            nr_rate_matching_ldpc_rx(1277992, 1, Z, dd, e, C, 0, 1, E, 0, K - 2 * Z);
+            int16_t z[68 * 384 + 16] __attribute__((aligned(16)));
+            memset(z, 0, 2 * Z * sizeof(*z));
+            memcpy(z + 2 * Z, dd, (K - 2 * Z) * sizeof(*z));
+            memcpy(z + K, dd + (K - 2 * Z), (68 * Z - K) * sizeof(*z));
+            simde__m128i *pv = (simde__m128i *)&z, *pl = (simde__m128i *)(flat + (size_t)r * 68 * Z);
+            for (int i = 0, j = 0; j < ((68 * Z) >> 4) + 1; i += 2, j++)
+              pl[j] = simde_mm_packs_epi16(pv[i], pv[i + 1]);
+          }
+          v[rep] = nowus() - a;
+        }
+        double m, p5, p9;
+        stat3(v, reps, &m, &p5, &p9);
+        printf("BENCH_PRE R%d C=%d mean %.1f p50 %.1f p99 %.1f us (%.1f us/cb)\n", Rs[ri2], C, m, p5, p9, p5 / C);
+      }
+    /* CRC24B of one 8448-bit snapshot, the host's per-snapshot check */
+    uint8_t snap[1056];
+    for (int i = 0; i < 1056; i++)
+      snap[i] = (uint8_t)lrand48();
+    const double a = nowus();
+    int dummy = 0;
+    for (int i = 0; i < 2000; i++) {
+      snap[0] = (uint8_t)i;
+      dummy += check_crc(snap, K, CRC24_B);
+    }
+    printf("BENCH_CRC check_crc(8448 bit) %.2f us per snapshot (dummy %d)\n", (nowus() - a) / 2000, dummy);
+  }
+  /* (b) kernel and (c) run() wall */
+  const int Rs[3] = {13, 23, 89}, ncolR[3] = {68, 35, 27};
+  for (int ri2 = 0; ri2 < 3; ri2++)
+    for (int it = 8; it <= 16; it += 8)
+      for (int hop = 0; hop < 2; hop++)
+        for (int ci = 0; ci < 32; ci++) {
+          static const int clist[] = {1, 2, 4, 8, 16, 32}, cfine[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 16, 24, 32};
+          const int nl = getenv("ISAC_BENCH_FINE") ? 14 : 6;
+          if (ci >= nl)
+            break;
+          const int C = (getenv("ISAC_BENCH_FINE") ? cfine : clist)[ci];
+          if (getenv("ISAC_BENCH_R") && atoi(getenv("ISAC_BENCH_R")) != Rs[ri2])
+            continue;
+          for (int k = 0; k < C; k++) {
+            memset(in[k], 0, sizeof(in[k]));
+            for (int i = 2 * Z; i < ncolR[ri2] * Z; i++) {
+              const double x = hop ? 40.0 * gauss() : 12.0 * (1.0 + (ri2 == 0 ? 0.9 : 0.5) * gauss());
+              in[k][i] = (int8_t)(x > 127 ? 127 : x < -128 ? -128 : lround(x));
+            }
+            jobs[k] = (nr_gpu_ldpc_job_t){.BG = 1, .R = Rs[ri2], .Z = Z, .K = K, .it_max = it, .llr = in[k]};
+            cMemcpy((char *)lb.dev + (size_t)k * NR_GPU_LDPC_DEV_IN_STRIDE, in[k], NR_GPU_LDPC_DEV_IN_STRIDE, 1);
+          }
+          double kv[1024], lv[1024], wv[1024];
+          const int n = reps < 1024 ? reps : 1024;
+          for (int rep = -5; rep < n; rep++) {
+            float ms = 0;
+            const double a = nowus();
+            cERec(e0, st);
+            if (dev(jobs, C, &lb, &bb, st)) {
+              printf("BENCH dev failed\n");
+              return 3;
+            }
+            cERec(e1, st);
+            const double b = nowus();
+            cESync(e1);
+            cEEl(&ms, e0, e1);
+            if (rep >= 0) {
+              kv[rep] = ms * 1000.0;
+              lv[rep] = b - a;
+            }
+          }
+          int nsn = 0, syn = 0;
+          for (int rep = -5; rep < n; rep++) {
+            const double a = nowus();
+            if (run(jobs, C)) {
+              printf("BENCH run failed\n");
+              return 3;
+            }
+            if (rep >= 0)
+              wv[rep] = nowus() - a;
+          }
+          for (int k = 0; k < C; k++) {
+            nsn += jobs[k].nsnap;
+            syn += jobs[k].syn0;
+          }
+          double mk, pk, qk, ml, pl2, ql, mw, pw, qw;
+          stat3(kv, n, &mk, &pk, &qk);
+          stat3(lv, n, &ml, &pl2, &ql);
+          stat3(wv, n, &mw, &pw, &qw);
+          printf("BENCH_GPU R%d it=%d %s C=%2d | kernel mean %.1f p50 %.1f p99 %.1f (%.1f us/cb) | launch-cpu p50 %.1f | run-wall mean %.1f p50 %.1f p99 %.1f (%.1f us/cb) | nsnap/cb %.1f syn0 %d/%d\n",
+                 Rs[ri2], it, hop ? "noise  " : "decodbl", C, mk, pk, qk, pk / C, pl2, mw, pw, qw, pw / C, (double)nsn / C, syn, C);
+        }
+  return 0;
+}
+
 int main(int argc, char **argv)
 {
   logInit();
@@ -69,6 +238,8 @@ int main(int argc, char **argv)
     printf("LDPC_GPU_TEST setup failed (%s)\n", dlerror());
     return 2;
   }
+  if (argc > 2 && !strcmp(argv[2], "bench"))
+    return bench(g, h, argc > 3 ? atoi(argv[3]) : 100);
   if (nc) {
     nr_gpu_ldpc_stats_fn st = (nr_gpu_ldpc_stats_fn)dlsym(g, "nr_pdsch_gpu_ldpc_stats");
     uint64_t o[3] = {0};
