@@ -116,6 +116,15 @@ static int bench(void *g, void *h, int reps)
   srand48(777);
   const char *pe = getenv("ISAC_GPU_POLL_SLEEP_US"), *ri = getenv("ISAC_GPU_RT_ISOLATE"), *ds = getenv("ISAC_GPU_DISC_SMS"), *nc = getenv("ISAC_GPU_LDPC_NOCLUSTER");
   printf("BENCH_CFG poll_sleep_us=%s rt_isolate=%s disc_sms=%s nocluster=%s reps=%d\n", pe ? pe : "unset", ri ? ri : "unset", ds ? ds : "unset", nc ? nc : "unset", reps);
+  { /* device facts: 16 = MultiProcessorCount, 97 = MaxSharedMemoryPerBlockOptin, 81 = MaxSharedMemoryPerMultiprocessor, 82 = MaxRegistersPerMultiprocessor */
+    int (*cAttr)(int *, int, int) = dlsym(g, "cudaDeviceGetAttribute");
+    if (!cAttr) { void *rt = dlopen("libcudart.so", RTLD_NOW); if (rt) cAttr = dlsym(rt, "cudaDeviceGetAttribute"); }
+    if (cAttr) {
+      int smc = 0, so = 0, sm = 0, rg = 0;
+      cAttr(&smc, 16, 0); cAttr(&so, 97, 0); cAttr(&sm, 81, 0); cAttr(&rg, 82, 0);
+      printf("BENCH_DEV sm_count=%d smem_optin=%d smem_per_sm=%d regs_per_sm=%d\n", smc, so, sm, rg);
+    }
+  }
   /* (a) CPU pre-step, E per rows set: R13 -> 25344, R23 -> 12672, R89 -> 9504 (Qm 6) */
   {
     const int Rs[3] = {13, 23, 89}, Es[3] = {25344, 12672, 9504};
