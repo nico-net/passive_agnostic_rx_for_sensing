@@ -664,8 +664,13 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   const Graph *gr[NJ];
   for (int k = 0; k < n; k++) {
     const nr_gpu_ldpc_job_t &j = jobs[k];
-    if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || (j.K & 7) || (j.K >> 3) > NR_GPU_LDPC_KB_MAX)
+    if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || (j.K & 7) || (j.K >> 3) > NR_GPU_LDPC_KB_MAX) {
+      static std::atomic<int> logged{0};
+      if (logged.fetch_add(1) < 8) /* which of the four checks: a few lines per process */
+        fprintf(stderr, "SENSING: GPU_LDPC param refuse BG=%d Z=%d R=%d K=%d it_max=%d (K&7=%d K>>3=%d max %d, it_max-1 max %d)\n", j.BG, j.Z, j.R, j.K,
+                j.it_max, j.K & 7, j.K >> 3, NR_GPU_LDPC_KB_MAX, NR_GPU_LDPC_MAX_SNAP);
       return NR_GPU_LDPC_E_PARAM;
+    }
     if (!(gr[k] = graph(j.BG, j.Z, j.R)))
       return NR_GPU_LDPC_E_GRAPH_MISS;
   }
