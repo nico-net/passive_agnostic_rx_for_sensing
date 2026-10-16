@@ -1623,6 +1623,7 @@ static __thread bool t_gw_used = false, t_gw_ready = false; /* last decode: LLRs
 /* Reruns (equivalence checks, the lazy computation): no learning-state side effect -- no PT-RS / PRG
  * pick, no HARQ soft combining, no sweep feed, no LBRM latch, no BRANCHFO commit, no HARQ record. */
 static __thread bool t_quiet = false;
+static __thread bool t_qam_ab_alt; /* tentative: defined (false) below; read by the GPUPASS retry gate */
 static __thread bool t_last_hq_retx = false; /* last decode combined a retransmission into a soft buffer */
 /* CB0 capture of the next LDPC call (GW_EQUIV / PROBE_EQUIV_GW): the rate-de-matched code block 0 the
  * segment decoder built (TB d buffer, r = 0) and its LDPC verdict. */
@@ -3139,7 +3140,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     extern __thread int nr_pdsch_chest_occ_override;
     static int gp_retry_old = -1; /* ISAC_GPU_PASS_RETRY_OLD (nr_gpu_pass_retry.h) */
     if (gp_retry_old < 0) { const char *e_ = getenv("ISAC_GPU_PASS_RETRY_OLD"); gp_retry_old = e_ && atoi(e_) == 1; }
-    gp_gate = nr_gpu_pass_retry_to_old(gp_retry_old, t_pdtim_body, t_recov_mode == 2) ? NR_GPU_PASS_GATE_RETRY
+    gp_gate = nr_gpu_pass_retry_to_old(gp_retry_old, t_pdtim_body, t_recov_mode == 2, t_quiet || t_qam_ab_alt || t_decode_tdra_attempt != 0) ? NR_GPU_PASS_GATE_RETRY
             : (seg_path && nseg > NR_GPU_PASS_MAX_SEG) ? NR_GPU_PASS_GATE_SEG /* more segments than the largest class; fewer run the segmented classes */
             : (t_probe_first_seg || probe_last_sym >= 0 || t_probe_no_horizon) ? NR_GPU_PASS_GATE_PROBE
             : (t_share.on || t_chest_bypass) ? NR_GPU_PASS_GATE_SHARE

@@ -1741,8 +1741,10 @@ TEST(GpuPassZUlSnrGate, Arithmetic) {
 /* Task 8b: ISAC_GPU_PASS_RETRY_OLD sends exactly the retry bodies (2nd+ body of a call, every worker body) to the old path, never the first body, never with the flag off */
 TEST(GpuPassRetry, OnlyRetryBodiesGoOld)
 {
-  EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 1, 0), 0);
-  EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 2, 0), 1);
-  EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 1, 1), 1);
-  EXPECT_EQ(nr_gpu_pass_retry_to_old(0, 3, 1), 0);
+  EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 1, 0, 0), 0);
+  EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 2, 0, 0), 1);
+  EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 1, 1, 0), 1);
+  EXPECT_EQ(nr_gpu_pass_retry_to_old(0, 3, 1, 0), 0);
+  EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 2, 0, 1), 0); /* quiet / predicted / A-B alternate body keeps the pass */
+  EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 1, 1, 1), 0);
 }
