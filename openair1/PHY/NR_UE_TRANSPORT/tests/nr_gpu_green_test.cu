@@ -21,6 +21,7 @@ int main(void)
 {
   setenv("ISAC_GPU_DISC_SMS", "16", 1);
   setenv("ISAC_GPU_RT_ISOLATE", "1", 1);
+  setenv("ISAC_GPU_DISC_SMS_LOW", "8", 1);
   int n = 0;
   if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1) { printf("GPU_GREEN_TEST skipped (no device)\n"); return 77; }
   cudaStream_t disc, rt;
@@ -51,6 +52,30 @@ int main(void)
   const bool disjoint = !((m[0] & m[4]) | (m[1] & m[5]) | (m[2] & m[6]) | (m[3] & m[7]));
   const bool ok = e == cudaSuccess && values && disjoint && count(m) > 0 && count(m) <= sms / 2 && count(m + 4) > 0
       && count(m) + count(m + 4) <= sms;
+  /* dynamic partition: a LOW stream exists, is picked only while a large grant is in flight, and a kernel queued on the HIGH stream before the switch finishes intact */
+  cudaStream_t low = 0;
+  bool dyn = nr_gpu_green_stream(&low, 0, false, -1);
+  dyn = dyn && nr_gpu_green_disc_pick(disc, low, 0) == disc && nr_gpu_green_disc_pick(disc, low, 1) == low && nr_gpu_green_disc_pick(disc, 0, 1) == disc;
+  if (dyn) {
+    unsigned *m2;
+    int *y, hb[256], bb[256];
+    cudaMallocManaged(&m2, 8 * sizeof(unsigned));
+    cudaMalloc(&y, 64 * sms * 128 * sizeof(int));
+    for (int i = 0; i < 8; i++) m2[i] = 0;
+    for (int i = 0; i < 256; i++) hb[i] = i;
+    cudaMemsetAsync(y, 0, 64 * sms * 128 * sizeof(int), disc);
+    cudaMemcpyAsync(y, hb, sizeof(hb), cudaMemcpyHostToDevice, disc);
+    where<<<64 * sms, 128, 0, disc>>>(m2, y);       /* queued before the switch */
+    cudaStream_t s2 = nr_gpu_green_disc_pick(disc, low, 1); /* switch while it may still run */
+    cudaStreamSynchronize(disc);                    /* the consumer's job end */
+    where<<<64 * sms, 128, 0, s2>>>(m2 + 4, y);
+    cudaMemcpyAsync(bb, y, sizeof(bb), cudaMemcpyDeviceToHost, s2);
+    dyn = cudaStreamSynchronize(s2) == cudaSuccess;
+    for (int i = 0; i < 256; i++) dyn &= bb[i] == i + 2;
+    dyn = dyn && count(m2 + 4) > 0 && count(m2 + 4) < count(m2);
+  }
+  printf("GPU_GREEN_TEST dyn=%d\n", dyn);
+  if (!dyn) return 1;
   printf("GPU_GREEN_TEST ok=%d sms=%d discovery=%d realtime=%d disjoint=%d values=%d cuda=%s\n", ok, sms, count(m),
          count(m + 4), disjoint, values, cudaGetErrorString(e));
   return ok ? 0 : 1;

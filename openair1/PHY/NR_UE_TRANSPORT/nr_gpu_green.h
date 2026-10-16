@@ -26,9 +26,10 @@ static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, i
 #if CUDART_VERSION >= 12050
   static int state = -1; /* -1 not read, 0 off, 1 on */
   static int sms, isolate;
-  static CUgreenCtx green[2], rgreen[8];
-  static bool made[2], rmade[8];
-  static CUdevResource part[2], rpart[8];
+  static CUgreenCtx green[2], rgreen[8], lgreen;
+  static bool made[2], rmade[8], lmade;
+  static CUdevResource part[2], rpart[8], lpart, all;
+  static int lsms;
   static unsigned ngrp;
   static CUdevice dev;
   static CUresult (*desc_gen)(CUdevResourceDesc *, CUdevResource *, unsigned);
@@ -47,7 +48,6 @@ static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, i
     for (int i = 0; i < 6; ++i)
       if (cudaGetDriverEntryPointByVersion(name[i], &f[i], 12050, cudaEnableDefault, &q) != cudaSuccess
           || q != cudaDriverEntryPointSuccess) f[i] = nullptr;
-    CUdevResource all;
     unsigned groups = 1;
     int device = 0;
     cudaGetDevice(&device);
@@ -83,7 +83,32 @@ static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, i
         fprintf(stderr, "[GPU] ISAC_GPU_RT_PARTS=%d: %u real-time SM groups of %u SMs\n", want, ngrp ? ngrp : 1u,
                 ngrp ? rpart[0].sm.smCount : part[1].sm.smCount);
     }
+    /* Dynamic partition: ISAC_GPU_DISC_SMS_LOW (> 0) is a smaller discovery context (the leading SMs, so a subset of the discovery ones); idx == -1 asks for it. */
+    const char *le = getenv("ISAC_GPU_DISC_SMS_LOW");
+    lsms = le ? atoi(le) : 0;
+    if (lsms > 0 && lsms < (int)part[0].sm.smCount) {
+      CUdevResource lrem;
+      unsigned g = 1;
+      const CUresult lrc = ((CUresult(*)(CUdevResource *, unsigned *, const CUdevResource *, CUdevResource *, unsigned, unsigned))f[2])(
+          &lpart, &g, &all, &lrem, 0, (unsigned)lsms); /* from all SMs: a split part cannot be split again (rc 915); the driver hands out the same leading SMs */
+      if (lrc != CUDA_SUCCESS || g != 1) {
+        fprintf(stderr, "[GPU] ISAC_GPU_DISC_SMS_LOW=%d: split of %u SMs failed (rc=%d groups=%u), single discovery partition\n", lsms, part[0].sm.smCount, (int)lrc, g);
+        lsms = 0;
+      }
+      cudaGetLastError();
+    } else lsms = 0;
+    if (lsms) fprintf(stderr, "[GPU] ISAC_GPU_DISC_SMS_LOW=%d: %u SMs while a large real grant is in flight\n", lsms, lpart.sm.smCount);
     state = 1;
+  }
+  if (!rt && idx == -1) { /* the LOW discovery stream; false when not configured (the caller keeps using the normal one) */
+    if (state != 1 || !lsms) return false;
+    if (!lmade) {
+      CUdevResourceDesc desc;
+      if (desc_gen(&desc, &lpart, 1) != CUDA_SUCCESS || ctx_create(&lgreen, desc, dev, CU_GREEN_CTX_DEFAULT_STREAM) != CUDA_SUCCESS)
+        return false;
+      lmade = true;
+    }
+    return stream_create((CUstream *)s, lgreen, CU_STREAM_NON_BLOCKING, priority) == CUDA_SUCCESS;
   }
   if (state != 1 || (rt && !isolate)) return false;
   if (rt && ngrp) {
@@ -108,6 +133,14 @@ static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, i
   (void)s; (void)priority; (void)rt; (void)idx;
   return false;
 #endif
+}
+/* Dynamic discovery partition (ISAC_GPU_DISC_SMS_LOW, default off). A discovery consumer creates its normal stream and, through
+ * nr_gpu_green_stream(&lo, prio, false, -1), a second one on fewer SMs (lo stays 0 when not configured). At the START of each job, with
+ * its previous job synchronised, it calls nr_gpu_green_disc_pick(hi, lo, nr_gpu_budget_rt_large_active()) and uses the result for the whole job:
+ * a stream is never switched under a kernel that is already queued, so in-flight work finishes untouched. */
+static inline cudaStream_t nr_gpu_green_disc_pick(cudaStream_t hi, cudaStream_t lo, int large_active)
+{
+  return lo && large_active > 0 ? lo : hi;
 }
 /* GPUALLOC ISAC_PDSCH_GPU_CTX_LIMIT=N (default off): PDSCH FEP/demod/LDPC pool contexts handed out are limited to the
  * first N (>= 1), so at most N consumers have GPU work in flight and the others wait on the CPU side. */
