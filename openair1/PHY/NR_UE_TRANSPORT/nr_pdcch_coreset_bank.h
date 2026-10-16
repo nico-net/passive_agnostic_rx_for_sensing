@@ -70,6 +70,8 @@ typedef struct {
   uint32_t stale_proof_hash;
   uint16_t stale_proof_rnti;
   uint32_t accepts_window;
+  uint32_t accepts_total; /* independent (non-duplicate, distinct-slot) CRC-valid DCIs on this entry, never reset; relaxed-atomic access */
+  uint64_t confirm_slot;
   uint32_t verified_epoch;
   uint8_t state;
 } nr_pdcch_discovered_coreset_t;
@@ -110,6 +112,7 @@ int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t 
  * defers compaction until its final reader leaves, so borrowed cfg/entry pointers stay valid. */
 int nr_pdcch_coreset_bank_remove(int index);
 void nr_pdcch_coreset_bank_note_accept(int index, uint64_t slot);
+void nr_pdcch_coreset_bank_note_confirm(int index, uint64_t slot);
 void nr_pdcch_coreset_bank_note_dci(int index, uint64_t slot, uint16_t rnti, uint32_t payload_hash);
 void nr_pdcch_coreset_bank_tick(uint64_t slot, bool traffic_elsewhere,
                                 uint32_t t_stale_slots, uint32_t t_remove_slots);

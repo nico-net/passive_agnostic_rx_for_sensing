@@ -1,6 +1,8 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE /* FATTAILS DECSLOW: RUSAGE_THREAD, sched_getcpu */
 #endif
+#include "PHY/TOOLS/nr_admit.h"
+#include "common/utils/nr_bg_lane.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
 #include "common/utils/nr_core_plan.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
@@ -410,6 +412,8 @@ static int  g_depth = 0;
 static int  g_head  = 0; // next write slot
 static int  g_tail  = 0; // next read slot
 static int  g_count = 0; // entries currently held
+static _Atomic int g_real_n; // full-decode (non-probe) entries in the ring; written under g_lock, read lock-free (ISAC_BG_LANE gate)
+#define REAL_ADD(j, d) do { if ((j).layout_probe == 0) atomic_fetch_add_explicit(&g_real_n, (d), memory_order_relaxed); } while (0)
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
@@ -518,6 +522,7 @@ static void dmrs_scan_run(dmrs_scan_slot_t *c, uint16_t rnti, int64_t abs_slot, 
 static void *dmrs_scan_worker(void *arg)
 {
   (void)arg;
+  nr_bg_lane_enter();
   for (;;) {
     pthread_mutex_lock(&g_dq_mu);
     while (g_dq_n == 0) pthread_cond_wait(&g_dq_cv, &g_dq_mu);
@@ -528,7 +533,11 @@ static void *dmrs_scan_worker(void *arg)
     pthread_mutex_lock(&g_scan_mu);
     dmrs_scan_slot_t *c = &g_scan_cache[j.abs_slot & 31];
     pthread_mutex_unlock(&g_scan_mu);
-    dmrs_scan_run(c, j.rnti, j.abs_slot, j.nr_slot, j.sym, j.full, j.nant, j.N, j.fco, j.n_rb, j.sps, rx);
+    const uint64_t t_adm = nr_admit_now_ns();
+    if (nr_admit_try(NR_ADMIT_DMRS_SCAN, t_adm, t_adm + 1000000000ull, 0)) { /* ISAC_BG_LANE: else the slot is dropped, the next one is fresher */
+      dmrs_scan_run(c, j.rnti, j.abs_slot, j.nr_slot, j.sym, j.full, j.nant, j.N, j.fco, j.n_rb, j.sps, rx);
+      nr_admit_done(NR_ADMIT_DMRS_SCAN, nr_admit_now_ns() - t_adm);
+    }
     pthread_mutex_lock(&g_dq_mu); /* the slot stays ours until the scan is done: the producer cannot overwrite the copy */
     g_dq_head = (g_dq_head + 1) % DSCAN_Q;
     g_dq_n--;
@@ -1336,7 +1345,14 @@ static int cdmrs_async_on(void)
 static void cdmrs_run(void *arg)
 {
   cdmrs_obs_t *o = arg;
+  const uint64_t t_adm = nr_admit_now_ns();
+  if (!nr_admit_try(NR_ADMIT_DMRS_ID, t_adm, t_adm + 1000000000ull, 0)) { /* ISAC_BG_LANE: critical lane busy, the observation is dropped */
+    free(o->row);
+    free(o);
+    return;
+  }
   coreset_dmrs_observe(o, o->row, 1);
+  nr_admit_done(NR_ADMIT_DMRS_ID, nr_admit_now_ns() - t_adm);
   free(o->row);
   free(o);
   const uint64_t n = __atomic_load_n(&g_cdmrs_q.done, __ATOMIC_RELAXED) + 1;
@@ -1354,6 +1370,12 @@ typedef struct {
 static void dldmrs_run(void *arg)
 {
   dldmrs_obs_t *o = arg;
+  const uint64_t t_adm = nr_admit_now_ns();
+  if (!nr_admit_try(NR_ADMIT_DMRS_ID, t_adm, t_adm + 1000000000ull, 0)) {
+    free(o->row);
+    free(o);
+    return;
+  }
   pthread_mutex_lock(&g_dl_dmrs_id_lock[o->ns]);
   nr_dmrs_id_2stage_t *dst = &g_dl_dmrs_id[o->ns];
   if (!g_dl_dmrs_id_init[o->ns]) { nr_dmrs_id_2stage_init(dst, "PDSCH", o->nid_cell); g_dl_dmrs_id_init[o->ns] = true; }
@@ -1361,6 +1383,7 @@ static void dldmrs_run(void *arg)
     nr_dmrs_id_2stage_accumulate(dst, o->row, o->ofdm, o->start_sc, o->rb_offset, o->nrb, o->n_rb_dl, o->nsym, o->slot, o->sym,
                                  o->nscid, o->normal, o->cfg_type);
   pthread_mutex_unlock(&g_dl_dmrs_id_lock[o->ns]);
+  nr_admit_done(NR_ADMIT_DMRS_ID, nr_admit_now_ns() - t_adm);
   free(o->row);
   free(o);
 }
@@ -1485,6 +1508,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     }
     real_first_locked();
     job    = g_ring[g_tail];
+    REAL_ADD(job, -1);
     uint64_t enqueue_ns = g_ring_ns[g_tail];
     g_tail = (g_tail + 1) % g_depth;
     g_count--;
@@ -1496,6 +1520,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     while (g_count > 0 && n_more < (atomic_load(&g_gpu) ? NR_PDSCH_PASSIVE_SLOT_GROUP_MAX : 8)
            && g_ring[g_tail].absolute_slot == job.absolute_slot) {
       more_ns[n_more] = g_ring_ns[g_tail];
+      REAL_ADD(g_ring[g_tail], -1);
       more[n_more++] = g_ring[g_tail];
       g_tail = (g_tail + 1) % g_depth;
       g_count--;
@@ -2820,6 +2845,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   g_head     = 0;
   g_tail     = 0;
   g_count    = 0;
+  atomic_store(&g_real_n, 0);
   g_nthreads = n_consumers;
   atomic_store_explicit(&g_stop, 0, memory_order_relaxed);
   atomic_store_explicit(&g_running, 1, memory_order_release);
@@ -3043,6 +3069,7 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
       return false;
     }
     if (victim >= 0) {
+      REAL_ADD(g_ring[(g_tail + victim) % g_depth], -1);
       release_solver(&g_ring[(g_tail + victim) % g_depth]);
       for (int i = victim; i > 0; i--) {
         g_ring[(g_tail + i) % g_depth] = g_ring[(g_tail + i - 1) % g_depth];
@@ -3070,6 +3097,7 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
     int victim = 0;
     while (victim < g_count && g_ring[(g_tail + victim) % g_depth].rnti != top_rnti) victim++;
     if (victim >= g_count) victim = 0;
+    REAL_ADD(g_ring[(g_tail + victim) % g_depth], -1);
     release_solver(&g_ring[(g_tail + victim) % g_depth]);
     for (int i = victim; i > 0; i--) { /* shift the entries older than the victim up by one */
       g_ring[(g_tail + i) % g_depth] = g_ring[(g_tail + i - 1) % g_depth];
@@ -3084,6 +3112,7 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
     atomic_fetch_add_explicit(&g_age_hist[job->layout_probe != 0][nr_passive_lag_bin(age)], 1, memory_order_relaxed);
   }
   g_ring[g_head] = *job;
+  REAL_ADD(*job, 1);
   g_ring_ns[g_head] = enqueue_ns;
   g_head         = (g_head + 1) % g_depth;
   g_count++;
@@ -3095,14 +3124,9 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
  *   the pool is not running. A waiting job means every consumer is busy. Caller: passive_decode_retry() (ISAC_PDSCH_RETRY_YIELD). */
 int nr_pdsch_passive_queue_backlog_real(void)
 {
-  if (!atomic_load_explicit(&g_running, memory_order_acquire) || g_count == 0) /* racy pre-check: the common case takes no lock */
+  if (!atomic_load_explicit(&g_running, memory_order_acquire))
     return 0;
-  pthread_mutex_lock(&g_lock);
-  int n = 0;
-  for (int i = 0; i < g_count; i++)
-    n += g_ring[(g_tail + i) % g_depth].layout_probe == 0;
-  pthread_mutex_unlock(&g_lock);
-  return n;
+  return atomic_load_explicit(&g_real_n, memory_order_relaxed); /* lock-free: polled by the background gate */
 }
 
 /* nr_pdsch_passive_queue_p99_dump: P99 tail-decomposition lines (only with ISAC_PDTIM_CLASS=1): PDSCH job age at enqueue

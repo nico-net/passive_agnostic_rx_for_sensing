@@ -122,6 +122,8 @@ extern void (*nr_csirs_disc_process_hook)(nr_csirs_disc_ring_t *ring);
 extern uint64_t csirs_disc_feed_drops;
 int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant);
 void nr_csirs_disc_stop(void);
+/* ISAC_BG_LANE gate of one worker iteration: 1 = run the processing hook now. Data that arrived while skipped stays in the ring (*deferred), so the next admitted run sees the newest batch. */
+int nr_csirs_disc_should_run(int drained, int *deferred, int admitted);
 bool nr_csirs_disc_running(void);
 nr_csirs_disc_ring_t *nr_csirs_disc_worker_ring(void);
 /* U5 installs the worker pipeline before U1 allocates its ring. */

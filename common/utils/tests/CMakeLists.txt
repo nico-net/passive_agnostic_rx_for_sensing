@@ -14,7 +14,7 @@ add_executable(test_bits test_bits.c)
 add_dependencies(tests test_bits)
 add_test(NAME test_bits COMMAND ./test_bits)
 
-add_executable(test_nr_core_plan test_nr_core_plan.cpp ../nr_core_plan.c)
+add_executable(test_nr_core_plan test_nr_core_plan.cpp ../nr_core_plan.c ../nr_bg_lane.c)
 target_include_directories(test_nr_core_plan PRIVATE ..)
 target_link_libraries(test_nr_core_plan PRIVATE GTest::gtest pthread)
 add_dependencies(tests test_nr_core_plan)

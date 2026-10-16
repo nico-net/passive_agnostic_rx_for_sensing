@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 
 #define _GNU_SOURCE
+#include "common/utils/nr_bg_lane.h"
 #include "nr_csirs_disc.h"
 
 #include <errno.h>
@@ -12,6 +13,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "PHY/TOOLS/nr_admit.h"
 #include "PHY/defs_nr_common.h"
 
 const uint16_t nr_csirs_disc_periods[NR_CSIRS_DISC_NUM_PERIODS] = {4, 5, 8, 10, 16, 20, 32, 40, 64, 80, 160, 320, 640};
@@ -390,6 +392,13 @@ int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r,
   return index;
 }
 
+int nr_csirs_disc_should_run(int drained, int *deferred, int admitted)
+{
+  if (drained <= 0 && !*deferred) return 0;
+  *deferred = !admitted;
+  return admitted;
+}
+
 /* disc_worker_main: thread body of the CSI-RS discovery worker: waits for a batch of slots, drains the TD front end, and runs nr_csirs_disc_process() (through the hook) on the ring or its snapshot.
  *   Also drains the blind search's discovery queue (nr_csirs_blind_rt_discovery_drain) each time it wakes. Wakes every 5 ms at least. Runs on core ISAC_CSIRS_DISC_CORE with SCHED_OTHER.
  *   Started by nr_csirs_disc_start() and stopped by nr_csirs_disc_stop().
@@ -404,9 +413,11 @@ static void *disc_worker_main(void *unused)
     CPU_SET(g_worker.core, &set);
     pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
   }
+  nr_bg_lane_enter();
 
   pthread_mutex_lock(&g_worker.wake_lock);
   uint64_t seen = 0;
+  int deferred = 0; /* a drained batch is waiting in the ring because the critical lane was busy */
   while (!g_worker.stop) {
     while (!g_worker.stop && seen == __atomic_load_n(&g_worker.wake_generation, __ATOMIC_ACQUIRE)
            && (!nr_csirs_disc_td_pending || nr_csirs_disc_td_pending() < g_worker.batch)) {
@@ -424,12 +435,17 @@ static void *disc_worker_main(void *unused)
     int drained=nr_csirs_disc_td_drain?nr_csirs_disc_td_drain(&g_worker.ring):0;
     seen = __atomic_load_n(&g_worker.wake_generation, __ATOMIC_ACQUIRE);
     void (*hook)(nr_csirs_disc_ring_t *) = nr_csirs_disc_process_hook;
-    if(drained>0) {
+    const uint64_t t_adm = nr_admit_now_ns();
+    const int work = drained > 0 || deferred || (!nr_csirs_disc_td_drain && g_worker.ring.written != g_worker.snapshot.written);
+    const int admitted = !work || nr_admit_try(NR_ADMIT_CSIRS, t_adm, t_adm + 1000000000ull, 0); /* idle wake-ups are not jobs */
+    if(nr_csirs_disc_should_run(drained, &deferred, admitted)) {
       /* TD mode has a single FD writer: this worker. The pipeline mutex
        * serializes processing with epoch reset, so no second IQ copy is needed. */
       if(hook) hook(&g_worker.ring);
-    } else if (!nr_csirs_disc_td_drain && g_worker.ring.written!=g_worker.snapshot.written && nr_csirs_disc_ring_snapshot(&g_worker.ring, &g_worker.snapshot) == 0) {
+      nr_admit_done(NR_ADMIT_CSIRS, nr_admit_now_ns() - t_adm);
+    } else if (drained <= 0 && !deferred && admitted && !nr_csirs_disc_td_drain && g_worker.ring.written!=g_worker.snapshot.written && nr_csirs_disc_ring_snapshot(&g_worker.ring, &g_worker.snapshot) == 0) {
       if(hook) hook(&g_worker.snapshot);
+      nr_admit_done(NR_ADMIT_CSIRS, nr_admit_now_ns() - t_adm);
     }
     pthread_mutex_lock(&g_worker.wake_lock);
   }
