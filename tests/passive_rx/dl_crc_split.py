@@ -29,7 +29,7 @@ def split(paths, margin=2.0):
                     continue
                 ok = int(kv['crc']); rnti = int(raw.split('rnti=')[1].split()[0], 16)
                 dims = {'Nl': kv['Nl'], 'tbl': kv['tbl'], 'Qm': kv['Qm'], 'nsym': kv['nsym'], 'cdm': kv.get('cdm', '?'),
-                        'rnti_class': 'si' if rnti == 0xffff else 'ra' if rnti < 0x100 else 'c',
+                        'mcs': kv['mcs'], 'rnti_class': 'si' if rnti == 0xffff else 'ra' if rnti < 0x100 else 'c',
                         'rb_bucket': rb_bucket(int(kv['rb'].split('+')[1])), 'cb_bucket': cb_bucket(int(kv.get('cb', 1))),
                         'core': kv.get('core', '?')}
             except (KeyError, ValueError, IndexError):
