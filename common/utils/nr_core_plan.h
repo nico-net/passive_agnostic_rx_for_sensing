@@ -41,6 +41,9 @@ int nr_core_machine_read(nr_core_machine_t *, const char *usrp_args, char *error
 int nr_core_plan_activate(const nr_core_machine_t *, const nr_core_plan_t *);
 bool nr_core_plan_active(void);
 int nr_core_plan_cpu(nr_core_role_t, int index, int fallback);
+/* True for a core the critical lane uses (UE/ring/UHD/DL/UL/sync/scan/PDSCH/PUSCH roles); false without an active plan. */
+bool nr_core_plan_is_critical(int core);
+void nr_core_plan_mark_critical_for_test(int core); /* core < 0 clears */
 /* threadCreate hook: affinity is set in pthread attributes BEFORE the thread can run.
  * Background workers use SCHED_OTHER so forced sharing cannot starve lower FIFO priorities. */
 int nr_core_plan_thread_attr(pthread_attr_t *, int affinity, int *priority);

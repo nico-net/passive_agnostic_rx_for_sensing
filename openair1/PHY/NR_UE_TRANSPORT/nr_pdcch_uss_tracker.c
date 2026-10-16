@@ -1,4 +1,6 @@
 #define _GNU_SOURCE
+#include "common/utils/nr_bg_lane.h"
+#include "PHY/TOOLS/nr_admit.h"
 #include "common/utils/nr_core_plan.h"
 #include "nr_pdcch_uss_tracker.h"
 
@@ -375,6 +377,7 @@ static void *tracker_worker(void *unused)
       affinity_rc = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
   }
   pthread_setname_np(pthread_self(), "pdcchUssHash");
+  nr_bg_lane_enter();
   LOG_A(PHY, "SENSING: USS_TRACK worker policy=SCHED_OTHER sched_rc=%d core=%d affinity_rc=%d\n",
         sched_rc, core, affinity_rc);
   for (;;) {
@@ -404,8 +407,14 @@ static void *tracker_worker(void *unused)
       }
     }
     pthread_mutex_unlock(&g_lock);
-    if (n >= USS_TRACK_MIN_OBS)
-      score_snapshot(job.state, generation, &geometry, sample, n);
+    if (n >= USS_TRACK_MIN_OBS) {
+      /* ISAC_BG_LANE: the history stays in the tracker, so a skipped round loses nothing (the next job rescans it) */
+      const uint64_t t0 = nr_admit_now_ns();
+      if (nr_admit_try(NR_ADMIT_USS, t0, t0 + 1000000000ull, 0)) {
+        score_snapshot(job.state, generation, &geometry, sample, n);
+        nr_admit_done(NR_ADMIT_USS, nr_admit_now_ns() - t0);
+      }
+    }
   }
   return NULL;
 }

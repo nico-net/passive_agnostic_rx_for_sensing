@@ -1,6 +1,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE /* T26c: CPU_SET / sched_getaffinity for the janon worker */
 #endif
+#include "common/utils/nr_bg_lane.h"
 #include "nr_pdsch_gpu_exact.h"
 #include <sched.h>
 #include <unistd.h>
@@ -9,6 +10,7 @@
 #include "nr_passive_cfg_epoch.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_passive_sample_lifetime.h"
+#include "PHY/TOOLS/nr_admit.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -2780,6 +2782,8 @@ typedef struct {
   uint64_t geom;
   uint16_t nid, rnti_min, rnti_max;
   int frame, slot, n;
+  uint64_t enq_ns; /* ISAC_BG_LANE: queue-entry time (freshness deadline) */
+  uint8_t suspect; /* a length context is SUSPECT (reconfiguration): bypasses the idle gate */
   uint8_t nlen, lens[4]; /* T26c ISAC_PDCCH_JOINT_ANON_LEN_HINT: lengths already locked on this CORESET; 0 = all */
   janon_cand_t c[JANON_MAX_CAND];
 } janon_item_t;
@@ -2834,6 +2838,12 @@ static unsigned joint_anon_mm_max(int L);
  *   Posts each accepted (CORESET, length, RNTI, payload) to g_janon_hits under g_janon_mu; logs JOINT_ANON_ASYNC statistics every 2000 items.
  *   Started once by janon_start() on a SCHED_OTHER thread (ISAC_PDCCH_JOINT_ANON_CORE). Blocks on g_janon_cv when the queue is empty.
  */
+#define JANON_FRESH_NS 50000000ull /* an item older than 50 ms is stale: its CORESET has been offered newer bits */
+/* janon_should_run: admission of one queued anonymous-solver item (ISAC_BG_LANE); suspect = reconfiguration priority token. */
+static int janon_should_run(uint64_t now_ns, uint64_t deadline_ns, int suspect)
+{
+  return nr_admit_try(NR_ADMIT_JANON, now_ns, deadline_ns, suspect);
+}
 static void *janon_worker(void *arg)
 {
   (void)arg;
@@ -2853,6 +2863,7 @@ static void *janon_worker(void *arg)
     if (CPU_COUNT(&set) > 0)
       pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
     pthread_setname_np(pthread_self(), "pdcchJanon");
+    nr_bg_lane_enter(); /* ISAC_BG_LANE: shared background core list, nice 10 */
   }
   for (;;) {
     pthread_mutex_lock(&g_janon_mu);
@@ -2862,6 +2873,10 @@ static void *janon_worker(void *arg)
     g_janon_head = (g_janon_head + 1) % g_janon_cap;
     g_janon_n--;
     pthread_mutex_unlock(&g_janon_mu);
+    if (nr_admit_on() && !janon_should_run(nr_admit_now_ns(), it.enq_ns + JANON_FRESH_NS, it.suspect)) {
+      atomic_fetch_add_explicit(&g_janon_drop, 1, memory_order_relaxed); /* critical lane busy or item stale: the next occasion offers fresh bits */
+      continue;
+    }
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     for (int c = 0; c < it.n; c++) {
@@ -2909,8 +2924,9 @@ static void *janon_worker(void *arg)
       }
     }
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    atomic_fetch_add_explicit(&g_janon_busy_ns, (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ull + (uint64_t)(t1.tv_nsec - t0.tv_nsec),
-                              memory_order_relaxed);
+    const uint64_t dt_ns = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ull + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
+    atomic_fetch_add_explicit(&g_janon_busy_ns, dt_ns, memory_order_relaxed);
+    nr_admit_done(NR_ADMIT_JANON, dt_ns);
     const uint64_t d = atomic_fetch_add_explicit(&g_janon_done, 1, memory_order_relaxed) + 1;
     if ((d % 2000) == 0)
       LOG_A(PHY, "SENSING: JOINT_ANON_ASYNC items submitted=%llu done=%llu dropped=%llu hits=%llu worker_busy_ms=%llu\n",
@@ -2926,7 +2942,7 @@ static void janon_start(void);
  *   Flags: ISAC_PDCCH_JOINT_ANON_TOPK, _Q, _DISCOVERY, _LEN_HINT. Caller: run_occasion_one().
  */
 static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int slots_per_frame, uint16_t rmin, uint16_t rmax,
-                         const nr_pdcch_autodiscover_cand_t *cand, int n_cand, const int *lens, int nlen)
+                         const nr_pdcch_autodiscover_cand_t *cand, int n_cand, const int *lens, int nlen, int suspect)
 {
   static _Atomic int s_topk = -1;
   static pthread_once_t once = PTHREAD_ONCE_INIT;
@@ -3016,6 +3032,8 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
   }
   janon_item_t *it = &g_janon_q[(g_janon_head + g_janon_n) % g_janon_cap];
   it->geom = geom; it->nid = nid; it->frame = frame; it->slot = slot; it->rnti_min = rmin; it->rnti_max = rmax; it->n = m;
+  it->enq_ns = nr_admit_on() ? nr_admit_now_ns() : 0;
+  it->suspect = (uint8_t)(suspect != 0);
   { /* LEN_HINT: one item in 8 still sweeps every length, so a UE with a different DCI size is found too */
     static uint32_t s_k;
     const bool full_sweep = janon_stable_enabled()
@@ -6781,6 +6799,9 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
           int jl[4], njl = 0; /* T26c LEN_HINT: the DCI lengths already locked on this CORESET */
           static int s_lh = -1;
           if (s_lh < 0) s_lh = getenv("ISAC_PDCCH_JOINT_ANON_LEN_HINT") && atoi(getenv("ISAC_PDCCH_JOINT_ANON_LEN_HINT")) ? 1 : 0;
+          int janon_suspect = 0; /* reconfiguration suspected on this CORESET: discovery must not be throttled */
+          for (int i = 0; reconf_lengths_enabled() && dl_bank && i < NR_PDCCH_LENGTH_CONTEXTS; ++i)
+            janon_suspect |= dl_bank->ue[i].rnti && dl_bank->ue[i].len_state == NR_LEN_SUSPECT;
           for (int i = 0; s_lh && dl_bank && i < NR_PDCCH_LENGTH_CONTEXTS && njl < 4; ++i) {
             const int f = dl_bank->ue[i].rnti ? dl_bank->ue[i].found[0] : 0;
             bool dup = f <= 0;
@@ -6792,7 +6813,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             if (f > 0) jl[njl++] = f;
           }
           janon_submit(dl_geom, cfg->coreset_pdcch_dmrs_scrambling_id, proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame,
-                       sweep_ctx.rnti_min, sweep_ctx.rnti_max, disc_cand, disc_n_cand, jl, njl);
+                       sweep_ctx.rnti_min, sweep_ctx.rnti_max, disc_cand, disc_n_cand, jl, njl, janon_suspect);
           n_jhits = janon_take(dl_geom, jhits, JANON_MAX_HITS);
           g_sweep_cache.valid = 0;
         } else if (budget_active)
@@ -9900,6 +9921,13 @@ constdiag_done:;
       int v = 0;
       for (; v < nv && decodes_this_occasion < cfg->pdsch_max_per_slot; v++) {
         const nr_pdcch_blind_result_t *o = &rparsed[var[v].reading];
+        if (var[v].probe && nr_admit_on()) { /* ISAC_BG_LANE: a solver probe waits for an idle critical lane */
+          const uint64_t t_now = nr_admit_now_ns();
+          if (!nr_admit_try(NR_ADMIT_PROBE, t_now, t_now + JANON_FRESH_NS, 0)) {
+            nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_THROTTLE);
+            continue;
+          }
+        }
         if (!pdsch_gate_admit(&var[v], out.rnti, o->mcs, source_absolute_slot)) {
           if (var[v].probe) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_THROTTLE);
           continue;

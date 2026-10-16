@@ -1,11 +1,14 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_core_plan.h"
+#include "nr_bg_lane.h"
 #include <gtest/gtest.h>
 #include <sched.h>
 #include <cstring>
 #include <set>
 #include <climits>
 #include <unistd.h>
+#include <sys/resource.h>
+#include <initializer_list>
 
 static nr_core_machine_t host(int count, int dpdk_first = -1, bool big_little = false)
 {
@@ -239,6 +242,22 @@ TEST(CorePlan,ApplyBeforeThreadEntry)
   },::testing::ExitedWithCode(0),"CORE_PLAN");
 }
 
+static void test_mark_critical(std::initializer_list<int> cs){nr_core_plan_mark_critical_for_test(-1);for(int c:cs) nr_core_plan_mark_critical_for_test(c);}
+TEST(BgLane,DropsCriticalCores){
+  setenv("ISAC_BG_CORES","2,5,7,10,11",1);   // 5 = slot producer, 7 = PDSCH/scan
+  test_mark_critical({5,6,7,8,9});
+  int c[8];int n=nr_bg_lane_cores(c,8);
+  EXPECT_EQ(3,n);EXPECT_EQ(2,c[0]);EXPECT_EQ(10,c[1]);EXPECT_EQ(11,c[2]);
+}
+TEST(BgLane,EmptyListFallsBackUnpinned){
+  setenv("ISAC_BG_CORES","5,6",1);test_mark_critical({5,6});
+  int c[8];EXPECT_EQ(0,nr_bg_lane_cores(c,8));
+  setenv("ISAC_BG_LANE","1",1);
+  nr_bg_lane_enter();   // must not crash; unpinned nice 19
+  EXPECT_EQ(19,getpriority(PRIO_PROCESS,0));
+  setenv("ISAC_BG_CORES","x",1);EXPECT_EQ(0,nr_bg_lane_cores(c,8));
+  unsetenv("ISAC_BG_LANE");nr_core_plan_mark_critical_for_test(-1);
+}
 TEST(EnvList,Nth){
   unsetenv("DTQ_L");
   EXPECT_EQ(nr_env_list_nth("DTQ_L",0,-1),-1);

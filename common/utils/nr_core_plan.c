@@ -327,6 +327,26 @@ int nr_core_plan_cpu(nr_core_role_t role, int index, int fallback)
   if(active) for(int i=0;i<current.count;i++) if(current.a[i].role==role && current.a[i].index==index) return current.a[i].core;
   return fallback;
 }
+static unsigned char test_critical[NR_CP_MAX_CPUS];
+static bool test_critical_set;
+void nr_core_plan_mark_critical_for_test(int core)
+{
+  if (core < 0) { memset(test_critical, 0, sizeof(test_critical)); test_critical_set = false; }
+  else if (core < NR_CP_MAX_CPUS) { test_critical[core] = 1; test_critical_set = true; }
+}
+bool nr_core_plan_is_critical(int core)
+{
+  if (core < 0 || core >= NR_CP_MAX_CPUS) return false;
+  if (test_critical_set) return test_critical[core];
+  if (!active) return false;
+  for (int i = 0; i < current.count; i++) {
+    const nr_core_role_t r = current.a[i].role;
+    if (current.a[i].core == core && r != NR_CP_USS && r != NR_CP_POOL && r != NR_CP_GPU && r != NR_CP_CSIRS && r != NR_CP_NID
+        && r != NR_CP_STATS)
+      return true;
+  }
+  return false;
+}
 /* nr_core_plan_thread_attr: sets the affinity and priority of a thread attribute object from the plan: one CPU when affinity >= 0 (must be a background or real-time CPU), else every background CPU.
  *   Priority is cleared (set to 0) unless the CPU is a real-time one. Returns 0, or an error code. Caller: nr_core_plan_create().
  */
