@@ -62,6 +62,47 @@ void nr_csirs_blind_rt_test_eight_probations(void)
   nr_csirs_blind_pin(&g_zp, NR_CSIRS_BLIND_MAX_CONF, 10);
 }
 
+/* ISAC_CSIRS_FULL_VALID: the candidate set of a T-like snapshot (confirmed NZP 80/16 id 923 + unconfirmed row-16 winner 40/8
+ * id 923) for a grant of DM-RS id `pop`. out = {n_rule, n_erase, n_cand}; -1 when the export queue owns the state. */
+int nr_csirs_blind_rt_test_fullvalid(uint32_t slot, uint16_t pop, uint16_t dmrs_mask, int out[3])
+{
+  if (discovery_queue_ready)
+    return -1;
+  static nr_csirs_blind_state_t sv_st, sv_zp;
+  sv_st = g_st;
+  sv_zp = g_zp;
+  const int sv_on = g_on, sv_armed = g_armed, sv_rank = g_rank;
+  g_on = 1;
+  g_armed = 1;
+  g_rank = 0;
+  memset(&g_st, 0, sizeof(g_st));
+  memset(&g_zp, 0, sizeof(g_zp));
+  nr_csirs_candidate_t nzp = {.row = 1, .freq_domain = 0x4, .symb_l0 = 9, .cdm_type = 0, .freq_density = 3, .start_rb = 0, .nr_of_rbs = 217, .scramb_id = 923};
+  nr_csirs_candidate_t win = {.row = 16, .freq_domain = 0x3, .symb_l0 = 8, .symb_l1 = 12, .cdm_type = 3, .freq_density = 1, .start_rb = 0, .nr_of_rbs = 217, .scramb_id = 923};
+  g_st.n = g_zp.n = 2;
+  g_st.cand[0] = g_zp.cand[0] = nzp;
+  g_st.cand[1] = g_zp.cand[1] = win;
+  g_st.n_conf = 1;
+  g_st.conf_idx[0] = 0;
+  g_st.conf_period[0] = 80;
+  g_st.conf_off[0][0] = 16;
+  g_st.conf_n_off[0] = 1;
+  g_st.seed_period[1] = 40;
+  g_st.seed_offset[1] = 8;
+  g_st.seed_n_off[1] = 1;
+  fapi_nr_dl_config_csirs_pdu_rel15_t sel[NFAPI_MAX_NUM_CSI_RATEMATCH], er[NFAPI_MAX_NUM_CSI_RATEMATCH], cand[NFAPI_MAX_NUM_CSI_RATEMATCH];
+  int ns = 0, ne = 0;
+  out[2] = full_valid_cands(slot, pop, dmrs_mask, sel, &ns, er, &ne, cand);
+  out[0] = ns;
+  out[1] = ne;
+  g_st = sv_st;
+  g_zp = sv_zp;
+  g_on = sv_on;
+  g_armed = sv_armed;
+  g_rank = sv_rank;
+  return 0;
+}
+
 /* Deterministic FFT boundary: copy samples only for symbols actually requested by runtime. */
 int nr_slot_fep_ant(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *frame_parms,
                     unsigned int slot, unsigned int symbol, unsigned int ant,

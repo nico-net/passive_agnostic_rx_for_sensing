@@ -34,6 +34,7 @@ void nr_csirs_blind_rt_test_clear_pins(void);
 uint32_t nr_csirs_blind_rt_test_pin_left(int zp);
 void nr_csirs_blind_rt_test_eight_probations(void);
 int nr_csirs_blind_rt_test_post_grant(uint32_t slot, double score, int other_geometry);
+int nr_csirs_blind_rt_test_fullvalid(uint32_t slot, uint16_t pop, uint16_t dmrs_mask, int out[3]);
 /* get_csi_mapping_parms() is linked in for the footprint tests; OAI's AssertFatal and CONFIG code
  * reference these two from the softmodem's main(). */
 void *uniqCfg = nullptr;
@@ -2865,4 +2866,24 @@ TEST(CsirsBlindDiscovery, SuperperiodAndLateSecondPhaseRefineOneEntry)
   }
   ASSERT_EQ(st->n_conf, 1); EXPECT_EQ(st->conf_period[0], 160);
   EXPECT_EQ(st->conf_n_off[0], 2);
+}
+
+/* Fix B (ISAC_CSIRS_FULL_VALID): T snapshot, grant DM-RS id 1677, cell id 923 (docs/superpowers/reports/csd/T8-TIM-DEAD-20261016.md) */
+TEST(CsirsFullValid, CandidatesFillTheEmptyIdRuleSetPhaseGatedAndClashFree)
+{
+  int o[3];
+  ASSERT_EQ(nr_csirs_blind_rt_test_fullvalid(16, 1677, 0x804, o), 0);  /* confirmed NZP 80/16: withheld by the id rule */
+  EXPECT_EQ(o[0], 0);
+  EXPECT_EQ(o[2], 1);
+  ASSERT_EQ(nr_csirs_blind_rt_test_fullvalid(8, 1677, 0x804, o), 0);   /* unconfirmed winner 40/8: never seen by the rule */
+  EXPECT_EQ(o[0], 0);
+  EXPECT_EQ(o[1], 0);
+  EXPECT_EQ(o[2], 1);
+  ASSERT_EQ(nr_csirs_blind_rt_test_fullvalid(9, 1677, 0x804, o), 0);   /* other phase: nothing */
+  EXPECT_EQ(o[2], 0);
+  ASSERT_EQ(nr_csirs_blind_rt_test_fullvalid(8, 1677, 1 << 8, o), 0);  /* DM-RS on the CSI-RS symbol: clash filtered */
+  EXPECT_EQ(o[2], 0);
+  ASSERT_EQ(nr_csirs_blind_rt_test_fullvalid(16, 923, 0x804, o), 0);   /* the id rule stays the seed */
+  EXPECT_EQ(o[0], 1);
+  EXPECT_EQ(o[2], 0);
 }

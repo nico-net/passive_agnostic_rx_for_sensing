@@ -5876,6 +5876,11 @@ static nr_pdsch_passive_decode_status_t passive_decode_entry(PHY_VARS_NR_UE *ue,
   /* CSI-FULL hook (ISAC_CSIRS_FULL=1): this grant's own cell CSI-RS set for its PDSCH slot (nr_csirs_blind_rt.c) */
   if (!t_probe_first_seg && !t_quiet && grant->dci11 && grant->rnti_class == 0) /* ISAC_CSIRS_FULL_AB diagnostic */
     nr_csirs_full_ab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF);
+  if (!t_probe_first_seg && !t_quiet && grant->dci11 && grant->rnti_class == 0) {
+    t_quiet = true; /* the trial decodes must not teach the shared per-RNTI / layout state (ISAC_CSIRS_FULL_VALID) */
+    nr_csirs_full_validate(ue, proc, dlsch_config, freq_alloc, grant, rxdataF);
+    t_quiet = false;
+  }
   nr_csirs_full_apply(dlsch_config, (uint32_t)(proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx));
   static _Atomic int s_xab = -1;
   if (s_xab < 0) s_xab = getenv("ISAC_PDSCH_CSI_EXTENT_AB") && atoi(getenv("ISAC_PDSCH_CSI_EXTENT_AB")) ? 1 : 0;

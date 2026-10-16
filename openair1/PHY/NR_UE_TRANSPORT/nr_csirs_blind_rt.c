@@ -1874,6 +1874,7 @@ static void full_select(uint32_t slot, uint16_t pop, uint16_t dmrs_mask, fapi_nr
       list[(*nl)++] = all[i];
   }
 }
+static int full_evidence(uint32_t slot, int mode, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max);
 int nr_csirs_full_rate_match(uint32_t pdsch_absolute_slot, uint16_t population_id, uint16_t dmrs_mask,
                              fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
 {
@@ -1881,6 +1882,100 @@ int nr_csirs_full_rate_match(uint32_t pdsch_absolute_slot, uint16_t population_i
   full_select(pdsch_absolute_slot, population_id, dmrs_mask, out, &n, max, NULL, NULL, 0);
   return n;
 }
+/* ISAC_CSIRS_FULL_VALID=1 (default off; needs ISAC_CSIRS_FULL=1): CRC-validated rate-match set per slot phase (slot % 160).
+ * The id rule of full_select (scramblingID == the grant's DM-RS ID) withholds confirmed resources whose ID differs and never
+ * sees the UNCONFIRMED ones (discovery WINNERs / ZP evidence, full_evidence()); on a cell where the rule leaves a periodic
+ * phase CRC-dead that is the whole loss (T 2026-10-16: abs%40 = 8, 18). The rule stays the seed. Per phase, while it is
+ * unproven: every eligible grant is decoded twice on the same samples, once with the rule's set and once with the rule's set
+ * + candidates (withheld confirmed + unconfirmed evidence occurring in the slot, DM-RS-clash-free). The phase is retired
+ * "alive" after FV_OK_MIN CRC-OK of the rule's set alone, validated after FV_OK_MIN CRC-OK of the candidate set (and more than the
+ * rule's), given up after FV_TRY_CAP trials. A validated phase applies the candidates in nr_csirs_full_apply(). No per-cell constants. */
+enum { FV_KEYS = 160, FV_LEARN = 0, FV_ALIVE, FV_VALIDATED, FV_GAVEUP, FV_OK_MIN = 3, FV_TRY_CAP = 24 };
+static struct { unsigned base_try, base_ok, cand_ok; unsigned state; } g_fv[FV_KEYS];
+static int full_valid_enabled(void)
+{
+  static int s = -1;
+  if (s < 0) s = getenv("ISAC_CSIRS_FULL_VALID") && atoi(getenv("ISAC_CSIRS_FULL_VALID")) ? 1 : 0;
+  return s && nr_csirs_full_enabled();
+}
+/* The rule's set in sel/er (full_select, erase list always built), and cand[] = withheld confirmed NZP (er) + unconfirmed evidence not already in sel. */
+static int full_valid_cands(uint32_t slot, uint16_t pop, uint16_t dmrs_mask, fapi_nr_dl_config_csirs_pdu_rel15_t *sel, int *nsel,
+                            fapi_nr_dl_config_csirs_pdu_rel15_t *er, int *ner, fapi_nr_dl_config_csirs_pdu_rel15_t *cand)
+{
+  fapi_nr_dl_config_csirs_pdu_rel15_t ev[NFAPI_MAX_NUM_CSI_RATEMATCH];
+  *nsel = 0;
+  full_select(slot, pop, dmrs_mask, sel, nsel, NFAPI_MAX_NUM_CSI_RATEMATCH, er, ner, NFAPI_MAX_NUM_CSI_RATEMATCH);
+  const int n_ev = full_evidence(slot, 1, ev, NFAPI_MAX_NUM_CSI_RATEMATCH);
+  int nc = 0;
+  for (int i = 0; i < *ner + n_ev; i++) {
+    const fapi_nr_dl_config_csirs_pdu_rel15_t *c = i < *ner ? &er[i] : &ev[i - *ner];
+    bool dup = csirs_full_dmrs_clash(c, dmrs_mask);
+    for (int j = 0; j < *nsel && !dup; j++)
+      dup = csirs_full_same_geometry(&sel[j], c);
+    for (int j = 0; j < nc && !dup; j++)
+      dup = csirs_full_same_geometry(&cand[j], c);
+    if (!dup && nc < NFAPI_MAX_NUM_CSI_RATEMATCH && *nsel + nc < NFAPI_MAX_NUM_CSI_RATEMATCH)
+      cand[nc++] = *c;
+  }
+  return nc;
+}
+extern nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
+                                                                fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                                                const freq_alloc_bitmap_t *freq_alloc,
+                                                                const nr_pdsch_passive_grant_t *grant,
+                                                                c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                                                nr_pdsch_passive_decode_result_t *out) __attribute__((weak));
+void nr_csirs_full_validate(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
+                            const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant,
+                            c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
+{
+  if (!full_valid_enabled() || t_full_ab_depth > 0 || !nr_pdsch_passive_decode || !cfg)
+    return;
+  const uint32_t slot = (uint32_t)(proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx);
+  const unsigned k = slot % FV_KEYS;
+  if (__atomic_load_n(&g_fv[k].state, __ATOMIC_RELAXED) != FV_LEARN)
+    return;
+  fapi_nr_dl_config_csirs_pdu_rel15_t sel[NFAPI_MAX_NUM_CSI_RATEMATCH], er[NFAPI_MAX_NUM_CSI_RATEMATCH], cand[NFAPI_MAX_NUM_CSI_RATEMATCH];
+  int ns = 0, ne = 0;
+  const int nc = full_valid_cands(slot, cfg->dlDmrsScramblingId, cfg->dlDmrsSymbPos, sel, &ns, er, &ne, cand);
+  if (nc <= 0)
+    return; /* nothing to learn in this slot */
+  static int s_erase = -1;
+  if (s_erase < 0)
+    s_erase = getenv("ISAC_CSIRS_FULL_ERASE") && atoi(getenv("ISAC_CSIRS_FULL_ERASE")) ? 1 : 0;
+  bool ok[2];
+  t_full_ab_depth++;
+  for (int h = 0; h < 2; h++) { /* 0 = the rule, 1 = the rule + candidates */
+    fapi_nr_dl_config_dlsch_pdu_rel15_t c = *cfg;
+    memcpy(c.csiRsForRateMatching, sel, ns * sizeof(sel[0]));
+    c.numCsiRsForRateMatching = (uint8_t)ns;
+    if (h)
+      for (int i = 0; i < nc; i++)
+        c.csiRsForRateMatching[c.numCsiRsForRateMatching++] = cand[i];
+    if (nr_dlsch_csi_erase_set)
+      nr_dlsch_csi_erase_set(er, s_erase && !h ? ne : 0);
+    nr_pdsch_passive_decode_result_t o;
+    memset(&o, 0, sizeof(o));
+    ok[h] = nr_pdsch_passive_decode(ue, proc, &c, fa, grant, rxdataF, &o) == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+  }
+  t_full_ab_depth--;
+  const unsigned bt = __atomic_add_fetch(&g_fv[k].base_try, 1, __ATOMIC_RELAXED);
+  const unsigned bo = ok[0] ? __atomic_add_fetch(&g_fv[k].base_ok, 1, __ATOMIC_RELAXED) : g_fv[k].base_ok;
+  const unsigned co = ok[1] ? __atomic_add_fetch(&g_fv[k].cand_ok, 1, __ATOMIC_RELAXED) : g_fv[k].cand_ok;
+  unsigned ns2 = FV_LEARN;
+  if (bo >= FV_OK_MIN)
+    ns2 = FV_ALIVE;
+  else if (co >= FV_OK_MIN && co > bo)
+    ns2 = FV_VALIDATED;
+  else if (bt >= FV_TRY_CAP)
+    ns2 = FV_GAVEUP;
+  if (ns2 != FV_LEARN) {
+    __atomic_store_n(&g_fv[k].state, ns2, __ATOMIC_RELAXED);
+    LOG_I(PHY, "SENSING: CSIFULLVAL phase=%u/%d state=%s trials=%u rule_ok=%u cand_ok=%u n_sel=%d n_cand=%d pop=%u\n", k, FV_KEYS,
+          ns2 == FV_ALIVE ? "alive" : ns2 == FV_VALIDATED ? "VALIDATED" : "gaveup", bt, bo, co, ns, nc, cfg->dlDmrsScramblingId);
+  }
+}
+
 void nr_csirs_full_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, uint32_t pdsch_absolute_slot)
 {
   if (!nr_csirs_full_enabled() || !cfg || t_full_ab_depth > 0) /* inside a CSIFULLAB hypothesis: keep its list */
@@ -1894,11 +1989,64 @@ void nr_csirs_full_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, uint32_t pdsc
   int n_sel = 0, n_erase = 0;
   full_select(pdsch_absolute_slot, cfg->dlDmrsScramblingId, cfg->dlDmrsSymbPos, cfg->csiRsForRateMatching, &n_sel,
               NFAPI_MAX_NUM_CSI_RATEMATCH, s_erase ? erase : NULL, s_erase ? &n_erase : NULL, NFAPI_MAX_NUM_CSI_RATEMATCH);
+  if (full_valid_enabled() && g_fv[pdsch_absolute_slot % FV_KEYS].state == FV_VALIDATED) {
+    /* a CRC-validated phase: the withheld + unconfirmed resources are rate-matched too (and no longer erased) */
+    fapi_nr_dl_config_csirs_pdu_rel15_t er2[NFAPI_MAX_NUM_CSI_RATEMATCH], cand[NFAPI_MAX_NUM_CSI_RATEMATCH];
+    int n2 = 0, ne2 = 0;
+    const int nc = full_valid_cands(pdsch_absolute_slot, cfg->dlDmrsScramblingId, cfg->dlDmrsSymbPos, cfg->csiRsForRateMatching, &n2, er2,
+                                    &ne2, cand);
+    for (int i = 0; i < nc && n2 < NFAPI_MAX_NUM_CSI_RATEMATCH; i++)
+      cfg->csiRsForRateMatching[n2++] = cand[i];
+    n_sel = n2;
+    n_erase = 0;
+    for (int i = 0; i < ne2; i++) {
+      bool taken = false;
+      for (int j = 0; j < nc && !taken; j++)
+        taken = csirs_full_same_geometry(&er2[i], &cand[j]);
+      if (s_erase && !taken)
+        erase[n_erase++] = er2[i];
+    }
+  }
   cfg->numCsiRsForRateMatching = (uint8_t)n_sel;
   if (nr_dlsch_csi_erase_set) /* weak: fixtures link this file without the demodulator */
     nr_dlsch_csi_erase_set(erase, n_erase);
 }
 
+/* ISAC_CSIRS_FULL_AB_EVID=1|2 (diagnostic, default off; extends ISAC_CSIRS_FULL_AB): UNCONFIRMED resources of the search
+ * state: g_st candidates with a seed period (discovery WINNERs / footprint fits, NZP) and g_zp candidates with a selected
+ * period (ZP_EVIDENCE). 1 = only in the slots their period/offset give; 3 = as 1 plus one hypothesis per resource (alone) and
+ * per leave-one-out (CSIFULLEV line); 2 = in every slot (any ZP candidate with a hit, any
+ * seeded NZP candidate), i.e. "would rate-matching it help this grant, whatever its phase". Never feeds PDSCH. */
+static int full_ab_evid_mode(void)
+{
+  static int s = -1;
+  if (s < 0) s = getenv("ISAC_CSIRS_FULL_AB_EVID") ? atoi(getenv("ISAC_CSIRS_FULL_AB_EVID")) : 0;
+  return s;
+}
+static int full_evidence(uint32_t slot, int mode, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
+{
+  int n = 0;
+  pthread_mutex_lock(&g_csirs_state_lock);
+  if (g_on > 0 && g_armed != 0 && g_rank <= 0)
+    for (int bank = 0; bank < 2; ++bank) {
+      nr_csirs_blind_state_t *st = bank ? &g_zp : &g_st;
+      for (int i = 0; i < st->n && n < max; ++i) {
+        if (nr_csirs_blind_is_confirmed(st, i))
+          continue;
+        const uint16_t p = bank ? st->zp_selected_period[i] : st->seed_period[i];
+        const int no = bank ? st->zp_selected_n_off[i] : st->seed_n_off[i];
+        bool hit = false;
+        for (int j = 0; p && j < no && j < 2; ++j)
+          hit |= slot % p == (bank ? st->zp_selected_off[i][j] : (j ? st->seed_offset2[i] : st->seed_offset[i]));
+        if (mode == 2 && (p || (bank && st->hits[i] > 0)))
+          hit = true;
+        if (hit)
+          fill_pdu(&st->cand[i], bank ? 2 : 1, &out[n++]);
+      }
+    }
+  pthread_mutex_unlock(&g_csirs_state_lock);
+  return n;
+}
 /* ISAC_CSIRS_FULL_AB=1 (diagnostic, default off; needs ISAC_CSIRS_FULL=1). Every eligible dedicated full decode in a
  * slot carrying discovered CSI-RS is first decoded under a fixed set of rate-matching hypotheses on the SAME
  * samples, and one CSIFULLAB line reports each hypothesis' CRC (1 = CRC on the hypothesis itself, r = only a
@@ -1922,7 +2070,7 @@ void nr_csirs_full_ab(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const f
   if (!s_ab || !nr_csirs_full_enabled() || t_full_ab_depth > 0 || !nr_pdsch_passive_decode || !cfg)
     return;
   const uint32_t slot = (uint32_t)(proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx);
-  fapi_nr_dl_config_csirs_pdu_rel15_t all[2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
+  fapi_nr_dl_config_csirs_pdu_rel15_t all[4 * NR_CSIRS_BLIND_DISC_MAX_CONF];
   int n_all = rate_match_all_n(slot, all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
   fapi_nr_dl_config_csirs_pdu_rel15_t conf[2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
   const int n_conf = full_all_confirmed(conf, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
@@ -1930,38 +2078,62 @@ void nr_csirs_full_ab(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const f
     n_all = full_add_trs_pairs(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
   if (full_block_infer_enabled())
     n_all = full_add_block(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  const int n_base = n_all;
+  const int evid = full_ab_evid_mode();
+  if (evid) /* evidence entries follow the discovered ones and are used by h 6/7 only */
+    n_all += full_evidence(slot, evid, &all[n_all], 4 * NR_CSIRS_BLIND_DISC_MAX_CONF - n_all);
+  const int n_ev = n_all - n_base;
   if (n_all <= 0)
     return;
   static int s_erase = -1;
   if (s_erase < 0)
     s_erase = getenv("ISAC_CSIRS_FULL_ERASE") && atoi(getenv("ISAC_CSIRS_FULL_ERASE")) ? 1 : 0;
   const uint16_t pop = cfg->dlDmrsScramblingId;
-  bool in_h[6][2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
+  bool in_h[8 + 2 * 6][4 * NR_CSIRS_BLIND_DISC_MAX_CONF];
   memset(in_h, 0, sizeof(in_h));
   int n_own = 0, n_range = 0;
   for (int i = 0; i < n_all; i++) {
-    const bool own = all[i].scramb_id == pop;
+    const bool own = i < n_base && all[i].scramb_id == pop;
     bool range = own; /* = the ISAC_CSIRS_FULL rule (full_select): own + own confirmed RB blocks */
     for (int j = 0; j < n_conf && !range; j++)
       range = conf[j].scramb_id == pop && conf[j].csi_type != 2 && full_rb_overlap_half(&conf[j], &all[i]);
+    if (i >= n_base) { /* evidence: only in h 6 (all + evidence) and h 7 (the rule + evidence) */
+      in_h[6][i] = in_h[7][i] = true;
+      for (int j = 0; j < 6; j++) {
+        in_h[8 + j][i] = i - n_base == j; /* resource j alone */
+        in_h[14 + j][i] = i - n_base != j; /* all evidence but j */
+      }
+      continue;
+    }
     in_h[1][i] = in_h[4][i] = own;
-    in_h[2][i] = in_h[5][i] = range;
+    in_h[2][i] = in_h[5][i] = in_h[7][i] = range;
     n_own += own;
     n_range += range;
-    in_h[3][i] = true;
+    in_h[3][i] = in_h[6][i] = true;
   }
   const bool can_toggle = cfg->start_symbol <= 1 && cfg->start_symbol + cfg->number_symbols == 14;
-  char res[6][3];
+  char res[8 + 2 * 6][3];
   memset(res, '-', sizeof(res));
+  for (int h = 0; h < 8 + 2 * 6; h++)
+    res[h][2] = 0;
   t_full_ab_depth++;
-  for (int h = 0; h < 6; h++) {
+  const int n_exj = evid == 3 && n_ev <= 6 ? n_ev : 0;
+  int hl[8 + 2 * 6], nh = 0;
+  for (int h = 0; h < (n_ev ? 8 : 6); h++)
+    hl[nh++] = h;
+  for (int j = 0; j < n_exj; j++) {
+    hl[nh++] = 8 + j;
+    hl[nh++] = 14 + j;
+  }
+  for (int k = 0; k < nh; k++) {
+    const int h = hl[k];
     for (int t = 0; t < (can_toggle ? 2 : 1); t++) {
       fapi_nr_dl_config_dlsch_pdu_rel15_t c = *cfg;
       c.numCsiRsForRateMatching = 0;
       fapi_nr_dl_config_csirs_pdu_rel15_t er[NFAPI_MAX_NUM_CSI_RATEMATCH];
       int ne = 0;
       for (int i = 0; i < n_all; i++) {
-        if (csirs_full_dmrs_clash(&all[i], c.dlDmrsSymbPos))
+        if (csirs_full_dmrs_clash(&all[i], c.dlDmrsSymbPos) || (i >= n_base && h < 6))
           continue;
         fapi_nr_dl_config_csirs_pdu_rel15_t r = all[i];
         if (h == 4) {
@@ -1975,7 +2147,7 @@ void nr_csirs_full_ab(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const f
             dup = csirs_full_same_geometry(&c.csiRsForRateMatching[j], &r);
           if (!dup && c.numCsiRsForRateMatching < NFAPI_MAX_NUM_CSI_RATEMATCH)
             c.csiRsForRateMatching[c.numCsiRsForRateMatching++] = r;
-        } else if (s_erase && h != 5 && r.csi_type != 2) { /* h 5 = the rule without erasure */
+        } else if (s_erase && h != 5 && i < n_base && r.csi_type != 2) { /* h 5 = the rule without erasure */
           for (int j = 0; j < ne && !dup; j++)
             dup = csirs_full_same_geometry(&er[j], &r);
           if (!dup && ne < NFAPI_MAX_NUM_CSI_RATEMATCH)
@@ -1996,9 +2168,18 @@ void nr_csirs_full_ab(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const f
     res[h][2] = 0;
   }
   t_full_ab_depth--;
+  if (n_exj) {
+    char line[400];
+    int u = 0;
+    for (int j = 0; j < n_exj; j++)
+      u += snprintf(line + u, sizeof(line) - u, " ev%d[t%u r%u l%u/%u rb%u+%u]=%s/%s", j, all[n_base + j].csi_type, all[n_base + j].row,
+                    all[n_base + j].symb_l0, all[n_base + j].symb_l1, all[n_base + j].start_rb, all[n_base + j].nr_of_rbs, res[8 + j],
+                    res[14 + j]);
+    LOG_I(PHY, "SENSING: CSIFULLEV rnti=0x%04x fs=%d.%d ph=%u alone/loo:%s\n", grant->rnti, proc->frame_rx, proc->nr_slot_rx, slot % 160, line);
+  }
   LOG_I(PHY, "SENSING: CSIFULLAB rnti=0x%04x fs=%d.%d ph=%u nl=%d mcs=%u rb=%u+%u S=%u L=%u pop=%u n_all=%d n_own=%d n_range=%d "
-        "none=%s own=%s range=%s all=%s own16=%s range_noerase=%s\n",
+        "none=%s own=%s range=%s all=%s own16=%s range_noerase=%s n_ev=%d all_ev=%s range_ev=%s\n",
         grant->rnti, proc->frame_rx, proc->nr_slot_rx, slot % 160, __builtin_popcount(cfg->dmrs_ports), grant->mcs,
         fa->first_rb, fa->num_rbs, cfg->start_symbol, cfg->number_symbols, pop, n_all, n_own, n_range, res[0], res[1], res[2], res[3],
-        res[4], res[5]);
+        res[4], res[5], n_ev, res[6], res[7]);
 }
