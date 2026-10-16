@@ -3411,6 +3411,12 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_gpu_budget PRIVATE GTest::gtest_main pthread)
   add_test(NAME test_nr_gpu_budget COMMAND test_nr_gpu_budget)
   add_dependencies(tests test_nr_gpu_budget)
+  add_executable(test_nr_admit openair1/PHY/TOOLS/tests/nr_admit_test.cc
+                 openair1/PHY/TOOLS/nr_admit.c)
+  target_include_directories(test_nr_admit PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS)
+  target_link_libraries(test_nr_admit PRIVATE GTest::gtest_main pthread)
+  add_test(NAME test_nr_admit COMMAND test_nr_admit)
+  add_dependencies(tests test_nr_admit)
   add_executable(test_nr_gpu_platform openair1/PHY/TOOLS/tests/nr_gpu_platform_test.cc
                  openair1/PHY/TOOLS/nr_gpu_platform.c)
   target_compile_definitions(test_nr_gpu_platform PRIVATE NR_GPU_PLATFORM_TEST)
