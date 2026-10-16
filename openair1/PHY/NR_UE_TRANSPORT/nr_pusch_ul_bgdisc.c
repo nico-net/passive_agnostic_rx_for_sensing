@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #define _GNU_SOURCE
 #include "nr_pusch_ul_bgdisc.h"
+#include "PHY/TOOLS/nr_admit.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -48,9 +49,11 @@ int nr_ul_bgdisc_enabled(void)
 }
 
 /* wired to nr_admit_try(NR_ADMIT_UL_DISC, ...) when csd/bglane is merged */
-static int ul_bgdisc_admit(void)
+/* weak: test binaries that compile this file without the utils library always admit */
+int nr_admit_try(nr_admit_class_t c, uint64_t now_ns, uint64_t deadline_ns, int priority_token) __attribute__((weak));
+static int ul_bgdisc_admit(uint64_t deadline_ns)
 {
-  return 1;
+  return !nr_admit_try || nr_admit_try(NR_ADMIT_UL_DISC, now_ns(), deadline_ns, 0);
 }
 
 static void log_stats(void)
@@ -94,7 +97,7 @@ static void *worker(void *arg)
     bgslot_t *s = &g_slot[pick];
     pthread_mutex_unlock(&g_lock);
     int expired = now_ns() - s->j.submit_ns > g_max_age_ns;
-    while (!expired && !g_stop && !ul_bgdisc_admit()) { /* not admitted: wait for the critical lane, up to the deadline */
+    while (!expired && !g_stop && !ul_bgdisc_admit(s->j.submit_ns + g_max_age_ns)) { /* not admitted: wait for the critical lane, up to the deadline */
       usleep(2000);
       expired = now_ns() - s->j.submit_ns > g_max_age_ns;
     }
