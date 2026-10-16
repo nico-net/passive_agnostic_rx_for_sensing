@@ -4434,6 +4434,19 @@ Replay label: `[MEASURED, DGX replay <cap>]` = air-like replay, not OTA. Cells n
 - Whole-system analysis agent: 2026-10-15 08:00 (branch `csd/sysan`).
 - Multi-PCI agent: next.
 
+
+### 2026-10-16 (ISAC_RA_TDRA_SWEEP) block (`csd/int16`, worktree `rr-csd-int16`; fix `9db7f4b113`, report `aae4e3e90f`; OTA 2026-10-16 evening at DEIB; replay and OTA only)
+
+- Cause (V, NSA SIB1 without pdsch-ConfigCommon): RA-RNTI 0x007f RAR DCI 1_0 falls back to default TDRA row 0 = S2 L12; the cell's real row 0 is S1 L13. This is the nsym-9 class (tbl0 mcs0 25-51 PRB) `[MEASURED, DGX OTA 2026-10-16, V, n=2]`; the cause itself is `[CODE-READ]`.
+- Fix `ISAC_RA_TDRA_SWEEP=1` (default off, `9db7f4b113`): re-decodes a failed non-SI, non-C-RNTI DCI 1_0 ending at symbol 14 with type-A S=0..3.
+- Replay: RA 0x007f decoded 0/45 -> 42/42 (all S1 L13); class n_q 16, 0.0 % -> 31, 51.6 % `[MEASURED, DGX replay raw_pci415_12s_b, t26aXE, n=2 per arm]`.
+- On air, V: class 0 % -> 100 % (X 0/10, 0/19; R 5/5, 5/5); re-decodes ok 432/435; crc_q 89-93 in both arms `[MEASURED, DGX OTA 2026-10-16 evening, V, n=2]`.
+- On air, T: no regression claimed, n=2. R crc_q 91.9 and 95.8 vs X 96.8 and 95.0; class not triggered (T nsym 9 is another cause) `[MEASURED, DGX OTA 2026-10-16 evening, T, n=2]`.
+- Recommendation: enable `ISAC_RA_TDRA_SWEEP=1` in the next default env, after a daytime confirmation run.
+- Follow-up (planned): learn S once per cell instead of retrying per RAR.
+- Open, not this fix: TIM nsym 9 / slots 3 and 13 (C-RNTI DCI 1_1, dead regardless of length) `[MEASURED, T aTX2 OTA, probe=0]`; V nsym 10 (51 grants) not analysed.
+
+---
 ---
 
 ## 26. Working rules for any agent on this project (carried over from the old setup)

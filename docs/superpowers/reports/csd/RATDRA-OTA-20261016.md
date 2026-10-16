@@ -26,7 +26,7 @@ V: RA-RNTI 0x007f re-decodes S=2 L=12 -> S=1 L=13 in 432 of 435 tries; the same 
 UL: crc ~0 in all runs (ULCAUSE unchanged).
 
 ## Reading
-- The target class goes 0 % -> 100 % on air (V); no CRC regression on either cell (T R inside the X spread; V crc_q 89-93 both arms). Latency and drops differences are within the n=2 noise.
+- The target class goes 0 % -> 100 % on air (V); no clear CRC regression at n=2 (T R 91.9/95.8 vs X 96.8/95.0, slightly lower, not resolved at n=2; V crc_q 89-93 both arms). Latency and drops differences are within the n=2 noise.
 - Recommend: turn ISAC_RA_TDRA_SWEEP=1 on in the next default env. Follow-up (planned): learn the S once per cell instead of retrying each time.
 - Evening numbers are better than the afternoon (V crc_q 89-93 vs 84-91 rescued; T p99 5.2-6.8 ms vs ~8 ms); load-dependent, not a regression signal.
 - Still failing G1 on latency everywhere (p99 5-17 ms); V rescues still large (4-8k per run, rescued p99 ~27-30 ms).
