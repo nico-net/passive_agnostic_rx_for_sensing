@@ -149,12 +149,12 @@ void nr_ul_bgdisc_stop(void)
 int nr_ul_bgdisc_submit(const nr_ul_bgdisc_job_t *j)
 {
   pthread_mutex_lock(&g_lock);
-  g_st.nohyp++;
   int idx = -1;
   for (int i = 0; i < g_depth; i++) {
     if (g_slot[i].state != FREE && g_slot[i].j.rnti == j->rnti) { g_st.dup++; pthread_mutex_unlock(&g_lock); return 0; }
     if (idx < 0 && g_slot[i].state == FREE) idx = i;
   }
+  g_st.nohyp++; /* distinct misses: a duplicate of an RNTI in flight is not one */
   if (idx < 0) { g_st.full++; pthread_mutex_unlock(&g_lock); return 0; }
   bgslot_t *s = &g_slot[idx];
   s->state = FILLING;
@@ -169,11 +169,11 @@ int nr_ul_bgdisc_submit(const nr_ul_bgdisc_job_t *j)
   }
   if (ok) {
     s->j = *j;
+    s->j.submit_ns = now_ns(); /* the age clock starts before the copy */
     for (int a = 0; a < j->nant; a++) {
       memcpy(s->buf[a], j->iq[a], (size_t)j->length * sizeof(c16_t));
       s->j.iq[a] = s->buf[a];
     }
-    s->j.submit_ns = now_ns();
   }
   pthread_mutex_lock(&g_lock);
   if (ok) {
@@ -201,7 +201,7 @@ static unsigned g_pend_next;
 
 int nr_ul_bgdisc_latch(uint16_t rnti, uint32_t key, int64_t abs_slot, uint32_t cur_key)
 {
-  if (!cur_key || key == cur_key) return 1;
+  if (key == cur_key) return 1; /* cur_key 0 = nothing cached: the first pass pends too */
   pthread_mutex_lock(&g_lock);
   int ret = 0, mine = -1;
   for (int i = 0; i < PEND_N; i++) {

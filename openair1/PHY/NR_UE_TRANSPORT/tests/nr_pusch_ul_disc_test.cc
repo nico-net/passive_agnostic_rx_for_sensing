@@ -288,7 +288,8 @@ TEST(UlBgDisc, SweepFindsUnpriorIdAndNoiseDoesNot) {
 }
 
 TEST(UlBgDisc, SingleFalseCrcDoesNotLatch) {
-  EXPECT_EQ(nr_ul_bgdisc_latch(1,0xA,100,0),1);      /* nothing cached: store */
+  EXPECT_EQ(nr_ul_bgdisc_latch(1,0xA,99,0),0);       /* nothing cached: the first pass pends too */
+  EXPECT_EQ(nr_ul_bgdisc_latch(1,0xA,100,0),1);      /* its confirmation in another slot */
   EXPECT_EQ(nr_ul_bgdisc_latch(1,0xA,101,0xA),1);    /* same as cached */
   EXPECT_EQ(nr_ul_bgdisc_latch(1,0xB,102,0xA),0);    /* one CRC pass of a different hypothesis: not latched */
   EXPECT_EQ(nr_ul_bgdisc_latch(1,0xB,102,0xA),0);    /* the same slot again is not a second pass */

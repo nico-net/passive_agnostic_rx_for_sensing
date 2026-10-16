@@ -35,7 +35,7 @@ void nr_ul_bgdisc_stop(void);
 /* Counts ul_nohyp, then queues the job (copying its IQ). Never searches, never blocks beyond a short mutex. 1 = queued, 0 = dropped (duplicate RNTI in flight, queue full, no memory). */
 int nr_ul_bgdisc_submit(const nr_ul_bgdisc_job_t *j);
 void nr_ul_bgdisc_stats(nr_ul_bgdisc_stats_t *s);
-/* Latch rule for a CRC-passing hypothesis (key != 0) of an RNTI whose cache holds cur_key (0 = none). 1 = store it now: nothing cached yet, the same
+/* Latch rule for a CRC-passing hypothesis (key != 0) of an RNTI whose cache holds cur_key (0 = none). 1 = store it now: the same
  * hypothesis as the cached one, a second pass of it in a DIFFERENT slot, or another RNTI with the same key pending. 0 = remembered, not stored. */
 int nr_ul_bgdisc_latch(uint16_t rnti, uint32_t key, int64_t abs_slot, uint32_t cur_key);
 #endif

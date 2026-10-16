@@ -34,6 +34,8 @@ typedef struct {
 int ul_hyp_cache_get(uint16_t rnti, ul_hyp_t *h);
 /* inserts or replaces the entry of the RNTI (64 entries, least recently written is evicted). Thread-safe. */
 void ul_hyp_cache_put(uint16_t rnti, const ul_hyp_t *h);
+/* the bg worker's put: skipped (0) when the entry holds a decode-refreshed (n_ok > 0) or newer-slot hypothesis */
+int ul_hyp_cache_put_if_new(uint16_t rnti, const ul_hyp_t *h);
 void ul_hyp_cache_clear(void);
 void ul_hyp_cache_drop(uint16_t rnti);
 /* the call site's lookup: counts hit / miss / stale (epoch differs or older than ISAC_UL_HYP_MAX_AGE slots, default 2000); 1 = usable hit */

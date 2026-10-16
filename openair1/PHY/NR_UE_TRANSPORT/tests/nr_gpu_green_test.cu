@@ -73,6 +73,10 @@ int main(void)
     dyn = cudaStreamSynchronize(s2) == cudaSuccess;
     for (int i = 0; i < 256; i++) dyn &= bb[i] == i + 2;
     dyn = dyn && count(m2 + 4) > 0 && count(m2 + 4) < count(m2);
+    /* LOW inside the DISC SMs (m: the 16-SM run above) and disjoint from the RT SMs (m + 4) */
+    unsigned lo[4], di[4], rt4[4];
+    cudaMemcpy(lo, m2 + 4, sizeof(lo), cudaMemcpyDefault); cudaMemcpy(di, m, sizeof(di), cudaMemcpyDefault); cudaMemcpy(rt4, m + 4, sizeof(rt4), cudaMemcpyDefault);
+    dyn = dyn && nr_green_low_ok(lo, di, rt4, true);
   }
   printf("GPU_GREEN_TEST dyn=%d\n", dyn);
   if (!dyn) return 1;

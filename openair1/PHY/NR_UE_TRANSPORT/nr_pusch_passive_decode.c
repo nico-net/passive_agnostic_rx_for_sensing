@@ -334,7 +334,7 @@ static int ul_seed_on(void)
   if (v < 0) { const char *e = getenv("ISAC_UL_GPU_PASS_SEED"); v = e && atoi(e) == 1; }
   return v;
 }
-static void ul_hyp_store(const nr_pdcch_blind_ul_result_t *g, int32_t ta, uint32_t epoch, int64_t abs_slot, uint32_t n_ok)
+static void ul_hyp_store(const nr_pdcch_blind_ul_result_t *g, int32_t ta, uint32_t epoch, int64_t abs_slot, uint32_t n_ok, bool worker)
 {
   ul_hyp_t h;
   memset(&h, 0, sizeof(h));
@@ -361,7 +361,8 @@ static void ul_hyp_store(const nr_pdcch_blind_ul_result_t *g, int32_t ta, uint32
         ? ((uint32_t)cur.dmrs_id << 8 | cur.nscid << 6 | cur.dmrs_type << 5 | cur.tp << 4) ^ ((uint32_t)cur.dmrs_mask << 16) ^ 0x80000000u : 0;
     if (!nr_ul_bgdisc_latch(g->rnti, key, abs_slot, ckey)) return;
   }
-  ul_hyp_cache_put(g->rnti, &h);
+  if (worker) ul_hyp_cache_put_if_new(g->rnti, &h);
+  else ul_hyp_cache_put(g->rnti, &h);
 }
 
 /* ---- TIMING-ADVANCE SWEEP (ISAC_UL_TA_SWEEP="start:step:count", default off) ------------------
@@ -1767,7 +1768,7 @@ static int ul_bg_run(const nr_ul_bgdisc_job_t *j)
     if (result.accepted && passive_ul_apply_dmrs_disc(&g, &result)) found = true;
   }
   if (found) {
-    ul_hyp_store(&g, ta, j->epoch, j->abs_slot, 0);
+    ul_hyp_store(&g, ta, j->epoch, j->abs_slot, 0, true);
     uint64_t h, m, st, p;
     nr_gpu_pass_ul_cache_counts(&h, &m, &st, &p);
     if (p % 20 == 1) LOG_I(PHY, "SENSING: UL_BGDISC_CACHE rnti=0x%04x ta=%d id=%d cache put=%lu hit=%lu miss=%lu stale=%lu\n", g.rnti, ta, g.ul_dmrs_scrambling_id,
@@ -1989,7 +1990,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   if (ul_pass_env && !cfr_only && !t_solver_probe && !gapped && !fdra_unresolved && g_snapshot[ctx].valid && fo_hz == 0.0 && ta_idx < 0 && g->rv == 0 && !g->frequency_hopping &&
       nant == g_gnb_nant && symsz == 4096 && sps == 14) {
     ul_hyp_t hyp;
-    if (nr_gpu_pass_ul_hyp_lookup(g->rnti, nr_cfg_epoch_dedicated_current(), (int64_t)abs_slot, &hyp)) {
+    if (nr_gpu_pass_ul_hyp_lookup(g->rnti, nr_cfg_epoch_dedicated_current(), (int64_t)abs_slot, &hyp) && hyp.tp == (uint8_t)g->transform_precoding) {
       ul_hyp_nok = hyp.n_ok;
       nr_pdcch_blind_ul_result_t pg = *g;
       ul_hyp_apply(&pg, &hyp);
@@ -3030,7 +3031,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       ul_hyp_cache_note_fail(g->rnti, 3);
     } else if (ul_pass_env && ul_seed_on() && !t_solver_probe && !cfr_only && !gapped && !fdra_unresolved && !g->transform_precoding && nr_cfg_epoch_work_current()) {
       /* ISAC_UL_GPU_PASS_SEED=1 (validation only): a grant that did not decode seeds the cache as well, so that the pass (and its shadow check) runs on captures where no UL TB ever decodes */
-      ul_hyp_store(g, nr_sense_ul_ta_refined(out->ta_applied_samples, pvp->delay.est_delay), nr_cfg_epoch_dedicated_current(), (int64_t)abs_slot, 0);
+      ul_hyp_store(g, nr_sense_ul_ta_refined(out->ta_applied_samples, pvp->delay.est_delay), nr_cfg_epoch_dedicated_current(), (int64_t)abs_slot, 0, false);
     }
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
     out->reject_reason = "segment or final transport-block CRC failed";
@@ -3064,7 +3065,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
   if ((ul_pass_env || bg_on) && !t_solver_probe && !cfr_only && !gapped && !fdra_unresolved && nr_cfg_epoch_work_current() && (!g->transform_precoding || bg_on))
-    ul_hyp_store(g, nr_sense_ul_ta_refined(out->ta_applied_samples, pvp->delay.est_delay), nr_cfg_epoch_dedicated_current(), (int64_t)abs_slot, ul_hyp_nok + 1);
+    ul_hyp_store(g, nr_sense_ul_ta_refined(out->ta_applied_samples, pvp->delay.est_delay), nr_cfg_epoch_dedicated_current(), (int64_t)abs_slot, ul_hyp_nok + 1, false);
   if (!t_solver_probe) atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
   // Reserved-MCS retransmission record (G5 review, gap-harq): only a CRC-verified, non-all-zero TB
   // (this point, past the ZERO_TB guard above) is strong enough evidence to seed/refresh this
