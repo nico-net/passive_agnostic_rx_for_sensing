@@ -223,13 +223,13 @@ struct Workspace {
   int rb=0,ant=0,capacity=0;
 } workspace;
 static std::mutex workspace_mutex;
-extern "C" int nr_gpu_budget_rt_large_active(void); // the executable's nr_gpu_budget.c
+extern "C" int nr_gpu_budget_rt_large_active(void) __attribute__((weak)); // the executable's nr_gpu_budget.c (weak: the module is dlopen'd)
 /* pick_stream: start of a job (workspace_mutex held): the low-SM stream while a large real grant is in flight, else the normal one. The previous job is synchronised first, so no queued kernel ever sees the switch. */
 static void pick_stream()
 {
   auto &w=workspace;
   if(!w.stream_lo) return;
-  cudaStream_t s=nr_gpu_green_disc_pick(w.stream_hi,w.stream_lo,nr_gpu_budget_rt_large_active());
+  cudaStream_t s=nr_gpu_green_disc_pick(w.stream_hi,w.stream_lo,nr_gpu_budget_rt_large_active?nr_gpu_budget_rt_large_active():0);
   if(s!=w.stream){cudaStreamSynchronize(w.stream);w.stream=s;}
 }
 /* prepare: prepares the GPU sweep workspace for a carrier (rb RBs, ant antennas, capacity slots): creates the stream and completion event and grows every device buffer (mapping, packed samples, scores, metadata).
