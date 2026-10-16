@@ -135,9 +135,9 @@ __device__ __forceinline__ unsigned cn_item(const Graph &G, int Z, int z, int e0
 /* Block rank / barrier of one code block's blocks. Cluster (NC = false, sm_90+): CLB blocks, hardware cluster barrier. Non-cluster (NC = true,
  * k_ldpc_nc / k_ldpc4_nc): ONE block per code block, __syncthreads; the shared data was already in global memory (g_llr / g_res / g_c2v, read
  * with __ldcg), only the work split (gs) changes, and every phase is order-independent integer arithmetic, so the result is bit-identical. */
-template <bool NC> __device__ __forceinline__ int blk_rank()
+template <int CB> __device__ __forceinline__ int blk_rank()
 {
-  if constexpr (NC)
+  if constexpr (CB == 1)
     return 0;
   else {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
@@ -148,9 +148,9 @@ template <bool NC> __device__ __forceinline__ int blk_rank()
 #endif
   }
 }
-template <bool NC> __device__ __forceinline__ void blk_bar()
+template <int CB> __device__ __forceinline__ void blk_bar()
 {
-  if constexpr (NC)
+  if constexpr (CB == 1)
     __syncthreads();
   else {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
@@ -163,12 +163,11 @@ template <bool NC> __device__ __forceinline__ void blk_bar()
 
 /* One thread-block cluster (CLB blocks) per code block (NC: one block): the phases are separated by cluster barriers (hardware, cheap,
  * no grid-wide residency like a cooperative launch), cross-block data is read from L2 (__ldcg). */
-template <bool NC> __global__ void __launch_bounds__(THREADS) k_ldpc_t(const DJob *jobs, int8_t *g_llr, int8_t *g_res, int8_t *g_c2v, int *g_unsat,
+template <int CB> __global__ void __launch_bounds__(THREADS) k_ldpc_t(const DJob *jobs, int8_t *g_llr, int8_t *g_res, int8_t *g_c2v, int *g_unsat,
                                                   uint8_t *g_snap, int *g_out)
 {
-  constexpr int CB = NC ? 1 : CLB;
   __shared__ Graph G;
-  const int c = blockIdx.x / CB, b = blk_rank<NC>(), t = threadIdx.x;
+  const int c = blockIdx.x / CB, b = blk_rank<CB>(), t = threadIdx.x;
   const DJob J = jobs[c];
   {
     const int *src = (const int *)J.g;
@@ -191,7 +190,7 @@ template <bool NC> __global__ void __launch_bounds__(THREADS) k_ldpc_t(const DJo
     c2v[n] = 0;
   for (int n = gt; n < NIT; n += gs)
     unsat[n] = 0;
-  blk_bar<NC>();
+  blk_bar<CB>();
   /* Per iteration it: CN (+ the syndrome of iteration it - 1, from the same reads), barrier, verdict on it - 1 (every
    * thread reads the same flag, so the exit is uniform), BN (+ the snapshot of it), barrier. */
   for (int it = 1;; it++) {
@@ -211,7 +210,7 @@ template <bool NC> __global__ void __launch_bounds__(THREADS) k_ldpc_t(const DJo
       if (it - 1 >= 3 && __syncthreads_or(bad) && t == 0)
         atomicOr(&unsat[it - 1], 1);
     }
-    blk_bar<NC>();
+    blk_bar<CB>();
     const int p = it - 1; /* verdict on iteration p */
     if (p >= 1) {
       const bool last = p >= itm + 1;
@@ -247,7 +246,7 @@ template <bool NC> __global__ void __launch_bounds__(THREADS) k_ldpc_t(const DJo
         }
       }
     }
-    blk_bar<NC>();
+    blk_bar<CB>();
   }
 }
 
@@ -335,12 +334,11 @@ template <int D> __device__ __forceinline__ void bn_sum4(const Graph &G, int Z, 
     }
 }
 
-template <bool NC> __global__ void __launch_bounds__(THREADS) k_ldpc4_t(const DJob *jobs, int8_t *g_llr, int8_t *g_res, int8_t *g_c2v, int *g_unsat,
+template <int CB> __global__ void __launch_bounds__(THREADS) k_ldpc4_t(const DJob *jobs, int8_t *g_llr, int8_t *g_res, int8_t *g_c2v, int *g_unsat,
                                                    uint8_t *g_snap, int *g_out)
 {
-  constexpr int CB = NC ? 1 : CLB;
   __shared__ Graph G;
-  const int c = blockIdx.x / CB, b = blk_rank<NC>(), t = threadIdx.x;
+  const int c = blockIdx.x / CB, b = blk_rank<CB>(), t = threadIdx.x;
   const DJob J = jobs[c];
   {
     const int *src = (const int *)J.g;
@@ -363,7 +361,7 @@ template <bool NC> __global__ void __launch_bounds__(THREADS) k_ldpc4_t(const DJ
     ((uint32_t *)c2v)[n] = 0;
   for (int n = gt; n < NIT; n += gs)
     unsat[n] = 0;
-  blk_bar<NC>();
+  blk_bar<CB>();
   for (int it = 1;; it++) {
     if (it <= itm + 1) { /* ---- CN phase: one (row, 4 z) per work item ---- */
       uint32_t bad = 0;
@@ -379,7 +377,7 @@ template <bool NC> __global__ void __launch_bounds__(THREADS) k_ldpc4_t(const DJ
       if (it - 1 >= 3 && __syncthreads_or(bad != 0) && t == 0)
         atomicOr(&unsat[it - 1], 1);
     }
-    blk_bar<NC>();
+    blk_bar<CB>();
     const int p = it - 1;
     if (p >= 1) {
       const bool last = p >= itm + 1;
@@ -422,7 +420,7 @@ template <bool NC> __global__ void __launch_bounds__(THREADS) k_ldpc4_t(const DJ
           snap[(size_t)(it - 3) * NR_GPU_LDPC_KB_MAX + (w >> 1)] = (uint8_t)(nib << 4 | nx);
       }
     }
-    blk_bar<NC>();
+    blk_bar<CB>();
   }
 }
 
@@ -542,11 +540,41 @@ static int acquire()
   }
 }
 
+/* CB = blocks per code block: 1 = _nc, 2/4 = small clusters, 8 = the portable-max cluster. Explicit instantiation so lazy loading sees every one. */
+template __global__ void k_ldpc_t<1>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
+template __global__ void k_ldpc_t<2>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
+template __global__ void k_ldpc_t<4>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
+template __global__ void k_ldpc_t<8>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
+template __global__ void k_ldpc4_t<1>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
+template __global__ void k_ldpc4_t<2>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
+template __global__ void k_ldpc4_t<4>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
+template __global__ void k_ldpc4_t<8>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
+
 /* Kernel family: the cluster kernels need sm_90+; below that, or with ISAC_GPU_LDPC_NOCLUSTER=1 (test on GB10), the _nc kernels (one block per
  * code block, same results). Decided once, first thing in warm_common()/init, before any graph warm-up. g_nc_state: 0 undecided, 1 cluster,
  * 2 non-cluster, 3 CC query failed (GPU LDPC refused, CPU fallback). */
 static std::atomic<int> g_nc_state{0}, g_refused{0};
+static int g_cl_min_cb = 0, g_cl_force = 0, g_rt_sms = 0; /* ISAC_GPU_LDPC_CL_MIN_CB (0 = off), ISAC_GPU_LDPC_CL_FORCE (test only: 1, 2, 4, 8) */
+static std::atomic<uint64_t> g_cb_launches[4], g_cl_fallback{0};
 static int g_nc_min_cb = 0; /* ISAC_GPU_LDPC_NC_MIN_CB: launches with >= N code blocks use the _nc kernels (0 = off); set before g_nc_state latches */
+/* Blocks per code block for a launch of n code blocks. Rules in order: force; non-cluster state -> 1; selection off or n < min_cb -> today's
+ * choice; else the largest cluster (4, 2) that keeps the whole launch in ONE wave of the RT partition, else 1. */
+static int pick_cb(int state, int n, int rt_sms, int min_cb, int force)
+{
+  if (force == 1 || force == 2 || force == 4 || force == 8)
+    return force;
+  if (state != 1)
+    return 1;
+  if (min_cb <= 0 || n < min_cb)
+    return g_nc_min_cb && n >= g_nc_min_cb ? 1 : CLB;
+  return n * 4 <= rt_sms ? 4 : n * 2 <= rt_sms ? 2 : 1;
+}
+extern "C" int nr_pdsch_gpu_ldpc_pick_cb(int state, int n, int sms, int min_cb, int force) { return pick_cb(state, n, sms, min_cb, force); }
+extern "C" void nr_pdsch_gpu_ldpc_cl_stats(uint64_t o[4])
+{
+  for (int i = 0; i < 4; i++)
+    o[i] = g_cb_launches[i].load();
+}
 static int decide_nc()
 {
   int st = g_nc_state.load();
@@ -564,7 +592,19 @@ static int decide_nc()
   g_nc_min_cb = m ? atoi(m) : 0;
   if (g_nc_min_cb < 0)
     g_nc_min_cb = 0;
+  m = getenv("ISAC_GPU_LDPC_CL_MIN_CB");
+  g_cl_min_cb = m ? atoi(m) : 0;
+  if (g_cl_min_cb < 0)
+    g_cl_min_cb = 0;
+  m = getenv("ISAC_GPU_LDPC_CL_FORCE");
+  g_cl_force = m ? atoi(m) : 0;
+  if (g_cl_force != 1 && g_cl_force != 2 && g_cl_force != 4 && g_cl_force != 8)
+    g_cl_force = 0;
+  if (st == 2 && g_cl_force > 1)
+    g_cl_force = 0; /* no clusters below sm_90 / with NOCLUSTER */
   g_nc_state.store(st);
+  if (g_cl_min_cb || g_cl_force)
+    fprintf(stderr, "SENSING: GPU_LDPC cl_min_cb=%d cl_force=%d\n", g_cl_min_cb, g_cl_force);
   if (g_nc_min_cb)
     fprintf(stderr, "SENSING: GPU_LDPC nc_min_cb=%d\n", g_nc_min_cb);
   if (st == 2)
@@ -572,25 +612,36 @@ static int decide_nc()
   return st;
 }
 
-/* one launch of n code blocks: cluster of CLB blocks each, or one block each (_nc) */
+/* one launch of n code blocks: CB blocks each (1 = _nc, 2/4/8 = cluster); CB 2/4 falls back to _nc in the same call if no SM group is free */
 static cudaError_t ldpc_launch(int nc, int n, cudaStream_t st, bool z4, const DJob *ddj, Ctx &x, uint8_t *dsnap, int *dres)
 {
-  if (nc == 1 && g_nc_min_cb && n >= g_nc_min_cb)
-    nc = 2;
+  const int cb = pick_cb(nc, n, g_rt_sms, g_cl_min_cb, g_cl_force);
   cudaLaunchConfig_t cfg = {};
-  cfg.gridDim = dim3(n * (nc == 2 ? 1 : CLB));
+  cfg.gridDim = dim3(n * cb);
   cfg.blockDim = dim3(THREADS);
   cfg.stream = st;
   cudaLaunchAttribute at[1];
   at[0].id = cudaLaunchAttributeClusterDimension;
-  at[0].val.clusterDim.x = CLB;
+  at[0].val.clusterDim.x = cb;
   at[0].val.clusterDim.y = 1;
   at[0].val.clusterDim.z = 1;
   cfg.attrs = at;
-  cfg.numAttrs = nc == 2 ? 0 : 1;
+  cfg.numAttrs = cb == 1 ? 0 : 1;
   void (*k)(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *) =
-      nc == 2 ? (z4 ? k_ldpc4_t<true> : k_ldpc_t<true>) : (z4 ? k_ldpc4_t<false> : k_ldpc_t<false>);
-  return cudaLaunchKernelEx(&cfg, k, ddj, x.llr, x.llrRes, x.c2v, x.unsat, dsnap, dres);
+      z4 ? (cb == 1 ? k_ldpc4_t<1> : cb == 2 ? k_ldpc4_t<2> : cb == 4 ? k_ldpc4_t<4> : k_ldpc4_t<8>)
+         : (cb == 1 ? k_ldpc_t<1> : cb == 2 ? k_ldpc_t<2> : cb == 4 ? k_ldpc_t<4> : k_ldpc_t<8>);
+  cudaError_t e = cudaLaunchKernelEx(&cfg, k, ddj, x.llr, x.llrRes, x.c2v, x.unsat, dsnap, dres);
+  int used = cb;
+  if (e != cudaSuccess && (cb == 2 || cb == 4)) {
+    (void)cudaGetLastError();
+    g_cl_fallback.fetch_add(1);
+    cfg.gridDim = dim3(n);
+    cfg.numAttrs = 0;
+    used = 1;
+    e = cudaLaunchKernelEx(&cfg, z4 ? k_ldpc4_t<1> : k_ldpc_t<1>, ddj, x.llr, x.llrRes, x.c2v, x.unsat, dsnap, dres);
+  }
+  g_cb_launches[used == 1 ? 0 : used == 2 ? 1 : used == 4 ? 2 : 3].fetch_add(1);
+  return e;
 }
 
 /* GPUSHARE: build every (BG, Z, R) graph now and load both kernels (CUDA lazy loading). Shared by the DL pool init and the
@@ -611,11 +662,16 @@ static bool warm_common()
         for (int Z = a; Z <= ZMAX; Z *= 2)
           graph(BG, Z, R); /* nullptr for the (BG, R) pairs that do not exist: nothing cached */
   cudaFuncAttributes fa;
-  if (nc == 2 ? cudaFuncGetAttributes(&fa, k_ldpc_t<true>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<true>) != cudaSuccess
-              : cudaFuncGetAttributes(&fa, k_ldpc_t<false>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<false>) != cudaSuccess)
+  if (nc == 2 ? cudaFuncGetAttributes(&fa, k_ldpc_t<1>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<1>) != cudaSuccess
+              : cudaFuncGetAttributes(&fa, k_ldpc_t<8>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<8>) != cudaSuccess)
     return false;
-  if (nc == 1 && g_nc_min_cb && (cudaFuncGetAttributes(&fa, k_ldpc_t<true>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<true>) != cudaSuccess))
+  if (nc == 1 && g_nc_min_cb && (cudaFuncGetAttributes(&fa, k_ldpc_t<1>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<1>) != cudaSuccess))
     return false; /* mixed selection: load the _nc module now, not on the first big TB */
+  if ((g_cl_min_cb || g_cl_force) && nc == 1 &&
+      (cudaFuncGetAttributes(&fa, k_ldpc_t<2>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc_t<4>) != cudaSuccess ||
+       cudaFuncGetAttributes(&fa, k_ldpc4_t<2>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<4>) != cudaSuccess ||
+       cudaFuncGetAttributes(&fa, k_ldpc_t<1>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<1>) != cudaSuccess))
+    return false; /* lazy-load stall otherwise (the _nc kernels are the fallback) */
   done = true;
   return true;
 }
@@ -650,6 +706,12 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
     g_prio = nr_pdsch_gpu_prio_on();
     if (!warm_common())
       return;
+    { /* SMs of the RT partition (device count if the mask query fails): pick_cb keeps a launch within one wave */
+      unsigned m[4] = {0};
+      int sms = 0;
+      cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0);
+      g_rt_sms = nr_green_smmask(g_ctx[0].s, m) ? __builtin_popcount(m[0]) + __builtin_popcount(m[1]) + __builtin_popcount(m[2]) + __builtin_popcount(m[3]) : sms;
+    }
     g_ok = 1;
   });
   return g_ok ? 0 : -1;

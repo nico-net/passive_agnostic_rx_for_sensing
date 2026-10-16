@@ -231,6 +231,8 @@ static int bench(void *g, void *h, int reps)
   return 0;
 }
 
+static void (*atexit_cl_check)(uint64_t *);
+
 int main(int argc, char **argv)
 {
   logInit();
@@ -244,6 +246,21 @@ int main(int argc, char **argv)
     setenv("ISAC_GPU_LDPC_NOCLUSTER", "1", 1);
   if (argc > 2 && !strcmp(argv[2], "mix")) /* nj = 1..6 per launch: 1-3 cluster, 4-6 non-cluster, same CPU-reference comparison */
     setenv("ISAC_GPU_LDPC_NC_MIN_CB", "4", 1);
+  if (argc > 2 && !strcmp(argv[2], "cl2")) setenv("ISAC_GPU_LDPC_CL_FORCE", "2", 1);
+  if (argc > 2 && !strcmp(argv[2], "cl4")) setenv("ISAC_GPU_LDPC_CL_FORCE", "4", 1);
+  if (argc > 2 && !strcmp(argv[2], "pick")) { /* host-only: the selection function */
+    int (*pk)(int, int, int, int, int) = g ? dlsym(g, "nr_pdsch_gpu_ldpc_pick_cb") : NULL;
+    const int exp[][6] = {/* state n sms min force -> cb */
+                          {1, 32, 40, 16, 0, 1}, {1, 20, 40, 16, 0, 2}, {1, 16, 40, 16, 0, 2}, {1, 15, 40, 16, 0, 8}, {1, 21, 40, 16, 0, 1},
+                          {1, 10, 40, 4, 0, 4}, {2, 18, 40, 16, 0, 1}, {1, 18, 40, 0, 0, 8}, {1, 6, 40, 16, 3, 8} /* 3 invalid: ignored */,
+                          {2, 18, 40, 16, 4, 4} /* force wins */};
+    if (!pk) { printf("LDPC_GPU_TEST pick: symbol missing\n"); return 2; }
+    for (unsigned i = 0; i < sizeof(exp) / sizeof(exp[0]); i++)
+      if (pk(exp[i][0], exp[i][1], exp[i][2], exp[i][3], exp[i][4]) != exp[i][5]) { printf("LDPC_GPU_TEST pick row %u wrong\n", i); return 3; }
+    printf("LDPC_GPU_TEST pick OK\n");
+    return 0;
+  }
+  if (argc > 2 && (!strcmp(argv[2], "cl2") || !strcmp(argv[2], "cl4")) && g) atexit_cl_check = dlsym(g, "nr_pdsch_gpu_ldpc_cl_stats");
   nr_gpu_ldpc_init_fn ginit = g ? (nr_gpu_ldpc_init_fn)dlsym(g, "nr_pdsch_gpu_ldpc_init") : NULL;
   nr_gpu_ldpc_ul_init_fn uinit = g ? (nr_gpu_ldpc_ul_init_fn)dlsym(g, "nr_pusch_gpu_ldpc_init") : NULL;
   nr_gpu_ldpc_run_fn grun = g ? (nr_gpu_ldpc_run_fn)dlsym(g, ul ? "nr_pusch_gpu_ldpc_run" : "nr_pdsch_gpu_ldpc_run") : NULL;
@@ -257,6 +274,34 @@ int main(int argc, char **argv)
   }
   if (argc > 2 && !strcmp(argv[2], "bench"))
     return bench(g, h, argc > 3 ? atoi(argv[3]) : 100);
+  if (argc > 4 && !strcmp(argv[2], "clab")) { /* nc-vs-cl A/B: dump nsnap, syn0 and the snapshot bytes of fixed-seed launches to argv[4]; cmp the files */
+    FILE *fo = fopen(argv[4], "wb");
+    static int8_t cin[NR_GPU_LDPC_MAX_JOBS][68 * 384 + 64];
+    static nr_gpu_ldpc_job_t cj[NR_GPU_LDPC_MAX_JOBS];
+    srand48(4242);
+    for (int ri = 0; ri < 3; ri++)
+      for (int hop = 0; hop < 2; hop++)
+        for (int ci = 0; ci < 6; ci++) {
+          const int C = (const int[]){1, 4, 9, 16, 20, 32}[ci], R = (const int[]){13, 23, 89}[ri], ncol = (const int[]){68, 35, 27}[ri], Z = 384, K = 8448;
+          for (int k = 0; k < C; k++) {
+            memset(cin[k], 0, sizeof(cin[k]));
+            for (int i = 2 * Z; i < ncol * Z; i++) {
+              double v = (hop ? 3.0 : 8.0) * (1.0 + (hop ? 3.0 : 0.6 + 0.1 * (k % 4)) * gauss());
+              cin[k][i] = (int8_t)(v > 127 ? 127 : v < -128 ? -128 : lround(v));
+            }
+            cj[k] = (nr_gpu_ldpc_job_t){.BG = 1, .R = R, .Z = Z, .K = K, .it_max = 8, .llr = cin[k]};
+          }
+          if (grun(cj, C) != 0) { printf("LDPC_GPU_TEST clab run failed\n"); return 3; }
+          for (int k = 0; k < C; k++) {
+            fwrite(&cj[k].nsnap, sizeof(int), 1, fo);
+            fwrite(&cj[k].syn0, sizeof(int), 1, fo);
+            for (int sn = 0; sn < cj[k].nsnap; sn++) fwrite(cj[k].snap[sn], 1, (K + 7) >> 3, fo);
+          }
+        }
+    fclose(fo);
+    printf("LDPC_GPU_TEST clab dumped %s\n", argv[4]);
+    return 0;
+  }
   if (nc) {
     nr_gpu_ldpc_stats_fn st = (nr_gpu_ldpc_stats_fn)dlsym(g, "nr_pdsch_gpu_ldpc_stats");
     uint64_t o[3] = {0};
@@ -405,5 +450,12 @@ int main(int argc, char **argv)
              jobs[0].nsnap, sum / 50, best, (b.tv_sec - a.tv_sec) * 1e6 + (b.tv_nsec - a.tv_nsec) / 1e3);
     }
   printf("LDPC_GPU_TEST%s mismatches=%ld\n", ul ? " (UL pool)" : "", n_bad + n_stop_bad);
+  if (atexit_cl_check) { /* the forced cluster size really ran (cb 2 -> o[1], cb 4 -> o[2]) and no cluster-8 launch */
+    uint64_t o[4] = {0};
+    atexit_cl_check(o);
+    const int i = !strcmp(argv[2], "cl2") ? 1 : 2;
+    printf("LDPC_GPU_TEST %s: launches cb1=%lu cb2=%lu cb4=%lu cb8=%lu\n", argv[2], (unsigned long)o[0], (unsigned long)o[1], (unsigned long)o[2], (unsigned long)o[3]);
+    if (!o[i] || o[3]) return 2;
+  }
   return n_bad + n_stop_bad ? 1 : 0;
 }
