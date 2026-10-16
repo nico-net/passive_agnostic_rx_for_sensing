@@ -144,8 +144,18 @@ void nr_pdcch_coreset_bank_note_accept(int index, uint64_t slot)
       e->last_accept_slot = slot;
     if (e->accepts_window != UINT32_MAX)
       ++e->accepts_window;
-    if (e->accepts_total != UINT32_MAX)
-      ++e->accepts_total;
+  }
+  pthread_mutex_unlock(&g_coreset_bank_lock);
+}
+
+/* note_confirm: one independent CRC-valid DCI on this entry (not a duplicate grant), counted once per distinct slot. Caller: the non-dup accept paths. */
+void nr_pdcch_coreset_bank_note_confirm(int index, uint64_t slot)
+{
+  pthread_mutex_lock(&g_coreset_bank_lock);
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
+  if (index >= 0 && index < n && g_coreset_bank[index].state != NR_CORESET_REMOVED && slot != g_coreset_bank[index].confirm_slot) {
+    g_coreset_bank[index].confirm_slot = slot;
+    __atomic_store_n(&g_coreset_bank[index].accepts_total, g_coreset_bank[index].accepts_total + 1, __ATOMIC_RELAXED);
   }
   pthread_mutex_unlock(&g_coreset_bank_lock);
 }
@@ -433,7 +443,7 @@ int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t 
   for (int i = 0; i < e->nowners; ++i)
     if (e->owners[i] == owner) { pthread_mutex_unlock(&g_coreset_bank_lock); return at; }
   if (owner && e->nowners < NR_PDCCH_BLIND_MAX_UE)
-    e->owners[e->nowners++] = owner;
+  { e->owners[e->nowners] = owner; __atomic_store_n(&e->nowners, (uint8_t)(e->nowners + 1), __ATOMIC_RELAXED); }
   pthread_mutex_unlock(&g_coreset_bank_lock);
   return at;
 }

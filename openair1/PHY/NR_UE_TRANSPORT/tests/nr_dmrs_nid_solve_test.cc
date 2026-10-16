@@ -329,3 +329,13 @@ TEST(NidPrimary, GeometryChangeResetsTheState)
   EXPECT_EQ(s.first_us, 20000u);  // grace anchored to the retune
   EXPECT_EQ(nr_dmrs_nid_sweep_demand(0, 0, 0, 21000, s.first_us, 0, 4000000, 2000000, 15000000), 0);
 }
+
+TEST(NidPrimary, OnlyUeSpecificRntisTieEntriesTogether)
+{
+  EXPECT_FALSE(nr_dmrs_nid_rnti_is_ue(0xFFFF));  // SI-RNTI
+  EXPECT_FALSE(nr_dmrs_nid_rnti_is_ue(0xFFFE));  // P-RNTI
+  EXPECT_FALSE(nr_dmrs_nid_rnti_is_ue(1));       // RA-RNTI range
+  EXPECT_FALSE(nr_dmrs_nid_rnti_is_ue(17920));
+  EXPECT_TRUE(nr_dmrs_nid_rnti_is_ue(0x59ab));
+  EXPECT_EQ(nr_dmrs_nid_confirm_score(1, nr_dmrs_nid_rnti_is_ue(0xFFFF)), 1);  // a common RNTI seen elsewhere does not verify
+}

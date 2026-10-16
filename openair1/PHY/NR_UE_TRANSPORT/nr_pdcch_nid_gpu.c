@@ -146,8 +146,10 @@ static void *worker(void *unused)
    nr_pdcch_nid_record_t h[2];uint64_t sig;
    int hn=nr_dmrs_nid_live_hints(h,2,&sig);
    const uint64_t now=duty_clock_us(batch_clock)+1;
-   {const unsigned char *c=(const unsigned char *)&g.batch[b].cfg;uint64_t hsh=1469598103934665603ull;
-    for(size_t k=0;k<sizeof(g.batch[b].cfg);k++)hsh=(hsh^c[k])*1099511628211ull;
+   {const nr_pdcch_nid_config_t *cf=&g.batch[b].cfg;uint64_t hsh=1469598103934665603ull; /* explicit fields, not padding bytes */
+    const uint64_t fl[]={(uint64_t)(int64_t)cf->nsc,(uint64_t)(int64_t)cf->point_a_sc,(uint64_t)(int64_t)cf->css0_crb,(uint64_t)(int64_t)cf->css0_nrb,
+                         (uint64_t)(int64_t)cf->pci,(uint64_t)(int64_t)cf->sps,(uint64_t)(int64_t)cf->dur,cf->epoch};
+    for(size_t k=0;k<sizeof(fl)/sizeof(fl[0]);k++)hsh=(hsh^fl[k])*1099511628211ull;
     if(!g.ps.valid)g.ps_epoch=g.batch[b].cfg.epoch;
     if(nr_dmrs_prim_cfg(&g.ps,hsh,now)) { /* retune: old cell's result, votes and confirmation are void; the grace restarts here */
      memset(&g.result,0,sizeof(g.result));g.generation++;g.all_verified=false;

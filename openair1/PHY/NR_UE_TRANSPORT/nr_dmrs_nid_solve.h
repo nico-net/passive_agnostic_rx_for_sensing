@@ -96,6 +96,8 @@ static inline int nr_dmrs_nid_confirm_score(int confirms, int owner_seen_elsewhe
 {
   return confirms >= 2 || (confirms == 1 && owner_seen_elsewhere) ? 2 : confirms;
 }
+/** Only a UE-specific RNTI can tie two CORESETs together: SI-RNTI 0xFFFF, P-RNTI 0xFFFE and the RA-RNTI range (1..17920) are common to all. */
+static inline int nr_dmrs_nid_rnti_is_ue(unsigned rnti) { return rnti > 17920 && rnti < 0xFFFE; }
 /** Primary-mode scheduler state; reset on a geometry/retune change (cfg_hash differs) so the grace restarts at the retune. Returns 1 when reset. */
 typedef struct { uint64_t cfg_hash, first_us, last_run_us; int valid, verified; unsigned burst; } nr_dmrs_prim_state_t;
 static inline int nr_dmrs_prim_cfg(nr_dmrs_prim_state_t *s, uint64_t cfg_hash, uint64_t now)

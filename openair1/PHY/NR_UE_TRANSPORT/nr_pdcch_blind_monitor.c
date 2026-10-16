@@ -1550,6 +1550,8 @@ int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
       const int bank = nr_pdcch_coreset_bank_add(&c, rnti);
       if (bank >= 0) {
         nr_pdcch_coreset_bank_note_accept(bank, slot);
+        nr_pdcch_coreset_bank_note_confirm(bank, s_add_disc.evidence[i].slot); /* the earlier evidence DCI (same RNTI, other slot, other payload) */
+        nr_pdcch_coreset_bank_note_confirm(bank, slot);
         LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d VERIFIED -> bank add index=%d rnti=0x%04x len=%d\n",
               s_add_disc.next + 1, s_add_disc.n, c.coreset_pdcch_dmrs_scrambling_id, bank, rnti, length);
       } else {
@@ -1607,11 +1609,20 @@ static int bank_confirm_score(int nid,int sym,int dur,int rb,int groups)
     if(!(rb<hi && rb+6*groups>lo))continue;
     const nr_pdcch_discovered_coreset_t *e=nr_pdcch_coreset_bank_entry(i);
     int elsewhere=0;
-    const int confirms=e->accepts_total>1000?1000:(int)e->accepts_total;
-    if(confirms==1)
+    const uint32_t acc=__atomic_load_n(&e->accepts_total,__ATOMIC_RELAXED);
+    const int confirms=acc>1000?1000:(int)acc;
+    const uint16_t own=__atomic_load_n(&e->nowners,__ATOMIC_RELAXED)?e->owners[0]:0;
+    if(confirms==1 && nr_dmrs_nid_rnti_is_ue(own))
       for(int k=0;k<n && !elsewhere;++k) {
+        if(k==i || nr_pdcch_coreset_bank_state(k)==NR_CORESET_REMOVED)continue;
         const nr_pdcch_discovered_coreset_t *o=nr_pdcch_coreset_bank_entry(k);
-        for(int q=0;k!=i && q<o->nowners && e->nowners;++q)elsewhere|=o->owners[q]==e->owners[0];
+        const nr_pdcch_blind_monitor_cfg_t *oc=&o->cfg;
+        if(oc->coreset_pdcch_dmrs_scrambling_id==nid)continue; /* same id: not independent */
+        const int olo=oc->bwp_start+oc->coreset_rb_offset,ohi=olo+6*oc->coreset_freq_domain;
+        const bool same_res=lo<ohi && olo<hi && oc->ss_first_symbol<sym+dur && sym<oc->ss_first_symbol+(int)oc->coreset_duration;
+        if(same_res)continue; /* same time-frequency resources under another id: an alias, not a second CORESET */
+        const int no=__atomic_load_n(&o->nowners,__ATOMIC_RELAXED);
+        for(int q=0;q<no;++q)elsewhere|=o->owners[q]==own;
       }
     const int sc=nr_dmrs_nid_confirm_score(confirms,elsewhere);
     if(sc>best)best=sc;
