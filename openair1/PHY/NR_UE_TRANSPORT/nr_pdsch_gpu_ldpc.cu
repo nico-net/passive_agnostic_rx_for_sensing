@@ -259,11 +259,13 @@ __device__ __forceinline__ uint32_t sx_hi(uint32_t x) { return __vsub2((x >> 8 &
 /* bytes row[(start + i) mod Z], i = 0..3, Z % 4 == 0; branch-free (three loads always issued, so an unrolled run of
  * them is in flight together): two aligned words around start, and the row head for the wrap. Reads up to 7 bytes
  * past the row (the buffers have slack). */
+template <int SM = 0> /* SM: row lives in this block's shared memory (plain loads; __ldcg is global-only) */
 __device__ __forceinline__ uint32_t ld4(const int8_t *row, int start, int Z)
 {
   const int a = start & ~3, sh = start & 3;
-  const uint32_t w0 = __ldcg((const unsigned int *)(row + a)), w1 = __ldcg((const unsigned int *)(row + a + 4));
-  const uint32_t w2 = __ldcg((const unsigned int *)row);
+  const uint32_t w0 = SM ? *(const unsigned int *)(row + a) : __ldcg((const unsigned int *)(row + a)),
+                 w1 = SM ? *(const unsigned int *)(row + a + 4) : __ldcg((const unsigned int *)(row + a + 4)),
+                 w2 = SM ? *(const unsigned int *)row : __ldcg((const unsigned int *)row);
   const uint32_t u = __funnelshift_r(w0, w1, 8 * sh);
   const int n = Z - start; /* valid bytes before the wrap, < 4 only when wrapping */
   return n >= 4 ? u : (u & ((1u << (8 * n)) - 1u)) | (w2 << (8 * n));
@@ -274,7 +276,7 @@ __device__ __forceinline__ uint32_t abs4(uint32_t v)
   const uint32_t m = __vcmplts4(v, 0u);
   return (__vneg4(v) & m) | (v & ~m);
 }
-template <int D>
+template <int D, int SM = 0>
 __device__ __forceinline__ uint32_t cn_item4(const Graph &G, int Z, int z, int e0, int deg, const int8_t *res, const int8_t *llr, int8_t *c2v)
 {
   uint32_t rr[D], cv[D], v[D];
@@ -283,7 +285,7 @@ __device__ __forceinline__ uint32_t cn_item4(const Graph &G, int Z, int z, int e
     const int e = e0 + (k < deg ? k : 0);
     int zb = z + G.esh[e];
     zb -= zb >= Z ? Z : 0;
-    rr[k] = ld4(res + G.ecol[e] * Z, zb, Z); /* written by other blocks: L2 */
+    rr[k] = ld4<SM>(res + G.ecol[e] * Z, zb, Z); /* written by other blocks: L2 */
     cv[k] = *(const uint32_t *)(c2v + e * Z + z);
   }
   uint32_t par = 0, m1 = 0x7f7f7f7fu, m2 = 0x7f7f7f7fu, sx = 0;
@@ -334,10 +336,13 @@ template <int D> __device__ __forceinline__ void bn_sum4(const Graph &G, int Z, 
     }
 }
 
-template <int CB> __global__ void __launch_bounds__(THREADS) k_ldpc4_t(const DJob *jobs, int8_t *g_llr, int8_t *g_res, int8_t *g_c2v, int *g_unsat,
+template <int CB, int SM = 0> /* SM = 1: the hard-decision state res in shared memory (CB == 1 only) */
+__global__ void __launch_bounds__(THREADS) k_ldpc4_t(const DJob *jobs, int8_t *g_llr, int8_t *g_res, int8_t *g_c2v, int *g_unsat,
                                                    uint8_t *g_snap, int *g_out)
 {
+  static_assert(SM == 0 || CB == 1, "shared-memory state needs one block per code block");
   __shared__ Graph G;
+  __shared__ __align__(16) int8_t sres[SM ? MAXC * ZMAX + 16 : 1];
   const int c = blockIdx.x / CB, b = blk_rank<CB>(), t = threadIdx.x;
   const DJob J = jobs[c];
   {
@@ -348,7 +353,7 @@ template <int CB> __global__ void __launch_bounds__(THREADS) k_ldpc4_t(const DJo
   }
   __syncthreads();
   const int Z = G.Z, Z4 = Z >> 2, M = G.M, ncol = G.ncol, gt = b * THREADS + t, gs = CB * THREADS, itm = J.it_max;
-  int8_t *llr = g_llr + (size_t)c * MAXC * ZMAX, *res = g_res + (size_t)c * MAXC * ZMAX, *c2v = g_c2v + (size_t)c * MAXE * ZMAX;
+  int8_t *llr = g_llr + (size_t)c * MAXC * ZMAX, *res = SM ? sres : g_res + (size_t)c * MAXC * ZMAX, *c2v = g_c2v + (size_t)c * MAXE * ZMAX;
   int *unsat = g_unsat + c * NIT;
   const int KB = J.K >> 3; /* Z % 4 == 0: K % 8 == 0 */
   uint8_t *snap = g_snap + (size_t)c * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX;
@@ -368,11 +373,11 @@ template <int CB> __global__ void __launch_bounds__(THREADS) k_ldpc4_t(const DJo
       for (int w = gt; w < M * Z4; w += gs) {
         const int r = w / Z4, z = (w - r * Z4) << 2, e0 = G.rs[r], deg = G.rs[r + 1] - e0;
         if (deg <= 4)
-          bad |= cn_item4<4>(G, Z, z, e0, deg, res, llr, c2v);
+          bad |= cn_item4<4, SM>(G, Z, z, e0, deg, res, llr, c2v);
         else if (deg <= 10)
-          bad |= cn_item4<10>(G, Z, z, e0, deg, res, llr, c2v);
+          bad |= cn_item4<10, SM>(G, Z, z, e0, deg, res, llr, c2v);
         else
-          bad |= cn_item4<19>(G, Z, z, e0, deg, res, llr, c2v);
+          bad |= cn_item4<19, SM>(G, Z, z, e0, deg, res, llr, c2v);
       }
       if (it - 1 >= 3 && __syncthreads_or(bad != 0) && t == 0)
         atomicOr(&unsat[it - 1], 1);
@@ -549,11 +554,14 @@ template __global__ void k_ldpc4_t<1>(const DJob *, int8_t *, int8_t *, int8_t *
 template __global__ void k_ldpc4_t<2>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
 template __global__ void k_ldpc4_t<4>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
 template __global__ void k_ldpc4_t<8>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
+template __global__ void k_ldpc4_t<1, 1>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
 
 /* Kernel family: the cluster kernels need sm_90+; below that, or with ISAC_GPU_LDPC_NOCLUSTER=1 (test on GB10), the _nc kernels (one block per
  * code block, same results). Decided once, first thing in warm_common()/init, before any graph warm-up. g_nc_state: 0 undecided, 1 cluster,
  * 2 non-cluster, 3 CC query failed (GPU LDPC refused, CPU fallback). */
 static std::atomic<int> g_nc_state{0}, g_refused{0};
+static int g_sm_level = 0; /* ISAC_GPU_LDPC_SM: 1 = res in shared memory for the _nc kernel (Z % 4 == 0 only) */
+static std::atomic<uint64_t> g_sm_launches{0};
 static int g_cl_min_cb = 0, g_cl_force = 0, g_rt_sms = 0; /* ISAC_GPU_LDPC_CL_MIN_CB (0 = off), ISAC_GPU_LDPC_CL_FORCE (test only: 1, 2, 4, 8) */
 static std::atomic<uint64_t> g_cb_launches[4], g_cl_fallback{0};
 static int g_nc_min_cb = 0; /* ISAC_GPU_LDPC_NC_MIN_CB: launches with >= N code blocks use the _nc kernels (0 = off); set before g_nc_state latches */
@@ -570,10 +578,11 @@ static int pick_cb(int state, int n, int rt_sms, int min_cb, int force)
   return n * 4 <= rt_sms ? 4 : n * 2 <= rt_sms ? 2 : 1;
 }
 extern "C" int nr_pdsch_gpu_ldpc_pick_cb(int state, int n, int sms, int min_cb, int force) { return pick_cb(state, n, sms, min_cb, force); }
-extern "C" void nr_pdsch_gpu_ldpc_cl_stats(uint64_t o[4])
+extern "C" void nr_pdsch_gpu_ldpc_cl_stats(uint64_t o[5])
 {
   for (int i = 0; i < 4; i++)
     o[i] = g_cb_launches[i].load();
+  o[4] = g_sm_launches.load();
 }
 static int decide_nc()
 {
@@ -600,6 +609,10 @@ static int decide_nc()
   g_cl_force = m ? atoi(m) : 0;
   if (g_cl_force != 1 && g_cl_force != 2 && g_cl_force != 4 && g_cl_force != 8)
     g_cl_force = 0;
+  m = getenv("ISAC_GPU_LDPC_SM");
+  g_sm_level = m ? atoi(m) : 0;
+  if (g_sm_level != 1)
+    g_sm_level = 0;
   if (st == 2 && g_cl_force > 1)
     g_cl_force = 0; /* no clusters below sm_90 / with NOCLUSTER */
   g_nc_state.store(st);
@@ -630,6 +643,9 @@ static cudaError_t ldpc_launch(int nc, int n, cudaStream_t st, bool z4, const DJ
   void (*k)(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *) =
       z4 ? (cb == 1 ? k_ldpc4_t<1> : cb == 2 ? k_ldpc4_t<2> : cb == 4 ? k_ldpc4_t<4> : k_ldpc4_t<8>)
          : (cb == 1 ? k_ldpc_t<1> : cb == 2 ? k_ldpc_t<2> : cb == 4 ? k_ldpc_t<4> : k_ldpc_t<8>);
+  const bool sm = cb == 1 && z4 && g_sm_level;
+  if (sm)
+    k = k_ldpc4_t<1, 1>;
   cudaError_t e = cudaLaunchKernelEx(&cfg, k, ddj, x.llr, x.llrRes, x.c2v, x.unsat, dsnap, dres);
   int used = cb;
   if (e != cudaSuccess && (cb == 2 || cb == 4)) {
@@ -639,7 +655,11 @@ static cudaError_t ldpc_launch(int nc, int n, cudaStream_t st, bool z4, const DJ
     cfg.numAttrs = 0;
     used = 1;
     e = cudaLaunchKernelEx(&cfg, z4 ? k_ldpc4_t<1> : k_ldpc_t<1>, ddj, x.llr, x.llrRes, x.c2v, x.unsat, dsnap, dres);
-  }
+  } else if (e != cudaSuccess && sm) { /* smem variant failed to launch: the global-memory _nc kernel */
+    (void)cudaGetLastError();
+    e = cudaLaunchKernelEx(&cfg, k_ldpc4_t<1>, ddj, x.llr, x.llrRes, x.c2v, x.unsat, dsnap, dres);
+  } else if (sm && e == cudaSuccess)
+    g_sm_launches.fetch_add(1);
   g_cb_launches[used == 1 ? 0 : used == 2 ? 1 : used == 4 ? 2 : 3].fetch_add(1);
   return e;
 }
@@ -672,6 +692,8 @@ static bool warm_common()
        cudaFuncGetAttributes(&fa, k_ldpc4_t<2>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<4>) != cudaSuccess ||
        cudaFuncGetAttributes(&fa, k_ldpc_t<1>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<1>) != cudaSuccess))
     return false; /* lazy-load stall otherwise (the _nc kernels are the fallback) */
+  if (g_sm_level && cudaFuncGetAttributes(&fa, k_ldpc4_t<1, 1>) != cudaSuccess)
+    return false;
   done = true;
   return true;
 }
