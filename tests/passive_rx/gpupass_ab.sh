@@ -2,6 +2,10 @@
 # usage: gpupass_ab.sh <capset b|tim> <n> [seeded]   (each replay takes heavy.lock via p99_replay.sh)
 # Interleaved arms OFF / ON / ONREC per run index; "seeded" runs only the validation-only ON arm with
 # ISAC_UL_GPU_PASS_SEED=1 (the captures hold no real UL CRC-OK TB). Arms differ only in the pass/recovery flags;
+# ARMS env (default "OFF ON ONREC") picks the arms; extra arms (all on t26f.env, ONR* = ON + ASYNC recovery + GPU SSB FEP):
+#   ONR  = ON + ISAC_PDSCH_RECOVERY_ASYNC=1 + ISAC_SSB_FEP_GPU=1
+#   ONRP = ONR + ISAC_GPU_PASS_POLL_SLEEP_US=${POLL_US:-600}
+#   ONRX = ONRP + ISAC_GPU_PASS_RETRY_OLD=1 (retry bodies to the old path, Task 8b)
 # t26f.env already sets ISAC_CSIRS_DISC=1 (needed by the async recovery).
 set -e
 E="ISAC_E2E_TRACE=1"  # same diagnostic in every arm (per-grant e2e timing for sysan_e2e.py); passed as arg: sudo drops the env
@@ -11,10 +15,13 @@ if [ "${3:-}" = seeded ]; then
   exit
 fi
 for i in $(seq 1 "$2"); do
-  for arm in OFF ON ONREC; do
+  for arm in ${ARMS:-OFF ON ONREC}; do
     case $arm in
       OFF)   X="$E";;
       ON)    X="$E ISAC_GPU_PASS=1 ISAC_UL_GPU_PASS=1";;
+      ONR)   X="$E ISAC_GPU_PASS=1 ISAC_UL_GPU_PASS=1 ISAC_PDSCH_RECOVERY_ASYNC=1 ISAC_SSB_FEP_GPU=1";;
+      ONRP)  X="$E ISAC_GPU_PASS=1 ISAC_UL_GPU_PASS=1 ISAC_PDSCH_RECOVERY_ASYNC=1 ISAC_SSB_FEP_GPU=1 ISAC_GPU_PASS_POLL_SLEEP_US=${POLL_US:-600}";;
+      ONRX)  X="$E ISAC_GPU_PASS=1 ISAC_UL_GPU_PASS=1 ISAC_PDSCH_RECOVERY_ASYNC=1 ISAC_SSB_FEP_GPU=1 ISAC_GPU_PASS_POLL_SLEEP_US=${POLL_US:-600} ISAC_GPU_PASS_RETRY_OLD=1";;
       ONREC) X="$E ISAC_GPU_PASS=1 ISAC_UL_GPU_PASS=1 ISAC_PDSCH_RECOVERY_ASYNC=1";;
     esac
     CAPSET=$1 ENVFILE=$O/t26f.env "$S/p99_replay.sh" "gp_${1}_${arm}_$i" $X || echo "FAILED gp_${1}_${arm}_$i rc=$?"

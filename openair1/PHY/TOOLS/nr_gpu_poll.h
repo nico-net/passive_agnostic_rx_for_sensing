@@ -11,13 +11,8 @@
 #include <stdlib.h>
 #include <time.h>
 
-static inline void nr_gpu_poll_relax(uint64_t *t0)
+static inline void nr_gpu_poll_relax_us(uint64_t *t0, int us)
 {
-  static int us = -1;
-  if (us < 0) {
-    const char *e = getenv("ISAC_GPU_POLL_SLEEP_US");
-    us = e && atoi(e) > 0 ? atoi(e) : 0;
-  }
   if (!us)
     return;
   struct timespec now;
@@ -31,4 +26,30 @@ static inline void nr_gpu_poll_relax(uint64_t *t0)
     const struct timespec ts = {0, 20000};
     nanosleep(&ts, NULL);
   }
+}
+
+static inline void nr_gpu_poll_relax(uint64_t *t0)
+{
+  static int us = -1;
+  if (us < 0) {
+    const char *e = getenv("ISAC_GPU_POLL_SLEEP_US");
+    us = e && atoi(e) > 0 ? atoi(e) : 0;
+  }
+  nr_gpu_poll_relax_us(t0, us);
+}
+
+/* ISAC_GPU_PASS_POLL_SLEEP_US=N: the same bounded spin for the graph pass's one long wait only (default = ISAC_GPU_POLL_SLEEP_US, i.e. unchanged).
+ * Safety is the same: after N us of spinning the thread nanosleeps 20 us per poll, so a pinned RT consumer still yields to its kworker; N must stay far below
+ * the 950 ms RT throttle (a pass lasts < 2 ms, so N = 600 only widens the pure-spin part of a normal wait). */
+static inline void nr_gpu_poll_relax_pass(uint64_t *t0)
+{
+  static int us = -1;
+  if (us < 0) {
+    const char *e = getenv("ISAC_GPU_PASS_POLL_SLEEP_US");
+    const char *g = getenv("ISAC_GPU_POLL_SLEEP_US");
+    us = e && *e ? atoi(e) : (g && atoi(g) > 0 ? atoi(g) : 0);
+    if (us < 0)
+      us = 0;
+  }
+  nr_gpu_poll_relax_us(t0, us);
 }

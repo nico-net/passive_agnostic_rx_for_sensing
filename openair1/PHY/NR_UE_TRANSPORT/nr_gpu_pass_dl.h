@@ -60,7 +60,7 @@ enum { NR_GPU_PASS_EV_COMMIT, NR_GPU_PASS_EV_RETRY_OLD /* pass said CRC fail / C
        NR_GPU_PASS_EV_FP32_FLIP /* FP32 pass: a shadow where pass and old path disagree on the CRC verdict only (tolerated, counted) */, NR_GPU_PASS_EV_N };
 /* gates of passive_decode_body_core that keep a grant off the pass (the first one that refuses, counted) */
 enum { NR_GPU_PASS_GATE_SEG /* more segments than the largest class (16) */, NR_GPU_PASS_GATE_PROBE, NR_GPU_PASS_GATE_SHARE, NR_GPU_PASS_GATE_GW, NR_GPU_PASS_GATE_PTRS, NR_GPU_PASS_GATE_TINTERP, NR_GPU_PASS_GATE_HARQ,
-       NR_GPU_PASS_GATE_LDPC_OFF, NR_GPU_PASS_GATE_CHEST_ONLY, NR_GPU_PASS_GATE_OCC, NR_GPU_PASS_GATE_NOMEM, NR_GPU_PASS_GATE_N };
+       NR_GPU_PASS_GATE_LDPC_OFF, NR_GPU_PASS_GATE_CHEST_ONLY, NR_GPU_PASS_GATE_OCC, NR_GPU_PASS_GATE_NOMEM, NR_GPU_PASS_GATE_RETRY /* ISAC_GPU_PASS_RETRY_OLD: a retry body runs the old path */, NR_GPU_PASS_GATE_N };
 void nr_gpu_pass_gate(int gate);
 /* every ISAC_GPU_PASS_CHECK-th CRC-failing pass: also run the old first body and compare */
 int nr_gpu_pass_shadow_due_fail(void);

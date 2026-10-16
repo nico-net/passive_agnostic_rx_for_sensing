@@ -248,7 +248,7 @@ void nr_gpu_pass_ul_census(void)
   }
   LOG_A(PHY,
         "SENSING: GPUPASS_UL on=%d runs=%lu launches=%lu graph_hits=%lu module_fb[unseen=%lu busy=%lu unsup=%lu err=%lu ldpc_key=%lu] tb_fail=%lu need_cpu=%lu wait_us_p50<=%lu p99<=%lu classes=%lu | host_fb[off=%lu "
-        "tp=%lu hop=%lu ptrs=%lu scope=%lu rv=%lu cell=%lu tbparam=%lu dmrs=%lu module=%lu nomem=%lu] cache[hit=%lu miss=%lu stale=%lu put=%lu] ok=%lu fail=%lu refine=%lu shadow=%lu shadow_bad=%lu llr_inexact=%lu est_diff=%lu (ok: disabling %lu snr_only %lu state3 %lu; fail %lu) snr_big=%lu need_cpu_old=%lu\n",
+        "tp=%lu hop=%lu ptrs=%lu scope=%lu rv=%lu cell=%lu tbparam=%lu dmrs=%lu module=%lu nomem=%lu] cache[hit=%lu miss=%lu stale=%lu put=%lu] ok=%lu fail=%lu refine=%lu shadow=%lu shadow_bad=%lu llr_inexact=%lu est_diff=%lu (ok: disabling %lu snr_only %lu state3 %lu; fail %lu) snr_big=%lu need_cpu_old=%lu prep_us[p50<=%lu p99<=%lu] run_us[p50<=%lu p99<=%lu] post_us[p50<=%lu p99<=%lu]\n",
         atomic_load(&U.on), (unsigned long)U.runs, (unsigned long)o[0], (unsigned long)o[1], (unsigned long)o[2], (unsigned long)o[3], (unsigned long)o[4], (unsigned long)o[5],
         (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[8], (unsigned long)o[9], (unsigned long)o[10], (unsigned long)o[11], (unsigned long)U.fb[FB_OFF],
         (unsigned long)U.fb[FB_TP], (unsigned long)U.fb[FB_HOP], (unsigned long)U.fb[FB_PTRS], (unsigned long)U.fb[FB_SCOPE], (unsigned long)U.fb[FB_RV], (unsigned long)U.fb[FB_CELL],
@@ -257,7 +257,8 @@ void nr_gpu_pass_ul_census(void)
         (unsigned long)U.ev[NR_GPU_PASS_UL_EV_REFINE], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_BAD], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_LLR_DIFF],
         (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_EST_OK_DISABLING], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_EST_OK_SNR_ONLY], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_EST_OK_STATE3],
         (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF_FAIL], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SNR_BIG],
-        (unsigned long)U.ev[NR_GPU_PASS_UL_EV_NEED_CPU]);
+        (unsigned long)U.ev[NR_GPU_PASS_UL_EV_NEED_CPU], (unsigned long)(o[12] & 0xffffffffu), (unsigned long)(o[12] >> 32), (unsigned long)(o[13] & 0xffffffffu),
+        (unsigned long)(o[13] >> 32), (unsigned long)(o[14] & 0xffffffffu), (unsigned long)(o[14] >> 32));
 }
 
 static int fb(int why)
@@ -299,6 +300,7 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
 {
   if (!nr_gpu_pass_ul_active())
     return fb(FB_OFF);
+  const uint64_t t_entry = nr_gpu_pass_now_ns();
   atomic_fetch_add_explicit(&U.runs, 1, memory_order_relaxed);
   if (in->transform_precoding)
     return fb(FB_TP);
@@ -319,6 +321,7 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
     return fb(FB_NOMEM);
   memset(j, 0, offsetof(nr_gpu_pass_job_t, dj));
   memset(&j->ul, 0, sizeof(j->ul));
+  j->t_entry_ns = t_entry;
   nr_gpu_pass_ul_t *u = &j->ul;
   const int qm = in->qam_mod_order, nrb = in->num_rb, end = in->start_symbol + in->num_symbols;
   const uint16_t range = (uint16_t)(((1u << in->num_symbols) - 1u) << in->start_symbol);

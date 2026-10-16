@@ -112,14 +112,14 @@ int nr_gpu_pass_shadow_due(void)
 
 static void census(void)
 {
-  char buf[512];
+  char buf[1024];
   if (G.stats)
     G.stats(buf, sizeof(buf));
   else
     buf[0] = 0;
   LOG_A(PHY,
         "SENSING: %s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu seg=%lu] seg_grants[1=%lu 2=%lu 4=%lu 8=%lu 16=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
-        "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu old_first=%lu fp32_flip=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu]\n",
+        "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu old_first=%lu fp32_flip=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu retry=%lu]\n",
         buf, (unsigned long)G.fb[FB_OFF], (unsigned long)G.fb[FB_CELL], (unsigned long)G.fb[FB_FO], (unsigned long)G.fb[FB_CHEST],
         (unsigned long)G.fb[FB_DEMOD], (unsigned long)G.fb[FB_TBPARAM], (unsigned long)G.fb[FB_MODULE], (unsigned long)G.fb[FB_SEG],
         (unsigned long)G.segn[0], (unsigned long)G.segn[1], (unsigned long)G.segn[2], (unsigned long)G.segn[3], (unsigned long)G.segn[4], (unsigned long)G.ev[NR_GPU_PASS_EV_COMMIT],
@@ -127,7 +127,7 @@ static void census(void)
         (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_BAD], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL_BAD],
         (unsigned long)G.ev[NR_GPU_PASS_EV_CONT_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_OLD_FIRST], (unsigned long)G.ev[NR_GPU_PASS_EV_FP32_FLIP], (unsigned long)G.gate[0], (unsigned long)G.gate[1],
         (unsigned long)G.gate[2], (unsigned long)G.gate[3], (unsigned long)G.gate[4], (unsigned long)G.gate[5], (unsigned long)G.gate[6], (unsigned long)G.gate[7],
-        (unsigned long)G.gate[8], (unsigned long)G.gate[9], (unsigned long)G.gate[10]);
+        (unsigned long)G.gate[8], (unsigned long)G.gate[9], (unsigned long)G.gate[10], (unsigned long)G.gate[11]);
 }
 
 static int fb(int why)
@@ -268,7 +268,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   int smade = 0;
   static const int segc[] = {1, 2, 4, 8, 16}, segnl[] = {1, 2, 3, 4};
   if (G.stats) {
-    char buf[512];
+    char buf[1024];
     G.stats(buf, sizeof(buf));
     LOG_A(PHY, "SENSING: %s (contiguous classes only)\n", buf);
   }
@@ -313,7 +313,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   LOG_A(PHY, "SENSING: GPUPASS %s: %d shape classes (+ %d segmented) x %d instances captured (EVM branch %d, %d failed), shadow check every %d passes, %s memory model, demod %s\n",
         made > 0 ? "enabled" : "NOT enabled", made, smade, NR_GPU_PASS_RING, evm, failed, G.check, nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE", G.fp32 ? "FP32 (sign/CRC shadow checks)" : "FP64 (bit-exact)");
   if (G.stats) {
-    char buf[512];
+    char buf[1024];
     G.stats(buf, sizeof(buf));
     LOG_A(PHY, "SENSING: %s\n", buf);
   }
@@ -331,6 +331,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
     if (c == 100 || (c % 2048) == 0)
       census();
   }
+  const uint64_t t_entry = nr_gpu_pass_now_ns();
   PHY_VARS_NR_UE *ue = in->ue;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const fapi_nr_dl_cw_info_t *cw = in->cw;
@@ -346,6 +347,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   if (!j || !out->llr)
     return fb(FB_MODULE);
   memset(j, 0, offsetof(nr_gpu_pass_job_t, dj));
+  j->t_entry_ns = t_entry;
   /* ---- channel estimate inputs. A segmented grant (PRG / VRB bundles): the chest runs per segment (classes of 1, 2, 4, 8, 16 segments) and the demod reads the
    * estimate in data order against the virtual contiguous allocation the old path gathers; here the gather is the demod geometry's RX index map. */
   const int nseg = in->seg ? in->nseg : 0;

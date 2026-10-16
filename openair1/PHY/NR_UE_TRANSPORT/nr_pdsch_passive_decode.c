@@ -51,7 +51,8 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_passive_tpool.h"
 #include "nr_pdsch_retry_pred.h"
 #include "nr_pdsch_gpu_ldpc_host.h"
-#include "nr_gpu_pass_dl.h" // GPUPASS Task 4
+#include "nr_gpu_pass_dl.h"
+#include "nr_gpu_pass_retry.h" // GPUPASS Task 4
 #include "PHY/TOOLS/nr_gpu_platform.h"
 static void gp_thread_prewarm(void);
 #include "nr_pdsch_cpu_route.h" /* BATCHCPU */
@@ -3135,7 +3136,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   int gp_gate = -1; /* the first gate that keeps this grant off the pass (counted: nr_gpu_pass_dl.h NR_GPU_PASS_GATE_*) */
   if (nr_gpu_pass_active()) {
     extern __thread int nr_pdsch_chest_occ_override;
-    gp_gate = (seg_path && nseg > NR_GPU_PASS_MAX_SEG) ? NR_GPU_PASS_GATE_SEG /* more segments than the largest class; fewer run the segmented classes */
+    static int gp_retry_old = -1; /* ISAC_GPU_PASS_RETRY_OLD (nr_gpu_pass_retry.h) */
+    if (gp_retry_old < 0) { const char *e_ = getenv("ISAC_GPU_PASS_RETRY_OLD"); gp_retry_old = e_ && atoi(e_) == 1; }
+    gp_gate = nr_gpu_pass_retry_to_old(gp_retry_old, t_pdtim_body, t_recov_mode == 2) ? NR_GPU_PASS_GATE_RETRY
+            : (seg_path && nseg > NR_GPU_PASS_MAX_SEG) ? NR_GPU_PASS_GATE_SEG /* more segments than the largest class; fewer run the segmented classes */
             : (t_probe_first_seg || probe_last_sym >= 0 || t_probe_no_horizon) ? NR_GPU_PASS_GATE_PROBE
             : (t_share.on || t_chest_bypass) ? NR_GPU_PASS_GATE_SHARE
             : (t_gw_used || t_gw_capture || t_llr_ovr != NULL || t_cap_req || t_tb_force_cpu) ? NR_GPU_PASS_GATE_GW

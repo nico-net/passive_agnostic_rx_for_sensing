@@ -9,6 +9,7 @@ extern "C" {
 #include <map>
 #include "nr_gpu_pass_fixture.h"
 #include "nr_gpu_pass_fp32_gate.h"
+#include "nr_gpu_pass_retry.h"
 #include "nr_gpu_platform.h"
 #include "nr_gpu_pass_post.h"
 #include <random>
@@ -1736,3 +1737,12 @@ TEST(GpuPassZUlSnrGate, Arithmetic) {
   EXPECT_EQ(1, nr_gpu_pass_ul_snr_note(1)) << "2 big in 101 trips";
 }
 
+
+/* Task 8b: ISAC_GPU_PASS_RETRY_OLD sends exactly the retry bodies (2nd+ body of a call, every worker body) to the old path, never the first body, never with the flag off */
+TEST(GpuPassRetry, OnlyRetryBodiesGoOld)
+{
+  EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 1, 0), 0);
+  EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 2, 0), 1);
+  EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 1, 1), 1);
+  EXPECT_EQ(nr_gpu_pass_retry_to_old(0, 3, 1), 0);
+}

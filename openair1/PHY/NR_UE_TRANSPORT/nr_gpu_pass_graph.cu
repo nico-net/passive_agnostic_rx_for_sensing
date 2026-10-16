@@ -220,6 +220,25 @@ static std::atomic<unsigned> g_busy{0};
 static std::atomic<uint64_t> g_seg_launches{0}, g_seg_classes{0}, g_used_mb{0}, g_base_mb{0}, g_fb_unseen_seg{0}; /* g_used_mb: GPU memory in use by the device after the last pre-fence build */
 static std::atomic<uint64_t> g_launches{0}, g_hits{0}, g_fb_unseen{0}, g_fb_busy{0}, g_fb_unsup{0}, g_fb_err{0}, g_need_cpu{0}, g_tb_fail{0}, g_allocs{0}, g_fb_ldpckey{0};
 static std::atomic<uint64_t> g_wait_hist[32]; /* host wait, 2^i us buckets */
+/* Task 8b stamps: host prep (run entry to launch), launch to done, post (done to commit end); [0] DL, [1] UL; 2^i us buckets */
+static std::atomic<uint64_t> g_stamp_hist[2][3][32];
+static void stamp_add(int ul, int k, uint64_t ns)
+{
+  const uint64_t us = ns / 1000;
+  int b = 0;
+  while (b < 31 && (1ull << b) < us) b++;
+  ++g_stamp_hist[ul][k][b];
+}
+static uint64_t stamp_q(int ul, int k, int pct) /* bucket upper bound in us */
+{
+  uint64_t tot = 0, acc = 0;
+  for (auto &h : g_stamp_hist[ul][k]) tot += h;
+  for (int i = 0; i < 32 && tot; i++) {
+    acc += g_stamp_hist[ul][k][i];
+    if (acc * 100 >= tot * pct) return 1ull << i;
+  }
+  return 0;
+}
 constexpr uint32_t RING_LEN = 80000;
 static int16_t g_zero_pil[6 * 273 * 2];
 static uint32_t g_zero_scr[LLR_CAP / 32 + 2];
@@ -640,7 +659,7 @@ static void wait_done(Inst &I)
 {
   uint64_t pt = 0;
   cudaError_t e;
-  while ((e = cudaEventQuery(I.done)) == cudaErrorNotReady) nr_gpu_poll_relax(&pt);
+  while ((e = cudaEventQuery(I.done)) == cudaErrorNotReady) nr_gpu_poll_relax_pass(&pt);
   if (e != cudaSuccess) g_dead = 1;
 }
 
@@ -850,10 +869,11 @@ extern "C" void nr_gpu_pass_stats(char *buf, int n)
     acc += g_wait_hist[i];
     if (acc * 2 >= tot && tot) { p50 = i; break; }
   }
-  snprintf(buf, n, "GPUPASS launches=%lu graph_hits=%lu fallback=%lu (unseen=%lu (seg %lu) busy=%lu unsup=%lu err=%lu ldpc_key=%lu) need_cpu=%lu tb_fail=%lu classes=%lu (seg %lu) seg_launches=%lu instances=%lu wait_us_p50<=%d gpu_delta_mb=%lu",
+  snprintf(buf, n, "GPUPASS launches=%lu graph_hits=%lu fallback=%lu (unseen=%lu (seg %lu) busy=%lu unsup=%lu err=%lu ldpc_key=%lu) need_cpu=%lu tb_fail=%lu classes=%lu (seg %lu) seg_launches=%lu instances=%lu wait_us_p50<=%d gpu_delta_mb=%lu prep_us[p50<=%lu p99<=%lu] run_us[p50<=%lu p99<=%lu] post_us[p50<=%lu p99<=%lu]",
            (unsigned long)o[0], (unsigned long)o[1], (unsigned long)(o[2] + o[3] + o[4] + o[5] + o[11]), (unsigned long)o[2], (unsigned long)o[14], (unsigned long)o[3], (unsigned long)o[4],
            (unsigned long)o[5], (unsigned long)o[11], (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[9], (unsigned long)o[13], (unsigned long)o[12], (unsigned long)o[8],
-           tot ? 1 << p50 : 0, (unsigned long)g_used_mb.load());
+           tot ? 1 << p50 : 0, (unsigned long)g_used_mb.load(), (unsigned long)stamp_q(0, 0, 50), (unsigned long)stamp_q(0, 0, 99), (unsigned long)stamp_q(0, 1, 50),
+           (unsigned long)stamp_q(0, 1, 99), (unsigned long)stamp_q(0, 2, 50), (unsigned long)stamp_q(0, 2, 99));
 }
 
 /* test hook: marks the instances of `mask` busy (1) or frees them (0) so that a test can run on one chosen instance */
@@ -903,6 +923,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   if (!rt.admitted) { ++g_fb_unsup; return 1; }
   const int pr = prepare(I, j);
   if (pr != 0) { ++(pr == -2 ? g_fb_ldpckey : g_fb_err); return 1; }
+  const uint64_t ts_l = nr_gpu_pass_now_ns();
   const auto t0 = std::chrono::steady_clock::now();
   if (cudaGraphLaunch(e->exec[id], I.s) != cudaSuccess || cudaEventRecord(I.done, I.s) != cudaSuccess) {
     ++g_fb_err;
@@ -910,6 +931,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     return -1;
   }
   wait_done(I);
+  const uint64_t ts_d = nr_gpu_pass_now_ns();
   const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   if (g_dead) { ++g_fb_err; return -1; }
   ++g_launches;
@@ -972,6 +994,12 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
       for (int m = 0; m < NSYM; m++)
         if (j->copy_mask >> m & 1) memcpy(j->rxdataF + 2 * ((size_t)a * j->rx_stride + (size_t)m * N), (const int16_t *)I.rxF.host + 2 * ((size_t)a * NSYM * N + (size_t)m * N), (size_t)N * 4);
   }
+  {
+    const uint64_t ts_c = nr_gpu_pass_now_ns();
+    if (j->t_entry_ns && j->t_entry_ns <= ts_l) stamp_add(0, 0, ts_l - j->t_entry_ns);
+    stamp_add(0, 1, ts_d - ts_l);
+    stamp_add(0, 2, ts_c - ts_d);
+  }
   return 0;
 }
 
@@ -993,6 +1021,7 @@ extern "C" void nr_gpu_pass_ul_counters(uint64_t o[16])
   o[10] = tot ? 1ull << (p99 - 1) : 0;
   o[11] = 0;
   for (const auto &e : g_cache) o[11] += (e.first >> 40) & 1;
+  for (int k = 0; k < 3; k++) o[12 + k] = stamp_q(1, k, 50) | stamp_q(1, k, 99) << 32; /* Task 8b: prep, run, post (p50 | p99 << 32, us) */
 }
 
 extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result_t *r)
@@ -1033,6 +1062,7 @@ extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   if (!rt.admitted) { ++g_ul_fb_unsup; return 1; }
   const int pr = prepare_ul(I, j);
   if (pr != 0) { ++(pr == -2 ? g_ul_fb_ldpckey : g_ul_fb_err); return 1; }
+  const uint64_t ts_l = nr_gpu_pass_now_ns();
   const auto t0 = std::chrono::steady_clock::now();
   if (cudaGraphLaunch(e->exec[id], I.s) != cudaSuccess || cudaEventRecord(I.done, I.s) != cudaSuccess) {
     ++g_ul_fb_err;
@@ -1040,6 +1070,7 @@ extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     return -1;
   }
   wait_done(I);
+  const uint64_t ts_d = nr_gpu_pass_now_ns();
   const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   if (g_dead) { ++g_ul_fb_err; return -1; }
   ++g_ul_launches;
@@ -1089,6 +1120,12 @@ extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
       if (u.rx[a])
         for (int m = 0; m < NSYM; m++)
           if (u.win[m] >= 0) memcpy(u.rx[a] + 2 * (size_t)m * N, (const int16_t *)I.rxF.host + 2 * ((size_t)a * NSYM + m) * N, (size_t)N * 4);
+  }
+  {
+    const uint64_t ts_c = nr_gpu_pass_now_ns();
+    if (j->t_entry_ns && j->t_entry_ns <= ts_l) stamp_add(1, 0, ts_l - j->t_entry_ns);
+    stamp_add(1, 1, ts_d - ts_l);
+    stamp_add(1, 2, ts_c - ts_d);
   }
   return 0;
 }

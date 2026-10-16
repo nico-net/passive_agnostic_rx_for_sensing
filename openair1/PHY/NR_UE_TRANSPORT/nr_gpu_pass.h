@@ -23,6 +23,7 @@
 #define NR_GPU_PASS_H
 #include <stdint.h>
 #include <stddef.h>
+#include <time.h>
 #include "PHY/TOOLS/nr_gpu_mem.h"
 #include "nr_pdsch_gpu_demod.h"
 #include "nr_gpu_pass_post.h"
@@ -170,6 +171,7 @@ typedef struct {
   uint32_t qm_n;
   int16_t *llr_out; /* optional caller buffer [G]: receives the final (descrambled, normalised) LLRs when the TB fails its CRC, so that the caller's retry arms can re-decode them */
   int llr_out_all;  /* 1 = llr_out is filled on CRC success too (tests, FP32 sign checks) */
+  uint64_t t_entry_ns; /* Task 8b: CLOCK_MONOTONIC at nr_gpu_pass_{dl,ul}_run entry (0 = not stamped); the module histograms prep / launch-to-done / post */
   nr_gpu_pass_ul_t ul; /* Task 7: the PUSCH inputs of nr_gpu_pass_ul_try (ul.on); the TB fields above (A, C, K, Z, F, E, E2, first_rE2, tbslbrm, BG, R, R2, rv, Qm, it_max, G, scr, shape, llr_out) are shared */
 } nr_gpu_pass_job_t;
 
@@ -235,6 +237,13 @@ typedef int (*nr_gpu_pass_warm_fn)(const nr_gpu_pass_shape_t *shape, int qmode, 
 typedef int (*nr_gpu_pass_dl_try_fn)(const nr_gpu_pass_job_t *j, nr_gpu_pass_result_t *r);
 typedef void (*nr_gpu_pass_stats_fn)(char *buf, int n);
 /* counters: launches, graph hits, fallbacks[unseen, busy, unsupported, error], need_cpu, tb_fail, instances, classes */
+static inline uint64_t nr_gpu_pass_now_ns(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
 typedef void (*nr_gpu_pass_counters_fn)(uint64_t o[16]);
 /* UL: launches, graph hits, fallbacks[unseen, busy, unsupported, error, ldpc key], tb_fail, need_cpu, host wait p50 / p99 <= (us, power-of-two bucket), classes */
 void nr_gpu_pass_ul_counters(uint64_t o[16]);
