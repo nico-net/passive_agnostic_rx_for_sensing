@@ -2751,6 +2751,12 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_passive_job_epoch)
   add_test(NAME test_nr_passive_job_epoch COMMAND ./test_nr_passive_job_epoch)
 
+  add_executable(test_nr_pdsch_slot_spread ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_slot_spread_test.cc)
+  target_include_directories(test_nr_pdsch_slot_spread PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_slot_spread PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_pdsch_slot_spread)
+  add_test(NAME test_nr_pdsch_slot_spread COMMAND ./test_nr_pdsch_slot_spread)
+
   add_executable(test_nr_pdsch_real_first ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_real_first_test.cc)
   target_include_directories(test_nr_pdsch_real_first PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_pdsch_real_first PRIVATE GTest::gtest GTest::gtest_main)

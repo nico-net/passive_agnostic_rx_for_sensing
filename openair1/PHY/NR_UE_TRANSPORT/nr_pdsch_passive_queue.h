@@ -132,6 +132,7 @@ typedef struct {
   uint32_t solver_token;
   int8_t   mrc_mode;       ///< T26d: per-grant combining mode override (-1/0 = receiver default)
   int32_t  coreset_key;    ///< T26c: PDCCH nID of the discovered CORESET the DCI came from (-1 = none / not set)
+  uint8_t  spread_solo;    ///< ISAC_PDSCH_SLOT_SPREAD: handed back to the ring by the consumer that dequeued the slot group; decoded alone, never regrouped
 } nr_pdsch_passive_job_t;
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in

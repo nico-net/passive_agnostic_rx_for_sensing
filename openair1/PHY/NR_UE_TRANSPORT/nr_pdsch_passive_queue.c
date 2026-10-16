@@ -1,6 +1,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE /* FATTAILS DECSLOW: RUSAGE_THREAD, sched_getcpu */
 #endif
+#include "nr_pdsch_slot_spread.h"
 #include "PHY/TOOLS/nr_stage_split.h"
 #include "PHY/TOOLS/nr_admit.h"
 #include "common/utils/nr_bg_lane.h"
@@ -420,6 +421,8 @@ static _Atomic int g_real_n; // full-decode (non-probe) entries in the ring; wri
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
+static int             g_idle;   /* consumers blocked on g_cv, under g_lock */
+static bool            g_spread; /* ISAC_PDSCH_SLOT_SPREAD, read once at queue start */
 
 static _Atomic uint64_t g_queued        = 0;
 static _Atomic uint64_t g_slot_groups   = 0; ///< dequeues that took >1 grant of one slot
@@ -1497,6 +1500,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const bool owned = nr_csirs_disc_enabled();
 
     pthread_mutex_lock(&g_lock);
+    g_idle++;
     while (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) == 0) {
       /* Timed wait so a stop cannot be missed if it lands between the predicate and the wait. */
       struct timespec ts;
@@ -1505,6 +1509,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
       pthread_cond_timedwait(&g_cv, &g_lock, &ts);
     }
+    g_idle--;
     if (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) != 0) {
       pthread_mutex_unlock(&g_lock);
       break;
@@ -1520,13 +1525,44 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_passive_job_t more[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
     uint64_t more_ns[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
     int n_more = 0;
-    while (g_count > 0 && n_more < (atomic_load(&g_gpu) ? NR_PDSCH_PASSIVE_SLOT_GROUP_MAX : 8)
-           && g_ring[g_tail].absolute_slot == job.absolute_slot) {
+    while (!job.spread_solo && g_count > 0 && n_more < (atomic_load(&g_gpu) ? NR_PDSCH_PASSIVE_SLOT_GROUP_MAX : 8)
+           && !g_ring[g_tail].spread_solo && g_ring[g_tail].absolute_slot == job.absolute_slot) {
       more_ns[n_more] = g_ring_ns[g_tail];
       REAL_ADD(g_ring[g_tail], -1);
       more[n_more++] = g_ring[g_tail];
       g_tail = (g_tail + 1) % g_depth;
       g_count--;
+    }
+    if (g_spread && n_more > 0) {
+      /* SLOT SPREAD: cheapest member first; the dearest ones go back to the ring (at the tail end the next idle
+       * consumer reads) as solo jobs, one per idle consumer. Each re-enters the normal path exactly once: its
+       * own staleness check, accounting, release and trace; it re-estimates alone (the shared estimate is
+       * thread-local). enqueue_ns is kept, so qwait still counts from the original admission. */
+      const int n_all = n_more + 1;
+      nr_pdsch_passive_job_t all[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
+      uint64_t all_ns[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1], cost[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
+      int ord[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
+      all[0] = job; all_ns[0] = enqueue_ns;
+      for (int k = 0; k < n_more; k++) { all[k + 1] = more[k]; all_ns[k + 1] = more_ns[k]; }
+      for (int k = 0; k < n_all; k++) {
+        const int ly = __builtin_popcount(all[k].dlsch_pdu.dmrs_ports);
+        cost[k] = (uint64_t)all[k].freq_alloc.num_rbs * all[k].dlsch_pdu.number_symbols * (all[k].dlsch_pdu.cw_info[0].qamModOrder ? all[k].dlsch_pdu.cw_info[0].qamModOrder : 1) * (ly ? ly : 1);
+      }
+      nr_slot_spread_order(cost, n_all, ord);
+      const int give = nr_slot_spread_give(n_all, g_idle);
+      const int keep = n_all - give;
+      for (int k = keep; k < n_all; k++) { /* cheapest of the given first, so the dearest ends at the front */
+        g_tail = (g_tail + g_depth - 1) % g_depth;
+        g_ring[g_tail] = all[ord[k]];
+        g_ring[g_tail].spread_solo = 1;
+        g_ring_ns[g_tail] = all_ns[ord[k]];
+        REAL_ADD(g_ring[g_tail], 1);
+        g_count++;
+      }
+      job = all[ord[0]]; enqueue_ns = all_ns[ord[0]];
+      n_more = keep - 1;
+      for (int k = 0; k < n_more; k++) { more[k] = all[ord[k + 1]]; more_ns[k] = all_ns[ord[k + 1]]; }
+      if (give > 0) pthread_cond_broadcast(&g_cv);
     }
     pthread_mutex_unlock(&g_lock);
     const uint64_t taken_ns = nr_passive_e2e_trace() ? now_ns() : 0; /* SYSAN e2e: dequeue time */
@@ -1585,7 +1621,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 #undef CONTIG_JOB
     /* Wide first: the data-aided CFR rows come from what decodes, and a wide grant's row is
      * worth more to the sensing grid than a narrow one's if the samples go stale mid-group. */
-    if (n_more > 0) {
+    if (n_more > 0 && !g_spread) { /* spread already ordered the group cheapest first */
       nr_pdsch_passive_job_t all[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
       uint64_t all_ns[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
       all_ns[0] = enqueue_ns;
@@ -2853,6 +2889,8 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   g_count    = 0;
   atomic_store(&g_real_n, 0);
   g_nthreads = n_consumers;
+  g_spread = getenv("ISAC_PDSCH_SLOT_SPREAD") && atoi(getenv("ISAC_PDSCH_SLOT_SPREAD")) != 0;
+  g_idle = 0;
   atomic_store_explicit(&g_stop, 0, memory_order_relaxed);
   atomic_store_explicit(&g_running, 1, memory_order_release);
 
@@ -3118,6 +3156,7 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
     atomic_fetch_add_explicit(&g_age_hist[job->layout_probe != 0][nr_passive_lag_bin(age)], 1, memory_order_relaxed);
   }
   g_ring[g_head] = *job;
+  g_ring[g_head].spread_solo = 0;
   REAL_ADD(*job, 1);
   g_ring_ns[g_head] = enqueue_ns;
   g_head         = (g_head + 1) % g_depth;
