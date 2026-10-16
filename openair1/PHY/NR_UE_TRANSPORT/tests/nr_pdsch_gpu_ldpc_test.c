@@ -250,6 +250,21 @@ int main(int argc, char **argv)
       return 2;
     }
   }
+  if (!ul) { /* F: refusals carry a reason */
+    static nr_gpu_ldpc_job_t bad[1];
+    static int8_t z[68 * 384 + 64];
+    bad[0] = (nr_gpu_ldpc_job_t){.BG = 1, .R = 15 /* no such BG1 rate */, .Z = 64, .K = 22 * 64, .it_max = 8, .llr = z};
+    if (grun(bad, 1) != NR_GPU_LDPC_E_GRAPH_MISS || grun(bad, 0) != NR_GPU_LDPC_E_RANGE) {
+      printf("LDPC_GPU_TEST reason codes wrong\n");
+      return 3;
+    }
+    bad[0].R = 13;
+    bad[0].K = 22 * 64 + 1;
+    if (grun(bad, 1) != NR_GPU_LDPC_E_PARAM) {
+      printf("LDPC_GPU_TEST param reason wrong\n");
+      return 3;
+    }
+  }
   const int reps = argc > 1 ? atoi(argv[1]) : 3;
   srand48(12345);
   static const int zs1[] = {384, 352, 208, 112, 64, 36, 15, 2}, zs2[] = {384, 256, 96, 52, 20, 14, 6}; /* Z % 4 != 0 (14, 6: BG2 with Kb = 8) takes the scalar kernel */

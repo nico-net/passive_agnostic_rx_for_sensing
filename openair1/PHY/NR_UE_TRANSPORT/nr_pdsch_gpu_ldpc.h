@@ -51,6 +51,12 @@ typedef int (*nr_gpu_ldpc_dev_fn)(const nr_gpu_ldpc_job_t *jobs, int n, const nr
 typedef int (*nr_gpu_ldpc_pass_set_fn)(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev);
 typedef int (*nr_gpu_ldpc_pass_dev_fn)(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, nr_gpu_buf_t *bits_dev, void *stream);
 
+/* Why nr_pdsch_gpu_ldpc_run refuses or fails (always non-zero, so every caller's != 0 check holds). */
+enum nr_gpu_ldpc_err { NR_GPU_LDPC_OK = 0, NR_GPU_LDPC_E_INIT = -1, NR_GPU_LDPC_E_RANGE = -2, NR_GPU_LDPC_E_PARAM = -3, NR_GPU_LDPC_E_GRAPH_MISS = -4,
+                       NR_GPU_LDPC_E_STREAM = -5, NR_GPU_LDPC_E_SENTINEL = -6, NR_GPU_LDPC_E_CAP = -7, NR_GPU_LDPC_E_RT = -8, NR_GPU_LDPC_E_BUSY = -9,
+                       NR_GPU_LDPC_E_DEADLINE = -10 };
+#define NR_GPU_LDPC_NERR 11 /* counter slots: index -rc, 0 unused for the DL */
+
 typedef int (*nr_gpu_ldpc_init_fn)(void);
 /* Decodes n <= NR_GPU_LDPC_MAX_JOBS code blocks (any mix of BG / Z / R) in one launch (one thread-block cluster each), synchronously.
  * jobs must stay valid until return (the module copies inputs and outputs through pinned memory). 0 = done. */

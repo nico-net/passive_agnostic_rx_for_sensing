@@ -657,14 +657,17 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
 
 extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
 {
-  if (!g_ok || n < 1 || n > NJ)
-    return -1;
+  if (!g_ok)
+    return NR_GPU_LDPC_E_INIT;
+  if (n < 1 || n > NJ)
+    return NR_GPU_LDPC_E_RANGE;
   const Graph *gr[NJ];
   for (int k = 0; k < n; k++) {
     const nr_gpu_ldpc_job_t &j = jobs[k];
-    if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || (j.K & 7) || (j.K >> 3) > NR_GPU_LDPC_KB_MAX
-        || !(gr[k] = graph(j.BG, j.Z, j.R)))
-      return -1;
+    if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || (j.K & 7) || (j.K >> 3) > NR_GPU_LDPC_KB_MAX)
+      return NR_GPU_LDPC_E_PARAM;
+    if (!(gr[k] = graph(j.BG, j.Z, j.R)))
+      return NR_GPU_LDPC_E_GRAPH_MISS;
   }
   const int c = acquire();
   Ctx &x = g_ctx[c];
@@ -699,7 +702,7 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   if (e != cudaSuccess) {
     fprintf(stderr, "nr_pdsch_gpu_ldpc_run: %s\n", cudaGetErrorString(e));
     g_busy.fetch_and(~(1u << c));
-    return -1;
+    return NR_GPU_LDPC_E_STREAM;
   }
   int rc = 0;
   for (int k = 0; k < n; k++) {
@@ -707,7 +710,7 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
     j.nsnap = x.res[2 * k];
     j.syn0 = x.res[2 * k + 1];
     if (j.nsnap < 0 || j.nsnap > NR_GPU_LDPC_MAX_SNAP) {
-      rc = -1;
+      rc = NR_GPU_LDPC_E_SENTINEL;
       continue;
     }
     for (int s = 0; s < j.nsnap; s++)

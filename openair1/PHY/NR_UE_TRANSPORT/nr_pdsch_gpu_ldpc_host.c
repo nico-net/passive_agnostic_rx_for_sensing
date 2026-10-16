@@ -37,6 +37,7 @@ typedef struct {
   uint32_t min_bits; /* UL: TBs with fewer coded information bits (K x code blocks) stay on the CPU, where a call is cheaper than a launch */
   const char *tag;
   _Atomic uint64_t calls, cbs, fb_refuse, fb_syn, fb_err, chk_ok, chk_bad, ns_sum, ns_gpu, fb_small;
+  _Atomic uint64_t fb_reason[NR_GPU_LDPC_NERR]; /* DL: fb_err by nr_gpu_ldpc_err (index -rc) */
   pthread_once_t once;
 } gl_t;
 static gl_t DLG = {.on = -1, .once = PTHREAD_ONCE_INIT, .tag = "GPU_EXACT_LDPC"};
@@ -176,8 +177,10 @@ static int gpu_tb(gl_t *G, nrLDPC_TB_decoding_parameters_t *tb, uint8_t *c, bool
     }
     nr_ss_add(NRSS_PREP, ss_prep);
     const uint64_t g0 = now_ns();
-    if (G->run(t->jobs, n) != 0) {
+    const int rc = G->run(t->jobs, n);
+    if (rc != 0) {
       atomic_fetch_add_explicit(&G->fb_err, 1, memory_order_relaxed);
+      atomic_fetch_add_explicit(&G->fb_reason[rc < 0 && -rc < NR_GPU_LDPC_NERR ? -rc : 0], 1, memory_order_relaxed);
       return 1;
     }
     *gpu_ns += now_ns() - g0;
@@ -211,13 +214,15 @@ static int gpu_tb(gl_t *G, nrLDPC_TB_decoding_parameters_t *tb, uint8_t *c, bool
   return 0;
 }
 
+#define FBR(i) ((unsigned long)atomic_load(&G->fb_reason[i]))
 static void stats(gl_t *G, uint64_t n)
 {
   if (!(n == 1 || n == 100 || n % 2000 == 0))
     return;
-  LOG_A(PHY, "SENSING: %s tbs=%lu cbs=%lu check_ok=%lu check_bad=%lu fallback[refused,syn0,err]=[%lu,%lu,%lu] mean=%.0f us (gpu %.0f)\n",
+  LOG_A(PHY, "SENSING: %s tbs=%lu cbs=%lu check_ok=%lu check_bad=%lu fallback[refused,syn0,err]=[%lu,%lu,%lu] fallback_err[init,range,param,graph,stream,sentinel,cap,rt,busy,deadline]=[%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu] other=%lu mean=%.0f us (gpu %.0f)\n",
         G->tag, (unsigned long)n, (unsigned long)atomic_load(&G->cbs), (unsigned long)atomic_load(&G->chk_ok), (unsigned long)atomic_load(&G->chk_bad),
         (unsigned long)atomic_load(&G->fb_refuse), (unsigned long)atomic_load(&G->fb_syn), (unsigned long)atomic_load(&G->fb_err),
+        FBR(1), FBR(2), FBR(3), FBR(4), FBR(5), FBR(6), FBR(7), FBR(8), FBR(9), FBR(10), FBR(0),
         atomic_load(&G->ns_sum) / 1e3 / n, atomic_load(&G->ns_gpu) / 1e3 / n);
 }
 
