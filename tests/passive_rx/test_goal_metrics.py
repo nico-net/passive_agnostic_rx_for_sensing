@@ -30,6 +30,12 @@ class GoalMetricsTest(unittest.TestCase):
         self.assertAlmostEqual(d['drops_pct'], 1.0)
         self.assertEqual(d['tot_p99'], 900)
 
+    def test_recovlate_credits_first_pass_failure(self):
+        p = write([ev(crc=0), ev(crc=1), "[PHY]    SENSING: RECOVLATE rnti=0x1 1.2 abs=5 pid=0 ndi=0 tbs=96 recovered_cfg=1\n"])
+        d = gm.parse_run(p)['dl']
+        self.assertEqual((d['recovered'], d['n_real']), (1, 2))
+        self.assertAlmostEqual(d['crc_all'], 100.0)
+
     def test_true_snr_floor_and_inversion(self):
         self.assertIsNone(gm.true_snr_db(3.9, 2))
         self.assertIsNone(gm.true_snr_db(4.9, 2))

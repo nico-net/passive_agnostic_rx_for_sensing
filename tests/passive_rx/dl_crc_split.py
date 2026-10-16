@@ -16,6 +16,7 @@ def split(paths, margin=2.0):
     for p in paths:
         with open(p, errors='replace') as fh:
             lines = fh.readlines()
+        rec = {m.groups() for m in (gm.RECOV.search(r) for r in lines if 'RECOVLATE' in r) if m}  # async-rescued first-pass failures
         for raw in lines:
             if 'EVMGRANT' not in raw:
                 continue
@@ -27,7 +28,7 @@ def split(paths, margin=2.0):
                 req = gm.required_snr_db(int(kv['mcs']), int(kv['tbl']))
                 if req is None or snr < req + margin:
                     continue
-                ok = int(kv['crc']); rnti = int(raw.split('rnti=')[1].split()[0], 16)
+                m = gm.EVKEY.search(raw); ok = int(kv['crc']) or int(bool(m and m.groups() in rec)); rnti = int(raw.split('rnti=')[1].split()[0], 16)
                 dims = {'Nl': kv['Nl'], 'tbl': kv['tbl'], 'Qm': kv['Qm'], 'nsym': kv['nsym'], 'cdm': kv.get('cdm', '?'),
                         'mcs': kv['mcs'], 'rnti_class': 'si' if rnti == 0xffff else 'ra' if rnti < 0x100 else 'c',
                         'rb_bucket': rb_bucket(int(kv['rb'].split('+')[1])), 'cb_bucket': cb_bucket(int(kv.get('cb', 1))),
