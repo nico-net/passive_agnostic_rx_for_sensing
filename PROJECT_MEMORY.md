@@ -4447,6 +4447,38 @@ Replay label: `[MEASURED, DGX replay <cap>]` = air-like replay, not OTA. Cells n
 - Open, not this fix: TIM nsym 9 / slots 3 and 13 (C-RNTI DCI 1_1, dead regardless of length) `[MEASURED, T aTX2 OTA, probe=0]`; V nsym 10 (51 grants) not analysed.
 
 ---
+
+### 2026-10-16 evening OTA status and DAYTIME-OTA freeze list (`csd/int16`, worktree `rr-csd-int16`; HEAD `230f880e7a`; OTA DEIB, evening/low load; replay and OTA only)
+
+**Current decoding status, per cell, never pooled (arm X = t26aXE, plain runs, no nsys)**
+- V (Vodafone): DL crc_q median 90.0 % (89.4-93.8), DL tot p99 median 15.8 ms (13.9-17.5), drops median 1.7 % (0.4-4.2), UL CRC-OK ~0. [MEASURED, DGX OTA 2026-10-16 evening, V, X, n=3] (`63b1a40e82`)
+- T (TIM): DL crc_q median 93.2 % (93.0-95.2), DL tot p99 median 5.1 ms (4.9-6.7), drops median 0.1 % (0.1-0.4), UL CRC-OK ~0. [MEASURED, DGX OTA 2026-10-16 evening, T, X, n=3] (`63b1a40e82`)
+- UL CRC ~0 in every 2026-10-16 arm (0-9 OK of 20k-112k decodes). [MEASURED, DGX OTA 2026-10-16, V|T, all arms] (`902f1190f0`, `474cbd16a9`)
+- Not a status number: the MAXCONN nsys arms (V p99 17-23 ms, T 8-17 ms) carry nsys overhead of 1.3-2x on p99. [MEASURED, DGX OTA 2026-10-16 LOW LOAD, V|T, nsys, n=2] (`230f880e7a`)
+
+**Adopted on air (in t26aXE)**
+- `ISAC_PDSCH_SLOT_SPREAD=1` (`d4559a4087`), `ISAC_GPU_LDPC_NC_MIN_CB=8`, GPU chest chunking for jobs >2048 rows (`7f34aff2a3`). [MEASURED, DGX OTA 2026-10-16, V|T, t26aXE vs t26aE, n=3, not interleaved] (`474cbd16a9`). Spread on/off interleaved A/B: no consistent effect, spread stays on. [MEASURED, DGX OTA 2026-10-16 15:20-16:10, V|T, n=3 per arm] (`902f1190f0`)
+
+**FROZEN PENDING DAYTIME OTA** (positive only at evening/low load; NOT default until a daytime interleaved A/B, n>=3 per cell, no nsys, same day, confirms)
+- `ISAC_RA_TDRA_SWEEP=1` (`9db7f4b113`), env `t26aXRE`. V RA class 0 % -> 100 % (432/435 re-decodes); T crc_q R 91.9/95.8 vs X 96.8/95.0, unresolved at n=2. Accept if the V class stays ~100 % and T median crc_q is not below X by more than the X run-to-run spread. [MEASURED, DGX OTA 2026-10-16 evening, V|T, X|R, n=2] (`aae4e3e90f`)
+- `ISAC_GPU_LDPC_NC_MIN_CB=4`, env `t26aXNE`. Weak positive V (drops median 0.5 vs 1.7 %, p99 14.2 vs 15.8 ms); T inside noise. Accept if V drops and p99 stay at or below X and T does not get worse. [MEASURED, DGX OTA 2026-10-16 evening, V|T, X|N, n=3] (`63b1a40e82`)
+- `CUDA_DEVICE_MAX_CONNECTIONS=32`, env `t26aXME`. Removes >=50 ms csirsDisc stalls: V 38/36 -> 8/0, T 21/29 -> 0/0 per 90 s; DL tail did not move under nsys. Accept only if DL p99.9 AND drops improve per cell in a plain daytime A/B, n>=3. [MEASURED, DGX OTA 2026-10-16 LOW LOAD, V|T, nsys, n=2] (`230f880e7a`); queue-count mechanism [INFERRED]
+
+**Rejected**
+- `ISAC_CSIRS_DISC_CHUNK_US`: bit-exact, stalls stay, T worse (p99 3-5x, drops). [MEASURED, DGX replay, V|T, n=2] (`bf8179c4b2`, `02c37dced9`)
+- `ISAC_PDCCH_PAR_BANKS=1` + 3 scan threads: scan slower. [MEASURED, DGX OTA 2026-10-16, V|T, n=3] (`fa89c33e28`)
+- Scan pinned to A725 cores 12-14 (sd_t26ul3p): a2e up, V drops 1.6-2.0 -> 2.9-3.5 %. [MEASURED, DGX OTA 2026-10-16, V|T, n=3] (`902f1190f0`)
+- T4 core map `t26aXCE`: T drops 0.1-0.4 -> 0.4-1.3 %. [MEASURED, DGX OTA 2026-10-16 evening, T, C, n=3] (`63b1a40e82`)
+- cudaMalloc/cudaFree stall candidate: no such calls in the on-air nsys traces. [MEASURED, DGX OTA 2026-10-16, V|T, nsys, n=1] (`aa4c826367`)
+
+**Open causes**
+- V DL tail = async TDRA rescues (1.4-5.6k per run). Phase 1 T7. [MEASURED, DGX OTA 2026-10-16 evening, V, X, n=3] (`63b1a40e82`)
+- GPU head-of-line blocking on shared hardware queues. [MEASURED stall counts; INFERRED mechanism] (`aa4c826367`, `230f880e7a`)
+- TIM slots 3 and 13 dead (C-RNTI DCI 1_1). Phase 1 T8. [MEASURED, T aTX2 OTA] (`bebea0db18`)
+- GPU LDPC fallback reasons unknown. Phase 1 T5. (`63b1a40e82`)
+- UL blocked: V unknown per-UE data scrambling ID, T low SNR, BWP look-alike lock. [MEASURED/INFERRED per ULCAUSE-20261016] (`699b2593db`)
+
+**Phase 1 decisions** (orchestrator, 2026-10-16 night): T6 heavy lane dropped (GPU pipeline replaces CPU queueing); T5, T7 (worktree `rr-csd-int16t7`, branch `csd/int16-t7`), T8 dispatched.
 ---
 
 ## 26. Working rules for any agent on this project (carried over from the old setup)
