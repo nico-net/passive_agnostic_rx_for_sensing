@@ -2,6 +2,8 @@
 #define _GNU_SOURCE /* T26c: CPU_SET / sched_getaffinity for the janon worker */
 #endif
 #include "common/utils/nr_bg_lane.h"
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include "nr_pdsch_gpu_exact.h"
 #include <sched.h>
 #include <unistd.h>
@@ -2866,6 +2868,10 @@ static void *janon_worker(void *arg)
       pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
     pthread_setname_np(pthread_self(), "pdcchJanon");
     nr_bg_lane_enter("ISAC_PDCCH_JOINT_ANON_CORE"); /* ISAC_BG_LANE: shared background core list, nice 10 */
+    if (nr_bg_lane_on()) { /* janon keeps its own priority (default nice 0): at nice 10 it lost ~20 % of anonymous hits to the other background threads */
+      const char *jn = getenv("ISAC_BG_JANON_NICE");
+      setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), jn ? atoi(jn) : 0);
+    }
   }
   for (;;) {
     pthread_mutex_lock(&g_janon_mu);
