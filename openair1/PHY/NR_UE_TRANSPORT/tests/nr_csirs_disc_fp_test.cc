@@ -413,3 +413,14 @@ int main(int argc,char **argv)
   setvbuf(stdout,nullptr,_IONBF,0);setenv("ISAC_CSIRS_DISC","1",1);
   nr_csirs_disc_synth_init();::testing::InitGoogleTest(&argc,argv);return RUN_ALL_TESTS();
 }
+// ISAC_BG_LANE gate: batches that arrive while the critical lane is busy stay in the ring; one run, on the newest data.
+TEST(BgLaneGate, CsirsKeepsNewestBatchWhenSkipped)
+{
+  int deferred = 0, runs = 0;
+  for (int b = 1; b <= 5; b++) runs += nr_csirs_disc_should_run(/*drained*/ 1, &deferred, /*admitted*/ 0);
+  EXPECT_EQ(0, runs);
+  EXPECT_EQ(1, deferred);
+  EXPECT_EQ(1, nr_csirs_disc_should_run(0, &deferred, 1));  // idle again: the ring holds batch 5
+  EXPECT_EQ(0, deferred);
+  EXPECT_EQ(0, nr_csirs_disc_should_run(0, &deferred, 1));  // nothing new, nothing deferred
+}

@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #define _GNU_SOURCE
+#include "common/utils/nr_bg_lane.h"
 #include "nr_pdcch_nid_gpu.h"
+#include "PHY/TOOLS/nr_admit.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
 #include "common/utils/LOG/log.h"
 #include <dlfcn.h>
@@ -112,11 +114,12 @@ static bool nodrop_acquire(void)
 static void *worker(void *unused)
 {
  (void)unused;
+ nr_bg_lane_enter();
  unsigned batches=0;
  nr_pdcch_nid_config_t previous={0};
  bool have_config=false;
  nr_gpu_discovery_duty_t duty={0};
- uint64_t wake=0;
+ uint64_t wake=0,admit_t0=0;
  int logged_mode=-1;
  for(;;) {
   pthread_mutex_lock(&g.mu);
@@ -147,6 +150,11 @@ static void *worker(void *unused)
    }
    if(!due) {g.state[b]=0;batch_freed();pthread_mutex_unlock(&g.mu);continue;}
   }
+  if(nr_admit_on()) { /* ISAC_BG_LANE: a skipped batch is freed; the next one carries newer samples */
+   const uint64_t t=nr_admit_now_ns();
+   if(!nr_admit_try(NR_ADMIT_NID,t,t+1000000000ull,0)) {g.state[b]=0;batch_freed();pthread_mutex_unlock(&g.mu);continue;}
+   admit_t0=t;
+  }
   pthread_mutex_unlock(&g.mu);
   bool changed=have_config && memcmp(&previous,&g.batch[b].cfg,sizeof(previous));
   if(!have_config || changed) {
@@ -167,6 +175,7 @@ static void *worker(void *unused)
   if(!g.incremental && (batches<(unsigned)g.window || (batches-g.window)%(unsigned)g.every))continue;
   nr_pdcch_nid_result_t result={0};
   rc=g.ops->run(g.device,&result);
+  if(admit_t0){nr_admit_done(NR_ADMIT_NID,nr_admit_now_ns()-admit_t0);admit_t0=0;}
   if(rc<0)goto failed;
   if(rc>0) {
    if(rc==2) LOG_W(PHY,"SENSING: PDCCH_NID_GPU pass budget exhausted; previous records retained\n");
