@@ -380,7 +380,7 @@ git commit -m "test(goals): CRC-OK vs SNR margin curve for calibrating the SNR-q
 - [ ] **Step 1: List every thread and its work.** Start from the live thread list in this session (`passivePdcch*`, `passivePdsch*`, `passivePusch*`, `pdcchJanon`, `pdcchUssHash`, `dmrsScan`, `dmrsIdBg`, `csirsDisc`, NID worker, `UEthread_0`, `usrpRing`, `uhd_ctrl*`, `Tpool*`, `pdschRecov`, `scan2Slow`, `gpuCheckBg`) and find each thread's creation site (`grep -rn "pthread_setname_np\|threadCreate\|nr_core_plan_create" openair1 executables common`).
 - [ ] **Step 2: For each stage, fill the row:**
 
-| stage | thread/core | file:function | CPU or GPU today (env switch) | cost per slot/grant [MEASURED from BTIM/PDTIM/stg lines, cell, run] | parallel-compute or control-logic | existing CUDA module to reuse | data in/out (sizes) and where it lives (host/pinned/managed/device) | syncs and CPU<->GPU round trips per slot | stream / priority / green-context partition used |
+| stage | thread/core (X925 or A725) | file:function | CPU or GPU today (env switch) | cost per slot/grant [MEASURED from BTIM/PDTIM/stg lines, cell, run] | parallel-compute or control-logic | existing CUDA module to reuse | data in/out (sizes) and where it lives (host/pinned/managed/device) | syncs and CPU<->GPU round trips per slot | stream / priority / green-context partition used |
 |---|---|---|---|---|---|---|---|---|---|
 
 - [ ] **Step 3: List every CUDA module** (`find openair1 common -name '*.cu'`): kernels, streams, allocation type (`nr_gpu_allocate` kinds: DEVICE / STAGING / managed), which use the RT green-context partition (`ISAC_GPU_RT_ISOLATE`, `nr_gpu_green_stream`), which assume unified memory, which have a discrete path (`nr_gpu_model()`).
@@ -474,6 +474,7 @@ git add tests/passive_rx/sysan_nsys.py tests/passive_rx/test_sysan_nsys.py
 git commit -m "test(sysan): find GPU stalls (consumer launch->start >= 50 ms) and what ran during them in nsys exports"
 ```
 
+- [ ] **Step 6a (X410 unplugged from 2026-10-16 16:10): trace a replay instead.** Run one capture replay under nsys through the existing replay script (heavy.lock), e.g. `ota_runs/raw_pci415_12s_b` (V) and `ota_runs/raw_pci923_tim_12s_tile3` (T), env t26aXE; label results `[MEASURED, DGX replay <cap>]`, never mixed with OTA numbers. The on-air trace of Step 6 follows when the radio is back.
 - [ ] **Step 6: Draft the OTA trace runner (text in the report, orchestrator runs it):** one V and one T run of env `t26aXE` with `nsys profile -t cuda,osrt --cuda-graph-trace=node -d 120 -o <run>/nsys` wrapping the receiver command used by `ota/starttest.sh` (`OTA_RUNNER` hook), plus one run each WITHOUT nsys back-to-back for overhead comparison. State the nsys overhead check: DL tot p50 with/without nsys within 20 %, else the trace is not representative.
 - [ ] **Step 7 (after the orchestrator ran it):** `nsys export -t sqlite`, `sysan_nsys.py <db>` and `--stalls`; report per cell: GPU busy share per thread class, launch->start p50/p99 per class, every stall >= 50 ms with its blocker, one representative slot timeline (all kernels and memcpys from slot read to last decode, as a table of start/end offsets in us). Name the stall root cause with evidence, or the ranked candidates and the test that separates them.
 

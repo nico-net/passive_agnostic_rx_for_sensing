@@ -12,6 +12,8 @@ Agreed with the user on 2026-10-16. This roadmap fixes the goals, their exact pa
 | G4 | Multi-PCI | one process for all cells, one CUDA context, shared worker pools; G1-G3 criteria hold per cell with >= 2 cells; then 400 MHz |
 
 - "SNR-qualified": a grant counts toward the CRC criterion only if its measured per-layer SNR >= required SNR of its MCS + 2 dB (definition and code: Phase 0 Task 1). Other grants are reported, not hidden.
+- G3 is done TOGETHER with G1 and G2 (user, 2026-10-16): every G1/G2 fix that touches a CPU stage is implemented directly as the GPU port of that stage (CPU kept as reference/fallback); Phase 2 only covers what G1/G2 did not touch.
+- Core placement follows the GB10 big/little split (MEASURED 2026-10-16, AB-SPREAD-PIN-20261016.md): cores 5-9 and 15-19 are Cortex-X925, cores 0-4 and 10-14 Cortex-A725; latency-critical threads go on X925 cores, helpers on A725.
 - G4 starts ONLY when G1, G2 and G3 pass. Exception: every new GPU interface written for G1-G3 is multi-cell ready from day one (takes a cell index, batches several cells, runs inside one CUDA context with priority streams), so G4 does not rewrite it.
 - GPU targets: exploit the DGX GB10 unified memory (zero-copy where it is faster) AND keep sens6 (RTX 4070, discrete, sm_89) working: every GPU path has a discrete-memory variant chosen at runtime by `nr_gpu_model()`; sens6 is validated at each phase gate (sens6 Task-9 style: build, tests, replay).
 
@@ -20,9 +22,9 @@ Agreed with the user on 2026-10-16. This roadmap fixes the goals, their exact pa
 | Phase | Content | Where | Plan |
 |---|---|---|---|
 | 0 | Metrics + scorecard; full CPU/GPU inventory; on-air GPU timeline and the 0.1-1.9 s GPU stall root cause; DL CRC root cause; target pipeline + per-stage budget + GPU API design | DGX (traces, OTA by orchestrator) + agents (code reading) | `2026-10-16-phase0-gpu-inventory-and-metrics.md` |
-| 1 (G1) | Port order from Phase 0: PDCCH fully on GPU (B3) + short Phase-2 lock (B5); DL CRC fixes; then large-grant lane (A2), GPU/parallel LDPC prep (A3), GPU stall fix (A4), housekeeping (A5) | DGX | written after Phase 0 |
-| UL track (G2) | C1 UL BWP look-alike lock fix; C4 probe/real split in UL logs; C2 UL IQ retention + background 1024 data-ID search; C3 HARQ soft combining. Runs IN PARALLEL with Phase 1 on cloud sessions (x86, rfsim), merged and validated on air on the DGX | cloud + DGX | written next (needs csd/int16 pushed) |
-| 2 (G3) | Remaining CPU work to GPU (joint-anon PDCCH search, DM-RS/CSI-RS searches, UL decode, helpers); helper threads pooled; second DPDK link off | DGX | after Phase 1 |
+| 1 (G1 + G3 for DL) | Port order from Phase 0, each fix implemented as a GPU port: PDCCH fully on GPU (B3) + short Phase-2 lock (B5); DL CRC fixes; then large-grant lane (A2), GPU/parallel LDPC prep (A3), GPU stall fix (A4), housekeeping (A5) | DGX | written after Phase 0 |
+| UL track (G2 + G3 for UL) | C1 UL BWP look-alike lock fix; C4 probe/real split in UL logs; C2 UL IQ retention + background 1024 data-ID search; C3 HARQ soft combining. Runs IN PARALLEL with Phase 1 on cloud sessions (x86, rfsim), merged and validated on air on the DGX | cloud + DGX | written next (needs csd/int16 pushed) |
+| 2 (G3 rest) | CPU work not already ported in Phases 1/UL (joint-anon PDCCH search, DM-RS/CSI-RS searches, UL decode, helpers); helper threads pooled; second DPDK link off | DGX | after Phase 1 |
 | 3 (G4) | Single-process multi-cell refactor, shared pools, in-process channelizer, one CUDA context; 2 cells at 200 MHz, then 400 MHz (2nd QSFP) | cloud (CPU refactor) + DGX | only after G1-G3 pass |
 
 ## Rules for every phase
