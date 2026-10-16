@@ -1,6 +1,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE /* FATTAILS DECSLOW: RUSAGE_THREAD, sched_getcpu */
 #endif
+#include "PHY/TOOLS/nr_stage_split.h"
 #include "PHY/TOOLS/nr_admit.h"
 #include "common/utils/nr_bg_lane.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
@@ -366,9 +367,11 @@ static int64_t gpu_fep_submit_and_wait(gpu_fep_req_t *req)
   }
   g_gpu_wq[g_gpu_wq_n++] = req;
   pthread_cond_signal(&g_gpu_wq_work);
+  const uint64_t ss_wq = nr_ss_now(); /* ISAC_E2E_TRACE stage split: the wait for the GPU FEP worker (queue + FEP + LLR of the group) */
   while (!req->done)
     pthread_cond_wait(&g_gpu_wq_done, &g_gpu_wq_lock);
   pthread_mutex_unlock(&g_gpu_wq_lock);
+  nr_ss_add(NRSS_WQ, ss_wq);
   return req->rc;
 }
 
@@ -1527,6 +1530,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     }
     pthread_mutex_unlock(&g_lock);
     const uint64_t taken_ns = nr_passive_e2e_trace() ? now_ns() : 0; /* SYSAN e2e: dequeue time */
+    nr_ss_ns[NRSS_WQ] = 0;
     const uint64_t slot_t0 = slot_timing ? now_ns() : 0;
     if (s_sigt) {
       sigt_t0 = now_ns();
@@ -2162,8 +2166,10 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       /* ISAC_PDSCH_EVM_GRANT (T26c): one line per full decode, decoded AND failed. snr = -20 log10(evm). */
       /* SYSAN ISAC_E2E_TRACE=1: e2e=arr2enq,qwait,pre,dec,first_body,bodies,tot,lag (us; lag = producer slots ahead at done):
        * slot samples read -> DCI accepted (scan) -> dequeued -> decode call start (IQ copy, GPU FEP group) -> decode end */
-      char e2e[128] = "";
+      char e2e[128] = "", stg[192] = "";
       if (nr_passive_e2e_trace()) {
+        extern int nr_pdsch_passive_decode_stg(char *, size_t);
+        nr_pdsch_passive_decode_stg(stg, sizeof(stg));
         extern uint64_t nr_pdsch_passive_decode_first_body_ns(void);
         unsigned eb = 0;
         uint64_t ebody = 0, estage = 0;
@@ -2177,7 +2183,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
                  "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f probe=%d kappa=%.2f alpha=%.2f,%.2f,%.2f,%.2f "
-                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f%s\n",
+                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f%s%s\n",
             job.rnti, job.frame_rx, job.nr_slot_rx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.grant.mcs, job.grant.mcs_table,
             dec.cw.qamModOrder, dec.cw.Nl, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, dec.evm_nsym, dec.evm_pct,
             dec.evm_pct > 0.f ? -20.0 * log10(dec.evm_pct / 100.0) : 99.0, dec.br_snr_db[0], dec.br_snr_db[1], dec.br_snr_db[2],
@@ -2186,7 +2192,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
             dec.br_alpha[0], dec.br_alpha[1], dec.br_alpha[2], dec.br_alpha[3], dec.br_nvar_db[0], dec.br_nvar_db[1],
             dec.br_nvar_db[2], dec.br_nvar_db[3], dec.rho, (int)job.mrc_mode, dec.dmrs_ports, dec.n_cdm, dec.dmrs_add, eq_used, occ_used, it_used, dec_us,
             job.grant.rv, job.grant.ndi, job.grant.harq_pid, (unsigned)dec.cw.TBS, dec.layer_snr_db[0], dec.layer_snr_db[1],
-            dec.layer_snr_db[2], dec.layer_snr_db[3], (int)dec.l2maxh, dec.zabs, e2e);
+            dec.layer_snr_db[2], dec.layer_snr_db[3], (int)dec.l2maxh, dec.zabs, e2e, stg);
       if (dec.evm_pct > 0.f && !job.layout_probe)
         nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)), (int)job.mrc_mode, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     }

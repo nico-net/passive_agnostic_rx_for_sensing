@@ -9,6 +9,7 @@
  * with t0 = 0 before the loop. */
 #include <stdint.h>
 #include <stdlib.h>
+#include "nr_stage_split.h" /* ISAC_E2E_TRACE stage split: callers of the poll loops add their wait time */
 #include <time.h>
 
 static inline void nr_gpu_poll_relax_us(uint64_t *t0, int us)

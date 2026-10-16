@@ -76,10 +76,12 @@ static int acquire()
 {
   struct timespec t0 = {};
   bool waited = false;
+  const uint64_t ss0 = nr_ss_now();
   for (;;) {
     unsigned m = g_busy.load();
     for (int i = 0; i < nr_gpu_ctx_limit(CTX); i++)
       if (!(m >> i & 1u) && g_busy.compare_exchange_strong(m, m | 1u << i)) {
+        nr_ss_add(NRSS_LK, ss0);
         if (waited) {
           struct timespec t1;
           clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -1585,8 +1587,10 @@ extern "C" int nr_pdsch_gpu_demod_evm_wait(nr_gpu_demod_job_t *j)
   Ctx &x = g_ctx[j->ctx];
   cudaError_t e;
   uint64_t pt = 0;
+  const uint64_t ss0 = nr_ss_now();
   while ((e = cudaStreamQuery(x.s2)) == cudaErrorNotReady)
     nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
+  nr_ss_add(NRSS_DEMOD, ss0);
   if (e != cudaSuccess)
     return -1;
   memcpy(j->evm, x.sh->evm, sizeof(j->evm));
@@ -1678,6 +1682,7 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
   }
   cudaError_t e = cudaPeekAtLastError();
   uint64_t pt = 0;
+  const uint64_t ss0 = nr_ss_now();
   while (e == cudaSuccess) {
     e = cudaStreamQuery(x.s);
     if (e == cudaErrorNotReady) {
@@ -1686,6 +1691,7 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
     } else
       break;
   }
+  nr_ss_add(NRSS_DEMOD, ss0);
   if (e != cudaSuccess) {
     fprintf(stderr, "nr_pdsch_gpu_demod_run: %s\n", cudaGetErrorString(e));
     g_ok = 0;

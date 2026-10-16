@@ -18,6 +18,7 @@
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.h"
 #include "common/utils/LOG/log.h"
 #include "PHY/sse_intrin.h"
+#include "PHY/TOOLS/nr_stage_split.h"
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -164,6 +165,7 @@ static int gpu_tb(gl_t *G, nrLDPC_TB_decoding_parameters_t *tb, uint8_t *c, bool
   for (uint32_t r0 = 0; r0 < n_dec; r0 += NR_GPU_LDPC_MAX_JOBS) {
     const int n = (int)(n_dec - r0 < NR_GPU_LDPC_MAX_JOBS ? n_dec - r0 : NR_GPU_LDPC_MAX_JOBS);
     int rm_bad[NR_GPU_LDPC_MAX_JOBS] = {0};
+    const uint64_t ss_prep = nr_ss_now();
     for (int k = 0; k < n; k++) {
       int E;
       uint8_t R;
@@ -172,6 +174,7 @@ static int gpu_tb(gl_t *G, nrLDPC_TB_decoding_parameters_t *tb, uint8_t *c, bool
       t->jobs[k] = (nr_gpu_ldpc_job_t){.BG = tb->BG, .R = R, .Z = (uint16_t)tb->Z, .K = (uint16_t)tb->K,
                                        .it_max = tb->max_ldpc_iterations, .llr = l};
     }
+    nr_ss_add(NRSS_PREP, ss_prep);
     const uint64_t g0 = now_ns();
     if (G->run(t->jobs, n) != 0) {
       atomic_fetch_add_explicit(&G->fb_err, 1, memory_order_relaxed);

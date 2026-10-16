@@ -1,4 +1,6 @@
 #include "common/utils/nr_core_plan.h"
+#include "PHY/TOOLS/nr_stage_split.h"
+extern uint64_t *nr_ss_gpu_ptr(void);
 #include "nr_passive_sample_lifetime.h"
 #include "nr_pdcch_ul_discovery.h"
 /*
@@ -289,7 +291,13 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     extern int nr_passive_e2e_trace(void);
     extern uint64_t nr_passive_slot_arrival_ns(long abs_slot);
     struct timespec e2e_t0 = {0}; /* SYSAN ISAC_E2E_TRACE=1: dequeue time */
-    if (nr_passive_e2e_trace()) clock_gettime(CLOCK_MONOTONIC, &e2e_t0);
+    if (nr_passive_e2e_trace()) {
+      clock_gettime(CLOCK_MONOTONIC, &e2e_t0);
+      nr_ss_ns[NRSS_PREP] = 0;
+      uint64_t *gp = nr_ss_gpu_ptr();
+      nr_ss_ns[NRSS_LDPC] = 0;
+      if (gp) gp[NRSS_LDPC] = 0;
+    }
     held = job.snap_idx; /* the queue's reference moves to this consumer */
     pthread_mutex_unlock(&g_lock);
     if (pick == 1) atomic_fetch_add_explicit(&g_dec_probe, 1, memory_order_relaxed);
@@ -530,10 +538,11 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       clock_gettime(CLOCK_MONOTONIC, &e2e_t1);
       const uint64_t t0 = (uint64_t)e2e_t0.tv_sec * 1000000000ull + e2e_t0.tv_nsec, t1 = (uint64_t)e2e_t1.tv_sec * 1000000000ull + e2e_t1.tv_nsec;
       const uint64_t arr = nr_passive_slot_arrival_ns(job.absolute_slot);
-      LOG_A(PHY, "SENSING: UL_E2E rnti=0x%04x st=%u prb=%u mcs=%u pick=%d arr2deq=%ld wall=%lu tot=%ld cpu_us=%ld\n", job.grant.rnti,
+      LOG_A(PHY, "SENSING: UL_E2E rnti=0x%04x st=%u prb=%u mcs=%u pick=%d arr2deq=%ld wall=%lu tot=%ld cpu_us=%ld stg=ldpc:g%lu,prep:%lu\n", job.grant.rnti,
             (unsigned)out.status, (unsigned)job.grant.num_rb, (unsigned)job.grant.mcs, pick, arr && t0 >= arr ? (long)((t0 - arr) / 1000) : -1L,
             (unsigned long)((t1 - t0) / 1000), arr && t1 >= arr ? (long)((t1 - arr) / 1000) : -1L,
-            nr_ul_chain_on() ? (long)((grant_cpu_end.tv_sec-grant_cpu_start.tv_sec)*1000000L+(grant_cpu_end.tv_nsec-grant_cpu_start.tv_nsec)/1000L) : -1L);
+            nr_ul_chain_on() ? (long)((grant_cpu_end.tv_sec-grant_cpu_start.tv_sec)*1000000L+(grant_cpu_end.tv_nsec-grant_cpu_start.tv_nsec)/1000L) : -1L,
+            (unsigned long)(((nr_ss_gpu_ptr() && nr_ss_gpu_ptr() != nr_ss_ns ? nr_ss_gpu_ptr()[NRSS_LDPC] : 0) + nr_ss_ns[NRSS_LDPC]) / 1000), (unsigned long)(nr_ss_ns[NRSS_PREP] / 1000));
     }
     if (nr_ul_chain_on()) {
       const uint64_t cpu_us=(uint64_t)((grant_cpu_end.tv_sec-grant_cpu_start.tv_sec)*1000000L+

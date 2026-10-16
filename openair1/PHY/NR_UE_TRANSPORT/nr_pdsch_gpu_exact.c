@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* GPU6: bit-exact GPU FEP for the passive PDSCH decoder -- see nr_pdsch_gpu_exact.h. */
+#include "PHY/TOOLS/nr_stage_split.h"
 #include "nr_pdsch_gpu_exact.h"
 #include "nr_pdsch_gpu_fep.h"
 #include "nr_pdsch_gpu_demod_host.h"
@@ -51,8 +52,27 @@ void nr_pdsch_gpu_exact_set_lowprio(int low)
     g_lowprio_fn(low);
 }
 
+/* ISAC_E2E_TRACE stage split: switches the accumulators of this process and of libpdsch_gpu.so on; nr_ss_gpu_ptr() = the calling thread's GPU-side ones */
+static uint64_t *(*g_ss_ptr_fn)(void);
+extern int nr_passive_e2e_trace(void);
+uint64_t *nr_ss_gpu_ptr(void) { return g_ss_ptr_fn ? g_ss_ptr_fn() : NULL; }
+static void nr_ss_gpu_init(void)
+{
+  if (!nr_passive_e2e_trace())
+    return;
+  nr_ss_on = 1;
+  void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
+  if (!h)
+    h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
+  void (*en)(int) = h ? (void (*)(int))dlsym(h, "nr_pdsch_gpu_ss_enable") : NULL;
+  g_ss_ptr_fn = h ? (uint64_t * (*)(void)) dlsym(h, "nr_pdsch_gpu_ss_ptr") : NULL;
+  if (en)
+    en(1);
+}
+
 int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
 {
+  nr_ss_gpu_init();
   const char *pr = getenv("ISAC_PDSCH_GPU_PRIO");
   if (pr && atoi(pr) == 1) {
     void *hp = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);

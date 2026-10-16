@@ -128,6 +128,9 @@ static cudaStream_t g_ctx_hi[EXACT_CTX], g_ctx_lo[EXACT_CTX]; /* GPUSCHED ISAC_P
 static bool g_ctx_prio;
 __thread int nr_pdsch_gpu_low;
 extern "C" void nr_pdsch_gpu_set_lowprio(int low) { nr_pdsch_gpu_low = low; }
+/* ISAC_E2E_TRACE stage split: this module (dlopen RTLD_LOCAL) has its own copy of the per-thread wait accumulators; the host reads them here */
+extern "C" uint64_t *nr_pdsch_gpu_ss_ptr(void) { return nr_ss_ns; }
+extern "C" void nr_pdsch_gpu_ss_enable(int on) { nr_ss_on = on; }
 static int *g_ctx_delay[EXACT_CTX];
 static short2 *g_ctx_ls[EXACT_CTX];    /* GPU-DEMOD chest: LS rows [64][4096] */
 static int *g_ctx_cout[EXACT_CTX];     /* GPU-DEMOD chest: delay triples + nvar (staging) */
@@ -164,12 +167,14 @@ static std::mutex g_exact_staged_lock;
  */
 static int ctx_acquire(bool try_only)
 {
+  const uint64_t ss0 = nr_ss_now();
   for (;;) {
     unsigned m = g_ctx_busy.load();
     for (int i = 0; i < nr_gpu_ctx_limit(EXACT_CTX); i++)
       if (!(m >> i & 1u) && g_ctx_busy.compare_exchange_strong(m, m | 1u << i)) {
         if (g_ctx_prio) /* the context is ours and idle: point it at the stream of this body's class */
           g_ctx_stream[i] = nr_pdsch_gpu_low ? g_ctx_lo[i] : g_ctx_hi[i];
+        nr_ss_add(NRSS_LK, ss0);
         return i;
       }
     if (try_only) return -1;
@@ -188,12 +193,14 @@ static void ctx_release(int i) { g_ctx_busy.fetch_and(~(1u << i)); }
  *   ISAC_* flags read: none.
  *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:908, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:983.
  */
-static int ctx_wait(int c, std::chrono::steady_clock::time_point t0)
+static int ctx_wait(int c, std::chrono::steady_clock::time_point t0, int sb)
 {
   bool late = false;
   uint64_t pt = 0;
+  const uint64_t ss0 = nr_ss_now();
   for (;;) {
     const cudaError_t q = cudaStreamQuery(g_ctx_stream[c]);
+    if (q != cudaErrorNotReady) nr_ss_add(sb, ss0);
     if (q == cudaSuccess) return 0;
     if (q != cudaErrorNotReady) return (int)q;
     nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
@@ -1151,7 +1158,7 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
         io, g_cfg.nb_prefix_samples, g_cfg.nb_prefix_samples0, g_d_perm, g_d_tw1024, g_d_tw4096, g_d_ts, g_cfg.n_rb_dl,
         g_cfg.first_carrier_offset);
     cudaError_t e = cudaPeekAtLastError();
-    if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0);
+    if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0, NRSS_FEP);
     ctx_release(c);
     if (e != cudaSuccess) {
       g_init_state = -1;
@@ -1161,10 +1168,12 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
     g_exact_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
     return 0;
   }
+  const uint64_t ss_lk = nr_ss_now();
   if (try_only) {
     if (!g_exact_staged_lock.try_lock()) { ++g_exact_busy; return -1; }
   } else
     g_exact_staged_lock.lock();
+  nr_ss_add(NRSS_LK, ss_lk);
   std::lock_guard<std::mutex> hold(g_exact_staged_lock, std::adopt_lock);
   if (g_exact_pending) {
     if (cudaStreamQuery(g_stream) == cudaErrorNotReady) { ++g_exact_busy; return -1; }
@@ -1188,6 +1197,7 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
     CK((cudaError_t)nr_gpu_copy_async(g_h_exact + off, g_d_exact + off, (size_t)(hi - lo + 1) * N * sizeof(short2), g_stream));
   }
   uint64_t pt = 0;
+  const uint64_t ss_w = nr_ss_now();
   for (;;) {
     const cudaError_t q = cudaStreamQuery(g_stream);
     if (q == cudaSuccess) break;
@@ -1196,9 +1206,11 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
     if (std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() > g_exact_deadline_us) {
       g_exact_pending = true;
       ++g_exact_late;
+      nr_ss_add(NRSS_FEP, ss_w);
       return -1;
     }
   }
+  nr_ss_add(NRSS_FEP, ss_w);
   for (int a = 0; a < nant; a++)
     for (int l = lo; l <= hi; l++)
       if (sym_mask >> l & 1)
@@ -1322,7 +1334,7 @@ extern "C" int nr_pdsch_gpu_exact_delay(const int16_t *const *rows, int nrows, i
   nr_exact::k_delay_exact<<<nrows, nr_exact::THREADS, 0, g_ctx_stream[c]>>>(io, g_d_perm, g_d_tw1024, g_d_tw4096,
                                                                            (int *)nr_gpu_device_ptr(g_ctx_delay[c]));
   cudaError_t e = cudaPeekAtLastError();
-  if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0);
+  if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0, NRSS_CHEST);
   if (e == cudaSuccess) memcpy(out, g_ctx_delay[c], 3 * nrows * sizeof(int));
   ctx_release(c);
   if (e != cudaSuccess) {
@@ -1473,7 +1485,7 @@ extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
   }
   nrch::k_fir<<<j->n_rows, 256, 0, g_ctx_stream[c]>>>(par, rows, g_ctx_ls[c], dout, (unsigned *)(dout + 3 * NR_GPU_CHEST_MAX_ROWS));
   cudaError_t e = cudaPeekAtLastError();
-  if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0);
+  if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0, NRSS_CHEST);
   if (e == cudaSuccess) {
     memcpy(j->delay, g_ctx_cout[c], 3 * j->n_rows * sizeof(int));
     memcpy(j->nvar, g_ctx_cout[c] + 3 * NR_GPU_CHEST_MAX_ROWS, j->n_rows * sizeof(int));

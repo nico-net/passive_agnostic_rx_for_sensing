@@ -530,11 +530,14 @@ static const Graph *graph_lookup(int BG, int Z, int R)
 
 static int acquire()
 {
+  const uint64_t ss0 = nr_ss_now();
   for (;;) {
     unsigned m = g_busy.load();
     for (int i = 0; i < nr_gpu_ctx_limit(CTX); i++)
-      if (!(m >> i & 1u) && g_busy.compare_exchange_strong(m, m | 1u << i))
+      if (!(m >> i & 1u) && g_busy.compare_exchange_strong(m, m | 1u << i)) {
+        nr_ss_add(NRSS_LK, ss0);
         return i;
+      }
     std::this_thread::yield();
   }
 }
@@ -688,9 +691,11 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   /* GPUSHARE: poll like the demod/FEP waits. cudaStreamSynchronize under cudaDeviceScheduleBlockingSync (set by
    * nr_gpu_platform) sleeps on the completion interrupt; the TB waited far longer than its kernel. */
   uint64_t pt = 0;
+  const uint64_t ss0 = nr_ss_now();
   if (e == cudaSuccess)
     while ((e = cudaStreamQuery(x.s)) == cudaErrorNotReady)
       nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
+  nr_ss_add(NRSS_LDPC, ss0);
   if (e != cudaSuccess) {
     fprintf(stderr, "nr_pdsch_gpu_ldpc_run: %s\n", cudaGetErrorString(e));
     g_busy.fetch_and(~(1u << c));
@@ -861,16 +866,20 @@ static int ul_exec(int i, nr_gpu_ldpc_job_t *jobs, int n, const Graph *const *gr
     cudaEventRecord(UL.e1[i], x.s);
   *launch_us = ul_now_us() - t0;
   uint64_t spin0 = ul_now_us();
+  const uint64_t ss0 = nr_ss_now();
   while (e == cudaSuccess && (e = cudaStreamQuery(x.s)) == cudaErrorNotReady) {
     e = cudaSuccess;
     const uint64_t now = ul_now_us();
-    if (now - t0 > deadline_us)
+    if (now - t0 > deadline_us) {
+      nr_ss_add(NRSS_LDPC, ss0);
       return -2;
+    }
     if (now - spin0 > 60) { /* no busy spin: 25 us naps after 60 us */
       const struct timespec ts = {0, 25000};
       nanosleep(&ts, NULL);
     }
   }
+  nr_ss_add(NRSS_LDPC, ss0);
   if (e != cudaSuccess)
     return -1;
   if (dg) {

@@ -1,3 +1,5 @@
+#include "PHY/TOOLS/nr_stage_split.h"
+#include <sched.h>
 #include "nr_pdsch_gpu_exact.h"
 #include "nr_pdsch_gpu_demod_host.h"
 #include "nr_passive_cfg_epoch.h"
@@ -6181,6 +6183,35 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_gated(PHY_VARS_NR_UE
   return st;
 }
 
+/* ISAC_E2E_TRACE stage split (EVMGRANT stg=): the first body's stage wall / thread-CPU (PDTIM timers; need ISAC_PDCCH_TIMING=1 ISAC_PDTIM_PCT=1,
+ * else 0) and the wait buckets of PHY/TOOLS/nr_stage_split.h (this process: prep, wq; libpdsch_gpu.so: gpu waits, lk), in us */
+static __thread struct { uint32_t gw[4], lk, prep, wq, cb; int core; uint32_t w[4], c[4]; } t_stg;
+extern uint64_t *nr_ss_gpu_ptr(void);
+static void stg_snapshot(void)
+{
+  const uint64_t *gp = nr_ss_gpu_ptr();
+  if (gp == nr_ss_ns)
+    gp = NULL; /* libpdsch_gpu.so bound the weak accumulators to this executable's copy: one set, count it once */
+  static const int map[4] = {PDTIM_FEP, PDTIM_CHEST, PDTIM_DEMOD, PDTIM_LDPC};
+  for (int k = 0; k < 4; k++) {
+    t_stg.w[k] = t_pdtim_stage_us[map[k]];
+    t_stg.c[k] = t_pdtim_stage_cpu_us[map[k]];
+    t_stg.gw[k] = (uint32_t)(((gp ? gp[k] : 0) + nr_ss_ns[k]) / 1000);
+  }
+  t_stg.lk = (uint32_t)(((gp ? gp[NRSS_LK] : 0) + nr_ss_ns[NRSS_LK]) / 1000);
+  t_stg.prep = (uint32_t)(nr_ss_ns[NRSS_PREP] / 1000);
+  t_stg.wq = (uint32_t)(nr_ss_ns[NRSS_WQ] / 1000);
+  t_stg.cb = t_seg_C;
+  t_stg.core = sched_getcpu();
+}
+/* nr_pdsch_passive_decode_stg: " stg=fep:w/c/g,chest:w/c/g,demod:w/c/g,ldpc:w/c/g,prep:p,wq:q cb=C core=X lk=L" of the last call's first body (us) */
+int nr_pdsch_passive_decode_stg(char *buf, size_t n)
+{
+  return snprintf(buf, n, " stg=fep:%u/%u/%u,chest:%u/%u/%u,demod:%u/%u/%u,ldpc:%u/%u/%u,prep:%u,wq:%u cb=%u core=%d lk=%u", t_stg.w[0], t_stg.c[0],
+                  t_stg.gw[0], t_stg.w[1], t_stg.c[1], t_stg.gw[1], t_stg.w[2], t_stg.c[2], t_stg.gw[2], t_stg.w[3], t_stg.c[3], t_stg.gw[3],
+                  t_stg.prep, t_stg.wq, t_stg.cb, t_stg.core, t_stg.lk);
+}
+
 /* BATCHCPU: route (CPU vs GPU chain) and gate one decode body; see nr_pdsch_cpu_route.h. Flags off: a plain call. */
 static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
                                                             const UE_nr_rxtx_proc_t *proc,
@@ -6195,8 +6226,18 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
     clock_gettime(CLOCK_MONOTONIC, &tb);
   const uint64_t tb0 = g_pdtim_on > 0 ? (uint64_t)tb.tv_sec * 1000000000ull + (uint64_t)tb.tv_nsec : 0;
   nr_pdsch_route_t rt = nr_pdsch_route_begin((int)freq_alloc->num_rbs, __builtin_popcount(dlsch_config->dmrs_ports), t_probe_first_seg);
+  const bool stg_first = nr_ss_on && t_pdtim_body == 0; /* t_pdtim_body++ happens inside the gated body */
+  if (stg_first) { /* ISAC_E2E_TRACE stage split: the first body starts from zero (the WQ wait of the pre-step was set at dequeue) */
+    uint64_t *gp = nr_ss_gpu_ptr();
+    for (int k = 0; k < NRSS_WQ; k++) {
+      nr_ss_ns[k] = 0;
+      if (gp) gp[k] = 0;
+    }
+  }
   const nr_pdsch_passive_decode_status_t st = passive_decode_body_gated(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
   nr_pdsch_route_end(&rt);
+  if (stg_first)
+    stg_snapshot();
   if (tb0) {
     clock_gettime(CLOCK_MONOTONIC, &tb);
     t_dec_body_ns += (uint64_t)tb.tv_sec * 1000000000ull + (uint64_t)tb.tv_nsec - tb0;
