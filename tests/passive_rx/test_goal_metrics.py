@@ -26,9 +26,26 @@ class GoalMetricsTest(unittest.TestCase):
         self.assertEqual(d['n_real'], 3)
         self.assertEqual(d['n_q'], 2)
         self.assertAlmostEqual(d['crc_q'], 50.0)
-        self.assertEqual(d['unqualified_low_snr'], 1)
+        self.assertEqual(d['unqualified_floor'], 1)  # snr_l -10 is below the QPSK floor: now floor, was low_snr
         self.assertAlmostEqual(d['drops_pct'], 1.0)
         self.assertEqual(d['tot_p99'], 900)
+
+    def test_true_snr_floor_and_inversion(self):
+        self.assertIsNone(gm.true_snr_db(3.9, 2))
+        self.assertIsNone(gm.true_snr_db(4.9, 2))
+        self.assertIsNone(gm.true_snr_db(14.4, 8))
+        self.assertAlmostEqual(gm.true_snr_db(10.3, 2), 10.0, delta=0.5)
+        self.assertAlmostEqual(gm.true_snr_db(35.0, 6), 35.0)
+        for qm in (2, 4, 6, 8):
+            v = [gm.true_snr_db(e / 10, qm) for e in range(0, 400)]
+            v = [x for x in v if x is not None]
+            self.assertEqual(v, sorted(v))
+
+    def test_floor_grant_unqualified(self):
+        d = gm.parse_run(write([ev(mcs=0, snr_l="3.9,-99,-99,-99"), ev(mcs=0, snr_l="10.3,-99,-99,-99")]))['dl']
+        self.assertEqual(d['unqualified_floor'], 1)
+        self.assertEqual(d['n_q'], 1)
+        # QPSK est 3.9 at MCS0 passed the old rule (req -4.5+2) at any true SNR
 
     def test_probes_excluded(self):
         d = gm.parse_run(write([ev(probe=1), ev()]))['dl']
@@ -67,6 +84,7 @@ class GoalMetricsTest(unittest.TestCase):
                    "[PHY]    SENSING: PUSCHQ2 consumers=2 real[queued=200 full=4] probe[queued=1 decoded=1 full=0]\n"])
         u = gm.parse_run(p)['ul']
         self.assertEqual(u['n_q'], 1)
+        self.assertEqual(u['unqualified_floor'], 1)  # snr_db=-12 is below the QPSK floor: unknown, not 'low'
         self.assertAlmostEqual(u['crc_q'], 100.0)
         self.assertEqual(u['tot_p99'], 700)
         self.assertAlmostEqual(u['drops_pct'], 2.0)
