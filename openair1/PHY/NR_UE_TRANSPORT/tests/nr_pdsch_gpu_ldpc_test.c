@@ -227,6 +227,8 @@ int main(int argc, char **argv)
   const int nc = argc > 2 && !strcmp(argv[2], "nc"); /* non-cluster kernels (what sm_89 runs), forced on this device; the CPU reference decides */
   if (nc)
     setenv("ISAC_GPU_LDPC_NOCLUSTER", "1", 1);
+  if (argc > 2 && !strcmp(argv[2], "mix")) /* nj = 1..6 per launch: 1-3 cluster, 4-6 non-cluster, same CPU-reference comparison */
+    setenv("ISAC_GPU_LDPC_NC_MIN_CB", "4", 1);
   nr_gpu_ldpc_init_fn ginit = g ? (nr_gpu_ldpc_init_fn)dlsym(g, "nr_pdsch_gpu_ldpc_init") : NULL;
   nr_gpu_ldpc_ul_init_fn uinit = g ? (nr_gpu_ldpc_ul_init_fn)dlsym(g, "nr_pusch_gpu_ldpc_init") : NULL;
   nr_gpu_ldpc_run_fn grun = g ? (nr_gpu_ldpc_run_fn)dlsym(g, ul ? "nr_pusch_gpu_ldpc_run" : "nr_pdsch_gpu_ldpc_run") : NULL;

@@ -543,6 +543,7 @@ static int acquire()
  * code block, same results). Decided once, first thing in warm_common()/init, before any graph warm-up. g_nc_state: 0 undecided, 1 cluster,
  * 2 non-cluster, 3 CC query failed (GPU LDPC refused, CPU fallback). */
 static std::atomic<int> g_nc_state{0}, g_refused{0};
+static int g_nc_min_cb = 0; /* ISAC_GPU_LDPC_NC_MIN_CB: launches with >= N code blocks use the _nc kernels (0 = off); set before g_nc_state latches */
 static int decide_nc()
 {
   int st = g_nc_state.load();
@@ -556,7 +557,13 @@ static int decide_nc()
   }
   const char *e = getenv("ISAC_GPU_LDPC_NOCLUSTER");
   st = major < 9 || (e && *e == '1') ? 2 : 1;
+  const char *m = getenv("ISAC_GPU_LDPC_NC_MIN_CB");
+  g_nc_min_cb = m ? atoi(m) : 0;
+  if (g_nc_min_cb < 0)
+    g_nc_min_cb = 0;
   g_nc_state.store(st);
+  if (g_nc_min_cb)
+    fprintf(stderr, "SENSING: GPU_LDPC nc_min_cb=%d\n", g_nc_min_cb);
   if (st == 2)
     fprintf(stderr, "SENSING: GPU LDPC: non-cluster kernels (sm_%d%s)\n", major, major < 9 ? "" : ", ISAC_GPU_LDPC_NOCLUSTER=1");
   return st;
@@ -565,6 +572,8 @@ static int decide_nc()
 /* one launch of n code blocks: cluster of CLB blocks each, or one block each (_nc) */
 static cudaError_t ldpc_launch(int nc, int n, cudaStream_t st, bool z4, const DJob *ddj, Ctx &x, uint8_t *dsnap, int *dres)
 {
+  if (nc == 1 && g_nc_min_cb && n >= g_nc_min_cb)
+    nc = 2;
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = dim3(n * (nc == 2 ? 1 : CLB));
   cfg.blockDim = dim3(THREADS);
@@ -602,6 +611,8 @@ static bool warm_common()
   if (nc == 2 ? cudaFuncGetAttributes(&fa, k_ldpc_t<true>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<true>) != cudaSuccess
               : cudaFuncGetAttributes(&fa, k_ldpc_t<false>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<false>) != cudaSuccess)
     return false;
+  if (nc == 1 && g_nc_min_cb && (cudaFuncGetAttributes(&fa, k_ldpc_t<true>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<true>) != cudaSuccess))
+    return false; /* mixed selection: load the _nc module now, not on the first big TB */
   done = true;
   return true;
 }
