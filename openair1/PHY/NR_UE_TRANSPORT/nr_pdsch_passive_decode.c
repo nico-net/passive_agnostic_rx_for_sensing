@@ -35,6 +35,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pdsch_qm_oracle.h"
 #include "nr_blind_stats.h"
+#include "nr_pdcch_blind_monitor.h" // nr_pdcch_blind_dmrs_mask (ISAC_RA_TDRA_SWEEP)
 #include "nr_pdsch_chest_key.h" // K32: complete chest-cache key
 #include "nr_llr_norm.h" // K38: LLR-norm shift over code block 0's span
 #include "nr_pdsch_solver.h"
@@ -6512,6 +6513,54 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
         LOG_A(PHY, "SENSING: RETRY_SNR_GATE skipped=%lu of %lu failed first bodies (min %.1f dB)\n", (unsigned long)k, (unsigned long)n, s_rsnr);
       return st;
     }
+  }
+  /* ISAC_RA_TDRA_SWEEP=1 (default off): DCI 1_0 in a common search space (RA/TC/P-RNTI) takes its TDRA row from pdsch-ConfigCommon
+   * (TS 38.214 5.1.2.1.1 Table 5.1.2.1.1-1). An NSA-style SIB1 carries none, so the receiver falls back to default table A
+   * (row 0 = S=2 L=12) although the cell's own list is not that table; every such grant then fails the CRC. Re-decode with the other
+   * type-A starts S=0..3 ending at symbol 14 (DM-RS re-derived by TS 38.211 Table 7.4.1.1.2-3, 1_0 => pos2). */
+  static _Atomic int ra_sweep = -1;
+  if (ra_sweep < 0) { const char *e = getenv("ISAC_RA_TDRA_SWEEP"); ra_sweep = e && atoi(e) != 0; }
+  if (ra_sweep && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !grant->dci11 && grant->rnti_class != 0 && grant->rnti_class != 2 && !t_quiet && !t_llr_ovr
+      && !t_gw_capture && !nr_agnostic_v2() && !harq_combine_on()
+      && dlsch_config->start_symbol + dlsch_config->number_symbols == 14 && (dlsch_config->dlDmrsSymbPos & 0x3FFFu)) {
+    if (t_recov_mode == 1) { /* RECOVERY_ASYNC: the sweep runs on the worker; the failed first pass stands (GrantWork owners are abandoned by the caller) */
+      t_recov_deferred = true;
+      return st;
+    }
+    const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
+    const int l0 = __builtin_ctz(original.dlDmrsSymbPos & 0x3FFFu);
+    const bool saved_quiet = t_quiet;
+    const double saved_fo_override = nr_slot_fep_fo_override_hz;
+    nr_slot_fep_fo_override_hz = t_last_fep_fo;
+    t_quiet = true;
+    bool ok = false;
+    for (int S = 0; S <= 3 && !ok; S++) {
+      if (S == (int)original.start_symbol || S > l0) continue;
+      const int32_t m = nr_pdcch_blind_dmrs_mask(l0 == 3, 14 - S, S, 0, 2, 1);
+      if (m <= 0) continue;
+      fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = original;
+      cfg.start_symbol = (uint8_t)S;
+      cfg.number_symbols = (uint8_t)(14 - S);
+      cfg.dlDmrsSymbPos = (original.dlDmrsSymbPos & ~0x3FFFu) | (uint32_t)m;
+      t_decode_tdra_attempt = 7 + 64 * (70 + S);
+      st = passive_decode_body(ue, proc, &cfg, freq_alloc, grant, rxdataF, out);
+      if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
+      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) { ok = true; *dlsch_config = cfg; out->config_recovered = true; }
+    }
+    LOG_I(PHY, "SENSING: RATDRA rnti=0x%04x cls=%u fs=%d.%d S=%u L=%u -> S=%u L=%u ok=%d\n", grant->rnti, grant->rnti_class, proc->frame_rx,
+          proc->nr_slot_rx, original.start_symbol, original.number_symbols, dlsch_config->start_symbol, dlsch_config->number_symbols, ok);
+    if (!ok) {
+      *dlsch_config = original;
+      if (t_recov_mode != 2) { /* restore the plain view; the worker has no first body to restore */
+      t_decode_tdra_attempt = 32;
+      st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+      if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
+      }
+    }
+    nr_slot_fep_fo_override_hz = saved_fo_override;
+    t_quiet = saved_quiet;
+    t_decode_tdra_attempt = 0;
+    return st;
   }
   if ((!tdra_retry && !csi_retry && !cdm_retry && !wide_retry && !csi_population_retry && !tint_retry && !opr_retry && !s_scsi_on()) || st != NR_PDSCH_PASSIVE_DECODE_CRC_FAIL
       || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_gw_used || (t_quiet && !t_qam_ab_alt) || t_llr_ovr
