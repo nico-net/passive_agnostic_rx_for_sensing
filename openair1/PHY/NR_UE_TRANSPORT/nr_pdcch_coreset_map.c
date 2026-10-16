@@ -24,6 +24,7 @@
  */
 #include "common/utils/nr_core_plan.h"
 #include "nr_pdcch_nid_gpu.h"
+#include "nr_dmrs_nid_solve.h"
 /* weak: test targets compile this file without nr_dl_traffic_probe.c */
 extern int nr_syncq_gate_closed(void) __attribute__((weak));
 #include "nr_pdcch_nid_occupancy.h"
@@ -531,6 +532,7 @@ void nr_pdcch_coreset_map_idsweep_push(const c16_t *rxF_sym, int fft, int fco, i
       atomic_fetch_add_explicit(&nid_capture_skipped_empty, 1, memory_order_relaxed);
       return;
     }
+    nr_dmrs_nid_live_offer(rxF_sym, fft, fco, nsc, pa, slot, sym); /* ISAC_DMRS_NID_SOLVE=1, observe only; no-op off */
     if (!nr_pdcch_nid_gpu_push(rxF_sym, fft, fco, slot, sym, &cfg))
       atomic_fetch_add_explicit(&nid_capture_taken, 1, memory_order_relaxed);
     return;
