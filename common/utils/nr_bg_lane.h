@@ -6,10 +6,10 @@
 extern "C" {
 #endif
 int nr_bg_lane_on(void);                          /* ISAC_BG_LANE=1 */
-/* Parses ISAC_BG_CORES (default "2,10,11,12,13,14"), drops critical cores (logged once); returns the count, 0 = none usable. */
+/* Parses ISAC_BG_CORES (default "2,11,12,13,14"), drops critical cores (logged once); returns the count, 0 = none usable. */
 int nr_bg_lane_cores(int *cores, int max);
 /* Called first thing in a background thread: SCHED_OTHER, affinity = the list, nice 10; list empty -> unpinned nice 19. No-op when off. */
-void nr_bg_lane_enter(void);
+void nr_bg_lane_enter(const char *own_core_env); /* own_core_env: explicit per-thread core variable, honoured when set and not critical */
 #ifdef __cplusplus
 }
 #endif

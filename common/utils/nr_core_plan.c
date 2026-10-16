@@ -338,7 +338,26 @@ bool nr_core_plan_is_critical(int core)
 {
   if (core < 0 || core >= NR_CP_MAX_CPUS) return false;
   if (test_critical_set) return test_critical[core];
-  if (!active) return false;
+  if (!active) { /* plan off (ISAC_CORE_PLAN=0): the critical lane is whatever the env core variables and --thread-pool name */
+    static const char *const lists[] = {"ISAC_GPU_WORKER_CORE", "ISAC_PDSCH_CORES", "ISAC_PUSCH_CORES", "ISAC_UHD_CTRL_CORES",
+                                        "ISAC_UE_RT_CORE", "ISAC_USRP_RING_CORE", "ISAC_BG_CRITICAL_CORES"};
+    unsigned char m[NR_CP_MAX_CPUS];
+    for (size_t i = 0; i < sizeof(lists) / sizeof(lists[0]); i++) {
+      const char *e = getenv(lists[i]);
+      if (e && nr_core_parse_list(e, m) == 0 && m[core]) return true;
+    }
+    FILE *f = fopen("/proc/self/cmdline", "r"); /* --thread-pool 8,9,15 */
+    bool hit = false, next = false;
+    char arg[256];
+    for (int c, n = 0; f && !hit && (c = fgetc(f)) != EOF;) {
+      if (c && n < (int)sizeof(arg) - 1) { arg[n++] = (char)c; continue; }
+      arg[n] = 0; n = 0;
+      if (next && nr_core_parse_list(arg, m) == 0 && m[core]) hit = true;
+      next = !strcmp(arg, "--thread-pool");
+    }
+    if (f) fclose(f);
+    return hit;
+  }
   for (int i = 0; i < current.count; i++) {
     const nr_core_role_t r = current.a[i].role;
     if (current.a[i].core == core && r != NR_CP_USS && r != NR_CP_POOL && r != NR_CP_GPU && r != NR_CP_CSIRS && r != NR_CP_NID

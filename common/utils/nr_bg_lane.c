@@ -19,7 +19,7 @@ int nr_bg_lane_on(void)
 int nr_bg_lane_cores(int *cores, int max)
 {
   const char *e = getenv("ISAC_BG_CORES");
-  if (!e) e = "2,10,11,12,13,14"; /* DGX default; other hosts set ISAC_BG_CORES */
+  if (!e) e = "2,11,12,13,14"; /* DGX default; other hosts set ISAC_BG_CORES */
   unsigned char mask[NR_CP_MAX_CPUS] = {0};
   static int warned;
   int n = 0;
@@ -27,7 +27,8 @@ int nr_bg_lane_cores(int *cores, int max)
     if (!warned++) fprintf(stderr, "SENSING: BG_LANE ISAC_BG_CORES=\"%s\" is not a CPU list; background threads run unpinned at nice 19\n", e);
     return 0;
   }
-  for (int c = 0; c < NR_CP_MAX_CPUS; c++) if (mask[c]) {
+  const long online = sysconf(_SC_NPROCESSORS_ONLN);
+  for (int c = 0; c < NR_CP_MAX_CPUS; c++) if (mask[c] && c < online) {
     if (nr_core_plan_is_critical(c)) {
       if (!warned++) fprintf(stderr, "SENSING: BG_LANE core %d of ISAC_BG_CORES is a critical-lane core and is dropped\n", c);
     } else if (n < max)
@@ -36,9 +37,16 @@ int nr_bg_lane_cores(int *cores, int max)
   if (n == 0 && !warned++) fprintf(stderr, "SENSING: BG_LANE no usable core in ISAC_BG_CORES=\"%s\"; background threads run unpinned at nice 19\n", e);
   return n;
 }
-void nr_bg_lane_enter(void)
+void nr_bg_lane_enter(const char *own_core_env)
 {
   if (!nr_bg_lane_on()) return;
+  const int own = own_core_env ? nr_env_list_nth(own_core_env, 0, -1) : -1;
+  if (own >= 0 && !nr_core_plan_is_critical(own)) { /* the thread is already pinned there: only demote it */
+    struct sched_param sp0 = {0};
+    pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp0);
+    setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
+    return;
+  }
   int cores[NR_CP_MAX_CPUS];
   const int n = nr_bg_lane_cores(cores, NR_CP_MAX_CPUS);
   struct sched_param sp = {0};

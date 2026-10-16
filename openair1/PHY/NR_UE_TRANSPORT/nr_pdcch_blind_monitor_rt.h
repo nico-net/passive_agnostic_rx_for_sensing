@@ -310,6 +310,7 @@ bool nr_pdcch_discovered_unverified_pending(void);
 int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
                                 nr_dci_bits_t payload, int length);
 void nr_pdcch_discovered_reset(void);
+void nr_pdcch_blind_monitor_rt_final_stats(void);
 /* ISAC_PDCCH_DISC_COVER=1 (ACQ-FIX, default off): every discovered nID/symbol/duration is first verified on the
  * canonical non-interleaved full-carrier cover (grid RB 0, floor(carrier/6) groups), then on the published geometry.
  * DM-RS correlation is invariant to whole-RB shifts of a CORESET, so a published start/span/mapping is a guess;
