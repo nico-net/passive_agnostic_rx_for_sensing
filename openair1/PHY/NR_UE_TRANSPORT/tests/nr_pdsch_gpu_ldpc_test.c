@@ -115,7 +115,8 @@ static int bench(void *g, void *h, int reps)
   double *v = malloc(sizeof(double) * reps);
   srand48(777);
   const char *pe = getenv("ISAC_GPU_POLL_SLEEP_US"), *ri = getenv("ISAC_GPU_RT_ISOLATE"), *ds = getenv("ISAC_GPU_DISC_SMS"), *nc = getenv("ISAC_GPU_LDPC_NOCLUSTER");
-  printf("BENCH_CFG poll_sleep_us=%s rt_isolate=%s disc_sms=%s nocluster=%s reps=%d\n", pe ? pe : "unset", ri ? ri : "unset", ds ? ds : "unset", nc ? nc : "unset", reps);
+  printf("BENCH_CFG poll_sleep_us=%s rt_isolate=%s disc_sms=%s nocluster=%s cl_min_cb=%s cl_force=%s reps=%d\n", pe ? pe : "unset", ri ? ri : "unset", ds ? ds : "unset", nc ? nc : "unset",
+         getenv("ISAC_GPU_LDPC_CL_MIN_CB") ? getenv("ISAC_GPU_LDPC_CL_MIN_CB") : "unset", getenv("ISAC_GPU_LDPC_CL_FORCE") ? getenv("ISAC_GPU_LDPC_CL_FORCE") : "unset", reps);
   { /* device facts: 16 = MultiProcessorCount, 97 = MaxSharedMemoryPerBlockOptin, 81 = MaxSharedMemoryPerMultiprocessor, 82 = MaxRegistersPerMultiprocessor */
     int (*cAttr)(int *, int, int) = dlsym(g, "cudaDeviceGetAttribute");
     if (!cAttr) { void *rt = dlopen("libcudart.so", RTLD_NOW); if (rt) cAttr = dlsym(rt, "cudaDeviceGetAttribute"); }
@@ -232,6 +233,7 @@ static int bench(void *g, void *h, int reps)
 }
 
 static void (*atexit_cl_check)(uint64_t *);
+static int sm_mode;
 
 int main(int argc, char **argv)
 {
@@ -246,6 +248,11 @@ int main(int argc, char **argv)
     setenv("ISAC_GPU_LDPC_NOCLUSTER", "1", 1);
   if (argc > 2 && !strcmp(argv[2], "mix")) /* nj = 1..6 per launch: 1-3 cluster, 4-6 non-cluster, same CPU-reference comparison */
     setenv("ISAC_GPU_LDPC_NC_MIN_CB", "4", 1);
+  if (argc > 2 && !strcmp(argv[2], "sm")) { /* res in shared memory, _nc kernel: same CPU-reference comparison */
+    setenv("ISAC_GPU_LDPC_NOCLUSTER", "1", 1);
+    setenv("ISAC_GPU_LDPC_SM", "1", 1);
+    sm_mode = 1;
+  }
   if (argc > 2 && !strcmp(argv[2], "cl2")) setenv("ISAC_GPU_LDPC_CL_FORCE", "2", 1);
   if (argc > 2 && !strcmp(argv[2], "cl4")) setenv("ISAC_GPU_LDPC_CL_FORCE", "4", 1);
   if (argc > 2 && !strcmp(argv[2], "pick")) { /* host-only: the selection function */
@@ -261,6 +268,7 @@ int main(int argc, char **argv)
     return 0;
   }
   if (argc > 2 && (!strcmp(argv[2], "cl2") || !strcmp(argv[2], "cl4")) && g) atexit_cl_check = dlsym(g, "nr_pdsch_gpu_ldpc_cl_stats");
+  if (sm_mode && g) atexit_cl_check = dlsym(g, "nr_pdsch_gpu_ldpc_cl_stats");
   nr_gpu_ldpc_init_fn ginit = g ? (nr_gpu_ldpc_init_fn)dlsym(g, "nr_pdsch_gpu_ldpc_init") : NULL;
   nr_gpu_ldpc_ul_init_fn uinit = g ? (nr_gpu_ldpc_ul_init_fn)dlsym(g, "nr_pusch_gpu_ldpc_init") : NULL;
   nr_gpu_ldpc_run_fn grun = g ? (nr_gpu_ldpc_run_fn)dlsym(g, ul ? "nr_pusch_gpu_ldpc_run" : "nr_pdsch_gpu_ldpc_run") : NULL;
@@ -451,8 +459,12 @@ int main(int argc, char **argv)
     }
   printf("LDPC_GPU_TEST%s mismatches=%ld\n", ul ? " (UL pool)" : "", n_bad + n_stop_bad);
   if (atexit_cl_check) { /* the forced cluster size really ran (cb 2 -> o[1], cb 4 -> o[2]) and no cluster-8 launch */
-    uint64_t o[4] = {0};
+    uint64_t o[5] = {0};
     atexit_cl_check(o);
+    if (sm_mode) {
+      printf("LDPC_GPU_TEST sm: smem launches %lu\n", (unsigned long)o[4]);
+      return o[4] && !n_bad && !n_stop_bad ? 0 : 2;
+    }
     const int i = !strcmp(argv[2], "cl2") ? 1 : 2;
     printf("LDPC_GPU_TEST %s: launches cb1=%lu cb2=%lu cb4=%lu cb8=%lu\n", argv[2], (unsigned long)o[0], (unsigned long)o[1], (unsigned long)o[2], (unsigned long)o[3]);
     if (!o[i] || o[3]) return 2;
