@@ -11,6 +11,7 @@ for arm in sys.argv[2:]:
     runs = []
     for d in sorted((x for x in glob.glob(f'{root}/replay_gp_{cap}_{arm}_[0-9]*_*/run.log') if os.path.getmtime(x) > SINCE), key=lambda p: int(re.search(rf'_{arm}_(\d+)_', p).group(1))):
         whole, w96, wbig, f96, fbig, ok, n, late, bad, stamps, gate_retry, launches = [], [], [], [], [], 0, 0, 0, 0, None, None, None
+        fepbad = None
         for l in open(d, errors='replace'):
             m = R.search(l)
             if m:
@@ -31,7 +32,7 @@ for arm in sys.argv[2:]:
             elif 'GPU_EXACT_CHEST calls' in l or 'GPU_EXACT_DEMOD calls' in l:
                 mm = re.search(r'check_bad=(\d+)', l); bad += int(mm.group(1))
         tot = ok + late
-        runs.append(dict(gt5=100.0 * sum(x > 5000 for x in whole) / len(whole) if whole else 0, f=d, n=n, ok=tot, rate=100.0 * tot / n if n else 0, whole=(pct(whole, 50), pct(whole, 99)), f96=(pct(f96, 50), pct(f96, 99)), fbig=(pct(fbig, 50), pct(fbig, 99)), stamps=stamps, gr=gate_retry, la=launches, bad=bad, fepbad=locals().get('fepbad')))
+        runs.append(dict(gt5=100.0 * sum(x > 5000 for x in whole) / len(whole) if whole else 0, f=d, n=n, ok=tot, rate=100.0 * tot / n if n else 0, whole=(pct(whole, 50), pct(whole, 99)), f96=(pct(f96, 50), pct(f96, 99)), fbig=(pct(fbig, 50), pct(fbig, 99)), stamps=stamps, gr=gate_retry, la=launches, bad=bad, fepbad=fepbad))
     if not runs: print(arm, 'no runs'); continue
     med = lambda k, i: st.median([r[k][i] for r in runs if r[k][i] is not None])
     rates = [r['rate'] for r in runs]
