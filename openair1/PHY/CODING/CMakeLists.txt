@@ -127,6 +127,12 @@ if(ENABLE_LDPC_CUDA)
   add_test(NAME test_nr_pdsch_gpu_ldpc_nc COMMAND ./test_nr_pdsch_gpu_ldpc 2 nc WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   # ISAC_GPU_LDPC_NC_MIN_CB=4: mixed cluster / non-cluster selection per launch
   add_test(NAME test_nr_pdsch_gpu_ldpc_mix COMMAND ./test_nr_pdsch_gpu_ldpc 2 mix WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  # cluster-2/4 kernels (ISAC_GPU_LDPC_CL_FORCE) and the host-only selection function
+  add_test(NAME test_nr_pdsch_gpu_ldpc_pick COMMAND ./test_nr_pdsch_gpu_ldpc 2 pick WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_test(NAME test_nr_pdsch_gpu_ldpc_cl2 COMMAND ./test_nr_pdsch_gpu_ldpc 2 cl2 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_test(NAME test_nr_pdsch_gpu_ldpc_cl4 COMMAND ./test_nr_pdsch_gpu_ldpc 2 cl4 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  # ISAC_GPU_LDPC_SM=1: hard-decision state in shared memory (_nc kernel), counted launches
+  add_test(NAME test_nr_pdsch_gpu_ldpc_sm COMMAND ./test_nr_pdsch_gpu_ldpc 2 sm WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   # ULLDPC: the same comparison through the UL pool of libpdsch_gpu.so
   add_test(NAME test_nr_pusch_gpu_ldpc COMMAND ./test_nr_pdsch_gpu_ldpc 2 ul WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   # GPUSHARE: green-context SM partition helper (nr_gpu_green.h); exit 77 = skipped (no device / no green contexts)
