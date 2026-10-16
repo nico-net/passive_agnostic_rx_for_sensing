@@ -81,6 +81,10 @@ int nr_csirs_full_enabled(void);
 void nr_csirs_full_ab(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
                       const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant,
                       c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP]);
+/** CSI-FULL ISAC_CSIRS_FULL_VALID=1: learn per slot phase, by CRC on the same samples, whether rate-matching the withheld + unconfirmed resources helps. */
+void nr_csirs_full_validate(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
+                            const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant,
+                            c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP]);
 void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
 void nr_csirs_blind_rt_cfr_time_us(uint64_t us);
 #endif /* __NR_CSIRS_BLIND_RT_H__ */
