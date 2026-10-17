@@ -9723,7 +9723,33 @@ constdiag_done:;
       const bool rfast = s_rfast;
       nr_dci11_reading_idx_t ridx;
       if (rfast) nr_dci11_reading_idx_init(&ridx);
-      for (int i = 0; i < nh; i++) {
+      /* ISAC_RNTI_LAYOUT_CACHE=1 (default off): a solved RNTI parses only its solved layout set (the solver's cand_bm + representative), keyed
+       * on this grant's context; layouts outside it can only form readings the solver ignores for a solved RNTI (it uses the representative's
+       * reading and refinement readings that overlap the set). The full pass returns after N consecutive full-TB CRC failures. */
+      uint16_t lc_ids[256];
+      int lc_n = -1, lc_chk_n = -1;
+      uint16_t lc_chk[256];
+      if (rep >= 0 && nr_rnti_layout_cache_on()) {
+        static int s_lc_fail = -1;
+        if (s_lc_fail < 0) s_lc_fail = getenv("ISAC_RNTI_LAYOUT_CACHE_FAILS") ? atoi(getenv("ISAC_RNTI_LAYOUT_CACHE_FAILS")) : 8;
+        int8_t lc_last = 13;
+        if (!nr_passive_acq_tdd_pdsch_last_symbols((uint32_t)abs_slot, (int)fp->numerology_index, 1, &lc_last)) lc_last = 13;
+        const uint64_t lc_key = (uint64_t)dlen | (uint64_t)(uint32_t)(cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id + 1 : 0) << 16
+                                | (uint64_t)(lc_last < 13 ? 1 : 0) << 48 | (uint64_t)(nr_tda_field_on() ? 1 : 0) << 50
+                                | (uint64_t)(uint8_t)lc_last << 52;
+        lc_n = nr_pdsch_solver_layout_cache(out.rnti, lc_key, s_lc_fail, lc_ids, 256);
+        { static _Atomic uint32_t s_lcq; if (((atomic_fetch_add(&s_lcq, 1) + 1) & 511) == 0) {
+            nr_pdsch_solver_lc_stats_t st; nr_pdsch_solver_layout_cache_stats(&st);
+            LOG_A(PHY, "SENSING: LAYOUT_CACHE hit=%llu miss=%llu stale=%llu fail_resolve=%llu bypass=%llu\n", (unsigned long long)st.hit,
+                  (unsigned long long)st.miss, (unsigned long long)st.stale, (unsigned long long)st.fail_resolve, (unsigned long long)st.bypass); } }
+        static int s_lc_chk = -1;
+        if (s_lc_chk < 0) s_lc_chk = getenv("ISAC_RNTI_LAYOUT_CACHE_CHECK") && atoi(getenv("ISAC_RNTI_LAYOUT_CACHE_CHECK")) ? 1 : 0;
+        if (s_lc_chk && lc_n >= 0) { memcpy(lc_chk, lc_ids, (size_t)lc_n * sizeof(uint16_t)); lc_chk_n = lc_n; lc_n = -1; }
+      }
+lc_regroup:
+      for (int ii = 0; ii < (lc_n >= 0 ? lc_n : nh); ii++) {
+        const int i = lc_n >= 0 ? lc_ids[ii] : ii;
+        if (i >= nh) continue;
         s_gid[i] = 0xff;
         if (!R->alive[i] && i != rep
             && !(reopen_layouts && R->off[i].fdra_mode < 8 && (live_fdra & (1u << R->off[i].fdra_mode))))
@@ -9782,6 +9808,17 @@ constdiag_done:;
         }
         if (kk >= 0) kgrp[kk] = g;
       }
+      if (lc_n >= 0 && nrd > 5) {
+        /* more than 1 + 4 readings overlap the solved set: the solver's refinement cap (4) then depends on the order in which the FULL pass
+         * numbers the readings, so this grant takes the full pass (keeps the cached pass bit-exact except for probe order below the cap) */
+        lc_n = -1;
+        nrd = 0;
+        nk = 0;
+        memset(rcount, 0, sizeof(rcount));
+        if (kfast) nr_keyhash_init(&khash);
+        if (rfast) nr_dci11_reading_idx_init(&ridx);
+        goto lc_regroup;
+      }
       { /* ISAC_PDSCH_REP_FIELDS=1 (TIMRM, default off): a solved RNTI's grant is decoded with the NDI / rv / HARQ pid its representative layout
          * reads, not those of whichever layout of the same reading (same MCS, allocation, ports) parsed first. Layouts whose MCS fields sit 2 bits
          * apart read the same MCS 0 when the bits before it are zero, but read the rv from different bits: the earlier one takes the NDI as the
@@ -9810,9 +9847,31 @@ constdiag_done:;
         rd[k].mcs = rparsed[k].mcs;
         off += rcount[k];
       }
-      for (int i = 0; i < nh; i++)
-        if (s_gid[i] != 0xff)
+      if (lc_chk_n >= 0) { /* ISAC_RNTI_LAYOUT_CACHE_CHECK=1: the full pass above ran; would the cached pass have produced the same readings? */
+        static _Atomic uint64_t s_n, s_ord, s_cap;
+        int last_g = -1, ndist = 0;
+        bool ord = false;
+        uint8_t seen[SOLVER_READINGS] = {0};
+        for (int ii = 0; ii < lc_chk_n; ii++) {
+          const int i = lc_chk[ii];
+          if (i >= nh || s_gid[i] == 0xff || (!R->alive[i] && i != rep)) continue;
+          if (!seen[s_gid[i]]) { seen[s_gid[i]] = 1; ndist++; }
+          if (s_gid[i] < last_g) ord = true; /* readings first met in another order than the full pass numbers them */
+          else last_g = s_gid[i];
+        }
+        /* the order only matters to the solver when more than 1 + 4 readings overlap the solved set (refinement cap) or the 128-reading cap bites */
+        const bool cap = ndist > 5 || nrd >= SOLVER_READINGS;
+        if (ord) atomic_fetch_add(&s_ord, 1);
+        if (cap) atomic_fetch_add(&s_cap, 1);
+        if (((atomic_fetch_add(&s_n, 1) + 1) & 511) == 0 || cap)
+          LOG_A(PHY, "SENSING: LAYOUT_CACHE_CHECK grants=%llu order_differs=%llu cap_risk=%llu\n", (unsigned long long)atomic_load(&s_n),
+                (unsigned long long)atomic_load(&s_ord), (unsigned long long)atomic_load(&s_cap));
+      }
+      for (int ii = 0; ii < (lc_n >= 0 ? lc_n : nh); ii++) {
+        const int i = lc_n >= 0 ? lc_ids[ii] : ii;
+        if (i < nh && s_gid[i] != 0xff)
           ((uint16_t *)rd[s_gid[i]].ids)[rd[s_gid[i]].n_ids++] = (uint16_t)i;
+      }
       static int s_budget = -1;
       if (s_budget < 0) {
         const char *e = getenv("ISAC_PDSCH_SOLVER_BUDGET");
