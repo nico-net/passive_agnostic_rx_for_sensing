@@ -18,6 +18,7 @@
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.h"
 #include "common/utils/LOG/log.h"
 #include "PHY/sse_intrin.h"
+#include "nr_pdsch_host_fast.h"
 #include "PHY/TOOLS/nr_stage_split.h"
 #include <dlfcn.h>
 #include <pthread.h>
@@ -130,6 +131,22 @@ static int prep_segment(nrLDPC_TB_decoding_parameters_t *tb, int r, tls_t *t, in
   *Eout = E;
   *Rout = R;
   int16_t *d = tb->d + (size_t)r * Kc * Z;
+  static int s_hf = -1; /* ISAC_PDSCH_HOST_FAST=1 (default off): NEON deinterleave / rate-match / pack, bit-identical */
+  if (s_hf < 0)
+    s_hf = getenv("ISAC_PDSCH_HOST_FAST") && atoi(getenv("ISAC_PDSCH_HOST_FAST")) ? 1 : 0;
+  if (s_hf && tb->C != 0 && tb->d_to_be_cleared == 1 && tb->rv_index < 4 && tb->BG >= 1 && tb->BG <= 2) {
+    static const uint8_t k0[2][4] = {{0, 17, 33, 56}, {0, 13, 25, 43}};
+    const uint32_t N = (tb->BG == 1) ? 66u * Z : 50u * Z;
+    const uint32_t Nref = tb->tbslbrm ? 3u * tb->tbslbrm / (2u * tb->C) : N;
+    const uint32_t Ncb = Nref < N ? Nref : N;
+    const uint32_t ind = (k0[tb->BG - 1][tb->rv_index] * Ncb / N) * Z, Foff = K - F - 2 * Z;
+    if (Foff <= Ncb && nrhf_deinterleave(E, tb->Qm, t->e, tb->llr + off)) {
+      memset(d, 0, N * sizeof(int16_t));
+      nrhf_rm_rx(d, t->e, E, ind, Ncb, Foff, F);
+      nrhf_pack(l, d, Z, K, F, lenWithCrc(tb->C, tb->A), Kc * Z);
+      return 0;
+    }
+  }
   nr_deinterleaving_ldpc(E, tb->Qm, t->e, tb->llr + off);
   if (nr_rate_matching_ldpc_rx(tb->tbslbrm, tb->BG, Z, d, t->e, tb->C, tb->rv_index, tb->d_to_be_cleared, E, F, K - F - 2 * Z) == -1)
     return -1;
