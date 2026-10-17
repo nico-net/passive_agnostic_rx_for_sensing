@@ -97,13 +97,14 @@ void nr_pusch_first_crc_result(const nr_pdcch_blind_ul_result_t *g,
     for (unsigned i=0;i<n;++i) snprintf(tbhex+2*i,3,"%02x",out->tb[i]);
   }
   LOG_A(PHY,"SENSING: UL_PUSCH_CRC rnti=0x%04x ok=%d mcs=%u prb=%u+%u ta=%d t=%ld cpu_us=%lu status=%u reason=%s uci_hint=%d uci_re=%u dmrs_id=%u data_id=%u"
-            " snr_db=%.1f delay=%d seg=%d/%d tbs=%u cdm=%u tb=%s\n",
+            " snr_db=%.1f delay=%d seg=%d/%d tbs=%u cdm=%u tb=%s probe=%d tbl=%u\n",
         g->rnti,ok,g->mcs,g->bwp_start+g->start_rb,g->num_rb,
         out->ta_applied_samples,(long)target_slot,(unsigned long)cpu_us,out->status,
         out->reject_reason ? out->reject_reason : "-",
         g->csi_request!=0 || g->dai!=0,out->uci_ack_re,out->dmrs_id,out->data_id,
         (double)out->snr_db,out->est_delay,out->segments_ok,out->n_segments,out->tbs_bytes,
-        (unsigned)g->n_dmrs_cdm_groups,tbhex);
+        (unsigned)g->n_dmrs_cdm_groups,tbhex,
+        (int)(nr_ul_layout_is_probe(g) || nr_ul_layout_is_trial(g)),(unsigned)g->mcs_table); /* probe= same rule as the PUSCHQ2 probe counters */
   if (first_ok && slots_per_frame>0)
     LOG_A(PHY,"SENSING: UL_FIRST_TB_OK rnti=0x%04x elapsed_ms=%.3f elapsed_slots=%ld first_dci_to_tb=1\n",
           g->rnti,10000.0*(double)elapsed_slots/slots_per_frame,(long)elapsed_slots);

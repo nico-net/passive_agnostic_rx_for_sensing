@@ -3,6 +3,7 @@
 #include "nr_pdcch_ul_layout_lock.h"
 #include "nr_pdsch_prb_set.h" /* NR_FDRA_TYPE1 */
 #include "nr_blind_stats.h"
+#include "nr_ul_layout_lookalike.h"
 #include "common/utils/LOG/log.h"
 #include <math.h>
 #include <pthread.h>
@@ -330,6 +331,8 @@ typedef struct {
 typedef struct { uint16_t n, start; uint32_t votes; uint16_t rntis[8]; uint8_t nrnti; uint32_t det; } hyp_state_t;
 /* ISAC_UL_LOCK_SIGN: g_only[a][b] = probes where hypothesis a detected a DM-RS (>= VOTE_DB) and b (which had PRBs) did not */
 static uint16_t g_only[NR_UL_LAYOUT_MAX_HYP][NR_UL_LAYOUT_MAX_HYP];
+/* ISAC_UL_LOOKALIKE: g_disc[a][b] = votes for a whose probe touches an RB inside exactly one of a, b (look-alike pair) */
+static uint16_t g_disc[NR_UL_LAYOUT_MAX_HYP][NR_UL_LAYOUT_MAX_HYP];
 typedef struct {
   long target;
   uint16_t rnti;
@@ -431,6 +434,7 @@ static void reset_locked(void)
   memset(g_occ, 0, sizeof(g_occ));
   memset(g_hyp, 0, sizeof(g_hyp));
   memset(g_only, 0, sizeof(g_only));
+  memset(g_disc, 0, sizeof(g_disc));
   g_nhyp = 0;
   g_locked_hyp = -1;
   memset(g_addpos, 0, sizeof(g_addpos));
@@ -675,6 +679,7 @@ static uint8_t llr_prior(int h)
   return (g_cell.dl_bwp_size && H->n == g_cell.dl_bwp_size && H->start == g_cell.dl_bwp_start)
          || (g_cell.sib1_ul_size && H->n == g_cell.sib1_ul_size && H->start == g_cell.sib1_ul_start);
 }
+static bool lookalike_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOOKALIKE"); }
 static bool llr_lock_ok(int *lead)
 {
   uint32_t v[NR_UL_LAYOUT_MAX_HYP];
@@ -756,6 +761,38 @@ static void sign_book_locked(const pending_t *p)
 }
 bool nr_ul_layout_searching(void) { return nr_ul_layout_lock_enabled() && g_have_cell && g_locked_hyp < 0; }
 
+/* ISAC_UL_LOOKALIKE=1: when the leader has a look-alike rival (same RBs but one edge RB), only edge-discriminating votes may
+ * separate them; without enough of them the DL BWP / SIB1 UL BWP prior wins, or nothing locks. Returns 1 = lock *lead,
+ * 0 = no lock, -1 = no look-alike contender (the normal rule applies). Caller holds mu. */
+static int lookalike_lock_locked(int *lead)
+{
+  int a = -1, j = -1;
+  for (int h = 0; h < g_nhyp; h++) if (g_hyp[h].votes && (a < 0 || g_hyp[h].votes > g_hyp[a].votes)) a = h;
+  if (a < 0) return -1;
+  for (int h = 0; h < g_nhyp; h++)
+    if (h != a && g_hyp[h].votes && nr_ul_layout_lookalike(g_hyp[a].n, g_hyp[a].start, g_hyp[h].n, g_hyp[h].start)
+        && (j < 0 || g_hyp[h].votes > g_hyp[j].votes))
+      j = h;
+  if (j < 0) return -1;
+  const uint32_t dv[2] = {g_disc[a][j], g_disc[j][a]};
+  const uint8_t pr[2] = {llr_prior(a), llr_prior(j)};
+  const int r = nr_ul_layout_resolve_lookalike(dv, pr);
+  const int c = r == 1 ? j : a;
+  static uint32_t last[5];
+  const uint32_t now_t[5] = {(uint32_t)a, (uint32_t)j, dv[0], dv[1], (uint32_t)(r + 1)};
+  if (memcmp(last, now_t, sizeof(last))) /* log changes only */
+  LOG_A(PHY, "SENSING: ULLAYOUT LOOKALIKE a=%u@%u b=%u@%u disc=%u,%u prior=%u,%u pick=%d\n", g_hyp[a].n, g_hyp[a].start,
+        g_hyp[j].n, g_hyp[j].start, dv[0], dv[1], pr[0], pr[1], r);
+  memcpy(last, now_t, sizeof(last));
+  if (r < 0 || g_hyp[c].votes < LOCK_MIN || g_hyp[c].nrnti < LOCK_RNTIS) return 0;
+  for (int h = 0; h < g_nhyp; h++) /* the other rivals still need the normal margin */
+    if (h != c && !nr_ul_layout_lookalike(g_hyp[c].n, g_hyp[c].start, g_hyp[h].n, g_hyp[h].start)
+        && (float)g_hyp[c].votes < LOCK_RATIO * (float)g_hyp[h].votes)
+      return 0;
+  *lead = c;
+  return 1;
+}
+
 /* caller holds mu */
 static void finalize_pending_locked(void)
 {
@@ -802,6 +839,12 @@ static void finalize_pending_locked(void)
     hyp_state_t *H = &g_hyp[k];
     H->votes++;
     g_votes_total++;
+    if (lookalike_enabled() && p->r1[k] > p->r0[k])
+      for (int j = 0; j < g_nhyp; j++)
+        if (j != k && nr_ul_layout_lookalike(H->n, H->start, g_hyp[j].n, g_hyp[j].start)
+            && nr_ul_layout_discriminates(H->n, H->start, g_hyp[j].n, g_hyp[j].start, p->r0[k], (uint16_t)(p->r1[k] - p->r0[k]))
+            && g_disc[k][j] < 65535)
+          g_disc[k][j]++;
     bool seen = false;
     for (int r = 0; r < H->nrnti; r++) seen |= H->rntis[r] == p->rnti;
     if (!seen && H->nrnti < 8) H->rntis[H->nrnti++] = p->rnti;
@@ -833,9 +876,10 @@ static void finalize_pending_locked(void)
             g_hyp[sl].votes, now);
     }
   }
-  if (sign_decides() ? sign_lock_ok(&la) : llr ? llr_lock_ok(&la)
+  const int lk = lookalike_enabled() ? lookalike_lock_locked(&la) : -1;
+  if (lk >= 0 ? lk : sign_decides() ? sign_lock_ok(&la) : llr ? llr_lock_ok(&la)
           : (va >= LOCK_MIN && (float)va >= LOCK_RATIO * (float)vb && g_hyp[a].nrnti >= LOCK_RNTIS)) {
-    if (llr && la != a) { a = la; b = -1; for (int h = 0; h < g_nhyp; h++) if (h != a && (b < 0 || g_hyp[h].votes > g_hyp[b].votes)) b = h; }
+    if ((llr || lk >= 0) && la != a) { a = la; b = -1; for (int h = 0; h < g_nhyp; h++) if (h != a && (b < 0 || g_hyp[h].votes > g_hyp[b].votes)) b = h; va = g_hyp[a].votes; vb = b >= 0 ? g_hyp[b].votes : 0; }
     if (g_prov) { /* DM-RS votes confirm (or move) the provisional adoption */
       g_prov = false;
       if (g_locked_hyp != a) for (int l = 0; l < g_nlen; l++) g_len[l].locked = false;
