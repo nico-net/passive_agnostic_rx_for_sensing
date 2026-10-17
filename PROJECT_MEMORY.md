@@ -4492,6 +4492,28 @@ Binary `csd/int16` at `cc747a25f6` (Fix A + Fix B merged, Fix B NOT enabled). Ru
 - P-FUSE (`csd/int16-fuse`, not merged): stopped at the bench gate, FP32 chest+demod p99 236-599 us at 273 PRB x 4 L [MEASURED, DGX bench GB10, n=200].
 - Latency split [MEASURED, DGX replay b, t26bE, n=1]: PDCCH scan p50 0.52 / p99 4.2 ms + decode body p50 0.5 / p99 2.6 ms; ~1.15 extra GPU decodes (probes + retries) per real grant. Latency FAILS on air.
 - Daytime retest 2026-10-17 morning, n >= 3, interleaved vs t26aXE: required before t26bE becomes the default.
+
+### 2026-10-17 daytime OTA: t26gE adopted as DL default (`csd/int16`, binary `b5c60c2dc8`; report `docs/superpowers/reports/csd/DAYTIME-OTA-20261017.md` at `b6e8c9bae6`; DAYTIME load, NOT low load)
+
+- **Setup:** 150 s runs, interleaved XBG/GXB/BGX, n=3 per arm per cell, 18/18 synced, 0 RF stalls, SIGINT exit. Daytime load 14k-45k grants per run. TIM 3759.99 MHz (SSB 233), Vodafone 3680.01 MHz (SSB 1171). Cells never pooled.
+- **Arms:** X = t26aXE (all-on baseline). B = t26bE (X + NC_MIN_CB=4 + RA_TDRA_SWEEP + CUDA_DEVICE_MAX_CONNECTIONS=32 + PDSCH_TDA_FIELD). G = t26gE (B + CL_MIN_CB=4, NC_MIN_CB=8, LDPC_SM=1, PDSCH_GATHER_FAST, PDSCH_HOST_FAST, SCAN_READING_HASH, SCAN_SCOREMEMO).
+
+| Cell, arm (label) | p50 / p99 / p99.9 (us) | crc_q (%) | drops (%) | recovered |
+|---|---|---|---|---|
+| TIM, X [MEASURED, DGX OTA 2026-10-17 daytime, TIM, X, n=3] | 1239 / 7501 / 13463 | 90.3-93.8 | 0.0-0.6 | 1-9 |
+| TIM, B [MEASURED, DGX OTA 2026-10-17 daytime, TIM, B, n=3] | 1227 / 5208 / 9963 | 94.7-97.6 | 0.0-0.1 | 4-6 |
+| TIM, G [MEASURED, DGX OTA 2026-10-17 daytime, TIM, G, n=3] | 1108 / 3584 / 10669 | 93.4-97.2 | 0.0 | 1-4 |
+| Vodafone, X [MEASURED, DGX OTA 2026-10-17 daytime, Vodafone, X, n=3] | 1516 / 11035 / 38781 | 94.2-95.1 | 0.1-0.8 | 5071-11028 |
+| Vodafone, B [MEASURED, DGX OTA 2026-10-17 daytime, Vodafone, B, n=3] | 1504 / 8109 / 15197 | 93.9-95.7 | 0.1-0.9 | 23-65 |
+| Vodafone, G [MEASURED, DGX OTA 2026-10-17 daytime, Vodafone, G, n=3] | 1164 / 4947 / 8823 | 94.8-95.9 | 0.0 | 32-46 |
+
+- **Slot classes, TIM only:** special slot (slot%10==3) crc 0 % (X), 50-57 % (B), 51-65 % (G) [MEASURED, DGX OTA 2026-10-17 daytime, TIM, X|B|G, n=3]. Even-frame slots 8/18: 0 % in all three arms, still dead (Fix B off) [MEASURED, DGX OTA 2026-10-17 daytime, TIM, X|B|G, n=3].
+- **Fix A** (PDSCH_TDA_FIELD) works at daytime load: Vodafone async rescues drop from 5071-11028 (X) to 23-65 (B) and 32-46 (G); X's rescues drove its Vodafone p99.9 [MEASURED, DGX OTA 2026-10-17 daytime, Vodafone, X|B|G, n=3].
+- **G vs B:** G is lower on both cells. Vodafone p99 ranges are disjoint (B 6554-8587 us, G 4194-5109 us); TIM p99 ranges overlap (G 3412-6440 us) [MEASURED, DGX OTA 2026-10-17 daytime, TIM|Vodafone, B|G, n=3].
+- **Freeze list statuses** (tested jointly in the G arm, not one by one): Fix A (TDA_FIELD), RA_TDRA_SWEEP, MAXCONN32, cluster LDPC/SM, GATHER_FAST, HOST_FAST, SCAN_READING_HASH, SCAN_SCOREMEMO: all adopted via G. NC_MIN_CB: freeze list said 4; G sets NC_MIN_CB=8 with cluster LDPC. Fix B (CSIRS_FULL_VALID): stays excluded.
+- **Decision:** t26gE replaces t26bE as the OTA DL default. It passes CRC and drops on both cells and has the lowest latency on both.
+- **Latency goal (p99 <= 0.5 ms) still FAILS** in all arms. Best arm G: TIM p50 1108 us, Vodafone p50 1164 us [MEASURED, DGX OTA 2026-10-17 daytime, TIM|Vodafone, G, n=3].
+- **Next levers:** per-RNTI layout cache + known-RNTI fast PDCCH (agent, branch `csd/int16-rcache`); UL U1+U2 (agent, branch `csd/int16-ul12`); moving work out of the Phase-2 lock; TIM even-frame 8/18 (latency-safe Fix B).
 ---
 
 ## 26. Working rules for any agent on this project (carried over from the old setup)
