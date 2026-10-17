@@ -2181,11 +2181,18 @@ TEST(GpuGraphRetry, EntryFollowsChangedInput) {
   GpuPassFixture ux = GpuPassFixture::from_shape({6, 13, 4, 2, 2, 1, 1}, 19); /* PRB class 6: never warmed (an unseen key in the middle of the call) */
   m.pass_split(1);
   int n = 0;
-  for (int si : {0, 5, 16 + 6, 48 + 5}) { /* 24 PRB nl 1 qm 2, 24 nl 2 qm 4, 48 nl 2 qm 6, 217 nl 2 qm 4 */
-    const nr_gpu_pass_shape_t shape = GpuPassFixture::warm_shapes()[si];
-    GpuPassFixture fx = GpuPassFixture::from_shape(shape, 41 + si);
+  const auto sd = seg_layout(32, 0, 4, 0, 0); /* review nit: a segmented grant too (PRG 4: 8 segments) */
+  for (int si : {0, 5, 16 + 6, 48 + 5, -1}) { /* 24 PRB nl 1 qm 2, 24 nl 2 qm 4, 48 nl 2 qm 6, 217 nl 2 qm 4, segmented 32 PRB nl 1 qm 4 */
+    const nr_gpu_pass_shape_t shape = si >= 0 ? GpuPassFixture::warm_shapes()[si] : nr_gpu_pass_shape_t{32, 13, 1, 4, 2, 1, 1, (uint16_t)nr_gpu_pass_nseg_class((int)sd.size())};
+    GpuPassFixture fx = GpuPassFixture::from_shape(shape, 41 + si, -1, si >= 0 ? nullptr : &sd);
     ASSERT_TRUE(fx.tb_ok_built);
-    const std::string what = "nrb " + std::to_string(shape.nrb_class) + " nl " + std::to_string(shape.nl) + " qm " + std::to_string(shape.qm) + " C " + std::to_string(fx.tb.C);
+    if (si < 0) {
+      fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
+      fx.shape.nrb_class = (uint16_t)nr_gpu_pass_nrb_class(32);
+      fx.bind();
+    }
+    const std::string what = "nrb " + std::to_string(shape.nrb_class) + " nl " + std::to_string(shape.nl) + " qm " + std::to_string(shape.qm) + " C " + std::to_string(fx.tb.C) +
+                             " nseg " + std::to_string(fx.segs.size());
     { /* every key of the call, before it (warming captures on every instance) */
       GpuPassFixture px = fx;
       px.make_probe();
@@ -2215,12 +2222,19 @@ TEST(GpuGraphRetry, EntryFollowsChangedInput) {
     body(fx, 0, what + " other pilots");
     rebind(fx);
     body(fx, 1, what + " same inputs again");
-    m.call_dirty();
+    fx.ring_offset -= 8; /* review nit: a non-pilot C input (the FFT window inside the CP) changes: C */
+    rebind(fx);
+    body(fx, 0, what + " ring offset moved");
+    fx.ring_offset += 8;
+    rebind(fx);
+    body(fx, 0, what + " ring offset back");
+    m.call_dirty(); /* review S3: releases the instance; the call's next pass acquires (and holds) one again */
+    inst = -1;
     rebind(fx);
     body(fx, 0, what + " after a dirty mark");
     m.call_end();
     m.retry_counters(h1);
-    EXPECT_EQ(h0[2] + 1, h1[2]) << what << ": one held call";
+    EXPECT_EQ(h0[2] + 2, h1[2]) << what << ": one held call, held again after the dirty release";
     EXPECT_EQ(h0[3] + 1, h1[3]) << what << ": one dirty invalidation";
     /* released: with every other instance busy a pass still finds this one; outside a call the same inputs enter at C */
     m.pass_hold(((1u << NR_GPU_PASS_RING) - 1u) & ~(1u << inst), 1);
@@ -2231,7 +2245,7 @@ TEST(GpuGraphRetry, EntryFollowsChangedInput) {
     n++;
   }
   m.pass_split(0);
-  printf("GpuGraphRetry.EntryFollowsChangedInput: %d calls x 7 bodies\n", n);
+  printf("GpuGraphRetry.EntryFollowsChangedInput: %d calls x 9 bodies\n", n);
 }
 
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is

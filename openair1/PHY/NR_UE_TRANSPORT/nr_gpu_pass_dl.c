@@ -246,6 +246,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
       const char *v = getenv(n);
       g_sub_on[i] = G.v2 && v && atoi(v) == 1;
     }
+    g_sub_on[2] &= g_sub_on[1]; /* review S2: RETRY needs SPLIT (its D entry is a split launch) */
   }
   if ((!dl_on && !ul_on) || !ue)
     return;
@@ -300,7 +301,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   if (c.split && split_on && !split_on()) { /* review S5: the instances alone reach the memory cap */
     LOG_E(PHY, "SENSING: GPUGRAPH: the pass instances alone reach ISAC_PDSCH_GPU_GRAPH_MB=%d: ISAC_PDSCH_GPU_GRAPH_SPLIT (and RETRY) off\n", c.split_mb);
     c.split = 0;
-    g_sub_on[1] = 0;
+    g_sub_on[1] = g_sub_on[2] = 0;
   }
   if (!dl_on || bad) { /* the PUSCH pass alone */
     nr_gpu_pass_ul_warm(h, fp->nb_antennas_rx, G.fp32);

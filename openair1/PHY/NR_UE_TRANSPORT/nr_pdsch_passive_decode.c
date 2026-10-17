@@ -2859,6 +2859,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
         nr_slot_fep(ue, fp, proc->nr_slot_rx, sym, rxdataF, link_type_dl, 0, nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata));
       }
     }
+    nr_gpu_graph_call_dirty(); /* v2 Task 4 review S1: the SSB FEP wrote the caller's rxdataF (fep_fo may be nonzero), which the held instance's D reads on DIRECT */
     if (grant->check_sample_lifetime && !nr_passive_samples_valid(
             atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
             grant->source_absolute_slot, fp->slots_per_frame)) {

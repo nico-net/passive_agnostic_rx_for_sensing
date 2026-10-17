@@ -1075,22 +1075,35 @@ static int acquire(int keep)
 
 /* v2 Task 4 (ISAC_PDSCH_GPU_GRAPH_RETRY): a decode call (nr_pdsch_passive_decode: first body, retry arms, worker arms) holds the instance its first pass takes until
  * nr_gpu_pass_call_end, so that est stays on the device across its bodies. Nested calls keep the outer hold. */
-extern "C" void nr_gpu_pass_call_begin(void) { ++t_hold; }
-extern "C" void nr_gpu_pass_call_end(void)
+static void hold_release()
 {
-  if (t_hold <= 0 || --t_hold > 0 || t_held < 0) return;
+  if (t_held < 0) return;
   g_inst[t_held].c_ok = false;
   hist_add(g_hold_hist, nr_gpu_pass_now_ns() - t_hold_ns);
   g_busy.fetch_and(~(1u << t_held));
   t_held = -1;
 }
-/* the host may have changed what D reads besides the job (a stage-path body rewrote the caller's rxdataF, which D reads in place on DIRECT): the next body re-runs C */
+/* review nit: a thread that exits inside a call (no call_end) gives its held instance back */
+struct HoldGuard { ~HoldGuard() { hold_release(); t_hold = 0; } };
+static thread_local HoldGuard t_hold_guard;
+extern "C" void nr_gpu_pass_call_begin(void)
+{
+  (void)&t_hold_guard; /* odr-use: constructs the guard, so its destructor runs at thread exit */
+  ++t_hold;
+}
+extern "C" void nr_gpu_pass_call_end(void)
+{
+  if (t_hold <= 0 || --t_hold > 0) return;
+  hold_release();
+}
+/* the host may have changed what D reads besides the job (a stage-path body rewrote the caller's rxdataF, which D reads in place on DIRECT): the next body re-runs C.
+ * Review S3: the instance is released too (a stage-path body, or the RECOVERY_ASYNC worker chain, would otherwise keep it from other consumers); the call stays open, so the
+ * next pass of the call acquires an instance again and holds it. */
 extern "C" void nr_gpu_pass_call_dirty(void)
 {
-  if (t_held >= 0 && g_inst[t_held].c_ok) {
-    g_inst[t_held].c_ok = false;
-    ++g_dirty;
-  }
+  if (t_held < 0) return;
+  ++g_dirty;
+  hold_release();
 }
 /* test / census: C entries, D entries (C skipped), held calls, dirty invalidations */
 extern "C" void nr_gpu_pass_retry_counters(uint64_t o[4])
@@ -1109,7 +1122,7 @@ static size_t c_sig(const nr_gpu_pass_job_t *j, const Key &k, uint8_t *o, size_t
   const int16_t *rxf = redirect ? j->rxdataF : nullptr;
   const uint32_t rst = redirect ? j->rx_stride : 0;
   put(&kc, sizeof(kc)); put(j->rxdata, sizeof(j->rxdata)); put(&j->ring_len, 4); put(&j->ring_offset, 4); put(&j->symbol_rot, sizeof(j->symbol_rot));
-  put(&rxf, sizeof(rxf)); put(&rst, 4);
+  put(&rxf, sizeof(rxf)); put(&rst, 4); put(&j->copy_mask, sizeof(j->copy_mask)); /* review nit: the DISCRETE copy-back mask */
   put(&j->nl, 4); put(&j->ndmrs, 4); put(&j->nrb, 4); put(&j->k0, 4); put(&j->nseg, 4); put(&j->seg_pil_nrb, 4);
   put(j->dmrs_sym, sizeof(int) * j->ndmrs); put(j->delta, sizeof(int) * j->nl);
   for (int s = 0; s < j->nseg; s++) { put(&j->seg[s].n_prb, 2); put(&j->seg[s].data_index, 2); put(&j->seg[s].pil_rb, 4); put(&j->seg[s].k0, 4); }
