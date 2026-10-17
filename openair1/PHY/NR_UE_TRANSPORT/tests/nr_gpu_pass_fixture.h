@@ -816,6 +816,33 @@ class GpuPassFixture {
   }
   std::vector<int16_t> llr_pass;
   std::vector<int16_t> llr_ref;
+  std::vector<int16_t> llr_pre, llr_post; /* run_stage_path: the demod output before and after the descrambling (before the K38 shift) */
+  /* the LLR statistics loops of passive_decode_body_core (nr_pdsch_passive_decode.c, demod_ok block) over the stage path's LLRs: magnitudes before the
+   * descrambling, signs after it (copied, not shared, so a change on either side shows) */
+  nr_gpu_llr_stats_t host_llr_stats() const
+  {
+    nr_gpu_llr_stats_t r;
+    memset(&r, 0, sizeof(r));
+    const uint32_t G = (uint32_t)llr_pre.size();
+    for (uint32_t i = 0; i < G; i += 32) {
+      const int v = llr_pre[i] < 0 ? -llr_pre[i] : llr_pre[i];
+      r.llr_absum += (uint64_t)v;
+      r.llr_n++;
+      r.llr_zero += v == 0;
+      r.llr_sat += v >= 32767;
+      r.llr_clip8 += v > 127;
+    }
+    for (uint32_t i = 0; i + 3 < G; i += 32) {
+      for (uint32_t j = 0; j < 4; j++) {
+        const int b = j < 2 ? 0 : 1;
+        r.nbit[b]++;
+        r.posbit[b] += llr_post[i + j] > 0;
+      }
+      r.llr_sgnsum += (int64_t)llr_post[i];
+      r.llr_pos += llr_post[i] > 0;
+    }
+    return r;
+  }
   std::vector<int16_t> est_l0; /* segmented stage path: layer-0 estimates [ant][first, last DM-RS symbol][N] c16 (the pass's brfo_rows layout) */
   typedef struct { int16_t r, i; } c16;
   std::vector<int16_t> geo_buf, geo_real, rxF_ref; /* rxF_ref: the exact FEP of the stage path, [ant][14][N] c16 */
@@ -898,7 +925,9 @@ class GpuPassFixture {
       for (uint32_t i = 0; i < G; i++) err += (llr[i] < 0) != (tx_bits[i] != 0);
       fprintf(stderr, "GP_DEBUG raw BER %.5f (%zu / %u) nvar %u C %d E %u E2 %u firstE2 %u R %d R2 %d K %d Z %d F %d\n", (double)err / G, err, G, nvar, tb.C, tb.E, tb.E2, tb.first_rE2, tb.R, tb.R2, tb.K, tb.Z, tb.F);
     }
+    llr_pre = llr;
     for (uint32_t i = 0; i < G; i++) if (tb.scr[i >> 5] >> (i & 31) & 1u) llr[i] = (int16_t)(-llr[i]);
+    llr_post = llr;
     if (G >= 64) {
       const int k = nr_llr_norm_shift(llr.data(), nr_llr_norm_span(G, (uint32_t)tb.C));
       if (k > 0) for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)(llr[i] >> k);

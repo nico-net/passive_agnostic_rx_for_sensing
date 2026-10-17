@@ -6,6 +6,7 @@
 #define NR_GPU_PASS_DL_H
 #include "PHY/defs_nr_UE.h"
 #include "nr_gpu_pass.h"
+#include "nr_gpu_graph_pool.h"
 #include "nr_ssb_rate_match.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h"
 
@@ -53,6 +54,9 @@ int nr_gpu_pass_fp32_on(void); /* Task 5: the graphs run the FP32 demod; the sha
 void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue);
 /* 0 = the pass ran (out filled; the TB may still have failed CRC or need the CPU decoder: out->r.tb_ok / need_cpu), 1 = not handled (counted), the old path decodes */
 int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out);
+/* v2 Task 1 (ISAC_PDSCH_GPU_GRAPH=1): a set of the pre-fence pool (nr_gpu_graph_pool.h) for a thread that reaches the pass after the RX fence; sets *shadow and the
+ * thread's job buffer. NULL = no pool (v2 off) or pool empty (counted). The thread keeps the set for life. */
+nr_gpu_pass_dl_out_t *nr_gpu_graph_pool_claim(uint8_t **shadow);
 /* body-side events for the census */
 enum { NR_GPU_PASS_EV_COMMIT, NR_GPU_PASS_EV_RETRY_OLD /* pass said CRC fail / CPU: the old path decodes */, NR_GPU_PASS_EV_ZERO_TB, NR_GPU_PASS_EV_LIFETIME, NR_GPU_PASS_EV_SHADOW,
        NR_GPU_PASS_EV_SHADOW_BAD, NR_GPU_PASS_EV_CONT_FAIL /* CRC fail of the pass continued into the retry arms, no old first body */,

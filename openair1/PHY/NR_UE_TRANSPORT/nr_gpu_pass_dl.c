@@ -17,7 +17,9 @@
 #include "PHY/TOOLS/nr_gpu_mem.h"
 #include "common/utils/LOG/log.h"
 #include "nr_gpu_pass_fp32_gate.h"
+#include "nr_gpu_graph_pool.h"
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,11 +36,37 @@ static struct {
   nr_gpu_pass_stats_fn stats;
   _Atomic int on;
   int nbrx, check, fp32; /* fp32: Task 5, the graphs run the FP32 demod (ISAC_GPU_PASS_FP32 / sm_89) */
+  int v2;                /* DL GPU data path v2 (ISAC_PDSCH_GPU_GRAPH=1 without ISAC_GPU_PASS=1): the census is GPUGRAPH, the pool serves late threads */
   _Atomic uint64_t fb[FB_N], ev[NR_GPU_PASS_EV_N], gate[NR_GPU_PASS_GATE_N], runs, shadow_n, shadow_fn;
   _Atomic uint64_t segn[5]; /* segmented grants that reached the pass, by segment-count class 1, 2, 4, 8, 16 */
 } G;
 
 int nr_gpu_pass_active(void) { return atomic_load_explicit(&G.on, memory_order_relaxed); }
+int nr_gpu_graph_on(void) { return G.v2 && nr_gpu_pass_active(); }
+int nr_gpu_graph_flag(const char *sub)
+{
+  char n[64];
+  snprintf(n, sizeof(n), "ISAC_PDSCH_GPU_GRAPH_%s", sub);
+  const char *e = getenv(n);
+  return nr_gpu_graph_on() && e && atoi(e) == 1;
+}
+static nr_gpu_graph_pool_t g_pool;
+nr_gpu_pass_dl_out_t *nr_gpu_graph_pool_claim(uint8_t **shadow)
+{
+  if (!G.v2)
+    return NULL;
+  nr_gpu_graph_set_t *s = nr_gpu_graph_pool_take(&g_pool);
+  char tn[32] = "?";
+  pthread_getname_np(pthread_self(), tn, sizeof(tn));
+  LOG_A(PHY, "SENSING: GPUGRAPH pool claim by thread %s: %s\n", tn, s ? "served" : "EMPTY");
+  if (!s)
+    return NULL;
+  nr_gpu_pass_dl_out_t *o = (nr_gpu_pass_dl_out_t *)s->out;
+  o->llr = s->llr;
+  jobp_tls = (nr_gpu_pass_job_t *)s->job;
+  *shadow = s->shadow;
+  return o;
+}
 int nr_gpu_pass_fp32_on(void) { return G.fp32; }
 
 /* Task 5: one FP32-shadowed grant (the old path decoded it too). flip: the CRC verdict (or the decoded-block count) differs; sign_bad: > 0.1 % of the LLR signs
@@ -66,7 +94,7 @@ void nr_gpu_pass_note(int ev)
 void nr_gpu_pass_disable(const char *why)
 {
   if (atomic_exchange(&G.on, 0))
-    LOG_E(PHY, "SENSING: GPUPASS DISABLED: %s -- the old path decodes from now on\n", why);
+    LOG_E(PHY, "SENSING: %s DISABLED: %s -- the old path decodes from now on\n", G.v2 ? "GPUGRAPH" : "GPUPASS", why);
 }
 
 void nr_gpu_pass_gate(int g)
@@ -117,10 +145,14 @@ static void census(void)
     G.stats(buf, sizeof(buf));
   else
     buf[0] = 0;
+  char pool[96] = "";
+  if (G.v2)
+    snprintf(pool, sizeof(pool), "GPUGRAPH pool[sets=%d claimed=%lu empty=%lu] ", g_pool.n, (unsigned long)__atomic_load_n(&g_pool.claimed, __ATOMIC_RELAXED),
+             (unsigned long)__atomic_load_n(&g_pool.empty, __ATOMIC_RELAXED));
   LOG_A(PHY,
-        "SENSING: %s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu seg=%lu] seg_grants[1=%lu 2=%lu 4=%lu 8=%lu 16=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
+        "SENSING: %s%s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu seg=%lu] seg_grants[1=%lu 2=%lu 4=%lu 8=%lu 16=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
         "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu old_first=%lu fp32_flip=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu retry=%lu]\n",
-        buf, (unsigned long)G.fb[FB_OFF], (unsigned long)G.fb[FB_CELL], (unsigned long)G.fb[FB_FO], (unsigned long)G.fb[FB_CHEST],
+        pool, buf, (unsigned long)G.fb[FB_OFF], (unsigned long)G.fb[FB_CELL], (unsigned long)G.fb[FB_FO], (unsigned long)G.fb[FB_CHEST],
         (unsigned long)G.fb[FB_DEMOD], (unsigned long)G.fb[FB_TBPARAM], (unsigned long)G.fb[FB_MODULE], (unsigned long)G.fb[FB_SEG],
         (unsigned long)G.segn[0], (unsigned long)G.segn[1], (unsigned long)G.segn[2], (unsigned long)G.segn[3], (unsigned long)G.segn[4], (unsigned long)G.ev[NR_GPU_PASS_EV_COMMIT],
         (unsigned long)G.ev[NR_GPU_PASS_EV_RETRY_OLD], (unsigned long)G.ev[NR_GPU_PASS_EV_ZERO_TB], (unsigned long)G.ev[NR_GPU_PASS_EV_LIFETIME],
@@ -168,7 +200,15 @@ static int env_list(const char *name, const char *dflt, int *v, int max)
 void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
 {
   const char *e = getenv("ISAC_GPU_PASS"), *eu = getenv("ISAC_UL_GPU_PASS");
-  const int dl_on = e && atoi(e) == 1, ul_on = eu && atoi(eu) == 1; /* ISAC_UL_GPU_PASS: the PUSCH pass (Task 7), independent of the DL one */
+  const char *eg = getenv("ISAC_PDSCH_GPU_GRAPH");
+  int dl_on = e && atoi(e) == 1;
+  const int ul_on = eu && atoi(eu) == 1; /* ISAC_UL_GPU_PASS: the PUSCH pass (Task 7), independent of the DL one */
+  if (eg && atoi(eg) == 1) { /* v2: the same module in v2 mode; never together with v1 */
+    if (dl_on)
+      LOG_W(PHY, "SENSING: GPUGRAPH refused: ISAC_GPU_PASS=1 (v1) is set; v2 off, v1 runs\n");
+    else
+      dl_on = G.v2 = 1;
+  }
   if ((!dl_on && !ul_on) || !ue)
     return;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
@@ -309,6 +349,9 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   G.nbrx = fp->nb_antennas_rx;
   const char *ch = getenv("ISAC_GPU_PASS_CHECK");
   G.check = ch ? atoi(ch) : 64;
+  if (G.v2 && made > 0) /* the per-thread host sets for threads that reach the pass after the RX fence (the async recovery worker) */
+    LOG_A(PHY, "SENSING: GPUGRAPH v2 mode: %d of %d prewarmed host buffer sets for late threads\n",
+          nr_gpu_graph_pool_fill(&g_pool, NR_GPU_GRAPH_POOL, sizeof(nr_gpu_pass_dl_out_t), sizeof(nr_gpu_pass_job_t)), NR_GPU_GRAPH_POOL);
   atomic_store(&G.on, made > 0);
   LOG_A(PHY, "SENSING: GPUPASS %s: %d shape classes (+ %d segmented) x %d instances captured (EVM branch %d, %d failed), shadow check every %d passes, %s memory model, demod %s\n",
         made > 0 ? "enabled" : "NOT enabled", made, smade, NR_GPU_PASS_RING, evm, failed, G.check, nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE", G.fp32 ? "FP32 (sign/CRC shadow checks)" : "FP64 (bit-exact)");

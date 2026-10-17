@@ -86,6 +86,7 @@ struct ResBlk { /* written by the kernels, read by the host after the pass */
   uint8_t cand_ok[MAXCB * NSNAP];
   uint8_t c[MAXCB][KBMAX];
   nrul::UlOut ul; /* Task 7: after c[] so that offsetof(ResBlk, c) is unchanged */
+  nr_gpu_llr_stats_t llr_stats; /* v2 Task 1: k_llr_stats */
 };
 
 /* ---- kernels of the LLR post and the stop rule ---- */
@@ -95,6 +96,38 @@ __global__ void k_unscr(int16_t *llr, const PassBlk *pb)
   const uint32_t *scr = pb->scr;
   for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < G; i += gridDim.x * blockDim.x)
     if (scr[i >> 5] >> (i & 31) & 1u) llr[i] = (int16_t)(-llr[i]);
+}
+/* v2 Task 1: the LLR statistics of passive_decode_body_core (nr_pdsch_passive_decode.c, demod_ok block) on the descrambled LLRs, before the K38 shift. The host
+ * takes the magnitude stats before its descrambling and the sign stats after it; descrambling only flips signs and |-v| == |v| for every int16 (-32768 included,
+ * it maps to itself), so one pass after k_unscr gives both. One block; integer sums are order-independent, so the result is bit-equal. */
+static_assert(offsetof(nr_gpu_llr_stats_t, llr_clip8) == 4 * sizeof(uint64_t) && offsetof(nr_gpu_llr_stats_t, llr_pos) == 5 * sizeof(uint64_t) &&
+              offsetof(nr_gpu_llr_stats_t, nbit) == 9 * sizeof(uint64_t) && sizeof(nr_gpu_llr_stats_t) == 11 * sizeof(uint64_t), "k_llr_stats writes the fields in order");
+__global__ void k_llr_stats(const int16_t *llr, const PassBlk *pb, ResBlk *rb)
+{
+  constexpr int K = 10; /* n, absum, zero, sat, clip8, pos, sgnsum, posbit0, posbit1, n4 (nbit[0] = nbit[1] = 2 * n4) */
+  __shared__ unsigned long long sh[K][32];
+  unsigned long long v[K] = {};
+  const uint32_t G = pb->G;
+  for (uint32_t i = threadIdx.x * 32u; i < G; i += blockDim.x * 32u) {
+    const int x = llr[i], a = x < 0 ? -x : x;
+    v[0]++; v[1] += (unsigned)a; v[2] += a == 0; v[3] += a >= 32767; v[4] += a > 127;
+    if (i + 3 < G) {
+      v[5] += x > 0; v[6] += (unsigned long long)(long long)x; /* two's complement: the wrapping sum is the signed sum */
+      v[7] += (llr[i + 1] > 0) + (x > 0); v[8] += (llr[i + 2] > 0) + (llr[i + 3] > 0); v[9]++;
+    }
+  }
+  for (int k = 0; k < K; k++)
+    for (int o = 16; o; o >>= 1) v[k] += __shfl_down_sync(0xffffffffu, v[k], o);
+  if (!(threadIdx.x & 31))
+    for (int k = 0; k < K; k++) sh[k][threadIdx.x >> 5] = v[k];
+  __syncthreads();
+  if (threadIdx.x < K) {
+    unsigned long long t = 0;
+    for (unsigned w = 0; w < blockDim.x / 32; w++) t += sh[threadIdx.x][w];
+    unsigned long long *o = (unsigned long long *)&rb->llr_stats;
+    if (threadIdx.x < 9) o[threadIdx.x] = t;
+    else o[9] = o[10] = 2 * t;
+  }
 }
 /* Segmented estimate (Task 4b): the passive loop's `memset(row, 0); memcpy(&row[data_index * 12], segment estimate, n_prb * 12)` for every (DM-RS symbol, layer, antenna) row.
  * Block b = (k * nl + l) * nrx + a; the segment rows sit in `sc` at ((k * nl + l) * ns + s) * nrx + a (the chest row order), the data-ordered row in est[l * nrx + a]. */
@@ -462,6 +495,7 @@ static int enqueue(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, cudaStrea
   if (nr_gpu_pass_launch_chest_post_p(I.PBd() ? &I.PBd()->post : nullptr, &I.RBd()->post, s) != 0) return -1;
   if (nr_pdsch_gpu_demod_pass_dev(I.id, &sj->dj, &I.llr, I.dj.nvar_dev, s, I.s2) != 0) return -1;
   k_unscr<<<256, 256, 0, s>>>((int16_t *)I.llr.dev, I.PBd());
+  k_llr_stats<<<1, 1024, 0, s>>>((const int16_t *)I.llr.dev, I.PBd(), I.RBd());
   k_norm_sum<<<1, 1024, 0, s>>>((const int16_t *)I.llr.dev, I.PBd(), I.RBd());
   k_norm_apply<<<256, 256, 0, s>>>((int16_t *)I.llr.dev, I.PBd(), I.RBd());
   if (nr_gpu_pass_launch_rdm((const int16_t *)I.llr.dev, I.PBd()->rdm, ncb, (int8_t *)I.lin.dev, s) != 0) return -1;
@@ -952,6 +986,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
    * (0 after init: the result block is zero-initialised), deterministic per instance */
   r->nvar = rb.post.nvar;
   r->post = rb.post;
+  r->llr_stats = rb.llr_stats;
   r->tb_ok = 0;
   for (uint32_t s = 0; s < j->C; s++) r->seg_ok[s] = rb.seg_ok[s];
   if (rb.need_cpu) ++g_need_cpu;

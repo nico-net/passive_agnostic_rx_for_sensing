@@ -1638,6 +1638,77 @@ TEST(GpuPassUl, FailStreakIsAtomic) {
   EXPECT_EQ(4000 & 255, g.fail_streak) << "no lost increments (uint8 streak wraps)";
 }
 
+/* ===================================================== DL GPU data path v2, Task 1 (ISAC_PDSCH_GPU_GRAPH) ===================================================== */
+#include "nr_gpu_graph_pool.h"
+/* v2: the pass's LLR statistics equal the stage path's host loops (passive_decode_body_core, demod_ok block) for every warm shape, CRC ok and CRC fail. */
+TEST(GpuGraph, LlrStatsEqualStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m));
+  int n = 0, n_fail = 0;
+  for (auto shape : GpuPassFixture::warm_shapes()) {
+    for (double snr : {20.0, -3.0}) { /* decodes / fails */
+      GpuPassFixture::noise_db = snr;
+      GpuPassFixture fx = GpuPassFixture::from_shape(shape, 13);
+      ASSERT_TRUE(fx.tb_ok_built);
+      fx.bind();
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64), sb(fx.tb.A / 8 + 64);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      ASSERT_EQ(0, m.pass_try(fx.job, &g));
+      ASSERT_EQ(0, fx.run_stage_path(&s));
+      const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+      ASSERT_GT(ref.llr_n, 0u);
+      EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << "nrb " << shape.nrb_class << " nl " << shape.nl << " qm " << shape.qm << " snr " << snr
+                                                            << ": n " << g.llr_stats.llr_n << "/" << ref.llr_n << " absum " << g.llr_stats.llr_absum << "/" << ref.llr_absum
+                                                            << " sgnsum " << g.llr_stats.llr_sgnsum << "/" << ref.llr_sgnsum << " pos " << g.llr_stats.llr_pos << "/" << ref.llr_pos;
+      n++;
+      n_fail += !g.tb_ok;
+    }
+  }
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuGraph.LlrStatsEqualStagePath: %d passes, %d CRC fail\n", n, n_fail);
+  EXPECT_GT(n_fail, 0) << "the -3 dB arm should fail some CRCs";
+}
+/* v2: a thread that reaches the pass late (the async recovery worker) claims a prewarmed buffer set instead of hitting the nomem gate; an empty pool returns NULL,
+ * counted, and nothing is allocated on the GPU (the claim only pops a pre-filled stack). */
+TEST(GpuGraph, LateThreadClaimsPrewarmedPool) {
+  static nr_gpu_graph_pool_t pool;
+  ASSERT_EQ(2, nr_gpu_graph_pool_fill(&pool, 2, 4096, 1024)); /* pre-fence */
+  uint64_t a0 = 0, d0 = 0, a1 = 0, d1 = 0;
+  nr_gpu_memory_stats(&a0, &d0);
+  nr_gpu_graph_set_t *s1 = nullptr, *s2 = nullptr, *s3 = nullptr;
+  std::thread t([&] { s1 = nr_gpu_graph_pool_take(&pool); });
+  t.join();
+  ASSERT_NE(nullptr, s1);
+  EXPECT_TRUE(s1->out && s1->job && s1->llr && s1->shadow);
+  s2 = nr_gpu_graph_pool_take(&pool);
+  ASSERT_NE(nullptr, s2);
+  EXPECT_NE(s1, s2) << "two threads never share a set";
+  s3 = nr_gpu_graph_pool_take(&pool);
+  EXPECT_EQ(nullptr, s3) << "pool exhausted -> NULL, counted, never an allocation";
+  EXPECT_EQ(2u, pool.claimed);
+  EXPECT_EQ(1u, pool.empty);
+  nr_gpu_memory_stats(&a1, &d1);
+  EXPECT_EQ(a0, a1);
+  EXPECT_EQ(d0, d1);
+  /* concurrent claims: every set handed out once */
+  static nr_gpu_graph_pool_t p8;
+  ASSERT_EQ(NR_GPU_GRAPH_POOL, nr_gpu_graph_pool_fill(&p8, NR_GPU_GRAPH_POOL, 64, 64));
+  std::atomic<int> got{0};
+  std::vector<std::thread> th;
+  std::vector<nr_gpu_graph_set_t *> seen(16, nullptr);
+  for (int i = 0; i < 16; i++) th.emplace_back([&, i] { seen[i] = nr_gpu_graph_pool_take(&p8); if (seen[i]) got++; });
+  for (auto &x : th) x.join();
+  EXPECT_EQ(NR_GPU_GRAPH_POOL, got.load());
+  std::sort(seen.begin(), seen.end());
+  EXPECT_EQ(seen.end(), std::adjacent_find(seen.begin() + (16 - NR_GPU_GRAPH_POOL), seen.end()));
+  EXPECT_EQ(16u - NR_GPU_GRAPH_POOL, p8.empty);
+}
+
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
  * allocated or built on the launch path. */
 extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);

@@ -39,6 +39,18 @@
 extern "C" {
 #endif
 
+/* v2 (ISAC_PDSCH_GPU_GRAPH): the LLR statistics of passive_decode_body_core (nr_pdsch_passive_decode.c, the llr_* loops of the demod_ok block), on the device.
+ * The first five fields stay contiguous and first: k_llr_stats_pre indexes them. */
+typedef struct {
+  uint64_t llr_n, llr_absum, llr_zero, llr_sat, llr_clip8, llr_pos; /* before descrambling, stride 32 (llr_pos: after, stride 32) */
+  int64_t llr_sgnsum;                                               /* after descrambling, stride 32 */
+  uint64_t posbit[2], nbit[2];                                      /* after descrambling, 4 LLRs per 32 */
+} nr_gpu_llr_stats_t;
+/* host side (nr_gpu_pass_dl.c): 1 = ISAC_PDSCH_GPU_GRAPH=1 and the module is up in v2 mode; nr_gpu_graph_flag("COVER"|"SPLIT"|"RETRY"|"SLOT"|"LEAN"):
+ * ISAC_PDSCH_GPU_GRAPH_<sub>=1 and the master on */
+int nr_gpu_graph_on(void);
+int nr_gpu_graph_flag(const char *sub);
+
 /* nrb_class: 6,12,24,48,96,136,217,273 (the smallest class >= the grant's PRBs); ncb_class: 1,2,4,8,16,32 (smallest >= C); nsym, qm: informational (they do not change the
  * graph); ndmrs: DM-RS symbols of the grant (1..4); fp32: bit 0 = 1 the float EVM chain (the product build), 0 the FP64 EVM chain (the chest post is always the float build);
  * bit 1 (NR_GPU_PASS_FP32_DEMOD) = the float instantiation of the demod kernels (Task 5, RTX 4070; not bit-exact), else the bit-exact double one. */
@@ -217,6 +229,7 @@ typedef struct {
   uint64_t ul_hsum[16];          /* sum |H|^2 over 12 * nrb of every chest row */
   uint32_t ul_nrows;
   uint8_t ul_tb_crc;             /* TB-level CRC24A of a multi-block TB (hp_crc_failed's second condition) */
+  nr_gpu_llr_stats_t llr_stats;  /* v2: the DL LLR statistics (k_llr_stats_pre / _post) */
 } nr_gpu_pass_result_t;
 
 /* Process-wide configuration, before nr_gpu_pass_init: the bit-exact chest reads the receiver's delay table (a fixed pointer, baked into the graphs). */

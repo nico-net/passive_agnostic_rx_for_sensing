@@ -2383,7 +2383,7 @@ static void pdcch_occ_diag(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, co
 /* GPUPASS: per-consumer host buffers, allocated and prefaulted at consumer start (before the RX fence), never on the pass path */
 static __thread nr_gpu_pass_dl_out_t *t_gpp = NULL; /* ~150 KB */
 static __thread uint8_t *t_gp_shadow = NULL;        /* the TB of a shadow-checked pass: sized to the largest TB up front */
-#define GP_SHADOW_CAP (262144u + 8u)
+#define GP_SHADOW_CAP NR_GPU_GRAPH_SHADOW_CAP /* nr_gpu_graph_pool.h: the v2 pool's shadow buffers have the same size */
 static __thread uint64_t t_gp_fhash = 0;           /* shadow of a CRC-failing pass: hash of its final LLRs and its count of decoded blocks */
 static __thread uint32_t t_gp_fok = 0;
 static __thread bool t_gp_sbad = false;           /* FP32 CRC-OK shadow: the LLR signs of the old path disagree */
@@ -2391,6 +2391,10 @@ static void gp_thread_prewarm(void)
 {
   if (!nr_gpu_pass_active() || t_gpp)
     return;
+  if (nr_gpu_graph_on() && !nr_gpu_allocations_allowed()) { /* v2: a thread that starts after the RX fence takes a prewarmed set (NULL = pool empty: nomem gate) */
+    t_gpp = nr_gpu_graph_pool_claim(&t_gp_shadow);
+    return;
+  }
   t_gp_shadow = (uint8_t *)malloc(GP_SHADOW_CAP);
   t_gpp = (nr_gpu_pass_dl_out_t *)aligned_alloc(64, (sizeof(nr_gpu_pass_dl_out_t) + 63) & ~(size_t)63);
   if (!t_gp_shadow || !t_gpp) {
@@ -3144,6 +3148,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     extern __thread int nr_pdsch_chest_occ_override;
     static int gp_retry_old = -1; /* ISAC_GPU_PASS_RETRY_OLD (nr_gpu_pass_retry.h) */
     if (gp_retry_old < 0) { const char *e_ = getenv("ISAC_GPU_PASS_RETRY_OLD"); gp_retry_old = e_ && atoi(e_) == 1; }
+    if (!t_gpp && nr_gpu_graph_on() && !nr_gpu_allocations_allowed())
+      gp_thread_prewarm(); /* v2: claim from the pool before the nomem gate below */
     gp_gate = nr_gpu_pass_retry_to_old(gp_retry_old, t_pdtim_body, t_recov_mode == 2, t_quiet || t_qam_ab_alt || t_decode_tdra_attempt != 0) ? NR_GPU_PASS_GATE_RETRY
             : (seg_path && nseg > NR_GPU_PASS_MAX_SEG) ? NR_GPU_PASS_GATE_SEG /* more segments than the largest class; fewer run the segmented classes */
             : (t_probe_first_seg || probe_last_sym >= 0 || t_probe_no_horizon) ? NR_GPU_PASS_GATE_PROBE
@@ -5178,6 +5184,13 @@ gpu_llr_ready:;
         t_last_llr = llr; t_last_G = G;
       }
       atomic_fetch_add(&g_rv_census[grant->mcs >= 24][cw->rv & 3], 1);
+      if (nr_gpu_graph_on()) { /* v2: the device computed the loops below (k_llr_stats, bit-equal) */
+        const nr_gpu_llr_stats_t *ls = &t_gpp->r.llr_stats;
+        llr_n = ls->llr_n; llr_absum = ls->llr_absum; llr_zero = ls->llr_zero; llr_sat = ls->llr_sat; llr_clip8 = ls->llr_clip8;
+        llr_pos = ls->llr_pos; llr_sgnsum = ls->llr_sgnsum;
+        memcpy(posbit, ls->posbit, sizeof(posbit));
+        memcpy(nbit, ls->nbit, sizeof(nbit));
+      }
       gp_commit_decode(t_gpp, cw, G, dlsch_config->tbslbrm, gp_tb);
       goto gp_llr_done;
     }
@@ -5675,7 +5688,7 @@ gpu_llr_ready:;
       atomic_fetch_add(&g_shape_Z[sk], (uint64_t)t_seg_Z);
       atomic_fetch_add(&g_nsym[sk][(dlsch_config->number_symbols <= 9) ? 0 : 1], 1);
     }
-    if (!gp_ok) { /* a pass-taken grant has no host LLR statistics: not counted, so the means are not diluted with zeros */
+    if (!gp_ok || nr_gpu_graph_on()) { /* a v1 pass-taken grant has no host LLR statistics: not counted, so the means are not diluted with zeros; v2 has them */
       const int k = ldpc_ok ? 1 : 0;
       atomic_fetch_add(&g_llr_n[k], llr_n);
       atomic_fetch_add(&g_llr_absum[k], llr_absum);
