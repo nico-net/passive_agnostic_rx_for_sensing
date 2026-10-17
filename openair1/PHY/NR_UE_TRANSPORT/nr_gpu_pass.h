@@ -238,6 +238,7 @@ typedef struct {
   int n_rb_dl;                 /* fp->N_RB_DL (the DM-RS FO measurement) */
   const int16_t *delay_table;  /* c16 [2 * max_delay_comp + 1][dt_stride]: fp->delay_table[0] */
   int dt_stride, max_delay_comp;
+  int v2;                      /* DL GPU data path v2 (ISAC_PDSCH_GPU_GRAPH): the graphs carry k_llr_stats; 0 = the v1 graph, unchanged */
 } nr_gpu_pass_cfg_t;
 typedef int (*nr_gpu_pass_config_fn)(const nr_gpu_pass_cfg_t *cfg);
 /* pre-fence: allocate the instances and record + instantiate one graph per warm class. max_classes bounds the default warm set

@@ -43,24 +43,34 @@ static struct {
 
 int nr_gpu_pass_active(void) { return atomic_load_explicit(&G.on, memory_order_relaxed); }
 int nr_gpu_graph_on(void) { return G.v2 && nr_gpu_pass_active(); }
+/* the sub-flags, read once at warm-up (nr_gpu_graph_flag runs per grant) */
+static const char *const g_sub_name[] = {"COVER", "SPLIT", "RETRY", "SLOT", "LEAN"};
+static int g_sub_on[sizeof(g_sub_name) / sizeof(g_sub_name[0])];
 int nr_gpu_graph_flag(const char *sub)
 {
-  char n[64];
-  snprintf(n, sizeof(n), "ISAC_PDSCH_GPU_GRAPH_%s", sub);
-  const char *e = getenv(n);
-  return nr_gpu_graph_on() && e && atoi(e) == 1;
+  for (size_t i = 0; i < sizeof(g_sub_name) / sizeof(g_sub_name[0]); i++)
+    if (!strcmp(sub, g_sub_name[i]))
+      return g_sub_on[i] && nr_gpu_graph_on();
+  return 0;
 }
 static nr_gpu_graph_pool_t g_pool;
+static pthread_key_t g_pool_key; /* a claiming thread's set: returned to the pool when the thread exits */
+static void pool_release(void *s) { nr_gpu_graph_pool_put(&g_pool, (nr_gpu_graph_set_t *)s); }
+int nr_gpu_graph_pool_has_free(void) { return G.v2 && nr_gpu_graph_pool_avail(&g_pool); }
 nr_gpu_pass_dl_out_t *nr_gpu_graph_pool_claim(uint8_t **shadow)
 {
+  nr_gpu_graph_set_t *s = nr_gpu_graph_pool_claim_set(&g_pool, G.v2);
   if (!G.v2)
     return NULL;
-  nr_gpu_graph_set_t *s = nr_gpu_graph_pool_take(&g_pool);
-  char tn[32] = "?";
-  pthread_getname_np(pthread_self(), tn, sizeof(tn));
-  LOG_A(PHY, "SENSING: GPUGRAPH pool claim by thread %s: %s\n", tn, s ? "served" : "EMPTY");
+  static _Atomic int empty_logged;
+  if (s || !atomic_exchange(&empty_logged, 1)) { /* every served claim (at most one per late thread), the first refusal only */
+    char tn[32] = "?";
+    pthread_getname_np(pthread_self(), tn, sizeof(tn));
+    LOG_A(PHY, "SENSING: GPUGRAPH pool claim by thread %s: %s\n", tn, s ? "served" : "EMPTY (first refusal; counted in the census)");
+  }
   if (!s)
     return NULL;
+  pthread_setspecific(g_pool_key, s);
   nr_gpu_pass_dl_out_t *o = (nr_gpu_pass_dl_out_t *)s->out;
   o->llr = s->llr;
   jobp_tls = (nr_gpu_pass_job_t *)s->job;
@@ -147,8 +157,8 @@ static void census(void)
     buf[0] = 0;
   char pool[96] = "";
   if (G.v2)
-    snprintf(pool, sizeof(pool), "GPUGRAPH pool[sets=%d claimed=%lu empty=%lu] ", g_pool.n, (unsigned long)__atomic_load_n(&g_pool.claimed, __ATOMIC_RELAXED),
-             (unsigned long)__atomic_load_n(&g_pool.empty, __ATOMIC_RELAXED));
+    snprintf(pool, sizeof(pool), "GPUGRAPH pool[sets=%d claimed=%lu empty=%lu released=%lu] ", g_pool.n, (unsigned long)__atomic_load_n(&g_pool.claimed, __ATOMIC_RELAXED),
+             (unsigned long)__atomic_load_n(&g_pool.empty, __ATOMIC_RELAXED), (unsigned long)__atomic_load_n(&g_pool.released, __ATOMIC_RELAXED));
   LOG_A(PHY,
         "SENSING: %s%s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu seg=%lu] seg_grants[1=%lu 2=%lu 4=%lu 8=%lu 16=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
         "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu old_first=%lu fp32_flip=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu retry=%lu]\n",
@@ -208,6 +218,12 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
       LOG_W(PHY, "SENSING: GPUGRAPH refused: ISAC_GPU_PASS=1 (v1) is set; v2 off, v1 runs\n");
     else
       dl_on = G.v2 = 1;
+    for (size_t i = 0; i < sizeof(g_sub_name) / sizeof(g_sub_name[0]); i++) {
+      char n[64];
+      snprintf(n, sizeof(n), "ISAC_PDSCH_GPU_GRAPH_%s", g_sub_name[i]);
+      const char *v = getenv(n);
+      g_sub_on[i] = G.v2 && v && atoi(v) == 1;
+    }
   }
   if ((!dl_on && !ul_on) || !ue)
     return;
@@ -238,7 +254,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     return;
   }
   nr_gpu_pass_cfg_t c = {.nbRx = fp->nb_antennas_rx, .n_rb_dl = fp->N_RB_DL, .delay_table = (const int16_t *)fp->delay_table[0],
-                         .dt_stride = NR_MAX_OFDM_SYMBOL_SIZE, .max_delay_comp = MAX_DELAY_COMP};
+                         .dt_stride = NR_MAX_OFDM_SYMBOL_SIZE, .max_delay_comp = MAX_DELAY_COMP, .v2 = G.v2};
   if (nr_gpu_model() == NR_GPU_MODEL_DISCRETE) { /* the graphs read the delay table on the device */
     static nr_gpu_buf_t dt;
     const size_t bytes = sizeof(fp->delay_table);
@@ -349,7 +365,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   G.nbrx = fp->nb_antennas_rx;
   const char *ch = getenv("ISAC_GPU_PASS_CHECK");
   G.check = ch ? atoi(ch) : 64;
-  if (G.v2 && made > 0) /* the per-thread host sets for threads that reach the pass after the RX fence (the async recovery worker) */
+  if (G.v2 && made > 0 && g_pool.n == 0 && pthread_key_create(&g_pool_key, pool_release) == 0) /* the per-thread host sets for threads that reach the pass after the RX fence (the async recovery worker); once */
     LOG_A(PHY, "SENSING: GPUGRAPH v2 mode: %d of %d prewarmed host buffer sets for late threads\n",
           nr_gpu_graph_pool_fill(&g_pool, NR_GPU_GRAPH_POOL, sizeof(nr_gpu_pass_dl_out_t), sizeof(nr_gpu_pass_job_t)), NR_GPU_GRAPH_POOL);
   atomic_store(&G.on, made > 0);

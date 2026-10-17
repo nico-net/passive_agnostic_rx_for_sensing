@@ -71,7 +71,7 @@ static bool pass_ready(GpuPassModule &m)
     }
   nr_gpu_buf_h2d_async(&dt, 0, dt.bytes, nullptr);
   cudaDeviceSynchronize();
-  nr_gpu_pass_cfg_t c = {4, 273, (const int16_t *)dt.dev, 4096, 20};
+  nr_gpu_pass_cfg_t c = {4, 273, (const int16_t *)dt.dev, 4096, 20, 1}; /* v2 graphs (k_llr_stats): a superset of v1's outputs */
   if (m.pass_config(&c) != 0 || m.pass_init(16) != 0) return false;
   m.pass_state = 1;
   return true;
@@ -1672,6 +1672,30 @@ TEST(GpuGraph, LlrStatsEqualStagePath) {
   GpuPassFixture::noise_db = 20.0;
   printf("GpuGraph.LlrStatsEqualStagePath: %d passes, %d CRC fail\n", n, n_fail);
   EXPECT_GT(n_fail, 0) << "the -3 dB arm should fail some CRCs";
+  /* odd G: the stride-32 and i + 3 < G edges of the loops (G = 3: magnitudes only; 33, 35: a second sample, sign stats of one; 0: the pass refuses the job) */
+  GpuPassFixture fx = GpuPassFixture::from_shape(GpuPassFixture::warm_shapes()[4 * 4 + 1], 13);
+  ASSERT_TRUE(fx.tb_ok_built);
+  nr_gpu_pass_result_t s0{};
+  std::vector<uint8_t> sb(fx.tb.A / 8 + 64), gb(fx.tb.A / 8 + 64);
+  s0.tb = sb.data();
+  ASSERT_EQ(0, fx.run_stage_path(&s0));
+  const std::vector<int16_t> pre = fx.llr_pre, post = fx.llr_post;
+  for (uint32_t G : {3u, 33u, 35u, 0u}) {
+    fx.bind();
+    fx.job->G = G;
+    fx.job->norm = 0;
+    nr_gpu_pass_result_t g{};
+    g.tb = gb.data();
+    if (!G) {
+      EXPECT_EQ(1, m.pass_try(fx.job, &g)) << "G = 0 is refused: no statistics are produced or read";
+      continue;
+    }
+    ASSERT_EQ(0, m.pass_try(fx.job, &g)) << "G " << G;
+    fx.llr_pre.assign(pre.begin(), pre.begin() + G);
+    fx.llr_post.assign(post.begin(), post.begin() + G);
+    const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+    EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << "G " << G << ": n " << g.llr_stats.llr_n << "/" << ref.llr_n << " nbit " << g.llr_stats.nbit[0] << "/" << ref.nbit[0];
+  }
 }
 /* v2: a thread that reaches the pass late (the async recovery worker) claims a prewarmed buffer set instead of hitting the nomem gate; an empty pool returns NULL,
  * counted, and nothing is allocated on the GPU (the claim only pops a pre-filled stack). */
@@ -1704,10 +1728,22 @@ TEST(GpuGraph, LateThreadClaimsPrewarmedPool) {
   for (int i = 0; i < 16; i++) th.emplace_back([&, i] { seen[i] = nr_gpu_graph_pool_take(&p8); if (seen[i]) got++; });
   for (auto &x : th) x.join();
   EXPECT_EQ(NR_GPU_GRAPH_POOL, got.load());
+  EXPECT_EQ((uint64_t)NR_GPU_GRAPH_POOL, p8.claimed);
   std::sort(seen.begin(), seen.end());
   EXPECT_EQ(seen.end(), std::adjacent_find(seen.begin() + (16 - NR_GPU_GRAPH_POOL), seen.end()));
   EXPECT_EQ(16u - NR_GPU_GRAPH_POOL, p8.empty);
+  /* the claim of nr_gpu_graph_pool_claim: v2 off claims nothing and counts nothing; a released set (its thread exited) is served again */
+  EXPECT_EQ(nullptr, nr_gpu_graph_pool_claim_set(&pool, 0));
+  EXPECT_EQ(2u, pool.claimed);
+  EXPECT_EQ(1u, pool.empty);
+  EXPECT_FALSE(nr_gpu_graph_pool_avail(&pool));
+  nr_gpu_graph_pool_put(&pool, s1);
+  EXPECT_TRUE(nr_gpu_graph_pool_avail(&pool));
+  EXPECT_EQ(s1, nr_gpu_graph_pool_claim_set(&pool, 1));
+  EXPECT_EQ(1u, pool.released);
+  EXPECT_EQ(3u, pool.claimed);
 }
+
 
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
  * allocated or built on the launch path. */

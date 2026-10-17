@@ -1778,6 +1778,16 @@ static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid, uint16_t cell)
   return e;
 }
 
+/* ISAC_PDSCH_PROBE_C1=1 (implied by ISAC_PDSCH_SOLVER=1): the outcome of a probe of a one-code-block TB is recorded (T26b, below) */
+static bool probe_c1_on(void)
+{
+  static _Atomic int s_probe_c1 = -1;
+  if (s_probe_c1 < 0) {
+    const char *e = getenv("ISAC_PDSCH_PROBE_C1");
+    s_probe_c1 = ((e && atoi(e) != 0) || nr_pdsch_solver_enabled()) ? 1 : 0;
+  }
+  return s_probe_c1 == 1;
+}
 /* passive_ldpc_decode_core: LDPC stage of one passive decode: builds the TB parameters (segmentation, E, rate matching, HARQ buffer) and runs the LDPC decoder.
  *   Returns true when every segment decodes and passes CRC. A one-code-block probe (ISAC_PDSCH_PROBE_C1) uses the TB CRC of its single block.
  *   Side effects: updates the per-thread HARQ buffer and decoder-used tag; ISAC_LDPC_ITERS sets the iteration count; ISAC_PDSCH_TBPARM logs the parameter set.
@@ -1980,12 +1990,7 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
      * recorded (only C > 1 set t_probe_seg_ok), so every single-CB probe read "failed" -- measured on the PCI 415
      * replay: probes whose dumped LLRs decode offline at LDPC iteration 1 reported CRC fail. ISAC_PDSCH_PROBE_C1=1
      * (implied by ISAC_PDSCH_SOLVER=1) records it, same all-zero guard, still never a decoded TB. */
-    static int s_probe_c1 = -1;
-    if (s_probe_c1 < 0) {
-      const char *e = getenv("ISAC_PDSCH_PROBE_C1");
-      s_probe_c1 = ((e && atoi(e) != 0) || nr_pdsch_solver_enabled()) ? 1 : 0;
-    }
-    if (t_probe_first_seg && (C_full > 1 || s_probe_c1)) {
+    if (t_probe_first_seg && (C_full > 1 || probe_c1_on())) {
       t_probe_seg_ok = (seg_ok == 1);
       /* The all-zero guard the full-TB path applies, on segment 0: an all-zero code block carries a
        * zero CRC24B, so LLRs that are mostly "0" (wrong layout, wrong scrambling, empty grant) pass
@@ -2387,12 +2392,16 @@ static __thread uint8_t *t_gp_shadow = NULL;        /* the TB of a shadow-checke
 static __thread uint64_t t_gp_fhash = 0;           /* shadow of a CRC-failing pass: hash of its final LLRs and its count of decoded blocks */
 static __thread uint32_t t_gp_fok = 0;
 static __thread bool t_gp_sbad = false;           /* FP32 CRC-OK shadow: the LLR signs of the old path disagree */
+static __thread bool t_gp_claim_tried = false;    /* v2: this thread asked the pool once (a refusal is not retried: nomem gate from then on) */
 static void gp_thread_prewarm(void)
 {
   if (!nr_gpu_pass_active() || t_gpp)
     return;
   if (nr_gpu_graph_on() && !nr_gpu_allocations_allowed()) { /* v2: a thread that starts after the RX fence takes a prewarmed set (NULL = pool empty: nomem gate) */
-    t_gpp = nr_gpu_graph_pool_claim(&t_gp_shadow);
+    if (!t_gp_claim_tried) {
+      t_gp_claim_tried = true;
+      t_gpp = nr_gpu_graph_pool_claim(&t_gp_shadow);
+    }
     return;
   }
   t_gp_shadow = (uint8_t *)malloc(GP_SHADOW_CAP);
@@ -3148,8 +3157,6 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     extern __thread int nr_pdsch_chest_occ_override;
     static int gp_retry_old = -1; /* ISAC_GPU_PASS_RETRY_OLD (nr_gpu_pass_retry.h) */
     if (gp_retry_old < 0) { const char *e_ = getenv("ISAC_GPU_PASS_RETRY_OLD"); gp_retry_old = e_ && atoi(e_) == 1; }
-    if (!t_gpp && nr_gpu_graph_on() && !nr_gpu_allocations_allowed())
-      gp_thread_prewarm(); /* v2: claim from the pool before the nomem gate below */
     gp_gate = nr_gpu_pass_retry_to_old(gp_retry_old, t_pdtim_body, t_recov_mode == 2, t_quiet || t_qam_ab_alt || t_decode_tdra_attempt != 0) ? NR_GPU_PASS_GATE_RETRY
             : (seg_path && nseg > NR_GPU_PASS_MAX_SEG) ? NR_GPU_PASS_GATE_SEG /* more segments than the largest class; fewer run the segmented classes */
             : (t_probe_first_seg || probe_last_sym >= 0 || t_probe_no_horizon) ? NR_GPU_PASS_GATE_PROBE
@@ -3161,7 +3168,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
             : !nr_pdsch_gpu_ldpc_enabled() ? NR_GPU_PASS_GATE_LDPC_OFF
             : nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) >= 0 ? NR_GPU_PASS_GATE_CHEST_ONLY
             : nr_pdsch_chest_occ_override > 0 ? NR_GPU_PASS_GATE_OCC
-            : (!t_gpp && !nr_gpu_allocations_allowed()) ? NR_GPU_PASS_GATE_NOMEM /* a thread that was not prewarmed before the fence */
+            : (!t_gpp && !nr_gpu_allocations_allowed() && (t_gp_claim_tried || !nr_gpu_graph_pool_has_free())) ? NR_GPU_PASS_GATE_NOMEM /* not prewarmed before the fence, no pool set */
             : -1;
     if (gp_gate >= 0)
       nr_gpu_pass_gate(gp_gate);
@@ -3179,7 +3186,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
                                        .branch = gp_perbranch() ? nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) : -1, .norm = gp_norm_on(),
                                        .it_max = gp_iters(), .chest_diag = chest_pdp_diag_on(), .fep_fo = fep_fo, .tb = g_harq.b};
       if (!t_gpp)
-        gp_thread_prewarm(); /* only before the RX fence; afterwards the gate above has refused */
+        gp_thread_prewarm(); /* before the RX fence: allocates; after it (v2): claims a pool set, lazily, once per thread */
       memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc)); /* the demod job reads whether the EVM is armed; the block below re-arms it for the old path */
       nr_pdsch_evm_acc.armed = gp_evm_armed(probe_last_sym);
       gp_tried = true;
