@@ -2125,6 +2125,115 @@ TEST(GpuGraphSplit, OneDmrsSymbolEqualsStagePath) {
   EXPECT_LT(n_ok, n);
 }
 
+/* ===================================================== DL GPU data path v2, Task 4 (ISAC_PDSCH_GPU_GRAPH_RETRY) ===================================================== */
+/* One decode call (nr_gpu_pass_call_begin / _end) holds its instance: the bodies of the call enter at C when the chest inputs changed (first body, other pilots = a CDM /
+ * DM-RS hypothesis change, after a dirty mark) and at D otherwise (a probe of the same grant: other demod horizon, code blocks and PassBlk; an RV change: other rate-dematching
+ * tables). Every body equals the stage path from scratch (TB, CRC verdict, need_cpu, seg_ok, nvar, final LLRs, LLR statistics, rxdataF). DISCRETE: a D entry reading the
+ * previous body's PassBlk / geometry would differ (review T4-1). A fallback in the middle of the call (unseen class) keeps the hold; call_end releases the instance. */
+TEST(GpuGraphRetry, EntryFollowsChangedInput) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split && m.pass_hold && m.call_begin && m.call_end && m.call_dirty && m.retry_counters);
+  auto warm = [&](GpuPassFixture &f) {
+    nr_gpu_pass_shape_t w = f.job->shape;
+    return m.pass_warm(&w, f.job->dj.qam_mode, f.job->dj.align, f.job->dj.want_evm);
+  };
+  int8_t inst = -1;
+  /* one body of the call; want_d: the entry expected (1 = D) */
+  auto body = [&](GpuPassFixture &f, int want_d, const std::string &what) {
+    f.job->llr_out_all = 1;
+    std::vector<uint8_t> gb(f.tb.A / 8 + 64, 0xAA), sb(f.tb.A / 8 + 64, 0x55);
+    nr_gpu_pass_result_t g{}, s{};
+    g.tb = gb.data(); s.tb = sb.data();
+    uint64_t c0[4], c1[4];
+    m.retry_counters(c0);
+    ASSERT_EQ(0, m.pass_try(f.job, &g)) << what;
+    m.retry_counters(c1);
+    EXPECT_EQ(c0[1] + (want_d ? 1 : 0), c1[1]) << what << ": entry at D";
+    EXPECT_EQ(c0[0] + (want_d ? 0 : 1), c1[0]) << what << ": entry at C";
+    if (inst >= 0) EXPECT_EQ(inst, g.instance) << what << ": the held instance";
+    inst = g.instance;
+    ASSERT_EQ(0, f.run_stage_path(&s)) << what;
+    EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+    EXPECT_EQ(f.is_probe ? 0 : s.tb_ok, g.tb_ok) << what;
+    EXPECT_EQ(s.nvar, g.nvar) << what;
+    EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+    if (!g.need_cpu) {
+      if (g.tb_ok) EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+      EXPECT_EQ(0, memcmp(f.llr_ref.data(), f.llr_pass.data(), (size_t)f.tb.G * 2)) << what << ": final LLRs";
+    }
+    const nr_gpu_llr_stats_t ref = f.host_llr_stats();
+    EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << what << ": LLR statistics";
+    for (int a = 0; a < 4; a++)
+      for (int sy = 0; sy < 14; sy++)
+        ASSERT_EQ(0, memcmp(&f.rxF_out[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], &f.rxF_ref[2 * ((size_t)a * 14 * 4096 + (size_t)sy * 4096)], 4096 * 4))
+            << "rxdataF, ant " << a << " sym " << sy << ", " << what;
+  };
+  /* the next body's job on the same grant object (same IQ ring, pilot and rxdataF buffers, as the retry arms of one call); rxdataF keeps what the earlier bodies wrote */
+  auto rebind = [](GpuPassFixture &f) {
+    const std::vector<int16_t> keep = f.rxF_out;
+    f.bind();
+    f.rxF_out = keep;
+  };
+  GpuPassFixture ux = GpuPassFixture::from_shape({6, 13, 4, 2, 2, 1, 1}, 19); /* PRB class 6: never warmed (an unseen key in the middle of the call) */
+  m.pass_split(1);
+  int n = 0;
+  for (int si : {0, 5, 16 + 6, 48 + 5}) { /* 24 PRB nl 1 qm 2, 24 nl 2 qm 4, 48 nl 2 qm 6, 217 nl 2 qm 4 */
+    const nr_gpu_pass_shape_t shape = GpuPassFixture::warm_shapes()[si];
+    GpuPassFixture fx = GpuPassFixture::from_shape(shape, 41 + si);
+    ASSERT_TRUE(fx.tb_ok_built);
+    const std::string what = "nrb " + std::to_string(shape.nrb_class) + " nl " + std::to_string(shape.nl) + " qm " + std::to_string(shape.qm) + " C " + std::to_string(fx.tb.C);
+    { /* every key of the call, before it (warming captures on every instance) */
+      GpuPassFixture px = fx;
+      px.make_probe();
+      ASSERT_EQ(0, warm(fx)) << what;
+      ASSERT_EQ(0, warm(px)) << what;
+    }
+    inst = -1;
+    uint64_t h0[4], h1[4];
+    m.retry_counters(h0);
+    m.call_begin();
+    body(fx, 0, what + " first body");
+    ASSERT_FALSE(HasFatalFailure());
+    fx.is_probe = true; /* make_probe() without clearing rxdataF */
+    rebind(fx);
+    body(fx, 1, what + " probe of the same grant");
+    std::vector<uint8_t> ub(ux.tb.A / 8 + 64);
+    nr_gpu_pass_result_t ur{};
+    ur.tb = ub.data();
+    EXPECT_EQ(1, m.pass_try(ux.job, &ur)) << what << ": unseen key in the middle of the call";
+    fx.is_probe = false; fx.n_decode = 0; fx.probe_last = -1;
+    fx.tb.rv = 2;
+    rebind(fx);
+    body(fx, 1, what + " rv 2");
+    fx.tb.rv = 0;
+    for (auto &v : fx.pilot[0][0]) v = (int16_t)-v; /* the DM-RS hypothesis changes in place (same buffer): C */
+    rebind(fx);
+    body(fx, 0, what + " other pilots");
+    rebind(fx);
+    body(fx, 1, what + " same inputs again");
+    m.call_dirty();
+    rebind(fx);
+    body(fx, 0, what + " after a dirty mark");
+    m.call_end();
+    m.retry_counters(h1);
+    EXPECT_EQ(h0[2] + 1, h1[2]) << what << ": one held call";
+    EXPECT_EQ(h0[3] + 1, h1[3]) << what << ": one dirty invalidation";
+    /* released: with every other instance busy a pass still finds this one; outside a call the same inputs enter at C */
+    m.pass_hold(((1u << NR_GPU_PASS_RING) - 1u) & ~(1u << inst), 1);
+    rebind(fx);
+    body(fx, 0, what + " after call_end");
+    m.pass_hold(((1u << NR_GPU_PASS_RING) - 1u) & ~(1u << inst), 0);
+    for (auto &v : fx.pilot[0][0]) v = (int16_t)-v;
+    n++;
+  }
+  m.pass_split(0);
+  printf("GpuGraphRetry.EntryFollowsChangedInput: %d calls x 7 bodies\n", n);
+}
+
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
  * allocated or built on the launch path. */
 extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);

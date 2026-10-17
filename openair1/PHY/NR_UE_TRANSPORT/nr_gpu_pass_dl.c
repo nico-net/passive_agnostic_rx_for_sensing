@@ -34,6 +34,7 @@ static __thread nr_gpu_pass_job_t *jobp_tls;
 static struct {
   nr_gpu_pass_dl_try_fn try_;
   nr_gpu_pass_stats_fn stats;
+  void (*call_begin)(void), (*call_end)(void), (*call_dirty)(void); /* v2 Task 4: the module's held-instance calls (ISAC_PDSCH_GPU_GRAPH_RETRY) */
   _Atomic int on;
   int nbrx, check, fp32; /* fp32: Task 5, the graphs run the FP32 demod (ISAC_GPU_PASS_FP32 / sm_89) */
   int v2;                /* DL GPU data path v2 (ISAC_PDSCH_GPU_GRAPH=1 without ISAC_GPU_PASS=1): the census is GPUGRAPH, the pool serves late threads */
@@ -46,6 +47,20 @@ static struct {
 int nr_gpu_pass_active(void) { return atomic_load_explicit(&G.on, memory_order_relaxed); }
 int nr_gpu_graph_on(void) { return G.v2 && nr_gpu_pass_active(); }
 int nr_gpu_pass_seg_max(void) { return nr_gpu_graph_flag("SPLIT") ? NR_GPU_PASS_MAX_SEG : NR_GPU_PASS_MAX_SEG_FULL; } /* split: the 32-segment class */
+/* v2 Task 4: a decode call holds its pass instance across its bodies (RETRY needs SPLIT: the entry at D is a split launch). 1 = held, end it with nr_gpu_graph_call_end */
+int nr_gpu_graph_call_begin(void)
+{
+  if (!G.call_begin || !nr_gpu_graph_flag("RETRY") || !nr_gpu_graph_flag("SPLIT"))
+    return 0;
+  G.call_begin();
+  return 1;
+}
+void nr_gpu_graph_call_end(void) { G.call_end(); }
+void nr_gpu_graph_call_dirty(void)
+{
+  if (G.call_dirty && nr_gpu_graph_flag("RETRY"))
+    G.call_dirty();
+}
 /* the sub-flags, read once at warm-up (nr_gpu_graph_flag runs per grant) */
 static const char *const g_sub_name[] = {"COVER", "SPLIT", "RETRY", "SLOT", "LEAN"};
 static int g_sub_on[sizeof(g_sub_name) / sizeof(g_sub_name[0])];
@@ -256,6 +271,9 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   G.try_ = h ? (nr_gpu_pass_dl_try_fn)dlsym(h, "nr_gpu_pass_dl_try") : NULL;
   { int (*fp32f)(void) = h ? (int (*)(void))dlsym(h, "nr_gpu_pass_fp32_default") : NULL; G.fp32 = fp32f ? fp32f() : 0; } /* before initf: the default classes read the same */
   G.stats = h ? (nr_gpu_pass_stats_fn)dlsym(h, "nr_gpu_pass_stats") : NULL;
+  G.call_begin = h ? (void (*)(void))dlsym(h, "nr_gpu_pass_call_begin") : NULL;
+  G.call_end = h ? (void (*)(void))dlsym(h, "nr_gpu_pass_call_end") : NULL;
+  G.call_dirty = h ? (void (*)(void))dlsym(h, "nr_gpu_pass_call_dirty") : NULL;
   if (!cfgf || !initf || !warmf || !dinit || !linit || !G.try_ || dinit(fp->nb_antennas_rx) != 0 || linit() != 0) {
     LOG_W(PHY, "SENSING: GPUPASS requested but libpdsch_gpu.so has no usable graph pass: off\n");
     return;

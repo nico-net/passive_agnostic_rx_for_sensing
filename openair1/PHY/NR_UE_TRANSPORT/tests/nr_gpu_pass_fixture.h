@@ -55,6 +55,8 @@ struct GpuPassModule {
   nr_gpu_pass_counters_fn pass_counters = nullptr;
   void (*pass_hold)(unsigned, int) = nullptr;
   void (*pass_split)(int) = nullptr; /* v2 Task 3 test hook: the split (C / D / L sub-graph) mode on / off */
+  void (*call_begin)(void) = nullptr, (*call_end)(void) = nullptr, (*call_dirty)(void) = nullptr; /* v2 Task 4: the held instance of a decode call */
+  void (*retry_counters)(uint64_t *) = nullptr;                                                      /* entries C, D, held calls, dirty */
   int pass_state = 0; /* 0 not tried, 1 ready, -1 failed */
   /* loads ./libpdsch_gpu.so and inits FEP (N = 4096, 4 RX), demod and LDPC once; false = no module or no device */
   static GpuPassModule &get(bool *ok, bool *have_lib = nullptr)
@@ -88,6 +90,10 @@ struct GpuPassModule {
         m.pass_counters = (nr_gpu_pass_counters_fn)dlsym(m.dl, "nr_gpu_pass_counters");
         m.pass_hold = (void (*)(unsigned, int))dlsym(m.dl, "nr_gpu_pass_test_hold");
         m.pass_split = (void (*)(int))dlsym(m.dl, "nr_gpu_pass_test_split");
+        m.call_begin = (void (*)(void))dlsym(m.dl, "nr_gpu_pass_call_begin");
+        m.call_end = (void (*)(void))dlsym(m.dl, "nr_gpu_pass_call_end");
+        m.call_dirty = (void (*)(void))dlsym(m.dl, "nr_gpu_pass_call_dirty");
+        m.retry_counters = (void (*)(uint64_t *))dlsym(m.dl, "nr_gpu_pass_retry_counters");
         if (!m.fep) fprintf(stderr, "libpdsch_gpu.so has no nr_pdsch_gpu_fep_dev\n");
         good = api && m.fep_stage && m.chest_stage && m.fep_old && m.chest_old && m.demod_old && m.demod_rel && m.ldpc_old && dinit && linit && m.fep && m.chest && m.demod && m.ldpc && api()->init(&cfg) == 0 && dinit(4) == 0;
         if (good) linit(); /* may refuse (CC < 9): the LDPC stage then reports it */

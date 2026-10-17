@@ -61,6 +61,11 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue);
 /* 0 = the pass ran (out filled; the TB may still have failed CRC or need the CPU decoder: out->r.tb_ok / need_cpu), 1 = not handled (counted), the old path decodes */
 int nr_gpu_pass_seg_max(void); /* segments of the largest segment-count class the pass covers: 32 in v2 split mode, else 16 */
 int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out);
+/* v2 Task 4 (ISAC_PDSCH_GPU_GRAPH_RETRY + _SPLIT): around one nr_pdsch_passive_decode call, the pass instance its first body takes stays held for the later bodies, which
+ * skip the chest sub-graph when its inputs are unchanged. begin returns 1 when held (then call end). dirty: a body ran the stage path (it may rewrite rxdataF). */
+int nr_gpu_graph_call_begin(void);
+void nr_gpu_graph_call_end(void);
+void nr_gpu_graph_call_dirty(void);
 /* v2 Task 1 (ISAC_PDSCH_GPU_GRAPH=1): a set of the pre-fence pool (nr_gpu_graph_pool.h) for a thread that reaches the pass after the RX fence; sets *shadow and the
  * thread's job buffer. NULL = no pool (v2 off) or pool empty (counted). The set returns to the pool when the thread exits. */
 nr_gpu_pass_dl_out_t *nr_gpu_graph_pool_claim(uint8_t **shadow);

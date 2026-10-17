@@ -244,7 +244,7 @@ typedef struct {
   const int16_t *delay_table;  /* c16 [2 * max_delay_comp + 1][dt_stride]: fp->delay_table[0] */
   int dt_stride, max_delay_comp;
   int v2;                      /* DL GPU data path v2 (ISAC_PDSCH_GPU_GRAPH): the graphs carry k_llr_stats; 0 = the v1 graph, unchanged */
-  int split;                   /* v2 Task 3 (ISAC_PDSCH_GPU_GRAPH_SPLIT): a DL pass is three sub-graphs C (FEP + chest + post), D (demod + LLR post), L (decode), cached under
+  int split;                   /* v2 Task 3 (ISAC_PDSCH_GPU_GRAPH_SPLIT): a DL pass is three sub-graphs C (FEP + chest), D (chest post + demod + LLR post), L (decode), cached under
                                 * separate keys (nrb, nl, ndmrs, nseg) / (nrb, nl, demod variant, EVM) / (ncb) and launched back to back; segment class 32 */
   int split_mb;                /* split: GPU memory cap of the pass (an estimate: the instance buffers' sizes + cudaMemGetInfo deltas around graph instantiation); warming stops at
                                 * it; the instances alone at or above it turn split off (nr_gpu_pass_split_on). 0 = 1024 */

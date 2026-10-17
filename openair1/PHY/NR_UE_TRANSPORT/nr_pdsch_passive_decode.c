@@ -3196,7 +3196,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     const bool gp_cover = nr_gpu_graph_flag("COVER");
     const bool gp_probe_cov = gp_cover && probe_c1_on() && !t_probe_no_horizon;
     const bool gp_share_cov = gp_cover;
-    gp_gate = nr_gpu_pass_retry_to_old(gp_retry_old, t_pdtim_body, t_recov_mode == 2, t_quiet || t_qam_ab_alt || t_decode_tdra_attempt != 0) ? NR_GPU_PASS_GATE_RETRY
+    /* v2 Task 4: with ISAC_PDSCH_GPU_GRAPH_RETRY the retry bodies stay on the pass (held instance), RETRY_OLD is not consulted */
+    gp_gate = (!nr_gpu_graph_flag("RETRY") && nr_gpu_pass_retry_to_old(gp_retry_old, t_pdtim_body, t_recov_mode == 2, t_quiet || t_qam_ab_alt || t_decode_tdra_attempt != 0)) ? NR_GPU_PASS_GATE_RETRY
             : (seg_path && nseg > nr_gpu_pass_seg_max()) ? NR_GPU_PASS_GATE_SEG /* more segments than the largest class; fewer run the segmented classes */
             : ((t_probe_first_seg || probe_last_sym >= 0 || t_probe_no_horizon) && !gp_probe_cov) ? NR_GPU_PASS_GATE_PROBE
             : ((t_share.on && !gp_share_cov) || t_chest_bypass) ? NR_GPU_PASS_GATE_SHARE
@@ -3276,6 +3277,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       }
     }
   }
+
+  if (!gp_ok)
+    nr_gpu_graph_call_dirty(); /* v2 Task 4: this body runs the stage path, which may rewrite rxdataF: the held instance's estimate is not reused */
 
   /* GPU LLRs in hand: everything from here to the LLR buffer (FEP, channel estimation, equaliser,
    * demodulator) is what the GPU already did for this slot. A PT-RS arm or CSI-RS rate matching
@@ -5925,7 +5929,9 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   if (s_low < 0) { const char *e = getenv("ISAC_GPU_DISC_SMS_LOW"); s_low = e && atoi(e) > 0; }
   const bool large = s_low && freq_alloc->num_rbs > 96;
   if (large) nr_gpu_budget_rt_large_begin();
+  const int gp_hold = nr_gpu_graph_call_begin(); /* v2 Task 4 (ISAC_PDSCH_GPU_GRAPH_RETRY): the call's bodies share one pass instance */
   const nr_pdsch_passive_decode_status_t st = passive_decode_entry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  if (gp_hold) nr_gpu_graph_call_end();
   if (large) nr_gpu_budget_rt_large_end();
   return st;
 }

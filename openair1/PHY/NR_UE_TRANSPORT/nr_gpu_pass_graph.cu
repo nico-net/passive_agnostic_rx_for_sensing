@@ -223,8 +223,8 @@ struct Key {
            (uint64_t)align << 28 | (uint64_t)(nseg ? 1 + __builtin_ctz((unsigned)nseg) : 0) << 29 | (uint64_t)ul << 40 | (uint64_t)sub << 41;
   }
 };
-/* v2 Task 3 (split): C = [H2D of the parameter blocks] + FEP + chest + [seg compose] + chest post + [nvar D2H]: depends on (nrb, nl, ndmrs, nseg);
- * D = demod (+ EVM fork) + descramble + LLR stats + LLR norm + [LLR / est / rxF D2H]: (nrb, nl, fp32, evm, qmode, align); L = rate dematch + LDPC + CRC + pick + CRC +
+/* v2 Task 3 (split): C = FEP + chest + [seg compose] + [nvar D2H]: depends on (nrb, nl, ndmrs, nseg); the parameter-block H2D precedes the first sub-graph of a launch
+ * (h2d_params, Task 4); D = chest post + demod (+ EVM fork) + descramble + LLR stats + LLR norm + [LLR / est / rxF D2H]: (nrb, nl, fp32, evm, qmode, align); L = rate dematch + LDPC + CRC + pick + CRC +
  * [result D2H]: (ncb). The count of graphs is the sum of the three key sets, not their product. */
 enum { SUB_FULL = 0, SUB_C = 1, SUB_D = 2, SUB_L = 3 };
 static Key key_sub(const Key &k, int sub)
@@ -250,6 +250,11 @@ struct Inst {
   nr_gpu_ldpc_job_t *lj = nullptr; /* [MAXCB]: only BG/R/Z/K/it_max are used */
   nr_gpu_demod_job_t dj = {};
   size_t bn = 0;
+  /* v2 Task 4: the C inputs (c_sig) of the last two launches on this instance, double-buffered; c_ok = the estimate on the device is that of sig[sig_cur] */
+  std::vector<uint8_t> sig[2];
+  size_t sig_n[2] = {};
+  int sig_cur = 0;
+  bool c_ok = false;
   PassBlk *PB() const { return (PassBlk *)pb.host; }
   ResBlk *RB() const { return (ResBlk *)res.host; }
   const PassBlk *PBd() const { return (const PassBlk *)pb.dev; }
@@ -274,23 +279,30 @@ static std::atomic<uint64_t> g_launches{0}, g_hits{0}, g_fb_unseen{0}, g_fb_busy
 static std::atomic<uint64_t> g_wait_hist[32]; /* host wait, 2^i us buckets */
 /* Task 8b stamps: host prep (run entry to launch), launch to done, post (done to commit end); [0] DL, [1] UL; 2^i us buckets */
 static std::atomic<uint64_t> g_stamp_hist[2][3][32];
-static void stamp_add(int ul, int k, uint64_t ns)
+static void hist_add(std::atomic<uint64_t> *h, uint64_t ns)
 {
   const uint64_t us = ns / 1000;
   int b = 0;
   while (b < 31 && (1ull << b) < us) b++;
-  ++g_stamp_hist[ul][k][b];
+  ++h[b];
 }
-static uint64_t stamp_q(int ul, int k, int pct) /* bucket upper bound in us */
+static uint64_t hist_q(const std::atomic<uint64_t> *h, int pct) /* bucket upper bound in us */
 {
   uint64_t tot = 0, acc = 0;
-  for (auto &h : g_stamp_hist[ul][k]) tot += h;
+  for (int i = 0; i < 32; i++) tot += h[i];
   for (int i = 0; i < 32 && tot; i++) {
-    acc += g_stamp_hist[ul][k][i];
+    acc += h[i];
     if (acc * 100 >= tot * pct) return 1ull << i;
   }
   return 0;
 }
+static void stamp_add(int ul, int k, uint64_t ns) { hist_add(g_stamp_hist[ul][k], ns); }
+static uint64_t stamp_q(int ul, int k, int pct) { return hist_q(g_stamp_hist[ul][k], pct); }
+/* v2 Task 4: the instance this thread's decode call holds (-1 none), the call nesting depth, when it was taken; entries [C, D], held calls, dirty invalidations, hold time */
+static thread_local int t_hold = 0, t_held = -1;
+static thread_local uint64_t t_hold_ns = 0;
+static std::atomic<uint64_t> g_entry[2], g_held{0}, g_dirty{0}, g_hold_hist[32];
+constexpr size_t SIG_CAP = 256 * 1024; /* c_sig bytes: pilots 4 DM-RS x 4 layers x 6 x 554 RBs x 4 B = 213 KB + the rest */
 constexpr uint32_t RING_LEN = 80000;
 static int16_t g_zero_pil[6 * 273 * 2];
 static uint32_t g_zero_scr[LLR_CAP / 32 + 2];
@@ -502,27 +514,36 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
   return prepare_tb(I, j);
 }
 
-/* the pass (sub = SUB_FULL: the v1 node order, unchanged) or one sub-graph of it (v2 split, key_sub) */
+/* the parameter blocks (DISCRETE: H2D; DIRECT: no-op, the kernels read the mapped memory). The single graph (v1) carries them as its first nodes; in split mode they
+ * are copied before the first sub-graph of every launch, whatever the entry (C, or D on a held instance), so that D and L never read a previous body's PassBlk / geometry /
+ * scrambling words (review T4-1). The pilots are read by C only. */
+static int h2d_params(Inst &I, const Key &k, cudaStream_t s, bool pil)
+{
+  const int ext = (12 * k.nrb + 15) & ~15;
+  return nr_gpu_buf_h2d_async(&I.pb, 0, sizeof(PassBlk), s) || nr_gpu_buf_h2d_async(&I.geo, 0, (size_t)2 * NSYM * ext * 4, s) ||
+         (pil && nr_gpu_buf_h2d_async(&I.pil, 0, (size_t)NR_GPU_PASS_MAX_DMRS * 4 * PIL_STRIDE * 4, s)) ||
+         nr_gpu_buf_h2d_async(&I.scr, 0, (size_t)(((size_t)12 * k.nrb * 13 * 8 * k.nl + 31) / 32) * 4, s);
+}
+
+/* the pass (sub = SUB_FULL: the v1 node order, unchanged) or one sub-graph of it (v2 split, key_sub). Split: C ends at the estimate (its inputs are the slot, the
+ * DM-RS geometry and the pilots only); the chest post (nvar normalisation reads number_symbols, the per-branch choice) heads D, so a retry body that changes S or the RE
+ * set re-enters at D on a held instance (Task 4). The post only writes ResBlk.post, so re-running it on the same estimate is idempotent. */
 static int enqueue(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, cudaStream_t s, int sub = SUB_FULL)
 {
   const int ncb = k.ncb, nbRx = g_cfg.nbRx;
-  const int ext = (12 * k.nrb + 15) & ~15;
   const bool full = sub == SUB_FULL;
   const size_t llr_bytes = std::min<size_t>((size_t)LLR_CAP, (size_t)12 * k.nrb * 13 * 8 * k.nl) * 2;
   const size_t nvar_bytes = (size_t)k.ndmrs * k.nl * (k.nseg ? k.nseg : 1) * nbRx * sizeof(int);
+  if (full && h2d_params(I, k, s, true)) return -1;
   if (full || sub == SUB_C) {
-    /* the parameter blocks (DISCRETE: H2D; DIRECT: the kernels read the mapped memory); C runs first, so D and L read them too */
-    if (nr_gpu_buf_h2d_async(&I.pb, 0, sizeof(PassBlk), s) || nr_gpu_buf_h2d_async(&I.geo, 0, (size_t)2 * NSYM * ext * 4, s) ||
-        nr_gpu_buf_h2d_async(&I.pil, 0, (size_t)NR_GPU_PASS_MAX_DMRS * 4 * PIL_STRIDE * 4, s) ||
-        nr_gpu_buf_h2d_async(&I.scr, 0, (size_t)(((size_t)12 * k.nrb * 13 * 8 * k.nl + 31) / 32) * 4, s))
-      return -1;
     if (nr_pdsch_gpu_fep_dev(&I.fj, &I.rxF, I.id, s) != 0) return -1;
     if (nr_pdsch_gpu_chest_dev(I.cj, I.cj->n_rows, k.nseg ? &I.segsc : &I.est, &I.nvar, I.id, s) != 0) return -1;
     if (k.nseg) k_seg_compose<<<k.ndmrs * k.nl * nbRx, 256, 0, s>>>((const short2 *)I.segsc.dev, (short2 *)I.est.dev, I.PBd(), k.nseg, k.nl, nbRx);
-    if (nr_gpu_pass_launch_chest_post_p(I.PBd() ? &I.PBd()->post : nullptr, &I.RBd()->post, s) != 0) return -1;
+    if (full && nr_gpu_pass_launch_chest_post_p(I.PBd() ? &I.PBd()->post : nullptr, &I.RBd()->post, s) != 0) return -1;
     if (!full && nr_gpu_buf_d2h_async(&I.nvar, 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int), nvar_bytes, s)) return -1;
   }
   if (full || sub == SUB_D) {
+    if (!full && nr_gpu_pass_launch_chest_post_p(&I.PBd()->post, &I.RBd()->post, s) != 0) return -1;
     if (nr_pdsch_gpu_demod_pass_dev(I.id, &sj->dj, &I.llr, I.dj.nvar_dev, s, I.s2) != 0) return -1;
     k_unscr<<<256, 256, 0, s>>>((int16_t *)I.llr.dev, I.PBd());
     if (g_cfg.v2) k_llr_stats<<<1, 1024, 0, s>>>((const int16_t *)I.llr.dev, I.PBd(), I.RBd()); /* v2 only: the v1 graph is unchanged */
@@ -811,8 +832,9 @@ static int build(const Key &k, int sub = SUB_FULL)
     if (cudaGraphInstantiate(&e.exec[i], g, 0) != cudaSuccess) rc = -1;
     cudaGraphDestroy(g);
     if (rc) break;
-    /* the first replay allocates inside the driver / loads the kernels: do it now (pre-fence) */
-    if (cudaGraphLaunch(e.exec[i], I.s) != cudaSuccess || cudaEventRecord(I.done, I.s) != cudaSuccess || cudaStreamSynchronize(I.s) != cudaSuccess) {
+    /* the first replay allocates inside the driver / loads the kernels: do it now (pre-fence). Split: the parameter blocks are not in the sub-graphs (h2d_params) */
+    if ((sub != SUB_FULL && h2d_params(I, k, I.s, true)) || cudaGraphLaunch(e.exec[i], I.s) != cudaSuccess || cudaEventRecord(I.done, I.s) != cudaSuccess ||
+        cudaStreamSynchronize(I.s) != cudaSuccess) {
       fprintf(stderr, "nr_gpu_pass: warm replay of class nrb %u nl %u failed: %s\n", k.nrb, k.nl, cudaGetErrorString(cudaGetLastError()));
       rc = -1;
     }
@@ -865,6 +887,7 @@ static int alloc_inst(int id)
       nr_gpu_buf_alloc(&I.uli, NSYM * sizeof(nr_pusch_gpu_fep_item_t) + 64) || nr_gpu_buf_alloc(&I.ulb, sizeof(nrul::UlBlk)) ||
       nr_gpu_buf_alloc(&I.ulwin, (size_t)4 * ULW_LEN * 4))
     return -1;
+  for (auto &v : I.sig) v.resize(SIG_CAP);
   I.cj = (nr_gpu_chest_job_t *)calloc(1, sizeof(nr_gpu_chest_job_t));
   I.lj = (nr_gpu_ldpc_job_t *)calloc(MAXCB, sizeof(nr_gpu_ldpc_job_t));
   if (!I.cj || !I.lj) return -1;
@@ -1018,6 +1041,9 @@ extern "C" void nr_gpu_pass_stats(char *buf, int n)
              (unsigned long)(NI * (g_split_n[SUB_C] + g_split_n[SUB_D] + g_split_n[SUB_L])), (unsigned long)(g_inst_mb + g_split_mb), (unsigned long)g_inst_mb.load(),
              (unsigned long)g_split_mb.load(), (unsigned long)(g_split_warm_us / 1000), (unsigned long)g_split_capped.load(), (unsigned long)g_split_unseen[SUB_C],
              (unsigned long)g_split_unseen[SUB_D], (unsigned long)g_split_unseen[SUB_L]);
+    const size_t l2 = strlen(buf); /* v2 Task 4: entries of split passes (D = C skipped on the held instance), held calls, hold time */
+    snprintf(buf + l2, n > (int)l2 ? n - l2 : 0, " retry[held=%lu entry_C=%lu entry_D=%lu dirty=%lu hold_us_p50<=%lu p99<=%lu]", (unsigned long)g_held.load(),
+             (unsigned long)g_entry[0].load(), (unsigned long)g_entry[1].load(), (unsigned long)g_dirty.load(), (unsigned long)hist_q(g_hold_hist, 50), (unsigned long)hist_q(g_hold_hist, 99));
   }
 }
 
@@ -1034,6 +1060,63 @@ static int probe_reserve()
   /* clamped to NI - 1 (review S2): a reserve of every instance would never let a probe run */
   static const int v = [] { const char *e = getenv("ISAC_PDSCH_GPU_GRAPH_PROBE_RESERVE"); return std::max(0, std::min(NI - 1, e && *e ? atoi(e) : 1)); }();
   return v;
+}
+
+/* a free instance (compare-and-swap on the busy mask) that leaves `keep` instances free, or -1 */
+static int acquire(int keep)
+{
+  for (unsigned m = g_busy.load();;) {
+    int i = 0;
+    while (i < NI && (m >> i & 1u)) i++;
+    if (i == NI || NI - __builtin_popcount(m & ((1u << NI) - 1u)) <= keep) return -1;
+    if (g_busy.compare_exchange_weak(m, m | 1u << i)) return i;
+  }
+}
+
+/* v2 Task 4 (ISAC_PDSCH_GPU_GRAPH_RETRY): a decode call (nr_pdsch_passive_decode: first body, retry arms, worker arms) holds the instance its first pass takes until
+ * nr_gpu_pass_call_end, so that est stays on the device across its bodies. Nested calls keep the outer hold. */
+extern "C" void nr_gpu_pass_call_begin(void) { ++t_hold; }
+extern "C" void nr_gpu_pass_call_end(void)
+{
+  if (t_hold <= 0 || --t_hold > 0 || t_held < 0) return;
+  g_inst[t_held].c_ok = false;
+  hist_add(g_hold_hist, nr_gpu_pass_now_ns() - t_hold_ns);
+  g_busy.fetch_and(~(1u << t_held));
+  t_held = -1;
+}
+/* the host may have changed what D reads besides the job (a stage-path body rewrote the caller's rxdataF, which D reads in place on DIRECT): the next body re-runs C */
+extern "C" void nr_gpu_pass_call_dirty(void)
+{
+  if (t_held >= 0 && g_inst[t_held].c_ok) {
+    g_inst[t_held].c_ok = false;
+    ++g_dirty;
+  }
+}
+/* test / census: C entries, D entries (C skipped), held calls, dirty invalidations */
+extern "C" void nr_gpu_pass_retry_counters(uint64_t o[4])
+{
+  o[0] = g_entry[0]; o[1] = g_entry[1]; o[2] = g_held; o[3] = g_dirty;
+}
+
+/* every input of sub-graph C of a job (what prepare() turns into the FEP block, the chest rows, the pilots and the segment tables) as bytes; > cap = not comparable.
+ * The IQ ring is identified by its pointers and offset: its samples do not change within one decode call (the recovery worker decodes its own snapshot). */
+static size_t c_sig(const nr_gpu_pass_job_t *j, const Key &k, uint8_t *o, size_t cap)
+{
+  size_t n = 0;
+  auto put = [&](const void *p, size_t b) { if (n + b <= cap) memcpy(o + n, p, b); n += b; };
+  const uint64_t kc = key_sub(k, SUB_C).pack();
+  const bool redirect = nr_gpu_model() == NR_GPU_MODEL_DIRECT && j->rxdataF; /* DIRECT: the FEP writes the caller's rxdataF and C / D read it there */
+  const int16_t *rxf = redirect ? j->rxdataF : nullptr;
+  const uint32_t rst = redirect ? j->rx_stride : 0;
+  put(&kc, sizeof(kc)); put(j->rxdata, sizeof(j->rxdata)); put(&j->ring_len, 4); put(&j->ring_offset, 4); put(&j->symbol_rot, sizeof(j->symbol_rot));
+  put(&rxf, sizeof(rxf)); put(&rst, 4);
+  put(&j->nl, 4); put(&j->ndmrs, 4); put(&j->nrb, 4); put(&j->k0, 4); put(&j->nseg, 4); put(&j->seg_pil_nrb, 4);
+  put(j->dmrs_sym, sizeof(int) * j->ndmrs); put(j->delta, sizeof(int) * j->nl);
+  for (int s = 0; s < j->nseg; s++) { put(&j->seg[s].n_prb, 2); put(&j->seg[s].data_index, 2); put(&j->seg[s].pil_rb, 4); put(&j->seg[s].k0, 4); }
+  const size_t pb = (size_t)6 * (j->nseg ? j->seg_pil_nrb : j->nrb) * 4;
+  for (int q = 0; q < j->ndmrs; q++)
+    for (int l = 0; l < j->nl; l++) put(j->pil[q][l], pb);
+  return n;
 }
 
 extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result_t *r)
@@ -1074,27 +1157,37 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
               j->C, k.evm, k.qmode, k.align, k.fp32, k.nseg, j->nseg, split && !es[0], split && !es[1], split && !es[2]);
     return 1;
   }
-  /* a probe never takes one of the last probe_reserve() free instances: real grants that find none free fall back to the slow stage path */
-  const int keep = j->probe ? probe_reserve() : 0;
-  int id = -1;
-  for (unsigned m = g_busy.load(); id < 0;) {
-    int i = 0;
-    while (i < NI && (m >> i & 1u)) i++;
-    if (i == NI || NI - __builtin_popcount(m & ((1u << NI) - 1u)) <= keep) break;
-    if (g_busy.compare_exchange_weak(m, m | 1u << i)) id = i;
-  }
+  /* the instance: the one this thread's decode call holds (Task 4), else a free one. A probe never takes one of the last probe_reserve() free instances: real grants that
+   * find none free fall back to the slow stage path. In a held call the first acquisition keeps the instance until nr_gpu_pass_call_end. */
+  const bool held = t_held >= 0;
+  const int id = held ? t_held : acquire(j->probe ? probe_reserve() : 0);
   if (id < 0) { ++(j->probe ? g_fb_busy_probe : g_fb_busy); return 1; }
   Inst &I = g_inst[id];
-  struct Rel { int id; ~Rel() { g_busy.fetch_and(~(1u << id)); } } rel{id};
+  if (!held) {
+    I.c_ok = false; /* a fresh instance: whatever estimate it holds is not this call's */
+    if (t_hold > 0) { t_held = id; t_hold_ns = nr_gpu_pass_now_ns(); ++g_held; }
+  }
+  struct Rel { int id; ~Rel() { if (id >= 0) g_busy.fetch_and(~(1u << id)); } } rel{t_held == id ? -1 : id};
   NrGpuRtScope rt;
   if (!rt.admitted) { ++g_fb_unsup; return 1; }
   const int pr = prepare(I, j);
   if (pr != 0) { ++(pr == -2 ? g_fb_ldpckey : g_fb_err); return 1; }
+  /* Task 4 entry: on the held instance, C is skipped when its inputs equal those of the C the instance last ran (the estimate on the device is this job's); D and L
+   * always run, after a fresh H2D of the parameter blocks (h2d_params). Data-driven, so an arm that changes the DM-RS hypothesis (CDM, pilots) can never reuse an estimate. */
+  bool skip_c = false;
+  size_t sig_n = SIG_CAP + 1;
+  if (split && t_held == id) {
+    sig_n = c_sig(j, k, I.sig[I.sig_cur ^ 1].data(), SIG_CAP);
+    skip_c = I.c_ok && sig_n <= SIG_CAP && sig_n == I.sig_n[I.sig_cur] && !memcmp(I.sig[I.sig_cur ^ 1].data(), I.sig[I.sig_cur].data(), sig_n);
+    I.sig_cur ^= 1;
+    I.sig_n[I.sig_cur] = sig_n;
+  }
+  I.c_ok = false; /* until this launch completes */
   const uint64_t ts_l = nr_gpu_pass_now_ns();
   const auto t0 = std::chrono::steady_clock::now();
   cudaStream_t ls = j->probe && I.s_lo ? I.s_lo : I.s; /* a captured graph launches on either stream */
-  const bool launched = split ? cudaGraphLaunch(es[0]->exec[id], ls) == cudaSuccess && cudaGraphLaunch(es[1]->exec[id], ls) == cudaSuccess &&
-                                    cudaGraphLaunch(es[2]->exec[id], ls) == cudaSuccess /* C, D, L back to back: stream order, no host wait between */
+  const bool launched = split ? !h2d_params(I, k, ls, !skip_c) && (skip_c || cudaGraphLaunch(es[0]->exec[id], ls) == cudaSuccess) &&
+                                    cudaGraphLaunch(es[1]->exec[id], ls) == cudaSuccess && cudaGraphLaunch(es[2]->exec[id], ls) == cudaSuccess /* back to back: stream order, no host wait between */
                               : cudaGraphLaunch(e->exec[id], ls) == cudaSuccess;
   if (!launched || cudaEventRecord(I.done, ls) != cudaSuccess) {
     ++g_fb_err;
@@ -1102,10 +1195,12 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     cudaStreamSynchronize(ls); /* error path (review N1): drain what was launched before the instance is released; g_dead keeps every later pass off */
     return -1;
   }
+  if (split) ++g_entry[skip_c];
   wait_done(I);
   const uint64_t ts_d = nr_gpu_pass_now_ns();
   const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   if (g_dead) { ++g_fb_err; return -1; }
+  I.c_ok = t_held == id && sig_n <= SIG_CAP;
   ++g_launches;
   ++g_hits;
   if (k.nseg) ++g_seg_launches;
@@ -1221,13 +1316,7 @@ extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
       fprintf(stderr, "GPUPASS unseen UL class: nrb %u (grant %d) ndmrs %u ncb %u (C %u)\n", k.nrb, u.nrb, k.ndmrs, k.ncb, j->C);
     return 1;
   }
-  int id = -1;
-  for (unsigned m = g_busy.load(); id < 0;) {
-    int i = 0;
-    while (i < NI && (m >> i & 1u)) i++;
-    if (i == NI) break;
-    if (g_busy.compare_exchange_weak(m, m | 1u << i)) id = i;
-  }
+  const int id = acquire(0);
   if (id < 0) { ++g_ul_fb_busy; return 1; }
   Inst &I = g_inst[id];
   struct Rel { int id; ~Rel() { g_busy.fetch_and(~(1u << id)); } } rel{id};
