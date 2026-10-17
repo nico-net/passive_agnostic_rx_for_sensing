@@ -63,7 +63,7 @@ constexpr int EXTMAX = NR_GPU_DEMOD_MAX_EXT;
 constexpr uint32_t LLR_CAP = 1500000;      /* LLRs of one pass: 273 PRB x 13 symbols x 12 x Qm 8 x 4 layers = 1362816 */
 constexpr int PIL_STRIDE = 3328;           /* c16 per (DM-RS symbol, layer) pilot row */
 constexpr int ULW_LEN = 66368;             /* PUSCH pass, DISCRETE: c16 of IQ copied per antenna (14 symbols + one FFT window: 14 * (4096 + 352) + 4096) */
-constexpr int SEG_ROWS = 512;              /* chest rows of one pass: nd * nl * nrx * nseg_class (= PASS_LS_ROWS of nr_pdsch_gpu_fep.cu) */
+static int SEG_ROWS = 512;                 /* chest rows of one pass: nd * nl * nrx * nseg_class (<= PASS_LS_ROWS of nr_pdsch_gpu_fep.cu); 1024 in split mode (32 segments) */
 
 /* ---- device-accessible blocks ---- */
 struct PassBlk { /* written by the host before every replay */
@@ -216,12 +216,27 @@ struct Key {
   uint8_t fp32, evm, qmode, align;
   uint8_t nseg; /* 0 = a contiguous grant (the estimate rows go straight into the estimate buffer); 1, 2, 4, 8, 16 = segmented grant of up to that many segments (scratch rows + compose) */
   uint8_t ul = 0; /* Task 7: a PUSCH pass class (nl = 1; nrb, ndmrs and ncb are its whole structure) */
+  uint8_t sub = 0; /* v2 Task 3: 0 = the whole pass in one graph; SUB_C / SUB_D / SUB_L = a sub-graph, keyed by the fields it depends on only (key_sub) */
   uint64_t pack() const
   {
     return (uint64_t)nrb | (uint64_t)nl << 9 | (uint64_t)ndmrs << 12 | (uint64_t)ncb << 15 | (uint64_t)(fp32 & 1) << 22 | (uint64_t)(fp32 >> 1) << 32 | (uint64_t)evm << 23 | (uint64_t)qmode << 24 |
-           (uint64_t)align << 28 | (uint64_t)(nseg ? 1 + __builtin_ctz((unsigned)nseg) : 0) << 29 | (uint64_t)ul << 40;
+           (uint64_t)align << 28 | (uint64_t)(nseg ? 1 + __builtin_ctz((unsigned)nseg) : 0) << 29 | (uint64_t)ul << 40 | (uint64_t)sub << 41;
   }
 };
+/* v2 Task 3 (split): C = [H2D of the parameter blocks] + FEP + chest + [seg compose] + chest post + [nvar D2H]: depends on (nrb, nl, ndmrs, nseg);
+ * D = demod (+ EVM fork) + descramble + LLR stats + LLR norm + [LLR / est / rxF D2H]: (nrb, nl, fp32, evm, qmode, align); L = rate dematch + LDPC + CRC + pick + CRC +
+ * [result D2H]: (ncb). The count of graphs is the sum of the three key sets, not their product. */
+enum { SUB_FULL = 0, SUB_C = 1, SUB_D = 2, SUB_L = 3 };
+static Key key_sub(const Key &k, int sub)
+{
+  Key r{};
+  if (sub == SUB_C) r = Key{k.nrb, k.nl, k.ndmrs, 0, 0, 0, 0, 0, k.nseg};
+  else if (sub == SUB_D) r = Key{k.nrb, k.nl, 0, 0, k.fp32, k.evm, k.qmode, k.align, 0};
+  else if (sub == SUB_L) r = Key{0, 0, 0, k.ncb, 0, 0, 0, 0, 0};
+  else return k;
+  r.sub = (uint8_t)sub;
+  return r;
+}
 
 struct Inst {
   int id = 0;
@@ -487,35 +502,49 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
   return prepare_tb(I, j);
 }
 
-static int enqueue(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, cudaStream_t s)
+/* the pass (sub = SUB_FULL: the v1 node order, unchanged) or one sub-graph of it (v2 split, key_sub) */
+static int enqueue(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, cudaStream_t s, int sub = SUB_FULL)
 {
   const int ncb = k.ncb, nbRx = g_cfg.nbRx;
   const int ext = (12 * k.nrb + 15) & ~15;
-  /* the parameter blocks (DISCRETE: H2D; DIRECT: the kernels read the mapped memory) */
-  if (nr_gpu_buf_h2d_async(&I.pb, 0, sizeof(PassBlk), s) || nr_gpu_buf_h2d_async(&I.geo, 0, (size_t)2 * NSYM * ext * 4, s) ||
-      nr_gpu_buf_h2d_async(&I.pil, 0, (size_t)NR_GPU_PASS_MAX_DMRS * 4 * PIL_STRIDE * 4, s) ||
-      nr_gpu_buf_h2d_async(&I.scr, 0, (size_t)(((size_t)12 * k.nrb * 13 * 8 * k.nl + 31) / 32) * 4, s))
-    return -1;
-  if (nr_pdsch_gpu_fep_dev(&I.fj, &I.rxF, I.id, s) != 0) return -1;
-  if (nr_pdsch_gpu_chest_dev(I.cj, I.cj->n_rows, k.nseg ? &I.segsc : &I.est, &I.nvar, I.id, s) != 0) return -1;
-  if (k.nseg) k_seg_compose<<<k.ndmrs * k.nl * nbRx, 256, 0, s>>>((const short2 *)I.segsc.dev, (short2 *)I.est.dev, I.PBd(), k.nseg, k.nl, nbRx);
-  if (nr_gpu_pass_launch_chest_post_p(I.PBd() ? &I.PBd()->post : nullptr, &I.RBd()->post, s) != 0) return -1;
-  if (nr_pdsch_gpu_demod_pass_dev(I.id, &sj->dj, &I.llr, I.dj.nvar_dev, s, I.s2) != 0) return -1;
-  k_unscr<<<256, 256, 0, s>>>((int16_t *)I.llr.dev, I.PBd());
-  if (g_cfg.v2) k_llr_stats<<<1, 1024, 0, s>>>((const int16_t *)I.llr.dev, I.PBd(), I.RBd()); /* v2 only: the v1 graph is unchanged */
-  k_norm_sum<<<1, 1024, 0, s>>>((const int16_t *)I.llr.dev, I.PBd(), I.RBd());
-  k_norm_apply<<<256, 256, 0, s>>>((int16_t *)I.llr.dev, I.PBd(), I.RBd());
-  if (nr_gpu_pass_launch_rdm((const int16_t *)I.llr.dev, I.PBd()->rdm, ncb, (int8_t *)I.lin.dev, s) != 0) return -1;
-  if (nr_pdsch_gpu_ldpc_pass_dev(I.id, I.lj, ncb, &I.lin, &I.bits, s) != 0) return -1;
-  const uint8_t *snaps = (const uint8_t *)I.bits.dev;
-  const int *dres = (const int *)((const char *)I.bits.dev + NR_GPU_LDPC_DEV_RES_OFF);
-  if (nr_gpu_pass_launch_crc_p(snaps, I.PBd()->cand, ncb * NSNAP, &I.PBd()->tbs, I.RBd()->cand_ok, &I.RBd()->dummy_tb, s) != 0) return -1;
-  k_pick<<<1, 128, 0, s>>>(snaps, dres, I.PBd(), I.RBd());
-  if (nr_gpu_pass_launch_crc_p((const uint8_t *)I.res.dev, I.PBd()->sel, ncb, &I.PBd()->tbs, I.RBd()->seg_crc, &I.RBd()->tb_crc, s) != 0) return -1;
-  if (nr_gpu_buf_d2h_async(&I.llr, 0, std::min<size_t>((size_t)LLR_CAP, (size_t)12 * k.nrb * 13 * 8 * k.nl) * 2, s) ||
-      nr_gpu_buf_d2h_async(&I.nvar, 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int), (size_t)k.ndmrs * k.nl * (k.nseg ? k.nseg : 1) * nbRx * sizeof(int), s) ||
-      nr_gpu_buf_d2h_async(&I.res, 0, sizeof(ResBlk), s) || nr_gpu_buf_d2h_async(&I.est, 0, (size_t)nbRx * NSYM * N * 4, s) ||
-      nr_gpu_buf_d2h_async(&I.rxF, 0, (size_t)nbRx * NSYM * N * 4, s))
+  const bool full = sub == SUB_FULL;
+  const size_t llr_bytes = std::min<size_t>((size_t)LLR_CAP, (size_t)12 * k.nrb * 13 * 8 * k.nl) * 2;
+  const size_t nvar_bytes = (size_t)k.ndmrs * k.nl * (k.nseg ? k.nseg : 1) * nbRx * sizeof(int);
+  if (full || sub == SUB_C) {
+    /* the parameter blocks (DISCRETE: H2D; DIRECT: the kernels read the mapped memory); C runs first, so D and L read them too */
+    if (nr_gpu_buf_h2d_async(&I.pb, 0, sizeof(PassBlk), s) || nr_gpu_buf_h2d_async(&I.geo, 0, (size_t)2 * NSYM * ext * 4, s) ||
+        nr_gpu_buf_h2d_async(&I.pil, 0, (size_t)NR_GPU_PASS_MAX_DMRS * 4 * PIL_STRIDE * 4, s) ||
+        nr_gpu_buf_h2d_async(&I.scr, 0, (size_t)(((size_t)12 * k.nrb * 13 * 8 * k.nl + 31) / 32) * 4, s))
+      return -1;
+    if (nr_pdsch_gpu_fep_dev(&I.fj, &I.rxF, I.id, s) != 0) return -1;
+    if (nr_pdsch_gpu_chest_dev(I.cj, I.cj->n_rows, k.nseg ? &I.segsc : &I.est, &I.nvar, I.id, s) != 0) return -1;
+    if (k.nseg) k_seg_compose<<<k.ndmrs * k.nl * nbRx, 256, 0, s>>>((const short2 *)I.segsc.dev, (short2 *)I.est.dev, I.PBd(), k.nseg, k.nl, nbRx);
+    if (nr_gpu_pass_launch_chest_post_p(I.PBd() ? &I.PBd()->post : nullptr, &I.RBd()->post, s) != 0) return -1;
+    if (!full && nr_gpu_buf_d2h_async(&I.nvar, 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int), nvar_bytes, s)) return -1;
+  }
+  if (full || sub == SUB_D) {
+    if (nr_pdsch_gpu_demod_pass_dev(I.id, &sj->dj, &I.llr, I.dj.nvar_dev, s, I.s2) != 0) return -1;
+    k_unscr<<<256, 256, 0, s>>>((int16_t *)I.llr.dev, I.PBd());
+    if (g_cfg.v2) k_llr_stats<<<1, 1024, 0, s>>>((const int16_t *)I.llr.dev, I.PBd(), I.RBd()); /* v2 only: the v1 graph is unchanged */
+    k_norm_sum<<<1, 1024, 0, s>>>((const int16_t *)I.llr.dev, I.PBd(), I.RBd());
+    k_norm_apply<<<256, 256, 0, s>>>((int16_t *)I.llr.dev, I.PBd(), I.RBd());
+    if (!full && (nr_gpu_buf_d2h_async(&I.llr, 0, llr_bytes, s) || nr_gpu_buf_d2h_async(&I.est, 0, (size_t)nbRx * NSYM * N * 4, s) ||
+                  nr_gpu_buf_d2h_async(&I.rxF, 0, (size_t)nbRx * NSYM * N * 4, s)))
+      return -1;
+  }
+  if (full || sub == SUB_L) {
+    if (nr_gpu_pass_launch_rdm((const int16_t *)I.llr.dev, I.PBd()->rdm, ncb, (int8_t *)I.lin.dev, s) != 0) return -1;
+    if (nr_pdsch_gpu_ldpc_pass_dev(I.id, I.lj, ncb, &I.lin, &I.bits, s) != 0) return -1;
+    const uint8_t *snaps = (const uint8_t *)I.bits.dev;
+    const int *dres = (const int *)((const char *)I.bits.dev + NR_GPU_LDPC_DEV_RES_OFF);
+    if (nr_gpu_pass_launch_crc_p(snaps, I.PBd()->cand, ncb * NSNAP, &I.PBd()->tbs, I.RBd()->cand_ok, &I.RBd()->dummy_tb, s) != 0) return -1;
+    k_pick<<<1, 128, 0, s>>>(snaps, dres, I.PBd(), I.RBd());
+    if (nr_gpu_pass_launch_crc_p((const uint8_t *)I.res.dev, I.PBd()->sel, ncb, &I.PBd()->tbs, I.RBd()->seg_crc, &I.RBd()->tb_crc, s) != 0) return -1;
+    if (!full && nr_gpu_buf_d2h_async(&I.res, 0, sizeof(ResBlk), s)) return -1;
+  }
+  if (full && (nr_gpu_buf_d2h_async(&I.llr, 0, llr_bytes, s) || nr_gpu_buf_d2h_async(&I.nvar, 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int), nvar_bytes, s) ||
+               nr_gpu_buf_d2h_async(&I.res, 0, sizeof(ResBlk), s) || nr_gpu_buf_d2h_async(&I.est, 0, (size_t)nbRx * NSYM * N * 4, s) ||
+               nr_gpu_buf_d2h_async(&I.rxF, 0, (size_t)nbRx * NSYM * N * 4, s)))
     return -1;
   return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
 }
@@ -728,14 +757,25 @@ static bool seg_ok(const nr_gpu_pass_job_t *j)
 static bool key_ok(const Key &k)
 {
   return g_cfg_set && nr_gpu_pass_nrb_class(k.nrb) == k.nrb && nr_gpu_pass_ncb_class(k.ncb) == k.ncb && k.nl >= 1 && k.nl <= 4 && k.nl <= g_cfg.nbRx &&
-         k.ndmrs >= 1 && k.ndmrs <= NR_GPU_PASS_MAX_DMRS && k.qmode <= 3 && (k.nseg == 0 || nr_gpu_pass_nseg_class(k.nseg) == k.nseg) &&
+         k.ndmrs >= 1 && k.ndmrs <= NR_GPU_PASS_MAX_DMRS && k.qmode <= 3 && (k.nseg == 0 || (nr_gpu_pass_nseg_class(k.nseg) == k.nseg && k.nseg <= (g_cfg.split ? NR_GPU_PASS_MAX_SEG : NR_GPU_PASS_MAX_SEG_FULL))) &&
          (int)k.ndmrs * k.nl * g_cfg.nbRx * (k.nseg ? k.nseg : 1) <= std::min(SEG_ROWS, nr_pdsch_gpu_pass_ls_rows());
 }
 
-/* capture + instantiate + one replay (pre-fence) of a class on every instance. Under g_mu. */
-static int build(const Key &k)
+/* v2 Task 3 (split) bookkeeping: sub-graphs cached per kind, pass memory (instance buffers + split graphs, cudaMemGetInfo deltas), warm time, cap refusals, unseen per kind */
+static std::atomic<uint64_t> g_split_n[4], g_split_unseen[4], g_split_mb{0}, g_inst_mb{0}, g_split_warm_us{0}, g_split_capped{0};
+static int split_cap_mb() { return g_cfg.split_mb > 0 ? g_cfg.split_mb : 1024; }
+
+/* capture + instantiate + one replay (pre-fence) of a class (sub = SUB_FULL) or of one sub-graph of it on every instance. Under g_mu. */
+static int build(const Key &k, int sub = SUB_FULL)
 {
   if (!guard_alloc()) return -1;
+  if (sub != SUB_FULL && g_inst_mb + g_split_mb >= (uint64_t)split_cap_mb()) { /* the memory cap: stop warming, the key stays unseen (stage path, counted) */
+    if (g_split_capped++ == 0) fprintf(stderr, "GPUGRAPH split: memory cap %d MB reached (instances %lu + graphs %lu MB): warming stops\n", split_cap_mb(), (unsigned long)g_inst_mb.load(), (unsigned long)g_split_mb.load());
+    return -1;
+  }
+  const auto tb0 = std::chrono::steady_clock::now();
+  size_t fr0 = 0, tot0 = 0;
+  if (sub != SUB_FULL) cudaMemGetInfo(&fr0, &tot0);
   Entry e;
   nr_gpu_pass_job_t *sj = (nr_gpu_pass_job_t *)malloc(sizeof(*sj));
   if (!sj) return -1;
@@ -749,10 +789,10 @@ static int build(const Key &k)
     if ((k.ul ? prepare_ul(I, sj) : prepare(I, sj)) != 0) { rc = -1; break; }
     cudaGraph_t g = nullptr;
     if (cudaStreamBeginCapture(I.s, cudaStreamCaptureModeRelaxed) != cudaSuccess) { rc = -1; break; }
-    const int er = k.ul ? enqueue_ul(I, k, I.s) : enqueue(I, k, sj, I.s);
+    const int er = k.ul ? enqueue_ul(I, k, I.s) : enqueue(I, k, sj, I.s, sub);
     const cudaError_t ee = cudaStreamEndCapture(I.s, &g);
     if (er != 0 || ee != cudaSuccess || !g) {
-      fprintf(stderr, "nr_gpu_pass: capture of class nrb %u nl %u ndmrs %u ncb %u nseg %u ul %u failed (enqueue %d, end %s, last %s)\n", k.nrb, k.nl, k.ndmrs, k.ncb, k.nseg, k.ul, er,
+      fprintf(stderr, "nr_gpu_pass: capture of class nrb %u nl %u ndmrs %u ncb %u nseg %u ul %u sub %d failed (enqueue %d, end %s, last %s)\n", k.nrb, k.nl, k.ndmrs, k.ncb, k.nseg, k.ul, sub, er,
               cudaGetErrorString(ee), cudaGetErrorString(cudaGetLastError()));
       if (g) cudaGraphDestroy(g);
       rc = -1;
@@ -774,11 +814,22 @@ static int build(const Key &k)
       if (e.exec[i]) cudaGraphExecDestroy(e.exec[i]);
     return -1;
   }
-  g_cache[k.pack()] = e;
-  if (k.nseg) ++g_seg_classes;
+  g_cache[key_sub(k, sub).pack()] = e;
+  if (k.nseg && (sub == SUB_FULL || sub == SUB_C)) ++g_seg_classes;
   {
     size_t fr = 0, tot_b = 0; /* build() runs before the fence only (guard_alloc) */
-    if (cudaMemGetInfo(&fr, &tot_b) == cudaSuccess) g_used_mb = ((tot_b - fr) >> 20) - g_base_mb; /* delta from the start of the warm-up (the device is shared) */
+    if (cudaMemGetInfo(&fr, &tot_b) == cudaSuccess) {
+      g_used_mb = ((tot_b - fr) >> 20) - g_base_mb; /* delta from the start of the warm-up (the device is shared) */
+      if (sub != SUB_FULL) { /* bytes: summed as KB so that small graphs are not lost to MB rounding */
+        static uint64_t kb = 0;
+        kb += fr0 > fr ? (uint64_t)(fr0 - fr) >> 10 : 0;
+        g_split_mb = kb >> 10;
+      }
+    }
+  }
+  if (sub != SUB_FULL) {
+    ++g_split_n[sub];
+    g_split_warm_us += (uint64_t)std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tb0).count();
   }
   return 0;
 }
@@ -864,8 +915,10 @@ extern "C" int nr_gpu_pass_init(int max_classes)
   for (int a = 0; a < 4; a++)
     if (nr_gpu_buf_alloc(&g_ring[a], (size_t)RING_LEN * 4)) return -1;
   if (nr_gpu_buf_alloc(&g_rot, 64 * 4)) return -1;
+  SEG_ROWS = g_cfg.split ? 1024 : 512; /* split: 32 segments x 2 DM-RS x 4 layers x 4 RX */
   for (int i = 0; i < NI; i++)
     if (alloc_inst(i) != 0) return -1;
+  { size_t fr = 0, tb = 0; if (cudaMemGetInfo(&fr, &tb) == cudaSuccess) g_inst_mb = ((tb - fr) >> 20) > g_base_mb ? ((tb - fr) >> 20) - g_base_mb : 0; }
   g_ready = 1;
   const int n = max_classes > 16 ? 16 : max_classes;
   for (int i = 0; i < n; i++) {
@@ -889,8 +942,20 @@ extern "C" int nr_gpu_pass_warm(const nr_gpu_pass_shape_t *sh, int qmode, int al
   const Key k{sh->nrb_class, sh->nl, sh->ndmrs, sh->ncb_class, sh->fp32, (uint8_t)(evm != 0), (uint8_t)(sh->nl >= 2 ? qmode : 0), (uint8_t)(sh->nl == 1 && align),
                 (uint8_t)sh->nseg_class};
   if (!key_ok(k) || (int)k.nseg > (int)k.nrb) return -1;
+  if (g_cfg.split) { /* the three sub-graphs of the class; the ones another class already built are shared */
+    for (int sub = SUB_C; sub <= SUB_L; sub++)
+      if (!g_cache.count(key_sub(k, sub).pack()) && build(k, sub) != 0) return -1;
+    return 0;
+  }
   if (g_cache.count(k.pack())) return 0;
   return build(k);
+}
+
+/* test hook: switch the split mode (the sub-graph caches and the single-graph cache are separate, so both modes can be compared in one process) */
+extern "C" void nr_gpu_pass_test_split(int on)
+{
+  std::lock_guard<std::mutex> lk(g_mu);
+  g_cfg.split = on;
 }
 
 extern "C" void nr_gpu_pass_counters(uint64_t o[16])
@@ -916,6 +981,14 @@ extern "C" void nr_gpu_pass_stats(char *buf, int n)
            (unsigned long)o[5], (unsigned long)o[11], (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[9], (unsigned long)o[13], (unsigned long)o[12], (unsigned long)o[8],
            tot ? 1 << p50 : 0, (unsigned long)g_used_mb.load(), (unsigned long)stamp_q(0, 0, 50), (unsigned long)stamp_q(0, 0, 99), (unsigned long)stamp_q(0, 1, 50),
            (unsigned long)stamp_q(0, 1, 99), (unsigned long)stamp_q(0, 2, 50), (unsigned long)stamp_q(0, 2, 99), (unsigned long)o[15]);
+  if (g_cfg.split) { /* v2 Task 3: mb = instance buffers + split graphs (cudaMemGetInfo deltas) */
+    const size_t l = strlen(buf);
+    snprintf(buf + l, n > (int)l ? n - l : 0, " GPUGRAPH split C=%lu D=%lu L=%lu execs=%lu mb=%lu (inst %lu graphs %lu) warm_ms=%lu capped=%lu unseen[C,D,L]=%lu,%lu,%lu",
+             (unsigned long)g_split_n[SUB_C], (unsigned long)g_split_n[SUB_D], (unsigned long)g_split_n[SUB_L],
+             (unsigned long)(NI * (g_split_n[SUB_C] + g_split_n[SUB_D] + g_split_n[SUB_L])), (unsigned long)(g_inst_mb + g_split_mb), (unsigned long)g_inst_mb.load(),
+             (unsigned long)g_split_mb.load(), (unsigned long)(g_split_warm_us / 1000), (unsigned long)g_split_capped.load(), (unsigned long)g_split_unseen[SUB_C],
+             (unsigned long)g_split_unseen[SUB_D], (unsigned long)g_split_unseen[SUB_L]);
+  }
 }
 
 /* test hook: marks the instances of `mask` busy (1) or frees them (0) so that a test can run on one chosen instance */
@@ -946,17 +1019,28 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     ++g_fb_unsup;
     return 1;
   }
-  Entry *e = nullptr;
+  Entry *e = nullptr, *es[3] = {}; /* split: the C, D and L sub-graphs */
+  const bool split = g_cfg.split != 0;
   {
     std::lock_guard<std::mutex> lk(g_mu);
-    auto f = g_cache.find(k.pack());
-    if (f != g_cache.end()) e = &f->second;
+    if (split) {
+      for (int q = 0; q < 3; q++) {
+        auto f = g_cache.find(key_sub(k, SUB_C + q).pack());
+        if (f != g_cache.end()) es[q] = &f->second;
+      }
+      if (es[0] && es[1] && es[2]) e = es[0];
+    } else {
+      auto f = g_cache.find(k.pack());
+      if (f != g_cache.end()) e = &f->second;
+    }
   }
   if (!e) {
     if (k.nseg) ++g_fb_unseen_seg;
+    for (int q = 0; split && q < 3; q++)
+      if (!es[q]) ++g_split_unseen[SUB_C + q];
     if (g_fb_unseen++ < 40 && getenv("ISAC_GPU_PASS_LOG_UNSEEN"))
-      fprintf(stderr, "GPUPASS unseen class: nrb %u (grant %d) nl %u ndmrs %u ncb %u (C %u) evm %u qmode %u align %u fp32 %u nseg %u (grant %d)\n", k.nrb, j->nrb, k.nl, k.ndmrs, k.ncb, j->C, k.evm, k.qmode,
-              k.align, k.fp32, k.nseg, j->nseg);
+      fprintf(stderr, "GPUPASS unseen class: nrb %u (grant %d) nl %u ndmrs %u ncb %u (C %u) evm %u qmode %u align %u fp32 %u nseg %u (grant %d) missing sub-graphs C%d D%d L%d\n", k.nrb, j->nrb, k.nl, k.ndmrs, k.ncb,
+              j->C, k.evm, k.qmode, k.align, k.fp32, k.nseg, j->nseg, split && !es[0], split && !es[1], split && !es[2]);
     return 1;
   }
   /* a probe never takes one of the last probe_reserve() free instances: real grants that find none free fall back to the slow stage path */
@@ -978,7 +1062,10 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   const uint64_t ts_l = nr_gpu_pass_now_ns();
   const auto t0 = std::chrono::steady_clock::now();
   cudaStream_t ls = j->probe && I.s_lo ? I.s_lo : I.s; /* a captured graph launches on either stream */
-  if (cudaGraphLaunch(e->exec[id], ls) != cudaSuccess || cudaEventRecord(I.done, ls) != cudaSuccess) {
+  const bool launched = split ? cudaGraphLaunch(es[0]->exec[id], ls) == cudaSuccess && cudaGraphLaunch(es[1]->exec[id], ls) == cudaSuccess &&
+                                    cudaGraphLaunch(es[2]->exec[id], ls) == cudaSuccess /* C, D, L back to back: stream order, no host wait between */
+                              : cudaGraphLaunch(e->exec[id], ls) == cudaSuccess;
+  if (!launched || cudaEventRecord(I.done, ls) != cudaSuccess) {
     ++g_fb_err;
     g_dead = 1;
     return -1;

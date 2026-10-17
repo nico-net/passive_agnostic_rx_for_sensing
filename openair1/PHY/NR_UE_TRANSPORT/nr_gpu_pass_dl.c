@@ -45,6 +45,7 @@ static struct {
 
 int nr_gpu_pass_active(void) { return atomic_load_explicit(&G.on, memory_order_relaxed); }
 int nr_gpu_graph_on(void) { return G.v2 && nr_gpu_pass_active(); }
+int nr_gpu_pass_seg_max(void) { return nr_gpu_graph_flag("SPLIT") ? NR_GPU_PASS_MAX_SEG : NR_GPU_PASS_MAX_SEG_FULL; } /* split: the 32-segment class */
 /* the sub-flags, read once at warm-up (nr_gpu_graph_flag runs per grant) */
 static const char *const g_sub_name[] = {"COVER", "SPLIT", "RETRY", "SLOT", "LEAN"};
 static int g_sub_on[sizeof(g_sub_name) / sizeof(g_sub_name[0])];
@@ -166,11 +167,11 @@ static void census(void)
              (unsigned long)G.chest_why[3], (unsigned long)G.chest_why[4], (unsigned long)G.chest_why[5], (unsigned long)G.chest_why[6], (unsigned long)G.chest_why[7],
              (unsigned long)G.chest_why[8], (unsigned long)G.chest_why[9], (unsigned long)G.chest_why[10]);
   LOG_A(PHY,
-        "SENSING: %s%s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu seg=%lu] seg_grants[1=%lu 2=%lu 4=%lu 8=%lu 16=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
+        "SENSING: %s%s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu seg=%lu] seg_grants[1=%lu 2=%lu 4=%lu 8=%lu 16=%lu 32=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
         "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu probe_done=%lu old_first=%lu fp32_flip=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu retry=%lu]\n",
         pool, buf, (unsigned long)G.fb[FB_OFF], (unsigned long)G.fb[FB_CELL], (unsigned long)G.fb[FB_FO], (unsigned long)G.fb[FB_CHEST],
         (unsigned long)G.fb[FB_DEMOD], (unsigned long)G.fb[FB_TBPARAM], (unsigned long)G.fb[FB_MODULE], (unsigned long)G.fb[FB_SEG],
-        (unsigned long)G.segn[0], (unsigned long)G.segn[1], (unsigned long)G.segn[2], (unsigned long)G.segn[3], (unsigned long)G.segn[4], (unsigned long)G.ev[NR_GPU_PASS_EV_COMMIT],
+        (unsigned long)G.segn[0], (unsigned long)G.segn[1], (unsigned long)G.segn[2], (unsigned long)G.segn[3], (unsigned long)G.segn[4], (unsigned long)G.segn[5], (unsigned long)G.ev[NR_GPU_PASS_EV_COMMIT],
         (unsigned long)G.ev[NR_GPU_PASS_EV_RETRY_OLD], (unsigned long)G.ev[NR_GPU_PASS_EV_ZERO_TB], (unsigned long)G.ev[NR_GPU_PASS_EV_LIFETIME],
         (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_BAD], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL_BAD],
         (unsigned long)G.ev[NR_GPU_PASS_EV_CONT_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_PROBE], (unsigned long)G.ev[NR_GPU_PASS_EV_OLD_FIRST], (unsigned long)G.ev[NR_GPU_PASS_EV_FP32_FLIP], (unsigned long)G.gate[0], (unsigned long)G.gate[1],
@@ -260,7 +261,8 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     return;
   }
   nr_gpu_pass_cfg_t c = {.nbRx = fp->nb_antennas_rx, .n_rb_dl = fp->N_RB_DL, .delay_table = (const int16_t *)fp->delay_table[0],
-                         .dt_stride = NR_MAX_OFDM_SYMBOL_SIZE, .max_delay_comp = MAX_DELAY_COMP, .v2 = G.v2};
+                         .dt_stride = NR_MAX_OFDM_SYMBOL_SIZE, .max_delay_comp = MAX_DELAY_COMP, .v2 = G.v2, .split = G.v2 && g_sub_on[1],
+                         .split_mb = getenv("ISAC_PDSCH_GPU_GRAPH_MB") ? atoi(getenv("ISAC_PDSCH_GPU_GRAPH_MB")) : 1024};
   if (nr_gpu_model() == NR_GPU_MODEL_DISCRETE) { /* the graphs read the delay table on the device */
     static nr_gpu_buf_t dt;
     const size_t bytes = sizeof(fp->delay_table);
@@ -283,12 +285,14 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   /* the class list: PRB classes x layers x the code block counts that can occur x DM-RS symbol counts, in the order of expected use, up to ISAC_GPU_PASS_CLASSES */
   int nd[4], nnd = env_list("ISAC_GPU_PASS_NDMRS", "3,2", nd, 4);
   const char *ce = getenv("ISAC_GPU_PASS_CLASSES");
-  const int budget = ce ? atoi(ce) : 512;
+  const int budget = ce ? atoi(ce) : c.split ? 1 << 20 : 512; /* split: every class of the loops (sub-graphs are shared between classes; the module's memory cap bounds them) */
   const int evm = (getenv("ISAC_PDSCH_EVM_GRANT") || getenv("ISAC_PDSCH_SNR_GATE") || (getenv("ISAC_PDSCH_DECODE_DIAG") && atoi(getenv("ISAC_PDSCH_DECODE_DIAG")) != 0)) ? 1 : 0;
   static const int nrbs[] = {273, 217, 136, 96, 48, 24, 12, 6};
   static const int nls[] = {1, 2, 4, 3};
   int made = 0, failed = 0;
-  for (int di = 0; di < nnd; di++)
+  /* split: contiguous classes also with 1 DM-RS symbol (only C keys are added; tim replay: 224-260 unseen grants per run had ndmrs 1) */
+  int ndc[4], nndc = env_list("ISAC_GPU_PASS_NDMRS", c.split ? "3,2,1" : "3,2", ndc, 4);
+  for (int di = 0; di < nndc; di++)
     for (int ni = 0; ni < 8 && made < budget; ni++)
       for (int li = 0; li < 4 && made < budget; li++) {
         const int nl = nls[li];
@@ -315,7 +319,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
           if (ncb / 2 >= cmax)
             break;
           for (int v = 0; v < nvar && made < budget; v++) {
-            const nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)nd[di], (uint16_t)ncb, (uint8_t)(1 | (G.fp32 ? NR_GPU_PASS_FP32_DEMOD : 0))};
+            const nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)ndc[di], (uint16_t)ncb, (uint8_t)(1 | (G.fp32 ? NR_GPU_PASS_FP32_DEMOD : 0))};
             if (warmf(&sh, variants[v][0], variants[v][1], evm) == 0)
               made++;
             else
@@ -326,9 +330,10 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   /* segmented (PRG / VRB-bundle) classes: segment-count classes 1, 2, 4, 8, 16 on top of the contiguous ones. Own budget
    * (ISAC_GPU_PASS_SEG_CLASSES, default 1400): the passes with the widest grants are warmed first; a segmented grant of an unwarmed class stays on the old path (unseen). */
   const char *se = getenv("ISAC_GPU_PASS_SEG_CLASSES");
-  const int sbudget = se ? atoi(se) : 1400;
+  const int sbudget = se ? atoi(se) : c.split ? 1 << 20 : 1400;
   int smade = 0;
-  static const int segc[] = {1, 2, 4, 8, 16}, segnl[] = {1, 2, 3, 4};
+  static const int segc[] = {1, 2, 4, 8, 16, 32}, segnl[] = {1, 2, 3, 4};
+  const int nsegc = c.split ? 6 : 5, segrows = c.split ? 1024 : 512; /* split: the 32-segment class and the module's 1024 chest rows */
   if (G.stats) {
     char buf[1024];
     G.stats(buf, sizeof(buf));
@@ -337,9 +342,9 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   for (int li = 0; li < 4; li++) /* the layers that occur most first, then the DM-RS counts, the PRB classes and the segment classes */
     for (int di = 0; di < nnd; di++)
       for (int ni = 0; ni < 8 && smade < sbudget; ni++)
-        for (int sc = 0; sc < 5 && smade < sbudget; sc++) {
+        for (int sc = 0; sc < nsegc && smade < sbudget; sc++) {
           const int nl = segnl[li], ns = segc[sc];
-          if (nl > fp->nb_antennas_rx || ns > nrbs[ni] || nd[di] * nl * fp->nb_antennas_rx * ns > 512)
+          if (nl > fp->nb_antennas_rx || ns > nrbs[ni] || nd[di] * nl * fp->nb_antennas_rx * ns > segrows)
             continue;
           int variants[2][2], nvar = 0;
           for (int qm = 2; qm <= 6; qm += 4) {
@@ -418,7 +423,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   const int nseg = in->seg ? in->nseg : 0;
   const int nsegc = nseg > 0 ? nr_gpu_pass_nseg_class(nseg) : 0;
   if (nseg > 0) {
-    if (!nsegc || nseg > NR_GPU_PASS_MAX_SEG)
+    if (!nsegc || nseg > nr_gpu_pass_seg_max())
       return fb(FB_SEG);
     atomic_fetch_add_explicit(&G.segn[__builtin_ctz((unsigned)nsegc)], 1, memory_order_relaxed);
   }

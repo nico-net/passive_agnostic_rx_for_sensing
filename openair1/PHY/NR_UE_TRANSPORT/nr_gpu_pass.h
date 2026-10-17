@@ -33,7 +33,8 @@
 #define NR_GPU_PASS_MAX_DMRS 4 /* DM-RS symbols of a grant */
 #define NR_GPU_PASS_MAX_NL 4
 #define NR_GPU_PASS_FP32_DEMOD 2 /* nr_gpu_pass_shape_t.fp32 bit: FP32 demod instantiation */
-#define NR_GPU_PASS_MAX_SEG 16 /* segments of a segmented grant (the largest segment-count class) */
+#define NR_GPU_PASS_MAX_SEG 32 /* segments of a segmented grant (the largest segment-count class; 32 only in the v2 split mode, ISAC_PDSCH_GPU_GRAPH_SPLIT) */
+#define NR_GPU_PASS_MAX_SEG_FULL 16 /* the largest segment-count class of a single (v1 / non-split) graph */
 
 #ifdef __cplusplus
 extern "C" {
@@ -70,7 +71,7 @@ static inline int nr_gpu_pass_nrb_class(int nrb)
       return c[i];
   return 0;
 }
-static inline int nr_gpu_pass_nseg_class(int n) /* segmented-grant class: 1, 2, 4, 8, 16; 0 = none (more segments than the largest class) */
+static inline int nr_gpu_pass_nseg_class(int n) /* segmented-grant class: 1, 2, 4, 8, 16, 32; 0 = none (more segments than the largest class) */
 {
   for (int c = 1; c <= NR_GPU_PASS_MAX_SEG; c <<= 1)
     if (n >= 1 && n <= c)
@@ -243,6 +244,9 @@ typedef struct {
   const int16_t *delay_table;  /* c16 [2 * max_delay_comp + 1][dt_stride]: fp->delay_table[0] */
   int dt_stride, max_delay_comp;
   int v2;                      /* DL GPU data path v2 (ISAC_PDSCH_GPU_GRAPH): the graphs carry k_llr_stats; 0 = the v1 graph, unchanged */
+  int split;                   /* v2 Task 3 (ISAC_PDSCH_GPU_GRAPH_SPLIT): a DL pass is three sub-graphs C (FEP + chest + post), D (demod + LLR post), L (decode), cached under
+                                * separate keys (nrb, nl, ndmrs, nseg) / (nrb, nl, demod variant, EVM) / (ncb) and launched back to back; segment class 32 */
+  int split_mb;                /* split: GPU memory cap of the pass (instance buffers + graphs, cudaMemGetInfo deltas); warming stops at it. 0 = 1024 */
 } nr_gpu_pass_cfg_t;
 typedef int (*nr_gpu_pass_config_fn)(const nr_gpu_pass_cfg_t *cfg);
 /* pre-fence: allocate the instances and record + instantiate one graph per warm class. max_classes bounds the default warm set

@@ -59,6 +59,7 @@ int nr_gpu_pass_fp32_on(void); /* Task 5: the graphs run the FP32 demod; the sha
 /* before the RX fence, after nr_pdsch_gpu_exact_warmup returned 1 */
 void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue);
 /* 0 = the pass ran (out filled; the TB may still have failed CRC or need the CPU decoder: out->r.tb_ok / need_cpu), 1 = not handled (counted), the old path decodes */
+int nr_gpu_pass_seg_max(void); /* segments of the largest segment-count class the pass covers: 32 in v2 split mode, else 16 */
 int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out);
 /* v2 Task 1 (ISAC_PDSCH_GPU_GRAPH=1): a set of the pre-fence pool (nr_gpu_graph_pool.h) for a thread that reaches the pass after the RX fence; sets *shadow and the
  * thread's job buffer. NULL = no pool (v2 off) or pool empty (counted). The set returns to the pool when the thread exits. */
