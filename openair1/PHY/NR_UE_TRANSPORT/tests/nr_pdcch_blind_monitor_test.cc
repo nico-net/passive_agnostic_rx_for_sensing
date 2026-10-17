@@ -6628,6 +6628,51 @@ TEST(UlLayoutLock, CrcFirstLocksAtOnceSib1RankedFirstAndRelocks)
   unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
 
+TEST(UlLayoutLock, DlBwpPriorSeedsAnUncertainLockOnlyWhenTheFitAdmitsItsSize)
+{
+  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
+  setenv("ISAC_UL_BWP_SEED", "1", 1);
+  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                              .slots_per_frame = 20, .sib1_ul_start = 0, .sib1_ul_size = 217, .sib1_ul_dl = 1};
+  nr_pdcch_blind_ul_result_t t[NR_UL_LAYOUT_MAX_TRIALS], o;
+  // flag off: the DL BWP is only a hypothesis, the vote is not short-circuited
+  unsetenv("ISAC_UL_BWP_DL_PRIOR");
+  { UllGen g; UllFit(g, cell); EXPECT_TRUE(nr_ul_layout_searching()); }
+  // flag on: 217@0 (15-bit RIV, admitted by the fit) is locked at once ...
+  setenv("ISAC_UL_BWP_DL_PRIOR", "1", 1);
+  UllGen g;
+  UllFit(g, cell);
+  EXPECT_FALSE(nr_ul_layout_searching());
+  nr_ul_layout_dci_t d = g.next();
+  ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  EXPECT_EQ(o.bwp_size, 217);
+  EXPECT_EQ(o.bwp_start, 0);
+  // ... but it is NOT certain: after a run of CRC failures other hypotheses are tried (a configured BWP would not be)
+  setenv("ISAC_UL_LOCK_CRC_FIRST", "1", 1);
+  for (int i = 0; i < 8; i++) nr_ul_layout_crc_result(&o, false);
+  int n = 0;
+  for (int i = 0; i < 200 && !n; i++) {
+    d = g.next();
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o);
+    n = nr_ul_layout_crc_trials(d.rnti, 44, d.slot, d.p, &cell, t, NR_UL_LAYOUT_MAX_TRIALS);
+  }
+  ASSERT_GE(n, 1);
+  bool other = false;
+  for (int i = 0; i < n; i++) other |= t[i].bwp_size != 217 || t[i].bwp_start != 0;
+  EXPECT_TRUE(other);
+  // a DL BWP whose RIV width the fit does not admit (107 PRB = 13 bits, DCI is 15 bits) seeds nothing
+  cell.sib1_ul_size = 107;
+  nr_ul_layout_lock_reset();
+  UllGen g3;
+  UllFit(g3, cell);
+  EXPECT_TRUE(nr_ul_layout_searching());
+  nr_ul_layout_lock_reset();
+  unsetenv("ISAC_UL_LOCK_CRC_FIRST");
+  unsetenv("ISAC_UL_BWP_DL_PRIOR");
+  unsetenv("ISAC_UL_BWP_SEED");
+  unsetenv("ISAC_UL_LAYOUT_LOCK");
+}
+
 TEST(UlLayoutLock, CrcGuardNeedsEvidenceForCrc16AndLocksOnCrc24)
 {
   setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);

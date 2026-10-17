@@ -424,6 +424,7 @@ static uint32_t g_edge_used, g_edge_excl;
 /* ISAC_UL_BWP_SEED=1 also makes the configured / SIB1 UL BWP a hypothesis (hypothesis 0, first in the CRC trials) */
 static bool bwp_seed_on(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_BWP_SEED"); }
 bool nr_ul_layout_bwp_seed_enabled(void) { return bwp_seed_on(); }
+bool nr_ul_layout_dl_prior_enabled(void) { return bwp_seed_on() && env_on("ISAC_UL_BWP_DL_PRIOR"); }
 bool nr_ul_layout_sib1_first_enabled(void) { return nr_ul_layout_lock_enabled() && (env_on("ISAC_UL_LOCK_SIB1_FIRST") || env_on("ISAC_UL_BWP_SEED")); }
 bool nr_ul_layout_crc_guard_enabled(void) { return nr_ul_layout_crc_first_enabled() && env_on("ISAC_UL_LOCK_CRC_GUARD"); }
 bool nr_ul_layout_crc_first_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_CRC_FIRST"); }
@@ -942,12 +943,12 @@ static void prior_adopt_locked(long slot);
  * cannot tell N@s from N+1@s. CRC-first trials still re-lock it after a run of failures. A SIB1-derived BWP is only a hypothesis. */
 static void seed_lock_locked(long slot)
 {
-  if (!bwp_seed_on() || !g_cell.sib1_ul_cfg || g_locked_hyp >= 0) return;
+  if (!bwp_seed_on() || !(g_cell.sib1_ul_cfg || (g_cell.sib1_ul_dl && nr_ul_layout_dl_prior_enabled())) || g_locked_hyp >= 0) return;
   for (int h = 0; h < g_nhyp; h++)
     if (g_hyp[h].n == g_cell.sib1_ul_size && g_hyp[h].start == g_cell.sib1_ul_start) {
       g_locked_hyp = h;
       g_lock_slot = slot;
-      LOG_A(PHY, "SENSING: ULLAYOUT SEED_LOCK bwp=%u@%u (configured) abs=%ld\n", g_hyp[h].n, g_hyp[h].start, slot);
+      LOG_A(PHY, "SENSING: ULLAYOUT SEED_LOCK bwp=%u@%u (%s) abs=%ld\n", g_hyp[h].n, g_hyp[h].start, g_cell.sib1_ul_cfg ? "configured" : "derived prior (SIB1 / DL BWP)", slot);
       return;
     }
 }
@@ -1131,7 +1132,7 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
   }
   if (!g_have_cell) { g_cell = *cell; g_have_cell = true; }
   else { /* priors that were not known at the first DCI */
-    if (!g_cell.sib1_ul_size && cell->sib1_ul_size) { g_cell.sib1_ul_start = cell->sib1_ul_start; g_cell.sib1_ul_size = cell->sib1_ul_size; g_cell.sib1_ul_cfg = cell->sib1_ul_cfg; }
+    if (!g_cell.sib1_ul_size && cell->sib1_ul_size) { g_cell.sib1_ul_start = cell->sib1_ul_start; g_cell.sib1_ul_size = cell->sib1_ul_size; g_cell.sib1_ul_cfg = cell->sib1_ul_cfg; g_cell.sib1_ul_dl = cell->sib1_ul_dl; }
     if (!g_cell.dl_bwp_size && cell->dl_bwp_size) { g_cell.dl_bwp_start = cell->dl_bwp_start; g_cell.dl_bwp_size = cell->dl_bwp_size; }
   }
   if (g_first_slot < 0) g_first_slot = abs_slot;

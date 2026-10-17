@@ -49,6 +49,7 @@ typedef struct {
   uint8_t sib1_ul_cfg;                  /* the "SIB1" BWP is the operator-configured one (ISAC_UL_BWP_SEED short-circuits the vote) */
   uint16_t sib1_ul_start, sib1_ul_size; /* SIB1 initialUplinkBWP (0 size = unknown); a hypothesis, ISAC_UL_LOCK_SIB1_FIRST */
   uint16_t dl_bwp_start; /* solved DL BWP start (valid with dl_bwp_size > 0): ISAC_UL_LOCK_PRIOR_SEARCH prior, never fixed truth */
+  uint8_t sib1_ul_dl;    /* the "SIB1" BWP is receiver-derived (SIB1 initial UL BWP or own DL BWP; ISAC_UL_BWP_DL_PRIOR): seeds an UNCERTAIN lock, CRC trials stay open */
 } nr_ul_layout_cell_t;
 
 typedef struct {
@@ -145,7 +146,8 @@ void nr_ul_layout_stats_dump(void);
  * top-K (ISAC_UL_LOCK_CRC_K, default 3) layout hypotheses before the lock (and, once locked, after a run of CRC failures);
  * a PUSCH TB CRC pass locks/re-locks that hypothesis at once. Both default off. */
 bool nr_ul_layout_sib1_first_enabled(void);
-bool nr_ul_layout_bwp_seed_enabled(void); /* ISAC_UL_BWP_SEED=1, default off: configured UL BWP locks, look-alike partners get CRC trials */
+bool nr_ul_layout_bwp_seed_enabled(void);
+bool nr_ul_layout_dl_prior_enabled(void); /* ISAC_UL_BWP_DL_PRIOR=1 (needs ISAC_UL_BWP_SEED=1): TDD UL BWP = DL BWP (38.331 same-centre pair) */ /* ISAC_UL_BWP_SEED=1, default off: configured UL BWP locks, look-alike partners get CRC trials */
 bool nr_ul_layout_crc_first_enabled(void);
 /* Call after nr_ul_layout_on_dci for the same DCI. Fills out[0..n) with CRC trial grants (hyp_generation TAG|TRIAL|..) to
  * book as ordinary PUSCH jobs; returns n (0 = none; at most one DCI per slot, small MCS only). */

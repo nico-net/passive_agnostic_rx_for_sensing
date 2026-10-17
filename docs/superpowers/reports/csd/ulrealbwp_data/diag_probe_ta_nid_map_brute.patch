@@ -1,0 +1,137 @@
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c b/openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c
+index ca2c169dcd..ba86a64001 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c
+@@ -217,6 +217,8 @@ static int ul_harq_combine_on(void)
+ }
+ bool nr_pusch_passive_harq_combine_enabled(void) { return ul_harq_combine_on() == 1; }
+ void nr_pusch_passive_harq_arm(bool on) { t_hq_armed = on; }
++static __thread bool t_nodisc; /* ISAC_UL_BRUTE: no timing / DM-RS search inside the brute-force loop */
++void nr_pusch_passive_nodisc(bool on) { t_nodisc = on; }
+ static unsigned ul_harq_max_seg(void)
+ {
+   static _Atomic int m = -1;
+@@ -1488,6 +1490,23 @@ bool nr_pusch_passive_layout_probe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, in
+                                    nr_ul_layout_probe_res_t *res)
+ {
+   if (!ue || !res || ctx < 0 || ctx >= NR_PUSCH_PASSIVE_MAX_CTX || n <= 0) return false;
++  { const char *e = getenv("ISAC_UL_PROBE_TA"); if (e && *e) ta = atoi(e); } /* diagnostic override, default off */
++  { /* ISAC_UL_PROBE_TASCAN=1 (diagnostic, default off): the same probe at advances -1024..2816 step 256; one line of the best SNR per advance */
++    static __thread int in_scan;
++    if (!in_scan && getenv("ISAC_UL_PROBE_TASCAN")) {
++      char ln[400]; int lo = 0;
++      in_scan = 1;
++      for (int a = -1024; a <= 2816 && lo < (int)sizeof(ln) - 20; a += 256) {
++        nr_ul_layout_probe_res_t rr;
++        float bs = -99.f;
++        if (nr_pusch_passive_layout_probe(ue, ctx, slot, a, fo_hz, n, prb0, nprb, nid, l0, &rr))
++          for (int h = 0; h < rr.n; h++) if (rr.snr_db[h] > bs) bs = rr.snr_db[h];
++        lo += snprintf(ln + lo, sizeof(ln) - lo, " %d:%.0f", a, bs);
++      }
++      in_scan = 0;
++      LOG_A(PHY, "SENSING: ULTASCAN slot=%d nid=%d%s\n", slot, nid, ln);
++    }
++  }
+   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+   const int N = fp->ofdm_symbol_size, fco = fp->first_carrier_offset;
+   int nant = g_gnb_nant > 0 ? g_gnb_nant : fp->nb_antennas_rx;
+@@ -1543,6 +1562,27 @@ bool nr_pusch_passive_layout_probe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, in
+     res->ctl_db = -99.f;
+     res->comb1_db = NAN;
+     if (best < 0) return true;
++    if (getenv("ISAC_UL_PROBE_MAP") && res->snr_db[best] >= 6.f) { /* diagnostic, default off: per-PRB true-sequence DM-RS excess along the table */
++      char m[300]; int mi = 0, bt = 0; double be = -1.0;
++      for (int t = 0; t < LP_NTAU; t++) { /* delay: best for the best hypothesis range */
++        double e = 0.0;
++        for (int r = 0; r < 3; r++) for (int a = 0; a < nant; a++) e += T->P[0][r][a][t][prb0[best] - qlo + nprb[best]] - T->P[0][r][a][t][prb0[best] - qlo];
++        if (e > be) { be = e; bt = t; }
++      }
++      for (int q = 0; q < 276 - qlo && q + qlo < 276 && mi < (int)sizeof(m) - 2; q++) {
++        if (q + 1 > 275 - qlo) break;
++        double ex = 0.0; int cnt = 0;
++        for (int r = 0; r < 2; r++) for (int a = 0; a < nant; a++) {
++          const double C = T->P[0][r][a][bt][q + 1] - T->P[0][r][a][bt][q], S2 = T->P[0][r][a][LP_NTAU][q + 1] - T->P[0][r][a][LP_NTAU][q];
++          const double nv = (S2 - C / 6.0) / 5.0;
++          if (nv > 0.0) { ex += C / (6.0 * nv) - 1.0; cnt++; }
++        }
++        ex = cnt ? ex / cnt : 0.0;
++        m[mi++] = ex < 1.0 ? '.' : (ex < 10.0 ? (char)('0' + (int)ex) : '#');
++      }
++      m[mi] = 0;
++      LOG_A(PHY, "SENSING: ULPROBE_MAP slot=%d q0=%d best=%d@%d+%d map=%s\n", slot, qlo, best, prb0[best], nprb[best], m);
++    }
+     static const int row_mask[3] = {1, 2, 4}, set_mask[3] = {1, 5, 7};
+     float rw[3], cl[3];
+     { /* DM-RS symbol set at the best hypothesis: as the legacy rule, from the per-symbol SNRs */
+@@ -1864,9 +1904,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
+     out->reject_reason = "no plausible grant";
+     return false;
+   }
+-  const bool timing_disc = nr_ul_chain_on() ||
+-      (getenv("ISAC_UL_TIMING_DISC") && !strcmp(getenv("ISAC_UL_TIMING_DISC"), "1"));
+-  const bool dmrs_disc = !t_solver_probe && (nr_ul_chain_on() ||
++  const bool timing_disc = !t_nodisc && (nr_ul_chain_on() ||
++      (getenv("ISAC_UL_TIMING_DISC") && !strcmp(getenv("ISAC_UL_TIMING_DISC"), "1")));
++  const bool dmrs_disc = !t_solver_probe && !t_nodisc && (nr_ul_chain_on() ||
+       (getenv("ISAC_UL_DMRS_DISC") && !strcmp(getenv("ISAC_UL_DMRS_DISC"), "1")));
+   nr_pdcch_blind_ul_result_t discovery_grant;
+   const bool ul_pass_env = nr_gpu_pass_ul_active();
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.h b/openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.h
+index 0d6f923176..334e535512 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.h
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.h
+@@ -96,6 +96,7 @@ void nr_pusch_passive_decode_attach(int ctx, c16_t *const *iq, uint32_t origin,
+  * decode; only that first call may combine into or store a (rnti, pid) soft buffer. */
+ bool nr_pusch_passive_harq_combine_enabled(void);
+ void nr_pusch_passive_harq_arm(bool on);
++void nr_pusch_passive_nodisc(bool on);
+ 
+ /**
+  * @brief Decode one passively-observed PUSCH.
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c b/openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c
+index e391822dd8..20e4869fd4 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c
+@@ -502,6 +502,42 @@ static void *nr_pusch_passive_queue_thread(void *arg)
+         }
+       }
+     }
++    { /* ISAC_UL_BRUTE=n (diagnostic, default off): a failed grant with DM-RS SNR >= n dB is re-decoded for every data-scrambling id 0..1023 and
++       * MCS table 0..2 (CRC is the oracle); at most 6 grants per run. Logs UL_BRUTE hits. */
++      static int brute_thr = -999;
++      static _Atomic int brute_n;
++      if (brute_thr == -999) brute_thr = getenv("ISAC_UL_BRUTE") ? atoi(getenv("ISAC_UL_BRUTE")) : -1000;
++      if (brute_thr > -999 && !job.cfr_only && out.status == NR_PUSCH_PASSIVE_CRC_FAIL && out.snr_db >= (float)brute_thr
++          && job.grant.num_rb <= 120 && atomic_fetch_add_explicit(&brute_n, 1, memory_order_relaxed) < 1) {
++        int hits = 0;
++        nr_pusch_passive_harq_arm(false);
++        nr_pusch_passive_nodisc(true);
++        uint16_t hn[NR_UL_LAYOUT_MAX_HYP], h0[NR_UL_LAYOUT_MAX_HYP], hl[NR_UL_LAYOUT_MAX_HYP];
++        const int nhr = nr_ul_layout_hyp_ranges(&job.grant, hn, h0, hl, NR_UL_LAYOUT_MAX_HYP);
++        for (int hh = 0; hh < nhr; hh++) {
++          if (hn[hh] < 213 || hn[hh] > 217) continue; /* the twin family of the DL BWP */
++          for (int tb = 0; tb < 3; tb++)
++            for (int id = 0; id < 1024; id++) {
++              nr_pdcch_blind_ul_result_t bg = job.grant;
++              nr_pusch_passive_out_t bo;
++              bg.bwp_start = 0; bg.start_rb = h0[hh]; bg.num_rb = hl[hh];
++              bg.mcs_table = (uint8_t)tb; bg.data_scrambling_id = (uint16_t)id; bg.data_id_advance = false; bg.ul_dmrs_scrambling_id = out.dmrs_id;
++              nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &bg, out.ta_applied_samples,
++                                      (uint64_t)job.absolute_slot, false, job.fo_hz, &bo);
++              if (bo.status == NR_PUSCH_PASSIVE_OK) {
++                hits++;
++                LOG_A(PHY, "SENSING: UL_BRUTE_HIT rnti=0x%04x t=%ld bwp=%u prb=%u+%u mcs=%u tbl=%d data_id=%d dmrs_id=%u tbs=%u segs=%d snr=%.1f\n",
++                      bg.rnti, (long)job.absolute_slot, hn[hh], bg.start_rb, bg.num_rb, bg.mcs, tb, id, bo.dmrs_id, bo.tbs_bytes * 8u,
++                      bo.n_segments, bo.snr_db);
++              }
++            }
++        }
++        nr_pusch_passive_nodisc(false);
++        LOG_A(PHY, "SENSING: UL_BRUTE_DONE rnti=0x%04x t=%ld prb=%u+%u mcs=%u tbl0=%u snr=%.1f hits=%d dmrs_id=%u ta=%d\n", job.grant.rnti,
++              (long)job.absolute_slot, job.grant.bwp_start + job.grant.start_rb, job.grant.num_rb, job.grant.mcs, job.grant.mcs_table,
++              out.snr_db, hits, out.dmrs_id, out.ta_applied_samples);
++      }
++    }
+     if (nr_ul_chain_on()) clock_gettime(CLOCK_THREAD_CPUTIME_ID,&grant_cpu_end);
+     if (pipeline) nr_pusch_passive_decode_capture_release(idx);
+     if (!nr_cfg_epoch_work_current()) {
