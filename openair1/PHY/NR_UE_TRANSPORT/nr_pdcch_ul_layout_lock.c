@@ -1618,6 +1618,12 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
   if (certain) nr = 1;
   const uint32_t vctr = g_var_ctr;
   if (vary) g_var_ctr++;
+  if (vary && !certain && nr > K) { /* uncertain BWP: the K-hypothesis window walks the whole ranking, one window per two variant rounds (votes alone cannot be trusted) */
+    const int nwin = (nr + K - 1) / K, rot = (int)((vctr / (2u * (uint32_t)nr_ul_variant_count(sweep, k2pair, tdapair, false))) % (uint32_t)nwin) * K;
+    int tmp[NR_UL_LAYOUT_MAX_HYP];
+    for (int i = 0; i < nr; i++) tmp[i] = rk[(i + rot) % nr];
+    memcpy(rk, tmp, sizeof(int) * (size_t)nr);
+  }
   const uint64_t gen = g_gen & NR_UL_LAYOUT_GEN_MASK;
   for (int t = 0; t < ls->ntail && t < 2 && n < K; t++) {
     const int cnt = nr_ul_variant_count(sweep, k2pair, tdapair, ls->tail[t].tp);
