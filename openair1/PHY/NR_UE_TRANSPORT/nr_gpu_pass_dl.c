@@ -158,7 +158,7 @@ static void census(void)
     G.stats(buf, sizeof(buf));
   else
     buf[0] = 0;
-  char pool[192] = "";
+  char pool[256] = "";
   if (G.v2)
     snprintf(pool, sizeof(pool), "GPUGRAPH pool[sets=%d claimed=%lu empty=%lu released=%lu] ", g_pool.n, (unsigned long)__atomic_load_n(&g_pool.claimed, __ATOMIC_RELAXED),
              (unsigned long)__atomic_load_n(&g_pool.empty, __ATOMIC_RELAXED), (unsigned long)__atomic_load_n(&g_pool.released, __ATOMIC_RELAXED));
@@ -278,6 +278,12 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     LOG_W(PHY, "SENSING: GPUPASS: nr_gpu_pass_config/init failed: off\n");
     return;
   }
+  int (*split_on)(void) = (int (*)(void))dlsym(h, "nr_gpu_pass_split_on");
+  if (c.split && split_on && !split_on()) { /* review S5: the instances alone reach the memory cap */
+    LOG_E(PHY, "SENSING: GPUGRAPH: the pass instances alone reach ISAC_PDSCH_GPU_GRAPH_MB=%d: ISAC_PDSCH_GPU_GRAPH_SPLIT (and RETRY) off\n", c.split_mb);
+    c.split = 0;
+    g_sub_on[1] = 0;
+  }
   if (!dl_on || bad) { /* the PUSCH pass alone */
     nr_gpu_pass_ul_warm(h, fp->nb_antennas_rx, G.fp32);
     return;
@@ -327,7 +333,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
           }
         }
       }
-  /* segmented (PRG / VRB-bundle) classes: segment-count classes 1, 2, 4, 8, 16 on top of the contiguous ones. Own budget
+  /* segmented (PRG / VRB-bundle) classes: segment-count classes 1, 2, 4, 8, 16 (32: split) on top of the contiguous ones. Own budget
    * (ISAC_GPU_PASS_SEG_CLASSES, default 1400): the passes with the widest grants are warmed first; a segmented grant of an unwarmed class stays on the old path (unseen). */
   const char *se = getenv("ISAC_GPU_PASS_SEG_CLASSES");
   const int sbudget = se ? atoi(se) : c.split ? 1 << 20 : 1400;
@@ -418,7 +424,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
     return fb(FB_MODULE);
   memset(j, 0, offsetof(nr_gpu_pass_job_t, dj));
   j->t_entry_ns = t_entry;
-  /* ---- channel estimate inputs. A segmented grant (PRG / VRB bundles): the chest runs per segment (classes of 1, 2, 4, 8, 16 segments) and the demod reads the
+  /* ---- channel estimate inputs. A segmented grant (PRG / VRB bundles): the chest runs per segment (classes of 1, 2, 4, 8, 16 segments; 32 in split mode) and the demod reads the
    * estimate in data order against the virtual contiguous allocation the old path gathers; here the gather is the demod geometry's RX index map. */
   const int nseg = in->seg ? in->nseg : 0;
   const int nsegc = nseg > 0 ? nr_gpu_pass_nseg_class(nseg) : 0;

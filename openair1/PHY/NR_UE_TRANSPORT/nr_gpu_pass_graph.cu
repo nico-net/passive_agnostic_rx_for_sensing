@@ -214,7 +214,7 @@ __global__ void k_pick(const uint8_t *snaps, const int *res, const PassBlk *pb, 
 struct Key {
   uint16_t nrb, nl, ndmrs, ncb;
   uint8_t fp32, evm, qmode, align;
-  uint8_t nseg; /* 0 = a contiguous grant (the estimate rows go straight into the estimate buffer); 1, 2, 4, 8, 16 = segmented grant of up to that many segments (scratch rows + compose) */
+  uint8_t nseg; /* 0 = a contiguous grant (the estimate rows go straight into the estimate buffer); 1, 2, 4, 8, 16 (32: split mode) = segmented grant of up to that many segments (scratch rows + compose) */
   uint8_t ul = 0; /* Task 7: a PUSCH pass class (nl = 1; nrb, ndmrs and ncb are its whole structure) */
   uint8_t sub = 0; /* v2 Task 3: 0 = the whole pass in one graph; SUB_C / SUB_D / SUB_L = a sub-graph, keyed by the fields it depends on only (key_sub) */
   uint64_t pack() const
@@ -762,20 +762,27 @@ static bool key_ok(const Key &k)
 }
 
 /* v2 Task 3 (split) bookkeeping: sub-graphs cached per kind, pass memory (instance buffers + split graphs, cudaMemGetInfo deltas), warm time, cap refusals, unseen per kind */
-static std::atomic<uint64_t> g_split_n[4], g_split_unseen[4], g_split_mb{0}, g_inst_mb{0}, g_split_warm_us{0}, g_split_capped{0};
+/* g_split_unseen[sub]: one count per missing sub-graph of a refused call (a class missing two sub-graphs counts in both; review N5).
+ * Memory (review S3), an ESTIMATE: g_inst_mb = the explicit sum of the instance buffers' sizes (other modules' per-instance contexts not included); g_split_kb = the
+ * cudaMemGetInfo deltas around graph instantiation + first replay only (device-wide, racy with other allocators). g_sub_kb_max: the largest cost of one sub-graph of each kind
+ * (all instances), the worst case a class is checked against before any of its sub-graphs is built (review S4: no orphan sub-graph when the cap is hit mid-class). */
+static std::atomic<uint64_t> g_split_n[4], g_split_unseen[4], g_split_mb{0}, g_inst_mb{0}, g_split_warm_us{0}, g_split_capped{0}, g_split_kb{0};
+static uint64_t g_sub_kb_max[4];
 static int split_cap_mb() { return g_cfg.split_mb > 0 ? g_cfg.split_mb : 1024; }
+static bool split_cap_hit(uint64_t extra_kb)
+{
+  if (((g_inst_mb << 10) + g_split_kb + extra_kb) >> 10 < (uint64_t)split_cap_mb()) return false;
+  if (g_split_capped++ == 0) fprintf(stderr, "GPUGRAPH split: memory cap %d MB reached (instances %lu + graphs %lu MB, estimate): warming stops\n", split_cap_mb(), (unsigned long)g_inst_mb.load(), (unsigned long)g_split_mb.load());
+  return true;
+}
 
 /* capture + instantiate + one replay (pre-fence) of a class (sub = SUB_FULL) or of one sub-graph of it on every instance. Under g_mu. */
 static int build(const Key &k, int sub = SUB_FULL)
 {
   if (!guard_alloc()) return -1;
-  if (sub != SUB_FULL && g_inst_mb + g_split_mb >= (uint64_t)split_cap_mb()) { /* the memory cap: stop warming, the key stays unseen (stage path, counted) */
-    if (g_split_capped++ == 0) fprintf(stderr, "GPUGRAPH split: memory cap %d MB reached (instances %lu + graphs %lu MB): warming stops\n", split_cap_mb(), (unsigned long)g_inst_mb.load(), (unsigned long)g_split_mb.load());
-    return -1;
-  }
+  if (sub != SUB_FULL && split_cap_hit(0)) return -1; /* the memory cap: stop warming, the key stays unseen (stage path, counted) */
   const auto tb0 = std::chrono::steady_clock::now();
-  size_t fr0 = 0, tot0 = 0;
-  if (sub != SUB_FULL) cudaMemGetInfo(&fr0, &tot0);
+  uint64_t kb = 0; /* split: cudaMemGetInfo deltas around instantiation + first replay (an estimate) */
   Entry e;
   nr_gpu_pass_job_t *sj = (nr_gpu_pass_job_t *)malloc(sizeof(*sj));
   if (!sj) return -1;
@@ -799,6 +806,8 @@ static int build(const Key &k, int sub = SUB_FULL)
       break;
     }
     ++g_allocs;
+    size_t f0 = 0, f1 = 0, tb_ = 0;
+    if (sub != SUB_FULL) cudaMemGetInfo(&f0, &tb_);
     if (cudaGraphInstantiate(&e.exec[i], g, 0) != cudaSuccess) rc = -1;
     cudaGraphDestroy(g);
     if (rc) break;
@@ -807,6 +816,7 @@ static int build(const Key &k, int sub = SUB_FULL)
       fprintf(stderr, "nr_gpu_pass: warm replay of class nrb %u nl %u failed: %s\n", k.nrb, k.nl, cudaGetErrorString(cudaGetLastError()));
       rc = -1;
     }
+    if (sub != SUB_FULL && cudaMemGetInfo(&f1, &tb_) == cudaSuccess && f0 > f1) kb += (uint64_t)(f0 - f1) >> 10;
   }
   free(sj);
   if (rc) {
@@ -820,14 +830,12 @@ static int build(const Key &k, int sub = SUB_FULL)
     size_t fr = 0, tot_b = 0; /* build() runs before the fence only (guard_alloc) */
     if (cudaMemGetInfo(&fr, &tot_b) == cudaSuccess) {
       g_used_mb = ((tot_b - fr) >> 20) - g_base_mb; /* delta from the start of the warm-up (the device is shared) */
-      if (sub != SUB_FULL) { /* bytes: summed as KB so that small graphs are not lost to MB rounding */
-        static uint64_t kb = 0;
-        kb += fr0 > fr ? (uint64_t)(fr0 - fr) >> 10 : 0;
-        g_split_mb = kb >> 10;
-      }
     }
   }
-  if (sub != SUB_FULL) {
+  if (sub != SUB_FULL) { /* summed as KB so that small graphs are not lost to MB rounding */
+    g_split_kb += kb;
+    g_split_mb = g_split_kb >> 10;
+    g_sub_kb_max[sub] = std::max(g_sub_kb_max[sub], kb);
     ++g_split_n[sub];
     g_split_warm_us += (uint64_t)std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tb0).count();
   }
@@ -916,9 +924,18 @@ extern "C" int nr_gpu_pass_init(int max_classes)
     if (nr_gpu_buf_alloc(&g_ring[a], (size_t)RING_LEN * 4)) return -1;
   if (nr_gpu_buf_alloc(&g_rot, 64 * 4)) return -1;
   SEG_ROWS = g_cfg.split ? 1024 : 512; /* split: 32 segments x 2 DM-RS x 4 layers x 4 RX */
-  for (int i = 0; i < NI; i++)
+  uint64_t ib = 0; /* review S3: the explicit sum of the pass's own buffers (an estimate: the stage modules' per-instance contexts are not in it) */
+  for (int i = 0; i < NI; i++) {
     if (alloc_inst(i) != 0) return -1;
-  { size_t fr = 0, tb = 0; if (cudaMemGetInfo(&fr, &tb) == cudaSuccess) g_inst_mb = ((tb - fr) >> 20) > g_base_mb ? ((tb - fr) >> 20) - g_base_mb : 0; }
+    const Inst &I = g_inst[i];
+    for (const nr_gpu_buf_t *b : {&I.rxF, &I.est, &I.nvar, &I.geo, &I.scratch, &I.llr, &I.lin, &I.bits, &I.pil, &I.scr, &I.pb, &I.res, &I.segsc, &I.uli, &I.ulb, &I.ulwin}) ib += b->bytes;
+  }
+  g_inst_mb = ib >> 20;
+  if (g_cfg.split && g_inst_mb >= (uint64_t)split_cap_mb()) { /* review S5: no room for any sub-graph: the single-graph (v1 class) mode; the host reads nr_gpu_pass_split_on() */
+    fprintf(stderr, "GPUGRAPH split: the pass instances alone (%lu MB) reach the cap %d MB: split mode off\n", (unsigned long)g_inst_mb.load(), split_cap_mb());
+    g_cfg.split = 0;
+    SEG_ROWS = 512;
+  }
   g_ready = 1;
   const int n = max_classes > 16 ? 16 : max_classes;
   for (int i = 0; i < n; i++) {
@@ -943,6 +960,14 @@ extern "C" int nr_gpu_pass_warm(const nr_gpu_pass_shape_t *sh, int qmode, int al
                 (uint8_t)sh->nseg_class};
   if (!key_ok(k) || (int)k.nseg > (int)k.nrb) return -1;
   if (g_cfg.split) { /* the three sub-graphs of the class; the ones another class already built are shared */
+    uint64_t need = 0; /* review S4: the worst case of the missing ones, checked before any is built (no orphan sub-graph at the cap) */
+    bool missing = false;
+    for (int sub = SUB_C; sub <= SUB_L; sub++)
+      if (!g_cache.count(key_sub(k, sub).pack())) {
+        missing = true;
+        need += g_sub_kb_max[sub];
+      }
+    if (missing && split_cap_hit(need)) return -1;
     for (int sub = SUB_C; sub <= SUB_L; sub++)
       if (!g_cache.count(key_sub(k, sub).pack()) && build(k, sub) != 0) return -1;
     return 0;
@@ -951,7 +976,11 @@ extern "C" int nr_gpu_pass_warm(const nr_gpu_pass_shape_t *sh, int qmode, int al
   return build(k);
 }
 
-/* test hook: switch the split mode (the sub-graph caches and the single-graph cache are separate, so both modes can be compared in one process) */
+/* split mode after nr_gpu_pass_init (0 = off: not requested, or the instances alone reach the memory cap, review S5) */
+extern "C" int nr_gpu_pass_split_on(void) { return g_cfg.split; }
+
+/* test hook only (review N4): switch the split mode (the sub-graph caches and the single-graph cache are separate, so both modes can be compared in one process); not safe while
+ * passes run in other threads */
 extern "C" void nr_gpu_pass_test_split(int on)
 {
   std::lock_guard<std::mutex> lk(g_mu);
@@ -965,6 +994,7 @@ extern "C" void nr_gpu_pass_counters(uint64_t o[16])
   o[8] = NI; o[9] = g_cache.size(); o[10] = g_allocs; o[11] = g_fb_ldpckey; o[12] = g_seg_launches; o[13] = g_seg_classes; o[14] = g_fb_unseen_seg; o[15] = g_fb_busy_probe;
 }
 
+static int probe_reserve();
 extern "C" void nr_gpu_pass_stats(char *buf, int n)
 {
   uint64_t o[16];
@@ -976,14 +1006,14 @@ extern "C" void nr_gpu_pass_stats(char *buf, int n)
     acc += g_wait_hist[i];
     if (acc * 2 >= tot && tot) { p50 = i; break; }
   }
-  snprintf(buf, n, "GPUPASS launches=%lu graph_hits=%lu fallback=%lu (unseen=%lu (seg %lu) busy=%lu unsup=%lu err=%lu ldpc_key=%lu) need_cpu=%lu tb_fail=%lu classes=%lu (seg %lu) seg_launches=%lu instances=%lu wait_us_p50<=%d gpu_delta_mb=%lu prep_us[p50<=%lu p99<=%lu] run_us[p50<=%lu p99<=%lu] post_us[p50<=%lu p99<=%lu] probe_busy=%lu",
+  snprintf(buf, n, "GPUPASS launches=%lu graph_hits=%lu fallback=%lu (real grants; refused probes are probe_busy) (unseen=%lu (seg %lu) busy=%lu unsup=%lu err=%lu ldpc_key=%lu) need_cpu=%lu tb_fail=%lu classes=%lu (seg %lu) seg_launches=%lu instances=%lu wait_us_p50<=%d gpu_delta_mb=%lu prep_us[p50<=%lu p99<=%lu] run_us[p50<=%lu p99<=%lu] post_us[p50<=%lu p99<=%lu] probe_busy=%lu probe_reserve=%d",
            (unsigned long)o[0], (unsigned long)o[1], (unsigned long)(o[2] + o[3] + o[4] + o[5] + o[11]), (unsigned long)o[2], (unsigned long)o[14], (unsigned long)o[3], (unsigned long)o[4],
            (unsigned long)o[5], (unsigned long)o[11], (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[9], (unsigned long)o[13], (unsigned long)o[12], (unsigned long)o[8],
            tot ? 1 << p50 : 0, (unsigned long)g_used_mb.load(), (unsigned long)stamp_q(0, 0, 50), (unsigned long)stamp_q(0, 0, 99), (unsigned long)stamp_q(0, 1, 50),
-           (unsigned long)stamp_q(0, 1, 99), (unsigned long)stamp_q(0, 2, 50), (unsigned long)stamp_q(0, 2, 99), (unsigned long)o[15]);
+           (unsigned long)stamp_q(0, 1, 99), (unsigned long)stamp_q(0, 2, 50), (unsigned long)stamp_q(0, 2, 99), (unsigned long)o[15], probe_reserve());
   if (g_cfg.split) { /* v2 Task 3: mb = instance buffers + split graphs (cudaMemGetInfo deltas) */
     const size_t l = strlen(buf);
-    snprintf(buf + l, n > (int)l ? n - l : 0, " GPUGRAPH split C=%lu D=%lu L=%lu execs=%lu mb=%lu (inst %lu graphs %lu) warm_ms=%lu capped=%lu unseen[C,D,L]=%lu,%lu,%lu",
+    snprintf(buf + l, n > (int)l ? n - l : 0, " GPUGRAPH split C=%lu D=%lu L=%lu execs=%lu mb=%lu (inst %lu graphs %lu, estimate) warm_ms=%lu capped=%lu unseen[C,D,L]=%lu,%lu,%lu",
              (unsigned long)g_split_n[SUB_C], (unsigned long)g_split_n[SUB_D], (unsigned long)g_split_n[SUB_L],
              (unsigned long)(NI * (g_split_n[SUB_C] + g_split_n[SUB_D] + g_split_n[SUB_L])), (unsigned long)(g_inst_mb + g_split_mb), (unsigned long)g_inst_mb.load(),
              (unsigned long)g_split_mb.load(), (unsigned long)(g_split_warm_us / 1000), (unsigned long)g_split_capped.load(), (unsigned long)g_split_unseen[SUB_C],
@@ -1001,7 +1031,8 @@ extern "C" void nr_gpu_pass_test_hold(unsigned mask, int hold)
 /* free instances a probe leaves to real grants: ISAC_PDSCH_GPU_GRAPH_PROBE_RESERVE (default 1, 0 = none) */
 static int probe_reserve()
 {
-  static const int v = [] { const char *e = getenv("ISAC_PDSCH_GPU_GRAPH_PROBE_RESERVE"); return e && *e ? std::max(0, std::min(NI, atoi(e))) : 1; }();
+  /* clamped to NI - 1 (review S2): a reserve of every instance would never let a probe run */
+  static const int v = [] { const char *e = getenv("ISAC_PDSCH_GPU_GRAPH_PROBE_RESERVE"); return std::max(0, std::min(NI - 1, e && *e ? atoi(e) : 1)); }();
   return v;
 }
 
@@ -1068,6 +1099,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   if (!launched || cudaEventRecord(I.done, ls) != cudaSuccess) {
     ++g_fb_err;
     g_dead = 1;
+    cudaStreamSynchronize(ls); /* error path (review N1): drain what was launched before the instance is released; g_dead keeps every later pass off */
     return -1;
   }
   wait_done(I);

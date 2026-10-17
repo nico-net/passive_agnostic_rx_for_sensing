@@ -15,7 +15,7 @@
  * flight per process, whatever the number of consumer threads (the PDSCH queue has up to 5). Nothing is allocated after the RX fence: buffers, streams,
  * events and graphs exist from nr_gpu_pass_init(); an unseen shape class returns 1.
  *
- * What a pass does NOT cover (the caller keeps the old path, counted in nr_gpu_pass_stats): grants of more than 16 segments (PRG / VRB-bundle grants of up to 16 segments run in the segmented classes 1, 2, 4, 8, 16: the chest estimates per segment into scratch rows and
+ * What a pass does NOT cover (the caller keeps the old path, counted in nr_gpu_pass_stats): grants of more than 16 segments (32 in the v2 split mode) (PRG / VRB-bundle grants run in the segmented classes 1, 2, 4, 8, 16 [, 32]: the chest estimates per segment into scratch rows and
  * k_seg_compose lays them out in data order, the demod geometry is composed with the old path's RE gather), the chest cache, DM-RS type 2, a single-branch
  * estimate, probes, PT-RS, more than NR_GPU_PASS_MAX_CB code blocks, Z not a multiple of 4, HARQ soft combining, TBs whose decode needs the CPU decoder
  * (zero syndrome with a failing CRC: nr_gpu_pass_result_t::need_cpu), and unseen classes. */
@@ -58,7 +58,7 @@ int nr_gpu_graph_flag(const char *sub);
 typedef struct {
   uint16_t nrb_class, nsym, nl, qm, ndmrs, ncb_class;
   uint8_t fp32;
-  uint16_t nseg_class; /* Task 4b: 0 = a contiguous grant. 1, 2, 4, 8, 16 = a segmented grant (PRG / VRB bundles) of up to that many segments: the chest runs one row set per segment into
+  uint16_t nseg_class; /* Task 4b: 0 = a contiguous grant. 1, 2, 4, 8, 16 (32: split mode) = a segmented grant (PRG / VRB bundles) of up to that many segments: the chest runs one row set per segment into
                         * scratch rows and a compose kernel lays them out in data order (the estimate layout the demod reads); the smallest class >= the segments of the grant. */
   uint8_t ul;          /* Task 7: 1 = a PUSCH pass class (nl = 1, CP-OFDM, DM-RS type 1; nrb_class, ndmrs and ncb_class are its whole structure) */
 } nr_gpu_pass_shape_t;
@@ -246,7 +246,8 @@ typedef struct {
   int v2;                      /* DL GPU data path v2 (ISAC_PDSCH_GPU_GRAPH): the graphs carry k_llr_stats; 0 = the v1 graph, unchanged */
   int split;                   /* v2 Task 3 (ISAC_PDSCH_GPU_GRAPH_SPLIT): a DL pass is three sub-graphs C (FEP + chest + post), D (demod + LLR post), L (decode), cached under
                                 * separate keys (nrb, nl, ndmrs, nseg) / (nrb, nl, demod variant, EVM) / (ncb) and launched back to back; segment class 32 */
-  int split_mb;                /* split: GPU memory cap of the pass (instance buffers + graphs, cudaMemGetInfo deltas); warming stops at it. 0 = 1024 */
+  int split_mb;                /* split: GPU memory cap of the pass (an estimate: the instance buffers' sizes + cudaMemGetInfo deltas around graph instantiation); warming stops at
+                                * it; the instances alone at or above it turn split off (nr_gpu_pass_split_on). 0 = 1024 */
 } nr_gpu_pass_cfg_t;
 typedef int (*nr_gpu_pass_config_fn)(const nr_gpu_pass_cfg_t *cfg);
 /* pre-fence: allocate the instances and record + instantiate one graph per warm class. max_classes bounds the default warm set

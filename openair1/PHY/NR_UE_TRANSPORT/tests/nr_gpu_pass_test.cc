@@ -2068,6 +2068,63 @@ TEST(GpuGraphSplit, WarmSetFitsBudget) {
   EXPECT_LE(C + D + L, 600u);
 }
 
+/* review S6: grants with ONE DM-RS symbol (the split warm set adds ndmrs 1 contiguous C keys): the split pass equals the stage path, CRC ok and CRC fail */
+TEST(GpuGraphSplit, OneDmrsSymbolEqualsStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  GpuPassFixture::n_dm = 1;
+  int n = 0, n_ok = 0;
+  for (int si : {0, 5, 16 + 6, 32 + 11, 48 + 5}) /* 24 PRB nl 1 qm 2, 24 nl 2 qm 4, 48 nl 2 qm 6, 96 nl 3 qm 8, 217 nl 2 qm 4 */
+    for (double snr : {20.0, -3.0}) {
+      GpuPassFixture::noise_db = snr;
+      nr_gpu_pass_shape_t sh = GpuPassFixture::warm_shapes()[si];
+      sh.ndmrs = 1;
+      GpuPassFixture fx = GpuPassFixture::from_shape(sh, 13);
+      ASSERT_TRUE(fx.tb_ok_built);
+      fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
+      fx.bind();
+      fx.job->llr_out_all = 1;
+      const std::string what = "ndmrs 1 nrb " + std::to_string(sh.nrb_class) + " nl " + std::to_string(sh.nl) + " qm " + std::to_string(sh.qm) + " snr " + std::to_string(snr);
+      m.pass_split(1);
+      nr_gpu_pass_shape_t w = fx.job->shape;
+      ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm)) << what;
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      const int rc = m.pass_try(fx.job, &g);
+      m.pass_split(0);
+      ASSERT_EQ(0, rc) << what;
+      ASSERT_EQ(0, fx.run_stage_path(&s)) << what;
+      EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+      EXPECT_EQ(s.tb_ok, g.tb_ok) << what;
+      EXPECT_EQ(s.nvar, g.nvar) << what;
+      EXPECT_EQ(0, memcmp(s.nvar_ant, g.nvar_ant, sizeof(s.nvar_ant))) << what;
+      EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+      if (!g.need_cpu) {
+        EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+        EXPECT_EQ(0, memcmp(fx.llr_ref.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs";
+      }
+      const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+      EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << what;
+      EXPECT_TRUE(fx.rxF_out.size() > 0);
+      for (int a = 0; a < 4; a++)
+        for (int sy = 0; sy < 14; sy++)
+          ASSERT_EQ(0, memcmp(&fx.rxF_out[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], &fx.rxF_ref[2 * ((size_t)a * 14 * 4096 + (size_t)sy * 4096)], 4096 * 4))
+              << "rxdataF, ant " << a << " sym " << sy << ", " << what;
+      n++;
+      n_ok += g.tb_ok;
+    }
+  GpuPassFixture::n_dm = 2;
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuGraphSplit.OneDmrsSymbolEqualsStagePath: %d grants, decoded %d\n", n, n_ok);
+  EXPECT_GE(n_ok, 3);
+  EXPECT_LT(n_ok, n);
+}
+
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
  * allocated or built on the launch path. */
 extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);

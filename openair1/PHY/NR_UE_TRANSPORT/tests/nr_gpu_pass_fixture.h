@@ -107,6 +107,8 @@ class GpuPassFixture {
                                          * widened band; the DM-RS is transmitted there too, the data is not) */
   int chest_extra = 0;
   static inline int first_sym = 1;      /* first symbol of the grant (1: the DL tests; 0: a PUSCH that starts at the slot boundary, Task 7) */
+  static inline int n_dm = 2;           /* DM-RS symbols of fixtures built from now on: 2 (symbols 2, 11) or 1 (symbol 2; review S6) */
+  int ndm = 2;
   static constexpr int N = 4096, NCP = 288, NCP0 = 352, NSYM = 14, NRB = 273, FCO = N - NRB * 6, NANT = 4;
   static constexpr int SLOT = NCP0 + N + (NSYM - 1) * (N + NCP);
   int nrb, nl, qm, start_rb = 10;
@@ -132,7 +134,7 @@ class GpuPassFixture {
   {
     size_t txk = 0;
     GpuPassFixture f;
-    f.nrb = nrb; f.nl = nl; f.qm = qm;
+    f.nrb = nrb; f.nl = nl; f.qm = qm; f.ndm = n_dm;
     f.chest_extra = sd ? 0 : widen_rb;
     f.pilspan = nrb + f.chest_extra;
     if (sd) {
@@ -152,7 +154,7 @@ class GpuPassFixture {
     std::normal_distribution<double> G(0, 1);
     std::uniform_real_distribution<double> U(0, 1);
     for (int l = first_sym; l < NSYM; l++)
-      if (l != f.dm_sym[0] && l != f.dm_sym[1]) f.data_syms.push_back(l);
+      if (l != f.dm_sym[0] && (f.ndm < 2 || l != f.dm_sym[1])) f.data_syms.push_back(l);
     /* channel: flat gain + one delayed tap per (ant, layer) */
     cd g0[NANT][4], g1[NANT][4];
     int dly[NANT][4];
@@ -165,7 +167,7 @@ class GpuPassFixture {
     auto H = [&](int a, int l, int ks) { return g0[a][l] + g1[a][l] * std::polar(1.0, -2 * M_PI * ks * dly[a][l] / N); };
     std::vector<cd> Y[NANT];
     for (auto &y : Y) y.assign((size_t)NSYM * N, 0);
-    for (int d = 0; d < 2; d++) {
+    for (int d = 0; d < f.ndm; d++) {
       for (int l = 0; l < nl; l++) f.pilot[d][l].assign((size_t)2 * 6 * f.pilspan, 0);
       for (int rb = 0; rb < nrb + f.chest_extra; rb++)
         for (int n = 0; n < 3; n++)
@@ -270,7 +272,7 @@ class GpuPassFixture {
     bool setup(GpuPassModule &mod, const GpuPassFixture &f, int nvar_pin)
     {
       m = &mod; fx = &f; nvar_fixed = nvar_pin;
-      len = 12 * f.nrb; ext = (len + 15) & ~15; nsym = (int)f.data_syms.size(); nrows = 2 * f.nl * NANT * (f.segs.empty() ? 1 : (int)f.segs.size());
+      len = 12 * f.nrb; ext = (len + 15) & ~15; nsym = (int)f.data_syms.size(); nrows = f.ndm * f.nl * NANT * (f.segs.empty() ? 1 : (int)f.segs.size());
       rxsz = (size_t)NANT * NSYM * N * 4;
       const size_t estrow = (size_t)NSYM * N * 4;
       bn = (size_t)2 * NSYM * NR_GPU_DEMOD_MAX_NL * ext * 2; /* comp, mag, magb, magr: int16 each */
@@ -305,7 +307,7 @@ class GpuPassFixture {
       memcpy(cj.filt[3], filt16_ul_last, 32);
       int r = 0;
       const int nsg = f.segs.empty() ? 1 : (int)f.segs.size();
-      for (int d = 0; d < 2; d++)
+      for (int d = 0; d < f.ndm; d++)
         for (int l = 0; l < f.nl; l++)
           for (int sg = 0; sg < nsg; sg++)
             for (int a = 0; a < NANT; a++, r++) {
@@ -331,7 +333,7 @@ class GpuPassFixture {
           gy[2 * (sy * ext + i)] = (int16_t)((FCO + 12 * (f.start_rb + f.bwp) + i) % N); /* rxdataF index; estimates are indexed from the grant's first RE (segmented: the virtual allocation at PRB 0) */
           gy[2 * (sy * ext + i) + 1] = 1;
           gh[2 * (sy * ext + i)] = (int16_t)i;
-          gh[2 * (sy * ext + i) + 1] = (int16_t)((sy < 7 ? f.dm_sym[0] : f.dm_sym[1]) + 1);
+          gh[2 * (sy * ext + i) + 1] = (int16_t)((sy < 7 || f.ndm < 2 ? f.dm_sym[0] : f.dm_sym[1]) + 1);
         }
       nr_gpu_buf_h2d_async(&geo, 0, geo.bytes, s);
       dj.nbRx = NANT; dj.nl = f.nl; dj.qm = f.qm; dj.N = N;
@@ -365,7 +367,7 @@ class GpuPassFixture {
       for (int a = 0; a < NANT; a++) memcpy(pring[a].data(), f.ring[a].data(), pring[a].size() * 2);
       memcpy(prot.data(), f.rot.data(), prot.size() * 2);
       fj.ring_offset = f.ring_offset;
-      for (int d = 0; d < 2; d++)
+      for (int d = 0; d < f.ndm; d++)
         for (int l = 0; l < f.nl; l++)
           memcpy((int16_t *)pil.host + (size_t)(d * f.nl + l) * 12 * f.pilspan * 2, f.pilot[d][l].data(), f.pilot[d][l].size() * 2);
       nr_gpu_buf_h2d_async(&pil, 0, pil.bytes, s);
@@ -590,7 +592,7 @@ class GpuPassFixture {
   /* TB parameters of a grant (G from its geometry) at a target code rate with at most 8 code blocks (one encoder macro group) */
   static bool tb_params(TbInfo *t, int nrb, int nl, int qm, int seed)
   {
-    t->G = (uint32_t)nrb * 12u * (first_sym == 0 ? 12u : 11u) * qm * nl;
+    t->G = (uint32_t)nrb * 12u * (uint32_t)(NSYM - first_sym - n_dm) * qm * nl;
     const double Rt = qm <= 4 ? 0.30 : 0.25;
     int A = ((int)(t->G * Rt)) & ~7;
     for (;; A = (int)(A * 0.8) & ~7) {
@@ -764,11 +766,11 @@ class GpuPassFixture {
     j.ring_len = ring_len; j.ring_offset = ring_offset; j.symbol_rot = rot.data();
     rxF_out.assign((size_t)2 * NANT * RXSTRIDE, 0);
     j.rxdataF = rxF_out.data(); j.rx_stride = RXSTRIDE; j.copy_mask = 0x3fff;
-    j.nbRx = NANT; j.nl = nl; j.ndmrs = 2;
-    j.dmrs_sym[0] = dm_sym[0]; j.dmrs_sym[1] = dm_sym[1];
+    j.nbRx = NANT; j.nl = nl; j.ndmrs = ndm;
+    for (int d = 0; d < ndm; d++) j.dmrs_sym[d] = dm_sym[d];
     for (int l = 0; l < nl; l++) {
       j.delta[l] = (l >> 1) & 1;
-      for (int d = 0; d < 2; d++) j.pil[d][l] = pilot[d][l].data();
+      for (int d = 0; d < ndm; d++) j.pil[d][l] = pilot[d][l].data();
     }
     j.nrb = nrb + chest_extra; j.k0 = (FCO + 12 * start_rb) % N; /* the chest band */
     j.shape.nrb_class = (uint16_t)nr_gpu_pass_nrb_class(nrb + chest_extra);
@@ -779,8 +781,8 @@ class GpuPassFixture {
       j.seg_pil_nrb = pilspan;
       j.shape.nseg_class = (uint16_t)nr_gpu_pass_nseg_class(j.nseg);
     }
-    j.number_symbols = 13; j.nvfix = 0; j.branch = -1; j.fo_first = 0; j.fo_last = 1;
-    j.dt_d = (1.0e-3 / 2) / 14 * (dm_sym[1] - dm_sym[0]); j.df_d = 30000.0;
+    j.number_symbols = 13; j.nvfix = 0; j.branch = -1; j.fo_first = ndm > 1 ? 0 : -1; j.fo_last = ndm > 1 ? 1 : -1; /* as nr_gpu_pass_dl_run */
+    j.dt_d = ndm > 1 ? (1.0e-3 / 2) / 14 * (dm_sym[1] - dm_sym[0]) : 0.0; j.df_d = 30000.0;
     j.G = tb.G; j.scr = tb.scr.data(); j.norm = tb.G >= 64; j.norm_span = nr_llr_norm_span(tb.G, (uint32_t)tb.C);
     j.A = (uint32_t)tb.A; j.C = (uint32_t)tb.C; j.K = (uint32_t)tb.K; j.Z = (uint32_t)tb.Z; j.F = (uint32_t)tb.F;
     j.E = tb.E; j.E2 = tb.E2; j.first_rE2 = tb.first_rE2; j.tbslbrm = 0;
@@ -803,7 +805,7 @@ class GpuPassFixture {
         gy[2 * (sy * ext + i)] = (int16_t)((FCO + 12 * (start_rb + bwp) + i) % N);
         gy[2 * (sy * ext + i) + 1] = 1;
         gh[2 * (sy * ext + i)] = (int16_t)i;
-        gh[2 * (sy * ext + i) + 1] = (int16_t)((sy < 7 ? dm_sym[0] : dm_sym[1]) + 1);
+        gh[2 * (sy * ext + i) + 1] = (int16_t)((sy < 7 || ndm < 2 ? dm_sym[0] : dm_sym[1]) + 1);
       }
     }
     if (!segs.empty()) { /* the graph reads the real rxdataF: the virtual allocation's index map composed with the old path's gather (what nr_gpu_pass_dl.c does) */
@@ -911,7 +913,7 @@ class GpuPassFixture {
     uint32_t nvar = 0;
     const int ns = seg ? (int)segs.size() : 1;
     memset(s->nvar_ant, 0, sizeof(s->nvar_ant));
-    for (int k = 0; k < 2 * nl; k++) {
+    for (int k = 0; k < ndm * nl; k++) {
       /* contiguous: the mean over the antennas with an estimate. Segmented: the passive loop's width-weighted combination of the segments' means (and per antenna) */
       uint64_t nv = 0, nva[NANT] = {0, 0, 0, 0};
       for (int sg = 0; sg < ns; sg++) {
