@@ -8579,7 +8579,9 @@ constdiag_done:;
                                                 .slots_per_frame = (uint8_t)fp->slots_per_frame};
           nr_ul_layout_cell_t ull_cell2 = ull_cell; /* + SIB1 initialUplinkBWP (hypothesis; used only with ISAC_UL_LOCK_SIB1_FIRST) */
           { const nr_pdcch_sib1_prior_t *sp = nr_pdcch_sib1_prior_get();
-            if (sp && sp->ul_bwp_valid) { ull_cell2.sib1_ul_start = sp->ul_bwp_start; ull_cell2.sib1_ul_size = sp->ul_bwp_size; } }
+            if (sp && sp->ul_bwp_valid) { ull_cell2.sib1_ul_start = sp->ul_bwp_start; ull_cell2.sib1_ul_size = sp->ul_bwp_size; }
+            if (!ull_cell2.sib1_ul_size && cfg->ul.bwp_size > 0 && nr_ul_layout_bwp_seed_enabled()) { /* configured UL BWP (ISAC_UL_BWP_SEED) */
+              ull_cell2.sib1_ul_start = (uint16_t)cfg->ul.bwp_start; ull_cell2.sib1_ul_size = (uint16_t)cfg->ul.bwp_size; ull_cell2.sib1_ul_cfg = 1; } }
           ull_cell2.dl_bwp_start = (uint16_t)cfg->bwp_start;
           ull = nr_ul_layout_on_dci(cand_task[ti].rnti_min, cand_task[ti].dci_length, source_absolute_slot,
                                     cand_task[ti].ul_out.raw_payload, &ull_cell2, &ull_g);

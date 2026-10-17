@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* UL-LAYOUT: blind UL BWP / DCI 0_1 layout lock. See the header for the method. */
 #include "nr_pdcch_ul_layout_lock.h"
+#include "nr_ul_trial_variant.h"
 #include "nr_pdsch_prb_set.h" /* NR_FDRA_TYPE1 */
 #include "nr_blind_stats.h"
 #include "nr_ul_layout_lookalike.h"
@@ -310,7 +311,7 @@ int nr_ul_layout_infer_k2(const uint32_t *occ, const uint32_t *hist, int spf)
 }
 
 /* ------------------------------------------------------------------ live state */
-#define CRC_EV_MAX 16
+#define CRC_EV_MAX 64
 typedef struct {
   uint16_t len;
   uint32_t count; /* DCIs seen (ring index = count % BANK) */
@@ -330,7 +331,8 @@ typedef struct {
   bool locked;
   nr_pdcch_blind_ul_opts_t opts;
   int chosen_tail;
-  struct { uint16_t e; uint32_t trials, passes; uint16_t rnti[4]; long slot[4]; uint8_t nr, ns; } ev[CRC_EV_MAX];
+  int chosen_var; /* trial variant (vt | k2d << 3) of the CRC-locked layout; 0 = default table / k2 */
+  struct { uint32_t e; uint32_t trials, passes; uint16_t rnti[4]; long slot[4]; uint8_t nr, ns; } ev[CRC_EV_MAX];
   uint32_t ev_susp, ev_dec, ev_lock; /* CRC guard stats: suppressed passes, decisive passes, evidence locks */
 } len_state_t;
 
@@ -360,6 +362,8 @@ static uint64_t g_gen = 1;
 static hyp_state_t g_hyp[NR_UL_LAYOUT_MAX_HYP];
 static int g_nhyp;
 static int g_locked_hyp = -1;
+static int g_lat_var;          /* latched trial variant (vt | k2d << 3), applied to every length's locked opts */
+static uint32_t g_var_ctr;     /* trial-slot counter: the variant rotates per trial slot */
 static uint32_t g_probes_skipped, g_addpos[3], g_ctl_votes, g_discarded, g_tied, g_votes_total, g_probes_fed, g_probes_booked;
 static pending_t g_pend[PENDING_MAX];
 static int g_npend;
@@ -417,7 +421,10 @@ static bool sprt_base_term(void) { return env_on("ISAC_UL_LOCK_SPRT") || !(env_o
 #define EG_GRANTS 24
 static struct { long target; int n; uint16_t rnti[EG_GRANTS]; uint16_t r0[EG_GRANTS][NR_UL_LAYOUT_MAX_HYP], r1[EG_GRANTS][NR_UL_LAYOUT_MAX_HYP]; } g_eg[EG_SLOTS];
 static uint32_t g_edge_used, g_edge_excl;
-bool nr_ul_layout_sib1_first_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_SIB1_FIRST"); }
+/* ISAC_UL_BWP_SEED=1 also makes the configured / SIB1 UL BWP a hypothesis (hypothesis 0, first in the CRC trials) */
+static bool bwp_seed_on(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_BWP_SEED"); }
+bool nr_ul_layout_bwp_seed_enabled(void) { return bwp_seed_on(); }
+bool nr_ul_layout_sib1_first_enabled(void) { return nr_ul_layout_lock_enabled() && (env_on("ISAC_UL_LOCK_SIB1_FIRST") || env_on("ISAC_UL_BWP_SEED")); }
 bool nr_ul_layout_crc_guard_enabled(void) { return nr_ul_layout_crc_first_enabled() && env_on("ISAC_UL_LOCK_CRC_GUARD"); }
 bool nr_ul_layout_crc_first_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_CRC_FIRST"); }
 
@@ -443,6 +450,8 @@ static void reset_locked(void)
   memset(g_disc, 0, sizeof(g_disc));
   g_nhyp = 0;
   g_locked_hyp = -1;
+  g_lat_var = 0;
+  g_var_ctr = 0;
   memset(g_addpos, 0, sizeof(g_addpos));
   g_ctl_votes = g_discarded = g_tied = g_votes_total = g_probes_fed = g_probes_booked = g_probes_skipped = 0;
   g_npend = 0;
@@ -613,6 +622,20 @@ static void tail_str(const nr_ul_layout_tail_t *t, char *s, size_t n)
            t->dai2, t->sri, t->ant, t->csi, t->beta, t->init, t->tp ? "TP" : "CP", t->cdm, t->cost, t->plaus);
 }
 
+/* ISAC_UL_MCS_TABLE_SWEEP=1: CRC-first trials rotate the UL MCS table; the explicit ISAC_UL_MCS_TABLE=n override wins */
+static bool trial_sweep_on(void)
+{
+  const char *v = getenv("ISAC_UL_MCS_TABLE");
+  return env_on("ISAC_UL_MCS_TABLE_SWEEP") && !(v && *v >= '0' && *v <= '2');
+}
+
+/* variant = vt | k2d << 3: vt = forced MCS table + 1 (0 = keep), k2d = k2 + 1 on every TDRA row */
+static void apply_variant(nr_pdcch_blind_ul_opts_t *o, int var)
+{
+  if ((var & 7) > 0) o->mcs_table = (uint8_t)((var & 7) - 1);
+  if (var & 8) for (int i = 0; i < o->tda_count && i < 16; i++) o->tda_k2[i]++;
+}
+
 /* caller holds mu: build the locked opts of one fitted length once the BWP is locked */
 static void lock_length_locked(len_state_t *ls, long now_slot)
 {
@@ -637,8 +660,10 @@ static void lock_length_locked(len_state_t *ls, long now_slot)
   for (int i = 0; i < 3; i++) if ((int)g_addpos[i] > mx) { mx = (int)g_addpos[i]; addpos = i; }
   nr_ul_layout_build_opts(pre, &ls->tail[best], H->start, H->n, ls->k2row, addpos, g_cell.pci, g_cell.mu,
                           g_cell.typeA_pos, &ls->opts);
+  apply_variant(&ls->opts, g_lat_var);
   if (nr_pdcch_blind_dci01_size(&ls->opts) != ls->len) return;
   ls->chosen_tail = best;
+  ls->chosen_var = g_lat_var;
   ls->locked = true;
   ls->lock_slot = now_slot;
   char a[160], b[160] = "-";
@@ -909,6 +934,19 @@ static void finalize_pending_locked(void)
 }
 
 static void prior_adopt_locked(long slot);
+/* ISAC_UL_BWP_SEED=1: an operator-CONFIGURED UL BWP (pdcch_blind_monitor_ul_bwp) is the BWP: it short-circuits the DM-RS vote, which
+ * cannot tell N@s from N+1@s. CRC-first trials still re-lock it after a run of failures. A SIB1-derived BWP is only a hypothesis. */
+static void seed_lock_locked(long slot)
+{
+  if (!bwp_seed_on() || !g_cell.sib1_ul_cfg || g_locked_hyp >= 0) return;
+  for (int h = 0; h < g_nhyp; h++)
+    if (g_hyp[h].n == g_cell.sib1_ul_size && g_hyp[h].start == g_cell.sib1_ul_start) {
+      g_locked_hyp = h;
+      g_lock_slot = slot;
+      LOG_A(PHY, "SENSING: ULLAYOUT SEED_LOCK bwp=%u@%u (configured) abs=%ld\n", g_hyp[h].n, g_hyp[h].start, slot);
+      return;
+    }
+}
 static pthread_mutex_t eval_mu = PTHREAD_MUTEX_INITIALIZER; /* serializes eval passes (static scratch below) */
 void nr_ul_layout_eval_once(void)
 {
@@ -999,6 +1037,7 @@ void nr_ul_layout_eval_once(void)
         LOG_A(PHY, "SENSING: ULLAYOUT FIT len=%u dcis=%d mcs_off=%d score=%.2f second=%.2f prefixes=[%s] k2_row0=%u"
                    " tails=%d best[%s] next[%s] bwp_hyps=%d first_abs=%ld fit_abs=%ld\n",
               len, n, mo, sc, sec, pr, k2row[0], ntail, t0, t1, g_nhyp, ls->first_slot, ls->fit_slot);
+        seed_lock_locked(ls->fit_slot);
         prior_adopt_locked(ls->fit_slot);
         lock_length_locked(ls, ls->fit_slot);
       } else {
@@ -1088,7 +1127,7 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
   }
   if (!g_have_cell) { g_cell = *cell; g_have_cell = true; }
   else { /* priors that were not known at the first DCI */
-    if (!g_cell.sib1_ul_size && cell->sib1_ul_size) { g_cell.sib1_ul_start = cell->sib1_ul_start; g_cell.sib1_ul_size = cell->sib1_ul_size; }
+    if (!g_cell.sib1_ul_size && cell->sib1_ul_size) { g_cell.sib1_ul_start = cell->sib1_ul_start; g_cell.sib1_ul_size = cell->sib1_ul_size; g_cell.sib1_ul_cfg = cell->sib1_ul_cfg; }
     if (!g_cell.dl_bwp_size && cell->dl_bwp_size) { g_cell.dl_bwp_start = cell->dl_bwp_start; g_cell.dl_bwp_size = cell->dl_bwp_size; }
   }
   if (g_first_slot < 0) g_first_slot = abs_slot;
@@ -1488,16 +1527,17 @@ static int pre_for_hyp(const len_state_t *ls, int h)
 }
 
 /* caller holds mu: build the opts of hypothesis (h, prefix k, tail t); false when it does not read `ls->len` */
-static bool trial_opts_locked(const len_state_t *ls, int h, int k, int t, nr_pdcch_blind_ul_opts_t *o)
+static bool trial_opts_locked(const len_state_t *ls, int h, int k, int t, int var, nr_pdcch_blind_ul_opts_t *o)
 {
   if (h < 0 || h >= g_nhyp || k < 0 || k >= ls->npre || t < 0 || t >= ls->ntail) return false;
   nr_ul_layout_build_opts(&ls->pre[k], &ls->tail[t], g_hyp[h].start, g_hyp[h].n, ls->k2row, cur_addpos_locked(), g_cell.pci,
                           g_cell.mu, g_cell.typeA_pos, o);
+  apply_variant(o, var);
   return nr_pdcch_blind_dci01_size(o) == ls->len;
 }
 
 /* caller holds mu: evidence slot of hypothesis e (created; the entry with the fewest passes is evicted when full) */
-static typeof(((len_state_t *)0)->ev[0]) *ev_slot_locked(len_state_t *ls, uint16_t e)
+static typeof(((len_state_t *)0)->ev[0]) *ev_slot_locked(len_state_t *ls, uint32_t e)
 {
   int v = 0;
   for (int i = 0; i < CRC_EV_MAX; i++) {
@@ -1505,7 +1545,7 @@ static typeof(((len_state_t *)0)->ev[0]) *ev_slot_locked(len_state_t *ls, uint16
     if (ls->ev[i].passes < ls->ev[v].passes) v = i;
   }
   memset(&ls->ev[v], 0, sizeof(ls->ev[v]));
-  ls->ev[v].e = (uint16_t)(e + 1u); /* 0 = empty */
+  ls->ev[v].e = e + 1u; /* 0 = empty */
   return &ls->ev[v];
 }
 
@@ -1549,29 +1589,57 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
       if (!(sa > sb || (sa == sb && g_hyp[a].votes > g_hyp[b].votes))) break;
       rk[j] = b; rk[j - 1] = a;
     }
+  if (bwp_seed_on() && nr > 0) { /* the leader's look-alike partners (N+1@s, shift variants) are tried right behind it: CRC decides, not votes */
+    uint16_t pt[4][2];
+    const int np = nr_ul_lookalike_partners(g_hyp[rk[0]].n, g_hyp[rk[0]].start, g_cell.carrier_rb, pt);
+    int pos = 1;
+    for (int q = 0; q < np && pos < K; q++) {
+      int hp = -1;
+      for (int h = 0; h < g_nhyp; h++) if (g_hyp[h].n == pt[q][0] && g_hyp[h].start == pt[q][1]) hp = h;
+      if (hp < 0 && g_nhyp < NR_UL_LAYOUT_MAX_HYP) { g_hyp[g_nhyp] = (hyp_state_t){.n = pt[q][0], .start = pt[q][1]}; hp = g_nhyp++; }
+      if (hp < 0 || pre_for_hyp(ls, hp) < 0) continue;
+      int idx = 0;
+      while (idx < nr && rk[idx] != hp) idx++;
+      if (idx == nr) rk[nr++] = hp;
+      for (; idx > pos; idx--) rk[idx] = rk[idx - 1];
+      rk[pos++] = hp;
+    }
+  }
+  const bool sweep = trial_sweep_on(), k2pair = env_on("ISAC_UL_K2_PAIR");
+  const uint32_t vctr = g_var_ctr;
+  if (sweep || k2pair) g_var_ctr++;
   const uint64_t gen = g_gen & NR_UL_LAYOUT_GEN_MASK;
-  for (int t = 0; t < ls->ntail && t < 2 && n < K; t++)
+  for (int t = 0; t < ls->ntail && t < 2 && n < K; t++) {
+    int tbl, k2d;
+    nr_ul_variant_get((int)(vctr % (uint32_t)nr_ul_variant_count(sweep, k2pair, ls->tail[t].tp)), sweep, k2pair, ls->tail[t].tp, &tbl, &k2d);
+    const int var = (tbl + 1) | k2d << 3;
     for (int i = 0; i < nr && n < K; i++) {
       const int h = rk[i], k = pre_for_hyp(ls, h);
-      if (ls->locked && g_locked_hyp == h && ls->chosen_tail == t) continue; /* the failing layout itself */
+      if (ls->locked && g_locked_hyp == h && ls->chosen_tail == t && ls->chosen_var == var) continue; /* the failing layout itself */
       nr_pdcch_blind_ul_opts_t o;
-      if (!trial_opts_locked(ls, h, k, t, &o) || !nr_pdcch_blind_extract_01(payload, len, rnti, &o, &out[n])) continue;
-      out[n].hyp_generation = NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_TRIAL | ((uint64_t)(h | k << 8 | t << 11) << 40) | gen;
-      ev_slot_locked(ls, (uint16_t)(h | k << 8 | t << 11))->trials++;
+      if (!trial_opts_locked(ls, h, k, t, var, &o) || !nr_pdcch_blind_extract_01(payload, len, rnti, &o, &out[n])) continue;
+      const uint32_t e = (uint32_t)(h | k << 8 | t << 11 | var << 13);
+      out[n].hyp_generation = NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_TRIAL | ((uint64_t)e << 40) | gen;
+      ev_slot_locked(ls, e)->trials++;
       n++;
     }
-  if (n) { g_trial_slot = abs_slot; ls->trials += (uint32_t)n; }
+  }
+  if (n || sweep || k2pair) g_trial_slot = abs_slot;
+  if (n) ls->trials += (uint32_t)n;
   pthread_mutex_unlock(&mu);
   return n;
 }
 
 /* caller holds mu: a TB CRC passed under (h, k, t): this layout is the lock (BWP, prefix, tail, k2/TDRA) */
-static void crc_lock_locked(int li, int h, int k, int t, long slot)
+static void crc_lock_locked(int li, int h, int k, int t, int var, long slot)
 {
   len_state_t *ls = &g_len[li];
   nr_pdcch_blind_ul_opts_t o;
-  if (!trial_opts_locked(ls, h, k, t, &o)) return;
+  if (!trial_opts_locked(ls, h, k, t, var, &o)) return;
   const bool relock = ls->locked;
+  const bool vchg = g_lat_var != var;
+  g_lat_var = var;
+  ls->chosen_var = var;
   g_prov = false; /* a CRC pass confirms whatever it names */
   ls->opts = o;
   ls->chosen_tail = t;
@@ -1579,7 +1647,7 @@ static void crc_lock_locked(int li, int h, int k, int t, long slot)
   ls->lock_slot = slot;
   ls->crc_fail_run = 0;
   ls->crc_locks++;
-  if (g_locked_hyp != h) {
+  if (g_locked_hyp != h || vchg) {
     g_locked_hyp = h;
     for (int l = 0; l < g_nlen; l++) if (l != li) g_len[l].locked = false; /* re-derived under the new BWP */
     for (int l = 0; l < g_nlen; l++) lock_length_locked(&g_len[l], slot);
@@ -1588,9 +1656,9 @@ static void crc_lock_locked(int li, int h, int k, int t, long slot)
   char tl[160];
   tail_str(&ls->tail[t], tl, sizeof(tl));
   LOG_A(PHY, "SENSING: ULLAYOUT_CRC_LOCK%s len=%u bwp=%u@%u riv=%u bwp_ind=%u tda=%u(k2=%u) fh=%u tail[%s] crc_ok=%u"
-             " trials=%u abs=%ld\n",
+             " trials=%u mcs_table=%u var=%d abs=%ld\n",
         relock ? " RELOCK" : "", ls->len, g_hyp[h].n, g_hyp[h].start, ls->pre[k].riv, ls->pre[k].bwp_ind, ls->pre[k].tda,
-        ls->k2row[0], ls->pre[k].fh, tl, ls->crc_ok, ls->trials, slot);
+        o.tda_k2[0], ls->pre[k].fh, tl, ls->crc_ok, ls->trials, (unsigned)o.mcs_table, var, slot);
 }
 
 /* ISAC_UL_LOCK_CRC_GUARD=1: may this TB CRC pass lock layout (h,k,t)? Caller holds mu.
@@ -1599,10 +1667,10 @@ static void crc_lock_locked(int li, int h, int k, int t, long slot)
  * the pass count m is accepted when H * P(Poisson(n_h * 2^-16) >= m) < ALPHA (Bonferroni) and the passes come from
  * >= 2 distinct slots. The DM-RS-SNR plausibility rule is skipped: the verdict only carries the decoder's own SNR scale. */
 #define CRC_GUARD_ALPHA 0.01
-static bool crc_guard_accept_locked(len_state_t *ls, int h, int k, int t, uint16_t rnti, long slot, uint32_t tbs_bits,
+static bool crc_guard_accept_locked(len_state_t *ls, int h, int k, int t, int var, uint16_t rnti, long slot, uint32_t tbs_bits,
                                     int nseg, int seg_ok)
 {
-  const uint16_t e = (uint16_t)(h | k << 8 | t << 11);
+  const uint32_t e = (uint32_t)(h | k << 8 | t << 11 | var << 13);
   const bool decisive = tbs_bits > 3824 || (nseg > 1 && seg_ok == nseg);
   typeof(ls->ev[0]) *v = ev_slot_locked(ls, e);
   v->passes++;
@@ -1636,12 +1704,14 @@ void nr_ul_layout_crc_verdict(const nr_pdcch_blind_ul_result_t *g, bool ok, uint
   if (li >= 0 && (g->hyp_generation & NR_UL_LAYOUT_GEN_MASK) == (g_gen & NR_UL_LAYOUT_GEN_MASK)) {
     len_state_t *ls = &g_len[li];
     if (nr_ul_layout_is_trial(g)) {
-      const unsigned e = (unsigned)((g->hyp_generation >> 40) & 0x1fff);
-      const int h = e & 255, k = (e >> 8) & 7, t = (e >> 11) & 3;
+      const unsigned e = (unsigned)((g->hyp_generation >> 40) & 0x1ffff);
+      const int h = e & 255, k = (e >> 8) & 7, t = (e >> 11) & 3, var = (e >> 13) & 15;
       if (ok) {
-        if (ls->locked && g_locked_hyp == h && ls->chosen_tail == t) { ls->crc_ok++; ls->crc_fail_run = 0; }
-        else if (!nr_ul_layout_crc_guard_enabled() || crc_guard_accept_locked(ls, h, k, t, g->rnti, slot, tbs_bits, nseg, seg_ok))
-          crc_lock_locked(li, h, k, t, ls->bank[(ls->count - 1) % NR_UL_LAYOUT_BANK].slot);
+        if (ls->locked && g_locked_hyp == h && ls->chosen_tail == t && ls->chosen_var == var) { ls->crc_ok++; ls->crc_fail_run = 0; }
+        /* a non-default table / k2 latches only on two independent CRC passes (distinct slots), guard or not */
+        else if ((!nr_ul_layout_crc_guard_enabled() && !var)
+                 || crc_guard_accept_locked(ls, h, k, t, var, g->rnti, slot, tbs_bits, nseg, seg_ok))
+          crc_lock_locked(li, h, k, t, var, ls->bank[(ls->count - 1) % NR_UL_LAYOUT_BANK].slot);
       }
     } else if (ls->locked) {
       if (ok) { ls->crc_ok++; ls->crc_fail_run = 0; }
@@ -1900,7 +1970,7 @@ void nr_ul_layout_prior_note(const nr_pdcch_blind_ul_result_t *g, bool ok, uint3
     if (expected) g_p_exp++;
     if (ok) {
       g_p_ok++;
-      if (k >= 0 && t >= 0 && (!nr_ul_layout_crc_guard_enabled() || crc_guard_accept_locked(ls, h, k, t, g->rnti, slot, tbs_bits, nseg, seg_ok))) {
+      if (k >= 0 && t >= 0 && (!nr_ul_layout_crc_guard_enabled() || crc_guard_accept_locked(ls, h, k, t, 0, g->rnti, slot, tbs_bits, nseg, seg_ok))) {
         g_prov = false;
         LOG_A(PHY, "SENSING: ULLAYOUT PRIOR_CONFIRM bwp=%u@%u by=crc crc_expected_n=%u crc_ok=%u dec=%u demotions=%u slot=%ld\n",
               g_hyp[h].n, g_hyp[h].start, g_p_exp, g_p_ok, g_p_dec, g_ndem, slot);

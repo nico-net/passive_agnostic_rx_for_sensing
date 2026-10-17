@@ -2286,6 +2286,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     forced_ids_grant.data_scrambling_id = force_data;
     forced_ids_grant.data_id_advance = false;
     g = &forced_ids_grant;
+    out->dmrs_id = force_dmrs; /* the UL_PUSCH_CRC log must show the forced IDs, not the pre-force ones set above */
+    out->data_id = force_data;
   }
   fill_pusch_pdu(g, nant, fp, &pdu);
   static atomic_bool tp_scope_logged = false;
