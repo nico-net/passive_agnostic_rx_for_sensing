@@ -119,6 +119,22 @@ TEST(PrbSet, GatherConcatenatesSegmentsInDataOrder) {
   for (int i = 0; i < 8; i++) EXPECT_EQ(idx[i], want[i]);
 }
 
+extern "C" int nr_prb_gather_copy(const void *src, void *dst, const nr_prb_seg_t *seg, int nseg, int re_per_prb, int off0, int N);
+TEST(PrbSet, GatherCopyEqualsPerReLoopIncludingRingWrap) {
+  const int N = 64, rp = 3;
+  const nr_prb_seg_t s[4] = {{10, 5, 0}, {0, 3, 5}, {17, 4, 8}, {6, 2, 12}};  // REs 30..44, 0..8, 51..62, 18..23
+  for (int off0 : {0, 5, 20, 50, 63}) {  // wrap of the source and the destination ring at different places
+    uint32_t src[N], a[N], b[N];
+    for (int i = 0; i < N; i++) { src[i] = 0x1000u + i; a[i] = b[i] = 0xdeadbeefu; }
+    int idx[64];
+    const int n = nr_prb_gather_index(s, 4, rp, idx, 64);
+    ASSERT_EQ(n, 14 * rp);
+    for (int i = 0; i < n; i++) a[(off0 + i) % N] = src[(off0 + idx[i]) % N];
+    EXPECT_EQ(nr_prb_gather_copy(src, b, s, 4, rp, off0, N), n);
+    EXPECT_EQ(memcmp(a, b, sizeof(a)), 0) << "off0 " << off0;
+  }
+}
+
 TEST(PrbSet, ListNormaliseRejectsDuplicateOutOfBwpAndOverLength) {
   // The pure core of nr_pdsch_passive_alloc_normalise(): every producer's PRB list goes through it.
   uint32_t bm[9] = {0xdeadbeef};
