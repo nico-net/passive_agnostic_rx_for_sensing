@@ -68,7 +68,8 @@ int nr_gpu_graph_pool_has_free(void); /* v2 and a set is free (the body's nomem 
 enum { NR_GPU_PASS_EV_COMMIT, NR_GPU_PASS_EV_RETRY_OLD /* pass said CRC fail / CPU: the old path decodes */, NR_GPU_PASS_EV_ZERO_TB, NR_GPU_PASS_EV_LIFETIME, NR_GPU_PASS_EV_SHADOW,
        NR_GPU_PASS_EV_SHADOW_BAD, NR_GPU_PASS_EV_CONT_FAIL /* CRC fail of the pass continued into the retry arms, no old first body */,
        NR_GPU_PASS_EV_OLD_FIRST /* old first body executed although a pass was attempted */, NR_GPU_PASS_EV_SHADOW_FAIL, NR_GPU_PASS_EV_SHADOW_FAIL_BAD,
-       NR_GPU_PASS_EV_FP32_FLIP /* FP32 pass: a shadow where pass and old path disagree on the CRC verdict only (tolerated, counted) */, NR_GPU_PASS_EV_N };
+       NR_GPU_PASS_EV_FP32_FLIP /* FP32 pass: a shadow where pass and old path disagree on the CRC verdict only (tolerated, counted) */,
+       NR_GPU_PASS_EV_PROBE /* v2: a layout probe's pass committed (never a decoded TB, so not a cont_fail) */, NR_GPU_PASS_EV_N };
 /* gates of passive_decode_body_core that keep a grant off the pass (the first one that refuses, counted) */
 enum { NR_GPU_PASS_GATE_SEG /* more segments than the largest class (16) */, NR_GPU_PASS_GATE_PROBE, NR_GPU_PASS_GATE_SHARE, NR_GPU_PASS_GATE_GW, NR_GPU_PASS_GATE_PTRS, NR_GPU_PASS_GATE_TINTERP, NR_GPU_PASS_GATE_HARQ,
        NR_GPU_PASS_GATE_LDPC_OFF, NR_GPU_PASS_GATE_CHEST_ONLY, NR_GPU_PASS_GATE_OCC, NR_GPU_PASS_GATE_NOMEM, NR_GPU_PASS_GATE_RETRY /* ISAC_GPU_PASS_RETRY_OLD: a retry body runs the old path */, NR_GPU_PASS_GATE_N };

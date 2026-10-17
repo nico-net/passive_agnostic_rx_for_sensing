@@ -3253,7 +3253,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
             nr_gpu_pass_note(NR_GPU_PASS_EV_SHADOW_FAIL);
           } else {
             gp_ok = true;
-            nr_gpu_pass_note(NR_GPU_PASS_EV_CONT_FAIL);
+            nr_gpu_pass_note(t_probe_first_seg ? NR_GPU_PASS_EV_PROBE : NR_GPU_PASS_EV_CONT_FAIL); /* a probe is never a TB: its outcome is seg_ok[0] */
           }
         } else {
           const uint32_t sz = cw->TBS / 8;

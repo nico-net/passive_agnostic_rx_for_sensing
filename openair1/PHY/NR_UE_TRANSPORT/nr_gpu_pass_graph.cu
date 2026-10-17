@@ -254,6 +254,7 @@ static bool g_cfg_set = false;
 static std::atomic<int> g_ready{0}, g_dead{0};
 static std::atomic<unsigned> g_busy{0};
 static std::atomic<uint64_t> g_seg_launches{0}, g_seg_classes{0}, g_used_mb{0}, g_base_mb{0}, g_fb_unseen_seg{0}; /* g_used_mb: GPU memory in use by the device after the last pre-fence build */
+static std::atomic<uint64_t> g_fb_busy_probe{0}; /* v2 Task 2 review: probes refused an instance (the reserve below), not counted in g_fb_busy */
 static std::atomic<uint64_t> g_launches{0}, g_hits{0}, g_fb_unseen{0}, g_fb_busy{0}, g_fb_unsup{0}, g_fb_err{0}, g_need_cpu{0}, g_tb_fail{0}, g_allocs{0}, g_fb_ldpckey{0};
 static std::atomic<uint64_t> g_wait_hist[32]; /* host wait, 2^i us buckets */
 /* Task 8b stamps: host prep (run entry to launch), launch to done, post (done to commit end); [0] DL, [1] UL; 2^i us buckets */
@@ -364,7 +365,7 @@ static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
   /* v2 Task 2: a probe decodes the first n_decode blocks with the parameters (K', CRC type, E, offsets) of the whole TB */
   const uint32_t nd = j->n_decode && j->n_decode < j->C ? j->n_decode : j->C;
   pb.G = j->G; pb.span = j->norm_span; pb.norm = j->norm; pb.tbs = j->A;
-  pb.Gd = j->G_dem && j->G_dem < j->G ? j->G_dem : j->G;
+  pb.Gd = j->probe ? j->G_dem : j->G_dem && j->G_dem < j->G ? j->G_dem : j->G; /* a probe: the LLRs up to its horizon (> 0, checked in dl_try) */
   pb.ncb = (int)nd; pb.KB = (int)(j->K >> 3);
   if (nr_gpu_model() == NR_GPU_MODEL_DIRECT) {
     pb.scr = j->scr;
@@ -794,7 +795,7 @@ static int alloc_inst(int id)
       (!nr_gpu_green_stream(&I.s2, hi, true, id) && cudaStreamCreateWithPriority(&I.s2, cudaStreamNonBlocking, hi) != cudaSuccess) ||
       cudaEventCreateWithFlags(&I.done, cudaEventDisableTiming) != cudaSuccess)
     return -1;
-  if (g_cfg.v2 && nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&I.s_lo, lo, hi)) I.s_lo = nullptr; /* v2 Task 2: probes on the twin; none = the RT stream */
+  if (g_cfg.v2 && nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&I.s_lo, lo, hi, id)) I.s_lo = nullptr; /* v2 Task 2: probes on the twin, in the instance's own green context (a graph captured on I.s cannot launch in another); none = the RT stream */
   if (nr_gpu_buf_alloc(&I.rxF, (size_t)4 * NSYM * N * 4) || nr_gpu_buf_alloc(&I.est, (size_t)16 * NSYM * N * 4) ||
       nr_gpu_buf_alloc(&I.nvar, NR_GPU_CHEST_DEV_BYTES) || nr_gpu_buf_alloc(&I.geo, (size_t)2 * NSYM * ext * 4) ||
       nr_gpu_buf_alloc(&I.scratch, 4 * I.bn * 2) || nr_gpu_buf_alloc(&I.llr, (size_t)LLR_CAP * 2) ||
@@ -896,7 +897,7 @@ extern "C" void nr_gpu_pass_counters(uint64_t o[16])
 {
   memset(o, 0, 16 * sizeof(uint64_t));
   o[0] = g_launches; o[1] = g_hits; o[2] = g_fb_unseen; o[3] = g_fb_busy; o[4] = g_fb_unsup; o[5] = g_fb_err; o[6] = g_need_cpu; o[7] = g_tb_fail;
-  o[8] = NI; o[9] = g_cache.size(); o[10] = g_allocs; o[11] = g_fb_ldpckey; o[12] = g_seg_launches; o[13] = g_seg_classes; o[14] = g_fb_unseen_seg;
+  o[8] = NI; o[9] = g_cache.size(); o[10] = g_allocs; o[11] = g_fb_ldpckey; o[12] = g_seg_launches; o[13] = g_seg_classes; o[14] = g_fb_unseen_seg; o[15] = g_fb_busy_probe;
 }
 
 extern "C" void nr_gpu_pass_stats(char *buf, int n)
@@ -910,11 +911,11 @@ extern "C" void nr_gpu_pass_stats(char *buf, int n)
     acc += g_wait_hist[i];
     if (acc * 2 >= tot && tot) { p50 = i; break; }
   }
-  snprintf(buf, n, "GPUPASS launches=%lu graph_hits=%lu fallback=%lu (unseen=%lu (seg %lu) busy=%lu unsup=%lu err=%lu ldpc_key=%lu) need_cpu=%lu tb_fail=%lu classes=%lu (seg %lu) seg_launches=%lu instances=%lu wait_us_p50<=%d gpu_delta_mb=%lu prep_us[p50<=%lu p99<=%lu] run_us[p50<=%lu p99<=%lu] post_us[p50<=%lu p99<=%lu]",
+  snprintf(buf, n, "GPUPASS launches=%lu graph_hits=%lu fallback=%lu (unseen=%lu (seg %lu) busy=%lu unsup=%lu err=%lu ldpc_key=%lu) need_cpu=%lu tb_fail=%lu classes=%lu (seg %lu) seg_launches=%lu instances=%lu wait_us_p50<=%d gpu_delta_mb=%lu prep_us[p50<=%lu p99<=%lu] run_us[p50<=%lu p99<=%lu] post_us[p50<=%lu p99<=%lu] probe_busy=%lu",
            (unsigned long)o[0], (unsigned long)o[1], (unsigned long)(o[2] + o[3] + o[4] + o[5] + o[11]), (unsigned long)o[2], (unsigned long)o[14], (unsigned long)o[3], (unsigned long)o[4],
            (unsigned long)o[5], (unsigned long)o[11], (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[9], (unsigned long)o[13], (unsigned long)o[12], (unsigned long)o[8],
            tot ? 1 << p50 : 0, (unsigned long)g_used_mb.load(), (unsigned long)stamp_q(0, 0, 50), (unsigned long)stamp_q(0, 0, 99), (unsigned long)stamp_q(0, 1, 50),
-           (unsigned long)stamp_q(0, 1, 99), (unsigned long)stamp_q(0, 2, 50), (unsigned long)stamp_q(0, 2, 99));
+           (unsigned long)stamp_q(0, 1, 99), (unsigned long)stamp_q(0, 2, 50), (unsigned long)stamp_q(0, 2, 99), (unsigned long)o[15]);
 }
 
 /* test hook: marks the instances of `mask` busy (1) or frees them (0) so that a test can run on one chosen instance */
@@ -924,6 +925,13 @@ extern "C" void nr_gpu_pass_test_hold(unsigned mask, int hold)
   else g_busy.fetch_and(~mask);
 }
 
+/* free instances a probe leaves to real grants: ISAC_PDSCH_GPU_GRAPH_PROBE_RESERVE (default 1, 0 = none) */
+static int probe_reserve()
+{
+  static const int v = [] { const char *e = getenv("ISAC_PDSCH_GPU_GRAPH_PROBE_RESERVE"); return e && *e ? std::max(0, std::min(NI, atoi(e))) : 1; }();
+  return v;
+}
+
 extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result_t *r)
 {
   if (!g_ready || g_dead || !j || !r || !r->tb) { ++g_fb_unsup; return 1; }
@@ -931,7 +939,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   const nr_gpu_demod_job_t &d = j->dj;
   const uint32_t ext = d.ext;
   const uint32_t nd = j->n_decode && j->n_decode < j->C ? j->n_decode : j->C; /* v2 Task 2: blocks decoded (a probe: block 0) */
-  if (!key_ok(k) || (int)k.nl != j->nl || (int)k.ndmrs != j->ndmrs || j->nbRx != g_cfg.nbRx || (int)j->nrb > (int)k.nrb || j->C < 1 || nd > k.ncb || j->G_dem > j->G ||
+  if (!key_ok(k) || (int)k.nl != j->nl || (int)k.ndmrs != j->ndmrs || j->nbRx != g_cfg.nbRx || (int)j->nrb > (int)k.nrb || j->C < 1 || nd > k.ncb || j->G_dem > j->G || (j->probe && !j->G_dem) ||
       (j->Z & 3) || (j->K & 7) || (j->K >> 3) > (uint32_t)KBMAX || j->G > LLR_CAP || j->G == 0 || ext > (uint32_t)EXTMAX || (d.want_evm && (k.fp32 & 1) == (uint8_t)d.evm_fp64) || ((k.fp32 >> 1) != (uint8_t)(d.demod_fp32 != 0)) ||
       j->nseg < 0 || j->nseg > (int)k.nseg || (j->nseg == 0) != (k.nseg == 0) || !seg_ok(j) ||
       j->it_max < 1 || j->it_max > NSNAP + 1 || !j->scr || !j->geo_y || !j->geo_h || !j->symbol_rot || !j->rxdata[0]) {
@@ -951,14 +959,16 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
               k.align, k.fp32, k.nseg, j->nseg);
     return 1;
   }
+  /* a probe never takes one of the last probe_reserve() free instances: real grants that find none free fall back to the slow stage path */
+  const int keep = j->probe ? probe_reserve() : 0;
   int id = -1;
   for (unsigned m = g_busy.load(); id < 0;) {
     int i = 0;
     while (i < NI && (m >> i & 1u)) i++;
-    if (i == NI) break;
+    if (i == NI || NI - __builtin_popcount(m & ((1u << NI) - 1u)) <= keep) break;
     if (g_busy.compare_exchange_weak(m, m | 1u << i)) id = i;
   }
-  if (id < 0) { ++g_fb_busy; return 1; }
+  if (id < 0) { ++(j->probe ? g_fb_busy_probe : g_fb_busy); return 1; }
   Inst &I = g_inst[id];
   struct Rel { int id; ~Rel() { g_busy.fetch_and(~(1u << id)); } } rel{id};
   NrGpuRtScope rt;

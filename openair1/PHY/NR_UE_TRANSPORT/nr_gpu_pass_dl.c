@@ -38,7 +38,9 @@ static struct {
   int nbrx, check, fp32; /* fp32: Task 5, the graphs run the FP32 demod (ISAC_GPU_PASS_FP32 / sm_89) */
   int v2;                /* DL GPU data path v2 (ISAC_PDSCH_GPU_GRAPH=1 without ISAC_GPU_PASS=1): the census is GPUGRAPH, the pool serves late threads */
   _Atomic uint64_t fb[FB_N], ev[NR_GPU_PASS_EV_N], gate[NR_GPU_PASS_GATE_N], runs, shadow_n, shadow_fn;
-  _Atomic uint64_t segn[5]; /* segmented grants that reached the pass, by segment-count class 1, 2, 4, 8, 16 */
+  _Atomic uint64_t segn[6]; /* segmented grants that reached the pass, by segment-count class 1, 2, 4, 8, 16, 32 */
+  _Atomic uint64_t chest_why[16]; /* fallback[chest] by nr_pdsch_gpu_chest_pass_inputs reason: 1 cpu route, 2 exact chest off, 3 gpu delay off / not passive / chest_freq, 4 DM-RS type 2,
+                                   * 5 shape (N, nrx, Nl, DM-RS count), 6 buffers, 7 pilot span, 8 diag / delay share / DFT window / dump, 9 single branch, 10 non-contiguous */
 } G;
 
 int nr_gpu_pass_active(void) { return atomic_load_explicit(&G.on, memory_order_relaxed); }
@@ -155,19 +157,23 @@ static void census(void)
     G.stats(buf, sizeof(buf));
   else
     buf[0] = 0;
-  char pool[96] = "";
+  char pool[192] = "";
   if (G.v2)
     snprintf(pool, sizeof(pool), "GPUGRAPH pool[sets=%d claimed=%lu empty=%lu released=%lu] ", g_pool.n, (unsigned long)__atomic_load_n(&g_pool.claimed, __ATOMIC_RELAXED),
              (unsigned long)__atomic_load_n(&g_pool.empty, __ATOMIC_RELAXED), (unsigned long)__atomic_load_n(&g_pool.released, __ATOMIC_RELAXED));
+  if (G.v2) /* the census of the chest refusals (reasons of nr_pdsch_gpu_chest_pass_inputs) */
+    snprintf(pool + strlen(pool), sizeof(pool) - strlen(pool), "chest_why[1..10=%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu] ", (unsigned long)G.chest_why[1], (unsigned long)G.chest_why[2],
+             (unsigned long)G.chest_why[3], (unsigned long)G.chest_why[4], (unsigned long)G.chest_why[5], (unsigned long)G.chest_why[6], (unsigned long)G.chest_why[7],
+             (unsigned long)G.chest_why[8], (unsigned long)G.chest_why[9], (unsigned long)G.chest_why[10]);
   LOG_A(PHY,
         "SENSING: %s%s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu seg=%lu] seg_grants[1=%lu 2=%lu 4=%lu 8=%lu 16=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
-        "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu old_first=%lu fp32_flip=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu retry=%lu]\n",
+        "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu probe_done=%lu old_first=%lu fp32_flip=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu retry=%lu]\n",
         pool, buf, (unsigned long)G.fb[FB_OFF], (unsigned long)G.fb[FB_CELL], (unsigned long)G.fb[FB_FO], (unsigned long)G.fb[FB_CHEST],
         (unsigned long)G.fb[FB_DEMOD], (unsigned long)G.fb[FB_TBPARAM], (unsigned long)G.fb[FB_MODULE], (unsigned long)G.fb[FB_SEG],
         (unsigned long)G.segn[0], (unsigned long)G.segn[1], (unsigned long)G.segn[2], (unsigned long)G.segn[3], (unsigned long)G.segn[4], (unsigned long)G.ev[NR_GPU_PASS_EV_COMMIT],
         (unsigned long)G.ev[NR_GPU_PASS_EV_RETRY_OLD], (unsigned long)G.ev[NR_GPU_PASS_EV_ZERO_TB], (unsigned long)G.ev[NR_GPU_PASS_EV_LIFETIME],
         (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_BAD], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL_BAD],
-        (unsigned long)G.ev[NR_GPU_PASS_EV_CONT_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_OLD_FIRST], (unsigned long)G.ev[NR_GPU_PASS_EV_FP32_FLIP], (unsigned long)G.gate[0], (unsigned long)G.gate[1],
+        (unsigned long)G.ev[NR_GPU_PASS_EV_CONT_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_PROBE], (unsigned long)G.ev[NR_GPU_PASS_EV_OLD_FIRST], (unsigned long)G.ev[NR_GPU_PASS_EV_FP32_FLIP], (unsigned long)G.gate[0], (unsigned long)G.gate[1],
         (unsigned long)G.gate[2], (unsigned long)G.gate[3], (unsigned long)G.gate[4], (unsigned long)G.gate[5], (unsigned long)G.gate[6], (unsigned long)G.gate[7],
         (unsigned long)G.gate[8], (unsigned long)G.gate[9], (unsigned long)G.gate[10], (unsigned long)G.gate[11]);
 }
@@ -418,9 +424,12 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   }
   int ndmrs = 0, k0 = 0, nrb = 0, pil_nrb = 0;
   const int wide = nseg == 0 && in->chest_fa && in->chest_cfg; /* v2 Task 2: the slot share's widened estimate band */
-  if (nr_pdsch_gpu_chest_pass_inputs(ue, in->proc, wide ? in->chest_cfg : in->dlsch_config, wide ? in->chest_fa : in->freq_alloc, cw->Nl, in->dmrs_full, in->chest_diag, &ndmrs, j->dmrs_sym, j->delta, j->pil,
-                                     &k0, &nrb, nseg > 0 ? in->seg : NULL, nseg, &pil_nrb) != 0)
+  const int chest_rc = nr_pdsch_gpu_chest_pass_inputs(ue, in->proc, wide ? in->chest_cfg : in->dlsch_config, wide ? in->chest_fa : in->freq_alloc, cw->Nl, in->dmrs_full, in->chest_diag, &ndmrs,
+                                                      j->dmrs_sym, j->delta, j->pil, &k0, &nrb, nseg > 0 ? in->seg : NULL, nseg, &pil_nrb);
+  if (chest_rc != 0) {
+    atomic_fetch_add_explicit(&G.chest_why[chest_rc & 15], 1, memory_order_relaxed);
     return fb(FB_CHEST);
+  }
   j->nbRx = fp->nb_antennas_rx;
   j->nl = cw->Nl;
   j->ndmrs = ndmrs;
@@ -464,7 +473,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   /* ---- transport block parameters, as passive_ldpc_decode_core derives them (no HARQ combining: first transmission, d cleared) */
   unsigned C = 0, K = 0, Z = 0, F = 0;
   if (nr_segmentation(NULL, NULL, lenWithCrc(1, cw->TBS), &C, &K, &Z, &F, cw->ldpcBaseGraph) < 0 || C < 1 || C > NR_GPU_PASS_MAX_CB || (Z & 3) || (K & 7) || (K >> 3) > 1056
-      || (in->probe ? G_dem > in->G : G_dem != in->G) || in->G == 0) /* a probe past its horizon demodulates fewer LLRs; the rest stay 0 */
+      || (in->probe ? G_dem > in->G || G_dem == 0 : G_dem != in->G) || in->G == 0) /* a probe past its horizon demodulates fewer LLRs; the rest stay 0 */
     return fb(FB_TBPARAM);
   const uint32_t n_dec = in->probe && C > 1 ? 1u : C; /* a probe decodes code block 0 (nb_segments_to_decode = 1 of passive_ldpc_decode_core) */
   const int ncb = nr_gpu_pass_ncb_class((int)n_dec);

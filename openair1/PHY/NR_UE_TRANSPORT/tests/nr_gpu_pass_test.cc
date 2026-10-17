@@ -1790,6 +1790,39 @@ TEST(GpuGraphCover, ProbeEqualsStagePath) {
   EXPECT_GT(n_ok, 0);
   EXPECT_LT(n_ok, n) << "the -3 dB arm should fail some";
 }
+/* v2 Task 2 review: a probe never takes the last free instance (ISAC_PDSCH_GPU_GRAPH_PROBE_RESERVE, default 1): with one instance free a probe is refused and counted
+ * probe_busy (o[15]), not busy (o[3]); a real grant still gets it. */
+TEST(GpuGraphCover, ProbeLeavesLastInstanceToRealGrants) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_hold);
+  const auto shape = GpuPassFixture::warm_shapes()[0];
+  GpuPassFixture fx = GpuPassFixture::from_shape(shape, 23);
+  ASSERT_TRUE(fx.tb_ok_built);
+  GpuPassFixture px = GpuPassFixture::from_shape(shape, 23);
+  px.make_probe();
+  nr_gpu_pass_shape_t w = px.job->shape;
+  ASSERT_EQ(0, m.pass_warm(&w, shape.nl >= 2 ? 3 : 0, 0, 0));
+  std::vector<uint8_t> gb(fx.tb.A / 8 + 64);
+  nr_gpu_pass_result_t g{};
+  g.tb = gb.data();
+  uint64_t o0[16], o1[16];
+  m.pass_hold((1u << NR_GPU_PASS_RING) - 2u, 1); /* all but instance 0 */
+  m.pass_counters(o0);
+  px.bind();
+  EXPECT_EQ(1, m.pass_try(px.job, &g)) << "the probe took the last free instance";
+  fx.bind();
+  EXPECT_EQ(0, m.pass_try(fx.job, &g)) << "the real grant found no instance";
+  m.pass_counters(o1);
+  m.pass_hold((1u << NR_GPU_PASS_RING) - 2u, 0);
+  EXPECT_EQ(o0[15] + 1, o1[15]) << "probe_busy";
+  EXPECT_EQ(o0[3], o1[3]) << "a refused probe is not a busy real grant";
+  px.bind();
+  EXPECT_EQ(0, m.pass_try(px.job, &g)) << "with every instance free a probe runs";
+}
 /* a slot-share grant: the estimate covers the group's union above the grant (share_chest_band), the demod reads the grant's REs; equal to the stage path's
  * share body (TB, seg_ok, final LLRs, nvar, LLR statistics), alone and as a probe. */
 TEST(GpuGraphCover, ShareWidenedChestEqualsStagePath) {

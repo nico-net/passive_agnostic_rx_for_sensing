@@ -2224,9 +2224,14 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
     return 3;
   if (config_type != NFAPI_NR_DMRS_TYPE1)
     return 4;
-  if (fp->ofdm_symbol_size != 4096 || nrx > 4 || Nl < 1 || Nl > 4 || Nl > nrx || nd < 1 || nd > 4 || diag || chest_delay_share() || getenv("ISAC_CHEST_DFT_WIN")
-      || s_stage_dump || nr_dl_chest_only_ant >= 0 || (!segs && !contiguous))
+  if (fp->ofdm_symbol_size != 4096 || nrx > 4 || Nl < 1 || Nl > 4 || Nl > nrx || nd < 1 || nd > 4)
     return 5;
+  if (diag || chest_delay_share() || getenv("ISAC_CHEST_DFT_WIN") || s_stage_dump)
+    return 8;
+  if (nr_dl_chest_only_ant >= 0)
+    return 9; /* single-branch estimate */
+  if (!segs && !contiguous)
+    return 10; /* non-contiguous allocation without segments */
   if (!gch_bufs(false))
     return 6;
   int max_end = 0, rb_offset = 0;

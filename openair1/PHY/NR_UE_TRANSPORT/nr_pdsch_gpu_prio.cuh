@@ -26,9 +26,9 @@ static inline bool nr_pdsch_gpu_prio_on(void)
 
 /* nr_pdsch_gpu_low_stream: creates the low-priority twin of a real-time stream (same SM partition). lo/hi = the device's
  * least/greatest priority. Returns false on failure (the caller then keeps one stream). */
-static inline bool nr_pdsch_gpu_low_stream(cudaStream_t *s, int lo, int hi)
+static inline bool nr_pdsch_gpu_low_stream(cudaStream_t *s, int lo, int hi, int idx = 0) /* idx: the RT green context of the stream it twins (graphs launch only in their own) */
 {
   const int p = hi < lo ? hi + 1 : hi;
-  return nr_gpu_green_stream(s, p, true) || cudaStreamCreateWithPriority(s, cudaStreamNonBlocking, p) == cudaSuccess;
+  return nr_gpu_green_stream(s, p, true, idx) || cudaStreamCreateWithPriority(s, cudaStreamNonBlocking, p) == cudaSuccess;
 }
 #endif
