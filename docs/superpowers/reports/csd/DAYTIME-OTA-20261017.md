@@ -54,7 +54,7 @@
 
 ## Reading
 - **CRC and drops:** pass in every run of every arm.
-  - crc_q: 90.3-97.6 % on TIM, 93.4-95.9 % on Vodafone.
+  - crc_q: 90.3-97.6 % on TIM, 93.9-95.9 % on Vodafone.
   - drops: <= 0.9 % everywhere, and 0.0 % in all six G runs.
 - **Fix A** (PDSCH_TDA_FIELD) confirmed at daytime load: the TIM special slot goes from 0 % (X) to 50-65 % (B, G).
   - Vodafone async rescues: 5-11k per run (X) down to 23-65 (B, G).
