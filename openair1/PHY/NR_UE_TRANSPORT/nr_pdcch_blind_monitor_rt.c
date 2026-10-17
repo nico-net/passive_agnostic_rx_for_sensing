@@ -178,7 +178,23 @@ static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t
   bool gold_ok[GOLD_IDS][2] = {{false}};
   if (nr_scancost_on() && gold == NULL) gold = malloc(sizeof(*gold) * GOLD_IDS);
   const bool gfast = gold != NULL;
+  /* ISAC_SCAN_SCOREMEMO=1 (default off): readings with the same allocation and nSCID take the first one's score (bit-exact: the
+   * score is a function of the CRB list, nSCID, identity and slot only). ISAC_SCAN_SCOREMEMO_CHECK=1 also scores them and counts
+   * any difference (diagnostic). */
+  static int s_memo = -1, s_memo_chk = -1;
+  if (s_memo < 0) s_memo = getenv("ISAC_SCAN_SCOREMEMO") && atoi(getenv("ISAC_SCAN_SCOREMEMO")) ? 1 : 0;
+  if (s_memo_chk < 0) s_memo_chk = getenv("ISAC_SCAN_SCOREMEMO_CHECK") && atoi(getenv("ISAC_SCAN_SCOREMEMO_CHECK")) ? 1 : 0;
+  int dk[128], ndk = 0;
   for (int k = 0; k < nrd && k < 128; k++) {
+    int mk = -1;
+    if (s_memo)
+      for (int q = 0; q < ndk && mk < 0; q++)
+        if (nr_dci11_same_alloc(&rp[dk[q]], &rp[k])) mk = dk[q];
+    if (mk >= 0 && !s_memo_chk) {
+      sc[k] = sc[mk];
+      kept += sc[k] >= 0.5f;
+      continue;
+    }
     uint16_t crb[275];
     int n = 0;
     if (rp[k].ra_type0) {
@@ -204,6 +220,15 @@ static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t
                                    fp->symbols_per_slot, ids[i], rp[k].nscid, crb, m);
       if (v > sc[k]) sc[k] = v;
     }
+    if (mk >= 0) {
+      static _Atomic long n_hit, n_bad;
+      atomic_fetch_add(&n_hit, 1);
+      if (sc[k] != sc[mk] && atomic_fetch_add(&n_bad, 1) < 20)
+        LOG_A(PHY, "SENSING: SCOREMEMO_CHECK MISMATCH k=%d mk=%d %g vs %g (hits %ld)\n", k, mk, sc[k], sc[mk], atomic_load(&n_hit));
+      if ((atomic_load(&n_hit) & 4095) == 1) LOG_A(PHY, "SENSING: SCOREMEMO_CHECK hits=%ld mismatches=%ld\n", atomic_load(&n_hit), atomic_load(&n_bad));
+      sc[k] = sc[mk]; /* the memo value stands, as with the flag on */
+    } else if (s_memo)
+      dk[ndk++] = k;
     kept += sc[k] >= 0.5f;
   }
   static _Atomic int s_log = 60;
