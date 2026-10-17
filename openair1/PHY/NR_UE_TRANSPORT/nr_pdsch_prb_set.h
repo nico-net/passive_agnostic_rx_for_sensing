@@ -64,6 +64,9 @@ int nr_prb_segments(const uint16_t *prb, int n, int bwp_start, int prg, nr_prb_s
  *  prb_start*re_per_prb .. (prb_start+n_prb)*re_per_prb - 1. out[i] is the source RE of data RE i.
  *  Returns the count, -1 if more than max. */
 int nr_prb_gather_index(const nr_prb_seg_t *seg, int nseg, int re_per_prb, int *out, int max);
+/** Same data movement as `dst[(off0+i)%N] = src[(off0+gather_index[i])%N]` for i < the total RE count, with 4-byte elements (c16_t), as memcpy per run
+ *  that wraps neither ring position. Returns the RE count. Bit-identical to the per-RE loop (ISAC_PDSCH_GATHER_FAST). */
+int nr_prb_gather_copy(const void *src, void *dst, const nr_prb_seg_t *seg, int nseg, int re_per_prb, int off0, int N);
 
 /** BWP-relative PRB index -> absolute carrier CRB (CRB0-referenced), for probes that index a
  *  whole-carrier array such as nr_dmrs_prb_coherence()'s out[] (that function fills it by absolute

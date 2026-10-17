@@ -4763,7 +4763,12 @@ gpu_llr_ready:;
     static __thread int *gidx = NULL; /* heap, not a 13 kB frame on every decode's stack */
     if (gidx == NULL)
       gidx = (int *)malloc(NR_PRB_SET_MAX * NR_NB_SC_PER_RB * sizeof(int));
-    const int nre = (virt && gidx) ? nr_prb_gather_index(seg, nseg, NR_NB_SC_PER_RB, gidx, NR_PRB_SET_MAX * NR_NB_SC_PER_RB) : -1;
+    static int s_gfast = -1; /* ISAC_PDSCH_GATHER_FAST=1 (default off): memcpy runs instead of the per-RE modulo loop; bit-identical */
+    if (s_gfast < 0) s_gfast = getenv("ISAC_PDSCH_GATHER_FAST") && atoi(getenv("ISAC_PDSCH_GATHER_FAST")) ? 1 : 0;
+    int nre_fast = 0;
+    for (int s = 0; s_gfast && s < nseg; s++) nre_fast += seg[s].n_prb * NR_NB_SC_PER_RB;
+    const int nre = !(virt && gidx) ? -1 : s_gfast ? (nre_fast <= NR_PRB_SET_MAX * NR_NB_SC_PER_RB ? nre_fast : -1)
+                                                    : nr_prb_gather_index(seg, nseg, NR_NB_SC_PER_RB, gidx, NR_PRB_SET_MAX * NR_NB_SC_PER_RB);
     if (nre != freq_alloc->num_rbs * NR_NB_SC_PER_RB) { /* not nsc_seg: the GPU goto skips its initialiser */
       out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
       return out->status;
@@ -4773,6 +4778,10 @@ gpu_llr_ready:;
       for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
         const c16_t *src = &rxdataF[aarx][m * N];
         c16_t *dst = &virt[(size_t)aarx * fp->samples_per_slot_wCP + (size_t)m * N];
+        if (s_gfast) {
+          nr_prb_gather_copy(src, dst, seg, nseg, NR_NB_SC_PER_RB, off0, N);
+          continue;
+        }
         for (int i = 0; i < nre; i++)
           dst[(off0 + i) % N] = src[(off0 + gidx[i]) % N];
       }
