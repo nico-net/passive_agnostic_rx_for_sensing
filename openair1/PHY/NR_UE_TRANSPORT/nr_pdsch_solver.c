@@ -1623,8 +1623,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
         if (nb) {
           for (int i = 0; i < p->n_ids; i++)
             if ((r->cand_bm[p->ids[i] >> 3] >> (p->ids[i] & 7)) & 1) nb[p->ids[i] >> 3] |= (uint8_t)(1u << (p->ids[i] & 7));
-          memcpy(r->cand_bm, nb, BM_BYTES);
-          lc_touch(r);
+          if (memcmp(r->cand_bm, nb, BM_BYTES) != 0) { memcpy(r->cand_bm, nb, BM_BYTES); lc_touch(r); }
           free(nb);
         }
       }
