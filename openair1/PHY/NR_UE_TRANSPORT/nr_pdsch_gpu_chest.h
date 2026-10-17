@@ -14,6 +14,7 @@ typedef struct {
   const int16_t *pil;  /* c16: &pilot[(6 or 4) * rb_offset] of this (symbol, layer) */
   int16_t *out;        /* c16: N entries rewritten (the estimate row, or a scratch row for a PRG segment) */
   int k0, nb_rb;       /* first LS subcarrier (bwp_start_subcarrier % N) and contiguous RBs of this row */
+  int type;            /* 0 = the job's type; 1 / 2 = this row's DM-RS type (the DL graph pass: a captured k_ls has the job's type baked in) */
 } nr_gpu_chest_row_t;
 typedef struct {
   int n_rows, type, N;

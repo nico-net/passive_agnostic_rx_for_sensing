@@ -2248,6 +2248,74 @@ TEST(GpuGraphRetry, EntryFollowsChangedInput) {
   printf("GpuGraphRetry.EntryFollowsChangedInput: %d calls x 9 bodies\n", n);
 }
 
+/* ===================================================== DL GPU data path v2: DM-RS type 2 in the pass (ISAC_PDSCH_GPU_GRAPH_DMRS2) ===================================================== */
+/* DM-RS configuration type 2 grants (2 adjacent-RE pairs per RB and CDM group; layers 0-1 in CDM group 0, layers 2-3 in group 1 with delta 2) through the split pass: the chest rows
+ * carry the type (the captured k_ls has type 1 baked in), the pilots are 4 c16 per RB. Every output equals the stage path (nr_pdsch_gpu_chest_grant's type-2 rows): TB, CRC verdict,
+ * need_cpu, seg_ok, nvar and per-antenna nvar, final LLRs, LLR statistics, rxdataF. Several PRB classes, layer counts (1, 2: one CDM group; 3, 4: two), 1 and 2 DM-RS symbols,
+ * CRC ok and CRC fail, contiguous and segmented. */
+TEST(GpuGraphDmrs2, Type2EqualsStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  GpuPassFixture::dmrs_type = 2;
+  const auto sd = seg_layout(32, 0, 4, 0, 0); /* PRG 4: 8 segments */
+  int n = 0, n_ok = 0;
+  for (int ndm : {2, 1})
+    for (int si : {0, 5, 16 + 6, 16 + 13, 32 + 11, 48 + 5, -1}) /* 24 PRB nl 1 qm 2, 24 nl 2 qm 4, 48 nl 2 qm 6, 48 nl 4 qm 4, 96 nl 3 qm 8, 217 nl 2 qm 4, segmented 32 PRB nl 2 qm 4 */
+      for (double snr : {20.0, -3.0}) {
+        GpuPassFixture::n_dm = ndm;
+        GpuPassFixture::noise_db = snr;
+        nr_gpu_pass_shape_t sh = si >= 0 ? GpuPassFixture::warm_shapes()[si] : nr_gpu_pass_shape_t{32, 13, 2, 4, 2, 1, 1, (uint16_t)nr_gpu_pass_nseg_class((int)sd.size())};
+        sh.ndmrs = (uint16_t)ndm;
+        GpuPassFixture fx = GpuPassFixture::from_shape(sh, 17 + si, -1, si >= 0 ? nullptr : &sd);
+        ASSERT_TRUE(fx.tb_ok_built);
+        ASSERT_EQ(2, fx.dtype);
+        fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
+        fx.shape.nrb_class = (uint16_t)nr_gpu_pass_nrb_class(si >= 0 ? sh.nrb_class : 32);
+        fx.bind();
+        fx.job->llr_out_all = 1;
+        const std::string what = "type 2 ndmrs " + std::to_string(ndm) + " nrb " + std::to_string(sh.nrb_class) + " nl " + std::to_string(sh.nl) + " qm " + std::to_string(sh.qm) +
+                                 " nseg " + std::to_string(fx.segs.size()) + " snr " + std::to_string(snr);
+        m.pass_split(1);
+        nr_gpu_pass_shape_t w = fx.job->shape;
+        ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm)) << what;
+        std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
+        nr_gpu_pass_result_t g{}, s{};
+        g.tb = gb.data(); s.tb = sb.data();
+        const int rc = m.pass_try(fx.job, &g);
+        m.pass_split(0);
+        ASSERT_EQ(0, rc) << what;
+        ASSERT_EQ(0, fx.run_stage_path(&s)) << what;
+        EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+        EXPECT_EQ(s.tb_ok, g.tb_ok) << what;
+        EXPECT_EQ(s.nvar, g.nvar) << what;
+        EXPECT_EQ(0, memcmp(s.nvar_ant, g.nvar_ant, sizeof(s.nvar_ant))) << what;
+        EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+        if (!g.need_cpu) {
+          EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+          EXPECT_EQ(0, memcmp(fx.llr_ref.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs";
+        }
+        if (g.tb_ok) EXPECT_EQ(0, memcmp(g.tb, fx.tb.payload.data(), fx.tb.A / 8)) << what << ": the transmitted TB";
+        const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+        EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << what;
+        for (int a = 0; a < 4; a++)
+          for (int sy = 0; sy < 14; sy++)
+            ASSERT_EQ(0, memcmp(&fx.rxF_out[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], &fx.rxF_ref[2 * ((size_t)a * 14 * 4096 + (size_t)sy * 4096)], 4096 * 4))
+                << "rxdataF, ant " << a << " sym " << sy << ", " << what;
+        n++;
+        n_ok += g.tb_ok;
+      }
+  GpuPassFixture::dmrs_type = 1;
+  GpuPassFixture::n_dm = 2;
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuGraphDmrs2.Type2EqualsStagePath: %d grants, decoded %d\n", n, n_ok);
+  EXPECT_GE(n_ok, n / 3) << "the clean type-2 grants should decode";
+  EXPECT_LT(n_ok, n);
+}
+
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
  * allocated or built on the launch path. */
 extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);

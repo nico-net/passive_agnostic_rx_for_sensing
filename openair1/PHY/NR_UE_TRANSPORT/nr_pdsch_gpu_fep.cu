@@ -1385,7 +1385,7 @@ __global__ void k_ls(const Par j, const nr_gpu_chest_row_t *rows, short2 *ls)
     short2 v = make_short2(0, 0);
     if (k < idx) {
       int q, a, b;
-      if (j.type == 1) { q = k >> 2; a = R.k0 + 4 * q; b = a + 2; }
+      if ((R.type ? R.type : j.type) == 1) { q = k >> 2; a = R.k0 + 4 * q; b = a + 2; }
       else { q = k / 6; a = R.k0 + 6 * q; b = a + 1; }
       const short2 l = mulshift(pil[2 * q], rx[a % N], 15), r = mulshift(pil[2 * q + 1], rx[b % N], 15);
       v = make_short2((short)(((int)l.x + r.x) >> 1), (short)(((int)l.y + r.y) >> 1));

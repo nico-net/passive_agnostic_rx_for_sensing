@@ -450,16 +450,18 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
   cj.type = 1; /* the instance's job is shared with the PUSCH pass (type 3) */
   int r = 0;
   const int pn = j->nseg ? j->seg_pil_nrb : j->nrb; /* RBs of the pilot sequence behind pil[][] */
+  const int dtype = j->dmrs_type == 2 ? 2 : 1, ppr = dtype == 2 ? 4 : 6; /* DMRS2: type-2 rows (k_ls reads the row's type), 4 pilots (c16) per RB */
   for (int k = 0; k < nd; k++)
     for (int l = 0; l < nl; l++) {
       int16_t *pil = (int16_t *)I.pil.host + (size_t)(k * 4 + l) * PIL_STRIDE * 2;
-      memcpy(pil, j->pil[k][l], (size_t)6 * pn * sizeof(int16_t) * 2);
+      memcpy(pil, j->pil[k][l], (size_t)ppr * pn * sizeof(int16_t) * 2);
       for (int sg = 0; sg < ns; sg++)
         for (int a = 0; a < nbRx; a++, r++) {
           nr_gpu_chest_row_t &row = cj.rows[r];
           const bool real = j->nseg && sg < j->nseg;
           row.rxF = rxbase + 2 * ((size_t)a * rxstride + (size_t)N * j->dmrs_sym[k] + j->delta[l]);
-          row.pil = (const int16_t *)I.pil.dev + (size_t)(k * 4 + l) * PIL_STRIDE * 2 + (real ? 12 * (size_t)j->seg[sg].pil_rb : 0);
+          row.pil = (const int16_t *)I.pil.dev + (size_t)(k * 4 + l) * PIL_STRIDE * 2 + (real ? 2 * (size_t)ppr * j->seg[sg].pil_rb : 0);
+          row.type = dtype;
           row.out = segd ? (int16_t *)I.segsc.dev + 2 * (size_t)r * N
                            : (int16_t *)I.est.dev + 2 * ((size_t)(l * nbRx + a) * NSYM * N + (size_t)j->dmrs_sym[k] * N);
           row.k0 = j->nseg ? (real ? j->seg[sg].k0 : 0) : j->k0;
@@ -1123,10 +1125,10 @@ static size_t c_sig(const nr_gpu_pass_job_t *j, const Key &k, uint8_t *o, size_t
   const uint32_t rst = redirect ? j->rx_stride : 0;
   put(&kc, sizeof(kc)); put(j->rxdata, sizeof(j->rxdata)); put(&j->ring_len, 4); put(&j->ring_offset, 4); put(&j->symbol_rot, sizeof(j->symbol_rot));
   put(&rxf, sizeof(rxf)); put(&rst, 4); put(&j->copy_mask, sizeof(j->copy_mask)); /* review nit: the DISCRETE copy-back mask */
-  put(&j->nl, 4); put(&j->ndmrs, 4); put(&j->nrb, 4); put(&j->k0, 4); put(&j->nseg, 4); put(&j->seg_pil_nrb, 4);
+  put(&j->dmrs_type, 1); put(&j->nl, 4); put(&j->ndmrs, 4); put(&j->nrb, 4); put(&j->k0, 4); put(&j->nseg, 4); put(&j->seg_pil_nrb, 4);
   put(j->dmrs_sym, sizeof(int) * j->ndmrs); put(j->delta, sizeof(int) * j->nl);
   for (int s = 0; s < j->nseg; s++) { put(&j->seg[s].n_prb, 2); put(&j->seg[s].data_index, 2); put(&j->seg[s].pil_rb, 4); put(&j->seg[s].k0, 4); }
-  const size_t pb = (size_t)6 * (j->nseg ? j->seg_pil_nrb : j->nrb) * 4;
+  const size_t pb = (size_t)(j->dmrs_type == 2 ? 4 : 6) * (j->nseg ? j->seg_pil_nrb : j->nrb) * 4;
   for (int q = 0; q < j->ndmrs; q++)
     for (int l = 0; l < j->nl; l++) put(j->pil[q][l], pb);
   return n;
@@ -1141,7 +1143,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   const uint32_t nd = j->n_decode && j->n_decode < j->C ? j->n_decode : j->C; /* v2 Task 2: blocks decoded (a probe: block 0) */
   if (!key_ok(k) || (int)k.nl != j->nl || (int)k.ndmrs != j->ndmrs || j->nbRx != g_cfg.nbRx || (int)j->nrb > (int)k.nrb || j->C < 1 || nd > k.ncb || j->G_dem > j->G || (j->probe && !j->G_dem) ||
       (j->Z & 3) || (j->K & 7) || (j->K >> 3) > (uint32_t)KBMAX || j->G > LLR_CAP || j->G == 0 || ext > (uint32_t)EXTMAX || (d.want_evm && (k.fp32 & 1) == (uint8_t)d.evm_fp64) || ((k.fp32 >> 1) != (uint8_t)(d.demod_fp32 != 0)) ||
-      j->nseg < 0 || j->nseg > (int)k.nseg || (j->nseg == 0) != (k.nseg == 0) || !seg_ok(j) ||
+      j->dmrs_type > 2 || j->nseg < 0 || j->nseg > (int)k.nseg || (j->nseg == 0) != (k.nseg == 0) || !seg_ok(j) ||
       j->it_max < 1 || j->it_max > NSNAP + 1 || !j->scr || !j->geo_y || !j->geo_h || !j->symbol_rot || !j->rxdata[0]) {
     ++g_fb_unsup;
     return 1;

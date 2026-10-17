@@ -40,7 +40,7 @@ static struct {
   int v2;                /* DL GPU data path v2 (ISAC_PDSCH_GPU_GRAPH=1 without ISAC_GPU_PASS=1): the census is GPUGRAPH, the pool serves late threads */
   _Atomic uint64_t fb[FB_N], ev[NR_GPU_PASS_EV_N], gate[NR_GPU_PASS_GATE_N], runs, shadow_n, shadow_fn;
   _Atomic uint64_t segn[6]; /* segmented grants that reached the pass, by segment-count class 1, 2, 4, 8, 16, 32 */
-  _Atomic uint64_t chest_why[16]; /* fallback[chest] by nr_pdsch_gpu_chest_pass_inputs reason: 1 cpu route, 2 exact chest off, 3 gpu delay off / not passive / chest_freq, 4 DM-RS type 2,
+  _Atomic uint64_t chest_why[16]; /* fallback[chest] by nr_pdsch_gpu_chest_pass_inputs reason: 1 cpu route, 2 exact chest off, 3 gpu delay off / not passive / chest_freq, 4 DM-RS type 2 (without _DMRS2),
                                    * 5 shape (N, nrx, Nl, DM-RS count), 6 buffers, 7 pilot span, 8 diag / delay share / DFT window / dump, 9 single branch, 10 non-contiguous */
 } G;
 
@@ -62,7 +62,7 @@ void nr_gpu_graph_call_dirty(void)
     G.call_dirty();
 }
 /* the sub-flags, read once at warm-up (nr_gpu_graph_flag runs per grant) */
-static const char *const g_sub_name[] = {"COVER", "SPLIT", "RETRY", "SLOT", "LEAN"};
+static const char *const g_sub_name[] = {"COVER", "SPLIT", "RETRY", "SLOT", "LEAN", "DMRS2"};
 static int g_sub_on[sizeof(g_sub_name) / sizeof(g_sub_name[0])];
 int nr_gpu_graph_flag(const char *sub)
 {
@@ -247,6 +247,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
       g_sub_on[i] = G.v2 && v && atoi(v) == 1;
     }
     g_sub_on[2] &= g_sub_on[1]; /* review S2: RETRY needs SPLIT (its D entry is a split launch) */
+    g_sub_on[5] &= g_sub_on[1]; /* DMRS2 (DM-RS type 2 in the pass) needs SPLIT */
   }
   if ((!dl_on && !ul_on) || !ue)
     return;
@@ -301,7 +302,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   if (c.split && split_on && !split_on()) { /* review S5: the instances alone reach the memory cap */
     LOG_E(PHY, "SENSING: GPUGRAPH: the pass instances alone reach ISAC_PDSCH_GPU_GRAPH_MB=%d: ISAC_PDSCH_GPU_GRAPH_SPLIT (and RETRY) off\n", c.split_mb);
     c.split = 0;
-    g_sub_on[1] = g_sub_on[2] = 0;
+    g_sub_on[1] = g_sub_on[2] = g_sub_on[5] = 0;
   }
   if (!dl_on || bad) { /* the PUSCH pass alone */
     nr_gpu_pass_ul_warm(h, fp->nb_antennas_rx, G.fp32);
@@ -452,15 +453,17 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
       return fb(FB_SEG);
     atomic_fetch_add_explicit(&G.segn[__builtin_ctz((unsigned)nsegc)], 1, memory_order_relaxed);
   }
-  int ndmrs = 0, k0 = 0, nrb = 0, pil_nrb = 0;
+  int ndmrs = 0, k0 = 0, nrb = 0, pil_nrb = 0, dtype = 1;
   const int wide = nseg == 0 && in->chest_fa && in->chest_cfg; /* v2 Task 2: the slot share's widened estimate band */
   const int chest_rc = nr_pdsch_gpu_chest_pass_inputs(ue, in->proc, wide ? in->chest_cfg : in->dlsch_config, wide ? in->chest_fa : in->freq_alloc, cw->Nl, in->dmrs_full, in->chest_diag, &ndmrs,
-                                                      j->dmrs_sym, j->delta, j->pil, &k0, &nrb, nseg > 0 ? in->seg : NULL, nseg, &pil_nrb);
+                                                      j->dmrs_sym, j->delta, j->pil, &k0, &nrb, nseg > 0 ? in->seg : NULL, nseg, &pil_nrb,
+                                                      nr_gpu_graph_flag("DMRS2"), &dtype);
   if (chest_rc != 0) {
     atomic_fetch_add_explicit(&G.chest_why[chest_rc & 15], 1, memory_order_relaxed);
     return fb(FB_CHEST);
   }
   j->nbRx = fp->nb_antennas_rx;
+  j->dmrs_type = (uint8_t)dtype;
   j->nl = cw->Nl;
   j->ndmrs = ndmrs;
   j->nrb = nrb;

@@ -2185,12 +2185,14 @@ static void gch_async_submit(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, 
 /* GPUPASS: what the graph pass's chest stage needs of a grant, with the same gates as nr_pdsch_gpu_chest_grant (non-segmented contiguous grant, every antenna, GPU
  * chest and GPU delay on, no PDP diagnostic / delay share / DFT window / stage dump, no single-branch estimate): the DM-RS symbols of dmrs_mask, the delta of
  * every layer's port, the pilot sequence of every (DM-RS symbol, layer) (this thread's buffer, valid until the next call; 6 * nrb c16 from the grant's first
- * RB), the first LS subcarrier and the PRBs. DM-RS type 1 only (the graph's LS kernel arguments are those of type 1). 0 = ok, else a refusal reason (> 0).
+ * RB), the first LS subcarrier and the PRBs. DM-RS type 1, and type 2 when allow_type2 (v2 ISAC_PDSCH_GPU_GRAPH_DMRS2: the pass's chest rows carry the type;
+ * the pilots are then 4 c16 per RB and the DM-RS amplitude is that of nr_pdsch_gpu_chest_grant's type 2). *type_out = 1 or 2. 0 = ok, else a refusal reason (> 0).
  * segs != NULL (Task 4b, the PRG/VRB segmented grant, same gates as nr_pdsch_gpu_chest_grant's segmented call): the pilot sequences start at RB 0 and cover *pil_nrb_out RBs
  * (= max over the segments of n_prb + rb_offset, the generator range of that call); the caller derives each segment's pilot offset and first subcarrier. *nrb_out = the grant's PRBs. */
 int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch,
                                    const freq_alloc_bitmap_t *freq_alloc, int Nl, uint16_t dmrs_mask, int diag, int *ndmrs, int dmrs_sym[4], int delta[4],
-                                   const int16_t *pil_out[4][4], int *k0_out, int *nrb_out, const nr_prb_seg_t *segs, int nseg, int *pil_nrb_out)
+                                   const int16_t *pil_out[4][4], int *k0_out, int *nrb_out, const nr_prb_seg_t *segs, int nseg, int *pil_nrb_out,
+                                   int allow_type2, int *type_out)
 {
   if (nr_pdsch_route_cpu()) /* BATCHCPU */
     return 1;
@@ -2222,8 +2224,9 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
     nd += (dmrs_mask >> m) & 1;
   if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) != 1 || !IS_PASSIVE_RX_MODE(get_softmodem_params()) || ue->chest_freq != 0)
     return 3;
-  if (config_type != NFAPI_NR_DMRS_TYPE1)
+  if (config_type != NFAPI_NR_DMRS_TYPE1 && !(allow_type2 && config_type == NFAPI_NR_DMRS_TYPE2))
     return 4;
+  const int ppr = config_type == NFAPI_NR_DMRS_TYPE1 ? 6 : 4; /* pilots (c16) per RB, as nr_pdsch_gpu_chest_grant */
   if (fp->ofdm_symbol_size != 4096 || nrx > 4 || Nl < 1 || Nl > 4 || Nl > nrx || nd < 1 || nd > 4)
     return 5;
   if (diag || chest_delay_share() || getenv("ISAC_CHEST_DFT_WIN") || s_stage_dump)
@@ -2242,9 +2245,9 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
     rb_offset = freq_alloc->first_rb + (dlsch->refPoint ? 0 : dlsch->BWPStart);
     max_end = freq_alloc->num_rbs + rb_offset;
   }
-  if (max_end * 6 > 3280)
+  if (max_end * ppr > 3280)
     return 7;
-  const float beta_dmrs_pdsch = get_beta_dmrs(dlsch->n_dmrs_cdm_groups, false);
+  const float beta_dmrs_pdsch = get_beta_dmrs(dlsch->n_dmrs_cdm_groups, config_type == NFAPI_NR_DMRS_TYPE2);
   const int16_t dmrs_scaling = (int16_t)((1 / beta_dmrs_pdsch) * (1 << 14));
   int np = 0, k = 0;
   for (int m = 0; m < fp->symbols_per_slot && m < 14; m++) {
@@ -2256,13 +2259,14 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
       const int p = get_dmrs_port(nl, dlsch->dmrs_ports);
       delta[nl] = get_delta(p, config_type);
       nr_pdsch_dmrs_rx(fp->Ncp, gold, pil[np], 1000 + p, 0, max_end, config_type, dmrs_scaling);
-      pil_out[k][nl] = (const int16_t *)&pil[np][6 * rb_offset];
+      pil_out[k][nl] = (const int16_t *)&pil[np][ppr * rb_offset];
     }
     k++;
   }
   *ndmrs = nd;
   *nrb_out = freq_alloc->num_rbs;
   *pil_nrb_out = segs ? max_end : freq_alloc->num_rbs;
+  *type_out = config_type == NFAPI_NR_DMRS_TYPE1 ? 1 : 2;
   *k0_out = (fp->first_carrier_offset + (dlsch->BWPStart + freq_alloc->first_rb) * 12) % fp->ofdm_symbol_size;
   return 0;
 }

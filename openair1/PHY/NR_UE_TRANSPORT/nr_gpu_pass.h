@@ -189,6 +189,7 @@ typedef struct {
   /* ---- v2 Task 2 (layout probes). 0 = the defaults (the whole grant) */
   uint32_t n_decode; /* code blocks decoded (blocks >= n_decode are padding; shape.ncb_class is the class of n_decode), 0 = C; K' / CRC type / E stay those of C */
   uint32_t G_dem;    /* LLRs the demod writes (a probe past its horizon: fewer); llr[G_dem, G) are zeroed, as the body's cleared buffer. 0 = G */
+  uint8_t dmrs_type; /* v2 ISAC_PDSCH_GPU_GRAPH_DMRS2: 2 = DM-RS type 2 (pil[][]: 4 c16 per RB; the chest rows carry the type), 0 / 1 = type 1 */
   uint8_t probe;     /* 1 = a layout probe: never a decoded TB (tb_ok = 0, llr_out filled; outcome seg_ok[0]); the low-priority twin stream (ISAC_PDSCH_GPU_PRIO) */
 } nr_gpu_pass_job_t;
 
