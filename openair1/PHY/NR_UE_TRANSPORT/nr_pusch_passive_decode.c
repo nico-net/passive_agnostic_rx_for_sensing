@@ -150,6 +150,19 @@ typedef struct {
 static passive_ul_scratch_t g_scratch[NR_PUSCH_PASSIVE_MAX_CTX];
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
 static __thread bool t_solver_probe;
+/* ISAC_UL_FORCE_IDS="dmrs:data" (DIAGNOSTIC, default unset = bit-identical): force the UL DM-RS / data scrambling identities of every
+ * decoded grant from the gNB config (forced-ID arm of the UL rfsim bed; ground truth, never a receiver input in production). */
+static bool ul_force_ids(uint16_t *dmrs, uint16_t *data)
+{
+  static int st = -1; static uint16_t d, x;
+  if (st < 0) {
+    const char *v = getenv("ISAC_UL_FORCE_IDS"); unsigned a_, b_;
+    st = (v && sscanf(v, "%u:%u", &a_, &b_) == 2 && a_ < 65536 && b_ < 65536) ? 1 : 0;
+    if (st) { d = (uint16_t)a_; x = (uint16_t)b_; LOG_A(PHY, "SENSING: UL_FORCE_IDS dmrs=%u data=%u (diagnostic arm)\n", d, x); }
+  }
+  *dmrs = d; *data = x;
+  return st == 1;
+}
 static __thread int t_ul_kind; /* GPUPASS UL: what carried the grant being decoded (nr_gpu_pass_ul_grant_us) */
 void nr_pusch_passive_counters(uint64_t *try_, uint64_t *crc_ok)
 {
@@ -2265,6 +2278,15 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     }
   }
   nfapi_nr_pusch_pdu_t pdu;
+  nr_pdcch_blind_ul_result_t forced_ids_grant;
+  uint16_t force_dmrs, force_data;
+  if (ul_force_ids(&force_dmrs, &force_data)) {
+    forced_ids_grant = *g;
+    forced_ids_grant.ul_dmrs_scrambling_id = force_dmrs;
+    forced_ids_grant.data_scrambling_id = force_data;
+    forced_ids_grant.data_id_advance = false;
+    g = &forced_ids_grant;
+  }
   fill_pusch_pdu(g, nant, fp, &pdu);
   static atomic_bool tp_scope_logged = false;
   if (g->transform_precoding && !atomic_exchange_explicit(&tp_scope_logged, true, memory_order_relaxed)) {

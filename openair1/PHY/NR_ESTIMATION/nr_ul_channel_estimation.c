@@ -495,7 +495,7 @@ int nr_pusch_channel_estimation(PHY_VARS_gNB *gNB,
     // Note: pilot returned by the following function is already the complex conjugate of the transmitted DMRS
     const uint32_t *gold = nr_gold_pusch(fp->N_RB_UL,
                                          fp->symbols_per_slot,
-                                         gNB->gNB_config.cell_config.phy_cell_id.value,
+                                         pusch_pdu->ul_dmrs_scrambling_id, /* TS 38.211 6.4.1.1.1: scramblingID0/1 else PCI (MAC fills the PCI by default); was phy_cell_id, which ignored scramblingID0/1 (gNB could not decode non-PCI DM-RS ids). The passive receiver sets both to the same value. */
                                          pusch_pdu->scid,
                                          Ns,
                                          symbol);
@@ -726,7 +726,7 @@ void nr_pusch_ptrs_processing(PHY_VARS_gNB *gNB,
       /*------------------------------------------------------------------------------------------------------- */
       const uint32_t *gold = nr_gold_pusch(frame_parms->N_RB_UL,
                                            frame_parms->symbols_per_slot,
-                                           gNB->gNB_config.cell_config.phy_cell_id.value,
+                                           rel15_ul->ul_dmrs_scrambling_id,
                                            rel15_ul->scid,
                                            nr_tti_rx,
                                            symbol);

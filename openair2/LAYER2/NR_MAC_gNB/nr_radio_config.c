@@ -1668,6 +1668,30 @@ static NR_SetupRelease_PUSCH_Config_t *config_pusch(const nr_mac_config_t *confi
   pusch_Config->uci_OnPUSCH = NULL;
   pusch_Config->tp_pi2BPSK = NULL;
 
+  /* UL rfsim test bed ONLY (default unset = unchanged config). The OAI gNB never configures the PUSCH scrambling identities,
+   * so every UE would use the PCI and the blind receiver's default would trivially be right.
+   *   ISAC_TB_PUSCH_IDS="dmrs:data"  -> scramblingID0 and dataScramblingIdentityPUSCH
+   *   ISAC_TB_PUSCH_TP=1             -> transform precoding enabled (pusch_Config.transformPrecoder)
+   *   ISAC_TB_PUSCH_MCSTAB=256       -> mcs_Table qam256 (and mcs_TableTransformPrecoder qam256) */
+  const char *tb_ids = getenv("ISAC_TB_PUSCH_IDS");
+  unsigned tb_d, tb_x;
+  if (tb_ids && sscanf(tb_ids, "%u:%u", &tb_d, &tb_x) == 2) {
+    pusch_Config->dataScramblingIdentityPUSCH = calloc_or_fail(1, sizeof(*pusch_Config->dataScramblingIdentityPUSCH));
+    *pusch_Config->dataScramblingIdentityPUSCH = tb_x;
+    NR_DMRS_UplinkConfig->transformPrecodingDisabled->scramblingID0 = calloc_or_fail(1, sizeof(long));
+    *NR_DMRS_UplinkConfig->transformPrecodingDisabled->scramblingID0 = tb_d;
+  }
+  if (getenv("ISAC_TB_PUSCH_TP") && !strcmp(getenv("ISAC_TB_PUSCH_TP"), "1")) {
+    pusch_Config->transformPrecoder = calloc_or_fail(1, sizeof(*pusch_Config->transformPrecoder));
+    *pusch_Config->transformPrecoder = NR_PUSCH_Config__transformPrecoder_enabled;
+  }
+  if (getenv("ISAC_TB_PUSCH_MCSTAB") && !strcmp(getenv("ISAC_TB_PUSCH_MCSTAB"), "256")) {
+    pusch_Config->mcs_Table = calloc_or_fail(1, sizeof(*pusch_Config->mcs_Table));
+    *pusch_Config->mcs_Table = NR_PUSCH_Config__mcs_Table_qam256;
+    pusch_Config->mcs_TableTransformPrecoder = calloc_or_fail(1, sizeof(*pusch_Config->mcs_TableTransformPrecoder));
+    *pusch_Config->mcs_TableTransformPrecoder = NR_PUSCH_Config__mcs_TableTransformPrecoder_qam256;
+  }
+
   return setup_puschconfig;
 }
 

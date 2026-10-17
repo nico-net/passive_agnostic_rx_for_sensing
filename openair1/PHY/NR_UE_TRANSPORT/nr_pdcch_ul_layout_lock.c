@@ -215,6 +215,12 @@ void nr_ul_layout_build_opts(const nr_ul_layout_prefix_t *pre, const nr_ul_layou
   o->dmrs_max_length = 1;
   o->transform_precoding = t->tp;
   o->mcs_table = t->tp ? 3 : 0;
+  { /* ISAC_UL_MCS_TABLE=<0|1|2> (DIAGNOSTIC, default unset = unchanged): the layout lock never infers the PUSCH MCS table; force it to test whether a
+     * qam256 cell (table 1) is lost here. TP keeps its own table family (+3 would be needed; not forced). */
+    static int forced = -2;
+    if (forced == -2) { const char *v = getenv("ISAC_UL_MCS_TABLE"); forced = (v && *v >= '0' && *v <= '2') ? *v - '0' : -1; }
+    if (forced >= 0 && !t->tp) o->mcs_table = (uint8_t)forced;
+  }
   o->data_scrambling_id = -1;
   o->ul_dmrs_scrambling_id = -1;
   o->phy_cell_id = pci;

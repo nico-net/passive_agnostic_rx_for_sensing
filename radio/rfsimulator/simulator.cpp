@@ -166,6 +166,7 @@ typedef struct buffer_s {
   size_t payload_sz;
   size_t remainToTransferBeam;
   std::queue<rfsim_packet_t *> received_packets;
+  bool tap; // listen-only UL-tap client (RFSIM_UL_TAP): gets DL+UL combined, never waited on, never summed
 } buffer_t;
 
 typedef struct {
@@ -206,7 +207,16 @@ typedef struct {
   int wait_timeout;
   double prop_delay_ms;
   rfsim_beam_ctrl_t *beam_ctrl;
+  // UL tap (server only, env RFSIM_UL_TAP=K: clients accepted after the K-th are listen-only taps). A tap gets one
+  // stream = DL (as written by the gNB) + UL (as summed at the gNB RX), delayed by tap_delay samples, so a passive
+  // receiver sees both directions on one timeline. Unset = no change. Single tap client supported.
+  int tap_after;
+  int accept_count;
+  uint64_t tap_next;
+  uint64_t tap_delay;
+  std::vector<std::vector<c16_t>> tap_dl, tap_ul;
 } rfsimulator_state_t;
+#define TAP_RING (1u << 23)
 
 /**
  * @brief Get the current beam map for a given timestamp and number of samples.
@@ -1053,10 +1063,17 @@ static int rfsimulator_write_internal(rfsimulator_state_t *t,
   }
   LOG_D(HW, "Sending %d samples at time: %ld, nbAnt %d\n", nsamps, timestamp, nbAnt);
 
+  if (t->tap_after >= 0 && !tx_beams.empty()) {
+    for (int a = 0; a < nbAnt && a < (int)t->tap_dl.size(); a++) {
+      const c16_t *in = (const c16_t *)samplesVoid[0][a];
+      for (int k = 0; k < nsamps; k++)
+        t->tap_dl[a][(timestamp + k) & (TAP_RING - 1)] = in[k];
+    }
+  }
   for (int i = 0; i < MAX_FD_RFSIMU; i++) {
     buffer_t *b = &t->buf[i];
 
-    if (b->conn_sock >= 0) {
+    if (b->conn_sock >= 0 && !b->tap) {
       samplesBlockHeader_t header = {(uint32_t)nsamps, (uint32_t)nbAnt, (uint64_t)timestamp, 0, 0, beams_to_beam_map(tx_beams)};
       fullwrite(b->conn_sock, &header, sizeof(header), t);
       int num_beams = tx_beams.size();
@@ -1162,6 +1179,11 @@ static bool add_client(rfsimulator_state_t *t)
     return false;
   }
   new_buf->lastReceivedTS = t->lastWroteTS;
+  if (t->tap_after >= 0 && t->accept_count++ >= t->tap_after) {
+    new_buf->tap = true;
+    t->tap_next = t->lastWroteTS + 1; // the 1-sample hello block below ends at lastWroteTS + 1
+    LOG_I(HW, "UL-tap client (listen-only, DL+UL combined) from connection #%d\n", t->accept_count);
+  }
   char ip[INET6_ADDRSTRLEN];
   getnameinfo((struct sockaddr *)&sa, socklen, ip, sizeof(ip), NULL, 0, NI_NUMERICHOST);
   uint16_t port = ((struct sockaddr_in *)&sa)->sin_port;
@@ -1410,7 +1432,7 @@ static void rfsimulator_read_internal(rfsimulator_state_t *t,
   for (int sock = 0; sock < MAX_FD_RFSIMU; sock++) {
     buffer_t *ptr = &t->buf[sock];
 
-    if (ptr->conn_sock != -1 && !ptr->received_packets.empty()) {
+    if (ptr->conn_sock != -1 && !ptr->tap && !ptr->received_packets.empty()) {
       AssertFatal(ptr->nbAnt != 0, "Number of antennas not set\n");
       bool reGenerateChannel = false;
 
@@ -1499,6 +1521,50 @@ static void rfsimulator_read_internal(rfsimulator_state_t *t,
   }
 }
 
+// Record the UL just summed at the gNB RX and ship [tap_next, now - tap_delay) of DL+UL to the tap client.
+static void tap_send(rfsimulator_state_t *t, openair0_timestamp_t ts, void **ul, int nsamps, int nbAnt)
+{
+  mutexlock(t->Sockmutex);
+  for (int a = 0; a < nbAnt && a < (int)t->tap_ul.size(); a++)
+    for (int k = 0; k < nsamps; k++)
+      t->tap_ul[a][(ts + k) & (TAP_RING - 1)] = ((c16_t *)ul[a])[k];
+  { // UL energy census (per 100 slot-reads): tells whether the UE UL reaches the gNB RX at all
+    static double eul[20]; static uint64_t nul[20]; static int calls;
+    const int slot = (int)(((uint64_t)ts / (uint64_t)(t->sample_rate / 2000)) % 20); // 30 kHz numerology only (diagnostic)
+    for (int k = 0; k < nsamps && nbAnt > 0; k++) { c16_t u = ((c16_t *)ul[0])[k]; eul[slot] += (double)u.r * u.r + (double)u.i * u.i; nul[slot]++; }
+    if (++calls % 4000 == 0) {
+      char b[400]; int o = 0;
+      for (int i = 0; i < 20; i++) o += snprintf(b + o, sizeof(b) - o, " %.0f", nul[i] ? 10 * log10(eul[i] / nul[i] + 1e-9) : -99.0);
+      LOG_I(HW, "UL-tap UL power dB per slot-of-frame:%s\n", b);
+      memset(eul, 0, sizeof(eul)); memset(nul, 0, sizeof(nul));
+    }
+  }
+  int sock = -1;
+  for (int i = 0; i < MAX_FD_RFSIMU; i++)
+    if (t->buf[i].conn_sock >= 0 && t->buf[i].tap)
+      sock = t->buf[i].conn_sock;
+  const uint64_t end = (uint64_t)(ts + nsamps) > t->tap_delay ? (uint64_t)(ts + nsamps) - t->tap_delay : 0;
+  if (sock >= 0 && end > t->tap_next) {
+    const int na = (int)t->tap_dl.size();
+    const uint32_t n = (uint32_t)(end - t->tap_next);
+    std::vector<std::vector<c16_t>> blk(na, std::vector<c16_t>(n));
+    for (int a = 0; a < na; a++)
+      for (uint32_t k = 0; k < n; k++) {
+        const size_t r = (t->tap_next + k) & (TAP_RING - 1);
+        c16_t d = t->tap_dl[a][r], u = t->tap_ul[a][r];
+        blk[a][k] = c16_t{(int16_t)(d.r + u.r), (int16_t)(d.i + u.i)};
+        t->tap_dl[a][r] = c16_t{0, 0}; // consumed: no stale lap data
+        t->tap_ul[a][r] = c16_t{0, 0};
+      }
+    samplesBlockHeader_t header = {n, (uint32_t)na, (uint64_t)t->tap_next, 0, 0, 1};
+    fullwrite(sock, &header, sizeof(header), t);
+    for (int a = 0; a < na; a++)
+      fullwrite(sock, blk[a].data(), sampleToByte(n, 1), t);
+    t->tap_next = end;
+  }
+  mutexunlock(t->Sockmutex);
+}
+
 static int rfsimulator_read_beams(openair0_device_t *device,
                                   openair0_timestamp_t *ptimestamp,
                                   void ***samplesVoid,
@@ -1576,7 +1642,7 @@ read_again:
       buffer_t *b = NULL;
       for (int sock = 0; sock < MAX_FD_RFSIMU; sock++) {
         b = &t->buf[sock];
-        if (b->conn_sock != -1 && (t->nextRxTstamp + nsamps) > b->lastReceivedTS) {
+        if (b->conn_sock != -1 && !b->tap && (t->nextRxTstamp + nsamps) > b->lastReceivedTS) {
           have_to_wait = true;
           break;
         }
@@ -1648,6 +1714,8 @@ read_again:
   }
 
   *ptimestamp = t->nextRxTstamp; // return the time of the first sample
+  if (t->tap_after >= 0)
+    tap_send(t, t->nextRxTstamp, samplesVoid[0], nsamps, nbAnt);
   t->nextRxTstamp += nsamps;
   clear_beam_queue(&t->beam_ctrl->rx, t->nextRxTstamp);
   LOG_D(HW,
@@ -1753,6 +1821,15 @@ extern "C" __attribute__((__visibility__("default"))) int device_init(openair0_d
   rfsimulator->tx_bw = openair0_cfg->tx_bw;
   rfsimulator->beam_ctrl = new rfsim_beam_ctrl_t;
   rfsimulator_readconfig(rfsimulator);
+  rfsimulator->tap_after = -1;
+  if (rfsimulator->role == SIMU_ROLE_SERVER && getenv("RFSIM_UL_TAP")) {
+    rfsimulator->tap_after = atoi(getenv("RFSIM_UL_TAP"));
+    rfsimulator->tap_delay = (uint64_t)(rfsimulator->sample_rate / 100); // 10 ms
+    const int na = rfsimulator->tx_num_channels; // DL antenna count = header.nbAnt the tap sees
+    rfsimulator->tap_dl.assign(na, std::vector<c16_t>(TAP_RING, c16_t{0, 0}));
+    rfsimulator->tap_ul.assign(na, std::vector<c16_t>(TAP_RING, c16_t{0, 0}));
+    LOG_I(HW, "RFSIM_UL_TAP=%d: clients accepted after the first %d are listen-only DL+UL taps\n", rfsimulator->tap_after, rfsimulator->tap_after);
+  }
   rfsimulator->passive_client = rfsimulator->role == SIMU_ROLE_CLIENT && IS_PASSIVE_RX_MODE(get_softmodem_params());
   if (rfsimulator->prop_delay_ms > 0.0)
     rfsimulator->chan_offset = ceil(rfsimulator->sample_rate * rfsimulator->prop_delay_ms / 1000);
