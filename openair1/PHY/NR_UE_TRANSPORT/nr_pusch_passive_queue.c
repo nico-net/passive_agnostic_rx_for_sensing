@@ -57,6 +57,7 @@ extern uint64_t *nr_ss_gpu_ptr(void);
 #include "nr_pdcch_ul_config_disc.h"
 #include "nr_pdcch_ul_layout_lock.h"
 #include "nr_pusch_passive_decode.h"
+#include "nr_ul_nid_bg.h" // nr_ul_nid_bg_wants_next
 #include "nr_pusch_ul_disc.h" // ISAC_UL_PROBE_TA: the per-RNTI timing tracker
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // nr_get_Qm_ul
 
@@ -629,12 +630,17 @@ static void *ulq_capture_thread(void *arg)
   while (!atomic_load_explicit(&g_stop, memory_order_relaxed)) {
     long abs = -1;
     int slot = 0;
+    bool want_next = false;
     for (int k = 0; k < g_cursor.count && abs < 0; k++) {
       const nr_pusch_passive_job_t *j = &g_ring[(g_cursor.tail + k) % g_cursor.depth];
       if (j->snap_idx == -1 && !ulq_is_probe(&j->grant)) {
         abs = j->absolute_slot;
         slot = j->nr_slot_rx;
       }
+    }
+    for (int k = 0; g_snap_next && abs >= 0 && k < g_cursor.count && !want_next; k++) { /* the slot after it, only if a job of this slot could become a stage-B job */
+      const nr_pusch_passive_job_t *j = &g_ring[(g_cursor.tail + k) % g_cursor.depth];
+      if (j->absolute_slot == abs && !ulq_is_probe(&j->grant)) want_next = nr_ul_nid_bg_wants_next(&j->grant);
     }
     const int b = abs >= 0 ? nr_pusch_snap_free(g_pool_refs, g_pool_n) : -1;
     if (abs >= 0 && b < 0) {
@@ -658,7 +664,7 @@ static void *ulq_capture_thread(void *arg)
     uint32_t origin = 0, len = 0, origin2 = 0, len2 = 0;
     const bool ok = nr_pusch_passive_snapshot_copy(ue, (uint8_t)slot, (uint64_t)abs, g_pool[b].iq, cap, &origin, &len);
     bool ok2 = false;
-    for (int w = 0; ok && g_snap_next && w < 40; w++) { /* the next slot is produced 0.5 ms after the target slot: wait for it (<= 4 ms), once it exists copy once */
+    for (int w = 0; ok && want_next && w < 40; w++) { /* the next slot is produced 0.5 ms after the target slot: wait for it (<= 4 ms), once it exists copy once */
       if (atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_acquire) < abs + 1) { usleep(100); continue; }
       ok2 = nr_pusch_passive_snapshot_copy(ue, (uint8_t)((slot + 1) % ue->frame_parms.slots_per_frame), (uint64_t)(abs + 1), g_pool2[b].iq, cap, &origin2, &len2);
       break;

@@ -12,9 +12,14 @@
  *   ISAC_UL_NID_BG_HYP=1000     stage B hypotheses per job (cursor per RNTI)
  *   ISAC_UL_NID_BG_TOPM=12      stage B: id sweeps on the TOPM highest-DM-RS-SNR distinct hypotheses of a job
  *   ISAC_UL_NID_BG_ADDPOS=1     stage B: also the other dmrs-AdditionalPosition readings (0 = the lock's current one only)
+ *   ISAC_UL_NID_BG_CORE=<cpu>   pin the worker thread (default: unpinned, nice 19)
+ *   ISAC_UL_NID_BG_IDLE=1       SCHED_IDLE worker (default off)
  *   ISAC_UL_NID_BG_NBWP=4       stage B BWP hypotheses of the lock's ranking walked per DCI (variants: ISAC_UL_MCS_TABLE_SWEEP / K2_PAIR / TDA_PAIR as in the CRC trials)
  *   ISAC_UL_NID_BG_MCS=4        stage B admits grants with an MCS index <= this (QPSK in every table); stage A needs the decoded Qm <= ISAC_UL_NID_BG_QM
  *   ISAC_UL_NID_BG_DROP=100     qualified real-time failures (and no pass) that drop a confirmed entry */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "nr_ul_nid_bg.h"
 #include <math.h>
 #include <pthread.h>
@@ -61,7 +66,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static nr_ul_nid_stats_t g_st;
 static _Atomic int g_on = -1, g_iq_on = -1, g_stop;
 static float g_snr;
-static int g_topm, g_addpos_n, g_dbg_try = -1, g_gap_ms, g_nbwp, g_mcs_max, g_qm, g_min_rb, g_repeat, g_trials, g_cpu_pct, g_job_ms, g_hyp_per_job, g_drop;
+static int g_idle, g_core = -1, g_topm, g_addpos_n, g_dbg_try = -1, g_gap_ms, g_nbwp, g_mcs_max, g_qm, g_min_rb, g_repeat, g_trials, g_cpu_pct, g_job_ms, g_hyp_per_job, g_drop;
 static int g_nlog;
 static nr_ul_nid_hyp_fn g_fn;
 static nr_ul_nid_prep_fn g_prep;
@@ -96,6 +101,10 @@ static void load_env(void)
   g_hyp_per_job = (int)envl("ISAC_UL_NID_BG_HYP", 1000);
   g_drop = (int)envl("ISAC_UL_NID_BG_DROP", 100);
   g_nlog = (int)envl("ISAC_UL_NID_BG_LOG", 0);
+  g_core = (int)envl("ISAC_UL_NID_BG_CORE", -1);
+  g_idle = (int)envl("ISAC_UL_NID_BG_IDLE", 0);
+  g_nbwp = (int)envl("ISAC_UL_NID_BG_NBWP", 4);
+  g_mcs_max = (int)envl("ISAC_UL_NID_BG_MCS", 4);
   const char *iq = getenv("ISAC_UL_NID_BG_IQ");
   atomic_store(&g_iq_on, on && iq && !strcmp(iq, "1"));
   atomic_store(&g_on, on);
@@ -281,6 +290,15 @@ void nr_ul_nid_bg_feedback(uint16_t rnti, bool ok, float snr_db)
     }
   }
   pthread_mutex_unlock(&g_lock);
+}
+bool nr_ul_nid_bg_wants_next(const nr_pdcch_blind_ul_result_t *g)
+{
+  if (!nr_ul_nid_bg_iq_enabled() || g->mcs > g_mcs_max || g->num_rb < g_min_rb || g->nrOfLayers != 1) return false;
+  pthread_mutex_lock(&g_lock);
+  nid_rnti_t *e = rnti_get_locked(g->rnti, false);
+  const bool ok = !(e && e->confirmed); /* the gap and the free job slot are not asked: the job runs ~100 ms after the copy */
+  pthread_mutex_unlock(&g_lock);
+  return ok;
 }
 void nr_ul_nid_bg_note_iq2(bool ok)
 {
@@ -603,9 +621,19 @@ static void *worker(void *a)
 {
   (void)a;
   if (nice(19) == -1) { /* best effort */ }
+  if (g_idle) { /* ISAC_UL_NID_BG_IDLE=1: SCHED_IDLE, runs only on a core nothing else wants */
+    const struct sched_param sp0 = {0};
+    if (sched_setscheduler(0, SCHED_IDLE, &sp0)) LOG_W(PHY, "SENSING: UL_NID_BG cannot use SCHED_IDLE\n");
+  }
+  if (g_core >= 0) { /* ISAC_UL_NID_BG_CORE=<cpu>: keep the search off the downlink cores */
+    cpu_set_t cs;
+    CPU_ZERO(&cs);
+    CPU_SET(g_core, &cs);
+    if (sched_setaffinity(0, sizeof(cs), &cs)) LOG_W(PHY, "SENSING: UL_NID_BG cannot pin to cpu %d\n", g_core);
+  }
   uint64_t last = now_ns();
   while (!atomic_load(&g_stop)) {
-    if (now_ns() - last > 10000000000ull) {
+    if (now_ns() - last > 5000000000ull) {
       last = now_ns();
       print_stats("");
     }

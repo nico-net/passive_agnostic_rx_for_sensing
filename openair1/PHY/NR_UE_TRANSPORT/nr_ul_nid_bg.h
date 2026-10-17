@@ -84,6 +84,8 @@ typedef struct {
   uint64_t cpu_us, rt_ok, rt_fail, iq2_ok, iq2_miss;
 } nr_ul_nid_stats_t;
 void nr_ul_nid_bg_stats(nr_ul_nid_stats_t *s);
+/* the capture thread asks before it copies the slot after a booked slot: could a grant like this one become a stage-B job (MCS / size gate, RNTI not confirmed)? */
+bool nr_ul_nid_bg_wants_next(const nr_pdcch_blind_ul_result_t *g);
 void nr_ul_nid_bg_note_iq2(bool ok); /* the k2 + 1 snapshot was / was not obtained */
 void nr_ul_nid_bg_stop(void);
 
