@@ -27,4 +27,12 @@ if st:
                       crc_pct=round(100 * (1 - r1 / r0), 2) if r0 else None, mcs=re.search(r'MCS \((\d)\) (\d+)', st[-1]).groups())
 m = [l for l in rx if 'pusch_passive[' in l]
 if m: out['pusch_passive_last'] = re.search(r'pusch_passive\[[^\]]*\]', m[-1]).group(0)
+# lock events with receiver time (s since rx start; the log prefix) and passive CRC after the last lock event
+ev = [(float(l.split()[0]), re.sub(r'^\S+ .*?SENSING: ', '', l.strip())[:230]) for l in rx if re.search(r'ULLAYOUT(_CRC_LOCK| BWP_LOCK| SEED_LOCK| LOCK )', l)]
+out['lock_events'] = [dict(t=e[0], ev=e[1]) for e in ev if 'ULLAYOUT LOCK' not in e[1]][:6]
+tl = max([e[0] for e in ev], default=None)
+tt = [(float(l.split()[0]), f(l, 'ok', int)) for l in crc if not (f(l, 'probe', int) or 0)]
+post = [ok for t, ok in tt if tl is not None and t >= tl]
+out['t_last_lock_s'] = tl
+out['post_lock'] = dict(n_real=len(post), crc_pct=round(100 * sum(1 for o in post if o == 1) / len(post), 2) if post else None)
 print(json.dumps(out))

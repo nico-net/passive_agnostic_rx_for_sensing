@@ -7,16 +7,19 @@
 #include "nr_ul_layout_lookalike.h"
 
 static inline int nr_ul_variant_ntables(bool sweep, bool tp) { return sweep ? (tp ? 2 : 3) : 1; }
-static inline int nr_ul_variant_count(bool sweep, bool k2pair, bool tp)
+/* variants = MCS tables x k2 {+0,+1} x symbol allocation {S0 L14 type A, S0 L13 type B} */
+static inline int nr_ul_variant_count(bool sweep, bool k2pair, bool tdapair, bool tp)
 {
-  return nr_ul_variant_ntables(sweep, tp) * (k2pair ? 2 : 1);
+  return nr_ul_variant_ntables(sweep, tp) * (k2pair ? 2 : 1) * (tdapair ? 2 : 1);
 }
-/* *tbl = -1 (the lock's default table) or the UL MCS table to force (0..2, TP 3..4); *k2d = 0 or 1 (k2 + 1 on every TDRA row) */
-static inline void nr_ul_variant_get(int v, bool sweep, bool k2pair, bool tp, int *tbl, int *k2d)
+/* *tbl = -1 (the lock's default table) or the UL MCS table to force (0..2, TP 3..4); *k2d = 0 or 1 (k2 + 1 on every TDRA row);
+ * *tda = 0 (S0 L14 type A) or 1 (S0 L13 type B) */
+static inline void nr_ul_variant_get(int v, bool sweep, bool k2pair, bool tdapair, bool tp, int *tbl, int *k2d, int *tda)
 {
-  const int nt = nr_ul_variant_ntables(sweep, tp), ti = v % nt;
+  const int nt = nr_ul_variant_ntables(sweep, tp), ti = v % nt, r = v / nt, nk = k2pair ? 2 : 1;
   *tbl = ti > 0 ? (tp ? 3 : 0) + ti : -1;
-  *k2d = (k2pair && v >= nt) ? 1 : 0;
+  *k2d = k2pair ? r % 2 : 0;
+  *tda = tdapair ? (r / nk) % 2 : 0;
 }
 /* a non-default variant latches only on two independent CRC passes (distinct slots): a CRC16 grant false-alarms at ~3e-4 per candidate */
 static inline bool nr_ul_variant_latch_ok(uint32_t passes, uint32_t distinct_slots) { return passes >= 2 && distinct_slots >= 2; }

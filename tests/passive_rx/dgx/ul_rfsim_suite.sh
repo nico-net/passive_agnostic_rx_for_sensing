@@ -20,6 +20,7 @@ for a in $ARMS; do
     A3_bwp_pci)            E=(RXCONF=$BW);;
     A3b_bwp_pci_dl255)     E=(RXCONF=$BW DLSLOTS=255);;
     A3c_bwp_pci_dl255_tbl1) E=(RXCONF=$BW DLSLOTS=255 RXENV=ISAC_UL_MCS_TABLE=1);;
+    T0_nocfg_table0)       E=(UECAP=$H/uecap_ports1_noqam256.cfg ULTAB=0);;  # UE cap without PUSCH 256QAM: truth table 0, fully blind
     A4_bwp_ids)            E=(RXCONF=$BW TBIDS=249:324);;
     A5_nocfg_pci)          E=();;
     A6_layout_tp)          E=(RXCONF=$H/ul_rfsim_rx.forced.tp.cfg RXENV=ISAC_UL_FORCE_OPTS=1 "ULENV=$FORCED_ENV" TBTP=1 ULBW=100 TBVARY=);;

@@ -629,11 +629,15 @@ static bool trial_sweep_on(void)
   return env_on("ISAC_UL_MCS_TABLE_SWEEP") && !(v && *v >= '0' && *v <= '2');
 }
 
-/* variant = vt | k2d << 3: vt = forced MCS table + 1 (0 = keep), k2d = k2 + 1 on every TDRA row */
+/* variant = vt | k2d << 3 | tda << 4: vt = forced MCS table + 1 (0 = keep), k2d = k2 + 1 on every TDRA row,
+ * tda = 0: every row S0 L14 type A; 1: every row S0 L13 type B (UL slot with the last symbol left to SRS) */
 static void apply_variant(nr_pdcch_blind_ul_opts_t *o, int var)
 {
   if ((var & 7) > 0) o->mcs_table = (uint8_t)((var & 7) - 1);
-  if (var & 8) for (int i = 0; i < o->tda_count && i < 16; i++) o->tda_k2[i]++;
+  for (int i = 0; i < o->tda_count && i < 16; i++) {
+    if (var & 8) o->tda_k2[i]++;
+    if (var & 16) { o->tda_start[i] = 0; o->tda_length[i] = 13; o->tda_mapping[i] = 1; }
+  }
 }
 
 /* caller holds mu: build the locked opts of one fitted length once the BWP is locked */
@@ -1589,7 +1593,7 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
       if (!(sa > sb || (sa == sb && g_hyp[a].votes > g_hyp[b].votes))) break;
       rk[j] = b; rk[j - 1] = a;
     }
-  if (bwp_seed_on() && nr > 0) { /* the leader's look-alike partners (N+1@s, shift variants) are tried right behind it: CRC decides, not votes */
+  if (bwp_seed_on() && nr > 0 && !(g_cell.sib1_ul_cfg && g_hyp[rk[0]].n == g_cell.sib1_ul_size && g_hyp[rk[0]].start == g_cell.sib1_ul_start)) { /* the leader's look-alike partners (N+1@s, shift variants) are tried right behind it: CRC decides, not votes */
     uint16_t pt[4][2];
     const int np = nr_ul_lookalike_partners(g_hyp[rk[0]].n, g_hyp[rk[0]].start, g_cell.carrier_rb, pt);
     int pos = 1;
@@ -1605,26 +1609,41 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
       rk[pos++] = hp;
     }
   }
-  const bool sweep = trial_sweep_on(), k2pair = env_on("ISAC_UL_K2_PAIR");
+  const bool sweep = trial_sweep_on(), k2pair = env_on("ISAC_UL_K2_PAIR"), tdapair = env_on("ISAC_UL_TDA_PAIR");
+  const bool vary = sweep || k2pair || tdapair;
+  /* a CONFIGURED UL BWP that leads the ranking is certain: the K jobs of the slot then test K variants of it instead of K BWP hypotheses */
+  const bool certain = vary && nr > 0 && bwp_seed_on() && g_cell.sib1_ul_cfg && g_hyp[rk[0]].n == g_cell.sib1_ul_size
+                       && g_hyp[rk[0]].start == g_cell.sib1_ul_start;
+  const int nvj = certain ? K : 1;
+  if (certain) nr = 1;
   const uint32_t vctr = g_var_ctr;
-  if (sweep || k2pair) g_var_ctr++;
+  if (vary) g_var_ctr++;
   const uint64_t gen = g_gen & NR_UL_LAYOUT_GEN_MASK;
   for (int t = 0; t < ls->ntail && t < 2 && n < K; t++) {
-    int tbl, k2d;
-    nr_ul_variant_get((int)(vctr % (uint32_t)nr_ul_variant_count(sweep, k2pair, ls->tail[t].tp)), sweep, k2pair, ls->tail[t].tp, &tbl, &k2d);
-    const int var = (tbl + 1) | k2d << 3;
-    for (int i = 0; i < nr && n < K; i++) {
-      const int h = rk[i], k = pre_for_hyp(ls, h);
-      if (ls->locked && g_locked_hyp == h && ls->chosen_tail == t && ls->chosen_var == var) continue; /* the failing layout itself */
-      nr_pdcch_blind_ul_opts_t o;
-      if (!trial_opts_locked(ls, h, k, t, var, &o) || !nr_pdcch_blind_extract_01(payload, len, rnti, &o, &out[n])) continue;
-      const uint32_t e = (uint32_t)(h | k << 8 | t << 11 | var << 13);
-      out[n].hyp_generation = NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_TRIAL | ((uint64_t)e << 40) | gen;
-      ev_slot_locked(ls, e)->trials++;
-      n++;
-    }
+    const int cnt = nr_ul_variant_count(sweep, k2pair, tdapair, ls->tail[t].tp);
+    for (int i = 0; i < nr && n < K; i++)
+      for (int j = 0; j < nvj && n < K; j++) {
+        const uint32_t ix = vctr * (uint32_t)nvj + (uint32_t)j;
+        int tbl, k2d, tda;
+        nr_ul_variant_get((int)(ix % (uint32_t)cnt), sweep, k2pair, tdapair, ls->tail[t].tp, &tbl, &k2d, &tda);
+        const int var = (tbl + 1) | k2d << 3 | tda << 4;
+        const int h = rk[i], k = pre_for_hyp(ls, h);
+        if (ls->locked && g_locked_hyp == h && ls->chosen_tail == t && ls->chosen_var == var) continue; /* the failing layout itself */
+        nr_pdcch_blind_ul_opts_t o;
+        if (!trial_opts_locked(ls, h, k, t, var, &o) || !nr_pdcch_blind_extract_01(payload, len, rnti, &o, &out[n])) continue;
+        /* the data-scrambling-ID walk moves on every failed decode, so a wrong table would never meet the right ID: every other round of
+         * the variant rotation pins the walking trials to the PCI default (and keeps them out of the walk) */
+        if (vary && out[n].data_id_advance && ((ix / (uint32_t)cnt) & 1u) == 0) {
+          out[n].data_scrambling_id = g_cell.pci;
+          out[n].data_id_advance = false;
+        }
+        const uint32_t e = (uint32_t)(h | k << 8 | t << 11 | var << 13);
+        out[n].hyp_generation = NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_TRIAL | ((uint64_t)e << 40) | gen;
+        ev_slot_locked(ls, e)->trials++;
+        n++;
+      }
   }
-  if (n || sweep || k2pair) g_trial_slot = abs_slot;
+  if (n || vary) g_trial_slot = abs_slot;
   if (n) ls->trials += (uint32_t)n;
   pthread_mutex_unlock(&mu);
   return n;
@@ -1704,8 +1723,8 @@ void nr_ul_layout_crc_verdict(const nr_pdcch_blind_ul_result_t *g, bool ok, uint
   if (li >= 0 && (g->hyp_generation & NR_UL_LAYOUT_GEN_MASK) == (g_gen & NR_UL_LAYOUT_GEN_MASK)) {
     len_state_t *ls = &g_len[li];
     if (nr_ul_layout_is_trial(g)) {
-      const unsigned e = (unsigned)((g->hyp_generation >> 40) & 0x1ffff);
-      const int h = e & 255, k = (e >> 8) & 7, t = (e >> 11) & 3, var = (e >> 13) & 15;
+      const unsigned e = (unsigned)((g->hyp_generation >> 40) & 0x7ffff);
+      const int h = e & 255, k = (e >> 8) & 7, t = (e >> 11) & 3, var = (e >> 13) & 63;
       if (ok) {
         if (ls->locked && g_locked_hyp == h && ls->chosen_tail == t && ls->chosen_var == var) { ls->crc_ok++; ls->crc_fail_run = 0; }
         /* a non-default table / k2 latches only on two independent CRC passes (distinct slots), guard or not */

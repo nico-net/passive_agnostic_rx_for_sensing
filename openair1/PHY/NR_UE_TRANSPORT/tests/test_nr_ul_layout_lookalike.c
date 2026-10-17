@@ -21,16 +21,20 @@ static void test_lookalike_without_edge_evidence_prefers_prior(void)
 
 static void test_trial_variants(void)
 {
-  int t, k;
-  assert(nr_ul_variant_count(false, false, false) == 1 && nr_ul_variant_count(true, false, false) == 3);
-  assert(nr_ul_variant_count(true, true, false) == 6 && nr_ul_variant_count(true, true, true) == 4);
-  nr_ul_variant_get(0, true, true, false, &t, &k); assert(t == -1 && k == 0);
-  nr_ul_variant_get(1, true, true, false, &t, &k); assert(t == 1 && k == 0);
-  nr_ul_variant_get(2, true, true, false, &t, &k); assert(t == 2 && k == 0);
-  nr_ul_variant_get(3, true, true, false, &t, &k); assert(t == -1 && k == 1);
-  nr_ul_variant_get(5, true, true, false, &t, &k); assert(t == 2 && k == 1);
-  nr_ul_variant_get(1, true, false, true, &t, &k); assert(t == 4 && k == 0);
-  nr_ul_variant_get(1, false, true, false, &t, &k); assert(t == -1 && k == 1); /* k2 pair only */
+  int t, k, d;
+  assert(nr_ul_variant_count(false, false, false, false) == 1 && nr_ul_variant_count(true, false, false, false) == 3);
+  assert(nr_ul_variant_count(true, true, false, false) == 6 && nr_ul_variant_count(true, true, false, true) == 4);
+  assert(nr_ul_variant_count(true, true, true, false) == 12);
+  nr_ul_variant_get(0, true, true, false, false, &t, &k, &d); assert(t == -1 && k == 0 && d == 0);
+  nr_ul_variant_get(1, true, true, false, false, &t, &k, &d); assert(t == 1 && k == 0);
+  nr_ul_variant_get(2, true, true, false, false, &t, &k, &d); assert(t == 2 && k == 0);
+  nr_ul_variant_get(3, true, true, false, false, &t, &k, &d); assert(t == -1 && k == 1);
+  nr_ul_variant_get(5, true, true, false, false, &t, &k, &d); assert(t == 2 && k == 1 && d == 0);
+  nr_ul_variant_get(1, true, false, false, true, &t, &k, &d); assert(t == 4 && k == 0);
+  nr_ul_variant_get(1, false, true, false, false, &t, &k, &d); assert(t == -1 && k == 1); /* k2 pair only */
+  nr_ul_variant_get(1, false, false, true, false, &t, &k, &d); assert(t == -1 && k == 0 && d == 1); /* TDA pair only */
+  nr_ul_variant_get(11, true, true, true, false, &t, &k, &d); assert(t == 2 && k == 1 && d == 1);
+  nr_ul_variant_get(6, true, true, true, false, &t, &k, &d); assert(t == -1 && k == 0 && d == 1);
   assert(!nr_ul_variant_latch_ok(1, 1) && !nr_ul_variant_latch_ok(2, 1) && nr_ul_variant_latch_ok(2, 2));
 }
 
