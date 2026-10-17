@@ -4516,6 +4516,38 @@ Binary `csd/int16` at `cc747a25f6` (Fix A + Fix B merged, Fix B NOT enabled). Ru
 - **Next levers:** per-RNTI layout cache + known-RNTI fast PDCCH (agent, branch `csd/int16-rcache`); UL U1+U2 (agent, branch `csd/int16-ul12`); moving work out of the Phase-2 lock; TIM even-frame 8/18 (latency-safe Fix B).
 ---
 
+### 2026-10-17 afternoon: goal redefinition, A/B results, DL GPU v2 and UL plan (user decisions)
+
+1. **Goals (user, 2026-10-17):**
+   - DL p99 < 3 ms (replaces 0.5 ms). CRC_q >= 80 % and drops < 1 % unchanged.
+   - Overarching: a high-performance multi-PCI passive RX that keeps the same performance with fewer cores. Best trade-off: up to ~10 % worse p50/p99 or RNTIs found per minute is acceptable for saved cores/GPU time, never beyond the hard limits.
+   - GPU-portable. Sensing remains the purpose.
+2. **sens6 GPU** = NVIDIA GeForce RTX 4060 Ti, 8 GB (sm_89), confirmed with `nvidia-smi` on 2026-10-17 (driver 580.178.04). Earlier notes saying RTX 4070 are wrong. Keep the GPU footprint well under 8 GB.
+3. **Non-bit-exact kernels** (e.g. FP32 demod) are allowed if correctness is ensured: replay-equivalent CRC, EVM and decoded grants.
+4. **Results:**
+   - Afternoon A/B, report `ac5b25a608` `GHC-OTA-20261017.md` [MEASURED, DGX OTA 2026-10-17 afternoon, n=3 per cell]:
+     - t26hE (+ ISAC_RNTI_LAYOUT_CACHE + ISAC_UL_LOOKALIKE) **REJECTED**: TIM n_real -25 %.
+     - PDSCH consumer moved off core 7 (ISAC_PDSCH_CORES=8,9,3,4) **REJECTED**: drops 1.1 % and 2.9 %.
+     - t26gE stays the default.
+     - p99: TIM 2.9-4.0 ms, V 4.8-7.7 ms; **not yet < 3 ms**.
+   - GPU contention (csd/int16-gpuc `4576048508`) is only 12-38 % of the tail. Host gaps between GPU stages are 36-71 %. ISAC_GPU_REAL_HOLD **rejected**.
+   - KNOWN_FAST (csd/int16-kfast `375ee38511`) and the RNTI cache are **PARKED**.
+5. **DL plan:** the whole DL data path goes on the GPU (spec section 10 "DL GPU data path v2"; plan `docs/superpowers/plans/2026-10-17-dl-gpu-datapath.md` on branch csd/int16-gpupath `3b9fef20c0`). 7 serial tasks behind ISAC_PDSCH_GPU_GRAPH*. Key finding: GPUPASS v1 already chains FEP->CRC in one graph, but 64-82 % of the >p99 grants bypass it. Estimate: TIM p99 ~2.0-2.7 ms, V ~3.2-5.8 ms.
+6. **PDCCH NOTE (user asked to record this):** PDCCH blind decode stays on the CPU for now. After DL GPU v2 lands, PDCCH (slot read to enqueue, 0.4-0.6 ms) becomes the largest tail component on Vodafone. Moving PDCCH to the GPU is the **NEXT lever** to revisit, with measured numbers.
+7. **UL (user: fix it, root cause "once for all"):**
+   - The night-time UL numbers were all probes (U1, `decf375921`).
+   - U4 Step 0 OTA dump (`b0da785fce`) was inconclusive: grants at SNR 0-4 dB with MCS 11-16.
+   - Code check: DCI 0_0 always uses PCI as the data n_ID even in USS (`nr_pdcch_blind_monitor.c` ~5596), vs TS 38.211 6.3.1.1.
+   - UL has never been validated against a known-config gNB. An rfsim known-config test bed is in progress on branch csd/int16-ulrfsim.
+   - No controlled phone is available.
+8. **Multi-PCI decisions:**
+   - Single process.
+   - 200 MHz wideband, 4 antennas, GPU channelizer only (no 2+2 split). sc16 first, then sc12/sc8 if the link falls short, never fewer antennas.
+   - One fixed RF gain.
+   - 2 cells within today's single-cell core set + ~25 %.
+   - Order after DL: cost per cell, wideband replay, 2-cell process, on air, sens6.
+---
+
 ## 26. Working rules for any agent on this project (carried over from the old setup)
 
 - Evidence labels (§0.1) in every status statement; retract wrong claims explicitly; never quote inherited numbers.
