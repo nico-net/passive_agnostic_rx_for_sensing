@@ -1744,6 +1744,119 @@ TEST(GpuGraph, LateThreadClaimsPrewarmedPool) {
   EXPECT_EQ(3u, pool.claimed);
 }
 
+/* ===================================================== v2 Task 2: probes on the pass (ISAC_PDSCH_GPU_GRAPH_COVER) ===================================================== */
+/* a layout probe (code block 0 only, the body's symbol horizon) through the pass equals the stage path's probe body: seg_ok[0], need_cpu, the final LLRs
+ * (zeros past the horizon) and the LLR statistics; nothing past block 0 is reported and the TB is never ok when C > 1. CRC ok and CRC fail. */
+TEST(GpuGraphCover, ProbeEqualsStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm);
+  int n = 0, n_hor = 0, n_ok = 0;
+  for (auto shape : GpuPassFixture::warm_shapes()) {
+    for (double snr : {20.0, -3.0}) {
+      GpuPassFixture::noise_db = snr;
+      GpuPassFixture fx = GpuPassFixture::from_shape(shape, 17);
+      ASSERT_TRUE(fx.tb_ok_built);
+      fx.make_probe();
+      nr_gpu_pass_shape_t w = fx.job->shape; /* the probe's key: the class of one code block (warmed by nr_gpu_pass_warmup for every PRB class) */
+      ASSERT_EQ(0, m.pass_warm(&w, shape.nl >= 2 ? 3 : 0, 0, 0));
+      ASSERT_EQ(0, fx.job->llr_out_all) << "the body's setting: a probe's LLRs reach llr_out without it"; /* (a CRC-ok C = 1 probe left llr_out stale: replay 2026-10-17) */
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64), sb(fx.tb.A / 8 + 64);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      const std::string what = "nrb " + std::to_string(shape.nrb_class) + " nl " + std::to_string(shape.nl) + " qm " + std::to_string(shape.qm) + " C " + std::to_string(fx.tb.C) +
+                               " horizon " + std::to_string(fx.probe_last) + " snr " + std::to_string(snr);
+      ASSERT_EQ(0, m.pass_try(fx.job, &g)) << what;
+      ASSERT_EQ(0, fx.run_stage_path(&s)) << what;
+      EXPECT_EQ(s.seg_ok[0], g.seg_ok[0]) << what;
+      EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+      for (int r = 1; r < NR_GPU_PASS_MAX_CB; r++) ASSERT_EQ(0, g.seg_ok[r]) << what << " block " << r;
+      EXPECT_EQ(0, g.tb_ok) << what;
+      EXPECT_EQ(0, memcmp(fx.llr_ref.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs";
+      const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+      EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << what << ": llr_n " << g.llr_stats.llr_n << "/" << ref.llr_n << " zero " << g.llr_stats.llr_zero << "/" << ref.llr_zero;
+      if (g.seg_ok[0] && fx.tb.C > 1) EXPECT_EQ(0, memcmp(gb.data(), fx.tb.payload.data(), (fx.tb.K >> 3) - (fx.tb.F >> 3) - 3)) << what << ": block 0 bytes";
+      n++;
+      n_hor += fx.probe_last >= 0;
+      n_ok += g.seg_ok[0];
+    }
+  }
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuGraphCover.ProbeEqualsStagePath: %d probes, %d with a horizon, %d block-0 CRC ok\n", n, n_hor, n_ok);
+  EXPECT_GT(n_hor, 0);
+  EXPECT_GT(n_ok, 0);
+  EXPECT_LT(n_ok, n) << "the -3 dB arm should fail some";
+}
+/* a slot-share grant: the estimate covers the group's union above the grant (share_chest_band), the demod reads the grant's REs; equal to the stage path's
+ * share body (TB, seg_ok, final LLRs, nvar, LLR statistics), alone and as a probe. */
+TEST(GpuGraphCover, ShareWidenedChestEqualsStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm);
+  int n = 0;
+  for (int w : {7, 20})
+    for (int si : {1, 16 + 6, 32 + 11, 48 + 5}) /* warm_shapes(): 24 PRB nl 1 qm 4, 48 nl 2 qm 6, 96 nl 3 qm 8, 217 nl 2 qm 4 */
+      for (int probe : {0, 1}) {
+        const nr_gpu_pass_shape_t shape = GpuPassFixture::warm_shapes()[si];
+        if (shape.nrb_class + w > 263) continue; /* the band stays inside the carrier (start_rb 10) */
+        GpuPassFixture::widen_rb = w;
+        GpuPassFixture fx = GpuPassFixture::from_shape(shape, 23);
+        GpuPassFixture::widen_rb = 0;
+        ASSERT_TRUE(fx.tb_ok_built);
+        if (probe) fx.make_probe();
+        nr_gpu_pass_shape_t sw = fx.job->shape;
+        ASSERT_EQ(0, m.pass_warm(&sw, shape.nl >= 2 ? 3 : 0, 0, 0));
+        std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
+        nr_gpu_pass_result_t g{}, s{};
+        g.tb = gb.data(); s.tb = sb.data();
+        const std::string what = "nrb " + std::to_string(shape.nrb_class) + " +" + std::to_string(w) + " nl " + std::to_string(shape.nl) + " probe " + std::to_string(probe);
+        ASSERT_EQ(0, m.pass_try(fx.job, &g)) << what;
+        ASSERT_EQ(0, fx.run_stage_path(&s)) << what;
+        EXPECT_EQ(s.nvar, g.nvar) << what;
+        EXPECT_EQ(probe ? 0 : s.tb_ok, g.tb_ok) << what; /* a probe is never a decoded TB */
+        EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+        if (!probe) EXPECT_TRUE(g.tb_ok) << what << ": 20 dB decodes";
+        if (g.tb_ok) EXPECT_EQ(0, memcmp(gb.data(), sb.data(), fx.tb.A / 8)) << what;
+        else EXPECT_EQ(0, memcmp(fx.llr_ref.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs";
+        const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+        EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << what;
+        n++;
+      }
+  printf("GpuGraphCover.ShareWidenedChestEqualsStagePath: %d grants\n", n);
+  EXPECT_GE(n, 12);
+}
+/* a probe whose key was never warmed: dl_try returns 1 and counts it unseen; nothing is allocated (platform or module) */
+TEST(GpuGraphCover, ProbeUnseenKeyFallsBackWithoutAlloc) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m));
+  GpuPassFixture fx = GpuPassFixture::from_shape({6, 13, 4, 2, 2, 1, 1}, 19); /* PRB class 6: no test warms it */
+  ASSERT_TRUE(fx.tb_ok_built);
+  fx.make_probe();
+  std::vector<uint8_t> gb(fx.tb.A / 8 + 64);
+  nr_gpu_pass_result_t g{};
+  g.tb = gb.data();
+  uint64_t a0, d0, a1, d1, o0[16], o1[16];
+  nr_gpu_memory_stats(&a0, &d0);
+  m.pass_counters(o0);
+  EXPECT_EQ(1, m.pass_try(fx.job, &g));
+  m.pass_counters(o1);
+  nr_gpu_memory_stats(&a1, &d1);
+  EXPECT_EQ(o0[2] + 1, o1[2]) << "counted unseen";
+  EXPECT_EQ(o0[10], o1[10]) << "the module built (allocated) a graph";
+  EXPECT_EQ(o0[9], o1[9]);
+  EXPECT_EQ(a0, a1) << "the platform allocated";
+  EXPECT_EQ(d0, d1);
+}
 
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
  * allocated or built on the launch path. */

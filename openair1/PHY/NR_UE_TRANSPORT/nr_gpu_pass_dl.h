@@ -31,6 +31,12 @@ typedef struct {
   int chest_diag;                   /* chest_pdp_diag_on() */
   double fep_fo;                    /* the FEP frequency offset the old path would use (must be 0) */
   uint8_t *tb;                      /* receives the transport block (g_harq.b) */
+  /* v2 Task 2 (ISAC_PDSCH_GPU_GRAPH_COVER): a layout probe decodes code block 0 only (with the full-C E / K / Z) and is never a decoded TB (out->r.tb_ok = 0);
+   * probe_last_sym: its symbol horizon (-1 = the whole grant; the body's rule), set for every grant */
+  int probe, probe_last_sym;
+  /* the band the channel estimate covers (the slot share widens it upward; nr_pdsch_passive_decode.c share_chest_band); NULL = the grant's. Contiguous grants only */
+  const freq_alloc_bitmap_t *chest_fa;
+  const fapi_nr_dl_config_dlsch_pdu_rel15_t *chest_cfg;
 } nr_gpu_pass_dl_in_t;
 
 typedef struct {

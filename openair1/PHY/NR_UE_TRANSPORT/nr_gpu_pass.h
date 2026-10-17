@@ -185,6 +185,10 @@ typedef struct {
   int llr_out_all;  /* 1 = llr_out is filled on CRC success too (tests, FP32 sign checks) */
   uint64_t t_entry_ns; /* Task 8b: CLOCK_MONOTONIC at nr_gpu_pass_{dl,ul}_run entry (0 = not stamped); the module histograms prep / launch-to-done / post */
   nr_gpu_pass_ul_t ul; /* Task 7: the PUSCH inputs of nr_gpu_pass_ul_try (ul.on); the TB fields above (A, C, K, Z, F, E, E2, first_rE2, tbslbrm, BG, R, R2, rv, Qm, it_max, G, scr, shape, llr_out) are shared */
+  /* ---- v2 Task 2 (layout probes). 0 = the defaults (the whole grant) */
+  uint32_t n_decode; /* code blocks decoded (blocks >= n_decode are padding; shape.ncb_class is the class of n_decode), 0 = C; K' / CRC type / E stay those of C */
+  uint32_t G_dem;    /* LLRs the demod writes (a probe past its horizon: fewer); llr[G_dem, G) are zeroed, as the body's cleared buffer. 0 = G */
+  uint8_t probe;     /* 1 = a layout probe: never a decoded TB (tb_ok = 0, llr_out filled; outcome seg_ok[0]); the low-priority twin stream (ISAC_PDSCH_GPU_PRIO) */
 } nr_gpu_pass_job_t;
 
 /* the per-segment inputs of a segmented job as nr_pdsch_gpu_chest_grant's rows take them: pilot RB (prb_start + the BWP start unless the reference point is CRB 0) and first LS

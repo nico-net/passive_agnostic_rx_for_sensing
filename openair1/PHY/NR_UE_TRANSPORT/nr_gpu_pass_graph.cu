@@ -19,6 +19,7 @@
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
+#include "nr_pdsch_gpu_prio.cuh"
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include "nr_pusch_gpu_fep.h" /* nr_pusch_gpu_fep_item_t: the layout of ulfep::Item (the PUSCH pass feeds k_ul_fep_p) */
 #define NR_GPU_PASS_UL_EQ
@@ -68,13 +69,14 @@ constexpr int SEG_ROWS = 512;              /* chest rows of one pass: nd * nl * 
 struct PassBlk { /* written by the host before every replay */
   nr_gpu_chest_post_par_t post;
   uint32_t G, span, tbs;
-  int norm, ncb, KB;
+  int norm, ncb, KB; /* ncb: the code blocks decoded (k_pick) */
   const uint32_t *scr;
   nr_gpu_rdm_seg_t rdm[MAXCB];
   nr_gpu_crc_seg_t cand[MAXCB * NSNAP]; /* every snapshot of every code block */
   nr_gpu_crc_seg_t sel[MAXCB];          /* the chosen block of every code block */
   uint16_t seg_n[NR_GPU_PASS_MAX_SEG], seg_d[NR_GPU_PASS_MAX_SEG]; /* segmented estimate: REs (12 * PRBs) and first data RE of every segment (n == 0: padding) */
   int dsym[NR_GPU_PASS_MAX_DMRS];       /* DM-RS symbols (the compose kernel's destination rows) */
+  uint32_t Gd;                          /* v2 Task 2: LLRs the demod wrote; k_unscr zeroes [Gd, G) (= G outside a probe horizon) */
 };
 struct ResBlk { /* written by the kernels, read by the host after the pass */
   nr_gpu_chest_post_out_t post;
@@ -93,9 +95,10 @@ struct ResBlk { /* written by the kernels, read by the host after the pass */
 __global__ void k_unscr(int16_t *llr, const PassBlk *pb)
 {
   const uint32_t G = pb->G;
-  const uint32_t *scr = pb->scr;
+  const uint32_t *scr = pb->scr, Gd = pb->Gd;
   for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < G; i += gridDim.x * blockDim.x)
-    if (scr[i >> 5] >> (i & 31) & 1u) llr[i] = (int16_t)(-llr[i]);
+    if (i >= Gd) llr[i] = 0; /* past a probe's horizon: the body's buffer is cleared (an earlier pass of the instance left LLRs here) */
+    else if (scr[i >> 5] >> (i & 31) & 1u) llr[i] = (int16_t)(-llr[i]);
 }
 /* v2 Task 1: the LLR statistics of passive_decode_body_core (nr_pdsch_passive_decode.c, demod_ok block) on the descrambled LLRs, before the K38 shift. The host
  * takes the magnitude stats before its descrambling and the sign stats after it; descrambling only flips signs and |-v| == |v| for every int16 (-32768 included,
@@ -222,7 +225,7 @@ struct Key {
 
 struct Inst {
   int id = 0;
-  cudaStream_t s = nullptr, s2 = nullptr;
+  cudaStream_t s = nullptr, s2 = nullptr, s_lo = nullptr; /* s_lo: v2 Task 2, the low-priority twin of s for probes (ISAC_PDSCH_GPU_PRIO=1), else null */
   cudaEvent_t done = nullptr;
   nr_gpu_buf_t rxF = {}, est = {}, nvar = {}, geo = {}, scratch = {}, llr = {}, lin = {}, bits = {}, pil = {}, scr = {}, pb = {}, res = {}, segsc = {};
   nr_gpu_buf_t uli = {}, ulb = {}, ulwin = {}; /* Task 7: the FEP items + geometry, the UlBlk, the DISCRETE IQ window copy */
@@ -358,8 +361,11 @@ static void synth_job(const Key &k, nr_gpu_pass_job_t *j, std::vector<int16_t> &
 static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
 {
   PassBlk &pb = *I.PB();
+  /* v2 Task 2: a probe decodes the first n_decode blocks with the parameters (K', CRC type, E, offsets) of the whole TB */
+  const uint32_t nd = j->n_decode && j->n_decode < j->C ? j->n_decode : j->C;
   pb.G = j->G; pb.span = j->norm_span; pb.norm = j->norm; pb.tbs = j->A;
-  pb.ncb = (int)j->C; pb.KB = (int)(j->K >> 3);
+  pb.Gd = j->G_dem && j->G_dem < j->G ? j->G_dem : j->G;
+  pb.ncb = (int)nd; pb.KB = (int)(j->K >> 3);
   if (nr_gpu_model() == NR_GPU_MODEL_DIRECT) {
     pb.scr = j->scr;
   } else {
@@ -373,7 +379,7 @@ static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
   for (int s = 0; s < ncb; s++) {
     nr_gpu_rdm_seg_t &g = pb.rdm[s];
     memset(&g, 0, sizeof(g));
-    if ((uint32_t)s < j->C) {
+    if ((uint32_t)s < nd) {
       const bool first = (uint32_t)s < j->first_rE2;
       g.E = first ? j->E : j->E2;
       g.llr_off = first ? (uint32_t)s * j->E : j->first_rE2 * j->E + ((uint32_t)s - j->first_rE2) * j->E2;
@@ -381,13 +387,13 @@ static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
     } /* padding blocks: C == 0 is "refused" -> zeros */
     for (int q = 0; q < NSNAP; q++) {
       nr_gpu_crc_seg_t &c = pb.cand[s * NSNAP + q];
-      c = {(uint32_t)((s * NSNAP + q) * KBMAX), (uint32_t)((uint32_t)s < j->C ? Kprime : 0), 0u, (uint32_t)ctype};
+      c = {(uint32_t)((s * NSNAP + q) * KBMAX), (uint32_t)((uint32_t)s < nd ? Kprime : 0), 0u, (uint32_t)ctype};
     }
-    pb.sel[s] = {(uint32_t)(offsetof(ResBlk, c) + (size_t)s * KBMAX), (uint32_t)((uint32_t)s < j->C ? Kprime : 0), (uint32_t)(pay > 0 ? pay : 0), (uint32_t)ctype};
+    pb.sel[s] = {(uint32_t)(offsetof(ResBlk, c) + (size_t)s * KBMAX), (uint32_t)((uint32_t)s < nd ? Kprime : 0), (uint32_t)(pay > 0 ? pay : 0), (uint32_t)ctype};
   }
   /* LDPC jobs: the padding blocks repeat block 0 (a zero input stops them at the first syndrome check) */
   for (int s = 0; s < ncb; s++) {
-    const uint32_t q = (uint32_t)s < j->C ? (uint32_t)s : 0u;
+    const uint32_t q = (uint32_t)s < nd ? (uint32_t)s : 0u;
     nr_gpu_ldpc_job_t &l = I.lj[s];
     l.BG = j->BG; l.R = q < j->first_rE2 ? j->R : j->R2; l.Z = (uint16_t)j->Z; l.K = (uint16_t)j->K; l.it_max = j->it_max; l.llr = nullptr;
   }
@@ -788,6 +794,7 @@ static int alloc_inst(int id)
       (!nr_gpu_green_stream(&I.s2, hi, true, id) && cudaStreamCreateWithPriority(&I.s2, cudaStreamNonBlocking, hi) != cudaSuccess) ||
       cudaEventCreateWithFlags(&I.done, cudaEventDisableTiming) != cudaSuccess)
     return -1;
+  if (g_cfg.v2 && nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&I.s_lo, lo, hi)) I.s_lo = nullptr; /* v2 Task 2: probes on the twin; none = the RT stream */
   if (nr_gpu_buf_alloc(&I.rxF, (size_t)4 * NSYM * N * 4) || nr_gpu_buf_alloc(&I.est, (size_t)16 * NSYM * N * 4) ||
       nr_gpu_buf_alloc(&I.nvar, NR_GPU_CHEST_DEV_BYTES) || nr_gpu_buf_alloc(&I.geo, (size_t)2 * NSYM * ext * 4) ||
       nr_gpu_buf_alloc(&I.scratch, 4 * I.bn * 2) || nr_gpu_buf_alloc(&I.llr, (size_t)LLR_CAP * 2) ||
@@ -923,7 +930,8 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   const Key k = key_of(j);
   const nr_gpu_demod_job_t &d = j->dj;
   const uint32_t ext = d.ext;
-  if (!key_ok(k) || (int)k.nl != j->nl || (int)k.ndmrs != j->ndmrs || j->nbRx != g_cfg.nbRx || (int)j->nrb > (int)k.nrb || j->C < 1 || j->C > k.ncb ||
+  const uint32_t nd = j->n_decode && j->n_decode < j->C ? j->n_decode : j->C; /* v2 Task 2: blocks decoded (a probe: block 0) */
+  if (!key_ok(k) || (int)k.nl != j->nl || (int)k.ndmrs != j->ndmrs || j->nbRx != g_cfg.nbRx || (int)j->nrb > (int)k.nrb || j->C < 1 || nd > k.ncb || j->G_dem > j->G ||
       (j->Z & 3) || (j->K & 7) || (j->K >> 3) > (uint32_t)KBMAX || j->G > LLR_CAP || j->G == 0 || ext > (uint32_t)EXTMAX || (d.want_evm && (k.fp32 & 1) == (uint8_t)d.evm_fp64) || ((k.fp32 >> 1) != (uint8_t)(d.demod_fp32 != 0)) ||
       j->nseg < 0 || j->nseg > (int)k.nseg || (j->nseg == 0) != (k.nseg == 0) || !seg_ok(j) ||
       j->it_max < 1 || j->it_max > NSNAP + 1 || !j->scr || !j->geo_y || !j->geo_h || !j->symbol_rot || !j->rxdata[0]) {
@@ -959,7 +967,8 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   if (pr != 0) { ++(pr == -2 ? g_fb_ldpckey : g_fb_err); return 1; }
   const uint64_t ts_l = nr_gpu_pass_now_ns();
   const auto t0 = std::chrono::steady_clock::now();
-  if (cudaGraphLaunch(e->exec[id], I.s) != cudaSuccess || cudaEventRecord(I.done, I.s) != cudaSuccess) {
+  cudaStream_t ls = j->probe && I.s_lo ? I.s_lo : I.s; /* a captured graph launches on either stream */
+  if (cudaGraphLaunch(e->exec[id], ls) != cudaSuccess || cudaEventRecord(I.done, ls) != cudaSuccess) {
     ++g_fb_err;
     g_dead = 1;
     return -1;
@@ -988,16 +997,16 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   r->post = rb.post;
   r->llr_stats = rb.llr_stats;
   r->tb_ok = 0;
-  for (uint32_t s = 0; s < j->C; s++) r->seg_ok[s] = rb.seg_ok[s];
+  for (uint32_t s = 0; s < nd; s++) r->seg_ok[s] = rb.seg_ok[s];
   if (rb.need_cpu) ++g_need_cpu;
   if (!r->need_cpu) {
     const bool crc_ok = j->C > 1 ? rb.tb_crc != 0 : rb.seg_crc[0] != 0;
-    r->tb_ok = rb.all_ok && crc_ok;
+    r->tb_ok = rb.all_ok && crc_ok && nd == j->C && !j->probe; /* a probe is never a decoded TB: its LLRs go to llr_out below like a CRC failure's */
     /* reassemble the TB exactly as passive_ldpc_decode_core: seg_bytes of every block (the CRC24B bytes of a multi-block TB are dropped) */
     const uint32_t seg_bytes = (j->K >> 3) - (j->F >> 3) - (j->C > 1 ? 3 : 0);
     uint32_t off = 0;
-    for (uint32_t s = 0; s < j->C; s++, off += seg_bytes) memcpy(r->tb + off, rb.c[s], seg_bytes);
-    if (!r->tb_ok) ++g_tb_fail;
+    for (uint32_t s = 0; s < nd; s++, off += seg_bytes) memcpy(r->tb + off, rb.c[s], seg_bytes);
+    if (!r->tb_ok && !j->probe) ++g_tb_fail;
   }
   nr_gpu_demod_job_t *dj = r->demod_out ? r->demod_out : &I.dj; /* the instance is ours until it is released */
   memcpy(dj, &j->dj, offsetof(nr_gpu_demod_job_t, evm));

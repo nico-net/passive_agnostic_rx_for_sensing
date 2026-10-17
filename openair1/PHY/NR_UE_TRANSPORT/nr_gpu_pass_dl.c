@@ -417,7 +417,8 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
     atomic_fetch_add_explicit(&G.segn[__builtin_ctz((unsigned)nsegc)], 1, memory_order_relaxed);
   }
   int ndmrs = 0, k0 = 0, nrb = 0, pil_nrb = 0;
-  if (nr_pdsch_gpu_chest_pass_inputs(ue, in->proc, in->dlsch_config, in->freq_alloc, cw->Nl, in->dmrs_full, in->chest_diag, &ndmrs, j->dmrs_sym, j->delta, j->pil,
+  const int wide = nseg == 0 && in->chest_fa && in->chest_cfg; /* v2 Task 2: the slot share's widened estimate band */
+  if (nr_pdsch_gpu_chest_pass_inputs(ue, in->proc, wide ? in->chest_cfg : in->dlsch_config, wide ? in->chest_fa : in->freq_alloc, cw->Nl, in->dmrs_full, in->chest_diag, &ndmrs, j->dmrs_sym, j->delta, j->pil,
                                      &k0, &nrb, nseg > 0 ? in->seg : NULL, nseg, &pil_nrb) != 0)
     return fb(FB_CHEST);
   j->nbRx = fp->nb_antennas_rx;
@@ -444,7 +445,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   pdsch_scope_req_t scope = {.copy_chanest_to_scope = false, .copy_rxdataF_to_scope = false, .scope_rxdataF_offset = 0};
   const freq_alloc_bitmap_t fa_virt = set_bitmap_from_start_size(0, in->freq_alloc->num_rbs); /* the old path demodulates this virtual allocation of the gathered REs */
   nr_pdsch_gpu_demod_call_t call = {.ue = ue, .proc = in->proc, .dlsch = &dlsch, .freq_alloc = nseg > 0 ? &fa_virt : in->freq_alloc, .cfg = in->dlsch_config, .harq = &harq,
-                                    .first_symbol = in->first_symbol, .probe_last_sym = -1, .est_size = in->est_size, .buf = in->rx_size_symbol,
+                                    .first_symbol = in->first_symbol, .probe_last_sym = in->probe ? in->probe_last_sym : -1, .est_size = in->est_size, .buf = in->rx_size_symbol,
                                     .rxdataF = (c16_t *)in->rxdataF, .scope = &scope, .ssb_rm = in->ssb_rm};
   if (nr_pdsch_gpu_demod_pass_job(&call, &j->dj, &j->geo_y, &j->geo_h) != 0)
     return fb(FB_DEMOD);
@@ -463,9 +464,10 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   /* ---- transport block parameters, as passive_ldpc_decode_core derives them (no HARQ combining: first transmission, d cleared) */
   unsigned C = 0, K = 0, Z = 0, F = 0;
   if (nr_segmentation(NULL, NULL, lenWithCrc(1, cw->TBS), &C, &K, &Z, &F, cw->ldpcBaseGraph) < 0 || C < 1 || C > NR_GPU_PASS_MAX_CB || (Z & 3) || (K & 7) || (K >> 3) > 1056
-      || G_dem != in->G || in->G == 0)
+      || (in->probe ? G_dem > in->G : G_dem != in->G) || in->G == 0) /* a probe past its horizon demodulates fewer LLRs; the rest stay 0 */
     return fb(FB_TBPARAM);
-  const int ncb = nr_gpu_pass_ncb_class((int)C);
+  const uint32_t n_dec = in->probe && C > 1 ? 1u : C; /* a probe decodes code block 0 (nb_segments_to_decode = 1 of passive_ldpc_decode_core) */
+  const int ncb = nr_gpu_pass_ncb_class((int)n_dec);
   const int nrbc = nr_gpu_pass_nrb_class(nrb);
   if (!ncb || !nrbc || in->it_max < 1 || in->it_max > 17)
     return fb(FB_TBPARAM);
@@ -485,6 +487,9 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   j->A = cw->TBS;
   j->C = C; j->K = K; j->Z = Z; j->F = F; j->E = E; j->E2 = E2; j->first_rE2 = first; j->tbslbrm = in->tbslbrm;
   j->BG = cw->ldpcBaseGraph; j->R = R; j->R2 = R2; j->rv = cw->rv; j->Qm = cw->qamModOrder; j->it_max = (uint8_t)in->it_max;
+  j->n_decode = n_dec;
+  j->G_dem = G_dem;
+  j->probe = (uint8_t)(in->probe != 0);
   /* ---- LLR post: descrambling words (the gold sequence nr_codeword_unscrambling reads) and the K38 normalisation */
   const int words = (int)((in->G + 31) / 32);
   j->scr = gold_cache(((uint32_t)in->rnti << 15) + (0u << 14) + in->dlsch_config->dlDataScramblingId, words);
