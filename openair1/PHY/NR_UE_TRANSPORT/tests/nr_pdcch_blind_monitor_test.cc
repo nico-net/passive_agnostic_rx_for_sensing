@@ -6903,3 +6903,33 @@ TEST(UssTrackerFast, MatchesReferenceAndFindsPlantedRnti)
     EXPECT_TRUE(found || sf[0] > 0.0f) << "trial " << trial;
   }
 }
+
+/* SCAN-TAIL: the hashed reading index returns what the solver's linear first-match search returned. */
+TEST(ScanTail, ReadingIndexMatchesLinearSearch)
+{
+  std::mt19937 rng(7);
+  for (int round = 0; round < 40; round++) {
+    const bool decode_fields = round & 1;
+    const int pool = round % 3 ? 30 : 400; /* few distinct readings = many repeats and chain collisions */
+    nr_pdcch_blind_result_t rd[128];
+    int n = 0;
+    nr_dci11_reading_idx_t h;
+    nr_dci11_reading_idx_init(&h);
+    for (int i = 0; i < 4000; i++) {
+      nr_pdcch_blind_result_t pr;
+      memset(&pr, 0, sizeof(pr));
+      const unsigned v = rng() % pool;
+      pr.start_rb = v % 7; pr.num_rb = 1 + v % 11; pr.rbg_bitmap = (v * 2654435761u) & 0xffff; pr.mcs = v % 29;
+      pr.dmrs_ports = 1u << (v % 4); pr.n_dmrs_cdm_groups = 1 + v % 2; pr.nscid = v & 1; pr.ra_type0 = v % 2; pr.rbg_size = 2 << (v % 3);
+      pr.rv = rng() % 4; pr.ndi = rng() % 2; pr.harq_pid = rng() % 16; /* only compared when decode_fields */
+      int lin = -1, pos = 0;
+      for (int k = 0; k < n && lin < 0; k++)
+        if (nr_dci11_same_reading(&rd[k], &pr, decode_fields)) lin = k;
+      ASSERT_EQ(nr_dci11_reading_idx_find(&h, rd, &pr, decode_fields, &pos), lin);
+      if (lin < 0 && n < 128) {
+        rd[n] = pr;
+        nr_dci11_reading_idx_put(&h, pos, n++);
+      }
+    }
+  }
+}

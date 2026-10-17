@@ -9693,6 +9693,11 @@ constdiag_done:;
       const bool kfast = nr_scancost_on();
       nr_keyhash_t khash;
       if (kfast) nr_keyhash_init(&khash);
+      static int s_rfast = -1; /* ISAC_SCAN_READING_HASH=1: hashed reading dedupe (bit-exact), default off */
+      if (s_rfast < 0) s_rfast = getenv("ISAC_SCAN_READING_HASH") && atoi(getenv("ISAC_SCAN_READING_HASH")) ? 1 : 0;
+      const bool rfast = s_rfast;
+      nr_dci11_reading_idx_t ridx;
+      if (rfast) nr_dci11_reading_idx_init(&ridx);
       for (int i = 0; i < nh; i++) {
         s_gid[i] = 0xff;
         if (!R->alive[i] && i != rep
@@ -9734,13 +9739,17 @@ constdiag_done:;
          * layout's MCS-0 grant took the rv of whichever layout parsed first (rv = NDI on TIM: half the MCS-0 TBs lost). */
         static int s_rd_rv = -1;
         if (s_rd_rv < 0) s_rd_rv = getenv("ISAC_PDSCH_READING_RV") && atoi(getenv("ISAC_PDSCH_READING_RV")) ? 1 : 0;
-        int g = -1;
-        for (int k = 0; k < nrd && g < 0; k++)
-          if (nr_dci11_same_reading(&rparsed[k], &pr, s_rd_rv))
-            g = k;
+        int g = -1, rpos = 0;
+        if (rfast)
+          g = nr_dci11_reading_idx_find(&ridx, rparsed, &pr, s_rd_rv, &rpos);
+        else
+          for (int k = 0; k < nrd && g < 0; k++)
+            if (nr_dci11_same_reading(&rparsed[k], &pr, s_rd_rv))
+              g = k;
         if (g < 0 && nrd < SOLVER_READINGS) {
           g = nrd++;
           rparsed[g] = pr;
+          if (rfast) nr_dci11_reading_idx_put(&ridx, rpos, g);
         }
         if (g >= 0) {
           s_gid[i] = (uint8_t)g;
