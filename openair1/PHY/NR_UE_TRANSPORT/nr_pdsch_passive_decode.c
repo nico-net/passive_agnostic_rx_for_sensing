@@ -82,6 +82,7 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "nr_pdsch_ptrs_unav.h"
 #include "nr_agnostic_v2.h"
 #include "nr_pdsch_prb_set.h" // nr_prb_segments, nr_prb_gather_index (non-contiguous PRB sets)
+#include "nr_pdsch_host_fast.h" // ISAC_PDSCH_HOST_FAST: NEON unscramble
 #include "nr_arm_sweep.h" // generic per-RNTI Wilson pick/latch core shared by the VRB-L and PRG sweeps
 #include "nr_pdsch_rm_genie.h" // TIMRM bit-level genie (ISAC_PDSCH_RM_GENIE)
 #include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the UL decoder
@@ -5233,7 +5234,14 @@ gpu_llr_ready:;
 
     zero_before = atomic_load(&g_ldpc_zero_tb);
     pdt_ldp = pdtim_on ? pdtim_now() : 0;
-    nr_dlsch_unscrambling(llr, G, 0 /* codeword */, dlsch_config->dlDataScramblingId, grant->rnti);
+    { /* ISAC_PDSCH_HOST_FAST=1 (default off): NEON sign-mask unscramble, bit-identical to nr_codeword_unscrambling */
+      static _Atomic int s_hfu = -1;
+      if (s_hfu < 0) s_hfu = getenv("ISAC_PDSCH_HOST_FAST") && atoi(getenv("ISAC_PDSCH_HOST_FAST")) ? 1 : 0;
+      if (s_hfu)
+        nrhf_unscramble(llr, G, gold_cache((grant->rnti << 15) + (0 << 14) + dlsch_config->dlDataScramblingId, (G + 31) / 32));
+      else
+        nr_dlsch_unscrambling(llr, G, 0 /* codeword */, dlsch_config->dlDataScramblingId, grant->rnti);
+    }
     t_last_llr = llr; t_last_G = G; /* for the GPU self-check */
 
     /* SIGN statistics AFTER descrambling -- measuring them before is meaningless, and that was the
