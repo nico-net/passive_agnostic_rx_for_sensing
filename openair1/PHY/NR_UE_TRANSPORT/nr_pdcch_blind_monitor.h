@@ -1111,6 +1111,47 @@ static inline bool nr_dci11_same_reading(const nr_pdcch_blind_result_t *a, const
          && (!decode_fields || (a->rv == b->rv && a->ndi == b->ndi && a->harq_pid == b->harq_pid));
 }
 
+/* SCAN-TAIL (ISAC_SCAN_READING_HASH=1, default off): open-addressing index over the solver's reading list. The reading dedupe
+ * ("first k with nr_dci11_same_reading") ran once per parsed layout over up to 128 readings -- ~10 % of the scan CPU on the b replay,
+ * under the Phase-2 lock. The list holds pairwise-different readings, so the one match found through the hash chain (verified with
+ * nr_dci11_same_reading itself) is the one the linear search found. The hash covers fields all comparison variants compare. */
+#define NR_DCI11_READING_CAP 256 /* >= 2 x the 128 readings the solver keeps */
+typedef struct {
+  int16_t slot[NR_DCI11_READING_CAP];
+} nr_dci11_reading_idx_t;
+
+static inline void nr_dci11_reading_idx_init(nr_dci11_reading_idx_t *h)
+{
+  for (int i = 0; i < NR_DCI11_READING_CAP; i++) h->slot[i] = -1;
+}
+
+static inline unsigned nr_dci11_reading_hash(const nr_pdcch_blind_result_t *r)
+{
+  uint64_t x = r->rbg_bitmap;
+  x = x * 0x9E3779B97F4A7C15ull + ((uint64_t)r->start_rb << 16 | r->num_rb);
+  x = x * 0x9E3779B97F4A7C15ull + ((uint64_t)r->dmrs_ports << 24 | (uint64_t)r->mcs << 16 | (uint64_t)r->rbg_size << 8 | r->ra_type0);
+  x = x * 0x9E3779B97F4A7C15ull + ((uint64_t)r->n_dmrs_cdm_groups << 16 | (uint64_t)r->dmrs_config_type << 8 | r->nscid);
+  return (unsigned)((x * 0x9E3779B97F4A7C15ull) >> 56) & (NR_DCI11_READING_CAP - 1);
+}
+
+/* Index of the reading equal to *pr in rd[], or -1; *pos is where nr_dci11_reading_idx_put() stores a new one. */
+static inline int nr_dci11_reading_idx_find(const nr_dci11_reading_idx_t *h, const nr_pdcch_blind_result_t *rd,
+                                            const nr_pdcch_blind_result_t *pr, bool decode_fields, int *pos)
+{
+  unsigned p = nr_dci11_reading_hash(pr);
+  while (h->slot[p] >= 0) {
+    if (nr_dci11_same_reading(&rd[h->slot[p]], pr, decode_fields)) {
+      *pos = (int)p;
+      return h->slot[p];
+    }
+    p = (p + 1) & (NR_DCI11_READING_CAP - 1);
+  }
+  *pos = (int)p;
+  return -1;
+}
+
+static inline void nr_dci11_reading_idx_put(nr_dci11_reading_idx_t *h, int pos, int k) { h->slot[pos] = (int16_t)k; }
+
 #ifdef __cplusplus
 }
 #endif
