@@ -104,6 +104,16 @@ class GoalMetricsTest(unittest.TestCase):
         self.assertEqual(u['tot_p99'], 700)
         self.assertAlmostEqual(u['drops_pct'], 2.0)
 
+    def test_ul_probe_lines_excluded(self):
+        p = write(["[PHY]    SENSING: UL_PUSCH_CRC rnti=0x1 ok=0 mcs=27 prb=48+3 ta=1 t=1 cpu_us=1 status=1 reason=x snr_db=15.0 delay=0 probe=1 tbl=0\n",
+                   "[PHY]    SENSING: UL_PUSCH_CRC rnti=0x1 ok=1 mcs=4 prb=1+10 ta=1 t=1 cpu_us=1 status=0 reason=ok snr_db=15.0 delay=0 probe=0 tbl=0\n",
+                   "[PHY]    SENSING: UL_E2E rnti=0x1 st=1 prb=3 mcs=27 pick=1 arr2deq=1 wall=1 tot=90000 cpu_us=1 probe=1\n",
+                   "[PHY]    SENSING: UL_E2E rnti=0x1 st=1 prb=10 mcs=4 pick=1 arr2deq=1 wall=1 tot=700 cpu_us=1 probe=0\n"])
+        u = gm.parse_run(p)['ul']
+        self.assertEqual(u['n_real'], 1)
+        self.assertEqual(u['tot_p99'], 700)
+
+
 class MarginCurveTest(unittest.TestCase):
     def test_cross80(self):
         # bins: margin -1 dB 0 % ok, +1 dB 50 %, +3 dB 90 % -> first bin >= 80 % is +3

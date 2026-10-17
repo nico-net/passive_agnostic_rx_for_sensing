@@ -116,6 +116,8 @@ def parse_run(path, margin=2.0):
                 ul['crc_all'][0] += ok; ul['crc_all'][1] += 1
                 classify(ul, ok, mcs, int(kv.get('tbl', 0)), 0, float(kv['snr_db']), margin, evm=False)
             elif 'UL_E2E' in line:
+                if kv.get('probe', '0') != '0':
+                    continue
                 ul['lat'].append(int(kv['tot']))
             elif 'PDSCHQ queued=' in line:
                 m = re.search(r'queued=(\d+).*full=(\d+) stale=(\d+).*dropped_narrow=(\d+)', line)
