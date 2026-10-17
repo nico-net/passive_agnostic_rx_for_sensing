@@ -913,8 +913,26 @@ class GpuPassFixture {
     cudaStream_t st = P.s;
     int fs = 0, cs = 0;
     const bool seg = !segs.empty();
-    if (P.stage(&fs, &cs) || m.fep(&P.fj, &P.rxF, fs, st) || m.chest(&P.cjv[0], P.nrows, seg ? &P.sc : &P.est, &P.nvar, cs, st)) return -1;
-    nr_gpu_buf_d2h_async(&P.nvar, 0, P.nvar.bytes, st);
+    constexpr int CH = 256; /* more rows than one chest launch of this process takes: chunks, as gch_flush chunks the production job (every row is independent) */
+    if (P.nrows <= CH) {
+      if (P.stage(&fs, &cs) || m.fep(&P.fj, &P.rxF, fs, st) || m.chest(&P.cjv[0], P.nrows, seg ? &P.sc : &P.est, &P.nvar, cs, st)) return -1;
+      nr_gpu_buf_d2h_async(&P.nvar, 0, P.nvar.bytes, st);
+    } else {
+      if (m.fep_stage(&P.fj, &fs) || m.fep(&P.fj, &P.rxF, fs, st)) return -1;
+      std::vector<int> acc(4 * NR_GPU_CHEST_MAX_ROWS, 0);
+      auto jc = std::make_unique<nr_gpu_chest_job_t>(P.cjv[0]);
+      for (int r0 = 0; r0 < P.nrows; r0 += CH) {
+        const int n = std::min(CH, P.nrows - r0);
+        memcpy(jc->rows, P.cjv[0].rows + r0, (size_t)n * sizeof(nr_gpu_chest_row_t));
+        jc->n_rows = n;
+        if (m.chest_stage(jc.get(), n, &cs) || m.chest(jc.get(), n, seg ? &P.sc : &P.est, &P.nvar, cs, st)) return -1;
+        nr_gpu_buf_d2h_async(&P.nvar, 0, P.nvar.bytes, st);
+        if (cudaStreamSynchronize(st)) return -1;
+        memcpy(&acc[3 * (size_t)r0], P.nvar.host, (size_t)3 * n * sizeof(int));
+        memcpy(&acc[3 * (size_t)NR_GPU_CHEST_MAX_ROWS + r0], (const int *)P.nvar.host + 3 * NR_GPU_CHEST_MAX_ROWS, (size_t)n * sizeof(int));
+      }
+      memcpy(P.nvar.host, acc.data(), acc.size() * sizeof(int));
+    }
     nr_gpu_buf_d2h_async(&P.rxF, 0, P.rxsz, st);
     if (seg) nr_gpu_buf_d2h_async(&P.sc, 0, P.sc.bytes, st);
     if (cudaStreamSynchronize(st)) return -1;

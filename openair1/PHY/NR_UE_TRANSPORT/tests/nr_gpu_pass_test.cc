@@ -52,6 +52,8 @@ TEST(GpuMem, AllocIsFirstTouched) {
 
 /* ===================================================== Task 4: the shape-class graph pass ===================================================== */
 /* The graphs are captured per instance under the memory model of the process (ctest runs this suite once as is and once with NR_GPU_PASS_DISCRETE=1). */
+/* the FEP module sizes its pass LS rows at init from these (1024 = the split value; a 128-segment row group is 512 rows); set before any test initialises it */
+[[maybe_unused]] static const int g_split_ls_rows_env = (setenv("ISAC_PDSCH_GPU_GRAPH", "1", 0), setenv("ISAC_PDSCH_GPU_GRAPH_SPLIT", "1", 0), 0);
 static void pass_model()
 {
   if (getenv("NR_GPU_PASS_DISCRETE")) setenv("ISAC_GPU_FORCE_DISCRETE", "1", 1);
@@ -2023,9 +2025,10 @@ TEST(GpuGraphSplit, ThirtyTwoSegmentsEqualStagePath) {
   printf("GpuGraphSplit.ThirtyTwoSegmentsEqualStagePath: %d grants, decoded %d\n", n, decoded);
   EXPECT_GE(decoded, 3) << "the clean grants should decode";
 }
-/* ISAC_PDSCH_GPU_GRAPH_SEG64: segmented grants of 33-64 segments (class 64, split only; rank 1-2 within the 1024 chest rows of a split process). This process has 256 LS rows
- * (no split env at the FEP init), so the grants carry one DM-RS symbol: 64 x 1 x 1 x 4 = 256 rows. The split pass equals the stage path's segmented body, CRC ok and CRC fail. */
-TEST(GpuGraphSplit, SixtyFourSegmentsEqualStagePath) {
+/* ISAC_PDSCH_GPU_GRAPH_SEG128: segmented grants of 33-128 segments (classes 64 and 128, split only). The C sub-graph runs the chest rows in chunks of whole (DM-RS symbol, layer)
+ * groups that reuse the scratch / LS rows (this process: 512 scratch rows, 1024 LS rows; the stage path chunks its own way), up to 2048 rows. The split pass equals the stage path's
+ * segmented body, CRC ok and CRC fail; the single-graph mode refuses the classes. */
+TEST(GpuGraphSplit, BeyondThirtyTwoSegmentsEqualStagePath) {
   if (!have_gpu()) GTEST_SKIP();
   pass_model();
   bool ok = false, lib = false;
@@ -2033,21 +2036,22 @@ TEST(GpuGraphSplit, SixtyFourSegmentsEqualStagePath) {
   if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
   ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
   const SegCase cases[] = {
-      {"prg2 128 PRB: 64 segs", 1, 4, 128, 0, 2, 0, 0},
-      {"prg2 80 PRB: 40 segs", 1, 2, 80, 0, 2, 0, 0},
-      {"interleaved L2 120 PRB in 273: 60 segs", 1, 6, 120, 0, 0, 2, 273},
-      {"interleaved L2 + BWPStart 12 refPoint 0, 50 segs", 1, 4, 100, 0, 0, 2, 240, 12, 0},
+      {"prg2 128 PRB: 64 segs rank 1", 1, 4, 128, 0, 2, 0, 0},
+      {"prg2 80 PRB: 40 segs rank 2 (2 chunks)", 2, 2, 80, 0, 2, 0, 0},
+      {"interleaved L2 120 PRB in 273: 60 segs rank 1", 1, 6, 120, 0, 0, 2, 273},
+      {"prg2 217 PRB: 109 segs rank 1 (2 chunks)", 1, 4, 217, 0, 2, 0, 0},
+      {"interleaved L2 200 PRB in 273: 100 segs rank 2 (4 chunks, 2048 rows)", 2, 4, 200, 0, 0, 2, 273},
+      {"interleaved L2 + BWPStart 12 refPoint 0, 50 segs rank 1", 1, 4, 100, 0, 0, 2, 240, 12, 0},
   };
-  GpuPassFixture::n_dm = 1;
   int n = 0, decoded = 0;
   for (const SegCase &c : cases) {
     const auto sd = seg_layout(c.n, c.start, c.prg, c.interleave, c.bwp);
     ASSERT_GT(sd.size(), 32u) << c.name;
-    ASSERT_LE(sd.size(), 64u) << c.name;
+    ASSERT_LE(sd.size(), 128u) << c.name;
     const int nsegc = nr_gpu_pass_nseg_class((int)sd.size());
-    ASSERT_EQ(64, nsegc) << c.name;
+    ASSERT_GE(nsegc, 64) << c.name;
     for (int corrupt : {-1, 0}) {
-      nr_gpu_pass_shape_t sh = {(uint16_t)c.n, 13, (uint16_t)c.nl, (uint16_t)c.qm, 1, 1, 1, (uint16_t)nsegc};
+      nr_gpu_pass_shape_t sh = {(uint16_t)c.n, 13, (uint16_t)c.nl, (uint16_t)c.qm, 2, 1, 1, (uint16_t)nsegc};
       GpuPassFixture fx = GpuPassFixture::from_shape(sh, 51 + n, corrupt, &sd, c.bwp_start, c.ref_point);
       ASSERT_TRUE(fx.tb_ok_built) << c.name;
       fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
@@ -2056,9 +2060,9 @@ TEST(GpuGraphSplit, SixtyFourSegmentsEqualStagePath) {
       fx.job->llr_out_all = 1;
       nr_gpu_pass_shape_t w = fx.shape;
       m.pass_split(0);
-      EXPECT_EQ(-1, m.pass_warm(&w, 0, fx.job->dj.align, fx.job->dj.want_evm)) << c.name << ": the single-graph mode has no 64-segment class";
+      EXPECT_EQ(-1, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm)) << c.name << ": the single-graph mode has no class above 32 segments";
       m.pass_split(1);
-      ASSERT_EQ(0, m.pass_warm(&w, 0, fx.job->dj.align, fx.job->dj.want_evm)) << c.name;
+      ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm)) << c.name;
       std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
       nr_gpu_pass_result_t g{}, s{};
       g.tb = gb.data(); s.tb = sb.data();
@@ -2089,8 +2093,7 @@ TEST(GpuGraphSplit, SixtyFourSegmentsEqualStagePath) {
       n++;
     }
   }
-  GpuPassFixture::n_dm = 2;
-  printf("GpuGraphSplit.SixtyFourSegmentsEqualStagePath: %d grants, decoded %d\n", n, decoded);
+  printf("GpuGraphSplit.BeyondThirtyTwoSegmentsEqualStagePath: %d grants, decoded %d\n", n, decoded);
   EXPECT_GE(decoded, 3) << "the clean grants should decode";
   EXPECT_LT(decoded, n);
 }

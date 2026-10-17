@@ -39,14 +39,14 @@ static struct {
   int nbrx, check, fp32; /* fp32: Task 5, the graphs run the FP32 demod (ISAC_GPU_PASS_FP32 / sm_89) */
   int v2;                /* DL GPU data path v2 (ISAC_PDSCH_GPU_GRAPH=1 without ISAC_GPU_PASS=1): the census is GPUGRAPH, the pool serves late threads */
   _Atomic uint64_t fb[FB_N], ev[NR_GPU_PASS_EV_N], gate[NR_GPU_PASS_GATE_N], runs, shadow_n, shadow_fn;
-  _Atomic uint64_t segn[7]; /* segmented grants that reached the pass, by segment-count class 1, 2, 4, 8, 16, 32, 64 */
+  _Atomic uint64_t segn[8]; /* segmented grants that reached the pass, by segment-count class 1, 2, 4, 8, 16, 32, 64, 128 */
   _Atomic uint64_t chest_why[16]; /* fallback[chest] by nr_pdsch_gpu_chest_pass_inputs reason: 1 cpu route, 2 exact chest off, 3 gpu delay off / not passive / chest_freq, 4 DM-RS type 2 (without _DMRS2),
                                    * 5 shape (N, nrx, Nl, DM-RS count), 6 buffers, 7 pilot span, 8 diag / delay share / DFT window / dump, 9 single branch, 10 non-contiguous */
 } G;
 
 int nr_gpu_pass_active(void) { return atomic_load_explicit(&G.on, memory_order_relaxed); }
 int nr_gpu_graph_on(void) { return G.v2 && nr_gpu_pass_active(); }
-int nr_gpu_pass_seg_max(void) { return nr_gpu_graph_flag("SEG64") ? 64 : nr_gpu_graph_flag("SPLIT") ? 32 : NR_GPU_PASS_MAX_SEG_FULL; } /* split: the 32-segment class; SEG64: 64 */
+int nr_gpu_pass_seg_max(void) { return nr_gpu_graph_flag("SEG128") ? 128 : nr_gpu_graph_flag("SPLIT") ? 32 : NR_GPU_PASS_MAX_SEG_FULL; } /* split: the 32-segment class; SEG128: 128 */
 /* v2 Task 4: a decode call holds its pass instance across its bodies (RETRY needs SPLIT: the entry at D is a split launch). 1 = held, end it with nr_gpu_graph_call_end */
 int nr_gpu_graph_call_begin(void)
 {
@@ -62,7 +62,7 @@ void nr_gpu_graph_call_dirty(void)
     G.call_dirty();
 }
 /* the sub-flags, read once at warm-up (nr_gpu_graph_flag runs per grant) */
-static const char *const g_sub_name[] = {"COVER", "SPLIT", "RETRY", "SLOT", "LEAN", "DMRS2", "SEG64"};
+static const char *const g_sub_name[] = {"COVER", "SPLIT", "RETRY", "SLOT", "LEAN", "DMRS2", "SEG128"};
 static int g_sub_on[sizeof(g_sub_name) / sizeof(g_sub_name[0])];
 int nr_gpu_graph_flag(const char *sub)
 {
@@ -182,11 +182,11 @@ static void census(void)
              (unsigned long)G.chest_why[3], (unsigned long)G.chest_why[4], (unsigned long)G.chest_why[5], (unsigned long)G.chest_why[6], (unsigned long)G.chest_why[7],
              (unsigned long)G.chest_why[8], (unsigned long)G.chest_why[9], (unsigned long)G.chest_why[10]);
   LOG_A(PHY,
-        "SENSING: %s%s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu seg=%lu] seg_grants[1=%lu 2=%lu 4=%lu 8=%lu 16=%lu 32=%lu 64=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
+        "SENSING: %s%s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu seg=%lu] seg_grants[1=%lu 2=%lu 4=%lu 8=%lu 16=%lu 32=%lu 64=%lu 128=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
         "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu probe_done=%lu old_first=%lu fp32_flip=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu retry=%lu]\n",
         pool, buf, (unsigned long)G.fb[FB_OFF], (unsigned long)G.fb[FB_CELL], (unsigned long)G.fb[FB_FO], (unsigned long)G.fb[FB_CHEST],
         (unsigned long)G.fb[FB_DEMOD], (unsigned long)G.fb[FB_TBPARAM], (unsigned long)G.fb[FB_MODULE], (unsigned long)G.fb[FB_SEG],
-        (unsigned long)G.segn[0], (unsigned long)G.segn[1], (unsigned long)G.segn[2], (unsigned long)G.segn[3], (unsigned long)G.segn[4], (unsigned long)G.segn[5], (unsigned long)G.segn[6], (unsigned long)G.ev[NR_GPU_PASS_EV_COMMIT],
+        (unsigned long)G.segn[0], (unsigned long)G.segn[1], (unsigned long)G.segn[2], (unsigned long)G.segn[3], (unsigned long)G.segn[4], (unsigned long)G.segn[5], (unsigned long)G.segn[6], (unsigned long)G.segn[7], (unsigned long)G.ev[NR_GPU_PASS_EV_COMMIT],
         (unsigned long)G.ev[NR_GPU_PASS_EV_RETRY_OLD], (unsigned long)G.ev[NR_GPU_PASS_EV_ZERO_TB], (unsigned long)G.ev[NR_GPU_PASS_EV_LIFETIME],
         (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_BAD], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL_BAD],
         (unsigned long)G.ev[NR_GPU_PASS_EV_CONT_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_PROBE], (unsigned long)G.ev[NR_GPU_PASS_EV_OLD_FIRST], (unsigned long)G.ev[NR_GPU_PASS_EV_FP32_FLIP], (unsigned long)G.gate[0], (unsigned long)G.gate[1],
@@ -248,7 +248,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     }
     g_sub_on[2] &= g_sub_on[1]; /* review S2: RETRY needs SPLIT (its D entry is a split launch) */
     g_sub_on[5] &= g_sub_on[1]; /* DMRS2 (DM-RS type 2 in the pass) needs SPLIT */
-    g_sub_on[6] &= g_sub_on[1]; /* SEG64 (the 64-segment class) needs SPLIT */
+    g_sub_on[6] &= g_sub_on[1]; /* SEG128 (the 64- and 128-segment classes, C in chunks) needs SPLIT */
   }
   if ((!dl_on && !ul_on) || !ue)
     return;
@@ -359,8 +359,8 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   const char *se = getenv("ISAC_GPU_PASS_SEG_CLASSES");
   const int sbudget = se ? atoi(se) : c.split ? 1 << 20 : 1400;
   int smade = 0;
-  static const int segc[] = {1, 2, 4, 8, 16, 32, 64}, segnl[] = {1, 2, 3, 4};
-  const int nsegc = c.split ? (g_sub_on[6] ? 7 : 6) : 5, segrows = c.split ? 1024 : 512; /* split: the 32-segment class (SEG64: 64, rank 1-2 within the rows) and the module's 1024 chest rows */
+  static const int segc[] = {1, 2, 4, 8, 16, 32, 64, 128}, segnl[] = {1, 2, 3, 4};
+  const int nsegc = c.split ? (g_sub_on[6] ? 8 : 6) : 5, segrows = c.split ? 1024 : 512; /* split: the 32-segment class and the module's 1024 chest rows; SEG128: 64, 128 in C chunks */
   if (G.stats) {
     char buf[1024];
     G.stats(buf, sizeof(buf));
@@ -371,7 +371,8 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
       for (int ni = 0; ni < 8 && smade < sbudget; ni++)
         for (int sc = 0; sc < nsegc && smade < sbudget; sc++) {
           const int nl = segnl[li], ns = segc[sc];
-          if (nl > fp->nb_antennas_rx || ns > nrbs[ni] || nd[di] * nl * fp->nb_antennas_rx * ns > segrows)
+          const int rows = nd[di] * nl * fp->nb_antennas_rx * ns; /* SEG128 (ns > 32): chunks of whole (DM-RS symbol, layer) groups, at most 2048 rows (the module's c_groups_per_chunk) */
+          if (nl > fp->nb_antennas_rx || ns > nrbs[ni] || (ns <= 32 ? rows > segrows : rows > 2048 || ns * fp->nb_antennas_rx > segrows))
             continue;
           int variants[2][2], nvar = 0;
           for (int qm = 2; qm <= 6; qm += 4) {

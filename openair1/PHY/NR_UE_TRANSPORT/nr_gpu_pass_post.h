@@ -9,7 +9,7 @@
 /* ---- chest post: the CPU math after the GPU chest in passive_decode_body_core (non-segmented path): nvar normalisation + per-branch
  * substitution (3697-3732) and the DM-RS phase-slope CFO/SFO measurement (3740-3990). The EMA, the s_apply hook and the logging stay on
  * the host: they read `out` after the pass. */
-#define NR_GPU_POST_MAX_SEG 64 /* = NR_GPU_PASS_MAX_SEG */
+#define NR_GPU_POST_MAX_SEG 128 /* = NR_GPU_PASS_MAX_SEG */
 typedef struct {
   const uint32_t *nvar_rows; /* chest nvar u32[row], row = (k * nrx + a); k = dmrs_index * nl + layer, as the GPU chest job orders them */
   int nrx, nl, n_dmrs_sym;   /* k < n_dmrs_sym * nl */

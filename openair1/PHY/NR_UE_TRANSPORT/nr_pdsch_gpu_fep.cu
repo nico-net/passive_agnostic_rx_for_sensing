@@ -1513,7 +1513,8 @@ extern "C" int nr_pdsch_gpu_chest_stage(const nr_gpu_chest_job_t *j, int n, int 
 /* the same for a slot chosen by the caller (a graph instance owns its slot) */
 extern "C" int nr_pdsch_gpu_chest_stage_at(const nr_gpu_chest_job_t *j, int n, int slot)
 {
-  if (g_init_state != 1 || !g_exact_ok || !j || n < 1 || n > j->n_rows || n > PASS_LS_ROWS || slot < 0 || slot >= PASS_SLOTS) return -1;
+  /* up to NR_GPU_CHEST_MAX_ROWS rows (the staging size); one launch takes at most PASS_LS_ROWS of them (nr_pdsch_gpu_chest_dev_at chunks) */
+  if (g_init_state != 1 || !g_exact_ok || !j || n < 1 || n > j->n_rows || n > NR_GPU_CHEST_MAX_ROWS || slot < 0 || slot >= PASS_SLOTS) return -1;
   pass_slot_wait(g_pass_cev[slot]);
   memcpy(g_pass_rh[slot], j->rows, (size_t)n * sizeof(nr_gpu_chest_row_t));
   return 0;
@@ -1521,22 +1522,24 @@ extern "C" int nr_pdsch_gpu_chest_stage_at(const nr_gpu_chest_job_t *j, int n, i
 
 /* GPUPASS: launch-only bit-exact chest of n rows of j after nr_pdsch_gpu_chest_stage returned `slot` (see nr_pdsch_gpu_chest.h). Enqueues the
  * rows H2D from the slot's pinned copy and the kernels on `stream`; graph-capturable. Delay triples and nvar go into nvar_dev, estimates to
- * row.out (all inside est_dev). One pass in flight (shared LS scratch). 0 or -1. */
-extern "C" int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, int slot, void *stream)
+ * row.out (all inside est_dev). One pass in flight (shared LS scratch). 0 or -1.
+ * _at (v2 SEG128, the chunked C sub-graph): rows [r0, r0 + n) of a job staged whole (up to NR_GPU_CHEST_MAX_ROWS rows); the LS scratch is reused by the next chunk in stream
+ * order; the delay triples and nvar of row r0 + i land at index r0 + i, as one launch of every row would write them (every row is independent: bit-exact). */
+extern "C" int nr_pdsch_gpu_chest_dev_at(const nr_gpu_chest_job_t *j, int r0, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, int slot, void *stream)
 {
   if (g_init_state != 1 || !g_exact_ok || !j || !est_dev || !est_dev->dev || !nvar_dev || !nvar_dev->dev || nvar_dev->bytes < NR_GPU_CHEST_DEV_BYTES
-      || n < 1 || n > j->n_rows || n > PASS_LS_ROWS || j->N != 4096 || slot < 0 || slot >= PASS_SLOTS)
+      || r0 < 0 || n < 1 || r0 + n > j->n_rows || r0 + n > NR_GPU_CHEST_MAX_ROWS || n > PASS_LS_ROWS || (r0 && j->type == 3) || j->N != 4096 || slot < 0 || slot >= PASS_SLOTS)
     return -1;
-  for (int r = 0; r < n; r++) {
+  for (int r = r0; r < r0 + n; r++) {
     const char *o = (const char *)j->rows[r].out;
     if (j->rows[r].nb_rb < 1 || 12 * j->rows[r].nb_rb > 4096 || o < (const char *)est_dev->dev
         || o + 4096 * sizeof(short2) > (const char *)est_dev->dev + est_dev->bytes)
       return -1;
   }
   const cudaStream_t s = (cudaStream_t)stream;
-  if (cudaMemcpyAsync(g_pass_rd[slot], g_pass_rh[slot], (size_t)n * sizeof(nr_gpu_chest_row_t), cudaMemcpyHostToDevice, s) != cudaSuccess) return -1;
-  const nr_gpu_chest_row_t *rows = g_pass_rd[slot];
-  int *dout = (int *)nvar_dev->dev;
+  if (cudaMemcpyAsync(g_pass_rd[slot] + r0, g_pass_rh[slot] + r0, (size_t)n * sizeof(nr_gpu_chest_row_t), cudaMemcpyHostToDevice, s) != cudaSuccess) return -1;
+  const nr_gpu_chest_row_t *rows = g_pass_rd[slot] + r0;
+  int *const dbase = (int *)nvar_dev->dev, *dout = dbase + 3 * r0; /* delay triples of the chunk's rows; nvar below at dbase + 3 * MAX_ROWS + r0 */
   nrch::Par par;
   par.type = j->type;
   par.N = j->N;
@@ -1550,7 +1553,7 @@ extern "C" int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu
     par.trim = trim;
   }
   /* type 3 (GPUPASS Task 7, the PUSCH pass): the UL least-squares step, and the exact noise sum of every row at u64 [512 + row] of the nvar area */
-  par.acc = j->type == 3 ? (unsigned long long *)(dout + 3 * NR_GPU_CHEST_MAX_ROWS) + 512 : nullptr;
+  par.acc = j->type == 3 ? (unsigned long long *)(dbase + 3 * NR_GPU_CHEST_MAX_ROWS) + 512 : nullptr;
   if (j->type == 3) nrch::k_ul_ls<<<n, 256, 0, s>>>(par, rows, g_pass_ls[slot]);
   else nrch::k_ls<<<n, 256, 0, s>>>(par, rows, g_pass_ls[slot]);
   {
@@ -1558,9 +1561,13 @@ extern "C" int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu
     io.base = g_pass_ls[slot];
     nr_exact::k_delay_exact<<<n, nr_exact::THREADS, 0, s>>>(io, g_d_perm, g_d_tw1024, g_d_tw4096, dout);
   }
-  nrch::k_fir<<<n, 256, 0, s>>>(par, rows, g_pass_ls[slot], dout, (unsigned *)(dout + 3 * NR_GPU_CHEST_MAX_ROWS));
+  nrch::k_fir<<<n, 256, 0, s>>>(par, rows, g_pass_ls[slot], dout, (unsigned *)(dbase + 3 * NR_GPU_CHEST_MAX_ROWS) + r0);
   if (cudaPeekAtLastError() != cudaSuccess) return -1;
   return pass_slot_done(g_pass_cev[slot], s) == cudaSuccess ? 0 : -1;
+}
+extern "C" int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, int slot, void *stream)
+{
+  return nr_pdsch_gpu_chest_dev_at(j, 0, n, est_dev, nvar_dev, slot, stream);
 }
 
 /* GPUPASS: LS rows per pass the chest can take (the graph classes are limited to it) */
