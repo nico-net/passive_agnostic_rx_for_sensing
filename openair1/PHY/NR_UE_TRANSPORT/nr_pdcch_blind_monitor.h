@@ -1111,6 +1111,15 @@ static inline bool nr_dci11_same_reading(const nr_pdcch_blind_result_t *a, const
          && (!decode_fields || (a->rv == b->rv && a->ndi == b->ndi && a->harq_pid == b->harq_pid));
 }
 
+/* SCAN-TAIL2 (ISAC_SCAN_SCOREMEMO=1, default off): two readings with the same PRB allocation (everything dmrs_scan_filter_readings
+ * expands to a CRB list) and the same nSCID score identically against any DM-RS identity, so the filter scores that allocation once. */
+static inline bool nr_dci11_same_alloc(const nr_pdcch_blind_result_t *a, const nr_pdcch_blind_result_t *b)
+{
+  return a->ra_type0 == b->ra_type0 && (a->nscid & 1) == (b->nscid & 1)
+         && (a->ra_type0 ? (a->rbg_bitmap == b->rbg_bitmap && a->rbg_bwp_start == b->rbg_bwp_start && a->rbg_size == b->rbg_size)
+                         : (a->start_rb == b->start_rb && a->num_rb == b->num_rb));
+}
+
 /* SCAN-TAIL (ISAC_SCAN_READING_HASH=1, default off): open-addressing index over the solver's reading list. The reading dedupe
  * ("first k with nr_dci11_same_reading") ran once per parsed layout over up to 128 readings -- ~10 % of the scan CPU on the b replay,
  * under the Phase-2 lock. The list holds pairwise-different readings, so the one match found through the hash chain (verified with

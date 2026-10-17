@@ -6905,6 +6905,39 @@ TEST(UssTrackerFast, MatchesReferenceAndFindsPlantedRnti)
 }
 
 /* SCAN-TAIL: the hashed reading index returns what the solver's linear first-match search returned. */
+/* SCAN-TAIL2: readings the score memo treats as one allocation expand to the same CRB list (type 0) / the same RB range (type 1) */
+TEST(ScanTail, SameAllocImpliesSameCrbList)
+{
+  std::mt19937 rng(11);
+  int same = 0;
+  for (int i = 0; i < 20000; i++) {
+    nr_pdcch_blind_result_t a = {}, b = {};
+    for (auto *r : {&a, &b}) {
+      r->ra_type0 = rng() & 1;
+      r->rbg_bitmap = (rng() % 4) ? 0x2a : rng() & 0xffff;
+      r->rbg_bwp_start = rng() % 2 ? 0 : 3;
+      r->rbg_size = 2 << (rng() % 2);
+      r->start_rb = rng() % 3;
+      r->num_rb = 1 + rng() % 3;
+      r->nscid = rng() & 1;
+    }
+    if (!nr_dci11_same_alloc(&a, &b)) continue;
+    same++;
+    ASSERT_EQ(a.nscid & 1, b.nscid & 1);
+    if (a.ra_type0) {
+      uint16_t ca[275], cb[275];
+      const int na = nr_ra_type0_prbs(a.rbg_bitmap, a.rbg_bwp_start, 106, a.rbg_size, ca, 275);
+      const int nb = nr_ra_type0_prbs(b.rbg_bitmap, b.rbg_bwp_start, 106, b.rbg_size, cb, 275);
+      ASSERT_EQ(na, nb);
+      ASSERT_EQ(memcmp(ca, cb, na * sizeof(uint16_t)), 0);
+    } else {
+      ASSERT_EQ(a.start_rb, b.start_rb);
+      ASSERT_EQ(a.num_rb, b.num_rb);
+    }
+  }
+  EXPECT_GT(same, 100);
+}
+
 TEST(ScanTail, ReadingIndexMatchesLinearSearch)
 {
   std::mt19937 rng(7);
