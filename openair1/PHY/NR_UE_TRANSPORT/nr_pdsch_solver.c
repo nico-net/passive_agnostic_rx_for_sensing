@@ -71,6 +71,7 @@ typedef struct {
   uint32_t hq_cnt, rvmis;  /*   payloads seen; RV-rescue notes since the last re-selection */
   uint64_t hq_abs;         /*   slot of the last payload (duplicate candidates of one DCI) */
   bool mcs_pos, promoted;  /*   a CRC pass at MCS > 0 happened; the solution has been allowed to seed the cell */
+  uint64_t lc_gen;         /* ISAC_RNTI_LAYOUT_CACHE: generation of cand_bm/solution (global counter, 0 = never solved); bumped by lc_touch() */
 } solver_rnti_t;
 
 typedef struct {
@@ -98,6 +99,17 @@ typedef struct {
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static solver_rnti_t g_r[SOLVER_RNTIS];
 static pending_t g_p[SOLVER_PENDING];
+/* ISAC_RNTI_LAYOUT_CACHE=1 (default off): per solved RNTI, the solved layout set (cand_bm + representative) as a short id list keyed on the grant
+ * context (DCI length, CORESET, slot class, CSI-RS slot), so the scan consumer parses only those layouts instead of every live one. Entries are
+ * valid while the RNTI's generation (lc_touch at every cand_bm / solution change) and representative are unchanged. Under g_mu. */
+#define LC_WAYS 4
+#define LC_MAX 256
+typedef struct { uint16_t rnti; uint64_t key, gen; int rep, n; uint16_t ids[LC_MAX]; } lc_entry_t;
+static lc_entry_t g_lc[SOLVER_RNTIS][LC_WAYS];
+static uint8_t g_lc_next[SOLVER_RNTIS];
+static uint64_t g_lc_gen_ctr;
+static nr_pdsch_solver_lc_stats_t g_lc_st;
+static void lc_touch(solver_rnti_t *r) { r->lc_gen = ++g_lc_gen_ctr; }
 static uint32_t g_token = 1; /* sequence part of a token; the low 12 bits are the pending index (O(1) feedback) */
 typedef struct {
   int32_t ids[16], key;
@@ -198,6 +210,9 @@ void nr_pdsch_solver_reset(void)
     memset(&g_r[i], 0, sizeof(g_r[i]));
   }
   memset(g_p, 0, sizeof(g_p));
+  memset(g_lc, 0, sizeof(g_lc));
+  memset(g_lc_next, 0, sizeof(g_lc_next));
+  memset(&g_lc_st, 0, sizeof(g_lc_st));
   memset(&g_st, 0, sizeof(g_st));
   g_have_prior = false;
   g_n_key_scr = 0;
@@ -1458,6 +1473,7 @@ static void make_cand(solver_rnti_t *r, const pending_t *p)
     return;
   memset(r->cand_bm, 0, BM_BYTES);
   for (int i = 0; i < p->n_ids; i++) r->cand_bm[p->ids[i] >> 3] |= (uint8_t)(1u << (p->ids[i] & 7));
+  lc_touch(r);
   r->has_cand = true;
   r->cand_add_pos = p->add_pos;
   r->cand_table = p->table_disc ? (int8_t)p->table : -1;
@@ -1478,6 +1494,7 @@ static void make_cand(solver_rnti_t *r, const pending_t *p)
 static void solve_now(solver_rnti_t *r, const pending_t *p, int kept)
 {
   r->solved = true;
+  lc_touch(r);
   memset(r->S_by_tda, -1, sizeof(r->S_by_tda));
   bool refuted = false;
   r->rep = choose_rep(r, true, &refuted);
@@ -1607,6 +1624,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
           for (int i = 0; i < p->n_ids; i++)
             if ((r->cand_bm[p->ids[i] >> 3] >> (p->ids[i] & 7)) & 1) nb[p->ids[i] >> 3] |= (uint8_t)(1u << (p->ids[i] & 7));
           memcpy(r->cand_bm, nb, BM_BYTES);
+          lc_touch(r);
           free(nb);
         }
       }
@@ -1648,6 +1666,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
         }
       } else if (signif_on()) { /* a consistent pass on another DCI: count it, solve once significant */
         memcpy(r->cand_bm, nb, BM_BYTES);
+        lc_touch(r);
         p->crc24 ? r->k24++ : r->k16++;
         add_ev(r, p->payload, p->S);
         r->cand_dci = p->dci; /* the next pass must come from yet another DCI */
@@ -1657,6 +1676,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
                 r->rnti, r->k16, r->k24, chance_p(r), r->cred16, r->cred24);
       } else {
         memcpy(r->cand_bm, nb, BM_BYTES);
+        lc_touch(r);
         r->n_ev = 0;
         add_ev(r, r->cand_payload, r->cand_S);
         add_ev(r, p->payload, p->S);
@@ -1726,6 +1746,61 @@ void nr_pdsch_solver_note_rv_mismatch(uint16_t rnti)
     r->rvmis = 0;
     hq_reselect(r, true);
   }
+  pthread_mutex_unlock(&g_mu);
+}
+
+/* nr_pdsch_solver_layout_cache: see header. Takes g_mu; one pass over the bitmap on a miss, a copy of <= LC_MAX ids on a hit. */
+bool nr_rnti_layout_cache_on(void)
+{
+  static _Atomic int en = -1;
+  int v = atomic_load(&en);
+  if (v < 0) {
+    v = getenv("ISAC_RNTI_LAYOUT_CACHE") && atoi(getenv("ISAC_RNTI_LAYOUT_CACHE")) ? 1 : 0;
+    atomic_store(&en, v);
+  }
+  return v;
+}
+int nr_pdsch_solver_layout_cache(uint16_t rnti, uint64_t key, int max_fail, uint16_t *ids, int max)
+{
+  if (!nr_rnti_layout_cache_on() || ids == NULL) return -1;
+  pthread_mutex_lock(&g_mu);
+  int slot = -1, n = -1;
+  solver_rnti_t *r = slot_of(rnti, false, &slot);
+  if (r == NULL || !r->solved || r->rep < 0 || r->cand_bm == NULL || r->lc_gen == 0) {
+    g_lc_st.bypass++;
+  } else if (max_fail > 0 && r->cons_fail >= (uint32_t)max_fail) {
+    g_lc_st.fail_resolve++; /* possible reconfiguration: the caller re-solves from every live layout */
+  } else {
+    lc_entry_t *e = NULL;
+    for (int w = 0; w < LC_WAYS && !e; w++)
+      if (g_lc[slot][w].n > 0 && g_lc[slot][w].rnti == rnti && g_lc[slot][w].key == key) e = &g_lc[slot][w];
+    if (e && e->gen == r->lc_gen && e->rep == r->rep) {
+      g_lc_st.hit++;
+    } else {
+      if (e) g_lc_st.stale++; else { e = &g_lc[slot][g_lc_next[slot]++ % LC_WAYS]; g_lc_st.miss++; }
+      int c = 0;
+      const uint64_t *bw = (const uint64_t *)(const void *)r->cand_bm;
+      for (int w = 0; w < BM_BYTES / 8 && c <= LC_MAX; w++) {
+        uint64_t m = bw[w];
+        if (r->rep >> 6 == w) m |= 1ull << (r->rep & 63);
+        for (; m && c <= LC_MAX; m &= m - 1) {
+          if (c < LC_MAX) e->ids[c] = (uint16_t)(w * 64 + __builtin_ctzll(m));
+          c++;
+        }
+      }
+      e->n = c > LC_MAX ? 0 : c; /* too many layouts left: not a cacheable solution */
+      e->rnti = rnti; e->key = key; e->gen = r->lc_gen; e->rep = r->rep;
+    }
+    if (e->n > 0 && e->n <= max) { memcpy(ids, e->ids, (size_t)e->n * sizeof(uint16_t)); n = e->n; }
+    else g_lc_st.bypass++;
+  }
+  pthread_mutex_unlock(&g_mu);
+  return n;
+}
+void nr_pdsch_solver_layout_cache_stats(nr_pdsch_solver_lc_stats_t *s)
+{
+  pthread_mutex_lock(&g_mu);
+  *s = g_lc_st;
   pthread_mutex_unlock(&g_mu);
 }
 

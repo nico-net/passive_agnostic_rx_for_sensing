@@ -9723,7 +9723,24 @@ constdiag_done:;
       const bool rfast = s_rfast;
       nr_dci11_reading_idx_t ridx;
       if (rfast) nr_dci11_reading_idx_init(&ridx);
-      for (int i = 0; i < nh; i++) {
+      /* ISAC_RNTI_LAYOUT_CACHE=1 (default off): a solved RNTI parses only its solved layout set (the solver's cand_bm + representative), keyed
+       * on this grant's context; layouts outside it can only form readings the solver ignores for a solved RNTI (it uses the representative's
+       * reading and refinement readings that overlap the set). The full pass returns after N consecutive full-TB CRC failures. */
+      uint16_t lc_ids[256];
+      int lc_n = -1;
+      if (rep >= 0 && !reopen_layouts && nr_rnti_layout_cache_on()) {
+        static int s_lc_fail = -1;
+        if (s_lc_fail < 0) s_lc_fail = getenv("ISAC_RNTI_LAYOUT_CACHE_FAILS") ? atoi(getenv("ISAC_RNTI_LAYOUT_CACHE_FAILS")) : 8;
+        int8_t lc_last = 13;
+        if (!nr_passive_acq_tdd_pdsch_last_symbols((uint32_t)abs_slot, (int)fp->numerology_index, 1, &lc_last)) lc_last = 13;
+        const uint64_t lc_key = (uint64_t)dlen | (uint64_t)(uint32_t)(cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id + 1 : 0) << 16
+                                | (uint64_t)(lc_last < 13 ? 1 : 0) << 48 | (uint64_t)(nr_tda_field_on() ? 1 : 0) << 50
+                                | (uint64_t)(uint8_t)lc_last << 52;
+        lc_n = nr_pdsch_solver_layout_cache(out.rnti, lc_key, s_lc_fail, lc_ids, 256);
+      }
+      for (int ii = 0; ii < (lc_n >= 0 ? lc_n : nh); ii++) {
+        const int i = lc_n >= 0 ? lc_ids[ii] : ii;
+        if (i >= nh) continue;
         s_gid[i] = 0xff;
         if (!R->alive[i] && i != rep
             && !(reopen_layouts && R->off[i].fdra_mode < 8 && (live_fdra & (1u << R->off[i].fdra_mode))))
@@ -9810,9 +9827,11 @@ constdiag_done:;
         rd[k].mcs = rparsed[k].mcs;
         off += rcount[k];
       }
-      for (int i = 0; i < nh; i++)
-        if (s_gid[i] != 0xff)
+      for (int ii = 0; ii < (lc_n >= 0 ? lc_n : nh); ii++) {
+        const int i = lc_n >= 0 ? lc_ids[ii] : ii;
+        if (i < nh && s_gid[i] != 0xff)
           ((uint16_t *)rd[s_gid[i]].ids)[rd[s_gid[i]].n_ids++] = (uint16_t)i;
+      }
       static int s_budget = -1;
       if (s_budget < 0) {
         const char *e = getenv("ISAC_PDSCH_SOLVER_BUDGET");

@@ -169,6 +169,16 @@ void nr_tda_field_note_ok(int pos, nr_dci_bits_t p, int len, bool mixed, int S, 
  * last = last PDSCH symbol of the slot (13 when no TDD pattern is known). *detected: the field was accepted. */
 int nr_tda_field_rows(int pos, nr_dci_bits_t p, int len, int last, int max, uint8_t *S, uint8_t *L, bool *detected);
 
+/* ISAC_RNTI_LAYOUT_CACHE=1 (default off): the layout set of a SOLVED RNTI for one grant context. `key` packs everything that changes
+ * what a layout reads (DCI length, CORESET, slot class: TDD special/mixed slot vs full, CSI-RS slot, TDA-field mode); a context never
+ * shares an entry with another. Returns n > 0 and writes the layout ids (ascending, the representative included) to ids[]; -1 = no cache
+ * (flag off, RNTI new/unsolved/LOST, set larger than the cache, or max_fail > 0 and the RNTI has failed that many full TB CRCs in a row:
+ * possible reconfiguration, the caller re-solves from every live layout). Layouts the resolver has since killed are the caller's to skip. */
+bool nr_rnti_layout_cache_on(void);
+int nr_pdsch_solver_layout_cache(uint16_t rnti, uint64_t key, int max_fail, uint16_t *ids, int max);
+typedef struct { uint64_t hit, miss, stale, fail_resolve, bypass; } nr_pdsch_solver_lc_stats_t;
+void nr_pdsch_solver_layout_cache_stats(nr_pdsch_solver_lc_stats_t *s);
+
 typedef struct { uint64_t planned, probes, fulls, probe_ok, full_ok, candidates, solved, dropped; } nr_pdsch_solver_stats_t;
 void nr_pdsch_solver_stats(nr_pdsch_solver_stats_t *s);
 

@@ -18,6 +18,7 @@ extern "C" void exit_function(const char *file, const char *function, const int 
   if (assert) abort(); else exit(EXIT_SUCCESS);
 }
 static const int kEnable = setenv("ISAC_PDSCH_SOLVER", "1", 1);
+static const int kLcEnable = setenv("ISAC_RNTI_LAYOUT_CACHE", "1", 1); // read once; only nr_pdsch_solver_layout_cache() looks at it
 /* HIGHMCS: the receiver-choice flags are read once per process; set them for the whole suite (the OTA env has PER_RNTI=1; the
  * SNR rule only engages once nr_pdsch_solver_note_snr() has fed 3 samples per receiver, which only ReceiverPickFollowsSnrWhenCrcTies does) */
 static const int kComb = setenv("ISAC_RX_MRC_PER_RNTI", "1", 1) + setenv("ISAC_RX_MRC_PER_RNTI_SNR", "1", 1);
@@ -810,4 +811,62 @@ TEST(PdschSolverRvc, McsZeroSolutionSeedsTheCellOnlyOnceHarqVerified)
   unsetenv("ISAC_DCI11_RV_CONSISTENCY");
   unsetenv("ISAC_PDSCH_SOLVER_REUSE");
   nr_pdsch_solver_reset();
+}
+
+// k grants of a solved RNTI; a variant with the true physical parameters passes its CRC only when `pass`
+static void SolvedGrants(uint16_t rnti, const Cell &c, int k, bool pass, std::mt19937 &rng)
+{
+  nr_pdsch_solver_reading_t rd[1] = {{c.truth.data(), (int)c.truth.size(), 16}};
+  for (int g = 0; g < k; g++) {
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(rnti, p, 49, 20, 2, rd, 1, 8, v);
+    for (int i = 0; i < n; i++)
+      nr_pdsch_solver_feedback(v[i].token, pass && v[i].S == c.S_true[p.w[0] & 1] && v[i].add_pos == 1 && v[i].table == 1, true);
+  }
+}
+/* ISAC_RNTI_LAYOUT_CACHE=1: the solved layout set of an RNTI is served from the cache (hit), keyed per grant context (slot class), and
+ * the cache steps aside after N consecutive full-TB CRC failures (possible reconfiguration) until a TB passes again. */
+TEST(RntiLayoutCache, HitSlotClassSeparationAndFailInvalidation)
+{
+  ASSERT_EQ(kLcEnable, 0);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  Cell c;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  std::mt19937 rng(7);
+  const uint16_t rnti = 0x4c21;
+  uint16_t ids[256];
+  EXPECT_EQ(nr_pdsch_solver_layout_cache(rnti, 1, 8, ids, 256), -1) << "unknown RNTI: no cache";
+  ASSERT_GT(RunCell(c, rnti, -1, 400, rng), 0);
+  nr_pdsch_solver_lc_stats_t s0, s1;
+  nr_pdsch_solver_layout_cache_stats(&s0);
+  const uint64_t kFull = 49, kSpecial = 49 | (1ull << 48); // same DCI length, TDD special slot class
+  int n = nr_pdsch_solver_layout_cache(rnti, kFull, 8, ids, 256);
+  ASSERT_EQ(n, 5) << "the solved set is exactly the truth reading's layouts";
+  for (int i = 0; i < n; i++) EXPECT_EQ(ids[i], 10 + i);
+  EXPECT_EQ(nr_pdsch_solver_layout_cache(rnti, kFull, 8, ids, 256), 5);
+  nr_pdsch_solver_layout_cache_stats(&s1);
+  EXPECT_EQ(s1.miss - s0.miss, 1u);
+  EXPECT_EQ(s1.hit - s0.hit, 1u) << "second lookup of the same context is a hit";
+  EXPECT_EQ(nr_pdsch_solver_layout_cache(rnti, kSpecial, 8, ids, 256), 5);
+  nr_pdsch_solver_layout_cache_stats(&s1);
+  EXPECT_EQ(s1.miss - s0.miss, 2u) << "another slot class never reuses the entry of this one";
+  EXPECT_EQ(s1.hit - s0.hit, 1u);
+  nr_pdsch_solver_layout_cache(rnti, kSpecial, 8, ids, 256);
+  nr_pdsch_solver_layout_cache_stats(&s1);
+  EXPECT_EQ(s1.hit - s0.hit, 2u);
+  // consecutive full-TB CRC failures: the cache steps aside (the caller re-solves from every live layout)
+  SolvedGrants(rnti, c, 40, true, rng); // learn S and the table
+  SolvedGrants(rnti, c, 60, false, rng);
+  EXPECT_EQ(nr_pdsch_solver_layout_cache(rnti, kFull, 8, ids, 256), -1);
+  EXPECT_EQ(nr_pdsch_solver_layout_cache(rnti, kFull, 0, ids, 256), 5) << "max_fail 0 = never invalidate on failures";
+  nr_pdsch_solver_layout_cache_stats(&s1);
+  EXPECT_GE(s1.fail_resolve - s0.fail_resolve, 1u);
+  // a passing TB ends the failure run
+  SolvedGrants(rnti, c, 40, true, rng);
+  EXPECT_EQ(nr_pdsch_solver_layout_cache(rnti, kFull, 8, ids, 256), 5);
+  // a reset (new epoch) forgets everything
+  nr_pdsch_solver_reset();
+  EXPECT_EQ(nr_pdsch_solver_layout_cache(rnti, kFull, 8, ids, 256), -1);
 }
