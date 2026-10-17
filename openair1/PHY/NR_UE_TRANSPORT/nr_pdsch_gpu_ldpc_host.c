@@ -114,7 +114,7 @@ static tls_t *tls(uint32_t E)
 }
 
 /* nr_process_decode_segment() up to the decoder call: rate dematching into d, the decoder's int8 input l. 0 = ok. */
-static int prep_segment(nrLDPC_TB_decoding_parameters_t *tb, int r, tls_t *t, int8_t *l, int *Eout, uint8_t *Rout)
+static int prep_segment_ref(nrLDPC_TB_decoding_parameters_t *tb, int r, tls_t *t, int8_t *l, int *Eout, uint8_t *Rout)
 {
   const int Kc = tb->BG == 2 ? 52 : 68, Z = tb->Z, K = tb->K, F = tb->F;
   int E, off;
@@ -161,6 +161,66 @@ static int prep_segment(nrLDPC_TB_decoding_parameters_t *tb, int r, tls_t *t, in
   for (int i = 0, j = 0; j < ((Kc * Z) >> 4) + 1; i += 2, j++)
     pl[j] = simde_mm_packs_epi16(pv[i], pv[i + 1]);
   return 0;
+}
+
+/* ISAC_PDSCH_HOST_FAST=1 (default off): NEON deinterleave / rate-match / int8 pack, bit-identical to prep_segment_ref();
+ * =2: run both and compare (logs the first difference, uses the reference result). Returns -2 when the fast path does not apply. */
+static int prep_segment_fast(nrLDPC_TB_decoding_parameters_t *tb, int r, tls_t *t, int8_t *l, int *Eout, uint8_t *Rout)
+{
+  const int Kc = tb->BG == 2 ? 52 : 68, Z = tb->Z, K = tb->K, F = tb->F;
+  if (tb->C == 0 || tb->d_to_be_cleared != 1 || tb->rv_index >= 4 || tb->BG < 1 || tb->BG > 2)
+    return -2;
+  int E, off;
+  if (r < tb->first_rE2) {
+    *Rout = tb->R; E = tb->E; off = r * E;
+  } else {
+    *Rout = tb->R2; E = tb->E2; off = tb->first_rE2 * tb->E + (r - tb->first_rE2) * E;
+  }
+  static const uint8_t k0[2][4] = {{0, 17, 33, 56}, {0, 13, 25, 43}};
+  const uint32_t N = (tb->BG == 1) ? 66u * Z : 50u * Z;
+  const uint32_t Nref = tb->tbslbrm ? 3u * tb->tbslbrm / (2u * tb->C) : N;
+  const uint32_t Ncb = Nref < N ? Nref : N;
+  const uint32_t ind = (k0[tb->BG - 1][tb->rv_index] * Ncb / N) * Z, Foff = K - F - 2 * Z;
+  int16_t *d = tb->d + (size_t)r * Kc * Z;
+  if (Foff > Ncb || !nrhf_deinterleave(E, tb->Qm, t->e, tb->llr + off))
+    return -2;
+  *Eout = E;
+  memset(d, 0, N * sizeof(int16_t));
+  nrhf_rm_rx(d, t->e, E, ind, Ncb, Foff, F);
+  nrhf_pack(l, d, Z, K, F, lenWithCrc(tb->C, tb->A), Kc * Z);
+  return 0;
+}
+
+static int prep_segment(nrLDPC_TB_decoding_parameters_t *tb, int r, tls_t *t, int8_t *l, int *Eout, uint8_t *Rout)
+{
+  static int s_hf = -1;
+  if (s_hf < 0)
+    s_hf = getenv("ISAC_PDSCH_HOST_FAST") ? atoi(getenv("ISAC_PDSCH_HOST_FAST")) : 0;
+  if (s_hf <= 0)
+    return prep_segment_ref(tb, r, t, l, Eout, Rout);
+  const int rc = prep_segment_fast(tb, r, t, l, Eout, Rout);
+  if (rc != -2 && s_hf != 2)
+    return rc;
+  if (rc == -2)
+    return prep_segment_ref(tb, r, t, l, Eout, Rout);
+  const int Kc = tb->BG == 2 ? 52 : 68, Z = tb->Z;
+  const size_t nd = (size_t)(tb->BG == 2 ? 50 : 66) * Z; /* the cleared / accumulated part of d */
+  int8_t *sv = malloc((size_t)Kc * Z);
+  int16_t *dv = malloc((size_t)Kc * Z * sizeof(int16_t));
+  int16_t *d = tb->d + (size_t)r * Kc * Z;
+  memcpy(sv, l, (size_t)Kc * Z);
+  memcpy(dv, d, (size_t)Kc * Z * sizeof(int16_t));
+  const int rr = prep_segment_ref(tb, r, t, l, Eout, Rout);
+  if (memcmp(sv, l, (size_t)Kc * Z) || memcmp(dv, d, nd * sizeof(int16_t))) {
+    int i = 0;
+    while (i < Kc * Z && sv[i] == l[i]) i++;
+    LOG_E(PHY, "SENSING: HOST_FAST MISMATCH r %d C %u BG %u Z %d K %u F %u A %u E %u Qm %u rv %u lbrm %u first l diff at %d (fast %d ref %d), d %s\n", r,
+          tb->C, tb->BG, Z, tb->K, tb->F, tb->A, *Eout, tb->Qm, tb->rv_index, tb->tbslbrm, i, i < Kc * Z ? sv[i] : 0, i < Kc * Z ? l[i] : 0,
+          memcmp(dv, d, nd * sizeof(int16_t)) ? "DIFF" : "same");
+  }
+  free(sv);
+  free(dv);
+  return rr;
 }
 
 static inline uint32_t tb_ndec(const nrLDPC_TB_decoding_parameters_t *tb)
