@@ -33,7 +33,7 @@
 #define NR_GPU_PASS_MAX_DMRS 4 /* DM-RS symbols of a grant */
 #define NR_GPU_PASS_MAX_NL 4
 #define NR_GPU_PASS_FP32_DEMOD 2 /* nr_gpu_pass_shape_t.fp32 bit: FP32 demod instantiation */
-#define NR_GPU_PASS_MAX_SEG 32 /* segments of a segmented grant (the largest segment-count class; 32 only in the v2 split mode, ISAC_PDSCH_GPU_GRAPH_SPLIT) */
+#define NR_GPU_PASS_MAX_SEG 64 /* segments of a segmented grant (the largest segment-count class; 32 only in the v2 split mode, ISAC_PDSCH_GPU_GRAPH_SPLIT; 64 with _SEG64) */
 #define NR_GPU_PASS_MAX_SEG_FULL 16 /* the largest segment-count class of a single (v1 / non-split) graph */
 
 #ifdef __cplusplus
@@ -71,7 +71,7 @@ static inline int nr_gpu_pass_nrb_class(int nrb)
       return c[i];
   return 0;
 }
-static inline int nr_gpu_pass_nseg_class(int n) /* segmented-grant class: 1, 2, 4, 8, 16, 32; 0 = none (more segments than the largest class) */
+static inline int nr_gpu_pass_nseg_class(int n) /* segmented-grant class: 1, 2, 4, 8, 16, 32, 64; 0 = none (more segments than the largest class) */
 {
   for (int c = 1; c <= NR_GPU_PASS_MAX_SEG; c <<= 1)
     if (n >= 1 && n <= c)

@@ -945,7 +945,7 @@ class GpuPassFixture {
       c16 *e = (c16 *)P.est.host;
       const int d0 = dm_sym[0], d1 = dm_sym[1];
       memset(e, 0, P.est.bytes);
-      for (int k = 0; k < 2; k++)
+      for (int k = 0; k < ndm; k++) /* 1 or 2 DM-RS symbols (rows of the chest job) */
         for (int l = 0; l < nl; l++)
           for (int a = 0; a < NANT; a++)
             for (int sg = 0; sg < ns; sg++) {

@@ -2023,6 +2023,77 @@ TEST(GpuGraphSplit, ThirtyTwoSegmentsEqualStagePath) {
   printf("GpuGraphSplit.ThirtyTwoSegmentsEqualStagePath: %d grants, decoded %d\n", n, decoded);
   EXPECT_GE(decoded, 3) << "the clean grants should decode";
 }
+/* ISAC_PDSCH_GPU_GRAPH_SEG64: segmented grants of 33-64 segments (class 64, split only; rank 1-2 within the 1024 chest rows of a split process). This process has 256 LS rows
+ * (no split env at the FEP init), so the grants carry one DM-RS symbol: 64 x 1 x 1 x 4 = 256 rows. The split pass equals the stage path's segmented body, CRC ok and CRC fail. */
+TEST(GpuGraphSplit, SixtyFourSegmentsEqualStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  const SegCase cases[] = {
+      {"prg2 128 PRB: 64 segs", 1, 4, 128, 0, 2, 0, 0},
+      {"prg2 80 PRB: 40 segs", 1, 2, 80, 0, 2, 0, 0},
+      {"interleaved L2 120 PRB in 273: 60 segs", 1, 6, 120, 0, 0, 2, 273},
+      {"interleaved L2 + BWPStart 12 refPoint 0, 50 segs", 1, 4, 100, 0, 0, 2, 240, 12, 0},
+  };
+  GpuPassFixture::n_dm = 1;
+  int n = 0, decoded = 0;
+  for (const SegCase &c : cases) {
+    const auto sd = seg_layout(c.n, c.start, c.prg, c.interleave, c.bwp);
+    ASSERT_GT(sd.size(), 32u) << c.name;
+    ASSERT_LE(sd.size(), 64u) << c.name;
+    const int nsegc = nr_gpu_pass_nseg_class((int)sd.size());
+    ASSERT_EQ(64, nsegc) << c.name;
+    for (int corrupt : {-1, 0}) {
+      nr_gpu_pass_shape_t sh = {(uint16_t)c.n, 13, (uint16_t)c.nl, (uint16_t)c.qm, 1, 1, 1, (uint16_t)nsegc};
+      GpuPassFixture fx = GpuPassFixture::from_shape(sh, 51 + n, corrupt, &sd, c.bwp_start, c.ref_point);
+      ASSERT_TRUE(fx.tb_ok_built) << c.name;
+      fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
+      fx.shape.nrb_class = (uint16_t)nr_gpu_pass_nrb_class(c.n);
+      fx.bind();
+      fx.job->llr_out_all = 1;
+      nr_gpu_pass_shape_t w = fx.shape;
+      m.pass_split(0);
+      EXPECT_EQ(-1, m.pass_warm(&w, 0, fx.job->dj.align, fx.job->dj.want_evm)) << c.name << ": the single-graph mode has no 64-segment class";
+      m.pass_split(1);
+      ASSERT_EQ(0, m.pass_warm(&w, 0, fx.job->dj.align, fx.job->dj.want_evm)) << c.name;
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      const int rc = m.pass_try(fx.job, &g);
+      m.pass_split(0);
+      ASSERT_EQ(0, rc) << c.name << " corrupt " << corrupt;
+      ASSERT_EQ(0, fx.run_stage_path(&s));
+      const std::string what = std::string(c.name) + " nseg " + std::to_string(sd.size()) + " corrupt " + std::to_string(corrupt) + " C " + std::to_string(fx.tb.C);
+      EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+      EXPECT_EQ(s.tb_ok, g.tb_ok) << what;
+      EXPECT_EQ(s.nvar, g.nvar) << what;
+      EXPECT_EQ(0, memcmp(s.nvar_ant, g.nvar_ant, sizeof(s.nvar_ant))) << what;
+      EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+      if (!g.need_cpu) {
+        EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+        EXPECT_EQ(0, memcmp(fx.llr_pass.data(), fx.llr_ref.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs";
+      }
+      const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+      EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << what;
+      if (g.tb_ok) {
+        EXPECT_EQ(0, memcmp(g.tb, fx.tb.payload.data(), fx.tb.A / 8)) << what;
+        decoded++;
+      }
+      for (int a = 0; a < 4; a++)
+        for (int sy = 0; sy < 14; sy++)
+          ASSERT_EQ(0, memcmp(&fx.rxF_out[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], &fx.rxF_ref[2 * ((size_t)a * 14 * 4096 + (size_t)sy * 4096)], 4096 * 4))
+              << "rxdataF, ant " << a << " sym " << sy << ", " << what;
+      n++;
+    }
+  }
+  GpuPassFixture::n_dm = 2;
+  printf("GpuGraphSplit.SixtyFourSegmentsEqualStagePath: %d grants, decoded %d\n", n, decoded);
+  EXPECT_GE(decoded, 3) << "the clean grants should decode";
+  EXPECT_LT(decoded, n);
+}
 /* the production-like warm set (nr_gpu_pass_warmup's loops: DM-RS 3,2 x PRB classes x layers x code block classes x two demod variants x EVM, plus the segment classes
  * 1..32 within the chest rows) in split mode: the GPUGRAPH census says mb (instance buffers + sub-graphs) <= 1024 and execs = 4 x (C + D + L) */
 TEST(GpuGraphSplit, WarmSetFitsBudget) {

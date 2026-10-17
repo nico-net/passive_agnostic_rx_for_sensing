@@ -214,9 +214,10 @@ __global__ void k_pick(const uint8_t *snaps, const int *res, const PassBlk *pb, 
 struct Key {
   uint16_t nrb, nl, ndmrs, ncb;
   uint8_t fp32, evm, qmode, align;
-  uint8_t nseg; /* 0 = a contiguous grant (the estimate rows go straight into the estimate buffer); 1, 2, 4, 8, 16 (32: split mode) = segmented grant of up to that many segments (scratch rows + compose) */
+  uint8_t nseg; /* 0 = a contiguous grant (the estimate rows go straight into the estimate buffer); 1, 2, 4, 8, 16 (32, 64: split mode) = segmented grant of up to that many segments (scratch rows + compose) */
   uint8_t ul = 0; /* Task 7: a PUSCH pass class (nl = 1; nrb, ndmrs and ncb are its whole structure) */
   uint8_t sub = 0; /* v2 Task 3: 0 = the whole pass in one graph; SUB_C / SUB_D / SUB_L = a sub-graph, keyed by the fields it depends on only (key_sub) */
+  static_assert(NR_GPU_PASS_MAX_SEG <= 64, "pack(): the segment class takes 3 bits (1 + log2 64 = 7)");
   uint64_t pack() const
   {
     return (uint64_t)nrb | (uint64_t)nl << 9 | (uint64_t)ndmrs << 12 | (uint64_t)ncb << 15 | (uint64_t)(fp32 & 1) << 22 | (uint64_t)(fp32 >> 1) << 32 | (uint64_t)evm << 23 | (uint64_t)qmode << 24 |
