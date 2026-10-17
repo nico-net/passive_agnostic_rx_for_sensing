@@ -158,7 +158,11 @@ void nr_pusch_passive_ul_ids_current(uint16_t rnti,uint8_t nscid,uint16_t pci,
         else if (ids_chain_on() &&
                  s->failed_grants>=9 && (s->failed_grants%16)!=0)
           *data_id=(uint16_t)((s->failed_grants-9-(s->failed_grants-1)/16)%1024);
-        else *data_id=s->priors[s->trial%s->n_priors];
+        else { /* a data id is 0..1023; DL scrambling priors may be larger (DM-RS ids go to 65535): skip those, fall back to the PCI */
+          uint16_t d=pci;
+          for(int k=0;k<s->n_priors;k++) { const uint16_t c=s->priors[(s->trial+k)%s->n_priors]; if(c<=1023) {d=c;break;} }
+          *data_id=d;
+        }
       }
     }
     break;

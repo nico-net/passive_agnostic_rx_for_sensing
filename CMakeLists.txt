@@ -1112,6 +1112,9 @@ set(PHY_NR_PASSIVE_UL_SRC
   ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_ul_channel_estimation.c
   ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_freq_equalization.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ul_llr_dump.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ul_nid_rule.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c
@@ -3285,6 +3288,28 @@ if(ENABLE_TESTS)
                                   ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_tbs_tools.c)
   target_link_libraries(pdsch_cb_offline PRIVATE nr_common crc_byte UTIL ${CMAKE_DL_LIBS})
   set_target_properties(pdsch_cb_offline PROPERTIES ENABLE_EXPORTS ON) # libldpc.so resolves cpu_meas_enabled here
+  # U4 Step 0: offline 1024-n_ID brute force of ISAC_UL_LLR_DUMP files + planted-ID selfcheck (ctest)
+  add_executable(nr_ul_nid_bruteforce ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ul_nid_bruteforce.c
+                                      ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c
+                                      ${OPENAIR1_DIR}/PHY/CODING/nr_segmentation.c
+                                      ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_tbs_tools.c)
+  target_link_libraries(nr_ul_nid_bruteforce PRIVATE nr_common crc_byte UTIL m ${CMAKE_DL_LIBS})
+  set_target_properties(nr_ul_nid_bruteforce PROPERTIES ENABLE_EXPORTS ON)
+  add_dependencies(nr_ul_nid_bruteforce ldpc_orig)
+  add_dependencies(tests nr_ul_nid_bruteforce)
+  add_test(NAME test_nr_ul_nid_selfcheck COMMAND nr_ul_nid_bruteforce --selfcheck --ldpc ${CMAKE_BINARY_DIR}/libldpc_orig.so)
+  add_executable(test_nr_ul_llr_dump ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ul_llr_dump_test.cc
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ul_llr_dump.c)
+  target_include_directories(test_nr_ul_llr_dump PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_ul_llr_dump PRIVATE GTest::gtest_main m pthread)
+  add_dependencies(tests test_nr_ul_llr_dump)
+  add_test(NAME test_nr_ul_llr_dump COMMAND ./test_nr_ul_llr_dump)
+  add_executable(test_nr_ul_nid_rule ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ul_nid_rule_test.cc
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ul_nid_rule.c)
+  target_include_directories(test_nr_ul_nid_rule PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT ${OPENAIR1_DIR} ${OPENAIR_DIR})
+  target_link_libraries(test_nr_ul_nid_rule PRIVATE GTest::gtest_main m pthread)
+  add_dependencies(tests test_nr_ul_nid_rule)
+  add_test(NAME test_nr_ul_nid_rule COMMAND ./test_nr_ul_nid_rule)
 
   add_executable(test_nr_pdsch_prb_set ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_prb_set_test.cc
                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c)

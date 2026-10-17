@@ -186,7 +186,7 @@ static void apply_physical(nr_pdcch_blind_ul_result_t *g, int physical, int l0,
     g->ul_dmrs_symb_pos = (uint16_t)mask;
   }
   if (nids > 0) {
-    g->data_scrambling_id = ids[id_index];
+    if (ids[id_index] <= 1023) g->data_scrambling_id = ids[id_index]; /* n_ID is 0..1023; DL priors may be larger (DM-RS ids reach 65535) */
     if (dmrs_override) g->ul_dmrs_scrambling_id = ids[dmrs_index];
   }
   g->data_id_advance = false;

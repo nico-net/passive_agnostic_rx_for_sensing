@@ -1532,13 +1532,17 @@ static int pre_for_hyp(const len_state_t *ls, int h)
 }
 
 /* caller holds mu: build the opts of hypothesis (h, prefix k, tail t); false when it does not read `ls->len` */
-static bool trial_opts_locked(const len_state_t *ls, int h, int k, int t, int var, nr_pdcch_blind_ul_opts_t *o)
+static bool trial_opts_ap_locked(const len_state_t *ls, int h, int k, int t, int var, int addpos, nr_pdcch_blind_ul_opts_t *o)
 {
   if (h < 0 || h >= g_nhyp || k < 0 || k >= ls->npre || t < 0 || t >= ls->ntail) return false;
-  nr_ul_layout_build_opts(&ls->pre[k], &ls->tail[t], g_hyp[h].start, g_hyp[h].n, ls->k2row, cur_addpos_locked(), g_cell.pci,
+  nr_ul_layout_build_opts(&ls->pre[k], &ls->tail[t], g_hyp[h].start, g_hyp[h].n, ls->k2row, addpos, g_cell.pci,
                           g_cell.mu, g_cell.typeA_pos, o);
   apply_variant(o, var);
   return nr_pdcch_blind_dci01_size(o) == ls->len;
+}
+static bool trial_opts_locked(const len_state_t *ls, int h, int k, int t, int var, nr_pdcch_blind_ul_opts_t *o)
+{
+  return trial_opts_ap_locked(ls, h, k, t, var, cur_addpos_locked(), o);
 }
 
 /* caller holds mu: evidence slot of hypothesis e (created; the entry with the fewest passes is evicted when full) */
@@ -1656,6 +1660,86 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
   return n;
 }
 
+/* ISAC_UL_NID_BG stage B: the CRC-first hypotheses of one DCI (BWP hypothesis x tail x variant), enumerated WITHOUT booking anything. Same ranking and same
+ * grant builder as nr_ul_layout_crc_trials(), so a CRC pass found in the background carries the same tag (h, k, t, var) and is fed to the lock through
+ * nr_ul_layout_crc_verdict(). The locked BWP hypothesis leads the ranking; at most `nhyp` BWP hypotheses are walked. `first` is a cursor over the
+ * `*total` combinations; the cursor wraps. Returns the number of grants written (<= cap). */
+int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uint32_t first, int nhyp, int ap_n, nr_pdcch_blind_ul_result_t *out, int cap,
+                          uint32_t *total, uint32_t *next)
+{
+  if (total) *total = 0;
+  if (next) *next = first;
+  if (!nr_ul_layout_crc_first_enabled() || !out || cap < 1) return 0;
+  pthread_mutex_lock(&mu);
+  int li = -1;
+  for (int l = 0; l < g_nlen; l++) if (g_len[l].len == len) li = l;
+  len_state_t *ls = li >= 0 ? &g_len[li] : NULL;
+  if (!g_have_cell || !ls || !ls->fitted || g_nhyp == 0) {
+    pthread_mutex_unlock(&mu);
+    return 0;
+  }
+  int rk[NR_UL_LAYOUT_MAX_HYP], nr = 0;
+  for (int h = 0; h < g_nhyp; h++) if (pre_for_hyp(ls, h) >= 0) rk[nr++] = h;
+  const bool sib1 = nr_ul_layout_sib1_first_enabled() && g_cell.sib1_ul_size > 0;
+  for (int i = 1; i < nr; i++)
+    for (int j = i; j > 0; j--) {
+      const int a = rk[j], b = rk[j - 1];
+      const bool sa = sib1 && g_hyp[a].n == g_cell.sib1_ul_size && g_hyp[a].start == g_cell.sib1_ul_start;
+      const bool sb = sib1 && g_hyp[b].n == g_cell.sib1_ul_size && g_hyp[b].start == g_cell.sib1_ul_start;
+      if (!(sa > sb || (sa == sb && g_hyp[a].votes > g_hyp[b].votes))) break;
+      rk[j] = b; rk[j - 1] = a;
+    }
+  for (int i = 1; i < nr && g_locked_hyp >= 0; i++) /* the locked hypothesis leads */
+    if (rk[i] == g_locked_hyp) { for (int j = i; j > 0; j--) rk[j] = rk[j - 1]; rk[0] = g_locked_hyp; break; }
+  if (nhyp > 0 && nr > nhyp) nr = nhyp;
+  if (bwp_seed_on() && nr > 0 && g_cell.sib1_ul_cfg && g_hyp[rk[0]].n == g_cell.sib1_ul_size && g_hyp[rk[0]].start == g_cell.sib1_ul_start) nr = 1; /* a CONFIGURED UL BWP is certain (as in the CRC trials) */
+  const bool sweep = trial_sweep_on(), k2pair = env_on("ISAC_UL_K2_PAIR"), tdapair = env_on("ISAC_UL_TDA_PAIR");
+  uint32_t tot = 0, base[2] = {0, 0};
+  int nt = ls->ntail < 2 ? ls->ntail : 2;
+  for (int t = 0; t < nt; t++) {
+    base[t] = tot;
+    tot += (uint32_t)nr * (uint32_t)nr_ul_variant_count(sweep, k2pair, tdapair, ls->tail[t].tp) * (uint32_t)ap_n;
+  }
+  if (total) *total = tot;
+  const uint64_t gen = g_gen & NR_UL_LAYOUT_GEN_MASK;
+  int n = 0;
+  uint32_t c = 0;
+  for (; c < tot && n < cap; c++) {
+    const uint32_t ix = (first + c) % tot;
+    int t = nt - 1;
+    while (t > 0 && ix < base[t]) t--;
+    const int cnt = nr_ul_variant_count(sweep, k2pair, tdapair, ls->tail[t].tp);
+    const uint32_t r = ix - base[t];
+    const int i = (int)(r / (uint32_t)(cnt * ap_n)), v = (int)((r / (uint32_t)ap_n) % (uint32_t)cnt), ai = (int)(r % (uint32_t)ap_n);
+    const int cur_ap = cur_addpos_locked(), addpos = ai == 0 ? cur_ap : (cur_ap + ai) % 3; /* the current reading first, then the other dmrs-AdditionalPosition values */
+    int tbl, k2d, tda;
+    nr_ul_variant_get(v, sweep, k2pair, tdapair, ls->tail[t].tp, &tbl, &k2d, &tda);
+    const int var = (tbl + 1) | k2d << 3 | tda << 4;
+    const int h = rk[i], k = pre_for_hyp(ls, h);
+    nr_pdcch_blind_ul_opts_t o;
+    if (!trial_opts_ap_locked(ls, h, k, t, var, addpos, &o) || !nr_pdcch_blind_extract_01(payload, len, rnti, &o, &out[n])) continue;
+    out[n].data_scrambling_id = g_cell.pci;
+    out[n].data_id_advance = false;
+    out[n].hyp_generation = NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_TRIAL | ((uint64_t)(uint32_t)(h | k << 8 | t << 11 | var << 13) << 40) | gen;
+    n++;
+  }
+  if (next && tot) *next = (first + c) % tot;
+  pthread_mutex_unlock(&mu);
+  return n;
+}
+
+/* the background search tried `n` more candidates (data ids) under the hypothesis of this tagged grant: the CRC16 false-alarm accounting of the evidence rule counts them */
+void nr_ul_layout_trial_add(const nr_pdcch_blind_ul_result_t *g, uint32_t n)
+{
+  if (!nr_ul_layout_is_tagged(g) || !nr_ul_layout_is_trial(g) || !nr_ul_layout_crc_first_enabled()) return;
+  pthread_mutex_lock(&mu);
+  int li = -1;
+  for (int l = 0; l < g_nlen; l++) if (g_len[l].len == g->dci_length) li = l;
+  if (li >= 0 && (g->hyp_generation & NR_UL_LAYOUT_GEN_MASK) == (g_gen & NR_UL_LAYOUT_GEN_MASK))
+    ev_slot_locked(&g_len[li], (uint32_t)((g->hyp_generation >> 40) & 0x7ffff))->trials += n;
+  pthread_mutex_unlock(&mu);
+}
+
 /* caller holds mu: a TB CRC passed under (h, k, t): this layout is the lock (BWP, prefix, tail, k2/TDRA) */
 static void crc_lock_locked(int li, int h, int k, int t, int var, long slot)
 {
@@ -1745,6 +1829,29 @@ void nr_ul_layout_crc_verdict(const nr_pdcch_blind_ul_result_t *g, bool ok, uint
     }
   }
   pthread_mutex_unlock(&mu);
+}
+
+/* ISAC_UL_NID_BG: a hit of the background n_ID search that already passed its own confirmation rule (CRC24, or CRC16 with the same id in >= 2 slots) is a decisive
+ * CRC pass of the tagged hypothesis. keep_table: the hit does not tell the MCS tables apart (same modulation and code rate), so the verdict carries the lock's
+ * current table instead of the hypothesis's. */
+void nr_ul_layout_nid_verdict(const nr_pdcch_blind_ul_result_t *g, bool keep_table, uint32_t tbs_bits, long slot)
+{
+  if (!nr_ul_layout_is_tagged(g) || !nr_ul_layout_is_trial(g) || !nr_ul_layout_crc_first_enabled()) return;
+  nr_pdcch_blind_ul_result_t t = *g;
+  if (keep_table) {
+    pthread_mutex_lock(&mu);
+    int li = -1;
+    for (int l = 0; l < g_nlen; l++) if (g_len[l].len == g->dci_length) li = l;
+    if (li >= 0) {
+      const len_state_t *ls = &g_len[li];
+      uint64_t e = (g->hyp_generation >> 40) & 0x7ffff;
+      const uint64_t var = (e >> 13) & 63, cur = ls->locked ? (uint64_t)(ls->chosen_var & 7) : (uint64_t)(g_lat_var & 7);
+      e = (e & ~(63ull << 13)) | (((var & ~7ull) | cur) << 13);
+      t.hyp_generation = (g->hyp_generation & ~(0x7ffffull << 40)) | (e << 40);
+    }
+    pthread_mutex_unlock(&mu);
+  }
+  nr_ul_layout_crc_verdict(&t, true, tbs_bits, 2, 2, slot);
 }
 
 /* ------------------------------------------------------------------ ISAC_UL_LOCK_PRIOR_SEARCH=1 (ULPRIOR)

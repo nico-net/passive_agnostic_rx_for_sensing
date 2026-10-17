@@ -165,4 +165,6 @@ void nr_pusch_passive_queue_stop(void);
 }
 #endif
 
+/* ISAC_UL_NID_BG_IQ: copy of the slot after `abs`, captured with the pool snapshot of `abs` (false when absent) */
+bool nr_pusch_passive_queue_pool_copy_next(long abs, int nant, c16_t *const *dst, uint32_t cap, uint32_t *origin, uint32_t *len);
 #endif // NR_PUSCH_PASSIVE_QUEUE_H

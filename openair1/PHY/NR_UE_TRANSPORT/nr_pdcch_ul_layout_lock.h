@@ -153,6 +153,12 @@ bool nr_ul_layout_crc_first_enabled(void);
  * book as ordinary PUSCH jobs; returns n (0 = none; at most one DCI per slot, small MCS only). */
 int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_t payload,
                             const nr_ul_layout_cell_t *cell, nr_pdcch_blind_ul_result_t *out, int cap);
+/* ISAC_UL_NID_BG stage B: the CRC-first hypotheses of one DCI, enumerated without booking (ap_n = 1: the current dmrs-AdditionalPosition reading only, 3: all three values; cursor `first` over *total combinations, *next = the cursor after the last one examined, at most nhyp BWP
+ * hypotheses); tagged like the trials, so nr_ul_layout_crc_verdict() accepts their verdicts. nr_ul_layout_trial_add(): n more candidates were tried under a tagged grant's hypothesis. */
+int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uint32_t first, int nhyp, int ap_n, nr_pdcch_blind_ul_result_t *out, int cap,
+                          uint32_t *total, uint32_t *next);
+void nr_ul_layout_trial_add(const nr_pdcch_blind_ul_result_t *g, uint32_t n);
+void nr_ul_layout_nid_verdict(const nr_pdcch_blind_ul_result_t *g, bool keep_table, uint32_t tbs_bits, long slot); /* a confirmed n_ID hit = decisive CRC pass of the tagged hypothesis */
 /* PUSCH worker: TB CRC verdict of a tagged (locked or trial) grant. */
 void nr_ul_layout_crc_result(const nr_pdcch_blind_ul_result_t *g, bool ok);
 /* ISAC_UL_LOCK_CRC_GUARD=1 (default off, needs CRC_FIRST): a CRC16 pass (TBS <= 3824 bits) is a false pass with p = 2^-16, so it only

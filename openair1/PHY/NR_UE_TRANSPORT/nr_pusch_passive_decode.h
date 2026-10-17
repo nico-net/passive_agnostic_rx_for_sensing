@@ -72,6 +72,9 @@ typedef struct {
   int      n_segments;    ///< transport-block segments (C)
   int      segments_ok;   ///< of which the CRC passed. 0 vs C-1 are different failures.
   const char *reject_reason; ///< non-NULL when status != OK
+  uint16_t hyp_n, hyp_s; ///< UL BWP size@start the attempt decoded under (0 on an early reject)
+  uint8_t tbl;            ///< MCS table used
+  bool nid_conf;          ///< ISAC_UL_NID_BG confirmed entry applied
 } nr_pusch_passive_out_t;
 
 /// Independent decode contexts. Each holds its own minimal PHY_VARS_gNB -- rxdataF ring, pusch_vars,

@@ -57,6 +57,7 @@ extern uint64_t *nr_ss_gpu_ptr(void);
 #include "nr_pdcch_ul_config_disc.h"
 #include "nr_pdcch_ul_layout_lock.h"
 #include "nr_pusch_passive_decode.h"
+#include "nr_pusch_ul_disc.h" // ISAC_UL_PROBE_TA: the per-RNTI timing tracker
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // nr_get_Qm_ul
 
 /* The RF producer's own position, published in executables/nr-ue.c immediately BEFORE nrue_ru_read()
@@ -84,6 +85,9 @@ typedef struct {
   uint32_t origin, len;
 } ulq_snap_t;
 static ulq_snap_t g_pool[ULQ_POOL_MAX];
+/* ISAC_UL_NID_BG_IQ=1: the capture thread also copies the slot AFTER each booked slot (hypotheses with k2 + 1 read it); same index as g_pool */
+static ulq_snap_t g_pool2[ULQ_POOL_MAX];
+static int g_snap_next;
 static int g_pool_refs[ULQ_POOL_MAX]; /* under g_lock */
 static int g_pool_n;
 static pthread_t g_cap_thread;
@@ -361,7 +365,13 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       uint8_t l0 = 2;
       const int nh = nr_ul_layout_probe_plan(&job.grant, p0, np, NR_UL_LAYOUT_MAX_HYP, &nid, &l0);
       nr_ul_layout_probe_res_t r;
-      if (nh > 0 && nr_pusch_passive_layout_probe(ue, idx, (uint8_t)job.nr_slot_rx, job.ta_offset_samples, job.fo_hz, nh,
+      /* ISAC_UL_PROBE_TA=1: the DM-RS probes of an RNTI use the advance its decode's timing search tracked, not the fixed N_TA_offset */
+      int32_t probe_ta = job.ta_offset_samples;
+      if (getenv("ISAC_UL_PROBE_TA") && !strcmp(getenv("ISAC_UL_PROBE_TA"), "1")) {
+        bool tracked = false;
+        probe_ta = nr_pusch_ul_disc_timing_seed(job.grant.rnti, job.ta_offset_samples, (long)job.absolute_slot, &tracked);
+      }
+      if (nh > 0 && nr_pusch_passive_layout_probe(ue, idx, (uint8_t)job.nr_slot_rx, probe_ta, job.fo_hz, nh,
                                                   p0, np, nid, l0, &r))
         nr_ul_layout_probe_feed(&job.grant, job.absolute_slot, &r);
       if (pipeline) nr_pusch_passive_decode_capture_release(idx);
@@ -642,10 +652,19 @@ static void *ulq_capture_thread(void *arg)
     g_pool_refs[b] = 1; /* this thread's hold during the copy */
     g_pool[b].abs = -1; /* not shareable by enqueue until the copy is complete */
     g_pool[b].len = 0;
+    g_pool2[b].abs = -1;
+    g_pool2[b].len = 0;
     pthread_mutex_unlock(&g_lock);
-    uint32_t origin = 0, len = 0;
+    uint32_t origin = 0, len = 0, origin2 = 0, len2 = 0;
     const bool ok = nr_pusch_passive_snapshot_copy(ue, (uint8_t)slot, (uint64_t)abs, g_pool[b].iq, cap, &origin, &len);
+    bool ok2 = false;
+    for (int w = 0; ok && g_snap_next && w < 40; w++) { /* the next slot is produced 0.5 ms after the target slot: wait for it (<= 4 ms), once it exists copy once */
+      if (atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_acquire) < abs + 1) { usleep(100); continue; }
+      ok2 = nr_pusch_passive_snapshot_copy(ue, (uint8_t)((slot + 1) % ue->frame_parms.slots_per_frame), (uint64_t)(abs + 1), g_pool2[b].iq, cap, &origin2, &len2);
+      break;
+    }
     pthread_mutex_lock(&g_lock);
+    if (ok2) { g_pool2[b].abs = abs + 1; g_pool2[b].origin = origin2; g_pool2[b].len = len2; }
     g_pool[b].abs = abs;
     g_pool[b].origin = origin;
     g_pool[b].len = len;
@@ -655,6 +674,26 @@ static void *ulq_capture_thread(void *arg)
   }
   pthread_mutex_unlock(&g_lock);
   return NULL;
+}
+
+/* ISAC_UL_NID_BG stage B: a private copy of the slot AFTER `abs` (hypotheses with k2 + 1), taken by the capture thread together with the pool snapshot of
+ * `abs`. The copy runs without g_lock under a reference. false = not captured (or larger than cap). */
+bool nr_pusch_passive_queue_pool_copy_next(long abs, int nant, c16_t *const *dst, uint32_t cap, uint32_t *origin, uint32_t *len)
+{
+  int b = -1;
+  pthread_mutex_lock(&g_lock);
+  for (int i = 0; g_snap_next && i < g_pool_n; i++)
+    if (g_pool[i].abs == abs && g_pool2[i].abs == abs + 1 && g_pool2[i].len > 0 && g_pool2[i].len <= cap) { b = i; break; }
+  if (b >= 0) g_pool_refs[b]++;
+  pthread_mutex_unlock(&g_lock);
+  if (b < 0) return false;
+  for (int a = 0; a < nant && a < 4; a++) memcpy(dst[a], g_pool2[b].iq[a], (size_t)g_pool2[b].len * sizeof(c16_t));
+  *origin = g_pool2[b].origin;
+  *len = g_pool2[b].len;
+  pthread_mutex_lock(&g_lock);
+  g_pool_refs[b]--;
+  pthread_mutex_unlock(&g_lock);
+  return true;
 }
 
 /* nr_pusch_passive_queue_start: starts the passive PUSCH decode pool: sizes the ring (depth clamped to [2, MAX]) and launches n_consumers consumer threads at SCHED_OTHER priority 50, below the RT receive thread.
@@ -712,6 +751,7 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   g_spare_rescue = ulq_env("ISAC_UL_SPARE_RESCUE", 0) == 1;
   g_budget_pct = ulq_env("ISAC_UL_CPU_BUDGET_PCT", 0);
   g_pool_n = 0;
+  g_snap_next = ulq_env("ISAC_UL_NID_BG", 0) == 1 && ulq_env("ISAC_UL_NID_BG_IQ", 0) == 1;
   if (nr_pusch_passive_pipeline_enabled() && ulq_env("ISAC_UL_SNAP_POOL", 0) == 1) {
     /* Distinct slots alive at once <= queued real jobs + one per consumer + the one being copied. */
     const uint32_t len = nr_pusch_passive_snapshot_len(&ue->frame_parms);
@@ -723,6 +763,10 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
       for (int a = 0; a < nant; a++) {
         if (!g_pool[b].iq[a]) g_pool[b].iq[a] = malloc16_clear((size_t)len * sizeof(c16_t));
         okb &= g_pool[b].iq[a] != NULL;
+        if (g_snap_next) {
+          if (!g_pool2[b].iq[a]) g_pool2[b].iq[a] = malloc16_clear((size_t)len * sizeof(c16_t));
+          if (!g_pool2[b].iq[a]) g_snap_next = 0;
+        }
       }
       if (!okb) break;
       g_pool_refs[b] = 0;
