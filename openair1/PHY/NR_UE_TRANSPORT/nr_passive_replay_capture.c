@@ -108,6 +108,7 @@ static void *write_capture(void *unused)
  */
 void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
 {
+  /* DEFERRED/DO NOT USE: ISAC_PASSIVE_REPLAY_CAPTURE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *path=getenv("ISAC_PASSIVE_REPLAY_CAPTURE");
   if (!path || !*path) return;
   const NR_DL_FRAME_PARMS *fp=&ue->frame_parms;
@@ -122,6 +123,7 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
   }
   memset(iq,0,bytes); /* Prefault before RF start, never page in 157 MB at capture time. */
   header->magic=UINT64_C(0x314951525041534e);
+  /* DEFERRED/DO NOT USE: ISAC_PASSIVE_REPLAY_FAILURES not in the frozen config t26zE (2026-10-18); slated for removal */
   header->version=getenv("ISAC_PASSIVE_REPLAY_FAILURES")?4:3;
   header->header_bytes=sizeof(*header);
   header->job_bytes=sizeof(nr_pdsch_passive_job_t); header->fp_bytes=sizeof(*fp);
@@ -315,7 +317,9 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
   if (h->n_ul<8) printf("UL-SEARCH UNRESOLVED: fewer than eight raw observations; no UL convergence claim\n");
   printf("REPLAY %s: identical DL controls=%u failed=%u raw UL=%u; no radio opened\n",
          failed?"VOID":"PASS",matches,failed,h->n_ul);
+  /* DEFERRED/DO NOT USE: ISAC_PASSIVE_REPLAY_UL_PROBE not in the frozen config t26zE (2026-10-18); slated for removal */
   if (!failed && getenv("ISAC_PASSIVE_REPLAY_UL_PROBE")) replay_probe_ul(ue,h,samples);
+  /* DEFERRED/DO NOT USE: ISAC_PASSIVE_REPLAY_UL_CONFIG not in the frozen config t26zE (2026-10-18); slated for removal */
   if (!failed && getenv("ISAC_PASSIVE_REPLAY_UL_CONFIG")) replay_ul_config(ue,h,samples);
   free(rxF); free(samples); free(h);
   return failed?2:0;

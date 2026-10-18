@@ -173,21 +173,26 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
   uint64_t channels = integer_env("ISAC_RAW_IQ_CHANNELS");
   uint64_t shift = integer_env("ISAC_RAW_IQ_SHIFT");
   AssertFatal(channels >= 1 && channels <= 8 && shift <= 15, "RAW_IQ_VOID invalid channel/shift\n");
+  /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_DIRECTORY not in the frozen config t26zE (2026-10-18); slated for removal */
   int ret = raw_iq_open(&s->source, getenv("ISAC_RAW_IQ_DIRECTORY"),
                        integer_env("ISAC_RAW_IQ_SAMPLES"), integer_env("ISAC_RAW_IQ_FIRST_TICK"),
                        channels, integer_env("ISAC_RAW_IQ_RATE"), integer_env("ISAC_RAW_IQ_CENTER"), shift);
   AssertFatal(ret == 0, "RAW_IQ_VOID cannot open exact saved IQ: %s\n", strerror(errno));
   char *end = NULL;
+  /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_SPEED not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *speed = getenv("ISAC_RAW_IQ_SPEED");
   s->speed = speed ? strtod(speed, &end) : 0;
   AssertFatal(speed && end && !*end && isfinite(s->speed) && s->speed > 0 && s->speed <= 1,
               "RAW_IQ_VOID invalid pacing speed\n");
+  /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_DECIM not in the frozen config t26zE (2026-10-18); slated for removal */
   { const char *dv = getenv("ISAC_RAW_IQ_DECIM"); s->decim = dv ? (unsigned)atoi(dv) : 1;
     AssertFatal(s->decim >= 1 && s->decim <= 4 && channels <= 8, "RAW_IQ_VOID invalid ISAC_RAW_IQ_DECIM\n");
     if (s->decim > 1) decim_init(s); }
+  /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_WANDER not in the frozen config t26zE (2026-10-18); slated for removal */
   { const char *w = getenv("ISAC_RAW_IQ_WANDER"); int lo, hi;
     if (w && sscanf(w, "%d:%d", &lo, &hi) == 2 && lo >= 0 && hi >= lo) {
       s->wander_lo = lo; s->wander_hi = hi; s->wander_on = 1; s->wander_rng = 12345u;
+      /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_WANDER_UNTIL_S not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *u = getenv("ISAC_RAW_IQ_WANDER_UNTIL_S"); s->wander_until = u ? (uint64_t)(atof(u) * s->source.rate) : 0;
       fprintf(stderr, "RAW_IQ_WANDER armed +-[%d,%d] samples per frame until_s=%s\n", lo, hi, u ? u : "end");
     } }
@@ -206,12 +211,16 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
   {
     /* ISAC_RAW_IQ_GAP_AT_S / ISAC_RAW_IQ_GAP_S: inject one stream discontinuity (seconds into
      * the recording, seconds skipped). Replay-only; there is no live-radio equivalent. */
+    /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_GAP_AT_S not in the frozen config t26zE (2026-10-18); slated for removal */
+    /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_GAP_S not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *gat = getenv("ISAC_RAW_IQ_GAP_AT_S"), *glen = getenv("ISAC_RAW_IQ_GAP_S");
     if (gat && glen && atof(gat) > 0 && atof(glen) > 0) {
       s->source.gap_at  = (uint64_t)(atof(gat)  * s->source.rate);
       s->source.gap_len = (uint64_t)(atof(glen) * s->source.rate);
       fprintf(stderr, "RAW_IQ_GAP armed at_s=%s len_s=%s\n", gat, glen);
     }
+    /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_GAP2_AT_S not in the frozen config t26zE (2026-10-18); slated for removal */
+    /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_GAP2_S not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *gat2 = getenv("ISAC_RAW_IQ_GAP2_AT_S"), *glen2 = getenv("ISAC_RAW_IQ_GAP2_S");
     if (gat2 && glen2 && atof(gat2) > 0 && atof(glen2) > 0) {
       s->source.gap2_at = (uint64_t)(atof(gat2) * s->source.rate);

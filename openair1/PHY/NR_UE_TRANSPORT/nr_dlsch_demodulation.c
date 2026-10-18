@@ -248,6 +248,7 @@ int nr_dlsch_csi_rb_extent(void)
 {
   static int s = -1;
   if (s < 0) /* CSI-FULL: ISAC_CSIRS_FULL=1 exports per-cell 52-RB TRS sets, which need their extent */
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_CSI_RB_EXTENT not in the frozen config t26zE (2026-10-18); slated for removal */
     s = (getenv("ISAC_PDSCH_CSI_RB_EXTENT") && atoi(getenv("ISAC_PDSCH_CSI_RB_EXTENT")))
         || atoi(getenv("ISAC_CSIRS_FULL") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : "0")) ? 1 : 0;
   return nr_dlsch_csi_extent_override >= 0 ? nr_dlsch_csi_extent_override : s;
@@ -835,6 +836,7 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
     static int s_cal = -1;
     static _Atomic unsigned long s_cn, s_tn, s_tns;
     static double s_cs, s_cs2;
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_MMSE_EXACT_CAL not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_cal < 0) { const char *e = getenv("ISAC_PDSCH_MMSE_EXACT_CAL"); s_cal = e ? atoi(e) : 0; }
     struct timespec t0;
     if (s_cal)
@@ -849,6 +851,7 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
      * too high still decodes 15 of 25 rank-4 grants in the float model, 10x too low 8 of 25, zero forcing 0).
      * MMSE3GPU: the whole symbol is nr_mmse3_symbol() (nr_mmse_exact.h), which the GPU reproduces bit for bit. */
     static double s_nvdb = -999.0;
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_MMSE_EXACT_NVAR_DB not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_nvdb < -998.0) { const char *e = getenv("ISAC_PDSCH_MMSE_EXACT_NVAR_DB"); s_nvdb = e ? atof(e) : 21.0; }
     const int16_t *yr[4], *hr[16];
     int16_t *zr[4], *mr[4], *mbr[4], *mrr[4];
@@ -934,6 +937,7 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
      * for the weak layer. A common gain 2^k, k = clamp(N - shift, 0, 12) (one value per grant: shift is per grant), scales z, mag, magb and magr
      * of ALL layers alike, so only the rounding grid changes, never the layer weighting. */
     static int s_g2 = -1;
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_MMSE2_GAIN not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_g2 < 0) s_g2 = getenv("ISAC_PDSCH_MMSE2_GAIN") ? atoi(getenv("ISAC_PDSCH_MMSE2_GAIN")) : 0;
     const int gk = s_g2 > 0 ? (s_g2 - shift < 0 ? 0 : s_g2 - shift > 12 ? 12 : s_g2 - shift) : 0;
     const double mmse2_gain = (double)(1 << gk);
@@ -1023,6 +1027,7 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
    * 273-PRB rank-4 slot. */
   static int s_mmse_float = -1;
   if (s_mmse_float < 0)
+    /* DEFERRED/DO NOT USE: ISAC_MMSE_FLOAT not in the frozen config t26zE (2026-10-18); slated for removal */
     s_mmse_float = (getenv("ISAC_MMSE_FLOAT") != NULL) ? atoi(getenv("ISAC_MMSE_FLOAT")) : 0;
   if (nr_dlsch_eq_override >= 0 ? nr_dlsch_eq_override == 1 : s_mmse_float > 0) {
     const int16_t qa = (mod_order == 4) ? QAM16_n1 : (mod_order == 6) ? QAM64_n1 : (mod_order == 8) ? QAM256_n1 : 0;
@@ -1084,6 +1089,7 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
         static __thread unsigned long s_mdn = 0;
         static __thread double s_err[4], s_pow[4];
         if (s_md < 0)
+          /* DEFERRED/DO NOT USE: ISAC_MMSE_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
           s_md = (getenv("ISAC_MMSE_DIAG") != NULL) ? 1 : 0;
         if (s_md && !singular && mod_order >= 4) {
           const int lev = 1 << (mod_order / 2 - 1); // 16QAM: 2 levels per axis, 64: 4, 256: 8
@@ -1377,6 +1383,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     t_mrc_mode = (e != NULL) ? atoi(e) : 0;
     t_mrc_env = t_mrc_mode;
     if (nr_dlsch_mrc_mode_override >= 0) t_mrc_mode = nr_dlsch_mrc_mode_override;
+    /* DEFERRED/DO NOT USE: ISAC_RX_BRANCH_MIN_DB not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *d = getenv("ISAC_RX_BRANCH_MIN_DB");
     if (d != NULL) {
       t_mrc_min_db = atof(d);
@@ -1401,6 +1408,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   bool do_ml = ue->do_ml;
   { /* ISAC_RX_ML_2L=1 (T26d): joint ML LLRs for 2 layers (Qm <= 6) instead of MMSE; per grant via ISAC_RX_EQ_AB */
     static int s_ml = -1;
+    /* DEFERRED/DO NOT USE: ISAC_RX_ML_2L not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_ml < 0) s_ml = getenv("ISAC_RX_ML_2L") ? atoi(getenv("ISAC_RX_ML_2L")) : 0;
     if (nr_dlsch_eq_override >= 0) do_ml = nr_dlsch_eq_override == 2;
     else if (s_ml) do_ml = true;
@@ -1429,6 +1437,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
      * fixed-point adjugate path disagrees with the float solution on 16-18 % of the signs at rank 3 (replay b, DECODEDIAG)
      * and its det(G) ~ (|h|^2 >> shift)^4 depends on the signal level (TIM 3-layer MCS 0 at 10-12 dB: 0/154 OTA). */
     static int s_nl34q = -1;
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_MMSE2_NL34_QPSK not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_nl34q < 0) { const char *e = getenv("ISAC_PDSCH_MMSE2_NL34_QPSK"); s_nl34q = e ? atoi(e) : 0; }
     if (nl >= 3 && (qam_mode == 1 || (dlsch->cw_info.qamModOrder == 2 && !(s_nl34q && qam_mode == 2) && qam_mode != 3))) qam_mode = 0;
     if (nr_dlsch_eq_override == 1) qam_mode = 0; /* the ISAC_RX_EQ_AB float arm keeps its own path */
@@ -1646,6 +1655,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
          * a noisy branch has a large |h|^2 estimate (noise included) and was being selected, which also shows up as
          * a QAM amplitude ratio kappa << 1 (signal part of h* y small against the noise-inflated |h|^2). */
         static int s_bsnr = -1;
+        /* DEFERRED/DO NOT USE: ISAC_RX_BEST_BY_SNR not in the frozen config t26zE (2026-10-18); slated for removal */
         if (s_bsnr < 0) s_bsnr = getenv("ISAC_RX_BEST_BY_SNR") && atoi(getenv("ISAC_RX_BEST_BY_SNR")) ? 1 : 0;
         if (s_bsnr) {
           double bq = -1.0;
@@ -1718,6 +1728,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
        * 0 (electrically identical in theory -- a zeroed channel estimate contributes exactly zero
        * to both the MRC signal and gain sums) reads 87.7 % on the SAME transport blocks, and static
        * reading of the zeroing/shift/accumulate path found no discrepancy. */
+      /* DEFERRED/DO NOT USE: ISAC_SUBSET_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
       if (getenv("ISAC_SUBSET_DIAG") != NULL) {
         LOG_I(PHY,
               "SENSING: SUBSETDIAG forced_mask=%d forced_branch=%d mode=%d nb_rx=%d rx_index=%d "
@@ -1735,6 +1746,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         static __thread int s_rxb = -1;
         static __thread unsigned long s_rxb_n = 0;
         if (s_rxb < 0) {
+          /* DEFERRED/DO NOT USE: ISAC_RX_BRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
           s_rxb = (getenv("ISAC_RX_BRANCH") != NULL) ? atoi(getenv("ISAC_RX_BRANCH")) : 0;
         }
         /* ISAC_RX_BRANCH=2 prints EVERY transport block, not 1 in 500. A 1-in-500 sample of
@@ -1771,6 +1783,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
      * per-RB means rather than per-RE so one noisy RE cannot steal a bit from the whole grant. */
     static int s_l2_peak = -1;
     if (s_l2_peak < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_L2MAXH_PEAK not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_L2MAXH_PEAK");
       s_l2_peak = (e != NULL && atoi(e) != 0) ? 1 : 0;
     }
@@ -1834,6 +1847,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
          * |h_a|^2 >> shift biases the QAM thresholds low (EVMGRANT kappa 1.17 mean / 2.4-2.9 at 6-13 dB on QAM MRC grants
          * vs 1.00-1.04 single branch). The float DD-SNR sees none of it. Balanced branches: unchanged. GPU: nrd_decide(). */
         static int s_shift_sum = -1;
+        /* DEFERRED/DO NOT USE: ISAC_RX_MRC_SHIFT_SUM not in the frozen config t26zE (2026-10-18); slated for removal */
         if (s_shift_sum < 0) { const char *e = getenv("ISAC_RX_MRC_SHIFT_SUM"); s_shift_sum = e ? atoi(e) : 0; }
         if (s_shift_sum)
           contributing = nr_mrc_shift_branches(avg, t_mrc_live_mask, nbRx, avgs);
@@ -1856,6 +1870,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
        * primitive as nr_channel_level() so the two scale alike. */
       static int s_l2_hr = -1;
       if (s_l2_hr < 0) {
+        /* DEFERRED/DO NOT USE: ISAC_L2MAXH_HEADROOM not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_L2MAXH_HEADROOM");
         s_l2_hr = (e != NULL && atoi(e) != 0) ? 1 : 0;
       }
@@ -1886,6 +1901,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     {
       static int s_l2d = -9999;
       if (s_l2d == -9999) {
+        /* DEFERRED/DO NOT USE: ISAC_L2MAXH_DELTA not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_L2MAXH_DELTA");
         s_l2d = (e != NULL) ? atoi(e) : 0;
       }
@@ -1914,6 +1930,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
       static __thread int s_l2 = -1;
       static __thread unsigned long s_l2n = 0;
       if (s_l2 < 0)
+        /* DEFERRED/DO NOT USE: ISAC_RX_BRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
         s_l2 = (getenv("ISAC_RX_BRANCH") != NULL) ? 1 : 0;
       if (s_l2 && (s_l2n++ % 500) == 0)
         LOG_I(PHY, "SENSING: L2MAXH log2_maxh=%d avgs=%d nl=%d mrc_nb_rx=%d Qm=%u\n",
@@ -2027,7 +2044,9 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     static int s_irc = -1;
     static double s_shrink = 0.3;
     if (s_irc < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_RX_IRC not in the frozen config t26zE (2026-10-18); slated for removal */
       s_irc = getenv("ISAC_RX_IRC") ? atoi(getenv("ISAC_RX_IRC")) : 0;
+      /* DEFERRED/DO NOT USE: ISAC_RX_IRC_SHRINK not in the frozen config t26zE (2026-10-18); slated for removal */
       if (getenv("ISAC_RX_IRC_SHRINK")) s_shrink = atof(getenv("ISAC_RX_IRC_SHRINK"));
     }
     const int s_irc_env = s_irc;
@@ -2166,6 +2185,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   int8_t *decode_ref_sign = NULL;
   static _Atomic int decode_diag = -1;
   if (decode_diag < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_DECODE_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDSCH_DECODE_DIAG");
     decode_diag = e && atoi(e) != 0;
   }
@@ -2397,6 +2417,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
    * kappa = mean(|Re z|,|Im z|) / mean(mag_a) rescales the thresholds per symbol (kappa also logged via EVMGRANT). */
   if (nl == 1 && dlsch->cw_info.qamModOrder > 2 && nb_re_pdsch >= 24) {
     static int s_agc = -1;
+    /* DEFERRED/DO NOT USE: ISAC_RX_QAM_AGC not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_agc < 0) s_agc = getenv("ISAC_RX_QAM_AGC") ? atoi(getenv("ISAC_RX_QAM_AGC")) : 0;
     const c16_t *z = p_rxComp[0];
     const c16_t *ma = dl_ch_mag[symbol][0];

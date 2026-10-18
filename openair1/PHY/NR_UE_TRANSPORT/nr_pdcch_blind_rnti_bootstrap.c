@@ -247,8 +247,10 @@ static int simulation_candidate_rntis(uint16_t *out, int max_out)
   static int count;
   if (!initialized) {
     initialized = 1;
+    /* DEFERRED/DO NOT USE: ISAC_SIM_CANDIDATE_RNTIS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_SIM_CANDIDATE_RNTIS");
     if (e == NULL)
+      /* DEFERRED/DO NOT USE: ISAC_SIM_CANDIDATE_RNTI not in the frozen config t26zE (2026-10-18); slated for removal */
       e = getenv("ISAC_SIM_CANDIDATE_RNTI"); /* backward-compatible single value */
     while (e != NULL && *e != '\0' && count < NR_PDCCH_BLIND_MAX_UE) {
       char *end = NULL;

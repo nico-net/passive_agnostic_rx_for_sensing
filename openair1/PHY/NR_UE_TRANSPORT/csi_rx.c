@@ -1046,6 +1046,7 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
   {
     static int audit = -1;
     if (audit < 0)
+      /* DEFERRED/DO NOT USE: ISAC_TSYNC_AUDIT not in the frozen config t26zE (2026-10-18); slated for removal */
       audit = (getenv("ISAC_TSYNC_AUDIT") != NULL) ? 1 : 0;
     if (audit && nof_re >= 2) {
       const int step = (int)isac_k[1] - (int)isac_k[0];
@@ -1417,6 +1418,7 @@ void nr_ue_csi_rs_sensing_capture_shifted(PHY_VARS_NR_UE *ue,
   {
     static int s_cd = -1;
     if (s_cd < 0)
+      /* DEFERRED/DO NOT USE: ISAC_CSI_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
       s_cd = (getenv("ISAC_CSI_DIAG") != NULL) ? 1 : 0;
     if (s_cd) {
       double pw[4] = {0, 0, 0, 0};

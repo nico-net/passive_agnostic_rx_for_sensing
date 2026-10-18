@@ -661,9 +661,11 @@ int nr_pusch_channel_estimation(PHY_VARS_gNB *gNB,
     int peak_power[nb_antennas_rx];
     for (int a=0;a<nb_antennas_rx;++a) peak_power[a]=delay_arr[a].delay_max_val;
     const int keep=nr_ulsch_passive_branch_selection(true,nb_antennas_rx,
+                       /* DEFERRED/DO NOT USE: ISAC_UL_RX_BRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
                        getenv("ISAC_UL_RX_BRANCH"),getenv("ISAC_RX_MRC_MODE"));
     const int best=nr_ulsch_passive_timing_branch(nb_antennas_rx,keep,peak_power);
     if (best>=0) *delay=delay_arr[best];
+    /* DEFERRED/DO NOT USE: ISAC_UL_TIMING_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     if (getenv("ISAC_UL_TIMING_DIAG"))
       LOG_I(PHY,"UL-TIMING rnti=%04x slot=%u sym=%u branch=%d delay=%d peak=%d\n",
             pusch_pdu->rnti,Ns,symbol,best,delay->est_delay,delay->delay_max_val);

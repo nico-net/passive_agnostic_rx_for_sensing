@@ -166,6 +166,7 @@ static bool map_staging_enabled(void)
 {
   /* Explicit 0 means exhaustive immediately; explicit 1 deliberately limits the search to the
    * pass-0 prior. Only the default staged mode promises a later exhaustive lap. */
+  /* DEFERRED/DO NOT USE: ISAC_MAP_PASS0_ONLY not in the frozen config t26zE (2026-10-18); slated for removal */
   return getenv("ISAC_MAP_PASS0_ONLY") == NULL;
 }
 
@@ -393,6 +394,7 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
    * that makes a scan cover the wrong geometry and report no error. Measured on Swisscom PCI 382:
    * 450+ RARs decoded at 100 % CRC, TC-RNTIs harvested, and ZERO Msg4 DCIs ever accepted. */
   {
+    /* DEFERRED/DO NOT USE: ISAC_CSS0_ALS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_CSS0_ALS");
     int a[4];
     if (e != NULL && sscanf(e, "%d:%d:%d:%d", &a[0], &a[1], &a[2], &a[3]) == 4) {
@@ -1186,6 +1188,7 @@ bool nr_pdcch_discovered_cover_banked(int nid, int sym, int dur, int rb, int gro
  *   durations interleaved. Combinations the group count cannot satisfy are skipped at dwell start (needs the carrier width). */
 static bool nr_disc_enum_enabled(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_DISC_ENUM not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_PDCCH_DISC_ENUM");
   return e && strcmp(e, "1") == 0;
 }
@@ -1216,6 +1219,8 @@ static int disc_enum_one(disc_coreset_t *line, int n, int max, int nid, int sym,
 }
 static int disc_enum_append_all(disc_coreset_t *line, int n, int max, int ncov)
 {
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_DISC_ENUM_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_DISC_ENUM_NIDS not in the frozen config t26zE (2026-10-18); slated for removal */
   const int cap = disc_env_int("ISAC_PDCCH_DISC_ENUM_MAX", 24, 1, 64), nids = disc_env_int("ISAC_PDCCH_DISC_ENUM_NIDS", 4, 1, 16);
   int seen[16], ns = 0;
   bool have_pci = false, pci_done = false;
@@ -1346,6 +1351,7 @@ static bool discovered_additional_poll(void)
     FILE *m = fmemopen(text, used, "r");
     return m && nr_pdcch_discovered_enabled() && !s_add_disc.active ? discovered_load_stream(m) : (m && fclose(m), false);
   }
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_DISCOVERED_FILE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *path = getenv("ISAC_PDCCH_DISCOVERED_FILE");
   if (!path || !*path) path = "/tmp/coresets_discovered.txt";
   struct stat st;
@@ -1484,6 +1490,7 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
  *   Caller: nr_pdcch_discovered_step_ex(). */
 bool nr_pdcch_dwell_adaptive_enabled(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_DWELL_ADAPTIVE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_PDCCH_DWELL_ADAPTIVE");
   return e && strcmp(e, "1") == 0;
 }
@@ -1524,6 +1531,7 @@ void nr_pdcch_discovered_step(uint64_t token, uint64_t slot)
 /* nr_pdcch_no_fake_footprint_enabled: ISAC_PDCCH_NO_FAKE_FOOTPRINT=1 (ACQ-ROBUST, default off). Caller: techA_commit_apply(). */
 bool nr_pdcch_no_fake_footprint_enabled(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_NO_FAKE_FOOTPRINT not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_PDCCH_NO_FAKE_FOOTPRINT");
   return e && strcmp(e, "1") == 0;
 }
@@ -1754,6 +1762,7 @@ static int al1_cover_enabled(void)
 {
   static int v = -1;
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_AL1_COVER not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_AL1_COVER");
     v = (e != NULL && atoi(e) == 1) ? 1 : 0;
   }
@@ -1784,6 +1793,7 @@ int nr_pdcch_blind_lookahead_count(void)
 {
   static int s_k = -1;
   if (s_k < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_EXTENT_BATCH not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_EXTENT_BATCH");
     int v = e ? atoi(e) : 1;
     if (v < 1) v = 1;
@@ -1812,6 +1822,7 @@ static int lane_map_count(int ext, nr_pdcch_map_cand_t *out)
   const int full_n = nr_pdcch_map_candidates(span_rb, g_cfg.coreset_duration,
                                              g_cfg.coreset_pdcch_dmrs_scrambling_id,
                                              out, NR_PDCCH_MAP_MAX_CAND);
+  /* DEFERRED/DO NOT USE: ISAC_MAP_PASS0_ONLY not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_MAP_PASS0_ONLY");
   if (e != NULL && atoi(e) == 0)
     return full_n; /* explicitly exhaustive from the first lap */
@@ -1896,6 +1907,7 @@ static bool lane_assign_next(int lane)
     ln->occ = 0;
     ln->active = true;
     lane_map_apply(lane);
+    /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     if (getenv("ISAC_DISCOVER_DIAG") != NULL)
       LOG_I(PHY, "SENSING: LOOKAHEAD_ASSIGN lane=%d extent=%d offset=%d span=%d bundle=%d interleaver=%d shift=%d fast=%d al1=%d\n",
             lane, ext, ln->rb_offset, span_rb, ln->reg_bundle_size, ln->interleaver_size,
@@ -1915,6 +1927,7 @@ static void lookahead_lanes_init(void)
    * from one shared two-dimensional catalogue. The old design spread lanes over extents but put
    * every one at mapping 0, making an L=6 interleaved CORESET wait behind thousands of occasions
    * of unrelated mappings. */
+  /* DEFERRED/DO NOT USE: ISAC_MAP_PASS0_ONLY not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *map_env = getenv("ISAC_MAP_PASS0_ONLY");
   s_lane_after_cover_stage = (map_env != NULL && atoi(map_env) == 0) ? 1 : 0;
   s_lane_dispatch_stage = al1_cover_enabled() ? -1 : s_lane_after_cover_stage;
@@ -2098,6 +2111,7 @@ int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_can
    * exhaustive walk from the start. */
   static int s_pass0_env = -1;
   if (s_pass0_env < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_MAP_PASS0_ONLY not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_MAP_PASS0_ONLY");
     s_pass0_env = (e == NULL) ? -2 : ((atoi(e) == 1) ? 1 : 0);   /* -2 = staged (default) */
   }
@@ -2135,6 +2149,7 @@ int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_can
  * the full list. ISAC_MAP_PASS0_ONLY=0 disables staging (exhaustive from the start). */
 static int map_stage_truncate(int n)
 {
+  /* DEFERRED/DO NOT USE: ISAC_MAP_PASS0_ONLY not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_MAP_PASS0_ONLY");
   if (e != NULL && atoi(e) == 0) return n;
   return (s_map_stage == 0 && s_map_pass0_n > 0 && s_map_pass0_n < n) ? s_map_pass0_n : n;
@@ -2416,6 +2431,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
      * window changing call to call. Rate-limited to avoid flooding the RT thread's own log volume. */
     static int s_diag = -1;
     if (s_diag < 0)
+      /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
       s_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
     static int s_calls = 0;
     s_calls++;
@@ -2508,6 +2524,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   const int obs_hits_needed = obs_nw * AUTODISCOVER_HITS_PER_WINDOW;
   {
     static int s_gate_diag = -1;
+    /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_gate_diag < 0) s_gate_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
     if (s_gate_diag && (obs_calls % 5000) == 0) {
       printf("DISCOVERGATE calls=%d total_hits=%d top=%d floor=%d lit=%d needed=%d\n", obs_calls, obs_total_hits, obs_top, lit_floor, obs_lit, obs_hits_needed);
@@ -2528,6 +2545,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   {
     static int s_min_bg = -1;
     if (s_min_bg < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_DISCOVER_MIN_BG not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_DISCOVER_MIN_BG");
       s_min_bg = (e != NULL) ? atoi(e) : 3;
       if (s_min_bg < 0) s_min_bg = 0;
@@ -2576,12 +2594,14 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
          * make dominance trivially true, N=0 would zero the absolute-evidence floor). */
         static int s_dom_k = -1;
         if (s_dom_k < 0) {
+          /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DOMINANCE_K not in the frozen config t26zE (2026-10-18); slated for removal */
           const char *e = getenv("ISAC_DISCOVER_DOMINANCE_K");
           s_dom_k = (e != NULL) ? atoi(e) : 4;
           if (s_dom_k < 1) s_dom_k = 1;
         }
         static int s_dom_n = -1;
         if (s_dom_n < 0) {
+          /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DOMINANCE_N not in the frozen config t26zE (2026-10-18); slated for removal */
           const char *e = getenv("ISAC_DISCOVER_DOMINANCE_N");
           s_dom_n = (e != NULL) ? atoi(e) : 3;
           if (s_dom_n < 1) s_dom_n = 1;
@@ -2631,6 +2651,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   {
     static int s_hist_diag = -1;
     if (s_hist_diag < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
       s_hist_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
     }
     if (s_hist_diag) {
@@ -4207,6 +4228,7 @@ static uint32_t blind_polar_decode(const int16_t* llr,
   {
     static int s_fullcrc = -1;
     if (s_fullcrc < 0)
+      /* DEFERRED/DO NOT USE: ISAC_PDCCH_FULLCRC not in the frozen config t26zE (2026-10-18); slated for removal */
       s_fullcrc = (getenv("ISAC_PDCCH_FULLCRC") != NULL) ? 1 : 0;
     /* RNTI-AGNOSTIC detector: a genuine polar decode has the upper 8 bits of the 24-bit CRC zero.
      * Keying this on a PINNED rnti_min was a mistake -- the C-RNTI churns on every re-attach, so a
@@ -4887,6 +4909,7 @@ static bool extract_11_impl(const nr_pdcch_blind_raw_result_t *raw, uint16_t dci
   out->mismatched_bits = raw->mismatched_bits;
   { /* TIMRM diagnostic (ISAC_PDSCH_RM_GENIE): hand the payload bits to the grant so RMDCI can print them; off = untouched */
     static int s_keep = -1;
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_RM_GENIE not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_keep < 0) { const char *e = getenv("ISAC_PDSCH_RM_GENIE"); s_keep = (e && atoi(e) > 0) ? 1 : 0; }
     if (s_keep) { out->payload = raw->payload; out->dci_len = dci_length; }
   }
@@ -5110,6 +5133,7 @@ bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
                                                     dmrs_typeA_position, rnti_min, rnti_max, opts, out);
   static int s_watch = -1;
   if (s_watch < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_DCI_WATCH_RNTI not in the frozen config t26zE (2026-10-18); slated for removal */
     const char* e = getenv("ISAC_DCI_WATCH_RNTI");
     s_watch = (e != NULL) ? (int)strtol(e, NULL, 0) : 0;
   }
@@ -6068,6 +6092,7 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
  * ISAC_SIB1_CACHE_DIR (default /tmp/passive_rx). */
 static void sib1_cache_path(uint16_t pci, uint32_t hash, char *out, size_t n)
 {
+  /* DEFERRED/DO NOT USE: ISAC_SIB1_CACHE_DIR not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *dir = getenv("ISAC_SIB1_CACHE_DIR");
   nr_cfg_sib1_cache_name(out, n, dir, pci,
                           hash,
@@ -6075,11 +6100,13 @@ static void sib1_cache_path(uint16_t pci, uint32_t hash, char *out, size_t n)
 }
 static void sib1_cache_index_path(uint16_t pci, char *out, size_t n)
 {
+  /* DEFERRED/DO NOT USE: ISAC_SIB1_CACHE_DIR not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *dir = getenv("ISAC_SIB1_CACHE_DIR");
   snprintf(out, n, "%s/sib1_common_pci%u_last_hash.bin", dir && *dir ? dir : "/tmp/passive_rx", pci);
 }
 static bool sib1_cache_enabled(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_SIB1_CACHE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_SIB1_CACHE");
   return e == NULL || atoi(e) != 0;
 }

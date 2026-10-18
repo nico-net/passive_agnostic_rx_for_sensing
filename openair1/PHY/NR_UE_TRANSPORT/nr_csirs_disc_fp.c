@@ -696,6 +696,7 @@ static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c
   uint64_t folded=fp_us();
   int group=scheduled && new_slots<(uint64_t)r->capacity?h->round++%FP_GROUPS:-1;
   int result=cluster_parallel(r,cfg,out,max_out,group);
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
   if(getenv("ISAC_CSIRS_DISC_DIAG")) fprintf(stderr,"DETECT normalize=%llu fold=%llu cluster=%llu us\n",
     (unsigned long long)norm,(unsigned long long)(folded-begin-norm),(unsigned long long)(fp_us()-folded));
   return result;

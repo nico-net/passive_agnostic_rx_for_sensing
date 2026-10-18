@@ -71,6 +71,7 @@ static void load(void)
     atomic_store(&G->on, 0);
     return;
   }
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_EXACT_LDPC_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
   G->check = getenv("ISAC_PDSCH_GPU_EXACT_LDPC_CHECK") ? atoi(getenv("ISAC_PDSCH_GPU_EXACT_LDPC_CHECK")) : 0;
   LOG_A(PHY, "SENSING: GPU_EXACT_LDPC enabled: OAI min-sum decoder on the GPU, bit-exact; check=%d\n", G->check);
   atomic_store(&G->on, 1);
@@ -388,12 +389,15 @@ static void ul_load(void)
   nr_gpu_ldpc_ul_init_fn init = h ? (nr_gpu_ldpc_ul_init_fn)dlsym(h, "nr_pusch_gpu_ldpc_init") : NULL;
   G->run = h ? (nr_gpu_ldpc_run_fn)dlsym(h, "nr_pusch_gpu_ldpc_run") : NULL;
   ul_stats_fn = h ? (nr_gpu_ldpc_ul_stats_fn)dlsym(h, "nr_pusch_gpu_ldpc_stats") : NULL;
+  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_LDPC_DEADLINE_US not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_LDPC_PCT not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *pc = getenv("ISAC_UL_GPU_LDPC_PCT"), *dl = getenv("ISAC_UL_GPU_LDPC_DEADLINE_US");
   if (!init || !G->run || !ul_stats_fn || init(pc ? atoi(pc) : 15, dl ? atoi(dl) : 4000) != 0) {
     LOG_W(PHY, "SENSING: UL_GPU_LDPC requested but unavailable -- CPU LDPC decoder\n");
     atomic_store(&G->on, 0);
     return;
   }
+  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_LDPC_MIN_BITS not in the frozen config t26zE (2026-10-18); slated for removal */
   G->min_bits = getenv("ISAC_UL_GPU_LDPC_MIN_BITS") ? (uint32_t)atoi(getenv("ISAC_UL_GPU_LDPC_MIN_BITS")) : 0;
   G->check = getenv("ISAC_UL_GPU_LDPC_CHECK") ? atoi(getenv("ISAC_UL_GPU_LDPC_CHECK")) : 64;
   LOG_A(PHY, "SENSING: UL_GPU_LDPC enabled: bit-exact GPU decoder for PUSCH TBs, check=%d\n", G->check);

@@ -77,6 +77,7 @@ bool nr_pusch_passive_ul_ue_state_enabled(void)
   int *cp=&g_ue_state_cached;
   int on=__atomic_load_n(cp,__ATOMIC_RELAXED);
   if (on<0) {
+    /* DEFERRED/DO NOT USE: ISAC_UL_UE_STATE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *v=getenv("ISAC_UL_UE_STATE");
     const char *chain=(getenv("ISAC_UL_PUSCH_CHAIN") ?: "1");
     const char *solver=(getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");

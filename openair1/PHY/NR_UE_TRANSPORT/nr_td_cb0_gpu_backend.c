@@ -24,6 +24,7 @@ uint8_t nr_td_cb0_gpu_iters(uint8_t max_iter)
 {
   static int over = -1;
   if (over < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_TD_CB0_GPU_ITERS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_TD_CB0_GPU_ITERS");
     over = (e && atoi(e) > 0) ? atoi(e) : 0;
     if (over > LDPC_CB0_MAX_ITERS)
@@ -36,6 +37,7 @@ uint8_t nr_td_cb0_gpu_iters(uint8_t max_iter)
    * forces it for every grant with a CB0 batch, whatever the backend (nr_td_cb0_wire_pre) */
   static int tb_cpu = -1;
   if (tb_cpu < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_TD_TB_CPU_WHILE_ACQ not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_TD_TB_CPU_WHILE_ACQ");
     tb_cpu = !(e && *e && atof(e) == 0.0);
     if (over && !tb_cpu && over < 2 * max_iter)

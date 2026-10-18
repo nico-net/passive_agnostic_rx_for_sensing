@@ -1082,6 +1082,7 @@ extern "C" void nr_gpu_pass_test_hold(unsigned mask, int hold)
 static int probe_reserve()
 {
   /* clamped to NI - 1 (review S2): a reserve of every instance would never let a probe run */
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_GRAPH_PROBE_RESERVE not in the frozen config t26zE (2026-10-18); slated for removal */
   static const int v = [] { const char *e = getenv("ISAC_PDSCH_GPU_GRAPH_PROBE_RESERVE"); return std::max(0, std::min(NI - 1, e && *e ? atoi(e) : 1)); }();
   return v;
 }
@@ -1189,6 +1190,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     if (k.nseg) ++g_fb_unseen_seg;
     for (int q = 0; split && q < 3; q++)
       if (!es[q]) ++g_split_unseen[SUB_C + q];
+    /* DEFERRED/DO NOT USE: ISAC_GPU_PASS_LOG_UNSEEN not in the frozen config t26zE (2026-10-18); slated for removal */
     if (g_fb_unseen++ < 40 && getenv("ISAC_GPU_PASS_LOG_UNSEEN"))
       fprintf(stderr, "GPUPASS unseen class: nrb %u (grant %d) nl %u ndmrs %u ncb %u (C %u) evm %u qmode %u align %u fp32 %u nseg %u (grant %d) missing sub-graphs C%d D%d L%d\n", k.nrb, j->nrb, k.nl, k.ndmrs, k.ncb,
               j->C, k.evm, k.qmode, k.align, k.fp32, k.nseg, j->nseg, split && !es[0], split && !es[1], split && !es[2]);
@@ -1349,6 +1351,7 @@ extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     if (f != g_cache.end()) e = &f->second;
   }
   if (!e) {
+    /* DEFERRED/DO NOT USE: ISAC_GPU_PASS_LOG_UNSEEN not in the frozen config t26zE (2026-10-18); slated for removal */
     if (g_ul_fb_unseen++ < 40 && getenv("ISAC_GPU_PASS_LOG_UNSEEN"))
       fprintf(stderr, "GPUPASS unseen UL class: nrb %u (grant %d) ndmrs %u ncb %u (C %u)\n", k.nrb, u.nrb, k.ndmrs, k.ncb, j->C);
     return 1;

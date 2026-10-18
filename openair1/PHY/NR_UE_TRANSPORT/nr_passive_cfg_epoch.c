@@ -79,6 +79,7 @@ static bool is_enabled(void)
 bool nr_cfg_reconf_enabled(void) { return is_enabled(); }
 static void read_ignore_sib1(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_TD_IGNORE_SIB1 not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *value = getenv("ISAC_TD_IGNORE_SIB1");
   ignore_sib1 = value && strcmp(value, "1") == 0;
 }
@@ -95,8 +96,10 @@ void nr_cfg_ignore_sib1_reset_for_test(void)
 }
 static void read_si_options(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_RECONF_SI_GRACE_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *grace = getenv("ISAC_RECONF_SI_GRACE_MS");
   si_grace_ms = grace && atoi(grace) > 0 ? (unsigned)atoi(grace) : 5000;
+  /* DEFERRED/DO NOT USE: ISAC_RECONF_SI_BUMP_WITHOUT_SIB1 not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *setting = getenv("ISAC_RECONF_SI_BUMP_WITHOUT_SIB1");
   si_bump_without_sib1 = !setting || strcmp(setting, "0") != 0;
 }
@@ -433,6 +436,7 @@ void nr_cfg_epoch_note_continuity_loss_samples(int64_t gap_samples, uint64_t sam
 {
   if (!is_enabled()) return;
   uint64_t threshold_ms = 10;
+  /* DEFERRED/DO NOT USE: ISAC_RECONF_GAP_HARD_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *setting = getenv("ISAC_RECONF_GAP_HARD_MS");
   if (setting && *setting) {
     char *end;

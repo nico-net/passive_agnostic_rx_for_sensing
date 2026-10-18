@@ -771,6 +771,7 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
    * "did stage 1 delete the true layout" -- the one question a 0 % run cannot answer otherwise. */
   static int s_s1_off = -1;
   if (s_s1_off < 0)
+    /* DEFERRED/DO NOT USE: ISAC_DCI11_S1_OFF not in the frozen config t26zE (2026-10-18); slated for removal */
     s_s1_off = (getenv("ISAC_DCI11_S1_OFF") != NULL && atoi(getenv("ISAC_DCI11_S1_OFF")) != 0) ? 1 : 0;
   if (s_s1_off)
     return r->n_alive;

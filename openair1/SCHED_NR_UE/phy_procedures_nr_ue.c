@@ -986,6 +986,7 @@ int nr_process_pbch_symbol(
     // offset is the whole bug. ISAC_PBCH_OFFSET_BIAS=<samples>, default 0 = unchanged.
     static int s_pbch_bias = INT_MIN;
     if (s_pbch_bias == INT_MIN) {
+      /* DEFERRED/DO NOT USE: ISAC_PBCH_OFFSET_BIAS not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_PBCH_OFFSET_BIAS");
       s_pbch_bias = e ? atoi(e) : 0;
       if (s_pbch_bias)
@@ -1003,6 +1004,7 @@ int nr_process_pbch_symbol(
       static int s_iq_left = -1;
       static FILE *s_iq = NULL;
       if (s_iq_left < 0) {
+        /* DEFERRED/DO NOT USE: ISAC_SSB_IQ not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *pth = getenv("ISAC_SSB_IQ");
         s_iq = (pth && pth[0]) ? fopen(pth, "wb") : NULL;
         s_iq_left = s_iq ? 96 : 0;
@@ -1053,6 +1055,7 @@ int nr_process_pbch_symbol(
     {
       static int s_phy_diag = -1;
       if (s_phy_diag < 0)
+        /* DEFERRED/DO NOT USE: ISAC_PHY_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
         s_phy_diag = (getenv("ISAC_PHY_DIAG") && atoi(getenv("ISAC_PHY_DIAG"))) ? 1 : 0;
       // FEPDIAG/SSBTIME/FRAMESCAN are heavy: FRAMESCAN alone does ~280 4096-point FFTs
       // INLINE ON THE RT PATH. Measured elsewhere to stall processing long enough to cause
@@ -1268,6 +1271,7 @@ int nr_process_pbch_symbol(
   {
     static int cfo_sweep = -1;
     if (cfo_sweep < 0)
+      /* DEFERRED/DO NOT USE: ISAC_PBCH_CFO_SWEEP not in the frozen config t26zE (2026-10-18); slated for removal */
       cfo_sweep = (getenv("ISAC_PBCH_CFO_SWEEP") != NULL) ? 1 : 0;
     if (cfo_sweep && relPbchSymb >= 0 && relPbchSymb < NB_SYMBOLS_PBCH) {
 #define CFO_SWEEP_NHYP 33
@@ -1515,6 +1519,7 @@ int nr_process_pbch_symbol(
         static int s_raw_left = -1;
         static FILE *s_raw = NULL;
         if (s_raw_left < 0) {
+          /* DEFERRED/DO NOT USE: ISAC_CHEST_RAW not in the frozen config t26zE (2026-10-18); slated for removal */
           const char *pth = getenv("ISAC_CHEST_RAW");
           s_raw = (pth && pth[0]) ? fopen(pth, "wb") : NULL;
           s_raw_left = s_raw ? 24 : 0;
@@ -1538,6 +1543,7 @@ int nr_process_pbch_symbol(
        * coherence ~1; noise or a wrong DM-RS/subcarrier mapping gives ~0. Cheap: one pass. */
       static int s_coh = -1;
       if (s_coh < 0)
+        /* DEFERRED/DO NOT USE: ISAC_CHEST_COH not in the frozen config t26zE (2026-10-18); slated for removal */
         s_coh = (getenv("ISAC_CHEST_COH") && atoi(getenv("ISAC_CHEST_COH"))) ? 1 : 0;
       static int s_coh_left = 24;
       if (s_coh && s_coh_left > 0 && aarx == 0) {
@@ -1732,6 +1738,7 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
       {
         static int audit = -1;
         if (audit < 0)
+          /* DEFERRED/DO NOT USE: ISAC_TSYNC_AUDIT not in the frozen config t26zE (2026-10-18); slated for removal */
           audit = (getenv("ISAC_TSYNC_AUDIT") != NULL) ? 1 : 0;
         if (audit) {
           struct timespec ts;
@@ -1753,6 +1760,7 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
       {
         static int cfo_audit = -1;
         if (cfo_audit < 0)
+          /* DEFERRED/DO NOT USE: ISAC_TSYNC_AUDIT not in the frozen config t26zE (2026-10-18); slated for removal */
           cfo_audit = (getenv("ISAC_TSYNC_AUDIT") != NULL) ? 1 : 0;
         if (cfo_audit) {
           const double cfo_hz = nr_ue_pbch_freq_offset(&UE->frame_parms, pbch_ch_est_sym1, pbch_ch_est_sym3);
@@ -1807,13 +1815,17 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
         static double s_hist[TRK_HIST];
         static int    s_streak = 0;
         if (s_trk_hz < 0) {
+          /* DEFERRED/DO NOT USE: ISAC_CFO_TRACK_HZ not in the frozen config t26zE (2026-10-18); slated for removal */
           const char *e = getenv("ISAC_CFO_TRACK_HZ");
           s_trk_hz = (e != NULL) ? atoi(e) : 0;
+          /* DEFERRED/DO NOT USE: ISAC_CFO_TRACK_SPREAD_HZ not in the frozen config t26zE (2026-10-18); slated for removal */
           const char *v = getenv("ISAC_CFO_TRACK_SPREAD_HZ");
           if (v != NULL) {
             s_trk_spread = atoi(v);
           }
+          /* DEFERRED/DO NOT USE: ISAC_CFO_TRACK_APPLY not in the frozen config t26zE (2026-10-18); slated for removal */
           s_trk_apply = (getenv("ISAC_CFO_TRACK_APPLY") != NULL) ? 1 : 0;
+          /* DEFERRED/DO NOT USE: ISAC_CFO_TRACK_PERIOD not in the frozen config t26zE (2026-10-18); slated for removal */
           const char *pv = getenv("ISAC_CFO_TRACK_PERIOD");
           if (pv != NULL && atoi(pv) > 0) {
             s_trk_period = atoi(pv);
@@ -1891,11 +1903,13 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
       {
         static int pbch_cap = -1;
         if (pbch_cap < 0)
+          /* DEFERRED/DO NOT USE: ISAC_PBCH_CAPTURE not in the frozen config t26zE (2026-10-18); slated for removal */
           pbch_cap = (getenv("ISAC_PBCH_CAPTURE") != NULL) ? 1 : 0;
         static FILE *pbch_cap_fp = NULL;
         static int pbch_cap_left = 300;
         if (pbch_cap && pbch_cap_left > 0) {
           if (!pbch_cap_fp) {
+            /* DEFERRED/DO NOT USE: ISAC_PBCH_CAPTURE_PATH not in the frozen config t26zE (2026-10-18); slated for removal */
             const char *path = getenv("ISAC_PBCH_CAPTURE_PATH");
             pbch_cap_fp = fopen(path ? path : "/tmp/pbch_capture.bin", "wb");
           }
@@ -1931,6 +1945,7 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
       // tested, instead of silently never firing.
       static int force_global_call = -1;
       if (force_global_call < 0)
+        /* DEFERRED/DO NOT USE: ISAC_FORCE_GLOBAL_SYNC not in the frozen config t26zE (2026-10-18); slated for removal */
         force_global_call = (getenv("ISAC_FORCE_GLOBAL_SYNC") != NULL) ? 1 : 0;
       // ---- CRC-INDEPENDENT TIMING UPDATE (2026-08-06) -------------------------------------
       // A CRC protects the decoded MIB bits. The timing estimate comes from the PBCH-DMRS channel
@@ -1943,6 +1958,7 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
       // ISAC_TSYNC_CRC_GATE=1 restores the old CRC-gated behaviour for comparison.
       static int crc_gate = -1;
       if (crc_gate < 0)
+        /* DEFERRED/DO NOT USE: ISAC_TSYNC_CRC_GATE not in the frozen config t26zE (2026-10-18); slated for removal */
         crc_gate = (getenv("ISAC_TSYNC_CRC_GATE") && atoi(getenv("ISAC_TSYNC_CRC_GATE"))) ? 1 : 0;
       const bool timing_allowed = crc_gate ? (pbchSuccess == 0 || force_global_call) : true;
       // ---- TWO-STAGE TIMING (2026-08-06) ------------------------------------------------
@@ -1959,16 +1975,20 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
       // 0.80-0.92) with hysteresis; they need re-calibrating at lower SNR before production use.
       static int s_anchor = -1;
       if (s_anchor < 0)
+        /* DEFERRED/DO NOT USE: ISAC_DMRS_ANCHOR not in the frozen config t26zE (2026-10-18); slated for removal */
         s_anchor = (getenv("ISAC_DMRS_ANCHOR") && atoi(getenv("ISAC_DMRS_ANCHOR"))) ? 1 : 0;
       static double s_enter = -1.0, s_stay = -1.0;
       if (s_enter < 0.0) {
+        /* DEFERRED/DO NOT USE: ISAC_ANCHOR_ENTER not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_ANCHOR_ENTER");
         s_enter = e ? atof(e) : 0.99;
+        /* DEFERRED/DO NOT USE: ISAC_ANCHOR_STAY not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *t = getenv("ISAC_ANCHOR_STAY");
         s_stay = t ? atof(t) : 0.97;
       }
       static int s_sign = INT_MIN;
       if (s_sign == INT_MIN) {
+        /* DEFERRED/DO NOT USE: ISAC_ANCHOR_SIGN not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_ANCHOR_SIGN");
         s_sign = e ? atoi(e) : -1;
       }
@@ -2171,6 +2191,7 @@ int pbch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_da
   // Escape hatch kept for A/B: ISAC_PBCH_NO_TRACK=1 restores the old cached-MIB behaviour.
   static int s_pbch_no_track = -1;
   if (s_pbch_no_track < 0)
+    /* DEFERRED/DO NOT USE: ISAC_PBCH_NO_TRACK not in the frozen config t26zE (2026-10-18); slated for removal */
     s_pbch_no_track = (getenv("ISAC_PBCH_NO_TRACK") && atoi(getenv("ISAC_PBCH_NO_TRACK"))) ? 1 : 0;
   const bool use_cached_mib =
       s_pbch_no_track && IS_PASSIVE_RX_MODE(get_softmodem_params()) && ue->is_synchronized;
@@ -2203,6 +2224,7 @@ int pbch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_da
       static int sweeps = 0;
       static int s_sweep_diag = -1;
       if (s_sweep_diag < 0)
+        /* DEFERRED/DO NOT USE: ISAC_PHY_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
         s_sweep_diag = (getenv("ISAC_PHY_DIAG") && atoi(getenv("ISAC_PHY_DIAG"))) ? 1 : 0;
       if (s_sweep_diag && sweeps < 8) {
         sweeps++;

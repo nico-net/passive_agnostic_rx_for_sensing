@@ -78,6 +78,7 @@ static int coherent_mode(void)
 {
   static int s_coh = -1;
   if (s_coh < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_COREMAP_SUBBAND not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_COREMAP_SUBBAND");
     s_coh = (e != NULL && atoi(e) != 0) ? 0 : 1;
   }
@@ -128,6 +129,7 @@ void nr_pdcch_coreset_map_accept_probe(const c16_t *rxdataF, int ofdm_symbol_siz
 {
   static int s_on = -1;
   if (s_on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_COREMAP_ONACCEPT not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_COREMAP_ONACCEPT");
     s_on = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
@@ -440,6 +442,7 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
   const bool gpu = nr_pdcch_nid_gpu_enabled();
   if (gpu && !nr_pdcch_nid_gpu_running()) return -1;
   if (!gpu && g_idsw.enabled < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_COREMAP_IDSWEEP not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_COREMAP_IDSWEEP");
     g_idsw.max_batches = (e != NULL) ? atoi(e) : 0;  /* ISAC_COREMAP_IDSWEEP=<batches to dump> */
     g_idsw.enabled = g_idsw.max_batches > 0 ? 1 : 0;
@@ -457,6 +460,7 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
     return -1;
   /* Live GPU capture is one rotating start on every DL slot. The legacy
    * diagnostic dump keeps its original every-tenth-slot cadence. */
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_INCREMENTAL not in the frozen config t26zE (2026-10-18); slated for removal */
   const bool incremental = gpu && (getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL")==NULL || strcmp(getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL"),"0")); /* own flag, default on (was ISAC_CSIRS_DISC) */
   int every = 10;
   if (incremental) {
@@ -475,6 +479,7 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
   if (incremental) {
     static int s_nsym = -1;
     if (s_nsym < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_SYMBOLS not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_PDCCH_NID_GPU_SYMBOLS");
       s_nsym = e ? (atoi(e) >= 1 ? atoi(e) : 0) : 3;
     }
@@ -507,13 +512,16 @@ void nr_pdcch_coreset_map_idsweep_push(const c16_t *rxF_sym, int fft, int fco, i
     static nr_pdcch_nid_config_t previous;
     static uint64_t previous_sync_losses;
     if (occ_enabled < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_OCC_GATE not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_PDCCH_NID_GPU_OCC_GATE");
       occ_enabled = !e || strcmp(e, "0");
+      /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_OCC_DB not in the frozen config t26zE (2026-10-18); slated for removal */
       e = getenv("ISAC_PDCCH_NID_GPU_OCC_DB");
       if (e) {
         char *end; float db = strtof(e, &end);
         if (end != e && !*end && isfinite(db) && db >= 0 && db <= 60) ratio = powf(10.f, db / 10.f);
       }
+      /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_OCC_FLOOR_PCT not in the frozen config t26zE (2026-10-18); slated for removal */
       e = getenv("ISAC_PDCCH_NID_GPU_OCC_FLOOR_PCT");
       if (e) {
         char *end; long n = strtol(e, &end, 10);
@@ -603,6 +611,7 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
   {
     static int s_ph = -2;
     if (s_ph == -2) {
+      /* DEFERRED/DO NOT USE: ISAC_COREMAP_PHASE not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_COREMAP_PHASE");
       s_ph = (e != NULL) ? atoi(e) : -1;
     }
@@ -628,6 +637,7 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
    * synthetic test's 0.8-0.95 assumption. */
   static int s_diag = -1;
   if (s_diag < 0)
+    /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     s_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
   static int s_calls = 0;
   s_calls++;
@@ -671,6 +681,7 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
   {
     static int s_gt = -1;
     if (s_gt < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_COREMAP_GT not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_COREMAP_GT");
       s_gt = (e != NULL && atoi(e) != 0) ? 1 : 0;
     }
@@ -688,6 +699,7 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
       {
         static int s_cs_start = -2, s_cs_nrb = 0;
         if (s_cs_start == -2) {
+          /* DEFERRED/DO NOT USE: ISAC_COREMAP_GT_CSET not in the frozen config t26zE (2026-10-18); slated for removal */
           const char *e = getenv("ISAC_COREMAP_GT_CSET");
           s_cs_start = -1;
           if (e != NULL && sscanf(e, "%d:%d", &s_cs_start, &s_cs_nrb) != 2)
@@ -796,6 +808,7 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
      * so a correlated background (not white noise) still cannot flood the histogram. */
     static double s_zbar = -1.0;
     if (s_zbar < 0.0) {
+      /* DEFERRED/DO NOT USE: ISAC_COREMAP_Z not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_COREMAP_Z");
       const double v = (e != NULL) ? atof(e) : 0.0;
       /* 3.0, NOT 5.0: a_r <= 1 caps Z at (1-mu0)/(sigma0/sqrt(6)) = 4.47 for a 6-RB window, so a
@@ -840,6 +853,7 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
   {
     static double s_emitbar = -1.0;
     if (s_emitbar < 0.0) {
+      /* DEFERRED/DO NOT USE: ISAC_COREMAP_EMITBAR not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_COREMAP_EMITBAR");
       /* DEFAULT 0 = keep the adaptive rule. MEASURED 2026-09-21: a fixed 0.40 per-WINDOW bar is
        * below the per-window noise tail (mean 0.209) and re-flattened the histogram -- 277 hits
@@ -860,6 +874,7 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
   {
     static double s_occbar = -1.0;
     if (s_occbar < 0.0) {
+      /* DEFERRED/DO NOT USE: ISAC_COREMAP_OCCBAR not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_COREMAP_OCCBAR");
       s_occbar = (e != NULL) ? atof(e) : 0.55;
       if (s_occbar < 0.0) s_occbar = 0.0;

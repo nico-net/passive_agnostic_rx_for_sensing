@@ -126,6 +126,7 @@ int nr_gpu_pass_ul_hyp_lookup(uint16_t rnti, uint32_t epoch, int64_t abs_slot, u
 {
   static int max_age = -1;
   if (max_age < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_UL_HYP_MAX_AGE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_UL_HYP_MAX_AGE");
     max_age = e ? atoi(e) : 2000;
   }
@@ -284,6 +285,7 @@ static int fb(int why)
 
 int nr_gpu_pass_ul_requested(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_UL_GPU_PASS");
   return e && atoi(e) == 1;
 }
@@ -514,6 +516,7 @@ static int env_list(const char *name, const char *dflt, int *v, int max)
 int nr_gpu_pass_ul_warm(void *h, int nbrx, int fp32)
 {
   (void)fp32; /* the PUSCH chain is integer: the FP32 instantiation only exists for the DL demod's MMSE */
+  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_UL_GPU_PASS");
   if (!e || atoi(e) != 1 || !h)
     return 0;
@@ -527,6 +530,7 @@ int nr_gpu_pass_ul_warm(void *h, int nbrx, int fp32)
   }
   int nd[4];
   const int nnd = env_list("ISAC_UL_GPU_PASS_NDMRS", "2,1", nd, 4);
+  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PASS_CLASSES not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ce = getenv("ISAC_UL_GPU_PASS_CLASSES");
   const int budget = ce ? atoi(ce) : 160;
   static const int nrbs[] = {136, 217, 96, 48, 24, 12, 6, 273};
@@ -546,6 +550,7 @@ int nr_gpu_pass_ul_warm(void *h, int nbrx, int fp32)
       }
     }
   U.nbrx = nbrx;
+  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PASS_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ch = getenv("ISAC_UL_GPU_PASS_CHECK");
   U.check = ch ? atoi(ch) : 16;
   atomic_store(&U.on, made > 0);

@@ -395,6 +395,7 @@ void nr_pdsch_solver_set_hq_fn(nr_pdsch_solver_hq_fn fn, void *ctx)
 }
 bool nr_pdsch_solver_rvc_on(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_DCI11_RV_CONSISTENCY not in the frozen config t26zE (2026-10-18); slated for removal */
   if (g_rvc < 0) g_rvc = getenv("ISAC_DCI11_RV_CONSISTENCY") && atoi(getenv("ISAC_DCI11_RV_CONSISTENCY")) ? 1 : 0;
   return g_rvc == 1;
 }
@@ -724,6 +725,7 @@ static int comb_n(void) { return comb_on() >= 2 ? 4 : 2; }
 static int comb_ab(void) /* ISAC_RX_MRC_PER_RNTI_AB=1: post-solve round robin over the receivers (paired A/B, no exploitation) */
 {
   static int en = -1;
+  /* DEFERRED/DO NOT USE: ISAC_RX_MRC_PER_RNTI_AB not in the frozen config t26zE (2026-10-18); slated for removal */
   if (en < 0) en = getenv("ISAC_RX_MRC_PER_RNTI_AB") ? atoi(getenv("ISAC_RX_MRC_PER_RNTI_AB")) : 0;
   return en;
 }
@@ -737,6 +739,7 @@ static int comb_ab(void) /* ISAC_RX_MRC_PER_RNTI_AB=1: post-solve round robin ov
  *   receiver; otherwise the CRC rule decides. */
 static int comb_by_snr(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_RX_MRC_PER_RNTI_SNR not in the frozen config t26zE (2026-10-18); slated for removal */
   if (g_comb_snr < 0) g_comb_snr = getenv("ISAC_RX_MRC_PER_RNTI_SNR") ? atoi(getenv("ISAC_RX_MRC_PER_RNTI_SNR")) : 0;
   return g_comb_snr;
 }
@@ -821,6 +824,7 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
 static bool probe_hog(const solver_rnti_t *r)
 {
   static int en = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_SOLVER_FAIR not in the frozen config t26zE (2026-10-18); slated for removal */
   if (en < 0) en = getenv("ISAC_PDSCH_SOLVER_FAIR") && atoi(getenv("ISAC_PDSCH_SOLVER_FAIR")) ? 1 : 0;
   if (!en || r->has_cand) return false;
   uint64_t tot = 0;
@@ -837,6 +841,7 @@ static bool probe_hog(const solver_rnti_t *r)
 static bool leader_ok(const solver_rnti_t *r)
 {
   static int en = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_SOLVER_LEADER not in the frozen config t26zE (2026-10-18); slated for removal */
   if (en < 0) en = getenv("ISAC_PDSCH_SOLVER_LEADER") && atoi(getenv("ISAC_PDSCH_SOLVER_LEADER")) ? 1 : 0;
   if (!en) return true;
   for (int i = 0; i < SOLVER_RNTIS; i++) /* any solved RNTI on the same CORESET: everybody searches (with the prior) */
@@ -855,7 +860,9 @@ static bool search_pref_skip(solver_rnti_t *r, int mcs)
 {
   static int n_gap = -1, mcs_max = 4;
   if (n_gap < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_SOLVER_PREF not in the frozen config t26zE (2026-10-18); slated for removal */
     n_gap = getenv("ISAC_PDSCH_SOLVER_PREF") ? atoi(getenv("ISAC_PDSCH_SOLVER_PREF")) : 0;
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_SOLVER_PREF_MCS not in the frozen config t26zE (2026-10-18); slated for removal */
     if (getenv("ISAC_PDSCH_SOLVER_PREF_MCS")) mcs_max = atoi(getenv("ISAC_PDSCH_SOLVER_PREF_MCS"));
   }
   if (n_gap <= 0 || r->has_cand) return false;
@@ -1754,6 +1761,7 @@ bool nr_rnti_layout_cache_on(void)
   static _Atomic int en = -1;
   int v = atomic_load(&en);
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_RNTI_LAYOUT_CACHE not in the frozen config t26zE (2026-10-18); slated for removal */
     v = getenv("ISAC_RNTI_LAYOUT_CACHE") && atoi(getenv("ISAC_RNTI_LAYOUT_CACHE")) ? 1 : 0;
     atomic_store(&en, v);
   }

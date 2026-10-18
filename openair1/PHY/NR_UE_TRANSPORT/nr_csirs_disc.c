@@ -140,6 +140,7 @@ static uint64_t cpu_us(void)
  */
 static int sweep_limit(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_SWEEP_HYPS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *s = getenv("ISAC_CSIRS_DISC_SWEEP_HYPS");
   const long value = s ? strtol(s, NULL, 10) : 32;
   return value > 0 && value <= NR_CSIRS_DISC_MAX_HYP ? (int)value : 32;
@@ -150,6 +151,7 @@ static int sweep_limit(void)
  */
 static int delta_limit(const nr_csirs_disc_ring_t *ring)
 {
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_DELTA_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *s = getenv("ISAC_CSIRS_DISC_DELTA_MAX");
   const long value = s ? strtol(s, NULL, 10) : 1;
   return value > 0 && value <= ring->slots_per_frame ? (int)value : 1;
@@ -205,6 +207,7 @@ void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp)
     pthread_once(&g_once, init_once);
     const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load();
     if(fp && gpu && gpu->prepare) {
+      /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_RING not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e=getenv("ISAC_CSIRS_DISC_RING");int capacity=e?atoi(e):640;
       if(capacity<1) capacity=640;
       size_t stride=14*(fp->ofdm_symbol_size+fp->nb_prefix_samples0+fp->nb_prefix_samples);
@@ -238,9 +241,13 @@ static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t
     uint32_t win = 640, div = 7;
     if (nr_csirs_disc_td_feed_params) nr_csirs_disc_td_feed_params(&win, &div);
     const char *e;
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_RATELIMIT_NOTICE_S not in the frozen config t26zE (2026-10-18); slated for removal */
     const double notice_s = (e=getenv("ISAC_CSIRS_DISC_RATELIMIT_NOTICE_S")) && atof(e) > 0 ? atof(e) : 60.0;
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_RATELIMIT_MISS not in the frozen config t26zE (2026-10-18); slated for removal */
     const double miss = (e=getenv("ISAC_CSIRS_DISC_RATELIMIT_MISS")) && atof(e) > 0 && atof(e) < 1 ? atof(e) : 0.01;
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_RATELIMIT_PDET not in the frozen config t26zE (2026-10-18); slated for removal */
     const double pdet = (e=getenv("ISAC_CSIRS_DISC_RATELIMIT_PDET")) && atof(e) > 0 && atof(e) < 1 ? atof(e) : 0.5;
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_RATELIMIT_CYCLES not in the frozen config t26zE (2026-10-18); slated for removal */
     const int cyc = (e=getenv("ISAC_CSIRS_DISC_RATELIMIT_CYCLES")) && atoi(e) > 0 ? atoi(e) : 2;
     cfg = (nr_csirs_rl_cfg_t){win, div, (uint64_t)(notice_s * ring->slots_per_frame * 100), miss, pdet, cyc};
     init = true;
@@ -478,6 +485,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       const nr_csirs_disc_hyp_t *h = &hyps[w->hyp_index];
       if (h->fp_index >= DISC_VIEWS)
         continue;
+      /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
       if (getenv("ISAC_CSIRS_DISC_DIAG"))
         LOG_I(PHY,
               "SENSING: CSIRS_DISC DIAG row=%u fd=%u l0=%u l1=%u fp=%u rb=%u:%u coarse=%u slots=%u id=%u z=%.6f z2=%.6f mu=%.6f sigma=%.6f P/O=%u/%u\n",
@@ -497,6 +505,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
               w->noise_sigma,
               h->period,
               h->offset);
+      /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
       if (cumulative && h->row==1 && getenv("ISAC_CSIRS_DISC_DIAG"))
         LOG_I(PHY,"SENSING: CSIRS_DISC EVIDENCE row=%u fd=%u l0=%u rb=%u:%u P/O=%u/%u slots=%u fresh=%u epoch=%llu\n",
               h->row,h->freq_domain,h->symb_l0,h->rb_start,h->n_rb,h->period,h->offset,
@@ -588,6 +597,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       nr_csirs_disc_win_t verified;
       int checked=gpu && ops->sweep?ops->sweep(ring,&refined,1,&sweep_cfg,&verified):-1;
       if(checked<0 && !ring->device_valid) checked=nr_csirs_disc_sweep_cpu(ring,&refined,1,&sweep_cfg,&verified);
+      /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
       if (checked == 1 && getenv("ISAC_CSIRS_DISC_DIAG"))
         LOG_I(PHY,
               "SENSING: CSIRS_DISC VERIFY row=%u fd=%u l0=%u l1=%u rb=%u:%u id=%u z=%.6f z2=%.6f mu=%.6f sigma=%.6f P/O=%u/%u accepted=%u\n",

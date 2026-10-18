@@ -46,6 +46,8 @@ static long burst_end = -1, burst_len = -1;
 static void td_feed_cfg(void)
 {
   if (feed_div >= 0) return;
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_FEED_DIV not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_FEED_WIN not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_CSIRS_DISC_FEED_DIV"), *w = getenv("ISAC_CSIRS_DISC_FEED_WIN");
   feed_div = e && atoi(e) > 0 ? atoi(e) : 7;
   if (w && atoi(w) >= 160) feed_win = atoi(w);
@@ -195,6 +197,8 @@ int nr_csirs_disc_td_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t frame,
    * (OTA 2026-10-07 adapt2_5, t9wb); 50 % keeps the same amount of data at half the memory pressure. */
   static int acq_div = -1;
   if (burst_len < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_FEED_ACQ_DIV not in the frozen config t26zE (2026-10-18); slated for removal */
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_FEED_BURST not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *b = getenv("ISAC_CSIRS_DISC_FEED_BURST"), *ad = getenv("ISAC_CSIRS_DISC_FEED_ACQ_DIV");
     burst_len = b && atol(b) >= 0 ? atol(b) : 5120;
     acq_div = ad && atoi(ad) > 0 ? atoi(ad) : 2;

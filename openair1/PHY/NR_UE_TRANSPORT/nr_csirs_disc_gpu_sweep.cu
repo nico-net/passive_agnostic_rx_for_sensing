@@ -218,8 +218,10 @@ struct Pace {
 };
 static long chunk_units(const Pace &p)
 {
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_CHUNK_UNITS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e=getenv("ISAC_CSIRS_DISC_CHUNK_UNITS");
   if(e && atol(e)>0) return atol(e);
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_CHUNK_US not in the frozen config t26zE (2026-10-18); slated for removal */
   e=getenv("ISAC_CSIRS_DISC_CHUNK_US");
   const double us=e?atof(e):0;
   if(us<=0) return LONG_MAX;
@@ -227,6 +229,7 @@ static long chunk_units(const Pace &p)
 }
 static void pace_start(Pace &p,cudaStream_t s)
 {
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_CHUNK_US not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e=getenv("ISAC_CSIRS_DISC_CHUNK_US");
   if(!e || atof(e)<=0) return;
   if(!p.a && (cudaEventCreate(&p.a)!=cudaSuccess || cudaEventCreate(&p.b)!=cudaSuccess)) {p.a=nullptr;return;}
@@ -312,6 +315,7 @@ static cudaError_t complete() {
  * at the instant refine_kernel ended, 300-400 ms late]. */
 static int copy_fence() {
   static int v=-1;
+  /* DEFERRED/DO NOT USE: ISAC_GPU_COPY_FENCE not in the frozen config t26zE (2026-10-18); slated for removal */
   if(v<0){const char *e=getenv("ISAC_GPU_COPY_FENCE");if(!e)e=(getenv("ISAC_FATTAILS") ?: "1");v=e && atoi(e)==1;}
   return v;
 }

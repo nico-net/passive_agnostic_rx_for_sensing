@@ -221,6 +221,7 @@ const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void)
 {
   const char *enabled = (getenv("ISAC_CSIRS_DISC") ?: "1");
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_BACKEND not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *backend = getenv("ISAC_CSIRS_DISC_BACKEND");
   if (!enabled || strcmp(enabled, "1") || (backend && !strcmp(backend, "cpu")))
     return NULL;

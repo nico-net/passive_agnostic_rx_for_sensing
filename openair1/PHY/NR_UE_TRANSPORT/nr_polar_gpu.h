@@ -51,6 +51,7 @@ static inline const nr_gpu_polar_api_t *nr_gpu_polar_load_impl(int prepare)
     return api;
   if (!prepare) return NULL;
   tried = 1;
+  /* DEFERRED/DO NOT USE: NR_GPU_POLAR not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("NR_GPU_POLAR");
   if (e == NULL || atoi(e) == 0)
     return NULL;

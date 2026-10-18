@@ -780,7 +780,9 @@ int main(int argc, char **argv)
   prepare_scc(scc);
   uint64_t ssb_bitmap = 1; // Enable only first SSB with index ssb_indx=0
   fill_scc_sim(scc, &ssb_bitmap, N_RB_DL, N_RB_DL, mu, mu);
+  /* DEFERRED/DO NOT USE: ISAC_HIDDEN_WAVEFORM_DIR not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *hidden_dir = getenv("ISAC_HIDDEN_WAVEFORM_DIR");
+  /* DEFERRED/DO NOT USE: ISAC_HIDDEN_SEED not in the frozen config t26zE (2026-10-18); slated for removal */
   unsigned hidden_seed = getenv("ISAC_HIDDEN_SEED") ? strtoul(getenv("ISAC_HIDDEN_SEED"), NULL, 0) : 71231;
   if (hidden_dir) {
     *scc->physCellId = hidden_seed % 1008;

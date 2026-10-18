@@ -61,6 +61,7 @@ static int chest_stage_timing(void)
 {
   static __thread int enabled = -1;
   if (enabled < 0)
+    /* DEFERRED/DO NOT USE: ISAC_CHEST_STAGE_TIMING not in the frozen config t26zE (2026-10-18); slated for removal */
     enabled = getenv("ISAC_CHEST_STAGE_TIMING") && atoi(getenv("ISAC_CHEST_STAGE_TIMING")) == 1;
   return enabled;
 }
@@ -73,6 +74,7 @@ static uint64_t chest_cpu_ns(void)
 static int chest_delay_share(void)
 {
   static int en = -1;
+  /* DEFERRED/DO NOT USE: ISAC_CHEST_DFT_WIN not in the frozen config t26zE (2026-10-18); slated for removal */
   if (en < 0) en = getenv("ISAC_CHEST_DELAY_SHARE") && !getenv("ISAC_CHEST_DFT_WIN") ? atoi(getenv("ISAC_CHEST_DELAY_SHARE")) : 0;
   return en;
 }
@@ -1117,11 +1119,13 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
    * noise outside the window is rejected. Same overflow guard as nr_passive_est_delay(). */
   static int s_dftw = -1;
   if (s_dftw < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_CHEST_DFT_WIN not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_CHEST_DFT_WIN");
     s_dftw = (e != NULL) ? atoi(e) : 0;
   }
   static int s_dft_apply = -1;
   if (s_dft_apply < 0)
+    /* DEFERRED/DO NOT USE: ISAC_CHEST_DFT_APPLY not in the frozen config t26zE (2026-10-18); slated for removal */
     s_dft_apply = (getenv("ISAC_CHEST_DFT_APPLY") != NULL) ? 1 : 0;
   /* Branch 0 is compact on this rig and the DFT estimate equals the FIR one there (corr 0.999):
    * when APPLYING, spend the transforms only on the branches that need them. */
@@ -1616,6 +1620,7 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
   delay_t gpu_delay[NR_DL_CHEST_MAX_ANT];
   int gpu_delay_mask = 0;
   if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_CHEST_GPU_DELAY_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = (getenv("ISAC_CHEST_GPU_DELAY") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : "0")), *c = getenv("ISAC_CHEST_GPU_DELAY_CHECK");
     g_chest_gpu_delay_check = c ? atoi(c) : 64;
     atomic_store(&g_chest_gpu_delay, e && atoi(e) == 1 && nr_pdsch_gpu_exact_delay_rows ? 1 : 0);
@@ -1623,6 +1628,7 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
   if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) == 1 && !nr_dl_chest_cpu_ref && IS_PASSIVE_RX_MODE(get_softmodem_params())
       && ue->chest_freq == 0 && (config_type == NFAPI_NR_DMRS_TYPE1 || config_type == NFAPI_NR_DMRS_TYPE2)
       && fp->ofdm_symbol_size == 4096 && fp->nb_antennas_rx <= NR_DL_CHEST_MAX_ANT && !nr_dl_chest_diag_request
+      /* DEFERRED/DO NOT USE: ISAC_CHEST_DFT_WIN not in the frozen config t26zE (2026-10-18); slated for removal */
       && !chest_delay_share() && !getenv("ISAC_CHEST_DFT_WIN")) {
     static __thread c16_t *ls_rows;
     if (!ls_rows) {
@@ -1816,6 +1822,7 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
     static __thread int s_nv = -1;
     static __thread unsigned long s_nv_n = 0;
     if (s_nv < 0)
+      /* DEFERRED/DO NOT USE: ISAC_RX_BRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
       s_nv = (getenv("ISAC_RX_BRANCH") != NULL) ? 1 : 0;
     if (s_nv && (s_nv_n++ % 500) == 0)
       LOG_I(PHY, "SENSING: NVAR nvar=%u ants=%d nl=%d\n", *nvar, nvar_ant_count, nl);
@@ -2206,6 +2213,7 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int config_type = dlsch->dmrsConfigType;
   if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_CHEST_GPU_DELAY_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = (getenv("ISAC_CHEST_GPU_DELAY") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : "0")), *c = getenv("ISAC_CHEST_GPU_DELAY_CHECK");
     g_chest_gpu_delay_check = c ? atoi(c) : 64;
     atomic_store(&g_chest_gpu_delay, e && atoi(e) == 1 && nr_pdsch_gpu_exact_delay_rows ? 1 : 0);
@@ -2213,6 +2221,7 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
   const int nrx = fp->nb_antennas_rx;
   static int s_stage_dump = -1;
   if (s_stage_dump < 0)
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_STAGE_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
     s_stage_dump = getenv("ISAC_PDSCH_GPU_STAGE_DUMP") != NULL;
   int contiguous = freq_alloc->num_rbs == freq_alloc->last_rb - freq_alloc->first_rb + 1 && freq_alloc->num_rbs >= 1;
   for (int rb = freq_alloc->first_rb; !segs && contiguous && rb <= freq_alloc->last_rb; rb++)
@@ -2229,6 +2238,7 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
   const int ppr = config_type == NFAPI_NR_DMRS_TYPE1 ? 6 : 4; /* pilots (c16) per RB, as nr_pdsch_gpu_chest_grant */
   if (fp->ofdm_symbol_size != 4096 || nrx > 4 || Nl < 1 || Nl > 4 || Nl > nrx || nd < 1 || nd > 4)
     return 5;
+  /* DEFERRED/DO NOT USE: ISAC_CHEST_DFT_WIN not in the frozen config t26zE (2026-10-18); slated for removal */
   if (diag || chest_delay_share() || getenv("ISAC_CHEST_DFT_WIN") || s_stage_dump)
     return 8;
   if (nr_dl_chest_only_ant >= 0)
@@ -2330,6 +2340,7 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int config_type = dlsch->dmrsConfigType;
   if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) < 0) { /* the estimator's own lazy switch */
+    /* DEFERRED/DO NOT USE: ISAC_CHEST_GPU_DELAY_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = (getenv("ISAC_CHEST_GPU_DELAY") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : "0")), *c = getenv("ISAC_CHEST_GPU_DELAY_CHECK");
     g_chest_gpu_delay_check = c ? atoi(c) : 64;
     atomic_store(&g_chest_gpu_delay, e && atoi(e) == 1 && nr_pdsch_gpu_exact_delay_rows ? 1 : 0);
@@ -2344,6 +2355,7 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
     nrows += ((dmrs_mask >> m) & 1) * Nl * nrx * ns;
   static int s_stage_dump = -1; /* GPU5 stage records (nr_pdsch_gpu_record.c) need the CPU estimator */
   if (s_stage_dump < 0)
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_STAGE_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
     s_stage_dump = getenv("ISAC_PDSCH_GPU_STAGE_DUMP") != NULL;
   int contiguous = freq_alloc->num_rbs == freq_alloc->last_rb - freq_alloc->first_rb + 1 && freq_alloc->num_rbs >= 1;
   for (int rb = freq_alloc->first_rb; !segs && contiguous && rb <= freq_alloc->last_rb; rb++)
@@ -2353,6 +2365,7 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
                   : (config_type != NFAPI_NR_DMRS_TYPE1 && config_type != NFAPI_NR_DMRS_TYPE2) ? 3
                   : fp->ofdm_symbol_size != 4096 || nrx > 4 || Nl > 4 || ns < 1 ? 4
                   : diag ? 5
+                  /* DEFERRED/DO NOT USE: ISAC_CHEST_DFT_WIN not in the frozen config t26zE (2026-10-18); slated for removal */
                   : chest_delay_share() || getenv("ISAC_CHEST_DFT_WIN") || s_stage_dump ? 6
                   : nr_dl_chest_only_ant >= 0 ? 7
                   : nrows < 1 || nrows > GCH_MAX_TOTAL_ROWS ? 8

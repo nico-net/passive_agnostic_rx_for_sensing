@@ -38,6 +38,7 @@ static cudaError_t disc_wait() {
  * at the instant refine_kernel ended, 300-400 ms late]. */
 static int copy_fence() {
   static int v=-1;
+  /* DEFERRED/DO NOT USE: ISAC_GPU_COPY_FENCE not in the frozen config t26zE (2026-10-18); slated for removal */
   if(v<0){const char *e=getenv("ISAC_GPU_COPY_FENCE");if(!e)e=(getenv("ISAC_FATTAILS") ?: "1");v=e && atoi(e)==1;}
   return v;
 }
@@ -232,6 +233,7 @@ extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
   static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host,fft_host,fep_host,accumulate_host,lattice_host,device_alloc,device_free,prepare_host,resident::detect,resident::reset,nullptr,nullptr,nullptr,readback,upload_symbols};return &ops;
 }
 /* use_managed: returns ISAC_CSIRS_DISC_MANAGED == 1: use CUDA managed memory for unified allocations instead of mapped pinned host memory (diagnostic only). */
+/* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_MANAGED not in the frozen config t26zE (2026-10-18); slated for removal */
 static bool use_managed(void) {const char *e=getenv("ISAC_CSIRS_DISC_MANAGED");return e && atoi(e)==1;}
 /* nr_csirs_disc_gpu_alloc_unified: allocates bytes of unified memory for the discovery buffers: mapped, portable pinned host memory by default, managed memory when ISAC_CSIRS_DISC_MANAGED=1.
  *   Returns NULL for zero bytes or on failure. Exported C entry; used through the unified-memory hook of the ring and the TD front end.
@@ -482,6 +484,7 @@ static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slo
   size_t out=(size_t)n*c->n_ant*14*12*c->n_rb;
   fep_extract<<<(out+255)/256,256,0,disc_stream()>>>(cfg,desc.p,work.p,(short2 *)(ring->device_grid?ring->device_grid:ring->grid_base),n,ring->capacity,first);
   ring->device_valid=ring->device_grid!=nullptr;
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
   if(ring->device_valid && getenv("ISAC_CSIRS_DISC_DUMP"))
     for(int i=0;i<n;++i) {size_t at=(size_t)((first+i)%ring->capacity)*ring->slot_stride;
       if(disc_copy(ring->grid_base+at,ring->device_grid+at,ring->slot_stride*2,cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;

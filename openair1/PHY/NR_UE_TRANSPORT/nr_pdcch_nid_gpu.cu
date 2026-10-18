@@ -562,12 +562,14 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  if(rb<6 || rb>275 || dur<1 || dur>3 || window<1 || window>NR_PDCCH_NID_MAX_WINDOW)return nullptr;
  Context *c=new Context{};c->rb=rb;c->dur=dur;c->window=window;
  c->budget_ms=5000;
+ /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_BUDGET_MS not in the frozen config t26zE (2026-10-18); slated for removal */
  if(const char *value=getenv("ISAC_PDCCH_NID_GPU_BUDGET_MS")) {
   char *end;long n=strtol(value,&end,10);if(*value && !*end && n>=100 && n<=60000)c->budget_ms=(int)n;
  }
  int n=window*NR_PDCCH_NID_BATCH,sc=12*rb;
  Device &p=c->host;
  /* Duration 2/3 multi-symbol evidence (T19): own flag, default on (was ISAC_CSIRS_DISC). */
+ /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_MULTISYMBOL not in the frozen config t26zE (2026-10-18); slated for removal */
  const char *enable=getenv("ISAC_PDCCH_NID_MULTISYMBOL");
  p.multisymbol=!(enable && !strcmp(enable,"0"));
  int *slots=nullptr; c16_t *iq=nullptr;double *scratch=nullptr;st2_snap_t *sn=nullptr;

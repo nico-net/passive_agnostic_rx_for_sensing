@@ -140,6 +140,7 @@ static int chest_pdp_diag_on(void)
 static int harq_combine_on(void)
 {
   static int en = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_HARQ_COMBINE not in the frozen config t26zE (2026-10-18); slated for removal */
   if (en < 0) en = getenv("ISAC_PDSCH_HARQ_COMBINE") && atoi(getenv("ISAC_PDSCH_HARQ_COMBINE")) ? 1 : 0;
   return en;
 }
@@ -149,6 +150,7 @@ static int harq_combine_on(void)
 static int si_combine_on(void)
 {
   static int en = -1;
+  /* DEFERRED/DO NOT USE: ISAC_SI_SOFTCOMBINE not in the frozen config t26zE (2026-10-18); slated for removal */
   if (en < 0) en = getenv("ISAC_SI_SOFTCOMBINE") && atoi(getenv("ISAC_SI_SOFTCOMBINE")) ? 1 : 0;
   return en;
 }
@@ -293,6 +295,7 @@ static c16_t *seg_virt_prepare(const NR_DL_FRAME_PARMS *fp)
 int nr_pdsch_pin_prewarm_all(void)
 {
   static int en = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_PIN_PREWARM_ALL not in the frozen config t26zE (2026-10-18); slated for removal */
   if (en < 0) en = getenv("ISAC_PDSCH_PIN_PREWARM_ALL") && atoi(getenv("ISAC_PDSCH_PIN_PREWARM_ALL")) ? 1 : 0;
   return en;
 }
@@ -718,6 +721,7 @@ static bool prg_sweep_enabled(void)
 {
   static _Atomic int on = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
   if (on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PRG_SWEEP not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PRG_SWEEP");
     on = (e != NULL && atoi(e) == 0) ? 0 : 1;
   }
@@ -1100,6 +1104,7 @@ static int chest_tinterp_global(void)
 {
   static _Atomic int s_g = -1;
   if (s_g < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_CHEST_TINTERP not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_CHEST_TINTERP");
     s_g = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
@@ -1114,6 +1119,7 @@ static int decode_diag_on(void)
 {
   static _Atomic int on = -1;
   if (on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_DECODE_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDSCH_DECODE_DIAG");
     on = e && atoi(e) != 0;
   }
@@ -1555,6 +1561,7 @@ static void brfo_commit(void)
     return;
   t_brfo_pending = false;
   if (s_brfo < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_RX_BRANCH_FO not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_RX_BRANCH_FO");
     s_brfo = (e != NULL) && (atoi(e) != 0); // default OFF (as before the port): on-air validation pending
   }
@@ -1764,6 +1771,7 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
   job->slot = (uint8_t)slot_rx; /* n_s,f for c_init, as proc->nr_slot_rx in the CPU chest */
   {
     static _Atomic int s_tinterp = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
+    /* DEFERRED/DO NOT USE: ISAC_CHEST_TINTERP not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_tinterp < 0) { const char *e = getenv("ISAC_CHEST_TINTERP"); s_tinterp = (e != NULL && atoi(e) != 0) ? 1 : 0; }
     job->time_interp = (uint8_t)(t_tinterp_override >= 0 ? t_tinterp_override : s_tinterp);
   }
@@ -1814,6 +1822,7 @@ static bool probe_c1_on(void)
 {
   static _Atomic int s_probe_c1 = -1;
   if (s_probe_c1 < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_PROBE_C1 not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDSCH_PROBE_C1");
     s_probe_c1 = ((e && atoi(e) != 0) || nr_pdsch_solver_enabled()) ? 1 : 0;
   }
@@ -1870,6 +1879,7 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
    * gain on the table. Only the full TB decode uses it (a CB0 probe keeps the batch's own limit). */
   {
     static _Atomic int s_iters = -1;
+    /* DEFERRED/DO NOT USE: ISAC_LDPC_ITERS not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_iters < 0) { const char *e = getenv("ISAC_LDPC_ITERS"); int v = e ? atoi(e) : 8; s_iters = (v >= 1 && v <= 255) ? v : 8; }
     TB_parameters.max_ldpc_iterations = (uint8_t)s_iters;
     extern __thread int nr_pdsch_ldpc_iters_override;
@@ -1915,6 +1925,7 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
   {
     static _Atomic int s_sd = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_sd < 0)
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_TBPARM not in the frozen config t26zE (2026-10-18); slated for removal */
       s_sd = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
     /* RATE-LIMITED (2026-08-25). This fired on EVERY decode: 30204 lines / 16 MB on a 48 s run,
      * and it shares ISAC_PDSCH_TBPARM with CHESTDIAG, which is capped at 12 -- so wanting the
@@ -2357,12 +2368,14 @@ static void pdcch_occ_diag(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, co
   static _Atomic int s_on = -1;
   static int s_ids[8], s_nid = 0;
   if (s_on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_PDCCH_OCC_IDS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDSCH_PDCCH_OCC_IDS");
     for (const char *p = e; p && *p && s_nid < 7;) {
       s_ids[s_nid++] = atoi(p);
       p = strchr(p, ',');
       if (p) p++;
     }
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_PDCCH_OCC_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     s_on = getenv("ISAC_PDSCH_PDCCH_OCC_DIAG") && atoi(getenv("ISAC_PDSCH_PDCCH_OCC_DIAG")) ? 1 : 0;
   }
   if (!s_on || cfg->start_symbol > 1 || fa->num_rbs < 1 || fa->num_rbs > 275)
@@ -2553,6 +2566,7 @@ static int gp_nvfix(void)
 {
   static _Atomic int v = -1;
   if (v < 0)
+    /* DEFERRED/DO NOT USE: ISAC_RX_NVAR_FIX not in the frozen config t26zE (2026-10-18); slated for removal */
     v = getenv("ISAC_RX_NVAR_FIX") != NULL ? atoi(getenv("ISAC_RX_NVAR_FIX")) : 0;
   return v;
 }
@@ -2560,6 +2574,7 @@ static int gp_perbranch(void)
 {
   static _Atomic int v = -1;
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_RX_NVAR_PERBRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_RX_NVAR_PERBRANCH");
     v = (e != NULL) ? atoi(e) : 1;
   }
@@ -2569,6 +2584,7 @@ static int gp_norm_on(void)
 {
   static _Atomic int v = -1;
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_LLR_NORM not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_LLR_NORM");
     v = (e && atoi(e) == 0) ? 0 : 1;
   }
@@ -2578,6 +2594,7 @@ static int gp_iters(void)
 {
   static _Atomic int s_iters = -1;
   if (s_iters < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_LDPC_ITERS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_LDPC_ITERS");
     const int v = e ? atoi(e) : 8;
     s_iters = (v >= 1 && v <= 255) ? v : 8;
@@ -2594,6 +2611,7 @@ static int gp_evm_armed(int probe_last_sym)
   if (evmp < 0)
     evmp = (getenv("ISAC_PDSCH_EVM_PROBES") ?: "1") ? 1 : 0;
   if (opr < 0)
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_OWN_PDCCH_RM not in the frozen config t26zE (2026-10-18); slated for removal */
     opr = getenv("ISAC_PDSCH_OWN_PDCCH_RM") && atoi(getenv("ISAC_PDSCH_OWN_PDCCH_RM")) ? 1 : 0;
   return (evmg || opr || decode_diag_on()) && (probe_last_sym < 0 || evmp);
 }
@@ -2818,6 +2836,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     /* _Atomic, L stored before K: a consumer that sees K resolved also sees L (N passivePdsch consumers) */
     static _Atomic int s_ptrs_k = -1, s_ptrs_l = -1;
     if (s_ptrs_k < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_PTRS_K not in the frozen config t26zE (2026-10-18); slated for removal */
+      /* DEFERRED/DO NOT USE: ISAC_PTRS_L not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *ek = getenv("ISAC_PTRS_K"), *el = getenv("ISAC_PTRS_L");
       s_ptrs_l = (el && *el) ? atoi(el) : 0;
       s_ptrs_k = (ek && *ek) ? atoi(ek) : 0;
@@ -3096,6 +3116,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   {
     static _Atomic int s_tbp = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_tbp < 0)
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_TBPARM not in the frozen config t26zE (2026-10-18); slated for removal */
       s_tbp = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
     if (s_tbp)
       LOG_I(PHY,
@@ -3186,6 +3207,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * allocation's last symbol is still visited because nr_rx_pdsch() emits the LLRs there. */
   int probe_last_sym = -1;
   static _Atomic int s_probe_horizon = -1; /* _Atomic (N consumers). ISAC_PROBE_HORIZON=0: probe with the whole slot processed (A/B of the horizon) */
+  /* DEFERRED/DO NOT USE: ISAC_PROBE_HORIZON not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s_probe_horizon < 0) { const char *e = getenv("ISAC_PROBE_HORIZON"); s_probe_horizon = (e && atoi(e) == 0) ? 0 : 1; }
   if (t_probe_first_seg && s_probe_horizon && !ssb_unav && !t_probe_no_horizon && !t_gw_used) { /* GrantWork: full slot */
     const uint32_t Kcb = (cw->ldpcBaseGraph == 2) ? 3840u : 8448u;
@@ -3487,6 +3509,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   {
     static _Atomic int s_xant = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_xant < 0)
+      /* DEFERRED/DO NOT USE: ISAC_XANT not in the frozen config t26zE (2026-10-18); slated for removal */
       s_xant = (getenv("ISAC_XANT") != NULL) ? 1 : 0;
     static _Atomic unsigned long s_xant_n = 0;
     if (s_xant && fp->nb_antennas_rx >= 2 && (atomic_fetch_add(&s_xant_n, 1) % 40000) == 0) {
@@ -3700,6 +3723,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       {
         static _Atomic int s_dc_fix = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
         if (s_dc_fix < 0) {
+          /* DEFERRED/DO NOT USE: ISAC_DC_FIX not in the frozen config t26zE (2026-10-18); slated for removal */
           const char *e = getenv("ISAC_DC_FIX");
           s_dc_fix = (e != NULL && atoi(e) != 0) ? 1 : 0;
         }
@@ -3733,6 +3757,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   {
     extern __thread int nr_pdsch_chest_occ_override;
     static int s_occ = -1;
+    /* DEFERRED/DO NOT USE: ISAC_CHEST_OCC not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_occ < 0) s_occ = getenv("ISAC_CHEST_OCC") ? atoi(getenv("ISAC_CHEST_OCC")) : 0;
     const int occ_on = nr_pdsch_chest_occ_override >= 0 ? nr_pdsch_chest_occ_override : s_occ;
     const int nlay = cw->Nl;
@@ -3810,6 +3835,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   {
     extern __thread int nr_dlsch_irc_override;
     static int s_ircenv = -1;
+    /* DEFERRED/DO NOT USE: ISAC_RX_IRC not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_ircenv < 0) s_ircenv = getenv("ISAC_RX_IRC") ? atoi(getenv("ISAC_RX_IRC")) : 0;
     const int irc_mode = nr_dlsch_irc_override >= 0 ? nr_dlsch_irc_override : s_ircenv;
     nr_irc_dmrs_cov.valid = 0;
@@ -3944,6 +3970,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * joinable to EVMGRANT on rnti + frame.slot. */
   {
     static _Atomic int s_cdmd = -1;
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_CDM_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_cdmd < 0) s_cdmd = getenv("ISAC_PDSCH_CDM_DIAG") && atoi(getenv("ISAC_PDSCH_CDM_DIAG")) ? 1 : 0;
     if (s_cdmd && !seg_path && !t_quiet && !t_probe_first_seg && grant->rnti_class == 0
         && dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1 && dlsch_config->dlDmrsSymbPos) {
@@ -3987,6 +4014,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     static uint32_t s_rlast;
     static pthread_mutex_t s_rmu = PTHREAD_MUTEX_INITIALIZER;
     if (s_rd < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_RAW_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_RAW_DUMP_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_RAW_DUMP_MINNL not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *p = getenv("ISAC_PDSCH_RAW_DUMP"), *mx = getenv("ISAC_PDSCH_RAW_DUMP_MAX"), *mn = getenv("ISAC_PDSCH_RAW_DUMP_MINNL");
       s_rleft = mx ? atoi(mx) : 3000;
       s_rminnl = mn ? atoi(mn) : 3;
@@ -4023,6 +4053,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   }
   static _Atomic int s_tinterp = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
   if (s_tinterp < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_CHEST_TINTERP not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_CHEST_TINTERP");
     s_tinterp = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
@@ -4087,6 +4118,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   {
     static _Atomic int s_nvfix = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_nvfix < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_RX_NVAR_FIX not in the frozen config t26zE (2026-10-18); slated for removal */
       s_nvfix = (getenv("ISAC_RX_NVAR_FIX") != NULL) ? atoi(getenv("ISAC_RX_NVAR_FIX")) : 0;
     }
     const uint32_t den = s_nvfix ? (uint32_t)(n_dmrs_sym * cw->Nl)
@@ -4107,6 +4139,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   {
     static _Atomic int s_pb = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_pb < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_RX_NVAR_PERBRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_RX_NVAR_PERBRANCH");
       s_pb = (e != NULL) ? atoi(e) : 1;
     }
@@ -4366,6 +4399,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       pthread_mutex_unlock(&s_dfo_lock);
       static _Atomic int s_apply = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
       if (s_apply < 0) {
+        /* DEFERRED/DO NOT USE: ISAC_DMRS_FO_APPLY not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_DMRS_FO_APPLY");
         s_apply = (e != NULL && atoi(e) != 0) ? 1 : 0;
       }
@@ -4462,6 +4496,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   {
     static _Atomic int s_cd = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_cd < 0) // ISAC_CHEST_DIAG=1 gives the 12 CHESTDIAG lines without TBPARM's per-TB volume
+      /* DEFERRED/DO NOT USE: ISAC_CHEST_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_TBPARM not in the frozen config t26zE (2026-10-18); slated for removal */
       s_cd = (getenv("ISAC_PDSCH_TBPARM") != NULL || getenv("ISAC_CHEST_DIAG") != NULL) ? 1 : 0;
     static _Atomic int s_cd_left = 40; /* log budget shared by the passivePdsch consumers */
     if (s_cd && s_cd_left > 0 && cw->Nl >= 1) {
@@ -4704,6 +4740,8 @@ gpu_llr_ready:;
   c16_t(*rho_dl_p)[NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][rx_size_symbol] = NULL;
   {
     static int s_mlw = -1;
+    /* DEFERRED/DO NOT USE: ISAC_RX_EQ_AB not in the frozen config t26zE (2026-10-18); slated for removal */
+    /* DEFERRED/DO NOT USE: ISAC_RX_ML_2L not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_mlw < 0) s_mlw = (getenv("ISAC_RX_ML_2L") && atoi(getenv("ISAC_RX_ML_2L"))) || (getenv("ISAC_RX_EQ_AB") && atoi(getenv("ISAC_RX_EQ_AB")));
     if (s_mlw && cw->Nl == 2) {
       static __thread fourDimArray_t *toFree6 = NULL;
@@ -4752,6 +4790,7 @@ gpu_llr_ready:;
   if (fp->nb_antennas_rx > 1 && dmrs_first >= 0) {
     static _Atomic int s_pdsch_ant_gate = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_pdsch_ant_gate < 0)
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_ANT_GATE not in the frozen config t26zE (2026-10-18); slated for removal */
       s_pdsch_ant_gate = (getenv("ISAC_PDSCH_ANT_GATE") != NULL && atoi(getenv("ISAC_PDSCH_ANT_GATE")) != 0) ? 1 : 0;
     if (s_pdsch_ant_gate) {
       double rough[8];
@@ -4812,6 +4851,7 @@ gpu_llr_ready:;
    * smaller error accumulating across a slot. Opt-in until an A/B shows it earns its place. */
   static _Atomic int s_sfo_corr = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
   if (s_sfo_corr < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_SFO_CORRECT not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_SFO_CORRECT");
     s_sfo_corr = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
@@ -4883,6 +4923,7 @@ gpu_llr_ready:;
     memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc));
     { /* LLRZERO ISAC_MMSE2_DIAG=1 */
       static int s_m2d = -1;
+      /* DEFERRED/DO NOT USE: ISAC_MMSE2_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
       if (s_m2d < 0) s_m2d = getenv("ISAC_MMSE2_DIAG") ? atoi(getenv("ISAC_MMSE2_DIAG")) : 0;
       memset(&nr_mmse2_diag, 0, sizeof(nr_mmse2_diag));
       nr_mmse2_diag.on = s_m2d;
@@ -4890,6 +4931,7 @@ gpu_llr_ready:;
     static int s_evmp = -1; /* ISAC_PDSCH_EVM_PROBES=1 (diagnostic): layout probes are measured too */
     if (s_evmp < 0) s_evmp = (getenv("ISAC_PDSCH_EVM_PROBES") ?: "1") ? 1 : 0;
     static int s_opr = -1; /* the own-PDCCH detector reads the per-RB error map */
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_OWN_PDCCH_RM not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_opr < 0) s_opr = getenv("ISAC_PDSCH_OWN_PDCCH_RM") && atoi(getenv("ISAC_PDSCH_OWN_PDCCH_RM")) ? 1 : 0;
     nr_pdsch_evm_acc.armed = (s_evmg || s_opr || decode_diag_on()) && (probe_last_sym < 0 || s_evmp) && !gpu_llr && !gw_ready;
   }
@@ -5023,10 +5065,12 @@ gpu_llr_ready:;
   {
     static _Atomic int s_evm = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_evm < 0)
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_EVM not in the frozen config t26zE (2026-10-18); slated for removal */
       s_evm = (getenv("ISAC_PDSCH_EVM") != NULL) ? 1 : 0;
     static __thread unsigned long s_evm_n = 0;
     /* ISAC_PDSCH_EVM=2: EVM per (symbol, layer) -- the axis the single-symbol probe below cannot see.
      * Written for the rank-4 bed where 5-symbol grants decode and 12/13-symbol ones do not. */
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_EVM not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_evm && !gw_ready && getenv("ISAC_PDSCH_EVM")[0] == '2' && demod_ok && (s_evm_n % 10) == 0) {
       const int lmax = (1 << (cw->qamModOrder / 2)) - 1;
       double ms = 0.0; int nlev = 0;
@@ -5195,7 +5239,9 @@ gpu_llr_ready:;
    * mcs_table, then int16 llr[G]. ISAC_PDSCH_LLR_DUMP_MAX grants (default 400). */
   static int s_dall = -1; /* ISAC_PDSCH_LLR_DUMP_ALL=1: every RNTI class (SI grants validate the offline harness) */
   static _Atomic int s_dfull = -1; /* ISAC_PDSCH_LLR_DUMP_FULL=1: exclude partial CB0 probes */
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_LLR_DUMP_FULL not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s_dfull < 0) s_dfull = getenv("ISAC_PDSCH_LLR_DUMP_FULL") && atoi(getenv("ISAC_PDSCH_LLR_DUMP_FULL")) != 0;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_LLR_DUMP_ALL not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s_dall < 0) s_dall = getenv("ISAC_PDSCH_LLR_DUMP_ALL") && atoi(getenv("ISAC_PDSCH_LLR_DUMP_ALL")) ? 1 : 0;
   if (demod_ok && (grant->rnti_class == 0 || s_dall) && !(s_dfull && t_probe_first_seg)) {
     static FILE *s_df;
@@ -5204,6 +5250,8 @@ gpu_llr_ready:;
     pthread_mutex_lock(&s_dmu);
     if (!s_dinit) {
       s_dinit = 1;
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_LLR_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_LLR_DUMP_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *pth = getenv("ISAC_PDSCH_LLR_DUMP"), *mx = getenv("ISAC_PDSCH_LLR_DUMP_MAX");
       s_dleft = mx ? atoi(mx) : 400;
       if (pth && *pth) s_df = fopen(pth, "wb");
@@ -5293,6 +5341,7 @@ gpu_llr_ready:;
     {
       static _Atomic int s_llr_scale = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
       if (s_llr_scale < 0) {
+        /* DEFERRED/DO NOT USE: ISAC_LLR_SCALE not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_LLR_SCALE");
         s_llr_scale = (e != NULL) ? atoi(e) : 0;
       }
@@ -5373,6 +5422,7 @@ gpu_llr_ready:;
      * already right and keeps the soft information where it was not. ISAC_LLR_NORM=0 disables. */
     {
       static _Atomic int s_norm = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
+      /* DEFERRED/DO NOT USE: ISAC_LLR_NORM not in the frozen config t26zE (2026-10-18); slated for removal */
       if (s_norm < 0) { const char *e = getenv("ISAC_LLR_NORM"); s_norm = (e && atoi(e) == 0) ? 0 : 1; }
       if (s_norm && G >= 64) {
         /* K38: the mean is taken over code block 0's span, ceil(G/C) LLRs, not all G: a layout probe
@@ -5432,6 +5482,7 @@ gpu_llr_ready:;
     {
       static _Atomic int s_rvr = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
       if (s_rvr < 0) {
+        /* DEFERRED/DO NOT USE: ISAC_RV_RETRY not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_RV_RETRY");
         s_rvr = (e != NULL && atoi(e) != 0) ? 1 : 0;
       }
@@ -5615,6 +5666,7 @@ gpu_llr_ready:;
         /* LLRFILL (2026-09-16): per-symbol non-zero LLR counts of the assembled buffer, one shot when
          * llr_have < 0.9 G -- which symbols/layers come out empty (rank-4 bed: llr_have 3 % of G). */
         static _Atomic int s_llrfill_left = 3;
+        /* DEFERRED/DO NOT USE: ISAC_LLRFILL_ALL not in the frozen config t26zE (2026-10-18); slated for removal */
         if (!(gp_ok && gp_tb) && cw->Nl > 1 && (llr_have != G || getenv("ISAC_LLRFILL_ALL")) && atomic_load(&s_llrfill_left) > 0) {
           atomic_fetch_sub(&s_llrfill_left, 1);
           char b[400]; int u = 0; uint32_t k = 0;
@@ -5682,6 +5734,7 @@ gpu_llr_ready:;
               ku += snprintf(kb + ku, sizeof(kb) - ku, "%s%.1f", k ? "," : "",
                              ea->n_k[worst][k] && ea->err_k[worst][k] > 0 ? 10.0 * log10(ea->n_k[worst][k] / ea->err_k[worst][k]) : 60.0);
             static _Atomic int s_evmrb = -1; /* ISAC_PDSCH_EVM_RB=1 (diagnostic): per-RB decision-directed SNR of symbols 0/1/3 */
+            /* DEFERRED/DO NOT USE: ISAC_PDSCH_EVM_RB not in the frozen config t26zE (2026-10-18); slated for removal */
             if (s_evmrb < 0) s_evmrb = getenv("ISAC_PDSCH_EVM_RB") && atoi(getenv("ISAC_PDSCH_EVM_RB")) ? 1 : 0;
             if (su && s_evmrb && dlsch_config->start_symbol <= 1 && freq_alloc->num_rbs <= 276) {
               char rb[3][280];
@@ -5801,6 +5854,7 @@ gpu_llr_ready:;
   if (t_gw != NULL && !t_quiet && !t_gw_capture) {
     static _Atomic int s_rvr_gw = -1;
     if (s_rvr_gw < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_RV_RETRY not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_RV_RETRY");
       s_rvr_gw = (e != NULL && atoi(e) != 0) ? 1 : 0;
     }
@@ -5824,6 +5878,7 @@ gpu_llr_ready:;
   {
     static _Atomic int s_tbp2 = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_tbp2 < 0)
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_TBPARM not in the frozen config t26zE (2026-10-18); slated for removal */
       s_tbp2 = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
     if (s_tbp2) {
       /* These are the PDUs actually supplied to this TB after occasion/overlap filtering.
@@ -5949,6 +6004,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          nr_pdsch_passive_decode_result_t *out)
 {
   static int s_low = -1;
+  /* DEFERRED/DO NOT USE: ISAC_GPU_DISC_SMS_LOW not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s_low < 0) { const char *e = getenv("ISAC_GPU_DISC_SMS_LOW"); s_low = e && atoi(e) > 0; }
   const bool large = s_low && freq_alloc->num_rbs > 96;
   if (large) nr_gpu_budget_rt_large_begin();
@@ -5981,6 +6037,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_entry(PHY_VARS_NR_UE *ue,
   }
   nr_csirs_full_apply(dlsch_config, (uint32_t)(proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx));
   static _Atomic int s_xab = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_CSI_EXTENT_AB not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s_xab < 0) s_xab = getenv("ISAC_PDSCH_CSI_EXTENT_AB") && atoi(getenv("ISAC_PDSCH_CSI_EXTENT_AB")) ? 1 : 0;
   extern __thread int nr_dlsch_csi_extent_override;
   if (!s_xab || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_quiet || t_llr_ovr
@@ -6020,6 +6077,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_tintab(PHY_VARS_NR_UE *ue
                                                               nr_pdsch_passive_decode_result_t *out)
 {
   static _Atomic int s_tab = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_TINT_AB not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s_tab < 0) s_tab = getenv("ISAC_PDSCH_TINT_AB") && atoi(getenv("ISAC_PDSCH_TINT_AB")) ? 1 : 0;
   if (!s_tab || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_quiet || t_llr_ovr
       || nr_agnostic_v2() || harq_combine_on() || t_tinterp_override >= 0)
@@ -6063,6 +6121,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_qamab(PHY_VARS_NR_UE *ue,
   static int s_ab_modes[4];
   if (s_ab_n < 0) {
     int n = 0;
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_MMSE_AB not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDSCH_MMSE_AB");
     for (const char *q = e; q && *q && n < 4;) {
       s_ab_modes[n++] = atoi(q);
@@ -6075,6 +6134,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_qamab(PHY_VARS_NR_UE *ue,
   const int ab_nl = __builtin_popcount(dlsch_config->dmrs_ports);
   const int ab_qm = nr_get_Qm_dl(grant->mcs, grant->mcs_table);
   static _Atomic int s_ab_qpsk = -1; /* ISAC_PDSCH_MMSE_AB_QPSK=1: also pair the QPSK grants (regression check) */
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_MMSE_AB_QPSK not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s_ab_qpsk < 0) s_ab_qpsk = getenv("ISAC_PDSCH_MMSE_AB_QPSK") && atoi(getenv("ISAC_PDSCH_MMSE_AB_QPSK")) ? 1 : 0;
   if (s_ab_n == 0 || ab_nl < 2 || (ab_qm <= 2 && !s_ab_qpsk) || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg
       || t_gw_capture || t_quiet || t_llr_ovr || nr_agnostic_v2() || harq_combine_on())
@@ -6115,6 +6175,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_qamab(PHY_VARS_NR_UE *ue,
 static int s_scsi_on(void)
 {
   static _Atomic int s = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_STATIC_CSI_RETRY not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s < 0) s = getenv("ISAC_PDSCH_STATIC_CSI_RETRY") && atoi(getenv("ISAC_PDSCH_STATIC_CSI_RETRY")) ? 1 : 0;
   return s;
 }
@@ -6155,6 +6216,7 @@ static int static_csi_resources(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, long a
 static int own_pdcch_hypotheses(const nr_pdsch_evm_acc_t *ea, int nrb, uint8_t hyp[][276], int max, int *run_first, int *run_last)
 {
   static _Atomic double s_db = -1.0;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_OWN_PDCCH_DB not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s_db < 0.0) { const char *e = getenv("ISAC_PDSCH_OWN_PDCCH_DB"); s_db = e && atof(e) > 0.0 ? atof(e) : 4.0; }
   if (nrb < 1 || nrb > 276) return 0;
   signed char dirty[276];
@@ -6277,6 +6339,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_gated(PHY_VARS_NR_UE
   t_pdtim_body++;
   static int s_prio = -1; /* GPUSCHED ISAC_PDSCH_GPU_PRIO=1: probes and retry bodies on the low-priority GPU streams */
   if (s_prio < 0)
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_PRIO not in the frozen config t26zE (2026-10-18); slated for removal */
     s_prio = getenv("ISAC_PDSCH_GPU_PRIO") && atoi(getenv("ISAC_PDSCH_GPU_PRIO")) == 1;
   if (s_prio)
     nr_pdsch_gpu_exact_set_lowprio(t_probe_first_seg || t_pdtim_body > 1);
@@ -6362,6 +6425,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
 static int signal_geom_on(void)
 {
   static _Atomic int s = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_SIGNAL_GEOM_RETRY not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s < 0) s = getenv("ISAC_PDSCH_SIGNAL_GEOM_RETRY") && atoi(getenv("ISAC_PDSCH_SIGNAL_GEOM_RETRY")) ? 1 : 0;
   return s;
 }
@@ -6451,6 +6515,7 @@ static int retry_budget_us(void)
 {
   static int v = -1;
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_RETRY_BUDGET_US not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDSCH_RETRY_BUDGET_US"), *u = (getenv("ISAC_FATTAILS") ?: "1");
     v = e ? atoi(e) : (u && atoi(u) ? 1000 : 0);
     if (v < 0)
@@ -6573,10 +6638,12 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
    * A successful PDU is retained for data-aided reconstruction. */
   static _Atomic int tdra_retry = -1, csi_retry = -1, cdm_retry = -1, wide_retry = -1, csi_population_retry = -1, tint_retry = -1, opr_retry = -1;
   if (opr_retry < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_OWN_PDCCH_RM not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDSCH_OWN_PDCCH_RM"); /* DECODE-RES: rate-match around the scheduling PDCCH's PRBs on symbol 0 (S=0 grants) */
     opr_retry = e && atoi(e) != 0;
   }
   if (tint_retry < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_TINTERP_RETRY not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDSCH_TINTERP_RETRY"); /* DECODE-RES: also try the flipped channel-estimate time interpolation */
     tint_retry = e && atoi(e) != 0;
   }
@@ -6607,6 +6674,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   static float s_rsnr = -1000.f;
   static _Atomic uint64_t s_rsnr_skip, s_rsnr_seen;
   if (s_rsnr == -1000.f)
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_RETRY_SNR_MIN_DB not in the frozen config t26zE (2026-10-18); slated for removal */
     s_rsnr = getenv("ISAC_PDSCH_RETRY_SNR_MIN_DB") ? (float)atof(getenv("ISAC_PDSCH_RETRY_SNR_MIN_DB")) : -999.f;
   if (s_rsnr > -999.f && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg) {
     const uint64_t n = atomic_fetch_add_explicit(&s_rsnr_seen, 1, memory_order_relaxed) + 1;
@@ -6852,6 +6920,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   /* DECODE-RES item 2: the full-band non-TRS CSI-RS of this network (static_csi_resources) rate-matched on a failed grant of those four slot phases. Tried with the
    * grant's S and, when legal, the toggled S; the first CRC pass is kept. Logs STATICCSI. */
   static _Atomic int s_scsi = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_STATIC_CSI_RETRY not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s_scsi < 0) s_scsi = getenv("ISAC_PDSCH_STATIC_CSI_RETRY") && atoi(getenv("ISAC_PDSCH_STATIC_CSI_RETRY")) ? 1 : 0;
   if (s_scsi && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg && !t_gw_capture && !t_gw_used
       && (!t_quiet || t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && !harq_combine_on() && grant->source_absolute_slot >= 0) {
@@ -7234,6 +7303,7 @@ int nr_pdsch_passive_gw_cb0(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypothesis
   /* C1 (K38): the shared LLRs are not normalised; this hypothesis's own shift, over its own ceil(G/C). */
   static _Atomic int s_norm = -1;
   if (s_norm < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_LLR_NORM not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_LLR_NORM");
     s_norm = (e && atoi(e) == 0) ? 0 : 1;
   }
@@ -7290,6 +7360,7 @@ int nr_pdsch_passive_gw_cb0_item(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypot
     *flags |= hflags;
   static _Atomic int s_norm = -1;
   if (s_norm < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_LLR_NORM not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_LLR_NORM");
     s_norm = (e && atoi(e) == 0) ? 0 : 1;
   }
@@ -7422,6 +7493,7 @@ void nr_pdsch_passive_gw_check(nr_td_grantwork_t *gw, nr_pdsch_passive_decode_st
 {
   static _Atomic int s_on = -1;
   if (s_on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_TD_GW_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_TD_GW_CHECK");
     s_on = e ? atoi(e) : 0;
   }
@@ -7547,6 +7619,7 @@ void nr_pdsch_passive_gw_profile(nr_td_grantwork_t *gw, bool used)
 {
   static _Atomic int s_on = -1;
   if (s_on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_TD_GW_PROFILE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_TD_GW_PROFILE");
     s_on = (e && atoi(e) != 0) ? 1 : 0;
   }
@@ -7615,6 +7688,7 @@ static void probe_equiv_check_body(PHY_VARS_NR_UE *ue,
 {
   static _Atomic int s_on = -1; /* _Atomic: N consumers */
   if (s_on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_TD_PROBE_EQUIV_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_TD_PROBE_EQUIV_CHECK");
     s_on = (e != NULL) ? atoi(e) : 0; /* 1: probe vs full; 2: also the cache-hit arm */
   }
@@ -7647,6 +7721,7 @@ static void probe_equiv_check_body(PHY_VARS_NR_UE *ue,
      * chest estimates a single branch (chest_only = k) and the non-planned rows are exercised. */
     static _Atomic int s_branch = -2;
     if (s_branch == -2) {
+      /* DEFERRED/DO NOT USE: ISAC_TD_PROBE_EQUIV_BRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_TD_PROBE_EQUIV_BRANCH");
       s_branch = (e != NULL) ? atoi(e) : -1;
     }

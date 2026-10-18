@@ -283,24 +283,35 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  g.rb=max_rb;
  const char *duty=(getenv("ISAC_PDCCH_NID_GPU_DUTY") ?: "1");
  g.duty_enabled=duty && !strcmp(duty,"1");
+ /* DEFERRED/DO NOT USE: ISAC_DMRS_NID_SOLVE not in the frozen config t26zE (2026-10-18); slated for removal */
  {const char *sv=getenv("ISAC_DMRS_NID_SOLVE");g.primary=sv && !strcmp(sv,"3");}
  if(g.primary) {
   g.duty_enabled=true; /* feedback and wake edges are needed */
+  /* DEFERRED/DO NOT USE: ISAC_DMRS_NID_SOLVE_GRACE_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   g.grace_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_GRACE_MS",4000,0,60000);
+  /* DEFERRED/DO NOT USE: ISAC_DMRS_NID_SOLVE_MAINTAIN_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   g.primary_maintain_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_MAINTAIN_MS",2000,1,600000);
+  /* DEFERRED/DO NOT USE: ISAC_DMRS_NID_SOLVE_RECHECK_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   g.reverify_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_RECHECK_MS",15000,1,600000);
  }
+ /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_ACQUIRE_MS not in the frozen config t26zE (2026-10-18); slated for removal */
  g.acquire_ms=env_int("ISAC_PDCCH_NID_GPU_ACQUIRE_MS",5000,1,60000);
+ /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_MAINTAIN_MS not in the frozen config t26zE (2026-10-18); slated for removal */
  g.maintain_ms=env_int("ISAC_PDCCH_NID_GPU_MAINTAIN_MS",500,1,60000);
+ /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_NODROP not in the frozen config t26zE (2026-10-18); slated for removal */
  {const char *nd=getenv("ISAC_PDCCH_NID_GPU_NODROP");g.nodrop=nd && !strcmp(nd,"1");}
  g.recheck_ms=env_int("ISAC_PDCCH_NID_GPU_RECHECK_MS",250,1,600000);
  const char *duration=getenv("ISAC_COREMAP_IDSWEEP_DUR");
  g.dur=duration?atoi(duration):3;
  if(g.dur<1)g.dur=1;
  if(g.dur>3)g.dur=3;
+ /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_INCREMENTAL not in the frozen config t26zE (2026-10-18); slated for removal */
  g.incremental=(getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL")==NULL || strcmp(getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL"),"0")); /* own flag, default on (was ISAC_CSIRS_DISC) */
+ /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_BATCH not in the frozen config t26zE (2026-10-18); slated for removal */
  g.batch_size=g.incremental?env_int("ISAC_PDCCH_NID_GPU_BATCH",64,1,NR_PDCCH_NID_BATCH):NR_PDCCH_NID_BATCH;
+ /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_EVERY not in the frozen config t26zE (2026-10-18); slated for removal */
  g.every=g.incremental?1:env_int("ISAC_PDCCH_NID_GPU_EVERY",2,1,1000);
+ /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_WINDOW not in the frozen config t26zE (2026-10-18); slated for removal */
  g.window=env_int("ISAC_PDCCH_NID_GPU_WINDOW",10,1,NR_PDCCH_NID_MAX_WINDOW);
  if(g.nodrop) {
   pthread_condattr_t ca;

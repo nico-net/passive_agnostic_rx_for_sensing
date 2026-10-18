@@ -453,9 +453,11 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   {
     static _Atomic int s_cfgtrace = -1;
     if (s_cfgtrace < 0)
+      /* DEFERRED/DO NOT USE: ISAC_PDCCH_CFGTRACE not in the frozen config t26zE (2026-10-18); slated for removal */
       s_cfgtrace = (getenv("ISAC_PDCCH_CFGTRACE") != NULL) ? 1 : 0;
     static _Atomic int s_cfgslot = -2;
     if (s_cfgslot == -2) {
+      /* DEFERRED/DO NOT USE: ISAC_PDCCH_CFGTRACE_SLOT not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_PDCCH_CFGTRACE_SLOT");
       s_cfgslot = e ? atoi(e) : -1; // -1 = every slot
     }
@@ -678,6 +680,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
        *
        * "1" logs every candidate (only ever do this on a short, deliberate capture); "25" every
        * 25th. Unset is off. */
+      /* DEFERRED/DO NOT USE: ISAC_TSYNC_AUDIT not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e_ = getenv("ISAC_TSYNC_AUDIT");
       audit = (e_ != NULL) ? atoi(e_) : 0;
       if (e_ != NULL && audit < 1) {
@@ -767,6 +770,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
     /* ISAC_PDCCH_ANT_MASK=<hex>: force the kept set (A/B tool: 0x3 = branches 0+1, what 2 RX uses). */
     static _Atomic int s_force_mask = -1;
     if (s_force_mask < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_PDCCH_ANT_MASK not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_PDCCH_ANT_MASK");
       s_force_mask = e ? (int)strtol(e, NULL, 0) : 0;
     }
@@ -1175,6 +1179,7 @@ void nr_pdcch_llr_probe(const char *path, int frame, int slot, int cce, int L, u
 {
   static _Atomic int s_on = -1;
   if (s_on < 0)
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_LLRPROBE not in the frozen config t26zE (2026-10-18); slated for removal */
     s_on = (getenv("ISAC_PDCCH_LLRPROBE") != NULL) ? 1 : 0;
   if (!s_on)
     return;
@@ -1182,6 +1187,7 @@ void nr_pdcch_llr_probe(const char *path, int frame, int slot, int cce, int L, u
    * provides the control arm. SIB1 sits in one slot index, so filtering to it costs nothing. */
   static _Atomic int s_slot = -2;
   if (s_slot == -2) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_LLRPROBE_SLOT not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e2 = getenv("ISAC_PDCCH_LLRPROBE_SLOT");
     s_slot = e2 ? atoi(e2) : -1;
   }

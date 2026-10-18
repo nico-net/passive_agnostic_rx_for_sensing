@@ -182,6 +182,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
     snprintf(discovery, sizeof(discovery), ",\"csirs_disc_readmit_skipped\":%" PRIu64,
              m->csirs_disc_readmit_skipped);
   char traffic[128] = "";
+  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_TRAFFIC_METRICS not in the frozen config t26zE (2026-10-18); slated for removal */
   if (getenv("ISAC_USRP_RING_TRAFFIC_METRICS"))
     snprintf(traffic, sizeof(traffic), ",\"usrp_ring_copy_bytes\":%" PRIu64 ",\"usrp_ring_direct_bytes\":%" PRIu64,
              m->usrp_ring_copy_bytes, m->usrp_ring_direct_bytes);

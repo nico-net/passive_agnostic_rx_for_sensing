@@ -167,7 +167,9 @@ static void probe_locked(void)
   }
 #endif
 finish:
+  /* DEFERRED/DO NOT USE: ISAC_GPU_MEMORY_MODEL not in the frozen config t26zE (2026-10-18); slated for removal */
   caps.model=nr_gpu_choose_model(&caps,getenv("ISAC_GPU_MEMORY_MODEL"));
+  /* DEFERRED/DO NOT USE: ISAC_GPU_SHARED_MANAGED not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *opt=getenv("ISAC_GPU_SHARED_MANAGED");
   managed=opt && !strcmp(opt,"1");
   report(0,"SENSING: GPU_PLATFORM device=%d name=\"%s\" cc=%d.%d integrated=%d pageableMemoryAccess=%d pageableMemoryAccessUsesHostPageTables=%d canMapHostMemory=%d concurrentManagedAccess=%d hostNativeAtomicSupported=%d total=%zu free=%zu model=%s managed=%d",

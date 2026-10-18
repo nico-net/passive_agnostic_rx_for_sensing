@@ -1491,6 +1491,7 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
     if (nr_gpu_buf_alloc(&g_jb[i], sizeof(JobK)) != 0)
       return -1;
   g_prio = nr_pdsch_gpu_prio_on();
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_EXACT_DEMOD_PROF not in the frozen config t26zE (2026-10-18); slated for removal */
   g_prof = getenv("ISAC_PDSCH_GPU_EXACT_DEMOD_PROF") && atoi(getenv("ISAC_PDSCH_GPU_EXACT_DEMOD_PROF")) == 1;
   /* first launches before the RX fence (module load, kernel images) */
   nr_gpu_demod_job_t j = {};

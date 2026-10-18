@@ -1813,6 +1813,7 @@ static void configure_common_BWP_dl(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_Do
      * Those are exactly the widths that were WRONG when the DCI payload was first decoded
      * (CLAUDE.md sec 12), so deriving them beats guessing. NOT obtainable from SIB1: the DEDICATED
      * CORESET/search space, DM-RS additional position, MCS table, CSI-RS resources -> RRCSetup. */
+    /* DEFERRED/DO NOT USE: ISAC_OTA_CFG not in the frozen config t26zE (2026-10-18); slated for removal */
     if (bwp_id == 0 && getenv("ISAC_OTA_CFG")) {
       const int N = bwp->BWPSize;
       int fd_bits = 0;
@@ -2393,9 +2394,11 @@ static void publish_sib1_pdcch_prior(const NR_UE_MAC_INST_t *mac, const NR_Servi
  * In capture mode the same event revalidates the handoff before declaring LIVE. */
 static bool passive_acquisition_sib1(NR_UE_MAC_INST_t *mac, NR_ServingCellConfigCommonSIB_t *scc)
 {
+  /* DEFERRED/DO NOT USE: ISAC_AUTO_ACQUIRE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *automatic = getenv("ISAC_AUTO_ACQUIRE");
   if (!IS_PASSIVE_RX_MODE(get_softmodem_params()) || !automatic || strcmp(automatic, "1"))
     return false;
+  /* DEFERRED/DO NOT USE: ISAC_ACQ_PROBE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *probe_env = getenv("ISAC_ACQ_PROBE");
   const bool probe = probe_env && !strcmp(probe_env, "1");
   const NR_FrequencyInfoDL_SIB_t *dl = &scc->downlinkConfigCommon.frequencyInfoDL;

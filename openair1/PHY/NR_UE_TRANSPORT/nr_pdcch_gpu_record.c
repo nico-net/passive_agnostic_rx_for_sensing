@@ -15,7 +15,9 @@ void nr_pdcch_gpu_record_cpu(const PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
   if (__atomic_load_n(&enabled, __ATOMIC_RELAXED) == 0) return;
   pthread_mutex_lock(&lock);
   if (enabled < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_GPU_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
     path = getenv("ISAC_PDCCH_GPU_DUMP");
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_GPU_DUMP_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *limit = getenv("ISAC_PDCCH_GPU_DUMP_MAX");
     left = limit ? atoi(limit) : 128;
     __atomic_store_n(&enabled, path && *path, __ATOMIC_RELAXED);

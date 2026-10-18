@@ -37,6 +37,7 @@ static const unsigned int a = 1664525lu;
 void randominit()
 {
   unsigned long seed;
+  /* DEFERRED/DO NOT USE: OAI_RNGSEED not in the frozen config t26zE (2026-10-18); slated for removal */
   const char* str_oai_rngseed = getenv("OAI_RNGSEED");
   if (str_oai_rngseed != NULL) {
     char *end;

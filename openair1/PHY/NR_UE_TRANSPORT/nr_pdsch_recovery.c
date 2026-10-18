@@ -131,6 +131,7 @@ static void add_cores(cpu_set_t *set, const char *list)
 static void pick_cores(cpu_set_t *set, const char *cores)
 {
   CPU_ZERO(set);
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_RECOVERY_CORES not in the frozen config t26zE (2026-10-18); slated for removal */
   if (!cores) cores = getenv("ISAC_PDSCH_RECOVERY_CORES");
   if (cores) {
     add_cores(set, cores);
@@ -138,7 +139,12 @@ static void pick_cores(cpu_set_t *set, const char *cores)
   }
   cpu_set_t busy;
   CPU_ZERO(&busy);
+  /* DEFERRED/DO NOT USE: ISAC_UE_RT_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   static const char *const keys[] = {"ISAC_PDSCH_CORES", "ISAC_USRP_RING_CORE", "ISAC_UE_RT_CORE", "ISAC_PUSCH_CORES", "ISAC_PDCCH_USS_CORE",
+                                     /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
+                                     /* DEFERRED/DO NOT USE: ISAC_PDCCH_JOINT_ANON_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
+                                     /* DEFERRED/DO NOT USE: ISAC_PDCCH_PAR_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
                                      "ISAC_PDCCH_JOINT_ANON_CORE", "ISAC_PDCCH_PAR_CORE", "ISAC_CSIRS_DISC_CORE", "ISAC_CSIRS_DISC_DETECT_CORES",
                                      "ISAC_GPU_WORKER_CORE", "ISAC_UHD_CTRL_CORES"};
   for (unsigned i = 0; i < sizeof keys / sizeof *keys; i++)
@@ -229,6 +235,7 @@ int nr_pdsch_recovery_start(int depth, const char *cores)
     return 0;
   }
   if (depth <= 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_RECOVERY_Q not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDSCH_RECOVERY_Q");
     depth = e ? atoi(e) : 32;
   }

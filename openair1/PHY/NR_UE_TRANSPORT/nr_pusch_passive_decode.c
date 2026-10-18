@@ -162,6 +162,7 @@ static bool ul_force_ids(uint16_t *dmrs, uint16_t *data)
 {
   static int st = -1; static uint16_t d, x;
   if (st < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_UL_FORCE_IDS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *v = getenv("ISAC_UL_FORCE_IDS"); unsigned a_, b_;
     st = (v && sscanf(v, "%u:%u", &a_, &b_) == 2 && a_ < 65536 && b_ < 65536) ? 1 : 0;
     if (st) { d = (uint16_t)a_; x = (uint16_t)b_; LOG_A(PHY, "SENSING: UL_FORCE_IDS dmrs=%u data=%u (diagnostic arm)\n", d, x); }
@@ -227,6 +228,7 @@ static unsigned ul_harq_max_seg(void)
 {
   static _Atomic int m = -1;
   if (m < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_UL_HARQ_MAX_SEG not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *v = getenv("ISAC_UL_HARQ_MAX_SEG");
     m = v ? atoi(v) : 8;
   }
@@ -303,6 +305,7 @@ static unsigned uci_budget_n(void)
 static uint64_t uci_budget_us(void)
 {
   static int v = -1;
+  /* DEFERRED/DO NOT USE: ISAC_UL_UCI_BUDGET_US not in the frozen config t26zE (2026-10-18); slated for removal */
   if (v < 0) { const char *e = getenv("ISAC_UL_UCI_BUDGET_US"); v = e ? atoi(e) : 0; if (v < 0) v = 0; }
   return (uint64_t)v;
 }
@@ -350,6 +353,7 @@ static void ul_hyp_apply(nr_pdcch_blind_ul_result_t *g, const ul_hyp_t *h)
 static int ul_seed_on(void)
 {
   static int v = -1;
+  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PASS_SEED not in the frozen config t26zE (2026-10-18); slated for removal */
   if (v < 0) { const char *e = getenv("ISAC_UL_GPU_PASS_SEED"); v = e && atoi(e) == 1; }
   return v;
 }
@@ -408,6 +412,7 @@ static int ta_sweep_points(void)
 {
   if (g_ta_sweep_n < 0) {
     g_ta_sweep_n = 0;
+    /* DEFERRED/DO NOT USE: ISAC_UL_TA_SWEEP not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_UL_TA_SWEEP");
     if (e != NULL) {
       int a = 0, b = 0, c = 0;
@@ -464,6 +469,7 @@ static inline int s_diag_on(void)
 {
   static int v = -1;
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PUSCH_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     v = (getenv("ISAC_PUSCH_DIAG") != NULL) ? 1 : 0;
   }
   return v;
@@ -472,6 +478,7 @@ static inline int s_diag_on(void)
 static inline int utim_enabled(void)
 {
   if (g_utim_on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PUSCH_TIMING not in the frozen config t26zE (2026-10-18); slated for removal */
     g_utim_on = (getenv("ISAC_PUSCH_TIMING") != NULL) ? 1 : 0;
   }
   return g_utim_on;
@@ -1033,10 +1040,12 @@ static bool passive_snapshot_fep(const NR_DL_FRAME_PARMS *fp, int ctx, int ant, 
  * the CPU and compared; a mismatch switches the GPU path off for good and the call is redone on the CPU. */
 static void ulg_warmup(const NR_DL_FRAME_PARMS *fp, int nant)
 {
+  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_FEP_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_UL_GPU_FEP_CHECK");
   if (e) g_ulg_check = atoi(e);
   const nr_pusch_gpu_fep_api_t *api = nr_pusch_gpu_fep_load();
   if (!api || fp->ofdm_symbol_size != 4096 || nant < 1 || nant > PASSIVE_UL_MAX_ANT) return;
+  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_FEP_PCT not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *p = getenv("ISAC_UL_GPU_FEP_PCT");
   if (api->init(nant, fp->ofdm_symbol_size, fp->nb_prefix_samples, (int)fp->ofdm_offset_divisor, p ? atoi(p) : 30,
                 1000 / fp->slots_per_subframe) != 0) {
@@ -1552,6 +1561,7 @@ bool nr_pusch_passive_layout_probe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, in
   /* ISAC_UL_LAYOUT_CONTROL=1 (validation only, default off): score every hypothesis with the DM-RS of the wrong slot
    * number, i.e. a receiver that sees no PUSCH at all -- the false-lock experiment. */
   static int control = -1;
+  /* DEFERRED/DO NOT USE: ISAC_UL_LAYOUT_CONTROL not in the frozen config t26zE (2026-10-18); slated for removal */
   if (control < 0) control = getenv("ISAC_UL_LAYOUT_CONTROL") && atoi(getenv("ISAC_UL_LAYOUT_CONTROL")) ? 1 : 0;
   const uint8_t sl_true = control ? (uint8_t)((slot + 1) % fp->slots_per_frame) : slot;
   for (int s = 0; s < 3; s++) {
@@ -1993,8 +2003,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     nid_applied = true;
   }
   const bool timing_disc = nr_ul_chain_on() ||
+      /* DEFERRED/DO NOT USE: ISAC_UL_TIMING_DISC not in the frozen config t26zE (2026-10-18); slated for removal */
       (getenv("ISAC_UL_TIMING_DISC") && !strcmp(getenv("ISAC_UL_TIMING_DISC"), "1"));
   const bool dmrs_disc = !t_solver_probe && (nr_ul_chain_on() ||
+      /* DEFERRED/DO NOT USE: ISAC_UL_DMRS_DISC not in the frozen config t26zE (2026-10-18); slated for removal */
       (getenv("ISAC_UL_DMRS_DISC") && !strcmp(getenv("ISAC_UL_DMRS_DISC"), "1")));
   nr_pdcch_blind_ul_result_t discovery_grant;
   const bool ul_pass_env = nr_gpu_pass_ul_active();
@@ -2164,6 +2176,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         in.passive = IS_PASSIVE_RX_MODE(get_softmodem_params());
         {
           static int s_keep = -2;
+          /* DEFERRED/DO NOT USE: ISAC_UL_RX_BRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
           if (s_keep == -2) s_keep = nr_ulsch_passive_branch_selection(true, nant, getenv("ISAC_UL_RX_BRANCH"), getenv("ISAC_RX_MRC_MODE"));
           in.keep = in.passive && nant > 1 ? s_keep : -1;
           in.timing_keep = in.keep;
@@ -3014,6 +3027,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   /* Expensive, bounded OFFLINE diagnostic, never enabled by full_auto alone.
    * Preserve descrambled LLRs and remove actual interleaved UCI positions.
    * A CRC win identifies a footprint candidate, not O_ACK/CSI/RRC configuration. */
+  /* DEFERRED/DO NOT USE: ISAC_PASSIVE_REPLAY_INPUT not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_PASSIVE_REPLAY_UL_UCI not in the frozen config t26zE (2026-10-18); slated for removal */
   if (getenv("ISAC_PASSIVE_REPLAY_INPUT") && getenv("ISAC_PASSIVE_REPLAY_UL_UCI") && !hq_retx
       && rc==0 && hp_crc_failed(ulsch) && g->nrOfLayers==1) {
     const uint32_t full_bits=out->G;

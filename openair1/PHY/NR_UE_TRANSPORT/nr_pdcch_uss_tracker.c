@@ -454,6 +454,7 @@ static void tables_init(void)
  */
 static void tracker_init(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_USS_TRACKER not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_PDCCH_USS_TRACKER");
   g_enabled = !e || atoi(e) != 0;
   const char *f = (getenv("ISAC_PDCCH_USS_FAST") ?: "1"), *b = (getenv("ISAC_PDCCH_USS_TRACK_BACKOFF") ?: "4");

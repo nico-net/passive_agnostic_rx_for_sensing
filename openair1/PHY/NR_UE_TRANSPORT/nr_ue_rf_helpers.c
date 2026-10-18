@@ -46,6 +46,7 @@ static double nr_ue_rx_gain_trim(int ch)
   static int parsed;
   if (!parsed) {
     parsed = 1;
+    /* DEFERRED/DO NOT USE: ISAC_RX_GAIN_TRIM not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_RX_GAIN_TRIM");
     if (e && *e) {
       char buf[128];

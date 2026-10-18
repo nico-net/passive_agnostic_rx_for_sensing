@@ -1017,6 +1017,7 @@ void nr_pbch_measure_delta(const NR_DL_FRAME_PARMS *fp,
     return;
   static int en = -1;
   if (en < 0)
+    /* DEFERRED/DO NOT USE: ISAC_DELTA_SCAN not in the frozen config t26zE (2026-10-18); slated for removal */
     en = (getenv("ISAC_DELTA_SCAN") && atoi(getenv("ISAC_DELTA_SCAN"))) ? 1 : 0;
   if (!en)
     return;
@@ -1118,6 +1119,7 @@ void nr_pbch_cir_convention_test(const NR_DL_FRAME_PARMS *fp,
     return;
   static int en = -1;
   if (en < 0)
+    /* DEFERRED/DO NOT USE: ISAC_CIR_TEST not in the frozen config t26zE (2026-10-18); slated for removal */
     en = (getenv("ISAC_CIR_TEST") && atoi(getenv("ISAC_CIR_TEST"))) ? 1 : 0;
   if (!en)
     return;
@@ -1490,6 +1492,7 @@ void nr_generate_pbch_llr(const PHY_VARS_NR_UE *ue,
     static int s_pbchdiag_left = 60;
     static int s_pbchdiag_en = -1;
     if (s_pbchdiag_en < 0)
+      /* DEFERRED/DO NOT USE: ISAC_PHY_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
       s_pbchdiag_en = (getenv("ISAC_PHY_DIAG") && atoi(getenv("ISAC_PHY_DIAG"))) ? 1 : 0;
     if (s_pbchdiag_en && s_pbchdiag_left > 0) {
       uint64_t h_rxf = 1469598103934665603ULL, h_chest = 1469598103934665603ULL;
@@ -1680,6 +1683,7 @@ void nr_generate_pbch_llr(const PHY_VARS_NR_UE *ue,
     {
       static int s_pd = -9999;
       if (s_pd == -9999) {
+        /* DEFERRED/DO NOT USE: ISAC_PBCH_L2_DELTA not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_PBCH_L2_DELTA");
         s_pd = (e != NULL) ? atoi(e) : 0;
       }

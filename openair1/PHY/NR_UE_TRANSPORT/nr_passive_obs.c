@@ -180,6 +180,7 @@ static void *writer(void *arg)
 {
   (void)arg;
   /* Test hook only: a no-op unless the variable is set. Makes the ring fill so overflow can be tested. */
+  /* DEFERRED/DO NOT USE: ISAC_OBS_TEST_WRITER_PAUSE_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *pause = getenv("ISAC_OBS_TEST_WRITER_PAUSE_MS");
   if (pause && atoi(pause) > 0)
     usleep((useconds_t)atoi(pause) * 1000);

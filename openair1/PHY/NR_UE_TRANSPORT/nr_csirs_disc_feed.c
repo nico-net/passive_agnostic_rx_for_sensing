@@ -102,6 +102,7 @@ static int env_positive(const char *name, int fallback)
  */
 static int env_core(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *text = getenv("ISAC_CSIRS_DISC_CORE");
   if (text == NULL || *text == '\0')
     return -1;
@@ -304,6 +305,7 @@ static void dump_slot(nr_csirs_disc_ring_t *r, int index)
   static FILE *dump;
   static int state;
   if(!state) {
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *path=getenv("ISAC_CSIRS_DISC_DUMP");
     dump=path && *path?fopen(path,"wb"):NULL;state=dump?1:-1;
     if(dump) {
@@ -413,6 +415,7 @@ static void *disc_worker_main(void *unused)
     CPU_SET(g_worker.core, &set);
     pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
   }
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   nr_bg_lane_enter("ISAC_CSIRS_DISC_CORE");
 
   pthread_mutex_lock(&g_worker.wake_lock);
@@ -482,6 +485,7 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
     return -1;
   }
   g_worker.synchronization_ready = true;
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_RING not in the frozen config t26zE (2026-10-18); slated for removal */
   const int capacity = env_positive("ISAC_CSIRS_DISC_RING", NR_CSIRS_DISC_DEFAULT_CAPACITY);
   if (nr_csirs_disc_ring_init(&g_worker.ring, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, true) != 0)
     goto fail;

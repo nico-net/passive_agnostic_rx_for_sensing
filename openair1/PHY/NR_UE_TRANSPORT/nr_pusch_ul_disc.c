@@ -312,6 +312,7 @@ nr_pusch_ul_disc_result_t nr_pusch_ul_disc_search(const nr_pusch_ul_disc_grid_t 
    * ~68 % of the UL consumers' CPU) runs on one grant in N per RNTI; the others try the cached result and the DL-known ids only.
    * shortcut: discovery of an unknown UL DM-RS id takes N times more grants; upgrade to a background scan on a snapshot. */
   static int every = -1;
+  /* DEFERRED/DO NOT USE: ISAC_UL_DISC_EVERY not in the frozen config t26zE (2026-10-18); slated for removal */
   if (every < 0) every = getenv("ISAC_UL_DISC_EVERY") && atoi(getenv("ISAC_UL_DISC_EVERY")) > 1 ? atoi(getenv("ISAC_UL_DISC_EVERY")) : 1;
   const bool scan_now = t_sweep_n || every == 1 || (t->scan_tick++ % (uint32_t)every) == 0;
   const int scan_total = t_sweep_n ? t_sweep_n : UL_DISC_SCAN_PER_GRANT;

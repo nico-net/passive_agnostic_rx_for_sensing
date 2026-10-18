@@ -244,6 +244,7 @@ int nr_core_machine_read(nr_core_machine_t *m, const char *args, char *error, si
   bool dpdk = args && strstr(args,"use_dpdk=1");
   if (dpdk) {
     char homepath[4096]; snprintf(homepath,sizeof(homepath),"%s/.uhd/uhd.conf",getenv("HOME") ? getenv("HOME") : "");
+    /* DEFERRED/DO NOT USE: UHD_CONFIG_FILE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *paths[] = {"/etc/uhd/uhd.conf",homepath,"/root/.uhd/uhd.conf",getenv("UHD_CONFIG_FILE")};
     for (int i=0;i<4;i++) if (paths[i] && !read_text(paths[i],buf,sizeof(buf))) {
       if (nr_core_parse_uhd(buf,m->dpdk)<0) return fail(error,n,"invalid dpdk_corelist in %s",paths[i]);
@@ -268,8 +269,11 @@ static void print_mask(const unsigned char mask[NR_CP_MAX_CPUS])
 static const char *env_for(nr_core_role_t role)
 {
   switch(role) {
+    /* DEFERRED/DO NOT USE: ISAC_UE_RT_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
+    /* DEFERRED/DO NOT USE: ISAC_USRP_RING_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
     case NR_CP_UE:return "ISAC_UE_RT_CORE"; case NR_CP_RING:return "ISAC_USRP_RING_CORE";
     case NR_CP_UHD:return "ISAC_UHD_CTRL_CORES"; case NR_CP_USS:return "ISAC_PDCCH_USS_CORE";
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
     case NR_CP_GPU:return "ISAC_GPU_WORKER_CORE"; case NR_CP_CSIRS:return "ISAC_CSIRS_DISC_CORE";
     case NR_CP_NID:return "ISAC_PDCCH_NID_GPU_CORE"; default:return NULL;
   }
@@ -340,6 +344,8 @@ bool nr_core_plan_is_critical(int core)
   if (test_critical_set) return test_critical[core];
   if (!active) { /* plan off (ISAC_CORE_PLAN=0): the critical lane is whatever the env core variables and --thread-pool name */
     static const char *const lists[] = {"ISAC_GPU_WORKER_CORE", "ISAC_PDSCH_CORES", "ISAC_PUSCH_CORES", "ISAC_UHD_CTRL_CORES",
+                                        /* DEFERRED/DO NOT USE: ISAC_UE_RT_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
+                                        /* DEFERRED/DO NOT USE: ISAC_USRP_RING_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
                                         "ISAC_UE_RT_CORE", "ISAC_USRP_RING_CORE", "ISAC_BG_CRITICAL_CORES"};
     unsigned char m[NR_CP_MAX_CPUS];
     for (size_t i = 0; i < sizeof(lists) / sizeof(lists[0]); i++) {

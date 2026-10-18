@@ -989,6 +989,7 @@ static int usrp_ring_ms(void)
 {
   static int ms = -1;
   if (ms < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_USRP_RING_MS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_USRP_RING_MS");
     ms = e ? atoi(e) : 0;
     if (ms < 0 || ms > 5000)
@@ -1010,6 +1011,7 @@ static int usrp_restart_max(void)
 {
   static int m = -1;
   if (m < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_USRP_RESTART_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_USRP_RESTART_MAX");
     m = e && atoi(e) > 0 ? atoi(e) : 10;
   }
@@ -1053,6 +1055,7 @@ static int usrp_rx_recover_max(void)
  */
 static int usrp_rx_recover_window_max(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_RX_RECOVER_MAX_FAULTS not in the frozen config t26zE (2026-10-18); slated for removal */
   static const int limit = [] { const char *e = getenv("ISAC_RX_RECOVER_MAX_FAULTS"); return e && atoi(e) > 0 ? atoi(e) : 20; }();
   return limit;
 }
@@ -1061,6 +1064,7 @@ static int usrp_rx_recover_window_max(void)
  */
 static double usrp_rx_recover_window_s(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_RX_RECOVER_WINDOW_S not in the frozen config t26zE (2026-10-18); slated for removal */
   static const double w = [] { const char *e = getenv("ISAC_RX_RECOVER_WINDOW_S"); return e && atof(e) > 0 ? atof(e) : 60.0; }();
   return w;
 }
@@ -1072,6 +1076,7 @@ static double usrp_rx_recover_window_s(void)
  * blocking get_time_now() (the X410 control path is starved by the same DPDK drop burst). */
 static bool usrp_rx_recover_noctrl(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_RX_RECOVER_NOCTRL not in the frozen config t26zE (2026-10-18); slated for removal */
   static const bool on = [] { const char *e = getenv("ISAC_RX_RECOVER_NOCTRL"); return !e || atoi(e) != 0; }();
   return on;
 }
@@ -1101,6 +1106,7 @@ static bool usrp_restart_allowed(const usrp_state_t *s, uint64_t w)
   static int until_sync = -1;
   static const int *synced = NULL;
   if (until_sync < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_USRP_RESTART_UNTIL_SYNC not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_USRP_RESTART_UNTIL_SYNC");
     until_sync = (e == NULL || atoi(e) != 0) ? 1 : 0;
     synced = (const int *)dlsym(RTLD_DEFAULT, "nr_ue_rx_synced_g");
@@ -1114,6 +1120,7 @@ static bool usrp_restart_allowed(const usrp_state_t *s, uint64_t w)
  */
 static void usrp_ring_producer(usrp_state_t *s)
 {
+  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *core = getenv("ISAC_USRP_RING_CORE");
   if (core && atoi(core) >= 0 && atoi(core) < CPU_SETSIZE) {
     cpu_set_t set;
@@ -1124,6 +1131,7 @@ static void usrp_ring_producer(usrp_state_t *s)
   /* ISAC_USRP_RING_PRIO (default 95): SCHED_FIFO priority of the producer. OAI's actors and ru_start_thread
    * run at FIFO 97 with no CPU pinning; on a core that is not isolated one of them preempts this thread for
    * as long as it runs, and the stream drops. 98 puts the producer above every OAI thread. */
+  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_PRIO not in the frozen config t26zE (2026-10-18); slated for removal */
   struct sched_param sp = {.sched_priority = usrp_env_int("ISAC_USRP_RING_PRIO", 95, 1)};
   if (sp.sched_priority > 99)
     sp.sched_priority = 95;
@@ -1135,6 +1143,7 @@ static void usrp_ring_producer(usrp_state_t *s)
    * every buffer until the pool ran dry (2026-10-06, frozen-timestamp X410 34B2AF1). */
   size_t pkts = 8;
   {
+    /* DEFERRED/DO NOT USE: ISAC_USRP_RING_PKTS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_USRP_RING_PKTS");
     if (e && atoi(e) > 0 && atoi(e) <= 64)
       pkts = (size_t)atoi(e);
@@ -1144,7 +1153,9 @@ static void usrp_ring_producer(usrp_state_t *s)
    * owns an isolated core, so spinning is free, whereas the blocking recv() made the DPDK I/O lcore issue a
    * futex wake (syscall + IPI) for most packets. ISAC_USRP_RING_POLL_TIMEOUT_MS (default 100) of continuous
    * silence is still a receive timeout (fault), as with the blocking 0.1 s recv(). */
+  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_POLL not in the frozen config t26zE (2026-10-18); slated for removal */
   static const bool poll_mode = usrp_env_int("ISAC_USRP_RING_POLL", 0, 0) != 0;
+  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_POLL_TIMEOUT_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   const double poll_limit_s = usrp_env_int("ISAC_USRP_RING_POLL_TIMEOUT_MS", 100, 1) * 1e-3;
   auto poll_last_data = std::chrono::steady_clock::now();
   uint64_t poll_notified = 0;
@@ -1159,8 +1170,11 @@ static void usrp_ring_producer(usrp_state_t *s)
   long long ref_end_ticks = 0; /* device ticks at the end of the last good sample (local reference) */
   std::chrono::steady_clock::time_point ref_wall;
   bool ref_valid = false;
+  /* DEFERRED/DO NOT USE: ISAC_RX_RECOVER_BACKOFF_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   const int backoff_base_ms = usrp_env_int("ISAC_RX_RECOVER_BACKOFF_MS", 300, 0);
+  /* DEFERRED/DO NOT USE: ISAC_RX_RECOVER_BACKOFF_MAX_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   const int backoff_max_ms = usrp_env_int("ISAC_RX_RECOVER_BACKOFF_MAX_MS", 3000, 1);
+  /* DEFERRED/DO NOT USE: ISAC_RX_RECOVER_LEAD_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   const double lead_s = usrp_env_int("ISAC_RX_RECOVER_LEAD_MS", 80, 1) * 1e-3;
   std::chrono::steady_clock::time_point restart_issued;
   usrp_ring_recovery_state recovery((uint64_t)s->sample_rate, usrp_rx_recover_max(),
@@ -1445,6 +1459,7 @@ static void usrp_ring_alloc(usrp_state_t *s)
  * unpinned FIFO 97 OAI threads; 8/8 starts on the 15-19 boot were drop-free. Warn only, never refuse. */
 static void usrp_isolation_check(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_USRP_ISOLATION_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
   if (usrp_env_int("ISAC_USRP_ISOLATION_CHECK", 0, 0) == 0)
     return;
   auto read_mask = [](const char *path, bool &ok) -> uint64_t {
@@ -1461,6 +1476,7 @@ static void usrp_isolation_check(void)
   bool ok_iso = false, ok_nohz = false;
   const uint64_t iso = read_mask("/sys/devices/system/cpu/isolated", ok_iso);
   const uint64_t nohz = read_mask("/sys/devices/system/cpu/nohz_full", ok_nohz);
+  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   struct { const char *role; const char *env; } roles[] = {{"ring producer", "ISAC_USRP_RING_CORE"},
                                                           {"uhd_ctrl", "ISAC_UHD_CTRL_CORES"}};
   int bad = 0;
@@ -2445,6 +2461,7 @@ ring_read_retry:
   static int s_map_init = 0;
   if (!s_map_init) {
     s_map_init = 1;
+    /* DEFERRED/DO NOT USE: ISAC_RX_CHAN_MAP not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_RX_CHAN_MAP");
     if (e && *e) {
       int n = 0; const char *q = e;
@@ -3312,6 +3329,7 @@ extern "C" {
             // account for spin-waiting workers competing with the softmodem's OWN real-time
             // threads for the same physical cores -- that only shows up live). Remove once P is
             // re-settled against a live measurement instead of the isolated offline one.
+            /* DEFERRED/DO NOT USE: USRP_DECIM_WORKERS not in the frozen config t26zE (2026-10-18); slated for removal */
             const char *p_override = getenv("USRP_DECIM_WORKERS");
             if (p_override != NULL) {
               int p_env = atoi(p_override);

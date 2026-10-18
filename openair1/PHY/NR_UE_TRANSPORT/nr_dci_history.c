@@ -310,6 +310,7 @@ bool nr_dci_hist_enabled(void)
 {
   int on = __atomic_load_n(&s_enabled, __ATOMIC_ACQUIRE);
   if (on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_TD_DCI_ADJ not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_TD_DCI_ADJ");
     on = (e != NULL && atoi(e) == 0) ? 0 : 1;
     __atomic_store_n(&s_enabled, on, __ATOMIC_RELEASE);
@@ -383,6 +384,7 @@ nr_dci_hist_t *nr_dci_hist_global(void)
 void nr_dci_hist_global_init(uint32_t period)
 {
   nr_dci_hist_t *h = nr_dci_hist_global();
+  /* DEFERRED/DO NOT USE: ISAC_TD_CERT_CONFIRMED not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *cc = getenv("ISAC_TD_CERT_CONFIRMED");
   pthread_mutex_lock(&h->lock);
   __atomic_store_n(&h->period, period, __ATOMIC_RELEASE);

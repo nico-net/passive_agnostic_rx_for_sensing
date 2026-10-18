@@ -86,11 +86,14 @@ static int hidden_waveform(PHY_VARS_gNB *tx, gNB_MAC_INST *mac, NR_UE_info_t *ue
 {
   AssertFatal(ue->current_DL_BWP.dci_format == NR_DL_DCI_FORMAT_1_1 &&
               ue->current_UL_BWP.dci_format == NR_UL_DCI_FORMAT_0_1, "Fixture needs dedicated formats\n");
+  /* DEFERRED/DO NOT USE: ISAC_HIDDEN_MULTI_CORESET not in the frozen config t26zE (2026-10-18); slated for removal */
   const bool multi_coreset = getenv("ISAC_HIDDEN_MULTI_CORESET") != NULL;
   const char *reconf_flag = getenv("ISAC_RECONF");
   const hidden_reconfig_kind_t reconfig = reconf_flag && strcmp(reconf_flag, "1") == 0
+      /* DEFERRED/DO NOT USE: ISAC_HIDDEN_RECONFIG not in the frozen config t26zE (2026-10-18); slated for removal */
       ? hidden_reconfig_parse(getenv("ISAC_HIDDEN_RECONFIG")) : HIDDEN_RECONF_NONE;
   const hidden_reconfig_schedule_t change = hidden_reconfig_schedule(reconfig);
+  /* DEFERRED/DO NOT USE: ISAC_TD_IGNORE_SIB1 not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ignore_sib1 = getenv("ISAC_TD_IGNORE_SIB1");
   const bool sib1_less = ignore_sib1 && strcmp(ignore_sib1, "1") == 0;
   const uint16_t second_rnti = (uint16_t)(ue->rnti ^ 0x3101u);

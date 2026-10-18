@@ -63,6 +63,7 @@ uint32_t nr_cfg_si_period_slots(unsigned coefficient, unsigned paging_cycle_fram
 
 bool nr_cfg_sib1_window_expired(uint64_t abs_slot, uint64_t start, unsigned occasions, unsigned slots_per_second)
 {
+  /* DEFERRED/DO NOT USE: ISAC_RECONF_SIB1_MAX_OCCASIONS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *setting = getenv("ISAC_RECONF_SIB1_MAX_OCCASIONS");
   const unsigned max = setting && atoi(setting) > 0 ? (unsigned)atoi(setting) : 8;
   return occasions >= max || (abs_slot >= start && abs_slot - start >= slots_per_second);

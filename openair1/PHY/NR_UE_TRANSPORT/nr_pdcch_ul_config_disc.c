@@ -80,6 +80,7 @@ bool nr_pdcch_ul_bank_enabled(void)
   static _Atomic int enabled = -1;
   int on = atomic_load_explicit(&enabled, memory_order_relaxed);
   if (on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_UL_DCI_BANK not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *s = getenv("ISAC_UL_DCI_BANK");
     const char *chain = (getenv("ISAC_UL_PUSCH_CHAIN") ?: "1");
     const char *solver = (getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");
@@ -137,6 +138,7 @@ bool nr_pdcch_ul_config_disc_enabled(void)
   static _Atomic int enabled = -1;
   int on = atomic_load_explicit(&enabled, memory_order_relaxed);
   if (on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_UL_CONFIG_DISC not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *s = getenv("ISAC_UL_CONFIG_DISC");
     const char *chain = (getenv("ISAC_UL_PUSCH_CHAIN") ?: "1");
     const char *solver = (getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");

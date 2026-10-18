@@ -38,6 +38,7 @@ static int ldpc_bench_on(void)
 {
   static int on = -1;
   if (on < 0) {
+    /* DEFERRED/DO NOT USE: LDPC_BENCH not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("LDPC_BENCH");
     on = e && atoi(e);
   }
@@ -167,9 +168,13 @@ static volatile int g_timeout_ms = 200, g_queue_cap = QUEUE_CAP, g_breaker_n = 4
 static void tunables_init(void)
 {
   const char *e;
+  /* DEFERRED/DO NOT USE: LDPC_CUDA_TIMEOUT_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   if ((e = getenv("LDPC_CUDA_TIMEOUT_MS")) && atoi(e) > 0) g_timeout_ms = atoi(e);
+  /* DEFERRED/DO NOT USE: LDPC_CUDA_TEST_QUEUE_CAP not in the frozen config t26zE (2026-10-18); slated for removal */
   if ((e = getenv("LDPC_CUDA_TEST_QUEUE_CAP")) && atoi(e) >= 0 && atoi(e) < QUEUE_CAP) g_queue_cap = atoi(e);
+  /* DEFERRED/DO NOT USE: LDPC_CUDA_BREAKER_N not in the frozen config t26zE (2026-10-18); slated for removal */
   if ((e = getenv("LDPC_CUDA_BREAKER_N")) && atoi(e) > 0) g_breaker_n = atoi(e);
+  /* DEFERRED/DO NOT USE: LDPC_CUDA_BREAKER_S not in the frozen config t26zE (2026-10-18); slated for removal */
   if ((e = getenv("LDPC_CUDA_BREAKER_S")) && atoi(e) > 0) g_breaker_ms = atoi(e) * 1000;
 }
 static void tunables_env_once(void)
@@ -385,6 +390,7 @@ int32_t nrLDPC_coding_init(void)
     static const struct { uint32_t BG, Z, K; } wu[2] = {{1, 384, 8448}, {2, 96, 960}};
     /* 2 x max_ldpc_iterations: 16 is the passive receiver's 8 (nr_pdsch_passive_decode.c), 10/20 the 5/10 defaults;
      * LDPC_CUDA_WARMUP_ITERS=<max_ldpc_iterations> adds 2x that value for a differently configured receiver */
+    /* DEFERRED/DO NOT USE: LDPC_CUDA_WARMUP_ITERS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *we = getenv("LDPC_CUDA_WARMUP_ITERS");
     const uint32_t its[4] = {16, 10, 20, we && atoi(we) > 0 ? 2u * (uint32_t)atoi(we) : 16};
     memset(ldpc_pool_host_llr(), 0, (size_t)512 * ldpc_batch_llr_stride());

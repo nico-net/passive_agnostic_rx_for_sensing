@@ -18,6 +18,7 @@ static inline bool nr_pdsch_gpu_prio_on(void)
 {
   static int on = -1;
   if (on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_PRIO not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDSCH_GPU_PRIO");
     on = e && atoi(e) == 1;
   }

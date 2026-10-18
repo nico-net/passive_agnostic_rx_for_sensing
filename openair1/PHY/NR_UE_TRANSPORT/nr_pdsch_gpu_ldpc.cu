@@ -595,6 +595,7 @@ static int decide_nc()
       fprintf(stderr, "SENSING: GPU LDPC: compute capability unknown; using CPU LDPC\n");
     return 3; /* not latched: a later call with a device retries */
   }
+  /* DEFERRED/DO NOT USE: ISAC_GPU_LDPC_NOCLUSTER not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_GPU_LDPC_NOCLUSTER");
   st = major < 9 || (e && *e == '1') ? 2 : 1;
   const char *m = getenv("ISAC_GPU_LDPC_NC_MIN_CB");
@@ -605,6 +606,7 @@ static int decide_nc()
   g_cl_min_cb = m ? atoi(m) : 4;
   if (g_cl_min_cb < 0)
     g_cl_min_cb = 0;
+  /* DEFERRED/DO NOT USE: ISAC_GPU_LDPC_CL_FORCE not in the frozen config t26zE (2026-10-18); slated for removal */
   m = getenv("ISAC_GPU_LDPC_CL_FORCE");
   g_cl_force = m ? atoi(m) : 0;
   if (g_cl_force != 1 && g_cl_force != 2 && g_cl_force != 4 && g_cl_force != 8)

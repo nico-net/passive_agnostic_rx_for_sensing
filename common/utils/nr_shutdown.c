@@ -207,6 +207,7 @@ int nr_shutdown_init(void (*notify_main)(void), void (*stop_radio)(void), void (
   notify_callback = notify_main;
   stop_callback = stop_radio;
   release_callback = release_radio;
+  /* DEFERRED/DO NOT USE: ISAC_SHUTDOWN_TIMEOUT_S not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_SHUTDOWN_TIMEOUT_S");
   if (e) {
     char *end;

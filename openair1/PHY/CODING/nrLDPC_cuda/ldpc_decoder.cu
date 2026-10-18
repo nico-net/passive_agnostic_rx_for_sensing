@@ -876,6 +876,7 @@ extern "C" uint8_t const* ldpc_batch_decode(uint32_t BG, uint32_t Z, uint32_t fi
     llr_msg_t* msg = c.b_msg + (size_t)first * BATCH_MSG_STRIDE;
     uint8_t* bits_dev = c.b_bits_dev + (size_t)first * BATCH_BITS_STRIDE;
     static int bench = -1;
+    /* DEFERRED/DO NOT USE: LDPC_BENCH not in the frozen config t26zE (2026-10-18); slated for removal */
     if (bench < 0) { const char* e = getenv("LDPC_BENCH"); bench = e && atoi(e); }
     if (bench && !nr_gpu_allocations_allowed()) bench = 0;
     cudaEvent_t ev[4];
@@ -1045,8 +1046,11 @@ static void pool_hooks_env_once() {
     static bool done;
     if (done) return;
     done = true;
+    /* DEFERRED/DO NOT USE: LDPC_CUDA_TEST_SKIP_LAUNCH not in the frozen config t26zE (2026-10-18); slated for removal */
     if (getenv("LDPC_CUDA_TEST_SKIP_LAUNCH")) g_hook_skip = atoi(getenv("LDPC_CUDA_TEST_SKIP_LAUNCH"));
+    /* DEFERRED/DO NOT USE: LDPC_CUDA_TEST_STALL_MS not in the frozen config t26zE (2026-10-18); slated for removal */
     if (getenv("LDPC_CUDA_TEST_STALL_MS")) g_hook_stall_ms = atoi(getenv("LDPC_CUDA_TEST_STALL_MS"));
+    /* DEFERRED/DO NOT USE: LDPC_CUDA_TEST_INJECT not in the frozen config t26zE (2026-10-18); slated for removal */
     if (getenv("LDPC_CUDA_TEST_INJECT")) g_hook_inject = atoi(getenv("LDPC_CUDA_TEST_INJECT"));
 }
 extern "C" void ldpc_pool_test_hooks(int skip, int stall_ms, int inject) {
@@ -1153,6 +1157,7 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
     /* The ~4*num_iter iteration launches are replayed from a CUDA graph per (BG, Z, nb, num_iter), nb = n
      * rounded up to a power of two; codewords [n, nb) are pre-marked done (any non-zero word) so their
      * blocks exit at once. LDPC_CUDA_GRAPH=0 launches them directly (A/B). */
+    /* DEFERRED/DO NOT USE: LDPC_CUDA_GRAPH not in the frozen config t26zE (2026-10-18); slated for removal */
     static const bool use_graph = !getenv("LDPC_CUDA_GRAPH") || atoi(getenv("LDPC_CUDA_GRAPH")) != 0;
     uint32_t nb = n;
     if (use_graph)

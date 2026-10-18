@@ -9,6 +9,7 @@ static inline int nr_agnostic_v2(void)
 {
   static int s = -1;
   if (s < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_AGNOSTIC_V2 not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_AGNOSTIC_V2");
     s = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }

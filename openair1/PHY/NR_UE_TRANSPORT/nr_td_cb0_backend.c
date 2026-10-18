@@ -104,6 +104,7 @@ static bool pick_gpu(nr_td_cb0_backend_t *be)
   if (g_mode < 0)
     g_mode = mode_from_env();
   if (g_backoff_len < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_TD_CB0_GPU_BACKOFF not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_TD_CB0_GPU_BACKOFF");
     g_backoff_len = e ? atoi(e) : 64;
     if (g_backoff_len < 1)

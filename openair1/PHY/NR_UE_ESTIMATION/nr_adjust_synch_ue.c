@@ -46,6 +46,7 @@ static int nr_max_pos_acc_limit(const NR_DL_FRAME_PARMS *fp)
   (void)fp; // used only when ISAC_MAX_POS_ACC asks for the rate-scaled variant
   static int override = -2;
   if (override == -2) {
+    /* DEFERRED/DO NOT USE: ISAC_MAX_POS_ACC not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_MAX_POS_ACC");
     override = e ? atoi(e) : -1;
   }
@@ -92,6 +93,7 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
      * alternating +/-200 samples), and summing it in made 4-antenna starts lock only ~1 in 4. */
     static int s_mask = -1;
     if (s_mask < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_SYNC_ANT_MASK not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_SYNC_ANT_MASK");
       s_mask = (e != NULL) ? (int)strtol(e, NULL, 0) : 0xFFFF;
     }
@@ -117,6 +119,7 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
     static int s_dump_left = -1;
     static FILE *s_dump = NULL;
     if (s_dump_left < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_TSYNC_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *p = getenv("ISAC_TSYNC_DUMP");
       s_dump = (p != NULL && p[0]) ? fopen(p, "wb") : NULL;
       s_dump_left = s_dump ? 32 : 0;
@@ -154,6 +157,7 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
    * diagnostic that induces the fault it is investigating is worse than none. */
   static int audit = -1;
   if (audit < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_TSYNC_AUDIT not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_TSYNC_AUDIT");
     audit = (e != NULL) ? atoi(e) : 0;
     if (e != NULL && audit < 1) {
@@ -168,6 +172,7 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
   // the unmodified path is bit-identical unless explicitly requested.
   static int force_global = -1;
   if (force_global < 0)
+    /* DEFERRED/DO NOT USE: ISAC_FORCE_GLOBAL_SYNC not in the frozen config t26zE (2026-10-18); slated for removal */
     force_global = (getenv("ISAC_FORCE_GLOBAL_SYNC") != NULL) ? 1 : 0;
 
   // ---- DMRS TIMING-MEASUREMENT RELIABILITY (2026-08-06) ------------------------------------
@@ -249,6 +254,7 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
     extern _Atomic int nr_ue_pending_rebase_valid;
     static int s_gr_on = -1;
     if (s_gr_on < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_TSYNC_GLOBAL_REBASE not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_TSYNC_GLOBAL_REBASE");
       s_gr_on = (e == NULL || atoi(e) != 0) ? 1 : 0;
     }
@@ -258,6 +264,7 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
      * applied by the consumer as a one-frame-minus-|d| discard. ISAC_TSYNC_REBASE_RATIO overrides 8. */
     static int s_gr_ratio = -1;
     if (s_gr_ratio < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_TSYNC_REBASE_RATIO not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_TSYNC_REBASE_RATIO");
       s_gr_ratio = (e != NULL && atoi(e) > 0) ? atoi(e) : 8;
     }
@@ -287,11 +294,13 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
   // It is the open-loop characterisation step that must precede designing the closed loop.
   static double min_ewin = -1.0;
   if (min_ewin < 0.0) {
+    /* DEFERRED/DO NOT USE: ISAC_TSYNC_MIN_EWIN not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_TSYNC_MIN_EWIN");
     min_ewin = e ? atof(e) : 0.0;
   }
   static int measure_only = -1;
   if (measure_only < 0)
+    /* DEFERRED/DO NOT USE: ISAC_TSYNC_MEASURE not in the frozen config t26zE (2026-10-18); slated for removal */
     measure_only = (getenv("ISAC_TSYNC_MEASURE") && atoi(getenv("ISAC_TSYNC_MEASURE"))) ? 1 : 0;
 
   const bool reliable = (min_ewin <= 0.0) || (e_win_frac >= min_ewin && !peak_out_of_window);

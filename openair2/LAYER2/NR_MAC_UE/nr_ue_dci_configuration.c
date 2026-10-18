@@ -571,6 +571,7 @@ void update_pdcch_config(NR_UE_MAC_INST_t *mac)
    *
    * num_rbs is also a multiple of 6 by construction (CORESET frequency-domain resources are 6-PRB
    * groups), so num_rbs/6 is directly pdcch_blind_monitor_coreset's first field. */
+  /* DEFERRED/DO NOT USE: ISAC_OTA_CFG not in the frozen config t26zE (2026-10-18); slated for removal */
   if (getenv("ISAC_OTA_CFG")) {
     const NR_Type0_PDCCH_CSS_config_t *t0 = &mac->type0_PDCCH_CSS_config;
     LOG_I(NR_MAC,

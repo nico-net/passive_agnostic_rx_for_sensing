@@ -36,6 +36,7 @@ long nr_initial_sync_scratch_mb(nr_scan_scratch_parse_t *status)
   static _Atomic int cached_status = 0;
   long mb = atomic_load_explicit(&cached_mb, memory_order_acquire);
   if (mb == 0) {
+    /* DEFERRED/DO NOT USE: ISAC_SCAN_SCRATCH_MB not in the frozen config t26zE (2026-10-18); slated for removal */
     nr_scan_scratch_parse_t st = nr_initial_sync_parse_scratch_mb(getenv("ISAC_SCAN_SCRATCH_MB"), &mb);
     atomic_store_explicit(&cached_status, (int)st, memory_order_relaxed);
     atomic_store_explicit(&cached_mb, mb, memory_order_release);

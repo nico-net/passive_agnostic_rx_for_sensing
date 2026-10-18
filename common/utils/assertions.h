@@ -15,6 +15,7 @@
 #define OAI_EXIT_NORMAL 0
 #define OAI_EXIT_ASSERT 1
 
+/* DEFERRED/DO NOT USE: OAI_GDBSTACKS not in the frozen config t26zE (2026-10-18); slated for removal */
 #define _Assert_Exit_							\
   if (getenv("OAI_GDBSTACKS")) {						\
     char tmp [1000];							\

@@ -26,6 +26,7 @@ struct CsirsDiscGate {
   {
     static int v = -1;
     if (v < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_BUDGET not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_CSIRS_DISC_BUDGET");
       v = e && atoi(e) == 1 && nr_gpu_budget_enabled && nr_gpu_budget_now_us && nr_gpu_budget_discovery_begin
           && nr_gpu_budget_discovery_delay_us && nr_gpu_budget_discovery_end && nr_gpu_budget_enabled();

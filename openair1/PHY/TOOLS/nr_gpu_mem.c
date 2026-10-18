@@ -7,6 +7,7 @@
 enum { MEMCPY_H2D = 1, MEMCPY_D2H = 2, HOST_MAPPED_PORTABLE = 3 };
 nr_gpu_model_t nr_gpu_model(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_GPU_FORCE_DISCRETE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *f = getenv("ISAC_GPU_FORCE_DISCRETE");
   if (f && atoi(f)) return NR_GPU_MODEL_DISCRETE;
   return nr_gpu_platform_shared_direct() ? NR_GPU_MODEL_DIRECT : NR_GPU_MODEL_DISCRETE;

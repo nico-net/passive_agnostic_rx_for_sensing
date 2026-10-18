@@ -23,11 +23,15 @@ static inline uint64_t now_ns(void)
 }
 static void init(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_CPU_SMALL not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_PDSCH_CPU_SMALL");
   g_small = e ? atoi(e) : 0;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_CPU_SMALL_NL not in the frozen config t26zE (2026-10-18); slated for removal */
   if ((e = getenv("ISAC_PDSCH_CPU_SMALL_NL")) && atoi(e) > 0)
     g_small_nl = atoi(e);
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_BATCH not in the frozen config t26zE (2026-10-18); slated for removal */
   g_batch = (e = getenv("ISAC_PDSCH_GPU_BATCH")) && atoi(e) == 1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_BATCH_SLOTS not in the frozen config t26zE (2026-10-18); slated for removal */
   if ((e = getenv("ISAC_PDSCH_GPU_BATCH_SLOTS")) && atoi(e) > 0)
     g_slots = atoi(e);
 }

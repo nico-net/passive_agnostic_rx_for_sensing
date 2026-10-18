@@ -215,6 +215,7 @@ static float ul_retry_snr_db(void)
 {
   static float t = -1000.0f;
   if (t < -999.0f) {
+    /* DEFERRED/DO NOT USE: ISAC_UL_RETRY_SNR_DB not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *v = getenv("ISAC_UL_RETRY_SNR_DB");
     t = v ? (float)atof(v) : -500.0f; /* post-estimation snr_db is not populated by the PUSCH path (0.0): gate off by default */
   }
@@ -240,6 +241,7 @@ static int ul_retry_max_rb(void)
 {
   static int m = -1;
   if (m < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_UL_RETRY_MAX_RB not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *v = getenv("ISAC_UL_RETRY_MAX_RB");
     m = v ? atoi(v) : 12;
   }
@@ -261,6 +263,7 @@ static bool ulq_wall_stale(long abs_slot, long slots_per_frame)
 
 bool nr_pusch_passive_pipeline_enabled(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_UL_PIPELINE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *v = getenv("ISAC_UL_PIPELINE");
   return nr_ul_chain_on() || (v && strcmp(v, "1") == 0);
 }
@@ -351,6 +354,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     {
       static __thread int boosted = 0, base_prio = -1;
       static int sp = -1;
+      /* DEFERRED/DO NOT USE: ISAC_PUSCH_SEARCH_PRIO not in the frozen config t26zE (2026-10-18); slated for removal */
       if (sp < 0) sp = getenv("ISAC_PUSCH_SEARCH_PRIO") ? atoi(getenv("ISAC_PUSCH_SEARCH_PRIO")) : 0;
       if (sp > 0) {
         const int want = nr_ul_layout_searching();
@@ -410,6 +414,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       nr_ul_layout_probe_res_t r;
       /* ISAC_UL_PROBE_TA=1: the DM-RS probes of an RNTI use the advance its decode's timing search tracked, not the fixed N_TA_offset */
       int32_t probe_ta = job.ta_offset_samples;
+      /* DEFERRED/DO NOT USE: ISAC_UL_PROBE_TA not in the frozen config t26zE (2026-10-18); slated for removal */
       if (getenv("ISAC_UL_PROBE_TA") && !strcmp(getenv("ISAC_UL_PROBE_TA"), "1")) {
         bool tracked = false;
         probe_ta = nr_pusch_ul_disc_timing_seed(job.grant.rnti, job.ta_offset_samples, (long)job.absolute_slot, &tracked);
@@ -560,12 +565,14 @@ static void *nr_pusch_passive_queue_thread(void *arg)
        * Logs UL_LBRUTE_HIT per CRC pass and UL_LBRUTE_DONE per grant. Never a receiver default. */
       static int lb_thr = -999;
       static _Atomic int lb_n;
+      /* DEFERRED/DO NOT USE: ISAC_UL_LAYOUT_BRUTE not in the frozen config t26zE (2026-10-18); slated for removal */
       if (lb_thr == -999) lb_thr = getenv("ISAC_UL_LAYOUT_BRUTE") ? atoi(getenv("ISAC_UL_LAYOUT_BRUTE")) : -1000;
       if (lb_thr > -999 && !job.cfr_only && out.status == NR_PUSCH_PASSIVE_CRC_FAIL && out.snr_db >= (float)lb_thr && job.grant.rv == 0 &&
           !job.grant.ra_type0 && !ulq_is_probe(&job.grant) && atomic_fetch_add_explicit(&lb_n, 1, memory_order_relaxed) < 3) {
         static const uint8_t tda[2][2] = {{0, 14}, {0, 13}};
         const int bw0 = job.grant.bwp_size, l0 = nr_pdcch_blind_monitor_get_cfg() && nr_pdcch_blind_monitor_get_cfg()->dmrs_typeA_position == 1 ? 1 : 0;
         int hits = 0, tries = 0, ids[4] = {ue->frame_parms.Nid_cell}, nids = 1;
+        /* DEFERRED/DO NOT USE: ISAC_UL_LAYOUT_BRUTE_IDS not in the frozen config t26zE (2026-10-18); slated for removal */
         for (const char *e = getenv("ISAC_UL_LAYOUT_BRUTE_IDS"); e && *e && nids < 4; ) { /* "a,b,c": extra data / DM-RS ids (both roles) */
           ids[nids++] = atoi(e);
           e = strchr(e, ',');
@@ -842,12 +849,14 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   g_cursor   = (nr_pusch_queue_cursor_t){.depth=depth};
   g_nthreads = n_consumers;
   g_prio = ulq_env("ISAC_UL_PRIO_QUEUE", 1) == 1;
+  /* DEFERRED/DO NOT USE: ISAC_UL_PROBE_DEPTH not in the frozen config t26zE (2026-10-18); slated for removal */
   int pdepth = ulq_env("ISAC_UL_PROBE_DEPTH", 8);
   if (pdepth < 2) pdepth = 2;
   if (pdepth > NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH) pdepth = NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH;
   g_pcursor = (nr_pusch_queue_cursor_t){.depth=pdepth};
   g_spare_rescue = ulq_env("ISAC_UL_SPARE_RESCUE", 1) == 1;
   g_stale_drop = ulq_env("ISAC_UL_STALE_DROP", 1) == 1;
+  /* DEFERRED/DO NOT USE: ISAC_UL_CPU_BUDGET_PCT not in the frozen config t26zE (2026-10-18); slated for removal */
   g_budget_pct = ulq_env("ISAC_UL_CPU_BUDGET_PCT", 0);
   g_pool_n = 0;
   g_snap_next = ulq_env("ISAC_UL_NID_BG", 1) == 1 && ulq_env("ISAC_UL_NID_BG_IQ", 1) == 1;

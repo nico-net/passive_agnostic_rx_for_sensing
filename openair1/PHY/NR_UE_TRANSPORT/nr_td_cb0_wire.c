@@ -38,12 +38,15 @@ static void cfg_locked(void)
   if (g_threads < 1)
     g_threads = 1;
   g_rank_max = (int)env_d("ISAC_TD_CB0_RANK_MAX", 4);
+  /* DEFERRED/DO NOT USE: ISAC_TD_TB_CPU_WHILE_ACQ not in the frozen config t26zE (2026-10-18); slated for removal */
   g_tb_cpu = env_d("ISAC_TD_TB_CPU_WHILE_ACQ", 1) != 0;
   /* the decode's own rule (nr_pdsch_passive_decode.c): ISAC_LLR_SCALE=<target mean |llr|> rescales iff atoi() > 0 (a
    * target of 1 IS a rescale); every value the decode treats as active makes the grant inadmissible */
+  /* DEFERRED/DO NOT USE: ISAC_LLR_SCALE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ls = getenv("ISAC_LLR_SCALE");
   g_llr_scale = ls != NULL && atoi(ls) > 0;
   /* a GPU iteration cap (nr_td_cb0_gpu_iters) is dominance-proven only against the CPU TB decoder */
+  /* DEFERRED/DO NOT USE: ISAC_TD_CB0_GPU_ITERS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *gi = getenv("ISAC_TD_CB0_GPU_ITERS");
   g_gpu_iters_over = gi != NULL && atoi(gi) > 0;
   const long nc = sysconf(_SC_NPROCESSORS_ONLN);
@@ -69,6 +72,7 @@ static void backends_locked(void)
   nr_td_cb0_set_threads(g_threads);
   /* GPU backend (td/cb0-gpu-entry): registered when libldpc_cuda.so has the CB0 entry and a device; auto / gpu then
    * use it with the CPU backend as the fallback (nr_td_cb0_exec failure rule + back-off) */
+  /* DEFERRED/DO NOT USE: ISAC_TD_CB0_GPU_AUTOREG not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ar = getenv("ISAC_TD_CB0_GPU_AUTOREG"); /* 0: never auto-register (tests driving a stub CPU decoder) */
   if (nr_td_cb0_backend_mode() != NR_TD_CB0_BE_CPU && !nr_td_cb0_gpu_backend_registered() && !(ar && atoi(ar) == 0)) {
     const int reg = nr_td_cb0_gpu_register();
@@ -82,6 +86,7 @@ static void backends_locked(void)
  */
 void nr_td_cb0_wire_warmup(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_TD_CB0_GPU_AUTOREG not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ar = getenv("ISAC_TD_CB0_GPU_AUTOREG");
   int enable = nr_td_cb0_backend_mode() != NR_TD_CB0_BE_CPU && !(ar && atoi(ar) == 0);
   nr_td_cb0_gpu_warmup(enable);

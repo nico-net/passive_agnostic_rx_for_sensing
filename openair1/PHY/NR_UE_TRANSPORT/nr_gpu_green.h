@@ -97,6 +97,7 @@ static inline bool nr_gpu_green_stream_impl(cudaStream_t *s, int priority, bool 
     fprintf(stderr, "[GPU] ISAC_GPU_DISC_SMS=%d: discovery on %u SMs, real-time on %s (%u of %u SMs)\n", sms,
             part[0].sm.smCount, isolate ? "the other SMs" : "all SMs", isolate ? part[1].sm.smCount : all.sm.smCount, all.sm.smCount);
     if (isolate) {
+      /* DEFERRED/DO NOT USE: ISAC_GPU_RT_PARTS not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *pe = getenv("ISAC_GPU_RT_PARTS");
       const int want = pe ? atoi(pe) : 0;
       const unsigned per = want > 1 ? (unsigned)(part[1].sm.smCount / (unsigned)want) : 0;
@@ -114,6 +115,7 @@ static inline bool nr_gpu_green_stream_impl(cudaStream_t *s, int priority, bool 
                 ngrp ? rpart[0].sm.smCount : part[1].sm.smCount);
     }
     /* Dynamic partition: ISAC_GPU_DISC_SMS_LOW (> 0) is a smaller discovery context (the leading SMs, so a subset of the discovery ones); idx == -1 asks for it. */
+    /* DEFERRED/DO NOT USE: ISAC_GPU_DISC_SMS_LOW not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *le = getenv("ISAC_GPU_DISC_SMS_LOW");
     lsms = le ? atoi(le) : 0;
     if (lsms > 0 && lsms < (int)part[0].sm.smCount) {
@@ -197,6 +199,7 @@ static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, i
 {
   static int logon = -1;
   static bool seen[2][8];
+  /* DEFERRED/DO NOT USE: ISAC_GPU_GREEN_LOG not in the frozen config t26zE (2026-10-18); slated for removal */
   if (logon < 0) { const char *e = getenv("ISAC_GPU_GREEN_LOG"); logon = e && atoi(e) == 1; }
   const bool ok = nr_gpu_green_stream_impl(s, priority, rt, idx);
   if (!logon) return ok;
@@ -225,6 +228,7 @@ static inline cudaStream_t nr_gpu_green_disc_pick(cudaStream_t hi, cudaStream_t 
 static inline int nr_gpu_ctx_limit(int pool)
 {
   static int n = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_CTX_LIMIT not in the frozen config t26zE (2026-10-18); slated for removal */
   if (n < 0) { const char *e = getenv("ISAC_PDSCH_GPU_CTX_LIMIT"); n = e ? atoi(e) : 0; }
   return n >= 1 && n < pool ? n : pool;
 }

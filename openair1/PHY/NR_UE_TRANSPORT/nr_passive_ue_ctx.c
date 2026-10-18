@@ -507,6 +507,7 @@ static void handle(const event_t *v)
 static void *run(void *unused)
 {
   (void)unused;
+  /* DEFERRED/DO NOT USE: ISAC_UECTX_TEST_WRITER_PAUSE_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *pause=getenv("ISAC_UECTX_TEST_WRITER_PAUSE_MS");
   if(pause && atoi(pause)>0) {struct timespec t={atoi(pause)/1000,(atoi(pause)%1000)*1000000L}; nanosleep(&t,NULL);}
   event_t e;
@@ -552,6 +553,7 @@ bool nr_ue_ctx_open(const char *path,uint32_t ring_capacity,double snapshot_peri
   free(entries);
   output=f; ring=r; entries=x; capacity=ring_capacity; head=0;
   period_s=snapshot_period_s; last_period_ns=last_age_ns=0; epoch=identity=0;
+  /* DEFERRED/DO NOT USE: ISAC_UL_UE_STATE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ul_flag=getenv("ISAC_UL_UE_STATE");
   const char *chain_flag=(getenv("ISAC_UL_PUSCH_CHAIN") ?: "1");
   const char *solver_flag=(getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");

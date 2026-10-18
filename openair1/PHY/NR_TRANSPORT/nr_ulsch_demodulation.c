@@ -43,6 +43,7 @@ static int nr_ulsch_passive_keep_branch(int nb_rx_ant)
   }
   static __thread int s_keep = -2; // each consumer caches its immutable environment without a race
   if (s_keep == -2) {
+    /* DEFERRED/DO NOT USE: ISAC_UL_RX_BRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_UL_RX_BRANCH");
     /* The former unconditional branch-0 default silently ignored MRC mode 2.
      * Retain explicit diagnostic/manual overrides, and the legacy no-mode default. */

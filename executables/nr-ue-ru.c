@@ -155,6 +155,7 @@ void nrue_set_cell_params(configmodule_interface_t *cfg)
       s_band_scan_i = 0;
       /* rfsim carries the gNB's baseband whatever the UE is tuned to, so a band scan there can only
        * be exercised mechanically; ISAC_BANDSCAN_FIRST_HZ puts the cell's centre first (test knob). */
+      /* DEFERRED/DO NOT USE: ISAC_BANDSCAN_FIRST_HZ not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *first = getenv("ISAC_BANDSCAN_FIRST_HZ");
       if (first != NULL && strtoull(first, NULL, 10) > 0) {
         for (int i = s_band_scan_n; i > 0; i--)
@@ -375,6 +376,7 @@ static void nrue_ru_fault_config(void)
 {
   /* Independent, default-off fault injection for the orchestrator's shutdown
    * acceptance test. It uses the same fatal-read path as a driver failure. */
+  /* DEFERRED/DO NOT USE: ISAC_RF_FAIL_AFTER_READS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *fail = getenv("ISAC_RF_FAIL_AFTER_READS");
   if (fail) {
     char *end;

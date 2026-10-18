@@ -13,11 +13,13 @@
 
 int nr_bg_lane_on(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_BG_LANE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_BG_LANE");
   return e && atoi(e) == 1;
 }
 int nr_bg_lane_cores(int *cores, int max)
 {
+  /* DEFERRED/DO NOT USE: ISAC_BG_CORES not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_BG_CORES");
   if (!e) e = "2,11,12,13,14"; /* DGX default; other hosts set ISAC_BG_CORES */
   unsigned char mask[NR_CP_MAX_CPUS] = {0};

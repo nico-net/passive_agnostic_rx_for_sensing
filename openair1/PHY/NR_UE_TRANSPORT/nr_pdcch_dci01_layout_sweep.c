@@ -222,6 +222,7 @@ bool nr_dci01_fdra_refuse_enforced(void)
 {
   static int on = -1;
   if (on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_UL_FDRA_REFUSE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_UL_FDRA_REFUSE");
     on = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }

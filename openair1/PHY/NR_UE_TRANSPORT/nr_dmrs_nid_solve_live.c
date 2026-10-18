@@ -40,9 +40,12 @@ static int enabled(void)
   static _Atomic int v = -1;
   int x = atomic_load_explicit(&v, memory_order_relaxed);
   if (x < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_DMRS_NID_SOLVE not in the frozen config t26zE (2026-10-18); slated for removal */
+    /* DEFERRED/DO NOT USE: ISAC_DMRS_NID_SOLVE_EVERY not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_DMRS_NID_SOLVE"), *ev = getenv("ISAC_DMRS_NID_SOLVE_EVERY");
     x = (e != NULL && (atoi(e) >= 1 && atoi(e) <= 3));
     g_mode = e != NULL ? atoi(e) : 0;
+    /* DEFERRED/DO NOT USE: ISAC_DMRS_NID_SOLVE_OPT not in the frozen config t26zE (2026-10-18); slated for removal */
     if (getenv("ISAC_DMRS_NID_SOLVE_OPT") != NULL) g_opt = atoi(getenv("ISAC_DMRS_NID_SOLVE_OPT")) != 0;
     if (ev != NULL && atoi(ev) >= 1) g_every = atoi(ev);
     atomic_store_explicit(&v, x, memory_order_relaxed);
@@ -247,6 +250,7 @@ static void start(void)
   clock_gettime(CLOCK_MONOTONIC, &g_t0);
   pthread_attr_t at;
   pthread_attr_init(&at);
+  /* DEFERRED/DO NOT USE: ISAC_DMRS_NID_SOLVE_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ce = getenv("ISAC_DMRS_NID_SOLVE_CORE");
   if (ce != NULL && atoi(ce) >= 0) {
     cpu_set_t s;

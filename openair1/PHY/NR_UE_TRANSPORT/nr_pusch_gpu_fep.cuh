@@ -145,6 +145,7 @@ __global__ void k_ul_test_spin(long long cyc)
 }
 static void test_rt_load_start(int greatest)
 {
+  /* DEFERRED/DO NOT USE: ISAC_UL_TEST_RT_LOAD not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_UL_TEST_RT_LOAD");
   double delay = 0, burst = 0, gap = 0, kus = 200;
   int blocks = 0, clk = 0;
@@ -196,6 +197,7 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int s
   }
   U.nant = nant;
   U.pct = pct > 0 && pct <= 100 ? (unsigned)pct : 20u;
+  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_FEP_DEADLINE not in the frozen config t26zE (2026-10-18); slated for removal */
   U.dl_on = env_on("ISAC_UL_GPU_FEP_DEADLINE");
   U.kc_on = !getenv("ISAC_UL_GPU_FEP_KCHARGE") || env_on("ISAC_UL_GPU_FEP_KCHARGE");
   U.deadline_us = slot_us > 0 ? (uint64_t)slot_us : 500u; /* one slot: a later FEP no longer keeps up with one grant per slot */

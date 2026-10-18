@@ -242,6 +242,7 @@ void nr_dlsch_decoding(PHY_VARS_NR_UE *phy_vars_ue,
   {
     static int s_sib1diag = -1;
     if (s_sib1diag < 0)
+      /* DEFERRED/DO NOT USE: ISAC_SIB1_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
       s_sib1diag = (getenv("ISAC_SIB1_DIAG") != NULL) ? 1 : 0;
     if (s_sib1diag && dlsch_config->refPoint == 1) {
       /* LLR magnitude: distinguishes "channel estimate/descrambling reaching the decoder is

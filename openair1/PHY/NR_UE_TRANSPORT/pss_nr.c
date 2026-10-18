@@ -213,6 +213,7 @@ static nr_pss_info_t pss_search_decim(const pss_search_t *p, int D, int pss_inde
   /* ISAC_PSS_PEAK_RATIO (default 5 = 7 dB): lowering it passes weaker PSS candidates to SSS and the PBCH CRC24, which decide anyway */
   static double s_ratio = -1;
   if (s_ratio < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PSS_PEAK_RATIO not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PSS_PEAK_RATIO");
     s_ratio = e && atof(e) >= 1 ? atof(e) : 5;
   }

@@ -569,6 +569,7 @@ static void nr_scan_ssb(void *arg)
         // chain over a swept FFT-window offset. delta=0 MUST decode -- if it does not, the fault
         // is in the chain rather than in sample selection, and every timing hypothesis is dead.
         // Runs on this thread while everything is in scope, so no cross-thread plumbing.
+        /* DEFERRED/DO NOT USE: ISAC_PBCH_REPLAY not in the frozen config t26zE (2026-10-18); slated for removal */
         if (getenv("ISAC_PBCH_REPLAY") && atoi(getenv("ISAC_PBCH_REPLAY"))) {
           extern void nr_pbch_golden_capture(int, int, c16_t *const *, int, int, int, int, int, int, int);
           extern void nr_pbch_replay_golden(const NR_DL_FRAME_PARMS *, const UE_nr_rxtx_proc_t *);
@@ -659,6 +660,7 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
     LOG_W(NR_PHY, "ISAC_ACQ_EMPTY_WINDOW: no synchronization raster points\n");
     return (nr_initial_sync_t){.cell_detected = false};
   }
+  /* DEFERRED/DO NOT USE: ISAC_AUTO_ACQUIRE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *auto_env = getenv("ISAC_AUTO_ACQUIRE");
   const bool auto_acquire = auto_env && !strcmp(auto_env, "1");
   int cfo_bins = 0;
@@ -666,6 +668,7 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
   if (auto_acquire) {
     AssertFatal(IS_PASSIVE_RX_MODE(get_softmodem_params()), "Automatic acquisition is passive-only\n");
     AssertFatal(ue->UE_fo_compensation, "Automatic acquisition requires --ue-fo-compensation\n");
+    /* DEFERRED/DO NOT USE: ISAC_ACQ_CFO_MAX_HZ not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *bound = getenv("ISAC_ACQ_CFO_MAX_HZ");
     char *end = NULL;
     const double max_hz = bound ? strtod(bound, &end) : 0;
@@ -749,6 +752,7 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
     scratch_warned = true;
     LOG_W(NR_PHY,
           "ISAC_SCAN_SCRATCH_MB=\"%s\" is %s, using %ld MB (valid range %ld..%ld)\n",
+          /* DEFERRED/DO NOT USE: ISAC_SCAN_SCRATCH_MB not in the frozen config t26zE (2026-10-18); slated for removal */
           getenv("ISAC_SCAN_SCRATCH_MB"),
           scratch_status == NR_SCAN_SCRATCH_CLAMPED ? "out of range, clamped" : "not a number, defaulted",
           scratch_mb,

@@ -383,6 +383,7 @@ static void gpu_dump_record(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *jo
                             const int16_t *llr_cpu, const int16_t *llr_gpu, uint32_t G)
 {
   static const char *path; static int tried;
+  /* DEFERRED/DO NOT USE: ISAC_GPU_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
   if (!tried) { tried = 1; path = getenv("ISAC_GPU_DUMP"); }
   if (!path) return;
   static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
@@ -1271,6 +1272,7 @@ static long rf_slot(const void *e) { return ((const nr_pdsch_passive_job_t *)e)-
 static void real_first_locked(void)
 {
   static int on = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCHQ_REAL_FIRST not in the frozen config t26zE (2026-10-18); slated for removal */
   if (on < 0) on = getenv("ISAC_PDSCHQ_REAL_FIRST") && atoi(getenv("ISAC_PDSCHQ_REAL_FIRST")) ? 1 : 0;
   if (!on || !nr_real_first_promote(g_ring, sizeof(g_ring[0]), g_ring_ns, g_tail, g_count, g_depth, rf_probe, rf_slot, &g_rf_scratch))
     return;
@@ -1396,6 +1398,7 @@ static void dldmrs_run(void *arg)
 static int dldmrs_async_on(void)
 {
   static int on = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_DMRS_ID2_ASYNC not in the frozen config t26zE (2026-10-18); slated for removal */
   if (on < 0) on = cdmrs_async_on() && getenv("ISAC_PDSCH_DMRS_ID2_ASYNC") && atoi(getenv("ISAC_PDSCH_DMRS_ID2_ASYNC")) ? 1 : 0;
   return on;
 }
@@ -1474,6 +1477,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d started\n", idx);
   nr_pdsch_passive_decode_pin_prewarm(ue); /* DECODETIME: ISAC_PDSCH_GPU_HOST_PIN=1 only */
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_SLOT_TIMING not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *slot_timing_env = getenv("ISAC_PDSCH_SLOT_TIMING");
   const bool slot_timing = slot_timing_env && atoi(slot_timing_env) != 0;
   {
@@ -1488,6 +1492,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
    * advanced by the group's own wall time in SIGNAL slots -- the pool then serves the queue at its live rate in signal
    * time, and queue fill / staleness become representative of live load. Never enable on air. */
   static int s_sigt = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCHQ_SIGNAL_TIME not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s_sigt < 0) s_sigt = getenv("ISAC_PDSCHQ_SIGNAL_TIME") && atoi(getenv("ISAC_PDSCHQ_SIGNAL_TIME")) ? 1 : 0;
   uint64_t sigt_t0 = 0;
   long sigt_p0 = 0;
@@ -1719,6 +1724,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_gpu_pdsch_job_t gj[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
     int gj_ok[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1] = {0};
     static _Atomic int s_probe_all_g = -1; /* _Atomic: every passivePdsch consumer resolves it (TSAN) */
+    /* DEFERRED/DO NOT USE: ISAC_PROBE_ALL not in the frozen config t26zE (2026-10-18); slated for removal */
     if (s_probe_all_g < 0) s_probe_all_g = (getenv("ISAC_PROBE_ALL") != NULL) ? 1 : 0;
     if (g_gpu) {
 
@@ -1868,6 +1874,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * ponytail: 1 in 8 eligible jobs probes (up to K x 14 FFTs + up to K slots of waiting each). */
         static _Atomic int s_k0_probe_on = -1; /* _Atomic: N consumers */
         if (s_k0_probe_on < 0) {
+          /* DEFERRED/DO NOT USE: ISAC_PDSCH_K0_PROBE not in the frozen config t26zE (2026-10-18); slated for removal */
           const char *e = getenv("ISAC_PDSCH_K0_PROBE");
           s_k0_probe_on = (e != NULL && atoi(e) == 0) ? 0 : 1;
         }
@@ -1933,6 +1940,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
        * the probe mechanics from the layout search. */
       static _Atomic int s_probe_all = -1; /* _Atomic: every passivePdsch consumer resolves it (TSAN) */
       if (s_probe_all < 0)
+        /* DEFERRED/DO NOT USE: ISAC_PROBE_ALL not in the frozen config t26zE (2026-10-18); slated for removal */
         s_probe_all = (getenv("ISAC_PROBE_ALL") != NULL) ? 1 : 0;
       if (s_probe_all)
         job.layout_probe = 1;
@@ -1943,8 +1951,10 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
      * ISAC_TD_GW_PROBE=1 also serves layout probes from it (whole slot instead of the probe horizon). */
     static _Atomic int s_gw_on = -1, s_gw_probe = -1; /* _Atomic: N consumers */
     if (s_gw_on < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_TD_GW_PROBE not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_TD_GW_PROBE");
       s_gw_probe = (e != NULL && atoi(e) != 0) ? 1 : 0;
+      /* DEFERRED/DO NOT USE: ISAC_TD_GRANTWORK not in the frozen config t26zE (2026-10-18); slated for removal */
       e = getenv("ISAC_TD_GRANTWORK"); /* default ON (operator 2026-10-04: fastest combination); 0 disables */
       s_gw_on = (e != NULL && *e && atoi(e) == 0) ? 0 : 1;
     }
@@ -1979,6 +1989,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     { /* ISAC_RX_EQ_AB=1 (T26d): multi-layer post-solve grants (needs ISAC_RX_MRC_PER_RNTI) rotate the equaliser {fixed MMSE, float MMSE, ML} (paired A/B); the search keeps the default */
       static int s_eqab = -1;
       static _Atomic unsigned s_eqn = 0;
+      /* DEFERRED/DO NOT USE: ISAC_RX_EQ_AB not in the frozen config t26zE (2026-10-18); slated for removal */
       if (s_eqab < 0) s_eqab = getenv("ISAC_RX_EQ_AB") ? atoi(getenv("ISAC_RX_EQ_AB")) : 0;
       nr_dlsch_eq_override = (s_eqab && job.mrc_mode > 0 && !job.layout_probe && __builtin_popcount(job.dlsch_pdu.dmrs_ports) >= 2) ? (int)(atomic_fetch_add(&s_eqn, 1) % 3u) : -1;
     }
@@ -1987,6 +1998,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     { /* ISAC_CHEST_OCC_AB=1 (T26d): multi-layer post-solve grants alternate stock / OCC-after-delay chest (paired A/B) */
       static int s_ocab = -1;
       static _Atomic unsigned s_ocn = 0;
+      /* DEFERRED/DO NOT USE: ISAC_CHEST_OCC_AB not in the frozen config t26zE (2026-10-18); slated for removal */
       if (s_ocab < 0) s_ocab = getenv("ISAC_CHEST_OCC_AB") ? atoi(getenv("ISAC_CHEST_OCC_AB")) : 0;
       nr_pdsch_chest_occ_override = (s_ocab && job.mrc_mode > 0 && !job.layout_probe && __builtin_popcount(job.dlsch_pdu.dmrs_ports) >= 2) ? (int)(atomic_fetch_add(&s_ocn, 1) % 2u) : -1;
     }
@@ -1996,6 +2008,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       static int s_ia = -1, s_ib = -1;
       static _Atomic unsigned s_in = 0;
       if (s_ia < 0) {
+        /* DEFERRED/DO NOT USE: ISAC_LDPC_ITERS_AB not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_LDPC_ITERS_AB");
         if (e == NULL || sscanf(e, "%d,%d", &s_ia, &s_ib) != 2) { s_ia = 0; s_ib = 0; }
       }
@@ -2044,6 +2057,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     { /* GPUSCHED ISAC_PDSCH_GPU_PRIO=1: back to real-time streams; a demod context still held for a deferred EVM of a
        * decode that returned before its LDPC stage is freed now, not at this thread's next grant (8-context pool, 5+ consumers) */
       static _Atomic int s_prio = -1;
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_PRIO not in the frozen config t26zE (2026-10-18); slated for removal */
       if (s_prio < 0) s_prio = getenv("ISAC_PDSCH_GPU_PRIO") && atoi(getenv("ISAC_PDSCH_GPU_PRIO")) == 1;
       if (s_prio) {
         nr_pdsch_gpu_exact_set_lowprio(0);
@@ -2265,6 +2279,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
               job.dlsch_pdu.nscid, sv_ok, (int)job.layout_probe);
       static int s_sdiag = -1;
       static _Atomic int s_sdiag_left = 400;
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_SOLVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
       if (s_sdiag < 0) s_sdiag = getenv("ISAC_PDSCH_SOLVER_DIAG") ? 1 : 0;
       if (s_sdiag && !job.layout_probe && atomic_fetch_sub(&s_sdiag_left, 1) > 0)
         LOG_A(PHY, "SENSING: PDSCH_SOLVER_FULL rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u rb=%u+%u ports=0x%x cdm=%u S=%u L=%u dmrs=0x%x csirs_rm=%u slot160=%ld st=%d\n",
@@ -2807,6 +2822,7 @@ void nr_pdsch_passive_gpu_warmup(PHY_VARS_NR_UE *ue)
   else if (!atomic_load(&g_gpu_disabled))
     g_gpu = nr_gpu_fep_prepare();
   { const char *e = getenv("ISAC_GPU_SELFCHECK"); g_gpu_chk_limit = e ? atoi(e) : 0; }
+  /* DEFERRED/DO NOT USE: ISAC_GPU_SELFCHECK_ENFORCE not in the frozen config t26zE (2026-10-18); slated for removal */
   { const char *e = getenv("ISAC_GPU_SELFCHECK_ENFORCE"); g_gpu_chk_enforce = e && !strcmp(e, "1"); }
   if (g_gpu) {
     void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_NOLOAD);
@@ -2941,6 +2957,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name, core, 40);
   }
   if (nr_pdsch_recovery_enabled() && nr_csirs_disc_enabled()) { /* ISAC_PDSCH_RECOVERY_ASYNC=1, default off; needs the owned IQ (snapshot hand-off) */
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_RECOVERY_SNAP not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDSCH_RECOVERY_SNAP"); /* snapshot holders, one set of ring-sized IQ buffers each */
     g_rsnap_n = e ? atoi(e) : 8;
     if (g_rsnap_n < 1) g_rsnap_n = 1;
@@ -3041,6 +3058,7 @@ __thread uint32_t nr_a2e_stg[NR_A2E_STG];
 int nr_a2e_trace(void)
 {
   static int en = -1;
+  /* DEFERRED/DO NOT USE: ISAC_A2E_TRACE not in the frozen config t26zE (2026-10-18); slated for removal */
   if (en < 0) en = getenv("ISAC_A2E_TRACE") && atoi(getenv("ISAC_A2E_TRACE")) ? 1 : 0;
   return en;
 }

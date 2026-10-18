@@ -41,16 +41,23 @@ static long envl(const char *k, long d)
 
 static void load_env(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_UL_LLR_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *d = getenv("ISAC_UL_LLR_DUMP");
   g_on = d && *d ? 1 : 0;
   if (!g_on) return;
   snprintf(g_dir, sizeof(g_dir), "%s", d);
   mkdir(g_dir, 0755); /* EEXIST is fine; a failed open later is reported once per file */
+  /* DEFERRED/DO NOT USE: ISAC_UL_LLR_DUMP_SNR not in the frozen config t26zE (2026-10-18); slated for removal */
   g_snr = (float)envl("ISAC_UL_LLR_DUMP_SNR", 0);
+  /* DEFERRED/DO NOT USE: ISAC_UL_LLR_DUMP_MCS not in the frozen config t26zE (2026-10-18); slated for removal */
   g_mcs = (int)envl("ISAC_UL_LLR_DUMP_MCS", 16);
+  /* DEFERRED/DO NOT USE: ISAC_UL_LLR_DUMP_MIN_RB not in the frozen config t26zE (2026-10-18); slated for removal */
   g_min_rb = (int)envl("ISAC_UL_LLR_DUMP_MIN_RB", 10);
+  /* DEFERRED/DO NOT USE: ISAC_UL_LLR_DUMP_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
   g_max = envl("ISAC_UL_LLR_DUMP_MAX", 400);
+  /* DEFERRED/DO NOT USE: ISAC_UL_LLR_DUMP_OK_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
   g_ok_max = envl("ISAC_UL_LLR_DUMP_OK_MAX", 20);
+  /* DEFERRED/DO NOT USE: ISAC_UL_LLR_DUMP_MAX_MB not in the frozen config t26zE (2026-10-18); slated for removal */
   g_max_bytes = (unsigned long)envl("ISAC_UL_LLR_DUMP_MAX_MB", 512) << 20;
 }
 

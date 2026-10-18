@@ -262,6 +262,7 @@ void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
   sr.owner=ue;sr.stop=false;sr.head=sr.tail=sr.count=sr.event_count=0;sr.have_hint=sr.stamp_valid=false;
   atomic_store(&sr.dropped,0);atomic_store(&sr.elapsed_us,0);
   sr.idle=(nr_srs_idle_t){.pct=5};
+  /* DEFERRED/DO NOT USE: ISAC_SRS_CPU_PCT not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *cpu_pct=getenv("ISAC_SRS_CPU_PCT");
   if(cpu_pct) {char *end;long value=strtol(cpu_pct,&end,10);if(end!=cpu_pct && !*end && value>=1 && value<=100) sr.idle.pct=value;}
   atomic_store(&sr.pregate_skip,0);atomic_store(&sr.backoff_skip,0);

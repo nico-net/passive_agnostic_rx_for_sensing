@@ -25,6 +25,7 @@ static inline bool nr_pusch_gpu_ul_prio_hi(void)
 {
   static int v = -1;
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PRIO not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_UL_GPU_PRIO");
     v = e && atoi(e) == 1;
   }
@@ -57,6 +58,7 @@ static inline bool on()
 }
 static inline uint64_t thr_us()
 {
+  /* DEFERRED/DO NOT USE: ISAC_UL_STALL_US not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_UL_STALL_US");
   static uint64_t us = e && atoi(e) > 0 ? (uint64_t)atoi(e) : 2000;
   return us;

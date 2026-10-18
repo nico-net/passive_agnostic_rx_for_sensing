@@ -22,6 +22,7 @@ static int g_nlines_map, g_nlines_gen;
 int nr_pdsch_rm_genie_level(void)
 {
   static int s = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_RM_GENIE not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s < 0) { const char *e = getenv("ISAC_PDSCH_RM_GENIE"); s = e ? atoi(e) : 0; }
   return s;
 }
@@ -35,6 +36,7 @@ bool nr_pdsch_rm_genie_on(void)
 static int nlines_cap(void)
 {
   static int s = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_RM_GENIE_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s < 0) { const char *e = getenv("ISAC_PDSCH_RM_GENIE_MAX"); s = e && atoi(e) > 0 ? atoi(e) : 400; }
   return s;
 }

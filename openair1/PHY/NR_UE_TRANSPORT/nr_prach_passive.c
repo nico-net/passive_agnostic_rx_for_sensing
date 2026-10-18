@@ -115,6 +115,7 @@ void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped)
 
 static int floor_margin_db10(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_PRACH_MARGIN_DB10 not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *v = getenv("ISAC_PRACH_MARGIN_DB10");
   if (!v || !*v) return 80;
   char *end;

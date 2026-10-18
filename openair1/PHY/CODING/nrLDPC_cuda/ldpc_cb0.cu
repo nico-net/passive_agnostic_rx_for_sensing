@@ -515,19 +515,33 @@ int init_locked()
     pthread_cond_init(&g_state_cv, &at);
     pthread_condattr_destroy(&at);
   }
+  /* DEFERRED/DO NOT USE: LDPC_CB0_TIMEOUT_MS not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: LDPC_CUDA_TIMEOUT_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   g_timeout_ms = env_int("LDPC_CB0_TIMEOUT_MS", "LDPC_CUDA_TIMEOUT_MS", 200);
   if (g_timeout_ms <= 0) g_timeout_ms = 200;
+  /* DEFERRED/DO NOT USE: LDPC_CB0_TIMEOUT_US_PER_ITEM not in the frozen config t26zE (2026-10-18); slated for removal */
   g_timeout_us_item = env_int("LDPC_CB0_TIMEOUT_US_PER_ITEM", nullptr, 100);
   if (g_timeout_us_item < 0) g_timeout_us_item = 100;
+  /* DEFERRED/DO NOT USE: LDPC_CB0_BREAKER_N not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: LDPC_CUDA_BREAKER_N not in the frozen config t26zE (2026-10-18); slated for removal */
   g_breaker_n = env_int("LDPC_CB0_BREAKER_N", "LDPC_CUDA_BREAKER_N", 4);
   if (g_breaker_n <= 0) g_breaker_n = 4;
+  /* DEFERRED/DO NOT USE: LDPC_CB0_BREAKER_S not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: LDPC_CUDA_BREAKER_S not in the frozen config t26zE (2026-10-18); slated for removal */
   g_breaker_ms = env_int("LDPC_CB0_BREAKER_S", "LDPC_CUDA_BREAKER_S", 5) * 1000;
   if (g_breaker_ms <= 0) g_breaker_ms = 5000;
+  /* DEFERRED/DO NOT USE: LDPC_CB0_TEST_INJECT not in the frozen config t26zE (2026-10-18); slated for removal */
   g_inject = env_int("LDPC_CB0_TEST_INJECT", nullptr, 0);
+  /* DEFERRED/DO NOT USE: LDPC_CB0_TEST_STALL_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   g_stall_ms = env_int("LDPC_CB0_TEST_STALL_MS", nullptr, 0);
+  /* DEFERRED/DO NOT USE: LDPC_CB0_MAX_ITEMS not in the frozen config t26zE (2026-10-18); slated for removal */
   g.cap = std::min(std::max(env_int("LDPC_CB0_MAX_ITEMS", nullptr, 2048), 1), 65536);
+  /* DEFERRED/DO NOT USE: LDPC_CB0_SLOTS not in the frozen config t26zE (2026-10-18); slated for removal */
   g.nslots = std::min(std::max(env_int("LDPC_CB0_SLOTS", nullptr, 3), 1), MAX_SLOTS);
+  /* DEFERRED/DO NOT USE: LDPC_CB0_CHUNK not in the frozen config t26zE (2026-10-18); slated for removal */
   g.chunk_cfg = env_int("LDPC_CB0_CHUNK", nullptr, 0);
+  /* DEFERRED/DO NOT USE: LDPC_CB0_GRAPH not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: LDPC_CUDA_GRAPH not in the frozen config t26zE (2026-10-18); slated for removal */
   g.use_graph = env_int("LDPC_CB0_GRAPH", "LDPC_CUDA_GRAPH", 1) != 0;
 
   ldpc_cuda_bg_t bg;
@@ -543,6 +557,7 @@ int init_locked()
     g.l2 = (size_t)v;
   /* UNIFIED only on an integrated GPU: a discrete GPU with HMM also reports pageable access, but every access
    * would then cross PCIe. LDPC_CB0_MEM=explicit forces the copy path (tests on GB10). */
+  /* DEFERRED/DO NOT USE: LDPC_CB0_MEM not in the frozen config t26zE (2026-10-18); slated for removal */
   const char* me = getenv("LDPC_CB0_MEM");
   int mode = MODE_EXPLICIT; /* bounded staged copies, including on coherent GB10 */
   if (me && !strcmp(me, "explicit"))
@@ -552,6 +567,7 @@ int init_locked()
   if (cudaStreamCreateWithPriority(&g.s, cudaStreamNonBlocking, lo) != cudaSuccess
       || cudaStreamCreateWithPriority(&g.s_copy, cudaStreamNonBlocking, lo) != cudaSuccess)
     return 0;
+  /* DEFERRED/DO NOT USE: LDPC_CB0_WORK_CW not in the frozen config t26zE (2026-10-18); slated for removal */
   g.chunk_max = (uint32_t)std::min(std::max(env_int("LDPC_CB0_WORK_CW", nullptr, 256), 16), 512);
   g.msg_bytes = (size_t)g.chunk_max * MSG_MAX;
   if (nr_gpu_allocate(NR_GPU_DEVICE, &g.msg, g.msg_bytes) != cudaSuccess || nr_gpu_allocate(NR_GPU_DEVICE, &g.chan, (size_t)g.chunk_max * 8 * CH) != cudaSuccess
@@ -603,6 +619,7 @@ uint32_t chunk_for(uint32_t rows, uint32_t cols, uint32_t edges, uint32_t Z)
 uint32_t ncw_for(uint32_t nb)
 {
   static const int cfg = [] {
+    /* DEFERRED/DO NOT USE: LDPC_CB0_NCW not in the frozen config t26zE (2026-10-18); slated for removal */
     const char* e = getenv("LDPC_CB0_NCW");
     const int v = e ? atoi(e) : 2;
     return v >= 4 ? 4 : v >= 2 ? 2 : 1;

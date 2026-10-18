@@ -205,14 +205,31 @@ static int fb(int why)
 /* flags whose host paths the pass does not reproduce: any of them set = the pass stays off for the run (logged) */
 static const char *incompatible_env(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_CHEST_OCC not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_CHEST_TINTERP not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_DMRS_FO_APPLY not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_EVM not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_RX_IRC not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_SFO_CORRECT not in the frozen config t26zE (2026-10-18); slated for removal */
   static const char *const nz[] = {"ISAC_PDSCH_EVM", "ISAC_SFO_CORRECT", "ISAC_DMRS_FO_APPLY", "ISAC_CHEST_OCC", "ISAC_RX_IRC", "ISAC_CHEST_TINTERP",
+                                   /* DEFERRED/DO NOT USE: ISAC_DC_FIX not in the frozen config t26zE (2026-10-18); slated for removal */
+                                   /* DEFERRED/DO NOT USE: ISAC_LLR_SCALE not in the frozen config t26zE (2026-10-18); slated for removal */
+                                   /* DEFERRED/DO NOT USE: ISAC_PDSCH_ANT_GATE not in the frozen config t26zE (2026-10-18); slated for removal */
+                                   /* DEFERRED/DO NOT USE: ISAC_PDSCH_LLR_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
+                                   /* DEFERRED/DO NOT USE: ISAC_PDSCH_RM_GENIE not in the frozen config t26zE (2026-10-18); slated for removal */
+                                   /* DEFERRED/DO NOT USE: ISAC_RX_BRANCH_FO not in the frozen config t26zE (2026-10-18); slated for removal */
                                    "ISAC_DC_FIX", "ISAC_PDSCH_ANT_GATE", "ISAC_LLR_SCALE", "ISAC_PDSCH_RM_GENIE", "ISAC_PDSCH_LLR_DUMP", "ISAC_RX_BRANCH_FO",
+                                   /* DEFERRED/DO NOT USE: ISAC_MMSE2_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
+                                   /* DEFERRED/DO NOT USE: ISAC_PDSCH_MMSE_AB not in the frozen config t26zE (2026-10-18); slated for removal */
+                                   /* DEFERRED/DO NOT USE: ISAC_PDSCH_OWN_PDCCH_RM not in the frozen config t26zE (2026-10-18); slated for removal */
+                                   /* DEFERRED/DO NOT USE: ISAC_TD_TB_CPU_WHILE_ACQ not in the frozen config t26zE (2026-10-18); slated for removal */
                                    "ISAC_PDSCH_MMSE_AB", "ISAC_MMSE2_DIAG", "ISAC_PDSCH_OWN_PDCCH_RM", "ISAC_TD_TB_CPU_WHILE_ACQ"};
   for (size_t i = 0; i < sizeof(nz) / sizeof(nz[0]); i++) {
     const char *e = getenv(nz[i]);
     if (e && atoi(e) != 0)
       return nz[i];
   }
+  /* DEFERRED/DO NOT USE: ISAC_LLR_NORM not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_LLR_NORM");
   (void)e;
   return NULL;
@@ -231,6 +248,8 @@ static int env_list(const char *name, const char *dflt, int *v, int max)
 
 void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
 {
+  /* DEFERRED/DO NOT USE: ISAC_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_GPU_PASS"), *eu = getenv("ISAC_UL_GPU_PASS");
   const char *eg = (getenv("ISAC_PDSCH_GPU_GRAPH") ?: "1");
   int dl_on = e && atoi(e) == 1;
@@ -284,6 +303,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   }
   nr_gpu_pass_cfg_t c = {.nbRx = fp->nb_antennas_rx, .n_rb_dl = fp->N_RB_DL, .delay_table = (const int16_t *)fp->delay_table[0],
                          .dt_stride = NR_MAX_OFDM_SYMBOL_SIZE, .max_delay_comp = MAX_DELAY_COMP, .v2 = G.v2, .split = G.v2 && g_sub_on[1],
+                         /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_GRAPH_MB not in the frozen config t26zE (2026-10-18); slated for removal */
                          .split_mb = getenv("ISAC_PDSCH_GPU_GRAPH_MB") ? atoi(getenv("ISAC_PDSCH_GPU_GRAPH_MB")) : 1024};
   if (nr_gpu_model() == NR_GPU_MODEL_DISCRETE) { /* the graphs read the delay table on the device */
     static nr_gpu_buf_t dt;
@@ -312,8 +332,10 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   }
   /* the class list: PRB classes x layers x the code block counts that can occur x DM-RS symbol counts, in the order of expected use, up to ISAC_GPU_PASS_CLASSES */
   int nd[4], nnd = env_list("ISAC_GPU_PASS_NDMRS", "3,2", nd, 4);
+  /* DEFERRED/DO NOT USE: ISAC_GPU_PASS_CLASSES not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ce = getenv("ISAC_GPU_PASS_CLASSES");
   const int budget = ce ? atoi(ce) : c.split ? 1 << 20 : 512; /* split: every class of the loops (sub-graphs are shared between classes; the module's memory cap bounds them) */
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_DECODE_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
   const int evm = ((getenv("ISAC_PDSCH_EVM_GRANT") ?: "1") || (getenv("ISAC_PDSCH_SNR_GATE") ?: "1") || (getenv("ISAC_PDSCH_DECODE_DIAG") && atoi(getenv("ISAC_PDSCH_DECODE_DIAG")) != 0)) ? 1 : 0;
   static const int nrbs[] = {273, 217, 136, 96, 48, 24, 12, 6};
   static const int nls[] = {1, 2, 4, 3};
@@ -357,6 +379,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
       }
   /* segmented (PRG / VRB-bundle) classes: segment-count classes 1, 2, 4, 8, 16 (32: split) on top of the contiguous ones. Own budget
    * (ISAC_GPU_PASS_SEG_CLASSES, default 1400): the passes with the widest grants are warmed first; a segmented grant of an unwarmed class stays on the old path (unseen). */
+  /* DEFERRED/DO NOT USE: ISAC_GPU_PASS_SEG_CLASSES not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *se = getenv("ISAC_GPU_PASS_SEG_CLASSES");
   const int sbudget = se ? atoi(se) : c.split ? 1 << 20 : 1400;
   int smade = 0;
@@ -403,6 +426,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
           }
         }
   G.nbrx = fp->nb_antennas_rx;
+  /* DEFERRED/DO NOT USE: ISAC_GPU_PASS_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ch = getenv("ISAC_GPU_PASS_CHECK");
   G.check = ch ? atoi(ch) : 64;
   if (G.v2 && made > 0 && g_pool.n == 0 && pthread_key_create(&g_pool_key, pool_release) == 0) /* the per-thread host sets for threads that reach the pass after the RX fence (the async recovery worker); once */

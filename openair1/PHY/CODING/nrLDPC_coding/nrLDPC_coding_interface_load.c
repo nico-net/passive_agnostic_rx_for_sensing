@@ -31,6 +31,7 @@ int load_nrLDPC_coding_interface(char *version, nrLDPC_coding_interface_t *itf, 
   char *ptr = (char *)config_get_if();
   char libname[64] = "ldpc";
   /* Opt-in replay selection of the existing CUDA transport-block decoder. */
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_LDPC not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *gpu_ldpc = getenv("ISAC_PDSCH_GPU_LDPC");
   if (version == NULL && gpu_ldpc && atoi(gpu_ldpc) != 0)
     version = "_cuda";

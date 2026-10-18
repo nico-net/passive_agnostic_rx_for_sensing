@@ -84,6 +84,7 @@ int init()
   if (!nr_gpu_module_ready()) return 0;
   if (g.ok >= 0) return g.ok;
   g.ok = 0;
+  /* DEFERRED/DO NOT USE: LDPC_CB0_MAX_ITEMS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("LDPC_CB0_MAX_ITEMS");
   g.max_items = e ? atoi(e) : 2048;
   if (g.max_items < 1) g.max_items = 1;

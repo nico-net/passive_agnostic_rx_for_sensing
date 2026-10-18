@@ -220,6 +220,7 @@ void nr_ul_layout_build_opts(const nr_ul_layout_prefix_t *pre, const nr_ul_layou
   { /* ISAC_UL_MCS_TABLE=<0|1|2> (DIAGNOSTIC, default unset = unchanged): the layout lock never infers the PUSCH MCS table; force it to test whether a
      * qam256 cell (table 1) is lost here. TP keeps its own table family (+3 would be needed; not forced). */
     static int forced = -2;
+    /* DEFERRED/DO NOT USE: ISAC_UL_MCS_TABLE not in the frozen config t26zE (2026-10-18); slated for removal */
     if (forced == -2) { const char *v = getenv("ISAC_UL_MCS_TABLE"); forced = (v && *v >= '0' && *v <= '2') ? *v - '0' : -1; }
     if (forced >= 0 && !t->tp) o->mcs_table = (uint8_t)forced;
   }
@@ -413,13 +414,21 @@ static struct { long target; int n; uint16_t rnti[OV_GRANTS]; uint16_t r0[OV_GRA
 static uint32_t g_ov_pairs[NR_UL_LAYOUT_MAX_HYP], g_ov_hit[NR_UL_LAYOUT_MAX_HYP];
 static const float WV_THR[4] = {6.f, 10.f, 15.f, 25.f};
 static int g_wv[4][NR_UL_LAYOUT_MAX_HYP][2]; /* winner votes per threshold {2,3,4,5}: [+ (argmax), - (argmin)] */
+/* DEFERRED/DO NOT USE: ISAC_UL_LOCK_EDGE not in the frozen config t26zE (2026-10-18); slated for removal */
 bool nr_ul_layout_edge_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_EDGE"); }
+/* DEFERRED/DO NOT USE: ISAC_UL_LOCK_COHERENT not in the frozen config t26zE (2026-10-18); slated for removal */
 bool nr_ul_layout_coherent_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_COHERENT"); }
 bool nr_ul_layout_sprt_enabled(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_UL_LOCK_COHERENT not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_UL_LOCK_EDGE not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_UL_LOCK_SPRT not in the frozen config t26zE (2026-10-18); slated for removal */
   return nr_ul_layout_lock_enabled() && (env_on("ISAC_UL_LOCK_SPRT") || env_on("ISAC_UL_LOCK_EDGE") || env_on("ISAC_UL_LOCK_COHERENT"));
 }
 /* the incoherent zn enters X_h with SPRT=1, or when neither new statistic is selected */
+/* DEFERRED/DO NOT USE: ISAC_UL_LOCK_COHERENT not in the frozen config t26zE (2026-10-18); slated for removal */
+/* DEFERRED/DO NOT USE: ISAC_UL_LOCK_EDGE not in the frozen config t26zE (2026-10-18); slated for removal */
+/* DEFERRED/DO NOT USE: ISAC_UL_LOCK_SPRT not in the frozen config t26zE (2026-10-18); slated for removal */
 static bool sprt_base_term(void) { return env_on("ISAC_UL_LOCK_SPRT") || !(env_on("ISAC_UL_LOCK_EDGE") || env_on("ISAC_UL_LOCK_COHERENT")); }
 /* ULTWINS edge test: grants of the last EG_SLOTS target slots with their range under every hypothesis (end exclusive) */
 #define EG_SLOTS 8
@@ -631,6 +640,7 @@ static void tail_str(const nr_ul_layout_tail_t *t, char *s, size_t n)
 /* ISAC_UL_MCS_TABLE_SWEEP=1: CRC-first trials rotate the UL MCS table; the explicit ISAC_UL_MCS_TABLE=n override wins */
 static bool trial_sweep_on(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_UL_MCS_TABLE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *v = getenv("ISAC_UL_MCS_TABLE");
   return env_ond("ISAC_UL_MCS_TABLE_SWEEP", true) && !(v && *v >= '0' && *v <= '2');
 }
@@ -712,6 +722,7 @@ bool nr_ul_layout_llr_decide(const uint32_t *votes, const uint8_t *prior, const 
   if (lead) *lead = a;
   return true;
 }
+/* DEFERRED/DO NOT USE: ISAC_UL_LOCK_LLR not in the frozen config t26zE (2026-10-18); slated for removal */
 static bool llr_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_LLR"); }
 /* prior of hypothesis h: it is the solved DL BWP or the SIB1 initial UL BWP */
 static uint8_t llr_prior(int h)
@@ -720,6 +731,7 @@ static uint8_t llr_prior(int h)
   return (g_cell.dl_bwp_size && H->n == g_cell.dl_bwp_size && H->start == g_cell.dl_bwp_start)
          || (g_cell.sib1_ul_size && H->n == g_cell.sib1_ul_size && H->start == g_cell.sib1_ul_start);
 }
+/* DEFERRED/DO NOT USE: ISAC_UL_LOOKALIKE not in the frozen config t26zE (2026-10-18); slated for removal */
 static bool lookalike_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOOKALIKE"); }
 static bool llr_lock_ok(int *lead)
 {
@@ -1385,6 +1397,7 @@ static void sprt_close_slot_locked(void)
 static double clip_z(double z)
 {
   static double c = -1.0;
+  /* DEFERRED/DO NOT USE: ISAC_UL_LOCK_CLIP not in the frozen config t26zE (2026-10-18); slated for removal */
   if (c < 0.0) { const char *e = getenv("ISAC_UL_LOCK_CLIP"); c = e && atof(e) > 0.0 ? atof(e) : SPRT_CLIP; }
   return z > c ? c : (z < -c ? -c : z);
 }
@@ -1436,6 +1449,7 @@ static void sprt_feed_locked(const nr_pdcch_blind_ul_result_t *g, int li, long t
       if (r->zn[mn] <= -WV_THR[t]) g_wv[t][mn][1]++;
     }
   }
+  /* DEFERRED/DO NOT USE: ISAC_UL_SPRT_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
   if (env_on("ISAC_UL_SPRT_DUMP")) { /* diagnostic: zn of three fixed hypotheses and of the best one */
     char t[200]; int u = 0, bz = -1;
     for (int h = 0; h < n; h++) if (r->snr_db[h] > -90.f && (bz < 0 || r->zn[h] > r->zn[bz])) bz = h;
@@ -1586,6 +1600,7 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
   len_state_t *ls = li >= 0 ? &g_len[li] : NULL;
   /* one DCI per slot (<= K jobs), small MCS only; locked layouts are re-tried only after a run of CRC failures */
   if (!g_have_cell || !ls || !ls->fitted || g_nhyp == 0 || g_trial_slot == abs_slot
+      /* DEFERRED/DO NOT USE: ISAC_UL_LOCK_NO_TRIAL_UNLOCKED not in the frozen config t26zE (2026-10-18); slated for removal */
       || (g_locked_hyp < 0 && env_on("ISAC_UL_LOCK_NO_TRIAL_UNLOCKED"))
       || (ls->locked && ls->crc_fail_run < RELOCK_FAILS) || fld(&payload, len, ls->mcs_off, 5) > TRIAL_MCS_MAX) {
     pthread_mutex_unlock(&mu);
@@ -1874,6 +1889,7 @@ void nr_ul_layout_nid_verdict(const nr_pdcch_blind_ul_result_t *g, bool keep_tab
  * fails 10 in a row with p < 1e-3); 4x dwell with < 2 passes also demotes. At most PRIOR_SEARCH_MAX hypotheses are tried; then
  * the search returns to the top prior and stops (no more demotions). */
 #define PRIOR_GAP_DB 2.0 /* [INF] LDPC short-block BLER ~50 % sits ~2 dB above the Shannon SNR of the grant's SE */
+/* DEFERRED/DO NOT USE: ISAC_UL_LOCK_PRIOR_SEARCH not in the frozen config t26zE (2026-10-18); slated for removal */
 static bool prior_on(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_PRIOR_SEARCH"); }
 bool nr_ul_layout_prior_enabled(void) { return prior_on(); }
 bool nr_ul_layout_prior_expected(float snr_db, float se)
@@ -1882,6 +1898,7 @@ bool nr_ul_layout_prior_expected(float snr_db, float se)
 }
 static uint32_t prior_dwell(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_UL_LOCK_PRIOR_DWELL not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_UL_LOCK_PRIOR_DWELL");
   return e && atoi(e) > 0 ? (uint32_t)atoi(e) : 10u;
 }

@@ -315,7 +315,17 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
   static double s_min_db = 12.0;
   if (s_env < 0) {
     /* every knob nr_rx_pdsch() reads whose path the GPU does not reproduce */
+    /* DEFERRED/DO NOT USE: ISAC_RX_QAM_AGC not in the frozen config t26zE (2026-10-18); slated for removal */
+    /* DEFERRED/DO NOT USE: ISAC_RX_IRC not in the frozen config t26zE (2026-10-18); slated for removal */
+    /* DEFERRED/DO NOT USE: ISAC_RX_BEST_BY_SNR not in the frozen config t26zE (2026-10-18); slated for removal */
+    /* DEFERRED/DO NOT USE: ISAC_L2MAXH_PEAK not in the frozen config t26zE (2026-10-18); slated for removal */
+    /* DEFERRED/DO NOT USE: ISAC_L2MAXH_HEADROOM not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *bad[] = {"ISAC_RX_BEST_BY_SNR", "ISAC_L2MAXH_PEAK", "ISAC_L2MAXH_HEADROOM", "ISAC_RX_IRC", "ISAC_RX_QAM_AGC",
+                         /* DEFERRED/DO NOT USE: ISAC_SUBSET_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
+                         /* DEFERRED/DO NOT USE: ISAC_RX_ML_2L not in the frozen config t26zE (2026-10-18); slated for removal */
+                         /* DEFERRED/DO NOT USE: ISAC_RX_BRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
+                         /* DEFERRED/DO NOT USE: ISAC_PDSCH_DECODE_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
+                         /* DEFERRED/DO NOT USE: ISAC_MMSE_FLOAT not in the frozen config t26zE (2026-10-18); slated for removal */
                          "ISAC_RX_ML_2L", "ISAC_PDSCH_DECODE_DIAG", "ISAC_SUBSET_DIAG", "ISAC_RX_BRANCH", "ISAC_MMSE_FLOAT"};
     int any = 0;
     for (size_t k = 0; k < sizeof(bad) / sizeof(bad[0]); k++) {
@@ -326,11 +336,15 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
     if (nr_agnostic_v2())
       any = 1;
     s_mode = env_int("ISAC_RX_MRC_MODE", 1);
+    /* DEFERRED/DO NOT USE: ISAC_RX_BRANCH_MIN_DB not in the frozen config t26zE (2026-10-18); slated for removal */
     if (getenv("ISAC_RX_BRANCH_MIN_DB"))
+      /* DEFERRED/DO NOT USE: ISAC_RX_BRANCH_MIN_DB not in the frozen config t26zE (2026-10-18); slated for removal */
       s_min_db = atof(getenv("ISAC_RX_BRANCH_MIN_DB"));
     s_align = env_int("ISAC_RX_MRC_ALIGN", 2);
+    /* DEFERRED/DO NOT USE: ISAC_L2MAXH_DELTA not in the frozen config t26zE (2026-10-18); slated for removal */
     s_l2d = env_int("ISAC_L2MAXH_DELTA", 0);
     s_l2d2 = env_int("ISAC_L2MAXH_DELTA_NL2", -3); /* nl == 2 only, as the CPU path */
+    /* DEFERRED/DO NOT USE: ISAC_RX_MRC_SHIFT_SUM not in the frozen config t26zE (2026-10-18); slated for removal */
     g_shift_sum = env_int("ISAC_RX_MRC_SHIFT_SUM", 0); /* MRCBUG: the job fill in gpu_grant() reads it */
     s_env = any;
   }
@@ -344,6 +358,7 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
     if (s_qm < 0) {
       s_qm = env_int("ISAC_PDSCH_MMSE_MODE", 2);
       s_nl34 = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_NL34", 1); /* DECGPU: 3 and 4 layers (mode 2, and the stock MMSE) */
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_MMSE2_NL34_QPSK not in the frozen config t26zE (2026-10-18); slated for removal */
       s_nl34q = env_int("ISAC_PDSCH_MMSE2_NL34_QPSK", 0);     /* HIGHMCS: as nr_rx_pdsch() */
     }
     int qam_mode = nr_dlsch_qam_mode_override >= 0 ? nr_dlsch_qam_mode_override : s_qm;
@@ -632,6 +647,7 @@ static int build_job(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   if (j->qam_mode == 3) { /* nr_dlsch_mmse() mode 3's s2 factor, same env and libm */
     static double s_nvfac = -1.0;
     if (s_nvfac < 0.0) {
+      /* DEFERRED/DO NOT USE: ISAC_PDSCH_MMSE_EXACT_NVAR_DB not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_PDSCH_MMSE_EXACT_NVAR_DB");
       s_nvfac = pow(10.0, (e ? atof(e) : 21.0) / 10.0);
     }
@@ -641,6 +657,7 @@ static int build_job(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   j->wide_mrc = nr_pdsch_decode_wide_mrc;
   j->want_kappa = nr_pdsch_evm_acc.armed;
   if (g_gpu_evm < 0)
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_EXACT_DEMOD_EVM not in the frozen config t26zE (2026-10-18); slated for removal */
     g_gpu_evm = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_EVM", 1); /* 1: GPU float, 2: GPU double, 0: CPU copy (exact, slow) */
   static int s_evm34 = -1; /* GPUFUSE: ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_NL34=1 (default off): GPU EVM for Nl = 3, 4 too (else the CPU copy) */
   if (s_evm34 < 0)
@@ -835,6 +852,7 @@ int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
 
 static void bg_start(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_GPU_CHECK_ASYNC_QUEUE not in the frozen config t26zE (2026-10-18); slated for removal */
   if (nr_bgq_start(&g_bgq, (unsigned)env_int("ISAC_GPU_CHECK_ASYNC_QUEUE", 2), "gpuCheckBg") != 0)
     g_bg_every = 0; /* no worker: inline checks as before */
   LOG_A(PHY, "SENSING: GPU_CHECK_ASYNC every %d-th grant\n", g_bg_every);
@@ -843,6 +861,7 @@ static void bg_start(void)
 static void bg_resolve(void)
 {
   const int on = nr_fattails_on("ISAC_GPU_CHECK_ASYNC") == 1;
+  /* DEFERRED/DO NOT USE: ISAC_GPU_CHECK_ASYNC_EVERY not in the frozen config t26zE (2026-10-18); slated for removal */
   const int every = on ? env_int("ISAC_GPU_CHECK_ASYNC_EVERY", 256) : 0;
   g_bg_every = every > 0 ? every : 0;
   if (g_bg_every)
@@ -1221,6 +1240,7 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
   }
   const uint64_t dt = now_ns() - t0;
   if (g_shapes < 0)
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_EXACT_DEMOD_SHAPES not in the frozen config t26zE (2026-10-18); slated for removal */
     g_shapes = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_SHAPES", 0);
   if (g_shapes == 1) {
     const int l = (c->dlsch->cw_info.Nl - 1) & 3, q = (c->dlsch->cw_info.qamModOrder / 2 - 1) & 3, r = rb_class(c->freq_alloc->num_rbs);

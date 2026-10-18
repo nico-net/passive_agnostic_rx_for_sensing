@@ -86,25 +86,41 @@ static void load_env(void)
 {
   const char *e = getenv("ISAC_UL_NID_BG");
   const int on = !e || !strcmp(e, "1");
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_SNR not in the frozen config t26zE (2026-10-18); slated for removal */
   g_snr = (float)envl("ISAC_UL_NID_BG_SNR", 6);
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_QM not in the frozen config t26zE (2026-10-18); slated for removal */
   g_qm = (int)envl("ISAC_UL_NID_BG_QM", 2);
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_MIN_RB not in the frozen config t26zE (2026-10-18); slated for removal */
   g_min_rb = (int)envl("ISAC_UL_NID_BG_MIN_RB", 16);
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_REPEAT not in the frozen config t26zE (2026-10-18); slated for removal */
   g_repeat = (int)envl("ISAC_UL_NID_BG_REPEAT", 4);
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_GAP_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   g_gap_ms = (int)envl("ISAC_UL_NID_BG_GAP_MS", 500);
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_DBG_TRY not in the frozen config t26zE (2026-10-18); slated for removal */
   g_dbg_try = (int)envl("ISAC_UL_NID_BG_DBG_TRY", -1);
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_TOPM not in the frozen config t26zE (2026-10-18); slated for removal */
   g_topm = (int)envl("ISAC_UL_NID_BG_TOPM", 12);
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_ADDPOS not in the frozen config t26zE (2026-10-18); slated for removal */
   g_addpos_n = envl("ISAC_UL_NID_BG_ADDPOS", 1) ? 3 : 1;
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_TRIALS not in the frozen config t26zE (2026-10-18); slated for removal */
   g_trials = (int)envl("ISAC_UL_NID_BG_TRIALS", 1);
   g_cpu_pct = (int)envl("ISAC_UL_NID_BG_CPU_PCT", 10);
   if (g_cpu_pct < 1) g_cpu_pct = 1;
   if (g_cpu_pct > 100) g_cpu_pct = 100;
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_JOB_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   g_job_ms = (int)envl("ISAC_UL_NID_BG_JOB_MS", 15000);
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_HYP not in the frozen config t26zE (2026-10-18); slated for removal */
   g_hyp_per_job = (int)envl("ISAC_UL_NID_BG_HYP", 1000);
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_DROP not in the frozen config t26zE (2026-10-18); slated for removal */
   g_drop = (int)envl("ISAC_UL_NID_BG_DROP", 100);
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_LOG not in the frozen config t26zE (2026-10-18); slated for removal */
   g_nlog = (int)envl("ISAC_UL_NID_BG_LOG", 0);
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   g_core = (int)envl("ISAC_UL_NID_BG_CORE", -1);
   g_idle = (int)envl("ISAC_UL_NID_BG_IDLE", 1);
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_NBWP not in the frozen config t26zE (2026-10-18); slated for removal */
   g_nbwp = (int)envl("ISAC_UL_NID_BG_NBWP", 4);
+  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_MCS not in the frozen config t26zE (2026-10-18); slated for removal */
   g_mcs_max = (int)envl("ISAC_UL_NID_BG_MCS", 4);
   const char *iq = getenv("ISAC_UL_NID_BG_IQ");
   atomic_store(&g_iq_on, on && (!iq || !strcmp(iq, "1")));

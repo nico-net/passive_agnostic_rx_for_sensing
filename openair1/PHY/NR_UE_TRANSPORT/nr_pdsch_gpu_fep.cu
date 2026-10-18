@@ -765,8 +765,10 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   CK(nr_gpu_allocate(NR_GPU_SHARED_RW, (void **)&g_h_llr, g_llr_cap * sizeof(int16_t)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_llr, g_llr_cap * sizeof(int16_t)));
   cudaFuncAttributes attr;
+  /* DEFERRED/DO NOT USE: NR_GPU_LLR_SCALE not in the frozen config t26zE (2026-10-18); slated for removal */
   if (const char *e = getenv("NR_GPU_LLR_SCALE"))
     g_llr_scale = (float)atof(e);
+  /* DEFERRED/DO NOT USE: NR_GPU_FORCE_ANT not in the frozen config t26zE (2026-10-18); slated for removal */
   if (const char *e = getenv("NR_GPU_FORCE_ANT")) {
     const int a = atoi(e);
     if (a >= 0 && a < cfg->nant) g_force_ant = a;
@@ -812,6 +814,7 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
       }
       g_ctx_prio = nr_pdsch_gpu_prio_on();
       const size_t ring = (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2);
+      /* DEFERRED/DO NOT USE: ISAC_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
       { const char *e = getenv("ISAC_GPU_PASS"), *g = (getenv("ISAC_PDSCH_GPU_GRAPH") ?: "1"), *sp = (getenv("ISAC_PDSCH_GPU_GRAPH_SPLIT") ?: "1");
         PASS_LS_ROWS = (e && atoi(e) == 1) ? 512 : (g && atoi(g) == 1 && sp && atoi(sp) == 1) ? 1024 : 256; } /* v2 split: 32 segments (nr_gpu_pass_graph.cu SEG_ROWS) */
       for (int k = 0; k < PASS_SLOTS; k++) {
@@ -827,12 +830,15 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
     }
     /* Direct mode: the kernel reads the receiver's host IQ ring and writes its rxdataF in place. Only on a
      * coherent shared-memory platform (GB10: pageable access through the host page tables). */
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_EXACT_DIRECT not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *d = getenv("ISAC_PDSCH_GPU_EXACT_DIRECT");
     g_exact_direct = nr_gpu_platform_shared_direct() && !(d && atoi(d) == 0);
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_EXACT_DEADLINE_US not in the frozen config t26zE (2026-10-18); slated for removal */
     if (const char *e = getenv("ISAC_PDSCH_GPU_EXACT_DEADLINE_US"))
       g_exact_deadline_us = std::max(50.0, atof(e));
     g_exact_ok = true;
   }
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_BATCH_ASYNC not in the frozen config t26zE (2026-10-18); slated for removal */
   g_batch_async = getenv("ISAC_PDSCH_GPU_BATCH_ASYNC") && !strcmp(getenv("ISAC_PDSCH_GPU_BATCH_ASYNC"), "1");
   CK(cudaFuncGetAttributes(&attr, k_fep_gather));
   CK(cudaFuncGetAttributes(&attr, k_fep_rotate));
@@ -844,6 +850,7 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   CK(cudaMemsetAsync(g_d_fft_in, 0, (size_t)cfg->nant * ns * N * sizeof(float2), g_stream));
   if (cufftExecC2C(g_plan, (cufftComplex *)g_d_fft_in, (cufftComplex *)g_d_rxF, CUFFT_FORWARD) != CUFFT_SUCCESS) return -1;
   CK((cudaError_t)nr_gpu_sync(g_stream));
+  /* DEFERRED/DO NOT USE: ISAC_GPU_HEARTBEAT not in the frozen config t26zE (2026-10-18); slated for removal */
   if (getenv("ISAC_GPU_HEARTBEAT") && atoi(getenv("ISAC_GPU_HEARTBEAT")) == 1) {
     int least = 0, greatest = 0;
     CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
@@ -1474,6 +1481,7 @@ extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
   memcpy(par.filt, j->filt, sizeof(par.filt));
   {
     static int trim = -1;
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_CHEST_TRIM not in the frozen config t26zE (2026-10-18); slated for removal */
     if (trim < 0) trim = getenv("ISAC_PDSCH_GPU_CHEST_TRIM") && atoi(getenv("ISAC_PDSCH_GPU_CHEST_TRIM")) == 1;
     par.trim = trim;
   }
@@ -1549,6 +1557,7 @@ extern "C" int nr_pdsch_gpu_chest_dev_at(const nr_gpu_chest_job_t *j, int r0, in
   memcpy(par.filt, j->filt, sizeof(par.filt));
   {
     static int trim = -1;
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_CHEST_TRIM not in the frozen config t26zE (2026-10-18); slated for removal */
     if (trim < 0) trim = getenv("ISAC_PDSCH_GPU_CHEST_TRIM") && atoi(getenv("ISAC_PDSCH_GPU_CHEST_TRIM")) == 1;
     par.trim = trim;
   }

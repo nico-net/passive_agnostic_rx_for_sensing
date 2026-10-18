@@ -249,6 +249,7 @@ configmodule_interface_t *load_configmodule(int argc,
 
   /* look for the OAI_CONFIGMODULE environment variable */
   if ( cfgparam == NULL ) {
+    /* DEFERRED/DO NOT USE: OAI_CONFIGMODULE not in the frozen config t26zE (2026-10-18); slated for removal */
     cfgparam = getenv("OAI_CONFIGMODULE");
   }
 

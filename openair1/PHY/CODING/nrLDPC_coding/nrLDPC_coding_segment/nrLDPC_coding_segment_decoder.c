@@ -27,6 +27,7 @@ static int ldpc_bench_on(void)
 {
   static int on = -1;
   if (on < 0) {
+    /* DEFERRED/DO NOT USE: LDPC_BENCH not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("LDPC_BENCH");
     on = e && atoi(e);
   }

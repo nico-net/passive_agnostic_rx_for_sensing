@@ -54,6 +54,7 @@ static unsigned setting(const char *name,unsigned def,unsigned lo,unsigned hi) {
 static void init(void) {
   const char *s=getenv("ISAC_GPU_BUDGET");enabled=s && !strcmp(s,"1");
   pct=setting("ISAC_GPU_DISCOVERY_BUDGET_PCT",30,1,100);
+  /* DEFERRED/DO NOT USE: ISAC_GPU_RT_DEADLINE_US not in the frozen config t26zE (2026-10-18); slated for removal */
   deadline=setting("ISAC_GPU_RT_DEADLINE_US",250,1,5000);
   start_us=nr_gpu_budget_now_us();
 }

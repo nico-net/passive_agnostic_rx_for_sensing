@@ -183,6 +183,7 @@ static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t
    * any difference (diagnostic). */
   static int s_memo = -1, s_memo_chk = -1;
   if (s_memo < 0) s_memo = atoi(getenv("ISAC_SCAN_SCOREMEMO") ?: "1") ? 1 : 0;
+  /* DEFERRED/DO NOT USE: ISAC_SCAN_SCOREMEMO_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s_memo_chk < 0) s_memo_chk = getenv("ISAC_SCAN_SCOREMEMO_CHECK") && atoi(getenv("ISAC_SCAN_SCOREMEMO_CHECK")) ? 1 : 0;
   int dk[128], ndk = 0;
   for (int k = 0; k < nrd && k < 128; k++) {
@@ -340,6 +341,7 @@ static bool nr_pdcch_c0_occ_hit(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *pro
   static float ratio = -1.f;
   static float floor_e; /* racy across consumers by design: a running estimate */
   if (ratio < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_C0_OCC_DB not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_C0_OCC_DB");
     ratio = powf(10.f, (e ? (float)atof(e) : 6.f) / 10.f);
   }
@@ -430,6 +432,7 @@ static bool screen_audit_enabled(void)
 {
   static _Atomic int enabled = -1;
   if (enabled < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_SHARED_PRESCREEN_AUDIT not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *v = getenv("ISAC_PDCCH_SHARED_PRESCREEN_AUDIT");
     enabled = v && atoi(v) != 0;
   }
@@ -443,7 +446,9 @@ static double screen_dmrs_min(void)
   static _Atomic int scaled = -1;
   if (scaled < 0) {
     int value = 0;
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_SHARED_DMRS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *on = getenv("ISAC_PDCCH_SHARED_DMRS");
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_SHARED_DMRS_MIN not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *s = getenv("ISAC_PDCCH_SHARED_DMRS_MIN");
     if (on && atoi(on) != 0) {
       const double min = s ? atof(s) : 0.5;
@@ -755,6 +760,7 @@ static __thread uint32_t t_pass_accepts;
 static bool pass_adapt_on(void)
 {
   static int en = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_PASS_ADAPT not in the frozen config t26zE (2026-10-18); slated for removal */
   if (en < 0) en = getenv("ISAC_PDCCH_PASS_ADAPT") && atoi(getenv("ISAC_PDCCH_PASS_ADAPT")) ? 1 : 0;
   return en == 1;
 }
@@ -830,6 +836,7 @@ static bool dwell_prescreen_enabled(void)
   static _Atomic int s_v = -1;
   int v = atomic_load_explicit(&s_v, memory_order_relaxed);
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_DWELL_PRESCREEN not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_DWELL_PRESCREEN");
     v = (e && atoi(e) != 0) ? 1 : 0;
     atomic_store_explicit(&s_v, v, memory_order_relaxed);
@@ -840,6 +847,7 @@ static double dwell_prescreen_z(void)
 {
   static double s_z = -1.0; /* idempotent init: benign race */
   if (s_z < 0.0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_DWELL_PRESCREEN_Z not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_DWELL_PRESCREEN_Z");
     s_z = (e && atof(e) > 0.0) ? atof(e) : NR_PDCCH_DWELL_PS_Z_DEFAULT;
   }
@@ -855,6 +863,7 @@ static bool prescreen_diag_enabled(void)
   static _Atomic int s_v = -1;
   int v = atomic_load_explicit(&s_v, memory_order_relaxed);
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_PRESCREEN_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_PRESCREEN_DIAG");
     v = (e && atoi(e) != 0) ? 1 : 0;
     atomic_store_explicit(&s_v, v, memory_order_relaxed);
@@ -866,6 +875,7 @@ static int sim_sparse_period(void)
   static _Atomic int s_v = -1;
   int v = atomic_load_explicit(&s_v, memory_order_relaxed);
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_SIM_SPARSE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_SIM_SPARSE");
     v = (e && atoi(e) > 1) ? atoi(e) : 0;
     atomic_store_explicit(&s_v, v, memory_order_relaxed);
@@ -1055,6 +1065,7 @@ static uint16_t nr_pdcch_nrnti_override(uint32_t abs_slot, const nr_pdcch_blind_
 {
   static int s_force0 = -1;
   if (s_force0 < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_NRNTI not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_NRNTI");
     s_force0 = (e != NULL && strcmp(e, "0") == 0) ? 1 : 0;
     LOG_A(PHY, "SENSING: STAGE0 n_RNTI %s\n", s_force0 ? "forced to 0 (regression control)"
@@ -1321,6 +1332,7 @@ static int nr_pdcch_dci11_stage2_enabled(void)
 {
   static int s_on = -1;
   if (s_on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_DCI11_STAGE2 not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_DCI11_STAGE2");
     s_on = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
@@ -1350,6 +1362,7 @@ static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int m
     fill = e ? atof(e) : 25.0;
     e = (getenv("ISAC_PDSCH_SNR_GATE") ?: "1");
     snr_gate = e && atoi(e) != 0;
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_SNR_GATE_DB not in the frozen config t26zE (2026-10-18); slated for removal */
     e = getenv("ISAC_PDSCH_SNR_GATE_DB");
     margin = e ? atof(e) : 3.0;
     tokens = burst;
@@ -1443,6 +1456,7 @@ typedef struct {
 static int dci11_parse_cache_mode(void) /* 0 off, 1 on, 2 on + compare every cached parse with the full one (self-check) */
 {
   static int en = -1;
+  /* DEFERRED/DO NOT USE: ISAC_DCI11_PARSE_CACHE not in the frozen config t26zE (2026-10-18); slated for removal */
   if (en < 0) en = getenv("ISAC_DCI11_PARSE_CACHE") ? atoi(getenv("ISAC_DCI11_PARSE_CACHE")) : 0;
   return en;
 }
@@ -1617,6 +1631,7 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
    * already known from offline field statistics. Never part of an OTA recipe. */
   static int s_filt = -1, f_riv, f_mcs, f_ap, f_apb, f_mode;
   if (s_filt < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_DCI11_DIAG_FILTER not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_DCI11_DIAG_FILTER");
     s_filt = e && sscanf(e, "%d,%d,%d,%d,%d", &f_riv, &f_mcs, &f_ap, &f_apb, &f_mode) == 5;
     if (s_filt) LOG_W(PHY, "SENSING: ISAC_DCI11_DIAG_FILTER %s -- DIAGNOSTIC, not a blind run\n", e);
@@ -1712,6 +1727,7 @@ static bool ul_force_opts_enabled(void)
 {
   static int on = -1;
   if (on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_UL_FORCE_OPTS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *v = getenv("ISAC_UL_FORCE_OPTS");
     on = (v && !strcmp(v, "1")) ? 1 : 0;
   }
@@ -1973,6 +1989,7 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
   }
   static _Thread_local int prune_log = -1;
   static _Thread_local bool prior_alive[NR_DCI11_LAYOUT_MAX];
+  /* DEFERRED/DO NOT USE: ISAC_DCI11_PRUNELOG not in the frozen config t26zE (2026-10-18); slated for removal */
   if (prune_log < 0) prune_log = getenv("ISAC_DCI11_PRUNELOG") && atoi(getenv("ISAC_DCI11_PRUNELOG"));
   const int prior_n = g_dci11_resolver->n_hyp;
   if (prune_log) memcpy(prior_alive, g_dci11_resolver->alive, prior_n * sizeof(*prior_alive));
@@ -2294,6 +2311,7 @@ static inline int autodiscover_sweep_budget(void)
 {
   static int s_budget = -1;
   if (s_budget < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_SWEEP_OCCASIONS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_SWEEP_OCCASIONS");
     const int v = (e != NULL) ? atoi(e) : 0;
     s_budget = (v > 0) ? v : 500;
@@ -2307,6 +2325,7 @@ static inline int dci_len_min(void)
 {
   static int v = -1;
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_DCI_LEN_MIN not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_DCI_LEN_MIN");
     const int x = (e != NULL) ? atoi(e) : 0;
     v = (x >= 1 && x <= NR_DCI_MAX_PAYLOAD) ? x : 30;
@@ -2317,6 +2336,7 @@ static inline int dci_len_max(void)
 {
   static int v = -1;
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_DCI_LEN_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_DCI_LEN_MAX");
     const int x = (e != NULL) ? atoi(e) : 0;
     v = (x >= dci_len_min() && x <= NR_DCI_MAX_PAYLOAD) ? x : NR_DCI_MAX_PAYLOAD;
@@ -2339,6 +2359,7 @@ static int lane_als(const uint8_t **out)
   static uint8_t v[5];
   static int n = -1;
   if (n < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_LANE_ALS not in the frozen config t26zE (2026-10-18); slated for removal */
     n = nr_pdcch_blind_parse_lane_als(getenv("ISAC_LANE_ALS"), v);
     if (n == 0) {
       const nr_pdcch_sib1_prior_t *pr = nr_pdcch_sib1_prior_get();
@@ -2395,6 +2416,7 @@ static int dci_sweep_stride(void)
 {
   static int s_stride = -1;
   if (s_stride < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_DCI_SWEEP_STRIDE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_DCI_SWEEP_STRIDE");
     s_stride = (e != NULL) ? atoi(e) : 0;
     if (s_stride < 0) {
@@ -2589,6 +2611,7 @@ static unsigned discovery_budget_us(void)
 {
   static int value=-1;
   if (value<0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_DISCOVERY_BUDGET_US not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e=getenv("ISAC_PDCCH_DISCOVERY_BUDGET_US");
     value=e?atoi(e):0;
     if(value<0 || value>1000000) value=0;
@@ -2604,6 +2627,7 @@ static uint64_t discovery_cpu_now(void)
 static bool discovery_trace_enabled(void)
 {
   static int enabled=-1;
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_DISCOVERY_TRACE not in the frozen config t26zE (2026-10-18); slated for removal */
   if(enabled<0) enabled=getenv("ISAC_PDCCH_DISCOVERY_TRACE")!=NULL;
   return enabled;
 }
@@ -2812,6 +2836,7 @@ static void discovery_evidence(const char *stage, const char *direction, int fra
 {
   static __thread int enabled = -1;
   if (enabled < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_DISCOVERY_EVIDENCE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_DISCOVERY_EVIDENCE");
     enabled = e && !strcmp(e, "1");
   }
@@ -2865,6 +2890,7 @@ static bool nr_pdcch_css_nrnti0_enabled(void)
 {
   static int en = -1;
   if (en < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_CSS_NRNTI0 not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_CSS_NRNTI0");
     en = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
@@ -2961,6 +2987,7 @@ static void *janon_worker(void *arg)
     pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
     cpu_set_t set;
     CPU_ZERO(&set);
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_JOINT_ANON_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *ce = getenv("ISAC_PDCCH_JOINT_ANON_CORE");
     if (ce && *ce && atoi(ce) >= 0 && atoi(ce) < CPU_SETSIZE)
       CPU_SET(atoi(ce), &set);
@@ -2969,8 +2996,10 @@ static void *janon_worker(void *arg)
     if (CPU_COUNT(&set) > 0)
       pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
     pthread_setname_np(pthread_self(), "pdcchJanon");
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_JOINT_ANON_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
     nr_bg_lane_enter("ISAC_PDCCH_JOINT_ANON_CORE"); /* ISAC_BG_LANE: shared background core list, nice 10 */
     if (nr_bg_lane_on()) { /* janon keeps its own priority (default nice 0): at nice 10 it lost ~20 % of anonymous hits to the other background threads */
+      /* DEFERRED/DO NOT USE: ISAC_BG_JANON_NICE not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *jn = getenv("ISAC_BG_JANON_NICE");
       setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), jn ? atoi(jn) : 0);
     }
@@ -3058,6 +3087,7 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
   static pthread_once_t once = PTHREAD_ONCE_INIT;
   int topk = atomic_load(&s_topk);
   if (topk < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_JOINT_ANON_TOPK not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_JOINT_ANON_TOPK");
     topk = (e && atoi(e) > 0) ? atoi(e) : (janon_stable_enabled() ? 8 : 6);
     if (topk > JANON_MAX_CAND) topk = JANON_MAX_CAND;
@@ -3166,6 +3196,7 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
  */
 static void janon_start(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_JOINT_ANON_Q not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_PDCCH_JOINT_ANON_Q");
   g_janon_cap = (e && atoi(e) > 0) ? atoi(e) : (janon_stable_enabled() ? 256 : 64);
   g_janon_q = calloc((size_t)g_janon_cap, sizeof(janon_item_t));
@@ -3413,7 +3444,9 @@ static void nr_pdcch_anon_dump(int frame, int slot, int nid, int rb_offset, int 
   pthread_mutex_lock(&mu);
   if (!s_init) {
     s_init = 1;
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_ANON_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *p = getenv("ISAC_PDCCH_ANON_DUMP");
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_ANON_DUMP_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *m = getenv("ISAC_PDCCH_ANON_DUMP_MAX");
     s_left = m ? atoi(m) : 20000;
     if (p && *p)
@@ -3454,6 +3487,7 @@ static int joint_anon_budget(void)
 {
   static int v = -1;
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_JOINT_ANON_OCC not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_JOINT_ANON_OCC");
     v = (e && atoi(e) > 0) ? atoi(e) : 4000;
   }
@@ -3466,6 +3500,7 @@ static unsigned joint_anon_mm_max(int L)
 {
   static int per216 = -1;
   if (per216 < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_JOINT_ANON_MM not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_JOINT_ANON_MM");
     per216 = (e && atoi(e) >= 0) ? atoi(e) : 1;
   }
@@ -3490,6 +3525,7 @@ static int joint_anon_budget_us(void)
 {
   static int v = -1;
   if (v < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_JOINT_ANON_BUDGET_US not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_JOINT_ANON_BUDGET_US");
     v = (e && atoi(e) > 0) ? atoi(e) : 0;
   }
@@ -3502,6 +3538,7 @@ static double joint_anon_score(const int16_t *llr, int E)
 {
   static _Atomic int s_neon = -1;
   if (s_neon < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_NEON_SCORE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *v = getenv("ISAC_PDCCH_NEON_SCORE");
     s_neon = v && atoi(v) != 0;
   }
@@ -3549,6 +3586,7 @@ static int blind_dmrs_rank_mode(void)
 {
   static int mode = -1;
   if (mode < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_DMRS_RANK not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_DMRS_RANK");
     mode = e ? atoi(e) : 1;
     if (mode < 0 || mode > 2) mode = 1;
@@ -3655,6 +3693,7 @@ static void blind_discovery_replay(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx
   static uint64_t last_geometry = UINT64_MAX, last_control = UINT64_MAX;
   if (!initialized) {
     initialized = 1;
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_DISCOVERY_REPLAY not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *path = getenv("ISAC_PDCCH_DISCOVERY_REPLAY");
     if (!path || !*path) return;
     file = fopen(path, "wbx");
@@ -4368,6 +4407,7 @@ static int nr_pbwp_enabled(void)
 {
   static int s_on = -1;
   if (s_on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_BWP_TRACK not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_BWP_TRACK");
     s_on = (e != NULL) ? (atoi(e) != 0) : nr_agnostic_v2();
   }
@@ -4586,6 +4626,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
     // field is dropped from the message.
     static int s_entry_diag = -1;
     if (s_entry_diag < 0)
+      /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
       s_entry_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
     static int s_entry_calls = 0;
     s_entry_calls++;
@@ -4597,6 +4638,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
   {
     static int s_cfg_diag = -1;
     if (s_cfg_diag < 0)
+      /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
       s_cfg_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
     static int s_cfg_calls = 0;
     s_cfg_calls++;
@@ -4687,6 +4729,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
   static uint32_t discovery_duty_tick; /* receive thread only */
   static uint32_t discovery_duty;
   if (!discovery_duty) {
+    /* DEFERRED/DO NOT USE: ISAC_RECONF_DISCOVERY_DUTY not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_RECONF_DISCOVERY_DUTY");
     char *end;
     const long v = e ? strtol(e, &end, 10) : 20;
@@ -4720,6 +4763,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
      * this residual per-subcarrier phase rotation would decorrelate Technique A's magnitude-of-
      * complex-sum measurement while leaving phase-insensitive measurements (RF power) unaffected --
      * exactly this handover's still-open symptom. */
+    /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     if (getenv("ISAC_DISCOVER_DIAG") != NULL) {
       extern double nr_ue_get_branch_fo_hz(int ant);
       static int s_fo_calls = 0;
@@ -4729,6 +4773,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
         fflush(stdout);
       }
     }
+    /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     if (getenv("ISAC_DISCOVER_DIAG") != NULL) {
       static uint32_t s_en_n;
       if ((s_en_n++ % 2000) == 0) {
@@ -4814,6 +4859,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
    * SS#0 slots when no dedicated search space is known (2026-10-06, NSA PCI 415/421: 2 slots in 20). */
   static int s_every_slot = -1;
   if (s_every_slot < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_SCAN_EVERY_SLOT not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_SCAN_EVERY_SLOT");
     s_every_slot = (e && atoi(e) != 0) ? 1 : 0;
   }
@@ -5019,6 +5065,7 @@ static void *par_bank_worker(void *arg)
 {
   par_helper_t *hp = (par_helper_t *)arg;
   pthread_setname_np(pthread_self(), "pdcchParBank");
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_PAR_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ce = getenv("ISAC_PDCCH_PAR_CORE"); /* "c0,c1": one core per helper, in creation order */
   static _Atomic int s_idx;
   const int my = atomic_fetch_add(&s_idx, 1);
@@ -5054,6 +5101,7 @@ static void *par_bank_worker(void *arg)
 static bool par_banks_on(void)
 {
   static int en = -1;
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_PAR_BANKS not in the frozen config t26zE (2026-10-18); slated for removal */
   if (en < 0) en = getenv("ISAC_PDCCH_PAR_BANKS") && atoi(getenv("ISAC_PDCCH_PAR_BANKS")) ? 1 : 0;
   return en == 1;
 }
@@ -5516,6 +5564,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   {
     static _Atomic int s_tdd_skip = -1; /* _Atomic: N scan consumers (Task A7) */
     if (s_tdd_skip < 0)
+      /* DEFERRED/DO NOT USE: ISAC_TDD_SKIP not in the frozen config t26zE (2026-10-18); slated for removal */
       s_tdd_skip = (getenv("ISAC_TDD_SKIP") != NULL) ? 1 : 0;
     static _Atomic unsigned long s_skipped = 0, s_seen = 0; /* _Atomic: N scan consumers (Task A7) */
     if (s_tdd_skip && proc != NULL) {
@@ -5612,6 +5661,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   {
     static _Atomic int s_css0_every = -1; /* _Atomic: N scan consumers (Task A7) */
     if (s_css0_every < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_CSS0_EVERY not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_CSS0_EVERY");
       s_css0_every = (e != NULL && atoi(e) >= 0) ? atoi(e) : 8;
     }
@@ -6150,6 +6200,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   extern _Atomic int nr_pdcch_blind_dmrs_probe;
   nr_pdcch_blind_dmrs_probe = 1;
   extern _Atomic int nr_pdcch_blind_capture;
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_CAPTURE not in the frozen config t26zE (2026-10-18); slated for removal */
   nr_pdcch_blind_capture = (getenv("ISAC_PDCCH_CAPTURE") != NULL);
 
   /* Exact-extent LLR reuse across bank, dwell and CSS/USS passes. Different
@@ -6157,6 +6208,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * and the P90 LLR autoscale, so they must be demodulated independently. */
   static _Atomic int s_llrc = -1;
   if (s_llrc < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_LLR_CACHE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *v = getenv("ISAC_PDCCH_LLR_CACHE");
     s_llrc = v && atoi(v) != 0;
   }
@@ -6185,6 +6237,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   const bool llrc_hit = llrc_on && nr_pdcch_scan_llr_get(&t_llrc, &llrc_key, pdcch_llr[0][0], llrc_bytes);
   static _Atomic int s_llrc_verify = -1;
   if (s_llrc_verify < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_LLR_CACHE_VERIFY not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *v = getenv("ISAC_PDCCH_LLR_CACHE_VERIFY");
     s_llrc_verify = v && atoi(v) != 0;
   }
@@ -6328,6 +6381,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
          * reference -- what the tracker is actually seeing, when no CORESET gets declared. */
         static _Atomic int s_bwp_diag = -1; /* _Atomic: N scan consumers (Task A7) */
         if (s_bwp_diag < 0)
+          /* DEFERRED/DO NOT USE: ISAC_BWP_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
           s_bwp_diag = getenv("ISAC_BWP_DIAG") ? 1 : 0;
         static _Atomic uint32_t s_diag_n; /* _Atomic: N scan consumers (Task A7) */
         if (s_bwp_diag && sym == 0 && (++s_diag_n % 256) == 0) {
@@ -6393,6 +6447,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * produces. Env-gated on the same ISAC_DISCOVER_DIAG flag as the discovery-side diagnostics. */
   static _Atomic int s_xcheck_diag = -1; /* _Atomic: N scan consumers (Task A7) */
   if (s_xcheck_diag < 0)
+    /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     s_xcheck_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
   if (s_xcheck_diag) {
 #define XCHECK_MAX_CANDIDATE_WINDOWS (273 / 6) // generous headroom for a 273 PRB carrier, mirrors nr_pdcch_blind_monitor.c
@@ -6490,6 +6545,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * by ISAC_PDCCH_KNOWN_PRESCREEN; keep this lever independently opt-in. */
   static _Atomic int s_shared_screen = -1;
   if (s_shared_screen < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_SHARED_PRESCREEN not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *v = getenv("ISAC_PDCCH_SHARED_PRESCREEN");
     s_shared_screen = v && atoi(v) != 0;
   }
@@ -6505,6 +6561,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       /* No amplitude-only cutoff preserved all admitted DCIs in the PCI415
        * replay (0.66 lost hundreds), so the safe default is fail-open. */
       int min_u = 0;
+      /* DEFERRED/DO NOT USE: ISAC_PDCCH_SHARED_PRESCREEN_MIN not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *v = getenv("ISAC_PDCCH_SHARED_PRESCREEN_MIN");
       if (v && atof(v) >= 0 && atof(v) < 1) min_u = (int)(atof(v) * 1000000.0);
       s_shared_min_u = min_u;
@@ -6513,6 +6570,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
     const double dmrs_min = screen_dmrs_min();
     static _Atomic int s_shared_neon = -1;
     if (s_shared_neon < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_PDCCH_NEON_SCORE not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *v = getenv("ISAC_PDCCH_NEON_SCORE");
       s_shared_neon = v && atoi(v) != 0;
     }
@@ -6645,6 +6703,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   if (cfg->autodiscover && dl_geometry_ready && !g_length_swept) {
     static _Atomic int s_force_len = -1; /* _Atomic: N scan consumers (Task A7) */
     if (s_force_len < 0) {
+      /* DEFERRED/DO NOT USE: ISAC_FORCE_DCI_LEN not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *e = getenv("ISAC_FORCE_DCI_LEN");
       s_force_len = (e != NULL) ? atoi(e) : 0;
     }
@@ -6663,6 +6722,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
     uint64_t evicted_geom = 0;
     nr_pdcch_dci_length_bank_t *dl_bank =
         nr_pdcch_dci_length_store_get(&g_dl_length_store, dl_geom, &evicted_geom);
+    /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
     if (evicted_geom && getenv("ISAC_DISCOVER_DIAG") != NULL)
       LOG_A(PHY, "SENSING: DL length store evicted coreset_key=%llu for key=%llu\n",
             (unsigned long long)evicted_geom, (unsigned long long)dl_geom);
@@ -6876,8 +6936,10 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
            * joint_anon it is the prescreen the scorer applied anyway (same decision); otherwise the SCAN2 UL screen
            * (z = ISAC_ANONLEN_Z, default 2.33). A screened trial still counts as a failed decode. */
           static double s_az = -1.0;
+          /* DEFERRED/DO NOT USE: ISAC_ANONLEN_Z not in the frozen config t26zE (2026-10-18); slated for removal */
           if (s_az < 0) { const char *e = getenv("ISAC_ANONLEN_Z"); s_az = e && atof(e) > 0 ? atof(e) : 2.33; }
           static int s_aud = -1;
+          /* DEFERRED/DO NOT USE: ISAC_ANONLEN_AUDIT_EVERY not in the frozen config t26zE (2026-10-18); slated for removal */
           if (s_aud < 0) { const char *e = getenv("ISAC_ANONLEN_AUDIT_EVERY"); s_aud = e ? atoi(e) : 64; }
           int ns = 0;
           for (int i = 0; i < disc_n_cand; ++i) {
@@ -6901,6 +6963,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         if (dlc && !dl_scout && !dl_second && !dlc->found[0]) {
           static _Atomic int s_len_memory = -1;
           if (s_len_memory < 0) {
+            /* DEFERRED/DO NOT USE: ISAC_PDCCH_LEN_MEMORY not in the frozen config t26zE (2026-10-18); slated for removal */
             const char *v = getenv("ISAC_PDCCH_LEN_MEMORY");
             s_len_memory = v && atoi(v) != 0;
           }
@@ -6925,7 +6988,9 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
            * of this CORESET are swept alone, one round in ISAC_ANONLEN_EVERY is a full lap. Any RNTI of the bank in
            * SUSPECT (reconfiguration suspected) switches this off until it is resolved. */
           static int s_min = -1, s_every = -1;
+          /* DEFERRED/DO NOT USE: ISAC_ANONLEN_MIN_RNTI not in the frozen config t26zE (2026-10-18); slated for removal */
           if (s_min < 0) { const char *e = getenv("ISAC_ANONLEN_MIN_RNTI"); s_min = e && atoi(e) > 0 ? atoi(e) : 2; }
+          /* DEFERRED/DO NOT USE: ISAC_ANONLEN_EVERY not in the frozen config t26zE (2026-10-18); slated for removal */
           if (s_every < 0) { const char *e = getenv("ISAC_ANONLEN_EVERY"); s_every = e && atoi(e) > 1 ? atoi(e) : 16; }
           int lens[8], cnt[8], nl = 0;
           bool suspect = false;
@@ -7189,6 +7254,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   uint64_t evicted_geom = 0;
   nr_pdcch_dci_length_bank_t *ul_bank =
       nr_pdcch_dci_length_store_get(&g_ul_length_store, geom, &evicted_geom);
+  /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
   if (evicted_geom && getenv("ISAC_DISCOVER_DIAG") != NULL)
     LOG_A(PHY, "SENSING: UL length store evicted coreset_key=%llu for key=%llu\n",
           (unsigned long long)evicted_geom, (unsigned long long)geom);
@@ -7341,10 +7407,12 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         if (nr_scan2_on(NR_SCAN2_UL)) {
           static _Atomic int s_audit_every = -1;
           if (s_audit_every < 0) {
+            /* DEFERRED/DO NOT USE: ISAC_SCAN2_AUDIT_EVERY not in the frozen config t26zE (2026-10-18); slated for removal */
             const char *e = getenv("ISAC_SCAN2_AUDIT_EVERY");
             s_audit_every = e ? atoi(e) : 64;
           }
           static double s_z = -1.0; /* false-alarm level of the empty-CCE screen: Q(2.33) = 1e-2 (the DL CFAR gate uses 3.09) */
+          /* DEFERRED/DO NOT USE: ISAC_SCAN2_UL_Z not in the frozen config t26zE (2026-10-18); slated for removal */
           if (s_z < 0) { const char *e = getenv("ISAC_SCAN2_UL_Z"); s_z = e && atof(e) > 0 ? atof(e) : 2.33; }
           int ns = 0;
           for (int i = 0; i < sweep_trials && i < 64; ++i) {
@@ -7372,6 +7440,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         const int found=nr_pdcch_dci_length_sweep_feed_budget(&ulc->state,ul_length_score,&ctx,
                                                      sweep_trials, dci_len_min(), dci_len_max(),
                                                      boot_rnti, ul_deadline, 0);
+        /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
         if (getenv("ISAC_DISCOVER_DIAG") != NULL)
           LOG_A(PHY, "SENSING: ULSWEEPTIM us=%.2f rnti=0x%x ranked_trials=%d offered=%d decodes=%llu\n",
                 (double)(btim_now() - ul_feed_start) / 1000.0, boot_rnti, sweep_trials, count,
@@ -7451,6 +7520,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * occurs once the thread has reached its peak population. */
   static _Atomic int s_task_cap64 = -1;
   if (s_task_cap64 < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_TASK_CAP64 not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *v = getenv("ISAC_PDCCH_TASK_CAP64");
     s_task_cap64 = v && atoi(v) != 0;
   }
@@ -7493,6 +7563,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
        * against this project's explicit priority (minimize lost grants), not a bug to hunt. Needs a
        * threshold sweep (looser z, or only gate candidates far below the energy-gate floor rather than a
        * tight statistical bound) before defaulting on. ISAC_PDCCH_DMRS_GATE=1 to re-enable for that A/B. */
+      /* DEFERRED/DO NOT USE: ISAC_PDCCH_DMRS_GATE not in the frozen config t26zE (2026-10-18); slated for removal */
       s_dmrs_gate_env = (getenv("ISAC_PDCCH_DMRS_GATE") != NULL && atoi(getenv("ISAC_PDCCH_DMRS_GATE")) != 0) ? 1 : 0;
     }
     double cand_dmrs_score[256];
@@ -7549,6 +7620,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       double       sum_abs = 0;
       static _Atomic int s_neon_energy = -1;
       if (s_neon_energy < 0) {
+        /* DEFERRED/DO NOT USE: ISAC_PDCCH_NEON_SCORE not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *v = getenv("ISAC_PDCCH_NEON_SCORE");
         s_neon_energy = v && atoi(v) != 0;
       }
@@ -7588,6 +7660,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       {
         static _Atomic int s_ep = -1; /* _Atomic: N scan consumers (Task A7) */
         if (s_ep < 0)
+          /* DEFERRED/DO NOT USE: ISAC_PDCCH_ENERGY not in the frozen config t26zE (2026-10-18); slated for removal */
           s_ep = (getenv("ISAC_PDCCH_ENERGY") != NULL) ? 1 : 0;
         if (s_ep) {
           static __thread float occ_max[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // AL 1,2,4,8; per consumer (A7)
@@ -7619,6 +7692,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       static double s_cfar_z = 3.09; /* Q(3.09) = 1e-3: the same level as the known-RNTI prescreen */
       if (s_cfar < 0) {
         s_cfar = atoi(getenv("ISAC_PDCCH_GATE_CFAR") ?: "1") ? 1 : 0;
+        /* DEFERRED/DO NOT USE: ISAC_PDCCH_GATE_CFAR_Z not in the frozen config t26zE (2026-10-18); slated for removal */
         if (getenv("ISAC_PDCCH_GATE_CFAR_Z") && atof(getenv("ISAC_PDCCH_GATE_CFAR_Z")) > 0) s_cfar_z = atof(getenv("ISAC_PDCCH_GATE_CFAR_Z"));
       }
       if (s_cfar && cfg->energy_adapt_factor > 0.0f) {
@@ -7654,6 +7728,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         static double s_kmin = 0.66;
         if (s_kps < 0) {
           s_kps = atoi(getenv("ISAC_PDCCH_KNOWN_PRESCREEN") ?: "1") ? 1 : 0;
+          /* DEFERRED/DO NOT USE: ISAC_PDCCH_KNOWN_PRESCREEN_MIN not in the frozen config t26zE (2026-10-18); slated for removal */
           const char *e = getenv("ISAC_PDCCH_KNOWN_PRESCREEN_MIN"); /* amplitude-consistency score; noise mean 2/pi = 0.637 */
           if (e && atof(e) > 0) s_kmin = atof(e);
         }
@@ -7877,6 +7952,7 @@ constdiag_done:;
         if (nr_scan2_on(NR_SCAN2_ULSSH) && cfg->discovered_coreset && !ulssh_geom_bad(dl_geom)
             && !ussh_allows(dl_geom, ul_ready_rnti[ri], proc->nr_slot_rx, rel15->CCE[c], L)) {
           static _Atomic int s_ae = -1;
+          /* DEFERRED/DO NOT USE: ISAC_SCAN2_ULSSH_AUDIT_EVERY not in the frozen config t26zE (2026-10-18); slated for removal */
           if (s_ae < 0) { const char *e = getenv("ISAC_SCAN2_ULSSH_AUDIT_EVERY"); s_ae = e ? atoi(e) : 16; }
           if (s_ae > 0 && ((((uint32_t)abs_slot * 0x9E3779B1u) >> 20) % (uint32_t)s_ae) == 0) {
             ul_probe = 1;
@@ -8042,6 +8118,7 @@ constdiag_done:;
    * the channel-estimation filter at an extent's first/last RB sees neighbours in the union that it
    * would not see in the sub-extent. ISAC_LANE_UNION_LLR=0 restores the per-lane path for an A/B. */
   static _Atomic int s_union_llr = -1; /* _Atomic: N scan consumers (Task A7) */
+  /* DEFERRED/DO NOT USE: ISAC_LANE_UNION_LLR not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s_union_llr < 0) { const char *e = getenv("ISAC_LANE_UNION_LLR"); s_union_llr = (e == NULL || atoi(e) != 0) ? 1 : 0; }
   static __thread c16_t pdcch_llr_union[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION
                                               * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS];
@@ -8821,6 +8898,7 @@ constdiag_done:;
                             u->dci_length, u->rnti, u->raw_payload, cand_task[ti].L, cand_task[ti].cce);
         { /* ISAC_UL_DBG_LOG=1 (diagnostic, default off): every admitted UL DCI with its raw payload */
           static int s_uldbg = -1;
+          /* DEFERRED/DO NOT USE: ISAC_UL_DBG_LOG not in the frozen config t26zE (2026-10-18); slated for removal */
           if (s_uldbg < 0) s_uldbg = getenv("ISAC_UL_DBG_LOG") && atoi(getenv("ISAC_UL_DBG_LOG")) ? 1 : 0;
           if (s_uldbg) {
             char hx[49];
@@ -8914,6 +8992,7 @@ constdiag_done:;
       {
         static int s_uldcigt = -1;
         if (s_uldcigt < 0)
+          /* DEFERRED/DO NOT USE: ISAC_PDCCH_ULDCIGT not in the frozen config t26zE (2026-10-18); slated for removal */
           s_uldcigt = (getenv("ISAC_PDCCH_ULDCIGT") != NULL) ? 1 : 0;
         /* Print ACCEPTS plus every candidate whose FULL 24-bit CRC landed in the plausible RNTI
          * range -- `rnti` is written only after that check passes, so a non-zero value IS the
@@ -9083,6 +9162,7 @@ constdiag_done:;
       static uint64_t raw_dl_count;
       char payload_hex[49];
       static int s_rawlog = -1; /* ISAC_DCI_RAW_LOG=1 (diagnostic, default off): every accepted raw DL DCI */
+      /* DEFERRED/DO NOT USE: ISAC_DCI_RAW_LOG not in the frozen config t26zE (2026-10-18); slated for removal */
       if (s_rawlog < 0) s_rawlog = getenv("ISAC_DCI_RAW_LOG") && atoi(getenv("ISAC_DCI_RAW_LOG")) ? 1 : 0;
       if (s_rawlog)
         LOG_A(PHY, "SENSING: DCIRAW %d.%d rnti=0x%04x len=%u cce=%d al=%u mm=%u payload=0x%s\n", cand_task[ti].frame,
@@ -9101,6 +9181,7 @@ constdiag_done:;
       static _Thread_local int s_observe_mm = -1;
       static _Thread_local unsigned s_observe_skipped;
       if (s_observe_mm < 0)
+        /* DEFERRED/DO NOT USE: ISAC_DCI11_OBSERVE_MM not in the frozen config t26zE (2026-10-18); slated for removal */
         s_observe_mm = getenv("ISAC_DCI11_OBSERVE_MM") && atoi(getenv("ISAC_DCI11_OBSERVE_MM"));
       const unsigned observe_mm_max = s_observe_mm ? joint_anon_mm_max(cand_task[ti].L) : UINT_MAX;
       if (raw->mismatched_bits <= observe_mm_max)
@@ -9445,6 +9526,7 @@ constdiag_done:;
        * mismatch count sits above the running mean is dropped before it can ever be examined. */
       static int s_no_mm = -1;
       if (s_no_mm < 0)
+        /* DEFERRED/DO NOT USE: ISAC_PDCCH_NO_MISMATCH_GATE not in the frozen config t26zE (2026-10-18); slated for removal */
         s_no_mm = (getenv("ISAC_PDCCH_NO_MISMATCH_GATE") != NULL) ? 1 : 0;
       /* DCIQUAL: report decode QUALITY for the non-SI classes. The DCI CRC passing only means a
        * 16-bit RNTI was recovered; the PAYLOAD can still carry bit errors, which would give a
@@ -9615,6 +9697,7 @@ constdiag_done:;
     {
       static int s_dcigt = -1;
       if (s_dcigt < 0)
+        /* DEFERRED/DO NOT USE: ISAC_PDCCH_DCIGT not in the frozen config t26zE (2026-10-18); slated for removal */
         s_dcigt = (getenv("ISAC_PDCCH_DCIGT") != NULL) ? 1 : 0;
       if (s_dcigt) {
         static const char *const kClassName[NR_BLIND_RNTI_CLASS_COUNT] = {"C", "TC", "SI", "RA", "P"};
@@ -9832,6 +9915,7 @@ constdiag_done:;
        * HARQ-sequence test bites, 1500+ live layouts give > 96 readings per DCI and the true one is cut. */
       static int s_max_live = -1;
       if (s_max_live < 0) {
+        /* DEFERRED/DO NOT USE: ISAC_PDSCH_SOLVER_MAX_LIVE not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_PDSCH_SOLVER_MAX_LIVE");
         s_max_live = (e && atoi(e) > 0) ? atoi(e) : 1024;
       }
@@ -9870,6 +9954,7 @@ constdiag_done:;
       uint16_t lc_chk[256];
       if (rep >= 0 && nr_rnti_layout_cache_on()) {
         static int s_lc_fail = -1;
+        /* DEFERRED/DO NOT USE: ISAC_RNTI_LAYOUT_CACHE_FAILS not in the frozen config t26zE (2026-10-18); slated for removal */
         if (s_lc_fail < 0) s_lc_fail = getenv("ISAC_RNTI_LAYOUT_CACHE_FAILS") ? atoi(getenv("ISAC_RNTI_LAYOUT_CACHE_FAILS")) : 8;
         int8_t lc_last = 13;
         if (!nr_passive_acq_tdd_pdsch_last_symbols((uint32_t)abs_slot, (int)fp->numerology_index, 1, &lc_last)) lc_last = 13;
@@ -9882,6 +9967,7 @@ constdiag_done:;
             LOG_A(PHY, "SENSING: LAYOUT_CACHE hit=%llu miss=%llu stale=%llu fail_resolve=%llu bypass=%llu\n", (unsigned long long)st.hit,
                   (unsigned long long)st.miss, (unsigned long long)st.stale, (unsigned long long)st.fail_resolve, (unsigned long long)st.bypass); } }
         static int s_lc_chk = -1;
+        /* DEFERRED/DO NOT USE: ISAC_RNTI_LAYOUT_CACHE_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
         if (s_lc_chk < 0) s_lc_chk = getenv("ISAC_RNTI_LAYOUT_CACHE_CHECK") && atoi(getenv("ISAC_RNTI_LAYOUT_CACHE_CHECK")) ? 1 : 0;
         if (s_lc_chk && lc_n >= 0) { memcpy(lc_chk, lc_ids, (size_t)lc_n * sizeof(uint16_t)); lc_chk_n = lc_n; lc_n = -1; }
       }
@@ -9928,6 +10014,7 @@ lc_regroup:
         /* ISAC_PDSCH_READING_RV=1 (TIMMCS0, default off): readings also differ by rv/NDI/HARQ pid. Without it a solved
          * layout's MCS-0 grant took the rv of whichever layout parsed first (rv = NDI on TIM: half the MCS-0 TBs lost). */
         static int s_rd_rv = -1;
+        /* DEFERRED/DO NOT USE: ISAC_PDSCH_READING_RV not in the frozen config t26zE (2026-10-18); slated for removal */
         if (s_rd_rv < 0) s_rd_rv = getenv("ISAC_PDSCH_READING_RV") && atoi(getenv("ISAC_PDSCH_READING_RV")) ? 1 : 0;
         int g = -1, rpos = 0;
         if (rfast)
@@ -10019,6 +10106,7 @@ lc_regroup:
       {
         static int s_diag = -1;
         static _Atomic int s_diag_left = 40;
+        /* DEFERRED/DO NOT USE: ISAC_PDSCH_SOLVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
         if (s_diag < 0) s_diag = getenv("ISAC_PDSCH_SOLVER_DIAG") ? 1 : 0;
         if (s_diag && rep < 0 && nrd > 1 && R->fdra_next > 1 && atomic_fetch_sub(&s_diag_left, 1) > 0) {
           char b[1400];
@@ -10626,6 +10714,7 @@ lc_regroup:
          * that section 14.4 proposes. */
         static int s_no_pdsch = -1;
         if (s_no_pdsch < 0) {
+          /* DEFERRED/DO NOT USE: ISAC_PDCCH_NO_PDSCH_DECODE not in the frozen config t26zE (2026-10-18); slated for removal */
           s_no_pdsch = (getenv("ISAC_PDCCH_NO_PDSCH_DECODE") != NULL) ? 1 : 0;
         }
         if (want_decode && !s_no_pdsch && decodes_this_occasion < cfg->pdsch_max_per_slot) {
@@ -10642,6 +10731,7 @@ lc_regroup:
                * RNTI before touching any width. */
               static int s_df = -1;
               if (s_df < 0)
+                /* DEFERRED/DO NOT USE: ISAC_DCI_FIELDS not in the frozen config t26zE (2026-10-18); slated for removal */
                 s_df = (getenv("ISAC_DCI_FIELDS") != NULL) ? 1 : 0;
               if (s_df)
                 LOG_I(PHY,
@@ -11132,6 +11222,7 @@ void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue)
   (void)nr_gpu_polar_prepare();
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const nr_gpu_pdcch_fep_api_t *pdcch = nr_gpu_pdcch_fep_prepare();
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_GPU_FEP not in the frozen config t26zE (2026-10-18); slated for removal */
   if (!pdcch && getenv("ISAC_PDCCH_GPU_FEP") && atoi(getenv("ISAC_PDCCH_GPU_FEP")) != 0)
     LOG_W(PHY, "SENSING: PDCCH GPU FEP unavailable; CPU LLR reference remains active\n");
   if (pdcch) {
@@ -11147,6 +11238,7 @@ void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue)
   int depth = cfg->pdsch_queue_depth > 0 ? cfg->pdsch_queue_depth : 8 * consumers;
   if (depth < 2) depth = 2;
   if (depth > NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH) depth = NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH;
+  /* DEFERRED/DO NOT USE: ISAC_TD_GRANTWORK not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *gw = getenv("ISAC_TD_GRANTWORK");
   const bool want_gw = !(gw && *gw && atoi(gw) == 0) && cfg->pdsch_decode >= 1;
   const size_t llr_bytes = (size_t)fp->N_RB_DL * 12 * 14 * 4 * 8 * sizeof(int16_t);

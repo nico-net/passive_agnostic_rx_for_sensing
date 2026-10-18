@@ -26,10 +26,14 @@ extern int nr_gpu_budget_rt_active(void) __attribute__((weak));
 static void cfg(void)
 {
   if (atomic_load(&cfg_state) >= 0) return;
+  /* DEFERRED/DO NOT USE: ISAC_BG_LANE not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_BG_MIN_DUTY_PCT not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_BG_LANE"), *d = getenv("ISAC_BG_MIN_DUTY_PCT");
   atomic_store(&min_duty_pct, d && atoi(d) >= 0 ? atoi(d) : 5);
   for (int c = 0; c < NR_ADMIT_N; c++) { busy_thr[c] = 1; floor_pct[c] = atomic_load(&min_duty_pct); }
   /* the anonymous solver is the discovery engine on a busy cell: it yields only to a real backlog and keeps 60 % duty */
+  /* DEFERRED/DO NOT USE: ISAC_BG_JANON_BACKLOG not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_BG_JANON_DUTY_PCT not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *jb = getenv("ISAC_BG_JANON_BACKLOG"), *jd = getenv("ISAC_BG_JANON_DUTY_PCT");
   busy_thr[NR_ADMIT_JANON] = jb && atoi(jb) > 0 ? atoi(jb) : 4;
   floor_pct[NR_ADMIT_JANON] = jd && atoi(jd) >= 0 ? atoi(jd) : 60;

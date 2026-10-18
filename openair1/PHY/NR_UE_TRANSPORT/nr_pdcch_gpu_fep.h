@@ -116,6 +116,7 @@ static inline const nr_gpu_pdcch_fep_api_t *nr_gpu_pdcch_fep_load_impl(int prepa
     return api;
   if (!prepare) return NULL;
   tried = 1;
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_GPU_FEP not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_PDCCH_GPU_FEP");
   if (e == NULL || atoi(e) == 0)
     return NULL;

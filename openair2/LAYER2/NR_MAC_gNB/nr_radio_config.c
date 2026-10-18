@@ -328,6 +328,7 @@ static NR_ControlResourceSet_t *get_coreset_config(int bwp_id,
    * (gNB_scheduler_primitives.c: ScramblingRNTI = rnti) -- the case a passive receiver cannot descramble without the
    * RNTI, used to exercise the joint RNTI solver end to end on rfsim. */
   {
+    /* DEFERRED/DO NOT USE: ISAC_GNB_PDCCH_DMRS_ID not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_GNB_PDCCH_DMRS_ID");
     if (e != NULL) {
       coreset->pdcch_DMRS_ScramblingID = calloc(1, sizeof(*coreset->pdcch_DMRS_ScramblingID));
@@ -1673,6 +1674,7 @@ static NR_SetupRelease_PUSCH_Config_t *config_pusch(const nr_mac_config_t *confi
    *   ISAC_TB_PUSCH_IDS="dmrs:data"  -> scramblingID0 and dataScramblingIdentityPUSCH
    *   ISAC_TB_PUSCH_TP=1             -> transform precoding enabled (pusch_Config.transformPrecoder)
    *   ISAC_TB_PUSCH_MCSTAB=256       -> mcs_Table qam256 (and mcs_TableTransformPrecoder qam256) */
+  /* DEFERRED/DO NOT USE: ISAC_TB_PUSCH_IDS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *tb_ids = getenv("ISAC_TB_PUSCH_IDS");
   unsigned tb_d, tb_x;
   if (tb_ids && sscanf(tb_ids, "%u:%u", &tb_d, &tb_x) == 2) {
@@ -1681,10 +1683,12 @@ static NR_SetupRelease_PUSCH_Config_t *config_pusch(const nr_mac_config_t *confi
     NR_DMRS_UplinkConfig->transformPrecodingDisabled->scramblingID0 = calloc_or_fail(1, sizeof(long));
     *NR_DMRS_UplinkConfig->transformPrecodingDisabled->scramblingID0 = tb_d;
   }
+  /* DEFERRED/DO NOT USE: ISAC_TB_PUSCH_TP not in the frozen config t26zE (2026-10-18); slated for removal */
   if (getenv("ISAC_TB_PUSCH_TP") && !strcmp(getenv("ISAC_TB_PUSCH_TP"), "1")) {
     pusch_Config->transformPrecoder = calloc_or_fail(1, sizeof(*pusch_Config->transformPrecoder));
     *pusch_Config->transformPrecoder = NR_PUSCH_Config__transformPrecoder_enabled;
   }
+  /* DEFERRED/DO NOT USE: ISAC_TB_PUSCH_MCSTAB not in the frozen config t26zE (2026-10-18); slated for removal */
   if (getenv("ISAC_TB_PUSCH_MCSTAB") && !strcmp(getenv("ISAC_TB_PUSCH_MCSTAB"), "256")) {
     pusch_Config->mcs_Table = calloc_or_fail(1, sizeof(*pusch_Config->mcs_Table));
     *pusch_Config->mcs_Table = NR_PUSCH_Config__mcs_Table_qam256;

@@ -201,8 +201,10 @@ static int allocate_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
   if (!nr_gpu_module_ready()) return -1;
   if (cfg->nant < 1 || cfg->nant > MAX_ANT || cfg->ofdm_symbol_size <= 0 || cfg->n_rb_dl < 1 || cfg->n_rb_dl > 275) return -1;
   g_cfg = *cfg;
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_GPU_CPU_ARITH not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *parity = getenv("ISAC_PDCCH_GPU_CPU_ARITH");
   g_cpu_arithmetic = parity && atoi(parity) == 1;
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_ANT_MASK not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *mask = getenv("ISAC_PDCCH_ANT_MASK");
   g_force_mask = mask ? strtol(mask, nullptr, 0) : 0;
   const int N = cfg->ofdm_symbol_size, nant = cfg->nant;

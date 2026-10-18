@@ -262,6 +262,7 @@ void nr_passive_acq_note_carrier_from_rs(const char *evidence)
 {
   static int s_enabled = -1; /* ISAC_ACQ_CARRIER_FROM_RS=0 disables this SIB1-free path */
   if (s_enabled < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_ACQ_CARRIER_FROM_RS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_ACQ_CARRIER_FROM_RS");
     s_enabled = !(e && atoi(e) == 0);
   }
@@ -322,6 +323,7 @@ static int g_carrier_sib_apply; /* set while the sibling itself is being applied
 typedef struct { uint32_t magic; int32_t n_rb, mu, off_a, off_c, k_ssb; } sib_file_t;
 static bool sibling_on(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_SIB1_SIBLING not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_SIB1_SIBLING"); /* a few calls per run: no caching */
   return e && atoi(e) > 0;
 }
@@ -477,6 +479,7 @@ static pthread_mutex_t g_cell_state_mu = PTHREAD_MUTEX_INITIALIZER;
 static int cell_state_level(void)
 {
   static int l = -1;
+  /* DEFERRED/DO NOT USE: ISAC_CELL_STATE not in the frozen config t26zE (2026-10-18); slated for removal */
   if (l < 0) { const char *e = getenv("ISAC_CELL_STATE"); l = e ? atoi(e) : 0; }
   return l;
 }
@@ -497,6 +500,7 @@ bool nr_cell_state_sweep_blocked(uint32_t abs_slot, uint64_t cap_offered, uint64
   static uint64_t s_sync_losses;
   static nr_cell_verdict_t s_last = NR_CELL_UNKNOWN;
   static uint32_t window = 0;
+  /* DEFERRED/DO NOT USE: ISAC_CELL_STATE_SECS not in the frozen config t26zE (2026-10-18); slated for removal */
   if (!window) { const char *e = getenv("ISAC_CELL_STATE_SECS"); const int sec = e ? atoi(e) : 30; window = (uint32_t)(sec > 0 ? sec : 30) * 2000u; }
   const nr_passive_acq_snapshot_t a = nr_passive_acq_snapshot();
   pthread_mutex_lock(&g_cell_state_mu);

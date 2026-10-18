@@ -726,6 +726,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   }
   const c16_t *rxdataF_ant0 = (rxdataF != NULL) ? &rxdataF[0][0] : NULL;
   if (g_on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_BLIND not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_CSIRS_BLIND");
     g_disc = nr_csirs_disc_enabled && nr_csirs_disc_enabled();
     g_on = (e != NULL && atoi(e) != 0) || g_disc;
@@ -790,6 +791,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * repeats across runs; a false positive shuffles. The rate-matcher gets no resource while this is
    * on (the export explicitly suppresses both banks), which is why it is diagnostic only. */
   if (g_rank < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_BLIND_RANK not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_CSIRS_BLIND_RANK");
     g_rank = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
@@ -862,6 +864,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
      * observation count and best z, so a real CSI-RS can be told from PDSCH DM-RS / PDCCH energy
      * (added 2026-10-06 for the offline replay of PCI 415/421, where the top-5 lists were all DM-RS). */
   if (g_rank && (g_slots % 500) == 499) {
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_BLIND_EPRDUMP not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *dump = getenv("ISAC_CSIRS_BLIND_EPRDUMP");
     if (dump) {
       FILE *f = fopen(dump, "w");
@@ -943,6 +946,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   static int s_conf_max = -1;
   static unsigned s_conf_rot;
   if (s_conf_max < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_CONFIRM_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_CSIRS_DISC_CONFIRM_MAX");
     s_conf_max = e && atoi(e) > 0 ? atoi(e) : 4;
   }
@@ -998,6 +1002,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   }
   static int s_per_slot = -1;
   if (s_per_slot < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_BLIND_PER_SLOT not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_CSIRS_BLIND_PER_SLOT");
     s_per_slot = e ? atoi(e) : 1;
     if (s_per_slot < 1)
@@ -1189,6 +1194,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     nr_slot_fep_ant(ue, fp, (unsigned)slot, (unsigned)c->symb_l0, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
   /* Footprint evidence for rows 6-18 from the symbol just transformed: one pass over the carrier. */
   if (g_wide < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_BLIND_WIDE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_CSIRS_BLIND_WIDE");
     g_wide = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
@@ -1446,6 +1452,7 @@ score_zero_power:
     return;
   /* ---- scramblingID sweep on a candidate whose POSITIONS already look like a pilot ---- */
   if (g_ids < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_BLIND_IDSWEEP not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_CSIRS_BLIND_IDSWEEP");
     g_ids = g_disc <= 0 && (e != NULL && atoi(e) != 0);
   }
@@ -1486,6 +1493,7 @@ score_zero_power:
    * amount), every sequence we generate is wrong while the positions stay exactly right. That is
    * precisely the pattern observed. Only ~20 offsets at mu=1, so the whole space fits in ONE visit. */
   if (g_slotsweep < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_BLIND_SLOTSWEEP not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_CSIRS_BLIND_SLOTSWEEP");
     g_slotsweep = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
@@ -1895,6 +1903,7 @@ static struct { unsigned base_try, base_ok, cand_ok; unsigned state; } g_fv[FV_K
 static int full_valid_enabled(void)
 {
   static int s = -1;
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_FULL_VALID not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s < 0) s = getenv("ISAC_CSIRS_FULL_VALID") && atoi(getenv("ISAC_CSIRS_FULL_VALID")) ? 1 : 0;
   return s && nr_csirs_full_enabled();
 }
@@ -2020,6 +2029,7 @@ void nr_csirs_full_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, uint32_t pdsc
 static int full_ab_evid_mode(void)
 {
   static int s = -1;
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_FULL_AB_EVID not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s < 0) s = getenv("ISAC_CSIRS_FULL_AB_EVID") ? atoi(getenv("ISAC_CSIRS_FULL_AB_EVID")) : 0;
   return s;
 }
@@ -2066,6 +2076,7 @@ void nr_csirs_full_ab(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const f
 {
   static int s_ab = -1;
   if (s_ab < 0)
+    /* DEFERRED/DO NOT USE: ISAC_CSIRS_FULL_AB not in the frozen config t26zE (2026-10-18); slated for removal */
     s_ab = getenv("ISAC_CSIRS_FULL_AB") && atoi(getenv("ISAC_CSIRS_FULL_AB")) ? 1 : 0;
   if (!s_ab || !nr_csirs_full_enabled() || t_full_ab_depth > 0 || !nr_pdsch_passive_decode || !cfg)
     return;

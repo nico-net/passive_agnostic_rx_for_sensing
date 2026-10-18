@@ -67,6 +67,7 @@ static void *worker(void *arg)
 {
   (void)arg;
   setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10); /* the discovery lane never competes with the grant consumers */
+  /* DEFERRED/DO NOT USE: ISAC_UL_BGDISC_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ce = getenv("ISAC_UL_BGDISC_CORE");
   if (ce && atoi(ce) >= 0) {
     cpu_set_t cs;
@@ -117,6 +118,7 @@ int nr_ul_bgdisc_start(int depth, nr_ul_bgdisc_run_fn run)
   pthread_mutex_lock(&g_lock);
   if (!g_depth) { /* the first call sets the queue up; a later one with a runner only starts the worker */
     g_depth = depth < 1 ? 1 : depth > BG_MAX_DEPTH ? BG_MAX_DEPTH : depth;
+    /* DEFERRED/DO NOT USE: ISAC_UL_BGDISC_MAX_AGE_MS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_UL_BGDISC_MAX_AGE_MS");
     g_max_age_ns = (uint64_t)(e && atoi(e) > 0 ? atoi(e) : 100) * 1000000ull;
     g_stop = 0;

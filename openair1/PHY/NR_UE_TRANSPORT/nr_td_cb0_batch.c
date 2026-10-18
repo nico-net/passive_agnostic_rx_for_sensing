@@ -841,10 +841,12 @@ static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result
   struct timespec tl0;
   clock_gettime(CLOCK_MONOTONIC, &tl0); /* compute time only: not the wait for another thread's batch */
   if (!force_cpu && g_gpu_on < 0) {
+    /* DEFERRED/DO NOT USE: NR_GPU_CB0 not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("NR_GPU_CB0");
     use_gpu_locked(e && atoi(e) == 1);
   }
   if (!force_cpu && g_cuda_on < 0) {
+    /* DEFERRED/DO NOT USE: NR_TD_CB0_CUDA_LDPC not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("NR_TD_CB0_CUDA_LDPC");
     use_cuda_locked(e && atoi(e) == 1);
   }

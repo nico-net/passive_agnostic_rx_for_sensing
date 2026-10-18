@@ -273,6 +273,7 @@ int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, 
   /* ISAC_CSIRS_BLIND_ROWS="1,2,..." (default: all of kRows): restrict the enumerated rows. Added
    * 2026-10-06 for offline replay, where scoring every candidate every slot is affordable only for a
    * small population (row 1 = TRS = 56 candidates vs 767 for rows 1-5). */
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_BLIND_ROWS not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *rows_env = getenv("ISAC_CSIRS_BLIND_ROWS");
   for (unsigned r = 0; r < sizeof(kRows) / sizeof(kRows[0]); r++) {
     if (nr_csirs_blind_row_needs_bits(kRows[r]) != 1) {
@@ -322,6 +323,7 @@ int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, 
            * Added 2026-10-06: a TRS pair scored z~2.3 over 217 PRB, consistent with a resource that
            * spans only part of the band; the window localises it. */
           {
+            /* DEFERRED/DO NOT USE: ISAC_CSIRS_BLIND_RB not in the frozen config t26zE (2026-10-18); slated for removal */
             const char *w = getenv("ISAC_CSIRS_BLIND_RB");
             int ws = 0, wn = 0;
             if (w && sscanf(w, "%d:%d", &ws, &wn) == 2 && ws >= 0 && wn > 0 && ws + wn <= n_rb) {

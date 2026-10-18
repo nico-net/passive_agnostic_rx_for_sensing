@@ -183,6 +183,7 @@ static bool pdsch_typeb_enabled(void)
 {
   static int enabled = -1;
   if (enabled < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDSCH_TYPEB not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDSCH_TYPEB");
     enabled = (e != NULL && atoi(e) == 0) ? 0 : 1;
   }
@@ -443,6 +444,7 @@ static int s_k0_legacy = -1;
 static bool k0_oracle_legacy(void)
 {
   if (s_k0_legacy < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_TD_K0_ORACLE_LEGACY not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_TD_K0_ORACLE_LEGACY");
     s_k0_legacy = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
@@ -1285,6 +1287,7 @@ static int s_cb0_elim_env = -1;
 bool nr_pdsch_config_sweep_cb0_elim_env(void)
 {
   if (s_cb0_elim_env < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_TD_CB0_ELIM not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_TD_CB0_ELIM"); /* default ON (operator 2026-10-04: fastest combination); 0 disables */
     s_cb0_elim_env = (e != NULL && *e && atoi(e) == 0) ? 0 : 1;
   }
@@ -1852,6 +1855,7 @@ static int fb_mode_locked(void)
   if (g_fb_mode < 0) {
     /* default fb2 (operator 2026-10-04: fastest combination). ONLY an explicit integer 0 disables it; any other value
      * (1 included, which meant "off" before 2026-10-04, and non-numeric text) resolves to fb2 and says so. */
+    /* DEFERRED/DO NOT USE: ISAC_TD_FIELDBOOK not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_TD_FIELDBOOK");
     char *end = NULL;
     const long v = (e && *e) ? strtol(e, &end, 10) : 2;
@@ -3001,6 +3005,7 @@ int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint
   if (!nr_cfg_epoch_work_current()) return 0;
   static int enabled = -1;
   if (enabled < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_QM_ORACLE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_QM_ORACLE");
     enabled = (e != NULL && atoi(e) == 0) ? 0 : 1;
   }

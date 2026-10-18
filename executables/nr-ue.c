@@ -208,6 +208,7 @@ void init_nr_ue_vars(PHY_VARS_NR_UE *ue, uint8_t UE_id)
    * wideband-tracking-uses-wrong-cell-dmrs memory); only rules out N_ID_2-distinct co-channel
    * cells entirely, which is what it is being used for here. */
   {
+    /* DEFERRED/DO NOT USE: ISAC_TARGET_PCI not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_TARGET_PCI");
     if (e && *e) {
       ue->target_Nid_cell = atoi(e);
@@ -280,6 +281,7 @@ static void UE_synch(void *arg) {
     nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier);
     if (syncD->fast_pss_position >= 0) {
       /* Test-only path to exercise the coarse fallback with a replay gap. */
+      /* DEFERRED/DO NOT USE: ISAC_RX_RECOVER_TEST_COARSE_EPOCH not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *force_coarse_env = getenv("ISAC_RX_RECOVER_TEST_COARSE_EPOCH");
       const bool force_coarse = force_coarse_env && atoll(force_coarse_env) == (long long)syncD->recover_epoch;
       LOG_I(PHY, "SENSING: RX_RECOVER fast PSS/SSS pci=%d ssb_sc=%d frame=%d expected_pos=%d radius=%d\n",
@@ -1106,6 +1108,7 @@ void *UE_thread(void *arg)
   }
   int shiftForNextFrame = 0;
   int intialSyncOffset = 0;
+  /* DEFERRED/DO NOT USE: ISAC_AUTO_ACQUIRE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *auto_acquire_env = getenv("ISAC_AUTO_ACQUIRE");
   const bool auto_timing = IS_PASSIVE_RX_MODE(get_softmodem_params())
                            && auto_acquire_env && !strcmp(auto_acquire_env, "1");
@@ -1119,6 +1122,7 @@ void *UE_thread(void *arg)
    * acquisition against that SSB alone -- the second pass IS the pinned path. Costs one extra
    * acquisition (~0.7 s) on a blind-scan start only; a pinned start never triggers it.
    * ISAC_SCAN_CONFIRM=0 disables. */
+  /* DEFERRED/DO NOT USE: ISAC_SCAN_CONFIRM not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *scan_confirm_env = getenv("ISAC_SCAN_CONFIRM");
   const bool scan_confirm_on = (scan_confirm_env == NULL) || (atoi(scan_confirm_env) != 0);
   bool scan_confirm_pending = false;
@@ -1446,6 +1450,7 @@ void *UE_thread(void *arg)
        * cap of one sample per frame is already an order of magnitude of headroom. */
       static int tsync_cap = -1;
       if (tsync_cap < 0) {
+        /* DEFERRED/DO NOT USE: ISAC_TSYNC_RESET not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_TSYNC_RESET");
         tsync_cap = (e != NULL) ? atoi(e) : 0;
       }
@@ -1530,6 +1535,7 @@ void *UE_thread(void *arg)
        * enabling it. */
       static int tsync_reset = -1;
       if (tsync_reset < 0) {
+        /* DEFERRED/DO NOT USE: ISAC_TSYNC_RESET not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_TSYNC_RESET");
         tsync_reset = (e != NULL) ? atoi(e) : 0;
       }
@@ -1646,6 +1652,7 @@ void *UE_thread(void *arg)
     curMsg.proc.hfn_rx      = (absolute_slot / nb_slot_frame) / MAX_FRAME_NUMBER;
     curMsg.proc.hfn_tx      = ((absolute_slot + duration_rx_to_tx) / nb_slot_frame) / MAX_FRAME_NUMBER;
     if (g_ulprobe_on < 0)
+      /* DEFERRED/DO NOT USE: ISAC_UL_PROBE not in the frozen config t26zE (2026-10-18); slated for removal */
       g_ulprobe_on = (getenv("ISAC_UL_PROBE") != NULL) ? atoi(getenv("ISAC_UL_PROBE")) : 0;
     if (g_ulprobe_on > 0 && UE->received_config_request) {
       /* One shot, the first time a config request has landed: the actual slot-type MAP. Printing
@@ -1702,6 +1709,7 @@ void *UE_thread(void *arg)
         static int s_census = -1;
         static long s_cum = 0, s_frames = 0, s_nz = 0;
         if (s_census < 0) {
+          /* DEFERRED/DO NOT USE: ISAC_SHIFT_CENSUS not in the frozen config t26zE (2026-10-18); slated for removal */
           const char *e = getenv("ISAC_SHIFT_CENSUS");
           s_census = e ? atoi(e) : 0;
         }
@@ -1754,6 +1762,7 @@ void *UE_thread(void *arg)
       /* ISAC_UL_DBG_LOG=1 (diagnostic, default off): absolute slot -> radio timestamp once per frame,
        * so offline tools can map a DCI's source slot onto raw IQ sample indices. */
       static int s_uldbg_ts = -1;
+      /* DEFERRED/DO NOT USE: ISAC_UL_DBG_LOG not in the frozen config t26zE (2026-10-18); slated for removal */
       if (s_uldbg_ts < 0) s_uldbg_ts = getenv("ISAC_UL_DBG_LOG") && atoi(getenv("ISAC_UL_DBG_LOG")) ? 1 : 0;
       if (s_uldbg_ts && slot_nr == 0)
         LOG_A(PHY, "SENSING: ULDBG_TS abs_slot=%d ts=%lld read=%d shift=%d\n", absolute_slot,
@@ -1816,6 +1825,7 @@ void *UE_thread(void *arg)
               s_rxts_prev_consumed, s_rxts_discont_total);
         static int s_disc_invalidate = -1;
         if (s_disc_invalidate < 0)
+          /* DEFERRED/DO NOT USE: ISAC_DISC_NO_RESYNC not in the frozen config t26zE (2026-10-18); slated for removal */
           s_disc_invalidate = (getenv("ISAC_DISC_NO_RESYNC") && atoi(getenv("ISAC_DISC_NO_RESYNC"))) ? 0 : 1;
         if (s_disc_invalidate && UE->is_synchronized) {
           if (rx_recover_on) {
@@ -2010,6 +2020,7 @@ void *UE_thread(void *arg)
        * the loop walks off the CP in ~30 % of starts ("timing runaway"). Clamp the step, keep the sign. */
       static int s_clamp = -1;
       if (s_clamp < 0) {
+        /* DEFERRED/DO NOT USE: ISAC_PBCH_SHIFT_CLAMP not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_PBCH_SHIFT_CLAMP");
         s_clamp = (e != NULL) ? atoi(e) : 0;
       }
@@ -2068,6 +2079,7 @@ void *UE_thread(void *arg)
       static int s_bad;         /* consecutive collapsed census windows */
       static long s_fires;
       if (s_wd_on < 0) {
+        /* DEFERRED/DO NOT USE: ISAC_RF_STALL_WATCHDOG not in the frozen config t26zE (2026-10-18); slated for removal */
         const char *e = getenv("ISAC_RF_STALL_WATCHDOG");
         s_wd_on = e ? atoi(e) : 1; /* 0 disables */
       }
@@ -2342,6 +2354,7 @@ void *UE_thread(void *arg)
                * kept decoding (crc_ok grew 749->28547, 833->2447, 4168->7683, 739->1782), and dwell
                * went from active_s=8 (run dies at the stall) to 50-66 s. Set 0 to restore exit-on-
                * stall. */
+              /* DEFERRED/DO NOT USE: ISAC_RF_STALL_MAX_REINIT not in the frozen config t26zE (2026-10-18); slated for removal */
               const char *e = getenv("ISAC_RF_STALL_MAX_REINIT");
               s_reinit_cap = e ? atoi(e) : 4;
             }
@@ -2515,6 +2528,7 @@ void init_NR_UE_threads(PHY_VARS_NR_UE *UE) {
    * check /sys/devices/system/cpu/isolated before choosing. */
   int rt_core = -1;
   {
+    /* DEFERRED/DO NOT USE: ISAC_UE_RT_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_UE_RT_CORE");
     if (e != NULL) {
       rt_core = atoi(e);

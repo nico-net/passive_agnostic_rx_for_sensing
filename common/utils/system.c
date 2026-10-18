@@ -398,12 +398,14 @@ void lock_memory_to_ram(void)
    * allocations up to 32 MB from the heap instead of mmap. On GB10 the GPU walks the host page tables (direct
    * mode), so every munmap/trim in any thread invalidates GPU translations device-wide: a candidate cause of
    * the on-air chest stalls. */
+  /* DEFERRED/DO NOT USE: ISAC_MALLOC_NOTRIM not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *nt = getenv("ISAC_MALLOC_NOTRIM");
   if (nt && atoi(nt) == 1) {
     mallopt(M_TRIM_THRESHOLD, -1);
     mallopt(M_MMAP_THRESHOLD, 32 << 20);
     LOG_I(UTIL, "SENSING: ISAC_MALLOC_NOTRIM=1: malloc trim off, mmap threshold 32 MB\n");
   }
+  /* DEFERRED/DO NOT USE: ISAC_MLOCK not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_MLOCK");
   if (e && atoi(e) == 0) {
     LOG_I(UTIL, "SENSING: mlockall skipped (ISAC_MLOCK=0)\n");

@@ -102,10 +102,12 @@ static void length_env_init(void)
 {
   const char *e = getenv("ISAC_RECONF");
   seen_order_enabled = e && atoi(e) == 1;
+  /* DEFERRED/DO NOT USE: ISAC_DCI_LEN_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
   e = getenv("ISAC_DCI_LEN_MAX");
   char *end = NULL;
   const long n = e ? strtol(e, &end, 10) : 0;
   explicit_max = e && end != e && !*end && n >= 1 && n <= NR_DCI_MAX_PAYLOAD ? (int)n : 0;
+  /* DEFERRED/DO NOT USE: ISAC_DCI_WIDE_PROBE_EVERY not in the frozen config t26zE (2026-10-18); slated for removal */
   e = getenv("ISAC_DCI_WIDE_PROBE_EVERY");
   const long period = e ? strtol(e, &end, 10) : 0;
   /* The configured cadence is a lower bound; wide_probe_length also accounts
@@ -240,6 +242,7 @@ int nr_pdcch_dci_length_context_relock_order(const nr_pdcch_dci_length_context_t
 
 uint32_t nr_pdcch_dci_length_n_suspect_from_env(void)
 {
+  /* DEFERRED/DO NOT USE: ISAC_RECONF_N_SUSPECT not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *e = getenv("ISAC_RECONF_N_SUSPECT");
   if (!e || !*e || *e == '-') return 200;
   char *end = NULL;
@@ -665,6 +668,7 @@ score_evidence:;
    * deployment's known-correct value) is accumulating ANY real passes at all, or whether the
    * candidates reaching this function never include it (a wiring/indexing issue upstream) vs.
    * genuinely never passing decode+plausibility at 47 specifically (a DSP/parameter issue). */
+  /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
   if (getenv("ISAC_DISCOVER_DIAG") != NULL) {
     static int s_feed_calls = 0;
     s_feed_calls++;

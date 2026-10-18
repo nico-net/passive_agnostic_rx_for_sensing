@@ -73,6 +73,7 @@ static void nr_ss_gpu_init(void)
 int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
 {
   nr_ss_gpu_init();
+  /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_PRIO not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *pr = getenv("ISAC_PDSCH_GPU_PRIO");
   if (pr && atoi(pr) == 1) {
     void *hp = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
@@ -177,6 +178,7 @@ int nr_pdcch_gpu_exact_fep_symbol(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *f
 {
   static int on = -1;
   if (on < 0) {
+    /* DEFERRED/DO NOT USE: ISAC_PDCCH_GPU_EXACT_FEP not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_PDCCH_GPU_EXACT_FEP");
     on = e && atoi(e) == 1;
   }

@@ -179,6 +179,7 @@ static int passive_core_plan(void)
   nr_core_machine_t machine;
   nr_core_plan_t plan = {0};
   char error[512] = "invalid or excessive explicit core setting";
+  /* DEFERRED/DO NOT USE: ISAC_PASSIVE_REPLAY_INPUT not in the frozen config t26zE (2026-10-18); slated for removal */
   const bool radio = !IS_SOFTMODEM_RFSIM && !getenv("ISAC_PASSIVE_REPLAY_INPUT");
   if (nrue_get_ru_count() != 1) {
     snprintf(error,sizeof(error),"automatic passive planning currently requires one RU"); goto fail;
@@ -199,7 +200,10 @@ static int passive_core_plan(void)
   if (!core_ul_count_explicit) nrUE_params.num_ul_actors = actor_default < 2 ? actor_default : 2;
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
 #define ADD(role, count, first) do { if (nr_core_plan_add(&plan, role, count, first)) goto fail; } while (0)
+  /* DEFERRED/DO NOT USE: ISAC_UE_RT_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   ADD(NR_CP_UE, 1, core_env_value("ISAC_UE_RT_CORE"));
+  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
+  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   if (radio && core_feature("ISAC_USRP_RING_MS", false)) ADD(NR_CP_RING, 1, core_env_value("ISAC_USRP_RING_CORE"));
   if (radio) {
     const char *s = getenv("ISAC_UHD_CTRL_CORES");
@@ -210,6 +214,7 @@ static int passive_core_plan(void)
       for (int c = 0; c < NR_CP_MAX_CPUS; c++) if (mask[c]) { ADD(NR_CP_UHD, 1, c); count++; }
       if (!count) goto fail;
     } else {
+      /* DEFERRED/DO NOT USE: ISAC_UHD_CTRL_THREADS not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *count_env = getenv("ISAC_UHD_CTRL_THREADS");
       int count = count_env ? atoi(count_env) : 1;
       if (count < 1) goto fail;
@@ -220,6 +225,7 @@ static int passive_core_plan(void)
   ADD(NR_CP_UL, nrUE_params.num_ul_actors, nrUE_params.ul_actor_core_start);
   ADD(NR_CP_SYNC, 1, nrUE_params.sync_actor_core);
   ADD(NR_CP_SCAN, cfg->scan_thread < 4 ? cfg->scan_thread : 4, cfg->scan_thread_core);
+  /* DEFERRED/DO NOT USE: ISAC_PDCCH_USS_TRACKER not in the frozen config t26zE (2026-10-18); slated for removal */
   if (core_feature("ISAC_PDCCH_USS_TRACKER", true)) ADD(NR_CP_USS, 1, core_env_value("ISAC_PDCCH_USS_CORE"));
   ADD(NR_CP_PDSCH, cfg->pdsch_thread < 6 ? cfg->pdsch_thread : 6, cfg->pdsch_thread_core);
   ADD(NR_CP_PUSCH, nr_pusch_passive_pipeline_enabled() && cfg->ul_pusch_decode ? 1 :
@@ -240,6 +246,7 @@ static int passive_core_plan(void)
     ADD(NR_CP_POOL, workers < 8 ? workers : 8, -1);
   }
   if (core_feature("ISAC_PDSCH_GPU", false) || core_feature("NR_GPU_FEP", false)) ADD(NR_CP_GPU, 1, core_env_value("ISAC_GPU_WORKER_CORE"));
+  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   if (core_feature("ISAC_CSIRS_DISC", true)) ADD(NR_CP_CSIRS, 1, core_env_value("ISAC_CSIRS_DISC_CORE"));
   if (core_feature("ISAC_PDCCH_NID_GPU", true)) ADD(NR_CP_NID, 1, core_env_value("ISAC_PDCCH_NID_GPU_CORE"));
   ADD(NR_CP_STATS, 1, -1);
@@ -425,10 +432,14 @@ int main(int argc, char **argv)
   const bool ul_chain_on = (ul_chain_flag && strcmp(ul_chain_flag, "1") == 0) ||
                            (ul_solver_flag && strcmp(ul_solver_flag, "1") == 0);
   if (nr_cfg_reconf_enabled() || ul_chain_on ||
+      /* DEFERRED/DO NOT USE: ISAC_UL_UE_STATE not in the frozen config t26zE (2026-10-18); slated for removal */
       (getenv("ISAC_UL_UE_STATE") && strcmp(getenv("ISAC_UL_UE_STATE"), "1") == 0)) {
+    /* DEFERRED/DO NOT USE: ISAC_UECTX_PATH not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *uectx_path = getenv("ISAC_UECTX_PATH");
     if ((uectx_path && *uectx_path) || ul_chain_on ||
+        /* DEFERRED/DO NOT USE: ISAC_UL_UE_STATE not in the frozen config t26zE (2026-10-18); slated for removal */
         (getenv("ISAC_UL_UE_STATE") && strcmp(getenv("ISAC_UL_UE_STATE"), "1") == 0)) {
+      /* DEFERRED/DO NOT USE: ISAC_UECTX_PERIOD_S not in the frozen config t26zE (2026-10-18); slated for removal */
       const char *period_env = getenv("ISAC_UECTX_PERIOD_S");
       const double period = period_env && *period_env ? atof(period_env) : 5.0;
       if (nr_ue_ctx_open(uectx_path, 16384, period))
@@ -439,8 +450,10 @@ int main(int argc, char **argv)
   }
   // Per-grant observation API (Task A3): JSONL of every decoded PDSCH/PUSCH grant; off unless ISAC_OBS_PATH is set.
   {
+    /* DEFERRED/DO NOT USE: ISAC_OBS_PATH not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *obs_path = getenv("ISAC_OBS_PATH");
     /* ISAC_OBS_TEST_RING_SLOTS: test hook (overload A/B with a tiny ring); the default is used when unset. */
+    /* DEFERRED/DO NOT USE: ISAC_OBS_TEST_RING_SLOTS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *ring_env = getenv("ISAC_OBS_TEST_RING_SLOTS");
     uint32_t ring = 1u << 14;
     if (ring_env && *ring_env) {
@@ -654,7 +667,9 @@ int main(int argc, char **argv)
   }
 
   /* Offline replay exits before any radio initialization. */
+  /* DEFERRED/DO NOT USE: ISAC_PASSIVE_REPLAY_INPUT not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *replay_input = getenv("ISAC_PASSIVE_REPLAY_INPUT");
+  /* DEFERRED/DO NOT USE: ISAC_PASSIVE_REPLAY_CAPTURE not in the frozen config t26zE (2026-10-18); slated for removal */
   if (replay_input || getenv("ISAC_PASSIVE_REPLAY_CAPTURE")) {
     AssertFatal(IS_PASSIVE_RX_MODE(get_softmodem_params()), "Replay requires --passive-rx\n");
     if (replay_input) {
