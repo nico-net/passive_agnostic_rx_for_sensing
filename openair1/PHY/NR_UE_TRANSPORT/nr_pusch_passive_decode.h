@@ -99,6 +99,10 @@ void nr_pusch_passive_decode_attach(int ctx, c16_t *const *iq, uint32_t origin, 
  * decode; only that first call may combine into or store a (rnti, pid) soft buffer. */
 bool nr_pusch_passive_harq_combine_enabled(void);
 void nr_pusch_passive_harq_arm(bool on);
+/* ISAC_PUSCH_TIMING: this thread's per-grant stage sums in us [fep, rx_pusch, cfr, decode] and [4] = decode calls */
+void nr_pusch_passive_grant_stages(uint64_t us[5], bool reset);
+/* SNR (dB) at the Shannon bound of a PUSCH MCS: 10 log10(2^(Qm R) - 1) */
+float nr_pusch_passive_shannon_db(uint8_t mcs, uint8_t mcs_table);
 
 /**
  * @brief Decode one passively-observed PUSCH.

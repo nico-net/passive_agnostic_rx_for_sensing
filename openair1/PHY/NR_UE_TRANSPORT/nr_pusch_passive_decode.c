@@ -453,6 +453,13 @@ static uint64_t g_utim_over_slot = 0;
 static int      g_utim_on        = -1;
 
 /* One gate for every per-grant probe in this file, so they cannot drift apart. */
+static _Atomic uint64_t g_ldpc_capped; /* ISAC_UL_LDPC_SNR_MARGIN: TBs decoded with one LDPC iteration */
+float nr_pusch_passive_shannon_db(uint8_t mcs, uint8_t mcs_table)
+{
+  const double se = nr_get_Qm_ul(mcs, mcs_table) * nr_get_code_rate_ul(mcs, mcs_table) / 10240.0;
+  return (float)(10.0 * log10(pow(2.0, se) - 1.0));
+}
+
 static inline int s_diag_on(void)
 {
   static int v = -1;
@@ -477,9 +484,20 @@ static inline uint64_t utim_now(void)
   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* per-grant stage sums of this consumer thread (ISAC_PUSCH_TIMING; UL_E2E calls=/fep=/rxp=/cfr=/dec=, UL-LAT-20261018) */
+static __thread uint64_t t_gs_ns[UTIM_N];
+void nr_pusch_passive_grant_stages(uint64_t us[UTIM_N], bool reset)
+{
+  for (int k = 0; k < UTIM_N; k++) {
+    if (us) us[k] = k == UTIM_TOTAL ? t_gs_ns[k] : t_gs_ns[k] / 1000; /* TOTAL slot: the number of decode calls */
+    if (reset) t_gs_ns[k] = 0;
+  }
+}
+
 static inline void utim_add(int k, uint64_t t0)
 {
   const uint64_t d = utim_now() - t0;
+  t_gs_ns[k] += d;
   g_utim_ns[k] += d;
   g_utim_n[k]++;
   if (d > g_utim_max[k]) {
@@ -489,6 +507,7 @@ static inline void utim_add(int k, uint64_t t0)
 
 static void utim_total(uint64_t d_ns, uint64_t slot_ns)
 {
+  t_gs_ns[UTIM_TOTAL]++;
   g_utim_ns[UTIM_TOTAL] += d_ns;
   g_utim_n[UTIM_TOTAL]++;
   if (d_ns > g_utim_max[UTIM_TOTAL]) {
@@ -2891,6 +2910,20 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       }
     }
   }
+  /* ISAC_UL_LDPC_SNR_MARGIN=<dB> (default off; UL-LAT-20261018): a TB whose DM-RS SNR is more than <dB> below the Shannon
+   * bound of its MCS runs ONE LDPC iteration instead of max_ldpc_iterations. Rate recovery and the HARQ soft buffer are
+   * unchanged (they precede the iterations); a HARQ-combined retransmission is never limited. On the replays these noise TBs
+   * kept the GPU LDPC pool busy ~2.5 ms per wide grant (the UL p99 tail of tim). */
+  {
+    static float lm = -1000.0f;
+    if (lm < -999.0f) lm = getenv("ISAC_UL_LDPC_SNR_MARGIN") ? (float)atof(getenv("ISAC_UL_LDPC_SNR_MARGIN")) : 1e9f;
+    ulsch->max_ldpc_iterations = gnb->max_ldpc_iterations;
+    if (lm < 1e8f && !hq_retx && isfinite(pvp->ul_dmrs_snr_db) &&
+        pvp->ul_dmrs_snr_db < nr_pusch_passive_shannon_db(g->mcs, g->mcs_table) - lm) {
+      ulsch->max_ldpc_iterations = 1;
+      atomic_fetch_add_explicit(&g_ldpc_capped, 1, memory_order_relaxed);
+    }
+  }
   int rc;
   if (ul_pass == 1 || (ul_pass == 2 && !uout.r.need_cpu && !hqe)) {
     /* the pass decided: leave behind what nr_ulsch_decoding would (a failed TB without a HARQ entry to store needs no soft buffer, the UCI search below decodes on its own) */
@@ -3486,6 +3519,9 @@ void nr_pusch_passive_stats_dump(void)
         (unsigned long)init_tx_hits, (unsigned long)init_tx_evicts,
         (unsigned long)atomic_load_explicit(&g_cfr_submits, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_cfr_re, memory_order_relaxed));
+  if (atomic_load(&g_ldpc_capped))
+    LOG_I(PHY, "SENSING: UL_LDPC_SNR_GATE capped=%lu (one LDPC iteration, DM-RS SNR below the MCS Shannon bound - margin)\n",
+          (unsigned long)atomic_load(&g_ldpc_capped));
   if (ul_harq_combine_on())
     LOG_I(PHY, "SENSING: UL_HARQ stored=%lu retx_try=%lu retx_ok=%lu rv_refused=%lu[none=%lu empty=%lu ndi=%lu] tbs_mismatch=%lu busy=%lu rx_ant=%d\n",
           (unsigned long)atomic_load(&g_hq_stored), (unsigned long)atomic_load(&g_hq_retx_try),

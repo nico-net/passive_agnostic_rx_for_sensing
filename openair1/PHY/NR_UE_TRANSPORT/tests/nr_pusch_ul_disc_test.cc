@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_pusch_ul_disc.h"
+#include "PHY/nr_phy_common/inc/nr_passive_delay_fast.h"
 #include "nr_pusch_ul_bgdisc.h"
 #include "nr_gpu_pass_ul.h"
 #include "nr_pdcch_blind_monitor.h"
@@ -318,6 +319,76 @@ TEST(UlBgDisc, SingleFalseCrcDoesNotLatch) {
   EXPECT_EQ(nr_ul_bgdisc_latch(1,0xB,103,0xA),1);    /* second pass in another slot */
   EXPECT_EQ(nr_ul_bgdisc_latch(2,0xC,200,0xA),0);
   EXPECT_EQ(nr_ul_bgdisc_latch(3,0xC,201,0xA),1);    /* two RNTIs agree */
+}
+
+/* ISAC_UL_DELAY_FAST: the pruned estimator must give the full-grid decision (argmax of P over all n positions, peak/mean
+ * > 15 by Parseval) on narrow LS rows: clean delays, weak signals near the threshold, pure noise. */
+TEST(UlDelayFast, MatchesFullGridDecision) {
+  for (const int n : {4096, 1536}) {
+  std::mt19937 rng(7);
+  std::normal_distribution<double> g(0, 1);
+  std::vector<c16_t> ls(n);
+  int ran = 0, nonzero = 0, bad = 0;
+  for (int c = 0; c < 400; c++) {
+    const int m = 12 * (1 + (int)(rng() % (n == 4096 ? 21 : 5))); /* 1..21 PRB (1..5 at n=1536, 40 MHz) */
+    const int dly = (int)(rng() % 601) - 300;
+    const double snr = (c % 5 == 0) ? -100 : -15.0 + (rng() % 45); /* every 5th case pure noise */
+    const double a = 1000 * pow(10, snr / 20), sn = 1000;
+    std::fill(ls.begin(), ls.end(), c16_t{0, 0});
+    for (int k = 0; k < m; k++) {
+      const double ph = -2 * M_PI * k * dly / n;
+      ls[k].r = (int16_t)lrint(a * cos(ph) + sn * g(rng));
+      ls[k].i = (int16_t)lrint(a * sin(ph) + sn * g(rng));
+    }
+    double e = 0, pb = -1;
+    int tb = 0;
+    for (int k = 0; k < m; k++) e += (double)ls[k].r * ls[k].r + (double)ls[k].i * ls[k].i;
+    for (int t = 0; t < n; t++) {
+      const double p = nr_pdf_power(ls.data(), m, n, t);
+      if (p > pb) { pb = p; tb = t; }
+    }
+    const int ref = pb > NR_PDF_THRESHOLD * e ? (tb > n / 2 ? tb - n : tb) : 0;
+    delay_t d = {0};
+    if (!nr_passive_est_delay_fast(n, ls.data(), &d)) continue;
+    ran++;
+    nonzero += ref != 0;
+    if (d.est_delay != ref) {
+      bad++;
+      printf("m=%d dly=%d snr=%.0f ref=%d fast=%d\n", m, dly, snr, ref, d.est_delay);
+    }
+    if (ref != 0) EXPECT_NEAR(d.delay_max_val, pb / (2.0 * n * n), 1.0);
+  }
+  EXPECT_EQ(bad, 0);
+  EXPECT_GT(ran, 300);
+  EXPECT_GT(nonzero, 100);
+  }
+  const int n = 4096;
+  std::vector<c16_t> ls(n);
+  delay_t d = {0};
+  std::fill(ls.begin(), ls.end(), c16_t{1, 1}); /* full-width row: not applicable, the caller runs the full estimator */
+  EXPECT_FALSE(nr_passive_est_delay_fast(n, ls.data(), &d));
+  /* the receiver's type-1 LS row repeats each pilot-pair estimate 4x (smooth, noise peaks wider): still the full-grid decision */
+  std::mt19937 rng(11);
+  std::normal_distribution<double> g(0, 1000);
+  for (int c = 0; c < 100; c++) {
+    const int m = 12 * (1 + c % 21);
+    std::fill(ls.begin(), ls.end(), c16_t{0, 0});
+    for (int k = 0; k < m; k += 4) {
+      const c16_t v = {(int16_t)lrint(g(rng)), (int16_t)lrint(g(rng))};
+      for (int j = 0; j < 4; j++) ls[k + j] = v;
+    }
+    double e = 0, pb = -1;
+    int tb = 0;
+    for (int k = 0; k < m; k++) e += (double)ls[k].r * ls[k].r + (double)ls[k].i * ls[k].i;
+    for (int t = 0; t < n; t++) {
+      const double p = nr_pdf_power(ls.data(), m, n, t);
+      if (p > pb) { pb = p; tb = t; }
+    }
+    const int ref = pb > NR_PDF_THRESHOLD * e ? (tb > n / 2 ? tb - n : tb) : 0;
+    delay_t dd = {0};
+    ASSERT_TRUE(nr_passive_est_delay_fast(n, ls.data(), &dd)) << m;
+    EXPECT_EQ(dd.est_delay, ref) << m;
+  }
 }
 
 int main(int argc, char **argv) {

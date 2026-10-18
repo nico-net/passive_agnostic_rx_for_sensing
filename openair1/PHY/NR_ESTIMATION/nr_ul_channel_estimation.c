@@ -18,6 +18,7 @@
 #include "PHY/NR_TRANSPORT/nr_ulsch_passive_branch.h"
 #include "PHY/NR_TRANSPORT/nr_ulsch_passive_timing.h"
 #include "PHY/nr_phy_common/inc/nr_passive_delay.h"
+#include "PHY/nr_phy_common/inc/nr_passive_delay_fast.h"
 #include "nr_phy_common.h"
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "T.h"
@@ -171,8 +172,10 @@ static void nr_pusch_antenna_processing(void *arg)
         pilot_cnt += 2;
       }
       c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
-      if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
-        nr_passive_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
+      if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+        if (!(nr_ul_delay_fast_on() && !rdata->scope && nr_passive_est_delay_fast(frame_parms->ofdm_symbol_size, ul_ls_est, delay)))
+          nr_passive_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
+      }
       else
         nr_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
       if (rdata->scope && antenna == 0) {
@@ -276,8 +279,10 @@ static void nr_pusch_antenna_processing(void *arg)
 
       // Delay compensation
       c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
-      if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
-        nr_passive_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
+      if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+        if (!(nr_ul_delay_fast_on() && !rdata->scope && nr_passive_est_delay_fast(frame_parms->ofdm_symbol_size, ul_ls_est, delay)))
+          nr_passive_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
+      }
       else
         nr_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
       if (rdata->scope && antenna == 0) {

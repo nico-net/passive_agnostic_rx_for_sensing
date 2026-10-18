@@ -60,6 +60,7 @@ extern uint64_t *nr_ss_gpu_ptr(void);
 #include "nr_ul_nid_bg.h" // nr_ul_nid_bg_wants_next
 #include "nr_pusch_ul_disc.h" // ISAC_UL_PROBE_TA: the per-RNTI timing tracker
 #include "nr_ul_nid_rule.h" // ISAC_UL_LAYOUT_BRUTE: RIV under BWP twins
+#include <math.h>
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // nr_get_Qm_ul
 
 /* The RF producer's own position, published in executables/nr-ue.c immediately BEFORE nrue_ru_read()
@@ -211,6 +212,21 @@ static float ul_retry_snr_db(void)
   }
   return t;
 }
+/* ISAC_UL_RETRY_SNR_MARGIN=<dB> (default off; UL-LAT-20261018): retry only when the DM-RS SNR reaches the Shannon bound of the
+ * grant's MCS minus the margin, 10 log10(2^(Qm R) - 1) - margin. The alternates change the data REs / symbol 0, never the DM-RS,
+ * so the SNR is the same under every alternate, and below that bound no alternate can pass CRC. Without it every CRC-failed
+ * small grant paid 3 decode calls (the UL p99 tail on replays). */
+static bool ul_retry_snr_ok(const nr_pdcch_blind_ul_result_t *g, float snr_db)
+{
+  static float margin = -1000.0f;
+  if (margin < -999.0f) {
+    const char *v = getenv("ISAC_UL_RETRY_SNR_MARGIN");
+    margin = v ? (float)atof(v) : 1e9f;
+  }
+  if (margin > 1e8f)
+    return true;
+  return snr_db >= nr_pusch_passive_shannon_db(g->mcs, g->mcs_table) - margin;
+}
 /* Default size gate instead: only small allocations (the detectable class at this position) are retried. */
 static int ul_retry_max_rb(void)
 {
@@ -299,6 +315,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     struct timespec e2e_t0 = {0}; /* SYSAN ISAC_E2E_TRACE=1: dequeue time */
     if (nr_passive_e2e_trace()) {
       clock_gettime(CLOCK_MONOTONIC, &e2e_t0);
+      nr_pusch_passive_grant_stages(NULL, true);
       nr_ss_ns[NRSS_PREP] = 0;
       uint64_t *gp = nr_ss_gpu_ptr();
       nr_ss_ns[NRSS_LDPC] = 0;
@@ -484,7 +501,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &job.grant,
                             job.ta_offset_samples, (uint64_t)job.absolute_slot, job.cfr_only, job.fo_hz, &out);
     if (ul_retry_enabled() && !job.cfr_only && out.status == NR_PUSCH_PASSIVE_CRC_FAIL && out.snr_db >= ul_retry_snr_db() &&
-        job.grant.num_rb <= ul_retry_max_rb() && nr_pusch_passive_rescue_allowed()) {
+        ul_retry_snr_ok(&job.grant, out.snr_db) && job.grant.num_rb <= ul_retry_max_rb() && nr_pusch_passive_rescue_allowed()) {
       /* Only grants with a measurable signal are retried (the extra LDPC runs cost CPU). Alternates, in order:
        * the other CDM-group count (data-RE set and G change), then the S=1/L=13 alias of S=0/L=14 (the DL TDRA
        * aliasing class: a symbol-0 mismatch leaves one wrong data symbol that LDPC cannot absorb at high MCS). */
@@ -598,11 +615,13 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       clock_gettime(CLOCK_MONOTONIC, &e2e_t1);
       const uint64_t t0 = (uint64_t)e2e_t0.tv_sec * 1000000000ull + e2e_t0.tv_nsec, t1 = (uint64_t)e2e_t1.tv_sec * 1000000000ull + e2e_t1.tv_nsec;
       const uint64_t arr = nr_passive_slot_arrival_ns(job.absolute_slot);
-      LOG_A(PHY, "SENSING: UL_E2E rnti=0x%04x st=%u prb=%u mcs=%u pick=%d arr2deq=%ld wall=%lu tot=%ld cpu_us=%ld stg=ldpc:g%lu,prep:%lu probe=%d\n", job.grant.rnti,
+      uint64_t gs[5];
+      nr_pusch_passive_grant_stages(gs, false);
+      LOG_A(PHY, "SENSING: UL_E2E rnti=0x%04x st=%u prb=%u mcs=%u pick=%d arr2deq=%ld wall=%lu tot=%ld cpu_us=%ld stg=ldpc:g%lu,prep:%lu,calls:%lu,fep:%lu,rxp:%lu,dec:%lu probe=%d\n", job.grant.rnti,
             (unsigned)out.status, (unsigned)job.grant.num_rb, (unsigned)job.grant.mcs, pick, arr && t0 >= arr ? (long)((t0 - arr) / 1000) : -1L,
             (unsigned long)((t1 - t0) / 1000), arr && t1 >= arr ? (long)((t1 - arr) / 1000) : -1L,
             nr_ul_chain_on() ? (long)((grant_cpu_end.tv_sec-grant_cpu_start.tv_sec)*1000000L+(grant_cpu_end.tv_nsec-grant_cpu_start.tv_nsec)/1000L) : -1L,
-            (unsigned long)(((nr_ss_gpu_ptr() && nr_ss_gpu_ptr() != nr_ss_ns ? nr_ss_gpu_ptr()[NRSS_LDPC] : 0) + nr_ss_ns[NRSS_LDPC]) / 1000), (unsigned long)(nr_ss_ns[NRSS_PREP] / 1000), (int)(pick == 1 || ulq_is_probe(&job.grant)));
+            (unsigned long)(((nr_ss_gpu_ptr() && nr_ss_gpu_ptr() != nr_ss_ns ? nr_ss_gpu_ptr()[NRSS_LDPC] : 0) + nr_ss_ns[NRSS_LDPC]) / 1000), (unsigned long)(nr_ss_ns[NRSS_PREP] / 1000), (unsigned long)gs[4], (unsigned long)gs[0], (unsigned long)gs[1], (unsigned long)gs[3], (int)(pick == 1 || ulq_is_probe(&job.grant)));
     }
     if (nr_ul_chain_on()) {
       const uint64_t cpu_us=(uint64_t)((grant_cpu_end.tv_sec-grant_cpu_start.tv_sec)*1000000L+
