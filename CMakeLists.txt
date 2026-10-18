@@ -2524,9 +2524,12 @@ if(ENABLE_TESTS)
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dl_adaptive_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_ul_field_sweep_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_ul_interp_sweep_test.cc
-    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dci11_pin_test.cc)
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dci11_pin_test.cc
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_post_accept_test.cc
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c)
   target_sources(test_nr_pdcch_blind_monitor PRIVATE
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_reconfig_replay_test.cc)
+  add_test(NAME test_nr_pdcch_post_accept COMMAND test_nr_pdcch_blind_monitor --gtest_filter=PostAccept.*:AliveNext.*:Dci11ObserveGolden.*)
   add_test(NAME test_nr_dl_adaptive COMMAND test_nr_pdcch_blind_monitor --gtest_filter=DlAdaptive.*:DlGeometry.*)
   add_custom_target(test_nr_pdcch_ul_field_sweep DEPENDS test_nr_pdcch_blind_monitor)
   add_custom_target(test_nr_pdcch_ul_interp_sweep DEPENDS test_nr_pdcch_blind_monitor)

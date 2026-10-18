@@ -60,6 +60,24 @@
 
 #include "nr_pdsch_prb_set.h"   /* NR_FDRA_* modes, N_RBG, FDRA width */
 
+#include <string.h>
+/** First index >= i (and < n) whose alive flag is set, or n. The resolver holds up to NR_DCI11_LAYOUT_MAX hypotheses of which a few
+ * hundred are alive, and every per-DCI pass used to test each flag; eight flags per load make the dead stretches nearly free.
+ * Pure. Same visit order and result as the plain `while (i < n && !alive[i]) i++`. */
+static inline int nr_alive_next(const bool *alive, int i, int n)
+{
+  while (i + 8 <= n) {
+    uint64_t w;
+    memcpy(&w, alive + i, 8);
+    if (w != 0)
+      break;
+    i += 8;
+  }
+  while (i < n && !alive[i])
+    i++;
+  return i;
+}
+
 /// One layout hypothesis, in the only terms extraction can distinguish.
 typedef struct {
   uint8_t bwp_ind;      ///< BWP indicator width: 0, 1 or 2 (n_dl_bwp)
