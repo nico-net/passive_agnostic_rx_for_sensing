@@ -126,6 +126,8 @@ def parse_run(path, margin=2.0):
             elif 'PUSCHQ2' in line:
                 m = re.search(r'real\[queued=(\d+) full=(\d+)\]', line)
                 q, f = map(int, m.groups())
+                st = re.search(r'real_stale=(\d+)', line)  # ULST ISAC_UL_STALE_DROP: stale real grants are drops too
+                f += int(st.group(1)) if st else 0
                 ul['drops'] = 100.0 * f / q if q else None
         except (KeyError, ValueError, IndexError, AttributeError):
             (dl if 'EVMGRANT' in line or 'PDSCHQ' in line else ul)['skipped'] += 1

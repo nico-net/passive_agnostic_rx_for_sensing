@@ -1011,17 +1011,46 @@ static bool ul_selftest(int i)
   return gr && ul_exec(i, &job, 1, &gr, 1000000, &l, &g) == 0 && job.nsnap > 0;
 }
 
+/* ULST ISAC_UL_GPU_LDPC_HOLD=1 (default off): after an abandoned (deadline) call, every call goes to the CPU decoder while
+ * it is still on the GPU and, once it drained, for as long again as it took (launch to reclaim): the FEP hold of
+ * nr_pusch_gpu_fep.cuh, so a starved partition costs one deadline per observed GPU latency, not one per TB. */
+static bool ul_hold_on()
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("ISAC_UL_GPU_LDPC_HOLD");
+    v = e && atoi(e) == 1;
+  }
+  return v == 1;
+}
+static uint64_t ul_lost_t0[UL_CTX];
+static std::atomic<uint64_t> ul_hold_until{0};
+/* gives back context i if it was abandoned and its stream has drained; true = reclaimed by this call */
+static bool ul_reclaim(int i)
+{
+  const unsigned bit = 1u << i;
+  if (!(UL.lost.load() & bit) || cudaStreamQuery(UL.c[i].s) == cudaErrorNotReady)
+    return false;
+  if (!(UL.lost.fetch_and(~bit) & bit))
+    return false; /* another consumer reclaimed it */
+  cudaGetLastError(); /* an abandoned call that failed: the next use re-validates */
+  if (ul_hold_on()) {
+    const uint64_t t = ul_now_us(), until = t + (t - ul_lost_t0[i]);
+    uint64_t h = ul_hold_until.load();
+    while (until > h && !ul_hold_until.compare_exchange_weak(h, until)) {}
+  }
+  UL.busy.fetch_and(~bit);
+  ++UL.n_reclaimed;
+  return true;
+}
+
 static int ul_acquire()
 {
   for (int i = 0; i < UL_CTX; i++) {
     const unsigned bit = 1u << i;
     if (UL.busy.load() & bit) {
-      if (!(UL.lost.load() & bit) || cudaStreamQuery(UL.c[i].s) == cudaErrorNotReady)
+      if (!ul_reclaim(i))
         continue;
-      cudaGetLastError(); /* an abandoned call that failed: the next use re-validates */
-      UL.lost.fetch_and(~bit);
-      UL.busy.fetch_and(~bit);
-      ++UL.n_reclaimed;
     }
     if (!(UL.busy.fetch_or(bit) & bit))
       return i;
@@ -1101,6 +1130,14 @@ extern "C" int nr_pusch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
     ++UL.n_rt;
     return -2;
   }
+  if (ul_hold_on()) {
+    for (int i = 0; i < UL_CTX; i++)
+      ul_reclaim(i);
+    if (UL.lost.load() || ul_now_us() < ul_hold_until.load()) {
+      ++UL.n_busy;
+      return -1;
+    }
+  }
   const int c = ul_acquire();
   if (c < 0) {
     ++UL.n_busy;
@@ -1112,6 +1149,7 @@ extern "C" int nr_pusch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   const int rc = ul_exec(c, jobs, n, gr, UL.deadline_us, &launch_us, &gpu_us);
   const uint64_t dt = ul_now_us() - t0;
   if (rc == -2) { /* abandoned: keep the context reserved until the stream drains */
+    ul_lost_t0[c] = t0;
     UL.lost.fetch_or(1u << c);
     ++UL.n_deadline;
     UL.win_used_us += dt;

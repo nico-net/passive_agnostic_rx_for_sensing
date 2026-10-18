@@ -1038,7 +1038,8 @@ static void ulg_warmup(const NR_DL_FRAME_PARMS *fp, int nant)
   const nr_pusch_gpu_fep_api_t *api = nr_pusch_gpu_fep_load();
   if (!api || fp->ofdm_symbol_size != 4096 || nant < 1 || nant > PASSIVE_UL_MAX_ANT) return;
   const char *p = getenv("ISAC_UL_GPU_FEP_PCT");
-  if (api->init(nant, fp->ofdm_symbol_size, fp->nb_prefix_samples, (int)fp->ofdm_offset_divisor, p ? atoi(p) : 30) != 0) {
+  if (api->init(nant, fp->ofdm_symbol_size, fp->nb_prefix_samples, (int)fp->ofdm_offset_divisor, p ? atoi(p) : 30,
+                1000 / fp->slots_per_subframe) != 0) {
     LOG_W(PHY, "SENSING: UL_GPU_FEP requested but unavailable -- CPU FEP\n");
     return;
   }
@@ -3539,14 +3540,14 @@ void nr_pusch_passive_stats_dump(void)
           (unsigned long)atomic_load(&g_fep_req[1]), (unsigned long)atomic_load(&g_fep_req[2]));
   }
   if (g_ulg) {
-    uint64_t o[10];
+    uint64_t o[13];
     g_ulg->stats(o);
     LOG_I(PHY, "SENSING: UL_GPU_FEP on=%d calls=%lu items=%lu gpu_ms=%lu mean_us=%.0f max_us=%lu busy=%lu over_cap=%lu rt_defer=%lu "
-               "late=%lu err=%lu part=%lu | cpu_bounds=%lu cpu_rej=%lu check=%lu bad=%lu\n",
+               "late=%lu err=%lu part=%lu deadline=%lu hold=%lu reclaimed=%lu | cpu_bounds=%lu cpu_rej=%lu check=%lu bad=%lu\n",
           (int)atomic_load(&g_ulg_on), (unsigned long)o[0], (unsigned long)o[1], (unsigned long)(o[2] / 1000),
           o[0] ? (double)o[2] / (double)o[0] : 0.0, (unsigned long)o[3], (unsigned long)o[4], (unsigned long)o[5],
           (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[8], (unsigned long)o[9],
-          (unsigned long)atomic_load(&g_ulg_cpu_bounds), (unsigned long)atomic_load(&g_ulg_cpu_rej),
+          (unsigned long)o[10], (unsigned long)o[11], (unsigned long)o[12], (unsigned long)atomic_load(&g_ulg_cpu_bounds), (unsigned long)atomic_load(&g_ulg_cpu_rej),
           (unsigned long)atomic_load(&g_ulg_chk), (unsigned long)atomic_load(&g_ulg_bad));
   }
   nr_gpu_pass_ul_census();

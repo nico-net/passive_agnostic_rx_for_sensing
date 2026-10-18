@@ -16,9 +16,9 @@ typedef struct {
 } nr_pusch_gpu_fep_item_t;
 
 typedef struct {
-  int (*init)(int nant, int N, int ncp, int offset_div, int pct);
+  int (*init)(int nant, int N, int ncp, int offset_div, int pct, int slot_us);
   int (*run)(const void *items, int n, int nb_rb, int fco); /* 0 done; < 0: nothing written, run the CPU FEP */
-  void (*stats)(uint64_t *o); /* calls items gpu_us max_us busy over_cap rt_defer late errors partitioned */
+  void (*stats)(uint64_t *o); /* calls items gpu_us max_us busy over_cap rt_defer late errors partitioned deadline hold reclaimed */
 } nr_pusch_gpu_fep_api_t;
 
 static inline const nr_pusch_gpu_fep_api_t *nr_pusch_gpu_fep_load(void)
@@ -32,7 +32,7 @@ static inline const nr_pusch_gpu_fep_api_t *nr_pusch_gpu_fep_load(void)
   void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!h) h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!h) return NULL;
-  api.init = (int (*)(int, int, int, int, int))dlsym(h, "nr_pusch_gpu_fep_init");
+  api.init = (int (*)(int, int, int, int, int, int))dlsym(h, "nr_pusch_gpu_fep_init");
   api.run = (int (*)(const void *, int, int, int))dlsym(h, "nr_pusch_gpu_fep_run");
   api.stats = (void (*)(uint64_t *))dlsym(h, "nr_pusch_gpu_fep_stats");
   if (!api.init || !api.run || !api.stats) { api.run = NULL; return NULL; }

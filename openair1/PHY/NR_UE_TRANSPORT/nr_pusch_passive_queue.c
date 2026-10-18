@@ -77,10 +77,18 @@ static nr_pusch_queue_cursor_t g_cursor;
  *  ISAC_UL_SNAP_POOL=1       one shared IQ snapshot per UL slot, copied by a capture thread right after booking
  *                            (ISAC_UL_SNAP_CORE / ISAC_UL_SNAP_PRIO), so a real grant stays decodable while it waits.
  *  ISAC_UL_SPARE_RESCUE=1    UCI explore search and UL_RETRY alternates run only while no real grant waits.
- *  ISAC_UL_CPU_BUDGET_PCT=p  each consumer idles so its CPU time stays <= p % of wall time (100 ms windows). */
+ *  ISAC_UL_CPU_BUDGET_PCT=p  each consumer idles so its CPU time stays <= p % of wall time (100 ms windows).
+ *  ISAC_UL_STALE_DROP=1      (ULST) a job holding a shared snapshot is dropped at dequeue by the same age rule as a job
+ *                            without one (nr_pusch_queue_snapshot_fresh: one frame minus 5 slots), so a GPU/CPU stall
+ *                            costs the grants older than that instead of draining tens of ms of backlog (VL2: 60 ms).
+ *                            The age is also taken in wall time (the same number of slot durations since the slot's
+ *                            samples arrived), since the producer's slot counter itself lags when the host stalls.
+ *                            shortcut: the wall-time age needs the arrival ring of ISAC_E2E_TRACE=1 (on in t26uL);
+ *                            without it only the slot-count rule applies -- record arrivals unconditionally to upgrade.
+ *                            Real-grant stale drops are printed as PUSCHQ2 real_stale= and scored as UL drops. */
 static nr_pusch_passive_job_t g_pring[NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH];
 static nr_pusch_queue_cursor_t g_pcursor;
-static int g_prio, g_spare_rescue, g_budget_pct;
+static int g_prio, g_spare_rescue, g_budget_pct, g_stale_drop;
 #define ULQ_POOL_MAX (NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH + NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS + 2)
 typedef struct {
   c16_t *iq[4];
@@ -96,7 +104,7 @@ static int g_pool_n;
 static pthread_t g_cap_thread;
 static pthread_cond_t g_cap_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_q_real, g_q_probe, g_dec_probe, g_full_probe, g_snap_ok, g_snap_fail, g_snap_nobuf,
-    g_snap_used, g_rescue_skipped, g_budget_sleep_us;
+    g_snap_used, g_rescue_skipped, g_budget_sleep_us, g_stale_real;
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool ulq_is_probe(const nr_pdcch_blind_ul_result_t *g);
@@ -238,6 +246,19 @@ static int ul_retry_max_rb(void)
   return m;
 }
 
+/* ULST: true when the slot's samples arrived more than (slots_per_frame - 5) slot durations ago (the
+ * nr_pusch_queue_snapshot_fresh budget in wall time); false when the arrival is unknown */
+static bool ulq_wall_stale(long abs_slot, long slots_per_frame)
+{
+  extern uint64_t nr_passive_slot_arrival_ns(long abs_slot);
+  const uint64_t arr = nr_passive_slot_arrival_ns(abs_slot);
+  if (!arr || slots_per_frame <= 5) return false;
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  const uint64_t now = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+  return now > arr && now - arr > (uint64_t)(slots_per_frame - 5) * (10000000ull / (uint64_t)slots_per_frame);
+}
+
 bool nr_pusch_passive_pipeline_enabled(void)
 {
   const char *v = getenv("ISAC_UL_PIPELINE");
@@ -358,10 +379,13 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     if (lag > (long)atomic_load_explicit(&g_max_lag, memory_order_relaxed)) {
       atomic_store_explicit(&g_max_lag, (uint64_t)(lag > 0 ? lag : 0), memory_order_relaxed);
     }
-    if (held < 0 && !(nr_pusch_passive_pipeline_enabled() ?
+    if ((held < 0 && !(nr_pusch_passive_pipeline_enabled() ?
           nr_pusch_queue_snapshot_fresh(prod, job.absolute_slot, slots_per_frame) :
-          nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame))) {
+          nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame)))
+        || (held >= 0 && g_stale_drop && (!nr_pusch_queue_snapshot_fresh(prod, job.absolute_slot, slots_per_frame)
+                                          || ulq_wall_stale(job.absolute_slot, slots_per_frame)))) {
       atomic_fetch_add_explicit(&g_dropped_stale, 1, memory_order_relaxed);
+      if (pick == 0) atomic_fetch_add_explicit(&g_stale_real, 1, memory_order_relaxed);
       continue;
     }
 
@@ -823,6 +847,7 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   if (pdepth > NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH) pdepth = NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH;
   g_pcursor = (nr_pusch_queue_cursor_t){.depth=pdepth};
   g_spare_rescue = ulq_env("ISAC_UL_SPARE_RESCUE", 0) == 1;
+  g_stale_drop = ulq_env("ISAC_UL_STALE_DROP", 0) == 1;
   g_budget_pct = ulq_env("ISAC_UL_CPU_BUDGET_PCT", 0);
   g_pool_n = 0;
   g_snap_next = ulq_env("ISAC_UL_NID_BG", 0) == 1 && ulq_env("ISAC_UL_NID_BG_IQ", 0) == 1;
@@ -981,9 +1006,10 @@ bool nr_pusch_passive_rescue_allowed(void)
 void nr_pusch_passive_queue_ulq_dump(void)
 {
   if (!g_prio && !g_pool_n && !g_spare_rescue && !g_budget_pct && g_nthreads <= 1) return;
-  LOG_I(PHY, "SENSING: PUSCHQ2 consumers=%d real[queued=%lu full=%lu] probe[queued=%lu decoded=%lu full=%lu] "
+  LOG_I(PHY, "SENSING: PUSCHQ2 consumers=%d real[queued=%lu full=%lu] real_stale=%lu probe[queued=%lu decoded=%lu full=%lu] "
              "snap[pool=%d ok=%lu fail=%lu nobuf=%lu used=%lu] rescue_skipped=%lu budget_sleep_ms=%lu\n",
         g_nthreads, (unsigned long)atomic_load(&g_q_real), (unsigned long)atomic_load(&g_dropped_full),
+        (unsigned long)atomic_load(&g_stale_real),
         (unsigned long)atomic_load(&g_q_probe), (unsigned long)atomic_load(&g_dec_probe),
         (unsigned long)atomic_load(&g_full_probe), g_pool_n, (unsigned long)atomic_load(&g_snap_ok),
         (unsigned long)atomic_load(&g_snap_fail), (unsigned long)atomic_load(&g_snap_nobuf),
