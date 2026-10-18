@@ -21,6 +21,7 @@
 #define _GNU_SOURCE
 #endif
 #include "nr_ul_nid_bg.h"
+#include "common/utils/nr_core_plan.h"
 #include <math.h>
 #include <pthread.h>
 #include <sched.h>
@@ -630,7 +631,8 @@ static void *worker(void *a)
     CPU_ZERO(&cs);
     CPU_SET(g_core, &cs);
     if (sched_setaffinity(0, sizeof(cs), &cs)) LOG_W(PHY, "SENSING: UL_NID_BG cannot pin to cpu %d\n", g_core);
-  }
+  } else
+    nr_core_float_enter(); /* started by a pinned PUSCH consumer: leave its core for the float lane */
   uint64_t last = now_ns();
   while (!atomic_load(&g_stop)) {
     if (now_ns() - last > 5000000000ull) {

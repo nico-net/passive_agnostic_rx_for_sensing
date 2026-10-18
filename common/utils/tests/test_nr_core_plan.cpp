@@ -278,3 +278,36 @@ TEST(EnvList,Nth){
 }
 
 int main(int argc,char **argv){::testing::InitGoogleTest(&argc,argv);return RUN_ALL_TESTS();}
+static void *float_probe(void *out)
+{
+  sched_getaffinity(0, sizeof(cpu_set_t), (cpu_set_t *)out);
+  return nullptr;
+}
+TEST(FloatCores,UnpinnedThreadsGoToTheLaneAndPinsAreKept){
+  EXPECT_EXIT({
+    if (sysconf(_SC_NPROCESSORS_ONLN) < 2) _exit(0);
+    cpu_set_t one; CPU_ZERO(&one); CPU_SET(1, &one);
+    pthread_t pinned; static volatile int stop = 0;
+    if (pthread_create(&pinned, nullptr, [](void *) -> void * { while (!stop) usleep(1000); return nullptr; }, nullptr)) _exit(10);
+    if (pthread_setaffinity_np(pinned, sizeof(one), &one)) _exit(11);
+    setenv("ISAC_FLOAT_CORES", "0", 1);
+    unsetenv("ISAC_CORE_PLAN");                                  // automatic plan on: the lane stays off
+    cpu_set_t s0;
+    if (nr_core_float_apply() || sched_getaffinity(0, sizeof(s0), &s0) || CPU_COUNT(&s0) < 2) _exit(20);
+    setenv("ISAC_CORE_PLAN", "0", 1);
+    if (nr_core_float_apply()) _exit(12);
+    cpu_set_t s;
+    if (sched_getaffinity(0, sizeof(s), &s) || CPU_COUNT(&s) != 1 || !CPU_ISSET(0, &s)) _exit(13);   // main moved
+    if (pthread_getaffinity_np(pinned, sizeof(s), &s) || !CPU_EQUAL(&s, &one)) _exit(14);           // pin kept
+    pthread_t t; cpu_set_t got; CPU_ZERO(&got);
+    sched_setaffinity(0, sizeof(one), &one);                     // a pinned creator: core -1 still lands in the lane
+    if (nr_core_plan_create(&t, nullptr, float_probe, &got, -1) || pthread_join(t, nullptr)) _exit(15);
+    if (CPU_COUNT(&got) != 1 || !CPU_ISSET(0, &got)) _exit(16);
+    if (nr_core_plan_create(&t, nullptr, float_probe, &got, 1) || pthread_join(t, nullptr)) _exit(17);
+    if (!CPU_ISSET(1, &got)) _exit(18);                          // core >= 0 without a plan: plain create (inherits)
+    setenv("ISAC_FLOAT_CORES", "x", 1);
+    if (nr_core_float_apply()) _exit(19);                        // malformed list: ignored, not fatal
+    stop = 1; pthread_join(pinned, nullptr);
+    _exit(0);
+  },::testing::ExitedWithCode(0),"");
+}

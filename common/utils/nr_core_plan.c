@@ -366,12 +366,55 @@ bool nr_core_plan_is_critical(int core)
   }
   return false;
 }
+static bool nr_core_float_mask(cpu_set_t *mask)
+{
+  const char *e = getenv("ISAC_FLOAT_CORES"), *plan = getenv("ISAC_CORE_PLAN");
+  unsigned char m[NR_CP_MAX_CPUS], on[NR_CP_MAX_CPUS];
+  char buf[4096];
+  /* the lane is the plan-off mechanism: with the automatic plan (ISAC_CORE_PLAN unset or 1) the plan owns every mask */
+  if (!e || !*e || !plan || atoi(plan) != 0) return false;
+  if (nr_core_parse_list(e, m) || read_text("/sys/devices/system/cpu/online", buf, sizeof(buf)) || nr_core_parse_list(buf, on)) return false;
+  CPU_ZERO(mask);
+  for (int c = 0; c < NR_CP_MAX_CPUS; c++) if (m[c] && on[c]) CPU_SET(c, mask);
+  return CPU_COUNT(mask) > 0;
+}
+int nr_core_float_apply(void)
+{
+  cpu_set_t lane, inherited, cur;
+  if (!nr_core_float_mask(&lane)) {
+    if (getenv("ISAC_FLOAT_CORES"))
+      fprintf(stderr, "SENSING: FLOAT_CORES \"%s\" ignored (needs ISAC_CORE_PLAN=0 and a CPU list with an online CPU)\n", getenv("ISAC_FLOAT_CORES"));
+    return 0;
+  }
+  if (sched_getaffinity(0, sizeof(inherited), &inherited)) return -1;
+  DIR *tasks = opendir("/proc/self/task");
+  if (!tasks) return -1;
+  struct dirent *entry; int moved = 0, kept = 0;
+  while ((entry = readdir(tasks))) {
+    char *end; long tid = strtol(entry->d_name, &end, 10);
+    if (end == entry->d_name || *end || tid <= 0 || tid > INT_MAX) continue;
+    if (sched_getaffinity((pid_t)tid, sizeof(cur), &cur)) continue;
+    if (!CPU_EQUAL(&cur, &inherited)) { kept++; continue; } /* explicitly pinned already */
+    if (sched_setaffinity((pid_t)tid, sizeof(lane), &lane) == 0) moved++;
+  }
+  closedir(tasks);
+  fprintf(stderr, "SENSING: FLOAT_CORES=%s (%d CPUs): %d task(s) moved, %d pinned task(s) kept\n", getenv("ISAC_FLOAT_CORES"), CPU_COUNT(&lane), moved, kept);
+  return 0;
+}
+void nr_core_float_enter(void)
+{
+  cpu_set_t lane;
+  if (nr_core_float_mask(&lane)) pthread_setaffinity_np(pthread_self(), sizeof(lane), &lane);
+}
 /* nr_core_plan_thread_attr: sets the affinity and priority of a thread attribute object from the plan: one CPU when affinity >= 0 (must be a background or real-time CPU), else every background CPU.
  *   Priority is cleared (set to 0) unless the CPU is a real-time one. Returns 0, or an error code. Caller: nr_core_plan_create().
  */
 int nr_core_plan_thread_attr(pthread_attr_t *attr, int affinity, int *priority)
 {
-  if(!active) return 0;
+  if(!active) {
+    cpu_set_t lane; /* no plan: a thread without a core goes to the float lane (ISAC_FLOAT_CORES), else inherits */
+    return affinity < 0 && nr_core_float_mask(&lane) ? pthread_attr_setaffinity_np(attr, sizeof(lane), &lane) : 0;
+  }
   cpu_set_t set; CPU_ZERO(&set);
   if(affinity>=0) {
     if(affinity>=NR_CP_MAX_CPUS || (!current.background[affinity] && !current.realtime[affinity])) return EINVAL;
@@ -386,13 +429,19 @@ int nr_core_plan_thread_attr(pthread_attr_t *attr, int affinity, int *priority)
  */
 int nr_core_plan_create(pthread_t *thread, pthread_attr_t *attr, void *(*fn)(void *), void *arg, int core)
 {
-  if (!active) return pthread_create(thread, attr, fn, arg);
+  cpu_set_t lane;
+  if (!active && (core >= 0 || !nr_core_float_mask(&lane))) return pthread_create(thread, attr, fn, arg);
   pthread_attr_t local;
   bool owned = attr == NULL;
   int rc = 0;
   if (owned) { rc = pthread_attr_init(&local); if (rc) return rc; attr = &local; }
   int priority = 0;
   rc = nr_core_plan_thread_attr(attr, core, &priority);
+  if (!active) { /* float lane only: keep the caller's scheduling attributes */
+    if (!rc) rc = pthread_create(thread, attr, fn, arg);
+    if (owned) pthread_attr_destroy(attr);
+    return rc;
+  }
   struct sched_param sp = {0};
   if (!rc) rc = pthread_attr_setinheritsched(attr, PTHREAD_EXPLICIT_SCHED);
   if (!rc) rc = pthread_attr_setschedpolicy(attr, SCHED_OTHER);
