@@ -445,6 +445,8 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
   j->nrb = nrb;
   j->llr_out = in->llr_out;
   j->llr_out_all = in->llr_out_all;
+  j->gate_on = (uint8_t)(in->gate_on != 0);
+  j->gate_thr_db = in->gate_thr_db;
   u->on = 1;
   memset(&out->r, 0, sizeof(out->r));
   out->r.tb = in->tb;
@@ -546,9 +548,7 @@ int nr_gpu_pass_ul_warm(void *h, int nbrx, int fp32)
       }
     }
   U.nbrx = nbrx;
-  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PASS_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *ch = getenv("ISAC_UL_GPU_PASS_CHECK");
-  U.check = ch ? atoi(ch) : 16;
+  U.check = 0; /* Fix A+D: no shadow decode on the hot path; see nr_gpu_pass_test.cc (GpuPassUl.MatchesCpuDecode) */
   atomic_store(&U.on, made > 0);
   LOG_A(PHY, "SENSING: GPUPASS_UL %s: %d PUSCH shape classes x %d instances captured (%d failed), shadow check every %d passes\n", made > 0 ? "enabled" : "NOT enabled", made,
         NR_GPU_PASS_RING, failed, U.check);

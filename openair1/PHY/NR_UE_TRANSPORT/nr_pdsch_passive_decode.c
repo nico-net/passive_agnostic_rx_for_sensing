@@ -33,6 +33,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
  */
 
 #include "nr_pdsch_passive_decode.h"
+#include "nr_snr_gate.h"
 #include "nr_pdsch_qm_oracle.h"
 #include "nr_blind_stats.h"
 #include "nr_pdcch_blind_monitor.h" // nr_pdcch_blind_dmrs_mask (ISAC_RA_TDRA_SWEEP)
@@ -3270,6 +3271,11 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     static const nr_ssb_rm_mask_t gp_no_ssb = {0};
     fapi_nr_dl_config_dlsch_pdu_rel15_t gp_chest_cfg;
     freq_alloc_bitmap_t gp_chest_fa;
+    /* no-chance gate inside the graph (nr_snr_gate.h): the pass stops after the chest when the DM-RS comb SNR < required - 5 dB. Probes (layout searches), SI/P/RA grants and
+     * retransmissions (rv != 0: HARQ soft bits are needed) are never gated. */
+    const double gp_req = nr_required_snr_db(grant->mcs, grant->mcs_table);
+    const bool gp_gate_on = !t_probe_no_horizon && nr_snr_gate_applies(t_probe_first_seg || probe_last_sym >= 0, grant->rnti_class == 0, grant->rv, true) && isfinite(gp_req);
+    const float gp_gate_thr = gp_gate_on ? (float)(gp_req - NR_SNR_GATE_MARGIN_DB) : 0.f;
     share_chest_band(freq_alloc, dlsch_config, &gp_chest_fa, &gp_chest_cfg);
     {
       const nr_gpu_pass_dl_in_t gin = {.ue = ue, .proc = proc, .dlsch_config = dlsch_config, .freq_alloc = freq_alloc, .seg = seg_path ? seg : NULL, .nseg = seg_path ? nseg : 0, .cw = cw,
@@ -3281,7 +3287,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
                                        .first_symbol = nr_ssb_rm_first_data_symbol(dlsch_config, freq_alloc, &ssb), .nvfix = gp_nvfix(),
                                        .branch = gp_perbranch() ? nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) : -1, .norm = gp_norm_on(),
                                        .it_max = gp_iters(), .chest_diag = chest_pdp_diag_on(), .fep_fo = fep_fo, .tb = g_harq.b,
-                                       .probe = t_probe_first_seg, .probe_last_sym = probe_last_sym, .chest_fa = &gp_chest_fa, .chest_cfg = &gp_chest_cfg};
+                                       .probe = t_probe_first_seg, .probe_last_sym = probe_last_sym, .chest_fa = &gp_chest_fa, .chest_cfg = &gp_chest_cfg,
+                                       .gate_on = gp_gate_on, .gate_thr_db = gp_gate_thr};
       if (!t_gpp)
         gp_thread_prewarm(); /* before the RX fence: allocates; after it (v2): claims a pool set, lazily, once per thread */
       memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc)); /* the demod job reads whether the EVM is armed; the block below re-arms it for the old path */
@@ -3292,6 +3299,11 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       const int gp_rc = t_gpp ? nr_gpu_pass_dl_run(&gin, t_gpp) : 1;
       nr_dlsch_csi_prb_map = NULL; /* the old path sets and clears its own */
       nr_dlsch_csi_prb_map_n = 0;
+      if (gp_rc == 0 && t_gpp->r.skip) { /* the in-graph gate fired: no demod / LDPC / CRC ran; the verdict is CRC fail, skip = 1, and no arm can help */
+        out->skip = 1;
+        out->status = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
+        return out->status;
+      }
       if (gp_rc == 0) {
         if (t_gpp->r.need_cpu) {
           nr_gpu_pass_note(NR_GPU_PASS_EV_RETRY_OLD); /* a block only the CPU decoder can settle: the old path decodes from scratch */
@@ -6572,6 +6584,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
     if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
     t_quiet = saved_quiet;
     t_decode_tdra_attempt = 0;
+    if (out->skip) { /* no-chance gate (nr_snr_gate.h): neither this body nor the plain one is worth running, and no arm can help */
+      *dlsch_config = plain;
+      return st;
+    }
     if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
       out->config_recovered = true;
       nr_retry_pred_hit(grant->rnti);
@@ -6596,6 +6612,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
     nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st);
   }
   }
+  if (out->skip) return st; /* no-chance gate: verdict is final, nothing to retry */
   if (rp_on && st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && grant->dci11 && grant->rnti_class == 0) nr_retry_pred_miss(grant->rnti);
   if (t_recov_mode != 2 /* needs the first body's rxdataF */ && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && signal_geom_on() && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg && !t_gw_capture
       && !t_gw_used && !(t_quiet && !t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && !harq_combine_on()) {

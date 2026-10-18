@@ -57,6 +57,7 @@
 #include "nr_ul_llr_dump.h" // ISAC_UL_LLR_DUMP (default off)
 #include "nr_ul_nid_bg.h" // ISAC_UL_NID_BG (default off)
 #include "nr_pusch_passive_queue.h" // nr_pusch_passive_queue_pool_copy_next
+#include "nr_snr_gate.h"
 #include "nr_pdcch_ul_interp_sweep.h" // gap item 2: nr_pusch_ul_energy_span/nr_pusch_ul_dmrs_pin_set
 
 /* nr_ulsch_decoding() has no declaration in any header this library exposes -- nr_transport_proto.h
@@ -2191,8 +2192,28 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         in.tb = ul_shadow ? scr_->shadow_tb : gnb->ulsch[0].harq_process->b;
         in.llr_out = ul_shadow ? scr_->shadow_llr : gnb->pusch_vars[0].llr;
         in.llr_out_all = ul_shadow || s_diag_on();
+        { /* no-chance gate inside the graph (nr_snr_gate.h): required SNR - 5 dB; probes / trials, transform-precoded grants and retransmissions (rv != 0 never reaches this pass) are never gated */
+          const double rq_ = nr_required_snr_db(pg.mcs, pg.mcs_table);
+          in.gate_on = !pg.transform_precoding && !nr_ul_layout_is_probe(g) && !nr_ul_layout_is_trial(g) && nr_snr_gate_applies(false, true, pg.rv, true) && isfinite(rq_);
+          in.gate_thr_db = in.gate_on ? (float)(rq_ - NR_SNR_GATE_MARGIN_DB) : 0.f;
+        }
         in.want_est = nr_srs_passive_enabled() || nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS) || s_diag_on();
-        if (in.tbs_bits && in.bg && nr_gpu_pass_ul_run(&in, &uout) == 0) {
+        const int ulrc_ = (in.tbs_bits && in.bg) ? nr_gpu_pass_ul_run(&in, &uout) : 1;
+        if (ulrc_ == 0 && uout.r.skip && !ul_shadow) {
+          /* the in-graph gate fired (DM-RS SNR far below the MCS requirement): CRC fail with skip = 1, no UCI search, no retry */
+          out->skip = 1;
+          out->snr_db = uout.dmrs_snr_db;
+          out->tbs_bytes = in.tbs_bits >> 3;
+          out->qam_mod_order = in.qam_mod_order;
+          out->nb_rb = pg.num_rb;
+          out->nb_symbols = pg.num_symbols;
+          out->est_delay = uout.est_delay;
+          out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
+          out->reject_reason = "no-chance SNR gate (DM-RS SNR far below the MCS requirement)";
+          out->ta_applied_samples = hyp.ta;
+          return false;
+        }
+        if (ulrc_ == 0) {
           const int d_ = uout.est_delay;
           if (d_ != 0 && (d_ > PASSIVE_UL_DELAY_TOL || d_ < -PASSIVE_UL_DELAY_TOL)) {
             nr_gpu_pass_ul_note(NR_GPU_PASS_UL_EV_REFINE); /* the old path re-places the FFT window */

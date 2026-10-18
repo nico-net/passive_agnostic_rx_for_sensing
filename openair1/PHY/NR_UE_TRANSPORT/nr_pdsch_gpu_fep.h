@@ -71,7 +71,7 @@ typedef struct {
 /* Fix A+D: the pass instances are three disjoint pools, each with its own streams, graph executables, FEP staging slot, demod and LDPC context (all indexed by the
  * instance), so a submission of one pool can never wait for an instance or a stream of another: real DL grants [0, DL), real UL grants [DL, DL + UL), probes (DL layout
  * probes, UL probes) the last NR_GPU_PASS_PROBE. See nr_gpu_pass_graph.cu. */
-#define NR_GPU_PASS_DL 3
+#define NR_GPU_PASS_DL 4
 #define NR_GPU_PASS_UL 2
 #define NR_GPU_PASS_PROBE 1
 #define NR_GPU_PASS_RING (NR_GPU_PASS_DL + NR_GPU_PASS_UL + NR_GPU_PASS_PROBE)

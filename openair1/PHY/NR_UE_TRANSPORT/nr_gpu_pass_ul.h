@@ -75,6 +75,7 @@ typedef struct {
   uint8_t *tb;                           /* receives the TB (>= (lenWithCrc(1, A) + 7) / 8 + 8 bytes); the decoder's harq b */
   int16_t *llr_out;                      /* [G]: the final LLRs of a TB that failed its CRC (the UCI search re-decodes them) */
   int llr_out_all;                       /* 1 = also on success (tests) */
+  int gate_on; float gate_thr_db;        /* Fix A+D: the in-graph no-chance gate (nr_snr_gate.h): required SNR - 5 dB; gate_on = 0 never skips */
   int want_est;                          /* 1 = the chest estimates go to out->est (the CFR / diagnostic consumers) */
   /* ---- test hooks: pilots / descrambling words of the caller instead of the Gold sequence */
   const int16_t *pil_override[NR_GPU_PASS_MAX_DMRS];

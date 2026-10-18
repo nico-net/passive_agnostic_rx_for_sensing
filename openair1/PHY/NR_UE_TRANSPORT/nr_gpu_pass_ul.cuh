@@ -42,6 +42,7 @@ struct UlBlk {
   int nre[NS], est_sym[NS], is_dmrs[NS];
   uint32_t llr_off[NS];
   int start_re;
+  int gate_on; float gate_thr_db; /* Fix A+D: the no-chance gate (k_gate_ul) */
   const short2 *rx[4];  /* rxdataF row of symbol 0 of the slot per antenna */
   const short2 *est;    /* [antenna][14][N] */
   short2 *comp, *mag, *magb, *magc; /* [14][ext] */

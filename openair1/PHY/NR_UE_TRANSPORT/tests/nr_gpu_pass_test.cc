@@ -1796,9 +1796,9 @@ TEST(GpuGraphCover, ProbeEqualsStagePath) {
 }
 /* v2 Task 2 review: a probe never takes the last free instance (ISAC_PDSCH_GPU_GRAPH_PROBE_RESERVE, default 1): with one instance free a probe is refused and counted
  * probe_busy (o[15]), not busy (o[3]); a real grant still gets it. */
-/* Fix A+D pools: DL real grants, UL real grants and probes own disjoint instances. (a) a probe runs on the probe pool while every DL instance is busy; (b) a real grant that finds the
- * DL pool full WAITS for a release (it does not fall back to the old path); (c) a probe is refused while a real grant waits (it never competes with real work); (d) a pool that stays
- * full for the bounded wait gives the old path, counted as busy, and the probe pool stays untouched by it. */
+/* Fix A+D pools: DL real grants, UL real grants and probes own disjoint instances. (a) a probe runs on the probe instance while the DL pool has two free instances; (b) with the DL pool
+ * full a real grant takes the overflow (probe) instance AT ONCE (no wait, no old path); (c) a probe is refused when fewer than two DL instances are free; (d) with the DL pool full and
+ * a probe still running, the grant waits for that probe only (bounded, 400 us) and decodes when it ends; if the probe outlasts the wait the old path takes it, counted busy. */
 TEST(GpuGraphCover, PoolsAreDisjointAndProbesYield) {
   if (!have_gpu()) GTEST_SKIP();
   pass_model();
@@ -1806,7 +1806,7 @@ TEST(GpuGraphCover, PoolsAreDisjointAndProbesYield) {
   GpuPassModule &m = GpuPassModule::get(&ok, &lib);
   if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
   ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_hold);
-  constexpr unsigned dl_mask = (1u << NR_GPU_PASS_DL) - 1u;
+  constexpr unsigned dl_mask = (1u << NR_GPU_PASS_DL) - 1u, probe_bit = ((1u << NR_GPU_PASS_PROBE) - 1u) << (NR_GPU_PASS_DL + NR_GPU_PASS_UL);
   const auto shape = GpuPassFixture::warm_shapes()[0];
   GpuPassFixture fx = GpuPassFixture::from_shape(shape, 23);
   ASSERT_TRUE(fx.tb_ok_built);
@@ -1814,38 +1814,42 @@ TEST(GpuGraphCover, PoolsAreDisjointAndProbesYield) {
   px.make_probe();
   nr_gpu_pass_shape_t w = px.job->shape;
   ASSERT_EQ(0, m.pass_warm(&w, shape.nl >= 2 ? 3 : 0, 0, 0));
-  std::vector<uint8_t> gb(fx.tb.A / 8 + 64), gb2(fx.tb.A / 8 + 64);
-  nr_gpu_pass_result_t g{}, g2{};
+  std::vector<uint8_t> gb(fx.tb.A / 8 + 64);
+  nr_gpu_pass_result_t g{};
   g.tb = gb.data();
-  g2.tb = gb2.data();
   uint64_t o0[16], o1[16];
-  m.pass_hold(dl_mask, 1);
+  m.pass_hold(dl_mask & 3u, 1); // two DL instances busy, two free
   px.bind();
-  EXPECT_EQ(0, m.pass_try(px.job, &g)) << "(a) the probe pool is its own: a full DL pool does not stop it";
-  // (b) a real grant waits for a release of the DL pool
-  fx.bind();
-  std::thread rel([&] { std::this_thread::sleep_for(std::chrono::microseconds(800)); m.pass_hold(1u, 0); });
-  m.pass_counters(o0);
-  EXPECT_EQ(0, m.pass_try(fx.job, &g)) << "(b) the real grant fell back instead of waiting for a DL instance";
-  rel.join();
-  m.pass_counters(o1);
-  EXPECT_EQ(o0[3], o1[3]) << "(b) no busy fallback";
-  m.pass_hold(1u, 1);
-  // (c) while a real grant waits, a probe is refused
-  std::atomic<int> rrc{-1};
-  std::thread real([&] { rrc = m.pass_try(fx.job, &g2); });
-  std::this_thread::sleep_for(std::chrono::microseconds(800));
+  EXPECT_EQ(0, m.pass_try(px.job, &g)) << "(a) the probe was refused with two DL instances free";
+  m.pass_hold(dl_mask & 3u, 0);
+  m.pass_hold(dl_mask & 7u, 1); // one free
   m.pass_counters(o0);
   px.bind();
-  EXPECT_EQ(1, m.pass_try(px.job, &g)) << "(c) a probe ran while a real grant waited";
+  EXPECT_EQ(1, m.pass_try(px.job, &g)) << "(c) a probe ran with one DL instance free";
   m.pass_counters(o1);
   EXPECT_EQ(o0[15] + 1, o1[15]) << "probe_busy";
-  real.join();
-  // (d) the pool stayed full for the whole bounded wait: busy, counted
-  EXPECT_EQ(1, rrc.load()) << "(d) bounded wait ended with the old path";
-  m.pass_hold(dl_mask, 0);
-  px.bind();
-  EXPECT_EQ(0, m.pass_try(px.job, &g)) << "with every instance free a probe runs";
+  m.pass_hold(dl_mask & 7u, 0);
+  m.pass_hold(dl_mask, 1);
+  fx.bind();
+  m.pass_counters(o0);
+  const auto t0 = std::chrono::steady_clock::now();
+  EXPECT_EQ(0, m.pass_try(fx.job, &g)) << "(b) the real grant did not take the overflow instance";
+  const double dt = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+  m.pass_counters(o1);
+  EXPECT_EQ(o0[3], o1[3]) << "(b) no busy fallback";
+  EXPECT_EQ(NR_GPU_PASS_DL + NR_GPU_PASS_UL, (int)g.instance) << "(b) ran on the probe-pool instance";
+  printf("GpuGraphCover.Pools: overflow grant wall %.0f us\n", dt);
+  // (d) the probe instance is busy with a (simulated) running probe
+  m.pass_hold(probe_bit, 1);
+  std::thread rel([&] { std::this_thread::sleep_for(std::chrono::microseconds(100)); m.pass_hold(probe_bit, 0); });
+  EXPECT_EQ(0, m.pass_try(fx.job, &g)) << "(d) the grant did not wait for the running probe";
+  rel.join();
+  m.pass_hold(probe_bit, 1);
+  m.pass_counters(o0);
+  EXPECT_EQ(1, m.pass_try(fx.job, &g)) << "(d) a probe that outlasts the bounded wait sends the grant to the old path";
+  m.pass_counters(o1);
+  EXPECT_EQ(o0[3] + 1, o1[3]) << "(d) counted busy";
+  m.pass_hold(dl_mask | probe_bit, 0);
 }
 /* a slot-share grant: the estimate covers the group's union above the grant (share_chest_band), the demod reads the grant's REs; equal to the stage path's
  * share body (TB, seg_ok, final LLRs, nvar, LLR statistics), alone and as a probe. */
@@ -2158,8 +2162,8 @@ TEST(GpuGraphSplit, WarmSetFitsBudget) {
   printf("GpuGraphSplit.WarmSetFitsBudget: %d classes covered (%d refused) in %.0f ms: %s\n", made, refused, ms, p);
   EXPECT_GT(made, 1000) << "the product of the class set is covered by the sum of the sub-graphs";
   EXPECT_EQ(0u, capped) << "the warm set hit the memory cap";
-  EXPECT_LE(mb, 1024u);
-  EXPECT_EQ(ex, 4 * (C + D + L));
+  EXPECT_LE(mb, 1536u);
+  EXPECT_EQ(ex, (NR_GPU_PASS_DL + NR_GPU_PASS_PROBE) * (C + D + L));
   EXPECT_LE(C + D + L, 600u);
 }
 
@@ -2609,6 +2613,8 @@ TEST(GpuPassBench, DlSubmissionBreakdown) {
     std::vector<uint8_t> tb(fx.tb.A / 8 + 64);
     nr_gpu_pass_result_t r{};
     r.tb = tb.data();
+    nr_gpu_pass_shape_t ws = fx.job->shape;
+    ASSERT_EQ(0, m.pass_warm(&ws, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm));
     ASSERT_EQ(0, m.pass_try(fx.job, &r));
     char what[64];
     snprintf(what, sizeof(what), "DL C=%d nrb %d nl %d qm %d", kv.first, kv.second.nrb_class, kv.second.nl, kv.second.qm);
@@ -2621,7 +2627,7 @@ TEST(GpuPassBench, DlSubmissionBreakdown) {
       ASSERT_EQ(0, fx.run_stage_path(&s));
       st.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
     }
-    for (int mode : {-600, 0, 150}) {
+    for (int mode : {-600, 0, 60}) {
       m.set_spin(mode);
       fixad::Lat l;
       for (int i = 0; i < 20; i++) m.pass_try(fx.job, &r);
@@ -2629,9 +2635,9 @@ TEST(GpuPassBench, DlSubmissionBreakdown) {
         ASSERT_EQ(0, m.pass_try(fx.job, &r));
         l.add(r);
       }
-      fixad::line(what, mode < 0 ? "poll+nap(old)" : mode == 0 ? "blocking" : "spin150+blk", l, mode == 150 ? fixad::q(st, 0.5) : -1);
+      fixad::line(what, mode < 0 ? "poll+nap(old)" : mode == 0 ? "blocking" : "sleep+spin60", l, mode == 60 ? fixad::q(st, 0.5) : -1);
     }
-    m.set_spin(150);
+    m.set_spin(60);
   }
 }
 
@@ -2673,7 +2679,7 @@ TEST(GpuPassBench, UlSubmissionBreakdown) {
       ASSERT_TRUE(ref.ok);
       st.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
     }
-    for (int mode : {-600, 0, 150}) {
+    for (int mode : {-600, 0, 60}) {
       m.set_spin(mode);
       fixad::Lat l;
       for (int i = 0; i < 20; i++) nr_gpu_pass_ul_run(&sl.in, &sl.out);
@@ -2681,9 +2687,9 @@ TEST(GpuPassBench, UlSubmissionBreakdown) {
         ASSERT_EQ(0, nr_gpu_pass_ul_run(&sl.in, &sl.out));
         l.add(sl.out.r);
       }
-      fixad::line(what, mode < 0 ? "poll+nap(old)" : mode == 0 ? "blocking" : "spin150+blk", l, mode == 150 ? fixad::q(st, 0.5) : -1);
+      fixad::line(what, mode < 0 ? "poll+nap(old)" : mode == 0 ? "blocking" : "sleep+spin60", l, mode == 60 ? fixad::q(st, 0.5) : -1);
     }
-    m.set_spin(150);
+    m.set_spin(60);
   }
 }
 
@@ -2697,7 +2703,7 @@ TEST(GpuPassBench, DlUlInterference) {
   GpuPassModule &m = GpuPassModule::get(&ok, &lib);
   if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
   ASSERT_TRUE(ok && ul_ready(m) && m.set_spin);
-  m.set_spin(150);
+  m.set_spin(60);
   const nr_gpu_pass_shape_t dsh = {96, 13, 2, 4, 2, 8, 1};
   GpuPassFixture dl = GpuPassFixture::from_shape(dsh, 11);
   ASSERT_TRUE(dl.tb_ok_built);
@@ -2780,6 +2786,141 @@ TEST(GpuPassBench, DlUlInterference) {
   EXPECT_LT(b, a + std::max(25.0, 0.25 * a)) << "DL submit->GPU start p50 alone " << a << " us, loaded " << b << " us";
   const double c = fixad::q(ul_alone.gstart, 0.5), d = fixad::q(ul_loaded.gstart, 0.5);
   EXPECT_LT(d, c + std::max(25.0, 0.25 * c)) << "UL submit->GPU start p50 alone " << c << " us, loaded " << d << " us";
+}
+
+/* ===================================================== Fix A+D: the no-chance gate inside the submission (nr_snr_gate.h) ===================================================== */
+#include "nr_snr_gate.h"
+#include "nr_pdsch_dmrs_snr.h"
+/* DL: the graph's own DM-RS comb SNR (r.gate_db) against required(mcs, tbl) - 5 dB. A grant more than 5 dB below skips (demod / LDPC / CRC nodes do not run, tb_ok = 0, skip = 1);
+ * every other grant is decoded and equals the ungated pass (TB bytes, CRC verdict, segment verdicts, nvar). The sweep over the SNR of the slot and over every MCS of tables 0 and 1
+ * gives skipped and decoded grants on the same slot, i.e. grants at req - 6 dB (skipped) and req - 4 dB (decoded). */
+TEST(GpuPassGate, DlSkipsNoChanceAndKeepsTheRest) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  m.pass_split(1);
+  int n_skip = 0, n_run = 0, n_near4 = 0, n_near6 = 0;
+  static const nr_gpu_pass_shape_t shapes[] = {{48, 13, 2, 4, 2, 4, 1}, {96, 13, 1, 6, 2, 8, 1}, {24, 13, 4, 2, 2, 1, 1}};
+  for (const auto &sh : shapes)
+    for (double noise : {25.0, 10.0, 3.0, -3.0}) {
+      GpuPassFixture::noise_db = noise;
+      GpuPassFixture fx = GpuPassFixture::from_shape(sh, 11);
+      GpuPassFixture::noise_db = 20.0;
+      if (!fx.tb_ok_built) continue;
+      fx.bind();
+      nr_gpu_pass_shape_t w = fx.job->shape;
+      ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm));
+      std::vector<uint8_t> ub(fx.tb.A / 8 + 64, 0), gbuf(fx.tb.A / 8 + 64, 0);
+      nr_gpu_pass_result_t u{}, g{};
+      u.tb = ub.data();
+      g.tb = gbuf.data();
+      fx.job->gate_on = 0;
+      std::vector<int16_t> brfo((size_t)4 * 2 * 4096 * 2);
+      u.brfo_rows = brfo.data();
+      ASSERT_EQ(0, m.pass_try(fx.job, &u));
+      ASSERT_FALSE(u.skip);
+      const double db = u.gate_db;
+      if (sh.nl == 1) { // the host function of the EVMGRANT dmrs_snr field (nr_pdsch_dmrs_snr.h) on the same estimate rows and residual noise
+        const int16_t *rows[4] = {};
+        for (int a = 0; a < 4; a++) rows[a] = brfo.data() + ((size_t)a * 2 + 1) * 4096 * 2;
+        nr_dmrs_snr_t ref;
+        nr_dmrs_snr_init(&ref);
+        nr_dmrs_snr_fill(&ref, rows, 4, 12 * fx.job->nrb, u.nvar_ant, fx.job->dmrs_type, 1.0);
+        EXPECT_NEAR(ref.comb_db, db, 0.05) << "device DM-RS SNR vs the host function, nrb " << sh.nrb_class << " noise " << noise;
+      }
+      u.brfo_rows = nullptr;
+      for (int tbl : {0, 1})
+        for (int mcs = 0; mcs < 28; mcs++) {
+          const double rq = nr_required_snr_db(mcs, tbl);
+          if (!std::isfinite(rq)) continue;
+          fx.job->gate_on = 1;
+          fx.job->gate_thr_db = (float)(rq - NR_SNR_GATE_MARGIN_DB);
+          memset(gbuf.data(), 0xEE, gbuf.size());
+          g = {};
+          g.tb = gbuf.data();
+          ASSERT_EQ(0, m.pass_try(fx.job, &g));
+          const bool want = nr_snr_no_chance(db, mcs, tbl);
+          EXPECT_EQ(want, g.skip != 0) << "snr " << db << " req " << rq << " mcs " << mcs << " tbl " << tbl;
+          EXPECT_FLOAT_EQ((float)db, g.gate_db);
+          if (db - rq < -4.0 && db - rq > -5.0) n_near4++;
+          if (db - rq < -5.0 && db - rq > -7.0) n_near6++;
+          if (g.skip) {
+            n_skip++;
+            EXPECT_EQ(0, g.tb_ok);
+            EXPECT_EQ(0, g.need_cpu);
+          } else {
+            n_run++;
+            EXPECT_EQ(u.tb_ok, g.tb_ok) << "the CRC verdict of a non-gated grant changed";
+            EXPECT_EQ(0, memcmp(u.seg_ok, g.seg_ok, sizeof(u.seg_ok)));
+            EXPECT_EQ(u.nvar, g.nvar);
+            if (u.tb_ok) EXPECT_EQ(0, memcmp(ub.data(), gbuf.data(), fx.tb.A / 8));
+          }
+        }
+    }
+  m.pass_split(0);
+  printf("GpuPassGate.Dl: %d skipped, %d decoded as ungated (%d grants within req-5..req-4, %d within req-7..req-5 dB)\n", n_skip, n_run, n_near4, n_near6);
+  EXPECT_GT(n_skip, 0);
+  EXPECT_GT(n_run, 0);
+  EXPECT_GT(n_near4, 0) << "no grant at about req - 4 dB in the sweep";
+  EXPECT_GT(n_near6, 0) << "no grant at about req - 6 dB in the sweep";
+}
+
+/* UL: the same on the PUSCH graph (the UL DM-RS SNR UL_PUSCH_CRC reports): skipped grants have tb_ok 0 and skip 1; the others equal the ungated pass; gate_db is the host's
+ * nr_ulsch_dmrs_snr_db of the same slot within single-precision rounding. */
+TEST(GpuPassGate, UlSkipsNoChanceAndKeepsTheRest) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && ul_ready(m));
+  int n_skip = 0, n_run = 0;
+  for (int nrb : {24, 106})
+    for (double noise : {25.0, 8.0, 0.0, -6.0}) {
+      GpuPassFixture::noise_db = noise;
+      GpuPassFixture::first_sym = 1;
+      const nr_gpu_pass_shape_t sh = {(uint16_t)nrb, 13, 1, 4, 2, 1, 1};
+      GpuPassFixture fx = GpuPassFixture::from_shape(sh, 3);
+      GpuPassFixture::noise_db = 20.0;
+      if (!fx.tb_ok_built) continue;
+      ul_warm_class(m, nrb, 2, fx.tb.C);
+      ASSERT_FALSE(HasFatalFailure());
+      UlSlot sl;
+      sl.build(fx, 0, -1, 0, 0);
+      sl.in.gate_on = 0;
+      ASSERT_EQ(0, nr_gpu_pass_ul_run(&sl.in, &sl.out));
+      const nr_gpu_pass_result_t u = sl.out.r;
+      const std::vector<uint8_t> utb = sl.tb;
+      const double host_db = sl.out.dmrs_snr_db;
+      if (std::isfinite(host_db)) EXPECT_NEAR(host_db, u.gate_db, 0.05) << "device vs host UL DM-RS SNR";
+      for (int tbl : {0, 1})
+        for (int mcs = 0; mcs < 28; mcs++) {
+          const double rq = nr_required_snr_db(mcs, tbl);
+          if (!std::isfinite(rq)) continue;
+          sl.build(fx, 0, -1, 0, 0);
+          sl.in.gate_on = 1;
+          sl.in.gate_thr_db = (float)(rq - NR_SNR_GATE_MARGIN_DB);
+          ASSERT_EQ(0, nr_gpu_pass_ul_run(&sl.in, &sl.out));
+          const nr_gpu_pass_result_t &g = sl.out.r;
+          const bool want = nr_snr_no_chance(u.gate_db, mcs, tbl);
+          EXPECT_EQ(want, g.skip != 0) << "snr " << u.gate_db << " req " << rq;
+          if (g.skip) {
+            n_skip++;
+            EXPECT_EQ(0, g.tb_ok);
+          } else {
+            n_run++;
+            EXPECT_EQ(u.tb_ok, g.tb_ok);
+            EXPECT_EQ(0, memcmp(u.seg_ok, g.seg_ok, sizeof(u.seg_ok)));
+            if (u.tb_ok) EXPECT_EQ(0, memcmp(utb.data(), sl.tb.data(), fx.tb.A / 8));
+          }
+        }
+    }
+  printf("GpuPassGate.Ul: %d skipped, %d decoded as ungated\n", n_skip, n_run);
+  EXPECT_GT(n_skip, 0);
+  EXPECT_GT(n_run, 0);
 }
 
 /* last: tripping the gate switches the pass off process-wide */
