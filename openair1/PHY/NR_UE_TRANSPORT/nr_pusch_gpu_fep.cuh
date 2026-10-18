@@ -14,6 +14,13 @@
  *   - duty cap: at most ISAC_UL_GPU_FEP_PCT (default 30) percent of every 100 ms window may be spent in UL launches; over
  *     the cap, or all contexts busy, the call returns an error and the caller runs the CPU FEP (counted);
  *   - no spin: the wait polls cudaStreamQuery, spins 60 us, then nanosleeps 25 us per poll;
+ *   - ULST ISAC_UL_GPU_FEP_DEADLINE=1 (default off): the kernel writes per-context staging rows, copied to the caller's rows on
+ *     success; a call not done within one slot (the deadline) is abandoned (context reserved until its stream drains,
+ *     nothing of the caller's is touched) and the caller runs the CPU FEP. While an abandoned call is still on the GPU every
+ *     call goes to the CPU (hysteresis: the GPU is retried as soon as the starved kernel has drained, no hold constant);
+ *   - ULST ISAC_UL_GPU_FEP_KCHARGE=1 (default off): the duty cap is charged with the kernel's own span (first block start
+ *     to last block end, %globaltimer), not the wall time that includes waiting behind DL kernels (VL2: one starved 26 ms
+ *     call tripped the 30 % cap and sent UL to the CPU for the rest of the window);
  *   - everything (tables, streams, item tables, first launch) is created in warm-up, before the RX allocation fence. */
 #include <unistd.h>
 #include <time.h>
@@ -59,11 +66,24 @@ __device__ __forceinline__ void ul_fep_blk(const Item &it, int ant, const uint16
   }
 }
 
+__device__ __forceinline__ unsigned long long ul_gtimer()
+{
+  unsigned long long t;
+  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+  return t;
+}
+/* span (ULST KCHARGE, may be null): {start, end} ns of every block at [2 * (y * gridDim.x + x)] */
 __global__ void __launch_bounds__(nr_exact::THREADS) k_ul_fep(const Item *__restrict__ items, const uint16_t *__restrict__ perm,
                                                               const short *__restrict__ tw1024, const short *__restrict__ tw4096,
-                                                              const short2 *__restrict__ ts, int nb_rb, int fco)
+                                                              const short2 *__restrict__ ts, int nb_rb, int fco, unsigned long long *span)
 {
+  const int b = 2 * (blockIdx.y * gridDim.x + blockIdx.x);
+  if (span && threadIdx.x == 0) span[b] = ul_gtimer();
   ul_fep_blk(items[blockIdx.x], blockIdx.y, perm, tw1024, tw4096, ts, nb_rb, fco);
+  if (span) {
+    __syncthreads();
+    if (threadIdx.x == 0) span[b + 1] = ul_gtimer();
+  }
 }
 /* GPUPASS Task 7: the same block for the graph pass: the rotation geometry (nb_rb, fco) is read from device memory when the kernel runs, and an item with src[0] == null is skipped */
 __global__ void __launch_bounds__(nr_exact::THREADS) k_ul_fep_p(const Item *__restrict__ items, const int *__restrict__ par, const uint16_t *__restrict__ perm,
@@ -81,10 +101,15 @@ struct State {
   cudaStream_t st[NCTX] = {};
   cudaEvent_t ev0[NCTX] = {}, ev1[NCTX] = {}; /* ISAC_UL_STALL_DIAG only */
   Item *h_items[NCTX] = {}, *d_items[NCTX] = {};
-  std::atomic<unsigned> busy{0};
+  std::atomic<unsigned> busy{0}, lost{0};
+  bool dl_on = false, kc_on = false; /* ULST: deadline + staging rows, kernel-span duty charge */
+  uint64_t deadline_us = 500;
+  short2 *h_stage[NCTX] = {};                          /* MAX_ITEMS x 4 rows of N (deadline mode) */
+  unsigned long long *h_span[NCTX] = {}, *d_span[NCTX] = {}; /* MAX_ITEMS x 4 x {start, end} ns (kcharge) */
   unsigned pct = 20;
   std::atomic<uint64_t> win_start_us{0}, win_used_us{0};
-  std::atomic<uint64_t> calls{0}, items{0}, gpu_us{0}, max_us{0}, n_busy{0}, n_budget{0}, n_rt{0}, n_late{0}, n_err{0};
+  std::atomic<uint64_t> calls{0}, items{0}, gpu_us{0}, max_us{0}, n_busy{0}, n_budget{0}, n_rt{0}, n_late{0}, n_err{0}, n_deadline{0}, n_hold{0},
+      n_reclaimed{0};
 };
 static State U;
 
@@ -106,7 +131,12 @@ static uint64_t now_us()
   } while (0)
 
 /* Warm-up (before the RX allocation fence). 0 = ready, -1 = unavailable (callers keep the CPU FEP). */
-static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct)
+static bool env_on(const char *k)
+{
+  const char *e = getenv(k);
+  return e && atoi(e) == 1;
+}
+static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int slot_us)
 {
   using namespace ulfep;
   if (U.ok) return U.nant == nant ? 0 : -1;
@@ -119,6 +149,9 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct)
   }
   U.nant = nant;
   U.pct = pct > 0 && pct <= 100 ? (unsigned)pct : 20u;
+  U.dl_on = env_on("ISAC_UL_GPU_FEP_DEADLINE");
+  U.kc_on = env_on("ISAC_UL_GPU_FEP_KCHARGE");
+  U.deadline_us = slot_us > 0 ? (uint64_t)slot_us : 500u; /* one slot: a later FEP no longer keeps up with one grant per slot */
   UCK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&U.d_perm, N * sizeof(uint16_t)));
   UCK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&U.d_tw1024, 3 * 512 * sizeof(short)));
   UCK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&U.d_tw4096, 3 * 2048 * sizeof(short)));
@@ -156,38 +189,79 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct)
     memset(U.h_items[c], 0, MAX_ITEMS * sizeof(Item));
     U.d_items[c] = (Item *)nr_gpu_device_ptr(U.h_items[c]);
     if (!U.d_items[c]) return -1;
+    if (U.dl_on) { /* written here, so the kernel never first-touches an unwritten page */
+      UCK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&U.h_stage[c], (size_t)MAX_ITEMS * 4 * row));
+      memset(U.h_stage[c], 0, (size_t)MAX_ITEMS * 4 * row);
+    }
+    if (U.kc_on) {
+      UCK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&U.h_span[c], MAX_ITEMS * 4 * 2 * sizeof(unsigned long long)));
+      memset(U.h_span[c], 0, MAX_ITEMS * 4 * 2 * sizeof(unsigned long long));
+      U.d_span[c] = (unsigned long long *)nr_gpu_device_ptr(U.h_span[c]);
+      if (!U.d_span[c]) return -1;
+    }
     Item &it = U.h_items[c][0];
-    for (int a = 0; a < 4; a++) { it.src[a] = buf; it.dst[a] = buf + N; }
+    for (int a = 0; a < 4; a++) { it.src[a] = buf; it.dst[a] = U.dl_on ? U.h_stage[c] + (size_t)a * N : buf + N; }
     it.rotate = 1;
-    k_ul_fep<<<dim3(1, nant), nr_exact::THREADS, 0, U.st[c]>>>(U.d_items[c], U.d_perm, U.d_tw1024, U.d_tw4096, U.d_ts, 106, N - 636);
+    k_ul_fep<<<dim3(1, nant), nr_exact::THREADS, 0, U.st[c]>>>(U.d_items[c], U.d_perm, U.d_tw1024, U.d_tw4096, U.d_ts, 106, N - 636, U.d_span[c]);
     UCK(cudaPeekAtLastError());
     UCK((cudaError_t)nr_gpu_sync(U.st[c]));
   }
   free(buf);
   U.ok = true;
-  fprintf(stderr, "SENSING: UL_GPU_FEP ready: %d RX, N=%d, %s stream, cap %u%% of each 100 ms\n", nant, N,
-          U.kind == 2 ? "real-time-partition" : U.part ? "discovery-partition" : "lowest-priority", U.pct);
+  fprintf(stderr, "SENSING: UL_GPU_FEP ready: %d RX, N=%d, %s stream, cap %u%% of each 100 ms, deadline %s %lu us, charge %s\n", nant, N,
+          U.kind == 2 ? "real-time-partition" : U.part ? "discovery-partition" : "lowest-priority", U.pct, U.dl_on ? "on" : "off",
+          (unsigned long)U.deadline_us, U.kc_on ? "kernel-span" : "wall");
   return 0;
 }
 
 /* The PDSCH init of this module seals its allocation fence (nr_dl_gpu_sealed) when it finishes; the UL front end is
  * created later (UL monitor start-up), still before the platform-wide RX seal (nr_gpu_allocation_guard), so it lifts the
  * module fence for the duration of its own init only. */
-extern "C" int nr_pusch_gpu_fep_init(int nant, int N, int ncp, int offset_div, int pct)
+extern "C" int nr_pusch_gpu_fep_init(int nant, int N, int ncp, int offset_div, int pct, int slot_us)
 {
   const bool was = nr_dl_gpu_sealed;
   nr_dl_gpu_sealed = false;
-  const int rc = ul_init_impl(nant, N, ncp, offset_div, pct);
+  const int rc = ul_init_impl(nant, N, ncp, offset_div, pct, slot_us);
   nr_dl_gpu_sealed = was;
   return rc;
 }
 
-/* One batch (<= MAX_ITEMS items x nant antennas). 0 = rows written; -1 all contexts busy; -2 over the duty cap / RT in
- * flight; -3 module off or CUDA error. On non-zero nothing was written and the caller runs the CPU FEP. */
+namespace ulfep {
+/* ULST KCHARGE: kernel span of the last launch on context c (n items x nant blocks), us; 0 = not measurable */
+static uint64_t span_us(int c, int nblk)
+{
+  unsigned long long lo = ~0ull, hi = 0;
+  for (int b = 0; b < nblk; b++) {
+    lo = std::min(lo, U.h_span[c][2 * b]);
+    hi = std::max(hi, U.h_span[c][2 * b + 1]);
+  }
+  return hi > lo ? (hi - lo) / 1000 : 0;
+}
+static int g_lost_nblk[NCTX]; /* blocks of the abandoned launch, charged at reclaim */
+/* ULST DEADLINE: give back every abandoned context whose stream has drained; true = none is still on the GPU */
+static bool reclaim_lost()
+{
+  for (int i = 0; i < NCTX; i++) {
+    const unsigned bit = 1u << i;
+    if (!(U.lost.load() & bit) || cudaStreamQuery(U.st[i]) == cudaErrorNotReady) continue;
+    if (!(U.lost.fetch_and(~bit) & bit)) continue; /* another consumer reclaimed it */
+    cudaGetLastError();
+    if (U.kc_on) U.win_used_us += span_us(i, g_lost_nblk[i]);
+    ++U.n_reclaimed;
+    U.busy.fetch_and(~bit);
+  }
+  return U.lost.load() == 0;
+}
+}  // namespace ulfep
+
+/* One batch (<= MAX_ITEMS items x nant antennas). 0 = rows written; -1 all contexts busy (or, DEADLINE, an abandoned call
+ * still on the GPU); -2 over the duty cap / RT in flight; -3 module off or CUDA error; -4 deadline (abandoned). On non-zero
+ * nothing was written and the caller runs the CPU FEP. */
 extern "C" int nr_pusch_gpu_fep_run(const void *items, int n, int nb_rb, int fco)
 {
   using namespace ulfep;
   if (!U.ok || n < 1 || n > MAX_ITEMS || nb_rb < 1 || nb_rb > 275 || fco < 0 || fco >= nr_exact::N) return -3;
+  if (U.dl_on && !reclaim_lost()) { ++U.n_hold; return -1; }
   int c = -1;
   for (int i = 0; i < NCTX && c < 0; i++)
     if (!(U.busy.fetch_or(1u << i) >> i & 1u)) c = i;
@@ -208,8 +282,13 @@ extern "C" int nr_pusch_gpu_fep_run(const void *items, int n, int nb_rb, int fco
   const bool dg = uldiag::on();
   const uldiag::Snap r0 = dg ? uldiag::snap() : uldiag::Snap();
   memcpy(U.h_items[c], items, (size_t)n * sizeof(Item));
+  const size_t N = nr_exact::N;
+  if (U.dl_on) /* the kernel writes only this context's staging rows, so an abandoned launch never touches the caller's */
+    for (int i = 0; i < n; i++)
+      for (int a = 0; a < U.nant; a++) U.h_items[c][i].dst[a] = U.h_stage[c] + ((size_t)i * 4 + a) * N;
   if (dg) cudaEventRecord(U.ev0[c], U.st[c]);
-  k_ul_fep<<<dim3(n, U.nant), nr_exact::THREADS, 0, U.st[c]>>>(U.d_items[c], U.d_perm, U.d_tw1024, U.d_tw4096, U.d_ts, nb_rb, fco);
+  k_ul_fep<<<dim3(n, U.nant), nr_exact::THREADS, 0, U.st[c]>>>(U.d_items[c], U.d_perm, U.d_tw1024, U.d_tw4096, U.d_ts, nb_rb, fco,
+                                                                U.d_span[c]);
   cudaError_t e = cudaPeekAtLastError();
   if (dg) cudaEventRecord(U.ev1[c], U.st[c]);
   const uint64_t t_launched = now_us();
@@ -217,7 +296,16 @@ extern "C" int nr_pusch_gpu_fep_run(const void *items, int n, int nb_rb, int fco
     e = cudaStreamQuery(U.st[c]);
     if (e == cudaErrorNotReady) {
       e = cudaSuccess;
-      if (now_us() - t0 > 60) {
+      const uint64_t el = now_us() - t0;
+      if (U.dl_on && el > U.deadline_us) { /* abandoned: the context stays reserved (lost) until its stream drains */
+        g_lost_nblk[c] = n * U.nant;
+        U.lost.fetch_or(1u << c);
+        ++U.n_deadline;
+        if (!U.kc_on) U.win_used_us += el; /* kcharge: the span is charged at reclaim */
+        if (dg) uldiag::report("fep-deadline", el, t_launched - t0, 0.0, n, r0, uldiag::snap());
+        return -4;
+      }
+      if (el > 60) {
         const struct timespec ts = {0, 25000};
         nanosleep(&ts, NULL);
       }
@@ -230,29 +318,35 @@ extern "C" int nr_pusch_gpu_fep_run(const void *items, int n, int nb_rb, int fco
     if (cudaEventElapsedTime(&ms, U.ev0[c], U.ev1[c]) != cudaSuccess) ms = 0.f;
     uldiag::report("fep", dt, t_launched - t0, 1000.0 * ms, n, r0, uldiag::snap());
   }
-  U.busy.fetch_and(~(1u << c));
   if (e != cudaSuccess) {
+    U.busy.fetch_and(~(1u << c));
     U.ok = false; /* the caller's CPU FEP takes over for good */
     ++U.n_err;
     fprintf(stderr, "nr_pusch_gpu_fep: %s -- UL GPU FEP off\n", cudaGetErrorString(e));
     return -3;
   }
+  if (U.dl_on)
+    for (int i = 0; i < n; i++)
+      for (int a = 0; a < U.nant; a++)
+        memcpy(((const Item *)items)[i].dst[a], U.h_stage[c] + ((size_t)i * 4 + a) * N, N * sizeof(short2));
+  const uint64_t ks = U.kc_on ? span_us(c, n * U.nant) : 0;
+  U.busy.fetch_and(~(1u << c));
   ++U.calls;
   U.items += (uint64_t)n;
   U.gpu_us += dt;
-  U.win_used_us += dt;
+  U.win_used_us += ks ? ks : dt;
   if (dt > 2000) ++U.n_late;
   uint64_t m = U.max_us.load();
   while (dt > m && !U.max_us.compare_exchange_weak(m, dt)) {}
   return 0;
 }
 
-/* calls, items, gpu_us, max_us, busy, over_cap, rt_defer, late(>2 ms), errors, partitioned */
+/* calls, items, gpu_us, max_us, busy, over_cap, rt_defer, late(>2 ms), errors, partitioned, deadline, hold, reclaimed */
 extern "C" void nr_pusch_gpu_fep_stats(uint64_t *o)
 {
   using namespace ulfep;
   o[0] = U.calls; o[1] = U.items; o[2] = U.gpu_us; o[3] = U.max_us; o[4] = U.n_busy; o[5] = U.n_budget; o[6] = U.n_rt;
-  o[7] = U.n_late; o[8] = U.n_err; o[9] = U.part;
+  o[7] = U.n_late; o[8] = U.n_err; o[9] = U.part; o[10] = U.n_deadline; o[11] = U.n_hold; o[12] = U.n_reclaimed;
 }
 
 /* GPUPASS Task 7: launch-only FEP of the PUSCH pass (graph-capturable). items_dev: 14 ulfep::Item (nr_pusch_gpu_fep_item_t) readable by the kernel, par_dev: {nb_rb, fco}
