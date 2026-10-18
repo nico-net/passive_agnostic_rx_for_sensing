@@ -173,6 +173,8 @@ static void *worker(void *arg)
 {
   (void)arg;
   if (g_nice) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
+  extern void nr_pdsch_recovery_thread_prewarm(void) __attribute__((weak)); /* nr_pdsch_passive_queue.c */
+  if (nr_pdsch_recovery_thread_prewarm) nr_pdsch_recovery_thread_prewarm();
   pthread_mutex_lock(&g_mu);
   for (;;) {
     while (g_n == 0 && !g_stop) pthread_cond_wait(&g_cv, &g_mu);

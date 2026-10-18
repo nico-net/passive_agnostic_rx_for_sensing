@@ -7011,3 +7011,50 @@ TEST(ScanTail, ReadingIndexMatchesLinearSearch)
     }
   }
 }
+
+/* ISAC_DCI11_PARSE_CACHE: the precomputed-field-widths extraction must equal the plain one, result and verdict, on every layout shape. */
+TEST(DlAdaptive, ExtractPreMatchesPlainExtract)
+{
+  uint64_t rng = 0x9E3779B97F4A7C15ULL;
+  auto next = [&rng]() { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return rng; };
+  int compared = 0, accepted = 0;
+  for (uint16_t bwp : {24, 51, 106, 217, 273})
+    for (int fdra = NR_FDRA_TYPE1; fdra <= NR_FDRA_DYN_CFG2; fdra++)
+      for (int shape = 0; shape < 24; shape++) {
+        nr_pdcch_blind_extract_opts_t o{};
+        o.bwp_indicator_bits = shape % 3; o.vrb_to_prb_bits = (shape / 3) % 2; o.prb_bundling_bits = shape % 2;
+        o.tb2_bits = (shape / 2) % 2 ? 8 : 0; o.harq_pid_bits = 4; o.dai_bits = 2; o.pdsch_to_harq_bits = 3;
+        o.antenna_ports_bits = 4 + shape % 3; o.dmrs_config_type = shape % 3 == 1 && shape % 2; o.tci_bits = (shape / 4) % 2 ? 3 : 0;
+        o.srs_request_bits = 2; o.cbg_bits = 0; o.fdra_mode = (uint8_t)fdra; o.fdra_bwp_start = (shape % 5) * 3;
+        o.tda_count = 1 + shape % 16;
+        for (int k = 0; k < o.tda_count && k < 16; k++) { o.tda_start[k] = 1 + k % 3; o.tda_length[k] = 13 - k % 5; o.tda_mapping[k] = k % 2; }
+        o.dmrs_add_pos = shape % 4; o.dmrs_max_length = 1 + shape % 2;
+        nr_pdcch_blind_extract_pre_t pre;
+        nr_pdcch_blind_extract_pre(bwp, &o, &pre);
+        const uint16_t size = nr_pdcch_blind_dci_size_ex(bwp, &o);
+        ASSERT_EQ(pre.size, size);
+        for (int extra : {0, 3, -1})
+          for (int trial = 0; trial < 40; trial++) {
+            const int len = size + extra;
+            if (len < 1 || len > NR_DCI_MAX_PAYLOAD) continue;
+            nr_pdcch_blind_raw_result_t raw{};
+            raw.rnti = (uint16_t)(next() | 1);
+            raw.mismatched_bits = (uint16_t)(next() % 7);
+            for (int w = 0; w < NR_DCI_WORDS; w++) raw.payload.w[w] = next();
+            if (len % 64) raw.payload.w[(len - 1) / 64] &= (1ULL << (len % 64)) - 1;
+            for (int w = (len + 63) / 64; w < NR_DCI_WORDS; w++) raw.payload.w[w] = 0;
+            const uint8_t typeA = 2 + trial % 2;
+            nr_pdcch_blind_result_t a, b;
+            memset(&a, 0x5a, sizeof(a));
+            memset(&b, 0x5a, sizeof(b));
+            const bool ra = nr_pdcch_blind_extract_11(&raw, (uint16_t)len, bwp, typeA, &o, &a);
+            const bool rb = nr_pdcch_blind_extract_11_pre(&raw, (uint16_t)len, bwp, typeA, &o, &pre, &b);
+            ASSERT_EQ(ra, rb) << "bwp " << bwp << " fdra " << fdra << " shape " << shape << " len " << len;
+            ASSERT_EQ(0, memcmp(&a, &b, sizeof(a))) << "bwp " << bwp << " fdra " << fdra << " shape " << shape << " len " << len;
+            compared++;
+            accepted += ra;
+          }
+      }
+  EXPECT_GT(compared, 10000);
+  EXPECT_GT(accepted, 100); /* the comparison is not only over rejects */
+}

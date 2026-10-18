@@ -132,7 +132,7 @@ def parse_run(path, margin=2.0):
     return {'dl': summary(dl), 'ul': summary(ul)}
 
 def verdict(s):
-    ok = (s['tot_p99'] is not None and s['tot_p99'] <= 500, s['crc_q'] is not None and s['crc_q'] >= 80,
+    ok = (s['tot_p99'] is not None and s['tot_p99'] < 3000, s['crc_q'] is not None and s['crc_q'] >= 80,  # p99 < 3 ms (goal 2026-10-17)
           s['drops_pct'] is not None and s['drops_pct'] < 1)
     return 'PASS' if all(ok) else 'FAIL(' + ','.join(n for n, g in zip(('lat', 'crc', 'drops'), ok) if not g) + ')'
 

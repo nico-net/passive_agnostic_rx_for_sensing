@@ -430,6 +430,12 @@ static geo_tls_t *geo_tls(const NR_DL_FRAME_PARMS *fp, uint32_t est_size)
   }
   return &g;
 }
+/* nr_pdsch_gpu_demod_pin_prewarm: creates (and, under FATTAILS, pins) this thread's geometry buffers before its first grant.
+ *   Caller: nr_pdsch_passive_decode_pin_prewarm() with ISAC_PDSCH_PIN_PREWARM_ALL=1. */
+void nr_pdsch_gpu_demod_pin_prewarm(const NR_DL_FRAME_PARMS *fp)
+{
+  (void)geo_tls(fp, 0);
+}
 
 typedef struct {
   int16_t *llr;

@@ -1426,9 +1426,78 @@ static bool solver_hq_of(void *ctx, uint16_t layout, nr_dci_bits_t payload, uint
  *   Builds the extract options from the layout's field widths, checks the DCI length, then extracts the fields into *parsed.
  *   Callers: nr_pdcch_dci11_stage2_candidates() and the PDSCH solver planning path in run_occasion_one().
  */
+static bool dci11_layout_parse_full(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                                    const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed,
+                                    nr_pdcch_blind_extract_opts_t *o_out, nr_pdcch_blind_extract_pre_t *pre_out);
+/* ISAC_DCI11_PARSE_CACHE=1 (default off; 2 = self-check, see dci11_parse_cache_mode): per scan thread and layout, the payload-independent part of a parse (extract options,
+ * field widths, implied size) is kept and reused while its inputs (the layout, its TDA width, len, BWP size/start, configured TDA
+ * count) are unchanged; the payload part runs as before. Bit-exact: the same pure functions of the same inputs. It removes about
+ * a third of the per-DCI solver reading pass, which parses every live layout (~1400 on capture b) before the grant is enqueued. */
+typedef struct {
+  nr_dci11_layout_t hyp;
+  uint16_t len, bwp_size, bwp_start;
+  uint8_t tda_bits, tda_count, state; /* state: 0 empty, 1 rejected (no field bits / size != len), 2 parse */
+  nr_pdcch_blind_extract_opts_t o;
+  nr_pdcch_blind_extract_pre_t pre;
+} dci11_parse_memo_t;
+static int dci11_parse_cache_mode(void) /* 0 off, 1 on, 2 on + compare every cached parse with the full one (self-check) */
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_DCI11_PARSE_CACHE") ? atoi(getenv("ISAC_DCI11_PARSE_CACHE")) : 0;
+  return en;
+}
+static bool dci11_parse_cached(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                               const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed);
 static bool dci11_layout_parse(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
                                const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed)
 {
+  const int mode = dci11_parse_cache_mode();
+  if (mode != 2)
+    return mode ? dci11_parse_cached(r, i, raw, len, cfg, parsed) : dci11_layout_parse_full(r, i, raw, len, cfg, parsed, NULL, NULL);
+  nr_pdcch_blind_result_t ref = *parsed;
+  const bool ok_ref = dci11_layout_parse_full(r, i, raw, len, cfg, &ref, NULL, NULL);
+  const bool ok = dci11_parse_cached(r, i, raw, len, cfg, parsed);
+  static _Atomic uint64_t s_n, s_bad;
+  const bool bad = ok != ok_ref || memcmp(&ref, parsed, sizeof(ref)) != 0;
+  const uint64_t n = atomic_fetch_add_explicit(&s_n, 1, memory_order_relaxed) + 1;
+  const uint64_t nb = bad ? atomic_fetch_add_explicit(&s_bad, 1, memory_order_relaxed) + 1 : atomic_load_explicit(&s_bad, memory_order_relaxed);
+  if ((bad && nb <= 8) || (n % 2000000) == 0)
+    LOG_A(PHY, "SENSING: DCI11_PARSE_CACHE check parses=%llu mismatches=%llu%s\n", (unsigned long long)n, (unsigned long long)nb,
+          bad ? " (MISMATCH)" : "");
+  *parsed = ref; /* self-check mode decodes with the reference result */
+  return ok_ref;
+}
+static bool dci11_parse_cached(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                               const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed)
+{
+  if (i < 0 || i >= NR_DCI11_LAYOUT_MAX)
+    return dci11_layout_parse_full(r, i, raw, len, cfg, parsed, NULL, NULL);
+  static __thread dci11_parse_memo_t *t_memo; /* heap, not static TLS (see the stage-2 scratch note) */
+  if (t_memo == NULL && (t_memo = calloc(NR_DCI11_LAYOUT_MAX, sizeof(*t_memo))) == NULL)
+    return dci11_layout_parse_full(r, i, raw, len, cfg, parsed, NULL, NULL);
+  dci11_parse_memo_t *m = &t_memo[i];
+  if (m->state == 0 || memcmp(&m->hyp, &r->hyp[i], sizeof(m->hyp)) != 0 || m->len != len || m->bwp_size != (uint16_t)cfg->bwp_size
+      || m->bwp_start != (uint16_t)cfg->bwp_start || m->tda_bits != r->off[i].tda_bits || m->tda_count != (uint8_t)cfg->extract.tda_count) {
+    m->hyp = r->hyp[i];
+    m->len = len;
+    m->bwp_size = (uint16_t)cfg->bwp_size;
+    m->bwp_start = (uint16_t)cfg->bwp_start;
+    m->tda_bits = r->off[i].tda_bits;
+    m->tda_count = (uint8_t)cfg->extract.tda_count;
+    m->state = 1;
+    const bool ok = dci11_layout_parse_full(r, i, raw, len, cfg, parsed, &m->o, &m->pre);
+    if (m->pre.size == len) m->state = 2; /* pre is set only when the field bits exist and the size matched */
+    return ok;
+  }
+  if (m->state != 2)
+    return false;
+  return nr_pdcch_blind_extract_11_pre(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &m->o, &m->pre, parsed);
+}
+static bool dci11_layout_parse_full(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                                    const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed,
+                                    nr_pdcch_blind_extract_opts_t *o_out, nr_pdcch_blind_extract_pre_t *pre_out)
+{
+  if (pre_out) pre_out->size = 0xFFFF; /* "not parseable" unless set below */
   nr_dci11_field_bits_t f;
   if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f))
     return false;
@@ -1458,6 +1527,10 @@ static bool dci11_layout_parse(const nr_dci11_resolver_t *r, int i, const nr_pdc
   }
   if (nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o) != len)
     return false;
+  if (pre_out) {
+    *o_out = o;
+    nr_pdcch_blind_extract_pre(cfg->bwp_size, o_out, pre_out);
+  }
   return nr_pdcch_blind_extract_11(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &o, parsed);
 }
 
@@ -5006,6 +5079,7 @@ static void run_discovered_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
 void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                          bool serial_candidates, long source_absolute_slot)
 {
+  if (nr_a2e_trace()) nr_a2e_ts[0] = btim_now_ns();
   if (nr_cfg_reconf_enabled()) nr_cfg_epoch_subscribe(length_epoch_listener);
   nr_cfg_epoch_drain();
   NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), serial_candidates
@@ -5376,6 +5450,12 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
 {
   phase2_guard_t phase2 __attribute__((cleanup(phase2_guard_release))) = {.held = false};
   slowpass_guard_t slowpass __attribute__((cleanup(slowpass_release))) = slowpass_enter();
+  if (nr_a2e_trace()) {
+    nr_a2e_ts[1] = btim_now_ns();
+    memset(&nr_a2e_ts[2], 0, 7 * sizeof(nr_a2e_ts[0]));
+    nr_a2e_kind = (int8_t)(t_pass_kind + (t_discovered_token ? 10 : 0));
+    nr_a2e_bank = (int8_t)t_bank_index;
+  }
   (void)slowpass;
   /* ISAC_PDCCH_POINTA_REF (TIM-ACQ): PDCCH-Config DM-RS from Point A for every decode of this occasion; the previous
    * per-thread value is restored on every return. Flag off -> 0 -> legacy indexing. */
@@ -8435,6 +8515,7 @@ constdiag_done:;
   }
   btim_add(BTIM_DECODE, btim_t_dec);
   discovery_scope.after_decode=btim_on?btim_now():0;
+  if (nr_a2e_trace()) nr_a2e_ts[2] = btim_now_ns();
   discovery_scope.phase=6;
   const uint64_t btim_t_post = btim_on ? btim_now() : 0;
 
@@ -8455,10 +8536,12 @@ constdiag_done:;
     btim_add(BTIM_P2WAIT, btim_t_p2);
     phase2.held = true;
   }
+  if (nr_a2e_trace()) nr_a2e_ts[3] = btim_now_ns();
   int decodes_this_occasion = 0; // capped by cfg->pdsch_max_per_slot -- see that field's comment
   bool retired_lookahead[NR_PDCCH_LOOKAHEAD_MAX] = {false};
   for (int ti = 0; ti < nof_tasks; ti++) {
     if (!nr_cfg_epoch_work_current()) break;
+    if (nr_a2e_trace()) { nr_a2e_ts[4] = nr_a2e_ts[5] = btim_now_ns(); nr_a2e_ts[7] = nr_a2e_ts[8] = 0; }
     /* SCAN2 TDD learner: any CRC-valid decode (DL, UL, lookahead, CSS0) proves this slot of the frame carries a PDCCH. */
     if (cand_task[ti].ok && nr_scan2_on(NR_SCAN2_TDD) && proc != NULL)
       nr_tdd_learn_evidence(&g_scan2.tdd, fp->slots_per_frame, proc->nr_slot_rx);
@@ -8879,6 +8962,7 @@ constdiag_done:;
                                        nr_dci_bits_hash(&raw->payload, cand_task[ti].dci_length));
       if (!t_discovered_token && accept_dup(abs_slot, raw->rnti, 0))
         continue;
+      if (nr_a2e_trace()) nr_a2e_ts[5] = btim_now_ns();
       if (t_discovered_token) t_discovered_prescreen_passed = true; /* CRC-OK DCI = fresh evidence */
       if (t_discovered_token)
         nr_pdcch_discovered_observe(t_discovered_token, raw->rnti,
@@ -9502,6 +9586,7 @@ constdiag_done:;
     }
 
     t_pass_accepts++;
+    if (nr_a2e_trace() && nr_a2e_ts[5] == nr_a2e_ts[4]) nr_a2e_ts[5] = btim_now_ns(); /* not already stamped by the DCI 1_1 accept */
     struct timespec rnti_ts;
     clock_gettime(CLOCK_REALTIME, &rnti_ts);
     const long long rnti_utc_ns = (long long)rnti_ts.tv_sec * 1000000000LL + (long long)rnti_ts.tv_nsec;
@@ -9659,6 +9744,7 @@ constdiag_done:;
         nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_GATE);
         continue;
       }
+      if (nr_a2e_trace()) nr_a2e_ts[7] = btim_now_ns(); /* solver reading pass starts */
       static _Atomic int s_tda_set;
       if (!atomic_exchange(&s_tda_set, 1))
         nr_pdsch_solver_set_tda_fn(solver_tda_of, (void *)cfg);
@@ -9908,6 +9994,7 @@ lc_regroup:
                 proc->frame_rx, proc->nr_slot_rx, out.rnti, nrd, R->n_alive, b1, b1ok, b1vrb, why, cfg->extract.tda_count, b);
         }
       }
+      if (nr_a2e_trace()) nr_a2e_ts[8] = btim_now_ns(); /* readings done */
       nr_pdsch_solver_var_t var[NR_PDSCH_SOLVER_MAX_VAR];
       /* run-time-discovered CSI-RS resources of this slot (blind CSI-RS search; nothing configured) */
       fapi_nr_dl_config_csirs_pdu_rel15_t sv_rm[NFAPI_MAX_NUM_CSI_RATEMATCH];

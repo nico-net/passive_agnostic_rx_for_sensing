@@ -271,6 +271,32 @@ static int16_t *llr_prepare(const NR_DL_FRAME_PARMS *fp, uint32_t need)
     nr_pdsch_gpu_host_pin(llr_tls, (size_t)need * sizeof(int16_t));
   return llr_tls;
 }
+/* seg_virt_prepare: this thread's data-ordered gather buffer (segmented grants), allocated and pinned once (file scope so that the
+ * prewarm below can create it before the first grant). */
+static __thread c16_t *t_seg_virt;
+static __thread size_t t_seg_virt_cap;
+static c16_t *seg_virt_prepare(const NR_DL_FRAME_PARMS *fp)
+{
+  const size_t need = (size_t)fp->nb_antennas_rx * fp->samples_per_slot_wCP;
+  if (t_seg_virt_cap < need) {
+    nr_pdsch_gpu_host_unpin(t_seg_virt); /* DECODETIME: read by the GPU demod */
+    free(t_seg_virt);
+    t_seg_virt = (c16_t *)malloc16(need * sizeof(c16_t));
+    t_seg_virt_cap = t_seg_virt ? need : 0;
+    nr_pdsch_gpu_host_pin(t_seg_virt, need * sizeof(c16_t));
+  }
+  return t_seg_virt;
+}
+/* ISAC_PDSCH_PIN_PREWARM_ALL=1 (default off): the prewarm also creates the buffers that were still pinned lazily on a thread's first
+ * segmented / GPU-demod grant (gather buffer, demod geometry buffers), and the pdschRecov worker prewarms at its start instead of at its
+ * first rescue (GPUGRAPH-DIAG-20261018: lazy cudaHostRegister calls mid-run, one of 5.9 ms, block every GPU launch for 3.5-6 ms). */
+int nr_pdsch_pin_prewarm_all(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDSCH_PIN_PREWARM_ALL") && atoi(getenv("ISAC_PDSCH_PIN_PREWARM_ALL")) ? 1 : 0;
+  return en;
+}
+void nr_pdsch_gpu_demod_pin_prewarm(const NR_DL_FRAME_PARMS *fp) __attribute__((weak)); /* nr_pdsch_gpu_demod_host.c */
 /* nr_pdsch_passive_decode_pin_prewarm: ISAC_PDSCH_GPU_HOST_PIN=1 only -- allocate and pin this consumer thread's GPU-touched
  * buffers before its first grant (flag off: no-op, buffers appear lazily as before). Caller: the PDSCH queue consumer. */
 void nr_pdsch_passive_decode_pin_prewarm(PHY_VARS_NR_UE *ue)
@@ -282,6 +308,11 @@ void nr_pdsch_passive_decode_pin_prewarm(PHY_VARS_NR_UE *ue)
   llr_prepare(&ue->frame_parms, 1);
   if (nr_pdsch_gpu_chest_pin_prewarm)
     nr_pdsch_gpu_chest_pin_prewarm();
+  if (nr_pdsch_pin_prewarm_all()) {
+    seg_virt_prepare(&ue->frame_parms);
+    if (nr_pdsch_gpu_demod_pin_prewarm)
+      nr_pdsch_gpu_demod_pin_prewarm(&ue->frame_parms);
+  }
 }
 static void pdtim_cls_note(uint64_t d)
 {
@@ -4751,16 +4782,7 @@ gpu_llr_ready:;
   if (seg_path && gp_ok)
     fa_virt = set_bitmap_from_start_size(0, freq_alloc->num_rbs); /* the pass demodulated it from the real REs: no gather, no CSI map (the demod below is skipped) */
   if (seg_path && !gpu_llr && !gp_ok) {
-    static __thread c16_t *virt = NULL;
-    static __thread size_t virt_cap = 0;
-    const size_t need = (size_t)fp->nb_antennas_rx * fp->samples_per_slot_wCP;
-    if (virt_cap < need) {
-      nr_pdsch_gpu_host_unpin(virt); /* DECODETIME: read by the GPU demod */
-      free(virt);
-      virt = (c16_t *)malloc16(need * sizeof(c16_t));
-      virt_cap = virt ? need : 0;
-      nr_pdsch_gpu_host_pin(virt, need * sizeof(c16_t));
-    }
+    c16_t *virt = seg_virt_prepare(fp);
     static __thread int *gidx = NULL; /* heap, not a 13 kB frame on every decode's stack */
     if (gidx == NULL)
       gidx = (int *)malloc(NR_PRB_SET_MAX * NR_NB_SC_PER_RB * sizeof(int));
