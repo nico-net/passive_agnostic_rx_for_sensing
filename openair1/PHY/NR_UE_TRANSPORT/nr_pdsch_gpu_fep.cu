@@ -812,7 +812,7 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
       }
       g_ctx_prio = nr_pdsch_gpu_prio_on();
       const size_t ring = (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2);
-      { const char *e = getenv("ISAC_GPU_PASS"), *g = getenv("ISAC_PDSCH_GPU_GRAPH"), *sp = getenv("ISAC_PDSCH_GPU_GRAPH_SPLIT");
+      { const char *e = getenv("ISAC_GPU_PASS"), *g = (getenv("ISAC_PDSCH_GPU_GRAPH") ?: "1"), *sp = (getenv("ISAC_PDSCH_GPU_GRAPH_SPLIT") ?: "1");
         PASS_LS_ROWS = (e && atoi(e) == 1) ? 512 : (g && atoi(g) == 1 && sp && atoi(sp) == 1) ? 1024 : 256; } /* v2 split: 32 segments (nr_gpu_pass_graph.cu SEG_ROWS) */
       for (int k = 0; k < PASS_SLOTS; k++) {
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_pass_h[k], ring));

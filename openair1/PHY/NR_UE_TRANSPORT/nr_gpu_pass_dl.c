@@ -232,7 +232,7 @@ static int env_list(const char *name, const char *dflt, int *v, int max)
 void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
 {
   const char *e = getenv("ISAC_GPU_PASS"), *eu = getenv("ISAC_UL_GPU_PASS");
-  const char *eg = getenv("ISAC_PDSCH_GPU_GRAPH");
+  const char *eg = (getenv("ISAC_PDSCH_GPU_GRAPH") ?: "1");
   int dl_on = e && atoi(e) == 1;
   const int ul_on = eu && atoi(eu) == 1; /* ISAC_UL_GPU_PASS: the PUSCH pass (Task 7), independent of the DL one */
   if (eg && atoi(eg) == 1) { /* v2: the same module in v2 mode; never together with v1 */
@@ -243,7 +243,8 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     for (size_t i = 0; i < sizeof(g_sub_name) / sizeof(g_sub_name[0]); i++) {
       char n[64];
       snprintf(n, sizeof(n), "ISAC_PDSCH_GPU_GRAPH_%s", g_sub_name[i]);
-      const char *v = getenv(n);
+      /* baked default on: COVER, SPLIT, RETRY, DMRS2 (the others stay off) */
+      const char *v = getenv(n) ?: (i == 0 || i == 1 || i == 2 || i == 5 ? "1" : NULL);
       g_sub_on[i] = G.v2 && v && atoi(v) == 1;
     }
     g_sub_on[2] &= g_sub_on[1]; /* review S2: RETRY needs SPLIT (its D entry is a split launch) */

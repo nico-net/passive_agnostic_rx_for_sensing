@@ -38,7 +38,7 @@ HEAVY_CPUS=${HEAVY_CPUS:-0-16} exec "$O/heavy.sh" bash -c 'for p in $(pgrep -x n
   ISAC_RAW_IQ_CHANNELS=4 ISAC_RAW_IQ_RATE=122880000 ISAC_RAW_IQ_CENTER="$CAPC" ISAC_RAW_IQ_SPEED=1 ISAC_RAW_IQ_SHIFT=2 \
   LD_LIBRARY_PATH="$B:/usr/local/lib" ISAC_CSIRS_DISC_CORE=11 ISAC_CSIRS_DISC_DETECT_CORES=12,13,14 \
   CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps \
-  ISAC_UE_RT_CORE=5 ISAC_RX_RECOVER=0 ISAC_MLOCK=0 "$@" \
+  CUDA_DEVICE_MAX_CONNECTIONS=32 ISAC_UE_RT_CORE=5 ISAC_RX_RECOVER=0 ISAC_MLOCK=0 "$@" \
   ${WRAP:-} "$B/nr-uesoftmodem" -O "$R/replay.cfg" --passive-rx -r 217 --numerology 1 --band 78 \
   -C "$RXC" --ssb "$SSB" --ue-rxgain 38 --ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --initial-fo "$FO" --ue-fo-compensation \
   --thread-pool 8,9,15 --time-sync-I 0.01 --ntn-initial-time-drift 0 -A 90 < /dev/null > "$R/run.log" 2>&1

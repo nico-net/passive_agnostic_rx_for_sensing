@@ -929,7 +929,7 @@ static int g_fp32_default()
 {
   static int v = -1;
   if (v < 0) {
-    const char *e = getenv("ISAC_GPU_PASS_FP32");
+    const char *e = (getenv("ISAC_GPU_PASS_FP32") ?: "1");
     cudaDeviceProp p;
     int dev = 0;
     v = e && *e ? atoi(e) == 1 : (cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&p, dev) == cudaSuccess && p.major == 8 && p.minor == 9);
