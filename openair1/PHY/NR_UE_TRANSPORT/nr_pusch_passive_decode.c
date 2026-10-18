@@ -21,7 +21,7 @@
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
 #include "nr_pdsch_gpu_ldpc_host.h" // ISAC_UL_GPU_LDPC: GPU LDPC for the PUSCH TBs (default off)
 #include "nr_pusch_gpu_fep.h" // ISAC_UL_GPU_FEP: GPU port of the UL FEP below (default off)
-#include "nr_gpu_pass_ul.h" // ISAC_UL_GPU_PASS: the whole PUSCH decode as one GPU graph (default off)
+#include "nr_gpu_pass_ul.h" // the whole PUSCH decode as one GPU graph (Fix A+D: the UL path)
 #include "PHY/NR_TRANSPORT/nr_ulsch_passive_branch.h"
 #include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
 
@@ -335,7 +335,7 @@ static inline bool hp_crc_failed(const NR_gNB_ULSCH_t *u)
   return h->C>1 && !check_crc(h->b,lenWithCrc(1,bits),crcType(1,bits));
 }
 
-/* ---- GPUPASS Task 7 (ISAC_UL_GPU_PASS=1, default off): the per-RNTI hypothesis of the last grant that decoded. A hit sends the grant straight into the GPU pass (FEP at the
+/* ---- GPUPASS Task 7 (Fix A+D, always on): the per-RNTI hypothesis of the last grant that decoded. A hit sends the grant straight into the GPU pass (FEP at the
  * cached timing advance, the cached DM-RS identity); a miss, a stale entry and anything the pass does not cover keep the old path. The entry is refreshed by every CRC-OK
  * decode (either path) with the timing advance corrected by the delay the estimator measured, so that it follows the clock drift. */
 static void ul_hyp_apply(nr_pdcch_blind_ul_result_t *g, const ul_hyp_t *h)

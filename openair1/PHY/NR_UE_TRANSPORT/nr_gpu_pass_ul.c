@@ -285,9 +285,7 @@ static int fb(int why)
 
 int nr_gpu_pass_ul_requested(void)
 {
-  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *e = getenv("ISAC_UL_GPU_PASS");
-  return e && atoi(e) == 1;
+  return 1; /* Fix A+D: no runtime switch; nr_gpu_pass_ul_active() tells whether the classes are cached */
 }
 
 void nr_gpu_pass_ul_prewarm(int ctx)
@@ -516,9 +514,7 @@ static int env_list(const char *name, const char *dflt, int *v, int max)
 int nr_gpu_pass_ul_warm(void *h, int nbrx, int fp32)
 {
   (void)fp32; /* the PUSCH chain is integer: the FP32 instantiation only exists for the DL demod's MMSE */
-  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *e = getenv("ISAC_UL_GPU_PASS");
-  if (!e || atoi(e) != 1 || !h)
+  if (!h)
     return 0;
   nr_gpu_pass_warm_fn warmf = (nr_gpu_pass_warm_fn)dlsym(h, "nr_gpu_pass_warm");
   U.try_ = (nr_gpu_pass_ul_try_fn)dlsym(h, "nr_gpu_pass_ul_try");

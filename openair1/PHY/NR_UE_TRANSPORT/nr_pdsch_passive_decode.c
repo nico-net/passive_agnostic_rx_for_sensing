@@ -3242,8 +3242,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   int gp_gate = -1; /* the first gate that keeps this grant off the pass (counted: nr_gpu_pass_dl.h NR_GPU_PASS_GATE_*) */
   if (nr_gpu_pass_active()) {
     extern __thread int nr_pdsch_chest_occ_override;
-    static int gp_retry_old = -1; /* ISAC_GPU_PASS_RETRY_OLD (nr_gpu_pass_retry.h) */
-    if (gp_retry_old < 0) { const char *e_ = (getenv("ISAC_GPU_PASS_RETRY_OLD") ?: "1"); gp_retry_old = e_ && atoi(e_) == 1; }
+    const int gp_retry_old = 1; /* frozen value of the former ISAC_GPU_PASS_RETRY_OLD; only consulted when the split/RETRY graphs are off (memory cap), i.e. the GPU path cannot hold the retry */
     /* v2 Task 2 (ISAC_PDSCH_GPU_GRAPH_COVER): layout probes run the pass (CB0 only, their horizon), and slot-share grants: the pass estimates the same
      * widened band (share_chest_band; a segmented grant estimates per segment, the share does not widen it) and does its own FEP, so the FEP / chest caches
      * are not read (their contents are the same numbers). */

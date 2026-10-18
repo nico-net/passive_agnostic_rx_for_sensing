@@ -54,6 +54,7 @@ struct GpuPassModule {
   nr_gpu_pass_stats_fn pass_stats = nullptr;
   nr_gpu_pass_counters_fn pass_counters = nullptr;
   void (*pass_hold)(unsigned, int) = nullptr;
+  void (*set_spin)(int) = nullptr; /* Fix A+D bench hook: completion wait, >= 0 spin us then blocking sync, < 0 the former poll+nap */
   void (*pass_split)(int) = nullptr; /* v2 Task 3 test hook: the split (C / D / L sub-graph) mode on / off */
   void (*call_begin)(void) = nullptr, (*call_end)(void) = nullptr, (*call_dirty)(void) = nullptr; /* v2 Task 4: the held instance of a decode call */
   void (*retry_counters)(uint64_t *) = nullptr;                                                      /* entries C, D, held calls, dirty */
@@ -89,6 +90,7 @@ struct GpuPassModule {
         m.pass_stats = (nr_gpu_pass_stats_fn)dlsym(m.dl, "nr_gpu_pass_stats");
         m.pass_counters = (nr_gpu_pass_counters_fn)dlsym(m.dl, "nr_gpu_pass_counters");
         m.pass_hold = (void (*)(unsigned, int))dlsym(m.dl, "nr_gpu_pass_test_hold");
+        m.set_spin = (void (*)(int))dlsym(m.dl, "nr_gpu_pass_set_spin_us");
         m.pass_split = (void (*)(int))dlsym(m.dl, "nr_gpu_pass_test_split");
         m.call_begin = (void (*)(void))dlsym(m.dl, "nr_gpu_pass_call_begin");
         m.call_end = (void (*)(void))dlsym(m.dl, "nr_gpu_pass_call_end");

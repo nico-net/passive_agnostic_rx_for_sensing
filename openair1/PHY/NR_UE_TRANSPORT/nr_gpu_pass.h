@@ -236,6 +236,8 @@ typedef struct {
   uint32_t ul_nrows;
   uint8_t ul_tb_crc;             /* TB-level CRC24A of a multi-block TB (hp_crc_failed's second condition) */
   nr_gpu_llr_stats_t llr_stats;  /* v2: the DL LLR statistics (k_llr_stats_pre / _post) */
+  uint32_t prep_ns, launch_ns;   /* host: entry -> first launch call; the launch calls (markers, H2D of the parameter blocks, graph launches, done event) */
+  uint32_t gstart_ns, gspan_ns;  /* Fix A+D: GPU-side event stamps of this pass: launch call -> first graph node, first node -> completion (0 = not measured: C skipped) */
 } nr_gpu_pass_result_t;
 
 /* Process-wide configuration, before nr_gpu_pass_init: the bit-exact chest reads the receiver's delay table (a fixed pointer, baked into the graphs). */

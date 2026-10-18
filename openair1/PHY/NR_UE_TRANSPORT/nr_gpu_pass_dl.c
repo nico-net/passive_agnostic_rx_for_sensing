@@ -127,8 +127,12 @@ void nr_gpu_pass_disable(const char *why)
 
 void nr_gpu_pass_gate(int g)
 {
-  if (g >= 0 && g < NR_GPU_PASS_GATE_N)
-    atomic_fetch_add_explicit(&G.gate[g], 1, memory_order_relaxed);
+  static const char *const gname[] = {"seg", "probe", "share", "gw", "ptrs", "tinterp", "harq", "ldpc_off", "chest_only", "occ", "nomem", "retry"};
+  if (g >= 0 && g < NR_GPU_PASS_GATE_N) {
+    /* Fix A+D: a first pass that leaves the GPU pass says why (first time per reason here; the census prints every count) */
+    if (atomic_fetch_add_explicit(&G.gate[g], 1, memory_order_relaxed) == 0 && g < (int)(sizeof(gname) / sizeof(gname[0])))
+      LOG_A(PHY, "SENSING: GPUPASS first grant kept off the pass: gate %s (the old path decodes this grant shape)\n", gname[g]);
+  }
 }
 
 int nr_gpu_pass_shadow_due_fail(void)
@@ -249,11 +253,10 @@ static int env_list(const char *name, const char *dflt, int *v, int max)
 void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
 {
   /* DEFERRED/DO NOT USE: ISAC_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
-  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *e = getenv("ISAC_GPU_PASS"), *eu = getenv("ISAC_UL_GPU_PASS");
+  const char *e = getenv("ISAC_GPU_PASS");
   const char *eg = (getenv("ISAC_PDSCH_GPU_GRAPH") ?: "1");
   int dl_on = e && atoi(e) == 1;
-  const int ul_on = eu && atoi(eu) == 1; /* ISAC_UL_GPU_PASS: the PUSCH pass (Task 7), independent of the DL one */
+  const int ul_on = 1; /* Fix A+D: the PUSCH pass (Task 7) is THE UL path (its own instance pool); grants outside its scope fall back, counted */
   if (eg && atoi(eg) == 1) { /* v2: the same module in v2 mode; never together with v1 */
     if (dl_on)
       LOG_W(PHY, "SENSING: GPUGRAPH refused: ISAC_GPU_PASS=1 (v1) is set; v2 off, v1 runs\n");
