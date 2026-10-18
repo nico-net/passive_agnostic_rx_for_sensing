@@ -84,6 +84,7 @@ typedef struct {
   /// FO (Hz) sampled on the RECEIVE thread with these samples; replayed by the consumer
   /// via nr_slot_fep_fo_override_hz. NAN would mean "read live", which is the bug.
   double fo_hz;
+  uint64_t enq_ns; ///< CLOCK_MONOTONIC at admission (only with ISAC_E2E_TRACE): splits the scan-queue wait into producer-side and queue/wake
 } nr_pdcch_passive_job_t;
 
 typedef struct {

@@ -55,6 +55,15 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
  * queue: a job must be finished comfortably before the producer laps it, not on the last slot. */
 #define NR_PDCCH_PASSIVE_QUEUE_MARGIN_SLOTS 4
 
+extern int nr_passive_e2e_trace(void);
+extern uint64_t nr_passive_slot_arrival_ns(long abs_slot);
+static uint64_t scanq_now_ns(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
 static nr_pdcch_passive_job_t g_ring[NR_PDCCH_PASSIVE_QUEUE_MAX_DEPTH];
 static int g_depth = 0;
 static int g_head  = 0; // next write slot
@@ -176,6 +185,7 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
     }
     g_count--;
     pthread_mutex_unlock(&g_lock);
+    const uint64_t take_ns = job.enq_ns ? scanq_now_ns() : 0;
 
     NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
     if (!nr_cfg_epoch_work_current()) {
@@ -209,14 +219,12 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
     proc.nr_slot_rx = job.nr_slot_rx;
     proc.gNB_id     = job.gNB_id;
 
-    extern int nr_passive_e2e_trace(void);
-    extern uint64_t nr_passive_slot_arrival_ns(long abs_slot);
     struct timespec e0;
     if (nr_passive_e2e_trace()) clock_gettime(CLOCK_MONOTONIC, &e0);
     nr_pdcch_blind_monitor_run_occasion(ue, &proc, true /* already off the RT thread */, job.absolute_slot);
     if (nr_passive_e2e_trace()) {
       /* SYSAN SCAN_E2E: slot read -> scan start (wait), scan occasion wall (run); 50-us bins, p50/p90/p99 every 4000 occasions */
-      static _Atomic uint32_t h[2][101];
+      static _Atomic uint32_t h[4][101]; /* wait, run, pre (arrival -> enqueue), q (enqueue -> taken: queue sit + wake-up) */
       static _Atomic uint64_t n_occ;
       struct timespec e1;
       clock_gettime(CLOCK_MONOTONIC, &e1);
@@ -226,19 +234,27 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
         const uint64_t w = (t0 - arr) / 50000, r = (t1 - t0) / 50000;
         atomic_fetch_add(&h[0][w > 100 ? 100 : w], 1);
         atomic_fetch_add(&h[1][r > 100 ? 100 : r], 1);
+        if (job.enq_ns >= arr && take_ns >= job.enq_ns) {
+          const uint64_t p = (job.enq_ns - arr) / 10000, q = (take_ns - job.enq_ns) / 10000; /* 10 us bins here: the hand-off is tens of us */
+          atomic_fetch_add(&h[2][p > 100 ? 100 : p], 1);
+          atomic_fetch_add(&h[3][q > 100 ? 100 : q], 1);
+        }
         if (atomic_fetch_add(&n_occ, 1) % 4000 == 3999) {
-          int q[2][3];
-          for (int k = 0; k < 2; k++) {
+          int q[4][3];
+          for (int k = 0; k < 4; k++) {
             uint64_t tot = 0, c = 0;
             for (int b = 0; b <= 100; b++) tot += h[k][b];
             const double f[3] = {0.5, 0.9, 0.99};
+            const int bin = k < 2 ? 50 : 10;
             for (int j = 0, b = 0; j < 3; j++) {
               while (b < 100 && c + h[k][b] < f[j] * tot) c += h[k][b++];
-              q[k][j] = (b + 1) * 50;
+              q[k][j] = (b + 1) * bin;
             }
           }
-          LOG_A(PHY, "SENSING: SCAN_E2E occ=%lu wait_us p50<=%d p90<=%d p99<=%d run_us p50<=%d p90<=%d p99<=%d\n",
-                (unsigned long)atomic_load(&n_occ), q[0][0], q[0][1], q[0][2], q[1][0], q[1][1], q[1][2]);
+          LOG_A(PHY, "SENSING: SCAN_E2E occ=%lu wait_us p50<=%d p90<=%d p99<=%d run_us p50<=%d p90<=%d p99<=%d "
+                     "pre_us p50<=%d p90<=%d p99<=%d q_us p50<=%d p90<=%d p99<=%d\n",
+                (unsigned long)atomic_load(&n_occ), q[0][0], q[0][1], q[0][2], q[1][0], q[1][1], q[1][2],
+                q[2][0], q[2][1], q[2][2], q[3][0], q[3][1], q[3][2]);
         }
       }
     }
@@ -324,10 +340,13 @@ bool nr_pdcch_passive_queue_enqueue(const nr_pdcch_passive_job_t *job)
   }
   g_ring[g_head] = *job;
   g_ring[g_head].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_work_stamp);
+  g_ring[g_head].enq_ns = nr_passive_e2e_trace() ? scanq_now_ns() : 0;
   g_head         = (g_head + 1) % g_depth;
   g_count++;
-  pthread_cond_signal(&g_cv);
   pthread_mutex_unlock(&g_lock);
+  /* Signal AFTER the unlock: signalled under the lock, the woken consumer's first act is to take g_lock, which the producer still
+   * holds, so it sleeps a second time (a futex round trip on the wake path, on top of the scheduler wake-up). */
+  pthread_cond_signal(&g_cv);
   atomic_fetch_add_explicit(&g_queued, 1, memory_order_relaxed);
   return true;
 }

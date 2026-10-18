@@ -287,6 +287,30 @@ bool nr_dci11_layout_impossible(const nr_dci11_offsets_t *off, nr_dci_bits_t pay
   return false;
 }
 
+/* layout_eval: nr_dci11_layout_plausible() and nr_dci11_layout_impossible() of one layout in one pass. The two read the same FDRA, antenna-port and
+ * TDA fields; observe() called both for every live layout of every accepted DCI. plausible == no impossible read AND mcs <= 27. Same results
+ * (checked by Dci11ObserveGolden against the state hash of the previous implementation). */
+static void layout_eval(const nr_dci11_offsets_t *off, nr_dci_bits_t payload, uint16_t bwp_size, bool *plausible, bool *impossible)
+{
+  *plausible = false;
+  *impossible = false;
+  if (off == NULL || bwp_size == 0)
+    return;
+  const uint32_t mcs = peek(payload, off->total, off->mcs, DCI11_MCS_BITS);
+  uint32_t fdra = peek(payload, off->total, off->riv, (uint8_t)(off->tda - off->riv));
+  bool type0 = off->fdra_mode == NR_FDRA_TYPE0_CFG1 || off->fdra_mode == NR_FDRA_TYPE0_CFG2;
+  if (off->fdra_mode == NR_FDRA_DYN_CFG1 || off->fdra_mode == NR_FDRA_DYN_CFG2)
+    type0 = !nr_fdra_dynamic_split(fdra, off->n_rbg, off->riv_bits, &fdra, &fdra);
+  bool bad = type0 ? fdra == 0 : fdra >= (uint32_t)bwp_size * ((uint32_t)bwp_size + 1u) / 2u;
+  if (!bad && off->ap_valid_rows > 0 && off->ant_ports_bits > 0
+      && peek(payload, off->total, off->ant_ports, off->ant_ports_bits) >= off->ap_valid_rows)
+    bad = true;
+  if (!bad && off->tda_valid > 0 && off->tda_bits > 0 && peek(payload, off->total, off->tda, off->tda_bits) >= off->tda_valid)
+    bad = true;
+  *impossible = bad;
+  *plausible = !bad && mcs <= 27;
+}
+
 /* hard_refute_enabled: returns ISAC_DCI11_HARD_REFUTE != 0, read at each call (one getenv per accepted DCI). Caller: nr_dci11_resolver_observe(). */
 static bool hard_refute_enabled(void) /* read per observe(): one getenv per accepted DCI, and tests can toggle it */
 {
@@ -722,16 +746,15 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
   if (r->winner >= 0) {
     return 1;
   }
-  for (int i = 0; i < r->n_hyp; i++) {
-    if (!r->alive[i]) {
-      continue;
-    }
+  for (int i = nr_alive_next(r->alive, 0, r->n_hyp); i < r->n_hyp; i = nr_alive_next(r->alive, i + 1, r->n_hyp)) {
     r->seen[i]++;
     hist_observe(r, i, payload);
-    if (nr_dci11_layout_plausible(&r->off[i], payload, r->bwp_size)) {
+    bool plausible, impossible;
+    layout_eval(&r->off[i], payload, r->bwp_size, &plausible, &impossible);
+    if (plausible) {
       r->pass[i]++;
     }
-    if (nr_dci11_layout_impossible(&r->off[i], payload, r->bwp_size))
+    if (impossible)
       r->impossible[i]++;
   }
   r->n_obs++;
@@ -744,8 +767,8 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
    * next FDRA mode at once (nr_dci11_resolver_arm_next_mode retires the refuted stage, reversibly). */
   if (hard_refute_enabled() && r->winner < 0) {
     bool all_refuted = r->n_alive > 0;
-    for (int i = 0; i < r->n_hyp; i++) {
-      if (!r->alive[i] || layout_has_pass(r, i))
+    for (int i = nr_alive_next(r->alive, 0, r->n_hyp); i < r->n_hyp; i = nr_alive_next(r->alive, i + 1, r->n_hyp)) {
+      if (layout_has_pass(r, i))
         continue;
       if (r->impossible[i] < NR_DCI11_HARD_REFUTE_N) {
         all_refuted = false;
@@ -756,7 +779,7 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
         r->n_alive--;
       }
     }
-    for (int i = 0; i < r->n_hyp && all_refuted; i++)
+    for (int i = nr_alive_next(r->alive, 0, r->n_hyp); i < r->n_hyp && all_refuted; i = nr_alive_next(r->alive, i + 1, r->n_hyp))
       if (r->alive[i] && (layout_has_pass(r, i) || r->impossible[i] < NR_DCI11_HARD_REFUTE_N))
         all_refuted = false;
     if (all_refuted && r->fdra_next < NR_DCI11_FDRA_STAGES) {
@@ -778,8 +801,8 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
   /* Drop in a second pass, and never drop the last one. Dropping inside the loop above would make
    * the outcome depend on candidate order; and an empty set can never converge, so a run of
    * unlucky payloads must not be able to erase the answer. */
-  for (int i = 0; i < r->n_hyp && r->n_alive > 1; i++) {
-    if (!r->alive[i] || r->seen[i] < DCI11_S1_MIN_SEEN) {
+  for (int i = nr_alive_next(r->alive, 0, r->n_hyp); i < r->n_hyp && r->n_alive > 1; i = nr_alive_next(r->alive, i + 1, r->n_hyp)) {
+    if (r->seen[i] < DCI11_S1_MIN_SEEN) {
       continue;
     }
     /* Drop on the UPPER confidence bound, not the point estimate. A drop is IRREVERSIBLE, so the
@@ -800,7 +823,7 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
   return r->n_alive;
 }
 
-/* harq_seq_enabled: returns ISAC_DCI11_HARQ_SEQ != 0 (read per call): enables the HARQ-sequence pruning of layouts in nr_dci11_resolver_observe_rnti(). */
+/* harq_seq_enabled: returns ISAC_DCI11_HARQ_SEQ != 0 (read per call: a unit test toggles it): enables the HARQ-sequence pruning of layouts in nr_dci11_resolver_observe_rnti(). */
 static bool harq_seq_enabled(void)
 {
   const char *e = (getenv("ISAC_DCI11_HARQ_SEQ") ?: "1");
@@ -829,8 +852,8 @@ int nr_dci11_resolver_observe_rnti(nr_dci11_resolver_t *r, nr_dci_bits_t payload
   }
   if (slot >= 0) {
     const nr_dci_bits_t prev = r->harq_prev[slot];
-    for (int i = 0; i < r->n_hyp; i++) {
-      if (!r->alive[i] || r->harq_pairs[i] == UINT16_MAX)
+    for (int i = nr_alive_next(r->alive, 0, r->n_hyp); i < r->n_hyp; i = nr_alive_next(r->alive, i + 1, r->n_hyp)) {
+      if (r->harq_pairs[i] == UINT16_MAX)
         continue;
       const nr_dci11_offsets_t *o = &r->off[i];
       const int a = harq_step(prev, payload, o->total, o->rv + DCI11_RV_BITS);
@@ -848,7 +871,7 @@ int nr_dci11_resolver_observe_rnti(nr_dci11_resolver_t *r, nr_dci_bits_t payload
   /* Evidence first: only once SOME live layout shows a HARQ counter far above chance does a layout reading none
    * lose its place -- a cell with random HARQ PIDs never triggers this and keeps every layout. */
   double best = 0.0;
-  for (int i = 0; i < r->n_hyp; i++)
+  for (int i = nr_alive_next(r->alive, 0, r->n_hyp); i < r->n_hyp; i = nr_alive_next(r->alive, i + 1, r->n_hyp))
     if (r->alive[i] && r->harq_pairs[i] >= 16 && r->harq_inc[i] >= 12 && 5u * r->harq_inc[i] >= 2u * r->harq_pairs[i]
         && (double)r->harq_inc[i] / r->harq_pairs[i] > best)
       best = (double)r->harq_inc[i] / r->harq_pairs[i];
@@ -856,7 +879,7 @@ int nr_dci11_resolver_observe_rnti(nr_dci11_resolver_t *r, nr_dci_bits_t payload
     return n_alive;
   /* Relative bar: a window one bit off the counter still steps by one on ~1/2 of the pairs (RV bit + PID >> 1), two
    * bits off on ~1/4; the aligned window steps on nearly every pair. 3/4 of the best rate separates them. */
-  for (int i = 0; i < r->n_hyp && r->n_alive > 1; i++)
+  for (int i = nr_alive_next(r->alive, 0, r->n_hyp); i < r->n_hyp && r->n_alive > 1; i = nr_alive_next(r->alive, i + 1, r->n_hyp))
     if (r->alive[i] && !layout_has_pass(r, i) && r->harq_pairs[i] >= 16
         && (double)r->harq_inc[i] / r->harq_pairs[i] < 0.75 * best) {
       r->alive[i] = false;

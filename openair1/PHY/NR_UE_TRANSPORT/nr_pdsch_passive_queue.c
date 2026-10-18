@@ -3028,8 +3028,8 @@ static void nr_pdsch_passive_queue_flush_locked(void) /* g_pending_mu held */
   for (int i = 0; i < g_n_pending; i++)
     enqueue_one(&g_pending[i], g_pending_ns[i]);
   g_n_pending = 0;
-  pthread_cond_broadcast(&g_cv);
   pthread_mutex_unlock(&g_lock);
+  pthread_cond_broadcast(&g_cv); /* after the unlock: a consumer woken under g_lock blocks on it again (second futex round trip) */
 }
 
 void nr_pdsch_passive_queue_flush(void)
