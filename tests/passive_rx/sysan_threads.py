@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """SYSAN: per-thread and per-core CPU budget of a running receiver (no perf needed).
-usage: sysan_threads.py EXE_PREFIX OUT.json [SECONDS=60] [START_DELAY=0]
+usage: sysan_threads.py EXE_PREFIX OUT.json [SECONDS=60] [START_DELAY=0] [LOG REGEX]
 Waits for an nr-uesoftmodem whose exe starts with EXE_PREFIX, sleeps START_DELAY, then samples
 /proc/<pid>/task/*/stat and /proc/stat over SECONDS. Writes per thread: comm, last core, policy, rt prio,
 nice, CPU % of one core over the window, allowed CPUs, wakeups/s (voluntary context switches), involuntary
@@ -79,6 +79,16 @@ def main():
         time.sleep(0.2)
     if pid is None:
         sys.exit('no receiver')
+    if len(sys.argv) > 6:  # LOG REGEX: start the window when the regex first appears in LOG (e.g. sync), then START_DELAY
+        import re
+        rx, t_log = re.compile(sys.argv[6].encode()), time.time() + 900
+        while time.time() < t_log:
+            try:
+                if rx.search(open(sys.argv[5], 'rb').read()):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.5)
     time.sleep(delay)
     pid = find_pid(prefix) or pid  # re-pick after the delay: start-up helpers and restarts change the pid
     hz = os.sysconf('SC_CLK_TCK')

@@ -50,7 +50,7 @@ int nr_core_plan_thread_attr(pthread_attr_t *, int affinity, int *priority);
 /* For raw pthread background helpers, including those spawned by RT actors. */
 int nr_core_plan_create(pthread_t *, pthread_attr_t *, void *(*)(void *), void *, int core);
 /* ISAC_FLOAT_CORES=<cpu list> (unset = off, offline CPUs dropped): the core lane of every receiver thread without an
- * explicit core, when the automatic plan is off. threadCreate()/nr_core_plan_create() with core -1 use it. */
+ * explicit core; only with ISAC_CORE_PLAN=0 (the automatic plan owns all masks otherwise). threadCreate()/nr_core_plan_create() with core -1 use it. */
 /* Called once early in main(): moves every existing task that still has the main thread's inherited mask
  * to the float lane (explicitly pinned tasks keep their core). Threads created later inherit it. No-op when off. */
 int nr_core_float_apply(void);

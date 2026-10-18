@@ -368,10 +368,11 @@ bool nr_core_plan_is_critical(int core)
 }
 static bool nr_core_float_mask(cpu_set_t *mask)
 {
-  const char *e = getenv("ISAC_FLOAT_CORES");
+  const char *e = getenv("ISAC_FLOAT_CORES"), *plan = getenv("ISAC_CORE_PLAN");
   unsigned char m[NR_CP_MAX_CPUS], on[NR_CP_MAX_CPUS];
   char buf[4096];
-  if (!e || !*e) return false;
+  /* the lane is the plan-off mechanism: with the automatic plan (ISAC_CORE_PLAN unset or 1) the plan owns every mask */
+  if (!e || !*e || !plan || atoi(plan) != 0) return false;
   if (nr_core_parse_list(e, m) || read_text("/sys/devices/system/cpu/online", buf, sizeof(buf)) || nr_core_parse_list(buf, on)) return false;
   CPU_ZERO(mask);
   for (int c = 0; c < NR_CP_MAX_CPUS; c++) if (m[c] && on[c]) CPU_SET(c, mask);
@@ -381,7 +382,8 @@ int nr_core_float_apply(void)
 {
   cpu_set_t lane, inherited, cur;
   if (!nr_core_float_mask(&lane)) {
-    if (getenv("ISAC_FLOAT_CORES")) fprintf(stderr, "SENSING: FLOAT_CORES \"%s\" is not a usable CPU list; ignored\n", getenv("ISAC_FLOAT_CORES"));
+    if (getenv("ISAC_FLOAT_CORES"))
+      fprintf(stderr, "SENSING: FLOAT_CORES \"%s\" ignored (needs ISAC_CORE_PLAN=0 and a CPU list with an online CPU)\n", getenv("ISAC_FLOAT_CORES"));
     return 0;
   }
   if (sched_getaffinity(0, sizeof(inherited), &inherited)) return -1;
