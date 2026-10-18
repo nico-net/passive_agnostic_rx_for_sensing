@@ -1,3 +1,4 @@
+#include <chrono>
 #include <gtest/gtest.h>
 #include <cstring>
 #include <cstdlib>
@@ -51,6 +52,8 @@ TEST(GpuMem, AllocIsFirstTouched) {
 
 /* ===================================================== Task 4: the shape-class graph pass ===================================================== */
 /* The graphs are captured per instance under the memory model of the process (ctest runs this suite once as is and once with NR_GPU_PASS_DISCRETE=1). */
+/* the FEP module sizes its pass LS rows at init from these (1024 = the split value; a 128-segment row group is 512 rows); set before any test initialises it */
+[[maybe_unused]] static const int g_split_ls_rows_env = (setenv("ISAC_PDSCH_GPU_GRAPH", "1", 0), setenv("ISAC_PDSCH_GPU_GRAPH_SPLIT", "1", 0), 0);
 static void pass_model()
 {
   if (getenv("NR_GPU_PASS_DISCRETE")) setenv("ISAC_GPU_FORCE_DISCRETE", "1", 1);
@@ -71,7 +74,7 @@ static bool pass_ready(GpuPassModule &m)
     }
   nr_gpu_buf_h2d_async(&dt, 0, dt.bytes, nullptr);
   cudaDeviceSynchronize();
-  nr_gpu_pass_cfg_t c = {4, 273, (const int16_t *)dt.dev, 4096, 20};
+  nr_gpu_pass_cfg_t c = {4, 273, (const int16_t *)dt.dev, 4096, 20, 1}; /* v2 graphs (k_llr_stats): a superset of v1's outputs */
   if (m.pass_config(&c) != 0 || m.pass_init(16) != 0) return false;
   m.pass_state = 1;
   return true;
@@ -1636,6 +1639,755 @@ TEST(GpuPassUl, FailStreakIsAtomic) {
   for (auto &t : th) t.join();
   ASSERT_EQ(1, ul_hyp_cache_get(0x78, &g));
   EXPECT_EQ(4000 & 255, g.fail_streak) << "no lost increments (uint8 streak wraps)";
+}
+
+/* ===================================================== DL GPU data path v2, Task 1 (ISAC_PDSCH_GPU_GRAPH) ===================================================== */
+#include "nr_gpu_graph_pool.h"
+/* v2: the pass's LLR statistics equal the stage path's host loops (passive_decode_body_core, demod_ok block) for every warm shape, CRC ok and CRC fail. */
+TEST(GpuGraph, LlrStatsEqualStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m));
+  int n = 0, n_fail = 0;
+  for (auto shape : GpuPassFixture::warm_shapes()) {
+    for (double snr : {20.0, -3.0}) { /* decodes / fails */
+      GpuPassFixture::noise_db = snr;
+      GpuPassFixture fx = GpuPassFixture::from_shape(shape, 13);
+      ASSERT_TRUE(fx.tb_ok_built);
+      fx.bind();
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64), sb(fx.tb.A / 8 + 64);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      ASSERT_EQ(0, m.pass_try(fx.job, &g));
+      ASSERT_EQ(0, fx.run_stage_path(&s));
+      const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+      ASSERT_GT(ref.llr_n, 0u);
+      EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << "nrb " << shape.nrb_class << " nl " << shape.nl << " qm " << shape.qm << " snr " << snr
+                                                            << ": n " << g.llr_stats.llr_n << "/" << ref.llr_n << " absum " << g.llr_stats.llr_absum << "/" << ref.llr_absum
+                                                            << " sgnsum " << g.llr_stats.llr_sgnsum << "/" << ref.llr_sgnsum << " pos " << g.llr_stats.llr_pos << "/" << ref.llr_pos;
+      n++;
+      n_fail += !g.tb_ok;
+    }
+  }
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuGraph.LlrStatsEqualStagePath: %d passes, %d CRC fail\n", n, n_fail);
+  EXPECT_GT(n_fail, 0) << "the -3 dB arm should fail some CRCs";
+  /* odd G: the stride-32 and i + 3 < G edges of the loops (G = 3: magnitudes only; 33, 35: a second sample, sign stats of one; 0: the pass refuses the job) */
+  GpuPassFixture fx = GpuPassFixture::from_shape(GpuPassFixture::warm_shapes()[4 * 4 + 1], 13);
+  ASSERT_TRUE(fx.tb_ok_built);
+  nr_gpu_pass_result_t s0{};
+  std::vector<uint8_t> sb(fx.tb.A / 8 + 64), gb(fx.tb.A / 8 + 64);
+  s0.tb = sb.data();
+  ASSERT_EQ(0, fx.run_stage_path(&s0));
+  const std::vector<int16_t> pre = fx.llr_pre, post = fx.llr_post;
+  for (uint32_t G : {3u, 33u, 35u, 0u}) {
+    fx.bind();
+    fx.job->G = G;
+    fx.job->norm = 0;
+    nr_gpu_pass_result_t g{};
+    g.tb = gb.data();
+    if (!G) {
+      EXPECT_EQ(1, m.pass_try(fx.job, &g)) << "G = 0 is refused: no statistics are produced or read";
+      continue;
+    }
+    ASSERT_EQ(0, m.pass_try(fx.job, &g)) << "G " << G;
+    fx.llr_pre.assign(pre.begin(), pre.begin() + G);
+    fx.llr_post.assign(post.begin(), post.begin() + G);
+    const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+    EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << "G " << G << ": n " << g.llr_stats.llr_n << "/" << ref.llr_n << " nbit " << g.llr_stats.nbit[0] << "/" << ref.nbit[0];
+  }
+}
+/* v2: a thread that reaches the pass late (the async recovery worker) claims a prewarmed buffer set instead of hitting the nomem gate; an empty pool returns NULL,
+ * counted, and nothing is allocated on the GPU (the claim only pops a pre-filled stack). */
+TEST(GpuGraph, LateThreadClaimsPrewarmedPool) {
+  static nr_gpu_graph_pool_t pool;
+  ASSERT_EQ(2, nr_gpu_graph_pool_fill(&pool, 2, 4096, 1024)); /* pre-fence */
+  uint64_t a0 = 0, d0 = 0, a1 = 0, d1 = 0;
+  nr_gpu_memory_stats(&a0, &d0);
+  nr_gpu_graph_set_t *s1 = nullptr, *s2 = nullptr, *s3 = nullptr;
+  std::thread t([&] { s1 = nr_gpu_graph_pool_take(&pool); });
+  t.join();
+  ASSERT_NE(nullptr, s1);
+  EXPECT_TRUE(s1->out && s1->job && s1->llr && s1->shadow);
+  s2 = nr_gpu_graph_pool_take(&pool);
+  ASSERT_NE(nullptr, s2);
+  EXPECT_NE(s1, s2) << "two threads never share a set";
+  s3 = nr_gpu_graph_pool_take(&pool);
+  EXPECT_EQ(nullptr, s3) << "pool exhausted -> NULL, counted, never an allocation";
+  EXPECT_EQ(2u, pool.claimed);
+  EXPECT_EQ(1u, pool.empty);
+  nr_gpu_memory_stats(&a1, &d1);
+  EXPECT_EQ(a0, a1);
+  EXPECT_EQ(d0, d1);
+  /* concurrent claims: every set handed out once */
+  static nr_gpu_graph_pool_t p8;
+  ASSERT_EQ(NR_GPU_GRAPH_POOL, nr_gpu_graph_pool_fill(&p8, NR_GPU_GRAPH_POOL, 64, 64));
+  std::atomic<int> got{0};
+  std::vector<std::thread> th;
+  std::vector<nr_gpu_graph_set_t *> seen(16, nullptr);
+  for (int i = 0; i < 16; i++) th.emplace_back([&, i] { seen[i] = nr_gpu_graph_pool_take(&p8); if (seen[i]) got++; });
+  for (auto &x : th) x.join();
+  EXPECT_EQ(NR_GPU_GRAPH_POOL, got.load());
+  EXPECT_EQ((uint64_t)NR_GPU_GRAPH_POOL, p8.claimed);
+  std::sort(seen.begin(), seen.end());
+  EXPECT_EQ(seen.end(), std::adjacent_find(seen.begin() + (16 - NR_GPU_GRAPH_POOL), seen.end()));
+  EXPECT_EQ(16u - NR_GPU_GRAPH_POOL, p8.empty);
+  /* the claim of nr_gpu_graph_pool_claim: v2 off claims nothing and counts nothing; a released set (its thread exited) is served again */
+  EXPECT_EQ(nullptr, nr_gpu_graph_pool_claim_set(&pool, 0));
+  EXPECT_EQ(2u, pool.claimed);
+  EXPECT_EQ(1u, pool.empty);
+  EXPECT_FALSE(nr_gpu_graph_pool_avail(&pool));
+  nr_gpu_graph_pool_put(&pool, s1);
+  EXPECT_TRUE(nr_gpu_graph_pool_avail(&pool));
+  EXPECT_EQ(s1, nr_gpu_graph_pool_claim_set(&pool, 1));
+  EXPECT_EQ(1u, pool.released);
+  EXPECT_EQ(3u, pool.claimed);
+}
+
+/* ===================================================== v2 Task 2: probes on the pass (ISAC_PDSCH_GPU_GRAPH_COVER) ===================================================== */
+/* a layout probe (code block 0 only, the body's symbol horizon) through the pass equals the stage path's probe body: seg_ok[0], need_cpu, the final LLRs
+ * (zeros past the horizon) and the LLR statistics; nothing past block 0 is reported and the TB is never ok when C > 1. CRC ok and CRC fail. */
+TEST(GpuGraphCover, ProbeEqualsStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm);
+  int n = 0, n_hor = 0, n_ok = 0;
+  for (auto shape : GpuPassFixture::warm_shapes()) {
+    for (double snr : {20.0, -3.0}) {
+      GpuPassFixture::noise_db = snr;
+      GpuPassFixture fx = GpuPassFixture::from_shape(shape, 17);
+      ASSERT_TRUE(fx.tb_ok_built);
+      fx.make_probe();
+      nr_gpu_pass_shape_t w = fx.job->shape; /* the probe's key: the class of one code block (warmed by nr_gpu_pass_warmup for every PRB class) */
+      ASSERT_EQ(0, m.pass_warm(&w, shape.nl >= 2 ? 3 : 0, 0, 0));
+      ASSERT_EQ(0, fx.job->llr_out_all) << "the body's setting: a probe's LLRs reach llr_out without it"; /* (a CRC-ok C = 1 probe left llr_out stale: replay 2026-10-17) */
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64), sb(fx.tb.A / 8 + 64);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      const std::string what = "nrb " + std::to_string(shape.nrb_class) + " nl " + std::to_string(shape.nl) + " qm " + std::to_string(shape.qm) + " C " + std::to_string(fx.tb.C) +
+                               " horizon " + std::to_string(fx.probe_last) + " snr " + std::to_string(snr);
+      ASSERT_EQ(0, m.pass_try(fx.job, &g)) << what;
+      ASSERT_EQ(0, fx.run_stage_path(&s)) << what;
+      EXPECT_EQ(s.seg_ok[0], g.seg_ok[0]) << what;
+      EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+      for (int r = 1; r < NR_GPU_PASS_MAX_CB; r++) ASSERT_EQ(0, g.seg_ok[r]) << what << " block " << r;
+      EXPECT_EQ(0, g.tb_ok) << what;
+      EXPECT_EQ(0, memcmp(fx.llr_ref.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs";
+      const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+      EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << what << ": llr_n " << g.llr_stats.llr_n << "/" << ref.llr_n << " zero " << g.llr_stats.llr_zero << "/" << ref.llr_zero;
+      if (g.seg_ok[0] && fx.tb.C > 1) EXPECT_EQ(0, memcmp(gb.data(), fx.tb.payload.data(), (fx.tb.K >> 3) - (fx.tb.F >> 3) - 3)) << what << ": block 0 bytes";
+      n++;
+      n_hor += fx.probe_last >= 0;
+      n_ok += g.seg_ok[0];
+    }
+  }
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuGraphCover.ProbeEqualsStagePath: %d probes, %d with a horizon, %d block-0 CRC ok\n", n, n_hor, n_ok);
+  EXPECT_GT(n_hor, 0);
+  EXPECT_GT(n_ok, 0);
+  EXPECT_LT(n_ok, n) << "the -3 dB arm should fail some";
+}
+/* v2 Task 2 review: a probe never takes the last free instance (ISAC_PDSCH_GPU_GRAPH_PROBE_RESERVE, default 1): with one instance free a probe is refused and counted
+ * probe_busy (o[15]), not busy (o[3]); a real grant still gets it. */
+TEST(GpuGraphCover, ProbeLeavesLastInstanceToRealGrants) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_hold);
+  const auto shape = GpuPassFixture::warm_shapes()[0];
+  GpuPassFixture fx = GpuPassFixture::from_shape(shape, 23);
+  ASSERT_TRUE(fx.tb_ok_built);
+  GpuPassFixture px = GpuPassFixture::from_shape(shape, 23);
+  px.make_probe();
+  nr_gpu_pass_shape_t w = px.job->shape;
+  ASSERT_EQ(0, m.pass_warm(&w, shape.nl >= 2 ? 3 : 0, 0, 0));
+  std::vector<uint8_t> gb(fx.tb.A / 8 + 64);
+  nr_gpu_pass_result_t g{};
+  g.tb = gb.data();
+  uint64_t o0[16], o1[16];
+  m.pass_hold((1u << NR_GPU_PASS_RING) - 2u, 1); /* all but instance 0 */
+  m.pass_counters(o0);
+  px.bind();
+  EXPECT_EQ(1, m.pass_try(px.job, &g)) << "the probe took the last free instance";
+  fx.bind();
+  EXPECT_EQ(0, m.pass_try(fx.job, &g)) << "the real grant found no instance";
+  m.pass_counters(o1);
+  m.pass_hold((1u << NR_GPU_PASS_RING) - 2u, 0);
+  EXPECT_EQ(o0[15] + 1, o1[15]) << "probe_busy";
+  EXPECT_EQ(o0[3], o1[3]) << "a refused probe is not a busy real grant";
+  px.bind();
+  EXPECT_EQ(0, m.pass_try(px.job, &g)) << "with every instance free a probe runs";
+}
+/* a slot-share grant: the estimate covers the group's union above the grant (share_chest_band), the demod reads the grant's REs; equal to the stage path's
+ * share body (TB, seg_ok, final LLRs, nvar, LLR statistics), alone and as a probe. */
+TEST(GpuGraphCover, ShareWidenedChestEqualsStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm);
+  int n = 0;
+  for (int w : {7, 20})
+    for (int si : {1, 16 + 6, 32 + 11, 48 + 5}) /* warm_shapes(): 24 PRB nl 1 qm 4, 48 nl 2 qm 6, 96 nl 3 qm 8, 217 nl 2 qm 4 */
+      for (int probe : {0, 1}) {
+        const nr_gpu_pass_shape_t shape = GpuPassFixture::warm_shapes()[si];
+        if (shape.nrb_class + w > 263) continue; /* the band stays inside the carrier (start_rb 10) */
+        GpuPassFixture::widen_rb = w;
+        GpuPassFixture fx = GpuPassFixture::from_shape(shape, 23);
+        GpuPassFixture::widen_rb = 0;
+        ASSERT_TRUE(fx.tb_ok_built);
+        if (probe) fx.make_probe();
+        nr_gpu_pass_shape_t sw = fx.job->shape;
+        ASSERT_EQ(0, m.pass_warm(&sw, shape.nl >= 2 ? 3 : 0, 0, 0));
+        std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
+        nr_gpu_pass_result_t g{}, s{};
+        g.tb = gb.data(); s.tb = sb.data();
+        const std::string what = "nrb " + std::to_string(shape.nrb_class) + " +" + std::to_string(w) + " nl " + std::to_string(shape.nl) + " probe " + std::to_string(probe);
+        ASSERT_EQ(0, m.pass_try(fx.job, &g)) << what;
+        ASSERT_EQ(0, fx.run_stage_path(&s)) << what;
+        EXPECT_EQ(s.nvar, g.nvar) << what;
+        EXPECT_EQ(probe ? 0 : s.tb_ok, g.tb_ok) << what; /* a probe is never a decoded TB */
+        EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+        if (!probe) EXPECT_TRUE(g.tb_ok) << what << ": 20 dB decodes";
+        if (g.tb_ok) EXPECT_EQ(0, memcmp(gb.data(), sb.data(), fx.tb.A / 8)) << what;
+        else EXPECT_EQ(0, memcmp(fx.llr_ref.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs";
+        const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+        EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << what;
+        n++;
+      }
+  printf("GpuGraphCover.ShareWidenedChestEqualsStagePath: %d grants\n", n);
+  EXPECT_GE(n, 12);
+}
+/* a probe whose key was never warmed: dl_try returns 1 and counts it unseen; nothing is allocated (platform or module) */
+TEST(GpuGraphCover, ProbeUnseenKeyFallsBackWithoutAlloc) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m));
+  GpuPassFixture fx = GpuPassFixture::from_shape({6, 13, 4, 2, 2, 1, 1}, 19); /* PRB class 6: no test warms it */
+  ASSERT_TRUE(fx.tb_ok_built);
+  fx.make_probe();
+  std::vector<uint8_t> gb(fx.tb.A / 8 + 64);
+  nr_gpu_pass_result_t g{};
+  g.tb = gb.data();
+  uint64_t a0, d0, a1, d1, o0[16], o1[16];
+  nr_gpu_memory_stats(&a0, &d0);
+  m.pass_counters(o0);
+  EXPECT_EQ(1, m.pass_try(fx.job, &g));
+  m.pass_counters(o1);
+  nr_gpu_memory_stats(&a1, &d1);
+  EXPECT_EQ(o0[2] + 1, o1[2]) << "counted unseen";
+  EXPECT_EQ(o0[10], o1[10]) << "the module built (allocated) a graph";
+  EXPECT_EQ(o0[9], o1[9]);
+  EXPECT_EQ(a0, a1) << "the platform allocated";
+  EXPECT_EQ(d0, d1);
+}
+
+/* ===================================================== DL GPU data path v2, Task 3 (ISAC_PDSCH_GPU_GRAPH_SPLIT) ===================================================== */
+/* the C, D and L sub-graphs launched back to back equal the single v1 graph and the stage path, every warm shape, CRC ok and CRC fail: TB, seg_ok, CRC verdict,
+ * need_cpu, nvar and per-antenna nvar, the chest post outputs, LLR statistics, the final LLRs of a failing TB and the caller's rxdataF. */
+TEST(GpuGraphSplit, ThreeLaunchesEqualSingleGraphAndStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  int n = 0, n_fail = 0;
+  uint64_t o0[16], o1[16];
+  for (auto shape : GpuPassFixture::warm_shapes()) {
+    for (double snr : {20.0, -3.0}) {
+      GpuPassFixture::noise_db = snr;
+      GpuPassFixture fx = GpuPassFixture::from_shape(shape, 11);
+      ASSERT_TRUE(fx.tb_ok_built);
+      fx.bind();
+      fx.job->llr_out_all = 1; /* the final LLRs of every pass, CRC ok too */
+      const std::string what = "nrb " + std::to_string(shape.nrb_class) + " nl " + std::to_string(shape.nl) + " qm " + std::to_string(shape.qm) + " snr " + std::to_string(snr);
+      std::vector<uint8_t> b1(fx.tb.A / 8 + 64, 0xAA), bg(fx.tb.A / 8 + 64, 0x5A), bs(fx.tb.A / 8 + 64, 0x55);
+      nr_gpu_pass_result_t one{}, g{}, s{};
+      one.tb = b1.data(); g.tb = bg.data(); s.tb = bs.data();
+      m.pass_split(0);
+      ASSERT_EQ(0, m.pass_try(fx.job, &one)) << what << ": single graph";
+      const std::vector<int16_t> llr_one = fx.llr_pass, rxF_one = fx.rxF_out;
+      m.pass_split(1);
+      nr_gpu_pass_shape_t w = fx.job->shape;
+      ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm)) << what;
+      m.pass_counters(o0);
+      ASSERT_EQ(0, m.pass_try(fx.job, &g)) << what << ": split";
+      m.pass_counters(o1);
+      m.pass_split(0);
+      EXPECT_EQ(o0[1] + 1, o1[1]) << what << ": a graph hit";
+      EXPECT_EQ(o0[2] + o0[3] + o0[4] + o0[5], o1[2] + o1[3] + o1[4] + o1[5]) << what << ": no fallback";
+      ASSERT_EQ(0, fx.run_stage_path(&s)) << what;
+      for (const nr_gpu_pass_result_t *r : {&s, &one}) {
+        const char *ref = r == &s ? " vs stage path" : " vs single graph";
+        EXPECT_EQ(r->need_cpu, g.need_cpu) << what << ref;
+        EXPECT_EQ(r->tb_ok, g.tb_ok) << what << ref;
+        EXPECT_EQ(r->nvar, g.nvar) << what << ref;
+        EXPECT_EQ(0, memcmp(r->nvar_ant, g.nvar_ant, sizeof(g.nvar_ant))) << what << ref;
+        EXPECT_EQ(0, memcmp(r->seg_ok, g.seg_ok, sizeof(g.seg_ok))) << what << ref;
+        EXPECT_EQ(0, memcmp(r->tb, g.tb, g.tbs / 8)) << what << ref;
+      }
+      EXPECT_EQ(0, memcmp(&one.post, &g.post, sizeof(g.post))) << what << ": chest post outputs";
+      EXPECT_EQ(0, memcmp(&one.llr_stats, &g.llr_stats, sizeof(g.llr_stats))) << what << ": LLR statistics";
+      const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+      EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << what << ": LLR statistics vs the host loops";
+      EXPECT_EQ(0, memcmp(llr_one.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs vs single graph";
+      if (!g.tb_ok && !g.need_cpu) {
+        EXPECT_EQ(0, memcmp(fx.llr_ref.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs vs stage path";
+        n_fail++;
+      }
+      EXPECT_TRUE(rxF_one == fx.rxF_out) << what << ": rxdataF";
+      for (int a = 0; a < 4; a++)
+        for (int sy = 0; sy < 14; sy++)
+          ASSERT_EQ(0, memcmp(&fx.rxF_out[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], &fx.rxF_ref[2 * ((size_t)a * 14 * 4096 + (size_t)sy * 4096)], 4096 * 4))
+              << "rxdataF, ant " << a << " sym " << sy << ", " << what;
+      n++;
+    }
+  }
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuGraphSplit.ThreeLaunchesEqualSingleGraphAndStagePath: %d passes, %d CRC fail\n", n, n_fail);
+  EXPECT_GT(n_fail, 0);
+}
+/* segmented grants of 17-32 segments (class 32, split only): the split pass equals the stage path's segmented body; the single-graph mode refuses the class */
+TEST(GpuGraphSplit, ThirtyTwoSegmentsEqualStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  const SegCase cases[] = {
+      {"prg2 64 PRB: 32 segs rank1", 1, 4, 64, 0, 2, 0, 0},
+      {"prg2 34 PRB: 17 segs rank1", 1, 2, 34, 0, 2, 0, 0},
+      {"interleaved L2 60 PRB in 273: 30 segs rank1", 1, 4, 60, 0, 0, 2, 273},
+      {"interleaved L2 + BWPStart 12 refPoint 0, 24 segs rank1", 1, 6, 48, 0, 0, 2, 200, 12, 0},
+  };
+  int n = 0, decoded = 0;
+  for (const SegCase &c : cases) {
+    const auto sd = seg_layout(c.n, c.start, c.prg, c.interleave, c.bwp);
+    ASSERT_GT(sd.size(), 16u) << c.name;
+    ASSERT_LE(sd.size(), 32u) << c.name;
+    const int nsegc = nr_gpu_pass_nseg_class((int)sd.size());
+    ASSERT_EQ(32, nsegc) << c.name;
+    for (int corrupt : {-1, 0}) {
+      nr_gpu_pass_shape_t sh = {(uint16_t)c.n, 13, (uint16_t)c.nl, (uint16_t)c.qm, 2, 1, 1, (uint16_t)nsegc};
+      GpuPassFixture fx = GpuPassFixture::from_shape(sh, 31 + n, corrupt, &sd, c.bwp_start, c.ref_point);
+      ASSERT_TRUE(fx.tb_ok_built) << c.name;
+      fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
+      fx.shape.nrb_class = (uint16_t)nr_gpu_pass_nrb_class(c.n);
+      fx.bind();
+      nr_gpu_pass_shape_t w = fx.shape;
+      m.pass_split(0);
+      EXPECT_EQ(-1, m.pass_warm(&w, 0, fx.job->dj.align, fx.job->dj.want_evm)) << c.name << ": the single-graph mode has no 32-segment class";
+      m.pass_split(1);
+      ASSERT_EQ(0, m.pass_warm(&w, 0, fx.job->dj.align, fx.job->dj.want_evm)) << c.name;
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
+      std::vector<int16_t> brfo((size_t)4 * 2 * 4096 * 2, 0x7e);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      g.brfo_rows = brfo.data();
+      const int rc = m.pass_try(fx.job, &g);
+      m.pass_split(0);
+      ASSERT_EQ(0, rc) << c.name << " corrupt " << corrupt;
+      ASSERT_EQ(0, fx.run_stage_path(&s));
+      const std::string what = std::string(c.name) + " nseg " + std::to_string(sd.size()) + " corrupt " + std::to_string(corrupt) + " C " + std::to_string(fx.tb.C);
+      EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+      EXPECT_EQ(s.tb_ok, g.tb_ok) << what;
+      EXPECT_EQ(s.nvar, g.nvar) << what;
+      EXPECT_EQ(0, memcmp(s.nvar_ant, g.nvar_ant, sizeof(s.nvar_ant))) << what;
+      EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+      if (!g.need_cpu) EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+      EXPECT_EQ(0, memcmp(brfo.data(), fx.est_l0.data(), brfo.size() * 2)) << "layer-0 estimates in data order, " << what;
+      if (g.tb_ok) {
+        EXPECT_EQ(0, memcmp(g.tb, fx.tb.payload.data(), fx.tb.A / 8)) << what;
+        decoded++;
+      } else if (!g.need_cpu)
+        EXPECT_EQ(0, memcmp(fx.llr_pass.data(), fx.llr_ref.data(), (size_t)fx.tb.G * 2)) << what;
+      for (int a = 0; a < 4; a++)
+        for (int sy = 0; sy < 14; sy++)
+          ASSERT_EQ(0, memcmp(&fx.rxF_out[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], &fx.rxF_ref[2 * ((size_t)a * 14 * 4096 + (size_t)sy * 4096)], 4096 * 4))
+              << "rxdataF, ant " << a << " sym " << sy << ", " << what;
+      n++;
+    }
+  }
+  printf("GpuGraphSplit.ThirtyTwoSegmentsEqualStagePath: %d grants, decoded %d\n", n, decoded);
+  EXPECT_GE(decoded, 3) << "the clean grants should decode";
+}
+/* ISAC_PDSCH_GPU_GRAPH_SEG128: segmented grants of 33-128 segments (classes 64 and 128, split only). The C sub-graph runs the chest rows in chunks of whole (DM-RS symbol, layer)
+ * groups that reuse the scratch / LS rows (this process: 512 scratch rows, 1024 LS rows; the stage path chunks its own way), up to 2048 rows. The split pass equals the stage path's
+ * segmented body, CRC ok and CRC fail; the single-graph mode refuses the classes. */
+TEST(GpuGraphSplit, BeyondThirtyTwoSegmentsEqualStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  const SegCase cases[] = {
+      {"prg2 128 PRB: 64 segs rank 1", 1, 4, 128, 0, 2, 0, 0},
+      {"prg2 80 PRB: 40 segs rank 2 (2 chunks)", 2, 2, 80, 0, 2, 0, 0},
+      {"interleaved L2 120 PRB in 273: 60 segs rank 1", 1, 6, 120, 0, 0, 2, 273},
+      {"prg2 217 PRB: 109 segs rank 1 (2 chunks)", 1, 4, 217, 0, 2, 0, 0},
+      {"interleaved L2 200 PRB in 273: 100 segs rank 2 (4 chunks, 2048 rows)", 2, 4, 200, 0, 0, 2, 273},
+      {"interleaved L2 + BWPStart 12 refPoint 0, 50 segs rank 1", 1, 4, 100, 0, 0, 2, 240, 12, 0},
+  };
+  int n = 0, decoded = 0;
+  for (const SegCase &c : cases) {
+    const auto sd = seg_layout(c.n, c.start, c.prg, c.interleave, c.bwp);
+    ASSERT_GT(sd.size(), 32u) << c.name;
+    ASSERT_LE(sd.size(), 128u) << c.name;
+    const int nsegc = nr_gpu_pass_nseg_class((int)sd.size());
+    ASSERT_GE(nsegc, 64) << c.name;
+    for (int corrupt : {-1, 0}) {
+      nr_gpu_pass_shape_t sh = {(uint16_t)c.n, 13, (uint16_t)c.nl, (uint16_t)c.qm, 2, 1, 1, (uint16_t)nsegc};
+      GpuPassFixture fx = GpuPassFixture::from_shape(sh, 51 + n, corrupt, &sd, c.bwp_start, c.ref_point);
+      ASSERT_TRUE(fx.tb_ok_built) << c.name;
+      fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
+      fx.shape.nrb_class = (uint16_t)nr_gpu_pass_nrb_class(c.n);
+      fx.bind();
+      fx.job->llr_out_all = 1;
+      nr_gpu_pass_shape_t w = fx.shape;
+      m.pass_split(0);
+      EXPECT_EQ(-1, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm)) << c.name << ": the single-graph mode has no class above 32 segments";
+      m.pass_split(1);
+      ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm)) << c.name;
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      const int rc = m.pass_try(fx.job, &g);
+      m.pass_split(0);
+      ASSERT_EQ(0, rc) << c.name << " corrupt " << corrupt;
+      ASSERT_EQ(0, fx.run_stage_path(&s));
+      const std::string what = std::string(c.name) + " nseg " + std::to_string(sd.size()) + " corrupt " + std::to_string(corrupt) + " C " + std::to_string(fx.tb.C);
+      EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+      EXPECT_EQ(s.tb_ok, g.tb_ok) << what;
+      EXPECT_EQ(s.nvar, g.nvar) << what;
+      EXPECT_EQ(0, memcmp(s.nvar_ant, g.nvar_ant, sizeof(s.nvar_ant))) << what;
+      EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+      if (!g.need_cpu) {
+        EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+        EXPECT_EQ(0, memcmp(fx.llr_pass.data(), fx.llr_ref.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs";
+      }
+      const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+      EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << what;
+      if (g.tb_ok) {
+        EXPECT_EQ(0, memcmp(g.tb, fx.tb.payload.data(), fx.tb.A / 8)) << what;
+        decoded++;
+      }
+      for (int a = 0; a < 4; a++)
+        for (int sy = 0; sy < 14; sy++)
+          ASSERT_EQ(0, memcmp(&fx.rxF_out[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], &fx.rxF_ref[2 * ((size_t)a * 14 * 4096 + (size_t)sy * 4096)], 4096 * 4))
+              << "rxdataF, ant " << a << " sym " << sy << ", " << what;
+      n++;
+    }
+  }
+  printf("GpuGraphSplit.BeyondThirtyTwoSegmentsEqualStagePath: %d grants, decoded %d\n", n, decoded);
+  EXPECT_GE(decoded, 3) << "the clean grants should decode";
+  EXPECT_LT(decoded, n);
+}
+/* the production-like warm set (nr_gpu_pass_warmup's loops: DM-RS 3,2 x PRB classes x layers x code block classes x two demod variants x EVM, plus the segment classes
+ * 1..32 within the chest rows) in split mode: the GPUGRAPH census says mb (instance buffers + sub-graphs) <= 1024 and execs = 4 x (C + D + L) */
+TEST(GpuGraphSplit, WarmSetFitsBudget) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  m.pass_split(1);
+  static const int nrbs[] = {273, 217, 136, 96, 48, 24, 12, 6}, nds[] = {3, 2}, segc[] = {0, 1, 2, 4, 8, 16, 32};
+  int made = 0, refused = 0;
+  const auto t0 = std::chrono::steady_clock::now();
+  for (int nd : nds)
+    for (int nrb : nrbs)
+      for (int nl = 1; nl <= 4; nl++)
+        for (int ns : segc) {
+          if (ns > nrb) continue;
+          const int cmax = nrb * nl * 132 * 8 * 93 / 100 / 8400 + 1;
+          for (int ncb = 1; ncb <= 32 && ncb / 2 < cmax; ncb <<= 1)
+            for (int v = 0; v < 2; v++) {
+              const nr_gpu_pass_shape_t sh = {(uint16_t)nrb, 13, (uint16_t)nl, 6, (uint16_t)nd, (uint16_t)ncb, 1, (uint16_t)ns};
+              if (m.pass_warm(&sh, nl >= 2 ? 2 + v : 0, nl == 1 ? v : 0, 1) == 0) made++;
+              else refused++; /* more chest rows than the stage buffers of this process take */
+            }
+        }
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  char buf[1024];
+  m.pass_stats(buf, sizeof(buf));
+  m.pass_split(0);
+  const char *p = strstr(buf, "GPUGRAPH split ");
+  ASSERT_NE(nullptr, p) << buf;
+  unsigned long C = 0, D = 0, L = 0, ex = 0, mb = 0, capped = 0;
+  ASSERT_EQ(5, sscanf(p, "GPUGRAPH split C=%lu D=%lu L=%lu execs=%lu mb=%lu", &C, &D, &L, &ex, &mb)) << p;
+  const char *q = strstr(p, "capped=");
+  ASSERT_NE(nullptr, q);
+  capped = strtoul(q + 7, nullptr, 10);
+  printf("GpuGraphSplit.WarmSetFitsBudget: %d classes covered (%d refused) in %.0f ms: %s\n", made, refused, ms, p);
+  EXPECT_GT(made, 1000) << "the product of the class set is covered by the sum of the sub-graphs";
+  EXPECT_EQ(0u, capped) << "the warm set hit the memory cap";
+  EXPECT_LE(mb, 1024u);
+  EXPECT_EQ(ex, 4 * (C + D + L));
+  EXPECT_LE(C + D + L, 600u);
+}
+
+/* review S6: grants with ONE DM-RS symbol (the split warm set adds ndmrs 1 contiguous C keys): the split pass equals the stage path, CRC ok and CRC fail */
+TEST(GpuGraphSplit, OneDmrsSymbolEqualsStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  GpuPassFixture::n_dm = 1;
+  int n = 0, n_ok = 0;
+  for (int si : {0, 5, 16 + 6, 32 + 11, 48 + 5}) /* 24 PRB nl 1 qm 2, 24 nl 2 qm 4, 48 nl 2 qm 6, 96 nl 3 qm 8, 217 nl 2 qm 4 */
+    for (double snr : {20.0, -3.0}) {
+      GpuPassFixture::noise_db = snr;
+      nr_gpu_pass_shape_t sh = GpuPassFixture::warm_shapes()[si];
+      sh.ndmrs = 1;
+      GpuPassFixture fx = GpuPassFixture::from_shape(sh, 13);
+      ASSERT_TRUE(fx.tb_ok_built);
+      fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
+      fx.bind();
+      fx.job->llr_out_all = 1;
+      const std::string what = "ndmrs 1 nrb " + std::to_string(sh.nrb_class) + " nl " + std::to_string(sh.nl) + " qm " + std::to_string(sh.qm) + " snr " + std::to_string(snr);
+      m.pass_split(1);
+      nr_gpu_pass_shape_t w = fx.job->shape;
+      ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm)) << what;
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      const int rc = m.pass_try(fx.job, &g);
+      m.pass_split(0);
+      ASSERT_EQ(0, rc) << what;
+      ASSERT_EQ(0, fx.run_stage_path(&s)) << what;
+      EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+      EXPECT_EQ(s.tb_ok, g.tb_ok) << what;
+      EXPECT_EQ(s.nvar, g.nvar) << what;
+      EXPECT_EQ(0, memcmp(s.nvar_ant, g.nvar_ant, sizeof(s.nvar_ant))) << what;
+      EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+      if (!g.need_cpu) {
+        EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+        EXPECT_EQ(0, memcmp(fx.llr_ref.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs";
+      }
+      const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+      EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << what;
+      EXPECT_TRUE(fx.rxF_out.size() > 0);
+      for (int a = 0; a < 4; a++)
+        for (int sy = 0; sy < 14; sy++)
+          ASSERT_EQ(0, memcmp(&fx.rxF_out[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], &fx.rxF_ref[2 * ((size_t)a * 14 * 4096 + (size_t)sy * 4096)], 4096 * 4))
+              << "rxdataF, ant " << a << " sym " << sy << ", " << what;
+      n++;
+      n_ok += g.tb_ok;
+    }
+  GpuPassFixture::n_dm = 2;
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuGraphSplit.OneDmrsSymbolEqualsStagePath: %d grants, decoded %d\n", n, n_ok);
+  EXPECT_GE(n_ok, 3);
+  EXPECT_LT(n_ok, n);
+}
+
+/* ===================================================== DL GPU data path v2, Task 4 (ISAC_PDSCH_GPU_GRAPH_RETRY) ===================================================== */
+/* One decode call (nr_gpu_pass_call_begin / _end) holds its instance: the bodies of the call enter at C when the chest inputs changed (first body, other pilots = a CDM /
+ * DM-RS hypothesis change, after a dirty mark) and at D otherwise (a probe of the same grant: other demod horizon, code blocks and PassBlk; an RV change: other rate-dematching
+ * tables). Every body equals the stage path from scratch (TB, CRC verdict, need_cpu, seg_ok, nvar, final LLRs, LLR statistics, rxdataF). DISCRETE: a D entry reading the
+ * previous body's PassBlk / geometry would differ (review T4-1). A fallback in the middle of the call (unseen class) keeps the hold; call_end releases the instance. */
+TEST(GpuGraphRetry, EntryFollowsChangedInput) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split && m.pass_hold && m.call_begin && m.call_end && m.call_dirty && m.retry_counters);
+  auto warm = [&](GpuPassFixture &f) {
+    nr_gpu_pass_shape_t w = f.job->shape;
+    return m.pass_warm(&w, f.job->dj.qam_mode, f.job->dj.align, f.job->dj.want_evm);
+  };
+  int8_t inst = -1;
+  /* one body of the call; want_d: the entry expected (1 = D) */
+  auto body = [&](GpuPassFixture &f, int want_d, const std::string &what) {
+    f.job->llr_out_all = 1;
+    std::vector<uint8_t> gb(f.tb.A / 8 + 64, 0xAA), sb(f.tb.A / 8 + 64, 0x55);
+    nr_gpu_pass_result_t g{}, s{};
+    g.tb = gb.data(); s.tb = sb.data();
+    uint64_t c0[4], c1[4];
+    m.retry_counters(c0);
+    ASSERT_EQ(0, m.pass_try(f.job, &g)) << what;
+    m.retry_counters(c1);
+    EXPECT_EQ(c0[1] + (want_d ? 1 : 0), c1[1]) << what << ": entry at D";
+    EXPECT_EQ(c0[0] + (want_d ? 0 : 1), c1[0]) << what << ": entry at C";
+    if (inst >= 0) EXPECT_EQ(inst, g.instance) << what << ": the held instance";
+    inst = g.instance;
+    ASSERT_EQ(0, f.run_stage_path(&s)) << what;
+    EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+    EXPECT_EQ(f.is_probe ? 0 : s.tb_ok, g.tb_ok) << what;
+    EXPECT_EQ(s.nvar, g.nvar) << what;
+    EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+    if (!g.need_cpu) {
+      if (g.tb_ok) EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+      EXPECT_EQ(0, memcmp(f.llr_ref.data(), f.llr_pass.data(), (size_t)f.tb.G * 2)) << what << ": final LLRs";
+    }
+    const nr_gpu_llr_stats_t ref = f.host_llr_stats();
+    EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << what << ": LLR statistics";
+    for (int a = 0; a < 4; a++)
+      for (int sy = 0; sy < 14; sy++)
+        ASSERT_EQ(0, memcmp(&f.rxF_out[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], &f.rxF_ref[2 * ((size_t)a * 14 * 4096 + (size_t)sy * 4096)], 4096 * 4))
+            << "rxdataF, ant " << a << " sym " << sy << ", " << what;
+  };
+  /* the next body's job on the same grant object (same IQ ring, pilot and rxdataF buffers, as the retry arms of one call); rxdataF keeps what the earlier bodies wrote */
+  auto rebind = [](GpuPassFixture &f) {
+    const std::vector<int16_t> keep = f.rxF_out;
+    f.bind();
+    f.rxF_out = keep;
+  };
+  GpuPassFixture ux = GpuPassFixture::from_shape({6, 13, 4, 2, 2, 1, 1}, 19); /* PRB class 6: never warmed (an unseen key in the middle of the call) */
+  m.pass_split(1);
+  int n = 0;
+  const auto sd = seg_layout(32, 0, 4, 0, 0); /* review nit: a segmented grant too (PRG 4: 8 segments) */
+  for (int si : {0, 5, 16 + 6, 48 + 5, -1}) { /* 24 PRB nl 1 qm 2, 24 nl 2 qm 4, 48 nl 2 qm 6, 217 nl 2 qm 4, segmented 32 PRB nl 1 qm 4 */
+    const nr_gpu_pass_shape_t shape = si >= 0 ? GpuPassFixture::warm_shapes()[si] : nr_gpu_pass_shape_t{32, 13, 1, 4, 2, 1, 1, (uint16_t)nr_gpu_pass_nseg_class((int)sd.size())};
+    GpuPassFixture fx = GpuPassFixture::from_shape(shape, 41 + si, -1, si >= 0 ? nullptr : &sd);
+    ASSERT_TRUE(fx.tb_ok_built);
+    if (si < 0) {
+      fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
+      fx.shape.nrb_class = (uint16_t)nr_gpu_pass_nrb_class(32);
+      fx.bind();
+    }
+    const std::string what = "nrb " + std::to_string(shape.nrb_class) + " nl " + std::to_string(shape.nl) + " qm " + std::to_string(shape.qm) + " C " + std::to_string(fx.tb.C) +
+                             " nseg " + std::to_string(fx.segs.size());
+    { /* every key of the call, before it (warming captures on every instance) */
+      GpuPassFixture px = fx;
+      px.make_probe();
+      ASSERT_EQ(0, warm(fx)) << what;
+      ASSERT_EQ(0, warm(px)) << what;
+    }
+    inst = -1;
+    uint64_t h0[4], h1[4];
+    m.retry_counters(h0);
+    m.call_begin();
+    body(fx, 0, what + " first body");
+    ASSERT_FALSE(HasFatalFailure());
+    fx.is_probe = true; /* make_probe() without clearing rxdataF */
+    rebind(fx);
+    body(fx, 1, what + " probe of the same grant");
+    std::vector<uint8_t> ub(ux.tb.A / 8 + 64);
+    nr_gpu_pass_result_t ur{};
+    ur.tb = ub.data();
+    EXPECT_EQ(1, m.pass_try(ux.job, &ur)) << what << ": unseen key in the middle of the call";
+    fx.is_probe = false; fx.n_decode = 0; fx.probe_last = -1;
+    fx.tb.rv = 2;
+    rebind(fx);
+    body(fx, 1, what + " rv 2");
+    fx.tb.rv = 0;
+    for (auto &v : fx.pilot[0][0]) v = (int16_t)-v; /* the DM-RS hypothesis changes in place (same buffer): C */
+    rebind(fx);
+    body(fx, 0, what + " other pilots");
+    rebind(fx);
+    body(fx, 1, what + " same inputs again");
+    fx.ring_offset -= 8; /* review nit: a non-pilot C input (the FFT window inside the CP) changes: C */
+    rebind(fx);
+    body(fx, 0, what + " ring offset moved");
+    fx.ring_offset += 8;
+    rebind(fx);
+    body(fx, 0, what + " ring offset back");
+    m.call_dirty(); /* review S3: releases the instance; the call's next pass acquires (and holds) one again */
+    inst = -1;
+    rebind(fx);
+    body(fx, 0, what + " after a dirty mark");
+    m.call_end();
+    m.retry_counters(h1);
+    EXPECT_EQ(h0[2] + 2, h1[2]) << what << ": one held call, held again after the dirty release";
+    EXPECT_EQ(h0[3] + 1, h1[3]) << what << ": one dirty invalidation";
+    /* released: with every other instance busy a pass still finds this one; outside a call the same inputs enter at C */
+    m.pass_hold(((1u << NR_GPU_PASS_RING) - 1u) & ~(1u << inst), 1);
+    rebind(fx);
+    body(fx, 0, what + " after call_end");
+    m.pass_hold(((1u << NR_GPU_PASS_RING) - 1u) & ~(1u << inst), 0);
+    for (auto &v : fx.pilot[0][0]) v = (int16_t)-v;
+    n++;
+  }
+  m.pass_split(0);
+  printf("GpuGraphRetry.EntryFollowsChangedInput: %d calls x 9 bodies\n", n);
+}
+
+/* ===================================================== DL GPU data path v2: DM-RS type 2 in the pass (ISAC_PDSCH_GPU_GRAPH_DMRS2) ===================================================== */
+/* DM-RS configuration type 2 grants (2 adjacent-RE pairs per RB and CDM group; layers 0-1 in CDM group 0, layers 2-3 in group 1 with delta 2) through the split pass: the chest rows
+ * carry the type (the captured k_ls has type 1 baked in), the pilots are 4 c16 per RB. Every output equals the stage path (nr_pdsch_gpu_chest_grant's type-2 rows): TB, CRC verdict,
+ * need_cpu, seg_ok, nvar and per-antenna nvar, final LLRs, LLR statistics, rxdataF. Several PRB classes, layer counts (1, 2: one CDM group; 3, 4: two), 1 and 2 DM-RS symbols,
+ * CRC ok and CRC fail, contiguous and segmented. */
+TEST(GpuGraphDmrs2, Type2EqualsStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  GpuPassFixture::dmrs_type = 2;
+  const auto sd = seg_layout(32, 0, 4, 0, 0); /* PRG 4: 8 segments */
+  int n = 0, n_ok = 0;
+  for (int ndm : {2, 1})
+    for (int si : {0, 5, 16 + 6, 16 + 13, 32 + 11, 48 + 5, -1}) /* 24 PRB nl 1 qm 2, 24 nl 2 qm 4, 48 nl 2 qm 6, 48 nl 4 qm 4, 96 nl 3 qm 8, 217 nl 2 qm 4, segmented 32 PRB nl 2 qm 4 */
+      for (double snr : {20.0, -3.0}) {
+        GpuPassFixture::n_dm = ndm;
+        GpuPassFixture::noise_db = snr;
+        nr_gpu_pass_shape_t sh = si >= 0 ? GpuPassFixture::warm_shapes()[si] : nr_gpu_pass_shape_t{32, 13, 2, 4, 2, 1, 1, (uint16_t)nr_gpu_pass_nseg_class((int)sd.size())};
+        sh.ndmrs = (uint16_t)ndm;
+        GpuPassFixture fx = GpuPassFixture::from_shape(sh, 17 + si, -1, si >= 0 ? nullptr : &sd);
+        ASSERT_TRUE(fx.tb_ok_built);
+        ASSERT_EQ(2, fx.dtype);
+        fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
+        fx.shape.nrb_class = (uint16_t)nr_gpu_pass_nrb_class(si >= 0 ? sh.nrb_class : 32);
+        fx.bind();
+        fx.job->llr_out_all = 1;
+        const std::string what = "type 2 ndmrs " + std::to_string(ndm) + " nrb " + std::to_string(sh.nrb_class) + " nl " + std::to_string(sh.nl) + " qm " + std::to_string(sh.qm) +
+                                 " nseg " + std::to_string(fx.segs.size()) + " snr " + std::to_string(snr);
+        m.pass_split(1);
+        nr_gpu_pass_shape_t w = fx.job->shape;
+        ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm)) << what;
+        std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
+        nr_gpu_pass_result_t g{}, s{};
+        g.tb = gb.data(); s.tb = sb.data();
+        const int rc = m.pass_try(fx.job, &g);
+        m.pass_split(0);
+        ASSERT_EQ(0, rc) << what;
+        ASSERT_EQ(0, fx.run_stage_path(&s)) << what;
+        EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+        EXPECT_EQ(s.tb_ok, g.tb_ok) << what;
+        EXPECT_EQ(s.nvar, g.nvar) << what;
+        EXPECT_EQ(0, memcmp(s.nvar_ant, g.nvar_ant, sizeof(s.nvar_ant))) << what;
+        EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+        if (!g.need_cpu) {
+          EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+          EXPECT_EQ(0, memcmp(fx.llr_ref.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs";
+        }
+        if (g.tb_ok) EXPECT_EQ(0, memcmp(g.tb, fx.tb.payload.data(), fx.tb.A / 8)) << what << ": the transmitted TB";
+        const nr_gpu_llr_stats_t ref = fx.host_llr_stats();
+        EXPECT_EQ(0, memcmp(&ref, &g.llr_stats, sizeof(ref))) << what;
+        for (int a = 0; a < 4; a++)
+          for (int sy = 0; sy < 14; sy++)
+            ASSERT_EQ(0, memcmp(&fx.rxF_out[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], &fx.rxF_ref[2 * ((size_t)a * 14 * 4096 + (size_t)sy * 4096)], 4096 * 4))
+                << "rxdataF, ant " << a << " sym " << sy << ", " << what;
+        n++;
+        n_ok += g.tb_ok;
+      }
+  GpuPassFixture::dmrs_type = 1;
+  GpuPassFixture::n_dm = 2;
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuGraphDmrs2.Type2EqualsStagePath: %d grants, decoded %d\n", n, n_ok);
+  EXPECT_GE(n_ok, n / 3) << "the clean type-2 grants should decode";
+  EXPECT_LT(n_ok, n);
 }
 
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is

@@ -15,7 +15,7 @@
  * flight per process, whatever the number of consumer threads (the PDSCH queue has up to 5). Nothing is allocated after the RX fence: buffers, streams,
  * events and graphs exist from nr_gpu_pass_init(); an unseen shape class returns 1.
  *
- * What a pass does NOT cover (the caller keeps the old path, counted in nr_gpu_pass_stats): grants of more than 16 segments (PRG / VRB-bundle grants of up to 16 segments run in the segmented classes 1, 2, 4, 8, 16: the chest estimates per segment into scratch rows and
+ * What a pass does NOT cover (the caller keeps the old path, counted in nr_gpu_pass_stats): grants of more than 16 segments (32 in the v2 split mode) (PRG / VRB-bundle grants run in the segmented classes 1, 2, 4, 8, 16 [, 32]: the chest estimates per segment into scratch rows and
  * k_seg_compose lays them out in data order, the demod geometry is composed with the old path's RE gather), the chest cache, DM-RS type 2, a single-branch
  * estimate, probes, PT-RS, more than NR_GPU_PASS_MAX_CB code blocks, Z not a multiple of 4, HARQ soft combining, TBs whose decode needs the CPU decoder
  * (zero syndrome with a failing CRC: nr_gpu_pass_result_t::need_cpu), and unseen classes. */
@@ -33,11 +33,24 @@
 #define NR_GPU_PASS_MAX_DMRS 4 /* DM-RS symbols of a grant */
 #define NR_GPU_PASS_MAX_NL 4
 #define NR_GPU_PASS_FP32_DEMOD 2 /* nr_gpu_pass_shape_t.fp32 bit: FP32 demod instantiation */
-#define NR_GPU_PASS_MAX_SEG 16 /* segments of a segmented grant (the largest segment-count class) */
+#define NR_GPU_PASS_MAX_SEG 128 /* segments of a segmented grant (the largest segment-count class; 32 only in the v2 split mode, ISAC_PDSCH_GPU_GRAPH_SPLIT; 64 and 128 with _SEG128) */
+#define NR_GPU_PASS_MAX_SEG_FULL 16 /* the largest segment-count class of a single (v1 / non-split) graph */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* v2 (ISAC_PDSCH_GPU_GRAPH): the LLR statistics of passive_decode_body_core (nr_pdsch_passive_decode.c, the llr_* loops of the demod_ok block), on the device.
+ * The first five fields stay contiguous and first: k_llr_stats_pre indexes them. */
+typedef struct {
+  uint64_t llr_n, llr_absum, llr_zero, llr_sat, llr_clip8, llr_pos; /* before descrambling, stride 32 (llr_pos: after, stride 32) */
+  int64_t llr_sgnsum;                                               /* after descrambling, stride 32 */
+  uint64_t posbit[2], nbit[2];                                      /* after descrambling, 4 LLRs per 32 */
+} nr_gpu_llr_stats_t;
+/* host side (nr_gpu_pass_dl.c): 1 = ISAC_PDSCH_GPU_GRAPH=1 and the module is up in v2 mode; nr_gpu_graph_flag("COVER"|"SPLIT"|"RETRY"|"SLOT"|"LEAN"):
+ * ISAC_PDSCH_GPU_GRAPH_<sub>=1 and the master on */
+int nr_gpu_graph_on(void);
+int nr_gpu_graph_flag(const char *sub);
 
 /* nrb_class: 6,12,24,48,96,136,217,273 (the smallest class >= the grant's PRBs); ncb_class: 1,2,4,8,16,32 (smallest >= C); nsym, qm: informational (they do not change the
  * graph); ndmrs: DM-RS symbols of the grant (1..4); fp32: bit 0 = 1 the float EVM chain (the product build), 0 the FP64 EVM chain (the chest post is always the float build);
@@ -45,7 +58,7 @@ extern "C" {
 typedef struct {
   uint16_t nrb_class, nsym, nl, qm, ndmrs, ncb_class;
   uint8_t fp32;
-  uint16_t nseg_class; /* Task 4b: 0 = a contiguous grant. 1, 2, 4, 8, 16 = a segmented grant (PRG / VRB bundles) of up to that many segments: the chest runs one row set per segment into
+  uint16_t nseg_class; /* Task 4b: 0 = a contiguous grant. 1, 2, 4, 8, 16 (32: split mode) = a segmented grant (PRG / VRB bundles) of up to that many segments: the chest runs one row set per segment into
                         * scratch rows and a compose kernel lays them out in data order (the estimate layout the demod reads); the smallest class >= the segments of the grant. */
   uint8_t ul;          /* Task 7: 1 = a PUSCH pass class (nl = 1, CP-OFDM, DM-RS type 1; nrb_class, ndmrs and ncb_class are its whole structure) */
 } nr_gpu_pass_shape_t;
@@ -58,7 +71,7 @@ static inline int nr_gpu_pass_nrb_class(int nrb)
       return c[i];
   return 0;
 }
-static inline int nr_gpu_pass_nseg_class(int n) /* segmented-grant class: 1, 2, 4, 8, 16; 0 = none (more segments than the largest class) */
+static inline int nr_gpu_pass_nseg_class(int n) /* segmented-grant class: 1, 2, 4, 8, 16, 32, 64, 128; 0 = none (more segments than the largest class) */
 {
   for (int c = 1; c <= NR_GPU_PASS_MAX_SEG; c <<= 1)
     if (n >= 1 && n <= c)
@@ -173,6 +186,11 @@ typedef struct {
   int llr_out_all;  /* 1 = llr_out is filled on CRC success too (tests, FP32 sign checks) */
   uint64_t t_entry_ns; /* Task 8b: CLOCK_MONOTONIC at nr_gpu_pass_{dl,ul}_run entry (0 = not stamped); the module histograms prep / launch-to-done / post */
   nr_gpu_pass_ul_t ul; /* Task 7: the PUSCH inputs of nr_gpu_pass_ul_try (ul.on); the TB fields above (A, C, K, Z, F, E, E2, first_rE2, tbslbrm, BG, R, R2, rv, Qm, it_max, G, scr, shape, llr_out) are shared */
+  /* ---- v2 Task 2 (layout probes). 0 = the defaults (the whole grant) */
+  uint32_t n_decode; /* code blocks decoded (blocks >= n_decode are padding; shape.ncb_class is the class of n_decode), 0 = C; K' / CRC type / E stay those of C */
+  uint32_t G_dem;    /* LLRs the demod writes (a probe past its horizon: fewer); llr[G_dem, G) are zeroed, as the body's cleared buffer. 0 = G */
+  uint8_t dmrs_type; /* v2 ISAC_PDSCH_GPU_GRAPH_DMRS2: 2 = DM-RS type 2 (pil[][]: 4 c16 per RB; the chest rows carry the type), 0 / 1 = type 1 */
+  uint8_t probe;     /* 1 = a layout probe: never a decoded TB (tb_ok = 0, llr_out filled; outcome seg_ok[0]); the low-priority twin stream (ISAC_PDSCH_GPU_PRIO) */
 } nr_gpu_pass_job_t;
 
 /* the per-segment inputs of a segmented job as nr_pdsch_gpu_chest_grant's rows take them: pilot RB (prb_start + the BWP start unless the reference point is CRB 0) and first LS
@@ -217,6 +235,7 @@ typedef struct {
   uint64_t ul_hsum[16];          /* sum |H|^2 over 12 * nrb of every chest row */
   uint32_t ul_nrows;
   uint8_t ul_tb_crc;             /* TB-level CRC24A of a multi-block TB (hp_crc_failed's second condition) */
+  nr_gpu_llr_stats_t llr_stats;  /* v2: the DL LLR statistics (k_llr_stats_pre / _post) */
 } nr_gpu_pass_result_t;
 
 /* Process-wide configuration, before nr_gpu_pass_init: the bit-exact chest reads the receiver's delay table (a fixed pointer, baked into the graphs). */
@@ -225,6 +244,11 @@ typedef struct {
   int n_rb_dl;                 /* fp->N_RB_DL (the DM-RS FO measurement) */
   const int16_t *delay_table;  /* c16 [2 * max_delay_comp + 1][dt_stride]: fp->delay_table[0] */
   int dt_stride, max_delay_comp;
+  int v2;                      /* DL GPU data path v2 (ISAC_PDSCH_GPU_GRAPH): the graphs carry k_llr_stats; 0 = the v1 graph, unchanged */
+  int split;                   /* v2 Task 3 (ISAC_PDSCH_GPU_GRAPH_SPLIT): a DL pass is three sub-graphs C (FEP + chest), D (chest post + demod + LLR post), L (decode), cached under
+                                * separate keys (nrb, nl, ndmrs, nseg) / (nrb, nl, demod variant, EVM) / (ncb) and launched back to back; segment class 32 */
+  int split_mb;                /* split: GPU memory cap of the pass (an estimate: the instance buffers' sizes + cudaMemGetInfo deltas around graph instantiation); warming stops at
+                                * it; the instances alone at or above it turn split off (nr_gpu_pass_split_on). 0 = 1024 */
 } nr_gpu_pass_cfg_t;
 typedef int (*nr_gpu_pass_config_fn)(const nr_gpu_pass_cfg_t *cfg);
 /* pre-fence: allocate the instances and record + instantiate one graph per warm class. max_classes bounds the default warm set

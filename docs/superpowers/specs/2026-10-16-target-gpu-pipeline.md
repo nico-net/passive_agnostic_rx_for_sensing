@@ -4,6 +4,8 @@ Phase 0 Task 6. Design only: no code, no build, no OTA. Inputs: roadmap `docs/su
 
 **Task 4 (GPU stall trace) is NOT done.** Everything that depends on it is marked `TO BE FIXED BY TASK 4` with a provisional value and the reason. They are: the maximum length X of a background kernel (4.2), the priority rules (4.3), and the claim that the RT/disc SM split is sufficient (4.1). Phase 1 plan must re-read these three after Task 4.
 
+**2026-10-17 update:** section 10 ("DL GPU data path v2") replaces rows 4-7 of table 1.1 and ranks 8 and 10 of section 7 for the DL per-grant path. Plan: `docs/superpowers/plans/2026-10-17-dl-gpu-datapath.md`.
+
 Rules that shape the design (roadmap): G3 is done together with G1/G2 (every G1/G2 fix that touches a CPU stage is the GPU port of that stage, CPU kept as reference and fallback); X925 cores for latency threads, A725 for helpers; new GPU interfaces are multi-cell ready; sens6 (RTX 4070, discrete, sm_89, weak FP64) works through a runtime switch `nr_gpu_model()`.
 
 ---
@@ -252,3 +254,252 @@ Ordering logic: ranks 1-4 are small and remove the largest p99 drivers or make t
 - The "fb err" reasons (item F) are hypotheses from reading the return paths; no counter by reason exists yet.
 - V per-thread CPU map; UL `ulBgDisc`, `dmrs_nid_solve` costs (GPU-INVENTORY "Not checked").
 - Effort estimates are the author's.
+
+---
+
+## 10. DL GPU data path v2 (2026-10-17)
+
+Status: design, not implemented. Plan: `docs/superpowers/plans/2026-10-17-dl-gpu-datapath.md`. Branch `csd/int16-gpupath` (base csd/int16 ac5b25a608).
+This section supersedes rows 4-7 of table 1.1 and ranks 8 and 10 of section 7 for the DL per-grant path. Sections 2 (PDCCH), 3 (memory model rules), 4 (streams) and 5 (multi-cell API) still hold; where 10 is more specific, 10 wins.
+
+User decisions (2026-10-17), binding:
+- The whole DL per-grant data path runs on the GPU as one chain with no host round trip between stages: FEP, channel estimation, demod, descrambling, LLR stats, rate de-matching, LDPC, CRC.
+- The CPU keeps control only: DCI parsing, layout solver, RNTI tracker, launch, readback of CRC and soft bits. PDCCH blind decode stays on the CPU.
+- Mechanism: pre-instantiated CUDA graphs per grant shape (or graph update with node parameters). A persistent kernel only if graphs leave a measured gap.
+- Every step is bit-exact with today's path in unit tests and builds/runs on sm_121 and sm_89 (`CMAKE_CUDA_ARCHITECTURES "89;121"`). No GB10-only feature without an sm_89 fallback.
+- Goals: DL p99 < 3 ms on air at daytime load on both cells (TIM PCI 923, Vodafone PCI 415), crc_q >= 80 %, drops < 1 %. Then fewer CPU cores at equal performance (10 % tolerance). Then 2 cells in one process (200 MHz wideband, GPU channelizer). The design must not block batching across cells.
+
+### 10.0 Starting point: what exists and what it showed
+
+Two GPU DL paths exist today [CODE-READ]:
+1. **Stage path** (production, `t26gE`): `nr_pdsch_gpu_exact_fep_ranges` -> wait -> `nr_pdsch_gpu_chest_grant` -> wait -> host math -> `nr_pdsch_gpu_demod_grant` -> wait -> host LLR work -> `nr_pdsch_gpu_ldpc_decode` -> wait -> host CRC. Four host waits per body, plus host compute between them (table 10.2).
+2. **GPUPASS v1** (`ISAC_GPU_PASS=1`, default off; `nr_gpu_pass_graph.cu`, `nr_gpu_pass.h`): FEP -> chest -> chest post -> demod (+EVM branch) -> descramble -> LLR norm -> rate dematch -> LDPC -> CRC -> pick -> CRC as ONE captured graph per shape class and instance, one host wait. It is bit-exact (GpuPassDl.GraphEqualsStagePath; 0 shadow mismatches on replay and on air).
+
+What v1 showed:
+- [MEASURED, DGX replay b/tim, GPUPASS-8B-20261016, n=6] first-body p50 for <= 96 PRB is not better than the stage path (528-616 vs 560-576 us). Graph launch-to-done sits in the 256-512 us bucket at p50; host prep 64 us, post 16 us.
+- [MEASURED, DGX OTA T night 2026-10-16, GPUPASS-OTA, n=2] the >5 ms count is 2-9x the t26f value; ~41 % of passes end in a CRC fail. After a failing pass the first body is not repeated (CONT_FAIL copies the pass LLRs, nr_pdsch_passive_decode.c:5168-5177), but every retry arm is a full body again (FEP + chest + demod + LDPC) and every sampled shadow / need_cpu / zero-TB / rc != 0 case runs the whole stage path on top (OLD_FIRST, :5325-5338) [CODE-READ].
+- [MEASURED, GPUPASS-20261016] 308 + 1400 segmented classes x 4 instances, 5792 MB of device memory, 8.6 s of warm-up before RX.
+- Retry bodies re-enter the pass and re-run FEP + chest + demod + LDPC [CODE-READ, GPUPASS-8B "Code reading"]; `ISAC_GPU_PASS_RETRY_OLD=1` only sends them back to the stage path.
+
+New measurement for this section [MEASURED, DGX replay <cap>, t26gE + ISAC_GPU_PASS=1 ISAC_GPU_PASS_RETRY_OLD=1 ISAC_GPU_PASS_POLL_SLEEP_US=600, binary rr-csd-int16gc build_t26 (csd/int16-gpuc 4576048508, same DL code as ac5b25a608), nsys -t cuda,nvtx --cuda-graph-trace=node, n=1 per capture; dirs `rr-csd-int16gpu/replays/replay_gpv_{b_141223,tim_141619}`, scripts passk.py / e2e.py in the session scratchpad, not committed]:
+
+| v1 pass body, real grants (us) | b p50 | b p99 | tim p50 | tim p99 |
+|---|---|---|---|---|
+| body wall | 597 | 1639 | 630 | 1388 |
+| host before graph launch (body start -> cudaGraphLaunch) | 108 | 337 | 65 | 252 |
+| launch -> first kernel | 16 | 97 | 15 | 77 |
+| graph span (first kernel start -> last kernel end) | 409 | 965 | 459 | 852 |
+| of which GPU busy / idle inside the graph | 363 / 43 | 858 / 266 | 421 / 34 | 734 / 174 |
+| host after the graph (commit, copies) | 53 | 619 | 54 | 704 |
+| kernels per graph | 27 | 28 | 27 | 28 |
+
+Kernel time per pass body, mean us (b / tim): k_ldpc4_t 76 / 63, k_fep_exact 56 / 53, k_delay_exact 43 / 34, k_tail 38 / 99, EVM chain (k_evm1-3, fold, out) 77 / 171, k_rdm 19 / 24, k_chest_post 18 / 16, k_crc 16 / 14, k_align 19 / -, k_gather 12 / 16.
+
+Where the v1 tot tail comes from (goal_metrics tot >= p99, same runs): b n=45, tim n=51 grants; tail means b a2e 1029, qw 230, pre 503, dec 1911 us; tim a2e 635, qw 133, pre 304, dec 2110 us (bodies = 1: retries run in the async recovery worker, outside tot). **29 of 45 (b) and 42 of 51 (tim) tail grants were decoded by the stage path, not by the graph** (their EVMGRANT stage timers are > 200 us; the pass bypasses them), although only 12-13 % of all grants took the stage path. Gates that sent bodies to the stage path in these runs (GPUPASS census): probe 3249 / 2989, nomem 2471 / 945 (recovery-worker threads without prewarmed buffers), seg > 16: 389 / 250, unseen class 0 / 195, gw 99 / 32, share 36 / 35, old_first 49 / 255.
+goal_metrics tot p50 / p99: b 1328 / 3029, tim 1075 / 2486 (t26gE without the pass, SCAN-TAIL2 n=8 means: b 1235 / 3500, tim 978 / 2289 [MEASURED, DGX replay]).
+
+Reading:
+1. Inside a graph the host gaps are gone: idle 34-43 us p50. The graph's span is the kernels' own time.
+2. v1's kernel time per grant is higher than the stage path's own-kernel busy (363-421 vs 247-315 us p50) because each grant transforms all 14 symbols, the EVM chain is in line, and chest post, rate dematch and CRC moved to the GPU.
+3. v1's tail is the grants it does not cover. Coverage, not the graph, decides p99.
+4. Host before the launch (65-108 us p50, up to 337 p99) is still there: geometry, job build and parameter blocks.
+
+Summary: the graph mechanism works (no gaps inside it). v1 lost on (a) coverage: the grants it gates off (probes, recovery-worker bodies, > 16 segments, unseen classes, shadows) are most of its tail; (b) per-grant work it added (all 14 symbols transformed per grant and per retry body; every retry a full body); (c) one graph per full-shape product, which caps the class set, memory (5.7-6.8 GB) and warm-up (8.6 s). v2 keeps v1's kernels and its bit-exact harness and changes the structure: three sub-graphs per grant plus one slot graph, the instance held across retries, and coverage of every body kind.
+
+### 10.1 Where the stage-path time goes today
+
+[MEASURED, DGX replay, nsys + NVTX body ranges, t26hE (= t26gE + RNTI_LAYOUT_CACHE + UL_LOOKALIKE, DL data path identical), csd/int16-gpuc build, n=1 trace per capture; traces `rr-csd-int16gc/replays/replay_ns_{b_111100,tim_111154}`, script in this session's scratchpad]. "busy" = union of the body's own kernels; "gaps" = wall time between them (host compute, host waits, launch latency).
+
+| per real body (us) | b p50 | b p99 | tim p50 | tim p99 |
+|---|---|---|---|---|
+| wall | 564 | 2019 | 589 | 2043 |
+| own kernels busy | 247 | 849 | 315 | 1016 |
+| gaps between own kernels | 172 | 1125 | 159 | 903 |
+| kernels per body | 18 | 19 | 18 | 19 |
+
+| per decode call incl. retries (us) | b p50 | b p99 | tim p50 | tim p99 |
+|---|---|---|---|---|
+| wall | 603 | 4233 | 592 | 2720 |
+| own kernels busy | 257 | 1825 | 317 | 1217 |
+| bodies per call in the slowest 1 % | 7.9 (mean) | | 2.6 (mean) | |
+
+Host launch API cost: 13.5 `cudaLaunchKernel` + 0.8 `cudaLaunchKernelExC` + 1.6 `cudaMemcpyAsync` per real body = 97 us of host API time per body [MEASURED, same b trace; nsys inflates API cost].
+
+Kernel time per tail body (slowest 1 % of real bodies, mean us): b: k_delay_exact 125, k_ldpc4_t 115, k_tail 67, k_fep_exact 65, k_evm1 61, k_fir 59, k_mmse3_prep 29, k_ls 28. tim: k_delay_exact 230, k_evm1 212, k_tail 187, k_ldpc4_t 185, k_fir 113, k_fep_exact 80, k_ls 59. [MEASURED, same traces]
+
+Combined with GPU-CONTENTION-20261017 (host time between stages 71 % / 36 % of tail-body wall for b / tim; own kernels 17 / 26 %; contention 12-38 %) and LARGE-GRANT-TAIL / HOST-GAP-20261017 (chest end -> demod launch 287-300 us p50 before GATHER_FAST, 113 us after; demod end -> LDPC launch 284-397 us p50; LLR stats + unscramble 62 us mean, 145 at CB >= 16; prep_segment 18-98 us p50 with HOST_FAST, 430 us p90 at CB >= 16): the floor reachable by removing every gap is the busy column, i.e. -55 to -60 % of body wall at p99, before any kernel gets faster.
+
+### 10.2 Stage list and where each host step goes
+
+Source: code map of passive_decode_body_core on csd/int16-gpupath [CODE-READ, this session]; D = nr_pdsch_passive_decode.c, DH = nr_pdsch_gpu_demod_host.c, LH = nr_pdsch_gpu_ldpc_host.c, G = nr_gpu_pass_graph.cu, P = nr_gpu_pass_post.cuh. Cost labels from LARGE-GRANT-TAIL / HOST-GAP-20261017 [MEASURED, DGX replay].
+
+| # | stage / host step today (t26gE) | file:line | today | v2: where it runs | kernel (v2) |
+|---|---|---|---|---|---|
+| 0 | slot FEP | D:3290, wait nr_pdsch_gpu_fep.cu:196 | GPU per grant, host wait | sub-graph S, once per (cell, slot), launched by the dispatcher at slot read, before any DCI | k_fep_exact (exists) |
+| 1 | chest LS, delay, FIR, seg compose | D:3532/3586, wait nr_pdsch_gpu_fep.cu:1488 | GPU, host wait; 78-204 us | C | k_ls, k_delay_exact, k_fir, k_seg_compose (exist) |
+| 2 | nvar sum, normalisation, per-branch substitution | D:3540-3603, 3987-4053 | host, small | C | k_chest_post block 1 (exists, P:215) |
+| 3 | DM-RS CFO/SFO measurement | D:4080-4328 | host O(N) per row | C (measurement); the EMA and log stay host after readback (`gp_dmrsfo_commit`, D:2434) | k_chest_post block 0 (exists, P:292) |
+| 4 | BRANCHFO per-antenna H1 conj(H0) | D:4329-4374 | host; also host in v1 (D:2464 on D2H est rows) | C | k_brfo (new, reduction over nrx x N, result in the result block) |
+| 5 | chest cache store / lookup | D:3455-3505, 3802-3830 | host memcpy | removed: the instance keeps est on the device for the whole call (10.7) | - |
+| 6 | RE gather (data order, segments, ring wrap) | D:4742-4790 | host 39-47 us p50 with GATHER_FAST (220 before) | D: composed into the demod RX index map (v1 way, nr_gpu_pass_seg_remap_geo) | k_gather (exists) |
+| 7 | demod job build incl. nr_dlsch_extract_geometry | DH:312, 560-646 | host per symbol | host, BEFORE the C launch (it depends on the DCI only), written into the parameter block | - (control) |
+| 8 | MRC align, level, MMSE3 prep, tail | demod.cu, wait :1687 | GPU, host wait | D | k_align, k_level, k_mmse3_prep, k_tail (exist) |
+| 9 | EVM chain + fold | DH:471-538, 671-685; deferred wait demod.cu:1591 | GPU + host fold | D, forked branch joined at the end of L (off the LLR critical path) | k_evm1-3, k_evm_fold, k_evm_out (exist); host fold of the sums stays (bookkeeping) |
+| 10 | Qm oracle | D:4929-4937 | host over <= 4096 equalised samples | host after readback (reads qm_row in place / D2H 16 KB) | - |
+| 11 | LLR stats (absum, zero, sat, clip8; sign stats after descramble) | D:5179-5235, 5246-5270 | host; with unscramble 62 us mean, 145 at CB >= 16 | D | k_llr_stats (new; v1 skips these fields) |
+| 12 | unscramble | D:5237-5244 | host NEON (HOST_FAST) | D | k_unscr (exists) |
+| 13 | LLR norm (K38 shift over CB0 span) | D:5296-5312 | host O(G) | D | k_norm_sum, k_norm_apply (exist) |
+| 14 | segmentation, TB params (C, K, Z, E, E2, R) | D:1814-1914 | host | host, before the C launch (DCI only) | - (control) |
+| 15 | prep_segment (deinterleave, rate dematch, int8 pack) | LH:194, 251 | host 18-98 us p50, 430 p90 at CB >= 16 with HOST_FAST | L | k_rdm (exists, bit-exact, P-DEMATCH) |
+| 16 | LDPC | LH:257, wait nr_pdsch_gpu_ldpc.cu:788 | GPU per 32-CB batch, host wait | L | k_ldpc4_t / nc family (exist) |
+| 17 | snapshot CRC pick, TB CRC, reassembly | LH:271-281, D:2015-2042 | host | L | k_crc, k_pick, k_crc (exist) + k_tb_pack (new: reassembly into the result block) |
+| 18 | commit (MAC hand-off, EVMGRANT, solver feedback, HARQ book, logs) | D:5694-5712, 1519, 5571+ | host | host after the one wait | - (control) |
+
+Host waits per body: 4-5 today (FEP, chest, demod, [EVM], LDPC per 32-CB batch) -> 1 in v2 (end of L).
+
+### 10.3 Graph structure, shapes and keys
+
+One grant decode = a **chain of three sub-graphs** launched back to back on one stream, plus a slot sub-graph shared by all grants of a (cell, slot):
+
+| sub-graph | content | key (graph structure only) | launched |
+|---|---|---|---|
+| **S** slot FEP | k_fep_exact over the 4 antennas x the symbols any grant of the slot needs (default 14) into the device slot grid | (cell, nsym_mask class: 1 value today) | once per (cell, slot), by the PDSCH dispatcher when the slot is read (before any DCI of that slot is known); every grant, retry and probe of the slot waits on its event with `cudaStreamWaitEvent` (no host wait). If the grid ring no longer holds the slot (> 3 slots old), the body re-runs S on its own instance |
+| **C** chest | k_ls, k_delay_exact, k_fir, [k_seg_compose], k_chest_post | (nrb_class, nl, ndmrs, nseg_class) | first body; retries only when the DM-RS hypothesis (CDM group, port set) changes |
+| **D** demod + LLR | k_gather, k_level, [k_align], [k_mmse3_prep], k_tail, EVM fork/join (k_evm1-3, k_evm_fold, k_evm_out), k_unscr, k_llr_stats (new), k_norm_sum, k_norm_apply | (nrb_class, nl, qmode, align, evm) | first body; retries that change the RE set, S/L, branch or MRC |
+| **L** decode | k_rdm, LDPC (nc or cluster family, chosen per key), k_crc (snapshots), k_pick, k_crc (TB), k_tb_pack | (ncb_class, ldpc family) | every body (a retry that only changes rv/TB parameters relaunches only L) |
+
+Why three and not one: v1's single key is the product of all fields (308 + 1400 classes, 5.8 GB). With sub-graphs the count is the SUM. Expected warm set [ESTIMATE from v1's class census: nrb_class 8 x nl 4 x ndmrs <= 4 x nseg 6 for C, 8 x 4 x qmode 3 x align 2 x evm 2 for D, 6 x 2 for L]: theoretical <= 768 + 384 + 12; observed classes on the two captures are expected at <= 150 C + <= 100 D + 12 L, i.e. ~260 exec graphs per instance. Instantiation cost [ESTIMATE from v1: 8.6 s for 1708 x 4 graphs = ~1.3 ms per exec graph]: ~260 x 4 x 1.3 ms = 1.4 s pre-fence. Unseen key at run time = old stage path for that grant (counted), and an off-path warm of that key on a helper thread before the next fence-free use is NOT allowed (allocation after the fence is forbidden); unseen keys are logged for the next warm set.
+
+Graph parameters: as in v1, every kernel reads its job from a device-accessible parameter block written by the host before launch (`PassBlk`-style per instance and per sub-graph). No `cudaGraphExecKernelNodeSetParams`, no `cudaGraphExecUpdate` on the hot path. Grid sizes come from the class; kernels early-exit beyond the job's real size (v1 behaviour).
+
+Not used: conditional graph nodes (CUDA 12.4+ feature, not needed: the host decides the entry point before launch) and device-side graph launch.
+
+### 10.4 Memory layout and ownership
+
+Same rules as section 3 (`nr_gpu_buf_alloc`, pre-fence only, `h2d_async`/`d2h_async` called unconditionally). New per-instance state that makes retries cheap: an instance is held for the whole decode call (first body + retries), not per body.
+
+| buffer | owner | lifetime | DIRECT (GB10) | DISCRETE (sm_89) |
+|---|---|---|---|---|
+| IQ ring | radio | ring | read in place by S | H2D of the slot's sample span on the RT copy stream, once per (cell, slot) |
+| slot grid rxF [cell][3 slots][4 ant][14][N] c16 | pipeline init | 3 slots | device scratch (no host mapping); host mirror written only on request (CSI/sensing consumers) | device; D2H only on request |
+| est, nvar rows, chest post out | instance | decode call | device | device |
+| geometry maps geo_y/geo_h, pilots, scrambling words, rdm/crc tables (parameter blocks) | instance | one launch | mapped, host writes, kernels read | pinned host + one H2D per launch (the 4 copies v1 makes in `enqueue`) |
+| LLR int16 [G] | instance | decode call | device | device; D2H only if a CPU consumer asks (shadow check, CPU retry fallback) |
+| LDPC in int8, snapshots | instance | one launch | device | device |
+| result block (tb_ok, seg_ok[], TB bytes, EVM/SNR sums, nvar, LLR stats, post out, need_cpu) | instance | one launch | mapped, read in place after the event | one D2H (<= 40 KB) |
+
+Removed vs v1 on DISCRETE: v1's unconditional D2H of `est` and `rxF` (4 x 14 x 4096 x 4 B = 917 KB each per pass) and of the whole LLR buffer [CODE-READ nr_gpu_pass_graph.cu enqueue()]: they become request-only.
+Instances: `NR_GPU_PASS_RING` = 4 today; v2 needs one per PDSCH consumer (5 in t26gE: cores 7,8,9,3,4) plus one for the async recovery worker: 6. Device memory per instance [ESTIMATE]: rxF is shared (slot grid), so an instance is est 4 x 4 x 14 x 4096 x 4 B = 3.7 MB + LLR 2 x 1.1 MB + LDPC in/snapshots ~1 MB + scratch ~4 MB = ~10 MB; 6 instances ~60 MB plus graphs. Budget cap for sens6: 1 GB total (8 GB card in the 2026-09-30 snapshot, 12 GB if it is the 4070; open question 10.12).
+
+### 10.5 Readback contract
+
+- The host waits once per launch (end of L) with `cudaEventQuery` + `nr_gpu_poll_relax_pass` (existing), never `cudaStreamSynchronize`.
+- What the host reads after the event: the result block (above). DIRECT: in place, after the event (the event orders the device writes). DISCRETE: the D2H of the result block is the last node of L, so the same event covers it.
+- What the host does after the read: commit (TB to MAC, EVMGRANT fields, solver feedback, HARQ bookkeeping) — control only. The CPU never re-computes a stage the GPU ran.
+- Soft bits (LLR) and the slot grid are read only when a consumer flags it before launch: shadow check (every ISAC_GPU_PASS_CHECK-th grant), a CPU fallback retry, CSI/sensing consumers of rxdataF. On DIRECT they are readable in place after the event at no cost (mapped); on DISCRETE a flagged D2H node is appended.
+- `need_cpu` (zero syndrome with failing CRC, OAI would iterate further): the only case where the CPU LDPC decoder runs a block again; counted. [MEASURED v1: need_cpu = 0 in all replay and OTA runs.]
+
+### 10.6 Error and fallback path
+
+| condition | when detected | action | counter |
+|---|---|---|---|
+| unseen key, no free instance, unsupported variant (gate list of nr_gpu_pass_dl.h: segments > 16, DM-RS type 2, PT-RS, HARQ combining, Z % 4, C > 32, ...) | before launch | stage path for the whole call | `fb_unseen/fb_busy/fb_unsup` + gate id |
+| CUDA error at launch | launch | stage path for this grant; instance marked bad until a self-test passes | `fb_err` |
+| graph not done after the RT deadline (`nr_gpu_rt_deadline_us`) | wait | keep waiting (the GPU work cannot be cancelled); count | `late` |
+| CRC fail | result | retries go through the v2 entry points (10.7), never the stage path | `tb_fail` |
+| need_cpu | result | CPU LDPC on the device LLRs (read in place / D2H), counted | `need_cpu` |
+| shadow mismatch (every N-th grant also runs the stage path and compares LLR hash, TB, seg_ok, EVM fields) | after commit | log `GPUGRAPH MISMATCH`, disable v2 for the run, stage path from then on | `shadow_bad` |
+
+Debugging: `ISAC_PDSCH_GPU_GRAPH_NOGRAPH=1` runs the same kernels stream-ordered without capture (the sub-graph builders are plain functions that enqueue on a stream; capture wraps them), so compute-sanitizer and nsys see ordinary kernels; NVTX ranges per sub-graph launch.
+
+### 10.7 Probes, retries and trial decodes on the same graphs
+
+Every body of a call keeps the instance (est, LLR, nvar on the device). The body declares which inputs changed; the host launches from the first affected sub-graph:
+
+[CODE-READ: arms in passive_decode_retry_impl, D:6402-6760; async worker nr_pdsch_passive_queue.c:2594-2708]
+
+| body | what changes | v2 entry | what is reused on the device |
+|---|---|---|---|
+| first body | - | S (shared) wait + C + D + L | - |
+| TDRA S toggle (arm & 2), second TDA | start symbol S, so data REs and G | D + L | slot grid (S covers all 14 symbols), est |
+| CSI retry, CSI population (cv 1, 2), static CSI, PDCCH RM | RE mask, G | D + L | slot grid, est |
+| DM-RS CDM (arm & 4) | n_dmrs_cdm_groups, so beta_dmrs | C + D + L | slot grid |
+| wide MRC (arm & 8) | demod combining | D + L | slot grid, est |
+| TINTERP (arm & 16, off in t26gE) | chest interpolation | C + D + L | slot grid |
+| RV retry (off) | LDPC parameters on the same LLRs | L | slot grid, est, LLR |
+| async recovery worker (RECOVERY_ASYNC=1) | the arms above, later, on its own IQ snapshot | its own instance; S is re-run only when the slot grid ring no longer holds the slot (3-slot ring, 1.5 ms) | est and LLR are NOT shared with the consumer's instance (released at the end of the first call) |
+| solver layout probe | layout hypothesis, CB0 only (`nb_segments_to_decode` = 1, horizon to CB0) | C + D + L on the low-priority twin stream, ncb_class 1 | slot grid |
+
+The decode call holds one instance from the first body to the last retry, so est / LLR stay valid. The arms are not changed (same order, same stop rule), so the decoded set equals today's by construction; the unit test compares every arm's LLR and TB against the stage path.
+
+Solver probes (layout hypotheses) are bodies with their own instance and the low-priority twin stream (ISAC_PDSCH_GPU_PRIO, nr_pdsch_gpu_prio.cuh); they launch C+D+L with the probe's ncb class (often 1: CB0 only), so a probe and a real decode use the same graphs. The slot FEP S is shared, so a probe never re-runs FEP.
+
+### 10.8 Per-grant GPU time
+
+Per-grant GPU time of the v2 chain (critical path, single grant, no contention). Base: v1 graph kernels [MEASURED above, b / tim]; v2 deltas [ESTIMATE].
+
+| item | p50 b / tim (us) | p99 b / tim (us) | source |
+|---|---|---|---|
+| v1 graph span | 409 / 459 | 965 / 852 | [MEASURED, 10.0] |
+| - slot FEP moved to S (launched at slot read, before the grant is queued; a2e p50 380-584 us leaves it ample time) | -56 / -53 | -102 / -66 (tail mean) | [MEASURED kernel time, 10.0] |
+| + k_llr_stats, k_brfo, k_tb_pack (one pass over G / rows) | +10 / +10 | +25 / +25 | [ESTIMATE: memory-bound passes of the size of k_unscr] |
+| + 3 sub-graph launches instead of 1 (dependent launches on one stream) | +10 / +10 | +20 / +20 | [ESTIMATE] |
+| **v2 chain C+D+L** | **~370 / ~425** | **~910 / ~830** | [ESTIMATE] |
+| host before launch (job build, geometry, parameter blocks) | 65-108 -> 60 | 252-337 -> 150 | [MEASURED v1] -> [ESTIMATE: TB params and geometry no longer wait on the chest] |
+| host after (commit) | 53 -> 40 | 619-704 -> 100 | [MEASURED v1] -> [ESTIMATE: no LLR copy-out / cont_fail memcpy, no old_first rerun] |
+| **v2 body wall** | **~470 / ~525** | **~1150 / ~1080** | [ESTIMATE] |
+| today's body wall (stage path, t26hE) | 564 / 589 | 2019 / 2043 | [MEASURED, 10.1] |
+
+Retry body (arm that enters at D): ~ v2 chain minus C (k_ls + k_delay_exact + k_fir + k_chest_post: 43+14+18+~7 = ~80 us b mean) -> ~290 / ~340 us p50 [ESTIMATE]. Today a retry body costs a full body.
+
+From grant to tot p99. Today the tot tail is a2e + qw + pre + dec; in the tail mean, dec (= the first body; retries run in the async worker) is 47-50 % (b) and 60-70 % (tim) of tot [MEASURED, 10.0 and t26hE traces: b dec 1690-1911 of 3597-3674 us; tim 2110-2481 of 3184-3497 us]. pre and qw are mostly earlier grants' decodes (P99-BOTTLENECK: pre of later slot-group members correlates 0.99 with earlier members' dec), so they shrink with dec. a2e (PDCCH, stays on the CPU) does not.
+
+| cell / source | today tot p99 | model | v2 tot p99 [ESTIMATE] |
+|---|---|---|---|
+| b replay | 3.0-3.5 ms (pass / t26gE) | tail: a2e 1.0 + (qw + pre 0.8) x 0.55 + dec 1.9 -> 1.15 | ~2.3 ms |
+| tim replay | 2.3-2.5 ms | a2e 0.6 + (qw + pre 0.45) x 0.55 + dec 2.1 -> 1.1 | ~1.7 ms |
+| T on air, daytime (GHC / DAYTIME, t26gE) | 2.9-4.0 ms | same ratio as tim replay (x 0.68) | ~2.0-2.7 ms: **meets < 3 ms** |
+| V on air, daytime | 4.2-7.7 ms | same ratio as b replay (x 0.75) | ~3.2-5.8 ms: **does not meet < 3 ms by this plan alone** |
+
+p50: today 1.0-1.6 ms on air (dec p50 ~0.55-0.64 ms in replay). With the v2 body p50 ~0.47-0.53 ms, p50 drops by ~0.1 ms [ESTIMATE]; p50 is dominated by a2e (0.38-0.58 ms replay p50), which this plan does not touch.
+
+What closes V: (1) the 12-13 % of grants v1 left on the stage path are 64-82 % of its tail [MEASURED 10.0]; v2 must cover probe, nomem (recovery worker), seg > 16 and unseen classes (Tasks 4, 6, 7), otherwise the estimate above is not reached; (2) on air V has more CB >= 16 grants than replay (GPU-CONTENTION caveat), where k_ldpc4_t is 115-219 us per tail body and k_tail<double> scales with Qm (P-FUSE: 363-666 us at 273 x 4): kernel work, not host gaps, then dominates and needs the LDPC cluster-2/4 (rank 14) or FP32 demod decision (open question); (3) a2e p99 on V (not measured on air for t26gE). The plan's final gate reports these three separately so the next step is chosen by measurement.
+
+### 10.9 Multi-cell batching hook
+
+- `cell` is a field of every parameter block (slot grid index, delay table, frame params); single-cell code passes 0 and kernels bounds-check it.
+- S is keyed by (cell, slot); one launch can take a cell list (grid.z = cell) once the 200 MHz channelizer exists: same kernel, more blocks.
+- L's parameter block is an array of CB jobs, each with its own (instance, LLR offset): the next step after this plan is a cross-grant L launch (jobs of several grants, of either cell, with the same LDPC family) without a new graph key. Nothing in v2 assumes one grant per L launch except the `ncb_class` sizing, which becomes "CBs in the batch".
+- One process, one CUDA context, the existing RT green partition; no per-cell stream or context (MPCI-OTA: a second context costs 4-9x).
+
+### 10.10 sm_89 portability
+
+| feature | GB10 sm_121 | sm_89 | plan |
+|---|---|---|---|
+| CUDA graphs: capture, instantiate, launch | yes | yes (all since CUDA 10) | same code |
+| conditional nodes, device graph launch | not used | not used | - |
+| mapped zero-copy (DIRECT) | yes | no (DISCRETE) | `nr_gpu_model()`; `ISAC_GPU_FORCE_DISCRETE=1` test on the DGX for every task |
+| green contexts / SM partition | used (RT 40 / disc 8 SMs) | UNVERIFIED | priority streams fallback (exists, nr_gpu_green.h) |
+| LDPC cluster kernels | yes (cc >= 9) | no: `decide_nc()` forces nc | the L key carries the family; sm_89 warms only nc |
+| FP64 demod (bit-exact k_tail<double>) | 2x slower than FP32 [MEASURED P-FUSE bench, 273x4] | FP64 at 1/64 rate on consumer Ada [vendor spec] | bit-exact requires FP64: risk 10.11-R5; sens6 timing measured at the phase gate |
+| CUDA 13 / driver 580 | yes | driver 580 on sens6 (snapshot) | build with `CMAKE_CUDA_ARCHITECTURES "89;121"`, ctest `test_nr_gpu_pass` in DIRECT and forced DISCRETE on the DGX; sens6 run by the orchestrator |
+
+### 10.11 Risks
+
+| id | risk | evidence | mitigation |
+|---|---|---|---|
+| R1 | graph instantiation cost / warm-up | v1: 8.6 s, 5.8 GB for 1708 classes x 4 [MEASURED] | sub-graph keys (sum, not product); warm set from the observed class census; budget check at init (refuse v2 above the cap, stage path stays) |
+| R2 | shape explosion (segmented grants, new nrb classes, multi-cell) | v1 needed 1400 segmented classes | nseg only in C's key; unseen = stage path + logged key; class census tool in Task 1 |
+| R3 | graphs on sm_89 | graph API is arch-independent; green contexts unverified | no conditional nodes; priority-stream fallback; forced-DISCRETE test every task |
+| R4 | debugging inside graphs | captured kernels are opaque to printf ordering and hard to bisect | NOGRAPH mode (10.6), per-sub-graph NVTX, shadow check |
+| R5 | FP64 bit-exactness vs sm_89 speed | k_tail<8,double> 431 us/call at 273x4 on GB10 [MEASURED P-FUSE] | out of scope here; the FP32 instantiation exists (NR_GPU_PASS_FP32_DEMOD) and is a separate, non-bit-exact decision (open question) |
+| R6 | LDPC CRC equivalence | rare GPU-vs-CPU LDPC disagreement pre-exists (1 in ~10000 TBs, HOST-GAP orchestrator check); OAI's stop rule (first passing snapshot) is emulated by k_pick | the unit test compares against the stage path's GPU LDPC (same kernel), not the CPU decoder; CPU-decoder agreement stays a separate counter; need_cpu path kept |
+| R7 | instance held across retries starves other consumers | 4 instances today, 5 consumers + recovery worker | 6 instances; busy -> stage path (counted); Task 7 replay gate checks fb_busy < 1 % |
+| R8 | the gain does not show at p99 on air (as with v1) | v1 OTA: >5 ms tail 2-9x | per-task replay gates on both captures with tot p99 and first-body p99 by CB class; on-air A/B vs t26gE only at the end |
+
+### 10.12 Open questions (user / orchestrator)
+1. V on air: the estimate (10.8) puts V at ~3.2-5.8 ms after this plan. Is a follow-up on kernel time (LDPC cluster-2/4, or the non-bit-exact FP32 demod instantiation that exists today) acceptable, given the bit-exact rule? Without one of them, V p99 < 3 ms depends on how many CB >= 16 grants the cell carries.
+2. sens6 GPU: the 2026-09-30 snapshot says RTX 4060 Ti 8 GB, the user's belief is RTX 4070 12 GB. The v2 device budget is capped at 1 GB; v1 needed 5.7-6.8 GB and would not fit next to the other GPU users on 8 GB.
+3. FP64 on sm_89: bit-exact demod keeps k_tail<double>. Consumer Ada runs FP64 at 1/64 of FP32. Its time on sens6 is unknown until the sens6 gate. Accept "bit-exact on sm_89 even if slower", or allow FP32 there?
+4. a2e (PDCCH on the CPU by decision) is 0.6-1.0 ms of the tail mean in replay. After v2 it becomes the largest single tail component on b. Is the PDCCH-on-CPU decision final for the p99 goal?
+5. Async recovery: v2 keeps the arms and order unchanged. Running independent arms concurrently (D+L for several arms at once) would cut recovery latency but costs GPU time. Out of scope unless asked.

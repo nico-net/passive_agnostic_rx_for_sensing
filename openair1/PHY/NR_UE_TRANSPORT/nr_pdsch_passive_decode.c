@@ -1809,6 +1809,16 @@ static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid, uint16_t cell)
   return e;
 }
 
+/* ISAC_PDSCH_PROBE_C1=1 (implied by ISAC_PDSCH_SOLVER=1): the outcome of a probe of a one-code-block TB is recorded (T26b, below) */
+static bool probe_c1_on(void)
+{
+  static _Atomic int s_probe_c1 = -1;
+  if (s_probe_c1 < 0) {
+    const char *e = getenv("ISAC_PDSCH_PROBE_C1");
+    s_probe_c1 = ((e && atoi(e) != 0) || nr_pdsch_solver_enabled()) ? 1 : 0;
+  }
+  return s_probe_c1 == 1;
+}
 /* passive_ldpc_decode_core: LDPC stage of one passive decode: builds the TB parameters (segmentation, E, rate matching, HARQ buffer) and runs the LDPC decoder.
  *   Returns true when every segment decodes and passes CRC. A one-code-block probe (ISAC_PDSCH_PROBE_C1) uses the TB CRC of its single block.
  *   Side effects: updates the per-thread HARQ buffer and decoder-used tag; ISAC_LDPC_ITERS sets the iteration count; ISAC_PDSCH_TBPARM logs the parameter set.
@@ -2011,12 +2021,7 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
      * recorded (only C > 1 set t_probe_seg_ok), so every single-CB probe read "failed" -- measured on the PCI 415
      * replay: probes whose dumped LLRs decode offline at LDPC iteration 1 reported CRC fail. ISAC_PDSCH_PROBE_C1=1
      * (implied by ISAC_PDSCH_SOLVER=1) records it, same all-zero guard, still never a decoded TB. */
-    static int s_probe_c1 = -1;
-    if (s_probe_c1 < 0) {
-      const char *e = getenv("ISAC_PDSCH_PROBE_C1");
-      s_probe_c1 = ((e && atoi(e) != 0) || nr_pdsch_solver_enabled()) ? 1 : 0;
-    }
-    if (t_probe_first_seg && (C_full > 1 || s_probe_c1)) {
+    if (t_probe_first_seg && (C_full > 1 || probe_c1_on())) {
       t_probe_seg_ok = (seg_ok == 1);
       /* The all-zero guard the full-TB path applies, on segment 0: an all-zero code block carries a
        * zero CRC24B, so LLRs that are mostly "0" (wrong layout, wrong scrambling, empty grant) pass
@@ -2315,6 +2320,24 @@ void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n)
 {
   t_share.on = on; t_share.rb_lo = rb_lo; t_share.rb_n = rb_n;
 }
+/* The band the channel estimate covers: the grant's, or with the slot share on the group's union of RBs above the grant's first RB, so the slot's next
+ * grant can reuse it. Widen UPWARD only: nr_pdsch_channel_estimation() writes dl_ch from INDEX 0 = the first RB of the freq_alloc IT was given, and
+ * nr_dlsch_extract_rbs() reads it back from index 0 assuming that is THIS grant's first RB, so the estimate's base RB must be this grant's first_rb
+ * (a lower base would hand the equaliser a channel shifted by (first_rb - rb_lo)*12 subcarriers). The chest key carries rb_lo AND rb_n: grants of one
+ * group with the same first RB compute the same union, hence the same key; a grant starting higher re-estimates. */
+static void share_chest_band(const freq_alloc_bitmap_t *fa, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, freq_alloc_bitmap_t *fa_out,
+                             fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg_out)
+{
+  *cfg_out = *cfg;
+  *fa_out = *fa;
+  if (t_share.on && t_share.rb_n > 0) {
+    const int lo = (int)fa->first_rb;
+    const int hi0 = t_share.rb_lo + t_share.rb_n, hi1 = (int)(fa->first_rb + fa->num_rbs);
+    const int hi = hi0 > hi1 ? hi0 : hi1;
+    *fa_out = set_bitmap_from_start_size(lo, hi - lo);
+    cfg_out->start_rb = lo; cfg_out->number_rbs = hi - lo;
+  }
+}
 
 /* nr_pdsch_passive_alloc_normalise() moved to nr_pdsch_prb_set.c (2026-09-27): it is pure (only
  * freq_alloc_bitmap_t + nr_prb_list_normalise(), both already there) and had no unit test because
@@ -2414,14 +2437,22 @@ static void pdcch_occ_diag(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, co
 /* GPUPASS: per-consumer host buffers, allocated and prefaulted at consumer start (before the RX fence), never on the pass path */
 static __thread nr_gpu_pass_dl_out_t *t_gpp = NULL; /* ~150 KB */
 static __thread uint8_t *t_gp_shadow = NULL;        /* the TB of a shadow-checked pass: sized to the largest TB up front */
-#define GP_SHADOW_CAP (262144u + 8u)
+#define GP_SHADOW_CAP NR_GPU_GRAPH_SHADOW_CAP /* nr_gpu_graph_pool.h: the v2 pool's shadow buffers have the same size */
 static __thread uint64_t t_gp_fhash = 0;           /* shadow of a CRC-failing pass: hash of its final LLRs and its count of decoded blocks */
 static __thread uint32_t t_gp_fok = 0;
 static __thread bool t_gp_sbad = false;           /* FP32 CRC-OK shadow: the LLR signs of the old path disagree */
+static __thread bool t_gp_claim_tried = false;    /* v2: this thread asked the pool once (a refusal is not retried: nomem gate from then on) */
 static void gp_thread_prewarm(void)
 {
   if (!nr_gpu_pass_active() || t_gpp)
     return;
+  if (nr_gpu_graph_on() && !nr_gpu_allocations_allowed()) { /* v2: a thread that starts after the RX fence takes a prewarmed set (NULL = pool empty: nomem gate) */
+    if (!t_gp_claim_tried) {
+      t_gp_claim_tried = true;
+      t_gpp = nr_gpu_graph_pool_claim(&t_gp_shadow);
+    }
+    return;
+  }
   t_gp_shadow = (uint8_t *)malloc(GP_SHADOW_CAP);
   t_gpp = (nr_gpu_pass_dl_out_t *)aligned_alloc(64, (sizeof(nr_gpu_pass_dl_out_t) + 63) & ~(size_t)63);
   if (!t_gp_shadow || !t_gpp) {
@@ -2575,8 +2606,9 @@ static bool gp_hq_arms(uint16_t rnti)
  * bit-exact with it). The TB itself is in g_harq.b, assembled by the pass. */
 static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_info_t *cw, uint32_t G, uint32_t tbslbrm, bool tb_ok)
 {
+  const int C_dec = t_probe_first_seg && g->C > 1 ? 1 : g->C; /* v2 Task 2: a probe decoded code block 0 (passive_ldpc_decode_core's C_dec) */
   uint32_t seg_ok = 0;
-  for (int r = 0; r < g->C; r++)
+  for (int r = 0; r < C_dec; r++)
     seg_ok += g->r.seg_ok[r] != 0;
   g_harq.processedSegments = seg_ok;
   t_seg_K = g->K; t_seg_F = g->F; t_seg_C = (uint32_t)g->C; t_seg_Z = g->Z;
@@ -2588,9 +2620,9 @@ static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_
     t_decode_cb[0] = 0;
     for (int r = 0; r < g->C && used + 32 < sizeof(t_decode_cb); r++)
       used += snprintf(t_decode_cb + used, sizeof(t_decode_cb) - used, "%s%u:%c", r ? "," : "", (unsigned)nr_get_E(G, (uint8_t)g->C, cw->qamModOrder, cw->Nl, (uint8_t)r),
-                       g->r.seg_ok[r] ? '1' : '0');
+                       r < C_dec ? (g->r.seg_ok[r] ? '1' : '0') : '-');
   }
-  for (int r = 0; r < g->C && r < NR_PDSCH_SEGIDX_MAX; r++) {
+  for (int r = 0; r < C_dec && r < NR_PDSCH_SEGIDX_MAX; r++) {
     const int cb = nr_pdsch_cbucket((uint32_t)g->C);
     atomic_fetch_add(&g_segidx_tot[r], 1);
     atomic_fetch_add(&g_segidxc_tot[cb][r], 1);
@@ -2600,6 +2632,20 @@ static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_
     }
   }
   t_seg_ok_last = seg_ok;
+  if (t_probe_first_seg && (g->C > 1 || probe_c1_on())) { /* passive_ldpc_decode_core's probe outcome: block 0's CRC, the all-zero guard on its bytes, never a TB */
+    t_probe_seg_ok = seg_ok == 1;
+    if (t_probe_seg_ok) {
+      const uint32_t seg_bytes = (g->K >> 3) - (g->F >> 3) - 3; /* the pass put block 0's bytes at the head of the TB buffer */
+      uint32_t i = 0;
+      while (i < seg_bytes && g_harq.b[i] == 0)
+        i++;
+      if (i == seg_bytes) {
+        t_probe_seg_ok = false;
+        atomic_fetch_add(&g_ldpc_zero_tb, 1);
+      }
+    }
+    return;
+  }
   if (seg_ok != (uint32_t)g->C) { /* what passive_ldpc_decode_core counts for a TB with a failed block */
     atomic_fetch_add(&g_ldpc_seg_fail, 1);
     atomic_fetch_add(&g_seg_ok_sum, seg_ok);
@@ -2844,6 +2890,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
         nr_slot_fep(ue, fp, proc->nr_slot_rx, sym, rxdataF, link_type_dl, 0, nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata));
       }
     }
+    nr_gpu_graph_call_dirty(); /* v2 Task 4 review S1: the SSB FEP wrote the caller's rxdataF (fep_fo may be nonzero), which the held instance's D reads on DIRECT */
     if (grant->check_sample_lifetime && !nr_passive_samples_valid(
             atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
             grant->source_absolute_slot, fp->slots_per_frame)) {
@@ -3175,10 +3222,17 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     extern __thread int nr_pdsch_chest_occ_override;
     static int gp_retry_old = -1; /* ISAC_GPU_PASS_RETRY_OLD (nr_gpu_pass_retry.h) */
     if (gp_retry_old < 0) { const char *e_ = getenv("ISAC_GPU_PASS_RETRY_OLD"); gp_retry_old = e_ && atoi(e_) == 1; }
-    gp_gate = nr_gpu_pass_retry_to_old(gp_retry_old, t_pdtim_body, t_recov_mode == 2, t_quiet || t_qam_ab_alt || t_decode_tdra_attempt != 0) ? NR_GPU_PASS_GATE_RETRY
-            : (seg_path && nseg > NR_GPU_PASS_MAX_SEG) ? NR_GPU_PASS_GATE_SEG /* more segments than the largest class; fewer run the segmented classes */
-            : (t_probe_first_seg || probe_last_sym >= 0 || t_probe_no_horizon) ? NR_GPU_PASS_GATE_PROBE
-            : (t_share.on || t_chest_bypass) ? NR_GPU_PASS_GATE_SHARE
+    /* v2 Task 2 (ISAC_PDSCH_GPU_GRAPH_COVER): layout probes run the pass (CB0 only, their horizon), and slot-share grants: the pass estimates the same
+     * widened band (share_chest_band; a segmented grant estimates per segment, the share does not widen it) and does its own FEP, so the FEP / chest caches
+     * are not read (their contents are the same numbers). */
+    const bool gp_cover = nr_gpu_graph_flag("COVER");
+    const bool gp_probe_cov = gp_cover && probe_c1_on() && !t_probe_no_horizon;
+    const bool gp_share_cov = gp_cover;
+    /* v2 Task 4: with ISAC_PDSCH_GPU_GRAPH_RETRY the retry bodies stay on the pass (held instance), RETRY_OLD is not consulted */
+    gp_gate = (!nr_gpu_graph_flag("RETRY") && nr_gpu_pass_retry_to_old(gp_retry_old, t_pdtim_body, t_recov_mode == 2, t_quiet || t_qam_ab_alt || t_decode_tdra_attempt != 0)) ? NR_GPU_PASS_GATE_RETRY
+            : (seg_path && nseg > nr_gpu_pass_seg_max()) ? NR_GPU_PASS_GATE_SEG /* more segments than the largest class; fewer run the segmented classes */
+            : ((t_probe_first_seg || probe_last_sym >= 0 || t_probe_no_horizon) && !gp_probe_cov) ? NR_GPU_PASS_GATE_PROBE
+            : ((t_share.on && !gp_share_cov) || t_chest_bypass) ? NR_GPU_PASS_GATE_SHARE
             : (t_gw_used || t_gw_capture || t_llr_ovr != NULL || t_cap_req || t_tb_force_cpu) ? NR_GPU_PASS_GATE_GW
             : ((dlsch_config->pduBitmap & 0x1) || ptrs_unav != 0) ? NR_GPU_PASS_GATE_PTRS
             : (ue->chest_time == 1 || t_tinterp_override > 0) ? NR_GPU_PASS_GATE_TINTERP
@@ -3186,13 +3240,16 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
             : !nr_pdsch_gpu_ldpc_enabled() ? NR_GPU_PASS_GATE_LDPC_OFF
             : nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) >= 0 ? NR_GPU_PASS_GATE_CHEST_ONLY
             : nr_pdsch_chest_occ_override > 0 ? NR_GPU_PASS_GATE_OCC
-            : (!t_gpp && !nr_gpu_allocations_allowed()) ? NR_GPU_PASS_GATE_NOMEM /* a thread that was not prewarmed before the fence */
+            : (!t_gpp && !nr_gpu_allocations_allowed() && (t_gp_claim_tried || !nr_gpu_graph_pool_has_free())) ? NR_GPU_PASS_GATE_NOMEM /* not prewarmed before the fence, no pool set */
             : -1;
     if (gp_gate >= 0)
       nr_gpu_pass_gate(gp_gate);
   }
   if (nr_gpu_pass_active() && gp_gate < 0) {
     static const nr_ssb_rm_mask_t gp_no_ssb = {0};
+    fapi_nr_dl_config_dlsch_pdu_rel15_t gp_chest_cfg;
+    freq_alloc_bitmap_t gp_chest_fa;
+    share_chest_band(freq_alloc, dlsch_config, &gp_chest_fa, &gp_chest_cfg);
     {
       const nr_gpu_pass_dl_in_t gin = {.ue = ue, .proc = proc, .dlsch_config = dlsch_config, .freq_alloc = freq_alloc, .seg = seg_path ? seg : NULL, .nseg = seg_path ? nseg : 0, .cw = cw,
                                        .ssb_rm = ssb_unav ? &ssb.dem : &gp_no_ssb, .rxdataF = &rxdataF[0][0], .rx_stride = fp->samples_per_slot_wCP,
@@ -3202,9 +3259,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
                                        .dmrs_full = (uint16_t)(dlsch_config->dlDmrsSymbPos & ((1u << fp->symbols_per_slot) - 1u)),
                                        .first_symbol = nr_ssb_rm_first_data_symbol(dlsch_config, freq_alloc, &ssb), .nvfix = gp_nvfix(),
                                        .branch = gp_perbranch() ? nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) : -1, .norm = gp_norm_on(),
-                                       .it_max = gp_iters(), .chest_diag = chest_pdp_diag_on(), .fep_fo = fep_fo, .tb = g_harq.b};
+                                       .it_max = gp_iters(), .chest_diag = chest_pdp_diag_on(), .fep_fo = fep_fo, .tb = g_harq.b,
+                                       .probe = t_probe_first_seg, .probe_last_sym = probe_last_sym, .chest_fa = &gp_chest_fa, .chest_cfg = &gp_chest_cfg};
       if (!t_gpp)
-        gp_thread_prewarm(); /* only before the RX fence; afterwards the gate above has refused */
+        gp_thread_prewarm(); /* before the RX fence: allocates; after it (v2): claims a pool set, lazily, once per thread */
       memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc)); /* the demod job reads whether the EVM is armed; the block below re-arms it for the old path */
       nr_pdsch_evm_acc.armed = gp_evm_armed(probe_last_sym);
       gp_tried = true;
@@ -3228,7 +3286,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
             nr_gpu_pass_note(NR_GPU_PASS_EV_SHADOW_FAIL);
           } else {
             gp_ok = true;
-            nr_gpu_pass_note(NR_GPU_PASS_EV_CONT_FAIL);
+            nr_gpu_pass_note(t_probe_first_seg ? NR_GPU_PASS_EV_PROBE : NR_GPU_PASS_EV_CONT_FAIL); /* a probe is never a TB: its outcome is seg_ok[0] */
           }
         } else {
           const uint32_t sz = cw->TBS / 8;
@@ -3251,6 +3309,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       }
     }
   }
+
+  if (!gp_ok)
+    nr_gpu_graph_call_dirty(); /* v2 Task 4: this body runs the stage path, which may rewrite rxdataF: the held instance's estimate is not reused */
 
   /* GPU LLRs in hand: everything from here to the LLR buffer (FEP, channel estimation, equaliser,
    * demodulator) is what the GPU already did for this slot. A PT-RS arm or CSI-RS rate matching
@@ -3468,21 +3529,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * H_i = Y_i / X from the raw per-antenna FEP output, which is still produced for every antenna. */
   const int chest_only = nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl);
   /* Estimate over the group's union of RBs so the slot's next grant can reuse it. */
-  fapi_nr_dl_config_dlsch_pdu_rel15_t chest_cfg = *dlsch_config;
-  freq_alloc_bitmap_t chest_alloc = *freq_alloc;
-  if (t_share.on && t_share.rb_n > 0) {
-    /* Widen UPWARD only: nr_pdsch_channel_estimation() writes dl_ch from INDEX 0 = the first RB of
-     * the freq_alloc IT was given, and nr_dlsch_extract_rbs() reads it back from index 0 assuming
-     * that is THIS grant's first RB, so the estimate's base RB must be this grant's first_rb
-     * (a lower base would hand the equaliser a channel shifted by (first_rb - rb_lo)*12
-     * subcarriers). The key below carries rb_lo AND rb_n: grants of one group with the same first
-     * RB compute the same union, hence the same key; a grant starting higher re-estimates. */
-    const int lo = (int)freq_alloc->first_rb;
-    const int hi0 = t_share.rb_lo + t_share.rb_n, hi1 = (int)(freq_alloc->first_rb + freq_alloc->num_rbs);
-    const int hi = hi0 > hi1 ? hi0 : hi1;
-    chest_alloc = set_bitmap_from_start_size(lo, hi - lo);
-    chest_cfg.start_rb = lo; chest_cfg.number_rbs = hi - lo;
-  }
+  fapi_nr_dl_config_dlsch_pdu_rel15_t chest_cfg;
+  freq_alloc_bitmap_t chest_alloc;
+  share_chest_band(freq_alloc, dlsch_config, &chest_alloc, &chest_cfg);
   const nr_pdsch_chest_key_t chest_key = {.slot = share_slot,
                                           .dmrs_pos = dmrs_full,
                                           .cfg_type = (uint8_t)dlsch_config->dmrsConfigType,
@@ -5200,6 +5249,13 @@ gpu_llr_ready:;
         t_last_llr = llr; t_last_G = G;
       }
       atomic_fetch_add(&g_rv_census[grant->mcs >= 24][cw->rv & 3], 1);
+      if (nr_gpu_graph_on()) { /* v2: the device computed the loops below (k_llr_stats, bit-equal) */
+        const nr_gpu_llr_stats_t *ls = &t_gpp->r.llr_stats;
+        llr_n = ls->llr_n; llr_absum = ls->llr_absum; llr_zero = ls->llr_zero; llr_sat = ls->llr_sat; llr_clip8 = ls->llr_clip8;
+        llr_pos = ls->llr_pos; llr_sgnsum = ls->llr_sgnsum;
+        memcpy(posbit, ls->posbit, sizeof(posbit));
+        memcpy(nbit, ls->nbit, sizeof(nbit));
+      }
       gp_commit_decode(t_gpp, cw, G, dlsch_config->tbslbrm, gp_tb);
       goto gp_llr_done;
     }
@@ -5352,8 +5408,9 @@ gpu_llr_ready:;
         nr_gpu_pass_fp32_shadow(ldpc_ok || t_seg_ok_last != t_gp_fok, gp_sign_bad(t_gpp->llr, llr, G));
       else if (ldpc_ok || t_seg_ok_last != t_gp_fok || gp_llr_hash(llr, G) != t_gp_fhash) {
         nr_gpu_pass_note(NR_GPU_PASS_EV_SHADOW_FAIL_BAD);
-        LOG_E(PHY, "SENSING: GPUPASS MISMATCH (CRC-fail shadow) rnti 0x%x nl %u mcs %u rb %d+%d tbs %u: pass blocks ok %u, old %u (old crc %d), llr hash %s\n", grant->rnti, cw->Nl,
-              grant->mcs, freq_alloc->first_rb, freq_alloc->num_rbs, cw->TBS, t_gp_fok, t_seg_ok_last, (int)ldpc_ok, gp_llr_hash(llr, G) == t_gp_fhash ? "equal" : "DIFFERENT");
+        LOG_E(PHY, "SENSING: GPUPASS MISMATCH (CRC-fail shadow) rnti 0x%x nl %u mcs %u rb %d+%d tbs %u: pass blocks ok %u, old %u (old crc %d), llr hash %s (probe %d horizon %d share %d G %u)\n", grant->rnti, cw->Nl,
+              grant->mcs, freq_alloc->first_rb, freq_alloc->num_rbs, cw->TBS, t_gp_fok, t_seg_ok_last, (int)ldpc_ok, gp_llr_hash(llr, G) == t_gp_fhash ? "equal" : "DIFFERENT",
+              (int)t_probe_first_seg, probe_last_sym, (int)t_share.on, G);
         nr_gpu_pass_disable("pass and old first body disagree on a CRC failure");
       }
     }
@@ -5697,7 +5754,7 @@ gpu_llr_ready:;
       atomic_fetch_add(&g_shape_Z[sk], (uint64_t)t_seg_Z);
       atomic_fetch_add(&g_nsym[sk][(dlsch_config->number_symbols <= 9) ? 0 : 1], 1);
     }
-    if (!gp_ok) { /* a pass-taken grant has no host LLR statistics: not counted, so the means are not diluted with zeros */
+    if (!gp_ok || nr_gpu_graph_on()) { /* a v1 pass-taken grant has no host LLR statistics: not counted, so the means are not diluted with zeros; v2 has them */
       const int k = ldpc_ok ? 1 : 0;
       atomic_fetch_add(&g_llr_n[k], llr_n);
       atomic_fetch_add(&g_llr_absum[k], llr_absum);
@@ -5895,7 +5952,9 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   if (s_low < 0) { const char *e = getenv("ISAC_GPU_DISC_SMS_LOW"); s_low = e && atoi(e) > 0; }
   const bool large = s_low && freq_alloc->num_rbs > 96;
   if (large) nr_gpu_budget_rt_large_begin();
+  const int gp_hold = nr_gpu_graph_call_begin(); /* v2 Task 4 (ISAC_PDSCH_GPU_GRAPH_RETRY): the call's bodies share one pass instance */
   const nr_pdsch_passive_decode_status_t st = passive_decode_entry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  if (gp_hold) nr_gpu_graph_call_end();
   if (large) nr_gpu_budget_rt_large_end();
   return st;
 }
