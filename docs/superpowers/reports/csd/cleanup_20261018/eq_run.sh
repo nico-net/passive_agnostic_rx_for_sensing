@@ -5,7 +5,7 @@
 set -u
 R=/home/nicola/NICOLA/wt/rr-csd-int16kf; S=$R/tests/passive_rx
 OLDB=/home/nicola/NICOLA/wt/rr-csd-int16ulr/cmake_targets/ran_build/build_t26; NEWB=$R/cmake_targets/ran_build/build_t26
-E=/home/nicola/NICOLA/wt/rr-orchestration/ota/t26yE.env
+E=/home/nicola/NICOLA/wt/rr-orchestration/ota/t26zE.env
 export CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps
 tag=$1; IDX=$2; rounds=$3; caps=${4:-"b tim"}
 one() { # cap arm i
