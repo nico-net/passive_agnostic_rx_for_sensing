@@ -16,8 +16,9 @@
  *   - no spin: the wait polls cudaStreamQuery, spins 60 us, then nanosleeps 25 us per poll;
  *   - ULST ISAC_UL_GPU_FEP_DEADLINE=1 (default off): the kernel writes per-context staging rows, copied to the caller's rows on
  *     success; a call not done within one slot (the deadline) is abandoned (context reserved until its stream drains,
- *     nothing of the caller's is touched) and the caller runs the CPU FEP. While an abandoned call is still on the GPU every
- *     call goes to the CPU (hysteresis: the GPU is retried as soon as the starved kernel has drained, no hold constant);
+ *     nothing of the caller's is touched) and the caller runs the CPU FEP. Hysteresis without a hold constant: while an
+ *     abandoned call is still on the GPU every call goes to the CPU, and after it drains the CPU keeps the FEP for as long
+ *     again as that call took (launch to reclaim), so a burst costs one deadline per observed GPU latency, not per grant;
  *   - ULST ISAC_UL_GPU_FEP_KCHARGE=1 (default off): the duty cap is charged with the kernel's own span (first block start
  *     to last block end, %globaltimer), not the wall time that includes waiting behind DL kernels (VL2: one starved 26 ms
  *     call tripped the 30 % cap and sent UL to the CPU for the rest of the window);
@@ -237,7 +238,9 @@ static uint64_t span_us(int c, int nblk)
   }
   return hi > lo ? (hi - lo) / 1000 : 0;
 }
-static int g_lost_nblk[NCTX]; /* blocks of the abandoned launch, charged at reclaim */
+static int g_lost_nblk[NCTX];     /* blocks of the abandoned launch, charged at reclaim */
+static uint64_t g_lost_t0[NCTX];  /* its call start */
+static std::atomic<uint64_t> g_hold_until{0};
 /* ULST DEADLINE: give back every abandoned context whose stream has drained; true = none is still on the GPU */
 static bool reclaim_lost()
 {
@@ -247,10 +250,13 @@ static bool reclaim_lost()
     if (!(U.lost.fetch_and(~bit) & bit)) continue; /* another consumer reclaimed it */
     cudaGetLastError();
     if (U.kc_on) U.win_used_us += span_us(i, g_lost_nblk[i]);
+    const uint64_t t = now_us(), until = t + (t - g_lost_t0[i]);
+    uint64_t h = g_hold_until.load();
+    while (until > h && !g_hold_until.compare_exchange_weak(h, until)) {}
     ++U.n_reclaimed;
     U.busy.fetch_and(~bit);
   }
-  return U.lost.load() == 0;
+  return U.lost.load() == 0 && now_us() >= g_hold_until.load();
 }
 }  // namespace ulfep
 
@@ -299,6 +305,7 @@ extern "C" int nr_pusch_gpu_fep_run(const void *items, int n, int nb_rb, int fco
       const uint64_t el = now_us() - t0;
       if (U.dl_on && el > U.deadline_us) { /* abandoned: the context stays reserved (lost) until its stream drains */
         g_lost_nblk[c] = n * U.nant;
+        g_lost_t0[c] = t0;
         U.lost.fetch_or(1u << c);
         ++U.n_deadline;
         if (!U.kc_on) U.win_used_us += el; /* kcharge: the span is charged at reclaim */

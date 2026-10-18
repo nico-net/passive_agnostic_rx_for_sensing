@@ -122,11 +122,13 @@ TEST(UlGpuFep, DeadlineAbandonLeavesRowsUntouched)
     it[i].rotate = 1; it[i].rot[0] = 20000; it[i].rot[1] = 3000;
   }
   int dl = 0, hold = 0;
-  for (int r = 0; r < 20; r++) {
+  for (int r = 0; r < 60; r++) {
     const int rc = api->run(it.data(), n, 217, 4096 - 217 * 6);
     ASSERT_TRUE(rc == -4 || rc == -1) << "rc " << rc;
     dl += rc == -4; hold += rc == -1;
-    if (r % 2) usleep(20000); /* let the abandoned kernel finish: the next call reclaims its context */
+    /* after a deadline 20 ms: the abandoned kernel drains, the next call reclaims it and holds the CPU for as long
+     * again (~20 ms), which the following 2 ms-spaced calls see as holds */
+    usleep(rc == -4 ? 20000 : 2000);
   }
   usleep(50000);
   for (auto &row : out)
@@ -136,8 +138,9 @@ TEST(UlGpuFep, DeadlineAbandonLeavesRowsUntouched)
   EXPECT_EQ(0u, st[0]);              /* no call completed */
   EXPECT_EQ((uint64_t)dl, st[10]);   /* deadline */
   EXPECT_EQ((uint64_t)hold, st[11]); /* hold */
-  EXPECT_GE(st[12], 9u);             /* reclaimed after each 20 ms pause */
-  EXPECT_GE(dl, 10);
+  EXPECT_GE(st[12], (uint64_t)dl - 1); /* every abandoned context came back */
+  EXPECT_GE(dl, 3);
+  EXPECT_GE(hold, 20);                 /* the latency-proportional hold after each reclaim */
 }
 
 // Latency of one batch (ULFEP_BENCH=1 to run): n items x 4 antennas, host-memory in/out, as the decoder calls it.
