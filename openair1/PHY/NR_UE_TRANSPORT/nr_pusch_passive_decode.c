@@ -2914,7 +2914,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * bound of its MCS runs ONE LDPC iteration instead of max_ldpc_iterations. Rate recovery and the HARQ soft buffer are
    * unchanged (they precede the iterations). A HARQ-combined retransmission gets 6 dB more room (soft combining of up to 4
    * transmissions); the GPU pool refuses combined TBs, so on CPU they cost ~2 ms per wide noise grant. On the replays these
-   * noise TBs kept the GPU LDPC pool busy ~2.5 ms per wide grant (the UL p99 tail of tim). */
+   * noise TBs kept the GPU LDPC pool busy ~2.5 ms per wide grant (the UL p99 tail of tim). Such a TB also skips the UCI
+   * footprint search below (up to ISAC_UL_UCI_BUDGET more demux + decode passes that cannot pass CRC either). */
+  bool ldpc_hopeless = false;
   {
     static float lm = -1000.0f;
     if (lm < -999.0f) lm = getenv("ISAC_UL_LDPC_SNR_MARGIN") ? (float)atof(getenv("ISAC_UL_LDPC_SNR_MARGIN")) : 1e9f;
@@ -2922,6 +2924,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     if (lm < 1e8f && isfinite(pvp->ul_dmrs_snr_db) &&
         pvp->ul_dmrs_snr_db < nr_pusch_passive_shannon_db(g->mcs, g->mcs_table) - lm - (hq_retx ? 6.0f : 0.0f)) {
       ulsch->max_ldpc_iterations = 1;
+      ldpc_hopeless = true;
       atomic_fetch_add_explicit(&g_ldpc_capped, 1, memory_order_relaxed);
     }
   }
@@ -3068,7 +3071,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * prevents the correct width from passing. The existing per-identity rate
    * limiter bounds exploration; cache entries still require a verified TB CRC. */
   if (rc == 0 && hp_crc_failed(ulsch) && ucfg != NULL && ucfg->ul_uci_search > 0
-      && g->nrOfLayers == 1 && out->G > 0 && !hq_retx) {
+      && g->nrOfLayers == 1 && out->G > 0 && !hq_retx && !ldpc_hopeless) {
     const uint32_t full_bits = out->G;
     int16_t *original = g_snapshot[ctx].valid ?
       (full_bits<=PASSIVE_UL_UCI_CAP ? g_scratch[ctx].uci : NULL) :
