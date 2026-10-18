@@ -57,6 +57,7 @@
 #include "nr_ul_llr_dump.h" // ISAC_UL_LLR_DUMP (default off)
 #include "nr_ul_nid_bg.h" // ISAC_UL_NID_BG (default off)
 #include "nr_pusch_passive_queue.h" // nr_pusch_passive_queue_pool_copy_next
+#include "nr_snr_gate.h"
 #include "nr_pdcch_ul_interp_sweep.h" // gap item 2: nr_pusch_ul_energy_span/nr_pusch_ul_dmrs_pin_set
 
 /* nr_ulsch_decoding() has no declaration in any header this library exposes -- nr_transport_proto.h
@@ -2902,6 +2903,24 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
      * a decode that failed. */
     out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
     out->reject_reason = "cfr_only mode: LDPC decode deliberately skipped";
+    return false;
+  }
+
+  /* TAIL-FIX no-chance gate (nr_snr_gate.h): the grant's DM-RS SNR is more than 5 dB below what its MCS needs: no LDPC, no UCI search, no retry; the verdict is a
+   * CRC fail with skip=1. Probes (layout search / trials / solver probes) are discovery and never gated; a retransmission is always decoded while UL HARQ
+   * combining is on (its soft bits are needed). Transform-precoded grants (pi/2-BPSK tables) are not covered by the table. */
+  if (!t_solver_probe && !g->transform_precoding && isfinite(pvp->ul_dmrs_snr_db)
+      && nr_snr_gate_applies(nr_ul_layout_is_probe(g) || nr_ul_layout_is_trial(g), true, g->rv, ul_harq_combine_on() != 0)
+      && nr_snr_no_chance(pvp->ul_dmrs_snr_db, g->mcs, g->mcs_table)) {
+    out->skip = 1;
+    out->snr_db = pvp->ul_dmrs_snr_db;
+    out->tbs_bytes = tbs >> 3;
+    out->qam_mod_order = pdu.qam_mod_order;
+    out->nb_rb = g->num_rb;
+    out->nb_symbols = g->num_symbols;
+    out->est_delay = pvp->delay.est_delay;
+    out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
+    out->reject_reason = "no-chance SNR gate (DM-RS SNR far below the MCS requirement)";
     return false;
   }
 

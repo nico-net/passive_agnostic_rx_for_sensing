@@ -75,6 +75,7 @@ typedef struct {
   uint16_t hyp_n, hyp_s; ///< UL BWP size@start the attempt decoded under (0 on an early reject)
   uint8_t tbl;            ///< MCS table used
   bool nid_conf;          ///< ISAC_UL_NID_BG confirmed entry applied
+  uint8_t skip;           ///< TAIL-FIX no-chance gate (nr_snr_gate.h): DM-RS SNR far below the MCS requirement; not demodulated / LDPC-decoded / retried (UL_PUSCH_CRC skip=)
 } nr_pusch_passive_out_t;
 
 /// Independent decode contexts. Each holds its own minimal PHY_VARS_gNB -- rxdataF ring, pusch_vars,

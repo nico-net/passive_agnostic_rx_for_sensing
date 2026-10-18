@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "nr_pdsch_recovery.h"
 #include "common/utils/nr_core_plan.h"
+#include "nr_recov_yield.h"
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -33,7 +34,9 @@ static int (*g_run_fn)(void *, const nr_recov_key_t *);
 static bool (*g_exp_fn)(const nr_recov_key_t *);
 static void (*g_fb_fn)(void *, const nr_recov_key_t *, int);
 static void (*g_done_fn)(void *);
-static _Atomic uint64_t g_sub, g_resc, g_stale, g_expd, g_full, g_late[LATE_BINS];
+static bool (*g_busy_fn)(void);
+static uint64_t g_idle_wait_ns = 2000000ull;
+static _Atomic uint64_t g_yielded, g_sub, g_resc, g_stale, g_expd, g_full, g_dropped_old, g_late[LATE_BINS];
 static bool g_nice, g_mu_init;
 static __thread uint64_t t_cur_ns; /* submit time of the job the worker is running */
 static __thread void *t_cur_job; /* job the worker is on */
@@ -55,6 +58,13 @@ static uint64_t now_ns(void)
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+void nr_pdsch_recovery_set_busy_hook(bool (*busy)(void)) { g_busy_fn = busy; }
+void nr_pdsch_recovery_test_idle_wait_ns(uint64_t ns) { g_idle_wait_ns = ns; }
+static void nap_100us(void)
+{
+  struct timespec t = {0, 100000};
+  nanosleep(&t, NULL);
 }
 void nr_pdsch_recovery_set_hooks(int (*run)(void *, const nr_recov_key_t *), bool (*expired)(const nr_recov_key_t *),
                                  void (*feedback)(void *, const nr_recov_key_t *, int), void (*done)(void *))
@@ -163,9 +173,9 @@ void nr_pdsch_recovery_stats(char *buf, int n)
     if (!p50 && c * 2 >= tot) p50 = i;
     if (!p99 && c * 100 >= tot * 99) { p99 = i; break; }
   }
-  snprintf(buf, (size_t)n, "RECOV submitted=%lu rescued=%lu stale=%lu expired=%lu dropped_full=%lu late_ms_p50/p99=%d/%d",
+  snprintf(buf, (size_t)n, "RECOV submitted=%lu rescued=%lu stale=%lu expired=%lu dropped_full=%lu dropped_old=%lu yielded=%lu late_ms_p50/p99=%d/%d",
            (unsigned long)atomic_load(&g_sub), (unsigned long)atomic_load(&g_resc), (unsigned long)atomic_load(&g_stale),
-           (unsigned long)atomic_load(&g_expd), (unsigned long)atomic_load(&g_full), p50, p99);
+           (unsigned long)atomic_load(&g_expd), (unsigned long)atomic_load(&g_full), (unsigned long)atomic_load(&g_dropped_old), (unsigned long)atomic_load(&g_yielded), p50, p99);
 }
 
 void nr_pdsch_recovery_set_job_bytes(size_t n) { g_slot_bytes = n < 64 ? 64 : (n + 63) & ~(size_t)63; }
@@ -197,6 +207,10 @@ static void *worker(void *arg)
       feedback(&e.k, NR_RECOV_FB_FAIL_NOCREDIT);
     } else if (stale(&e.k)) { /* a newer slot of this process is known: do not even run the arms */
       atomic_fetch_add_explicit(&g_stale, 1, memory_order_relaxed);
+      feedback(&e.k, NR_RECOV_FB_FAIL);
+    } else if (!nr_recov_wait_idle(g_busy_fn, now_ns, nap_100us, g_idle_wait_ns)) {
+      /* a first-pass decode still waits after the bounded wait: the lane yields, no arm runs; the failure verdict stands and its feedback is delivered once */
+      atomic_fetch_add_explicit(&g_yielded, 1, memory_order_relaxed);
       feedback(&e.k, NR_RECOV_FB_FAIL);
     } else if (g_run_fn) {
       t_cur_ns = e.t_ns;
@@ -306,8 +320,25 @@ void *nr_pdsch_recovery_acquire(void)
     return NULL;
   }
   void *p = NULL;
-  if (g_run && !g_stop && g_nfree > 0) p = g_slots + (size_t)g_free[--g_nfree] * g_slot_bytes;
+  entry_t old = {0};
+  bool evicted = false;
+  if (g_run && !g_stop) {
+    if (g_nfree > 0) {
+      p = g_slots + (size_t)g_free[--g_nfree] * g_slot_bytes;
+    } else if (g_n > 0) { /* full: the OLDEST queued job is the least likely to still matter (a newer slot of its HARQ process may already exist): it is dropped, its slot reused */
+      old = g_q[g_head];
+      g_head = (g_head + 1) % g_depth;
+      g_n--;
+      evicted = true;
+      p = old.job;
+    }
+  }
   pthread_mutex_unlock(&g_mu);
+  if (evicted) { /* its failure verdict is delivered exactly once, here, as for any job the worker does not rescue */
+    atomic_fetch_add_explicit(&g_dropped_old, 1, memory_order_relaxed);
+    if (g_fb_fn) g_fb_fn(old.job, &old.k, NR_RECOV_FB_FAIL);
+    if (g_done_fn) g_done_fn(old.job);
+  }
   if (!p) atomic_fetch_add_explicit(&g_full, 1, memory_order_relaxed);
   return p;
 }
