@@ -8,7 +8,7 @@ tag=$1; IDX=$2; shift 2
 for spec in "$@"; do IFS=: read cap arm i <<< "$spec"
   extra="ISAC_A2E_TRACE=1"; [ "$arm" = ON ] && extra="$extra ${ONFLAGS:-}"; v=FLAGS_$arm; [ -n "${!v:-}" ] && extra="$extra ${!v}"
   for try in $(seq 1 30); do
-    flag=$(mktemp); ( while [ -e "$flag" ]; do pgrep -f "rr-csd-int16kf/cmake_targets/ran_build/build_t26/nr-uesoftmodem" > /dev/null && pgrep -x burst > /dev/null && echo burst >> "$flag.seen"; sleep 2; done ) &
+    flag=$(mktemp); ( while [ -e "$flag" ]; do pgrep -f "^/home/nicola/NICOLA/wt/rr-csd-int16kf/cmake_targets/ran_build/build_t26/nr-uesoftmodem" > /dev/null && pgrep -x burst > /dev/null && echo burst >> "$flag.seen"; sleep 2; done ) &
     CAPSET=$cap ENVFILE=$E TMO=90 "$S/p99_replay.sh" "${tag}_${cap}_${arm}_$i" $extra < /dev/null > /dev/null 2>&1
     rm -f "$flag"; wait
     d=$(ls -d $R/replays/replay_${tag}_${cap}_${arm}_${i}_* | tail -1)

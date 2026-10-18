@@ -1493,11 +1493,11 @@ static bool dci11_parse_cached(const nr_dci11_resolver_t *r, int i, const nr_pdc
     return false;
   return nr_pdcch_blind_extract_11_pre(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &m->o, &m->pre, parsed);
 }
-/* dci11_layout_opts: the payload-independent first half of dci11_layout_parse_full(): the extract options of layout i, false when the
- * layout has no field bits or does not give the length len. */
-static bool dci11_layout_opts(const nr_dci11_resolver_t *r, int i, uint16_t len, const nr_pdcch_blind_monitor_cfg_t *cfg,
-                              nr_pdcch_blind_extract_opts_t *op)
+static bool dci11_layout_parse_full(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                                    const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed,
+                                    nr_pdcch_blind_extract_opts_t *o_out, nr_pdcch_blind_extract_pre_t *pre_out)
 {
+  if (pre_out) pre_out->size = 0xFFFF; /* "not parseable" unless set below */
   nr_dci11_field_bits_t f;
   if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f))
     return false;
@@ -1525,132 +1525,13 @@ static bool dci11_layout_opts(const nr_dci11_resolver_t *r, int i, uint16_t len,
   for (int k = 0; k < o.tda_count && k < 16; ++k) {
     o.tda_start[k] = 1; o.tda_length[k] = 13; o.tda_mapping[k] = 0;
   }
-  *op = o;
-  return nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o) == len;
-}
-static bool dci11_layout_parse_full(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
-                                    const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed,
-                                    nr_pdcch_blind_extract_opts_t *o_out, nr_pdcch_blind_extract_pre_t *pre_out)
-{
-  if (pre_out) pre_out->size = 0xFFFF; /* "not parseable" unless set below */
-  nr_pdcch_blind_extract_opts_t o;
-  if (!dci11_layout_opts(r, i, len, cfg, &o))
+  if (nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o) != len)
     return false;
   if (pre_out) {
     *o_out = o;
     nr_pdcch_blind_extract_pre(cfg->bwp_size, o_out, pre_out);
   }
   return nr_pdcch_blind_extract_11(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &o, parsed);
-}
-
-/* ---- ISAC_DCI11_READ_MEMO=1 (DLT task 2, default off; 2 = self-check). The solver's reading pass parses every live layout past the
- * 256 offset keys (~1300 parses per DCI on capture b). A layout's parse is a pure function of the values it reads at its field
- * positions and of a few options (nr_dci11_key_t, nr_pdcch_blind_monitor.h); the reading it lands in depends only on whether it parses
- * and on the fields nr_dci11_same_reading() compares, so within one DCI two layouts with equal keys (those fields' inputs) land in
- * the same reading (the first one's full parse is the one a new reading keeps). Per layout the positions are kept (dci11_layout_key, refreshed like the parse
- * cache); per DCI a table maps key -> outcome of the first layout that had it (reading id, -1 none, -2 rejected), and later layouts
- * with that key take the outcome without parsing. The 256-key grouping, the reading order and the reading cap are untouched: only
- * parses whose result is already known are skipped. The table is sized from the live count, so it never fills. Mode 2 parses
- * every memo hit as well and counts outcomes that differ (and then uses the parse). */
-static int dci11_read_memo_mode(void)
-{
-  static int en = -1;
-  if (en < 0) en = getenv("ISAC_DCI11_READ_MEMO") ? atoi(getenv("ISAC_DCI11_READ_MEMO")) : 0;
-  return en;
-}
-typedef struct {
-  nr_dci11_layout_t hyp;
-  uint16_t len, bwp_size, bwp_start;
-  uint8_t tda_bits, tda_count, state; /* state: 0 empty, 1 the parse rejects before reading the payload, 2 keymap */
-  nr_dci11_keymap_t km;
-} dci11_km_memo_t;
-/* 1: *k is layout i's key for raw; 0: the parse of layout i at len returns false whatever the payload; -1: no key (parse it) */
-static int dci11_layout_key(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
-                            const nr_pdcch_blind_monitor_cfg_t *cfg, bool decode_fields, nr_dci11_key_t *k)
-{
-  static __thread dci11_km_memo_t *t_km; /* heap, not static TLS (see the stage-2 scratch note) */
-  if (i < 0 || i >= NR_DCI11_LAYOUT_MAX || (t_km == NULL && (t_km = calloc(NR_DCI11_LAYOUT_MAX, sizeof(*t_km))) == NULL))
-    return -1;
-  dci11_km_memo_t *m = &t_km[i];
-  if (m->state == 0 || memcmp(&m->hyp, &r->hyp[i], sizeof(m->hyp)) != 0 || m->len != len || m->bwp_size != (uint16_t)cfg->bwp_size
-      || m->bwp_start != (uint16_t)cfg->bwp_start || m->tda_bits != r->off[i].tda_bits || m->tda_count != (uint8_t)cfg->extract.tda_count) {
-    m->hyp = r->hyp[i];
-    m->len = len;
-    m->bwp_size = (uint16_t)cfg->bwp_size;
-    m->bwp_start = (uint16_t)cfg->bwp_start;
-    m->tda_bits = r->off[i].tda_bits;
-    m->tda_count = (uint8_t)cfg->extract.tda_count;
-    m->state = 1;
-    nr_pdcch_blind_extract_opts_t o;
-    if (dci11_layout_opts(r, i, len, cfg, &o)) {
-      nr_pdcch_blind_extract_pre_t pre;
-      nr_pdcch_blind_extract_pre(cfg->bwp_size, &o, &pre);
-      nr_pdcch_blind_dci11_keymap(len, &o, &pre, &m->km);
-      m->state = 2;
-    }
-  }
-  if (m->state != 2)
-    return 0;
-  nr_pdcch_blind_dci11_key(raw, &m->km, decode_fields, k);
-  return 1;
-}
-typedef struct {
-  nr_dci11_key_t k;
-  uint32_t gen;
-  int16_t out; /* reading id, -1 no reading, -2 rejected */
-} dci11_vmemo_ent_t;
-static __thread dci11_vmemo_ent_t *t_vm;
-static __thread uint32_t t_vm_cap, t_vm_gen;
-static _Atomic uint64_t g_vm_n, g_vm_hit, g_vm_bad;
-/* dci11_vmemo_begin: empties the per-DCI table (generation stamp), sized >= 2 x the layouts that can insert; false: no table */
-static bool dci11_vmemo_begin(int n_layouts)
-{
-  uint32_t need = 1024;
-  while (need < 2u * (uint32_t)n_layouts) need <<= 1;
-  if (need > t_vm_cap) {
-    free(t_vm);
-    t_vm = calloc(need, sizeof(*t_vm));
-    t_vm_cap = t_vm ? need : 0;
-    t_vm_gen = 0;
-  }
-  if (!t_vm) return false;
-  if (++t_vm_gen == 0) {
-    memset(t_vm, 0, t_vm_cap * sizeof(*t_vm));
-    t_vm_gen = 1;
-  }
-  return true;
-}
-/* dci11_vmemo_slot: the entry of key *k: *found when this DCI already stored it, else the empty entry to store it in */
-static dci11_vmemo_ent_t *dci11_vmemo_slot(const nr_dci11_key_t *k, bool *found)
-{
-  uint64_t h = 0;
-  const uint8_t *b = (const uint8_t *)k;
-  for (size_t q = 0; q + 8 <= sizeof(*k); q += 8) {
-    uint64_t v;
-    memcpy(&v, b + q, 8);
-    h = (h ^ v) * 0x9E3779B97F4A7C15ull;
-  }
-  h ^= h >> 31;
-  for (uint32_t p = (uint32_t)h & (t_vm_cap - 1);; p = (p + 1) & (t_vm_cap - 1)) {
-    dci11_vmemo_ent_t *e = &t_vm[p];
-    if (e->gen != t_vm_gen) {
-      *found = false;
-      return e;
-    }
-    if (memcmp(&e->k, k, sizeof(*k)) == 0) {
-      *found = true;
-      return e;
-    }
-  }
-}
-static void dci11_vmemo_note(bool hit, bool bad)
-{
-  const uint64_t n = atomic_fetch_add_explicit(&g_vm_n, 1, memory_order_relaxed) + 1;
-  if (hit) atomic_fetch_add_explicit(&g_vm_hit, 1, memory_order_relaxed);
-  const uint64_t nb = bad ? atomic_fetch_add_explicit(&g_vm_bad, 1, memory_order_relaxed) + 1 : atomic_load_explicit(&g_vm_bad, memory_order_relaxed);
-  if ((bad && nb <= 8) || (n % 2000000) == 0)
-    LOG_A(PHY, "SENSING: DCI11_READ_MEMO layouts=%llu skipped_parses=%llu mismatches=%llu%s\n", (unsigned long long)n,
-          (unsigned long long)atomic_load_explicit(&g_vm_hit, memory_order_relaxed), (unsigned long long)nb, bad ? " (MISMATCH)" : "");
 }
 
 /* nr_pdcch_dci11_stage2_candidates: stage 2 of the DCI 1_1 layout search: returns up to max parsed candidates from the live layouts for one raw DCI.
@@ -10004,10 +9885,7 @@ constdiag_done:;
         if (s_lc_chk < 0) s_lc_chk = getenv("ISAC_RNTI_LAYOUT_CACHE_CHECK") && atoi(getenv("ISAC_RNTI_LAYOUT_CACHE_CHECK")) ? 1 : 0;
         if (s_lc_chk && lc_n >= 0) { memcpy(lc_chk, lc_ids, (size_t)lc_n * sizeof(uint16_t)); lc_chk_n = lc_n; lc_n = -1; }
       }
-      static int s_rd_rv = -1; /* ISAC_PDSCH_READING_RV, read below */
-      if (s_rd_rv < 0) s_rd_rv = getenv("ISAC_PDSCH_READING_RV") && atoi(getenv("ISAC_PDSCH_READING_RV")) ? 1 : 0;
-lc_regroup:;
-      const int vmemo = dci11_read_memo_mode() && dci11_vmemo_begin(lc_n >= 0 ? lc_n : nh) ? dci11_read_memo_mode() : 0;
+lc_regroup:
       for (int ii = 0; ii < (lc_n >= 0 ? lc_n : nh); ii++) {
         const int i = lc_n >= 0 ? lc_ids[ii] : ii;
         if (i >= nh) continue;
@@ -10044,42 +9922,13 @@ lc_regroup:;
           if (kfast) nr_keyhash_put(&khash, kpos, nk);
           kk = nk++;
         }
-        dci11_vmemo_ent_t *vm = NULL; /* ISAC_DCI11_READ_MEMO: where this layout's outcome is stored for the next equal key */
-        nr_dci11_key_t vk;
-        if (vmemo) {
-          const int kr = dci11_layout_key(R, i, rw, dlen, cfg, s_rd_rv, &vk);
-          bool found = false;
-          if (kr == 1) vm = dci11_vmemo_slot(&vk, &found);
-          if (kr == 0 || found) {
-            int got = kr == 0 ? -2 : vm->out;
-            bool bad = false;
-            if (vmemo == 2) { /* self-check: the outcome the parse below would give, without changing any state */
-              nr_pdcch_blind_result_t pc;
-              int want = -2;
-              if (dci11_layout_parse(R, i, rw, dlen, cfg, &pc) && !pc.vrb_to_prb) {
-                want = nrd < SOLVER_READINGS ? -3 : -1; /* -3: would open a new reading */
-                for (int k = 0; k < nrd && want < 0; k++)
-                  if (nr_dci11_same_reading(&rparsed[k], &pc, s_rd_rv)) want = k;
-              }
-              bad = want != got;
-            }
-            dci11_vmemo_note(true, bad);
-            if (!bad) {
-              if (got >= 0) { s_gid[i] = (uint8_t)got; rcount[got]++; }
-              if (kk >= 0 && got != -2) kgrp[kk] = got;
-              continue;
-            }
-            vm = NULL; /* mismatch: decode with the parse */
-          } else
-            dci11_vmemo_note(false, false);
-        }
         nr_pdcch_blind_result_t pr;
-        if (!dci11_layout_parse(R, i, rw, dlen, cfg, &pr) || pr.vrb_to_prb) {
-          if (vm) *vm = (dci11_vmemo_ent_t){.k = vk, .gen = t_vm_gen, .out = -2};
+        if (!dci11_layout_parse(R, i, rw, dlen, cfg, &pr) || pr.vrb_to_prb)
           continue;
-        }
         /* ISAC_PDSCH_READING_RV=1 (TIMMCS0, default off): readings also differ by rv/NDI/HARQ pid. Without it a solved
          * layout's MCS-0 grant took the rv of whichever layout parsed first (rv = NDI on TIM: half the MCS-0 TBs lost). */
+        static int s_rd_rv = -1;
+        if (s_rd_rv < 0) s_rd_rv = getenv("ISAC_PDSCH_READING_RV") && atoi(getenv("ISAC_PDSCH_READING_RV")) ? 1 : 0;
         int g = -1, rpos = 0;
         if (rfast)
           g = nr_dci11_reading_idx_find(&ridx, rparsed, &pr, s_rd_rv, &rpos);
@@ -10097,7 +9946,6 @@ lc_regroup:;
           rcount[g]++;
         }
         if (kk >= 0) kgrp[kk] = g;
-        if (vm) *vm = (dci11_vmemo_ent_t){.k = vk, .gen = t_vm_gen, .out = (int16_t)g};
       }
       if (lc_n >= 0 && nrd > 5) {
         /* more than 1 + 4 readings overlap the solved set: the solver's refinement cap (4) then depends on the order in which the FULL pass
