@@ -61,6 +61,8 @@ struct Recovery : ::testing::Test {
     for (auto &f : g_fb) f = 0;
     nr_pdsch_recovery_set_job_bytes(256);
     nr_pdsch_recovery_set_hooks(run_hold, exp_hook, fb_hook, done_hook);
+    nr_pdsch_recovery_set_busy_hook(nullptr);
+    nr_pdsch_recovery_test_idle_wait_ns(2000000);
   }
   void TearDown() override { g_hold = false; nr_pdsch_recovery_stop(); }
 };
@@ -96,24 +98,93 @@ TEST_F(Recovery, ExpiredIqIsDropped)
   EXPECT_EQ(1, g_fb[2].load());
 }
 
-TEST_F(Recovery, QueueFullDropsNotBlocks)
+static void wait_ran(int n)
+{
+  for (int i = 0; i < 400 && g_ran < n; i++) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+}
+
+/* TAIL-FIX: a full lane drops the OLDEST queued job (never blocks, never the running one); the drop is counted and the job's failure feedback is delivered once */
+TEST_F(Recovery, QueueFullDropsOldestAndCountsIt)
 {
   nr_pdsch_recovery_start(4, "0");
-  const unsigned long f0 = field("dropped_full");
-  g_hold = true; /* the worker sticks in the first job */
+  const unsigned long f0 = field("dropped_full"), o0 = field("dropped_old");
+  g_hold = true;
   nr_recov_key_t k{0x4603, 2, 0, 3000, 2};
+  ASSERT_EQ(0, submit(k));
+  wait_ran(1); /* the worker sticks in the first job and keeps its slot */
   long worst_ns = 0;
-  int ok = 0;
-  for (int i = 0; i < 10; i++) {
+  int ok = 1;
+  for (int i = 0; i < 9; i++) {
+    nr_recov_key_t ki{0x4603, 2, 0, (uint32_t)(3001 + i), 2};
     auto t0 = std::chrono::steady_clock::now();
-    ok += submit(k) == 0;
+    ok += submit(ki) == 0;
     worst_ns = std::max<long>(worst_ns, std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
   }
-  /* 4 slots; the worker keeps its slot while it runs, so 4 accepted, 6 dropped */
-  EXPECT_EQ(4, ok);
-  EXPECT_EQ(f0 + 6, field("dropped_full"));
+  /* 4 slots: 1 running + 3 queued; the 6 later submits each evicted the oldest queued job, so every submit was accepted */
+  EXPECT_EQ(10, ok);
+  EXPECT_EQ(o0 + 6, field("dropped_old"));
+  EXPECT_EQ(f0, field("dropped_full"));
+  EXPECT_EQ(6, g_fb[NR_RECOV_FB_FAIL].load()); /* each evicted job got its failure feedback, once, at eviction */
+  EXPECT_EQ(6, g_done.load());
   EXPECT_LT(worst_ns, 50000);
   g_hold = false;
+  wait_fb(10);
+  EXPECT_EQ(10, g_fb[0] + g_fb[1] + g_fb[2]); /* one feedback per submitted job: no solver / HARQ update is lost */
+}
+
+/* the lane starts a job only when no first-pass decode waits, and not before the grant's verdict was emitted */
+TEST_F(Recovery, ArmsRunOnlyWhenFirstPassQueuesAreEmpty)
+{
+  static std::atomic<bool> busy{true};
+  static std::atomic<int> seq{0}, verdict_seq{0}, run_seq{0};
+  busy = true; seq = 0; verdict_seq = 0; run_seq = 0;
+  nr_pdsch_recovery_set_busy_hook([] { return busy.load(); });
+  nr_pdsch_recovery_set_hooks([](void *, const nr_recov_key_t *) { run_seq = ++seq; return 0; }, exp_hook, fb_hook, done_hook);
+  nr_pdsch_recovery_test_idle_wait_ns(500000000ull);
+  nr_pdsch_recovery_start(4, "0");
+  verdict_seq = ++seq; /* the consumer logs EVMGRANT / UL_PUSCH_CRC (first-decode time), then hands the grant over */
+  nr_recov_key_t k{0x4604, 1, 0, 4000, 2};
+  ASSERT_EQ(0, submit(k));
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  EXPECT_EQ(0, run_seq.load()) << "an arm started while a first-pass decode was waiting";
+  busy = false;
+  wait_fb(1);
+  EXPECT_GT(run_seq.load(), verdict_seq.load());
+  EXPECT_EQ(1, g_fb[NR_RECOV_FB_FAIL].load());
+  EXPECT_EQ(0ul, field("yielded"));
+}
+
+/* a lane that stays blocked past the bounded wait gives the job up: no arm, one failure feedback, counted */
+TEST_F(Recovery, BlockedLaneYieldsAfterBoundedWait)
+{
+  nr_pdsch_recovery_set_busy_hook([] { return true; });
+  nr_pdsch_recovery_test_idle_wait_ns(3000000ull);
+  nr_pdsch_recovery_start(4, "0");
+  nr_recov_key_t k{0x4605, 1, 0, 5000, 2};
+  ASSERT_EQ(0, submit(k));
+  wait_fb(1);
+  EXPECT_EQ(0, g_ran.load());
+  EXPECT_EQ(1, g_fb[NR_RECOV_FB_FAIL].load());
+  EXPECT_EQ(1, g_done.load());
+  EXPECT_EQ(1ul, field("yielded"));
+}
+
+/* every submitted job gets exactly one feedback and one done, whatever happens to it (rescued, failed, evicted, yielded) */
+TEST_F(Recovery, ExactlyOneFeedbackPerJobAcrossOutcomes)
+{
+  nr_pdsch_recovery_set_hooks(run_publish, exp_hook, fb_hook, done_hook);
+  nr_pdsch_recovery_start(3, "0");
+  const unsigned long sub0 = field("submitted");
+  int n = 0;
+  for (int i = 0; i < 40; i++) {
+    nr_recov_key_t k{0x4606, (uint8_t)(i % 4), 0, (uint32_t)(6000 + i), 2};
+    n += submit(k) == 0;
+  }
+  ASSERT_GT(n, 0); /* a submit can lose the lock race with the worker (dropped_full, caller keeps the job): only accepted jobs count */
+  nr_pdsch_recovery_stop(); /* the worker drains; pending jobs get their failure verdict */
+  EXPECT_EQ(n, g_fb[0] + g_fb[1] + g_fb[2]);
+  EXPECT_EQ(n, g_done.load());
+  EXPECT_EQ(sub0 + n, field("submitted"));
 }
 
 TEST_F(Recovery, BusyLockDropsWithin50us)

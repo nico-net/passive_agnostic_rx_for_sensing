@@ -25,12 +25,17 @@ enum { NR_RECOV_FB_RESCUED = 0, NR_RECOV_FB_FAIL = 1, NR_RECOV_FB_FAIL_NOCREDIT 
 void nr_pdsch_recovery_set_hooks(int (*run)(void *job, const nr_recov_key_t *k), bool (*expired)(const nr_recov_key_t *k),
                                  void (*feedback)(void *job, const nr_recov_key_t *k, int outcome), void (*done)(void *job));
 
+/* TAIL-FIX: busy() true = a first-pass decode waits (DL ring or UL real queue). The worker starts a job only when it is false (waits at most 2 ms, then the job
+ * yields: FAIL feedback, counted yielded). NULL = never busy. */
+void nr_pdsch_recovery_set_busy_hook(bool (*busy)(void));
+void nr_pdsch_recovery_test_idle_wait_ns(uint64_t ns); /* tests: shorten the bounded wait */
 bool nr_pdsch_recovery_enabled(void); /* ISAC_PDSCH_RECOVERY_ASYNC, read once */
 void nr_pdsch_recovery_set_job_bytes(size_t n); /* job slot size; call before start */
 /* depth <= 0: ISAC_PDSCH_RECOVERY_Q (default 32); cores NULL: ISAC_PDSCH_RECOVERY_CORES, else 10-14 minus the launcher's pinned cores (unpinned nice 10 if none left). Idempotent. 0 = running. */
 int  nr_pdsch_recovery_start(int depth, const char *cores);
 void nr_pdsch_recovery_stop(void);
-/* Free job slot (zero-copy handoff target), or NULL: queue full, stopping, or the lock busy (never waits). NULL is counted dropped_full. */
+/* Free job slot (zero-copy handoff target), or NULL: stopping or the lock busy (never waits; counted dropped_full). Queue full: the OLDEST queued job is dropped
+ * (counted dropped_old; its FAIL feedback and done hook run here, once) and its slot returned, so the newest failure always gets a place. The job the worker is running is never touched. */
 void *nr_pdsch_recovery_acquire(void);
 void  nr_pdsch_recovery_release(void *slot); /* give back an acquired slot that is not submitted */
 /* Queue an acquired, filled slot (the worker returns it). 0 = queued; 1 = not running. */
@@ -47,6 +52,6 @@ void nr_pdsch_recovery_count_stale(void);
 /* Arm order for the enabled arms (bitmask CSI 1 | TDRA-S 2 | CDM 4 | wide-MRC 8 | tinterp 16): every nonempty combination of enabled bits,
  * ascending, with the S toggle (2) first (99 % of rescues, SYSAN section 6.3). Returns the count (<= 31). */
 int  nr_pdsch_recovery_arm_order(unsigned mask, int out[31]);
-/* "RECOV submitted= rescued= stale= expired= dropped_full= late_ms_p50/p99=" */
+/* "RECOV submitted= rescued= stale= expired= dropped_full= dropped_old= yielded= late_ms_p50/p99=" */
 void nr_pdsch_recovery_stats(char *buf, int n);
 #endif

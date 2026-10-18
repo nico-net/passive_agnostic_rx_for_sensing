@@ -1459,6 +1459,7 @@ static pthread_mutex_t g_rsnap_mu = PTHREAD_MUTEX_INITIALIZER;
 static bool g_recov_ok; /* snapshot pool allocated and the worker running */
 static _Atomic uint64_t g_recov_nosnap;
 static void recov_group_handoff(int idx, recov_wjob_t *const slots[], const nr_recov_key_t keys[], int n);
+bool nr_pdsch_passive_first_pass_waiting(void); /* TAIL-FIX, defined below */
 
 /* ISAC_PDSCH_PIN_PREWARM_ALL=1: the pdschRecov worker pins its decode buffers at its start, like the consumers (else at its first rescue) */
 int nr_pdsch_pin_prewarm_all(void);
@@ -2253,7 +2254,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
                  "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f probe=%d kappa=%.2f alpha=%.2f,%.2f,%.2f,%.2f "
-                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f skip=%d%s%s\n",
+                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f dmrs_snr=%.1f,%.1f,%.1f,%.1f,%.1f dmrs_pw=%.1f dmrs_ref=%.1f dsp=%u skip=%d%s%s\n",
             job.rnti, job.frame_rx, job.nr_slot_rx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.grant.mcs, job.grant.mcs_table,
             dec.cw.qamModOrder, dec.cw.Nl, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, dec.evm_nsym, dec.evm_pct,
             dec.evm_pct > 0.f ? -20.0 * log10(dec.evm_pct / 100.0) : 99.0, dec.br_snr_db[0], dec.br_snr_db[1], dec.br_snr_db[2],
@@ -2262,7 +2263,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
             dec.br_alpha[0], dec.br_alpha[1], dec.br_alpha[2], dec.br_alpha[3], dec.br_nvar_db[0], dec.br_nvar_db[1],
             dec.br_nvar_db[2], dec.br_nvar_db[3], dec.rho, (int)job.mrc_mode, dec.dmrs_ports, dec.n_cdm, dec.dmrs_add, eq_used, occ_used, it_used, dec_us,
             job.grant.rv, job.grant.ndi, job.grant.harq_pid, (unsigned)dec.cw.TBS, dec.layer_snr_db[0], dec.layer_snr_db[1],
-            dec.layer_snr_db[2], dec.layer_snr_db[3], (int)dec.l2maxh, dec.zabs, (int)dec.skip, e2e, stg);
+            dec.layer_snr_db[2], dec.layer_snr_db[3], (int)dec.l2maxh, dec.zabs,
+            dec.dmrs_snr.snr_db[0], dec.dmrs_snr.snr_db[1], dec.dmrs_snr.snr_db[2], dec.dmrs_snr.snr_db[3], dec.dmrs_snr.comb_db, dec.dmrs_snr.pw_db,
+            dec.dmrs_snr.ref_db, (unsigned)dec.dmrs_path, (int)dec.skip, e2e, stg);
       if (dec.evm_pct > 0.f && !job.layout_probe)
         nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)), (int)job.mrc_mode, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     }
@@ -2975,6 +2978,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     for (int i = 0; i < g_rsnap_n; i++) g_rsnap_free[g_rsnap_nfree++] = i;
     nr_pdsch_recovery_set_job_bytes(sizeof(recov_wjob_t));
     nr_pdsch_recovery_set_hooks(recov_run, NULL, recov_feedback, recov_done);
+    nr_pdsch_recovery_set_busy_hook(nr_pdsch_passive_first_pass_waiting);
     g_recov_ok = ok && nr_pdsch_recovery_start(0, NULL) == 0;
     LOG_A(PHY, "SENSING: RECOV worker %s (ISAC_PDSCH_RECOVERY_ASYNC, %d snapshot holders, %d/%d buffers host-pinned, pin %s)\n", g_recov_ok ? "started" : "FAILED to start",
           g_rsnap_n, n_pinned, g_rsnap_n * ue->frame_parms.nb_antennas_rx, nr_pdsch_gpu_host_pin_enabled() ? "on" : "off");
@@ -3230,6 +3234,13 @@ int nr_pdsch_passive_queue_backlog_real(void)
   if (!atomic_load_explicit(&g_running, memory_order_acquire))
     return 0;
   return atomic_load_explicit(&g_real_n, memory_order_relaxed); /* lock-free: polled by the background gate */
+}
+
+/* TAIL-FIX: true while any first-pass decode waits for a consumer, DL (full-decode ring) or UL (real queue). The recovery lane runs only when this is false. */
+extern int nr_pusch_passive_queue_real_pending(void) __attribute__((weak));
+bool nr_pdsch_passive_first_pass_waiting(void)
+{
+  return nr_pdsch_passive_queue_backlog_real() > 0 || (nr_pusch_passive_queue_real_pending && nr_pusch_passive_queue_real_pending() > 0);
 }
 
 /* nr_pdsch_passive_queue_p99_dump: P99 tail-decomposition lines (only with ISAC_PDTIM_CLASS=1): PDSCH job age at enqueue

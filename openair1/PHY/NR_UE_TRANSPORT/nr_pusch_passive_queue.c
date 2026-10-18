@@ -529,37 +529,10 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     nr_pusch_passive_out_t out;
     nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &job.grant,
                             job.ta_offset_samples, (uint64_t)job.absolute_slot, job.cfr_only, job.fo_hz, &out);
-    if (ul_retry_enabled() && !job.cfr_only && out.status == NR_PUSCH_PASSIVE_CRC_FAIL && out.snr_db >= ul_retry_snr_db() &&
-        ul_retry_snr_ok(&job.grant, out.snr_db) && job.grant.num_rb <= ul_retry_max_rb() && nr_pusch_passive_rescue_allowed()) {
-      /* Only grants with a measurable signal are retried (the extra LDPC runs cost CPU). Alternates, in order:
-       * the other CDM-group count (data-RE set and G change), then the S=1/L=13 alias of S=0/L=14 (the DL TDRA
-       * aliasing class: a symbol-0 mismatch leaves one wrong data symbol that LDPC cannot absorb at high MCS). */
-      nr_pdcch_blind_ul_result_t alts[2];
-      int na = 0;
-      if ((job.grant.n_dmrs_cdm_groups == 1 || job.grant.n_dmrs_cdm_groups == 2) && !job.grant.transform_precoding) {
-        alts[na] = job.grant;
-        alts[na].n_dmrs_cdm_groups = (uint8_t)(3 - job.grant.n_dmrs_cdm_groups);
-        na++;
-      }
-      if (job.grant.start_symbol == 0 && job.grant.num_symbols == 14) {
-        alts[na] = job.grant;
-        alts[na].start_symbol = 1;
-        alts[na].num_symbols = 13;
-        na++;
-      }
-      for (int a = 0; a < na; ++a) {
-        nr_pusch_passive_out_t out2;
-        nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &alts[a],
-                                job.ta_offset_samples, (uint64_t)job.absolute_slot, false, job.fo_hz, &out2);
-        if (out2.status == NR_PUSCH_PASSIVE_OK) {
-          out = out2;
-          LOG_A(PHY, "SENSING: UL_RETRY rnti=0x%04x CRC OK with cdm_groups=%u S=%u L=%u (reading said cdm=%u S=%u L=%u)\n",
-                alts[a].rnti, alts[a].n_dmrs_cdm_groups, alts[a].start_symbol, alts[a].num_symbols,
-                job.grant.n_dmrs_cdm_groups, job.grant.start_symbol, job.grant.num_symbols);
-          break;
-        }
-      }
-    }
+    /* TAIL-FIX: the alternates of a failed grant (UL_RETRY below the verdict) run AFTER its verdict (UL_E2E / UL_PUSCH_CRC, first-decode time), on this same consumer,
+     * and only while no real grant waits (re-checked before each alternate). A rescue is a late event, logged with its own arrival-to-rescue time. */
+    const bool ul_retry_wanted = ul_retry_enabled() && !job.cfr_only && !out.skip && out.status == NR_PUSCH_PASSIVE_CRC_FAIL && out.snr_db >= ul_retry_snr_db() &&
+                                 ul_retry_snr_ok(&job.grant, out.snr_db) && job.grant.num_rb <= ul_retry_max_rb();
     { /* ISAC_UL_LAYOUT_BRUTE=<snr_db> (DIAGNOSTIC, default off): a failed rv-0 real grant with DM-RS SNR >= snr_db is re-decoded (probe decodes, PCI data id,
        * the decode's DM-RS id) over BWP twins x MCS table x CDM groups x TDA (S/L) x dmrs-AdditionalPosition; CRC is the oracle. At most 4 grants per run.
        * Logs UL_LBRUTE_HIT per CRC pass and UL_LBRUTE_DONE per grant. Never a receiver default. */
@@ -611,8 +584,8 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       }
     }
     if (nr_ul_chain_on()) clock_gettime(CLOCK_THREAD_CPUTIME_ID,&grant_cpu_end);
-    if (pipeline) nr_pusch_passive_decode_capture_release(idx);
     if (!nr_cfg_epoch_work_current()) {
+      if (pipeline) nr_pusch_passive_decode_capture_release(idx);
       continue;
     }
     if (nr_ul_layout_is_tagged(&job.grant) && (out.status==NR_PUSCH_PASSIVE_OK || out.status==NR_PUSCH_PASSIVE_CRC_FAIL))
@@ -668,6 +641,51 @@ static void *nr_pusch_passive_queue_thread(void *arg)
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
       }
     }
+    if (ul_retry_wanted) {
+      /* Only grants with a measurable signal are retried (the extra LDPC runs cost CPU). Alternates, in order:
+       * the other CDM-group count (data-RE set and G change), then the S=1/L=13 alias of S=0/L=14 (the DL TDRA
+       * aliasing class: a symbol-0 mismatch leaves one wrong data symbol that LDPC cannot absorb at high MCS). */
+      nr_pdcch_blind_ul_result_t alts[2];
+      int na = 0;
+      if ((job.grant.n_dmrs_cdm_groups == 1 || job.grant.n_dmrs_cdm_groups == 2) && !job.grant.transform_precoding) {
+        alts[na] = job.grant;
+        alts[na].n_dmrs_cdm_groups = (uint8_t)(3 - job.grant.n_dmrs_cdm_groups);
+        na++;
+      }
+      if (job.grant.start_symbol == 0 && job.grant.num_symbols == 14) {
+        alts[na] = job.grant;
+        alts[na].start_symbol = 1;
+        alts[na].num_symbols = 13;
+        na++;
+      }
+      for (int a = 0; a < na && nr_pusch_passive_rescue_allowed(); ++a) {
+        nr_pusch_passive_out_t out2;
+        nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &alts[a],
+                                job.ta_offset_samples, (uint64_t)job.absolute_slot, false, job.fo_hz, &out2);
+        if (out2.status != NR_PUSCH_PASSIVE_OK) continue;
+        struct timespec t_r;
+        clock_gettime(CLOCK_MONOTONIC, &t_r);
+        const uint64_t arr_r = nr_passive_slot_arrival_ns(job.absolute_slot), now_r = (uint64_t)t_r.tv_sec * 1000000000ull + t_r.tv_nsec;
+        LOG_A(PHY, "SENSING: UL_RETRY rnti=0x%04x CRC OK with cdm_groups=%u S=%u L=%u (reading said cdm=%u S=%u L=%u) late tot_us=%ld\n",
+              alts[a].rnti, alts[a].n_dmrs_cdm_groups, alts[a].start_symbol, alts[a].num_symbols,
+              job.grant.n_dmrs_cdm_groups, job.grant.start_symbol, job.grant.num_symbols, arr_r && now_r >= arr_r ? (long)((now_r - arr_r) / 1000) : -1L);
+        /* the updates the first pass withheld: CRC-OK counter and the CRC-OK feedback of the solver ticket, the ID store, the discovery / FDRA searches */
+        atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+        if (job.ul_ticket_valid) {
+          nr_ue_ul_update_t confirmed = job.ul_update;
+          confirmed.ta_samples = out2.ta_applied_samples;
+          confirmed.dmrs_id = out2.dmrs_id;
+          confirmed.data_id = out2.data_id;
+          confirmed.nscid = out2.nscid;
+          nr_ue_ctx_ul_feedback(&job.ul_ticket, &confirmed, true);
+          nr_pusch_passive_ul_ids_confirm(&job.ul_ticket, out2.nscid, out2.dmrs_id, out2.data_id);
+        }
+        if (!nr_ul_layout_is_tagged(&job.grant)) nr_pdcch_ul_discovery_feedback(&job.grant, true);
+        nr_pdcch_dci01_fdra_feedback(&job.grant, true);
+        break;
+      }
+    }
+    if (pipeline) nr_pusch_passive_decode_capture_release(idx);
   }
 
   if (held >= 0) {

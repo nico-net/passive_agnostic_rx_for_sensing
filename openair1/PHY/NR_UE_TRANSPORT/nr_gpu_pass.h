@@ -28,6 +28,7 @@
 #include "nr_pdsch_gpu_demod.h"
 #include "nr_gpu_pass_post.h"
 #include "nr_pdsch_prb_set.h"
+#include "nr_pdsch_dmrs_snr.h"
 
 #define NR_GPU_PASS_MAX_CB 32  /* code blocks per pass = NR_GPU_LDPC_MAX_JOBS */
 #define NR_GPU_PASS_MAX_DMRS 4 /* DM-RS symbols of a grant */
@@ -158,6 +159,7 @@ typedef struct {
   int delta[NR_GPU_PASS_MAX_NL];                                 /* get_delta(port) of each layer */
   const int16_t *pil[NR_GPU_PASS_MAX_DMRS][NR_GPU_PASS_MAX_NL];  /* c16 pilots of (DM-RS symbol, layer): 6 * nrb values from the grant's first RB */
   int nrb, k0;                                                   /* PRBs of the grant, first LS subcarrier (bwp_start_subcarrier % N) */
+  int car_k0, car_n;                                             /* the carrier: first subcarrier (first_carrier_offset) and 12 * N_RB_DL (dmrs_ref); 0 = no ref */
   /* ---- segmented grant (PRG / VRB-bundle segments in data order; nr_pdsch_prb_set.h). nseg == 0: the grant above. nseg >= 1: pil[][] points at the pilot sequence of RB 0
    * (seg_pil_nrb RBs, 6 c16 each); segment s is n_prb PRBs at pilot RB pil_rb, first LS subcarrier k0, and its estimate lands at data_index * 12 of the row. nrb is the sum of
    * the n_prb; k0 above is unused. */
@@ -231,6 +233,7 @@ typedef struct {
   int16_t *qm_row;               /* optional caller buffer [4096] c16: job.qm_n equalised layer-0 samples of symbol job.qm_sym (DIRECT model only: qm_valid) */
   uint8_t qm_valid;
   uint32_t nvar_ant[4];          /* the chest's per-antenna noise of the last DM-RS symbol and layer (what nr_dl_chest_nvar_ant holds after the old chest) */
+  nr_dmrs_snr_t dsnr;            /* EVMGRANT dmrs_snr / dmrs_pw (LS units) / dmrs_ref of the last DM-RS symbol and layer, from the host copy of the estimate (no extra GPU work) */
   /* ---- Task 7 (UL pass): row = dmrs_index * nbRx + antenna */
   int32_t ul_log2_maxh;          /* the fixed-point scale of the equaliser */
   int32_t ul_avg[4];             /* channel level of the measurement symbol per antenna (kept branches only) */

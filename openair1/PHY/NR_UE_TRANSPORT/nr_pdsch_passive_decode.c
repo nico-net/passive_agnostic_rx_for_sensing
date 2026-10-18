@@ -34,6 +34,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 
 #include "nr_pdsch_passive_decode.h"
 #include "nr_snr_gate.h"
+#include "nr_recov_yield.h"
 #include "nr_pdsch_qm_oracle.h"
 #include "nr_blind_stats.h"
 #include "nr_pdcch_blind_monitor.h" // nr_pdcch_blind_dmrs_mask (ISAC_RA_TDRA_SWEEP)
@@ -134,17 +135,11 @@ static int chest_pdp_diag_on(void)
   if (en < 0) en = getenv("ISAC_CHEST_PDP_DIAG") ? atoi(getenv("ISAC_CHEST_PDP_DIAG")) : 0; /* baked t26yE default */
   return en;
 }
-/* harq_combine_on: returns ISAC_PDSCH_HARQ_COMBINE (cached): 1 enables passive HARQ soft combining on its own flag.
+/* harq_combine_on: constant 1 (was ISAC_PDSCH_HARQ_COMBINE): enables passive HARQ soft combining on its own flag.
  *   With it on, a retransmission is LDPC-decoded into the stored soft buffer of the failed first transmission (64-entry LRU).
  *   Callers: passive_ldpc_decode(), passive_decode_retry()/qamab(), nr_pdsch_passive_decode() (these skip their retry arms when on).
  */
-static int harq_combine_on(void)
-{
-  static int en = -1;
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_HARQ_COMBINE not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (en < 0) en = getenv("ISAC_PDSCH_HARQ_COMBINE") && atoi(getenv("ISAC_PDSCH_HARQ_COMBINE")) ? 1 : 0;
-  return en;
-}
+static int harq_combine_on(void) { return 1; } /* default since 2026-10-19, no flag; the retry arms are off with it (their conditions test !harq_combine_on()) */
 /* si_combine_on: ISAC_SI_SOFTCOMBINE (cached, default 0): SIB1/SI soft combining across repetitions (PCIS2 2026-10-13). Unlike ISAC_PDSCH_HARQ_COMBINE it
  *   needs no layout bootstrap and no NDI/RV evidence: every SI-RNTI grant of a cell with the same TBS is LDPC-decoded INTO the soft buffer of the previous
  *   undecoded one (SIB1 is the same transport block in every repetition, rv cycles 0,2,3,1), max NR_SI_COMB_MAX grants, keyed by the cell (Nid_cell). */
@@ -4106,6 +4101,39 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   } else {
     nr_dlsch_chest_per_symbol = 0;
   }
+  /* EVMGRANT dmrs_snr / dmrs_pw / dmrs_ref (CPU chest, GPU exact chest, chest cache): last DM-RS symbol and layer, as nr_dl_chest_nvar_ant. The GPU graph pass fills
+   * the same from its host copy of the estimate (nr_gpu_pass_graph.cu); a gpu_llr / gw_ready grant has no chest of its own and stays path 0 (-99). */
+  {
+    nr_dmrs_snr_init(&out->dmrs_snr);
+    out->dmrs_path = 0;
+    if (dmrs_last >= 0 && cw->Nl > 0) {
+      const int nrx = fp->nb_antennas_rx < 4 ? fp->nb_antennas_rx : 4, Nfft = fp->ofdm_symbol_size;
+      const int nrb = seg_path ? freq_alloc->num_rbs : chest_alloc.num_rbs;
+      const int16_t *rows[4] = {0, 0, 0, 0};
+      uint32_t nres[4] = {0, 0, 0, 0};
+      for (int a = 0; a < nrx; a++) {
+        rows[a] = (const int16_t *)&pdsch_dl_ch_estimates[(cw->Nl - 1) * fp->nb_antennas_rx + a][Nfft * dmrs_last];
+        nres[a] = nr_dl_chest_nvar_ant[a];
+      }
+      /* LS = rx * pilot >> 15 and |pilot| = 2^14 / beta_dmrs: LS power = rx power * (1 / (2 beta))^2 */
+      const double beta = get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2);
+      nr_dmrs_snr_fill(&out->dmrs_snr, rows, nrx, 12 * nrb, nres, dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2 ? 2 : 1, 4.0 * beta * beta);
+      if (!seg_path)
+        out->dmrs_snr.ref_db = nr_dmrs_ref_db((const int16_t *)&rxdataF[0][Nfft * dmrs_last], Nfft, fp->first_carrier_offset, 12 * fp->N_RB_DL,
+                                              (fp->first_carrier_offset + (chest_cfg.BWPStart + chest_alloc.first_rb) * 12) % Nfft, 12 * nrb);
+      out->dmrs_path = chest_hit ? 4 : ((seg_path ? gseg : gch) == 0) ? 2 : 1;
+    }
+  }
+  /* TAIL-FIX no-chance gate (nr_snr_gate.h): the chest's own DM-RS SNR (comb) is more than 5 dB below the SNR this MCS needs: no demod, no LDPC, no retry.
+   * Probes (layout searches) are discovery and SI/P/RA grants carry no MCS-table evidence: never gated. With HARQ combining on a retransmission is always decoded.
+   * (The GPU graph pass estimates inside its graph and is not gated here.) */
+  if (out->dmrs_path != 0 && !t_probe_no_horizon
+      && nr_snr_gate_applies(t_probe_first_seg || probe_last_sym >= 0, grant->rnti_class == 0, grant->rv, harq_combine_on() != 0)
+      && nr_snr_no_chance(out->dmrs_snr.comb_db, grant->mcs, grant->mcs_table)) {
+    out->skip = 1;
+    out->status = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
+    return out->status;
+  }
   /* nvar normalisation. ISAC_RX_NVAR_FIX=1 (opt-in, default OFF = bit-identical to before).
    *
    * The loop above accumulates (n_dmrs_sym x Nl) terms, each one already a PER-ANTENNA MEAN of
@@ -4673,6 +4701,10 @@ gpu_llr_ready:;
   if (gpu_llr) { nvar = 0; nvar_den = 1u; n_dmrs_sym = 0; } /* skipped by the jump; read only on the guarded retries */
   if (gp_ok) { /* skipped by the jump too: what the graph pass measured (the chest post, the DM-RS FO tracker, the per-branch FO estimate) */
     nvar = t_gpp->r.nvar; nvar_den = 1u; n_dmrs_sym = t_gpp->ndmrs;
+    out->dmrs_snr = t_gpp->r.dsnr; /* LS units: rx power = LS power * 4 beta^2 (see the chest-side fill) */
+    if (out->dmrs_snr.pw_db > -90.f)
+      out->dmrs_snr.pw_db += (float)(20.0 * log10(2.0 * get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2)));
+    out->dmrs_path = 3;
     dmrs_first = t_gpp->dmrs_first; dmrs_last = t_gpp->dmrs_last;
     out->nvar = nvar;
     for (int a = 0; a < NR_DL_CHEST_MAX_ANT; a++)
@@ -6540,6 +6572,13 @@ static int retry_yield_mode(void)
   if (v < 0) v = getenv("ISAC_PDSCH_RETRY_YIELD") ? atoi(getenv("ISAC_PDSCH_RETRY_YIELD")) : 2;
   return v;
 }
+/* TAIL-FIX: the recovery worker runs an arm only while no first-pass decode waits (DL ring or UL real queue, nr_pdsch_passive_first_pass_waiting); checked before every
+ * arm (nr_recov_yield.h). A busy lane waits at most RY_IDLE_WAIT_NS and then gives the remaining arms up. Weak: test binaries do not link the queues. */
+bool nr_pdsch_passive_first_pass_waiting(void) __attribute__((weak));
+#define RY_IDLE_WAIT_NS 2000000ull
+static bool ry_busy(void) { return nr_pdsch_passive_first_pass_waiting && nr_pdsch_passive_first_pass_waiting(); }
+static void ry_nap(void) { usleep(100); }
+static bool ry_wait_idle(void) { return nr_recov_wait_idle(ry_busy, dec_now_ns, ry_nap, RY_IDLE_WAIT_NS); }
 /* ry_arm_worth: mode 2 gate of one arm (see above); counts the gated tries */
 static bool ry_arm_worth(int k)
 {
@@ -6714,6 +6753,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
       t_recov_deferred = true;
       return st;
     }
+    if (t_recov_mode == 2 && !ry_wait_idle()) return st; /* TAIL-FIX: first-pass work waits, the worker yields */
     const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
     const int l0 = __builtin_ctz(original.dlDmrsSymbPos & 0x3FFFu);
     const bool saved_quiet = t_quiet;
@@ -6757,6 +6797,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
       t_recov_deferred = true;
       return st;
     }
+    if (t_recov_mode == 2 && !ry_wait_idle()) return st; /* TAIL-FIX: first-pass work waits, the worker yields */
     const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
     const bool saved_quiet = t_quiet;
     const double saved_fo_override = nr_slot_fep_fo_override_hz;
@@ -6871,6 +6912,11 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
         const int ry_k = (arm + 32 * cv) % RY_ARMS;
         if (ry == 2 && !ry_arm_worth(ry_k))
           continue;
+        if (t_recov_mode == 2 && !ry_wait_idle()) {
+          yielded = true; /* first-pass work is waiting: the rest of this grant's arms are dropped (counted) */
+          atomic_fetch_add_explicit(&g_ry_yields, 1, memory_order_relaxed);
+          break;
+        }
         if (ry && t_recov_mode != 2 && !(cv == 0 && arm == 2)
             && (ry_backlog() > 0 || (retry_budget_us() && dec_now_ns() - t_dec_t0_ns > (uint64_t)retry_budget_us() * 1000ull))) {
           yielded = true; /* a full decode waits for a consumer: stop this grant's long-shot arms */
