@@ -25,6 +25,7 @@
  *   - everything (tables, streams, item tables, first launch) is created in warm-up, before the RX allocation fence. */
 #include <unistd.h>
 #include <time.h>
+#include <thread>
 #include "nr_pusch_gpu_diag.h"
 
 namespace ulfep {
@@ -131,6 +132,51 @@ static uint64_t now_us()
     }                                                                                          \
   } while (0)
 
+/* ULST TEST ONLY, never on air: ISAC_UL_TEST_RT_LOAD="delay_s:burst_ms:gap_ms:blocks[:kern_us]" (default off) reproduces
+ * the VL2 stall offline. A thread fills the real-time partition at the GREATEST stream priority (where the DL streams are)
+ * with back-to-back spin kernels of kern_us (default 200) for burst_ms, idles gap_ms, repeats, starting delay_s after init;
+ * the UL FEP stream (ISAC_UL_GPU_PART=rt, least priority) then waits behind them inside the same partition. Stream
+ * priority only orders PENDING blocks, so a UL launch waits for up to about one running kernel: kern_us sets the stall. */
+namespace ulfep {
+__global__ void k_ul_test_spin(long long cyc)
+{
+  const long long t0 = clock64();
+  while (clock64() - t0 < cyc) {}
+}
+static void test_rt_load_start(int greatest)
+{
+  const char *e = getenv("ISAC_UL_TEST_RT_LOAD");
+  double delay = 0, burst = 0, gap = 0, kus = 200;
+  int blocks = 0, clk = 0;
+  if (!e || sscanf(e, "%lf:%lf:%lf:%d:%lf", &delay, &burst, &gap, &blocks, &kus) < 4 || burst <= 0 || blocks <= 0 || kus <= 0) return;
+  static cudaStream_t s;
+  if (!nr_gpu_green_stream(&s, greatest, true, 0) && /* green context of UL context 0: same context, so stream priority orders the blocks */ cudaStreamCreateWithPriority(&s, cudaStreamNonBlocking, greatest) != cudaSuccess) return;
+  cudaDeviceGetAttribute(&clk, cudaDevAttrClockRate, 0); /* kHz */
+  const long long cyc = (long long)(kus * 1e-3 * clk);
+  k_ul_test_spin<<<blocks, 256, 0, s>>>(1000); /* first launch before the fence */
+  cudaStreamSynchronize(s);
+  fprintf(stderr, "SENSING: UL_TEST_RT_LOAD on (TEST ONLY): delay %.0f s, %.0f ms bursts every %.0f ms, %d blocks of %.0f us\n", delay, burst, burst + gap, blocks, kus);
+  static cudaEvent_t ev[4];
+  for (auto &x : ev)
+    if (cudaEventCreateWithFlags(&x, cudaEventDisableTiming) != cudaSuccess) return;
+  std::thread([=] {
+    usleep((useconds_t)(delay * 1e6));
+    for (unsigned long i = 0;; ) {
+      const uint64_t b0 = now_us();
+      while (now_us() - b0 < (uint64_t)(burst * 1000)) { /* 3-4 kernels always pending: the partition never drains */
+        if (i >= 4)
+          while (cudaEventQuery(ev[i % 4]) == cudaErrorNotReady) usleep(50);
+        k_ul_test_spin<<<blocks, 256, 0, s>>>(cyc);
+        cudaEventRecord(ev[i % 4], s);
+        i++;
+      }
+      while (cudaStreamQuery(s) == cudaErrorNotReady) usleep(100);
+      usleep((useconds_t)(gap * 1000));
+    }
+  }).detach();
+}
+}  // namespace ulfep
+
 /* Warm-up (before the RX allocation fence). 0 = ready, -1 = unavailable (callers keep the CPU FEP). */
 static bool env_on(const char *k)
 {
@@ -208,6 +254,7 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int s
     UCK((cudaError_t)nr_gpu_sync(U.st[c]));
   }
   free(buf);
+  test_rt_load_start(greatest);
   U.ok = true;
   fprintf(stderr, "SENSING: UL_GPU_FEP ready: %d RX, N=%d, %s stream, cap %u%% of each 100 ms, deadline %s %lu us, charge %s\n", nant, N,
           U.kind == 2 ? "real-time-partition" : U.part ? "discovery-partition" : "lowest-priority", U.pct, U.dl_on ? "on" : "off",
