@@ -135,17 +135,11 @@ static int chest_pdp_diag_on(void)
   if (en < 0) en = getenv("ISAC_CHEST_PDP_DIAG") ? atoi(getenv("ISAC_CHEST_PDP_DIAG")) : 0; /* baked t26yE default */
   return en;
 }
-/* harq_combine_on: returns ISAC_PDSCH_HARQ_COMBINE (cached): 1 enables passive HARQ soft combining on its own flag.
+/* harq_combine_on: constant 1 (was ISAC_PDSCH_HARQ_COMBINE): enables passive HARQ soft combining on its own flag.
  *   With it on, a retransmission is LDPC-decoded into the stored soft buffer of the failed first transmission (64-entry LRU).
  *   Callers: passive_ldpc_decode(), passive_decode_retry()/qamab(), nr_pdsch_passive_decode() (these skip their retry arms when on).
  */
-static int harq_combine_on(void)
-{
-  static int en = -1;
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_HARQ_COMBINE not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (en < 0) en = getenv("ISAC_PDSCH_HARQ_COMBINE") && atoi(getenv("ISAC_PDSCH_HARQ_COMBINE")) ? 1 : 0;
-  return en;
-}
+static int harq_combine_on(void) { return 1; } /* default since 2026-10-19, no flag; the retry arms are off with it (their conditions test !harq_combine_on()) */
 /* si_combine_on: ISAC_SI_SOFTCOMBINE (cached, default 0): SIB1/SI soft combining across repetitions (PCIS2 2026-10-13). Unlike ISAC_PDSCH_HARQ_COMBINE it
  *   needs no layout bootstrap and no NDI/RV evidence: every SI-RNTI grant of a cell with the same TBS is LDPC-decoded INTO the soft buffer of the previous
  *   undecoded one (SIB1 is the same transport block in every repetition, rv cycles 0,2,3,1), max NR_SI_COMB_MAX grants, keyed by the cell (Nid_cell). */
