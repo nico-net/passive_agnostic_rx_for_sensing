@@ -453,6 +453,28 @@ void nr_pdcch_blind_extract_pre(uint16_t bwp_size, const nr_pdcch_blind_extract_
 bool nr_pdcch_blind_extract_11_pre(const nr_pdcch_blind_raw_result_t *raw, uint16_t dci_length, uint16_t bwp_size,
                                    uint8_t dmrs_typeA_position, const nr_pdcch_blind_extract_opts_t *opts,
                                    const nr_pdcch_blind_extract_pre_t *pre, nr_pdcch_blind_result_t *out);
+/* ISAC_DCI11_READ_MEMO (DLT task 2): everything nr_pdcch_blind_extract_11_pre() turns into its result, as a value key. keymap: the
+ * read position (the `pos` read_field() starts from) and width of each field the result depends on, in the extraction's own walk,
+ * plus the opts the interpretation reads; key: those fields' values for one payload. For two opts of ONE (raw, dci_length,
+ * bwp_size, dmrs_typeA_position) that differ at most in field widths, dmrs_config_type, fdra_mode and tda_count (equal TDRA rows
+ * 0..tda_count-1, which dci11_layout_parse builds as constants), equal keys give equal extraction results (see decode_fields). */
+#define NR_DCI11_KEY_F 10
+typedef struct {
+  int16_t pos[NR_DCI11_KEY_F];
+  uint8_t w[NR_DCI11_KEY_F];
+  uint8_t ant_w, dmrs_t2, fdra_mode, tda_count, size_bad, add_pos, max_len;
+  uint16_t fdra_bwp_start;
+} nr_dci11_keymap_t;
+typedef struct {
+  uint32_t v[NR_DCI11_KEY_F];
+  uint8_t ant_w, dmrs_t2, fdra_mode, tda_count, size_bad, add_pos, max_len, pad;
+  uint16_t fdra_bwp_start, pad2;
+} nr_dci11_key_t;
+void nr_pdcch_blind_dci11_keymap(uint16_t dci_length, const nr_pdcch_blind_extract_opts_t *opts, const nr_pdcch_blind_extract_pre_t *pre,
+                                 nr_dci11_keymap_t *km);
+/// decode_fields false: NDI, RV, HARQ pid and SRS request are left out; equal keys then give equal accept/reject and equal
+/// nr_dci11_same_reading(.., false) fields (not equal whole results). true: the whole result, as above.
+void nr_pdcch_blind_dci11_key(const nr_pdcch_blind_raw_result_t *raw, const nr_dci11_keymap_t *km, bool decode_fields, nr_dci11_key_t *k);
 
 /**
  * @brief Parse the [sensing] pdcch_blind_monitor_* config keys. Safe to call once at UE start-up;

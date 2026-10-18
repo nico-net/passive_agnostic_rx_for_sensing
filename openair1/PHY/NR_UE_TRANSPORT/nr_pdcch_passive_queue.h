@@ -122,6 +122,13 @@ void nr_pdcch_passive_queue_get_stats(nr_pdcch_passive_queue_stats_t *out);
 /// Occasions waiting in the ring right now, or -1 when the pool is not running (in-line scan).
 int nr_pdcch_passive_queue_backlog(void);
 
+/// Side work (ISAC_PDCCH_BANK_HANDOFF): a consumer posts fn(arg) for an IDLE consumer of the same pool; returns the slot to pass to
+/// nr_pdcch_passive_queue_side_finish(), or -1 (pool not running, one consumer, or no free slot: run it yourself).
+int nr_pdcch_passive_queue_side_post(void (*fn)(void *), void *arg);
+/// Joins a posted side work: runs it here when no consumer took it yet, else waits for the consumer running it.
+void nr_pdcch_passive_queue_side_finish(int slot);
+void nr_pdcch_passive_queue_side_stats(uint64_t *posted, uint64_t *taken);
+
 /// P99: lag histograms in slots, bins < 2/4/8/12/16/18/24/32/inf (nr_passive_lag_bin()).
 #define NR_PASSIVE_LAG_BINS 9
 int nr_passive_lag_bin(long lag);

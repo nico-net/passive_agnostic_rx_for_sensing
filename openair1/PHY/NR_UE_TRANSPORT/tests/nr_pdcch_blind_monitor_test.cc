@@ -1,3 +1,6 @@
+#include <map>
+#include <string>
+#include <vector>
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -7013,6 +7016,74 @@ TEST(ScanTail, ReadingIndexMatchesLinearSearch)
 }
 
 /* ISAC_DCI11_PARSE_CACHE: the precomputed-field-widths extraction must equal the plain one, result and verdict, on every layout shape. */
+/* ISAC_DCI11_READ_MEMO: for one DCI, layouts with equal value keys extract identical results (the solver's reading pass reuses the
+ * first one's outcome). Sparse payloads make different layouts read equal values, so the groups are not singletons. */
+TEST(DlAdaptive, Dci11KeyDecidesExtraction)
+{
+  uint64_t rng = 0xD1B54A32D192ED03ULL;
+  auto next = [&rng]() { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return rng; };
+  int compared = 0, accepted = 0, shared_reading = 0;
+  for (uint16_t bwp : {24, 51, 106, 217, 273}) {
+    std::vector<nr_pdcch_blind_extract_opts_t> os;
+    for (int fdra = NR_FDRA_TYPE1; fdra <= NR_FDRA_DYN_CFG2; fdra++)
+      for (int shape = 0; shape < 48; shape++) {
+        nr_pdcch_blind_extract_opts_t o{};
+        o.bwp_indicator_bits = shape % 3; o.vrb_to_prb_bits = (shape / 3) % 2; o.prb_bundling_bits = shape % 2;
+        o.rate_matching_bits = (shape / 6) % 3; o.zp_csirs_bits = (shape / 5) % 3;
+        o.tb2_bits = (shape / 2) % 2 ? 8 : 0; o.harq_pid_bits = 4 + (shape / 7) % 2; o.dai_bits = 2 * ((shape / 11) % 2 + 1);
+        o.pdsch_to_harq_bits = (shape / 13) % 4; o.antenna_ports_bits = 4 + shape % 3; o.dmrs_config_type = (shape / 17) % 2;
+        o.tci_bits = (shape / 4) % 2 ? 3 : 0; o.srs_request_bits = 2 + (shape / 19) % 2; o.cbg_bits = (shape / 23) % 2 ? 4 : 0;
+        o.fdra_mode = (uint8_t)fdra; o.fdra_bwp_start = 3;
+        o.tda_count = shape % 3 == 0 ? 16 : 1 << (shape % 5); /* the layout-dependent count; rows are a function of k only */
+        for (int k = 0; k < o.tda_count && k < 16; k++) { o.tda_start[k] = 1; o.tda_length[k] = 13; o.tda_mapping[k] = 0; }
+        o.dmrs_add_pos = 0; o.dmrs_max_length = 1;
+        os.push_back(o);
+      }
+    std::map<int, int> by_size; /* the reading pass only parses layouts whose size is the DCI length: test at those lengths */
+    for (const auto &o : os) by_size[nr_pdcch_blind_dci_size_ex(bwp, &o)]++;
+    std::vector<int> lens;
+    for (const auto &kv : by_size)
+      if (kv.second >= 4 && kv.first <= NR_DCI_MAX_PAYLOAD) lens.push_back(kv.first);
+    for (int trial = 0; trial < 40 * (int)lens.size(); trial++) {
+      const int len = lens[trial % lens.size()] + (trial % 10 == 9 ? 1 : 0);
+      nr_pdcch_blind_raw_result_t raw{};
+      raw.rnti = (uint16_t)(next() | 1);
+      for (int w = 0; w < NR_DCI_WORDS; w++) raw.payload.w[w] = next() & next() & next(); /* sparse: ~1/8 ones */
+      raw.payload.w[(len - 1) / 64] |= 1ULL << ((len - 1) % 64);                          /* format indicator 1 */
+      if (len % 64) raw.payload.w[(len - 1) / 64] &= (1ULL << (len % 64)) - 1;
+      for (int w = (len + 63) / 64; w < NR_DCI_WORDS; w++) raw.payload.w[w] = 0;
+      std::map<std::string, std::pair<bool, nr_pdcch_blind_result_t>> seen[2];
+      for (const auto &o : os) {
+        nr_pdcch_blind_extract_pre_t pre;
+        nr_pdcch_blind_extract_pre(bwp, &o, &pre);
+        nr_dci11_keymap_t km;
+        nr_pdcch_blind_dci11_keymap((uint16_t)len, &o, &pre, &km);
+        nr_pdcch_blind_result_t r;
+        memset(&r, 0x5a, sizeof(r));
+        const bool ok = nr_pdcch_blind_extract_11_pre(&raw, (uint16_t)len, bwp, trial & 1 /* enum: pos2, pos3 */, &o, &pre, &r);
+        for (int full = 0; full < 2; full++) {
+          nr_dci11_key_t k;
+          nr_pdcch_blind_dci11_key(&raw, &km, full, &k);
+          const std::string key((const char *)&k, sizeof(k));
+          auto it = seen[full].find(key);
+          if (it == seen[full].end()) { seen[full].emplace(key, std::make_pair(ok, r)); continue; }
+          ASSERT_EQ(it->second.first, ok) << "bwp " << bwp << " len " << len << " full " << full;
+          if (full)
+            ASSERT_EQ(0, memcmp(&it->second.second, &r, sizeof(r))) << "bwp " << bwp << " len " << len;
+          else if (ok)
+            ASSERT_TRUE(nr_dci11_same_reading(&it->second.second, &r, false)) << "bwp " << bwp << " len " << len;
+          compared += full;
+          accepted += full && ok;
+          shared_reading += !full && ok;
+        }
+      }
+    }
+  }
+  EXPECT_GT(compared, 5000);
+  EXPECT_GT(accepted, 100);
+  EXPECT_GT(shared_reading, accepted);
+}
+
 TEST(DlAdaptive, ExtractPreMatchesPlainExtract)
 {
   uint64_t rng = 0x9E3779B97F4A7C15ULL;

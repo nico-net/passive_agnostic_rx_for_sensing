@@ -1493,11 +1493,11 @@ static bool dci11_parse_cached(const nr_dci11_resolver_t *r, int i, const nr_pdc
     return false;
   return nr_pdcch_blind_extract_11_pre(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &m->o, &m->pre, parsed);
 }
-static bool dci11_layout_parse_full(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
-                                    const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed,
-                                    nr_pdcch_blind_extract_opts_t *o_out, nr_pdcch_blind_extract_pre_t *pre_out)
+/* dci11_layout_opts: the payload-independent first half of dci11_layout_parse_full(): the extract options of layout i, false when the
+ * layout has no field bits or does not give the length len. */
+static bool dci11_layout_opts(const nr_dci11_resolver_t *r, int i, uint16_t len, const nr_pdcch_blind_monitor_cfg_t *cfg,
+                              nr_pdcch_blind_extract_opts_t *op)
 {
-  if (pre_out) pre_out->size = 0xFFFF; /* "not parseable" unless set below */
   nr_dci11_field_bits_t f;
   if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f))
     return false;
@@ -1525,13 +1525,132 @@ static bool dci11_layout_parse_full(const nr_dci11_resolver_t *r, int i, const n
   for (int k = 0; k < o.tda_count && k < 16; ++k) {
     o.tda_start[k] = 1; o.tda_length[k] = 13; o.tda_mapping[k] = 0;
   }
-  if (nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o) != len)
+  *op = o;
+  return nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o) == len;
+}
+static bool dci11_layout_parse_full(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                                    const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed,
+                                    nr_pdcch_blind_extract_opts_t *o_out, nr_pdcch_blind_extract_pre_t *pre_out)
+{
+  if (pre_out) pre_out->size = 0xFFFF; /* "not parseable" unless set below */
+  nr_pdcch_blind_extract_opts_t o;
+  if (!dci11_layout_opts(r, i, len, cfg, &o))
     return false;
   if (pre_out) {
     *o_out = o;
     nr_pdcch_blind_extract_pre(cfg->bwp_size, o_out, pre_out);
   }
   return nr_pdcch_blind_extract_11(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &o, parsed);
+}
+
+/* ---- ISAC_DCI11_READ_MEMO=1 (DLT task 2, default off; 2 = self-check). The solver's reading pass parses every live layout past the
+ * 256 offset keys (~1300 parses per DCI on capture b). A layout's parse is a pure function of the values it reads at its field
+ * positions and of a few options (nr_dci11_key_t, nr_pdcch_blind_monitor.h); the reading it lands in depends only on whether it parses
+ * and on the fields nr_dci11_same_reading() compares, so within one DCI two layouts with equal keys (those fields' inputs) land in
+ * the same reading (the first one's full parse is the one a new reading keeps). Per layout the positions are kept (dci11_layout_key, refreshed like the parse
+ * cache); per DCI a table maps key -> outcome of the first layout that had it (reading id, -1 none, -2 rejected), and later layouts
+ * with that key take the outcome without parsing. The 256-key grouping, the reading order and the reading cap are untouched: only
+ * parses whose result is already known are skipped. The table is sized from the live count, so it never fills. Mode 2 parses
+ * every memo hit as well and counts outcomes that differ (and then uses the parse). */
+static int dci11_read_memo_mode(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_DCI11_READ_MEMO") ? atoi(getenv("ISAC_DCI11_READ_MEMO")) : 0;
+  return en;
+}
+typedef struct {
+  nr_dci11_layout_t hyp;
+  uint16_t len, bwp_size, bwp_start;
+  uint8_t tda_bits, tda_count, state; /* state: 0 empty, 1 the parse rejects before reading the payload, 2 keymap */
+  nr_dci11_keymap_t km;
+} dci11_km_memo_t;
+/* 1: *k is layout i's key for raw; 0: the parse of layout i at len returns false whatever the payload; -1: no key (parse it) */
+static int dci11_layout_key(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                            const nr_pdcch_blind_monitor_cfg_t *cfg, bool decode_fields, nr_dci11_key_t *k)
+{
+  static __thread dci11_km_memo_t *t_km; /* heap, not static TLS (see the stage-2 scratch note) */
+  if (i < 0 || i >= NR_DCI11_LAYOUT_MAX || (t_km == NULL && (t_km = calloc(NR_DCI11_LAYOUT_MAX, sizeof(*t_km))) == NULL))
+    return -1;
+  dci11_km_memo_t *m = &t_km[i];
+  if (m->state == 0 || memcmp(&m->hyp, &r->hyp[i], sizeof(m->hyp)) != 0 || m->len != len || m->bwp_size != (uint16_t)cfg->bwp_size
+      || m->bwp_start != (uint16_t)cfg->bwp_start || m->tda_bits != r->off[i].tda_bits || m->tda_count != (uint8_t)cfg->extract.tda_count) {
+    m->hyp = r->hyp[i];
+    m->len = len;
+    m->bwp_size = (uint16_t)cfg->bwp_size;
+    m->bwp_start = (uint16_t)cfg->bwp_start;
+    m->tda_bits = r->off[i].tda_bits;
+    m->tda_count = (uint8_t)cfg->extract.tda_count;
+    m->state = 1;
+    nr_pdcch_blind_extract_opts_t o;
+    if (dci11_layout_opts(r, i, len, cfg, &o)) {
+      nr_pdcch_blind_extract_pre_t pre;
+      nr_pdcch_blind_extract_pre(cfg->bwp_size, &o, &pre);
+      nr_pdcch_blind_dci11_keymap(len, &o, &pre, &m->km);
+      m->state = 2;
+    }
+  }
+  if (m->state != 2)
+    return 0;
+  nr_pdcch_blind_dci11_key(raw, &m->km, decode_fields, k);
+  return 1;
+}
+typedef struct {
+  nr_dci11_key_t k;
+  uint32_t gen;
+  int16_t out; /* reading id, -1 no reading, -2 rejected */
+} dci11_vmemo_ent_t;
+static __thread dci11_vmemo_ent_t *t_vm;
+static __thread uint32_t t_vm_cap, t_vm_gen;
+static _Atomic uint64_t g_vm_n, g_vm_hit, g_vm_bad;
+/* dci11_vmemo_begin: empties the per-DCI table (generation stamp), sized >= 2 x the layouts that can insert; false: no table */
+static bool dci11_vmemo_begin(int n_layouts)
+{
+  uint32_t need = 1024;
+  while (need < 2u * (uint32_t)n_layouts) need <<= 1;
+  if (need > t_vm_cap) {
+    free(t_vm);
+    t_vm = calloc(need, sizeof(*t_vm));
+    t_vm_cap = t_vm ? need : 0;
+    t_vm_gen = 0;
+  }
+  if (!t_vm) return false;
+  if (++t_vm_gen == 0) {
+    memset(t_vm, 0, t_vm_cap * sizeof(*t_vm));
+    t_vm_gen = 1;
+  }
+  return true;
+}
+/* dci11_vmemo_slot: the entry of key *k: *found when this DCI already stored it, else the empty entry to store it in */
+static dci11_vmemo_ent_t *dci11_vmemo_slot(const nr_dci11_key_t *k, bool *found)
+{
+  uint64_t h = 0;
+  const uint8_t *b = (const uint8_t *)k;
+  for (size_t q = 0; q + 8 <= sizeof(*k); q += 8) {
+    uint64_t v;
+    memcpy(&v, b + q, 8);
+    h = (h ^ v) * 0x9E3779B97F4A7C15ull;
+  }
+  h ^= h >> 31;
+  for (uint32_t p = (uint32_t)h & (t_vm_cap - 1);; p = (p + 1) & (t_vm_cap - 1)) {
+    dci11_vmemo_ent_t *e = &t_vm[p];
+    if (e->gen != t_vm_gen) {
+      *found = false;
+      return e;
+    }
+    if (memcmp(&e->k, k, sizeof(*k)) == 0) {
+      *found = true;
+      return e;
+    }
+  }
+}
+static void dci11_vmemo_note(bool hit, bool bad)
+{
+  const uint64_t n = atomic_fetch_add_explicit(&g_vm_n, 1, memory_order_relaxed) + 1;
+  if (hit) atomic_fetch_add_explicit(&g_vm_hit, 1, memory_order_relaxed);
+  const uint64_t nb = bad ? atomic_fetch_add_explicit(&g_vm_bad, 1, memory_order_relaxed) + 1 : atomic_load_explicit(&g_vm_bad, memory_order_relaxed);
+  if ((bad && nb <= 8) || (n % 2000000) == 0)
+    LOG_A(PHY, "SENSING: DCI11_READ_MEMO layouts=%llu skipped_parses=%llu mismatches=%llu%s\n", (unsigned long long)n,
+          (unsigned long long)atomic_load_explicit(&g_vm_hit, memory_order_relaxed), (unsigned long long)nb, bad ? " (MISMATCH)" : "");
 }
 
 /* nr_pdcch_dci11_stage2_candidates: stage 2 of the DCI 1_1 layout search: returns up to max parsed candidates from the live layouts for one raw DCI.
@@ -2655,6 +2774,10 @@ static inline void btim_add(int k, uint64_t t0)
     return;
   }
   const uint64_t d = btim_now() - t0;
+  if (nr_a2e_trace()) { /* the current pass's split, copied into its grants (a2p=) */
+    static const int8_t stg[BTIM_N] = {0, 1, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 3, -1, -1};
+    if (stg[k] >= 0) nr_a2e_stg[stg[k]] += (uint32_t)d;
+  }
   NR_BLIND_CTR_ADD(g_btim_ns[k], d);
   NR_BLIND_CTR_INC(g_btim_n[k]);
   btim_max_update(&g_btim_max[k], d);
@@ -4949,6 +5072,9 @@ typedef struct {
   _Atomic uint64_t *counter;
   bool reconf;
   int state; /* 0 idle, 1 queued/running, 2 done */
+  double fo_hz;    /* ISAC_PDCCH_BANK_HANDOFF: the poster's FEP frequency offset (thread-local there) */
+  uint64_t a2e_t0; /* ... and its ISAC_A2E_TRACE occasion start */
+  bool held;       /* the poster holds the bank dispatch (reader) across the job: no nested enter (it could wait on a compaction that waits on the poster) */
 } par_bank_job_t;
 typedef struct { /* one helper per scan consumer thread (TLS), so two consumers never share a job slot */
   pthread_mutex_t mu;
@@ -4957,6 +5083,53 @@ typedef struct { /* one helper per scan consumer thread (TLS), so two consumers 
 } par_helper_t;
 static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                                     bool serial_candidates, long source_absolute_slot);
+/* par_bank_run: runs the banked CORESET passes j->first..j->n-1 of one dedicated-only slot on the calling thread (the PAR_BANKS helper,
+ * or for ISAC_PDCCH_BANK_HANDOFF the idle scan consumer that took the side work, or the poster itself when nobody took it). */
+static void par_bank_run(const par_bank_job_t *jp)
+{
+  const par_bank_job_t j = *jp;
+  {
+    NR_CFG_EPOCH_WORK(j.stamp, j.counter);
+    if (j.reconf && !j.held) nr_pdcch_coreset_bank_dispatch_enter();
+    t_pass_kind = PASS_BANK;
+    for (int i = j.first; i < j.n; ++i) {
+      if (j.reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED) continue;
+      t_bank_index = i;
+      t_bank_slot = j.src_abs >= 0 ? (uint64_t)j.src_abs : 0;
+      t_candidate_share = j.additional && !dwell_own_budget() ? nr_pdcch_discovered_candidate_share(j.shares, i, j.vd) : 0;
+      nr_pdcch_blind_monitor_cfg_override(nr_pdcch_coreset_bank_cfg(i));
+      const uint64_t pk0 = btim_now_ns();
+      const uint32_t pa0 = t_pass_accepts;
+      nr_pdcch_blind_monitor_run_occasion_one(j.ue, j.proc, j.serial, j.src_abs);
+      pass_note(PK_BANK, btim_now_ns() - pk0, t_pass_accepts - pa0);
+    }
+    t_bank_index = -1;
+    t_candidate_share = 0;
+    t_pass_kind = PASS_OTHER;
+    nr_pdcch_blind_monitor_cfg_override(NULL);
+    if (j.reconf && !j.held) nr_pdcch_coreset_bank_dispatch_leave();
+  }
+}
+/* ---- ISAC_PDCCH_BANK_HANDOFF=1 (DLT task 3, default off): on a dedicated-only slot with >= 2 banked CORESETs, banks 1..n-1 are
+ * posted as side work of the scan pool (nr_pdcch_passive_queue_side_post) while this consumer runs bank 0, so a bank-1 DCI no longer
+ * waits for bank 0's whole pass when another consumer is idle. No thread is added: the other consumer of the SAME pool runs it, and
+ * when none is idle this consumer runs it itself after bank 0, exactly as without the flag. Same concurrency as ISAC_PDCCH_PAR_BANKS
+ * (Phase 1 of different passes is independent, Phase 2 is under its lock), without its extra helper thread and core. */
+static bool bank_handoff_on(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDCCH_BANK_HANDOFF") && atoi(getenv("ISAC_PDCCH_BANK_HANDOFF")) ? 1 : 0;
+  return en == 1;
+}
+static void par_bank_side(void *arg)
+{
+  const par_bank_job_t *j = (const par_bank_job_t *)arg;
+  const double fo = nr_slot_fep_fo_override_hz;
+  nr_slot_fep_fo_override_hz = j->fo_hz;
+  if (nr_a2e_trace()) nr_a2e_ts[0] = j->a2e_t0;
+  par_bank_run(j);
+  nr_slot_fep_fo_override_hz = fo;
+}
 /* par_bank_worker: helper thread for ISAC_PDCCH_PAR_BANKS: runs the banked CORESET passes 1..n-1 of a dedicated-only slot while the scan consumer runs bank 0.
  *   Waits on its job slot (state 1), runs run_occasion_one() for each bank, then sets state 2 and signals done_cv. Core from ISAC_PDCCH_PAR_CORE.
  *   Started lazily by par_helper_get(), one helper per scan consumer thread.
@@ -4986,27 +5159,7 @@ static void *par_bank_worker(void *arg)
     while (hp->job.state != 1) pthread_cond_wait(&hp->cv, &hp->mu);
     par_bank_job_t j = hp->job;
     pthread_mutex_unlock(&hp->mu);
-    {
-      NR_CFG_EPOCH_WORK(j.stamp, j.counter);
-      if (j.reconf) nr_pdcch_coreset_bank_dispatch_enter();
-      t_pass_kind = PASS_BANK;
-      for (int i = j.first; i < j.n; ++i) {
-        if (j.reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED) continue;
-        t_bank_index = i;
-        t_bank_slot = j.src_abs >= 0 ? (uint64_t)j.src_abs : 0;
-        t_candidate_share = j.additional && !dwell_own_budget() ? nr_pdcch_discovered_candidate_share(j.shares, i, j.vd) : 0;
-        nr_pdcch_blind_monitor_cfg_override(nr_pdcch_coreset_bank_cfg(i));
-        const uint64_t pk0 = btim_now_ns();
-        const uint32_t pa0 = t_pass_accepts;
-        nr_pdcch_blind_monitor_run_occasion_one(j.ue, j.proc, j.serial, j.src_abs);
-        pass_note(PK_BANK, btim_now_ns() - pk0, t_pass_accepts - pa0);
-      }
-      t_bank_index = -1;
-      t_candidate_share = 0;
-      t_pass_kind = PASS_OTHER;
-      nr_pdcch_blind_monitor_cfg_override(NULL);
-      if (j.reconf) nr_pdcch_coreset_bank_dispatch_leave();
-    }
+    par_bank_run(&j);
     pthread_mutex_lock(&hp->mu);
     hp->job.state = 2;
     pthread_cond_signal(&hp->done_cv);
@@ -5154,7 +5307,17 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       pthread_mutex_unlock(&hp->mu);
       par = true;
     }
-    for (int i = 0; i < (par ? 1 : n); ++i) {
+    par_bank_job_t side_job;
+    int side = -1;
+    if (!par && n >= 2 && serial_candidates && bank_handoff_on()) {
+      side_job = (par_bank_job_t){.ue = ue, .proc = proc, .serial = serial_candidates, .src_abs = source_absolute_slot,
+                                  .first = 1, .n = n, .shares = shares_d, .additional = additional, .vd = vd,
+                                  .stamp = nr_cfg_epoch_work_stamp(), .counter = nr_pdcch_passive_queue_epoch_counter(),
+                                  .reconf = reconf, .state = 1, .fo_hz = nr_slot_fep_fo_override_hz,
+                                  .a2e_t0 = nr_a2e_ts[0], .held = reconf};
+      side = nr_pdcch_passive_queue_side_post(par_bank_side, &side_job);
+    }
+    for (int i = 0; i < (par || side >= 0 ? 1 : n); ++i) {
       if (reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED)
         continue;
       t_bank_index = i;
@@ -5165,6 +5328,9 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
       pass_note(PK_BANK, btim_now_ns() - pk0, t_pass_accepts - pa0);
     }
+    /* ISAC_PDCCH_BANK_HANDOFF: banks 1..n-1 are done before the dwell and CORESET#0 passes, as without the flag: run them here when
+     * no idle consumer took them (the same order as the plain loop), else wait for the consumer running them */
+    if (side >= 0) nr_pdcch_passive_queue_side_finish(side);
     t_bank_index = -1;
     t_candidate_share = 0;
     t_pass_kind = PASS_OTHER;
@@ -5453,6 +5619,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   if (nr_a2e_trace()) {
     nr_a2e_ts[1] = btim_now_ns();
     memset(&nr_a2e_ts[2], 0, 7 * sizeof(nr_a2e_ts[0]));
+    memset(nr_a2e_stg, 0, sizeof(nr_a2e_stg));
     nr_a2e_kind = (int8_t)(t_pass_kind + (t_discovered_token ? 10 : 0));
     nr_a2e_bank = (int8_t)t_bank_index;
   }
@@ -9837,7 +10004,10 @@ constdiag_done:;
         if (s_lc_chk < 0) s_lc_chk = getenv("ISAC_RNTI_LAYOUT_CACHE_CHECK") && atoi(getenv("ISAC_RNTI_LAYOUT_CACHE_CHECK")) ? 1 : 0;
         if (s_lc_chk && lc_n >= 0) { memcpy(lc_chk, lc_ids, (size_t)lc_n * sizeof(uint16_t)); lc_chk_n = lc_n; lc_n = -1; }
       }
-lc_regroup:
+      static int s_rd_rv = -1; /* ISAC_PDSCH_READING_RV, read below */
+      if (s_rd_rv < 0) s_rd_rv = getenv("ISAC_PDSCH_READING_RV") && atoi(getenv("ISAC_PDSCH_READING_RV")) ? 1 : 0;
+lc_regroup:;
+      const int vmemo = dci11_read_memo_mode() && dci11_vmemo_begin(lc_n >= 0 ? lc_n : nh) ? dci11_read_memo_mode() : 0;
       for (int ii = 0; ii < (lc_n >= 0 ? lc_n : nh); ii++) {
         const int i = lc_n >= 0 ? lc_ids[ii] : ii;
         if (i >= nh) continue;
@@ -9874,13 +10044,42 @@ lc_regroup:
           if (kfast) nr_keyhash_put(&khash, kpos, nk);
           kk = nk++;
         }
+        dci11_vmemo_ent_t *vm = NULL; /* ISAC_DCI11_READ_MEMO: where this layout's outcome is stored for the next equal key */
+        nr_dci11_key_t vk;
+        if (vmemo) {
+          const int kr = dci11_layout_key(R, i, rw, dlen, cfg, s_rd_rv, &vk);
+          bool found = false;
+          if (kr == 1) vm = dci11_vmemo_slot(&vk, &found);
+          if (kr == 0 || found) {
+            int got = kr == 0 ? -2 : vm->out;
+            bool bad = false;
+            if (vmemo == 2) { /* self-check: the outcome the parse below would give, without changing any state */
+              nr_pdcch_blind_result_t pc;
+              int want = -2;
+              if (dci11_layout_parse(R, i, rw, dlen, cfg, &pc) && !pc.vrb_to_prb) {
+                want = nrd < SOLVER_READINGS ? -3 : -1; /* -3: would open a new reading */
+                for (int k = 0; k < nrd && want < 0; k++)
+                  if (nr_dci11_same_reading(&rparsed[k], &pc, s_rd_rv)) want = k;
+              }
+              bad = want != got;
+            }
+            dci11_vmemo_note(true, bad);
+            if (!bad) {
+              if (got >= 0) { s_gid[i] = (uint8_t)got; rcount[got]++; }
+              if (kk >= 0 && got != -2) kgrp[kk] = got;
+              continue;
+            }
+            vm = NULL; /* mismatch: decode with the parse */
+          } else
+            dci11_vmemo_note(false, false);
+        }
         nr_pdcch_blind_result_t pr;
-        if (!dci11_layout_parse(R, i, rw, dlen, cfg, &pr) || pr.vrb_to_prb)
+        if (!dci11_layout_parse(R, i, rw, dlen, cfg, &pr) || pr.vrb_to_prb) {
+          if (vm) *vm = (dci11_vmemo_ent_t){.k = vk, .gen = t_vm_gen, .out = -2};
           continue;
+        }
         /* ISAC_PDSCH_READING_RV=1 (TIMMCS0, default off): readings also differ by rv/NDI/HARQ pid. Without it a solved
          * layout's MCS-0 grant took the rv of whichever layout parsed first (rv = NDI on TIM: half the MCS-0 TBs lost). */
-        static int s_rd_rv = -1;
-        if (s_rd_rv < 0) s_rd_rv = getenv("ISAC_PDSCH_READING_RV") && atoi(getenv("ISAC_PDSCH_READING_RV")) ? 1 : 0;
         int g = -1, rpos = 0;
         if (rfast)
           g = nr_dci11_reading_idx_find(&ridx, rparsed, &pr, s_rd_rv, &rpos);
@@ -9898,6 +10097,7 @@ lc_regroup:
           rcount[g]++;
         }
         if (kk >= 0) kgrp[kk] = g;
+        if (vm) *vm = (dci11_vmemo_ent_t){.k = vk, .gen = t_vm_gen, .out = (int16_t)g};
       }
       if (lc_n >= 0 && nrd > 5) {
         /* more than 1 + 4 readings overlap the solved set: the solver's refinement cap (4) then depends on the order in which the FULL pass
@@ -11026,6 +11226,11 @@ lc_regroup:
       }
       const uint64_t slot_ns = (fp->slots_per_frame > 0) ? (10000000ull / (uint64_t)fp->slots_per_frame) : 0;
       LOG_I(PHY, "SENSING: BTIM %s\n", rep);
+      if (bank_handoff_on()) {
+        uint64_t sp, st;
+        nr_pdcch_passive_queue_side_stats(&sp, &st);
+        LOG_I(PHY, "SENSING: BANK_HANDOFF posted=%llu taken_by_idle_consumer=%llu\n", (unsigned long long)sp, (unsigned long long)st);
+      }
       LOG_I(PHY,
             "SENSING: BTIM occ_total_us_hist <50=%lu <100=%lu <200=%lu <400=%lu <800=%lu <1600=%lu "
             "<3200=%lu >=3200=%lu over_slot(%luus)=%lu/%lu\n",

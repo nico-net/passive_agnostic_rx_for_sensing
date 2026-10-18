@@ -4860,6 +4860,52 @@ void nr_pdcch_blind_extract_pre(uint16_t bwp_size, const nr_pdcch_blind_extract_
 }
 static bool extract_11_impl(const nr_pdcch_blind_raw_result_t *raw, uint16_t dci_length, uint16_t bwp_size, uint8_t dmrs_typeA_position,
                             const nr_pdcch_blind_extract_opts_t *opts, const nr_pdcch_blind_extract_pre_t *pre, nr_pdcch_blind_result_t *out);
+/* nr_pdcch_blind_dci11_keymap: extract_11_impl()'s field walk, recording where each value it uses is read from (keep in step with
+ * it; DlAdaptive.Dci11KeyDecidesExtraction checks equal keys give equal results). The kept fields: format indicator, FDRA, TDA,
+ * MCS, NDI, RV, HARQ pid, antenna ports, SRS request, DM-RS sequence init. */
+void nr_pdcch_blind_dci11_keymap(uint16_t dci_length, const nr_pdcch_blind_extract_opts_t *opts, const nr_pdcch_blind_extract_pre_t *pre,
+                                 nr_dci11_keymap_t *km)
+{
+  blind_field_bits_t f;
+  memcpy(&f, pre->f, sizeof(f));
+  memset(km, 0, sizeof(*km));
+  const int seq[][2] = {{1, 1}, {0, 0}, {f.bwp_ind, 0}, {f.riv, 1}, {f.tda, 1}, {f.vrb, 0}, {f.prb_bundling, 0}, {f.rate_match, 0},
+                        {f.zp_csirs, 0}, {5, 1}, {1, 1}, {2, 1}, {f.tb2, 0}, {f.harq_pid, 1}, {f.dai, 0}, {2, 0}, {3, 0},
+                        {f.pdsch_to_harq, 0}, {f.ant_ports, 1}, {f.tci, 0}, {f.srs, 1}, {f.cbg, 0}, {1, 1}};
+  int pos = (int)dci_length, n = 0;
+  for (size_t q = 0; q < sizeof(seq) / sizeof(seq[0]); q++) {
+    if (seq[q][1]) {
+      km->pos[n] = (int16_t)pos;
+      km->w[n++] = (uint8_t)seq[q][0];
+    }
+    pos -= seq[q][0];
+  }
+  km->ant_w = (uint8_t)f.ant_ports;
+  km->dmrs_t2 = opts->dmrs_config_type == 1;
+  km->fdra_mode = (uint8_t)opts->fdra_mode;
+  km->tda_count = (uint8_t)opts->tda_count;
+  km->size_bad = pre->size > dci_length;
+  km->add_pos = (uint8_t)opts->dmrs_add_pos;
+  km->max_len = (uint8_t)opts->dmrs_max_length;
+  km->fdra_bwp_start = (uint16_t)opts->fdra_bwp_start;
+}
+void nr_pdcch_blind_dci11_key(const nr_pdcch_blind_raw_result_t *raw, const nr_dci11_keymap_t *km, bool decode_fields, nr_dci11_key_t *k)
+{
+  memset(k, 0, sizeof(*k));
+  for (int q = 0; q < NR_DCI11_KEY_F; q++) {
+    if (!decode_fields && (q == 4 || q == 5 || q == 6 || q == 8)) continue; /* NDI, RV, HARQ pid, SRS: not in a reading */
+    int pos = km->pos[q];
+    k->v[q] = read_field(raw->payload, &pos, km->w[q]); /* the same read as the extraction's */
+  }
+  k->ant_w = km->ant_w;
+  k->dmrs_t2 = km->dmrs_t2;
+  k->fdra_mode = km->fdra_mode;
+  k->tda_count = km->tda_count;
+  k->size_bad = km->size_bad;
+  k->add_pos = km->add_pos;
+  k->max_len = km->max_len;
+  k->fdra_bwp_start = km->fdra_bwp_start;
+}
 bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
                                uint16_t dci_length, uint16_t bwp_size,
                                uint8_t dmrs_typeA_position,

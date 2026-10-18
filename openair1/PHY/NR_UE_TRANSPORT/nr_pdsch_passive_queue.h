@@ -88,6 +88,7 @@ void nr_pdsch_passive_gpu_warmup(PHY_VARS_NR_UE *ue);
 
 /// One deferred decode. Carries everything the chain needs that is NOT derivable from `ue`, by
 /// VALUE -- the producer must not leave the consumer holding pointers into its own stack frame.
+#define NR_A2E_STG 6
 typedef struct {
   fapi_nr_dl_config_dlsch_pdu_rel15_t dlsch_pdu; ///< allocation; the decode writes cw_info/tbslbrm into it
   freq_alloc_bitmap_t                 freq_alloc;
@@ -136,11 +137,14 @@ typedef struct {
   /// ISAC_A2E_TRACE=1 (diagnostic): scan timestamps of the DCI's occasion, ns: occasion start, pass start, Phase-1 end, Phase-2 start, candidate start, DCI accepted, (unused), solver reading pass start, readings done; pass kind, bank
   uint64_t a2s_ns[9];
   int8_t   a2s_kind, a2s_bank;
+  uint32_t a2p_ns[NR_A2E_STG]; ///< ISAC_A2E_TRACE + ISAC_PDCCH_TIMING: the DCI's own pass split (see nr_a2e_stg)
 } nr_pdsch_passive_job_t;
 
 /* ISAC_A2E_TRACE=1: the scan thread's current occasion stamps (set by nr_pdcch_blind_monitor_rt.c, copied into each job at enqueue) */
 extern __thread uint64_t nr_a2e_ts[9];
 extern __thread int8_t nr_a2e_kind, nr_a2e_bank;
+/* ... and the pass's PDCCH_TIMING stages, ns: fep_llr, demap, dlsweep, ulsweep, prepass, decode (Phase 1) */
+extern __thread uint32_t nr_a2e_stg[NR_A2E_STG];
 int nr_a2e_trace(void);
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in

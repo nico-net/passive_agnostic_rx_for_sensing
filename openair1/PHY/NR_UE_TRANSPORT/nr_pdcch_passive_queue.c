@@ -64,6 +64,20 @@ static int g_count = 0;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
 
+/* SIDE WORK (ISAC_PDCCH_BANK_HANDOFF, nr_pdcch_blind_monitor_rt.c): a consumer running an occasion posts part of it (the later banked
+ * CORESET passes); an IDLE consumer of this same pool takes it, so no thread or core is added. The poster reclaims it and runs it
+ * itself when no consumer took it by the time its own part is done, so the work never waits for a busy consumer. Under g_lock. */
+typedef struct {
+  void (*fn)(void *);
+  void *arg;
+  int state; /* 0 free, 1 posted, 2 taken, 3 done */
+} side_work_t;
+static side_work_t g_side[NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+static int g_side_posted;
+static pthread_cond_t g_side_done = PTHREAD_COND_INITIALIZER;
+static _Atomic uint64_t g_side_n, g_side_taken;
+static int g_nthreads;
+
 static _Atomic int      g_running = 0;
 static _Atomic int      g_stop    = 0;
 static _Atomic uint64_t g_queued        = 0;
@@ -100,7 +114,6 @@ static int scanq_fresh(void)
 }
 
 static pthread_t g_threads[NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS];
-static int       g_nthreads = 0;
 static PHY_VARS_NR_UE *g_ue = NULL;
 
 typedef struct {
@@ -120,7 +133,23 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
     nr_pdcch_passive_job_t job;
 
     pthread_mutex_lock(&g_lock);
-    while (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) == 0) {
+    if (g_side_posted > 0) { /* another consumer's posted side work: it is for an occasion already running, run it first */
+      for (int k = 0; k < NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS; k++)
+        if (g_side[k].state == 1) {
+          g_side[k].state = 2;
+          g_side_posted--;
+          pthread_mutex_unlock(&g_lock);
+          atomic_fetch_add_explicit(&g_side_taken, 1, memory_order_relaxed);
+          g_side[k].fn(g_side[k].arg);
+          pthread_mutex_lock(&g_lock);
+          g_side[k].state = 3;
+          pthread_cond_broadcast(&g_side_done);
+          break;
+        }
+      pthread_mutex_unlock(&g_lock);
+      continue;
+    }
+    while (g_count == 0 && g_side_posted == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) == 0) {
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
       ts.tv_nsec += 20 * 1000 * 1000; // 20 ms
@@ -130,6 +159,10 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
     if (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) != 0) {
       pthread_mutex_unlock(&g_lock);
       break;
+    }
+    if (g_count == 0) { /* woken for side work */
+      pthread_mutex_unlock(&g_lock);
+      continue;
     }
     const int fresh = scanq_fresh();
     if (fresh && g_count >= 2
@@ -297,6 +330,44 @@ bool nr_pdcch_passive_queue_enqueue(const nr_pdcch_passive_job_t *job)
   pthread_mutex_unlock(&g_lock);
   atomic_fetch_add_explicit(&g_queued, 1, memory_order_relaxed);
   return true;
+}
+
+int nr_pdcch_passive_queue_side_post(void (*fn)(void *), void *arg)
+{
+  if (!atomic_load_explicit(&g_running, memory_order_acquire) || g_nthreads < 2)
+    return -1;
+  int slot = -1;
+  pthread_mutex_lock(&g_lock);
+  for (int k = 0; k < NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS && slot < 0; k++)
+    if (g_side[k].state == 0) slot = k;
+  if (slot >= 0) {
+    g_side[slot] = (side_work_t){.fn = fn, .arg = arg, .state = 1};
+    g_side_posted++;
+    pthread_cond_broadcast(&g_cv);
+  }
+  pthread_mutex_unlock(&g_lock);
+  if (slot >= 0) atomic_fetch_add_explicit(&g_side_n, 1, memory_order_relaxed);
+  return slot;
+}
+void nr_pdcch_passive_queue_side_finish(int slot)
+{
+  if (slot < 0) return;
+  pthread_mutex_lock(&g_lock);
+  if (g_side[slot].state == 1) { /* nobody took it: run it here */
+    g_side_posted--;
+    g_side[slot].state = 0;
+    pthread_mutex_unlock(&g_lock);
+    g_side[slot].fn(g_side[slot].arg);
+    return;
+  }
+  while (g_side[slot].state == 2) pthread_cond_wait(&g_side_done, &g_lock);
+  g_side[slot].state = 0;
+  pthread_mutex_unlock(&g_lock);
+}
+void nr_pdcch_passive_queue_side_stats(uint64_t *posted, uint64_t *taken)
+{
+  *posted = atomic_load_explicit(&g_side_n, memory_order_relaxed);
+  *taken = atomic_load_explicit(&g_side_taken, memory_order_relaxed);
 }
 
 int nr_pdcch_passive_queue_backlog(void)

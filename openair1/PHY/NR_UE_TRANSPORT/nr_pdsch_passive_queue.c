@@ -2231,6 +2231,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           const size_t l2_ = strlen(e2e); /* a2x=accept->solver pass, solver readings, readings->enqueue (us; -1 = no solver pass) */
           snprintf(e2e + l2_, sizeof(e2e) - l2_, " a2x=%ld,%ld,%ld", E2E_US(job.a2s_ns[5], job.a2s_ns[7]), E2E_US(job.a2s_ns[7], job.a2s_ns[8]),
                    E2E_US(job.a2s_ns[8], enqueue_ns));
+          const size_t l3_ = strlen(e2e); /* a2p=own pass: fep_llr,demap,dlsweep,ulsweep,prepass,decode (us; needs ISAC_PDCCH_TIMING) */
+          snprintf(e2e + l3_, sizeof(e2e) - l3_, " a2p=%u,%u,%u,%u,%u,%u", job.a2p_ns[0] / 1000, job.a2p_ns[1] / 1000, job.a2p_ns[2] / 1000,
+                   job.a2p_ns[3] / 1000, job.a2p_ns[4] / 1000, job.a2p_ns[5] / 1000);
         }
 #undef E2E_US
       }
@@ -3034,6 +3037,7 @@ int nr_pdsch_passive_queue_fill_pct(void)
  */
 __thread uint64_t nr_a2e_ts[9];
 __thread int8_t nr_a2e_kind, nr_a2e_bank;
+__thread uint32_t nr_a2e_stg[NR_A2E_STG];
 int nr_a2e_trace(void)
 {
   static int en = -1;
@@ -3056,6 +3060,7 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
     memcpy(g_pending[g_n_pending].a2s_ns, nr_a2e_ts, sizeof(nr_a2e_ts));
     g_pending[g_n_pending].a2s_kind = nr_a2e_kind;
     g_pending[g_n_pending].a2s_bank = nr_a2e_bank;
+    memcpy(g_pending[g_n_pending].a2p_ns, nr_a2e_stg, sizeof(nr_a2e_stg));
   }
   /* BLINDPIPE traffic probe: every decoded PDSCH allocation (grid RBs) explains occupancy in its slot */
   nr_dltp_note_grant((uint16_t)job->frame_rx, (uint8_t)job->nr_slot_rx, job->dlsch_pdu.BWPStart + job->dlsch_pdu.start_rb,
