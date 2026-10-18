@@ -1777,7 +1777,8 @@ static int ul_bg_run(const nr_ul_bgdisc_job_t *j)
       if (best_score >= 0.35 && nr_pusch_ul_disc_accept(best_score, best_pairs, &fa)) {
         ta = best_advance;
         found = true;
-        nr_pusch_ul_disc_timing_update(g.rnti, j->ta_offset, best_advance, best_score, (long)j->abs_slot);
+        if (!(nr_pusch_ul_disc_ta_track_on() && nr_ul_layout_is_trial(&g))) /* as the inline search: trials do not train the tracker */
+          nr_pusch_ul_disc_timing_update(g.rnti, j->ta_offset, best_advance, best_score, (long)j->abs_slot);
       } else if (nr_pusch_ul_disc_ta_track_on()) {
         ta = seed; /* ISAC_UL_TA_TRACK, as the inline search */
       }
@@ -2255,6 +2256,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       job.origin = g_snapshot[ctx].origin; job.length = g_snapshot[ctx].length; job.grant = *g;
       for (int a = 0; a < nant; a++) job.iq[a] = g_snapshot[ctx].iq[a];
       if (g_snapshot[ctx].valid) nr_ul_bgdisc_submit(&job);
+      if (nr_pusch_ul_disc_ta_track_on()) { /* ISAC_UL_TA_TRACK: no cached hypothesis yet; the learned advance, not N_TA_offset */
+        ul_sample_offset = nr_pusch_ul_disc_timing_seed(g->rnti, ta_offset_samples, (long)abs_slot, NULL);
+        out->ta_applied_samples = ul_sample_offset;
+      }
     }
     PASSIVE_UL_FEP(ul_sample_offset, 0);
   } else if ((timing_disc || dmrs_disc) && !gapped && !fdra_unresolved && !g->transform_precoding && !ul_shadow_state &&
