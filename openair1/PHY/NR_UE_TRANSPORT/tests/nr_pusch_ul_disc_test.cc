@@ -199,6 +199,28 @@ TEST(PuschUlDisc, PerUeTimingEmaRejectsOutlier) {
   EXPECT_FALSE(tracked);
 }
 
+TEST(PuschUlDisc, TaTrackKeepsAdvanceAcrossOldSlotsSilenceAndSeedsNewRntis) {
+  setenv("ISAC_UL_TA_TRACK","1",1);
+  nr_pusch_ul_disc_reset();
+  bool tracked=true;
+  EXPECT_EQ(nr_pusch_ul_disc_timing_seed(7,1600,100,&tracked),1600); /* nothing learned: N_TA_offset */
+  EXPECT_FALSE(tracked);
+  nr_pusch_ul_disc_timing_update(7,1600,-16,0.9,100);
+  EXPECT_EQ(nr_pusch_ul_disc_timing_seed(7,1600,100,&tracked),-16);  /* same slot (second consumer / CRC trial) keeps it */
+  EXPECT_TRUE(tracked);
+  EXPECT_EQ(nr_pusch_ul_disc_timing_seed(7,1600,90,&tracked),-16);   /* an older slot too */
+  EXPECT_EQ(nr_pusch_ul_disc_timing_seed(7,1600,9000,&tracked),-16); /* 4.5 s of silence: still the seed, searched wide */
+  EXPECT_FALSE(tracked);
+  EXPECT_EQ(nr_pusch_ul_disc_timing_seed(8,1600,9000,&tracked),-16); /* a never-timed RNTI starts from the cell's advance */
+  EXPECT_FALSE(tracked);
+  nr_pusch_ul_disc_timing_update(9,1600,1648,0.5,9001);              /* one far UE does not move the cell mode */
+  nr_pusch_ul_disc_timing_update(10,1600,0,0.9,9002);
+  EXPECT_EQ(nr_pusch_ul_disc_timing_seed(11,1600,9003,&tracked),-16);
+  EXPECT_EQ(nr_pusch_ul_disc_timing_seed(9,1600,9003,&tracked),1648); /* but keeps its own */
+  EXPECT_TRUE(tracked);
+  unsetenv("ISAC_UL_TA_TRACK");
+}
+
 namespace {
 Fixture *g_bg_fix;
 int g_bg_runs;

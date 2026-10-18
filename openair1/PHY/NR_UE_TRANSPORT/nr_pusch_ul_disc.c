@@ -25,6 +25,8 @@ static ul_disc_track_t tracks[UL_DISC_TRACKS];
 static pthread_mutex_t track_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned evict_next;
 static uint32_t current_epoch;
+#define UL_DISC_CELL_N 16
+static int cell_res[UL_DISC_CELL_N], cell_n; /* ISAC_UL_TA_TRACK cell prior; kept across epochs (timing is physical) */
 
 static ul_disc_track_t *track(uint16_t rnti)
 {
@@ -60,6 +62,7 @@ void nr_pusch_ul_disc_reset(void)
   memset(tracks, 0, sizeof(tracks));
   evict_next = 0;
   current_epoch = 0;
+  cell_n = 0;
   pthread_mutex_unlock(&track_lock);
 }
 
@@ -74,13 +77,41 @@ void nr_pusch_ul_disc_epoch(uint32_t dedicated_epoch)
   pthread_mutex_unlock(&track_lock);
 }
 
+/* ISAC_UL_TA_TRACK=1 (default off): a learned advance outlives the grant that measured it. Without it the per-RNTI correction is wiped by
+ * any decode of an equal or older slot (two consumers, CRC-first trials of one grant) and by 1 s of silence, and a grant whose own search
+ * fails decodes at N_TA_offset; on capture b the busiest UE arrives ~1600 samples off it, so ~90 % of its grants were decoded > CP off. */
+bool nr_pusch_ul_disc_ta_track_on(void)
+{
+  const char *e = getenv("ISAC_UL_TA_TRACK"); /* not cached: a few calls per grant, and the unit test toggles it */
+  return e && atoi(e) > 0;
+}
+/* cell-level prior for RNTIs never timed: the residual most other accepted residuals agree with (+-64), from the last 16 */
+static bool cell_mode(int *out)
+{
+  int best = -1, bv = 0;
+  for (int i = 0; i < cell_n && i < UL_DISC_CELL_N; i++) {
+    int v = 0;
+    for (int k = 0; k < cell_n && k < UL_DISC_CELL_N; k++) v += abs(cell_res[k] - cell_res[i]) <= 64;
+    if (v > bv) { bv = v; best = i; }
+  }
+  if (best >= 0) *out = cell_res[best];
+  return best >= 0;
+}
+
 int nr_pusch_ul_disc_timing_seed(uint16_t rnti, int nominal_advance, long abs_slot, bool *tracked)
 {
   pthread_mutex_lock(&track_lock);
   ul_disc_track_t *t = track(rnti);
-  if (t->timed && (abs_slot <= t->last_slot || abs_slot - t->last_slot > 2000)) t->timed = false;
-  if (tracked) *tracked = t->timed;
-  const int correction = t->timed ? (int)lrint(t->correction) : 0;
+  int correction;
+  if (nr_pusch_ul_disc_ta_track_on()) {
+    if (tracked) *tracked = t->timed && labs(abs_slot - t->last_slot) <= 2000;
+    correction = t->timed ? (int)lrint(t->correction) : 0;
+    if (!t->timed && !cell_mode(&correction)) correction = 0;
+  } else {
+    if (t->timed && (abs_slot <= t->last_slot || abs_slot - t->last_slot > 2000)) t->timed = false;
+    if (tracked) *tracked = t->timed;
+    correction = t->timed ? (int)lrint(t->correction) : 0;
+  }
   pthread_mutex_unlock(&track_lock);
   return nominal_advance + correction;
 }
@@ -92,6 +123,18 @@ void nr_pusch_ul_disc_timing_update(uint16_t rnti, int nominal_advance,
   pthread_mutex_lock(&track_lock);
   ul_disc_track_t *t = track(rnti);
   const double correction = measured_advance - nominal_advance;
+  if (nr_pusch_ul_disc_ta_track_on()) {
+    cell_res[cell_n++ % UL_DISC_CELL_N] = (int)correction;
+    if (!t->timed || labs(abs_slot - t->last_slot) > 2000) {
+      t->correction = correction;
+      t->timed = true;
+    } else if (fabs(correction - t->correction) <= 256.0) {
+      t->correction += 0.25 * (correction - t->correction);
+    }
+    if (abs_slot > t->last_slot || !t->timed) t->last_slot = abs_slot;
+    pthread_mutex_unlock(&track_lock);
+    return;
+  }
   if (!t->timed || abs_slot <= t->last_slot || abs_slot - t->last_slot > 2000) {
     t->correction = correction;
     t->timed = true;

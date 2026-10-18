@@ -65,5 +65,6 @@ int nr_pusch_ul_disc_timing_seed(uint16_t rnti, int nominal_advance, long abs_sl
 void nr_pusch_ul_disc_timing_update(uint16_t rnti, int nominal_advance,
                                     int measured_advance, double score, long abs_slot);
 void nr_pusch_ul_disc_reset(void);
+bool nr_pusch_ul_disc_ta_track_on(void); /* ISAC_UL_TA_TRACK */
 void nr_pusch_ul_disc_epoch(uint32_t dedicated_epoch);
 #endif

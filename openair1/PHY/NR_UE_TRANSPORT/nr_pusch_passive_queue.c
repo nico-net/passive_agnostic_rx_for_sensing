@@ -59,6 +59,7 @@ extern uint64_t *nr_ss_gpu_ptr(void);
 #include "nr_pusch_passive_decode.h"
 #include "nr_ul_nid_bg.h" // nr_ul_nid_bg_wants_next
 #include "nr_pusch_ul_disc.h" // ISAC_UL_PROBE_TA: the per-RNTI timing tracker
+#include "nr_ul_nid_rule.h" // ISAC_UL_LAYOUT_BRUTE: RIV under BWP twins
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // nr_get_Qm_ul
 
 /* The RF producer's own position, published in executables/nr-ue.c immediately BEFORE nrue_ru_read()
@@ -511,6 +512,54 @@ static void *nr_pusch_passive_queue_thread(void *arg)
                 job.grant.n_dmrs_cdm_groups, job.grant.start_symbol, job.grant.num_symbols);
           break;
         }
+      }
+    }
+    { /* ISAC_UL_LAYOUT_BRUTE=<snr_db> (DIAGNOSTIC, default off): a failed rv-0 real grant with DM-RS SNR >= snr_db is re-decoded (probe decodes, PCI data id,
+       * the decode's DM-RS id) over BWP twins x MCS table x CDM groups x TDA (S/L) x dmrs-AdditionalPosition; CRC is the oracle. At most 4 grants per run.
+       * Logs UL_LBRUTE_HIT per CRC pass and UL_LBRUTE_DONE per grant. Never a receiver default. */
+      static int lb_thr = -999;
+      static _Atomic int lb_n;
+      if (lb_thr == -999) lb_thr = getenv("ISAC_UL_LAYOUT_BRUTE") ? atoi(getenv("ISAC_UL_LAYOUT_BRUTE")) : -1000;
+      if (lb_thr > -999 && !job.cfr_only && out.status == NR_PUSCH_PASSIVE_CRC_FAIL && out.snr_db >= (float)lb_thr && job.grant.rv == 0 &&
+          !job.grant.ra_type0 && !ulq_is_probe(&job.grant) && atomic_fetch_add_explicit(&lb_n, 1, memory_order_relaxed) < 3) {
+        static const uint8_t tda[2][2] = {{0, 14}, {0, 13}};
+        const int bw0 = job.grant.bwp_size, l0 = nr_pdcch_blind_monitor_get_cfg() && nr_pdcch_blind_monitor_get_cfg()->dmrs_typeA_position == 1 ? 1 : 0;
+        int hits = 0, tries = 0, ids[4] = {ue->frame_parms.Nid_cell}, nids = 1;
+        for (const char *e = getenv("ISAC_UL_LAYOUT_BRUTE_IDS"); e && *e && nids < 4; ) { /* "a,b,c": extra data / DM-RS ids (both roles) */
+          ids[nids++] = atoi(e);
+          e = strchr(e, ',');
+          if (e) e++; else break;
+        }
+        nr_pusch_passive_harq_arm(false);
+        for (int n = bw0 - 4; n <= bw0 + 1; n++) {
+          int rs, rl;
+          if (n < 1 || nr_ul_nid_riv_bits(n) != nr_ul_nid_riv_bits(bw0) || !nr_ul_nid_riv_decode(job.grant.freq_domain_assignment, n, &rs, &rl)) continue;
+          for (int tb = 0; tb < 3; tb++)
+            for (int cdm = 1; cdm <= 2; cdm++)
+              for (int t = 0; t < 2; t++)
+                for (int mb = 0; mb < 2; mb++)
+                  for (int ap = 0; ap < 3; ap++)
+                  for (int ii = 0; ii < nids * nids; ii++) {
+                    const int mask = nr_pdcch_blind_ul_dmrs_mask(tda[t][1], tda[t][0], mb, ap, 1, (uint8_t)l0);
+                    if (mask <= 0 || (mb == 0 && tda[t][0] != 0)) continue;
+                    nr_pdcch_blind_ul_result_t bg = job.grant;
+                    nr_pusch_passive_out_t bo;
+                    bg.bwp_size = (uint16_t)n; bg.start_rb = (uint16_t)rs; bg.num_rb = (uint16_t)rl; bg.mcs_table = (uint8_t)tb; bg.n_dmrs_cdm_groups = (uint8_t)cdm;
+                    bg.start_symbol = tda[t][0]; bg.num_symbols = tda[t][1]; bg.mapping_type = (uint8_t)mb; bg.ul_dmrs_symb_pos = (uint16_t)mask;
+                    bg.data_scrambling_id = ids[ii / nids]; bg.data_id_advance = false; bg.ul_dmrs_scrambling_id = ids[ii % nids];
+                    nr_pusch_passive_decode_probe(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &bg, job.ta_offset_samples,
+                                                  (uint64_t)job.absolute_slot, job.fo_hz, &bo);
+                    tries++;
+                    if (bo.status == NR_PUSCH_PASSIVE_OK || bo.segments_ok > 0) {
+                      hits++;
+                      LOG_A(PHY, "SENSING: UL_LBRUTE_HIT rnti=0x%04x t=%ld ok=%d segok=%d/%d bwp=%d prb=%d+%d mcs=%u tbl=%d cdm=%d S=%u L=%u map=%d mask=0x%x data_id=%u dmrs_id=%u snr=%.1f ta=%d\n",
+                            bg.rnti, (long)job.absolute_slot, bo.status == NR_PUSCH_PASSIVE_OK, bo.segments_ok, bo.n_segments, n, rs, rl, bg.mcs, tb, cdm,
+                            bg.start_symbol, bg.num_symbols, mb, mask, bg.data_scrambling_id, bg.ul_dmrs_scrambling_id, bo.snr_db, bo.ta_applied_samples);
+                    }
+                  }
+        }
+        LOG_A(PHY, "SENSING: UL_LBRUTE_DONE rnti=0x%04x t=%ld prb=%u+%u bwp=%u mcs=%u snr=%.1f dmrs_id=%u ta=%d tries=%d hits=%d\n", job.grant.rnti,
+              (long)job.absolute_slot, job.grant.start_rb, job.grant.num_rb, job.grant.bwp_size, job.grant.mcs, out.snr_db, out.dmrs_id, out.ta_applied_samples, tries, hits);
       }
     }
     if (nr_ul_chain_on()) clock_gettime(CLOCK_THREAD_CPUTIME_ID,&grant_cpu_end);

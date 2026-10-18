@@ -1778,6 +1778,8 @@ static int ul_bg_run(const nr_ul_bgdisc_job_t *j)
         ta = best_advance;
         found = true;
         nr_pusch_ul_disc_timing_update(g.rnti, j->ta_offset, best_advance, best_score, (long)j->abs_slot);
+      } else if (nr_pusch_ul_disc_ta_track_on()) {
+        ta = seed; /* ISAC_UL_TA_TRACK, as the inline search */
       }
     }
   }
@@ -2222,12 +2224,15 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   } while (0)
 #define PASSIVE_UL_FEP(off_, kind_)                                                                \
   do {                                                                                             \
+    /* ISAC_UL_TA_TRACK: the snapshot ends at the slot end, so a UE arriving up to a CP late (advance < 0) is read at advance 0 -- \
+     * up to CP samples early, inside the cyclic prefix -- instead of being refused as "timing outside bounded UL snapshot" */ \
+    const int offc_ = (g_snapshot[ctx].valid && (off_) < 0 && (off_) > -(int)fp->nb_prefix_samples && nr_pusch_ul_disc_ta_track_on()) ? 0 : (off_); \
     const int s0_ = g->start_symbol;                                                               \
     const int s1_ = g->start_symbol + g->num_symbols < sps ? g->start_symbol + g->num_symbols : sps; \
     atomic_fetch_add_explicit(&g_fep_req[kind_], (uint64_t)(s1_ > s0_ ? s1_ - s0_ : 0) * nant, memory_order_relaxed); \
     if (!(ulg_usable(ctx, nant, fo_hz, fp) &&                                                      \
-          ulg_fep_symbols(gnb, ctx, nant, (unsigned char)slot, slot_off, s0_, s1_, (off_))))       \
-      for (int sym_ = s0_; sym_ < s1_; sym_++) PASSIVE_UL_FEP_SYMBOL((off_), sym_);                \
+          ulg_fep_symbols(gnb, ctx, nant, (unsigned char)slot, slot_off, s0_, s1_, offc_)))       \
+      for (int sym_ = s0_; sym_ < s1_; sym_++) PASSIVE_UL_FEP_SYMBOL(offc_, sym_);                \
   } while (0)
 
   if (ul_pass) {
@@ -2326,12 +2331,18 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         if (best_score >= 0.35 && nr_pusch_ul_disc_accept(best_score, best_pairs, &fa)) {
           ul_sample_offset = best_advance;
           out->ta_applied_samples = best_advance;
-          if (!t_solver_probe)
+          /* ISAC_UL_TA_TRACK: a CRC-first trial (k2+1, a look-alike BWP) may sit in a DL slot, where the PDSCH DM-RS -- the same
+           * PCI-seeded sequence -- locks the search at the DL frame timing (capture b: "advance 0" was the gNB's own DM-RS); only
+           * the grant's own reading trains the tracker */
+          if (!t_solver_probe && !(nr_pusch_ul_disc_ta_track_on() && nr_ul_layout_is_trial(g)))
             nr_pusch_ul_disc_timing_update(g->rnti, ta_offset_samples, best_advance,
                                            best_score, (long)abs_slot);
           LOG_I(PHY, "SENSING: UL_TIMING_DISC rnti=0x%04x slot=%lu nominal=%d advance=%d residual=%d score=%.3f fa<=%.2g\n",
                 g->rnti, (unsigned long)abs_slot, ta_offset_samples, best_advance,
                 best_advance-ta_offset_samples, best_score, fa);
+        } else if (nr_pusch_ul_disc_ta_track_on()) {
+          ul_sample_offset = seed; /* ISAC_UL_TA_TRACK: this grant's search failed; the RNTI's (or the cell's) learned advance, not N_TA_offset */
+          out->ta_applied_samples = seed;
         }
       }
     }
