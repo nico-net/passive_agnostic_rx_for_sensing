@@ -209,7 +209,7 @@ static double port_score(const int16_t *rx, const int8_t *ref, int n, int block,
 int nr_csirs_disc_sweep_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
                           const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out)
 {
-  const char *enable = getenv("ISAC_CSIRS_DISC");
+  const char *enable = (getenv("ISAC_CSIRS_DISC") ?: "1");
   if (!enable || strcmp(enable, "1")) return 0;
   nr_csirs_disc_sweep_cfg_t c;
   if (!out || nr_csirs_disc_sweep_validate(r, hyps, nh, cfg, &c)) return -1;

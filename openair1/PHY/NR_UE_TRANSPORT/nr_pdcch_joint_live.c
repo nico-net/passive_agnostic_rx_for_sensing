@@ -30,7 +30,7 @@ bool nr_pdcch_joint_live_enabled(void)
 {
   static int en = -1;
   if (en < 0) {
-    const char *e = getenv("ISAC_PDCCH_JOINT");
+    const char *e = (getenv("ISAC_PDCCH_JOINT") ?: "1");
     en = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
   return en == 1;

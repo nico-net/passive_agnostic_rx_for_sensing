@@ -15,8 +15,8 @@ static inline bool nr_ul_chain_on(void)
   static int cached = -1;
   int on = __atomic_load_n(&cached, __ATOMIC_RELAXED);
   if (on < 0) {
-    const char *v = getenv("ISAC_UL_PUSCH_CHAIN");
-    const char *s = getenv("ISAC_UL_PUSCH_SOLVER");
+    const char *v = (getenv("ISAC_UL_PUSCH_CHAIN") ?: "1");
+    const char *s = (getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");
     on = (v && strcmp(v, "1") == 0) || (s && strcmp(s, "1") == 0);
     __atomic_store_n(&cached, on, __ATOMIC_RELAXED);
   }

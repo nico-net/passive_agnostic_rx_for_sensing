@@ -57,7 +57,7 @@ static int evidence_retries;
  */
 static bool feature(const char *name)
 {
-  const char *s=getenv(name); return s && !strcmp(s,"1");
+  const char *s=(getenv(name) ?: "1"); return s && !strcmp(s,"1"); /* all callers: baked t26yE default 1 */
 }
 /* retry_refined: remembers a refined (extent-refined) hypothesis whose verification failed, so that the next batch re-verifies that exact geometry.
  *   Keeps up to 16 entries (oldest overwritten); a duplicate of an entry already stored is ignored. Caller: nr_csirs_disc_process() (CUMULATIVE).

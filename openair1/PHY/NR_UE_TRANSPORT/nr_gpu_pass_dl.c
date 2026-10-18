@@ -313,7 +313,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   int nd[4], nnd = env_list("ISAC_GPU_PASS_NDMRS", "3,2", nd, 4);
   const char *ce = getenv("ISAC_GPU_PASS_CLASSES");
   const int budget = ce ? atoi(ce) : c.split ? 1 << 20 : 512; /* split: every class of the loops (sub-graphs are shared between classes; the module's memory cap bounds them) */
-  const int evm = (getenv("ISAC_PDSCH_EVM_GRANT") || getenv("ISAC_PDSCH_SNR_GATE") || (getenv("ISAC_PDSCH_DECODE_DIAG") && atoi(getenv("ISAC_PDSCH_DECODE_DIAG")) != 0)) ? 1 : 0;
+  const int evm = ((getenv("ISAC_PDSCH_EVM_GRANT") ?: "1") || (getenv("ISAC_PDSCH_SNR_GATE") ?: "1") || (getenv("ISAC_PDSCH_DECODE_DIAG") && atoi(getenv("ISAC_PDSCH_DECODE_DIAG")) != 0)) ? 1 : 0;
   static const int nrbs[] = {273, 217, 136, 96, 48, 24, 12, 6};
   static const int nls[] = {1, 2, 4, 3};
   int made = 0, failed = 0;

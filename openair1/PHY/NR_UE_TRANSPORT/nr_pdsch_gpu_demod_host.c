@@ -86,7 +86,7 @@ static int env_int(const char *n, int dflt)
 
 int nr_pdsch_gpu_demod_warmup(const NR_DL_FRAME_PARMS *fp)
 {
-  if (env_int("ISAC_PDSCH_GPU_EXACT_DEMOD", 0) != 1 || !fp)
+  if (env_int("ISAC_PDSCH_GPU_EXACT_DEMOD", 1) != 1 || !fp)
     return 0;
   if (fp->nb_antennas_rx > NR_GPU_DEMOD_MAX_RX || fp->symbols_per_slot != 14
       || ((fp->N_RB_DL * 12 + 15) & ~15) > NR_GPU_DEMOD_MAX_EXT || fp->ofdm_symbol_size > 32768) {
@@ -100,12 +100,12 @@ int nr_pdsch_gpu_demod_warmup(const NR_DL_FRAME_PARMS *fp)
   g_run = h ? (nr_gpu_demod_run_fn)dlsym(h, "nr_pdsch_gpu_demod_run") : NULL;
   g_release = h ? (nr_gpu_demod_release_fn)dlsym(h, "nr_pdsch_gpu_demod_release") : NULL;
   g_evm_wait = h ? (nr_gpu_demod_evm_wait_fn)dlsym(h, "nr_pdsch_gpu_demod_evm_wait") : NULL;
-  g_defer = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_DEFER", 0) && g_evm_wait;
+  g_defer = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_DEFER", 1) && g_evm_wait;
   if (!g_init || !g_run || !g_release || g_init(fp->nb_antennas_rx) != 0) {
     LOG_W(PHY, "SENSING: GPU_EXACT_DEMOD requested but libpdsch_gpu.so has no usable demod entry -- CPU demodulation\n");
     return 0;
   }
-  g_check = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_CHECK", 0);
+  g_check = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_CHECK", 64);
   atomic_store(&g_on, 1);
   LOG_A(PHY, "SENSING: GPU_EXACT_DEMOD enabled: %d RX, bit-exact nr_rx_pdsch() on the GPU; check=%d\n", fp->nb_antennas_rx, g_check);
   return 1;
@@ -325,12 +325,12 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
     }
     if (nr_agnostic_v2())
       any = 1;
-    s_mode = env_int("ISAC_RX_MRC_MODE", 0);
+    s_mode = env_int("ISAC_RX_MRC_MODE", 1);
     if (getenv("ISAC_RX_BRANCH_MIN_DB"))
       s_min_db = atof(getenv("ISAC_RX_BRANCH_MIN_DB"));
-    s_align = env_int("ISAC_RX_MRC_ALIGN", 0);
+    s_align = env_int("ISAC_RX_MRC_ALIGN", 2);
     s_l2d = env_int("ISAC_L2MAXH_DELTA", 0);
-    s_l2d2 = env_int("ISAC_L2MAXH_DELTA_NL2", 0); /* nl == 2 only, as the CPU path */
+    s_l2d2 = env_int("ISAC_L2MAXH_DELTA_NL2", -3); /* nl == 2 only, as the CPU path */
     g_shift_sum = env_int("ISAC_RX_MRC_SHIFT_SUM", 0); /* MRCBUG: the job fill in gpu_grant() reads it */
     s_env = any;
   }
@@ -342,15 +342,15 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
   if (nl >= 2) { /* nr_rx_pdsch()'s qam_mode resolution */
     static int s_qm = -1, s_nl34 = -1, s_nl34q = -1;
     if (s_qm < 0) {
-      s_qm = env_int("ISAC_PDSCH_MMSE_MODE", 0);
-      s_nl34 = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_NL34", 0); /* DECGPU: 3 and 4 layers (mode 2, and the stock MMSE) */
+      s_qm = env_int("ISAC_PDSCH_MMSE_MODE", 2);
+      s_nl34 = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_NL34", 1); /* DECGPU: 3 and 4 layers (mode 2, and the stock MMSE) */
       s_nl34q = env_int("ISAC_PDSCH_MMSE2_NL34_QPSK", 0);     /* HIGHMCS: as nr_rx_pdsch() */
     }
     int qam_mode = nr_dlsch_qam_mode_override >= 0 ? nr_dlsch_qam_mode_override : s_qm;
     static int s_ex34 = -1, s_m3 = -1; /* TIMRANK34: mode 3 (exact double MMSE), resolved as nr_rx_pdsch() does */
     if (s_ex34 < 0) {
-      s_ex34 = env_int("ISAC_PDSCH_MMSE_EXACT_NL34", 0);
-      s_m3 = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_MMSE3", 0); /* MMSE3GPU: mode 3 on the GPU (default off: CPU) */
+      s_ex34 = env_int("ISAC_PDSCH_MMSE_EXACT_NL34", 1);
+      s_m3 = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_MMSE3", 1); /* MMSE3GPU: mode 3 on the GPU (default off: CPU) */
     }
     if (qam_mode < 0 || qam_mode > 3)
       qam_mode = 0;
@@ -644,7 +644,7 @@ static int build_job(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
     g_gpu_evm = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_EVM", 1); /* 1: GPU float, 2: GPU double, 0: CPU copy (exact, slow) */
   static int s_evm34 = -1; /* GPUFUSE: ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_NL34=1 (default off): GPU EVM for Nl = 3, 4 too (else the CPU copy) */
   if (s_evm34 < 0)
-    s_evm34 = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_NL34", 0);
+    s_evm34 = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_NL34", 1);
   j->want_evm = nr_pdsch_evm_acc.armed && g_gpu_evm && (nl <= 2 || s_evm34 == 1);
   j->evm_fp64 = g_gpu_evm == 2;
   j->evm_erase = nr_dlsch_csi_erase_n > 0;
@@ -804,7 +804,7 @@ int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
   CPU_ZERO(&cs);
   const char *e = getenv("ISAC_GPU_CHECK_CORES");
   char buf[128], list[128];
-  snprintf(buf, sizeof(buf), "%s", e && *e ? e : "0-4,10-14");
+  snprintf(buf, sizeof(buf), "%s", e && *e ? e : "10-14");
   snprintf(list, sizeof(list), "%s", buf);
   char *sv = NULL;
   for (char *t = strtok_r(buf, ",", &sv); t; t = strtok_r(NULL, ",", &sv)) {

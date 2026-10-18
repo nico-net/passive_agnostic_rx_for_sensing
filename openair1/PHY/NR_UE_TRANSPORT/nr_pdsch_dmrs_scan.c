@@ -280,7 +280,7 @@ static int g_base_seen_n;
 static int g_contrast = -1; /* re-read by nr_dmrs_scan_reset() (tests) */
 bool nr_dmrs_scan_contrast_on(void)
 {
-  if (g_contrast < 0) g_contrast = getenv("ISAC_PDSCH_DMRS_ID_CONTRAST") && atoi(getenv("ISAC_PDSCH_DMRS_ID_CONTRAST")) ? 1 : 0;
+  if (g_contrast < 0) g_contrast = atoi(getenv("ISAC_PDSCH_DMRS_ID_CONTRAST") ?: "1") ? 1 : 0;
   return g_contrast == 1;
 }
 /* base_count: counts the hits of one slot cell-wide, once per distinct slot (g_vmu held) */

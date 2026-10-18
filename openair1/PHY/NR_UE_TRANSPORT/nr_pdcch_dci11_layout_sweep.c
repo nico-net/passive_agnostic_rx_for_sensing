@@ -290,7 +290,7 @@ bool nr_dci11_layout_impossible(const nr_dci11_offsets_t *off, nr_dci_bits_t pay
 /* hard_refute_enabled: returns ISAC_DCI11_HARD_REFUTE != 0, read at each call (one getenv per accepted DCI). Caller: nr_dci11_resolver_observe(). */
 static bool hard_refute_enabled(void) /* read per observe(): one getenv per accepted DCI, and tests can toggle it */
 {
-  const char *e = getenv("ISAC_DCI11_HARD_REFUTE");
+  const char *e = (getenv("ISAC_DCI11_HARD_REFUTE") ?: "1");
   return e != NULL && atoi(e) != 0;
 }
 
@@ -802,7 +802,7 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
 /* harq_seq_enabled: returns ISAC_DCI11_HARQ_SEQ != 0 (read per call): enables the HARQ-sequence pruning of layouts in nr_dci11_resolver_observe_rnti(). */
 static bool harq_seq_enabled(void)
 {
-  const char *e = getenv("ISAC_DCI11_HARQ_SEQ");
+  const char *e = (getenv("ISAC_DCI11_HARQ_SEQ") ?: "1");
   return e != NULL && atoi(e) != 0;
 }
 
@@ -975,8 +975,8 @@ bool nr_dci11_layout_to_field_bits(const nr_dci11_layout_t *l, nr_dci11_field_bi
    * 4 bits behind the RV (as solver_hq_of does, tb2 assumed absent) and park the rest in dai; the total is unchanged. */
   /* ISAC_SCANCOST: the flag is read once (a getenv per call was ~12 % of the scan CPU: the solver parses every layout key) */
   static int s_harqpid = -1;
-  const bool harqpid = nr_scancost_on() ? (s_harqpid < 0 ? (s_harqpid = getenv("ISAC_DCI11_HARQPID") != NULL) : s_harqpid)
-                                        : getenv("ISAC_DCI11_HARQPID") != NULL;
+  const bool harqpid = nr_scancost_on() ? (s_harqpid < 0 ? (s_harqpid = true) : s_harqpid)
+                                        : true; /* ISAC_DCI11_HARQPID: presence-only flag, baked on (t26yE) */
   if (harqpid && pre_ant_variable >= 4) {
     out->tb2_bits      = 0;
     out->harq_pid_bits = 4;

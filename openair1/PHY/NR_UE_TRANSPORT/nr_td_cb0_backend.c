@@ -35,7 +35,7 @@ static uint64_t now_ns(void)
 
 static int mode_from_env(void)
 {
-  const char *e = getenv("ISAC_TD_CB0_BACKEND");
+  const char *e = (getenv("ISAC_TD_CB0_BACKEND") ?: "gpu");
   if (e == NULL || *e == 0 || strcasecmp(e, "auto") == 0)
     return NR_TD_CB0_BE_AUTO;
   if (strcasecmp(e, "cpu") == 0)

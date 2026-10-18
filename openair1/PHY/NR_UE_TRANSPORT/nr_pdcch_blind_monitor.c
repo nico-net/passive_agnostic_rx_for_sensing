@@ -1046,7 +1046,7 @@ static struct {
 /* nr_pdcch_discovered_enabled: returns true when the discovered-CORESET bank is enabled (ISAC_PDCCH_NID_BANK=1). Callers: the discovered-CORESET entry points in this file and nr_pdcch_blind_monitor_rt.c. */
 bool nr_pdcch_discovered_enabled(void)
 {
-  const char *v = getenv("ISAC_PDCCH_NID_BANK"); /* own flag; was mistakenly ISAC_CSIRS_DISC */
+  const char *v = (getenv("ISAC_PDCCH_NID_BANK") ?: "1"); /* own flag; was mistakenly ISAC_CSIRS_DISC */
   return v && strcmp(v, "1") == 0;
 }
 
@@ -1074,7 +1074,7 @@ bool nr_pdcch_discovered_load(const char *path)
  *   nr_pdcch_discovered_enabled(). Callers: the discovered queue (load/snapshot) and nid_budget_feedback(). */
 bool nr_pdcch_discovered_cover_enabled(void)
 {
-  const char *e = getenv("ISAC_PDCCH_DISC_COVER");
+  const char *e = (getenv("ISAC_PDCCH_DISC_COVER") ?: "1");
   return e && strcmp(e, "1") == 0;
 }
 
@@ -1084,7 +1084,7 @@ bool nr_pdcch_pointa_ref_enabled(void)
 {
   static _Atomic int en = -1;
   if (en < 0) {
-    const char *e = getenv("ISAC_PDCCH_POINTA_REF");
+    const char *e = (getenv("ISAC_PDCCH_POINTA_REF") ?: "1");
     en = (e && strcmp(e, "1") == 0) ? 1 : 0;
   }
   return en == 1;
@@ -1126,7 +1126,7 @@ void nr_pdcch_discovered_note_pci(int pci) { s_disc_pci = pci; }
 /* nr_carrier_from_sib1_enabled: ISAC_CARRIER_FROM_SIB1=1 (CARRIERGEOM, default off); read per call (dwell start only). */
 bool nr_carrier_from_sib1_enabled(void)
 {
-  const char *e = getenv("ISAC_CARRIER_FROM_SIB1");
+  const char *e = (getenv("ISAC_CARRIER_FROM_SIB1") ?: "1");
   return e && strcmp(e, "1") == 0;
 }
 
@@ -3771,8 +3771,8 @@ void nr_pdcch_blind_monitor_init(void)
   /* The integrated first-PUSCH mode supplies the two config switches the DL-only
    * OTA configuration lacks. Full-auto keeps the UL BWP/TDRA unknown until U3
    * proposes a ticket; the flag is the only new default-off activation point. */
-  const char *ul_chain = getenv("ISAC_UL_PUSCH_CHAIN");
-  const char *ul_solver = getenv("ISAC_UL_PUSCH_SOLVER");
+  const char *ul_chain = (getenv("ISAC_UL_PUSCH_CHAIN") ?: "1");
+  const char *ul_solver = (getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");
   if (((ul_chain && strcmp(ul_chain,"1") == 0) ||
        (ul_solver && strcmp(ul_solver,"1") == 0)) && g_cfg.dl_full_auto) {
     g_cfg.dci01_scan = 1;

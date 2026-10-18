@@ -187,7 +187,7 @@ static void la_drain(void)
 }
 static void la_init(void)
 {
-  const char *e = getenv("ISAC_LOG_ASYNC");
+  const char *e = (getenv("ISAC_LOG_ASYNC") ?: "1");
   if (!e || atoi(e) == 0) return;
   g_la.buf = malloc(LOG_ASYNC_RING);
   if (!g_la.buf) return;

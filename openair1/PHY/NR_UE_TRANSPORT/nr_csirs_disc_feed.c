@@ -70,7 +70,7 @@ static void worker_note_slot(void);
  */
 static void read_enabled(void)
 {
-  const char *value = getenv("ISAC_CSIRS_DISC");
+  const char *value = (getenv("ISAC_CSIRS_DISC") ?: "1");
   g_enabled = value != NULL && strcmp(value, "1") == 0;
 }
 

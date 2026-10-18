@@ -52,7 +52,7 @@ static unsigned setting(const char *name,unsigned def,unsigned lo,unsigned hi) {
 }
 /* init: one-time setup (pthread_once): reads ISAC_GPU_BUDGET (enabled when "1"), ISAC_GPU_DISCOVERY_BUDGET_PCT (default 30) and ISAC_GPU_RT_DEADLINE_US (default 250), and records the start time. */
 static void init(void) {
-  const char *s=getenv("ISAC_GPU_BUDGET");enabled=s && !strcmp(s,"1");
+  const char *s=(getenv("ISAC_GPU_BUDGET") ?: "1");enabled=s && !strcmp(s,"1");
   pct=setting("ISAC_GPU_DISCOVERY_BUDGET_PCT",30,1,100);
   deadline=setting("ISAC_GPU_RT_DEADLINE_US",250,1,5000);
   start_us=nr_gpu_budget_now_us();

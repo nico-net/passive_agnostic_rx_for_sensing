@@ -197,7 +197,7 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int s
   U.nant = nant;
   U.pct = pct > 0 && pct <= 100 ? (unsigned)pct : 20u;
   U.dl_on = env_on("ISAC_UL_GPU_FEP_DEADLINE");
-  U.kc_on = env_on("ISAC_UL_GPU_FEP_KCHARGE");
+  U.kc_on = !getenv("ISAC_UL_GPU_FEP_KCHARGE") || env_on("ISAC_UL_GPU_FEP_KCHARGE");
   U.deadline_us = slot_us > 0 ? (uint64_t)slot_us : 500u; /* one slot: a later FEP no longer keeps up with one grant per slot */
   UCK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&U.d_perm, N * sizeof(uint16_t)));
   UCK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&U.d_tw1024, 3 * 512 * sizeof(short)));

@@ -368,7 +368,7 @@ int nr_pdcch_coreset_map_idsweep_dur(void)
    * dur=0 symbols (2724-byte batches, OTA 2026-10-07 nidsweep). */
   if (g_idsw.dur <= 0) {
     const char *e = getenv("ISAC_COREMAP_IDSWEEP_DUR");
-    int d = (e != NULL) ? atoi(e) : (nr_pdcch_nid_gpu_enabled() ? 3 : 1);
+    int d = (e != NULL) ? atoi(e) : 3; /* baked t26yE default 3 (was 3 only with NID_GPU, else 1) */
     if (d < 1) d = 1;
     if (d > IDSW_DUR_MAX) d = IDSW_DUR_MAX;
     g_idsw.dur = d;
@@ -460,7 +460,7 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
   const bool incremental = gpu && (getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL")==NULL || strcmp(getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL"),"0")); /* own flag, default on (was ISAC_CSIRS_DISC) */
   int every = 10;
   if (incremental) {
-    const char *e = getenv("ISAC_PDCCH_NID_GPU_CAPTURE_EVERY");
+    const char *e = (getenv("ISAC_PDCCH_NID_GPU_CAPTURE_EVERY") ?: "2");
     char *end = NULL;
     long n = e ? strtol(e, &end, 10) : 1;
     every = n >= 1 && n <= 1000 && (!e || (end != e && !*end)) ? (int)n : 1;

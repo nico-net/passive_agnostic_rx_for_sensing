@@ -130,7 +130,7 @@ static uint64_t g_pdtim_calls = 0;
 static int chest_pdp_diag_on(void)
 {
   static int en = -1;
-  if (en < 0) en = getenv("ISAC_CHEST_PDP_DIAG") ? atoi(getenv("ISAC_CHEST_PDP_DIAG")) : 1;
+  if (en < 0) en = getenv("ISAC_CHEST_PDP_DIAG") ? atoi(getenv("ISAC_CHEST_PDP_DIAG")) : 0; /* baked t26yE default */
   return en;
 }
 /* harq_combine_on: returns ISAC_PDSCH_HARQ_COMBINE (cached): 1 enables passive HARQ soft combining on its own flag.
@@ -160,8 +160,8 @@ static _Atomic int g_pdtim_on = -1; /* _Atomic: lazily resolved by every passive
 static inline int pdtim_enabled(void)
 {
   if (g_pdtim_on < 0) {
-    g_pdtim_on = (getenv("ISAC_PDCCH_TIMING") != NULL) ? 1 : 0;
-    g_pdtim_pct = getenv("ISAC_PDTIM_PCT") && atoi(getenv("ISAC_PDTIM_PCT")) ? 1 : 0;
+    g_pdtim_on = 1; /* ISAC_PDCCH_TIMING presence-only flag, baked on (t26yE) */
+    g_pdtim_pct = atoi(getenv("ISAC_PDTIM_PCT") ?: "1") ? 1 : 0;
   }
   return g_pdtim_on;
 }
@@ -416,7 +416,7 @@ static inline void pdtim_add(int k, uint64_t t0)
   const uint64_t c0 = t_pdtim_cpu0;
   const uint64_t d = pdtim_now() - t0;
   if (g_pdtim_pct < 0)
-    g_pdtim_pct = getenv("ISAC_PDTIM_PCT") && atoi(getenv("ISAC_PDTIM_PCT")) ? 1 : 0;
+    g_pdtim_pct = atoi(getenv("ISAC_PDTIM_PCT") ?: "1") ? 1 : 0;
   if (g_pdtim_pct && k != PDTIM_ALLOC) {
     pdtim_hist(k, d);
     if (k == PDTIM_FEP) {
@@ -450,7 +450,7 @@ static void pdtim_report(void)
   if (g_pdtim_pct > 0 && t_pdtim_sum_n) {
     pdtim_hist(PDTIM_N, t_pdtim_sum);
     if (g_pdtim_cls < 0)
-      g_pdtim_cls = getenv("ISAC_PDTIM_CLASS") && atoi(getenv("ISAC_PDTIM_CLASS")) ? 1 : 0;
+      g_pdtim_cls = atoi(getenv("ISAC_PDTIM_CLASS") ?: "1") ? 1 : 0;
     if (g_pdtim_cls)
       pdtim_cls_note(t_pdtim_sum);
     t_dec_stage_ns += t_pdtim_sum;
@@ -743,7 +743,7 @@ static void mcs_table_evidence_feed(uint8_t mcs, uint8_t used)
 {
   static int s_on = -1;
   if (s_on < 0)
-    s_on = getenv("ISAC_MCS_TABLE_EVID") && atoi(getenv("ISAC_MCS_TABLE_EVID")) ? 1 : 0;
+    s_on = atoi(getenv("ISAC_MCS_TABLE_EVID") ?: "1") ? 1 : 0;
   if (!s_on || used > 2)
     return;
   bool same[3], differs = false;
@@ -2590,9 +2590,9 @@ static int gp_evm_armed(int probe_last_sym)
 {
   static _Atomic int evmg = -1, evmp = -1, opr = -1;
   if (evmg < 0)
-    evmg = (getenv("ISAC_PDSCH_EVM_GRANT") || getenv("ISAC_PDSCH_SNR_GATE")) ? 1 : 0;
+    evmg = ((getenv("ISAC_PDSCH_EVM_GRANT") ?: "1") || (getenv("ISAC_PDSCH_SNR_GATE") ?: "1")) ? 1 : 0;
   if (evmp < 0)
-    evmp = getenv("ISAC_PDSCH_EVM_PROBES") ? 1 : 0;
+    evmp = (getenv("ISAC_PDSCH_EVM_PROBES") ?: "1") ? 1 : 0;
   if (opr < 0)
     opr = getenv("ISAC_PDSCH_OWN_PDCCH_RM") && atoi(getenv("ISAC_PDSCH_OWN_PDCCH_RM")) ? 1 : 0;
   return (evmg || opr || decode_diag_on()) && (probe_last_sym < 0 || evmp);
@@ -2870,7 +2870,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
      * first body of SSB-candidate slots. Same fallback rule as the main FEP below: CPU when the GPU path refuses. */
     static int s_ssb_gpu = -1;
     if (s_ssb_gpu < 0)
-      s_ssb_gpu = getenv("ISAC_SSB_FEP_GPU") && atoi(getenv("ISAC_SSB_FEP_GPU")) ? 1 : 0;
+      s_ssb_gpu = atoi(getenv("ISAC_SSB_FEP_GPU") ?: "1") ? 1 : 0;
     int ssb_rng[14][2], n_ssb_rng = 0;
     for (int sym = 0; sym < 14; ++sym)
       if ((fep_syms >> sym) & 1) {
@@ -4836,7 +4836,7 @@ gpu_llr_ready:;
     if (gidx == NULL)
       gidx = (int *)malloc(NR_PRB_SET_MAX * NR_NB_SC_PER_RB * sizeof(int));
     static int s_gfast = -1; /* ISAC_PDSCH_GATHER_FAST=1 (default off): memcpy runs instead of the per-RE modulo loop; bit-identical */
-    if (s_gfast < 0) s_gfast = getenv("ISAC_PDSCH_GATHER_FAST") && atoi(getenv("ISAC_PDSCH_GATHER_FAST")) ? 1 : 0;
+    if (s_gfast < 0) s_gfast = atoi(getenv("ISAC_PDSCH_GATHER_FAST") ?: "1") ? 1 : 0;
     int nre_fast = 0;
     for (int s = 0; s_gfast && s < nseg; s++) nre_fast += seg[s].n_prb * NR_NB_SC_PER_RB;
     const int nre = !(virt && gidx) ? -1 : s_gfast ? (nre_fast <= NR_PRB_SET_MAX * NR_NB_SC_PER_RB ? nre_fast : -1)
@@ -4879,7 +4879,7 @@ gpu_llr_ready:;
   }
   { /* ISAC_PDSCH_EVM_GRANT (T26c): arm the per-grant EVM accumulator for the CPU demod loop below */
     static int s_evmg = -1;
-    if (s_evmg < 0) s_evmg = (getenv("ISAC_PDSCH_EVM_GRANT") || getenv("ISAC_PDSCH_SNR_GATE")) ? 1 : 0; /* the SNR gate needs the measurement */
+    if (s_evmg < 0) s_evmg = ((getenv("ISAC_PDSCH_EVM_GRANT") ?: "1") || (getenv("ISAC_PDSCH_SNR_GATE") ?: "1")) ? 1 : 0; /* the SNR gate needs the measurement */
     memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc));
     { /* LLRZERO ISAC_MMSE2_DIAG=1 */
       static int s_m2d = -1;
@@ -4888,7 +4888,7 @@ gpu_llr_ready:;
       nr_mmse2_diag.on = s_m2d;
     }
     static int s_evmp = -1; /* ISAC_PDSCH_EVM_PROBES=1 (diagnostic): layout probes are measured too */
-    if (s_evmp < 0) s_evmp = getenv("ISAC_PDSCH_EVM_PROBES") ? 1 : 0;
+    if (s_evmp < 0) s_evmp = (getenv("ISAC_PDSCH_EVM_PROBES") ?: "1") ? 1 : 0;
     static int s_opr = -1; /* the own-PDCCH detector reads the per-RB error map */
     if (s_opr < 0) s_opr = getenv("ISAC_PDSCH_OWN_PDCCH_RM") && atoi(getenv("ISAC_PDSCH_OWN_PDCCH_RM")) ? 1 : 0;
     nr_pdsch_evm_acc.armed = (s_evmg || s_opr || decode_diag_on()) && (probe_last_sym < 0 || s_evmp) && !gpu_llr && !gw_ready;
@@ -4960,7 +4960,7 @@ gpu_llr_ready:;
    * CPU demod, 1 layer, 0 = n/a). Replay b 2026-10-13: median 143-196 (single branch) vs 73-89 (4-branch MRC), p10 32. */
   out->zabs = 0.f;
   static int s_fx = -1;
-  if (s_fx < 0) s_fx = getenv("ISAC_PDSCH_EVM_GRANT") ? 1 : 0;
+  if (s_fx < 0) s_fx = (getenv("ISAC_PDSCH_EVM_GRANT") ?: "1") ? 1 : 0;
   if (s_fx && demod_ok && gdem != 0 && !gpu_llr && !gw_ready && cw->Nl == 1) {
     double zabs = 0.0; uint64_t nz = 0;
     for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
@@ -5314,7 +5314,7 @@ gpu_llr_ready:;
     pdt_ldp = pdtim_on ? pdtim_now() : 0;
     { /* ISAC_PDSCH_HOST_FAST=1 (default off): NEON sign-mask unscramble, bit-identical to nr_codeword_unscrambling */
       static _Atomic int s_hfu = -1;
-      if (s_hfu < 0) s_hfu = getenv("ISAC_PDSCH_HOST_FAST") && atoi(getenv("ISAC_PDSCH_HOST_FAST")) ? 1 : 0;
+      if (s_hfu < 0) s_hfu = atoi(getenv("ISAC_PDSCH_HOST_FAST") ?: "1") ? 1 : 0;
       if (s_hfu)
         nrhf_unscramble(llr, G, gold_cache((grant->rnti << 15) + (0 << 14) + dlsch_config->dlDataScramblingId, (G + 31) / 32));
       else
@@ -6233,7 +6233,7 @@ static int pdcch_rm_mode(void)
   static _Atomic int s_m = -1;
   if (s_m < 0) {
     const char *e = getenv("ISAC_PDSCH_PDCCH_RM");
-    s_m = e ? atoi(e) : 0;
+    s_m = e ? atoi(e) : 1;
   }
   return s_m;
 }
@@ -6451,7 +6451,7 @@ static int retry_budget_us(void)
 {
   static int v = -1;
   if (v < 0) {
-    const char *e = getenv("ISAC_PDSCH_RETRY_BUDGET_US"), *u = getenv("ISAC_FATTAILS");
+    const char *e = getenv("ISAC_PDSCH_RETRY_BUDGET_US"), *u = (getenv("ISAC_FATTAILS") ?: "1");
     v = e ? atoi(e) : (u && atoi(u) ? 1000 : 0);
     if (v < 0)
       v = 0;
@@ -6461,7 +6461,7 @@ static int retry_budget_us(void)
 static int retry_yield_mode(void)
 {
   static int v = -1;
-  if (v < 0) v = getenv("ISAC_PDSCH_RETRY_YIELD") ? atoi(getenv("ISAC_PDSCH_RETRY_YIELD")) : 0;
+  if (v < 0) v = getenv("ISAC_PDSCH_RETRY_YIELD") ? atoi(getenv("ISAC_PDSCH_RETRY_YIELD")) : 2;
   return v;
 }
 /* ry_arm_worth: mode 2 gate of one arm (see above); counts the gated tries */
@@ -6491,10 +6491,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   /* ISAC_PDSCH_RETRY_PREDICT=1 / ISAC_PDSCH_RETRY_NORESTORE=1 (default off, DECQUEUE): see nr_pdsch_retry_pred.h; and skip the final re-decode
    * of the plain reading after every arm failed (it repeats the first body bit for bit; its only effect was to restore *out). */
   static _Atomic int rp_on = -1, rn_on = -1;
-  if (rp_on < 0) { const char *e = getenv("ISAC_PDSCH_RETRY_PREDICT"); rp_on = e && atoi(e) != 0; }
-  if (rn_on < 0) { const char *e = getenv("ISAC_PDSCH_RETRY_NORESTORE"); rn_on = e && atoi(e) != 0; }
+  if (rp_on < 0) { const char *e = (getenv("ISAC_PDSCH_RETRY_PREDICT") ?: "1"); rp_on = e && atoi(e) != 0; }
+  if (rn_on < 0) { const char *e = (getenv("ISAC_PDSCH_RETRY_NORESTORE") ?: "1"); rn_on = e && atoi(e) != 0; }
   nr_pdsch_passive_decode_status_t st;
-  if (t_recov_mode != 2 && rp_on && getenv("ISAC_PDSCH_TDRA_RETRY") && atoi(getenv("ISAC_PDSCH_TDRA_RETRY")) && grant->dci11 && grant->rnti_class == 0
+  if (t_recov_mode != 2 && rp_on && atoi(getenv("ISAC_PDSCH_TDRA_RETRY") ?: "1") && grant->dci11 && grant->rnti_class == 0
       && !t_probe_first_seg && !t_gw_capture && !t_gw_used && !(t_quiet && !t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && !harq_combine_on()
       && dlsch_config->start_symbol <= 1 && dlsch_config->start_symbol + dlsch_config->number_symbols == 14
       && nr_retry_pred_try_first(grant->rnti)) {
@@ -6581,23 +6581,23 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
     tint_retry = e && atoi(e) != 0;
   }
   if (tdra_retry < 0) {
-    const char *e = getenv("ISAC_PDSCH_TDRA_RETRY");
+    const char *e = (getenv("ISAC_PDSCH_TDRA_RETRY") ?: "1");
     tdra_retry = e && atoi(e) != 0;
   }
   if (csi_retry < 0) {
-    const char *e = getenv("ISAC_PDSCH_CSI_RETRY");
+    const char *e = (getenv("ISAC_PDSCH_CSI_RETRY") ?: "1");
     csi_retry = e && atoi(e) != 0;
   }
   if (cdm_retry < 0) {
-    const char *e = getenv("ISAC_PDSCH_DMRS_CDM_RETRY");
+    const char *e = (getenv("ISAC_PDSCH_DMRS_CDM_RETRY") ?: "1");
     cdm_retry = e && atoi(e) != 0;
   }
   if (wide_retry < 0) {
-    const char *e = getenv("ISAC_PDSCH_WIDE_MRC_RETRY");
+    const char *e = (getenv("ISAC_PDSCH_WIDE_MRC_RETRY") ?: "1");
     wide_retry = e && atoi(e) != 0;
   }
   if (csi_population_retry < 0) {
-    const char *e = getenv("ISAC_PDSCH_CSI_POPULATION_RETRY");
+    const char *e = (getenv("ISAC_PDSCH_CSI_POPULATION_RETRY") ?: "1");
     csi_population_retry = e && atoi(e) != 0;
   }
   /* SYSAN ISAC_PDSCH_RETRY_SNR_MIN_DB=X (default off): no recovery arm when the failed first body's own EVM-SNR is below X dB.
@@ -6622,7 +6622,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
    * (row 0 = S=2 L=12) although the cell's own list is not that table; every such grant then fails the CRC. Re-decode with the other
    * type-A starts S=0..3 ending at symbol 14 (DM-RS re-derived by TS 38.211 Table 7.4.1.1.2-3, 1_0 => pos2). */
   static _Atomic int ra_sweep = -1;
-  if (ra_sweep < 0) { const char *e = getenv("ISAC_RA_TDRA_SWEEP"); ra_sweep = e && atoi(e) != 0; }
+  if (ra_sweep < 0) { const char *e = (getenv("ISAC_RA_TDRA_SWEEP") ?: "1"); ra_sweep = e && atoi(e) != 0; }
   if (ra_sweep && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !grant->dci11 && grant->rnti_class != 0 && grant->rnti_class != 2 && !t_quiet && !t_llr_ovr
       && !t_gw_capture && !nr_agnostic_v2() && !harq_combine_on()
       && dlsch_config->start_symbol + dlsch_config->number_symbols == 14 && (dlsch_config->dlDmrsSymbPos & 0x3FFFu)) {

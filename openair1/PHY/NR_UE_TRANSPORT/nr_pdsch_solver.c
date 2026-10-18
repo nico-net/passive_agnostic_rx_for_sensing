@@ -130,7 +130,7 @@ static bool solver_thread_ctx_enabled(void)
   static _Atomic int en = -1;
   int v = atomic_load(&en);
   if (v < 0) {
-    v = getenv("ISAC_PDSCH_SOLVER_THREAD_CTX") && atoi(getenv("ISAC_PDSCH_SOLVER_THREAD_CTX")) ? 1 : 0;
+    v = atoi(getenv("ISAC_PDSCH_SOLVER_THREAD_CTX") ?: "1") ? 1 : 0;
     atomic_store(&en, v);
   }
   return v == 1;
@@ -168,7 +168,7 @@ bool nr_pdsch_solver_enabled(void)
 {
   static int en = -1;
   if (en < 0) {
-    const char *e = getenv("ISAC_PDSCH_SOLVER");
+    const char *e = (getenv("ISAC_PDSCH_SOLVER") ?: "1");
     en = (e && atoi(e) != 0) ? 1 : 0;
   }
   return en == 1;
@@ -339,7 +339,7 @@ bool nr_pdsch_solver_reopen_layouts(uint16_t rnti)
   pthread_mutex_lock(&g_mu);
   if (g_layout_recover < 0) {
     const char *e = getenv("ISAC_PDSCH_SOLVER_LAYOUT_RECOVER");
-    g_layout_recover = e ? atoi(e) : 0;
+    g_layout_recover = e ? atoi(e) : 32;
     if (g_layout_recover < 0) g_layout_recover = 0;
   }
   solver_rnti_t *r = slot_of(rnti, false, NULL);
@@ -368,7 +368,7 @@ int nr_pdsch_solver_rep(uint16_t rnti)
 
 bool nr_pdsch_solver_fairshare_on(void)
 {
-  if (g_fairshare < 0) g_fairshare = getenv("ISAC_PDSCH_SOLVER_FAIRSHARE") && atoi(getenv("ISAC_PDSCH_SOLVER_FAIRSHARE")) ? 1 : 0;
+  if (g_fairshare < 0) g_fairshare = atoi(getenv("ISAC_PDSCH_SOLVER_FAIRSHARE") ?: "1") ? 1 : 0;
   return g_fairshare == 1;
 }
 
@@ -377,7 +377,7 @@ bool nr_pdsch_solver_fairshare_on(void)
  *   once "solved" OTA TIM run ab_Tr2_1_094729 on a wrong layout, and that prior and scrambling stayed for the whole run. */
 static bool prior_crc_on(void)
 {
-  if (g_prior_crc < 0) g_prior_crc = getenv("ISAC_PDSCH_SOLVER_PRIOR_CRC") && atoi(getenv("ISAC_PDSCH_SOLVER_PRIOR_CRC")) ? 1 : 0;
+  if (g_prior_crc < 0) g_prior_crc = atoi(getenv("ISAC_PDSCH_SOLVER_PRIOR_CRC") ?: "1") ? 1 : 0;
   return g_prior_crc == 1;
 }
 
@@ -478,7 +478,7 @@ static void try_promote(solver_rnti_t *r)
 #define SIGNIF_ALPHA 1e-3
 static bool signif_on(void)
 {
-  if (g_signif < 0) g_signif = getenv("ISAC_PDSCH_SOLVER_SIGNIF") && atoi(getenv("ISAC_PDSCH_SOLVER_SIGNIF")) ? 1 : 0;
+  if (g_signif < 0) g_signif = atoi(getenv("ISAC_PDSCH_SOLVER_SIGNIF") ?: "1") ? 1 : 0;
   return g_signif == 1;
 }
 /* poisson_tail: P(X >= k), X ~ Poisson(lam); summed upwards (no 1 - small cancellation). */
@@ -522,7 +522,7 @@ static bool tb_crc24(int table, int mcs, int nrb, int S, int l0, int add_pos, in
  * that never decoded went to identity forms or dimensions no solved RNTI of the cell uses. */
 static bool prior_ids_on(void)
 {
-  if (g_prior_ids < 0) g_prior_ids = getenv("ISAC_PDSCH_SOLVER_PRIOR_IDS") && atoi(getenv("ISAC_PDSCH_SOLVER_PRIOR_IDS")) ? 1 : 0;
+  if (g_prior_ids < 0) g_prior_ids = atoi(getenv("ISAC_PDSCH_SOLVER_PRIOR_IDS") ?: "1") ? 1 : 0;
   return g_prior_ids == 1;
 }
 /* scr_form: identity form of a scrambling hypothesis: -1 default ids, 0 data id = DM-RS id, D + 1 data id = D. */
@@ -565,7 +565,7 @@ void nr_pdsch_solver_note_skip(uint16_t rnti, int why)
 {
   if (why < 0 || why >= NR_PDSCH_SOLVER_WHY_CALLER_N) return;
   static int s_why = -1; /* only ISAC_PDSCH_SOLVER_WHY=1 lets a never-planned RNTI take a table entry (flag off = unchanged) */
-  if (s_why < 0) s_why = getenv("ISAC_PDSCH_SOLVER_WHY") && atoi(getenv("ISAC_PDSCH_SOLVER_WHY")) ? 1 : 0;
+  if (s_why < 0) s_why = atoi(getenv("ISAC_PDSCH_SOLVER_WHY") ?: "1") ? 1 : 0;
   pthread_mutex_lock(&g_mu);
   solver_rnti_t *r = slot_of(rnti, s_why == 1, NULL);
   if (r) r->why[why]++;
@@ -622,7 +622,7 @@ void nr_pdsch_solver_set_alt_scr(int key, const uint16_t *ids, int n, bool first
   static _Atomic int s_en = -1;
   int en = atomic_load(&s_en);
   if (en < 0) {
-    en = getenv("ISAC_PDSCH_SOLVER_SCR") && atoi(getenv("ISAC_PDSCH_SOLVER_SCR")) ? 1 : 0;
+    en = atoi(getenv("ISAC_PDSCH_SOLVER_SCR") ?: "1") ? 1 : 0;
     atomic_store(&s_en, en);
   }
   if (!solver_thread_ctx_enabled()) pthread_mutex_lock(&g_mu);
@@ -704,7 +704,7 @@ static uint8_t t_comb; /* T26d combining mode for this grant's variants (0 = def
 static int comb_on(void)
 {
   static int en = -1;
-  if (en < 0) en = getenv("ISAC_RX_MRC_PER_RNTI") ? atoi(getenv("ISAC_RX_MRC_PER_RNTI")) : 0;
+  if (en < 0) en = getenv("ISAC_RX_MRC_PER_RNTI") ? atoi(getenv("ISAC_RX_MRC_PER_RNTI")) : 1;
   return en;
 }
 /* Mode for this grant: unsolved -> alternate 1/3 by grant parity; solved -> the mode with the better CRC rate
@@ -870,7 +870,7 @@ static bool search_pref_skip(solver_rnti_t *r, int mcs)
 static int nl_pref_gap(void)
 {
   if (g_nl_pref_gap < 0)
-    g_nl_pref_gap = getenv("ISAC_PDSCH_SOLVER_NL_PREF") ? atoi(getenv("ISAC_PDSCH_SOLVER_NL_PREF")) : 0;
+    g_nl_pref_gap = getenv("ISAC_PDSCH_SOLVER_NL_PREF") ? atoi(getenv("ISAC_PDSCH_SOLVER_NL_PREF")) : 1;
   return g_nl_pref_gap;
 }
 
@@ -893,7 +893,7 @@ static bool reading_nl_qpsk(const nr_pdsch_solver_reading_t *rd)
 static bool search_backoff(const solver_rnti_t *r)
 {
   static int lim = -1;
-  if (lim < 0) lim = getenv("ISAC_PDSCH_SOLVER_BACKOFF") ? atoi(getenv("ISAC_PDSCH_SOLVER_BACKOFF")) : 0;
+  if (lim < 0) lim = getenv("ISAC_PDSCH_SOLVER_BACKOFF") ? atoi(getenv("ISAC_PDSCH_SOLVER_BACKOFF")) : 200;
   return lim > 0 && !r->has_cand && r->n_probe >= (uint32_t)lim && (r->grants % 8u) != 0;
 }
 
@@ -1129,7 +1129,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     }
     LOG_A(PHY, "SENSING: PDSCH_SOLVER per-rnti%s\n", b);
     static int s_why = -1;
-    if (s_why < 0) s_why = getenv("ISAC_PDSCH_SOLVER_WHY") && atoi(getenv("ISAC_PDSCH_SOLVER_WHY")) ? 1 : 0;
+    if (s_why < 0) s_why = atoi(getenv("ISAC_PDSCH_SOLVER_WHY") ?: "1") ? 1 : 0;
     for (int i = 0; s_why && i < SOLVER_RNTIS; i++) {
       const solver_rnti_t *q = &g_r[i];
       if (!q->used) continue;
@@ -1250,7 +1250,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     /* 2. the cell prior (another RNTI's solution), first. ISAC_PDSCH_SOLVER_REUSE=1: the CURRENT solution of the best
      * solved RNTI (most full TB CRC passes; layouts refined, S map and MCS table learnt since) instead of the snapshot
      * taken at the first solve -- gNBs configure UEs from one RRC template. Still confirmed by this RNTI's own 2 passes. */
-    if (g_reuse < 0) g_reuse = getenv("ISAC_PDSCH_SOLVER_REUSE") && atoi(getenv("ISAC_PDSCH_SOLVER_REUSE")) ? 1 : 0;
+    if (g_reuse < 0) g_reuse = atoi(getenv("ISAC_PDSCH_SOLVER_REUSE") ?: "1") ? 1 : 0;
     const solver_rnti_t *best = NULL;
     const uint32_t min_ok = prior_crc_on() ? 1 : 0;
     if (g_reuse)
@@ -1332,7 +1332,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
        * changes from grant to grant with the TDA index while the true reading is there on every grant */
       static const uint8_t kA[4] = {1, 2, 0, 3};
       if (g_coverage < 0)
-        g_coverage = getenv("ISAC_PDSCH_SOLVER_COVERAGE") && atoi(getenv("ISAC_PDSCH_SOLVER_COVERAGE"));
+        g_coverage = atoi(getenv("ISAC_PDSCH_SOLVER_COVERAGE") ?: "1");
       if (g_coverage) {
         plan_coverage(r, out, &n, budget, slot, rd, order, no, l0, nl_preferred, dci, payload);
       } else if (nl_gap > 0) {
@@ -1552,7 +1552,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
   }
   { /* ISAC_PDSCH_SOLVER_PROBELOG=1 (T26d diagnostic): one line per credited search probe -- which hypothesis was tried */
     static int s_pl = -1;
-    if (s_pl < 0) s_pl = getenv("ISAC_PDSCH_SOLVER_PROBELOG") ? atoi(getenv("ISAC_PDSCH_SOLVER_PROBELOG")) : 0;
+    if (s_pl < 0) s_pl = getenv("ISAC_PDSCH_SOLVER_PROBELOG") ? atoi(getenv("ISAC_PDSCH_SOLVER_PROBELOG")) : 1;
     if (s_pl && p != NULL && credit && p->phase == 0) {
       int lo = 65535, hi = -1;
       for (int i = 0; i < p->n_ids; i++) { if (p->ids[i] < lo) lo = p->ids[i]; if (p->ids[i] > hi) hi = p->ids[i]; }
@@ -1831,7 +1831,7 @@ static int g_tf_n, g_tf_init;
 bool nr_tda_field_on(void)
 {
   static int en = -1;
-  if (en < 0) en = getenv("ISAC_PDSCH_TDA_FIELD") && atoi(getenv("ISAC_PDSCH_TDA_FIELD")) ? 1 : 0;
+  if (en < 0) en = atoi(getenv("ISAC_PDSCH_TDA_FIELD") ?: "1") ? 1 : 0;
   return en == 1;
 }
 static void tf_init_locked(void)

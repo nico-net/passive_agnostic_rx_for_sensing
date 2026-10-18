@@ -83,7 +83,7 @@ void nr_pusch_ul_disc_epoch(uint32_t dedicated_epoch)
 bool nr_pusch_ul_disc_ta_track_on(void)
 {
   const char *e = getenv("ISAC_UL_TA_TRACK"); /* not cached: a few calls per grant, and the unit test toggles it */
-  return e && atoi(e) > 0;
+  return !e || atoi(e) > 0;
 }
 /* cell-level prior for RNTIs never timed: the residual most other accepted residuals agree with (+-64), from the last 16 */
 static bool cell_mode(int *out)

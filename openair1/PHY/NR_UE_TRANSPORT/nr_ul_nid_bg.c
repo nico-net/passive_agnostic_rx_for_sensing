@@ -85,7 +85,7 @@ static long envl(const char *k, long d)
 static void load_env(void)
 {
   const char *e = getenv("ISAC_UL_NID_BG");
-  const int on = e && !strcmp(e, "1");
+  const int on = !e || !strcmp(e, "1");
   g_snr = (float)envl("ISAC_UL_NID_BG_SNR", 6);
   g_qm = (int)envl("ISAC_UL_NID_BG_QM", 2);
   g_min_rb = (int)envl("ISAC_UL_NID_BG_MIN_RB", 16);
@@ -95,7 +95,7 @@ static void load_env(void)
   g_topm = (int)envl("ISAC_UL_NID_BG_TOPM", 12);
   g_addpos_n = envl("ISAC_UL_NID_BG_ADDPOS", 1) ? 3 : 1;
   g_trials = (int)envl("ISAC_UL_NID_BG_TRIALS", 1);
-  g_cpu_pct = (int)envl("ISAC_UL_NID_BG_CPU_PCT", 50);
+  g_cpu_pct = (int)envl("ISAC_UL_NID_BG_CPU_PCT", 10);
   if (g_cpu_pct < 1) g_cpu_pct = 1;
   if (g_cpu_pct > 100) g_cpu_pct = 100;
   g_job_ms = (int)envl("ISAC_UL_NID_BG_JOB_MS", 15000);
@@ -103,11 +103,11 @@ static void load_env(void)
   g_drop = (int)envl("ISAC_UL_NID_BG_DROP", 100);
   g_nlog = (int)envl("ISAC_UL_NID_BG_LOG", 0);
   g_core = (int)envl("ISAC_UL_NID_BG_CORE", -1);
-  g_idle = (int)envl("ISAC_UL_NID_BG_IDLE", 0);
+  g_idle = (int)envl("ISAC_UL_NID_BG_IDLE", 1);
   g_nbwp = (int)envl("ISAC_UL_NID_BG_NBWP", 4);
   g_mcs_max = (int)envl("ISAC_UL_NID_BG_MCS", 4);
   const char *iq = getenv("ISAC_UL_NID_BG_IQ");
-  atomic_store(&g_iq_on, on && iq && !strcmp(iq, "1"));
+  atomic_store(&g_iq_on, on && (!iq || !strcmp(iq, "1")));
   atomic_store(&g_on, on);
   if (on)
     LOG_A(PHY, "SENSING: UL_NID_BG on snr>=%.1f qm<=%d min_rb=%d repeat=%d trials=%d cpu_pct=%d job_ms=%d stageB=%d hyp/job=%d nbwp=%d mcs<=%d\n", g_snr, g_qm,

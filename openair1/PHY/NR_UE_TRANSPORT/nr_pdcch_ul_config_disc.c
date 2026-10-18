@@ -81,8 +81,8 @@ bool nr_pdcch_ul_bank_enabled(void)
   int on = atomic_load_explicit(&enabled, memory_order_relaxed);
   if (on < 0) {
     const char *s = getenv("ISAC_UL_DCI_BANK");
-    const char *chain = getenv("ISAC_UL_PUSCH_CHAIN");
-    const char *solver = getenv("ISAC_UL_PUSCH_SOLVER");
+    const char *chain = (getenv("ISAC_UL_PUSCH_CHAIN") ?: "1");
+    const char *solver = (getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");
     on = (s && strcmp(s, "1") == 0) || (chain && strcmp(chain, "1") == 0) ||
          (solver && strcmp(solver, "1") == 0);
     atomic_store_explicit(&enabled, on, memory_order_relaxed);
@@ -138,8 +138,8 @@ bool nr_pdcch_ul_config_disc_enabled(void)
   int on = atomic_load_explicit(&enabled, memory_order_relaxed);
   if (on < 0) {
     const char *s = getenv("ISAC_UL_CONFIG_DISC");
-    const char *chain = getenv("ISAC_UL_PUSCH_CHAIN");
-    const char *solver = getenv("ISAC_UL_PUSCH_SOLVER");
+    const char *chain = (getenv("ISAC_UL_PUSCH_CHAIN") ?: "1");
+    const char *solver = (getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");
     on = (s && strcmp(s, "1") == 0) || (chain && strcmp(chain, "1") == 0) ||
          (solver && strcmp(solver, "1") == 0);
     atomic_store_explicit(&enabled, on, memory_order_relaxed);
@@ -193,7 +193,7 @@ static void geometry(ue_t *u, const nr_pdcch_blind_ul_opts_t *base,
   };
   static int solver_cached=-1; /* read once (review fix: no per-proposal getenv) */
   if (__atomic_load_n(&solver_cached,__ATOMIC_RELAXED)<0) {
-    const char *solver_flag=getenv("ISAC_UL_PUSCH_SOLVER");
+    const char *solver_flag=(getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");
     __atomic_store_n(&solver_cached,(solver_flag && strcmp(solver_flag,"1")==0)?1:0,__ATOMIC_RELAXED);
   }
   const bool solver=__atomic_load_n(&solver_cached,__ATOMIC_RELAXED)==1;

@@ -38,7 +38,7 @@ static cudaError_t disc_wait() {
  * at the instant refine_kernel ended, 300-400 ms late]. */
 static int copy_fence() {
   static int v=-1;
-  if(v<0){const char *e=getenv("ISAC_GPU_COPY_FENCE");if(!e)e=getenv("ISAC_FATTAILS");v=e && atoi(e)==1;}
+  if(v<0){const char *e=getenv("ISAC_GPU_COPY_FENCE");if(!e)e=(getenv("ISAC_FATTAILS") ?: "1");v=e && atoi(e)==1;}
   return v;
 }
 static cudaError_t disc_copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
@@ -50,7 +50,7 @@ static cudaError_t disc_copy(void *dst,const void *src,size_t n,cudaMemcpyKind k
 static cudaError_t disc_zero(void *dst,int value,size_t n) {return cudaMemsetAsync(dst,value,n,disc_stream());}
 
 /* norm_rbfast: ISAC_CSIRS_DISC_NORM_COALESCE=1 (default off, DECTAIL): coalesced thread order of normalize(). */
-static int norm_rbfast(void) {static int v=-1;if(v<0){const char *e=getenv("ISAC_CSIRS_DISC_NORM_COALESCE");v=e && atoi(e)==1;}return v;}
+static int norm_rbfast(void) {static int v=-1;if(v<0){const char *e=(getenv("ISAC_CSIRS_DISC_NORM_COALESCE") ?: "1");v=e && atoi(e)==1;}return v;}
 /* normalize: GPU kernel: per (slot, RB, symbol) thread, normalises the 12 RE powers against the mean of the lowest third (excluded REs skipped), in the same integer arithmetic as the CPU.
  *   Output x holds 4096 x power / reference (capped at 8192) per RE, and invalid slots are skipped. Launched by footprints(), normalize_host(), accumulate_host() and prepare_host().
  */
@@ -670,7 +670,7 @@ static int prepare_host(int rb,int ant,int capacity,int fft,size_t stride)
 static void lmem_prereserve(void)
 {
   static bool done=false;
-  const char *e=getenv("ISAC_GPU_LMEM_PRERESERVE");
+  const char *e=(getenv("ISAC_GPU_LMEM_PRERESERVE") ?: "1");
   if(done || !e || atoi(e)!=1) return;
   done=true;
   size_t need=0,cur=0;cudaFuncAttributes fa;

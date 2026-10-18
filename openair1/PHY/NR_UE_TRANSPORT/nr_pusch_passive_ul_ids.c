@@ -66,7 +66,7 @@ static bool ids_chain_on(void)
 {
   int on=__atomic_load_n(&g_chain_cached,__ATOMIC_RELAXED);
   if (on<0) {
-    const char *v=getenv("ISAC_UL_PUSCH_CHAIN"), *s=getenv("ISAC_UL_PUSCH_SOLVER");
+    const char *v=(getenv("ISAC_UL_PUSCH_CHAIN") ?: "1"), *s=(getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");
     on=(v && strcmp(v,"1")==0) || (s && strcmp(s,"1")==0);
     __atomic_store_n(&g_chain_cached,on,__ATOMIC_RELAXED);
   }
@@ -78,8 +78,8 @@ bool nr_pusch_passive_ul_ue_state_enabled(void)
   int on=__atomic_load_n(cp,__ATOMIC_RELAXED);
   if (on<0) {
     const char *v=getenv("ISAC_UL_UE_STATE");
-    const char *chain=getenv("ISAC_UL_PUSCH_CHAIN");
-    const char *solver=getenv("ISAC_UL_PUSCH_SOLVER");
+    const char *chain=(getenv("ISAC_UL_PUSCH_CHAIN") ?: "1");
+    const char *solver=(getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");
     on=(chain && strcmp(chain,"1")==0) || (solver && strcmp(solver,"1")==0) ||
        (v && strcmp(v,"1")==0);
     __atomic_store_n(cp,on,__ATOMIC_RELAXED);

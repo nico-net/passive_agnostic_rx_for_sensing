@@ -125,7 +125,7 @@ static bool nr_pdsch_dmrs_scan_on(void)
   static _Atomic int on = -1;
   int v = atomic_load(&on);
   if (v < 0) {
-    v = getenv("ISAC_PDSCH_DMRS_ID_SCAN") && atoi(getenv("ISAC_PDSCH_DMRS_ID_SCAN")) > 0 ? 1 : 0;
+    v = atoi(getenv("ISAC_PDSCH_DMRS_ID_SCAN") ?: "16") > 0 ? 1 : 0;
     atomic_store(&on, v);
   }
   return v == 1;
@@ -136,7 +136,7 @@ static bool dmrs_prio_on(void)
   static _Atomic int on = -1;
   int v = atomic_load(&on);
   if (v < 0) {
-    v = getenv("ISAC_PDSCH_SOLVER_DMRS_PRIO") && atoi(getenv("ISAC_PDSCH_SOLVER_DMRS_PRIO")) ? 1 : 0;
+    v = atoi(getenv("ISAC_PDSCH_SOLVER_DMRS_PRIO") ?: "1") ? 1 : 0;
     atomic_store(&on, v);
   }
   return v == 1;
@@ -182,7 +182,7 @@ static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t
    * score is a function of the CRB list, nSCID, identity and slot only). ISAC_SCAN_SCOREMEMO_CHECK=1 also scores them and counts
    * any difference (diagnostic). */
   static int s_memo = -1, s_memo_chk = -1;
-  if (s_memo < 0) s_memo = getenv("ISAC_SCAN_SCOREMEMO") && atoi(getenv("ISAC_SCAN_SCOREMEMO")) ? 1 : 0;
+  if (s_memo < 0) s_memo = atoi(getenv("ISAC_SCAN_SCOREMEMO") ?: "1") ? 1 : 0;
   if (s_memo_chk < 0) s_memo_chk = getenv("ISAC_SCAN_SCOREMEMO_CHECK") && atoi(getenv("ISAC_SCAN_SCOREMEMO_CHECK")) ? 1 : 0;
   int dk[128], ndk = 0;
   for (int k = 0; k < nrd && k < 128; k++) {
@@ -291,7 +291,7 @@ static bool nr_pdcch_ded_every_slot(void)
 {
   static int en = -1;
   if (en < 0) {
-    const char *e = getenv("ISAC_PDCCH_DED_EVERY_SLOT");
+    const char *e = (getenv("ISAC_PDCCH_DED_EVERY_SLOT") ?: "1");
     en = (e && atoi(e) != 0) ? 1 : 0;
   }
   return en == 1;
@@ -325,7 +325,7 @@ static bool nr_pdcch_c0_occ_gate_on(void)
 {
   static int en = -1;
   if (en < 0) {
-    const char *e = getenv("ISAC_PDCCH_C0_OCC_GATE");
+    const char *e = (getenv("ISAC_PDCCH_C0_OCC_GATE") ?: "1");
     en = (e && atoi(e) != 0) ? 1 : 0;
   }
   return en == 1;
@@ -460,7 +460,7 @@ static double screen_dmrs_min(void)
 static void scan_timing_note(uint64_t ns, bool ded_only)
 {
   static int en = -1;
-  if (en < 0) en = getenv("ISAC_PDCCH_SCAN_TIMING") ? 1 : 0;
+  if (en < 0) en = 1; /* ISAC_PDCCH_SCAN_TIMING presence-only flag, baked on (t26yE) */
   if (!en) return;
   static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
   static uint64_t hist[2][64], n[2], mx[2], over500[2];
@@ -767,7 +767,7 @@ static bool pass_adapt_on(void)
 static bool dwell_own_budget(void)
 {
   static int en = -1;
-  if (en < 0) en = getenv("ISAC_PDCCH_DWELL_OWN_BUDGET") && atoi(getenv("ISAC_PDCCH_DWELL_OWN_BUDGET")) ? 1 : 0;
+  if (en < 0) en = atoi(getenv("ISAC_PDCCH_DWELL_OWN_BUDGET") ?: "1") ? 1 : 0;
   return en == 1;
 }
 /* pass_should_run: decides whether pass kind k (bank, dwell, C0USS, CSS0) runs on this opportunity.
@@ -1209,7 +1209,7 @@ static bool si_rv_any(void)
 {
   static int s_any = -1;
   if (s_any < 0)
-    s_any = getenv("ISAC_SI_RV_ANY") && atoi(getenv("ISAC_SI_RV_ANY")) > 0;
+    s_any = atoi(getenv("ISAC_SI_RV_ANY") ?: "1") > 0;
   return s_any;
 }
 
@@ -1343,12 +1343,12 @@ static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int m
   static uint64_t n_admit, n_throttle, n_full, n_skip_snr, n_explore;
   if (!init) {
     const char *e = getenv("ISAC_PDSCH_SOLVER_PROBE_RATE");
-    rate = e ? atof(e) : 0.0;
+    rate = e ? atof(e) : 0.5;
     e = getenv("ISAC_PDSCH_SOLVER_PROBE_BURST");
-    burst = e ? atof(e) : 8.0;
+    burst = e ? atof(e) : 16.0;
     e = getenv("ISAC_PDSCH_SOLVER_PROBE_FILL");
-    fill = e ? atof(e) : 50.0;
-    e = getenv("ISAC_PDSCH_SNR_GATE");
+    fill = e ? atof(e) : 25.0;
+    e = (getenv("ISAC_PDSCH_SNR_GATE") ?: "1");
     snr_gate = e && atoi(e) != 0;
     e = getenv("ISAC_PDSCH_SNR_GATE_DB");
     margin = e ? atof(e) : 3.0;
@@ -2561,7 +2561,7 @@ static inline int btim_enabled(void)
 {
   int on = atomic_load_explicit(&g_btim_on, memory_order_relaxed);
   if (on < 0) {
-    on = (getenv("ISAC_PDCCH_TIMING") != NULL) ? 1 : 0;
+    on = 1; /* ISAC_PDCCH_TIMING presence-only flag, baked on (t26yE) */
     atomic_store_explicit(&g_btim_on, on, memory_order_relaxed);
   }
   return on;
@@ -2908,7 +2908,7 @@ static bool janon_async_enabled(void)
 {
   static int en = -1;
   if (en < 0) {
-    const char *e = getenv("ISAC_PDCCH_JOINT_ANON_ASYNC");
+    const char *e = (getenv("ISAC_PDCCH_JOINT_ANON_ASYNC") ?: "1");
     en = (e && atoi(e) != 0) ? 1 : 0;
   }
   return en == 1;
@@ -2921,7 +2921,7 @@ static bool janon_stable_enabled(void)
   static _Atomic int en = -1;
   int v = atomic_load(&en);
   if (v < 0) {
-    v = getenv("ISAC_PDCCH_JOINT_ANON_STABLE") && atoi(getenv("ISAC_PDCCH_JOINT_ANON_STABLE")) ? 1 : 0;
+    v = atoi(getenv("ISAC_PDCCH_JOINT_ANON_STABLE") ?: "1") ? 1 : 0;
     atomic_store(&en, v);
   }
   return v == 1;
@@ -3078,12 +3078,12 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
     static _Atomic uint64_t s_skip;
     double rate = atomic_load(&s_rate);
     if (rate < 0.0) {
-      rate = getenv("ISAC_PDCCH_JOINT_ANON_RATE") ? atof(getenv("ISAC_PDCCH_JOINT_ANON_RATE")) : 0.0;
+      rate = atof(getenv("ISAC_PDCCH_JOINT_ANON_RATE") ?: "1");
       atomic_store(&s_rate, rate);
     }
     int discovery = atomic_load(&s_discovery);
     if (discovery < 0) {
-      discovery = getenv("ISAC_PDCCH_JOINT_ANON_DISCOVERY") && atoi(getenv("ISAC_PDCCH_JOINT_ANON_DISCOVERY"));
+      discovery = atoi(getenv("ISAC_PDCCH_JOINT_ANON_DISCOVERY") ?: "1");
       atomic_store(&s_discovery, discovery);
     }
     /* Stable sampling must not stretch an unverified geometry's finite dwell by
@@ -3214,7 +3214,7 @@ static void janon_note_cell_len(int len)
 static bool janon_all_coresets(void)
 {
   static int en = -1;
-  if (en < 0) en = getenv("ISAC_PDCCH_JANON_ALL_CORESETS") && atoi(getenv("ISAC_PDCCH_JANON_ALL_CORESETS")) ? 1 : 0;
+  if (en < 0) en = atoi(getenv("ISAC_PDCCH_JANON_ALL_CORESETS") ?: "1") ? 1 : 0;
   return en == 1;
 }
 /* janon_hit_scorer: scorer of the anonymous length sweep for joint-anon hits: accepts trial i only when it is a hit of the requested length and its RNTI is not already known.
@@ -3258,7 +3258,7 @@ static const uint32_t kUsshA[3] = {39827, 39829, 39839};
 static bool ussh_enabled(void)
 {
   static int en = -1;
-  if (en < 0) en = getenv("ISAC_PDCCH_USS_HASH") && atoi(getenv("ISAC_PDCCH_USS_HASH")) ? 1 : 0;
+  if (en < 0) en = atoi(getenv("ISAC_PDCCH_USS_HASH") ?: "1") ? 1 : 0;
   return en == 1;
 }
 /* ussh_Y: the USS hash state Y_p,n for an RNTI at a slot, for one multiplier A (TS 38.213 10.1, iterated modulo 65537).
@@ -3514,7 +3514,7 @@ static bool nr_pdcch_joint_anon_enabled(void)
 {
   static int en = -1;
   if (en < 0) {
-    const char *e = getenv("ISAC_PDCCH_JOINT_ANON");
+    const char *e = (getenv("ISAC_PDCCH_JOINT_ANON") ?: "1");
     en = (e != NULL && atoi(e) != 0 && nr_pdcch_joint_live_enabled()) ? 1 : 0;
     if (e != NULL && atoi(e) != 0)
       LOG_A(PHY, "SENSING: JOINT_ANON %s (unknown-RNTI joint solve in the anonymous DCI 1_1 length sweep)\n",
@@ -4999,7 +4999,7 @@ static void par_bank_run(const par_bank_job_t *jp)
 static bool bank_handoff_on(void)
 {
   static int en = -1;
-  if (en < 0) en = getenv("ISAC_PDCCH_BANK_HANDOFF") && atoi(getenv("ISAC_PDCCH_BANK_HANDOFF")) ? 1 : 0;
+  if (en < 0) en = atoi(getenv("ISAC_PDCCH_BANK_HANDOFF") ?: "1") ? 1 : 0;
   return en == 1;
 }
 static void par_bank_side(void *arg)
@@ -5219,7 +5219,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     /* ISAC_PDCCH_DED_BUDGET_US (T26b, 0 = off): once the banked passes of a dedicated-only slot have used the budget,
      * the discovered dwell and the CORESET#0 occupancy pass are skipped for this slot (counted in SCANTIME). */
     static int s_dbud = -1;
-    if (s_dbud < 0) s_dbud = getenv("ISAC_PDCCH_DED_BUDGET_US") ? atoi(getenv("ISAC_PDCCH_DED_BUDGET_US")) : 0;
+    if (s_dbud < 0) s_dbud = atoi(getenv("ISAC_PDCCH_DED_BUDGET_US") ?: "300");
     static _Atomic uint64_t s_dbud_skip;
     bool over = s_dbud > 0 && btim_now_ns() - t_scan0 > (uint64_t)s_dbud * 1000ull;
     { /* T26c: the budget must not starve discovery -- replay: 12001 of 12001 dedicated-only slots skipped the dwell, so
@@ -5227,7 +5227,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
        * still runs the dwell + CORESET#0 passes. */
       static int s_share = -1;
       static _Atomic uint32_t s_streak;
-      if (s_share < 0) s_share = getenv("ISAC_PDCCH_DED_BUDGET_SHARE") ? atoi(getenv("ISAC_PDCCH_DED_BUDGET_SHARE")) : 4;
+      if (s_share < 0) s_share = atoi(getenv("ISAC_PDCCH_DED_BUDGET_SHARE") ?: "2");
       if (over && s_share > 0 && (atomic_fetch_add_explicit(&s_streak, 1, memory_order_relaxed) + 1) % (uint32_t)s_share == 0)
         over = false;
     }
@@ -5459,7 +5459,7 @@ static slowpass_guard_t slowpass_enter(void)
   slowpass_guard_t g = {.slot = -1};
   int ms = atomic_load(&g_sp_ms);
   if (ms < 0) {
-    const char *e = getenv("ISAC_SCAN2_SLOWPASS_MS");
+    const char *e = (getenv("ISAC_SCAN2_SLOWPASS_MS") ?: "8");
     ms = e ? atoi(e) : 0;
     atomic_store(&g_sp_ms, ms);
     if (ms > 0) {
@@ -6202,7 +6202,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
     static __thread c16_t *t_fc[NB_ANTENNAS_RX];
     static __thread struct { int frame, slot, symbol, nant, size; double fo; const void *src; bool valid; } t_fk;
     static int s_fc = -1;
-    if (s_fc < 0) s_fc = getenv("ISAC_PDCCH_FEP_CACHE") && atoi(getenv("ISAC_PDCCH_FEP_CACHE")) ? 1 : 0;
+    if (s_fc < 0) s_fc = atoi(getenv("ISAC_PDCCH_FEP_CACHE") ?: "1") ? 1 : 0;
     const double fo_key = nr_slot_fep_fo_override_hz;
     const bool fc_hit = s_fc && t_fk.valid && t_fk.frame == proc->frame_rx && t_fk.slot == proc->nr_slot_rx
                         && t_fk.symbol == symbol && t_fk.nant == fp->nb_antennas_rx && t_fk.size == fp->ofdm_symbol_size
@@ -6960,7 +6960,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         if (janon_async) {
           int jl[4], njl = 0; /* T26c LEN_HINT: the DCI lengths already locked on this CORESET */
           static int s_lh = -1;
-          if (s_lh < 0) s_lh = getenv("ISAC_PDCCH_JOINT_ANON_LEN_HINT") && atoi(getenv("ISAC_PDCCH_JOINT_ANON_LEN_HINT")) ? 1 : 0;
+          if (s_lh < 0) s_lh = atoi(getenv("ISAC_PDCCH_JOINT_ANON_LEN_HINT") ?: "1") ? 1 : 0;
           int janon_suspect = 0; /* reconfiguration suspected on this CORESET: discovery must not be throttled */
           for (int i = 0; reconf_lengths_enabled() && dl_bank && i < NR_PDCCH_LENGTH_CONTEXTS; ++i)
             janon_suspect |= dl_bank->ue[i].rnti && dl_bank->ue[i].len_state == NR_LEN_SUSPECT;
@@ -7618,7 +7618,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       static int s_cfar = -1;
       static double s_cfar_z = 3.09; /* Q(3.09) = 1e-3: the same level as the known-RNTI prescreen */
       if (s_cfar < 0) {
-        s_cfar = getenv("ISAC_PDCCH_GATE_CFAR") && atoi(getenv("ISAC_PDCCH_GATE_CFAR")) ? 1 : 0;
+        s_cfar = atoi(getenv("ISAC_PDCCH_GATE_CFAR") ?: "1") ? 1 : 0;
         if (getenv("ISAC_PDCCH_GATE_CFAR_Z") && atof(getenv("ISAC_PDCCH_GATE_CFAR_Z")) > 0) s_cfar_z = atof(getenv("ISAC_PDCCH_GATE_CFAR_Z"));
       }
       if (s_cfar && cfg->energy_adapt_factor > 0.0f) {
@@ -7653,7 +7653,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         static int s_kps = -1;
         static double s_kmin = 0.66;
         if (s_kps < 0) {
-          s_kps = getenv("ISAC_PDCCH_KNOWN_PRESCREEN") && atoi(getenv("ISAC_PDCCH_KNOWN_PRESCREEN")) ? 1 : 0;
+          s_kps = atoi(getenv("ISAC_PDCCH_KNOWN_PRESCREEN") ?: "1") ? 1 : 0;
           const char *e = getenv("ISAC_PDCCH_KNOWN_PRESCREEN_MIN"); /* amplitude-consistency score; noise mean 2/pi = 0.637 */
           if (e && atof(e) > 0) s_kmin = atof(e);
         }
@@ -8834,7 +8834,7 @@ constdiag_done:;
            * fields: abs = source absolute slot, fs = frame.slot of the DCI, fmt 0_1|0_0, k2 (slots), rb = absolute
            * start+length, mcs/ndi/rv/pid as decoded, tda = TDRA row index. Widths/IDs are the receiver's own reading. */
           static int s_ulq = -1;
-          if (s_ulq < 0) s_ulq = getenv("ISAC_UL_DCI_LOG") && atoi(getenv("ISAC_UL_DCI_LOG")) ? 1 : 0;
+          if (s_ulq < 0) s_ulq = getenv("ISAC_UL_DCI_LOG") ? (atoi(getenv("ISAC_UL_DCI_LOG")) ? 1 : 0) : 1;
           if (s_ulq)
             LOG_A(PHY, "SENSING: ULDCI rnti=0x%04x abs=%ld fs=%d.%d fmt=%s len=%u k2=%u rb=%u+%u mcs=%u ndi=%u rv=%u pid=%u tda=%u\n",
                   u->rnti, source_absolute_slot, cand_task[ti].frame, cand_task[ti].slot,
@@ -9379,7 +9379,7 @@ constdiag_done:;
       /* BLINDFIX F7 (ISAC_MCS_TABLE_EVID=1): the table the cell's CRC passes support overrides the config value */
       static int s_ev = -1;
       if (s_ev < 0)
-        s_ev = getenv("ISAC_MCS_TABLE_EVID") && atoi(getenv("ISAC_MCS_TABLE_EVID")) ? 1 : 0;
+        s_ev = atoi(getenv("ISAC_MCS_TABLE_EVID") ?: "1") ? 1 : 0;
       const int ev = s_ev ? nr_pdsch_passive_mcs_table_evidence() : -1;
       if (ev >= 0) {
         if (!is_dci10) grant_mcs_table = (uint8_t)ev;
@@ -9846,7 +9846,7 @@ constdiag_done:;
           if (R->alive[i] && R->off[i].fdra_mode < 8) live_fdra |= 1u << R->off[i].fdra_mode;
       static _Thread_local int s_dmrs_domain = -1;
       if (s_dmrs_domain < 0)
-        s_dmrs_domain = getenv("ISAC_PDSCH_SOLVER_DMRS_DOMAIN") && atoi(getenv("ISAC_PDSCH_SOLVER_DMRS_DOMAIN"));
+        s_dmrs_domain = atoi(getenv("ISAC_PDSCH_SOLVER_DMRS_DOMAIN") ?: "1");
       /* Layouts whose READ fields sit at the same offsets read the same: parse one per offset key, not one per layout
        * (1534 live -> a few dozen parses; the per-layout parse was ~2 ms per C-RNTI DCI on the scan path). */
       enum { KEYS = 256 };
@@ -9858,7 +9858,7 @@ constdiag_done:;
       nr_keyhash_t khash;
       if (kfast) nr_keyhash_init(&khash);
       static int s_rfast = -1; /* ISAC_SCAN_READING_HASH=1: hashed reading dedupe (bit-exact), default off */
-      if (s_rfast < 0) s_rfast = getenv("ISAC_SCAN_READING_HASH") && atoi(getenv("ISAC_SCAN_READING_HASH")) ? 1 : 0;
+      if (s_rfast < 0) s_rfast = atoi(getenv("ISAC_SCAN_READING_HASH") ?: "1") ? 1 : 0;
       const bool rfast = s_rfast;
       nr_dci11_reading_idx_t ridx;
       if (rfast) nr_dci11_reading_idx_init(&ridx);
@@ -9965,7 +9965,7 @@ lc_regroup:
          * Readings, their ids and the refinement probes are untouched (unlike ISAC_PDSCH_READING_RV, which splits readings and starves the
          * refinement budget: the Vodafone 20261008 replay lost every MCS > 0 TB). */
         static int s_repf = -1;
-        if (s_repf < 0) s_repf = getenv("ISAC_PDSCH_REP_FIELDS") && atoi(getenv("ISAC_PDSCH_REP_FIELDS")) ? 1 : 0;
+        if (s_repf < 0) s_repf = atoi(getenv("ISAC_PDSCH_REP_FIELDS") ?: "1") ? 1 : 0;
         if (s_repf && rep >= 0 && rep < nh && s_gid[rep] != 0xff) {
           nr_pdcch_blind_result_t rp;
           const int g = s_gid[rep];
@@ -10014,7 +10014,7 @@ lc_regroup:
       static int s_budget = -1;
       if (s_budget < 0) {
         const char *e = getenv("ISAC_PDSCH_SOLVER_BUDGET");
-        s_budget = (e && atoi(e) > 0) ? atoi(e) : 8;
+        s_budget = (e && atoi(e) > 0) ? atoi(e) : 24;
       }
       {
         static int s_diag = -1;
@@ -10081,7 +10081,7 @@ lc_regroup:
         static int s_cs = -1;
         static uint16_t s_ids[8];
         static int s_n;
-        if (s_cs < 0) s_cs = getenv("ISAC_PDSCH_SOLVER_SCR_CSIRS") && atoi(getenv("ISAC_PDSCH_SOLVER_SCR_CSIRS")) ? 1 : 0;
+        if (s_cs < 0) s_cs = atoi(getenv("ISAC_PDSCH_SOLVER_SCR_CSIRS") ?: "1") ? 1 : 0;
         for (int k = 0; s_cs && k < sv_nrm; k++) {
           if (sv_rm[k].csi_type == 2 || sv_rm[k].scramb_id == fp->Nid_cell) continue;
           bool dup = false;
@@ -10226,7 +10226,7 @@ lc_regroup:
          * and unconfirmed layout probes, and can latch a different identity forever. */
         static _Thread_local int s_scr_explicit = -1;
         if (s_scr_explicit < 0)
-          s_scr_explicit = getenv("ISAC_PDSCH_SOLVER_SCR_EXPLICIT") && atoi(getenv("ISAC_PDSCH_SOLVER_SCR_EXPLICIT"));
+          s_scr_explicit = atoi(getenv("ISAC_PDSCH_SOLVER_SCR_EXPLICIT") ?: "1");
         if (s_scr_explicit)
           dl.dlDmrsScramblingId = dl.dlDataScramblingId = fp->Nid_cell;
         if (var[v].scr >= 0) { /* T26c: CRC-selected per-RNTI hypothesis -- a run-time discovered nID */
@@ -11195,7 +11195,7 @@ static void isac_segv_bt(int sig, siginfo_t *si, void *uc)
  */
 __attribute__((constructor)) static void isac_segv_bt_install(void)
 {
-  if (!getenv("ISAC_SEGV_BT")) return;
+  /* ISAC_SEGV_BT presence-only flag, baked on (t26yE) */
   void *fr[2];
   (void)backtrace(fr, 2); /* load libgcc before any fault */
   static char alt[65536];

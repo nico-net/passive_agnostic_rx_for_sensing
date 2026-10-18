@@ -220,7 +220,7 @@ const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
  */
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void)
 {
-  const char *enabled = getenv("ISAC_CSIRS_DISC");
+  const char *enabled = (getenv("ISAC_CSIRS_DISC") ?: "1");
   const char *backend = getenv("ISAC_CSIRS_DISC_BACKEND");
   if (!enabled || strcmp(enabled, "1") || (backend && !strcmp(backend, "cpu")))
     return NULL;

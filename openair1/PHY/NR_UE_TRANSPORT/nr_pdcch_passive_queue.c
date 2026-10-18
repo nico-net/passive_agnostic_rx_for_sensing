@@ -106,7 +106,7 @@ static int scanq_fresh(void)
 {
   static int v = -1;
   if (v < 0) {
-    const char *e = getenv("ISAC_SCANQ_FRESH");
+    const char *e = (getenv("ISAC_SCANQ_FRESH") ?: "6");
     v = e ? atoi(e) : 0;
     if (v < 0) v = 0;
   }

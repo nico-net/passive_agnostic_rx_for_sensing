@@ -1351,7 +1351,7 @@ void nr_ue_csi_rs_sensing_capture_shifted(PHY_VARS_NR_UE *ue,
   }
   static int csirs_timing = -1;
   if (csirs_timing < 0) {
-    const char *e = getenv("ISAC_PDCCH_TIMING");
+    const char *e = (getenv("ISAC_PDCCH_TIMING") ?: "1");
     csirs_timing = e && atoi(e) != 0;
   }
   struct timespec cfr_start = {0};

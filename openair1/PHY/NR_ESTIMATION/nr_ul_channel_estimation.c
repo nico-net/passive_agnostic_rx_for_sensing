@@ -64,7 +64,7 @@ static __thread struct { delay_t d; int nl, k0, rb, ns; bool ok; } t_dly1[16];
 static bool nr_ul_delay_once_on(void)
 {
   static int on = -1;
-  if (on < 0) on = getenv("ISAC_UL_DELAY_ONCE") && atoi(getenv("ISAC_UL_DELAY_ONCE")) > 0;
+  if (on < 0) on = !getenv("ISAC_UL_DELAY_ONCE") || atoi(getenv("ISAC_UL_DELAY_ONCE")) > 0;
   return on;
 }
 static void ul_passive_delay(const puschAntennaProc_t *rdata, int antenna, const c16_t *ls, c16_t *time, delay_t *delay)

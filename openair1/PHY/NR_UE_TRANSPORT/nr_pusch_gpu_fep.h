@@ -28,7 +28,7 @@ static inline const nr_pusch_gpu_fep_api_t *nr_pusch_gpu_fep_load(void)
   if (tried) return api.run ? &api : NULL;
   tried = 1;
   const char *e = getenv("ISAC_UL_GPU_FEP");
-  if (!e || atoi(e) != 1) return NULL;
+  if (e && atoi(e) != 1) return NULL;
   void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!h) h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!h) return NULL;

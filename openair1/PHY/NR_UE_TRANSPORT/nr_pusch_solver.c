@@ -15,7 +15,7 @@
 static _Atomic uint32_t refill_slots = UL_SOLVER_REFILL_SLOTS;
 void nr_pusch_solver_set_mu(int mu)
 {
-  const char *e = getenv("ISAC_SLOT_SCALE");
+  const char *e = (getenv("ISAC_SLOT_SCALE") ?: "1");
   if (e && atoi(e) == 1 && mu >= 0 && mu <= 4)
     atomic_store_explicit(&refill_slots, 20u << mu, memory_order_relaxed);
 }
@@ -56,7 +56,7 @@ bool nr_pusch_solver_enabled(void)
 {
   static int enabled = -1;
   if (enabled < 0) {
-    const char *v = getenv("ISAC_UL_PUSCH_SOLVER");
+    const char *v = (getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");
     enabled = v && !strcmp(v, "1");
   }
   return enabled == 1;

@@ -67,8 +67,8 @@ static inline bool nr_gpu_green_stream_impl(cudaStream_t *s, int priority, bool 
   static CUresult (*stream_create)(CUstream *, CUgreenCtx, unsigned, int);
   if (state < 0) {
     const char *e = getenv("ISAC_GPU_DISC_SMS"), *r = getenv("ISAC_GPU_RT_ISOLATE");
-    sms = e ? atoi(e) : 0;
-    isolate = r && atoi(r) == 1;
+    sms = e ? atoi(e) : 8;
+    isolate = !r || atoi(r) == 1;
     state = 0;
     if (sms <= 0) return false;
     void *f[6] = {};

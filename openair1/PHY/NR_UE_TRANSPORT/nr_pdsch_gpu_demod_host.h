@@ -71,7 +71,7 @@ static inline int nr_fattails_on(const char *name)
 {
   const char *e = getenv(name);
   if (!e)
-    e = getenv("ISAC_FATTAILS");
+    e = (getenv("ISAC_FATTAILS") ?: "1");
   return e ? atoi(e) : 0;
 }
 int nr_fattails_pin_all(void); /* ISAC_GPU_PIN_ALL (umbrella): pin and pre-populate every GPU-read host buffer */

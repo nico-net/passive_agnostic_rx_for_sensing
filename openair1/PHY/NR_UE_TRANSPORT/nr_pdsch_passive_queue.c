@@ -159,7 +159,7 @@ uint64_t nr_passive_slot_arrival_ns(long abs_slot)
 int nr_passive_e2e_trace(void)
 {
   static _Atomic int s = -1;
-  if (s < 0) s = getenv("ISAC_E2E_TRACE") && atoi(getenv("ISAC_E2E_TRACE")) ? 1 : 0;
+  if (s < 0) s = atoi(getenv("ISAC_E2E_TRACE") ?: "1") ? 1 : 0;
   return s;
 }
 /* release_solver: drops a queued decode variant without decoding it: returns its pending solver entry with no credit, at once.
@@ -441,7 +441,7 @@ static int dmrs_scan_rate(void)
   int v = atomic_load(&r);
   if (v < 0) {
     const char *e = getenv("ISAC_PDSCH_DMRS_ID_SCAN");
-    v = e ? atoi(e) : 0;
+    v = e ? atoi(e) : 16;
     if (v == 1) v = 8;
     if (v < 0) v = 0;
     atomic_store(&r, v);
@@ -485,7 +485,7 @@ static bool dmrs_scan_async(void)
 {
   static _Atomic int v = -1;
   int r = atomic_load(&v);
-  if (r < 0) { const char *e = getenv("ISAC_PDSCH_DMRS_SCAN_ASYNC"); r = e && atoi(e) != 0; atomic_store(&v, r); }
+  if (r < 0) { const char *e = (getenv("ISAC_PDSCH_DMRS_SCAN_ASYNC") ?: "1"); r = e && atoi(e) != 0; atomic_store(&v, r); }
   return r;
 }
 /* dmrs_scan_run: the scan itself (cache fill, votes, log); rx = the DM-RS symbol per antenna. */
@@ -640,7 +640,7 @@ static int coreset_dmrs_refresh(void)
   static _Thread_local int n = -1;
   if (n < 0) {
     const char *e = getenv("ISAC_PDSCH_DMRS_ID_REFRESH");
-    n = e ? atoi(e) : 0;
+    n = e ? atoi(e) : 64;
     if (n < 0) n = 0;
   }
   return n;
@@ -651,7 +651,7 @@ static int coreset_dmrs_refresh(void)
 static bool per_coreset_dmrs_on(void)
 {
   static int en = -1;
-  if (en < 0) en = getenv("ISAC_PDSCH_DMRS_ID_PER_CORESET") && atoi(getenv("ISAC_PDSCH_DMRS_ID_PER_CORESET")) ? 1 : 0;
+  if (en < 0) en = atoi(getenv("ISAC_PDSCH_DMRS_ID_PER_CORESET") ?: "1") ? 1 : 0;
   return en == 1;
 }
 /* coreset_dmrs_slot: finds or allocates the DM-RS identity estimator of one CORESET key (8 slots, under g_cs_dmrs_mu) and initialises it with the PCI.
@@ -1477,7 +1477,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
   const char *slot_timing_env = getenv("ISAC_PDSCH_SLOT_TIMING");
   const bool slot_timing = slot_timing_env && atoi(slot_timing_env) != 0;
   {
-    const char *e = getenv("ISAC_PDSCH_INLINE_POOL");
+    const char *e = (getenv("ISAC_PDSCH_INLINE_POOL") ?: "1");
     nr_passive_tpool_inline = e && atoi(e) != 0;
     if (nr_passive_tpool_inline)
       LOG_A(PHY, "SENSING: passive PDSCH consumer %d runs FEP/chest/LDPC tasks inline (ISAC_PDSCH_INLINE_POOL)\n", idx);
@@ -2008,7 +2008,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     void nr_pdsch_passive_decode_slow_stats(unsigned *bodies, uint64_t *body_ns, uint64_t *stage_ns);
     static int s_decslow = -1;
     if (s_decslow < 0)
-      s_decslow = getenv("ISAC_PDTIM_CLASS") && atoi(getenv("ISAC_PDTIM_CLASS")) ? 1 : 0;
+      s_decslow = atoi(getenv("ISAC_PDTIM_CLASS") ?: "1") ? 1 : 0;
     struct rusage ds_ru0 = {0};
     struct timespec ds_c0 = {0};
     const int ds_cpu0 = s_decslow ? sched_getcpu() : -1;
@@ -2204,7 +2204,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         recov_hold = true;
       }
     }
-    if (dec.evm_valid && (!job.layout_probe || getenv("ISAC_PDSCH_EVM_PROBES"))
+    if (dec.evm_valid && (!job.layout_probe || (getenv("ISAC_PDSCH_EVM_PROBES") ?: "1"))
         && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
       /* ISAC_PDSCH_EVM_GRANT (T26c): one line per full decode, decoded AND failed. snr = -20 log10(evm). */
       /* SYSAN ISAC_E2E_TRACE=1: e2e=arr2enq,qwait,pre,dec,first_body,bodies,tot,lag (us; lag = producer slots ahead at done):
@@ -2258,7 +2258,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       /* A CRC pass is evidence even on IQ that expired meanwhile (overwritten samples cannot pass a CRC but by the
        * same chance any wrong hypothesis can); a FAILURE on expired IQ says nothing and is not credited. */
       const bool sv_ok = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
-      if (getenv("ISAC_PDSCH_SOLVER_PROBELOG") && atoi(getenv("ISAC_PDSCH_SOLVER_PROBELOG")))
+      if (atoi(getenv("ISAC_PDSCH_SOLVER_PROBELOG") ?: "1"))
         LOG_A(PHY, "SENSING: PDSCH_SOLVER identity tok=%u rnti=0x%04x key=%d abs=%ld dmrs=%u data=%u nscid=%u crc=%d probe=%d\n",
               job.solver_token, job.rnti, job.coreset_key, (long)job.absolute_slot,
               job.dlsch_pdu.dlDmrsScramblingId, job.dlsch_pdu.dlDataScramblingId,
@@ -2806,7 +2806,7 @@ void nr_pdsch_passive_gpu_warmup(PHY_VARS_NR_UE *ue)
     nr_gpu_pass_warmup(ue); /* GPUPASS: ISAC_GPU_PASS=1, default off */
   else if (!atomic_load(&g_gpu_disabled))
     g_gpu = nr_gpu_fep_prepare();
-  { const char *e = getenv("ISAC_GPU_SELFCHECK"); g_gpu_chk_limit = e ? atoi(e) : 32; }
+  { const char *e = getenv("ISAC_GPU_SELFCHECK"); g_gpu_chk_limit = e ? atoi(e) : 0; }
   { const char *e = getenv("ISAC_GPU_SELFCHECK_ENFORCE"); g_gpu_chk_enforce = e && !strcmp(e, "1"); }
   if (g_gpu) {
     void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_NOLOAD);
@@ -2834,7 +2834,7 @@ void nr_pdsch_passive_gpu_warmup(PHY_VARS_NR_UE *ue)
          * only pins the receive thread to core 2, so 3 is otherwise unused by any pinned thread here. */
         static int s_gpu_worker_core = -2;
         if (s_gpu_worker_core == -2) {
-          const char *e = getenv("ISAC_GPU_WORKER_CORE");
+          const char *e = nr_env_core("ISAC_GPU_WORKER_CORE");
           s_gpu_worker_core = e ? atoi(e) : 3;
         }
         threadCreate(&g_gpu_worker_thread, gpu_fep_worker_thread, NULL, "gpuFepWorker", s_gpu_worker_core, 40);
@@ -2913,7 +2913,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   g_count    = 0;
   atomic_store(&g_real_n, 0);
   g_nthreads = n_consumers;
-  g_spread = getenv("ISAC_PDSCH_SLOT_SPREAD") && atoi(getenv("ISAC_PDSCH_SLOT_SPREAD")) != 0;
+  g_spread = atoi(getenv("ISAC_PDSCH_SLOT_SPREAD") ?: "1") != 0;
   g_idle = 0;
   atomic_store_explicit(&g_stop, 0, memory_order_relaxed);
   atomic_store_explicit(&g_running, 1, memory_order_release);
@@ -2929,7 +2929,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
      * the X410 host) held NAPI off until they blocked. One core each from base_core; <0 unpinned. */
     int core = nr_core_plan_cpu(NR_CP_PDSCH, i, (affinity >= 0) ? (affinity + i) : -1);
     { /* ISAC_PDSCH_CORES="6,7,8,9,15,16" (T26c): explicit, non-contiguous consumer cores (GB10 big cores are 5-9,15-19) */
-      const char *cl = getenv("ISAC_PDSCH_CORES");
+      const char *cl = nr_env_core("ISAC_PDSCH_CORES");
       for (int k = 0; cl && *cl; k++) {
         char *end;
         const long c = strtol(cl, &end, 10);
@@ -3101,7 +3101,7 @@ static _Atomic uint64_t g_dropped_probe; /* ISAC_PDSCHQ_PROBE_LAST: probes refus
 static bool probe_last_enabled(void)
 {
   static int en = -1;
-  if (en < 0) en = getenv("ISAC_PDSCHQ_PROBE_LAST") && atoi(getenv("ISAC_PDSCHQ_PROBE_LAST")) ? 1 : 0;
+  if (en < 0) en = atoi(getenv("ISAC_PDSCHQ_PROBE_LAST") ?: "1") ? 1 : 0;
   return en == 1;
 }
 
@@ -3229,7 +3229,7 @@ void nr_pdsch_passive_queue_p99_dump(void)
   }
   static int on = -1;
   if (on < 0)
-    on = getenv("ISAC_PDTIM_CLASS") && atoi(getenv("ISAC_PDTIM_CLASS")) ? 1 : 0;
+    on = atoi(getenv("ISAC_PDTIM_CLASS") ?: "1") ? 1 : 0;
   if (!on)
     return;
   uint64_t sc[NR_PASSIVE_LAG_BINS], fresh = 0, chains = 0, yields = 0, gated = 0;

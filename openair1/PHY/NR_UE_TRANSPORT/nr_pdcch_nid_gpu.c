@@ -54,7 +54,7 @@ static struct {
 bool nr_pdcch_nid_gpu_enabled(void)
 {
  const char *e=getenv("ISAC_PDCCH_NID_GPU");
- return e && strcmp(e,"1")==0;
+ return !e || strcmp(e,"1")==0;
 }
 bool nr_pdcch_nid_gpu_running(void) {return atomic_load_explicit(&g.running,memory_order_acquire);}
 /* env_int: reads an integer environment variable, returning def when unset, empty, non-numeric or outside [lo, hi].
@@ -281,7 +281,7 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  if(g.device)return nr_pdcch_nid_gpu_running()?0:-1;
  if(max_rb<6 || max_rb>275)return -1;
  g.rb=max_rb;
- const char *duty=getenv("ISAC_PDCCH_NID_GPU_DUTY");
+ const char *duty=(getenv("ISAC_PDCCH_NID_GPU_DUTY") ?: "1");
  g.duty_enabled=duty && !strcmp(duty,"1");
  {const char *sv=getenv("ISAC_DMRS_NID_SOLVE");g.primary=sv && !strcmp(sv,"3");}
  if(g.primary) {
@@ -293,7 +293,7 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  g.acquire_ms=env_int("ISAC_PDCCH_NID_GPU_ACQUIRE_MS",5000,1,60000);
  g.maintain_ms=env_int("ISAC_PDCCH_NID_GPU_MAINTAIN_MS",500,1,60000);
  {const char *nd=getenv("ISAC_PDCCH_NID_GPU_NODROP");g.nodrop=nd && !strcmp(nd,"1");}
- g.recheck_ms=env_int("ISAC_PDCCH_NID_GPU_RECHECK_MS",10000,1,600000);
+ g.recheck_ms=env_int("ISAC_PDCCH_NID_GPU_RECHECK_MS",250,1,600000);
  const char *duration=getenv("ISAC_COREMAP_IDSWEEP_DUR");
  g.dur=duration?atoi(duration):3;
  if(g.dur<1)g.dur=1;
@@ -329,7 +329,7 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  rc|=pthread_attr_setschedparam(&attr,&sp);
  cpu_set_t allowed,pin;CPU_ZERO(&allowed);CPU_ZERO(&pin);
  if(sched_getaffinity(0,sizeof(allowed),&allowed)!=0)rc=-1;
- int core=env_int("ISAC_PDCCH_NID_GPU_CORE",-1,0,CPU_SETSIZE-1);
+ int core=env_int("ISAC_PDCCH_NID_GPU_CORE",13,0,CPU_SETSIZE-1);
  if(core<0)for(int j=CPU_SETSIZE-1;j>=0;j--)if(CPU_ISSET(j,&allowed)){core=j;break;}
  if(core<0 || !CPU_ISSET(core,&allowed))rc=-1;
  else {CPU_SET(core,&pin);rc|=pthread_attr_setaffinity_np(&attr,sizeof(pin),&pin);}

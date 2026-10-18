@@ -43,7 +43,7 @@ int nr_ul_bgdisc_enabled(void)
   static int v = -1;
   if (v < 0) {
     const char *e = getenv("ISAC_UL_BGDISC");
-    v = e && !strcmp(e, "1");
+    v = !e || !strcmp(e, "1");
   }
   return v;
 }

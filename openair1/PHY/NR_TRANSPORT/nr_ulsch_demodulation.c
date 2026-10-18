@@ -277,7 +277,7 @@ static int nr_pusch_mmse_mode(void)
   static int mode = -1;
   if (mode < 0) {
     const char *v = getenv("ISAC_PUSCH_MMSE_MODE");
-    mode = v ? atoi(v) : 0;
+    mode = v ? atoi(v) : 2;
   }
   return mode;
 }

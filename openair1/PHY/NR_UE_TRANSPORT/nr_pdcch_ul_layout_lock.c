@@ -23,6 +23,7 @@
 #define CDM_MIN 3
 #define PENDING_MAX 24
 static bool env_on(const char *name);
+static bool env_ond(const char *name, bool d);
 
 /* ------------------------------------------------------------------ pure helpers */
 int nr_ul_layout_riv_bits(int n)
@@ -104,7 +105,7 @@ int nr_ul_layout_fit_mcs(const nr_ul_layout_dci_t *b, int n, uint16_t len, float
   }
   if (score) *score = best;
   if (second) *second = sec;
-  if (env_on("ISAC_UL_LOCK_MCS_STAT")) {
+  if (env_ond("ISAC_UL_LOCK_MCS_STAT", true)) {
     if (bo < 0 || best_pairs < 8) return -1;
     const double a = 1e-3 / (double)(nofs > 0 ? nofs : 1);
     if (!(nbs_binom_sf((uint64_t)best_ok, (uint64_t)best_pairs, 3.0 / 16.0) < a && nbs_binom_sf((uint64_t)best_rv, (uint64_t)n, 0.25) < a))
@@ -172,7 +173,7 @@ int nr_ul_layout_fit_prefix(const nr_ul_layout_dci_t *b, int n, uint16_t len, in
    * NR_UL_PREFIX_ENT_MARGIN bits above the best. Measured on TIM PCI 923 / Vodafone PCI 415 (replay + OTA 10-14): the
    * order used to be RIV width ascending, so {riv=14, tda=4} (N <= 162: 107@x, 162@x, 178@39 locks) beat the true
    * {riv=15, tda=3}; those false widths also seeded the BWP hypotheses that win the thin-evidence votes. */
-  if (cnt > 1 && env_on("ISAC_UL_PREFIX_ENT")) {
+  if (cnt > 1 && env_ond("ISAC_UL_PREFIX_ENT", true)) {
     for (int i = 1; i < cnt; i++)
       for (int j = i; j > 0 && (out[j].ent < out[j - 1].ent - 0.05f
                                 || (out[j].ent <= out[j - 1].ent + 0.05f && out[j].riv > out[j - 1].riv)); j--) {
@@ -384,10 +385,14 @@ static int pre_for_hyp(const len_state_t *ls, int h);
 
 #define RELOCK_FAILS 8    /* consecutive CRC failures of a locked layout before alternatives are tried again */
 #define TRIAL_MCS_MAX 10  /* trials only on robust (small-MCS) grants */
-static bool env_on(const char *name)
+static bool env_ond(const char *name, bool d)
 {
   const char *s = getenv(name);
-  return s && !strcmp(s, "1");
+  return s ? !strcmp(s, "1") : d;
+}
+static bool env_on(const char *name)
+{
+  return env_ond(name, false);
 }
 /* ISAC_UL_LOCK_SPRT state (caller holds mu). X[h] of one PUSCH slot = sum over that slot probes of clip(zn_h). */
 #define SPRT_ALPHA 1e-3      /* P(lock | no DM-RS at any hypothesis) <= this: derivation in ULLOCKSPEED-20261012.md */
@@ -422,12 +427,12 @@ static bool sprt_base_term(void) { return env_on("ISAC_UL_LOCK_SPRT") || !(env_o
 static struct { long target; int n; uint16_t rnti[EG_GRANTS]; uint16_t r0[EG_GRANTS][NR_UL_LAYOUT_MAX_HYP], r1[EG_GRANTS][NR_UL_LAYOUT_MAX_HYP]; } g_eg[EG_SLOTS];
 static uint32_t g_edge_used, g_edge_excl;
 /* ISAC_UL_BWP_SEED=1 also makes the configured / SIB1 UL BWP a hypothesis (hypothesis 0, first in the CRC trials) */
-static bool bwp_seed_on(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_BWP_SEED"); }
+static bool bwp_seed_on(void) { return nr_ul_layout_lock_enabled() && env_ond("ISAC_UL_BWP_SEED", true); }
 bool nr_ul_layout_bwp_seed_enabled(void) { return bwp_seed_on(); }
-bool nr_ul_layout_dl_prior_enabled(void) { return bwp_seed_on() && env_on("ISAC_UL_BWP_DL_PRIOR"); }
-bool nr_ul_layout_sib1_first_enabled(void) { return nr_ul_layout_lock_enabled() && (env_on("ISAC_UL_LOCK_SIB1_FIRST") || env_on("ISAC_UL_BWP_SEED")); }
-bool nr_ul_layout_crc_guard_enabled(void) { return nr_ul_layout_crc_first_enabled() && env_on("ISAC_UL_LOCK_CRC_GUARD"); }
-bool nr_ul_layout_crc_first_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_CRC_FIRST"); }
+bool nr_ul_layout_dl_prior_enabled(void) { return bwp_seed_on() && env_ond("ISAC_UL_BWP_DL_PRIOR", true); }
+bool nr_ul_layout_sib1_first_enabled(void) { return nr_ul_layout_lock_enabled() && (env_ond("ISAC_UL_LOCK_SIB1_FIRST", true) || env_ond("ISAC_UL_BWP_SEED", true)); }
+bool nr_ul_layout_crc_guard_enabled(void) { return nr_ul_layout_crc_first_enabled() && env_ond("ISAC_UL_LOCK_CRC_GUARD", true); }
+bool nr_ul_layout_crc_first_enabled(void) { return nr_ul_layout_lock_enabled() && env_ond("ISAC_UL_LOCK_CRC_FIRST", true); }
 
 bool nr_ul_layout_lock_enabled(void)
 {
@@ -435,7 +440,7 @@ bool nr_ul_layout_lock_enabled(void)
   int v = atomic_load_explicit(&on, memory_order_relaxed);
   if (v < 0) {
     const char *s = getenv("ISAC_UL_LAYOUT_LOCK");
-    v = (s && !strcmp(s, "1")) ? 1 : 0;
+    v = !s || !strcmp(s, "1") ? 1 : 0; /* baked t26yE default on */
     atomic_store_explicit(&on, v, memory_order_relaxed);
   }
   return v == 1;
@@ -539,7 +544,7 @@ bool nr_ul_layout_enum_at(int car, int w, uint32_t maxriv, uint32_t idx, uint16_
   return false;
 }
 
-static bool bwp_all_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_BWP_ALL"); }
+static bool bwp_all_enabled(void) { return nr_ul_layout_lock_enabled() && env_ond("ISAC_UL_LOCK_BWP_ALL", true); }
 /* ISAC_UL_LOCK_BWP_ALL=1 (F6): after the legacy hypotheses, every (N, start) of the carrier that the RIV field can express
  * (riv_bits(N) == the fitted width) and that is consistent with the DCI bank: N(N+1)/2 must exceed the largest RIV observed
  * at that field (a smaller N would make an observed RIV illegal). The observed maximum only grows, so the filter never excludes
@@ -627,7 +632,7 @@ static void tail_str(const nr_ul_layout_tail_t *t, char *s, size_t n)
 static bool trial_sweep_on(void)
 {
   const char *v = getenv("ISAC_UL_MCS_TABLE");
-  return env_on("ISAC_UL_MCS_TABLE_SWEEP") && !(v && *v >= '0' && *v <= '2');
+  return env_ond("ISAC_UL_MCS_TABLE_SWEEP", true) && !(v && *v >= '0' && *v <= '2');
 }
 
 /* variant = vt | k2d << 3 | tda << 4: vt = forced MCS table + 1 (0 = keep), k2d = k2 + 1 on every TDRA row,
@@ -765,7 +770,7 @@ bool nr_ul_layout_sign_decide(const uint16_t *only, int stride, const uint32_t *
 static int sign_mode(void)
 {
   const char *e = getenv("ISAC_UL_LOCK_SIGN"); /* read per call like env_on(): finalize runs once per probe batch, not per sample */
-  return e ? atoi(e) : 0;
+  return e ? atoi(e) : 2; /* baked t26yE default */
 }
 static bool sign_enabled(void) { return nr_ul_layout_lock_enabled() && sign_mode() > 0; }
 static bool sign_decides(void) { return nr_ul_layout_lock_enabled() && sign_mode() == 1; }
@@ -1010,7 +1015,7 @@ void nr_ul_layout_eval_once(void)
     if (gen == g_gen && !ls->fitted && !k2ok && npre > 0) {
       /* ISAC_UL_BGDISC=1: the k2 inference of this DCI length found no free slot (returned 0); the TDRA table is the cell's, so another length's fitted k2 applies */
       static int bg = -1;
-      if (bg < 0) bg = getenv("ISAC_UL_BGDISC") && !strcmp(getenv("ISAC_UL_BGDISC"), "1");
+      if (bg < 0) bg = !getenv("ISAC_UL_BGDISC") || !strcmp(getenv("ISAC_UL_BGDISC"), "1");
       for (int o = 0; bg && o < g_nlen && !k2ok; o++)
         if (o != l && g_len[o].fitted && g_len[o].k2row[0]) {
           for (int r = 0; r < 16; r++) if (!k2row[r]) k2row[r] = g_len[o].k2row[r] ? g_len[o].k2row[r] : g_len[o].k2row[0];
@@ -1056,7 +1061,7 @@ void nr_ul_layout_eval_once(void)
 }
 
 static void ul_layout_start_thread(void);
-bool nr_ul_layout_fit_read_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_FIT_READ"); }
+bool nr_ul_layout_fit_read_enabled(void) { return nr_ul_layout_lock_enabled() && env_ond("ISAC_UL_FIT_READ", true); }
 
 /* ISAC_UL_FIT_READ (ULDCI-20261014): the bank fit (MCS block, prefix, tail) is known ~1 s after the first DCIs and does
  * not depend on the BWP lock, but the fields of every grant of an UNLOCKED length were read by the width sweeps, whose
@@ -1472,7 +1477,7 @@ void nr_ul_layout_probe_feed(const nr_pdcch_blind_ul_result_t *g, long target, c
   g_probes_fed++;
   { /* ISAC_UL_LAYOUT_LOG=1 (diagnostic, default off): one line per probe, the three best hypotheses */
     static int lg = -1;
-    if (lg < 0) lg = getenv("ISAC_UL_LAYOUT_LOG") && atoi(getenv("ISAC_UL_LAYOUT_LOG")) ? 1 : 0;
+    if (lg < 0) lg = getenv("ISAC_UL_LAYOUT_LOG") ? (atoi(getenv("ISAC_UL_LAYOUT_LOG")) ? 1 : 0) : 1;
     if (lg) {
       int b0 = -1, b1 = -1, b2 = -1;
       for (int h = 0; h < r->n && h < g_nhyp; h++) {
@@ -1614,7 +1619,7 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
       rk[pos++] = hp;
     }
   }
-  const bool sweep = trial_sweep_on(), k2pair = env_on("ISAC_UL_K2_PAIR"), tdapair = env_on("ISAC_UL_TDA_PAIR");
+  const bool sweep = trial_sweep_on(), k2pair = env_ond("ISAC_UL_K2_PAIR", true), tdapair = env_ond("ISAC_UL_TDA_PAIR", true);
   const bool vary = sweep || k2pair || tdapair;
   /* a CONFIGURED UL BWP that leads the ranking is certain: the K jobs of the slot then test K variants of it instead of K BWP hypotheses */
   const bool certain = vary && nr > 0 && bwp_seed_on() && g_cell.sib1_ul_cfg && g_hyp[rk[0]].n == g_cell.sib1_ul_size
@@ -1693,7 +1698,7 @@ int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, ui
     if (rk[i] == g_locked_hyp) { for (int j = i; j > 0; j--) rk[j] = rk[j - 1]; rk[0] = g_locked_hyp; break; }
   if (nhyp > 0 && nr > nhyp) nr = nhyp;
   if (bwp_seed_on() && nr > 0 && g_cell.sib1_ul_cfg && g_hyp[rk[0]].n == g_cell.sib1_ul_size && g_hyp[rk[0]].start == g_cell.sib1_ul_start) nr = 1; /* a CONFIGURED UL BWP is certain (as in the CRC trials) */
-  const bool sweep = trial_sweep_on(), k2pair = env_on("ISAC_UL_K2_PAIR"), tdapair = env_on("ISAC_UL_TDA_PAIR");
+  const bool sweep = trial_sweep_on(), k2pair = env_ond("ISAC_UL_K2_PAIR", true), tdapair = env_ond("ISAC_UL_TDA_PAIR", true);
   uint32_t tot = 0, base[2] = {0, 0};
   int nt = ls->ntail < 2 ? ls->ntail : 2;
   for (int t = 0; t < nt; t++) {

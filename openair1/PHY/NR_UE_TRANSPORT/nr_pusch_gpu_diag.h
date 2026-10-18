@@ -39,7 +39,7 @@ static inline bool nr_pusch_gpu_ul_prio_hi(void)
 static inline int nr_pusch_gpu_ul_stream(cudaStream_t *s, int hi, int lo, int idx)
 {
   const char *e = getenv("ISAC_UL_GPU_PART");
-  if (e && !strcmp(e, "rt") && nr_gpu_green_stream(s, lo, true, idx)) return 2;
+  if ((!e || !strcmp(e, "rt")) && nr_gpu_green_stream(s, lo, true, idx)) return 2;
   return nr_gpu_green_stream(s, nr_pusch_gpu_ul_prio_hi() ? hi : 0, false) ? 1 : 0;
 }
 namespace uldiag {
@@ -51,7 +51,7 @@ static inline bool on()
   static int v = -1;
   if (v < 0) {
     const char *e = getenv("ISAC_UL_STALL_DIAG");
-    v = e && atoi(e) == 1;
+    v = !e || atoi(e) == 1;
   }
   return v == 1;
 }

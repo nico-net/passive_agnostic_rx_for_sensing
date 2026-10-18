@@ -198,7 +198,7 @@ static _Atomic int g_sq_med, g_sq_p90;
 int nr_syncq_enabled(void)
 {
   static int e = -1;
-  if (e < 0) { const char *v = getenv("ISAC_CORESET_DISC_SYNCQ"); e = v ? atoi(v) : 0; if (e < 0 || e > 2) e = 0; }
+  if (e < 0) { const char *v = getenv("ISAC_CORESET_DISC_SYNCQ"); e = v ? atoi(v) : 1; if (e < 0 || e > 2) e = 0; }
   return e != 0;
 }
 void nr_syncq_note(int step)
@@ -229,7 +229,7 @@ int nr_syncq_status(int *med, int *p90)
 int nr_syncq_gate_closed(void)
 {
   static int lvl = -1;
-  if (lvl < 0) { const char *v = getenv("ISAC_CORESET_DISC_SYNCQ"); lvl = v ? atoi(v) : 0; }
+  if (lvl < 0) { const char *v = getenv("ISAC_CORESET_DISC_SYNCQ"); lvl = v ? atoi(v) : 1; }
   return lvl == 2 && atomic_load_explicit(&g_sq_poor, memory_order_relaxed);
 }
 void nr_syncq_request_reacquire(void) { atomic_store_explicit(&g_sq_reacq, 1, memory_order_relaxed); atomic_store_explicit(&g_sq_clamp, 1, memory_order_relaxed); }

@@ -240,9 +240,9 @@ static bool start(const NR_DL_FRAME_PARMS *fp)
 void nr_dl_traffic_probe_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t frame, uint8_t slot)
 {
   if (g.every < 0) {
-    g.every = env_int("ISAC_DL_TRAFFIC_PROBE", 0, 0, 100000);
-    g.sweep = env_int("ISAC_POINTA_SWEEP", 0, 0, 1);
-    g.watch = env_int("ISAC_CORESET_DISC_WATCH", 0, 0, 1);
+    g.every = env_int("ISAC_DL_TRAFFIC_PROBE", 16, 0, 100000);
+    g.sweep = env_int("ISAC_POINTA_SWEEP", 1, 0, 1);
+    g.watch = env_int("ISAC_CORESET_DISC_WATCH", 1, 0, 1);
     g.cd_miss_s = env_int("ISAC_CORESET_DISC_MISS_S", 12, 1, 600);
     g.cd_max_recover = env_int("ISAC_CORESET_DISC_RECOVER_MAX", 3, 0, 100);
     if (g.watch && !g.every) g.every = 16; /* the watch needs the traffic probe: same cadence as the BLINDPIPE runs */

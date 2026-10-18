@@ -25,7 +25,7 @@ static inline bool nr_ul_delay_fast_on(void)
   static int on = -1;
   if (on < 0) {
     const char *e = getenv("ISAC_UL_DELAY_FAST");
-    on = e && atoi(e) > 0;
+    on = !e || atoi(e) > 0;
   }
   return on;
 }

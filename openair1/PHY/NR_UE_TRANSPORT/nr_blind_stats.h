@@ -48,7 +48,7 @@ static inline bool nbs_beats_runner(uint64_t ok_b, uint64_t n_b, uint64_t ok_s, 
 /* F8: the sweep decision. alpha is split over n_active hypotheses (Bonferroni). */
 static inline bool nbs_sweep_signif_enabled(void)
 {
-  const char *e = getenv("ISAC_SWEEP_SIGNIF");
+  const char *e = (getenv("ISAC_SWEEP_SIGNIF") ?: "1");
   return e && atoi(e) != 0;
 }
 static inline bool nbs_sweep_winner(uint64_t ok_b, uint64_t n_b, uint64_t ok_s, uint64_t n_s, int n_active)

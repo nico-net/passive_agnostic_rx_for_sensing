@@ -50,7 +50,7 @@
 static _Atomic uint32_t g_stale_slots = RNTI_BOOTSTRAP_STALE_SLOTS;
 void nr_pdcch_blind_rnti_bootstrap_set_mu(int mu)
 {
-  const char *e = getenv("ISAC_SLOT_SCALE");
+  const char *e = (getenv("ISAC_SLOT_SCALE") ?: "1");
   if (e && atoi(e) == 1 && mu >= 0 && mu <= 4)
     atomic_store_explicit(&g_stale_slots, 10000u << mu, memory_order_relaxed);
 }

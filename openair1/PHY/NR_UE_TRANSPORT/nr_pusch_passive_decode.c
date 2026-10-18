@@ -217,7 +217,7 @@ static int ul_harq_combine_on(void)
   static _Atomic int on = -1;
   if (on < 0) {
     const char *v = getenv("ISAC_UL_HARQ_COMBINE");
-    on = (v && !strcmp(v, "1")) ? 1 : 0;
+    on = (!v || !strcmp(v, "1")) ? 1 : 0;
   }
   return on;
 }
@@ -297,7 +297,7 @@ static _Atomic uint64_t g_uci_trials, g_uci_rescued, g_uci_unconfirmed, g_uci_cu
 static unsigned uci_budget_n(void)
 {
   static int v = -1;
-  if (v < 0) { const char *e = getenv("ISAC_UL_UCI_BUDGET"); v = e ? atoi(e) : 0; if (v < 0) v = 0; }
+  if (v < 0) { const char *e = getenv("ISAC_UL_UCI_BUDGET"); v = e ? atoi(e) : 8; if (v < 0) v = 0; }
   return (unsigned)v;
 }
 static uint64_t uci_budget_us(void)
@@ -317,7 +317,7 @@ static bool ul_uci_safe(void)
   static int on = -1;
   if (on < 0) {
     const char *v = getenv("ISAC_UL_UCI_SAFE");
-    on = (v && !strcmp(v, "1")) ? 1 : 0;
+    on = (!v || !strcmp(v, "1")) ? 1 : 0;
   }
   return on == 1;
 }
@@ -765,7 +765,7 @@ bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue, int ctx)
   if (!ue || ctx < 0 || ctx >= NR_PUSCH_PASSIVE_MAX_CTX || !passive_gnb_prepare(ue, ctx)) return false;
   /* The solver can try DFT-s-OFDM tables. The normal gNB init generates
    * these low-PAPR pilots before RX; this private context bypasses that init. */
-  const char *solver=getenv("ISAC_UL_PUSCH_SOLVER");
+  const char *solver=(getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");
   if (ctx == 0 && solver && !strcmp(solver,"1")) generate_lowpapr_typ1_refsig_sequences(SHRT_MAX);
   if (ctx == 0 && nr_ul_bgdisc_enabled()) nr_ul_bgdisc_start(8, ul_bg_run);
   passive_ul_snapshot_t *s = &g_snapshot[ctx];
@@ -2920,7 +2920,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   bool ldpc_hopeless = false;
   {
     static float lm = -1000.0f;
-    if (lm < -999.0f) lm = getenv("ISAC_UL_LDPC_SNR_MARGIN") ? (float)atof(getenv("ISAC_UL_LDPC_SNR_MARGIN")) : 1e9f;
+    if (lm < -999.0f) lm = getenv("ISAC_UL_LDPC_SNR_MARGIN") ? (float)atof(getenv("ISAC_UL_LDPC_SNR_MARGIN")) : 6.0f;
     ulsch->max_ldpc_iterations = gnb->max_ldpc_iterations;
     if (lm < 1e8f && isfinite(pvp->ul_dmrs_snr_db) &&
         pvp->ul_dmrs_snr_db < nr_pusch_passive_shannon_db(g->mcs, g->mcs_table) - lm - (hq_retx ? 6.0f : 0.0f)) {

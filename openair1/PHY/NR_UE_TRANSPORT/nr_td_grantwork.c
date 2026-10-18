@@ -543,7 +543,7 @@ static _Atomic int g_tim_on = -1;
 bool nr_td_gw_tim_on(void)
 {
   if (g_tim_on < 0)
-    g_tim_on = getenv("ISAC_PDCCH_TIMING") != NULL ? 1 : 0;
+    g_tim_on = 1; /* ISAC_PDCCH_TIMING presence-only flag, baked on (t26yE) */
   return g_tim_on > 0;
 }
 

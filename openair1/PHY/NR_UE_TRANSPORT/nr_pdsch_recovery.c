@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "nr_pdsch_recovery.h"
+#include "common/utils/nr_core_plan.h"
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -75,7 +76,7 @@ bool nr_pdsch_recovery_enabled(void)
 {
   static _Atomic int v = -1;
   if (v < 0) {
-    const char *e = getenv("ISAC_PDSCH_RECOVERY_ASYNC");
+    const char *e = (getenv("ISAC_PDSCH_RECOVERY_ASYNC") ?: "1");
     v = e && atoi(e) != 0;
   }
   return v;
@@ -141,7 +142,7 @@ static void pick_cores(cpu_set_t *set, const char *cores)
                                      "ISAC_PDCCH_JOINT_ANON_CORE", "ISAC_PDCCH_PAR_CORE", "ISAC_CSIRS_DISC_CORE", "ISAC_CSIRS_DISC_DETECT_CORES",
                                      "ISAC_GPU_WORKER_CORE", "ISAC_UHD_CTRL_CORES"};
   for (unsigned i = 0; i < sizeof keys / sizeof *keys; i++)
-    if (getenv(keys[i])) add_cores(&busy, getenv(keys[i]));
+    if (nr_env_core(keys[i])) add_cores(&busy, nr_env_core(keys[i]));
   for (int c = 10; c <= 14; c++)
     if (!CPU_ISSET(c, &busy)) CPU_SET(c, set);
 }

@@ -127,7 +127,7 @@ int nr_dlsch_planned_branch(int nbRx, int nl)
     }
     return -1;
   }
-  const char *e = getenv("ISAC_RX_MRC_MODE");
+  const char *e = (getenv("ISAC_RX_MRC_MODE") ?: "1");
   const int mode = (e != NULL) ? atoi(e) : 0;
   return (mode == 0) ? 0 : -1;
 }
@@ -248,7 +248,7 @@ int nr_dlsch_csi_rb_extent(void)
   static int s = -1;
   if (s < 0) /* CSI-FULL: ISAC_CSIRS_FULL=1 exports per-cell 52-RB TRS sets, which need their extent */
     s = (getenv("ISAC_PDSCH_CSI_RB_EXTENT") && atoi(getenv("ISAC_PDSCH_CSI_RB_EXTENT")))
-        || (getenv("ISAC_CSIRS_FULL") && atoi(getenv("ISAC_CSIRS_FULL"))) ? 1 : 0;
+        || atoi(getenv("ISAC_CSIRS_FULL") ?: "1") ? 1 : 0;
   return nr_dlsch_csi_extent_override >= 0 ? nr_dlsch_csi_extent_override : s;
 }
 /* CSI-FULL: a segmented/interleaved grant is demodulated as a VIRTUAL allocation (BWP RB v = data-order PRB v);
@@ -1358,7 +1358,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   if (t_mrc_env >= 0) /* already resolved: apply the per-grant override (nr_dlsch_mrc_mode_override, -1 = none) */
     t_mrc_mode = nr_dlsch_mrc_mode_override >= 0 ? nr_dlsch_mrc_mode_override : t_mrc_env;
   if (t_mrc_mode < 0) {
-    const char *e = getenv("ISAC_RX_MRC_MODE");
+    const char *e = (getenv("ISAC_RX_MRC_MODE") ?: "1");
     /* DEFAULT 0 -- MEASURED, not inherited. A 2x4 sweep on the live cell (modes alternated so
      * run-to-run drift is shared) gave: mode 0 = 48.9 % and 82.6 % PDSCH CRC; modes 1, 2 and 3 =
      * 0.0 % on every one of six runs. Post-equalisation EVM stayed flat at 47-60 % across ALL of
@@ -1412,14 +1412,14 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   int qam_mode = 0;
   {
     static int s_qm = -1;
-    if (s_qm < 0) s_qm = getenv("ISAC_PDSCH_MMSE_MODE") ? atoi(getenv("ISAC_PDSCH_MMSE_MODE")) : 0;
+    if (s_qm < 0) s_qm = getenv("ISAC_PDSCH_MMSE_MODE") ? atoi(getenv("ISAC_PDSCH_MMSE_MODE")) : 2;
     qam_mode = nr_dlsch_qam_mode_override >= 0 ? nr_dlsch_qam_mode_override : s_qm;
     if (qam_mode < 0 || qam_mode > 3) qam_mode = 0;
     /* TIMRANK34 ISAC_PDSCH_MMSE_EXACT_NL34=1 (default off): mode 3 (exact unbiased MMSE, see nr_dlsch_mmse) for every Qm at
      * 3-4 layers; =2 also at 2 layers. CPU only (the GPU demod refuses it). An explicit per-decode override (QAMAB arm) still
      * wins, so a paired A/B can compare against the stock path. */
     static int s_ex34 = -1;
-    if (s_ex34 < 0) { const char *e = getenv("ISAC_PDSCH_MMSE_EXACT_NL34"); s_ex34 = e ? atoi(e) : 0; }
+    if (s_ex34 < 0) { const char *e = getenv("ISAC_PDSCH_MMSE_EXACT_NL34"); s_ex34 = e ? atoi(e) : 1; }
     if (s_ex34 && nl >= (s_ex34 >= 2 ? 2 : 3) && nr_dlsch_qam_mode_override < 0) qam_mode = 3;
     /* Measured (QAMFIX.md): at 3-4 layers ZF noise enhancement costs low-SNR QPSK (16 -> 9 of 227 paired) and
      * the fixed-point ZF determinant underflows (kappa 0); keep the stock MMSE there. QAM at any rank and 2-layer
@@ -1892,7 +1892,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
       static int s_l2d2 = -9999;
       if (s_l2d2 == -9999) {
         const char *e2 = getenv("ISAC_L2MAXH_DELTA_NL2");
-        s_l2d2 = (e2 != NULL) ? atoi(e2) : 0;
+        s_l2d2 = (e2 != NULL) ? atoi(e2) : -3;
       }
       const int l2dd = s_l2d + (nl == 2 ? s_l2d2 : 0); /* NL2SPEED: nl == 2 only; Nl 3/4 GPU CHECK mismatched (pivot ties) and disabled the GPU demod */
       if (l2dd != 0) {
@@ -1974,7 +1974,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
    * re-phases branch a onto the strongest live branch before nr_channel_compensation() combines. */
   if (nl == 1 && mrc_nb_rx > 1 && nb_re_pdsch >= 12) {
     static int s_align = -1;
-    if (s_align < 0) s_align = getenv("ISAC_RX_MRC_ALIGN") ? atoi(getenv("ISAC_RX_MRC_ALIGN")) : 0;
+    if (s_align < 0) s_align = getenv("ISAC_RX_MRC_ALIGN") ? atoi(getenv("ISAC_RX_MRC_ALIGN")) : 2;
     if (s_align) {
       const int a0 = mrc_rx_index, a1 = mrc_rx_index + mrc_nb_rx;
       double pw[NR_PDSCH_EVM_MAX_RX * 2] = {0};

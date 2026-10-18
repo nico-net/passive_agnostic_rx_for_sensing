@@ -925,7 +925,7 @@ static void trx_usrp_start_generic_gpio(usrp_state_t *s)
  * while benchmark_rate, not created from an RT thread, never failed. */
 static bool usrp_repin_uhd_threads(const char *when)
 {
-  const char *e = getenv("ISAC_UHD_CTRL_CORES");
+  const char *e = nr_env_core("ISAC_UHD_CTRL_CORES");
   if (!e || !*e)
     return true;
   cpu_set_t set;
@@ -1020,7 +1020,7 @@ static int usrp_restart_max(void)
  */
 static bool usrp_rx_recover(void)
 {
-  static const bool enabled = [] { const char *e = getenv("ISAC_RX_RECOVER"); return e && atoi(e) != 0; }();
+  static const bool enabled = [] { const char *e = getenv("ISAC_RX_RECOVER"); return !e || atoi(e) != 0; }();
   return enabled;
 }
 static std::atomic<uint64_t> g_ring_copy_bytes{0}, g_ring_direct_bytes{0};
@@ -1171,7 +1171,7 @@ static void usrp_ring_producer(usrp_state_t *s)
    * BEFORE this thread's 5 s silence limit turned into a fault, so the existing ISAC_RX_RECOVER STOP/drain/timed-START re-arm never
    * ran. A value below 3000 (e.g. 2200 = 1 s start latency + 1.2 s margin) lets the producer fault first; the fault sets
    * ring_restarting, which extends the consumer's deadline while the re-arm runs. Needs ISAC_RX_RECOVER=1. */
-  const int start_timeout_ms = usrp_env_int("ISAC_USRP_START_TIMEOUT_MS", 5000, 1200);
+  const int start_timeout_ms = usrp_env_int("ISAC_USRP_START_TIMEOUT_MS", 2200, 1200);
   auto start_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(start_timeout_ms);
   while (!s->ring_stop.load(std::memory_order_relaxed) && !s->rx_stop_requested.load(std::memory_order_relaxed)) {
     const uint64_t w = recovery.write_index;
@@ -1465,7 +1465,7 @@ static void usrp_isolation_check(void)
                                                           {"uhd_ctrl", "ISAC_UHD_CTRL_CORES"}};
   int bad = 0;
   for (auto &r : roles) {
-    const char *e = getenv(r.env);
+    const char *e = nr_env_core(r.env);
     if (!e || !*e) {
       LOG_W(HW, "SENSING: USRP_ISOLATION %s has no pinned core (%s unset): it may share a core with IRQs and FIFO 97 threads\n",
             r.role, r.env);
@@ -2175,7 +2175,7 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
   uhd::rx_metadata_t first_metadata;
   std::vector<void *> pointers(cc);
   const bool ring_active = s->ring_thread.joinable() || s->planned_ring_started;
-  static const bool ring_direct_enabled = [] { const char *e = getenv("ISAC_USRP_RING_ZEROCOPY"); return e && atoi(e) != 0; }();
+  static const bool ring_direct_enabled = [] { const char *e = getenv("ISAC_USRP_RING_ZEROCOPY"); return !e || atoi(e) != 0; }();
   const bool ring_direct = ring_active && ring_direct_enabled && decim == 1;
   uint64_t ring_r = 0;
   auto receive_failure = [&](const char *reason) {
@@ -2232,7 +2232,7 @@ ring_read_retry:
       static double x = -1;
       if (x < 0) {
         const char *e = getenv("ISAC_USRP_CATCHUP_X");
-        x = e ? atof(e) : 1.5;
+        x = e ? atof(e) : 1.05;
         if (!(x > 0)) x = 0;
       }
       if (x > 0) {
@@ -2260,7 +2260,7 @@ ring_read_retry:
     {
       static int period_s = -1;
       static std::chrono::steady_clock::time_point next_p{};
-      if (period_s < 0) { const char *e = getenv("ISAC_USRP_CHPOW_S"); period_s = e ? atoi(e) : 0; }
+      if (period_s < 0) { const char *e = getenv("ISAC_USRP_CHPOW_S"); period_s = e ? atoi(e) : 1; }
       const auto now_p = std::chrono::steady_clock::now();
       if (period_s > 0 && now_p >= next_p) {
         next_p = now_p + std::chrono::seconds(period_s);
@@ -3528,7 +3528,7 @@ extern "C" {
    * device queues toward a TX endpoint is never drained. Also narrows passivity issue K13. */
   {
     const char *e = getenv("ISAC_USRP_NO_TX");
-    if (e && atoi(e) != 0) {
+    if (!e || atoi(e) != 0) {
       s->tx_stream = NULL;
       LOG_W(HW, "SENSING: USRP TX streamer NOT created (ISAC_USRP_NO_TX=1, receive-only)\n");
     } else {

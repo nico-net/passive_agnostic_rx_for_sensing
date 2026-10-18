@@ -463,13 +463,13 @@ bool nr_csirs_blind_is_confirmed(const nr_csirs_blind_state_t *st, int idx)
 int nr_csirs_full_enabled(void)
 {
   static int s = -1;
-  if (s < 0) s = getenv("ISAC_CSIRS_FULL") && atoi(getenv("ISAC_CSIRS_FULL")) ? 1 : 0;
+  if (s < 0) s = atoi(getenv("ISAC_CSIRS_FULL") ?: "1") ? 1 : 0;
   return s;
 }
 int nr_csirs_full_bursts_enabled(void)
 {
   static int s = -1;
-  if (s < 0) s = getenv("ISAC_CSIRS_FULL_BURSTS") && atoi(getenv("ISAC_CSIRS_FULL_BURSTS")) ? 1 : 0;
+  if (s < 0) s = atoi(getenv("ISAC_CSIRS_FULL_BURSTS") ?: "1") ? 1 : 0;
   return s;
 }
 int nr_csirs_blind_disc_cap(void) { return nr_csirs_full_bursts_enabled() ? NR_CSIRS_BLIND_DISC_MAX_CONF : 32; }

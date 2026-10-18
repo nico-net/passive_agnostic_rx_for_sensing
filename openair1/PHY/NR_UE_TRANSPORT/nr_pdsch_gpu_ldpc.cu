@@ -598,11 +598,11 @@ static int decide_nc()
   const char *e = getenv("ISAC_GPU_LDPC_NOCLUSTER");
   st = major < 9 || (e && *e == '1') ? 2 : 1;
   const char *m = getenv("ISAC_GPU_LDPC_NC_MIN_CB");
-  g_nc_min_cb = m ? atoi(m) : 0;
+  g_nc_min_cb = m ? atoi(m) : 8;
   if (g_nc_min_cb < 0)
     g_nc_min_cb = 0;
   m = getenv("ISAC_GPU_LDPC_CL_MIN_CB");
-  g_cl_min_cb = m ? atoi(m) : 0;
+  g_cl_min_cb = m ? atoi(m) : 4;
   if (g_cl_min_cb < 0)
     g_cl_min_cb = 0;
   m = getenv("ISAC_GPU_LDPC_CL_FORCE");
@@ -610,7 +610,7 @@ static int decide_nc()
   if (g_cl_force != 1 && g_cl_force != 2 && g_cl_force != 4 && g_cl_force != 8)
     g_cl_force = 0;
   m = getenv("ISAC_GPU_LDPC_SM");
-  g_sm_level = m ? atoi(m) : 0;
+  g_sm_level = m ? atoi(m) : 1;
   if (g_sm_level != 1)
     g_sm_level = 0;
   if (st == 2 && g_cl_force > 1)
@@ -1019,7 +1019,7 @@ static bool ul_hold_on()
   static int v = -1;
   if (v < 0) {
     const char *e = getenv("ISAC_UL_GPU_LDPC_HOLD");
-    v = e && atoi(e) == 1;
+    v = !e || atoi(e) == 1;
   }
   return v == 1;
 }

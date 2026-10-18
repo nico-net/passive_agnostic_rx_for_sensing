@@ -25,7 +25,7 @@ void nr_pdsch_gpu_stage_context(uint32_t epoch, int symbol, int layer, int ant)
 {
   if (stage_enabled < 0) {
     const char *e = getenv("ISAC_PDSCH_GPU_STAGE_DUMP");
-    const char *in = getenv("ISAC_PDSCH_INLINE_POOL");
+    const char *in = (getenv("ISAC_PDSCH_INLINE_POOL") ?: "1");
     stage_enabled = e && atoi(e) == 1 && in && atoi(in) == 1;
   }
   if (!stage_enabled) return;
@@ -155,7 +155,7 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
   const size_t rxF_bytes = (size_t)fp->nb_antennas_rx * fp->ofdm_symbol_size * sizeof(c16_t) * (stage ? 14 : 1);
   uint32_t rows = 0;
   nr_pdsch_gpu_stage_meta_t meta = {dec->config_recovered, src->mrc_mode,
-    getenv("ISAC_PDSCH_MMSE_MODE") ? atoi(getenv("ISAC_PDSCH_MMSE_MODE")) : 0,
+    getenv("ISAC_PDSCH_MMSE_MODE") ? atoi(getenv("ISAC_PDSCH_MMSE_MODE")) : 2,
     nr_pdsch_passive_last_decoder_used(), src->dlsch_pdu.numCsiRsForRateMatching,
     src->dlsch_pdu.pduBitmap & 1, dec->nvar};
   size_t stage_bytes = stage ? sizeof(rows) + sizeof(meta) : 0;

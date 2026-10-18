@@ -734,11 +734,11 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     return;
   }
   if (g_timing < 0) {
-    const char *e = getenv("ISAC_PDCCH_TIMING");
+    const char *e = (getenv("ISAC_PDCCH_TIMING") ?: "1");
     g_timing = e && atoi(e) != 0;
   }
   if (g_reconf < 0) {
-    const char *e = getenv("ISAC_RECONF");
+    const char *e = (getenv("ISAC_RECONF") ?: "1");
     g_reconf = e && strcmp(e, "1") == 0;
   }
   const uint64_t slot_start_us = g_timing ? now_us() : 0;
@@ -1771,7 +1771,7 @@ static bool full_rb_overlap_half(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, c
 static int full_trs_pair_enabled(void)
 {
   static int s = -1;
-  if (s < 0) s = getenv("ISAC_CSIRS_FULL_TRS_PAIR") && atoi(getenv("ISAC_CSIRS_FULL_TRS_PAIR")) ? 1 : 0;
+  if (s < 0) s = atoi(getenv("ISAC_CSIRS_FULL_TRS_PAIR") ?: "1") ? 1 : 0;
   return s;
 }
 static bool full_trs_partner(const fapi_nr_dl_config_csirs_pdu_rel15_t *c, fapi_nr_dl_config_csirs_pdu_rel15_t *p)
@@ -1813,7 +1813,7 @@ static int full_add_trs_pairs(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, i
 static int full_block_infer_enabled(void)
 {
   static int s = -1;
-  if (s < 0) s = getenv("ISAC_CSIRS_FULL_BLOCK_INFER") ? atoi(getenv("ISAC_CSIRS_FULL_BLOCK_INFER")) : 0;
+  if (s < 0) s = atoi(getenv("ISAC_CSIRS_FULL_BLOCK_INFER") ?: "2");
   return s;
 }
 static bool full_rb_overlap_half(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, const fapi_nr_dl_config_csirs_pdu_rel15_t *b);
@@ -1942,7 +1942,7 @@ void nr_csirs_full_validate(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, c
     return; /* nothing to learn in this slot */
   static int s_erase = -1;
   if (s_erase < 0)
-    s_erase = getenv("ISAC_CSIRS_FULL_ERASE") && atoi(getenv("ISAC_CSIRS_FULL_ERASE")) ? 1 : 0;
+    s_erase = atoi(getenv("ISAC_CSIRS_FULL_ERASE") ?: "1") ? 1 : 0;
   bool ok[2];
   t_full_ab_depth++;
   for (int h = 0; h < 2; h++) { /* 0 = the rule, 1 = the rule + candidates */
@@ -1984,7 +1984,7 @@ void nr_csirs_full_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, uint32_t pdsc
    * become LLR erasures in nr_dlsch_extract_rbs() (their REs carry this grant's data under a foreign TRS). */
   static int s_erase = -1;
   if (s_erase < 0)
-    s_erase = getenv("ISAC_CSIRS_FULL_ERASE") && atoi(getenv("ISAC_CSIRS_FULL_ERASE")) ? 1 : 0;
+    s_erase = atoi(getenv("ISAC_CSIRS_FULL_ERASE") ?: "1") ? 1 : 0;
   fapi_nr_dl_config_csirs_pdu_rel15_t erase[NFAPI_MAX_NUM_CSI_RATEMATCH];
   int n_sel = 0, n_erase = 0;
   full_select(pdsch_absolute_slot, cfg->dlDmrsScramblingId, cfg->dlDmrsSymbPos, cfg->csiRsForRateMatching, &n_sel,
@@ -2087,7 +2087,7 @@ void nr_csirs_full_ab(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const f
     return;
   static int s_erase = -1;
   if (s_erase < 0)
-    s_erase = getenv("ISAC_CSIRS_FULL_ERASE") && atoi(getenv("ISAC_CSIRS_FULL_ERASE")) ? 1 : 0;
+    s_erase = atoi(getenv("ISAC_CSIRS_FULL_ERASE") ?: "1") ? 1 : 0;
   const uint16_t pop = cfg->dlDmrsScramblingId;
   bool in_h[8 + 2 * 6][4 * NR_CSIRS_BLIND_DISC_MAX_CONF];
   memset(in_h, 0, sizeof(in_h));

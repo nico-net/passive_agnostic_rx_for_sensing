@@ -358,7 +358,7 @@ static void *tracker_worker(void *unused)
   const int sched_rc = pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
   int affinity_rc = 0;
   int core = -1;
-  const char *core_env = getenv("ISAC_PDCCH_USS_CORE");
+  const char *core_env = nr_env_core("ISAC_PDCCH_USS_CORE");
   if (core_env && *core_env) {
     core = atoi(core_env);
     if (core >= 0 && core < CPU_SETSIZE) {
@@ -456,7 +456,7 @@ static void tracker_init(void)
 {
   const char *e = getenv("ISAC_PDCCH_USS_TRACKER");
   g_enabled = !e || atoi(e) != 0;
-  const char *f = getenv("ISAC_PDCCH_USS_FAST"), *b = getenv("ISAC_PDCCH_USS_TRACK_BACKOFF");
+  const char *f = (getenv("ISAC_PDCCH_USS_FAST") ?: "1"), *b = (getenv("ISAC_PDCCH_USS_TRACK_BACKOFF") ?: "4");
   g_fast = f && atoi(f) != 0;
   g_backoff = b && atoi(b) > 1 ? atoi(b) : 1;
   tables_init();

@@ -85,7 +85,7 @@ int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
   if (ue)
     nr_pdsch_gpu_demod_warmup(&ue->frame_parms); /* GPU-DEMOD: independent knob, same module and warm-up point */
   nr_pdsch_gpu_ldpc_enabled(); /* GPUSHARE: GPU LDPC contexts and graphs before RX, not at the first TB (no-op when off) */
-  const char *e = getenv("ISAC_PDSCH_GPU_EXACT_FEP");
+  const char *e = (getenv("ISAC_PDSCH_GPU_EXACT_FEP") ?: "1");
   if (!e || atoi(e) != 1 || !ue)
     return 0;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
@@ -320,7 +320,7 @@ static int (*g_unpin_fn)(void *);
 static pthread_once_t g_pin_once = PTHREAD_ONCE_INIT;
 static void pin_init(void)
 {
-  const char *e = getenv("ISAC_PDSCH_GPU_HOST_PIN");
+  const char *e = (getenv("ISAC_PDSCH_GPU_HOST_PIN") ?: "1");
   if (!e || atoi(e) != 1)
     return;
   void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);

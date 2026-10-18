@@ -56,7 +56,7 @@ static uint64_t now_ns(void)
 static void load(void)
 {
   gl_t *G = &DLG;
-  const char *e = getenv("ISAC_PDSCH_GPU_EXACT_LDPC");
+  const char *e = (getenv("ISAC_PDSCH_GPU_EXACT_LDPC") ?: "1");
   if (!e || atoi(e) != 1) {
     atomic_store(&G->on, 0);
     return;
@@ -133,7 +133,7 @@ static int prep_segment_ref(nrLDPC_TB_decoding_parameters_t *tb, int r, tls_t *t
   int16_t *d = tb->d + (size_t)r * Kc * Z;
   static int s_hf = -1; /* ISAC_PDSCH_HOST_FAST=1 (default off): NEON deinterleave / rate-match / pack, bit-identical */
   if (s_hf < 0)
-    s_hf = getenv("ISAC_PDSCH_HOST_FAST") && atoi(getenv("ISAC_PDSCH_HOST_FAST")) ? 1 : 0;
+    s_hf = atoi(getenv("ISAC_PDSCH_HOST_FAST") ?: "1") ? 1 : 0;
   if (s_hf && tb->C != 0 && tb->d_to_be_cleared == 1 && tb->rv_index < 4 && tb->BG >= 1 && tb->BG <= 2) {
     static const uint8_t k0[2][4] = {{0, 17, 33, 56}, {0, 13, 25, 43}};
     const uint32_t N = (tb->BG == 1) ? 66u * Z : 50u * Z;
@@ -195,7 +195,7 @@ static int prep_segment(nrLDPC_TB_decoding_parameters_t *tb, int r, tls_t *t, in
 {
   static int s_hf = -1;
   if (s_hf < 0)
-    s_hf = getenv("ISAC_PDSCH_HOST_FAST") ? atoi(getenv("ISAC_PDSCH_HOST_FAST")) : 0;
+    s_hf = getenv("ISAC_PDSCH_HOST_FAST") ? atoi(getenv("ISAC_PDSCH_HOST_FAST")) : 1;
   if (s_hf <= 0)
     return prep_segment_ref(tb, r, t, l, Eout, Rout);
   const int rc = prep_segment_fast(tb, r, t, l, Eout, Rout);
@@ -378,7 +378,7 @@ static void ul_load(void)
 {
   gl_t *G = &ULG;
   const char *e = getenv("ISAC_UL_GPU_LDPC");
-  if (!e || atoi(e) != 1) {
+  if (e && atoi(e) != 1) {
     atomic_store(&G->on, 0);
     return;
   }

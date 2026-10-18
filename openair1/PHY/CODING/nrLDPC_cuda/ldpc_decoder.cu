@@ -1079,7 +1079,7 @@ extern "C" int ldpc_pool_init(uint32_t cap) {
         return -1;
     int rc = 0;
     {
-        const char *disc = getenv("ISAC_CSIRS_DISC");
+        const char *disc = (getenv("ISAC_CSIRS_DISC") ?: "1");
         int least = 0, greatest = 0;
         if (disc && disc[0] == '1' && disc[1] == '\0') {
             POOL_CHECK(cudaDeviceGetStreamPriorityRange(&least, &greatest));

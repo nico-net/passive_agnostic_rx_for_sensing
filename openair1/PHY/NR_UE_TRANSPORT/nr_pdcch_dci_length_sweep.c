@@ -100,7 +100,7 @@ uint64_t nr_pdcch_dci_length_learn_rounds(bool restricted)
 }
 static void length_env_init(void)
 {
-  const char *e = getenv("ISAC_RECONF");
+  const char *e = (getenv("ISAC_RECONF") ?: "1");
   seen_order_enabled = e && atoi(e) == 1;
   e = getenv("ISAC_DCI_LEN_MAX");
   char *end = NULL;

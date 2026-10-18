@@ -553,8 +553,8 @@ bool nr_ue_ctx_open(const char *path,uint32_t ring_capacity,double snapshot_peri
   output=f; ring=r; entries=x; capacity=ring_capacity; head=0;
   period_s=snapshot_period_s; last_period_ns=last_age_ns=0; epoch=identity=0;
   const char *ul_flag=getenv("ISAC_UL_UE_STATE");
-  const char *chain_flag=getenv("ISAC_UL_PUSCH_CHAIN");
-  const char *solver_flag=getenv("ISAC_UL_PUSCH_SOLVER");
+  const char *chain_flag=(getenv("ISAC_UL_PUSCH_CHAIN") ?: "1");
+  const char *solver_flag=(getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");
   ul_state_enabled=(ul_flag && strcmp(ul_flag,"1")==0) ||
                    (chain_flag && strcmp(chain_flag,"1")==0) ||
                    (solver_flag && strcmp(solver_flag,"1")==0);

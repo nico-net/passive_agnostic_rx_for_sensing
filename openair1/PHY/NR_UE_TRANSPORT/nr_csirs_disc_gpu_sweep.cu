@@ -312,7 +312,7 @@ static cudaError_t complete() {
  * at the instant refine_kernel ended, 300-400 ms late]. */
 static int copy_fence() {
   static int v=-1;
-  if(v<0){const char *e=getenv("ISAC_GPU_COPY_FENCE");if(!e)e=getenv("ISAC_FATTAILS");v=e && atoi(e)==1;}
+  if(v<0){const char *e=getenv("ISAC_GPU_COPY_FENCE");if(!e)e=(getenv("ISAC_FATTAILS") ?: "1");v=e && atoi(e)==1;}
   return v;
 }
 static cudaError_t copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
@@ -348,7 +348,7 @@ static const short2 *upload_grid(const nr_csirs_disc_ring_t *r)
 int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
         const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out)
 {
-  const char *enable = getenv("ISAC_CSIRS_DISC");
+  const char *enable = (getenv("ISAC_CSIRS_DISC") ?: "1");
   if (!enable || strcmp(enable, "1"))
     return 0;
   nr_csirs_disc_sweep_cfg_t c;
@@ -650,7 +650,7 @@ extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
     nr_csirs_disc_sweep_cfg_t cfg={0,1,1,32,1};
     sweep<<<dim3(1,1),128,0,w.stream>>>(map,w.dx.p,w.ds.p,ant,20,cfg,w.dz.p);
     average_scores<false><<<1,256,0,w.stream>>>(w.dz.p,1,1,w.dmean.p);
-    const char *cum=getenv("ISAC_CSIRS_DISC_CUMULATIVE");
+    const char *cum=(getenv("ISAC_CSIRS_DISC_CUMULATIVE") ?: "1");
     if(cum && !strcmp(cum,"1"))
       average_scores<true><<<1,256,0,w.stream>>>(w.dz.p,1,1,w.dmean.p,w.dz.p+w.dz.capacity-1024,0);
     reduce_scores<<<1,256,0,w.stream>>>(w.dmean.p,cfg,0,1,w.dw.p);

@@ -175,7 +175,7 @@ static bool core_feature(const char *name, bool def)
  */
 static int passive_core_plan(void)
 {
-  if (!IS_PASSIVE_RX_MODE(get_softmodem_params()) || !core_feature("ISAC_CORE_PLAN", true)) return 0;
+  if (!IS_PASSIVE_RX_MODE(get_softmodem_params()) || !core_feature("ISAC_CORE_PLAN", false)) return 0;
   nr_core_machine_t machine;
   nr_core_plan_t plan = {0};
   char error[512] = "invalid or excessive explicit core setting";
@@ -240,8 +240,8 @@ static int passive_core_plan(void)
     ADD(NR_CP_POOL, workers < 8 ? workers : 8, -1);
   }
   if (core_feature("ISAC_PDSCH_GPU", false) || core_feature("NR_GPU_FEP", false)) ADD(NR_CP_GPU, 1, core_env_value("ISAC_GPU_WORKER_CORE"));
-  if (core_feature("ISAC_CSIRS_DISC", false)) ADD(NR_CP_CSIRS, 1, core_env_value("ISAC_CSIRS_DISC_CORE"));
-  if (core_feature("ISAC_PDCCH_NID_GPU", false)) ADD(NR_CP_NID, 1, core_env_value("ISAC_PDCCH_NID_GPU_CORE"));
+  if (core_feature("ISAC_CSIRS_DISC", true)) ADD(NR_CP_CSIRS, 1, core_env_value("ISAC_CSIRS_DISC_CORE"));
+  if (core_feature("ISAC_PDCCH_NID_GPU", true)) ADD(NR_CP_NID, 1, core_env_value("ISAC_PDCCH_NID_GPU_CORE"));
   ADD(NR_CP_STATS, 1, -1);
 #undef ADD
   if (nr_core_plan_build(&machine, &plan, error, sizeof(error))) goto fail;
@@ -407,11 +407,11 @@ int main(int argc, char **argv)
   nr_csirs_monitor_init();
   // Blind PDCCH/DCI-1_1 monitor (TOTAL_PASSIVE_UE_HANDOVER.md Phase 3); no-op if unset.
   nr_pdcch_blind_monitor_init();
-  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && core_feature("ISAC_CORE_PLAN", true))
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && core_feature("ISAC_CORE_PLAN", false))
     nrue_set_ru_params(uniqCfg);
   if (passive_core_plan()) return EXIT_FAILURE;
-  const char *ul_chain_flag = getenv("ISAC_UL_PUSCH_CHAIN");
-  const char *ul_solver_flag = getenv("ISAC_UL_PUSCH_SOLVER");
+  const char *ul_chain_flag = (getenv("ISAC_UL_PUSCH_CHAIN") ?: "1");
+  const char *ul_solver_flag = (getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");
   const bool ul_chain_on = (ul_chain_flag && strcmp(ul_chain_flag, "1") == 0) ||
                            (ul_solver_flag && strcmp(ul_solver_flag, "1") == 0);
   if (nr_cfg_reconf_enabled() || ul_chain_on ||

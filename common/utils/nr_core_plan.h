@@ -58,9 +58,21 @@ int nr_core_float_apply(void);
 void nr_core_float_enter(void);
 /* nr_env_list_nth: the k-th entry (0-based) of the comma list in env `name` ("17,18"), or `dflt` when unset/short/malformed. */
 #include <stdlib.h>
+#include <string.h>
+/* nr_env_core: getenv for the site core lists, with the on-air (t26yE) site map as the default when unset. */
+static inline const char *nr_env_core(const char *name)
+{
+  static const char *const dflt[][2] = {{"ISAC_PDSCH_CORES", "7,3,4,0,1"}, {"ISAC_PUSCH_CORES", "8,9"}, {"ISAC_GPU_WORKER_CORE", "10"},
+                                        {"ISAC_UHD_CTRL_CORES", "15"}, {"ISAC_PDCCH_USS_CORE", "12"}, {"ISAC_PDCCH_NID_GPU_CORE", "13"},
+                                        {"ISAC_FLOAT_CORES", "10-14"}};
+  const char *e = getenv(name);
+  for (unsigned i = 0; !e && i < sizeof(dflt) / sizeof(dflt[0]); i++)
+    if (!strcmp(name, dflt[i][0])) e = dflt[i][1];
+  return e;
+}
 static inline int nr_env_list_nth(const char *name, int k, int dflt)
 {
-  const char *cl = getenv(name);
+  const char *cl = nr_env_core(name);
   for (int j = 0; cl && *cl; j++) {
     char *end;
     const long c = strtol(cl, &end, 10);

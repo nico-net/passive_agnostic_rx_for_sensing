@@ -13,7 +13,7 @@ static inline bool nr_scancost_on(void)
 {
   static int on = -1;
   if (on < 0) {
-    const char *e = getenv("ISAC_SCANCOST");
+    const char *e = (getenv("ISAC_SCANCOST") ?: "2");
     on = e && atoi(e) != 0;
   }
   return on;
@@ -29,7 +29,7 @@ static inline bool nr_scan2_on(int id)
   static int on[NR_SCAN2_N] = {-1, -1, -1};
   if (on[id] < 0) {
     const char *e = getenv(names[id]);
-    const char *u = getenv("ISAC_SCANCOST");
+    const char *u = (getenv("ISAC_SCANCOST") ?: "2");
     on[id] = e ? atoi(e) != 0 : (u && atoi(u) >= 2);
   }
   return on[id];
@@ -45,8 +45,8 @@ static inline bool nr_anonlen_on(int id)
   static int on[NR_ANONLEN_N] = {-1, -1};
   if (on[id] < 0) {
     const char *e = getenv(names[id]);
-    const char *a = getenv("ISAC_ANONLEN");
-    const char *u = getenv("ISAC_SCANCOST");
+    const char *a = (getenv("ISAC_ANONLEN") ?: "1");
+    const char *u = (getenv("ISAC_SCANCOST") ?: "2");
     on[id] = e ? atoi(e) != 0 : ((a && atoi(a) != 0) || (u && atoi(u) >= 3));
   }
   return on[id];

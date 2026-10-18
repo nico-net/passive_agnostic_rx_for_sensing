@@ -193,7 +193,7 @@ static int ul_solver_fallthrough(void)
   static int on = -1;
   if (on < 0) {
     const char *v = getenv("ISAC_UL_SOLVER_FALLTHROUGH");
-    on = v ? atoi(v) : 0;
+    on = v ? atoi(v) : 2;
   }
   return on;
 }
@@ -207,7 +207,7 @@ static bool ul_retry_enabled(void)
   static int on = -1;
   if (on < 0) {
     const char *v = getenv("ISAC_UL_RETRY");
-    on = (v && !strcmp(v, "1")) ? 1 : 0;
+    on = (!v || !strcmp(v, "1")) ? 1 : 0;
   }
   return on == 1;
 }
@@ -229,7 +229,7 @@ static bool ul_retry_snr_ok(const nr_pdcch_blind_ul_result_t *g, float snr_db)
   static float margin = -1000.0f;
   if (margin < -999.0f) {
     const char *v = getenv("ISAC_UL_RETRY_SNR_MARGIN");
-    margin = v ? (float)atof(v) : 1e9f;
+    margin = v ? (float)atof(v) : 3.0f;
   }
   if (margin > 1e8f)
     return true;
@@ -808,7 +808,7 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   }
   if (nr_pusch_passive_pipeline_enabled()) {
     /* One prewarmed context per consumer (the consumer index IS the context index). Default 1 as before. */
-    n_consumers = ulq_env("ISAC_PUSCH_CONSUMERS", 1);
+    n_consumers = ulq_env("ISAC_PUSCH_CONSUMERS", 2);
     if (n_consumers < 1) n_consumers = 1;
     if (n_consumers > NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS) n_consumers = NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS;
     for (int c = 0; c < n_consumers; c++)
@@ -817,7 +817,7 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
         n_consumers = c;
         break;
       }
-    depth = ulq_env("ISAC_UL_QUEUE_DEPTH", depth);
+    depth = ulq_env("ISAC_UL_QUEUE_DEPTH", 32);
   }
   /* The --cont-fo-comp refusal that used to live here is GONE, and the hazard it named is fixed
    * rather than avoided. It read: a deferred nr_slot_fep() would de-rotate using
@@ -841,17 +841,17 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   g_ue       = ue;
   g_cursor   = (nr_pusch_queue_cursor_t){.depth=depth};
   g_nthreads = n_consumers;
-  g_prio = ulq_env("ISAC_UL_PRIO_QUEUE", 0) == 1;
+  g_prio = ulq_env("ISAC_UL_PRIO_QUEUE", 1) == 1;
   int pdepth = ulq_env("ISAC_UL_PROBE_DEPTH", 8);
   if (pdepth < 2) pdepth = 2;
   if (pdepth > NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH) pdepth = NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH;
   g_pcursor = (nr_pusch_queue_cursor_t){.depth=pdepth};
-  g_spare_rescue = ulq_env("ISAC_UL_SPARE_RESCUE", 0) == 1;
-  g_stale_drop = ulq_env("ISAC_UL_STALE_DROP", 0) == 1;
+  g_spare_rescue = ulq_env("ISAC_UL_SPARE_RESCUE", 1) == 1;
+  g_stale_drop = ulq_env("ISAC_UL_STALE_DROP", 1) == 1;
   g_budget_pct = ulq_env("ISAC_UL_CPU_BUDGET_PCT", 0);
   g_pool_n = 0;
-  g_snap_next = ulq_env("ISAC_UL_NID_BG", 0) == 1 && ulq_env("ISAC_UL_NID_BG_IQ", 0) == 1;
-  if (nr_pusch_passive_pipeline_enabled() && ulq_env("ISAC_UL_SNAP_POOL", 0) == 1) {
+  g_snap_next = ulq_env("ISAC_UL_NID_BG", 1) == 1 && ulq_env("ISAC_UL_NID_BG_IQ", 1) == 1;
+  if (nr_pusch_passive_pipeline_enabled() && ulq_env("ISAC_UL_SNAP_POOL", 1) == 1) {
     /* Distinct slots alive at once <= queued real jobs + one per consumer + the one being copied. */
     const uint32_t len = nr_pusch_passive_snapshot_len(&ue->frame_parms);
     const int nant = nr_pusch_passive_snapshot_nant();
@@ -887,12 +887,12 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     /* ISAC_PUSCH_CORES="17,18" / ISAC_PUSCH_PRIO=<0..49> (default off): the UL trial decodes (ISAC_UL_LOCK_CRC_FIRST) ran unpinned at
      * FIFO 50, above the PDSCH consumers (40), and inflated every PDSCH stage (DECQUEUE report). Pin them off the PDSCH cores, lower. */
     core = nr_env_list_nth("ISAC_PUSCH_CORES", i, core);
-    if (getenv("ISAC_PUSCH_PRIO")) prio = atoi(getenv("ISAC_PUSCH_PRIO"));
+    prio = atoi(getenv("ISAC_PUSCH_PRIO") ?: "0");
     threadCreate(&g_threads[i], nr_pusch_passive_queue_thread, &g_args[i], name, core, prio);
   }
   if (g_pool_n > 0) {
-    const int core = ulq_env("ISAC_UL_SNAP_CORE", nr_env_list_nth("ISAC_PUSCH_CORES", 0, -1));
-    const int prio = ulq_env("ISAC_UL_SNAP_PRIO", (getenv("ISAC_PUSCH_PRIO") ? atoi(getenv("ISAC_PUSCH_PRIO")) : 50) + 1);
+    const int core = ulq_env("ISAC_UL_SNAP_CORE", 8);
+    const int prio = ulq_env("ISAC_UL_SNAP_PRIO", 0);
     threadCreate(&g_cap_thread, ulq_capture_thread, NULL, "passivePuschCap", core, prio);
   }
   LOG_I(PHY, "SENSING: passive PUSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest; ULQ prio=%d probe_depth=%d snap_pool=%d spare_rescue=%d budget_pct=%d\n",

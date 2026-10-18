@@ -33,7 +33,7 @@ static inline void nr_gpu_poll_relax(uint64_t *t0)
 {
   static int us = -1;
   if (us < 0) {
-    const char *e = getenv("ISAC_GPU_POLL_SLEEP_US");
+    const char *e = (getenv("ISAC_GPU_POLL_SLEEP_US") ?: "200");
     us = e && atoi(e) > 0 ? atoi(e) : 0;
   }
   nr_gpu_poll_relax_us(t0, us);
@@ -47,7 +47,7 @@ static inline void nr_gpu_poll_relax_pass(uint64_t *t0)
   static int us = -1;
   if (us < 0) {
     const char *e = getenv("ISAC_GPU_PASS_POLL_SLEEP_US");
-    const char *g = getenv("ISAC_GPU_POLL_SLEEP_US");
+    const char *g = (getenv("ISAC_GPU_POLL_SLEEP_US") ?: "200");
     us = (e && atoi(e) > 0) ? atoi(e) : (g && atoi(g) > 0 ? atoi(g) : 0); /* 0 / unset = the global value, never a forced pure spin */
   }
   nr_gpu_poll_relax_us(t0, us);
