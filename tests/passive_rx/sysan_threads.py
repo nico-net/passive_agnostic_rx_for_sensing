@@ -11,14 +11,21 @@ import json, os, subprocess, sys, time
 
 
 def find_pid(prefix):
+    # the receiver can show as two processes (a short-lived helper with one thread): take the one with the most threads
+    best = None
     for p in subprocess.run(['pgrep', '-x', 'nr-uesoftmodem'], capture_output=True, text=True).stdout.split():
         try:
             exe = subprocess.run(['sudo', '-n', 'readlink', '/proc/%s/exe' % p], capture_output=True, text=True).stdout.strip()
         except OSError:
             continue
         if exe.startswith(prefix):
-            return int(p)
-    return None
+            try:
+                n = len(os.listdir('/proc/%s/task' % p))
+            except OSError:
+                continue
+            if best is None or n > best[0]:
+                best = (n, int(p))
+    return best[1] if best and best[0] > 4 else None
 
 
 def tasks(pid):
@@ -73,6 +80,7 @@ def main():
     if pid is None:
         sys.exit('no receiver')
     time.sleep(delay)
+    pid = find_pid(prefix) or pid  # re-pick after the delay: start-up helpers and restarts change the pid
     hz = os.sysconf('SC_CLK_TCK')
     ps_snap(pid, 'start', out + '.ps.txt')
     a, ca, w0 = tasks(pid), cores(), time.time()

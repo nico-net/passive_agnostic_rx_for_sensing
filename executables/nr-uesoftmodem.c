@@ -379,6 +379,7 @@ static void gpu_platform_log(int warning, const char *text)
  */
 int main(int argc, char **argv)
 {
+  nr_core_float_apply(); /* ISAC_FLOAT_CORES: unpinned threads (and everything they start) stay in one lane */
   start_background_system();
   if (nr_shutdown_init(nrue_shutdown_notify, nrue_ru_shutdown_stop, nrue_ru_shutdown) != 0) {
     fprintf(stderr, "Cannot initialize bounded radio shutdown\n");
