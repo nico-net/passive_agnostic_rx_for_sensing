@@ -2912,14 +2912,15 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
   /* ISAC_UL_LDPC_SNR_MARGIN=<dB> (default off; UL-LAT-20261018): a TB whose DM-RS SNR is more than <dB> below the Shannon
    * bound of its MCS runs ONE LDPC iteration instead of max_ldpc_iterations. Rate recovery and the HARQ soft buffer are
-   * unchanged (they precede the iterations); a HARQ-combined retransmission is never limited. On the replays these noise TBs
-   * kept the GPU LDPC pool busy ~2.5 ms per wide grant (the UL p99 tail of tim). */
+   * unchanged (they precede the iterations). A HARQ-combined retransmission gets 6 dB more room (soft combining of up to 4
+   * transmissions); the GPU pool refuses combined TBs, so on CPU they cost ~2 ms per wide noise grant. On the replays these
+   * noise TBs kept the GPU LDPC pool busy ~2.5 ms per wide grant (the UL p99 tail of tim). */
   {
     static float lm = -1000.0f;
     if (lm < -999.0f) lm = getenv("ISAC_UL_LDPC_SNR_MARGIN") ? (float)atof(getenv("ISAC_UL_LDPC_SNR_MARGIN")) : 1e9f;
     ulsch->max_ldpc_iterations = gnb->max_ldpc_iterations;
-    if (lm < 1e8f && !hq_retx && isfinite(pvp->ul_dmrs_snr_db) &&
-        pvp->ul_dmrs_snr_db < nr_pusch_passive_shannon_db(g->mcs, g->mcs_table) - lm) {
+    if (lm < 1e8f && isfinite(pvp->ul_dmrs_snr_db) &&
+        pvp->ul_dmrs_snr_db < nr_pusch_passive_shannon_db(g->mcs, g->mcs_table) - lm - (hq_retx ? 6.0f : 0.0f)) {
       ulsch->max_ldpc_iterations = 1;
       atomic_fetch_add_explicit(&g_ldpc_capped, 1, memory_order_relaxed);
     }

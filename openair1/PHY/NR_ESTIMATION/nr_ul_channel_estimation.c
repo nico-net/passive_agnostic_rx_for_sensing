@@ -53,7 +53,36 @@ typedef struct puschAntennaProc_s {
   scopeData_t *scope;
   c16_t *pusch_ch_est_dmrs_pos_slot_mem;
   int dmrs_symbol_start_idx;
+  uint8_t lp; /* DM-RS symbol index within the grant */
 } puschAntennaProc_t;
+
+/* ISAC_UL_DELAY_ONCE=1 (default off; UL-LAT-20261018, passive RX only): the delay of an antenna is estimated on the grant's
+ * first DM-RS symbol and reused on its later DM-RS symbols (same UE, same slot: one arrival time), halving the n-point
+ * IDFTs of a 2-symbol DM-RS grant. Keyed by layer, start subcarrier, PRB count and slot, so a PRB-list segment or a new
+ * grant never reuses another allocation's estimate. */
+static __thread struct { delay_t d; int nl, k0, rb, ns; bool ok; } t_dly1[16];
+static bool nr_ul_delay_once_on(void)
+{
+  static int on = -1;
+  if (on < 0) on = getenv("ISAC_UL_DELAY_ONCE") && atoi(getenv("ISAC_UL_DELAY_ONCE")) > 0;
+  return on;
+}
+static void ul_passive_delay(const puschAntennaProc_t *rdata, int antenna, const c16_t *ls, c16_t *time, delay_t *delay)
+{
+  const int n = rdata->frame_parms->ofdm_symbol_size;
+  const bool once = nr_ul_delay_once_on() && antenna >= 0 && antenna < 16;
+  if (once && rdata->lp > 0 && t_dly1[antenna].ok && t_dly1[antenna].nl == rdata->nl && t_dly1[antenna].k0 == rdata->bwp_start_subcarrier
+      && t_dly1[antenna].rb == rdata->pusch_pdu->rb_size && t_dly1[antenna].ns == rdata->Ns) {
+    if (t_dly1[antenna].d.delay_max_val >= delay->delay_max_val)
+      *delay = t_dly1[antenna].d;
+    return;
+  }
+  if (!(nr_ul_delay_fast_on() && !rdata->scope && nr_passive_est_delay_fast(n, ls, delay)))
+    nr_passive_est_delay(n, ls, time, delay);
+  if (once && rdata->lp == 0)
+    t_dly1[antenna] = (typeof(t_dly1[0])){.d = *delay, .nl = rdata->nl, .k0 = rdata->bwp_start_subcarrier, .rb = rdata->pusch_pdu->rb_size,
+                                          .ns = rdata->Ns, .ok = true};
+}
 
 __attribute__((always_inline)) inline c16_t c32x16cumulVectVectWithSteps(c16_t *in1,
                                                                          int *offset1,
@@ -172,10 +201,8 @@ static void nr_pusch_antenna_processing(void *arg)
         pilot_cnt += 2;
       }
       c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
-      if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
-        if (!(nr_ul_delay_fast_on() && !rdata->scope && nr_passive_est_delay_fast(frame_parms->ofdm_symbol_size, ul_ls_est, delay)))
-          nr_passive_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
-      }
+      if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+        ul_passive_delay(rdata, antenna, ul_ls_est, ch_estimates_time, delay);
       else
         nr_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
       if (rdata->scope && antenna == 0) {
@@ -279,10 +306,8 @@ static void nr_pusch_antenna_processing(void *arg)
 
       // Delay compensation
       c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
-      if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
-        if (!(nr_ul_delay_fast_on() && !rdata->scope && nr_passive_est_delay_fast(frame_parms->ofdm_symbol_size, ul_ls_est, delay)))
-          nr_passive_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
-      }
+      if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+        ul_passive_delay(rdata, antenna, ul_ls_est, ch_estimates_time, delay);
       else
         nr_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
       if (rdata->scope && antenna == 0) {
@@ -610,6 +635,7 @@ int nr_pusch_channel_estimation(PHY_VARS_gNB *gNB,
     rdata->ans = &ans;
     rdata->pusch_ch_est_dmrs_pos_slot_mem = pusch_ch_est_dmrs_pos_slot_mem;
     rdata->dmrs_symbol_start_idx = dmrs_symbol_start_idx;
+    rdata->lp = lp;
     // Call the nr_pusch_antenna_processing function
     if (job_id == num_jobs - 1) {
       // Run the last job inline
