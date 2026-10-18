@@ -1,0 +1,36 @@
+ab_aTL1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=2 err=[]
+aTL1 -> /home/nicola/NICOLA/ota_runs/ab_aTL1_1_142631
+ab_aTY1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=2 err=[]
+aTY1 -> /home/nicola/NICOLA/ota_runs/ab_aTY1_1_142943
+ab_aTF1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=2 err=[]
+aTF1 -> /home/nicola/NICOLA/ota_runs/ab_aTF1_1_143253
+ab_aVL1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=195 err=[]
+aVL1 -> /home/nicola/NICOLA/ota_runs/ab_aVL1_1_143602
+ab_aVY1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=194 err=[]
+aVY1 -> /home/nicola/NICOLA/ota_runs/ab_aVY1_1_143907
+ab_aVF1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=155 err=[]
+aVF1 -> /home/nicola/NICOLA/ota_runs/ab_aVF1_1_144210
+ab_aTF2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=2 err=[]
+aTF2 -> /home/nicola/NICOLA/ota_runs/ab_aTF2_1_144516
+ab_aTL2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=3 err=[]
+aTL2 -> /home/nicola/NICOLA/ota_runs/ab_aTL2_1_144825
+ab_aTY2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=2 err=[]
+aTY2 -> /home/nicola/NICOLA/ota_runs/ab_aTY2_1_145134
+ab_aVF2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=177 err=[]
+aVF2 -> /home/nicola/NICOLA/ota_runs/ab_aVF2_1_145440
+ab_aVL2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=183 err=[]
+aVL2 -> /home/nicola/NICOLA/ota_runs/ab_aVL2_1_145744
+ab_aVY2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=111 err=[]
+aVY2 -> /home/nicola/NICOLA/ota_runs/ab_aVY2_1_150047
+ab_aTY3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=3 err=[]
+aTY3 -> /home/nicola/NICOLA/ota_runs/ab_aTY3_1_150352
+ab_aTF3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=3 err=[]
+aTF3 -> /home/nicola/NICOLA/ota_runs/ab_aTF3_1_150701
+ab_aTL3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=2 err=[]
+aTL3 -> /home/nicola/NICOLA/ota_runs/ab_aTL3_1_151011
+ab_aVY3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=196 err=[]
+aVY3 -> /home/nicola/NICOLA/ota_runs/ab_aVY3_1_151319
+ab_aVF3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=179 err=[]
+aVF3 -> /home/nicola/NICOLA/ota_runs/ab_aVF3_1_151627
+ab_aVL3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=187 err=[]
+aVL3 -> /home/nicola/NICOLA/ota_runs/ab_aVL3_1_151930
