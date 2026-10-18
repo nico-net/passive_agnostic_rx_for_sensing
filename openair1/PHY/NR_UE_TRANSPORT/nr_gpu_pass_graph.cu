@@ -914,14 +914,15 @@ static void wait_done(Inst &I, int ul, uint64_t key, uint64_t t_launch_ns)
     static thread_local bool slack = false;
     if (!slack) { prctl(PR_SET_TIMERSLACK, 1000UL, 0, 0, 0); slack = true; } /* 1 us instead of the default 50 us wake slack of this thread's timers */
     const uint32_t pred = sp > 0 ? g_pred_ns[ul][(key * 0x9E3779B97F4A7C15ull) >> 56].load(std::memory_order_relaxed) : 0;
-    if (pred) {
-      const uint64_t tgt = t_launch_ns + (uint64_t)pred * 9 / 10 - (uint64_t)sp * 1000ull, now = nr_gpu_pass_now_ns();
+    if (sp > 0) {
+      /* sleep once to sp us before the predicted end, spin to 100 us after it (an unseen class: spin up to 500 us), then block on the event for outliers */
+      const uint64_t now = nr_gpu_pass_now_ns();
+      const uint64_t tgt = pred ? t_launch_ns + pred - (uint64_t)sp * 1000ull : 0, end = t_launch_ns + (pred ? (uint64_t)pred + 100000ull : 500000ull);
       if (tgt > now + 20000) {
         const struct timespec d = {(time_t)((tgt - now) / 1000000000ull), (long)((tgt - now) % 1000000000ull)};
         nanosleep(&d, nullptr);
       }
-      const uint64_t t0 = nr_gpu_pass_now_ns();
-      while ((e = cudaEventQuery(I.done)) == cudaErrorNotReady && nr_gpu_pass_now_ns() - t0 < (uint64_t)sp * 1000ull) {}
+      while ((e = cudaEventQuery(I.done)) == cudaErrorNotReady && nr_gpu_pass_now_ns() < end) {}
     }
     if (e == cudaErrorNotReady) e = cudaEventSynchronize(I.done);
   }
@@ -973,7 +974,7 @@ static bool key_ok(const Key &k)
  * (all instances), the worst case a class is checked against before any of its sub-graphs is built (review S4: no orphan sub-graph when the cap is hit mid-class). */
 static std::atomic<uint64_t> g_split_n[4], g_split_unseen[4], g_split_mb{0}, g_inst_mb{0}, g_split_warm_us{0}, g_split_capped{0}, g_split_kb{0};
 static uint64_t g_sub_kb_max[4];
-static int split_cap_mb() { return g_cfg.split_mb > 0 ? g_cfg.split_mb : 1536; /* measured 0.49 MB per graph executable: 5 DL-shape executables (4 real + overflow) per class need ~1.3 GB for the full warm set (was 1008 MB with 4) */ }
+static int split_cap_mb() { return g_cfg.split_mb > 0 ? g_cfg.split_mb : 2048; /* measured 0.55 MB per graph executable (the gated D / L wrappers included): 5 DL-shape executables (4 real + overflow) per class need ~1.5 GB for the full warm set of the unit test (was 1008 MB with 4); production warms fewer classes */ }
 static bool split_cap_hit(uint64_t extra_kb)
 {
   if (((g_inst_mb << 10) + g_split_kb + extra_kb) >> 10 < (uint64_t)split_cap_mb()) return false;
@@ -1105,11 +1106,12 @@ static int build(const Key &k, int sub = SUB_FULL)
     cudaGraphDestroy(g);
     if (rc) break;
     /* the first replay allocates inside the driver / loads the kernels: do it now (pre-fence). Split: the parameter blocks are not in the sub-graphs (h2d_params) */
-    if ((sub != SUB_FULL && h2d_params(I, k, I.s, true)) || cudaGraphLaunch(e.exec[i], I.s) != cudaSuccess || cudaEventRecord(I.done, I.s) != cudaSuccess ||
-        cudaStreamSynchronize(I.s) != cudaSuccess) {
+    if (cudaEventRecord(I.ev0, I.s) != cudaSuccess || (sub != SUB_FULL && h2d_params(I, k, I.s, true)) || cudaGraphLaunch(e.exec[i], I.s) != cudaSuccess || cudaEventRecord(I.done, I.s) != cudaSuccess ||
+        cudaEventSynchronize(I.done) != cudaSuccess /* the blocking wait and the event timing once, pre-fence: their driver state is allocated here, not on the pass path */ || cudaStreamSynchronize(I.s) != cudaSuccess) {
       fprintf(stderr, "nr_gpu_pass: warm replay of class nrb %u nl %u failed: %s\n", k.nrb, k.nl, cudaGetErrorString(cudaGetLastError()));
       rc = -1;
     }
+    { float ms; cudaEventElapsedTime(&ms, I.ev0, I.done); cudaGetLastError(); }
     if (sub != SUB_FULL && cudaMemGetInfo(&f1, &tb_) == cudaSuccess && f0 > f1) kb += (uint64_t)(f0 - f1) >> 10;
   }
   free(sj);
@@ -1145,12 +1147,12 @@ static int alloc_inst(int id)
   const size_t ext = EXTMAX;
   I.bn = (size_t)2 * NSYM * NR_GPU_DEMOD_MAX_NL * ext * 2;
   const int prio = id < NR_GPU_PASS_DL ? hi : lo; /* real DL grants highest; UL and probe pools lowest (see the pool comment at the top) */
-  if ((!nr_gpu_green_stream(&I.s, prio, true, id) && cudaStreamCreateWithPriority(&I.s, cudaStreamNonBlocking, prio) != cudaSuccess) ||
-      (!nr_gpu_green_stream(&I.s2, prio, true, id) && cudaStreamCreateWithPriority(&I.s2, cudaStreamNonBlocking, prio) != cudaSuccess) ||
+  if ((!nr_gpu_green_stream(&I.s, prio, true, id < NR_GPU_PASS_DL ? id : NR_GREEN_UL_IDX + id) && cudaStreamCreateWithPriority(&I.s, cudaStreamNonBlocking, prio) != cudaSuccess) ||
+      (!nr_gpu_green_stream(&I.s2, prio, true, id < NR_GPU_PASS_DL ? id : NR_GREEN_UL_IDX + id) && cudaStreamCreateWithPriority(&I.s2, cudaStreamNonBlocking, prio) != cudaSuccess) ||
       cudaEventCreateWithFlags(&I.done, cudaEventBlockingSync) != cudaSuccess || cudaEventCreateWithFlags(&I.ev0, cudaEventDefault) != cudaSuccess ||
       cudaEventCreateWithFlags(&I.evh, cudaEventDefault) != cudaSuccess) /* blocking sync: the wake is the driver's, not a poll loop */
     return -1;
-  if (g_cfg.v2 && nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&I.s_lo, lo, hi, id)) I.s_lo = nullptr; /* v2 Task 2: probes on the twin, in the instance's own green context (a graph captured on I.s cannot launch in another); none = the RT stream */
+  if (g_cfg.v2 && nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&I.s_lo, lo, hi, id < NR_GPU_PASS_DL ? id : NR_GREEN_UL_IDX + id)) I.s_lo = nullptr; /* v2 Task 2: probes on the twin, in the instance's own green context (a graph captured on I.s cannot launch in another); none = the RT stream */
   if (nr_gpu_buf_alloc(&I.rxF, (size_t)4 * NSYM * N * 4) || nr_gpu_buf_alloc(&I.est, (size_t)16 * NSYM * N * 4) ||
       nr_gpu_buf_alloc(&I.nvar, NR_GPU_CHEST_DEV_BYTES) || nr_gpu_buf_alloc(&I.geo, (size_t)2 * NSYM * ext * 4) ||
       nr_gpu_buf_alloc(&I.scratch, 4 * I.bn * 2) || nr_gpu_buf_alloc(&I.llr, (size_t)LLR_CAP * 2) ||
@@ -1321,10 +1323,11 @@ extern "C" void nr_gpu_pass_stats(char *buf, int n)
 }
 
 /* test hook: marks the instances of `mask` busy (1) or frees them (0) so that a test can run on one chosen instance */
+static void release_mask(unsigned mask);
 extern "C" void nr_gpu_pass_test_hold(unsigned mask, int hold)
 {
   if (hold) g_busy.fetch_or(mask);
-  else g_busy.fetch_and(~mask);
+  else release_mask(mask);
 }
 
 /* Pool acquisition (compare-and-swap on the busy mask). A real grant takes an instance of its own pool at once. If the pool is full it takes the OVERFLOW instance, the probe-pool
@@ -1344,14 +1347,15 @@ static int try_acquire(unsigned pool)
     if (g_busy.compare_exchange_weak(m, m | 1u << i)) return i;
   }
 }
-static void release(int id)
+static void release_mask(unsigned mask)
 {
-  g_busy.fetch_and(~(1u << id));
+  g_busy.fetch_and(~mask);
   if (g_real_waiting.load() > 0) {
     std::lock_guard<std::mutex> lk(g_pool_mu);
     g_pool_cv.notify_all();
   }
 }
+static void release(int id) { release_mask(1u << id); }
 static int acquire_real(unsigned pool)
 {
   int id = try_acquire(pool);
