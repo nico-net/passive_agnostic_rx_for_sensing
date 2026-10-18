@@ -53,7 +53,7 @@ TEST(GpuMem, AllocIsFirstTouched) {
 /* ===================================================== Task 4: the shape-class graph pass ===================================================== */
 /* The graphs are captured per instance under the memory model of the process (ctest runs this suite once as is and once with NR_GPU_PASS_DISCRETE=1). */
 /* the FEP module sizes its pass LS rows at init from these (1024 = the split value; a 128-segment row group is 512 rows); set before any test initialises it */
-[[maybe_unused]] static const int g_split_ls_rows_env = (setenv("ISAC_PDSCH_GPU_GRAPH", "1", 0), setenv("ISAC_PDSCH_GPU_GRAPH_SPLIT", "1", 0), 0);
+[[maybe_unused]] static const int g_split_ls_rows_env = (setenv("ISAC_PDSCH_GPU_GRAPH", "1", 0), setenv("ISAC_PDSCH_GPU_GRAPH_SPLIT", "1", 0), setenv("ISAC_GPU_PASS_FP32", "0", 0), 0); /* the bit-exact double demod is the reference here (FP32 is the passive default since t26zE) */
 static void pass_model()
 {
   if (getenv("NR_GPU_PASS_DISCRETE")) setenv("ISAC_GPU_FORCE_DISCRETE", "1", 1);
