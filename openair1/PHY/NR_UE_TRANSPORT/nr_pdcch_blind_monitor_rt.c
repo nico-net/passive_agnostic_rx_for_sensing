@@ -1429,7 +1429,7 @@ static bool solver_hq_of(void *ctx, uint16_t layout, nr_dci_bits_t payload, uint
 static bool dci11_layout_parse_full(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
                                     const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed,
                                     nr_pdcch_blind_extract_opts_t *o_out, nr_pdcch_blind_extract_pre_t *pre_out);
-/* ISAC_DCI11_PARSE_CACHE=1 (default off): per scan thread and layout, the payload-independent part of a parse (extract options,
+/* ISAC_DCI11_PARSE_CACHE=1 (default off; 2 = self-check, see dci11_parse_cache_mode): per scan thread and layout, the payload-independent part of a parse (extract options,
  * field widths, implied size) is kept and reused while its inputs (the layout, its TDA width, len, BWP size/start, configured TDA
  * count) are unchanged; the payload part runs as before. Bit-exact: the same pure functions of the same inputs. It removes about
  * a third of the per-DCI solver reading pass, which parses every live layout (~1400 on capture b) before the grant is enqueued. */
@@ -1440,16 +1440,37 @@ typedef struct {
   nr_pdcch_blind_extract_opts_t o;
   nr_pdcch_blind_extract_pre_t pre;
 } dci11_parse_memo_t;
-static bool dci11_parse_cache_on(void)
+static int dci11_parse_cache_mode(void) /* 0 off, 1 on, 2 on + compare every cached parse with the full one (self-check) */
 {
   static int en = -1;
-  if (en < 0) en = getenv("ISAC_DCI11_PARSE_CACHE") && atoi(getenv("ISAC_DCI11_PARSE_CACHE")) ? 1 : 0;
-  return en == 1;
+  if (en < 0) en = getenv("ISAC_DCI11_PARSE_CACHE") ? atoi(getenv("ISAC_DCI11_PARSE_CACHE")) : 0;
+  return en;
 }
+static bool dci11_parse_cached(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                               const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed);
 static bool dci11_layout_parse(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
                                const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed)
 {
-  if (!dci11_parse_cache_on() || i < 0 || i >= NR_DCI11_LAYOUT_MAX)
+  const int mode = dci11_parse_cache_mode();
+  if (mode != 2)
+    return mode ? dci11_parse_cached(r, i, raw, len, cfg, parsed) : dci11_layout_parse_full(r, i, raw, len, cfg, parsed, NULL, NULL);
+  nr_pdcch_blind_result_t ref = *parsed;
+  const bool ok_ref = dci11_layout_parse_full(r, i, raw, len, cfg, &ref, NULL, NULL);
+  const bool ok = dci11_parse_cached(r, i, raw, len, cfg, parsed);
+  static _Atomic uint64_t s_n, s_bad;
+  const bool bad = ok != ok_ref || memcmp(&ref, parsed, sizeof(ref)) != 0;
+  const uint64_t n = atomic_fetch_add_explicit(&s_n, 1, memory_order_relaxed) + 1;
+  const uint64_t nb = bad ? atomic_fetch_add_explicit(&s_bad, 1, memory_order_relaxed) + 1 : atomic_load_explicit(&s_bad, memory_order_relaxed);
+  if ((bad && nb <= 8) || (n % 2000000) == 0)
+    LOG_A(PHY, "SENSING: DCI11_PARSE_CACHE check parses=%llu mismatches=%llu%s\n", (unsigned long long)n, (unsigned long long)nb,
+          bad ? " (MISMATCH)" : "");
+  *parsed = ref; /* self-check mode decodes with the reference result */
+  return ok_ref;
+}
+static bool dci11_parse_cached(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                               const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed)
+{
+  if (i < 0 || i >= NR_DCI11_LAYOUT_MAX)
     return dci11_layout_parse_full(r, i, raw, len, cfg, parsed, NULL, NULL);
   static __thread dci11_parse_memo_t *t_memo; /* heap, not static TLS (see the stage-2 scratch note) */
   if (t_memo == NULL && (t_memo = calloc(NR_DCI11_LAYOUT_MAX, sizeof(*t_memo))) == NULL)

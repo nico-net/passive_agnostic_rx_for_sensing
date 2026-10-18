@@ -1,0 +1,27 @@
+b OFF 1 high p50=1219 p99=3071 p999=4586 crc_q=96.0 n_real=5133 drops=0.0 | tail n=52 a2e p10/50/90=548/945/1773 x_read=173 dec=2139.5 | all a2e=625 x_read=151.0
+b ON 1 mid  p50=1159 p99=3181 p999=4906 crc_q=96.5 n_real=3198 drops=0.0 | tail n=32 a2e p10/50/90=503/887/1747 x_read=21.5 dec=2294.5 | all a2e=589.0 x_read=119.0
+tim ON 1      p50=937 p99=2420 p999=4285 crc_q=76.7 n_real=5845 drops=0.0 | tail n=59 a2e p10/50/90=293/477/933 x_read=55.0 dec=2218 | all a2e=390 x_read=66
+tim OFF 1      p50=958 p99=2153 p999=3717 crc_q=73.4 n_real=5109 drops=0.0 | tail n=52 a2e p10/50/90=384/570/785 x_read=118.5 dec=1799.0 | all a2e=401 x_read=77.0
+b ON 2 mid  p50=1286 p99=3148 p999=4899 crc_q=96.5 n_real=2831 drops=0.0 | tail n=29 a2e p10/50/90=628/1267/2321 x_read=127 dec=1220 | all a2e=660 x_read=122.0
+b OFF 2 high p50=1349 p99=3593 p999=5747 crc_q=95.8 n_real=4546 drops=0.0 | tail n=46 a2e p10/50/90=594/1035/1606 x_read=165.0 dec=2785.0 | all a2e=705.0 x_read=152
+tim OFF 2      p50=960 p99=2292 p999=3237 crc_q=73.7 n_real=5739 drops=0.0 | tail n=58 a2e p10/50/90=350/532/943 x_read=116 dec=1993.0 | all a2e=410 x_read=73
+tim ON 2      p50=954 p99=2266 p999=4893 crc_q=75.3 n_real=5910 drops=0.0 | tail n=60 a2e p10/50/90=312/537/1425 x_read=75.5 dec=1950.5 | all a2e=381.0 x_read=65.0
+b OFF 3 high p50=1318 p99=3595 p999=5221 crc_q=96.0 n_real=5125 drops=0.0 | tail n=52 a2e p10/50/90=789/1038/1571 x_read=193.0 dec=2462.5 | all a2e=672 x_read=157
+b ON 3 low  p50=1349 p99=3805 p999=4858 crc_q=96.8 n_real=2131 drops=0.0 | tail n=22 a2e p10/50/90=378/1297/2442 x_read=26 dec=2043.0 | all a2e=734 x_read=119.0
+tim ON 3      p50=1000 p99=2357 p999=3148 crc_q=70.4 n_real=1889 drops=0.0 | tail n=19 a2e p10/50/90=451/752/1525 x_read=89 dec=1597 | all a2e=405 x_read=68
+tim OFF 3      p50=955 p99=2285 p999=6504 crc_q=73.5 n_real=4818 drops=0.0 | tail n=49 a2e p10/50/90=340/557/3802 x_read=95.0 dec=1693 | all a2e=391.0 x_read=73.0
+b ON 4 mid  p50=1224 p99=3319 p999=4545 crc_q=97.2 n_real=3736 drops=0.0 | tail n=38 a2e p10/50/90=504/1135/3011 x_read=154.0 dec=1885.0 | all a2e=648.0 x_read=126
+b OFF 4 mid  p50=1277 p99=3118 p999=4769 crc_q=97.1 n_real=2551 drops=0.0 | tail n=26 a2e p10/50/90=647/1415/2748 x_read=25.0 dec=985.0 | all a2e=688 x_read=138.0
+b OFF 5 low  p50=1199 p99=3656 p999=5711 crc_q=97.1 n_real=2298 drops=0.0 | tail n=23 a2e p10/50/90=531/790/1908 x_read=25 dec=3059 | all a2e=595.0 x_read=156
+b ON 5 low  p50=1402 p99=4035 p999=6286 crc_q=97.0 n_real=2466 drops=0.0 | tail n=25 a2e p10/50/90=703/971/2160 x_read=167 dec=3307 | all a2e=717.5 x_read=126.0
+b ON 6 high p50=1223 p99=2856 p999=5110 crc_q=95.3 n_real=4912 drops=0.0 | tail n=50 a2e p10/50/90=679/1144/1824 x_read=130.0 dec=1617.5 | all a2e=640.0 x_read=117.0
+b OFF 6 low  p50=1236 p99=3688 p999=5280 crc_q=96.9 n_real=2294 drops=0.0 | tail n=23 a2e p10/50/90=728/981/1679 x_read=147 dec=2604 | all a2e=601.5 x_read=148.0
+
+b   high OFF n=3 p50 1318 p99 3593 [3071, 3593, 3595] p99.9 5221 crc_q 96.0 [95.8-96.0] n_real 5125 drops max 0.0 | tail a2e 1022 x_read 173 acc2enq 216 pass2p1 204 occ2pass 246 dec 2462 | all a2e 672 x_read 152
+b   high ON  n=1 p50 1223 p99 2856 [2856] p99.9 5110 crc_q 95.3 [95.3-95.3] n_real 4912 drops max 0.0 | tail a2e 1126 x_read 130 acc2enq 168 pass2p1 216 occ2pass 558 dec 1618 | all a2e 640 x_read 117
+b   low  OFF n=2 p50 1218 p99 3672 [3656, 3688] p99.9 5496 crc_q 97.0 [96.9-97.1] n_real 2296 drops max 0.0 | tail a2e 886 x_read 86 acc2enq 143 pass2p1 264 occ2pass 207 dec 2832 | all a2e 598 x_read 152
+b   low  ON  n=2 p50 1376 p99 3920 [3805, 4035] p99.9 5572 crc_q 96.9 [96.8-97.0] n_real 2298 drops max 0.0 | tail a2e 1128 x_read 96 acc2enq 140 pass2p1 264 occ2pass 215 dec 2675 | all a2e 726 x_read 122
+b   mid  OFF n=1 p50 1277 p99 3118 [3118] p99.9 4769 crc_q 97.1 [97.1-97.1] n_real 2551 drops max 0.0 | tail a2e 1400 x_read 25 acc2enq 84 pass2p1 284 occ2pass 816 dec 985 | all a2e 688 x_read 138
+b   mid  ON  n=3 p50 1224 p99 3181 [3148, 3181, 3319] p99.9 4899 crc_q 96.5 [96.5-97.2] n_real 3198 drops max 0.0 | tail a2e 1132 x_read 127 acc2enq 170 pass2p1 211 occ2pass 223 dec 1885 | all a2e 648 x_read 122
+tim      OFF n=3 p50 958 p99 2285 [2153, 2285, 2292] p99.9 3717 crc_q 73.5 [73.4-73.7] n_real 5109 drops max 0.0 | tail a2e 557 x_read 116 acc2enq 158 pass2p1 187 occ2pass 3 dec 1799 | all a2e 401 x_read 73
+tim      ON  n=3 p50 954 p99 2357 [2266, 2357, 2420] p99.9 4285 crc_q 75.3 [70.4-76.7] n_real 5845 drops max 0.0 | tail a2e 529 x_read 76 acc2enq 118 pass2p1 186 occ2pass 3 dec 1950 | all a2e 390 x_read 66
