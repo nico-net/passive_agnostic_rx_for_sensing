@@ -368,7 +368,7 @@ bool nr_core_plan_is_critical(int core)
 }
 static bool nr_core_float_mask(cpu_set_t *mask)
 {
-  const char *e = nr_env_core("ISAC_FLOAT_CORES"), *plan = (getenv("ISAC_CORE_PLAN") ?: "0");
+  const char *e = getenv("ISAC_FLOAT_CORES"), *plan = getenv("ISAC_CORE_PLAN");
   unsigned char m[NR_CP_MAX_CPUS], on[NR_CP_MAX_CPUS];
   char buf[4096];
   /* the lane is the plan-off mechanism: with the automatic plan (ISAC_CORE_PLAN unset or 1) the plan owns every mask */
@@ -382,8 +382,8 @@ int nr_core_float_apply(void)
 {
   cpu_set_t lane, inherited, cur;
   if (!nr_core_float_mask(&lane)) {
-    if (nr_env_core("ISAC_FLOAT_CORES"))
-      fprintf(stderr, "SENSING: FLOAT_CORES \"%s\" ignored (needs ISAC_CORE_PLAN=0 and a CPU list with an online CPU)\n", nr_env_core("ISAC_FLOAT_CORES"));
+    if (getenv("ISAC_FLOAT_CORES"))
+      fprintf(stderr, "SENSING: FLOAT_CORES \"%s\" ignored (needs ISAC_CORE_PLAN=0 and a CPU list with an online CPU)\n", getenv("ISAC_FLOAT_CORES"));
     return 0;
   }
   if (sched_getaffinity(0, sizeof(inherited), &inherited)) return -1;
@@ -398,7 +398,7 @@ int nr_core_float_apply(void)
     if (sched_setaffinity((pid_t)tid, sizeof(lane), &lane) == 0) moved++;
   }
   closedir(tasks);
-  fprintf(stderr, "SENSING: FLOAT_CORES=%s (%d CPUs): %d task(s) moved, %d pinned task(s) kept\n", nr_env_core("ISAC_FLOAT_CORES"), CPU_COUNT(&lane), moved, kept);
+  fprintf(stderr, "SENSING: FLOAT_CORES=%s (%d CPUs): %d task(s) moved, %d pinned task(s) kept\n", getenv("ISAC_FLOAT_CORES"), CPU_COUNT(&lane), moved, kept);
   return 0;
 }
 void nr_core_float_enter(void)

@@ -1616,7 +1616,7 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
   delay_t gpu_delay[NR_DL_CHEST_MAX_ANT];
   int gpu_delay_mask = 0;
   if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) < 0) {
-    const char *e = (getenv("ISAC_CHEST_GPU_DELAY") ?: "1"), *c = getenv("ISAC_CHEST_GPU_DELAY_CHECK");
+    const char *e = (getenv("ISAC_CHEST_GPU_DELAY") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : "0")), *c = getenv("ISAC_CHEST_GPU_DELAY_CHECK");
     g_chest_gpu_delay_check = c ? atoi(c) : 64;
     atomic_store(&g_chest_gpu_delay, e && atoi(e) == 1 && nr_pdsch_gpu_exact_delay_rows ? 1 : 0);
   }
@@ -2197,8 +2197,8 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
   if (nr_pdsch_route_cpu()) /* BATCHCPU */
     return 1;
   if (atomic_load_explicit(&g_gch_on, memory_order_relaxed) < 0) {
-    const char *e = (getenv("ISAC_PDSCH_GPU_EXACT_CHEST") ?: "1"), *c = getenv("ISAC_PDSCH_GPU_EXACT_CHEST_CHECK");
-    g_gch_check = c ? atoi(c) : 64;
+    const char *e = (getenv("ISAC_PDSCH_GPU_EXACT_CHEST") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : "0")), *c = getenv("ISAC_PDSCH_GPU_EXACT_CHEST_CHECK");
+    g_gch_check = c ? atoi(c) : (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 64 : 0);
     atomic_store(&g_gch_on, e && atoi(e) == 1 && nr_pdsch_gpu_exact_chest_entry && nr_pdsch_gpu_exact_chest_entry());
   }
   if (!atomic_load_explicit(&g_gch_on, memory_order_relaxed) || !(nr_pdsch_gpu_exact_chest_entry ? nr_pdsch_gpu_exact_chest_entry() : NULL))
@@ -2206,7 +2206,7 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int config_type = dlsch->dmrsConfigType;
   if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) < 0) {
-    const char *e = (getenv("ISAC_CHEST_GPU_DELAY") ?: "1"), *c = getenv("ISAC_CHEST_GPU_DELAY_CHECK");
+    const char *e = (getenv("ISAC_CHEST_GPU_DELAY") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : "0")), *c = getenv("ISAC_CHEST_GPU_DELAY_CHECK");
     g_chest_gpu_delay_check = c ? atoi(c) : 64;
     atomic_store(&g_chest_gpu_delay, e && atoi(e) == 1 && nr_pdsch_gpu_exact_delay_rows ? 1 : 0);
   }
@@ -2310,8 +2310,8 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
   if (nr_pdsch_route_cpu()) /* BATCHCPU */
     return -1;
   if (atomic_load_explicit(&g_gch_on, memory_order_relaxed) < 0) {
-    const char *e = (getenv("ISAC_PDSCH_GPU_EXACT_CHEST") ?: "1"), *c = getenv("ISAC_PDSCH_GPU_EXACT_CHEST_CHECK");
-    g_gch_check = c ? atoi(c) : 64;
+    const char *e = (getenv("ISAC_PDSCH_GPU_EXACT_CHEST") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : "0")), *c = getenv("ISAC_PDSCH_GPU_EXACT_CHEST_CHECK");
+    g_gch_check = c ? atoi(c) : (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 64 : 0);
     const int on = e && atoi(e) == 1 && nr_pdsch_gpu_exact_chest_entry && nr_pdsch_gpu_exact_chest_entry();
     atomic_store(&g_gch_on, on);
     if (on)
@@ -2330,7 +2330,7 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int config_type = dlsch->dmrsConfigType;
   if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) < 0) { /* the estimator's own lazy switch */
-    const char *e = (getenv("ISAC_CHEST_GPU_DELAY") ?: "1"), *c = getenv("ISAC_CHEST_GPU_DELAY_CHECK");
+    const char *e = (getenv("ISAC_CHEST_GPU_DELAY") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : "0")), *c = getenv("ISAC_CHEST_GPU_DELAY_CHECK");
     g_chest_gpu_delay_check = c ? atoi(c) : 64;
     atomic_store(&g_chest_gpu_delay, e && atoi(e) == 1 && nr_pdsch_gpu_exact_delay_rows ? 1 : 0);
   }

@@ -277,7 +277,7 @@ static int nr_pusch_mmse_mode(void)
   static int mode = -1;
   if (mode < 0) {
     const char *v = getenv("ISAC_PUSCH_MMSE_MODE");
-    mode = v ? atoi(v) : 2;
+    mode = v ? atoi(v) : (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 2 : 0);
   }
   return mode;
 }

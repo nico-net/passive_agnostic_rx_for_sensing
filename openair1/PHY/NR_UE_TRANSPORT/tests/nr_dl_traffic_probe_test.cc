@@ -184,3 +184,6 @@ TEST(DlTrafficProbe, CoresetDiscSyncPoorIsNotAMissAndRearmsOnRecovery) {
   in.now_s = 52; nr_cdisc_step(&c, &in, &o); EXPECT_EQ(c.state, NR_CDISC_MISSED);   /* 52-36 = 16 s since arming */
   EXPECT_EQ(o.recover, 1);
 }
+
+/* link stub: nr_dl_traffic_probe.c / nr_csirs_monitor.c read the passive-mode flag (zeroed params = not passive) */
+extern "C" void *get_softmodem_params(void) { static char z[65536]; return z; }

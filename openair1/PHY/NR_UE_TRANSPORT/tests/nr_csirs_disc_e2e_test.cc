@@ -402,3 +402,6 @@ TEST(CsirsDiscE2E, CumulativeLowMarginRequiresFreshSequenceConfirmation)
   EXPECT_EQ(out[0].scramb_id,415);EXPECT_EQ(out[0].row,1);EXPECT_EQ(out[0].nr_of_rbs,16);
   nr_csirs_blind_rt_test_discovery_reset();
 }
+
+/* link stub: nr_dl_traffic_probe.c / nr_csirs_monitor.c read the passive-mode flag (zeroed params = not passive) */
+softmodem_params_t *get_softmodem_params(void) { static softmodem_params_t p; return &p; }

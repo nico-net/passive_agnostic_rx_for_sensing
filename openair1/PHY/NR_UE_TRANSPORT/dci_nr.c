@@ -237,7 +237,7 @@ static bool nr_pdcch_rboffset_fix_enabled(void)
 {
   static _Atomic int en = -1;
   if (en < 0) {
-    const char *e = (getenv("ISAC_PDCCH_RBOFFSET_FIX") ?: "1");
+    const char *e = (getenv("ISAC_PDCCH_RBOFFSET_FIX") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : NULL));
     en = (e && strcmp(e, "1") == 0) ? 1 : 0;
   }
   return en == 1;

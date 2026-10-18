@@ -189,7 +189,7 @@ static nr_pss_fold_t s_pss_fold; /* initial sync only (single GSCN, sync actor) 
 static nr_pss_info_t pss_search_decim(const pss_search_t *p, int D, int pss_index_start, int pss_index_end)
 {
   static int s_k = -1;
-  const int K = min(max(pss_env_int("ISAC_PSS_ACC", 8, &s_k), 1), 64);
+  const int K = min(max(pss_env_int("ISAC_PSS_ACC", IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 8 : 0, &s_k), 1), 64);
   const int N = p->ofdm_symbol_size;
   c16_t(*pssTime)[N] = (c16_t(*)[N])p->pssTime;
   const int npos = p->rxdata_length / D;
@@ -348,7 +348,7 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
 
   static int s_decim = -1;
   const int D = nr_pss_decim_factor(p->ofdm_symbol_size);
-  if (p->decim && D > 0 && p->window_radius == 0 && p->search_stride <= 4 && pss_env_int("ISAC_PSS_DECIM", 1, &s_decim) > 0
+  if (p->decim && D > 0 && p->window_radius == 0 && p->search_stride <= 4 && pss_env_int("ISAC_PSS_DECIM", IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 1 : 0, &s_decim) > 0
       && get_softmodem_params()->sl_mode == 0)
     return pss_search_decim(p, D, pss_index_start, pss_index_end);
 

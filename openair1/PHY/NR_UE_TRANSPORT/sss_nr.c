@@ -222,13 +222,13 @@ sss_detection_result_t rx_sss_nr(nr_sss_params_t *params,
    * floor is in ADC counts squared, so it rejects any cell received below ~Vodafone/TIM level (2026-10-11: PCI 4/403/675
    * at 11-13k vs 30000). PBCH's CRC24 still verifies every accept. */
   static double s_rel = -1;
-  if (s_rel < 0) s_rel = atof(getenv("ISAC_SSS_REL_RATIO") ?: "2.5");
+  if (s_rel < 0) s_rel = atof(getenv("ISAC_SSS_REL_RATIO") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "2.5" : "0"));
   int64_t second = 0; /* best metric of a Nid1 other than res.nid_cell's, over all phases tried */
   /* ISAC_SSS_MULTI=R (default off): keep each Nid1's best metric; when the best beats the 4th-best Nid1 by R, the top 3
    * PCIs are candidates, each verified by its own PBCH CRC in nr_scan_ssb(). Unlike ISAC_SSS_REL_RATIO (best vs second)
    * this does not reject the strongest cell when a second cell shares the N_ID_2 and the SSB frequency. */
   static double s_multi = -1;
-  if (s_multi < 0) s_multi = atof(getenv("ISAC_SSS_MULTI") ?: "2.5");
+  if (s_multi < 0) s_multi = atof(getenv("ISAC_SSS_MULTI") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "2.5" : "0"));
   int64_t best_n1[N_ID_1_NUMBER];
   for (int i = 0; i < N_ID_1_NUMBER; i++) best_n1[i] = INT64_MIN;
 

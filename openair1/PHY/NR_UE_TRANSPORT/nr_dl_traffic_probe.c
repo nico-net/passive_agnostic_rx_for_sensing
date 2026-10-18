@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* See nr_dl_traffic_probe.h. Pure functions plus the grant registry; the RT feed is nr_dl_traffic_probe_rt.c. */
 #include "nr_dl_traffic_probe.h"
+#include "executables/softmodem-common.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -198,7 +199,7 @@ static _Atomic int g_sq_med, g_sq_p90;
 int nr_syncq_enabled(void)
 {
   static int e = -1;
-  if (e < 0) { const char *v = getenv("ISAC_CORESET_DISC_SYNCQ"); e = v ? atoi(v) : 1; if (e < 0 || e > 2) e = 0; }
+  if (e < 0) { const char *v = getenv("ISAC_CORESET_DISC_SYNCQ"); e = v ? atoi(v) : (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 1 : 0); if (e < 0 || e > 2) e = 0; }
   return e != 0;
 }
 void nr_syncq_note(int step)
@@ -229,7 +230,7 @@ int nr_syncq_status(int *med, int *p90)
 int nr_syncq_gate_closed(void)
 {
   static int lvl = -1;
-  if (lvl < 0) { const char *v = getenv("ISAC_CORESET_DISC_SYNCQ"); lvl = v ? atoi(v) : 1; }
+  if (lvl < 0) { const char *v = getenv("ISAC_CORESET_DISC_SYNCQ"); lvl = v ? atoi(v) : (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 1 : 0); }
   return lvl == 2 && atomic_load_explicit(&g_sq_poor, memory_order_relaxed);
 }
 void nr_syncq_request_reacquire(void) { atomic_store_explicit(&g_sq_reacq, 1, memory_order_relaxed); atomic_store_explicit(&g_sq_clamp, 1, memory_order_relaxed); }

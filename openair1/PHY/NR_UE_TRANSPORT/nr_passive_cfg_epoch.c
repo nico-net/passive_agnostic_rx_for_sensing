@@ -68,7 +68,7 @@ static bool si_bump_without_sib1;
 
 static void read_enable(void)
 {
-  const char *s = (getenv("ISAC_RECONF") ?: "1");
+  const char *s = getenv("ISAC_RECONF");
   enabled = s && strcmp(s, "1") == 0;
 }
 static bool is_enabled(void)

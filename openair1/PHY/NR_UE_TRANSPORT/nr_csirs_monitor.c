@@ -31,6 +31,7 @@
 
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
+#include "executables/softmodem-common.h"
 
 /// One configured monitor resource: its CSI-RS PDU plus a (period, offset) occurrence rule.
 typedef struct {
@@ -253,7 +254,7 @@ int nr_csirs_monitor_add_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *pdu,
       }
     }
   }
-  const char *discovery=(getenv("ISAC_CSIRS_DISC") ?: "1");
+  const char *discovery=(getenv("ISAC_CSIRS_DISC") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : NULL));
   const int capacity=discovery && !strcmp(discovery,"1")?DISC_MONITOR_CAPACITY:NR_CSIRS_MONITOR_MAX;
   if (g_n_monitors >= capacity) {
     pthread_mutex_unlock(&g_monitor_lock);

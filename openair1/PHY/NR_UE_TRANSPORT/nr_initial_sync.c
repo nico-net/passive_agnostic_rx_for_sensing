@@ -372,7 +372,7 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
     /* ISAC_SSS_MULTI also makes ISAC_TARGET_PCI an operator choice of ONE PCI (N_ID_1 pinned too); unset: N_ID_2 only */
     static int s_multi = -1;
     if (s_multi < 0)
-      s_multi = atof(getenv("ISAC_SSS_MULTI") ?: "2.5") > 0;
+      s_multi = atof(getenv("ISAC_SSS_MULTI") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "2.5" : "0")) > 0;
     params->sss_res = rx_sss_nr(&p_sss, pss_res, s_multi && params->target_nid_cell >= 0 ? params->target_nid_cell : -1, rxdataF);
 
     if (!params->sss_res.success || params->sss_res.nid_cell < 0) {
@@ -622,7 +622,7 @@ static void nr_kssb_grid_align(PHY_VARS_NR_UE *ue, nr_ue_ssb_scan_t *res)
     return;
   static int s_on = -1;
   if (s_on < 0)
-    s_on = atoi(getenv("ISAC_KSSB_ALIGN") ?: "1") > 0;
+    s_on = atoi(getenv("ISAC_KSSB_ALIGN") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : "0")) > 0;
   LOG_W(NR_PHY, "SENSING: KSSB_GRID k_ssb=%d ssb_sc=%d: receiver RB grid off the CRB grid by %d subcarriers (aligned: --ssb %d -C %lu)%s\n",
         k_ssb, fp->ssb_start_subcarrier, sh, fp->ssb_start_subcarrier - sh,
         (unsigned long)(fp->dl_CarrierFreq + (int64_t)sh * fp->subcarrier_spacing), s_on ? "; ISAC_KSSB_ALIGN retunes" : "");
@@ -904,7 +904,7 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
   clock_gettime(CLOCK_MONOTONIC, &scan_t1);
   LOG_I(NR_PHY, "SENSING: SYNC_SCAN ms=%.1f gscn=%d ant=%d frames=%d decim=%s detected=%d\n",
         (scan_t1.tv_sec - scan_t0.tv_sec) * 1e3 + (scan_t1.tv_nsec - scan_t0.tv_nsec) / 1e6, numGscn, scan_fp.nb_antennas_rx,
-        scan_nframes, getenv("ISAC_PSS_DECIM") ? getenv("ISAC_PSS_DECIM") : "1", res != NULL);
+        scan_nframes, getenv("ISAC_PSS_DECIM") ? getenv("ISAC_PSS_DECIM") : (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : "0"), res != NULL);
   // Set globals based on detected cell
   if (res) {
     fp->Nid_cell = res->nidCell;

@@ -738,7 +738,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     g_timing = e && atoi(e) != 0;
   }
   if (g_reconf < 0) {
-    const char *e = (getenv("ISAC_RECONF") ?: "1");
+    const char *e = getenv("ISAC_RECONF");
     g_reconf = e && strcmp(e, "1") == 0;
   }
   const uint64_t slot_start_us = g_timing ? now_us() : 0;

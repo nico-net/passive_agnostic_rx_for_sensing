@@ -192,3 +192,6 @@ TEST(CsirsDiscDump, ProductionStream)
   EXPECT_EQ(fed,5468u);EXPECT_EQ(csirs_disc_feed_drops,drops_before);
   nr_csirs_disc_ring_free(&snapshot);nr_csirs_disc_ring_free(&ring);nr_csirs_disc_detect_reset();fclose(file);
 }
+
+/* link stub: nr_dl_traffic_probe.c / nr_csirs_monitor.c read the passive-mode flag (zeroed params = not passive) */
+softmodem_params_t *get_softmodem_params(void) { static softmodem_params_t p; return &p; }

@@ -379,6 +379,15 @@ static void gpu_platform_log(int warning, const char *text)
  */
 int main(int argc, char **argv)
 {
+  /* t26yE site defaults of the passive receiver (never for the phy-test UE): visible before logInit() and the float lane. --passive-rx is on the command line on air. */
+  for (int i = 1; i < argc; i++)
+    if (!strcmp(argv[i], "--passive-rx")) {
+      setenv("ISAC_LOG_ASYNC", "1", 0); setenv("ISAC_CSIRS_DISC", "1", 0); setenv("ISAC_GPU_BUDGET", "1", 0); setenv("ISAC_RECONF", "1", 0); /* read by shared code (LDPC pool, GPU budget) */
+      /* USRP driver (hardware radio shared with the gNB): site defaults of the receiver */
+      setenv("ISAC_UHD_CTRL_CORES", "15", 0); setenv("ISAC_RX_RECOVER", "1", 0); setenv("ISAC_USRP_START_TIMEOUT_MS", "2200", 0);
+      setenv("ISAC_USRP_RING_ZEROCOPY", "1", 0); setenv("ISAC_USRP_CATCHUP_X", "1.05", 0); setenv("ISAC_USRP_CHPOW_S", "1", 0); setenv("ISAC_USRP_NO_TX", "1", 0);
+      if (!getenv("ISAC_CORE_PLAN") || !atoi(getenv("ISAC_CORE_PLAN"))) { setenv("ISAC_CORE_PLAN", "0", 0); setenv("ISAC_FLOAT_CORES", "10-14", 0); }
+    }
   nr_core_float_apply(); /* ISAC_FLOAT_CORES: unpinned threads (and everything they start) stay in one lane */
   start_background_system();
   if (nr_shutdown_init(nrue_shutdown_notify, nrue_ru_shutdown_stop, nrue_ru_shutdown) != 0) {
@@ -410,8 +419,9 @@ int main(int argc, char **argv)
   if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && core_feature("ISAC_CORE_PLAN", false))
     nrue_set_ru_params(uniqCfg);
   if (passive_core_plan()) return EXIT_FAILURE;
-  const char *ul_chain_flag = (getenv("ISAC_UL_PUSCH_CHAIN") ?: "1");
-  const char *ul_solver_flag = (getenv("ISAC_UL_PUSCH_SOLVER") ?: "1");
+  const bool pas = IS_PASSIVE_RX_MODE(get_softmodem_params());
+  const char *ul_chain_flag = (getenv("ISAC_UL_PUSCH_CHAIN") ?: (pas ? "1" : NULL));
+  const char *ul_solver_flag = (getenv("ISAC_UL_PUSCH_SOLVER") ?: (pas ? "1" : NULL));
   const bool ul_chain_on = (ul_chain_flag && strcmp(ul_chain_flag, "1") == 0) ||
                            (ul_solver_flag && strcmp(ul_solver_flag, "1") == 0);
   if (nr_cfg_reconf_enabled() || ul_chain_on ||

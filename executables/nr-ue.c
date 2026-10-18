@@ -825,7 +825,7 @@ bool readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
   }
 
   c16_t *rxp[fp->nb_antennas_rx];
-  const bool check_capture = (getenv("ISAC_RX_RECOVER") ?: "1") && atoi((getenv("ISAC_RX_RECOVER") ?: "1")) != 0;
+  const bool check_capture = getenv("ISAC_RX_RECOVER") ? atoi(getenv("ISAC_RX_RECOVER")) != 0 : IS_PASSIVE_RX_MODE(get_softmodem_params());
   static uint64_t (*ring_epoch_get)(void) = NULL;
   static bool ring_epoch_checked = false;
   if (check_capture && !ring_epoch_checked) {
@@ -1090,7 +1090,7 @@ void *UE_thread(void *arg)
   NR_UE_MAC_INST_t *mac = get_mac_inst(UE->Mod_id);
 
   bool syncRunning = false;
-  const bool rx_recover_on = (getenv("ISAC_RX_RECOVER") ?: "1") && atoi((getenv("ISAC_RX_RECOVER") ?: "1")) != 0;
+  const bool rx_recover_on = getenv("ISAC_RX_RECOVER") ? atoi(getenv("ISAC_RX_RECOVER")) != 0 : IS_PASSIVE_RX_MODE(get_softmodem_params());
   uint64_t rx_recover_epoch = 0;
   long long rx_recover_gap = 0;
   struct timespec rx_recover_start = {0};
