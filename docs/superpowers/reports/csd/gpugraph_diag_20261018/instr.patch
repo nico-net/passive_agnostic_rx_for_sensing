@@ -1,0 +1,139 @@
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu b/openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu
+index 47d4205b33..4e75b16d8f 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu
+@@ -19,6 +19,7 @@
+ #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
+ #include <cuda_runtime.h>
+ #include "nr_gpu_green.h"
++#include "/usr/local/cuda/include/nvtx3/nvToolsExt.h" /* DIAGTMP */
+ #include "nr_pdsch_gpu_prio.cuh"
+ #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
+ #include "nr_pusch_gpu_fep.h" /* nr_pusch_gpu_fep_item_t: the layout of ulfep::Item (the PUSCH pass feeds k_ul_fep_p) */
+@@ -764,7 +765,9 @@ static void wait_done(Inst &I)
+ {
+   uint64_t pt = 0;
+   cudaError_t e;
++  nvtxRangePushA("pwait"); /* DIAGTMP */
+   while ((e = cudaEventQuery(I.done)) == cudaErrorNotReady) nr_gpu_poll_relax_pass(&pt);
++  nvtxRangePop(); /* DIAGTMP */
+   if (e != cudaSuccess) g_dead = 1;
+ }
+ 
+@@ -1207,7 +1210,9 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
+   struct Rel { int id; ~Rel() { if (id >= 0) g_busy.fetch_and(~(1u << id)); } } rel{t_held == id ? -1 : id};
+   NrGpuRtScope rt;
+   if (!rt.admitted) { ++g_fb_unsup; return 1; }
++  nvtxRangePushA(j->probe ? "pprep:probe" : "pprep"); /* DIAGTMP */
+   const int pr = prepare(I, j);
++  nvtxRangePop(); /* DIAGTMP */
+   if (pr != 0) { ++(pr == -2 ? g_fb_ldpckey : g_fb_err); return 1; }
+   /* Task 4 entry: on the held instance, C is skipped when its inputs equal those of the C the instance last ran (the estimate on the device is this job's); D and L
+    * always run, after a fresh H2D of the parameter blocks (h2d_params). Data-driven, so an arm that changes the DM-RS hypothesis (CDM, pilots) can never reuse an estimate. */
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c b/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c
+index 051dc9e359..61bbda8607 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c
+@@ -3,6 +3,7 @@
+  * \brief See nr_pdcch_blind_phase2.h (Task A7: N blind-PDCCH scan consumers).
+  */
+ #include "nr_pdcch_blind_phase2.h"
++#include "/usr/local/cuda/include/nvtx3/nvToolsExt.h" /* DIAGTMP */
+ #include <pthread.h>
+ #include <stdatomic.h>
+ 
+@@ -34,7 +35,9 @@ static pthread_mutex_t g_phase2_mu = PTHREAD_MUTEX_INITIALIZER;
+ 
+ void nr_pdcch_blind_phase2_lock(void)
+ {
++  nvtxRangePushA("p2wait"); /* DIAGTMP */
+   pthread_mutex_lock(&g_phase2_mu);
++  nvtxRangePop(); /* DIAGTMP */
+ }
+ 
+ void nr_pdcch_blind_phase2_unlock(void)
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c b/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c
+index 5b03125e32..40c70a8f32 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c
+@@ -1,3 +1,4 @@
++#include "/usr/local/cuda/include/nvtx3/nvToolsExt.h" /* DIAGTMP */
+ #include "common/utils/nr_core_plan.h"
+ #include "nr_passive_sample_lifetime.h"
+ /*
+@@ -180,7 +181,9 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
+     extern uint64_t nr_passive_slot_arrival_ns(long abs_slot);
+     struct timespec e0;
+     if (nr_passive_e2e_trace()) clock_gettime(CLOCK_MONOTONIC, &e0);
++    { char sb_[48]; snprintf(sb_, sizeof(sb_), "scan a=%ld", (long)job.absolute_slot); nvtxRangePushA(sb_); } /* DIAGTMP */
+     nr_pdcch_blind_monitor_run_occasion(ue, &proc, true /* already off the RT thread */, job.absolute_slot);
++    nvtxRangePop(); /* DIAGTMP */
+     if (nr_passive_e2e_trace()) {
+       /* SYSAN SCAN_E2E: slot read -> scan start (wait), scan occasion wall (run); 50-us bins, p50/p90/p99 every 4000 occasions */
+       static _Atomic uint32_t h[2][101];
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c b/openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
+index 52e2389c9b..34ea0c6479 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
+@@ -5,6 +5,7 @@
+ #include "nr_passive_cfg_epoch.h"
+ #include "nr_passive_sample_lifetime.h"
+ #include "PHY/TOOLS/nr_gpu_budget.h"
++#include "/usr/local/cuda/include/nvtx3/nvToolsExt.h" /* DIAGTMP */
+ extern _Atomic long nr_ue_diag_producer_absolute_slot;
+ /*
+  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
+@@ -6258,10 +6259,15 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_gated(PHY_VARS_NR_UE
+     s_prio = getenv("ISAC_PDSCH_GPU_PRIO") && atoi(getenv("ISAC_PDSCH_GPU_PRIO")) == 1;
+   if (s_prio)
+     nr_pdsch_gpu_exact_set_lowprio(t_probe_first_seg || t_pdtim_body > 1);
+-  if (pdcch_rm_mode() != 1 || !pdcch_rm_arm(dlsch_config, freq_alloc, grant))
+-    return passive_decode_body_core(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
++  nvtxRangePushA(t_probe_first_seg ? "body:probe" : t_pdtim_body > 1 ? "body:retry" : "body:real"); /* DIAGTMP */
++  if (pdcch_rm_mode() != 1 || !pdcch_rm_arm(dlsch_config, freq_alloc, grant)) {
++    const nr_pdsch_passive_decode_status_t st0 = passive_decode_body_core(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
++    nvtxRangePop(); /* DIAGTMP */
++    return st0;
++  }
+   const nr_pdsch_passive_decode_status_t st = passive_decode_body_core(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+   rm_disarm();
++  nvtxRangePop(); /* DIAGTMP */
+   return st;
+ }
+ 
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c b/openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c
+index 99809c602a..076366007c 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c
+@@ -2,6 +2,7 @@
+ #define _GNU_SOURCE /* FATTAILS DECSLOW: RUSAGE_THREAD, sched_getcpu */
+ #endif
+ #include "nr_pdsch_slot_spread.h"
++#include "/usr/local/cuda/include/nvtx3/nvToolsExt.h" /* DIAGTMP */
+ #include "PHY/TOOLS/nr_stage_split.h"
+ #include "PHY/TOOLS/nr_admit.h"
+ #include "common/utils/nr_bg_lane.h"
+@@ -2010,6 +2011,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
+       clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ds_c0);
+     }
+     const uint64_t dec_t0 = now_ns();
++    { char nb_[64]; snprintf(nb_, sizeof(nb_), "dec a=%ld p=%d", (long)job.absolute_slot, (int)job.layout_probe); nvtxRangePushA(nb_); } /* DIAGTMP */
+     nr_pdsch_passive_recov_mode(g_recov_ok && owned && !job.layout_probe ? 1 : 0); /* RECOVERY_ASYNC: arms go to pdschRecov (owned IQ only: the snapshot is handed off) */
+     const nr_pdsch_passive_decode_status_t st_raw =
+         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
+@@ -2051,6 +2053,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
+     nr_pdsch_chest_occ_override = -1;
+     nr_pdsch_ldpc_iters_override = -1;
+     const uint64_t dec_t1 = now_ns();
++    nvtxRangePop(); /* DIAGTMP */
+     const double dec_us = (double)(dec_t1 - dec_t0) / 1000.0;
+     if (owned) {
+       const uint64_t done = now_ns();
+@@ -2216,6 +2219,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
+                  E2E_US(taken_ns, dec_t0), E2E_US(dec_t0, dec_t1), (long)(nr_pdsch_passive_decode_first_body_ns() / 1000), eb,
+                  E2E_US(arr, dec_t1), atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed) - job.absolute_slot);
+ #undef E2E_US
++        { char nm_[400]; snprintf(nm_, sizeof(nm_), "G a=%ld rb=%u+%u nl=%u off=%lu%s%s", (long)job.absolute_slot, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, (unsigned)dec.cw.Nl, (unsigned long)(now_ns() - dec_t1), e2e, stg); nvtxMarkA(nm_); } /* DIAGTMP */
+       }
+       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
+                  "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f probe=%d kappa=%.2f alpha=%.2f,%.2f,%.2f,%.2f "

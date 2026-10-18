@@ -1,0 +1,13 @@
+b ON 1 /home/nicola/NICOLA/wt/rr-csd-int16gpu/replays/replay_dg2_b_ON_1_035100
+b FP32 1 /home/nicola/NICOLA/wt/rr-csd-int16gpu/replays/replay_dg2_b_FP32_1_035137
+tim ON 1 /home/nicola/NICOLA/wt/rr-csd-int16gpu/replays/replay_dg2_tim_ON_1_040321
+tim FP32 1 /home/nicola/NICOLA/wt/rr-csd-int16gpu/replays/replay_dg2_tim_FP32_1_040358
+b ON 2 /home/nicola/NICOLA/wt/rr-csd-int16gpu/replays/replay_dg2_b_ON_2_040435
+b FP32 2 /home/nicola/NICOLA/wt/rr-csd-int16gpu/replays/replay_dg2_b_FP32_2_040513
+tim ON 2 /home/nicola/NICOLA/wt/rr-csd-int16gpu/replays/replay_dg2_tim_ON_2_040605
+tim FP32 2 /home/nicola/NICOLA/wt/rr-csd-int16gpu/replays/replay_dg2_tim_FP32_2_040719
+b ON 3 /home/nicola/NICOLA/wt/rr-csd-int16gpu/replays/replay_dg2_b_ON_3_040833
+b FP32 3 /home/nicola/NICOLA/wt/rr-csd-int16gpu/replays/replay_dg2_b_FP32_3_040952
+tim ON 3 /home/nicola/NICOLA/wt/rr-csd-int16gpu/replays/replay_dg2_tim_ON_3_041106
+tim FP32 3 /home/nicola/NICOLA/wt/rr-csd-int16gpu/replays/replay_dg2_tim_FP32_3_041222
+DONE
