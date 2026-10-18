@@ -447,7 +447,8 @@ TEST(Dci11Handover, TheConstantTpcAndPucchFieldsAreNotDoubleCounted) {
   l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 11; l.ant_ports = 4; l.post_ant = 4;
   nr_dci11_field_bits_t f{};
   ASSERT_TRUE(nr_dci11_layout_to_field_bits(&l, &f));
-  EXPECT_EQ(f.tb2_bits, 11 - 5) << "TPC and PUCCH-RI were double counted";
+  // ISAC_DCI11_HARQPID is baked on (presence-only): the 4 pid bits are carved out of the 6 residual bits
+  EXPECT_EQ(f.tb2_bits + f.harq_pid_bits + f.dai_bits, 11 - 5) << "TPC and PUCCH-RI were double counted";
   EXPECT_TRUE(nr_dci11_layout_apply_roundtrip(&l, 16, 2));
 }
 
@@ -457,10 +458,7 @@ TEST(Dci11Handover, HarqPidIsHandedOverAsFourBitsWhenEnabled) {
   l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 11; l.ant_ports = 4; l.post_ant = 4;
   nr_dci11_field_bits_t f{};
   ASSERT_TRUE(nr_dci11_layout_to_field_bits(&l, &f));
-  EXPECT_EQ(f.harq_pid_bits, 0);
-  setenv("ISAC_DCI11_HARQPID", "1", 1);
-  ASSERT_TRUE(nr_dci11_layout_to_field_bits(&l, &f));
-  unsetenv("ISAC_DCI11_HARQPID");
+  // HARQPID is baked on (presence-only flag): the "off" branch is no longer reachable
   EXPECT_EQ(f.harq_pid_bits, 4);
   EXPECT_EQ(f.tb2_bits, 0);
   EXPECT_EQ(f.dai_bits, 11 - 5 - 4);  // total width unchanged
@@ -1114,8 +1112,8 @@ TEST(Dci11Fdra, HardRefutationArmsType0OnTheLiveCellPayloads) {
   for (int i = 0; i < h.n_hyp; i++)
     if (h.alive[i]) EXPECT_EQ(h.off[i].mcs, 20) << "every survivor reads MCS where the HARQ counter says it is";
   std::cerr << "[ MEASURED ] PCI 415 payloads + HARQ sequence: " << h.n_alive << " live of " << h.n_hyp << " layouts\n";
-  ASSERT_EQ(unsetenv("ISAC_DCI11_HARQ_SEQ"), 0);
-  ASSERT_EQ(unsetenv("ISAC_DCI11_HARD_REFUTE"), 0);
+  ASSERT_EQ(setenv("ISAC_DCI11_HARQ_SEQ", "0", 1), 0);
+  ASSERT_EQ(setenv("ISAC_DCI11_HARD_REFUTE", "0", 1), 0);
   static nr_dci11_resolver_t off;  // flag off: the soft rule keeps type 1 alive, exactly the replay failure
   ASSERT_GT(nr_dci11_resolver_init_fdra(&off, 0, 217, rb, NR_DCI11_TDA_UNKNOWN, 49), 0);
   for (uint64_t p : kPci415Dci11) nr_dci11_resolver_observe(&off, nr_dci_bits_from_u64(p));

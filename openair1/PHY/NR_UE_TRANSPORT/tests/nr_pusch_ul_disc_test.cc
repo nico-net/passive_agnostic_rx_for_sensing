@@ -184,6 +184,7 @@ TEST(PuschUlDisc, NoiseOnlyDoesNotPublish) {
 }
 
 TEST(PuschUlDisc, PerUeTimingEmaRejectsOutlier) {
+  setenv("ISAC_UL_TA_TRACK","0",1); // baked default is on; this case covers the off path
   nr_pusch_ul_disc_reset();
   bool tracked=true;
   EXPECT_EQ(nr_pusch_ul_disc_timing_seed(1,1600,10,&tracked),1600);
@@ -198,6 +199,7 @@ TEST(PuschUlDisc, PerUeTimingEmaRejectsOutlier) {
   nr_pusch_ul_disc_epoch(2);
   EXPECT_EQ(nr_pusch_ul_disc_timing_seed(1,1600,13,&tracked),1600);
   EXPECT_FALSE(tracked);
+  unsetenv("ISAC_UL_TA_TRACK");
 }
 
 TEST(PuschUlDisc, TaTrackKeepsAdvanceAcrossOldSlotsSilenceAndSeedsNewRntis) {

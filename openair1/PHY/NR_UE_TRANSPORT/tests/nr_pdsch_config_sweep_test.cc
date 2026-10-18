@@ -212,6 +212,7 @@ TEST(PdschConfigSweep, InvalidTicketAndUnavailableContextCannotScore) {
 
 int main(int argc, char **argv)
 {
+  setenv("ISAC_RECONF", "0", 1); /* RECONF is baked on; this binary tests the reconf-off baseline (epoch fixtures skip) */
   testing::InitGoogleTest(&argc, argv);
   /* every test starts at the documented baseline (fb0, CB0 elimination off), whatever ran before it: nr_td_test_baseline.h */
   nr_td_test::register_baseline();

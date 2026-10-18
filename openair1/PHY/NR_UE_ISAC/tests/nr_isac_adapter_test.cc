@@ -324,7 +324,7 @@ TEST_F(Adapter, SubslotConfigPassesThrough) {
 }
 
 int main(int argc,char **argv) {
-  unsetenv("ISAC_RECONF"); logInit();
+  setenv("ISAC_RECONF", "0", 1); logInit();
 #if T_TRACER
   T_stdout = 1;
 #endif

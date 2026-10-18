@@ -353,7 +353,7 @@ TEST(CsirsDiscSweep, InvalidEmptyAndDisabled)
   ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&w),1);
   EXPECT_EQ(w.z,0);
   EXPECT_EQ(w.n_slots,0);
-  unsetenv("ISAC_CSIRS_DISC");
+  setenv("ISAC_CSIRS_DISC","0",1);
   memset(&w,0xa5,sizeof(w));
   std::array<unsigned char,sizeof(w)> before; memcpy(before.data(),&w,sizeof(w));
   const auto samples=grid.samples;

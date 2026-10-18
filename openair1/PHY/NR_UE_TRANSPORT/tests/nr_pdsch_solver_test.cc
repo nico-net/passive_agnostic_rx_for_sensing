@@ -17,6 +17,10 @@ extern "C" void exit_function(const char *file, const char *function, const int 
   if (s) fprintf(stderr, "%s:%d %s() Exiting: %s\n", file, line, function, s);
   if (assert) abort(); else exit(EXIT_SUCCESS);
 }
+/* the code defaults are the t26yE values since the 2026-10-18 bake; this suite assumes the pre-bake (off) defaults */
+static const int kOff = [] { for (const char *k : {"REUSE", "PRIOR_CRC", "PRIOR_IDS", "SIGNIF", "FAIRSHARE", "COVERAGE", "NL_PREF", "LAYOUT_RECOVER", "THREAD_CTX", "SCR", "BACKOFF", "WHY", "PROBELOG", "TDA_FIELD"})
+                              setenv((std::string("ISAC_PDSCH_SOLVER_") + k).c_str(), "0", 1);
+                            return 0; }();
 static const int kEnable = setenv("ISAC_PDSCH_SOLVER", "1", 1);
 static const int kLcEnable = setenv("ISAC_RNTI_LAYOUT_CACHE", "1", 1); // read once; only nr_pdsch_solver_layout_cache() looks at it
 /* HIGHMCS: the receiver-choice flags are read once per process; set them for the whole suite (the OTA env has PER_RNTI=1; the
@@ -137,7 +141,7 @@ TEST(PdschSolver, OneLayerQpskReadingsGetFirstProbesAndBoundedFallback)
   n = nr_pdsch_solver_plan(0x2222, p, 49, 2, 2, rd, 2, 8, v);
   EXPECT_GT(n, 0);
   for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, false, true);
-  unsetenv("ISAC_PDSCH_SOLVER_NL_PREF");
+  setenv("ISAC_PDSCH_SOLVER_NL_PREF", "0", 1);
   nr_pdsch_solver_reset();
 }
 
@@ -162,7 +166,7 @@ TEST(PdschSolver, ConfirmationRejectsIncompatibleMcsTables)
   EXPECT_TRUE(first);
   EXPECT_TRUE(second);
   EXPECT_EQ(nr_pdsch_solver_rep(0x3344), -1);
-  unsetenv("ISAC_PDSCH_SOLVER_NL_PREF");
+  setenv("ISAC_PDSCH_SOLVER_NL_PREF", "0", 1);
   nr_pdsch_solver_reset();
 }
 
@@ -192,8 +196,8 @@ TEST(PdschSolver, CoverageSurvivesReorderedReadingsAndIdentityChanges)
     nr_pdsch_solver_feedback(v[0].token, false, true);
   }
   for (auto &lane : seen) for (bool tested : lane) EXPECT_TRUE(tested);
-  unsetenv("ISAC_PDSCH_SOLVER_COVERAGE");
-  unsetenv("ISAC_PDSCH_SOLVER_NL_PREF");
+  setenv("ISAC_PDSCH_SOLVER_COVERAGE", "0", 1);
+  setenv("ISAC_PDSCH_SOLVER_NL_PREF", "0", 1);
   nr_pdsch_solver_set_alt_scr(-1, nullptr, 0, false);
   nr_pdsch_solver_reset();
 }
@@ -215,8 +219,8 @@ TEST(PdschSolver, CoverageKeepsStartSymbolSearchSeparateForEachTdra)
     nr_pdsch_solver_feedback(v[0].token, false, true);
   }
   EXPECT_EQ(nr_pdsch_solver_rep(0x7788), -1);
-  unsetenv("ISAC_PDSCH_SOLVER_COVERAGE");
-  unsetenv("ISAC_PDSCH_SOLVER_NL_PREF");
+  setenv("ISAC_PDSCH_SOLVER_COVERAGE", "0", 1);
+  setenv("ISAC_PDSCH_SOLVER_NL_PREF", "0", 1);
   nr_pdsch_solver_reset();
 }
 
@@ -239,8 +243,8 @@ TEST(PdschSolver, IneligibleTablesDoNotConsumeLaterQpskTrials)
   EXPECT_EQ(v[0].table, 1);
   EXPECT_EQ(v[0].S, 1); // this physical hypothesis has not been tried yet
   nr_pdsch_solver_feedback(v[0].token, false, true);
-  unsetenv("ISAC_PDSCH_SOLVER_COVERAGE");
-  unsetenv("ISAC_PDSCH_SOLVER_NL_PREF");
+  setenv("ISAC_PDSCH_SOLVER_COVERAGE", "0", 1);
+  setenv("ISAC_PDSCH_SOLVER_NL_PREF", "0", 1);
   nr_pdsch_solver_reset();
 }
 
@@ -263,7 +267,7 @@ TEST(PdschSolver, LayoutRecoveryNeedsCreditedCrcFailures)
   for (int i = 0; i < 3; i++) nr_pdsch_solver_feedback(v[i].token, false, true);
   EXPECT_TRUE(nr_pdsch_solver_reopen_layouts(0x7788));
   EXPECT_EQ(nr_pdsch_solver_rep(0x7788), -1); // reopening is not a lock
-  unsetenv("ISAC_PDSCH_SOLVER_LAYOUT_RECOVER");
+  setenv("ISAC_PDSCH_SOLVER_LAYOUT_RECOVER", "0", 1);
   nr_pdsch_solver_reset();
   EXPECT_FALSE(nr_pdsch_solver_reopen_layouts(0x7788));
 }
@@ -447,7 +451,7 @@ TEST(PdschSolver, OnlyACrcProvenSolutionSeedsTheCell)
   fake.add_pos = 2;
   for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? fake.truth : fake.wrong).push_back((uint16_t)i);
   for (int on = 0; on < 2; on++) {
-    on ? setenv("ISAC_PDSCH_SOLVER_PRIOR_CRC", "1", 1) : unsetenv("ISAC_PDSCH_SOLVER_PRIOR_CRC");
+    on ? setenv("ISAC_PDSCH_SOLVER_PRIOR_CRC", "1", 1) : setenv("ISAC_PDSCH_SOLVER_PRIOR_CRC", "0", 1);
     nr_pdsch_solver_reset();
     nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
     std::mt19937 rng(21);
@@ -464,8 +468,8 @@ TEST(PdschSolver, OnlyACrcProvenSolutionSeedsTheCell)
   ASSERT_GT(RunCell(fake, 0x00a1, -1, 400, rng), 0);
   FullDecodes(0x00a1, fake, 20, true, rng);
   EXPECT_EQ(FirstAddPos(0x00b2, fake, rng), 2);
-  unsetenv("ISAC_PDSCH_SOLVER_PRIOR_CRC");
-  unsetenv("ISAC_PDSCH_SOLVER_REUSE");
+  setenv("ISAC_PDSCH_SOLVER_PRIOR_CRC", "0", 1);
+  setenv("ISAC_PDSCH_SOLVER_REUSE", "0", 1);
   nr_pdsch_solver_reset();
 }
 
@@ -504,7 +508,7 @@ TEST(PdschSolver, SignificanceRuleScalesTheSolveEvidenceWithTheProbesSpent)
   for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
   int grants[2][3];
   for (int on = 0; on < 2; on++) {
-    on ? setenv("ISAC_PDSCH_SOLVER_SIGNIF", "1", 1) : unsetenv("ISAC_PDSCH_SOLVER_SIGNIF");
+    on ? setenv("ISAC_PDSCH_SOLVER_SIGNIF", "1", 1) : setenv("ISAC_PDSCH_SOLVER_SIGNIF", "0", 1);
     nr_pdsch_solver_reset();
     nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
     std::mt19937 rng(31);
@@ -518,7 +522,7 @@ TEST(PdschSolver, SignificanceRuleScalesTheSolveEvidenceWithTheProbesSpent)
   EXPECT_EQ(grants[1][0], grants[0][0]) << "two CRC16 passes still solve a quiet RNTI";
   EXPECT_GT(grants[1][1], grants[0][1]) << "a busy RNTI needs more passes";
   EXPECT_LT(grants[1][2], grants[0][2]) << "one CRC24 pass solves";
-  unsetenv("ISAC_PDSCH_SOLVER_SIGNIF");
+  setenv("ISAC_PDSCH_SOLVER_SIGNIF", "0", 1);
   nr_pdsch_solver_reset();
 }
 
@@ -532,7 +536,7 @@ TEST(PdschSolver, ProvenDimsAreTriedWithEveryOwnIdentity)
   for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
   const int32_t kForm = (923 + 1) << 16;
   for (int on = 0; on < 2; on++) {
-    on ? setenv("ISAC_PDSCH_SOLVER_PRIOR_IDS", "1", 1) : unsetenv("ISAC_PDSCH_SOLVER_PRIOR_IDS");
+    on ? setenv("ISAC_PDSCH_SOLVER_PRIOR_IDS", "1", 1) : setenv("ISAC_PDSCH_SOLVER_PRIOR_IDS", "0", 1);
     nr_pdsch_solver_reset();
     nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
     std::mt19937 rng(41);
@@ -556,9 +560,9 @@ TEST(PdschSolver, ProvenDimsAreTriedWithEveryOwnIdentity)
     }
     EXPECT_EQ(id202 && id303, on == 1) << "on: both own identities on the proven dims in one grant; off: one per grant";
   }
-  unsetenv("ISAC_PDSCH_SOLVER_PRIOR_IDS");
-  unsetenv("ISAC_PDSCH_SOLVER_PRIOR_CRC");
-  unsetenv("ISAC_PDSCH_SOLVER_REUSE");
+  setenv("ISAC_PDSCH_SOLVER_PRIOR_IDS", "0", 1);
+  setenv("ISAC_PDSCH_SOLVER_PRIOR_CRC", "0", 1);
+  setenv("ISAC_PDSCH_SOLVER_REUSE", "0", 1);
   nr_pdsch_solver_reset();
 }
 
@@ -667,7 +671,7 @@ static int PlanProbes(uint16_t rnti, int budget)
 TEST(PdschSolver, FairShareSplitsTheProbeRateBetweenActiveRntis)
 {
   for (int on = 0; on < 2; on++) {
-    on ? setenv("ISAC_PDSCH_SOLVER_FAIRSHARE", "1", 1) : unsetenv("ISAC_PDSCH_SOLVER_FAIRSHARE");
+    on ? setenv("ISAC_PDSCH_SOLVER_FAIRSHARE", "1", 1) : setenv("ISAC_PDSCH_SOLVER_FAIRSHARE", "0", 1);
     nr_pdsch_solver_reset();
     int busy = 0, quiet = 0;
     for (uint64_t s = 1000; s < 3000; s++) {
@@ -688,7 +692,7 @@ TEST(PdschSolver, FairShareSplitsTheProbeRateBetweenActiveRntis)
       EXPECT_EQ(nr_pdsch_solver_fair_budget(0x5114, 0.5, false, 24), 24); /* work-conserving: no cap without contention */
     }
   }
-  unsetenv("ISAC_PDSCH_SOLVER_FAIRSHARE");
+  setenv("ISAC_PDSCH_SOLVER_FAIRSHARE", "0", 1);
   nr_pdsch_solver_reset();
 }
 
@@ -706,7 +710,7 @@ TEST(PdschSolver, FullTableReusesOnlyIdleEntries)
   for (int i = 1; i < 64; i++) PlanProbes((uint16_t)(0x4000 + i), 8); /* 0x4000 stays idle */
   EXPECT_GT(PlanProbes(0x5000, 8), 0); /* reuses 0x4000's entry */
   EXPECT_EQ(PlanProbes(0x5001, 8), 0); /* nothing else idle */
-  unsetenv("ISAC_PDSCH_SOLVER_FAIRSHARE");
+  setenv("ISAC_PDSCH_SOLVER_FAIRSHARE", "0", 1);
   nr_pdsch_solver_reset();
 }
 
@@ -809,7 +813,7 @@ TEST(PdschSolverRvc, McsZeroSolutionSeedsTheCellOnlyOnceHarqVerified)
     EXPECT_EQ(FirstAddPos(0x00b3, c, rng), 2) << "HARQ readings of the representative verify it";
   }
   unsetenv("ISAC_DCI11_RV_CONSISTENCY");
-  unsetenv("ISAC_PDSCH_SOLVER_REUSE");
+  setenv("ISAC_PDSCH_SOLVER_REUSE", "0", 1);
   nr_pdsch_solver_reset();
 }
 

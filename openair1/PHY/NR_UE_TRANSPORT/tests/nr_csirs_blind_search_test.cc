@@ -815,6 +815,9 @@ TEST(CsirsBlindPin, PinnedPeriodicResourceConfirmsWithinThreePeriods) {
 
 int main(int argc, char **argv)
 {
+  /* the code defaults are the t26yE values since the 2026-10-18 bake; these cases assume the pre-bake (off) behaviour */
+  for (const char *k : {"ISAC_LOG_ASYNC", "ISAC_CSIRS_FULL", "ISAC_CSIRS_FULL_BURSTS", "ISAC_CSIRS_FULL_ERASE", "ISAC_CSIRS_FULL_TRS_PAIR", "ISAC_CSIRS_FULL_BLOCK_INFER"})
+    setenv(k, "0", 1);
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

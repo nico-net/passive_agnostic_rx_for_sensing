@@ -815,7 +815,7 @@ TEST(DciLengthSweep, SeenOrderSurvivesBudgetResumeAndNewHints) {
 TEST(DciLengthSweep, DefaultOrderIsAscending) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
   EXPECT_EXIT(([]{
-    unsetenv("ISAC_RECONF");
+    setenv("ISAC_RECONF", "0", 1);
     nr_pdcch_dci_length_note_seen(47);
     int order[141];
     EXPECT_EQ(nr_pdcch_dci_length_order(30, 140, order), 111);

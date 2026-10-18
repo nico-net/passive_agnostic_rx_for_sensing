@@ -638,6 +638,7 @@ TEST(TdSimV2, LegacyPinTravelsWithTheRestoredMask)
 }
 int main(int argc, char **argv)
 {
+  setenv("ISAC_RECONF", "0", 1); /* code default is on since the 2026-10-18 bake; the golden numbers were pinned with it off */
   testing::InitGoogleTest(&argc, argv);
   logInit();
   const int rc = RUN_ALL_TESTS();

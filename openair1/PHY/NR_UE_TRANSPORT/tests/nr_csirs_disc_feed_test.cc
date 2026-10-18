@@ -13,7 +13,7 @@ extern "C" {
 
 TEST(AEnabled, OffByDefault)
 {
-  unsetenv("ISAC_CSIRS_DISC");
+  setenv("ISAC_CSIRS_DISC","0",1);
   EXPECT_FALSE(nr_csirs_disc_enabled());
 }
 

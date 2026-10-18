@@ -74,7 +74,7 @@ TEST(CsirsDiscE2E, DisabledPipelineIsByteIdentical)
   // The enable bit is process-lifetime state. Use a fresh death-test child.
   ::testing::FLAGS_gtest_death_test_style="threadsafe";
   EXPECT_EXIT(([] {
-    unsetenv("ISAC_CSIRS_DISC");
+    setenv("ISAC_CSIRS_DISC","0",1);
     nr_csirs_disc_ring_t ring={};
     nr_csirs_disc_slot_meta_t meta={};
     std::vector<int16_t> samples(4*14*24*8,12345);
@@ -245,6 +245,8 @@ int nr_csirs_blind_rt_test_discovery_feed(int, uint32_t, double);
 int nr_csirs_blind_rt_test_discovered(int, fapi_nr_dl_config_csirs_pdu_rel15_t *, uint16_t *, uint16_t *);
 extern uint64_t csirs_disc_readmit_skipped;
 }
+/* read once; the code default is on since the 2026-10-18 bake, this case pins the single-burst readmission */
+static const int kNoBursts = setenv("ISAC_CSIRS_FULL_BURSTS", "0", 1);
 TEST(CsirsDiscE2E, ReadmissionMergesPeriodExtentAndLatePhase)
 {
   setenv("ISAC_CSIRS_DISC", "1", 1);

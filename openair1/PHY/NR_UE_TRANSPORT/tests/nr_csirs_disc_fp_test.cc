@@ -223,7 +223,7 @@ TEST(CsirsDisc, ExclusionsAndDefaultThreshold)
 }
 TEST(CsirsDisc, BackendDisabled)
 {
-  unsetenv("ISAC_CSIRS_DISC");EXPECT_EQ(nr_csirs_disc_gpu_load(),nullptr);
+  setenv("ISAC_CSIRS_DISC","0",1);EXPECT_EQ(nr_csirs_disc_gpu_load(),nullptr);
   setenv("ISAC_CSIRS_DISC","1",1);setenv("ISAC_CSIRS_DISC_BACKEND","cpu",1);
   EXPECT_EQ(nr_csirs_disc_gpu_load(),nullptr);unsetenv("ISAC_CSIRS_DISC_BACKEND");
 }

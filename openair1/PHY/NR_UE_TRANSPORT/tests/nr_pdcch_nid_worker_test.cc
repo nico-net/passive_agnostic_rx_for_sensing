@@ -25,12 +25,13 @@ int main(int argc,char **argv) {
  bool duty=argc>1 && !strcmp(argv[1],"--duty");
  bool nodrop=argc>1 && !strcmp(argv[1],"--nodrop");
  bool incremental=duty || nodrop || (argc>1 && !strcmp(argv[1],"--incremental"));
- if(duty) {unsetenv("ISAC_GPU_BUDGET");setenv("ISAC_PDCCH_NID_GPU_DUTY","1",1);setenv("ISAC_PDCCH_NID_GPU_RECHECK_MS","120",1);setenv("ISAC_PDCCH_NID_GPU_MAINTAIN_MS","100",1);}
+ setenv("ISAC_PDCCH_NID_GPU_DUTY","0",1);setenv("ISAC_GPU_BUDGET","0",1);setenv("ISAC_PDCCH_NID_GPU_RECHECK_MS","10000",1); /* pre-bake defaults (t26yE is now the default) */
+ if(duty) {setenv("ISAC_GPU_BUDGET","0",1);setenv("ISAC_PDCCH_NID_GPU_DUTY","1",1);setenv("ISAC_PDCCH_NID_GPU_RECHECK_MS","120",1);setenv("ISAC_PDCCH_NID_GPU_MAINTAIN_MS","100",1);}
  int batch_size=incremental?64:336;
  int dur=incremental?3:device?1:(argc>1?atoi(argv[1]):1);
  logInit();
  setenv("ISAC_PDCCH_NID_GPU_INCREMENTAL",incremental?"1":"0",1);setenv("ISAC_PDCCH_NID_MULTISYMBOL",incremental?"1":"0",1);
- unsetenv("ISAC_PDCCH_NID_GPU");
+ setenv("ISAC_PDCCH_NID_GPU","0",1);
  if(nodrop)setenv("ISAC_PDCCH_NID_GPU_NODROP","1",1);
  nr_pdcch_nid_record_t records[16],sentinel[16];memset(records,0xa5,sizeof(records));memcpy(sentinel,records,sizeof(records));
  uint64_t generation=0;

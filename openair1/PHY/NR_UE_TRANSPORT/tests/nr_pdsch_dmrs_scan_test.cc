@@ -185,7 +185,7 @@ static void VoteCell(void)
 TEST(PdschDmrsScan, ContrastRanksTheUesOwnIdentityAboveCellWideOnes)
 {
   int ids[2];
-  unsetenv("ISAC_PDSCH_DMRS_ID_CONTRAST");
+  setenv("ISAC_PDSCH_DMRS_ID_CONTRAST","0",1);
   nr_dmrs_scan_reset();
   VoteCell();
   ASSERT_EQ(nr_dmrs_scan_rnti_ids(0x5098, ids, 2), 2);
@@ -211,7 +211,7 @@ TEST(PdschDmrsScan, ContrastRanksTheUesOwnIdentityAboveCellWideOnes)
   }
   ASSERT_EQ(nr_dmrs_scan_rnti_ids(0x7683, ids, 2), 2);
   EXPECT_EQ(ids[0], 415);
-  unsetenv("ISAC_PDSCH_DMRS_ID_CONTRAST");
+  setenv("ISAC_PDSCH_DMRS_ID_CONTRAST","0",1);
   nr_dmrs_scan_reset();
 }
 

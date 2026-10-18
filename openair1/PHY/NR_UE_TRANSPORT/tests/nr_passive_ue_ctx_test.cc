@@ -29,9 +29,10 @@ class UeContext : public ::testing::Test {
     char name[]="/tmp/rr-uectx-XXXXXX";
     int fd=mkstemp(name); ASSERT_GE(fd,0); close(fd); path=name;
     reopened_count=0;
+    setenv("ISAC_UL_PUSCH_CHAIN","0",1); setenv("ISAC_UL_PUSCH_SOLVER","0",1); // baked defaults are on; fixture default = UL off
     ASSERT_TRUE(nr_ue_ctx_open(path.c_str(),128,0));
   }
-  void TearDown() override {nr_ue_ctx_close(); unlink(path.c_str());}
+  void TearDown() override {nr_ue_ctx_close(); unlink(path.c_str()); unsetenv("ISAC_UL_PUSCH_CHAIN"); unsetenv("ISAC_UL_PUSCH_SOLVER");}
   std::string contents() {
     nr_ue_ctx_close();
     std::ifstream f(path); std::ostringstream s; s<<f.rdbuf(); return s.str();

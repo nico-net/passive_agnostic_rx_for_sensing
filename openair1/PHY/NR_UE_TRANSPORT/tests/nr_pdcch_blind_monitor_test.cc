@@ -4725,7 +4725,7 @@ TEST_F(DiscoveredCoresets, TwoIdsSameGridAlongsideAlreadyVerifiedPciWalk) {
 }
 
 TEST_F(DiscoveredCoresets, FeatureOffCannotStartAdditionalDwell) {
-  unsetenv("ISAC_PDCCH_NID_BANK");
+  setenv("ISAC_PDCCH_NID_BANK", "0", 1);
   EXPECT_FALSE(nr_pdcch_discovered_enabled());
   EXPECT_FALSE(nr_pdcch_discovered_load(path));
   nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token = 0;
@@ -4823,7 +4823,7 @@ TEST_F(DiscoveredCoresets, NrntiRotationVisitsAllConfirmedOwnersPerId) {
 // nID 62922 as grid_rb=2/5 groups=35, grid_rb=11 groups=34 and grid_rb=179 groups=2 L=2 R=2; each dwell was
 // rejected after 4000 occasions without a CRC pass. The synthetic grid() places 62922 at RBs 0..23 (AL4, CCE 0).
 struct DiscoveredCover : DiscoveredCoresets {
-  void SetUp() override { DiscoveredCoresets::SetUp(); unsetenv("ISAC_PDCCH_DISC_COVER"); }
+  void SetUp() override { DiscoveredCoresets::SetUp(); setenv("ISAC_PDCCH_DISC_COVER", "0", 1); }
   void TearDown() override { unsetenv("ISAC_PDCCH_DISC_COVER"); DiscoveredCoresets::TearDown(); }
   static constexpr const char *kShifted = "CORESET nid=62922 sym=0 dur=1 grid_rb=2 groups=35 L=0 R=0 shift=0\n"
                                           "CORESET nid=62922 sym=0 dur=1 grid_rb=5 groups=35 L=0 R=0 shift=0\n";
@@ -4961,7 +4961,7 @@ TEST_F(DiscoveredCarrier, GridEqualsCarrierIsIdentityNoInterleavedCover) {
 }
 
 TEST_F(DiscoveredCarrier, FlagOffKeepsGridGeometry) {
-  unsetenv("ISAC_CARRIER_FROM_SIB1");
+  setenv("ISAC_CARRIER_FROM_SIB1", "0", 1); setenv("ISAC_PDCCH_POINTA_REF", "0", 1);
   lines("CORESET nid=36098 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0\n");
   nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
   ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
@@ -5063,6 +5063,7 @@ struct DiscoveredRobust : DiscoveredCoresets {
   static constexpr const char *kLine = "CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n";
   void SetUp() override {
     DiscoveredCoresets::SetUp();
+    setenv("ISAC_PDCCH_DISC_COVER", "0", 1); setenv("ISAC_CARRIER_FROM_SIB1", "0", 1); setenv("ISAC_PDCCH_POINTA_REF", "0", 1); // baked on
     unsetenv("ISAC_PDCCH_DWELL_ADAPTIVE"); unsetenv("ISAC_PDCCH_NO_FAKE_FOOTPRINT");
   }
   void TearDown() override {
@@ -6127,8 +6128,8 @@ struct UllTimGen {
 
 TEST(UlLayoutFit, EntropyRankedPrefixAndFitReadAreCoherent)
 {
-  unsetenv("ISAC_UL_PREFIX_ENT");
-  unsetenv("ISAC_UL_FIT_READ");
+  setenv("ISAC_UL_PREFIX_ENT", "0", 1);
+  setenv("ISAC_UL_FIT_READ", "0", 1);
   UllTimGen g;
   std::vector<nr_ul_layout_dci_t> b;
   UlTruth t;
@@ -6174,8 +6175,8 @@ TEST(UlLayoutFit, EntropyRankedPrefixAndFitReadAreCoherent)
   }
   EXPECT_GT(n, 150);
   EXPECT_EQ(ok, n);
-  unsetenv("ISAC_UL_PREFIX_ENT");
-  unsetenv("ISAC_UL_FIT_READ");
+  setenv("ISAC_UL_PREFIX_ENT", "0", 1);
+  setenv("ISAC_UL_FIT_READ", "0", 1);
   nr_ul_layout_lock_reset();
 }
 
@@ -6579,10 +6580,12 @@ TEST(UlLayoutLock, CrcFirstLocksAtOnceSib1RankedFirstAndRelocks)
   nr_ul_layout_dci_t d;
   UllGen g;
   // flags off: nothing is requested (existing behaviour)
+  for (const char *k : {"ISAC_UL_LOCK_BWP_ALL","ISAC_UL_FIT_READ","ISAC_UL_PREFIX_ENT","ISAC_UL_K2_PAIR","ISAC_UL_TDA_PAIR","ISAC_UL_LOCK_MCS_STAT","ISAC_UL_MCS_TABLE_SWEEP","ISAC_UL_LOCK_SIGN"}) setenv(k, "0", 1); setenv("ISAC_UL_LOCK_CRC_FIRST", "0", 1); setenv("ISAC_UL_LOCK_SIB1_FIRST", "0", 1); setenv("ISAC_UL_BWP_SEED", "0", 1); // baked on
   UllFit(g, cell);
   EXPECT_EQ(nr_ul_layout_crc_trials(0x4000, 44, 5000, d.p, &cell, t, NR_UL_LAYOUT_MAX_TRIALS), 0);
   setenv("ISAC_UL_LOCK_CRC_FIRST", "1", 1);
   setenv("ISAC_UL_LOCK_SIB1_FIRST", "1", 1);
+  setenv("ISAC_UL_LOCK_CRC_GUARD", "0", 1); // baked on
   unsetenv("ISAC_UL_LOCK_CRC_K");
   nr_ul_layout_lock_reset();
   UllGen g2;
@@ -6623,8 +6626,8 @@ TEST(UlLayoutLock, CrcFirstLocksAtOnceSib1RankedFirstAndRelocks)
   EXPECT_EQ(o.bwp_start, 1);
   EXPECT_EQ(o.bwp_size, 216);
   nr_ul_layout_lock_reset();
-  unsetenv("ISAC_UL_LOCK_CRC_FIRST");
-  unsetenv("ISAC_UL_LOCK_SIB1_FIRST");
+  setenv("ISAC_UL_LOCK_CRC_FIRST", "0", 1);
+  setenv("ISAC_UL_LOCK_SIB1_FIRST", "0", 1);
   unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
 
@@ -6636,7 +6639,7 @@ TEST(UlLayoutLock, DlBwpPriorSeedsAnUncertainLockOnlyWhenTheFitAdmitsItsSize)
                               .slots_per_frame = 20, .sib1_ul_start = 0, .sib1_ul_size = 217, .sib1_ul_dl = 1};
   nr_pdcch_blind_ul_result_t t[NR_UL_LAYOUT_MAX_TRIALS], o;
   // flag off: the DL BWP is only a hypothesis, the vote is not short-circuited
-  unsetenv("ISAC_UL_BWP_DL_PRIOR");
+  setenv("ISAC_UL_BWP_DL_PRIOR", "0", 1);
   { UllGen g; UllFit(g, cell); EXPECT_TRUE(nr_ul_layout_searching()); }
   // flag on: 217@0 (15-bit RIV, admitted by the fit) is locked at once ...
   setenv("ISAC_UL_BWP_DL_PRIOR", "1", 1);
@@ -6667,9 +6670,9 @@ TEST(UlLayoutLock, DlBwpPriorSeedsAnUncertainLockOnlyWhenTheFitAdmitsItsSize)
   UllFit(g3, cell);
   EXPECT_TRUE(nr_ul_layout_searching());
   nr_ul_layout_lock_reset();
-  unsetenv("ISAC_UL_LOCK_CRC_FIRST");
-  unsetenv("ISAC_UL_BWP_DL_PRIOR");
-  unsetenv("ISAC_UL_BWP_SEED");
+  setenv("ISAC_UL_LOCK_CRC_FIRST", "0", 1);
+  setenv("ISAC_UL_BWP_DL_PRIOR", "0", 1);
+  setenv("ISAC_UL_BWP_SEED", "0", 1);
   unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
 
@@ -6733,8 +6736,8 @@ TEST(UlLayoutLock, CrcGuardNeedsEvidenceForCrc16AndLocksOnCrc24)
   d = g3.next();
   EXPECT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
   nr_ul_layout_lock_reset();
-  unsetenv("ISAC_UL_LOCK_CRC_FIRST");
-  unsetenv("ISAC_UL_LOCK_CRC_GUARD");
+  setenv("ISAC_UL_LOCK_CRC_FIRST", "0", 1);
+  setenv("ISAC_UL_LOCK_CRC_GUARD", "0", 1);
   unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
 
@@ -6762,8 +6765,9 @@ TEST(UlLayoutLock, PriorSearchStaysMovesAndIgnoresLowSnr)
   EXPECT_FALSE(nr_ul_layout_prior_expected(0.f, 2.f));  // Shannon(2 bit/RE) = 4.8 dB
   setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
   setenv("ISAC_UL_LOCK_PRIOR_SEARCH", "1", 1);
-  unsetenv("ISAC_UL_LOCK_CRC_FIRST");
-  unsetenv("ISAC_UL_LOCK_CRC_GUARD");
+  setenv("ISAC_UL_LOCK_CRC_FIRST", "0", 1);
+  setenv("ISAC_UL_LOCK_CRC_GUARD", "0", 1);
+  for (const char *k : {"ISAC_UL_LOCK_BWP_ALL","ISAC_UL_FIT_READ","ISAC_UL_PREFIX_ENT","ISAC_UL_K2_PAIR","ISAC_UL_TDA_PAIR","ISAC_UL_LOCK_MCS_STAT","ISAC_UL_MCS_TABLE_SWEEP","ISAC_UL_LOCK_SIGN"}) setenv(k, "0", 1); setenv("ISAC_UL_LOCK_SIB1_FIRST", "0", 1); setenv("ISAC_UL_BWP_SEED", "0", 1); setenv("ISAC_UL_BWP_DL_PRIOR", "0", 1); // baked on
   nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 216, .pci = 415, .mu = 1, .typeA_pos = 0,
                               .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216, .dl_bwp_start = 0};
   uint16_t st = 0, sz = 0;

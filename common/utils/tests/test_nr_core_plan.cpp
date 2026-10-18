@@ -291,7 +291,7 @@ TEST(FloatCores,UnpinnedThreadsGoToTheLaneAndPinsAreKept){
     if (pthread_create(&pinned, nullptr, [](void *) -> void * { while (!stop) usleep(1000); return nullptr; }, nullptr)) _exit(10);
     if (pthread_setaffinity_np(pinned, sizeof(one), &one)) _exit(11);
     setenv("ISAC_FLOAT_CORES", "0", 1);
-    unsetenv("ISAC_CORE_PLAN");                                  // automatic plan on: the lane stays off
+    setenv("ISAC_CORE_PLAN", "1", 1);                           // automatic plan on: the lane stays off
     cpu_set_t s0;
     if (nr_core_float_apply() || sched_getaffinity(0, sizeof(s0), &s0) || CPU_COUNT(&s0) < 2) _exit(20);
     setenv("ISAC_CORE_PLAN", "0", 1);
