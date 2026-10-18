@@ -57,6 +57,7 @@
 #include "common/utils/bits.h" // freq_alloc_bitmap_t
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_pdsch_passive_alloc_normalise (pure, lives there)
 #include "PHY/defs_nr_UE.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_snr.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h"
 
 #ifdef __cplusplus
@@ -155,6 +156,8 @@ typedef struct {
   float                br_nvar_db[4];///< per-branch chest noise variance (dB, chest's own DM-RS estimate)
   float                rho;          ///< mean |cross-branch residual correlation|       ///< mean QAM amplitude consistency (1 = coherent), 0 = n/a ///< EVM after a per-symbol complex scale (what CPE/amplitude tracking would leave)
   float                br_snr_db[4];
+  nr_dmrs_snr_t        dmrs_snr;     ///< EVMGRANT dmrs_snr= / dmrs_pw= / dmrs_ref= (chest-based, valid when dmrs_path != 0)
+  uint8_t              dmrs_path;    ///< 0 none (-99), 1 CPU chest, 2 GPU exact chest, 3 GPU graph pass, 4 chest cache (EVMGRANT dsp=)
   float                layer_snr_db[4]; ///< HIGHMCS: per-layer decision-directed SNR (dB), -99 = n/a (EVMGRANT snr_l=)
   int8_t               l2maxh;       ///< MRCBUG diag: the fixed-point output shift of this decode (EVMGRANT l2=)
   float                zabs;         ///< MRCBUG diag: mean |Re z|,|Im z| of the int16 equaliser output in LSB (EVMGRANT zabs=)

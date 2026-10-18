@@ -495,6 +495,8 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   j->ndmrs = ndmrs;
   j->nrb = nrb;
   j->k0 = k0;
+  j->car_k0 = fp->first_carrier_offset;
+  j->car_n = 12 * fp->N_RB_DL;
   if (nseg > 0) {
     j->seg_pil_nrb = pil_nrb;
     const int tot = nr_gpu_pass_seg_fill(j, in->seg, nseg, in->dlsch_config->BWPStart, in->dlsch_config->refPoint, fp->first_carrier_offset, fp->ofdm_symbol_size);

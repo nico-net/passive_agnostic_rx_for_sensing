@@ -4095,6 +4095,29 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   } else {
     nr_dlsch_chest_per_symbol = 0;
   }
+  /* EVMGRANT dmrs_snr / dmrs_pw / dmrs_ref (CPU chest, GPU exact chest, chest cache): last DM-RS symbol and layer, as nr_dl_chest_nvar_ant. The GPU graph pass fills
+   * the same from its host copy of the estimate (nr_gpu_pass_graph.cu); a gpu_llr / gw_ready grant has no chest of its own and stays path 0 (-99). */
+  {
+    nr_dmrs_snr_init(&out->dmrs_snr);
+    out->dmrs_path = 0;
+    if (dmrs_last >= 0 && cw->Nl > 0) {
+      const int nrx = fp->nb_antennas_rx < 4 ? fp->nb_antennas_rx : 4, Nfft = fp->ofdm_symbol_size;
+      const int nrb = seg_path ? freq_alloc->num_rbs : chest_alloc.num_rbs;
+      const int16_t *rows[4] = {0, 0, 0, 0};
+      uint32_t nres[4] = {0, 0, 0, 0};
+      for (int a = 0; a < nrx; a++) {
+        rows[a] = (const int16_t *)&pdsch_dl_ch_estimates[(cw->Nl - 1) * fp->nb_antennas_rx + a][Nfft * dmrs_last];
+        nres[a] = nr_dl_chest_nvar_ant[a];
+      }
+      /* LS = rx * pilot >> 15 and |pilot| = 2^14 / beta_dmrs: LS power = rx power * (1 / (2 beta))^2 */
+      const double beta = get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2);
+      nr_dmrs_snr_fill(&out->dmrs_snr, rows, nrx, 12 * nrb, nres, dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2 ? 2 : 1, 4.0 * beta * beta);
+      if (!seg_path)
+        out->dmrs_snr.ref_db = nr_dmrs_ref_db((const int16_t *)&rxdataF[0][Nfft * dmrs_last], Nfft, fp->first_carrier_offset, 12 * fp->N_RB_DL,
+                                              (fp->first_carrier_offset + (chest_cfg.BWPStart + chest_alloc.first_rb) * 12) % Nfft, 12 * nrb);
+      out->dmrs_path = chest_hit ? 4 : ((seg_path ? gseg : gch) == 0) ? 2 : 1;
+    }
+  }
   /* nvar normalisation. ISAC_RX_NVAR_FIX=1 (opt-in, default OFF = bit-identical to before).
    *
    * The loop above accumulates (n_dmrs_sym x Nl) terms, each one already a PER-ANTENNA MEAN of
@@ -4662,6 +4685,10 @@ gpu_llr_ready:;
   if (gpu_llr) { nvar = 0; nvar_den = 1u; n_dmrs_sym = 0; } /* skipped by the jump; read only on the guarded retries */
   if (gp_ok) { /* skipped by the jump too: what the graph pass measured (the chest post, the DM-RS FO tracker, the per-branch FO estimate) */
     nvar = t_gpp->r.nvar; nvar_den = 1u; n_dmrs_sym = t_gpp->ndmrs;
+    out->dmrs_snr = t_gpp->r.dsnr; /* LS units: rx power = LS power * 4 beta^2 (see the chest-side fill) */
+    if (out->dmrs_snr.pw_db > -90.f)
+      out->dmrs_snr.pw_db += (float)(20.0 * log10(2.0 * get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2)));
+    out->dmrs_path = 3;
     dmrs_first = t_gpp->dmrs_first; dmrs_last = t_gpp->dmrs_last;
     out->nvar = nvar;
     for (int a = 0; a < NR_DL_CHEST_MAX_ANT; a++)
