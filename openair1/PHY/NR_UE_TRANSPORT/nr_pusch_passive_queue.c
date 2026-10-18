@@ -81,6 +81,10 @@ static nr_pusch_queue_cursor_t g_cursor;
  *  ISAC_UL_STALE_DROP=1      (ULST) a job holding a shared snapshot is dropped at dequeue by the same age rule as a job
  *                            without one (nr_pusch_queue_snapshot_fresh: one frame minus 5 slots), so a GPU/CPU stall
  *                            costs the grants older than that instead of draining tens of ms of backlog (VL2: 60 ms).
+ *                            The age is also taken in wall time (the same number of slot durations since the slot's
+ *                            samples arrived), since the producer's slot counter itself lags when the host stalls.
+ *                            shortcut: the wall-time age needs the arrival ring of ISAC_E2E_TRACE=1 (on in t26uL);
+ *                            without it only the slot-count rule applies -- record arrivals unconditionally to upgrade.
  *                            Real-grant stale drops are printed as PUSCHQ2 real_stale= and scored as UL drops. */
 static nr_pusch_passive_job_t g_pring[NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH];
 static nr_pusch_queue_cursor_t g_pcursor;
@@ -242,6 +246,19 @@ static int ul_retry_max_rb(void)
   return m;
 }
 
+/* ULST: true when the slot's samples arrived more than (slots_per_frame - 5) slot durations ago (the
+ * nr_pusch_queue_snapshot_fresh budget in wall time); false when the arrival is unknown */
+static bool ulq_wall_stale(long abs_slot, long slots_per_frame)
+{
+  extern uint64_t nr_passive_slot_arrival_ns(long abs_slot);
+  const uint64_t arr = nr_passive_slot_arrival_ns(abs_slot);
+  if (!arr || slots_per_frame <= 5) return false;
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  const uint64_t now = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+  return now > arr && now - arr > (uint64_t)(slots_per_frame - 5) * (10000000ull / (uint64_t)slots_per_frame);
+}
+
 bool nr_pusch_passive_pipeline_enabled(void)
 {
   const char *v = getenv("ISAC_UL_PIPELINE");
@@ -365,7 +382,8 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     if ((held < 0 && !(nr_pusch_passive_pipeline_enabled() ?
           nr_pusch_queue_snapshot_fresh(prod, job.absolute_slot, slots_per_frame) :
           nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame)))
-        || (held >= 0 && g_stale_drop && !nr_pusch_queue_snapshot_fresh(prod, job.absolute_slot, slots_per_frame))) {
+        || (held >= 0 && g_stale_drop && (!nr_pusch_queue_snapshot_fresh(prod, job.absolute_slot, slots_per_frame)
+                                          || ulq_wall_stale(job.absolute_slot, slots_per_frame)))) {
       atomic_fetch_add_explicit(&g_dropped_stale, 1, memory_order_relaxed);
       if (pick == 0) atomic_fetch_add_explicit(&g_stale_real, 1, memory_order_relaxed);
       continue;
