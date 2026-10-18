@@ -1457,6 +1457,13 @@ static bool g_recov_ok; /* snapshot pool allocated and the worker running */
 static _Atomic uint64_t g_recov_nosnap;
 static void recov_group_handoff(int idx, recov_wjob_t *const slots[], const nr_recov_key_t keys[], int n);
 
+/* ISAC_PDSCH_PIN_PREWARM_ALL=1: the pdschRecov worker pins its decode buffers at its start, like the consumers (else at its first rescue) */
+int nr_pdsch_pin_prewarm_all(void);
+void nr_pdsch_recovery_thread_prewarm(void)
+{
+  if (nr_pdsch_pin_prewarm_all() && g_ue) nr_pdsch_passive_decode_pin_prewarm(g_ue);
+}
+
 static void *nr_pdsch_passive_queue_thread(void *arg)
 {
   const int idx = ((consumer_arg_t *)arg)->idx;
@@ -2202,7 +2209,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       /* ISAC_PDSCH_EVM_GRANT (T26c): one line per full decode, decoded AND failed. snr = -20 log10(evm). */
       /* SYSAN ISAC_E2E_TRACE=1: e2e=arr2enq,qwait,pre,dec,first_body,bodies,tot,lag (us; lag = producer slots ahead at done):
        * slot samples read -> DCI accepted (scan) -> dequeued -> decode call start (IQ copy, GPU FEP group) -> decode end */
-      char e2e[128] = "", stg[192] = "";
+      char e2e[256] = "", stg[192] = "";
       if (nr_passive_e2e_trace()) {
         extern int nr_pdsch_passive_decode_stg(char *, size_t);
         nr_pdsch_passive_decode_stg(stg, sizeof(stg));
@@ -2215,6 +2222,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         snprintf(e2e, sizeof(e2e), " e2e=%ld,%ld,%ld,%ld,%ld,%u,%ld,%ld", E2E_US(arr, enqueue_ns), E2E_US(enqueue_ns, taken_ns),
                  E2E_US(taken_ns, dec_t0), E2E_US(dec_t0, dec_t1), (long)(nr_pdsch_passive_decode_first_body_ns() / 1000), eb,
                  E2E_US(arr, dec_t1), atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed) - job.absolute_slot);
+        if (nr_a2e_trace() && job.a2s_ns[0]) { /* a2s=arr->occ,occ->pass,pass->p1end,p1end->p2,p2->cand,cand->accept,accept->enq,kind,bank */
+          const size_t l_ = strlen(e2e);
+          snprintf(e2e + l_, sizeof(e2e) - l_, " a2s=%ld,%ld,%ld,%ld,%ld,%ld,%ld,%d,%d", E2E_US(arr, job.a2s_ns[0]), E2E_US(job.a2s_ns[0], job.a2s_ns[1]),
+                   E2E_US(job.a2s_ns[1], job.a2s_ns[2]), E2E_US(job.a2s_ns[2], job.a2s_ns[3]), E2E_US(job.a2s_ns[3], job.a2s_ns[4]),
+                   E2E_US(job.a2s_ns[4], job.a2s_ns[5]), E2E_US(job.a2s_ns[5], enqueue_ns),
+                   (int)job.a2s_kind, (int)job.a2s_bank);
+          const size_t l2_ = strlen(e2e); /* a2x=accept->solver pass, solver readings, readings->enqueue (us; -1 = no solver pass) */
+          snprintf(e2e + l2_, sizeof(e2e) - l2_, " a2x=%ld,%ld,%ld", E2E_US(job.a2s_ns[5], job.a2s_ns[7]), E2E_US(job.a2s_ns[7], job.a2s_ns[8]),
+                   E2E_US(job.a2s_ns[8], enqueue_ns));
+        }
 #undef E2E_US
       }
       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
@@ -3015,6 +3032,15 @@ int nr_pdsch_passive_queue_fill_pct(void)
  *   Stamps the config epoch and sensing epoch, normalises the PRB allocation (refuses invalid PRB lists), and flushes at once when CSI-RS discovery is on.
  *   Returns false when the pool is not running or the grant is refused. Caller: nr_pdcch_blind_monitor_rt.c (per PDCCH grant).
  */
+__thread uint64_t nr_a2e_ts[9];
+__thread int8_t nr_a2e_kind, nr_a2e_bank;
+int nr_a2e_trace(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_A2E_TRACE") && atoi(getenv("ISAC_A2E_TRACE")) ? 1 : 0;
+  return en;
+}
+
 bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
 {
   if (!atomic_load_explicit(&g_running, memory_order_acquire)) {
@@ -3026,6 +3052,11 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
     nr_pdsch_passive_queue_flush_locked();
   g_pending[g_n_pending] = *job;
   g_pending_ns[g_n_pending] = nr_csirs_disc_enabled() ? now_ns() : 0;
+  if (nr_a2e_trace()) {
+    memcpy(g_pending[g_n_pending].a2s_ns, nr_a2e_ts, sizeof(nr_a2e_ts));
+    g_pending[g_n_pending].a2s_kind = nr_a2e_kind;
+    g_pending[g_n_pending].a2s_bank = nr_a2e_bank;
+  }
   /* BLINDPIPE traffic probe: every decoded PDSCH allocation (grid RBs) explains occupancy in its slot */
   nr_dltp_note_grant((uint16_t)job->frame_rx, (uint8_t)job->nr_slot_rx, job->dlsch_pdu.BWPStart + job->dlsch_pdu.start_rb,
                      job->dlsch_pdu.number_rbs, job->dlsch_pdu.start_symbol, job->dlsch_pdu.number_symbols);

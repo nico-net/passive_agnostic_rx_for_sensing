@@ -446,6 +446,13 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
                                uint8_t dmrs_typeA_position,
                                const nr_pdcch_blind_extract_opts_t *opts,
                                nr_pdcch_blind_result_t *out);
+/// The payload-independent part of nr_pdcch_blind_extract_11() for one (bwp_size, opts): field widths and the implied size.
+typedef struct { int32_t f[24]; uint16_t size; } nr_pdcch_blind_extract_pre_t;
+void nr_pdcch_blind_extract_pre(uint16_t bwp_size, const nr_pdcch_blind_extract_opts_t *opts, nr_pdcch_blind_extract_pre_t *pre);
+/// nr_pdcch_blind_extract_11() with `pre` from nr_pdcch_blind_extract_pre(bwp_size, opts): the same result, without recomputing it.
+bool nr_pdcch_blind_extract_11_pre(const nr_pdcch_blind_raw_result_t *raw, uint16_t dci_length, uint16_t bwp_size,
+                                   uint8_t dmrs_typeA_position, const nr_pdcch_blind_extract_opts_t *opts,
+                                   const nr_pdcch_blind_extract_pre_t *pre, nr_pdcch_blind_result_t *out);
 
 /**
  * @brief Parse the [sensing] pdcch_blind_monitor_* config keys. Safe to call once at UE start-up;

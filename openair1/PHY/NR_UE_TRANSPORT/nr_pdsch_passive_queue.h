@@ -133,7 +133,15 @@ typedef struct {
   int8_t   mrc_mode;       ///< T26d: per-grant combining mode override (-1/0 = receiver default)
   int32_t  coreset_key;    ///< T26c: PDCCH nID of the discovered CORESET the DCI came from (-1 = none / not set)
   uint8_t  spread_solo;    ///< ISAC_PDSCH_SLOT_SPREAD: handed back to the ring by the consumer that dequeued the slot group; decoded alone, never regrouped
+  /// ISAC_A2E_TRACE=1 (diagnostic): scan timestamps of the DCI's occasion, ns: occasion start, pass start, Phase-1 end, Phase-2 start, candidate start, DCI accepted, (unused), solver reading pass start, readings done; pass kind, bank
+  uint64_t a2s_ns[9];
+  int8_t   a2s_kind, a2s_bank;
 } nr_pdsch_passive_job_t;
+
+/* ISAC_A2E_TRACE=1: the scan thread's current occasion stamps (set by nr_pdcch_blind_monitor_rt.c, copied into each job at enqueue) */
+extern __thread uint64_t nr_a2e_ts[9];
+extern __thread int8_t nr_a2e_kind, nr_a2e_bank;
+int nr_a2e_trace(void);
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in
 /// `decoded` is always attributable rather than merely visible.

@@ -4850,11 +4850,32 @@ bool nr_pdcch_blind_decode_raw_11(const int16_t *llr, uint8_t aggregation_level,
   return nr_pdcch_blind_decode_raw(llr, aggregation_level, dci_length, rnti_min, rnti_max, true, out);
 }
 
+_Static_assert(sizeof(blind_field_bits_t) <= sizeof(((nr_pdcch_blind_extract_pre_t *)0)->f), "extract pre: field-bit storage too small");
+void nr_pdcch_blind_extract_pre(uint16_t bwp_size, const nr_pdcch_blind_extract_opts_t *opts, nr_pdcch_blind_extract_pre_t *pre)
+{
+  const blind_field_bits_t f = blind_field_bits(bwp_size, opts);
+  memset(pre, 0, sizeof(*pre));
+  memcpy(pre->f, &f, sizeof(f));
+  pre->size = nr_pdcch_blind_dci_size_ex(bwp_size, opts);
+}
+static bool extract_11_impl(const nr_pdcch_blind_raw_result_t *raw, uint16_t dci_length, uint16_t bwp_size, uint8_t dmrs_typeA_position,
+                            const nr_pdcch_blind_extract_opts_t *opts, const nr_pdcch_blind_extract_pre_t *pre, nr_pdcch_blind_result_t *out);
 bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
                                uint16_t dci_length, uint16_t bwp_size,
                                uint8_t dmrs_typeA_position,
                                const nr_pdcch_blind_extract_opts_t *opts,
                                nr_pdcch_blind_result_t *out)
+{
+  return extract_11_impl(raw, dci_length, bwp_size, dmrs_typeA_position, opts, NULL, out);
+}
+bool nr_pdcch_blind_extract_11_pre(const nr_pdcch_blind_raw_result_t *raw, uint16_t dci_length, uint16_t bwp_size,
+                                   uint8_t dmrs_typeA_position, const nr_pdcch_blind_extract_opts_t *opts,
+                                   const nr_pdcch_blind_extract_pre_t *pre, nr_pdcch_blind_result_t *out)
+{
+  return extract_11_impl(raw, dci_length, bwp_size, dmrs_typeA_position, opts, pre, out);
+}
+static bool extract_11_impl(const nr_pdcch_blind_raw_result_t *raw, uint16_t dci_length, uint16_t bwp_size, uint8_t dmrs_typeA_position,
+                            const nr_pdcch_blind_extract_opts_t *opts, const nr_pdcch_blind_extract_pre_t *pre, nr_pdcch_blind_result_t *out)
 {
   if (!out) return false;
   memset(out, 0, sizeof(*out));
@@ -4882,11 +4903,15 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
   // deployment that needed dci_length_override=45 has NOT been isolated, so the per-field bit
   // positions below may still be misaligned for that deployment even once decode (Step 1-2) starts
   // succeeding. Flagged, not fixed -- see the Stage 1 handover note this session leaves behind. ----
-  const blind_field_bits_t f = blind_field_bits(bwp_size, opts);
+  blind_field_bits_t f;
+  if (pre) /* precomputed by nr_pdcch_blind_extract_pre() for the same bwp_size and opts: the same values */
+    memcpy(&f, pre->f, sizeof(f));
+  else
+    f = blind_field_bits(bwp_size, opts);
   // read_field() walks DOWN from dci_length, so a field list wider than the payload would shift by
   // a negative count (undefined behaviour) -- and, long before that, would mean every field is
   // being read from the wrong offset anyway. Reject rather than produce confident garbage.
-  if (nr_pdcch_blind_dci_size_ex(bwp_size, opts) > dci_length) {
+  if ((pre ? pre->size : nr_pdcch_blind_dci_size_ex(bwp_size, opts)) > dci_length) {
     out->reject_reason = "configured DCI field widths exceed dci_length";
     return false;
   }
