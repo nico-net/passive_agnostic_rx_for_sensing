@@ -34,6 +34,8 @@ typedef struct {
   /* v2 Task 2 (ISAC_PDSCH_GPU_GRAPH_COVER): a layout probe decodes code block 0 only (with the full-C E / K / Z) and is never a decoded TB (out->r.tb_ok = 0);
    * probe_last_sym: its symbol horizon (-1 = the whole grant; the body's rule), set for every grant */
   int probe, probe_last_sym;
+  int gate_on;                      /* Fix A+D: the in-graph no-chance gate (nr_snr_gate.h): required SNR - 5 dB in gate_thr_db; 0 = never skip */
+  float gate_thr_db;
   /* the band the channel estimate covers (the slot share widens it upward; nr_pdsch_passive_decode.c share_chest_band); NULL = the grant's. Contiguous grants only */
   const freq_alloc_bitmap_t *chest_fa;
   const fapi_nr_dl_config_dlsch_pdu_rel15_t *chest_cfg;

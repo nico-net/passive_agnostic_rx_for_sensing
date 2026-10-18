@@ -190,6 +190,10 @@ typedef struct {
   uint32_t n_decode; /* code blocks decoded (blocks >= n_decode are padding; shape.ncb_class is the class of n_decode), 0 = C; K' / CRC type / E stay those of C */
   uint32_t G_dem;    /* LLRs the demod writes (a probe past its horizon: fewer); llr[G_dem, G) are zeroed, as the body's cleared buffer. 0 = G */
   uint8_t dmrs_type; /* v2 ISAC_PDSCH_GPU_GRAPH_DMRS2: 2 = DM-RS type 2 (pil[][]: 4 c16 per RB; the chest rows carry the type), 0 / 1 = type 1 */
+  /* ---- Fix A+D: the no-chance gate inside the submission (nr_snr_gate.h; both DL and UL jobs). gate_on = 0: never skip. Otherwise the pass stops after the channel estimate when the
+   * DM-RS comb SNR is below gate_thr_db (= the SNR the MCS needs - 5 dB, computed by the caller) and reports skip = 1 (tb_ok 0, no LLRs) */
+  uint8_t gate_on;
+  float gate_thr_db;
   uint8_t probe;     /* 1 = a layout probe: never a decoded TB (tb_ok = 0, llr_out filled; outcome seg_ok[0]); the low-priority twin stream (ISAC_PDSCH_GPU_PRIO) */
 } nr_gpu_pass_job_t;
 
@@ -236,6 +240,10 @@ typedef struct {
   uint32_t ul_nrows;
   uint8_t ul_tb_crc;             /* TB-level CRC24A of a multi-block TB (hp_crc_failed's second condition) */
   nr_gpu_llr_stats_t llr_stats;  /* v2: the DL LLR statistics (k_llr_stats_pre / _post) */
+  uint8_t skip;                  /* Fix A+D: the in-graph no-chance gate fired: no demod / LDPC / CRC ran, tb_ok = 0, need_cpu = 0 */
+  float gate_db;                 /* the DM-RS comb SNR the gate compared (-99 = none) */
+  uint32_t prep_ns, launch_ns;   /* host: entry -> first launch call; the launch calls (markers, H2D of the parameter blocks, graph launches, done event) */
+  uint32_t gstart_ns, gspan_ns;  /* Fix A+D: GPU-side event stamps of this pass: launch call -> first graph node, first node -> completion (0 = not measured: C skipped) */
 } nr_gpu_pass_result_t;
 
 /* Process-wide configuration, before nr_gpu_pass_init: the bit-exact chest reads the receiver's delay table (a fixed pointer, baked into the graphs). */

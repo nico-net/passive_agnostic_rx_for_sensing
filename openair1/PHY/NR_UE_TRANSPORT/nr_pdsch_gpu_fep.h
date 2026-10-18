@@ -68,7 +68,13 @@ typedef struct {
  * 0 <= slot < NR_GPU_PASS_RING), then launch or replay nr_pdsch_gpu_fep_dev(j, rxF, slot, stream), which only enqueues device work (H2D
  * from that slot's fixed pinned memory on DISCRETE, the kernel, an event marking the slot free). A graph is captured per slot index;
  * rxdata pointers, ring_len and sym_mask of the captured job are baked in, the window position (ring_offset) and rotation are not. */
-#define NR_GPU_PASS_RING 4
+/* Fix A+D: the pass instances are three disjoint pools, each with its own streams, graph executables, FEP staging slot, demod and LDPC context (all indexed by the
+ * instance), so a submission of one pool can never wait for an instance or a stream of another: real DL grants [0, DL), real UL grants [DL, DL + UL), probes (DL layout
+ * probes, UL probes) the last NR_GPU_PASS_PROBE. See nr_gpu_pass_graph.cu. */
+#define NR_GPU_PASS_DL 4
+#define NR_GPU_PASS_UL 2
+#define NR_GPU_PASS_PROBE 1
+#define NR_GPU_PASS_RING (NR_GPU_PASS_DL + NR_GPU_PASS_UL + NR_GPU_PASS_PROBE)
 typedef int (*nr_gpu_fep_stage_fn)(const nr_gpu_fep_job_t *j, int *slot_out);
 typedef int (*nr_gpu_fep_dev_fn)(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF_dev, int slot, void *stream);
 /* stage into a slot chosen by the caller (the rx pointers, ring length, origin and rotation are read from the slot when the kernel runs) */

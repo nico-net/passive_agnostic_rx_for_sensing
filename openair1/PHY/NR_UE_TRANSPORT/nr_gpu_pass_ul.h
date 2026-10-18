@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
-/* GPUPASS Task 7, host side of the PUSCH (UL) graph pass (nr_gpu_pass_ul.c, in the PHY UE library). ISAC_UL_GPU_PASS=1 enables it (default off: nothing here runs).
+/* GPUPASS Task 7, host side of the PUSCH (UL) graph pass (nr_gpu_pass_ul.c, in the PHY UE library). the pass is the UL path (Fix A+D, no switch).
  *
  *   - ul_hyp_cache: the per-RNTI hypothesis a locked grant decodes with (timing advance, DM-RS identity and layout). A hit lets the decoder skip the timing search and the
  *     DM-RS-id discovery and go straight into the GPU pass; a miss leaves the existing path untouched. Filled by the decoder when a grant of the RNTI decodes (and, in
@@ -75,6 +75,7 @@ typedef struct {
   uint8_t *tb;                           /* receives the TB (>= (lenWithCrc(1, A) + 7) / 8 + 8 bytes); the decoder's harq b */
   int16_t *llr_out;                      /* [G]: the final LLRs of a TB that failed its CRC (the UCI search re-decodes them) */
   int llr_out_all;                       /* 1 = also on success (tests) */
+  int gate_on; float gate_thr_db;        /* Fix A+D: the in-graph no-chance gate (nr_snr_gate.h): required SNR - 5 dB; gate_on = 0 never skips */
   int want_est;                          /* 1 = the chest estimates go to out->est (the CFR / diagnostic consumers) */
   /* ---- test hooks: pilots / descrambling words of the caller instead of the Gold sequence */
   const int16_t *pil_override[NR_GPU_PASS_MAX_DMRS];
@@ -93,11 +94,11 @@ typedef struct {
   const int16_t *est;                    /* want_est: [ndmrs * nbRx][4096] c16, row = dmrs_index * nbRx + antenna */
 } nr_gpu_pass_ul_out_t;
 
-/* 1 when ISAC_UL_GPU_PASS=1 was asked for (before the module is up): the decoder allocates its per-context buffers only then */
+/* always 1 (Fix A+D): the decoder allocates its per-context buffers */
 int nr_gpu_pass_ul_requested(void);
 /* before the RX fence (per decode context): the job, pilot and estimate buffers, allocated and prefaulted */
 void nr_gpu_pass_ul_prewarm(int ctx);
-/* 1 = ISAC_UL_GPU_PASS=1 and the classes are cached */
+/* 1 = the classes are cached */
 int nr_gpu_pass_ul_active(void);
 /* 0 = the pass ran (out filled; out->r.tb_ok is the TB CRC verdict, out->r.need_cpu the zero-syndrome case); 1 = not handled (counted), the old path decodes */
 int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out);

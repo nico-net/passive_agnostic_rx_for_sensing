@@ -51,6 +51,8 @@ static inline bool nr_green_low_ok(const unsigned *lo, const unsigned *disc, con
 /* nr_gpu_green_stream: creates *s (non-blocking, given priority) in this translation unit's discovery (rt = false) or
  * real-time (rt = true) green context when the flags above ask for it; returns true on success, false when off or
  * unavailable. The contexts are created once, on first use, and never destroyed. */
+/* stream idx of the UL / probe real-time context (idx below it: the DL real-time context) */
+#define NR_GREEN_UL_IDX 100
 static inline bool nr_gpu_green_stream_impl(cudaStream_t *s, int priority, bool rt, int idx)
 {
 #if CUDART_VERSION >= 12050
@@ -60,7 +62,8 @@ static inline bool nr_gpu_green_stream_impl(cudaStream_t *s, int priority, bool 
   static bool made[2], rmade[8], lmade, lfail;
   static CUdevResource part[2], rpart[8], lpart, all;
   static int lsms;
-  static unsigned ngrp;
+  static unsigned ngrp, ul_first, ul_n, dl_first, dl_n;
+  static CUdevResource rgrp[16];
   static CUdevice dev;
   static CUresult (*desc_gen)(CUdevResourceDesc *, CUdevResource *, unsigned);
   static CUresult (*ctx_create)(CUgreenCtx *, CUdevResourceDesc, CUdevice, unsigned);
@@ -96,23 +99,30 @@ static inline bool nr_gpu_green_stream_impl(cudaStream_t *s, int priority, bool 
     stream_create = (CUresult(*)(CUstream *, CUgreenCtx, unsigned, int))f[5];
     fprintf(stderr, "[GPU] ISAC_GPU_DISC_SMS=%d: discovery on %u SMs, real-time on %s (%u of %u SMs)\n", sms,
             part[0].sm.smCount, isolate ? "the other SMs" : "all SMs", isolate ? part[1].sm.smCount : all.sm.smCount, all.sm.smCount);
-    if (isolate) {
-      /* DEFERRED/DO NOT USE: ISAC_GPU_RT_PARTS not in the frozen config t26zE (2026-10-18); slated for removal */
-      const char *pe = getenv("ISAC_GPU_RT_PARTS");
-      const int want = pe ? atoi(pe) : 0;
-      const unsigned per = want > 1 ? (unsigned)(part[1].sm.smCount / (unsigned)want) : 0;
-      if (want > 1 && want <= 8 && per >= 8) {
-        CUdevResource rem;
-        unsigned g = (unsigned)want;
-        const CUresult rc = ((CUresult(*)(CUdevResource *, unsigned *, const CUdevResource *, CUdevResource *, unsigned, unsigned))f[2])(
-            rpart, &g, &part[1], &rem, 0, per);
-        if (rc == CUDA_SUCCESS && g >= 2) ngrp = g;
-        else fprintf(stderr, "[GPU] ISAC_GPU_RT_PARTS: split of %u SMs by %u failed (rc=%d groups=%u)\n", part[1].sm.smCount, per, (int)rc, g);
-        cudaGetLastError();
-      }
-      if (want > 1)
-        fprintf(stderr, "[GPU] ISAC_GPU_RT_PARTS=%d: %u real-time SM groups of %u SMs\n", want, ngrp ? ngrp : 1u,
-                ngrp ? rpart[0].sm.smCount : part[1].sm.smCount);
+    if (isolate && part[1].sm.smCount >= 32) {
+      /* Fix A+D: the real-time SMs are split in two disjoint green contexts: the DL real-grant context and a small UL / probe context (stream idx >= NR_GREEN_UL_IDX), so that a UL pass
+       * or a probe never occupies an SM a DL grant needs (stream priority alone does not: running blocks are not preempted). A split part cannot be split again (rc 915), so all SMs
+       * are split once into groups of the driver's granularity (8 SMs on the GB10: 4 groups + a remainder): the first group(s) are the discovery SMs, the next group is UL + probes,
+       * the rest (groups and remainder) is the DL context. A GPU with fewer than 32 real-time SMs keeps one real-time context (UL and probes then yield by stream priority only). */
+      CUdevResource rem = {};
+      unsigned g = 16;
+      const CUresult rc = ((CUresult(*)(CUdevResource *, unsigned *, const CUdevResource *, CUdevResource *, unsigned, unsigned))f[2])(rgrp, &g, &all, &rem, 0, 4);
+      const unsigned sz = g ? rgrp[0].sm.smCount : 0, disc_n = sz ? (part[0].sm.smCount + sz - 1) / sz : 0;
+      if (rc == CUDA_SUCCESS && g < 16 && sz && g >= disc_n + 1) {
+        unsigned tot = g;
+        if (rem.sm.smCount > 0) rgrp[tot++] = rem;
+        ul_first = disc_n;
+        ul_n = 1;
+        dl_first = disc_n + 1;
+        dl_n = tot > dl_first ? tot - dl_first : 0;
+        if (dl_n) {
+          unsigned dsm = 0;
+          for (unsigned i = 0; i < dl_n; i++) dsm += rgrp[dl_first + i].sm.smCount;
+          ngrp = 2;
+          fprintf(stderr, "[GPU] real-time SMs split: DL %u SMs, UL + probes %u SMs\n", dsm, rgrp[ul_first].sm.smCount);
+        }
+      } else fprintf(stderr, "[GPU] real-time split of %u SMs failed (rc=%d groups=%u): one real-time context\n", all.sm.smCount, (int)rc, g);
+      cudaGetLastError();
     }
     /* Dynamic partition: ISAC_GPU_DISC_SMS_LOW (> 0) is a smaller discovery context (the leading SMs, so a subset of the discovery ones); idx == -1 asks for it. */
     /* DEFERRED/DO NOT USE: ISAC_GPU_DISC_SMS_LOW not in the frozen config t26zE (2026-10-18); slated for removal */
@@ -170,10 +180,10 @@ static inline bool nr_gpu_green_stream_impl(cudaStream_t *s, int priority, bool 
   }
   if (state != 1 || (rt && !isolate)) return false;
   if (rt && ngrp) {
-    const int q = (idx < 0 ? 0 : idx) % (int)ngrp;
+    const int q = idx >= NR_GREEN_UL_IDX ? 1 : 0;
     if (!rmade[q]) {
       CUdevResourceDesc desc;
-      if (desc_gen(&desc, &rpart[q], 1) != CUDA_SUCCESS || ctx_create(&rgreen[q], desc, dev, CU_GREEN_CTX_DEFAULT_STREAM) != CUDA_SUCCESS)
+      if (desc_gen(&desc, &rgrp[q ? ul_first : dl_first], q ? ul_n : dl_n) != CUDA_SUCCESS || ctx_create(&rgreen[q], desc, dev, CU_GREEN_CTX_DEFAULT_STREAM) != CUDA_SUCCESS)
         return false;
       rmade[q] = true;
     }

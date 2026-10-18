@@ -163,6 +163,7 @@ typedef struct {
   uint16_t             dmrs_ports;   ///< T26d diag: DM-RS port bitmap the decode used
   uint8_t              n_cdm;        ///< T26d diag: CDM groups without data
   uint8_t              dmrs_add;     ///< T26d diag: number of DM-RS symbols
+  uint8_t              skip;         ///< TAIL-FIX no-chance gate (nr_snr_gate.h): 1 = DM-RS SNR far below the MCS requirement, not demodulated / decoded / retried (EVMGRANT skip=)
 } nr_pdsch_passive_decode_result_t;
 
 /**

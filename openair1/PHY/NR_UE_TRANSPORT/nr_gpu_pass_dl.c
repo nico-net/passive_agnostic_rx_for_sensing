@@ -127,8 +127,12 @@ void nr_gpu_pass_disable(const char *why)
 
 void nr_gpu_pass_gate(int g)
 {
-  if (g >= 0 && g < NR_GPU_PASS_GATE_N)
-    atomic_fetch_add_explicit(&G.gate[g], 1, memory_order_relaxed);
+  static const char *const gname[] = {"seg", "probe", "share", "gw", "ptrs", "tinterp", "harq", "ldpc_off", "chest_only", "occ", "nomem", "retry"};
+  if (g >= 0 && g < NR_GPU_PASS_GATE_N) {
+    /* Fix A+D: a first pass that leaves the GPU pass says why (first time per reason here; the census prints every count) */
+    if (atomic_fetch_add_explicit(&G.gate[g], 1, memory_order_relaxed) == 0 && g < (int)(sizeof(gname) / sizeof(gname[0])))
+      LOG_A(PHY, "SENSING: GPUPASS first grant kept off the pass: gate %s (the old path decodes this grant shape)\n", gname[g]);
+  }
 }
 
 int nr_gpu_pass_shadow_due_fail(void)
@@ -249,11 +253,10 @@ static int env_list(const char *name, const char *dflt, int *v, int max)
 void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
 {
   /* DEFERRED/DO NOT USE: ISAC_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
-  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *e = getenv("ISAC_GPU_PASS"), *eu = getenv("ISAC_UL_GPU_PASS");
+  const char *e = getenv("ISAC_GPU_PASS");
   const char *eg = (getenv("ISAC_PDSCH_GPU_GRAPH") ?: "1");
   int dl_on = e && atoi(e) == 1;
-  const int ul_on = eu && atoi(eu) == 1; /* ISAC_UL_GPU_PASS: the PUSCH pass (Task 7), independent of the DL one */
+  const int ul_on = 1; /* Fix A+D: the PUSCH pass (Task 7) is THE UL path (its own instance pool); grants outside its scope fall back, counted */
   if (eg && atoi(eg) == 1) { /* v2: the same module in v2 mode; never together with v1 */
     if (dl_on)
       LOG_W(PHY, "SENSING: GPUGRAPH refused: ISAC_GPU_PASS=1 (v1) is set; v2 off, v1 runs\n");
@@ -304,7 +307,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   nr_gpu_pass_cfg_t c = {.nbRx = fp->nb_antennas_rx, .n_rb_dl = fp->N_RB_DL, .delay_table = (const int16_t *)fp->delay_table[0],
                          .dt_stride = NR_MAX_OFDM_SYMBOL_SIZE, .max_delay_comp = MAX_DELAY_COMP, .v2 = G.v2, .split = G.v2 && g_sub_on[1],
                          /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_GRAPH_MB not in the frozen config t26zE (2026-10-18); slated for removal */
-                         .split_mb = getenv("ISAC_PDSCH_GPU_GRAPH_MB") ? atoi(getenv("ISAC_PDSCH_GPU_GRAPH_MB")) : 1024};
+                         .split_mb = 0 /* default cap, nr_gpu_pass_graph.cu */};
   if (nr_gpu_model() == NR_GPU_MODEL_DISCRETE) { /* the graphs read the delay table on the device */
     static nr_gpu_buf_t dt;
     const size_t bytes = sizeof(fp->delay_table);
@@ -426,9 +429,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
           }
         }
   G.nbrx = fp->nb_antennas_rx;
-  /* DEFERRED/DO NOT USE: ISAC_GPU_PASS_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *ch = getenv("ISAC_GPU_PASS_CHECK");
-  G.check = ch ? atoi(ch) : 64;
+  G.check = 0; /* Fix A+D: no shadow decode on the hot path; the pass-vs-reference comparison lives in the unit tests */
   if (G.v2 && made > 0 && g_pool.n == 0 && pthread_key_create(&g_pool_key, pool_release) == 0) /* the per-thread host sets for threads that reach the pass after the RX fence (the async recovery worker); once */
     LOG_A(PHY, "SENSING: GPUGRAPH v2 mode: %d of %d prewarmed host buffer sets for late threads\n",
           nr_gpu_graph_pool_fill(&g_pool, NR_GPU_GRAPH_POOL, sizeof(nr_gpu_pass_dl_out_t), sizeof(nr_gpu_pass_job_t)), NR_GPU_GRAPH_POOL);
@@ -559,6 +560,8 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   j->n_decode = n_dec;
   j->G_dem = G_dem;
   j->probe = (uint8_t)(in->probe != 0);
+  j->gate_on = (uint8_t)(in->gate_on != 0);
+  j->gate_thr_db = in->gate_thr_db;
   /* ---- LLR post: descrambling words (the gold sequence nr_codeword_unscrambling reads) and the K38 normalisation */
   const int words = (int)((in->G + 31) / 32);
   j->scr = gold_cache(((uint32_t)in->rnti << 15) + (0u << 14) + in->dlsch_config->dlDataScramblingId, words);
