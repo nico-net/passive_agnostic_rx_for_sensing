@@ -2846,6 +2846,11 @@ The four-RX DGX `api_off`/`api_all` gate and CPU/drop budget are also pending.
 | K48 | fb2 epoch bump on SOFT gaps | `[CODE-READ]` `nr_pdsch_config_sweep_fieldbook_bump_epoch()` is called only at the RX-stream discontinuity edge in `executables/nr-ue.c` (next to `nr_passive_acq_note_sync_loss`), so **every** sync-invalidating gap bumps the field-book epoch, including SOFT gaps < 10 ms that the operator rule (2026-10-02) says must not invalidate evidence | `task-R2fb-report.md` (review Important 2, fix round 1 comment in `nr-ue.c`) | Low–Medium (a bump only turns promoted values into hints needing 2 new supporters: slower, never wrong) | — | **Open:** robustness plan R7 must **replace** that call site with the SOFT/HARD (≥ 10 ms HARD_REVERIFY) classification, not add a second bump |
 | K49 | rank-4 pin49r4 grant count | `[MEASURED, DGX rfsim rank-4 pin49r4 273 PRB 4 RX]` the pinned rank-4 bed now decodes only ~150–220 grants per 150 s and **831–931 per 420 s on main and on the branch** (CRC 100 %, first C-RNTI 44–52 s), vs ~3000 per 150 s recorded until 2026-10-02 (§14.8) | `task-CB0WIRE-report.md` round 1 §4, round 2 §1 | Low (CRC unaffected; reduces the statistical power of rank-4 checks) | — | **Open, unexplained** (`[HYPOTHESIS]` host-related: other agents' load / docker OAI bed). Re-run on an idle host before quoting rank-4 counts |
 | K50 | Review status of the acceleration round | Per the ledger: the **ELIM fix round 1** (`2c51f9c4e4`) was merged without its Opus re-review (usage limit; recorded as "TODO before runtime enable"); **CB0WIRE** and **CB0GPU** have no independent review recorded (controller diff checks and the agents' own tests only). The merged-main defaults turn all three ON | `progress.md` | Medium (process: unreviewed code on by default) | each ON default can be disabled with `=0` (§10.2) | **Open:** review ELIM fix round 1, the CB0 wiring (admissibility bits, adapter re-validation, `note_tb_decoder` via empty grants) and the GPU CB0 entry before the first OTA claims |
+| K51 | Large grants (>= 8 CB) fail CRC | `[MEASURED, DGX OTA 2026-10-19, cells not split in the source note]` CRC 33–49 % at >= 15 dB DM-RS margin. **Under investigation (CRC-BUGS-20261019.md).** | High | none: CRC is never traded for latency (user, 2026-10-19) | **Open:** why big grants fail at high margin (§25 2026-10-18/19) |
+| K52 | rv != 0 retransmissions fail | `[MEASURED, DGX OTA 2026-10-19, cells not split in the source note]` CRC 0 % for rv != 0 grants. **Under investigation (CRC-BUGS-20261019.md).** | High | none | **Open:** retransmission path (HARQ soft state, GPU pass and CPU path) |
+| K53 | Nl = 3 / 4 grants fail | `[MEASURED, DGX OTA 2026-10-19 00:10, csd/int16-dmrssnr 6074e9f7de, LOW LOAD, cells not split]` 30–38 % CRC fail even at >= 10 dB DM-RS margin. Likely a receiver bug. | High | none | **Open:** multi-layer decode at high SNR |
+| K54 | `polar_decoder_int16` with large LLR magnitude | `[MEASURED bench, DGX]` clean AL4/AL8 DCIs mis-decode at soft-bit amplitude >= ~100–200 (int16 -32768 hazard in min-sum). Latent: production clips at +-31. The fast-SSC replacement on csd/int16-pdcchinv has no such hazard in bench. | Medium (latent) | production LLR clip +-31 | Keep the amplitude test whenever the LLR scale changes |
+| K55 | DL p99 tail: large failing grants | `[MEASURED, DGX OTA 2026-10-19, ll* and uu* runs, cells not split in the source note]` the tail is 14–15 CB grants that fail, with GPU span ~4 ms and queue ~5 ms. DL p99 is 4.85–11.69 ms in all 12 merge19-build runs (§25 2026-10-18/19). | High | frozen config as OTA default | **Open:** LDPC iteration cost of failing large grants; decode GPU span, to reach the DL median |
 
 ---
 
@@ -4546,6 +4551,89 @@ Binary `csd/int16` at `cc747a25f6` (Fix A + Fix B merged, Fix B NOT enabled). Ru
    - One fixed RF gain.
    - 2 cells within today's single-cell core set + ~25 %.
    - Order after DL: cost per cell, wideband replay, 2-cell process, on air, sens6.
+### 2026-10-18/19 block (`csd/int16-pmem19`, worktree `rr-csd-int16pm`, from `csd/int16-merge19` d79b8b7bc5; OTA DEIB 2026-10-18 and 2026-10-19; no replays, no new builds in this block)
+
+**Goals (user, 2026-10-18).**
+- DL and UL median < 0.5 ms AND p99 < 3 ms.
+- CRC_q >= 80 %.
+- Drops < 1 %.
+- Fewest cores, no flags, no per-cell tuning.
+- Timing is judged only on air. No replays.
+- PDSCH data is used for sensing. CRC is never traded for latency.
+
+**Status at the end of 2026-10-19: no latency target is met.** DL p50 and DL p99 miss in every run listed below. UL p50 misses in 15 of 16 runs (table below).
+
+**Frozen config (OTA default).**
+- Config t26zE = t26yE + PDSCH GPU pass. Code tag `freeze-20261018` on `csd/int16-clean` (310a86d899). Defaults are baked for `--passive-rx`.
+- 561 flags that are not in t26zE are marked `DEFERRED/DO NOT USE` (comments only; 729 sites in 114 files). List: `docs/superpowers/reports/csd/cleanup_20261018/DEFERRED.md`. No behaviour change.
+- On air, `FROZEN_20261018.env` is passed explicitly.
+- Frozen stays the OTA default until merge19 passes on air.
+
+**Per-block latency on air.** Labels are per line.
+- [MEASURED, DGX OTA 2026-10-18 evening, cells TIM and Vodafone, real grants, p50] PDCCH: slot arrival to scan start 61–65 us; FEP+LLR 74–78 us; polar decode of all pass candidates 49–95 us; accept to enqueue 125–178 us, of which the DCI 1_1 solver reading pass is 94–142 us.
+- [MEASURED, DGX OTA 2026-10-19 daytime, frozen, real grants, p50] PDCCH arr2enq: TIM 503 us (n = 56 483), Vodafone 743 us (n = 38 344). Logs `ab_jjsT1_1_090021`, `ab_jjsV1_1_090338`.
+- [MEASURED, DGX OTA 2026-10-19 09:15, merge19 first run] DL p50 1.25 / 1.92 ms (TIM / Vodafone). GPU span 329 / 441 us against about 170 us of GPU compute. HARQ combining then switched the GPU pass off for real grants. This was fixed later the same day (below).
+- [MEASURED, DGX OTA 2026-10-18 21:20, frozen] DL p50 = PDCCH CPU about 0.48 ms + PDSCH decode 0.59–0.89 ms, of which GPU compute about 0.17 ms. Near-idle DL p50 was still 1.10–1.18 ms, so the median is a serial per-grant path, not load.
+- [MEASURED, DGX OTA 2026-10-19, merge19 with early start, `ll*` and `uu*` runs] PDCCH arr2enq about 0 (per-CORESET early start works). DL tail: 14–15 CB grants that fail, with GPU span about 4 ms and queue about 5 ms.
+
+**Frozen vs merge19 on air, 2026-10-19.** Scored with `tests/passive_rx/goal_metrics.py` on the run logs in `/home/nicola/NICOLA/ota_runs/` (`ab_ll*`, `ab_uu*`, 16 runs). n = 2 per arm per cell, 150 s. Cells are never pooled. Values are the two runs per arm, in order.
+
+Correction to the brief: the 13:36–14:25 window is **merge19 (`uu`, M) vs merge19-ulown (U)**, not merge19 vs frozen (`run_uo_20261019.sh`). The 12:03–12:50 window is merge19 (M, `int16mg`) vs frozen (F, `int16kf`) (`run_mg_20261019.sh`).
+
+| window | cell | arm | DL p50 ms | DL p99 ms | DL crc_q % | DL drops % | UL p99 ms | UL crc % |
+|---|---|---|---|---|---|---|---|---|
+| 12:03 (ll) | TIM 3759.99 MHz | merge19 M (TM1 / TM2) | 1.03 / 1.08 | 6.48 / 7.80 | 84.3 / 79.9 | 0.0 / 0.0 | 2.37 / 2.26 | 0.0 / 0.0 |
+| 12:03 (ll) | TIM 3759.99 MHz | frozen F (TF1 / TF2) | 1.77 / 1.52 | 9.46 / 5.65 | 84.2 / 93.9 | 0.0 / 0.0 | 3.12 / 2.87 | 0.0 / 0.0 |
+| 12:03 (ll) | Vodafone 3680.01 MHz | merge19 M (VM1 / VM2) | 1.26 / 1.22 | 11.20 / 9.18 | 90.3 / 92.1 | 0.5 / 0.1 | 2.73 / 2.81 | 0.0 / 0.0 |
+| 12:03 (ll) | Vodafone 3680.01 MHz | frozen F (VF1 / VF2) | 2.09 / 1.78 | 9.43 / 6.71 | 94.5 / 95.0 | 0.2 / 0.1 | 3.82 / 3.45 | 0.0 / 0.0 |
+| 13:36 (uu) | TIM 3759.99 MHz | merge19 M (TM1 / TM2) | 0.81 / 1.10 | 9.52 / 6.89 | 92.4 / 74.2 | 0.1 / 0.0 | 2.02 / 2.41 | 0.0 / 0.0 |
+| 13:36 (uu) | TIM 3759.99 MHz | ulown U (TU1 / TU2) | 0.90 / 1.11 | 8.05 / 4.85 | 91.1 / 71.6 | 0.1 / 0.0 | 2.31 / 1.60 | 0.0 / 0.0 |
+| 13:36 (uu) | Vodafone 3680.01 MHz | merge19 M (VM1 / VM2) | 1.32 / 1.64 | 11.39 / 11.69 | 87.8 / 86.7 | 0.1 / 0.5 | 2.17 / 3.20 | 0.0 / 0.0 |
+| 13:36 (uu) | Vodafone 3680.01 MHz | ulown U (VU1 / VU2) | 1.22 / 0.99 | 11.34 / 11.03 | 90.2 / 91.1 | 0.3 / 0.5 | 2.16 / 2.16 | 0.0 / 0.0 |
+
+[MEASURED, DGX OTA 2026-10-19, the 16 runs above, n = 2 per arm per cell.] Reading:
+- No run passed DL p99 < 3 ms or DL p50 < 0.5 ms (scorer: DL FAIL(lat) in all 16).
+- DL p50 on merge19 runs: 0.81–1.64 ms. On frozen (12:03 only): 1.52–2.09 ms.
+- DL p99 on the 12 merge19-build runs (M and U): 4.85–11.69 ms. The frozen runs are 5.65–9.46 ms in the same window. There is no consistent DL p99 gain of merge19 over frozen; it differs by cell and run.
+- DL crc_q below 80 % in 3 merge19-build runs (79.9 TIM M; 74.2 TIM M; 71.6 TIM U). Frozen runs are all above 84 %.
+- DL drops are at most 0.5 % (below 1 %).
+- UL p99 < 3 ms: merge19 M in 7 of 8 runs (miss: 3.20 ms, Vodafone uu M2); U in 4 of 4; frozen in 1 of 4.
+- UL p50 < 0.5 ms in 1 of 16 runs (uu TU2, 0.48 ms). Other UL p50 values are 0.50–0.84 ms.
+- UL CRC is 0.0 % in all 16 runs. UL crc_q is 0.0 in every run. This is the SNR-limited UL CRC issue (§24), not a latency item.
+- Scorer verdicts: merge19 M and U each pass UL latency in most runs, but neither meets DL.
+
+**Fixes landed on the merge19 branch (unit tests and DGX build only, except where marked on air).**
+- Fix A+D (`csd/int16-fixad`): one GPU submission per grant, separate DL, UL and probe pools, in-graph no-chance gate (DM-RS SNR < required - 5 dB, device-side skip). Bench, DGX GB10 [BENCH]: submit to GPU start p50 2–6 us under load. DL span grows 11 % under load with the SM split. [unit test, DGX GB10] `test_nr_gpu_pass` 52/52.
+- Tail fixes 1-2-3 (`csd/int16-tail`, from `csd/int16-dmrssnr` 6074e9f7de): async recovery lane yields to first-pass work; drop-oldest eviction; UL retries run after the verdict; no-chance gate. Gate skips at required - 5 dB.
+- DM-RS SNR OTA (`csd/int16-dmrssnr` 6074e9f7de, 10-19 00:10, LOW LOAD) [MEASURED]: CRC rises monotonically with DM-RS margin. The gate (required - 5 dB) loses 0–0.05 % of CRC-OK grants, catches 7–36 % of failures, and costs 2–12 % of time. Failed grants have median margin +2.4 to +6.7 dB, so most failures are not below the requirement. Nl = 1 at 0–5 dB gives 2–8 % CRC (formula about 5–8 dB optimistic).
+- HARQ combining: it used to disable the GPU pass for every real grant (`ISAC_PDSCH_HARQ_COMBINE`). Fixed in `bef9daecc1`: the HARQ sum lives in device blocks and the combine runs inside the pass (unit test: combined pass equals CPU combine, 600 random sets). Retry arms run again with combining on (`74a84d3ff4`). The 09:15 on-air run predates this fix.
+- PDCCH (`csd/int16-pdcchinv` into merge19, `d79b8b7bc5`): NEON fast-SSC polar (bit-identical to the reference, 1.5–2.0x single, 8-lane batch in the scan), spin hand-off (cross-core wake p50 98 us to 3.7 us in bench), known-RNTI fast lane, per-CORESET early start (`bc4c8e2acd`). Early start gives PDCCH arr2enq about 0 on air (above). No separate on-air measurement of the fast-SSC or the spin hand-off is in the reports.
+- Fix B' (CPU post-accept cut, `csd/int16-pdcchgpu`): moves bookkeeping after the enqueue. Bench [BENCH unit, DGX]: solver observe 19 to 12.7–14.2 us per DCI.
+- UL borrows DL SMs (`csd/int16-merge19`) vs UL on its own SMs (`csd/int16-merge19-ulown`): the 10-19 note reads "no effect" and merge19 was kept. The uu table shows run-to-run differences in UL p99 (for example 3.20 ms M vs 2.16 ms U on Vodafone run 2). No statistical test is in the reports.
+
+**Measured no effect or rejected.**
+- GPU PDCCH: SC polar kernel floor 230–285 us (`SCAN2-20261014`). A GPU fast-SSC in shared memory gives 31–48 us per decode wave on GB10 [MEASURED bench] and is still 15–130x slower than the CPU per decode. Rejected.
+- GPU stream priority (`GPU_PRIO`, 10-18 18:35, n = 3 per cell): no gain; eVP3 13.2 ms.
+- FP32 GPU pass (afternoon 10-18, `t26fE`): DL p99 worse on both cells (median of p99: TIM 4.22, Vodafone 5.98 ms). Rejected.
+- Core plan K5 (`t26yE`, 10-18 afternoon): UL p99 1.76 / 2.27 ms (TIM / Vodafone medians), DL median worse (+8 % TIM). Frozen does not use it.
+- CSI-RS discovery off: [UNVERIFIED] the only discovery-off run in the reports (10-18 21:20, Test C) collapsed decoding (146–705 real grants vs 12–46k, UL 0), and its tail result was inconclusive. A "no median change" result is not in the reports. Source needed.
+- Fix B' alone: [UNVERIFIED] `FIX-B-PDCCHGPU-20261019.md` says B' was not measured on air. No on-air A/B of B' alone was found. Source needed.
+- A+D alone did not shorten DL decode on air: [UNVERIFIED] no on-air A/B of A+D alone was found. The FIX-AD report is bench only. Source needed.
+
+**Branch map.**
+- `csd/int16-merge19` (d79b8b7bc5): A+D + tail 1-2-3 + DM-RS SNR gate + B' + HARQ combine in the pass (`bef9daecc1`) + retries with combining (`74a84d3ff4`) + PDCCH work from `csd/int16-pdcchinv` (fast-SSC, spin hand-off, fast lane, early start `bc4c8e2acd`).
+- `csd/int16-merge19-ulown`: A/B variant, UL on its own SM group. Same DL code.
+- `csd/int16-tailtrace` (807fbafaf6): traced build. Tracing perturbs latency (UL p50 +0.4 ms, V CRC_q 77–82 % in the 10-18 check). Never use its absolute latencies.
+- `csd/int16-clean` (310a86d899): frozen code, tag `freeze-20261018`.
+- `csd/int16-pdcchinv`: PDCCH design and prototypes (`tests/pdcch_redesign/`), merged into merge19 at `d79b8b7bc5`.
+
+**Next steps (in order).**
+1. CRC bugs: large grants (K51), rv != 0 (K52), Nl >= 3 (K53). Investigation in `CRC-BUGS-20261019.md`. No CRC is traded for latency.
+2. LDPC iteration cost of failing large grants (K55). The failing grants cost the DL tail.
+3. Decode GPU span, to reach the DL median (GPU span about 4 ms on the tail; about 170 us of compute per grant on the median path).
+4. Then multi-PCI (single process, decided 2026-10-16).
+- Keep frozen as the OTA default until merge19 passes on air. Each on-air claim names its cell and n.
+
 ---
 
 ## 26. Working rules for any agent on this project (carried over from the old setup)
