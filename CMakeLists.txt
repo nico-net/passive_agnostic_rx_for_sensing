@@ -3407,6 +3407,12 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_harq_init_tx)
   add_test(NAME test_nr_harq_init_tx COMMAND ./test_nr_harq_init_tx)
 
+  add_executable(test_nr_hq_retry ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_hq_retry_test.cc)
+  target_include_directories(test_nr_hq_retry PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_hq_retry PRIVATE GTest::gtest GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_hq_retry)
+  add_test(NAME test_nr_hq_retry COMMAND ./test_nr_hq_retry)
+
   add_executable(test_nr_pdsch_ptrs_unav ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_ptrs_unav_test.cc
                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c)
   target_include_directories(test_nr_pdsch_ptrs_unav PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)

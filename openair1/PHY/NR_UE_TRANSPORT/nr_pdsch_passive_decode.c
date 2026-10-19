@@ -35,6 +35,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdsch_passive_decode.h"
 #include "nr_snr_gate.h"
 #include "nr_recov_yield.h"
+#include "nr_hq_retry.h"
 #include "nr_pdsch_qm_oracle.h"
 #include "nr_blind_stats.h"
 #include "nr_pdcch_blind_monitor.h" // nr_pdcch_blind_dmrs_mask (ISAC_RA_TDRA_SWEEP)
@@ -138,9 +139,9 @@ static int chest_pdp_diag_on(void)
 }
 /* harq_combine_on: constant 1 (was ISAC_PDSCH_HARQ_COMBINE): enables passive HARQ soft combining on its own flag.
  *   With it on, a retransmission is LDPC-decoded into the stored soft buffer of the failed first transmission (64-entry LRU).
- *   Callers: passive_ldpc_decode(), passive_decode_retry()/qamab(), nr_pdsch_passive_decode() (these skip their retry arms when on).
+ *   Callers: passive_ldpc_decode(), passive_decode_retry()/qamab(), nr_pdsch_passive_decode() (the retry arms then run only in the async lane, nr_hq_retry.h).
  */
-static int harq_combine_on(void) { return 1; } /* default since 2026-10-19, no flag; the retry arms are off with it (their conditions test !harq_combine_on()) */
+static int harq_combine_on(void) { return 1; } /* default since 2026-10-19, no flag */
 /* si_combine_on: ISAC_SI_SOFTCOMBINE (cached, default 0): SIB1/SI soft combining across repetitions (PCIS2 2026-10-13). Unlike ISAC_PDSCH_HARQ_COMBINE it
  *   needs no layout bootstrap and no NDI/RV evidence: every SI-RNTI grant of a cell with the same TBS is LDPC-decoded INTO the soft buffer of the previous
  *   undecoded one (SIB1 is the same transport block in every repetition, rv cycles 0,2,3,1), max NR_SI_COMB_MAX grants, keyed by the cell (Nid_cell). */
@@ -1533,6 +1534,7 @@ typedef struct {
   bool used, soft_valid;
   uint16_t rnti, cell; /* cell: Nid_cell for SI soft combining (ISAC_SI_SOFTCOMBINE), 0 for every other process */
   uint8_t pid, ndi, ncomb;
+  int64_t first_slot; /* absolute slot of the first transmission of the stored TB (a rescue retires only that TB) */
   uint32_t tbs;
   uint64_t last;
   int16_t *d;
@@ -1593,7 +1595,7 @@ static int hqb_ensure(harqc_entry_t *e, int C)
   pthread_mutex_unlock(&g_harqc_lock);
   return rc;
 }
-static __thread struct { int armed; uint16_t rnti; uint8_t pid, ndi; uint16_t cell; bool si; } t_hq;
+static __thread struct { int armed; uint16_t rnti; uint8_t pid, ndi; uint16_t cell; bool si; int64_t slot; } t_hq;
 static __thread int16_t *t_hq_d = NULL;
 /* BRANCHFO residuals measured on this thread's current grant, committed only on a TB CRC pass. */
 static __thread bool t_brfo_pending = false;
@@ -1666,6 +1668,8 @@ static __thread int t_recov_mode;
 static __thread bool t_recov_deferred;
 void nr_pdsch_passive_recov_mode(int mode) { t_recov_mode = mode; t_recov_deferred = false; }
 bool nr_pdsch_passive_recov_deferred(void) { return t_recov_deferred; }
+/* retry arms vs HARQ combining: allowed inline only without combining; with it only in the async lane (nr_hq_retry.h) */
+#define RETRY_ARMS_OK() nr_hq_retry_lane(harq_combine_on(), t_recov_mode)
 static __thread c16_t **t_owned_iq;
 static __thread int t_owned_slot = -1;
 static __thread uint64_t t_fep_done_ns;
@@ -1863,6 +1867,27 @@ static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid, uint16_t cell)
   e->last = ++g_harqc_clock;
   pthread_mutex_unlock(&g_harqc_lock);
   return e;
+}
+
+/* A retry arm of the async lane passed CRC for (rnti, pid, ndi) first sent at job_slot: the failed first pass left a soft sum for that TB; it is dead now, so the entry is retired as for
+ * a first-pass success (soft_valid false, device blocks back to the pool). Never allocates an entry. The entry lock is the busy flag: a consumer holds it for one decode, the worker waits for it
+ * (bounded; on timeout the sum stays, harmless). A retransmission racing this either combined first (the clear then follows it) or finds the sum gone and decodes alone. */
+static void hq_nap(void) { usleep(100); }
+static void harqc_rescued(uint16_t rnti, uint8_t pid, uint8_t ndi, int64_t job_slot)
+{
+  harqc_entry_t *e = NULL;
+  pthread_mutex_lock(&g_harqc_lock);
+  for (int i = 0; i < NR_HARQC_N && !e; i++)
+    if (g_harqc[i].used && g_harqc[i].rnti == rnti && g_harqc[i].pid == pid && g_harqc[i].cell == 0)
+      e = &g_harqc[i];
+  pthread_mutex_unlock(&g_harqc_lock);
+  if (e == NULL || !nr_hq_lock_wait(&e->busy, hq_nap, 20))
+    return;
+  if (nr_hq_rescue_match(e->soft_valid, e->ndi, e->first_slot, ndi, job_slot)) {
+    e->soft_valid = false;
+    hqb_release_locked(e);
+  }
+  atomic_store(&e->busy, 0);
 }
 
 /* ISAC_PDSCH_PROBE_C1=1 (implied by ISAC_PDSCH_SOLVER=1): the outcome of a probe of a one-code-block TB is recorded (T26b, below) */
@@ -2219,6 +2244,7 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
     atomic_fetch_add(&g_hq_first, 1);
   }
   e->ndi = t_hq.ndi;
+  if (!retx) e->first_slot = t_hq.slot;
   e->tbs = A;
   e->soft_valid = !ok; /* keep the soft bits only while the TB is still undecoded */
   if (t_hq.si) {
@@ -3417,6 +3443,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
           }
           t_last_hq_retx = gp_hq_retx;
           gp_he->ndi = grant->ndi;
+          if (!gp_hq_retx) gp_he->first_slot = grant->source_absolute_slot;
           gp_he->tbs = gp_hq_retx ? gp_hq_A : cw->TBS;
           gp_he->soft_valid = !t_gpp->r.tb_ok; /* the soft bits are kept only while the TB is undecoded */
           gp_he->on_gpu = true;
@@ -5629,6 +5656,7 @@ gpu_llr_ready:;
       t_hq.rnti = grant->rnti;
       t_hq.pid = grant->harq_pid;
       t_hq.ndi = grant->ndi;
+      t_hq.slot = grant->source_absolute_slot;
     }
   gp_llr_done:;
     if (gp_tried && !gp_ok)
@@ -6192,6 +6220,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   if (large) nr_gpu_budget_rt_large_begin();
   const int gp_hold = nr_gpu_graph_call_begin(); /* v2 Task 4 (ISAC_PDSCH_GPU_GRAPH_RETRY): the call's bodies share one pass instance */
   const nr_pdsch_passive_decode_status_t st = passive_decode_entry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  if (t_recov_mode == 2 && st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && harq_combine_on())
+    harqc_rescued(grant->rnti, (uint8_t)grant->harq_pid, (uint8_t)grant->ndi, grant->source_absolute_slot);
   if (gp_hold) nr_gpu_graph_call_end();
   if (large) nr_gpu_budget_rt_large_end();
   return st;
@@ -6886,7 +6916,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   static _Atomic int ra_sweep = -1;
   if (ra_sweep < 0) { const char *e = (getenv("ISAC_RA_TDRA_SWEEP") ?: "1"); ra_sweep = e && atoi(e) != 0; }
   if (ra_sweep && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !grant->dci11 && grant->rnti_class != 0 && grant->rnti_class != 2 && !t_quiet && !t_llr_ovr
-      && !t_gw_capture && !nr_agnostic_v2() && !harq_combine_on()
+      && !t_gw_capture && !nr_agnostic_v2() && RETRY_ARMS_OK()
       && dlsch_config->start_symbol + dlsch_config->number_symbols == 14 && (dlsch_config->dlDmrsSymbPos & 0x3FFFu)) {
     if (t_recov_mode == 1) { /* RECOVERY_ASYNC: the sweep runs on the worker; the failed first pass stands (GrantWork owners are abandoned by the caller) */
       t_recov_deferred = true;
@@ -6931,7 +6961,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   /* Fix A (ISAC_PDSCH_TDA_FIELD=1, default off): a grant in a TDD mixed slot carries a second legal (S,L) row (nr_tda_field_rows: SIB1 row picked by the
    * DCI's TDRA field, else the other legal row). Re-decode with it; the first CRC pass is kept. Logs TDAFIELD. */
   if (grant->tda_n > 1 && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg && !t_gw_capture && !t_gw_used
-      && !(t_quiet && !t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && !harq_combine_on() && (dlsch_config->dlDmrsSymbPos & 0x3FFFu)) {
+      && !(t_quiet && !t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && RETRY_ARMS_OK() && (dlsch_config->dlDmrsSymbPos & 0x3FFFu)) {
     if (t_recov_mode == 1) { /* RECOVERY_ASYNC: runs on the worker; the failed first pass stands */
       t_recov_deferred = true;
       return st;
@@ -6967,7 +6997,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   }
   if ((!tdra_retry && !csi_retry && !cdm_retry && !wide_retry && !csi_population_retry && !tint_retry && !opr_retry && !s_scsi_on()) || st != NR_PDSCH_PASSIVE_DECODE_CRC_FAIL
       || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_gw_used || (t_quiet && !t_qam_ab_alt) || t_llr_ovr
-      || nr_agnostic_v2() || harq_combine_on())
+      || nr_agnostic_v2() || !RETRY_ARMS_OK())
     return st;
   if (t_recov_mode == 1 && !t_qam_ab_alt) { /* RECOVERY_ASYNC: every arm below runs on the worker; the failed first pass stands */
     t_recov_deferred = true;
@@ -7124,7 +7154,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   /* DEFERRED/DO NOT USE: ISAC_PDSCH_STATIC_CSI_RETRY not in the frozen config t26zE (2026-10-18); slated for removal */
   if (s_scsi < 0) s_scsi = getenv("ISAC_PDSCH_STATIC_CSI_RETRY") && atoi(getenv("ISAC_PDSCH_STATIC_CSI_RETRY")) ? 1 : 0;
   if (s_scsi && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg && !t_gw_capture && !t_gw_used
-      && (!t_quiet || t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && !harq_combine_on() && grant->source_absolute_slot >= 0) {
+      && (!t_quiet || t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && RETRY_ARMS_OK() && grant->source_absolute_slot >= 0) {
+    if (t_recov_mode == 1 && !t_qam_ab_alt) { t_recov_deferred = true; return st; } /* async lane only */
     fapi_nr_dl_config_dlsch_pdu_rel15_t probe_cfg = *dlsch_config;
     if (static_csi_resources(&probe_cfg, grant->source_absolute_slot) > 0) {
       const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
