@@ -45,7 +45,9 @@ typedef struct {
 #define NR_GPU_PASS_LDPC_JOBS 160
 #define NR_GPU_PASS_LDPC_IN_BYTES ((size_t)NR_GPU_PASS_LDPC_JOBS * NR_GPU_LDPC_DEV_IN_STRIDE)
 #define NR_GPU_PASS_LDPC_RES_OFF ((size_t)NR_GPU_PASS_LDPC_JOBS * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX)
-#define NR_GPU_PASS_LDPC_BITS_BYTES (NR_GPU_PASS_LDPC_RES_OFF + 2 * NR_GPU_PASS_LDPC_JOBS * sizeof(int))
+/* measurement only: after res, uint64 ts[2 * JOBS] = %globaltimer (ns) at the entry of each code block's first block and at its stop (k_ldpc*_t, written for every block of the launch) */
+#define NR_GPU_PASS_LDPC_TS_OFF (NR_GPU_PASS_LDPC_RES_OFF + 2 * NR_GPU_PASS_LDPC_JOBS * sizeof(int))
+#define NR_GPU_PASS_LDPC_BITS_BYTES (NR_GPU_PASS_LDPC_TS_OFF + 2 * NR_GPU_PASS_LDPC_JOBS * sizeof(uint64_t))
 
 /* GPUPASS launch-only decode of n code blocks from device LLRs into device snapshots; 0 or -1. Below CC 9 (or ISAC_GPU_LDPC_NOCLUSTER=1) the non-cluster kernels run. Enqueue only. */
 /* o[0] kernel family (0 undecided, 1 cluster, 2 non-cluster, 3 refused), o[1] refusals, o[2] dev graph misses */

@@ -17,6 +17,7 @@
 #include "PHY/TOOLS/nr_gpu_platform.h"
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
 #include <cuda_runtime.h>
+#include <nvtx3/nvToolsExt.h> /* header-only; a no-op unless a tool (nsys -t nvtx) is attached */
 #include "nr_gpu_green.h"
 #include "nr_pdsch_gpu_prio.cuh"
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
@@ -110,7 +111,14 @@ struct ResBlk { /* written by the kernels, read by the host after the pass */
   nr_gpu_llr_stats_t llr_stats; /* v2 Task 1: k_llr_stats */
   uint32_t skip;                /* Fix A+D: the in-graph gate said no-chance: the demod, LDPC and CRC nodes did not run */
   float gate_db;                /* the DM-RS comb SNR it compared (-99 = no estimate) */
+  unsigned long long tg[4];     /* measurement only: %globaltimer at k_gate_d entry / IF decided, k_gate_l entry / IF decided */
 };
+__device__ __forceinline__ unsigned long long pass_gtimer()
+{
+  unsigned long long t;
+  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+  return t;
+}
 
 /* ---- Fix A+D: the no-chance gate kernels. The condition handle of the IF node that follows decides whether the demod / LDPC / CRC sub-graph runs: no host round trip. ---- */
 __global__ void k_gate_d(const PassBlk *pb, ResBlk *rb, cudaGraphConditionalHandle h)
@@ -118,7 +126,7 @@ __global__ void k_gate_d(const PassBlk *pb, ResBlk *rb, cudaGraphConditionalHand
   __shared__ unsigned long long red[256];
   __shared__ float lin;
   const int t = threadIdx.x;
-  if (t == 0) lin = 0.f;
+  if (t == 0) { lin = 0.f; rb->tg[0] = pass_gtimer(); }
   for (int a = 0; a < pb->gate_nbrx; a++) {
     unsigned long long e = 0;
     const short2 *row = pb->gate_est + (size_t)a * pb->gate_astride;
@@ -149,12 +157,17 @@ __global__ void k_gate_d(const PassBlk *pb, ResBlk *rb, cudaGraphConditionalHand
     const uint32_t skip = pb->gate_on && db > -90.f && db < pb->gate_thr_db;
     rb->skip = skip;
     rb->gate_db = db;
+    rb->tg[1] = pass_gtimer();
     cudaGraphSetConditional(h, skip ? 0u : 1u);
   }
 }
-__global__ void k_gate_l(const ResBlk *rb, cudaGraphConditionalHandle h)
+__global__ void k_gate_l(ResBlk *rb, cudaGraphConditionalHandle h)
 {
-  if (threadIdx.x == 0) cudaGraphSetConditional(h, rb->skip ? 0u : 1u);
+  if (threadIdx.x == 0) {
+    rb->tg[2] = pass_gtimer();
+    rb->tg[3] = pass_gtimer();
+    cudaGraphSetConditional(h, rb->skip ? 0u : 1u);
+  }
 }
 /* UL: nr_ulsch_dmrs_snr_db(sig2, nvar) of the grant on the device (hsum of k_ul_level, the chest's noise sums) */
 __global__ void k_gate_ul(const nrul::UlBlk *ub, ResBlk *rb, const uint64_t *acc, cudaGraphConditionalHandle h)
@@ -337,6 +350,7 @@ struct Inst {
   int id = 0;
   cudaStream_t s = nullptr, s2 = nullptr, s_lo = nullptr; /* s_lo: v2 Task 2, the low-priority twin of s for probes (ISAC_PDSCH_GPU_PRIO=1), else null */
   cudaEvent_t done = nullptr, ev0 = nullptr, evh = nullptr; /* ev0: stream marker before the launches; evh: external event node at the head of the (first sub-)graph; done: after the last. Timing on: gstart = ev0->evh, gspan = evh->done */
+  cudaEvent_t evC = nullptr, evD = nullptr; /* measurement only: stream markers after the C and after the D sub-graph launch (split DL pass): cspan = evh->evC, dspan = evC->evD, lspan = evD->done */
   nr_gpu_buf_t rxF = {}, est = {}, nvar = {}, geo = {}, scratch = {}, llr = {}, lin = {}, bits = {}, pil = {}, scr = {}, pb = {}, res = {}, segsc = {};
   nr_gpu_buf_t uli = {}, ulb = {}, ulwin = {}; /* Task 7: the FEP items + geometry, the UlBlk, the DISCRETE IQ window copy */
   nr_gpu_chest_job_t *cj = nullptr;
@@ -407,6 +421,61 @@ static void gpu_stamps(int ul, const Inst &I, bool head, nr_gpu_pass_result_t *r
   r->gstart_ns = (uint32_t)(a * 1e6f);
   r->gspan_ns = (uint32_t)(b * 1e6f);
 }
+/* measurement only: the split DL pass's sub-graph spans (C absent when skipped: cspan 0, D from the marker after the parameter H2D) */
+static void split_stamps(const Inst &I, bool c_ran, nr_gpu_pass_result_t *r)
+{
+  float c = 0, d = 0, l = 0;
+  r->cspan_ns = r->dspan_ns = r->lspan_ns = 0;
+  if ((c_ran && cudaEventElapsedTime(&c, I.evh, I.evC) != cudaSuccess) || cudaEventElapsedTime(&d, I.evC, I.evD) != cudaSuccess || cudaEventElapsedTime(&l, I.evD, I.done) != cudaSuccess) {
+    cudaGetLastError();
+    return;
+  }
+  r->cspan_ns = (uint32_t)(c * 1e6f);
+  r->dspan_ns = (uint32_t)(d * 1e6f);
+  r->lspan_ns = (uint32_t)(l * 1e6f);
+}
+/* measurement only: the L sub-graph's LDPC launch from its per-code-block verdicts (res) and %globaltimer stamps (ts), host-readable in the DIRECT model only. nd = the TB's blocks,
+ * ncb = the class's (padding blocks repeat block 0 on zero LLRs and stop at the first check). */
+static void ldpc_info(const Inst &I, int nd, int ncb, nr_gpu_pass_result_t *r)
+{
+  memset(&r->li, 0, sizeof(r->li));
+  if (nr_gpu_model() != NR_GPU_MODEL_DIRECT || !I.bits.host || nd < 1 || ncb < nd || ncb > NR_GPU_PASS_LDPC_JOBS) return;
+  const int *res = (const int *)((const char *)I.bits.host + NR_GPU_PASS_LDPC_RES_OFF);
+  const unsigned long long *ts = (const unsigned long long *)((const char *)I.bits.host + NR_GPU_PASS_LDPC_TS_OFF);
+  unsigned long long e0 = ~0ull, e1 = 0, x1 = 0;
+  for (int c = 0; c < ncb; c++) {
+    if (res[2 * c] < 0 || !ts[2 * c] || ts[2 * c + 1] < ts[2 * c]) return; /* a block that did not run in this launch: no verdict */
+    e0 = std::min(e0, ts[2 * c]);
+    e1 = std::max(e1, ts[2 * c]);
+    x1 = std::max(x1, ts[2 * c + 1]);
+  }
+  uint32_t dc = 0, dl = 0;
+  int nconv = 0, nlast = 0, itmax = 0, itsum = 0;
+  for (int c = 0; c < nd; c++) {
+    const uint32_t d = (uint32_t)(ts[2 * c + 1] - ts[2 * c]);
+    if (res[2 * c + 1]) { nconv++; itmax = std::max(itmax, res[2 * c]); itsum += res[2 * c]; dc = std::max(dc, d); }
+    else { nlast++; dl = std::max(dl, d); }
+  }
+  uint32_t dp = 0;
+  int npad = 0;
+  for (int c = nd; c < ncb; c++) { /* the class's padding blocks (zero LLRs) */
+    dp = std::max(dp, (uint32_t)(ts[2 * c + 1] - ts[2 * c]));
+    npad += !res[2 * c + 1];
+  }
+  const ResBlk &rb = *I.RB();
+  r->li.ncb = (uint16_t)nd; r->li.nconv = (uint16_t)nconv; r->li.nlast = (uint16_t)nlast; r->li.it_conv_max = (uint16_t)itmax; r->li.it_conv_sum = (uint16_t)std::min(itsum, 65535);
+  r->li.kspan_ns = (uint32_t)(x1 - e0);
+  r->li.swait_ns = (uint32_t)(e1 - e0);
+  r->li.dconv_max_ns = dc;
+  r->li.dlast_max_ns = dl;
+  r->li.g2l_ns = rb.tg[3] && e0 > rb.tg[3] ? (uint32_t)(e0 - rb.tg[3]) : 0;
+  r->li.d2l_ns = rb.tg[1] && rb.tg[2] > rb.tg[1] ? (uint32_t)(rb.tg[2] - rb.tg[1]) : 0;
+  r->li.npad = (uint16_t)(ncb - nd);
+  r->li.npad_last = (uint16_t)npad;
+  r->li.dpad_max_ns = dp;
+  r->li.valid = 1;
+}
+static std::atomic<uint32_t> g_pass_seq{0};
 /* v2 Task 4: the instance this thread's decode call holds (-1 none), the call nesting depth, when it was taken; entries [C, D], held calls, dirty invalidations, hold time */
 static thread_local int t_hold = 0, t_held = -1;
 static thread_local uint64_t t_hold_ns = 0;
@@ -1173,7 +1242,8 @@ static int alloc_inst(int id)
   if ((!nr_gpu_green_stream(&I.s, prio, true, pass_green_idx(id)) && cudaStreamCreateWithPriority(&I.s, cudaStreamNonBlocking, prio) != cudaSuccess) ||
       (!nr_gpu_green_stream(&I.s2, prio, true, pass_green_idx(id)) && cudaStreamCreateWithPriority(&I.s2, cudaStreamNonBlocking, prio) != cudaSuccess) ||
       cudaEventCreateWithFlags(&I.done, cudaEventBlockingSync) != cudaSuccess || cudaEventCreateWithFlags(&I.ev0, cudaEventDefault) != cudaSuccess ||
-      cudaEventCreateWithFlags(&I.evh, cudaEventDefault) != cudaSuccess) /* blocking sync: the wake is the driver's, not a poll loop */
+      cudaEventCreateWithFlags(&I.evh, cudaEventDefault) != cudaSuccess || cudaEventCreateWithFlags(&I.evC, cudaEventDefault) != cudaSuccess ||
+      cudaEventCreateWithFlags(&I.evD, cudaEventDefault) != cudaSuccess) /* blocking sync: the wake is the driver's, not a poll loop */
     return -1;
   if (g_cfg.v2 && nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&I.s_lo, lo, hi, pass_green_idx(id))) I.s_lo = nullptr; /* v2 Task 2: probes on the twin, in the instance's own green context (a graph captured on I.s cannot launch in another); none = the RT stream */
   if (nr_gpu_buf_alloc(&I.rxF, (size_t)4 * NSYM * N * 4) || nr_gpu_buf_alloc(&I.est, (size_t)16 * NSYM * N * 4) ||
@@ -1555,9 +1625,21 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   const uint64_t ts_l = nr_gpu_pass_now_ns();
   const auto t0 = std::chrono::steady_clock::now();
   cudaStream_t ls = j->probe && I.s_lo ? I.s_lo : I.s; /* a captured graph launches on either stream */
+  const uint32_t seq = ++g_pass_seq;
+  {
+    nvtxEventAttributes_t na = {};
+    na.version = NVTX_VERSION;
+    na.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+    na.messageType = NVTX_MESSAGE_TYPE_ASCII;
+    na.message.ascii = "gp";
+    na.payloadType = NVTX_PAYLOAD_TYPE_UNSIGNED_INT64;
+    na.payload.ullValue = seq;
+    nvtxMarkEx(&na);
+  }
   const uint64_t ts_l1 = nr_gpu_pass_now_ns();
   const bool launched = cudaEventRecord(I.ev0, ls) == cudaSuccess && (split ? !h2d_params(I, k, ls, !skip_c) && (skip_c || cudaGraphLaunch(es[0]->exec[id], ls) == cudaSuccess) &&
-                                    cudaGraphLaunch(es[1]->exec[id], ls) == cudaSuccess && cudaGraphLaunch(es[2]->exec[id], ls) == cudaSuccess /* back to back: stream order, no host wait between */
+                                    cudaEventRecord(I.evC, ls) == cudaSuccess && cudaGraphLaunch(es[1]->exec[id], ls) == cudaSuccess && cudaEventRecord(I.evD, ls) == cudaSuccess &&
+                                    cudaGraphLaunch(es[2]->exec[id], ls) == cudaSuccess /* back to back: stream order, no host wait between (evC / evD: measurement markers) */
                               : cudaGraphLaunch(e->exec[id], ls) == cudaSuccess);
   const bool recorded = launched && cudaEventRecord(I.done, ls) == cudaSuccess;
   const uint64_t ts_l2 = nr_gpu_pass_now_ns();
@@ -1593,6 +1675,10 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   r->post = rb.post;
   r->llr_stats = rb.llr_stats;
   r->tb_ok = 0;
+  r->seq = seq;
+  memset(&r->li, 0, sizeof(r->li));
+  r->cspan_ns = r->dspan_ns = r->lspan_ns = 0;
+  if (split) split_stamps(I, !skip_c, r);
   r->skip = split && rb.skip ? 1 : 0; /* Fix A+D: the in-graph gate fired (D's IF body and L did not run); a full (non-split) graph has no gate and leaves rb.skip stale */
   r->gate_db = rb.gate_db;
   if (r->skip) {
@@ -1601,6 +1687,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     return 0;
   }
   for (uint32_t s = 0; s < nd; s++) r->seg_ok[s] = rb.seg_ok[s];
+  if (split) ldpc_info(I, (int)nd, (int)k.ncb, r);
   if (rb.need_cpu) ++g_need_cpu;
   if (!r->need_cpu) {
     const bool crc_ok = j->C > 1 ? rb.tb_crc != 0 : rb.seg_crc[0] != 0;

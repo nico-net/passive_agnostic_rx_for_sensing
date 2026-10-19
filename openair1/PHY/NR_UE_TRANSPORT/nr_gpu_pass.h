@@ -254,6 +254,21 @@ typedef struct {
   float gate_db;                 /* the DM-RS comb SNR the gate compared (-99 = none) */
   uint32_t prep_ns, launch_ns;   /* host: entry -> first launch call; the launch calls (markers, H2D of the parameter blocks, graph launches, done event) */
   uint32_t gstart_ns, gspan_ns;  /* Fix A+D: GPU-side event stamps of this pass: launch call -> first graph node, first node -> completion (0 = not measured: C skipped) */
+  /* ---- measurement only (GPU-span root cause, 2026-10-19; EVMGRANT gq= / li=). DL split pass only, else 0. */
+  uint32_t cspan_ns, dspan_ns, lspan_ns; /* event-timed sub-graph spans: C head -> after C, after C -> after D, after D -> done (cspan + dspan + lspan = gspan; C skipped: cspan 0, gspan 0) */
+  uint32_t seq;                  /* process-wide pass number, also the payload of the NVTX mark "gp" emitted just before the launches (joins an nsys capture to the log line) */
+  struct {                       /* the L sub-graph's LDPC launch, from the per-code-block verdicts and %globaltimer stamps (DIRECT model, decode not skipped; valid = 0 otherwise) */
+    uint8_t valid;
+    uint16_t ncb, nconv, nlast;  /* code blocks of the TB decoded; stopped at a zero syndrome; ran to the iteration limit */
+    uint16_t it_conv_max, it_conv_sum; /* snapshots (hard-decision iterations) of the converged blocks: max, sum */
+    uint32_t kspan_ns;           /* first block entry -> last block stop over the whole launch (padding blocks of the class included) */
+    uint32_t swait_ns;           /* last block entry - first block entry: blocks that waited for an SM slot */
+    uint32_t dconv_max_ns, dlast_max_ns; /* longest entry -> stop of a converged / of a limit-reached block of the TB */
+    uint32_t g2l_ns;             /* k_gate_l end (IF of L decided) -> first LDPC block entry: IF body launch + rate dematch + memset */
+    uint32_t d2l_ns;             /* k_gate_d end (IF of D decided) -> k_gate_l start: IF body launch + D body + D -> L graph boundary */
+    uint16_t npad, npad_last;    /* padding blocks of the class (ncb class - ncb); of them, ran to the iteration limit */
+    uint32_t dpad_max_ns;        /* longest entry -> stop of a padding block */
+  } li;
 } nr_gpu_pass_result_t;
 
 /* Process-wide configuration, before nr_gpu_pass_init: the bit-exact chest reads the receiver's delay table (a fixed pointer, baked into the graphs). */

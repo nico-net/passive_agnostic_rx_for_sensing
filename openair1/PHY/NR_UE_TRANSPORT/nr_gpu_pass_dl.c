@@ -485,8 +485,11 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     nr_gpu_pass_ul_warm(h, fp->nb_antennas_rx, G.fp32);
 }
 
-/* per-grant on-air breakdown of the last DL pass of this thread, printed and zeroed by the EVMGRANT line (gp=): total, before try, try, prep, launch, gstart, gspan (us) */
-__thread uint32_t nr_gp_tt[7];
+/* per-grant on-air breakdown of the last DL pass of this thread, printed and zeroed by the EVMGRANT line (gp=): total, before try, try, prep, launch, gstart, gspan (us);
+ * measurement only (gq=): [7..10] C span, D span, L span (us), pass seq (the NVTX "gp" payload); (li=): [11] valid, [12..16] ncb, nconv, nlast, it_conv_max, it_conv_sum,
+ * [17..22] LDPC kspan, swait, dconv_max, dlast_max, gate_l->LDPC, gate_d->gate_l (us), [23..25] padding blocks, of them at the limit, longest padding block (us).
+ * The size is repeated in nr_pdsch_passive_queue.c. */
+__thread uint32_t nr_gp_tt[26];
 /* HARQ soft store <-> host layout (nr_gpu_pass.h): 0 = done */
 int nr_gpu_pass_dl_hq_xfer(int down, const uint16_t *blk, int16_t *d, int C, int kcz, int n)
 {
@@ -682,6 +685,11 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
     const uint64_t t_ret = nr_gpu_pass_now_ns();
     nr_gp_tt[0] = (uint32_t)((t_ret - t_entry) / 1000); nr_gp_tt[1] = (uint32_t)((t_try - t_entry) / 1000); nr_gp_tt[2] = (uint32_t)((t_ret - t_try) / 1000);
     nr_gp_tt[3] = out->r.prep_ns / 1000; nr_gp_tt[4] = out->r.launch_ns / 1000; nr_gp_tt[5] = out->r.gstart_ns / 1000; nr_gp_tt[6] = out->r.gspan_ns / 1000;
+    nr_gp_tt[7] = out->r.cspan_ns / 1000; nr_gp_tt[8] = out->r.dspan_ns / 1000; nr_gp_tt[9] = out->r.lspan_ns / 1000; nr_gp_tt[10] = out->r.seq;
+    nr_gp_tt[11] = out->r.li.valid; nr_gp_tt[12] = out->r.li.ncb; nr_gp_tt[13] = out->r.li.nconv; nr_gp_tt[14] = out->r.li.nlast; nr_gp_tt[15] = out->r.li.it_conv_max; nr_gp_tt[16] = out->r.li.it_conv_sum;
+    nr_gp_tt[17] = out->r.li.kspan_ns / 1000; nr_gp_tt[18] = out->r.li.swait_ns / 1000; nr_gp_tt[19] = out->r.li.dconv_max_ns / 1000; nr_gp_tt[20] = out->r.li.dlast_max_ns / 1000;
+    nr_gp_tt[21] = out->r.li.g2l_ns / 1000; nr_gp_tt[22] = out->r.li.d2l_ns / 1000;
+    nr_gp_tt[23] = out->r.li.npad; nr_gp_tt[24] = out->r.li.npad_last; nr_gp_tt[25] = out->r.li.dpad_max_ns / 1000;
   }
   if (rc != 0) /* unseen class / no free instance / unsupported variant / error: counted by the module */
     return fb(FB_MODULE);

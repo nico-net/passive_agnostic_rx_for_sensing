@@ -50,7 +50,14 @@ struct DJob { /* device view of one code block */
   const Graph *g;
   const int8_t *llr_in; /* pinned staging, Kc*Z */
   int K, it_max;
+  unsigned long long *ts; /* measurement only (graph-pass instances; else null): [0] %globaltimer at the code block's entry, [1] at its stop */
 };
+__device__ __forceinline__ unsigned long long gtimer()
+{
+  unsigned long long t;
+  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+  return t;
+}
 
 struct Ctx {
   cudaStream_t s;
@@ -62,6 +69,7 @@ struct Ctx {
   int *res;            /* pinned mapped [NJ][2]: nsnap, syn0 */
   int8_t *llr, *llrRes, *c2v; /* device [NJ][MAXC*ZMAX], [NJ][MAXC*ZMAX], [NJ][MAXE*ZMAX] */
   int *unsat;          /* device [NJ][NIT] */
+  unsigned long long *ts; /* graph-pass instance: the bits buffer's NR_GPU_PASS_LDPC_TS_OFF (set by dev_impl); null otherwise */
 };
 static Ctx g_ctx[CTX + NR_GPU_PASS_RING + 1]; /* [CTX + i]: the GPUPASS context of graph-pass instance i (nr_pdsch_gpu_ldpc_dev: the extra context [CTX + RING]), never handed out by acquire() */
 static std::atomic<unsigned> g_busy{0};
@@ -170,6 +178,7 @@ template <int CB> __global__ void __launch_bounds__(THREADS) k_ldpc_t(const DJob
   __shared__ Graph G;
   const int c = blockIdx.x / CB, b = blk_rank<CB>(), t = threadIdx.x;
   const DJob J = jobs[c];
+  if (J.ts && b == 0 && t == 0) J.ts[0] = gtimer();
   {
     const int *src = (const int *)J.g;
     int *dst = (int *)&G;
@@ -220,6 +229,7 @@ template <int CB> __global__ void __launch_bounds__(THREADS) k_ldpc_t(const DJob
         if (gt == 0) {
           g_out[2 * c] = p >= 3 ? p - 2 : 0;
           g_out[2 * c + 1] = syn0 && !last;
+          if (J.ts) J.ts[1] = gtimer();
         }
         break;
       }
@@ -346,6 +356,7 @@ __global__ void __launch_bounds__(THREADS) k_ldpc4_t(const DJob *jobs, int8_t *g
   __shared__ __align__(16) int8_t sres[SM ? MAXC * ZMAX + 16 : 1];
   const int c = blockIdx.x / CB, b = blk_rank<CB>(), t = threadIdx.x;
   const DJob J = jobs[c];
+  if (J.ts && b == 0 && t == 0) J.ts[0] = gtimer();
   {
     const int *src = (const int *)J.g;
     int *dst = (int *)&G;
@@ -392,6 +403,7 @@ __global__ void __launch_bounds__(THREADS) k_ldpc4_t(const DJob *jobs, int8_t *g
         if (gt == 0) {
           g_out[2 * c] = p >= 3 ? p - 2 : 0;
           g_out[2 * c + 1] = syn0 && !last;
+          if (J.ts) J.ts[1] = gtimer();
         }
         break;
       }
@@ -839,7 +851,7 @@ static int pass_set(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu
   }
   Ctx &x = g_ctx[CTX + inst];
   for (int k = 0; k < n; k++)
-    x.dj[k] = DJob{gr[k], (const int8_t *)llr_dev->dev + (size_t)k * NR_GPU_LDPC_DEV_IN_STRIDE, jobs[k].K, jobs[k].it_max};
+    x.dj[k] = DJob{gr[k], (const int8_t *)llr_dev->dev + (size_t)k * NR_GPU_LDPC_DEV_IN_STRIDE, jobs[k].K, jobs[k].it_max, x.ts ? x.ts + 2 * k : nullptr};
   if (z4) {
     *z4 = true;
     for (int k = 0; k < n; k++)
@@ -854,6 +866,8 @@ extern "C" int nr_pdsch_gpu_ldpc_pass_set(int inst, const nr_gpu_ldpc_job_t *job
 static int dev_impl(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, nr_gpu_buf_t *bits_dev, void *stream)
 {
   bool z4 = true;
+  if (inst >= 0 && inst < NR_GPU_PASS_RING && bits_dev && bits_dev->dev && bits_dev->bytes >= NR_GPU_PASS_LDPC_BITS_BYTES) /* the instance's stamp area (its one bits buffer), before pass_set fills the DJobs */
+    g_ctx[CTX + inst].ts = (unsigned long long *)((char *)bits_dev->dev + NR_GPU_PASS_LDPC_TS_OFF);
   if (!bits_dev || !bits_dev->dev || bits_dev->bytes < (inst < NR_GPU_PASS_RING ? NR_GPU_PASS_LDPC_BITS_BYTES : NR_GPU_LDPC_DEV_BITS_BYTES) || pass_set(inst, jobs, n, llr_dev, &z4) != 0)
     return -1;
   Ctx &x = g_ctx[CTX + inst];

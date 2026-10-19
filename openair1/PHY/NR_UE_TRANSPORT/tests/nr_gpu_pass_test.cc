@@ -267,6 +267,74 @@ TEST(GpuPassDl, CrcFailAgreesWithStagePath) {
   printf("GpuPassDl.CrcFailAgreesWithStagePath: %d shapes, CB0 ok and CB1 failed in %d, CPU hand-over in %d\n", n, partial, cpu);
   EXPECT_GE(n, 4);
 }
+/* GPU-span root cause (2026-10-19), measurement only: the split pass reports its sub-graph spans (cspan + dspan + lspan = gspan, event-timed), a pass seq (the NVTX payload), and per
+ * launch the LDPC verdicts and %globaltimer stamps of every code block (li). A clean TB: every block converges, none runs to the limit. A TB corrupted from block 1: blocks 1..C-1 run
+ * to the iteration limit (the GPU decodes every block; no abort after the first failure) and take at least as long as the converged block 0. */
+TEST(GpuPassStamps, SplitSpansAndLdpcVerdicts) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  const bool direct = nr_gpu_model() == NR_GPU_MODEL_DIRECT;
+  int n = 0, n_bad = 0;
+  uint32_t last_seq = 0;
+  m.pass_split(1);
+  for (auto shape : GpuPassFixture::warm_shapes()) {
+    if (shape.qm != 4 || shape.nl > 2) continue;
+    for (int corrupt : {-1, 1}) {
+      GpuPassFixture fx = GpuPassFixture::from_shape(shape, 31, corrupt);
+      ASSERT_TRUE(fx.tb_ok_built);
+      if (fx.tb.C < 2) continue;
+      fx.bind();
+      nr_gpu_pass_shape_t w = fx.job->shape;
+      ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm));
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA);
+      nr_gpu_pass_result_t g{};
+      g.tb = gb.data();
+      ASSERT_EQ(0, m.pass_try(fx.job, &g));
+      const std::string what = "nrb " + std::to_string(shape.nrb_class) + " nl " + std::to_string(shape.nl) + " C " + std::to_string(fx.tb.C) + (corrupt >= 0 ? " corrupted" : " clean");
+      n++;
+      EXPECT_GT(g.seq, last_seq) << what;
+      last_seq = g.seq;
+      ASSERT_EQ(0, g.skip) << what;
+      ASSERT_GT(g.gspan_ns, 0u) << what;
+      EXPECT_GT(g.cspan_ns, 0u) << what;
+      EXPECT_GT(g.dspan_ns, 0u) << what;
+      EXPECT_GT(g.lspan_ns, 0u) << what;
+      const double sum = ((double)g.cspan_ns + g.dspan_ns + g.lspan_ns) / 1e3, span = g.gspan_ns / 1e3;
+      EXPECT_NEAR(sum, span, 3.0) << what << ": C + D + L tile the GPU span";
+      if (!direct) { EXPECT_EQ(0, g.li.valid) << what; continue; }
+      ASSERT_EQ(1, g.li.valid) << what;
+      EXPECT_EQ((int)fx.tb.C, (int)g.li.ncb) << what;
+      EXPECT_EQ((int)g.li.ncb, g.li.nconv + g.li.nlast) << what;
+      EXPECT_GE(g.li.kspan_ns, std::max(std::max(g.li.dconv_max_ns, g.li.dlast_max_ns), g.li.dpad_max_ns)) << what;
+      EXPECT_EQ((int)fx.job->shape.ncb_class - (int)fx.tb.C, (int)g.li.npad) << what;
+      EXPECT_LE(g.li.npad_last, g.li.npad) << what;
+      EXPECT_LE(g.li.swait_ns, g.li.kspan_ns) << what;
+      EXPECT_GT(g.li.g2l_ns, 0u) << what;
+      EXPECT_GT(g.li.d2l_ns, 0u) << what;
+      EXPECT_LT(g.li.kspan_ns / 1e3, g.lspan_ns / 1e3 + 5.0) << what << ": the LDPC launch lies inside L";
+      if (corrupt < 0 && g.tb_ok) {
+        EXPECT_EQ((int)fx.tb.C, (int)g.li.nconv) << what;
+        EXPECT_EQ(0, g.li.nlast) << what;
+        EXPECT_GE(g.li.it_conv_max, 1) << what;
+      }
+      if (corrupt >= 0) {
+        EXPECT_EQ(0, g.tb_ok) << what;
+        EXPECT_GE(g.li.nlast, 1) << what << ": the corrupted blocks run to the limit";
+        if (g.li.nconv) n_bad += g.li.dlast_max_ns < g.li.dconv_max_ns;
+      }
+      printf("GpuPassStamps %s: gspan %.1f = C %.1f + D %.1f + L %.1f us; LDPC ncb %u conv %u (it max %u) limit %u, kspan %.1f swait %.1f dconv %.1f dlast %.1f pad %u (limit %u, max %.1f) gate_l->LDPC %.1f gate_d->gate_l %.1f us\n",
+             what.c_str(), span, g.cspan_ns / 1e3, g.dspan_ns / 1e3, g.lspan_ns / 1e3, g.li.ncb, g.li.nconv, g.li.it_conv_max, g.li.nlast, g.li.kspan_ns / 1e3, g.li.swait_ns / 1e3,
+             g.li.dconv_max_ns / 1e3, g.li.dlast_max_ns / 1e3, g.li.npad, g.li.npad_last, g.li.dpad_max_ns / 1e3, g.li.g2l_ns / 1e3, g.li.d2l_ns / 1e3);
+    }
+  }
+  m.pass_split(0);
+  EXPECT_GE(n, 4);
+  EXPECT_EQ(0, n_bad) << "a block that ran to the iteration limit took less time than a converged one";
+}
 /* Concurrency model: 4 instances; 8 threads each running their own grant 40 times. Every launch either decodes the TB it was given or is refused with 1 (counted busy); no
  * launch may return another thread's bytes (the instances' buffers, staging slots and contexts are private). */
 /* Every instance, one at a time (the others held busy), decodes the TB of every warm shape: the sequential test above only ever runs on instance 0. */
