@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* ULFEP: host loader of the UL GPU front end (nr_pusch_gpu_fep.cuh, exported by libpdsch_gpu.so).
- * ISAC_UL_GPU_FEP=1 loads it; unset/0 or any failure leaves the CPU FEP untouched. */
+ * Any load failure leaves the CPU FEP untouched. */
 #ifndef NR_PUSCH_GPU_FEP_H
 #define NR_PUSCH_GPU_FEP_H
 #include <dlfcn.h>
@@ -27,8 +27,6 @@ static inline const nr_pusch_gpu_fep_api_t *nr_pusch_gpu_fep_load(void)
   static int tried;
   if (tried) return api.run ? &api : NULL;
   tried = 1;
-  const char *e = getenv("ISAC_UL_GPU_FEP");
-  if (e && atoi(e) != 1) return NULL;
   void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!h) h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!h) return NULL;

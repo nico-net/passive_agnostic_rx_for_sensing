@@ -38,7 +38,7 @@ void ul_hyp_cache_put(uint16_t rnti, const ul_hyp_t *h);
 int ul_hyp_cache_put_if_new(uint16_t rnti, const ul_hyp_t *h);
 void ul_hyp_cache_clear(void);
 void ul_hyp_cache_drop(uint16_t rnti);
-/* the call site's lookup: counts hit / miss / stale (epoch differs or older than ISAC_UL_HYP_MAX_AGE slots, default 2000); 1 = usable hit */
+/* the call site's lookup: counts hit / miss / stale (epoch differs or older than 2000 slots); 1 = usable hit */
 int nr_gpu_pass_ul_hyp_lookup(uint16_t rnti, uint32_t epoch, int64_t abs_slot, ul_hyp_t *h);
 void nr_gpu_pass_ul_cache_counts(uint64_t *hit, uint64_t *miss, uint64_t *stale, uint64_t *put);
 
@@ -122,6 +122,7 @@ void nr_gpu_pass_ul_census(void);
 void nr_gpu_pass_ul_grant_us(int kind, uint32_t us);
 /* class warm-up (before the RX fence), called by nr_gpu_pass_warmup() after the module is up (h = the dlopen handle); returns the classes captured */
 int nr_gpu_pass_ul_warm(void *h, int nbrx, int fp32);
+void nr_gpu_pass_ul_test_budget(int classes); /* test hook: the warm-up captures at most this many classes (default 160) */
 
 #ifdef __cplusplus
 }

@@ -16,7 +16,6 @@
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
-#include "nr_pdsch_gpu_prio.cuh"
 #include "nr_pusch_gpu_diag.h"
 #include <atomic>
 #include <cstdio>
@@ -61,7 +60,6 @@ __device__ __forceinline__ unsigned long long gtimer()
 
 struct Ctx {
   cudaStream_t s;
-  cudaStream_t sh, sl; /* GPUSCHED ISAC_PDSCH_GPU_PRIO: real-time and low-priority streams */
   int cap;             /* code blocks per launch: NJP for a graph-pass instance, NJ otherwise */
   DJob *dj;            /* pinned mapped [cap] */
   int8_t *in;          /* pinned [NJ][MAXC*ZMAX] */
@@ -73,7 +71,7 @@ struct Ctx {
 };
 static Ctx g_ctx[CTX + NR_GPU_PASS_RING + 1]; /* [CTX + i]: the GPUPASS context of graph-pass instance i (nr_pdsch_gpu_ldpc_dev: the extra context [CTX + RING]), never handed out by acquire() */
 static std::atomic<unsigned> g_busy{0};
-static int g_ok, g_prio;
+static int g_ok;
 static std::mutex g_gm;
 static std::map<int, Graph *> g_graphs; /* (BG, Z, R) -> device graph */
 
@@ -569,15 +567,15 @@ template __global__ void k_ldpc4_t<4>(const DJob *, int8_t *, int8_t *, int8_t *
 template __global__ void k_ldpc4_t<8>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
 template __global__ void k_ldpc4_t<1, 1>(const DJob *, int8_t *, int8_t *, int8_t *, int *, uint8_t *, int *);
 
-/* Kernel family: the cluster kernels need sm_90+; below that, or with ISAC_GPU_LDPC_NOCLUSTER=1 (test on GB10), the _nc kernels (one block per
+/* Kernel family: the cluster kernels need sm_90+; below that, the _nc kernels (one block per
  * code block, same results). Decided once, first thing in warm_common()/init, before any graph warm-up. g_nc_state: 0 undecided, 1 cluster,
  * 2 non-cluster, 3 CC query failed (GPU LDPC refused, CPU fallback). */
 static std::atomic<int> g_nc_state{0}, g_refused{0};
-static int g_sm_level = 0; /* ISAC_GPU_LDPC_SM: 1 = res in shared memory for the _nc kernel (Z % 4 == 0 only) */
+static int g_sm_level = 0; /* 1 = res in shared memory for the _nc kernel (Z % 4 == 0 only) */
 static std::atomic<uint64_t> g_sm_launches{0};
-static int g_cl_min_cb = 0, g_cl_force = 0, g_rt_sms = 0; /* ISAC_GPU_LDPC_CL_MIN_CB (0 = off), ISAC_GPU_LDPC_CL_FORCE (test only: 1, 2, 4, 8) */
+static int g_cl_min_cb = 0, g_rt_sms = 0; /* cluster selection min code blocks (0 = off) */
 static std::atomic<uint64_t> g_cb_launches[4], g_cl_fallback{0};
-static int g_nc_min_cb = 0; /* ISAC_GPU_LDPC_NC_MIN_CB: launches with >= N code blocks use the _nc kernels (0 = off); set before g_nc_state latches */
+static int g_nc_min_cb = 0; /* launches with >= N code blocks use the _nc kernels (0 = off); set before g_nc_state latches */
 /* Blocks per code block for a launch of n code blocks. Rules in order: force; non-cluster state -> 1; selection off or n < min_cb -> today's
  * choice; else the largest cluster (4, 2) that keeps the whole launch in ONE wave of the RT partition, else 1. */
 static int pick_cb(int state, int n, int rt_sms, int min_cb, int force)
@@ -608,42 +606,24 @@ static int decide_nc()
       fprintf(stderr, "SENSING: GPU LDPC: compute capability unknown; using CPU LDPC\n");
     return 3; /* not latched: a later call with a device retries */
   }
-  /* DEFERRED/DO NOT USE: ISAC_GPU_LDPC_NOCLUSTER not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *e = getenv("ISAC_GPU_LDPC_NOCLUSTER");
-  st = major < 9 || (e && *e == '1') ? 2 : 1;
-  const char *m = getenv("ISAC_GPU_LDPC_NC_MIN_CB");
-  g_nc_min_cb = m ? atoi(m) : 8;
-  if (g_nc_min_cb < 0)
-    g_nc_min_cb = 0;
-  m = getenv("ISAC_GPU_LDPC_CL_MIN_CB");
-  g_cl_min_cb = m ? atoi(m) : 4;
-  if (g_cl_min_cb < 0)
-    g_cl_min_cb = 0;
-  /* DEFERRED/DO NOT USE: ISAC_GPU_LDPC_CL_FORCE not in the frozen config t26zE (2026-10-18); slated for removal */
-  m = getenv("ISAC_GPU_LDPC_CL_FORCE");
-  g_cl_force = m ? atoi(m) : 0;
-  if (g_cl_force != 1 && g_cl_force != 2 && g_cl_force != 4 && g_cl_force != 8)
-    g_cl_force = 0;
-  m = getenv("ISAC_GPU_LDPC_SM");
-  g_sm_level = m ? atoi(m) : 1;
-  if (g_sm_level != 1)
-    g_sm_level = 0;
-  if (st == 2 && g_cl_force > 1)
-    g_cl_force = 0; /* no clusters below sm_90 / with NOCLUSTER */
+  st = major < 9 ? 2 : 1;
+  g_nc_min_cb = 8; /* frozen ISAC_GPU_LDPC_NC_MIN_CB=8 */
+  g_cl_min_cb = 4; /* frozen ISAC_GPU_LDPC_CL_MIN_CB=4 */
+  g_sm_level = 1;  /* frozen ISAC_GPU_LDPC_SM=1 */
   g_nc_state.store(st);
-  if (g_cl_min_cb || g_cl_force)
-    fprintf(stderr, "SENSING: GPU_LDPC cl_min_cb=%d cl_force=%d\n", g_cl_min_cb, g_cl_force);
+  if (g_cl_min_cb)
+    fprintf(stderr, "SENSING: GPU_LDPC cl_min_cb=%d cl_force=%d\n", g_cl_min_cb, 0);
   if (g_nc_min_cb)
     fprintf(stderr, "SENSING: GPU_LDPC nc_min_cb=%d\n", g_nc_min_cb);
   if (st == 2)
-    fprintf(stderr, "SENSING: GPU LDPC: non-cluster kernels (sm_%d%s)\n", major, major < 9 ? "" : ", ISAC_GPU_LDPC_NOCLUSTER=1");
+    fprintf(stderr, "SENSING: GPU LDPC: non-cluster kernels (sm_%d)\n", major);
   return st;
 }
 
 /* one launch of n code blocks: CB blocks each (1 = _nc, 2/4/8 = cluster); CB 2/4 falls back to _nc in the same call if no SM group is free */
 static cudaError_t ldpc_launch(int nc, int n, cudaStream_t st, bool z4, const DJob *ddj, Ctx &x, uint8_t *dsnap, int *dres)
 {
-  const int cb = pick_cb(nc, n, g_rt_sms, g_cl_min_cb, g_cl_force);
+  const int cb = pick_cb(nc, n, g_rt_sms, g_cl_min_cb, 0);
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = dim3(n * cb);
   cfg.blockDim = dim3(THREADS);
@@ -702,7 +682,7 @@ static bool warm_common()
     return false;
   if (nc == 1 && g_nc_min_cb && (cudaFuncGetAttributes(&fa, k_ldpc_t<1>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<1>) != cudaSuccess))
     return false; /* mixed selection: load the _nc module now, not on the first big TB */
-  if ((g_cl_min_cb || g_cl_force) && nc == 1 &&
+  if (g_cl_min_cb && nc == 1 &&
       (cudaFuncGetAttributes(&fa, k_ldpc_t<2>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc_t<4>) != cudaSuccess ||
        cudaFuncGetAttributes(&fa, k_ldpc4_t<2>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<4>) != cudaSuccess ||
        cudaFuncGetAttributes(&fa, k_ldpc_t<1>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4_t<1>) != cudaSuccess))
@@ -740,11 +720,7 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
           || cudaMalloc(&x.llr, (size_t)cap * MAXC * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.llrRes, (size_t)cap * MAXC * ZMAX + 16) != cudaSuccess
           || cudaMalloc(&x.c2v, (size_t)cap * MAXE * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.unsat, sizeof(int) * cap * NIT) != cudaSuccess)
         return;
-      x.sh = x.sl = x.s;
-      if (nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&x.sl, lo, hi))
-        return;
     }
-    g_prio = nr_pdsch_gpu_prio_on();
     if (!warm_common())
       return;
     { /* SMs of the RT partition (device count if the mask query fails): pick_cb keeps a launch within one wave */
@@ -779,8 +755,6 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   }
   const int c = acquire();
   Ctx &x = g_ctx[c];
-  if (g_prio) /* the context is ours and idle: this body's class picks the stream */
-    x.s = nr_pdsch_gpu_low ? x.sl : x.sh;
   int8_t *din = nullptr;
   cudaHostGetDevicePointer((void **)&din, x.in, 0);
   for (int k = 0; k < n; k++) {
@@ -835,7 +809,7 @@ extern "C" void nr_pdsch_gpu_ldpc_stats(uint64_t *o)
 }
 extern "C" unsigned nr_pdsch_gpu_ldpc_dev_misses(void) { return g_dev_miss.load(); }
 /* GPUPASS: launch-only decode of n <= NJ code blocks. Inputs already on the device (llr_dev, NR_GPU_LDPC_DEV_IN_STRIDE per job), outputs
- * into bits_dev (NR_GPU_LDPC_DEV_* layout); enqueues on `stream` only. jobs[k].llr / snap are not touched. Below CC 9 (or ISAC_GPU_LDPC_NOCLUSTER=1) the non-cluster
+ * into bits_dev (NR_GPU_LDPC_DEV_* layout); enqueues on `stream` only. jobs[k].llr / snap are not touched. Below CC 9 the non-cluster
  * kernels run; -1 on any refusal / error (init not done, bad job, graph miss, launch error). One pass in flight (private context). 0 or an error code. */
 /* host: validates the jobs and writes them into the instance's DJob array (graph replay: the kernel reads it when it runs). 0 or -1. */
 static int pass_set(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, bool *z4)
@@ -1033,18 +1007,9 @@ static bool ul_selftest(int i)
   return gr && ul_exec(i, &job, 1, &gr, 1000000, &l, &g) == 0 && job.nsnap > 0;
 }
 
-/* ULST ISAC_UL_GPU_LDPC_HOLD=1 (default off): after an abandoned (deadline) call, every call goes to the CPU decoder while
+/* ULST: after an abandoned (deadline) call, every call goes to the CPU decoder while
  * it is still on the GPU and, once it drained, for as long again as it took (launch to reclaim): the FEP hold of
  * nr_pusch_gpu_fep.cuh, so a starved partition costs one deadline per observed GPU latency, not one per TB. */
-static bool ul_hold_on()
-{
-  static int v = -1;
-  if (v < 0) {
-    const char *e = getenv("ISAC_UL_GPU_LDPC_HOLD");
-    v = !e || atoi(e) == 1;
-  }
-  return v == 1;
-}
 static uint64_t ul_lost_t0[UL_CTX];
 static std::atomic<uint64_t> ul_hold_until{0};
 /* gives back context i if it was abandoned and its stream has drained; true = reclaimed by this call */
@@ -1056,7 +1021,7 @@ static bool ul_reclaim(int i)
   if (!(UL.lost.fetch_and(~bit) & bit))
     return false; /* another consumer reclaimed it */
   cudaGetLastError(); /* an abandoned call that failed: the next use re-validates */
-  if (ul_hold_on()) {
+  {
     const uint64_t t = ul_now_us(), until = t + (t - ul_lost_t0[i]);
     uint64_t h = ul_hold_until.load();
     while (until > h && !ul_hold_until.compare_exchange_weak(h, until)) {}
@@ -1115,7 +1080,6 @@ extern "C" int nr_pusch_gpu_ldpc_init(int pct, int deadline_us)
         UL.part = false;
         good = cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, lo) == cudaSuccess;
       }
-      x.sh = x.sl = x.s;
       good = good && ul_selftest(i);
       UL.busy.store(0);
     }
@@ -1152,7 +1116,7 @@ extern "C" int nr_pusch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
     ++UL.n_rt;
     return -2;
   }
-  if (ul_hold_on()) {
+  {
     for (int i = 0; i < UL_CTX; i++)
       ul_reclaim(i);
     if (UL.lost.load() || ul_now_us() < ul_hold_until.load()) {

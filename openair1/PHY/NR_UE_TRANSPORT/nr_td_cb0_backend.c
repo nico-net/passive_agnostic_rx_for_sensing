@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 /*! \file nr_td_cb0_backend.c
- * \brief CB0 batch backend selection (ISAC_TD_CB0_BACKEND), GPU registration hook and the GPU failure rule.
+ * \brief CB0 batch backend selection (GPU, CPU fallback), GPU registration hook and the GPU failure rule.
  * See the "Backend interface" block of nr_td_cb0_batch.h. Plain C, no CUDA dependency: the CPU backend is
  * nr_td_cb0_batch_cpu(); a GPU backend is whatever the GPU entry registers.
  */
@@ -20,9 +20,9 @@
 static pthread_mutex_t g_be_lock = PTHREAD_MUTEX_INITIALIZER;
 static nr_td_cb0_backend_t g_gpu_be;
 static bool g_gpu_be_set;
-static int g_mode = -1;     /* NR_TD_CB0_BE_*; -1 = read the environment */
+static int g_mode = NR_TD_CB0_BE_GPU; /* NR_TD_CB0_BE_* */
 static int g_backoff;       /* GPU batches still to skip after a failure */
-static int g_backoff_len = -1;
+static int g_backoff_len = 64; /* GPU batches skipped after a failure (test hook: nr_td_cb0_backend_test_backoff) */
 static bool g_warned_fallback;
 static _Atomic uint64_t s_batches_cpu, s_batches_gpu, s_gpu_failed, s_gpu_skipped;
 
@@ -33,33 +33,25 @@ static uint64_t now_ns(void)
   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-static int mode_from_env(void)
-{
-  const char *e = (getenv("ISAC_TD_CB0_BACKEND") ?: "gpu");
-  if (e == NULL || *e == 0 || strcasecmp(e, "auto") == 0)
-    return NR_TD_CB0_BE_AUTO;
-  if (strcasecmp(e, "cpu") == 0)
-    return NR_TD_CB0_BE_CPU;
-  if (strcasecmp(e, "gpu") == 0)
-    return NR_TD_CB0_BE_GPU;
-  fprintf(stderr, "SENSING: ISAC_TD_CB0_BACKEND=%s unknown, using auto\n", e);
-  return NR_TD_CB0_BE_AUTO;
-}
-
 int nr_td_cb0_backend_mode(void)
 {
   pthread_mutex_lock(&g_be_lock);
-  if (g_mode < 0)
-    g_mode = mode_from_env();
   const int m = g_mode;
   pthread_mutex_unlock(&g_be_lock);
   return m;
 }
 
+void nr_td_cb0_backend_test_backoff(int batches)
+{
+  pthread_mutex_lock(&g_be_lock);
+  g_backoff_len = batches < 1 ? 1 : batches;
+  pthread_mutex_unlock(&g_be_lock);
+}
+
 void nr_td_cb0_backend_mode_set(int mode)
 {
   pthread_mutex_lock(&g_be_lock);
-  g_mode = mode < 0 ? mode_from_env() : mode;
+  g_mode = mode < 0 ? NR_TD_CB0_BE_GPU : mode;
   g_backoff = 0;
   g_warned_fallback = false;
   pthread_mutex_unlock(&g_be_lock);
@@ -101,15 +93,6 @@ void nr_td_cb0_backend_get_stats(nr_td_cb0_backend_stats_t *s)
 static bool pick_gpu(nr_td_cb0_backend_t *be)
 {
   pthread_mutex_lock(&g_be_lock);
-  if (g_mode < 0)
-    g_mode = mode_from_env();
-  if (g_backoff_len < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_TD_CB0_GPU_BACKOFF not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_TD_CB0_GPU_BACKOFF");
-    g_backoff_len = e ? atoi(e) : 64;
-    if (g_backoff_len < 1)
-      g_backoff_len = 1;
-  }
   bool gpu = false;
   if (g_mode != NR_TD_CB0_BE_CPU && g_gpu_be_set) {
     if (g_backoff > 0) {
@@ -129,7 +112,7 @@ static bool pick_gpu(nr_td_cb0_backend_t *be)
     gpu = false;
   }
   if (warn)
-    fprintf(stderr, "SENSING: ISAC_TD_CB0_BACKEND=gpu but no usable GPU backend: CB0 batches run on the CPU backend\n");
+    fprintf(stderr, "SENSING: the CB0 GPU backend is not usable: no usable GPU backend: CB0 batches run on the CPU backend\n");
   return gpu;
 }
 
@@ -137,8 +120,6 @@ int nr_td_cb0_backend_peek(void)
 {
   nr_td_cb0_backend_t be;
   pthread_mutex_lock(&g_be_lock);
-  if (g_mode < 0)
-    g_mode = mode_from_env();
   const bool cand = g_mode != NR_TD_CB0_BE_CPU && g_gpu_be_set && g_backoff == 0;
   if (cand)
     be = g_gpu_be;

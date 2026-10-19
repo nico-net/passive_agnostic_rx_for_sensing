@@ -9,7 +9,7 @@ extern "C" {
 
 typedef enum { NR_GPU_NONE, NR_GPU_SHARED, NR_GPU_DISCRETE } nr_gpu_platform_model_t;
 typedef enum { NR_GPU_DEVICE, NR_GPU_STAGING, NR_GPU_SHARED_RW } nr_gpu_kind_t;
-typedef enum { NR_GPU_ALLOC_UNAVAILABLE, NR_GPU_ALLOC_DEVICE, NR_GPU_ALLOC_MAPPED, NR_GPU_ALLOC_MANAGED } nr_gpu_storage_t;
+typedef enum { NR_GPU_ALLOC_UNAVAILABLE, NR_GPU_ALLOC_DEVICE, NR_GPU_ALLOC_MAPPED } nr_gpu_storage_t;
 typedef struct {
   int available, device, major, minor, integrated;
   int pageable_memory_access, host_page_tables, can_map_host_memory;
@@ -18,9 +18,9 @@ typedef struct {
   char name[256];
   nr_gpu_platform_model_t model;
 } nr_gpu_caps_t;
-/* Pure policy functions also used by the mocked-capability tests. Invalid overrides fail closed. */
-nr_gpu_platform_model_t nr_gpu_choose_model(const nr_gpu_caps_t *, const char *override);
-nr_gpu_storage_t nr_gpu_storage(nr_gpu_platform_model_t, nr_gpu_kind_t, int managed_opt_in);
+/* Pure policy functions also used by the mocked-capability tests. */
+nr_gpu_platform_model_t nr_gpu_choose_model(const nr_gpu_caps_t *);
+nr_gpu_storage_t nr_gpu_storage(nr_gpu_platform_model_t, nr_gpu_kind_t);
 int nr_gpu_arch_compatible(int major, int minor, const char *built_archs);
 /* One process-wide instance, shared by the core and dlopen modules. No CUDA link dependency.
  * Probe is idempotent; call before module warm-up. The first GPU module may probe earlier.

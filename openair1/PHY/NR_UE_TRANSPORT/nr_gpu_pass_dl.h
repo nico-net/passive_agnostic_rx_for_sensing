@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* GPUPASS Task 4, host side (nr_gpu_pass_dl.c, in the PHY UE library): loads libpdsch_gpu.so's graph pass (nr_gpu_pass.h), warms the shape classes before the RX
  * fence and turns the state of passive_decode_body_core at the point just before its FEP into an nr_gpu_pass_job_t. The body calls nr_gpu_pass_dl_run() with the
- * facts only it knows (the statics behind its gates) and commits the result itself. ISAC_GPU_PASS=1 enables it (default off: nothing here runs). */
+ * facts only it knows (the statics behind its gates) and commits the result itself. */
 #ifndef NR_GPU_PASS_DL_H
 #define NR_GPU_PASS_DL_H
 #include "PHY/defs_nr_UE.h"
@@ -57,7 +57,7 @@ typedef struct {
   int16_t *llr;                     /* heap [G]: the final LLRs of a pass whose TB failed its CRC (the retry arms re-decode them) */
 } nr_gpu_pass_dl_out_t;
 
-/* 1 = ISAC_GPU_PASS=1 and the module is up (set by nr_gpu_pass_warmup) */
+/* 1 = the module is up (set by nr_gpu_pass_warmup) */
 int nr_gpu_pass_active(void);
 int nr_gpu_pass_fp32_shadow(int flip, int sign_bad); /* FP32 shadow outcome of one grant; 1 = the pass was disabled */
 int nr_gpu_pass_fp32_on(void); /* Task 5: the graphs run the FP32 demod; the shadow checks then compare LLR signs and CRC verdicts, not hashes */

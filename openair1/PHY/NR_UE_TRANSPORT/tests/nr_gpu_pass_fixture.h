@@ -2,7 +2,7 @@
 /* GPUPASS test fixture: one synthetic 4-RX, N = 4096 slot (own DM-RS and QAM, OAI TX symbol rotation, frequency-selective 4 x Nl
  * channel, AWGN, int16 IQ ring that wraps) pushed through the launch-only _dev entry points of libpdsch_gpu.so on ONE stream:
  * exact FEP -> exact chest -> demod -> (LDPC on CC >= 9). run_stages() allocates its device buffers under the current
- * ISAC_GPU_FORCE_DISCRETE, so the same fixture runs both memory models. Later tasks extend it (from_shape(...)). */
+ * nr_gpu_mem_test_force_discrete, so the same fixture runs both memory models. Later tasks extend it (from_shape(...)). */
 #ifndef NR_GPU_PASS_FIXTURE_H
 #define NR_GPU_PASS_FIXTURE_H
 #include <dlfcn.h>
@@ -83,6 +83,7 @@ struct GpuPassModule {
         m.demod_old = (decltype(m.demod_old))dlsym(m.dl, "nr_pdsch_gpu_demod_run");
         m.demod_rel = (decltype(m.demod_rel))dlsym(m.dl, "nr_pdsch_gpu_demod_release");
         m.ldpc_old = (decltype(m.ldpc_old))dlsym(m.dl, "nr_pdsch_gpu_ldpc_run");
+        if (auto fp32 = (void (*)(int))dlsym(m.dl, "nr_gpu_pass_test_fp32")) fp32(0); /* the bit-exact double demod is the reference here (FP32 is the production default) */
         m.pass_config = (nr_gpu_pass_config_fn)dlsym(m.dl, "nr_gpu_pass_config");
         m.pass_init = (nr_gpu_pass_init_fn)dlsym(m.dl, "nr_gpu_pass_init");
         m.pass_warm = (nr_gpu_pass_warm_fn)dlsym(m.dl, "nr_gpu_pass_warm");

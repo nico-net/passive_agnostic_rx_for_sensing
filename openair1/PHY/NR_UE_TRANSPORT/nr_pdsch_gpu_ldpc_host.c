@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
-/* DECGPU exact LDPC, host side: ISAC_PDSCH_GPU_EXACT_LDPC=1 (default off) decodes a passive PDSCH TB with the GPU port of
+/* DECGPU exact LDPC, host side: decodes a passive PDSCH TB with the GPU port of
  * OAI's CPU decoder (nr_pdsch_gpu_ldpc.cu) instead of libldpc.so, with the same result per code block:
  *   - deinterleaving, rate dematching into the HARQ buffer d, the 2Z zeros / filler 127s / int8 packing: verbatim
  *     nr_process_decode_segment() (nrLDPC_coding_segment_decoder.c), on the CPU;
@@ -10,7 +10,7 @@
  *     The GPU stops a block early only at a zero syndrome; if that snapshot's CRC fails (a codeword with a wrong
  *     CRC: later iterations unknown) the whole TB is redone by the CPU decoder.
  * Refused (CPU decoder): HARQ combining into a kept buffer (d not cleared), more than one TB per call, > 17 iterations.
- * ISAC_PDSCH_GPU_EXACT_LDPC_CHECK=N (N >= 1): every N-th TB is also decoded by the CPU, which gives the result used;
+ * Check mode (UL: every 64th TB): the TB is also decoded by the CPU, which gives the result used;
  * every code block's success flag and bytes are compared and the first difference disables the GPU path. */
 #include "nr_pdsch_gpu_ldpc_host.h"
 #include "nr_pdsch_gpu_ldpc.h"
@@ -28,16 +28,15 @@
 #include <time.h>
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 
-/* One instance per user of the GPU decoder: the DL (ISAC_PDSCH_GPU_EXACT_LDPC) and the UL (ISAC_UL_GPU_LDPC, own context pool,
- * own counters and own CHECK/disable state: a UL mismatch never switches the DL off). */
+/* One instance per user of the GPU decoder: the DL and the UL (own context pool,
+ * own counters and own check/disable state: a UL mismatch never switches the DL off). */
 typedef struct {
   nr_gpu_ldpc_run_fn run;
   _Atomic int on; /* -1 unresolved, 0 off, 1 on */
   int check;
   int ul;
-  uint32_t min_bits; /* UL: TBs with fewer coded information bits (K x code blocks) stay on the CPU, where a call is cheaper than a launch */
   const char *tag;
-  _Atomic uint64_t calls, cbs, fb_refuse, fb_syn, fb_err, chk_ok, chk_bad, ns_sum, ns_gpu, fb_small;
+  _Atomic uint64_t calls, cbs, fb_refuse, fb_syn, fb_err, chk_ok, chk_bad, ns_sum, ns_gpu;
   _Atomic uint64_t fb_reason[NR_GPU_LDPC_NERR]; /* DL: fb_err by nr_gpu_ldpc_err (index -rc) */
   pthread_once_t once;
 } gl_t;
@@ -56,11 +55,6 @@ static uint64_t now_ns(void)
 static void load(void)
 {
   gl_t *G = &DLG;
-  const char *e = (getenv("ISAC_PDSCH_GPU_EXACT_LDPC") ?: "1");
-  if (!e || atoi(e) != 1) {
-    atomic_store(&G->on, 0);
-    return;
-  }
   void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!h)
     h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
@@ -71,8 +65,6 @@ static void load(void)
     atomic_store(&G->on, 0);
     return;
   }
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_EXACT_LDPC_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
-  G->check = getenv("ISAC_PDSCH_GPU_EXACT_LDPC_CHECK") ? atoi(getenv("ISAC_PDSCH_GPU_EXACT_LDPC_CHECK")) : 0;
   LOG_A(PHY, "SENSING: GPU_EXACT_LDPC enabled: OAI min-sum decoder on the GPU, bit-exact; check=%d\n", G->check);
   atomic_store(&G->on, 1);
 }
@@ -132,22 +124,6 @@ static int prep_segment_ref(nrLDPC_TB_decoding_parameters_t *tb, int r, tls_t *t
   *Eout = E;
   *Rout = R;
   int16_t *d = tb->d + (size_t)r * Kc * Z;
-  static int s_hf = -1; /* ISAC_PDSCH_HOST_FAST=1 (default off): NEON deinterleave / rate-match / pack, bit-identical */
-  if (s_hf < 0)
-    s_hf = atoi(getenv("ISAC_PDSCH_HOST_FAST") ?: "1") ? 1 : 0;
-  if (s_hf && tb->C != 0 && tb->d_to_be_cleared == 1 && tb->rv_index < 4 && tb->BG >= 1 && tb->BG <= 2) {
-    static const uint8_t k0[2][4] = {{0, 17, 33, 56}, {0, 13, 25, 43}};
-    const uint32_t N = (tb->BG == 1) ? 66u * Z : 50u * Z;
-    const uint32_t Nref = tb->tbslbrm ? 3u * tb->tbslbrm / (2u * tb->C) : N;
-    const uint32_t Ncb = Nref < N ? Nref : N;
-    const uint32_t ind = (k0[tb->BG - 1][tb->rv_index] * Ncb / N) * Z, Foff = K - F - 2 * Z;
-    if (Foff <= Ncb && nrhf_deinterleave(E, tb->Qm, t->e, tb->llr + off)) {
-      memset(d, 0, N * sizeof(int16_t));
-      nrhf_rm_rx(d, t->e, E, ind, Ncb, Foff, F);
-      nrhf_pack(l, d, Z, K, F, lenWithCrc(tb->C, tb->A), Kc * Z);
-      return 0;
-    }
-  }
   nr_deinterleaving_ldpc(E, tb->Qm, t->e, tb->llr + off);
   if (nr_rate_matching_ldpc_rx(tb->tbslbrm, tb->BG, Z, d, t->e, tb->C, tb->rv_index, tb->d_to_be_cleared, E, F, K - F - 2 * Z) == -1)
     return -1;
@@ -164,8 +140,7 @@ static int prep_segment_ref(nrLDPC_TB_decoding_parameters_t *tb, int r, tls_t *t
   return 0;
 }
 
-/* ISAC_PDSCH_HOST_FAST=1 (default off): NEON deinterleave / rate-match / int8 pack, bit-identical to prep_segment_ref();
- * =2: run both and compare (logs the first difference, uses the reference result). Returns -2 when the fast path does not apply. */
+/* NEON deinterleave / rate-match / int8 pack, bit-identical to prep_segment_ref(). Returns -2 when the fast path does not apply. */
 static int prep_segment_fast(nrLDPC_TB_decoding_parameters_t *tb, int r, tls_t *t, int8_t *l, int *Eout, uint8_t *Rout)
 {
   const int Kc = tb->BG == 2 ? 52 : 68, Z = tb->Z, K = tb->K, F = tb->F;
@@ -194,34 +169,8 @@ static int prep_segment_fast(nrLDPC_TB_decoding_parameters_t *tb, int r, tls_t *
 
 static int prep_segment(nrLDPC_TB_decoding_parameters_t *tb, int r, tls_t *t, int8_t *l, int *Eout, uint8_t *Rout)
 {
-  static int s_hf = -1;
-  if (s_hf < 0)
-    s_hf = getenv("ISAC_PDSCH_HOST_FAST") ? atoi(getenv("ISAC_PDSCH_HOST_FAST")) : 1;
-  if (s_hf <= 0)
-    return prep_segment_ref(tb, r, t, l, Eout, Rout);
   const int rc = prep_segment_fast(tb, r, t, l, Eout, Rout);
-  if (rc != -2 && s_hf != 2)
-    return rc;
-  if (rc == -2)
-    return prep_segment_ref(tb, r, t, l, Eout, Rout);
-  const int Kc = tb->BG == 2 ? 52 : 68, Z = tb->Z;
-  const size_t nd = (size_t)(tb->BG == 2 ? 50 : 66) * Z; /* the cleared / accumulated part of d */
-  int8_t *sv = malloc((size_t)Kc * Z);
-  int16_t *dv = malloc((size_t)Kc * Z * sizeof(int16_t));
-  int16_t *d = tb->d + (size_t)r * Kc * Z;
-  memcpy(sv, l, (size_t)Kc * Z);
-  memcpy(dv, d, (size_t)Kc * Z * sizeof(int16_t));
-  const int rr = prep_segment_ref(tb, r, t, l, Eout, Rout);
-  if (memcmp(sv, l, (size_t)Kc * Z) || memcmp(dv, d, nd * sizeof(int16_t))) {
-    int i = 0;
-    while (i < Kc * Z && sv[i] == l[i]) i++;
-    LOG_E(PHY, "SENSING: HOST_FAST MISMATCH r %d C %u BG %u Z %d K %u F %u A %u E %u Qm %u rv %u lbrm %u first l diff at %d (fast %d ref %d), d %s\n", r,
-          tb->C, tb->BG, Z, tb->K, tb->F, tb->A, *Eout, tb->Qm, tb->rv_index, tb->tbslbrm, i, i < Kc * Z ? sv[i] : 0, i < Kc * Z ? l[i] : 0,
-          memcmp(dv, d, nd * sizeof(int16_t)) ? "DIFF" : "same");
-  }
-  free(sv);
-  free(dv);
-  return rr;
+  return rc == -2 ? prep_segment_ref(tb, r, t, l, Eout, Rout) : rc;
 }
 
 static inline uint32_t tb_ndec(const nrLDPC_TB_decoding_parameters_t *tb)
@@ -314,10 +263,6 @@ static int32_t decode_impl(gl_t *G, nrLDPC_slot_decoding_parameters_t *p, nrLDPC
     atomic_fetch_add_explicit(&G->fb_refuse, 1, memory_order_relaxed);
     return cpu(p);
   }
-  if (G->ul && (uint64_t)tb->K * tb_ndec(tb) < G->min_bits) {
-    atomic_fetch_add_explicit(&G->fb_small, 1, memory_order_relaxed);
-    return cpu(p);
-  }
   const uint64_t t0 = now_ns();
   const uint64_t n = atomic_fetch_add_explicit(&G->calls, 1, memory_order_relaxed) + 1;
   const uint32_t n_dec = tb_ndec(tb);
@@ -370,36 +315,26 @@ int32_t nr_pdsch_gpu_ldpc_decode(nrLDPC_slot_decoding_parameters_t *p, nrLDPC_co
   return decode_impl(&DLG, p, cpu);
 }
 
-/* ---- ULLDPC: ISAC_UL_GPU_LDPC=1 (default off). The passive PUSCH decode (nr_ulsch_decoding) calls the coding interface
+/* ---- ULLDPC: the passive PUSCH decode (nr_ulsch_decoding) calls the coding interface
  * once per TB; nr_pusch_gpu_ldpc_wrap() returns a decoder that sends the TB to the UL pool of libpdsch_gpu.so and calls the
  * original (CPU) decoder for everything it refuses (HARQ-combined buffers, a busy / over-cap / late GPU, any error). Same
  * bit-exact code path and CRC stop rule as the DL (gpu_tb), so the CRC verdicts and decoded bytes are the CPU decoder's.
- * ISAC_UL_GPU_LDPC_CHECK=N (N >= 1, default 64): every N-th TB is also decoded on the CPU and compared. */
+ * Every 64th TB is also decoded on the CPU and compared. */
 static void ul_load(void)
 {
   gl_t *G = &ULG;
-  const char *e = getenv("ISAC_UL_GPU_LDPC");
-  if (e && atoi(e) != 1) {
-    atomic_store(&G->on, 0);
-    return;
-  }
   void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!h)
     h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   nr_gpu_ldpc_ul_init_fn init = h ? (nr_gpu_ldpc_ul_init_fn)dlsym(h, "nr_pusch_gpu_ldpc_init") : NULL;
   G->run = h ? (nr_gpu_ldpc_run_fn)dlsym(h, "nr_pusch_gpu_ldpc_run") : NULL;
   ul_stats_fn = h ? (nr_gpu_ldpc_ul_stats_fn)dlsym(h, "nr_pusch_gpu_ldpc_stats") : NULL;
-  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_LDPC_DEADLINE_US not in the frozen config t26zE (2026-10-18); slated for removal */
-  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_LDPC_PCT not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *pc = getenv("ISAC_UL_GPU_LDPC_PCT"), *dl = getenv("ISAC_UL_GPU_LDPC_DEADLINE_US");
-  if (!init || !G->run || !ul_stats_fn || init(pc ? atoi(pc) : 15, dl ? atoi(dl) : 4000) != 0) {
+  if (!init || !G->run || !ul_stats_fn || init(15, 4000) != 0) {
     LOG_W(PHY, "SENSING: UL_GPU_LDPC requested but unavailable -- CPU LDPC decoder\n");
     atomic_store(&G->on, 0);
     return;
   }
-  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_LDPC_MIN_BITS not in the frozen config t26zE (2026-10-18); slated for removal */
-  G->min_bits = getenv("ISAC_UL_GPU_LDPC_MIN_BITS") ? (uint32_t)atoi(getenv("ISAC_UL_GPU_LDPC_MIN_BITS")) : 0;
-  G->check = getenv("ISAC_UL_GPU_LDPC_CHECK") ? atoi(getenv("ISAC_UL_GPU_LDPC_CHECK")) : 64;
+  G->check = 64;
   LOG_A(PHY, "SENSING: UL_GPU_LDPC enabled: bit-exact GPU decoder for PUSCH TBs, check=%d\n", G->check);
   atomic_store(&G->on, 1);
 }
@@ -434,10 +369,10 @@ void nr_pusch_gpu_ldpc_report(char *buf, size_t n)
   gl_t *G = &ULG;
   snprintf(buf, n,
            "on=%d tbs=%lu cbs=%lu gpu_calls=%lu gpu_ms=%lu max_us=%lu busy=%lu over_cap=%lu rt_defer=%lu late=%lu deadline=%lu err=%lu "
-           "reclaimed=%lu part=%lu | cpu_refused=%lu small=%lu syn0=%lu run_fail=%lu check_ok=%lu check_bad=%lu",
+           "reclaimed=%lu part=%lu | cpu_refused=%lu syn0=%lu run_fail=%lu check_ok=%lu check_bad=%lu",
            atomic_load(&G->on) == 1, (unsigned long)atomic_load(&G->calls), (unsigned long)atomic_load(&G->cbs), (unsigned long)o[0],
            (unsigned long)(o[2] / 1000), (unsigned long)o[3], (unsigned long)o[4], (unsigned long)o[5], (unsigned long)o[6],
            (unsigned long)o[7], (unsigned long)o[8], (unsigned long)o[9], (unsigned long)o[10], (unsigned long)o[11],
-           (unsigned long)atomic_load(&G->fb_refuse), (unsigned long)atomic_load(&G->fb_small), (unsigned long)atomic_load(&G->fb_syn),
+           (unsigned long)atomic_load(&G->fb_refuse), (unsigned long)atomic_load(&G->fb_syn),
            (unsigned long)atomic_load(&G->fb_err), (unsigned long)atomic_load(&G->chk_ok), (unsigned long)atomic_load(&G->chk_bad));
 }

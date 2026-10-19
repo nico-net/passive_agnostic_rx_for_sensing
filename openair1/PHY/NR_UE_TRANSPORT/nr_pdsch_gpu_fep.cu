@@ -1,5 +1,4 @@
 /* GPU FEP + DM-RS channel estimation + MMSE + LLR for the passive PDSCH decoder. See the header. */
-#define NR_GPU_FEP_NO_LOADER
 #include "nr_pdsch_gpu_fep.h"
 #include "../TOOLS/nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include "nr_pdsch_gpu_chest.h"
@@ -9,7 +8,6 @@
 #include "nr_dl_gpu_memory.h"
 #include "nr_dl_gpu_budget.h"
 #include "nr_gpu_green.h"
-#include "nr_pdsch_gpu_prio.cuh"
 #include <cufft.h>
 #include <chrono>
 #include <cmath>
@@ -108,15 +106,15 @@ static int16_t *g_h_llr, *g_d_llr;
 static size_t g_llr_cap;
 static double g_fep_us, g_llr_us;
 static int g_last_chunks;
-static float g_llr_scale = 4.0f;
-static int g_force_ant = -1; /* recorded-input branch isolation; unset in production */
-static bool g_batch_async; /* opt-in: caller follows FEP with LLR on the same stream */
+static const float g_llr_scale = 4.0f;
+static const int g_force_ant = -1; /* no antenna forced */
 /* GPU6 bit-exact FEP (nr_pdsch_gpu_exact_fep.cuh): tables + per-slot int16 rxdataF */
 static uint16_t *g_d_perm;
 static short *g_d_tw1024, *g_d_tw4096;
 static short2 *g_d_ts, *g_d_exact, *g_h_exact;
 static bool g_exact_ok, g_exact_direct, g_exact_pending;
-static double g_exact_us, g_exact_deadline_us = 2000;
+static double g_exact_us;
+static const double g_exact_deadline_us = 2000;
 static std::atomic<uint64_t> g_exact_late, g_exact_busy;
 /* Exact-path contexts: one stream and one small mapped output each. Rotation and symbol list ride in the kernel
  * argument and the kernels read/write the caller's memory, so concurrent consumers never share a mutable buffer
@@ -124,10 +122,6 @@ static std::atomic<uint64_t> g_exact_late, g_exact_busy;
  * keeps a lock. */
 static const int EXACT_CTX = 8;
 static cudaStream_t g_ctx_stream[EXACT_CTX];
-static cudaStream_t g_ctx_hi[EXACT_CTX], g_ctx_lo[EXACT_CTX]; /* GPUSCHED ISAC_PDSCH_GPU_PRIO: the two streams of a context */
-static bool g_ctx_prio;
-__thread int nr_pdsch_gpu_low;
-extern "C" void nr_pdsch_gpu_set_lowprio(int low) { nr_pdsch_gpu_low = low; }
 /* ISAC_E2E_TRACE stage split: this module (dlopen RTLD_LOCAL) has its own copy of the per-thread wait accumulators; the host reads them here */
 extern "C" uint64_t *nr_pdsch_gpu_ss_ptr(void) { return nr_ss_ns; }
 extern "C" void nr_pdsch_gpu_ss_enable(int on) { nr_ss_on = on; }
@@ -141,7 +135,7 @@ static std::atomic<unsigned> g_ctx_busy{0};
 static const int PASS_RING = NR_GPU_PASS_RING;
 static const int PASS_SLOTS = NR_GPU_PASS_RING + 1; /* [0, RING): graph-pass instances; [RING]: the test-only round-robin _stage helpers (never a live instance's slot) */
 static short2 *g_pass_h[PASS_SLOTS], *g_pass_d[PASS_SLOTS], *g_pass_ls[PASS_SLOTS];
-static int PASS_LS_ROWS = 256; /* 512 when ISAC_GPU_PASS=1 (set at init, before the allocation below); LS rows per slot: a graph pass needs nd x nl x nrx x segments rows (nr_gpu_pass_graph.cu SEG_ROWS): 2 x 4 x 4 x 16 or 3 x 4 x 4 x 8 */
+static const int PASS_LS_ROWS = 1024; /* v2 split: 32 segments (nr_gpu_pass_graph.cu SEG_ROWS); LS rows per slot: a graph pass needs nd x nl x nrx x segments rows (nr_gpu_pass_graph.cu SEG_ROWS): 2 x 4 x 4 x 16 or 3 x 4 x 4 x 8 */
 static uint32_t *g_pass_par[PASS_SLOTS];              /* per slot staging block read by the kernel (nr_exact::ExactIO::par layout) */
 static nr_gpu_chest_row_t *g_pass_rh[PASS_SLOTS], *g_pass_rd[PASS_SLOTS]; /* chest rows: pinned staging, device copy */
 static cudaEvent_t g_pass_fev[PASS_SLOTS], g_pass_cev[PASS_SLOTS];        /* recorded when a pass is done with the slot */
@@ -172,8 +166,6 @@ static int ctx_acquire(bool try_only)
     unsigned m = g_ctx_busy.load();
     for (int i = 0; i < nr_gpu_ctx_limit(EXACT_CTX); i++)
       if (!(m >> i & 1u) && g_ctx_busy.compare_exchange_strong(m, m | 1u << i)) {
-        if (g_ctx_prio) /* the context is ours and idle: point it at the stream of this body's class */
-          g_ctx_stream[i] = nr_pdsch_gpu_low ? g_ctx_lo[i] : g_ctx_hi[i];
         nr_ss_add(NRSS_LK, ss0);
         return i;
       }
@@ -209,100 +201,6 @@ static int ctx_wait(int c, std::chrono::steady_clock::time_point t0, int sb)
       ++g_exact_late;
     }
   }
-}
-
-/* OTATAIL: ISAC_GPU_HEARTBEAT=1 (default off). A probe thread times two one-block kernels every 10 ms on a
- * real-time-partition stream: k_hb over device memory only, then k_hb over 4 KB of pageable host memory (direct
- * mode, the way the chest kernels read rxdataF). Every 5 s it logs the GPU-time and launch-to-completion maxima and
- * the probes above 2 ms (GPU_HEARTBEAT); a probe above 5 ms is logged at once (GPU_HEARTBEAT STALL). An on-air
- * stall is then device-wide (both probes slow), host-memory-path only (host probe slow) or PDSCH-specific
- * (neither). At start it also writes %smid from the RT stream and from a discovery-partition stream
- * (GPU_GREEN_VERIFY): with ISAC_GPU_RT_ISOLATE=1 the two SM sets must not overlap. */
-__global__ void k_hb(const int *__restrict__ src, int *dst, int n)
-{
-  int s = 0;
-  if (src) for (int i = threadIdx.x; i < n; i += blockDim.x) s += src[i];
-  if (threadIdx.x == 0) dst[0] = s;
-}
-__global__ void k_smid(unsigned *out)
-{
-  unsigned id;
-  asm("mov.u32 %0, %%smid;" : "=r"(id));
-  for (volatile int i = 0; i < 20000; i++) {} /* stay resident so the blocks spread over the partition */
-  if (threadIdx.x == 0) out[blockIdx.x] = id;
-}
-static std::atomic<bool> g_hb_stop{false};
-static std::thread g_hb_thread;
-static void hb_join(void) { g_hb_stop = true; if (g_hb_thread.joinable()) g_hb_thread.join(); }
-static void hb_loop(cudaStream_t s, cudaEvent_t e0, cudaEvent_t e1, int *dst, const int *host_src)
-{
-  float max_gpu[2] = {0, 0}, max_wall[2] = {0, 0};
-  unsigned over2[2] = {0, 0}, n = 0;
-  auto last = std::chrono::steady_clock::now();
-  while (!g_hb_stop) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    struct timespec ts;
-    for (int k = 0; k < 2; k++) {
-      if (k && !host_src) break;
-      const auto t0 = std::chrono::steady_clock::now();
-      cudaEventRecord(e0, s);
-      k_hb<<<1, 128, 0, s>>>(k ? host_src : nullptr, dst, 1024);
-      cudaEventRecord(e1, s);
-      if (cudaEventSynchronize(e1) != cudaSuccess) return;
-      float gpu = 0;
-      cudaEventElapsedTime(&gpu, e0, e1);
-      const float wall = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
-      max_gpu[k] = std::max(max_gpu[k], gpu);
-      max_wall[k] = std::max(max_wall[k], wall);
-      if (wall > 2.f) over2[k]++;
-      if (wall > 5.f) {
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        fprintf(stderr, "SENSING: GPU_HEARTBEAT STALL t=%ld.%03ld kind=%s gpu_ms=%.2f wall_ms=%.2f\n", (long)ts.tv_sec,
-                ts.tv_nsec / 1000000, k ? "host" : "dev", gpu, wall);
-      }
-    }
-    n++;
-    if (std::chrono::steady_clock::now() - last >= std::chrono::seconds(5)) {
-      clock_gettime(CLOCK_MONOTONIC, &ts);
-      fprintf(stderr, "SENSING: GPU_HEARTBEAT t=%ld.%03ld n=%u dev_max_ms=%.2f/%.2f dev_over2=%u host_max_ms=%.2f/%.2f host_over2=%u (gpu/wall)\n",
-              (long)ts.tv_sec, ts.tv_nsec / 1000000, n, max_gpu[0], max_wall[0], over2[0], max_gpu[1], max_wall[1], over2[1]);
-      max_gpu[0] = max_gpu[1] = max_wall[0] = max_wall[1] = 0;
-      over2[0] = over2[1] = n = 0;
-      last = std::chrono::steady_clock::now();
-    }
-  }
-}
-/* hb_start: creates the probe's stream, events and buffers (before the RX allocation fence), runs the SM check and
- * starts the thread. Returns a CUDA error only for the probe's own resources. */
-static int hb_start(int greatest)
-{
-  cudaStream_t s = nullptr, sd = nullptr;
-  cudaEvent_t e0, e1;
-  int *dst = nullptr;
-  unsigned *smid = nullptr;
-  if (!nr_gpu_green_stream(&s, greatest, true, 7)) CK(cudaStreamCreateWithPriority(&s, cudaStreamNonBlocking, greatest));
-  CK(cudaEventCreate(&e0));
-  CK(cudaEventCreateWithFlags(&e1, cudaEventBlockingSync));
-  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&dst, 4096));
-  CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&smid, 2 * 1024 * sizeof(unsigned)));
-  unsigned *dsm = (unsigned *)nr_gpu_device_ptr(smid);
-  const bool disc = nr_gpu_green_stream(&sd, 0, false);
-  k_smid<<<1024, 64, 0, s>>>(dsm);
-  if (disc) k_smid<<<1024, 64, 0, sd>>>(dsm + 1024);
-  CK((cudaError_t)nr_gpu_sync(s));
-  if (disc) CK((cudaError_t)nr_gpu_sync(sd));
-  uint64_t mrt = 0, mds = 0;
-  for (int i = 0; i < 1024; i++) {
-    mrt |= 1ull << (smid[i] & 63);
-    if (disc) mds |= 1ull << (smid[1024 + i] & 63);
-  }
-  fprintf(stderr, "SENSING: GPU_GREEN_VERIFY rt_sms=%d disc_sms=%d overlap=%d rt_mask=%016llx disc_mask=%016llx\n",
-          __builtin_popcountll(mrt), __builtin_popcountll(mds), __builtin_popcountll(mrt & mds), (unsigned long long)mrt,
-          (unsigned long long)mds);
-  const int *host_src = g_exact_direct ? (const int *)calloc(1024, sizeof(int)) : nullptr;
-  g_hb_thread = std::thread(hb_loop, s, e0, e1, dst, host_src);
-  atexit(hb_join);
-  return 0;
 }
 
 /* ---------------------------------------------------------------- FEP ---- */
@@ -765,14 +663,6 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   CK(nr_gpu_allocate(NR_GPU_SHARED_RW, (void **)&g_h_llr, g_llr_cap * sizeof(int16_t)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_llr, g_llr_cap * sizeof(int16_t)));
   cudaFuncAttributes attr;
-  /* DEFERRED/DO NOT USE: NR_GPU_LLR_SCALE not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (const char *e = getenv("NR_GPU_LLR_SCALE"))
-    g_llr_scale = (float)atof(e);
-  /* DEFERRED/DO NOT USE: NR_GPU_FORCE_ANT not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (const char *e = getenv("NR_GPU_FORCE_ANT")) {
-    const int a = atoi(e);
-    if (a >= 0 && a < cfg->nant) g_force_ant = a;
-  }
   if (N == nr_exact::N && cfg->nant <= MAX_ANT) {
     /* Bit-exact FEP working set: allocated with the rest before the RX fence. The timeshift table is
      * computed exactly as init_timeshift_rotation() does (same libm, same formula). */
@@ -805,18 +695,12 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
       CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
       for (int c = 0; c < EXACT_CTX; c++) {
         if (!nr_gpu_green_stream(&g_ctx_stream[c], greatest, true, c)) CK(cudaStreamCreateWithPriority(&g_ctx_stream[c], cudaStreamNonBlocking, greatest));
-        g_ctx_hi[c] = g_ctx_lo[c] = g_ctx_stream[c];
-        if (nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&g_ctx_lo[c], least, greatest)) g_ctx_lo[c] = g_ctx_stream[c];
         CK(nr_gpu_allocate(NR_GPU_STAGING, &g_ctx_delay[c], 3 * nr_exact::DELAY_MAX_ROWS * sizeof(int)));
         CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_ctx_ls[c], NR_GPU_CHEST_MAX_ROWS * 4096 * sizeof(short2)));
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_ctx_cout[c], 4 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)));
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_ctx_rows[c], NR_GPU_CHEST_MAX_ROWS * sizeof(nr_gpu_chest_row_t)));
       }
-      g_ctx_prio = nr_pdsch_gpu_prio_on();
       const size_t ring = (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2);
-      /* DEFERRED/DO NOT USE: ISAC_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
-      { const char *e = getenv("ISAC_GPU_PASS"), *g = (getenv("ISAC_PDSCH_GPU_GRAPH") ?: "1"), *sp = (getenv("ISAC_PDSCH_GPU_GRAPH_SPLIT") ?: "1");
-        PASS_LS_ROWS = (e && atoi(e) == 1) ? 512 : (g && atoi(g) == 1 && sp && atoi(sp) == 1) ? 1024 : 256; } /* v2 split: 32 segments (nr_gpu_pass_graph.cu SEG_ROWS) */
       for (int k = 0; k < PASS_SLOTS; k++) {
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_pass_h[k], ring));
         CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_pass_d[k], ring));
@@ -830,16 +714,9 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
     }
     /* Direct mode: the kernel reads the receiver's host IQ ring and writes its rxdataF in place. Only on a
      * coherent shared-memory platform (GB10: pageable access through the host page tables). */
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_EXACT_DIRECT not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *d = getenv("ISAC_PDSCH_GPU_EXACT_DIRECT");
-    g_exact_direct = nr_gpu_platform_shared_direct() && !(d && atoi(d) == 0);
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_EXACT_DEADLINE_US not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (const char *e = getenv("ISAC_PDSCH_GPU_EXACT_DEADLINE_US"))
-      g_exact_deadline_us = std::max(50.0, atof(e));
+    g_exact_direct = nr_gpu_platform_shared_direct();
     g_exact_ok = true;
   }
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_BATCH_ASYNC not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_batch_async = getenv("ISAC_PDSCH_GPU_BATCH_ASYNC") && !strcmp(getenv("ISAC_PDSCH_GPU_BATCH_ASYNC"), "1");
   CK(cudaFuncGetAttributes(&attr, k_fep_gather));
   CK(cudaFuncGetAttributes(&attr, k_fep_rotate));
   CK(cudaFuncGetAttributes(&attr, k_gold));
@@ -850,12 +727,6 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   CK(cudaMemsetAsync(g_d_fft_in, 0, (size_t)cfg->nant * ns * N * sizeof(float2), g_stream));
   if (cufftExecC2C(g_plan, (cufftComplex *)g_d_fft_in, (cufftComplex *)g_d_rxF, CUFFT_FORWARD) != CUFFT_SUCCESS) return -1;
   CK((cudaError_t)nr_gpu_sync(g_stream));
-  /* DEFERRED/DO NOT USE: ISAC_GPU_HEARTBEAT not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (getenv("ISAC_GPU_HEARTBEAT") && atoi(getenv("ISAC_GPU_HEARTBEAT")) == 1) {
-    int least = 0, greatest = 0;
-    CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
-    if (hb_start(greatest)) return -1;
-  }
   return 0;
 }
 
@@ -921,7 +792,7 @@ static cudaError_t upload_window(const int16_t *const *rxdata, uint32_t ring_len
 }
 
 /* api_fep_slot: API entry: runs the FEP for one slot on the GPU.
- *   How it works: Admits the RT budget scope. Uploads the window and the optional symbol rotation. k_fep_gather applies the sample gather and the frequency-offset phase. cuFFT forward, then k_fep_rotate. Waits for the stream unless g_batch_async is set. Records g_fep_us.
+ *   How it works: Admits the RT budget scope. Uploads the window and the optional symbol rotation. k_fep_gather applies the sample gather and the frequency-offset phase. cuFFT forward, then k_fep_rotate. Waits for the stream. Records g_fep_us.
  *   ISAC_* flags read: none.
  *   Callers: PDSCH GPU API table (function pointer).
  */
@@ -946,11 +817,7 @@ static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_
     g_init_state=-1;nr_gpu_budget_fault();return -1;
   }
   k_fep_rotate<<<grd, blk, 0, g_stream>>>(g_d_rxF, symbol_rot ? g_d_rot : nullptr, N, ns, early);
-  /* The next pdsch_llr() call uses this stream and waits for the full batch.
-   * The queue owns an outer RT budget scope across both calls. This flag is
-   * reserved for that paired call path; default preserves the blocking API. */
-  if (g_batch_async) CK(cudaPeekAtLastError());
-  else CK(rt.wait(g_stream));
+  CK(rt.wait(g_stream));
   g_fep_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   return 0;
 }
@@ -1371,7 +1238,6 @@ struct Par { /* the job without its rows (kernel argument size) */
   int type, N, dt_stride, max_delay_comp;
   const int16_t *delay_table;
   int16_t filt[4][16];
-  int trim; /* DECTAIL: ISAC_PDSCH_GPU_CHEST_TRIM=1, k_fir computes only k < 12 nb_rb + 16 and zero-fills the rest */
   unsigned long long *acc; /* GPUPASS Task 7 (type 3): the noise sum of every row, exact (nvar = acc / 12 nb_rb loses the remainder the UL aggregation needs); null = not written */
 };
 __device__ __forceinline__ short2 mulshift(short2 a, short2 b, int s) /* c16mulShift (int arithmetic, wraps) */
@@ -1415,11 +1281,7 @@ __global__ void k_fir(const Par j, const nr_gpu_chest_row_t *rows, const short2 
   const short2 *dt = (const short2 *)j.delay_table + (size_t)di * j.dt_stride;
   const short2 *it = (const short2 *)j.delay_table + (size_t)ii * j.dt_stride;
   unsigned long long acc = 0;
-  /* the last pilot's 16-tap window ends at fir_base(np - 1) + 15 = idx + 7 < idx + 16: every output beyond is exactly zero */
-  const int kend = j.trim ? min(N, idx + 16) : N;
-  for (int k = kend + threadIdx.x; k < N; k += blockDim.x)
-    out[k] = make_short2(0, 0);
-  for (int k = threadIdx.x; k < kend; k += blockDim.x) {
+  for (int k = threadIdx.x; k < N; k += blockDim.x) {
     short yr = 0, yi = 0;
     const int p0 = max(0, (k - 16) / 2 - 1), p1 = min(np - 1, k / 2 + 6);
     for (int p = p0; p <= p1; p++) {
@@ -1479,12 +1341,6 @@ extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
   par.max_delay_comp = j->max_delay_comp;
   par.delay_table = j->delay_table;
   memcpy(par.filt, j->filt, sizeof(par.filt));
-  {
-    static int trim = -1;
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_CHEST_TRIM not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (trim < 0) trim = getenv("ISAC_PDSCH_GPU_CHEST_TRIM") && atoi(getenv("ISAC_PDSCH_GPU_CHEST_TRIM")) == 1;
-    par.trim = trim;
-  }
   par.acc = nullptr;
   nrch::k_ls<<<j->n_rows, 256, 0, g_ctx_stream[c]>>>(par, rows, g_ctx_ls[c]);
   {
@@ -1555,12 +1411,6 @@ extern "C" int nr_pdsch_gpu_chest_dev_at(const nr_gpu_chest_job_t *j, int r0, in
   par.max_delay_comp = j->max_delay_comp;
   par.delay_table = j->delay_table;
   memcpy(par.filt, j->filt, sizeof(par.filt));
-  {
-    static int trim = -1;
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_CHEST_TRIM not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (trim < 0) trim = getenv("ISAC_PDSCH_GPU_CHEST_TRIM") && atoi(getenv("ISAC_PDSCH_GPU_CHEST_TRIM")) == 1;
-    par.trim = trim;
-  }
   /* type 3 (GPUPASS Task 7, the PUSCH pass): the UL least-squares step, and the exact noise sum of every row at u64 [512 + row] of the nvar area */
   par.acc = j->type == 3 ? (unsigned long long *)(dbase + 3 * NR_GPU_CHEST_MAX_ROWS) + 512 : nullptr;
   if (j->type == 3) nrch::k_ul_ls<<<n, 256, 0, s>>>(par, rows, g_pass_ls[slot]);

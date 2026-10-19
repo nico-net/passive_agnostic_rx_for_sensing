@@ -1,6 +1,6 @@
 #pragma once
-/* ISAC_GPU_POLL_SLEEP_US=N (P99, default 0 = pure spin = unchanged): the GPU completion polls of the decode threads
- * (cudaStreamQuery loops) sleep 20 us between polls once a wait has lasted N us.
+/* The GPU completion polls of the decode threads
+ * (cudaStreamQuery loops) sleep 20 us between polls once a wait has lasted 200 us.
  * Why: the PDSCH consumers (SCHED_FIFO 40, pinned) and the scan consumers (FIFO 50) spin on the GPU. A spinning RT thread
  * starves the bound per-CPU kernel workers (kworker/N) of its core; the GPU path they wait for then stalls until RT
  * throttling (sched_rt_runtime_us 950000 of 1000000) gives the core away: every consumer froze for ~950 ms
@@ -29,12 +29,4 @@ static inline void nr_gpu_poll_relax_us(uint64_t *t0, int us)
   }
 }
 
-static inline void nr_gpu_poll_relax(uint64_t *t0)
-{
-  static int us = -1;
-  if (us < 0) {
-    const char *e = (getenv("ISAC_GPU_POLL_SLEEP_US") ?: "200");
-    us = e && atoi(e) > 0 ? atoi(e) : 0;
-  }
-  nr_gpu_poll_relax_us(t0, us);
-}
+static inline void nr_gpu_poll_relax(uint64_t *t0) { nr_gpu_poll_relax_us(t0, 200); }

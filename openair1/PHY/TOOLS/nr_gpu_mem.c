@@ -5,11 +5,11 @@
 #include <string.h>
 /* Uses the platform's dlopen'd runtime so libnr_gpu_platform keeps no CUDA link dependency. */
 enum { MEMCPY_H2D = 1, MEMCPY_D2H = 2, HOST_MAPPED_PORTABLE = 3 };
+static int g_force_discrete;
+void nr_gpu_mem_test_force_discrete(int on) { g_force_discrete = on; }
 nr_gpu_model_t nr_gpu_model(void)
 {
-  /* DEFERRED/DO NOT USE: ISAC_GPU_FORCE_DISCRETE not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *f = getenv("ISAC_GPU_FORCE_DISCRETE");
-  if (f && atoi(f)) return NR_GPU_MODEL_DISCRETE;
+  if (g_force_discrete) return NR_GPU_MODEL_DISCRETE;
   return nr_gpu_platform_shared_direct() ? NR_GPU_MODEL_DIRECT : NR_GPU_MODEL_DISCRETE;
 }
 int nr_gpu_buf_alloc(nr_gpu_buf_t *b, size_t bytes)

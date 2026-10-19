@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
-/* ULSTALL: ISAC_UL_STALL_DIAG=1 (default off) splits every slow UL GPU call (FEP or LDPC) into its parts:
+/* ULSTALL: splits every slow UL GPU call (FEP or LDPC) into its parts:
  *   launch  host time inside the launch call (driver lock / page-migration drain would show here),
  *   gpu     cudaEvent time between the stream reaching the call and its end (queue behind earlier work on the stream or
  *           partition + kernel run),
  *   wake    the rest: the host noticing completion late (poll sleep, preemption of the consumer),
  *   cpu / nivcsw / nvcsw  the calling thread's CPU time and context switches over the call (RUSAGE_THREAD): wall >> cpu with
  *           nivcsw > 0 is preemption, wall >> cpu with nvcsw only is the poll sleeps.
- * One "ULSTALL" line per call slower than ISAC_UL_STALL_US (default 2000), at most 400 per process. Header only, no GPU state. */
+ * One "ULSTALL" line per call slower than 2000 us, at most 400 per process. Header only, no GPU state. */
 #ifndef NR_PUSCH_GPU_DIAG_H
 #define NR_PUSCH_GPU_DIAG_H
 #include <stdint.h>
@@ -18,50 +18,23 @@
 #include "nr_gpu_green.h"
 #include <sys/resource.h>
 
-/* ISAC_UL_GPU_PRIO=1 (default off): the UL FEP / LDPC streams inside the discovery SM partition get the GREATEST stream priority
- * instead of the default one, so their blocks are placed before the pending blocks of CSI-RS discovery kernels sharing the
- * partition (priority orders pending blocks only; it never preempts a running block and never reaches the RT partition). */
-static inline bool nr_pusch_gpu_ul_prio_hi(void)
-{
-  static int v = -1;
-  if (v < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PRIO not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_UL_GPU_PRIO");
-    v = e && atoi(e) == 1;
-  }
-  return v == 1;
-}
-/* ISAC_UL_GPU_PART=disc|rt (default disc = the old behaviour): where the UL FEP / LDPC streams live.
- *   disc  the discovery SM partition (CSI-RS discovery's long kernels sit in it: 14-455 ms UL stalls MEASURED),
- *   rt    the real-time partition at the LEAST stream priority (DL streams outrank them; a running UL block is never preempted).
- * (A UL partition carved out of the real-time SMs was tried: the driver refuses the second split, rc 915.)
- * Returns 1 disc, 2 rt, 0 = no green context (the caller makes a plain lowest-priority stream). hi / lo = the device's
- * greatest / least stream priority. */
+/* Where the UL FEP / LDPC streams live: the real-time SM partition at the LEAST stream priority (DL streams outrank them; a
+ * running UL block is never preempted), else the discovery partition at the default priority, where CSI-RS discovery's long
+ * kernels caused 14-455 ms UL stalls (MEASURED). Returns 2 rt, 1 disc, 0 = no green context (the caller makes a plain stream). */
 static inline int nr_pusch_gpu_ul_stream(cudaStream_t *s, int hi, int lo, int idx)
 {
-  const char *e = getenv("ISAC_UL_GPU_PART");
-  if ((!e || !strcmp(e, "rt")) && nr_gpu_green_stream(s, lo, true, idx)) return 2;
-  return nr_gpu_green_stream(s, nr_pusch_gpu_ul_prio_hi() ? hi : 0, false) ? 1 : 0;
+  (void)hi;
+  if (nr_gpu_green_stream(s, lo, true, idx)) return 2;
+  return nr_gpu_green_stream(s, 0, false) ? 1 : 0;
 }
 namespace uldiag {
 struct Snap {
   uint64_t cpu_us = 0, ivcsw = 0, vcsw = 0;
 };
-static inline bool on()
-{
-  static int v = -1;
-  if (v < 0) {
-    const char *e = getenv("ISAC_UL_STALL_DIAG");
-    v = !e || atoi(e) == 1;
-  }
-  return v == 1;
-}
+static inline bool on() { return true; } /* shortcut: stall split always on; remove with its users in nr_pdsch_gpu_ldpc.cu */
 static inline uint64_t thr_us()
 {
-  /* DEFERRED/DO NOT USE: ISAC_UL_STALL_US not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *e = getenv("ISAC_UL_STALL_US");
-  static uint64_t us = e && atoi(e) > 0 ? (uint64_t)atoi(e) : 2000;
-  return us;
+  return 2000;
 }
 static inline Snap snap()
 {

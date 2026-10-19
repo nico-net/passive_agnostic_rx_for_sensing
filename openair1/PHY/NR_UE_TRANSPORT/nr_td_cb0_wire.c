@@ -16,50 +16,30 @@
 /* ---- configuration (read once) ---- */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER; /* scheduler, per-context table, configuration */
 static bool g_cfg_done;
-static int g_threads = 8, g_rank_max = 4;
-static bool g_tb_cpu = true, g_llr_scale, g_gpu_iters_over;
+static const int g_threads = 8, g_rank_max = 4;
+static double g_cpu_pct = 30; /* host CPU share cap of the token bucket (test hook: nr_td_cb0_wire_test_cpu_pct) */
+static bool g_autoreg = true;  /* test hook: false = never auto-register the CUDA CB0 adapter */
 static nr_td_cb0_sched_t g_sched;
 static bool g_dec_registered;
 static bool g_freeze; /* test hook: the cost estimates stay at their initial values */
 static bool g_unlimited; /* test hook: the token bucket admits every grant */
-
-static double env_d(const char *n, double dflt)
-{
-  const char *e = getenv(n);
-  return (e && *e) ? atof(e) : dflt;
-}
 
 static void cfg_locked(void)
 {
   if (g_cfg_done)
     return;
   g_cfg_done = true;
-  g_threads = (int)env_d("ISAC_TD_CB0_THREADS", 8);
-  if (g_threads < 1)
-    g_threads = 1;
-  g_rank_max = (int)env_d("ISAC_TD_CB0_RANK_MAX", 4);
-  /* DEFERRED/DO NOT USE: ISAC_TD_TB_CPU_WHILE_ACQ not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_tb_cpu = env_d("ISAC_TD_TB_CPU_WHILE_ACQ", 1) != 0;
-  /* the decode's own rule (nr_pdsch_passive_decode.c): ISAC_LLR_SCALE=<target mean |llr|> rescales iff atoi() > 0 (a
-   * target of 1 IS a rescale); every value the decode treats as active makes the grant inadmissible */
-  /* DEFERRED/DO NOT USE: ISAC_LLR_SCALE not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *ls = getenv("ISAC_LLR_SCALE");
-  g_llr_scale = ls != NULL && atoi(ls) > 0;
-  /* a GPU iteration cap (nr_td_cb0_gpu_iters) is dominance-proven only against the CPU TB decoder */
-  /* DEFERRED/DO NOT USE: ISAC_TD_CB0_GPU_ITERS not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *gi = getenv("ISAC_TD_CB0_GPU_ITERS");
-  g_gpu_iters_over = gi != NULL && atoi(gi) > 0;
   const long nc = sysconf(_SC_NPROCESSORS_ONLN);
-  nr_td_cb0_sched_init(&g_sched, env_d("ISAC_TD_CB0_BUDGET_US", NR_TD_CB0_BUDGET_US_DEFAULT), env_d("ISAC_TD_CB0_CPU_PCT", 30), nc > 0 ? (int)nc : 1, 8);
-  nr_td_cb0_sched_set_b(&g_sched, (int)env_d("ISAC_TD_CB0_B", NR_TD_CB0_B_DEFAULT));
+  nr_td_cb0_sched_init(&g_sched, NR_TD_CB0_BUDGET_US_DEFAULT, g_cpu_pct, nc > 0 ? (int)nc : 1, 8);
+  nr_td_cb0_sched_set_b(&g_sched, NR_TD_CB0_B_DEFAULT);
   LOG_A(PHY,
-        "SENSING: TD_CB0 wiring on: B=%d budget=%.0f us/grant cpu_pct=%.0f ncpu=%d threads=%d B0=%d rank_max=%d tb_cpu_while_acq=%d "
-        "backend=%d engine_wired=%d llr_scale=%d gpu_iters_cap=%d\n",
-        g_sched.b_target, g_sched.budget_us, g_sched.cpu_pct, g_sched.ncpu, g_threads, nr_td_cb0_sched_B(&g_sched), g_rank_max, g_tb_cpu,
-        nr_td_cb0_backend_mode(), nr_td_cb0a_engine_wired() ? 1 : 0, g_llr_scale, g_gpu_iters_over);
+        "SENSING: TD_CB0 wiring on: B=%d budget=%.0f us/grant cpu_pct=%.0f ncpu=%d threads=%d B0=%d rank_max=%d "
+        "backend=%d engine_wired=%d\n",
+        g_sched.b_target, g_sched.budget_us, g_sched.cpu_pct, g_sched.ncpu, g_threads, nr_td_cb0_sched_B(&g_sched), g_rank_max,
+        nr_td_cb0_backend_mode(), nr_td_cb0a_engine_wired() ? 1 : 0);
 }
 
-/* Backends: the CPU decoder, the worker threads and (unless ISAC_TD_CB0_BACKEND=cpu) the CUDA CB0 adapter, once. Done
+/* Backends: the CPU decoder, the worker threads and (unless the backend mode is cpu) the CUDA CB0 adapter, once. Done
  * BEFORE the first grant's TB-decoder decision (nr_td_cb0_wire_pre peeks at the backend the batch will use). */
 static void backends_locked(void)
 {
@@ -72,23 +52,18 @@ static void backends_locked(void)
   nr_td_cb0_set_threads(g_threads);
   /* GPU backend (td/cb0-gpu-entry): registered when libldpc_cuda.so has the CB0 entry and a device; auto / gpu then
    * use it with the CPU backend as the fallback (nr_td_cb0_exec failure rule + back-off) */
-  /* DEFERRED/DO NOT USE: ISAC_TD_CB0_GPU_AUTOREG not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *ar = getenv("ISAC_TD_CB0_GPU_AUTOREG"); /* 0: never auto-register (tests driving a stub CPU decoder) */
-  if (nr_td_cb0_backend_mode() != NR_TD_CB0_BE_CPU && !nr_td_cb0_gpu_backend_registered() && !(ar && atoi(ar) == 0)) {
+  if (nr_td_cb0_backend_mode() != NR_TD_CB0_BE_CPU && !nr_td_cb0_gpu_backend_registered() && g_autoreg) {
     const int reg = nr_td_cb0_gpu_register();
-    LOG_A(PHY, "SENSING: TD_CB0 GPU backend %s (ISAC_TD_CB0_BACKEND=%d)\n", reg ? "registered (CUDA CB0 entry)" : "not available, CPU only",
-          nr_td_cb0_backend_mode());
+    LOG_A(PHY, "SENSING: TD_CB0 GPU backend %s\n", reg ? "registered (CUDA CB0 entry)" : "not available, CPU only");
   }
 }
 
-/* nr_td_cb0_wire_warmup: one-time warm-up of the CB0 wire: enables the GPU backend (unless the backend mode is CPU or ISAC_TD_CB0_GPU_AUTOREG=0) and loads the configuration and the backends under the lock.
+/* nr_td_cb0_wire_warmup: one-time warm-up of the CB0 wire: enables the GPU backend (unless the backend mode is CPU) and loads the configuration and the backends under the lock.
  *   Caller: nr_pdcch_blind_monitor_rt.c (start-up, nr_dl_gpu_warmup path).
  */
 void nr_td_cb0_wire_warmup(void)
 {
-  /* DEFERRED/DO NOT USE: ISAC_TD_CB0_GPU_AUTOREG not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *ar = getenv("ISAC_TD_CB0_GPU_AUTOREG");
-  int enable = nr_td_cb0_backend_mode() != NR_TD_CB0_BE_CPU && !(ar && atoi(ar) == 0);
+  int enable = nr_td_cb0_backend_mode() != NR_TD_CB0_BE_CPU && g_autoreg;
   nr_td_cb0_gpu_warmup(enable);
   pthread_mutex_lock(&g_lock);
   cfg_locked();
@@ -224,7 +199,6 @@ bool nr_td_cb0_wire_pre(const nr_pdsch_sweep_ticket_t *t, nr_td_grantwork_t *gw,
   pthread_mutex_lock(&g_lock);
   cfg_locked();
   backends_locked();
-  const bool force_tb_cpu = g_tb_cpu, gpu_iters_cap = g_gpu_iters_over;
   pthread_mutex_unlock(&g_lock);
   nr_td_cb0a_set_t set = {.idx = p->aidx, .hyp = p->ahyp};
   if (!nr_td_cb0a_active_set(t, &set) || set.winner >= 0)
@@ -246,13 +220,11 @@ bool nr_td_cb0_wire_pre(const nr_pdsch_sweep_ticket_t *t, nr_td_grantwork_t *gw,
   if (!job->gw_on) {
     static _Atomic int s_warned;
     if (atomic_exchange(&s_warned, 1) == 0)
-      LOG_W(PHY, "SENSING: TD_CB0 CB0 elimination needs GrantWork (ISAC_TD_GRANTWORK=0 is set): refused (TB-only)\n");
+      LOG_W(PHY, "SENSING: TD_CB0 CB0 elimination needs GrantWork: refused (TB-only)\n");
     p->pre_reasons |= 1u << NR_TD_CB0_R_NO_GRANTWORK;
   } else if (gw == NULL && !job->gpu_job) {
     p->pre_reasons |= 1u << NR_TD_CB0_R_MEMBER_STALE; /* the GrantWork could not be created */
   }
-  if (g_llr_scale)
-    p->pre_reasons |= 1u << NR_TD_CB0_R_LLR_SCALE;
   if (p->pre_reasons)
     return true; /* known before decoding: no batch (the CPU is not spent on an inadmissible grant) */
   /* Hypothesis set: fixed here, before any decode of this grant (nr_td_cb0_sched.h, two-level hash subset). */
@@ -367,13 +339,12 @@ bool nr_td_cb0_wire_pre(const nr_pdsch_sweep_ticket_t *t, nr_td_grantwork_t *gw,
   p->batch = true;
   /* TB decoder (dominance): forced onto the CPU decoder ONLY for a grant whose CB0 batch will run (no pre-decode reason, not
    * budget-skipped, something to test) on the CPU backend -- a CPU CB0 batch dominates only a CPU TB. A CUDA CB0 batch
-   * dominates a CPU or a CUDA TB, so a grant headed for the GPU backend keeps the receiver's TB decoder, unless a GPU
-   * iteration cap (ISAC_TD_CB0_GPU_ITERS) is set: that cap is proven only against the CPU TB decoder. Grants without a
+   * dominates a CPU or a CUDA TB, so a grant headed for the GPU backend keeps the receiver's TB decoder. Grants without a
    * batch keep the receiver's TB decoder (no CPU spent on them). The prediction can be wrong (another consumer's GPU
    * failure starts the back-off before this batch runs): a CPU batch after a CUDA TB is then inadmissible (per grant:
-   * nr_td_cb0_admissibility DECODER; per epoch: the engine's dominance rule). ISAC_TD_TB_CPU_WHILE_ACQ=0 never forces. */
+   * nr_td_cb0_admissibility DECODER; per epoch: the engine's dominance rule). */
   if (tb_cpu)
-    *tb_cpu = force_tb_cpu && (gpu_iters_cap || nr_td_cb0_backend_peek() == NR_TD_CB0_BE_CPU);
+    *tb_cpu = nr_td_cb0_backend_peek() == NR_TD_CB0_BE_CPU;
   return true;
 }
 
@@ -503,7 +474,6 @@ void nr_td_cb0_wire_feed(const nr_pdsch_sweep_ticket_t *t, const nr_td_cb0_tb_t 
                              .iq_ok_after = tb->iq_ok_after,
                              .gw_flags = p->gw_flags,
                              .rv = tb->rv,
-                             .llr_scale = g_llr_scale,
                              .gpu_llr = false,
                              .member_error = p->member_error,
                              .backend_failed = p->backend_failed || !p->ran,
@@ -657,6 +627,20 @@ void nr_td_cb0_wire_test_unlimited(bool on)
 {
   pthread_mutex_lock(&g_lock);
   g_unlimited = on;
+  pthread_mutex_unlock(&g_lock);
+}
+
+void nr_td_cb0_wire_test_cpu_pct(double pct)
+{
+  pthread_mutex_lock(&g_lock);
+  g_cpu_pct = pct;
+  pthread_mutex_unlock(&g_lock);
+}
+
+void nr_td_cb0_wire_test_autoreg(bool on)
+{
+  pthread_mutex_lock(&g_lock);
+  g_autoreg = on;
   pthread_mutex_unlock(&g_lock);
 }
 

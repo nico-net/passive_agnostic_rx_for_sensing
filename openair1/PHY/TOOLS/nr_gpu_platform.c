@@ -14,7 +14,7 @@ enum { GPU_ERROR=1, GPU_NO_MEMORY=2, GPU_NOT_READY=600 };
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static nr_gpu_runtime_t rt;
 static nr_gpu_caps_t caps;
-static int probed, sealed, managed, warned_late;
+static int probed, sealed, warned_late;
 static uint64_t allocations, denied;
 static void (*logger)(int, const char *);
 typedef struct allocation {
@@ -48,28 +48,24 @@ void nr_gpu_set_logger(void (*fn)(int, const char *))
   logger = fn;
   pthread_mutex_unlock(&mu);
 }
-/* nr_gpu_choose_model: selects the memory model from the probed capabilities and an override string ("auto", "shared" or "discrete"; unknown values give NONE).
- *   Auto chooses SHARED for integrated devices or devices with pageable memory access and host page tables, else DISCRETE. Returns NR_GPU_NONE when the device is unavailable.
+/* nr_gpu_choose_model: selects the memory model from the probed capabilities.
+ *   Chooses SHARED for integrated devices or devices with pageable memory access and host page tables, else DISCRETE. Returns NR_GPU_NONE when the device is unavailable.
  */
-nr_gpu_platform_model_t nr_gpu_choose_model(const nr_gpu_caps_t *c, const char *override)
+nr_gpu_platform_model_t nr_gpu_choose_model(const nr_gpu_caps_t *c)
 {
   if (!c || !c->available) return NR_GPU_NONE;
-  if (!override || !strcmp(override, "auto"))
-    return c->integrated || (c->pageable_memory_access && c->host_page_tables) ? NR_GPU_SHARED : NR_GPU_DISCRETE;
-  if (!strcmp(override, "shared")) return NR_GPU_SHARED;
-  if (!strcmp(override, "discrete")) return NR_GPU_DISCRETE;
-  return NR_GPU_NONE;
+  return c->integrated || (c->pageable_memory_access && c->host_page_tables) ? NR_GPU_SHARED : NR_GPU_DISCRETE;
 }
-/* nr_gpu_storage: maps a buffer kind (device, staging or shared read-write) to the allocation type for the model: device memory, mapped host memory, or managed memory when use_managed is set.
+/* nr_gpu_storage: maps a buffer kind (device, staging or shared read-write) to the allocation type for the model: device memory or mapped host memory.
  *   Only the SHARED model allocates; any other model returns NR_GPU_ALLOC_UNAVAILABLE. Used by nr_gpu_alloc().
  */
-nr_gpu_storage_t nr_gpu_storage(nr_gpu_platform_model_t model, nr_gpu_kind_t kind, int use_managed)
+nr_gpu_storage_t nr_gpu_storage(nr_gpu_platform_model_t model, nr_gpu_kind_t kind)
 {
   if (model != NR_GPU_SHARED) return NR_GPU_ALLOC_UNAVAILABLE;
   switch (kind) {
     case NR_GPU_DEVICE: return NR_GPU_ALLOC_DEVICE;
     case NR_GPU_STAGING: return NR_GPU_ALLOC_MAPPED;
-    case NR_GPU_SHARED_RW: return use_managed ? NR_GPU_ALLOC_MANAGED : NR_GPU_ALLOC_MAPPED;
+    case NR_GPU_SHARED_RW: return NR_GPU_ALLOC_MAPPED;
   }
   return NR_GPU_ALLOC_UNAVAILABLE;
 }
@@ -117,7 +113,7 @@ static int load_runtime(void)
 #define LOAD(field, symbol) do { *(void **)(&rt.field)=dlsym(h, symbol); if (!rt.field) return 0; } while (0)
   LOAD(get_count,"cudaGetDeviceCount"); LOAD(get_device,"cudaGetDevice");
   LOAD(attribute,"cudaDeviceGetAttribute"); LOAD(mem_info,"cudaMemGetInfo");
-  LOAD(malloc_device,"cudaMalloc"); LOAD(malloc_host,"cudaHostAlloc"); LOAD(malloc_managed,"cudaMallocManaged");
+  LOAD(malloc_device,"cudaMalloc"); LOAD(malloc_host,"cudaHostAlloc");
   LOAD(free_device,"cudaFree"); LOAD(free_host,"cudaFreeHost"); LOAD(host_device_ptr,"cudaHostGetDevicePointer");
   LOAD(register_host,"cudaHostRegister"); LOAD(unregister_host,"cudaHostUnregister");
   LOAD(copy_async,"cudaMemcpyAsync"); LOAD(stream_sync,"cudaStreamSynchronize"); LOAD(device_sync,"cudaDeviceSynchronize");
@@ -135,7 +131,7 @@ static int attribute(int attr)
   }
   return value;
 }
-/* probe_locked: probes the GPU once (caller holds mu): loads the runtime, selects device 0, reads its capabilities, chooses the memory model (ISAC_GPU_MEMORY_MODEL) and the managed-memory option (ISAC_GPU_SHARED_MANAGED).
+/* probe_locked: probes the GPU once (caller holds mu): loads the runtime, selects device 0, reads its capabilities, chooses the memory model.
  *   Logs the device summary, a warning for DISCRETE (not implemented) and for an unusable shared model. Sets caps.available = 0 when the probe fails.
  */
 static void probe_locked(void)
@@ -167,15 +163,11 @@ static void probe_locked(void)
   }
 #endif
 finish:
-  /* DEFERRED/DO NOT USE: ISAC_GPU_MEMORY_MODEL not in the frozen config t26zE (2026-10-18); slated for removal */
-  caps.model=nr_gpu_choose_model(&caps,getenv("ISAC_GPU_MEMORY_MODEL"));
-  /* DEFERRED/DO NOT USE: ISAC_GPU_SHARED_MANAGED not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *opt=getenv("ISAC_GPU_SHARED_MANAGED");
-  managed=opt && !strcmp(opt,"1");
-  report(0,"SENSING: GPU_PLATFORM device=%d name=\"%s\" cc=%d.%d integrated=%d pageableMemoryAccess=%d pageableMemoryAccessUsesHostPageTables=%d canMapHostMemory=%d concurrentManagedAccess=%d hostNativeAtomicSupported=%d total=%zu free=%zu model=%s managed=%d",
+  caps.model=nr_gpu_choose_model(&caps);
+  report(0,"SENSING: GPU_PLATFORM device=%d name=\"%s\" cc=%d.%d integrated=%d pageableMemoryAccess=%d pageableMemoryAccessUsesHostPageTables=%d canMapHostMemory=%d concurrentManagedAccess=%d hostNativeAtomicSupported=%d total=%zu free=%zu model=%s",
          caps.device,caps.name,caps.major,caps.minor,caps.integrated,caps.pageable_memory_access,caps.host_page_tables,
          caps.can_map_host_memory,caps.concurrent_managed_access,caps.host_native_atomic_supported,caps.total_memory,caps.free_memory,
-         caps.model==NR_GPU_SHARED?"shared":caps.model==NR_GPU_DISCRETE?"discrete":"unavailable",managed);
+         caps.model==NR_GPU_SHARED?"shared":caps.model==NR_GPU_DISCRETE?"discrete":"unavailable");
   if (caps.model==NR_GPU_DISCRETE)
     report(1,"SENSING: GPU_PLATFORM DISCRETE backend is not implemented (phase 2); GPU paths use CPU fallback");
   else if (caps.model!=NR_GPU_SHARED || !caps.can_map_host_memory || !caps.unified_addressing)
@@ -242,7 +234,7 @@ static allocation *lookup(void *ptr)
   for (allocation *a=live;a;a=a->next) if (a->host==ptr) return a;
   return NULL;
 }
-/* nr_gpu_alloc: allocates a buffer of the given kind and size for the platform's model: device memory, mapped pinned host memory (with its device pointer) or managed memory.
+/* nr_gpu_alloc: allocates a buffer of the given kind and size for the platform's model: device memory, or mapped pinned host memory (with its device pointer).
  *   Returns the host pointer (use nr_gpu_device_ptr() for the device side), or NULL when denied, unavailable or out of memory. Tracked in the live list for nr_gpu_free().
  */
 void *nr_gpu_alloc(nr_gpu_kind_t kind,size_t bytes)
@@ -252,12 +244,11 @@ void *nr_gpu_alloc(nr_gpu_kind_t kind,size_t bytes)
   if (!allowed_locked() || !bytes) goto done;
   probe_locked();
   if (!caps.available || !caps.can_map_host_memory || !caps.unified_addressing) goto done;
-  nr_gpu_storage_t storage=nr_gpu_storage(caps.model,kind,managed);
-  if (!storage || (storage==NR_GPU_ALLOC_MANAGED && !caps.concurrent_managed_access)) goto done;
+  nr_gpu_storage_t storage=nr_gpu_storage(caps.model,kind);
+  if (!storage) goto done;
   allocation *a=calloc(1,sizeof(*a));
   if (!a) goto done;
-  int rc=storage==NR_GPU_ALLOC_DEVICE ? rt.malloc_device(&p,bytes) :
-         storage==NR_GPU_ALLOC_MANAGED ? rt.malloc_managed(&p,bytes,1) : rt.malloc_host(&p,bytes,3);
+  int rc=storage==NR_GPU_ALLOC_DEVICE ? rt.malloc_device(&p,bytes) : rt.malloc_host(&p,bytes,3);
   if (rc) { free(a); p=NULL; goto done; }
   a->device=p;
   if (storage==NR_GPU_ALLOC_MAPPED && rt.host_device_ptr(&a->device,p,0)) {
@@ -348,6 +339,6 @@ void nr_gpu_test_reset(const nr_gpu_runtime_t *runtime)
   /* Test-only; caller has joined all users and released allocations first. */
   while (live) { allocation *a=live; live=a->next; free(a); }
   rt=*runtime; memset(&caps,0,sizeof(caps));
-  probed=sealed=managed=warned_late=0; allocations=denied=0;
+  probed=sealed=warned_late=0; allocations=denied=0;
 }
 #endif

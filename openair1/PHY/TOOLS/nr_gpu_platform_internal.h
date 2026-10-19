@@ -10,7 +10,6 @@ typedef struct {
   int (*mem_info)(size_t *, size_t *);
   int (*malloc_device)(void **, size_t);
   int (*malloc_host)(void **, size_t, unsigned);
-  int (*malloc_managed)(void **, size_t, unsigned);
   int (*free_device)(void *);
   int (*free_host)(void *);
   int (*host_device_ptr)(void **, void *, unsigned);

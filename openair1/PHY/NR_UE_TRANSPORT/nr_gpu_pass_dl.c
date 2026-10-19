@@ -38,8 +38,8 @@ static struct {
   nr_gpu_pass_hq_copy_fn hq_copy[2]; /* the HARQ soft store: [0] host to device, [1] device to host */
   void (*call_begin)(void), (*call_end)(void), (*call_dirty)(void); /* v2 Task 4: the module's held-instance calls (ISAC_PDSCH_GPU_GRAPH_RETRY) */
   _Atomic int on;
-  int nbrx, check, fp32; /* fp32: Task 5, the graphs run the FP32 demod (ISAC_GPU_PASS_FP32 / sm_89) */
-  int v2;                /* DL GPU data path v2 (ISAC_PDSCH_GPU_GRAPH=1 without ISAC_GPU_PASS=1): the census is GPUGRAPH, the pool serves late threads */
+  int nbrx, check, fp32; /* fp32: Task 5, the graphs run the FP32 demod (nr_gpu_pass_fp32_default) */
+  int v2;                /* DL GPU data path v2 : the census is GPUGRAPH, the pool serves late threads */
   _Atomic uint64_t fb[FB_N], ev[NR_GPU_PASS_EV_N], gate[NR_GPU_PASS_GATE_N], runs, shadow_n, shadow_fn;
   _Atomic uint64_t why[WHY_N]; /* transport blocks kept off the pass, by reason (the tbparam fallback split) */
   _Atomic uint64_t segn[8]; /* segmented grants that reached the pass, by segment-count class 1, 2, 4, 8, 16, 32, 64, 128 */
@@ -64,8 +64,8 @@ void nr_gpu_graph_call_dirty(void)
   if (G.call_dirty && nr_gpu_graph_flag("RETRY"))
     G.call_dirty();
 }
-/* the sub-flags, read once at warm-up (nr_gpu_graph_flag runs per grant) */
-static const char *const g_sub_name[] = {"COVER", "SPLIT", "RETRY", "SLOT", "LEAN", "DMRS2", "SEG128"};
+/* the sub-features, set once at warm-up (nr_gpu_graph_flag runs per grant) */
+static const char *const g_sub_name[] = {"COVER", "SPLIT", "RETRY", "DMRS2", "SEG128"};
 static int g_sub_on[sizeof(g_sub_name) / sizeof(g_sub_name[0])];
 int nr_gpu_graph_flag(const char *sub)
 {
@@ -210,50 +210,6 @@ static int fb(int why)
   return 1;
 }
 
-/* flags whose host paths the pass does not reproduce: any of them set = the pass stays off for the run (logged) */
-static const char *incompatible_env(void)
-{
-  /* DEFERRED/DO NOT USE: ISAC_CHEST_OCC not in the frozen config t26zE (2026-10-18); slated for removal */
-  /* DEFERRED/DO NOT USE: ISAC_CHEST_TINTERP not in the frozen config t26zE (2026-10-18); slated for removal */
-  /* DEFERRED/DO NOT USE: ISAC_DMRS_FO_APPLY not in the frozen config t26zE (2026-10-18); slated for removal */
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_EVM not in the frozen config t26zE (2026-10-18); slated for removal */
-  /* DEFERRED/DO NOT USE: ISAC_RX_IRC not in the frozen config t26zE (2026-10-18); slated for removal */
-  /* DEFERRED/DO NOT USE: ISAC_SFO_CORRECT not in the frozen config t26zE (2026-10-18); slated for removal */
-  static const char *const nz[] = {"ISAC_PDSCH_EVM", "ISAC_SFO_CORRECT", "ISAC_DMRS_FO_APPLY", "ISAC_CHEST_OCC", "ISAC_RX_IRC", "ISAC_CHEST_TINTERP",
-                                   /* DEFERRED/DO NOT USE: ISAC_DC_FIX not in the frozen config t26zE (2026-10-18); slated for removal */
-                                   /* DEFERRED/DO NOT USE: ISAC_LLR_SCALE not in the frozen config t26zE (2026-10-18); slated for removal */
-                                   /* DEFERRED/DO NOT USE: ISAC_PDSCH_ANT_GATE not in the frozen config t26zE (2026-10-18); slated for removal */
-                                   /* DEFERRED/DO NOT USE: ISAC_PDSCH_LLR_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
-                                   /* DEFERRED/DO NOT USE: ISAC_PDSCH_RM_GENIE not in the frozen config t26zE (2026-10-18); slated for removal */
-                                   /* DEFERRED/DO NOT USE: ISAC_RX_BRANCH_FO not in the frozen config t26zE (2026-10-18); slated for removal */
-                                   "ISAC_DC_FIX", "ISAC_PDSCH_ANT_GATE", "ISAC_LLR_SCALE", "ISAC_PDSCH_RM_GENIE", "ISAC_PDSCH_LLR_DUMP", "ISAC_RX_BRANCH_FO",
-                                   /* DEFERRED/DO NOT USE: ISAC_MMSE2_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
-                                   /* DEFERRED/DO NOT USE: ISAC_PDSCH_MMSE_AB not in the frozen config t26zE (2026-10-18); slated for removal */
-                                   /* DEFERRED/DO NOT USE: ISAC_PDSCH_OWN_PDCCH_RM not in the frozen config t26zE (2026-10-18); slated for removal */
-                                   /* DEFERRED/DO NOT USE: ISAC_TD_TB_CPU_WHILE_ACQ not in the frozen config t26zE (2026-10-18); slated for removal */
-                                   "ISAC_PDSCH_MMSE_AB", "ISAC_MMSE2_DIAG", "ISAC_PDSCH_OWN_PDCCH_RM", "ISAC_TD_TB_CPU_WHILE_ACQ"};
-  for (size_t i = 0; i < sizeof(nz) / sizeof(nz[0]); i++) {
-    const char *e = getenv(nz[i]);
-    if (e && atoi(e) != 0)
-      return nz[i];
-  }
-  /* DEFERRED/DO NOT USE: ISAC_LLR_NORM not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *e = getenv("ISAC_LLR_NORM");
-  (void)e;
-  return NULL;
-}
-
-static int env_list(const char *name, const char *dflt, int *v, int max)
-{
-  const char *e = getenv(name);
-  char buf[64];
-  snprintf(buf, sizeof(buf), "%s", e && *e ? e : dflt);
-  int n = 0;
-  for (char *s = strtok(buf, ","); s && n < max; s = strtok(NULL, ","))
-    v[n++] = atoi(s);
-  return n;
-}
-
 /* The demod variants (qam_mode of nl >= 2, align of nl = 1) the receiver can ask of a pass for nl layers: the per-RNTI receiver choice (nr_pdsch_passive_queue.c: mrc_mode 0..6 sets the MRC / IRC overrides) and
  * the modulation order both change them, so a class is warmed for every one the policy can produce, not only for the default receiver. v[i] = {qmode, align}. */
 static int demod_variants(PHY_VARS_NR_UE *ue, int nl, int v[16][2])
@@ -316,36 +272,15 @@ static void warm_contiguous(nr_gpu_pass_warm_fn warmf, PHY_VARS_NR_UE *ue, int n
 
 void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
 {
-  /* DEFERRED/DO NOT USE: ISAC_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *e = getenv("ISAC_GPU_PASS");
-  const char *eg = (getenv("ISAC_PDSCH_GPU_GRAPH") ?: "1");
-  int dl_on = e && atoi(e) == 1;
-  const int ul_on = 1; /* Fix A+D: the PUSCH pass (Task 7) is THE UL path (its own instance pool); grants outside its scope fall back, counted */
-  if (eg && atoi(eg) == 1) { /* v2: the same module in v2 mode; never together with v1 */
-    if (dl_on)
-      LOG_W(PHY, "SENSING: GPUGRAPH refused: ISAC_GPU_PASS=1 (v1) is set; v2 off, v1 runs\n");
-    else
-      dl_on = G.v2 = 1;
-    for (size_t i = 0; i < sizeof(g_sub_name) / sizeof(g_sub_name[0]); i++) {
-      char n[64];
-      snprintf(n, sizeof(n), "ISAC_PDSCH_GPU_GRAPH_%s", g_sub_name[i]);
-      /* baked default on: COVER, SPLIT, RETRY, DMRS2, SEG128 (the others stay off) */
-      const char *v = getenv(n) ?: (i == 0 || i == 1 || i == 2 || i == 5 || i == 6 ? "1" : NULL);
-      g_sub_on[i] = G.v2 && v && atoi(v) == 1;
-    }
-    g_sub_on[2] &= g_sub_on[1]; /* review S2: RETRY needs SPLIT (its D entry is a split launch) */
-    g_sub_on[5] &= g_sub_on[1]; /* DMRS2 (DM-RS type 2 in the pass) needs SPLIT */
-    g_sub_on[6] &= g_sub_on[1]; /* SEG128 (the 64- and 128-segment classes, C in chunks) needs SPLIT */
-  }
-  if ((!dl_on && !ul_on) || !ue)
+  if (!ue)
     return;
+  G.v2 = 1; /* the DL pass is the v2 graph module; its sub-features COVER, SPLIT, RETRY, DMRS2 and SEG128 are all on */
+  for (size_t i = 0; i < sizeof(g_sub_name) / sizeof(g_sub_name[0]); i++)
+    g_sub_on[i] = 1;
+  g_sub_on[2] &= g_sub_on[1]; /* RETRY needs SPLIT (its D entry is a split launch) */
+  g_sub_on[3] &= g_sub_on[1]; /* DMRS2 (DM-RS type 2 in the pass) needs SPLIT */
+  g_sub_on[4] &= g_sub_on[1]; /* SEG128 (the 64- and 128-segment classes, C in chunks) needs SPLIT */
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-  const char *bad = dl_on ? incompatible_env() : NULL;
-  if (bad) {
-    LOG_W(PHY, "SENSING: GPUPASS requested but %s is set (a host path the pass does not reproduce): off\n", bad);
-    if (!ul_on)
-      return;
-  }
   if (fp->ofdm_symbol_size != 4096 || fp->symbols_per_slot != 14 || fp->nb_antennas_rx < 1 || fp->nb_antennas_rx > 4) {
     LOG_W(PHY, "SENSING: GPUPASS needs N = 4096, 14 symbols, <= 4 RX: off\n");
     return;
@@ -372,7 +307,6 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   }
   nr_gpu_pass_cfg_t c = {.nbRx = fp->nb_antennas_rx, .n_rb_dl = fp->N_RB_DL, .delay_table = (const int16_t *)fp->delay_table[0],
                          .dt_stride = NR_MAX_OFDM_SYMBOL_SIZE, .max_delay_comp = MAX_DELAY_COMP, .v2 = G.v2, .split = G.v2 && g_sub_on[1],
-                         /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_GRAPH_MB not in the frozen config t26zE (2026-10-18); slated for removal */
                          .split_mb = 0 /* default cap, nr_gpu_pass_graph.cu */};
   if (nr_gpu_model() == NR_GPU_MODEL_DISCRETE) { /* the graphs read the delay table on the device */
     static nr_gpu_buf_t dt;
@@ -391,25 +325,20 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   }
   int (*split_on)(void) = (int (*)(void))dlsym(h, "nr_gpu_pass_split_on");
   if (c.split && split_on && !split_on()) { /* review S5: the instances alone reach the memory cap */
-    LOG_E(PHY, "SENSING: GPUGRAPH: the pass instances alone reach ISAC_PDSCH_GPU_GRAPH_MB=%d: ISAC_PDSCH_GPU_GRAPH_SPLIT (and RETRY) off\n", c.split_mb);
+    LOG_E(PHY, "SENSING: GPUGRAPH: the pass instances alone reach the graph memory cap (%d MB): SPLIT (and RETRY) off\n", c.split_mb);
     c.split = 0;
-    g_sub_on[1] = g_sub_on[2] = g_sub_on[5] = g_sub_on[6] = 0;
+    g_sub_on[1] = g_sub_on[2] = g_sub_on[3] = g_sub_on[4] = 0;
   }
-  if (!dl_on || bad) { /* the PUSCH pass alone */
-    nr_gpu_pass_ul_warm(h, fp->nb_antennas_rx, G.fp32);
-    return;
-  }
-  /* the class list: PRB classes x layers x the code block counts that can occur x DM-RS symbol counts, in the order of expected use, up to ISAC_GPU_PASS_CLASSES */
-  int nd[4], nnd = env_list("ISAC_GPU_PASS_NDMRS", "3,2", nd, 4); /* segmented classes: 2 and 3 DM-RS symbols (1 and 4 would double their C sub-graphs, ~0.5 GB of graph memory on top of the 2 GB cap; counted as unseen) */
-  /* DEFERRED/DO NOT USE: ISAC_GPU_PASS_CLASSES not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *ce = getenv("ISAC_GPU_PASS_CLASSES");
-  const int budget = ce ? atoi(ce) : c.split ? 1 << 20 : 512; /* split: every class of the loops (sub-graphs are shared between classes; the module's memory cap bounds them) */
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_DECODE_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
-  const int evm = ((getenv("ISAC_PDSCH_EVM_GRANT") ?: "1") || (getenv("ISAC_PDSCH_SNR_GATE") ?: "1") || (getenv("ISAC_PDSCH_DECODE_DIAG") && atoi(getenv("ISAC_PDSCH_DECODE_DIAG")) != 0)) ? 1 : 0;
+  /* the class list: PRB classes x layers x the code block counts that can occur x DM-RS symbol counts, in the order of expected use */
+  static const int nd[] = {3, 2}; /* segmented classes: 2 and 3 DM-RS symbols (1 and 4 would double their C sub-graphs, ~0.5 GB of graph memory on top of the 2 GB cap; counted as unseen) */
+  const int nnd = 2;
+  const int budget = c.split ? 1 << 20 : 512; /* split: every class of the loops (sub-graphs are shared between classes; the module's memory cap bounds them) */
+  const int evm = 1;
   int made = 0, failed = 0;
   /* contiguous classes with 3, 2 and 1 DM-RS symbols (only C keys are added for the later counts: the D and L sub-graphs are shared; tim replay: 224-260 unseen grants per run had ndmrs 1); 4 DM-RS symbols (additional
    * position 3, rare) are warmed last, after the segmented classes, so that a small GPU's memory cap cuts them first */
-  int ndc[4], nndc = env_list("ISAC_GPU_PASS_NDMRS", c.split ? "3,2,1" : "3,2", ndc, 4);
+  static const int ndc[] = {3, 2, 1};
+  const int nndc = c.split ? 3 : 2;
   warm_contiguous(warmf, ue, fp->nb_antennas_rx, ndc, nndc, budget, evm, &made, &failed);
   /* transport blocks below ~700 bits (Z not a multiple of 4: one code block) run the generic LDPC kernel: its own L sub-graph per class (nz4), the C and D ones are shared */
   if (c.split)
@@ -428,13 +357,11 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
         }
       }
   /* segmented (PRG / VRB-bundle) classes: segment-count classes 1, 2, 4, 8, 16 (32: split) on top of the contiguous ones. Own budget
-   * (ISAC_GPU_PASS_SEG_CLASSES, default 1400): the passes with the widest grants are warmed first; a segmented grant of an unwarmed class stays on the old path (unseen). */
-  /* DEFERRED/DO NOT USE: ISAC_GPU_PASS_SEG_CLASSES not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *se = getenv("ISAC_GPU_PASS_SEG_CLASSES");
-  const int sbudget = se ? atoi(se) : c.split ? 1 << 20 : 1400;
+   * (1400 without split): the passes with the widest grants are warmed first; a segmented grant of an unwarmed class stays on the old path (unseen). */
+  const int sbudget = c.split ? 1 << 20 : 1400;
   int smade = 0;
   static const int segc[] = {1, 2, 4, 8, 16, 32, 64, 128}, segnl[] = {1, 2, 3, 4};
-  const int nsegc = c.split ? (g_sub_on[6] ? 8 : 6) : 5, segrows = c.split ? 1024 : 512; /* split: the 32-segment class and the module's 1024 chest rows; SEG128: 64, 128 in C chunks */
+  const int nsegc = c.split ? (g_sub_on[4] ? 8 : 6) : 5, segrows = c.split ? 1024 : 512; /* split: the 32-segment class and the module's 1024 chest rows; SEG128: 64, 128 in C chunks */
   if (G.stats) {
     char buf[1024];
     G.stats(buf, sizeof(buf));
@@ -481,8 +408,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     G.stats(buf, sizeof(buf));
     LOG_A(PHY, "SENSING: %s\n", buf);
   }
-  if (ul_on)
-    nr_gpu_pass_ul_warm(h, fp->nb_antennas_rx, G.fp32);
+  nr_gpu_pass_ul_warm(h, fp->nb_antennas_rx, G.fp32); /* the PUSCH pass (Fix A+D) is THE UL path, its own instance pool; grants outside its scope fall back, counted */
 }
 
 /* per-grant on-air breakdown of the last DL pass of this thread, printed and zeroed by the EVMGRANT line (gp=): total, before try, try, prep, launch, gstart, gspan (us);

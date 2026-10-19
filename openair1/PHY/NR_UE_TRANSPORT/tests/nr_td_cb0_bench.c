@@ -72,7 +72,6 @@ int main(int argc, char **argv)
 {
   const int T = argc > 1 ? atoi(argv[1]) : 8;
   const double secs = argc > 2 ? atof(argv[2]) : 1.0;
-  setenv("LDPC_CUDA_WARMUP_ITERS", "4", 0); /* pre-capture the 2 x 4 = 8 iteration graphs too */
   cb0_fx_init();
   const int gpu = nr_td_cb0_use_gpu(1);
   const int cuda = nr_td_cb0_use_cuda_ldpc(1);

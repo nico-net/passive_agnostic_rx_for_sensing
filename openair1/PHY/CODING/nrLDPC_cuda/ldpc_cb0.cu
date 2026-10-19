@@ -390,7 +390,7 @@ struct Slot {
 struct Ctx {
   int state = -1; /* -1 not initialised, 0 unusable, 1 ready */
   int mode = MODE_NONE, integrated = 0, cma = 0;
-  int cap = 2048, nslots = 3, chunk_cfg = 0;
+  int cap = 2048, nslots = 3;
   size_t l2 = 0;
   cudaStream_t s = nullptr, s_copy = nullptr;
   int8_t *chan = nullptr, *total = nullptr, *msg = nullptr;
@@ -401,7 +401,6 @@ struct Ctx {
   size_t msg_bytes = 0;
   Slot slot[MAX_SLOTS];
   std::map<uint64_t, cudaGraphExec_t> graphs;
-  bool use_graph = true;
 };
 Ctx g;
 pthread_mutex_t g_init_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -424,14 +423,6 @@ long long mono_ns()
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
-}
-
-int env_int(const char* a, const char* b, int def)
-{
-  const char* e = getenv(a);
-  if ((!e || !*e) && b)
-    e = getenv(b);
-  return e && *e ? atoi(e) : def;
 }
 
 /* x^k mod g for k < CRC_MAX_BITS; g = x^L + low (OAI's top-aligned 32-bit polynomials, crc_byte.c) */
@@ -515,34 +506,6 @@ int init_locked()
     pthread_cond_init(&g_state_cv, &at);
     pthread_condattr_destroy(&at);
   }
-  /* DEFERRED/DO NOT USE: LDPC_CB0_TIMEOUT_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  /* DEFERRED/DO NOT USE: LDPC_CUDA_TIMEOUT_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_timeout_ms = env_int("LDPC_CB0_TIMEOUT_MS", "LDPC_CUDA_TIMEOUT_MS", 200);
-  if (g_timeout_ms <= 0) g_timeout_ms = 200;
-  /* DEFERRED/DO NOT USE: LDPC_CB0_TIMEOUT_US_PER_ITEM not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_timeout_us_item = env_int("LDPC_CB0_TIMEOUT_US_PER_ITEM", nullptr, 100);
-  if (g_timeout_us_item < 0) g_timeout_us_item = 100;
-  /* DEFERRED/DO NOT USE: LDPC_CB0_BREAKER_N not in the frozen config t26zE (2026-10-18); slated for removal */
-  /* DEFERRED/DO NOT USE: LDPC_CUDA_BREAKER_N not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_breaker_n = env_int("LDPC_CB0_BREAKER_N", "LDPC_CUDA_BREAKER_N", 4);
-  if (g_breaker_n <= 0) g_breaker_n = 4;
-  /* DEFERRED/DO NOT USE: LDPC_CB0_BREAKER_S not in the frozen config t26zE (2026-10-18); slated for removal */
-  /* DEFERRED/DO NOT USE: LDPC_CUDA_BREAKER_S not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_breaker_ms = env_int("LDPC_CB0_BREAKER_S", "LDPC_CUDA_BREAKER_S", 5) * 1000;
-  if (g_breaker_ms <= 0) g_breaker_ms = 5000;
-  /* DEFERRED/DO NOT USE: LDPC_CB0_TEST_INJECT not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_inject = env_int("LDPC_CB0_TEST_INJECT", nullptr, 0);
-  /* DEFERRED/DO NOT USE: LDPC_CB0_TEST_STALL_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_stall_ms = env_int("LDPC_CB0_TEST_STALL_MS", nullptr, 0);
-  /* DEFERRED/DO NOT USE: LDPC_CB0_MAX_ITEMS not in the frozen config t26zE (2026-10-18); slated for removal */
-  g.cap = std::min(std::max(env_int("LDPC_CB0_MAX_ITEMS", nullptr, 2048), 1), 65536);
-  /* DEFERRED/DO NOT USE: LDPC_CB0_SLOTS not in the frozen config t26zE (2026-10-18); slated for removal */
-  g.nslots = std::min(std::max(env_int("LDPC_CB0_SLOTS", nullptr, 3), 1), MAX_SLOTS);
-  /* DEFERRED/DO NOT USE: LDPC_CB0_CHUNK not in the frozen config t26zE (2026-10-18); slated for removal */
-  g.chunk_cfg = env_int("LDPC_CB0_CHUNK", nullptr, 0);
-  /* DEFERRED/DO NOT USE: LDPC_CB0_GRAPH not in the frozen config t26zE (2026-10-18); slated for removal */
-  /* DEFERRED/DO NOT USE: LDPC_CUDA_GRAPH not in the frozen config t26zE (2026-10-18); slated for removal */
-  g.use_graph = env_int("LDPC_CB0_GRAPH", "LDPC_CUDA_GRAPH", 1) != 0;
 
   ldpc_cuda_bg_t bg;
   if (ldpc_cuda_basegraph(1, 384, &bg) != 0) /* tables first: platform probe configures the context */
@@ -555,20 +518,13 @@ int init_locked()
   g.cma = caps->concurrent_managed_access;
   if (cudaDeviceGetAttribute(&v, cudaDevAttrL2CacheSize, dev) == cudaSuccess)
     g.l2 = (size_t)v;
-  /* UNIFIED only on an integrated GPU: a discrete GPU with HMM also reports pageable access, but every access
-   * would then cross PCIe. LDPC_CB0_MEM=explicit forces the copy path (tests on GB10). */
-  /* DEFERRED/DO NOT USE: LDPC_CB0_MEM not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char* me = getenv("LDPC_CB0_MEM");
-  int mode = MODE_EXPLICIT; /* bounded staged copies, including on coherent GB10 */
-  if (me && !strcmp(me, "explicit"))
-    mode = MODE_EXPLICIT;
+  /* a discrete GPU with HMM also reports pageable access, but every UNIFIED access would then cross PCIe: always the staged copies */
+  const int mode = MODE_EXPLICIT; /* bounded staged copies, including on coherent GB10 */
   int lo = 0, hi = 0;
   cudaDeviceGetStreamPriorityRange(&lo, &hi); /* lo = numerically greatest = lowest priority: TB decodes go first */
   if (cudaStreamCreateWithPriority(&g.s, cudaStreamNonBlocking, lo) != cudaSuccess
       || cudaStreamCreateWithPriority(&g.s_copy, cudaStreamNonBlocking, lo) != cudaSuccess)
     return 0;
-  /* DEFERRED/DO NOT USE: LDPC_CB0_WORK_CW not in the frozen config t26zE (2026-10-18); slated for removal */
-  g.chunk_max = (uint32_t)std::min(std::max(env_int("LDPC_CB0_WORK_CW", nullptr, 256), 16), 512);
   g.msg_bytes = (size_t)g.chunk_max * MSG_MAX;
   if (nr_gpu_allocate(NR_GPU_DEVICE, &g.msg, g.msg_bytes) != cudaSuccess || nr_gpu_allocate(NR_GPU_DEVICE, &g.chan, (size_t)g.chunk_max * 8 * CH) != cudaSuccess
       || nr_gpu_allocate(NR_GPU_DEVICE, &g.total, (size_t)g.chunk_max * 8 * CH) != cudaSuccess
@@ -592,20 +548,15 @@ int init_locked()
 }
 
 /* Codewords per chunk for (BG, Z): the chunk's working set (messages + posterior + input) about one L2,
- * a power of two, at most what the work buffers hold. LDPC_CB0_CHUNK overrides. */
+ * a power of two, at most what the work buffers hold. */
 uint32_t chunk_for(uint32_t rows, uint32_t cols, uint32_t edges, uint32_t Z)
 {
   const uint32_t room = (uint32_t)std::min<size_t>(g.msg_bytes / ((size_t)rows * cols * Z), (size_t)g.chunk_max * 8);
-  uint32_t c;
-  if (g.chunk_cfg > 0) {
-    c = (uint32_t)g.chunk_cfg;
-  } else {
-    const size_t ws = (size_t)edges + 2u * cols * Z + (size_t)cols * Z; /* msg + posterior + input */
-    /* measured on GB10 (24 MB L2), BG1 Z=384 wrong-heavy N=600: chunk 64 / 128 / 256 / 512 = 81 / 76 / - / 91 us per CB0
-     * (task-CB0GPU report): about one L2 of working set per chunk */
-    const size_t budget = g.l2 ? g.l2 + g.l2 / 8 : (size_t)24 << 20;
-    c = (uint32_t)std::max<size_t>(budget / ws, 1);
-  }
+  const size_t ws = (size_t)edges + 2u * cols * Z + (size_t)cols * Z; /* msg + posterior + input */
+  /* measured on GB10 (24 MB L2), BG1 Z=384 wrong-heavy N=600: chunk 64 / 128 / 256 / 512 = 81 / 76 / - / 91 us per CB0
+   * (task-CB0GPU report): about one L2 of working set per chunk */
+  const size_t budget = g.l2 ? g.l2 + g.l2 / 8 : (size_t)24 << 20;
+  uint32_t c = (uint32_t)std::max<size_t>(budget / ws, 1);
   uint32_t p = 1;
   while (p * 2 <= c)
     p *= 2;
@@ -615,17 +566,8 @@ uint32_t chunk_for(uint32_t rows, uint32_t cols, uint32_t edges, uint32_t Z)
   return std::max<uint32_t>(p, 1);
 }
 
-/* codewords per thread for a chunk of nb (a power of two): LDPC_CB0_NCW (1, 2, 4), default 2, at most nb */
-uint32_t ncw_for(uint32_t nb)
-{
-  static const int cfg = [] {
-    /* DEFERRED/DO NOT USE: LDPC_CB0_NCW not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char* e = getenv("LDPC_CB0_NCW");
-    const int v = e ? atoi(e) : 2;
-    return v >= 4 ? 4 : v >= 2 ? 2 : 1;
-  }();
-  return (uint32_t)std::min<uint32_t>((uint32_t)cfg, nb);
-}
+/* codewords per thread for a chunk of nb (a power of two): 2, at most nb */
+uint32_t ncw_for(uint32_t nb) { return std::min<uint32_t>(2u, nb); }
 
 /* (BG, Z) edge tables with the shifts reduced mod Z, built once per pair on the stream (stream-ordered before use). */
 struct ModZ {
@@ -678,19 +620,13 @@ int launch_iterations(const ldpc_cuda_bg_t& bg, uint32_t BG, uint32_t Z, uint32_
                                                       bg.num_cols, bg.num_rows, i, msg_stride, g.done, g.unsat, nb,    \
                                                       g.iters);                                                         \
   } while (0)
-      if (ncw == 4)
-        CB0_LAUNCH(4);
-      else if (ncw == 2)
+      if (ncw == 2)
         CB0_LAUNCH(2);
       else
         CB0_LAUNCH(1);
 #undef CB0_LAUNCH
     }
   };
-  if (!g.use_graph) {
-    body();
-    return (int)cudaPeekAtLastError();
-  }
   const uint64_t key = (uint64_t)BG << 48 | (uint64_t)Z << 32 | (uint64_t)nb << 8 | iters;
   auto it = g.graphs.find(key);
   if (it != g.graphs.end())

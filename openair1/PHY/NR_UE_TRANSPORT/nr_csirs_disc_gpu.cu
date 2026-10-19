@@ -2,7 +2,6 @@
 #include "nr_csirs_disc_fp_internal.h"
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
-#include "nr_csirs_disc_gpu_budget.cuh"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -32,26 +31,15 @@ static cudaError_t disc_wait() {
   return rc==cudaSuccess?cudaEventSynchronize(discovery_stream.done):rc;
 }
 /* disc_copy: asynchronous memcpy on the discovery stream followed by disc_wait(); returns the CUDA status of the copy. */
-/* FATTAILS ISAC_GPU_COPY_FENCE=1 (umbrella ISAC_FATTAILS=1): wait for this stream's queued kernels BEFORE enqueuing a copy. A copy
- * queued behind a long kernel (refine_kernel in the sweep module: one thread, up to 400 ms) holds the copy engine at its stream wait, and every
- * other stream's copy (the PDSCH demod/EVM D2H copies) queued behind it [MEASURED, DGX replay b + nsys: PDSCH copies released
- * at the instant refine_kernel ended, 300-400 ms late]. */
-static int copy_fence() {
-  static int v=-1;
-  /* DEFERRED/DO NOT USE: ISAC_GPU_COPY_FENCE not in the frozen config t26zE (2026-10-18); slated for removal */
-  if(v<0){const char *e=getenv("ISAC_GPU_COPY_FENCE");if(!e)e=(getenv("ISAC_FATTAILS") ?: "1");v=e && atoi(e)==1;}
-  return v;
-}
 static cudaError_t disc_copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
-  if(copy_fence()) {cudaError_t f=disc_wait();if(f!=cudaSuccess) return f;}
+  /* wait for queued kernels first: a copy queued behind a long kernel stalls other streams' copies [MEASURED, DGX 300-400 ms] */
+  {cudaError_t f=disc_wait();if(f!=cudaSuccess) return f;}
   cudaError_t rc=cudaMemcpyAsync(dst,src,n,kind,disc_stream());
   return rc==cudaSuccess?disc_wait():rc;
 }
 /* disc_zero: asynchronous memset of n bytes on the discovery stream (no wait); the caller waits before reading the result. */
 static cudaError_t disc_zero(void *dst,int value,size_t n) {return cudaMemsetAsync(dst,value,n,disc_stream());}
 
-/* norm_rbfast: ISAC_CSIRS_DISC_NORM_COALESCE=1 (default off, DECTAIL): coalesced thread order of normalize(). */
-static int norm_rbfast(void) {static int v=-1;if(v<0){const char *e=(getenv("ISAC_CSIRS_DISC_NORM_COALESCE") ?: "1");v=e && atoi(e)==1;}return v;}
 /* normalize: GPU kernel: per (slot, RB, symbol) thread, normalises the 12 RE powers against the mean of the lowest third (excluded REs skipped), in the same integer arithmetic as the CPU.
  *   Output x holds 4096 x power / reference (capped at 8192) per RE, and invalid slots are skipped. Launched by footprints(), normalize_host(), accumulate_host() and prepare_host().
  */
@@ -127,7 +115,6 @@ static int fold_gpu(void *opaque,int p,uint64_t *sum,uint64_t *sq)
 {
   Fold *f=(Fold *)opaque;uint64_t *ds=nullptr,*dq=nullptr;
   size_t bytes=(size_t)p*f->nr*sizeof(*sum);int ret=-1;
-  CsirsDiscGate gate;
   if(cudaMalloc(&ds,bytes)!=cudaSuccess || cudaMalloc(&dq,bytes)!=cudaSuccess) goto done;
   if(disc_zero(ds,0,bytes)!=cudaSuccess || disc_zero(dq,0,bytes)!=cudaSuccess) goto done;
   fold_kernel<<<(f->nr+127)/128,128,0,disc_stream()>>>(f->x,f->meta,f->nt,f->nr,p,ds,dq);
@@ -145,7 +132,6 @@ static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t
   if(max_out>NR_CSIRS_DISC_MAX_FP) max_out=NR_CSIRS_DISC_MAX_FP;
   const int tiles=(r->n_rb+15)/16;
   int16_t *grid=nullptr;uint8_t *excl=nullptr;Fold f={nullptr,nullptr,r->capacity,14*12*r->n_rb+168*tiles};int ret=-1;
-  CsirsDiscGate gate;
   size_t gb=(size_t)r->capacity*r->slot_stride*sizeof(int16_t), xb=(size_t)f.nt*f.nr*sizeof(uint32_t);
   /* Explicit-copy baseline accepts ordinary malloc or unified U1 rings. */
   if(cudaMalloc(&grid,gb)!=cudaSuccess || cudaMalloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
@@ -157,7 +143,7 @@ static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t
     if(cudaMalloc(&excl,14*12*r->n_rb)!=cudaSuccess || disc_copy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
   }
   normalize<<<(r->capacity*r->n_rb*14+127)/128,128,0,disc_stream()>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
-                                                cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles,norm_rbfast());
+                                                cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles,1);
   if(cudaGetLastError()!=cudaSuccess) goto done;
   pool<<<(r->capacity*168*tiles+127)/128,128,0,disc_stream()>>>(f.x,r->capacity,r->n_rb,tiles);
   if(cudaGetLastError()!=cudaSuccess || disc_wait()!=cudaSuccess) goto done;
@@ -172,7 +158,6 @@ static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_c
   if(!nr_disc_fp_valid(r) || !out) return -1;
   const int tiles=1;
   int16_t *grid=nullptr;uint8_t *excl=nullptr;Fold f={nullptr,nullptr,r->capacity,14*12*r->n_rb+168};int ret=-1;
-  CsirsDiscGate gate;
   size_t gb=(size_t)r->capacity*r->slot_stride*sizeof(int16_t), xb=(size_t)f.nt*f.nr*sizeof(uint32_t);
   /* Explicit-copy baseline accepts ordinary malloc or unified U1 rings. */
   if(cudaMalloc(&grid,gb)!=cudaSuccess || cudaMalloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
@@ -184,7 +169,7 @@ static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_c
     if(cudaMalloc(&excl,14*12*r->n_rb)!=cudaSuccess || disc_copy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
   }
   normalize<<<(r->capacity*r->n_rb*14+127)/128,128,0,disc_stream()>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
-                                                cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles,norm_rbfast());
+                                                cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles,1);
   if(cudaGetLastError()!=cudaSuccess) goto done;
   pool<<<(r->capacity*168*tiles+127)/128,128,0,disc_stream()>>>(f.x,r->capacity,r->n_rb,tiles);
   if(cudaGetLastError()!=cudaSuccess || disc_wait()!=cudaSuccess) goto done;
@@ -232,17 +217,13 @@ extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
   int devices=0;if(cudaGetDeviceCount(&devices)!=cudaSuccess || devices<1) return nullptr;
   static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host,fft_host,fep_host,accumulate_host,lattice_host,device_alloc,device_free,prepare_host,resident::detect,resident::reset,nullptr,nullptr,nullptr,readback,upload_symbols};return &ops;
 }
-/* use_managed: returns ISAC_CSIRS_DISC_MANAGED == 1: use CUDA managed memory for unified allocations instead of mapped pinned host memory (diagnostic only). */
-/* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_MANAGED not in the frozen config t26zE (2026-10-18); slated for removal */
-static bool use_managed(void) {const char *e=getenv("ISAC_CSIRS_DISC_MANAGED");return e && atoi(e)==1;}
-/* nr_csirs_disc_gpu_alloc_unified: allocates bytes of unified memory for the discovery buffers: mapped, portable pinned host memory by default, managed memory when ISAC_CSIRS_DISC_MANAGED=1.
+/* nr_csirs_disc_gpu_alloc_unified: allocates bytes of unified memory for the discovery buffers: mapped, portable pinned host memory.
  *   Returns NULL for zero bytes or on failure. Exported C entry; used through the unified-memory hook of the ring and the TD front end.
  */
 extern "C" void *nr_csirs_disc_gpu_alloc_unified(size_t bytes)
 {
   void *ptr=nullptr;
   if(!bytes) return nullptr;
-  if(use_managed()) return cudaMallocManaged(&ptr,bytes)==cudaSuccess?ptr:nullptr;
   return cudaHostAlloc(&ptr,bytes,cudaHostAllocMapped|cudaHostAllocPortable)==cudaSuccess?ptr:nullptr;
 }
 /* nr_csirs_disc_gpu_free_unified: frees memory from nr_csirs_disc_gpu_alloc_unified(): host pinned memory (cudaFreeHost) or device memory (cudaFree), chosen by the pointer attributes.
@@ -299,7 +280,6 @@ static int fft_host(int fft, int transforms, const int16_t *in, int16_t *out)
     if (cudaMalloc(&work,n*sizeof(*work))!=cudaSuccess) return -1;
     capacity=n;
   }
-  CsirsDiscGate gate;
   fft_unpack<<<(n+255)/256,256,0,disc_stream()>>>((const short2 *)in,work,n);
   if (cudaGetLastError()!=cudaSuccess || cufftExecC2C(plan,work,work,CUFFT_FORWARD)!=CUFFT_SUCCESS) {
     disc_wait(); // Quiesce queued work before the caller's CPU fallback.
@@ -454,7 +434,7 @@ static int fep_prepare(int fft,int ant,size_t stride)
       && f.td.reserve((size_t)NR_CSIRS_DISC_DEFAULT_BATCH*ant*stride)?0:-1;
 }
 /* fep_host: GPU front end for a batch of up to NR_CSIRS_DISC_DEFAULT_BATCH slots: uploads the samples, runs fep_unpack, a cuFFT, and fep_extract into the ring (device grid when present).
- *   Serialised by a mutex. With ISAC_CSIRS_DISC_DUMP the device slots are copied back to the host grid. Returns 0, or -1 on failure (the caller then falls back).
+ *   Serialised by a mutex. Returns 0, or -1 on failure (the caller then falls back).
  */
 static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slot_t *slots,
                     int n,nr_csirs_disc_ring_t *ring,int first)
@@ -467,7 +447,6 @@ static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slo
   if(fep_prepare(c->fft,c->n_ant,c->stride)<0) return -1;
   size_t count=(size_t)(n==1?1:NR_CSIRS_DISC_DEFAULT_BATCH)*c->n_ant*14*c->fft;
   nr_csirs_disc_fep_slot_t staged[NR_CSIRS_DISC_DEFAULT_BATCH];
-  CsirsDiscGate gate;
   for(int i=0;i<n;++i) {
     staged[i]=slots[i];staged[i].samples=(int16_t *)(fep_workspace.td.p+(size_t)i*c->n_ant*c->stride);
     if(disc_copy((void *)staged[i].samples,slots[i].samples,c->n_ant*c->stride*sizeof(short2),cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
@@ -484,11 +463,6 @@ static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slo
   size_t out=(size_t)n*c->n_ant*14*12*c->n_rb;
   fep_extract<<<(out+255)/256,256,0,disc_stream()>>>(cfg,desc.p,work.p,(short2 *)(ring->device_grid?ring->device_grid:ring->grid_base),n,ring->capacity,first);
   ring->device_valid=ring->device_grid!=nullptr;
-  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
-  if(ring->device_valid && getenv("ISAC_CSIRS_DISC_DUMP"))
-    for(int i=0;i<n;++i) {size_t at=(size_t)((first+i)%ring->capacity)*ring->slot_stride;
-      if(disc_copy(ring->grid_base+at,ring->device_grid+at,ring->slot_stride*2,cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
-    }
   cudaError_t launch=cudaGetLastError(),complete=disc_wait();
   return launch==cudaSuccess && complete==cudaSuccess?0:-1;
 }
@@ -528,13 +502,12 @@ static int accumulate_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_
   bool managed=cudaPointerGetAttributes(&attr,r->grid_base)==cudaSuccess && (attr.type==cudaMemoryTypeManaged || attr.type==cudaMemoryTypeHost);
   cudaGetLastError();
   const int16_t *input=managed?r->grid_base:grid.p;
-  CsirsDiscGate gate;
   if((!managed && disc_copy(grid.p,r->grid_base,gb*sizeof(int16_t),cudaMemcpyHostToDevice)!=cudaSuccess) ||
      disc_copy(meta.p,r->meta,r->capacity*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
      disc_zero(x.p,0,xb*sizeof(uint32_t))!=cudaSuccess) return -1;
   if(cfg && cfg->excl_re && disc_copy(excl.p,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
   normalize<<<(r->capacity*r->n_rb*14+127)/128,128,0,disc_stream()>>>(input,meta.p,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
-      cfg?cfg->excl_sym_mask_any:0,cfg && cfg->excl_re?excl.p:nullptr,x.p,tiles,norm_rbfast());
+      cfg?cfg->excl_sym_mask_any:0,cfg && cfg->excl_re?excl.p:nullptr,x.p,tiles,1);
   pool<<<(r->capacity*168*tiles+127)/128,128,0,disc_stream()>>>(x.p,r->capacity,r->n_rb,tiles);
   accumulate_kernel<<<(nr+127)/128,128,0,disc_stream()>>>(x.p,meta.p,r->capacity,nr,168*tiles,sum,sq,s80,s64,total,totalq);
   cudaError_t launch=cudaGetLastError(),complete=disc_wait();
@@ -617,7 +590,6 @@ static int lattice_host(int rb,int p,uint64_t nt,const uint64_t *counts,const ui
   int tiles=(rb+15)/16,pooled=168*tiles,nr=14*12*rb+pooled;
   size_t count=(size_t)p*14*tiles*6;
   if(!ps.reserve((size_t)p*pooled) || !pq.reserve((size_t)p*pooled) || !dc.reserve(p) || !dm.reserve(count)) return -1;
-  CsirsDiscGate gate;
   if(disc_copy(dc.p,counts,p*sizeof(uint64_t),cudaMemcpyHostToDevice)!=cudaSuccess ||
      disc_zero(dm.p,0,count*sizeof(uint16_t))!=cudaSuccess) return -1;
   lattice_pool<<<(p*pooled+127)/128,128,0,disc_stream()>>>(p,nr,pooled,sum,sq,ps.p,pq.p);
@@ -659,27 +631,26 @@ static int prepare_host(int rb,int ant,int capacity,int fft,size_t stride)
   if(resident::detect(&ring,nullptr,out,128,false)<0) return -1;
   auto &h=resident::state;int tiles=(rb+15)/16,nr=14*12*rb+168*tiles;
   if(disc_zero(h.meta.p,0,sizeof(meta))!=cudaSuccess || disc_zero(h.x.p,0,nr*4)!=cudaSuccess) return -1;
-  normalize<<<(rb*14+127)/128,128,0,disc_stream()>>>(h.grid.p,h.meta.p,ring.slot_stride,1,ant,rb,0,nullptr,h.x.p,tiles,norm_rbfast());
+  normalize<<<(rb*14+127)/128,128,0,disc_stream()>>>(h.grid.p,h.meta.p,ring.slot_stride,1,ant,rb,0,nullptr,h.x.p,tiles,1);
   pool<<<(168*tiles+127)/128,128,0,disc_stream()>>>(h.x.p,1,rb,tiles);
   accumulate_kernel<<<(nr+127)/128,128,0,disc_stream()>>>(h.x.p,h.meta.p,1,nr,168*tiles,h.sum.p,h.sq.p,h.s80.p,h.s64.p,h.total.p,h.totalq.p);
   resident::reset();
   return cudaGetLastError()==cudaSuccess && disc_wait()==cudaSuccess?0:-1;
 }
 
-/* GPUFUSE: ISAC_GPU_LMEM_PRERESERVE=1 (default off). resident::segment needs ~21 KB of local memory per thread: its
+/* GPUFUSE: always on. resident::segment needs ~21 KB of local memory per thread: its
  * first launch made the driver grow the device's local-memory reservation (~2 GB), a device-wide synchronisation that
  * blocked every kernel launch, PDSCH included, for 218 ms [nsys, replay b] -- the "one stall per run". Reserving
  * the largest frame of this module's kernels before RX moves that growth to start-up. */
 static void lmem_prereserve(void)
 {
   static bool done=false;
-  const char *e=(getenv("ISAC_GPU_LMEM_PRERESERVE") ?: "1");
-  if(done || !e || atoi(e)!=1) return;
+  if(done) return;
   done=true;
   size_t need=0,cur=0;cudaFuncAttributes fa;
   if(cudaFuncGetAttributes(&fa,resident::segment)==cudaSuccess) need=std::max(need,fa.localSizeBytes);
   if(cudaFuncGetAttributes(&fa,resident::finish)==cudaSuccess) need=std::max(need,fa.localSizeBytes);
   if(cudaDeviceGetLimit(&cur,cudaLimitStackSize)!=cudaSuccess) return;
   const cudaError_t r=need>cur?cudaDeviceSetLimit(cudaLimitStackSize,need):cudaSuccess;
-  fprintf(stderr,"[GPU] ISAC_GPU_LMEM_PRERESERVE=1: per-thread local memory %zu -> %zu bytes (%s)\n",cur,std::max(cur,need),cudaGetErrorString(r));
+  fprintf(stderr,"[GPU] lmem prereserve: per-thread local memory %zu -> %zu bytes (%s)\n",cur,std::max(cur,need),cudaGetErrorString(r));
 }

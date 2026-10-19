@@ -30,42 +30,6 @@ extern int nr_gpu_module_ready(void);
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
-/* LDPC_BENCH=1: per-TB decode wall time and whole-process CPU time (getrusage, so the thread pool's
- * segment tasks are included), averaged and printed every 200 calls. For comparing libldpc (CPU) and
- * libldpc_cuda (GPU) on the same workload; off by default. */
-#include <sys/resource.h>
-static int ldpc_bench_on(void)
-{
-  static int on = -1;
-  if (on < 0) {
-    /* DEFERRED/DO NOT USE: LDPC_BENCH not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("LDPC_BENCH");
-    on = e && atoi(e);
-  }
-  return on;
-}
-static double ldpc_bench_cpu_s(void)
-{
-  struct rusage u;
-  getrusage(RUSAGE_SELF, &u);
-  return u.ru_utime.tv_sec + u.ru_stime.tv_sec + 1e-6 * (u.ru_utime.tv_usec + u.ru_stime.tv_usec);
-}
-static double ldpc_bench_wall_s(void)
-{
-  struct timespec t;
-  clock_gettime(CLOCK_MONOTONIC, &t);
-  return t.tv_sec + 1e-9 * t.tv_nsec;
-}
-static void ldpc_bench_add(const char *who, double wall, double cpu, int segs)
-{
-  static __thread double sw, sc;
-  static __thread long n, ns;
-  sw += wall; sc += cpu; ns += segs;
-  if (++n % 200 == 0)
-    printf("LDPC_BENCH %s: %ld TBs, %.1f segs/TB, wall %.1f us/TB, cpu %.1f us/TB\n", who, n, (double)ns / n,
-           1e6 * sw / n, 1e6 * sc / n);
-}
-
 #include <string.h>
 
 struct ThreadContext;
@@ -113,7 +77,7 @@ static void cuda_prepare_segment(void *arg)
     const int ncp = s->Kc * Z;
     memset(z + ncp, 0, 16 * sizeof(*z));
     /* saturate to int8 with the segment decoder's SIMD pack (a scalar loop here cost ~0.5 ms per
-     * 24-segment TB -- more than OAI's whole CPU decode, measured with LDPC_BENCH) */
+     * 24-segment TB -- more than OAI's whole CPU decode, measured) */
     simde__m128i *pv = (simde__m128i *)z, *pl = (simde__m128i *)s->batch_llr;
     for (int i = 0, j = 0; j < (ncp + 15) >> 4; i += 2, j++)
       pl[j] = simde_mm_packs_epi16(pv[i], pv[i + 1]);
@@ -125,7 +89,7 @@ static void cuda_prepare_segment(void *arg)
  * queued as requests and decoded together, so the ~40 launches of a decode are shared by every TB in
  * flight instead of paid per TB. Submitters sleep on a condition variable while the GPU works.
  *
- * K34 safety (2026-10-03): every wait is bounded (LDPC_CUDA_TIMEOUT_MS, default 50), the queue is
+ * K34 safety (2026-10-03): every wait is bounded (200 ms), the queue is
  * bounded, slot reservation is all-or-nothing, and any GPU error / timeout / rejection sends the TB's
  * code blocks to the CPU decoder (same LLR input). A GPU result is accepted only if its
  * request status is OK; a poisoned slot can never be turned into a pass. ---- */
@@ -163,25 +127,8 @@ int ldpc_pool_sticky(void);
 int ldpc_pool_capturing(void);
 uint32_t ldpc_pool_capture_epoch(void);
 
-/* ---- tunables / test hooks: environment read ONCE, tests override through ldpc_cuda_test_hooks() ---- */
+/* ---- tunables (tests override through ldpc_cuda_test_hooks()) ---- */
 static volatile int g_timeout_ms = 200, g_queue_cap = QUEUE_CAP, g_breaker_n = 4, g_breaker_ms = 5000;
-static void tunables_init(void)
-{
-  const char *e;
-  /* DEFERRED/DO NOT USE: LDPC_CUDA_TIMEOUT_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  if ((e = getenv("LDPC_CUDA_TIMEOUT_MS")) && atoi(e) > 0) g_timeout_ms = atoi(e);
-  /* DEFERRED/DO NOT USE: LDPC_CUDA_TEST_QUEUE_CAP not in the frozen config t26zE (2026-10-18); slated for removal */
-  if ((e = getenv("LDPC_CUDA_TEST_QUEUE_CAP")) && atoi(e) >= 0 && atoi(e) < QUEUE_CAP) g_queue_cap = atoi(e);
-  /* DEFERRED/DO NOT USE: LDPC_CUDA_BREAKER_N not in the frozen config t26zE (2026-10-18); slated for removal */
-  if ((e = getenv("LDPC_CUDA_BREAKER_N")) && atoi(e) > 0) g_breaker_n = atoi(e);
-  /* DEFERRED/DO NOT USE: LDPC_CUDA_BREAKER_S not in the frozen config t26zE (2026-10-18); slated for removal */
-  if ((e = getenv("LDPC_CUDA_BREAKER_S")) && atoi(e) > 0) g_breaker_ms = atoi(e) * 1000;
-}
-static void tunables_env_once(void)
-{
-  static pthread_once_t o = PTHREAD_ONCE_INIT;
-  pthread_once(&o, tunables_init);
-}
 
 /* ---- circuit breaker (K34): N consecutive GPU errors or any wait timeout -> bypass the GPU for g_breaker_ms;
  * a sticky CUDA error -> bypass for good. State 0 closed, 1 bypassed, 2 permanently off (ldpc_cuda_disabled). ---- */
@@ -252,7 +199,6 @@ void ldpc_cuda_get_counters(uint64_t *errors, uint64_t *fallbacks, uint64_t *poi
 /* Test API (K34 tests only). queue_cap < 0, timeout/breaker <= 0 leave a value. */
 void ldpc_cuda_test_hooks(int skip, int stall_ms, int inject, int queue_cap, int timeout_ms, int breaker_n, int breaker_ms)
 {
-  tunables_env_once();
   ldpc_pool_test_hooks(skip, stall_ms, inject);
   if (queue_cap >= 0) g_queue_cap = queue_cap > QUEUE_CAP ? QUEUE_CAP : queue_cap;
   if (timeout_ms > 0) g_timeout_ms = timeout_ms;
@@ -277,7 +223,6 @@ int ldpc_cuda_test_slots_used(void)
 
 static int pool_timeout_ms(void)
 {
-  tunables_env_once();
   return g_timeout_ms;
 }
 static void deadline_after_ms(struct timespec *ts, int ms)
@@ -368,7 +313,6 @@ int32_t nrLDPC_coding_init(void)
     return 0;
   }
   pthread_once(&g_once, cond_setup);
-  tunables_env_once();
   if (!nr_gpu_module_ready()) {
     atomic_store(&g_perm_off, true);
     inited = 1;
@@ -388,14 +332,11 @@ int32_t nrLDPC_coding_init(void)
    * capture never trips the breaker). A failing warm-up leaves the GPU disabled (CPU only), the plugin still loads. */
   {
     static const struct { uint32_t BG, Z, K; } wu[2] = {{1, 384, 8448}, {2, 96, 960}};
-    /* 2 x max_ldpc_iterations: 16 is the passive receiver's 8 (nr_pdsch_passive_decode.c), 10/20 the 5/10 defaults;
-     * LDPC_CUDA_WARMUP_ITERS=<max_ldpc_iterations> adds 2x that value for a differently configured receiver */
-    /* DEFERRED/DO NOT USE: LDPC_CUDA_WARMUP_ITERS not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *we = getenv("LDPC_CUDA_WARMUP_ITERS");
-    const uint32_t its[4] = {16, 10, 20, we && atoi(we) > 0 ? 2u * (uint32_t)atoi(we) : 16};
+    /* 2 x max_ldpc_iterations: 16 is the passive receiver's 8 (nr_pdsch_passive_decode.c), 10/20 the 5/10 defaults */
+    const uint32_t its[3] = {16, 10, 20};
     memset(ldpc_pool_host_llr(), 0, (size_t)512 * ldpc_batch_llr_stride());
     for (int i = 0; i < 2 && !atomic_load(&g_perm_off); i++)
-      for (int k = 0; k < 4 && !atomic_load(&g_perm_off); k++)
+      for (int k = 0; k < 3 && !atomic_load(&g_perm_off); k++)
         for (uint32_t nb = 1; nb <= 512; nb <<= 1) {
           const uint32_t first = 0, count = nb;
           int rc = 0;
@@ -457,7 +398,6 @@ static bool cpu_decode_segment(const nrLDPC_TB_decoding_parameters_t *tb, int r,
   return false;
 }
 
-static __thread double t_prep_s, t_gpu_s; /* LDPC_BENCH phase split */
 /* Segments to decode for a TB: nb_segments_to_decode (0 = all C) -- a layout probe wants code
  * block 0 alone, with the CRC type / K' / offsets of the full C. */
 static inline int tb_ndec(const nrLDPC_TB_decoding_parameters_t *tb)
@@ -465,9 +405,8 @@ static inline int tb_ndec(const nrLDPC_TB_decoding_parameters_t *tb)
   return (tb->nb_segments_to_decode > 0 && tb->nb_segments_to_decode < tb->C) ? (int)tb->nb_segments_to_decode : (int)tb->C;
 }
 
-int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
+int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *slot)
 {
-  const double t_start = ldpc_bench_on() ? ldpc_bench_wall_s() : 0;
   const int nt = slot->nb_TBs;
   if (nt == 0 || nt > 64)
     return nt ? -1 : 0;
@@ -549,7 +488,6 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
     }
   }
   join_task_ans(&ans);
-  const double t_a = ldpc_bench_on() ? ldpc_bench_wall_s() : 0;
 
   /* phase B: queue one heap request per TB, wait with a deadline. A TB that is rejected (queue full) or
    * not finished at the deadline is decoded on the CPU from a private copy of its LLR slots. */
@@ -620,8 +558,6 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
         breaker_note_fail(W_TIMEOUT, "consecutive GPU errors/timeouts, GPU bypassed for a few seconds");
     }
   }
-  if (ldpc_bench_on())
-    t_gpu_s += ldpc_bench_wall_s() - t_a;
   /* settle each request: DONE -> usable iff rc == 0; otherwise remove it from the queue / abandon it */
   pthread_mutex_lock(&g_mu);
   for (int t = 0; t < nt; t++) {
@@ -687,24 +623,5 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
   pthread_cond_broadcast(&g_cv_done);
   pthread_mutex_unlock(&g_mu);
   free(scratch);
-  if (ldpc_bench_on())
-    t_prep_s += t_a - t_start;
   return 0;
-}
-
-int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *p)
-{
-  if (!ldpc_bench_on())
-    return nrLDPC_coding_decoder_impl(p);
-  int segs = 0;
-  for (int t = 0; t < p->nb_TBs; t++)
-    segs += p->TBs[t].C;
-  const double w0 = ldpc_bench_wall_s(), c0 = ldpc_bench_cpu_s();
-  const int32_t rc = nrLDPC_coding_decoder_impl(p);
-  ldpc_bench_add("gpu", ldpc_bench_wall_s() - w0, ldpc_bench_cpu_s() - c0, segs);
-  static __thread long nb;
-  if (++nb % 200 == 0)
-    printf("LDPC_BENCH gpu phases: prep %.1f us/TB, gpu wait %.1f us/TB, %.2f TBs per GPU batch\n", 1e6 * t_prep_s / nb,
-           1e6 * t_gpu_s / nb, (double)atomic_load(&g_batched_reqs) / (double)(atomic_load(&g_batches) ? atomic_load(&g_batches) : 1));
-  return rc;
 }

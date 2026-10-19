@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
-/* GPUPASS Task 4: the DL decode pass of one PDSCH grant as ONE captured CUDA graph per shape class, one host wait per pass (ISAC_GPU_PASS=1, default off).
+/* GPUPASS Task 4: the DL decode pass of one PDSCH grant as ONE captured CUDA graph per shape class, one host wait per pass.
  *
  * Graph (per shape class and per instance), all on one stream:
  *   [H2D of the parameter blocks (DISCRETE only)] -> exact FEP (all 14 symbols) -> exact chest -> chest post (nvar + DM-RS FO/SFO sums) ->
@@ -49,8 +49,8 @@ typedef struct {
   int64_t llr_sgnsum;                                               /* after descrambling, stride 32 */
   uint64_t posbit[2], nbit[2];                                      /* after descrambling, 4 LLRs per 32 */
 } nr_gpu_llr_stats_t;
-/* host side (nr_gpu_pass_dl.c): 1 = ISAC_PDSCH_GPU_GRAPH=1 and the module is up in v2 mode; nr_gpu_graph_flag("COVER"|"SPLIT"|"RETRY"|"SLOT"|"LEAN"):
- * ISAC_PDSCH_GPU_GRAPH_<sub>=1 and the master on */
+/* host side (nr_gpu_pass_dl.c): 1 = the module is up in v2 mode; nr_gpu_graph_flag("COVER"|"SPLIT"|"RETRY"|"DMRS2"|"SEG128"):
+ * the sub-feature is on (all are, once the module is up) */
 int nr_gpu_graph_on(void);
 int nr_gpu_graph_flag(const char *sub);
 
@@ -119,7 +119,7 @@ static inline int nr_gpu_pass_seg_remap_geo(int16_t *geo_y, int ext, uint16_t sy
  *   k_ul_fep (the PUSCH symbols of every antenna, from the UL snapshot, with the cached timing advance) -> chest (k_ul_ls, the GPU6 delay transform, the 16-tap FIR) ->
  *   k_ul_level + k_ul_decide (the fixed-point scale of nr_rx_pusch_group_internal) -> k_ul_eq (extraction + nr_channel_compensation) -> k_ul_llr (nr_compute_llr + the
  *   unscrambling) -> k_rdm -> LDPC -> k_crc -> k_pick -> k_crc. Every step is integer arithmetic, so the pass is bit-exact with nr_rx_pusch_group_tp + nr_ulsch_decoding
- *   whatever ISAC_GPU_PASS_FP32 says (the FP32 instantiation only exists for the DL demod's MMSE).
+ *   whatever the FP32 default says (the FP32 instantiation only exists for the DL demod's MMSE).
  * Scope (anything else returns 1 from nr_gpu_pass_ul_try, counted, and the old path decodes): one layer (the passive UL receiver refuses more upstream), CP-OFDM, DM-RS type 1,
  * contiguous PRBs, normal CP, no PTRS, no frequency hopping, no HARQ combining (rv 0 of a fresh process), a TB of at most NR_GPU_PASS_MAX_CB code blocks, N = 4096. */
 #define NR_GPU_PASS_UL_NSYM 14

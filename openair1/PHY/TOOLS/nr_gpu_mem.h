@@ -8,8 +8,9 @@ extern "C" {
 /* One buffer type for both platforms: DIRECT (GB10 shared memory, dev == host) and DISCRETE (PCIe GPU, pinned host + cudaMalloc, explicit copies). */
 typedef enum { NR_GPU_MODEL_DIRECT = 0, NR_GPU_MODEL_DISCRETE = 1 } nr_gpu_model_t;
 typedef struct { void *dev; void *host; size_t bytes; nr_gpu_model_t model; } nr_gpu_buf_t;
-/* DIRECT iff NR_GPU_SHARED && pageable access && !ISAC_GPU_FORCE_DISCRETE (the env forces DISCRETE for tests). */
+/* DIRECT iff NR_GPU_SHARED && pageable access && not forced DISCRETE by a test. */
 nr_gpu_model_t nr_gpu_model(void);
+void nr_gpu_mem_test_force_discrete(int on); /* test hook: 1 = DISCRETE model on any device (buffers allocated from now on) */
 /* Pre-fence only (before nr_gpu_rx_started); host side pinned and zeroed. Returns 0 or -1. */
 int nr_gpu_buf_alloc(nr_gpu_buf_t *b, size_t bytes);
 /* No-ops on DIRECT. stream is a cudaStream_t (NULL = default). Return 0 or -1. */

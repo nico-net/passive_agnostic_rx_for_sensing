@@ -62,19 +62,10 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
                                    const freq_alloc_bitmap_t *freq_alloc, int Nl, uint16_t dmrs_mask, int diag, int *ndmrs, int dmrs_sym[4], int delta[4],
                                    const int16_t *pil_out[4][4], int *k0_out, int *nrb_out, const nr_prb_seg_t *segs, int nseg, int *pil_nrb_out,
                                    int allow_type2, int *type_out);
-/* FATTAILS ISAC_GPU_CHECK_ASYNC=1 (nr_pdsch_gpu_demod_host.c): one low-priority worker for the GPU self-checks.
- * every(): 0 = off (inline checks as configured), N = check every N-th grant on the worker (ISAC_GPU_CHECK_ASYNC_EVERY,
- * default 256). submit(): 0 = queued (the worker runs fn(job), fn frees job), -1 = dropped (counted; caller frees).
+/* FATTAILS (nr_pdsch_gpu_demod_host.c): one low-priority worker for the GPU self-checks.
+ * every(): 0 = off (inline checks as configured), N = check every N-th grant on the worker (256). submit(): 0 = queued (the worker runs fn(job), fn frees job), -1 = dropped (counted; caller frees).
  * note(): a finished check's worker time (GPU_CHECK_ASYNC line). */
-/* FATTAILS umbrella: a FATTAILS flag is its own env value when set, else ISAC_FATTAILS (default 0 = off) */
-static inline int nr_fattails_on(const char *name)
-{
-  const char *e = getenv(name);
-  if (!e)
-    e = (getenv("ISAC_FATTAILS") ?: "1");
-  return e ? atoi(e) : 0;
-}
-int nr_fattails_pin_all(void); /* ISAC_GPU_PIN_ALL (umbrella): pin and pre-populate every GPU-read host buffer */
+int nr_fattails_pin_all(void); /* always 1: pin and pre-populate every GPU-read host buffer */
 int nr_gpu_check_async_every(void);
 int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name); /* one SCHED_OTHER nice-19 worker draining q */
 int nr_gpu_check_async_room(void);

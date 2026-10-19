@@ -1269,18 +1269,10 @@ static int alloc_inst(int id)
   return 0;
 }
 
-/* Task 5: the FP32 demod instantiation is used when ISAC_GPU_PASS_FP32=1, or (unset) on sm_89 (RTX 4070: FP64 at 1/64 rate); ISAC_GPU_PASS_FP32=0 forces the bit-exact double one */
-static int g_fp32_default()
-{
-  static int v = -1;
-  if (v < 0) {
-    const char *e = (getenv("ISAC_GPU_PASS_FP32") ?: "1");
-    cudaDeviceProp p;
-    int dev = 0;
-    v = e && *e ? atoi(e) == 1 : (cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&p, dev) == cudaSuccess && p.major == 8 && p.minor == 9);
-  }
-  return v;
-}
+/* Task 5: the FP32 demod instantiation is the default (RTX 4070/4060 Ti: FP64 at 1/64 rate); the tests switch to the bit-exact double one */
+static int g_fp32 = 1;
+static int g_fp32_default() { return g_fp32; }
+extern "C" void nr_gpu_pass_test_fp32(int on) { g_fp32 = on; }
 extern "C" int nr_gpu_pass_fp32_default(void) { return g_fp32_default(); }
 
 /* default warm set (max_classes): nrb 24/48/96/217 x nl 1..4, 2 DM-RS symbols, a typical padded block count, float */
@@ -1585,10 +1577,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     if (k.nseg) ++g_fb_unseen_seg;
     for (int q = 0; split && q < 3; q++)
       if (!es[q]) ++g_split_unseen[SUB_C + q];
-    /* DEFERRED/DO NOT USE: ISAC_GPU_PASS_LOG_UNSEEN not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (g_fb_unseen++ < 40 && getenv("ISAC_GPU_PASS_LOG_UNSEEN"))
-      fprintf(stderr, "GPUPASS unseen class: nrb %u (grant %d) nl %u ndmrs %u ncb %u (C %u) evm %u qmode %u align %u fp32 %u nseg %u (grant %d) missing sub-graphs C%d D%d L%d\n", k.nrb, j->nrb, k.nl, k.ndmrs, k.ncb,
-              j->C, k.evm, k.qmode, k.align, k.fp32, k.nseg, j->nseg, split && !es[0], split && !es[1], split && !es[2]);
+    ++g_fb_unseen;
     return 1;
   }
   /* the instance: the one this thread's decode call holds (Task 4), else a free one. A probe never takes one of the last probe_reserve() free instances: real grants that
@@ -1791,9 +1780,7 @@ extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     if (f != g_cache.end()) e = &f->second;
   }
   if (!e) {
-    /* DEFERRED/DO NOT USE: ISAC_GPU_PASS_LOG_UNSEEN not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (g_ul_fb_unseen++ < 40 && getenv("ISAC_GPU_PASS_LOG_UNSEEN"))
-      fprintf(stderr, "GPUPASS unseen UL class: nrb %u (grant %d) ndmrs %u ncb %u (C %u)\n", k.nrb, u.nrb, k.ndmrs, k.ncb, j->C);
+    ++g_ul_fb_unseen;
     return 1;
   }
   const int id = j->probe ? acquire_probe() : acquire_real(M_UL);

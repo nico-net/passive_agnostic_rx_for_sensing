@@ -29,7 +29,7 @@ static bool have_gpu() { return nr_gpu_model() >= 0 && getenv("NR_GPU_TEST_SKIP"
 TEST(GpuMem, RoundTripBothModels) {
   if (!have_gpu()) GTEST_SKIP();
   for (int force : {0, 1}) {
-    setenv("ISAC_GPU_FORCE_DISCRETE", force ? "1" : "0", 1);
+    nr_gpu_mem_test_force_discrete(force);
     nr_gpu_buf_t b;
     ASSERT_EQ(0, nr_gpu_buf_alloc(&b, 4096));
     EXPECT_EQ(force ? NR_GPU_MODEL_DISCRETE : nr_gpu_model(), b.model);
@@ -54,12 +54,10 @@ TEST(GpuMem, AllocIsFirstTouched) {
 
 /* ===================================================== Task 4: the shape-class graph pass ===================================================== */
 /* The graphs are captured per instance under the memory model of the process (ctest runs this suite once as is and once with NR_GPU_PASS_DISCRETE=1). */
-/* the FEP module sizes its pass LS rows at init from these (1024 = the split value; a 128-segment row group is 512 rows); set before any test initialises it */
-[[maybe_unused]] static const int g_split_ls_rows_env = (setenv("ISAC_PDSCH_GPU_GRAPH", "1", 0), setenv("ISAC_PDSCH_GPU_GRAPH_SPLIT", "1", 0), setenv("ISAC_GPU_PASS_FP32", "0", 0), 0); /* the bit-exact double demod is the reference here (FP32 is the passive default since t26zE) */
 static void pass_model()
 {
-  if (getenv("NR_GPU_PASS_DISCRETE")) setenv("ISAC_GPU_FORCE_DISCRETE", "1", 1);
-  else unsetenv("ISAC_GPU_FORCE_DISCRETE");
+  if (getenv("NR_GPU_PASS_DISCRETE")) nr_gpu_mem_test_force_discrete(1);
+  else nr_gpu_mem_test_force_discrete(0);
 }
 static bool pass_ready(GpuPassModule &m)
 {
@@ -521,12 +519,12 @@ TEST(GpuPassDl, EvmBranchGraph) {
 static void dl_stages_case(int nrb, int nl, int qm, int seed, double max_ber) {
   GpuPassFixture fx = GpuPassFixture::small_grant(nrb, nl, qm, seed);
   std::vector<int16_t> llr_direct, llr_discrete;
-  setenv("ISAC_GPU_FORCE_DISCRETE", "0", 1);
+  nr_gpu_mem_test_force_discrete(0);
   ASSERT_EQ(0, fx.run_stages(&llr_direct));
   const auto rxF0 = fx.rxF_head; const auto chest0 = fx.chest_out; const auto snap0 = fx.snap; const int rc0 = fx.ldpc_rc;
-  setenv("ISAC_GPU_FORCE_DISCRETE", "1", 1);
+  nr_gpu_mem_test_force_discrete(1);
   ASSERT_EQ(0, fx.run_stages(&llr_discrete));
-  unsetenv("ISAC_GPU_FORCE_DISCRETE");
+  nr_gpu_mem_test_force_discrete(0);
   ASSERT_EQ(llr_direct.size(), llr_discrete.size());
   ASSERT_EQ(fx.tx_bits.size(), llr_direct.size());
   EXPECT_EQ(rxF0, fx.rxF_head) << "FEP rxdataF differs between the models";
@@ -546,11 +544,11 @@ static void dl_stages_case(int nrb, int nl, int qm, int seed, double max_ber) {
 static void dev_vs_old_case(int nrb, int nl, int qm, int seed) {
   GpuPassFixture fx = GpuPassFixture::small_grant(nrb, nl, qm, seed);
   std::vector<int16_t> llr_old, llr_dev;
-  setenv("ISAC_GPU_FORCE_DISCRETE", "0", 1);
+  nr_gpu_mem_test_force_discrete(0);
   ASSERT_EQ(0, fx.run_stages(&llr_old, true));
   const auto rxF0 = fx.rxF_head; const auto chest0 = fx.chest_out; const auto snap0 = fx.snap; const int rc0 = fx.ldpc_rc, ns0 = fx.ldpc_nsnap;
   ASSERT_EQ(0, fx.run_stages(&llr_dev, false));
-  unsetenv("ISAC_GPU_FORCE_DISCRETE");
+  nr_gpu_mem_test_force_discrete(0);
   EXPECT_EQ(rxF0, fx.rxF_head) << "rxdataF: old vs _dev";
   EXPECT_EQ(chest0, fx.chest_out) << "chest delay/nvar: old vs _dev";
   ASSERT_EQ(llr_old.size(), llr_dev.size());
@@ -565,7 +563,7 @@ TEST(GpuPassStages, DevEqualsOldEntryPoints) {
   GpuPassModule::get(&ok, &lib);
   if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
   ASSERT_TRUE(ok);
-  unsetenv("ISAC_GPU_FORCE_DISCRETE"); /* GpuMem.RoundTrip leaves it at 1 */
+  nr_gpu_mem_test_force_discrete(0); /* GpuMem.RoundTrip leaves it at 1 */
   if (nr_gpu_model() != NR_GPU_MODEL_DIRECT) GTEST_SKIP() << "old entry points need the DIRECT model (GB10)";
   dev_vs_old_case(24, 2, 4, 7);
   dev_vs_old_case(12, 1, 6, 9);
@@ -579,7 +577,7 @@ TEST(GpuChestChunks, FullJobEqualsSplitJobs) {
   GpuPassModule &m = GpuPassModule::get(&ok, &lib);
   if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
   ASSERT_TRUE(ok);
-  unsetenv("ISAC_GPU_FORCE_DISCRETE");
+  nr_gpu_mem_test_force_discrete(0);
   if (nr_gpu_model() != NR_GPU_MODEL_DIRECT) GTEST_SKIP() << "old entry point needs the DIRECT model (GB10)";
   const int N = 4096, MDC = 20, R = NR_GPU_CHEST_MAX_ROWS;
   nr_gpu_buf_t rx, pil, dt, out[2];
@@ -645,7 +643,7 @@ TEST(GpuPassStages, DlStagesSameBitsBothModels) {
  * instantiated before any fence; then for three different inputs: stage on the host, replay, and compare with a plain (not captured) run of
  * the same inputs on the same buffers. Both models. */
 static void graph_case(int force) {
-  setenv("ISAC_GPU_FORCE_DISCRETE", force ? "1" : "0", 1);
+  nr_gpu_mem_test_force_discrete(force);
   bool ok = false;
   GpuPassModule &m = GpuPassModule::get(&ok);
   ASSERT_TRUE(ok);
@@ -695,7 +693,7 @@ TEST(GpuPassStages, DevCapturableAndReplayable) {
   ASSERT_TRUE(ok);
   graph_case(0);
   graph_case(1);
-  unsetenv("ISAC_GPU_FORCE_DISCRETE");
+  nr_gpu_mem_test_force_discrete(0);
 }
 
 
@@ -1703,8 +1701,7 @@ static bool ul_ready(GpuPassModule &m)
   static int state = 0;
   if (state) return state > 0;
   state = -1;
-  setenv("ISAC_UL_GPU_PASS", "1", 1);
-  setenv("ISAC_UL_GPU_PASS_CLASSES", "1", 1);
+  nr_gpu_pass_ul_test_budget(1);
   if (!pass_ready(m) || !m.pass_warm) return false;
   if (load_dftslib() != 0) return false;
   if (nr_gpu_pass_ul_warm(m.dl, 4, 0) < 1) return false;
@@ -3354,7 +3351,7 @@ TEST(GpuPassFence, LdpcDevNoAllocOnMiss) {
   auto misses = (unsigned (*)(void))dlsym(dl, "nr_pdsch_gpu_ldpc_dev_misses");
   auto stats = (void (*)(uint64_t *, uint64_t *))dlsym(dl, "nr_dl_gpu_memory_stats");
   ASSERT_TRUE(misses && stats);
-  unsetenv("ISAC_GPU_FORCE_DISCRETE");
+  nr_gpu_mem_test_force_discrete(0);
   nr_gpu_buf_t lin = {}, bits = {};
   ASSERT_EQ(0, nr_gpu_buf_alloc(&lin, NR_GPU_LDPC_DEV_IN_BYTES));
   ASSERT_EQ(0, nr_gpu_buf_alloc(&bits, NR_GPU_LDPC_DEV_BITS_BYTES));

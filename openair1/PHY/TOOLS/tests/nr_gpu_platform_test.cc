@@ -6,7 +6,7 @@
 #include <thread>
 #include <vector>
 namespace {
-int attrs[128], count, calls, device_allocs, host_allocs, managed_allocs, frees, registrations;
+int attrs[128], count, calls, device_allocs, host_allocs, frees, registrations;
 unsigned flags;
 int copy_kind, syncs;
 void *copy_stream;
@@ -19,7 +19,6 @@ int attr(int *v,int a,int) { *v=attrs[a]; return a==failed_attribute ? 1 : 0; }
 int mem_info(size_t *free,size_t *total) { *free=1024; *total=2048; return 0; }
 int device_alloc(void **p,size_t) { ++device_allocs; *p=memory[next_buffer++]; return 0; }
 int host_alloc(void **p,size_t,unsigned f) { ++host_allocs; flags=f; *p=memory[next_buffer++]; return 0; }
-int managed_alloc(void **p,size_t,unsigned f) { ++managed_allocs; flags=f; *p=memory[next_buffer++]; return 0; }
 int release(void *) { ++frees; return 0; }
 int device_ptr(void **d,void *h,unsigned) { *d=h; return 0; }
 int reg(void *,size_t,unsigned f) { ++registrations; flags=f; return 0; }
@@ -28,43 +27,32 @@ int stream_sync(void *) { ++syncs; return 0; }
 int device_sync() { ++syncs; return 0; }
 int set_flags(unsigned) { return 0; }
 int get_last_error() { ++cleared_errors; return 0; }
-const nr_gpu_runtime_t runtime={get_count,get_device,attr,mem_info,device_alloc,host_alloc,managed_alloc,
+const nr_gpu_runtime_t runtime={get_count,get_device,attr,mem_info,device_alloc,host_alloc,
                               release,release,device_ptr,reg,release,copy,stream_sync,device_sync,set_flags,get_last_error};
 class Platform : public testing::Test {
-  std::string old_model,old_managed;
-  bool had_model,had_managed;
   void SetUp() override {
-    const char *m=getenv("ISAC_GPU_MEMORY_MODEL"), *o=getenv("ISAC_GPU_SHARED_MANAGED");
-    had_model=m; had_managed=o; old_model=m?m:""; old_managed=o?o:"";
-    unsetenv("ISAC_GPU_MEMORY_MODEL"); unsetenv("ISAC_GPU_SHARED_MANAGED");
     memset(attrs,0,sizeof(attrs));
     attrs[18]=attrs[19]=attrs[41]=attrs[89]=1; attrs[75]=12; attrs[76]=1;
     failed_attribute=-1; cleared_errors=0;
-    count=1; calls=device_allocs=host_allocs=managed_allocs=frees=registrations=next_buffer=syncs=0;
+    count=1; calls=device_allocs=host_allocs=frees=registrations=next_buffer=syncs=0;
     nr_gpu_test_reset(&runtime);
     nr_gpu_set_logger(log_message); warnings=info_lines=0;
   }
   void TearDown() override {
-    if (had_model) setenv("ISAC_GPU_MEMORY_MODEL",old_model.c_str(),1); else unsetenv("ISAC_GPU_MEMORY_MODEL");
-    if (had_managed) setenv("ISAC_GPU_SHARED_MANAGED",old_managed.c_str(),1); else unsetenv("ISAC_GPU_SHARED_MANAGED");
     nr_gpu_test_reset(&runtime);
   }
 };
-TEST_F(Platform, CapabilityTableAndOverrides) {
+TEST_F(Platform, CapabilityTable) {
   nr_gpu_caps_t c{};
-  EXPECT_EQ(nr_gpu_choose_model(&c,"shared"),NR_GPU_NONE);
+  EXPECT_EQ(nr_gpu_choose_model(&c),NR_GPU_NONE);
   c.available=1; c.integrated=1;
-  EXPECT_EQ(nr_gpu_choose_model(&c,"auto"),NR_GPU_SHARED);
+  EXPECT_EQ(nr_gpu_choose_model(&c),NR_GPU_SHARED);
   c.integrated=0; c.pageable_memory_access=c.host_page_tables=1;
-  EXPECT_EQ(nr_gpu_choose_model(&c,nullptr),NR_GPU_SHARED);
+  EXPECT_EQ(nr_gpu_choose_model(&c),NR_GPU_SHARED);
   c.host_page_tables=0; // HMM alone is not hardware coherence.
-  EXPECT_EQ(nr_gpu_choose_model(&c,"auto"),NR_GPU_DISCRETE);
+  EXPECT_EQ(nr_gpu_choose_model(&c),NR_GPU_DISCRETE);
   c.pageable_memory_access=0;
-  EXPECT_EQ(nr_gpu_choose_model(&c,"auto"),NR_GPU_DISCRETE);
-  EXPECT_EQ(nr_gpu_choose_model(&c,"shared"),NR_GPU_SHARED);
-  c.integrated=1;
-  EXPECT_EQ(nr_gpu_choose_model(&c,"discrete"),NR_GPU_DISCRETE);
-  EXPECT_EQ(nr_gpu_choose_model(&c,"typo"),NR_GPU_NONE);
+  EXPECT_EQ(nr_gpu_choose_model(&c),NR_GPU_DISCRETE);
 }
 TEST_F(Platform, ProbeIsOnceAndCapturesCapabilities) {
   attrs[88]=attrs[100]=attrs[86]=1;
@@ -86,10 +74,10 @@ TEST_F(Platform, NoDeviceAndDiscreteFailClosed) {
   EXPECT_FALSE(nr_gpu_module_check("mock","89-real,121-real,121-virtual"));
   EXPECT_EQ(nr_gpu_alloc(NR_GPU_STAGING,128),nullptr);
   EXPECT_NE(nr_gpu_register_host(memory[63],128),0);
-  EXPECT_EQ(device_allocs+host_allocs+managed_allocs+registrations,0);
+  EXPECT_EQ(device_allocs+host_allocs+registrations,0);
 }
 TEST_F(Platform, DiscreteWarnsOnceAcrossModules) {
-  setenv("ISAC_GPU_MEMORY_MODEL","discrete",1);
+  attrs[18]=0; // not integrated, no pageable access: DISCRETE
   EXPECT_FALSE(nr_gpu_module_check("ldpc","121"));
   EXPECT_FALSE(nr_gpu_module_check("polar","121"));
   EXPECT_FALSE(nr_gpu_platform_ready());
@@ -112,20 +100,14 @@ TEST_F(Platform, UnsupportedOptionalAttributeDoesNotPoisonWarmup) {
   EXPECT_EQ(cleared_errors,1);
 }
 TEST_F(Platform, KindMappingAndCorrectFree) {
-  for (int kind=0;kind<3;++kind) EXPECT_EQ(nr_gpu_storage(NR_GPU_DISCRETE,(nr_gpu_kind_t)kind,0),NR_GPU_ALLOC_UNAVAILABLE);
-  EXPECT_EQ(nr_gpu_storage(NR_GPU_SHARED,(nr_gpu_kind_t)99,0),NR_GPU_ALLOC_UNAVAILABLE);
+  for (int kind=0;kind<3;++kind) EXPECT_EQ(nr_gpu_storage(NR_GPU_DISCRETE,(nr_gpu_kind_t)kind),NR_GPU_ALLOC_UNAVAILABLE);
+  EXPECT_EQ(nr_gpu_storage(NR_GPU_SHARED,(nr_gpu_kind_t)99),NR_GPU_ALLOC_UNAVAILABLE);
   void *d=nr_gpu_alloc(NR_GPU_DEVICE,128), *s=nr_gpu_alloc(NR_GPU_STAGING,128), *r=nr_gpu_alloc(NR_GPU_SHARED_RW,128);
   ASSERT_NE(d,nullptr); ASSERT_NE(s,nullptr); ASSERT_NE(r,nullptr);
-  EXPECT_EQ(device_allocs,1); EXPECT_EQ(host_allocs,2); EXPECT_EQ(managed_allocs,0); EXPECT_EQ(flags,3u);
+  EXPECT_EQ(device_allocs,1); EXPECT_EQ(host_allocs,2); EXPECT_EQ(flags,3u);
   EXPECT_EQ(nr_gpu_device_ptr(s),s);
   EXPECT_EQ(nr_gpu_free(d),0); EXPECT_EQ(nr_gpu_free(s),0); EXPECT_EQ(nr_gpu_free(r),0);
   EXPECT_EQ(frees,3); EXPECT_NE(nr_gpu_free(r),0);
-}
-TEST_F(Platform, ManagedRequiresExplicitOptIn) {
-  setenv("ISAC_GPU_SHARED_MANAGED","1",1);
-  auto r=nr_gpu_alloc(NR_GPU_SHARED_RW,128), s=nr_gpu_alloc(NR_GPU_STAGING,128);
-  EXPECT_EQ(managed_allocs,1); EXPECT_EQ(host_allocs,1);
-  EXPECT_EQ(nr_gpu_free(r),0); EXPECT_EQ(nr_gpu_free(s),0);
 }
 TEST_F(Platform, RegistrationAndTransferContract) {
   char source[128]="GPU", target[128]{};
@@ -148,7 +130,7 @@ TEST_F(Platform, RxFencePreventsEveryMemoryMutationButAllowsTransfers) {
   EXPECT_NE(nr_gpu_register_host(memory[62],128),0);
   EXPECT_NE(nr_gpu_unregister_host(memory[63]),0);
   EXPECT_NE(nr_gpu_free(p),0);
-  EXPECT_EQ(host_allocs,1); EXPECT_EQ(registrations,1); EXPECT_EQ(device_allocs+managed_allocs+frees,0);
+  EXPECT_EQ(host_allocs,1); EXPECT_EQ(registrations,1); EXPECT_EQ(device_allocs+frees,0);
   uint64_t allocated,denied; nr_gpu_memory_stats(&allocated,&denied);
   EXPECT_EQ(allocated,2u); EXPECT_EQ(denied,6u);
   EXPECT_EQ(nr_gpu_copy_async(p,memory[63],128,nullptr),0);

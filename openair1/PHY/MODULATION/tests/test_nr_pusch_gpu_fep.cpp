@@ -4,7 +4,7 @@
 // with a spread of amplitudes (uniform +-40 .. +-3000, i.e. rms up to ~1700; real OTA UL captures have rms 290-750), odd and
 // even carrier widths, several windows per batch. KNOWN LIMIT (measured): from uniform +-4000 (rms ~2300, white, all samples)
 // the CPU dft4096 saturates in intermediate butterflies in a way the kernel (nr_exact::fft4096, shared with the PDSCH exact
-// FEP) does not reproduce: ~128-512 of 4096 bins differ. The runtime check of ISAC_UL_GPU_FEP_CHECK guards that case.
+// FEP) does not reproduce: ~128-512 of 4096 bins differ. The runtime check of every 16th call guards that case.
 // Skipped (exit 77 / GTEST_SKIP) without a CUDA device, a coherent-memory platform or the module.
 #include "gtest/gtest.h"
 #include <dlfcn.h>
@@ -50,7 +50,6 @@ static void apply_nr_rotation_symbol_RX(const int symbols_per_slot, const int sl
 TEST(UlGpuFep, BitExactVsCpu)
 {
   ASSERT_EQ(0, load_dftslib());
-  setenv("ISAC_UL_GPU_FEP", "1", 1);
   const nr_pusch_gpu_fep_api_t *api = nr_pusch_gpu_fep_load();
   if (!api) GTEST_SKIP() << "libpdsch_gpu.so not loadable";
   const int N = 4096, ncp = 288, div = 8, nsym = 14, spsf = 2;
@@ -99,56 +98,11 @@ TEST(UlGpuFep, BitExactVsCpu)
   EXPECT_GT(st[0], 0u);
 }
 
-// ULST ISAC_UL_GPU_FEP_DEADLINE: with a 1 us deadline every call is abandoned. The caller's rows must stay untouched even
-// after the abandoned kernel has finished (it wrote the context's staging rows), the call must report the deadline (-4)
-// or the hold (-1, an abandoned call still on the GPU), and once the streams drain the contexts are reclaimed.
-// Own process (init is once per process): ULFEP_DEADLINE_TEST=1 ./test_nr_pusch_gpu_fep --gtest_filter=UlGpuFep.Deadline*
-TEST(UlGpuFep, DeadlineAbandonLeavesRowsUntouched)
-{
-  if (!getenv("ULFEP_DEADLINE_TEST")) GTEST_SKIP() << "ULFEP_DEADLINE_TEST not set";
-  setenv("ISAC_UL_GPU_FEP", "1", 1);
-  setenv("ISAC_UL_GPU_FEP_DEADLINE", "1", 1);
-  setenv("ISAC_UL_GPU_FEP_KCHARGE", "1", 1);
-  const nr_pusch_gpu_fep_api_t *api = nr_pusch_gpu_fep_load();
-  if (!api) GTEST_SKIP() << "libpdsch_gpu.so not loadable";
-  if (api->init(4, 4096, 288, 8, 100, 1) != 0) GTEST_SKIP() << "no CUDA device / coherent host memory";
-  const int n = 14;
-  std::vector<std::vector<c16_t>> iq(4, std::vector<c16_t>(69632, c16_t{100, -50}));
-  std::vector<std::vector<c16_t>> out(4 * n, std::vector<c16_t>(4096, c16_t{0x1234, 0x5678}));
-  std::vector<nr_pusch_gpu_fep_item_t> it(n);
-  for (int i = 0; i < n; i++) {
-    memset(&it[i], 0, sizeof(it[i]));
-    for (int a = 0; a < 4; a++) { it[i].src[a] = (const int16_t *)&iq[a][i * 300]; it[i].dst[a] = (int16_t *)out[i * 4 + a].data(); }
-    it[i].rotate = 1; it[i].rot[0] = 20000; it[i].rot[1] = 3000;
-  }
-  int dl = 0, hold = 0;
-  for (int r = 0; r < 60; r++) {
-    const int rc = api->run(it.data(), n, 217, 4096 - 217 * 6);
-    ASSERT_TRUE(rc == -4 || rc == -1) << "rc " << rc;
-    dl += rc == -4; hold += rc == -1;
-    /* after a deadline 20 ms: the abandoned kernel drains, the next call reclaims it and holds the CPU for as long
-     * again (~20 ms), which the following 2 ms-spaced calls see as holds */
-    usleep(rc == -4 ? 20000 : 2000);
-  }
-  usleep(50000);
-  for (auto &row : out)
-    for (auto &x : row) ASSERT_TRUE(x.r == 0x1234 && x.i == 0x5678) << "caller row written by an abandoned launch";
-  uint64_t st[13];
-  api->stats(st);
-  EXPECT_EQ(0u, st[0]);              /* no call completed */
-  EXPECT_EQ((uint64_t)dl, st[10]);   /* deadline */
-  EXPECT_EQ((uint64_t)hold, st[11]); /* hold */
-  EXPECT_GE(st[12], (uint64_t)dl - 1); /* every abandoned context came back */
-  EXPECT_GE(dl, 3);
-  EXPECT_GE(hold, 20);                 /* the latency-proportional hold after each reclaim */
-}
-
 // Latency of one batch (ULFEP_BENCH=1 to run): n items x 4 antennas, host-memory in/out, as the decoder calls it.
 TEST(UlGpuFep, Bench)
 {
   if (!getenv("ULFEP_BENCH")) GTEST_SKIP() << "ULFEP_BENCH not set";
   ASSERT_EQ(0, load_dftslib());
-  setenv("ISAC_UL_GPU_FEP", "1", 1);
   const nr_pusch_gpu_fep_api_t *api = nr_pusch_gpu_fep_load();
   ASSERT_TRUE(api);
   ASSERT_EQ(0, api->init(4, 4096, 288, 8, 100, 500));

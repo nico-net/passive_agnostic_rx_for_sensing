@@ -13,7 +13,6 @@
 #include "nr_mmse_exact.h" /* MMSE3GPU: mode 3, the CPU's own source */
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
-#include "nr_pdsch_gpu_prio.cuh"
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include <atomic>
 #include <chrono>
@@ -47,12 +46,10 @@ struct Ctx {
   double2 *xs, *sd; /* EVM: per-RE zero-forcing solution and decisions [14][4][EXT] */
   double *part, *sum; /* EVM block partials [14][EVM_NCH][EVM_P] and per-symbol sums [14][EVM_P] */
   nrd_c16 *hy, *hh;   /* pinned host copies of y/h for the CPU EVM fallback (ISAC_PDSCH_GPU_EXACT_DEMOD_EVM=0) */
-  cudaEvent_t ev[13];
   cudaStream_t s2;           /* EVM chain, concurrent with compensation/MMSE/LLR */
-  cudaEvent_t fork, join; /* ISAC_PDSCH_GPU_EXACT_DEMOD_PROF=1: per-kernel GPU time */
+  cudaEvent_t fork, join; /* fork/join of the EVM chain on s2 */
   Shared *sh;  /* pinned host copy, filled by one DMA at the end */
   Shared *dsh; /* device copy the kernels use (host-pinned memory is uncached for the GPU) */
-  cudaStream_t s_rt, s2_rt, s_lo, s2_lo; /* GPUSCHED ISAC_PDSCH_GPU_PRIO: real-time and low-priority stream pairs */
 };
 constexpr int PASS_INST = NR_GPU_PASS_RING;
 static Ctx g_ctx[CTX + PASS_INST + 1]; /* [CTX + PASS_INST]: the test-only nr_pdsch_gpu_demod_dev context, [CTX + i]: that of graph-pass instance i; never handed out by acquire() */
@@ -67,8 +64,7 @@ static inline const JobK &K(const nr_gpu_demod_job_t &j) { return *reinterpret_c
 #define NRD_JOB(jk) (reinterpret_cast<const nr_gpu_demod_job_t *>(&(jk))->jref ? *reinterpret_cast<const nr_gpu_demod_job_t *>(&(jk))->jref : *reinterpret_cast<const nr_gpu_demod_job_t *>(&(jk)))
 #define NRD_NVAR(j) ((j).nvar_dev ? *(j).nvar_dev : (j).nvar)
 static std::atomic<unsigned> g_busy{0};
-static int g_ok, g_prof, g_prio;
-static std::atomic<unsigned long long> g_prof_ns[13], g_prof_n;
+static int g_ok;
 
 /* DECTAIL: pool exhaustion is counted (DEMOD_POOL_WAIT lines, first 30 waits above 1 ms, and the waits/total in the first line). */
 static std::atomic<unsigned> g_pool_waits{0}, g_pool_log{0};
@@ -1475,24 +1471,14 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
     memset(x.sh, 0, sizeof(Shared));
     if (cudaMemset(x.dsh, 0, sizeof(Shared)) != cudaSuccess)
       return -1;
-    for (int k = 0; k < 13; k++)
-      if (cudaEventCreate(&x.ev[k]) != cudaSuccess)
-        return -1;
     if ((!nr_gpu_green_stream(&x.s2, hi, true, c) && cudaStreamCreateWithPriority(&x.s2, cudaStreamNonBlocking, hi) != cudaSuccess)
         || cudaEventCreateWithFlags(&x.fork, cudaEventDisableTiming) != cudaSuccess
         || cudaEventCreateWithFlags(&x.join, cudaEventDisableTiming) != cudaSuccess)
-      return -1;
-    x.s_rt = x.s_lo = x.s;
-    x.s2_rt = x.s2_lo = x.s2;
-    if (nr_pdsch_gpu_prio_on() && (!nr_pdsch_gpu_low_stream(&x.s_lo, lo, hi) || !nr_pdsch_gpu_low_stream(&x.s2_lo, lo, hi)))
       return -1;
   }
   for (int i = 0; i < PASS_INST; i++)
     if (nr_gpu_buf_alloc(&g_jb[i], sizeof(JobK)) != 0)
       return -1;
-  g_prio = nr_pdsch_gpu_prio_on();
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_EXACT_DEMOD_PROF not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_prof = getenv("ISAC_PDSCH_GPU_EXACT_DEMOD_PROF") && atoi(getenv("ISAC_PDSCH_GPU_EXACT_DEMOD_PROF")) == 1;
   /* first launches before the RX fence (module load, kernel images) */
   nr_gpu_demod_job_t j = {};
   j.sym_mask = 0;
@@ -1609,28 +1595,17 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
     return -1;
   const int c = acquire();
   Ctx &x = g_ctx[c];
-  if (g_prio) { /* the context is ours and idle: this body's class picks the stream pair */
-    x.s = nr_pdsch_gpu_low ? x.s_lo : x.s_rt;
-    x.s2 = nr_pdsch_gpu_low ? x.s2_lo : x.s2_rt;
-  }
   const nr_gpu_demod_job_t jj = *j;
   const int gx = (int)((jj.ext + 127) / 128);
-  if (g_prof) cudaEventRecord(x.ev[0], x.s);
   k_gather<<<dim3(gx, NSYM), 128, 0, x.s>>>(K(jj), x.y, x.h);
-  if (g_prof) cudaEventRecord(x.ev[1], x.s);
   k_level<<<jj.nl * jj.nbRx, 256, 0, x.s>>>(K(jj), x.h, x.dsh); /* + the decision (last block) */
-  if (g_prof) cudaEventRecord(x.ev[2], x.s);
   k_mask_pw<<<NSYM, 256, 0, x.s>>>(K(jj), x.h, x.dsh);
-  if (g_prof) cudaEventRecord(x.ev[3], x.s);
   if (jj.nl == 1 && jj.align)
     launch_align(jj, x, x.s);
-  if (g_prof) cudaEventRecord(x.ev[4], x.s);
   if (jj.want_evm) {
-    cudaStream_t es = g_prof ? x.s : x.s2;
-    if (!g_prof) {
-      cudaEventRecord(x.fork, x.s);
-      cudaStreamWaitEvent(x.s2, x.fork, 0);
-    }
+    cudaStream_t es = x.s2;
+    cudaEventRecord(x.fork, x.s);
+    cudaStreamWaitEvent(x.s2, x.fork, 0);
     k_evm_zero<<<NSYM, 288, 0, es>>>(x.dsh);
     if (jj.evm_fp64) {
       if (jj.nl > 2)
@@ -1638,10 +1613,8 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
       else
         k_evm1<double, 2><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.dsh, x.part, jj.evm_erase);
       k_evm_fold<<<NSYM, 64, 0, es>>>(K(jj), x.part, EVM_P1, 5, x.sum);
-      if (g_prof) cudaEventRecord(x.ev[10], es);
       k_evm2<double><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.sd, x.dsh, x.part, x.sum);
       k_evm_fold<<<NSYM, 64, 0, es>>>(K(jj), x.part, EVM_P2, EVM_NP2 + 24, x.sum);
-      if (g_prof) cudaEventRecord(x.ev[11], es);
       k_evm3<double><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.sd, x.dsh, x.part, x.sum);
     } else {
       if (jj.nl > 2)
@@ -1649,35 +1622,25 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
       else
         k_evm1<float, 2><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.dsh, x.part, jj.evm_erase);
       k_evm_fold<<<NSYM, 64, 0, es>>>(K(jj), x.part, EVM_P1, 5, x.sum);
-      if (g_prof) cudaEventRecord(x.ev[10], es);
       k_evm2<float><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.sd, x.dsh, x.part, x.sum);
       k_evm_fold<<<NSYM, 64, 0, es>>>(K(jj), x.part, EVM_P2, EVM_NP2 + 24, x.sum);
-      if (g_prof) cudaEventRecord(x.ev[11], es);
       k_evm3<float><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.sd, x.dsh, x.part, x.sum);
     }
     k_evm_fold<<<NSYM, 64, 0, es>>>(K(jj), x.part, EVM_P3, 20, x.sum);
     k_evm_out<<<NSYM, 32, 0, es>>>(K(jj), x.dsh, x.sum);
-    if (!g_prof)
-      cudaEventRecord(x.join, x.s2);
+    cudaEventRecord(x.join, x.s2);
   }
-  if (g_prof) cudaEventRecord(x.ev[5], x.s);
   launch_tail(jj, x, x.s, gx);
-  if (g_prof) { /* PROF: comp= is the fused tail; mmse2 / kappa / llr read 0 */
-    cudaEventRecord(x.ev[6], x.s);
-    cudaEventRecord(x.ev[7], x.s);
-    cudaEventRecord(x.ev[8], x.s);
-  }
-  if (g_prof) cudaEventRecord(x.ev[9], x.s);
   if (jj.want_kappa && !jj.want_evm) { /* CPU EVM fallback reads the extraction buffers */
     cudaMemcpyAsync(x.hy, x.y, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT, cudaMemcpyDeviceToHost, x.s);
     cudaMemcpyAsync(x.hh, x.h, sizeof(nrd_c16) * NSYM * 16 * EXT, cudaMemcpyDeviceToHost, x.s);
   }
-  const bool defer = jj.want_evm && jj.evm_defer && !g_prof;
+  const bool defer = jj.want_evm && jj.evm_defer;
   if (defer) { /* the LLRs need only the main stream; the EVM sums follow on s2 (nr_pdsch_gpu_demod_evm_wait) */
     cudaMemcpyAsync(x.sh, x.dsh, offsetof(Shared, evm), cudaMemcpyDeviceToHost, x.s);
     cudaMemcpyAsync(x.sh->evm, x.dsh->evm, sizeof(x.sh->evm), cudaMemcpyDeviceToHost, x.s2);
   } else {
-    if (jj.want_evm && !g_prof)
+    if (jj.want_evm)
       cudaStreamWaitEvent(x.s, x.join, 0);
     cudaMemcpyAsync(x.sh, x.dsh, sizeof(Shared), cudaMemcpyDeviceToHost, x.s);
   }
@@ -1698,28 +1661,6 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
     g_ok = 0;
     nr_pdsch_gpu_demod_release(c);
     return -1;
-  }
-  if (g_prof) {
-    for (int k = 0; k < 9; k++) {
-      float ms = 0.f;
-      if (cudaEventElapsedTime(&ms, x.ev[k], x.ev[k + 1]) == cudaSuccess)
-        g_prof_ns[k] += (unsigned long long)(ms * 1e6f);
-    }
-    if (jj.want_evm) {
-      float a = 0.f, b = 0.f, c = 0.f;
-      if (cudaEventElapsedTime(&a, x.ev[4], x.ev[10]) == cudaSuccess && cudaEventElapsedTime(&b, x.ev[10], x.ev[11]) == cudaSuccess
-          && cudaEventElapsedTime(&c, x.ev[11], x.ev[5]) == cudaSuccess) {
-        g_prof_ns[10] += (unsigned long long)(a * 1e6f);
-        g_prof_ns[11] += (unsigned long long)(b * 1e6f);
-        g_prof_ns[12] += (unsigned long long)(c * 1e6f);
-      }
-    }
-    const unsigned long long n = ++g_prof_n;
-    if (n % 2000 == 0)
-      fprintf(stderr, "GPU_EXACT_DEMOD_PROF n=%llu us/grant gather=%.1f level=%.1f mask_pw=%.1f align=%.1f evm=%.1f comp=%.1f mmse2=%.1f kappa=%.1f llr=%.1f (evm1 %.1f evm2 %.1f evm3 %.1f)\n", n,
-              g_prof_ns[0] / 1e3 / n, g_prof_ns[1] / 1e3 / n, g_prof_ns[2] / 1e3 / n, g_prof_ns[3] / 1e3 / n, g_prof_ns[4] / 1e3 / n,
-              g_prof_ns[5] / 1e3 / n, g_prof_ns[6] / 1e3 / n, g_prof_ns[7] / 1e3 / n, g_prof_ns[8] / 1e3 / n, g_prof_ns[10] / 1e3 / n,
-              g_prof_ns[11] / 1e3 / n, g_prof_ns[12] / 1e3 / n);
   }
   const nrd_decision d = x.sh->d;
   j->log2_maxh = d.log2_maxh;

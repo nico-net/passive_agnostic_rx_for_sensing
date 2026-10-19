@@ -124,12 +124,7 @@ void ul_hyp_cache_clear(void)
 
 int nr_gpu_pass_ul_hyp_lookup(uint16_t rnti, uint32_t epoch, int64_t abs_slot, ul_hyp_t *h)
 {
-  static int max_age = -1;
-  if (max_age < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_UL_HYP_MAX_AGE not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_UL_HYP_MAX_AGE");
-    max_age = e ? atoi(e) : 2000;
-  }
+  const int max_age = 2000;
   ul_hyp_t t;
   if (!ul_hyp_cache_get(rnti, &t)) {
     atomic_fetch_add_explicit(&g_hyp_miss, 1, memory_order_relaxed);
@@ -502,16 +497,8 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
 }
 
 /* ------------------------------------------------------------------ warm-up ------------------------------------------------------------------ */
-static int env_list(const char *name, const char *dflt, int *v, int max)
-{
-  const char *e = getenv(name);
-  char buf[64];
-  snprintf(buf, sizeof(buf), "%s", e && *e ? e : dflt);
-  int n = 0;
-  for (char *s = strtok(buf, ","); s && n < max; s = strtok(NULL, ","))
-    v[n++] = atoi(s);
-  return n;
-}
+static int g_warm_budget = 160;
+void nr_gpu_pass_ul_test_budget(int classes) { g_warm_budget = classes; }
 
 int nr_gpu_pass_ul_warm(void *h, int nbrx, int fp32)
 {
@@ -526,11 +513,9 @@ int nr_gpu_pass_ul_warm(void *h, int nbrx, int fp32)
     U.try_ = NULL;
     return 0;
   }
-  int nd[4];
-  const int nnd = env_list("ISAC_UL_GPU_PASS_NDMRS", "2,1", nd, 4);
-  /* DEFERRED/DO NOT USE: ISAC_UL_GPU_PASS_CLASSES not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *ce = getenv("ISAC_UL_GPU_PASS_CLASSES");
-  const int budget = ce ? atoi(ce) : 160;
+  static const int nd[] = {2, 1};
+  const int nnd = 2;
+  const int budget = g_warm_budget;
   static const int nrbs[] = {136, 217, 96, 48, 24, 12, 6, 273};
   int made = 0, failed = 0;
   for (int di = 0; di < nnd; di++)

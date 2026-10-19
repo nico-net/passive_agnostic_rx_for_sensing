@@ -40,7 +40,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
  * Idempotent: it rewrites the same constants. */
 static pthread_once_t g_crc_once = PTHREAD_ONCE_INIT;
 static const nr_td_cb0_gpu_api_t *g_gpu; /* loaded module, NULL = not loaded */
-static int g_gpu_on = -1;                /* -1: decide from NR_GPU_CB0 at the first batch */
+static int g_gpu_on;                     /* GPU de-matching: off until nr_td_cb0_use_gpu(1) */
 
 void nr_td_cb0_set_ldpc_decoder(void *ldpc_decoder_fn)
 {
@@ -587,7 +587,7 @@ void nr_td_cb0_get_stats(nr_td_cb0_stats_t *s)
 
 /* ---- CUDA LDPC through libldpc_cuda.so's public TB entry (G1's worker queue / pool / breaker / fallback) ---- */
 static int32_t (*g_cuda_dec)(nrLDPC_slot_decoding_parameters_t *);
-static int g_cuda_on = -1; /* -1: decide from NR_TD_CB0_CUDA_LDPC at the first batch */
+static int g_cuda_on; /* CUDA LDPC: off until nr_td_cb0_use_cuda_ldpc(1) */
 static tpool_t g_inline_pool; /* no worker threads: the plugin's per-segment prep runs inline in our worker */
 
 static int cuda_load(void)
@@ -751,7 +751,7 @@ int nr_td_cb0_batch(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *ou
 {
   return cb0_batch_impl(items, n, out, false);
 }
-/* The CPU backend (nr_td_cb0_batch.h): no CUDA LDPC, no GPU de-matching, whatever NR_TD_CB0_CUDA_LDPC / NR_GPU_CB0 say. */
+/* The CPU backend (nr_td_cb0_batch.h): no CUDA LDPC, no GPU de-matching, whatever nr_td_cb0_use_cuda_ldpc / nr_td_cb0_use_gpu say. */
 int nr_td_cb0_batch_cpu(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out)
 {
   return cb0_batch_impl(items, n, out, true);
@@ -765,7 +765,7 @@ int nr_td_cb0_get_threads(void)
 }
 
 /* cb0_batch_impl: core of the CB0 batch decoder: computes the metadata of each item, removes exact duplicates (same key after sorting), decodes the unique items through the CUDA LDPC, the GPU dematch or the CPU worker pool, and copies the verdicts back to every item.
- *   Device errors make the whole CUDA batch inconclusive. The CPU path releases g_lock while decoding (the decoder is reentrant). Environment: NR_GPU_CB0 and NR_TD_CB0_CUDA_LDPC select the backends when not forced. Returns the number of items that passed.
+ *   Device errors make the whole CUDA batch inconclusive. The CPU path releases g_lock while decoding (the decoder is reentrant). nr_td_cb0_use_gpu / nr_td_cb0_use_cuda_ldpc select the backends when not forced (both off by default). Returns the number of items that passed.
  *   Callers: nr_td_cb0_batch() (default backends) and nr_td_cb0_batch_cpu() (forced CPU).
  */
 static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out, bool force_cpu)
@@ -840,16 +840,6 @@ static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result
   pthread_mutex_lock(&g_lock);
   struct timespec tl0;
   clock_gettime(CLOCK_MONOTONIC, &tl0); /* compute time only: not the wait for another thread's batch */
-  if (!force_cpu && g_gpu_on < 0) {
-    /* DEFERRED/DO NOT USE: NR_GPU_CB0 not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("NR_GPU_CB0");
-    use_gpu_locked(e && atoi(e) == 1);
-  }
-  if (!force_cpu && g_cuda_on < 0) {
-    /* DEFERRED/DO NOT USE: NR_TD_CB0_CUDA_LDPC not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("NR_TD_CB0_CUDA_LDPC");
-    use_cuda_locked(e && atoi(e) == 1);
-  }
   if (nr > 0 && g_cuda_on == 1 && !force_cpu) {
     cb0_cuda_job_t j = {.items = ritem, .meta = rmeta, .out = rout, .n = nr, .Emax = Emax};
     atomic_init(&j.next, 0);
