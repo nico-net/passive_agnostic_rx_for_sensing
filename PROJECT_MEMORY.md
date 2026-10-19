@@ -4616,9 +4616,9 @@ Correction to the brief: the 13:36–14:25 window is **merge19 (`uu`, M) vs merg
 - GPU stream priority (`GPU_PRIO`, 10-18 18:35, n = 3 per cell): no gain; eVP3 13.2 ms.
 - FP32 GPU pass (afternoon 10-18, `t26fE`): DL p99 worse on both cells (median of p99: TIM 4.22, Vodafone 5.98 ms). Rejected.
 - Core plan K5 (`t26yE`, 10-18 afternoon): UL p99 1.76 / 2.27 ms (TIM / Vodafone medians), DL median worse (+8 % TIM). Frozen does not use it.
-- CSI-RS discovery off: [UNVERIFIED] the only discovery-off run in the reports (10-18 21:20, Test C) collapsed decoding (146–705 real grants vs 12–46k, UL 0), and its tail result was inconclusive. A "no median change" result is not in the reports. Source needed.
-- Fix B' alone: [UNVERIFIED] `FIX-B-PDCCHGPU-20261019.md` says B' was not measured on air. No on-air A/B of B' alone was found. Source needed.
-- A+D alone did not shorten DL decode on air: [UNVERIFIED] no on-air A/B of A+D alone was found. The FIX-AD report is bench only. Source needed.
+- CSI-RS discovery off (probes ON): no DL median change. [MEASURED, DGX OTA 2026-10-19 02:18-02:30, TIM, LOW LOAD, csd/int16-fixad build, n=2 per arm, runs ab_jjgN1/N2 (ISAC_CSIRS_DISC=0) vs ab_jjgK1/K2] decode p50 648-665 vs 653-668 us; GPU span bucket 256-512 us in both; p99 mixed (inconclusive). (Separate from Test C 10-18 21:20, where discovery AND probes off collapsed decoding: 146-705 real grants vs 12-46k, UL 0.)
+- Fix B' alone: no measurable arr2enq gain. [MEASURED, DGX OTA 2026-10-19 02:14, TIM, LOW LOAD, n=1, run ab_jjiPG (csd/int16-pdcchgpu b86a6a8d9e)] arr2enq p50 348 us vs frozen 351-352 us (ab_jjTF1/TF2, same night).
+- A+D alone did not shorten DL decode on air. [MEASURED, DGX OTA 2026-10-19, TIM, csd/int16-fixad 9326f8b6fa/21802a1d74] decode p50 639 us (ab_jjiAD 02:08, LOW LOAD, n=1) and 653-668 us (ab_jjgK1/K2) vs frozen 531-543 us (ab_jjTF1/TF2, same night); daytime 09:00 ab_jjsT1 decode 606 us with gp= GPU span 329 us p50 (TIM), 441 us (Vodafone ab_jjsV1). UL improved: p50 0.49-0.58 ms vs 0.64-0.71 frozen.
 
 **Branch map.**
 - `csd/int16-merge19` (d79b8b7bc5): A+D + tail 1-2-3 + DM-RS SNR gate + B' + HARQ combine in the pass (`bef9daecc1`) + retries with combining (`74a84d3ff4`) + PDCCH work from `csd/int16-pdcchinv` (fast-SSC, spin hand-off, fast lane, early start `bc4c8e2acd`).
