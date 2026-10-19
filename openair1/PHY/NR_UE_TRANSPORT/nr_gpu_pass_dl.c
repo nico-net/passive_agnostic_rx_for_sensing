@@ -445,8 +445,11 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     nr_gpu_pass_ul_warm(h, fp->nb_antennas_rx, G.fp32);
 }
 
+/* per-grant on-air breakdown of the last DL pass of this thread, printed and zeroed by the EVMGRANT line (gp=): total, before try, try, prep, launch, gstart, gspan (us) */
+__thread uint32_t nr_gp_tt[7];
 int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
 {
+  memset(nr_gp_tt, 0, sizeof(nr_gp_tt));
   if (!nr_gpu_pass_active())
     return fb(FB_OFF);
   {
@@ -605,7 +608,13 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   out->r.qm_row = out->qm_row;
   j->llr_out = out->llr;
   atomic_fetch_add_explicit(&G.runs, 1, memory_order_relaxed);
+  const uint64_t t_try = nr_gpu_pass_now_ns();
   const int rc = G.try_(j, &out->r);
+  {
+    const uint64_t t_ret = nr_gpu_pass_now_ns();
+    nr_gp_tt[0] = (uint32_t)((t_ret - t_entry) / 1000); nr_gp_tt[1] = (uint32_t)((t_try - t_entry) / 1000); nr_gp_tt[2] = (uint32_t)((t_ret - t_try) / 1000);
+    nr_gp_tt[3] = out->r.prep_ns / 1000; nr_gp_tt[4] = out->r.launch_ns / 1000; nr_gp_tt[5] = out->r.gstart_ns / 1000; nr_gp_tt[6] = out->r.gspan_ns / 1000;
+  }
   if (rc != 0) /* unseen class / no free instance / unsupported variant / error: counted by the module */
     return fb(FB_MODULE);
   for (int m = 0; m < 14; m++)
