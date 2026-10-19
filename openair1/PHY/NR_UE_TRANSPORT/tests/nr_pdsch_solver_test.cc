@@ -22,6 +22,7 @@ static const int kOff = [] { for (const char *k : {"REUSE", "PRIOR_CRC", "PRIOR_
                               setenv((std::string("ISAC_PDSCH_SOLVER_") + k).c_str(), "0", 1);
                             return 0; }();
 static const int kEnable = setenv("ISAC_PDSCH_SOLVER", "1", 1);
+static const int kRvcOff = setenv("ISAC_DCI11_RV_CONSISTENCY", "0", 1); // default on since 2026-10-19; RvcSetup() turns it on per test
 static const int kLcEnable = setenv("ISAC_RNTI_LAYOUT_CACHE", "1", 1); // read once; only nr_pdsch_solver_layout_cache() looks at it
 /* HIGHMCS: the receiver-choice flags are read once per process; set them for the whole suite (the OTA env has PER_RNTI=1; the
  * SNR rule only engages once nr_pdsch_solver_note_snr() has fed 3 samples per receiver, which only ReceiverPickFollowsSnrWhenCrcTies does) */
@@ -735,7 +736,7 @@ void NoteDcis(uint16_t rnti, int from, int to)
 }
 void RvcSetup(bool on)
 {
-  on ? setenv("ISAC_DCI11_RV_CONSISTENCY", "1", 1) : unsetenv("ISAC_DCI11_RV_CONSISTENCY");
+  setenv("ISAC_DCI11_RV_CONSISTENCY", on ? "1" : "0", 1);
   nr_pdsch_solver_reset();
   nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
   nr_pdsch_solver_set_hq_fn(hq_fn, nullptr);
@@ -770,7 +771,7 @@ TEST(PdschSolverRvc, ShiftedLayoutLosesTheRepresentative)
     ASSERT_GT(SolveGrants(0x5264, c, 0, 16, 400, rng), 0);
     EXPECT_EQ(nr_pdsch_solver_rep(0x5264), on ? 11 : 10) << "flag " << on;
   }
-  unsetenv("ISAC_DCI11_RV_CONSISTENCY");
+  setenv("ISAC_DCI11_RV_CONSISTENCY", "0", 1);
   nr_pdsch_solver_reset();
 }
 
@@ -793,7 +794,7 @@ TEST(PdschSolverRvc, SolvedRntiIsReselectedByLaterHarqEvidenceAndRescueNotes)
   ASSERT_EQ(nr_pdsch_solver_rep(0x5265), 10);
   NoteDcis(0x5265, 0, 64);
   EXPECT_EQ(nr_pdsch_solver_rep(0x5265), 11);
-  unsetenv("ISAC_DCI11_RV_CONSISTENCY");
+  setenv("ISAC_DCI11_RV_CONSISTENCY", "0", 1);
   nr_pdsch_solver_reset();
 }
 
@@ -812,7 +813,7 @@ TEST(PdschSolverRvc, McsZeroSolutionSeedsTheCellOnlyOnceHarqVerified)
     NoteDcis(0x00a1, 0, 64);
     EXPECT_EQ(FirstAddPos(0x00b3, c, rng), 2) << "HARQ readings of the representative verify it";
   }
-  unsetenv("ISAC_DCI11_RV_CONSISTENCY");
+  setenv("ISAC_DCI11_RV_CONSISTENCY", "0", 1);
   setenv("ISAC_PDSCH_SOLVER_REUSE", "0", 1);
   nr_pdsch_solver_reset();
 }
@@ -873,4 +874,47 @@ TEST(RntiLayoutCache, HitSlotClassSeparationAndFailInvalidation)
   // a reset (new epoch) forgets everything
   nr_pdsch_solver_reset();
   EXPECT_EQ(nr_pdsch_solver_layout_cache(rnti, kFull, 8, ids, 256), -1);
+}
+
+/* CRC-BUGS 2026-10-19: DCIRV is on by default (unset env), and "=0" turns it off. */
+TEST(PdschSolverRvc, OnByDefault)
+{
+  unsetenv("ISAC_DCI11_RV_CONSISTENCY");
+  nr_pdsch_solver_reset();
+  EXPECT_TRUE(nr_pdsch_solver_rvc_on());
+  setenv("ISAC_DCI11_RV_CONSISTENCY", "0", 1);
+  nr_pdsch_solver_reset();
+  EXPECT_FALSE(nr_pdsch_solver_rvc_on());
+}
+
+/* CRC-BUGS 2026-10-19: a solved RNTI whose representative is in no reading of a DCI gets no full decode of another reading (it used to
+ * decode reading 0, another layout's MCS/NDI/rv: Vodafone OTA 787 such decodes, 1 CRC pass); a DCI that has it decodes as before. */
+TEST(PdschSolver, SolvedRntiNeverFullDecodesAReadingWithoutItsRepresentative)
+{
+  RvcSetup(false);
+  std::mt19937 rng(6);
+  const Cell c = RvcCell();
+  ASSERT_GT(SolveGrants(0x6ba9, c, 0, 16, 400, rng), 0);
+  const int rep = nr_pdsch_solver_rep(0x6ba9);
+  ASSERT_GE(rep, 10);
+  std::vector<uint16_t> other = {30, 31}, with = {(uint16_t)rep};
+  nr_pdsch_solver_reading_t rd_other[1] = {{other.data(), 2, 16, 1, 1, 0}};
+  nr_pdsch_solver_reading_t rd_both[2] = {{other.data(), 2, 16, 1, 1, 0}, {with.data(), 1, 16, 1, 1, 0}};
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+  const nr_dci_bits_t p = {{0, 0, 0}};
+  int n = nr_pdsch_solver_plan(0x6ba9, p, 49, 0, 2, rd_other, 1, 8, v);
+  for (int i = 0; i < n; i++) {
+    EXPECT_TRUE(v[i].probe) << "only refinement probes on a DCI without the representative's reading";
+    nr_pdsch_solver_feedback(v[i].token, false, false);
+  }
+  n = nr_pdsch_solver_plan(0x6ba9, p, 49, 0, 2, rd_both, 2, 8, v);
+  int full = 0;
+  for (int i = 0; i < n; i++) {
+    full += !v[i].probe && v[i].reading == 1;
+    EXPECT_FALSE(!v[i].probe && v[i].reading == 0);
+    nr_pdsch_solver_feedback(v[i].token, false, false);
+  }
+  EXPECT_EQ(full, 1) << "the representative's reading is the full decode";
+  setenv("ISAC_DCI11_RV_CONSISTENCY", "0", 1);
+  nr_pdsch_solver_reset();
 }

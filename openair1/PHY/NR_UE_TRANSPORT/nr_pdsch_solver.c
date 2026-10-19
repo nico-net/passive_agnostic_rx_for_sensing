@@ -19,9 +19,9 @@
 typedef struct { uint64_t key; uint32_t count; } coverage_entry_t;
 /* internal diagnostic reasons, after the caller-side NR_PDSCH_SOLVER_WHY_* ones */
 enum { W_PLAN = NR_PDSCH_SOLVER_WHY_CALLER_N, W_CSIRS, W_LEADER, W_HOG, W_NLSKIP, W_BACKOFF, W_WIDE, W_PROBES, W_POK, W_PFAIL,
-       W_PNOCRED, W_N };
+       W_PNOCRED, W_NOREP, W_N };
 static const char *const kWhy[W_N] = {"gate", "live", "budget0", "noread", "throttle", "cap", "weak", "plan", "csirs", "leader", "hog",
-                                      "nlskip", "backoff", "wide", "probes", "p_ok", "p_fail", "p_nocred"};
+                                      "nlskip", "backoff", "wide", "probes", "p_ok", "p_fail", "p_nocred", "norep"};
 typedef struct { coverage_entry_t *entries; size_t cap, used; } solver_coverage_t;
 
 typedef struct {
@@ -395,8 +395,9 @@ void nr_pdsch_solver_set_hq_fn(nr_pdsch_solver_hq_fn fn, void *ctx)
 }
 bool nr_pdsch_solver_rvc_on(void)
 {
-  /* DEFERRED/DO NOT USE: ISAC_DCI11_RV_CONSISTENCY not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (g_rvc < 0) g_rvc = getenv("ISAC_DCI11_RV_CONSISTENCY") && atoi(getenv("ISAC_DCI11_RV_CONSISTENCY")) ? 1 : 0;
+  /* default ON since CRC-BUGS 2026-10-19 (=0 turns it off): TIM PCI 923 OTA, 147 of 148 rv != 0 DCIs were read while the representative was
+   * the lowest-id layout among the CRC-equivalent ones, with the MCS 2 bits early; the true layout reads rv 0 on all 6000 RMDCI rows. */
+  if (g_rvc < 0) g_rvc = getenv("ISAC_DCI11_RV_CONSISTENCY") ? (atoi(getenv("ISAC_DCI11_RV_CONSISTENCY")) ? 1 : 0) : 1;
   return g_rvc == 1;
 }
 /* P(X >= k) for X ~ Binomial(n, p) (lower = false) or P(X <= k) (lower = true). */
@@ -1156,10 +1157,14 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   t_scr = r->solved ? r->scr : -1;
   t_comb = comb_pick(r);
   if (r->solved) {
-    int ri = 0;
+    int ri = -1;
     for (int i = 0; i < n_rd; i++)
       if (has_id(&rd[i], r->rep)) { ri = i; break; }
-    if (csirs_slot && r->rm < 0) { /* unknown: probe with and without, learn by CRC */
+    if (ri < 0) {
+      /* no reading of this DCI comes from the solution's layout: decoding reading 0 would use another layout's MCS/NDI/rv (CRC-BUGS
+       * 2026-10-19), so there is no full decode; the refinement probes below still run */
+      r->why[W_NOREP]++;
+    } else if (csirs_slot && r->rm < 0) { /* unknown: probe with and without, learn by CRC */
       for (int k = 1; k >= 0; k--) {
         t_rm = k;
         t_learn_rm = true;

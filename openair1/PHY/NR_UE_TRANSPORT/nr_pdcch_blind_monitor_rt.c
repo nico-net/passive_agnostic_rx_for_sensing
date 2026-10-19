@@ -10357,6 +10357,25 @@ lc_regroup:
         if (rfast) nr_dci11_reading_idx_init(&ridx);
         goto lc_regroup;
       }
+      if (rep >= 0 && rep < nh && s_gid[rep] == 0xff && nrd < SOLVER_READINGS) {
+        /* CRC-BUGS 2026-10-19: the representative can be left without a reading when an earlier layout with the same offset key failed
+         * to parse this DCI (that key's group is then empty). The solver used to fall back to reading 0, i.e. another layout's fields
+         * (Vodafone PCI 415 OTA: 787 of 5282 DCIs of a solved RNTI decoded with MCS/NDI/rv read 4-5 bits early, 1 CRC pass). Parse
+         * the representative on its own, under the same admission rules as the grouping loop. */
+        const nr_dci11_offsets_t *of = &R->off[rep];
+        const unsigned ap = nr_dci_bits_field(&rw->payload, of->total, of->ant_ports, of->ant_ports_bits);
+        const bool dbl = s_dmrs_domain && ((of->ant_ports_bits == 5 && !R->hyp[rep].dmrs_type && ap >= 12)
+                                           || (of->ant_ports_bits == 6 && R->hyp[rep].dmrs_type && ap >= 24));
+        nr_pdcch_blind_result_t pr;
+        if (!dbl && dci11_layout_parse(R, rep, rw, dlen, cfg, &pr) && !pr.vrb_to_prb) {
+          int g = -1;
+          for (int k = 0; k < nrd && g < 0; k++)
+            if (nr_dci11_same_reading(&rparsed[k], &pr, false)) g = k;
+          if (g < 0) { g = nrd++; rparsed[g] = pr; }
+          s_gid[rep] = (uint8_t)g;
+          rcount[g]++;
+        }
+      }
       { /* ISAC_PDSCH_REP_FIELDS=1 (TIMRM, default off): a solved RNTI's grant is decoded with the NDI / rv / HARQ pid its representative layout
          * reads, not those of whichever layout of the same reading (same MCS, allocation, ports) parsed first. Layouts whose MCS fields sit 2 bits
          * apart read the same MCS 0 when the bits before it are zero, but read the rv from different bits: the earlier one takes the NDI as the
