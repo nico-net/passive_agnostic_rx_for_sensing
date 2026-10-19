@@ -138,6 +138,10 @@ typedef struct {
   uint64_t a2s_ns[9];
   int8_t   a2s_kind, a2s_bank;
   uint32_t a2p_ns[NR_A2E_STG]; ///< ISAC_A2E_TRACE + ISAC_PDCCH_TIMING: the DCI's own pass split (see nr_a2e_stg)
+  /// Early start (nr_early_start.h): the DCI was accepted by an EARLY scan job while its slot was still being read. The consumer waits for the
+  /// slot (nr_slot_gate) before it touches the samples. es_sym1 = symbols of the slot complete at acceptance + 1 (0 = not an early grant).
+  bool     slot_gate;
+  uint8_t  es_sym1;
 } nr_pdsch_passive_job_t;
 
 /* ISAC_A2E_TRACE=1: the scan thread's current occasion stamps (set by nr_pdcch_blind_monitor_rt.c, copied into each job at enqueue) */

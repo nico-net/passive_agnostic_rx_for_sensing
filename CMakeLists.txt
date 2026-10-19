@@ -1026,6 +1026,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_record.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_early_start.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/pucch_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/csi_rx.c
@@ -2540,6 +2541,22 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdcch_blind_monitor PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest)
   add_dependencies(tests test_nr_pdcch_blind_monitor)
   add_test(NAME test_nr_pdcch_blind_monitor COMMAND ./test_nr_pdcch_blind_monitor)
+  add_executable(test_nr_polar_fssc ${OPENAIR1_DIR}/PHY/CODING/nrPolar_tools/tests/nr_polar_fssc_test.cc)
+  target_link_libraries(test_nr_polar_fssc PRIVATE polar crc_byte UTIL GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_polar_fssc)
+  add_test(NAME test_nr_polar_fssc COMMAND ./test_nr_polar_fssc)
+  add_executable(test_nr_spin_handoff ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_spin_handoff_test.cc)
+  target_link_libraries(test_nr_spin_handoff PRIVATE GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_spin_handoff)
+  add_test(NAME test_nr_spin_handoff COMMAND ./test_nr_spin_handoff)
+  add_executable(test_nr_pdcch_fast_lane ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_fast_lane_test.cc)
+  target_link_libraries(test_nr_pdcch_fast_lane PRIVATE GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_pdcch_fast_lane)
+  add_test(NAME test_nr_pdcch_fast_lane COMMAND ./test_nr_pdcch_fast_lane)
+  add_executable(test_nr_early_start ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_early_start_test.cc ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_early_start.c)
+  target_link_libraries(test_nr_early_start PRIVATE GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_early_start)
+  add_test(NAME test_nr_early_start COMMAND ./test_nr_early_start)
   add_executable(test_nr_pdcch_scan_fast ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_scan_fast_test.cc)
   target_link_libraries(test_nr_pdcch_scan_fast PRIVATE GTest::gtest_main)
   add_dependencies(tests test_nr_pdcch_scan_fast)

@@ -99,6 +99,9 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
 #include <string.h>
 #include <time.h>
 #include <sched.h>
+#include <sys/prctl.h>
+#include "nr_spin_handoff.h"
+#include "nr_early_start.h"
 #include <sys/resource.h> /* FATTAILS DECSLOW: getrusage(RUSAGE_THREAD) */
 
 #include "common/utils/LOG/log.h"
@@ -423,6 +426,9 @@ static _Atomic int g_real_n; // full-decode (non-probe) entries in the ring; wri
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
 static int             g_idle;   /* consumers blocked on g_cv, under g_lock */
+/* Timer-then-spin hand-off scan -> PDSCH consumer (nr_spin_handoff.h): grants show up a scan-latency after the slot arrival. */
+static nr_spin_pred_t  g_spin_pred;
+extern _Atomic long nr_ue_diag_producer_wall_ns;
 static bool            g_spread; /* ISAC_PDSCH_SLOT_SPREAD, read once at queue start */
 
 static _Atomic uint64_t g_queued        = 0;
@@ -1478,6 +1484,10 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
   const long slots_per_frame = fp->slots_per_frame;
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d started\n", idx);
+  prctl(PR_SET_TIMERSLACK, 1UL);
+  nr_spin_acct_t spin_acct;
+  nr_spin_acct_init(&spin_acct);
+  nr_spin_pred_init(&g_spin_pred, 10000000ull / (uint64_t)slots_per_frame, &nr_ue_diag_producer_wall_ns); /* idempotent: same values from every consumer */
   nr_pdsch_passive_decode_pin_prewarm(ue); /* DECODETIME: ISAC_PDSCH_GPU_HOST_PIN=1 only */
   /* DEFERRED/DO NOT USE: ISAC_PDSCH_SLOT_TIMING not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *slot_timing_env = getenv("ISAC_PDSCH_SLOT_TIMING");
@@ -1519,6 +1529,23 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       /* Timed wait so a stop cannot be missed if it lands between the predicate and the wait. */
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
+      uint64_t until = 0;
+      const nr_spin_action_t act = nr_spin_plan(&g_spin_pred, &spin_acct, nr_spin_now_ns(), &until);
+      if (act == NR_SPIN_SPIN) {
+        g_idle--; /* spinning is not idle for the slot-spread accounting */
+        pthread_mutex_unlock(&g_lock);
+        nr_spin_run(&g_spin_pred, &spin_acct, &g_count, until);
+        pthread_mutex_lock(&g_lock);
+        g_idle++;
+        continue;
+      }
+      if (act == NR_SPIN_SLEEP && until - nr_spin_now_ns() < 20ull * 1000 * 1000) {
+        ts.tv_sec = (time_t)(until / 1000000000ull);
+        ts.tv_nsec = (long)(until % 1000000000ull);
+        pthread_cond_timedwait(&g_cv, &g_lock, &ts);
+        nr_spin_note_wake(&spin_acct, until, nr_spin_now_ns());
+        continue;
+      }
       ts.tv_nsec += 20 * 1000 * 1000; // 20 ms
       if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
       pthread_cond_timedwait(&g_cv, &g_lock, &ts);
@@ -1579,6 +1606,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (give > 0) pthread_cond_broadcast(&g_cv);
     }
     pthread_mutex_unlock(&g_lock);
+    if (job.slot_gate && !nr_slot_gate_wait(&nr_slot_gate, job.absolute_slot, 50)) { /* the slot never completed (stream fault): drop, never decode half a slot */
+      release_solver(&job);
+      for (int k = 0; k < n_more; ++k) release_solver(&more[k]);
+      continue;
+    }
     const uint64_t taken_ns = nr_passive_e2e_trace() ? now_ns() : 0; /* SYSAN e2e: dequeue time */
     nr_ss_ns[NRSS_WQ] = 0;
     const uint64_t slot_t0 = slot_timing ? now_ns() : 0;
@@ -2238,6 +2270,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         snprintf(e2e, sizeof(e2e), " e2e=%ld,%ld,%ld,%ld,%ld,%u,%ld,%ld", E2E_US(arr, enqueue_ns), E2E_US(enqueue_ns, taken_ns),
                  E2E_US(taken_ns, dec_t0), E2E_US(dec_t0, dec_t1), (long)(nr_pdsch_passive_decode_first_body_ns() / 1000), eb,
                  E2E_US(arr, dec_t1), atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed) - job.absolute_slot);
+        if (job.es_sym1) { /* early grant: accepted at symbol k of its slot, `lead` us before the slot's read returned (arr2enq is then <= 0) */
+          const size_t l_es = strlen(e2e);
+          snprintf(e2e + l_es, sizeof(e2e) - l_es, " es=%d,%ld", (int)job.es_sym1 - 1,
+                   (arr && enqueue_ns && arr >= enqueue_ns) ? (long)((arr - enqueue_ns) / 1000) : -1L);
+        }
         if (nr_a2e_trace() && job.a2s_ns[0]) { /* a2s=arr->occ,occ->pass,pass->p1end,p1end->p2,p2->cand,cand->accept,accept->enq,kind,bank */
           const size_t l_ = strlen(e2e);
           snprintf(e2e + l_, sizeof(e2e) - l_, " a2s=%ld,%ld,%ld,%ld,%ld,%ld,%ld,%d,%d", E2E_US(arr, job.a2s_ns[0]), E2E_US(job.a2s_ns[0], job.a2s_ns[1]),
@@ -3034,6 +3071,7 @@ static void nr_pdsch_passive_queue_flush_locked(void) /* g_pending_mu held */
   for (int i = 0; i < g_n_pending; i++)
     enqueue_one(&g_pending[i], g_pending_ns[i]);
   g_n_pending = 0;
+  nr_spin_pred_note(&g_spin_pred, nr_spin_now_ns());
   pthread_mutex_unlock(&g_lock);
   pthread_cond_broadcast(&g_cv); /* after the unlock: a consumer woken under g_lock blocks on it again (second futex round trip) */
 }
@@ -3080,6 +3118,10 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
     nr_pdsch_passive_queue_flush_locked();
   g_pending[g_n_pending] = *job;
   g_pending_ns[g_n_pending] = nr_csirs_disc_enabled() ? now_ns() : 0;
+  if (nr_es_tls_early) { /* accepted by an early scan job: hold the consumer back until the slot has been read */
+    g_pending[g_n_pending].slot_gate = true;
+    g_pending[g_n_pending].es_sym1 = (uint8_t)(1 + nr_es_progress_symbols(&nr_es_progress, job->absolute_slot, nr_es_tls_symbols_per_slot));
+  }
   if (nr_a2e_trace()) {
     memcpy(g_pending[g_n_pending].a2s_ns, nr_a2e_ts, sizeof(nr_a2e_ts));
     g_pending[g_n_pending].a2s_kind = nr_a2e_kind;

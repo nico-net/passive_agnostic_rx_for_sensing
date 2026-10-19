@@ -436,6 +436,13 @@ void nr_pdcch_dci01_fdra_feedback(const nr_pdcch_blind_ul_result_t *grant, bool 
 void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                          bool serial_candidates, long source_absolute_slot);
 
+/* EARLY START (nr_early_start.h). run_occasion_early: an early scan job for the slot being read (`symbols_done` OFDM symbols complete) runs the
+ * banked CORESET passes whose last symbol is in the ring and marks them done for the slot-end job. early_post: called by the RX thread at a
+ * trigger point of the split slot read; enqueues the early job. Both only act when every precondition of an exact early run holds
+ * (see es_global_ok() in the .c); otherwise the slot is scanned by the slot-end job as before. */
+void nr_pdcch_blind_monitor_run_occasion_early(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, long slot_abs, int symbols_done);
+bool nr_pdcch_blind_monitor_early_post(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, long slot_abs, int symbols_done);
+
 #define NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS 9 // == dci_nr.c's file-local RE_PER_RB_OUT_DMRS #define
 /* Widest aggregation level a lane may scan. Shared by the lane parser (library) and the
  * RT lane-batch sizing in nr_pdcch_blind_monitor_rt.c. */

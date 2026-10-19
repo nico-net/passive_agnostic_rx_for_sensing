@@ -1,0 +1,13 @@
+# hand-off bench, producer cpu 1, consumer cpu 2, period 500 us, 12000 iterations/variant
+dft4096 (OAI NEON) on cpu 2: 1 antenna 25.77 us, 4 antennas back-to-back 102.95 us
+timer wake lateness  slack=50000 ns p50   52.8 p90   53.1 p99   58.3 max  1718.2 us
+timer wake lateness  slack=1     ns p50    2.8 p90    3.2 p99    7.8 max  2446.4 us
+cond (as queue.c)      p50  100.7  p90  104.2  p99  170.0  max   762.8 us | consumer spin/busy 0% of one core
+futex                  p50   98.3  p90  101.6  p99  133.9  max   412.4 us | consumer spin/busy 0% of one core
+eventfd                p50   99.5  p90  103.1  p99  169.2  max   458.5 us | consumer spin/busy 0% of one core
+yield-spin<=300us+cond p50   78.8  p90  103.7  p99  158.7  max   439.4 us | consumer spin/busy 60% of one core
+busy spin (yield insn) p50    0.2  p90    0.2  p99    0.2  max    11.0 us | consumer spin/busy 100% of one core
+hybrid timer-40us+spin p50    0.2  p90    0.2  p99    0.2  max   220.0 us | consumer spin/busy 8% of one core
+hybrid timer-15us+spin p50    0.2  p90    0.2  p99    0.2  max   302.4 us | consumer spin/busy 3% of one core
+cond, same cpu         p50    2.6  p90    2.7  p99    3.2  max  2581.9 us | consumer spin/busy 0% of one core
+done

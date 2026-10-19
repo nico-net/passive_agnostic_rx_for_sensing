@@ -32,6 +32,8 @@
  */
 
 #include "nr_pdcch_passive_queue.h"
+#include "nr_spin_handoff.h"
+#include <sys/prctl.h>
 #include "PHY/MODULATION/modulation_UE.h"
 
 #include <pthread.h>
@@ -50,6 +52,7 @@
 /* Monotonic slot counter published by the RF producer; the same source nr_pdsch_passive_queue uses,
  * so the two staleness checks are on one clock. */
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
+extern _Atomic long nr_ue_diag_producer_wall_ns;
 
 /* Margin, in slots, held back from the full rxdata wrap. Same value and same reasoning as the PDSCH
  * queue: a job must be finished comfortably before the producer laps it, not on the last slot. */
@@ -122,6 +125,9 @@ static int scanq_fresh(void)
   return v;
 }
 
+/* Timer-then-spin hand-off RX -> scan consumer (nr_spin_handoff.h): the work of this queue is one occasion per slot, ~0 after the slot arrival. */
+static nr_spin_pred_t g_spin_pred;
+
 static pthread_t g_threads[NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS];
 static PHY_VARS_NR_UE *g_ue = NULL;
 
@@ -137,6 +143,9 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
   const long slots_per_frame = ue->frame_parms.slots_per_frame;
 
   LOG_I(PHY, "SENSING: blind PDCCH scan consumer %d started\n", idx);
+  prctl(PR_SET_TIMERSLACK, 1UL); /* the sleep-until-window wake is a timer wake: default 50 us slack would eat the lead */
+  nr_spin_acct_t spin_acct;
+  nr_spin_acct_init(&spin_acct);
 
   while (1) {
     nr_pdcch_passive_job_t job;
@@ -161,6 +170,21 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
     while (g_count == 0 && g_side_posted == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) == 0) {
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
+      uint64_t until = 0;
+      const nr_spin_action_t act = nr_spin_plan(&g_spin_pred, &spin_acct, nr_spin_now_ns(), &until);
+      if (act == NR_SPIN_SPIN) { /* bounded busy-wait for the predicted occasion, then back to the ordinary wait */
+        pthread_mutex_unlock(&g_lock);
+        nr_spin_run(&g_spin_pred, &spin_acct, &g_count, until);
+        pthread_mutex_lock(&g_lock);
+        continue;
+      }
+      if (act == NR_SPIN_SLEEP && until - nr_spin_now_ns() < 20ull * 1000 * 1000) {
+        ts.tv_sec = (time_t)(until / 1000000000ull);
+        ts.tv_nsec = (long)(until % 1000000000ull);
+        pthread_cond_timedwait(&g_cv, &g_lock, &ts);
+        nr_spin_note_wake(&spin_acct, until, nr_spin_now_ns());
+        continue;
+      }
       ts.tv_nsec += 20 * 1000 * 1000; // 20 ms
       if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
       pthread_cond_timedwait(&g_cv, &g_lock, &ts);
@@ -205,7 +229,8 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
                                                      memory_order_relaxed))
       ;
     atomic_fetch_add_explicit(&g_lag_hist[nr_passive_lag_bin(lag)], 1, memory_order_relaxed);
-    if (!nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame)) {
+    /* an early job's slot is still being read: its CORESET symbols are in, the producer counter is one behind */
+    if (!nr_passive_samples_valid(prod, job.early_sym ? job.absolute_slot - 1 : job.absolute_slot, slots_per_frame)) {
       atomic_fetch_add_explicit(&g_dropped_stale, 1, memory_order_relaxed);
       continue;
     }
@@ -221,7 +246,10 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
 
     struct timespec e0;
     if (nr_passive_e2e_trace()) clock_gettime(CLOCK_MONOTONIC, &e0);
-    nr_pdcch_blind_monitor_run_occasion(ue, &proc, true /* already off the RT thread */, job.absolute_slot);
+    if (job.early_sym)
+      nr_pdcch_blind_monitor_run_occasion_early(ue, &proc, job.absolute_slot, job.early_sym);
+    else
+      nr_pdcch_blind_monitor_run_occasion(ue, &proc, true /* already off the RT thread */, job.absolute_slot);
     if (nr_passive_e2e_trace()) {
       /* SYSAN SCAN_E2E: slot read -> scan start (wait), scan occasion wall (run); 50-us bins, p50/p90/p99 every 4000 occasions */
       static _Atomic uint32_t h[4][101]; /* wait, run, pre (arrival -> enqueue), q (enqueue -> taken: queue sit + wake-up) */
@@ -299,6 +327,7 @@ bool nr_pdcch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   g_tail     = 0;
   g_count    = 0;
   g_nthreads = n_consumers;
+  nr_spin_pred_init(&g_spin_pred, 10000000ull / (uint64_t)ue->frame_parms.slots_per_frame, &nr_ue_diag_producer_wall_ns);
   atomic_store_explicit(&g_stop, 0, memory_order_relaxed);
   atomic_store_explicit(&g_running, 1, memory_order_release);
 
@@ -343,6 +372,7 @@ bool nr_pdcch_passive_queue_enqueue(const nr_pdcch_passive_job_t *job)
   g_ring[g_head].enq_ns = nr_passive_e2e_trace() ? scanq_now_ns() : 0;
   g_head         = (g_head + 1) % g_depth;
   g_count++;
+  nr_spin_pred_note(&g_spin_pred, nr_spin_now_ns());
   pthread_mutex_unlock(&g_lock);
   /* Signal AFTER the unlock: signalled under the lock, the woken consumer's first act is to take g_lock, which the producer still
    * holds, so it sleeps a second time (a futex round trip on the wake path, on top of the scheduler wake-up). */

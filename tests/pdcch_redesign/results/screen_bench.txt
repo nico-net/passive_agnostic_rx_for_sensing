@@ -1,0 +1,1 @@
+screen of 67 candidates (15552 soft bits): scalar per candidate 5.85 us | shipped NEON per candidate 6.87 us | per-CCE prefix-sum prototype 0.80 us | max |score diff| 0.00e+00 (237986208)
