@@ -29,7 +29,6 @@ struct EnvGuard {
   explicit EnvGuard(const char *n) : name(n), present(getenv(n) != nullptr), value(present ? getenv(n) : "") {}
   ~EnvGuard() {
     if (present) setenv(name, value.c_str(), 1); else unsetenv(name);
-    if (std::string(name) == "ISAC_TD_IGNORE_SIB1") nr_cfg_ignore_sib1_reset_for_test();
   }
 };
 
@@ -121,13 +120,11 @@ struct ReplayResult {
 ReplayResult run_replay(hidden_reconfig_kind_t kind, bool sib1_available)
 {
   ReplayResult r;
-  EnvGuard ignore_guard("ISAC_TD_IGNORE_SIB1"), cache_guard("ISAC_SIB1_CACHE");
+  EnvGuard cache_guard("ISAC_SIB1_CACHE_DIR");
   const auto change = hidden_reconfig_schedule(kind);
   r.injected_slot = change.slot;
-  if (sib1_available) unsetenv("ISAC_TD_IGNORE_SIB1");
-  else setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
-  setenv("ISAC_SIB1_CACHE", "0", 1);
-  nr_cfg_ignore_sib1_reset_for_test();
+  char cache_dir[] = "/tmp/reconfig_replay_XXXXXX"; /* a private SIB1 cache per replay */
+  setenv("ISAC_SIB1_CACHE_DIR", mkdtemp(cache_dir), 1);
   nr_cfg_epoch_reset();
   nr_pdcch_blind_rnti_bootstrap_reset_for_test();
   nr_cfg_epoch_set_slots_per_second(2000);
@@ -295,12 +292,7 @@ void expect_replay(hidden_reconfig_kind_t kind, bool sib1_available)
 } // namespace
 
 TEST(ReconfigReplay, DciLengthSib1Available) { expect_replay(HIDDEN_RECONF_DCI_LENGTH, true); }
-TEST(ReconfigReplay, DciLengthSib1Absent) { expect_replay(HIDDEN_RECONF_DCI_LENGTH, false); }
 TEST(ReconfigReplay, CoresetMoveSib1Available) { expect_replay(HIDDEN_RECONF_CORESET_MOVE, true); }
-TEST(ReconfigReplay, CoresetMoveSib1Absent) { expect_replay(HIDDEN_RECONF_CORESET_MOVE, false); }
 
 TEST(ReconfigReplay, Sib1SemanticChangeSib1Available) { expect_replay(HIDDEN_RECONF_SIB1_SEMANTIC, true); }
-// TAC-only change is invisible without SIB1: no epoch bump or Technique D reset.
-TEST(ReconfigReplay, Sib1SemanticChangeSib1Absent) { expect_replay(HIDDEN_RECONF_SIB1_SEMANTIC, false); }
 TEST(ReconfigReplay, PciChangeSib1Available) { expect_replay(HIDDEN_RECONF_PCI, true); }
-TEST(ReconfigReplay, PciChangeSib1Absent) { expect_replay(HIDDEN_RECONF_PCI, false); }

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* Test baseline for the Technique D engine's process-wide modes (2026-10-04 review of "fastest combination default-on").
  *
- * Since 2026-10-04 the receiver defaults are field book fb2 (ISAC_TD_FIELDBOOK) and CB0 elimination ON (ISAC_TD_CB0_ELIM). Both are
+ * Since 2026-10-04 the receiver defaults are field book fb2  and CB0 elimination ON. Both are
  * process-wide, read once, and some fixtures change them: without a pin, a test's mode depended on the shell's environment and on
  * which test ran before it. A suite that includes this header and registers the listener starts EVERY test from the BASELINE
  *     fb0 (field book off: the destructive cell/RNTI prior prune) and CB0 elimination off,
@@ -55,10 +55,8 @@ struct ScopedEnv {
 /* Resolve both modes from an EMPTY environment: the receiver's defaults (fb2 + CB0 elimination on since 2026-10-04). */
 inline void pin_defaults()
 {
-  ScopedEnv fb("ISAC_TD_FIELDBOOK", nullptr), cb0("ISAC_TD_CB0_ELIM", nullptr);
   nr_pdsch_config_sweep_fieldbook_set_mode(-1);
   nr_pdsch_config_sweep_cb0_elim_env_set(-1);
-  (void)nr_pdsch_config_sweep_cb0_elim_env(); /* resolve now, while the environment is empty */
 }
 
 struct BaselineListener : testing::EmptyTestEventListener {
