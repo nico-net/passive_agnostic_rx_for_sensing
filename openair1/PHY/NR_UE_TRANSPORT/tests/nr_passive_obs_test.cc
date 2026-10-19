@@ -9,6 +9,8 @@ extern "C" {
 #include "nr_passive_obs.h"
 }
 
+extern "C" int nr_passive_obs_test_writer_pause_ms;
+
 static nr_passive_obs_t sample() {
   nr_passive_obs_t o = {};
   o.abs_slot = 1000; o.frame = 12; o.slot = 3; o.pci = 64; o.dir = NR_OBS_DIR_DL; o.rnti = 0x4768; o.rnti_class = 0;
@@ -69,13 +71,13 @@ TEST(PassiveObs, WritesEveryRecordFromManyThreads) {
 
 TEST(PassiveObs, FullRingDropsAndCountsInsteadOfBlocking) {
   char path[] = "/tmp/obs_test_XXXXXX"; const int fd = mkstemp(path); close(fd);
-  setenv("ISAC_OBS_TEST_WRITER_PAUSE_MS", "300", 1); // writer sleeps first: forces the ring to fill
+  nr_passive_obs_test_writer_pause_ms = 300; // writer sleeps first: forces the ring to fill
   ASSERT_TRUE(nr_passive_obs_open(path, 64));
   const nr_passive_obs_t o = sample(); int ok = 0;
   for (int i = 0; i < 1000; i++) ok += nr_passive_obs_push(&o);
   uint64_t p, w, d; nr_passive_obs_stats(&p, &w, &d);
   EXPECT_LE(ok, 64); EXPECT_EQ(p + d, 1000u); EXPECT_GE(d, 936u);
-  nr_passive_obs_close(); unsetenv("ISAC_OBS_TEST_WRITER_PAUSE_MS"); unlink(path);
+  nr_passive_obs_close(); nr_passive_obs_test_writer_pause_ms = 0; unlink(path);
 }
 
 TEST(PassiveObs, IoErrorsCountedAndNotWritten) {

@@ -52,11 +52,6 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   *m = (nr_passive_metrics_t){0};
-  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_TRAFFIC_METRICS not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (getenv("ISAC_USRP_RING_TRAFFIC_METRICS")) {
-    void (*traffic)(uint64_t *, uint64_t *) = dlsym(RTLD_DEFAULT, "isac_usrp_ring_traffic");
-    if (traffic) traffic(&m->usrp_ring_copy_bytes, &m->usrp_ring_direct_bytes);
-  }
   if (nr_pdcch_nid_capture_metrics) {
     float noise;
     nr_pdcch_nid_capture_metrics(&m->nid_capture_offered, &m->nid_capture_taken, &m->nid_capture_skipped_empty, &noise);
@@ -234,7 +229,6 @@ void nr_passive_metrics_emit(void)
   pthread_mutex_lock(&mu);
   if (!tried) {
     tried = 1;
-    /* DEFERRED/DO NOT USE: ISAC_METRICS_PATH not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *p = getenv("ISAC_METRICS_PATH");
     if (p && *p) {
       f = fopen(p, "a");

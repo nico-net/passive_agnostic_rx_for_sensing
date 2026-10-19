@@ -100,7 +100,8 @@ typedef struct {
 
 /* ---------------- API ---------------- */
 /* U1 (nr_csirs_disc_feed.c) */
-bool nr_csirs_disc_enabled(void);                                  /* ISAC_CSIRS_DISC=1 */
+bool nr_csirs_disc_enabled(void);                                  /* always true */
+extern int nr_csirs_disc_test_sweep_limit; /* hypotheses swept per batch (default 32); tests raise it */
 int nr_csirs_disc_ring_init(nr_csirs_disc_ring_t *r, int n_ant, int n_rb, int slots_per_frame, int capacity, bool unified);
 void nr_csirs_disc_ring_free(nr_csirs_disc_ring_t *r);
 /* Copy one FEP'd slot (rxdataF layout of the receiver: [ant][sym*ofdm_symbol_size]) into the ring.
@@ -166,7 +167,7 @@ typedef struct {
   uint64_t evidence_epoch;              /* T28 opt-in bounded row-1 accumulation; zero preserves legacy semantics.
                                         * Caller changes epoch on reset. Rebuild core + GPU modules together. */
 } nr_csirs_disc_sweep_cfg_t;
-/* Returns n_hyp on success, 0 while ISAC_CSIRS_DISC is not exactly "1", -1 on error.
+/* Returns n_hyp on success, -1 on error.
  * NULL cfg selects {0,1024,1,32}; explicit cfg values must be positive (id_first may be zero).
  * Noise ~1 refers to an individual sequence score; maximizing a sweep raises the noise maximum.
  * Caller keeps the ring stable during a sweep and initializes OAI modulation tables on startup. */
@@ -236,7 +237,7 @@ typedef struct {
   int (*upload_symbols)(nr_csirs_disc_ring_t *, uint16_t symbols);
 } nr_csirs_disc_gpu_ops_t;
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GPU module */
-/* CPU-side loader, gated by ISAC_CSIRS_DISC=1 and BACKEND=auto|cpu|gpu.
+/* CPU-side loader, gated by the test-only ISAC_CSIRS_DISC_BACKEND=auto|cpu|gpu.
  * Returns NULL on absence/failure (including forced gpu); caller may fall back to CPU.
  * The module exports gpu_ops above, plus nr_csirs_disc_gpu_alloc_unified/_free_unified; the loader installs them
  * into the core hooks nr_csirs_disc_alloc_unified/_free_unified (function pointers, see U1 above). */

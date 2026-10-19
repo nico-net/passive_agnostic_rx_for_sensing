@@ -261,7 +261,7 @@ static const uint8_t kDensities[][3] = {{3, 0xFF, 0xFF}, {2, 0, 1}, {2, 0, 1},
 #define CSIRS_MIN_HITS      3
 
 /* nr_csirs_blind_enumerate: builds the candidate list of single-bit CSI-RS resources (rows, one-hot frequency domain, density, start symbol) for a carrier of n_rb RBs.
- *   Loops over the supported rows and densities and every legal l0; a candidate spans the whole grid unless ISAC_CSIRS_BLIND_RB=start:nrb restricts it. ISAC_CSIRS_BLIND_ROWS selects rows (replay).
+ *   Loops over the supported rows and densities and every legal l0; a candidate spans the whole grid.
  *   Returns the number of candidates written (at most max), or -1 on bad arguments. Caller: nr_csirs_blind_init() in this file; tests/nr_csirs_blind_synth_*.
  */
 int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, uint16_t scramb_id)
@@ -270,28 +270,9 @@ int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, 
     return -1;
   }
   int n = 0;
-  /* ISAC_CSIRS_BLIND_ROWS="1,2,..." (default: all of kRows): restrict the enumerated rows. Added
-   * 2026-10-06 for offline replay, where scoring every candidate every slot is affordable only for a
-   * small population (row 1 = TRS = 56 candidates vs 767 for rows 1-5). */
-  /* DEFERRED/DO NOT USE: ISAC_CSIRS_BLIND_ROWS not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *rows_env = getenv("ISAC_CSIRS_BLIND_ROWS");
   for (unsigned r = 0; r < sizeof(kRows) / sizeof(kRows[0]); r++) {
     if (nr_csirs_blind_row_needs_bits(kRows[r]) != 1) {
       continue;   /* see kRows: a multi-bit row would spin the generator's unbounded bitmap walk */
-    }
-    if (rows_env != NULL && *rows_env != '\0') {
-      bool allowed = false;
-      for (const char *q = rows_env; *q;) {
-        char *end = NULL;
-        const long v = strtol(q, &end, 10);
-        if (end == q)
-          break;
-        if (v == kRows[r])
-          allowed = true;
-        q = (*end == ',') ? end + 1 : end;
-      }
-      if (!allowed)
-        continue;
     }
     for (unsigned d = 0; d < 3; d++) {
       const uint8_t density = kDensities[r][d];
@@ -319,18 +300,6 @@ int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, 
           c->scramb_id = scramb_id;
           c->start_rb = 0;
           c->nr_of_rbs = n_rb;
-          /* ISAC_CSIRS_BLIND_RB="start:nrb" (default: whole grid): search a frequency window only.
-           * Added 2026-10-06: a TRS pair scored z~2.3 over 217 PRB, consistent with a resource that
-           * spans only part of the band; the window localises it. */
-          {
-            /* DEFERRED/DO NOT USE: ISAC_CSIRS_BLIND_RB not in the frozen config t26zE (2026-10-18); slated for removal */
-            const char *w = getenv("ISAC_CSIRS_BLIND_RB");
-            int ws = 0, wn = 0;
-            if (w && sscanf(w, "%d:%d", &ws, &wn) == 2 && ws >= 0 && wn > 0 && ws + wn <= n_rb) {
-              c->start_rb = (uint16_t)ws;
-              c->nr_of_rbs = (uint16_t)wn;
-            }
-          }
         }
       }
     }
@@ -462,19 +431,8 @@ bool nr_csirs_blind_is_confirmed(const nr_csirs_blind_state_t *st, int idx)
   return false;
 }
 
-int nr_csirs_full_enabled(void)
-{
-  static int s = -1;
-  if (s < 0) s = atoi(getenv("ISAC_CSIRS_FULL") ?: "1") ? 1 : 0;
-  return s;
-}
-int nr_csirs_full_bursts_enabled(void)
-{
-  static int s = -1;
-  if (s < 0) s = atoi(getenv("ISAC_CSIRS_FULL_BURSTS") ?: "1") ? 1 : 0;
-  return s;
-}
-int nr_csirs_blind_disc_cap(void) { return nr_csirs_full_bursts_enabled() ? NR_CSIRS_BLIND_DISC_MAX_CONF : 32; }
+int nr_csirs_full_enabled(void) { return 1; } /* CSI-FULL is always on; kept for the callers outside this file */
+int nr_csirs_blind_disc_cap(void) { return NR_CSIRS_BLIND_DISC_MAX_CONF; }
 
 int nr_csirs_blind_occurring(const nr_csirs_blind_state_t *st, uint32_t absolute_slot, int *idx_out, int max)
 {

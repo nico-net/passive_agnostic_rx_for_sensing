@@ -221,15 +221,14 @@ TEST(CsirsDisc, ExclusionsAndDefaultThreshold)
   for(int k=0;k<12*r.r.n_rb;++k) e[4*12*r.r.n_rb+k]=1;
   EXPECT_EQ(nr_csirs_disc_footprints_cpu(&r.r,&fc,out,32),0);
 }
-TEST(CsirsDisc, BackendDisabled)
+TEST(CsirsDisc, BackendCpuSelector)
 {
-  setenv("ISAC_CSIRS_DISC","0",1);EXPECT_EQ(nr_csirs_disc_gpu_load(),nullptr);
-  setenv("ISAC_CSIRS_DISC","1",1);setenv("ISAC_CSIRS_DISC_BACKEND","cpu",1);
+  setenv("ISAC_CSIRS_DISC_BACKEND","cpu",1);
   EXPECT_EQ(nr_csirs_disc_gpu_load(),nullptr);unsetenv("ISAC_CSIRS_DISC_BACKEND");
 }
 TEST(CsirsDisc, GpuMatchesCpu)
 {
-  setenv("ISAC_CSIRS_DISC","1",1);setenv("ISAC_CSIRS_DISC_BACKEND","gpu",1);
+  setenv("ISAC_CSIRS_DISC_BACKEND","gpu",1);
   const auto *ops=nr_csirs_disc_gpu_load();
   if(!ops || !ops->footprints) GTEST_SKIP()<<"CUDA module/device unavailable; run build_gpu/test_nr_csirs_disc_fp --gtest_filter=CsirsDisc.GpuMatchesCpu";
   // The public ops are circuit-breaker wrappers in the executable; dladdr on
@@ -370,7 +369,7 @@ TEST(CsirsDisc, StatefulMatchesFullHistoryAndResetSnapshot)
 }
 TEST(CsirsDisc, StatefulGpuMatchesCpu)
 {
-  setenv("ISAC_CSIRS_DISC","1",1);setenv("ISAC_CSIRS_DISC_BACKEND","gpu",1);
+  setenv("ISAC_CSIRS_DISC_BACKEND","gpu",1);
   const auto *ops=nr_csirs_disc_gpu_load();
   if(!ops || !ops->footprints) GTEST_SKIP()<<"CUDA unavailable: run build_gpu/test_nr_csirs_disc_fp --gtest_filter=CsirsDisc.StatefulGpuMatchesCpu";
   ASSERT_NE(ops->normalize,nullptr);
@@ -410,7 +409,7 @@ TEST(CsirsDisc, StatefulGpuMatchesCpu)
 }
 int main(int argc,char **argv)
 {
-  setvbuf(stdout,nullptr,_IONBF,0);setenv("ISAC_CSIRS_DISC","1",1);
+  setvbuf(stdout,nullptr,_IONBF,0);
   nr_csirs_disc_synth_init();::testing::InitGoogleTest(&argc,argv);return RUN_ALL_TESTS();
 }
 // ISAC_BG_LANE gate: batches that arrive while the critical lane is busy stay in the ring; one run, on the newest data.

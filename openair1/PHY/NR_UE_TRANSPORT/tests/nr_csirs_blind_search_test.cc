@@ -34,7 +34,6 @@ void nr_csirs_blind_rt_test_clear_pins(void);
 uint32_t nr_csirs_blind_rt_test_pin_left(int zp);
 void nr_csirs_blind_rt_test_eight_probations(void);
 int nr_csirs_blind_rt_test_post_grant(uint32_t slot, double score, int other_geometry);
-int nr_csirs_blind_rt_test_fullvalid(uint32_t slot, uint16_t pop, uint16_t dmrs_mask, int out[3]);
 /* get_csi_mapping_parms() is linked in for the footprint tests; OAI's AssertFatal and CONFIG code
  * reference these two from the softmodem's main(). */
 void *uniqCfg = nullptr;
@@ -103,14 +102,6 @@ TEST(CsirsBlindRuntime, ReconfRecheckLeavesZpStateUnchanged) {
   int mask = 0;
   nr_csirs_blind_rt_test_slot(2, 0, 0, 0, 1, &mask);
   EXPECT_TRUE(nr_csirs_blind_rt_test_recheck_zp_unchanged());
-}
-
-TEST(CsirsBlindRuntime, RankModeExportsNeitherBankAndLeavesOutputUntouched) {
-  for (int banks : {1, 2, 3}) {
-    int types[2] = {}, untouched = 0;
-    EXPECT_EQ(nr_csirs_blind_rt_test_export(1, banks, types, &untouched), 0) << "banks=" << banks;
-    EXPECT_TRUE(untouched) << "banks=" << banks;
-  }
 }
 
 // A reference grid: QPSK-ish symbols on `occupied` REs of `n`, zero elsewhere.
@@ -815,9 +806,7 @@ TEST(CsirsBlindPin, PinnedPeriodicResourceConfirmsWithinThreePeriods) {
 
 int main(int argc, char **argv)
 {
-  /* the code defaults are the t26yE values since the 2026-10-18 bake; these cases assume the pre-bake (off) behaviour */
-  for (const char *k : {"ISAC_LOG_ASYNC", "ISAC_CSIRS_FULL", "ISAC_CSIRS_FULL_BURSTS", "ISAC_CSIRS_FULL_ERASE", "ISAC_CSIRS_FULL_TRS_PAIR", "ISAC_CSIRS_FULL_BLOCK_INFER"})
-    setenv(k, "0", 1);
+  setenv("ISAC_LOG_ASYNC", "0", 1);
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
@@ -2871,22 +2860,3 @@ TEST(CsirsBlindDiscovery, SuperperiodAndLateSecondPhaseRefineOneEntry)
   EXPECT_EQ(st->conf_n_off[0], 2);
 }
 
-/* Fix B (ISAC_CSIRS_FULL_VALID): T snapshot, grant DM-RS id 1677, cell id 923 (docs/superpowers/reports/csd/T8-TIM-DEAD-20261016.md) */
-TEST(CsirsFullValid, CandidatesFillTheEmptyIdRuleSetPhaseGatedAndClashFree)
-{
-  int o[3];
-  ASSERT_EQ(nr_csirs_blind_rt_test_fullvalid(16, 1677, 0x804, o), 0);  /* confirmed NZP 80/16: withheld by the id rule */
-  EXPECT_EQ(o[0], 0);
-  EXPECT_EQ(o[2], 1);
-  ASSERT_EQ(nr_csirs_blind_rt_test_fullvalid(8, 1677, 0x804, o), 0);   /* unconfirmed winner 40/8: never seen by the rule */
-  EXPECT_EQ(o[0], 0);
-  EXPECT_EQ(o[1], 0);
-  EXPECT_EQ(o[2], 1);
-  ASSERT_EQ(nr_csirs_blind_rt_test_fullvalid(9, 1677, 0x804, o), 0);   /* other phase: nothing */
-  EXPECT_EQ(o[2], 0);
-  ASSERT_EQ(nr_csirs_blind_rt_test_fullvalid(8, 1677, 1 << 8, o), 0);  /* DM-RS on the CSI-RS symbol: clash filtered */
-  EXPECT_EQ(o[2], 0);
-  ASSERT_EQ(nr_csirs_blind_rt_test_fullvalid(16, 923, 0x804, o), 0);   /* the id rule stays the seed */
-  EXPECT_EQ(o[0], 1);
-  EXPECT_EQ(o[2], 0);
-}

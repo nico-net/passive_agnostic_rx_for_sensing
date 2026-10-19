@@ -176,14 +176,13 @@ static uint64_t obs_flush(uint64_t pending)
   return 0;
 }
 
+/* Test hook: the writer sleeps first so the ring fills (overflow tests). */
+int nr_passive_obs_test_writer_pause_ms;
 static void *writer(void *arg)
 {
   (void)arg;
-  /* Test hook only: a no-op unless the variable is set. Makes the ring fill so overflow can be tested. */
-  /* DEFERRED/DO NOT USE: ISAC_OBS_TEST_WRITER_PAUSE_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *pause = getenv("ISAC_OBS_TEST_WRITER_PAUSE_MS");
-  if (pause && atoi(pause) > 0)
-    usleep((useconds_t)atoi(pause) * 1000);
+  if (nr_passive_obs_test_writer_pause_ms > 0)
+    usleep((useconds_t)nr_passive_obs_test_writer_pause_ms * 1000);
   char line[1024];
   uint64_t pending = 0; /* lines in the stdio buffer, counted as `written` only once a flush succeeded */
   for (;;) {

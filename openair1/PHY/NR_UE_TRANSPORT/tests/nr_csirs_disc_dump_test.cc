@@ -29,7 +29,6 @@ TEST(CsirsDiscDump, ProductionStream)
 {
   const char *path = getenv("ISAC_CSIRS_DISC_DUMP_IN");
   if (!path) GTEST_SKIP() << "Set ISAC_CSIRS_DISC_DUMP_IN to the OTA ring dump";
-  setenv("ISAC_CSIRS_DISC", "1", 1);
   nr_csirs_disc_synth_init(); set_glog(OAILOG_INFO);
   FILE *file=fopen(path,"rb"); ASSERT_NE(file,nullptr);
   int32_t header[5]; ASSERT_EQ(fread(header,sizeof(header),1,file),1u);

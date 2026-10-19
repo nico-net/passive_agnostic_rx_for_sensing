@@ -165,7 +165,7 @@ static void discovery_publish(void)
     unsigned zero=0;
     if(!__atomic_compare_exchange_n(&discovery_exports[b].users,&zero,UINT32_MAX,false,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED)) continue;
     discovery_exports[b].n=0;
-    if(g_on>0 && g_armed && g_rank<=0) for(int bank=0;bank<2;++bank) {
+    if(g_on>0 && g_armed) for(int bank=0;bank<2;++bank) {
       nr_csirs_blind_state_t *st=bank?&g_zp:&g_st;
       for(int k=0;k<st->n_conf;++k) {
         __typeof__(discovery_exports[b].resource[0]) *r=&discovery_exports[b].resource[discovery_exports[b].n++];

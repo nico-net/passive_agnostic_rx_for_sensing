@@ -14,13 +14,9 @@
 
 static std::atomic<int> reopened_count{0};
 extern "C" void nr_cfg_epoch_note_rnti_reopened(uint16_t, bool, uint64_t) { ++reopened_count; }
-extern "C" bool nr_cfg_ignore_sib1(void) {
-  const char *value=getenv("ISAC_TD_IGNORE_SIB1");
-  return value && std::string(value)=="1";
-}
 extern "C" bool nr_cfg_reconf_enabled(void) { return false; }
 extern "C" uint32_t nr_cfg_epoch_work_stamp(void) { return 0; }
-extern "C" void nr_cfg_ignore_sib1_reset_for_test(void) {}
+extern "C" int nr_ue_ctx_test_writer_pause_ms;
 
 class UeContext : public ::testing::Test {
  protected:
@@ -29,10 +25,9 @@ class UeContext : public ::testing::Test {
     char name[]="/tmp/rr-uectx-XXXXXX";
     int fd=mkstemp(name); ASSERT_GE(fd,0); close(fd); path=name;
     reopened_count=0;
-    setenv("ISAC_UL_PUSCH_CHAIN","0",1); setenv("ISAC_UL_PUSCH_SOLVER","0",1); // baked defaults are on; fixture default = UL off
     ASSERT_TRUE(nr_ue_ctx_open(path.c_str(),128,0));
   }
-  void TearDown() override {nr_ue_ctx_close(); unlink(path.c_str()); unsetenv("ISAC_UL_PUSCH_CHAIN"); unsetenv("ISAC_UL_PUSCH_SOLVER");}
+  void TearDown() override {nr_ue_ctx_close(); unlink(path.c_str());}
   std::string contents() {
     nr_ue_ctx_close();
     std::ifstream f(path); std::ostringstream s; s<<f.rdbuf(); return s.str();
@@ -55,13 +50,12 @@ TEST_F(UeContext, FirstGrantCreatesFirstSeenThenActive) {
   auto s=contents(); nr_ue_ctx_t c{};
   ASSERT_TRUE(nr_ue_ctx_get(o.rnti,&c)); EXPECT_EQ(c.state,NR_UE_ACTIVE);
   EXPECT_EQ(c.st.grants_dl,1);
-  EXPECT_EQ(s.find("\"ul\":"),std::string::npos);
+  EXPECT_NE(s.find("\"ul\":"),std::string::npos);
   EXPECT_NE(s.find("\"state\":\"FIRST_SEEN\""),std::string::npos);
   EXPECT_NE(s.find("\"state\":\"ACTIVE\""),std::string::npos);
 }
 TEST_F(UeContext, UlStateUsesDlLockAndRejectsOldIncarnationFeedback) {
   nr_ue_ctx_close();
-  setenv("ISAC_UL_UE_STATE","1",1);
   ASSERT_TRUE(nr_ue_ctx_open(path.c_str(),128,0));
   nr_ue_ctx_on_param(0x101,NR_UEP_DCI_LEN_DL,52,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
   nr_ue_ctx_on_param(0x101,NR_UEP_BWP,100,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
@@ -113,11 +107,9 @@ TEST_F(UeContext, UlStateUsesDlLockAndRejectsOldIncarnationFeedback) {
   std::ifstream json(path);
   std::ostringstream records; records<<json.rdbuf();
   EXPECT_NE(records.str().find("\"ul\":"),std::string::npos);
-  unsetenv("ISAC_UL_UE_STATE");
 }
 TEST_F(UeContext, UlStateClearsOnDedicatedBankReverify) {
   nr_ue_ctx_close();
-  setenv("ISAC_UL_UE_STATE","1",1);
   ASSERT_TRUE(nr_ue_ctx_open(path.c_str(),128,0));
   nr_ue_ctx_on_param(0x103,NR_UEP_DCI_LEN_DL,52,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
   nr_ue_ul_ticket_t ticket{};
@@ -141,18 +133,15 @@ TEST_F(UeContext, UlStateClearsOnDedicatedBankReverify) {
   ASSERT_TRUE(nr_ue_ctx_get(0x103,&state));
   EXPECT_EQ(state.ul.field[NR_UL_F_DATA_ID].evidence,NR_UL_EVID_UNKNOWN);
   EXPECT_EQ(state.cfg[NR_UEP_DCI_LEN_DL].verif,NR_UEV_HINT);
-  unsetenv("ISAC_UL_UE_STATE");
 }
 TEST_F(UeContext, UlStateRunsWithoutJsonDestination) {
   nr_ue_ctx_close();
-  setenv("ISAC_UL_UE_STATE","1",1);
   ASSERT_TRUE(nr_ue_ctx_open(nullptr,128,0));
   nr_ue_ctx_on_param(0x104,NR_UEP_DCI_LEN_DL,51,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
   nr_ue_ctx_close();
   nr_ue_ctx_t state{};
   ASSERT_TRUE(nr_ue_ctx_get(0x104,&state));
   EXPECT_EQ(state.ul.field[NR_UL_F_DCI_LEN].evidence,NR_UL_EVID_DL_PRIOR);
-  unsetenv("ISAC_UL_UE_STATE");
 }
 TEST_F(UeContext, IdleAfterTidleGoneAfterTgone) {
   auto o=grant(1,1000000000,1); nr_ue_ctx_on_obs(&o);
@@ -325,24 +314,6 @@ TEST_F(UeContext, Sib1ParametersRecordedWhenDecoded) {
   EXPECT_NE(s.find("\"SIB1_BWP\":{\"value\":100"),std::string::npos);
   EXPECT_NE(s.find("\"SIB1_TDRA_HASH\":{\"value\":22136"),std::string::npos);
 }
-TEST_F(UeContext, IgnoreSib1KeepsParametersNull) {
-  const char *old=getenv("ISAC_TD_IGNORE_SIB1");
-  const bool had_old=old!=nullptr;
-  const std::string old_value=had_old?old:"";
-  setenv("ISAC_TD_IGNORE_SIB1","1",1);
-  nr_cfg_ignore_sib1_reset_for_test();
-  nr_ue_ctx_on_sib1(0x1234,10);
-  nr_ue_ctx_on_sib1_param(NR_UEP_SIB1_BWP,100,10);
-  nr_ue_ctx_on_sib1_param(NR_UEP_SIB1_TDRA_HASH,0x5678,10);
-  auto o=grant(15,1000000000,11); nr_ue_ctx_on_obs(&o);
-  const auto s=contents();
-  EXPECT_NE(s.find("\"SIB1_HASH\":null"),std::string::npos);
-  EXPECT_NE(s.find("\"SIB1_BWP\":null"),std::string::npos);
-  EXPECT_NE(s.find("\"SIB1_TDRA_HASH\":null"),std::string::npos);
-  if(had_old) setenv("ISAC_TD_IGNORE_SIB1",old_value.c_str(),1);
-  else unsetenv("ISAC_TD_IGNORE_SIB1");
-  nr_cfg_ignore_sib1_reset_for_test();
-}
 TEST_F(UeContext, CoresetRemovalMarksSuspectWithoutReconfig) {
   nr_ue_ctx_on_param(16,NR_UEP_CORESET,123,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
   nr_ue_ctx_on_param(16,NR_UEP_CORESET,123,NR_UEV_SUSPECT,NR_UEC_CORESET_CHANGE,20);
@@ -371,11 +342,11 @@ TEST_F(UeContext, CloseWritesFinalSnapshotForEveryUe) {
 }
 TEST(UeContextRing, FullRingDropsAndCounts) {
   char name[]="/tmp/rr-uectx-full-XXXXXX"; int fd=mkstemp(name); ASSERT_GE(fd,0); close(fd);
-  setenv("ISAC_UECTX_TEST_WRITER_PAUSE_MS","200",1);
+  nr_ue_ctx_test_writer_pause_ms=200;
   ASSERT_TRUE(nr_ue_ctx_open(name,1,0));
   nr_passive_obs_t o{}; o.rnti=1; o.t_mono_ns=1000000000;
   for(int i=0;i<1000;i++) nr_ue_ctx_on_obs(&o);
-  nr_ue_ctx_close(); unsetenv("ISAC_UECTX_TEST_WRITER_PAUSE_MS"); unlink(name);
+  nr_ue_ctx_close(); nr_ue_ctx_test_writer_pause_ms=0; unlink(name);
   uint64_t events=0,written=0,dropped=0; nr_ue_ctx_stats(&events,&written,&dropped);
   EXPECT_GT(events,0); EXPECT_GT(dropped,0); EXPECT_GT(written,0);
 }

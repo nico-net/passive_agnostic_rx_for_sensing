@@ -52,13 +52,6 @@ static uint64_t evidence_epoch=1;
  * of ordinary hypotheses; never transfer credit from the coarse extent. */
 static struct {nr_csirs_disc_hyp_t h; uint64_t written;} evidence_retry[16];
 static int evidence_retries;
-/* feature: returns true when the environment variable `name` is exactly "1" (feature flag reader for the ISAC_CSIRS_DISC_* switches).
- *   Read on every batch; callers are nr_csirs_disc_process() (CUMULATIVE, TRS_PRIORITY).
- */
-static bool feature(const char *name)
-{
-  const char *s=(getenv(name) ?: "1"); return s && !strcmp(s,"1"); /* all callers: baked t26yE default 1 */
-}
 /* retry_refined: remembers a refined (extent-refined) hypothesis whose verification failed, so that the next batch re-verifies that exact geometry.
  *   Keeps up to 16 entries (oldest overwritten); a duplicate of an entry already stored is ignored. Caller: nr_csirs_disc_process() (CUMULATIVE).
  */
@@ -71,7 +64,7 @@ static void retry_refined(const nr_csirs_disc_hyp_t *h, uint64_t written)
 }
 static struct {nr_csirs_disc_hyp_t h;uint16_t id;} qualified[256];
 static int qualified_count;
-/* ISAC_CSIRS_DISC_RATELIMIT bookkeeping (nr_csirs_disc_rate_internal.h); all under pipeline_lock. */
+/* Rate-limit bookkeeping (nr_csirs_disc_rate_internal.h); all under pipeline_lock. */
 static float q_strength[256];
 static bool q_was[256], rl_epoch;
 static nr_csirs_disc_fp_t rl_known[128], rl_pending[8];
@@ -135,28 +128,6 @@ static uint64_t cpu_us(void)
   struct timespec t;clock_gettime(CLOCK_THREAD_CPUTIME_ID,&t);return (uint64_t)t.tv_sec*1000000+t.tv_nsec/1000;
 }
 
-/* sweep_limit: returns ISAC_CSIRS_DISC_SWEEP_HYPS (default 32, max NR_CSIRS_DISC_MAX_HYP): the number of hypotheses swept per batch.
- *   Invalid values fall back to 32. Caller: nr_csirs_disc_process().
- */
-static int sweep_limit(void)
-{
-  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_SWEEP_HYPS not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *s = getenv("ISAC_CSIRS_DISC_SWEEP_HYPS");
-  const long value = s ? strtol(s, NULL, 10) : 32;
-  return value > 0 && value <= NR_CSIRS_DISC_MAX_HYP ? (int)value : 32;
-}
-
-/* delta_limit: returns ISAC_CSIRS_DISC_DELTA_MAX (default 1): the largest slot-delta searched by the sweep, clipped to the slots per frame.
- *   Caller: nr_csirs_disc_process() (sweep configuration).
- */
-static int delta_limit(const nr_csirs_disc_ring_t *ring)
-{
-  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_DELTA_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *s = getenv("ISAC_CSIRS_DISC_DELTA_MAX");
-  const long value = s ? strtol(s, NULL, 10) : 1;
-  return value > 0 && value <= ring->slots_per_frame ? (int)value : 1;
-}
-
 /* epoch_listener: configuration-epoch listener: clears the sweep cache, evidence and the ring, and withdraws discovered CSI-RS resources unless the epoch was a soft RX recovery.
  *   Runs under pipeline_lock. A soft RX recovery keeps the monitor exports (cell configuration), a full reconfiguration removes them via nr_csirs_blind_rt_discovery_reset() and nr_csirs_monitor_remove_dynamic_all().
  *   Registered by init_once() through nr_cfg_epoch_subscribe().
@@ -207,9 +178,7 @@ void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp)
     pthread_once(&g_once, init_once);
     const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load();
     if(fp && gpu && gpu->prepare) {
-      /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_RING not in the frozen config t26zE (2026-10-18); slated for removal */
-      const char *e=getenv("ISAC_CSIRS_DISC_RING");int capacity=e?atoi(e):640;
-      if(capacity<1) capacity=640;
+      const int capacity=NR_CSIRS_DISC_DEFAULT_CAPACITY;
       size_t stride=14*(fp->ofdm_symbol_size+fp->nb_prefix_samples0+fp->nb_prefix_samples);
       if(!gpu->sweep || !gpu->refine || !gpu->confirm || !gpu->sweep_prepare || gpu->prepare(fp->N_RB_DL,fp->nb_antennas_rx,capacity,fp->ofdm_symbol_size,stride)<0
          || (gpu->sweep_prepare && gpu->sweep_prepare(fp->N_RB_DL,fp->nb_antennas_rx,capacity)<0))
@@ -229,8 +198,8 @@ static bool off_near(unsigned a, unsigned b, unsigned p)
   return d <= 1 || d == p - 1;
 }
 
-/* rl_update: ISAC_CSIRS_DISC_RATELIMIT. Builds the observation (confirmed set of this module's winners, footprint novelty, CRC counters),
- *   steps the state machine and applies the ingest duty to the TD front end. Caller: nr_csirs_disc_process() under pipeline_lock, flag on only.
+/* rl_update: Builds the observation (confirmed set of this module's winners, footprint novelty, CRC counters),
+ *   steps the state machine and applies the ingest duty to the TD front end. Caller: nr_csirs_disc_process() under pipeline_lock.
  */
 static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t *fps, int n_fp)
 {
@@ -240,19 +209,10 @@ static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t
   if (!init) {
     uint32_t win = 640, div = 7;
     if (nr_csirs_disc_td_feed_params) nr_csirs_disc_td_feed_params(&win, &div);
-    const char *e;
-    /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_RATELIMIT_NOTICE_S not in the frozen config t26zE (2026-10-18); slated for removal */
-    const double notice_s = (e=getenv("ISAC_CSIRS_DISC_RATELIMIT_NOTICE_S")) && atof(e) > 0 ? atof(e) : 60.0;
-    /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_RATELIMIT_MISS not in the frozen config t26zE (2026-10-18); slated for removal */
-    const double miss = (e=getenv("ISAC_CSIRS_DISC_RATELIMIT_MISS")) && atof(e) > 0 && atof(e) < 1 ? atof(e) : 0.01;
-    /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_RATELIMIT_PDET not in the frozen config t26zE (2026-10-18); slated for removal */
-    const double pdet = (e=getenv("ISAC_CSIRS_DISC_RATELIMIT_PDET")) && atof(e) > 0 && atof(e) < 1 ? atof(e) : 0.5;
-    /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_RATELIMIT_CYCLES not in the frozen config t26zE (2026-10-18); slated for removal */
-    const int cyc = (e=getenv("ISAC_CSIRS_DISC_RATELIMIT_CYCLES")) && atoi(e) > 0 ? atoi(e) : 2;
-    cfg = (nr_csirs_rl_cfg_t){win, div, (uint64_t)(notice_s * ring->slots_per_frame * 100), miss, pdet, cyc};
+    cfg = (nr_csirs_rl_cfg_t){win, div, (uint64_t)(60.0 * ring->slots_per_frame * 100), 0.01, 0.5, 2};
     init = true;
     LOG_I(PHY, "SENSING: CSIRS_DISC RATELIMIT cfg win=%u div=%u notice_slots=%llu checks=%u cycles=%d\n", win, div,
-          (unsigned long long)cfg.notice_slots, nr_csirs_rl_checks(&cfg), cyc);
+          (unsigned long long)cfg.notice_slots, nr_csirs_rl_checks(&cfg), cfg.stable_cycles);
   }
   nr_csirs_rl_obs_t o = {.epoch = rl_epoch};
   rl_epoch = false;
@@ -314,9 +274,11 @@ static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t
   }
 }
 
+int nr_csirs_disc_test_sweep_limit = 32; /* hypotheses swept per batch; tests raise it */
+
 /* nr_csirs_disc_process: one discovery batch on a snapshot of the IQ ring: detects footprints, builds hypotheses, sweeps them (GPU or CPU), gates the winners, refines and verifies them, and admits the survivors to the CSI-RS search.
- *   Steps: footprints (nr_csirs_disc_detect_candidates) -> union views -> hypotheses (cache and confirmed-skip filters, ISAC_CSIRS_DISC_CUMULATIVE/_TRS_PRIORITY) -> sweep -> per-footprint best -> gate -> refine -> verify -> nr_csirs_blind_rt_add_discovered().
- *   Flags: ISAC_CSIRS_DISC_DIAG, ISAC_CSIRS_DISC_SWEEP_HYPS, ISAC_CSIRS_DISC_DELTA_MAX, ISAC_CSIRS_DISC_CUMULATIVE, ISAC_CSIRS_DISC_TRS_PRIORITY. Logs WINNER, AMBIGUOUS and BATCH lines.
+ *   Steps: footprints (nr_csirs_disc_detect_candidates) -> union views -> hypotheses (cache and confirmed-skip filters) -> sweep -> per-footprint best -> gate -> refine -> verify -> nr_csirs_blind_rt_add_discovered().
+ *   Logs WINNER, AMBIGUOUS and BATCH lines.
  *   Takes pipeline_lock for the batch and g_lock for the metrics. Caller: the discovery worker through nr_csirs_disc_process_hook (nr_csirs_disc_feed.c); tests.
  */
 void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
@@ -329,8 +291,6 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
     cache_count=qualified_count=evidence_retries=0; ++evidence_epoch;
     rl_epoch=true;rl_known_n=0;
   }
-  const bool cumulative=feature("ISAC_CSIRS_DISC_CUMULATIVE");
-  const bool trs_priority=feature("ISAC_CSIRS_DISC_TRS_PRIORITY");
   cache_grid=ring->grid_base;cache_written=ring->written;
   const uint64_t begin = now_us(), cpu_begin=cpu_us();
   nr_csirs_disc_fp_t fps[DISC_VIEWS];
@@ -412,10 +372,10 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   }
 
   const nr_csirs_disc_gpu_ops_t *ops = nr_csirs_disc_gpu_load();
-  int budget = sweep_limit();
+  int budget = nr_csirs_disc_test_sweep_limit;
   const int n_all = nr_csirs_disc_hypotheses(fps, n_fp_hyp, all_hyps, NR_CSIRS_DISC_MAX_HYP);
   int n_hyp = 0;
-  if (cumulative) for (int i=0;i<evidence_retries && n_hyp<budget/4;++i) {
+  for (int i=0;i<evidence_retries && n_hyp<budget/4;++i) {
     nr_csirs_disc_hyp_t h=evidence_retry[i].h;
     if (ring->written-evidence_retry[i].written>10000 || cached(&h,ring->written)) continue;
     // Keep only currently observed persistent footprints; no blind stale probes.
@@ -427,12 +387,12 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
     }
   }
   // Priority changes ordering only, not the feed, sweep cap, planner or GPU budget.
-  for (int pass=0;pass<(trs_priority?2:1);++pass)
+  for (int pass=0;pass<2;++pass)
     for (int i=0;i<n_all && n_hyp<budget;++i) {
       const bool trs=all_hyps[i].row==1 && all_hyps[i].period>=80;
-      if (trs_priority && trs!=(pass==0)) continue;
+      if (trs!=(pass==0)) continue;
       bool duplicate=false;
-      if (cumulative) for (int j=0;j<n_hyp;++j)
+      for (int j=0;j<n_hyp;++j)
         duplicate |= nr_csirs_disc_evidence_key(&hyps[j],&all_hyps[i]);
       if (!duplicate && !cached(&all_hyps[i],ring->written)
           && (!nr_csirs_blind_rt_discovery_confirmed || !nr_csirs_blind_rt_discovery_confirmed(&all_hyps[i])))
@@ -445,8 +405,8 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   int n_win = 0;
   bool gpu = false;
   const nr_csirs_disc_sweep_cfg_t sweep_cfg = {
-      .id_first = 0, .id_count = 1024, .delta_max = delta_limit(ring), .block_re = 32, .max_slots = 4,
-      .evidence_epoch = cumulative ? evidence_epoch : 0};
+      .id_first = 0, .id_count = 1024, .delta_max = 1, .block_re = 32, .max_slots = 4,
+      .evidence_epoch = evidence_epoch};
   if (n_hyp > 0 && ops && ops->sweep) {
     n_win = ops->sweep(ring, hyps, n_hyp, &sweep_cfg, wins);
     gpu = n_win >= 0;
@@ -485,31 +445,6 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       const nr_csirs_disc_hyp_t *h = &hyps[w->hyp_index];
       if (h->fp_index >= DISC_VIEWS)
         continue;
-      /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
-      if (getenv("ISAC_CSIRS_DISC_DIAG"))
-        LOG_I(PHY,
-              "SENSING: CSIRS_DISC DIAG row=%u fd=%u l0=%u l1=%u fp=%u rb=%u:%u coarse=%u slots=%u id=%u z=%.6f z2=%.6f mu=%.6f sigma=%.6f P/O=%u/%u\n",
-              h->row,
-              h->freq_domain,
-              h->symb_l0,
-              h->symb_l1,
-              h->fp_index,
-              h->rb_start,
-              h->n_rb,
-              (unsigned)coarse_only[w->hyp_index],
-              w->n_slots,
-              w->scramb_id,
-              w->z,
-              w->z_second,
-              w->noise_mu,
-              w->noise_sigma,
-              h->period,
-              h->offset);
-      /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
-      if (cumulative && h->row==1 && getenv("ISAC_CSIRS_DISC_DIAG"))
-        LOG_I(PHY,"SENSING: CSIRS_DISC EVIDENCE row=%u fd=%u l0=%u rb=%u:%u P/O=%u/%u slots=%u fresh=%u epoch=%llu\n",
-              h->row,h->freq_domain,h->symb_l0,h->rb_start,h->n_rb,h->period,h->offset,
-              w->n_slots,w->fresh_slots,(unsigned long long)evidence_epoch);
       const int lead = leader[h->fp_index];
       if (lead < 0 || w->z > wins[lead].z)
         leader[h->fp_index] = i;
@@ -535,7 +470,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
         continue;
       const nr_csirs_disc_win_t *w = &wins[i];
       const nr_csirs_disc_hyp_t *h = &hyps[w->hyp_index];
-      const bool accumulated=cumulative && h->row==1 && sweep_cfg.delta_max==1;
+      const bool accumulated=h->row==1 && sweep_cfg.delta_max==1;
       // Re-verification may read a cached vector, but admission needs new IQ.
       if (accumulated && !w->fresh_slots) {
         cache_result(h,ring->written,false);
@@ -597,17 +532,9 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       nr_csirs_disc_win_t verified;
       int checked=gpu && ops->sweep?ops->sweep(ring,&refined,1,&sweep_cfg,&verified):-1;
       if(checked<0 && !ring->device_valid) checked=nr_csirs_disc_sweep_cpu(ring,&refined,1,&sweep_cfg,&verified);
-      /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
-      if (checked == 1 && getenv("ISAC_CSIRS_DISC_DIAG"))
-        LOG_I(PHY,
-              "SENSING: CSIRS_DISC VERIFY row=%u fd=%u l0=%u l1=%u rb=%u:%u id=%u z=%.6f z2=%.6f mu=%.6f sigma=%.6f P/O=%u/%u accepted=%u\n",
-              refined.row, refined.freq_domain, refined.symb_l0, refined.symb_l1,
-              refined.rb_start, refined.n_rb, verified.scramb_id, verified.z, verified.z_second,
-              verified.noise_mu, verified.noise_sigma, refined.period, refined.offset,
-              (unsigned)(nr_csirs_disc_gate_accept(&verified, &gate) && verified.scramb_id == w->scramb_id));
       if(checked!=1
           || !nr_csirs_disc_gate_accept(&verified, &gate) || verified.scramb_id!=w->scramb_id) {
-        if (cumulative && checked==1 && refined.row==1 && sweep_cfg.delta_max==1)
+        if (checked==1 && refined.row==1 && sweep_cfg.delta_max==1)
           retry_refined(&refined,ring->written);
         continue;
       }
@@ -642,7 +569,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
     }
   }
 
-  if (feature("ISAC_CSIRS_DISC_RATELIMIT")) rl_update(ring, fps, n_fp);
+  rl_update(ring, fps, n_fp);
   pthread_mutex_lock(&g_lock);
   uint64_t cpu_end=cpu_us();
   g_metrics.cpu_us+=cpu_end-cpu_begin;g_metrics.detect_cpu_us+=cpu_detected-cpu_begin;

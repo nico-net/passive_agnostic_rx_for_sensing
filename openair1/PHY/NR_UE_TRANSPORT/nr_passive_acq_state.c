@@ -255,19 +255,11 @@ bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot)
   pthread_mutex_unlock(&g_lock);
   return t.valid ? nr_tdd_slot_has_downlink(&t, absolute_slot) : true;
 }
-/* nr_passive_acq_note_carrier_from_rs: confirms the carrier grid without SIB1 carrier information, when a CSI-RS sequence has been decoded on the grid: marks the carrier verified with Point A at the grid start and the centre of the started carrier (ISAC_ACQ_CARRIER_FROM_RS=0 disables it).
+/* nr_passive_acq_note_carrier_from_rs: confirms the carrier grid without SIB1 carrier information, when a CSI-RS sequence has been decoded on the grid: marks the carrier verified with Point A at the grid start and the centre of the started carrier.
  *   Does nothing when the carrier is already verified or the physical geometry is not set. Logs the confirmation with its evidence. Caller: nr_csirs_blind_rt.c (confirmed CSI-RS, discovery path).
  */
 void nr_passive_acq_note_carrier_from_rs(const char *evidence)
 {
-  static int s_enabled = -1; /* ISAC_ACQ_CARRIER_FROM_RS=0 disables this SIB1-free path */
-  if (s_enabled < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_ACQ_CARRIER_FROM_RS not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_ACQ_CARRIER_FROM_RS");
-    s_enabled = !(e && atoi(e) == 0);
-  }
-  if (!s_enabled)
-    return;
   pthread_mutex_lock(&g_lock);
   if (g_snap.carrier_verified != 0 || !g_phy_geom_set) {
     pthread_mutex_unlock(&g_lock);
@@ -313,70 +305,11 @@ void nr_passive_acq_note_carrier_hypothesis(int point_a_sc, const char *evidence
   pthread_mutex_unlock(&g_lock);
 }
 
-/* ISAC_SIB1_SIBLING=1 (default off): co-channel / co-sited cells (sectors of one site) transmit the SAME SSB frequency with the same
- * carrier. A SIB1-decoded cell stores {carrier width, mu, offsetToPointA, offsetToCarrier, k_ssb} in /tmp/passive_rx keyed by the
- * ABSOLUTE SSB frequency; a cell on that SSB frequency with the same MIB k_ssb whose own SIB1 is not (yet) decoded (PCI 4 beside
- * PCI 508) takes it as its carrier HYPOTHESIS, which opens the nID sweep / dwell path (they need CRB 0). Its own SIB1 overrides it.
- * A wrong hypothesis finds nothing (every dwell is verified by TB-CRC), it cannot create a false CORESET. */
-static int g_carrier_sibling; /* 1 while the carrier verdict is a sibling's */
-static int g_carrier_sib_apply; /* set while the sibling itself is being applied */
-typedef struct { uint32_t magic; int32_t n_rb, mu, off_a, off_c, k_ssb; } sib_file_t;
-static bool sibling_on(void)
-{
-  /* DEFERRED/DO NOT USE: ISAC_SIB1_SIBLING not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *e = getenv("ISAC_SIB1_SIBLING"); /* a few calls per run: no caching */
-  return e && atoi(e) > 0;
-}
-static bool sibling_path(char *out, size_t n) /* g_lock held, geometry set */
-{
-  const double scs = 15000.0 * (1 << g_carrier.phy_mu);
-  const double ssb_hz = g_carrier.phy_dl_carrier_hz + (g_carrier.phy_ssb_start_subcarrier - 6 * g_carrier.phy_n_rb) * scs;
-  if (!g_phy_geom_set || g_carrier.phy_dl_carrier_hz <= 0) return false;
-  snprintf(out, n, "/tmp/passive_rx/sib1_sibling_%lld.bin", (long long)(ssb_hz / 1000.0 + 0.5));
-  return true;
-}
-/* Own SIB1 carrier facts -> file (g_lock held). */
-static void sibling_save(int n_rb, int mu, int off_a, int off_c, int k_ssb)
-{
-  char path[160];
-  if (!sibling_on() || !sibling_path(path, sizeof(path))) return;
-  const sib_file_t f = {0x53425831u, n_rb, mu, off_a, off_c, k_ssb};
-  if (mkdir("/tmp/passive_rx", 0777) == 0)
-    chmod("/tmp/passive_rx", 01777); // the receiver runs as root (umask 022); users' tests and tools share this store
-  FILE *fp = fopen(path, "wb");
-  if (!fp) return;
-  fwrite(&f, sizeof(f), 1, fp);
-  fclose(fp);
-}
-void nr_passive_acq_try_sibling_carrier(int k_ssb)
-{
-  char path[160];
-  if (!sibling_on()) return;
-  pthread_mutex_lock(&g_lock);
-  if (g_snap.carrier_verified != 0 || !sibling_path(path, sizeof(path))) { pthread_mutex_unlock(&g_lock); return; }
-  sib_file_t f = {0};
-  FILE *fp = fopen(path, "rb");
-  const bool ok = fp && fread(&f, sizeof(f), 1, fp) == 1 && f.magic == 0x53425831u && f.k_ssb == k_ssb && f.mu == g_carrier.phy_mu;
-  if (fp) fclose(fp);
-  pthread_mutex_unlock(&g_lock);
-  if (!ok) return;
-  LOG_A(PHY, "SENSING: ACQ carrier SIBLING hypothesis: same SSB frequency and k_ssb=%d as a cell with a decoded SIB1 -> %d PRB mu=%d offsetToPointA %d offsetToCarrier %d (own SIB1 overrides)\n",
-        k_ssb, f.n_rb, f.mu, f.off_a, f.off_c);
-  pthread_mutex_lock(&g_lock);
-  g_carrier_sib_apply = 1;
-  pthread_mutex_unlock(&g_lock);
-  nr_passive_acq_note_sib1_carrier(f.n_rb, f.mu, f.off_a, f.off_c, f.k_ssb);
-  pthread_mutex_lock(&g_lock);
-  g_carrier_sib_apply = 0;
-  g_carrier_sibling = 1;
-  pthread_mutex_unlock(&g_lock);
-}
+void nr_passive_acq_try_sibling_carrier(int k_ssb) { (void)k_ssb; } /* sibling-carrier hypothesis removed; kept for the caller in nr-ue.c */
 
 void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, int offset_to_carrier, int k_ssb)
 {
   pthread_mutex_lock(&g_lock);
-  const int was_sibling = g_carrier_sibling; /* a live SIB1 replaces a sibling verdict */
-  if (was_sibling && !g_carrier_sib_apply) { g_carrier_sibling = 0; g_snap.carrier_verified = 0; }
   g_carrier.sib1_n_rb = n_rb; g_carrier.sib1_mu = mu; g_carrier.sib1_offset_to_point_a = offset_to_point_a;
   g_carrier.sib1_offset_to_carrier = offset_to_carrier; g_carrier.sib1_k_ssb = k_ssb;
   if (!g_phy_geom_set) {
@@ -422,7 +355,6 @@ void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, i
   }
   g_snap.carrier_verified = ok ? 1 : -1;
   g_snap.carrier = v;
-  if (!g_carrier_sib_apply) sibling_save(n_rb, mu, offset_to_point_a, offset_to_carrier, k_ssb);
   pthread_mutex_unlock(&g_lock);
 }
 nr_passive_acq_snapshot_t nr_passive_acq_snapshot(void)
@@ -438,7 +370,7 @@ void nr_passive_acq_reset(void)
   memset(&g_snap, 0, sizeof(g_snap));
   memset(&g_last_in, 0, sizeof(g_last_in));
   g_pbch_locked = g_sib1_decoded = false;
-  memset(&g_carrier, 0, sizeof(g_carrier)); g_phy_geom_set = false; g_carrier_sibling = 0;
+  memset(&g_carrier, 0, sizeof(g_carrier)); g_phy_geom_set = false;
   g_snap.state = NR_ACQ_SEARCHING;
   pthread_mutex_unlock(&g_lock);
 }
@@ -474,49 +406,11 @@ nr_cell_verdict_t nr_cell_state_update(nr_cell_state_t *c, uint32_t abs_slot, ui
   return c->verdict;
 }
 
-static nr_cell_state_t g_cell_state;
-static pthread_mutex_t g_cell_state_mu = PTHREAD_MUTEX_INITIALIZER;
-static int cell_state_level(void)
-{
-  static int l = -1;
-  /* DEFERRED/DO NOT USE: ISAC_CELL_STATE not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (l < 0) { const char *e = getenv("ISAC_CELL_STATE"); l = e ? atoi(e) : 0; }
-  return l;
-}
-void nr_cell_state_note_mib_barred(bool barred)
-{
-  if (!cell_state_level()) return;
-  pthread_mutex_lock(&g_cell_state_mu); g_cell_state.barred = barred; pthread_mutex_unlock(&g_cell_state_mu);
-}
-void nr_cell_state_note_ue_rnti(uint16_t rnti)
-{
-  if (!cell_state_level()) return;
-  pthread_mutex_lock(&g_cell_state_mu); nr_cell_state_note_rnti(&g_cell_state, rnti); pthread_mutex_unlock(&g_cell_state_mu);
-}
+/* The process-wide cell-state instance was off by default and is gone; the hooks stay for their callers. */
+void nr_cell_state_note_mib_barred(bool barred) { (void)barred; }
+void nr_cell_state_note_ue_rnti(uint16_t rnti) { (void)rnti; }
 bool nr_cell_state_sweep_blocked(uint32_t abs_slot, uint64_t cap_offered, uint64_t cap_taken, uint64_t cap_empty)
 {
-  const int level = cell_state_level();
-  if (!level) return false;
-  static uint64_t s_sync_losses;
-  static nr_cell_verdict_t s_last = NR_CELL_UNKNOWN;
-  static uint32_t window = 0;
-  /* DEFERRED/DO NOT USE: ISAC_CELL_STATE_SECS not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (!window) { const char *e = getenv("ISAC_CELL_STATE_SECS"); const int sec = e ? atoi(e) : 30; window = (uint32_t)(sec > 0 ? sec : 30) * 2000u; }
-  const nr_passive_acq_snapshot_t a = nr_passive_acq_snapshot();
-  pthread_mutex_lock(&g_cell_state_mu);
-  if (a.sync_losses != s_sync_losses) { s_sync_losses = a.sync_losses; const bool b = g_cell_state.barred; memset(&g_cell_state, 0, sizeof g_cell_state); g_cell_state.barred = b; s_last = NR_CELL_UNKNOWN; }
-  const nr_cell_verdict_t v = nr_cell_state_update(&g_cell_state, abs_slot, window);
-  const bool barred = g_cell_state.barred;
-  pthread_mutex_unlock(&g_cell_state_mu);
-  if (v != s_last) {
-    s_last = v;
-    if (v != NR_CELL_UNKNOWN)
-      LOG_A(PHY, "SENSING: CELL_STATE %s barred=%d sib1_decodes=%llu window=%u slots no_recurring_ue_rnti=%d nid_capture offered=%llu taken=%llu skipped_empty=%llu -> %s\n",
-            nr_cell_verdict_name(v), (int)barred, (unsigned long long)a.sib1_decodes, (unsigned)window, v != NR_CELL_ACTIVE,
-            (unsigned long long)cap_offered, (unsigned long long)cap_taken, (unsigned long long)cap_empty,
-            v == NR_CELL_ACTIVE ? "UE traffic observed, nID sweep (re)armed"
-                                : (level >= 2 ? "no UE traffic observed: nID sweep capture stopped until a UE RNTI recurs"
-                                              : "no UE traffic observed (report only; ISAC_CELL_STATE=2 stops the nID sweep)"));
-  }
-  return level >= 2 && (v == NR_CELL_BARRED_IDLE || v == NR_CELL_IDLE);
+  (void)abs_slot; (void)cap_offered; (void)cap_taken; (void)cap_empty;
+  return false;
 }

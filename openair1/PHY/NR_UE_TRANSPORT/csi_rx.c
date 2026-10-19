@@ -57,7 +57,7 @@ static bool csirs_ports_fit(const nr_csi_info_t *csi_info, const csi_mapping_par
     return true;
   static __thread int warned;
   if (!warned++)
-    LOG_W(NR_PHY, "SENSING: CSI-RS row %d has %d ports > %d buffers (ISAC_CSIRS_PORTS_GT8=0); skipped\n", (int)pdu->row, (int)m->ports,
+    LOG_W(NR_PHY, "SENSING: CSI-RS row %d has %d ports > %d buffers; skipped\n", (int)pdu->row, (int)m->ports,
           csi_info->csi_rs_generated_ports);
   return false;
 }
@@ -1034,60 +1034,6 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
   }
   nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_CSIRS,nr_sense_now_ns()-t_sense_prod);
 
-  // TIME-TRACKING AUDIT (2026-08-04, instrumentation only -- no behavioural change, nothing
-  // downstream reads these values). Same coherence/tau estimator as dci_nr.c's TSYNC_PDCCH probe
-  // (see that file for the derivation), applied here to the CSI-RS LS estimate (isac_h/isac_k)
-  // BEFORE nr_isac_submit_cfr_multi() exports the receiver estimates. This measures the raw
-  // per-RB Ĥ phase slope on antenna 0.
-  // isac_k[] is an exact arithmetic sequence (step = NR_NB_SC_PER_RB = 12) whenever freq_density
-  // > 1 (every csirs_monitor resource in this cell's conf), since the skip-every-other-RB branch
-  // above is dead in that case; a non-uniform step is detected and the probe silently skipped
-  // rather than risk a wrong tau on some future freq_density<=1 resource.
-  {
-    static int audit = -1;
-    if (audit < 0)
-      /* DEFERRED/DO NOT USE: ISAC_TSYNC_AUDIT not in the frozen config t26zE (2026-10-18); slated for removal */
-      audit = (getenv("ISAC_TSYNC_AUDIT") != NULL) ? 1 : 0;
-    if (audit && nof_re >= 2) {
-      const int step = (int)isac_k[1] - (int)isac_k[0];
-      int uniform = (step > 0);
-      for (uint32_t i = 1; i < nof_re && uniform; i++)
-        if ((int)isac_k[i] - (int)isac_k[i - 1] != step)
-          uniform = 0;
-      if (uniform) {
-        const int symb_sz = frame_parms->ofdm_symbol_size;
-        double lr = 0.0, li = 0.0, e = 0.0;
-        double pr = 0.0, pi = 0.0;
-        for (uint32_t n = 0; n < nof_re; n++) {
-          const double zr = isac_h[2 * n];
-          const double zi = isac_h[2 * n + 1];
-          if (n > 0) {
-            lr += pr * zr + pi * zi;
-            li += pi * zr - pr * zi;
-          }
-          pr = zr;
-          pi = zi;
-          e += zr * zr + zi * zi;
-        }
-        const double coh = (e > 0.0) ? sqrt(lr * lr + li * li) / e : 0.0;
-        const double dphi = -atan2(li, lr);
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        LOG_I(NR_PHY,
-              "TSYNC_CSIRS utc_ns=%lld frame=%d slot=%d nof_re=%d step=%d coherence=%.4f "
-              "tau_samples=%.1f tau_ambig=%.1f\n",
-              (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec,
-              proc->frame_rx,
-              proc->nr_slot_rx,
-              (int)nof_re,
-              step,
-              coh,
-              dphi * symb_sz / (2.0 * M_PI * step),
-              (double)symb_sz / (2.0 * step));
-      }
-    }
-  }
-
   if (nof_re > 0) {
     nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)frame_parms->N_RB_DL,
                                  .scs_hz          = frame_parms->subcarrier_spacing,
@@ -1328,7 +1274,7 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
 }
 
 /* nr_ue_csi_rs_sensing_capture_shifted: UE-agnostic passive-sensing capture of one NZP CSI-RS resource that is not the UE's own: runs the CSI-RS channel estimate (up to the LS estimate, no RI/PMI/CQI and no report to MAC) for the resources of the [sensing] csirs_monitor list and feeds them to the ISAC engine.
- *   Only when the monitor is configured (nr_csirs_monitor_enabled). slot_delta shifts the resource's slot. Diagnostics: ISAC_CSI_DIAG, ISAC_PDCCH_TIMING. Caller: phy_procedures_nr_ue.c (the monitor's per-slot path, with the resource's slot delta).
+ *   Only when the monitor is configured (nr_csirs_monitor_enabled). slot_delta shifts the resource's slot. Caller: phy_procedures_nr_ue.c (the monitor's per-slot path, with the resource's slot delta).
  */
 void nr_ue_csi_rs_sensing_capture_shifted(PHY_VARS_NR_UE *ue,
                                           const UE_nr_rxtx_proc_t *proc,
@@ -1350,11 +1296,7 @@ void nr_ue_csi_rs_sensing_capture_shifted(PHY_VARS_NR_UE *ue,
     LOG_D(NR_PHY, "SENSING: csirs_monitor resource csi_type=%d not NZP; skipped\n", csirs_config_pdu->csi_type);
     return;
   }
-  static int csirs_timing = -1;
-  if (csirs_timing < 0) {
-    const char *e = (getenv("ISAC_PDCCH_TIMING") ?: (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : NULL));
-    csirs_timing = e && atoi(e) != 0;
-  }
+  const bool csirs_timing = IS_PASSIVE_RX_MODE(get_softmodem_params());
   struct timespec cfr_start = {0};
   if (csirs_timing) clock_gettime(CLOCK_MONOTONIC, &cfr_start);
 
@@ -1412,40 +1354,6 @@ void nr_ue_csi_rs_sensing_capture_shifted(PHY_VARS_NR_UE *ue,
                                &log2_re,
                                &log2_maxh,
                                &noise_power);
-
-  /* CSIDIAG (ISAC_CSI_DIAG=1): report the CSI-RS measurement so CSI is observably TRACKED by the
-   * receiver instead of only being handed to a sensing engine that may not be linked in. */
-  {
-    static int s_cd = -1;
-    if (s_cd < 0)
-      /* DEFERRED/DO NOT USE: ISAC_CSI_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
-      s_cd = (getenv("ISAC_CSI_DIAG") != NULL) ? 1 : 0;
-    if (s_cd) {
-      double pw[4] = {0, 0, 0, 0};
-      const int nant = (frame_parms->nb_antennas_rx < 4) ? frame_parms->nb_antennas_rx : 4;
-      for (int a = 0; a < nant; a++) {
-        double acc = 0;
-        int cnt = 0;
-        for (int k = 0; k < frame_parms->ofdm_symbol_size; k++) {
-          const c16_t v = csi_rs_ls_estimated_channel[a][0][k];
-          if (v.r || v.i) {
-            acc += (double)v.r * v.r + (double)v.i * v.i;
-            cnt++;
-          }
-        }
-        pw[a] = cnt ? acc / cnt : 0.0;
-      }
-      double sig = 0;
-      for (int a = 0; a < nant; a++)
-        sig += pw[a];
-      sig /= (nant ? nant : 1);
-      LOG_I(PHY,
-            "SENSING: CSIDIAG %d.%d symb_l0=%d nport=%d noise=%u pw=[%.0f,%.0f,%.0f,%.0f] snr=%.1fdB\n",
-            proc->frame_rx, proc->nr_slot_rx, (int)csirs_config_pdu->symb_l0, (int)mapping_parms.ports,
-            noise_power, pw[0], pw[1], pw[2], pw[3],
-            (noise_power > 0 && sig > 0) ? 10.0 * log10(sig / (double)noise_power) : 0.0);
-    }
-  }
 
   nr_isac_submit_csirs_ls(frame_parms, proc, csirs_config_pdu, &csi_rs_ls_estimated_channel[0][0][0],
                           (size_t)mapping_parms.ports * frame_parms->ofdm_symbol_size, mapping_parms.loverline[0],

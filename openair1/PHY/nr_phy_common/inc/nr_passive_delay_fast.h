@@ -1,6 +1,6 @@
 #ifndef NR_PASSIVE_DELAY_FAST_H
 #define NR_PASSIVE_DELAY_FAST_H
-/* ISAC_UL_DELAY_FAST=1 (default off; UL-LAT-20261018): nr_passive_est_delay()'s decision for an LS row whose support is
+/* UL-LAT-20261018: nr_passive_est_delay()'s decision for an LS row whose support is
  * [0,m) with 8m <= n/2, without the n-point IDFT. That IDFT (one per antenna x DM-RS symbol, n = 4096) was ~55 % of the CPU
  * of a PUSCH decode call while a 3-PRB grant has m = 36 non-zero bins.
  *
@@ -20,15 +20,7 @@
 #define NR_PDF_THRESHOLD 15.0
 #define NR_PDF_MAX_CAND 8
 
-static inline bool nr_ul_delay_fast_on(void)
-{
-  static int on = -1;
-  if (on < 0) {
-    const char *e = getenv("ISAC_UL_DELAY_FAST");
-    on = !e || atoi(e) > 0;
-  }
-  return on;
-}
+static inline bool nr_ul_delay_fast_on(void) { return true; }
 
 /* in-place radix-2 FFT with the +j kernel (an unscaled IDFT) */
 static inline void nr_pdf_fft(float *re, float *im, int np)

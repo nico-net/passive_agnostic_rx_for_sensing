@@ -204,13 +204,11 @@ static double port_score(const int16_t *rx, const int8_t *ref, int n, int block,
 
 /* nr_csirs_disc_sweep_cpu: serial CPU sweep of a list of hypotheses over the ring: for each hypothesis and scrambling identity (and slot delta) it correlates the selected slots against the reference and produces a winner.
  *   Works on the slots with the hypothesis period and offset that are fresh for the cumulative evidence bank (when evidence_epoch is set), and merges with the previous evidence.
- *   Returns nh on success, 1 per hypothesis via out, -1 on error; returns 0 when ISAC_CSIRS_DISC is not "1". Callers: nr_csirs_disc.c (admission and verification).
+ *   Returns nh on success, 1 per hypothesis via out, -1 on error. Callers: nr_csirs_disc.c (admission and verification).
  */
 int nr_csirs_disc_sweep_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
                           const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out)
 {
-  const char *enable = (getenv("ISAC_CSIRS_DISC") ?: "1");
-  if (!enable || strcmp(enable, "1")) return 0;
   nr_csirs_disc_sweep_cfg_t c;
   if (!out || nr_csirs_disc_sweep_validate(r, hyps, nh, cfg, &c)) return -1;
   float *scores = calloc((size_t)c.id_count*c.delta_max,sizeof(*scores));

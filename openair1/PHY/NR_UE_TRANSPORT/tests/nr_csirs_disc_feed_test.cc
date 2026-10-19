@@ -11,10 +11,9 @@ extern "C" {
 #include "nr_csirs_disc.h"
 }
 
-TEST(AEnabled, OffByDefault)
+TEST(AEnabled, AlwaysOn)
 {
-  setenv("ISAC_CSIRS_DISC","0",1);
-  EXPECT_FALSE(nr_csirs_disc_enabled());
+  EXPECT_TRUE(nr_csirs_disc_enabled());
 }
 
 class RingCopyTest : public ::testing::TestWithParam<int> {};
