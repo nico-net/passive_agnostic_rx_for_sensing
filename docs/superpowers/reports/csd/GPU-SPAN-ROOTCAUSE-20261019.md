@@ -1,107 +1,128 @@
 # DL GPU span: root cause (p50 and p99), 2026-10-19
 
-Status: **NOT PROVEN YET for the merge19 build.** There is no on-air profile of csd/int16-merge19. The measurement commit `d2dcce42d1` and the run spec below fix that. This report states what the existing on-air data already shows, what it rules out, and what the next run will settle.
+Labels: [MEASURED source, run] = on-air data, daytime 2026-10-19, merge19 + measurement commit d2dcce42d1, FROZEN_20261018.env. [BENCH] = synthetic unit test, not on air, never used as proof. [INFERRED] = reasoning. Cells are never pooled. All values in µs.
 
-Labels: [MEASURED source, run, date] = read from the named on-air data. [BENCH] = synthetic unit test on the DGX GPU with no receiver running (not on air; it never serves as proof). [INFERRED] = reasoning, not measured. Cells are never pooled. All values are in µs.
+## 0. Runs and tools
 
-## 0. Data used
-
-| tag | build | what | GPU layout |
-|---|---|---|---|
-| mmTM1 = ab_mmTM1_1_153134 (TIM), mmVM2 = ab_mmVM2_1_155023 (Vodafone) | merge19 d79b8b7bc5, frozen env | run logs; EVMGRANT gp= | current (DL 32 SM, probe 8, disc 8) |
-| kTZ1 = nsys_kTZ1 + ab_kTZ1_1_194746 (TIM, 2026-10-18 19:47) | frozen predecessor csd/int16-int 26b16e3671, **no in-graph gate** | nsys, CUDA + graph-node trace, window 60–90 s, 19 667 passes | old (DL pass in its own RT green context, standalone demod/LDPC/FEP contexts beside it) |
-| jjpAD = nsys_jjpAD + ab_jjpAD_1_023106 (2026-10-19 02:31, night) | A+D build (in-graph gate = the merge19 graph structure) | nsys, first 60 s, 3 528 passes, **mostly probes** (345 real grants in the whole 90 s run) | probe passes on the 8-SM probe context |
-
-Tools: `tests/passive_rx/gpuspan/passes.py` and `passrep.py`. They rebuild every pass from the trace: the three `cudaGraphLaunch` of one passivePdsch thread, the conditional-body kernels attributed through their `graphNodeId`, and every other kernel classified by the thread that issued it. `gqrep.py` reads the new EVMGRANT fields.
-
-## 1. What a DL grant looks like on air (merge19) [MEASURED mmTM1, mmVM2, 2026-10-19]
-
-| run | real grants on the pass | gspan p50 | the p50 grant (gspan p45–p55) | the p99 grant (gspan ≥ p99) |
-|---|---|---|---|---|
-| mmTM1 TIM | 7 857 | 438 | C (code blocks, from TBS) p50 **1**, 16 RB, CRC-ok 38 % | gspan p50 4 615, C p50 18 (p90 31), 201 RB, CRC-ok 15 %, qwait p50 164 |
-| mmVM2 Vodafone | 24 420 | 427 | C p50 **1**, 16 RB, CRC-ok 51 % | gspan p50 4 100, C p50 12 (p90 20), 185 RB, CRC-ok 33 %, qwait p50 398 |
-
-gspan by code-block count (CRC ok / fail), p50: TIM C=1 355 / 395, C~8 807 / 630, C~16 1 386 / 952. Vodafone C=1 342 / 383, C~8 801 / 805, C~16 1 398 / 1 334 [MEASURED mmTM1, mmVM2].
-- The p50 grant is a **single-code-block, 16-RB grant**, and its GPU span is still about 350–440 µs. So the p50 span is mostly cost that does not depend on grant size. It is not decode work [MEASURED, same runs].
-- At a fixed code-block count, a CRC failure does not raise the p50 gspan (Vodafone C~8: 805 fail vs 801 ok). The size of the grant drives the span, not failing blocks [MEASURED mmVM2]. At C~8–16, p99/p50 is 3–8×. That spread comes from something other than the grant's own work [MEASURED; the cause is the open item §4].
-- The EVMGRANT `cb=` field was not used. C comes from TBS as in TS 38.212 5.2.2. The base-graph rule is simplified (BG1 when TBS > 3824), so C is approximate for mid-size TBs [INFERRED].
-
-## 2. Per-pass reconstruction of the gated graph structure [MEASURED jjpAD, 2026-10-19 02:31]
-
-These passes have the merge19 graph structure: C = FEP + chest; D = chest post → k_gate_d → IF{demod, descramble, LLR post}; L = k_gate_l → IF{rate dematch, LDPC, CRC, pick, CRC}. The data comes from the probe context (8 SMs), mostly probes, 1-code-block class, at night.
-
-Typical pass (span p45–p55, n = 357), p50 values:
-
-| segment | µs | what the GPU did for this pass | what else ran on the GPU then |
-|---|---|---|---|
-| C sub-graph | 142 | k_fep_exact 89, k_delay_exact 29, k_fir 8, k_ls 2, memcpy 1 | CSI-RS discovery (its own context) |
-| C→D boundary | 5.4 | nothing of its own (graph-to-graph launch on the stream) | — |
-| chest_post + k_gate_d | ~20 | 13 + 7 | |
-| **IF(D) body launch** (gate end → first body kernel) | **33** (p10 32, p90 46) | **nothing of its own**: the device-side launch of the conditional body | discovery only (GPU otherwise idle for this pass) |
-| D body | 73 | demod 10 kernels, unscr, LLR stats/norm | |
-| D→L boundary | 6.8 | nothing | |
-| **IF(L) body launch** | **16.5** (p10 16, p90 21) | **nothing of its own** | |
-| L body | 99 | k_rdm 9, **k_ldpc4_t 73** (1 CB, cluster of 8 blocks), CRC 11 + 1, pick 3 | |
-| **span** | **402** | own kernel busy 326, own idle gaps 77 | |
-
-- The two conditional nodes add **≈ 50 µs per pass (12 %)** in which the pass runs nothing. The latency has a narrow spread (IF-D p10 32 / p90 46 µs), which points to a fixed launch cost, not contention [MEASURED jjpAD].
-- In the probe context, k_fep_exact (grid 14) takes 88–89 µs every time (p10 87.7). The same kernel, standalone in the 32-SM context, runs at p10 37 µs [MEASURED jjpAD]. 14 blocks on 8 SMs need two waves [INFERRED]. So a probe's C is about 2.4× a real grant's C: an SM-count effect of the probe partition.
-- No conditional-node gaps exist in kTZ1, the build without the gate: C→D 5.4 µs and D→L 2.7 µs [MEASURED kTZ1].
-
-## 3. Kernel stretch under concurrency [MEASURED kTZ1, 2026-10-18; old layout]
-
-In kTZ1 the typical pass (span 776 µs under nsys) is **91 % own-kernel busy (705 µs)**. Own idle gaps are only 54 µs, and the GPU was busy with other work during them. The span is therefore the duration of the pass's own kernels. Those kernels are slower than solo by a factor that depends on **who runs at the same time**. The ratio is duration / solo p50 of the same kernel and grid:
-
-| overlapping work (> 20 % of the kernel) | stretch p50 | share of own-kernel time |
+| run | cell | what |
 |---|---|---|
-| CSI-RS discovery only (separate SM context) | 1.03 | 8 % |
-| other DL pass instances | 1.33 | 2 % |
-| discovery + other DL passes | 1.47 | 15 % |
-| discovery + other DL passes + DL non-pass (standalone FEP/LDPC) | 2.92 | 27 % |
-| … + UL | 6.44 | 20 % |
-| none | 1.00 | 2 % |
+| gsT1 = ab_gsT1_1_165236 | TIM | unprofiled, 150 s, 23 323 real grants on the pass, EVMGRANT `gq=` / `li=` |
+| gsT2N = ab_gsT2N_1_173659 + nsys_gsT2N | TIM | nsys `-t cuda,nvtx --cuda-graph-trace=node -y 90 -d 20 --kill=none`; 5 966 passes, all joined to their log line by NVTX seq |
+| gsV2N = ab_gsV2N_1_174103 + nsys_gsV2N | Vodafone | same; 7 302 passes |
 
-Same kernel and grid, solo vs shared, p50: k_ldpc4_t grid 8 73 → 134; k_fep_exact grid 14 53 → 96; k_mmse3_prep 24 → 54 [MEASURED kTZ1].
-- **Ruled out as the p50 driver in that layout:** discovery alone. Its own SM partition stretches DL kernels by only 3 %, which agrees with the user's A/B "CSI-RS discovery off did not change DL p50".
-- In the old layout, the stretch comes from RT-partition kernels running at the same time: other DL instances, standalone DL stages, UL. The p99 passes in kTZ1 (span ≥ 9.2 ms) are 9.3 ms busy plus 3.5 ms of gaps filled by other DL passes, non-pass DL and UL. That is SM sharing, not idle time [MEASURED kTZ1].
-- This layout is not merge19's, where UL streams sit on the DL SMs at low priority. Whether the same stretch holds in merge19 is **not measured** [INFERRED that it does; unproven].
+The Vodafone unprofiled runs crashed (PDCCH SEGV, handled elsewhere). Vodafone numbers are therefore from the profiled run only. nsys inflates absolute times; GPU-side ordering and durations are what is used from it.
 
-## 4. LDPC on the GPU path
+Tools are in `tests/passive_rx/gpuspan/`. passes.py rebuilds each pass from the trace: C/D/L, the conditional-body kernels (attributed by graphNodeId), and each other kernel classified by the thread that issued it. passrep.py joins passes to EVMGRANT by seq and reports per-pass timelines, gaps, stretch and queue. gqrep.py reads the gq/li fields. p50attr.py, gapnext.py, tailattr.py, gapdl.py, launchblk.py and refine.py (same directory) produce §1–§2.
 
-- The kernels decode **every code block of the launch to its own stop rule, independently**. There is no abort after the first failing block. The OAI abort rule is applied afterwards by k_pick, on verdicts that are already computed [CODE: nr_pdsch_gpu_ldpc.cu k_ldpc4_t, nr_gpu_pass_graph.cu k_pick]. A failing block runs to the iteration limit, 7 snapshots with it_max 8. The kernel ends when its slowest block ends, so **one failing block sets the LDPC time of the whole TB** [BENCH, GpuPassStamps: C=5 TB corrupted from block 1, blocks 1–4 at the limit 270–283 µs, block 0 converged 118–122 µs, kernel span = the slowest block]. On air this is **not yet measured**. The new `li=` field measures it per grant.
-- The launch also decodes the class's **padding blocks** (class = next power of two ≥ C) [CODE: prepare_tb, ncb_class]. In the bench, the time of one block grows with the number of blocks launched together: 1 snapshot takes 57 µs with 8 blocks, 90 µs with 16, 125 µs with 32, and blocks start together (swait < 1 µs). This points to a memory/L2 throughput limit, not to waiting for SMs [BENCH; INFERRED cause]. On air it is unmeasured: `li` reports npad, npad_last and dpad_max.
-- On air, at a fixed C, CRC fail vs ok makes no p50 difference (§1). So the iteration count of failing blocks is **not** the p50 cause. It may matter at p99 (large C, 60–80 % fail) [MEASURED mmVM2 for p50; p99 open].
+## 1. p50: what a typical real grant's GPU span is made of
 
-## 5. Conclusions so far
+### Example typical real pass
 
-| claim | status |
+[MEASURED gsT2N, seq 31304, TIM]: CRC fail, TBS 5376, 16 RB, 1 code block (li: ncb 1, at the iteration limit, 86 µs). Span 620.
+
+| t (µs) | event |
 |---|---|
-| The p50 DL grant is a 1-code-block grant whose gspan (~430 µs) is fixed cost: full-slot FEP + chest (C), chest post + gate + 2 conditional-node body launches + demod, LDPC minimum + CRC | [MEASURED mmTM1/mmVM2 for the grant profile; the per-segment split is measured only on the A+D build in the probe context (jjpAD)] |
-| The two IF nodes cost ~50 µs per pass with the pass idle | [MEASURED jjpAD]; on merge19 on air: **pending** (`li` d2l/g2l + nsys) |
-| The span is own-kernel time stretched by RT-partition kernels running at the same time, not idle gaps | [MEASURED kTZ1, old layout]; merge19: **pending** |
-| Discovery (own partition) is not the driver | [MEASURED kTZ1 stretch 1.03; user A/B 2026-10-19] |
-| One failing CB holds the whole TB's LDPC kernel | [BENCH]; on air: **pending** (`li`) |
-| p99 = large grants (C 12–31, 185–201 RB) + concurrency stretch + queueing behind them | grant profile [MEASURED mmTM1/mmVM2]; mechanism and queue attribution: **pending** |
+| 0 | C: k_fep_exact (69 µs) |
+| 69 → 251 | **182 µs gap**: only CSI-RS discovery ran on the GPU |
+| 251 → 307 | memcpy, k_ls, k_delay_exact 33, k_fir 8 |
+| | D: chest_post 13, gate_d 7 |
+| 334 → 378 | **IF-D body launch, 45 µs, nothing of its own** |
+| 378 → 456 | demod + EVM chain + LLR post, 78 µs |
+| | D→L boundary 7.5, gate_l 2 |
+| | **IF-L body launch, 21 µs** |
+| 486 → 619 | rdm 20, LDPC 88, CRC/pick 25 |
 
-No fix is proposed: no cause is proven on merge19 on air yet.
+### Typical real passes (span p45–p55), mean per pass
 
-## 6. Instrumentation (commit d2dcce42d1 on csd/int16-merge19; measurement only, always on, no env flag)
+Source: p50attr.py and gapnext.py on the joined nsys passes.
 
-- `EVMGRANT … gp=… gq=C,D,L,seq`: event-timed sub-graph spans (C+D+L = gspan), and the pass number. The same number is the payload of an NVTX mark `gp` emitted just before the launches, so an nsys pass joins its log line exactly.
-- `li=valid,ncb,nconv,nlast,it_conv_max,it_conv_sum,kspan,swait,dconv_max,dlast_max,g2l,d2l,npad,npad_last,dpad_max`: per-code-block verdicts and `%globaltimer` stamps of the LDPC launch, plus the gate kernels' stamps. g2l = IF(L) launch + rate dematch; d2l = IF(D) launch + D body + D→L boundary. DIRECT model only (the DGX).
-- Cost: two `cudaEventRecord` and one NVTX call per pass on the host; four 8-byte stores per gate and two per code block on the GPU.
-- Test: `GpuPassStamps.SplitSpansAndLdpcVerdicts` passes in both memory models. `ctest -I 234,250`: all pass except test_nr_modulation (known ARM failure). The build has three pre-existing link failures in targets this change does not touch: test_nr_ssb_rate_match_prod, test_nr_csi_rb_extent, nr_pusch_ra0sim (undefined nr_srs_passive_enabled / nr_pusch_grant_book_* in nr_pdcch_blind_monitor_rt.c).
+| component | TIM gsT2N (span 624) | Vodafone gsV2N (span 609) |
+|---|---|---|
+| own kernels at their solo speed (solo = p50 of the same kernel and grid with nothing overlapping) | 339 (54 %) | 342 (56 %) |
+| kernel slow-down while others ran: other DL pass instances | 46 + 11 (with DL non-pass) | 35 + 8 |
+| … while only CSI-RS discovery ran (separate SM partition) | 71 | 22 |
+| … DL non-pass, PDCCH-NID, UL | 16 | 12 |
+| … with nothing overlapping (data-dependent spread, unattributed) | 24 | 41 |
+| gaps: **IF-D body launch** | 50 (p50 47, p90 61) | 49 (p50 46, p90 64) |
+| gaps: **IF-L body launch** | 24 (p50 21) | 24 (p50 21) |
+| gaps: C→D and D→L graph boundaries | 23 | 29 |
+| gaps: node-to-node inside graphs (~27 gaps of ~0.5–2 µs) | 35 | 48 |
+| gaps: memcpy nodes | 8 | 8 |
 
-## 7. Next on-air run (spec) and analysis
+Unprofiled confirmation [MEASURED gsT1, gqrep], for the typical grant (gspan 912; this run's mix is 4-layer and ~5 code blocks):
+- C 208 + D 225 + L 425.
+- L = gate_l→first LDPC block 42 + LDPC 285 + after-LDPC 79. The 42 µs is IF-L launch + rdm (~20) + memset, so the IF-L launch latency is ~20 µs without the profiler too.
+- gate_d→gate_l (IF-D launch + D body) = 193.
 
-The script is `/home/nicola/NICOLA/wt/rr-orchestration/ota/run_gspan_20261019.sh`. Run it in daytime. It uses build_t26 of /home/nicola/NICOLA/wt/rr-csd-int16mg, FROZEN_20261018.env and sd_t26ul, with no env additions. Each run is 150 s:
-gsT1 (TIM, unprofiled), gsV1 (Vodafone, unprofiled), gsTN (TIM, nsys), gsVN (Vodafone, nsys).
-The nsys runs use `nsys profile -t cuda,nvtx --cuda-graph-trace=node --sample=none --cpuctxsw=none -d 35`. Report generation then ends before the stop. The jjq/jjr reports were still being generated when the receiver was stopped (status 143) [MEASURED their run.log].
+**p50 cause (proven by the per-grant reconstruction):** there is no single waiting resource. The span is:
 
-Analysis, ready and dry-run on a profiled unit test:
-1. `gqrep.py ab_gsT1*/run.log`, then the same for gsV1: per-grant C/D/L, the L split (g2l + LDPC + after), LDPC by CRC and limit blocks, one-failing-block test.
-2. `nsys export --type sqlite` (through heavy.sh), then `passes.py <sqlite> --out x.pkl`, then `passrep.py x.pkl --log <run.log> --select real` (and `--select crcfail`). Output: per-grant timelines (kernels, gaps, IF latencies, what else ran in each gap and kernel) and the queue section (who is ahead on the same thread from the slot group, and how many other decode threads were inside GPU passes during the qwait).
+- **(a) ~55 % the grant's own GPU work at solo speed (~340 µs).** The work is fixed per grant: a full-slot FEP for every grant (k_fep_exact 69–75 µs plus delay/FIR ~45), the demod/EVM chain (~80–110), and an LDPC launch sized by the class (~90–110 for 1–5 blocks). For the p50 grant (1 code block, 16 RB) this is size-independent work.
+- **(b) ~20–25 % slow-down of those kernels by work running at the same time.** Mostly other DL pass instances sharing the DL SMs. There is also an association with discovery-only overlap in TIM (71 µs). That part is not causal for p50: the CSI-RS-off A/B did not move p50.
+- **(c) ~22–26 % idle gaps.** Of these, **~74 µs are the two conditional-node (Fix A+D gate) body launches**. They have a fixed latency, p90/p50 ≈ 1.3, and occur with the GPU otherwise idle for this pass. The rest is graph boundaries and node dependencies (~60–75).
+- The earlier "~170 µs kernel compute" does not hold. The own-kernel work at solo speed is ~340 µs per typical real grant [MEASURED gsT2N, gsV2N].
 
-## 8. Unproven
+## 2. p99: proven causes
 
-The merge19 per-segment split on the 32-SM DL context. Whether the concurrency stretch persists in the merge19 partition layout. LDPC iterations and the effect of a failing block, and of padding blocks, on air. Who the p99 grants wait behind.
+### 2.1 Extreme tail (≥ 10 ms): launches blocked until a long CSI-RS discovery kernel ends
+
+Passes at span ≥ p99 [MEASURED tailattr.py]:
+
+| | TIM | Vodafone |
+|---|---|---|
+| mean span | 21.0 ms | 49.2 ms |
+| own kernel busy | 3.8 ms | 9.3 ms |
+| idle gaps, of which > 96 % lay under one long (> 1 ms) discovery kernel | ~17 ms | ~40 ms |
+| main kernels under those gaps | segment 12.0, sweep 2.0, lattice_screen 1.9 ms | sweep 21.3, refine_kernel 13.0, segment 4.3 ms |
+
+During pass gaps ≥ 10 ms [MEASURED gapdl.py]: other DL/UL work covered only 5 % (TIM) / 21 % (Vodafone) of the gap time, while CSI-RS discovery covered 100 %. The DL SMs were idle and the pass still did not run.
+
+The mechanism [MEASURED refine.py, launchblk.py, gsV2N]:
+- In the 5 episodes with refine_kernel (258–652 ms), csirsDisc sat in `cudaEventSynchronize` on that kernel.
+- In each episode, **`cudaGraphLaunch` calls of 2 to 5 DL and UL decode threads (passivePdsch*, passivePusch*) blocked inside the driver**. Every one returned 0.2–1.1 ms after refine_kernel ended.
+- The same happened with segment, lattice_screen and sweep. Launches > 5 ms occurred only while a long discovery kernel ran, and 20 of 23 (Vodafone C) and 5 of 7 (TIM C) returned within 2 ms of that kernel's end. No launch > 5 ms occurred outside such kernels.
+
+The resource is therefore **host-side launch submission into the driver**, not SMs. The same pattern stalls the device-side IF-body launches (tail ifD p50 295 µs / 1.9 ms).
+
+Without the profiler the stalls are also there [MEASURED gsT1]: 2.5 % of real grants have gspan > 10 ms. The tail grants have a normal LDPC span (kspan p50 290) but C/D/L spans of ms to hundreds of ms.
+
+### 2.2 Moderate tail (p90–p99, 2.5–5.5 ms): SM sharing with other DL/UL work + large grants
+
+- Gaps of 0.2–10 ms are 52–76 % covered by other DL/UL kernels [MEASURED gapdl.py].
+- p90–p99 passes: own busy 1.4 ms (TIM) / 2.5 ms (Vodafone), gaps 1.1 / 3.0 ms [MEASURED tailattr.py].
+- Large grants carry the LDPC cost (§2.3).
+
+### 2.3 LDPC behaviour on the GPU path
+
+Source [MEASURED gsT1 and gsT2N li=]:
+- Every code block is decoded to its own stop rule. There is no abort after the first failure (code: k_ldpc4_t; k_pick applies OAI's rule afterwards).
+- Failing blocks run to the iteration limit. Converged blocks take 2 snapshots p50 and 6 at p99.
+- **One failing block sets the TB's LDPC time.** Exactly-1-limit vs all-limit, ncb ≤ 8: 282 vs 277 µs (TIM T2N); ncb ≤ 32: 716 vs 850.
+- **But the LDPC time is dominated by the number of blocks in the launch, not by iterations.** kspan for converged-only vs ≥ 1 block at the limit: ncb ≤ 8 281 vs 277; ncb ≤ 16 432 vs 570; ncb = 1 30 vs 69.
+- **Padding blocks of the class (next power of two) run to the limit** in 55 % of ncb 2–8 failing grants and 87 % of ncb 9–16 grants (dpad 291 ≈ dlast 298) [MEASURED gsT1]. In conv-only ncb 2–8 grants they set the kernel time: kspan 169 vs dconv 89. On air this contradicts the bench, where zero-LLR padding converges [BENCH]. **Why is unproven.**
+- Blocks wait for SM slots in large launches: swait p50 292 µs at ncb 9–16 [MEASURED gsT1].
+
+### 2.4 Queueing
+
+Source [MEASURED passrep queue section]:
+- For grants at slot→result ≥ p99, qwait p50 is 145 µs (TIM) and **6 061 µs** (Vodafone). During the wait, on average 2.1–2.2 of the other 4 decode threads were inside a GPU pass.
+- The worst Vodafone grants waited behind passes that were themselves stalled for 21–53 ms (§2.1). Example: seq 23777 waited 33.8 ms in `pre` behind its slot-group mate seq 23775, whose span was 31.6 ms.
+- So the 1–5 ms (and beyond) of queue is **head-of-line blocking behind stalled passes**. The resource is the decode threads and pass instances, which are held while their launch is blocked.
+
+## 3. Ruled out
+
+| candidate | ruled out by |
+|---|---|
+| Discovery stretching DL kernels via its SM partition, as the p50 driver | p50 A/B (CSI-RS discovery off): no change |
+| Failing-block iterations as the p50 driver | at fixed block count, kspan with and without limit blocks is the same for ncb ≤ 8 |
+| Host prep / launch-call cost at p50 | gp prep 25, launch 26 µs p50 |
+| The IF launch latency as an nsys artefact | unprofiled g2l = 42 µs (IF + rdm + memset) |
+
+## 4. Open, NOT proven
+
+1. **Why this binary stalls so much more than the morning runs.** Real grants with gspan > 10 ms: gsT1 2.5 %, gsT2N 1.8 %, gsV2N 10.5 %, against mmTM1/TM2/VM1/VM2 ≤ 0.01 % at 15:31–15:56, with the same discovery activity. UL also degraded: ULSTALL 641–800 vs 43–97 per run.
+   - Candidates: (i) measurement commit d2dcce42d1 (2 extra cudaEventRecord per pass, NVTX mark, globaltimer stores); (ii) the functional commits 66a913319f and 438890da3c, which the gs binary includes and the mm binary did not; (iii) external GPU load on the shared host.
+   - Needed: same-hour on-air A/B, 438890da3c vs d2dcce42d1, TIM, 150 s each.
+2. **Why the driver blocks `cudaGraphLaunch` until the other context's kernel ends.** The data shows that it does, not why.
+3. Why the padding blocks do not converge on air.
+
+**No fix is proposed.** The p50 composition is proven, but it is a sum of work, sharing and launch latency, not one removable cause. The p99 stall mechanism inside the driver, and its trigger in this binary, are not proven (§4.1–4.2).
