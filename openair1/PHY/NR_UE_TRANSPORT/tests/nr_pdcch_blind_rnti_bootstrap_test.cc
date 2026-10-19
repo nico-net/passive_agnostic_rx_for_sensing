@@ -189,15 +189,7 @@ TEST(RntiBootstrap, StaleEntriesLeaveTheSet) {
 }
 
 TEST(RntiBootstrap, SlotScaleKeepsTenSecondsAtAnyNumerology) {
-  // Default (flag 0): mu is ignored, the window stays 20000 slots.
-  setenv("ISAC_SLOT_SCALE", "0", 1);
-  nr_pdcch_blind_rnti_bootstrap_reset_for_test();
-  nr_pdcch_blind_rnti_bootstrap_set_mu(3);
-  nr_pdcch_blind_rnti_bootstrap_record(0x3333, NR_BLIND_RNTI_CLASS_C, 10);
-  nr_pdcch_blind_rnti_bootstrap_record(0x3333, NR_BLIND_RNTI_CLASS_C, 11);
-  EXPECT_FALSE(nr_pdcch_blind_monitor_rnti_confirmed(11 + 20001, 0x3333));
-  // ISAC_SLOT_SCALE=1: 10 s at mu=3 (8000 slots/s) is 80000 slots; mu=1 reproduces the constant.
-  setenv("ISAC_SLOT_SCALE", "1", 1);
+  // 10 s at mu=3 (8000 slots/s) is 80000 slots; mu=1 reproduces the constant.
   nr_pdcch_blind_rnti_bootstrap_reset_for_test();
   nr_pdcch_blind_rnti_bootstrap_set_mu(3);
   nr_pdcch_blind_rnti_bootstrap_record(0x3333, NR_BLIND_RNTI_CLASS_C, 10);
@@ -206,7 +198,6 @@ TEST(RntiBootstrap, SlotScaleKeepsTenSecondsAtAnyNumerology) {
   EXPECT_FALSE(nr_pdcch_blind_monitor_rnti_confirmed(11 + 80001, 0x3333));
   nr_pdcch_blind_rnti_bootstrap_set_mu(1);
   EXPECT_FALSE(nr_pdcch_blind_monitor_rnti_confirmed(11 + 20001, 0x3333));
-  setenv("ISAC_SLOT_SCALE", "0", 1);
   nr_pdcch_blind_rnti_bootstrap_reset_for_test();
 }
 

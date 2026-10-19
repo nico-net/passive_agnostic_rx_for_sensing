@@ -80,8 +80,7 @@ static uint8_t g_count[136][7];
 static uint8_t g_hitmask[136][136];
 static float g_vh[136][7], g_vm[136][7];
 static uint32_t g_magic[136];
-static bool g_fast;      /* ISAC_PDCCH_USS_FAST=1: score_compute_fast */
-static int g_backoff = 1; /* ISAC_PDCCH_USS_TRACK_BACKOFF=k: a settled geometry is rescored every 256*k observations */
+#define USS_TRACK_BACKOFF 4 /* a settled geometry is rescored every 256*4 observations */
 static pthread_once_t g_tables_once = PTHREAD_ONCE_INIT;
 
 static bool same_geometry(const nr_pdcch_uss_geometry_t *a, const nr_pdcch_uss_geometry_t *b)
@@ -203,7 +202,7 @@ static void score_compute_ref(const uss_sample_t *sample, int n,
   }
 }
 
-/* score_compute_fast (ISAC_PDCCH_USS_FAST=1): same scoring as score_compute_ref, same candidate ranking, with the per-sample invariants hoisted out of the RNTI loop:
+/* score_compute_fast : same scoring as score_compute_ref, same candidate ranking, with the per-sample invariants hoisted out of the RNTI loop:
  *   - y = (a^(slot+1) * rnti mod 65537) mod N via the 2^16 = -1 mod 65537 fold and a reciprocal multiply (exact for N <= 135), no 64-bit % in the loop;
  *   - the float division and the sqrt of the 7 M hypotheses become per-sample weight tables w*vh / w*vm, the hit test one byte of a (N, delta) mask.
  *   Only the float summation rounding differs from the reference (last ulp). */
@@ -298,7 +297,7 @@ static void score_snapshot(int state_index, uint32_t generation,
   uint16_t best_hits[NR_PDCCH_USS_TRACKER_TOP];
   uint8_t best_hash[NR_PDCCH_USS_TRACKER_TOP], best_m[NR_PDCCH_USS_TRACKER_TOP];
   tables_init();
-  (g_fast ? score_compute_fast : score_compute_ref)(sample, n, best_rnti, best_score, best_hits, best_hash, best_m);
+  score_compute_fast(sample, n, best_rnti, best_score, best_hits, best_hash, best_m);
 
   pthread_mutex_lock(&g_lock);
   uss_geometry_state_t *s = &g_state[state_index];
@@ -449,17 +448,12 @@ static void tables_init(void)
   pthread_once(&g_tables_once, tables_init_once);
 }
 
-/* tracker_init: one-time setup (pthread_once): reads ISAC_PDCCH_USS_TRACKER (on by default), builds the table of allowed USS hash positions per CORESET size and starts the tracker worker.
+/* tracker_init: one-time setup (pthread_once): builds the table of allowed USS hash positions per CORESET size and starts the tracker worker.
  *   Disables the tracker when the worker cannot be started. Callers: the USS tracker entry points in this file.
  */
 static void tracker_init(void)
 {
-  /* DEFERRED/DO NOT USE: ISAC_PDCCH_USS_TRACKER not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *e = getenv("ISAC_PDCCH_USS_TRACKER");
-  g_enabled = !e || atoi(e) != 0;
-  const char *f = (getenv("ISAC_PDCCH_USS_FAST") ?: "1"), *b = (getenv("ISAC_PDCCH_USS_TRACK_BACKOFF") ?: "4");
-  g_fast = f && atoi(f) != 0;
-  g_backoff = b && atoi(b) > 1 ? atoi(b) : 1;
+  g_enabled = true;
   tables_init();
   if (g_enabled && nr_core_plan_create(&g_thread, NULL, tracker_worker, NULL, nr_core_plan_cpu(NR_CP_USS, 0, -1)) == 0) {
     g_thread_started = true;
@@ -523,7 +517,7 @@ void nr_pdcch_uss_tracker_observe(const nr_pdcch_uss_geometry_t *geometry,
   /* Rescore on distinct-slot milestones. Duplicate geometry passes cannot manufacture recurrence. */
   const bool due = !replaced && (s->observations == 8 || s->observations == 16
                    || s->observations == 32 || s->observations == 64
-                   || (s->observations > 64 && s->observations % (256u * (s->settled ? (unsigned)g_backoff : 1u)) == 0));
+                   || (s->observations > 64 && s->observations % (256u * (s->settled ? (unsigned)USS_TRACK_BACKOFF : 1u)) == 0));
   if (due && s->n >= USS_TRACK_MIN_DISTINCT_SLOTS && g_q_count < USS_TRACK_QUEUE) {
     g_queue[g_q_tail] = (uss_job_t){.state = si, .generation = s->generation};
     g_q_tail = (g_q_tail + 1) % USS_TRACK_QUEUE;

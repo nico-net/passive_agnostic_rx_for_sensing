@@ -46,12 +46,11 @@
 // table, a newcomer takes a FREE slot instead of the incumbent's, and eviction (when full) removes
 // the weakest-evidenced entry rather than the oldest arrival.
 #define RNTI_BOOTSTRAP_STALE_SLOTS 20000u  // ~10 s at this deployment's ~2000 slots/s (mu=1); other mu: see set_mu
-/* ISAC_SLOT_SCALE=1 (default off): the window is ~10 s at ANY numerology (10000 << mu slots; mu=1 gives the constant above). */
+/* The window is ~10 s at ANY numerology (10000 << mu slots; mu=1 gives the constant above). */
 static _Atomic uint32_t g_stale_slots = RNTI_BOOTSTRAP_STALE_SLOTS;
 void nr_pdcch_blind_rnti_bootstrap_set_mu(int mu)
 {
-  const char *e = (getenv("ISAC_SLOT_SCALE") ?: "1");
-  if (e && atoi(e) == 1 && mu >= 0 && mu <= 4)
+  if (mu >= 0 && mu <= 4)
     atomic_store_explicit(&g_stale_slots, 10000u << mu, memory_order_relaxed);
 }
 
@@ -237,49 +236,6 @@ bool nr_pdcch_blind_rnti_bootstrap_recent(uint16_t rnti, uint32_t now_abs_slot, 
   return recent;
 }
 
-/* Offline hidden-waveform validation may supply candidate identities before dedicated decoding.
- * It is never enabled implicitly and has no OTA source. CRC/payload recurrence must still prove
- * the DCI length and every grant. */
-static int simulation_candidate_rntis(uint16_t *out, int max_out)
-{
-  static int initialized;
-  static uint16_t values[NR_PDCCH_BLIND_MAX_UE];
-  static int count;
-  if (!initialized) {
-    initialized = 1;
-    /* DEFERRED/DO NOT USE: ISAC_SIM_CANDIDATE_RNTIS not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_SIM_CANDIDATE_RNTIS");
-    if (e == NULL)
-      /* DEFERRED/DO NOT USE: ISAC_SIM_CANDIDATE_RNTI not in the frozen config t26zE (2026-10-18); slated for removal */
-      e = getenv("ISAC_SIM_CANDIDATE_RNTI"); /* backward-compatible single value */
-    while (e != NULL && *e != '\0' && count < NR_PDCCH_BLIND_MAX_UE) {
-      char *end = NULL;
-      const unsigned long x = strtoul(e, &end, 0);
-      if (end == e)
-        break;
-      if (x > 0 && x < 65535)
-        values[count++] = (uint16_t)x;
-      e = end;
-      while (*e == ',' || *e == ':' || *e == ';' || *e == ' ' || *e == '\t')
-        ++e;
-    }
-  }
-  const int n = count < max_out ? count : max_out;
-  if (out != NULL && n > 0)
-    memcpy(out, values, (size_t)n * sizeof(*out));
-  return n;
-}
-
-static bool simulation_candidate_contains(uint16_t rnti)
-{
-  uint16_t candidates[NR_PDCCH_BLIND_MAX_UE];
-  const int n = simulation_candidate_rntis(candidates, NR_PDCCH_BLIND_MAX_UE);
-  for (int i = 0; i < n; ++i)
-    if (candidates[i] == rnti)
-      return true;
-  return false;
-}
-
 static int nr_pdcch_blind_monitor_confirmed_rnti_set_locked(uint32_t now_abs_slot, uint16_t *out, int max_out)
 {
   if (out == NULL || max_out <= 0) {
@@ -290,15 +246,6 @@ static int nr_pdcch_blind_monitor_confirmed_rnti_set_locked(uint32_t now_abs_slo
     if (boot_entry_live(&g_boot[i], now_abs_slot)) {
       out[n++] = g_boot[i].rnti;
     }
-  }
-  uint16_t sim[NR_PDCCH_BLIND_MAX_UE];
-  const int nsim = simulation_candidate_rntis(sim, NR_PDCCH_BLIND_MAX_UE);
-  for (int si = 0; si < nsim && n < max_out; ++si) {
-    bool present = false;
-    for (int i = 0; i < n; ++i)
-      present |= out[i] == sim[si];
-    if (!present)
-      out[n++] = sim[si];
   }
   return n;
 }
@@ -311,15 +258,6 @@ static int nr_pdcch_blind_monitor_verified_rnti_set_locked(uint32_t now_abs_slot
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE && n < max_out; ++i)
     if (g_boot[i].verified && boot_entry_live(&g_boot[i], now_abs_slot))
       out[n++] = g_boot[i].rnti;
-  uint16_t sim[NR_PDCCH_BLIND_MAX_UE];
-  const int nsim = simulation_candidate_rntis(sim, NR_PDCCH_BLIND_MAX_UE);
-  for (int si = 0; si < nsim && n < max_out; ++si) {
-    bool present = false;
-    for (int i = 0; i < n; ++i)
-      present |= out[i] == sim[si];
-    if (!present)
-      out[n++] = sim[si];
-  }
   return n;
 }
 
@@ -331,20 +269,11 @@ static int nr_pdcch_blind_monitor_dedicated_rnti_set_locked(uint32_t now_abs_slo
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE && n < max_out; ++i)
     if (g_boot[i].cls == NR_BLIND_RNTI_CLASS_C && boot_entry_live(&g_boot[i], now_abs_slot))
       out[n++] = g_boot[i].rnti;
-  uint16_t sim[NR_PDCCH_BLIND_MAX_UE];
-  const int nsim = simulation_candidate_rntis(sim, NR_PDCCH_BLIND_MAX_UE);
-  for (int si = 0; si < nsim && n < max_out; ++si) {
-    bool present = false;
-    for (int i = 0; i < n; ++i) present |= out[i] == sim[si];
-    if (!present) out[n++] = sim[si];
-  }
   return n;
 }
 
 static bool nr_pdcch_blind_monitor_rnti_confirmed_locked(uint32_t now_abs_slot, uint16_t rnti)
 {
-  if (simulation_candidate_contains(rnti))
-    return true;
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; i++) {
     if (g_boot[i].rnti == rnti && boot_entry_live(&g_boot[i], now_abs_slot)) {
       return true;

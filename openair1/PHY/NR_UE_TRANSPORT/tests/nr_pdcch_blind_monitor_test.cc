@@ -94,11 +94,8 @@ struct SibEnvGuard {
     std::string value;
     explicit Saved(const char *n) : name(n), present(getenv(n) != nullptr), value(present ? getenv(n) : "") {}
     void restore() const { if (present) setenv(name, value.c_str(), 1); else unsetenv(name); }
-  } ignore{"ISAC_TD_IGNORE_SIB1"}, cache{"ISAC_SIB1_CACHE"}, dir{"ISAC_SIB1_CACHE_DIR"};
-  ~SibEnvGuard() {
-    ignore.restore(); cache.restore(); dir.restore();
-    nr_cfg_ignore_sib1_reset_for_test();
-  }
+  } dir{"ISAC_SIB1_CACHE_DIR"};
+  ~SibEnvGuard() { dir.restore(); }
 };
 
 // nr_mac_common.c's object file (needed here for get_dl_tda_info()/fill_dmrs_mask()) also defines
@@ -2246,19 +2243,6 @@ TEST(Css0Autoconf, BwpOriginIsTheCoresetZeroStartNotTheSsbOrigin) {
   EXPECT_EQ(c->coreset_type, 1);
 }
 
-TEST(Css0Autoconf, IgnoreSib1KeepsMibCss0ButDisablesC0Uss) {
-  SibEnvGuard env_guard;
-  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(48, 1, 0, 12, 40, 0, 2, 0, 1, 996, 12, 2));
-  setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
-  nr_cfg_ignore_sib1_reset_for_test();
-  const nr_pdcch_blind_monitor_cfg_t *css0 = nr_pdcch_blind_monitor_css0_cfg();
-  ASSERT_NE(css0, nullptr);
-  EXPECT_EQ(css0->coreset_type, 1);
-  nr_pdcch_blind_monitor_cfg_t c0_uss{};
-  EXPECT_FALSE(nr_pdcch_blind_monitor_coreset0_uss_cfg(&c0_uss));
-  unsetenv("ISAC_TD_IGNORE_SIB1");
-}
-
 // ISAC_CSS0_INTERLEAVE_K swaps the WHOLE config struct per occasion, so what it has to guarantee is
 // (a) the snapshot really is the common-search-space one, (b) it carries autodiscover OFF so an
 // interleaved occasion cannot advance -- and then have reverted -- a dedicated-sweep hypothesis, and
@@ -3137,7 +3121,6 @@ TEST_F(BlindPdcchTest, UlDefaultTdaTableArmsTheWidthSearch) {
 }
 
 TEST_F(BlindPdcchTest, UlConfigDiscKeepsTwoHiddenBwpUesAndTicketsSeparate) {
-  setenv("ISAC_UL_CONFIG_DISC", "1", 1);
   nr_pdcch_ul_config_disc_reset();
   auto base = LiveUlOpts(); base.bwp_size = 0; base.tda_count = 0;
   for (int k = 0; k < 2; ++k) {
@@ -3166,7 +3149,6 @@ TEST_F(BlindPdcchTest, UlConfigDiscKeepsTwoHiddenBwpUesAndTicketsSeparate) {
 }
 
 TEST_F(BlindPdcchTest, UlConfigDiscExploresPastWrongDlBwpWithoutCrcCredit) {
-  setenv("ISAC_UL_CONFIG_DISC", "1", 1);
   nr_pdcch_ul_config_disc_reset();
   auto truth = LiveUlOpts(); truth.bwp_size = 217; truth.tda_count = 0;
   auto base = truth; base.bwp_size = 0;
@@ -3194,7 +3176,6 @@ TEST_F(BlindPdcchTest, UlConfigDiscExploresPastWrongDlBwpWithoutCrcCredit) {
 }
 
 TEST_F(BlindPdcchTest, UlConfigDiscExploresEqualLengthWidthSplits) {
-  setenv("ISAC_UL_CONFIG_DISC", "1", 1);
   nr_pdcch_ul_config_disc_reset();
   auto truth = LiveUlOpts();
   truth.bwp_size = 217;
@@ -3229,7 +3210,6 @@ TEST_F(BlindPdcchTest, UlConfigDiscExploresEqualLengthWidthSplits) {
 }
 
 TEST_F(BlindPdcchTest, UlConfigDiscFindsHiddenTwoRowTdraWidth) {
-  setenv("ISAC_UL_CONFIG_DISC", "1", 1);
   nr_pdcch_ul_config_disc_reset();
   auto truth = LiveUlOpts(); truth.bwp_size = 106; truth.bwp_start = 6;
   auto base = truth; base.bwp_size = 0; base.tda_count = 0;
@@ -3272,7 +3252,6 @@ TEST_F(BlindPdcchTest, BankedUlRawDecodeUsesKnownRntisWithDifferentDlAndUlLength
 }
 
 TEST_F(BlindPdcchTest, UlConfigDiscNoTruthAndStaleTicketDoNotEarnCrcEvidence) {
-  setenv("ISAC_UL_CONFIG_DISC", "1", 1);
   nr_pdcch_ul_config_disc_reset();
   auto truth = LiveUlOpts(); truth.bwp_size = 52; truth.tda_count = 0;
   auto base = truth; base.bwp_size = 0;
@@ -3309,7 +3288,6 @@ TEST_F(BlindPdcchTest, BankedUlKnownRntiNoiseDoesNotLockAFalseLength) {
 }
 
 TEST_F(BlindPdcchTest, UlConfigDiscSameRntiDifferentBanksDoNotShareTbEvidence) {
-  setenv("ISAC_UL_CONFIG_DISC", "1", 1);
   nr_pdcch_ul_config_disc_reset();
   auto truth = LiveUlOpts(); truth.bwp_size = 52; truth.tda_count = 0;
   auto base = truth; base.bwp_size = 0;
@@ -4596,15 +4574,9 @@ TEST(DiscoveryGates, DeferredCommitIsAppliedByTheConsumerNotTheReceiveThread) {
 
 class DiscoveredCoresets : public BlindPdcchTest {
  protected:
-  std::string old_env;
-  bool had_env;
   char path[64] = "/tmp/t15-discovered-XXXXXX";
   void SetUp() override {
     BlindPdcchTest::SetUp();
-    const char *v = getenv("ISAC_PDCCH_NID_BANK");
-    had_env = v != nullptr;
-    if (v) old_env = v;
-    setenv("ISAC_PDCCH_NID_BANK", "1", 1);
     nr_pdcch_blind_monitor_autodiscover_reset();
     while (nr_pdcch_coreset_bank_count()) nr_pdcch_coreset_bank_remove(0);
     int fd = mkstemp(path);
@@ -4615,8 +4587,6 @@ class DiscoveredCoresets : public BlindPdcchTest {
     unlink(path);
     while (nr_pdcch_coreset_bank_count()) nr_pdcch_coreset_bank_remove(0);
     nr_pdcch_blind_monitor_autodiscover_reset();
-    if (had_env) setenv("ISAC_PDCCH_NID_BANK", old_env.c_str(), 1);
-    else unsetenv("ISAC_PDCCH_NID_BANK");
     BlindPdcchTest::TearDown();
   }
   void lines(const char *text) {
@@ -4724,17 +4694,6 @@ TEST_F(DiscoveredCoresets, TwoIdsSameGridAlongsideAlreadyVerifiedPciWalk) {
   EXPECT_FALSE(nr_pdcch_blind_monitor_discovery_paused());
 }
 
-TEST_F(DiscoveredCoresets, FeatureOffCannotStartAdditionalDwell) {
-  setenv("ISAC_PDCCH_NID_BANK", "0", 1);
-  EXPECT_FALSE(nr_pdcch_discovered_enabled());
-  EXPECT_FALSE(nr_pdcch_discovered_load(path));
-  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token = 0;
-  EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 217));
-  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 0);
-  setenv("ISAC_PDCCH_NID_BANK", "0", 1);
-  EXPECT_FALSE(nr_pdcch_discovered_load(path));
-}
-
 TEST_F(DiscoveredCoresets, DwellRejectsRepeatedEvidenceAndLateTokens) {
   lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n"
         "CORESET nid=10163 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
@@ -4819,30 +4778,15 @@ TEST_F(DiscoveredCoresets, NrntiRotationVisitsAllConfirmedOwnersPerId) {
   nr_pdcch_blind_rnti_bootstrap_reset_for_test();
 }
 
-// ACQ-FIX (ISAC_PDCCH_DISC_COVER). Live 2026-10-10 (ab_C1/ab_H2/ab_C2) the GPU published the RB-0 CORESET of
+// ACQ-FIX. Live 2026-10-10 (ab_C1/ab_H2/ab_C2) the GPU published the RB-0 CORESET of
 // nID 62922 as grid_rb=2/5 groups=35, grid_rb=11 groups=34 and grid_rb=179 groups=2 L=2 R=2; each dwell was
 // rejected after 4000 occasions without a CRC pass. The synthetic grid() places 62922 at RBs 0..23 (AL4, CCE 0).
 struct DiscoveredCover : DiscoveredCoresets {
-  void SetUp() override { DiscoveredCoresets::SetUp(); setenv("ISAC_PDCCH_DISC_COVER", "0", 1); }
-  void TearDown() override { unsetenv("ISAC_PDCCH_DISC_COVER"); DiscoveredCoresets::TearDown(); }
   static constexpr const char *kShifted = "CORESET nid=62922 sym=0 dur=1 grid_rb=2 groups=35 L=0 R=0 shift=0\n"
                                           "CORESET nid=62922 sym=0 dur=1 grid_rb=5 groups=35 L=0 R=0 shift=0\n";
 };
 
-TEST_F(DiscoveredCover, FlagOffDwellsOnShiftedPublicationAndCannotDecode) {
-  lines(kShifted);
-  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
-  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
-  EXPECT_EQ(c.coreset_rb_offset, 2); EXPECT_EQ(c.coreset_freq_domain, 35);
-  for (int j = 0; j < 2; ++j) {
-    auto fft = grid(3 + j, 0x400000002345 + j * 16);
-    nr_pdcch_blind_raw_result_t raw{};
-    EXPECT_FALSE(decode(c, fft, 3 + j, 0x1234, &raw)); // a 2-RB shift breaks every CCE: the live rejection
-  }
-}
-
 TEST_F(DiscoveredCover, CoverDwellFirstVerifiesAndSkipsSubsumedPublications) {
-  setenv("ISAC_PDCCH_DISC_COVER", "1", 1);
   lines(kShifted);
   nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
   ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
@@ -4870,7 +4814,6 @@ TEST_F(DiscoveredCover, CoverDwellFirstVerifiesAndSkipsSubsumedPublications) {
 }
 
 TEST_F(DiscoveredCover, QueueOrderCoversFirstThenPublishedLines) {
-  setenv("ISAC_PDCCH_DISC_COVER", "1", 1);
   lines("CORESET nid=62922 sym=0 dur=1 grid_rb=179 groups=2 L=2 R=2 shift=0\n"
         "CORESET nid=9020 sym=0 dur=1 grid_rb=0 groups=36 L=6 R=6 shift=0\n"
         "CORESET nid=9020 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
@@ -4919,14 +4862,12 @@ class DiscoveredCarrier : public DiscoveredCover {
  protected:
   void SetUp() override {
     DiscoveredCover::SetUp();
-    setenv("ISAC_CARRIER_FROM_SIB1", "1", 1);
-    setenv("ISAC_PDCCH_DISC_COVER", "1", 1);
     nr_passive_acq_reset();
     nr_passive_acq_set_phy_geometry(217, 1, 517, 3590190000.0);
     nr_passive_acq_note_sib1_carrier(162, 1, 32, 0, 2); // Point A at grid subcarrier 517 - 193 = 324
   }
   void TearDown() override {
-    unsetenv("ISAC_CARRIER_FROM_SIB1"); nr_passive_acq_reset();
+    nr_passive_acq_reset();
     DiscoveredCover::TearDown();
   }
 };
@@ -4960,116 +4901,9 @@ TEST_F(DiscoveredCarrier, GridEqualsCarrierIsIdentityNoInterleavedCover) {
   EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 162)); // no interleaved dwell; the published line = the cover
 }
 
-TEST_F(DiscoveredCarrier, FlagOffKeepsGridGeometry) {
-  setenv("ISAC_CARRIER_FROM_SIB1", "0", 1); setenv("ISAC_PDCCH_POINTA_REF", "0", 1);
-  lines("CORESET nid=36098 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0\n");
-  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
-  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
-  EXPECT_EQ(c.bwp_start, 0); EXPECT_EQ(c.bwp_size, 217); EXPECT_EQ(c.coreset_rb_offset, 0); EXPECT_EQ(c.coreset_freq_domain, 36); // legacy grid cover (POINTA_REF off)
-}
-
-// CORESETALL (ISAC_PDCCH_DISC_ENUM): bounded enumeration of the CORESET geometries TS 38.211 7.3.2 permits.
-struct DwellKey { int nid, dur, ng, L, R, sh; bool operator==(const DwellKey &o) const { return nid == o.nid && dur == o.dur && ng == o.ng && L == o.L && R == o.R && sh == o.sh; } };
-static std::vector<DwellKey> DrainDwells(int carrier_rb) {
-  std::vector<DwellKey> v; uint64_t slot = 0;
-  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
-  while (v.size() < 400 && nr_pdcch_discovered_snapshot(&c, &token, carrier_rb)) {
-    v.push_back({c.coreset_pdcch_dmrs_scrambling_id, c.coreset_duration, c.coreset_freq_domain, c.coreset_reg_bundle_size,
-                 c.coreset_interleaver_size, c.coreset_shift_index});
-    for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, slot++); // no evidence: rejected
-  }
-  return v;
-}
-static bool Has(const std::vector<DwellKey> &v, DwellKey k) { for (auto &x : v) if (x == k) return true; return false; }
-static int Count(const std::vector<DwellKey> &v, DwellKey k) { int n = 0; for (auto &x : v) n += x == k; return n; }
-
-struct DiscoveredEnum : DiscoveredCover {
-  void SetUp() override {
-    DiscoveredCover::SetUp();
-    setenv("ISAC_PDCCH_DISC_COVER", "1", 1); setenv("ISAC_PDCCH_DISC_ENUM", "1", 1);
-    unsetenv("ISAC_PDCCH_DISC_ENUM_MAX"); unsetenv("ISAC_PDCCH_DISC_ENUM_NIDS");
-    nr_pdcch_discovered_note_pci(508);
-  }
-  void TearDown() override {
-    unsetenv("ISAC_PDCCH_DISC_ENUM"); unsetenv("ISAC_PDCCH_DISC_ENUM_MAX"); unsetenv("ISAC_PDCCH_DISC_ENUM_NIDS");
-    DiscoveredCover::TearDown();
-  }
-};
-
-TEST_F(DiscoveredEnum, DurationsInterleaverShiftBundleAndPciAreEnumerated) {
-  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
-  const auto v = DrainDwells(217);
-  ASSERT_GE(v.size(), 20u);
-  EXPECT_TRUE(v[0] == (DwellKey{62922, 1, 36, 0, 0, 0}));            // the ACQ-FIX cover stays first
-  EXPECT_TRUE(Has(v, {62922, 2, 36, 0, 0, 0})); EXPECT_TRUE(Has(v, {62922, 3, 36, 0, 0, 0}));   // GPU sweep runs at dur 1 only
-  for (int R : {3, 2, 6}) {
-    EXPECT_TRUE(Has(v, {62922, 1, 36, 6, R, 508}));                   // default shiftIndex = PCI
-    EXPECT_TRUE(Has(v, {62922, 1, 36, 6, R, 0}));                     // shiftIndex 0
-    EXPECT_TRUE(Has(v, {62922, 1, 36, 2, R, 508}));                   // bundle 2
-    EXPECT_TRUE(Has(v, {62922, 2, 36, 6, R, 508}));                   // other duration, interleaved
-  }
-  EXPECT_FALSE(Has(v, {62922, 1, 36, 3, 3, 508}));                    // bundle 3 needs duration 3
-  EXPECT_TRUE(Has(v, {508, 1, 36, 0, 0, 0}));                         // nID = PCI hypothesis (cover + extras)
-  EXPECT_TRUE(Has(v, {508, 1, 36, 6, 3, 508}));
-  for (auto &k : v) EXPECT_EQ(Count(v, k), 1);                         // no dwell repeated
-}
-
-TEST_F(DiscoveredEnum, FlagOffAndCapAreRespected) {
-  setenv("ISAC_PDCCH_DISC_ENUM_MAX", "3", 1); setenv("ISAC_PDCCH_DISC_ENUM_NIDS", "1", 1);
-  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
-  auto v = DrainDwells(217);
-  // cover + 3 extras (durations 2, 3, first interleaved) + PCI cover + 3 PCI extras
-  EXPECT_EQ(v.size(), 8u);
-  nr_pdcch_discovered_reset();
-  unsetenv("ISAC_PDCCH_DISC_ENUM");
-  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
-  v = DrainDwells(217);
-  EXPECT_EQ(v.size(), 1u);
-}
-
-TEST_F(DiscoveredEnum, AnyVerifiedCoresetEndsTheEnumeration) {
-  lines(kShifted);
-  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
-  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
-  for (int j = 0; j < 2; ++j) {
-    const int slot = 3 + j;
-    auto fft = grid(slot, 0x400000002345 + j * 16);
-    nr_pdcch_blind_raw_result_t raw{};
-    ASSERT_TRUE(decode(c, fft, slot, 0x1234, &raw));
-    nr_pdcch_discovered_observe(token, raw.rnti, slot, raw.payload, 47);
-    nr_pdcch_discovered_step(token, slot);
-  }
-  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 1);
-  EXPECT_TRUE(DrainDwells(217).empty());           // a dwell costs the verified CORESET most of its DCIs: no extras
-}
-
-TEST_F(DiscoveredEnum, CarrierSubsizesAndNoDuplicateOfLegacyInterleavedCover) {
-  setenv("ISAC_CARRIER_FROM_SIB1", "1", 1);
-  nr_passive_acq_reset();
-  nr_passive_acq_set_phy_geometry(217, 1, 517, 3590190000.0);
-  nr_passive_acq_note_sib1_carrier(162, 1, 32, 0, 2); // 508: Point A at grid RB 27, 162 PRB = 27 groups
-  lines("CORESET nid=36098 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0\n");
-  const auto v = DrainDwells(217);
-  EXPECT_EQ(Count(v, {36098, 1, 27, 6, 3, 508}), 1);                  // legacy interleaved cover, not repeated by the enumeration
-  EXPECT_FALSE(Has(v, {36098, 1, 27, 6, 2, 508}));                    // 27 groups: only R = 3 divides
-  EXPECT_TRUE(Has(v, {36098, 1, 26, 6, 2, 508}));                     // largest even size
-  EXPECT_TRUE(Has(v, {36098, 1, 24, 6, 6, 508})); EXPECT_TRUE(Has(v, {36098, 1, 24, 6, 3, 508}));  // largest multiple of 6
-  EXPECT_TRUE(Has(v, {36098, 2, 27, 0, 0, 0}));
-  unsetenv("ISAC_CARRIER_FROM_SIB1"); nr_passive_acq_reset();
-}
-
-// ACQ-ROBUST: ISAC_PDCCH_DWELL_ADAPTIVE and ISAC_PDCCH_NO_FAKE_FOOTPRINT.
+// ACQ-ROBUST: the discovered dwell rejects after 4000 occasions regardless of the prescreen.
 struct DiscoveredRobust : DiscoveredCoresets {
   static constexpr const char *kLine = "CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n";
-  void SetUp() override {
-    DiscoveredCoresets::SetUp();
-    setenv("ISAC_PDCCH_DISC_COVER", "0", 1); setenv("ISAC_CARRIER_FROM_SIB1", "0", 1); setenv("ISAC_PDCCH_POINTA_REF", "0", 1); // baked on
-    unsetenv("ISAC_PDCCH_DWELL_ADAPTIVE"); unsetenv("ISAC_PDCCH_NO_FAKE_FOOTPRINT");
-  }
-  void TearDown() override {
-    unsetenv("ISAC_PDCCH_DWELL_ADAPTIVE"); unsetenv("ISAC_PDCCH_NO_FAKE_FOOTPRINT");
-    DiscoveredCoresets::TearDown();
-  }
 };
 
 TEST_F(DiscoveredRobust, FlagOffRejectsAt4000RegardlessOfPrescreen) {
@@ -5079,72 +4913,10 @@ TEST_F(DiscoveredRobust, FlagOffRejectsAt4000RegardlessOfPrescreen) {
   for (int i = 0; i < 3999; ++i) nr_pdcch_discovered_step_ex(token, i, false);
   EXPECT_TRUE(nr_pdcch_discovered_unverified_pending()); // still active
   nr_pdcch_discovered_step_ex(token, 3999, false);       // 4000th occasion: rejected as before
-  EXPECT_FALSE(nr_pdcch_discovered_unverified_pending());
-}
-
-TEST_F(DiscoveredRobust, AdaptiveNoPrescreenSurvivesUntilCap) {
-  setenv("ISAC_PDCCH_DWELL_ADAPTIVE", "1", 1);
-  lines(kLine);
-  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
-  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
-  for (int i = 0; i < 39999; ++i) nr_pdcch_discovered_step_ex(token, i, false);
-  EXPECT_TRUE(nr_pdcch_discovered_unverified_pending());  // 40000 - 1 occasions, none prescreened: alive
-  nr_pdcch_discovered_step_ex(token, 39999, false);        // the cap
-  EXPECT_FALSE(nr_pdcch_discovered_unverified_pending());
-}
-
-TEST_F(DiscoveredRobust, AdaptivePrescreenWithoutCrcRejectsAt4000) {
-  setenv("ISAC_PDCCH_DWELL_ADAPTIVE", "1", 1);
-  lines(kLine);
-  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
-  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
-  for (int i = 0; i < 3999; ++i) nr_pdcch_discovered_step_ex(token, i, true);
-  EXPECT_TRUE(nr_pdcch_discovered_unverified_pending());
-  nr_pdcch_discovered_step_ex(token, 3999, true);
-  EXPECT_FALSE(nr_pdcch_discovered_unverified_pending());
-}
-
-TEST_F(DiscoveredRobust, AdaptiveCountsOnlyPrescreenedOccasions) {
-  setenv("ISAC_PDCCH_DWELL_ADAPTIVE", "1", 1);
-  lines(kLine);
-  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
-  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
-  uint64_t slot = 0;
-  for (int i = 0; i < 3999; ++i) { nr_pdcch_discovered_step_ex(token, slot++, true); nr_pdcch_discovered_step_ex(token, slot++, false); }
-  EXPECT_TRUE(nr_pdcch_discovered_unverified_pending()); // 7998 occasions, 3999 prescreened
-  nr_pdcch_discovered_step_ex(token, slot++, true);
-  EXPECT_FALSE(nr_pdcch_discovered_unverified_pending());
-}
-
-TEST_F(DiscoveredRobust, NoFakeFootprintKeepsRootPeriodWhilePending) {
-  // Technique A fallback commit with the discovered queue holding an unverified entry: flag off overwrites the root SS period with 1/0/1,
-  // flag on keeps it; with nothing pending the flag changes nothing.
-  for (int mode = 0; mode < 3; ++mode) {  // 0 flag off + pending, 1 flag on + pending, 2 flag on + nothing pending
-    SCOPED_TRACE(mode);
-    ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(6, 1, 42, 0, 40, 0, 2, 0, 1, 2, 0, 0));
-    nr_pdcch_blind_monitor_autodiscover_reset();
-    nr_pdcch_discovered_reset();
-    if (mode == 1 || mode == 2) setenv("ISAC_PDCCH_NO_FAKE_FOOTPRINT", "1", 1); else unsetenv("ISAC_PDCCH_NO_FAKE_FOOTPRINT");
-    if (mode != 2) lines(kLine);
-    EXPECT_EQ(nr_pdcch_discovered_unverified_pending(), mode != 2);
-    const int period0 = nr_pdcch_blind_monitor_get_cfg()->ss_monitoring_slot_periodicity;
-    const int offset0 = nr_pdcch_blind_monitor_get_cfg()->ss_monitoring_slot_offset;
-    const int dur0 = nr_pdcch_blind_monitor_get_cfg()->ss_duration;
-    ASSERT_NE(period0, 1) << "precondition: the parked CSS0 period must differ from the forced 1";
-    const int calls = RunSparseDiscoveryToConvergence(18, kGate2MaxCalls);
-    ASSERT_GT(calls, 0);
-    const auto *g = nr_pdcch_blind_monitor_get_cfg();
-    EXPECT_EQ(g->coreset_rb_offset, 18); // the footprint itself is committed either way
-    if (mode == 1) {
-      EXPECT_EQ(g->ss_monitoring_slot_periodicity, period0);
-      EXPECT_EQ(g->ss_monitoring_slot_offset, offset0);
-      EXPECT_EQ(g->ss_duration, dur0);
-    } else {
-      EXPECT_EQ(g->ss_monitoring_slot_periodicity, 1);
-      EXPECT_EQ(g->ss_monitoring_slot_offset, 0);
-      EXPECT_EQ(g->ss_duration, 1);
-    }
-  }
+  // the cover dwell is always queued behind the line, so "pending" stays true; the original dwell is gone:
+  nr_pdcch_blind_monitor_cfg_t c2{}; uint64_t token2 = token;
+  if (nr_pdcch_discovered_snapshot(&c2, &token2, 217)) { EXPECT_NE(token2, token); } // next queued dwell, new token
+  nr_pdcch_discovered_step_ex(token, 4000, false);       // stale token: ignored
 }
 
 // ISAC_PDCCH_RBOFFSET_FIX: CPU PDCCH extraction group positions (TS 38.213 10.1, TS 38.211 7.3.2.2).
@@ -5685,11 +5457,9 @@ TEST_F(BlindPdcchTest, PolarAllocationSizesFollowShape) {
 TEST(Sib1Cache, StartupHintRekeysOnLiveDecodeWithoutEpochBump) {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "run with ISAC_RECONF=1";
   SibEnvGuard env_guard;
-  nr_cfg_ignore_sib1_reset_for_test();
   char dir[] = "/tmp/rr-r8b-cache-XXXXXX";
   ASSERT_NE(mkdtemp(dir), nullptr);
   setenv("ISAC_SIB1_CACHE_DIR", dir, 1);
-  setenv("ISAC_SIB1_CACHE", "1", 1);
   nr_cfg_epoch_reset();
   nr_pdcch_blind_common_config_t f{}, got{};
   f.pci = 997; f.dl_bwp_size = 106;
@@ -5719,61 +5489,7 @@ TEST(Sib1Cache, StartupHintRekeysOnLiveDecodeWithoutEpochBump) {
   remove(path);
   nr_pdcch_blind_reset_common();
   unsetenv("ISAC_SIB1_CACHE_DIR");
-  unsetenv("ISAC_SIB1_CACHE");
 }
-
-TEST(Sib1Cache, IgnoreArmSuppressesPublishLoadAndHash) {
-  if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "run with ISAC_RECONF=1";
-  SibEnvGuard env_guard;
-  nr_cfg_ignore_sib1_reset_for_test();
-  char dir[] = "/tmp/rr-r12a-cache-XXXXXX";
-  ASSERT_NE(mkdtemp(dir), nullptr);
-  setenv("ISAC_SIB1_CACHE_DIR", dir, 1);
-  setenv("ISAC_SIB1_CACHE", "1", 1);
-  nr_pdcch_blind_common_config_t f{}, got{};
-  f.pci = 996; f.dl_bwp_size = 106;
-  nr_pdcch_blind_reset_common();
-  nr_pdcch_blind_set_sib1_semantic_hash(0x1234);
-  ASSERT_TRUE(nr_pdcch_blind_publish_common(&f));
-  nr_pdcch_blind_reset_common();
-  nr_pdcch_blind_set_sib1_semantic_hash(0); // new sync permits a cache hint
-  setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
-  nr_cfg_ignore_sib1_reset_for_test();
-  EXPECT_FALSE(nr_pdcch_blind_publish_common(&f));
-  nr_pdcch_blind_set_sib1_semantic_hash(0x5678);
-  EXPECT_EQ(nr_pdcch_blind_sib1_semantic_hash(), 0u);
-  EXPECT_FALSE(nr_pdcch_blind_get_common(f.pci, &got));
-  unsetenv("ISAC_TD_IGNORE_SIB1");
-  nr_cfg_ignore_sib1_reset_for_test();
-  EXPECT_TRUE(nr_pdcch_blind_get_common(f.pci, &got));
-  EXPECT_EQ(got.dl_bwp_size, 106);
-  nr_pdcch_blind_reset_common();
-  char path[256];
-  nr_cfg_sib1_cache_name(path, sizeof(path), dir, f.pci, 0x1234, nr_cfg_reconf_enabled());
-  remove(path);
-  snprintf(path, sizeof(path), "%s/sib1_common_pci996_last_hash.bin", dir);
-  remove(path);
-  unsetenv("ISAC_SIB1_CACHE_DIR");
-  unsetenv("ISAC_SIB1_CACHE");
-}
-
-TEST(Sib1Cache, IgnoreArmIsIndependentOfReconf) {
-  if (nr_cfg_reconf_enabled()) GTEST_SKIP() << "run with ISAC_RECONF unset";
-  SibEnvGuard env_guard;
-  nr_cfg_ignore_sib1_reset_for_test();
-  setenv("ISAC_SIB1_CACHE", "0", 1);
-  nr_pdcch_blind_common_config_t f{};
-  f.pci = 995; f.dl_bwp_size = 106;
-  setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
-  nr_cfg_ignore_sib1_reset_for_test();
-  EXPECT_FALSE(nr_pdcch_blind_publish_common(&f));
-  unsetenv("ISAC_TD_IGNORE_SIB1");
-  nr_cfg_ignore_sib1_reset_for_test();
-  EXPECT_TRUE(nr_pdcch_blind_publish_common(&f));
-  nr_pdcch_blind_reset_common();
-  unsetenv("ISAC_SIB1_CACHE");
-}
-
 
 TEST(EpochFeedback, InFlightJobAcrossBumpNotCredited) {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "run with ISAC_RECONF=1";
@@ -5803,8 +5519,6 @@ TEST(EpochFeedback, InFlightJobAcrossBumpNotCredited) {
 #include "nr_pusch_passive_ul_ids.h"
 
 TEST(UlUeIds, TwoUesAndRntiReuseKeepConfirmedIdsSeparate) {
-  setenv("ISAC_UL_UE_STATE","1",1);
-  nr_pusch_passive_ul_ids_flags_reset_for_test(); /* flags are cached on first use by earlier tests */
   nr_pusch_passive_ul_ids_reset_all();
   nr_ue_ctx_t dl{};
   dl.identity_gen=1; dl.incarnation=0;
@@ -5835,8 +5549,6 @@ TEST(UlUeIds, TwoUesAndRntiReuseKeepConfirmedIdsSeparate) {
   nr_pusch_passive_ul_ids_confirm(&a,0,900,901);
   EXPECT_FALSE(nr_pusch_passive_ul_ids_get(&reused,0,&dmrs,&data));
   nr_pusch_passive_ul_ids_reset_all();
-  unsetenv("ISAC_UL_UE_STATE");
-  nr_pusch_passive_ul_ids_flags_reset_for_test();
 }
 #include "nr_ul_first_pusch.h"
 
@@ -5860,8 +5572,6 @@ TEST(UlFirstPusch, TracksLockedIdentityAndNonzeroCrcOnly)
 
 TEST(UlFirstPusch, DataIdWalkRetainsDlPriorsAndCoversSkippedPosition)
 {
-  setenv("ISAC_UL_PUSCH_CHAIN","1",1);
-  nr_pusch_passive_ul_ids_flags_reset_for_test();
   nr_pusch_passive_ul_ids_reset_all();
   nr_ue_ctx_t dl{};
   dl.identity_gen=11;
@@ -5882,8 +5592,6 @@ TEST(UlFirstPusch, DataIdWalkRetainsDlPriorsAndCoversSkippedPosition)
   nr_pusch_passive_ul_ids_current(ticket.rnti,0,415,&dmrs,&data);
   EXPECT_EQ(data,7); /* the sweep resumes at the skipped position */
   nr_pusch_passive_ul_ids_reset_all();
-  unsetenv("ISAC_UL_PUSCH_CHAIN");
-  nr_pusch_passive_ul_ids_flags_reset_for_test();
 }
 
 // ---- UL-READY: DCI 0_1 field order pinned independently of the test packer above ---------------------------------
@@ -6128,8 +5836,6 @@ struct UllTimGen {
 
 TEST(UlLayoutFit, EntropyRankedPrefixAndFitReadAreCoherent)
 {
-  setenv("ISAC_UL_PREFIX_ENT", "0", 1);
-  setenv("ISAC_UL_FIT_READ", "0", 1);
   UllTimGen g;
   std::vector<nr_ul_layout_dci_t> b;
   UlTruth t;
@@ -6140,9 +5846,6 @@ TEST(UlLayoutFit, EntropyRankedPrefixAndFitReadAreCoherent)
   const uint16_t cand[] = {217, 216, 162, 107, 273};
   nr_ul_layout_prefix_t pre[6];
   int np = nr_ul_layout_fit_prefix(b.data(), (int)b.size(), 44, mo, cand, 5, pre, 6);
-  ASSERT_GE(np, 2);
-  EXPECT_EQ(pre[0].riv, 14);  // the old order: width ascending, a RIV LSB parked in TDRA
-  setenv("ISAC_UL_PREFIX_ENT", "1", 1);
   np = nr_ul_layout_fit_prefix(b.data(), (int)b.size(), 44, mo, cand, 5, pre, 6);
   ASSERT_EQ(np, 1);
   EXPECT_EQ(pre[0].bwp_ind, 1);
@@ -6151,14 +5854,12 @@ TEST(UlLayoutFit, EntropyRankedPrefixAndFitReadAreCoherent)
   EXPECT_EQ(pre[0].n_max, 217);
 
   // module: fitted, BWP not locked -> fields exact
-  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
   const nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 923, .mu = 1, .typeA_pos = 0,
                                     .slots_per_frame = 20};
   nr_ul_layout_lock_reset();
   nr_pdcch_blind_ul_result_t out;
   UllTimGen g2;
-  EXPECT_FALSE(nr_ul_layout_read_fitted(0x4000, 44, nr_dci_bits_from_u64(0), &out));  // flag off
-  setenv("ISAC_UL_FIT_READ", "1", 1);
+  EXPECT_FALSE(nr_ul_layout_read_fitted(0x4000, 44, nr_dci_bits_from_u64(0), &out));  // no fit yet
   for (int i = 0; i < 300; i++) {
     for (int s2 = 0; s2 < 18; s2++)
       if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
@@ -6175,14 +5876,11 @@ TEST(UlLayoutFit, EntropyRankedPrefixAndFitReadAreCoherent)
   }
   EXPECT_GT(n, 150);
   EXPECT_EQ(ok, n);
-  setenv("ISAC_UL_PREFIX_ENT", "0", 1);
-  setenv("ISAC_UL_FIT_READ", "0", 1);
   nr_ul_layout_lock_reset();
 }
 
 TEST(UlLayoutLock, DmrsVotesLockTheBwpWithoutAnyCrcAndNoiseDoesNot)
 {
-  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
   ASSERT_TRUE(nr_ul_layout_lock_enabled());
   nr_ul_layout_lock_reset();
   const nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
@@ -6260,273 +5958,6 @@ TEST(UlLayoutLock, DmrsVotesLockTheBwpWithoutAnyCrcAndNoiseDoesNot)
   EXPECT_EQ(out.n_dmrs_cdm_groups, 1);
   EXPECT_EQ(out.transform_precoding, 0);
   nr_ul_layout_lock_reset();
-  unsetenv("ISAC_UL_LAYOUT_LOCK");
-}
-
-// ---- ISAC_UL_LOCK_SPRT (ULLOCKSPEED): sequential test on sub-threshold DM-RS evidence of every probe, any grant width.
-namespace {
-struct SprtRun {
-  int locked_n = 0, locked_start = 0;  // 0 = no lock
-  int probes = 0;
-  int wide = 0;  // probes with an L > 16 PRB hypothesis range
-};
-// mu = per-PRB mean of the DM-RS statistic on the true allocation (216 @ CRB 1).
-// heavy = noise drawn from a symmetric heavy-tailed mixture (the exchangeable-null shape is symmetric, not Gaussian).
-SprtRun UllSprtRun(unsigned seed, double mu, int max_probes, bool heavy, bool edge = false)
-{
-  nr_ul_layout_lock_reset();
-  const nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
-                                    .slots_per_frame = 20};
-  UllGen g;
-  g.rng.seed(seed);
-  nr_pdcch_blind_ul_result_t out;
-  for (int i = 0; i < 300; i++) {
-    for (int s2 = 0; s2 < 18; s2++)
-      if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
-    const nr_ul_layout_dci_t d = g.next();
-    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
-  }
-  nr_ul_layout_eval_once();
-  std::mt19937 rng(seed * 7919u + 1);
-  std::normal_distribution<double> nd(0.0, 1.0);
-  std::uniform_real_distribution<double> ud(0.0, 1.0);
-  SprtRun run;
-  for (int i = 0; i < max_probes; i++) {
-    const nr_ul_layout_dci_t d = g.next();
-    const int rc = nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
-    if (rc == 1) {
-      run.locked_n = out.bwp_size;
-      run.locked_start = out.bwp_start;
-      return run;
-    }
-    if (rc != 2) continue;
-    uint16_t p0[NR_UL_LAYOUT_MAX_HYP], np[NR_UL_LAYOUT_MAX_HYP];
-    const int n = nr_ul_layout_probe_plan(&out, p0, np, NR_UL_LAYOUT_MAX_HYP, nullptr, nullptr);
-    uint16_t s = 0, l = 0;
-    nr_ul_layout_riv((uint32_t)nr_dci_bits_field(&d.p, 44, 2, 15), 216, &s, &l);
-    const int t0 = 1 + s, t1 = 1 + s + l;  // truth: N = 216 at CRB 1
-    nr_ul_layout_probe_res_t r = {};
-    r.n = n;
-    r.zn_valid = true;
-    r.ze_valid = edge;
-    r.ctl_db = -6.f;
-    r.comb1_db = NAN;
-    // per-PRB statistic u_q ~ noise (+ mu on the true allocation); a hypothesis' zn is the normalised sum over its range, so
-    // neighbouring hypotheses share noise and signal exactly as overlapping PRB ranges do
-    std::vector<double> u(276), cu(277, 0.0);
-    for (int q = 0; q < 276; q++) {
-      double z = nd(rng);
-      if (heavy && ud(rng) < 0.1) z *= 3.0;
-      u[q] = z + ((q >= t0 && q < t1) ? mu : 0.0);
-      cu[q + 1] = cu[q] + u[q];
-    }
-    for (int h = 0; h < n; h++) {
-      r.snr_db[h] = np[h] ? -5.f : -99.f;
-      r.set[h] = 1;
-      if (!np[h]) continue;
-      if (np[h] > 16) run.wide++;
-      r.zn[h] = (float)((cu[p0[h] + np[h]] - cu[p0[h]]) / std::sqrt((double)np[h]));
-      // edge statistic: (inside - outside) of the PRB at each end of the range, normalised by sqrt(2)
-      r.ze[h][0] = p0[h] >= 1 ? (float)((u[p0[h]] - u[p0[h] - 1]) / std::sqrt(2.0)) : NAN;
-      r.ze[h][1] = p0[h] + np[h] < 275 ? (float)((u[p0[h] + np[h] - 1] - u[p0[h] + np[h]]) / std::sqrt(2.0)) : NAN;
-    }
-    nr_ul_layout_probe_feed(&out, d.slot + 2, &r);
-    run.probes++;
-  }
-  return run;
-}
-}  // namespace
-
-TEST(UlLayoutLock, SprtLocksOnWeakEvidenceAndNeverOnNoise)
-{
-  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
-  setenv("ISAC_UL_LOCK_SPRT", "1", 1);
-  ASSERT_TRUE(nr_ul_layout_sprt_enabled());
-  // weak but present DM-RS: every vote-threshold rule (6 dB per probe) sees nothing; the accumulated evidence must lock the
-  // true BWP (216 @ CRB 1) and never a neighbour, for several seeds
-  for (unsigned seed = 1; seed <= 6; seed++) {
-    const SprtRun r = UllSprtRun(seed, 0.35, 4000, false);
-    EXPECT_EQ(r.locked_n, 216) << "seed " << seed << " probes " << r.probes;
-    EXPECT_EQ(r.locked_start, 1) << "seed " << seed;
-    EXPECT_LT(r.probes, 3000) << "seed " << seed;
-    EXPECT_GT(r.wide, 0);  // wide grants are probed
-  }
-  // no DM-RS anywhere (mu = 0), heavy-tailed symmetric noise: 150 independent sessions of 1500 probes, none may lock
-  // (bound alpha = 1e-3 per session)
-  int false_locks = 0;
-  for (unsigned seed = 100; seed < 250; seed++) false_locks += UllSprtRun(seed, 0.0, 1500, true).locked_n != 0;
-  EXPECT_EQ(false_locks, 0);
-  nr_ul_layout_lock_reset();
-  unsetenv("ISAC_UL_LOCK_SPRT");
-  unsetenv("ISAC_UL_LAYOUT_LOCK");
-}
-
-// ULTWINS: the allocation-edge test alone (the range-sum evidence zn is left out when ISAC_UL_LOCK_EDGE=1): the step at the edges of the true
-// layout locks it; 1-PRB twins (216@0, 216@2, 215@x) see a step on neither edge, since both PRBs of an edge sit inside or outside the grant.
-TEST(UlLayoutLock, EdgeTestLocksTheTrueLayoutAndNeverOnNoise)
-{
-  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
-  setenv("ISAC_UL_LOCK_EDGE", "1", 1);
-  ASSERT_TRUE(nr_ul_layout_edge_enabled());
-  for (unsigned seed = 1; seed <= 6; seed++) {
-    const SprtRun r = UllSprtRun(seed, 0.8, 6000, false, true);
-    EXPECT_EQ(r.locked_n, 216) << "seed " << seed << " probes " << r.probes;
-    EXPECT_EQ(r.locked_start, 1) << "seed " << seed;
-  }
-  int false_locks = 0;
-  for (unsigned seed = 100; seed < 250; seed++) false_locks += UllSprtRun(seed, 0.0, 1500, true, true).locked_n != 0;
-  EXPECT_EQ(false_locks, 0);
-  nr_ul_layout_lock_reset();
-  unsetenv("ISAC_UL_LOCK_EDGE");
-  unsetenv("ISAC_UL_LAYOUT_LOCK");
-}
-
-// ---- UL layout lock: SIB1-first hypothesis and CRC-first locking (ISAC_UL_LOCK_SIB1_FIRST / ISAC_UL_LOCK_CRC_FIRST) ----
-/* ISAC_UL_LOCK_LLR decision rule on synthetic tallies (hypothesis 0 = DL BWP, carries the prior). ULBWP-20261014. */
-TEST(UlLayoutLock, LlrRuleOnSyntheticTallies)
-{
-  auto run = [](std::vector<uint32_t> v, int prior_h, uint8_t nr = 3, int *lead = nullptr) {
-    std::vector<uint8_t> pr(v.size(), 0), n(v.size(), nr);
-    if (prior_h >= 0) pr[prior_h] = 1;
-    int l = -1;
-    bool ok = nr_ul_layout_llr_decide(v.data(), pr.data(), n.data(), (int)v.size(), &l);
-    if (lead) *lead = l;
-    return ok;
-  };
-  int lead = -1;
-  EXPECT_TRUE(run({4, 1, 1, 1, 1, 1}, 0, 3, &lead)); /* T0a: 4 informative for the DL BWP vs <= 1 */
-  EXPECT_EQ(lead, 0);
-  EXPECT_FALSE(run({2, 6, 0}, 0));                   /* 216@1-style fluke 6:2 against the DL BWP (2 votes) */
-  EXPECT_TRUE(run({0, 6, 2}, 0));                    /* 6 vs 2 elsewhere, the DL BWP has none: locks */
-  EXPECT_FALSE(run({2, 6, 2}, 0));
-  EXPECT_FALSE(run({4, 1, 1}, -1));                  /* same 4:1 without prior: not enough (needs 6) */
-  EXPECT_TRUE(run({0, 6, 1}, 0));                    /* 6:1 against a prior with no votes still locks: prior cannot force */
-  EXPECT_FALSE(run({3, 0, 0}, 0));                   /* prior never locks on 3 votes */
-  EXPECT_FALSE(run({0, 0, 0}, 0));                   /* no votes: prior alone locks nothing */
-  EXPECT_FALSE(run({4, 1, 1}, 0, 1));                /* one RNTI */
-  EXPECT_FALSE(run({6, 4, 0}, -1));                  /* near tie (old rule: no lock either) */
-  EXPECT_TRUE(run({9, 4, 0}, -1));      /* 9:4 without prior locks */
-  EXPECT_FALSE(run({0, 62, 45}, -1));                /* large look-alike pair (62:45): the margin is met but the ratio is not */
-  EXPECT_FALSE(run({1, 8, 5}, 0));                   /* runner-up too close even with the prior against */
-}
-
-
-/* ISAC_UL_LOCK_SIGN: pairwise sign test on per-hypothesis detections (a-only vs b-only probes). h0 = the true 217@0, h1 = the 216@1
- * look-alike, h2 = 216@0. */
-TEST(UlLayoutLock, SignRuleOnSyntheticTallies)
-{
-  struct Case {
-    std::vector<uint32_t> det;
-    std::vector<std::vector<int>> only; /* only[a][b] */
-    int prior_h;
-    uint8_t nrnti;
-  };
-  auto run = [](const Case &c, int *lead = nullptr) {
-    const int n = (int)c.det.size();
-    std::vector<uint16_t> m((size_t)n * n, 0);
-    for (int a = 0; a < n; a++)
-      for (int b = 0; b < n; b++) m[(size_t)a * n + b] = (uint16_t)c.only[a][b];
-    std::vector<uint8_t> pr(n, 0), nr(n, c.nrnti);
-    if (c.prior_h >= 0) pr[c.prior_h] = 1;
-    int l = -1;
-    const bool ok = nr_ul_layout_sign_decide(m.data(), n, c.det.data(), pr.data(), nr.data(), n, &l);
-    if (lead) *lead = l;
-    return ok;
-  };
-  int lead = -1;
-  /* the truth is detected in 40 probes; its look-alike in 25 (neighbours' DM-RS) but never when the truth is silent */
-  EXPECT_TRUE(run({{40, 25, 3}, {{0, 15, 37}, {0, 0, 22}, {0, 0, 0}}, -1, 3}, &lead));
-  EXPECT_EQ(lead, 0);
-  /* winner-take-all would hand the look-alike the vote (it detects more often with a stronger neighbour): 30 vs 22 detections,
-   * but only the truth has probes the other lacks */
-  EXPECT_TRUE(run({{22, 30, 2}, {{0, 11, 20}, {2, 0, 28}, {0, 0, 0}}, -1, 3}, &lead));
-  EXPECT_EQ(lead, 0);
-  /* a coin flip between two hypotheses is not a decision */
-  EXPECT_FALSE(run({{20, 19, 0}, {{0, 6, 20}, {5, 0, 19}, {0, 0, 0}}, -1, 3}));
-  /* 6:0 locks (p = 1/64); 5:0 does not without the prior; with the prior 5 + 1 = 6:0 does */
-  EXPECT_TRUE(run({{6, 3, 0}, {{0, 6, 6}, {0, 0, 3}, {0, 0, 0}}, -1, 3}));
-  EXPECT_FALSE(run({{5, 3, 0}, {{0, 5, 5}, {0, 0, 3}, {0, 0, 0}}, -1, 3}));
-  EXPECT_TRUE(run({{5, 3, 0}, {{0, 5, 5}, {0, 0, 3}, {0, 0, 0}}, 0, 3}));
-  /* 4 + prior = 5:0 -> p = 1/32 > alpha: the prior alone never locks */
-  EXPECT_FALSE(run({{4, 2, 0}, {{0, 4, 4}, {0, 0, 2}, {0, 0, 0}}, 0, 3}));
-  /* one RNTI only */
-  EXPECT_FALSE(run({{40, 25, 3}, {{0, 15, 37}, {0, 0, 22}, {0, 0, 0}}, -1, 1}));
-  /* a twin that is detected as often and never discordant cannot be told apart: no lock, and a prior cannot break it */
-  EXPECT_FALSE(run({{20, 20, 0}, {{0, 0, 20}, {0, 0, 20}, {0, 0, 0}}, -1, 3}));
-  EXPECT_FALSE(run({{20, 20, 0}, {{0, 0, 20}, {0, 0, 20}, {0, 0, 0}}, 0, 3}));
-  /* large tally, mild contamination (the truth is silent in 3 probes where the look-alike fires): 60 vs 3 still locks */
-  EXPECT_TRUE(run({{80, 40, 0}, {{0, 60, 80}, {3, 0, 40}, {0, 0, 0}}, -1, 3}, &lead));
-  EXPECT_EQ(lead, 0);
-}
-
-/* ISAC_UL_LOCK_SIGN end to end: the truth (216@1 of the generator) is sent by a UE that DM-RS detection sees in 80 % of the probes; in
- * 70 % of the probes another UE sits right behind it and its stronger DM-RS (15 dB) lands on the PRBs the shifted look-alike
- * hypothesis reads. The sign test must lock the truth, never the look-alike. */
-static bool SignWorld(const char *mode, uint16_t *bwp_n, uint16_t *bwp_s)
-{
-  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
-  if (mode) setenv("ISAC_UL_LOCK_SIGN", mode, 1); else unsetenv("ISAC_UL_LOCK_SIGN");
-  nr_ul_layout_lock_reset();
-  const nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0, .slots_per_frame = 20};
-  UllGen g;
-  nr_pdcch_blind_ul_result_t out;
-  for (int i = 0; i < 300; i++) {
-    for (int s2 = 0; s2 < 18; s2++)
-      if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
-    const nr_ul_layout_dci_t d = g.next();
-    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
-  }
-  nr_ul_layout_eval_once();
-  std::mt19937 rng(99);
-  bool locked = false;
-  for (int i = 0; i < 6000 && !locked; i++) {
-    const nr_ul_layout_dci_t d = g.next();
-    const int rc = nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
-    if (rc == 1) { locked = true; break; }
-    if (rc == 0) continue;
-    uint16_t p0[NR_UL_LAYOUT_MAX_HYP], np[NR_UL_LAYOUT_MAX_HYP];
-    const int n = nr_ul_layout_probe_plan(&out, p0, np, NR_UL_LAYOUT_MAX_HYP, nullptr, nullptr);
-    uint16_t s = 0, l = 0;
-    if (!nr_ul_layout_riv((uint32_t)nr_dci_bits_field(&d.p, 44, 2, 15), 216, &s, &l)) continue;
-    const int ts = 1 + s, te = 1 + s + l;  // the truth's PRBs [ts, te)
-    const bool truth_seen = rng() % 10 < 8, neighbour = rng() % 10 < 7;
-    nr_ul_layout_probe_res_t r = {};
-    r.n = n;
-    for (int h = 0; h < n; h++) {
-      r.set[h] = 1;
-      r.snr_db[h] = -5.f;
-      if (!np[h]) continue;
-      if (p0[h] == ts && np[h] == l) { if (truth_seen) r.snr_db[h] = 12.f; }
-      else if (neighbour && p0[h] >= te && p0[h] < te + l && p0[h] + np[h] <= te + 2 * l) r.snr_db[h] = 15.f;
-    }
-    r.ctl_db = -6.f;
-    r.comb1_db = -0.5f;
-    nr_ul_layout_probe_feed(&out, d.slot + 2, &r);
-  }
-  bool ok = false;
-  if (locked) {
-    const nr_ul_layout_dci_t d = g.next();
-    if (nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out) == 1) {
-      *bwp_n = out.bwp_size;
-      *bwp_s = out.bwp_start;
-      ok = true;
-    }
-  }
-  nr_ul_layout_lock_reset();
-  unsetenv("ISAC_UL_LOCK_SIGN");
-  unsetenv("ISAC_UL_LAYOUT_LOCK");
-  return ok;
-}
-
-TEST(UlLayoutLock, SignRuleLocksTheTruthNextToAnAdjacentLookAlike)
-{
-  uint16_t n = 0, s = 0;
-  ASSERT_TRUE(SignWorld("1", &n, &s));
-  EXPECT_EQ(n, 216);
-  EXPECT_EQ(s, 1);
-  uint16_t on = 0, os = 0;
-  const bool old_locks = SignWorld(nullptr, &on, &os);  // winner-take-all in the same world: informative, not asserted
-  printf("[ SIGN-WORLD ] old rule locked=%d bwp=%u@%u; sign rule bwp=%u@%u\n", (int)old_locks, on, os, n, s);
 }
 
 TEST(UlLayoutLock, Sib1PriorCarriesTheUplinkBwp)
@@ -6573,20 +6004,10 @@ int UllTrials(UllGen &g, const nr_ul_layout_cell_t &cell, nr_pdcch_blind_ul_resu
 
 TEST(UlLayoutLock, CrcFirstLocksAtOnceSib1RankedFirstAndRelocks)
 {
-  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
   nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
                               .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216};
   nr_pdcch_blind_ul_result_t t[NR_UL_LAYOUT_MAX_TRIALS], o;
   nr_ul_layout_dci_t d;
-  UllGen g;
-  // flags off: nothing is requested (existing behaviour)
-  for (const char *k : {"ISAC_UL_LOCK_BWP_ALL","ISAC_UL_FIT_READ","ISAC_UL_PREFIX_ENT","ISAC_UL_K2_PAIR","ISAC_UL_TDA_PAIR","ISAC_UL_LOCK_MCS_STAT","ISAC_UL_MCS_TABLE_SWEEP","ISAC_UL_LOCK_SIGN"}) setenv(k, "0", 1); setenv("ISAC_UL_LOCK_CRC_FIRST", "0", 1); setenv("ISAC_UL_LOCK_SIB1_FIRST", "0", 1); setenv("ISAC_UL_BWP_SEED", "0", 1); // baked on
-  UllFit(g, cell);
-  EXPECT_EQ(nr_ul_layout_crc_trials(0x4000, 44, 5000, d.p, &cell, t, NR_UL_LAYOUT_MAX_TRIALS), 0);
-  setenv("ISAC_UL_LOCK_CRC_FIRST", "1", 1);
-  setenv("ISAC_UL_LOCK_SIB1_FIRST", "1", 1);
-  setenv("ISAC_UL_LOCK_CRC_GUARD", "0", 1); // baked on
-  unsetenv("ISAC_UL_LOCK_CRC_K");
   nr_ul_layout_lock_reset();
   UllGen g2;
   UllFit(g2, cell);
@@ -6600,7 +6021,7 @@ TEST(UlLayoutLock, CrcFirstLocksAtOnceSib1RankedFirstAndRelocks)
   // a CRC pass under the SECOND hypothesis overrides the SIB1 ranking and locks immediately (no DM-RS votes at all)
   ASSERT_TRUE(t[1].bwp_size != 216 || t[1].bwp_start != 1);
   const uint16_t b1_start = t[1].bwp_start, b1_size = t[1].bwp_size;
-  nr_ul_layout_crc_result(&t[1], true);
+  nr_ul_layout_crc_verdict(&t[1], true, 6000, 1, 1, 400);
   d = g2.next();
   ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
   EXPECT_TRUE(nr_ul_layout_is_tagged(&o));
@@ -6620,29 +6041,20 @@ TEST(UlLayoutLock, CrcFirstLocksAtOnceSib1RankedFirstAndRelocks)
   int pick = -1;
   for (int i = 0; i < n; i++) if (t[i].bwp_size == 216 && t[i].bwp_start == 1) pick = i;
   ASSERT_GE(pick, 0);
-  nr_ul_layout_crc_result(&t[pick], true);
+  nr_ul_layout_crc_verdict(&t[pick], true, 6000, 1, 1, 401);
   d = g2.next();
   ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
   EXPECT_EQ(o.bwp_start, 1);
   EXPECT_EQ(o.bwp_size, 216);
   nr_ul_layout_lock_reset();
-  setenv("ISAC_UL_LOCK_CRC_FIRST", "0", 1);
-  setenv("ISAC_UL_LOCK_SIB1_FIRST", "0", 1);
-  unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
 
 TEST(UlLayoutLock, DlBwpPriorSeedsAnUncertainLockOnlyWhenTheFitAdmitsItsSize)
 {
-  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
-  setenv("ISAC_UL_BWP_SEED", "1", 1);
   nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
                               .slots_per_frame = 20, .sib1_ul_start = 0, .sib1_ul_size = 217, .sib1_ul_dl = 1};
   nr_pdcch_blind_ul_result_t t[NR_UL_LAYOUT_MAX_TRIALS], o;
-  // flag off: the DL BWP is only a hypothesis, the vote is not short-circuited
-  setenv("ISAC_UL_BWP_DL_PRIOR", "0", 1);
-  { UllGen g; UllFit(g, cell); EXPECT_TRUE(nr_ul_layout_searching()); }
-  // flag on: 217@0 (15-bit RIV, admitted by the fit) is locked at once ...
-  setenv("ISAC_UL_BWP_DL_PRIOR", "1", 1);
+  // 217@0 (15-bit RIV, admitted by the fit) is locked at once ...
   UllGen g;
   UllFit(g, cell);
   EXPECT_FALSE(nr_ul_layout_searching());
@@ -6651,7 +6063,6 @@ TEST(UlLayoutLock, DlBwpPriorSeedsAnUncertainLockOnlyWhenTheFitAdmitsItsSize)
   EXPECT_EQ(o.bwp_size, 217);
   EXPECT_EQ(o.bwp_start, 0);
   // ... but it is NOT certain: after a run of CRC failures other hypotheses are tried (a configured BWP would not be)
-  setenv("ISAC_UL_LOCK_CRC_FIRST", "1", 1);
   for (int i = 0; i < 8; i++) nr_ul_layout_crc_result(&o, false);
   int n = 0;
   for (int i = 0; i < 200 && !n; i++) {
@@ -6670,18 +6081,10 @@ TEST(UlLayoutLock, DlBwpPriorSeedsAnUncertainLockOnlyWhenTheFitAdmitsItsSize)
   UllFit(g3, cell);
   EXPECT_TRUE(nr_ul_layout_searching());
   nr_ul_layout_lock_reset();
-  setenv("ISAC_UL_LOCK_CRC_FIRST", "0", 1);
-  setenv("ISAC_UL_BWP_DL_PRIOR", "0", 1);
-  setenv("ISAC_UL_BWP_SEED", "0", 1);
-  unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
 
 TEST(UlLayoutLock, CrcGuardNeedsEvidenceForCrc16AndLocksOnCrc24)
 {
-  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
-  setenv("ISAC_UL_LOCK_CRC_FIRST", "1", 1);
-  setenv("ISAC_UL_LOCK_CRC_GUARD", "1", 1);
-  unsetenv("ISAC_UL_LOCK_CRC_K");
   nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
                               .slots_per_frame = 20};
   nr_pdcch_blind_ul_result_t t[NR_UL_LAYOUT_MAX_TRIALS], o;
@@ -6736,100 +6139,8 @@ TEST(UlLayoutLock, CrcGuardNeedsEvidenceForCrc16AndLocksOnCrc24)
   d = g3.next();
   EXPECT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
   nr_ul_layout_lock_reset();
-  setenv("ISAC_UL_LOCK_CRC_FIRST", "0", 1);
-  setenv("ISAC_UL_LOCK_CRC_GUARD", "0", 1);
-  unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
 
-namespace {
-// feeds `n` decoded grants (locked layout reads) with the verdict `ok(start)`; returns the start of the last grant
-int UllPriorRun(UllGen &g, const nr_ul_layout_cell_t &cell, int n, int true_start, float snr, float se)
-{
-  int last = -1;
-  nr_pdcch_blind_ul_result_t o;
-  for (int i = 0; i < n; i++) {
-    const nr_ul_layout_dci_t d = g.next();
-    if (nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o) != 1) continue;
-    last = o.bwp_start;
-    nr_ul_layout_prior_note(&o, o.bwp_start == true_start, 800, 1, 1, d.slot, snr, se);
-  }
-  return last;
-}
-}  // namespace
-
-// ULPRIOR: provisional adoption of the top prior-ranked UL BWP start; demoted only by CRC-expected failures.
-TEST(UlLayoutLock, PriorSearchStaysMovesAndIgnoresLowSnr)
-{
-  EXPECT_TRUE(nr_ul_layout_prior_expected(20.f, 1.f));
-  EXPECT_FALSE(nr_ul_layout_prior_expected(-10.f, 2.f));
-  EXPECT_FALSE(nr_ul_layout_prior_expected(0.f, 2.f));  // Shannon(2 bit/RE) = 4.8 dB
-  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
-  setenv("ISAC_UL_LOCK_PRIOR_SEARCH", "1", 1);
-  setenv("ISAC_UL_LOCK_CRC_FIRST", "0", 1);
-  setenv("ISAC_UL_LOCK_CRC_GUARD", "0", 1);
-  for (const char *k : {"ISAC_UL_LOCK_BWP_ALL","ISAC_UL_FIT_READ","ISAC_UL_PREFIX_ENT","ISAC_UL_K2_PAIR","ISAC_UL_TDA_PAIR","ISAC_UL_LOCK_MCS_STAT","ISAC_UL_MCS_TABLE_SWEEP","ISAC_UL_LOCK_SIGN"}) setenv(k, "0", 1); setenv("ISAC_UL_LOCK_SIB1_FIRST", "0", 1); setenv("ISAC_UL_BWP_SEED", "0", 1); setenv("ISAC_UL_BWP_DL_PRIOR", "0", 1); // baked on
-  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 216, .pci = 415, .mu = 1, .typeA_pos = 0,
-                              .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216, .dl_bwp_start = 0};
-  uint16_t st = 0, sz = 0;
-  uint32_t ex = 0, okn = 0, dem = 0;
-  {  // prior right (SIB1 start 1): adopted at the fit, confirmed by the CRC pass, never moves afterwards
-    UllGen g;
-    UllFit(g, cell);
-    EXPECT_TRUE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
-    EXPECT_EQ(st, 1); EXPECT_GE(sz, 213); EXPECT_LE(sz, 218);
-    EXPECT_EQ(UllPriorRun(g, cell, 30, 1, 20.f, 0.5f), 1);
-    EXPECT_FALSE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));  // confirmed
-    EXPECT_EQ(dem, 0u);
-    // later CRC-expected failures (a bad stretch) do not move a confirmed lock
-    EXPECT_EQ(UllPriorRun(g, cell, 300, -1, 20.f, 0.5f), 1);
-  }
-  {  // prior wrong (truth 0, SIB1 says 1, the DL-consistent start is 0): the DL prior is the 2nd hypothesis: two demotions, then the right start, confirmed
-    UllGen g;
-    UllFit(g, cell);
-    EXPECT_EQ(UllPriorRun(g, cell, 200, 0, 20.f, 0.5f), 0);
-    EXPECT_FALSE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
-    EXPECT_EQ(st, 0); EXPECT_GE(sz, 213); EXPECT_LE(sz, 218);
-  }
-  {  // prior size 217 (SIB1 and DL) but the RIV fit says 107: the adopted size is the fitted one, never the prior's
-    nr_ul_layout_cell_t c2 = cell;
-    c2.sib1_ul_start = 0; c2.sib1_ul_size = 217; c2.dl_bwp_start = 0; c2.dl_bwp_size = 217;
-    UllGen g;
-    g.rivw = 13;
-    nr_pdcch_blind_ul_result_t out;
-    nr_ul_layout_lock_reset();
-    for (int i = 0; i < 300; i++) {
-      for (int s2 = 0; s2 < 18; s2++)
-        if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
-      const nr_ul_layout_dci_t d = g.next(107);
-      nr_ul_layout_on_dci(d.rnti, 42, d.slot, d.p, &c2, &out);
-    }
-    nr_ul_layout_eval_once();
-    EXPECT_TRUE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
-    EXPECT_GE(sz, 100); EXPECT_LE(sz, 109);
-    EXPECT_EQ(st, 0);  // seeded by the prior start (clamped into [0, carrier-N])
-  }
-  {  // low SNR: every grant fails on every hypothesis, none predicts a pass: no demotion, stays on the prior
-    UllGen g;
-    UllFit(g, cell);
-    EXPECT_EQ(UllPriorRun(g, cell, 800, 0, -5.f, 1.5f), 1);
-    EXPECT_TRUE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
-    EXPECT_EQ(dem, 0u); EXPECT_EQ(ex, 0u); EXPECT_EQ(st, 1);
-  }
-  {  // nothing ever passes although every grant predicts a pass: bounded, back to the top prior, then stops
-    UllGen g;
-    UllFit(g, cell);
-    UllPriorRun(g, cell, 3000, -1, 20.f, 0.5f);
-    nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem);
-    EXPECT_EQ(dem, 16u);
-    EXPECT_EQ(st, 1);
-    EXPECT_EQ(UllPriorRun(g, cell, 400, -1, 20.f, 0.5f), 1);
-    nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem);
-    EXPECT_EQ(dem, 16u);
-  }
-  nr_ul_layout_lock_reset();
-  unsetenv("ISAC_UL_LOCK_PRIOR_SEARCH");
-  unsetenv("ISAC_UL_LAYOUT_LOCK");
-}
 
 // TIMMCS0 (2026-10-11): two DCI 1_1 layouts whose MCS fields sit 2 bits apart both read MCS 0 when the bits before it
 // are zero, with the same allocation and ports, yet read the rv from different bits (layout A reads "MCS LSB, NDI" of

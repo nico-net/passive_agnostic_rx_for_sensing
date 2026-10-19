@@ -3,7 +3,6 @@
 #include "common/utils/nr_bg_lane.h"
 #include "nr_pdcch_nid_gpu.h"
 #include "PHY/TOOLS/nr_admit.h"
-#include "nr_dmrs_nid_solve.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
 #include "common/utils/LOG/log.h"
 #include <dlfcn.h>
@@ -20,7 +19,6 @@
 static struct {
  pthread_mutex_t mu;
  pthread_cond_t cv;
- pthread_cond_t cv_free; /* ISAC_PDCCH_NID_GPU_NODROP: a staging batch was freed; CLOCK_MONOTONIC (initialised in start()) */
  pthread_t thread;
  void *module, *device;
  const nr_pdcch_nid_ops_t *ops;
@@ -28,34 +26,18 @@ static struct {
  int state[3]; /* 0 free, 1 producer, 2 full, 3 worker */
  uint64_t sequence[3], produced, generation, passes, dropped;
  nr_pdcch_nid_result_t result;
- int producer, n, rb, dur, every, window, batch_size;
- bool incremental;
+ int producer, n, rb, dur, window, batch_size;
  bool duty_enabled, all_verified;
- /* ISAC_PDCCH_NID_GPU_NODROP state. nodrop is set in start(). The push-side fields below are touched by the single producer thread only;
-  * slot_ticks is read by the worker and the feedback caller. */
- bool nodrop, snap_started, snap_refused;
- int snap_slot;
- _Atomic uint64_t slot_ticks, dropped_snapshots, dropped_partial;
- uint64_t clock_us[3]; /* duty clock stamped on each batch when it is queued */
  uint32_t epoch, rearm; /* rearm: ACQMISS recovery counter, folded into the batch cfg epoch so the device window and duty restart */
  uint64_t wake, last_outside_us;
  unsigned acquire_ms, maintain_ms, recheck_ms;
  bool stop;
- /* ISAC_DMRS_NID_SOLVE=3 (solver primary): the sweep runs on demand only (nr_dmrs_nid_sweep_demand); hints are the solver's top-2 ids. */
- bool primary;
- uint32_t ps_epoch;
- nr_dmrs_prim_state_t ps; /* first_us (grace anchor), last_run_us, verified, burst: reset when the batch cfg (geometry / epoch) changes */
- uint64_t primary_maintain_us, hint_sig, grace_us, reverify_us;
- uint64_t runs, skipped; /* sweep GPU passes run / batches not uploaded (primary) */
+ uint64_t runs; /* sweep GPU passes run */
  double kernel_ms;
  _Atomic bool running;
 } g = {.mu=PTHREAD_MUTEX_INITIALIZER,.cv=PTHREAD_COND_INITIALIZER,.producer=-1};
 
-bool nr_pdcch_nid_gpu_enabled(void)
-{
- const char *e=getenv("ISAC_PDCCH_NID_GPU");
- return !e || strcmp(e,"1")==0;
-}
+bool nr_pdcch_nid_gpu_enabled(void) {return true;}
 bool nr_pdcch_nid_gpu_running(void) {return atomic_load_explicit(&g.running,memory_order_acquire);}
 /* env_int: reads an integer environment variable, returning def when unset, empty, non-numeric or outside [lo, hi].
  *   How it works: strtol with end-pointer check and range test.
@@ -68,54 +50,8 @@ static int env_int(const char *key,int def,int lo,int hi)
  char *end;long n=strtol(s,&end,10);
  return *end || n<lo || n>hi?def:(int)n;
 }
-/* NODROP_WAIT_NS: the longest the real-time producer may wait for a free staging batch or the mutex: one slot at 30 kHz SCS. */
-#define NODROP_WAIT_NS 500000L
-#define NODROP_SLOT_US 500ull
-/* duty_clock_us: the duty-cycle clock. Flag off: wall-clock budget time. NODROP: 500 us per pushed slot, so identical input gives an identical
- *   duty schedule. batch_clock is the value stamped on the batch being handled (nodrop only). Caller: worker(); feedback reads slot_clock_us() directly. */
-static uint64_t duty_clock_us(uint64_t batch_clock)
-{
- if(!g.nodrop)return nr_gpu_budget_now_us();
- return batch_clock;
-}
-/* slot_clock_us: no-drop mode clock: the slot tick counter converted to microseconds.
- *   How it works: (slot_ticks + 1) * NODROP_SLOT_US, relaxed atomic load.
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:60, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:326, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:362.
- */
-static uint64_t slot_clock_us(void)
-{
- return (atomic_load_explicit(&g.slot_ticks,memory_order_relaxed)+1)*NODROP_SLOT_US;
-}
-/* batch_freed: called with g.mu held after a staging batch returned to state 0; wakes a producer waiting in nodrop_acquire(). Callers: worker(), feedback. */
-static void batch_freed(void)
-{
- if(g.nodrop)pthread_cond_signal(&g.cv_free);
-}
-/* nodrop_acquire: bounded (<= NODROP_WAIT_NS in total) replacement for trylock + "all batches busy" drop. Takes g.mu with trylock polling
- *   (never a blocking lock), then, if no producer batch is open, waits on cv_free with a CLOCK_MONOTONIC deadline for the worker to free one.
- *   Returns true with g.mu held and g.producer >= 0; false with g.mu released. Caller: nr_pdcch_nid_gpu_push() (real-time path). */
-static bool nodrop_acquire(void)
-{
- struct timespec dl,nap={0,10000};
- clock_gettime(CLOCK_MONOTONIC,&dl);
- dl.tv_nsec+=NODROP_WAIT_NS;
- if(dl.tv_nsec>=1000000000L) {dl.tv_sec++;dl.tv_nsec-=1000000000L;}
- while(pthread_mutex_trylock(&g.mu)) {
-  struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);
-  if(now.tv_sec>dl.tv_sec || (now.tv_sec==dl.tv_sec && now.tv_nsec>=dl.tv_nsec))return false;
-  nanosleep(&nap,NULL);
- }
- bool timed_out=false;
- for(;;) {
-  if(g.producer<0)for(int j=0;j<3;j++)if(g.state[j]==0){g.producer=j;g.state[j]=1;g.n=0;break;}
-  if(g.producer>=0)return true;
-  if(timed_out) {pthread_mutex_unlock(&g.mu);return false;}
-  timed_out=pthread_cond_timedwait(&g.cv_free,&g.mu,&dl)==ETIMEDOUT;
- }
-}
 /* worker: the PDCCH NID GPU worker thread: takes a filled batch and decides whether to run it.
- *   How it works: Waits on g.cv for a batch in state 2 (lowest sequence). With ISAC_PDCCH_NID_GPU_DUTY=1 it runs the ACQUIRE/MAINTAIN/PAUSED duty state machine (nr_gpu_discovery_due) and frees skipped batches. A geometry change resets the duty and the published result. TODO(doc): the device-run and publish tail (after line 308) was not reviewed.
+ *   How it works: Waits on g.cv for a batch in state 2 (lowest sequence). With duty on it runs the ACQUIRE/MAINTAIN/PAUSED duty state machine (nr_gpu_discovery_due) and frees skipped batches. A geometry change resets the duty and the published result. TODO(doc): the device-run and publish tail (after line 308) was not reviewed.
  *   ISAC_* flags read: none.
  *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:60, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:70.
  */
@@ -123,7 +59,6 @@ static void *worker(void *unused)
 {
  (void)unused;
  nr_bg_lane_enter("ISAC_PDCCH_NID_GPU_CORE");
- unsigned batches=0;
  nr_pdcch_nid_config_t previous={0};
  bool have_config=false;
  nr_gpu_discovery_duty_t duty={0};
@@ -139,42 +74,13 @@ static void *worker(void *unused)
   }
   if(g.stop) {pthread_mutex_unlock(&g.mu);break;}
   g.state[b]=3;
-  const uint64_t batch_clock=g.clock_us[b];
   const uint32_t epoch=g.epoch;
   const bool geometry_changed=have_config && memcmp(&previous,&g.batch[b].cfg,sizeof(previous));
   const bool unexplained=wake!=g.wake;
   if(geometry_changed)duty=(nr_gpu_discovery_duty_t){0};
   wake=g.wake;
-  if(g.primary) {
-   nr_pdcch_nid_record_t h[2];uint64_t sig;
-   int hn=nr_dmrs_nid_live_hints(h,2,&sig);
-   const uint64_t now=duty_clock_us(batch_clock)+1;
-   {const nr_pdcch_nid_config_t *cf=&g.batch[b].cfg;uint64_t hsh=1469598103934665603ull; /* explicit fields, not padding bytes */
-    const uint64_t fl[]={(uint64_t)(int64_t)cf->nsc,(uint64_t)(int64_t)cf->point_a_sc,(uint64_t)(int64_t)cf->css0_crb,(uint64_t)(int64_t)cf->css0_nrb,
-                         (uint64_t)(int64_t)cf->pci,(uint64_t)(int64_t)cf->sps,(uint64_t)(int64_t)cf->dur,cf->epoch};
-    for(size_t k=0;k<sizeof(fl)/sizeof(fl[0]);k++)hsh=(hsh^fl[k])*1099511628211ull;
-    if(!g.ps.valid)g.ps_epoch=g.batch[b].cfg.epoch;
-    if(nr_dmrs_prim_cfg(&g.ps,hsh,now)) { /* retune: old cell's result, votes and confirmation are void; the grace restarts here */
-     memset(&g.result,0,sizeof(g.result));g.generation++;g.all_verified=false;
-     if(g.ps_epoch!=g.batch[b].cfg.epoch) {nr_dmrs_nid_live_reset();hn=-1;} /* new epoch = new cell: forget the votes */
-     g.ps_epoch=g.batch[b].cfg.epoch;
-     LOG_A(PHY,"SENSING: DMRS_NID_SOLVE geometry change: state reset, grace restarts\n");
-     if(hn<0)hn=0;
-    }}
-   const bool resp=g.result.count>0;
-   const int published=resp || hn>0,verified=g.ps.verified;
-   nr_gpu_budget_discovery_prefer(!published);
-   if(published && !g.ps.last_run_us)g.ps.last_run_us=now; /* the cross-check sweep waits one maintain period for the hint to be CRC-confirmed */
-   int due=g.ps.burst>0;
-   if(due)g.ps.burst--;
-   else if(nr_dmrs_nid_sweep_demand(published,verified,unexplained,now,g.ps.first_us,g.ps.last_run_us,g.grace_us,g.primary_maintain_us,g.reverify_us)) {
-    due=1;g.ps.burst=g.window>1?g.window-1:0;g.ps.last_run_us=now;
-    LOG_A(PHY,"SENSING: DMRS_NID_SOLVE sweep on demand: solver_ids=%d resp=%d verified=%d wake=%d\n",hn,resp,verified,unexplained);
-   }
-   if(!due) {g.skipped++;g.state[b]=0;batch_freed();pthread_mutex_unlock(&g.mu);continue;}
-  } else
   if(g.duty_enabled) {
-   int due=nr_gpu_discovery_due(&duty,duty_clock_us(batch_clock),epoch,
+   int due=nr_gpu_discovery_due(&duty,nr_gpu_budget_now_us(),epoch,
        !geometry_changed && g.result.count>0,!geometry_changed && g.all_verified,unexplained,1000ull*g.acquire_ms,
        1000ull*g.maintain_ms,1000ull*g.recheck_ms);
    nr_gpu_budget_discovery_prefer(duty.mode==NR_GPU_DISC_ACQUIRE); /* OTATAIL: acquisition goes before CSI-RS discovery */
@@ -184,17 +90,17 @@ static void *worker(void *unused)
           logged_mode<0?"START":names[logged_mode],names[duty.mode],epoch,g.result.count,g.all_verified,unexplained);
     logged_mode=duty.mode;
    }
-   if(!due) {g.state[b]=0;batch_freed();pthread_mutex_unlock(&g.mu);continue;}
+   if(!due) {g.state[b]=0;pthread_mutex_unlock(&g.mu);continue;}
   }
   if(nr_admit_on()) { /* ISAC_BG_LANE: a skipped batch is freed; the next one carries newer samples */
    const uint64_t t=nr_admit_now_ns();
-   if(!nr_admit_try(NR_ADMIT_NID,t,0,g.primary)) {g.state[b]=0;batch_freed();pthread_mutex_unlock(&g.mu);continue;}
+   if(!nr_admit_try(NR_ADMIT_NID,t,0,false)) {g.state[b]=0;pthread_mutex_unlock(&g.mu);continue;}
    admit_t0=t;
   }
   pthread_mutex_unlock(&g.mu);
   bool changed=have_config && memcmp(&previous,&g.batch[b].cfg,sizeof(previous));
   if(!have_config || changed) {
-   previous=g.batch[b].cfg;have_config=true;batches=0;
+   previous=g.batch[b].cfg;have_config=true;
    if(changed) {
     pthread_mutex_lock(&g.mu);
     memset(&g.result,0,sizeof(g.result));g.generation++;g.all_verified=false;
@@ -204,11 +110,9 @@ static void *worker(void *unused)
   int rc=g.ops->upload(g.device,&g.batch[b]);
   pthread_mutex_lock(&g.mu);
   g.state[b]=0;
-  batch_freed();
+  
   pthread_mutex_unlock(&g.mu);
   if(rc<0)goto failed;
-  batches++;
-  if(!g.incremental && (batches<(unsigned)g.window || (batches-g.window)%(unsigned)g.every)){admit_t0=0;continue;}
   nr_pdcch_nid_result_t result={0};
   rc=g.ops->run(g.device,&result);
   if(admit_t0){nr_admit_done(NR_ADMIT_NID,nr_admit_now_ns()-admit_t0);admit_t0=0;}
@@ -216,8 +120,8 @@ static void *worker(void *unused)
   if(rc==0) {
    g.runs++;
    for(int k=0;k<NR_PDCCH_NID_KERNEL_KINDS;k++)g.kernel_ms+=result.kernel_total_ms[k];
-   if((g.runs&7)==1)LOG_A(PHY,"SENSING: PDCCH_NID_GPU cumulative: sweep_runs=%llu kernel_ms=%.3f skipped_batches=%llu primary=%d\n",
-     (unsigned long long)g.runs,g.kernel_ms,(unsigned long long)g.skipped,g.primary);
+   if((g.runs&7)==1)LOG_A(PHY,"SENSING: PDCCH_NID_GPU cumulative: sweep_runs=%llu kernel_ms=%.3f\n",
+     (unsigned long long)g.runs,g.kernel_ms);
   }
   if(rc>0) {
    if(rc==2) LOG_W(PHY,"SENSING: PDCCH_NID_GPU pass budget exhausted; previous records retained\n");
@@ -237,7 +141,7 @@ static void *worker(void *unused)
   g.result=result;if(!same || !g.duty_enabled) {g.generation++;g.all_verified=false;}g.passes++;
   if(g.duty_enabled && result.count && duty.mode==NR_GPU_DISC_ACQUIRE) {
    duty.published=1;duty.mode=NR_GPU_DISC_MAINTAIN;
-   duty.next_us=duty_clock_us(batch_clock)+1000ull*g.maintain_ms;
+   duty.next_us=nr_gpu_budget_now_us()+1000ull*g.maintain_ms;
    LOG_A(PHY,"SENSING: PDCCH_NID_GPU mode ACQUIRE -> MAINTAIN epoch=%u published=%d reason=publication\n",epoch,result.count);
    logged_mode=duty.mode;
   }
@@ -253,12 +157,6 @@ static void *worker(void *unused)
    if(n<0 || (size_t)n>=sizeof(records)-used)break;
    used+=n;
   }
-  if(g.nodrop)
-   LOG_A(PHY,"SENSING: PDCCH_NID_GPU pass %llu: stage1 %.3f ms stage2 %.3f ms t=%ld.%03ld (kernels max %.3f ms) dropped_snapshots=%llu dropped_partial=%llu -> %d CORESETs:%s\n",
-         (unsigned long long)pass,result.stage1_ms,result.stage2_ms,(long)pts.tv_sec,pts.tv_nsec/1000000,result.kernel_max_ms,
-         (unsigned long long)atomic_load_explicit(&g.dropped_snapshots,memory_order_relaxed),
-         (unsigned long long)atomic_load_explicit(&g.dropped_partial,memory_order_relaxed),result.count,records);
-  else
   LOG_A(PHY,"SENSING: PDCCH_NID_GPU pass %llu: stage1 %.3f ms stage2 %.3f ms t=%ld.%03ld (kernels max %.3f ms) -> %d CORESETs:%s\n",
         (unsigned long long)pass,result.stage1_ms,result.stage2_ms,(long)pts.tv_sec,pts.tv_nsec/1000000,result.kernel_max_ms,result.count,records);
   continue;
@@ -270,10 +168,16 @@ failed:
  nr_gpu_budget_discovery_prefer(0);
  return NULL;
 }
-/* nr_pdcch_nid_gpu_start: starts the PDCCH NID GPU discovery: reads the ISAC_PDCCH_NID_GPU_* policy flags, loads the device module and starts the worker thread.
- *   How it works: Returns 0 when the feature is off. Reads DUTY, ACQUIRE_MS, MAINTAIN_MS, NODROP, RECHECK_MS, the ISAC_COREMAP_IDSWEEP_DUR duration (clamped 1..3), INCREMENTAL (default on), BATCH, EVERY and WINDOW. In no-drop mode it sets a monotonic condvar and resets the slot ticks. dlopen libpdcch_nid_gpu.so, check the ABI, create the device and set the worker to SCHED_OTHER with an explicit schedule.
- *   ISAC_* flags read: ISAC_COREMAP_IDSWEEP_DUR, ISAC_CSIRS_DISC, ISAC_PDCCH_NID_GPU_ACQUIRE_MS, ISAC_PDCCH_NID_GPU_BATCH, ISAC_PDCCH_NID_GPU_CORE, ISAC_PDCCH_NID_GPU_DUTY, ISAC_PDCCH_NID_GPU_EVERY, ISAC_PDCCH_NID_GPU_INCREMENTAL, ISAC_PDCCH_NID_GPU_MAINTAIN_MS, ISAC_PDCCH_NID_GPU_NODROP, ISAC_PDCCH_NID_GPU_RECHECK_MS, ISAC_PDCCH_NID_GPU_WINDOW.
- *   Callers: executables/nr-uesoftmodem.c:620, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.h:59, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:32, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:39.
+/* Policy of the sweep: 3-symbol evidence, 10-batch window of 64 snapshots, duty ACQUIRE 5 s / MAINTAIN 500 ms / recheck 250 ms. Only the unit test overrides it (before start()). */
+static struct {int dur,window,batch_size;bool duty;unsigned acquire_ms,maintain_ms,recheck_ms;} policy={3,10,64,true,5000,500,250};
+void nr_pdcch_nid_gpu_test_policy(int dur,int window,int batch_size,bool duty,unsigned acquire_ms,unsigned maintain_ms,unsigned recheck_ms)
+{
+ policy.dur=dur;policy.window=window;policy.batch_size=batch_size;policy.duty=duty;
+ policy.acquire_ms=acquire_ms;policy.maintain_ms=maintain_ms;policy.recheck_ms=recheck_ms;
+}
+/* nr_pdcch_nid_gpu_start: loads the device module and starts the worker thread, pinned to ISAC_PDCCH_NID_GPU_CORE (default 13).
+ *   How it works: dlopen libpdcch_nid_gpu.so, check the ABI, create the device and set the worker to SCHED_OTHER with an explicit schedule.
+ *   Callers: executables/nr-uesoftmodem.c, tests/nr_pdcch_nid_worker_test.cc.
  */
 int nr_pdcch_nid_gpu_start(int max_rb)
 {
@@ -281,48 +185,9 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  if(g.device)return nr_pdcch_nid_gpu_running()?0:-1;
  if(max_rb<6 || max_rb>275)return -1;
  g.rb=max_rb;
- const char *duty=(getenv("ISAC_PDCCH_NID_GPU_DUTY") ?: "1");
- g.duty_enabled=duty && !strcmp(duty,"1");
- /* DEFERRED/DO NOT USE: ISAC_DMRS_NID_SOLVE not in the frozen config t26zE (2026-10-18); slated for removal */
- {const char *sv=getenv("ISAC_DMRS_NID_SOLVE");g.primary=sv && !strcmp(sv,"3");}
- if(g.primary) {
-  g.duty_enabled=true; /* feedback and wake edges are needed */
-  /* DEFERRED/DO NOT USE: ISAC_DMRS_NID_SOLVE_GRACE_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  g.grace_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_GRACE_MS",4000,0,60000);
-  /* DEFERRED/DO NOT USE: ISAC_DMRS_NID_SOLVE_MAINTAIN_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  g.primary_maintain_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_MAINTAIN_MS",2000,1,600000);
-  /* DEFERRED/DO NOT USE: ISAC_DMRS_NID_SOLVE_RECHECK_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  g.reverify_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_RECHECK_MS",15000,1,600000);
- }
- /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_ACQUIRE_MS not in the frozen config t26zE (2026-10-18); slated for removal */
- g.acquire_ms=env_int("ISAC_PDCCH_NID_GPU_ACQUIRE_MS",5000,1,60000);
- /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_MAINTAIN_MS not in the frozen config t26zE (2026-10-18); slated for removal */
- g.maintain_ms=env_int("ISAC_PDCCH_NID_GPU_MAINTAIN_MS",500,1,60000);
- /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_NODROP not in the frozen config t26zE (2026-10-18); slated for removal */
- {const char *nd=getenv("ISAC_PDCCH_NID_GPU_NODROP");g.nodrop=nd && !strcmp(nd,"1");}
- g.recheck_ms=env_int("ISAC_PDCCH_NID_GPU_RECHECK_MS",250,1,600000);
- const char *duration=getenv("ISAC_COREMAP_IDSWEEP_DUR");
- g.dur=duration?atoi(duration):3;
- if(g.dur<1)g.dur=1;
- if(g.dur>3)g.dur=3;
- /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_INCREMENTAL not in the frozen config t26zE (2026-10-18); slated for removal */
- g.incremental=(getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL")==NULL || strcmp(getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL"),"0")); /* own flag, default on (was ISAC_CSIRS_DISC) */
- /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_BATCH not in the frozen config t26zE (2026-10-18); slated for removal */
- g.batch_size=g.incremental?env_int("ISAC_PDCCH_NID_GPU_BATCH",64,1,NR_PDCCH_NID_BATCH):NR_PDCCH_NID_BATCH;
- /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_EVERY not in the frozen config t26zE (2026-10-18); slated for removal */
- g.every=g.incremental?1:env_int("ISAC_PDCCH_NID_GPU_EVERY",2,1,1000);
- /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_WINDOW not in the frozen config t26zE (2026-10-18); slated for removal */
- g.window=env_int("ISAC_PDCCH_NID_GPU_WINDOW",10,1,NR_PDCCH_NID_MAX_WINDOW);
- if(g.nodrop) {
-  pthread_condattr_t ca;
-  pthread_condattr_init(&ca);
-  pthread_condattr_setclock(&ca,CLOCK_MONOTONIC);
-  pthread_cond_destroy(&g.cv_free);
-  pthread_cond_init(&g.cv_free,&ca);
-  pthread_condattr_destroy(&ca);
-  g.snap_started=g.snap_refused=false;
-  atomic_store_explicit(&g.slot_ticks,0,memory_order_relaxed);
- }
+ g.duty_enabled=policy.duty;
+ g.acquire_ms=policy.acquire_ms;g.maintain_ms=policy.maintain_ms;g.recheck_ms=policy.recheck_ms;
+ g.dur=policy.dur;g.batch_size=policy.batch_size;g.window=policy.window;
  g.module=dlopen("libpdcch_nid_gpu.so",RTLD_NOW|RTLD_LOCAL);
  if(!g.module)goto fail;
  const nr_pdcch_nid_ops_t *(*get_ops)(void)=dlsym(g.module,"nr_pdcch_nid_gpu_ops");
@@ -348,9 +213,9 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  pthread_attr_destroy(&attr);
  if(rc)goto fail;
  atomic_store_explicit(&g.running,true,memory_order_release);
- LOG_I(PHY,"SENSING: PDCCH_NID_GPU ready: core=%d SCHED_OTHER window=%d every=%d dur=%d batch=%d incremental=%d pinned staging=3 batches\n",
-       core,g.window,g.every,g.dur,g.batch_size,g.incremental);
- {struct timespec t0;clock_gettime(CLOCK_MONOTONIC,&t0);LOG_A(PHY,"SENSING: PDCCH_NID_GPU t0 t=%ld.%03ld primary=%d\n",(long)t0.tv_sec,t0.tv_nsec/1000000,g.primary);}
+ LOG_I(PHY,"SENSING: PDCCH_NID_GPU ready: core=%d SCHED_OTHER window=%d dur=%d batch=%d pinned staging=3 batches\n",
+       core,g.window,g.dur,g.batch_size);
+ {struct timespec t0;clock_gettime(CLOCK_MONOTONIC,&t0);LOG_A(PHY,"SENSING: PDCCH_NID_GPU t0 t=%ld.%03ld\n",(long)t0.tv_sec,t0.tv_nsec/1000000);}
  return 0;
 fail:
  if(g.device)g.ops->destroy(g.device);
@@ -368,10 +233,8 @@ void nr_pdcch_nid_gpu_stop(void)
 {
  if(!g.device)return;
  atomic_store_explicit(&g.running,false,memory_order_release);
- LOG_A(PHY,"SENSING: PDCCH_NID_GPU stop summary: sweep_runs=%llu kernel_ms=%.3f skipped_batches=%llu primary=%d\n",
-   (unsigned long long)g.runs,g.kernel_ms,(unsigned long long)g.skipped,g.primary);
- if(g.nodrop)LOG_A(PHY,"SENSING: PDCCH_NID_GPU stop: dropped_snapshots=%llu dropped_partial=%llu\n",
-   (unsigned long long)nr_pdcch_nid_gpu_dropped_snapshots(),(unsigned long long)atomic_load_explicit(&g.dropped_partial,memory_order_relaxed));
+ LOG_A(PHY,"SENSING: PDCCH_NID_GPU stop summary: sweep_runs=%llu kernel_ms=%.3f\n",
+   (unsigned long long)g.runs,g.kernel_ms);
  pthread_mutex_lock(&g.mu);g.stop=true;pthread_cond_signal(&g.cv);pthread_mutex_unlock(&g.mu);
  pthread_join(g.thread,NULL);
  g.ops->destroy(g.device);dlclose(g.module);g.device=g.module=NULL;g.ops=NULL;
@@ -380,17 +243,8 @@ void nr_pdcch_nid_gpu_stop(void)
  g.result.count=0;g.generation++;
  pthread_mutex_unlock(&g.mu);
 }
-/* nr_pdcch_nid_gpu_dropped_snapshots: returns the number of no-drop snapshots refused so far.
- *   How it works: Relaxed atomic load of dropped_snapshots.
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:274, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.h:62, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:65, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:71 (+3 more).
- */
-uint64_t nr_pdcch_nid_gpu_dropped_snapshots(void)
-{
- return atomic_load_explicit(&g.dropped_snapshots,memory_order_relaxed);
-}
 /* nr_pdcch_nid_gpu_push: producer entry, called per RX symbol: validates the geometry and copies the symbol IQ into the current batch.
- *   How it works: Rejects bad geometry (nsc, sps, slot, FFT offset, RB count). No-drop mode accepts a slot atomically: the first symbol decides, and later symbols of a refused slot are counted as partial drops. Otherwise it takes the mutex and a free batch. Copies dur symbols per candidate with the cyclic FFT offset, zero-fills past sps, and marks the batch ready (state 2) at batch_size.
+ *   How it works: Rejects bad geometry (nsc, sps, slot, FFT offset, RB count). Takes the mutex (trylock) and a free batch. Copies dur symbols per candidate with the cyclic FFT offset, zero-fills past sps, and marks the batch ready (state 2) at batch_size.
  *   ISAC_* flags read: none.
  *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:526, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:77, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.h:65, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:52 (+1 more).
  */
@@ -398,28 +252,14 @@ int nr_pdcch_nid_gpu_push(const void *rx,int fft,int fco,int slot,int sym,const 
 {
  if(!nr_pdcch_nid_gpu_running() || !rx || !cfg || cfg->dur!=g.dur || cfg->nsc<72
     || cfg->nsc>12*g.rb || cfg->nsc>fft || fco<0 || fco>=fft || cfg->sps<1 || cfg->sps>14
-    || sym<0 || (g.incremental?sym>=cfg->sps:sym+cfg->dur>cfg->sps) || slot<0 || slot>=160
+    || sym<0 || sym>=cfg->sps || slot<0 || slot>=160
     || (cfg->nsc-cfg->point_a_sc)/12>275
     || (cfg->nsc-cfg->point_a_sc)/12-(cfg->point_a_sc<0?(-cfg->point_a_sc+11)/12:0)<6)return -1;
- if(g.nodrop) {
-  /* A snapshot is one slot's push sequence. Its first symbol decides: if that cannot be accepted the rest is refused, so the GPU never sees a partial snapshot. */
-  const bool first=!g.snap_started || slot!=g.snap_slot;
-  if(first) {
-   if(g.snap_started)atomic_fetch_add_explicit(&g.slot_ticks,(uint64_t)((slot-g.snap_slot+160)%160),memory_order_relaxed);
-   g.snap_started=true;g.snap_slot=slot;g.snap_refused=false;
-  } else if(g.snap_refused)return -1;
-  if(!nodrop_acquire()) {
-   if(first) {g.snap_refused=true;atomic_fetch_add_explicit(&g.dropped_snapshots,1,memory_order_relaxed);}
-   else atomic_fetch_add_explicit(&g.dropped_partial,1,memory_order_relaxed);
-   return -1;
-  }
- } else {
  if(pthread_mutex_trylock(&g.mu))return -1;
  if(g.producer<0) {
   for(int j=0;j<3;j++)if(g.state[j]==0){g.producer=j;g.state[j]=1;g.n=0;break;}
  }
  if(g.producer<0) {g.dropped++;pthread_mutex_unlock(&g.mu);return -1;}
- }
  nr_pdcch_nid_batch_t *b=&g.batch[g.producer];
  nr_pdcch_nid_config_t current=*cfg;current.epoch=g.epoch+(g.rearm<<24);
  if(g.n && memcmp(&b->cfg,&current,sizeof(current)))g.n=0;
@@ -432,13 +272,13 @@ int nr_pdcch_nid_gpu_push(const void *rx,int fft,int fco,int slot,int sym,const 
  }
  b->slot[g.n]=slot;b->sym[g.n]=sym;
  if(++g.n==g.batch_size) {
-  b->count=g.incremental?g.batch_size:0;
-  g.state[g.producer]=2;g.sequence[g.producer]=++g.produced;g.clock_us[g.producer]=slot_clock_us();g.producer=-1;g.n=0;
+  b->count=g.batch_size;
+  g.state[g.producer]=2;g.sequence[g.producer]=++g.produced;g.producer=-1;g.n=0;
   pthread_cond_signal(&g.cv);
  }
  pthread_mutex_unlock(&g.mu);return 0;
 }
-/* nr_pdcch_nid_gpu_rearm: ACQMISS recovery. Forgets the published records and the incremental window and restarts the ACQUIRE duty (GPU priority over CSI-RS discovery) by changing the batch cfg epoch. No-op when the sweep is not running. Caller: nr_dl_traffic_probe_rt.c (ISAC_CORESET_DISC_WATCH). */
+/* nr_pdcch_nid_gpu_rearm: ACQMISS recovery. Forgets the published records and the incremental window and restarts the ACQUIRE duty (GPU priority over CSI-RS discovery) by changing the batch cfg epoch. No-op when the sweep is not running. Caller: nr_dl_traffic_probe_rt.c . */
 void nr_pdcch_nid_gpu_rearm(void)
 {
  if(!nr_pdcch_nid_gpu_running())return;
@@ -447,52 +287,15 @@ void nr_pdcch_nid_gpu_rearm(void)
  pthread_mutex_unlock(&g.mu);
 }
 /* nr_pdcch_nid_gpu_passes: completed sweep passes (0 when the lock is contended). Caller: ACQMISS state line. */
-bool nr_pdcch_nid_gpu_primary(void) {return g.primary;}
 uint64_t nr_pdcch_nid_gpu_passes(void)
 {
  if(pthread_mutex_trylock(&g.mu))return 0;
  uint64_t n=g.passes;pthread_mutex_unlock(&g.mu);return n;
 }
-/* ISAC_DMRS_NID_SOLVE=3: the solver's top-2 ids first (unless the sweep already has a record for that id), then the sweep's records. *gen carries bit 63
- * whenever a hint takes part (feedback uses it) and changes with the hint set and with the sweep generation. Caller holds g.mu. */
-static int merged(nr_pdcch_nid_record_t *out,int cap,uint64_t *gen,uint64_t *sig)
-{
- nr_pdcch_nid_record_t h[2];
- const int hn=nr_dmrs_nid_live_hints(h,2,sig);
- int n=0;
- for(int i=0;i<hn && n<cap;i++) {
-  bool dup=false;
-  for(int j=0;j<g.result.count;j++) { /* the sweep record replaces the hint only when it covers the hint's footprint */
-   const nr_pdcch_nid_record_t *q=g.result.records+j;
-   dup|=q->nid==h[i].nid && q->sym==h[i].sym && q->dur==h[i].dur && q->grid_rb<=h[i].grid_rb && q->grid_rb+6*q->groups>=h[i].grid_rb+6*h[i].groups;
-  }
-  if(!dup)out[n++]=h[i];
- }
- for(int j=0;j<g.result.count && n<cap;j++)out[n++]=g.result.records[j];
- *gen=hn>0?NR_PDCCH_NID_HINT_GEN((*sig)*1000003u+g.generation):g.generation;
- if(hn==0)*sig=0;
- return n;
-}
 int nr_pdcch_nid_gpu_records(nr_pdcch_nid_record_t *out,int capacity,uint64_t *generation)
 {
  if(!nr_pdcch_nid_gpu_enabled() || !out || capacity<1 || !generation || pthread_mutex_trylock(&g.mu))return -1;
  int n=-1;
- /* ISAC_DMRS_NID_SOLVE=2: until the sweep has published anything, offer the solver's leader once as a hint (own generation value). */
- if(g.generation==0 && g.result.count==0 && *generation!=UINT64_MAX-1 && nr_dmrs_nid_live_hint(out)) {
-  *generation=UINT64_MAX-1;pthread_mutex_unlock(&g.mu);return 1;
- }
- if(g.primary) {
-  uint64_t gen,sig;const int m=merged(out,capacity,&gen,&sig);
-  if(*generation==gen) {pthread_mutex_unlock(&g.mu);return -1;}
-  *generation=gen;
-  if(sig!=g.hint_sig) {
-   g.hint_sig=sig;
-   struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);
-   LOG_A(PHY,"SENSING: DMRS_NID_SOLVE hint served n=%d nid0=%d nid1=%d t=%ld.%03ld\n",m,m>0?out[0].nid:-1,m>1?out[1].nid:-1,(long)t.tv_sec,t.tv_nsec/1000000);
-  }
-  g.ps.verified=false;
-  pthread_mutex_unlock(&g.mu);return m;
- }
  if(*generation!=g.generation) {
   n=g.result.count<capacity?g.result.count:capacity;
   memcpy(out,g.result.records,n*sizeof(*out));*generation=g.generation;
@@ -503,10 +306,6 @@ int nr_pdcch_nid_gpu_records(nr_pdcch_nid_record_t *out,int capacity,uint64_t *g
 int nr_pdcch_nid_gpu_snapshot(nr_pdcch_nid_record_t *out,int cap,uint64_t *generation)
 {
  if(!out || cap<1 || !generation || pthread_mutex_trylock(&g.mu))return -1;
- if(g.primary) {
-  uint64_t sig;const int m=merged(out,cap,generation,&sig);
-  pthread_mutex_unlock(&g.mu);return m;
- }
  int n=g.result.count<cap?g.result.count:cap;
  memcpy(out,g.result.records,n*sizeof(*out));*generation=g.generation;
  pthread_mutex_unlock(&g.mu);return n;
@@ -521,20 +320,14 @@ void nr_pdcch_nid_gpu_feedback(uint32_t epoch,uint64_t generation,bool verified,
  if(!g.duty_enabled)return;
  if(pthread_mutex_trylock(&g.mu))return;
  if(g.epoch!=epoch) {
-  g.epoch=epoch;g.result.count=0;g.generation++;g.all_verified=false;g.last_outside_us=0;g.ps.verified=false;
+  g.epoch=epoch;g.result.count=0;g.generation++;g.all_verified=false;g.last_outside_us=0;
   /* Drop queued old-epoch snapshots, but never reclaim the worker's buffer. */
   for(int i=0;i<3;++i)if(g.state[i]==2)g.state[i]=0;
-  batch_freed();
   if(g.producer>=0)g.n=0;
  }
  if(generation==g.generation)g.all_verified=verified;
- if(g.primary) { /* a listed id confirmed by >= 2 CRC-valid DCIs; the generation must be the one currently served */
-  nr_pdcch_nid_record_t tmp[NR_PDCCH_NID_MAX_RECORDS];uint64_t gen,sig;
-  merged(tmp,NR_PDCCH_NID_MAX_RECORDS,&gen,&sig);
-  if(generation==gen)g.ps.verified=verified;
- }
  if(unexplained) {
-  uint64_t now=g.nodrop?slot_clock_us():nr_gpu_budget_now_us();
+  uint64_t now=nr_gpu_budget_now_us();
   // The monitor reports a level on each occupied occasion. Reopen once per
   // episode, then permit bank acknowledgement to pause again. A quiet
   // MAINTAIN interval rearms the edge; a changed epoch always rearms it.

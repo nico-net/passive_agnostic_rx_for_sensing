@@ -28,12 +28,7 @@ static _Atomic unsigned long long s_attempts, s_screen_pass, s_accepted;
 
 bool nr_pdcch_joint_live_enabled(void)
 {
-  static int en = -1;
-  if (en < 0) {
-    const char *e = (getenv("ISAC_PDCCH_JOINT") ?: "1");
-    en = (e != NULL && atoi(e) != 0) ? 1 : 0;
-  }
-  return en == 1;
+  return true;
 }
 
 void nr_pdcch_joint_live_counts(unsigned long long *a, unsigned long long *p, unsigned long long *k)

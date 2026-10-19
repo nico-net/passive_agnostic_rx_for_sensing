@@ -19,8 +19,7 @@
 #include <math.h>    // sqrt, for the Wilson interval
 #include <stddef.h>  // NULL
 #include <stdio.h>   // fprintf (hard-refutation arming note)
-#include <stdlib.h>  // getenv/atoi (ISAC_DCI11_S1_OFF)
-#include "nr_scancost.h"
+#include <stdlib.h>
 
 /* TS 38.212 7.3.1.2.2, fields at fixed width regardless of any RRC switch:
  *   format identifier 1 | MCS 5 | NDI 1 | RV 2 | TPC for PUCCH 2 | PUCCH resource indicator 3
@@ -309,13 +308,6 @@ static void layout_eval(const nr_dci11_offsets_t *off, nr_dci_bits_t payload, ui
     bad = true;
   *impossible = bad;
   *plausible = !bad && mcs <= 27;
-}
-
-/* hard_refute_enabled: returns ISAC_DCI11_HARD_REFUTE != 0, read at each call (one getenv per accepted DCI). Caller: nr_dci11_resolver_observe(). */
-static bool hard_refute_enabled(void) /* read per observe(): one getenv per accepted DCI, and tests can toggle it */
-{
-  const char *e = (getenv("ISAC_DCI11_HARD_REFUTE") ?: "1");
-  return e != NULL && atoi(e) != 0;
 }
 
 /* ---- STATEFUL RESOLVER ------------------------------------------------------------------------ */
@@ -735,8 +727,8 @@ int nr_dci11_thompson_pick(const uint32_t *ok, const uint32_t *trials, const dou
   return arg;
 }
 
-/* nr_dci11_resolver_observe: observes one accepted DCI 1_1 payload: updates the pass and impossible counters of every live layout, optionally hard-refutes layouts that are impossible for enough payloads (ISAC_DCI11_HARD_REFUTE), and drops layouts whose optimistic pass rate is below the bar.
- *   Drops are applied in a second pass and never remove the last live layout. ISAC_DCI11_S1_OFF=1 keeps every layout alive (A/B control). Returns the number of live layouts. Callers: nr_dci11_resolver_observe_rnti() and nr_pdcch_blind_monitor_rt.c (via nr_pdcch_dci11_layout_observe()).
+/* nr_dci11_resolver_observe: observes one accepted DCI 1_1 payload: updates the pass and impossible counters of every live layout, hard-refutes layouts that are impossible for enough payloads, and drops layouts whose optimistic pass rate is below the bar.
+ *   Drops are applied in a second pass and never remove the last live layout.. Returns the number of live layouts. Callers: nr_dci11_resolver_observe_rnti() and nr_pdcch_blind_monitor_rt.c (via nr_pdcch_dci11_layout_observe()).
  */
 int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
 {
@@ -758,14 +750,14 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
       r->impossible[i]++;
   }
   r->n_obs++;
-  /* HARD REFUTATION (ISAC_DCI11_HARD_REFUTE, T26). The soft rate rule below keeps a layout whose impossible reads
+  /* HARD REFUTATION (T26). The soft rate rule below keeps a layout whose impossible reads
    * are rare: OTA PCI 415 (replay raw_pci415_12s_20261008) sends a full-band type-0 bitmap in 13 % of its DCIs,
    * which every type-1 layout reads as RIV = 0x7fff > N(N+1)/2 -- impossible, yet 87 % plausible, so type 1 was
    * never refuted and RA type 0 waited for a TB-CRC refutation that 12 s of traffic cannot supply. A CRC-verified
    * C-RNTI DCI that no correct layout can produce refutes the layout outright; NR_DCI11_HARD_REFUTE_N of them
    * (guarding against a rare false DCI) remove it, and a stage whose every live layout is hard-refuted arms the
    * next FDRA mode at once (nr_dci11_resolver_arm_next_mode retires the refuted stage, reversibly). */
-  if (hard_refute_enabled() && r->winner < 0) {
+  if (r->winner < 0) {
     bool all_refuted = r->n_alive > 0;
     for (int i = nr_alive_next(r->alive, 0, r->n_hyp); i < r->n_hyp; i = nr_alive_next(r->alive, i + 1, r->n_hyp)) {
       if (layout_has_pass(r, i))
@@ -790,14 +782,6 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
               NR_DCI11_HARD_REFUTE_N, m, added, r->n_alive, r->n_hyp);
     }
   }
-  /* ISAC_DCI11_S1_OFF=1: keep every layout alive (probes rotate over the whole set). A/B knob for
-   * "did stage 1 delete the true layout" -- the one question a 0 % run cannot answer otherwise. */
-  static int s_s1_off = -1;
-  if (s_s1_off < 0)
-    /* DEFERRED/DO NOT USE: ISAC_DCI11_S1_OFF not in the frozen config t26zE (2026-10-18); slated for removal */
-    s_s1_off = (getenv("ISAC_DCI11_S1_OFF") != NULL && atoi(getenv("ISAC_DCI11_S1_OFF")) != 0) ? 1 : 0;
-  if (s_s1_off)
-    return r->n_alive;
   /* Drop in a second pass, and never drop the last one. Dropping inside the loop above would make
    * the outcome depend on candidate order; and an empty set can never converge, so a run of
    * unlucky payloads must not be able to erase the answer. */
@@ -823,13 +807,6 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
   return r->n_alive;
 }
 
-/* harq_seq_enabled: returns ISAC_DCI11_HARQ_SEQ != 0 (read per call: a unit test toggles it): enables the HARQ-sequence pruning of layouts in nr_dci11_resolver_observe_rnti(). */
-static bool harq_seq_enabled(void)
-{
-  const char *e = (getenv("ISAC_DCI11_HARQ_SEQ") ?: "1");
-  return e != NULL && atoi(e) != 0;
-}
-
 /* One window: does the 4-bit field at `at` read exactly one above its previous value (mod 16)? */
 static int harq_step(nr_dci_bits_t prev, nr_dci_bits_t cur, uint16_t total, int at)
 {
@@ -843,7 +820,7 @@ static int harq_step(nr_dci_bits_t prev, nr_dci_bits_t cur, uint16_t total, int 
  */
 int nr_dci11_resolver_observe_rnti(nr_dci11_resolver_t *r, nr_dci_bits_t payload, uint16_t rnti)
 {
-  if (r == NULL || r->n_hyp <= 0 || rnti == 0 || !harq_seq_enabled() || r->winner >= 0)
+  if (r == NULL || r->n_hyp <= 0 || rnti == 0 || r->winner >= 0)
     return nr_dci11_resolver_observe(r, payload);
   int slot = -1, empty = -1;
   for (int k = 0; k < NR_DCI11_HARQ_RNTIS; k++) {
@@ -997,11 +974,7 @@ bool nr_dci11_layout_to_field_bits(const nr_dci11_layout_t *l, nr_dci11_field_bi
   /* HARQPID: the blob (tb2 + harq 4 + dai + pdsch_to_harq) used to be read as ONE tb2 field, so every grant got harq_pid 0
    * (HARQ soft buffers of all processes aliased, DCIRV scorer read the right bits but the decode path did not). Read the pid
    * 4 bits behind the RV (as solver_hq_of does, tb2 assumed absent) and park the rest in dai; the total is unchanged. */
-  /* ISAC_SCANCOST: the flag is read once (a getenv per call was ~12 % of the scan CPU: the solver parses every layout key) */
-  static int s_harqpid = -1;
-  const bool harqpid = nr_scancost_on() ? (s_harqpid < 0 ? (s_harqpid = true) : s_harqpid)
-                                        : true; /* ISAC_DCI11_HARQPID: presence-only flag, baked on (t26yE) */
-  if (harqpid && pre_ant_variable >= 4) {
+  if (pre_ant_variable >= 4) {
     out->tb2_bits      = 0;
     out->harq_pid_bits = 4;
     out->dai_bits      = pre_ant_variable - 4;

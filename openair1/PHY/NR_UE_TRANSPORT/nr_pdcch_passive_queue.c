@@ -110,20 +110,11 @@ int nr_passive_lag_bin(long lag)
     b++;
   return b;
 }
-/* ISAC_SCANQ_FRESH=N (P99, default 0 = off = FIFO unchanged): when >= 2 occasions wait and the oldest is already
+/* Fresh-first (N = 6): when >= 2 occasions wait and the oldest is already
  * N or more slots old, serve the NEWEST first. Under a scan backlog FIFO makes every occasion late, so the PDSCH jobs it
  * creates arrive with little of their 18-slot sample lifetime left (born stale); newest-first keeps most of them fresh
  * and lets the oldest ones age out (still counted as scanq drop_stale). */
-static int scanq_fresh(void)
-{
-  static int v = -1;
-  if (v < 0) {
-    const char *e = (getenv("ISAC_SCANQ_FRESH") ?: "6");
-    v = e ? atoi(e) : 0;
-    if (v < 0) v = 0;
-  }
-  return v;
-}
+static int scanq_fresh(void) { return 6; }
 
 /* Timer-then-spin hand-off RX -> scan consumer (nr_spin_handoff.h): the work of this queue is one occasion per slot, ~0 after the slot arrival. */
 static nr_spin_pred_t g_spin_pred;

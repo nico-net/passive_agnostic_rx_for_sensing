@@ -174,9 +174,7 @@ static inline bool nr_ul_layout_is_trial(const nr_pdcch_blind_ul_result_t *g)
  * start, neighbours) hypothesis at the fit, demoted by a run of CRC-EXPECTED failures, confirmed by a CRC pass or by DM-RS votes.
  * prior_note: verdict of a grant read with the locked layout + decoder SNR and TB bits per coded RE. */
 bool nr_ul_layout_prior_enabled(void);
-bool nr_ul_layout_prior_expected(float snr_db, float se); /* pure: snr_db >= Shannon(se) + 2 dB */
 /* returns true while the adoption is provisional */
-bool nr_ul_layout_prior_state(uint16_t *start, uint16_t *size, uint32_t *crc_expected_n, uint32_t *crc_ok, uint32_t *demotions);
 void nr_ul_layout_prior_note(const nr_pdcch_blind_ul_result_t *g, bool ok, uint32_t tbs_bits, int nseg, int seg_ok, long slot,
                              float snr_db, float se);
 /* One fit pass over every length's bank: the eval thread runs it every 100 ms; unit tests call it directly. */

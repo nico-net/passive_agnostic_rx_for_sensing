@@ -64,13 +64,8 @@ std::vector<int16_t> Rx(uint64_t payload, uint16_t rnti, uint16_t nid, int A, in
 uint64_t DlPayload(std::mt19937& rng, int A) { return (((uint64_t)rng() << 32 | rng()) & ((1ULL << A) - 1)) | (1ULL << (A - 1)); }
 }  // namespace
 
-// enabled for this executable before main(); the default-off contract is checked below by reading the env var
-// the way the module does, not by re-testing getenv
-static const int kEnable = setenv("ISAC_PDCCH_JOINT", "1", 1);
-
 TEST(JointLive, RecoversAnUnknownRntiFromLlrsTheWorkerDescrambledWithRntiZero)
 {
-  ASSERT_EQ(kEnable, 0);
   ASSERT_TRUE(nr_pdcch_joint_live_enabled());
   std::mt19937 rng(41);
   int ok = 0, n = 0;

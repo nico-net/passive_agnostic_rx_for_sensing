@@ -88,38 +88,16 @@ int nr_pdcch_dci_length_bank_peer_hint(const nr_pdcch_dci_length_bank_t *bank,
 // observation window runs (unlike the fixed floor it replaces -- see this file's header).
 #define Z_SIGMA 6.0
 
-static pthread_once_t length_env_once = PTHREAD_ONCE_INIT;
-static bool seen_order_enabled;
-static int explicit_max;
-static unsigned wide_probe_every = 1;
 static _Atomic uint64_t wide_probes;
 static _Atomic uint64_t learn_restricted, learn_full;
 uint64_t nr_pdcch_dci_length_learn_rounds(bool restricted)
 {
   return atomic_load_explicit(restricted ? &learn_restricted : &learn_full, memory_order_relaxed);
 }
-static void length_env_init(void)
-{
-  const char *e = getenv("ISAC_RECONF");
-  seen_order_enabled = e && atoi(e) == 1;
-  /* DEFERRED/DO NOT USE: ISAC_DCI_LEN_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
-  e = getenv("ISAC_DCI_LEN_MAX");
-  char *end = NULL;
-  const long n = e ? strtol(e, &end, 10) : 0;
-  explicit_max = e && end != e && !*end && n >= 1 && n <= NR_DCI_MAX_PAYLOAD ? (int)n : 0;
-  /* DEFERRED/DO NOT USE: ISAC_DCI_WIDE_PROBE_EVERY not in the frozen config t26zE (2026-10-18); slated for removal */
-  e = getenv("ISAC_DCI_WIDE_PROBE_EVERY");
-  const long period = e ? strtol(e, &end, 10) : 0;
-  /* The configured cadence is a lower bound; wide_probe_length also accounts
-   * for rotation/preferred-only work to cap extra scorer calls at 5%. */
-  if (e && end != e && !*end && period > 0 && period <= INT_MAX)
-    wide_probe_every = (unsigned)period;
-}
 
 bool nr_pdcch_reconf_enabled(void)
 {
-  pthread_once(&length_env_once, length_env_init);
-  return seen_order_enabled;
+  return true;
 }
 
 static _Atomic bool cell_seen[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
@@ -137,12 +115,10 @@ void nr_pdcch_dci_length_note_seen(int len)
 int nr_pdcch_dci_length_active_max(const nr_pdcch_dci_length_sweep_state_t *state,
                                    int min_len, int max_len)
 {
-  pthread_once(&length_env_once, length_env_init);
   /* Finish the active round before accepting new hints. */
   if (state->round_max && (state->resume_len || state->rot_phase))
     return state->round_max < max_len ? state->round_max : max_len;
-  if (max_len <= 63 || min_len > 63 || explicit_max >= min_len
-      || state->relock_old_len)
+  if (max_len <= 63 || min_len > 63 || state->relock_old_len)
     return max_len;
   for (int len = 64; len <= NR_DCI_MAX_PAYLOAD; ++len)
     if (atomic_load_explicit(&cell_seen[len], memory_order_relaxed)) return max_len;
@@ -164,7 +140,7 @@ static int wide_probe_length(const nr_pdcch_dci_length_sweep_state_t *state,
   if (state->preferred_len || state->secondary_excluded_len || state->tertiary_excluded_len)
     narrow = 1;
   const unsigned minimum = (20 + narrow - 1) / narrow;
-  const unsigned every = wide_probe_every > minimum ? wide_probe_every : minimum;
+  const unsigned every = minimum; /* one 64..140 probe per exhausted sweep at most; bounds the extra scorer calls to 5 % */
   if (((uint64_t)state->feed_serial + 1) % every != 0)
     return 0;
   return 64 + state->wide_probe_cursor % (max_len - 63);
@@ -191,11 +167,6 @@ uint64_t nr_pdcch_dci_length_wide_probes(void)
 int nr_pdcch_dci_length_order(int min_len, int max_len, int *out)
 {
   if (!out || min_len < 1 || max_len > NR_DCI_MAX_PAYLOAD || min_len > max_len) return 0;
-  pthread_once(&length_env_once, length_env_init);
-  if (!seen_order_enabled) {
-    for (int len = min_len; len <= max_len; ++len) out[len - min_len] = len;
-    return max_len - min_len + 1;
-  }
   int distance[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
   for (int len = min_len; len <= max_len; ++len) distance[len] = NR_DCI_MAX_PAYLOAD;
   for (int seen = 1; seen <= NR_DCI_MAX_PAYLOAD; ++seen) {
@@ -242,12 +213,7 @@ int nr_pdcch_dci_length_context_relock_order(const nr_pdcch_dci_length_context_t
 
 uint32_t nr_pdcch_dci_length_n_suspect_from_env(void)
 {
-  /* DEFERRED/DO NOT USE: ISAC_RECONF_N_SUSPECT not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *e = getenv("ISAC_RECONF_N_SUSPECT");
-  if (!e || !*e || *e == '-') return 200;
-  char *end = NULL;
-  const unsigned long n = strtoul(e, &end, 10);
-  return end != e && *end == '\0' && n > 0 && n <= UINT32_MAX ? (uint32_t)n : 200;
+  return 200; /* active-elsewhere misses before a LOCKED per-RNTI DCI length turns SUSPECT */
 }
 
 void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c,
@@ -663,33 +629,6 @@ score_evidence:;
     }
   }
 
-  /* DIAGNOSTIC (2026-09-06, env-gated): the accumulate-across-occasions rewrite still never
-   * converges even with confirmed real DL traffic present -- need to see whether length 47 (this
-   * deployment's known-correct value) is accumulating ANY real passes at all, or whether the
-   * candidates reaching this function never include it (a wiring/indexing issue upstream) vs.
-   * genuinely never passing decode+plausibility at 47 specifically (a DSP/parameter issue). */
-  /* DEFERRED/DO NOT USE: ISAC_DISCOVER_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (getenv("ISAC_DISCOVER_DIAG") != NULL) {
-    static int s_feed_calls = 0;
-    s_feed_calls++;
-    if ((s_feed_calls % 50) == 1 || best_len > 0) {
-      int max_len_seen = -1, max_passes = -1, max_trials = 0;
-      for (int len = min_len; len <= max_len && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN; len++) {
-        if (state->passes[len] > max_passes) {
-          max_passes = state->passes[len];
-          max_len_seen = len;
-          max_trials = state->trials[len];
-        }
-      }
-      const int len47 = (47 >= min_len && 47 <= max_len && 47 < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN) ? 47 : -1;
-      printf("SWEEPDIAG feed=%d occ=%d best_len=%d max_len=%d max_passes=%d/%d len47_trials=%d "
-            "len47_passes=%d len47_distinct=%d len47_bshits=%d\n",
-            s_feed_calls, state->occasions_fed, best_len, max_len_seen, max_passes, max_trials,
-            len47 > 0 ? state->trials[47] : -1, len47 > 0 ? state->passes[47] : -1,
-            len47 > 0 ? state->n_distinct[47] : -1, len47 > 0 ? state->bootstrap_hits[47] : -1);
-      fflush(stdout);
-    }
-  }
   if (full_round_completed && best_len < 0 && min_len <= 63) {
     bool stage_one_exhausted = true;
     for (int len = min_len; len <= 63 && len <= max_len; ++len)

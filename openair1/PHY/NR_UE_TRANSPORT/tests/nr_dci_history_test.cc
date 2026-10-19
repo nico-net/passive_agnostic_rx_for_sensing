@@ -289,13 +289,11 @@ struct DciBc9d : testing::Test {
   {
     nr_pdsch_config_sweep_reset_all();
     nr_pdsch_config_sweep_prior_reset();
-    nr_pdsch_config_sweep_k0_legacy_set(0);
     nr_dci_hist_enabled_set(1);
     g_bc9d_calls = 0;
   }
   void TearDown() override
   {
-    nr_pdsch_config_sweep_k0_legacy_set(-1);
     nr_dci_hist_enabled_set(-1);
   }
 };
@@ -473,13 +471,8 @@ TEST_F(DciBc9d, KillSwitchStillDisablesAll)
   EXPECT_EQ(bc9d_count_k0(0, 1), k1);
   ASSERT_EQ(nr_dci_hist_at(h.get(), 0x1234, 7, out, 2), 1);
   EXPECT_FALSE(out[0].confirmed); /* no confirmation either */
-  /* the environment switch, as the receiver reads it */
-  setenv("ISAC_TD_DCI_ADJ", "0", 1);
   nr_dci_hist_enabled_set(-1);
-  EXPECT_FALSE(nr_dci_hist_enabled());
-  unsetenv("ISAC_TD_DCI_ADJ");
-  nr_dci_hist_enabled_set(-1);
-  EXPECT_TRUE(nr_dci_hist_enabled());
+  EXPECT_TRUE(nr_dci_hist_enabled()); /* -1 restores the default (on) */
 }
 
 TEST(DciHistory, CertConfirmedOptionCountsOnlyConfirmedOccupants)

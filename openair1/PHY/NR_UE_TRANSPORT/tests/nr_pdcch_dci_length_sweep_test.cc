@@ -313,7 +313,6 @@ TEST(DciLengthBank, InterleavedUesKeepDifferentLengthsAndBudgets) {
 }
 
 TEST(DciLengthBank, LockedToSuspectAfterNMisses) {
-  unsetenv("ISAC_RECONF_N_SUSPECT");
   EXPECT_EQ(nr_pdcch_dci_length_n_suspect_from_env(),200u);
   nr_pdcch_dci_length_context_t c{};
   c.rnti=0x1234;
@@ -326,9 +325,6 @@ TEST(DciLengthBank, LockedToSuspectAfterNMisses) {
   EXPECT_EQ(c.len_state,NR_LEN_SUSPECT);
   EXPECT_EQ(c.found[0],47);
   EXPECT_EQ(c.state.preferred_len,47);
-  setenv("ISAC_RECONF_N_SUSPECT","3",1);
-  EXPECT_EQ(nr_pdcch_dci_length_n_suspect_from_env(),3u);
-  unsetenv("ISAC_RECONF_N_SUSPECT");
 }
 
 TEST(DciLengthBank, InactiveRntiNeverSuspect) {
@@ -750,7 +746,6 @@ TEST(DciLengthSweep, LocksLength100) {
 TEST(DciLengthSweep, SeenLengthFirstOutwardOrder) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
   EXPECT_EXIT(([]{
-  setenv("ISAC_RECONF", "1", 1);
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_note_seen(47);
   int order[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
@@ -772,7 +767,6 @@ TEST(DciLengthSweep, SeenLengthFirstOutwardOrder) {
 TEST(DciLengthSweep, SeenOrderSurvivesBudgetResumeAndNewHints) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
   EXPECT_EXIT(([]{
-  setenv("ISAC_RECONF", "1", 1);
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_note_seen(47);
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -809,18 +803,6 @@ TEST(DciLengthSweep, SeenOrderSurvivesBudgetResumeAndNewHints) {
   EXPECT_EQ(visits.lengths[3], 48);
   nr_pdcch_dci_length_seen_reset();
   _exit(::testing::Test::HasFailure() ? 1 : 0);
-  }()), ::testing::ExitedWithCode(0), "");
-}
-
-TEST(DciLengthSweep, DefaultOrderIsAscending) {
-  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
-  EXPECT_EXIT(([]{
-    setenv("ISAC_RECONF", "0", 1);
-    nr_pdcch_dci_length_note_seen(47);
-    int order[141];
-    EXPECT_EQ(nr_pdcch_dci_length_order(30, 140, order), 111);
-    for (int i = 0; i < 111; ++i) EXPECT_EQ(order[i], 30 + i);
-    _exit(::testing::Test::HasFailure() ? 1 : 0);
   }()), ::testing::ExitedWithCode(0), "");
 }
 
@@ -933,29 +915,6 @@ TEST(DciLengthSweep, LanesNeverBatchFullWideRangeWithoutEvidence) {
   nr_pdcch_dci_length_seen_reset();
 }
 
-TEST(DciLengthSweep, WideProbeCadenceFromEnv) {
-  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
-  EXPECT_EXIT(([]{
-    setenv("ISAC_DCI_WIDE_PROBE_EVERY", "32", 1);
-    unsetenv("ISAC_DCI_LEN_MAX");
-    nr_pdcch_dci_length_seen_reset();
-    nr_pdcch_dci_length_sweep_state_t state{};
-    state.stage_one_exhausted = true;
-    auto scorer = [](int, int, uint16_t *, uint32_t *, void *) -> bool { return false; };
-    const auto before = nr_pdcch_dci_length_wide_probes();
-    for (int i = 0; i < 64; ++i) {
-      int lengths[141];
-      EXPECT_EQ(nr_pdcch_dci_length_batch_lengths(&state, 30, 140, lengths),
-                (i + 1) % 32 == 0 ? 35 : 34);
-      nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0);
-    }
-    EXPECT_EQ(state.trials[64], 1);
-    EXPECT_EQ(state.trials[65], 1);
-    EXPECT_EQ(nr_pdcch_dci_length_wide_probes() - before, 2u);
-    _exit(::testing::Test::HasFailure() ? 1 : 0);
-  }()), ::testing::ExitedWithCode(0), "");
-}
-
 TEST(DciLengthSweep, WideProbesRespectBudgetAndNarrowResume) {
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -982,19 +941,6 @@ TEST(DciLengthSweep, SeenWideLengthWidensImmediately) {
   nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0);
   EXPECT_EQ(state.trials[100], 1);
   nr_pdcch_dci_length_seen_reset();
-}
-
-TEST(DciLengthSweep, ExplicitMaximumEnablesColdWideRound) {
-  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
-  EXPECT_EXIT(([]{
-    setenv("ISAC_DCI_LEN_MAX", "100", 1);
-    nr_pdcch_dci_length_seen_reset();
-    nr_pdcch_dci_length_sweep_state_t state{};
-    auto scorer = [](int, int, uint16_t *, uint32_t *, void *) -> bool { return false; };
-    nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 100, 0);
-    EXPECT_EQ(state.trials[100], 1);
-    _exit(::testing::Test::HasFailure() ? 1 : 0);
-  }()), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(DciLengthBank, IdleThenUlResumeStaysLocked) {

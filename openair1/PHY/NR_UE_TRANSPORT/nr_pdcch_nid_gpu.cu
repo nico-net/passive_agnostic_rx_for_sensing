@@ -26,7 +26,6 @@ struct Device {
  NidStage2 stage2;
  int score_nf[NID_HYP_CAP], score_below[NID_HYP_CAP];
  NidView view;
- bool multisymbol;
  uint16_t *history_hits, *total_hits;
  float *history_z;
  double *total_z;
@@ -63,7 +62,7 @@ struct Context {
  nr_pdcch_nid_iq_t *staging;
  HostTransfer *transfer;
  nr_pdcch_nid_config_t cfg;
- int rb, dur, window, batches, budget_ms;
+ int rb, dur, window, batches;
  int batch_size, pending, first_new;
  bool incremental;
  uint64_t look;
@@ -226,37 +225,6 @@ __global__ void summarize(Device *p) {
  }
  if(tid==0)p->summary[blockIdx.x]=v[0];
 }
-void shortlist(HostTransfer *p) {
- for(int r=0;r<2;r++) {
-  double total=0;float bv=-1;int bi=0;uint64_t hash=1469598103934665603ULL;
-  for(int j=0;j<CELLS/256;j++) {
-   const auto &v=p->summary[r*(CELLS/256)+j];total+=v.total;
-   if(v.peak>bv || (v.peak==bv && v.cell<bi)){bv=v.peak;bi=v.cell;}
-  }
-  for(int j=0;j<CELLS;j++)hash=(hash^p->hits[r*CELLS+j])*1099511628211ULL;
-  p->result.hit_hash[r]=hash;
-  p->result.top_id[r]=bi%IDS;p->result.top_sym[r]=bi/IDS;
-  double lam=total/CELLS;int threshold=1;
-  while(threshold<1000) {
-   double term=exp(-lam),cdf=0;
-   for(int i=0;i<threshold;i++){cdf+=term;term*=lam/(i+1);}
-   if(CELLS*fmax(1.0-cdf,0.0)<0.01)break;
-   threshold++;
-  }
-  if(r==0)continue;
-  // Same descending hits / ascending cell order as idsw_list.
-  int selected[40],n=0;
-  for(int j=0;j<CELLS;j++) {
-   unsigned h=p->hits[CELLS+j];if(h<(unsigned)threshold)continue;
-   int at=0;while(at<n && p->hits[CELLS+selected[at]]>=h)at++;
-   if(at>=40)continue;
-   if(n<40)n++;
-   for(int t=n-1;t>at;t--)selected[t]=selected[t-1];selected[at]=j;
-  }
-  p->result.list_n=n;
-  for(int t=0;t<n;t++){p->result.list_id[t]=selected[t]%IDS;p->result.list_sym[t]=selected[t]/IDS;}
- }
-}
 // Each new batch is scored once. Subtract the evicted batch, add the new one.
 // IQ and sufficient statistics share the same batch ring position.
 __global__ void slide(Device *p,int ring,bool empty,bool evict) {
@@ -324,7 +292,6 @@ __global__ void prepare_init(Device *p,int list) {
   s.alive=0;s.nact=0;s.nh=0;
   if(list>=p->result.list_n)return;
   int nid=p->result.list_id[list];
-  if(!p->multisymbol)for(int j=0;j<list;j++)if(p->result.list_id[j]==nid)return;
   s.nid=nid;s.sym0=p->result.list_sym[list];
   int pa=s.g_idsw.point_a_sc;
   s.g_st2_clo=pa>=0?0:(-pa+11)/12;s.g_st2_chi=(s.g_idsw.nsc-pa)/12;
@@ -349,7 +316,7 @@ __global__ void prepare_control(Device *p,bool active) {
   for(int k=0;k<s.g_idsw.n;k++)if(p->lit[k])p->active[s.nact++]=k;
   s.alive=s.nact>0;
  } else {
-  if(p->multisymbol && p->explicit_duration>0)return;
+  if(p->explicit_duration>0)return;
   int nsym[14]={},nlit[14]={};
   for(int k=0;k<s.g_idsw.n;k++) {
    int sym=s.g_idsw.sym[s.g_idsw.index(k)];nsym[sym]++;nlit[sym]+=p->lit[k];
@@ -561,17 +528,8 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  if(nr_dl_gpu_sealed)return nullptr; // one pre-RX context per module lifetime
  if(rb<6 || rb>275 || dur<1 || dur>3 || window<1 || window>NR_PDCCH_NID_MAX_WINDOW)return nullptr;
  Context *c=new Context{};c->rb=rb;c->dur=dur;c->window=window;
- c->budget_ms=5000;
- /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_GPU_BUDGET_MS not in the frozen config t26zE (2026-10-18); slated for removal */
- if(const char *value=getenv("ISAC_PDCCH_NID_GPU_BUDGET_MS")) {
-  char *end;long n=strtol(value,&end,10);if(*value && !*end && n>=100 && n<=60000)c->budget_ms=(int)n;
- }
  int n=window*NR_PDCCH_NID_BATCH,sc=12*rb;
  Device &p=c->host;
- /* Duration 2/3 multi-symbol evidence (T19): own flag, default on (was ISAC_CSIRS_DISC). */
- /* DEFERRED/DO NOT USE: ISAC_PDCCH_NID_MULTISYMBOL not in the frozen config t26zE (2026-10-18); slated for removal */
- const char *enable=getenv("ISAC_PDCCH_NID_MULTISYMBOL");
- p.multisymbol=!(enable && !strcmp(enable,"0"));
  int *slots=nullptr; c16_t *iq=nullptr;double *scratch=nullptr;st2_snap_t *sn=nullptr;
  int least_priority=0,greatest_priority=0;
  if(cudaDeviceGetStreamPriorityRange(&least_priority,&greatest_priority)!=cudaSuccess
@@ -681,7 +639,7 @@ int upload(void *ptr,const nr_pdcch_nid_batch_t *b) {
     || (b->cfg.nsc-b->cfg.point_a_sc)/12>275
     || (b->cfg.nsc-b->cfg.point_a_sc)/12-(b->cfg.point_a_sc<0?(-b->cfg.point_a_sc+11)/12:0)<6)return -1;
  int count=b->count?b->count:NR_PDCCH_NID_BATCH;
- if(count<1 || count>NR_PDCCH_NID_BATCH || (b->count && !c->host.multisymbol))return -1;
+ if(count<1 || count>NR_PDCCH_NID_BATCH)return -1;
  if(c->pending && c->incremental)return -1; // never silently lose an unscored batch
  bool changed=memcmp(&b->cfg,&c->cfg,sizeof(c->cfg)) || count!=c->batch_size || c->incremental!=(b->count>0);
  if(changed) {c->batches=0;c->cfg=b->cfg;c->bank={};}
@@ -742,7 +700,7 @@ bool complete(Context *c,const std::chrono::steady_clock::time_point &start) {
   if(e!=cudaErrorNotReady)return false;
   // Coarse in-pass observation only. Drain already queued work and publish a
   // complete pass even when shared-device contention exceeds the soft budget.
-  if(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count()>=c->budget_ms)
+  if(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count()>=5000)
    c->timing.budget_exceeded=1;
   std::this_thread::yield();
  }
@@ -767,7 +725,7 @@ int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *s
     LAUNCH(SWEEP,sweep<<<dim3(ids/128,(n+1)/2),dim3(128,2),0,stream>>>(p,first,n,id));
    LAUNCH(STANDARDIZE,standardize<<<2*n,256,0,stream>>>(p));
    LAUNCH(ACCUMULATE,accumulate<<<IDS/256,256,0,stream>>>(p,first,n));
-   if(c->host.multisymbol && c->dur>1) {
+   if(c->dur>1) {
     for(int base=0;base<NID_CAL;base+=NR_NID_SECONDARY_IDS)
      LAUNCH(SWEEP,calibrate<<<dim3(NR_NID_SECONDARY_IDS/128,n,c->dur-1),128,0,stream>>>(p,first,n,base));
     LAUNCH(STANDARDIZE,standardize<<<2*n,256,0,stream>>>(p,2*CHUNK,NID_CAL));
@@ -805,8 +763,7 @@ int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *s
       || budget_copy(c,c->transfer->zsum,c->host.zsum,sizeof(c->transfer->zsum),cudaMemcpyDeviceToHost,stream)!=cudaSuccess
       || !complete(c,start))return -1;
    c->transfer->result={};
-   if(c->host.multisymbol)nid_shortlist(c->transfer->hits,c->transfer->zsum,c->dur,&c->transfer->result);
-   else shortlist(c->transfer);
+   nid_shortlist(c->transfer->hits,c->transfer->zsum,c->dur,&c->transfer->result);
   }
  } else {
   c->transfer->result={};c->transfer->result.list_n=seed->list_n;
