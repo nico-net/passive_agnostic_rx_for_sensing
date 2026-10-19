@@ -102,3 +102,16 @@ TEST(HqRetry, RetransmissionRacingPendingRetry)
   EXPECT_TRUE(nr_hq_lock_wait(&f.busy, [] {}, 0));
   (void)naps;
 }
+
+// CRC-BUGS 2026-10-19: a same-NDI grant combines only with the stored TB of its own TBS; another TBS is decoded alone and leaves the entry (-1).
+TEST(HqRetxRule, SameNdiAndTbsCombineAnotherTbsDecodesAlone)
+{
+  EXPECT_EQ(nr_hq_retx_rule(false, 1, 1128, 1, 2, 1128, false), 0); // nothing stored: first transmission
+  EXPECT_EQ(nr_hq_retx_rule(true, 0, 1128, 1, 2, 1128, false), 0);  // NDI toggled: a new TB
+  EXPECT_EQ(nr_hq_retx_rule(true, 1, 1128, 1, 2, 1128, false), 1);  // retransmission of the stored TB
+  EXPECT_EQ(nr_hq_retx_rule(true, 1, 1128, 1, 3, 984, false), -1);  // same NDI, another TBS: not this TB's retransmission
+  EXPECT_EQ(nr_hq_retx_rule(true, 1, 1128, 1, 0, 984, true), -1);
+  EXPECT_EQ(nr_hq_retx_rule(true, 1, 0, 1, 1, 984, false), 1);      // no TBS recorded: unchanged behaviour
+  EXPECT_EQ(nr_hq_retx_rule(true, 1, 1128, 1, 0, 1128, false), 0);  // rv 0 on the same NDI: combined only once admitted
+  EXPECT_EQ(nr_hq_retx_rule(true, 1, 1128, 1, 0, 1128, true), 1);
+}

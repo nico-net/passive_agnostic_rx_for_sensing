@@ -43,6 +43,10 @@ int cb0_fx_rx_decode(const nr_td_cb0_item_t *it, int probe, int *seg0_ok);
  * the TB CRC recomputed on it equals the decoded CRC bits: the pass is checked against the source bits, not only
  * against the decoder's own CRC verdict. */
 int cb0_fx_rx_decode_bits(const nr_td_cb0_item_t *it, const uint8_t *expect, int *bits_match);
+/* HARQ soft combining through the same decoder: n transmissions of one TB (same tbs / R / bg, any rv, G, Qm, Nl) are
+ * rate de-matched into ONE soft buffer (d_to_be_cleared only on the first), decoded after each; returns the verdict
+ * (1 pass / 0 fail / -1 refused) of the last decode, *bits_match as cb0_fx_rx_decode_bits. */
+int cb0_fx_rx_decode_hq(const nr_td_cb0_item_t *its, int n, const uint8_t *expect, int *bits_match);
 /* crc24a / crc16 of a buffer (the TB CRC the encoder attaches): non-zero on random data iff the tables are set. */
 uint32_t cb0_fx_tb_crc(const uint8_t *a, uint32_t A);
 /* get_BG / nr_get_G / nr_compute_tbs pass-throughs for the .cc */

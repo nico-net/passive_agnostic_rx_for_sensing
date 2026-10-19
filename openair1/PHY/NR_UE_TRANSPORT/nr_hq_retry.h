@@ -24,6 +24,19 @@ static inline bool nr_hq_rescue_match(bool soft_valid, uint8_t e_ndi, int64_t e_
 {
   return soft_valid && e_ndi == job_ndi && job_slot >= e_first_slot;
 }
+/* The retransmission decision of the DL HARQ store (CPU decode and GPU pass): 1 = combine into the stored sum, 0 = a first transmission (the entry restarts),
+ * -1 = decode alone and leave the entry as it is. A retransmission is the same NDI on the process (TS 38.321 5.3.2.2) AND the same TBS: the soft bits of one TB
+ * exist only for its own K, C and E (TS 38.212 5.2.2 / 5.4.2.1), and a retransmission carries its initial TBS (TS 38.214 5.1.3.2; a reserved MCS already hands
+ * over the recorded one). A same-NDI grant with another TBS is not this TB's retransmission (a missed DCI, or one of the two DCIs read with the wrong layout):
+ * combining it with the stored TBS could only fail (2026-10-19 on air: every combined retransmission was decoded with the stored, not its own, TBS). */
+static inline int nr_hq_retx_rule(bool soft_valid, uint8_t e_ndi, uint32_t e_tbs, uint8_t ndi, uint8_t rv, uint32_t tbs, bool rv0_admitted)
+{
+  if (!soft_valid || e_ndi != ndi)
+    return 0;
+  if (e_tbs != 0 && e_tbs != tbs)
+    return -1;
+  return (rv != 0 || rv0_admitted) ? 1 : 0;
+}
 /* worker side: take the entry lock, waiting up to `spins` naps; false = still held by a consumer (the sum stays; harmless, the TB is decoded) */
 static inline bool nr_hq_lock_wait(void *busy_p, void (*nap)(void), int spins)
 {

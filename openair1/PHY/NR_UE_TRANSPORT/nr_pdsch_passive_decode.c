@@ -2166,11 +2166,12 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
   return true;
 }
 
-/* The retransmission decision of the HARQ store, shared by the CPU decode and the GPU pass. A retransmission is "same NDI on this HARQ process" (TS 38.321 5.3.2.2); the RV only sets the
- * circular-buffer start the rate de-matcher already takes from cw->rv. Combining into an rv-0 grant was withheld so a wrong layout hypothesis (junk NDI/PID) cannot poison a fresh decode;
- * it is admitted only once THIS cell has shown it retransmits at rv 0 -- same NDI with rv 0 on a still-undecoded process, seen NR_HARQC_RV0_EVIDENCE times (the census the HARQC line
- * reports). *A: the TBS to decode with (a retransmission keeps the TBS of its first transmission). */
-static bool harq_retx_decide(const harqc_entry_t *e, const fapi_nr_dl_cw_info_t *cw, bool si, uint8_t ndi, uint32_t *A)
+/* The retransmission decision of the HARQ store, shared by the CPU decode and the GPU pass: nr_hq_retx_rule (nr_hq_retry.h), 1 combine / 0 first / -1 decode alone,
+ * entry untouched. The RV only sets the circular-buffer start the rate de-matcher already takes from cw->rv. Combining into an rv-0 grant was withheld so a wrong
+ * layout hypothesis (junk NDI/PID) cannot poison a fresh decode; it is admitted only once THIS cell has shown it retransmits at rv 0 -- same NDI with rv 0 on a
+ * still-undecoded process, seen NR_HARQC_RV0_EVIDENCE times (the census the HARQC line reports). *A: the TBS to decode with (a retransmission has its first
+ * transmission's TBS, the rule requires it equal). */
+static int harq_retx_decide(const harqc_entry_t *e, const fapi_nr_dl_cw_info_t *cw, bool si, uint8_t ndi, uint32_t *A)
 {
   static _Atomic uint32_t s_rv0_retx_seen;
   const bool same_ndi = e->soft_valid && e->ndi == ndi;
@@ -2178,15 +2179,15 @@ static bool harq_retx_decide(const harqc_entry_t *e, const fapi_nr_dl_cw_info_t 
   if (same_ndi && cw->rv == 0 && e->tbs != 0 && e->tbs == cw->TBS)
     atomic_fetch_add(&s_rv0_retx_seen, 1);
   const bool rv0_admitted = atomic_load(&s_rv0_retx_seen) >= NR_HARQC_RV0_EVIDENCE;
+  *A = cw->TBS;
   /* SI soft combining: the SIB1 TB repeats unchanged, so any grant with the stored TBS combines (NDI of an SI DCI is reserved, rv 0 included), at most
    * NR_SI_COMB_MAX in a row so a changed SIB1 cannot poison the buffer for longer than one repetition window. */
-  const bool retx = si ? (e->soft_valid && e->tbs == cw->TBS && e->ncomb < NR_SI_COMB_MAX) : same_ndi && (cw->rv != 0 || rv0_admitted);
-  *A = cw->TBS;
-  if (retx && e->tbs != 0 && e->tbs != *A) {
-    *A = e->tbs;
-    atomic_fetch_add(&g_hq_tbs_override, 1);
-  }
-  return retx;
+  if (si)
+    return (e->soft_valid && e->tbs == cw->TBS && e->ncomb < NR_SI_COMB_MAX) ? 1 : 0;
+  const int d = nr_hq_retx_rule(e->soft_valid, e->ndi, e->tbs, ndi, cw->rv, cw->TBS, rv0_admitted);
+  if (d < 0)
+    atomic_fetch_add(&g_hq_tbs_override, 1); /* HARQC "tbs_from_first": now the count of same-NDI grants with another TBS, decoded alone */
+  return d;
 }
 
 static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
@@ -2222,7 +2223,12 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
     return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
   }
   uint32_t A = cw->TBS;
-  bool retx = harq_retx_decide(e, cw, t_hq.si, t_hq.ndi, &A);
+  const int hq_d = harq_retx_decide(e, cw, t_hq.si, t_hq.ndi, &A);
+  if (hq_d < 0) { /* not this process's TB: decoded alone, the stored sum stays for its own retransmission */
+    atomic_store(&e->busy, 0);
+    return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
+  }
+  bool retx = hq_d > 0;
   if (retx && e->on_gpu && ((size_t)e->gC * e->gKcz > e->cap || nr_gpu_pass_dl_hq_xfer(1, e->hb.id, e->d, e->gC, (int)e->gKcz, (int)e->gN) != 0)) {
     retx = false; /* the soft bits are on the device and cannot be fetched: decode as a first transmission */
     A = cw->TBS;
@@ -3377,7 +3383,14 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       if (gp_he == NULL) {
         atomic_fetch_add(&g_hq_busy_skip, 1); /* as the CPU path: decoded without combining */
       } else {
-        gp_hq_retx = harq_retx_decide(gp_he, cw, false, grant->ndi, &gp_hq_A);
+        const int gp_d = harq_retx_decide(gp_he, cw, false, grant->ndi, &gp_hq_A);
+        gp_hq_retx = gp_d > 0;
+        if (gp_d < 0) { /* as the CPU path: decoded alone, the entry untouched (hq_mode 0) */
+          atomic_store(&gp_he->busy, 0);
+          gp_he = NULL;
+        }
+      }
+      if (gp_he != NULL) {
         unsigned C = 0, K = 0, Z = 0, F = 0;
         const int Kc = cw->ldpcBaseGraph == 2 ? 52 : 68;
         if (gp_hq_retx && gp_he->on_gpu && gp_he->hb.n < (int)gp_he->gC) { /* cannot happen: the blocks of a live sum are never given away */

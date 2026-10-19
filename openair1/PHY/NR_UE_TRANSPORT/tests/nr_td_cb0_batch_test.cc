@@ -7,6 +7,10 @@
 #include <vector>
 #include <dlfcn.h>
 #include "nr_td_cb0_fixture.h"
+extern "C" {
+#include "nr_hq_retry.h"
+uint32_t nr_compute_tbslbrm(uint16_t table, uint16_t nb_rb, uint8_t Nl);
+}
 
 namespace {
 
@@ -466,6 +470,112 @@ TEST_F(Cb0, InconclusiveOnError)
   EXPECT_EQ(nr_td_cb0_batch(nullptr, 0, nullptr), 0);
   cb0_fx_reinit_decoder();
   delete s;
+}
+
+/* CRC-BUGS 2026-10-19, bug 2 (rv != 0 never decodes on air): every redundancy version of a TB encoded with the OAI
+ * transmitter chain (nr_rate_matching_ldpc at rv 0..3, LBRM off and binding) decodes ALONE through the receiver's
+ * decoder (nrLDPC_coding_decoder: nr_rate_matching_ldpc_rx + LDPCdecoder with nr_get_R_ldpc_decoder's R) whenever
+ * the rv is self-decodable (low rate: E wraps the circular buffer; rv 0 and 3 at mid rate, TS 38.212 5.4.2.1), and two
+ * noisy transmissions (rv 0 + rv 2) combined in one soft buffer decode where neither does alone. */
+TEST_F(Cb0, EveryRvDecodesAloneAndCombined)
+{
+  struct Shape { const char *name; uint8_t Qm, Nl; uint16_t R, nrb; bool all_rv; } shapes[] = {
+      {"MCS0-like 16 PRB QPSK R0.12 nl2", 2, 2, 1200, 16, true},
+      {"MCS0-like 217 PRB QPSK R0.12 nl1", 2, 1, 1200, 217, true},
+      {"16QAM R0.43 48 PRB nl2", 4, 2, 4340, 48, false},
+      {"64QAM R0.54 217 PRB nl2", 6, 2, 5550, 217, false},
+  };
+  for (const auto &sh : shapes)
+    for (int lb = 0; lb < 2; lb++)
+      for (uint8_t rv = 0; rv < 4; rv++) {
+        const uint32_t A = cb0_fx_tbs(sh.Qm, sh.R, sh.nrb, 12, 12, sh.Nl), G = cb0_fx_G(sh.nrb, 12, 12, 1, sh.Qm, sh.Nl);
+        uint32_t lbrm = 0;
+        if (lb) { /* an LBRM that binds: N_ref = 3/4 N (as GpuDematchBitIdenticalSweep) */
+          Fx probe(A, sh.R, sh.Qm, sh.Nl, 0, G);
+          const uint32_t N = (probe.fx.BG == 1 ? 66u : 50u) * probe.fx.Z;
+          lbrm = probe.fx.C * N / 2;
+        }
+        Fx f(A, sh.R, sh.Qm, sh.Nl, rv, G, lbrm, 11 + rv);
+        if (!sh.all_rv && rv != 0 && rv != 3)
+          continue; /* not self-decodable at this rate: only the combined case below */
+        int match = 0;
+        const nr_td_cb0_item_t it = f.item();
+        EXPECT_EQ(cb0_fx_rx_decode_bits(&it, f.fx.payload, &match), 1) << sh.name << " rv " << (int)rv << " lbrm " << lbrm << " C " << f.fx.C;
+        EXPECT_EQ(match, 1) << sh.name << " rv " << (int)rv;
+      }
+  /* combining: rv 0 then rv 2 of the same TB, each with a fraction p of its LLRs sign-flipped; at the smallest p (1 % steps)
+   * where both fail alone, the two combined in one soft buffer must decode to the transmitted bits */
+  for (const auto &sh : shapes) {
+    const uint32_t A = cb0_fx_tbs(sh.Qm, sh.R, sh.nrb, 12, 12, sh.Nl), G = cb0_fx_G(sh.nrb, 12, 12, 1, sh.Qm, sh.Nl);
+    Fx f0(A, sh.R, sh.Qm, sh.Nl, 0, G, 0, 5), f2(A, sh.R, sh.Qm, sh.Nl, 2, G, 0, 5);
+    ASSERT_EQ(memcmp(f0.fx.payload, f2.fx.payload, A / 8), 0);
+    bool tested = false;
+    for (int pc = 1; pc <= 45 && !tested; pc++) {
+      std::mt19937 rng(9);
+      std::bernoulli_distribution flip(pc / 100.0);
+      std::vector<int16_t> l0(f0.fx.llr, f0.fx.llr + G), l2(f2.fx.llr, f2.fx.llr + G);
+      for (auto &v : l0) if (flip(rng)) v = (int16_t)-v;
+      for (auto &v : l2) if (flip(rng)) v = (int16_t)-v;
+      nr_td_cb0_item_t its[2] = {f0.item(), f2.item()};
+      its[0].llr = l0.data(); its[1].llr = l2.data();
+      if (cb0_fx_rx_decode(&its[0], 0, nullptr) != 0 || cb0_fx_rx_decode(&its[1], 0, nullptr) != 0)
+        continue;
+      tested = true;
+      int m = 0;
+      EXPECT_EQ(cb0_fx_rx_decode_hq(its, 2, f0.fx.payload, &m), 1) << sh.name << " rv 0 + rv 2 combined, " << pc << " % flips";
+      EXPECT_EQ(m, 1) << sh.name;
+    }
+    EXPECT_TRUE(tested) << sh.name;
+  }
+}
+
+/* CRC-BUGS 2026-10-19, bug 2 (reproducer): a failed first transmission is stored for (rnti, pid); a same-NDI grant with ANOTHER TBS (here a clean, self-decodable
+ * MCS-0-like rv 3) used to be decoded INTO that buffer with the stored TBS -- it cannot pass. nr_hq_retx_rule says -1 for it: decoded alone it passes. */
+TEST_F(Cb0, SameNdiGrantWithAnotherTbsIsDecodedAlone)
+{
+  const uint32_t G = cb0_fx_G(16, 12, 12, 1, 2, 2);
+  const uint32_t A1 = cb0_fx_tbs(2, 1200, 16, 12, 12, 2), A2 = cb0_fx_tbs(2, 1570, 16, 12, 12, 2);
+  ASSERT_NE(A1, A2);
+  Fx first(A1, 1200, 2, 2, 0, G, 0, 21), retx(A2, 1570, 2, 2, 3, G, 0, 22);
+  std::vector<int16_t> l1(first.fx.llr, first.fx.llr + G);
+  for (uint32_t i = 0; i < G; i++) if (i % 16) l1[i] = 0; /* 15 of 16 LLRs erased: the first transmission fails */
+  nr_td_cb0_item_t it1 = first.item();
+  it1.llr = l1.data();
+  ASSERT_EQ(cb0_fx_rx_decode(&it1, 0, nullptr), 0);
+  nr_td_cb0_item_t it2 = retx.item();
+  /* old rule: the stored TBS and the stored sum */
+  nr_td_cb0_item_t old2 = it2;
+  old2.tbs = A1; old2.R = it1.R;
+  nr_td_cb0_item_t seq[2] = {it1, old2};
+  EXPECT_EQ(cb0_fx_rx_decode_hq(seq, 2, nullptr, nullptr), 0) << "combined with the stored TBS: fails (the on-air bug)";
+  /* new rule */
+  ASSERT_EQ(nr_hq_retx_rule(true, 1, A1, 1, 3, A2, false), -1);
+  int m = 0;
+  EXPECT_EQ(cb0_fx_rx_decode_bits(&it2, retx.fx.payload, &m), 1) << "decoded alone with its own TBS";
+  EXPECT_EQ(m, 1);
+}
+
+/* CRC-BUGS 2026-10-19, bug 1: the large on-air grants that fail at high DM-RS SNR (217 / 201 / 160 PRB, 13 symbols, 2 DM-RS symbols, Nl 2-4, 256QAM table
+ * MCS 9-19, C 8-30) are encoded with the OAI transmitter chain at the receiver's own TBS (nr_compute_tbs) and LBRM (nr_compute_tbslbrm, table 1, 217 PRB,
+ * n_L 4 and 1) and decoded clean by the receiver's decoder: TBS, segmentation, LBRM and LDPC rate (de)matching are not what fails them. */
+TEST_F(Cb0, LargeOnAirShapesDecodeClean)
+{
+  struct S { uint16_t nrb, nsym, dmrs_re; uint8_t Qm, Nl; uint16_t R; } sh[] = {
+      {217, 13, 12, 6, 2, 5670}, {217, 13, 12, 6, 2, 8730}, {201, 13, 24, 6, 2, 6160}, {160, 11, 24, 4, 2, 4900},
+      {217, 13, 24, 6, 3, 5170}, {217, 13, 24, 4, 4, 6580}, {217, 12, 12, 8, 2, 7110}, {217, 13, 12, 6, 1, 7720}};
+  int big = 0;
+  for (const auto &x : sh)
+    for (int nl : {4, 1}) {
+      const uint32_t A = cb0_fx_tbs(x.Qm, x.R, x.nrb, x.nsym, x.dmrs_re, x.Nl);
+      const uint32_t G = cb0_fx_G(x.nrb, x.nsym, (uint8_t)(x.dmrs_re / 2), 2, x.Qm, x.Nl);
+      Fx f(A, x.R, x.Qm, x.Nl, 0, G, nr_compute_tbslbrm(1, 217, (uint8_t)nl), 31);
+      big += f.fx.C >= 8;
+      int m = 0;
+      const nr_td_cb0_item_t it = f.item();
+      EXPECT_EQ(cb0_fx_rx_decode_bits(&it, f.fx.payload, &m), 1) << x.nrb << " PRB Qm" << (int)x.Qm << " Nl" << (int)x.Nl << " R" << x.R << " C " << f.fx.C << " n_L " << nl;
+      EXPECT_EQ(m, 1);
+    }
+  EXPECT_GE(big, 12) << "the shapes must be the large (C >= 8) ones";
 }
 
 } // namespace
