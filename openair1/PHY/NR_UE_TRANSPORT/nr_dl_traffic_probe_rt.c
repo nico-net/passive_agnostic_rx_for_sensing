@@ -36,8 +36,6 @@ static struct {
   nr_cdisc_t cd;
   uint32_t cd_probed0;               /* probed slots and nocss0 RB-slots when the sweep was armed */
   uint64_t cd_rbslots0;
-  double cd_miss_s;
-  int cd_max_recover;
   const NR_DL_FRAME_PARMS *fp;
   bool running;
   uint32_t dl_calls, now_slot;
@@ -60,15 +58,6 @@ static struct {
   uint32_t probed, pa_hits[DLTP_PA_N], pa_sym_hits[3], pa_syms, pci_windows, pci_sym_windows[3];
   bool pa_done;
 } g = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .every = -1, .sweep = -1, .watch = -1};
-
-static int env_int(const char *k, int def, int lo, int hi)
-{
-  const char *s = getenv(k);
-  if (!s || !*s) return def;
-  char *end;
-  const long n = strtol(s, &end, 10);
-  return *end || n < lo || n > hi ? def : (int)n;
-}
 
 /* pdcch_pci_windows: lit 6-RB windows of the PDCCH DM-RS of nID = PCI in `sym`, groups aligned to CRB 0 = grid RB ref_rb
  *   (negative when CRB 0 is below the grid), CORESET#0 and SSB RBs skipped. Caller: worker(). */
@@ -181,7 +170,7 @@ static void *worker(void *arg)
       struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
       const int was_armed = g.cd.armed;
       nr_cdisc_in_t in = {.now_s = (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec, .carrier_ok = snap.carrier_verified == 1,
-                          .bank_count = nr_pdcch_coreset_bank_count(), .miss_s = g.cd_miss_s, .max_recover = g.cd_max_recover};
+                          .bank_count = nr_pdcch_coreset_bank_count(), .miss_s = 12.0, .max_recover = 3};
       if (in.carrier_ok && !was_armed) { g.cd_probed0 = g.probed; g.cd_rbslots0 = g.st.pdsch_like_ungranted_nocss0; }
       int sq_med = 0, sq_p90 = 0;
       const int sq = nr_syncq_enabled() ? nr_syncq_status(&sq_med, &sq_p90) : -1;
@@ -241,14 +230,10 @@ static bool start(const NR_DL_FRAME_PARMS *fp)
 void nr_dl_traffic_probe_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t frame, uint8_t slot)
 {
   if (g.every < 0) {
-    g.every = env_int("ISAC_DL_TRAFFIC_PROBE", IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 16 : 0, 0, 100000);
-    g.sweep = env_int("ISAC_POINTA_SWEEP", IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 1 : 0, 0, 1);
-    g.watch = env_int("ISAC_CORESET_DISC_WATCH", IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 1 : 0, 0, 1);
-    /* DEFERRED/DO NOT USE: ISAC_CORESET_DISC_MISS_S not in the frozen config t26zE (2026-10-18); slated for removal */
-    g.cd_miss_s = env_int("ISAC_CORESET_DISC_MISS_S", 12, 1, 600);
-    /* DEFERRED/DO NOT USE: ISAC_CORESET_DISC_RECOVER_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
-    g.cd_max_recover = env_int("ISAC_CORESET_DISC_RECOVER_MAX", 3, 0, 100);
-    if (g.watch && !g.every) g.every = 16; /* the watch needs the traffic probe: same cadence as the BLINDPIPE runs */
+    const bool passive = IS_PASSIVE_RX_MODE(get_softmodem_params()); /* frozen ISAC_DL_TRAFFIC_PROBE=16, _POINTA_SWEEP=1, _CORESET_DISC_WATCH=1; off outside --passive-rx */
+    g.every = passive ? 16 : 0;
+    g.sweep = passive;
+    g.watch = passive;
   }
   if (!g.every) return;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;

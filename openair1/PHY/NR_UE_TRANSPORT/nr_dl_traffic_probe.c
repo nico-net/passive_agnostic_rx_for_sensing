@@ -199,7 +199,7 @@ static _Atomic int g_sq_med, g_sq_p90;
 int nr_syncq_enabled(void)
 {
   static int e = -1;
-  if (e < 0) { const char *v = getenv("ISAC_CORESET_DISC_SYNCQ"); e = v ? atoi(v) : (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 1 : 0); if (e < 0 || e > 2) e = 0; }
+  if (e < 0) e = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 1 : 0; /* frozen ISAC_CORESET_DISC_SYNCQ=1; off outside --passive-rx */
   return e != 0;
 }
 void nr_syncq_note(int step)
@@ -225,14 +225,9 @@ int nr_syncq_status(int *med, int *p90)
   if (atomic_load_explicit(&g_sq_count, memory_order_acquire) < NR_SYNCQ_MIN) return -1;
   return (int)atomic_load_explicit(&g_sq_level, memory_order_relaxed);
 }
-/* ISAC_CORESET_DISC_SYNCQ=1: report + re-acquire + re-arm. =2: additionally pause the nID capture while POOR. MEASURED (replay, injected wander): pausing
- * HURTS where the sweep still works with poor sync (TIM tile3 banked 1 CORESET with wander and 0 when paused), so 2 is not the recommended value. */
-int nr_syncq_gate_closed(void)
-{
-  static int lvl = -1;
-  if (lvl < 0) { const char *v = getenv("ISAC_CORESET_DISC_SYNCQ"); lvl = v ? atoi(v) : (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 1 : 0); }
-  return lvl == 2 && atomic_load_explicit(&g_sq_poor, memory_order_relaxed);
-}
+/* Report + re-acquire + re-arm only; pausing the nID capture while POOR is not done (MEASURED, replay, injected wander: it HURTS where the sweep
+ * still works with poor sync, TIM tile3 banked 1 CORESET with wander and 0 when paused). */
+int nr_syncq_gate_closed(void) { return 0; }
 void nr_syncq_request_reacquire(void) { atomic_store_explicit(&g_sq_reacq, 1, memory_order_relaxed); atomic_store_explicit(&g_sq_clamp, 1, memory_order_relaxed); }
 int nr_syncq_take_reacquire(void) { return nr_syncq_enabled() && atomic_exchange_explicit(&g_sq_reacq, 0, memory_order_relaxed); }
 int nr_syncq_clamp(void) { return nr_syncq_enabled() && atomic_load_explicit(&g_sq_clamp, memory_order_relaxed) ? NR_SYNCQ_CLAMP : 0; }

@@ -165,8 +165,8 @@ TEST(PdschDmrsScan, VotesIsolateTheUesOwnIdentity)
 }
 
 /* SOLVERCOVER: a background identity in every slot (65) and a busy co-scheduled UE's identity (1337, 60 % of the slots)
- * outvote a quiet UE's own identity (638, detected on half of its slots). Raw votes rank 65/1337 first; the contrast
- * ranking (ISAC_PDSCH_DMRS_ID_CONTRAST=1) puts 638 first and never drops an identity. A UE alone in the cell keeps its id. */
+ * outvote a quiet UE's own identity (638, detected on half of its slots). Raw votes would rank 65/1337 first; the contrast
+ * ranking puts 638 first and never drops an identity. A UE alone in the cell keeps its id. */
 static void VoteCell(void)
 {
   std::mt19937 rng(7);
@@ -185,14 +185,6 @@ static void VoteCell(void)
 TEST(PdschDmrsScan, ContrastRanksTheUesOwnIdentityAboveCellWideOnes)
 {
   int ids[2];
-  setenv("ISAC_PDSCH_DMRS_ID_CONTRAST","0",1);
-  nr_dmrs_scan_reset();
-  VoteCell();
-  ASSERT_EQ(nr_dmrs_scan_rnti_ids(0x5098, ids, 2), 2);
-  EXPECT_EQ(ids[0], 65); /* raw votes: the background id wins */
-  EXPECT_NE(ids[1], 638);
-  EXPECT_TRUE(nr_dmrs_scan_rnti_decided(0x4000)); /* raw rule: any id with 2 votes over 4 slots */
-  setenv("ISAC_PDSCH_DMRS_ID_CONTRAST", "1", 1);
   nr_dmrs_scan_reset();
   VoteCell();
   ASSERT_EQ(nr_dmrs_scan_rnti_ids(0x5098, ids, 2), 2);
@@ -211,7 +203,6 @@ TEST(PdschDmrsScan, ContrastRanksTheUesOwnIdentityAboveCellWideOnes)
   }
   ASSERT_EQ(nr_dmrs_scan_rnti_ids(0x7683, ids, 2), 2);
   EXPECT_EQ(ids[0], 415);
-  setenv("ISAC_PDSCH_DMRS_ID_CONTRAST","0",1);
   nr_dmrs_scan_reset();
 }
 

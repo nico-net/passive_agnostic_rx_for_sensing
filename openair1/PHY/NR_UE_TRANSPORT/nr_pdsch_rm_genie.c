@@ -21,10 +21,7 @@ static int g_nlines_map, g_nlines_gen;
 
 int nr_pdsch_rm_genie_level(void)
 {
-  static int s = -1;
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_RM_GENIE not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (s < 0) { const char *e = getenv("ISAC_PDSCH_RM_GENIE"); s = e ? atoi(e) : 0; }
-  return s;
+  return 0; /* diagnostic permanently off; whole file goes once passive_decode drops its calls */
 }
 
 bool nr_pdsch_rm_genie_on(void)
@@ -32,13 +29,9 @@ bool nr_pdsch_rm_genie_on(void)
   return nr_pdsch_rm_genie_level() >= 1;
 }
 
-/* ISAC_PDSCH_RM_GENIE_MAX: RMMAP line budget (default 400; HIGHMCS replays use 20000). */
 static int nlines_cap(void)
 {
-  static int s = -1;
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_RM_GENIE_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (s < 0) { const char *e = getenv("ISAC_PDSCH_RM_GENIE_MAX"); s = e && atoi(e) > 0 ? atoi(e) : 400; }
-  return s;
+  return 400; /* RMMAP line budget */
 }
 
 /* Expected transmitted bits f[0..G) for TB bytes tb (B/8, CRC included), rv; every code block (38.212 5.2.2, 5.4.2.1:

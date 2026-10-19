@@ -266,7 +266,7 @@ typedef struct {
 } vote_t;
 static vote_t g_v[VOTE_RNTIS];
 static pthread_mutex_t g_vmu = PTHREAD_MUTEX_INITIALIZER;
-/* SOLVERCOVER ISAC_PDSCH_DMRS_ID_CONTRAST=1: cell-wide base rate of every identity, over the distinct voted slots. A slot
+/* SOLVERCOVER: cell-wide base rate of every identity, over the distinct voted slots. A slot
  * votes its hits for every RNTI scheduled in it, so an identity present in most slots of the cell (a background/always-on
  * PDSCH, or a heavily scheduled co-scheduled UE) collects as many votes as a UE's own identity. Measured on TIM PCI 923
  * (OTA 2026-10-10 23:19 and replay of raw_pci923_tim_12s_tile3): one such id (65, 928 or 1280) sat in the top-2 of almost
@@ -277,12 +277,7 @@ static struct { int nid, slots; } g_base[BASE_IDS];
 static int g_nbase, g_base_slots;
 static int64_t g_base_seen[BASE_SEEN];
 static int g_base_seen_n;
-static int g_contrast = -1; /* re-read by nr_dmrs_scan_reset() (tests) */
-bool nr_dmrs_scan_contrast_on(void)
-{
-  if (g_contrast < 0) g_contrast = atoi(getenv("ISAC_PDSCH_DMRS_ID_CONTRAST") ?: "1") ? 1 : 0;
-  return g_contrast == 1;
-}
+bool nr_dmrs_scan_contrast_on(void) { return true; }
 /* base_count: counts the hits of one slot cell-wide, once per distinct slot (g_vmu held) */
 static void base_count(int64_t abs_slot, const nr_dmrs_scan_hit_t *hits, int n)
 {
@@ -400,7 +395,6 @@ void nr_dmrs_scan_reset(void)
   pthread_mutex_lock(&g_vmu);
   memset(g_v, 0, sizeof(g_v));
   g_nbase = g_base_slots = g_base_seen_n = 0;
-  g_contrast = -1;
   pthread_mutex_unlock(&g_vmu);
   pthread_mutex_lock(&g_pmu);
   g_npool = 0;

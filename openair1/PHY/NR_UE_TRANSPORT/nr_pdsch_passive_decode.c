@@ -38,7 +38,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_hq_retry.h"
 #include "nr_pdsch_qm_oracle.h"
 #include "nr_blind_stats.h"
-#include "nr_pdcch_blind_monitor.h" // nr_pdcch_blind_dmrs_mask (ISAC_RA_TDRA_SWEEP)
+#include "nr_pdcch_blind_monitor.h" // nr_pdcch_blind_dmrs_mask (RA TDRA sweep)
 #include "nr_pdsch_chest_key.h" // K32: complete chest-cache key
 #include "nr_llr_norm.h" // K38: LLR-norm shift over code block 0's span
 #include "nr_pdsch_solver.h"
@@ -54,7 +54,6 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include <math.h>
 #include <pthread.h> // sqrt/floor/log10 (EQDIAG)
 #include "nr_pdsch_evm_acc.h"
-#include "nr_irc_cov.h"
 #include "nr_passive_tpool.h"
 #include "nr_pdsch_retry_pred.h"
 #include "nr_pdsch_gpu_ldpc_host.h"
@@ -76,7 +75,6 @@ static void gp_thread_prewarm(void);
 #define NR_DL_CHEST_MAX_ANT 8
 extern __thread uint32_t nr_dl_chest_nvar_ant[];
 extern __thread int nr_dl_chest_only_ant;
-extern __thread int nr_dl_chest_diag_request;
 extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read the estimate at the data symbol itself
 
 #include "PHY/CODING/coding_defs.h"
@@ -84,11 +82,9 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
 #include "PHY/MODULATION/modulation_UE.h" // nr_slot_fep, nr_slot_fep_ant
 #include "nr_pdsch_ptrs_unav.h"
-#include "nr_agnostic_v2.h"
 #include "nr_pdsch_prb_set.h" // nr_prb_segments, nr_prb_gather_index (non-contiguous PRB sets)
-#include "nr_pdsch_host_fast.h" // ISAC_PDSCH_HOST_FAST: NEON unscramble
+#include "nr_pdsch_host_fast.h" // NEON unscramble
 #include "nr_arm_sweep.h" // generic per-RNTI Wilson pick/latch core shared by the VRB-L and PRG sweeps
-#include "nr_pdsch_rm_genie.h" // TIMRM bit-level genie (ISAC_PDSCH_RM_GENIE)
 #include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the UL decoder
 #include "nr_csirs_blind_search.h" // nr_csirs_blind_re_energy / nr_csirs_blind_zp_grant_score
 #include "nr_csirs_blind_rt.h" // nr_csirs_blind_rt_zp_grant_evidence
@@ -127,41 +123,14 @@ static uint64_t g_pdtim_n[PDTIM_N]  = {0};
 static uint64_t g_pdtim_max[PDTIM_N] = {0};
 static double g_pdtim_ss[PDTIM_N] = {0}; /* sum of squared stage times (us^2): per-decode std in PDTIM */
 static uint64_t g_pdtim_calls = 0;
-/* chest_pdp_diag_on: returns ISAC_CHEST_PDP_DIAG (cached, default 1): whether the channel estimator runs its per-call BRDELAY/PDP diagnostic.
- *   Setting it to 0 skips a double-precision pass over the IDFT output for every (antenna, DM-RS symbol).
- *   Caller: the passive decode consumer, which copies it to nr_dl_chest_diag_request before each channel estimate.
- */
-static int chest_pdp_diag_on(void)
-{
-  static int en = -1;
-  if (en < 0) en = getenv("ISAC_CHEST_PDP_DIAG") ? atoi(getenv("ISAC_CHEST_PDP_DIAG")) : 0; /* baked t26yE default */
-  return en;
-}
-/* harq_combine_on: constant 1 (was ISAC_PDSCH_HARQ_COMBINE): enables passive HARQ soft combining on its own flag.
- *   With it on, a retransmission is LDPC-decoded into the stored soft buffer of the failed first transmission (64-entry LRU).
- *   Callers: passive_ldpc_decode(), passive_decode_retry()/qamab(), nr_pdsch_passive_decode() (the retry arms then run only in the async lane, nr_hq_retry.h).
- */
-static int harq_combine_on(void) { return 1; } /* default since 2026-10-19, no flag */
-/* si_combine_on: ISAC_SI_SOFTCOMBINE (cached, default 0): SIB1/SI soft combining across repetitions (PCIS2 2026-10-13). Unlike ISAC_PDSCH_HARQ_COMBINE it
- *   needs no layout bootstrap and no NDI/RV evidence: every SI-RNTI grant of a cell with the same TBS is LDPC-decoded INTO the soft buffer of the previous
- *   undecoded one (SIB1 is the same transport block in every repetition, rv cycles 0,2,3,1), max NR_SI_COMB_MAX grants, keyed by the cell (Nid_cell). */
-static int si_combine_on(void)
-{
-  static int en = -1;
-  /* DEFERRED/DO NOT USE: ISAC_SI_SOFTCOMBINE not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (en < 0) en = getenv("ISAC_SI_SOFTCOMBINE") && atoi(getenv("ISAC_SI_SOFTCOMBINE")) ? 1 : 0;
-  return en;
-}
 static uint64_t g_pdtim_cpu_ns[PDTIM_N] = {0}; /* T26c: thread CPU time per stage -- wall >> cpu means preempted/blocked */
 static __thread uint64_t t_pdtim_cpu0;
-static int g_pdtim_pct = -1; /* ISAC_PDTIM_PCT */
 static _Atomic int g_pdtim_on = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
 
 static inline int pdtim_enabled(void)
 {
   if (g_pdtim_on < 0) {
-    g_pdtim_on = 1; /* ISAC_PDCCH_TIMING presence-only flag, baked on (t26yE) */
-    g_pdtim_pct = atoi(getenv("ISAC_PDTIM_PCT") ?: "1") ? 1 : 0;
+    g_pdtim_on = 1;
   }
   return g_pdtim_on;
 }
@@ -182,7 +151,7 @@ static inline uint64_t pdtim_now(void)
  *   No-op unless ISAC_PDCCH_TIMING is set. Updates count, total, max and CPU time of the stage in plain (non-atomic) globals.
  *   Callers: passive_decode_body() after the FEP, channel estimation, allocation, demodulation and LDPC stages.
  */
-/* ISAC_PDTIM_PCT=1 (DECGPU, default off; needs ISAC_PDCCH_TIMING): 10-us histograms per stage and of the per-decode
+/* DECGPU: 10-us histograms per stage and of the per-decode
  * sum fep+chest+demod+ldpc, printed as PDTIMPCT p50/p90/p99 next to every PDTIM line. */
 #define PDTIM_HB 2000 /* 10 us bins, last bin = >= 19.99 ms */
 static _Atomic uint32_t g_pdtim_hist[PDTIM_N + 1][PDTIM_HB];
@@ -193,17 +162,16 @@ static inline void pdtim_hist(int k, uint64_t d)
   const uint64_t b = d / 10000;
   atomic_fetch_add_explicit(&g_pdtim_hist[k][b < PDTIM_HB ? b : PDTIM_HB - 1], 1, memory_order_relaxed);
 }
-/* ISAC_PDTIM_CLASS=1 (GPUSCHED, default off; needs ISAC_PDTIM_PCT): the per-body sum split by class -- real = first body of
+/* GPUSCHED: the per-body sum split by class -- real = first body of
  * a full decode, retry = later bodies of the same nr_pdsch_passive_decode() call (recovery arms), probe = first-code-block
  * solver probe -- with exact mean, p50/p90/p99, max and the bodies above 5 / 20 ms, printed as PDTIMCLS after PDTIMPCT. */
 #define PDTIM_NCLS 3
 static const char *const kPdtimCls[PDTIM_NCLS] = {"real", "retry", "probe"};
-static int g_pdtim_cls = -1;
 static _Atomic uint32_t g_cls_hist[PDTIM_NCLS][PDTIM_HB];
 static _Atomic uint64_t g_cls_ns[PDTIM_NCLS], g_cls_max[PDTIM_NCLS], g_cls_gt5[PDTIM_NCLS], g_cls_gt20[PDTIM_NCLS];
 static _Atomic uint64_t g_cls_ns1[PDTIM_NCLS], g_cls_ns5[PDTIM_NCLS], g_cls_ns20[PDTIM_NCLS]; /* DECTAIL: time spent in bodies > 1 / 5 / 20 ms */
 static __thread unsigned t_pdtim_body; /* bodies of the current nr_pdsch_passive_decode() call (passive_decode_body) */
-static int retry_budget_us(void);            /* FATTAILS, below */
+#define RETRY_BUDGET_NS 1000000ull /* FATTAILS: a decode call that has run this long skips its long-shot recovery arms */
 static uint64_t dec_now_ns(void);
 static __thread uint64_t t_dec_first_ns; /* SYSAN e2e: wall of this call's first body */
 static __thread uint64_t t_dec_body_ns, t_dec_stage_ns, t_dec_t0_ns; /* FATTAILS DECSLOW: this call's body wall and fep+chest+demod+ldpc wall */
@@ -287,17 +255,7 @@ static c16_t *seg_virt_prepare(const NR_DL_FRAME_PARMS *fp)
   }
   return t_seg_virt;
 }
-/* ISAC_PDSCH_PIN_PREWARM_ALL=1 (default off): the prewarm also creates the buffers that were still pinned lazily on a thread's first
- * segmented / GPU-demod grant (gather buffer, demod geometry buffers), and the pdschRecov worker prewarms at its start instead of at its
- * first rescue (GPUGRAPH-DIAG-20261018: lazy cudaHostRegister calls mid-run, one of 5.9 ms, block every GPU launch for 3.5-6 ms). */
-int nr_pdsch_pin_prewarm_all(void)
-{
-  static int en = -1;
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_PIN_PREWARM_ALL not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (en < 0) en = getenv("ISAC_PDSCH_PIN_PREWARM_ALL") && atoi(getenv("ISAC_PDSCH_PIN_PREWARM_ALL")) ? 1 : 0;
-  return en;
-}
-void nr_pdsch_gpu_demod_pin_prewarm(const NR_DL_FRAME_PARMS *fp) __attribute__((weak)); /* nr_pdsch_gpu_demod_host.c */
+int nr_pdsch_pin_prewarm_all(void) { return 0; } /* NEEDS: caller in nr_pdsch_passive_queue.c to be dropped, then delete this */
 /* nr_pdsch_passive_decode_pin_prewarm: ISAC_PDSCH_GPU_HOST_PIN=1 only -- allocate and pin this consumer thread's GPU-touched
  * buffers before its first grant (flag off: no-op, buffers appear lazily as before). Caller: the PDSCH queue consumer. */
 void nr_pdsch_passive_decode_pin_prewarm(PHY_VARS_NR_UE *ue)
@@ -309,11 +267,6 @@ void nr_pdsch_passive_decode_pin_prewarm(PHY_VARS_NR_UE *ue)
   llr_prepare(&ue->frame_parms, 1);
   if (nr_pdsch_gpu_chest_pin_prewarm)
     nr_pdsch_gpu_chest_pin_prewarm();
-  if (nr_pdsch_pin_prewarm_all()) {
-    seg_virt_prepare(&ue->frame_parms);
-    if (nr_pdsch_gpu_demod_pin_prewarm)
-      nr_pdsch_gpu_demod_pin_prewarm(&ue->frame_parms);
-  }
 }
 static void pdtim_cls_note(uint64_t d)
 {
@@ -416,9 +369,7 @@ static inline void pdtim_add(int k, uint64_t t0)
   }
   const uint64_t c0 = t_pdtim_cpu0;
   const uint64_t d = pdtim_now() - t0;
-  if (g_pdtim_pct < 0)
-    g_pdtim_pct = atoi(getenv("ISAC_PDTIM_PCT") ?: "1") ? 1 : 0;
-  if (g_pdtim_pct && k != PDTIM_ALLOC) {
+  if (k != PDTIM_ALLOC) {
     pdtim_hist(k, d);
     if (k == PDTIM_FEP) {
       t_pdtim_sum = t_pdtim_sum_n = 0; /* a decode that returned early left a partial sum */
@@ -448,22 +399,17 @@ static void pdtim_report(void)
     return;
   }
   g_pdtim_calls++;
-  if (g_pdtim_pct > 0 && t_pdtim_sum_n) {
+  if (t_pdtim_sum_n) {
     pdtim_hist(PDTIM_N, t_pdtim_sum);
-    if (g_pdtim_cls < 0)
-      g_pdtim_cls = atoi(getenv("ISAC_PDTIM_CLASS") ?: "1") ? 1 : 0;
-    if (g_pdtim_cls)
-      pdtim_cls_note(t_pdtim_sum);
+    pdtim_cls_note(t_pdtim_sum);
     t_dec_stage_ns += t_pdtim_sum;
     t_pdtim_sum = t_pdtim_sum_n = 0;
   }
   if ((g_pdtim_calls % 200) != 0) {
     return;
   }
-  if (g_pdtim_pct > 0)
-    pdtim_pct_report();
-  if (g_pdtim_cls > 0)
-    pdtim_cls_report();
+  pdtim_pct_report();
+  pdtim_cls_report();
   char rep[900];
   int u = 0;
   for (int k = 0; k < PDTIM_N && u < (int)sizeof(rep) - 110; k++) {
@@ -633,12 +579,6 @@ static _Atomic uint64_t g_llr_sat[2]   = {0, 0};
  * clipped LLR is a hard decision, and belief propagation on hard decisions cannot correct
  * anything. Measured mean |llr| on this receiver is 232-498, i.e. 2-4x that rail. */
 static _Atomic uint64_t g_llr_clip8[2] = {0, 0};
-/* The DMRSFO tracker's current SFO estimate, in ppm, for the correction stage below. Read-mostly
- * across consumer threads; a stale value only means one grant corrected with the previous estimate,
- * so no lock -- but _Atomic (relaxed), since a plain double read during the tracker's store is a data
- * race (N passivePdsch consumers, Task A7 follow-up). */
-static _Atomic double g_sfo_ppm_ema = 0.0;
-static double nr_pdsch_passive_sfo_ppm(void) { return atomic_load_explicit(&g_sfo_ppm_ema, memory_order_relaxed); }
 /* SIGNED sum, and the count of positive LLRs. mean|LLR| (above) is BLIND to a sign bias, and a bias
  * is exactly what would explain the dominant failure mode: all-zeros is a valid codeword for any
  * linear code, so LDPC settles on it whenever the LLRs systematically favour 0-bits. With one UE on
@@ -670,7 +610,6 @@ static _Atomic uint64_t g_rbhist[3][NR_PDSCH_RBHIST_BINS];
  * (wide fails only at high MCS) from a width bug (wide fails at every MCS). */
 static _Atomic uint64_t g_mcshist[2][3][32];
 static _Atomic uint64_t g_mcs_segs[32], g_mcs_segs_ok[32], g_mcs_tbs[32], g_mcs_rb[32];
-static _Atomic uint64_t g_rv_try[4][32], g_rv_ok[4][32]; // ISAC_RV_RETRY rescues by [rv][mcs]
 /* V2 HARQ soft-combining and PT-RS sweep state, declared here so the periodic report can read it. */
 static _Atomic uint64_t g_hq_retx_try, g_hq_retx_ok, g_hq_tbs_override, g_hq_busy_skip, g_hq_first;
 static _Atomic uint64_t g_hqb_evict, g_hqb_nospace; /* device HARQ blocks (GPU pass): sums dropped to make room, grants decoded without keeping theirs */
@@ -683,9 +622,7 @@ static _Atomic uint64_t g_hqb_evict, g_hqb_nospace; /* device HARQ blocks (GPU p
 static pthread_mutex_t g_harqc_lock = PTHREAD_MUTEX_INITIALIZER;
 static nr_harq_init_tx_table_t g_dl_harq_init;
 static pthread_mutex_t g_ptrs_lock = PTHREAD_MUTEX_INITIALIZER;
-static _Atomic int g_ptrs_arm_last = -2; // for the report
 static _Atomic int g_lbrm_nl = 4;        // TBS_LBRM layer term n_L, CELL-WIDE seed (4 = spec ceiling), see rnti_dec()
-static int g_ptrs_cell_arm = -1;         // PT-RS arm, CELL-WIDE seed; under g_ptrs_lock
 /* PER-RNTI n_L AND PT-RS ARM. Both are dedicated-RRC properties of the UE (maxMIMO-layers
  * capability, phaseTrackingRS) and only cell-common in practice, so each RNTI latches its own,
  * SEEDED from the cell-wide value, and the cell-wide value is promoted only once two distinct
@@ -710,21 +647,11 @@ static int vrbl_sweep_pick(const nr_vrbl_sweep_t *s) { return nr_arm_sweep_pick(
 static int vrbl_sweep_feed(nr_vrbl_sweep_t *s, int arm, bool tb_ok) { return nr_arm_sweep_feed(s, NR_VRBL_ARMS, arm, tb_ok); }
 /* PRG is EVIDENCE-TRIGGERED (final review C1): arm 0 (wideband = the exact pre-sweep contiguous path) is
  * used exclusively until it shows a sustained CRC deficit while the link is healthy, see
- * nr_arm_sweep_gated_t. ISAC_PRG_SWEEP=0 disables the sweep entirely (always arm 0, no bookkeeping). */
+ * nr_arm_sweep_gated_t. */
 static int prg_sweep_pick(const nr_prg_sweep_t *s) { return nr_arm_sweep_gated_pick(s, NR_PRG_ARMS); }
 static int prg_sweep_feed(nr_prg_sweep_t *s, int arm, bool tb_ok, bool link_ok)
 {
   return nr_arm_sweep_gated_feed(s, NR_PRG_ARMS, arm, tb_ok, link_ok);
-}
-static bool prg_sweep_enabled(void)
-{
-  static _Atomic int on = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-  if (on < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_PRG_SWEEP not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_PRG_SWEEP");
-    on = (e != NULL && atoi(e) == 0) ? 0 : 1;
-  }
-  return on;
 }
 /// arm -> PRB-bundling size (0/2/4), the field prg_sweep's arm index maps to.
 static uint8_t nr_prg_arm_value(int arm) { return arm == 2 ? 4 : (arm == 1 ? 2 : 0); }
@@ -734,20 +661,17 @@ static uint8_t nr_prg_arm_value(int arm) { return arm == 2 ? 4 : (arm == 1 ? 2 :
  * data-identity decision. SI-/RA-/P-RNTI grants never get a slot (rnti_sweepable()): those identities
  * are not UEs and carry no dedicated RRC configuration. ~2.1 KB/slot, 135 KB of BSS. */
 #define RNTI_DEC_MAX 64
-typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_ptrs_sweep_t ptrs; nr_vrbl_sweep_t vrbl; nr_prg_sweep_t prg; nr_scrambling_id_sweep_t data_id; } rnti_dec_t;
+typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_vrbl_sweep_t vrbl; nr_prg_sweep_t prg; nr_scrambling_id_sweep_t data_id; } rnti_dec_t;
 static rnti_dec_t g_rnti_dec[RNTI_DEC_MAX];
 static uint64_t g_rnti_dec_clock;
 /* rnti_class is nr_blind_rnti_class_t: 2 = SI, 3 = RA, 4 = P. */
-/* BLINDFIX F7 (ISAC_MCS_TABLE_EVID=1, default off): the MCS table of the cell from TB-CRC evidence instead of the config value.
+/* BLINDFIX F7: the MCS table of the cell from TB-CRC evidence instead of the config value.
  * A full-TB CRC pass under a DCI 1_1 grant supports every table that reads this MCS to the same (Qm, R) as the table the
  * decode used, and only counts when at least one table reads it differently (nbs_table_ev_*, sign test at alpha 1e-3). */
 static _Atomic uint32_t g_mcs_tbl_pass[3];
 static void mcs_table_evidence_feed(uint8_t mcs, uint8_t used)
 {
-  static int s_on = -1;
-  if (s_on < 0)
-    s_on = atoi(getenv("ISAC_MCS_TABLE_EVID") ?: "1") ? 1 : 0;
-  if (!s_on || used > 2)
+  if (used > 2)
     return;
   bool same[3], differs = false;
   for (int t = 0; t < 3; t++) {
@@ -777,8 +701,6 @@ static bool rnti_dec_evidence(const rnti_dec_t *r)
   if (r->nl || r->data_id.n > 0 || r->prg.explore || r->prg.s.latched >= 0 || r->vrbl.latched >= 0)
     return true;
   uint32_t tr = 0;
-  for (int a = 0; a < NR_PTRS_ARMS; a++)
-    tr += r->ptrs.tr[a];
   for (int a = 0; a < NR_ARM_SWEEP_MAX; a++)
     tr += r->vrbl.tr[a] + r->prg.s.tr[a];
   return tr >= NR_ARM_SWEEP_LATCH_MIN_OK;
@@ -811,8 +733,6 @@ static rnti_dec_t *rnti_dec_find(uint16_t rnti, bool create)
   memset(r, 0, sizeof(*r));
   r->rnti = rnti;
   r->touched = ++g_rnti_dec_clock;
-  nr_ptrs_sweep_init(&r->ptrs);
-  r->ptrs.latched = g_ptrs_cell_arm; // seed: a cell-wide arm, or -1 = sweep from scratch
   r->vrbl.latched = -1; // tr/ok already zeroed by the memset above
   nr_arm_sweep_gated_init(&r->prg);
   return r;
@@ -907,28 +827,6 @@ void nr_pdsch_passive_data_id_feed(uint16_t rnti, bool tb_crc_ok)
             r->data_id.pos == 0 ? " WRAPPED: every candidate failed once, starting over from the PCI" : "");
   }
   pthread_mutex_unlock(&g_ptrs_lock);
-}
-static int rnti_ptrs_pick(uint16_t rnti)
-{
-  pthread_mutex_lock(&g_ptrs_lock);
-  const int arm = nr_ptrs_sweep_pick(&rnti_dec(rnti)->ptrs);
-  pthread_mutex_unlock(&g_ptrs_lock);
-  return arm;
-}
-static int rnti_ptrs_feed(uint16_t rnti, int arm, bool tb_ok)
-{
-  if (!nr_cfg_epoch_work_current()) return -1;
-  pthread_mutex_lock(&g_ptrs_lock);
-  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_ptrs_lock); return -1; }
-  const int latched = nr_ptrs_sweep_feed(&rnti_dec(rnti)->ptrs, arm, tb_ok);
-  if (latched >= 0 && g_ptrs_cell_arm < 0)
-    for (int i = 0; i < RNTI_DEC_MAX; i++)
-      if (g_rnti_dec[i].rnti && g_rnti_dec[i].rnti != rnti && g_rnti_dec[i].ptrs.latched == latched) {
-        g_ptrs_cell_arm = latched;
-        break;
-      }
-  pthread_mutex_unlock(&g_ptrs_lock);
-  return latched;
 }
 static int rnti_vrbl_pick(uint16_t rnti)
 {
@@ -1076,55 +974,9 @@ static __thread uint32_t t_seg_K = 0, t_seg_F = 0, t_seg_C = 0, t_seg_Z = 0;
  * them has now been eliminated by measurement (EVM identical at 9.9 % and 78.1 % CRC), so if the
  * fault is a stream-offset problem it must show as one of these differing by outcome. */
 static __thread uint32_t t_seg_E = 0, t_seg_R = 0, t_seg_lbrm = 0, t_seg_BG = 0;
-static __thread char t_decode_cb[4096]; /* E:CRC per CB, '-' means not attempted */
 static __thread int t_decode_tdra_attempt;
-/* DECODE-RES: per-decode override of ISAC_CHEST_TINTERP (-1 = use the env flag). Set only by the paired TINT A/B and the
- * ISAC_PDSCH_TINTERP_RETRY arm, which re-demodulate the same samples with the channel-estimate time interpolation flipped. */
-static __thread int t_tinterp_override = -1;
-/* DECODE-RES ISAC_PDSCH_OWN_PDCCH_RM: TS 38.214 5.1.4.1 -- the PDSCH is not mapped to the REs of the PDCCH that scheduled it. A grant with S=0
- * on a CORESET of duration 1 loses the whole PRBs (12 REs, DM-RS included) of its own CCEs on symbol 0. Set only by the retry arm that
- * tries a hypothesised contiguous CRB range; consumed in passive_decode_body() through the SSB rate-matching plan (same per-symbol per-PRB
- * exclusion semantics). first_crb/last_crb are common RB indices. */
-static __thread struct { int on; int first_crb, last_crb; uint16_t symbols; uint8_t crb[275]; } t_own_pdcch = {0, 0, 0, 0, {0}};
-/* tinterp_row: hm = ha + t (hb - ha) over n int16 values (re/im interleaved), single precision, round half away from zero
- *   (lround's rule), saturated. O3 here only: the -O2 build does not vectorise it. Caller: ISAC_CHEST_TINTERP below. */
-static __attribute__((optimize("O3"))) void tinterp_row(const int16_t *restrict ha, const int16_t *restrict hb, int16_t *restrict hm,
-                                                        uint32_t n, float t)
-{
-  for (uint32_t k = 0; k < n; k++) {
-    float v = (float)ha[k] + t * ((float)hb[k] - (float)ha[k]);
-    v = fminf(fmaxf(v + copysignf(0.5f, v), -32768.f), 32767.f); /* branch-free: vectorises */
-    hm[k] = (int16_t)v;
-  }
-}
 
-/* chest_tinterp_global: ISAC_CHEST_TINTERP != 0 (cached). The unflipped state of the time interpolation. */
-static int chest_tinterp_global(void)
-{
-  static _Atomic int s_g = -1;
-  if (s_g < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_CHEST_TINTERP not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_CHEST_TINTERP");
-    s_g = (e != NULL && atoi(e) != 0) ? 1 : 0;
-  }
-  return s_g;
-}
 extern __thread bool nr_pdsch_decode_wide_mrc;
-extern __thread uint64_t nr_pdsch_decode_signs, nr_pdsch_decode_sign_errors;
-/* decode_diag_on: returns ISAC_PDSCH_DECODE_DIAG != 0 (cached atomically): enables the per-decode diagnostics (EVM accumulators, CB decode map).
- *   Used to arm the EVM accumulator and to print decode details. Callers: passive_ldpc_decode_core() and passive_decode_body().
- */
-static int decode_diag_on(void)
-{
-  static _Atomic int on = -1;
-  if (on < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_DECODE_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_PDSCH_DECODE_DIAG");
-    on = e && atoi(e) != 0;
-  }
-  return on;
-}
-
 static _Atomic int64_t  g_llr_sgnsum[2] = {0, 0};
 static _Atomic uint64_t g_llr_pos[2]    = {0, 0};
 /* Positive-rate split by BIT POSITION within each 16QAM symbol. nr_16qam_llr() emits 4 LLRs per
@@ -1317,21 +1169,6 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
       LOG_I(PHY, "SENSING: MCSHIST %s crc_ok%% by mcs: %s\n", w ? "WIDE(>=128prb)" : "NARROW(<128prb)", mb);
   }
   {
-    char rb[400];
-    size_t u = 0;
-    for (int m = 0; m < 32 && u < sizeof(rb) - 40; m++) {
-      const uint64_t t2 = atomic_load(&g_rv_try[2][m]);
-      if (t2 == 0)
-        continue;
-      u += snprintf(rb + u, sizeof(rb) - u, "mcs%d: rv2 %lu/%lu rv3 %lu/%lu rv1 %lu/%lu; ", m,
-                    (unsigned long)atomic_load(&g_rv_ok[2][m]), (unsigned long)t2,
-                    (unsigned long)atomic_load(&g_rv_ok[3][m]), (unsigned long)atomic_load(&g_rv_try[3][m]),
-                    (unsigned long)atomic_load(&g_rv_ok[1][m]), (unsigned long)atomic_load(&g_rv_try[1][m]));
-    }
-    if (u > 0)
-      LOG_I(PHY, "SENSING: RVRETRY rescued/tried by mcs: %s\n", rb);
-  }
-  if (nr_agnostic_v2() || harq_combine_on()) {
     uint64_t init_tx_hits, init_tx_evicts;
     pthread_mutex_lock(&g_harqc_lock);
     init_tx_hits   = g_dl_harq_init.hits;
@@ -1352,20 +1189,6 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
           (unsigned long)atomic_load(&g_llr_norm_shift[0]), (unsigned long)atomic_load(&g_llr_norm_shift[1]),
           (unsigned long)atomic_load(&g_llr_norm_shift[2]), (unsigned long)atomic_load(&g_llr_norm_shift[3]),
           (unsigned long)atomic_load(&g_llr_norm_shift[4]));
-    pthread_mutex_lock(&g_ptrs_lock);
-    nr_ptrs_sweep_t sum = {0};
-    int n_rnti = 0, n_latched = 0;
-    for (int i = 0; i < RNTI_DEC_MAX; i++) {
-      if (!g_rnti_dec[i].rnti)
-        continue;
-      n_rnti++;
-      n_latched += g_rnti_dec[i].ptrs.latched >= 0;
-      for (int a = 0; a < NR_PTRS_ARMS; a++) { sum.ok[a] += g_rnti_dec[i].ptrs.ok[a]; sum.tr[a] += g_rnti_dec[i].ptrs.tr[a]; }
-    }
-    LOG_I(PHY, "SENSING: PTRS_SWEEP cell_arm=%d rntis=%d latched=%d ok/trials per arm, all RNTIs [absent %u/%u | K2L1 %u/%u K2L2 %u/%u K2L4 %u/%u | K4L1 %u/%u K4L2 %u/%u K4L4 %u/%u]\n",
-          g_ptrs_cell_arm, n_rnti, n_latched, sum.ok[0], sum.tr[0], sum.ok[1], sum.tr[1], sum.ok[2], sum.tr[2],
-          sum.ok[3], sum.tr[3], sum.ok[4], sum.tr[4], sum.ok[5], sum.tr[5], sum.ok[6], sum.tr[6]);
-    pthread_mutex_unlock(&g_ptrs_lock);
   }
   {
     /* Density per RB as one digit 0-9 relative to the busiest RB in this window, plus the CRC-OK
@@ -1454,23 +1277,6 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
 
 }
 
-/// Bounded append for CHESTDIAG's report string. snprintf() returns the length it WOULD have
-/// written, so accumulating its return value directly walks the buffer once the text is truncated --
-/// which is easy to reach at Nl x nb_antennas_rx entries. Clamps to `cap - 1` instead.
-static void rep_append(char *buf, size_t cap, int *u, const char *fmt, ...)
-{
-  if (cap == 0 || *u < 0 || (size_t)*u >= cap - 1) {
-    return;
-  }
-  va_list ap;
-  va_start(ap, fmt);
-  const int n = vsnprintf(buf + *u, cap - (size_t)*u, fmt, ap);
-  va_end(ap);
-  if (n < 0) {
-    return;
-  }
-  *u = ((size_t)(*u + n) >= cap - 1) ? (int)(cap - 1) : (*u + n);
-}
 
 static __thread passive_harq_t g_harq; // zero-initialised per thread
 
@@ -1532,8 +1338,8 @@ static bool passive_harq_prepare(passive_harq_t *h, int n_rb_dl)
 typedef struct {
   _Atomic int busy;
   bool used, soft_valid;
-  uint16_t rnti, cell; /* cell: Nid_cell for SI soft combining (ISAC_SI_SOFTCOMBINE), 0 for every other process */
-  uint8_t pid, ndi, ncomb;
+  uint16_t rnti;
+  uint8_t pid, ndi;
   int64_t first_slot; /* absolute slot of the first transmission of the stored TB (a rescue retires only that TB) */
   uint32_t tbs;
   uint64_t last;
@@ -1546,7 +1352,6 @@ typedef struct {
   uint32_t gN, gKcz;
   nr_hq_blocks_t hb;
 } harqc_entry_t;
-#define NR_SI_COMB_MAX 8 /* one 160 ms SIB1 window: 8 repetitions at 20 ms */
 static harqc_entry_t g_harqc[NR_HARQC_N];
 /* g_harqc_lock and g_dl_harq_init (the reserved-MCS retransmission record that shares this lock)
  * are declared much earlier in this file, alongside g_hq_first and friends -- see the comment
@@ -1595,39 +1400,8 @@ static int hqb_ensure(harqc_entry_t *e, int C)
   pthread_mutex_unlock(&g_harqc_lock);
   return rc;
 }
-static __thread struct { int armed; uint16_t rnti; uint8_t pid, ndi; uint16_t cell; bool si; int64_t slot; } t_hq;
+static __thread struct { int armed; uint16_t rnti; uint8_t pid, ndi; int64_t slot; } t_hq;
 static __thread int16_t *t_hq_d = NULL;
-/* BRANCHFO residuals measured on this thread's current grant, committed only on a TB CRC pass. */
-static __thread bool t_brfo_pending = false;
-static __thread int t_brfo_nant = 0;
-static __thread double t_brfo_d[NR_DL_CHEST_MAX_ANT];
-static pthread_mutex_t s_brfo_lock = PTHREAD_MUTEX_INITIALIZER;
-static void brfo_commit(void)
-{
-  static double s_fo_corr[NR_DL_CHEST_MAX_ANT];
-  static _Atomic int s_brfo = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-  if (!t_brfo_pending)
-    return;
-  t_brfo_pending = false;
-  if (s_brfo < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_RX_BRANCH_FO not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_RX_BRANCH_FO");
-    s_brfo = (e != NULL) && (atoi(e) != 0); // default OFF (as before the port): on-air validation pending
-  }
-  if (!s_brfo)
-    return;
-  pthread_mutex_lock(&s_brfo_lock);
-  for (int a = 0; a < t_brfo_nant && a < NR_DL_CHEST_MAX_ANT; a++) {
-    /* INTEGRATE. `d` is the residual AFTER the correction already in the FEP, so the correction
-     * must accumulate it, not be replaced by it -- replacing settled at half the offset (measured
-     * -350..-700 Hz residual with the loop "on"). Gain 0.05/grant, clamp to the aliasing limit. */
-    s_fo_corr[a] -= 0.05 * t_brfo_d[a];
-    if (s_fo_corr[a] > 1500.0) s_fo_corr[a] = 1500.0;
-    if (s_fo_corr[a] < -1500.0) s_fo_corr[a] = -1500.0;
-    nr_ue_set_branch_fo_hz(a, s_fo_corr[a]);
-  }
-  pthread_mutex_unlock(&s_brfo_lock);
-}
 static __thread uint16_t t_csi_prb_map[NR_PRB_SET_MAX]; /* CSI-FULL: virtual -> physical PRB of a segmented grant */
 /* CSI-FULL: the real CRB per virtual RB of a segmented grant, for the extractor (nr_dlsch_csi_prb_map); the caller clears it after the demod */
 static void gp_seg_csi_map(const nr_prb_seg_t *seg, int nseg, const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, const freq_alloc_bitmap_t *freq_alloc)
@@ -1644,23 +1418,12 @@ static __thread bool t_probe_first_seg = false; /* decode segment 0 only; outcom
 static __thread bool t_probe_seg_ok = false;
 void nr_pdsch_passive_probe_mode(bool on) { t_probe_first_seg = on; t_probe_seg_ok = false; }
 static bool pdtim_is_probe(void) { return t_probe_first_seg; }
-static __thread bool t_ptrs_sweep_allow = true;
-void nr_pdsch_passive_ptrs_sweep_allow(bool on) { t_ptrs_sweep_allow = on; }
+void nr_pdsch_passive_ptrs_sweep_allow(bool on) { (void)on; } /* NEEDS: callers in nr_pdsch_passive_queue.c and the declaration in nr_pdsch_passive_decode.h go, the PT-RS sweep is deleted */
 bool nr_pdsch_passive_probe_outcome(void) { return t_probe_seg_ok; }
 
 static __thread const int16_t *t_last_llr = NULL;
 static __thread uint32_t t_last_G = 0;
-/* Probe-equivalence rerun (ISAC_TD_PROBE_EQUIV_CHECK): process the whole slot despite probe mode, and
- * neither read nor fill the chest cache, so the reference is a cache-free full-slot decode. */
-static __thread bool t_probe_no_horizon = false, t_chest_bypass = false;
-static __thread int t_last_probe_horizon = -1, t_last_chest_hit = 0; /* for the PROBE_EQUIV log */
-static __thread double t_last_fep_fo = 0.0; /* FEP frequency offset of the last decode (PROBE_EQUIV log) */
-/* Mode-2 chest snapshot: every (layer x antenna) row at every DM-RS symbol as the chest stage leaves it
- * (before any post-processing), so a hit can be compared row for row with a miss -- the non-planned
- * rows too, which DMRSFO (row 0), the branch gate, CHESTDIAG and EQDIAG read. */
-static __thread bool t_eq_snap = false;
-static __thread c16_t *t_eq_snap_buf = NULL;
-static __thread size_t t_eq_snap_cap = 0, t_eq_snap_n = 0;
+static __thread double t_last_fep_fo = 0.0; /* FEP frequency offset of the last decode (the recovery arms re-use it) */
 uint32_t nr_pdsch_passive_last_llr(const int16_t **p) { *p = t_last_llr; return t_last_G; }
 /* RECOVERY_ASYNC (Task 6): 1 = consumer: a failed first pass whose recovery arms would run is returned as it is and flagged deferred;
  * 2 = the pdschRecov worker: runs the arms (S toggle first, no backlog yield). 0 = unchanged behaviour. */
@@ -1669,7 +1432,7 @@ static __thread bool t_recov_deferred;
 void nr_pdsch_passive_recov_mode(int mode) { t_recov_mode = mode; t_recov_deferred = false; }
 bool nr_pdsch_passive_recov_deferred(void) { return t_recov_deferred; }
 /* retry arms vs HARQ combining: allowed inline only without combining; with it only in the async lane (nr_hq_retry.h) */
-#define RETRY_ARMS_OK() nr_hq_retry_lane(harq_combine_on(), t_recov_mode)
+#define RETRY_ARMS_OK() nr_hq_retry_lane(true, t_recov_mode)
 static __thread c16_t **t_owned_iq;
 static __thread int t_owned_slot = -1;
 static __thread uint64_t t_fep_done_ns;
@@ -1716,14 +1479,7 @@ static __thread bool t_gw_used = false, t_gw_ready = false; /* last decode: LLRs
 /* Reruns (equivalence checks, the lazy computation): no learning-state side effect -- no PT-RS / PRG
  * pick, no HARQ soft combining, no sweep feed, no LBRM latch, no BRANCHFO commit, no HARQ record. */
 static __thread bool t_quiet = false;
-static __thread bool t_qam_ab_alt; /* tentative: defined (false) below; read by the GPUPASS retry gate */
 static __thread bool t_last_hq_retx = false; /* last decode combined a retransmission into a soft buffer */
-/* CB0 capture of the next LDPC call (GW_EQUIV / PROBE_EQUIV_GW): the rate-de-matched code block 0 the
- * segment decoder built (TB d buffer, r = 0) and its LDPC verdict. */
-static __thread bool t_cap_req = false, t_cap_have = false, t_cap_seg0_ok = false;
-static __thread int t_cap_decoder = 0; /* decoder_used of the captured decode (nr_td_decoder_t) */
-static __thread int16_t *t_cap_d = NULL;
-static __thread uint32_t t_cap_dlen = 0, t_cap_dcap = 0;
 
 /* Published with each entry: what the skipped stages produced that the rest of the decode reads. */
 typedef struct {
@@ -1766,9 +1522,6 @@ static uint64_t gw_fingerprint(const fapi_nr_dl_config_dlsch_pdu_rel15_t *p, con
   uint64_t fob; memcpy(&fob, &fo, sizeof(fob)); GWFP(fob);
   { extern __thread int nr_dlsch_mrc_mode_override, nr_dlsch_irc_override;
     GWFP(nr_dlsch_mrc_mode_override + 1); GWFP(nr_dlsch_irc_override + 1); } /* T26d: LLRs depend on the receiver */
-  { extern __thread int nr_dlsch_qam_mode_override; GWFP(nr_dlsch_qam_mode_override + 1); } /* QAM-FIX A/B arm */
-  GWFP(t_tinterp_override + 1); /* DECODE-RES: TINT A/B / retry arm changes the channel estimate */
-  { uint64_t hh_ = 0; if (t_own_pdcch.on) for (int i_ = 0; i_ < 275; i_++) hh_ = hh_ * 1099511628211ull + t_own_pdcch.crb[i_] + 1; GWFP(hh_); } /* DECODE-RES own-PDCCH exclusion */
   { uint64_t hh_ = 0; if (nr_ssb_rm_extra.crb) { hh_ = nr_ssb_rm_extra.symbols; for (int i_ = 0; i_ < 275; i_++) hh_ = hh_ * 1099511628211ull + nr_ssb_rm_extra.crb[i_] + 1; } GWFP(hh_); } /* WIDE-S0 PDCCH exclusion */
   GWFP(nr_dlsch_csi_rb_extent()); /* LOW-MCS: CSI-RS exclusion extent changes the RE set */
 #undef GWFP
@@ -1820,12 +1573,7 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
   job->nscid = (uint8_t)pdu->nscid;
   job->dmrs_ref_rb = (uint16_t)(pdu->refPoint ? pdu->BWPStart : 0); /* rb_offset = first_rb + (refPoint ? 0 : BWPStart) */
   job->slot = (uint8_t)slot_rx; /* n_s,f for c_init, as proc->nr_slot_rx in the CPU chest */
-  {
-    static _Atomic int s_tinterp = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-    /* DEFERRED/DO NOT USE: ISAC_CHEST_TINTERP not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (s_tinterp < 0) { const char *e = getenv("ISAC_CHEST_TINTERP"); s_tinterp = (e != NULL && atoi(e) != 0) ? 1 : 0; }
-    job->time_interp = (uint8_t)(t_tinterp_override >= 0 ? t_tinterp_override : s_tinterp);
-  }
+  job->time_interp = 0;
   if (probe) { /* code block 0 plus one symbol of slack, as the CPU probe horizon */
     const uint8_t nb_re_dmrs = get_num_dmrs_re_per_rb(pdu->dmrsConfigType, pdu->n_dmrs_cdm_groups);
     const uint16_t dmrs_len = get_num_dmrs(pdu->dlDmrsSymbPos);
@@ -1844,13 +1592,13 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
 static __thread bool t_hq_clear = true;
 static __thread uint32_t t_hq_A = 0;
 
-static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid, uint16_t cell)
+static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid)
 {
   pthread_mutex_lock(&g_harqc_lock);
   harqc_entry_t *hit = NULL, *lru = NULL;
   for (int i = 0; i < NR_HARQC_N; i++) {
     harqc_entry_t *e = &g_harqc[i];
-    if (e->used && e->rnti == rnti && e->pid == pid && e->cell == cell) { hit = e; break; }
+    if (e->used && e->rnti == rnti && e->pid == pid) { hit = e; break; }
     if (atomic_load(&e->busy)) continue;
     if (lru == NULL || !e->used || (lru->used && e->last < lru->last)) lru = e;
   }
@@ -1862,7 +1610,7 @@ static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid, uint16_t cell)
   }
   if (!hit) {
     hqb_release(e);
-    e->used = true; e->rnti = rnti; e->pid = pid; e->cell = cell; e->ncomb = 0; e->soft_valid = false; e->tbs = 0; e->on_gpu = false;
+    e->used = true; e->rnti = rnti; e->pid = pid; e->soft_valid = false; e->tbs = 0; e->on_gpu = false;
   }
   e->last = ++g_harqc_clock;
   pthread_mutex_unlock(&g_harqc_lock);
@@ -1878,7 +1626,7 @@ static void harqc_rescued(uint16_t rnti, uint8_t pid, uint8_t ndi, int64_t job_s
   harqc_entry_t *e = NULL;
   pthread_mutex_lock(&g_harqc_lock);
   for (int i = 0; i < NR_HARQC_N && !e; i++)
-    if (g_harqc[i].used && g_harqc[i].rnti == rnti && g_harqc[i].pid == pid && g_harqc[i].cell == 0)
+    if (g_harqc[i].used && g_harqc[i].rnti == rnti && g_harqc[i].pid == pid)
       e = &g_harqc[i];
   pthread_mutex_unlock(&g_harqc_lock);
   if (e == NULL || !nr_hq_lock_wait(&e->busy, hq_nap, 20))
@@ -1890,20 +1638,9 @@ static void harqc_rescued(uint16_t rnti, uint8_t pid, uint8_t ndi, int64_t job_s
   atomic_store(&e->busy, 0);
 }
 
-/* ISAC_PDSCH_PROBE_C1=1 (implied by ISAC_PDSCH_SOLVER=1): the outcome of a probe of a one-code-block TB is recorded (T26b, below) */
-static bool probe_c1_on(void)
-{
-  static _Atomic int s_probe_c1 = -1;
-  if (s_probe_c1 < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_PROBE_C1 not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_PDSCH_PROBE_C1");
-    s_probe_c1 = ((e && atoi(e) != 0) || nr_pdsch_solver_enabled()) ? 1 : 0;
-  }
-  return s_probe_c1 == 1;
-}
 /* passive_ldpc_decode_core: LDPC stage of one passive decode: builds the TB parameters (segmentation, E, rate matching, HARQ buffer) and runs the LDPC decoder.
- *   Returns true when every segment decodes and passes CRC. A one-code-block probe (ISAC_PDSCH_PROBE_C1) uses the TB CRC of its single block.
- *   Side effects: updates the per-thread HARQ buffer and decoder-used tag; ISAC_LDPC_ITERS sets the iteration count; ISAC_PDSCH_TBPARM logs the parameter set.
+ *   Returns true when every segment decodes and passes CRC. A one-code-block probe uses the TB CRC of its single block.
+ *   Side effects: updates the per-thread HARQ buffer and decoder-used tag.
  *   Caller: passive_ldpc_decode().
  */
 static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
@@ -1947,17 +1684,9 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
     return false;
   }
 
-  /* ISAC_LDPC_ITERS=<n> (cherry-picked from csd/snr-audit 2e63cdb3ee, default off = 8, the init_nr_ue_dlsch() default): the OAI
-   * int8 flooding min-sum decoder stops at 8 iterations; at low SNR (the passive receiver's 6-10 dB grants) that leaves coding
-   * gain on the table. Only the full TB decode uses it (a CB0 probe keeps the batch's own limit). */
-  {
-    static _Atomic int s_iters = -1;
-    /* DEFERRED/DO NOT USE: ISAC_LDPC_ITERS not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (s_iters < 0) { const char *e = getenv("ISAC_LDPC_ITERS"); int v = e ? atoi(e) : 8; s_iters = (v >= 1 && v <= 255) ? v : 8; }
-    TB_parameters.max_ldpc_iterations = (uint8_t)s_iters;
-    extern __thread int nr_pdsch_ldpc_iters_override;
-    if (nr_pdsch_ldpc_iters_override > 0) TB_parameters.max_ldpc_iterations = (uint8_t)nr_pdsch_ldpc_iters_override; /* ISAC_LDPC_ITERS_AB */
-  }
+  TB_parameters.max_ldpc_iterations = 8; /* the OAI int8 flooding min-sum default; only the full TB decode may raise it */
+  extern __thread int nr_pdsch_ldpc_iters_override;
+  if (nr_pdsch_ldpc_iters_override > 0) TB_parameters.max_ldpc_iterations = (uint8_t)nr_pdsch_ldpc_iters_override; /* ISAC_LDPC_ITERS_AB */
   TB_parameters.rv_index = cw->rv;
   TB_parameters.tbslbrm = dlsch_config->tbslbrm;
   TB_parameters.abort_decode = &h->abort_decode;
@@ -1992,32 +1721,6 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
       break;
     }
   }
-  /* SEGDIAG (ISAC_PDSCH_TBPARM=1): the full rate-matching / segmentation parameter set, on ONE
-   * line, so an MCS that fails deterministically can be diffed against one that succeeds without
-   * pairing log lines. Everything the LDPC decoder is handed is here. */
-  {
-    static _Atomic int s_sd = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-    if (s_sd < 0)
-      /* DEFERRED/DO NOT USE: ISAC_PDSCH_TBPARM not in the frozen config t26zE (2026-10-18); slated for removal */
-      s_sd = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
-    /* RATE-LIMITED (2026-08-25). This fired on EVERY decode: 30204 lines / 16 MB on a 48 s run,
-     * and it shares ISAC_PDSCH_TBPARM with CHESTDIAG, which is capped at 12 -- so wanting the
-     * 12 per-branch SNR samples used to cost the full SEGDIAG flood. The handover's 27.3 records an
-     * instrument firing every occasion costing 163 MB/run and CAUSING the timing runaway it was
-     * added to diagnose. 1-in-500 gives ~60 samples/run, and nr_pdsch_passive_parmset_dump() already
-     * records every DISTINCT parameter tuple with counts, so nothing is lost by sampling. */
-    static __thread unsigned long s_sd_n = 0;
-    if (s_sd && (s_sd_n++ % 500) == 0)
-      LOG_I(PHY,
-            "SENSING: SEGDIAG mcs=%u BG=%u A=%u G=%u C=%u K=%u Z=%u F=%u E=%u E2=%u frE2=%u R=%u R2=%u "
-            "Qm=%u nl=%u rv=%u tbslbrm=%u nb_rb=%d llrLen=%d\n",
-            (unsigned)cw->mcs, (unsigned)TB_parameters.BG, (unsigned)TB_parameters.A, (unsigned)TB_parameters.G,
-            (unsigned)TB_parameters.C, (unsigned)TB_parameters.K, (unsigned)TB_parameters.Z,
-            (unsigned)TB_parameters.F, (unsigned)TB_parameters.E, (unsigned)TB_parameters.E2,
-            (unsigned)TB_parameters.first_rE2, (unsigned)TB_parameters.R, (unsigned)TB_parameters.R2,
-            (unsigned)TB_parameters.Qm, (unsigned)TB_parameters.nb_layers, (unsigned)TB_parameters.rv_index,
-            (unsigned)TB_parameters.tbslbrm, TB_parameters.nb_rb, h->llrLen);
-  }
 
   TB_parameters.d_to_be_cleared = t_hq_clear; // false only for a retransmission being combined
   /* LAYOUT PROBE (2026-09-15). A DCI-layout trial does not need the whole transport block: the first
@@ -2032,10 +1735,8 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
   const uint32_t C_full = TB_parameters.C;
   TB_parameters.nb_segments_to_decode = (t_probe_first_seg && C_full > 1) ? 1 : 0;
   const uint32_t C_dec = TB_parameters.nb_segments_to_decode ? 1 : C_full;
-  if (g_pdtim_pct > 0) {
-    atomic_fetch_add_explicit(&g_pdtim_ldpc_tb, 1, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_pdtim_ldpc_cb, C_dec, memory_order_relaxed);
-  }
+  atomic_fetch_add_explicit(&g_pdtim_ldpc_tb, 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_pdtim_ldpc_cb, C_dec, memory_order_relaxed);
   for (uint32_t r = 0; r < TB_parameters.C; r++) {
     TB_parameters.decodeSuccess[r] = false;
   }
@@ -2057,32 +1758,8 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
     return false;
   }
   t_decoder_used_last = TB_parameters.decoder_used;
-  if (decode_diag_on()) {
-    size_t used = 0;
-    t_decode_cb[0] = 0;
-    for (uint32_t r = 0; r < C_full && used + 32 < sizeof(t_decode_cb); r++)
-      used += snprintf(t_decode_cb + used, sizeof(t_decode_cb) - used, "%s%u:%c", r ? "," : "",
-                       nr_get_E(G, C_full, cw->qamModOrder, cw->Nl, r),
-                       r < C_dec ? (TB_parameters.decodeSuccess[r] ? '1' : '0') : '-');
-  }
   atomic_fetch_add(&g_ldpc_tb_dec[TB_parameters.decoder_used < 3 ? TB_parameters.decoder_used : 0], 1);
   LOG_D(NR_PHY, "SENSING: passive PDSCH decode decoder_used=%u (1=CPU min-sum, 2=CUDA normalised min-sum x2 iterations)\n", TB_parameters.decoder_used);
-  if (t_cap_req) { /* GrantWork equivalence checks: code block 0 as the segment decoder de-matched it */
-    t_cap_req = false;
-    const uint32_t dlen = (TB_parameters.BG == 1 ? 68u : 52u) * TB_parameters.Z;
-    if (t_cap_dcap < dlen) {
-      free(t_cap_d);
-      t_cap_d = malloc((size_t)dlen * sizeof(int16_t));
-      t_cap_dcap = t_cap_d ? dlen : 0;
-    }
-    if (t_cap_d) {
-      memcpy(t_cap_d, TB_parameters.d, (size_t)dlen * sizeof(int16_t));
-      t_cap_dlen = dlen;
-      t_cap_seg0_ok = TB_parameters.decodeSuccess[0];
-      t_cap_decoder = TB_parameters.decoder_used;
-      t_cap_have = true;
-    }
-  }
 
   {
     uint32_t seg_ok = 0;
@@ -2105,7 +1782,7 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
      * recorded (only C > 1 set t_probe_seg_ok), so every single-CB probe read "failed" -- measured on the PCI 415
      * replay: probes whose dumped LLRs decode offline at LDPC iteration 1 reported CRC fail. ISAC_PDSCH_PROBE_C1=1
      * (implied by ISAC_PDSCH_SOLVER=1) records it, same all-zero guard, still never a decoded TB. */
-    if (t_probe_first_seg && (C_full > 1 || probe_c1_on())) {
+    if (t_probe_first_seg) { /* a probe of a one-code-block TB records its outcome too */
       t_probe_seg_ok = (seg_ok == 1);
       /* The all-zero guard the full-TB path applies, on segment 0: an all-zero code block carries a
        * zero CRC24B, so LLRs that are mostly "0" (wrong layout, wrong scrambling, empty grant) pass
@@ -2171,7 +1848,7 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
  * layout hypothesis (junk NDI/PID) cannot poison a fresh decode; it is admitted only once THIS cell has shown it retransmits at rv 0 -- same NDI with rv 0 on a
  * still-undecoded process, seen NR_HARQC_RV0_EVIDENCE times (the census the HARQC line reports). *A: the TBS to decode with (a retransmission has its first
  * transmission's TBS, the rule requires it equal). */
-static int harq_retx_decide(const harqc_entry_t *e, const fapi_nr_dl_cw_info_t *cw, bool si, uint8_t ndi, uint32_t *A)
+static int harq_retx_decide(const harqc_entry_t *e, const fapi_nr_dl_cw_info_t *cw, uint8_t ndi, uint32_t *A)
 {
   static _Atomic uint32_t s_rv0_retx_seen;
   const bool same_ndi = e->soft_valid && e->ndi == ndi;
@@ -2180,10 +1857,6 @@ static int harq_retx_decide(const harqc_entry_t *e, const fapi_nr_dl_cw_info_t *
     atomic_fetch_add(&s_rv0_retx_seen, 1);
   const bool rv0_admitted = atomic_load(&s_rv0_retx_seen) >= NR_HARQC_RV0_EVIDENCE;
   *A = cw->TBS;
-  /* SI soft combining: the SIB1 TB repeats unchanged, so any grant with the stored TBS combines (NDI of an SI DCI is reserved, rv 0 included), at most
-   * NR_SI_COMB_MAX in a row so a changed SIB1 cannot poison the buffer for longer than one repetition window. */
-  if (si)
-    return (e->soft_valid && e->tbs == cw->TBS && e->ncomb < NR_SI_COMB_MAX) ? 1 : 0;
   const int d = nr_hq_retx_rule(e->soft_valid, e->ndi, e->tbs, ndi, cw->rv, cw->TBS, rv0_admitted);
   if (d < 0)
     atomic_fetch_add(&g_hq_tbs_override, 1); /* HARQC "tbs_from_first": now the count of same-NDI grants with another TBS, decoded alone */
@@ -2206,7 +1879,7 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
   if (!t_hq.armed || t_probe_first_seg || t_quiet)
     return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
   t_hq.armed = 0; /* first call per TB only */
-  harqc_entry_t *e = harqc_acquire(t_hq.rnti, t_hq.pid, t_hq.si ? t_hq.cell : 0);
+  harqc_entry_t *e = harqc_acquire(t_hq.rnti, t_hq.pid);
   if (e == NULL) {
     atomic_fetch_add(&g_hq_busy_skip, 1);
     return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
@@ -2223,7 +1896,7 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
     return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
   }
   uint32_t A = cw->TBS;
-  const int hq_d = harq_retx_decide(e, cw, t_hq.si, t_hq.ndi, &A);
+  const int hq_d = harq_retx_decide(e, cw, t_hq.ndi, &A);
   if (hq_d < 0) { /* not this process's TB: decoded alone, the stored sum stays for its own retransmission */
     atomic_store(&e->busy, 0);
     return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
@@ -2253,16 +1926,6 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
   if (!retx) e->first_slot = t_hq.slot;
   e->tbs = A;
   e->soft_valid = !ok; /* keep the soft bits only while the TB is still undecoded */
-  if (t_hq.si) {
-    static _Atomic unsigned long n_si_first, n_si_first_ok, n_si_comb, n_si_comb_ok;
-    e->ncomb = retx ? (uint8_t)(e->ncomb + 1) : 0;
-    const unsigned long tot = atomic_fetch_add_explicit(retx ? &n_si_comb : &n_si_first, 1, memory_order_relaxed) + 1;
-    if (ok) atomic_fetch_add_explicit(retx ? &n_si_comb_ok : &n_si_first_ok, 1, memory_order_relaxed);
-    if (ok && retx)
-      LOG_I(PHY, "SENSING: SI_SOFTCOMBINE cell %u: TB CRC ok after %u combined repetitions (rv %u)\n", (unsigned)t_hq.cell, (unsigned)e->ncomb + 1u, (unsigned)cw->rv);
-    if ((tot % 64) == 0)
-      LOG_I(PHY, "SENSING: SI_SOFTCOMBINE stats first=%lu ok=%lu | combined=%lu ok=%lu\n", atomic_load(&n_si_first), atomic_load(&n_si_first_ok), atomic_load(&n_si_comb), atomic_load(&n_si_comb_ok));
-  }
   atomic_store(&e->busy, 0);
   return ok;
 }
@@ -2445,96 +2108,10 @@ static void share_chest_band(const freq_alloc_bitmap_t *fa, const fapi_nr_dl_con
  * this file pulls in PHY_VARS_NR_UE/NFAPI and can't link into the lightweight test_nr_pdsch_prb_set
  * target. Declared via nr_pdsch_passive_decode.h's include of nr_pdsch_prb_set.h. */
 
-/* pdcch_occ_diag: WIDE-S0 diagnostic (ISAC_PDSCH_PDCCH_OCC_DIAG=1, default off; needs ISAC_PDSCH_DECODE_DIAG=1 ISAC_PDSCH_EVM_RB=1).
- *   For an S<=1 grant, per RB of the allocation on symbols 0 and 1: the coherence of the received REs at the PDCCH DM-RS positions
- *   (subcarriers 1, 5, 9; TS 38.211 7.4.1.3) with the PDCCH DM-RS sequence of each nID in ISAC_PDSCH_PDCCH_OCC_IDS (comma list; the PCI
- *   is always tried), reference point CRB 0. |sum y p*|^2 / (sum|y|^2 sum|p|^2) summed over the receive antennas: ~1 on a PDCCH REG of that
- *   nID, ~1/3 on PDSCH data. Printed per RB as coherence x 10 (o0/o1), the same over 4-RB blocks (b0), and e0 = symbol-0 over symbol-1 power
- *   (5 + dB/2). Line DECODEPDCCHOCC. Reads rxdataF only. */
-static void pdcch_occ_diag(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
-                           const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant,
-                           c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
-{
-  static _Atomic int s_on = -1;
-  static int s_ids[8], s_nid = 0;
-  if (s_on < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_PDCCH_OCC_IDS not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_PDSCH_PDCCH_OCC_IDS");
-    for (const char *p = e; p && *p && s_nid < 7;) {
-      s_ids[s_nid++] = atoi(p);
-      p = strchr(p, ',');
-      if (p) p++;
-    }
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_PDCCH_OCC_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
-    s_on = getenv("ISAC_PDSCH_PDCCH_OCC_DIAG") && atoi(getenv("ISAC_PDSCH_PDCCH_OCC_DIAG")) ? 1 : 0;
-  }
-  if (!s_on || cfg->start_symbol > 1 || fa->num_rbs < 1 || fa->num_rbs > 275)
-    return;
-  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-  int ids[8], n = 0;
-  ids[n++] = fp->Nid_cell;
-  for (int i = 0; i < s_nid; i++)
-    if (s_ids[i] != fp->Nid_cell) ids[n++] = s_ids[i];
-  const int nrb_grid = fp->N_RB_DL < NR_PDCCH_RANK_MAX_RB ? fp->N_RB_DL : NR_PDCCH_RANK_MAX_RB;
-  for (int i = 0; i < n; i++) {
-    char m[2][280], b4[2][280];
-    for (int s = 0; s < 2; s++) {
-      static __thread nr_pdcch_dmrs_rank_grid_t g[4];
-      double num[276] = {0}, den[276] = {0};
-      for (int a = 0; a < fp->nb_antennas_rx && a < 4; a++) {
-        if (!nr_pdcch_dmrs_rank_grid(&g[a], rxdataF[a], fp->ofdm_symbol_size, fp->first_carrier_offset, nrb_grid, (uint16_t)ids[i],
-                                     proc->nr_slot_rx, s, 1, 0))
-          continue;
-        for (int r = 0; r < fa->num_rbs; r++) {
-          const int crb = cfg->BWPStart + fa->first_rb + r;
-          if (crb < 0 || crb >= nrb_grid) continue;
-          const double re = g[a].re[0][crb + 1] - g[a].re[0][crb], im = g[a].im[0][crb + 1] - g[a].im[0][crb];
-          num[r] += re * re + im * im;
-          den[r] += (g[a].py[0][crb + 1] - g[a].py[0][crb]) * (g[a].px[0][crb + 1] - g[a].px[0][crb]);
-        }
-      }
-      /* per RB (o) and per 4-RB block aligned on CRB multiples of 4 (b): coherent per RB, power-summed over the block's RBs and antennas */
-      double gn[70] = {0}, gd[70] = {0};
-      for (int r = 0; r < fa->num_rbs; r++) {
-        const int q = (cfg->BWPStart + fa->first_rb + r) / 4;
-        if (q < 70) { gn[q] += num[r]; gd[q] += den[r]; }
-      }
-      for (int r = 0; r < fa->num_rbs; r++) {
-        const int q = (cfg->BWPStart + fa->first_rb + r) / 4;
-        const double c = den[r] > 0 ? num[r] / den[r] : 0, cb = q < 70 && gd[q] > 0 ? gn[q] / gd[q] : 0;
-        m[s][r] = (char)('0' + (c >= 0.9 ? 9 : (int)(c * 10)));
-        b4[s][r] = (char)('0' + (cb >= 0.9 ? 9 : (int)(cb * 10)));
-      }
-      b4[s][fa->num_rbs] = 0;
-      m[s][fa->num_rbs] = 0;
-    }
-    /* e0: symbol-0 power over symbol-1 power per RB, all 12 subcarriers and all antennas, as 5 + dB/2 (5 = equal, 0 = >= 10 dB weaker) */
-    char e0[280];
-    for (int r = 0; r < fa->num_rbs; r++) {
-      double p0 = 0, p1 = 0;
-      const int crb = cfg->BWPStart + fa->first_rb + r;
-      for (int a = 0; a < fp->nb_antennas_rx && a < 4; a++)
-        for (int k = 0; k < 12; k++) {
-          const int sc = (fp->first_carrier_offset + crb * 12 + k) % fp->ofdm_symbol_size;
-          const c16_t y0 = rxdataF[a][sc], y1 = rxdataF[a][fp->ofdm_symbol_size + sc];
-          p0 += (double)y0.r * y0.r + (double)y0.i * y0.i;
-          p1 += (double)y1.r * y1.r + (double)y1.i * y1.i;
-        }
-      const double db = p0 > 0 && p1 > 0 ? 10.0 * log10(p0 / p1) : -99.0;
-      const int v = 5 + (int)lrint(db / 2.0);
-      e0[r] = (char)('0' + (v < 0 ? 0 : v > 9 ? 9 : v));
-    }
-    e0[fa->num_rbs] = 0;
-    LOG_I(PHY, "SENSING: DECODEPDCCHOCC rnti=0x%04x fs=%d.%d abs=%ld S=%u attempt=%d nid=%d rb=%u+%u o0=%s o1=%s b0=%s e0=%s\n", grant->rnti,
-          proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, cfg->start_symbol, t_decode_tdra_attempt, ids[i], fa->first_rb,
-          fa->num_rbs, m[0], m[1], b4[0], e0);
-  }
-}
 
 /* passive_decode_body: one complete passive PDSCH decode of a grant: FEP, channel estimation, equaliser, demodulation (LLRs) and LDPC, in that order.
- *   Starts with the PRG hypothesis (ISAC_PRG_SWEEP), the TBS/LBRM derivation and the GrantWork lookup (skips FEP/chest/LLR when a READY entry exists).
- *   Stages: FEP per symbol with per-antenna parallelism; channel estimate (ISAC_CHEST_*, ISAC_RX_IRC); demodulation (nr_rx_pdsch); LLR fill; LDPC via passive_ldpc_decode().
- *   Other flags read here: ISAC_PTRS_K, ISAC_XANT, ISAC_DC_FIX, ISAC_RX_NVAR_FIX, ISAC_RX_ML_2L, ISAC_PDSCH_EVM, ISAC_PDSCH_LLR_DUMP, ISAC_LLR_SCALE, ISAC_RV_RETRY.
+ *   Starts with the PRG hypothesis (PRG sweep), the TBS/LBRM derivation and the GrantWork lookup (skips FEP/chest/LLR when a READY entry exists).
+ *   Stages: FEP per symbol with per-antenna parallelism; channel estimate; demodulation (nr_rx_pdsch); LLR fill; LDPC via passive_ldpc_decode().
  *   Writes the result to *out and its status (CRC_OK / CRC_FAIL / UNSUPPORTED). Caller: passive_decode_retry() only.
  */
 /* GPUPASS: per-consumer host buffers, allocated and prefaulted at consumer start (before the RX fence), never on the pass path */
@@ -2586,132 +2163,14 @@ static uint64_t gp_llr_hash(const int16_t *p, uint32_t n)
   return h;
 }
 
-/* ---- GPUPASS (Task 4): state shared with the graph pass's commit ------------------------------------------------------------------------------------------
- * The DM-RS FO/SFO tracker and the per-branch FO estimator keep their EMA state at file scope so that a decode the graph pass took (its chest-post kernel hands
- * the exact sums over) updates the same state as the host loops of the old path. */
-static _Atomic uint64_t s_dfo_n = 0, s_sfo_n = 0, s_dfo_rej = 0;
-static pthread_mutex_t s_dfo_lock = PTHREAD_MUTEX_INITIALIZER;
-static double s_cfo_ema = 0.0, s_sfo_ema = 0.0;
-static _Atomic uint64_t s_fo_n = 0;
-static double s_fo_ema[NR_DL_CHEST_MAX_ANT];
-
-/* The EMA part of the DMRSFO block, from the chest-post kernel's flags and values (diagnostics only: ISAC_SFO_CORRECT and ISAC_DMRS_FO_APPLY keep the pass off). */
-static void gp_dmrsfo_commit(const nr_gpu_chest_post_out_t *p, uint32_t n_rb_dl)
-{
-  if (p->flags & NR_GPU_POST_FO_REJECTED) {
-    atomic_fetch_add(&s_dfo_rej, 1);
-    return;
-  }
-  if (!(p->flags & NR_GPU_POST_FO_VALID))
-    return;
-  const bool sfo_measured = (p->flags & NR_GPU_POST_SFO_MEASURED) != 0;
-  const uint64_t dn = atomic_fetch_add(&s_dfo_n, 1);
-  pthread_mutex_lock(&s_dfo_lock);
-  s_cfo_ema = (dn == 0) ? (double)p->cfo_hz : (0.99 * s_cfo_ema + 0.01 * (double)p->cfo_hz);
-  if (sfo_measured) {
-    const double dk_ref = (double)n_rb_dl * 12.0 / 2.0;
-    double rel = (dk_ref > 0.0) ? ((double)p->sfo_dk / dk_ref) : 0.0;
-    rel = rel * rel;
-    if (rel > 1.0)
-      rel = 1.0;
-    const double a = 0.01 * rel;
-    const uint64_t sn = atomic_fetch_add(&s_sfo_n, 1);
-    if (sn == 0 || (s_sfo_ema == 0.0 && rel > 0.5))
-      s_sfo_ema = (double)p->sfo_ppm;
-    else
-      s_sfo_ema = (1.0 - a) * s_sfo_ema + a * (double)p->sfo_ppm;
-    atomic_store_explicit(&g_sfo_ppm_ema, s_sfo_ema, memory_order_relaxed);
-  }
-  pthread_mutex_unlock(&s_dfo_lock);
-}
-
-/* The BRANCHFO measurement of the old path from the layer-0 estimates of the first and last DM-RS symbol (rows [a][2][N] c16, as the graph pass hands them over) */
-static void gp_brfo_measure(const int16_t *rows, int nrx, uint32_t N, double dt)
-{
-  double fo[NR_DL_CHEST_MAX_ANT] = {0};
-  for (int a = 0; a < nrx && a < NR_DL_CHEST_MAX_ANT; a++) {
-    const c16_t *h0 = (const c16_t *)(rows + (size_t)a * 2 * N * 2);
-    const c16_t *h1 = h0 + N;
-    double re = 0.0, im = 0.0;
-    for (uint32_t k = 0; k < N; k++) {
-      re += (double)h1[k].r * h0[k].r + (double)h1[k].i * h0[k].i;
-      im += (double)h1[k].i * h0[k].r - (double)h1[k].r * h0[k].i;
-    }
-    fo[a] = (re != 0.0 || im != 0.0) ? atan2(im, re) / (2.0 * M_PI * dt) : 0.0;
-  }
-  const uint64_t n = atomic_fetch_add(&s_fo_n, 1);
-  pthread_mutex_lock(&s_brfo_lock);
-  for (int a = 0; a < nrx && a < NR_DL_CHEST_MAX_ANT; a++) {
-    const double d = fo[a] - fo[0];
-    s_fo_ema[a] = (n == 0) ? d : (0.99 * s_fo_ema[a] + 0.01 * d);
-    t_brfo_d[a] = d;
-  }
-  pthread_mutex_unlock(&s_brfo_lock);
-  t_brfo_nant = nrx;
-  t_brfo_pending = true;
-}
-
 /* the facts of the body the graph pass needs, resolved as the body's own statics resolve them */
-static int gp_nvfix(void)
-{
-  static _Atomic int v = -1;
-  if (v < 0)
-    /* DEFERRED/DO NOT USE: ISAC_RX_NVAR_FIX not in the frozen config t26zE (2026-10-18); slated for removal */
-    v = getenv("ISAC_RX_NVAR_FIX") != NULL ? atoi(getenv("ISAC_RX_NVAR_FIX")) : 0;
-  return v;
-}
-static int gp_perbranch(void)
-{
-  static _Atomic int v = -1;
-  if (v < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_RX_NVAR_PERBRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_RX_NVAR_PERBRANCH");
-    v = (e != NULL) ? atoi(e) : 1;
-  }
-  return v;
-}
-static int gp_norm_on(void)
-{
-  static _Atomic int v = -1;
-  if (v < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_LLR_NORM not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_LLR_NORM");
-    v = (e && atoi(e) == 0) ? 0 : 1;
-  }
-  return v;
-}
 static int gp_iters(void)
 {
-  static _Atomic int s_iters = -1;
-  if (s_iters < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_LDPC_ITERS not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_LDPC_ITERS");
-    const int v = e ? atoi(e) : 8;
-    s_iters = (v >= 1 && v <= 255) ? v : 8;
-  }
   extern __thread int nr_pdsch_ldpc_iters_override;
-  return nr_pdsch_ldpc_iters_override > 0 ? nr_pdsch_ldpc_iters_override : s_iters;
+  return nr_pdsch_ldpc_iters_override > 0 ? nr_pdsch_ldpc_iters_override : 8;
 }
-/* nr_pdsch_evm_acc.armed as the body arms it for a full decode (not a probe) */
-static int gp_evm_armed(int probe_last_sym)
-{
-  static _Atomic int evmg = -1, evmp = -1, opr = -1;
-  if (evmg < 0)
-    evmg = ((getenv("ISAC_PDSCH_EVM_GRANT") ?: "1") || (getenv("ISAC_PDSCH_SNR_GATE") ?: "1")) ? 1 : 0;
-  if (evmp < 0)
-    evmp = (getenv("ISAC_PDSCH_EVM_PROBES") ?: "1") ? 1 : 0;
-  if (opr < 0)
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_OWN_PDCCH_RM not in the frozen config t26zE (2026-10-18); slated for removal */
-    opr = getenv("ISAC_PDSCH_OWN_PDCCH_RM") && atoi(getenv("ISAC_PDSCH_OWN_PDCCH_RM")) ? 1 : 0;
-  return (evmg || opr || decode_diag_on()) && (probe_last_sym < 0 || evmp);
-}
-/* t_hq.armed is set for these decodes (soft combining across retransmissions): the pass does not combine */
-static bool gp_hq_arms(uint16_t rnti)
-{
-  return !t_quiet && ((si_combine_on() && rnti == 0xffff) || ((nr_agnostic_v2() || harq_combine_on()) && atomic_load(&g_ldpc_ok) >= 100));
-}
-/* SI soft combining (deferred, off in the frozen config) is the only HARQ mode the pass does not take */
-static bool gp_hq_si(uint16_t rnti) { return nr_gpu_pass_hq_refuses(gp_hq_arms(rnti), si_combine_on() && rnti == 0xffff); }
+/* t_hq.armed is set for these decodes (soft combining across retransmissions) */
+static bool gp_hq_arms(void) { return !t_quiet && atomic_load(&g_ldpc_ok) >= 100; }
 /* What passive_ldpc_decode_core leaves behind for a transport block every code block of which decoded (the GPU LDPC wrapper reports decoder_used = CPU: it is
  * bit-exact with it). The TB itself is in g_harq.b, assembled by the pass. */
 static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_info_t *cw, uint32_t G, uint32_t tbslbrm, bool tb_ok)
@@ -2725,13 +2184,6 @@ static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_
   t_seg_E = g->E; t_seg_R = g->R; t_seg_lbrm = tbslbrm; t_seg_BG = (uint32_t)g->BG;
   t_decoder_used_last = NRLDPC_DECODER_CPU;
   atomic_fetch_add(&g_ldpc_tb_dec[NRLDPC_DECODER_CPU], 1);
-  if (decode_diag_on()) {
-    size_t used = 0;
-    t_decode_cb[0] = 0;
-    for (int r = 0; r < g->C && used + 32 < sizeof(t_decode_cb); r++)
-      used += snprintf(t_decode_cb + used, sizeof(t_decode_cb) - used, "%s%u:%c", r ? "," : "", (unsigned)nr_get_E(G, (uint8_t)g->C, cw->qamModOrder, cw->Nl, (uint8_t)r),
-                       r < C_dec ? (g->r.seg_ok[r] ? '1' : '0') : '-');
-  }
   for (int r = 0; r < C_dec && r < NR_PDSCH_SEGIDX_MAX; r++) {
     const int cb = nr_pdsch_cbucket((uint32_t)g->C);
     atomic_fetch_add(&g_segidx_tot[r], 1);
@@ -2742,7 +2194,7 @@ static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_
     }
   }
   t_seg_ok_last = seg_ok;
-  if (t_probe_first_seg && (g->C > 1 || probe_c1_on())) { /* passive_ldpc_decode_core's probe outcome: block 0's CRC, the all-zero guard on its bytes, never a TB */
+  if (t_probe_first_seg) { /* passive_ldpc_decode_core's probe outcome: block 0's CRC, the all-zero guard on its bytes, never a TB */
     t_probe_seg_ok = seg_ok == 1;
     if (t_probe_seg_ok) {
       const uint32_t seg_bytes = (g->K >> 3) - (g->F >> 3) - 3; /* the pass put block 0's bytes at the head of the TB buffer */
@@ -2785,11 +2237,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
   t_last_sk = -1;
   t_last_llr_have = t_last_data_bits = 0;
-  nr_pdsch_decode_signs = nr_pdsch_decode_sign_errors = 0;
-  t_decode_cb[0] = 0;
   t_last_llr = NULL; t_last_G = 0; t_seg_E = 0; /* never read a previous decode's LLRs as this one's */
-  t_last_probe_horizon = -1; t_last_chest_hit = 0;
-  t_brfo_pending = false; /* the GPU path jumps past the BRANCHFO measurement */
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
 
@@ -2808,12 +2256,12 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * EVIDENCE-TRIGGERED (final review C1): arm 0 is used EXCLUSIVELY until it has shown <= 25 % CRC over
    * 32 trials while the link was healthy (nr_arm_sweep_gated_t); before, the Wilson pick sent ~2/3 of all
    * decodes from the first grant onto the ~100x costlier segmented path, which also skips DMRSFO/SFO/the
-   * chest cache/PT-RS/GPU. DCI 1_1, sweepable RNTIs only; ISAC_PRG_SWEEP=0 turns it off. */
+   * chest cache/PT-RS/GPU. DCI 1_1, sweepable RNTIs only. */
   freq_alloc_bitmap_t fa_prg;
   int prg_arm = -1;
   const bool sweepable = rnti_sweepable(grant->rnti, grant->rnti_class);
   /* DCI 1_1 only: TS 38.214 5.1.2.3 fixes the PRG for 1_0 (and SI/RA/P grants carry no RRC config). */
-  if (freq_alloc->prg == 0 && t_llr_ovr_n == 0 && grant->dci11 && sweepable && !t_quiet && prg_sweep_enabled()) {
+  if (freq_alloc->prg == 0 && t_llr_ovr_n == 0 && grant->dci11 && sweepable && !t_quiet) {
     prg_arm = rnti_prg_pick(grant->rnti);
     const uint8_t prg_val = nr_prg_arm_value(prg_arm);
     if (prg_val != 0) {
@@ -2887,72 +2335,15 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
 
   // ---- Scope: mirror nr_isac_pdsch_data_aided_submit()'s own guards. Decoding a grant whose
   // reconstruction we could not use anyway is pure CPU cost. ----
-  /* ---- PT-RS: decodable once G accounts for the REs it steals -------------------------------
-   * This used to return unconditionally, which cost the grant entirely -- no TB CRC evidence for
-   * Technique D or the DCI-1_1 layout sweep, and no data-aided row. PT-RS removes REs from PDSCH,
-   * so the only thing actually needed is the right `unav_res` for nr_get_G().
-   * The densities come from ptrs-DensityRecommendationDL (dedicated RRC, invisible here), but the
-   * densities it SELECTS are a six-element set -- K in {2,4} x L in {1,2,4}. ISAC_PTRS_K/L pin one
-   * for now; sweeping all six against the TB CRC is the agnostic completion and needs air to run.
-   * DEFAULT IS UNCHANGED: with neither set, PT-RS grants are still refused, so this cannot regress
-   * a run that does not ask for it. */
-  uint32_t ptrs_unav = 0;
-  int ptrs_arm = -1;
-  if (nr_agnostic_v2() && !seg_path && !(dlsch_config->pduBitmap & 0x1) && grant->mcs >= 10 && grant->mcs <= 27
-      && t_ptrs_sweep_allow && !t_probe_first_seg && sweepable && !t_quiet) {
-    ptrs_arm = rnti_ptrs_pick(grant->rnti);
-    uint8_t K, L;
-    if (nr_ptrs_sweep_arm(ptrs_arm, &K, &L)) {
-      dlsch_config->pduBitmap |= 0x1;
-      /* OAI's encoding, NOT the literal densities: PTRSFreqDensity is K (2|4) but PTRSTimeDensity is
-       * log2(L) -- get_L_ptrs() returns 2/1/0 for L = 4/2/1 and nr_pdsch_ptrs_processing() spaces
-       * PT-RS symbols by 1 << PTRSTimeDensity. Writing L literally put L=4 at a 16-symbol spacing. */
-      dlsch_config->PTRSFreqDensity = K;
-      dlsch_config->PTRSTimeDensity = (L == 4) ? 2 : (L == 2) ? 1 : 0;
-      dlsch_config->PTRSPortIndex = 1;
-      dlsch_config->PTRSReOffset = 0;
-    }
-  }
-  /* ponytail: PT-RS subcarriers are numbered over the scheduled PRBs in INCREASING PRB order
-   * (TS 38.211 7.4.1.2.2), which the virtual data-ordered layout below does not preserve; refused
-   * until a segmented grant with PT-RS is actually seen. */
-  if (seg_path && (dlsch_config->pduBitmap & 0x1)) {
+  /* PT-RS grants are refused: the density is RRC-only, invisible to a passive receiver, and G cannot be computed without it. */
+  if (dlsch_config->pduBitmap & 0x1) {
     { static _Atomic unsigned long c_ = 0;
       const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
       if (n_ == 1 || (n_ % 200) == 0)
-        LOG_A(PHY, "SENSING: PDSCH UNSUP@seg-ptrs n=%lu\n", n_); }
-    prg_arm_unsupported(grant->rnti, prg_arm);
+        LOG_A(PHY, "SENSING: PDSCH UNSUP@%s n=%lu\n", seg_path ? "seg-ptrs" : "1373", n_); }
+    if (seg_path)
+      prg_arm_unsupported(grant->rnti, prg_arm);
     return out->status;
-  }
-  if (dlsch_config->pduBitmap & 0x1) {
-    /* _Atomic, L stored before K: a consumer that sees K resolved also sees L (N passivePdsch consumers) */
-    static _Atomic int s_ptrs_k = -1, s_ptrs_l = -1;
-    if (s_ptrs_k < 0) {
-      /* DEFERRED/DO NOT USE: ISAC_PTRS_K not in the frozen config t26zE (2026-10-18); slated for removal */
-      /* DEFERRED/DO NOT USE: ISAC_PTRS_L not in the frozen config t26zE (2026-10-18); slated for removal */
-      const char *ek = getenv("ISAC_PTRS_K"), *el = getenv("ISAC_PTRS_L");
-      s_ptrs_l = (el && *el) ? atoi(el) : 0;
-      s_ptrs_k = (ek && *ek) ? atoi(ek) : 0;
-    }
-    int pk = s_ptrs_k, pl = s_ptrs_l;
-    if (ptrs_arm > 0) { uint8_t K = 0, L = 0; nr_ptrs_sweep_arm(ptrs_arm, &K, &L); pk = K; pl = L; } /* the RE count wants literal L */
-    if (pk <= 0 || pl <= 0) {
-      { static _Atomic unsigned long c_ = 0;
-        const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
-        if (n_ == 1 || (n_ % 200) == 0)
-          LOG_A(PHY, "SENSING: PDSCH UNSUP@1373 n=%lu\n", n_); }
-      return out->status; // PT-RS, and no density given to compute G with
-    }
-    ptrs_unav = nr_pdsch_ptrs_unav_res(freq_alloc->num_rbs, dlsch_config->start_symbol,
-                                       dlsch_config->number_symbols, dlsch_config->dlDmrsSymbPos,
-                                       (uint8_t)pk, (uint8_t)pl, 1);
-    if (ptrs_unav == 0) {
-      { static _Atomic unsigned long c_ = 0;
-        const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
-        if (n_ == 1 || (n_ % 200) == 0)
-          LOG_A(PHY, "SENSING: PDSCH UNSUP@1379 n=%lu\n", n_); }
-      return out->status; // the density did not describe any PT-RS -- do not guess G
-    }
   }
   /* ---- SSB rate matching (TS 38.214 5.1.4): the CURRENT slot's SSB, observed blind (PSS x SSS of
    * the acquired PCI) -- no configured bitmap, no projected period, no SIB1. PSS/SSS need their FFT
@@ -2977,19 +2368,16 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       return out->status; /* IQ already overwritten: nothing to observe */
     }
     const uint16_t fep_syms = ssb_cand | (ssb_cand << 2); // PSS at s, SSS at s+2
-    /* SYSAN ISAC_SSB_FEP_GPU=1 (default off): these PSS/SSS symbols through the bit-exact GPU FEP (one launch for all
-     * antennas and symbols) instead of 2 x nb_antennas_rx serial CPU FFTs on this consumer: measured +150-250 us p50 on the
-     * first body of SSB-candidate slots. Same fallback rule as the main FEP below: CPU when the GPU path refuses. */
-    static int s_ssb_gpu = -1;
-    if (s_ssb_gpu < 0)
-      s_ssb_gpu = atoi(getenv("ISAC_SSB_FEP_GPU") ?: "1") ? 1 : 0;
+    /* SYSAN: these PSS/SSS symbols through the bit-exact GPU FEP (one launch for all antennas and symbols) instead of
+     * 2 x nb_antennas_rx serial CPU FFTs on this consumer: measured +150-250 us p50 on the first body of SSB-candidate slots.
+     * Same fallback rule as the main FEP below: CPU when the GPU path refuses. */
     int ssb_rng[14][2], n_ssb_rng = 0;
     for (int sym = 0; sym < 14; ++sym)
       if ((fep_syms >> sym) & 1) {
         ssb_rng[n_ssb_rng][0] = sym;
         ssb_rng[n_ssb_rng++][1] = 1;
       }
-    const bool ssb_gpu_done = s_ssb_gpu && nr_pdsch_gpu_exact_fep_ranges(ue, fp, proc->nr_slot_rx, ssb_rng, n_ssb_rng, &rxdataF[0][0],
+    const bool ssb_gpu_done = nr_pdsch_gpu_exact_fep_ranges(ue, fp, proc->nr_slot_rx, ssb_rng, n_ssb_rng, &rxdataF[0][0],
                                                                          fp->samples_per_slot_wCP,
                                                                          nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata)) == 0;
     for (int sym = 0; sym < 14 && !ssb_gpu_done; ++sym) {
@@ -3014,15 +2402,11 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     }
   }
   nr_ssb_rm_event_t ssb_event = nr_ssb_rm_observe(fp, proc->frame_rx, proc->nr_slot_rx, ssb_cand, rxdataF);
-  if (t_own_pdcch.on && ssb_event.symbols == 0) { /* DECODE-RES: the scheduling PDCCH's PRBs as a rate-matching event (no SSB in this slot) */
-    ssb_event = (nr_ssb_rm_event_t){proc->frame_rx, proc->nr_slot_rx, fp->Nid_cell, t_own_pdcch.symbols,
-                                    (uint16_t)t_own_pdcch.first_crb, (uint16_t)t_own_pdcch.last_crb};
-  }
   nr_ssb_rm_plan_t ssb;
   const bool ssb_ok = nr_ssb_rm_plan(&ssb_event, proc->frame_rx, proc->nr_slot_rx, fp->Nid_cell, grant->rnti, dlsch_config,
                                      freq_alloc, seg_path ? seg : NULL, seg_path ? nseg : 0, &ssb);
   const uint32_t ssb_unav = ssb.unav;
-  if (ssb_event.symbols && !t_own_pdcch.on) {
+  if (ssb_event.symbols) {
     static _Atomic unsigned long count = 0;
     const unsigned long n = atomic_fetch_add_explicit(&count, 1, memory_order_relaxed) + 1;
     if (n <= 100 || n % 100 == 0)
@@ -3193,7 +2577,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   dlsch_config->tbslbrm = nr_compute_tbslbrm(tbl_lbrm, bw_lbrm, (uint8_t)nl_tbslbrm);
 
   const uint32_t G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
-                              ptrs_unav + csi_unav + ssb_unav,
+                              csi_unav + ssb_unav,
                               cw->qamModOrder, cw->Nl);
   if (G == 0) {
     { static _Atomic unsigned long c_ = 0;
@@ -3201,26 +2585,6 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       if (n_ == 1 || (n_ % 200) == 0)
         LOG_A(PHY, "SENSING: PDSCH UNSUP@1475 n=%lu\n", n_); }
     return out->status;
-  }
-/* TBPARM probe (ISAC_PDSCH_TBPARM=1): every transport-block parameter the gNB also prints on its
-   * own PDSCH line, so they can be compared one-for-one instead of inferred from a CRC failure.
-   * gNB prints: mcs_index / mod / tbs / tb_size_lbrm / ldpc_base_graph / vrbs=[start..end). */
-  {
-    static _Atomic int s_tbp = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-    if (s_tbp < 0)
-      /* DEFERRED/DO NOT USE: ISAC_PDSCH_TBPARM not in the frozen config t26zE (2026-10-18); slated for removal */
-      s_tbp = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
-    if (s_tbp)
-      LOG_I(PHY,
-            "SENSING: TBPARM rnti=0x%x nl=%u mcs=%u tbl=%u Qm=%u R=%u tbs=%u G=%u lbrm=%u bg=%u "
-            "prb=%u+%u nsym=%u dmrs_len=%u nb_re_dmrs=%u ports=0x%x cdm=%u type=%u pos=0x%x nscid=%u\n",
-            grant->rnti, (unsigned)cw->Nl, (unsigned)grant->mcs, (unsigned)grant->mcs_table,
-            (unsigned)cw->qamModOrder, (unsigned)cw->targetCodeRate, (unsigned)cw->TBS, G,
-            (unsigned)dlsch_config->tbslbrm, (unsigned)cw->ldpcBaseGraph, (unsigned)freq_alloc->first_rb,
-            (unsigned)freq_alloc->num_rbs, (unsigned)dlsch_config->number_symbols, (unsigned)dmrs_len,
-            (unsigned)nb_re_dmrs, (unsigned)dlsch_config->dmrs_ports, (unsigned)dlsch_config->n_dmrs_cdm_groups,
-            (unsigned)dlsch_config->dmrsConfigType, (unsigned)dlsch_config->dlDmrsSymbPos,
-            (unsigned)dlsch_config->nscid);
   }
 
   out->cw = *cw;
@@ -3298,10 +2662,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * skipped (their LLR count stays 0, so segment 0's bits are still the first in the buffer); the
    * allocation's last symbol is still visited because nr_rx_pdsch() emits the LLRs there. */
   int probe_last_sym = -1;
-  static _Atomic int s_probe_horizon = -1; /* _Atomic (N consumers). ISAC_PROBE_HORIZON=0: probe with the whole slot processed (A/B of the horizon) */
-  /* DEFERRED/DO NOT USE: ISAC_PROBE_HORIZON not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (s_probe_horizon < 0) { const char *e = getenv("ISAC_PROBE_HORIZON"); s_probe_horizon = (e && atoi(e) == 0) ? 0 : 1; }
-  if (t_probe_first_seg && s_probe_horizon && !ssb_unav && !t_probe_no_horizon && !t_gw_used) { /* GrantWork: full slot */
+  if (t_probe_first_seg && !ssb_unav && !t_gw_used) { /* GrantWork: full slot */
     const uint32_t Kcb = (cw->ldpcBaseGraph == 2) ? 3840u : 8448u;
     const uint32_t B = cw->TBS + 24u;
     const uint32_t C_est = (B <= Kcb) ? 1u : (B + (Kcb - 24u) - 1u) / (Kcb - 24u);
@@ -3323,7 +2684,6 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     }
   }
   const int probe_end = (probe_last_sym >= 0) ? probe_last_sym + 1 : dlsch_config->start_symbol + dlsch_config->number_symbols;
-  t_last_probe_horizon = probe_last_sym;
 
   /* ---- GPUPASS (Task 4, ISAC_GPU_PASS=1, default off): the whole DL pass of this grant -- exact FEP, chest, chest post, demod, descrambling, LLR norm, rate
    * dematching, LDPC, CRC -- as ONE captured CUDA graph with one host wait (nr_gpu_pass.h). Only a transport block that passes its CRC is taken: everything the
@@ -3337,30 +2697,26 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   bool gp_hq_retx = false;
   int gp_gate = -1; /* the first gate that keeps this grant off the pass (counted: nr_gpu_pass_dl.h NR_GPU_PASS_GATE_*) */
   if (nr_gpu_pass_active()) {
-    extern __thread int nr_pdsch_chest_occ_override;
     const int gp_retry_old = 1; /* frozen value of the former ISAC_GPU_PASS_RETRY_OLD; only consulted when the split/RETRY graphs are off (memory cap), i.e. the GPU path cannot hold the retry */
     /* v2 Task 2 (ISAC_PDSCH_GPU_GRAPH_COVER): layout probes run the pass (CB0 only, their horizon), and slot-share grants: the pass estimates the same
      * widened band (share_chest_band; a segmented grant estimates per segment, the share does not widen it) and does its own FEP, so the FEP / chest caches
      * are not read (their contents are the same numbers). */
     const bool gp_cover = nr_gpu_graph_flag("COVER");
-    const bool gp_probe_cov = gp_cover && probe_c1_on() && !t_probe_no_horizon;
+    const bool gp_probe_cov = gp_cover;
     const bool gp_share_cov = gp_cover;
     /* v2 Task 4: with ISAC_PDSCH_GPU_GRAPH_RETRY the retry bodies stay on the pass (held instance), RETRY_OLD is not consulted */
-    gp_gate = (!nr_gpu_graph_flag("RETRY") && nr_gpu_pass_retry_to_old(gp_retry_old, t_pdtim_body, t_recov_mode == 2, t_quiet || t_qam_ab_alt || t_decode_tdra_attempt != 0)) ? NR_GPU_PASS_GATE_RETRY
+    gp_gate = (!nr_gpu_graph_flag("RETRY") && nr_gpu_pass_retry_to_old(gp_retry_old, t_pdtim_body, t_recov_mode == 2, t_quiet || t_decode_tdra_attempt != 0)) ? NR_GPU_PASS_GATE_RETRY
             : (seg_path && nseg > nr_gpu_pass_seg_max()) ? NR_GPU_PASS_GATE_SEG /* more segments than the largest class; fewer run the segmented classes */
-            : ((t_probe_first_seg || probe_last_sym >= 0 || t_probe_no_horizon) && !gp_probe_cov) ? NR_GPU_PASS_GATE_PROBE
-            : ((t_share.on && !gp_share_cov) || t_chest_bypass) ? NR_GPU_PASS_GATE_SHARE
+            : ((t_probe_first_seg || probe_last_sym >= 0) && !gp_probe_cov) ? NR_GPU_PASS_GATE_PROBE
+            : (t_share.on && !gp_share_cov) ? NR_GPU_PASS_GATE_SHARE
             : t_gw_ready ? NR_GPU_PASS_GATE_GW_READY
             : (t_gw_used || t_gw_capture) ? NR_GPU_PASS_GATE_GW /* the GrantWork owner publishes the un-normalised LLRs of this geometry for other hypotheses; the pass only returns the normalised ones */
             : t_llr_ovr != NULL ? NR_GPU_PASS_GATE_LLR_OVR
-            : t_cap_req ? NR_GPU_PASS_GATE_CAP
             : t_tb_force_cpu ? NR_GPU_PASS_GATE_FORCE_CPU
-            : ((dlsch_config->pduBitmap & 0x1) || ptrs_unav != 0) ? NR_GPU_PASS_GATE_PTRS
-            : (ue->chest_time == 1 || t_tinterp_override > 0) ? NR_GPU_PASS_GATE_TINTERP
-            : gp_hq_si(grant->rnti) ? NR_GPU_PASS_GATE_HARQ /* only the deferred SI soft combining stays on the old path: DL HARQ combining runs in the pass */
+            : ((dlsch_config->pduBitmap & 0x1)) ? NR_GPU_PASS_GATE_PTRS
+            : ue->chest_time == 1 ? NR_GPU_PASS_GATE_TINTERP
             : !nr_pdsch_gpu_ldpc_enabled() ? NR_GPU_PASS_GATE_LDPC_OFF
             : nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) >= 0 ? NR_GPU_PASS_GATE_CHEST_ONLY
-            : nr_pdsch_chest_occ_override > 0 ? NR_GPU_PASS_GATE_OCC
             : (!t_gpp && !nr_gpu_allocations_allowed() && (t_gp_claim_tried || !nr_gpu_graph_pool_has_free())) ? NR_GPU_PASS_GATE_NOMEM /* not prewarmed before the fence, no pool set */
             : -1;
     if (gp_gate >= 0)
@@ -3373,17 +2729,17 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     /* no-chance gate inside the graph (nr_snr_gate.h): the pass stops after the chest when the DM-RS comb SNR < required - 5 dB. Probes (layout searches), SI/P/RA grants and
      * retransmissions (rv != 0: HARQ soft bits are needed) are never gated. */
     const double gp_req = nr_required_snr_db(grant->mcs, grant->mcs_table);
-    const bool gp_gate_on = !t_probe_no_horizon && nr_snr_gate_applies(t_probe_first_seg || probe_last_sym >= 0, grant->rnti_class == 0, grant->rv, true) && isfinite(gp_req);
+    const bool gp_gate_on = nr_snr_gate_applies(t_probe_first_seg || probe_last_sym >= 0, grant->rnti_class == 0, grant->rv, true) && isfinite(gp_req);
     const float gp_gate_thr = gp_gate_on ? (float)(gp_req - NR_SNR_GATE_MARGIN_DB) : 0.f;
     share_chest_band(freq_alloc, dlsch_config, &gp_chest_fa, &gp_chest_cfg);
     /* DL HARQ soft combining in the pass: the same decision as passive_ldpc_decode (harq_retx_decide) on the same store; a probe is HARQ-neutral. The soft bits live in device blocks of the entry
      * (hqb_ensure); a stored sum that is still on the host (an earlier CPU decode) is uploaded first. Anything that cannot be arranged decodes without combining (counted) and leaves no stale sum. */
-    if (gp_hq_arms(grant->rnti) && !gp_hq_si(grant->rnti) && !t_probe_first_seg && probe_last_sym < 0 && !t_probe_no_horizon) {
-      gp_he = harqc_acquire(grant->rnti, grant->harq_pid, 0);
+    if (gp_hq_arms() && !t_probe_first_seg && probe_last_sym < 0) {
+      gp_he = harqc_acquire(grant->rnti, grant->harq_pid);
       if (gp_he == NULL) {
         atomic_fetch_add(&g_hq_busy_skip, 1); /* as the CPU path: decoded without combining */
       } else {
-        const int gp_d = harq_retx_decide(gp_he, cw, false, grant->ndi, &gp_hq_A);
+        const int gp_d = harq_retx_decide(gp_he, cw, grant->ndi, &gp_hq_A);
         gp_hq_retx = gp_d > 0;
         if (gp_d < 0) { /* as the CPU path: decoded alone, the entry untouched (hq_mode 0) */
           atomic_store(&gp_he->busy, 0);
@@ -3427,15 +2783,15 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
                                        .est_size = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16,
                                        .rx_size_symbol = (fp->N_RB_DL * NR_NB_SC_PER_RB + 15) & ~15u,
                                        .dmrs_full = (uint16_t)(dlsch_config->dlDmrsSymbPos & ((1u << fp->symbols_per_slot) - 1u)),
-                                       .first_symbol = nr_ssb_rm_first_data_symbol(dlsch_config, freq_alloc, &ssb), .nvfix = gp_nvfix(),
-                                       .branch = gp_perbranch() ? nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) : -1, .norm = gp_norm_on(),
-                                       .it_max = gp_iters(), .chest_diag = chest_pdp_diag_on(), .fep_fo = fep_fo, .tb = g_harq.b,
+                                       .first_symbol = nr_ssb_rm_first_data_symbol(dlsch_config, freq_alloc, &ssb), .nvfix = 0,
+                                       .branch = nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl), .norm = 1,
+                                       .it_max = gp_iters(), .chest_diag = 0, .fep_fo = fep_fo, .tb = g_harq.b,
                                        .probe = t_probe_first_seg, .probe_last_sym = probe_last_sym, .chest_fa = &gp_chest_fa, .chest_cfg = &gp_chest_cfg,
                                        .gate_on = gp_gate_on, .gate_thr_db = gp_gate_thr, .hq_mode = gp_hq_mode, .hq_tbs = gp_hq_retx ? gp_hq_A : 0, .hq_blk = gp_hq_mode ? gp_he->hb.id : NULL};
       if (!t_gpp)
         gp_thread_prewarm(); /* before the RX fence: allocates; after it (v2): claims a pool set, lazily, once per thread */
       memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc)); /* the demod job reads whether the EVM is armed; the block below re-arms it for the old path */
-      nr_pdsch_evm_acc.armed = gp_evm_armed(probe_last_sym);
+      nr_pdsch_evm_acc.armed = 1;
       gp_tried = true;
       if (seg_path)
         gp_seg_csi_map(seg, nseg, dlsch_config, freq_alloc); /* the demod geometry reads the CSI-FULL map of the virtual allocation */
@@ -3652,7 +3008,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
 
   // ---- Channel estimation on the DM-RS symbols. ----
   {
-    extern __thread uint32_t nr_dl_chest_delay_epoch; /* ISAC_CHEST_DELAY_SHARE: one delay estimate per decode */
+    extern __thread uint32_t nr_dl_chest_delay_epoch; /* GPU stage-record context key: one epoch per decode */
     if (++nr_dl_chest_delay_epoch == 0) nr_dl_chest_delay_epoch = 1;
   }
   const uint64_t pdt_che = pdtim_on ? pdtim_now() : 0;
@@ -3687,50 +3043,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
 
   uint32_t nvar = 0, nvar_den = 1u; // nvar_den: hoisted divisor, also cached by the slot-share
   int n_dmrs_sym = 0;
-  /* XANT (ISAC_XANT=1, default off): time-domain cross-correlation of antenna a vs antenna 0 over
-   * +/-3000 sample lags, on this slot's samples, once every ~60 s. A peak away from lag 0 is a stream
-   * alignment offset between X410 channels -- the one thing every per-branch diagnostic so far
-   * (equal DM-RS peak position, 45 % delay-profile compactness, nvar x4000) is consistent with. */
-  {
-    static _Atomic int s_xant = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-    if (s_xant < 0)
-      /* DEFERRED/DO NOT USE: ISAC_XANT not in the frozen config t26zE (2026-10-18); slated for removal */
-      s_xant = (getenv("ISAC_XANT") != NULL) ? 1 : 0;
-    static _Atomic unsigned long s_xant_n = 0;
-    if (s_xant && fp->nb_antennas_rx >= 2 && (atomic_fetch_add(&s_xant_n, 1) % 40000) == 0) {
-      const c16_t **rx = (const c16_t **)ue->common_vars.rxdata;
-      const unsigned total = (unsigned)fp->samples_per_frame;
-      const unsigned base = (get_samples_slot_timestamp(fp, proc->nr_slot_rx) + 2u * (unsigned)(fp->ofdm_symbol_size + fp->nb_prefix_samples)) % total;
-      const int L = 4096, MAXLAG = 3000;
-      char line[200];
-      int u = 0;
-      for (int a = 1; a < fp->nb_antennas_rx && a < 4; a++) {
-        double best = 0.0, e0 = 0.0, ea = 0.0;
-        int bestlag = 0;
-        for (int lag = -MAXLAG; lag <= MAXLAG; lag += 4) {
-          double re = 0.0, im = 0.0;
-          for (int n = 0; n < L; n += 2) {
-            const c16_t x = rx[0][(base + n) % total];
-            const c16_t y = rx[a][(base + n + lag + total) % total];
-            re += (double)x.r * y.r + (double)x.i * y.i;
-            im += (double)x.i * y.r - (double)x.r * y.i;
-          }
-          const double m = re * re + im * im;
-          if (m > best) { best = m; bestlag = lag; }
-        }
-        for (int n = 0; n < L; n += 2) {
-          const c16_t x = rx[0][(base + n) % total];
-          const c16_t y = rx[a][(base + n + bestlag + total) % total];
-          e0 += (double)x.r * x.r + (double)x.i * x.i;
-          ea += (double)y.r * y.r + (double)y.i * y.i;
-        }
-        u += snprintf(line + u, sizeof(line) - u, " ant%d: lag=%+d rho=%.2f", a, bestlag,
-                      (e0 > 0.0 && ea > 0.0) ? sqrt(best) / sqrt(e0 * ea) : 0.0);
-      }
-      LOG_A(PHY, "SENSING: XANT slot=%d (vs ant0, +/-%d lags, step 4):%s\n", proc->nr_slot_rx, MAXLAG, line);
-    }
-  }
-  int dmrs_first = -1, dmrs_last = -1; // for the per-branch phase-slope estimator below
+  int dmrs_first = -1, dmrs_last = -1; 
   /* SINGLE-BRANCH DECODE (P39): when the demodulator reads one branch (ISAC_RX_MRC_MODE=0 -> branch 0,
    * or a pinned branch), estimate only that branch. The other three were estimated and then never read:
    * 4x the chest cost (~1.2 ms/grant OTA) for nothing. Sensing does not use this estimate -- it forms
@@ -3757,10 +3070,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
                                           .n_ant = fp->nb_antennas_rx,
                                           .fo_hz = fep_fo,
                                           .seg = seg_path};
-  const bool chest_cacheable = t_share.on && !seg_path && !t_chest_bypass;
+  const bool chest_cacheable = t_share.on && !seg_path;
   const int chest_hit = chest_cacheable && t_chest_cache.valid && nr_pdsch_chest_key_eq(&t_chest_cache.key, &chest_key);
   atomic_fetch_add(chest_hit ? &g_chest_hit : &g_chest_miss, 1);
-  t_last_chest_hit = chest_hit;
   /* Cached rows: every (layer, antenna) row the estimator fills (one branch per layer when
    * chest_only >= 0), at every DM-RS symbol of the slot. Stored compactly: cache row j = r, or the
    * layer r / n_ant when a single branch is estimated. */
@@ -3802,7 +3114,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * NOT just the last segment's raw value, which is what this comment used to say before that fix
    * landed a few lines below. It is still only the last DM-RS SYMBOL's mean across symbols, the
    * same last-call approximation the branch-substitution block further down already documents. The
-   * ISAC_DC_FIX interpolation is not applied here. */
+   */
   static __thread c16_t *seg_h = NULL;
   static __thread size_t seg_h_cap = 0;
   const int nsc_seg = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
@@ -3818,7 +3130,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   }
   uint32_t gch_nv[14][4], gch_nva[14][4][NR_DL_CHEST_MAX_ANT]; /* GPU-DEMOD stage 2 (ISAC_PDSCH_GPU_EXACT_CHEST) */
   const int gseg = seg_path ? nr_pdsch_gpu_chest_grant(ue, proc, dlsch_config, freq_alloc, seg, nseg, cw->Nl, dmrs_full, pdsch_est_size,
-                                                       pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, chest_pdp_diag_on(), gch_nv, gch_nva) : -1;
+                                                       pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, 0, gch_nv, gch_nva) : -1;
   if (gseg == 0) { /* what the loop below leaves in its locals */
     chest_alloc = set_bitmap_from_start_size(seg[nseg - 1].prb_start, seg[nseg - 1].n_prb);
     chest_cfg.start_rb = seg[nseg - 1].prb_start;
@@ -3844,7 +3156,6 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
         chest_cfg.number_rbs = seg[s].n_prb;
         chest_cfg.resource_alloc = 1; /* each segment is contiguous */
         uint32_t nvar_tmp = 0;
-        nr_dl_chest_diag_request = chest_pdp_diag_on();
         nr_pdsch_channel_estimation(ue, proc, &chest_cfg, &chest_alloc, nl,
                                     get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
                                     pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
@@ -3859,7 +3170,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       nvar += (uint32_t)(nv / (uint64_t)freq_alloc->num_rbs);
       /* The estimator overwrites nr_dl_chest_nvar_ant[] per call, so after the loop it would hold the
        * LAST segment's value -- possibly a single PRB -- which the per-branch nvar substitution
-       * (ISAC_RX_NVAR_PERBRANCH, default on) then feeds the equaliser. Publish the width-weighted mean. */
+       * (per-branch nvar) then feeds the equaliser. Publish the width-weighted mean. */
       for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++)
         nr_dl_chest_nvar_ant[a] = (uint32_t)(nv_ant[a] / (uint64_t)freq_alloc->num_rbs);
       for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
@@ -3872,7 +3183,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   }
   nr_dl_chest_only_ant = chest_only; /* P39: non-segmented path only; reset after the loop */
   const int gch = (!seg_path && !chest_hit && chest_only < 0) ? nr_pdsch_gpu_chest_grant(ue, proc, &chest_cfg, &chest_alloc, NULL, 0, cw->Nl,
-      dmrs_full, pdsch_est_size, pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, chest_pdp_diag_on(), gch_nv, gch_nva) : -1;
+      dmrs_full, pdsch_est_size, pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, 0, gch_nv, gch_nva) : -1;
   for (int m = 0; !seg_path && !chest_hit && m < fp->symbols_per_slot; m++) { /* K32: every DM-RS symbol of the slot */
     if (!((dmrs_full >> m) & 1)) {
       continue;
@@ -3883,206 +3194,15 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     dmrs_last = m;
     for (int nl = 0; nl < cw->Nl; nl++) { // mirrors nr_ue_pdsch_procedures()'s per-layer loop
       uint32_t nvar_tmp = 0;
-      nr_dl_chest_diag_request = chest_pdp_diag_on(); // consumer thread only: BRDELAY/PDP diagnostics
       if (gch == 0) { nvar_tmp = gch_nv[m][nl]; memcpy(nr_dl_chest_nvar_ant, gch_nva[m][nl], sizeof(gch_nva[m][nl])); } else
       nr_pdsch_channel_estimation(ue, proc, &chest_cfg, &chest_alloc, nl,
                                   get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
                                   pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
       nvar += nvar_tmp;
-      /* ---- DC-SUBCARRIER (LO-leakage) INTERPOLATION (ISAC_DC_FIX=1, default off pending live A/B) --
-       * MEASURED 2026-09-18, office gNB PCI 2, 273 PRB, reproduced IDENTICALLY across two independent
-       * captures minutes apart, two different serving UEs/precoding vectors (pm_index 35 and others):
-       * EQDIAG evm_by_freq_bin shows a fixed spike at the diagnostic bin straddling absolute FFT index
-       * 0 (evm 282%/111% both times, hrms normal there -- "the estimate is wrong, not the signal"),
-       * while every other bin reads 12-16%. FFT index 0 is DC -- classic direct-conversion LO leakage,
-       * a RECEIVER hardware property independent of cell/UE/precoding, confirmed by reproducing
-       * identically under two different pm_index values. It was never excluded anywhere in this path.
-       * For a 273 PRB / BWPStart=0 grant this lands at allocation-relative PRB ~136 -- inside only
-       * 1-2 of ~27 code blocks at MCS 25, but a TB needs every block, so it single-handedly zeroes
-       * TB success while low-MCS (SEGIDXC: most segment indices already measured at 92-100%, only
-       * specific indices near-0%) tolerates it on redundancy/margin alone. Small linear-interpolation
-       * window (+/-4 bins around DC) from the nearest unaffected neighbours -- cheap, and every other
-       * grant/estimate is untouched (bit-identical when DC is not inside num_rbs*12 relative to this
-       * layer's own indexing). Do NOT widen this window without new evidence: the diagnostic's own
-       * bin resolution (204 REs) is far coarser than the true affected width. */
-      {
-        static _Atomic int s_dc_fix = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-        if (s_dc_fix < 0) {
-          /* DEFERRED/DO NOT USE: ISAC_DC_FIX not in the frozen config t26zE (2026-10-18); slated for removal */
-          const char *e = getenv("ISAC_DC_FIX");
-          s_dc_fix = (e != NULL && atoi(e) != 0) ? 1 : 0;
-        }
-        if (s_dc_fix) {
-          const int N = fp->ofdm_symbol_size;
-          const int W = 4; // +/- bins interpolated; W+1 used as the reference neighbour on each side
-          for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
-            const int r = nl * fp->nb_antennas_rx + aarx;
-            c16_t *h = (c16_t *)&pdsch_dl_ch_estimates[r][N * m];
-            const c16_t lo = h[(N - (W + 1)) % N], hi = h[(W + 1) % N];
-            for (int d = -W; d <= W; d++) {
-              const double t = (double)(d + W + 1) / (double)(2 * (W + 1));
-              const int idx = ((d % N) + N) % N;
-              h[idx].r = (int16_t)lround((double)lo.r + t * ((double)hi.r - lo.r));
-              h[idx].i = (int16_t)lround((double)lo.i + t * ((double)hi.i - lo.i));
-            }
-          }
-        }
-      }
     }
     n_dmrs_sym++;
   }
   nr_dl_chest_only_ant = -1;
-  /* ISAC_CHEST_OCC=1 (T26d): multi-layer DM-RS estimate with the delay removed BEFORE the FD-OCC despreading.
-   * The stock type-1 estimator averages each OCC pair (2 comb REs, 4 subcarriers apart) first and compensates the
-   * delay afterwards; a delay tau rotates the pair by 2 pi 4 df tau, so the pair average leaks the other port
-   * (1 us: ~-9 dB; 2 us: ~-3 dB) -- a per-layer SINR cap that only multi-layer grants see. Here, per branch and CDM
-   * group: LS z_j = p_ref(j) y(k_j); delay phase slope from lag-2 products (same OCC sign); derotate; per RB a 2-unknown
-   * LS (orthogonal OCC: mean(z) and mean(w z)); linear interpolation between RB centres; rerotate. Nl >= 2,
-   * type 1, contiguous, single-symbol ports < 4 only. ISAC_CHEST_OCC_AB=1: per grant via nr_pdsch_chest_occ_override. */
-  {
-    extern __thread int nr_pdsch_chest_occ_override;
-    static int s_occ = -1;
-    /* DEFERRED/DO NOT USE: ISAC_CHEST_OCC not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (s_occ < 0) s_occ = getenv("ISAC_CHEST_OCC") ? atoi(getenv("ISAC_CHEST_OCC")) : 0;
-    const int occ_on = nr_pdsch_chest_occ_override >= 0 ? nr_pdsch_chest_occ_override : s_occ;
-    const int nlay = cw->Nl;
-    if (occ_on && nlay >= 2 && nlay <= 4 && !seg_path && dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1
-        && freq_alloc->n_prb_list == 0 && fp->nb_antennas_rx <= 4 && freq_alloc->num_rbs >= 2) {
-      int port[4], okp = 1;
-      for (int l = 0; l < nlay; l++) {
-        port[l] = get_dmrs_port(l, dlsch_config->dmrs_ports);
-        if (port[l] < 0 || port[l] >= 4) okp = 0;
-      }
-      const int nb = fp->nb_antennas_rx, N = fp->ofdm_symbol_size, nrb = freq_alloc->num_rbs;
-      const int rb_offset = freq_alloc->first_rb + (dlsch_config->refPoint ? 0 : dlsch_config->BWPStart);
-      const int sc0 = fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * 12;
-      const float beta = get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, false);
-      const int16_t dmrs_scaling = (int16_t)((1 / beta) * (1 << 14));
-      for (int m = 0; okp && m < fp->symbols_per_slot; m++) {
-        if (!((dmrs_full >> m) & 1)) continue;
-        c16_t pilot[4][3280] __attribute__((aligned(16)));
-        const uint32_t *gold = nr_gold_pdsch(fp->N_RB_DL, fp->symbols_per_slot, dlsch_config->dlDmrsScramblingId,
-                                             dlsch_config->nscid, proc->nr_slot_rx, m);
-        for (int l = 0; l < nlay; l++)
-          nr_pdsch_dmrs_rx(fp->Ncp, gold, pilot[l], 1000 + port[l], 0, nrb + rb_offset, NFAPI_NR_DMRS_TYPE1, dmrs_scaling);
-        for (int cg = 0; cg < 2; cg++) {
-          int lay[4], nlg = 0;
-          for (int l = 0; l < nlay; l++)
-            if (port[l] / 2 == cg) lay[nlg++] = l;
-          if (nlg == 0) continue;
-          const int nj = nrb * 6;
-          for (int a = 0; a < nb; a++) {
-            static __thread double complex z[3280];
-            double complex sl = 0;
-            for (int j = 0; j < nj; j++) {
-              const c16_t pl = pilot[lay[0]][6 * rb_offset + j];
-              const c16_t y = rxdataF[a][m * N + (sc0 + 2 * j + cg) % N];
-              z[j] = ((double)pl.r * y.r - (double)pl.i * y.i + I * ((double)pl.r * y.i + (double)pl.i * y.r)) / 32768.0;
-              if (j >= 2) sl += z[j] * conj(z[j - 2]);
-            }
-            const double phi = carg(sl) / 4.0; /* phase per subcarrier */
-            double complex hrb[4][275];
-            for (int rb = 0; rb < nrb; rb++) {
-              double complex acc[4] = {0};
-              for (int q = 0; q < 6; q++) {
-                const int j = rb * 6 + q, k = 2 * j + cg;
-                const double complex zd = z[j] * cexp(-I * phi * k);
-                for (int g = 0; g < nlg; g++) {
-                  const c16_t pq = pilot[lay[g]][6 * rb_offset + j], pr = pilot[lay[0]][6 * rb_offset + j];
-                  const double w = ((double)pq.r * pr.r + (double)pq.i * pr.i) >= 0 ? 1.0 : -1.0;
-                  acc[g] += w * zd;
-                }
-              }
-              for (int g = 0; g < nlg; g++) hrb[g][rb] = acc[g] / 6.0;
-            }
-            for (int g = 0; g < nlg; g++) {
-              c16_t *h = (c16_t *)&pdsch_dl_ch_estimates[lay[g] * nb + a][N * m];
-              for (int k = 0; k < nrb * 12; k++) {
-                const double x = ((double)k - 5.5) / 12.0; /* RB-centre coordinate */
-                int r0 = (int)floor(x);
-                if (r0 < 0) r0 = 0;
-                if (r0 > nrb - 2) r0 = nrb - 2;
-                double t = x - r0;
-                if (t < 0) t = 0;
-                if (t > 1) t = 1;
-                const double complex v = ((1 - t) * hrb[g][r0] + t * hrb[g][r0 + 1]) * cexp(I * phi * k);
-                h[k].r = (int16_t)fmax(-32768.0, fmin(32767.0, lround(creal(v))));
-                h[k].i = (int16_t)fmax(-32768.0, fmin(32767.0, lround(cimag(v))));
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-  /* ISAC_RX_IRC=4 (T26d): interference+noise covariance from the DM-RS residuals h_ls - h_est per 4-RB group, on every
-   * DM-RS symbol of the grant (port 1000 comb, type 1, layer 0), for the whitening IRC in nr_rx_pdsch(). */
-  {
-    extern __thread int nr_dlsch_irc_override;
-    static int s_ircenv = -1;
-    /* DEFERRED/DO NOT USE: ISAC_RX_IRC not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (s_ircenv < 0) s_ircenv = getenv("ISAC_RX_IRC") ? atoi(getenv("ISAC_RX_IRC")) : 0;
-    const int irc_mode = nr_dlsch_irc_override >= 0 ? nr_dlsch_irc_override : s_ircenv;
-    nr_irc_dmrs_cov.valid = 0;
-    if (irc_mode == 4 && !seg_path && dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1 && fp->nb_antennas_rx <= 4
-        && freq_alloc->n_prb_list == 0) {
-      const int nb = fp->nb_antennas_rx, N = fp->ofdm_symbol_size;
-      const int nrb = freq_alloc->num_rbs, ng = (nrb + 3) / 4;
-      if (ng <= NR_IRC_MAX_GROUPS) {
-        memset(&nr_irc_dmrs_cov, 0, sizeof(nr_irc_dmrs_cov));
-        const int rb_offset = freq_alloc->first_rb + (dlsch_config->refPoint ? 0 : dlsch_config->BWPStart);
-        const int sc0 = fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * 12;
-        float beta = get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, false);
-        const int16_t dmrs_scaling = (int16_t)((1 / beta) * (1 << 14));
-        /* N layers (T26d): ports of CDM group 0/1 (type 1, single-symbol: port index < 4). On a comb RE of group g the
-         * LS product with the group's first port pilot is sum_{l in g} w_l h_l + n (w_l = +-1, FD-OCC), so the residual
-         * removes every layer of that group. */
-        const int nlay = cw->Nl;
-        int port[4], ok_ports = nlay >= 1 && nlay <= 4;
-        for (int l = 0; ok_ports && l < nlay; l++) {
-          port[l] = get_dmrs_port(l, dlsch_config->dmrs_ports);
-          if (port[l] < 0 || port[l] >= 4) ok_ports = 0;
-        }
-        for (int m = 0; ok_ports && m < fp->symbols_per_slot; m++) {
-          if (!((dmrs_full >> m) & 1)) continue;
-          c16_t pilot[4][3280] __attribute__((aligned(16)));
-          const uint32_t *gold = nr_gold_pdsch(fp->N_RB_DL, fp->symbols_per_slot, dlsch_config->dlDmrsScramblingId,
-                                               dlsch_config->nscid, proc->nr_slot_rx, m);
-          for (int l = 0; l < nlay; l++)
-            nr_pdsch_dmrs_rx(fp->Ncp, gold, pilot[l], 1000 + port[l], 0, nrb + rb_offset, NFAPI_NR_DMRS_TYPE1, dmrs_scaling);
-          for (int cg = 0; cg < 2; cg++) {
-            int lref = -1;
-            for (int l = 0; l < nlay; l++)
-              if (port[l] / 2 == cg) { lref = l; break; }
-            if (lref < 0) continue;
-            for (int k = cg; k < nrb * 12; k += 2) {
-              const int pi = 6 * rb_offset + k / 2;
-              const c16_t pl = pilot[lref][pi];
-              double complex e[4];
-              for (int a = 0; a < nb; a++) {
-                const c16_t y = rxdataF[a][m * N + (sc0 + k) % N];
-                e[a] = ((double)pl.r * y.r - (double)pl.i * y.i + I * ((double)pl.r * y.i + (double)pl.i * y.r)) / 32768.0;
-                for (int l = 0; l < nlay; l++) {
-                  if (port[l] / 2 != cg) continue;
-                  const c16_t pq = pilot[l][pi];
-                  const double w = ((double)pq.r * pl.r + (double)pq.i * pl.i) >= 0 ? 1.0 : -1.0; /* OCC sign vs ref */
-                  const c16_t he = ((c16_t *)&pdsch_dl_ch_estimates[l * nb + a][N * m])[k];
-                  e[a] -= w * (he.r + I * he.i);
-                }
-              }
-              const int g = k / 48;
-              for (int a = 0; a < nb; a++)
-                for (int b = 0; b < nb; b++) nr_irc_dmrs_cov.R[g][a][b] += e[a] * conj(e[b]);
-              nr_irc_dmrs_cov.n[g]++;
-            }
-          }
-        }
-        nr_irc_dmrs_cov.ng = ng;
-        nr_irc_dmrs_cov.nb = nb;
-        nr_irc_dmrs_cov.valid = ok_ports;
-      }
-    }
-  }
   if (n_dmrs_sym == 0) {
     { static _Atomic unsigned long c_ = 0;
       const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
@@ -4121,165 +3241,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       t_chest_cache.valid = 1;
     }
   }
-  if (t_eq_snap) {
-    const size_t need = (size_t)chest_nrow * chest_ndmrs * fp->ofdm_symbol_size;
-    if (t_eq_snap_cap < need) {
-      free(t_eq_snap_buf);
-      t_eq_snap_buf = (c16_t *)malloc(need * sizeof(c16_t));
-      t_eq_snap_cap = t_eq_snap_buf ? need : 0;
-    }
-    t_eq_snap_n = 0;
-    if (t_eq_snap_buf) {
-      for (int r = 0; r < chest_nrow; r++)
-        for (int m = 0; m < fp->symbols_per_slot; m++)
-          if ((dmrs_full >> m) & 1) {
-            memcpy(&t_eq_snap_buf[t_eq_snap_n], &pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * m],
-                   sizeof(c16_t) * fp->ofdm_symbol_size);
-            t_eq_snap_n += fp->ofdm_symbol_size;
-          }
-    }
-  }
-  /* ---- TIME INTERPOLATION OF THE CHANNEL ESTIMATE (ISAC_CHEST_TINTERP=1, default off) ----------
-   * nr_rx_pdsch() equalises each data symbol against the PREVIOUS DM-RS symbol's estimate
-   * (get_valid_dmrs_idx_for_channel_est), up to 4 symbols away on this cell (DM-RS at 2/7/11). A
-   * residual CFO of ~100 Hz (DMRSFO, measured) rotates the channel by ~5 deg over that gap, and a
-   * 5 ppm SFO drifts it by ~10 deg at the band edge: an EVM floor of 7-10 % that MCS 18-19 tolerates
-   * and 256QAM at MCS 25 (needs < ~3.5 %) does not. Measured floor in the flat band: 6-7 % against a
-   * raw SNR of 33 dB. Linear complex interpolation between the bracketing DM-RS symbols (extrapolation
-   * past the last / before the first) removes both to first order, using estimates we already have.
-   * Written into the data symbol's own slot of pdsch_dl_ch_estimates; nr_dlsch_chest_per_symbol makes
-   * nr_rx_pdsch read that slot. */
-  /* ISAC_PDSCH_CDM_DIAG=1 (diagnostic, default off, HIGHMCS2): on DM-RS symbols of a type-1 grant, mean |y|^2 on our CDM group's
-   * subcarriers vs the other group's. With 2 CDM groups without data the other group carries no data of this grant: noise
-   * alone reads ~-SNR dB, another UE's DM-RS (MU-MIMO co-scheduling) reads near 0 dB. One CDMDIAG line per full dedicated decode,
-   * joinable to EVMGRANT on rnti + frame.slot. */
-  {
-    static _Atomic int s_cdmd = -1;
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_CDM_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (s_cdmd < 0) s_cdmd = getenv("ISAC_PDSCH_CDM_DIAG") && atoi(getenv("ISAC_PDSCH_CDM_DIAG")) ? 1 : 0;
-    if (s_cdmd && !seg_path && !t_quiet && !t_probe_first_seg && grant->rnti_class == 0
-        && dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1 && dlsch_config->dlDmrsSymbPos) {
-      const int N = fp->ofdm_symbol_size, nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
-      const int sc0 = fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB;
-      const int own = (get_dmrs_port(0, dlsch_config->dmrs_ports) / 2) & 1; /* type 1: port 1000/1001 -> group 0 (even k) */
-      double e[2] = {0.0, 0.0};
-      char sb[14 * 8 + 1], pb[14 * 8 + 1];
-      int su = 0, pu = 0;
-      double etot[14] = {0};
-      for (int m = 0; m < fp->symbols_per_slot && m < 14; m++) {
-        double es[2] = {0.0, 0.0}; /* per symbol, odd vs even subcarriers: a DM-RS symbol with one group used reads << 0 dB */
-        for (int a = 0; a < fp->nb_antennas_rx; a++)
-          for (int k = 0; k < nsc; k++) {
-            const c16_t y = rxdataF[a][m * N + (sc0 + k) % N];
-            es[k & 1] += (double)y.r * y.r + (double)y.i * y.i;
-          }
-        su += snprintf(sb + su, sizeof(sb) - su, "%s%.0f", m ? "," : "",
-                       es[own] > 0.0 && es[!own] > 0.0 ? 10.0 * log10(es[!own] / es[own]) : -99.0);
-        if ((dlsch_config->dlDmrsSymbPos >> m) & 1) { e[0] += es[0]; e[1] += es[1]; }
-        etot[m] = es[0] + es[1];
-      }
-      const int d0 = __builtin_ctz(dlsch_config->dlDmrsSymbPos | (1u << 15));
-      for (int m = 0; m < 14; m++) /* total energy per symbol vs the first DM-RS symbol: where the allocation really ends */
-        pu += snprintf(pb + pu, sizeof(pb) - pu, "%s%.0f", m ? "," : "",
-                       d0 < 14 && etot[d0] > 0.0 && etot[m] > 0.0 ? 10.0 * log10(etot[m] / etot[d0]) : -99.0);
-      if (e[own] > 0.0)
-        LOG_I(PHY, "SENSING: CDMDIAG rnti=0x%04x fs=%d.%d nl=%d ports=0x%x cdm=%d mcs=%u rb=%u+%u S=%u L=%u dmrs=0x%x other_vs_own_db=%.1f sym_db=[%s] pow_db=[%s]\n",
-              grant->rnti, proc->frame_rx, proc->nr_slot_rx, cw->Nl, dlsch_config->dmrs_ports, dlsch_config->n_dmrs_cdm_groups,
-              grant->mcs, freq_alloc->first_rb, freq_alloc->num_rbs, dlsch_config->start_symbol, dlsch_config->number_symbols,
-              dlsch_config->dlDmrsSymbPos, e[!own] > 0.0 ? 10.0 * log10(e[!own] / e[own]) : -99.0, sb, pb);
-    }
-  }
-  /* ISAC_PDSCH_RAW_DUMP=<path> (diagnostic, default off, TIMRANK34): append the FEP'd allocation span (all 14 symbols x nbRx,
-   * c16) of each full dedicated decode with Nl >= ISAC_PDSCH_RAW_DUMP_MINNL (default 3), once per rnti+slot, for offline
-   * DM-RS port / OCC / scrambling hypothesis tests. Record: "PRW1", int32 h[32], c16 [nbRx][14][nsc]. */
-  {
-    static _Atomic int s_rd = -1;
-    static FILE *s_rf;
-    static int s_rleft, s_rminnl;
-    static uint32_t s_rlast;
-    static pthread_mutex_t s_rmu = PTHREAD_MUTEX_INITIALIZER;
-    if (s_rd < 0) {
-      /* DEFERRED/DO NOT USE: ISAC_PDSCH_RAW_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
-      /* DEFERRED/DO NOT USE: ISAC_PDSCH_RAW_DUMP_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
-      /* DEFERRED/DO NOT USE: ISAC_PDSCH_RAW_DUMP_MINNL not in the frozen config t26zE (2026-10-18); slated for removal */
-      const char *p = getenv("ISAC_PDSCH_RAW_DUMP"), *mx = getenv("ISAC_PDSCH_RAW_DUMP_MAX"), *mn = getenv("ISAC_PDSCH_RAW_DUMP_MINNL");
-      s_rleft = mx ? atoi(mx) : 3000;
-      s_rminnl = mn ? atoi(mn) : 3;
-      s_rf = (p && *p) ? fopen(p, "wb") : NULL;
-      s_rd = s_rf ? 1 : 0;
-    }
-    if (s_rd && !t_quiet && !t_probe_first_seg && grant->rnti_class == 0 && cw->Nl >= s_rminnl) {
-      const uint32_t key = ((uint32_t)grant->rnti << 16) ^ ((uint32_t)proc->frame_rx << 5) ^ (uint32_t)proc->nr_slot_rx;
-      pthread_mutex_lock(&s_rmu);
-      if (s_rleft > 0 && key != s_rlast) {
-        s_rlast = key;
-        --s_rleft;
-        const int N = fp->ofdm_symbol_size, nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
-        const int sc0 = fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB;
-        const int32_t h[32] = {grant->rnti, proc->frame_rx, proc->nr_slot_rx, cw->Nl, dlsch_config->dmrs_ports,
-                               dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType, dlsch_config->dlDmrsSymbPos,
-                               dlsch_config->start_symbol, dlsch_config->number_symbols, freq_alloc->first_rb, freq_alloc->num_rbs,
-                               dlsch_config->BWPStart, grant->mcs, grant->mcs_table, dlsch_config->nscid,
-                               dlsch_config->dlDmrsScramblingId, dlsch_config->dlDataScramblingId, grant->dci_len,
-                               (int32_t)(grant->dci_w[0] & 0xffffffffu), (int32_t)(grant->dci_w[0] >> 32),
-                               (int32_t)(grant->dci_w[1] & 0xffffffffu), (int32_t)(grant->dci_w[1] >> 32), N,
-                               fp->first_carrier_offset, fp->nb_antennas_rx, freq_alloc->prg, freq_alloc->n_prb_list, sc0, grant->rv,
-                               grant->harq_pid, grant->ndi};
-        fwrite("PRW1", 1, 4, s_rf);
-        fwrite(h, sizeof(h), 1, s_rf);
-        for (int a = 0; a < fp->nb_antennas_rx; a++)
-          for (int m = 0; m < 14; m++)
-            for (int k = 0; k < nsc; k++)
-              fwrite(&rxdataF[a][m * N + (sc0 + k) % N], sizeof(c16_t), 1, s_rf);
-        fflush(s_rf);
-      }
-      pthread_mutex_unlock(&s_rmu);
-    }
-  }
-  static _Atomic int s_tinterp = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-  if (s_tinterp < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_CHEST_TINTERP not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_CHEST_TINTERP");
-    s_tinterp = (e != NULL && atoi(e) != 0) ? 1 : 0;
-  }
-  if (t_tinterp_override >= 0 ? t_tinterp_override : s_tinterp) {
-    /* the estimate rows are allocation-relative (nr_dlsch_extract_rbs reads [0, num_rbs*12)): interpolating the whole FFT
-     * width cost 4096 bins x Nl x nbRx x data symbols per decode; same values inside the span, nothing outside is read */
-    const uint32_t tspan_sc = (uint32_t)freq_alloc->num_rbs * NR_NB_SC_PER_RB;
-    const uint32_t tspan = tspan_sc < (uint32_t)fp->ofdm_symbol_size ? tspan_sc : (uint32_t)fp->ofdm_symbol_size;
-    int dsym[NR_SYMBOLS_PER_SLOT], nd = 0;
-    for (int m = 0; m < NR_SYMBOLS_PER_SLOT; m++) /* every DM-RS symbol of the slot is estimated (K32) */
-      if ((dmrs_full >> m) & 1)
-        dsym[nd++] = m;
-    const int s0 = dlsch_config->start_symbol, s1 = s0 + dlsch_config->number_symbols;
-    for (int m = s0; m < s1 && nd >= 1; m++) {
-      if ((dlsch_config->dlDmrsSymbPos >> m) & 1)
-        continue;
-      int a, b;
-      if (nd == 1) {
-        a = b = dsym[0];
-      } else {
-        int i = 0;
-        while (i + 1 < nd - 1 && dsym[i + 1] <= m) // last pair with dsym[i] <= m (or the first pair)
-          i++;
-        if (dsym[i] > m) i = 0;
-        a = dsym[i]; b = dsym[i + 1];
-      }
-      const float t = (b == a) ? 0.f : (float)(m - a) / (float)(b - a);
-      for (int nl = 0; nl < cw->Nl; nl++) {
-        for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
-          const int r = nl * fp->nb_antennas_rx + aarx;
-          const int16_t *ha = (const int16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * a];
-          const int16_t *hb = (const int16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * b];
-          int16_t *hm = (int16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * m];
-          tinterp_row(ha, hb, hm, 2 * tspan, t);
-        }
-      }
-    }
-    nr_dlsch_chest_per_symbol = 1;
-  } else {
-    nr_dlsch_chest_per_symbol = 0;
-  }
+  nr_dlsch_chest_per_symbol = 0;
   /* EVMGRANT dmrs_snr / dmrs_pw / dmrs_ref (CPU chest, GPU exact chest, chest cache): last DM-RS symbol and layer, as nr_dl_chest_nvar_ant. The GPU graph pass fills
    * the same from its host copy of the estimate (nr_gpu_pass_graph.cu); a gpu_llr / gw_ready grant has no chest of its own and stays path 0 (-99). */
   {
@@ -4306,44 +3268,17 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   /* TAIL-FIX no-chance gate (nr_snr_gate.h): the chest's own DM-RS SNR (comb) is more than 5 dB below the SNR this MCS needs: no demod, no LDPC, no retry.
    * Probes (layout searches) are discovery and SI/P/RA grants carry no MCS-table evidence: never gated. With HARQ combining on a retransmission is always decoded.
    * (The GPU graph pass estimates inside its graph and is not gated here.) */
-  if (out->dmrs_path != 0 && !t_probe_no_horizon
-      && nr_snr_gate_applies(t_probe_first_seg || probe_last_sym >= 0, grant->rnti_class == 0, grant->rv, harq_combine_on() != 0)
+  if (out->dmrs_path != 0
+      && nr_snr_gate_applies(t_probe_first_seg || probe_last_sym >= 0, grant->rnti_class == 0, grant->rv, true)
       && nr_snr_no_chance(out->dmrs_snr.comb_db, grant->mcs, grant->mcs_table)) {
     out->skip = 1;
     out->status = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
     return out->status;
   }
-  /* nvar normalisation. ISAC_RX_NVAR_FIX=1 (opt-in, default OFF = bit-identical to before).
-   *
-   * The loop above accumulates (n_dmrs_sym x Nl) terms, each one already a PER-ANTENNA MEAN of
-   * |LS_est - filtered_est|^2 (that per-antenna averaging is 18.3's fix inside
-   * nr_pdsch_channel_estimation). So the mean is the sum over (n_dmrs_sym x Nl) -- and the divisor
-   * used below is neither of those factors:
-   *   - it divides by nb_antennas_rx AGAIN, though the helper already averaged over antennas: 4x;
-   *   - it divides by number_symbols (13, the whole allocation) though only n_dmrs_sym (3) terms
-   *     were summed: 4.33x.
-   * MEASURED 2026-08-25 on run SNR1: the NVAR probe's pre-division value 20245 against CHESTDIAG's
-   * post-division 1167 = 17.35x, matching 13/3 exactly. nvar sets the equaliser's confidence, so a
-   * 12.4 dB under-estimate makes the LLRs too large and they clip -- a decode failure with a
-   * perfectly healthy constellation, which is the signature 17.2b measured (post-equalisation EVM
-   * flat at 47-62 % across runs decoding 82.6 % and 0.0 %). Same defect CLASS as 18.3, which took
-   * CRC 0 % -> 54-71 % when the antenna part of it was corrected.
-   *
-   * DEFAULT STAYS OFF because the current form is a DELIBERATE mirror of nr_ue_pdsch_procedures(),
-   * which carries the identical arithmetic -- this is upstream OAI behaviour, not a local slip, and
-   * the attached path's gates were tuned against it. Flip it only on an alternated >= 5-run-per-arm
-   * A/B at comparable offered load (19.3), never on inspection. */
-  {
-    static _Atomic int s_nvfix = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-    if (s_nvfix < 0) {
-      /* DEFERRED/DO NOT USE: ISAC_RX_NVAR_FIX not in the frozen config t26zE (2026-10-18); slated for removal */
-      s_nvfix = (getenv("ISAC_RX_NVAR_FIX") != NULL) ? atoi(getenv("ISAC_RX_NVAR_FIX")) : 0;
-    }
-    const uint32_t den = s_nvfix ? (uint32_t)(n_dmrs_sym * cw->Nl)
-                                 : (uint32_t)(dlsch_config->number_symbols * cw->Nl * fp->nb_antennas_rx);
-    nvar_den = (den > 0) ? den : 1u;
-    nvar /= nvar_den;
-  }
+  /* nvar normalisation: the mirror of nr_ue_pdsch_procedures() (upstream OAI arithmetic), kept bit-identical on purpose. */
+  nvar_den = (uint32_t)(dlsch_config->number_symbols * cw->Nl * fp->nb_antennas_rx);
+  if (nvar_den == 0) nvar_den = 1u;
+  nvar /= nvar_den;
   /* ---- Match nvar to the branch actually decoded (2026-09-04) ---------------------------------
    * nvar above is the MEAN over every receive branch, but the rank-1 four-RX path decodes ONE
    * branch. On this rig three of the four are noise, so the mean tells the equaliser the channel is
@@ -4353,15 +3288,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    *
    * Only applied when the branch is known in advance (mode 0, the default) and that branch actually
    * produced an estimate; otherwise the mean stands, so nothing changes for the attached UE, for
-   * mode 1/2/3, or for a single-antenna receiver. ISAC_RX_NVAR_PERBRANCH=0 disables it. */
+   * mode 1/2/3, or for a single-antenna receiver. */
   {
-    static _Atomic int s_pb = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-    if (s_pb < 0) {
-      /* DEFERRED/DO NOT USE: ISAC_RX_NVAR_PERBRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
-      const char *e = getenv("ISAC_RX_NVAR_PERBRANCH");
-      s_pb = (e != NULL) ? atoi(e) : 1;
-    }
-    const int dl_branch = s_pb ? nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) : -1;
+    const int dl_branch = nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl);
     if (dl_branch >= 0 && dl_branch < NR_DL_CHEST_MAX_ANT && nr_dl_chest_nvar_ant[dl_branch] > 0) {
       /* SCALE-PRESERVING substitution, not a raw one. `nvar` at this point is
        *     (sum over n_dmrs_sym x Nl calls of the per-antenna MEAN) / den
@@ -4388,481 +3317,6 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     nr_td_gw_tim_add(NR_TD_GWTIM_CHEST, t_ - gw_t_chest);
   }
 
-  /* ---- PER-BRANCH FREQUENCY-OFFSET ESTIMATE (2026-09-03) --------------------------------------
-   * THE measurement that decides why branches 1-3 are undecodable. Selection diversity established
-   * that they rescue 0 of 15411 TBs while branch 2 is only 1.7 dB down -- too small a deficit to be
-   * a link-budget failure, so their channel must be moving WITHIN the slot. This quantifies that
-   * directly, per branch, from data already computed.
-   *
-   * Estimator: the DM-RS channel estimate at the first and last DM-RS symbol differ, for a static
-   * channel, only by the phase a residual frequency offset accumulated between them:
-   *     acc   = sum_k H_last[k] . conj(H_first[k])        (noise averages out over subcarriers)
-   *     f_res = arg(acc) / (2.pi.dt)
-   * Reported as a DIFFERENCE against branch 0, because the part common to all branches is already
-   * handled by the shared sync loop -- what breaks a branch is the part that is NOT common.
-   *
-   * Unambiguous only for |arg| < pi, i.e. |f| < 1/(2.dt): with DM-RS at symbols 2 and 11 at 30 kHz
-   * SCS that is ~1557 Hz. A branch beyond that aliases and reads small -- so treat a near-zero
-   * value on an otherwise-dead branch with suspicion rather than as proof of coherence.
-   *
-   * ISAC_RX_BRANCH_FO=1 additionally APPLIES the estimate (nr_ue_set_branch_fo_hz -> the per-branch
-   * de-rotation in nr_slot_fep_ant). Default is measure-and-log ONLY: correcting on the strength of
-   * an unvalidated estimate is exactly the mistake this file's history is full of. */
-  /* ---- DM-RS PHASE-SLOPE CFO/SFO TRACKER (2026-09-07) -----------------------------------------
-   * WHY THIS EXISTS. The carrier frequency offset is estimated ONCE at acquisition and never
-   * revisited (the CFO trim loop in phy_procedures_nr_ue.c measures but does not apply, and
-   * --cont-fo-comp's PI loop is gated on a PBCH decode, so it updates at SSB rate, 20 ms, not per
-   * slot). SAMPLING frequency offset is not estimated at ALL anywhere in this receive path -- the
-   * only SFO code in the tree is NR_UE_ISAC's cpi_sfo_tracker, and the passive confs run with
-   * sensing.enable = 0. Both errors accumulate ACROSS SYMBOLS WITHIN A SLOT, which is the shape of
-   * the symptom: PDCCH lives on symbol 0 and decodes near-perfectly, PDSCH spans symbols 1-13 and
-   * swings 5-78 % between otherwise identical runs.
-   *
-   * WHY IT IS ESSENTIALLY FREE HERE. This gNB sends dl_dmrs_symb_pos = 0x884, i.e. DM-RS on symbols
-   * 2, 7 and 11 of every grant, and the loop above ALREADY channel-estimates each of them. So the
-   * estimate costs one pass over an array that is already in cache, per grant, with ~200k grants a
-   * run to average over. No new reference signal, no extra FFT, no PT-RS (which this cell does not
-   * configure anyway).
-   *
-   * THE SEPARATION, which is the whole point of using a SLOPE rather than a mean. Between two
-   * pilot-bearing symbols separated by dt:
-   *     dphi(k) = arg( H_last[k] . conj(H_first[k]) ) = 2*pi*f_cfo*dt  -  2*pi*k*df*eps*dt
-   * CFO is a CONSTANT phase on every subcarrier; SFO is a phase RAMP linear in the subcarrier index
-   * k. Fit phase against k and the INTERCEPT is the CFO while the SLOPE is the SFO -- one
-   * measurement yields both, and neither can masquerade as the other. (Standard result; see e.g.
-   * US7224666B2 / EP1363435A2.)
-   *
-   * Rather than a full least-squares fit, the ramp is taken from the two halves of the occupied
-   * band (negative-k and positive-k about DC) and differenced. One subtraction, no matrix, and the
-   * noise averages over ~half the allocation on each side. A full LS fit is the upgrade path if the
-   * slope ever needs more precision than this.
-   *
-   * MEASURE-ONLY BY DEFAULT, and that is not timidity: retuning the radio on an unvalidated
-   * estimate killed it 2/2 on this rig, which is why the existing trim loop is two-stage too.
-   * ISAC_DMRS_FO_APPLY=1 applies the CFO as a DIGITAL de-rotation through the same per-branch hook
-   * nr_slot_fep_ant already uses -- never a hardware retune. SFO is reported only; correcting it
-   * needs a per-subcarrier ramp in the equaliser, which is a bigger change than this. */
-  if (!seg_path && dmrs_first >= 0 && dmrs_last > dmrs_first) { /* the SFO slope needs a frequency-ordered axis */
-    /* SFO is counted separately from CFO: a grant too narrow to fit two slope groups yields a CFO
-     * but NO SFO, and the two populations are not the same size (measured 46 % narrow on
-     * captures/sfooff_r1_191752). Sharing one counter is what let an unmeasured SFO be folded in
-     * as if it were a measurement -- see the gate below. */
-    /* The EMA updates are READ-MODIFY-WRITE and this function runs on N consumer threads
-     * (nr_pdsch_passive_queue.c starts several). Plain statics raced: a capture showed
-     * "cfo=-41.3 Hz (ema +248.2)", an average nowhere near the samples feeding it. The published
-     * g_sfo_ppm_ema is an atomic a consumer may read stale; the update itself needs this lock. The
-     * critical section is a few flops. */
-    const double dt_d = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot
-                        * (double)(dmrs_last - dmrs_first);
-    const uint32_t N = fp->ofdm_symbol_size;
-    const c16_t *h0 = (const c16_t *)&pdsch_dl_ch_estimates[0][N * dmrs_first];
-    const c16_t *h1 = (const c16_t *)&pdsch_dl_ch_estimates[0][N * dmrs_last];
-    /* Split at the midpoint of the OCCUPIED band, not at DC.
-     * MEASURED 2026-09-07: splitting at N/2 put EVERY occupied subcarrier on one side
-     * (n_sc = 0/292) and the slope estimator never ran -- SFO read 0.00 ppm in every grant of a
-     * whole capture, which looks exactly like "no SFO" rather than like a broken estimator. The
-     * grant lives in one contiguous stretch of the FFT array, so a DC split is not guaranteed to
-     * divide it at all.
-     * The ORIGIN of k does not matter for the slope: shifting k by k0 leaves d(phi)/dk unchanged
-     * and moves only the intercept, by 2*pi*k0*df*eps*dt, which at these eps is far below the CFO
-     * term it lands in. Any two well-separated groups of subcarriers give the same SFO. */
-    uint32_t kmin = N, kmax = 0;
-    for (uint32_t k = 0; k < N; k++) {
-      if (h0[k].r != 0 || h0[k].i != 0 || h1[k].r != 0 || h1[k].i != 0) {
-        if (k < kmin) kmin = k;
-        if (k > kmax) kmax = k;
-      }
-    }
-    const uint32_t kmid = (kmin <= kmax) ? (kmin + kmax) / 2 : 0;
-    double re[2] = {0.0, 0.0}, im[2] = {0.0, 0.0}, ksum[2] = {0.0, 0.0}, magsum[2] = {0.0, 0.0};
-    uint32_t kn[2] = {0, 0};
-    for (uint32_t k = 0; k < N; k++) {
-      const double rr = (double)h1[k].r * h0[k].r + (double)h1[k].i * h0[k].i;
-      const double ii = (double)h1[k].i * h0[k].r - (double)h1[k].r * h0[k].i;
-      if (rr == 0.0 && ii == 0.0) {
-        continue;  // unallocated subcarrier
-      }
-      const int h = (k <= kmid) ? 0 : 1;
-      re[h] += rr;
-      im[h] += ii;
-      ksum[h] += (double)k;
-      /* |H1|.|H0| per subcarrier: the magnitude the coherent sum WOULD reach if every subcarrier
-       * agreed in phase. Its ratio to |sum| is the validity gate below. */
-      magsum[h] += sqrt(((double)h1[k].r * h1[k].r + (double)h1[k].i * h1[k].i)
-                        * ((double)h0[k].r * h0[k].r + (double)h0[k].i * h0[k].i));
-      kn[h]++;
-    }
-    /* ---- VALIDITY GATE ---------------------------------------------------------------------
-     * COHERENCE, not energy. |sum(H1.conj(H0))| / sum(|H1||H0|) is 1 when every subcarrier reports
-     * the same phase difference (a real, common CFO/SFO) and falls to ~1/sqrt(n) when the phases
-     * are random, which is what noise looks like. It is dimensionless and self-normalising, so it
-     * needs no reference level and no per-rig calibration -- the same reason this project prefers
-     * dimensionless gates elsewhere.
-     * MEASURED 2026-09-07: on a DEAF capture (4 TBs decoded, EVM 70 %, no signal on air) the
-     * ungated estimator published cfo = -224 Hz and sfo = -12.24 ppm from pure noise, against
-     * +40 Hz / +2.2 ppm on healthy runs. With the correction stage enabled that garbage would have
-     * been applied to every later grant in the run. An estimator that cannot say "I do not know"
-     * is a liability once anything consumes it. */
-    const double coh_num = sqrt((re[0] + re[1]) * (re[0] + re[1]) + (im[0] + im[1]) * (im[0] + im[1]));
-    const double coh_den = magsum[0] + magsum[1];
-    const double coherence = (coh_den > 0.0) ? (coh_num / coh_den) : 0.0;
-    /* ---- THE COMBINED COHERENCE MEASURES THE SFO, NOT THE NOISE -----------------------------
-     * A real SFO makes the phase difference ramp LINEARLY across k, so a coherent sum over the
-     * whole occupied band partially cancels: the value is |sinc(PHI/2)| where PHI is the total
-     * ramp, 2*pi*df*eps*dt*K. At this geometry (df=30 kHz, dt=321 us, K=3276) PHI is 198486*eps,
-     * so the combined coherence is a monotone function of the SFO:
-     *     2.4 ppm -> 0.99    4.2 ppm -> 0.97    12 ppm -> 0.78    24 ppm -> 0.29
-     * MEASURED on this rig: coh=0.97 at a reported 4.2 ppm -- the sinc prediction to two decimals.
-     * The noise floor at n=3276 is 1/sqrt(n) = 0.017, so the 0.30 threshold sits 17x above noise
-     * and is nowhere near it: what actually trips the gate is a LARGE REAL SFO, from ~24 ppm up.
-     * That is backwards -- the estimator refuses exactly when the impairment it exists to measure
-     * is worst, and reports "withheld" rather than "large". A wide-grant rejection observed at
-     * coh=0.077 (n_sc=1628/1628) is consistent with ~30 ppm, not with a dead channel.
-     *
-     * PER-HALF coherence is the right gate. Each half spans half the band, so it suffers only
-     * sinc(PHI/4) -- at 24 ppm that is 0.78 rather than 0.29 -- and it validates precisely the two
-     * phases the slope is built from, which the combined figure never did (one half could be pure
-     * noise while a strong other half carried the sum past the threshold). */
-    const double coh_h[2] = {
-        (magsum[0] > 0.0) ? sqrt(re[0] * re[0] + im[0] * im[0]) / magsum[0] : 0.0,
-        (magsum[1] > 0.0) ? sqrt(re[1] * re[1] + im[1] * im[1]) / magsum[1] : 0.0};
-    const double coh_min = (coh_h[0] < coh_h[1]) ? coh_h[0] : coh_h[1];
-    /* Fall back to the combined figure when a half is too thin for its own coherence to mean
-     * anything (1/sqrt(n) rises fast at small n, and a spurious rejection is as bad as a spurious
-     * accept). 8 keeps the per-half floor at ~0.35 worst case. */
-    const bool halves_usable = (kn[0] >= 8 && kn[1] >= 8);
-    const double coh_gate = halves_usable ? coh_min : coherence;
-    /* 0.3 is far above the ~1/sqrt(n) a random-phase population reaches at these n (n >= 28 gives
-     * ~0.19, and the real populations here run several hundred), and far below the ~0.9+ a genuine
-     * common rotation produces. Anything in between is not trustworthy enough to steer a
-     * correction with. */
-    if (kn[0] + kn[1] > 0 && coh_gate < 0.30) {
-      const uint64_t nrej = atomic_fetch_add(&s_dfo_rej, 1);
-      if ((nrej % 500) == 0) {
-        /* Print BOTH: a low combined with healthy halves is a large SFO, not a dead channel, and
-         * the two were previously indistinguishable in this line. */
-        LOG_I(PHY, "SENSING: DMRSFO REJECTED n=%lu coh=%.3f (halves %.3f/%.3f, gate %.3f < 0.30) "
-                   "n_sc=%u/%u -- estimate withheld, not published\n",
-              (unsigned long)nrej + 1, coherence, coh_h[0], coh_h[1], coh_gate, kn[0], kn[1]);
-      }
-    }
-    if (kn[0] + kn[1] > 0 && coh_gate >= 0.30) {
-      const double cfo_hz = atan2(im[0] + im[1], re[0] + re[1]) / (2.0 * M_PI * dt_d);
-      double sfo_ppm = 0.0, sfo_dk = 0.0;
-      bool sfo_measured = false;
-      if (kn[0] > 16 && kn[1] > 16 && coh_h[0] >= 0.30 && coh_h[1] >= 0.30) {
-        const double p_lo = atan2(im[0], re[0]), p_hi = atan2(im[1], re[1]);
-        const double k_lo = ksum[0] / (double)kn[0], k_hi = ksum[1] / (double)kn[1];
-        double dphi = p_hi - p_lo;
-        while (dphi > M_PI)  dphi -= 2.0 * M_PI;   // the ramp must not alias across the branch cut
-        while (dphi < -M_PI) dphi += 2.0 * M_PI;
-        const double dk = k_hi - k_lo;
-        if (dk != 0.0) {
-          /* dphi/dk = -2*pi*df*eps*dt  ->  eps = -(dphi/dk) / (2*pi*df*dt) */
-          const double df = (double)fp->subcarrier_spacing;
-          sfo_ppm = -(dphi / dk) / (2.0 * M_PI * df * dt_d) * 1.0e6;
-          sfo_dk = (dk < 0.0) ? -dk : dk;
-          sfo_measured = true;
-        }
-      }
-      const uint64_t dn = atomic_fetch_add(&s_dfo_n, 1);
-      /* A grant with fewer than two usable slope groups produced NO SFO estimate. Folding the
-       * initialiser 0.0 into the average records "unmeasurable" as "zero", which is not a neutral
-       * default -- it drags the published value toward zero in proportion to how many narrow
-       * grants the cell schedules. MEASURED on captures/sfooff_r1_191752: 49 of 107 DMRSFO samples
-       * (46 %) had kn <= 16 and every one of them published sfo=+0.00, so the reported ema of
-       * +4.33 ppm was averaged with ~46 % fabricated zeros and UNDERSTATES the true SFO. The
-       * correction stage consumes exactly this value. Same distinction the CSI-RS correlator makes
-       * between "cannot score" and "scored zero". */
-      double sfo_pub;
-      pthread_mutex_lock(&s_dfo_lock);
-      s_cfo_ema = (dn == 0) ? cfo_hz : (0.99 * s_cfo_ema + 0.01 * cfo_hz);
-      if (sfo_measured) {
-        /* ---- WEIGHT BY PRECISION, NOT EQUALLY -------------------------------------------------
-         * The slope is recovered from the phase difference between two subcarrier groups whose
-         * centres are dk apart, so its variance goes as 1/dk^2. dk is set by the GRANT's
-         * allocation, and this cell schedules everything from a couple of resource blocks to the
-         * full carrier -- a factor of ~30 in dk, so a factor of ~1000 in variance.
-         *
-         * Equal weighting therefore let a narrow grant, whose own unambiguous range is
-         * +/-1000 ppm and which resolves nothing at the few-ppm scale being measured, move the
-         * average as much as a full-band grant. MEASURED: the published EMA reached -45.65 ppm
-         * while instantaneous full-band estimates read +4.3 ppm -- outside the +/-31.6 ppm
-         * unambiguous range of the very grants that dominate the population, which is impossible
-         * for an average of valid measurements and is what exposed this.
-         *
-         * Inverse-variance weighting is the standard answer and needs no threshold: the step is
-         * scaled by (dk/dk_ref)^2, unity for a full-band grant. A narrow grant still contributes,
-         * in proportion to the information it actually carries. */
-        const double dk_ref = (double)fp->N_RB_DL * 12.0 / 2.0;  /* full-band group separation */
-        double rel = (dk_ref > 0.0) ? (sfo_dk / dk_ref) : 0.0;
-        rel = rel * rel;
-        if (rel > 1.0) {
-          rel = 1.0;   /* a wider-than-reference separation is not MORE than fully informative */
-        }
-        const double a = 0.01 * rel;
-        const uint64_t sn = atomic_fetch_add(&s_sfo_n, 1);
-        /* Seed from the first FULL-WEIGHT sample rather than the first sample of any width: a
-         * narrow first grant would otherwise set the starting point to a near-meaningless value
-         * that the weighted updates then take a long time to walk away from. */
-        if (sn == 0 || (s_sfo_ema == 0.0 && rel > 0.5)) {
-          s_sfo_ema = sfo_ppm;
-        } else {
-          s_sfo_ema = (1.0 - a) * s_sfo_ema + a * sfo_ppm;
-        }
-        atomic_store_explicit(&g_sfo_ppm_ema, s_sfo_ema, memory_order_relaxed); // published for the SFO correction stage
-      }
-      sfo_pub = s_sfo_ema;
-      const double cfo_pub = s_cfo_ema;
-      pthread_mutex_unlock(&s_dfo_lock);
-      static _Atomic int s_apply = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-      if (s_apply < 0) {
-        /* DEFERRED/DO NOT USE: ISAC_DMRS_FO_APPLY not in the frozen config t26zE (2026-10-18); slated for removal */
-        const char *e = getenv("ISAC_DMRS_FO_APPLY");
-        s_apply = (e != NULL && atoi(e) != 0) ? 1 : 0;
-      }
-      {
-        if (s_apply) {
-          /* Digital de-rotation only, applied to every branch in common. NOT nrue_ru_set_freq(). */
-          for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++) {
-            nr_ue_set_branch_fo_hz(a, -cfo_pub);
-          }
-        }
-      }
-      if ((dn % 500) == 0) {
-        char sfo_txt[64];
-        if (sfo_measured) {
-          /* The slope is recovered from a phase difference wrapped to (-pi, pi], so the SFO is
-           * unambiguous only up to |eps| = 1 / (2 * df * dt * dk). Beyond that it ALIASES and
-           * reports a small value -- indistinguishable from a clean clock. The CFO line has always
-           * printed its own limit; the SFO never did, which matters now that the published figure
-           * is suspected of understating the truth. */
-          const double dk_lo = ksum[0] / (double)kn[0], dk_hi = ksum[1] / (double)kn[1];
-          const double dk_abs = (dk_hi > dk_lo) ? (dk_hi - dk_lo) : (dk_lo - dk_hi);
-          const double eps_max = (dk_abs > 0.0)
-                                     ? 1.0e6 / (2.0 * (double)fp->subcarrier_spacing * dt_d * dk_abs)
-                                     : 0.0;
-          snprintf(sfo_txt, sizeof(sfo_txt), "%+.2f ppm (unamb +/-%.1f)", sfo_ppm, eps_max);
-        } else {
-          /* NOT "0.00": this grant was too narrow to fit two slope groups. Printing a zero here is
-           * what made a broken estimator look like a quiet channel. */
-          snprintf(sfo_txt, sizeof(sfo_txt), "n/a (kn<=16)");
-        }
-        LOG_I(PHY,
-              "SENSING: DMRSFO cfo=%+.1f Hz (ema %+.1f) sfo=%s (ema %+.2f over %lu) "
-              "sym %d->%d n_sc=%u/%u coh=%.2f (halves %.2f/%.2f) dk=%.0f unambiguous=+/-%.0f Hz apply=%d\n",
-              cfo_hz, cfo_pub, sfo_txt, sfo_pub, (unsigned long)atomic_load(&s_sfo_n),
-              dmrs_first, dmrs_last, kn[0], kn[1], coherence, coh_h[0], coh_h[1], sfo_dk,
-              1.0 / (2.0 * dt_d), s_apply);
-      }
-    }
-  }
-
-  /* BRANCHFO: measured here, integrated only once this grant's TB CRC passes (see brfo_commit):
-   * probes, unsettled layout hypotheses and false-accept DCIs give random slopes that would
-   * random-walk the correction to its clamp. */
-  t_brfo_pending = false;
-  if (fp->nb_antennas_rx > 1 && dmrs_first >= 0 && dmrs_last <= dmrs_first) {
-    static _Atomic int s_inert_logged = 0;
-    if (!atomic_exchange(&s_inert_logged, 1))
-      LOG_W(PHY, "SENSING: BRANCHFO inert: grant has one DM-RS symbol, no per-branch slope to measure\n");
-  }
-  if (fp->nb_antennas_rx > 1 && chest_only < 0 && dmrs_first >= 0 && dmrs_last > dmrs_first) {
-    // symbol duration incl. CP: one slot is 1ms/slots_per_subframe, split into symbols_per_slot
-    const double dt = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot
-                      * (double)(dmrs_last - dmrs_first);
-    double fo[NR_DL_CHEST_MAX_ANT] = {0};
-    for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++) {
-      const c16_t *h0 = (const c16_t *)&pdsch_dl_ch_estimates[a][fp->ofdm_symbol_size * dmrs_first];
-      const c16_t *h1 = (const c16_t *)&pdsch_dl_ch_estimates[a][fp->ofdm_symbol_size * dmrs_last];
-      double re = 0.0, im = 0.0;
-      for (uint32_t k = 0; k < fp->ofdm_symbol_size; k++) {
-        // H_last * conj(H_first); unallocated subcarriers are zero and contribute nothing
-        re += (double)h1[k].r * h0[k].r + (double)h1[k].i * h0[k].i;
-        im += (double)h1[k].i * h0[k].r - (double)h1[k].r * h0[k].i;
-      }
-      fo[a] = (re != 0.0 || im != 0.0) ? atan2(im, re) / (2.0 * M_PI * dt) : 0.0;
-    }
-    const uint64_t n = atomic_fetch_add(&s_fo_n, 1);
-    pthread_mutex_lock(&s_brfo_lock);
-    for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++) {
-      // Differential against branch 0: the common part is the shared sync loop's job, not ours.
-      const double d = fo[a] - fo[0];
-      s_fo_ema[a] = (n == 0) ? d : (0.99 * s_fo_ema[a] + 0.01 * d);
-      t_brfo_d[a] = d;
-    }
-    pthread_mutex_unlock(&s_brfo_lock);
-    t_brfo_nant = fp->nb_antennas_rx;
-    t_brfo_pending = true;
-    if ((n % 500) == 0) {
-      LOG_I(PHY,
-            "SENSING: BRANCHFO d_vs_br0=[%.1f %.1f %.1f %.1f] Hz (EMA, DM-RS sym %d->%d, "
-            "unambiguous to +/-%.0f Hz)\n",
-            s_fo_ema[0], fp->nb_antennas_rx > 1 ? s_fo_ema[1] : 0.0,
-            fp->nb_antennas_rx > 2 ? s_fo_ema[2] : 0.0, fp->nb_antennas_rx > 3 ? s_fo_ema[3] : 0.0,
-            dmrs_first, dmrs_last, 1.0 / (2.0 * dt));
-    }
-  }
-
-  /* CHESTDIAG (ISAC_PDSCH_TBPARM=1): per-(layer,antenna) channel power, plus the layer-space Gram
-   * matrix conditioning. This is the one remaining hypothesis for the rank-4 CRC failure that has
-   * been asserted but never measured: separating Nl spatial streams requires the Nl x nbRx effective
-   * channel to be well conditioned AT THIS RECEIVER, and the gNB chose its precoder from the SERVED
-   * UE's PMI, not ours. If the layer columns are near-parallel here the MMSE inverse amplifies noise
-   * without bound and no parameter fix can help; if they are well separated, the fault is in the
-   * demodulation chain instead. Cheap: one pass over the already-computed estimates. */
-  {
-    static _Atomic int s_cd = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-    if (s_cd < 0) // ISAC_CHEST_DIAG=1 gives the 12 CHESTDIAG lines without TBPARM's per-TB volume
-      /* DEFERRED/DO NOT USE: ISAC_CHEST_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
-      /* DEFERRED/DO NOT USE: ISAC_PDSCH_TBPARM not in the frozen config t26zE (2026-10-18); slated for removal */
-      s_cd = (getenv("ISAC_PDSCH_TBPARM") != NULL || getenv("ISAC_CHEST_DIAG") != NULL) ? 1 : 0;
-    static _Atomic int s_cd_left = 40; /* log budget shared by the passivePdsch consumers */
-    if (s_cd && s_cd_left > 0 && cw->Nl >= 1) {
-      s_cd_left--;
-      const int nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
-      /* Estimates are written at ch_offset = ofdm_symbol_size * <DM-RS symbol>, NOT at
-       * start_symbol -- reading start_symbol returns an untouched buffer (all zeros). */
-      int sym = -1;
-      for (int m2 = 0; m2 < NR_SYMBOLS_PER_SLOT; m2++) {
-        if (dlsch_config->dlDmrsSymbPos & (1u << m2)) {
-          sym = m2;
-          break;
-        }
-      }
-      if (sym < 0)
-        sym = dlsch_config->start_symbol;
-      char rep[1024];
-      int u = 0;
-      rep[0] = '\0';
-      double pw[8][8];
-      for (int l = 0; l < cw->Nl && l < 8; l++) {
-        for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
-          const c16_t *h = (const c16_t *)&pdsch_dl_ch_estimates[l * fp->nb_antennas_rx + a][fp->ofdm_symbol_size * sym];
-          double acc = 0;
-          for (int k = 0; k < nsc; k++)
-            acc += (double)h[k].r * h[k].r + (double)h[k].i * h[k].i;
-          pw[l][a] = acc / (nsc > 0 ? nsc : 1);
-        }
-      }
-      /* Fill `rep`. It was declared, printed with %s and NEVER WRITTEN -- undefined behaviour on
-       * every CHESTDIAG line, and it discarded the per-(layer,antenna) powers computed just above.
-       * That is PASSIVE_RX_ONLY_HANDOVER.md 12.7's bug, reintroduced by the 13 revert (812f6b4af6).
-       * Restored because it is the only per-BRANCH PDSCH SNR instrument in the tree, and both the
-       * branch-imbalance work and the "can this link carry mcs 25" question need it.
-       *
-       * Two things to know before reading the numbers:
-       *  - the dB are 10log10(pw / nvar) against the nvar THIS function has already divided by
-       *    (number_symbols x Nl x nb_antennas_rx), mirroring nr_ue_pdsch_procedures(). The blind
-       *    monitor's own SNR gate uses the RAW nvar, so the two are on different scales -- treat this
-       *    as this path's scale, not as a calibrated link SNR;
-       *  - that division is common-mode across antennas, so the BRANCH-TO-BRANCH deltas are exact
-       *    whatever the convention, and those are the quantity the imbalance work actually needs.
-       * Use ANTPOW for the raw antenna powers (RXBRANCH pw[] is a channel ESTIMATE and swings 10 dB
-       * between transport blocks -- 20/21). */
-      for (int l = 0; l < cw->Nl && l < 8; l++) {
-        rep_append(rep, sizeof(rep), &u, "%spw=L%d[", l ? " " : "", l);
-        for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
-          rep_append(rep, sizeof(rep), &u, "%s%.0f", a ? "," : "", pw[l][a]);
-        }
-        rep_append(rep, sizeof(rep), &u, "] rel_dB=L%d[", l);
-        for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
-          /* Against the SHARED noise, deliberately. The per-antenna value exists (printed as
-           * resid= below) but it is NOT a noise power and must not be used as an SNR denominator:
-           * nr_dl_channel_estimation.c forms it as |dl_ls_est - dl_ch|^2, the residual between the
-           * RAW LS estimate and the FILTERED one, which is noise PLUS filter mismatch. On a
-           * frequency-selective branch the mismatch term scales with |H|, so the ratio collapses
-           * towards a constant -- measured pw/resid = 2.3 on three branches at once while raw
-           * power said those branches differed, which is the signature of a denominator tracking
-           * its own numerator.
-           * A shared denominator at least makes the RELATIVE dB between branches exact, which is
-           * what this line is used for. It is NOT an absolute per-branch SNR and is not labelled
-           * as one. For judging a single antenna, use raw ANTPOW power -- no estimator involved. */
-          rep_append(rep, sizeof(rep), &u, "%s%.1f", a ? "," : "",
-                     (nvar > 0 && pw[l][a] > 0.0) ? 10.0 * log10(pw[l][a] / (double)nvar) : -99.0);
-        }
-        /* resid, not nvar: |LS - filtered|^2 per antenna. Reported because the SPREAD across
-         * branches is diagnostic (a branch whose estimate the filter cannot fit stands out), but it
-         * is not a noise power -- see the snr_dB comment above. */
-        rep_append(rep, sizeof(rep), &u, "] resid=L%d[", l);
-        for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
-          rep_append(rep, sizeof(rep), &u, "%s%u", a ? "," : "",
-                     (a < NR_DL_CHEST_MAX_ANT) ? nr_dl_chest_nvar_ant[a] : 0u);
-        }
-        rep_append(rep, sizeof(rep), &u, "]");
-      }
-      /* MIMO separability, done properly (2026-08-20). The previous statistic summed the layer
-       * inner product over antennas AND subcarriers with POWER weighting, so a single dominant
-       * branch (ch0 measured 11-17 dB above the others) made it return ~1 mechanically, whatever
-       * the true spatial structure was. It could not distinguish "layers are parallel" from
-       * "only one antenna is alive".
-       *
-       * Correct measure: per-subcarrier Gram matrix over LAYERS, G = H^H H with H[antenna][layer],
-       * after normalising each ANTENNA branch by its own RMS so per-chain gain cannot bias the
-       * geometry. Then the normalised determinant det(G) / prod(G_ii) in [0,1]:
-       *   1  -> layers mutually orthogonal, full rank, 4 streams separable
-       *   0  -> layers collinear, rank deficient, streams NOT separable
-       * Computed by Cholesky (G is Hermitian positive semi-definite), which also yields the
-       * per-layer residual L_ii^2 / G_ii: how much NEW information each layer adds beyond the
-       * previous ones. That is the honest "effective rank" read-out. */
-      double bn[8];
-      for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
-        double acc = 0;
-        for (int l = 0; l < cw->Nl && l < 8; l++)
-          acc += pw[l][a];
-        bn[a] = (acc > 0) ? 1.0 / sqrt(acc) : 0.0; // per-branch gain normalisation
-      }
-      const int NL = (cw->Nl < 4) ? cw->Nl : 4;
-      double gr[4][4] = {{0}}, gi[4][4] = {{0}};
-      for (int x = 0; x < NL; x++) {
-        for (int y = 0; y < NL; y++) {
-          double ar = 0, ai = 0;
-          for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
-            const c16_t *hx = (const c16_t *)&pdsch_dl_ch_estimates[x * fp->nb_antennas_rx + a][fp->ofdm_symbol_size * sym];
-            const c16_t *hy = (const c16_t *)&pdsch_dl_ch_estimates[y * fp->nb_antennas_rx + a][fp->ofdm_symbol_size * sym];
-            const double w = bn[a] * bn[a];
-            for (int k = 0; k < nsc; k++) {
-              ar += w * ((double)hx[k].r * hy[k].r + (double)hx[k].i * hy[k].i);
-              ai += w * ((double)hx[k].r * hy[k].i - (double)hx[k].i * hy[k].r);
-            }
-          }
-          gr[x][y] = ar;
-          gi[x][y] = ai;
-        }
-      }
-      /* Cholesky of the Hermitian Gram; lr/li hold L. */
-      double lr[4][4] = {{0}}, li[4][4] = {{0}}, resid[4] = {0};
-      int pd = 1;
-      for (int x = 0; x < NL && pd; x++) {
-        for (int y = 0; y <= x && pd; y++) {
-          double sr = gr[x][y], si = gi[x][y];
-          for (int m2 = 0; m2 < y; m2++) {
-            sr -= lr[x][m2] * lr[y][m2] + li[x][m2] * li[y][m2];
-            si -= li[x][m2] * lr[y][m2] - lr[x][m2] * li[y][m2];
-          }
-          if (x == y) {
-            if (sr <= 0) { pd = 0; break; }
-            lr[x][x] = sqrt(sr);
-            li[x][x] = 0;
-            resid[x] = (gr[x][x] > 0) ? sr / gr[x][x] : 0.0; // fraction of layer x NOT explained by earlier layers
-          } else {
-            const double d = lr[y][y];
-            lr[x][y] = sr / d;
-            li[x][y] = si / d;
-          }
-        }
-      }
-      double detg = 1.0, prod_diag = 1.0;
-      for (int x = 0; x < NL; x++) {
-        detg *= pd ? (lr[x][x] * lr[x][x]) : 0.0;
-        prod_diag *= gr[x][x];
-      }
-      const double orth = (prod_diag > 0) ? detg / prod_diag : 0.0;
-      LOG_I(PHY,
-            "SENSING: CHESTDIAG nl=%u nvar=%u orth=%.4f resid=[%.3f,%.3f,%.3f,%.3f] %s\n",
-            (unsigned)cw->Nl, nvar, orth, resid[0], resid[1], resid[2], resid[3], rep);
-    }
-  }
   out->nvar = nvar;
   out->qm_measured = 0;
 
@@ -4888,12 +3342,6 @@ gpu_llr_ready:;
     out->nvar = nvar;
     for (int a = 0; a < NR_DL_CHEST_MAX_ANT; a++)
       nr_dl_chest_nvar_ant[a] = a < 4 ? t_gpp->nvar_ant[a] : 0;
-    if (n_dmrs_sym > 1 && !seg_path) /* the old DM-RS phase-slope tracker needs a frequency-ordered axis: it does not run for a segmented grant */
-      gp_dmrsfo_commit(&t_gpp->r.post, (uint32_t)fp->N_RB_DL);
-    t_brfo_pending = false;
-    if (fp->nb_antennas_rx > 1 && n_dmrs_sym > 1)
-      gp_brfo_measure(t_gpp->brfo_rows, fp->nb_antennas_rx,
-                      fp->ofdm_symbol_size, (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot * (double)(dmrs_last - dmrs_first));
     nr_gpu_pass_note(NR_GPU_PASS_EV_COMMIT);
   }
   if (gw_ready) { /* skipped by the jump too: what the entry's computation measured */
@@ -4957,20 +3405,7 @@ gpu_llr_ready:;
   allocCast3D(dl_ch_mag, c16_t, toFree3, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
   allocCast3D(dl_ch_magb, c16_t, toFree4, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
   allocCast3D(dl_ch_magr, c16_t, toFree5, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
-  /* T26d ISAC_RX_ML_2L / ISAC_RX_EQ_AB: the 2-layer ML LLR needs the inter-layer correlation buffer (stock decode
-   * passes NULL); allocated per thread on first use only. */
-  c16_t(*rho_dl_p)[NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][rx_size_symbol] = NULL;
-  {
-    static int s_mlw = -1;
-    /* DEFERRED/DO NOT USE: ISAC_RX_EQ_AB not in the frozen config t26zE (2026-10-18); slated for removal */
-    /* DEFERRED/DO NOT USE: ISAC_RX_ML_2L not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (s_mlw < 0) s_mlw = (getenv("ISAC_RX_ML_2L") && atoi(getenv("ISAC_RX_ML_2L"))) || (getenv("ISAC_RX_EQ_AB") && atoi(getenv("ISAC_RX_EQ_AB")));
-    if (s_mlw && cw->Nl == 2) {
-      static __thread fourDimArray_t *toFree6 = NULL;
-      allocCast3D(rho_dl, c16_t, toFree6, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS, rx_size_symbol, true);
-      rho_dl_p = rho_dl;
-    }
-  }
+  c16_t(*rho_dl_p)[NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][rx_size_symbol] = NULL; /* the 2-layer ML correlation buffer: ML is not part of the receiver */
 
   c16_t ptrs_phase_per_slot[fp->nb_antennas_rx][NR_SYMBOLS_PER_SLOT];
   memset(ptrs_phase_per_slot, 0, sizeof(ptrs_phase_per_slot));
@@ -4991,96 +3426,6 @@ gpu_llr_ready:;
    * re-count, which walks CRB numbers over the BWP-relative bitmap and is wrong for BWPStart > 0. */
   static const nr_ssb_rm_mask_t no_ssb = {0};
 
-  /* ---- PDSCH BRANCH-QUALITY GATE (ISAC_PDSCH_ANT_GATE=1, default OFF) --------------------------
-   * 2026-09-23, ADDED BUT NOT LIVE-VALIDATED (no hardware available overnight to A/B it). Mirrors
-   * dci_nr.c's `rough[a]` PDCCH gate exactly: nr_rx_pdsch() below MMSE/MRC-combines every rx antenna
-   * UNCONDITIONALLY (no such gate exists on this path today), which is exactly the configuration
-   * [[four-antenna-fep-chest-blows-rt-budget]] measured failing on THIS receiver's own X410 -- two
-   * branches physically 8-15 dB down (bad RX1 cabling on channels 1/3, confirmed with rx_gain/config
-   * identical across channels) took 4-antenna PDSCH from 76-93% (1 ant) to ~0%, because MRC weights a
-   * noise-dominated branch's channel estimate as signal and ADDS noise rather than combining gain.
-   * Same metric as PDCCH: roughness = sum of |consecutive-RE channel estimate difference|^2 over
-   * total power, on the FIRST DM-RS symbol (dmrs_first) since that is what every later data symbol's
-   * equaliser reference is drawn from (get_valid_dmrs_idx_for_channel_est()); a branch whose roughness
-   * exceeds 4x the best branch is memset to zero for ALL its symbols before nr_rx_pdsch() ever reads
-   * it, exactly like the PDCCH gate zeroes pdcch_dl_ch_estimates_ext[a]. A zeroed channel estimate
-   * contributes zero MRC weight, so the bad branch is excluded rather than merely down-weighted.
-   * Default OFF: the PDCCH gate above is the validated pattern this ports, but ported code is not
-   * measured code -- turn this on and re-run the branch-imbalance A/B ([[antpow-branch-shape-is-not-stable]]
-   * warns the imbalance SHAPE itself is not stable run to run) before trusting a live PDSCH number
-   * at NANT>1. */
-  if (fp->nb_antennas_rx > 1 && dmrs_first >= 0) {
-    static _Atomic int s_pdsch_ant_gate = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-    if (s_pdsch_ant_gate < 0)
-      /* DEFERRED/DO NOT USE: ISAC_PDSCH_ANT_GATE not in the frozen config t26zE (2026-10-18); slated for removal */
-      s_pdsch_ant_gate = (getenv("ISAC_PDSCH_ANT_GATE") != NULL && atoi(getenv("ISAC_PDSCH_ANT_GATE")) != 0) ? 1 : 0;
-    if (s_pdsch_ant_gate) {
-      double rough[8];
-      double best_r = 1e30;
-      const int nrx = fp->nb_antennas_rx > 8 ? 8 : fp->nb_antennas_rx; /* rough[] bound, matches dci_nr.c's <=8 */
-      for (int a = 0; a < nrx; a++) {
-        const c16_t *h = (const c16_t *)&pdsch_dl_ch_estimates[a][fp->ofdm_symbol_size * dmrs_first];
-        double dp = 0.0, pw = 0.0;
-        for (uint32_t i = 1; i < fp->ofdm_symbol_size; i++) {
-          const double dr = (double)h[i].r - h[i - 1].r, di = (double)h[i].i - h[i - 1].i;
-          dp += dr * dr + di * di;
-          pw += (double)h[i].r * h[i].r + (double)h[i].i * h[i].i;
-        }
-        rough[a] = pw > 0.0 ? dp / pw : 1e30;
-        if (rough[a] < best_r)
-          best_r = rough[a];
-      }
-      int kept = 0;
-      for (int a = 0; a < nrx; a++) {
-        if (rough[a] > 4.0 * best_r) {
-          for (uint32_t d = 0; d < (uint32_t)fp->symbols_per_slot; d++)
-            memset((c16_t *)&pdsch_dl_ch_estimates[a][fp->ofdm_symbol_size * d], 0, sizeof(c16_t) * fp->ofdm_symbol_size);
-        } else {
-          kept |= 1 << a;
-        }
-      }
-      static _Atomic int s_gate_log = 8; /* log budget shared by the passivePdsch consumers */
-      if (s_gate_log > 0 && kept != (1 << nrx) - 1) {
-        s_gate_log--;
-        LOG_W(PHY, "SENSING: PDSCH branch gate kept=0x%x rough=[%.2f %.2f %.2f %.2f]\n", kept, rough[0],
-              nrx > 1 ? rough[1] : -1.0, nrx > 2 ? rough[2] : -1.0, nrx > 3 ? rough[3] : -1.0);
-      }
-    }
-  }
-
-
-  /* ---- RESIDUAL SFO CORRECTION (ISAC_SFO_CORRECT=1, default off) ------------------------------
-   * WHAT IS UNCORRECTED. nr_rx_pdsch() equalises EVERY data symbol against ONE DM-RS symbol's
-   * estimate -- dl_ch_estimates[..][validDmrsEst * ofdm_symbol_size], chosen by
-   * get_valid_dmrs_idx_for_channel_est() -- with no interpolation in time. A sampling-clock offset
-   * eps makes the timing drift by eps*dt between that reference symbol and the data symbol, and a
-   * timing shift tau is a phase ramp exp(-j*2*pi*k*df*tau) across subcarriers. So after
-   * equalisation the residual is exactly
-   *     exp(-j*2*pi*k*df*eps*(t_m - t_ref))
-   * and nothing in this receive path removes it. The DMRSFO tracker above measures eps directly
-   * (~2.4 ppm on this rig), which over symbols 2->11 is ~13 degrees at the band edge -- small for
-   * QPSK, not small for the 256QAM this gNB actually schedules.
-   *
-   * HOW. Rotate the channel estimate rather than the data: the estimate is this decode's own
-   * thread-local buffer (allocCast2D above), whereas rxdataF is shared with every other consumer
-   * and must not be touched. Rotating H by the SAME phase the data drifted makes Y/H land back on
-   * X. Each DM-RS slot carries its own applied-rotation accumulator, so a slot is always brought to
-   * exactly (m - d) symbol periods however the reference switches between symbols -- setting the
-   * absolute rotation, never blindly stepping, which would drift out of phase with the reference.
-   *
-   * SECOND-ORDER, and stated as such: the dominant defect on this receiver is LLR clipping at the
-   * int8 rail (see LLRCLIP), which destroys information outright. This only stops a real but
-   * smaller error accumulating across a slot. Opt-in until an A/B shows it earns its place. */
-  static _Atomic int s_sfo_corr = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-  if (s_sfo_corr < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_SFO_CORRECT not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_SFO_CORRECT");
-    s_sfo_corr = (e != NULL && atoi(e) != 0) ? 1 : 0;
-  }
-  double sfo_applied[NR_SYMBOLS_PER_SLOT] = {0};  // symbol-periods of rotation already applied, per slot
-  const double sfo_eps = (s_sfo_corr && !nr_dlsch_chest_per_symbol && !seg_path) ? (nr_pdsch_passive_sfo_ppm() * 1.0e-6) : 0.0;
-  const double sfo_tsym = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot;
-
   /* ---- DATA-ORDERED GATHER (seg_path only). nr_rx_pdsch() walks its allocation in increasing PRB
    * order (nr_dlsch_extract_rbs), which is not data order for interleaved VRBs, and it rereads the
    * estimate from index 0 for every bitmap block. So it is handed a VIRTUAL contiguous allocation at
@@ -5094,15 +3439,10 @@ gpu_llr_ready:;
     fa_virt = set_bitmap_from_start_size(0, freq_alloc->num_rbs); /* the pass demodulated it from the real REs: no gather, no CSI map (the demod below is skipped) */
   if (seg_path && !gpu_llr && !gp_ok) {
     c16_t *virt = seg_virt_prepare(fp);
-    static __thread int *gidx = NULL; /* heap, not a 13 kB frame on every decode's stack */
-    if (gidx == NULL)
-      gidx = (int *)malloc(NR_PRB_SET_MAX * NR_NB_SC_PER_RB * sizeof(int));
-    static int s_gfast = -1; /* ISAC_PDSCH_GATHER_FAST=1 (default off): memcpy runs instead of the per-RE modulo loop; bit-identical */
-    if (s_gfast < 0) s_gfast = atoi(getenv("ISAC_PDSCH_GATHER_FAST") ?: "1") ? 1 : 0;
+    /* memcpy runs instead of the per-RE modulo loop; bit-identical */
     int nre_fast = 0;
-    for (int s = 0; s_gfast && s < nseg; s++) nre_fast += seg[s].n_prb * NR_NB_SC_PER_RB;
-    const int nre = !(virt && gidx) ? -1 : s_gfast ? (nre_fast <= NR_PRB_SET_MAX * NR_NB_SC_PER_RB ? nre_fast : -1)
-                                                    : nr_prb_gather_index(seg, nseg, NR_NB_SC_PER_RB, gidx, NR_PRB_SET_MAX * NR_NB_SC_PER_RB);
+    for (int s = 0; s < nseg; s++) nre_fast += seg[s].n_prb * NR_NB_SC_PER_RB;
+    const int nre = !virt ? -1 : (nre_fast <= NR_PRB_SET_MAX * NR_NB_SC_PER_RB ? nre_fast : -1);
     if (nre != freq_alloc->num_rbs * NR_NB_SC_PER_RB) { /* not nsc_seg: the GPU goto skips its initialiser */
       out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
       return out->status;
@@ -5112,12 +3452,7 @@ gpu_llr_ready:;
       for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
         const c16_t *src = &rxdataF[aarx][m * N];
         c16_t *dst = &virt[(size_t)aarx * fp->samples_per_slot_wCP + (size_t)m * N];
-        if (s_gfast) {
-          nr_prb_gather_copy(src, dst, seg, nseg, NR_NB_SC_PER_RB, off0, N);
-          continue;
-        }
-        for (int i = 0; i < nre; i++)
-          dst[(off0 + i) % N] = src[(off0 + gidx[i]) % N];
+        nr_prb_gather_copy(src, dst, seg, nseg, NR_NB_SC_PER_RB, off0, N);
       }
     fa_virt = set_bitmap_from_start_size(0, freq_alloc->num_rbs);
     rxdataF_dem = (c16_t(*)[fp->samples_per_slot_wCP])virt;
@@ -5139,25 +3474,9 @@ gpu_llr_ready:;
     memcpy(llr, gw_view.llr, (size_t)G * sizeof(int16_t));
     memcpy(dl_valid_re, gw_meta->dl_valid_re, sizeof(dl_valid_re));
   }
-  { /* ISAC_PDSCH_EVM_GRANT (T26c): arm the per-grant EVM accumulator for the CPU demod loop below */
-    static int s_evmg = -1;
-    if (s_evmg < 0) s_evmg = ((getenv("ISAC_PDSCH_EVM_GRANT") ?: "1") || (getenv("ISAC_PDSCH_SNR_GATE") ?: "1")) ? 1 : 0; /* the SNR gate needs the measurement */
-    memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc));
-    { /* LLRZERO ISAC_MMSE2_DIAG=1 */
-      static int s_m2d = -1;
-      /* DEFERRED/DO NOT USE: ISAC_MMSE2_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
-      if (s_m2d < 0) s_m2d = getenv("ISAC_MMSE2_DIAG") ? atoi(getenv("ISAC_MMSE2_DIAG")) : 0;
-      memset(&nr_mmse2_diag, 0, sizeof(nr_mmse2_diag));
-      nr_mmse2_diag.on = s_m2d;
-    }
-    static int s_evmp = -1; /* ISAC_PDSCH_EVM_PROBES=1 (diagnostic): layout probes are measured too */
-    if (s_evmp < 0) s_evmp = (getenv("ISAC_PDSCH_EVM_PROBES") ?: "1") ? 1 : 0;
-    static int s_opr = -1; /* the own-PDCCH detector reads the per-RB error map */
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_OWN_PDCCH_RM not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (s_opr < 0) s_opr = getenv("ISAC_PDSCH_OWN_PDCCH_RM") && atoi(getenv("ISAC_PDSCH_OWN_PDCCH_RM")) ? 1 : 0;
-    nr_pdsch_evm_acc.armed = (s_evmg || s_opr || decode_diag_on()) && (probe_last_sym < 0 || s_evmp) && !gpu_llr && !gw_ready;
-  }
-  const int gdem = gp_ok ? 0 /* the pass demodulated */ : (gpu_llr || gw_ready || sfo_eps != 0.0) ? -1 /* GPU-DEMOD (ISAC_PDSCH_GPU_EXACT_DEMOD): 0 = demodulated */
+  memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc)); /* the SNR gate needs the per-grant EVM measurement */
+  nr_pdsch_evm_acc.armed = !gpu_llr && !gw_ready;
+  const int gdem = gp_ok ? 0 /* the pass demodulated */ : (gpu_llr || gw_ready) ? -1 /* GPU-DEMOD (ISAC_PDSCH_GPU_EXACT_DEMOD): 0 = demodulated */
       : nr_pdsch_gpu_demod_grant(&(nr_pdsch_gpu_demod_call_t){ue, proc, &dlsch, seg_path ? &fa_virt : freq_alloc, dlsch_config, &harq,
           first_symbol_with_data, probe_last_sym, pdsch_est_size, (int32_t *)pdsch_dl_ch_estimates, llr, rx_llr_buf_sz, dl_valid_re,
           (c16_t *)rxdataF_dem, &log2_maxh, rx_size_symbol, (c16_t *)rxdataF_comp, (c16_t *)dl_ch_mag, (c16_t *)dl_ch_magb,
@@ -5171,39 +3490,6 @@ gpu_llr_ready:;
   for (int m = dlsch_config->start_symbol; m <= last_sym && !gpu_llr && !gw_ready && gdem != 0; m++) {
     if (probe_last_sym >= 0 && m > probe_last_sym && m != last_sym)
       continue; /* probe: past the horizon, LLR count stays 0 for this symbol */
-    if (sfo_eps != 0.0) {
-      /* Bring every DM-RS slot to the rotation this symbol needs. Cheap: at most 3 slots on this
-       * cell, and only the ones that actually differ are touched. */
-      for (int d = 0; d < fp->symbols_per_slot && d < NR_SYMBOLS_PER_SLOT; d++) {
-        if (!((dlsch_config->dlDmrsSymbPos >> d) & 1)) {
-          continue;
-        }
-        const double want = (double)(m - d);
-        const double delta = want - sfo_applied[d];
-        if (delta == 0.0) {
-          continue;
-        }
-        sfo_applied[d] = want;
-        const double c = -2.0 * M_PI * (double)fp->subcarrier_spacing * sfo_eps * delta * sfo_tsym;
-        for (int r = 0; r < fp->nb_antennas_rx * NR_MAX_NB_LAYERS; r++) {
-          c16_t *h = (c16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * d];
-          for (uint32_t k = 0; k < fp->ofdm_symbol_size; k++) {
-            if (h[k].r == 0 && h[k].i == 0) {
-              continue;
-            }
-            /* The ramp is on the SIGNED subcarrier index: FFT bins >= N/2 are negative
-             * frequencies. Raw k would put an extra 2*pi*fs*tau on that half of the band
-             * (~0.2 turns at 5 ppm over 9 symbols), splitting the band at DC. */
-            const long ks = (k < fp->ofdm_symbol_size / 2) ? (long)k : (long)k - (long)fp->ofdm_symbol_size;
-            const double ph = c * (double)ks;
-            const double cs = cos(ph), sn = sin(ph);
-            const double hr = (double)h[k].r, hi = (double)h[k].i;
-            h[k].r = (int16_t)lround(hr * cs - hi * sn);
-            h[k].i = (int16_t)lround(hr * sn + hi * cs);
-          }
-        }
-      }
-    }
     if (nr_rx_pdsch(ue, proc, &dlsch, seg_path ? &fa_virt : freq_alloc, dlsch_config, &harq, (unsigned char)m,
                     m == first_symbol_with_data, (unsigned char)dlsch_config->harq_process_nbr, pdsch_est_size,
                     pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF_dem, &log2_maxh, rx_size_symbol,
@@ -5223,9 +3509,7 @@ gpu_llr_ready:;
   /* MRCBUG diag (EVMGRANT zabs=): mean |Re z|, |Im z| of the int16 equaliser output in LSB (the stream the LLRs are cut from;
    * CPU demod, 1 layer, 0 = n/a). Replay b 2026-10-13: median 143-196 (single branch) vs 73-89 (4-branch MRC), p10 32. */
   out->zabs = 0.f;
-  static int s_fx = -1;
-  if (s_fx < 0) s_fx = (getenv("ISAC_PDSCH_EVM_GRANT") ?: "1") ? 1 : 0;
-  if (s_fx && demod_ok && gdem != 0 && !gpu_llr && !gw_ready && cw->Nl == 1) {
+  if (demod_ok && gdem != 0 && !gpu_llr && !gw_ready && cw->Nl == 1) {
     double zabs = 0.0; uint64_t nz = 0;
     for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
       const uint32_t n = dl_valid_re[m];
@@ -5252,8 +3536,7 @@ gpu_llr_ready:;
       static _Atomic unsigned long c_ = 0;
       const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
       if (n_ == 1 || (n_ % 200) == 0)
-        LOG_W(PHY, "SENSING: PDSCH RE-budget mismatch n=%lu rnti=0x%x: demodulated %lu LLRs, G %u (ssb_unav %u csi_unav %u "
-                   "ptrs_unav %u)\n", n_, grant->rnti, (unsigned long)llr_n, G, ssb_unav, csi_unav, ptrs_unav);
+        LOG_W(PHY, "SENSING: PDSCH RE-budget mismatch n=%lu rnti=0x%x: demodulated %lu LLRs, G %u (ssb_unav %u csi_unav %u)\n", n_, grant->rnti, (unsigned long)llr_n, G, ssb_unav, csi_unav);
       prg_arm_unsupported(grant->rnti, prg_arm);
       out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
       return out->status;
@@ -5271,225 +3554,7 @@ gpu_llr_ready:;
                                : (uint8_t)nr_pdsch_qm_classify((const int16_t *)rxdataF_comp[qm_m][0], qm_n > 4096 ? 4096 : qm_n, NULL);
   }
 
-  /* ---- EQDIAG: post-equalisation EVM (ISAC_PDSCH_EVM=1, default off) --------------------------
-   * PASSIVE_RX_ONLY_HANDOVER.md §13 names this as "the measurement to take next, and why it was not
-   * taken": the receiver goes bimodally 0 % / ~90 % PDSCH CRC across otherwise identical runs and
-   * nothing measured so far separates "the signal reaching the equaliser is degraded" from "the
-   * signal is fine and something downstream is wrong". EVM answers exactly that and nothing else:
-   *   ~30 %  -> the constellation is as good as the 90.7 % runs (§12.1); the fault is DOWNSTREAM
-   *             (descrambling, rate recovery, LDPC, TBS) and no amount of gain or geometry helps.
-   *   >>40 % -> the signal itself is short; the fault is the LINK (gain, beam, channel, rank).
-   * The §12.7 version of this probe was removed by the §13 revert; this reinstates it.
-   *
-   * Measured on rxdataF_comp, which is the EQUALISED symbol stream, and against the ideal QAM grid
-   * for this grant's own modulation order -- normalised by the measured RMS, so the arbitrary
-   * log2_maxh fixed-point scaling cancels and the number is comparable across runs and MCSs. */
-  {
-    static _Atomic int s_evm = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-    if (s_evm < 0)
-      /* DEFERRED/DO NOT USE: ISAC_PDSCH_EVM not in the frozen config t26zE (2026-10-18); slated for removal */
-      s_evm = (getenv("ISAC_PDSCH_EVM") != NULL) ? 1 : 0;
-    static __thread unsigned long s_evm_n = 0;
-    /* ISAC_PDSCH_EVM=2: EVM per (symbol, layer) -- the axis the single-symbol probe below cannot see.
-     * Written for the rank-4 bed where 5-symbol grants decode and 12/13-symbol ones do not. */
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_EVM not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (s_evm && !gw_ready && getenv("ISAC_PDSCH_EVM")[0] == '2' && demod_ok && (s_evm_n % 10) == 0) {
-      const int lmax = (1 << (cw->qamModOrder / 2)) - 1;
-      double ms = 0.0; int nlev = 0;
-      for (int l = 1; l <= lmax; l += 2) { ms += (double)l * l; nlev++; }
-      const double ideal_pow = 2.0 * ms / nlev;
-      char tb[1024]; int ut = 0;
-      for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols && ut < 900; m++) {
-        const uint32_t n = dl_valid_re[m] > 2048 ? 2048 : dl_valid_re[m];
-        ut += snprintf(tb + ut, sizeof(tb) - ut, " s%d:", m);
-        for (int l = 0; l < cw->Nl; l++) {
-          if (n < 64) { ut += snprintf(tb + ut, sizeof(tb) - ut, "-/"); continue; }
-          const c16_t *z = rxdataF_comp[m][l];
-          double pw = 0.0;
-          for (uint32_t i = 0; i < n; i++) pw += (double)z[i].r * z[i].r + (double)z[i].i * z[i].i;
-          pw /= n;
-          const double scale = pw > 0 ? sqrt(ideal_pow / pw) : 0.0;
-          double err = 0.0;
-          for (uint32_t i = 0; i < n; i++) {
-            const double vi = z[i].r * scale, vq = z[i].i * scale;
-            double si = 2.0 * floor(vi / 2.0) + 1.0, sq = 2.0 * floor(vq / 2.0) + 1.0;
-            si = si > lmax ? lmax : si < -lmax ? -lmax : si;
-            sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
-            err += (vi - si) * (vi - si) + (vq - sq) * (vq - sq);
-          }
-          /* scale check: rms of the equalised samples against layer 0's mag threshold (the LLR
-           * kernels use dl_ch_mag[m][0] for EVERY layer) -- a per-layer ratio away from the others
-           * means the LLR thresholds are wrong for that layer even though the EVM is clean */
-          const double mag0 = (double)dl_ch_mag[m][0][n / 2].r;
-          ut += snprintf(tb + ut, sizeof(tb) - ut, "%.0f(%.2f)/", sqrt(err / n / ideal_pow) * 100.0,
-                         mag0 > 0 ? sqrt(pw) / mag0 : -1.0);
-        }
-      }
-      LOG_I(PHY, "SENSING: EQDIAG2 %d.%d rnti=0x%04x Qm=%u Nl=%u nsym=%u first_rb=%u nrb=%u ptrs_arm=%d bitmap=%u csirm=%u evm%%[sym:layer]%s\n", proc->frame_rx, proc->nr_slot_rx, grant->rnti, cw->qamModOrder, cw->Nl,
-            dlsch_config->number_symbols, (unsigned)freq_alloc->first_rb, (unsigned)freq_alloc->num_rbs, ptrs_arm, (unsigned)dlsch_config->pduBitmap, (unsigned)dlsch_config->numCsiRsForRateMatching, tb);
-    }
-    if (s_evm && !gw_ready && demod_ok && (s_evm_n++ % 200) == 0) {
-      /* Sample the symbol carrying the MOST valid data REs: the last symbol of an allocation is
-       * often DM-RS with none, and scoring a near-empty symbol reports noise as signal. */
-      int best_m = -1;
-      uint32_t best_n = 0;
-      for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
-        if (dl_valid_re[m] > best_n) {
-          best_n = dl_valid_re[m];
-          best_m = m;
-        }
-      }
-      if (best_m >= 0 && best_n >= 64) {
-        const uint32_t n = (best_n > 4096) ? 4096 : best_n;
-        const c16_t *z = rxdataF_comp[best_m][0];
-        double p = 0.0;
-        for (uint32_t i = 0; i < n; i++) {
-          p += (double)z[i].r * z[i].r + (double)z[i].i * z[i].i;
-        }
-        p /= (double)n;
-        /* Ideal per-dimension levels are the odd integers +-1..+-(2^(Qm/2)-1); mean square of those
-         * is the constellation's per-dimension power, so 2x it is the total. */
-        const int lmax = (1 << (cw->qamModOrder / 2)) - 1; // 1 (QPSK), 3 (16QAM), 7 (64QAM), 15 (256QAM)
-        double ms = 0.0;
-        int nlev = 0;
-        for (int l = 1; l <= lmax; l += 2) {
-          ms += (double)l * l;
-          nlev++;
-        }
-        ms /= (double)nlev;
-        const double ideal_pow = 2.0 * ms;
-        const double scale = (p > 0.0) ? sqrt(ideal_pow / p) : 0.0;
-        /* Split by FREQUENCY POSITION within the allocation. rxdataF_comp holds this symbol's valid
-         * data REs in increasing-subcarrier order, so quartile q covers the q-th quarter of the
-         * allocated band. This is the one axis SEGIDX cannot see: rate matching + interleaving
-         * smear frequency across every segment index, which is exactly why SEGIDX reads uniform.
-         *   EVM FLAT across quartiles -> the estimate is equally good/bad everywhere; the loss is
-         *                                broadband (link margin, or a fault common to the TB).
-         *   EVM RISING with quartile   -> the estimate degrades with distance from its reference;
-         *                                that is an indexing / reference-point error, and it also
-         *                                explains why narrow grants decode and wide ones do not.
-         * One shared scale for all four, so the quartiles are directly comparable. */
-#define EQDIAG_NBIN 16
-        double errsum = 0.0, errq[EQDIAG_NBIN] = {0.0};
-        uint32_t nq[EQDIAG_NBIN] = {0};
-        for (uint32_t i = 0; i < n; i++) {
-          const double vi = (double)z[i].r * scale;
-          const double vq = (double)z[i].i * scale;
-          /* Slice to the nearest ODD integer, clamped to the constellation edge. */
-          double si = 2.0 * floor(vi / 2.0) + 1.0;
-          double sq = 2.0 * floor(vq / 2.0) + 1.0;
-          if (si > lmax) si = lmax;
-          if (si < -lmax) si = -lmax;
-          if (sq > lmax) sq = lmax;
-          if (sq < -lmax) sq = -lmax;
-          const double e = (vi - si) * (vi - si) + (vq - sq) * (vq - sq);
-          errsum += e;
-          uint32_t q = (uint32_t)(((uint64_t)i * (uint64_t)EQDIAG_NBIN) / n);
-          if (q >= EQDIAG_NBIN)
-            q = EQDIAG_NBIN - 1;
-          errq[q] += e;
-          nq[q]++;
-        }
-        const double evm = sqrt((errsum / (double)n) / ideal_pow) * 100.0;
-        /* Absolute FFT bin of allocation index 0, so a bad bin can be named in the receiver's own
-         * frequency frame rather than in units of my bin width. The allocation wraps the FFT, so
-         * index i sits at (start_re + i) % ofdm_symbol_size. */
-        const int start_rb_abs = freq_alloc->first_rb + dlsch_config->BWPStart;
-        const int start_re_abs = seg_path ? -1 /* bins are DATA order: no single FFT origin */
-            : (fp->first_carrier_offset + start_rb_abs * NR_NB_SC_PER_RB) % fp->ofdm_symbol_size;
-        char eb[768];
-        int ub = 0;
-        for (int q = 0; q < EQDIAG_NBIN && ub < (int)sizeof(eb) - 24; q++) {
-          const double v = nq[q] ? sqrt((errq[q] / (double)nq[q]) / ideal_pow) * 100.0 : -1.0;
-          ub += snprintf(eb + ub, sizeof(eb) - ub, "%s%.0f", q ? " " : "", v);
-        }
-        /* |H| over the SAME frequency bins. EVM alone cannot tell "the estimate is wrong here" from
-         * "there is no signal here": both raise it. |H| separates them --
-         *   |H| collapses where EVM spikes -> no signal / notch / the estimate found nothing there
-         *   |H| flat while EVM spikes      -> signal present and the estimate is simply WRONG there
-         * nr_pdsch_channel_estimation() writes dl_ch from index 0 relative to the allocation, at
-         * ch_offset = ofdm_symbol_size * <DM-RS symbol> (verified by reading its writers), so index
-         * i below is allocation subcarrier i -- the same axis the EVM bins use. */
-        char hb[768];
-        int uh = 0;
-        {
-          int dsym = -1;
-          for (int m2 = 0; m2 < NR_SYMBOLS_PER_SLOT; m2++) {
-            if (dlsch_config->dlDmrsSymbPos & (1u << m2)) {
-              dsym = m2;
-              break;
-            }
-          }
-          const int nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
-          if (dsym >= 0 && nsc >= EQDIAG_NBIN) {
-            const c16_t *H = (const c16_t *)&pdsch_dl_ch_estimates[0][fp->ofdm_symbol_size * dsym];
-            for (int q = 0; q < EQDIAG_NBIN && uh < (int)sizeof(hb) - 24; q++) {
-              const int i0 = (int)(((long)q * nsc) / EQDIAG_NBIN);
-              const int i1 = (int)(((long)(q + 1) * nsc) / EQDIAG_NBIN);
-              double acc = 0.0;
-              for (int i = i0; i < i1; i++)
-                acc += (double)H[i].r * H[i].r + (double)H[i].i * H[i].i;
-              const double rms = (i1 > i0) ? sqrt(acc / (double)(i1 - i0)) : 0.0;
-              uh += snprintf(hb + uh, sizeof(hb) - uh, "%s%.0f", q ? " " : "", rms);
-            }
-            /* Per-RB raw |H| for the first 20 RBs of the allocation, keyed by ABSOLUTE start RB, so a
-             * narrow and a wide grant covering the same RBs can be compared estimate-to-estimate. */
-            uh += snprintf(hb + uh, sizeof(hb) - uh, "] start_rb=%d hrb[", start_rb_abs);
-            for (int rb = 0; rb < 20 && rb < freq_alloc->num_rbs && uh < (int)sizeof(hb) - 24; rb++) {
-              double acc = 0.0;
-              for (int i = rb * NR_NB_SC_PER_RB; i < (rb + 1) * NR_NB_SC_PER_RB; i++)
-                acc += (double)H[i].r * H[i].r + (double)H[i].i * H[i].i;
-              uh += snprintf(hb + uh, sizeof(hb) - uh, "%s%.0f", rb ? " " : "", sqrt(acc / NR_NB_SC_PER_RB));
-            }
-          }
-        }
-        LOG_I(NR_PHY,
-              "SENSING: EQDIAG rnti=0x%x Qm=%u sym=%d n=%u prb=%u start_re=%d nbin=%d evm=%.1f%% | "
-              "evm_by_freq_bin[%s] hrms_by_freq_bin[%s] (each bin = %u REs starting at FFT bin "
-              "(start_re + bin*%u) mod %u; EVM spike with |H| flat = the estimate is wrong there, "
-              "EVM spike with |H| collapsed = no signal there)\n",
-              grant->rnti, (unsigned)cw->qamModOrder, best_m, n, (unsigned)freq_alloc->num_rbs,
-              start_re_abs, EQDIAG_NBIN, evm, eb, uh ? hb : "n/a", n / EQDIAG_NBIN,
-              n / EQDIAG_NBIN, (unsigned)fp->ofdm_symbol_size);
-      }
-    }
-  }
 
-  /* ISAC_PDSCH_LLR_DUMP=<path> (DIAGNOSTIC, default off; T26): append each dedicated C-RNTI grant's demodulated LLRs
-   * for offline scrambling/coding analysis. Record "PDL1", int32 rnti, frame, slot, Qm, Nl, first_rb, num_rbs,
-   * start_symbol, number_symbols, mcs, dlDataScramblingId, descrambled(0/1 = GrantWork already descrambled), G,
-   * mcs_table, then int16 llr[G]. ISAC_PDSCH_LLR_DUMP_MAX grants (default 400). */
-  static int s_dall = -1; /* ISAC_PDSCH_LLR_DUMP_ALL=1: every RNTI class (SI grants validate the offline harness) */
-  static _Atomic int s_dfull = -1; /* ISAC_PDSCH_LLR_DUMP_FULL=1: exclude partial CB0 probes */
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_LLR_DUMP_FULL not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (s_dfull < 0) s_dfull = getenv("ISAC_PDSCH_LLR_DUMP_FULL") && atoi(getenv("ISAC_PDSCH_LLR_DUMP_FULL")) != 0;
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_LLR_DUMP_ALL not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (s_dall < 0) s_dall = getenv("ISAC_PDSCH_LLR_DUMP_ALL") && atoi(getenv("ISAC_PDSCH_LLR_DUMP_ALL")) ? 1 : 0;
-  if (demod_ok && (grant->rnti_class == 0 || s_dall) && !(s_dfull && t_probe_first_seg)) {
-    static FILE *s_df;
-    static int s_dinit, s_dleft;
-    static pthread_mutex_t s_dmu = PTHREAD_MUTEX_INITIALIZER;
-    pthread_mutex_lock(&s_dmu);
-    if (!s_dinit) {
-      s_dinit = 1;
-      /* DEFERRED/DO NOT USE: ISAC_PDSCH_LLR_DUMP not in the frozen config t26zE (2026-10-18); slated for removal */
-      /* DEFERRED/DO NOT USE: ISAC_PDSCH_LLR_DUMP_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
-      const char *pth = getenv("ISAC_PDSCH_LLR_DUMP"), *mx = getenv("ISAC_PDSCH_LLR_DUMP_MAX");
-      s_dleft = mx ? atoi(mx) : 400;
-      if (pth && *pth) s_df = fopen(pth, "wb");
-    }
-    if (s_df && s_dleft > 0) {
-      --s_dleft;
-      const int32_t h[14] = {grant->rnti, proc->frame_rx, proc->nr_slot_rx, cw->qamModOrder, cw->Nl, freq_alloc->first_rb,
-                             freq_alloc->num_rbs, dlsch_config->start_symbol, dlsch_config->number_symbols, grant->mcs,
-                             dlsch_config->dlDataScramblingId, gw_ready ? 1 : 0, (int32_t)G, grant->mcs_table};
-      fwrite("PDL1", 1, 4, s_df);
-      fwrite(h, sizeof(h), 1, s_df);
-      fwrite(llr, sizeof(int16_t), G, s_df);
-      fflush(s_df);
-    }
-    pthread_mutex_unlock(&s_dmu);
-  }
   if (demod_ok) {
     /* Measured BEFORE unscrambling: descrambling only flips signs, so magnitudes are identical
      * either side of it and taking them here keeps this independent of whether the scrambling
@@ -5544,53 +3609,10 @@ gpu_llr_ready:;
       }
     }
 
-    /* ---- LLR RESCALE TO THE INT8 RAIL (ISAC_LLR_SCALE=<target mean |llr|>, 0/unset = off) -----
-     * The decoder's own input stage saturates at +-127. With a measured mean |llr| of 232-498,
-     * most of the distribution is clipped to a hard decision before belief propagation starts,
-     * which is why healthy-magnitude LLRs fail to converge and why the failure rate tracks the
-     * per-run LLR SCALE rather than the channel (EVM is normalised by measured RMS, so it is blind
-     * to scale by construction and reads a clean 10 % on runs that decode 26 %).
-     *
-     * Rescale by the ratio of a target mean to the measured mean of THIS transport block, so the
-     * correction follows whatever the per-run scale happens to be instead of assuming it. A target
-     * well below the rail leaves headroom for the tail; the mean is a robust statistic here because
-     * the distribution has no heavy tail once it is not clipped.
-     *
-     * NOT the root fix. The scale is wrong because nvar is wrong (see ISAC_RX_NVAR_FIX and this
-     * project's own "nvar ~4x too small" finding); this only stops the wrongness reaching a rail
-     * where information is destroyed rather than merely mis-weighted. Opt-in so the default path
-     * stays bit-identical until an A/B says otherwise. */
-    {
-      static _Atomic int s_llr_scale = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-      if (s_llr_scale < 0) {
-        /* DEFERRED/DO NOT USE: ISAC_LLR_SCALE not in the frozen config t26zE (2026-10-18); slated for removal */
-        const char *e = getenv("ISAC_LLR_SCALE");
-        s_llr_scale = (e != NULL) ? atoi(e) : 0;
-      }
-      if (s_llr_scale > 0 && llr_n > 0 && llr_absum > 0) {
-        const double mean_abs = (double)llr_absum / (double)llr_n;
-        const double f = (double)s_llr_scale / mean_abs;
-        if (f < 0.999 || f > 1.001) {
-          for (uint32_t i = 0; i < G; i++) {
-            int v = (int)lround((double)llr[i] * f);
-            if (v > 32767) v = 32767;
-            if (v < -32768) v = -32768;
-            llr[i] = (int16_t)v;
-          }
-        }
-      }
-    }
-
     zero_before = atomic_load(&g_ldpc_zero_tb);
     pdt_ldp = pdtim_on ? pdtim_now() : 0;
-    { /* ISAC_PDSCH_HOST_FAST=1 (default off): NEON sign-mask unscramble, bit-identical to nr_codeword_unscrambling */
-      static _Atomic int s_hfu = -1;
-      if (s_hfu < 0) s_hfu = atoi(getenv("ISAC_PDSCH_HOST_FAST") ?: "1") ? 1 : 0;
-      if (s_hfu)
-        nrhf_unscramble(llr, G, gold_cache((grant->rnti << 15) + (0 << 14) + dlsch_config->dlDataScramblingId, (G + 31) / 32));
-      else
-        nr_dlsch_unscrambling(llr, G, 0 /* codeword */, dlsch_config->dlDataScramblingId, grant->rnti);
-    }
+    /* NEON sign-mask unscramble, bit-identical to nr_codeword_unscrambling */
+    nrhf_unscramble(llr, G, gold_cache((grant->rnti << 15) + (0 << 14) + dlsch_config->dlDataScramblingId, (G + 31) / 32));
     t_last_llr = llr; t_last_G = G; /* for the GPU self-check */
 
     /* SIGN statistics AFTER descrambling -- measuring them before is meaningless, and that was the
@@ -5641,12 +3663,9 @@ gpu_llr_ready:;
      * 454 with 87 % clipped on the rank-4 bed (417 / 22 % OTA), the float path 79 / 20 %, a rank-2
      * decode 125 / 0.015 %. Min-sum is scale-invariant except for that clipping, so a uniform
      * right shift that brings the mean under LLR_NORM_TARGET costs nothing where the scale was
-     * already right and keeps the soft information where it was not. ISAC_LLR_NORM=0 disables. */
+     * already right and keeps the soft information where it was not. */
     {
-      static _Atomic int s_norm = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-      /* DEFERRED/DO NOT USE: ISAC_LLR_NORM not in the frozen config t26zE (2026-10-18); slated for removal */
-      if (s_norm < 0) { const char *e = getenv("ISAC_LLR_NORM"); s_norm = (e && atoi(e) == 0) ? 0 : 1; }
-      if (s_norm && G >= 64) {
+      if (G >= 64) {
         /* K38: the mean is taken over code block 0's span, ceil(G/C) LLRs, not all G: a layout probe
          * leaves every LLR past its horizon at 0, and a whole-buffer mean diluted by those zeros gave
          * the probe a smaller shift than the whole-slot decode of the same hypothesis (rank 4: CB0
@@ -5661,10 +3680,7 @@ gpu_llr_ready:;
         }
       }
     }
-    if (si_combine_on() && grant->rnti == 0xffff && !t_quiet) { /* SIB1/SI soft combining: no bootstrap (a cell that decodes nothing alone never reaches it) */
-      t_hq.armed = 1; t_hq.si = true;
-      t_hq.rnti = grant->rnti; t_hq.pid = grant->harq_pid; t_hq.ndi = grant->ndi; t_hq.cell = (uint16_t)ue->frame_parms.Nid_cell;
-    } else if ((nr_agnostic_v2() || harq_combine_on()) && atomic_load(&g_ldpc_ok) >= 100 && !t_quiet) { /* only once the layout has bootstrapped */
+    if (atomic_load(&g_ldpc_ok) >= 100 && !t_quiet) { /* only once the layout has bootstrapped */
       t_hq.armed = 1;
       t_hq.rnti = grant->rnti;
       t_hq.pid = grant->harq_pid;
@@ -5688,7 +3704,7 @@ gpu_llr_ready:;
       }
     }
     t_gp_sbad = gp_cmp && !gp_ok && nr_gpu_pass_fp32_on() && gp_sign_bad(t_gpp->llr, llr, G); /* FP32: the CRC-OK shadow compares the LLR signs too */
-    t_hq.armed = 0; t_hq.si = false;
+    t_hq.armed = 0;
     /* A probe's outcome is code block 0's CRC, and every hypothesis sweep below (PT-RS density,
      * the PDSCH config feedback in the queue, the layout search) must see it: with ldpc_ok false
      * for every probe the PT-RS sweep could never latch "absent" and only 1 arm in 7 was right --
@@ -5697,38 +3713,6 @@ gpu_llr_ready:;
     const bool probe_ok = t_probe_first_seg && t_probe_seg_ok;
     if (probe_ok)
       ldpc_ok = true;
-    /* ISAC_RV_RETRY=1 (default off): on a failed TB, re-run ONLY the LDPC stage with rv 2, 3, 1 on
-     * the same (already descrambled) LLRs. Tests the hypothesis that some grants are retransmissions
-     * whose RV field the current DCI-1_1 layout misreads as 0 (MCS-24 grants: 0 % of code blocks
-     * decode on 3.5k TBs while MCS 25 gets 49 % -- a lower code rate cannot do that on SNR alone).
-     * A rescue at rv=2 is proof; the counters are printed with MCSHIST. */
-    {
-      static _Atomic int s_rvr = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-      if (s_rvr < 0) {
-        /* DEFERRED/DO NOT USE: ISAC_RV_RETRY not in the frozen config t26zE (2026-10-18); slated for removal */
-        const char *e = getenv("ISAC_RV_RETRY");
-        s_rvr = (e != NULL && atoi(e) != 0) ? 1 : 0;
-      }
-      if (s_rvr && !ldpc_ok) {
-        static const uint8_t rvs[4] = {0, 2, 3, 1}; /* every rv but the DCI's own (rv 0 too: TIMMCS0) */
-        const uint8_t rv0 = cw->rv;
-        for (int i = 0; i < 4 && !ldpc_ok; i++) {
-          if (rvs[i] == rv0) continue;
-          cw->rv = rvs[i];
-          atomic_fetch_add(&g_rv_try[rvs[i]][grant->mcs & 31], 1);
-          if (passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G)) {
-            ldpc_ok = true;
-            atomic_fetch_add(&g_rv_ok[rvs[i]][grant->mcs & 31], 1);
-            nr_pdsch_solver_note_rv_mismatch(grant->rnti); /* DCIRV: >= 3 re-select the RNTI's DCI layout */
-            if (!t_quiet)
-              LOG_A(PHY, "SENSING: RVRESCUE rnti=0x%04x fs=%d.%d probe=%d mcs=%u nl=%u dci_rv=%u ok_rv=%u ndi=%u tbs=%u\n", grant->rnti,
-                    proc->frame_rx, proc->nr_slot_rx, (int)t_probe_first_seg, grant->mcs, cw->Nl, rv0, rvs[i], grant->ndi, cw->TBS);
-          }
-        }
-        if (!ldpc_ok)
-          cw->rv = rv0;
-      }
-    }
     /* LBRM layer-term hypotheses: only when the hypothesis would change the bit selection (E beyond
      * the smaller N_ref), never on probes; a pass latches n_L for this RNTI. Cost: one extra LDPC
      * pass per failed long TB until latched. */
@@ -5764,91 +3748,10 @@ gpu_llr_ready:;
         }
       }
     }
-    /* TIMRM bit-level genie (ISAC_PDSCH_RM_GENIE=1, diagnostic): codeword-vs-LLR error map on passes, retransmission match on fails. */
-    if (nr_pdsch_rm_genie_on() && !t_quiet && !t_probe_first_seg && !t_last_hq_retx && cw->TBS <= 8424 && G > 0) {
-      if (grant->dci_len > 0 && grant->dci_len <= 128 && nr_pdsch_rm_genie_dci_budget()) {
-        char bits[130];
-        for (unsigned i = 0; i < grant->dci_len; i++) {
-          const unsigned b = grant->dci_len - 1 - i; /* MSB-first, field offsets as SOLVEDLAYOUT */
-          bits[i] = ((grant->dci_w[b >> 6] >> (b & 63)) & 1) ? '1' : '0';
-        }
-        bits[grant->dci_len] = 0;
-        LOG_A(PHY, "SENSING: RMDCI rnti=0x%04x fs=%d.%d crc=%d mcs=%u ndi=%u rv=%u pid=%u nl=%u A=%u dci=%s\n", grant->rnti, proc->frame_rx,
-              proc->nr_slot_rx, ldpc_ok ? 1 : 0, (unsigned)grant->mcs, (unsigned)grant->ndi, (unsigned)grant->rv, (unsigned)grant->harq_pid,
-              (unsigned)cw->Nl, cw->TBS, bits);
-      }
-      if (nr_mmse2_diag.on && nr_mmse2_diag.n[0] > 0) {
-        const nr_mmse2_diag_t *d = &nr_mmse2_diag;
-        char b[512]; int o = 0;
-        for (int l = 0; l < d->nl && l < 4; l++) {
-          const double n = d->n[l] ? d->n[l] : 1;
-          o += snprintf(b + o, sizeof(b) - o, "%s[w=%.1f z=%.0f w0=%.1f z0=%.1f mag0=%.1f sing=%.1f sat=%.2f]", l ? " " : "", d->sumw[l] / n, d->sumabsz[l] / n,
-                        100.0 * d->w0[l] / n, 100.0 * d->z0[l] / n, 100.0 * d->mag0[l] / n, 100.0 * d->sing[l] / n, 100.0 * d->sat[l] / n);
-        }
-        LOG_A(PHY, "SENSING: MMSE2DIAG rnti=0x%04x fs=%d.%d crc=%d mcs=%u nl=%d Qm=%d shift=%d gain_k=%d layers: %s\n", grant->rnti, proc->frame_rx,
-              proc->nr_slot_rx, ldpc_ok ? 1 : 0, (unsigned)grant->mcs, d->nl, d->qm, d->shift, d->gain_k, b);
-      }
-      if (ldpc_ok)
-        nr_pdsch_rm_genie_note(grant->rnti, proc->frame_rx, proc->nr_slot_rx, cw->TBS, g_harq.b, cw->ldpcBaseGraph, cw->qamModOrder,
-                               cw->Nl, cw->rv, dlsch_config->tbslbrm, G, llr, (uint8_t)grant->mcs);
-      else {
-        nr_pdsch_rm_genie_fail(grant->rnti, proc->frame_rx, proc->nr_slot_rx, cw->TBS, cw->ldpcBaseGraph, cw->qamModOrder, cw->Nl,
-                               cw->rv, dlsch_config->tbslbrm, G, llr, (uint8_t)grant->mcs);
-      if (!ldpc_ok && nr_pdsch_rm_genie_level() >= 2) {
-        /* TBS sweep: the LLRs are fixed (E = G whatever the TBS), so any transport-block size and rv the transmitter could have used
-         * is a pure LDPC re-decode. A hit names the true (A, rv) of a grant whose DCI-derived (A, rv) fails. */
-        static _Atomic int s_sweeps;
-        if (atomic_load(&s_sweeps) < 120 && cw->TBS <= 4000) {
-          atomic_fetch_add(&s_sweeps, 1);
-          const uint32_t A0 = cw->TBS, R0 = cw->targetCodeRate;
-          const uint8_t rv0s = cw->rv, bg0 = cw->ldpcBaseGraph;
-          uint32_t seen[512]; int ns = 0, hit = 0;
-          for (int tb = 0; tb < 3 && !hit; tb++)
-            for (int m = 0; m < 28 && !hit; m++)
-              for (int nl = 1; nl <= 4 && !hit; nl++) {
-                const uint8_t Q = nr_get_Qm_dl(m, (uint8_t)tb);
-                const uint32_t R = nr_get_code_rate_dl(m, (uint8_t)tb);
-                if (Q == 0 || R == 0) continue;
-                const uint32_t A = nr_compute_tbs(Q, (uint16_t)R, freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs * dmrs_len,
-                                                  grant->nb_rb_oh, grant->tb_scaling, (uint8_t)nl);
-                if (A == 0 || A > 4000) continue;
-                int dup = 0;
-                for (int i = 0; i < ns; i++) dup |= (seen[i] == A * 16 + (uint32_t)nl);
-                if (dup || ns >= 512) continue;
-                seen[ns++] = A * 16 + (uint32_t)nl;
-                cw->TBS = A; cw->targetCodeRate = (uint16_t)R; cw->ldpcBaseGraph = get_BG(A, (uint16_t)R);
-                for (int r = 0; r < 4 && !hit; r++) {
-                  cw->rv = (uint8_t)r;
-                  if (passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G)) {
-                    hit = 1;
-                    int sf = -1, ss = -1;
-                    const int same = nr_pdsch_rm_genie_same_as(grant->rnti, A, g_harq.b, &sf, &ss);
-                    LOG_A(PHY, "SENSING: RMTBS rnti=0x%04x fs=%d.%d mcs=%u dci_rv=%u dci_A=%u nl=%u G=%u HIT A=%u (table %d mcs %d nl %d) rv=%d same_tb_as=%d.%d\n",
-                          grant->rnti, proc->frame_rx, proc->nr_slot_rx, (unsigned)grant->mcs, rv0s, A0, (unsigned)cw->Nl, G, A, tb, m, nl, r, sf, ss);
-                  }
-                }
-              }
-          if (!hit)
-            LOG_A(PHY, "SENSING: RMTBS rnti=0x%04x fs=%d.%d mcs=%u dci_rv=%u dci_A=%u nl=%u G=%u NOHIT over %d sizes\n", grant->rnti,
-                  proc->frame_rx, proc->nr_slot_rx, (unsigned)grant->mcs, rv0s, A0, (unsigned)cw->Nl, G, ns);
-          cw->TBS = A0; cw->targetCodeRate = (uint16_t)R0; cw->ldpcBaseGraph = bg0; cw->rv = rv0s;
-        }
-      }
-      }
-    }
     pdtim_add(PDTIM_LDPC, pdt_ldp);
     if (evm_deferred && nr_pdsch_gpu_demod_evm_finish(1) == 0)
       evm_fill(out, dlsch_config, demod_ok);
 
-    if (ptrs_arm >= 0 && !t_quiet) {
-      const int latched = rnti_ptrs_feed(grant->rnti, ptrs_arm, ldpc_ok);
-      if (latched >= 0 && atomic_exchange(&g_ptrs_arm_last, latched) != latched) {
-        uint8_t K = 0, L = 0;
-        const bool any = nr_ptrs_sweep_arm(latched, &K, &L);
-        LOG_A(PHY, "SENSING: PTRS_SWEEP LATCHED arm=%d (%s K=%u L=%u) from the TB CRC for rnti 0x%04x\n", latched,
-              any ? "PT-RS present," : "no PT-RS", K, L, grant->rnti);
-      }
-    }
     /* DCI 1_1 interleaved VRB-to-PRB bundle-size sweep (grant->vrb_l == 0 for a non-interleaved or
      * DCI 1_0 grant -- nothing to feed back, see the field comment). */
     if ((grant->vrb_l == 2 || grant->vrb_l == 4) && !t_quiet) {
@@ -5886,22 +3789,6 @@ gpu_llr_ready:;
             if (llr[i] != 0) { llr_have = (uint32_t)i + 1; break; }
           }
         t_last_llr_have = llr_have;
-        /* LLRFILL (2026-09-16): per-symbol non-zero LLR counts of the assembled buffer, one shot when
-         * llr_have < 0.9 G -- which symbols/layers come out empty (rank-4 bed: llr_have 3 % of G). */
-        static _Atomic int s_llrfill_left = 3;
-        /* DEFERRED/DO NOT USE: ISAC_LLRFILL_ALL not in the frozen config t26zE (2026-10-18); slated for removal */
-        if (!(gp_ok && gp_tb) && cw->Nl > 1 && (llr_have != G || getenv("ISAC_LLRFILL_ALL")) && atomic_load(&s_llrfill_left) > 0) {
-          atomic_fetch_sub(&s_llrfill_left, 1);
-          char b[400]; int u = 0; uint32_t k = 0;
-          for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols && u < 360; m++) {
-            const uint32_t blk = dl_valid_re[m] * cw->qamModOrder * cw->Nl;
-            uint32_t nz = 0, nzl[4] = {0, 0, 0, 0};
-            for (uint32_t i = 0; i < blk && k + i < G; i++) if (llr[k + i] != 0) { nz++; nzl[(i / cw->qamModOrder) % cw->Nl]++; }
-            u += snprintf(b + u, sizeof(b) - u, " s%d:%u/%u[%u,%u,%u,%u]", m, nz, blk, nzl[0], nzl[1], nzl[2], nzl[3]);
-            k += blk;
-          }
-          LOG_A(PHY, "SENSING: LLRFILL Nl=%u Qm=%u G=%u have=%u%s\n", cw->Nl, cw->qamModOrder, G, llr_have, b);
-        }
         uint32_t vre = 0;
         for (int m = dlsch_config->start_symbol;
              m < dlsch_config->start_symbol + dlsch_config->number_symbols && m < NR_SYMBOLS_PER_SLOT; m++) {
@@ -5909,84 +3796,6 @@ gpu_llr_ready:;
         }
         const int pk = (sk == 1) ? 1 : 0;  // 1 = decoded, 0 = did not decode (zero_tb or seg_fail)
         t_last_data_bits = vre * cw->qamModOrder * cw->Nl;
-        if (decode_diag_on()) {
-          const uint32_t N = (t_seg_BG == 1 ? 66u : 50u) * t_seg_Z;
-          const uint32_t nref = t_seg_C ? 3u * t_seg_lbrm / (2u * t_seg_C) : 0;
-          /* The queued PDU carries the symbol mask, not the solver's add_pos.
-           * Report its compatible type-A values; short allocations can alias. */
-          unsigned add_mask = 0;
-          const unsigned dm = dlsch_config->dlDmrsSymbPos;
-          if (dm)
-            for (int ap = 0; ap < 4; ap++)
-              if (nr_pdsch_solver_dmrs_mask(__builtin_ctz(dm), dlsch_config->start_symbol,
-                                            dlsch_config->number_symbols, ap) == dm)
-                add_mask |= 1u << ap;
-          const int add_pos = __builtin_popcount(add_mask) == 1 ? __builtin_ctz(add_mask) : -1;
-          LOG_I(PHY, "SENSING: DECODEDIAG rnti=0x%04x fs=%d.%d abs=%ld probe=%d crc=%d "
-                "nl=%u mcs=%u tbl=%u qm=%u snr=%.2f G=%u llr_have=%u produced=%u "
-                "C=%u K=%u Zc=%u F=%u BG=%u cb=[%s] rv=%u ndi=%u pid=%u combined=%d "
-                "S=%u L=%u dmrs=0x%x ndmrs=%u add_pos=%d add_mask=0x%x ports=0x%x cdm=%u dmrs_type=%u nscid=%u dmrsid=%u dataid=%u "
-                "ptrs_arm=%d ptrs_re=%u ptrs_k=%u ptrs_log2l=%u csi_re=%u ssb_re=%u "
-                "Ncb=%u lbrm=%u tbs=%u xoh=%u scaling=%u rb=%u+%u decoder=%u sign_errors=%lu signs=%lu fep_fo=%.6f attempt=%d\n",
-                grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot,
-                t_probe_first_seg, ldpc_ok, cw->Nl, grant->mcs, grant->mcs_table, cw->qamModOrder,
-                out->evm_valid && out->evm_pct > 0 ? -20.0 * log10(out->evm_pct / 100.0) : -99.0,
-                G, llr_have, t_last_data_bits, t_seg_C, t_seg_K, t_seg_Z, t_seg_F, t_seg_BG, t_decode_cb,
-                cw->rv, grant->ndi, grant->harq_pid, t_last_hq_retx, dlsch_config->start_symbol,
-                dlsch_config->number_symbols, dlsch_config->dlDmrsSymbPos, dmrs_len, add_pos, add_mask,
-                dlsch_config->dmrs_ports, dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType,
-                dlsch_config->nscid, dlsch_config->dlDmrsScramblingId,
-                dlsch_config->dlDataScramblingId, ptrs_arm, ptrs_unav, dlsch_config->PTRSFreqDensity,
-                dlsch_config->PTRSTimeDensity, csi_unav, ssb_unav, t_seg_lbrm && nref < N ? nref : N,
-                t_seg_lbrm, cw->TBS, grant->nb_rb_oh, grant->tb_scaling, freq_alloc->first_rb,
-                freq_alloc->num_rbs, t_decoder_used_last, nr_pdsch_decode_sign_errors, nr_pdsch_decode_signs,
-                t_last_fep_fo, t_decode_tdra_attempt);
-          { /* per-symbol decision-directed SNR (dB) and, for the worst symbol, per data-RE index mod 12 */
-            const nr_pdsch_evm_acc_t *ea = &nr_pdsch_evm_acc;
-            char sb[260], kb[200];
-            int su = 0, ku = 0, worst = -1;
-            double wsnr = 1e9;
-            for (int m = 0; m < 14 && su < 240; m++) {
-              if (ea->ref_sym[m] <= 0.0) continue;
-              const double snr = ea->err_sym[m] > 0.0 ? 10.0 * log10(ea->ref_sym[m] / ea->err_sym[m]) : 60.0;
-              su += snprintf(sb + su, sizeof(sb) - su, "%s%d:%.1f", su ? "," : "", m, snr);
-              if (snr < wsnr) { wsnr = snr; worst = m; }
-            }
-            kb[0] = 0;
-            for (int k = 0; worst >= 0 && k < 12 && ku < 180; k++)
-              ku += snprintf(kb + ku, sizeof(kb) - ku, "%s%.1f", k ? "," : "",
-                             ea->n_k[worst][k] && ea->err_k[worst][k] > 0 ? 10.0 * log10(ea->n_k[worst][k] / ea->err_k[worst][k]) : 60.0);
-            static _Atomic int s_evmrb = -1; /* ISAC_PDSCH_EVM_RB=1 (diagnostic): per-RB decision-directed SNR of symbols 0/1/3 */
-            /* DEFERRED/DO NOT USE: ISAC_PDSCH_EVM_RB not in the frozen config t26zE (2026-10-18); slated for removal */
-            if (s_evmrb < 0) s_evmrb = getenv("ISAC_PDSCH_EVM_RB") && atoi(getenv("ISAC_PDSCH_EVM_RB")) ? 1 : 0;
-            if (su && s_evmrb && dlsch_config->start_symbol <= 1 && freq_alloc->num_rbs <= 276) {
-              char rb[3][280];
-              for (int row = 0; row < 3; row++) { /* one char per RB: SNR in dB, 0-35 as 0-9a-z, '.' = no sample */
-                for (int r = 0; r < (int)freq_alloc->num_rbs; r++) {
-                  const double sn = ea->n_rb[row][r] && ea->err_rb[row][r] > 0 ? 10.0 * log10(ea->n_rb[row][r] / ea->err_rb[row][r]) : (ea->n_rb[row][r] ? 60.0 : -99.0);
-                  rb[row][r] = sn < -50 ? '.' : sn < 0 ? '0' : "0123456789abcdefghijklmnopqrstuvwxyz"[sn > 35 ? 35 : (int)sn];
-                }
-                rb[row][freq_alloc->num_rbs] = 0;
-              }
-              LOG_I(PHY, "SENSING: DECODEEVMRB rnti=0x%04x fs=%d.%d abs=%ld crc=%d attempt=%d rb=%u+%u S=%u s0=%s s1=%s s3=%s\n",
-                    grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, ldpc_ok, t_decode_tdra_attempt,
-                    freq_alloc->first_rb, freq_alloc->num_rbs, dlsch_config->start_symbol, rb[0], rb[1], rb[2]);
-              pdcch_occ_diag(ue, proc, dlsch_config, freq_alloc, grant, rxdataF);
-            }
-            if (su)
-              LOG_I(PHY, "SENSING: DECODEEVM rnti=0x%04x fs=%d.%d abs=%ld crc=%d attempt=%d sym=[%s] worst=%d k12=[%s]\n",
-                    grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, ldpc_ok,
-                    t_decode_tdra_attempt, sb, worst, kb);
-          }
-          for (int i = 0; i < dlsch_config->numCsiRsForRateMatching; i++) {
-            const fapi_nr_dl_config_csirs_pdu_rel15_t *p = &dlsch_config->csiRsForRateMatching[i];
-            LOG_I(PHY, "SENSING: DECODECSI rnti=0x%04x abs=%ld attempt=%d index=%d id=%u type=%u row=%u "
-                  "rb=%u+%u l0=%u l1=%u fd=0x%x density=%u cdm=%u\n",
-                  grant->rnti, grant->source_absolute_slot, t_decode_tdra_attempt, i, p->scramb_id,
-                  p->csi_type, p->row, p->start_rb, p->nr_of_rbs, p->symb_l0, p->symb_l1,
-                  p->freq_domain, p->freq_density, p->cdm_type);
-          }
-        }
         const uint64_t v[PIPE_N_FIELDS] = {
             G, llr_have, vre, (uint64_t)vre * cw->qamModOrder * cw->Nl,
             t_seg_C, t_seg_K, t_seg_Z, t_seg_F, t_seg_E, t_seg_R, t_seg_lbrm,
@@ -6046,8 +3855,6 @@ gpu_llr_ready:;
       atomic_fetch_add(&g_llr_tb[k], 1);
     }
     if (ldpc_ok) {
-      if (!t_probe_first_seg && !t_quiet)
-        brfo_commit();
       if (!t_probe_first_seg && !t_quiet && grant->dci11 && rnti_sweepable(grant->rnti, grant->rnti_class))
         mcs_table_evidence_feed(grant->mcs, grant->mcs_table);
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_OK;
@@ -6075,79 +3882,17 @@ gpu_llr_ready:;
 
   /* GrantWork admissibility (fix round 1, I2): what the job's full decode did that CB0 from shared work does not. */
   if (t_gw != NULL && !t_quiet && !t_gw_capture) {
-    static _Atomic int s_rvr_gw = -1;
-    if (s_rvr_gw < 0) {
-      /* DEFERRED/DO NOT USE: ISAC_RV_RETRY not in the frozen config t26zE (2026-10-18); slated for removal */
-      const char *e = getenv("ISAC_RV_RETRY");
-      s_rvr_gw = (e != NULL && atoi(e) != 0) ? 1 : 0;
-    }
     uint32_t f = 0;
     if (t_last_hq_retx || have_init_tx)
       f |= NR_TD_GW_F_HARQ;
-    if (s_rvr_gw)
-      f |= NR_TD_GW_F_RV_RETRY;
-    if (prg_arm > 0 || ptrs_arm > 0)
+    if (prg_arm > 0)
       f |= NR_TD_GW_F_ARM;
     nr_td_grantwork_flag(t_gw, f);
     gw_ctx_t *gc = (gw_ctx_t *)nr_td_grantwork_ctx(t_gw); /* the gw's own copy; written only on the job thread */
     if (gc != NULL && t_decoder_used_last)
       gc->main_decoder_used = t_decoder_used_last;
   }
-  /* Per-RNTI outcome (ISAC_PDSCH_TBPARM=1). Run inside an ATTACHED UE this splits the decode
-   * population into grants addressed to US and grants addressed to ANOTHER UE, with everything
-   * else -- code, rank machinery, config, radio, slot -- held identical. That is the controlled
-   * test for whether a passive PDSCH failure is positional (precoder conditioned for the served
-   * UE) or a defect in the receive path. */
-  {
-    static _Atomic int s_tbp2 = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-    if (s_tbp2 < 0)
-      /* DEFERRED/DO NOT USE: ISAC_PDSCH_TBPARM not in the frozen config t26zE (2026-10-18); slated for removal */
-      s_tbp2 = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
-    if (s_tbp2) {
-      /* These are the PDUs actually supplied to this TB after occasion/overlap filtering.
-       * Keep geometry on the outcome line: export logs alone cannot attribute applied masks.
-       * Tuple: type/row:start:nrb:bitmap:l0:l1:cdm:density:scramblingID. */
-      char csi_detail[512] = "";
-      int pos = 0;
-      for (unsigned i = 0; i < dlsch_config->numCsiRsForRateMatching && i < NFAPI_MAX_NUM_CSI_RATEMATCH; i++) {
-        const fapi_nr_dl_config_csirs_pdu_rel15_t *c = &dlsch_config->csiRsForRateMatching[i];
-        const int n = snprintf(csi_detail + pos, sizeof(csi_detail) - pos,
-                               "%s%u/%u:%u:%u:%u:%u:%u:%u:%u:%u", i ? ";" : "",
-                               c->csi_type, c->row, c->start_rb, c->nr_of_rbs, c->freq_domain,
-                               c->symb_l0, c->symb_l1, c->cdm_type, c->freq_density, c->scramb_id);
-        if (n < 0 || (size_t)n >= sizeof(csi_detail) - pos)
-          break;
-        pos += n;
-      }
-      /* Every field needed to attribute a failure is on THIS line. Do NOT reconstruct it by pairing
-       * against the preceding TBPARM line: decodes for different slots interleave in the log, so
-       * adjacency-based pairing silently mis-attributes (it produced two mutually contradictory
-       * breakdowns before this was fixed). Same class of error as the retracted "20 % dt bias". */
-      LOG_I(PHY,
-            "SENSING: TBRESULT rnti=0x%x nl=%u mcs=%u Qm=%u R=%u tbs=%u bg=%u prb=%u+%u "
-            "cdm=%u dmrsmask=0x%x nscid=%u scramb=%u refpt=%u sym=%u+%u G=%u bwpstart=%u status=%s "
-            "slot=%d.%d why=%s csirm=%u harq=%u rv=%u llr_have=%u data_bits=%u csirs=[%s]\n",
-            grant->rnti, (unsigned)cw->Nl, (unsigned)grant->mcs, (unsigned)cw->qamModOrder,
-            (unsigned)cw->targetCodeRate, (unsigned)cw->TBS, (unsigned)cw->ldpcBaseGraph,
-            (unsigned)freq_alloc->first_rb, (unsigned)freq_alloc->num_rbs,
-            (unsigned)dlsch_config->n_dmrs_cdm_groups,
-            (unsigned)dlsch_config->dlDmrsSymbPos,
-            (unsigned)dlsch_config->nscid,
-            (unsigned)dlsch_config->dlDataScramblingId,
-            (unsigned)dlsch_config->refPoint,
-            (unsigned)dlsch_config->start_symbol,
-            (unsigned)dlsch_config->number_symbols,
-            (unsigned)out->G,
-            (unsigned)dlsch_config->BWPStart,
-            out->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? "CRC_OK"
-              : (out->status == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? "CRC_FAIL" : "ERROR"),
-            proc->frame_rx, proc->nr_slot_rx,
-            out->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? "ok" : t_last_sk == 0 ? "zero_tb" : t_last_sk == 2 ? "seg_fail" : "-",
-            (unsigned)dlsch_config->numCsiRsForRateMatching, (unsigned)grant->harq_pid, (unsigned)grant->rv,
-            t_last_llr_have, t_last_data_bits, csi_detail);
-    }
-    t_last_sk = -1;
-  }
+  t_last_sk = -1;
 
   pdtim_report();
 
@@ -6174,7 +3919,6 @@ gpu_llr_ready:;
   return out->status;
 }
 
-static __thread bool t_qam_ab_alt = false; /* QAM-FIX: an A/B alternate is running (quiet, but recovery arms allowed) */
 static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
                                                              const UE_nr_rxtx_proc_t *proc,
                                                              fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -6183,29 +3927,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
                                                              c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                              nr_pdsch_passive_decode_result_t *out);
 
-/* QAM-FIX ISAC_PDSCH_MMSE_AB=<modes> (diagnostic, default off), e.g. "1,2": on every full dedicated decode with
- * >= 2 layers and Qm > 2, first decode the SAME samples with each listed ISAC_PDSCH_MMSE_MODE arm (quiet: no
- * learning; the DECODE-FIX recovery arms still apply), then the normal decode, which alone is returned and fed
- * back. One QAMAB line per grant with every arm's CRC and kappa: a paired A/B on identical received inputs. */
-static nr_pdsch_passive_decode_status_t passive_decode_qamab(PHY_VARS_NR_UE *ue,
-                                                             const UE_nr_rxtx_proc_t *proc,
-                                                             fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
-                                                             const freq_alloc_bitmap_t *freq_alloc,
-                                                             const nr_pdsch_passive_grant_t *grant,
-                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                                             nr_pdsch_passive_decode_result_t *out);
-
-static nr_pdsch_passive_decode_status_t passive_decode_tintab(PHY_VARS_NR_UE *ue,
-                                                             const UE_nr_rxtx_proc_t *proc,
-                                                             fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
-                                                             const freq_alloc_bitmap_t *freq_alloc,
-                                                             const nr_pdsch_passive_grant_t *grant,
-                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                                             nr_pdsch_passive_decode_result_t *out);
-
 /* nr_pdsch_passive_decode: entry point: decodes one dedicated PDSCH grant of the passive receiver and fills *out; returns the decode status.
- *   Default path: passive_decode_qamab() -> passive_decode_retry() -> passive_decode_body(). With ISAC_PDSCH_CSI_EXTENT_AB=1 (diagnostic) and a DCI 1_1 C-RNTI grant
- *   it first runs a quiet decode with the CSI extent inverted and logs one SENSING: CSIAB line pairing both CRCs.
+ *   Path: passive_decode_retry() -> passive_decode_body().
  *   Callers: nr_pdsch_passive_queue.c (consumer threads, probe re-run), nr_pdcch_blind_monitor_rt.c (in-line decode), nr_passive_replay_capture.c.
  */
 static nr_pdsch_passive_decode_status_t passive_decode_entry(PHY_VARS_NR_UE *ue,
@@ -6216,8 +3939,6 @@ static nr_pdsch_passive_decode_status_t passive_decode_entry(PHY_VARS_NR_UE *ue,
                                                              c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                              nr_pdsch_passive_decode_result_t *out);
 
-/* ISAC_GPU_DISC_SMS_LOW (default off): a decode of a grant above 96 PRB is a "large real grant in flight" for the whole call, so that GPU discovery
- * (nr_gpu_green.h) launches its next job on the smaller SM partition. Off: the plain call. */
 nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const UE_nr_rxtx_proc_t *proc,
                                                          fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -6226,17 +3947,11 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                          nr_pdsch_passive_decode_result_t *out)
 {
-  static int s_low = -1;
-  /* DEFERRED/DO NOT USE: ISAC_GPU_DISC_SMS_LOW not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (s_low < 0) { const char *e = getenv("ISAC_GPU_DISC_SMS_LOW"); s_low = e && atoi(e) > 0; }
-  const bool large = s_low && freq_alloc->num_rbs > 96;
-  if (large) nr_gpu_budget_rt_large_begin();
   const int gp_hold = nr_gpu_graph_call_begin(); /* v2 Task 4 (ISAC_PDSCH_GPU_GRAPH_RETRY): the call's bodies share one pass instance */
   const nr_pdsch_passive_decode_status_t st = passive_decode_entry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-  if (t_recov_mode == 2 && st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && harq_combine_on())
+  if (t_recov_mode == 2 && st == NR_PDSCH_PASSIVE_DECODE_CRC_OK)
     harqc_rescued(grant->rnti, (uint8_t)grant->harq_pid, (uint8_t)grant->ndi, grant->source_absolute_slot);
   if (gp_hold) nr_gpu_graph_call_end();
-  if (large) nr_gpu_budget_rt_large_end();
   return st;
 }
 
@@ -6250,8 +3965,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_entry(PHY_VARS_NR_UE *ue,
 {
   t_pdtim_body = 0; /* ISAC_PDTIM_CLASS: the next body is this call's first (real), later ones are retries */
   t_dec_body_ns = t_dec_stage_ns = t_dec_first_ns = 0;
-  if (retry_budget_us())
-    t_dec_t0_ns = dec_now_ns();
+  t_dec_t0_ns = dec_now_ns();
   /* CSI-FULL hook (ISAC_CSIRS_FULL=1): this grant's own cell CSI-RS set for its PDSCH slot (nr_csirs_blind_rt.c) */
   if (!t_probe_first_seg && !t_quiet && grant->dci11 && grant->rnti_class == 0) /* ISAC_CSIRS_FULL_AB diagnostic */
     nr_csirs_full_ab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF);
@@ -6261,276 +3975,20 @@ static nr_pdsch_passive_decode_status_t passive_decode_entry(PHY_VARS_NR_UE *ue,
     t_quiet = false;
   }
   nr_csirs_full_apply(dlsch_config, (uint32_t)(proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx));
-  static _Atomic int s_xab = -1;
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_CSI_EXTENT_AB not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (s_xab < 0) s_xab = getenv("ISAC_PDSCH_CSI_EXTENT_AB") && atoi(getenv("ISAC_PDSCH_CSI_EXTENT_AB")) ? 1 : 0;
-  extern __thread int nr_dlsch_csi_extent_override;
-  if (!s_xab || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_quiet || t_llr_ovr
-      || nr_agnostic_v2() || harq_combine_on())
-    return passive_decode_tintab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-  const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
-  nr_dlsch_csi_extent_override = !nr_dlsch_csi_rb_extent();
-  t_quiet = true;
-  t_qam_ab_alt = true;
-  const nr_pdsch_passive_decode_status_t sa = passive_decode_retry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-  const int alt_csi = (int)dlsch_config->numCsiRsForRateMatching;
-  t_qam_ab_alt = false;
-  t_quiet = false;
-  nr_dlsch_csi_extent_override = -1;
-  *dlsch_config = original;
-  const nr_pdsch_passive_decode_status_t st = passive_decode_tintab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-  LOG_I(PHY, "SENSING: CSIAB rnti=0x%04x fs=%d.%d abs=%ld nl=%d mcs=%u rb=%u+%u snr=%.2f extent=%d crc=%d alt_crc=%d "
-        "csi0=%u csi_alt=%d rec=%d\n",
-        grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot,
-        __builtin_popcount(original.dmrs_ports), grant->mcs, freq_alloc->first_rb, freq_alloc->num_rbs,
-        out->evm_valid && out->evm_pct > 0 ? -20.0 * log10(out->evm_pct / 100.0) : -99.0, nr_dlsch_csi_rb_extent(),
-        st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, sa == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? 1 : sa == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? 0 : -1,
-        original.numCsiRsForRateMatching, alt_csi, (int)out->config_recovered);
-  return st;
-}
-
-/* passive_decode_tintab: ISAC_PDSCH_TINT_AB=1 (diagnostic, default off). On every full dedicated DCI 1_1 C-RNTI decode first runs a quiet decode of
- *   the SAME samples with the channel-estimate time interpolation flipped (ISAC_CHEST_TINTERP state inverted; recovery arms allowed, like CSIAB), then the normal decode,
- *   which alone is returned. One SENSING: TINTAB line pairs both CRCs and DD-EVM SNRs. Otherwise delegates to passive_decode_qamab(). Caller: nr_pdsch_passive_decode().
- */
-static nr_pdsch_passive_decode_status_t passive_decode_tintab(PHY_VARS_NR_UE *ue,
-                                                              const UE_nr_rxtx_proc_t *proc,
-                                                              fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
-                                                              const freq_alloc_bitmap_t *freq_alloc,
-                                                              const nr_pdsch_passive_grant_t *grant,
-                                                              c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                                              nr_pdsch_passive_decode_result_t *out)
-{
-  static _Atomic int s_tab = -1;
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_TINT_AB not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (s_tab < 0) s_tab = getenv("ISAC_PDSCH_TINT_AB") && atoi(getenv("ISAC_PDSCH_TINT_AB")) ? 1 : 0;
-  if (!s_tab || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_quiet || t_llr_ovr
-      || nr_agnostic_v2() || harq_combine_on() || t_tinterp_override >= 0)
-    return passive_decode_qamab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-  const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
-  t_tinterp_override = !chest_tinterp_global();
-  t_quiet = true;
-  t_qam_ab_alt = true;
-  const nr_pdsch_passive_decode_status_t sa = passive_decode_qamab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-  t_qam_ab_alt = false;
-  t_quiet = false;
-  t_tinterp_override = -1;
-  const double snr_alt = out->evm_valid && out->evm_pct > 0 ? -20.0 * log10(out->evm_pct / 100.0) : -99.0;
-  const int rec_alt = (int)out->config_recovered;
-  *dlsch_config = original;
-  const nr_pdsch_passive_decode_status_t st = passive_decode_qamab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-  LOG_I(PHY, "SENSING: TINTAB rnti=0x%04x fs=%d.%d abs=%ld nl=%d qm=%d mcs=%u rb=%u+%u S=%u L=%u snr=%.2f snr_alt=%.2f tint=%d "
-        "crc=%d alt_crc=%d rec=%d alt_rec=%d\n",
-        grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, __builtin_popcount(original.dmrs_ports),
-        nr_get_Qm_dl(grant->mcs, grant->mcs_table), grant->mcs, freq_alloc->first_rb, freq_alloc->num_rbs,
-        original.start_symbol, original.number_symbols,
-        out->evm_valid && out->evm_pct > 0 ? -20.0 * log10(out->evm_pct / 100.0) : -99.0, snr_alt, chest_tinterp_global(),
-        st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, sa == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? 1 : sa == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? 0 : -1,
-        (int)out->config_recovered, rec_alt);
-  return st;
-}
-
-/* passive_decode_qamab: runs the decode once per ISAC_PDSCH_MMSE_AB mode (comma-separated list of QAM demapper modes), then once with the default mode.
- *   Only for multi-layer, non-QPSK, C-RNTI DCI 1_1 grants; otherwise delegates to passive_decode_retry() directly.
- *   Logs one SENSING: QAMAB line with the CRC and kappa of each mode; the final result is the default-mode decode. Caller: nr_pdsch_passive_decode().
- */
-static nr_pdsch_passive_decode_status_t passive_decode_qamab(PHY_VARS_NR_UE *ue,
-                                                             const UE_nr_rxtx_proc_t *proc,
-                                                             fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
-                                                             const freq_alloc_bitmap_t *freq_alloc,
-                                                             const nr_pdsch_passive_grant_t *grant,
-                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                                             nr_pdsch_passive_decode_result_t *out)
-{
-  static _Atomic int s_ab_n = -1;
-  static int s_ab_modes[4];
-  if (s_ab_n < 0) {
-    int n = 0;
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_MMSE_AB not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_PDSCH_MMSE_AB");
-    for (const char *q = e; q && *q && n < 4;) {
-      s_ab_modes[n++] = atoi(q);
-      q = strchr(q, ',');
-      if (q) q++;
-    }
-    s_ab_n = n;
-  }
-  extern __thread int nr_dlsch_qam_mode_override;
-  const int ab_nl = __builtin_popcount(dlsch_config->dmrs_ports);
-  const int ab_qm = nr_get_Qm_dl(grant->mcs, grant->mcs_table);
-  static _Atomic int s_ab_qpsk = -1; /* ISAC_PDSCH_MMSE_AB_QPSK=1: also pair the QPSK grants (regression check) */
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_MMSE_AB_QPSK not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (s_ab_qpsk < 0) s_ab_qpsk = getenv("ISAC_PDSCH_MMSE_AB_QPSK") && atoi(getenv("ISAC_PDSCH_MMSE_AB_QPSK")) ? 1 : 0;
-  if (s_ab_n == 0 || ab_nl < 2 || (ab_qm <= 2 && !s_ab_qpsk) || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg
-      || t_gw_capture || t_quiet || t_llr_ovr || nr_agnostic_v2() || harq_combine_on())
-    return passive_decode_retry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-  const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
-  int crc[4];
-  float kap[4], snr[4];
-  for (int k = 0; k < s_ab_n; k++) {
-    *dlsch_config = original;
-    nr_dlsch_qam_mode_override = s_ab_modes[k];
-    t_quiet = true;
-    t_qam_ab_alt = true;
-    const nr_pdsch_passive_decode_status_t sk = passive_decode_retry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-    t_qam_ab_alt = false;
-    t_quiet = false;
-    crc[k] = sk == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? 1 : sk == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? 0 : -1;
-    kap[k] = out->kappa;
-    snr[k] = out->evm_valid && out->evm_pct > 0 ? (float)(-20.0 * log10(out->evm_pct / 100.0)) : -99.f;
-  }
-  nr_dlsch_qam_mode_override = -1;
-  *dlsch_config = original;
-  const nr_pdsch_passive_decode_status_t st = passive_decode_retry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-  char b[160];
-  int u = 0;
-  for (int k = 0; k < s_ab_n && u < 140; k++)
-    u += snprintf(b + u, sizeof(b) - u, " m%d=%d/%.2f", s_ab_modes[k], crc[k], kap[k]);
-  LOG_I(PHY, "SENSING: QAMAB rnti=0x%04x fs=%d.%d abs=%ld nl=%d qm=%d mcs=%u tbl=%u rb=%u+%u snr=%.2f snr_alt=%.2f "
-        "crc=%d kappa=%.2f%s rec=%d snr_l=%.1f,%.1f\n",
-        grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, ab_nl, ab_qm, grant->mcs,
-        grant->mcs_table, freq_alloc->first_rb, freq_alloc->num_rbs,
-        out->evm_valid && out->evm_pct > 0 ? -20.0 * log10(out->evm_pct / 100.0) : -99.0, snr[0],
-        st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, out->kappa, b, (int)out->config_recovered,
-        nr_pdsch_evm_acc.err_layer[0] > 0 ? 10.0 * log10(nr_pdsch_evm_acc.ref_layer[0] / nr_pdsch_evm_acc.err_layer[0]) : -99.0,
-        nr_pdsch_evm_acc.err_layer[1] > 0 ? 10.0 * log10(nr_pdsch_evm_acc.ref_layer[1] / nr_pdsch_evm_acc.err_layer[1]) : -99.0);
-  return st;
-}
-
-static int s_scsi_on(void)
-{
-  static _Atomic int s = -1;
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_STATIC_CSI_RETRY not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (s < 0) s = getenv("ISAC_PDSCH_STATIC_CSI_RETRY") && atoi(getenv("ISAC_PDSCH_STATIC_CSI_RETRY")) ? 1 : 0;
-  return s;
-}
-/* static_csi_resources: DECODE-RES item 2. The full-band non-TRS CSI-RS measured on the PCI-415 carrier (tools/csirs_capture_map.py, CSIFULL.md section 1;
- *   a network property, NOT a TS rule): at abs_slot % 160 == 24 symbols 10-13 subcarriers {0-3, 8-11}; == 63 symbols 10-13 subcarriers 4-11; == 105 symbols
- *   10, 12, 13 subcarriers 0-3; == 135 symbol 7 subcarriers 4-7; all RBs. Expressed as row-4 (four contiguous REs, one symbol) zero-power resources, one per
- *   (symbol, 4-RE block). Appends them to cfg->csiRsForRateMatching (up to the array capacity) and returns the number added; 0 for any other phase.
- *   Caller: passive_decode_retry() (ISAC_PDSCH_STATIC_CSI_RETRY).
- */
-static int static_csi_resources(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, long abs_slot)
-{
-  static const struct { int phase; uint16_t syms; uint8_t blocks; } pat[4] = {
-    {24, 0x3c00, 0x5}, {63, 0x3c00, 0x6}, {105, 0x3400, 0x1}, {135, 0x0080, 0x2}};
-  const int ph = (int)(((abs_slot % 160) + 160) % 160);
-  int added = 0;
-  for (int i = 0; i < 4; i++) {
-    if (pat[i].phase != ph) continue;
-    for (int sym = 0; sym < 14; sym++)
-      for (int b = 0; b < 3; b++) {
-        if (!((pat[i].syms >> sym) & 1) || !((pat[i].blocks >> b) & 1)) continue;
-        if (cfg->numCsiRsForRateMatching >= NFAPI_MAX_NUM_CSI_RATEMATCH) return added;
-        fapi_nr_dl_config_csirs_pdu_rel15_t *r = &cfg->csiRsForRateMatching[cfg->numCsiRsForRateMatching++];
-        memset(r, 0, sizeof(*r));
-        r->row = 4; r->freq_domain = (uint16_t)(1u << b); r->symb_l0 = (uint8_t)sym; r->symb_l1 = (uint8_t)sym;
-        r->freq_density = 2; r->start_rb = 0; r->nr_of_rbs = 273; r->csi_type = 2; r->cdm_type = 0;
-        added++;
-      }
-  }
-  return added;
-}
-
-/* own_pdcch_hypotheses: DECODE-RES. From the per-RB decision-directed error of one finished S=0 decode (nr_pdsch_evm_acc.err_rb: symbols 0, 1, 3),
- *   finds the PRBs of the allocation whose symbol 0 is worse than symbols 1/3 by more than ISAC_PDSCH_OWN_PDCCH_DB (default 4 dB): these carry the
- *   grant's own PDCCH (CCEs of a duration-1 CORESET map to 6 contiguous PRBs each, so the part inside a contiguous grant is one run).
- *   Writes up to `max` allocation-relative [first,last] hypotheses (the longest run, merged over 1-PRB gaps, with its edges moved by +-1 PRB) and returns the
- *   count; 0 when the grant is clean, too noisy (mean reference SNR < 6 dB) or without symbol-0 samples. Caller: passive_decode_retry().
- */
-static int own_pdcch_hypotheses(const nr_pdsch_evm_acc_t *ea, int nrb, uint8_t hyp[][276], int max, int *run_first, int *run_last)
-{
-  static _Atomic double s_db = -1.0;
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_OWN_PDCCH_DB not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (s_db < 0.0) { const char *e = getenv("ISAC_PDSCH_OWN_PDCCH_DB"); s_db = e && atof(e) > 0.0 ? atof(e) : 4.0; }
-  if (nrb < 1 || nrb > 276) return 0;
-  signed char dirty[276];
-  double ref_sum = 0.0;
-  int ref_n = 0;
-  for (int r = 0; r < nrb; r++) {
-    dirty[r] = -1;
-    if (ea->n_rb[0][r] < 6) continue;
-    double s0 = ea->err_rb[0][r] > 0.0f ? 10.0 * log10(ea->n_rb[0][r] / (double)ea->err_rb[0][r]) : 60.0;
-    double ref = -99.0;
-    for (int row = 1; row <= 2; row++)
-      if (ea->n_rb[row][r] >= 6) {
-        const double v = ea->err_rb[row][r] > 0.0f ? 10.0 * log10(ea->n_rb[row][r] / (double)ea->err_rb[row][r]) : 60.0;
-        if (v > ref) ref = v;
-      }
-    if (ref < -90.0) continue;
-    ref_sum += ref;
-    ref_n++;
-    dirty[r] = s0 < ref - s_db ? 1 : 0;
-  }
-  if (ref_n < 1 || ref_sum / ref_n < 6.0) return 0;
-  /* runs of dirty PRBs, single-PRB gaps bridged; runs shorter than 2 PRBs are noise (a CCE is 6 PRBs) unless the only one */
-  int ra[64], rb_[64], nr = 0;
-  for (int r = 0; r < nrb && nr < 64;) {
-    if (dirty[r] != 1) { r++; continue; }
-    int a = r, b = r, q = r + 1;
-    while (q < nrb) {
-      if (dirty[q] == 1) { b = q; q++; }
-      else if (q + 1 < nrb && dirty[q + 1] == 1) q++;
-      else break;
-    }
-    ra[nr] = a; rb_[nr] = b; nr++;
-    r = b + 1;
-  }
-  int keep[64], nk = 0, longest = -1;
-  for (int i = 0; i < nr; i++) {
-    if (longest < 0 || rb_[i] - ra[i] > rb_[longest] - ra[longest]) longest = i;
-    if (rb_[i] - ra[i] + 1 >= 2) keep[nk++] = i;
-  }
-  if (nr == 0) return 0;
-  if (nk == 0) keep[nk++] = longest;
-  *run_first = ra[longest];
-  *run_last = rb_[longest];
-  int n = 0;
-  /* mode 0 exact runs; 1 grown by 1 PRB each side; 2 shrunk by 1; 3 longest run only; 4/5 longest run grown/shrunk; 6 snapped out to 6-PRB (CRB) multiples */
-  for (int mode = 0; mode < 7 && n < max; mode++) {
-    uint8_t *h = hyp[n];
-    memset(h, 0, 276);
-    bool any = false;
-    const bool one = mode == 3 || mode == 4 || mode == 5;
-    for (int j = 0; j < (one ? 1 : nk); j++) {
-      const int i = one ? longest : keep[j];
-      int a = ra[i], b = rb_[i];
-      if (mode == 1 || mode == 4) { a--; b++; }
-      if (mode == 2 || mode == 5) { a++; b--; }
-      if (mode == 6) { a -= a % 6; b = b - b % 6 + 5; }
-      for (int r = a < 0 ? 0 : a; r <= b && r < nrb; r++) { h[r] = 1; any = true; }
-    }
-    if (!any) continue;
-    bool dup = false;
-    for (int m = 0; m < n && !dup; m++) dup = memcmp(hyp[m], h, 276) == 0;
-    if (!dup) n++;
-  }
-  return n;
+  return passive_decode_retry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
 }
 
 static __thread uint8_t t_pdcch_rm_crb[275]; /* WIDE-S0: per-CRB exclusion handed to nr_ssb_rm_extra by pdcch_rm_arm() */
 /* rm_disarm: clears the WIDE-S0 exclusion (nr_ssb_rm_extra). */
 static void rm_disarm(void) { nr_ssb_rm_extra = (nr_ssb_rm_extra_t){0, NULL}; }
 
-/* pdcch_rm_mode: ISAC_PDSCH_PDCCH_RM (WIDE-S0, default 0 = off): 1 = every decode excludes the scheduling PDCCH's REs (grant->pdcch_*) on the
- *   CORESET symbols the PDSCH spans, as TS 38.214 5.1.4.1 requires; 2 = paired diagnostic: decode as before and, on a CRC failure of a grant that
- *   overlaps its PDCCH, re-decode the same samples with the exclusion (PDCCHRM line). Cached. Callers: passive_decode_body(), passive_decode_retry(). */
-static int pdcch_rm_mode(void)
-{
-  static _Atomic int s_m = -1;
-  if (s_m < 0) {
-    const char *e = getenv("ISAC_PDSCH_PDCCH_RM");
-    s_m = e ? atoi(e) : 1;
-  }
-  return s_m;
-}
 
 /* pdcch_rm_arm: if the grant carries its scheduling PDCCH and the PDSCH allocation [start_symbol, +number_symbols) overlaps the PDCCH's CORESET
  *   symbols on at least one of the PDCCH's common RBs, loads that exclusion into nr_ssb_rm_extra (the SSB rate-matching plan's per-CRB/per-symbol
  *   mask's second layer, nr_ssb_rm_extra) and returns true. The PRB set compared is the allocation's own (contiguous or segmented). */
 static bool pdcch_rm_arm(const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant)
 {
-  if (!grant->pdcch_nsym || t_own_pdcch.on || nr_ssb_rm_extra.crb)
+  if (!grant->pdcch_nsym || nr_ssb_rm_extra.crb)
     return false;
   uint16_t symbols = 0;
   for (int l = grant->pdcch_sym0; l < grant->pdcch_sym0 + grant->pdcch_nsym && l < 14; l++)
@@ -6551,7 +4009,7 @@ static bool pdcch_rm_arm(const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, const f
   return true;
 }
 
-/* passive_decode_body: passive_decode_body_core() with, under ISAC_PDSCH_PDCCH_RM=1, the scheduling PDCCH's REs excluded (pdcch_rm_arm()).
+/* passive_decode_body: passive_decode_body_core() with the scheduling PDCCH's REs excluded (pdcch_rm_arm()).
  *   Flag unset or the grant without a PDCCH overlap: exactly passive_decode_body_core(). */
 static nr_pdsch_passive_decode_status_t passive_decode_body_gated(PHY_VARS_NR_UE *ue,
                                                             const UE_nr_rxtx_proc_t *proc,
@@ -6562,13 +4020,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_gated(PHY_VARS_NR_UE
                                                             nr_pdsch_passive_decode_result_t *out)
 {
   t_pdtim_body++;
-  static int s_prio = -1; /* GPUSCHED ISAC_PDSCH_GPU_PRIO=1: probes and retry bodies on the low-priority GPU streams */
-  if (s_prio < 0)
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_GPU_PRIO not in the frozen config t26zE (2026-10-18); slated for removal */
-    s_prio = getenv("ISAC_PDSCH_GPU_PRIO") && atoi(getenv("ISAC_PDSCH_GPU_PRIO")) == 1;
-  if (s_prio)
-    nr_pdsch_gpu_exact_set_lowprio(t_probe_first_seg || t_pdtim_body > 1);
-  if (pdcch_rm_mode() != 1 || !pdcch_rm_arm(dlsch_config, freq_alloc, grant))
+  if (!pdcch_rm_arm(dlsch_config, freq_alloc, grant))
     return passive_decode_body_core(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
   const nr_pdsch_passive_decode_status_t st = passive_decode_body_core(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
   rm_disarm();
@@ -6639,80 +4091,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
   return st;
 }
 
-/* ---- ISAC_PDSCH_SIGNAL_GEOM_RETRY=1 (default off, HIGHMCS2): the grant's time geometry read from the signal --------------------
- * TIM PCI 923 schedules some DCI 1_1 PDSCH as S=1 L=5 (2 CDM groups without data, DM-RS on symbol 2 only) under TDRA values the
- * solver resolved to S=1 L=13 DM-RS {2,11}: per-symbol power drops 22-38 dB after symbol 5 and the 2-CDM-group DM-RS signature
- * (other CDM group empty) is on symbol 2 only (CDMDIAG). Those grants failed at every SNR. On a CRC-failed full dedicated grant:
- *  - allocation end: the first symbol after which every symbol up to the assumed end is >= 15 dB below the first DM-RS symbol;
- *  - DM-RS symbols: with 2 CDM groups and all ports in one group, the symbols whose other-group energy is <= -6 dB under their own;
- *    otherwise the assumed mask's additional-position count re-applied to the new duration (TS 38.211 table 7.4.1.1.2-3, type A).
- * The grant is re-decoded once with that geometry and kept only on a full TB CRC (no latch: the TDRA is per DCI, not per RNTI). */
-static int signal_geom_on(void)
-{
-  static _Atomic int s = -1;
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_SIGNAL_GEOM_RETRY not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (s < 0) s = getenv("ISAC_PDSCH_SIGNAL_GEOM_RETRY") && atoi(getenv("ISAC_PDSCH_SIGNAL_GEOM_RETRY")) ? 1 : 0;
-  return s;
-}
-/* type-A single-symbol DM-RS for duration ld (first symbol of the slot to the last PDSCH symbol), l0 = first DM-RS symbol, `add`
- * additional positions (dmrs-AdditionalPosition pos0..pos3), TS 38.211 table 7.4.1.1.2-3 */
-static uint16_t dmrs_mask_type_a(int l0, int ld, int add)
-{
-  uint16_t m = (uint16_t)(1u << l0);
-  if (ld < 8 || add == 0) return m;
-  if (ld <= 9) return m | (1u << 7);
-  if (add == 1) return m | (1u << (ld <= 12 ? 9 : 11));
-  if (add == 2 || ld <= 11) return m | (ld <= 12 ? (1u << 6) | (1u << 9) : (1u << 7) | (1u << 11));
-  return m | (1u << 5) | (1u << 8) | (1u << 11);
-}
-/* signal_geom_detect: number_symbols and DM-RS mask the FEP'd slot shows for this grant; false when it shows the assumed geometry or
- *   cannot tell (non-contiguous PRBs, PRG). Type 1 only. */
-static bool signal_geom_detect(const NR_DL_FRAME_PARMS *fp, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, const freq_alloc_bitmap_t *fa,
-                               c16_t rxdataF[][fp->samples_per_slot_wCP], uint8_t *n_sym, uint16_t *mask)
-{
-  const uint16_t assumed = cfg->dlDmrsSymbPos & 0x3FFF;
-  if (cfg->dmrsConfigType != NFAPI_NR_DMRS_TYPE1 || !assumed || fa->prg || fa->num_rbs < 1 || fa->last_rb - fa->first_rb + 1 != fa->num_rbs
-      || !cfg->dmrs_ports || (cfg->dmrs_ports & ~15u))
-    return false;
-  const int N = fp->ofdm_symbol_size, nsc = fa->num_rbs * NR_NB_SC_PER_RB, S = cfg->start_symbol, end = S + cfg->number_symbols;
-  const int sc0 = fp->first_carrier_offset + (cfg->BWPStart + fa->first_rb) * NR_NB_SC_PER_RB, d0 = __builtin_ctz(assumed);
-  const int own = (cfg->dmrs_ports & 3u) ? 0 : 1; /* type 1: ports 1000/1001 on even subcarriers, 1002/1003 on odd */
-  const bool one_group = !((cfg->dmrs_ports & 3u) && (cfg->dmrs_ports & 12u)) && cfg->n_dmrs_cdm_groups == 2;
-  if (end > 14 || d0 < S || d0 >= end) return false;
-  double e[14][2] = {{0}};
-  for (int m = S; m < end; m++)
-    for (int a = 0; a < fp->nb_antennas_rx; a++)
-      for (int k = 0; k < nsc; k++) {
-        const c16_t y = rxdataF[a][m * N + (sc0 + k) % N];
-        e[m][k & 1] += (double)y.r * y.r + (double)y.i * y.i;
-      }
-  const double p0 = e[d0][0] + e[d0][1];
-  if (p0 <= 0.0) return false;
-  int last = end; /* one past the last PDSCH symbol */
-  for (int m = d0 + 1; m < end && last == end; m++) {
-    bool quiet = true;
-    for (int k = m; k < end && quiet; k++) quiet = e[k][0] + e[k][1] <= p0 / 31.6; /* 15 dB */
-    if (quiet) last = m;
-  }
-  uint16_t det = 0;
-  if (one_group) {
-    for (int m = S; m < last; m++)
-      if (e[m][own] > 0.0 && e[m][!own] <= 0.25 * e[m][own]) det |= (uint16_t)(1u << m);
-    if (!(det & (1u << d0))) det = 0;
-  }
-  if (!det) det = dmrs_mask_type_a(d0, last, __builtin_popcount(assumed) - 1);
-  /* full length: a DM-RS-only correction never passed CRC on any capture (b: 26 tries / run, tim 0 / 73): not retried */
-  if (last == end) return false;
-  *n_sym = (uint8_t)(last - S);
-  *mask = det;
-  return true;
-}
-
-/* passive_decode_retry: runs passive_decode_body() and, on a CRC failure, tries the recovery arms (default off): TDRA start symbol, CSI-RS rate matching, DM-RS CDM groups, wide MRC.
- *   Arms: ISAC_PDSCH_TDRA_RETRY, ISAC_PDSCH_CSI_RETRY, ISAC_PDSCH_DMRS_CDM_RETRY, ISAC_PDSCH_WIDE_MRC_RETRY, ISAC_PDSCH_CSI_POPULATION_RETRY.
- *   A recovered decode sets out->config_recovered. Each trial re-demodulates the same samples with quiet mode (t_quiet). Caller: passive_decode_qamab() and nr_pdsch_passive_decode().
+/* passive_decode_retry: runs passive_decode_body() and, on a CRC failure, tries the recovery arms: TDRA start symbol, CSI-RS rate matching, DM-RS CDM groups, wide MRC.
+ *   A recovered decode sets out->config_recovered. Each trial re-demodulates the same samples with quiet mode (t_quiet). Caller: passive_decode_entry().
  */
-/* ISAC_PDSCH_RETRY_YIELD (P99, default 0 = off = unchanged arm order and count) for the DECODE-FIX recovery chain:
+/* RETRY_YIELD (P99) for the DECODE-FIX recovery chain, mode 2 (the only one that runs):
  *  1: the S=0/1 toggle (arm 2, ~95 % of the Vodafone on-air rescues) runs first, and every later arm is skipped as soon as a
  *     full decode (non-probe job) waits in the PDSCH queue: the long-shot arms of one failed grant no longer delay the next
  *     grants into the stale window.
@@ -6727,32 +4109,13 @@ static bool signal_geom_detect(const NR_DL_FRAME_PARMS *fp, const fapi_nr_dl_con
 int nr_pdsch_passive_queue_backlog_real(void) __attribute__((weak));
 static int ry_backlog(void) { return nr_pdsch_passive_queue_backlog_real ? nr_pdsch_passive_queue_backlog_real() : 0; }
 static _Atomic uint64_t g_ry_chains, g_ry_yields, g_ry_gated, g_ry_try[RY_ARMS], g_ry_ok[RY_ARMS], g_ry_seen[RY_ARMS];
-/* FATTAILS ISAC_PDSCH_RETRY_BUDGET_US=N (default 0 = off; umbrella ISAC_FATTAILS=1 -> 1000): with RETRY_YIELD, the arms after
- * the S toggle are skipped once this decode call has run N us (counted as yields): a failed grant's long-shot arms no longer
- * hold its consumer for several bodies. */
+/* FATTAILS: the arms after the S toggle are skipped once this decode call has run RETRY_BUDGET_NS (counted as yields): a failed grant's long-shot arms
+ * no longer hold its consumer for several bodies. */
 static uint64_t dec_now_ns(void)
 {
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
-}
-static int retry_budget_us(void)
-{
-  static int v = -1;
-  if (v < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_RETRY_BUDGET_US not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_PDSCH_RETRY_BUDGET_US"), *u = (getenv("ISAC_FATTAILS") ?: "1");
-    v = e ? atoi(e) : (u && atoi(u) ? 1000 : 0);
-    if (v < 0)
-      v = 0;
-  }
-  return v;
-}
-static int retry_yield_mode(void)
-{
-  static int v = -1;
-  if (v < 0) v = getenv("ISAC_PDSCH_RETRY_YIELD") ? atoi(getenv("ISAC_PDSCH_RETRY_YIELD")) : 2;
-  return v;
 }
 /* TAIL-FIX: the recovery worker runs an arm only while no first-pass decode waits (DL ring or UL real queue, nr_pdsch_passive_first_pass_waiting); checked before every
  * arm (nr_recov_yield.h). A busy lane waits at most RY_IDLE_WAIT_NS and then gives the remaining arms up. Weak: test binaries do not link the queues. */
@@ -6785,42 +4148,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
                                                              c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                              nr_pdsch_passive_decode_result_t *out)
 {
-  /* ISAC_PDSCH_RETRY_PREDICT=1 / ISAC_PDSCH_RETRY_NORESTORE=1 (default off, DECQUEUE): see nr_pdsch_retry_pred.h; and skip the final re-decode
-   * of the plain reading after every arm failed (it repeats the first body bit for bit; its only effect was to restore *out). */
-  static _Atomic int rp_on = -1, rn_on = -1;
-  if (rp_on < 0) { const char *e = (getenv("ISAC_PDSCH_RETRY_PREDICT") ?: "1"); rp_on = e && atoi(e) != 0; }
-  if (rn_on < 0) { const char *e = (getenv("ISAC_PDSCH_RETRY_NORESTORE") ?: "1"); rn_on = e && atoi(e) != 0; }
+  /* nr_pdsch_retry_pred.h: the S toggle (arm 2) runs first, learnt per RNTI; the final re-decode of the plain reading after every arm failed is
+   * skipped (it repeats the first body bit for bit; its only effect was to restore *out). */
   nr_pdsch_passive_decode_status_t st;
-  if (t_recov_mode != 2 && rp_on && atoi(getenv("ISAC_PDSCH_TDRA_RETRY") ?: "1") && grant->dci11 && grant->rnti_class == 0
-      && !t_probe_first_seg && !t_gw_capture && !t_gw_used && !(t_quiet && !t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && !harq_combine_on()
-      && dlsch_config->start_symbol <= 1 && dlsch_config->start_symbol + dlsch_config->number_symbols == 14
-      && nr_retry_pred_try_first(grant->rnti)) {
-    const fapi_nr_dl_config_dlsch_pdu_rel15_t plain = *dlsch_config;
-    const bool saved_quiet = t_quiet;
-    t_quiet = true;
-    dlsch_config->start_symbol = 1 - plain.start_symbol;
-    dlsch_config->number_symbols = 14 - dlsch_config->start_symbol;
-    t_decode_tdra_attempt = 2;
-    st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-    if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
-    t_quiet = saved_quiet;
-    t_decode_tdra_attempt = 0;
-    if (out->skip) { /* no-chance gate (nr_snr_gate.h): neither this body nor the plain one is worth running, and no arm can help */
-      *dlsch_config = plain;
-      return st;
-    }
-    if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
-      out->config_recovered = true;
-      nr_retry_pred_hit(grant->rnti);
-      LOG_I(PHY, "SENSING: DECODETDRA rnti=0x%04x fs=%d.%d abs=%ld before=0 after=1 S=%u L=%u csi=%u altS=%u altL=%u alt_csi=%u cdm=%u alt_cdm=%u arm=2 pred=1\n",
-            grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, plain.start_symbol, plain.number_symbols,
-            plain.numCsiRsForRateMatching, dlsch_config->start_symbol, dlsch_config->number_symbols, dlsch_config->numCsiRsForRateMatching,
-            plain.n_dmrs_cdm_groups, dlsch_config->n_dmrs_cdm_groups);
-      return st;
-    }
-    nr_retry_pred_miss(grant->rnti);
-    *dlsch_config = plain;
-  }
   if (t_recov_mode == 2) {
     /* RECOVERY_ASYNC worker: the consumer's first pass already failed; the arms below each re-demodulate from the IQ snapshot with their own
      * configuration and use nothing of that pass but its FO (the job's FO override) -- so no first body here. */
@@ -6834,102 +4164,19 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   }
   }
   if (out->skip) return st; /* no-chance gate: verdict is final, nothing to retry */
-  if (rp_on && st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && grant->dci11 && grant->rnti_class == 0) nr_retry_pred_miss(grant->rnti);
-  if (t_recov_mode != 2 /* needs the first body's rxdataF */ && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && signal_geom_on() && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg && !t_gw_capture
-      && !t_gw_used && !(t_quiet && !t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && !harq_combine_on()) {
-    uint8_t n_sym = 0;
-    uint16_t mask = 0;
-    if (signal_geom_detect(&ue->frame_parms, dlsch_config, freq_alloc, rxdataF, &n_sym, &mask)) {
-      const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
-      const nr_pdsch_passive_decode_result_t out0 = *out;
-      const bool saved_quiet = t_quiet;
-      const double saved_fo_override = nr_slot_fep_fo_override_hz;
-      nr_slot_fep_fo_override_hz = t_last_fep_fo;
-      t_quiet = true;
-      dlsch_config->number_symbols = n_sym;
-      dlsch_config->dlDmrsSymbPos = (original.dlDmrsSymbPos & ~0x3FFFu) | mask;
-      t_decode_tdra_attempt = 6 + 64 * 50;
-      const nr_pdsch_passive_decode_status_t st2 = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-      if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st2); }
-      if (st2 == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
-        st = st2;
-        out->config_recovered = true;
-      } else { /* the plain decode's result stands (its thread-local LLR view is the retry's, as with ISAC_PDSCH_RETRY_NORESTORE) */
-        *dlsch_config = original;
-        *out = out0;
-      }
-      LOG_I(PHY, "SENSING: SIGGEOM rnti=0x%04x fs=%d.%d nl=%d ports=0x%x cdm=%u mcs=%u S=%u L=%u->%u dmrs=0x%x->0x%x crc=%d\n", grant->rnti,
-            proc->frame_rx, proc->nr_slot_rx, __builtin_popcount(original.dmrs_ports), original.dmrs_ports, original.n_dmrs_cdm_groups,
-            grant->mcs, original.start_symbol, original.number_symbols, n_sym, original.dlDmrsSymbPos & 0x3FFF, mask,
-            st2 == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
-      nr_slot_fep_fo_override_hz = saved_fo_override;
-      t_quiet = saved_quiet;
-      t_decode_tdra_attempt = 0;
-    }
-  }
-  const nr_pdsch_passive_decode_result_t out_plain = *out; /* only read with rn_on */
+  if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && grant->dci11 && grant->rnti_class == 0) nr_retry_pred_miss(grant->rnti);
+  const nr_pdsch_passive_decode_result_t out_plain = *out; 
   const nr_pdsch_passive_decode_status_t st_plain = st;
   /* DECODE-FIX: CRC success for one DCI does not establish the TDRA or
    * CSI-RS exclusions for every later DCI. These default-off recovery arms
    * re-demodulate the SAME samples and accept only a full, nonzero TB CRC.
    * A successful PDU is retained for data-aided reconstruction. */
-  static _Atomic int tdra_retry = -1, csi_retry = -1, cdm_retry = -1, wide_retry = -1, csi_population_retry = -1, tint_retry = -1, opr_retry = -1;
-  if (opr_retry < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_OWN_PDCCH_RM not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_PDSCH_OWN_PDCCH_RM"); /* DECODE-RES: rate-match around the scheduling PDCCH's PRBs on symbol 0 (S=0 grants) */
-    opr_retry = e && atoi(e) != 0;
-  }
-  if (tint_retry < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_TINTERP_RETRY not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_PDSCH_TINTERP_RETRY"); /* DECODE-RES: also try the flipped channel-estimate time interpolation */
-    tint_retry = e && atoi(e) != 0;
-  }
-  if (tdra_retry < 0) {
-    const char *e = (getenv("ISAC_PDSCH_TDRA_RETRY") ?: "1");
-    tdra_retry = e && atoi(e) != 0;
-  }
-  if (csi_retry < 0) {
-    const char *e = (getenv("ISAC_PDSCH_CSI_RETRY") ?: "1");
-    csi_retry = e && atoi(e) != 0;
-  }
-  if (cdm_retry < 0) {
-    const char *e = (getenv("ISAC_PDSCH_DMRS_CDM_RETRY") ?: "1");
-    cdm_retry = e && atoi(e) != 0;
-  }
-  if (wide_retry < 0) {
-    const char *e = (getenv("ISAC_PDSCH_WIDE_MRC_RETRY") ?: "1");
-    wide_retry = e && atoi(e) != 0;
-  }
-  if (csi_population_retry < 0) {
-    const char *e = (getenv("ISAC_PDSCH_CSI_POPULATION_RETRY") ?: "1");
-    csi_population_retry = e && atoi(e) != 0;
-  }
-  /* SYSAN ISAC_PDSCH_RETRY_SNR_MIN_DB=X (default off): no recovery arm when the failed first body's own EVM-SNR is below X dB.
-   * The arms re-read the configuration (S, CSI-RS, CDM, MRC), which cannot fix a grant lost in noise: [MEASURED, DGX replay b,
-   * t26f, 3 runs] chains below 3 dB were 29 % of all recovery chains and 30 % of their decode time, and rescued 2.7 % of them
-   * (22 of 567 rescues). Counted in RETRY_SNR_GATE. */
-  static float s_rsnr = -1000.f;
-  static _Atomic uint64_t s_rsnr_skip, s_rsnr_seen;
-  if (s_rsnr == -1000.f)
-    /* DEFERRED/DO NOT USE: ISAC_PDSCH_RETRY_SNR_MIN_DB not in the frozen config t26zE (2026-10-18); slated for removal */
-    s_rsnr = getenv("ISAC_PDSCH_RETRY_SNR_MIN_DB") ? (float)atof(getenv("ISAC_PDSCH_RETRY_SNR_MIN_DB")) : -999.f;
-  if (s_rsnr > -999.f && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg) {
-    const uint64_t n = atomic_fetch_add_explicit(&s_rsnr_seen, 1, memory_order_relaxed) + 1;
-    if (out->evm_valid && out->evm_pct > 0.f && -20.0 * log10(out->evm_pct / 100.0) < s_rsnr) {
-      const uint64_t k = atomic_fetch_add_explicit(&s_rsnr_skip, 1, memory_order_relaxed) + 1;
-      if (k == 1 || k % 500 == 0)
-        LOG_A(PHY, "SENSING: RETRY_SNR_GATE skipped=%lu of %lu failed first bodies (min %.1f dB)\n", (unsigned long)k, (unsigned long)n, s_rsnr);
-      return st;
-    }
-  }
-  /* ISAC_RA_TDRA_SWEEP=1 (default off): DCI 1_0 in a common search space (RA/TC/P-RNTI) takes its TDRA row from pdsch-ConfigCommon
+  /* DCI 1_0 in a common search space (RA/TC/P-RNTI) takes its TDRA row from pdsch-ConfigCommon
    * (TS 38.214 5.1.2.1.1 Table 5.1.2.1.1-1). An NSA-style SIB1 carries none, so the receiver falls back to default table A
    * (row 0 = S=2 L=12) although the cell's own list is not that table; every such grant then fails the CRC. Re-decode with the other
    * type-A starts S=0..3 ending at symbol 14 (DM-RS re-derived by TS 38.211 Table 7.4.1.1.2-3, 1_0 => pos2). */
-  static _Atomic int ra_sweep = -1;
-  if (ra_sweep < 0) { const char *e = (getenv("ISAC_RA_TDRA_SWEEP") ?: "1"); ra_sweep = e && atoi(e) != 0; }
-  if (ra_sweep && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !grant->dci11 && grant->rnti_class != 0 && grant->rnti_class != 2 && !t_quiet && !t_llr_ovr
-      && !t_gw_capture && !nr_agnostic_v2() && RETRY_ARMS_OK()
+  if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !grant->dci11 && grant->rnti_class != 0 && grant->rnti_class != 2 && !t_quiet && !t_llr_ovr
+      && !t_gw_capture && RETRY_ARMS_OK()
       && dlsch_config->start_symbol + dlsch_config->number_symbols == 14 && (dlsch_config->dlDmrsSymbPos & 0x3FFFu)) {
     if (t_recov_mode == 1) { /* RECOVERY_ASYNC: the sweep runs on the worker; the failed first pass stands (GrantWork owners are abandoned by the caller) */
       t_recov_deferred = true;
@@ -6971,10 +4218,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
     t_decode_tdra_attempt = 0;
     return st;
   }
-  /* Fix A (ISAC_PDSCH_TDA_FIELD=1, default off): a grant in a TDD mixed slot carries a second legal (S,L) row (nr_tda_field_rows: SIB1 row picked by the
+  /* Fix A (ISAC_PDSCH_TDA_FIELD=1): a grant in a TDD mixed slot carries a second legal (S,L) row (nr_tda_field_rows: SIB1 row picked by the
    * DCI's TDRA field, else the other legal row). Re-decode with it; the first CRC pass is kept. Logs TDAFIELD. */
   if (grant->tda_n > 1 && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg && !t_gw_capture && !t_gw_used
-      && !(t_quiet && !t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && RETRY_ARMS_OK() && (dlsch_config->dlDmrsSymbPos & 0x3FFFu)) {
+      && !t_quiet && !t_llr_ovr && RETRY_ARMS_OK() && (dlsch_config->dlDmrsSymbPos & 0x3FFFu)) {
     if (t_recov_mode == 1) { /* RECOVERY_ASYNC: runs on the worker; the failed first pass stands */
       t_recov_deferred = true;
       return st;
@@ -7008,22 +4255,21 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
     t_decode_tdra_attempt = 0;
     if (ok) return st;
   }
-  if ((!tdra_retry && !csi_retry && !cdm_retry && !wide_retry && !csi_population_retry && !tint_retry && !opr_retry && !s_scsi_on()) || st != NR_PDSCH_PASSIVE_DECODE_CRC_FAIL
-      || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_gw_used || (t_quiet && !t_qam_ab_alt) || t_llr_ovr
-      || nr_agnostic_v2() || !RETRY_ARMS_OK())
+  if (st != NR_PDSCH_PASSIVE_DECODE_CRC_FAIL || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_gw_used || t_quiet
+      || t_llr_ovr || !RETRY_ARMS_OK())
     return st;
-  if (t_recov_mode == 1 && !t_qam_ab_alt) { /* RECOVERY_ASYNC: every arm below runs on the worker; the failed first pass stands */
+  if (t_recov_mode == 1) { /* RECOVERY_ASYNC: every arm below runs on the worker; the failed first pass stands */
     t_recov_deferred = true;
     return st;
   }
-  const bool try_start = tdra_retry && dlsch_config->start_symbol <= 1
+  const bool try_start = dlsch_config->start_symbol <= 1
                          && dlsch_config->start_symbol + dlsch_config->number_symbols == 14;
-  const bool try_cdm = cdm_retry && dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1
+  const bool try_cdm = dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1
                        && dlsch_config->dmrs_ports && !(dlsch_config->dmrs_ports & ~3u)
                        && (dlsch_config->n_dmrs_cdm_groups == 1 || dlsch_config->n_dmrs_cdm_groups == 2);
   fapi_nr_dl_config_dlsch_pdu_rel15_t alternate_csi = *dlsch_config;
   bool try_csi = false;
-  if (csi_retry && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !t_probe_first_seg && !t_quiet) {
+  if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !t_probe_first_seg && !t_quiet) {
     if (alternate_csi.numCsiRsForRateMatching > 0) {
       alternate_csi.numCsiRsForRateMatching = 0;
       try_csi = true;
@@ -7037,7 +4283,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   fapi_nr_dl_config_dlsch_pdu_rel15_t csi_variants[3];
   csi_variants[0] = alternate_csi;
   int n_csi_variants = 1;
-  if (csi_population_retry) {
+  {
     /* Discovery sees several cells. A union of their resources is not this
      * UE's rate-matching configuration. Try a same-ID subset independently.
      * Its detected bandwidth can also stop before the configured edge: a
@@ -7067,46 +4313,42 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
       if (changed) n_csi_variants = 3;
     }
   }
-  const bool try_wide = wide_retry && dlsch_config->cw_info[0].Nl == 1
+  const bool try_wide = dlsch_config->cw_info[0].Nl == 1
                         && dlsch_config->cw_info[0].qamModOrder == 2;
-  const bool try_tint = tint_retry && t_tinterp_override < 0; /* a nested AB arm already flips it */
 
-  if (try_start || try_csi || try_cdm || try_wide || try_tint || n_csi_variants > 1) {
+  if (try_start || try_csi || try_cdm || try_wide || n_csi_variants > 1) {
     const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
     const bool saved_quiet = t_quiet;
-    const int saved_tint = t_tinterp_override; /* a TINT_AB arm's choice must survive its recovery arms */
     const double saved_fo_override = nr_slot_fep_fo_override_hz;
     nr_slot_fep_fo_override_hz = t_last_fep_fo; /* same frequency compensation for paired trials */
     t_quiet = true; /* do not teach unrelated parameter sweeps from these trials */
     bool recovered = false, yielded = false;
-    const int ry = retry_yield_mode();
     int ry_bodies = 0;
-    if (ry) atomic_fetch_add_explicit(&g_ry_chains, 1, memory_order_relaxed);
-    /* Bits 0..4 select CSI-RS, S=0/1, CDM groups, wide MRC, and flipped time interpolation (DECODE-RES).
+    atomic_fetch_add_explicit(&g_ry_chains, 1, memory_order_relaxed);
+    /* Bits 0..3 select CSI-RS, S=0/1, CDM groups and wide MRC.
      * Type-1 ports 0/1 occupy CDM group 0; either one or two groups is legal. */
     for (int cv = 0; cv < n_csi_variants && !recovered && !yielded; cv++) {
-      for (int a = 1; a <= (try_tint ? 31 : 15) && !recovered; a++) {
-        const int arm = (ry || t_recov_mode == 2) && cv == 0 && a <= 2 ? 3 - a : a; /* RETRY_YIELD / worker: the S toggle (arm 2) first */
+      for (int a = 1; a <= 15 && !recovered; a++) {
+        const int arm = cv == 0 && a <= 2 ? 3 - a : a; /* the S toggle (arm 2) first */
         if (cv > 0 && !(arm & 1)) continue;
         if (((arm & 1) && cv == 0 && !try_csi) || ((arm & 2) && !try_start)
-            || ((arm & 4) && !try_cdm) || ((arm & 8) && !try_wide) || ((arm & 16) && !try_tint))
+            || ((arm & 4) && !try_cdm) || ((arm & 8) && !try_wide))
           continue;
         const int ry_k = (arm + 32 * cv) % RY_ARMS;
-        if (ry == 2 && !ry_arm_worth(ry_k))
+        if (!ry_arm_worth(ry_k))
           continue;
         if (t_recov_mode == 2 && !ry_wait_idle()) {
           yielded = true; /* first-pass work is waiting: the rest of this grant's arms are dropped (counted) */
           atomic_fetch_add_explicit(&g_ry_yields, 1, memory_order_relaxed);
           break;
         }
-        if (ry && t_recov_mode != 2 && !(cv == 0 && arm == 2)
-            && (ry_backlog() > 0 || (retry_budget_us() && dec_now_ns() - t_dec_t0_ns > (uint64_t)retry_budget_us() * 1000ull))) {
+        if (t_recov_mode != 2 && !(cv == 0 && arm == 2)
+            && (ry_backlog() > 0 || dec_now_ns() - t_dec_t0_ns > RETRY_BUDGET_NS)) {
           yielded = true; /* a full decode waits for a consumer: stop this grant's long-shot arms */
           atomic_fetch_add_explicit(&g_ry_yields, 1, memory_order_relaxed);
           break;
         }
         ry_bodies++;
-        t_tinterp_override = (arm & 16) ? !chest_tinterp_global() : saved_tint;
         *dlsch_config = original;
         if (arm & 1) *dlsch_config = csi_variants[cv];
         if (arm & 2) {
@@ -7123,11 +4365,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
           nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st);
         }
         recovered = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
-        if (ry) {
-          atomic_fetch_add_explicit(&g_ry_try[ry_k], 1, memory_order_relaxed);
-          if (recovered) atomic_fetch_add_explicit(&g_ry_ok[ry_k], 1, memory_order_relaxed);
-        }
-        if (rp_on && recovered) {
+        atomic_fetch_add_explicit(&g_ry_try[ry_k], 1, memory_order_relaxed);
+        if (recovered) atomic_fetch_add_explicit(&g_ry_ok[ry_k], 1, memory_order_relaxed);
+        if (recovered) {
           if (arm == 2 && cv == 0) nr_retry_pred_hit(grant->rnti);
           else nr_retry_pred_miss(grant->rnti);
         }
@@ -7139,184 +4379,17 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
           dlsch_config->start_symbol, dlsch_config->number_symbols, dlsch_config->numCsiRsForRateMatching, original.n_dmrs_cdm_groups, dlsch_config->n_dmrs_cdm_groups,
           t_decode_tdra_attempt);
     nr_pdsch_decode_wide_mrc = false;
-    t_tinterp_override = saved_tint;
-    if (!recovered && (!ry || ry_bodies > 0) && t_recov_mode != 2) {
+    if (!recovered && ry_bodies > 0 && t_recov_mode != 2) {
       /* Restore the public result AND the thread-local decoder/LLR view
        * used by the queue's diagnostics and equivalence checks. */
       *dlsch_config = original;
-      if (rn_on) {
-        *out = out_plain;
-        st = st_plain;
-      } else {
-        t_decode_tdra_attempt = 32;
-        st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-        if (t_gw_owner) {
-          t_gw_owner = false;
-          nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st);
-        }
-      }
+      *out = out_plain;
+      st = st_plain;
     }
     out->config_recovered = recovered;
     nr_slot_fep_fo_override_hz = saved_fo_override;
     t_quiet = saved_quiet;
     t_decode_tdra_attempt = 0;
-  }
-  /* DECODE-RES item 2: the full-band non-TRS CSI-RS of this network (static_csi_resources) rate-matched on a failed grant of those four slot phases. Tried with the
-   * grant's S and, when legal, the toggled S; the first CRC pass is kept. Logs STATICCSI. */
-  static _Atomic int s_scsi = -1;
-  /* DEFERRED/DO NOT USE: ISAC_PDSCH_STATIC_CSI_RETRY not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (s_scsi < 0) s_scsi = getenv("ISAC_PDSCH_STATIC_CSI_RETRY") && atoi(getenv("ISAC_PDSCH_STATIC_CSI_RETRY")) ? 1 : 0;
-  if (s_scsi && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg && !t_gw_capture && !t_gw_used
-      && (!t_quiet || t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && RETRY_ARMS_OK() && grant->source_absolute_slot >= 0) {
-    if (t_recov_mode == 1 && !t_qam_ab_alt) { t_recov_deferred = true; return st; } /* async lane only */
-    fapi_nr_dl_config_dlsch_pdu_rel15_t probe_cfg = *dlsch_config;
-    if (static_csi_resources(&probe_cfg, grant->source_absolute_slot) > 0) {
-      const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
-      const bool saved_quiet = t_quiet;
-      const double saved_fo_override = nr_slot_fep_fo_override_hz;
-      nr_slot_fep_fo_override_hz = t_last_fep_fo;
-      t_quiet = true;
-      bool ok = false;
-      const bool toggle = original.start_symbol <= 1 && original.start_symbol + original.number_symbols == 14;
-      for (int v = 0; v < (toggle ? 2 : 1) && !ok; v++) {
-        fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = original;
-        if (v) { cfg.start_symbol = 1 - original.start_symbol; cfg.number_symbols = 14 - cfg.start_symbol; }
-        static_csi_resources(&cfg, grant->source_absolute_slot);
-        t_decode_tdra_attempt = 5 + 64 * (60 + v);
-        st = passive_decode_body(ue, proc, &cfg, freq_alloc, grant, rxdataF, out);
-        if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
-        if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) { ok = true; *dlsch_config = cfg; }
-      }
-      LOG_I(PHY, "SENSING: STATICCSI rnti=0x%04x fs=%d.%d abs=%ld phase=%ld S=%u L=%u rb=%u+%u ok=%d\n", grant->rnti, proc->frame_rx, proc->nr_slot_rx,
-            grant->source_absolute_slot, grant->source_absolute_slot % 160, original.start_symbol, original.number_symbols, freq_alloc->first_rb,
-            freq_alloc->num_rbs, ok);
-      if (!ok) {
-        *dlsch_config = original;
-        t_decode_tdra_attempt = 32;
-        st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-        if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
-      } else {
-        out->config_recovered = true;
-      }
-      nr_slot_fep_fo_override_hz = saved_fo_override;
-      t_quiet = saved_quiet;
-      t_decode_tdra_attempt = 0;
-    }
-  }
-  /* DECODE-RES own-PDCCH rate matching, strictly after every other arm (so a pass here is a gain over them on identical samples). Only for a grant that can be
-   * S=0/L=14 (S=0 as parsed, or the S=1/L=13 alias of it), contiguous, with no SSB event in the slot (the exclusion reuses the SSB plan). Decode the S=0 reading
-   * plainly, read its per-RB symbol-0 error map, then try the detected PRB run (and its +-1 PRB edges) as excluded PRBs. */
-  bool try_own = opr_retry && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !t_own_pdcch.on && dlsch_config->start_symbol <= 1 && dlsch_config->start_symbol + dlsch_config->number_symbols == 14
-                 && freq_alloc->num_rbs >= 1 && freq_alloc->last_rb - freq_alloc->first_rb + 1 == freq_alloc->num_rbs
-                 && !(dlsch_config->pduBitmap & 1) && !nr_ssb_rm_candidates(&ue->frame_parms, proc->nr_slot_rx, 0, 14);
-  if (try_own) {
-    const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
-    const bool saved_quiet = t_quiet;
-    const double saved_fo_override = nr_slot_fep_fo_override_hz;
-    nr_slot_fep_fo_override_hz = t_last_fep_fo;
-    t_quiet = true;
-    bool recovered = false;
-    static __thread uint8_t hyp[8][276];
-    int run_a = -1, run_b = -1, nh = 0, n_try = 0, won = -1;
-    fapi_nr_dl_config_dlsch_pdu_rel15_t s0cfg = original;
-    s0cfg.start_symbol = 0;
-    s0cfg.number_symbols = 14;
-    t_decode_tdra_attempt = 2 + 64 * 40; /* P0 baseline: S=0 reading, no exclusion */
-    st = passive_decode_body(ue, proc, &s0cfg, freq_alloc, grant, rxdataF, out);
-    if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
-    if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
-      recovered = true;
-      *dlsch_config = s0cfg;
-    } else {
-      nh = own_pdcch_hypotheses(&nr_pdsch_evm_acc, (int)freq_alloc->num_rbs, hyp, 8, &run_a, &run_b);
-    }
-    for (int h = 0; h < nh && !recovered; h++) {
-      fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = s0cfg;
-      t_own_pdcch.on = 1;
-      t_own_pdcch.symbols = 1; /* symbol 0 (duration-1 CORESET) */
-      memset(t_own_pdcch.crb, 0, sizeof(t_own_pdcch.crb));
-      t_own_pdcch.first_crb = 274; t_own_pdcch.last_crb = 0;
-      for (int r = 0; r < (int)freq_alloc->num_rbs; r++) {
-        const int crb = (int)cfg.BWPStart + (int)freq_alloc->first_rb + r;
-        if (hyp[h][r] && crb < 275) {
-          t_own_pdcch.crb[crb] = 1;
-          if (crb < t_own_pdcch.first_crb) t_own_pdcch.first_crb = crb;
-          if (crb > t_own_pdcch.last_crb) t_own_pdcch.last_crb = crb;
-        }
-      }
-      nr_ssb_rm_only_crb = t_own_pdcch.crb;
-      t_decode_tdra_attempt = 3 + 64 * (41 + h);
-      n_try++;
-      st = passive_decode_body(ue, proc, &cfg, freq_alloc, grant, rxdataF, out);
-      nr_ssb_rm_only_crb = NULL;
-      t_own_pdcch.on = 0;
-      if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
-      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
-        recovered = true;
-        won = h;
-        *dlsch_config = cfg;
-      }
-    }
-    t_own_pdcch.on = 0;
-    if (nh > 0 || recovered)
-      {
-        char wb[300]; int u = 0;
-        for (int r = 0; won >= 0 && r < (int)freq_alloc->num_rbs && u < 280; r++) wb[u++] = hyp[won][r] ? '1' : '0';
-        wb[u] = 0;
-        LOG_I(PHY, "SENSING: OWNPDCCH rnti=0x%04x fs=%d.%d abs=%ld S0=%u rb=%u+%u run=[%d,%d] hyp=%d tried=%d ok=%d win=%d first_crb=%u map=%s\n",
-              grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, original.start_symbol, freq_alloc->first_rb, freq_alloc->num_rbs,
-              run_a, run_b, nh, n_try, recovered, won >= 0 ? won : -1, (unsigned)(original.BWPStart + freq_alloc->first_rb), wb);
-      }
-    nr_slot_fep_fo_override_hz = saved_fo_override;
-    t_quiet = saved_quiet;
-    t_decode_tdra_attempt = 0;
-    if (recovered)
-      out->config_recovered = true;
-  }
-  /* WIDE-S0 ISAC_PDSCH_PDCCH_RM=2 (paired diagnostic/recovery arm): strictly after every other arm, re-decode the same samples with the scheduling
-   * PDCCH's REs excluded (TS 38.214 5.1.4.1), as parsed and, for an S=1/L=13 parse, as the S=0/L=14 TDRA alias. A pass is a gain on identical
-   * samples over every other arm. Logged as PDCCHRM. The exclusion is the SSB plan's second layer (nr_ssb_rm_extra), so SSB slots are covered. */
-  if (pdcch_rm_mode() == 2 && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->pdcch_nsym && !t_own_pdcch.on) {
-    const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
-    const bool saved_quiet = t_quiet;
-    const double saved_fo_override = nr_slot_fep_fo_override_hz;
-    nr_slot_fep_fo_override_hz = t_last_fep_fo;
-    t_quiet = true;
-    int tried = 0, won = -1;
-    for (int h = 0; h < 2 && won < 0; h++) {
-      fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = original;
-      if (h == 1) {
-        if (!(original.start_symbol == 1 && original.number_symbols == 13))
-          break;
-        cfg.start_symbol = 0;
-        cfg.number_symbols = 14;
-      }
-      if (!pdcch_rm_arm(&cfg, freq_alloc, grant))
-        continue;
-      tried++;
-      t_decode_tdra_attempt = 4 + 64 * (60 + h);
-      st = passive_decode_body_core(ue, proc, &cfg, freq_alloc, grant, rxdataF, out);
-      rm_disarm();
-      if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
-      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
-        won = h;
-        *dlsch_config = cfg;
-      }
-    }
-    if (tried) {
-      if (won < 0) st = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
-      int pf = -1, pl = -1, pn = 0; /* the scheduling PDCCH's common RBs (whole carrier) for the log */
-      for (int c = 0; c < 275; c++)
-        if ((grant->pdcch_crb[c >> 3] >> (c & 7)) & 1) { if (pf < 0) pf = c; pl = c; pn++; }
-      LOG_I(PHY, "SENSING: PDCCHRM rnti=0x%04x fs=%d.%d abs=%ld S=%u L=%u rb=%u+%u tried=%d ok=%d win=%d pdcch=%d-%d/%d sym=%u+%u\n", grant->rnti,
-            proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, original.start_symbol, original.number_symbols, freq_alloc->first_rb,
-            freq_alloc->num_rbs, tried, won >= 0, won, pf, pl, pn, grant->pdcch_sym0, grant->pdcch_nsym);
-    }
-    nr_slot_fep_fo_override_hz = saved_fo_override;
-    t_quiet = saved_quiet;
-    t_decode_tdra_attempt = 0;
-    if (won >= 0)
-      out->config_recovered = true;
   }
   return st;
 }
@@ -7339,7 +4412,6 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
 }
 
 /* ---- GRANTWORK API (nr_pdsch_passive_decode.h) ---------------------------------------------------- */
-static uint32_t equiv_diff(const int16_t *a, const int16_t *b, uint32_t n, uint32_t *first, int *maxd);
 void nr_pdsch_passive_set_grantwork(nr_td_grantwork_t *gw, bool probes_too)
 {
   t_gw = gw;
@@ -7386,7 +4458,7 @@ static int gw_compute(void *vctx, nr_td_grantwork_t *gw, uint64_t sig, const voi
   pdu.dlDmrsSymbPos = (c->pdu.dlDmrsSymbPos & ~0x3FFFu) | g.dmrs_mask;
 
   nr_td_grantwork_t *const s_gw = t_gw;
-  const bool s_cap = t_gw_capture, s_probe = t_probe_first_seg, s_ptrs = t_ptrs_sweep_allow, s_quiet = t_quiet;
+  const bool s_cap = t_gw_capture, s_probe = t_probe_first_seg, s_quiet = t_quiet;
   const bool s_owner = t_gw_owner;
   const uint64_t s_sig = t_gw_sig;
   const int16_t *const s_ovr = t_llr_ovr;
@@ -7395,7 +4467,6 @@ static int gw_compute(void *vctx, nr_td_grantwork_t *gw, uint64_t sig, const voi
   t_gw = gw;
   t_gw_capture = true;
   t_probe_first_seg = false;
-  t_ptrs_sweep_allow = false;
   t_quiet = true;
   t_llr_ovr = NULL;
   t_llr_ovr_n = 0;
@@ -7407,7 +4478,6 @@ static int gw_compute(void *vctx, nr_td_grantwork_t *gw, uint64_t sig, const voi
   t_gw = s_gw;
   t_gw_capture = s_cap;
   t_probe_first_seg = s_probe;
-  t_ptrs_sweep_allow = s_ptrs;
   t_quiet = s_quiet;
   t_gw_owner = s_owner;
   t_gw_sig = s_sig;
@@ -7546,14 +4616,8 @@ int nr_pdsch_passive_gw_cb0(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypothesis
       return NR_TD_GW_E_NOMEM;
   }
   /* C1 (K38): the shared LLRs are not normalised; this hypothesis's own shift, over its own ceil(G/C). */
-  static _Atomic int s_norm = -1;
-  if (s_norm < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_LLR_NORM not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_LLR_NORM");
-    s_norm = (e && atoi(e) == 0) ? 0 : 1;
-  }
   int k = -1;
-  r2 = nr_td_gw_cb0_input(v.llr, v.G, &p, s_norm != 0, out->e0, out->d, &k);
+  r2 = nr_td_gw_cb0_input(v.llr, v.G, &p, true, out->e0, out->d, &k);
   if (r2 != NR_TD_GW_OK)
     return r2;
   out->p = p;
@@ -7603,14 +4667,8 @@ int nr_pdsch_passive_gw_cb0_item(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypot
     return r2;
   if (flags)
     *flags |= hflags;
-  static _Atomic int s_norm = -1;
-  if (s_norm < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_LLR_NORM not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_LLR_NORM");
-    s_norm = (e && atoi(e) == 0) ? 0 : 1;
-  }
   int k = 0;
-  if (s_norm != 0 && v.G >= 64)
+  if (v.G >= 64)
     k = nr_llr_norm_shift(v.llr, nr_llr_norm_span(v.G, nr_llr_norm_num_cb(p.A, p.BG)));
   memset(it, 0, sizeof(*it));
   it->llr = v.llr;
@@ -7715,416 +4773,11 @@ bool nr_pdsch_passive_gw_cb0_decode(const nr_pdsch_gw_cb0_t *cb, bool *ldpc_ok)
   return ok;
 }
 
-/* The geometry hypothesis a decoded PDU describes (pristine gw PDU): what the queue decoded for this grant. */
-static nr_pdsch_cfg_hypothesis_t gw_hyp_of(const gw_ctx_t *c)
-{
-  nr_pdsch_cfg_hypothesis_t h = {0};
-  h.tda_start = (uint8_t)c->pdu.start_symbol;
-  h.tda_length = (uint8_t)c->pdu.number_symbols;
-  h.k0 = c->k0;
-  h.dmrs_mask = (uint16_t)(c->pdu.dlDmrsSymbPos & 0x3FFF);
-  h.mcs_table = c->grant.mcs_table;
-  return h;
-}
 
-/* ---- GW_EQUIV (ISAC_TD_GW_CHECK=N, debug, default off): 1 main decode in N that went through GrantWork is
- * decoded twice more, quietly (no HARQ, no feeds, no latches): (b) with the gw attached -- the READY path --
- * and (c) without it, with the FEP / chest caches dropped -- today's path. TB LLRs (all G) and the TB CRC of
- * (a) the original, (b) and (c) must agree; then CB0 of the same hypothesis is extracted from the gw and
- * compared with what (c)'s segment decoder de-matched for r = 0, and decoded on the CPU against (c)'s CB0
- * verdict. The CRC comparison skips a decode (a) that combined a HARQ retransmission. Call after every use
- * of the first decode's TB (the reruns overwrite the private HARQ buffers). */
-void nr_pdsch_passive_gw_check(nr_td_grantwork_t *gw, nr_pdsch_passive_decode_status_t st_a)
-{
-  static _Atomic int s_on = -1;
-  if (s_on < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_TD_GW_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_TD_GW_CHECK");
-    s_on = e ? atoi(e) : 0;
-  }
-  static _Atomic uint64_t s_seen, s_n, s_llr_bad_b, s_llr_bad_c, s_crc_bad, s_cb0_d_bad, s_cb0_llr_bad, s_cb0_crc_bad,
-      s_cb0_n, s_not_ready, s_skip, s_cb0_sib;
-  if (s_on <= 0 || gw == NULL || t_probe_first_seg || !t_gw_used || t_last_llr == NULL || t_last_G == 0
-      || (st_a != NR_PDSCH_PASSIVE_DECODE_CRC_OK && st_a != NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
-    return;
-  if ((atomic_fetch_add(&s_seen, 1) % (uint64_t)s_on) != 0)
-    return;
-  const gw_ctx_t *c = (const gw_ctx_t *)nr_td_grantwork_ctx(gw);
-  const uint32_t G = t_last_G;
-  const bool hq_a = t_last_hq_retx;
-  static __thread int16_t *a = NULL, *b = NULL;
-  static __thread uint32_t cap = 0;
-  if (cap < G) {
-    free(a);
-    free(b);
-    a = malloc((size_t)G * sizeof(int16_t));
-    b = malloc((size_t)G * sizeof(int16_t));
-    cap = (a && b) ? G : 0;
-    if (!cap)
-      return;
-  }
-  memcpy(a, t_last_llr, (size_t)G * sizeof(int16_t));
-  const uint32_t stride = c->ue->frame_parms.samples_per_slot_wCP;
-  c16_t(*rxF)[stride] = (c16_t(*)[stride])nr_td_grantwork_fep(gw);
-  nr_td_grantwork_t *const s_gw = t_gw;
-  const double s_fo = nr_slot_fep_fo_override_hz;
-  nr_slot_fep_fo_override_hz = c->fo_hz;
-  t_quiet = true;
-  /* (b) READY path */
-  fapi_nr_dl_config_dlsch_pdu_rel15_t pdu = c->pdu;
-  nr_pdsch_passive_decode_result_t r;
-  t_gw = gw;
-  const nr_pdsch_passive_decode_status_t st_b = nr_pdsch_passive_decode(c->ue, &c->proc, &pdu, &c->fa, &c->grant, rxF, &r);
-  const bool b_ready = t_gw_ready;
-  const uint32_t Gb = t_last_G;
-  if (t_last_llr && Gb == G)
-    memcpy(b, t_last_llr, (size_t)G * sizeof(int16_t));
-  /* (c) today's path, caches dropped */
-  t_gw = NULL;
-  t_fep_cache.valid = 0;
-  t_chest_cache.valid = 0;
-  pdu = c->pdu;
-  t_cap_req = true;
-  t_cap_have = false;
-  const nr_pdsch_passive_decode_status_t st_c = nr_pdsch_passive_decode(c->ue, &c->proc, &pdu, &c->fa, &c->grant, rxF, &r);
-  t_cap_req = false;
-  const uint32_t Gc = t_last_G;
-  t_quiet = false;
-  t_gw = s_gw;
-  t_fep_cache.valid = 0;
-  nr_slot_fep_fo_override_hz = s_fo;
-  if (!b_ready || Gb != G || Gc != G || t_last_llr == NULL) {
-    const uint64_t k = atomic_fetch_add(&s_not_ready, 1);
-    if (k < 5)
-      LOG_A(PHY, "SENSING: GW_EQUIV skipped: ready=%d G a/b/c=%u/%u/%u st b/c=%d/%d\n", b_ready, G, Gb, Gc, st_b, st_c);
-    return;
-  }
-  uint32_t first_b, first_c;
-  int maxd_b, maxd_c;
-  const uint32_t bad_b = equiv_diff(a, b, G, &first_b, &maxd_b);
-  const uint32_t bad_c = equiv_diff(a, t_last_llr, G, &first_c, &maxd_c);
-  const bool crc_cmp = !hq_a;
-  const bool crc_bad = crc_cmp && (st_a != st_b || st_a != st_c);
-  /* CB0 of the same hypothesis from the gw vs (c)'s segment decoder */
-  uint32_t cb0_d_bad = 0, cb0_llr_bad = 0, cb0_E = 0, cb0_flags = 0;
-  int cb0_rc = -100, cb0_crc = -1, seg0 = -1, cb0_C = 0, cb0_k = -1;
-  if (t_cap_have) {
-    const nr_pdsch_cfg_hypothesis_t h = gw_hyp_of(c);
-    static __thread nr_pdsch_gw_cb0_t cb = {0};
-    const int16_t *llr_c = t_last_llr; /* still (c)'s buffer: the extraction does not decode */
-    cb0_rc = nr_pdsch_passive_gw_cb0(gw, &h, &cb);
-    if (cb0_rc == NR_TD_GW_OK) {
-      cb0_C = cb.p.C;
-      cb0_E = cb.p.E;
-      cb0_k = cb.norm_k;
-      cb0_flags = cb.flags;
-      const uint32_t N = (uint32_t)(cb.p.BG == 1 ? 66 : 50) * (uint32_t)cb.p.Z;
-      for (uint32_t i = 0; i < N && i < t_cap_dlen; i++)
-        cb0_d_bad += cb.d[i] != t_cap_d[i];
-      for (uint32_t i = 0; i < cb.p.E; i++)
-        cb0_llr_bad += cb.llr[i] != llr_c[i];
-      bool ldpc_ok;
-      (void)nr_pdsch_passive_gw_cb0_decode(&cb, &ldpc_ok);
-      cb0_crc = ldpc_ok;
-      seg0 = t_cap_seg0_ok;
-      atomic_fetch_add(&s_cb0_n, 1);
-      atomic_fetch_add(&s_cb0_d_bad, cb0_d_bad != 0);
-      atomic_fetch_add(&s_cb0_llr_bad, cb0_llr_bad != 0);
-      /* A full decode aborts every segment once one fails (shared decode_abort_t): CB0 of a failed TB can read
-       * "fail" there although it converges alone. Counted apart; the probe arm (PROBE_EQUIV_GW) compares
-       * against a CB0-only decode, which has no sibling. */
-      const bool sib = cb0_crc == 1 && seg0 == 0 && st_c == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
-      atomic_fetch_add(&s_cb0_sib, sib);
-      atomic_fetch_add(&s_cb0_crc_bad, cb0_crc != seg0 && !sib);
-    }
-  } else {
-    atomic_fetch_add(&s_skip, 1);
-  }
-  const uint64_t n = atomic_fetch_add(&s_n, 1) + 1;
-  const uint64_t nb = atomic_fetch_add(&s_llr_bad_b, bad_b != 0) + (bad_b != 0);
-  const uint64_t nc = atomic_fetch_add(&s_llr_bad_c, bad_c != 0) + (bad_c != 0);
-  const uint64_t ncrc = atomic_fetch_add(&s_crc_bad, crc_bad) + crc_bad;
-  LOG_A(PHY,
-        "SENSING: GW_EQUIV n=%lu llr_mismatch ready=%lu today=%lu crc_mismatch=%lu | cb0 n=%lu d_mismatch=%lu "
-        "llr_mismatch=%lu crc_mismatch=%lu sibling_abort=%lu not_ready=%lu | this: rnti=0x%x nl=%u G=%u st a/b/c=%d/%d/%d hq=%d "
-        "diff b=%u c=%u (max %d/%d) cb0 rc=%d C=%d E=%u k=%d d_diff=%u llr_diff=%u crc cpu/seg=%d/%d full_decoder=%d flags=0x%x unified=%d\n",
-        (unsigned long)n, (unsigned long)nb, (unsigned long)nc, (unsigned long)ncrc, (unsigned long)atomic_load(&s_cb0_n),
-        (unsigned long)atomic_load(&s_cb0_d_bad), (unsigned long)atomic_load(&s_cb0_llr_bad),
-        (unsigned long)atomic_load(&s_cb0_crc_bad), (unsigned long)atomic_load(&s_cb0_sib),
-        (unsigned long)atomic_load(&s_not_ready), c->grant.rnti,
-        (unsigned)__builtin_popcount(c->pdu.dmrs_ports & 0xFFF), G, st_a, st_b, st_c, hq_a, bad_b, bad_c, maxd_b, maxd_c,
-        cb0_rc, cb0_C, cb0_E, cb0_k, cb0_d_bad, cb0_llr_bad, cb0_crc, seg0, t_cap_decoder, cb0_flags, nr_td_gw_unified());
-}
-
-/* ISAC_TD_GW_PROFILE=1 (default off): after every main decode that went through GrantWork, CB0-decode the
- * same grant under each MCS table (the hypotheses a cold search carries for it): equal Qm -> the shared
- * entry (HIT), other Qm -> one more shared computation; rate de-match + CPU LDPC per hypothesis. The
- * GWTIM line reports both costs. Quiet: nothing is fed back. */
-void nr_pdsch_passive_gw_profile(nr_td_grantwork_t *gw, bool used)
-{
-  static _Atomic int s_on = -1;
-  if (s_on < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_TD_GW_PROFILE not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_TD_GW_PROFILE");
-    s_on = (e && atoi(e) != 0) ? 1 : 0;
-  }
-  if (!s_on || gw == NULL || !used)
-    return;
-  const gw_ctx_t *c = (const gw_ctx_t *)nr_td_grantwork_ctx(gw);
-  static __thread nr_pdsch_gw_cb0_t cb = {0};
-  nr_pdsch_cfg_hypothesis_t h = gw_hyp_of(c);
-  for (int t = 0; t < 3; t++) {
-    h.mcs_table = (uint8_t)t;
-    if (nr_pdsch_passive_gw_cb0(gw, &h, &cb) == NR_TD_GW_OK)
-      (void)nr_pdsch_passive_gw_cb0_decode(&cb, NULL);
-  }
-}
-
-/* ---- PROBE == FULL CHECK (ISAC_TD_PROBE_EQUIV_CHECK=1|2, debug, default off; K32 / spec V2) -----
- * A probe FAIL may only count as evidence against a hypothesis if the probe computed what the full
- * decode would have: code block 0's LLRs must be the same numbers. On 1 probed grant in 50 the same
- * hypothesis is decoded again with the probe horizon off and the chest cache bypassed -- a cache-free
- * whole-slot reference -- and the two CB0 LLR vectors (descrambled, the decoder's input) are compared
- * element-wise. Every rerun stays in probe mode (CB0-only LDPC): no HARQ, no TB, no feedback.
- *
- * =2 adds the CACHE-HIT arm (K32's own scenario: a probe fills the slot's chest cache, a later decode
- * of the slot hits it), run FIRST so the decoder's working buffer still holds an older slot's
- * estimate. A single-grant slot never shares, so the slot share is forced on for this grant alone:
- * (1) the probe again, cache on -> fills the cache; (2) a whole-slot decode, cache on -> hits it;
- * (3) the reference. (2) and (3) are compared over ALL G LLRs: a truncated or post-processed cached
- * estimate shows on the symbols after the probe horizon, not in code block 0. */
-static bool equiv_rerun(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
-                        const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant,
-                        c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], bool no_horizon, bool bypass)
-{
-  fapi_nr_dl_config_dlsch_pdu_rel15_t pdu = *cfg;
-  nr_pdsch_passive_decode_result_t dec = {0};
-  t_probe_no_horizon = no_horizon;
-  t_chest_bypass = bypass;
-  const nr_pdsch_passive_decode_status_t st = nr_pdsch_passive_decode(ue, proc, &pdu, fa, grant, rxdataF, &dec);
-  t_probe_no_horizon = t_chest_bypass = false;
-  return st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED && t_last_llr != NULL && t_last_G;
-}
-
-static uint32_t equiv_diff(const int16_t *a, const int16_t *b, uint32_t n, uint32_t *first, int *maxd)
-{
-  uint32_t bad = 0;
-  *first = UINT32_MAX;
-  *maxd = 0;
-  for (uint32_t i = 0; i < n; i++)
-    if (a[i] != b[i]) {
-      if (!bad)
-        *first = i;
-      bad++;
-      const int d = abs((int)a[i] - (int)b[i]);
-      if (d > *maxd)
-        *maxd = d;
-    }
-  return bad;
-}
-
-static void probe_equiv_check_body(PHY_VARS_NR_UE *ue,
-                                   const UE_nr_rxtx_proc_t *proc,
-                                   const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
-                                   const freq_alloc_bitmap_t *freq_alloc,
-                                   const nr_pdsch_passive_grant_t *grant,
-                                   c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                   nr_td_grantwork_t *gw_h)
-{
-  static _Atomic int s_on = -1; /* _Atomic: N consumers */
-  if (s_on < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_TD_PROBE_EQUIV_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_TD_PROBE_EQUIV_CHECK");
-    s_on = (e != NULL) ? atoi(e) : 0; /* 1: probe vs full; 2: also the cache-hit arm */
-  }
-  if (s_on <= 0 || !t_probe_first_seg || t_last_llr == NULL || t_seg_E == 0 || t_seg_E > t_last_G)
-    return;
-  static _Atomic uint64_t s_seen = 0, s_n = 0, s_bad = 0, s_el = 0, s_el_bad = 0, s_skip = 0;
-  static _Atomic uint64_t s_hn = 0, s_hbad = 0, s_hel = 0, s_hel_bad = 0, s_hskip = 0;
-  if ((atomic_fetch_add(&s_seen, 1) % 50) != 0)
-    return;
-  const uint32_t E = t_seg_E;
-  const int probe_horizon = t_last_probe_horizon, probe_hit = t_last_chest_hit;
-  const double probe_fo = t_last_fep_fo;
-  const bool saved_ok = t_probe_seg_ok;
-  static __thread int16_t *buf = NULL; /* [0, E): the probe's CB0 LLRs; [E, E+G): the cache-hit decode's LLRs */
-  static __thread uint32_t buf_cap = 0;
-  const uint32_t need = E + t_last_G;
-  if (buf_cap < need) {
-    free(buf);
-    buf = malloc((size_t)need * sizeof(int16_t));
-    buf_cap = buf ? need : 0;
-    if (!buf)
-      return;
-  }
-  memcpy(buf, t_last_llr, (size_t)E * sizeof(int16_t));
-  uint32_t first;
-  int maxd;
-
-  if (s_on == 2 && freq_alloc->n_prb_list == 0 && freq_alloc->prg == 0) {
-    /* ISAC_TD_PROBE_EQUIV_BRANCH=k pins the rank-1 four-RX decode to branch k for these runs, so the
-     * chest estimates a single branch (chest_only = k) and the non-planned rows are exercised. */
-    static _Atomic int s_branch = -2;
-    if (s_branch == -2) {
-      /* DEFERRED/DO NOT USE: ISAC_TD_PROBE_EQUIV_BRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
-      const char *e = getenv("ISAC_TD_PROBE_EQUIV_BRANCH");
-      s_branch = (e != NULL) ? atoi(e) : -1;
-    }
-    const nr_pdsch_slot_share_t saved_share = t_share;
-    t_share = (nr_pdsch_slot_share_t){1, (int)freq_alloc->first_rb, (int)freq_alloc->num_rbs};
-    t_chest_cache.valid = 0;
-    t_fep_cache.valid = 0;
-    nr_dlsch_force_branch(s_branch);
-    (void)equiv_rerun(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, false, false); /* (1) the probe fills the cache */
-    const int horizon1 = t_last_probe_horizon;
-    /* (1b) scribble: an all-branch, cache-bypassing decode of the slot overwrites every row of the working
-     * buffer (what a PRB-list grant or a different-signature grant of the group does between two hits). */
-    nr_dlsch_force_branch(-1);
-    nr_dlsch_force_mask(0xF);
-    (void)equiv_rerun(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, true, true);
-    nr_dlsch_force_mask(-1);
-    nr_dlsch_force_branch(s_branch);
-    t_eq_snap = true;
-    const bool ok2 = equiv_rerun(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, true, false); /* (2) hits it */
-    const int hit2 = t_last_chest_hit;
-    const uint32_t G2 = t_last_G;
-    static __thread c16_t *snap2 = NULL;
-    static __thread size_t snap2_cap = 0;
-    const size_t n2 = t_eq_snap_n;
-    if (snap2_cap < n2) {
-      free(snap2);
-      snap2 = (c16_t *)malloc(n2 * sizeof(c16_t));
-      snap2_cap = snap2 ? n2 : 0;
-    }
-    if (snap2 && n2)
-      memcpy(snap2, t_eq_snap_buf, n2 * sizeof(c16_t));
-    if (ok2 && E + G2 <= buf_cap)
-      memcpy(buf + E, t_last_llr, (size_t)G2 * sizeof(int16_t));
-    t_eq_snap_n = 0;
-    const bool ok3 = equiv_rerun(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, true, true); /* (3) reference */
-    t_eq_snap = false;
-    nr_dlsch_force_branch(-1);
-    t_share = saved_share;
-    t_chest_cache.valid = 0;
-    t_fep_cache.valid = 0;
-    uint32_t chest_bad = 0, chest_n = 0;
-    if (snap2 && n2 && n2 == t_eq_snap_n) {
-      chest_n = (uint32_t)n2;
-      for (size_t i = 0; i < n2; i++)
-        chest_bad += (snap2[i].r != t_eq_snap_buf[i].r || snap2[i].i != t_eq_snap_buf[i].i);
-    }
-    static _Atomic uint64_t s_cbad = 0, s_cn = 0;
-    if (ok2 && ok3 && hit2 && t_last_G == G2 && E + G2 <= buf_cap) {
-      const uint64_t cb = atomic_fetch_add(&s_cbad, chest_bad != 0) + (chest_bad != 0);
-      const uint64_t cn = atomic_fetch_add(&s_cn, 1) + 1;
-      LOG_A(PHY, "SENSING: PROBE_EQUIV_CHEST mismatches=%lu/%lu | this: branch=%d chest_re_diff=%u/%u\n", (unsigned long)cb,
-            (unsigned long)cn, s_branch, chest_bad, chest_n);
-      const uint32_t bad = equiv_diff(buf + E, t_last_llr, G2, &first, &maxd);
-      const uint64_t n = atomic_fetch_add(&s_hn, 1) + 1;
-      const uint64_t nb = atomic_fetch_add(&s_hbad, bad != 0) + (bad != 0);
-      const uint64_t el = atomic_fetch_add(&s_hel, G2) + G2;
-      const uint64_t elb = atomic_fetch_add(&s_hel_bad, bad) + bad;
-      LOG_A(PHY, "SENSING: PROBE_EQUIV_HIT mismatches=%lu/%lu llr_mismatch=%lu/%lu skipped=%lu | this: S=%d L=%d dmrs=0x%x "
-            "G=%u diff=%u first=%d max|d|=%d probe_horizon=%d\n",
-            (unsigned long)nb, (unsigned long)n, (unsigned long)elb, (unsigned long)el, (unsigned long)atomic_load(&s_hskip),
-            dlsch_config->start_symbol, dlsch_config->number_symbols, dlsch_config->dlDmrsSymbPos, G2, bad,
-            bad ? (int)first : -1, maxd, horizon1);
-    } else if (atomic_fetch_add(&s_hskip, 1) < 5) {
-      LOG_A(PHY, "SENSING: PROBE_EQUIV_HIT skipped: ok2=%d ok3=%d hit=%d G2=%u G3=%u\n", ok2, ok3, hit2, G2, t_last_G);
-    }
-  }
-
-  /* GrantWork arm (PROBE_EQUIV_GW): code block 0 of the probe's own hypothesis taken from the grant's shared
-   * work (lazily computed over the whole slot, chest cache as in production) -- its LLRs and its rate-de-matched
-   * input must equal the cache-free whole-slot reference's below. */
-  static __thread int16_t *gw_llr = NULL, *gw_d = NULL;
-  static __thread uint32_t gw_llr_cap = 0, gw_d_cap = 0;
-  uint32_t gw_E = 0, gw_N = 0;
-  int gw_rc = -100, gw_cpu = -1;
-  if (gw_h != NULL) {
-    const gw_ctx_t *gc = (const gw_ctx_t *)nr_td_grantwork_ctx(gw_h);
-    const nr_pdsch_cfg_hypothesis_t h = gw_hyp_of(gc);
-    static __thread nr_pdsch_gw_cb0_t cb = {0};
-    gw_rc = nr_pdsch_passive_gw_cb0(gw_h, &h, &cb);
-    if (gw_rc == NR_TD_GW_OK) {
-      gw_E = cb.p.E;
-      gw_N = (uint32_t)(cb.p.BG == 1 ? 66 : 50) * (uint32_t)cb.p.Z;
-      if (gw_llr_cap < gw_E) {
-        free(gw_llr);
-        gw_llr = malloc((size_t)gw_E * sizeof(int16_t));
-        gw_llr_cap = gw_llr ? gw_E : 0;
-      }
-      if (gw_d_cap < gw_N) {
-        free(gw_d);
-        gw_d = malloc((size_t)gw_N * sizeof(int16_t));
-        gw_d_cap = gw_d ? gw_N : 0;
-      }
-      if (gw_llr && gw_d) {
-        memcpy(gw_llr, cb.llr, (size_t)gw_E * sizeof(int16_t));
-        memcpy(gw_d, cb.d, (size_t)gw_N * sizeof(int16_t));
-        bool ldpc_ok = false;
-        (void)nr_pdsch_passive_gw_cb0_decode(&cb, &ldpc_ok);
-        gw_cpu = ldpc_ok;
-      } else {
-        gw_rc = NR_TD_GW_E_NOMEM;
-      }
-    }
-  }
-  t_cap_req = gw_h != NULL;
-  t_cap_have = false;
-  const bool ok = equiv_rerun(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, true, true);
-  t_cap_req = false;
-  t_probe_seg_ok = saved_ok;
-  if (!ok || t_seg_E != E) {
-    atomic_fetch_add(&s_skip, 1);
-    return;
-  }
-  if (gw_h != NULL) {
-    static _Atomic uint64_t s_gn = 0, s_gbad = 0, s_gdbad = 0, s_gskip = 0, s_gcrc = 0;
-    if (gw_rc == NR_TD_GW_OK && gw_E == E && t_cap_have && t_cap_dlen >= gw_N && t_last_fep_fo == probe_fo) {
-      uint32_t gfirst;
-      int gmaxd;
-      const uint32_t gbad = equiv_diff(gw_llr, t_last_llr, E, &gfirst, &gmaxd);
-      uint32_t dbad = 0;
-      for (uint32_t i = 0; i < gw_N; i++)
-        dbad += gw_d[i] != t_cap_d[i];
-      const uint64_t gn = atomic_fetch_add(&s_gn, 1) + 1;
-      const uint64_t gb = atomic_fetch_add(&s_gbad, gbad != 0) + (gbad != 0);
-      const uint64_t gd = atomic_fetch_add(&s_gdbad, dbad != 0) + (dbad != 0);
-      const bool crc_bad = gw_cpu != (int)t_cap_seg0_ok;
-      const uint64_t gc = atomic_fetch_add(&s_gcrc, crc_bad) + crc_bad;
-      LOG_A(PHY, "SENSING: PROBE_EQUIV_GW mismatches=%lu/%lu cb0_input_mismatches=%lu/%lu cb0_crc_mismatches=%lu/%lu skipped=%lu | "
-            "this: rnti=0x%x nl=%u E=%u diff=%u first=%d max|d|=%d d_diff=%u/%u crc cpu/ref=%d/%d ref_decoder=%d\n",
-            (unsigned long)gb, (unsigned long)gn, (unsigned long)gd, (unsigned long)gn, (unsigned long)gc, (unsigned long)gn,
-            (unsigned long)atomic_load(&s_gskip), grant->rnti, (unsigned)dlsch_config->cw_info[0].Nl, E, gbad,
-            gbad ? (int)gfirst : -1, gmaxd, dbad, gw_N, gw_cpu, t_cap_seg0_ok, t_cap_decoder);
-    } else if (atomic_fetch_add(&s_gskip, 1) < 5) {
-      LOG_A(PHY, "SENSING: PROBE_EQUIV_GW skipped: rc=%d E gw/ref=%u/%u cap=%d fo_moved=%d\n", gw_rc, gw_E, E, t_cap_have,
-            t_last_fep_fo != probe_fo);
-    }
-  }
-  const uint32_t bad = equiv_diff(buf, t_last_llr, E, &first, &maxd);
-  /* The reference runs later than the probe: with continuous FO compensation the FEP offset may have moved
-   * in between (the receive thread updates ue->freq_offset), which changes every LLR for reasons that are
-   * not the probe's. Such samples are counted apart, not as probe != full. */
-  if (t_last_fep_fo != probe_fo) {
-    static _Atomic uint64_t s_fo_moved = 0;
-    const uint64_t fm = atomic_fetch_add(&s_fo_moved, 1) + 1;
-    LOG_A(PHY, "SENSING: PROBE_EQUIV fo_moved=%lu (not compared) | this: fo probe=%.3f ref=%.3f Hz diff=%u/%u\n",
-          (unsigned long)fm, probe_fo, t_last_fep_fo, bad, E);
-    return;
-  }
-  const uint64_t n = atomic_fetch_add(&s_n, 1) + 1;
-  const uint64_t nb = atomic_fetch_add(&s_bad, bad != 0) + (bad != 0);
-  const uint64_t el = atomic_fetch_add(&s_el, E) + E;
-  const uint64_t elb = atomic_fetch_add(&s_el_bad, bad) + bad;
-  LOG_A(PHY, "SENSING: PROBE_EQUIV mismatches=%lu/%lu llr_mismatch=%lu/%lu skipped=%lu | this: rnti=0x%x S=%d L=%d dmrs=0x%x "
-        "nl=%u E=%u diff=%u first=%d max|d|=%d horizon=%d chest_hit=%d\n",
-        (unsigned long)nb, (unsigned long)n, (unsigned long)elb, (unsigned long)el, (unsigned long)atomic_load(&s_skip),
-        grant->rnti, dlsch_config->start_symbol, dlsch_config->number_symbols, dlsch_config->dlDmrsSymbPos,
-        (unsigned)dlsch_config->cw_info[0].Nl, E, bad, bad ? (int)first : -1, maxd, probe_horizon, probe_hit);
-}
-
+/* GrantWork / probe equivalence checks (debug, were ISAC_TD_GW_CHECK / ISAC_TD_GW_PROFILE / ISAC_TD_PROBE_EQUIV_CHECK) are gone.
+ * NEEDS: delete these three stubs, their declarations in nr_pdsch_passive_decode.h and the calls in nr_pdsch_passive_queue.c. */
+void nr_pdsch_passive_gw_check(nr_td_grantwork_t *gw, nr_pdsch_passive_decode_status_t st_a) { (void)gw; (void)st_a; }
+void nr_pdsch_passive_gw_profile(nr_td_grantwork_t *gw, bool used) { (void)gw; (void)used; }
 void nr_pdsch_passive_probe_equiv_check(PHY_VARS_NR_UE *ue,
                                         const UE_nr_rxtx_proc_t *proc,
                                         const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -8132,9 +4785,5 @@ void nr_pdsch_passive_probe_equiv_check(PHY_VARS_NR_UE *ue,
                                         const nr_pdsch_passive_grant_t *grant,
                                         c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
 {
-  /* The reruns are references: never served from (or published into) the attached GrantWork. */
-  nr_td_grantwork_t *const gw = t_gw;
-  t_gw = NULL;
-  probe_equiv_check_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, gw);
-  t_gw = gw;
+  (void)ue; (void)proc; (void)dlsch_config; (void)freq_alloc; (void)grant; (void)rxdataF;
 }
