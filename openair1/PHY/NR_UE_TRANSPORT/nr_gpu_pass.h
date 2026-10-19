@@ -15,10 +15,10 @@
  * flight per process, whatever the number of consumer threads (the PDSCH queue has up to 5). Nothing is allocated after the RX fence: buffers, streams,
  * events and graphs exist from nr_gpu_pass_init(); an unseen shape class returns 1.
  *
- * What a pass does NOT cover (the caller keeps the old path, counted in nr_gpu_pass_stats): grants of more than 16 segments (32 in the v2 split mode) (PRG / VRB-bundle grants run in the segmented classes 1, 2, 4, 8, 16 [, 32]: the chest estimates per segment into scratch rows and
- * k_seg_compose lays them out in data order, the demod geometry is composed with the old path's RE gather), the chest cache, DM-RS type 2, a single-branch
- * estimate, probes, PT-RS, more than NR_GPU_PASS_MAX_CB code blocks, Z not a multiple of 4, HARQ soft combining, TBs whose decode needs the CPU decoder
- * (zero syndrome with a failing CRC: nr_gpu_pass_result_t::need_cpu), and unseen classes. */
+ * What a pass does NOT cover (the caller keeps the old path, counted in nr_gpu_pass_stats): grants of more than 128 segments (PRG / VRB-bundle grants run in the segmented classes 1, 2, 4, ..., 128: the chest estimates
+ * per segment into scratch rows and k_seg_compose lays them out in data order, the demod geometry is composed with the old path's RE gather), the chest cache, a single-branch estimate, PT-RS,
+ * more than NR_GPU_PASS_MAX_CB (160) code blocks, SI soft combining (DL HARQ soft combining of C-RNTI grants runs in the pass: nr_gpu_pass_hq_*), TBs whose decode needs the CPU decoder
+ * (zero syndrome with a failing CRC: nr_gpu_pass_result_t::need_cpu), and unseen classes. A lifting size Z that is not a multiple of 4 (a TB below ~700 bit, one code block) runs the generic LDPC kernel (nz4 class). */
 #ifndef NR_GPU_PASS_H
 #define NR_GPU_PASS_H
 #include <stdint.h>
@@ -30,7 +30,8 @@
 #include "nr_pdsch_prb_set.h"
 #include "nr_pdsch_dmrs_snr.h"
 
-#define NR_GPU_PASS_MAX_CB 32  /* code blocks per pass = NR_GPU_LDPC_MAX_JOBS */
+#define NR_GPU_PASS_MAX_CB 160 /* code blocks per pass = NR_GPU_LDPC_MAX_JOBS: 273 PRB x 4 layers x 156 RE x 7.4 bit / 8424 = 150, the most TS 38.214 allows within the supported set */
+#define NR_GPU_PASS_UL_MAX_CB 32 /* the PUSCH pass classes (ncb 1, 2, 4 in practice) */
 #define NR_GPU_PASS_MAX_DMRS 4 /* DM-RS symbols of a grant */
 #define NR_GPU_PASS_MAX_NL 4
 #define NR_GPU_PASS_FP32_DEMOD 2 /* nr_gpu_pass_shape_t.fp32 bit: FP32 demod instantiation */
@@ -62,6 +63,7 @@ typedef struct {
   uint16_t nseg_class; /* Task 4b: 0 = a contiguous grant. 1, 2, 4, 8, 16 (32: split mode) = a segmented grant (PRG / VRB bundles) of up to that many segments: the chest runs one row set per segment into
                         * scratch rows and a compose kernel lays them out in data order (the estimate layout the demod reads); the smallest class >= the segments of the grant. */
   uint8_t ul;          /* Task 7: 1 = a PUSCH pass class (nl = 1, CP-OFDM, DM-RS type 1; nrb_class, ndmrs and ncb_class are its whole structure) */
+  uint8_t nz4;         /* 1 = the LDPC stage runs the generic kernel (a lifting size Z that is not a multiple of 4: TBs below ~700 bits, one code block); ncb_class must be 1 */
 } nr_gpu_pass_shape_t;
 
 static inline int nr_gpu_pass_nrb_class(int nrb)
@@ -79,11 +81,12 @@ static inline int nr_gpu_pass_nseg_class(int n) /* segmented-grant class: 1, 2, 
       return c;
   return 0;
 }
-static inline int nr_gpu_pass_ncb_class(int ncb)
+static inline int nr_gpu_pass_ncb_class(int ncb) /* code-block count classes: 1, 2, 4, 8, 16, 32, 64, 128, 160; 0 = more than a pass holds */
 {
-  for (int c = 1; c <= NR_GPU_PASS_MAX_CB; c <<= 1)
-    if (ncb >= 1 && ncb <= c)
-      return c;
+  static const int c[9] = {1, 2, 4, 8, 16, 32, 64, 128, NR_GPU_PASS_MAX_CB};
+  for (int i = 0; i < 9; i++)
+    if (ncb >= 1 && ncb <= c[i])
+      return c[i];
   return 0;
 }
 
@@ -165,6 +168,10 @@ typedef struct {
    * the n_prb; k0 above is unused. */
   int nseg, seg_pil_nrb;
   struct { uint16_t n_prb, data_index; int pil_rb, k0; } seg[NR_GPU_PASS_MAX_SEG];
+  /* ---- DL HARQ soft combining on the device (before dj: zeroed per job). hq_mode 0 = none; 1 = first transmission: the rate-dematched sum of every code block is stored in HARQ slot
+   * hq_slot; 2 = retransmission: it is added to the sum stored there first (clear = 0 of the CPU path), then stored. A failed TB keeps the slot; the caller drops it on a CRC pass. */
+  uint8_t hq_mode;
+  uint16_t hq_blk[NR_GPU_PASS_MAX_CB]; /* the HARQ block (nr_gpu_pass_hq_*) of every code block */
   /* ---- chest post: nvar normalisation + per-branch substitution, DM-RS FO/SFO sums */
   int number_symbols, nvfix, branch;                             /* branch: nr_dlsch_planned_branch() when ISAC_RX_NVAR_PERBRANCH, else -1 */
   int fo_first, fo_last;                                         /* DM-RS indices (into dmrs_sym) of the first and last DM-RS symbol, -1 = no FO measurement */
@@ -283,6 +290,14 @@ typedef void (*nr_gpu_pass_counters_fn)(uint64_t o[16]);
 /* UL: launches, graph hits, fallbacks[unseen, busy, unsupported, error, ldpc key], tb_fail, need_cpu, host wait p50 / p99 <= (us, power-of-two bucket), classes */
 void nr_gpu_pass_ul_counters(uint64_t o[16]);
 
+/* DL HARQ soft store: NR_GPU_HQ_BLK blocks of NR_GPU_HQ_SEG int16 (N = 66 * 384 circular-buffer entries, one code block each), device memory allocated in nr_gpu_pass_init (before the RX fence;
+ * 2048 blocks = 104 MB). The host store (the 64-entry LRU of nr_pdsch_passive_decode.c) hands every entry the blocks it needs (job.hq_blk). up / down: copy the blocks of an entry to / from the host layout
+ * of the CPU path (block r at host_d + r * kcz, n entries each), synchronously (a fallback between the two stores, rare). 0 = done. */
+#define NR_GPU_HQ_BLK 2048
+#define NR_GPU_HQ_SEG (66 * 384)
+typedef int (*nr_gpu_pass_hq_copy_fn)(const uint16_t *blk, int16_t *host_d, int C, int kcz, int n);
+int nr_gpu_pass_hq_up(const uint16_t *blk, const int16_t *host_d, int C, int kcz, int n);
+int nr_gpu_pass_hq_down(const uint16_t *blk, int16_t *host_d, int C, int kcz, int n);
 int nr_gpu_pass_config(const nr_gpu_pass_cfg_t *cfg);
 int nr_gpu_pass_init(int max_classes);
 int nr_gpu_pass_warm(const nr_gpu_pass_shape_t *shape, int qmode, int align, int evm);

@@ -59,6 +59,10 @@ typedef int (*nr_gpu_pass_chest_post64_fn)(const nr_gpu_chest_post_par_t *p, nr_
 typedef struct {
   uint32_t llr_off; /* element offset of the segment's E LLRs in the llr array */
   uint32_t E, Qm, BG, Z, K, F, Kprime, Tbslbrm, C, rv;
+  /* DL HARQ soft combining on the device (the CPU path's harqc store): hq_mode 0 = none (clear = 1, nothing kept), 1 = first transmission (clear = 1, the int16 sum is stored at hq),
+   * 2 = retransmission (clear = 0: the stored sum at hq is added to, then stored). hq: N = (BG == 1 ? 66 : 50) * Z int16 of the circular buffer, device memory, one per code block. */
+  uint32_t hq_mode;
+  int16_t *hq;
 } nr_gpu_rdm_seg_t;
 typedef int (*nr_gpu_pass_rdm_fn)(const int16_t *llr, const nr_gpu_rdm_seg_t *segs, int nseg, int8_t *ldpc_in, void *stream);
 

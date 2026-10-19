@@ -32,7 +32,7 @@
 namespace cg = cooperative_groups;
 
 namespace nrldpc {
-constexpr int MAXE = 316, MAXR = 46, MAXC = 68, ZMAX = 384, NJ = NR_GPU_LDPC_MAX_JOBS, NIT = NR_GPU_LDPC_MAX_SNAP + 3;
+constexpr int MAXE = 316, MAXR = 46, MAXC = 68, ZMAX = 384, NJ = NR_GPU_LDPC_MAX_JOBS, NJP = NR_GPU_PASS_LDPC_JOBS, NIT = NR_GPU_LDPC_MAX_SNAP + 3;
 constexpr int CTX = 8, THREADS = 512, CLB = 8; /* CLB: blocks per code block = cluster size (portable max) */
 
 struct Graph {         /* rows 0..M-1 of the base graph (the rows nrLDPC_init() uses for R), lifted by Z */
@@ -55,7 +55,8 @@ struct DJob { /* device view of one code block */
 struct Ctx {
   cudaStream_t s;
   cudaStream_t sh, sl; /* GPUSCHED ISAC_PDSCH_GPU_PRIO: real-time and low-priority streams */
-  DJob *dj;            /* pinned mapped [NJ] */
+  int cap;             /* code blocks per launch: NJP for a graph-pass instance, NJ otherwise */
+  DJob *dj;            /* pinned mapped [cap] */
   int8_t *in;          /* pinned [NJ][MAXC*ZMAX] */
   uint8_t *snap;       /* pinned mapped [NJ][NR_GPU_LDPC_MAX_SNAP][KB_MAX] */
   int *res;            /* pinned mapped [NJ][2]: nsnap, syn0 */
@@ -715,13 +716,17 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
     cudaDeviceGetStreamPriorityRange(&lo, &hi);
     for (int i = 0; i < CTX + NR_GPU_PASS_RING + 1; i++) {
       Ctx &x = g_ctx[i];
+      const bool pass_ctx = i >= CTX && i < CTX + NR_GPU_PASS_RING;
+      const int cap = pass_ctx ? NJP : NJ;     /* the graph-pass instances decode up to 160 code blocks per launch ... */
+      const int cio = pass_ctx ? 1 : NJ;       /* ... from and into their own buffers (nr_gpu_pass_graph.cu): the pinned staging of the standalone run() is not used */
+      x.cap = cap;
       if ((!nr_gpu_green_stream(&x.s, hi, true, i) && cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess)
-          || cudaHostAlloc(&x.dj, sizeof(DJob) * NJ, cudaHostAllocMapped) != cudaSuccess
-          || cudaHostAlloc(&x.in, (size_t)NJ * MAXC * ZMAX, cudaHostAllocMapped) != cudaSuccess
-          || cudaHostAlloc(&x.snap, (size_t)NJ * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX, cudaHostAllocMapped) != cudaSuccess
-          || cudaHostAlloc(&x.res, sizeof(int) * 2 * NJ, cudaHostAllocMapped) != cudaSuccess
-          || cudaMalloc(&x.llr, (size_t)NJ * MAXC * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.llrRes, (size_t)NJ * MAXC * ZMAX + 16) != cudaSuccess
-          || cudaMalloc(&x.c2v, (size_t)NJ * MAXE * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.unsat, sizeof(int) * NJ * NIT) != cudaSuccess)
+          || cudaHostAlloc(&x.dj, sizeof(DJob) * cap, cudaHostAllocMapped) != cudaSuccess
+          || cudaHostAlloc(&x.in, (size_t)cio * MAXC * ZMAX, cudaHostAllocMapped) != cudaSuccess
+          || cudaHostAlloc(&x.snap, (size_t)cio * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX, cudaHostAllocMapped) != cudaSuccess
+          || cudaHostAlloc(&x.res, sizeof(int) * 2 * cio, cudaHostAllocMapped) != cudaSuccess
+          || cudaMalloc(&x.llr, (size_t)cap * MAXC * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.llrRes, (size_t)cap * MAXC * ZMAX + 16) != cudaSuccess
+          || cudaMalloc(&x.c2v, (size_t)cap * MAXE * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.unsat, sizeof(int) * cap * NIT) != cudaSuccess)
         return;
       x.sh = x.sl = x.s;
       if (nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&x.sl, lo, hi))
@@ -823,9 +828,9 @@ extern "C" unsigned nr_pdsch_gpu_ldpc_dev_misses(void) { return g_dev_miss.load(
 /* host: validates the jobs and writes them into the instance's DJob array (graph replay: the kernel reads it when it runs). 0 or -1. */
 static int pass_set(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, bool *z4)
 {
-  if (!g_ok || inst < 0 || inst > NR_GPU_PASS_RING || !jobs || n < 1 || n > NJ || !llr_dev || !llr_dev->dev || llr_dev->bytes < (size_t)n * NR_GPU_LDPC_DEV_IN_STRIDE)
+  if (!g_ok || inst < 0 || inst > NR_GPU_PASS_RING || !jobs || n < 1 || n > (inst < NR_GPU_PASS_RING ? NJP : NJ) || !llr_dev || !llr_dev->dev || llr_dev->bytes < (size_t)n * NR_GPU_LDPC_DEV_IN_STRIDE)
     return -1;
-  const Graph *gr[NJ];
+  const Graph *gr[NJP];
   for (int k = 0; k < n; k++) {
     const nr_gpu_ldpc_job_t &j = jobs[k];
     if (j.it_max < 1 || j.it_max - 1 > NR_GPU_LDPC_MAX_SNAP || ((j.K + 7) >> 3) > NR_GPU_LDPC_KB_MAX
@@ -849,15 +854,16 @@ extern "C" int nr_pdsch_gpu_ldpc_pass_set(int inst, const nr_gpu_ldpc_job_t *job
 static int dev_impl(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, nr_gpu_buf_t *bits_dev, void *stream)
 {
   bool z4 = true;
-  if (!bits_dev || !bits_dev->dev || bits_dev->bytes < NR_GPU_LDPC_DEV_BITS_BYTES || pass_set(inst, jobs, n, llr_dev, &z4) != 0)
+  if (!bits_dev || !bits_dev->dev || bits_dev->bytes < (inst < NR_GPU_PASS_RING ? NR_GPU_PASS_LDPC_BITS_BYTES : NR_GPU_LDPC_DEV_BITS_BYTES) || pass_set(inst, jobs, n, llr_dev, &z4) != 0)
     return -1;
   Ctx &x = g_ctx[CTX + inst];
   const cudaStream_t s = (cudaStream_t)stream;
   DJob *ddj = nullptr;
   cudaHostGetDevicePointer((void **)&ddj, x.dj, 0);
   uint8_t *dsnap = (uint8_t *)bits_dev->dev;
-  int *dres = (int *)((char *)bits_dev->dev + NR_GPU_LDPC_DEV_RES_OFF);
-  if (cudaMemsetAsync(dres, 0xff, 2 * NJ * sizeof(int), s) != cudaSuccess) return -1; /* the host's -1 sentinels */
+  const int jmax = inst < NR_GPU_PASS_RING ? NJP : NJ; /* a pass instance's buffers hold 160 code blocks, the standalone context's 32 */
+  int *dres = (int *)((char *)bits_dev->dev + (inst < NR_GPU_PASS_RING ? NR_GPU_PASS_LDPC_RES_OFF : NR_GPU_LDPC_DEV_RES_OFF));
+  if (cudaMemsetAsync(dres, 0xff, 2 * jmax * sizeof(int), s) != cudaSuccess) return -1; /* the host's -1 sentinels */
   return ldpc_launch(g_nc_state.load(), n, s, z4, ddj, x, dsnap, dres) == cudaSuccess ? 0 : -1;
 }
 extern "C" int nr_pdsch_gpu_ldpc_dev(const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, nr_gpu_buf_t *bits_dev, void *stream)

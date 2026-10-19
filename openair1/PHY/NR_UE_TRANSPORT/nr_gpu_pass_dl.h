@@ -34,6 +34,9 @@ typedef struct {
   /* v2 Task 2 (ISAC_PDSCH_GPU_GRAPH_COVER): a layout probe decodes code block 0 only (with the full-C E / K / Z) and is never a decoded TB (out->r.tb_ok = 0);
    * probe_last_sym: its symbol horizon (-1 = the whole grant; the body's rule), set for every grant */
   int probe, probe_last_sym;
+  int hq_mode;                      /* DL HARQ combining in the pass (nr_gpu_pass.h): mode 0 none, 1 first transmission (store), 2 retransmission (combine with the stored sum); hq_tbs: the TBS of the first transmission, 0 = the grant's */
+  uint32_t hq_tbs;
+  const uint16_t *hq_blk;           /* the HARQ block of every code block (NR_GPU_PASS_MAX_CB entries), mode != 0 */
   int gate_on;                      /* Fix A+D: the in-graph no-chance gate (nr_snr_gate.h): required SNR - 5 dB in gate_thr_db; 0 = never skip */
   float gate_thr_db;
   /* the band the channel estimate covers (the slot share widens it upward; nr_pdsch_passive_decode.c share_chest_band); NULL = the grant's. Contiguous grants only */
@@ -63,6 +66,8 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue);
 /* 0 = the pass ran (out filled; the TB may still have failed CRC or need the CPU decoder: out->r.tb_ok / need_cpu), 1 = not handled (counted), the old path decodes */
 int nr_gpu_pass_seg_max(void); /* segments of the largest segment-count class the pass covers: 32 in v2 split mode, else 16 */
 int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out);
+/* the HARQ soft store of the device (nr_gpu_pass_hq_up / _down): down = 1 copies the slot to the host layout of the CPU store; 0 = done */
+int nr_gpu_pass_dl_hq_xfer(int down, const uint16_t *blk, int16_t *d, int C, int kcz, int n);
 /* v2 Task 4 (ISAC_PDSCH_GPU_GRAPH_RETRY + _SPLIT): around one nr_pdsch_passive_decode call, the pass instance its first body takes stays held for the later bodies, which
  * skip the chest sub-graph when its inputs are unchanged. begin returns 1 when held (then call end). dirty: a body ran the stage path (it may rewrite rxdataF). */
 int nr_gpu_graph_call_begin(void);
@@ -80,7 +85,9 @@ enum { NR_GPU_PASS_EV_COMMIT, NR_GPU_PASS_EV_RETRY_OLD /* pass said CRC fail / C
        NR_GPU_PASS_EV_PROBE /* v2: a layout probe's pass committed (never a decoded TB, so not a cont_fail) */, NR_GPU_PASS_EV_N };
 /* gates of passive_decode_body_core that keep a grant off the pass (the first one that refuses, counted) */
 enum { NR_GPU_PASS_GATE_SEG /* more segments than the largest class (16; 32 in split mode) */, NR_GPU_PASS_GATE_PROBE, NR_GPU_PASS_GATE_SHARE, NR_GPU_PASS_GATE_GW, NR_GPU_PASS_GATE_PTRS, NR_GPU_PASS_GATE_TINTERP, NR_GPU_PASS_GATE_HARQ,
-       NR_GPU_PASS_GATE_LDPC_OFF, NR_GPU_PASS_GATE_CHEST_ONLY, NR_GPU_PASS_GATE_OCC, NR_GPU_PASS_GATE_NOMEM, NR_GPU_PASS_GATE_RETRY /* ISAC_GPU_PASS_RETRY_OLD: a retry body runs the old path */, NR_GPU_PASS_GATE_N };
+       NR_GPU_PASS_GATE_LDPC_OFF, NR_GPU_PASS_GATE_CHEST_ONLY, NR_GPU_PASS_GATE_OCC, NR_GPU_PASS_GATE_NOMEM, NR_GPU_PASS_GATE_RETRY /* ISAC_GPU_PASS_RETRY_OLD: a retry body runs the old path */,
+       NR_GPU_PASS_GATE_GW_READY /* the grant's LLRs come from a GrantWork entry another hypothesis published: only the LDPC is left, nothing for the pass to do */, NR_GPU_PASS_GATE_LLR_OVR, NR_GPU_PASS_GATE_CAP,
+       NR_GPU_PASS_GATE_FORCE_CPU, NR_GPU_PASS_GATE_N };
 void nr_gpu_pass_gate(int gate);
 /* every ISAC_GPU_PASS_CHECK-th CRC-failing pass: also run the old first body and compare */
 int nr_gpu_pass_shadow_due_fail(void);

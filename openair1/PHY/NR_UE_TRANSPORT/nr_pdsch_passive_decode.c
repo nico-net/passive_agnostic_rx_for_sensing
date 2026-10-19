@@ -58,6 +58,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdsch_retry_pred.h"
 #include "nr_pdsch_gpu_ldpc_host.h"
 #include "nr_gpu_pass_dl.h"
+#include "nr_gpu_pass_hq.h"
 #include "nr_gpu_pass_retry.h" // GPUPASS Task 4
 #include "PHY/TOOLS/nr_gpu_platform.h"
 static void gp_thread_prewarm(void);
@@ -671,6 +672,7 @@ static _Atomic uint64_t g_mcs_segs[32], g_mcs_segs_ok[32], g_mcs_tbs[32], g_mcs_
 static _Atomic uint64_t g_rv_try[4][32], g_rv_ok[4][32]; // ISAC_RV_RETRY rescues by [rv][mcs]
 /* V2 HARQ soft-combining and PT-RS sweep state, declared here so the periodic report can read it. */
 static _Atomic uint64_t g_hq_retx_try, g_hq_retx_ok, g_hq_tbs_override, g_hq_busy_skip, g_hq_first;
+static _Atomic uint64_t g_hqb_evict, g_hqb_nospace; /* device HARQ blocks (GPU pass): sums dropped to make room, grants decoded without keeping theirs */
 /* g_harqc's own lock (harqc_entry_t/g_harqc are declared further down, next to their only other
  * users) and the reserved-MCS retransmission record (gap-harq lane) that shares it -- both declared
  * this early, alongside the harqc counters above, for the SAME reason: nr_pdsch_passive_ldpc_stats_
@@ -1334,11 +1336,11 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
     init_tx_hits   = g_dl_harq_init.hits;
     init_tx_evicts = g_dl_harq_init.evicts;
     pthread_mutex_unlock(&g_harqc_lock);
-    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu | init_tx hit=%lu evict=%lu | rv census mcs<24 [%lu %lu %lu %lu] mcs>=24 [%lu %lu %lu %lu] | lbrm n_L=%d try/ok 4:%lu/%lu 2:%lu/%lu 1:%lu/%lu | llr_norm shift0..4 [%lu %lu %lu %lu %lu]\n",
+    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu | init_tx hit=%lu evict=%lu | dev_blocks evict=%lu nospace=%lu | rv census mcs<24 [%lu %lu %lu %lu] mcs>=24 [%lu %lu %lu %lu] | lbrm n_L=%d try/ok 4:%lu/%lu 2:%lu/%lu 1:%lu/%lu | llr_norm shift0..4 [%lu %lu %lu %lu %lu]\n",
           (unsigned long)atomic_load(&g_hq_first), (unsigned long)atomic_load(&g_hq_retx_ok),
           (unsigned long)atomic_load(&g_hq_retx_try), (unsigned long)atomic_load(&g_hq_tbs_override),
           (unsigned long)atomic_load(&g_hq_busy_skip),
-          (unsigned long)init_tx_hits, (unsigned long)init_tx_evicts,
+          (unsigned long)init_tx_hits, (unsigned long)init_tx_evicts, (unsigned long)atomic_load(&g_hqb_evict), (unsigned long)atomic_load(&g_hqb_nospace),
           (unsigned long)atomic_load(&g_rv_census[0][0]), (unsigned long)atomic_load(&g_rv_census[0][1]),
           (unsigned long)atomic_load(&g_rv_census[0][2]), (unsigned long)atomic_load(&g_rv_census[0][3]),
           (unsigned long)atomic_load(&g_rv_census[1][0]), (unsigned long)atomic_load(&g_rv_census[1][1]),
@@ -1535,6 +1537,12 @@ typedef struct {
   uint64_t last;
   int16_t *d;
   size_t cap;
+  /* the soft bits of a failed TB live on the host (d) or, when on_gpu, in the device HARQ blocks blk[0 .. gC) of the GPU pass (nr_gpu_pass.h): gN entries each, block r at r * gKcz on the host.
+   * hb holds the blocks taken from the pool (g_hqb_pool) while the sum is on the device. */
+  bool on_gpu;
+  uint8_t gC;
+  uint32_t gN, gKcz;
+  nr_hq_blocks_t hb;
 } harqc_entry_t;
 #define NR_SI_COMB_MAX 8 /* one 160 ms SIB1 window: 8 repetitions at 20 ms */
 static harqc_entry_t g_harqc[NR_HARQC_N];
@@ -1542,6 +1550,49 @@ static harqc_entry_t g_harqc[NR_HARQC_N];
  * are declared much earlier in this file, alongside g_hq_first and friends -- see the comment
  * there for why. */
 static uint64_t g_harqc_clock;
+/* ---- the device HARQ blocks (NR_GPU_HQ_BLK of NR_GPU_HQ_SEG int16, one code block each), handed to the entries that keep a failed TB's soft sum on the device. Under g_harqc_lock. ---- */
+static nr_hq_pool_t g_hqb_pool;
+static void hqb_release(harqc_entry_t *e) /* lock held */
+{
+  nr_hq_pool_put(&g_hqb_pool, &e->hb);
+  e->on_gpu = false;
+}
+static void hqb_release_locked(harqc_entry_t *e)
+{
+  pthread_mutex_lock(&g_harqc_lock);
+  hqb_release(e);
+  pthread_mutex_unlock(&g_harqc_lock);
+}
+/* the idle entry that held the blocks longest (its sum is dropped) */
+static nr_hq_blocks_t *hqb_victim(void *ctx, const nr_hq_blocks_t *except)
+{
+  (void)ctx;
+  harqc_entry_t *v = NULL;
+  for (int i = 0; i < NR_HARQC_N; i++) {
+    harqc_entry_t *x = &g_harqc[i];
+    if (&x->hb != except && x->hb.n > 0 && !atomic_load(&x->busy) && (v == NULL || x->last < v->last))
+      v = x;
+  }
+  if (v == NULL)
+    return NULL;
+  v->soft_valid = false;
+  v->on_gpu = false;
+  return &v->hb;
+}
+/* gives e (busy, held by the caller) C blocks; takes the blocks of the least recently used idle entries when the pool is short (their sums are dropped). 0 = e has >= C blocks. */
+static int hqb_ensure(harqc_entry_t *e, int C)
+{
+  pthread_mutex_lock(&g_harqc_lock);
+  if (e->hb.n < C && e->on_gpu && e->soft_valid)
+    e->soft_valid = false; /* growing a live sum is not possible: its blocks are the old ones */
+  int ev = 0;
+  const int rc = nr_hq_pool_ensure(&g_hqb_pool, &e->hb, C, hqb_victim, NULL, &ev);
+  atomic_fetch_add(&g_hqb_evict, (uint64_t)ev);
+  if (rc != 0)
+    atomic_fetch_add(&g_hqb_nospace, 1);
+  pthread_mutex_unlock(&g_harqc_lock);
+  return rc;
+}
 static __thread struct { int armed; uint16_t rnti; uint8_t pid, ndi; uint16_t cell; bool si; } t_hq;
 static __thread int16_t *t_hq_d = NULL;
 /* BRANCHFO residuals measured on this thread's current grant, committed only on a TB CRC pass. */
@@ -1806,7 +1857,8 @@ static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid, uint16_t cell)
     return NULL;
   }
   if (!hit) {
-    e->used = true; e->rnti = rnti; e->pid = pid; e->cell = cell; e->ncomb = 0; e->soft_valid = false; e->tbs = 0;
+    hqb_release(e);
+    e->used = true; e->rnti = rnti; e->pid = pid; e->cell = cell; e->ncomb = 0; e->soft_valid = false; e->tbs = 0; e->on_gpu = false;
   }
   e->last = ++g_harqc_clock;
   pthread_mutex_unlock(&g_harqc_lock);
@@ -2089,6 +2141,29 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
   return true;
 }
 
+/* The retransmission decision of the HARQ store, shared by the CPU decode and the GPU pass. A retransmission is "same NDI on this HARQ process" (TS 38.321 5.3.2.2); the RV only sets the
+ * circular-buffer start the rate de-matcher already takes from cw->rv. Combining into an rv-0 grant was withheld so a wrong layout hypothesis (junk NDI/PID) cannot poison a fresh decode;
+ * it is admitted only once THIS cell has shown it retransmits at rv 0 -- same NDI with rv 0 on a still-undecoded process, seen NR_HARQC_RV0_EVIDENCE times (the census the HARQC line
+ * reports). *A: the TBS to decode with (a retransmission keeps the TBS of its first transmission). */
+static bool harq_retx_decide(const harqc_entry_t *e, const fapi_nr_dl_cw_info_t *cw, bool si, uint8_t ndi, uint32_t *A)
+{
+  static _Atomic uint32_t s_rv0_retx_seen;
+  const bool same_ndi = e->soft_valid && e->ndi == ndi;
+  /* Evidence needs the TBS to match the stored first transmission too: a junk-layout NDI matches by chance half the time, a junk TBS does not, so the count cannot be filled by mis-parsed grants. */
+  if (same_ndi && cw->rv == 0 && e->tbs != 0 && e->tbs == cw->TBS)
+    atomic_fetch_add(&s_rv0_retx_seen, 1);
+  const bool rv0_admitted = atomic_load(&s_rv0_retx_seen) >= NR_HARQC_RV0_EVIDENCE;
+  /* SI soft combining: the SIB1 TB repeats unchanged, so any grant with the stored TBS combines (NDI of an SI DCI is reserved, rv 0 included), at most
+   * NR_SI_COMB_MAX in a row so a changed SIB1 cannot poison the buffer for longer than one repetition window. */
+  const bool retx = si ? (e->soft_valid && e->tbs == cw->TBS && e->ncomb < NR_SI_COMB_MAX) : same_ndi && (cw->rv != 0 || rv0_admitted);
+  *A = cw->TBS;
+  if (retx && e->tbs != 0 && e->tbs != *A) {
+    *A = e->tbs;
+    atomic_fetch_add(&g_hq_tbs_override, 1);
+  }
+  return retx;
+}
+
 static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
                                 const UE_nr_rxtx_proc_t *proc,
                                 passive_harq_t *h,
@@ -2121,27 +2196,14 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
     atomic_store(&e->busy, 0);
     return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
   }
-  /* A retransmission is "same NDI on this HARQ process" (TS 38.321 5.3.2.2); the RV only sets the
-   * circular-buffer start the rate de-matcher already takes from cw->rv. Combining into an rv-0 grant
-   * was withheld so a wrong layout hypothesis (junk NDI/PID) cannot poison a fresh decode; it is
-   * admitted only once THIS cell has shown it retransmits at rv 0 -- same NDI with rv 0 on a still-
-   * undecoded process, seen NR_HARQC_RV0_EVIDENCE times (the census the HARQC line reports). */
-  static _Atomic uint32_t s_rv0_retx_seen;
-  const bool same_ndi = e->soft_valid && e->ndi == t_hq.ndi;
-  /* Evidence needs the TBS to match the stored first transmission too: a junk-layout NDI matches by
-   * chance half the time, a junk TBS does not, so the count cannot be filled by mis-parsed grants. */
-  if (same_ndi && cw->rv == 0 && e->tbs != 0 && e->tbs == cw->TBS)
-    atomic_fetch_add(&s_rv0_retx_seen, 1);
-  const bool rv0_admitted = atomic_load(&s_rv0_retx_seen) >= NR_HARQC_RV0_EVIDENCE;
-  /* SI soft combining: the SIB1 TB repeats unchanged, so any grant with the stored TBS combines (NDI of an SI DCI is reserved, rv 0 included), at most
-   * NR_SI_COMB_MAX in a row so a changed SIB1 cannot poison the buffer for longer than one repetition window. */
-  const bool retx = t_hq.si ? (e->soft_valid && e->tbs == cw->TBS && e->ncomb < NR_SI_COMB_MAX)
-                            : same_ndi && (cw->rv != 0 || rv0_admitted);
   uint32_t A = cw->TBS;
-  if (retx && e->tbs != 0 && e->tbs != A) {
-    A = e->tbs;
-    atomic_fetch_add(&g_hq_tbs_override, 1);
+  bool retx = harq_retx_decide(e, cw, t_hq.si, t_hq.ndi, &A);
+  if (retx && e->on_gpu && ((size_t)e->gC * e->gKcz > e->cap || nr_gpu_pass_dl_hq_xfer(1, e->hb.id, e->d, e->gC, (int)e->gKcz, (int)e->gN) != 0)) {
+    retx = false; /* the soft bits are on the device and cannot be fetched: decode as a first transmission */
+    A = cw->TBS;
   }
+  if (e->hb.n > 0)
+    hqb_release_locked(e); /* from here the host buffer is the truth (this decode overwrites it) */
   t_hq_d = e->d;
   t_last_hq_retx = retx;
   t_hq_clear = !retx;
@@ -2616,6 +2678,8 @@ static bool gp_hq_arms(uint16_t rnti)
 {
   return !t_quiet && ((si_combine_on() && rnti == 0xffff) || ((nr_agnostic_v2() || harq_combine_on()) && atomic_load(&g_ldpc_ok) >= 100));
 }
+/* SI soft combining (deferred, off in the frozen config) is the only HARQ mode the pass does not take */
+static bool gp_hq_si(uint16_t rnti) { return nr_gpu_pass_hq_refuses(gp_hq_arms(rnti), si_combine_on() && rnti == 0xffff); }
 /* What passive_ldpc_decode_core leaves behind for a transport block every code block of which decoded (the GPU LDPC wrapper reports decoder_used = CPU: it is
  * bit-exact with it). The TB itself is in g_harq.b, assembled by the pass. */
 static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_info_t *cw, uint32_t G, uint32_t tbslbrm, bool tb_ok)
@@ -3235,6 +3299,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * not settle, an unseen shape class, a busy pass instance or any gate that is not met leaves gp_ok false and the old path decodes from scratch, so a
    * failing grant costs the pass on top of the old path. Every ISAC_GPU_PASS_CHECK-th taken grant (default 64) is decoded by the old path too and compared. */
   bool gp_ok = false, gp_cmp = false, gp_tb = false, gp_tried = false, gp_fcmp = false;
+  harqc_entry_t *gp_he = NULL; /* DL HARQ combining in the pass: the held (busy) store entry of this grant, released below */
+  int gp_hq_mode = 0;          /* 0 none, 1 first transmission (the pass stores the soft sum), 2 retransmission (the pass combines with the stored sum) */
+  uint32_t gp_hq_A = 0;
+  bool gp_hq_retx = false;
   int gp_gate = -1; /* the first gate that keeps this grant off the pass (counted: nr_gpu_pass_dl.h NR_GPU_PASS_GATE_*) */
   if (nr_gpu_pass_active()) {
     extern __thread int nr_pdsch_chest_occ_override;
@@ -3250,10 +3318,14 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
             : (seg_path && nseg > nr_gpu_pass_seg_max()) ? NR_GPU_PASS_GATE_SEG /* more segments than the largest class; fewer run the segmented classes */
             : ((t_probe_first_seg || probe_last_sym >= 0 || t_probe_no_horizon) && !gp_probe_cov) ? NR_GPU_PASS_GATE_PROBE
             : ((t_share.on && !gp_share_cov) || t_chest_bypass) ? NR_GPU_PASS_GATE_SHARE
-            : (t_gw_used || t_gw_capture || t_llr_ovr != NULL || t_cap_req || t_tb_force_cpu) ? NR_GPU_PASS_GATE_GW
+            : t_gw_ready ? NR_GPU_PASS_GATE_GW_READY
+            : (t_gw_used || t_gw_capture) ? NR_GPU_PASS_GATE_GW /* the GrantWork owner publishes the un-normalised LLRs of this geometry for other hypotheses; the pass only returns the normalised ones */
+            : t_llr_ovr != NULL ? NR_GPU_PASS_GATE_LLR_OVR
+            : t_cap_req ? NR_GPU_PASS_GATE_CAP
+            : t_tb_force_cpu ? NR_GPU_PASS_GATE_FORCE_CPU
             : ((dlsch_config->pduBitmap & 0x1) || ptrs_unav != 0) ? NR_GPU_PASS_GATE_PTRS
             : (ue->chest_time == 1 || t_tinterp_override > 0) ? NR_GPU_PASS_GATE_TINTERP
-            : gp_hq_arms(grant->rnti) ? NR_GPU_PASS_GATE_HARQ
+            : gp_hq_si(grant->rnti) ? NR_GPU_PASS_GATE_HARQ /* only the deferred SI soft combining stays on the old path: DL HARQ combining runs in the pass */
             : !nr_pdsch_gpu_ldpc_enabled() ? NR_GPU_PASS_GATE_LDPC_OFF
             : nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) >= 0 ? NR_GPU_PASS_GATE_CHEST_ONLY
             : nr_pdsch_chest_occ_override > 0 ? NR_GPU_PASS_GATE_OCC
@@ -3272,6 +3344,43 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     const bool gp_gate_on = !t_probe_no_horizon && nr_snr_gate_applies(t_probe_first_seg || probe_last_sym >= 0, grant->rnti_class == 0, grant->rv, true) && isfinite(gp_req);
     const float gp_gate_thr = gp_gate_on ? (float)(gp_req - NR_SNR_GATE_MARGIN_DB) : 0.f;
     share_chest_band(freq_alloc, dlsch_config, &gp_chest_fa, &gp_chest_cfg);
+    /* DL HARQ soft combining in the pass: the same decision as passive_ldpc_decode (harq_retx_decide) on the same store; a probe is HARQ-neutral. The soft bits live in device blocks of the entry
+     * (hqb_ensure); a stored sum that is still on the host (an earlier CPU decode) is uploaded first. Anything that cannot be arranged decodes without combining (counted) and leaves no stale sum. */
+    if (gp_hq_arms(grant->rnti) && !gp_hq_si(grant->rnti) && !t_probe_first_seg && probe_last_sym < 0 && !t_probe_no_horizon) {
+      gp_he = harqc_acquire(grant->rnti, grant->harq_pid, 0);
+      if (gp_he == NULL) {
+        atomic_fetch_add(&g_hq_busy_skip, 1); /* as the CPU path: decoded without combining */
+      } else {
+        gp_hq_retx = harq_retx_decide(gp_he, cw, false, grant->ndi, &gp_hq_A);
+        unsigned C = 0, K = 0, Z = 0, F = 0;
+        const int Kc = cw->ldpcBaseGraph == 2 ? 52 : 68;
+        if (gp_hq_retx && gp_he->on_gpu && gp_he->hb.n < (int)gp_he->gC) { /* cannot happen: the blocks of a live sum are never given away */
+          gp_hq_retx = false;
+          gp_he->soft_valid = false;
+        }
+        if (gp_hq_retx && !gp_he->on_gpu) { /* the sum is on the host: move it to device blocks */
+          if (gp_he->d == NULL || nr_segmentation(NULL, NULL, lenWithCrc(1, gp_hq_A), &C, &K, &Z, &F, cw->ldpcBaseGraph) < 0 || C < 1 || C > NR_GPU_PASS_MAX_CB || (size_t)C * Kc * Z > gp_he->cap
+              || hqb_ensure(gp_he, (int)C) != 0
+              || nr_gpu_pass_dl_hq_xfer(0, gp_he->hb.id, gp_he->d, (int)C, Kc * (int)Z, (cw->ldpcBaseGraph == 1 ? 66 : 50) * (int)Z) != 0) {
+            gp_hq_retx = false; /* a first transmission */
+          } else {
+            gp_he->on_gpu = true;
+            gp_he->gC = (uint8_t)C;
+          }
+        }
+        if (!gp_hq_retx) {
+          gp_hq_A = cw->TBS;
+          if (nr_segmentation(NULL, NULL, lenWithCrc(1, gp_hq_A), &C, &K, &Z, &F, cw->ldpcBaseGraph) < 0 || C < 1 || C > NR_GPU_PASS_MAX_CB || hqb_ensure(gp_he, (int)C) != 0) {
+            gp_he->soft_valid = false; /* no blocks: this grant is decoded without keeping its soft bits */
+            hqb_release_locked(gp_he);
+          } else {
+            gp_hq_mode = 1;
+          }
+        } else {
+          gp_hq_mode = 2;
+        }
+      }
+    }
     {
       const nr_gpu_pass_dl_in_t gin = {.ue = ue, .proc = proc, .dlsch_config = dlsch_config, .freq_alloc = freq_alloc, .seg = seg_path ? seg : NULL, .nseg = seg_path ? nseg : 0, .cw = cw,
                                        .ssb_rm = ssb_unav ? &ssb.dem : &gp_no_ssb, .rxdataF = &rxdataF[0][0], .rx_stride = fp->samples_per_slot_wCP,
@@ -3283,7 +3392,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
                                        .branch = gp_perbranch() ? nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) : -1, .norm = gp_norm_on(),
                                        .it_max = gp_iters(), .chest_diag = chest_pdp_diag_on(), .fep_fo = fep_fo, .tb = g_harq.b,
                                        .probe = t_probe_first_seg, .probe_last_sym = probe_last_sym, .chest_fa = &gp_chest_fa, .chest_cfg = &gp_chest_cfg,
-                                       .gate_on = gp_gate_on, .gate_thr_db = gp_gate_thr};
+                                       .gate_on = gp_gate_on, .gate_thr_db = gp_gate_thr, .hq_mode = gp_hq_mode, .hq_tbs = gp_hq_retx ? gp_hq_A : 0, .hq_blk = gp_hq_mode ? gp_he->hb.id : NULL};
       if (!t_gpp)
         gp_thread_prewarm(); /* before the RX fence: allocates; after it (v2): claims a pool set, lazily, once per thread */
       memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc)); /* the demod job reads whether the EVM is armed; the block below re-arms it for the old path */
@@ -3294,7 +3403,32 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       const int gp_rc = t_gpp ? nr_gpu_pass_dl_run(&gin, t_gpp) : 1;
       nr_dlsch_csi_prb_map = NULL; /* the old path sets and clears its own */
       nr_dlsch_csi_prb_map_n = 0;
+      if (gp_he != NULL && gp_hq_mode != 0 && gp_rc == 0 && !t_gpp->r.skip) { /* the pass ran its rate dematching: the store entry follows what passive_ldpc_decode would leave */
+        if (t_gpp->r.need_cpu) {
+          gp_he->soft_valid = false; /* the old path decodes this grant from scratch; the device sum already holds it, so it must not be combined again */
+          hqb_release_locked(gp_he);
+        } else {
+          const int Kc = cw->ldpcBaseGraph == 2 ? 52 : 68;
+          if (gp_hq_retx) {
+            atomic_fetch_add(&g_hq_retx_try, 1);
+            if (t_gpp->r.tb_ok) atomic_fetch_add(&g_hq_retx_ok, 1);
+          } else {
+            atomic_fetch_add(&g_hq_first, 1);
+          }
+          t_last_hq_retx = gp_hq_retx;
+          gp_he->ndi = grant->ndi;
+          gp_he->tbs = gp_hq_retx ? gp_hq_A : cw->TBS;
+          gp_he->soft_valid = !t_gpp->r.tb_ok; /* the soft bits are kept only while the TB is undecoded */
+          gp_he->on_gpu = true;
+          gp_he->gC = (uint8_t)t_gpp->C;
+          gp_he->gKcz = (uint32_t)(Kc * t_gpp->Z);
+          gp_he->gN = (uint32_t)((cw->ldpcBaseGraph == 1 ? 66 : 50) * t_gpp->Z);
+          if (t_gpp->r.tb_ok)
+            hqb_release_locked(gp_he); /* decoded: the sum is dead, the blocks go back to the pool */
+        }
+      }
       if (gp_rc == 0 && t_gpp->r.skip) { /* the in-graph gate fired: no demod / LDPC / CRC ran; the verdict is CRC fail, skip = 1, and no arm can help */
+        if (gp_he) atomic_store(&gp_he->busy, 0);
         out->skip = 1;
         out->status = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
         return out->status;
@@ -3305,7 +3439,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
         } else if (!t_gpp->r.tb_ok) {
           /* CRC failure: the pass IS the old first body (bit-identical). Its LLRs are on the host (t_gpp->llr) and the bookkeeping of a failed first decode is
            * committed at gp_llr_done; the retry arms of the old path (RV, LBRM n_L, ...) then run on them, exactly as after a failed first body. */
-          if (nr_gpu_pass_shadow_due_fail()) { /* sampled: the old path decodes this first body too; its verdicts and LLR hash are compared with the pass's */
+          if (gp_hq_mode != 2 && nr_gpu_pass_shadow_due_fail()) { /* sampled (a combining retransmission is not: the old path would see the sum the pass has already stored): the old path decodes this first body too; its verdicts and LLR hash are compared with the pass's */
             gp_fcmp = true;
             t_gp_fhash = gp_llr_hash(t_gpp->llr, G);
             t_gp_fok = 0;
@@ -3317,13 +3451,13 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
             nr_gpu_pass_note(t_probe_first_seg ? NR_GPU_PASS_EV_PROBE : NR_GPU_PASS_EV_CONT_FAIL); /* a probe is never a TB: its outcome is seg_ok[0] */
           }
         } else {
-          const uint32_t sz = cw->TBS / 8;
+          const uint32_t sz = (gp_hq_retx ? gp_hq_A : cw->TBS) / 8;
           bool zero = g_harq.b[sz] == 0 && g_harq.b[sz + 1] == 0;
           for (uint32_t i = 0; zero && i < sz; i++)
             zero = g_harq.b[i] == 0;
           if (zero) { /* the all-zero TB with a zero CRC is the known false pass: the old path counts and refuses it */
             nr_gpu_pass_note(NR_GPU_PASS_EV_ZERO_TB);
-          } else if (nr_gpu_pass_shadow_due()) { /* the old path decodes this one too; the verdicts are compared at the end */
+          } else if (gp_hq_mode != 2 && nr_gpu_pass_shadow_due()) { /* the old path decodes this one too; the verdicts are compared at the end */
             if (t_gp_shadow && sz + 8 <= GP_SHADOW_CAP) {
               memcpy(t_gp_shadow, g_harq.b, sz);
               gp_cmp = true;
@@ -3338,6 +3472,11 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     }
   }
 
+  if (gp_he != NULL) { /* the pass block is over: the old path (shadow, fallback) re-acquires the entry itself */
+    if (gp_cmp || gp_fcmp)
+      gp_he->soft_valid = false; /* a first transmission the old path decodes too: it must see a fresh process, not the sum the pass has just stored */
+    atomic_store(&gp_he->busy, 0);
+  }
   if (!gp_ok)
     nr_gpu_graph_call_dirty(); /* v2 Task 4: this body runs the stage path, which may rewrite rxdataF: the held instance's estimate is not reused */
 

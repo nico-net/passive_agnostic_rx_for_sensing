@@ -169,12 +169,12 @@ __global__ void k_rdm(const int16_t *llr, const nr_gpu_rdm_seg_t *segs, int nseg
   }
   const uint32_t EQ = Qm ? E / Qm : 1;
   for (uint32_t j = threadIdx.x; j < Kc * Z; j += blockDim.x) {
-    int v = 0;
-    if (bad || Nvalid == 0 || j < 2 * Z)
-      v = 0;
-    else if (j >= sg.Kprime && j < sg.K)
-      v = j < sg.Kprime + sg.F ? 127 : 0;
-    else {
+    int v = 0, nv = 0; /* v: the decoder input; nv: this transmission's contribution at circular-buffer position i = j - 2Z */
+    const bool filler = j >= sg.Kprime && j < sg.K;
+    const bool sel = !bad && Nvalid != 0 && j >= 2 * Z && !filler;
+    if (!bad && Nvalid != 0 && filler && j < sg.Kprime + sg.F)
+      v = 127;
+    else if (sel) {
       const uint32_t i = j - 2 * Z;
       if (i < Ncb && !(i >= Foffset && i < Foffset + Fx)) {
         const uint32_t r = i < Foffset ? i : i - Fx;
@@ -182,8 +182,16 @@ __global__ void k_rdm(const int16_t *llr, const nr_gpu_rdm_seg_t *segs, int nseg
         int acc = 0;
         for (; k < E; k += Nvalid)
           acc += llr[sg.llr_off + k / EQ + (k % EQ) * Qm];
-        v = (int16_t)acc; /* int16 wraparound of d[ind] += soft */
+        nv = (int16_t)acc; /* int16 wraparound of d[ind] += soft */
       }
+      v = nv;
+    }
+    if (sg.hq_mode && !bad && j >= 2 * Z && j - 2 * Z < N) { /* HARQ: clear = 0 adds to the stored sum (int16 wrap as the CPU's d), clear = 1 overwrites all N entries; the sum is kept for the next retransmission */
+      const uint32_t i = j - 2 * Z;
+      const int tot = (int16_t)((sg.hq_mode == 2 ? sg.hq[i] : 0) + nv);
+      sg.hq[i] = (int16_t)tot;
+      if (sel)
+        v = tot;
     }
     out[j] = (int8_t)(v > 127 ? 127 : v < -128 ? -128 : v);
   }

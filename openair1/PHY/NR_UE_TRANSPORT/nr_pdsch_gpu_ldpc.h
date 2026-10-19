@@ -41,6 +41,12 @@ typedef struct {
 #define NR_GPU_LDPC_DEV_RES_OFF ((size_t)NR_GPU_LDPC_MAX_JOBS * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX)
 #define NR_GPU_LDPC_DEV_BITS_BYTES (NR_GPU_LDPC_DEV_RES_OFF + 2 * NR_GPU_LDPC_MAX_JOBS * sizeof(int))
 
+/* The graph-pass instances (nr_gpu_pass.h) decode up to NR_GPU_PASS_LDPC_JOBS code blocks per launch; their llr_dev / bits_dev buffers use the same layouts at that size (the standalone contexts and the PUSCH pool keep 32). */
+#define NR_GPU_PASS_LDPC_JOBS 160
+#define NR_GPU_PASS_LDPC_IN_BYTES ((size_t)NR_GPU_PASS_LDPC_JOBS * NR_GPU_LDPC_DEV_IN_STRIDE)
+#define NR_GPU_PASS_LDPC_RES_OFF ((size_t)NR_GPU_PASS_LDPC_JOBS * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX)
+#define NR_GPU_PASS_LDPC_BITS_BYTES (NR_GPU_PASS_LDPC_RES_OFF + 2 * NR_GPU_PASS_LDPC_JOBS * sizeof(int))
+
 /* GPUPASS launch-only decode of n code blocks from device LLRs into device snapshots; 0 or -1. Below CC 9 (or ISAC_GPU_LDPC_NOCLUSTER=1) the non-cluster kernels run. Enqueue only. */
 /* o[0] kernel family (0 undecided, 1 cluster, 2 non-cluster, 3 refused), o[1] refusals, o[2] dev graph misses */
 typedef void (*nr_gpu_ldpc_stats_fn)(uint64_t *o);

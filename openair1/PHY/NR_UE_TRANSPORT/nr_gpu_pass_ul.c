@@ -377,7 +377,7 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
     return fb(FB_TBPARAM);
   /* ---- transport block parameters, as nr_ulsch_decoding derives them (first transmission, round 0) */
   unsigned C = 0, K = 0, Z = 0, F = 0;
-  if (nr_segmentation(NULL, NULL, lenWithCrc(1, in->tbs_bits), &C, &K, &Z, &F, in->bg) < 0 || C < 1 || C > NR_GPU_PASS_MAX_CB || (Z & 3) || (K & 7) || (K >> 3) > 1056)
+  if (nr_segmentation(NULL, NULL, lenWithCrc(1, in->tbs_bits), &C, &K, &Z, &F, in->bg) < 0 || C < 1 || C > NR_GPU_PASS_UL_MAX_CB || (Z & 3) || (K & 7) || (K >> 3) > 1056)
     return fb(FB_TBPARAM);
   const int ncb = nr_gpu_pass_ncb_class((int)C), nrbc = nr_gpu_pass_nrb_class(nrb);
   if (!ncb || !nrbc || in->max_ldpc_iterations < 1 || in->max_ldpc_iterations > 17)

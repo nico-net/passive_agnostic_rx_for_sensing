@@ -66,6 +66,7 @@ constexpr int NI = NR_GPU_PASS_RING;
 constexpr unsigned M_DL = ((1u << NR_GPU_PASS_DL) - 1u), M_UL = ((1u << NR_GPU_PASS_UL) - 1u) << NR_GPU_PASS_DL,
                    M_PROBE = ((1u << NR_GPU_PASS_PROBE) - 1u) << (NR_GPU_PASS_DL + NR_GPU_PASS_UL);
 constexpr int MAXCB = NR_GPU_PASS_MAX_CB;
+static_assert(NR_GPU_PASS_MAX_CB == NR_GPU_PASS_LDPC_JOBS, "one LDPC job per code block");
 constexpr int NSYM = 14;
 constexpr int N = 4096;
 constexpr int NSNAP = NR_GPU_LDPC_MAX_SNAP;
@@ -309,11 +310,12 @@ struct Key {
   uint8_t nseg; /* 0 = a contiguous grant (the estimate rows go straight into the estimate buffer); 1, 2, 4, 8, 16 (32, 64, 128: split mode) = segmented grant of up to that many segments (scratch rows + compose) */
   uint8_t ul = 0; /* Task 7: a PUSCH pass class (nl = 1; nrb, ndmrs and ncb are its whole structure) */
   uint8_t sub = 0; /* v2 Task 3: 0 = the whole pass in one graph; SUB_C / SUB_D / SUB_L = a sub-graph, keyed by the fields it depends on only (key_sub) */
+  uint8_t nz4 = 0; /* the LDPC kernel family baked into the graph: 1 = the generic kernel (a lifting size Z that is not a multiple of 4: Z in 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15, 18, 22, 26, 30, hence one code block only), 0 = the 4-lane kernel */
   static_assert(NR_GPU_PASS_MAX_SEG <= 128, "pack(): the segment class takes 4 bits (1 + log2 128 = 8)");
   uint64_t pack() const
   {
-    return (uint64_t)nrb | (uint64_t)nl << 9 | (uint64_t)ndmrs << 12 | (uint64_t)ncb << 15 | (uint64_t)(fp32 & 1) << 22 | (uint64_t)(fp32 >> 1) << 32 | (uint64_t)evm << 23 | (uint64_t)qmode << 24 |
-           (uint64_t)align << 28 | (uint64_t)(nseg ? 1 + __builtin_ctz((unsigned)nseg) : 0) << 44 | (uint64_t)ul << 40 | (uint64_t)sub << 41;
+    return (uint64_t)nrb | (uint64_t)nl << 9 | (uint64_t)ndmrs << 12 | (uint64_t)ncb << 15 | (uint64_t)(fp32 & 1) << 48 | (uint64_t)(fp32 >> 1) << 32 | (uint64_t)evm << 49 | (uint64_t)qmode << 24 |
+           (uint64_t)align << 28 | (uint64_t)(nseg ? 1 + __builtin_ctz((unsigned)nseg) : 0) << 44 | (uint64_t)ul << 40 | (uint64_t)sub << 41 | (uint64_t)nz4 << 47; /* ncb takes bits 15..23 (up to 160) */
   }
 };
 /* v2 Task 3 (split): C = FEP + chest + [seg compose] + [nvar D2H]: depends on (nrb, nl, ndmrs, nseg); the parameter-block H2D precedes the first sub-graph of a launch
@@ -325,7 +327,7 @@ static Key key_sub(const Key &k, int sub)
   Key r{};
   if (sub == SUB_C) r = Key{k.nrb, k.nl, k.ndmrs, 0, 0, 0, 0, 0, k.nseg};
   else if (sub == SUB_D) r = Key{k.nrb, k.nl, 0, 0, k.fp32, k.evm, k.qmode, k.align, 0};
-  else if (sub == SUB_L) r = Key{0, 0, 0, k.ncb, 0, 0, 0, 0, 0};
+  else if (sub == SUB_L) { r = Key{0, 0, 0, k.ncb, 0, 0, 0, 0, 0}; r.nz4 = k.nz4; }
   else return k;
   r.sub = (uint8_t)sub;
   return r;
@@ -359,6 +361,7 @@ struct Inst {
 struct Entry { cudaGraphExec_t exec[NI] = {}; };
 
 static Inst g_inst[NI];
+static int16_t *g_hq = nullptr;             /* DL HARQ soft store: NR_GPU_HQ_BLK blocks x NR_GPU_HQ_SEG int16 (device memory, allocated in nr_gpu_pass_init) */
 static nr_gpu_buf_t g_ring[4], g_rot;       /* the warm replay's dummy IQ ring and rotation */
 static std::map<uint64_t, Entry> g_cache;
 static std::mutex g_mu;
@@ -488,6 +491,7 @@ static void synth_job(const Key &k, nr_gpu_pass_job_t *j, std::vector<int16_t> &
   j->norm = 1;
   j->norm_span = off;
   j->A = 500; j->C = 1; j->K = 640; j->Z = 64; j->F = 640 - (500 + 16); j->E = off; j->E2 = off; j->first_rE2 = 1;
+  if (k.nz4) { j->A = 200; j->K = 300; j->Z = 30; j->F = 300 - (200 + 16); } /* BG2 Kb 10: the generic LDPC kernel is captured */
   j->BG = 2; j->R = 15; j->R2 = 15; j->rv = 0; j->Qm = 2; j->it_max = 8;
 }
 
@@ -499,7 +503,7 @@ static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
   const uint32_t nd = j->n_decode && j->n_decode < j->C ? j->n_decode : j->C;
   pb.G = j->G; pb.span = j->norm_span; pb.norm = j->norm; pb.tbs = j->A;
   pb.Gd = j->probe ? j->G_dem : j->G_dem && j->G_dem < j->G ? j->G_dem : j->G; /* a probe: the LLRs up to its horizon (> 0, checked in dl_try) */
-  pb.ncb = (int)nd; pb.KB = (int)(j->K >> 3);
+  pb.ncb = (int)nd; pb.KB = (int)((j->K + 7) >> 3);
   if (nr_gpu_model() == NR_GPU_MODEL_DIRECT) {
     pb.scr = j->scr;
   } else {
@@ -508,7 +512,7 @@ static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
   }
   const int Kprime = (j->C > 1) ? (int)((j->A + 24 + 24 * j->C) / j->C) : (int)(j->A + (j->A > 3824 ? 24 : 16));
   const int ctype = (j->C > 1) ? 1 : (j->A > 3824 ? 0 : 2);
-  const int pay = (int)(j->K >> 3) - (int)(j->F >> 3) - 3;
+  const int pay = (int)((j->K - j->F) >> 3) - 3; /* K' / 8 (K - F = K' for every lifting size, byte aligned for every TBS) */
   const int ncb = j->shape.ncb_class;
   for (int s = 0; s < ncb; s++) {
     nr_gpu_rdm_seg_t &g = pb.rdm[s];
@@ -518,6 +522,10 @@ static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
       g.E = first ? j->E : j->E2;
       g.llr_off = first ? (uint32_t)s * j->E : j->first_rE2 * j->E + ((uint32_t)s - j->first_rE2) * j->E2;
       g.Qm = j->Qm; g.BG = j->BG; g.Z = j->Z; g.K = j->K; g.F = j->F; g.Kprime = (uint32_t)Kprime; g.Tbslbrm = j->tbslbrm; g.C = j->C; g.rv = j->rv;
+      if (j->hq_mode && g_hq && j->hq_blk[s] < NR_GPU_HQ_BLK && !j->probe) {
+        g.hq_mode = j->hq_mode;
+        g.hq = g_hq + (size_t)j->hq_blk[s] * NR_GPU_HQ_SEG;
+      }
     } /* padding blocks: C == 0 is "refused" -> zeros */
     for (int q = 0; q < NSNAP; q++) {
       nr_gpu_crc_seg_t &c = pb.cand[s * NSNAP + q];
@@ -533,6 +541,12 @@ static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
   }
   if (nr_pdsch_gpu_ldpc_pass_set(I.id, I.lj, ncb, &I.lin) != 0) return -2; /* an LDPC (BG, Z, R) the init did not build */
   return 0;
+}
+
+/* The result block back to the host (DISCRETE only; a no-op in the shared model): the verdicts, then the code blocks of the class (c[ncb] of up to 160 x 1056 bytes), then the fields behind c[]. */
+static int res_d2h(Inst &I, int ncb, cudaStream_t s)
+{
+  return nr_gpu_buf_d2h_async(&I.res, 0, offsetof(ResBlk, c) + (size_t)ncb * KBMAX, s) || nr_gpu_buf_d2h_async(&I.res, offsetof(ResBlk, ul), sizeof(ResBlk) - offsetof(ResBlk, ul), s);
 }
 
 /* the host side of a pass: writes every block the kernels read. Used for the synthetic job (capture / warm replay) and for real grants. `cls` = the key the
@@ -685,20 +699,20 @@ static int enqueue(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, cudaStrea
                   nr_gpu_buf_d2h_async(&I.rxF, 0, (size_t)nbRx * NSYM * N * 4, s)))
       return -1;
   }
-  if (sub == SUB_L && part == 3) return nr_gpu_buf_d2h_async(&I.res, 0, sizeof(ResBlk), s) ? -1 : (cudaPeekAtLastError() == cudaSuccess ? 0 : -1);
+  if (sub == SUB_L && part == 3) return res_d2h(I, k.ncb, s) ? -1 : (cudaPeekAtLastError() == cudaSuccess ? 0 : -1);
   if (sub == SUB_L && part == 1) return 0;
   if (full || sub == SUB_L) {
     if (nr_gpu_pass_launch_rdm((const int16_t *)I.llr.dev, I.PBd()->rdm, ncb, (int8_t *)I.lin.dev, s) != 0) return -1;
     if (nr_pdsch_gpu_ldpc_pass_dev(I.id, I.lj, ncb, &I.lin, &I.bits, s) != 0) return -1;
     const uint8_t *snaps = (const uint8_t *)I.bits.dev;
-    const int *dres = (const int *)((const char *)I.bits.dev + NR_GPU_LDPC_DEV_RES_OFF);
+    const int *dres = (const int *)((const char *)I.bits.dev + NR_GPU_PASS_LDPC_RES_OFF);
     if (nr_gpu_pass_launch_crc_p(snaps, I.PBd()->cand, ncb * NSNAP, &I.PBd()->tbs, I.RBd()->cand_ok, &I.RBd()->dummy_tb, s) != 0) return -1;
     k_pick<<<1, 128, 0, s>>>(snaps, dres, I.PBd(), I.RBd());
     if (nr_gpu_pass_launch_crc_p((const uint8_t *)I.res.dev, I.PBd()->sel, ncb, &I.PBd()->tbs, I.RBd()->seg_crc, &I.RBd()->tb_crc, s) != 0) return -1;
-    if (!full && part == 0 && nr_gpu_buf_d2h_async(&I.res, 0, sizeof(ResBlk), s)) return -1;
+    if (!full && part == 0 && res_d2h(I, k.ncb, s)) return -1;
   }
   if (full && (nr_gpu_buf_d2h_async(&I.llr, 0, llr_bytes, s) || nr_gpu_buf_d2h_async(&I.nvar, 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int), nvar_bytes, s) ||
-               nr_gpu_buf_d2h_async(&I.res, 0, sizeof(ResBlk), s) || nr_gpu_buf_d2h_async(&I.est, 0, (size_t)nbRx * NSYM * N * 4, s) ||
+               res_d2h(I, k.ncb, s) || nr_gpu_buf_d2h_async(&I.est, 0, (size_t)nbRx * NSYM * N * 4, s) ||
                nr_gpu_buf_d2h_async(&I.rxF, 0, (size_t)nbRx * NSYM * N * 4, s)))
     return -1;
   return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
@@ -850,7 +864,7 @@ static int enqueue_ul(Inst &I, const Key &k, cudaStream_t s, int part = 0)
   const size_t nllr = std::min<size_t>((size_t)LLR_CAP, (size_t)12 * k.nrb * 13 * 8);
   const size_t accoff = ((size_t)3 * NR_GPU_CHEST_MAX_ROWS + 1024) * sizeof(int);
   /* part (Fix A+D gate): 0 = everything; 1 = FEP, chest, k_ul_level and the chest results copy (before the gate); 2 = the IF body (equaliser ... CRC); 3 = the result copy (after the IF) */
-  if (part == 3) return nr_gpu_buf_d2h_async(&I.res, 0, sizeof(ResBlk), s) ? -1 : (cudaPeekAtLastError() == cudaSuccess ? 0 : -1);
+  if (part == 3) return res_d2h(I, k.ncb, s) ? -1 : (cudaPeekAtLastError() == cudaSuccess ? 0 : -1);
   if (part != 2 && cudaEventRecordWithFlags(I.evh, s, cudaEventRecordExternal) != cudaSuccess) return -1;
   if (part != 2 && (nr_gpu_buf_h2d_async(&I.pb, 0, sizeof(PassBlk), s) || nr_gpu_buf_h2d_async(&I.ulb, 0, sizeof(nrul::UlBlk), s) ||
                     nr_gpu_buf_h2d_async(&I.pil, 0, (size_t)NR_GPU_PASS_MAX_DMRS * 4 * PIL_STRIDE * 4, s) ||
@@ -871,12 +885,12 @@ static int enqueue_ul(Inst &I, const Key &k, cudaStream_t s, int part = 0)
   if (nr_gpu_pass_launch_rdm((const int16_t *)I.llr.dev, I.PBd()->rdm, ncb, (int8_t *)I.lin.dev, s) != 0) return -1;
   if (nr_pdsch_gpu_ldpc_pass_dev(I.id, I.lj, ncb, &I.lin, &I.bits, s) != 0) return -1;
   const uint8_t *snaps = (const uint8_t *)I.bits.dev;
-  const int *dres = (const int *)((const char *)I.bits.dev + NR_GPU_LDPC_DEV_RES_OFF);
+  const int *dres = (const int *)((const char *)I.bits.dev + NR_GPU_PASS_LDPC_RES_OFF);
   if (nr_gpu_pass_launch_crc_p(snaps, I.PBd()->cand, ncb * NSNAP, &I.PBd()->tbs, I.RBd()->cand_ok, &I.RBd()->dummy_tb, s) != 0) return -1;
   k_pick<<<1, 128, 0, s>>>(snaps, dres, I.PBd(), I.RBd());
   if (nr_gpu_pass_launch_crc_p((const uint8_t *)I.res.dev, I.PBd()->sel, ncb, &I.PBd()->tbs, I.RBd()->seg_crc, &I.RBd()->tb_crc, s) != 0) return -1;
   if (nr_gpu_buf_d2h_async(&I.llr, 0, nllr * 2, s) || (part == 0 && (nr_gpu_buf_d2h_async(&I.nvar, 0, (size_t)rows * 3 * sizeof(int), s) ||
-      nr_gpu_buf_d2h_async(&I.nvar, accoff, (size_t)rows * sizeof(uint64_t), s) || nr_gpu_buf_d2h_async(&I.res, 0, sizeof(ResBlk), s))) ||
+      nr_gpu_buf_d2h_async(&I.nvar, accoff, (size_t)rows * sizeof(uint64_t), s) || res_d2h(I, k.ncb, s))) ||
       nr_gpu_buf_d2h_async(&I.est, 0, (size_t)nbRx * NSYM * N * 4, s) || nr_gpu_buf_d2h_async(&I.rxF, 0, (size_t)nbRx * NSYM * N * 4, s))
     return -1;
   return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
@@ -934,7 +948,7 @@ static Key key_of(const nr_gpu_pass_job_t *j)
   const nr_gpu_demod_job_t &d = j->dj;
   return Key{j->shape.nrb_class, j->shape.nl, j->shape.ndmrs, j->shape.ncb_class, j->shape.fp32, (uint8_t)(d.want_evm != 0),
              (uint8_t)(j->shape.nl >= 2 ? d.qam_mode : 0), (uint8_t)(j->shape.nl == 1 && d.align != 0),
-             (uint8_t)j->shape.nseg_class};
+             (uint8_t)j->shape.nseg_class, 0, 0, (uint8_t)((j->Z & 3) != 0)};
 }
 
 /* the segment geometry of a job: segments tile [0, nrb) in data order, their pilots and first subcarriers lie inside the buffers */
@@ -974,7 +988,14 @@ static bool key_ok(const Key &k)
  * (all instances), the worst case a class is checked against before any of its sub-graphs is built (review S4: no orphan sub-graph when the cap is hit mid-class). */
 static std::atomic<uint64_t> g_split_n[4], g_split_unseen[4], g_split_mb{0}, g_inst_mb{0}, g_split_warm_us{0}, g_split_capped{0}, g_split_kb{0};
 static uint64_t g_sub_kb_max[4];
-static int split_cap_mb() { return g_cfg.split_mb > 0 ? g_cfg.split_mb : 2048; /* measured 0.55 MB per graph executable (the gated D / L wrappers included): 5 DL-shape executables (4 real + overflow) per class need ~1.5 GB for the full warm set of the unit test (was 1008 MB with 4); production warms fewer classes */ }
+/* The memory cap of the split graphs: a quarter of the device's memory between 2048 and 3072 MB (8 GB card: 2048; the GB10's unified memory: 3072). */
+static int split_cap_auto()
+{
+  size_t fr = 0, tb = 0;
+  const long q = cudaMemGetInfo(&fr, &tb) == cudaSuccess ? (long)(tb >> 20) / 4 : 2048;
+  return q < 2048 ? 2048 : q > 3072 ? 3072 : (int)q;
+}
+static int split_cap_mb() { return g_cfg.split_mb > 0 ? g_cfg.split_mb : split_cap_auto(); /* measured 0.55 MB per graph executable (the gated D / L wrappers included): 5 DL-shape executables (4 real + overflow) per class need ~1.5 GB for the full warm set of the unit test (was 1008 MB with 4); production warms fewer classes */ }
 static bool split_cap_hit(uint64_t extra_kb)
 {
   if (((g_inst_mb << 10) + g_split_kb + extra_kb) >> 10 < (uint64_t)split_cap_mb()) return false;
@@ -1138,6 +1159,8 @@ static int build(const Key &k, int sub = SUB_FULL)
   return 0;
 }
 
+/* the green-context stream index of an instance: the DL pool (id), the UL pool (NR_GREEN_UL_IDX + id), the probe pool (NR_GREEN_PROBE_IDX + id) */
+static int pass_green_idx(int id) { return id < NR_GPU_PASS_DL ? id : id < NR_GPU_PASS_DL + NR_GPU_PASS_UL ? NR_GREEN_UL_IDX + id : NR_GREEN_PROBE_IDX + id; }
 static int alloc_inst(int id)
 {
   Inst &I = g_inst[id];
@@ -1147,16 +1170,16 @@ static int alloc_inst(int id)
   const size_t ext = EXTMAX;
   I.bn = (size_t)2 * NSYM * NR_GPU_DEMOD_MAX_NL * ext * 2;
   const int prio = id < NR_GPU_PASS_DL ? hi : lo; /* real DL grants highest; UL and probe pools lowest (see the pool comment at the top) */
-  if ((!nr_gpu_green_stream(&I.s, prio, true, id < NR_GPU_PASS_DL ? id : NR_GREEN_UL_IDX + id) && cudaStreamCreateWithPriority(&I.s, cudaStreamNonBlocking, prio) != cudaSuccess) ||
-      (!nr_gpu_green_stream(&I.s2, prio, true, id < NR_GPU_PASS_DL ? id : NR_GREEN_UL_IDX + id) && cudaStreamCreateWithPriority(&I.s2, cudaStreamNonBlocking, prio) != cudaSuccess) ||
+  if ((!nr_gpu_green_stream(&I.s, prio, true, pass_green_idx(id)) && cudaStreamCreateWithPriority(&I.s, cudaStreamNonBlocking, prio) != cudaSuccess) ||
+      (!nr_gpu_green_stream(&I.s2, prio, true, pass_green_idx(id)) && cudaStreamCreateWithPriority(&I.s2, cudaStreamNonBlocking, prio) != cudaSuccess) ||
       cudaEventCreateWithFlags(&I.done, cudaEventBlockingSync) != cudaSuccess || cudaEventCreateWithFlags(&I.ev0, cudaEventDefault) != cudaSuccess ||
       cudaEventCreateWithFlags(&I.evh, cudaEventDefault) != cudaSuccess) /* blocking sync: the wake is the driver's, not a poll loop */
     return -1;
-  if (g_cfg.v2 && nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&I.s_lo, lo, hi, id < NR_GPU_PASS_DL ? id : NR_GREEN_UL_IDX + id)) I.s_lo = nullptr; /* v2 Task 2: probes on the twin, in the instance's own green context (a graph captured on I.s cannot launch in another); none = the RT stream */
+  if (g_cfg.v2 && nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&I.s_lo, lo, hi, pass_green_idx(id))) I.s_lo = nullptr; /* v2 Task 2: probes on the twin, in the instance's own green context (a graph captured on I.s cannot launch in another); none = the RT stream */
   if (nr_gpu_buf_alloc(&I.rxF, (size_t)4 * NSYM * N * 4) || nr_gpu_buf_alloc(&I.est, (size_t)16 * NSYM * N * 4) ||
       nr_gpu_buf_alloc(&I.nvar, NR_GPU_CHEST_DEV_BYTES) || nr_gpu_buf_alloc(&I.geo, (size_t)2 * NSYM * ext * 4) ||
       nr_gpu_buf_alloc(&I.scratch, 4 * I.bn * 2) || nr_gpu_buf_alloc(&I.llr, (size_t)LLR_CAP * 2) ||
-      nr_gpu_buf_alloc(&I.lin, NR_GPU_LDPC_DEV_IN_BYTES) || nr_gpu_buf_alloc(&I.bits, NR_GPU_LDPC_DEV_BITS_BYTES) ||
+      nr_gpu_buf_alloc(&I.lin, NR_GPU_PASS_LDPC_IN_BYTES) || nr_gpu_buf_alloc(&I.bits, NR_GPU_PASS_LDPC_BITS_BYTES) ||
       nr_gpu_buf_alloc(&I.pil, (size_t)NR_GPU_PASS_MAX_DMRS * 4 * PIL_STRIDE * 4) || nr_gpu_buf_alloc(&I.scr, (size_t)(LLR_CAP / 32 + 2) * 4) ||
       nr_gpu_buf_alloc(&I.pb, sizeof(PassBlk)) || nr_gpu_buf_alloc(&I.res, sizeof(ResBlk)) ||
       nr_gpu_buf_alloc(&I.segsc, (size_t)SEG_ROWS * N * 4) ||
@@ -1213,6 +1236,20 @@ extern "C" int nr_gpu_pass_config(const nr_gpu_pass_cfg_t *c)
   return 0;
 }
 
+/* HARQ blocks <-> the host layout of the CPU store (block r at d + r * kcz, n = N entries): rare fallbacks between the GPU and the CPU decoder; the blocks are owned by the caller (its entry is busy) */
+static int hq_copy(const uint16_t *blk, int16_t *d, int C, int kcz, int n, bool up)
+{
+  if (!g_hq || !blk || !d || C < 1 || C > MAXCB || n < 1 || n > NR_GPU_HQ_SEG) return -1;
+  for (int r = 0; r < C; r++) {
+    if (blk[r] >= NR_GPU_HQ_BLK) return -1;
+    int16_t *dev = g_hq + (size_t)blk[r] * NR_GPU_HQ_SEG;
+    if ((up ? cudaMemcpy(dev, d + (size_t)r * kcz, (size_t)n * 2, cudaMemcpyHostToDevice) : cudaMemcpy(d + (size_t)r * kcz, dev, (size_t)n * 2, cudaMemcpyDeviceToHost)) != cudaSuccess) return -1;
+  }
+  return 0;
+}
+extern "C" int nr_gpu_pass_hq_up(const uint16_t *blk, const int16_t *d, int C, int kcz, int n) { return hq_copy(blk, const_cast<int16_t *>(d), C, kcz, n, true); }
+extern "C" int nr_gpu_pass_hq_down(const uint16_t *blk, int16_t *d, int C, int kcz, int n) { return hq_copy(blk, d, C, kcz, n, false); }
+
 extern "C" int nr_gpu_pass_init(int max_classes)
 {
   std::lock_guard<std::mutex> lk(g_mu);
@@ -1222,6 +1259,8 @@ extern "C" int nr_gpu_pass_init(int max_classes)
   for (int a = 0; a < 4; a++)
     if (nr_gpu_buf_alloc(&g_ring[a], (size_t)RING_LEN * 4)) return -1;
   if (nr_gpu_buf_alloc(&g_rot, 64 * 4)) return -1;
+  if (cudaMalloc((void **)&g_hq, (size_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2) != cudaSuccess) return -1; /* 104 MB: the HARQ soft store counts against the pass's VRAM */
+  cudaMemset(g_hq, 0, (size_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2);
   SEG_ROWS = g_cfg.split ? 1024 : 512; /* split: 32 segments x 2 DM-RS x 4 layers x 4 RX */
   uint64_t ib = 0; /* review S3: the explicit sum of the pass's own buffers (an estimate: the stage modules' per-instance contexts are not in it) */
   for (int i = 0; i < NI; i++) {
@@ -1256,7 +1295,8 @@ extern "C" int nr_gpu_pass_warm(const nr_gpu_pass_shape_t *sh, int qmode, int al
     return build(ku);
   }
   const Key k{sh->nrb_class, sh->nl, sh->ndmrs, sh->ncb_class, sh->fp32, (uint8_t)(evm != 0), (uint8_t)(sh->nl >= 2 ? qmode : 0), (uint8_t)(sh->nl == 1 && align),
-                (uint8_t)sh->nseg_class};
+                (uint8_t)sh->nseg_class, 0, 0, (uint8_t)(sh->nz4 != 0)};
+  if (k.nz4 && k.ncb != 1) return -1; /* a lifting size that is not a multiple of 4 only occurs below 700 bits: one code block */
   if (!key_ok(k) || (int)k.nseg > (int)k.nrb) return -1;
   if (g_cfg.split) { /* the three sub-graphs of the class; the ones another class already built are shared */
     uint64_t need = 0; /* review S4: the worst case of the missing ones, checked before any is built (no orphan sub-graph at the cap) */
@@ -1448,8 +1488,9 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   const nr_gpu_demod_job_t &d = j->dj;
   const uint32_t ext = d.ext;
   const uint32_t nd = j->n_decode && j->n_decode < j->C ? j->n_decode : j->C; /* v2 Task 2: blocks decoded (a probe: block 0) */
+  if (j->hq_mode && (j->hq_mode > 2 || j->probe || !g_hq)) { ++g_fb_unsup; return 1; } /* the host would count a combine that never happened */
   if (!key_ok(k) || (int)k.nl != j->nl || (int)k.ndmrs != j->ndmrs || j->nbRx != g_cfg.nbRx || (int)j->nrb > (int)k.nrb || j->C < 1 || nd > k.ncb || j->G_dem > j->G || (j->probe && !j->G_dem) ||
-      (j->Z & 3) || (j->K & 7) || (j->K >> 3) > (uint32_t)KBMAX || j->G > LLR_CAP || j->G == 0 || ext > (uint32_t)EXTMAX || (d.want_evm && (k.fp32 & 1) == (uint8_t)d.evm_fp64) || ((k.fp32 >> 1) != (uint8_t)(d.demod_fp32 != 0)) ||
+      (j->Z & 3 && j->C != 1) || ((j->K + 7) >> 3) > (uint32_t)KBMAX || ((j->K - j->F) & 7) || j->G > LLR_CAP || j->G == 0 || ext > (uint32_t)EXTMAX || (d.want_evm && (k.fp32 & 1) == (uint8_t)d.evm_fp64) || ((k.fp32 >> 1) != (uint8_t)(d.demod_fp32 != 0)) ||
       j->dmrs_type > 2 || j->nseg < 0 || j->nseg > (int)k.nseg || (j->nseg == 0) != (k.nseg == 0) || !seg_ok(j) ||
       j->it_max < 1 || j->it_max > NSNAP + 1 || !j->scr || !j->geo_y || !j->geo_h || !j->symbol_rot || !j->rxdata[0]) {
     ++g_fb_unsup;
@@ -1565,7 +1606,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     const bool crc_ok = j->C > 1 ? rb.tb_crc != 0 : rb.seg_crc[0] != 0;
     r->tb_ok = rb.all_ok && crc_ok && nd == j->C && !j->probe; /* a probe is never a decoded TB: its LLRs go to llr_out below like a CRC failure's */
     /* reassemble the TB exactly as passive_ldpc_decode_core: seg_bytes of every block (the CRC24B bytes of a multi-block TB are dropped) */
-    const uint32_t seg_bytes = (j->K >> 3) - (j->F >> 3) - (j->C > 1 ? 3 : 0);
+    const uint32_t seg_bytes = ((j->K - j->F) >> 3) - (j->C > 1 ? 3 : 0);
     uint32_t off = 0;
     for (uint32_t s = 0; s < nd; s++, off += seg_bytes) memcpy(r->tb + off, rb.c[s], seg_bytes);
     if (!r->tb_ok && !j->probe) ++g_tb_fail;

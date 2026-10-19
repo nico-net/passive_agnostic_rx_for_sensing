@@ -31,14 +31,17 @@ int nr_get_E(uint32_t G, uint8_t C, uint8_t Qm, uint8_t Nl, uint8_t r);
 enum { FB_OFF, FB_CELL, FB_FO, FB_CHEST, FB_DEMOD, FB_TBPARAM, FB_MODULE, FB_SEG, FB_N };
 static const char *const fb_name[FB_N] = {"off", "cell", "fo", "chest", "demod", "tbparam", "module", "seg"};
 static __thread nr_gpu_pass_job_t *jobp_tls;
+enum { WHY_SEGFAIL, WHY_C32, WHY_Z, WHY_G, WHY_CLASS, WHY_N };
 static struct {
   nr_gpu_pass_dl_try_fn try_;
   nr_gpu_pass_stats_fn stats;
+  nr_gpu_pass_hq_copy_fn hq_copy[2]; /* the HARQ soft store: [0] host to device, [1] device to host */
   void (*call_begin)(void), (*call_end)(void), (*call_dirty)(void); /* v2 Task 4: the module's held-instance calls (ISAC_PDSCH_GPU_GRAPH_RETRY) */
   _Atomic int on;
   int nbrx, check, fp32; /* fp32: Task 5, the graphs run the FP32 demod (ISAC_GPU_PASS_FP32 / sm_89) */
   int v2;                /* DL GPU data path v2 (ISAC_PDSCH_GPU_GRAPH=1 without ISAC_GPU_PASS=1): the census is GPUGRAPH, the pool serves late threads */
   _Atomic uint64_t fb[FB_N], ev[NR_GPU_PASS_EV_N], gate[NR_GPU_PASS_GATE_N], runs, shadow_n, shadow_fn;
+  _Atomic uint64_t why[WHY_N]; /* transport blocks kept off the pass, by reason (the tbparam fallback split) */
   _Atomic uint64_t segn[8]; /* segmented grants that reached the pass, by segment-count class 1, 2, 4, 8, 16, 32, 64, 128 */
   _Atomic uint64_t chest_why[16]; /* fallback[chest] by nr_pdsch_gpu_chest_pass_inputs reason: 1 cpu route, 2 exact chest off, 3 gpu delay off / not passive / chest_freq, 4 DM-RS type 2 (without _DMRS2),
                                    * 5 shape (N, nrx, Nl, DM-RS count), 6 buffers, 7 pilot span, 8 diag / delay share / DFT window / dump, 9 single branch, 10 non-contiguous */
@@ -127,7 +130,7 @@ void nr_gpu_pass_disable(const char *why)
 
 void nr_gpu_pass_gate(int g)
 {
-  static const char *const gname[] = {"seg", "probe", "share", "gw", "ptrs", "tinterp", "harq", "ldpc_off", "chest_only", "occ", "nomem", "retry"};
+  static const char *const gname[] = {"seg", "probe", "share", "gw", "ptrs", "tinterp", "harq", "ldpc_off", "chest_only", "occ", "nomem", "retry", "gw_ready", "llr_ovr", "cap", "force_cpu"};
   if (g >= 0 && g < NR_GPU_PASS_GATE_N) {
     /* Fix A+D: a first pass that leaves the GPU pass says why (first time per reason here; the census prints every count) */
     if (atomic_fetch_add_explicit(&G.gate[g], 1, memory_order_relaxed) == 0 && g < (int)(sizeof(gname) / sizeof(gname[0])))
@@ -187,7 +190,7 @@ static void census(void)
              (unsigned long)G.chest_why[8], (unsigned long)G.chest_why[9], (unsigned long)G.chest_why[10]);
   LOG_A(PHY,
         "SENSING: %s%s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu seg=%lu] seg_grants[1=%lu 2=%lu 4=%lu 8=%lu 16=%lu 32=%lu 64=%lu 128=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
-        "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu probe_done=%lu old_first=%lu fp32_flip=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu retry=%lu]\n",
+        "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu probe_done=%lu old_first=%lu fp32_flip=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu retry=%lu gw_ready=%lu llr_ovr=%lu cap=%lu force_cpu=%lu] tbparam_why[segfail=%lu c_gt_32=%lu z=%lu g=%lu class=%lu]\n",
         pool, buf, (unsigned long)G.fb[FB_OFF], (unsigned long)G.fb[FB_CELL], (unsigned long)G.fb[FB_FO], (unsigned long)G.fb[FB_CHEST],
         (unsigned long)G.fb[FB_DEMOD], (unsigned long)G.fb[FB_TBPARAM], (unsigned long)G.fb[FB_MODULE], (unsigned long)G.fb[FB_SEG],
         (unsigned long)G.segn[0], (unsigned long)G.segn[1], (unsigned long)G.segn[2], (unsigned long)G.segn[3], (unsigned long)G.segn[4], (unsigned long)G.segn[5], (unsigned long)G.segn[6], (unsigned long)G.segn[7], (unsigned long)G.ev[NR_GPU_PASS_EV_COMMIT],
@@ -195,7 +198,8 @@ static void census(void)
         (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_BAD], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL_BAD],
         (unsigned long)G.ev[NR_GPU_PASS_EV_CONT_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_PROBE], (unsigned long)G.ev[NR_GPU_PASS_EV_OLD_FIRST], (unsigned long)G.ev[NR_GPU_PASS_EV_FP32_FLIP], (unsigned long)G.gate[0], (unsigned long)G.gate[1],
         (unsigned long)G.gate[2], (unsigned long)G.gate[3], (unsigned long)G.gate[4], (unsigned long)G.gate[5], (unsigned long)G.gate[6], (unsigned long)G.gate[7],
-        (unsigned long)G.gate[8], (unsigned long)G.gate[9], (unsigned long)G.gate[10], (unsigned long)G.gate[11]);
+        (unsigned long)G.gate[8], (unsigned long)G.gate[9], (unsigned long)G.gate[10], (unsigned long)G.gate[11], (unsigned long)G.gate[12], (unsigned long)G.gate[13], (unsigned long)G.gate[14],
+        (unsigned long)G.gate[15], (unsigned long)G.why[WHY_SEGFAIL], (unsigned long)G.why[WHY_C32], (unsigned long)G.why[WHY_Z], (unsigned long)G.why[WHY_G], (unsigned long)G.why[WHY_CLASS]);
 }
 
 static int fb(int why)
@@ -250,6 +254,66 @@ static int env_list(const char *name, const char *dflt, int *v, int max)
   return n;
 }
 
+/* The demod variants (qam_mode of nl >= 2, align of nl = 1) the receiver can ask of a pass for nl layers: the per-RNTI receiver choice (nr_pdsch_passive_queue.c: mrc_mode 0..6 sets the MRC / IRC overrides) and
+ * the modulation order both change them, so a class is warmed for every one the policy can produce, not only for the default receiver. v[i] = {qmode, align}. */
+static int demod_variants(PHY_VARS_NR_UE *ue, int nl, int v[16][2])
+{
+  extern __thread int nr_dlsch_mrc_mode_override, nr_dlsch_irc_override;
+  static const int ov[7][2] = {{-1, -1}, {1, 0}, {2, 0}, {3, 0}, {1, 3}, {1, 2}, {1, 4}};
+  const int mrc0 = nr_dlsch_mrc_mode_override, irc0 = nr_dlsch_irc_override;
+  int n = 0;
+  for (int o = 0; o < 7; o++)
+    for (int qm = 2; qm <= 8; qm += 2) {
+      nr_dlsch_mrc_mode_override = ov[o][0];
+      nr_dlsch_irc_override = ov[o][1];
+      int qmode = 0, align = 0;
+      if (nr_pdsch_gpu_demod_pass_variant(ue, nl, qm, &qmode, &align) != 0)
+        continue;
+      int dup = 0;
+      for (int i = 0; i < n; i++)
+        dup |= v[i][0] == qmode && v[i][1] == align;
+      if (!dup && n < 16) {
+        v[n][0] = qmode;
+        v[n][1] = align;
+        n++;
+      }
+    }
+  nr_dlsch_mrc_mode_override = mrc0;
+  nr_dlsch_irc_override = irc0;
+  return n;
+}
+
+static const int g_nrbs[] = {273, 217, 136, 96, 48, 24, 12, 6};
+static const int g_ncbc[9] = {1, 2, 4, 8, 16, 32, 64, 128, NR_GPU_PASS_MAX_CB}; /* the code-block count classes (nr_gpu_pass_ncb_class) */
+static const int g_nls[] = {1, 2, 4, 3};
+/* the contiguous classes of the DM-RS counts nds: PRB classes x layers x code-block count classes x demod variants */
+static void warm_contiguous(nr_gpu_pass_warm_fn warmf, PHY_VARS_NR_UE *ue, int nbrx, const int *nds, int nnds, int budget, int evm, int *made, int *failed)
+{
+  for (int di = 0; di < nnds; di++)
+    for (int ni = 0; ni < 8 && *made < budget; ni++)
+      for (int li = 0; li < 4 && *made < budget; li++) {
+        const int nl = g_nls[li];
+        if (nl > nbrx)
+          continue;
+        int variants[16][2];
+        const int nvar = demod_variants(ue, nl, variants);
+        /* code blocks per pass: from 1 to the most the grant can carry (256QAM, rate 0.93) */
+        const int cmax = g_nrbs[ni] * nl * 132 * 8 * 93 / 100 / 8400 + 1;
+        for (int ci = 0; ci < 9 && *made < budget; ci++) {
+          const int ncb = g_ncbc[ci];
+          if (ci > 0 && g_ncbc[ci - 1] >= cmax)
+            break;
+          for (int v = 0; v < nvar && *made < budget; v++) {
+            const nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(g_nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)nds[di], (uint16_t)ncb, (uint8_t)(1 | (G.fp32 ? NR_GPU_PASS_FP32_DEMOD : 0))};
+            if (warmf(&sh, variants[v][0], variants[v][1], evm) == 0)
+              ++*made;
+            else
+              ++*failed;
+          }
+        }
+      }
+}
+
 void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
 {
   /* DEFERRED/DO NOT USE: ISAC_GPU_PASS not in the frozen config t26zE (2026-10-18); slated for removal */
@@ -265,8 +329,8 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     for (size_t i = 0; i < sizeof(g_sub_name) / sizeof(g_sub_name[0]); i++) {
       char n[64];
       snprintf(n, sizeof(n), "ISAC_PDSCH_GPU_GRAPH_%s", g_sub_name[i]);
-      /* baked default on: COVER, SPLIT, RETRY, DMRS2 (the others stay off) */
-      const char *v = getenv(n) ?: (i == 0 || i == 1 || i == 2 || i == 5 ? "1" : NULL);
+      /* baked default on: COVER, SPLIT, RETRY, DMRS2, SEG128 (the others stay off) */
+      const char *v = getenv(n) ?: (i == 0 || i == 1 || i == 2 || i == 5 || i == 6 ? "1" : NULL);
       g_sub_on[i] = G.v2 && v && atoi(v) == 1;
     }
     g_sub_on[2] &= g_sub_on[1]; /* review S2: RETRY needs SPLIT (its D entry is a split launch) */
@@ -297,6 +361,8 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   G.try_ = h ? (nr_gpu_pass_dl_try_fn)dlsym(h, "nr_gpu_pass_dl_try") : NULL;
   { int (*fp32f)(void) = h ? (int (*)(void))dlsym(h, "nr_gpu_pass_fp32_default") : NULL; G.fp32 = fp32f ? fp32f() : 0; } /* before initf: the default classes read the same */
   G.stats = h ? (nr_gpu_pass_stats_fn)dlsym(h, "nr_gpu_pass_stats") : NULL;
+  G.hq_copy[0] = h ? (nr_gpu_pass_hq_copy_fn)dlsym(h, "nr_gpu_pass_hq_up") : NULL;
+  G.hq_copy[1] = h ? (nr_gpu_pass_hq_copy_fn)dlsym(h, "nr_gpu_pass_hq_down") : NULL;
   G.call_begin = h ? (void (*)(void))dlsym(h, "nr_gpu_pass_call_begin") : NULL;
   G.call_end = h ? (void (*)(void))dlsym(h, "nr_gpu_pass_call_end") : NULL;
   G.call_dirty = h ? (void (*)(void))dlsym(h, "nr_gpu_pass_call_dirty") : NULL;
@@ -334,50 +400,31 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     return;
   }
   /* the class list: PRB classes x layers x the code block counts that can occur x DM-RS symbol counts, in the order of expected use, up to ISAC_GPU_PASS_CLASSES */
-  int nd[4], nnd = env_list("ISAC_GPU_PASS_NDMRS", "3,2", nd, 4);
+  int nd[4], nnd = env_list("ISAC_GPU_PASS_NDMRS", "3,2", nd, 4); /* segmented classes: 2 and 3 DM-RS symbols (1 and 4 would double their C sub-graphs, ~0.5 GB of graph memory on top of the 2 GB cap; counted as unseen) */
   /* DEFERRED/DO NOT USE: ISAC_GPU_PASS_CLASSES not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ce = getenv("ISAC_GPU_PASS_CLASSES");
   const int budget = ce ? atoi(ce) : c.split ? 1 << 20 : 512; /* split: every class of the loops (sub-graphs are shared between classes; the module's memory cap bounds them) */
   /* DEFERRED/DO NOT USE: ISAC_PDSCH_DECODE_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
   const int evm = ((getenv("ISAC_PDSCH_EVM_GRANT") ?: "1") || (getenv("ISAC_PDSCH_SNR_GATE") ?: "1") || (getenv("ISAC_PDSCH_DECODE_DIAG") && atoi(getenv("ISAC_PDSCH_DECODE_DIAG")) != 0)) ? 1 : 0;
-  static const int nrbs[] = {273, 217, 136, 96, 48, 24, 12, 6};
-  static const int nls[] = {1, 2, 4, 3};
   int made = 0, failed = 0;
-  /* split: contiguous classes also with 1 DM-RS symbol (only C keys are added; tim replay: 224-260 unseen grants per run had ndmrs 1) */
+  /* contiguous classes with 3, 2 and 1 DM-RS symbols (only C keys are added for the later counts: the D and L sub-graphs are shared; tim replay: 224-260 unseen grants per run had ndmrs 1); 4 DM-RS symbols (additional
+   * position 3, rare) are warmed last, after the segmented classes, so that a small GPU's memory cap cuts them first */
   int ndc[4], nndc = env_list("ISAC_GPU_PASS_NDMRS", c.split ? "3,2,1" : "3,2", ndc, 4);
-  for (int di = 0; di < nndc; di++)
-    for (int ni = 0; ni < 8 && made < budget; ni++)
-      for (int li = 0; li < 4 && made < budget; li++) {
-        const int nl = nls[li];
-        if (nl > fp->nb_antennas_rx)
-          continue;
-        /* the demod variants: QPSK and higher can resolve different MMSE modes for 3 and 4 layers */
-        int variants[2][2], nvar = 0;
-        for (int qm = 2; qm <= 6; qm += 4) {
-          int qmode = 0, align = 0;
-          if (nr_pdsch_gpu_demod_pass_variant(ue, nl, qm, &qmode, &align) != 0)
-            continue;
-          int dup = 0;
-          for (int v = 0; v < nvar; v++)
-            dup |= variants[v][0] == qmode && variants[v][1] == align;
-          if (!dup) {
-            variants[nvar][0] = qmode;
-            variants[nvar][1] = align;
-            nvar++;
-          }
-        }
-        /* code blocks per pass: from 1 to the most the grant can carry (256QAM, rate 0.93) */
-        const int cmax = nrbs[ni] * nl * 132 * 8 * 93 / 100 / 8400 + 1;
-        for (int ncb = 1; ncb <= 32 && made < budget; ncb <<= 1) {
-          if (ncb / 2 >= cmax)
-            break;
-          for (int v = 0; v < nvar && made < budget; v++) {
-            const nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)ndc[di], (uint16_t)ncb, (uint8_t)(1 | (G.fp32 ? NR_GPU_PASS_FP32_DEMOD : 0))};
-            if (warmf(&sh, variants[v][0], variants[v][1], evm) == 0)
-              made++;
-            else
-              failed++;
-          }
+  warm_contiguous(warmf, ue, fp->nb_antennas_rx, ndc, nndc, budget, evm, &made, &failed);
+  /* transport blocks below ~700 bits (Z not a multiple of 4: one code block) run the generic LDPC kernel: its own L sub-graph per class (nz4), the C and D ones are shared */
+  if (c.split)
+    for (int ni = 0; ni < 8; ni++)
+      for (int li = 0; li < 4; li++) {
+        const int nl = g_nls[li];
+        int variants[16][2];
+        const int nvar = nl <= fp->nb_antennas_rx ? demod_variants(ue, nl, variants) : 0;
+        for (int v = 0; v < nvar; v++) {
+          nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(g_nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)ndc[0], 1, (uint8_t)(1 | (G.fp32 ? NR_GPU_PASS_FP32_DEMOD : 0))};
+          sh.nz4 = 1;
+          if (warmf(&sh, variants[v][0], variants[v][1], evm) == 0)
+            made++;
+          else
+            failed++;
         }
       }
   /* segmented (PRG / VRB-bundle) classes: segment-count classes 1, 2, 4, 8, 16 (32: split) on top of the contiguous ones. Own budget
@@ -399,28 +446,17 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
         for (int sc = 0; sc < nsegc && smade < sbudget; sc++) {
           const int nl = segnl[li], ns = segc[sc];
           const int rows = nd[di] * nl * fp->nb_antennas_rx * ns; /* SEG128 (ns > 32): chunks of whole (DM-RS symbol, layer) groups, at most 2048 rows (the module's c_groups_per_chunk) */
-          if (nl > fp->nb_antennas_rx || ns > nrbs[ni] || (ns <= 32 ? rows > segrows : rows > 2048 || ns * fp->nb_antennas_rx > segrows))
+          if (nl > fp->nb_antennas_rx || ns > g_nrbs[ni] || (ns <= 32 ? rows > segrows : rows > 2048 || ns * fp->nb_antennas_rx > segrows))
             continue;
-          int variants[2][2], nvar = 0;
-          for (int qm = 2; qm <= 6; qm += 4) {
-            int qmode = 0, align = 0;
-            if (nr_pdsch_gpu_demod_pass_variant(ue, nl, qm, &qmode, &align) != 0)
-              continue;
-            int dup = 0;
-            for (int v = 0; v < nvar; v++)
-              dup |= variants[v][0] == qmode && variants[v][1] == align;
-            if (!dup) {
-              variants[nvar][0] = qmode;
-              variants[nvar][1] = align;
-              nvar++;
-            }
-          }
-          const int cmax = nrbs[ni] * nl * 132 * 8 * 93 / 100 / 8400 + 1;
-          for (int ncb = 1; ncb <= 32 && smade < sbudget; ncb <<= 1) {
-            if (ncb / 2 >= cmax)
+          int variants[16][2];
+          const int nvar = demod_variants(ue, nl, variants);
+          const int cmax = g_nrbs[ni] * nl * 132 * 8 * 93 / 100 / 8400 + 1;
+          for (int ci = 0; ci < 9 && smade < sbudget; ci++) {
+            const int ncb = g_ncbc[ci];
+            if (ci > 0 && g_ncbc[ci - 1] >= cmax)
               break;
             for (int v = 0; v < nvar && smade < sbudget; v++) {
-              nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)nd[di], (uint16_t)ncb, (uint8_t)(1 | (G.fp32 ? NR_GPU_PASS_FP32_DEMOD : 0)), (uint16_t)ns};
+              nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(g_nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)nd[di], (uint16_t)ncb, (uint8_t)(1 | (G.fp32 ? NR_GPU_PASS_FP32_DEMOD : 0)), (uint16_t)ns};
               if (warmf(&sh, variants[v][0], variants[v][1], evm) == 0)
                 smade++;
               else
@@ -428,6 +464,10 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
             }
           }
         }
+  if (c.split) {
+    const int nd4[1] = {4};
+    warm_contiguous(warmf, ue, fp->nb_antennas_rx, nd4, 1, budget, evm, &made, &failed);
+  }
   G.nbrx = fp->nb_antennas_rx;
   G.check = 0; /* Fix A+D: no shadow decode on the hot path; the pass-vs-reference comparison lives in the unit tests */
   if (G.v2 && made > 0 && g_pool.n == 0 && pthread_key_create(&g_pool_key, pool_release) == 0) /* the per-thread host sets for threads that reach the pass after the RX fence (the async recovery worker); once */
@@ -447,6 +487,11 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
 
 /* per-grant on-air breakdown of the last DL pass of this thread, printed and zeroed by the EVMGRANT line (gp=): total, before try, try, prep, launch, gstart, gspan (us) */
 __thread uint32_t nr_gp_tt[7];
+/* HARQ soft store <-> host layout (nr_gpu_pass.h): 0 = done */
+int nr_gpu_pass_dl_hq_xfer(int down, const uint16_t *blk, int16_t *d, int C, int kcz, int n)
+{
+  return G.hq_copy[down != 0] ? G.hq_copy[down != 0](blk, d, C, kcz, n) : -1;
+}
 int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
 {
   memset(nr_gp_tt, 0, sizeof(nr_gp_tt));
@@ -537,15 +582,33 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
     if (j->dj.sym_mask >> m & 1)
       G_dem += (uint32_t)j->dj.nre[m] * cw->qamModOrder * cw->Nl;
   /* ---- transport block parameters, as passive_ldpc_decode_core derives them (no HARQ combining: first transmission, d cleared) */
+  const uint32_t A = in->hq_tbs ? in->hq_tbs : cw->TBS; /* a HARQ retransmission keeps the TBS of its first transmission (the LLR norm below still sees the grant's) */
   unsigned C = 0, K = 0, Z = 0, F = 0;
-  if (nr_segmentation(NULL, NULL, lenWithCrc(1, cw->TBS), &C, &K, &Z, &F, cw->ldpcBaseGraph) < 0 || C < 1 || C > NR_GPU_PASS_MAX_CB || (Z & 3) || (K & 7) || (K >> 3) > 1056
-      || (in->probe ? G_dem > in->G || G_dem == 0 : G_dem != in->G) || in->G == 0) /* a probe past its horizon demodulates fewer LLRs; the rest stay 0 */
+  /* why a transport block stays off the pass (counted in G.why, printed by the census): the segmentation failed, more code blocks than a pass holds, the demodulated LLRs are not the G of the grant,
+   * a lifting size the kernels do not take (Z not a multiple of 4 with more than one block: cannot occur, TBs below ~700 bits have one), or a class / iteration count outside the module's */
+  if (nr_segmentation(NULL, NULL, lenWithCrc(1, A), &C, &K, &Z, &F, cw->ldpcBaseGraph) < 0 || C < 1) {
+    atomic_fetch_add_explicit(&G.why[WHY_SEGFAIL], 1, memory_order_relaxed);
     return fb(FB_TBPARAM);
+  }
+  if (C > NR_GPU_PASS_MAX_CB) { /* TBS above 32 * 8424 bits: needs the pass and the LDPC context sized for more than NR_GPU_LDPC_MAX_JOBS blocks */
+    atomic_fetch_add_explicit(&G.why[WHY_C32], 1, memory_order_relaxed);
+    return fb(FB_TBPARAM);
+  }
+  if (((Z & 3) && C != 1) || ((K - F) & 7) || ((K + 7) >> 3) > 1056) {
+    atomic_fetch_add_explicit(&G.why[WHY_Z], 1, memory_order_relaxed);
+    return fb(FB_TBPARAM);
+  }
+  if ((in->probe ? G_dem > in->G || G_dem == 0 : G_dem != in->G) || in->G == 0) { /* a probe past its horizon demodulates fewer LLRs; the rest stay 0 */
+    atomic_fetch_add_explicit(&G.why[WHY_G], 1, memory_order_relaxed);
+    return fb(FB_TBPARAM);
+  }
   const uint32_t n_dec = in->probe && C > 1 ? 1u : C; /* a probe decodes code block 0 (nb_segments_to_decode = 1 of passive_ldpc_decode_core) */
   const int ncb = nr_gpu_pass_ncb_class((int)n_dec);
   const int nrbc = nr_gpu_pass_nrb_class(nrb);
-  if (!ncb || !nrbc || in->it_max < 1 || in->it_max > 17)
+  if (!ncb || !nrbc || in->it_max < 1 || in->it_max > 17) {
+    atomic_fetch_add_explicit(&G.why[WHY_CLASS], 1, memory_order_relaxed);
     return fb(FB_TBPARAM);
+  }
   const uint32_t E = (uint32_t)nr_get_E(in->G, (uint8_t)C, cw->qamModOrder, cw->Nl, 0);
   int llrLen = 0;
   uint32_t E2 = E, first = C;
@@ -559,7 +622,10 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
       break;
     }
   }
-  j->A = cw->TBS;
+  j->A = A;
+  j->hq_mode = (uint8_t)(in->probe || !in->hq_blk ? 0 : in->hq_mode);
+  if (j->hq_mode)
+    memcpy(j->hq_blk, in->hq_blk, (size_t)C * sizeof(uint16_t));
   j->C = C; j->K = K; j->Z = Z; j->F = F; j->E = E; j->E2 = E2; j->first_rE2 = first; j->tbslbrm = in->tbslbrm;
   j->BG = cw->ldpcBaseGraph; j->R = R; j->R2 = R2; j->rv = cw->rv; j->Qm = cw->qamModOrder; j->it_max = (uint8_t)in->it_max;
   j->n_decode = n_dec;
@@ -592,7 +658,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   j->dt_d = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot * (double)(j->dmrs_sym[ndmrs - 1] - j->dmrs_sym[0]);
   j->df_d = (double)fp->subcarrier_spacing;
   j->shape = (nr_gpu_pass_shape_t){(uint16_t)nrbc, (uint16_t)in->dlsch_config->number_symbols, (uint16_t)cw->Nl, (uint16_t)cw->qamModOrder, (uint16_t)ndmrs,
-                                   (uint16_t)ncb, (uint8_t)((j->dj.evm_fp64 ? 0 : 1) | (j->dj.demod_fp32 ? NR_GPU_PASS_FP32_DEMOD : 0)), (uint16_t)nsegc};
+                                   (uint16_t)ncb, (uint8_t)((j->dj.evm_fp64 ? 0 : 1) | (j->dj.demod_fp32 ? NR_GPU_PASS_FP32_DEMOD : 0)), (uint16_t)nsegc, 0, (uint8_t)((Z & 3) != 0)};
   /* ---- the pass */
   memset(&out->r, 0, sizeof(out->r));
   out->r.tb = in->tb;

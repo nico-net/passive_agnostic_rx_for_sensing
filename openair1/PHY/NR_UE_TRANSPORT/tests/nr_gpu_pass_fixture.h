@@ -110,6 +110,8 @@ struct GpuPassModule {
 class GpuPassFixture {
  public:
   typedef std::complex<double> cd;
+  static inline int max_cb = 8;         /* from_shape(): most code blocks of a built TB (the encoder takes 8 per macro group; a test of many blocks raises it) */
+  static inline int force_A = 0;        /* from_shape(): the transport block size in bits (0 = the target code rate's); for small TBs (odd lifting sizes) */
   static inline double noise_db = 20.0; /* SNR of small_grant()/from_shape() fixtures built from now on */
   static inline int widen_rb = 0;       /* v2 Task 2: contiguous fixtures built from now on estimate the channel over widen_rb more PRBs above the grant (the slot share's
                                          * widened band; the DM-RS is transmitted there too, the data is not) */
@@ -606,7 +608,7 @@ class GpuPassFixture {
   {
     t->G = (uint32_t)nrb * 12u * (uint32_t)(NSYM - first_sym - n_dm) * qm * nl;
     const double Rt = qm <= 4 ? 0.30 : 0.25;
-    int A = ((int)(t->G * Rt)) & ~7;
+    int A = force_A > 0 ? force_A : ((int)(t->G * Rt)) & ~7;
     for (;; A = (int)(A * 0.8) & ~7) {
       if (A < 64) return false;
       const double R = (A + 24.0) / t->G;
@@ -614,7 +616,7 @@ class GpuPassFixture {
       unsigned C, K, Z, F;
       const int B = lenWithCrc(1, A);
       if (segment(nullptr, nullptr, (unsigned)B, &C, &K, &Z, &F, t->BG) < 0) return false;
-      if (C <= 8) {
+      if (C <= (unsigned)max_cb) {
         if (A > 3824) { /* 38.214 5.1.3.2: TBS + 24 is a multiple of 8 C, so that every code block is a whole number of bytes */
           const int A2 = (int)((A + 24 + 8 * C - 1) / (8 * C)) * (int)(8 * C) - 24;
           if (A2 != A) { A = A2; unsigned C2; if (segment(nullptr, nullptr, (unsigned)lenWithCrc(1, A), &C2, &K, &Z, &F, t->BG) < 0 || C2 != C) { A = (int)(A * 0.9) & ~7; continue; } }
@@ -679,20 +681,23 @@ class GpuPassFixture {
     t->Kb = segment(b.data(), cp.data(), (unsigned)B, &c_, &k_, &z_, &f_, t->BG);
     t->cblk = cs;
     alignas(64) static uint8_t d[68 * 384];
-    memset(d, 0, sizeof(d));
     LdpcEnc impp = {};
-    impp.n_segments = (unsigned)C; impp.first_seg = 0; impp.K = (uint32_t)K; impp.Kb = (uint32_t)t->Kb; impp.Zc = (uint32_t)Z; impp.F = (uint32_t)F; impp.BG = (uint8_t)t->BG;
-    enc(cp.data(), d, &impp);
+    impp.n_segments = (unsigned)C; impp.K = (uint32_t)K; impp.Kb = (uint32_t)t->Kb; impp.Zc = (uint32_t)Z; impp.F = (uint32_t)F; impp.BG = (uint8_t)t->BG;
     const uint32_t Emax = std::max(t->E, t->E2);
     std::vector<uint8_t> e(Emax + 64, 0), f((t->E + 127) & ~63u, 0), f2((t->E2 + 127) & ~63u, 0);
-    nr_rate_matching_ldpc(0, (uint8_t)t->BG, (uint16_t)Z, d, e.data(), (uint8_t)C, (uint32_t)F, (uint32_t)(K - F - 2 * Z), (uint8_t)t->rv, Emax);
-    nr_interleaving_ldpc(t->E, (uint8_t)qm, e.data(), f.data());
-    if (t->E2 != t->E) nr_interleaving_ldpc(t->E2, (uint8_t)qm, e.data(), f2.data());
     bits->clear();
-    for (int r = 0; r < C; r++) {
-      const bool first = (uint32_t)r < t->first_rE2;
-      const std::vector<uint8_t> &src = first ? f : f2;
-      for (uint32_t i = 0; i < (first ? t->E : t->E2); i++) bits->push_back((src[i] >> r) & 1u);
+    for (int g0 = 0; g0 < C; g0 += 8) { /* one encoder macro group = 8 code blocks, bit-sliced */
+      memset(d, 0, sizeof(d));
+      impp.first_seg = (unsigned)g0;
+      enc(cp.data(), d, &impp);
+      nr_rate_matching_ldpc(0, (uint8_t)t->BG, (uint16_t)Z, d, e.data(), (uint8_t)C, (uint32_t)F, (uint32_t)(K - F - 2 * Z), (uint8_t)t->rv, Emax);
+      nr_interleaving_ldpc(t->E, (uint8_t)qm, e.data(), f.data());
+      if (t->E2 != t->E) nr_interleaving_ldpc(t->E2, (uint8_t)qm, e.data(), f2.data());
+      for (int r = g0; r < C && r < g0 + 8; r++) {
+        const bool first = (uint32_t)r < t->first_rE2;
+        const std::vector<uint8_t> &src = first ? f : f2;
+        for (uint32_t i = 0; i < (first ? t->E : t->E2); i++) bits->push_back((src[i] >> (r - g0)) & 1u);
+      }
     }
     (void)nl;
     if (bits->size() != t->G) { fprintf(stderr, "fixture: coded bits %zu != G %u\n", bits->size(), t->G); return false; }
@@ -714,11 +719,12 @@ class GpuPassFixture {
   }
   /* shape.nrb_class is the grant's PRB count here (24/48/96/217 are classes themselves) */
   /* corrupt_from_cb >= 0: the coded bits of code blocks >= corrupt_from_cb are flipped with probability 0.3 (those blocks cannot decode) */
-  static GpuPassFixture from_shape(const nr_gpu_pass_shape_t &sh, int seed, int corrupt_from_cb = -1, const std::vector<SegDef> *sd = nullptr, int bwp_start = 0, int ref_point = 0)
+  static GpuPassFixture from_shape(const nr_gpu_pass_shape_t &sh, int seed, int corrupt_from_cb = -1, const std::vector<SegDef> *sd = nullptr, int bwp_start = 0, int ref_point = 0, int rv = 0, int payload_seed = -1)
   {
     TbInfo t;
+    t.rv = rv; /* a retransmission: the same transport block (payload_seed) with another redundancy version and its own channel / noise (seed) */
     std::vector<uint8_t> bits;
-    const bool ok = tb_params(&t, sh.nrb_class, sh.nl, sh.qm, seed) && encode_tb(&t, sh.qm, sh.nl, &bits);
+    const bool ok = tb_params(&t, sh.nrb_class, sh.nl, sh.qm, payload_seed >= 0 ? payload_seed : seed) && encode_tb(&t, sh.qm, sh.nl, &bits);
     if (ok && corrupt_from_cb >= 0) {
       std::mt19937 rng(seed + 99);
       std::uniform_real_distribution<double> U(0, 1);
@@ -1025,6 +1031,7 @@ class GpuPassFixture {
     const int C = n_decode && (int)n_decode < Ctb ? (int)n_decode : Ctb; /* a probe decodes block 0 with the whole TB's parameters (nb_segments_to_decode) */
     std::vector<nr_gpu_ldpc_job_t> jobs((size_t)C);
     std::vector<int16_t> e(std::max(tb.E, tb.E2) + 16), d((size_t)Kc * Z + 16), zv((size_t)68 * 384 + 16);
+    std::vector<int8_t> lin_all((size_t)C * NR_GPU_LDPC_DEV_IN_STRIDE, 0);
     for (int r = 0; r < C; r++) {
       const bool first = (uint32_t)r < tb.first_rE2;
       const uint32_t E = first ? tb.E : tb.E2;
@@ -1036,23 +1043,37 @@ class GpuPassFixture {
       memset(zv.data() + Kprime, 127, (size_t)F * 2);
       memcpy(zv.data() + 2 * Z, d.data(), (size_t)(Kprime - 2 * Z) * 2);
       memcpy(zv.data() + K, d.data() + (K - 2 * Z), (size_t)(Kc * Z - K) * 2);
-      int8_t *l = (int8_t *)P.lin.host + (size_t)r * NR_GPU_LDPC_DEV_IN_STRIDE;
+      int8_t *l = lin_all.data() + (size_t)r * NR_GPU_LDPC_DEV_IN_STRIDE;
       for (int i = 0; i < Kc * Z; i++) { const int v = zv[(size_t)i]; l[i] = (int8_t)(v > 127 ? 127 : v < -128 ? -128 : v); }
       jobs[(size_t)r] = {};
       jobs[(size_t)r].BG = (uint8_t)tb.BG; jobs[(size_t)r].R = first ? tb.R : tb.R2; jobs[(size_t)r].Z = (uint16_t)Z; jobs[(size_t)r].K = (uint16_t)K; jobs[(size_t)r].it_max = 8;
     }
-    nr_gpu_buf_h2d_async(&P.lin, 0, (size_t)(C - 1) * NR_GPU_LDPC_DEV_IN_STRIDE + (size_t)Kc * Z, st);
-    if (m.ldpc(jobs.data(), C, &P.lin, &P.bits, st)) return -1;
-    nr_gpu_buf_d2h_async(&P.bits, 0, P.bits.bytes, st);
-    if (cudaStreamSynchronize(st)) return -1;
-    const int *res = (const int *)((char *)P.bits.host + NR_GPU_LDPC_DEV_RES_OFF);
-    const int KB = K >> 3;
+    /* the standalone context takes NR_GPU_LDPC_MAX_JOBS blocks per launch (a TB with more is cut into launches, as nr_pdsch_gpu_ldpc_host.c does) */
+    std::vector<uint8_t> snap_all((size_t)C * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX);
+    std::vector<int> res_all((size_t)2 * C);
+    for (int r0 = 0; r0 < C; r0 += NR_GPU_LDPC_MAX_JOBS) {
+      const int n = std::min(C - r0, (int)NR_GPU_LDPC_MAX_JOBS);
+      memcpy(P.lin.host, lin_all.data() + (size_t)r0 * NR_GPU_LDPC_DEV_IN_STRIDE, (size_t)n * NR_GPU_LDPC_DEV_IN_STRIDE);
+      nr_gpu_buf_h2d_async(&P.lin, 0, (size_t)(n - 1) * NR_GPU_LDPC_DEV_IN_STRIDE + (size_t)Kc * Z, st);
+      if (m.ldpc(jobs.data() + r0, n, &P.lin, &P.bits, st)) return -1;
+      nr_gpu_buf_d2h_async(&P.bits, 0, P.bits.bytes, st);
+      if (cudaStreamSynchronize(st)) return -1;
+      const int *rs = (const int *)((char *)P.bits.host + NR_GPU_LDPC_DEV_RES_OFF);
+      for (int r = 0; r < n; r++) {
+        res_all[(size_t)2 * (r0 + r)] = rs[2 * r];
+        res_all[(size_t)2 * (r0 + r) + 1] = rs[2 * r + 1];
+        memcpy(snap_all.data() + (size_t)(r0 + r) * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX, (uint8_t *)P.bits.host + (size_t)r * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX,
+               (size_t)NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX);
+      }
+    }
+    const int *res = res_all.data();
+    const int KB = (K + 7) >> 3; /* a lifting size that is not a multiple of 4 gives K = Kb * Z of no whole number of bytes */
     if (getenv("GP_DEBUG"))
       for (int r = 0; r < C; r++) {
         int diff = -1;
         if (res[2 * r] > 0) {
           diff = 0;
-          const uint8_t *sn = (uint8_t *)P.bits.host + ((size_t)r * NR_GPU_LDPC_MAX_SNAP) * NR_GPU_LDPC_KB_MAX;
+          const uint8_t *sn = snap_all.data() + ((size_t)r * NR_GPU_LDPC_MAX_SNAP) * NR_GPU_LDPC_KB_MAX;
           for (int q2 = 0; q2 < K / 8; q2++) diff += __builtin_popcount((unsigned)(sn[q2] ^ tb.cblk[(size_t)r][(size_t)q2]));
         }
         fprintf(stderr, "GP_DEBUG cb %d nsnap %d syn0 %d first-snapshot bit diff vs encoded block %d (Kprime %d)\n", r, res[2 * r], res[2 * r + 1], diff, Kprime);
@@ -1065,9 +1086,9 @@ class GpuPassFixture {
       int hit = -1;
       if (!aborted)
         for (int q2 = 0; q2 < res[2 * r] && hit < 0; q2++)
-          if (check_crc((uint8_t *)P.bits.host + ((size_t)r * NR_GPU_LDPC_MAX_SNAP + q2) * NR_GPU_LDPC_KB_MAX, Kprime, ctype)) hit = q2;
+          if (check_crc(snap_all.data() + ((size_t)r * NR_GPU_LDPC_MAX_SNAP + q2) * NR_GPU_LDPC_KB_MAX, Kprime, ctype)) hit = q2;
       if (hit >= 0) {
-        memcpy(c.data() + (size_t)r * KB, (uint8_t *)P.bits.host + ((size_t)r * NR_GPU_LDPC_MAX_SNAP + hit) * NR_GPU_LDPC_KB_MAX, KB);
+        memcpy(c.data() + (size_t)r * KB, snap_all.data() + ((size_t)r * NR_GPU_LDPC_MAX_SNAP + hit) * NR_GPU_LDPC_KB_MAX, KB);
         s->seg_ok[r] = 1;
         continue;
       }
@@ -1078,7 +1099,7 @@ class GpuPassFixture {
     s->tbs = (uint32_t)tb.A;
     s->tb_ok = 0;
     if (!s->need_cpu) {
-      const int seg_bytes = KB - (F >> 3) - (Ctb > 1 ? 3 : 0);
+      const int seg_bytes = ((K - F) >> 3) - (Ctb > 1 ? 3 : 0);
       uint32_t off = 0;
       for (int r = 0; r < C; r++, off += seg_bytes) memcpy(s->tb + off, c.data() + (size_t)r * KB, seg_bytes);
       s->tb_ok = all && C == Ctb && (C == 1 || check_crc(s->tb, lenWithCrc(1, tb.A), crcType(1, tb.A)));

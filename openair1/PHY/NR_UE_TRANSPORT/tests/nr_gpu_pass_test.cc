@@ -11,6 +11,7 @@ extern "C" {
 #include "nr_gpu_pass_fixture.h"
 #include "nr_gpu_pass_fp32_gate.h"
 #include "nr_gpu_pass_retry.h"
+#include "nr_gpu_pass_hq.h"
 #include "nr_gpu_platform.h"
 #include "nr_gpu_pass_post.h"
 #include <random>
@@ -22,6 +23,7 @@ extern "C" {
 #include <thread>
 #include <memory>
 #include <string>
+#include <array>
 static bool have_gpu() { return nr_gpu_model() >= 0 && getenv("NR_GPU_TEST_SKIP") == nullptr; }
 
 TEST(GpuMem, RoundTripBothModels) {
@@ -816,6 +818,358 @@ TEST(GpuPassPost, RateDematchMatchesCpu) {
   printf("rate dematch: %d CPU-refused segments, %d with repetition, %d with LBRM\n", n_rej, n_rep, n_lbrm);
   EXPECT_GT(n_rep, 50);
   EXPECT_GT(n_lbrm, 50);
+}
+
+/* ---- DL HARQ soft combining on the device: k_rdm with hq_mode 1 (first transmission, clear = 1, the sum is stored) and 2 (retransmission, clear = 0, the stored sum is added to) against
+ * nr_rate_matching_ldpc_rx on a persistent d buffer, the CPU path's combine (clear flag of d_to_be_cleared). Both the int8 LDPC input and the stored int16 circular buffer are compared bit for bit. */
+static int cpu_prep_hq(const nr_gpu_rdm_seg_t &s, const int16_t *llr, int8_t *l, std::vector<int16_t> &d, int clear) {
+  const int Kc = s.BG == 2 ? 52 : 68, Z = s.Z;
+  std::vector<int16_t> e(s.E + 16);
+  {
+    const uint32_t N = s.BG == 1 ? 66 * Z : 50 * Z, Ncb = s.Tbslbrm == 0 ? N : std::min(N, 3 * s.Tbslbrm / (2 * s.C));
+    if (s.K - s.F - 2 * Z > Ncb) return -1;
+  }
+  nr_deinterleaving_ldpc(s.E, s.Qm, e.data(), const_cast<int16_t *>(llr + s.llr_off));
+  if (nr_rate_matching_ldpc_rx(s.Tbslbrm, s.BG, Z, d.data(), e.data(), s.C, s.rv, clear, s.E, s.F, s.K - s.F - 2 * Z) == -1) return -1;
+  std::vector<int16_t> z((size_t)Kc * Z + 64, 0);
+  memset(z.data() + s.Kprime, 127, s.F * sizeof(int16_t));
+  memcpy(z.data() + 2 * Z, d.data(), (s.Kprime - 2 * Z) * sizeof(int16_t));
+  memcpy(z.data() + s.K, d.data() + (s.K - 2 * Z), (Kc * Z - s.K) * sizeof(int16_t));
+  for (int i = 0; i < Kc * Z; i++) l[i] = (int8_t)(z[i] > 127 ? 127 : z[i] < -128 ? -128 : z[i]);
+  return 0;
+}
+TEST(GpuPassPost, RateDematchHarqCombineMatchesCpu) {
+  if (!have_gpu()) GTEST_SKIP();
+  PostSyms &S = PostSyms::get();
+  ASSERT_TRUE(S.rdm);
+  static const int zs[] = {2, 7, 11, 16, 22, 36, 64, 96, 128, 176, 208, 256, 320, 384};
+  Dev<int16_t> dllr, dhq;
+  Dev<nr_gpu_rdm_seg_t> dsegs;
+  Dev<int8_t> dout;
+  int n_comb = 0, n_lbrm = 0, n_sat = 0;
+  for (int seed = 0; seed < 600; seed++) {
+    std::mt19937 g(seed * 7919u + 11);
+    const int nseg = 1 + g() % 3;
+    std::vector<nr_gpu_rdm_seg_t> base(nseg);
+    for (auto &s : base) {
+      s.BG = 1 + g() % 2; s.Z = zs[g() % 14];
+      const int Kb = s.BG == 1 ? 22 : 10, N = (s.BG == 1 ? 66 : 50) * s.Z;
+      s.K = Kb * s.Z;
+      s.F = g() % 3 == 0 ? 0 : g() % (s.K / 4 + 1);
+      s.Kprime = s.K - s.F;
+      s.C = 1 + g() % 40;
+      const uint32_t Ncb = g() % 3 ? N : (uint32_t)(s.K / 2 + g() % (N - s.K / 2) + 1);
+      s.Tbslbrm = Ncb == (uint32_t)N ? (g() % 2 ? 0 : 1000000) : (uint32_t)((uint64_t)Ncb * 2 * s.C / 3 + 1);
+      s.Qm = 2 * (1 + g() % 4);
+      n_lbrm += s.Tbslbrm != 0 && s.Tbslbrm != 1000000;
+    }
+    const size_t hq_n = (size_t)nseg * NR_GPU_HQ_SEG;
+    std::vector<int16_t> garbage(hq_n);
+    for (auto &v : garbage) v = (int16_t)g(); /* a slot of an earlier, unrelated TB: the first transmission must clear it */
+    dhq.up(garbage.data(), hq_n * 2);
+    std::vector<std::vector<int16_t>> cpu_d(nseg);
+    for (int i = 0; i < nseg; i++) cpu_d[i].assign((size_t)(base[i].BG == 2 ? 52 : 68) * base[i].Z + 16, 0x1234); /* the CPU buffer is also dirty before the clear */
+    const int ntx = 2 + g() % 2;
+    for (int tx = 0; tx < ntx; tx++) {
+      std::vector<nr_gpu_rdm_seg_t> segs = base;
+      std::vector<int16_t> llr;
+      const int amp = g() % 3 == 0 ? 32767 : g() % 2 ? 60 : 3000; /* full range wraps the int16 sum, 60 never saturates the int8 input */
+      for (int i = 0; i < nseg; i++) {
+        auto &s = segs[i];
+        s.rv = g() % 4; /* every transmission its own redundancy version and its own E (repetition up to 2 N) */
+        const int N = (s.BG == 1 ? 66 : 50) * s.Z;
+        s.E = s.Qm * (1 + g() % ((g() % 4 == 0 ? 2 * N : N) / s.Qm));
+        s.llr_off = (uint32_t)llr.size();
+        for (uint32_t k = 0; k < s.E; k++) llr.push_back((int16_t)((int)(g() % (2 * amp + 1)) - amp));
+        s.hq_mode = tx == 0 ? 1 : 2;
+        s.hq = dhq.p + (size_t)i * NR_GPU_HQ_SEG;
+      }
+      dllr.up(llr.data(), llr.size() * 2);
+      dsegs.up(segs.data(), nseg * sizeof(segs[0]));
+      const size_t ob = (size_t)nseg * NR_GPU_LDPC_DEV_IN_STRIDE;
+      dout.up(std::vector<int8_t>(ob, 55).data(), ob);
+      ASSERT_EQ(0, S.rdm(dllr.p, dsegs.p, nseg, dout.p, nullptr));
+      std::vector<int8_t> got(ob);
+      dout.down(got.data(), ob);
+      std::vector<int16_t> hq(hq_n);
+      dhq.down(hq.data(), hq_n * 2);
+      for (int i = 0; i < nseg; i++) {
+        const int Kc = segs[i].BG == 2 ? 52 : 68, N = (segs[i].BG == 1 ? 66 : 50) * segs[i].Z;
+        std::vector<int8_t> ref((size_t)Kc * segs[i].Z + 16, 0);
+        const int rc = cpu_prep_hq(segs[i], llr.data(), ref.data(), cpu_d[i], tx == 0);
+        if (rc != 0) continue; /* a CPU-refused parameter set (the kernel writes zeros, tested above); the stored sum is not defined then */
+        n_comb += tx > 0;
+        ASSERT_EQ(0, memcmp(ref.data(), &got[(size_t)i * NR_GPU_LDPC_DEV_IN_STRIDE], (size_t)Kc * segs[i].Z))
+            << "LDPC input, seed " << seed << " tx " << tx << " seg " << i << " BG" << segs[i].BG << " Z" << segs[i].Z << " rv" << segs[i].rv << " E" << segs[i].E << " Tbslbrm " << segs[i].Tbslbrm;
+        ASSERT_EQ(0, memcmp(cpu_d[i].data(), &hq[(size_t)i * NR_GPU_HQ_SEG], (size_t)N * 2))
+            << "stored soft sum, seed " << seed << " tx " << tx << " seg " << i << " BG" << segs[i].BG << " Z" << segs[i].Z;
+        for (int k = 0; k < Kc * (int)segs[i].Z; k++) n_sat += ref[k] == 127 || ref[k] == -128;
+      }
+      if (::testing::Test::HasFatalFailure()) return;
+    }
+  }
+  printf("HARQ combine in k_rdm: %d combined transmissions bit-equal to nr_rate_matching_ldpc_rx (clear = 0), %d LBRM segments, %d saturated inputs\n", n_comb, n_lbrm, n_sat);
+  EXPECT_GT(n_comb, 500);
+  EXPECT_GT(n_sat, 1000);
+}
+/* The soft store round trip between the host layout of the CPU store (block r at r * Kc * Z) and the device blocks of an entry: the fallback path between the two decoders. */
+TEST(GpuPassHarq, BlockCopiesRoundTrip) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m));
+  auto up = (nr_gpu_pass_hq_copy_fn)dlsym(m.dl, "nr_gpu_pass_hq_up");
+  auto down = (nr_gpu_pass_hq_copy_fn)dlsym(m.dl, "nr_gpu_pass_hq_down");
+  ASSERT_TRUE(up && down);
+  std::mt19937 g(5);
+  for (auto cfg : {std::array<int, 3>{1, 68 * 384, 66 * 384}, {7, 68 * 64, 66 * 64}, {32, 52 * 128, 50 * 128}, {3, 68 * 2, 66 * 2}, {NR_GPU_PASS_MAX_CB, 68 * 8, 66 * 8}}) {
+    const int C = cfg[0], kcz = cfg[1], n = cfg[2];
+    std::vector<uint16_t> blk((size_t)C); /* scattered blocks of the pool, as an entry holds them after evictions */
+    for (int r = 0; r < C; r++) blk[r] = (uint16_t)((r * 7919 + 13) % NR_GPU_HQ_BLK);
+    std::sort(blk.begin(), blk.end());
+    blk.erase(std::unique(blk.begin(), blk.end()), blk.end());
+    const int Cu = (int)blk.size();
+    std::vector<int16_t> a((size_t)Cu * kcz), b((size_t)Cu * kcz, 0x7777);
+    for (auto &v : a) v = (int16_t)g();
+    ASSERT_EQ(0, up(blk.data(), a.data(), Cu, kcz, n));
+    ASSERT_EQ(0, down(blk.data(), b.data(), Cu, kcz, n));
+    for (int r = 0; r < Cu; r++) ASSERT_EQ(0, memcmp(&a[(size_t)r * kcz], &b[(size_t)r * kcz], (size_t)n * 2)) << "block " << r;
+  }
+  std::vector<uint16_t> bad = {(uint16_t)NR_GPU_HQ_BLK};
+  EXPECT_NE(0, up(bad.data(), std::vector<int16_t>(100).data(), 1, 100, 100));
+  EXPECT_NE(0, up(bad.data(), std::vector<int16_t>(100).data(), NR_GPU_PASS_MAX_CB + 1, 100, 100));
+}
+/* A failed first transmission and a retransmission, both through the whole pass: the combined verdict decodes transport blocks that neither transmission decodes alone, the TB is the transmitted one,
+ * and the pass takes both (rc 0). The store is the device slot; the CPU combine is the reference of the k_rdm test above (bit-equal LDPC inputs, hence the same verdict). */
+TEST(GpuPassHarq, CombinedRetransmissionDecodesWhatNeitherDecodesAlone) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && m.pass_try && pass_ready(m));
+  const nr_gpu_pass_shape_t sh = GpuPassFixture::warm_shapes()[16 + 6 + 0]; /* 48 PRB, nl 2, qm 6 */
+  int tried = 0, comb_ok = 0, alone_ok = 0, comb_only = 0, taken = 0;
+  for (double snr : {7.0, 5.0, 3.0, 1.0, -1.0}) {
+    GpuPassFixture::noise_db = snr;
+    for (int seed = 1; seed <= 10; seed++) {
+      GpuPassFixture f0 = GpuPassFixture::from_shape(sh, seed, -1, nullptr, 0, 0, 0, seed);
+      GpuPassFixture f2 = GpuPassFixture::from_shape(sh, seed + 100, -1, nullptr, 0, 0, 2, seed);
+      GpuPassFixture f2a = GpuPassFixture::from_shape(sh, seed + 100, -1, nullptr, 0, 0, 2, seed);
+      ASSERT_TRUE(f0.tb_ok_built && f2.tb_ok_built);
+      ASSERT_EQ(f0.tb.payload, f2.tb.payload);
+      f0.bind(); f2.bind(); f2a.bind();
+      std::vector<uint8_t> b0(f0.tb.A / 8 + 64), b2(f0.tb.A / 8 + 64), ba(f0.tb.A / 8 + 64);
+      nr_gpu_pass_result_t r0{}, r2{}, ra{};
+      r0.tb = b0.data(); r2.tb = b2.data(); ra.tb = ba.data();
+      f0.job->hq_mode = 1; f2.job->hq_mode = 2;
+      for (int r = 0; r < f0.tb.C; r++) f0.job->hq_blk[r] = f2.job->hq_blk[r] = (uint16_t)(1000 + 3 * r); /* the blocks of the entry */
+      const int rc0 = m.pass_try(f0.job, &r0);
+      ASSERT_EQ(0, rc0) << "a first transmission with combining armed takes the pass";
+      if (r0.tb_ok || r0.need_cpu || r0.skip) continue; /* only failed first transmissions are stored */
+      ASSERT_EQ(0, m.pass_try(f2a.job, &ra)); /* the retransmission alone (hq_mode 0) */
+      const int rc2 = m.pass_try(f2.job, &r2);
+      ASSERT_EQ(0, rc2) << "a retransmission with combining armed takes the pass";
+      taken += 2;
+      tried++;
+      alone_ok += ra.tb_ok;
+      comb_ok += r2.tb_ok;
+      comb_only += r2.tb_ok && !ra.tb_ok;
+      if (r2.tb_ok) EXPECT_EQ(0, memcmp(r2.tb, f0.tb.payload.data(), f0.tb.A / 8)) << "the combined TB is the transmitted one";
+      if (ra.tb_ok) EXPECT_TRUE(r2.tb_ok) << "combining never loses a TB the retransmission decodes alone"; /* the stored sum only adds evidence here */
+    }
+  }
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuPassHarq: %d failed first transmissions, retransmission alone decoded %d, combined %d (%d only combined), %d pass runs\n", tried, alone_ok, comb_ok, comb_only, taken);
+  EXPECT_GE(tried, 5);
+  EXPECT_GE(comb_only, 1) << "the combine must rescue at least one TB";
+  EXPECT_GE(comb_ok, alone_ok);
+}
+/* The block pool of the HARQ entries: blocks are handed out on demand, an entry that holds enough keeps its blocks, a short pool takes them from the victims (least recently used idle entry first), a
+ * request no eviction can satisfy fails with the entry empty and the pool whole, and every block is accounted for (none lost, none given twice). */
+namespace {
+struct PoolEnt { nr_hq_blocks_t b; int last; bool idle; };
+struct PoolCtx { std::vector<PoolEnt> *e; std::vector<int> dropped; };
+nr_hq_blocks_t *pool_victim(void *ctx, const nr_hq_blocks_t *except) {
+  PoolCtx *c = (PoolCtx *)ctx;
+  PoolEnt *v = nullptr;
+  for (auto &x : *c->e)
+    if (&x.b != except && x.b.n > 0 && x.idle && (!v || x.last < v->last)) v = &x;
+  if (v) c->dropped.push_back(v->last);
+  return v ? &v->b : nullptr;
+}
+}  // namespace
+TEST(GpuPassHarq, BlockPoolHandsOutKeepsAndEvictsWithoutLeaks) {
+  auto pool = std::make_unique<nr_hq_pool_t>();
+  memset(pool.get(), 0, sizeof(*pool));
+  std::vector<PoolEnt> ents(64);
+  for (int i = 0; i < 64; i++) { memset(&ents[i], 0, sizeof(PoolEnt)); ents[i].last = i + 1; ents[i].idle = true; }
+  PoolCtx ctx{&ents, {}};
+  auto held = [&] { int n = 0; for (auto &x : ents) n += x.b.n; return n; };
+  auto check = [&](const char *what) {
+    std::vector<int> seen(NR_GPU_HQ_BLK, 0);
+    for (int i = 0; i < pool->nfree; i++) seen[pool->free_id[i]]++;
+    for (auto &x : ents) for (int i = 0; i < x.b.n; i++) seen[x.b.id[i]]++;
+    for (int i = 0; i < NR_GPU_HQ_BLK; i++) ASSERT_EQ(1, seen[i]) << what << ": block " << i << " is " << (seen[i] ? "held twice" : "lost");
+    ASSERT_EQ(NR_GPU_HQ_BLK, pool->nfree + held()) << what;
+  };
+  int ev = 0;
+  ASSERT_EQ(0, nr_hq_pool_ensure(pool.get(), &ents[0].b, 20, pool_victim, &ctx, &ev));
+  EXPECT_EQ(20, ents[0].b.n);
+  const uint16_t first[2] = {ents[0].b.id[0], ents[0].b.id[19]};
+  EXPECT_EQ(0, nr_hq_pool_ensure(pool.get(), &ents[0].b, 12, pool_victim, &ctx, &ev)) << "enough held: kept";
+  EXPECT_EQ(20, ents[0].b.n);
+  EXPECT_EQ(first[0], ents[0].b.id[0]);
+  EXPECT_EQ(first[1], ents[0].b.id[19]);
+  EXPECT_EQ(0, ev);
+  check("after the first");
+  /* fill the pool: 62 entries of 32 blocks = 1984 + 20 = 2004 of 2048 */
+  for (int i = 1; i < 63; i++) ASSERT_EQ(0, nr_hq_pool_ensure(pool.get(), &ents[i].b, 32, pool_victim, &ctx, &ev)) << i;
+  EXPECT_EQ(0, ev);
+  check("filled");
+  EXPECT_EQ(NR_GPU_HQ_BLK - 20 - 62 * 32, pool->nfree);
+  /* entry 63 needs 160 blocks: 44 free, so the three least recently used idle entries (last = 1, 2, 3 -> entries 0, 1, 2) give 20 + 32 + 32 = 84 -> 128 >= 160? no: a fourth is taken */
+  ents[63].idle = false;
+  ASSERT_EQ(0, nr_hq_pool_ensure(pool.get(), &ents[63].b, 160, pool_victim, &ctx, &ev));
+  EXPECT_EQ(160, ents[63].b.n);
+  EXPECT_EQ(4, ev);
+  ASSERT_EQ(4u, ctx.dropped.size());
+  for (int i = 0; i < 4; i++) EXPECT_EQ(i + 1, ctx.dropped[i]) << "least recently used first";
+  for (int i = 0; i < 4; i++) EXPECT_EQ(0, ents[i].b.n);
+  check("after the eviction");
+  /* a request nothing can satisfy: every other entry busy */
+  for (auto &x : ents) x.idle = false;
+  const int before = held();
+  ents[62].idle = false;
+  EXPECT_EQ(-1, nr_hq_pool_ensure(pool.get(), &ents[62].b, NR_GPU_PASS_MAX_CB, pool_victim, &ctx, &ev)) << "62 holds 32; 160 more than free plus nothing evictable";
+  EXPECT_EQ(0, ents[62].b.n) << "left empty";
+  EXPECT_EQ(before - 32, held());
+  check("after the refusal");
+  EXPECT_EQ(-1, nr_hq_pool_ensure(pool.get(), &ents[5].b, 0, nullptr, nullptr, nullptr));
+  EXPECT_EQ(-1, nr_hq_pool_ensure(pool.get(), &ents[5].b, NR_GPU_PASS_MAX_CB + 1, nullptr, nullptr, nullptr));
+  for (auto &x : ents) nr_hq_pool_put(pool.get(), &x.b);
+  EXPECT_EQ(NR_GPU_HQ_BLK, pool->nfree);
+  check("released");
+}
+/* A real grant (not SI) with combining on is not refused by the HARQ gate; only the deferred SI soft combining is. */
+TEST(GpuPassHarq, OnlySoftCombiningOfSiStaysOffThePass) {
+  EXPECT_EQ(0, nr_gpu_pass_hq_refuses(/*armed*/ 1, /*si*/ 0));
+  EXPECT_EQ(0, nr_gpu_pass_hq_refuses(0, 0));
+  EXPECT_EQ(0, nr_gpu_pass_hq_refuses(0, 1));
+  EXPECT_EQ(1, nr_gpu_pass_hq_refuses(1, 1));
+}
+
+/* Transport blocks below ~700 bits have a lifting size Z that is not a multiple of 4 (one code block): the generic LDPC kernel, its own L sub-graph (nz4 class). The pass equals the stage path. */
+TEST(GpuPassTb, OddLiftingSizeEqualsStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  int n = 0, n_ok = 0, odd = 0;
+  for (int A : {64, 72, 88, 136, 232, 280}) {
+    GpuPassFixture::force_A = A;
+    for (double snr : {20.0, 0.0}) {
+      GpuPassFixture::noise_db = snr;
+      nr_gpu_pass_shape_t sh = GpuPassFixture::warm_shapes()[5]; /* 24 PRB nl 2 qm 4 */
+      GpuPassFixture fx = GpuPassFixture::from_shape(sh, 21);
+      ASSERT_TRUE(fx.tb_ok_built) << "A " << A;
+      ASSERT_EQ(1, fx.tb.C);
+      fx.shape.ncb_class = 1;
+      fx.bind();
+      fx.job->llr_out_all = 1;
+      const bool nz4 = (fx.tb.Z & 3) != 0;
+      odd += nz4;
+      m.pass_split(1);
+      nr_gpu_pass_shape_t w = fx.job->shape;
+      w.nz4 = nz4;
+      const std::string what = "A " + std::to_string(A) + " Z " + std::to_string(fx.tb.Z) + " K " + std::to_string(fx.tb.K) + " snr " + std::to_string(snr);
+      ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm)) << what;
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      const int rc = m.pass_try(fx.job, &g);
+      m.pass_split(0);
+      ASSERT_EQ(0, rc) << "the pass takes it: " << what;
+      ASSERT_EQ(0, fx.run_stage_path(&s)) << what;
+      EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+      EXPECT_EQ(s.tb_ok, g.tb_ok) << what;
+      EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+      if (!g.need_cpu) {
+        EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+        EXPECT_EQ(0, memcmp(fx.llr_ref.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs";
+      }
+      if (g.tb_ok) EXPECT_EQ(0, memcmp(g.tb, fx.tb.payload.data(), fx.tb.A / 8)) << what;
+      n++;
+      n_ok += g.tb_ok;
+    }
+  }
+  GpuPassFixture::force_A = 0;
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuPassTb.OddLiftingSizeEqualsStagePath: %d grants (%d with Z not a multiple of 4), decoded %d\n", n, odd, n_ok);
+  EXPECT_GE(odd, 6);
+  EXPECT_GE(n_ok, 5);
+}
+
+/* Transport blocks of more than 32 code blocks (TBS above 269 kbit: a wide grant at a high rate), up to the 150 of 273 PRB x 4 layers x 156 RE x 256QAM at the top rate. The pass takes them
+ * (code-block classes 64, 128, 160) and equals the stage path: TB, CRC verdict, per-block verdicts, final LLRs. */
+TEST(GpuPassTb, ManyCodeBlocksEqualStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  GpuPassFixture::max_cb = NR_GPU_PASS_MAX_CB;
+  struct Case { int nrb, nl, qm, A, ndm; };
+  int n = 0, n_ok = 0, cmax = 0;
+  for (const Case &cs : {Case{136, 4, 8, 300000, 2}, Case{273, 4, 8, 500000, 2}, Case{273, 4, 8, 1100000, 1}, Case{217, 3, 6, 290000, 2}, Case{217, 4, 4, 290000, 2}, Case{217, 3, 6, 340000, 2}}) /* the third: C = 131 at rate 0.87, a CRC failure on both paths */
+    for (double snr : {40.0, 12.0}) {
+      GpuPassFixture::force_A = cs.A;
+      GpuPassFixture::noise_db = snr;
+      GpuPassFixture::n_dm = cs.ndm;
+      nr_gpu_pass_shape_t sh = {(uint16_t)cs.nrb, 13, (uint16_t)cs.nl, (uint16_t)cs.qm, (uint16_t)cs.ndm, 1, 1};
+      GpuPassFixture fx = GpuPassFixture::from_shape(sh, 9);
+      ASSERT_TRUE(fx.tb_ok_built) << "A " << cs.A << " nrb " << cs.nrb;
+      ASSERT_GT(fx.tb.C, 32);
+      ASSERT_LE(fx.tb.C, NR_GPU_PASS_MAX_CB);
+      cmax = std::max(cmax, fx.tb.C);
+      fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
+      fx.bind();
+      fx.job->llr_out_all = 1;
+      const std::string what = "nrb " + std::to_string(cs.nrb) + " nl " + std::to_string(cs.nl) + " qm " + std::to_string(cs.qm) + " C " + std::to_string(fx.tb.C) + " A " + std::to_string(fx.tb.A) + " snr " + std::to_string(snr);
+      m.pass_split(1);
+      nr_gpu_pass_shape_t w = fx.job->shape;
+      ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm)) << what;
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      const int rc = m.pass_try(fx.job, &g);
+      m.pass_split(0);
+      ASSERT_EQ(0, rc) << "the pass takes it: " << what;
+      ASSERT_EQ(0, fx.run_stage_path(&s)) << what;
+      EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+      EXPECT_EQ(s.tb_ok, g.tb_ok) << what;
+      EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+      if (!g.need_cpu) {
+        EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+        EXPECT_EQ(0, memcmp(fx.llr_ref.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs";
+      }
+      if (g.tb_ok) EXPECT_EQ(0, memcmp(g.tb, fx.tb.payload.data(), fx.tb.A / 8)) << what;
+      printf("  many-CB %s: pass tb_ok %d, blocks ok %d\n", what.c_str(), (int)g.tb_ok, (int)std::count(g.seg_ok, g.seg_ok + fx.tb.C, (uint8_t)1));
+      n++;
+      n_ok += g.tb_ok;
+    }
+  GpuPassFixture::max_cb = 8;
+  GpuPassFixture::force_A = 0;
+  GpuPassFixture::n_dm = 2;
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuPassTb.ManyCodeBlocksEqualStagePath: %d grants, up to %d code blocks, decoded %d\n", n, cmax, n_ok);
+  EXPECT_GE(cmax, 100);
+  EXPECT_GE(n_ok, 1);
 }
 
 /* the CPU math, transcribed from passive_decode_body_core (nvar normalisation + per-branch substitution, DM-RS FO/SFO), FP64 */
@@ -2139,22 +2493,38 @@ TEST(GpuGraphSplit, WarmSetFitsBudget) {
   if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
   ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
   m.pass_split(1);
-  static const int nrbs[] = {273, 217, 136, 96, 48, 24, 12, 6}, nds[] = {3, 2}, segc[] = {0, 1, 2, 4, 8, 16, 32};
+  /* the production warm set of nr_gpu_pass_warmup (nr_gpu_pass_dl.c): contiguous classes with 3, 2 and 1 DM-RS symbols (4 last), segmented classes (1 .. 128 segments) with 3 and 2, every code-block count
+   * class up to 160, every demod variant the receiver policy can ask for (4 MMSE modes for nl >= 2, 2 alignments for nl = 1), and the generic-LDPC (nz4) L graph of the one-block classes */
+  static const int nrbs[] = {273, 217, 136, 96, 48, 24, 12, 6}, ndc[] = {3, 2, 1}, nds[] = {3, 2}, segc[] = {1, 2, 4, 8, 16, 32, 64, 128}, ncbc[] = {1, 2, 4, 8, 16, 32, 64, 128, NR_GPU_PASS_MAX_CB};
   int made = 0, refused = 0;
   const auto t0 = std::chrono::steady_clock::now();
+  auto warm_cls = [&](int nd, int nrb, int nl, int ns) {
+    const int cmax = nrb * nl * 132 * 8 * 93 / 100 / 8400 + 1;
+    for (int ci = 0; ci < 9 && (ci == 0 || ncbc[ci - 1] < cmax); ci++)
+      for (int v = 0; v < (nl >= 2 ? 4 : 2); v++) {
+        const nr_gpu_pass_shape_t sh = {(uint16_t)nrb, 13, (uint16_t)nl, 6, (uint16_t)nd, (uint16_t)ncbc[ci], 1, (uint16_t)ns};
+        if (m.pass_warm(&sh, nl >= 2 ? v : 0, nl == 1 ? v : 0, 1) == 0) made++;
+        else refused++; /* more chest rows than the stage buffers of this process take */
+      }
+  };
+  for (int nd : ndc)
+    for (int nrb : nrbs)
+      for (int nl = 1; nl <= 4; nl++) warm_cls(nd, nrb, nl, 0);
+  for (int nrb : nrbs)
+    for (int nl = 1; nl <= 4; nl++)
+      for (int v = 0; v < (nl >= 2 ? 4 : 2); v++) {
+        nr_gpu_pass_shape_t sh = {(uint16_t)nrb, 13, (uint16_t)nl, 6, 3, 1, 1};
+        sh.nz4 = 1;
+        if (m.pass_warm(&sh, nl >= 2 ? v : 0, nl == 1 ? v : 0, 1) == 0) made++;
+        else refused++;
+      }
   for (int nd : nds)
     for (int nrb : nrbs)
       for (int nl = 1; nl <= 4; nl++)
-        for (int ns : segc) {
-          if (ns > nrb) continue;
-          const int cmax = nrb * nl * 132 * 8 * 93 / 100 / 8400 + 1;
-          for (int ncb = 1; ncb <= 32 && ncb / 2 < cmax; ncb <<= 1)
-            for (int v = 0; v < 2; v++) {
-              const nr_gpu_pass_shape_t sh = {(uint16_t)nrb, 13, (uint16_t)nl, 6, (uint16_t)nd, (uint16_t)ncb, 1, (uint16_t)ns};
-              if (m.pass_warm(&sh, nl >= 2 ? 2 + v : 0, nl == 1 ? v : 0, 1) == 0) made++;
-              else refused++; /* more chest rows than the stage buffers of this process take */
-            }
-        }
+        for (int ns : segc)
+          if (ns <= nrb) warm_cls(nd, nrb, nl, ns);
+  for (int nl = 1; nl <= 4; nl++)
+    for (int nrb : nrbs) warm_cls(4, nrb, nl, 0);
   const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   char buf[1024];
   m.pass_stats(buf, sizeof(buf));
@@ -2169,9 +2539,9 @@ TEST(GpuGraphSplit, WarmSetFitsBudget) {
   printf("GpuGraphSplit.WarmSetFitsBudget: %d classes covered (%d refused) in %.0f ms: %s\n", made, refused, ms, p);
   EXPECT_GT(made, 1000) << "the product of the class set is covered by the sum of the sub-graphs";
   EXPECT_EQ(0u, capped) << "the warm set hit the memory cap";
-  EXPECT_LE(mb, 2048u);
+  EXPECT_LE(mb, 3072u); /* the cap of a device with this much memory (8 GB: 2048)*/
   EXPECT_EQ(ex, (NR_GPU_PASS_DL + NR_GPU_PASS_PROBE) * (C + D + L));
-  EXPECT_LE(C + D + L, 600u);
+  EXPECT_LE(C + D + L, 900u);
 }
 
 /* review S6: grants with ONE DM-RS symbol (the split warm set adds ndmrs 1 contiguous C keys): the split pass equals the stage path, CRC ok and CRC fail */
@@ -2649,6 +3019,123 @@ TEST(GpuPassBench, DlUlInterference) {
   EXPECT_LT(b, a + std::max(25.0, 0.25 * a)) << "DL submit->GPU start p50 alone " << a << " us, loaded " << b << " us";
   const double c = fixad::q(ul_alone.gstart, 0.5), d = fixad::q(ul_loaded.gstart, 0.5);
   EXPECT_LT(d, c + std::max(25.0, 0.25 * c)) << "UL submit->GPU start p50 alone " << c << " us, loaded " << d << " us";
+}
+
+/* P99-UL Task 3: the DL / UL share of the real-time SMs. GPU span (graph head to completion, device-side event stamps) of typical DL grants of 1 / 4 / 8 / 16 code blocks and of UL grants, alone and
+ * under the other direction's load (2 UL loops + a probe loop against DL; 2 DL loops against UL). What the partition is comes from the process environment (nr_gpu_green.h: the DL / UL split
+ * of the real-time SMs is printed at start-up; ISAC_GPU_RT_ISOLATE=0 puts every stream on all SMs); BENCH_TAG labels the run. A bench: no assertion on the numbers except that the passes ran. */
+TEST(GpuPassBench, DlSmShare) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && ul_ready(m) && m.set_spin);
+  m.set_spin(60);
+  const char *tag = getenv("BENCH_TAG") ? getenv("BENCH_TAG") : "default";
+  std::map<int, nr_gpu_pass_shape_t> pick;
+  GpuPassFixture::max_cb = 32; /* a 16-block grant needs a wide high-order one */
+  struct RestoreMaxCb { ~RestoreMaxCb() { GpuPassFixture::max_cb = 8; } } restore_max_cb;
+  for (int nrb : {24, 48, 96, 136, 217})
+    for (int nl : {1, 2, 4})
+      for (int qm : {2, 4, 6, 8}) {
+        const nr_gpu_pass_shape_t sh = {(uint16_t)nrb, 13, (uint16_t)nl, (uint16_t)qm, 2, 32, 1};
+        GpuPassFixture f = GpuPassFixture::from_shape(sh, 11);
+        if (!f.tb_ok_built) continue;
+        const int c = (int)f.tb.C;
+        if ((c == 1 || c == 4 || c == 8 || (c >= 14 && c <= 17)) && !pick.count(c)) pick[c] = sh;
+      }
+  ASSERT_FALSE(pick.empty());
+  GpuPassFixture::noise_db = 20.0;
+  GpuPassFixture::first_sym = 1;
+  struct UlCase { int nrb, qm; };
+  const UlCase ucs[] = {{106, 4}, {217, 4}};
+  std::vector<std::unique_ptr<GpuPassFixture>> uls;
+  std::vector<std::array<UlSlot, 3>> uslots(2);
+  for (int u = 0; u < 2; u++) {
+    const nr_gpu_pass_shape_t ush = {(uint16_t)ucs[u].nrb, 13, 1, (uint16_t)ucs[u].qm, 2, 1, 1};
+    uls.emplace_back(new GpuPassFixture(GpuPassFixture::from_shape(ush, 3)));
+    ASSERT_TRUE(uls.back()->tb_ok_built);
+    ul_warm_class(m, ucs[u].nrb, 2, uls.back()->tb.C);
+    ASSERT_FALSE(HasFatalFailure());
+    for (int i = 0; i < 3; i++) uslots[u][i].build(*uls.back(), 0, -1, 0, i);
+  }
+  const nr_gpu_pass_shape_t psh = {96, 13, 2, 4, 2, 8, 1};
+  GpuPassFixture px = GpuPassFixture::from_shape(psh, 11);
+  px.make_probe();
+  nr_gpu_pass_shape_t pw = px.job->shape;
+  ASSERT_EQ(0, m.pass_warm(&pw, 3, 0, 0));
+  const int NREP = 400;
+  auto run_dl = [&](GpuPassFixture &dl, fixad::Lat *l) {
+    std::vector<uint8_t> tb(dl.tb.A / 8 + 64);
+    nr_gpu_pass_result_t r{};
+    r.tb = tb.data();
+    for (int i = 0; i < 30; i++) m.pass_try(dl.job, &r);
+    for (int i = 0; i < NREP; i++)
+      if (m.pass_try(dl.job, &r) == 0) l->add(r);
+  };
+  auto run_ul = [&](UlSlot &sl, fixad::Lat *l) {
+    for (int i = 0; i < 30; i++) nr_gpu_pass_ul_run(&sl.in, &sl.out);
+    for (int i = 0; i < NREP; i++)
+      if (nr_gpu_pass_ul_run(&sl.in, &sl.out) == 0) l->add(sl.out.r);
+  };
+  std::vector<std::unique_ptr<GpuPassFixture>> dls;
+  for (auto &kv : pick) {
+    dls.emplace_back(new GpuPassFixture(GpuPassFixture::from_shape(kv.second, 11)));
+    GpuPassFixture &dl = *dls.back();
+    dl.bind();
+    nr_gpu_pass_shape_t ws = dl.job->shape;
+    ASSERT_EQ(0, m.pass_warm(&ws, dl.job->dj.qam_mode, dl.job->dj.align, dl.job->dj.want_evm));
+    char what[96];
+    snprintf(what, sizeof(what), "[%s] DL C=%d nrb %d nl %d qm %d", tag, kv.first, kv.second.nrb_class, kv.second.nl, kv.second.qm);
+    fixad::Lat alone, loaded;
+    run_dl(dl, &alone);
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> th;
+    for (int i = 0; i < 2; i++)
+      th.emplace_back([&, i] { while (!stop) nr_gpu_pass_ul_run(&uslots[0][i].in, &uslots[0][i].out); });
+    th.emplace_back([&] {
+      std::vector<uint8_t> tb(px.tb.A / 8 + 64);
+      nr_gpu_pass_result_t r{};
+      r.tb = tb.data();
+      std::vector<int16_t> llr(px.tb.G + 64);
+      px.job->llr_out = llr.data();
+      while (!stop) m.pass_try(px.job, &r);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    run_dl(dl, &loaded);
+    stop = true;
+    for (auto &t : th) t.join();
+    fixad::line(what, "alone", alone);
+    fixad::line(what, "+2UL+probe", loaded);
+    EXPECT_GE(alone.gspan.size(), (size_t)NREP / 2);
+  }
+  for (int u = 0; u < 2; u++) {
+    char what[96];
+    snprintf(what, sizeof(what), "[%s] UL nrb %d qm %d", tag, ucs[u].nrb, ucs[u].qm);
+    fixad::Lat alone, loaded;
+    run_ul(uslots[u][2], &alone);
+    GpuPassFixture dl2a = GpuPassFixture::from_shape(pick.rbegin()->second, 12), dl2b = GpuPassFixture::from_shape(pick.rbegin()->second, 13);
+    dl2a.bind();
+    dl2b.bind();
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> th;
+    for (int i = 0; i < 2; i++)
+      th.emplace_back([&, i] {
+        std::vector<uint8_t> tb(dl2a.tb.A / 8 + 64);
+        nr_gpu_pass_result_t r{};
+        r.tb = tb.data();
+        const nr_gpu_pass_job_t *jj = i ? dl2b.job : dl2a.job;
+        while (!stop) m.pass_try(jj, &r);
+      });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    run_ul(uslots[u][2], &loaded);
+    stop = true;
+    for (auto &t : th) t.join();
+    fixad::line(what, "alone", alone);
+    fixad::line(what, "+2DL", loaded);
+    EXPECT_GE(alone.gspan.size(), (size_t)NREP / 2);
+  }
 }
 
 /* ===================================================== Fix A+D: the no-chance gate inside the submission (nr_snr_gate.h) ===================================================== */
