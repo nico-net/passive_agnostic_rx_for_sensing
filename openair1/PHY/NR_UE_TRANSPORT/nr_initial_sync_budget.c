@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_initial_sync_budget.h"
 
+int nr_auto_acquire_on;
+
 int nr_initial_sync_scan_batch(size_t bytes_per_gscn, size_t len_thr, long scratch_mb)
 {
   if (scratch_mb < NR_INITIAL_SYNC_SCRATCH_MB_MIN)

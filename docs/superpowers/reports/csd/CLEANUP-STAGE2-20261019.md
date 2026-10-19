@@ -1220,3 +1220,11 @@ NEEDS (lead)
 DOUBTS
 - Not run. CrcFirst test now runs with BWP_ALL/MCS_STAT/K2_PAIR/TDA_PAIR/TABLE_SWEEP at their baked values (previously forced 0 by the test); ASSERT_LE(n,3) on trial count and the slot numbers 400/401 for the decisive verdicts may need adjustment.
 - Tests with no setenv (DiscoveredCoresets.*) now see DISC_COVER always on (was default off); queue order may differ for lines other than the full-carrier ones.
+
+## ISAC_AUTO_ACQUIRE restored without a flag (2026-10-20)
+Trigger: `nr_auto_acquire_on = passive && !(--ssb given) && !(--initial-fo given)`, computed once in nr-uesoftmodem.c from `PARAMFLAG_PARAMSET` of the two options (no new flag); pure rule `nr_auto_acquire_trigger()` in nr_initial_sync_budget.h. Pinned runs (all OTA) are unchanged: every restored hunk is behind that bit.
+Restored from csd/int16-merge19: nr_initial_sync.c coarse-CFO trial loop + ISAC_ACQ_CFO_TRIAL/ISAC_ACQ_SSB; nr-ue.c auto_timing anchor/drift/handoff (ISAC_ACQ_TIMING_ANCHOR/DRIFT/HANDOFF); config_ue.c passive_acquisition_sib1 (ISAC_ACQ_SIB1/UNSUPPORTED).
+CFO bound: `NR_ACQ_CFO_MAX_HZ` = 60000 (constant, ISAC_ACQ_CFO_MAX_HZ gone). Auto mode asserts `--ue-fo-compensation` with a clear message.
+ISAC_ACQ_PROBE is still an env read (config_ue.c, auto mode only; auto_acquire.py probe phase). Not a new flag, but not baked either.
+Scripts: auto_acquire.py and raw_baseline/run_raw_replay.py no longer set ISAC_AUTO_ACQUIRE/ISAC_ACQ_CFO_MAX_HZ and omit --ssb/--initial-fo (auto_acquire.py now always uses --ue-scan-carrier, so its capture phase no longer pins the probed SSB/CFO seed; --cfo-max-hz default 200000 -> 60000). Behaviour change: any passive run without --ssb and --initial-fo is now auto and needs --ue-fo-compensation.
+Tests: AutoAcquire.* in nr_initial_sync_budget_test.cc (trigger table, bound). Functional acquisition on a capture NOT run: no raw IQ capture on this host, replay needs sudo unshare. Build: only the known link failures remain (ra0, ssb_rate_match_prod, csi_rb_extent); ctest failures dft_test, test_nr_modulation, nr_td_sim_test as before.

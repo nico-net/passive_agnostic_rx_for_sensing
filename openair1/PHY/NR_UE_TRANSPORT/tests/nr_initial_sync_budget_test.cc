@@ -55,3 +55,18 @@ TEST(ScanBatch, SizeTThreadCountNoNarrowing)
   /* len_thr is size_t: a value above INT_MAX must not wrap negative (floor 1) but be capped by the memory budget */
   EXPECT_EQ(nr_initial_sync_scan_batch(8UL << 20, (size_t)1 << 33, 64), 64 / 8);
 }
+
+TEST(AutoAcquire, TriggerOnlyPassiveAndUnpinned)
+{
+  EXPECT_TRUE(nr_auto_acquire_trigger(1, 0, 0));
+  EXPECT_FALSE(nr_auto_acquire_trigger(1, 1, 0)); // --ssb given
+  EXPECT_FALSE(nr_auto_acquire_trigger(1, 0, 1)); // --initial-fo given
+  EXPECT_FALSE(nr_auto_acquire_trigger(1, 1, 1));
+  EXPECT_FALSE(nr_auto_acquire_trigger(0, 0, 0)); // not passive
+}
+
+TEST(AutoAcquire, CfoBoundDefault)
+{
+  EXPECT_EQ(NR_ACQ_CFO_MAX_HZ, 60000.0);
+  EXPECT_LE(NR_ACQ_CFO_MAX_HZ, 32.0 * 15000); // the bound must fit 32 SCS at the narrowest FR1 SCS
+}

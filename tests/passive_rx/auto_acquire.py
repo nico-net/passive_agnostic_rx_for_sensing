@@ -239,8 +239,7 @@ class Acquisition:
         config.write_text(receiver_config(self.out, probe))
         env = dict(PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
                    HOME=str(Path.home()), LANG='C', LD_LIBRARY_PATH=f'{self.args.binary.parent}:/usr/local/lib',
-                   ISAC_AUTO_ACQUIRE='1', ISAC_ACQ_PROBE=str(int(probe)),
-                   ISAC_ACQ_CFO_MAX_HZ=str(self.args.cfo_max_hz),
+                   ISAC_ACQ_PROBE=str(int(probe)),
                    ISAC_SYNC_ONLY='1', ISAC_RX_MRC_MODE='2', ISAC_UL_RX_BRANCH='-1',
                    ISAC_DMRS_FO_APPLY='0', ISAC_SFO_CORRECT='0', ISAC_RX_BRANCH_FO='0',
                    ISAC_RX_GAIN_TRIM='0,0,0,0', ISAC_DISC_NO_RESYNC='0',
@@ -264,13 +263,10 @@ class Acquisition:
                    '--ue-rxgain', str(self.args.rx_gain), '--ue-nb-ant-rx', '4',
                    '--ue-nb-ant-tx', '4', '--passive-rx', '--ue-fo-compensation',
                    '--cont-fo-comp', '1', '--freq-sync-P', '.05', '--freq-sync-I', '.001',
-                   '--initial-fo', str(initial_fo), '--ntn-initial-time-drift', '0',
+                   '--ntn-initial-time-drift', '0',
                    '--thread-pool', '0,1,6,7', '--time-sync-I', '.01', '-A', '90']
-        if 'ssb_sc' in candidate:
-            # This value was measured during this acquisition, never read from a deployment config.
-            command += ['--ssb', str(candidate['ssb_sc'])]
-        else:
-            command += ['--ue-scan-carrier']
+        # No --ssb/--initial-fo: either one would pin the cell and switch automatic acquisition off.
+        command += ['--ue-scan-carrier']
         save(directory / 'invocation.json', dict(command=command, env=env, hypothesis=candidate,
                                                           cfo_seed_from_received_pbch=seed))
         self.state('PROBING' if probe else 'REACQUIRING', hypothesis=candidate)
@@ -407,7 +403,7 @@ def main():
     parser.add_argument('--interface', default='enp129s0f0np0')
     parser.add_argument('--rx-gain', type=float, default=40, help='Receiver front-end gain, not a decoded cell parameter')
     parser.add_argument('--max-bandwidth-mhz', type=int, choices=BW_MHZ, default=100)
-    parser.add_argument('--cfo-max-hz', type=int, default=200000, help='Symmetric CFO search bound, not a CFO seed')
+    parser.add_argument('--cfo-max-hz', type=int, default=60000, help='Symmetric CFO search bound (must match NR_ACQ_CFO_MAX_HZ in nr_initial_sync_budget.h), not a CFO seed')
     parser.add_argument('--dwell-seconds', type=float, default=180)
     parser.add_argument('--duration-seconds', type=float, default=0, help='Seconds after first broadcast-validated lock; 0 means continuous')
     args = parser.parse_args()

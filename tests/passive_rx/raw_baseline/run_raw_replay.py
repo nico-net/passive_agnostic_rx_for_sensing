@@ -107,7 +107,7 @@ def main():
     p.add_argument('--hypothesis-index', type=int, default=0)
     p.add_argument('--speed', type=float, default=0.1, help='Sample pacing relative to real time, not signal resampling')
     p.add_argument('--timeout', type=float, default=180)
-    p.add_argument('--cfo-bound-hz', type=int, default=200000)
+    p.add_argument('--cfo-bound-hz', type=int, default=60000)
     p.add_argument('--sample-shift', type=int, choices=range(16), required=True,
                    help='Explicit analysis amplitude scaling; original IQ is never modified')
     p.add_argument('--binary', type=Path, default=REPO / 'cmake_targets/ran_build/build/nr-uesoftmodem')
@@ -141,7 +141,7 @@ def main():
                ISAC_RAW_IQ_FIRST_TICK=str(info['first_sample_tick']), ISAC_RAW_IQ_CHANNELS=str(info['channels']),
                ISAC_RAW_IQ_RATE=str(info['sample_rate_hz']), ISAC_RAW_IQ_CENTER=str(round(trial['center_hz'])),
                ISAC_RAW_IQ_SPEED=str(args.speed), ISAC_RAW_IQ_SHIFT=str(args.sample_shift),
-               ISAC_AUTO_ACQUIRE='1', ISAC_ACQ_PROBE='0', ISAC_ACQ_CFO_MAX_HZ=str(args.cfo_bound_hz),
+               ISAC_ACQ_PROBE='0',
                ISAC_SYNC_ONLY='1', ISAC_RX_MRC_MODE='2', ISAC_UL_RX_BRANCH='-1',
                ISAC_DMRS_FO_APPLY='0', ISAC_SFO_CORRECT='0', ISAC_RX_BRANCH_FO='0',
                ISAC_RX_GAIN_TRIM='0,0,0,0', ISAC_DISC_NO_RESYNC='0', ISAC_RF_STALL_MAX_REINIT='0',
@@ -160,7 +160,7 @@ def main():
                 '--ue-nb-ant-rx', str(info['channels']), '--ue-nb-ant-tx', str(info['channels']),
                 '--ue-rxgain', str(info['rf_channels'][0]['gain_db']), '--thread-pool', '-1',
                 '--ue-scan-carrier', '--ue-fo-compensation', '--cont-fo-comp', '1',
-                '--freq-sync-P', '.05', '--freq-sync-I', '.001', '--initial-fo', '0',
+                '--freq-sync-P', '.05', '--freq-sync-I', '.001',
                 '--ntn-initial-time-drift', '0', '--time-sync-I', '.01', '-A', '90']
     write_json(out / 'invocation.json', dict(command=command, env=env, capture=str(capture),
                capture_integrity='PASS', bootstrap_hypotheses=hypotheses,

@@ -1,4 +1,5 @@
 #include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
+#include "PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_rx_continuity.h"
 /* Set once the first initial sync succeeds; read by the USRP driver (dlsym) to bound its pre-sync stream restarts. */
@@ -1117,6 +1118,7 @@ void *UE_thread(void *arg)
   }
   int shiftForNextFrame = 0;
   int intialSyncOffset = 0;
+  const bool auto_timing = nr_auto_acquire_on; // passive and no --ssb/--initial-fo
   /* BLIND-SCAN CONFIRM PASS (2026-09-19). MEASURED on the Swisscom macro (PCI 382, 3610.56 MHz SSB,
    * 273 PRB, identical -C and RX gain): from a 64-GSCN blind scan the receiver acquires and decodes
    * the MIB every time, then NEVER tracks PBCH (0/50 in all 45 windows, in-window CIR energy
@@ -1132,6 +1134,11 @@ void *UE_thread(void *arg)
   nr_gscn_info_t scan_confirm_ssb = {0};
   bool scan_confirm_check = false;
   int scan_confirm_fo1 = 0;
+  bool auto_anchor_valid = false, auto_drift_ready = false;
+  openair0_timestamp_t auto_anchor_timestamp = 0;
+  int auto_anchor_frame = 0, auto_anchor_pci = -1;
+  double auto_drift_samples_per_frame = 0;
+  nr_gscn_info_t auto_anchor_ssb = {0};
 
   openair0_timestamp_t sync_timestamp;
   bool stats_printed = false;
@@ -1200,6 +1207,59 @@ void *UE_thread(void *arg)
                 UE->init_sync_frame,
                 trashed_frames);
           syncData_t *syncMsg = (syncData_t *)NotifiedFifoData(res);
+          if (auto_timing && !auto_drift_ready) {
+            /* Timestamp of the frame whose SFN was decoded from THIS PBCH.
+             * init_sync_frame includes both capture frame index and offset wrap.
+             * Use hardware sample time, never host wall time or CFO/frequency. */
+            const openair0_timestamp_t anchor = syncMsg->capture_end
+                - (openair0_timestamp_t)(UE->init_sync_frame + 1) * fp->samples_per_frame
+                + syncMsg->rx_offset;
+            if (auto_anchor_valid && auto_anchor_pci == fp->Nid_cell) {
+              const int64_t delta_samples = anchor - auto_anchor_timestamp;
+              const int64_t delta_frames = llround((double)delta_samples / fp->samples_per_frame);
+              const int sfn_delta = (decoded_frame_rx - auto_anchor_frame + MAX_FRAME_NUMBER) % MAX_FRAME_NUMBER;
+              if (delta_frames >= 2 && delta_frames % MAX_FRAME_NUMBER == sfn_delta) {
+                const double measured = (double)delta_samples / delta_frames - fp->samples_per_frame;
+                const double ppm = measured * 1e6 / fp->samples_per_frame;
+                if (isfinite(ppm) && fabs(ppm) <= 200.0 && get_nrUE_params()->time_sync_I > 0) {
+                  auto_drift_samples_per_frame = measured;
+                  auto_drift_ready = true;
+                  /* Steady-state readBlockSize subtracts shiftForNextFrame;
+                   * shiftForNextFrame = -I*max_pos_acc. Positive drift therefore
+                   * requires a positive integral and MORE samples per frame. */
+                  /* NEGATED: measured drift is +samples/frame, but the timing integrator's
+                   * steady state for that drift is NEGATIVE. Measured on this rig: auto_timing
+                   * reads samples_per_frame = +5.2242 while the working (non-auto) loop converges
+                   * to max_pos_acc = -522 == -(5.2242/0.01) -- same magnitude, opposite sign. The
+                   * unnegated seed started the loop at double the error in the wrong direction:
+                   * the FFT window walked off, PBCH still correlated (timing-tolerant) but SIB1's
+                   * PDSCH extraction never landed, so acquisition stuck at PBCH_LOCKED forever. */
+                  UE->max_pos_acc = -lround(measured / get_nrUE_params()->time_sync_I);
+                  UE->max_pos_iir = 0;
+                  LOG_I(PHY,
+                        "ISAC_ACQ_DRIFT {\"pci\":%d,\"delta_frames\":%ld,\"delta_samples\":%ld,"
+                        "\"samples_per_frame\":%.6f,\"sfo_ppm\":%.6f}\n",
+                        fp->Nid_cell, (long)delta_frames, (long)delta_samples, measured, ppm);
+                }
+              }
+            }
+            if (!auto_drift_ready) {
+              LOG_I(PHY, "ISAC_ACQ_TIMING_ANCHOR pci=%d sfn=%d timestamp=%ld; requesting fresh PBCH\n",
+                    fp->Nid_cell, decoded_frame_rx, (long)anchor);
+              auto_anchor_valid = true;
+              auto_anchor_timestamp = anchor;
+              auto_anchor_frame = decoded_frame_rx;
+              auto_anchor_pci = fp->Nid_cell;
+              auto_anchor_ssb = (nr_gscn_info_t){.ssbFirstSC = fp->ssb_start_subcarrier};
+              for (int i = 0; i < syncMsg->numGscn; ++i)
+                if (syncMsg->gscnInfo[i].ssbFirstSC == fp->ssb_start_subcarrier)
+                  auto_anchor_ssb = syncMsg->gscnInfo[i];
+              UE->is_synchronized = 0;
+              delNotifiedFIFO_elt(res);
+              stream_status = STREAM_STATUS_UNSYNC;
+              continue;
+            }
+          }
           // shift the frame index with all the frames we trashed meanwhile we perform the synch search
           decoded_frame_rx = (decoded_frame_rx + UE->init_sync_frame + trashed_frames) % MAX_FRAME_NUMBER;
           intialSyncOffset = syncMsg->rx_offset;
@@ -1302,6 +1362,10 @@ void *UE_thread(void *arg)
       /* Acquisition consumes frames outside the slot-read accounting. Never compare
        * a new lock against the final timestamp of the previous lock. */
       nr_rx_continuity_reset(&rx_continuity);
+      if (auto_timing && auto_drift_ready) {
+        auto_drift_ready = false;
+        auto_anchor_valid = false;
+      }
       if (get_nrUE_params()->time_sync_I)
         UE->max_pos_acc = ntn_init_time_drift * 1e-6 * fp->samples_per_frame / get_nrUE_params()->time_sync_I;
       else
@@ -1347,7 +1411,11 @@ void *UE_thread(void *arg)
         syncMsg->fast_pss_radius = fp->ofdm_symbol_size / 4;
         syncMsg->fast_pss_wide_radius = (int)fmax(syncMsg->fast_pss_radius, fp->samples_per_frame / 20);
       }
-      if (scan_confirm_pending) {
+      if (auto_timing && auto_anchor_valid) {
+        // The second timing observation searches only the SSB just measured OTA.
+        syncMsg->gscnInfo[0] = auto_anchor_ssb;
+        syncMsg->numGscn = 1;
+      } else if (scan_confirm_pending) {
         // Confirm pass: only the SSB the blind scan just won .
         scan_confirm_pending = false;
         syncMsg->gscnInfo[0] = scan_confirm_ssb;
@@ -1385,8 +1453,22 @@ void *UE_thread(void *arg)
        * plausible real drift. At the measured 0.11 ppm this link drifts ~0.14 samples/frame, so a
        * cap of one sample per frame is already an order of magnitude of headroom. */
       double drift = elapsed_frames * (double)UE->max_pos_acc * get_nrUE_params()->time_sync_I;
-      const int initial_drift_shift = -round(drift);
+      const int initial_drift_shift = auto_timing && auto_drift_ready
+          ? lround((elapsed_frames - 1) * auto_drift_samples_per_frame) : -round(drift);
       int corrected_sync_offset = intialSyncOffset + initial_drift_shift;
+      if (auto_timing && auto_drift_ready) {
+        const int period = lround(fp->samples_per_frame + auto_drift_samples_per_frame);
+        while (corrected_sync_offset < 0) {
+          corrected_sync_offset += period;
+          decoded_frame_rx = (decoded_frame_rx + MAX_FRAME_NUMBER - 1) % MAX_FRAME_NUMBER;
+        }
+        while (corrected_sync_offset >= period) {
+          corrected_sync_offset -= period;
+          decoded_frame_rx = (decoded_frame_rx + 1) % MAX_FRAME_NUMBER;
+        }
+        LOG_I(PHY, "ISAC_ACQ_TIMING_HANDOFF age_frames=%d drift_shift=%d offset=%d integral=%d\n",
+              elapsed_frames - 1, initial_drift_shift, corrected_sync_offset, UE->max_pos_acc);
+      }
       if (corrected_sync_offset >= 0) {
         syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, corrected_sync_offset);
       } else {

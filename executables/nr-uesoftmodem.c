@@ -1,5 +1,6 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
+#include "PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.h"
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
@@ -154,12 +155,20 @@ uint64_t set_nrUE_optmask(uint64_t bitmask) {
 nrUE_params_t *get_nrUE_params(void) {
   return &nrUE_params;
 }
+static int ssb_given, fo_given; // explicit --ssb / --initial-fo on the command line (pinned cell)
 /* get_options: reads the NR UE command-line parameters (CMDLINE_NRUEPARAMS_DESC); asserts that no extra PDU session was requested. Caller: main(). */
 static void get_options(configmodule_interface_t *cfg)
 {
   paramdef_t cmdline_params[] = CMDLINE_NRUEPARAMS_DESC;
   int numparams = sizeofArray(cmdline_params);
   config_get(cfg, cmdline_params, numparams, NULL);
+  for (int i = 0; i < numparams; i++) {
+    const int set = !!(cmdline_params[i].paramflags & PARAMFLAG_PARAMSET);
+    if (!strcmp(cmdline_params[i].optname, "ssb"))
+      ssb_given = set;
+    else if (!strcmp(cmdline_params[i].optname, "initial-fo"))
+      fo_given = set;
+  }
   AssertFatal(nrUE_params.extra_pdu_id == -1,
               "Add additional PDU sessions in uicc.pdu_sessions array instead\n");
 }
@@ -300,6 +309,7 @@ int main(int argc, char **argv)
   get_options(uniqCfg); // Command-line options specific for NRUE
   IS_SOFTMODEM_5GUE = true;
   get_common_options(uniqCfg);
+  nr_auto_acquire_on = nr_auto_acquire_trigger(IS_PASSIVE_RX_MODE(get_softmodem_params()), ssb_given, fo_given);
   CONFIG_CLEARRTFLAG(CONFIG_NOEXITONHELP);
 
   // ISAC / passive-radar sensing pipeline: parse the [sensing] config section (no-op if disabled).

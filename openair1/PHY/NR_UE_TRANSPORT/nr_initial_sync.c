@@ -627,6 +627,19 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
     LOG_W(NR_PHY, "ISAC_ACQ_EMPTY_WINDOW: no synchronization raster points\n");
     return (nr_initial_sync_t){.cell_detected = false};
   }
+  const bool auto_acquire = nr_auto_acquire_on;
+  int cfo_bins = 0;
+  int cfo_limit_hz = 0;
+  if (auto_acquire) {
+    AssertFatal(ue->UE_fo_compensation,
+                "Automatic acquisition (--passive-rx without --ssb/--initial-fo) requires --ue-fo-compensation; "
+                "pin the cell with --ssb and --initial-fo to disable it\n");
+    const double max_hz = NR_ACQ_CFO_MAX_HZ;
+    AssertFatal(max_hz <= 32.0 * fp->subcarrier_spacing, "NR_ACQ_CFO_MAX_HZ must be <= 32 SCS\n");
+    AssertFatal(fabs((double)ue->initial_fo) <= max_hz, "Initial CFO measurement exceeds search bound\n");
+    cfo_limit_hz = (int)floor(max_hz);
+    cfo_bins = (int)ceil((max_hz + fabs((double)ue->initial_fo)) / fp->subcarrier_spacing);
+  }
 
 
   /* Peak scratch memory, not parallelism, is the binding constraint on this scan.
@@ -715,6 +728,22 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
   // returns exactly the cell the single-shot version did.
   nr_ue_ssb_scan_t *res = NULL;
 
+  /* Search integer-SCS ambiguities on fresh private copies, then let the
+   * existing PSS/SSS estimators refine CFO. Only PBCH CRC accepts a hypothesis.
+   * This increases work, not scratch memory, and never retunes the radio. */
+  for (int trial = 0; trial <= 2 * cfo_bins && !res; ++trial) {
+    /* Probe starts at zero; handoff starts at this run's PBCH-derived CFO.
+     * Fresh PBCH CRC still accepts every trial, including the initial seed. */
+    /* SIGNED arithmetic: fp->subcarrier_spacing is uint32_t, so the -1 direction would be promoted to
+     * unsigned and wrap -- every negative trial evaluated to INT_MIN and was then skipped by the
+     * abs() guard. The search then only probes the POSITIVE hypotheses. */
+    const int scs_hz = (int)fp->subcarrier_spacing;
+    const int step = ((trial + 1) / 2) * scs_hz;
+    const int coarse_offset = ue->initial_fo + ((trial & 1) ? step : -step);
+    if (auto_acquire && abs(coarse_offset) > cfo_limit_hz)
+      continue;
+    if (auto_acquire)
+      LOG_I(NR_PHY, "ISAC_ACQ_CFO_TRIAL coarse_hz=%d\n", coarse_offset);
   for (int base = 0; base < numGscn && !res; base += batch) {
 
     const int n = (numGscn - base < batch) ? (numGscn - base) : batch;
@@ -732,7 +761,7 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
                                     .syncRes.cell_detected = false,
                                     .nFrames = scan_nframes,
                                     .foFlag = ue->UE_fo_compensation,
-                                    .freqOffset = ue->initial_fo,
+                                    .freqOffset = auto_acquire ? coarse_offset : ue->initial_fo,
                                     .targetNidCell = ue->target_Nid_cell};
       ssbInfo->pssWindowCenter = pss_window_center;
       ssbInfo->pssWindowRadius = pss_window_radius;
@@ -821,6 +850,8 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
     }
   }
 
+  } // coarse CFO hypotheses
+
   clock_gettime(CLOCK_MONOTONIC, &scan_t1);
   LOG_I(NR_PHY, "SENSING: SYNC_SCAN ms=%.1f gscn=%d ant=%d frames=%d decim=%s detected=%d\n",
         (scan_t1.tv_sec - scan_t0.tv_sec) * 1e3 + (scan_t1.tv_nsec - scan_t0.tv_nsec) / 1e6, numGscn, scan_fp.nb_antennas_rx,
@@ -908,6 +939,16 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
     LOG_I(PHY, "[UE%d] In synch, rx_offset %d samples\n", ue->Mod_id, res->syncRes.rx_offset);
     LOG_I(PHY, "[UE %d] Measured Carrier Frequency offset %d Hz\n", ue->Mod_id, res->freqOffset);
     LOG_A(PHY, "Initial sync successful, PCI: %d\n", fp->Nid_cell);
+    if (auto_acquire) {
+      const double ss_ref = res->gscnInfo.ssRef > 0 ? res->gscnInfo.ssRef
+          : (double)fp->dl_CarrierFreq
+              + (res->gscnInfo.ssbFirstSC + 120 - 6 * fp->N_RB_DL) * (double)fp->subcarrier_spacing;
+      LOG_I(NR_PHY,
+            "ISAC_ACQ_SSB {\"pci\":%d,\"gscn\":%d,\"ss_ref_hz\":%.0f,"
+            "\"ssb_mu\":%d,\"cfo_hz\":%d,\"sto_samples\":%d,\"sample_rate_hz\":%d}\n",
+            fp->Nid_cell, res->gscnInfo.gscn, ss_ref, fp->numerology_index,
+            res->freqOffset, res->syncRes.rx_offset, fp->samples_per_subframe * 1000);
+    }
     return res->syncRes;
   } else {
 #ifdef DEBUG_INITIAL_SYNC

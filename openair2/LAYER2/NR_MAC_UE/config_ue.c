@@ -2341,6 +2341,42 @@ static void publish_sib1_pdcch_prior(const NR_UE_MAC_INST_t *mac, const NR_Servi
   nr_pdcch_sib1_prior_set(&pr);
 }
 
+extern int nr_auto_acquire_on __attribute__((weak)); // unit tests link config_ue.c without the PHY lib
+/* Automatic acquisition: log the broadcast geometry (ISAC_ACQ_SIB1) for the supervisor; always continues applying SIB1. */
+static bool passive_acquisition_sib1(NR_UE_MAC_INST_t *mac, NR_ServingCellConfigCommonSIB_t *scc)
+{
+  if (!&nr_auto_acquire_on || !nr_auto_acquire_on)
+    return false;
+  /* ISAC_ACQ_PROBE=1 (tests/passive_rx/auto_acquire.py probe phase): stop at broadcast facts. Applying SIB1 to a trial
+   * RF window would promote the scan center to the carrier center; the supervisor restarts with the broadcast geometry. */
+  const char *probe_env = getenv("ISAC_ACQ_PROBE");
+  const bool probe = probe_env && !strcmp(probe_env, "1");
+  const NR_FrequencyInfoDL_SIB_t *dl = &scc->downlinkConfigCommon.frequencyInfoDL;
+  const NR_FrequencyInfoUL_SIB_t *ul = scc->uplinkConfigCommon ? &scc->uplinkConfigCommon->frequencyInfoUL : NULL;
+  if (!mac->mib || mac->frequency_range != FR1 || dl->frequencyBandList.list.count < 1
+      || !dl->frequencyBandList.list.array[0]->freqBandIndicatorNR
+      || dl->scs_SpecificCarrierList.list.count != 1 || !ul || ul->scs_SpecificCarrierList.list.count != 1) {
+    LOG_W(NR_MAC, "ISAC_ACQ_UNSUPPORTED: need FR1 with one DL and one UL SCS carrier\n");
+    return probe;
+  }
+  LOG_I(NR_MAC,
+        "ISAC_ACQ_SIB1 {\"pci\":%d,\"band\":%ld,\"mib_mu\":%ld,"
+        "\"dl_mu\":%ld,\"dl_prb\":%ld,\"dl_offset_rb\":%ld,"
+        "\"offset_to_point_a_rb\":%ld,\"k_ssb\":%d,\"tdd\":%d,"
+        "\"ul_mu\":%ld,\"ul_prb\":%ld,\"ul_offset_rb\":%ld,\"ul_point_a_arfcn\":%ld}\n",
+        (int)mac->physCellId, *dl->frequencyBandList.list.array[0]->freqBandIndicatorNR,
+        mac->mib->subCarrierSpacingCommon,
+        dl->scs_SpecificCarrierList.list.array[0]->subcarrierSpacing,
+        dl->scs_SpecificCarrierList.list.array[0]->carrierBandwidth,
+        dl->scs_SpecificCarrierList.list.array[0]->offsetToCarrier,
+        dl->offsetToPointA, mac->ssb_subcarrier_offset, scc->tdd_UL_DL_ConfigurationCommon != NULL,
+        ul->scs_SpecificCarrierList.list.array[0]->subcarrierSpacing,
+        ul->scs_SpecificCarrierList.list.array[0]->carrierBandwidth,
+        ul->scs_SpecificCarrierList.list.array[0]->offsetToCarrier,
+        ul->absoluteFrequencyPointA ? *ul->absoluteFrequencyPointA : -1L);
+  return probe;
+}
+
 /* nr_passive_sib1_semantic_hash: 32-bit hash of the semantic content of a SIB1 that the passive receiver uses to detect a configuration change: the PLMN list, cell identity, tracking area, and (when present) the serving cell common configuration.
  *   A SIB1 without servingCellConfigCommon (NSA cells) hashes only the identity part. Callers: config_ue.c (SIB1 check) and nr_rrc_process_sib1-related code in rrc_UE.c.
  */
@@ -2562,6 +2598,12 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
       }
       nr_ue_ctx_on_sib1_param(NR_UEP_SIB1_TDRA_HASH, hash, -1);
     }
+  }
+
+  if (passive_acquisition_sib1(mac, scc)) {
+    ret = pthread_mutex_unlock(&mac->if_mutex);
+    AssertFatal(!ret, "mutex failed %d\n", ret);
+    return;
   }
 
   UPDATE_IE(mac->tdd_UL_DL_ConfigurationCommon, scc->tdd_UL_DL_ConfigurationCommon, NR_TDD_UL_DL_ConfigCommon_t);
