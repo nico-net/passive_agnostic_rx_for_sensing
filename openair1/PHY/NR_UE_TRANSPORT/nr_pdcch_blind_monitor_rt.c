@@ -5722,6 +5722,7 @@ static void phase2_guard_release(phase2_guard_t *g)
  * Attribution tool for the multi-ms scan-pass maxima; costs one atomic store per pass when on, nothing when off. */
 #include <execinfo.h>
 #include <signal.h>
+#include "nr_safe_backtrace.h"
 #define SLOWPASS_SLOTS 16
 static _Atomic uint64_t g_sp_t0[SLOWPASS_SLOTS];
 static _Atomic uint32_t g_sp_hits[SLOWPASS_SLOTS];
@@ -5737,7 +5738,9 @@ static void slowpass_handler(int sig)
   pthread_getname_np(pthread_self(), name, sizeof(name));
   const int n = snprintf(hdr, sizeof(hdr), "SLOWPASS_BT thread %s\n", name);
   if (n > 0) { ssize_t w = write(2, hdr, (size_t)n); (void)w; }
-  backtrace_symbols_fd(fr, backtrace(fr, 40), 2);
+  const int k = nr_safe_backtrace(fr, 40); /* a plain backtrace() can fault through an SVE frame and kill the process */
+  if (k >= 0) backtrace_symbols_fd(fr, k, 2);
+  else { static const char m[] = "SLOWPASS_BT unwind faulted, skipped\n"; ssize_t w = write(2, m, sizeof m - 1); (void)w; }
 }
 static void *slowpass_watchdog(void *arg)
 {
@@ -11611,6 +11614,7 @@ void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue)
 static void isac_segv_bt(int sig, siginfo_t *si, void *uc)
 {
   (void)uc;
+  nr_safe_backtrace_on_fault(); /* the fault is inside a SLOWPASS_BT unwind: abandon that backtrace, the process is fine */
   void *fr[48];
   char hdr[160];
   char name[16] = {0};

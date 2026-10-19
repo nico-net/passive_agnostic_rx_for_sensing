@@ -149,3 +149,55 @@ TEST(PolarFssc, DISABLED_Bench)
     printf("len %d AL%d: ref %.3f us | fssc %.3f us | x8 %.3f us per decode (%u)\n", len, al, tr, tf, tb, sink & 1);
   }
 }
+
+// SLOWPASS_BT regression (2026-10-19 on-air SIGSEGVs in passivePdcch0/1): a SIGUSR2 that lands in the SVE stack-clash prologue of
+// nr_polar_dci_decode_fssc (GCC 13 CFI: CFA = x11 + 0) makes backtrace() read a stale stack word as the return address and fault.
+// The signal handler must survive that: nr_safe_backtrace() jumps out of the failed unwind. Runs in a child (death on regression).
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+#include <atomic>
+#include "PHY/NR_UE_TRANSPORT/nr_safe_backtrace.h"
+static std::atomic<long> g_bt_ok{0}, g_bt_fault{0};
+static std::atomic<int> g_bt_stop{0};
+static void bt_sig(int)
+{
+  void *fr[40];
+  (nr_safe_backtrace(fr, 40) < 0 ? g_bt_fault : g_bt_ok)++;
+}
+static void bt_segv(int sig)
+{
+  nr_safe_backtrace_on_fault();
+  _exit(100 + sig);
+}
+static void *bt_decoder(void *)
+{
+  std::vector<Vec> vs;
+  for (int al : {1, 2, 4, 8, 16}) for (int len : {40, 47, 99}) if (len + 24 <= al * 108) vs.push_back(make(len, al, 20, 12));
+  const int L[] = {40, 47, 99};
+  uint64_t o[3];
+  while (!g_bt_stop.load())
+    for (size_t i = 0; i < vs.size(); i++) nr_polar_dci_decode_fssc(vs[i].llr.data(), o, L[i % 3], (uint8_t)(vs[i].llr.size() / 108));
+  return NULL;
+}
+TEST(PolarFssc, SignalBacktraceDuringDecodeSurvives)
+{
+  crcTableInit();
+  EXPECT_EXIT(
+      {
+        signal(SIGUSR2, bt_sig);
+        signal(SIGSEGV, bt_segv);
+        signal(SIGBUS, bt_segv);
+        void *fr[2];
+        (void)backtrace(fr, 2);
+        pthread_t th;
+        pthread_create(&th, NULL, bt_decoder, NULL);
+        const double t0 = now_us();
+        while (now_us() - t0 < 4e6) { pthread_kill(th, SIGUSR2); usleep(20); }
+        g_bt_stop = 1;
+        pthread_join(th, NULL);
+        fprintf(stderr, "backtraces ok=%ld faulted=%ld\n", g_bt_ok.load(), g_bt_fault.load());
+        exit(g_bt_ok.load() + g_bt_fault.load() > 1000 ? 0 : 2); /* survived >1000 unwinds mid-decode */
+      },
+      ::testing::ExitedWithCode(0), "backtraces ok=");
+}
