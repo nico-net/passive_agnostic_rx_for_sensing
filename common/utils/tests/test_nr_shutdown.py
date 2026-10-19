@@ -6,10 +6,7 @@ import sys
 import time
 
 binary, mode = sys.argv[1:]
-env = dict(os.environ, ISAC_SHUTDOWN_TIMEOUT_S="1")
-env.pop("ISAC_RF_FAIL_AFTER_READS", None)
-if mode == "injected":
-    env["ISAC_RF_FAIL_AFTER_READS"] = "3"
+env = dict(os.environ)
 start = time.monotonic()
 with subprocess.Popen([binary, mode], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as child:
     # This binary has only a fake radio, never a receiver/UHD/rfsim process.

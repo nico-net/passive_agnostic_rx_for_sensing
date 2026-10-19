@@ -3168,8 +3168,7 @@ uint16_t nr_dci_size(const NR_UE_DL_BWP_t *DL_BWP,
       }
       { /* UL rfsim test bed ground truth (logged once; packer-order widths for pdcch_blind_monitor_ul_dci_bits) */
         static bool logged;
-        /* DEFERRED/DO NOT USE: ISAC_TB_LOG_WIDTHS not in the frozen config t26zE (2026-10-18); slated for removal */
-        if (!logged && getenv("ISAC_TB_LOG_WIDTHS")) { /* test bed only, default off */
+        if (!logged && getenv("ISAC_TB_LOG_WIDTHS")) { /* gNB-side rfsim test bed ground truth (tests/passive_rx/dgx/ul_rfsim_arm.sh), never the receiver */
           logged = true;
           LOG_A(NR_MAC, "DCI01_WIDTHS total=%d carrier=%d ulsul=%d bwp=%d hop=%d harq=%d dai1=%d dai2=%d sri=%d prec=%d ant=%d srs=%d csi=%d cbg=%d ptrs=%d beta=%d dmrsseq=%d fdra=%d tda=%d\n",
                 size, dci_pdu->carrier_indicator.nbits, dci_pdu->ul_sul_indicator.nbits, dci_pdu->bwp_indicator.nbits,

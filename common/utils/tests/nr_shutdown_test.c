@@ -13,6 +13,7 @@
 
 /* Link the production RU read/lifetime code, with no RF plugin or PHY runtime. */
 void nrue_ru_test_device(openair0_device_t device);
+void nrue_ru_test_fail_after_reads(unsigned long n);
 void itti_wait_tasks_end(void (*handler)(int));
 void itti_wait_tasks_unblock(void);
 int oai_exit;
@@ -114,6 +115,8 @@ int main(int argc, char **argv)
   if (argc != 2)
     return 99;
   mode = argv[1];
+  if (!strcmp(mode, "injected"))
+    nrue_ru_test_fail_after_reads(3);
   nrue_ru_test_device((openair0_device_t){.priv = &ue, .trx_read_func = fake_read,
                                         .trx_stop_func = fake_stop, .trx_end_func = fake_end});
   if (nr_shutdown_init(notify_main, nrue_ru_shutdown_stop, nrue_ru_shutdown))

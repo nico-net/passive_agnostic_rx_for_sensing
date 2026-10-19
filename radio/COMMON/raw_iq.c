@@ -22,10 +22,6 @@ typedef struct {
   unsigned decim;
   float *taps; int ntaps;
   int16_t *hist[8], *scr[8]; int scr_cap;
-  /* ISAC_RAW_IQ_WANDER=lo:hi (replay-only test injection, default off): a new random content offset of +-[lo,hi] samples every 10 ms frame
-   * (memoryless, like the SSB timing jumps measured in ab_L1_1_110507); the returned timestamps stay continuous, so the receiver sees a
-   * jittering cell timing, not a stream loss. ISAC_RAW_IQ_WANDER_UNTIL_S=<s> (default 0 = whole run) stops it. */
-  int wander_lo, wander_hi; uint64_t wander_until, wander_frame, wander_ts; int wander_off, wander_on; uint32_t wander_rng;
 } replay_state;
 
 #define DEC_TAPS 127
@@ -114,25 +110,7 @@ static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
   uint64_t ts;
   int got;
   if (D == 1) {
-    uint64_t wander_ts = 0;
-    if (s->wander_on) {
-      const uint64_t pos = s->source.position, frame = pos / (uint64_t)(s->source.rate / 100);
-      if (!s->wander_ts) s->wander_ts = s->source.first_tick + pos;
-      if (frame != s->wander_frame) {
-        s->wander_frame = frame;
-        int o = 0;
-        if (!s->wander_until || pos < s->wander_until) {
-          s->wander_rng = s->wander_rng * 1664525u + 1013904223u; const int mag = s->wander_lo + (int)((s->wander_rng >> 8) % (unsigned)(s->wander_hi - s->wander_lo + 1));
-          s->wander_rng = s->wander_rng * 1664525u + 1013904223u; o = (s->wander_rng >> 16) & 1 ? mag : -mag;
-        }
-        int64_t np = (int64_t)pos + (o - s->wander_off);
-        if (np < 0) np = 0;
-        s->source.position = (uint64_t)np; s->wander_off = o;
-      }
-      wander_ts = s->wander_ts; s->wander_ts += (uint64_t)n;
-    }
     got = raw_iq_read(&s->source, b, n, c, &ts);
-    if (s->wander_on) ts = wander_ts;
   } else {
     if (m > s->scr_cap) {
       for (int k = 0; k < 8; ++k) { free(s->scr[k]); s->scr[k] = malloc((size_t)(m + DEC_TAPS) * 4); }
@@ -173,29 +151,18 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
   uint64_t channels = integer_env("ISAC_RAW_IQ_CHANNELS");
   uint64_t shift = integer_env("ISAC_RAW_IQ_SHIFT");
   AssertFatal(channels >= 1 && channels <= 8 && shift <= 15, "RAW_IQ_VOID invalid channel/shift\n");
-  /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_DIRECTORY not in the frozen config t26zE (2026-10-18); slated for removal */
   int ret = raw_iq_open(&s->source, getenv("ISAC_RAW_IQ_DIRECTORY"),
                        integer_env("ISAC_RAW_IQ_SAMPLES"), integer_env("ISAC_RAW_IQ_FIRST_TICK"),
                        channels, integer_env("ISAC_RAW_IQ_RATE"), integer_env("ISAC_RAW_IQ_CENTER"), shift);
   AssertFatal(ret == 0, "RAW_IQ_VOID cannot open exact saved IQ: %s\n", strerror(errno));
   char *end = NULL;
-  /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_SPEED not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *speed = getenv("ISAC_RAW_IQ_SPEED");
   s->speed = speed ? strtod(speed, &end) : 0;
   AssertFatal(speed && end && !*end && isfinite(s->speed) && s->speed > 0 && s->speed <= 1,
               "RAW_IQ_VOID invalid pacing speed\n");
-  /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_DECIM not in the frozen config t26zE (2026-10-18); slated for removal */
   { const char *dv = getenv("ISAC_RAW_IQ_DECIM"); s->decim = dv ? (unsigned)atoi(dv) : 1;
     AssertFatal(s->decim >= 1 && s->decim <= 4 && channels <= 8, "RAW_IQ_VOID invalid ISAC_RAW_IQ_DECIM\n");
     if (s->decim > 1) decim_init(s); }
-  /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_WANDER not in the frozen config t26zE (2026-10-18); slated for removal */
-  { const char *w = getenv("ISAC_RAW_IQ_WANDER"); int lo, hi;
-    if (w && sscanf(w, "%d:%d", &lo, &hi) == 2 && lo >= 0 && hi >= lo) {
-      s->wander_lo = lo; s->wander_hi = hi; s->wander_on = 1; s->wander_rng = 12345u;
-      /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_WANDER_UNTIL_S not in the frozen config t26zE (2026-10-18); slated for removal */
-      const char *u = getenv("ISAC_RAW_IQ_WANDER_UNTIL_S"); s->wander_until = u ? (uint64_t)(atof(u) * s->source.rate) : 0;
-      fprintf(stderr, "RAW_IQ_WANDER armed +-[%d,%d] samples per frame until_s=%s\n", lo, hi, u ? u : "end");
-    } }
   pthread_mutex_init(&s->mutex, NULL);
   d->priv = s; d->openair0_cfg = cfg; d->type = NONE_DEV;
   for (unsigned c = 0; c < channels; ++c) {
@@ -211,17 +178,13 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
   {
     /* ISAC_RAW_IQ_GAP_AT_S / ISAC_RAW_IQ_GAP_S: inject one stream discontinuity (seconds into
      * the recording, seconds skipped). Replay-only; there is no live-radio equivalent. */
-    /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_GAP_AT_S not in the frozen config t26zE (2026-10-18); slated for removal */
-    /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_GAP_S not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *gat = getenv("ISAC_RAW_IQ_GAP_AT_S"), *glen = getenv("ISAC_RAW_IQ_GAP_S");
+        const char *gat = getenv("ISAC_RAW_IQ_GAP_AT_S"), *glen = getenv("ISAC_RAW_IQ_GAP_S");
     if (gat && glen && atof(gat) > 0 && atof(glen) > 0) {
       s->source.gap_at  = (uint64_t)(atof(gat)  * s->source.rate);
       s->source.gap_len = (uint64_t)(atof(glen) * s->source.rate);
       fprintf(stderr, "RAW_IQ_GAP armed at_s=%s len_s=%s\n", gat, glen);
     }
-    /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_GAP2_AT_S not in the frozen config t26zE (2026-10-18); slated for removal */
-    /* DEFERRED/DO NOT USE: ISAC_RAW_IQ_GAP2_S not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *gat2 = getenv("ISAC_RAW_IQ_GAP2_AT_S"), *glen2 = getenv("ISAC_RAW_IQ_GAP2_S");
+        const char *gat2 = getenv("ISAC_RAW_IQ_GAP2_AT_S"), *glen2 = getenv("ISAC_RAW_IQ_GAP2_S");
     if (gat2 && glen2 && atof(gat2) > 0 && atof(glen2) > 0) {
       s->source.gap2_at = (uint64_t)(atof(gat2) * s->source.rate);
       s->source.gap2_len = (uint64_t)(atof(glen2) * s->source.rate);

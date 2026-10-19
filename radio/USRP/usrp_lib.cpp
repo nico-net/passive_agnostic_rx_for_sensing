@@ -964,7 +964,7 @@ static bool usrp_repin_uhd_threads(const char *when)
         while (next_core < CPU_SETSIZE && !CPU_ISSET(next_core, &set)) next_core++;
         if (next_core == CPU_SETSIZE) {
           LOG_E(HW, "SENSING: CORE_PLAN more UHD busy-pollers than reserved CPUs; stream cancelled. "
-                    "Set ISAC_UHD_CTRL_THREADS to the number of control endpoints\n");
+                    "Set ISAC_UHD_CTRL_CORES to the number of control endpoints\n");
           ok = false;
           fclose(f);
           continue;
@@ -989,7 +989,6 @@ static int usrp_ring_ms(void)
 {
   static int ms = -1;
   if (ms < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_USRP_RING_MS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_USRP_RING_MS");
     ms = e ? atoi(e) : 0;
     if (ms < 0 || ms > 5000)
@@ -1011,7 +1010,6 @@ static int usrp_restart_max(void)
 {
   static int m = -1;
   if (m < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_USRP_RESTART_MAX not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_USRP_RESTART_MAX");
     m = e && atoi(e) > 0 ? atoi(e) : 10;
   }
@@ -1042,46 +1040,14 @@ extern "C" __attribute__((visibility("default"))) void isac_usrp_ring_traffic(ui
   *copied = g_ring_copy_bytes.load(std::memory_order_relaxed);
   *direct = g_ring_direct_bytes.load(std::memory_order_relaxed);
 }
-/* usrp_rx_recover_max: returns ISAC_RX_RECOVER_MAX (cached, default 20): consecutive failed re-arms allowed before the RX gives up.
- *   Used to build the recovery state in usrp_ring_producer().
- */
-static int usrp_rx_recover_max(void)
-{
-  static const int limit = [] { const char *e = getenv("ISAC_RX_RECOVER_MAX"); return e && atoi(e) > 0 ? atoi(e) : 20; }();
-  return limit;
-}
-/* usrp_rx_recover_window_max: returns ISAC_RX_RECOVER_MAX_FAULTS (cached, default 20): faults allowed inside the fault window before the RX gives up.
- *   Used with usrp_rx_recover_window_s() by usrp_ring_producer().
- */
-static int usrp_rx_recover_window_max(void)
-{
-  /* DEFERRED/DO NOT USE: ISAC_RX_RECOVER_MAX_FAULTS not in the frozen config t26zE (2026-10-18); slated for removal */
-  static const int limit = [] { const char *e = getenv("ISAC_RX_RECOVER_MAX_FAULTS"); return e && atoi(e) > 0 ? atoi(e) : 20; }();
-  return limit;
-}
-/* usrp_rx_recover_window_s: returns ISAC_RX_RECOVER_WINDOW_S (cached, default 60 s): length of the fault window of the recovery budget.
- *   Caller: usrp_ring_producer().
- */
-static double usrp_rx_recover_window_s(void)
-{
-  /* DEFERRED/DO NOT USE: ISAC_RX_RECOVER_WINDOW_S not in the frozen config t26zE (2026-10-18); slated for removal */
-  static const double w = [] { const char *e = getenv("ISAC_RX_RECOVER_WINDOW_S"); return e && atof(e) > 0 ? atof(e) : 60.0; }();
-  return w;
-}
-/**
- * usrp_rx_recover_noctrl: returns ISAC_RX_RECOVER_NOCTRL (cached, default on): re-arm the stream from a locally computed device time, without a blocking control read.
- *   Used by the recovery path of usrp_ring_producer(): STOP errors are then non-fatal and the start time comes from the last good sample.
- *
- * ISAC_RX_RECOVER_NOCTRL (default 1 when ISAC_RX_RECOVER=1): re-arm from a locally computed time, never a
- * blocking get_time_now() (the X410 control path is starved by the same DPDK drop burst). */
-static bool usrp_rx_recover_noctrl(void)
-{
-  /* DEFERRED/DO NOT USE: ISAC_RX_RECOVER_NOCTRL not in the frozen config t26zE (2026-10-18); slated for removal */
-  static const bool on = [] { const char *e = getenv("ISAC_RX_RECOVER_NOCTRL"); return !e || atoi(e) != 0; }();
-  return on;
-}
+/* Recovery budget of usrp_ring_producer(): consecutive failed re-arms, faults per window, window length. */
+static constexpr int USRP_RX_RECOVER_MAX = 20;
+static constexpr int USRP_RX_RECOVER_MAX_FAULTS = 20;
+static constexpr double USRP_RX_RECOVER_WINDOW_S = 60.0;
+/* Re-arm from a locally computed device time, never a blocking get_time_now(): the X410 control path is starved by the same DPDK drop burst. */
+static constexpr bool usrp_rx_recover_noctrl() { return true; }
 /* usrp_env_int: reads an integer environment variable, returning def when it is unset or below lo.
- *   Used for the ring and recovery tunables (ISAC_USRP_RING_PRIO, _PKTS, _POLL, ISAC_RX_RECOVER_*).
+ *   Used for the ring and recovery tunables (ISAC_USRP_RING_PRIO, _PKTS, _POLL).
  */
 static int usrp_env_int(const char *name, int def, int lo)
 {
@@ -1106,7 +1072,6 @@ static bool usrp_restart_allowed(const usrp_state_t *s, uint64_t w)
   static int until_sync = -1;
   static const int *synced = NULL;
   if (until_sync < 0) {
-    /* DEFERRED/DO NOT USE: ISAC_USRP_RESTART_UNTIL_SYNC not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_USRP_RESTART_UNTIL_SYNC");
     until_sync = (e == NULL || atoi(e) != 0) ? 1 : 0;
     synced = (const int *)dlsym(RTLD_DEFAULT, "nr_ue_rx_synced_g");
@@ -1120,7 +1085,6 @@ static bool usrp_restart_allowed(const usrp_state_t *s, uint64_t w)
  */
 static void usrp_ring_producer(usrp_state_t *s)
 {
-  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *core = getenv("ISAC_USRP_RING_CORE");
   if (core && atoi(core) >= 0 && atoi(core) < CPU_SETSIZE) {
     cpu_set_t set;
@@ -1131,7 +1095,6 @@ static void usrp_ring_producer(usrp_state_t *s)
   /* ISAC_USRP_RING_PRIO (default 95): SCHED_FIFO priority of the producer. OAI's actors and ru_start_thread
    * run at FIFO 97 with no CPU pinning; on a core that is not isolated one of them preempts this thread for
    * as long as it runs, and the stream drops. 98 puts the producer above every OAI thread. */
-  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_PRIO not in the frozen config t26zE (2026-10-18); slated for removal */
   struct sched_param sp = {.sched_priority = usrp_env_int("ISAC_USRP_RING_PRIO", 95, 1)};
   if (sp.sched_priority > 99)
     sp.sched_priority = 95;
@@ -1143,7 +1106,6 @@ static void usrp_ring_producer(usrp_state_t *s)
    * every buffer until the pool ran dry (2026-10-06, frozen-timestamp X410 34B2AF1). */
   size_t pkts = 8;
   {
-    /* DEFERRED/DO NOT USE: ISAC_USRP_RING_PKTS not in the frozen config t26zE (2026-10-18); slated for removal */
     const char *e = getenv("ISAC_USRP_RING_PKTS");
     if (e && atoi(e) > 0 && atoi(e) <= 64)
       pkts = (size_t)atoi(e);
@@ -1153,9 +1115,7 @@ static void usrp_ring_producer(usrp_state_t *s)
    * owns an isolated core, so spinning is free, whereas the blocking recv() made the DPDK I/O lcore issue a
    * futex wake (syscall + IPI) for most packets. ISAC_USRP_RING_POLL_TIMEOUT_MS (default 100) of continuous
    * silence is still a receive timeout (fault), as with the blocking 0.1 s recv(). */
-  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_POLL not in the frozen config t26zE (2026-10-18); slated for removal */
   static const bool poll_mode = usrp_env_int("ISAC_USRP_RING_POLL", 0, 0) != 0;
-  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_POLL_TIMEOUT_MS not in the frozen config t26zE (2026-10-18); slated for removal */
   const double poll_limit_s = usrp_env_int("ISAC_USRP_RING_POLL_TIMEOUT_MS", 100, 1) * 1e-3;
   auto poll_last_data = std::chrono::steady_clock::now();
   uint64_t poll_notified = 0;
@@ -1170,15 +1130,11 @@ static void usrp_ring_producer(usrp_state_t *s)
   long long ref_end_ticks = 0; /* device ticks at the end of the last good sample (local reference) */
   std::chrono::steady_clock::time_point ref_wall;
   bool ref_valid = false;
-  /* DEFERRED/DO NOT USE: ISAC_RX_RECOVER_BACKOFF_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  const int backoff_base_ms = usrp_env_int("ISAC_RX_RECOVER_BACKOFF_MS", 300, 0);
-  /* DEFERRED/DO NOT USE: ISAC_RX_RECOVER_BACKOFF_MAX_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  const int backoff_max_ms = usrp_env_int("ISAC_RX_RECOVER_BACKOFF_MAX_MS", 3000, 1);
-  /* DEFERRED/DO NOT USE: ISAC_RX_RECOVER_LEAD_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  const double lead_s = usrp_env_int("ISAC_RX_RECOVER_LEAD_MS", 80, 1) * 1e-3;
+  const int backoff_base_ms = 300, backoff_max_ms = 3000;
+  const double lead_s = 80 * 1e-3;
   std::chrono::steady_clock::time_point restart_issued;
-  usrp_ring_recovery_state recovery((uint64_t)s->sample_rate, usrp_rx_recover_max(),
-                                    usrp_rx_recover() ? usrp_rx_recover_window_max() : 0, usrp_rx_recover_window_s());
+  usrp_ring_recovery_state recovery((uint64_t)s->sample_rate, USRP_RX_RECOVER_MAX,
+                                    usrp_rx_recover() ? USRP_RX_RECOVER_MAX_FAULTS : 0, USRP_RX_RECOVER_WINDOW_S);
   /* ACQMISS (task B): ISAC_USRP_START_TIMEOUT_MS (default 5000 = unchanged). MEASURED 2026-10-09 gs2_38 (9.5 h idle) and 2026-10-13
    * ab_K1_1_110419 (first start after a reboot): the timed START (pps + 1 s) produced no packet at all (RPC "timeout event" and
    * "blocks timed out during flush" at device init), the consumer's first read gave up after 3 s (RFSTALL USRP_RX_START received=0)
@@ -1459,7 +1415,6 @@ static void usrp_ring_alloc(usrp_state_t *s)
  * unpinned FIFO 97 OAI threads; 8/8 starts on the 15-19 boot were drop-free. Warn only, never refuse. */
 static void usrp_isolation_check(void)
 {
-  /* DEFERRED/DO NOT USE: ISAC_USRP_ISOLATION_CHECK not in the frozen config t26zE (2026-10-18); slated for removal */
   if (usrp_env_int("ISAC_USRP_ISOLATION_CHECK", 0, 0) == 0)
     return;
   auto read_mask = [](const char *path, bool &ok) -> uint64_t {
@@ -1476,7 +1431,6 @@ static void usrp_isolation_check(void)
   bool ok_iso = false, ok_nohz = false;
   const uint64_t iso = read_mask("/sys/devices/system/cpu/isolated", ok_iso);
   const uint64_t nohz = read_mask("/sys/devices/system/cpu/nohz_full", ok_nohz);
-  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   struct { const char *role; const char *env; } roles[] = {{"ring producer", "ISAC_USRP_RING_CORE"},
                                                           {"uhd_ctrl", "ISAC_UHD_CTRL_CORES"}};
   int bad = 0;
@@ -2454,23 +2408,8 @@ ring_read_retry:
   }
 
   // bring RX data into 12 LSBs for softmodem RX
-  /* ISAC_RX_CHAN_MAP="2,3,0,1": OAI antenna i takes UHD channel map[i]. A/B tool (2026-09-16): on the
-   * X410 the weak daughterboard-A antennas are UHD ch0/ch1 and the strong B ones ch2/ch3; making a
-   * strong channel OAI antenna 0 tells whether the 4-RX CORESET#0 failure follows antenna 0's role. */
-  static int s_map[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-  static int s_map_init = 0;
-  if (!s_map_init) {
-    s_map_init = 1;
-    /* DEFERRED/DO NOT USE: ISAC_RX_CHAN_MAP not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_RX_CHAN_MAP");
-    if (e && *e) {
-      int n = 0; const char *q = e;
-      while (*q && n < 8) { s_map[n++] = atoi(q); while (*q && *q != ',') q++; if (*q) q++; }
-      LOG_W(HW, "ISAC_RX_CHAN_MAP: OAI antennas take UHD channels [%d %d %d %d]\n", s_map[0], s_map[1], s_map[2], s_map[3]);
-    }
-  }
   for (int i=0; i<cc; i++) {
-    const int src = (s_map[i] >= 0 && s_map[i] < cc) ? s_map[i] : i;
+    const int src = i;
     if (ring_direct) {
       const int32_t *ring_src = s->ring[src].data();
       const size_t start = ring_r % s->ring_cap;
@@ -3304,7 +3243,7 @@ extern "C" {
           if (s->decim_ratio > 1) {
             if (nr_core_plan_active()) {
               LOG_E(HW, "SENSING: CORE_PLAN cannot safely start the legacy software-decimation spin pool; "
-                        "use a hardware-DDC FPGA image (ISAC_CORE_PLAN=0 restores legacy scheduling)\n");
+                        "use a hardware-DDC FPGA image\n");
               return -1;
             }
             LOG_W(HW,
@@ -3324,20 +3263,6 @@ extern "C" {
             int p = (int)hw_cores - 2;
             if (p < 2) p = 2;
             if (p > 8) p = 8; // untested above 8; the P=8-is-worse result above suggests this cap is generous, not tight
-            // TEMPORARY (2026-08-02): env override for re-tuning P against LIVE contention (the
-            // isolated-stage offline benchmark that picked hw_cores-2 did not, and could not,
-            // account for spin-waiting workers competing with the softmodem's OWN real-time
-            // threads for the same physical cores -- that only shows up live). Remove once P is
-            // re-settled against a live measurement instead of the isolated offline one.
-            /* DEFERRED/DO NOT USE: USRP_DECIM_WORKERS not in the frozen config t26zE (2026-10-18); slated for removal */
-            const char *p_override = getenv("USRP_DECIM_WORKERS");
-            if (p_override != NULL) {
-              int p_env = atoi(p_override);
-              if (p_env >= 1 && p_env <= USRP_DECIM_SPINPOOL_MAX_WORKERS) {
-                p = p_env;
-                LOG_W(HW, "USRP decim: worker count overridden to %d via USRP_DECIM_WORKERS\n", p);
-              }
-            }
             s->decim_num_workers = p;
             s->decim_pool = new UsrpDecimWorkerPool(p);
             LOG_I(HW, "USRP decim: started %d-worker pool for parallel software decimation (hw_cores=%u)\n", p, hw_cores);

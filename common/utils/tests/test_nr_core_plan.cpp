@@ -252,11 +252,8 @@ TEST(BgLane,DropsCriticalCores){
 TEST(BgLane,EmptyListFallsBackUnpinned){
   setenv("ISAC_BG_CORES","5,6",1);test_mark_critical({5,6});
   int c[8];EXPECT_EQ(0,nr_bg_lane_cores(c,8));
-  setenv("ISAC_BG_LANE","1",1);
-  nr_bg_lane_enter(nullptr);   // must not crash; unpinned nice 19
-  EXPECT_EQ(19,getpriority(PRIO_PROCESS,0));
   setenv("ISAC_BG_CORES","x",1);EXPECT_EQ(0,nr_bg_lane_cores(c,8));
-  unsetenv("ISAC_BG_LANE");nr_core_plan_mark_critical_for_test(-1);
+  nr_core_plan_mark_critical_for_test(-1);
 }
 TEST(BgLane,PlanOffUsesEnvCores){
   nr_core_plan_mark_critical_for_test(-1);   // plan inactive in this process: env vars define the critical lane
@@ -291,10 +288,6 @@ TEST(FloatCores,UnpinnedThreadsGoToTheLaneAndPinsAreKept){
     if (pthread_create(&pinned, nullptr, [](void *) -> void * { while (!stop) usleep(1000); return nullptr; }, nullptr)) _exit(10);
     if (pthread_setaffinity_np(pinned, sizeof(one), &one)) _exit(11);
     setenv("ISAC_FLOAT_CORES", "0", 1);
-    setenv("ISAC_CORE_PLAN", "1", 1);                           // automatic plan on: the lane stays off
-    cpu_set_t s0;
-    if (nr_core_float_apply() || sched_getaffinity(0, sizeof(s0), &s0) || CPU_COUNT(&s0) < 2) _exit(20);
-    setenv("ISAC_CORE_PLAN", "0", 1);
     if (nr_core_float_apply()) _exit(12);
     cpu_set_t s;
     if (sched_getaffinity(0, sizeof(s), &s) || CPU_COUNT(&s) != 1 || !CPU_ISSET(0, &s)) _exit(13);   // main moved

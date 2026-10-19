@@ -154,127 +154,12 @@ uint64_t set_nrUE_optmask(uint64_t bitmask) {
 nrUE_params_t *get_nrUE_params(void) {
   return &nrUE_params;
 }
-/* Read configuration before creating any RT workers. The solver itself is independent of OAI. */
-static bool core_dl_count_explicit, core_ul_count_explicit;
-/* core_env_value: reads a CPU number from the environment variable `name`: -1 when unset, -2 when it is not a valid CPU number (0 to NR_CP_MAX_CPUS-1). Caller: passive_core_plan(). */
-static int core_env_value(const char *name)
-{
-  const char *s = getenv(name);
-  if (!s) return -1;
-  char *end; errno = 0; long c = strtol(s, &end, 10);
-  if (errno || end == s || *end || c < 0 || c >= NR_CP_MAX_CPUS) return -2;
-  return c;
-}
-/* core_feature: reads a boolean switch from the environment (atoi != 0), with the default def when unset. Caller: passive_core_plan() and main(). */
-static bool core_feature(const char *name, bool def)
-{
-  const char *s = getenv(name); return s ? atoi(s) != 0 : def;
-}
-/* passive_core_plan: builds and activates the CPU core plan for the passive receiver (ISAC_CORE_PLAN, on by default): reads the host topology, sizes the actor counts from the physical core count, and assigns the real-time and pool roles (UE, ring, UHD control, DL/UL actors, sync, scan, USS, PDSCH, PUSCH, pool, GPU, CSI-RS, NID, stats).
- *   Explicit ISAC_* core variables and the thread pool list are respected as user pins. On success it sets the thread pool specification and activates the plan; on failure it prints the error and returns -1 (radio start-up is then cancelled). Caller: main() (passive-RX mode only).
- */
-static int passive_core_plan(void)
-{
-  if (!IS_PASSIVE_RX_MODE(get_softmodem_params()) || !core_feature("ISAC_CORE_PLAN", false)) return 0;
-  nr_core_machine_t machine;
-  nr_core_plan_t plan = {0};
-  char error[512] = "invalid or excessive explicit core setting";
-  /* DEFERRED/DO NOT USE: ISAC_PASSIVE_REPLAY_INPUT not in the frozen config t26zE (2026-10-18); slated for removal */
-  const bool radio = !IS_SOFTMODEM_RFSIM && !getenv("ISAC_PASSIVE_REPLAY_INPUT");
-  if (nrue_get_ru_count() != 1) {
-    snprintf(error,sizeof(error),"automatic passive planning currently requires one RU"); goto fail;
-  }
-  const nrUE_RU_params_t *ru = nrue_get_ru(0);
-  if (nr_core_machine_read(&machine, radio ? ru->sdr_addrs : NULL, error, sizeof(error))) goto fail;
-  int physical = 0;
-  for (int c = 0; c < NR_CP_MAX_CPUS; c++) if (machine.online[c] && machine.allowed[c] && !machine.dpdk[c]) {
-    bool duplicate = false;
-    for (int j = 0; j < c; j++) if (machine.online[j] && machine.allowed[j]
-        && machine.package[c] == machine.package[j] && machine.sibling[c] == machine.sibling[j]) duplicate = true;
-    if (!duplicate) physical++;
-  }
-  /* Passive actors do little work compared with the deferred decoders. Preserve explicit counts;
-   * scale the defaults so 4 DL + 2 UL actors do not consume the entire 12-core host. */
-  const int actor_default = physical / 12 > 0 ? physical / 12 : 1;
-  if (!core_dl_count_explicit) nrUE_params.num_dl_actors = actor_default < 4 ? actor_default : 4;
-  if (!core_ul_count_explicit) nrUE_params.num_ul_actors = actor_default < 2 ? actor_default : 2;
-  const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
-#define ADD(role, count, first) do { if (nr_core_plan_add(&plan, role, count, first)) goto fail; } while (0)
-  /* DEFERRED/DO NOT USE: ISAC_UE_RT_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
-  ADD(NR_CP_UE, 1, core_env_value("ISAC_UE_RT_CORE"));
-  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
-  /* DEFERRED/DO NOT USE: ISAC_USRP_RING_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (radio && core_feature("ISAC_USRP_RING_MS", false)) ADD(NR_CP_RING, 1, core_env_value("ISAC_USRP_RING_CORE"));
-  if (radio) {
-    const char *s = getenv("ISAC_UHD_CTRL_CORES");
-    if (s) {
-      unsigned char mask[NR_CP_MAX_CPUS];
-      if (nr_core_parse_list(s, mask)) goto fail;
-      int count = 0;
-      for (int c = 0; c < NR_CP_MAX_CPUS; c++) if (mask[c]) { ADD(NR_CP_UHD, 1, c); count++; }
-      if (!count) goto fail;
-    } else {
-      /* DEFERRED/DO NOT USE: ISAC_UHD_CTRL_THREADS not in the frozen config t26zE (2026-10-18); slated for removal */
-      const char *count_env = getenv("ISAC_UHD_CTRL_THREADS");
-      int count = count_env ? atoi(count_env) : 1;
-      if (count < 1) goto fail;
-      ADD(NR_CP_UHD, count, -1);
-    }
-  }
-  ADD(NR_CP_DL, nrUE_params.num_dl_actors, nrUE_params.dl_actor_core_start);
-  ADD(NR_CP_UL, nrUE_params.num_ul_actors, nrUE_params.ul_actor_core_start);
-  ADD(NR_CP_SYNC, 1, nrUE_params.sync_actor_core);
-  ADD(NR_CP_SCAN, cfg->scan_thread < 4 ? cfg->scan_thread : 4, cfg->scan_thread_core);
-  /* DEFERRED/DO NOT USE: ISAC_PDCCH_USS_TRACKER not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (core_feature("ISAC_PDCCH_USS_TRACKER", true)) ADD(NR_CP_USS, 1, core_env_value("ISAC_PDCCH_USS_CORE"));
-  ADD(NR_CP_PDSCH, cfg->pdsch_thread < 6 ? cfg->pdsch_thread : 6, cfg->pdsch_thread_core);
-  ADD(NR_CP_PUSCH, nr_pusch_passive_pipeline_enabled() && cfg->ul_pusch_decode ? 1 :
-      (cfg->ul_thread < 6 ? cfg->ul_thread : 6), cfg->ul_thread_core);
-  if (get_softmodem_params()->threadPoolConfigExplicit) {
-    char *text = strdup(get_softmodem_params()->threadPoolConfig), *save = NULL;
-    if (!text) goto fail;
-    bool valid = true;
-    int worker_count = 0;
-    for (char *s = strtok_r(text, ",", &save); s; s = strtok_r(NULL, ",", &save)) {
-      if (!strcmp(s,"n") || !strcmp(s,"N")) continue;
-      char *end; errno = 0; long c = strtol(s,&end,10);
-      if (++worker_count > 64 || errno || *end || end == s || c < -1 || c >= NR_CP_MAX_CPUS || nr_core_plan_add(&plan,NR_CP_POOL,1,c)) { valid = false; break; }
-    }
-    free(text); if (!valid) goto fail;
-  } else {
-    int workers = ru->nb_rx > 2 ? ru->nb_rx : 2;
-    ADD(NR_CP_POOL, workers < 8 ? workers : 8, -1);
-  }
-  if (core_feature("ISAC_PDSCH_GPU", false) || core_feature("NR_GPU_FEP", false)) ADD(NR_CP_GPU, 1, core_env_value("ISAC_GPU_WORKER_CORE"));
-  /* DEFERRED/DO NOT USE: ISAC_CSIRS_DISC_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (core_feature("ISAC_CSIRS_DISC", true)) ADD(NR_CP_CSIRS, 1, core_env_value("ISAC_CSIRS_DISC_CORE"));
-  if (core_feature("ISAC_PDCCH_NID_GPU", true)) ADD(NR_CP_NID, 1, core_env_value("ISAC_PDCCH_NID_GPU_CORE"));
-  ADD(NR_CP_STATS, 1, -1);
-#undef ADD
-  if (nr_core_plan_build(&machine, &plan, error, sizeof(error))) goto fail;
-  /* Replace only the default pool specification. Explicit -1 entries retain their count and are
-   * filled from the plan too; explicit numbered entries are preserved by the solver. */
-  static char pool[NR_CP_MAX_ROLES * 6];
-  size_t pos = 0;
-  for (int i = 0; i < plan.count; i++) if (plan.a[i].role == NR_CP_POOL)
-    pos += snprintf(pool + pos, sizeof(pool) - pos, "%s%d", pos ? "," : "", plan.a[i].core);
-  if (!pos) strcpy(pool,"n");
-  get_softmodem_params()->threadPoolConfig = pool;
-  if (nr_core_plan_activate(&machine, &plan)) { snprintf(error,sizeof(error),"cannot apply plan: %s",strerror(errno)); goto fail; }
-  return 0;
-fail:
-  fprintf(stderr,"SENSING: CORE_PLAN error: %s; radio startup cancelled (ISAC_CORE_PLAN=0 restores legacy behavior)\n",error);
-  return -1;
-}
-
-/* get_options: reads the NR UE command-line parameters (CMDLINE_NRUEPARAMS_DESC) and records whether the actor counts were given explicitly (used by passive_core_plan()); asserts that no extra PDU session was requested. Caller: main(). */
+/* get_options: reads the NR UE command-line parameters (CMDLINE_NRUEPARAMS_DESC); asserts that no extra PDU session was requested. Caller: main(). */
 static void get_options(configmodule_interface_t *cfg)
 {
   paramdef_t cmdline_params[] = CMDLINE_NRUEPARAMS_DESC;
   int numparams = sizeofArray(cmdline_params);
   config_get(cfg, cmdline_params, numparams, NULL);
-  core_dl_count_explicit = config_isparamset(cmdline_params, config_paramidx_fromname(cmdline_params, numparams, "num-dl-actors"));
-  core_ul_count_explicit = config_isparamset(cmdline_params, config_paramidx_fromname(cmdline_params, numparams, "num-ul-actors"));
   AssertFatal(nrUE_params.extra_pdu_id == -1,
               "Add additional PDU sessions in uicc.pdu_sessions array instead\n");
 }
@@ -393,7 +278,7 @@ int main(int argc, char **argv)
       /* USRP driver (hardware radio shared with the gNB): site defaults of the receiver */
       setenv("ISAC_UHD_CTRL_CORES", "15", 0); setenv("ISAC_RX_RECOVER", "1", 0); setenv("ISAC_USRP_START_TIMEOUT_MS", "2200", 0);
       setenv("ISAC_USRP_RING_ZEROCOPY", "1", 0); setenv("ISAC_USRP_CATCHUP_X", "1.05", 0); setenv("ISAC_USRP_CHPOW_S", "1", 0); setenv("ISAC_USRP_NO_TX", "1", 0);
-      if (!getenv("ISAC_CORE_PLAN") || !atoi(getenv("ISAC_CORE_PLAN"))) { setenv("ISAC_CORE_PLAN", "0", 0); setenv("ISAC_FLOAT_CORES", "10-14", 0); }
+      setenv("ISAC_FLOAT_CORES", "10-14", 0);
     }
   nr_core_float_apply(); /* ISAC_FLOAT_CORES: unpinned threads (and everything they start) stay in one lane */
   start_background_system();
@@ -423,53 +308,12 @@ int main(int argc, char **argv)
   nr_csirs_monitor_init();
   // Blind PDCCH/DCI-1_1 monitor (TOTAL_PASSIVE_UE_HANDOVER.md Phase 3); no-op if unset.
   nr_pdcch_blind_monitor_init();
-  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && core_feature("ISAC_CORE_PLAN", false))
-    nrue_set_ru_params(uniqCfg);
-  if (passive_core_plan()) return EXIT_FAILURE;
   const bool pas = IS_PASSIVE_RX_MODE(get_softmodem_params());
-  const char *ul_chain_flag = (getenv("ISAC_UL_PUSCH_CHAIN") ?: (pas ? "1" : NULL));
-  const char *ul_solver_flag = (getenv("ISAC_UL_PUSCH_SOLVER") ?: (pas ? "1" : NULL));
-  const bool ul_chain_on = (ul_chain_flag && strcmp(ul_chain_flag, "1") == 0) ||
-                           (ul_solver_flag && strcmp(ul_solver_flag, "1") == 0);
-  if (nr_cfg_reconf_enabled() || ul_chain_on ||
-      /* DEFERRED/DO NOT USE: ISAC_UL_UE_STATE not in the frozen config t26zE (2026-10-18); slated for removal */
-      (getenv("ISAC_UL_UE_STATE") && strcmp(getenv("ISAC_UL_UE_STATE"), "1") == 0)) {
-    /* DEFERRED/DO NOT USE: ISAC_UECTX_PATH not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *uectx_path = getenv("ISAC_UECTX_PATH");
-    if ((uectx_path && *uectx_path) || ul_chain_on ||
-        /* DEFERRED/DO NOT USE: ISAC_UL_UE_STATE not in the frozen config t26zE (2026-10-18); slated for removal */
-        (getenv("ISAC_UL_UE_STATE") && strcmp(getenv("ISAC_UL_UE_STATE"), "1") == 0)) {
-      /* DEFERRED/DO NOT USE: ISAC_UECTX_PERIOD_S not in the frozen config t26zE (2026-10-18); slated for removal */
-      const char *period_env = getenv("ISAC_UECTX_PERIOD_S");
-      const double period = period_env && *period_env ? atof(period_env) : 5.0;
-      if (nr_ue_ctx_open(uectx_path, 16384, period))
-        nr_cfg_epoch_subscribe(nr_ue_ctx_on_epoch);
-      else
-        LOG_W(PHY, "SENSING: UE context writer/state could not be opened\n");
-    }
-  }
-  // Per-grant observation API (Task A3): JSONL of every decoded PDSCH/PUSCH grant; off unless ISAC_OBS_PATH is set.
-  {
-    /* DEFERRED/DO NOT USE: ISAC_OBS_PATH not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *obs_path = getenv("ISAC_OBS_PATH");
-    /* ISAC_OBS_TEST_RING_SLOTS: test hook (overload A/B with a tiny ring); the default is used when unset. */
-    /* DEFERRED/DO NOT USE: ISAC_OBS_TEST_RING_SLOTS not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *ring_env = getenv("ISAC_OBS_TEST_RING_SLOTS");
-    uint32_t ring = 1u << 14;
-    if (ring_env && *ring_env) {
-      char *end = NULL;
-      const unsigned long v = strtoul(ring_env, &end, 10);
-      if (end && *end == '\0' && v >= 1)
-        ring = v > (1ul << 20) ? (1u << 20) : (uint32_t)v; // clamp to [1, 1<<20]
-      else
-        LOG_W(PHY, "SENSING: ISAC_OBS_TEST_RING_SLOTS=%s invalid, using %u\n", ring_env, ring);
-    }
-    if (obs_path && *obs_path) {
-      if (nr_passive_obs_open(obs_path, ring))
-        LOG_I(PHY, "SENSING: per-grant observations -> %s (ring %u, drop-on-full)\n", obs_path, ring);
-      else
-        LOG_W(PHY, "SENSING: ISAC_OBS_PATH=%s set but the observation writer could not be opened; no observations\n", obs_path);
-    }
+  if (pas) { /* UL PUSCH chain + solver are on in passive mode */
+    if (nr_ue_ctx_open(NULL, 16384, 5.0))
+      nr_cfg_epoch_subscribe(nr_ue_ctx_on_epoch);
+    else
+      LOG_W(PHY, "SENSING: UE context writer/state could not be opened\n");
   }
 
   softmodem_verify_mode(get_softmodem_params());
@@ -514,7 +358,7 @@ int main(int argc, char **argv)
   nr_pdcp_layer_init();
   nas_init_nrue(NB_UE_INST);
 
-  if (!nr_core_plan_active()) nrue_set_ru_params(uniqCfg);
+  nrue_set_ru_params(uniqCfg);
   nrue_set_cell_params(uniqCfg);
 
   init_NR_UE(NB_UE_INST,
@@ -667,9 +511,7 @@ int main(int argc, char **argv)
   }
 
   /* Offline replay exits before any radio initialization. */
-  /* DEFERRED/DO NOT USE: ISAC_PASSIVE_REPLAY_INPUT not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *replay_input = getenv("ISAC_PASSIVE_REPLAY_INPUT");
-  /* DEFERRED/DO NOT USE: ISAC_PASSIVE_REPLAY_CAPTURE not in the frozen config t26zE (2026-10-18); slated for removal */
   if (replay_input || getenv("ISAC_PASSIVE_REPLAY_CAPTURE")) {
     AssertFatal(IS_PASSIVE_RX_MODE(get_softmodem_params()), "Replay requires --passive-rx\n");
     if (replay_input) {
