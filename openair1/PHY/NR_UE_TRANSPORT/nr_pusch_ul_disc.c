@@ -18,7 +18,7 @@ typedef struct {
   bool used, timed;
   long last_slot;
   double correction;
-  uint32_t scan_cursor, scan_tick;
+  uint32_t scan_cursor;
   nr_pusch_ul_disc_result_t found;
 } ul_disc_track_t;
 static ul_disc_track_t tracks[UL_DISC_TRACKS];
@@ -26,7 +26,7 @@ static pthread_mutex_t track_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned evict_next;
 static uint32_t current_epoch;
 #define UL_DISC_CELL_N 16
-static int cell_res[UL_DISC_CELL_N], cell_n; /* ISAC_UL_TA_TRACK cell prior; kept across epochs (timing is physical) */
+static int cell_res[UL_DISC_CELL_N], cell_n; /* cell prior of the timing tracker; kept across epochs (timing is physical) */
 
 static ul_disc_track_t *track(uint16_t rnti)
 {
@@ -77,14 +77,6 @@ void nr_pusch_ul_disc_epoch(uint32_t dedicated_epoch)
   pthread_mutex_unlock(&track_lock);
 }
 
-/* ISAC_UL_TA_TRACK=1 (default off): a learned advance outlives the grant that measured it. Without it the per-RNTI correction is wiped by
- * any decode of an equal or older slot (two consumers, CRC-first trials of one grant) and by 1 s of silence, and a grant whose own search
- * fails decodes at N_TA_offset; on capture b the busiest UE arrives ~1600 samples off it, so ~90 % of its grants were decoded > CP off. */
-bool nr_pusch_ul_disc_ta_track_on(void)
-{
-  const char *e = getenv("ISAC_UL_TA_TRACK"); /* not cached: a few calls per grant, and the unit test toggles it */
-  return !e || atoi(e) > 0;
-}
 /* cell-level prior for RNTIs never timed: the residual most other accepted residuals agree with (+-64), from the last 16 */
 static bool cell_mode(int *out)
 {
@@ -102,16 +94,10 @@ int nr_pusch_ul_disc_timing_seed(uint16_t rnti, int nominal_advance, long abs_sl
 {
   pthread_mutex_lock(&track_lock);
   ul_disc_track_t *t = track(rnti);
-  int correction;
-  if (nr_pusch_ul_disc_ta_track_on()) {
-    if (tracked) *tracked = t->timed && labs(abs_slot - t->last_slot) <= 2000;
-    correction = t->timed ? (int)lrint(t->correction) : 0;
-    if (!t->timed && !cell_mode(&correction)) correction = 0;
-  } else {
-    if (t->timed && (abs_slot <= t->last_slot || abs_slot - t->last_slot > 2000)) t->timed = false;
-    if (tracked) *tracked = t->timed;
-    correction = t->timed ? (int)lrint(t->correction) : 0;
-  }
+  /* a learned advance outlives the grant that measured it (older slots, 1 s of silence): a failed search decodes near the real timing */
+  if (tracked) *tracked = t->timed && labs(abs_slot - t->last_slot) <= 2000;
+  int correction = t->timed ? (int)lrint(t->correction) : 0;
+  if (!t->timed && !cell_mode(&correction)) correction = 0;
   pthread_mutex_unlock(&track_lock);
   return nominal_advance + correction;
 }
@@ -123,25 +109,14 @@ void nr_pusch_ul_disc_timing_update(uint16_t rnti, int nominal_advance,
   pthread_mutex_lock(&track_lock);
   ul_disc_track_t *t = track(rnti);
   const double correction = measured_advance - nominal_advance;
-  if (nr_pusch_ul_disc_ta_track_on()) {
-    cell_res[cell_n++ % UL_DISC_CELL_N] = (int)correction;
-    if (!t->timed || labs(abs_slot - t->last_slot) > 2000) {
-      t->correction = correction;
-      t->timed = true;
-    } else if (fabs(correction - t->correction) <= 256.0) {
-      t->correction += 0.25 * (correction - t->correction);
-    }
-    if (abs_slot > t->last_slot || !t->timed) t->last_slot = abs_slot;
-    pthread_mutex_unlock(&track_lock);
-    return;
-  }
-  if (!t->timed || abs_slot <= t->last_slot || abs_slot - t->last_slot > 2000) {
+  cell_res[cell_n++ % UL_DISC_CELL_N] = (int)correction;
+  if (!t->timed || labs(abs_slot - t->last_slot) > 2000) {
     t->correction = correction;
     t->timed = true;
   } else if (fabs(correction - t->correction) <= 256.0) {
     t->correction += 0.25 * (correction - t->correction);
   }
-  t->last_slot = abs_slot;
+  if (abs_slot > t->last_slot || !t->timed) t->last_slot = abs_slot;
   pthread_mutex_unlock(&track_lock);
 }
 
@@ -277,7 +252,7 @@ static void consider(const nr_pusch_ul_disc_grid_t *g, nr_pusch_ul_disc_result_t
   }
 }
 
-/* ISAC_UL_BGDISC worker: the scan below covers [lo, lo+n) in one call instead of 64 ids per grant; the per-RNTI cursor is left alone. */
+/* background discovery worker: the scan below covers [lo, lo+n) in one call instead of 64 ids per grant; the per-RNTI cursor is left alone. */
 static __thread int t_sweep_lo, t_sweep_n;
 
 int nr_pusch_ul_disc_known_ids(int *ids, int max)
@@ -308,15 +283,8 @@ nr_pusch_ul_disc_result_t nr_pusch_ul_disc_search(const nr_pusch_ul_disc_grid_t 
   ul_disc_track_t *t = track(rnti);
   const nr_pusch_ul_disc_result_t cached = t->found;
   const uint32_t cursor = t_sweep_n ? (uint32_t)t_sweep_lo : t->scan_cursor;
-  /* SYSAN ISAC_UL_DISC_EVERY=N (default 1 = every grant): the blind 64-id scan below (score_impl, [MEASURED, DGX replay b, perf]
-   * ~68 % of the UL consumers' CPU) runs on one grant in N per RNTI; the others try the cached result and the DL-known ids only.
-   * shortcut: discovery of an unknown UL DM-RS id takes N times more grants; upgrade to a background scan on a snapshot. */
-  static int every = -1;
-  /* DEFERRED/DO NOT USE: ISAC_UL_DISC_EVERY not in the frozen config t26zE (2026-10-18); slated for removal */
-  if (every < 0) every = getenv("ISAC_UL_DISC_EVERY") && atoi(getenv("ISAC_UL_DISC_EVERY")) > 1 ? atoi(getenv("ISAC_UL_DISC_EVERY")) : 1;
-  const bool scan_now = t_sweep_n || every == 1 || (t->scan_tick++ % (uint32_t)every) == 0;
   const int scan_total = t_sweep_n ? t_sweep_n : UL_DISC_SCAN_PER_GRANT;
-  if (scan_now && !t_sweep_n)
+  if (!t_sweep_n)
     t->scan_cursor = cursor + UL_DISC_SCAN_PER_GRANT;
   pthread_mutex_unlock(&track_lock);
   int front_load[2] = {0,0};
@@ -352,7 +320,7 @@ nr_pusch_ul_disc_result_t nr_pusch_ul_disc_search(const nr_pusch_ul_disc_grid_t 
         if (best.accepted) goto publish;
       }
   }
-  if (!best.accepted && scan_now) {
+  if (!best.accepted) {
     /* A first DM-RS symbol is enough to reject almost every wrong ID, and it
      * avoids a 16-bit Cartesian product with all additional-position masks.
      * Type A begins at l0=2/3; type B begins at the allocation start. Once a

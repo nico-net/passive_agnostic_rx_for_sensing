@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #define _GNU_SOURCE
 #include "nr_pusch_ul_bgdisc.h"
-#include "PHY/TOOLS/nr_admit.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -38,24 +37,6 @@ static uint64_t now_ns(void)
   return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 
-int nr_ul_bgdisc_enabled(void)
-{
-  static int v = -1;
-  if (v < 0) {
-    const char *e = getenv("ISAC_UL_BGDISC");
-    v = !e || !strcmp(e, "1");
-  }
-  return v;
-}
-
-/* wired to nr_admit_try(NR_ADMIT_UL_DISC, ...) when csd/bglane is merged */
-/* weak: test binaries that compile this file without the utils library always admit */
-int nr_admit_try(nr_admit_class_t c, uint64_t now_ns, uint64_t deadline_ns, int priority_token) __attribute__((weak));
-static int ul_bgdisc_admit(uint64_t deadline_ns)
-{
-  return !nr_admit_try || nr_admit_try(NR_ADMIT_UL_DISC, now_ns(), deadline_ns, 0);
-}
-
 static void log_stats(void)
 {
   fprintf(stderr, "SENSING: UL_BGDISC nohyp=%lu submitted=%lu dup=%lu full=%lu bg_expired=%lu done=%lu\n", (unsigned long)g_st.nohyp,
@@ -67,7 +48,6 @@ static void *worker(void *arg)
 {
   (void)arg;
   setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10); /* the discovery lane never competes with the grant consumers */
-  /* DEFERRED/DO NOT USE: ISAC_UL_BGDISC_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
   const char *ce = getenv("ISAC_UL_BGDISC_CORE");
   if (ce && atoi(ce) >= 0) {
     cpu_set_t cs;
@@ -97,11 +77,7 @@ static void *worker(void *arg)
     }
     bgslot_t *s = &g_slot[pick];
     pthread_mutex_unlock(&g_lock);
-    int expired = now_ns() - s->j.submit_ns > g_max_age_ns;
-    while (!expired && !g_stop && !ul_bgdisc_admit(s->j.submit_ns + g_max_age_ns)) { /* not admitted: wait for the critical lane, up to the deadline */
-      usleep(2000);
-      expired = now_ns() - s->j.submit_ns > g_max_age_ns;
-    }
+    const int expired = now_ns() - s->j.submit_ns > g_max_age_ns;
     int rc = 0;
     if (!expired && !g_stop) rc = g_run(&s->j);
     pthread_mutex_lock(&g_lock);
@@ -118,9 +94,7 @@ int nr_ul_bgdisc_start(int depth, nr_ul_bgdisc_run_fn run)
   pthread_mutex_lock(&g_lock);
   if (!g_depth) { /* the first call sets the queue up; a later one with a runner only starts the worker */
     g_depth = depth < 1 ? 1 : depth > BG_MAX_DEPTH ? BG_MAX_DEPTH : depth;
-    /* DEFERRED/DO NOT USE: ISAC_UL_BGDISC_MAX_AGE_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_UL_BGDISC_MAX_AGE_MS");
-    g_max_age_ns = (uint64_t)(e && atoi(e) > 0 ? atoi(e) : 100) * 1000000ull;
+    g_max_age_ns = 100 * 1000000ull;
     g_stop = 0;
   }
   const int go = run && !g_run_active;

@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
-#include <stdlib.h> // getenv (ISAC_PUSCH_MMSE_MODE)
 #include "PHY/defs_gNB.h"
 #include "PHY/phy_extern.h"
 #include "nr_transport_proto.h"
@@ -20,7 +19,7 @@
 #include <sys/time.h>
 #include "openair1/SCHED_NR/sched_nr.h"
 #include "executables/softmodem-common.h" // IS_PASSIVE_RX_MODE, for the passive-only branch restriction below
-#include "nr_ulsch_passive_branch.h"
+#include "nr_ulsch_passive_branch.h" // nr_ulsch_dmrs_snr_db
 
 /* PASSIVE-RX UL RECEIVE-BRANCH RESTRICTION (2026-09-03).
  *
@@ -41,16 +40,12 @@ static int nr_ulsch_passive_keep_branch(int nb_rx_ant)
   if (nb_rx_ant <= 1 || !IS_PASSIVE_RX_MODE(get_softmodem_params())) {
     return -1;
   }
-  static __thread int s_keep = -2; // each consumer caches its immutable environment without a race
-  if (s_keep == -2) {
-    /* DEFERRED/DO NOT USE: ISAC_UL_RX_BRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
-    const char *e = getenv("ISAC_UL_RX_BRANCH");
-    /* The former unconditional branch-0 default silently ignored MRC mode 2.
-     * Retain explicit diagnostic/manual overrides, and the legacy no-mode default. */
-    s_keep = nr_ulsch_passive_branch_selection(true, nb_rx_ant, e, getenv("ISAC_RX_MRC_MODE"));
-    LOG_W(PHY, "SENSING: UL restricted to receive branch %d (ISAC_UL_RX_BRANCH, -1 = all branches)\n", s_keep);
+  static __thread bool s_logged;
+  if (!s_logged) {
+    s_logged = true;
+    LOG_W(PHY, "SENSING: UL restricted to receive branch 0\n");
   }
-  return (s_keep >= 0 && s_keep < nb_rx_ant) ? s_keep : -1;
+  return 0; // ISAC_RX_MRC_MODE=1: branch 0 only (mode 2 would combine all)
 }
 
 #define NR_MAX_PUSCH_SCRAMBLING_STACK_BYTES (2 * 1024 * 1024) // 2MB
@@ -271,15 +266,12 @@ static int get_nb_re_pusch (NR_DL_FRAME_PARMS *frame_parms, const nfapi_nr_pusch
     return (rel15_ul->rb_size * NR_NB_SC_PER_RB);
 }
 
-/* ISAC_PUSCH_MMSE_MODE (default 0 = stock): 2 = unbiased 2-layer ZF with per-layer thresholds for the 2-layer QAM path
- * that uses nr_mmse_2layers() (Qm > 6; Qm <= 6 keeps the max-log ML detector). Read once. */
+/* Passive RX: unbiased 2-layer ZF with per-layer thresholds for the 2-layer QAM path that uses nr_mmse_2layers() (Qm > 6; Qm <= 6
+ * keeps the max-log ML detector). 2 = that mode, 0 = stock. */
 static int nr_pusch_mmse_mode(void)
 {
   static int mode = -1;
-  if (mode < 0) {
-    const char *v = getenv("ISAC_PUSCH_MMSE_MODE");
-    mode = v ? atoi(v) : (IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 2 : 0);
-  }
+  if (mode < 0) mode = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 2 : 0;
   return mode;
 }
 
@@ -351,7 +343,7 @@ static void inner_rx(PHY_VARS_gNB *gNB,
    * local, freshly-memset buffer, so this touches no shared state: zeroing a branch's channel
    * estimate makes nr_channel_compensation() weight it by h* == 0, contributing exactly zero
    * signal AND zero noise. Same technique the DL path uses for its excluded branches, and cheaper
-   * than permuting rows. -1 (a real gNB, or ISAC_UL_RX_BRANCH=-1) skips this entirely. */
+   * than permuting rows. -1 (a real gNB) skips this entirely. */
   {
     const int ul_keep = nr_ulsch_passive_keep_branch(nb_rx_ant);
     if (ul_keep >= 0) {
@@ -428,7 +420,7 @@ static void inner_rx(PHY_VARS_gNB *gNB,
                         rel15_ul->qam_mod_order);
     }
     else if (nr_pusch_mmse_mode() == 2) {
-      /* ISAC_PUSCH_MMSE_MODE=2 (default off; unset = the stock gNB path below, unchanged) */
+      /* passive RX: unbiased 2-layer ZF; a real gNB takes the stock path below, unchanged */
       nr_mmse_2layers_unbiased(pusch_vars->rxdataF_comp,
                                buffer_length,
                                buffer_length,
@@ -1046,7 +1038,7 @@ static int nr_rx_pusch_group_internal(PHY_VARS_gNB *gNB,
    *
    * GATED ON PASSIVE MODE, deliberately: a real gNB wants every branch in the max, and
    * four-rx-mrc-skip-blocks-passive-pdcch records the cost of "fixing" one use case by breaking the
-   * other. ISAC_UL_RX_BRANCH overrides -- -1 keeps the legacy all-branch max, >= 0 pins a branch.
+   * other. Passive RX pins branch 0.
    *
    * This is the SCALE half; the COMBINING half is the chFext zeroing in nr_rx_pusch_symbol(), and
    * both read nr_ulsch_passive_keep_branch() so they cannot disagree about which branch is live. */

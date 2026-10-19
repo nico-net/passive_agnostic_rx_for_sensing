@@ -1,22 +1,18 @@
-/* See nr_ul_nid_bg.h. Env (all read once; everything default off):
- *   ISAC_UL_NID_BG=1            module on
- *   ISAC_UL_NID_BG_IQ=1         stage B (hypothesis expansion on a private IQ copy)
- *   ISAC_UL_NID_BG_SNR=6        min DM-RS SNR (dB) of an admitted grant
- *   ISAC_UL_NID_BG_QM=2         max modulation order of an admitted grant (QPSK first)
- *   ISAC_UL_NID_BG_MIN_RB=16    min PRBs (wide low-MCS grants carry CRC24 TBs: one hit confirms)
- *   ISAC_UL_NID_BG_GAP_MS=500   stage B: min time between two admitted grants of one RNTI (no SNR gate there: every hypothesis measures its own SNR)
- *   ISAC_UL_NID_BG_REPEAT=4     stage A: max sweeps of one (RNTI, layout hypothesis); distinct hypotheses are never throttled
- *   ISAC_UL_NID_BG_TRIALS=1     admit CRC-first trial grants (their LLRs carry a layout variant)
- *   ISAC_UL_NID_BG_CPU_PCT=50   worker duty cycle: after a job it sleeps cpu*(100-pct)/pct
- *   ISAC_UL_NID_BG_JOB_MS=15000 CPU-time cap of one job
- *   ISAC_UL_NID_BG_HYP=1000     stage B hypotheses per job (cursor per RNTI)
- *   ISAC_UL_NID_BG_TOPM=12      stage B: id sweeps on the TOPM highest-DM-RS-SNR distinct hypotheses of a job
- *   ISAC_UL_NID_BG_ADDPOS=1     stage B: also the other dmrs-AdditionalPosition readings (0 = the lock's current one only)
- *   ISAC_UL_NID_BG_CORE=<cpu>   pin the worker thread (default: unpinned, nice 19)
- *   ISAC_UL_NID_BG_IDLE=1       SCHED_IDLE worker (default off)
- *   ISAC_UL_NID_BG_NBWP=4       stage B BWP hypotheses of the lock's ranking walked per DCI (variants: ISAC_UL_MCS_TABLE_SWEEP / K2_PAIR / TDA_PAIR as in the CRC trials)
- *   ISAC_UL_NID_BG_MCS=4        stage B admits grants with an MCS index <= this (QPSK in every table); stage A needs the decoded Qm <= ISAC_UL_NID_BG_QM
- *   ISAC_UL_NID_BG_DROP=100     qualified real-time failures (and no pass) that drop a confirmed entry */
+/* See nr_ul_nid_bg.h. Constants of the one configuration:
+ *   SNR 6 dB    min DM-RS SNR of an admitted grant
+ *   QM 2        max modulation order of an admitted grant (QPSK first)
+ *   MIN_RB 16   min PRBs (wide low-MCS grants carry CRC24 TBs: one hit confirms)
+ *   GAP_MS 500  stage B: min time between two admitted grants of one RNTI (no SNR gate there: every hypothesis measures its own SNR)
+ *   REPEAT 4    stage A: max sweeps of one (RNTI, layout hypothesis); distinct hypotheses are never throttled
+ *   CPU_PCT 10  worker duty cycle: after a job it sleeps cpu*(100-pct)/pct
+ *   JOB_MS 15000 CPU-time cap of one job
+ *   HYP 1000    stage B hypotheses per job (cursor per RNTI)
+ *   TOPM 12     stage B: id sweeps on the TOPM highest-DM-RS-SNR distinct hypotheses of a job
+ *   ADDPOS      stage B: also the other dmrs-AdditionalPosition readings
+ *   NBWP 4      stage B BWP hypotheses of the lock's ranking walked per DCI
+ *   MCS 4       stage B admits grants with an MCS index <= this (QPSK in every table); stage A needs the decoded Qm <= QM
+ *   DROP 100    qualified real-time failures (and no pass) that drop a confirmed entry
+ * ISAC_UL_NID_BG_CORE=<cpu> pins the worker thread (default: unpinned, nice 19, SCHED_IDLE). */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -65,10 +61,11 @@ static nr_ul_nid_job_t g_job[NJOB];
 static nid_rnti_t g_rnti[RNTI_CAP];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static nr_ul_nid_stats_t g_st;
-static _Atomic int g_on = -1, g_iq_on = -1, g_stop;
-static float g_snr;
-static int g_idle, g_core = -1, g_topm, g_addpos_n, g_dbg_try = -1, g_gap_ms, g_nbwp, g_mcs_max, g_qm, g_min_rb, g_repeat, g_trials, g_cpu_pct, g_job_ms, g_hyp_per_job, g_drop;
-static int g_nlog;
+static _Atomic int g_stop;
+static int g_core = -1;
+enum { g_topm = 12, g_addpos_n = 3, g_gap_ms = 500, g_nbwp = 4, g_mcs_max = 4, g_qm = 2, g_min_rb = 16, g_repeat = 4, g_cpu_pct = 10,
+       g_job_ms = 15000, g_hyp_per_job = 1000, g_drop = 100 };
+static const float g_snr = 6.f;
 static nr_ul_nid_hyp_fn g_fn;
 static nr_ul_nid_prep_fn g_prep;
 static pthread_t g_thr;
@@ -77,67 +74,21 @@ static bool g_started;
 static uint16_t g_learned[8];
 static int g_nlearned;
 
-static long envl(const char *k, long d)
-{
-  const char *v = getenv(k);
-  return v && *v ? atol(v) : d;
-}
 static void load_env(void)
 {
-  const char *e = getenv("ISAC_UL_NID_BG");
-  const int on = !e || !strcmp(e, "1");
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_SNR not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_snr = (float)envl("ISAC_UL_NID_BG_SNR", 6);
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_QM not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_qm = (int)envl("ISAC_UL_NID_BG_QM", 2);
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_MIN_RB not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_min_rb = (int)envl("ISAC_UL_NID_BG_MIN_RB", 16);
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_REPEAT not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_repeat = (int)envl("ISAC_UL_NID_BG_REPEAT", 4);
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_GAP_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_gap_ms = (int)envl("ISAC_UL_NID_BG_GAP_MS", 500);
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_DBG_TRY not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_dbg_try = (int)envl("ISAC_UL_NID_BG_DBG_TRY", -1);
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_TOPM not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_topm = (int)envl("ISAC_UL_NID_BG_TOPM", 12);
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_ADDPOS not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_addpos_n = envl("ISAC_UL_NID_BG_ADDPOS", 1) ? 3 : 1;
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_TRIALS not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_trials = (int)envl("ISAC_UL_NID_BG_TRIALS", 1);
-  g_cpu_pct = (int)envl("ISAC_UL_NID_BG_CPU_PCT", 10);
-  if (g_cpu_pct < 1) g_cpu_pct = 1;
-  if (g_cpu_pct > 100) g_cpu_pct = 100;
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_JOB_MS not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_job_ms = (int)envl("ISAC_UL_NID_BG_JOB_MS", 15000);
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_HYP not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_hyp_per_job = (int)envl("ISAC_UL_NID_BG_HYP", 1000);
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_DROP not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_drop = (int)envl("ISAC_UL_NID_BG_DROP", 100);
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_LOG not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_nlog = (int)envl("ISAC_UL_NID_BG_LOG", 0);
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_CORE not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_core = (int)envl("ISAC_UL_NID_BG_CORE", -1);
-  g_idle = (int)envl("ISAC_UL_NID_BG_IDLE", 1);
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_NBWP not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_nbwp = (int)envl("ISAC_UL_NID_BG_NBWP", 4);
-  /* DEFERRED/DO NOT USE: ISAC_UL_NID_BG_MCS not in the frozen config t26zE (2026-10-18); slated for removal */
-  g_mcs_max = (int)envl("ISAC_UL_NID_BG_MCS", 4);
-  const char *iq = getenv("ISAC_UL_NID_BG_IQ");
-  atomic_store(&g_iq_on, on && (!iq || !strcmp(iq, "1")));
-  atomic_store(&g_on, on);
-  if (on)
-    LOG_A(PHY, "SENSING: UL_NID_BG on snr>=%.1f qm<=%d min_rb=%d repeat=%d trials=%d cpu_pct=%d job_ms=%d stageB=%d hyp/job=%d nbwp=%d mcs<=%d\n", g_snr, g_qm,
-          g_min_rb, g_repeat, g_trials, g_cpu_pct, g_job_ms, (int)atomic_load(&g_iq_on), g_hyp_per_job, g_nbwp, g_mcs_max);
+  static _Atomic int done;
+  if (atomic_exchange(&done, 1)) return;
+  const char *c = getenv("ISAC_UL_NID_BG_CORE");
+  g_core = c && *c ? atoi(c) : -1;
+  LOG_A(PHY, "SENSING: UL_NID_BG on snr>=%.1f qm<=%d min_rb=%d repeat=%d cpu_pct=%d job_ms=%d hyp/job=%d nbwp=%d mcs<=%d\n", g_snr, g_qm, g_min_rb,
+        g_repeat, g_cpu_pct, g_job_ms, g_hyp_per_job, g_nbwp, g_mcs_max);
 }
 bool nr_ul_nid_bg_enabled(void)
 {
-  if (atomic_load_explicit(&g_on, memory_order_relaxed) < 0) load_env();
-  return atomic_load_explicit(&g_on, memory_order_relaxed) > 0;
+  load_env();
+  return true;
 }
-bool nr_ul_nid_bg_iq_enabled(void)
-{
-  return nr_ul_nid_bg_enabled() && atomic_load_explicit(&g_iq_on, memory_order_relaxed) > 0;
-}
+bool nr_ul_nid_bg_iq_enabled(void) { return true; }
 
 static uint64_t now_ns(void)
 {
@@ -174,17 +125,10 @@ static uint64_t hyp_key(const nr_ul_nid_rec_t *r, uint16_t id);
 int nr_ul_nid_bg_admit(const nr_ul_nid_rec_t *r)
 {
   if (!nr_ul_nid_bg_enabled()) return -1;
-  if (g_nlog >= 2) { /* every offered record, capped: why does a hypothesis never qualify */
-    static _Atomic int n;
-    if (atomic_fetch_add(&n, 1) < 1500)
-      LOG_A(PHY, "SENSING: UL_NID_OFFER rnti=0x%04x trial=%u hyp=%u@%u tbl=%u mcs=%u qm=%u rb=%u+%u sym=%u+%u tbs=%u dmrs_id=%u tried=%u snr=%.1f\n", r->rnti,
-            r->trial, r->bwp_size, r->bwp_start, r->mcs_table, r->mcs, r->qm, r->start_rb, r->num_rb, r->start_sym, r->num_sym, r->tbs_bits, r->dmrs_id,
-            r->tried_id, r->snr_db);
-  }
   const bool b_on = nr_ul_nid_bg_iq_enabled(); /* stage B: the SNR is measured under each hypothesis, not under the real-time one */
   const bool qm_ok = b_on ? r->mcs <= g_mcs_max : r->qm <= g_qm;
   if (r->crc_ok || (!b_on && !(r->snr_db >= g_snr)) || !qm_ok || r->num_rb < g_min_rb || !r->tbs_bits || !r->G || r->G > LLR_MAX ||
-      (r->trial && !g_trials) || r->nl != 1) {
+      r->nl != 1) {
     pthread_mutex_lock(&g_lock);
     g_st.dropped_gate++;
     if (!qm_ok) g_st.gate_qm++;
@@ -223,10 +167,6 @@ int nr_ul_nid_bg_admit(const nr_ul_nid_rec_t *r)
       e->seen[si].n++;
       g_job[idx].rec = *r;
       g_st.submitted++;
-      if (g_nlog)
-        LOG_A(PHY, "SENSING: UL_NID_ADMIT rnti=0x%04x trial=%u hyp=%u@%u tbl=%u mcs=%u qm=%u rb=%u+%u sym=%u+%u tbs=%u dmrs_id=%u tried=%u snr=%.1f slot=%ld\n", r->rnti,
-              r->trial, r->bwp_size, r->bwp_start, r->mcs_table, r->mcs, r->qm, r->start_rb, r->num_rb, r->start_sym, r->num_sym, r->tbs_bits, r->dmrs_id,
-              r->tried_id, r->snr_db, (long)r->abs_slot);
     }
   }
   pthread_mutex_unlock(&g_lock);
@@ -451,13 +391,6 @@ static int sweep(const nr_ul_nid_rec_t *r, const int16_t *llr, uint64_t cpu_dead
     if (!seen[id]) order[no++] = (uint16_t)id;
   int hits = 0;
   uint64_t cands = 0;
-  if (g_nlog) {
-    double m = 0;
-    for (int i = 0; i < E; i++) m += abs(llr[i]);
-    LOG_A(PHY, "SENSING: UL_NID_SWEEP rnti=0x%04x hyp=%u@%u tbl=%u k2=%u sym=%u+%u rb=%u+%u dmrs=%u tried=%u G=%u E=%d C=%u tbs=%u qm=%u snr=%.1f mean|llr|=%.1f crc_ok=%d\n", r->rnti,
-          r->bwp_size, r->bwp_start, r->mcs_table, r->k2, r->start_sym, r->num_sym, r->start_rb, r->num_rb, r->dmrs_id, r->tried_id, r->G, E, C, r->tbs_bits,
-          r->qm, r->snr_db, m / E, (int)r->crc_ok);
-  }
   for (int i = 0; i < no && !atomic_load(&g_stop); i++) {
     if ((i & 31) == 31 && cpu_ns() > cpu_deadline_ns) break;
     memcpy(w, neutral, (size_t)E * sizeof(int16_t));
@@ -554,14 +487,9 @@ static void run_job(nr_ul_nid_job_t *j)
           if (phase && !idok[di]) continue;
           nr_pdcch_blind_ul_result_t h2 = hl[hx];
           h2.ul_dmrs_scrambling_id = ids[di];
-          if (g_dbg_try >= 0) h2.data_scrambling_id = (uint16_t)g_dbg_try; /* ISAC_UL_NID_BG_DBG_TRY=<id>: DIAGNOSTIC, a ground-truth id for validating the hypothesis chain; never a receiver input */
           memset(&cap.rec, 0, sizeof(cap.rec));
           cap.got = false;
           const bool got = g_fn(j, &h2, j->rec.ta_nom, delta, &cap) && cap.got && cap.rec.G <= LLR_MAX;
-          if (g_nlog)
-            LOG_A(PHY, "SENSING: UL_NID_HYP rnti=0x%04x hx=%d/%d hyp=%u@%u tbl=%u dk2=%d sym=%u+%u map=%u mask=0x%x rb=%u+%u dmrs=%u got=%d snr=%.1f tbs=%u\n", g->rnti, hx,
-                  nh, h2.bwp_size, h2.bwp_start, h2.mcs_table, delta, h2.start_symbol, h2.num_symbols, h2.mapping_type, h2.ul_dmrs_symb_pos, h2.start_rb,
-                  h2.num_rb, h2.ul_dmrs_scrambling_id, (int)got, got ? cap.rec.snr_db : -99.f, got ? cap.rec.tbs_bits : 0);
           if (got && cap.rec.snr_db >= g_snr) {
             idok[di] = true;
             if (cap.rec.snr_db > idsnr[di]) idsnr[di] = cap.rec.snr_db;
@@ -638,11 +566,11 @@ static void *worker(void *a)
 {
   (void)a;
   if (nice(19) == -1) { /* best effort */ }
-  if (g_idle) { /* ISAC_UL_NID_BG_IDLE=1: SCHED_IDLE, runs only on a core nothing else wants */
+  { /* SCHED_IDLE: runs only on a core nothing else wants */
     const struct sched_param sp0 = {0};
     if (sched_setscheduler(0, SCHED_IDLE, &sp0)) LOG_W(PHY, "SENSING: UL_NID_BG cannot use SCHED_IDLE\n");
   }
-  if (g_core >= 0) { /* ISAC_UL_NID_BG_CORE=<cpu>: keep the search off the downlink cores */
+  if (g_core >= 0) { /* keep the search off the downlink cores */
     cpu_set_t cs;
     CPU_ZERO(&cs);
     CPU_SET(g_core, &cs);

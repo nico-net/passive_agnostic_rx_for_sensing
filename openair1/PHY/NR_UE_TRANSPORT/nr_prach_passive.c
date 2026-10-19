@@ -113,16 +113,6 @@ void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped)
   *skipped = atomic_load_explicit(&prach_skipped, memory_order_relaxed);
 }
 
-static int floor_margin_db10(void)
-{
-  /* DEFERRED/DO NOT USE: ISAC_PRACH_MARGIN_DB10 not in the frozen config t26zE (2026-10-18); slated for removal */
-  const char *v = getenv("ISAC_PRACH_MARGIN_DB10");
-  if (!v || !*v) return 80;
-  char *end;
-  long margin = strtol(v, &end, 10);
-  return *end || margin < 1 || margin > 300 ? 80 : (int)margin;
-}
-
 static int floor_compare(const void *a, const void *b)
 {
   const int x = *(const int *)a, y = *(const int *)b;
@@ -140,7 +130,7 @@ static bool floor_detect(int fdm, int gain_db, int energy)
     int sorted[PRACH_FLOOR_HISTORY];
     memcpy(sorted, f->energy, f->count * sizeof(int));
     qsort(sorted, f->count, sizeof(int), floor_compare);
-    detected = energy >= sorted[(f->count - 1) / 4] + floor_margin_db10();
+    detected = energy >= sorted[(f->count - 1) / 4] + 80; /* floor margin, dB/10 */
   }
   f->energy[f->next++ % PRACH_FLOOR_HISTORY] = energy;
   if (f->count < PRACH_FLOOR_HISTORY) f->count++;

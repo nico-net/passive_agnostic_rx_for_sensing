@@ -56,21 +56,15 @@ typedef struct puschAntennaProc_s {
   uint8_t lp; /* DM-RS symbol index within the grant */
 } puschAntennaProc_t;
 
-/* ISAC_UL_DELAY_ONCE=1 (default off; UL-LAT-20261018, passive RX only): the delay of an antenna is estimated on the grant's
+/* Passive RX only: the delay of an antenna is estimated on the grant's
  * first DM-RS symbol and reused on its later DM-RS symbols (same UE, same slot: one arrival time), halving the n-point
  * IDFTs of a 2-symbol DM-RS grant. Keyed by layer, start subcarrier, PRB count and slot, so a PRB-list segment or a new
  * grant never reuses another allocation's estimate. */
 static __thread struct { delay_t d; int nl, k0, rb, ns; bool ok; } t_dly1[16];
-static bool nr_ul_delay_once_on(void)
-{
-  static int on = -1;
-  if (on < 0) on = !getenv("ISAC_UL_DELAY_ONCE") || atoi(getenv("ISAC_UL_DELAY_ONCE")) > 0;
-  return on;
-}
 static void ul_passive_delay(const puschAntennaProc_t *rdata, int antenna, const c16_t *ls, c16_t *time, delay_t *delay)
 {
   const int n = rdata->frame_parms->ofdm_symbol_size;
-  const bool once = nr_ul_delay_once_on() && antenna >= 0 && antenna < 16;
+  const bool once = antenna >= 0 && antenna < 16;
   if (once && rdata->lp > 0 && t_dly1[antenna].ok && t_dly1[antenna].nl == rdata->nl && t_dly1[antenna].k0 == rdata->bwp_start_subcarrier
       && t_dly1[antenna].rb == rdata->pusch_pdu->rb_size && t_dly1[antenna].ns == rdata->Ns) {
     if (t_dly1[antenna].d.delay_max_val >= delay->delay_max_val)
@@ -660,15 +654,9 @@ int nr_pusch_channel_estimation(PHY_VARS_gNB *gNB,
   if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
     int peak_power[nb_antennas_rx];
     for (int a=0;a<nb_antennas_rx;++a) peak_power[a]=delay_arr[a].delay_max_val;
-    const int keep=nr_ulsch_passive_branch_selection(true,nb_antennas_rx,
-                       /* DEFERRED/DO NOT USE: ISAC_UL_RX_BRANCH not in the frozen config t26zE (2026-10-18); slated for removal */
-                       getenv("ISAC_UL_RX_BRANCH"),getenv("ISAC_RX_MRC_MODE"));
+    const int keep=nb_antennas_rx>1 ? 0 : -1; /* ISAC_RX_MRC_MODE=1: branch 0 */
     const int best=nr_ulsch_passive_timing_branch(nb_antennas_rx,keep,peak_power);
     if (best>=0) *delay=delay_arr[best];
-    /* DEFERRED/DO NOT USE: ISAC_UL_TIMING_DIAG not in the frozen config t26zE (2026-10-18); slated for removal */
-    if (getenv("ISAC_UL_TIMING_DIAG"))
-      LOG_I(PHY,"UL-TIMING rnti=%04x slot=%u sym=%u branch=%d delay=%d peak=%d\n",
-            pusch_pdu->rnti,Ns,symbol,best,delay->est_delay,delay->delay_max_val);
   } else {
     for (int aarx = 1; aarx < nb_antennas_rx; aarx++) {
       if (delay_arr[aarx].est_delay >= delay->est_delay) {

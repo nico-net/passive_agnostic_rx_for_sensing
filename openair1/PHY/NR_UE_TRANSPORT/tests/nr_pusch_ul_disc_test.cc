@@ -183,27 +183,7 @@ TEST(PuschUlDisc, NoiseOnlyDoesNotPublish) {
   std::printf("ULC_BENCH unresolved_cpu_us_per_grant=%.0f\n",search_cpu_s*1e6/20);
 }
 
-TEST(PuschUlDisc, PerUeTimingEmaRejectsOutlier) {
-  setenv("ISAC_UL_TA_TRACK","0",1); // baked default is on; this case covers the off path
-  nr_pusch_ul_disc_reset();
-  bool tracked=true;
-  EXPECT_EQ(nr_pusch_ul_disc_timing_seed(1,1600,10,&tracked),1600);
-  EXPECT_FALSE(tracked);
-  nr_pusch_ul_disc_timing_update(1,1600,1712,0.9,10);
-  EXPECT_EQ(nr_pusch_ul_disc_timing_seed(1,1600,11,&tracked),1712);
-  EXPECT_TRUE(tracked);
-  nr_pusch_ul_disc_timing_update(1,1600,1600-800,0.9,11);
-  EXPECT_EQ(nr_pusch_ul_disc_timing_seed(1,1600,12,&tracked),1712);
-  EXPECT_EQ(nr_pusch_ul_disc_timing_seed(2,1600,12,&tracked),1600);
-  EXPECT_FALSE(tracked);
-  nr_pusch_ul_disc_epoch(2);
-  EXPECT_EQ(nr_pusch_ul_disc_timing_seed(1,1600,13,&tracked),1600);
-  EXPECT_FALSE(tracked);
-  unsetenv("ISAC_UL_TA_TRACK");
-}
-
 TEST(PuschUlDisc, TaTrackKeepsAdvanceAcrossOldSlotsSilenceAndSeedsNewRntis) {
-  setenv("ISAC_UL_TA_TRACK","1",1);
   nr_pusch_ul_disc_reset();
   bool tracked=true;
   EXPECT_EQ(nr_pusch_ul_disc_timing_seed(7,1600,100,&tracked),1600); /* nothing learned: N_TA_offset */
@@ -221,7 +201,6 @@ TEST(PuschUlDisc, TaTrackKeepsAdvanceAcrossOldSlotsSilenceAndSeedsNewRntis) {
   EXPECT_EQ(nr_pusch_ul_disc_timing_seed(11,1600,9003,&tracked),-16);
   EXPECT_EQ(nr_pusch_ul_disc_timing_seed(9,1600,9003,&tracked),1648); /* but keeps its own */
   EXPECT_TRUE(tracked);
-  unsetenv("ISAC_UL_TA_TRACK");
 }
 
 namespace {
@@ -283,18 +262,16 @@ TEST(UlBgDisc, WorkerFillsCache) {
 
 TEST(UlBgDisc, ExpiredSnapshotDropped) {
   nr_ul_bgdisc_stop();
-  setenv("ISAC_UL_BGDISC_MAX_AGE_MS","30",1);
   Fixture f(8);
   g_bg_fix=&f; g_bg_runs=0;
   ASSERT_EQ(nr_ul_bgdisc_start(4,nullptr),0);
   auto j=bg_job(f,5);
   ASSERT_EQ(nr_ul_bgdisc_submit(&j),1);
-  usleep(80000);
+  usleep(150000); /* older than the 100 ms job age */
   ASSERT_EQ(nr_ul_bgdisc_start(4,bg_runner),0);
   nr_ul_bgdisc_stats_t st{};
   for (int i=0;i<200 && st.expired==0;++i) { usleep(10000); nr_ul_bgdisc_stats(&st); }
   nr_ul_bgdisc_stop();
-  unsetenv("ISAC_UL_BGDISC_MAX_AGE_MS");
   EXPECT_EQ(st.expired,1u);
   EXPECT_EQ(g_bg_runs,0); /* never ran: the samples were not read */
 }
@@ -323,7 +300,7 @@ TEST(UlBgDisc, SingleFalseCrcDoesNotLatch) {
   EXPECT_EQ(nr_ul_bgdisc_latch(3,0xC,201,0xA),1);    /* two RNTIs agree */
 }
 
-/* ISAC_UL_DELAY_FAST: the pruned estimator must give the full-grid decision (argmax of P over all n positions, peak/mean
+/* UL delay fast path: the pruned estimator must give the full-grid decision (argmax of P over all n positions, peak/mean
  * > 15 by Parseval) on narrow LS rows: clean delays, weak signals near the threshold, pure noise. */
 TEST(UlDelayFast, MatchesFullGridDecision) {
   for (const int n : {4096, 1536}) {

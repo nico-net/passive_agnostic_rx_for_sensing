@@ -1,11 +1,11 @@
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  *
- * ISAC_PUSCH_MMSE_MODE=2: unbiased 2-layer UL equaliser (nr_mmse_2layers_unbiased) against the stock
+ * Passive-RX UL MMSE mode 2: unbiased 2-layer UL equaliser (nr_mmse_2layers_unbiased) against the stock
  * nr_mmse_2layers(), on synthetic 2-layer 256QAM through OAI's own nr_channel_compensation().
  *   kappa = mean(|Re z|, |Im z|) / mean(threshold n1): an unbiased equaliser gives ~1 (mean |coord| of 256QAM per
  *   dimension = 8/sqrt(170) = QAM256_n1). Stock with diagonal loading on correlated layers: < 1 (QAM-FIX, DL twin).
- * Flag off is the stock function itself (the UL call site only branches on ISAC_PUSCH_MMSE_MODE == 2), checked
+ * Mode 0 is the stock function itself (the UL call site only branches on mode == 2), checked
  * byte for byte against a second stock call on the same input.
  */
 #include <gtest/gtest.h>
