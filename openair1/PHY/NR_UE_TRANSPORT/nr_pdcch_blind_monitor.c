@@ -57,6 +57,7 @@
  * assignment being found in nr_radio_config.c).
  */
 
+#include "PHY/CODING/nrPolar_tools/nr_polar_fssc.h"
 #include "nr_pdcch_nid_gpu.h"
 #include "nr_dmrs_nid_solve.h"
 #include "nr_pdcch_blind_monitor.h"
@@ -4217,8 +4218,7 @@ static uint32_t blind_polar_decode(const int16_t* llr,
     crc = tls_polar_pre.crc;
     tls_polar_pre.llr = NULL;
   } else {
-    crc = polar_decoder_int16((int16_t*)llr, dci_estimation, 1, NR_POLAR_DCI_MESSAGE_TYPE,
-                              dci_length, aggregation_level);
+    crc = nr_polar_dci_decode_fssc(llr, dci_estimation, dci_length, aggregation_level); /* fast-SSC, decisions == polar_decoder_int16 */
   }
 
   /* FULLCRC probe: polar_decoder_int16() returns a 24-bit CRC, and only a genuine match has its

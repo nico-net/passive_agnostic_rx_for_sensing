@@ -5,6 +5,7 @@ add_library(polar STATIC
   nr_bitwise_operations.c
   nr_crc_byte.c
   nr_polar_decoder.c
+  nr_polar_fssc.c
   nr_polar_decoding_tools.c
   nr_polar_encoder.c
   nr_polar_interleaving_pattern.c

@@ -262,6 +262,9 @@ static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t
 #include "nr_td_cb0_wire.h"
 #include "nr_td_grantwork.h"
 #include "nr_polar_gpu.h"                                 // SWEEP GPU BATCH: nr_gpu_polar_load/decode_vec
+#include "nr_early_start.h"
+#include "nr_pdcch_fast_lane.h"                            // fast lane: known-RNTI / CSS tasks first
+#include "PHY/CODING/nrPolar_tools/nr_polar_fssc.h"       // CPU batch stage
 
 // Spec maxima for a CORESET: the frequency-domain bitmap addresses 6-PRB groups over the BWP, so at
 // most floor(275/6) = 45 groups = 270 PRB; duration is 1..3 symbols (38.331 ControlResourceSet).
@@ -4388,6 +4391,9 @@ typedef struct {
   uint8_t      open_rnti;      // 1 = open RNTI range at a known length: finds UEs not yet resolved
   bool         is_lookahead;   // multi-candidate-per-occasion lookahead task (see the lookahead block)
   int8_t       lookahead_lane; // which lane; valid only when is_lookahead
+  bool         pre_ok;         // CPU batch stage decoded this candidate's first unscrambling (crc/payload below)
+  uint32_t     pre_crc;
+  nr_dci_bits_t pre_payload;
   task_ans_t  *ans;
 } nr_pdcch_blind_cand_task_t;
 
@@ -4533,7 +4539,13 @@ static void nr_pdcch_blind_cand_worker_body(nr_pdcch_blind_cand_task_t *t)
   uint16_t data_scrambling_rnti = t->scrambling_rnti;
   bool used_alternate_scrambling = false;
 retry_scrambling:
+  nr_pdcch_blind_polar_pre_set(NULL);
   nr_pdcch_unscrambling((c16_t *)t->e_rx, data_scrambling_rnti, (uint32_t)(t->L * 108), t->dmrs_scrambling_id, tmp_e);
+  if (t->pre_ok && !used_alternate_scrambling) { /* the batch stage unscrambled with these very arguments; one-shot, matched on pointer and size */
+    const nr_pdcch_blind_polar_pre_t pre = {.llr = tmp_e, .crc = t->pre_crc, .payload = t->pre_payload,
+                                            .dci_length = t->dci_length, .aggregation_level = t->L};
+    nr_pdcch_blind_polar_pre_set(&pre);
+  }
   if (t->ul_scan) {
     t->ok = nr_pdcch_blind_decode_01_mode(t->ul_auto,tmp_e,t->L,t->dci_length,t->ul_opts,
                                           t->rnti_min,t->rnti_max,&t->ul_out);
@@ -4637,6 +4649,49 @@ retry_scrambling:
   {
     extern void nr_pdcch_llr_probe(const char *, int, int, int, int, uint32_t, const int16_t *, int);
     nr_pdcch_llr_probe("blind", t->frame, t->slot, t->cce, t->L, t->out.rnti, tmp_e, t->L * 108);
+  }
+  nr_pdcch_blind_polar_pre_set(NULL); /* never leave a hand-off pointing into this frame */
+}
+
+/* CPU batch stage: candidates of one Phase-1 range that share (dci_length, L) are polar-decoded 8 per call by the fast-SSC batch decoder; the
+ * worker then finds the result via the polar_pre hand-off above. Groups of fewer than 3 stay on the single-candidate path (the batch only wins
+ * from ~3 lanes). The decoder is the same one the single path uses and its decisions are bit-identical, so a task decodes to the same
+ * (crc, payload) either way; a task the worker rejects before decoding simply never reads its result. */
+static void nr_pdcch_polar_batch_stage(nr_pdcch_blind_cand_task_t *tasks, const int *ord, int r0, int r1)
+{
+  enum { CAP = 48, MAXE = 4 * 108 };
+  static __thread int16_t arena[CAP][MAXE];
+  int idx[CAP], n = 0;
+  for (int k = r0; k < r1 && n < CAP; k++) {
+    const nr_pdcch_blind_cand_task_t *t = &tasks[ord[k]];
+    if (t->L > 4 || (t->L != 1 && t->L != 2 && t->L != 4) || t->dci_length < 12 || t->dci_length > 140
+        || t->dci_length + 24 > t->L * 108 || t->e_rx == NULL)
+      continue;
+    idx[n++] = ord[k];
+  }
+  bool done[CAP] = {false};
+  for (int a = 0; a < n; a++) {
+    if (done[a]) continue;
+    int grp[8], g = 0;
+    for (int b = a; b < n && g < 8; b++)
+      if (!done[b] && tasks[idx[b]].dci_length == tasks[idx[a]].dci_length && tasks[idx[b]].L == tasks[idx[a]].L) grp[g++] = b;
+    if (g < 3) continue;
+    const int16_t *llr[8];
+    for (int j = 0; j < g; j++) {
+      nr_pdcch_blind_cand_task_t *t = &tasks[idx[grp[j]]];
+      nr_pdcch_unscrambling((c16_t *)t->e_rx, t->scrambling_rnti, (uint32_t)(t->L * 108), t->dmrs_scrambling_id, arena[grp[j]]);
+      llr[j] = arena[grp[j]];
+    }
+    uint32_t res[8];
+    uint64_t pay[8 * 3];
+    nr_polar_dci_decode_fssc_x8(llr, g, res, pay, tasks[idx[a]].dci_length, tasks[idx[a]].L);
+    for (int j = 0; j < g; j++) {
+      nr_pdcch_blind_cand_task_t *t = &tasks[idx[grp[j]]];
+      t->pre_ok = true;
+      t->pre_crc = res[j];
+      t->pre_payload = (nr_dci_bits_t){{pay[3 * j], pay[3 * j + 1], pay[3 * j + 2]}};
+      done[grp[j]] = true;
+    }
   }
 }
 
@@ -5097,6 +5152,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
                                                     bool serial_candidates, long source_absolute_slot);
 /* par_bank_run: runs the banked CORESET passes j->first..j->n-1 of one dedicated-only slot on the calling thread (the PAR_BANKS helper,
  * or for ISAC_PDCCH_BANK_HANDOFF the idle scan consumer that took the side work, or the poster itself when nobody took it). */
+static bool es_bank_skip(int i, const UE_nr_rxtx_proc_t *proc, long mono, int slots_per_frame);
+static void es_publish_banks(void);
 static void par_bank_run(const par_bank_job_t *jp)
 {
   const par_bank_job_t j = *jp;
@@ -5106,6 +5163,7 @@ static void par_bank_run(const par_bank_job_t *jp)
     t_pass_kind = PASS_BANK;
     for (int i = j.first; i < j.n; ++i) {
       if (j.reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED) continue;
+      if (es_bank_skip(i, j.proc, j.src_abs, j.ue->frame_parms.slots_per_frame)) continue; /* ran in an early job */
       t_bank_index = i;
       t_bank_slot = j.src_abs >= 0 ? (uint64_t)j.src_abs : 0;
       t_candidate_share = j.additional && !dwell_own_budget() ? nr_pdcch_discovered_candidate_share(j.shares, i, j.vd) : 0;
@@ -5215,6 +5273,92 @@ uint64_t nr_pdcch_blind_inline_drop_epoch(void)
 {
   return atomic_load_explicit(&g_inline_drop_epoch, memory_order_relaxed);
 }
+/* ---- EARLY START (nr_early_start.h) --------------------------------------------------------------------------------------------
+ * An early job runs the banked CORESET passes (the verified, known geometry) as soon as their last symbol is in the ring. It is exact
+ * only when nothing the pass does reads samples beyond that symbol and nothing depends on the pass order against the slot-end work:
+ *   - the PDSCH decode is deferred to its queue (no in-line FEP of the PDSCH symbols), the per-accept channel estimate is not needed
+ *     (no DM-RS sensing source, no SNR gate), CSI-RS discovery owns the CSI-RS symbols (the in-line blind CSI-RS step is off);
+ *   - the bank pass candidate share is 0 (dwell_own_budget, or no discovered dwell), so the pass does not depend on the visit counters;
+ *   - every slot is admitted to the banked passes (ded_every_slot), so the slot-end job would have run the same passes;
+ *   - discovery state machines (root pass autodiscover) are the slot-end job's business: the early job only touches banks.
+ * Anything else: no early job, the slot is scanned as before. */
+static bool es_global_ok(void)
+{
+  const nr_pdcch_blind_monitor_cfg_t *root = nr_pdcch_blind_monitor_get_cfg();
+  if (!root->autodiscover || root->pdsch_decode < 1) return false;
+  if (!nr_pdsch_passive_queue_running() || !nr_pdcch_passive_queue_running() || !nr_csirs_disc_enabled()) return false;
+  if (nr_sense_blind_dmrs_source() >= 0 || !nr_pdcch_ded_every_slot()) return false;
+  if (nr_pdcch_discovered_enabled() && !dwell_own_budget()) return false;
+  return true;
+}
+static bool es_bank_ok(int i, int *first, int *dur)
+{
+  const nr_pdcch_blind_monitor_cfg_t *c = nr_pdcch_coreset_bank_cfg(i);
+  if (c == NULL || c->min_snr_lin > 0.0f || c->ss_first_symbol < 0 || c->coreset_duration < 1 || c->coreset_duration > 3) return false;
+  *first = c->ss_first_symbol;
+  *dur = c->coreset_duration;
+  return true;
+}
+/* Publish the early-eligible bank geometry for the RX thread (seqlock; unchanged geometry writes nothing). */
+static void es_publish_banks(void)
+{
+  nr_es_cs_t cs[NR_ES_MAX_BANKS];
+  int n = nr_pdcch_coreset_bank_count();
+  if (n > NR_ES_MAX_BANKS) n = NR_ES_MAX_BANKS;
+  const bool ok = n > 0 && es_global_ok();
+  for (int i = 0; i < n; i++) {
+    int f = 0, d = 0;
+    cs[i] = (nr_es_cs_t){0, 0};
+    if (ok && !(reconf_lengths_enabled() && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED) && es_bank_ok(i, &f, &d))
+      cs[i] = (nr_es_cs_t){(int8_t)f, (int8_t)d};
+  }
+  nr_es_banks_publish(&nr_es_banks, cs, ok ? n : 0);
+}
+/* The absolute slot an end-of-slot job belongs to: the largest slot <= the job's producer reference with the job's frame/slot residue. */
+static long es_true_slot(const UE_nr_rxtx_proc_t *proc, long mono, int slots_per_frame)
+{
+  if (mono < 0 || proc == NULL) return -1;
+  const long period = 1024L * slots_per_frame, key = (long)proc->frame_rx * slots_per_frame + proc->nr_slot_rx;
+  long d = (mono - key) % period;
+  if (d < 0) d += period;
+  return mono - d;
+}
+/* Bank i already ran for this slot in an early job: skip it in the slot-end dispatch (consumes the mark). */
+static bool es_bank_skip(int i, const UE_nr_rxtx_proc_t *proc, long mono, int slots_per_frame)
+{
+  const long s = es_true_slot(proc, mono, slots_per_frame);
+  if (s < 0 || !nr_es_done_is(&nr_es_done, i, s)) return false;
+  atomic_store_explicit(&nr_es_done.slot[i], 0, memory_order_release);
+  return true;
+}
+
+/* occasion_reconf_prologue: the once-per-slot bank tick and the dispatch bracket of run_occasion() when reconfiguration is on. Shared by the
+ *   slot-end job and the early job (whichever runs first for a slot ticks the bank; the CAS on last_tick_slot makes it once per slot). */
+static void occasion_reconf_prologue(PHY_VARS_NR_UE *ue, long source_absolute_slot)
+{
+  const bool reconf = reconf_lengths_enabled();
+  if (reconf) {
+    static pthread_once_t hook_once = PTHREAD_ONCE_INIT;
+    static _Atomic uint64_t last_tick_slot = UINT64_MAX;
+    static _Atomic uint64_t last_c0_unique;
+    pthread_once(&hook_once, bank_register_reopen_hook);
+    t_bank_slot = source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot : 0;
+    const uint64_t slot = t_bank_slot;
+    uint64_t prev = atomic_load_explicit(&last_tick_slot, memory_order_relaxed);
+    if (slot && (prev == UINT64_MAX || slot > prev)
+        && atomic_compare_exchange_strong_explicit(&last_tick_slot, &prev, slot,
+                                                    memory_order_relaxed, memory_order_relaxed)) {
+      const uint64_t c0 = atomic_load_explicit(&g_c0uss_unique, memory_order_relaxed);
+      const uint64_t old_c0 = atomic_exchange_explicit(&last_c0_unique, c0, memory_order_relaxed);
+      const uint32_t slots_per_second = ue->frame_parms.slots_per_frame * 100;
+      const bool outside = nr_pdcch_blind_monitor_take_outside_occupancy();
+      if(outside)nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),0,false,true);
+      nr_pdcch_coreset_bank_tick(slot, c0 > old_c0 || outside, 5 * slots_per_second, 30 * slots_per_second);
+    }
+    nr_pdcch_coreset_bank_dispatch_enter();
+  }
+}
+
 /* run_discovered_occasion: runs one occasion of the discovered (dedicated) CORESET geometry: sets the discovery token and share, runs the pass under the Phase-2 lock and feeds the discovery step.
  *   Caller: nr_pdcch_blind_monitor_run_occasion() (the discovered dwell, in the three slot paths).
  */
@@ -5238,6 +5382,56 @@ static void run_discovered_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   t_candidate_share = 0;
 }
 
+void nr_pdcch_blind_monitor_run_occasion_early(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, long slot_abs, int symbols_done)
+{
+  if (!es_global_ok()) return;
+  const int spf = ue->frame_parms.slots_per_frame;
+  if (nr_a2e_trace()) nr_a2e_ts[0] = btim_now_ns();
+  nr_cfg_epoch_drain();
+  NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), nr_pdcch_passive_queue_epoch_counter());
+  if (!nr_cfg_epoch_work_current()) return;
+  const bool reconf = reconf_lengths_enabled();
+  occasion_reconf_prologue(ue, slot_abs);
+  const int n = nr_pdcch_coreset_bank_count();
+  nr_es_tls_early = 1;
+  nr_es_tls_symbols_per_slot = ue->frame_parms.symbols_per_slot;
+  t_pass_kind = PASS_BANK;
+  for (int i = 0; i < n && i < NR_ES_MAX_BANKS; ++i) {
+    int f = 0, d = 0;
+    if (reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED) continue;
+    if (!es_bank_ok(i, &f, &d) || f + d > symbols_done || f + d >= ue->frame_parms.symbols_per_slot) continue;
+    if (nr_es_done_is(&nr_es_done, i, slot_abs)) continue;
+    t_bank_index = i;
+    t_bank_slot = (uint64_t)slot_abs;
+    t_candidate_share = 0;
+    nr_pdcch_blind_monitor_cfg_override(nr_pdcch_coreset_bank_cfg(i));
+    const uint64_t pk0 = btim_now_ns();
+    const uint32_t pa0 = t_pass_accepts;
+    nr_pdcch_blind_monitor_run_occasion_one(ue, proc, true, slot_abs);
+    pass_note(PK_BANK, btim_now_ns() - pk0, t_pass_accepts - pa0);
+    nr_es_done_mark(&nr_es_done, i, slot_abs);
+  }
+  t_bank_index = -1;
+  t_candidate_share = 0;
+  t_pass_kind = PASS_OTHER;
+  nr_pdcch_blind_monitor_cfg_override(NULL);
+  nr_es_tls_early = 0;
+  nr_pdsch_passive_queue_flush(); /* the early grants reach the PDSCH consumers now (they wait for the slot on nr_slot_gate) */
+  if (reconf) nr_pdcch_coreset_bank_dispatch_leave();
+  (void)spf;
+}
+
+bool nr_pdcch_blind_monitor_early_post(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, long slot_abs, int symbols_done)
+{
+  const nr_pdcch_passive_job_t job = {.frame_rx = proc->frame_rx,
+                                      .nr_slot_rx = proc->nr_slot_rx,
+                                      .gNB_id = proc->gNB_id,
+                                      .absolute_slot = slot_abs,
+                                      .fo_hz = ue->cont_fo_comp ? (ue->dl_Doppler_shift + ue->freq_offset) : 0.0,
+                                      .early_sym = (uint8_t)symbols_done};
+  return nr_pdcch_passive_queue_enqueue(&job);
+}
+
 /* nr_pdcch_blind_monitor_run_occasion: runs one PDCCH scan occasion: the CORESET#0 and discovered passes, the bank passes and the dwell, as selected by the configuration.
  *   With autodiscover off it is a single run_occasion_one(). With it on, it commits any pending Technique A decision, polls the discovered geometry, then runs the bank and dwell passes in order (or on par_bank helpers).
  *   Handles the reconfiguration epoch (bank ticks, dispatch enter/leave). Flags: ISAC_PDCCH_DED_EVERY_SLOT, ISAC_PDCCH_DED_BUDGET_US, _DED_BUDGET_SHARE, ISAC_PDCCH_PAR_BANKS, ISAC_PDCCH_SCAN_TIMING.
@@ -5252,28 +5446,10 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), serial_candidates
       ? nr_pdcch_passive_queue_epoch_counter() : &g_inline_drop_epoch);
   if (!nr_cfg_epoch_work_current()) return;
+  es_publish_banks(); /* geometry for the RX thread's early-start triggers (nr_early_start.h) */
   const nr_pdcch_blind_monitor_cfg_t *root = nr_pdcch_blind_monitor_get_cfg();
   const bool reconf = reconf_lengths_enabled();
-  if (reconf) {
-    static pthread_once_t hook_once = PTHREAD_ONCE_INIT;
-    static _Atomic uint64_t last_tick_slot = UINT64_MAX;
-    static _Atomic uint64_t last_c0_unique;
-    pthread_once(&hook_once, bank_register_reopen_hook);
-    t_bank_slot = source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot : 0;
-    const uint64_t slot = t_bank_slot;
-    uint64_t prev = atomic_load_explicit(&last_tick_slot, memory_order_relaxed);
-    if (slot && (prev == UINT64_MAX || slot > prev)
-        && atomic_compare_exchange_strong_explicit(&last_tick_slot, &prev, slot,
-                                                    memory_order_relaxed, memory_order_relaxed)) {
-      const uint64_t c0 = atomic_load_explicit(&g_c0uss_unique, memory_order_relaxed);
-      const uint64_t old_c0 = atomic_exchange_explicit(&last_c0_unique, c0, memory_order_relaxed);
-      const uint32_t slots_per_second = ue->frame_parms.slots_per_frame * 100;
-      const bool outside = nr_pdcch_blind_monitor_take_outside_occupancy();
-      if(outside)nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),0,false,true);
-      nr_pdcch_coreset_bank_tick(slot, c0 > old_c0 || outside, 5 * slots_per_second, 30 * slots_per_second);
-    }
-    nr_pdcch_coreset_bank_dispatch_enter();
-  }
+  occasion_reconf_prologue(ue, source_absolute_slot);
   const int n = nr_pdcch_coreset_bank_count();
   if (!root->autodiscover) {
     nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
@@ -5334,6 +5510,8 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     for (int i = 0; i < (par || side >= 0 ? 1 : n); ++i) {
       if (reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED)
         continue;
+      if (es_bank_skip(i, proc, source_absolute_slot, ue->frame_parms.slots_per_frame))
+        continue; /* ran in an early job */
       t_bank_index = i;
       t_candidate_share = additional && !dwell_own_budget() ? nr_pdcch_discovered_candidate_share(shares_d, i, vd) : 0;
       nr_pdcch_blind_monitor_cfg_override(nr_pdcch_coreset_bank_cfg(i));
@@ -5442,6 +5620,8 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   for (int i = 0; i < n; ++i) {
     if (reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED)
       continue;
+    if (es_bank_skip(i, proc, source_absolute_slot, ue->frame_parms.slots_per_frame))
+      continue; /* ran in an early job */
     t_bank_index = i;
     t_candidate_share = additional && !dwell_own_budget() ? nr_pdcch_discovered_candidate_share(shares, i, visit) : 0;
     nr_pdcch_blind_monitor_cfg_override(nr_pdcch_coreset_bank_cfg(i));
@@ -6501,7 +6681,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   btim_add(BTIM_PBWP, btim_t_pbwp);
   if (!nr_passive_samples_valid(
           atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
-          source_absolute_slot, fp->slots_per_frame))
+          source_absolute_slot - (nr_es_tls_early ? 1 : 0) /* early job: the slot is still being read */, fp->slots_per_frame))
     return; /* No discovery/CRC evidence from an overwritten CORESET window. */
 
   /* Blind CSI-RS search, observe-only (ISAC_CSIRS_BLIND=1, default off). Placed HERE, after the
@@ -8693,8 +8873,32 @@ constdiag_done:;
   discovery_scope.after_pre=btim_on?btim_now():0;
   discovery_scope.phase=5;
 
+  /* ---- FAST LANE (nr_pdcch_fast_lane.h). Tasks that decode a DL grant of a known RNTI (and every DL task of a common-search-space
+   * occasion) run Phase 1 + Phase 2 first, then their PDSCH jobs are pushed to the consumers; discovery, open-RNTI, 1_0-in-USS, UL and
+   * lookahead tasks follow in the second round, same thread, original relative order, Phase-2 lock held throughout. Nothing is dropped. ---- */
+  int fl_ord[cand_task_cap > 0 ? cand_task_cap : 1];
+  int fl_nfast;
+  {
+    nr_fl_task_t fl_t[cand_task_cap > 0 ? cand_task_cap : 1];
+    for (int i = 0; i < nof_tasks; i++) {
+      const nr_pdcch_blind_cand_task_t *c = &cand_task[i];
+      fl_t[i] = (nr_fl_task_t){.ul_scan = c->ul_scan != 0, .is_lookahead = c->is_lookahead, .bwp_probe = c->bwp_probe != 0,
+                               .open_rnti = c->open_rnti != 0, .fmt10 = c->format == NR_BLIND_DCI_FORMAT_1_0, .dl_auto = c->dl_auto,
+                               .bwp_entry = c->bwp_entry, .rnti_min = c->rnti_min, .rnti_max = c->rnti_max};
+    }
+    fl_nfast = nr_fl_partition(fl_t, nof_tasks, css0_occasion, fl_ord);
+  }
+  const int fl_rounds = (fl_nfast > 0 && fl_nfast < nof_tasks) ? 2 : 1;
+  int decodes_this_occasion = 0; // capped by cfg->pdsch_max_per_slot -- see that field's comment
+  bool retired_lookahead[NR_PDCCH_LOOKAHEAD_MAX] = {false};
+  uint64_t btim_t_post = 0;
+  for (int fl_round = 0; fl_round < fl_rounds; fl_round++) {
+  if (fl_round > 0 && !nr_cfg_epoch_work_current()) break; /* same as the Phase-2 loop's own epoch check: the rest of the occasion is void */
+  const int fl_r0 = (fl_rounds == 2 && fl_round == 1) ? fl_nfast : 0;
+  const int fl_r1 = (fl_rounds == 2 && fl_round == 0) ? fl_nfast : nof_tasks;
   const uint64_t btim_t_dec = btim_on ? btim_now() : 0;
-  if (nof_tasks > 0) {
+  if (fl_r1 > fl_r0) {
+    nr_pdcch_polar_batch_stage(cand_task, fl_ord, fl_r0, fl_r1);
     if (serial_candidates) {
       /* ALREADY off the PHY receive thread, so there is nothing to protect by fanning out -- and
        * fanning out here actively HURT. MEASURED, same work, same candidate count (38), same
@@ -8709,15 +8913,15 @@ constdiag_done:;
        * Running them serially here costs honest CPU instead of scheduling luck. The whole machine
        * is at ~1.5 of 12 cores, so there is no throughput reason to fan out -- only a latency one,
        * and latency is exactly what the deferral already bought. */
-      for (int i = 0; i < nof_tasks; i++) {
-        nr_pdcch_blind_cand_worker_serial(&cand_task[i]);
+      for (int k = fl_r0; k < fl_r1; k++) {
+        nr_pdcch_blind_cand_worker_serial(&cand_task[fl_ord[k]]);
       }
     } else {
       task_ans_t ans;
-      init_task_ans(&ans, nof_tasks);
-      for (int i = 0; i < nof_tasks; i++) {
-        cand_task[i].ans = &ans;
-        task_t t = {.func = nr_pdcch_blind_cand_worker, .args = &cand_task[i]};
+      init_task_ans(&ans, fl_r1 - fl_r0);
+      for (int k = fl_r0; k < fl_r1; k++) {
+        cand_task[fl_ord[k]].ans = &ans;
+        task_t t = {.func = nr_pdcch_blind_cand_worker, .args = &cand_task[fl_ord[k]]};
         pushTpool(&get_nrUE_params()->Tpool, t);
       }
       join_task_ans(&ans);
@@ -8727,7 +8931,7 @@ constdiag_done:;
   discovery_scope.after_decode=btim_on?btim_now():0;
   if (nr_a2e_trace()) nr_a2e_ts[2] = btim_now_ns();
   discovery_scope.phase=6;
-  const uint64_t btim_t_post = btim_on ? btim_now() : 0;
+  if (fl_round == 0) btim_t_post = btim_on ? btim_now() : 0;
 
   // ---- Phase 2 (sequential, in original candidate order): everything below has a genuine
   // sequential dependency (dci_thres EMA, RNTI persistence ring buffer) or is rare/expensive enough
@@ -8747,9 +8951,8 @@ constdiag_done:;
     phase2.held = true;
   }
   if (nr_a2e_trace()) nr_a2e_ts[3] = btim_now_ns();
-  int decodes_this_occasion = 0; // capped by cfg->pdsch_max_per_slot -- see that field's comment
-  bool retired_lookahead[NR_PDCCH_LOOKAHEAD_MAX] = {false};
-  for (int ti = 0; ti < nof_tasks; ti++) {
+  for (int fl_k = fl_r0; fl_k < fl_r1; fl_k++) {
+    const int ti = fl_ord[fl_k];
     if (!nr_cfg_epoch_work_current()) break;
     /* bookkeeping of an accepted DCI that its PDSCH job does not read runs when this iteration ends, whichever way (nr_pdcch_post_accept.h) */
     nr_post_accept_t pa __attribute__((cleanup(pa_cleanup)));
@@ -11054,6 +11257,9 @@ lc_regroup:
     }
     free(toFree);
   }
+  if (fl_rounds == 2 && fl_round == 0)
+    nr_pdsch_passive_queue_flush(); /* fast-lane grants reach the consumers now, not at the next occasion's start */
+  } /* fl_round */
 
   if (btim_on) {
     btim_add(BTIM_POST, btim_t_post);

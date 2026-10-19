@@ -8,6 +8,7 @@ int nr_ue_rx_synced_g = 0;
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_early_start.h" // per-CORESET early start: split slot read, symbol progress, slot gate
 #include "PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe.h" // ACQMISS-2 sync-quality metric
 #include "PHY/NR_UE_TRANSPORT/nr_passive_metrics.h" // ISAC_METRICS pci
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
@@ -1049,6 +1050,55 @@ void trs_freq_correction(PHY_VARS_NR_UE *ue, int cfo)
   }
 }
 
+/* nr_rx_read_slot: reads one slot. When verified CORESETs end before the slot does (nr_early_start.h) the read is split at the end of
+ *   each CORESET's last symbol: the symbol progress is published and an early scan job posted at each point, so the PDCCH fast lane
+ *   starts while the rest of the slot is still arriving. With no early-eligible CORESET it is exactly one nrue_ru_read(), as before.
+ *   Returns the samples read (sum of the pieces) or < 0 on cancellation; *ts is the slot's first-sample timestamp. */
+static int nr_rx_read_slot(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ts, c16_t **rxp, int readBlockSize, int firstSymSamp, int slot_nr,
+                           long abs_slot, const UE_nr_rxtx_proc_t *proc)
+{
+  NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
+  const int nant = fp->nb_antennas_rx;
+  nr_es_point_t pts[NR_ES_MAX_POINTS];
+  int np = 0;
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+    nr_es_cs_t cs[NR_ES_MAX_BANKS];
+    int nb = 0;
+    if (nr_es_banks_read(&nr_es_banks, cs, &nb) && nb > 0 && fp->symbols_per_slot <= 14) {
+      uint32_t cum[15];
+      cum[0] = 0;
+      for (int k = 1; k <= fp->symbols_per_slot; k++)
+        cum[k] = get_samples_symbol_duration(fp, slot_nr, 0, k);
+      np = nr_es_plan(cs, nb, fp->symbols_per_slot, cum, (uint32_t)firstSymSamp, pts, NR_ES_MAX_POINTS);
+      while (np > 0 && pts[np - 1].sample_off >= readBlockSize) np--; /* a point must fall inside this (possibly shortened) read */
+    }
+  }
+  if (np == 0)
+    return nrue_ru_read(UE, ts, (void **)rxp, readBlockSize, nant);
+  int done = 0;
+  bool first = true;
+  for (int p = 0; p < np; p++) {
+    const int want = pts[p].sample_off - done;
+    if (want > 0) {
+      void *bp[nant];
+      for (int a = 0; a < nant; a++) bp[a] = rxp[a] + done;
+      openair0_timestamp_t t2;
+      const int n = nrue_ru_read(UE, first ? ts : &t2, bp, want, nant);
+      if (n < 0) return n;
+      first = false;
+      done += n;
+      if (n != want) break; /* short read: the rest is read in one piece below, no further early points this slot */
+    }
+    nr_es_progress_publish(&nr_es_progress, abs_slot, pts[p].sym_end);
+    nr_pdcch_blind_monitor_early_post(UE, proc, abs_slot, pts[p].sym_end);
+  }
+  void *bp[nant];
+  for (int a = 0; a < nant; a++) bp[a] = rxp[a] + done;
+  openair0_timestamp_t t2;
+  const int n = nrue_ru_read(UE, first ? ts : &t2, bp, readBlockSize - done, nant);
+  return n < 0 ? n : done + n;
+}
+
 /* UE_thread: the PHY receive thread of the NR UE (the real-time loop): acquires the cell with UE_synch() through the sync actor, tracks timing and frequency, reads one slot per iteration, and dispatches each slot's RX/TX processing to the actors and barriers.
  *   The stream status moves UNSYNC -> SYNCING -> SYNCED and back on loss. Loss is detected by PBCH tracking, the RF stall watchdog (ISAC_RF_STALL_WATCHDOG, with up to ISAC_RF_STALL_MAX_REINIT device re-inits) and the RX recovery path (ISAC_RX_RECOVER). Other flags: ISAC_AUTO_ACQUIRE, ISAC_SCAN_CONFIRM, ISAC_TSYNC_RESET, ISAC_UL_PROBE, ISAC_SHIFT_CENSUS, ISAC_DISC_NO_RESYNC, ISAC_PBCH_SHIFT_CLAMP.
  *   Exits when shutdown is requested and requests shutdown with the final status. Started by init_NR_UE_threads() (summary; the function is long and this header gives its structure, not every branch).
@@ -1744,7 +1794,7 @@ void *UE_thread(void *arg)
 
     const int readBlockSize = get_readBlockSize(slot_nr, fp) - iq_shift_to_apply;
     openair0_timestamp_t rx_timestamp;
-    int tmp = nrue_ru_read(UE, &rx_timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
+    int tmp = nr_rx_read_slot(UE, &rx_timestamp, rxp, readBlockSize, firstSymSamp, slot_nr, absolute_slot, &curMsg.proc);
     /* Cancellation has no sample timestamp and must never reach continuity
      * checks or the decoder/sensing consumers. */
     if (oai_exit || tmp < 0)
@@ -1753,6 +1803,8 @@ void *UE_thread(void *arg)
       struct timespec diag_ts;
       clock_gettime(CLOCK_REALTIME, &diag_ts);
       atomic_store_explicit(&nr_ue_diag_producer_absolute_slot, absolute_slot, memory_order_relaxed);
+      nr_es_progress_publish(&nr_es_progress, absolute_slot, fp->symbols_per_slot); /* the slot is complete: early-start progress and the PDSCH slot gate */
+      nr_slot_gate_complete(&nr_slot_gate, absolute_slot);
       { /* SYSAN ISAC_E2E_TRACE=1: slot arrival time for per-grant end-to-end latency */
         extern int nr_passive_e2e_trace(void);
         extern void nr_passive_note_slot_arrival(long abs_slot);

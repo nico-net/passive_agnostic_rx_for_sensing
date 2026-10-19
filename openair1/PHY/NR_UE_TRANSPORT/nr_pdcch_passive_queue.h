@@ -85,6 +85,9 @@ typedef struct {
   /// via nr_slot_fep_fo_override_hz. NAN would mean "read live", which is the bug.
   double fo_hz;
   uint64_t enq_ns; ///< CLOCK_MONOTONIC at admission (only with ISAC_E2E_TRACE): splits the scan-queue wait into producer-side and queue/wake
+  /// Early start (nr_early_start.h): > 0 = this job was posted mid-slot, `early_sym` OFDM symbols of absolute_slot are in the ring and the
+  /// slot itself is still being read. The consumer runs only the banked CORESET passes that are due.
+  uint8_t early_sym;
 } nr_pdcch_passive_job_t;
 
 typedef struct {
