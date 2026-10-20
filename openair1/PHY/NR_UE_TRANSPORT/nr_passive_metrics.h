@@ -79,6 +79,15 @@ typedef struct {
   uint32_t csirs_confirm_resource_count;
   uint64_t csirs_confirm_resource_key[NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX];
   uint64_t csirs_confirm_resource_slots[NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX];
+  /* Tail keys (additive, schema stays 1). t_real_ns: CLOCK_REALTIME at snapshot (mono<->wall calibration). proc_*: getrusage(RUSAGE_SELF)
+   * (utime/stime in us, maxrss in kB, fault counts). has_* = 0: the getter is absent (weak symbol) and the keys are omitted, never 0.
+   * recov_*: nr_pdsch_recovery_stats() (late_ms in ms); retry_yield_*: nr_pdsch_retry_yield_stats(). */
+  uint64_t t_real_ns, proc_utime_us, proc_stime_us, proc_maxrss_kb, proc_minflt, proc_majflt;
+  int has_cfg_epoch, has_recov, has_retry_yield;
+  uint32_t cfg_epoch, cfg_identity_gen;
+  uint64_t recov_submitted, recov_rescued, recov_stale, recov_expired, recov_dropped_full, recov_dropped_old, recov_yielded;
+  int recov_late_ms_p50, recov_late_ms_p99;
+  uint64_t retry_yield_chains, retry_yield_yields, retry_yield_gated;
 } nr_passive_metrics_t;
 #ifndef __cplusplus
 /* PCI of the locked cell, -1 before PBCH lock. Written by nr-ue.c (relaxed), read by collect (relaxed). */
