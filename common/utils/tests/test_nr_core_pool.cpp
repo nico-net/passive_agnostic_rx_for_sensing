@@ -94,7 +94,7 @@ TEST(CorePool, CapsLeaveATokenForDecodeAndScan)
   holder(NR_POOL_DISC, 2);  // low cap N-2 = 2: refused
   holder(NR_POOL_RETRY, 3); // refused
   holder(NR_POOL_SCAN, 4);  // granted
-  holder(NR_POOL_DECODE, 5);
+  holder(NR_POOL_DECODE | NR_POOL_F_UL, 5);
   EXPECT_GE(r[0], 0);
   EXPECT_GE(r[1], 0);
   EXPECT_EQ(r[2], -1);
@@ -125,6 +125,30 @@ TEST(CorePool, ScanCannotTakeTheDecodeReserve)
   EXPECT_GE(r[1], 0);
   EXPECT_EQ(r[2], -1); // third scan: scan + low = 2 = N-1
   EXPECT_GE(r[3], 0);  // decode takes the reserve
+  st = 1;
+  for (auto &t : hold) t.join();
+  nr_pool_destroy(p);
+}
+
+// DL decode may not take the token kept for UL decode (and scan): 2 DL decodes fill their cap, a third DL is refused, UL is granted.
+TEST(CorePool, UlDecodeKeepsATokenAgainstDl)
+{
+  nr_pool_t *p = mk(4);
+  std::atomic<int> st{0}, r[4];
+  for (auto &x : r) x = -2;
+  std::vector<std::thread> hold;
+  for (int i = 0; i < 4; i++) {
+    hold.emplace_back([&, i] {
+      r[i] = nr_pool_try_acquire(p, i < 3 ? NR_POOL_DECODE : (NR_POOL_DECODE | NR_POOL_F_UL), 0, 0);
+      while (st < 1) usleep(100);
+      nr_pool_release(p);
+    });
+    usleep(20000);
+  }
+  EXPECT_GE(r[0], 0);
+  EXPECT_GE(r[1], 0);
+  EXPECT_EQ(r[2], -1);
+  EXPECT_GE(r[3], 0);
   st = 1;
   for (auto &t : hold) t.join();
   nr_pool_destroy(p);

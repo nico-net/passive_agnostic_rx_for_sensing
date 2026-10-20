@@ -378,9 +378,18 @@ static bool nr_core_float_mask(cpu_set_t *mask)
   for (int c = 0; c < NR_CP_MAX_CPUS; c++) if (m[c] && on[c]) CPU_SET(c, mask);
   return CPU_COUNT(mask) > 0;
 }
+static cpu_set_t g_inherited;
+static int g_have_inherited;
+/* nr_core_inherited_mask: the process mask as it was before the float lane moved the main thread (1 = saved). */
+int nr_core_inherited_mask(cpu_set_t *out)
+{
+  if (g_have_inherited) *out = g_inherited;
+  return g_have_inherited;
+}
 int nr_core_float_apply(void)
 {
   cpu_set_t lane, inherited, cur;
+  if (!g_have_inherited && sched_getaffinity(0, sizeof(g_inherited), &g_inherited) == 0) g_have_inherited = 1;
   if (!nr_core_float_mask(&lane)) {
     if (getenv("ISAC_FLOAT_CORES"))
       fprintf(stderr, "SENSING: FLOAT_CORES \"%s\" ignored (needs no active core plan and a CPU list with an online CPU)\n", getenv("ISAC_FLOAT_CORES"));

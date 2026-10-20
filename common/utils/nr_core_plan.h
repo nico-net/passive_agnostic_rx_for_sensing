@@ -54,6 +54,10 @@ int nr_core_plan_create(pthread_t *, pthread_attr_t *, void *(*)(void *), void *
 /* Called once early in main(): moves every existing task that still has the main thread's inherited mask
  * to the float lane (explicitly pinned tasks keep their core). Threads created later inherit it. No-op when off. */
 int nr_core_float_apply(void);
+#ifdef _GNU_SOURCE
+#include <sched.h>
+int nr_core_inherited_mask(cpu_set_t *out);
+#endif
 /* For a background thread created by a pinned thread: move the calling thread to the float lane. No-op when off. */
 void nr_core_float_enter(void);
 /* nr_env_list_nth: the k-th entry (0-based) of the comma list in env `name` ("17,18"), or `dflt` when unset/short/malformed. */

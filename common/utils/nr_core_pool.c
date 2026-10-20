@@ -4,6 +4,7 @@
 #include "nr_core_pool.h"
 #include "nr_core_plan.h"
 #include <dirent.h>
+#include <sys/prctl.h>
 #include <limits.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -19,6 +20,7 @@
 
 typedef struct waiter {
   int prio, cell, tok, last;
+  bool ul;
   uint64_t deadline, t_enq, seq;
   pthread_cond_t *cv;
 } waiter_t;
@@ -35,6 +37,7 @@ struct nr_pool {
   uint64_t seq;
   _Atomic int nwait[NR_POOL_NPRIO]; /* lock-free view for should_yield */
   int cnt[NR_POOL_NPRIO];           /* current leases per class */
+  int cnt_dl;                       /* of the DECODE leases, the DL ones */
   cpu_set_t poolset, home;
   bool have_home;
   pid_t member[256];
@@ -46,8 +49,9 @@ struct nr_pool {
 static __thread struct {
   const nr_pool_t *pool;
   int tok, prio, cell, cur_core;
+  bool ul;
   uint64_t deadline, t_grant;
-} tl = {NULL, -1, 0, 0, -1, 0, 0};
+} tl = {NULL, -1, 0, 0, -1, false, 0, 0};
 static __thread pthread_cond_t tl_cv = PTHREAD_COND_INITIALIZER;
 static __thread int tl_last = -1; /* token of the previous lease: preferred when free */
 
@@ -119,7 +123,7 @@ static bool overdue(const nr_pool_t *p, const waiter_t *w, uint64_t now)
 
 /* May a class `prio` be granted a token right now (ignoring who else waits)? The caps keep one token for each urgent class (see header (b)).
  * promoted (waited past its age): only the hard limit busy < N. */
-static bool class_ok(const nr_pool_t *p, int prio, bool promoted)
+static bool class_ok(const nr_pool_t *p, int prio, bool promoted, bool ul)
 {
   const int n = p->n;
   if (p->nfree <= 0) return false;
@@ -128,7 +132,7 @@ static bool class_ok(const nr_pool_t *p, int prio, bool promoted)
   const int lim1 = n > 1 ? n - 1 : 1, lim2 = n > 2 ? n - 2 : 1;
   switch (prio) {
     case NR_POOL_SCAN: return p->cnt[NR_POOL_SCAN] + low < lim1;
-    case NR_POOL_DECODE: return p->cnt[NR_POOL_DECODE] + low < lim1;
+    case NR_POOL_DECODE: return ul ? p->cnt[NR_POOL_DECODE] + low < lim1 : p->cnt_dl + low < lim2;
     default: return busy < lim2 && low < lim2;
   }
 }
@@ -165,13 +169,12 @@ static int select_waiter(nr_pool_t *p, uint64_t now, bool *promoted)
   }
   *promoted = false;
   for (int pr = 0; pr < NR_POOL_NPRIO; pr++) {
-    if (!class_ok(p, pr, false)) continue; /* capped class: a lower class may still fit under its own cap */
     for (int k = 1; k <= NR_POOL_MAX_CELLS; k++) { /* round-robin over cells after the one served last */
       const int cell = (p->rr[pr] + k) % NR_POOL_MAX_CELLS;
       best = -1;
       for (int i = 0; i < p->nwq; i++) {
         const waiter_t *w = p->wq[i];
-        if (w->prio != pr || w->cell != cell) continue;
+        if (w->prio != pr || w->cell != cell || !class_ok(p, pr, false, w->ul)) continue; /* a capped waiter does not block the others */
         if (best < 0 || w->deadline < p->wq[best]->deadline
             || (w->deadline == p->wq[best]->deadline && w->seq < p->wq[best]->seq))
           best = i;
@@ -190,12 +193,19 @@ static void grant(nr_pool_t *p, waiter_t *w, int tok, uint64_t now, bool promote
   p->busy[tok] = true;
   p->nfree--;
   p->cnt[w->prio]++;
+  if (w->prio == NR_POOL_DECODE && !w->ul) p->cnt_dl++;
   w->tok = tok;
   const uint64_t wait = now > w->t_enq ? now - w->t_enq : 0; /* now may predate a waiter that queued while an older dispatch ran */
   p->st.leases[w->prio]++;
   if (wait > 2000) p->st.waited[w->prio]++;
   if (promoted) p->st.promoted[w->prio]++;
   if (wait > p->st.wait_max_ns[w->prio]) p->st.wait_max_ns[w->prio] = wait;
+  if (wait > 50000000ull) { /* a lease wait this long: show who held the tokens (rate-limited) */
+    static _Atomic int n_wait;
+    if (atomic_fetch_add(&n_wait, 1) < 40)
+      fprintf(stderr, "SENSING: CORE_POOL long wait class=%d%s waited_ms=%lu free=%d held scan=%d decode=%d(dl %d) retry=%d disc=%d house=%d\n", w->prio,
+              w->ul ? "(ul)" : "", (unsigned long)(wait / 1000000ull), p->nfree, p->cnt[0], p->cnt[1], p->cnt_dl, p->cnt[2], p->cnt[3], p->cnt[4]);
+  }
   uint64_t us = wait / 1000;
   int b = 0;
   while (us && b < NR_POOL_WAIT_BINS - 1) us >>= 1, b++;
@@ -243,21 +253,23 @@ static int lease(nr_pool_t *p, int prio, int cell, uint64_t deadline, bool block
 {
   if (!p) return -1;
   if (tl.pool == p) { /* already holds one (nested request: keeps the outer class; a different class is counted, see header (c)) */
-    if (prio != tl.prio) { pthread_mutex_lock(&p->mu); p->st.nested++; pthread_mutex_unlock(&p->mu); }
+    if ((prio & ~NR_POOL_F_UL) != tl.prio) { pthread_mutex_lock(&p->mu); p->st.nested++; pthread_mutex_unlock(&p->mu); }
     return p->core[tl.tok];
   }
+  const bool ul = (prio & NR_POOL_F_UL) != 0;
+  prio &= ~NR_POOL_F_UL;
   if (prio < 0) prio = 0;
   if (prio >= NR_POOL_NPRIO) prio = NR_POOL_NPRIO - 1;
   cell = (unsigned)cell % NR_POOL_MAX_CELLS;
   const uint64_t now = nr_pool_now_ns();
-  waiter_t w = {.prio = prio, .cell = cell, .tok = -1, .last = tl_last, .deadline = deadline ? deadline : now, .t_enq = now, .cv = &tl_cv};
+  waiter_t w = {.prio = prio, .cell = cell, .tok = -1, .ul = ul, .last = tl_last, .deadline = deadline ? deadline : now, .t_enq = now, .cv = &tl_cv};
   pthread_mutex_lock(&p->mu);
   w.seq = p->seq++;
   if (!block) { /* grant only if no more urgent waiter could take this token */
     bool ahead = false;
     for (int i = 0; i < p->nwq; i++)
-      if (p->wq[i]->prio < prio && class_ok(p, p->wq[i]->prio, false)) ahead = true;
-    if (ahead || !class_ok(p, prio, false)) {
+      if (p->wq[i]->prio < prio && class_ok(p, p->wq[i]->prio, false, p->wq[i]->ul)) ahead = true;
+    if (ahead || !class_ok(p, prio, false, ul)) {
       pthread_mutex_unlock(&p->mu);
       return -1;
     }
@@ -273,6 +285,7 @@ static int lease(nr_pool_t *p, int prio, int cell, uint64_t deadline, bool block
   tl.pool = p;
   tl.tok = tl_last = w.tok;
   tl.prio = prio;
+  tl.ul = ul;
   tl.cell = cell;
   tl.deadline = w.deadline;
   tl.t_grant = nr_pool_now_ns();
@@ -289,12 +302,20 @@ void nr_pool_release(nr_pool_t *p)
   if (!p || tl.pool != p) return;
   const uint64_t now = nr_pool_now_ns();
   const int tok = tl.tok, prio = tl.prio;
+  const bool was_ul = tl.ul;
   tl.pool = NULL;
   tl.tok = -1;
+  if (now - tl.t_grant > 20000000ull) { /* a lease held this long means the holder blocked on something: name it (rate-limited) */
+    static _Atomic int n_long;
+    char nm[20] = "?";
+    prctl(PR_GET_NAME, nm, 0, 0, 0);
+    if (atomic_fetch_add(&n_long, 1) < 40) fprintf(stderr, "SENSING: CORE_POOL long lease %s class=%d held_ms=%lu\n", nm, prio, (unsigned long)((now - tl.t_grant) / 1000000ull));
+  }
   pthread_mutex_lock(&p->mu);
   p->busy[tok] = false;
   p->nfree++;
   p->cnt[prio]--;
+  if (prio == NR_POOL_DECODE && !was_ul) p->cnt_dl--;
   p->st.hold_ns[prio] += now - tl.t_grant;
   p->st.busy_ns += now - tl.t_grant;
   dispatch(p, now);
@@ -313,7 +334,7 @@ bool nr_pool_should_yield(const nr_pool_t *p, int prio)
 bool nr_pool_yield(nr_pool_t *p)
 {
   if (!p || tl.pool != p || !nr_pool_should_yield(p, tl.prio)) return false;
-  const int prio = tl.prio, cell = tl.cell;
+  const int prio = tl.prio | (tl.ul ? NR_POOL_F_UL : 0), cell = tl.cell;
   const uint64_t dl = tl.deadline;
   nr_pool_release(p);
   pthread_mutex_lock(&p->mu);
@@ -348,7 +369,8 @@ int nr_pool_stats_line(nr_pool_t *p, char *buf, int len)
   static const char *const nm[NR_POOL_NPRIO] = {"scan", "decode", "retry", "disc", "house"};
   nr_pool_stats_t s;
   nr_pool_stats(p, &s);
-  int o = snprintf(buf, (size_t)len, "SENSING: CORE_POOL n=%d yields=%lu", p ? p->n : 0, (unsigned long)s.yields);
+  int o = snprintf(buf, (size_t)len, "SENSING: CORE_POOL n=%d yields=%lu gpu_gives=%lu nested=%lu enforced=%lu", p ? p->n : 0, (unsigned long)s.yields,
+                (unsigned long)s.gpu_gives, (unsigned long)s.nested, (unsigned long)s.enforced);
   for (int i = 0; i < NR_POOL_NPRIO && o < len; i++)
     o += snprintf(buf + o, (size_t)(len - o), " %s[n=%lu waited=%lu promo=%lu wait_us p50<=%lu p99<=%lu max=%lu]", nm[i],
                   (unsigned long)s.leases[i], (unsigned long)s.waited[i], (unsigned long)s.promoted[i],
@@ -413,6 +435,7 @@ int nr_pool_enforce(nr_pool_t *p)
   return changed;
 }
 
+extern int nr_core_inherited_mask(cpu_set_t *) __attribute__((weak));
 /* ---- site pool ---- */
 static nr_pool_t *g_site;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
@@ -446,8 +469,8 @@ static void site_init(void)
   add_list(getenv("ISAC_UE_RT_CORE"), ex, &nex);
   add_list(getenv("ISAC_USRP_RING_CORE"), ex, &nex);
   add_list(nr_env_core("ISAC_UHD_CTRL_CORES"), ex, &nex);
-  cpu_set_t allowed;
-  const bool have_allowed = sched_getaffinity(0, sizeof(allowed), &allowed) == 0;
+  cpu_set_t allowed; /* the mask before the float lane moved the main thread: the cores this process may really use */
+  const bool have_allowed = (nr_core_inherited_mask && nr_core_inherited_mask(&allowed)) || sched_getaffinity(0, sizeof(allowed), &allowed) == 0;
   int k = 0;
   for (int i = 0; i < n; i++) {
     bool drop = have_allowed && !CPU_ISSET(cores[i], &allowed);
@@ -516,7 +539,7 @@ void nr_pool_site_gpu_wait(void)
     nanosleep(&ts, NULL);
     return;
   }
-  const int prio = tl.prio, cell = tl.cell;
+  const int prio = tl.prio | (tl.ul ? NR_POOL_F_UL : 0), cell = tl.cell;
   const uint64_t dl = tl.deadline;
   nr_pool_release(p);
   pthread_mutex_lock(&p->mu);
