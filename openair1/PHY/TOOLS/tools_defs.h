@@ -924,8 +924,8 @@ static inline void rotate_cpx_vector(const c16_t *const x, const c16_t alpha, c1
                                                          15, 14, 7, 6, 13, 12, 5, 4, 11, 10, 3, 2, 9, 8, 1, 0);
     for (; i < (N & ~15u); i += 16) {
       const simde__m512i y512 = simde_mm512_loadu_si512((const simde__m512i *)(x + i));
-      const simde__m512i xre = simde_mm512_srai_epi32(simde_mm512_madd_epi16(y512, alpha_for_real), output_shift);
-      const simde__m512i xim = simde_mm512_srai_epi32(simde_mm512_madd_epi16(y512, alpha_for_im), output_shift);
+      const simde__m512i xre = oai_mm512_srai_epi32(simde_mm512_madd_epi16(y512, alpha_for_real), output_shift);
+      const simde__m512i xim = oai_mm512_srai_epi32(simde_mm512_madd_epi16(y512, alpha_for_im), output_shift);
       const simde__m512i tmp = simde_mm512_packs_epi32(xre, xim);
       simde_mm512_storeu_si512((simde__m512i *)(y + i), simde_mm512_shuffle_epi8(tmp, perm_mask));
     }

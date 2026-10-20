@@ -1,5 +1,6 @@
 #include "nr_sense_records.h"
 #include <gtest/gtest.h>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <atomic>
@@ -14,6 +15,8 @@ static std::atomic<uint32_t> test_epoch{0};
 static bool test_ctx_found=false;
 static nr_ue_ctx_t test_ctx{};
 extern "C" {
+void *uniqCfg = nullptr;
+void exit_function(const char *, const char *, int, const char *, int) { abort(); }
 bool nr_ue_ctx_fast_open=false;
 bool nr_cfg_reconf_enabled(void) { return test_reconf.load(); }
 uint64_t nr_cfg_epoch_cfr_stamp(void) { return uint64_t(test_epoch.load())<<32; }
