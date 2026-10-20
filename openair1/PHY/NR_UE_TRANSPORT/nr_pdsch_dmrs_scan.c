@@ -208,18 +208,14 @@ int nr_dmrs_scan_slot_pool(const int16_t *const *rx, int nant, int N, int fco, i
   return nh;
 }
 
-float nr_dmrs_scan_prb_score(const int16_t *const *rx, int nant, int N, int fco, int slot, int symbol, int symbols_per_slot,
-                             int nid, int nscid, const uint16_t *crb, int n_crb)
+void nr_dmrs_scan_prb_gold(int slot, int symbol, int symbols_per_slot, int nid, int nscid, int n, uint8_t *out)
 {
-  if (!rx || nant <= 0 || !crb || n_crb <= 0 || nid < 0 || nid > 65535)
-    return 0.f;
-  int mx = 0;
-  for (int q = 0; q < n_crb; q++) if (crb[q] > mx) mx = crb[q];
-  if (mx > 274) return 0.f;
-  const int nbits = 12 * (mx + 1);
-  uint8_t *c = malloc((size_t)nbits);
-  if (!c) return 0.f;
-  nr_dmrs_scan_gold_ref(c_init_of(symbols_per_slot, slot, symbol, nid, nscid & 1), 0, nbits, c);
+  nr_dmrs_scan_gold_ref(c_init_of(symbols_per_slot, slot, symbol, nid, nscid & 1), 0, n, out);
+}
+
+float nr_dmrs_scan_prb_score_gold(const int16_t *const *rx, int nant, int N, int fco, const uint8_t *c, const uint16_t *crb,
+                                  int n_crb)
+{
   double Sr = 0, Si = 0, den = 0;
   for (int q = 0; q < n_crb; q++)
     for (int i = 0; i < 4; i++) {
@@ -237,8 +233,24 @@ float nr_dmrs_scan_prb_score(const int16_t *const *rx, int nant, int N, int fco,
       Si += r * im + im_ * re;
       den += sqrt(r * r + im_ * im_);
     }
-  free(c);
   return den > 0 ? (float)(sqrt(Sr * Sr + Si * Si) / 2.0 / den) : 0.f;
+}
+
+float nr_dmrs_scan_prb_score(const int16_t *const *rx, int nant, int N, int fco, int slot, int symbol, int symbols_per_slot,
+                             int nid, int nscid, const uint16_t *crb, int n_crb)
+{
+  if (!rx || nant <= 0 || !crb || n_crb <= 0 || nid < 0 || nid > 65535)
+    return 0.f;
+  int mx = 0;
+  for (int q = 0; q < n_crb; q++) if (crb[q] > mx) mx = crb[q];
+  if (mx > 274) return 0.f;
+  const int nbits = 12 * (mx + 1);
+  uint8_t *c = malloc((size_t)nbits);
+  if (!c) return 0.f;
+  nr_dmrs_scan_prb_gold(slot, symbol, symbols_per_slot, nid, nscid, nbits, c);
+  const float v = nr_dmrs_scan_prb_score_gold(rx, nant, N, fco, c, crb, n_crb);
+  free(c);
+  return v;
 }
 
 /* ---- per-RNTI votes ---- */
@@ -254,7 +266,7 @@ typedef struct {
 } vote_t;
 static vote_t g_v[VOTE_RNTIS];
 static pthread_mutex_t g_vmu = PTHREAD_MUTEX_INITIALIZER;
-/* SOLVERCOVER ISAC_PDSCH_DMRS_ID_CONTRAST=1: cell-wide base rate of every identity, over the distinct voted slots. A slot
+/* SOLVERCOVER: cell-wide base rate of every identity, over the distinct voted slots. A slot
  * votes its hits for every RNTI scheduled in it, so an identity present in most slots of the cell (a background/always-on
  * PDSCH, or a heavily scheduled co-scheduled UE) collects as many votes as a UE's own identity. Measured on TIM PCI 923
  * (OTA 2026-10-10 23:19 and replay of raw_pci923_tim_12s_tile3): one such id (65, 928 or 1280) sat in the top-2 of almost
@@ -265,12 +277,7 @@ static struct { int nid, slots; } g_base[BASE_IDS];
 static int g_nbase, g_base_slots;
 static int64_t g_base_seen[BASE_SEEN];
 static int g_base_seen_n;
-static int g_contrast = -1; /* re-read by nr_dmrs_scan_reset() (tests) */
-bool nr_dmrs_scan_contrast_on(void)
-{
-  if (g_contrast < 0) g_contrast = getenv("ISAC_PDSCH_DMRS_ID_CONTRAST") && atoi(getenv("ISAC_PDSCH_DMRS_ID_CONTRAST")) ? 1 : 0;
-  return g_contrast == 1;
-}
+bool nr_dmrs_scan_contrast_on(void) { return true; }
 /* base_count: counts the hits of one slot cell-wide, once per distinct slot (g_vmu held) */
 static void base_count(int64_t abs_slot, const nr_dmrs_scan_hit_t *hits, int n)
 {
@@ -388,7 +395,6 @@ void nr_dmrs_scan_reset(void)
   pthread_mutex_lock(&g_vmu);
   memset(g_v, 0, sizeof(g_v));
   g_nbase = g_base_slots = g_base_seen_n = 0;
-  g_contrast = -1;
   pthread_mutex_unlock(&g_vmu);
   pthread_mutex_lock(&g_pmu);
   g_npool = 0;

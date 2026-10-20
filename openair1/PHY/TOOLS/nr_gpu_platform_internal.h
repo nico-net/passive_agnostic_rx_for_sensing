@@ -10,7 +10,6 @@ typedef struct {
   int (*mem_info)(size_t *, size_t *);
   int (*malloc_device)(void **, size_t);
   int (*malloc_host)(void **, size_t, unsigned);
-  int (*malloc_managed)(void **, size_t, unsigned);
   int (*free_device)(void *);
   int (*free_host)(void *);
   int (*host_device_ptr)(void **, void *, unsigned);
@@ -22,6 +21,7 @@ typedef struct {
   int (*set_flags)(unsigned);
   int (*get_last_error)(void);
 } nr_gpu_runtime_t;
+const nr_gpu_runtime_t *nr_gpu_platform_runtime(void);
 #ifdef NR_GPU_PLATFORM_TEST
 #ifdef __cplusplus
 extern "C" {

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 
 #define _GNU_SOURCE
+#include "common/utils/nr_bg_lane.h"
 #include "nr_csirs_disc.h"
 
 #include <errno.h>
@@ -12,6 +13,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "PHY/TOOLS/nr_admit.h"
 #include "PHY/defs_nr_common.h"
 
 const uint16_t nr_csirs_disc_periods[NR_CSIRS_DISC_NUM_PERIODS] = {4, 5, 8, 10, 16, 20, 32, 40, 64, 80, 160, 320, 640};
@@ -46,8 +48,6 @@ typedef struct {
 } disc_worker_t;
 
 static disc_worker_t g_worker;
-static pthread_once_t g_enabled_once = PTHREAD_ONCE_INIT;
-static bool g_enabled;
 
 /* U1's standalone test deliberately links no U5 object. */
 extern const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void) __attribute__((weak));
@@ -63,36 +63,10 @@ extern int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *) __attribute__((weak));
 extern int nr_csirs_blind_rt_discovery_drain(void) __attribute__((weak));
 static void worker_note_slot(void);
 
-/* read_enabled: reads ISAC_CSIRS_DISC once (pthread_once) and stores whether it is exactly "1".
- *   Caller: nr_csirs_disc_enabled() (the cached switch for the whole discovery pipeline).
- */
-static void read_enabled(void)
-{
-  const char *value = getenv("ISAC_CSIRS_DISC");
-  g_enabled = value != NULL && strcmp(value, "1") == 0;
-}
-
-/* nr_csirs_disc_enabled: returns the cached ISAC_CSIRS_DISC switch: true when CSI-RS blind discovery is enabled for this process.
- *   Thread-safe after the first call. Read by the PHY receive path, the PDSCH queue (owned IQ) and the blind monitor.
- */
+/* nr_csirs_disc_enabled: true; CSI-RS blind discovery is always on (kept for the callers in the PHY receive path, the PDSCH queue and the blind monitor). */
 bool nr_csirs_disc_enabled(void)
 {
-  pthread_once(&g_enabled_once, read_enabled);
-  return g_enabled;
-}
-
-/* env_positive: reads a positive integer from the environment variable `name`, or returns fallback when unset, malformed, zero or negative.
- *   Used for ISAC_CSIRS_DISC_BATCH, _RING and _TD_RING. Caller: nr_csirs_disc_start().
- */
-static int env_positive(const char *name, int fallback)
-{
-  const char *text = getenv(name);
-  if (text == NULL || *text == '\0')
-    return fallback;
-  char *end = NULL;
-  errno = 0;
-  const long value = strtol(text, &end, 10);
-  return errno == 0 && end != text && *end == '\0' && value > 0 && value <= INT32_MAX ? (int)value : fallback;
+  return true;
 }
 
 /* env_core: returns the CPU core for the discovery worker from ISAC_CSIRS_DISC_CORE, or -1 (no pinning) when unset or invalid.
@@ -294,28 +268,7 @@ int nr_csirs_disc_ring_write_begin(nr_csirs_disc_ring_t *r, int count)
   return first;
 }
 
-/* dump_slot: writes one slot (metadata and grid) to the file named by ISAC_CSIRS_DISC_DUMP, with a header record; the file is opened once.
- *   No-op when the variable is unset. Called from ring_push() and ring_write_end() for every committed slot.
- */
-static void dump_slot(nr_csirs_disc_ring_t *r, int index)
-{
-  static FILE *dump;
-  static int state;
-  if(!state) {
-    const char *path=getenv("ISAC_CSIRS_DISC_DUMP");
-    dump=path && *path?fopen(path,"wb"):NULL;state=dump?1:-1;
-    if(dump) {
-      const int32_t hdr[5]={0x43534431,r->n_ant,r->n_rb,r->slots_per_frame,NR_CSIRS_DISC_NSYM};
-      fwrite(hdr,sizeof(hdr),1,dump);
-    }
-  }
-  if(state==1) {
-    fwrite(&r->meta[index],sizeof(r->meta[index]),1,dump);
-    fwrite(r->grid_base+index*r->slot_stride,sizeof(int16_t),r->slot_stride,dump);
-    fflush(dump);
-  }
-}
-/* nr_csirs_disc_ring_write_end: publishes the slots reserved by nr_csirs_disc_ring_write_begin(): writes their metadata, serial numbers and the dump, then advances the write counter and unlocks.
+/* nr_csirs_disc_ring_write_end: publishes the slots reserved by nr_csirs_disc_ring_write_begin(): writes their metadata and serial numbers, then advances the write counter and unlocks.
  *   With meta == NULL the reservation is released without publishing. Caller: nr_csirs_disc_td.c (TD drain).
  */
 void nr_csirs_disc_ring_write_end(nr_csirs_disc_ring_t *r, int count, const nr_csirs_disc_slot_meta_t *meta)
@@ -326,7 +279,6 @@ void nr_csirs_disc_ring_write_end(nr_csirs_disc_ring_t *r, int count, const nr_c
     int idx=(start+i)%r->capacity;
     r->meta[idx]=meta?meta[i]:(nr_csirs_disc_slot_meta_t){0};
     s->serial[idx]=meta?start+i+1:0;
-    if(meta) dump_slot(r,idx);
     pthread_mutex_unlock(&s->entry_lock[idx]);
   }
   if(meta) __atomic_store_n(&r->written,start+count,__ATOMIC_RELEASE);
@@ -383,11 +335,17 @@ int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r,
   state->serial[index] = r->written + 1;
   __atomic_add_fetch(&r->written, 1, __ATOMIC_RELEASE);
   pthread_mutex_unlock(&state->entry_lock[index]);
-  dump_slot(r,index);
   pthread_mutex_unlock(&state->read_lock);
   if (r == &g_worker.ring)
     worker_note_slot();
   return index;
+}
+
+int nr_csirs_disc_should_run(int drained, int *deferred, int admitted)
+{
+  if (drained <= 0 && !*deferred) return 0;
+  *deferred = !admitted;
+  return admitted;
 }
 
 /* disc_worker_main: thread body of the CSI-RS discovery worker: waits for a batch of slots, drains the TD front end, and runs nr_csirs_disc_process() (through the hook) on the ring or its snapshot.
@@ -404,9 +362,11 @@ static void *disc_worker_main(void *unused)
     CPU_SET(g_worker.core, &set);
     pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
   }
+  nr_bg_lane_enter("ISAC_CSIRS_DISC_CORE");
 
   pthread_mutex_lock(&g_worker.wake_lock);
   uint64_t seen = 0;
+  int deferred = 0; /* a drained batch is waiting in the ring because the critical lane was busy */
   while (!g_worker.stop) {
     while (!g_worker.stop && seen == __atomic_load_n(&g_worker.wake_generation, __ATOMIC_ACQUIRE)
            && (!nr_csirs_disc_td_pending || nr_csirs_disc_td_pending() < g_worker.batch)) {
@@ -424,12 +384,17 @@ static void *disc_worker_main(void *unused)
     int drained=nr_csirs_disc_td_drain?nr_csirs_disc_td_drain(&g_worker.ring):0;
     seen = __atomic_load_n(&g_worker.wake_generation, __ATOMIC_ACQUIRE);
     void (*hook)(nr_csirs_disc_ring_t *) = nr_csirs_disc_process_hook;
-    if(drained>0) {
+    const uint64_t t_adm = nr_admit_now_ns();
+    const int work = drained > 0 || deferred || (!nr_csirs_disc_td_drain && g_worker.ring.written != g_worker.snapshot.written);
+    const int admitted = !work || nr_admit_try(NR_ADMIT_CSIRS, t_adm, 0, 0); /* idle wake-ups are not jobs */
+    if(nr_csirs_disc_should_run(drained, &deferred, admitted)) {
       /* TD mode has a single FD writer: this worker. The pipeline mutex
        * serializes processing with epoch reset, so no second IQ copy is needed. */
       if(hook) hook(&g_worker.ring);
-    } else if (!nr_csirs_disc_td_drain && g_worker.ring.written!=g_worker.snapshot.written && nr_csirs_disc_ring_snapshot(&g_worker.ring, &g_worker.snapshot) == 0) {
+      nr_admit_done(NR_ADMIT_CSIRS, nr_admit_now_ns() - t_adm);
+    } else if (drained <= 0 && !deferred && admitted && !nr_csirs_disc_td_drain && g_worker.ring.written!=g_worker.snapshot.written && nr_csirs_disc_ring_snapshot(&g_worker.ring, &g_worker.snapshot) == 0) {
       if(hook) hook(&g_worker.snapshot);
+      nr_admit_done(NR_ADMIT_CSIRS, nr_admit_now_ns() - t_adm);
     }
     pthread_mutex_lock(&g_worker.wake_lock);
   }
@@ -443,8 +408,6 @@ static void *disc_worker_main(void *unused)
  */
 int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
 {
-  if (!nr_csirs_disc_enabled())
-    return 0;
   if (atomic_load_explicit(&g_worker.running, memory_order_acquire))
     return 0;
   if (fp == NULL || fp->symbols_per_slot != NR_CSIRS_DISC_NSYM)
@@ -457,7 +420,7 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
   if(nr_csirs_disc_pipeline_ready && !nr_csirs_disc_pipeline_ready()) return -1;
 
   memset(&g_worker, 0, sizeof(g_worker));
-  g_worker.batch = env_positive("ISAC_CSIRS_DISC_BATCH", NR_CSIRS_DISC_DEFAULT_BATCH);
+  g_worker.batch = NR_CSIRS_DISC_DEFAULT_BATCH;
   g_worker.core = env_core();
   if (pthread_mutex_init(&g_worker.wake_lock, NULL) != 0)
     return -1;
@@ -466,7 +429,7 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
     return -1;
   }
   g_worker.synchronization_ready = true;
-  const int capacity = env_positive("ISAC_CSIRS_DISC_RING", NR_CSIRS_DISC_DEFAULT_CAPACITY);
+  const int capacity = NR_CSIRS_DISC_DEFAULT_CAPACITY;
   if (nr_csirs_disc_ring_init(&g_worker.ring, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, true) != 0)
     goto fail;
   const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load?nr_csirs_disc_gpu_load():NULL;
@@ -477,7 +440,7 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
   if (nr_csirs_disc_ring_init(&g_worker.snapshot, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, false) != 0)
     goto fail;
   if (nr_csirs_disc_td_init && nr_csirs_disc_td_init(fp, n_ant,
-          env_positive("ISAC_CSIRS_DISC_TD_RING", 1024)) != 0)
+          1024) != 0)
     goto fail;
   pthread_attr_t attr;
   if (pthread_attr_init(&attr) != 0)

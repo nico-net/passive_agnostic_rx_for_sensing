@@ -50,7 +50,6 @@ static uint64_t last_period_ns;
 static uint64_t last_age_ns;
 static double period_s;
 static bool real_time_session;
-static bool ul_state_enabled;
 extern void nr_cfg_epoch_note_rnti_reopened(uint16_t, bool, uint64_t) __attribute__((weak));
 extern void nr_pusch_passive_ul_ids_reset(uint16_t) __attribute__((weak));
 extern void nr_pusch_passive_ul_ids_reset_all(void) __attribute__((weak));
@@ -160,7 +159,7 @@ static void snapshot(entry_t *e, uint64_t ns)
   fputs(",\"prb_size_max\":",output); json_int(s->prb_size_max);
   fputs(",\"prb_size_mean\":",output); json_float(s->prb_size_mean);
   fputs(",\"last_abs_slot\":",output); json_int(s->last_abs_slot);
-  if (ul_state_enabled) {
+  {
     static const char *names[NR_UL_F_COUNT] = {"dci_len","layout","bwp","tda","k2",
       "dmrs_id0","dmrs_id1","data_id","ta_samples","cfo_hz"};
     fputs("},\"ul\":{", output);
@@ -240,7 +239,7 @@ static void change(entry_t *e,nr_ue_param_t p,int64_t old,int64_t value,int caus
 }
 static void init_entry(entry_t *e,uint16_t rnti,uint16_t incarnation,uint64_t ns)
 {
-  if(ul_state_enabled && nr_pusch_passive_ul_ids_reset) nr_pusch_passive_ul_ids_reset(rnti);
+  if(nr_pusch_passive_ul_ids_reset) nr_pusch_passive_ul_ids_reset(rnti);
   memset(e,0,sizeof(*e));
   e->used=true; e->ctx.rnti=rnti; e->ctx.incarnation=incarnation;
   e->ctx.identity_gen=identity; e->ctx.state=NR_UE_FIRST_SEEN; e->last_activity_ns=ns;
@@ -324,7 +323,7 @@ static void param(entry_t *e,nr_ue_param_t p,int64_t value,nr_ue_verif_t verif,
   v->value=value; v->verif=verif; v->epoch_learned=epoch;
   if(verif==NR_UEV_TRUSTED) v->last_confirmed_abs_slot=slot;
   v->source=source_for_param(p);
-  if(ul_state_enabled && verif==NR_UEV_TRUSTED) {
+  if(verif==NR_UEV_TRUSTED) {
     if(p==NR_UEP_DCI_LEN_DL) ul_dl_prior(e,NR_UL_F_DCI_LEN,value);
     if(p==NR_UEP_BWP) {
       e->ctx.ul.dl_bwp_prior=value;
@@ -351,7 +350,7 @@ static void observe(entry_t *e,const nr_passive_obs_t *o,uint64_t ns)
   if(o->nl>=1 && o->nl<=4) s->layers_hist[o->nl]++;
   s->snr_ema_db=ema(s->snr_ema_db,o->snr_db); s->nvar_ema=ema(s->nvar_ema,o->nvar);
   s->fo_ema_hz=ema(s->fo_ema_hz,o->fo_comp_hz); s->ta_ema_samples=ema(s->ta_ema_samples,o->delay_samples);
-  if(ul_state_enabled && o->dir==NR_OBS_DIR_DL && isfinite(s->fo_ema_hz)) {
+  if(o->dir==NR_OBS_DIR_DL && isfinite(s->fo_ema_hz)) {
     c->ul.dl_cfo_prior_hz=(int32_t)lrintf(s->fo_ema_hz);
     c->ul.dl_cfo_prior_valid=true;
     ul_dl_prior(e,NR_UL_F_CFO,c->ul.dl_cfo_prior_hz);
@@ -432,7 +431,7 @@ static void handle(const event_t *v)
     last_age_ns=ns;
   }
   if(v->kind==EV_EPOCH) {
-    if(ul_state_enabled && (v->epoch.last_class!=NR_EPOCH_SOFT ||
+    if((v->epoch.last_class!=NR_EPOCH_SOFT ||
        v->epoch.last_cause==NR_CAUSE_DEDICATED_CHANGE_SUSPECTED) && nr_pusch_passive_ul_ids_reset_all)
       nr_pusch_passive_ul_ids_reset_all();
     for(int i=0;i<NR_UECTX_MAX_UE;i++) if(entries[i].used && entries[i].ctx.state!=NR_UE_GONE) {
@@ -504,11 +503,12 @@ static void handle(const event_t *v)
   }
   pthread_mutex_unlock(&ctx_lock);
 }
+/* Test hook: the writer sleeps first so the ring fills (overflow tests). */
+int nr_ue_ctx_test_writer_pause_ms;
 static void *run(void *unused)
 {
   (void)unused;
-  const char *pause=getenv("ISAC_UECTX_TEST_WRITER_PAUSE_MS");
-  if(pause && atoi(pause)>0) {struct timespec t={atoi(pause)/1000,(atoi(pause)%1000)*1000000L}; nanosleep(&t,NULL);}
+  if(nr_ue_ctx_test_writer_pause_ms>0) {struct timespec t={nr_ue_ctx_test_writer_pause_ms/1000,(nr_ue_ctx_test_writer_pause_ms%1000)*1000000L}; nanosleep(&t,NULL);}
   event_t e;
   uint64_t last_idle_tick=now_ns();
   while(atomic_load_explicit(&running,memory_order_seq_cst) ||
@@ -552,12 +552,6 @@ bool nr_ue_ctx_open(const char *path,uint32_t ring_capacity,double snapshot_peri
   free(entries);
   output=f; ring=r; entries=x; capacity=ring_capacity; head=0;
   period_s=snapshot_period_s; last_period_ns=last_age_ns=0; epoch=identity=0;
-  const char *ul_flag=getenv("ISAC_UL_UE_STATE");
-  const char *chain_flag=getenv("ISAC_UL_PUSCH_CHAIN");
-  const char *solver_flag=getenv("ISAC_UL_PUSCH_SOLVER");
-  ul_state_enabled=(ul_flag && strcmp(ul_flag,"1")==0) ||
-                   (chain_flag && strcmp(chain_flag,"1")==0) ||
-                   (solver_flag && strcmp(solver_flag,"1")==0);
   for(int i=0;i<=UINT16_MAX;i++) active_index[i]=-1;
   real_time_session=false;
   for(int i=0;i<3;i++) sib1_values[i]=-1;
@@ -602,7 +596,7 @@ void nr_ue_ctx_on_anchor(uint16_t rnti,int kind,int64_t slot)
 void nr_ue_ctx_on_sib1(uint32_t hash,int64_t slot)
 { nr_ue_ctx_on_sib1_param(NR_UEP_SIB1_HASH,hash,slot); }
 void nr_ue_ctx_on_sib1_param(nr_ue_param_t p,int64_t value,int64_t slot)
-{ if(nr_ue_ctx_enabled() && !nr_cfg_ignore_sib1() && p>=NR_UEP_SIB1_HASH && p<=NR_UEP_SIB1_TDRA_HASH)
+{ if(nr_ue_ctx_enabled() && p>=NR_UEP_SIB1_HASH && p<=NR_UEP_SIB1_TDRA_HASH)
     {event_t e={.kind=EV_SIB1,.ns=now_ns(),.slot=slot,.p=p,.value=value};enqueue(&e);} }
 void nr_ue_ctx_on_epoch(const nr_cfg_epoch_snapshot_t *s)
 { if(s && nr_ue_ctx_enabled()) {event_t e={.kind=EV_EPOCH,.ns=now_ns(),.epoch=*s};enqueue(&e);} }
@@ -640,19 +634,16 @@ bool nr_ue_ctx_try_get(uint16_t rnti,nr_ue_ctx_t *out)
 {
   if (!out || !entries || pthread_mutex_trylock(&ctx_lock)) return false;
   bool found=false;
-  if(ul_state_enabled) {
+  {
     const int16_t idx=active_index[rnti];
     if(idx>=0 && entries[idx].used && entries[idx].ctx.state!=NR_UE_GONE) {*out=entries[idx].ctx;found=true;}
-  } else {
-    for(int i=0;i<NR_UECTX_MAX_UE;i++) if(entries[i].used && entries[i].ctx.rnti==rnti &&
-        (!found || entries[i].ctx.incarnation>=out->incarnation)) {*out=entries[i].ctx;found=true;}
   }
   pthread_mutex_unlock(&ctx_lock);
   return found;
 }
 bool nr_ue_ctx_ul_ticket(uint16_t rnti,nr_ue_ul_ticket_t *out)
 {
-  if(!out || !ul_state_enabled || !nr_ue_ctx_enabled() || pthread_mutex_trylock(&ctx_lock)) return false;
+  if(!out || !nr_ue_ctx_enabled() || pthread_mutex_trylock(&ctx_lock)) return false;
   const int16_t idx=active_index[rnti];
   bool ok=false;
   if(idx>=0) {
@@ -667,21 +658,21 @@ bool nr_ue_ctx_ul_ticket(uint16_t rnti,nr_ue_ul_ticket_t *out)
 }
 void nr_ue_ctx_ul_grant(const nr_ue_ul_ticket_t *t,const nr_ue_ul_update_t *u)
 {
-  if(t && u && nr_ue_ctx_enabled() && ul_state_enabled) {
+  if(t && u && nr_ue_ctx_enabled()) {
     event_t e={.kind=EV_UL_GRANT,.ns=now_ns(),.rnti=t->rnti,.ul_ticket=*t,.ul_update=*u};
     enqueue(&e);
   }
 }
 void nr_ue_ctx_ul_feedback(const nr_ue_ul_ticket_t *t,const nr_ue_ul_update_t *u,bool tb_crc_ok)
 {
-  if(t && u && tb_crc_ok && nr_ue_ctx_enabled() && ul_state_enabled) {
+  if(t && u && tb_crc_ok && nr_ue_ctx_enabled()) {
     event_t e={.kind=EV_UL_FEEDBACK,.ns=now_ns(),.rnti=t->rnti,.ul_ticket=*t,.ul_update=*u};
     enqueue(&e);
   }
 }
 void nr_ue_ctx_ul_ta_command(uint16_t rnti,int units,int mu,bool absolute)
 {
-  if(!nr_ue_ctx_enabled() || !ul_state_enabled || mu<0 || mu>4 || rnti==0) return;
+  if(!nr_ue_ctx_enabled() || mu<0 || mu>4 || rnti==0) return;
   event_t e={.kind=EV_UL_TA,.ns=now_ns(),.rnti=rnti,.value=units,.p=mu,.cause=absolute?1:0};
   e.ul_ticket.epoch=nr_cfg_reconf_enabled()?nr_cfg_epoch_work_stamp():0;
   enqueue(&e);

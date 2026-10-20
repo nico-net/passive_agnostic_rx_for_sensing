@@ -7,7 +7,6 @@
  */
 
 #include "PHY/NR_UE_TRANSPORT/nr_mrc_weights.h"
-#include "PHY/NR_UE_TRANSPORT/nr_agnostic_v2.h"
 #include "common/platform_constants.h"
 #include "nr_phy_common.h"
 #include "PHY/defs_nr_UE.h"
@@ -26,8 +25,11 @@
 #include <math.h>
 #include "nr_pdsch_evm_acc.h"
 #include "nr_irc_cov.h"
+#include "nr_mmse_exact.h"
+#include <time.h>
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_nr_interface.h"
+#include "executables/softmodem-common.h"
 
 /* SELECTION DIVERSITY across receive branches (2026-09-03).
  *
@@ -49,8 +51,8 @@ __thread int nr_dlsch_forced_branch = -1;
  * this rig's own 5-88 % CRC swing all change between runs. */
 __thread int nr_dlsch_forced_mask = -1;
 __thread int nr_dlsch_mrc_mode_override = -1;
-__thread int nr_dlsch_irc_override = -1; /* T26d: per-grant ISAC_RX_IRC value (-1 = env) */ /* T26d ISAC_RX_MRC_PER_RNTI: per-grant combining mode (set by the passive decode) */
-__thread nr_irc_cov_t nr_irc_dmrs_cov; /* ISAC_RX_IRC=4, nr_irc_cov.h */
+__thread int nr_dlsch_irc_override = -1; /* T26d ISAC_RX_MRC_PER_RNTI: per-grant IRC mode (set by the passive decode), -1 = none */
+__thread nr_irc_cov_t nr_irc_dmrs_cov; /* IRC mode 4, nr_irc_cov.h */
 __thread int nr_pdsch_chest_occ_override = -1; /* T26d ISAC_CHEST_OCC_AB, nr_pdsch_passive_decode.c */
 __thread int nr_pdsch_ldpc_iters_override = -1; /* T26d ISAC_LDPC_ITERS_AB (set by the PDSCH queue, read by the passive decode) */
 __thread bool nr_pdsch_decode_wide_mrc; /* CRC-validated passive recovery only */
@@ -125,8 +127,7 @@ int nr_dlsch_planned_branch(int nbRx, int nl)
     }
     return -1;
   }
-  const char *e = getenv("ISAC_RX_MRC_MODE");
-  const int mode = (e != NULL) ? atoi(e) : 0;
+  const int mode = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 1 : 0; /* frozen ISAC_RX_MRC_MODE=1 */
   return (mode == 0) ? 0 : -1;
 }
 
@@ -229,7 +230,7 @@ uint32_t nr_dlsch_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_
   return csi_res_bitmap;
 }
 
-/* LOW-MCS FIX ISAC_PDSCH_CSI_RB_EXTENT=1 (default off = the bitmap above applied to EVERY allocated RB).
+/* LOW-MCS FIX (passive RX; off otherwise = the bitmap above applied to EVERY allocated RB).
  * TS 38.211 7.4.1.5.3: a CSI-RS resource occupies only the RBs of its CSI-FrequencyOccupation
  * (startingRB / nrofRBs, FAPI start_rb / nr_of_rbs relative to CRB 0) with RB parity per its density;
  * TS 38.214 5.1.4.1 rate-matches the PDSCH around those REs only. The legacy bitmap dropped REs in every
@@ -237,7 +238,7 @@ uint32_t nr_dlsch_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_
  * extraction stayed consistent with each other but not with the gNB's mapping -> CRC 0/83 at the serving
  * cell's TRS occasions OTA. Returns the 12-bit excluded-RE map of common RB `crb` on `symbol`. */
 __thread int nr_dlsch_csi_extent_override = -1; /* per-decode A/B (ISAC_PDSCH_CSI_EXTENT_AB), -1 = env */
-/* nr_dlsch_csi_rb_extent: returns whether CSI-RS exclusion is limited to each resource's own RB range (ISAC_PDSCH_CSI_RB_EXTENT=1, cached; default 0 = every allocated RB).
+/* nr_dlsch_csi_rb_extent: returns whether CSI-RS exclusion is limited to each resource's own RB range (passive RX, cached; otherwise every allocated RB).
  *   The per-decode override nr_dlsch_csi_extent_override (set by the ISAC_PDSCH_CSI_EXTENT_AB diagnostic) takes precedence when >= 0.
  *   Callers: nr_dlsch_csi_rb_mask(), nr_dlsch_csi_unav_res(), nr_dlsch_extract_rbs(), nr_rx_pdsch(), and gw_fingerprint() in the passive decoder.
  */
@@ -245,8 +246,7 @@ int nr_dlsch_csi_rb_extent(void)
 {
   static int s = -1;
   if (s < 0) /* CSI-FULL: ISAC_CSIRS_FULL=1 exports per-cell 52-RB TRS sets, which need their extent */
-    s = (getenv("ISAC_PDSCH_CSI_RB_EXTENT") && atoi(getenv("ISAC_PDSCH_CSI_RB_EXTENT")))
-        || (getenv("ISAC_CSIRS_FULL") && atoi(getenv("ISAC_CSIRS_FULL"))) ? 1 : 0;
+    s = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 1 : 0; /* frozen ISAC_CSIRS_FULL=1 */
   return nr_dlsch_csi_extent_override >= 0 ? nr_dlsch_csi_extent_override : s;
 }
 /* CSI-FULL: a segmented/interleaved grant is demodulated as a VIRTUAL allocation (BWP RB v = data-order PRB v);
@@ -794,13 +794,13 @@ void nr_conjch0_mult_ch1(c16_t *ch0, c16_t *ch1, c16_t *ch0conj_ch1, unsigned sh
 }
 
 /* nr_dlsch_mmse: multi-layer MMSE receiver for up to 4 layers: solves (H^H H + noise I) x = H^H y per RE and computes the per-layer LLR thresholds from the determinant.
- *   Env: ISAC_PDSCH_MMSE_MODE=2 (unbiased ZF with per-layer scale), ISAC_MMSE_FLOAT=1 (float solver), ISAC_MMSE_DIAG=1 (per-layer EVM log).
  *   Output is the layer-equalised symbols rxdataF_comp and the magnitude thresholds dl_ch_mag*. Caller: nr_rx_pdsch(), used when Nl > 2, or Nl == 2 without the ML LLR (ISAC_RX_ML_2L).
  */
 static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
                           uint32_t rx_size_symbol,
                           unsigned char n_rx,
                           unsigned char nl, // number of layer
+                          c16_t rxdataF_ext[][rx_size_symbol], /* mode 3 only: the extracted RX samples */
                           c16_t rxdataF_comp[nl][pdsch_buf_size_max],
                           c16_t dl_ch_mag[][pdsch_buf_size_max],
                           c16_t dl_ch_magb[][pdsch_buf_size_max],
@@ -814,6 +814,42 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
 {
   uint32_t nb_rb_0 = (length + 11) / 12;
   c16_t determ_fin[12 * nb_rb_0] __attribute__((aligned(32)));
+
+  /* TIMRANK34 mode 3 (passive RX at 3-4 layers, or MMSE mode 3): exact unbiased MMSE in double.
+   * Modes 0-2 work on G = sum_a (conj(h) h >> shift) and H^H y >> shift rounded to int16. With shift sized from the strongest
+   * layer, G sits at ~2|h| LSB; at a low receive level (TIM: |h| ~ 20 LSB, chest nvar 15-19 dB) and a 3-4 layer channel
+   * conditioned at 20-24 dB at our antennas, the weak eigen-direction of G is below 1 LSB: the solve returns noise (TIM rank
+   * 3: LLRs in {-1,0,1}, 45 % sign agreement with a float receiver that decodes 29 of 30 of the same MCS-0 grants).
+   * Here G and H^H y come straight from the int16 estimates and samples. Noise variance: the residual in the
+   * nbRx - nl dimensional complement of H (decision-free), per symbol; nbRx == nl uses the chest nvar (calibrated, MMSE3CAL).
+   * Output as mode 2 (z = w x_unbiased, per-layer thresholds w n1/n2/n3) with w = mu/[A^-1]_ll the per-layer
+   * MMSE SINR in G units, i.e. z = x / [A^-1]_ll, A = G + s2 I; times a gain that puts the strongest layer near 2^10 LSB
+   * whatever the receive level (the K38 LLR norm only shifts down). */
+  if (qam_mode == 3) {
+    const int16_t qa = (mod_order == 4) ? QAM16_n1 : (mod_order == 6) ? QAM64_n1 : (mod_order == 8) ? QAM256_n1 : 0;
+    const int16_t qb = (mod_order == 6) ? QAM64_n2 : (mod_order == 8) ? QAM256_n2 : 0;
+    const int16_t qr = (mod_order == 8) ? QAM256_n3 : 0;
+    /* output gain: the strongest layer's mean G_ll -> 2^10 LSB (w <= G_ll), independent of the receive level and of any
+     * ISAC_L2MAXH_DELTA*; continuous, so it moves with the channel only (no per-symbol power-of-two jumps).
+     * nbRx == nl (rank 4 on 4 RX): no noise-only dimension, so s2 = chest nvar x 10^(dB/10). MMSE3CAL measured the residual at
+     * +19.2 dB (TIM tile3, sd 3.0) and +16.1 dB (Vodafone b, sd 4.3) over that nvar; 21 dB errs high, the safe side (an s2 10x
+     * too high still decodes 15 of 25 rank-4 grants in the float model, 10x too low 8 of 25, zero forcing 0).
+     * MMSE3GPU: the whole symbol is nr_mmse3_symbol() (nr_mmse_exact.h), which the GPU reproduces bit for bit. */
+    const int16_t *yr[4], *hr[16];
+    int16_t *zr[4], *mr[4], *mbr[4], *mrr[4];
+    for (int a = 0; a < n_rx; a++)
+      yr[a] = (const int16_t *)rxdataF_ext[a];
+    for (int r = 0; r < nl * n_rx; r++)
+      hr[r] = (const int16_t *)dl_ch_estimates_ext[r];
+    for (int r = 0; r < nl; r++) {
+      zr[r] = (int16_t *)rxdataF_comp[r];
+      mr[r] = (int16_t *)dl_ch_mag[r];
+      mbr[r] = (int16_t *)dl_ch_magb[r];
+      mrr[r] = (int16_t *)dl_ch_magr[r];
+    }
+    (void)nr_mmse3_symbol(nl, n_rx, length, yr, hr, shift, noise_var, pow(10.0, 21.0 / 10.0), qa, qb, qr, zr, mr, mbr, mrr);
+    return;
+  }
 
   ///Allocate H^*H matrix elements and sub elements
   c16_t conjH_H_elements_data[n_rx][nl][nl][12 * nb_rb_0];
@@ -863,18 +899,11 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
     const int16_t qa = (mod_order == 4) ? QAM16_n1 : (mod_order == 6) ? QAM64_n1 : (mod_order == 8) ? QAM256_n1 : 0;
     const int16_t qb = (mod_order == 6) ? QAM64_n2 : (mod_order == 8) ? QAM256_n2 : 0;
     const int16_t qr = (mod_order == 8) ? QAM256_n3 : 0;
-    /* LLRZERO ISAC_PDSCH_MMSE2_GAIN=N (default 0 = off): w and z are rounded to int16 in |h|^2 >> shift units, which sit at a few LSB
-     * for the weak layer. A common gain 2^k, k = clamp(N - shift, 0, 12) (one value per grant: shift is per grant), scales z, mag, magb and magr
-     * of ALL layers alike, so only the rounding grid changes, never the layer weighting. */
-    static int s_g2 = -1;
-    if (s_g2 < 0) s_g2 = getenv("ISAC_PDSCH_MMSE2_GAIN") ? atoi(getenv("ISAC_PDSCH_MMSE2_GAIN")) : 0;
-    const int gk = s_g2 > 0 ? (s_g2 - shift < 0 ? 0 : s_g2 - shift > 12 ? 12 : s_g2 - shift) : 0;
-    const double mmse2_gain = (double)(1 << gk);
     if (nr_mmse2_diag.on) {
       nr_mmse2_diag.shift = shift;
       nr_mmse2_diag.nl = nl;
       nr_mmse2_diag.qm = mod_order;
-      nr_mmse2_diag.gain_k = gk;
+      nr_mmse2_diag.gain_k = 0;
     }
     for (int i = 0; i < length; i++) {
       double complex M[4][9]; /* [G | b | I] */
@@ -919,7 +948,6 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
       for (int r = 0; r < nl; r++) {
         const double dinv = singular ? 0.0 : creal(M[r][nl + 1 + r]);
         double w = dinv > 1e-12 ? 1.0 / dinv : 0.0;
-        w *= mmse2_gain; /* LLRZERO ISAC_PDSCH_MMSE2_GAIN: per-grant power-of-two common gain, 1.0 = off (exact) */
         const double complex o = w > 0.0 ? M[r][nl] * w : 0.0;
 #define QF_S16(v) ((int16_t)((v) > 32767.0 ? 32767 : (v) < -32768.0 ? -32768 : lround(v)))
         rxdataF_comp[r][i].r = QF_S16(creal(o));
@@ -941,120 +969,6 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
         }
 #undef QF_S16
       }
-    }
-    return;
-  }
-
-  /* ISAC_MMSE_FLOAT=1 (default off = stock fixed-point path): solve (H^H H + nvar I) x = H^H y
-   * per RE in double, output the unit-gain estimate at a fixed amplitude A and set the LLR
-   * thresholds from that same A. Written while chasing the rank-4 0 % CRC (2026-09-16); the real
-   * causes turned out to be the rfsim channel (nb_tx sized from the UE's own TX count, see
-   * simulator.cpp) and an ill-conditioned scene -- on a well-conditioned 4x4 channel the fixed-point
-   * adjugate path below decodes 100 % too. Kept opt-in as the A/B reference: it is immune to the
-   * det(G) ~ (|h|^2 >> shift)^4 int16 saturation and puts the LLRs on a scale that does not clip
-   * (fixed-point: 87 % of 256QAM LLRs on the int8 rail; here 20 %). Scalar per RE, a few ms per
-   * 273-PRB rank-4 slot. */
-  static int s_mmse_float = -1;
-  if (s_mmse_float < 0)
-    s_mmse_float = (getenv("ISAC_MMSE_FLOAT") != NULL) ? atoi(getenv("ISAC_MMSE_FLOAT")) : 0;
-  if (nr_dlsch_eq_override >= 0 ? nr_dlsch_eq_override == 1 : s_mmse_float > 0) {
-    const int16_t qa = (mod_order == 4) ? QAM16_n1 : (mod_order == 6) ? QAM64_n1 : (mod_order == 8) ? QAM256_n1 : 0;
-    const int16_t qb = (mod_order == 6) ? QAM64_n2 : (mod_order == 8) ? QAM256_n2 : 0;
-    const int16_t qr = (mod_order == 8) ? QAM256_n3 : 0;
-    for (int i = 0; i < length; i++) {
-      double complex M[nl][nl + 1]; // augmented [G | z]
-      double diag = 0.0;
-      for (int r = 0; r < nl; r++) {
-        for (int c = 0; c < nl; c++) {
-          const c16_t g = conjH_H_elements[0][c][r][i]; // (H^H H)[r][c] is stored at [c][r]
-          M[r][c] = (double)g.r + I * (double)g.i;
-        }
-        M[r][nl] = (double)rxdataF_comp[r][i].r + I * (double)rxdataF_comp[r][i].i;
-        diag += creal(M[r][r]);
-      }
-      bool singular = false;
-      for (int k = 0; k < nl && !singular; k++) {
-        int piv = k;
-        for (int r = k + 1; r < nl; r++)
-          if (cabs(M[r][k]) > cabs(M[piv][k]))
-            piv = r;
-        if (cabs(M[piv][k]) < 1e-9) {
-          singular = true;
-          break;
-        }
-        if (piv != k)
-          for (int c = 0; c <= nl; c++) {
-            const double complex t = M[k][c];
-            M[k][c] = M[piv][c];
-            M[piv][c] = t;
-          }
-        const double complex inv = 1.0 / M[k][k];
-        for (int c = 0; c <= nl; c++)
-          M[k][c] *= inv;
-        for (int r = 0; r < nl; r++) {
-          if (r == k)
-            continue;
-          const double complex f = M[r][k];
-          if (f == 0.0)
-            continue;
-          for (int c = 0; c <= nl; c++)
-            M[r][c] -= f * M[k][c];
-        }
-      }
-      /* Output amplitude. The estimate is unit-gain, so A sets the LLR scale directly: the outermost
-       * 16QAM LLR is 3A/sqrt(10) and the decoder input rail is int8, so A = 128 keeps every
-       * constellation inside +-127 (256QAM outer bit 0.54A = 69, inner step 2A/sqrt(170) = 20 LSB).
-       * tr(G)/nl (~1000 here) put 88 % of the 256QAM LLRs on the rail -> 7.6 % CRC at MCS 25.
-       * ponytail: fixed scale, no per-layer SINR weighting (all layers share dl_ch_mag[0]); add
-       * per-layer 1/[G^-1]_rr weighting only if a rank-4 link is measured to be SINR-limited. */
-      const double A = 128.0;
-      (void)diag;
-      /* MMSEDIAG (ISAC_MMSE_DIAG=1): per-layer EVM of the unit-gain estimate against the nearest
-       * 16/64/256-QAM grid point, one line per 200 calls. Tells "equaliser output is a constellation"
-       * from "it is noise" without any downstream stage in the way. */
-      {
-        static __thread int s_md = -1;
-        static __thread unsigned long s_mdn = 0;
-        static __thread double s_err[4], s_pow[4];
-        if (s_md < 0)
-          s_md = (getenv("ISAC_MMSE_DIAG") != NULL) ? 1 : 0;
-        if (s_md && !singular && mod_order >= 4) {
-          const int lev = 1 << (mod_order / 2 - 1); // 16QAM: 2 levels per axis, 64: 4, 256: 8
-          const double step = 2.0 / sqrt((2.0 / 3.0) * (double)((1 << mod_order) - 1)); // odd-integer grid spacing
-          for (int r = 0; r < nl; r++) {
-            const double re = creal(M[r][nl]), im = cimag(M[r][nl]);
-            double best = 1e30;
-            for (int a = -lev; a < lev; a++)
-              for (int b = -lev; b < lev; b++) {
-                const double dr = re - (2 * a + 1) * step / 2, di = im - (2 * b + 1) * step / 2;
-                const double d = dr * dr + di * di;
-                if (d < best) best = d;
-              }
-            s_err[r] += best;
-            s_pow[r] += re * re + im * im;
-          }
-          if (i == length - 1 && (s_mdn++ % 200) == 0) {
-            LOG_I(PHY, "SENSING: MMSEDIAG nl=%d Qm=%d A=%.0f evm%%=[%.1f %.1f %.1f %.1f] pow=[%.2f %.2f %.2f %.2f]\n", nl,
-                  mod_order, A, 100.0 * sqrt(s_err[0] / (s_pow[0] + 1e-30)), 100.0 * sqrt(s_err[1] / (s_pow[1] + 1e-30)),
-                  100.0 * sqrt(s_err[2] / (s_pow[2] + 1e-30)), 100.0 * sqrt(s_err[3] / (s_pow[3] + 1e-30)),
-                  s_pow[0] / length, s_pow[1] / length, s_pow[2] / length, s_pow[3] / length);
-          }
-          if (i == length - 1)
-            memset(s_err, 0, sizeof(s_err)), memset(s_pow, 0, sizeof(s_pow));
-        }
-      }
-      for (int r = 0; r < nl; r++) {
-        const double complex o = singular ? 0.0 : M[r][nl] * A;
-        const double re = creal(o), im = cimag(o);
-        rxdataF_comp[r][i].r = (int16_t)(re > 32767.0 ? 32767 : re < -32768.0 ? -32768 : lround(re));
-        rxdataF_comp[r][i].i = (int16_t)(im > 32767.0 ? 32767 : im < -32768.0 ? -32768 : lround(im));
-      }
-      const int32_t a16 = (A > 32767.0) ? 32767 : (int32_t)lround(A);
-      const int16_t ma = (int16_t)((a16 * qa + 16384) >> 15), mb = (int16_t)((a16 * qb + 16384) >> 15),
-                    mr = (int16_t)((a16 * qr + 16384) >> 15);
-      dl_ch_mag[0][i].r = dl_ch_mag[0][i].i = ma;
-      dl_ch_magb[0][i].r = dl_ch_magb[0][i].i = mb;
-      dl_ch_magr[0][i].r = dl_ch_magr[0][i].i = mr;
     }
     return;
   }
@@ -1228,8 +1142,6 @@ static int nr_dlsch_llr(const NR_UE_DLSCH_t *dlsch,
 /* Main Function */
 
 /* nr_rx_pdsch: demodulates one OFDM symbol of a PDSCH grant: extract data REs, channel compensation (MRC or per-branch), MMSE or ML for multi-layer, LLRs.
- *   Env flags read here: ISAC_RX_MRC_MODE, ISAC_RX_BRANCH_MIN_DB, ISAC_RX_ML_2L, ISAC_PDSCH_MMSE_MODE, ISAC_RX_BEST_BY_SNR, ISAC_RX_BRANCH, ISAC_L2MAXH_*,
- *   ISAC_RX_MRC_ALIGN, ISAC_RX_IRC (+ _SHRINK), ISAC_RX_QAM_AGC, ISAC_PDSCH_EVM_GRANT, ISAC_PDSCH_DECODE_DIAG, ISAC_SUBSET_DIAG.
  *   Writes LLRs into llr and the valid-RE counts into dl_valid_re; the PTRS phase is estimated afterwards on the same symbols.
  *   Per-branch state (which receiver branch decoded) is kept in thread-locals. Callers: phy_procedures_nr_ue.c (regular PDSCH) and nr_pdsch_passive_decode.c (passive decode, once per symbol).
  */
@@ -1283,37 +1195,15 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   static __thread int t_mrc_nb_rx = 0;
   static __thread int t_mrc_rx_index = 0;
   static __thread int t_mrc_live_mask = 0xF; // which receive branches feed the combiner (mode 3)
-  static __thread int t_mrc_weighted = 0;    // V2: noise-weighted MRC active for this TB
-  static __thread int16_t t_mrc_wq15[4] = {32767, 32767, 32767, 32767};
-  static __thread double t_mrc_w[4] = {1, 1, 1, 1};
   static __thread int t_mrc_mode = -1;
   static __thread int t_mrc_env = -1; /* T26d: ISAC_RX_MRC_MODE as configured; t_mrc_mode = per-grant effective mode */
-  static __thread double t_mrc_min_db = 12.0;
+  const double t_mrc_min_db = 12.0;
   if (t_mrc_env >= 0) /* already resolved: apply the per-grant override (nr_dlsch_mrc_mode_override, -1 = none) */
     t_mrc_mode = nr_dlsch_mrc_mode_override >= 0 ? nr_dlsch_mrc_mode_override : t_mrc_env;
   if (t_mrc_mode < 0) {
-    const char *e = getenv("ISAC_RX_MRC_MODE");
-    /* DEFAULT 0 -- MEASURED, not inherited. A 2x4 sweep on the live cell (modes alternated so
-     * run-to-run drift is shared) gave: mode 0 = 48.9 % and 82.6 % PDSCH CRC; modes 1, 2 and 3 =
-     * 0.0 % on every one of six runs. Post-equalisation EVM stayed flat at 47-60 % across ALL of
-     * them, so the failures are not constellation quality.
-     *
-     * Mode 1 is the same code path as mode 0 with only a different antenna INDEX, and it decodes
-     * nothing even though branch 3 reports the HIGHEST |h| -- so the other branches are not merely
-     * weak, they are not coherently USABLE. The X410 puts channels 0/1 on RF daughterboard A and
-     * 2/3 on board B; a residual per-board frequency offset would leave branch 3 with a strong
-     * DM-RS-symbol estimate whose phase then rotates across the 13 data symbols -- exactly
-     * "high |h|, zero decodes" -- and would equally corrupt any coherent sum containing it (modes 2
-     * and 3). That makes §12.3's "+6 dB of MRC gain" UNAVAILABLE on this rig until the boards are
-     * frequency-aligned or the antennas moved onto one board: hardware, not code. Keep the knob and
-     * the RXBRANCH probe for that work; do not re-enable a combining mode by assumption. */
-    t_mrc_mode = (e != NULL) ? atoi(e) : 0;
+    t_mrc_mode = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 1 : 0; /* frozen ISAC_RX_MRC_MODE=1 */
     t_mrc_env = t_mrc_mode;
     if (nr_dlsch_mrc_mode_override >= 0) t_mrc_mode = nr_dlsch_mrc_mode_override;
-    const char *d = getenv("ISAC_RX_BRANCH_MIN_DB");
-    if (d != NULL) {
-      t_mrc_min_db = atof(d);
-    }
   }
   if (!(nl == 1 && nbRx == 4)) {
     t_mrc_nb_rx = nbRx;
@@ -1332,12 +1222,6 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   // Controlled by ue->do_ml (set via -E flag in dlsim, or ue->do_ml in the UE struct).
   // When false (default), MMSE equalization is used for all configurations.
   bool do_ml = ue->do_ml;
-  { /* ISAC_RX_ML_2L=1 (T26d): joint ML LLRs for 2 layers (Qm <= 6) instead of MMSE; per grant via ISAC_RX_EQ_AB */
-    static int s_ml = -1;
-    if (s_ml < 0) s_ml = getenv("ISAC_RX_ML_2L") ? atoi(getenv("ISAC_RX_ML_2L")) : 0;
-    if (nr_dlsch_eq_override >= 0) do_ml = nr_dlsch_eq_override == 2;
-    else if (s_ml) do_ml = true;
-  }
   if (rho_dl == NULL) do_ml = false; /* no inter-layer correlation buffer (passive decode allocates it on request) */
   /* QAM-FIX ISAC_PDSCH_MMSE_MODE (multi-layer MMSE path only; default 0 = stock):
    *   0 stock fixed-point MMSE: adj(G + nvar/8 I) H^H y against det(G + nvar/8 I) thresholds (biased for QAM)
@@ -1346,19 +1230,16 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   int qam_mode = 0;
   {
     static int s_qm = -1;
-    if (s_qm < 0) s_qm = getenv("ISAC_PDSCH_MMSE_MODE") ? atoi(getenv("ISAC_PDSCH_MMSE_MODE")) : 0;
+    if (s_qm < 0) s_qm = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 2 : 0; /* frozen ISAC_PDSCH_MMSE_MODE=2 */
     qam_mode = nr_dlsch_qam_mode_override >= 0 ? nr_dlsch_qam_mode_override : s_qm;
-    if (qam_mode < 0 || qam_mode > 2) qam_mode = 0;
+    if (qam_mode < 0 || qam_mode > 3) qam_mode = 0;
+    /* TIMRANK34 (passive RX): mode 3 (exact unbiased MMSE, see nr_dlsch_mmse) for every Qm at 3-4 layers. An explicit per-decode
+     * override (QAMAB arm) still wins. */
+    if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nl >= 3 && nr_dlsch_qam_mode_override < 0) qam_mode = 3;
     /* Measured (QAMFIX.md): at 3-4 layers ZF noise enhancement costs low-SNR QPSK (16 -> 9 of 227 paired) and
      * the fixed-point ZF determinant underflows (kappa 0); keep the stock MMSE there. QAM at any rank and 2-layer
      * QPSK (1046 -> 1079 of 2110 paired) use the selected mode. */
-    /* HIGHMCS ISAC_PDSCH_MMSE2_NL34_QPSK=1 (default off): keep the float ZF (mode 2) for QPSK at 3-4 layers too. The stock
-     * fixed-point adjugate path disagrees with the float solution on 16-18 % of the signs at rank 3 (replay b, DECODEDIAG)
-     * and its det(G) ~ (|h|^2 >> shift)^4 depends on the signal level (TIM 3-layer MCS 0 at 10-12 dB: 0/154 OTA). */
-    static int s_nl34q = -1;
-    if (s_nl34q < 0) { const char *e = getenv("ISAC_PDSCH_MMSE2_NL34_QPSK"); s_nl34q = e ? atoi(e) : 0; }
-    if (nl >= 3 && (qam_mode == 1 || (dlsch->cw_info.qamModOrder == 2 && !(s_nl34q && qam_mode == 2)))) qam_mode = 0;
-    if (nr_dlsch_eq_override == 1) qam_mode = 0; /* the ISAC_RX_EQ_AB float arm keeps its own path */
+    if (nl >= 3 && (qam_mode == 1 || (dlsch->cw_info.qamModOrder == 2 && qam_mode != 3))) qam_mode = 0;
   }
 
   // Reinterpret flat dl_ch_estimates_ext as [nl][nbRx][rx_size_symbol]
@@ -1569,19 +1450,6 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         t_mrc_rx_index = 0;
         avgs = avg[0];
       } else if (t_mrc_mode == 1) {
-        /* ISAC_RX_BEST_BY_SNR=1 (T26d): pick the branch with the best |h|^2 / chest noise, not the highest |h|^2 --
-         * a noisy branch has a large |h|^2 estimate (noise included) and was being selected, which also shows up as
-         * a QAM amplitude ratio kappa << 1 (signal part of h* y small against the noise-inflated |h|^2). */
-        static int s_bsnr = -1;
-        if (s_bsnr < 0) s_bsnr = getenv("ISAC_RX_BEST_BY_SNR") && atoi(getenv("ISAC_RX_BEST_BY_SNR")) ? 1 : 0;
-        if (s_bsnr) {
-          double bq = -1.0;
-          for (int aarx = 0; aarx < nbRx && aarx < 4; aarx++) {
-            const double nv = nr_dl_chest_nvar_ant[aarx] > 0 ? (double)nr_dl_chest_nvar_ant[aarx] : 1.0;
-            const double q = (double)avg[aarx] / nv;
-            if (q > bq) { bq = q; best = aarx; }
-          }
-        }
         t_mrc_nb_rx = 1;
         t_mrc_rx_index = best;
         avgs = avg[best];
@@ -1617,67 +1485,12 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         t_mrc_live_mask = mask;
         t_mrc_nb_rx = nbRx; // the slice stays contiguous; excluded branches are zeroed instead
         t_mrc_rx_index = 0;
-        /* V2: replace the power threshold with noise weighting. Power is the wrong criterion on this
-         * rig -- branch 2 is the STRONGEST and the noisiest -- so weight by measured chest noise. */
-        t_mrc_weighted = 0;
-        if (nr_agnostic_v2() && nbRx <= 4) {
-          uint32_t nv[4] = {0, 0, 0, 0};
-          for (int aarx = 0; aarx < nbRx; aarx++) nv[aarx] = nr_dl_chest_nvar_ant[aarx];
-          if (nr_mrc_noise_weights(nv, nbRx, t_mrc_w) > 0) {
-            int wm = 0;
-            for (int aarx = 0; aarx < nbRx; aarx++) {
-              t_mrc_wq15[aarx] = (int16_t)lround(t_mrc_w[aarx] * 32767.0);
-              if (t_mrc_w[aarx] > 0.0) wm |= 1 << aarx;
-            }
-            t_mrc_live_mask = wm ? wm : (1 << best);
-            t_mrc_weighted = 1;
-          }
-        }
       }
       mrc_nb_rx = t_mrc_nb_rx;
       mrc_rx_index = t_mrc_rx_index;
       // Publish the branch actually used, so the passive decoder's retry knows which one to skip.
       nr_dlsch_used_branch = (t_mrc_nb_rx == 1) ? t_mrc_rx_index : -1;
 
-      /* SUBSETDIAG (ISAC_SUBSET_DIAG=1): the state this decision actually resolved to, printed for
-       * EVERY call so a force_mask={0} call and a primary mode-0 call on the same TB can be diffed
-       * line by line. Added 2026-09-08 because {0} via force_mask reads 0 % CRC while primary mode
-       * 0 (electrically identical in theory -- a zeroed channel estimate contributes exactly zero
-       * to both the MRC signal and gain sums) reads 87.7 % on the SAME transport blocks, and static
-       * reading of the zeroing/shift/accumulate path found no discrepancy. */
-      if (getenv("ISAC_SUBSET_DIAG") != NULL) {
-        LOG_I(PHY,
-              "SENSING: SUBSETDIAG forced_mask=%d forced_branch=%d mode=%d nb_rx=%d rx_index=%d "
-              "live_mask=0x%x avgs=%d best=%d shift_src=%s\n",
-              nr_dlsch_forced_mask, nr_dlsch_forced_branch, t_mrc_mode, mrc_nb_rx, mrc_rx_index,
-              t_mrc_live_mask, avgs, best,
-              (nr_dlsch_forced_mask >= 0) ? "mask-branch" : (t_mrc_mode == 0) ? "mode0" : "other");
-      }
-
-      /* RXBRANCH: the per-branch powers this decision is made from. §12.7 records that CHESTDIAG's
-       * equivalent field was declared, printed and never written, which is why the imbalance stayed
-       * invisible for so long -- so this one prints the raw values, not a derived summary. dB are
-       * relative to the strongest branch. */
-      {
-        static __thread int s_rxb = -1;
-        static __thread unsigned long s_rxb_n = 0;
-        if (s_rxb < 0) {
-          s_rxb = (getenv("ISAC_RX_BRANCH") != NULL) ? atoi(getenv("ISAC_RX_BRANCH")) : 0;
-        }
-        /* ISAC_RX_BRANCH=2 prints EVERY transport block, not 1 in 500. A 1-in-500 sample of
-         * `best` cannot distinguish "branch 0 is always strongest" from "branch 0 is strongest one
-         * time in three", and that decides whether mode 1 is even selecting the branch it should. */
-        if (s_rxb && ((s_rxb >= 2) || (s_rxb_n++ % 500) == 0)) {
-          const double mx = (avg[best] > 0) ? (double)avg[best] : 1.0;
-          LOG_I(PHY,
-                "SENSING: RXBRANCH mode=%d best=%d used=[%d..%d) live_mask=0x%x pw=[%d %d %d %d] "
-                "dB=[%.1f %.1f %.1f %.1f]\n",
-                t_mrc_mode, best, mrc_rx_index, mrc_rx_index + mrc_nb_rx, t_mrc_live_mask,
-                avg[0], avg[1], avg[2], avg[3],
-                10.0 * log10((avg[0] > 0 ? avg[0] : 1) / mx), 10.0 * log10((avg[1] > 0 ? avg[1] : 1) / mx),
-                10.0 * log10((avg[2] > 0 ? avg[2] : 1) / mx), 10.0 * log10((avg[3] > 0 ? avg[3] : 1) / mx));
-        }
-      }
     }
 
     if (nl > 1) {
@@ -1687,39 +1500,6 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
           avgs = cmax(avgs, median[l][aarx]);
         }
       }
-    }
-    /* ISAC_L2MAXH_PEAK=1 (default off): size the shift from the PEAK per-RB channel level over
-     * the allocation instead of the MEAN. Measured OTA 2026-09-14 (EQDIAG, 273 PRB, X410 4-ch):
-     * the front end has ~5 dB of in-band tilt (low edge 1.4-1.7x the band median), and every RE
-     * whose |H| exceeds ~1.4x the allocation mean saturates in Y.H* -> int16: EVM 6-7 % below the
-     * knee, 45-87 % above it, in 100 % of >=255-PRB grants and ~1 % of <=33-PRB ones (a narrow
-     * grant's mean is local). The single guard bit covers the 256QAM constellation peak, not the
-     * channel's own spread. Same RB-mean primitive as nr_channel_level so the two scale alike;
-     * per-RB means rather than per-RE so one noisy RE cannot steal a bit from the whole grant. */
-    static int s_l2_peak = -1;
-    if (s_l2_peak < 0) {
-      const char *e = getenv("ISAC_L2MAXH_PEAK");
-      s_l2_peak = (e != NULL && atoi(e) != 0) ? 1 : 0;
-    }
-    if (s_l2_peak && nl == 1) {
-      int32_t peak = 0;
-      c16_t (*ext)[rx_size_symbol] = (c16_t (*)[rx_size_symbol])dl_ch_estimates_ext;
-      for (int aarx = 0; aarx < nbRx; aarx++) {
-        if (nbRx == 4 && (t_mrc_mode == 3 || nr_dlsch_forced_mask >= 0) && !(t_mrc_live_mask & (1 << aarx)))
-          continue;
-        for (uint32_t re = 0; re + 12 <= nb_re_pdsch; re += 12) {
-          const int32_t rb = simde_mm_average((simde__m128i *)&ext[aarx][re], 12, 2, 3);
-          if (rb > peak)
-            peak = rb;
-        }
-      }
-      static __thread unsigned long s_l2n = 0;
-      if ((s_l2n++ % 500) == 0)
-        LOG_A(PHY, "SENSING: L2PEAK nb_rb=%d avgs(mean)=%d peak_rb=%d ratio=%.2f shift_delta=%d\n",
-              nb_rb_pdsch, avgs, peak, avgs > 0 ? (double)peak / avgs : 0.0,
-              (log2_approx(peak > avgs ? peak : avgs) >> 1) - (log2_approx(avgs) >> 1));
-      if (peak > avgs)
-        avgs = peak;
     }
     // Output shift: half channel energy (log2|h|^2/2) + MRC antenna gain.
     // Single-layer adds +1 guard bit (raw peak); multi-layer uses median so no guard needed.
@@ -1742,9 +1522,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
        * describes. Measured 2026-09-08: every one of the 15 subsets read 0 % CRC, including {0},
        * on transport blocks the primary path decoded at 87.7 %. Same class as the nvar bug fixed
        * the same day -- a correction that knew about mode 3 but not about forced_mask. */
-      if (t_mrc_weighted && nbRx <= 4 && t_mrc_mode == 3 && nr_dlsch_forced_mask < 0) {
-        contributing = nr_mrc_effective_branches(t_mrc_w, nbRx);
-      } else if (nbRx == 4 && (t_mrc_mode == 3 || nr_dlsch_forced_mask >= 0)) {
+      if (nbRx == 4 && (t_mrc_mode == 3 || nr_dlsch_forced_mask >= 0)) {
         contributing = 0;
         for (int aarx = 0; aarx < nbRx; aarx++) {
           if (t_mrc_live_mask & (1 << aarx)) {
@@ -1754,98 +1532,20 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         if (contributing < 1) {
           contributing = 1;
         }
-        /* MRCBUG ISAC_RX_MRC_SHIFT_SUM=1 (default off): headroom from the combined channel energy sum_live |h_a|^2 / max
-         * |h_a|^2, not from the live-branch COUNT. The 12 dB mask keeps 4 of 4 branches live on 97 % of the OTA MRC grants
-         * while their SNRs sit up to 15-20 dB apart, so the output was shifted for a 4x coherent sum that is really
-         * 1.3-2.5x: 1-2 int16 bits lost against the single-branch receiver on the SAME grant, and the per-branch floor of
-         * |h_a|^2 >> shift biases the QAM thresholds low (EVMGRANT kappa 1.17 mean / 2.4-2.9 at 6-13 dB on QAM MRC grants
-         * vs 1.00-1.04 single branch). The float DD-SNR sees none of it. Balanced branches: unchanged. GPU: nrd_decide(). */
-        static int s_shift_sum = -1;
-        if (s_shift_sum < 0) { const char *e = getenv("ISAC_RX_MRC_SHIFT_SUM"); s_shift_sum = e ? atoi(e) : 0; }
-        if (s_shift_sum)
-          contributing = nr_mrc_shift_branches(avg, t_mrc_live_mask, nbRx, avgs);
       }
       *log2_maxh = (log2_approx(avgs) >> 1) + 1 + log2_approx(contributing);
-      /* ISAC_L2MAXH_HEADROOM=1 (default off): the shift above is derived from the MEAN |H|^2, which
-       * leaves 2-4 bits of the int16 equaliser output unused on a flat channel and is therefore
-       * 2-4 bits too COARSE once the channel has in-band spread -- the weak RBs then get too few
-       * LSBs per 256QAM constellation step. Measured with OAI's own nr_channel_compensation() +
-       * nr_256qam_llr(), no noise, exact H, 273 PRB, 3276 REs (see
-       * openair1/PHY/NR_UE_ISAC/tests/dlsch_fixed_point_test.cc):
-       *   |H|rms 480, flat        : 0.0000 % LLR sign errors at the mean-derived shift
-       *   |H|rms 480, 21 dB spread: 2.14 %  at the mean-derived shift, 0.0000 % 2-4 bits lower
-       *   |H|rms 2672, 21 dB      : 0.0000 % either way (that level already has the headroom)
-       * Sizing the shift from the PEAK per-RB level instead makes the choice automatic and can only
-       * LOWER it (cmin below), so a receiver already inside the exact window is unaffected.
-       * NOT the root cause of the OTA wide-grant failure -- that rig measures |H|rms ~2672, where
-       * both rules score 0.0000 % -- this is a robustness fix for lower-gain / wider-spread cases.
-       * Per-RB means (not per-RE) so one noisy RE cannot steal a bit from the whole grant, same
-       * primitive as nr_channel_level() so the two scale alike. */
-      static int s_l2_hr = -1;
-      if (s_l2_hr < 0) {
-        const char *e = getenv("ISAC_L2MAXH_HEADROOM");
-        s_l2_hr = (e != NULL && atoi(e) != 0) ? 1 : 0;
-      }
-      if (s_l2_hr) {
-        int32_t peak_rb = 0;
-        c16_t (*ext_hr)[rx_size_symbol] = (c16_t (*)[rx_size_symbol])dl_ch_estimates_ext;
-        for (int aarx = 0; aarx < nbRx; aarx++) {
-          if (nbRx == 4 && (t_mrc_mode == 3 || nr_dlsch_forced_mask >= 0) && !(t_mrc_live_mask & (1 << aarx)))
-            continue;
-          for (uint32_t re = 0; re + 12 <= nb_re_pdsch; re += 12) {
-            const int32_t rb = simde_mm_average((simde__m128i *)&ext_hr[aarx][re], 12, 2, 3);
-            if (rb > peak_rb)
-              peak_rb = rb;
-          }
-        }
-        const int hr = nr_log2_maxh_headroom((uint32_t)peak_rb, contributing);
-        if (peak_rb > 0 && hr < *log2_maxh)
-          *log2_maxh = hr;
-      }
     }
     else
       *log2_maxh = (log2_approx(avgs) >> 1) + log2_approx(nbRx >> 1);
-    /* ISAC_L2MAXH_DELTA (signed bits, default 0): the shift above makes Y.H* >> shift ~ |Y|/2, i.e.
-     * the equaliser OUTPUT sits at a few LSB whatever the RX gain (measured OTA 2026-09-14: EVM floor
-     * 7 % = ~25 dB at both 40 and 49 dB gain, rawmean 4 -> 11). Every LLR is quantised at that
-     * resolution. A negative delta keeps more bits; pair it with ISAC_LLR_SCALE so the int8 pack
-     * stays calibrated. Saturation guard: |H|^2 >> shift must stay well under 32767. */
-    {
-      static int s_l2d = -9999;
-      if (s_l2d == -9999) {
-        const char *e = getenv("ISAC_L2MAXH_DELTA");
-        s_l2d = (e != NULL) ? atoi(e) : 0;
-      }
-      /* ISAC_L2MAXH_DELTA_NL2 (default 0): extra delta for nl == 2 only (weak layer of MMSE mode 2 rounds to 0). */
-      static int s_l2d2 = -9999;
-      if (s_l2d2 == -9999) {
-        const char *e2 = getenv("ISAC_L2MAXH_DELTA_NL2");
-        s_l2d2 = (e2 != NULL) ? atoi(e2) : 0;
-      }
-      const int l2dd = s_l2d + (nl == 2 ? s_l2d2 : 0); /* NL2SPEED: nl == 2 only; Nl 3/4 GPU CHECK mismatched (pivot ties) and disabled the GPU demod */
-      if (l2dd != 0) {
-        *log2_maxh += l2dd;
-        if (*log2_maxh < 0)
-          *log2_maxh = 0;
-      }
+    /* NL2SPEED: nl == 2 only (weak layer of MMSE mode 2 rounds to 0); Nl 3/4 GPU CHECK mismatched (pivot ties) and disabled the GPU demod.
+     * frozen ISAC_L2MAXH_DELTA_NL2=-3 in passive RX. */
+    const int l2dd = (nl == 2 && IS_PASSIVE_RX_MODE(get_softmodem_params())) ? -3 : 0;
+    if (l2dd != 0) {
+      *log2_maxh += l2dd;
+      if (*log2_maxh < 0)
+        *log2_maxh = 0;
     }
     LOG_D(PHY, "[DLSCH] AbsSubframe %d.%d log2_maxh = %d (%d)\n", frame % 1024, nr_slot_rx, *log2_maxh, avgs);
-    /* L2MAXH (ISAC_RX_BRANCH=1): the fixed-point shift the equaliser scales its output -- and hence
-     * the QAM LLR decision thresholds -- by. This is the one quantity that can leave the CONSTELLATION
-     * intact while destroying the DECODER's soft input, which is exactly the signature this rig shows:
-     * post-equalisation EVM sits at 47-62 % whether the run decodes 82.6 % of transport blocks or
-     * 0.0 % of them, so whatever separates those runs is downstream of the equaliser, and log2_maxh
-     * is derived from the MEASURED channel level `avgs` and therefore free to move run to run with
-     * gain/AGC. A self-normalising EVM probe is blind to it by construction. */
-    {
-      static __thread int s_l2 = -1;
-      static __thread unsigned long s_l2n = 0;
-      if (s_l2 < 0)
-        s_l2 = (getenv("ISAC_RX_BRANCH") != NULL) ? 1 : 0;
-      if (s_l2 && (s_l2n++ % 500) == 0)
-        LOG_I(PHY, "SENSING: L2MAXH log2_maxh=%d avgs=%d nl=%d mrc_nb_rx=%d Qm=%u\n",
-              *log2_maxh, avgs, nl, mrc_nb_rx, (unsigned)dlsch->cw_info.qamModOrder);
-    }
 #if T_TRACER
     T(T_UE_PHY_PDSCH_ENERGY,
       T_INT(gNB_id),
@@ -1880,29 +1580,13 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
       }
     }
   }
-  /* V2 noise-weighted MRC: scale h AND y of each branch by w_a (Q15) every symbol, for the same
-   * reason the mask above is re-applied every symbol (the extraction rebuilds both buffers). */
-  if (nl == 1 && t_mrc_weighted && t_mrc_mode == 3 && nr_dlsch_forced_mask < 0 && nbRx <= 4) {
-    for (int aarx = 0; aarx < nbRx; aarx++) {
-      const int32_t w = t_mrc_wq15[aarx];
-      if (w >= 32767)
-        continue;
-      c16_t *hq = (c16_t *)chFext[0][aarx], *yq = rxdataF_ext[aarx];
-      for (int k = 0; k < rx_size_symbol; k++) {
-        hq[k].r = (int16_t)(((int32_t)hq[k].r * w) >> 15); hq[k].i = (int16_t)(((int32_t)hq[k].i * w) >> 15);
-        yq[k].r = (int16_t)(((int32_t)yq[k].r * w) >> 15); yq[k].i = (int16_t)(((int32_t)yq[k].i * w) >> 15);
-      }
-    }
-  }
-
-  /* ISAC_RX_MRC_ALIGN=1 (T26d): per-symbol phase alignment of the MRC branches. Each branch is equalised against its
+  /* MRC ALIGN (T26d; frozen ISAC_RX_MRC_ALIGN=2 in passive RX, off otherwise): per-symbol phase alignment of the MRC branches. Each branch is equalised against its
    * own DM-RS estimate, but on this rig the branches' phases drift DIFFERENTLY between the DM-RS and the data symbols
    * (independent board LOs), so sum_a h_a* y_a adds partly incoherently. u_a = h_a* y_a ~ |h_a|^2 x e^{j th_a}; the
    * cross-correlation c_a = sum_i u_a conj(u_ref) ~ e^{j(th_a - th_ref)} needs no decisions. Rotating h_a by arg(c_a)
    * re-phases branch a onto the strongest live branch before nr_channel_compensation() combines. */
   if (nl == 1 && mrc_nb_rx > 1 && nb_re_pdsch >= 12) {
-    static int s_align = -1;
-    if (s_align < 0) s_align = getenv("ISAC_RX_MRC_ALIGN") ? atoi(getenv("ISAC_RX_MRC_ALIGN")) : 0;
+    const int s_align = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 2 : 0;
     if (s_align) {
       const int a0 = mrc_rx_index, a1 = mrc_rx_index + mrc_nb_rx;
       double pw[NR_PDSCH_EVM_MAX_RX * 2] = {0};
@@ -1914,7 +1598,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         }
         if (pw[a] > 0.0 && (ref < 0 || pw[a] > pw[ref])) ref = a;
       }
-      /* ISAC_RX_MRC_ALIGN=2: one phase per chunk of 48 REs (4 RB) instead of per symbol -- follows a phase SLOPE
+      /* align 2: one phase per chunk of 48 REs (4 RB) instead of per symbol -- follows a phase SLOPE
        * across frequency (different per-board timing / shared delay estimate) as well as the common rotation. */
       const uint32_t chunk = s_align >= 2 ? 48u : nb_re_pdsch;
       for (int a = a0; ref >= 0 && a < a1; a++) {
@@ -1943,22 +1627,15 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     }
   }
 
-  /* ISAC_RX_IRC=1 (T26d prototype): MMSE-IRC for 1 layer by spatial whitening. Per chunk of 48 REs (4 RB) of this
+  /* IRC (T26d prototype; only via the per-grant nr_dlsch_irc_override): MMSE-IRC for 1 layer by spatial whitening. Per chunk of 48 REs (4 RB) of this
    * symbol the interference+noise covariance R (nbRx x nbRx) is estimated from decision-directed residuals
-   * e = y - h s_hat (s_hat: MRC decision over all branches), shrunk toward its diagonal (ISAC_RX_IRC_SHRINK, default
-   * 0.3) and loaded; with R = L L^H, y' = L^-1 y and h' = L^-1 h make the stock MRC combiner compute h^H R^-1 y and
+   * e = y - h s_hat (s_hat: MRC decision over all branches), shrunk toward its diagonal (0.3) and loaded; with R = L L^H, y' = L^-1 y and h' = L^-1 h make the stock MRC combiner compute h^H R^-1 y and
    * the QAM thresholds h^H R^-1 h, i.e. IRC, with no change to the LLR code. All branches combine (mode-independent);
    * the whitened pair is rescaled so its combined power equals the original combined power of this mode's slice
    * (log2_maxh stays valid). Decision-directed: self-nulling at high symbol-error rates is the known risk. */
   if (nl >= 1 && nl <= 4 && nbRx >= 2 && nbRx <= 4 && nb_re_pdsch >= 48) {
-    static int s_irc = -1;
-    static double s_shrink = 0.3;
-    if (s_irc < 0) {
-      s_irc = getenv("ISAC_RX_IRC") ? atoi(getenv("ISAC_RX_IRC")) : 0;
-      if (getenv("ISAC_RX_IRC_SHRINK")) s_shrink = atof(getenv("ISAC_RX_IRC_SHRINK"));
-    }
-    const int s_irc_env = s_irc;
-    if (nr_dlsch_irc_override >= 0) s_irc = nr_dlsch_irc_override; /* per-grant (ISAC_RX_MRC_PER_RNTI) */
+    const double s_shrink = 0.3;
+    const int s_irc = nr_dlsch_irc_override >= 0 ? nr_dlsch_irc_override : 0; /* per-grant (ISAC_RX_MRC_PER_RNTI) */
     if (s_irc && (nl == 1 || s_irc == 4)) { /* N layers: only the DM-RS covariance (4) -- no data decisions */
       const int qm = dlsch->cw_info.qamModOrder;
       const int lmax = (1 << (qm / 2)) - 1;
@@ -1998,7 +1675,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         for (uint32_t c0 = 0; c0 < nb_re_pdsch; c0 += 48) {
           const uint32_t c1 = c0 + 48 < nb_re_pdsch ? c0 + 48 : nb_re_pdsch;
           double complex R[4][4] = {{0}};
-          /* ISAC_RX_IRC>=2: first correct each branch's estimate by its chunk LS gain alpha_a = <y_a, h_a s>/|h_a s|^2
+          /* IRC mode >= 2: first correct each branch's estimate by its chunk LS gain alpha_a = <y_a, h_a s>/|h_a s|^2
            * (measured |alpha| ~0.5-0.85 < 1: the estimate is inflated by its own noise and its phase drifts), so the
            * residual does not carry (1-alpha) h s -- which made R see the signal and null it (self-nulling). */
           double complex alpha[4] = {1, 1, 1, 1};
@@ -2085,17 +1762,10 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
       }
       free(xs);
     }
-    s_irc = s_irc_env;
   }
 
   /* ISAC_PDSCH_EVM_GRANT (T26c): per-grant decision-directed EVM + per-branch LS SNR, nr_pdsch_evm_acc.h.
    * x = ZF over the combined branches (nl = 1: MRC), per layer; decisions per layer; branch fit uses sum_l h_l s_l. */
-  int8_t *decode_ref_sign = NULL;
-  static _Atomic int decode_diag = -1;
-  if (decode_diag < 0) {
-    const char *e = getenv("ISAC_PDSCH_DECODE_DIAG");
-    decode_diag = e && atoi(e) != 0;
-  }
   if (nr_pdsch_evm_acc.armed && nl >= 1 && nl <= 4 && nb_re_pdsch >= 12 && nb_re_pdsch <= rx_size_symbol) {
     nr_pdsch_evm_acc_t *ea = &nr_pdsch_evm_acc;
     const int qm = dlsch->cw_info.qamModOrder;
@@ -2155,8 +1825,6 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     bool good = xr && nv >= 12;
     for (int l = 0; l < nl && good; l++) good = pw[l] > 0.0;
     if (good) {
-      if (decode_diag && qm == 2)
-        decode_ref_sign = calloc((size_t)nl * nb_re_pdsch * 2, sizeof(*decode_ref_sign));
       double scale[4];
       for (int l = 0; l < nl; l++) scale[l] = sqrt(ideal_pow / (pw[l] / nv));
       double cr[NR_PDSCH_EVM_MAX_RX] = {0}, ci[NR_PDSCH_EVM_MAX_RX] = {0}, P[NR_PDSCH_EVM_MAX_RX] = {0}, Y[NR_PDSCH_EVM_MAX_RX] = {0};
@@ -2166,10 +1834,6 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         double sr[4], sq_[4];
         for (int l = 0; l < nl; l++) {
           const double vi = xr[l][i] * scale[l], vq = xi[l][i] * scale[l];
-          if (decode_ref_sign) {
-            decode_ref_sign[2 * (l * nb_re_pdsch + i)] = vi < 0 ? -1 : 1;
-            decode_ref_sign[2 * (l * nb_re_pdsch + i) + 1] = vq < 0 ? -1 : 1;
-          }
           double si = 2.0 * floor(vi / 2.0) + 1.0, sq = 2.0 * floor(vq / 2.0) + 1.0;
           si = si > lmax ? lmax : si < -lmax ? -lmax : si;
           sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
@@ -2316,15 +1980,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   write_output(filename, "rxdataF_comp00", &rxdataF_comp[0][0][symbol * pdsch_buf_size_max], pdsch_buf_size_max, 1, 1);
 #endif
 
-  /* ISAC_RX_QAM_AGC=1 (T26d): amplitude consistency of the QAM soft decisions. nr_channel_compensation() gives
-   * z = sum_a h_a* y_a and the QAM thresholds mag = sum_a |h_a|^2 * n1; for a coherent combination the symbol mean of
-   * |Re z|,|Im z| equals the mean of mag_a (n1 = mean |x| per dimension for 16/64/256QAM). Branches whose phase drifts
-   * differently between the DM-RS and the data symbols (independent X410 board LOs) add partly incoherently in MRC,
-   * shrinking |z| against mag, which biases every amplitude bit toward the inner points: QPSK is immune, QAM is not.
-   * kappa = mean(|Re z|,|Im z|) / mean(mag_a) rescales the thresholds per symbol (kappa also logged via EVMGRANT). */
+  /* QAM amplitude ratio kappa = mean(|Re z|,|Im z|) / mean(mag_a): measured only (logged via EVMGRANT); the threshold rescale was removed. */
   if (nl == 1 && dlsch->cw_info.qamModOrder > 2 && nb_re_pdsch >= 24) {
-    static int s_agc = -1;
-    if (s_agc < 0) s_agc = getenv("ISAC_RX_QAM_AGC") ? atoi(getenv("ISAC_RX_QAM_AGC")) : 0;
     const c16_t *z = p_rxComp[0];
     const c16_t *ma = dl_ch_mag[symbol][0];
     double sz = 0.0, sm = 0.0;
@@ -2334,28 +1991,6 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     }
     const double kappa = sm > 0.0 ? sz / sm : 1.0;
     if (nr_pdsch_evm_acc.armed) { nr_pdsch_evm_acc.kappa_sum += kappa; nr_pdsch_evm_acc.kappa_n++; }
-    if (s_agc && kappa > 0.2 && kappa < 1.5) {
-      const int16_t kq = (int16_t)lround(kappa * 32767.0 > 32767.0 ? 32767.0 : kappa * 32767.0);
-      const int qm = dlsch->cw_info.qamModOrder;
-      if (kappa < 1.0)
-        for (uint32_t i = 0; i < nb_re_pdsch; i++) {
-          c16_t *a1 = &dl_ch_mag[symbol][0][i], *b1 = &dl_ch_magb[symbol][0][i], *r1 = &dl_ch_magr[symbol][0][i];
-          a1->r = (int16_t)(((int32_t)a1->r * kq) >> 15); a1->i = (int16_t)(((int32_t)a1->i * kq) >> 15);
-          if (qm > 4) { b1->r = (int16_t)(((int32_t)b1->r * kq) >> 15); b1->i = (int16_t)(((int32_t)b1->i * kq) >> 15); }
-          if (qm > 6) { r1->r = (int16_t)(((int32_t)r1->r * kq) >> 15); r1->i = (int16_t)(((int32_t)r1->i * kq) >> 15); }
-        }
-      else if (s_agc >= 2) { /* =2 only: kappa >= 1 scales the thresholds UP (noise inflates mean |z|; off by default) */
-        for (uint32_t i = 0; i < nb_re_pdsch; i++) {
-          c16_t *a1 = &dl_ch_mag[symbol][0][i], *b1 = &dl_ch_magb[symbol][0][i], *r1 = &dl_ch_magr[symbol][0][i];
-          const double f = kappa;
-          #define SATK(v) ((int16_t)fmax(-32768.0, fmin(32767.0, (double)(v) * f)))
-          a1->r = SATK(a1->r); a1->i = SATK(a1->i);
-          if (qm > 4) { b1->r = SATK(b1->r); b1->i = SATK(b1->i); }
-          if (qm > 6) { r1->r = SATK(r1->r); r1->i = SATK(r1->i); }
-          #undef SATK
-        }
-      }
-    }
   }
 
   // MRC is performed inline by nr_channel_compensation; apply MMSE for multi-layer
@@ -2368,6 +2003,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                     rx_size_symbol,
                     nbRx,
                     nl,
+                    rxdataF_ext,
                     rxdataF_comp[symbol],
                     dl_ch_mag[symbol],
                     dl_ch_magb[symbol],
@@ -2376,14 +2012,14 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                     qamModOrder,
                     *log2_maxh,
                     nb_re_pdsch,
-                    qam_mode == 0 ? nvar : 0, /* modes 1/2: unbiased ZF, no diagonal loading */
+                    (qam_mode == 0 || qam_mode == 3) ? nvar : 0, /* modes 1/2: unbiased ZF, no diagonal loading */
                     qam_mode);
       /* QAM-FIX diagnostic: amplitude ratio of the multi-layer soft output against its own thresholds.
        * For an unbiased equaliser E|Re z| = mag (n1 = mean |x| per dimension of 16/64/256QAM), so
        * kappa ~ 1 at high SNR; a shrunk (biased) output reads kappa < 1. Logged by EVMGRANT. */
       if (nr_pdsch_evm_acc.armed && qamModOrder > 2 && nb_re_pdsch >= 24) {
         for (int l = 0; l < nl; l++) {
-          const c16_t *z = rxdataF_comp[symbol][l], *ma = dl_ch_mag[symbol][qam_mode == 2 ? l : 0];
+          const c16_t *z = rxdataF_comp[symbol][l], *ma = dl_ch_mag[symbol][qam_mode >= 2 ? l : 0];
           double sz = 0.0, sm = 0.0;
           for (uint32_t i = 0; i < nb_re_pdsch; i++) {
             sz += abs(z[i].r) + abs(z[i].i);
@@ -2414,20 +2050,6 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     }
   }
   stop_meas_nr_ue_phy(ue, DLSCH_MRC_MMSE_STATS);
-  if (decode_ref_sign) {
-    for (int l = 0; l < nl; l++)
-      for (uint32_t i = 0; i < nb_re_pdsch; i++) {
-        const int16_t v[2] = {rxdataF_comp[symbol][l][i].r, rxdataF_comp[symbol][l][i].i};
-        for (int q = 0; q < 2; q++) {
-          const int ref = decode_ref_sign[2 * (l * nb_re_pdsch + i) + q];
-          if (!ref) continue;
-          nr_pdsch_decode_signs++;
-          nr_pdsch_decode_sign_errors += (v[q] < 0 ? -1 : 1) != ref;
-        }
-      }
-    free(decode_ref_sign);
-  }
-
   if (meas_enabled) {
     LOG_D(PHY,
           "[AbsSFN %u.%d] Slot%d Symbol %d: Channel Combine and MMSE %5.2f \n",
@@ -2527,7 +2149,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                      dl_ch_mag[llr_sym],
                      dl_ch_magb[llr_sym],
                      dl_ch_magr[llr_sym],
-                     qam_mode == 2 && nl >= 2,
+                     qam_mode >= 2 && nl >= 2,
                      nbRx,
                      rxdataF_comp[llr_sym],
                      llr_per_symbol,

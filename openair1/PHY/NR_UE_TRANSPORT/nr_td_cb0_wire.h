@@ -10,15 +10,13 @@
  *                         one GrantWork = one PDSCH slot), admits it against the token bucket (or skips it whole), and
  *                         says whether the TB must be decoded on the CPU: only when the batch will run (no pre-decode
  *                         reason, not budget-skipped, something to test) on the CPU backend (nr_td_cb0_backend_peek),
- *                         or on the GPU backend under an ISAC_TD_CB0_GPU_ITERS cap; ISAC_TD_TB_CPU_WHILE_ACQ=0 never
- *                         forces (default 1).
+ *                         (a GPU backend batch keeps the receiver's TB decoder).
  *   nr_td_cb0_wire_run()  AFTER the main decode, before nr_td_grantwork_job_end(): builds the items from GrantWork
  *                         (lazy entries on this thread), retains the gw, runs nr_td_cb0_exec() synchronously, releases.
  *   nr_td_cb0_wire_feed() AFTER the grant's TB feedback (and before anything that may re-index the context): the
  *                         admissibility decision (nr_td_cb0_admissibility) and the feed through nr_td_cb0_adapter.
  * Requires GrantWork (ISAC_TD_GRANTWORK, default on): with ISAC_TD_GRANTWORK=0 the channel refuses (logged once, reason no_grantwork).
- * Environment (read once): ISAC_TD_CB0_B (96; 0 = from ISAC_TD_CB0_BUDGET_US), ISAC_TD_CB0_BUDGET_US (20000, sized for 4 RX), ISAC_TD_CB0_CPU_PCT (30), ISAC_TD_CB0_THREADS (8),
- * ISAC_TD_CB0_RANK_MAX (4), ISAC_TD_TB_CPU_WHILE_ACQ (1), ISAC_TD_CB0_BACKEND (auto). */
+ * Constants: B 96 items per grant, budget 20000 us per grant (sized for 4 RX), CPU share 30 %, 8 worker threads, rank max 4, backend gpu (CPU fallback). */
 #ifndef NR_TD_CB0_WIRE_H
 #define NR_TD_CB0_WIRE_H
 #include <stdbool.h>
@@ -41,7 +39,7 @@ void *nr_pdsch_passive_cb0_cpu_ldpc(void);
 void nr_pdsch_passive_force_cpu_tb(bool on);
 
 #define NR_TD_CB0_PLAN_MAX 512 /* items per grant (B is capped by it) */
-#define NR_TD_CB0_B_DEFAULT 96 /* ISAC_TD_CB0_B: CB0 items per grant (coordinator 2026-10-04: B 64..128; simulator first-RNTI 12.9 s at 64, 8.3 s at 128); 0 = budget-derived */
+#define NR_TD_CB0_B_DEFAULT 96 /* CB0 items per grant (coordinator 2026-10-04: B 64..128; simulator first-RNTI 12.9 s at 64, 8.3 s at 128); 0 = budget-derived */
 
 typedef struct {
   int64_t abs_slot;  /* the grant's IQ slot (hash input) */
@@ -86,7 +84,7 @@ typedef struct {
   uint64_t gpu_failed, gpu_skipped;
 } nr_td_cb0_wire_stats_t;
 void nr_td_cb0_wire_stats(nr_td_cb0_wire_stats_t *s);
-/* Test hook: reset counters, scheduler and per-context table; re-read the environment at the next grant. */
+/* Test hook: reset counters, scheduler and per-context table; re-read the configuration at the next grant. */
 void nr_td_cb0_wire_reset(void);
 /* Test hooks: freeze the cost estimates; this thread's last planned set (context indices; -1 = no active plan) and its
  * pre-decode reasons. */
@@ -96,6 +94,9 @@ uint32_t nr_td_cb0_wire_test_last_reasons(void);
 /* Test hooks: admit every grant (bucket off); set the bucket's tokens (CPU-us, capped at its capacity). */
 void nr_td_cb0_wire_test_unlimited(bool on);
 void nr_td_cb0_wire_test_set_tokens(double us);
+/* Test hooks: the bucket's CPU share in percent (default 30; read at the next configuration); false = never auto-register the CUDA CB0 adapter. */
+void nr_td_cb0_wire_test_cpu_pct(double pct);
+void nr_td_cb0_wire_test_autoreg(bool on);
 
 #ifdef __cplusplus
 }

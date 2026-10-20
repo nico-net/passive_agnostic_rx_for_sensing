@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
-/* GPUSHARE: nr_gpu_green.h. With ISAC_GPU_DISC_SMS=16 ISAC_GPU_RT_ISOLATE=1 a full-occupancy grid launched on the
+/* GPUSHARE: nr_gpu_green.h. A full-occupancy grid launched on the
  * discovery stream must run only on the discovery partition, a grid on the real-time stream only on the other SMs,
  * the two SM sets must be disjoint, and copies/events on those streams must work as on ordinary streams.
  * Prints GPU_GREEN_TEST ok=1 (exit 0), or exits 77 (skipped) without a usable device / green-context support. */
@@ -19,8 +19,6 @@ static int count(const unsigned *m) { return __builtin_popcount(m[0]) + __builti
 
 int main(void)
 {
-  setenv("ISAC_GPU_DISC_SMS", "16", 1);
-  setenv("ISAC_GPU_RT_ISOLATE", "1", 1);
   int n = 0;
   if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1) { printf("GPU_GREEN_TEST skipped (no device)\n"); return 77; }
   cudaStream_t disc, rt;

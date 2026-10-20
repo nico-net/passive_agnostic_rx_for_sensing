@@ -1,0 +1,38 @@
+# gpu_bench on NVIDIA GB10 sm_121, 48 SMs
+
+len 47 AL 1 (N=128 E=108 nodes=43): GPU u vs CPU prototype u: 0/128 candidates differ
+  (A) batch of   1: kernel (event) p50   30.8 us | launch+exec+sync wall p50   35.6 p99   40.8 us
+  (A) batch of   8: kernel (event) p50   31.9 us | launch+exec+sync wall p50   36.6 p99   37.0 us
+  (A) batch of  32: kernel (event) p50   31.9 us | launch+exec+sync wall p50   36.7 p99   40.6 us
+  (A) batch of 128: kernel (event) p50   38.1 us | launch+exec+sync wall p50   42.8 p99   44.9 us
+  (B) persistent,  1 cand: round trip (LLR write -> all u back) p50   32.6 p90   33.1 p99   33.7 us, u exact: yes
+  (B) persistent,  8 cand: round trip (LLR write -> all u back) p50   39.0 p90   39.7 p99   40.3 us, u exact: yes
+  (B) persistent, 32 cand: round trip (LLR write -> all u back) p50   61.5 p90   63.0 p99   67.4 us, u exact: yes
+
+len 47 AL 2 (N=256 E=216 nodes=47): GPU u vs CPU prototype u: 0/128 candidates differ
+  (A) batch of   1: kernel (event) p50   34.2 us | launch+exec+sync wall p50   39.0 p99   44.7 us
+  (A) batch of   8: kernel (event) p50   36.0 us | launch+exec+sync wall p50   40.7 p99   41.8 us
+  (A) batch of  32: kernel (event) p50   36.1 us | launch+exec+sync wall p50   40.8 p99   42.8 us
+  (A) batch of 128: kernel (event) p50   44.2 us | launch+exec+sync wall p50   48.9 p99   93.6 us
+  (B) persistent,  1 cand: round trip (LLR write -> all u back) p50   40.2 p90   40.7 p99   43.5 us, u exact: yes
+  (B) persistent,  8 cand: round trip (LLR write -> all u back) p50   46.0 p90   46.8 p99   47.5 us, u exact: yes
+  (B) persistent, 32 cand: round trip (LLR write -> all u back) p50   68.7 p90   70.4 p99   74.1 us, u exact: yes
+
+len 47 AL 4 (N=512 E=432 nodes=63): GPU u vs CPU prototype u: 0/128 candidates differ
+  (A) batch of   1: kernel (event) p50   48.1 us | launch+exec+sync wall p50   52.9 p99   55.2 us
+  (A) batch of   8: kernel (event) p50   48.4 us | launch+exec+sync wall p50   53.1 p99   55.8 us
+  (A) batch of  32: kernel (event) p50   48.3 us | launch+exec+sync wall p50   53.1 p99   53.9 us
+  (A) batch of 128: kernel (event) p50   58.6 us | launch+exec+sync wall p50   63.3 p99  114.0 us
+  (B) persistent,  1 cand: round trip (LLR write -> all u back) p50   59.3 p90   59.9 p99   60.3 us, u exact: yes
+  (B) persistent,  8 cand: round trip (LLR write -> all u back) p50   64.4 p90   64.9 p99   65.7 us, u exact: yes
+  (B) persistent, 32 cand: round trip (LLR write -> all u back) p50   87.6 p90   88.7 p99   90.2 us, u exact: yes
+
+len 47 AL 8 (N=512 E=864 nodes=63): GPU u vs CPU prototype u: 0/128 candidates differ
+  (A) batch of   1: kernel (event) p50   48.3 us | launch+exec+sync wall p50   53.1 p99   73.6 us
+  (A) batch of   8: kernel (event) p50   48.4 us | launch+exec+sync wall p50   53.1 p99   56.2 us
+  (A) batch of  32: kernel (event) p50   48.4 us | launch+exec+sync wall p50   53.1 p99   55.3 us
+  (A) batch of 128: kernel (event) p50   58.6 us | launch+exec+sync wall p50   63.3 p99   64.0 us
+  (B) persistent,  1 cand: round trip (LLR write -> all u back) p50   62.7 p90   63.1 p99   63.5 us, u exact: yes
+  (B) persistent,  8 cand: round trip (LLR write -> all u back) p50   67.4 p90   68.0 p99   68.8 us, u exact: yes
+  (B) persistent, 32 cand: round trip (LLR write -> all u back) p50   94.3 p90   96.3 p99  100.1 us, u exact: yes
+done

@@ -104,14 +104,6 @@ TEST(CsirsBlindRuntime, ReconfRecheckLeavesZpStateUnchanged) {
   EXPECT_TRUE(nr_csirs_blind_rt_test_recheck_zp_unchanged());
 }
 
-TEST(CsirsBlindRuntime, RankModeExportsNeitherBankAndLeavesOutputUntouched) {
-  for (int banks : {1, 2, 3}) {
-    int types[2] = {}, untouched = 0;
-    EXPECT_EQ(nr_csirs_blind_rt_test_export(1, banks, types, &untouched), 0) << "banks=" << banks;
-    EXPECT_TRUE(untouched) << "banks=" << banks;
-  }
-}
-
 // A reference grid: QPSK-ish symbols on `occupied` REs of `n`, zero elsewhere.
 static void make_ref(std::vector<int16_t> &ref, int n, int stride, unsigned seed = 7)
 {
@@ -814,6 +806,7 @@ TEST(CsirsBlindPin, PinnedPeriodicResourceConfirmsWithinThreePeriods) {
 
 int main(int argc, char **argv)
 {
+  setenv("ISAC_LOG_ASYNC", "0", 1);
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
@@ -2866,3 +2859,4 @@ TEST(CsirsBlindDiscovery, SuperperiodAndLateSecondPhaseRefineOneEntry)
   ASSERT_EQ(st->n_conf, 1); EXPECT_EQ(st->conf_period[0], 160);
   EXPECT_EQ(st->conf_n_off[0], 2);
 }
+

@@ -27,7 +27,7 @@ extern "C" {
 
 namespace {
 struct EnvInit {
-  EnvInit() { setenv("ISAC_TD_CB0_GPU_BACKOFF", "2", 1); }
+  EnvInit() { nr_td_cb0_backend_test_backoff(2); }
 } g_env_init;
 
 /* ---------- fixture items: one true TB, one wrong-rv view of it (fails), small and fast (C == 1, BG2) ---------- */
@@ -93,7 +93,7 @@ class Cb0Wire : public ::testing::Test {
   {
     /* these tests drive the CPU backend through a stub decoder (and register fake GPU backends themselves): keep the
      * wiring from auto-registering the real CUDA CB0 adapter when libldpc_cuda.so is present (td/cb0-gpu-entry) */
-    setenv("ISAC_TD_CB0_GPU_AUTOREG", "0", 1);
+    nr_td_cb0_wire_test_autoreg(false);
     cb0_fx_init();
     nr_td_cb0_use_gpu(0);
     nr_td_cb0_use_cuda_ldpc(0);
@@ -106,8 +106,7 @@ class Cb0Wire : public ::testing::Test {
   }
   void SetUp() override
   {
-    unsetenv("ISAC_TD_CB0_BUDGET_US");
-    unsetenv("ISAC_TD_CB0_CPU_PCT");
+    nr_td_cb0_wire_test_cpu_pct(30);
     /* both process-wide engine modes pinned to the receiver defaults (fb2 + CB0 elimination on since 2026-10-04), so a test's
      * mode never depends on the shell's ISAC_TD_* nor on the test order */
     nr_pdsch_config_sweep_fieldbook_set_mode(2);
@@ -628,7 +627,7 @@ TEST_F(Cb0Wire, AdmissibilityGatingAtRuntime)
 
 TEST_F(Cb0Wire, BudgetSkipIsWholeGrant)
 {
-  setenv("ISAC_TD_CB0_CPU_PCT", "0.0001", 1); /* the bucket barely refills */
+  nr_td_cb0_wire_test_cpu_pct(0.0001); /* the bucket barely refills */
   nr_td_cb0_wire_reset();
   nr_td_cb0_wire_test_unlimited(false);
   const auto t = ticket();
@@ -655,7 +654,7 @@ TEST_F(Cb0Wire, BudgetSkipIsWholeGrant)
   const auto s = stats();
   EXPECT_EQ(s.budget_skips, (uint64_t)skipped);
   EXPECT_EQ(s.inadmissible[NR_TD_CB0_R_BUDGET], (uint64_t)skipped);
-  unsetenv("ISAC_TD_CB0_CPU_PCT");
+  nr_td_cb0_wire_test_cpu_pct(30);
 }
 
 TEST_F(Cb0Wire, ReindexedContextCreditsNothing)
@@ -699,7 +698,7 @@ TEST_F(Cb0Wire, EngineEliminatesWrongNeverTruth)
   auto t0 = ticket();
   nr_pdsch_config_sweep_state_t *st = (nr_pdsch_config_sweep_state_t *)malloc(sizeof(*st));
   ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t0, st));
-  ASSERT_TRUE(st->cb0_elim) << "new runtime contexts take ISAC_TD_CB0_ELIM";
+  ASSERT_TRUE(st->cb0_elim) << "new runtime contexts take the CB0 default";
   const nr_pdsch_cfg_hypothesis_t truth = st->hyp[t0.hypothesis];
   const uint64_t tk = nr_td_cb0_hyp_key(&truth);
   g_stub.pass[tk] = true;
@@ -753,7 +752,7 @@ TEST_F(Cb0Wire, TbDecoderNotedWithoutBatchBlocksCpuBatches)
   nr_td_cb0_wire_test_unlimited(false);
   const auto t = ticket();
   nr_td_cb0_wire_test_set_tokens(0.0);
-  setenv("ISAC_TD_CB0_CPU_PCT", "0.0001", 1);
+  nr_td_cb0_wire_test_cpu_pct(0.0001);
   ASSERT_TRUE(grant(t, 30000, false, true, true, /*tb_dec=*/2)); /* skipped: only the TB decoder note reaches the engine */
   EXPECT_EQ(stats().budget_skips, 1u);
   nr_td_cb0_wire_test_unlimited(true);
@@ -761,7 +760,7 @@ TEST_F(Cb0Wire, TbDecoderNotedWithoutBatchBlocksCpuBatches)
   uint64_t alarms = 0, rej[NR_TD_CB0_X_COUNT] = {0};
   nr_pdsch_config_sweep_cb0_stats(&alarms, rej);
   EXPECT_EQ(rej[11], 1u) << "engine DECODER rejection: the epoch saw a CUDA TB";
-  unsetenv("ISAC_TD_CB0_CPU_PCT");
+  nr_td_cb0_wire_test_cpu_pct(30);
 }
 }  // namespace
 
@@ -837,10 +836,10 @@ TEST_F(Cb0Wire, TbForcedOnlyForCpuBackendBatches)
   /* budget-skipped: never forced */
   nr_td_cb0_wire_test_unlimited(false);
   nr_td_cb0_wire_test_set_tokens(0.0);
-  setenv("ISAC_TD_CB0_CPU_PCT", "0.0001", 1);
+  nr_td_cb0_wire_test_cpu_pct(0.0001);
   EXPECT_FALSE(pre_tb_cpu(gw, t, 40004));
   EXPECT_NE(nr_td_cb0_wire_test_last_reasons() & (1u << NR_TD_CB0_R_BUDGET), 0u);
-  unsetenv("ISAC_TD_CB0_CPU_PCT");
+  nr_td_cb0_wire_test_cpu_pct(30);
   nr_td_cb0_wire_test_unlimited(true);
   /* GPU backend registered and healthy: the CUDA batch dominates either TB decoder -> not forced */
   g_fake = FakeGpu{};
@@ -851,7 +850,7 @@ TEST_F(Cb0Wire, TbForcedOnlyForCpuBackendBatches)
   g_fake.healthy = false;
   EXPECT_TRUE(pre_tb_cpu(gw, t, 40006));
   g_fake.healthy = true;
-  /* ISAC_TD_CB0_BACKEND=cpu -> forced */
+  /* backend mode cpu -> forced */
   nr_td_cb0_backend_mode_set(NR_TD_CB0_BE_CPU);
   EXPECT_TRUE(pre_tb_cpu(gw, t, 40007));
   nr_td_cb0_backend_mode_set(NR_TD_CB0_BE_AUTO);
@@ -859,18 +858,7 @@ TEST_F(Cb0Wire, TbForcedOnlyForCpuBackendBatches)
   g_fake.fail_on = g_fake.calls;
   EXPECT_FALSE(pre_tb_cpu(gw, t, 40008)); /* this batch fails on the GPU */
   EXPECT_TRUE(pre_tb_cpu(gw, t, 40009));  /* back-off (2 batches): CPU */
-  /* a GPU iteration cap is proven only against the CPU TB: forced even on the GPU backend */
-  nr_td_cb0_backend_mode_set(NR_TD_CB0_BE_AUTO);
-  setenv("ISAC_TD_CB0_GPU_ITERS", "12", 1);
-  nr_td_cb0_wire_reset(); /* configuration re-read */
-  EXPECT_TRUE(pre_tb_cpu(gw, t, 40010));
-  unsetenv("ISAC_TD_CB0_GPU_ITERS");
-  /* ISAC_TD_TB_CPU_WHILE_ACQ=0: never forced */
-  setenv("ISAC_TD_TB_CPU_WHILE_ACQ", "0", 1);
-  nr_td_cb0_wire_reset();
   nr_td_cb0_register_gpu_backend(nullptr);
-  EXPECT_FALSE(pre_tb_cpu(gw, t, 40011));
-  unsetenv("ISAC_TD_TB_CPU_WHILE_ACQ");
   nr_td_cb0_wire_reset();
 }
 
@@ -926,39 +914,6 @@ TEST_F(Cb0Wire, CpuFallbackAfterCudaTbIsInadmissible)
   EXPECT_EQ(alarms, 0u);
 }
 
-/* ISAC_LLR_SCALE: the decode rescales iff atoi() > 0 (1 included); every such value makes the grant inadmissible, others do not. */
-TEST_F(Cb0Wire, LlrScaleFollowsTheDecodeRule)
-{
-  const auto t = ticket();
-  const struct {
-    const char *v;
-    bool inadm;
-  } c[] = {{"1", true}, {"64", true}, {"0", false}, {"-3", false}, {"abc", false}, {nullptr, false}};
-  for (const auto &x : c) {
-    if (x.v)
-      setenv("ISAC_LLR_SCALE", x.v, 1);
-    else
-      unsetenv("ISAC_LLR_SCALE");
-    nr_td_cb0_wire_reset();
-    bool tb_cpu = false;
-    nr_td_cb0_job_t j{};
-    j.abs_slot = 42000;
-    j.job_k0 = t.k0;
-    j.gw_on = true;
-    ASSERT_TRUE(nr_td_cb0_wire_pre(&t, gw, &j, &tb_cpu));
-    EXPECT_EQ((nr_td_cb0_wire_test_last_reasons() >> NR_TD_CB0_R_LLR_SCALE) & 1u, x.inadm ? 1u : 0u) << (x.v ? x.v : "unset");
-    EXPECT_EQ(tb_cpu, !x.inadm) << "an inadmissible grant never forces the TB decoder";
-    nr_td_cb0_wire_run(gw);
-    nr_td_cb0_tb_t tb{};
-    tb.tb_fed = true;
-    tb.tb_decoder = 1;
-    tb.iq_ok_after = true;
-    tb.nl = 1;
-    nr_td_cb0_wire_feed(&t, &tb);
-  }
-  unsetenv("ISAC_LLR_SCALE");
-  nr_td_cb0_wire_reset();
-}
 }  // namespace
 
 namespace {

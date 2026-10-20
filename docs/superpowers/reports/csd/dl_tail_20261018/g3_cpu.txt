@@ -1,0 +1,7 @@
+scan consumer CPU seconds per replay (utime+stime at exit; same 2 consumer threads on the same pinned cores in every arm)
+('b', 'H') n=6 consumer0 med 4.63, consumer1 med 4.51, sum med 9.15 [8.58 9.11 9.70 9.20 8.52 9.40]
+('b', 'HP') n=6 consumer0 med 4.23, consumer1 med 4.82, sum med 9.10 [7.40 10.61 9.14 9.23 8.73 9.06]
+('b', 'OFF') n=6 consumer0 med 3.92, consumer1 med 3.99, sum med 7.96 [8.58 5.47 8.15 7.78 7.00 8.52]
+('tim', 'H') n=3 consumer0 med 2.41, consumer1 med 2.19, sum med 4.60 [4.54 4.60 4.75]
+('tim', 'HP') n=3 consumer0 med 2.21, consumer1 med 2.62, sum med 4.89 [5.47 4.54 4.89]
+('tim', 'OFF') n=3 consumer0 med 2.65, consumer1 med 2.49, sum med 4.96 [5.39 4.96 4.46]

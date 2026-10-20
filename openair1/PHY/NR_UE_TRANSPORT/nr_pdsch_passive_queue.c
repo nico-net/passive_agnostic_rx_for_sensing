@@ -1,3 +1,10 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* FATTAILS DECSLOW: RUSAGE_THREAD, sched_getcpu */
+#endif
+#include "nr_pdsch_slot_spread.h"
+#include "PHY/TOOLS/nr_stage_split.h"
+#include "PHY/TOOLS/nr_admit.h"
+#include "common/utils/nr_bg_lane.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
 #include "common/utils/nr_core_plan.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
@@ -50,6 +57,7 @@
  */
 
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h" // P99: lag bins, scan lag histogram
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_solver.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"         // T26b grant solver feedback
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"    // MAC timing-advance parsers + this file's reporter
@@ -72,11 +80,9 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h" // CB0 elimination channel (ISAC_TD_CB0_ELIM, default ON, 0 disables)
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_job_epoch.h"
-#include "nr_gpu_fep_hygiene.h"
-#include "nr_pdsch_gpu_record.h"
 #include "nr_pdsch_gpu_exact.h"
+#include "nr_gpu_pass_dl.h"
 #include "nr_pdsch_gpu_demod_host.h"
-#include "nr_pdsch_real_first.h"
 void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *src,
                              const nr_pdsch_passive_decode_result_t *dec, const c16_t *rxdataF, uint32_t rxF_stride);
 #include "nr_csirs_disc.h"
@@ -89,6 +95,11 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sched.h>
+#include <sys/prctl.h>
+#include "nr_spin_handoff.h"
+#include "nr_early_start.h"
+#include <sys/resource.h> /* FATTAILS DECSLOW: getrusage(RUSAGE_THREAD) */
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/system.h" // threadCreate
@@ -96,6 +107,7 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h" // nr_dlsch_unscrambling (GPU self-check)
+#include "nr_pdsch_recovery.h" // Task 6 RECOVERY_ASYNC
 
 /* T21: fixed-size consumer-owned IQ arenas, allocated before threads start. No
  * CUDA registration or allocation. Only a slot window is copied per group. */
@@ -103,7 +115,7 @@ static c16_t *g_owned_iq[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS][NB_ANTENNAS_RX];
 static _Atomic uint64_t g_latency[NR_PDSCH_LAT_STAGES][NR_PDSCH_LAT_BINS];
 static _Atomic uint64_t g_drop_reason[NR_PDSCH_DROP_REASONS];
 /* latency_note: adds one sample (end - start, ns) to the queue-latency histogram of a pipeline stage; ignored when start is 0 or end < start.
- *   Lock-free atomic increment into g_latency[stage][bin]. Callers: gpu_fep_worker_thread(), nr_pdsch_passive_queue_thread() (queue wait, FEP).
+ *   Lock-free atomic increment into g_latency[stage][bin]. Caller: nr_pdsch_passive_queue_thread() (queue wait, FEP).
  */
 static void latency_note(int stage, uint64_t start, uint64_t end)
 {
@@ -111,21 +123,29 @@ static void latency_note(int stage, uint64_t start, uint64_t end)
     atomic_fetch_add_explicit(&g_latency[stage][nr_pdsch_latency_bin(end - start)], 1, memory_order_relaxed);
 }
 
-/* ---- GPU front end (NR_GPU_FEP=1): FEP + chest + MMSE + LLR for a whole slot group in one launch
- * set, LLRs handed to the decode through nr_pdsch_passive_set_llr_override(). ---- */
-static const nr_gpu_fep_api_t * _Atomic g_gpu; /* NULL = CPU path; health gate can disable from a consumer */
-static _Atomic uint64_t g_gpu_slots, g_gpu_jobs, g_gpu_fep_ns, g_gpu_llr_ns;
-static _Atomic uint64_t g_gpu_chk_n, g_gpu_chk_crc_agree, g_gpu_chk_crc_gpu_ok, g_gpu_chk_crc_cpu_ok;
-static _Atomic uint64_t g_gpu_stale_pre, g_gpu_stale_post, g_gpu_chk_fail, g_gpu_chk_skipped;
-static _Atomic int g_gpu_disabled;
-static _Atomic int g_gpu_chk_limit;
-static _Atomic int g_gpu_chk_enforce;
-static int (*g_gpu_admit)(const nr_gpu_pdsch_job_t *, int, int);
-static int16_t *g_consumer_gpu_llr[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
-static int16_t *g_consumer_gpu_rxF[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
-#define GPU_LLR_CAP (32u << 20) /* int16 per consumer: room for a full recorded multi-grant slot */
-
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
+/* SYSAN e2e trace: monotonic arrival time of each producer slot (the nrue_ru_read() return),
+ * ring of 128 slots, so a grant's latency can be measured from its slot's samples to its CRC (EVMGRANT e2e=, UL_E2E). */
+static _Atomic uint64_t g_slot_arr_ns[128];
+static _Atomic long g_slot_arr_tag[128];
+void nr_passive_note_slot_arrival(long abs_slot)
+{
+  const int k = (int)(abs_slot & 127);
+  atomic_store_explicit(&g_slot_arr_tag[k], -1, memory_order_release);
+  atomic_store_explicit(&g_slot_arr_ns[k], now_ns(), memory_order_release);
+  atomic_store_explicit(&g_slot_arr_tag[k], abs_slot, memory_order_release);
+}
+/* nr_passive_slot_arrival_ns: arrival time of abs_slot, 0 when it left the ring (> 128 slots old) or was never seen */
+uint64_t nr_passive_slot_arrival_ns(long abs_slot)
+{
+  const int k = (int)(abs_slot & 127);
+  const uint64_t t = atomic_load_explicit(&g_slot_arr_ns[k], memory_order_acquire);
+  return atomic_load_explicit(&g_slot_arr_tag[k], memory_order_acquire) == abs_slot ? t : 0;
+}
+int nr_passive_e2e_trace(void)
+{
+  return 1; /* frozen ISAC_E2E_TRACE=1 */
+}
 /* release_solver: drops a queued decode variant without decoding it: returns its pending solver entry with no credit, at once.
  *   Called when a job is evicted, refused or skipped, so the solver's FIFO does not keep it as a lost CRC. Caller: enqueue_one() and queue_thread().
  */
@@ -134,243 +154,16 @@ static void release_solver(const nr_pdsch_passive_job_t *j)
   if (j->solver_token) nr_pdsch_solver_feedback(j->solver_token, false, false);
 }
 
-/* ---- ONE dedicated GPU worker thread (2026-09-16), not "whichever consumer grabs the lock" -------
- * ROOT CAUSE of the live OTA drop spike (r4a_104200: 92 % dropped, GPU_FEP calls measured 13-31 ms
- * against the isolated 0.3-1.6 ms): cons6_ota.conf's `pdcch_blind_monitor_pdsch` pins the 6 passive-
- * PDSCH consumers to cores 6..11 (LOG line "cores 6..11") -- 2 of those (6,7) ARE `--thread-pool`
- * cores, and 4 (8-11) ARE the NIC's own dedicated MSI IRQ cores (preflight: "NIC irqs -> 8-13"), the
- * exact contention the 2026-09-02 NIC/softmodem core separation exists to prevent, now reintroduced
- * for this pool. Confirmed NOT a self-check or batching bug: ISAC_GPU_SELFCHECK never fired in that
- * run (0 GPU_SELFCHECK lines) and GPU_FEP slots==jobs (batch 1 throughout, as expected -- most
- * dequeues are single-slot, "slot_groups=37/641"). Reproduced clean (4 threads, real mutex, 3 ms of
- * CPU work/job, no core contention): p50 251 us / p99 273 us fep, 840 jobs/s aggregate -- mutex
- * contention ALONE does not explain it (scratchpad/gpu_contend_bench.cc).
- * MECHANISM: with the OLD design every one of the 6 consumers directly executed the blocking GPU
- * call (fep_slot+pdsch_llr) under one shared mutex. CPU-only decodes are fully independent, so a
- * consumer thread stalled on a contended core only slows itself; the GPU path serialises all 6
- * behind one lock, so ANY ONE of the 6 -- and on this conf 4/6 sit on the busiest IRQ cores in the
- * box -- stalling while it holds the lock stalls the other five. That is the drop-rate asymmetry.
- * FIX: one dedicated worker thread executes every GPU call; consumers hand off a request and block
- * on their OWN completion condvar (releasing the CPU, not spinning on the lock). This does not
- * raise the GPU's raw throughput ceiling (still one lane), but it shrinks the "who can stall
- * everyone" surface from 6 threads on 6 (partly contended) cores to exactly 1 thread on 1 core that
- * can be placed deliberately: core 3 by default -- `isolcpus=2,3` keeps the scheduler off it,
- * ISAC_UE_RT_CORE only pins the receive thread to core 2, and it is neither a `--thread-pool` core
- * nor a NIC IRQ core. ISAC_GPU_WORKER_CORE overrides; <0 = unpinned. */
-typedef struct {
-  nr_gpu_pdsch_job_t *jobs; int n_jobs;
-  uint32_t config_epoch;
-  long source_abs_slot, slots_per_frame;
-  const int16_t *rx[4]; uint32_t ring_len, ring_off, abs_sample; double fo_hz; const int16_t *rot;
-  int16_t *out; size_t out_cap;
-  int16_t *rxdataF; int read_rc, ofdm_symbol_size;
-  const nr_gpu_fep_api_t *api;
-  uint64_t fep_end_ns, submit_ns;
-  bool owned_iq;
-  volatile int done; int64_t rc;
-} gpu_fep_req_t;
-#define GPU_WORKER_QUEUE_MAX 32
-static gpu_fep_req_t *g_gpu_wq[GPU_WORKER_QUEUE_MAX];
-static int g_gpu_wq_n;
-static pthread_mutex_t g_gpu_wq_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_gpu_wq_work = PTHREAD_COND_INITIALIZER, g_gpu_wq_done = PTHREAD_COND_INITIALIZER;
-static _Atomic int g_gpu_worker_running;
-static pthread_t g_gpu_worker_thread;
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
-/* This is the only call site for the GPU API. In particular, read_rxdataF must run before
- * the worker takes another slot and replaces the device-global resident rxdataF. */
-static long gpu_req_producer(void *ctx)
+/* queue_producer_slot: the RF producer's completed absolute slot (the sample-lifetime guard of the owned-IQ copy reads it). */
+static long queue_producer_slot(void *ctx)
 {
   (void)ctx;
   return atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
 }
-static void gpu_req_stale(void *ctx, int stage)
-{
-  (void)ctx;
-  atomic_fetch_add_explicit(stage == 0 ? &g_gpu_stale_pre : &g_gpu_stale_post, 1, memory_order_relaxed);
-}
-/* gpu_req_fep: GPU worker step 1: asks the GPU admission gate whether it can take the request, then runs the FEP for one slot on the device.
- *   Returns the fep_slot() return code (-1 when not admitted) and stamps r->fep_end_ns. Used directly for owned-IQ requests and as the FEP callback otherwise.
- *   Callers: gpu_fep_worker_thread(), gpu_fep_submit_and_wait().
- */
-static int gpu_req_fep(void *ctx)
-{
-  gpu_fep_req_t *r = ctx;
-  if (!g_gpu_admit || !g_gpu_admit(r->jobs, r->n_jobs, r->rxdataF != NULL)) return -1;
-  const int rc = r->api->fep_slot(r->rx, r->ring_len, r->ring_off, r->abs_sample, r->fo_hz, r->rot);
-  r->fep_end_ns = now_ns();
-  return rc;
-}
-/* gpu_req_llr: GPU request callback run by the PDSCH queue: computes the LLRs for the jobs and reads back the rxdataF.
- *   How it works: Calls the GPU PDSCH LLR API. On success and when an rxdataF buffer is given, calls nr_pdsch_gpu_readback and keeps its result in read_rc.
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:245, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:302.
- */
-static int64_t gpu_req_llr(void *ctx)
-{
-  gpu_fep_req_t *r = ctx;
-  const int64_t rc = r->api->pdsch_llr(r->jobs, r->n_jobs, r->out, r->out_cap);
-  if (rc >= 0 && r->rxdataF)
-    r->read_rc = nr_pdsch_gpu_readback(r->api, r->jobs, r->n_jobs, r->ofdm_symbol_size, r->rxdataF);
-  return rc;
-}
-
-/* gpu_fep_worker_thread: dedicated GPU worker: takes batches of FEP+LLR requests from g_gpu_wq and runs them on the device, one request at a time.
- *   Waits on g_gpu_wq_work (20 ms timeout) while idle; a request whose config epoch is stale or whose API is gone completes with rc = -1.
- *   Completion: per-request done flag (with NR_CSIRS_DISC) or a batch-wide done flag, then broadcast on g_gpu_wq_done. Logs GPU_FEP stats every 1000 slots.
- *   Started by nr_pdsch_passive_gpu_warmup() on its own core (ISAC_GPU_WORKER_CORE, default 3). Stopped by nr_pdsch_passive_queue_stop().
- */
-static void *gpu_fep_worker_thread(void *arg)
-{
-  (void)arg;
-  LOG_I(PHY, "SENSING: GPU_FEP worker thread started\n");
-  while (atomic_load_explicit(&g_gpu_worker_running, memory_order_relaxed)) {
-    gpu_fep_req_t *take[GPU_WORKER_QUEUE_MAX];
-    int nt;
-    pthread_mutex_lock(&g_gpu_wq_lock);
-    while (g_gpu_wq_n == 0 && atomic_load_explicit(&g_gpu_worker_running, memory_order_relaxed)) {
-      struct timespec ts;
-      clock_gettime(CLOCK_REALTIME, &ts);
-      ts.tv_nsec += 20 * 1000 * 1000;
-      if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
-      pthread_cond_timedwait(&g_gpu_wq_work, &g_gpu_wq_lock, &ts);
-    }
-    nt = g_gpu_wq_n;
-    memcpy(take, g_gpu_wq, (size_t)nt * sizeof(*take));
-    g_gpu_wq_n = 0;
-    pthread_mutex_unlock(&g_gpu_wq_lock);
-    for (int i = 0; i < nt; i++) {
-      gpu_fep_req_t *r = take[i];
-      r->api = atomic_load(&g_gpu);
-      if (!r->api || nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), r->config_epoch, nr_cfg_epoch_current)) {
-        r->rc = -1;
-        goto complete;
-      }
-      const uint64_t t0 = now_ns();
-      if (r->owned_iq) latency_note(NR_PDSCH_LAT_GPU_WAIT, r->submit_ns, t0);
-      /* Owned IQ passed the queue's pre/post-copy guards; device execution has
-       * no remaining dependency on the live ring. Keep the borrowed API guarded. */
-      int64_t rc = r->owned_iq ? (gpu_req_fep(r) == 0 ? gpu_req_llr(r) : -1)
-          : nr_gpu_fep_run_checked(r->source_abs_slot, r->slots_per_frame, gpu_req_producer,
-                                  gpu_req_stale, gpu_req_fep, gpu_req_llr, r);
-      const uint64_t t1 = now_ns();
-      r->rc = (atomic_load(&g_gpu) != r->api || nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), r->config_epoch, nr_cfg_epoch_current)) ? -1 : rc;
-      if (rc >= 0) {
-        atomic_fetch_add(&g_gpu_slots, 1);
-        atomic_fetch_add(&g_gpu_jobs, (uint64_t)r->n_jobs);
-        atomic_fetch_add(&g_gpu_fep_ns, r->fep_end_ns - t0);
-        atomic_fetch_add(&g_gpu_llr_ns, t1 - r->fep_end_ns);
-        const uint64_t ns = atomic_load(&g_gpu_slots);
-        if (ns == 50 || (ns % 1000) == 0)
-          LOG_A(PHY, "SENSING: GPU_FEP slots=%lu jobs=%lu fep=%.0f us/slot chest+llr=%.0f us/slot (%.1f us/job) selfcheck n=%lu crc_agree=%lu gpu_ok=%lu cpu_ok=%lu\n",
-                (unsigned long)ns, (unsigned long)atomic_load(&g_gpu_jobs), atomic_load(&g_gpu_fep_ns) / 1e3 / ns,
-                atomic_load(&g_gpu_llr_ns) / 1e3 / ns, atomic_load(&g_gpu_llr_ns) / 1e3 / (double)atomic_load(&g_gpu_jobs),
-                (unsigned long)atomic_load(&g_gpu_chk_n), (unsigned long)atomic_load(&g_gpu_chk_crc_agree),
-                (unsigned long)atomic_load(&g_gpu_chk_crc_gpu_ok), (unsigned long)atomic_load(&g_gpu_chk_crc_cpu_ok));
-      }
-complete:
-      /* Release completed requests immediately; another request's CUDA round trip
-       * must not hold this consumer (or its snapshot) hostage. */
-      if (nr_csirs_disc_enabled()) {
-        pthread_mutex_lock(&g_gpu_wq_lock);
-        r->done = 1;
-        pthread_cond_broadcast(&g_gpu_wq_done);
-        pthread_mutex_unlock(&g_gpu_wq_lock);
-      }
-    }
-    pthread_mutex_lock(&g_gpu_wq_lock);
-    if (!nr_csirs_disc_enabled())
-      for (int i = 0; i < nt; i++) take[i]->done = 1;
-    pthread_cond_broadcast(&g_gpu_wq_done);
-    pthread_mutex_unlock(&g_gpu_wq_lock);
-  }
-  LOG_I(PHY, "SENSING: GPU_FEP worker thread exiting\n");
-  return NULL;
-}
-
-/* gpu_fep_submit_and_wait: hands one FEP+LLR request to the GPU and blocks until it is done; returns the rc of the FEP/LLR call (-1 when refused).
- *   With the GPU budget gate (nr_gpu_budget_enabled) it runs the request directly under a nonblocking mutex; otherwise it queues it to the worker (bounded queue).
- *   Caller: queue_thread() on the GPU front-end path. Takes g_gpu_wq_lock while waiting on g_gpu_wq_done.
- */
-static int64_t gpu_fep_submit_and_wait(gpu_fep_req_t *req)
-{
-  if(nr_gpu_budget_enabled()) {
-    /* A stack-owned request cannot be abandoned on the old worker queue: the
-     * worker could still write its output after CPU fallback. Run under one
-     * nonblocking gate instead; CUDA modules quarantine their private buffers
-     * on timeout. One deadline covers FEP, LLR and optional self-check readback. */
-    static pthread_mutex_t direct=PTHREAD_MUTEX_INITIALIZER;
-    if(pthread_mutex_trylock(&direct)) {nr_gpu_budget_rt_result(0,1);return -1;}
-    req->submit_ns=now_ns();
-    nr_gpu_budget_rt_job_start(req->submit_ns/1000);
-    int64_t rc=-1;
-    if(nr_gpu_budget_rt_begin()) {
-      req->api=atomic_load(&g_gpu);
-      if(req->api && !nr_passive_job_epoch_old(nr_cfg_reconf_enabled(),req->config_epoch,nr_cfg_epoch_current)) {
-        rc=req->owned_iq ? (gpu_req_fep(req)==0?gpu_req_llr(req):-1)
-          : nr_gpu_fep_run_checked(req->source_abs_slot,req->slots_per_frame,gpu_req_producer,
-                                  gpu_req_stale,gpu_req_fep,gpu_req_llr,req);
-        if(nr_passive_job_epoch_old(nr_cfg_reconf_enabled(),req->config_epoch,nr_cfg_epoch_current))rc=-1;
-        if(rc>=0) {
-          atomic_fetch_add(&g_gpu_slots,1);atomic_fetch_add(&g_gpu_jobs,req->n_jobs);
-          atomic_fetch_add(&g_gpu_fep_ns,req->fep_end_ns-req->submit_ns);
-          atomic_fetch_add(&g_gpu_llr_ns,now_ns()-req->fep_end_ns);
-        }
-      }
-      nr_gpu_budget_rt_end();
-    }
-    nr_gpu_budget_rt_job_start(0);
-    pthread_mutex_unlock(&direct);return rc;
-  }
-  req->done = 0;
-  req->submit_ns = req->owned_iq ? now_ns() : 0;
-  pthread_mutex_lock(&g_gpu_wq_lock);
-  if (!atomic_load(&g_gpu_worker_running) || g_gpu_wq_n >= GPU_WORKER_QUEUE_MAX) {
-    /* worker is badly backed up -- do not grow unbounded; caller falls back to CPU for this group */
-    pthread_mutex_unlock(&g_gpu_wq_lock);
-    return -1;
-  }
-  g_gpu_wq[g_gpu_wq_n++] = req;
-  pthread_cond_signal(&g_gpu_wq_work);
-  while (!req->done)
-    pthread_cond_wait(&g_gpu_wq_done, &g_gpu_wq_lock);
-  pthread_mutex_unlock(&g_gpu_wq_lock);
-  return req->rc;
-}
-
-/* gpu_dump_record: ISAC_GPU_DUMP=<file>: appends one record per self-checked GPU job to the dump file (slot IQ window, job, CPU and GPU LLRs) for offline comparison.
- *   Opens the file once (path cached in a static). Writes nothing when the env var is unset. Caller: queue_thread() after the GPU self-check.
- */
-static void gpu_dump_record(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *job, const nr_gpu_pdsch_job_t *gj,
-                            const int16_t *llr_cpu, const int16_t *llr_gpu, uint32_t G)
-{
-  static const char *path; static int tried;
-  if (!tried) { tried = 1; path = getenv("ISAC_GPU_DUMP"); }
-  if (!path) return;
-  static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
-  pthread_mutex_lock(&lk);
-  FILE *f = fopen(path, "ab");
-  if (f) {
-    const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-    const uint32_t ring_len = 2 * fp->samples_per_frame, off = get_samples_slot_timestamp(fp, job->nr_slot_rx);
-    const uint32_t win = fp->samples_per_slot_wCP + fp->ofdm_symbol_size;
-    const uint32_t hdr[8] = {0x47505544u /* "GPUD" */, (uint32_t)job->absolute_slot, (uint32_t)fp->nb_antennas_rx, win,
-                             G, (uint32_t)job->layout_probe, (uint32_t)sizeof(*gj), (uint32_t)(job->fo_hz * 1000)};
-    fwrite(hdr, sizeof(hdr), 1, f);
-    fwrite(gj, sizeof(*gj), 1, f);
-    for (int a = 0; a < fp->nb_antennas_rx; a++)
-      for (uint32_t i = 0; i < win; i++)
-        fwrite(&nr_pdsch_passive_iq_for_slot(job->nr_slot_rx, ue->common_vars.rxdata)[a][(off + i) % ring_len], sizeof(c16_t), 1, f);
-    fwrite(llr_cpu, sizeof(int16_t), G, f);
-    fwrite(llr_gpu, sizeof(int16_t), G, f);
-    fclose(f);
-  }
-  pthread_mutex_unlock(&lk);
-}
 
 /* The RF producer's completed position, published in executables/nr-ue.c after a
  * successful nrue_ru_read(). The two-slot lifetime margin also covers prefetched IQ. */
-extern _Atomic long nr_ue_diag_producer_absolute_slot;
 
 static nr_pdsch_passive_job_t g_ring[NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH];
 static uint64_t g_ring_ns[NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH];
@@ -378,9 +171,15 @@ static int  g_depth = 0;
 static int  g_head  = 0; // next write slot
 static int  g_tail  = 0; // next read slot
 static int  g_count = 0; // entries currently held
+static _Atomic int g_real_n; // full-decode (non-probe) entries in the ring; written under g_lock, read lock-free (ISAC_BG_LANE gate)
+#define REAL_ADD(j, d) do { if ((j).layout_probe == 0) atomic_fetch_add_explicit(&g_real_n, (d), memory_order_relaxed); } while (0)
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
+static int             g_idle;   /* consumers blocked on g_cv, under g_lock */
+/* Timer-then-spin hand-off scan -> PDSCH consumer (nr_spin_handoff.h): grants show up a scan-latency after the slot arrival. */
+static nr_spin_pred_t  g_spin_pred;
+extern _Atomic long nr_ue_diag_producer_wall_ns;
 
 static _Atomic uint64_t g_queued        = 0;
 static _Atomic uint64_t g_slot_groups   = 0; ///< dequeues that took >1 grant of one slot
@@ -391,23 +190,14 @@ void nr_pdcch_bwp_crc_result(int entry, bool crc_ok);
 void nr_pdcch_bwp_crc_search_result(int entry, bool crc_ok);
 #include "nr_dmrs_id_estimate.h"
 #include "nr_pdsch_dmrs_scan.h"
-/* TIM-PDSCH ISAC_PDSCH_DMRS_ID_SCAN=<scans per second of signal time> (default off; 1 = 8/s): blind per-UE PDSCH DM-RS
+/* TIM-PDSCH: blind per-UE PDSCH DM-RS
  * identity scan over 0..65535 (nr_pdsch_dmrs_scan.h) on the DM-RS symbol of slots carrying an unsolved dedicated
  * grant; the identities found are voted for every C-RNTI whose PDSCH is in that slot. A slot is scanned once (cache). */
 static int dmrs_scan_rate(void)
 {
-  static _Atomic int r = -1;
-  int v = atomic_load(&r);
-  if (v < 0) {
-    const char *e = getenv("ISAC_PDSCH_DMRS_ID_SCAN");
-    v = e ? atoi(e) : 0;
-    if (v == 1) v = 8;
-    if (v < 0) v = 0;
-    atomic_store(&r, v);
-  }
-  return v;
+  return 16; /* scans per second of signal time (ISAC_PDSCH_DMRS_ID_SCAN default, frozen 16) */
 }
-/* wait[]: RNTIs of this slot that arrived while its scan was in progress (ISAC_PDSCH_DMRS_ID_CONTRAST): voted when it ends */
+/* wait[]: RNTIs of this slot that arrived while its scan was in progress (DM-RS id contrast): voted when it ends */
 typedef struct { int64_t abs; int n; nr_dmrs_scan_hit_t h[NR_DMRS_SCAN_MAX_HITS]; int nwait; uint16_t wait[8]; } dmrs_scan_slot_t;
 static dmrs_scan_slot_t g_scan_cache[32];
 static int64_t g_scan_last_abs = -1000000;
@@ -424,8 +214,8 @@ static void dmrs_scan_vote_log(uint16_t rnti, int64_t abs_slot, const nr_dmrs_sc
     LOG_A(PHY, "SENSING: DMRS_SCAN ids rnti=0x%04x abs=%ld ids=%d (%d %d) slots=%d\n", rnti, (long)abs_slot, nb,
           nb > 0 ? b[0] : -1, nb > 1 ? b[1] : -1, nr_dmrs_scan_rnti_slots(rnti));
 }
-/* ISAC_PDSCH_DMRS_SCAN_ASYNC=1 (default off, DECQUEUE): a full scan costs ~65 ms and ran inline on a PDSCH consumer, i.e. one of the
- * decode cores was gone for 16 scans/s. With the flag the scan job (a copy of the DM-RS symbol) goes to ONE worker thread, pinned to
+/* DECQUEUE: a full scan costs ~65 ms and would run inline on a PDSCH consumer, i.e. one of the
+ * decode cores gone for 16 scans/s. So the scan job (a copy of the DM-RS symbol) goes to ONE worker thread, pinned to
  * ISAC_DMRS_SCAN_CORE and run at SCHED_OTHER; the consumer returns at once. The votes then arrive a few slots later. A full queue drops the job. */
 #define DSCAN_Q 4
 #define DSCAN_MAXN 8192
@@ -440,13 +230,6 @@ static pthread_mutex_t g_dq_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_dq_cv = PTHREAD_COND_INITIALIZER;
 static pthread_t g_dq_thr;
 static _Atomic uint64_t g_dscan_dropped;
-static bool dmrs_scan_async(void)
-{
-  static _Atomic int v = -1;
-  int r = atomic_load(&v);
-  if (r < 0) { const char *e = getenv("ISAC_PDSCH_DMRS_SCAN_ASYNC"); r = e && atoi(e) != 0; atomic_store(&v, r); }
-  return r;
-}
 /* dmrs_scan_run: the scan itself (cache fill, votes, log); rx = the DM-RS symbol per antenna. */
 static void dmrs_scan_run(dmrs_scan_slot_t *c, uint16_t rnti, int64_t abs_slot, int nr_slot, int sym, bool full, int nant, int N, int fco,
                           int n_rb, int sps, const int16_t *const *rx)
@@ -487,6 +270,7 @@ static void dmrs_scan_run(dmrs_scan_slot_t *c, uint16_t rnti, int64_t abs_slot, 
 static void *dmrs_scan_worker(void *arg)
 {
   (void)arg;
+  nr_bg_lane_enter("ISAC_DMRS_SCAN_CORE");
   for (;;) {
     pthread_mutex_lock(&g_dq_mu);
     while (g_dq_n == 0) pthread_cond_wait(&g_dq_cv, &g_dq_mu);
@@ -497,7 +281,11 @@ static void *dmrs_scan_worker(void *arg)
     pthread_mutex_lock(&g_scan_mu);
     dmrs_scan_slot_t *c = &g_scan_cache[j.abs_slot & 31];
     pthread_mutex_unlock(&g_scan_mu);
-    dmrs_scan_run(c, j.rnti, j.abs_slot, j.nr_slot, j.sym, j.full, j.nant, j.N, j.fco, j.n_rb, j.sps, rx);
+    const uint64_t t_adm = nr_admit_now_ns();
+    if (nr_admit_try(NR_ADMIT_DMRS_SCAN, t_adm, 0, 0)) { /* ISAC_BG_LANE: else the slot is dropped, the next one is fresher */
+      dmrs_scan_run(c, j.rnti, j.abs_slot, j.nr_slot, j.sym, j.full, j.nant, j.N, j.fco, j.n_rb, j.sps, rx);
+      nr_admit_done(NR_ADMIT_DMRS_SCAN, nr_admit_now_ns() - t_adm);
+    }
     pthread_mutex_lock(&g_dq_mu); /* the slot stays ours until the scan is done: the producer cannot overwrite the copy */
     g_dq_head = (g_dq_head + 1) % DSCAN_Q;
     g_dq_n--;
@@ -557,7 +345,7 @@ static void dmrs_scan_job(const NR_DL_FRAME_PARMS *fp, uint16_t rnti, int64_t ab
   if (full) g_scan_last_abs = abs_slot;
   c->abs = abs_slot; c->n = -1; c->nwait = 0; /* in progress: concurrent consumers of this slot do not vote (unless CONTRAST) */
   pthread_mutex_unlock(&g_scan_mu);
-  if (dmrs_scan_async() && dmrs_scan_submit(rnti, abs_slot, nr_slot, sym, full, fp->nb_antennas_rx, fp->ofdm_symbol_size,
+  if (dmrs_scan_submit(rnti, abs_slot, nr_slot, sym, full, fp->nb_antennas_rx, fp->ofdm_symbol_size,
                                             fp->first_carrier_offset, fp->N_RB_DL, fp->symbols_per_slot, rx))
     return;
   dmrs_scan_run(c, rnti, abs_slot, nr_slot, sym, full, fp->nb_antennas_rx, fp->ofdm_symbol_size, fp->first_carrier_offset, fp->N_RB_DL,
@@ -575,7 +363,7 @@ static _Atomic uint64_t g_crc_ok        = 0;
 #define NR_DL_DMRS_NSCID 2
 /* Two windows per nSCID, stage 1 always on, stage 2 throttled and capped: nr_dmrs_id_2stage_t
  * (final review I5; measured 170360 us per stage-2 accumulate vs ~2 ms for stage 1). */
-/* T26c ISAC_PDSCH_DMRS_ID_PER_CORESET: one blind DM-RS identity estimator per discovered CORESET population */
+/* T26c: one blind DM-RS identity estimator per discovered CORESET population */
 typedef struct {
   int key, decided, top[3];
   bool used;
@@ -586,27 +374,12 @@ typedef struct {
 } coreset_dmrs_t;
 static coreset_dmrs_t g_cs_dmrs[8];
 static pthread_mutex_t g_cs_dmrs_mu = PTHREAD_MUTEX_INITIALIZER;
-/* coreset_dmrs_refresh: returns ISAC_PDSCH_DMRS_ID_REFRESH (cached per thread, default 0): how often the per-CORESET DM-RS identity is re-estimated.
- *   Nonzero also makes the coreset_dmrs table readers take its mutex. Callers: nr_pdsch_passive_coreset_dmrs_top(), queue_thread().
+/* coreset_dmrs_refresh: how often the per-CORESET DM-RS identity is re-estimated (frozen ISAC_PDSCH_DMRS_ID_REFRESH=64); nonzero also makes
+ *   the coreset_dmrs table readers take its mutex. Callers: nr_pdsch_passive_coreset_dmrs_top(), queue_thread().
  */
 static int coreset_dmrs_refresh(void)
 {
-  static _Thread_local int n = -1;
-  if (n < 0) {
-    const char *e = getenv("ISAC_PDSCH_DMRS_ID_REFRESH");
-    n = e ? atoi(e) : 0;
-    if (n < 0) n = 0;
-  }
-  return n;
-}
-/* per_coreset_dmrs_on: returns ISAC_PDSCH_DMRS_ID_PER_CORESET (cached): 1 keeps a separate DM-RS identity estimate for each CORESET key.
- *   Off by default; when off the shared per-grant estimate is used. Caller: queue_thread() (after the solver feedback).
- */
-static bool per_coreset_dmrs_on(void)
-{
-  static int en = -1;
-  if (en < 0) en = getenv("ISAC_PDSCH_DMRS_ID_PER_CORESET") && atoi(getenv("ISAC_PDSCH_DMRS_ID_PER_CORESET")) ? 1 : 0;
-  return en == 1;
+  return 64;
 }
 /* coreset_dmrs_slot: finds or allocates the DM-RS identity estimator of one CORESET key (8 slots, under g_cs_dmrs_mu) and initialises it with the PCI.
  *   The estimator is a two-stage NID search restricted to stage 1 (s1_grants = UINT32_MAX). Returns NULL when all 8 slots are used.
@@ -632,7 +405,7 @@ static coreset_dmrs_t *coreset_dmrs_slot(int key, int pci)
   return r;
 }
 /* nr_pdsch_passive_coreset_dmrs_top: returns the three best DM-RS identity candidates of a CORESET (out3[0..2]) once that CORESET has a decided identity; returns 3, else 0.
- *   Reads the table under the per-entry mutex only when ISAC_PDSCH_DMRS_ID_REFRESH is set. Caller: nr_pdcch_blind_monitor_rt.c (scrambling-id hypotheses).
+ *   Reads the table under the per-entry mutex (the refresh is always on). Caller: nr_pdcch_blind_monitor_rt.c (scrambling-id hypotheses).
  */
 int nr_pdsch_passive_coreset_dmrs_top(int key, int *out3)
 {
@@ -1212,27 +985,147 @@ void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_tic
 }
 
 /* nr_pdsch_passive_queue_thread: consumer thread body of the passive PDSCH decode pool: takes a slot group of grants from the ring, decodes each grant, and feeds the results back.
- *   Per group: optional signal-time pacing (ISAC_PDSCHQ_SIGNAL_TIME, replay only), owned IQ copy, FEP+channel estimate on CPU or on the GPU (gpu_fep_submit_and_wait),
+ *   Per group: owned IQ copy, FEP+channel estimate on the CPU,
  *   DM-RS oracle and k0 hypotheses, GrantWork and CB0 elimination, then nr_pdsch_passive_decode() per grant; solver feedback (nr_pdsch_solver_feedback), RRC and TA harvest, Technique D and Qm-oracle updates.
- *   Flags read: ISAC_PDSCH_INLINE_POOL, ISAC_PDSCHQ_SIGNAL_TIME, ISAC_PROBE_ALL, ISAC_PDSCH_K0_PROBE, ISAC_TD_GRANTWORK, ISAC_TD_GW_PROBE, ISAC_TD_CB0_ELIM, ISAC_RX_EQ_AB, ISAC_CHEST_OCC_AB, ISAC_LDPC_ITERS_AB, ISAC_GPU_SELFCHECK, ISAC_PDSCH_EVM_GRANT.
+ *   Flags read: none.
  *   Started by nr_pdsch_passive_queue_start() (one per consumer, priority 40 below RT). Exits when g_stop is set; uses g_lock and g_cv for the ring.
  */
-/* ISAC_PDSCHQ_REAL_FIRST=1 (GPUSCHED, default off): full decodes before older solver probes, see nr_pdsch_real_first.h. */
-static _Atomic uint64_t g_real_first; /* slots promoted */
-static nr_pdsch_passive_job_t g_rf_scratch; /* g_lock held */
-static bool rf_probe(const void *e) { return ((const nr_pdsch_passive_job_t *)e)->layout_probe != 0; }
-static long rf_slot(const void *e) { return ((const nr_pdsch_passive_job_t *)e)->absolute_slot; }
-static void real_first_locked(void)
+/* T26c per-CORESET blind DM-RS identity, one observation (moved out of the consumer loop by FATTAILS, unchanged logic).
+ * blocking = 0: the consumer's trylock (skip when busy, as before); 1: the FATTAILS worker waits for the lock. */
+typedef struct {
+  int key, nid_cell, crc, ofdm, start_sc, rb_offset, nrb, n_rb_dl, nsym, slot, sym, nscid, ncp_normal, cfg_type;
+  long abs_slot;
+  c16_t *row; /* deferred copy of the DM-RS symbol of antenna 0 (ofdm entries) */
+} cdmrs_obs_t;
+static void coreset_dmrs_observe(const cdmrs_obs_t *o, const c16_t *row, int blocking)
+{
+  coreset_dmrs_t *cd = coreset_dmrs_slot(o->key, o->nid_cell);
+  const int refresh = coreset_dmrs_refresh();
+  if (!cd || !(refresh || __atomic_load_n(&cd->decided, __ATOMIC_ACQUIRE) < 0))
+    return;
+  if (blocking ? pthread_mutex_lock(&cd->mu) != 0 : pthread_mutex_trylock(&cd->mu) != 0)
+    return;
+  const int crc = o->crc;
+  /* A batch of layout variants observes the SAME pilots, not independent
+   * grants. Count at most one observation per signal slot. A frozen
+   * coherence winner without CRC support must eventually be reconsidered. */
+  const bool fresh = !refresh || (o->abs_slot >= 0 && (uint64_t)o->abs_slot > cd->last_slot);
+  if (refresh && crc) cd->failed_slots = 0;
+  if (refresh && fresh) {
+    cd->last_slot = (uint64_t)o->abs_slot;
+    if (!crc && __atomic_load_n(&cd->decided, __ATOMIC_ACQUIRE) >= 0
+        && ++cd->failed_slots >= (uint32_t)refresh) {
+      const int old = __atomic_load_n(&cd->decided, __ATOMIC_ACQUIRE);
+      nr_dmrs_id_set_range(&cd->est.s1, 0, NR_DMRS_ID_CANDIDATES);
+      __atomic_store_n(&cd->est.decided_p1, 0, __ATOMIC_RELEASE);
+      __atomic_store_n(&cd->decided, -1, __ATOMIC_RELEASE);
+      cd->failed_slots = 0;
+      LOG_A(PHY, "SENSING: DMRS_ID REFRESH nid=%d old=%d abs=%ld after %d independent failed slots\n",
+            o->key, old, o->abs_slot, refresh);
+    }
+  }
+  if (fresh && nr_dmrs_id_2stage_accumulate(&cd->est, row, o->ofdm, o->start_sc, o->rb_offset, o->nrb, o->n_rb_dl, o->nsym,
+                                            o->slot, o->sym, o->nscid, o->ncp_normal, o->cfg_type)) {
+    const int id = nr_dmrs_id_2stage_decided(&cd->est);
+    /* T26d: the population can mix DM-RS identities (replays: 249 or 442 on CORESET 10163): keep the three
+     * best-scoring ids; the solver tries them per RNTI and the CRC decides */
+    double sc[3] = {-1, -1, -1};
+    int tp[3] = {id, -1, -1};
+    for (int c = 0; c < 1024; c++) {
+      const double v = nr_dmrs_id_score(&cd->est.s1, c);
+      for (int q = 0; q < 3; q++)
+        if (v > sc[q]) { for (int z = 2; z > q; z--) { sc[z] = sc[z - 1]; tp[z] = tp[z - 1]; } sc[q] = v; tp[q] = c; break; }
+    }
+    for (int q = 0; q < 3; q++) cd->top[q] = tp[q];
+    if (refresh) cd->failed_slots = 0;
+    __atomic_store_n(&cd->decided, id, __ATOMIC_RELEASE);
+    LOG_A(PHY, "SENSING: DMRS_ID per-CORESET nid=%d top3 %d %d %d\n", o->key, tp[0], tp[1], tp[2]);
+    LOG_A(PHY, "SENSING: DMRS_ID per-CORESET nid=%d PDSCH DM-RS id DECIDED %d (cell %d)\n", o->key, id, o->nid_cell);
+  }
+  pthread_mutex_unlock(&cd->mu);
+}
+/* FATTAILS: the observation runs on a SCHED_OTHER nice-19 worker
+ * (queue 8, dropped and counted when full) instead of the FIFO-40 consumer. [MEASURED, DGX replay tim, bpftrace profile]
+ * nr_dmrs_id_2stage_accumulate (1024 candidates per observation, every fresh slot with the DM-RS id refresh) was
+ * ~65 % of the PDSCH consumers' CPU time. */
+static nr_bgq_t g_cdmrs_q;
+static int cdmrs_async_on(void)
 {
   static int on = -1;
-  if (on < 0) on = getenv("ISAC_PDSCHQ_REAL_FIRST") && atoi(getenv("ISAC_PDSCHQ_REAL_FIRST")) ? 1 : 0;
-  if (!on || !nr_real_first_promote(g_ring, sizeof(g_ring[0]), g_ring_ns, g_tail, g_count, g_depth, rf_probe, rf_slot, &g_rf_scratch))
+  if (on < 0) {
+    on = 1; /* published before the start: concurrent consumers must not start the worker again (as at HEAD) */
+    if (nr_bgq_start(&g_cdmrs_q, 8, "dmrsIdBg") != 0)
+      on = 0;
+  }
+  return on;
+}
+static void cdmrs_run(void *arg)
+{
+  cdmrs_obs_t *o = arg;
+  const uint64_t t_adm = nr_admit_now_ns();
+  if (!nr_admit_try(NR_ADMIT_DMRS_ID, t_adm, 0, 0)) { /* ISAC_BG_LANE: critical lane busy, the observation is dropped */
+    free(o->row);
+    free(o);
     return;
-  if ((atomic_fetch_add_explicit(&g_real_first, 1, memory_order_relaxed) % 2000) == 0)
-    LOG_A(PHY, "SENSING: PDSCHQ_REAL_FIRST promoted=%llu (full-decode slots served before older probes)\n",
-          (unsigned long long)atomic_load(&g_real_first));
+  }
+  coreset_dmrs_observe(o, o->row, 1);
+  nr_admit_done(NR_ADMIT_DMRS_ID, nr_admit_now_ns() - t_adm);
+  free(o->row);
+  free(o);
+  const uint64_t n = __atomic_load_n(&g_cdmrs_q.done, __ATOMIC_RELAXED) + 1;
+  if (n == 1 || n % 2000 == 0)
+    LOG_A(PHY, "SENSING: DMRS_ID_ASYNC done=%lu queued=%lu dropped=%lu\n", (unsigned long)n,
+          (unsigned long)__atomic_load_n(&g_cdmrs_q.queued, __ATOMIC_RELAXED), (unsigned long)__atomic_load_n(&g_cdmrs_q.dropped, __ATOMIC_RELAXED));
+}
+static void coreset_dmrs_observe_or_defer(const cdmrs_obs_t *o, const c16_t *row)
+{
+  if (!cdmrs_async_on()) {
+    coreset_dmrs_observe(o, row, 0);
+    return;
+  }
+  coreset_dmrs_t *cd = coreset_dmrs_slot(o->key, o->nid_cell);
+  if (!cd || !(coreset_dmrs_refresh() || __atomic_load_n(&cd->decided, __ATOMIC_ACQUIRE) < 0) || !nr_bgq_room(&g_cdmrs_q)) {
+    if (cd && nr_bgq_room(&g_cdmrs_q) == 0)
+      __atomic_fetch_add(&g_cdmrs_q.dropped, 1, __ATOMIC_RELAXED);
+    return;
+  }
+  cdmrs_obs_t *j = malloc(sizeof(*j));
+  c16_t *r = j ? malloc(sizeof(c16_t) * (size_t)o->ofdm) : NULL;
+  if (!r) {
+    free(j);
+    return;
+  }
+  *j = *o;
+  memcpy(r, row, sizeof(c16_t) * (size_t)o->ofdm);
+  j->row = r;
+  if (nr_bgq_push(&g_cdmrs_q, cdmrs_run, j) != 0) {
+    free(r);
+    free(j);
+  }
 }
 
+/* ---- RECOVERY_ASYNC job slot + IQ snapshot pool (Task 6). Everything is allocated at queue start; the RT consumer allocates nothing.
+ * A snapshot holder is a full set of ring-sized owned-IQ buffers: after a slot group the consumer SWAPS its owned buffers with a free holder
+ * (pointer swap, no copy) and the holder, refcounted by the group's deferred jobs, goes to the worker, which returns it when done. */
+typedef struct { c16_t *iq[NB_ANTENNAS_RX]; _Atomic int refs; } recov_snap_t;
+typedef struct { nr_pdsch_passive_job_t job; recov_snap_t *snap; } recov_wjob_t;
+#define RECOV_SNAP_MAX 32
+static recov_snap_t g_rsnap[RECOV_SNAP_MAX];
+static int g_rsnap_free[RECOV_SNAP_MAX], g_rsnap_nfree, g_rsnap_n;
+static pthread_mutex_t g_rsnap_mu = PTHREAD_MUTEX_INITIALIZER;
+static bool g_recov_ok; /* snapshot pool allocated and the worker running */
+static _Atomic uint64_t g_recov_nosnap;
+static void recov_group_handoff(int idx, recov_wjob_t *const slots[], const nr_recov_key_t keys[], int n);
+bool nr_pdsch_passive_first_pass_waiting(void); /* TAIL-FIX, defined below */
+
+/* ISAC_PDSCH_PIN_PREWARM_ALL=1: the pdschRecov worker pins its decode buffers at its start, like the consumers (else at its first rescue) */
+int nr_pdsch_pin_prewarm_all(void);
+void nr_pdsch_recovery_thread_prewarm(void)
+{
+  if (nr_pdsch_pin_prewarm_all() && g_ue) nr_pdsch_passive_decode_pin_prewarm(g_ue);
+}
+
+extern __thread uint32_t nr_gp_tt[26]; /* nr_gpu_pass_dl.c */
 static void *nr_pdsch_passive_queue_thread(void *arg)
 {
   const int idx = ((consumer_arg_t *)arg)->idx;
@@ -1242,54 +1135,53 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
   const long slots_per_frame = fp->slots_per_frame;
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d started\n", idx);
+  prctl(PR_SET_TIMERSLACK, 1UL);
+  nr_spin_acct_t spin_acct;
+  nr_spin_acct_init(&spin_acct);
+  nr_spin_pred_init(&g_spin_pred, 10000000ull / (uint64_t)slots_per_frame, &nr_ue_diag_producer_wall_ns); /* idempotent: same values from every consumer */
   nr_pdsch_passive_decode_pin_prewarm(ue); /* DECODETIME: ISAC_PDSCH_GPU_HOST_PIN=1 only */
-  const char *slot_timing_env = getenv("ISAC_PDSCH_SLOT_TIMING");
-  const bool slot_timing = slot_timing_env && atoi(slot_timing_env) != 0;
-  {
-    const char *e = getenv("ISAC_PDSCH_INLINE_POOL");
-    nr_passive_tpool_inline = e && atoi(e) != 0;
-    if (nr_passive_tpool_inline)
-      LOG_A(PHY, "SENSING: passive PDSCH consumer %d runs FEP/chest/LDPC tasks inline (ISAC_PDSCH_INLINE_POOL)\n", idx);
-  }
+  nr_passive_tpool_inline = true; /* frozen ISAC_PDSCH_INLINE_POOL=1 */
+  LOG_A(PHY, "SENSING: passive PDSCH consumer %d runs FEP/chest/LDPC tasks inline\n", idx);
 
-  /* ISAC_PDSCHQ_SIGNAL_TIME=1 (T26c, REPLAY ONLY): an offline replay runs at a fraction of real time, so the decode
-   * pool looks ~1/f times faster than live. After each dequeued group the consumer waits until the producer has
-   * advanced by the group's own wall time in SIGNAL slots -- the pool then serves the queue at its live rate in signal
-   * time, and queue fill / staleness become representative of live load. Never enable on air. */
-  static int s_sigt = -1;
-  if (s_sigt < 0) s_sigt = getenv("ISAC_PDSCHQ_SIGNAL_TIME") && atoi(getenv("ISAC_PDSCHQ_SIGNAL_TIME")) ? 1 : 0;
-  uint64_t sigt_t0 = 0;
-  long sigt_p0 = 0;
-  const double slot_ns = 10e6 / (double)slots_per_frame;
   while (1) {
-    if (s_sigt && sigt_t0) {
-      const long need = sigt_p0 + (long)((double)(now_ns() - sigt_t0) / slot_ns + 0.5);
-      for (int w = 0; w < 200000 && atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed) < need
-                      && !atomic_load_explicit(&g_stop, memory_order_relaxed); w++) {
-        struct timespec ts = {0, 50000};
-        nanosleep(&ts, NULL);
-      }
-      sigt_t0 = 0;
-    }
     nr_pdsch_passive_job_t job;
     nr_pdsch_passive_set_owned_iq(NULL, -1);
     const bool owned = nr_csirs_disc_enabled();
 
     pthread_mutex_lock(&g_lock);
+    g_idle++;
     while (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) == 0) {
       /* Timed wait so a stop cannot be missed if it lands between the predicate and the wait. */
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
+      uint64_t until = 0;
+      const nr_spin_action_t act = nr_spin_plan(&g_spin_pred, &spin_acct, nr_spin_now_ns(), &until);
+      if (act == NR_SPIN_SPIN) {
+        g_idle--; /* spinning is not idle for the slot-spread accounting */
+        pthread_mutex_unlock(&g_lock);
+        nr_spin_run(&g_spin_pred, &spin_acct, &g_count, until);
+        pthread_mutex_lock(&g_lock);
+        g_idle++;
+        continue;
+      }
+      if (act == NR_SPIN_SLEEP && until - nr_spin_now_ns() < 20ull * 1000 * 1000) {
+        ts.tv_sec = (time_t)(until / 1000000000ull);
+        ts.tv_nsec = (long)(until % 1000000000ull);
+        pthread_cond_timedwait(&g_cv, &g_lock, &ts);
+        nr_spin_note_wake(&spin_acct, until, nr_spin_now_ns());
+        continue;
+      }
       ts.tv_nsec += 20 * 1000 * 1000; // 20 ms
       if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
       pthread_cond_timedwait(&g_cv, &g_lock, &ts);
     }
+    g_idle--;
     if (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) != 0) {
       pthread_mutex_unlock(&g_lock);
       break;
     }
-    real_first_locked();
     job    = g_ring[g_tail];
+    REAL_ADD(job, -1);
     uint64_t enqueue_ns = g_ring_ns[g_tail];
     g_tail = (g_tail + 1) % g_depth;
     g_count--;
@@ -1298,19 +1190,53 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_passive_job_t more[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
     uint64_t more_ns[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
     int n_more = 0;
-    while (g_count > 0 && n_more < (atomic_load(&g_gpu) ? NR_PDSCH_PASSIVE_SLOT_GROUP_MAX : 8)
-           && g_ring[g_tail].absolute_slot == job.absolute_slot) {
+    while (!job.spread_solo && g_count > 0 && n_more < 8
+           && !g_ring[g_tail].spread_solo && g_ring[g_tail].absolute_slot == job.absolute_slot) {
       more_ns[n_more] = g_ring_ns[g_tail];
+      REAL_ADD(g_ring[g_tail], -1);
       more[n_more++] = g_ring[g_tail];
       g_tail = (g_tail + 1) % g_depth;
       g_count--;
     }
-    pthread_mutex_unlock(&g_lock);
-    const uint64_t slot_t0 = slot_timing ? now_ns() : 0;
-    if (s_sigt) {
-      sigt_t0 = now_ns();
-      sigt_p0 = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+    if (n_more > 0) {
+      /* SLOT SPREAD: cheapest member first; the dearest ones go back to the ring (at the tail end the next idle
+       * consumer reads) as solo jobs, one per idle consumer. Each re-enters the normal path exactly once: its
+       * own staleness check, accounting, release and trace; it re-estimates alone (the shared estimate is
+       * thread-local). enqueue_ns is kept, so qwait still counts from the original admission. */
+      const int n_all = n_more + 1;
+      nr_pdsch_passive_job_t all[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
+      uint64_t all_ns[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1], cost[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
+      int ord[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
+      all[0] = job; all_ns[0] = enqueue_ns;
+      for (int k = 0; k < n_more; k++) { all[k + 1] = more[k]; all_ns[k + 1] = more_ns[k]; }
+      for (int k = 0; k < n_all; k++) {
+        const int ly = __builtin_popcount(all[k].dlsch_pdu.dmrs_ports);
+        cost[k] = (uint64_t)all[k].freq_alloc.num_rbs * all[k].dlsch_pdu.number_symbols * (all[k].dlsch_pdu.cw_info[0].qamModOrder ? all[k].dlsch_pdu.cw_info[0].qamModOrder : 1) * (ly ? ly : 1);
+      }
+      nr_slot_spread_order(cost, n_all, ord);
+      const int give = nr_slot_spread_give(n_all, g_idle);
+      const int keep = n_all - give;
+      for (int k = keep; k < n_all; k++) { /* cheapest of the given first, so the dearest ends at the front */
+        g_tail = (g_tail + g_depth - 1) % g_depth;
+        g_ring[g_tail] = all[ord[k]];
+        g_ring[g_tail].spread_solo = 1;
+        g_ring_ns[g_tail] = all_ns[ord[k]];
+        REAL_ADD(g_ring[g_tail], 1);
+        g_count++;
+      }
+      job = all[ord[0]]; enqueue_ns = all_ns[ord[0]];
+      n_more = keep - 1;
+      for (int k = 0; k < n_more; k++) { more[k] = all[ord[k + 1]]; more_ns[k] = all_ns[ord[k + 1]]; }
+      if (give > 0) pthread_cond_broadcast(&g_cv);
     }
+    pthread_mutex_unlock(&g_lock);
+    if (job.slot_gate && !nr_slot_gate_wait(&nr_slot_gate, job.absolute_slot, 50)) { /* the slot never completed (stream fault): drop, never decode half a slot */
+      release_solver(&job);
+      for (int k = 0; k < n_more; ++k) release_solver(&more[k]);
+      continue;
+    }
+    const uint64_t taken_ns = nr_passive_e2e_trace() ? now_ns() : 0; /* SYSAN e2e: dequeue time */
+    nr_ss_ns[NRSS_WQ] = 0;
     if (owned) {
       const uint64_t taken = now_ns();
       latency_note(NR_PDSCH_LAT_QUEUE, enqueue_ns, taken);
@@ -1358,26 +1284,6 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     if (rb_hi < rb_lo) /* no contiguous member: rb_n = 0 disables the widening */
       rb_lo = rb_hi = 0;
 #undef CONTIG_JOB
-    /* Wide first: the data-aided CFR rows come from what decodes, and a wide grant's row is
-     * worth more to the sensing grid than a narrow one's if the samples go stale mid-group. */
-    if (n_more > 0) {
-      nr_pdsch_passive_job_t all[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
-      uint64_t all_ns[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
-      all_ns[0] = enqueue_ns;
-      for (int k = 0; k < n_more; ++k) all_ns[k + 1] = more_ns[k];
-      all[0] = job;
-      for (int k = 0; k < n_more; k++) all[k + 1] = more[k];
-      for (int i = 1; i <= n_more; i++) {
-        nr_pdsch_passive_job_t t = all[i];
-        const uint64_t t_ns = all_ns[i];
-        int j = i - 1;
-        while (j >= 0 && all[j].freq_alloc.num_rbs < t.freq_alloc.num_rbs) { all[j + 1] = all[j]; all_ns[j + 1] = all_ns[j]; j--; }
-        all[j + 1] = t; all_ns[j + 1] = t_ns;
-      }
-      job = all[0]; enqueue_ns = all_ns[0];
-      for (int k = 0; k < n_more; ++k) more_ns[k] = all_ns[k + 1];
-      for (int k = 0; k < n_more; k++) more[k] = all[k + 1];
-    }
     nr_pdsch_passive_set_slot_share(n_more > 0, rb_lo, rb_hi - rb_lo);
     if (n_more > 0) atomic_fetch_add_explicit(&g_slot_groups, 1, memory_order_relaxed);
 
@@ -1430,7 +1336,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       if (!nr_pdsch_copy_iq(dst, src, fp->nb_antennas_rx, ring * sizeof(c16_t),
                             ((off + ring - early) % ring) * sizeof(c16_t), window * sizeof(c16_t),
-                            job.absolute_slot, slots_per_frame, gpu_req_producer, NULL)) {
+                            job.absolute_slot, slots_per_frame, queue_producer_slot, NULL)) {
         atomic_fetch_add(&g_dropped_stale, n_more + 1);
         atomic_fetch_add(&g_drop_reason[NR_PDSCH_DROP_COPY], n_more + 1);
         release_solver(&job);
@@ -1440,75 +1346,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       nr_pdsch_passive_set_owned_iq(g_owned_iq[idx], job.nr_slot_rx);
     }
 
-    /* ---- GPU front end: one FEP for the slot, one launch set for every eligible job of the group.
-     * A job the GPU cannot take (PT-RS, CSI-RS RM, Nl > antennas, wants the data-aided CFR, BWP probe)
-     * keeps n_llr = 0 and goes through the CPU chain below unchanged. ---- */
-    int16_t *t_gpu_llr = g_consumer_gpu_llr[idx];
-    int16_t *t_gpu_rxF = g_consumer_gpu_rxF[idx];
-    int16_t *group_rxF = NULL;
-    uint64_t group_fep_ns = 0;
-    int group_gpu_jobs = 0;
-    nr_gpu_pdsch_job_t gj[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
-    int gj_ok[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1] = {0};
-    static _Atomic int s_probe_all_g = -1; /* _Atomic: every passivePdsch consumer resolves it (TSAN) */
-    if (s_probe_all_g < 0) s_probe_all_g = (getenv("ISAC_PROBE_ALL") != NULL) ? 1 : 0;
-    if (g_gpu) {
-
-      int n_gj = 0;
-      for (int gi = -1; gi < n_more; gi++) {
-        const nr_pdsch_passive_job_t *jb = gi < 0 ? &job : &more[gi];
-        nr_pdsch_passive_grant_t g = jb->grant;
-        g.source_absolute_slot = jb->absolute_slot;
-        gj_ok[gi + 1] = !nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), jb->config_epoch, nr_cfg_epoch_current)
-                        && jb->bwp_probe_entry <= 0 && !jb->want_data
-                        && nr_pdsch_passive_gpu_job(ue, &jb->dlsch_pdu, &jb->freq_alloc, &g, jb->nr_slot_rx,
-                                                    jb->layout_probe || s_probe_all_g, &gj[gi + 1]);
-        if (gj_ok[gi + 1]) n_gj++;
-      }
-      if (n_gj > 0 && t_gpu_llr) {
-
-        /* mirror nr_slot_fep_ant(): the slot's ring position, FO only with cont_fo_comp, OAI rotation */
-        const uint32_t ring_len = 2 * fp->samples_per_frame;
-        const uint32_t off = get_samples_slot_timestamp(fp, job.nr_slot_rx);
-        const double fo = ue->cont_fo_comp ? job.fo_hz : 0.0;
-        const int16_t *rx[4];
-        for (int a = 0; a < fp->nb_antennas_rx && a < 4; a++) rx[a] = (const int16_t *)nr_pdsch_passive_iq_for_slot(job.nr_slot_rx, ue->common_vars.rxdata)[a];
-        const c16_t *rot = fp->symbol_rotation[link_type_dl] + (job.nr_slot_rx % fp->slots_per_subframe) * fp->symbols_per_slot;
-        nr_gpu_pdsch_job_t packed[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
-        int map[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1], np = 0;
-        for (int k = 0; k <= n_more; k++) if (gj_ok[k]) { map[np] = k; packed[np++] = gj[k]; }
-        /* Hand off to the ONE dedicated GPU worker thread (see its header comment) instead of
-         * locking and executing the GPU call inline on this consumer thread: this consumer just
-         * blocks on its own completion condvar, so a bad core assignment for THIS thread no longer
-         * stalls the other five while it happens to be holding the GPU's only lock. */
-        gpu_fep_req_t req = {.jobs = packed, .n_jobs = np, .config_epoch = job.config_epoch,
-                             .source_abs_slot = job.absolute_slot, .slots_per_frame = slots_per_frame, .owned_iq = owned,
-                             .ring_len = ring_len, .ring_off = off,
-                             .abs_sample = off, .fo_hz = fo, .rot = (const int16_t *)rot,
-                             .out = t_gpu_llr, .out_cap = GPU_LLR_CAP,
-                             .rxdataF = g_gpu_chk_limit > 0 && atomic_load(&g_gpu_chk_n) < (uint64_t)g_gpu_chk_limit ? t_gpu_rxF : NULL,
-                             .read_rc = -1, .ofdm_symbol_size = fp->ofdm_symbol_size};
-        for (int a = 0; a < fp->nb_antennas_rx && a < 4; a++) req.rx[a] = rx[a];
-        const int64_t rc = gpu_fep_submit_and_wait(&req);
-        if (rc < 0 || !atomic_load(&g_gpu)) {
-          if (owned) atomic_fetch_add(&g_drop_reason[NR_PDSCH_GPU_FALLBACK], np);
-          for (int k = 0; k <= n_more; k++) gj_ok[k] = 0;
-        } else {
-          group_fep_ns = req.fep_end_ns;
-          group_gpu_jobs = np;
-          if (req.read_rc == 0) group_rxF = t_gpu_rxF;
-          for (int p = 0; p < np; p++) { gj[map[p]] = packed[p]; if (packed[p].n_llr == 0) gj_ok[map[p]] = 0; }
-        }
-      }
-    }
-
+    recov_wjob_t *rpend[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1]; /* RECOVERY_ASYNC: deferred jobs of this slot group, handed off at its end */
+    nr_recov_key_t rkeys[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
+    int n_rpend = 0;
     for (int gi = -1; gi < n_more; gi++) {
     if (gi >= 0) { job = more[gi]; enqueue_ns = more_ns[gi]; }
     NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
     if (!nr_cfg_epoch_work_current()) {
       continue;
     }
-    const nr_gpu_pdsch_job_t *gpu_job = gj_ok[gi + 1] && atomic_load(&g_gpu) ? &gj[gi + 1] : NULL;
     /* Only these three proc fields are read downstream -- verified by inspecting every proc->
      * reference in nr_dl_channel_estimation.c, nr_dlsch_demodulation.c and nr_pdsch_data_aided.c. */
     UE_nr_rxtx_proc_t proc = {0};
@@ -1593,18 +1439,13 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * is not proof (another UE's PDSCH may sit there), which is why it only ADDS hypotheses -- the TB CRC
          * still decides, and a converged context drops the layers it did not win on. FEP goes to a scratch
          * buffer: rxdataF carries this job's own slot, which the decode's per-thread FEP cache may reuse for
-         * the rest of the slot group. ISAC_PDSCH_K0_PROBE=0 disables it (read once).
+         * the rest of the slot group.
          * ponytail: 1 in 8 eligible jobs probes (up to K x 14 FFTs + up to K slots of waiting each). */
-        static _Atomic int s_k0_probe_on = -1; /* _Atomic: N consumers */
-        if (s_k0_probe_on < 0) {
-          const char *e = getenv("ISAC_PDSCH_K0_PROBE");
-          s_k0_probe_on = (e != NULL && atoi(e) == 0) ? 0 : 1;
-        }
         static _Atomic uint32_t s_probe_tick;
         static __thread c16_t *t_probe;
-        if (s_k0_probe_on && !t_probe)
+        if (!t_probe)
           t_probe = (c16_t *)malloc16_clear((size_t)rxdataF_sz * sizeof(c16_t));
-        if (s_k0_probe_on && t_probe && (atomic_fetch_add(&s_probe_tick, 1) % 8) == 0) {
+        if (t_probe && (atomic_fetch_add(&s_probe_tick, 1) % 8) == 0) {
           const long K = slots_per_frame - 2 < 32 ? slots_per_frame - 2 : 32;
           const int slot_iters = (int)(100 / slots_per_frame) > 0 ? (int)(100 / slots_per_frame) : 1; /* 100 us steps per slot */
           uint64_t hits = 0; /* bit k: DM-RS seen on these PRBs at slot+k */
@@ -1658,39 +1499,23 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
     }
     nr_pdsch_passive_decode_result_t dec = {0};
-    { /* ISAC_PROBE_ALL=1: every job is a first-code-block probe, pinned confs included -- isolates
-       * the probe mechanics from the layout search. */
-      static _Atomic int s_probe_all = -1; /* _Atomic: every passivePdsch consumer resolves it (TSAN) */
-      if (s_probe_all < 0)
-        s_probe_all = (getenv("ISAC_PROBE_ALL") != NULL) ? 1 : 0;
-      if (s_probe_all)
-        job.layout_probe = 1;
-    }
-    /* GRANTWORK-LITE (ISAC_TD_GRANTWORK, default ON, 0 disables; levers plan R1): this grant's shared per-geometry work
+    /* GRANTWORK-LITE (levers plan R1): this grant's shared per-geometry work
      * (FEP / chest / LLRs per signature, immutable, unified memory) -- the main decode computes and publishes
-     * its own signature; CB0 of other hypotheses can then be extracted from it (nr_pdsch_passive_gw_cb0).
-     * ISAC_TD_GW_PROBE=1 also serves layout probes from it (whole slot instead of the probe horizon). */
-    static _Atomic int s_gw_on = -1, s_gw_probe = -1; /* _Atomic: N consumers */
-    if (s_gw_on < 0) {
-      const char *e = getenv("ISAC_TD_GW_PROBE");
-      s_gw_probe = (e != NULL && atoi(e) != 0) ? 1 : 0;
-      e = getenv("ISAC_TD_GRANTWORK"); /* default ON (operator 2026-10-04: fastest combination); 0 disables */
-      s_gw_on = (e != NULL && *e && atoi(e) == 0) ? 0 : 1;
-    }
+     * its own signature; CB0 of other hypotheses can then be extracted from it (nr_pdsch_passive_gw_cb0). */
     nr_td_grantwork_t *gw = NULL;
-    if (s_gw_on && !gpu_job) {
+    {
       /* I4: the borrowed FEP buffer belongs to THIS job: any older gw can no longer compute on it */
       __atomic_fetch_add(&g_fep_gen[idx], 1, __ATOMIC_RELEASE);
       gw = nr_pdsch_passive_grantwork_begin(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, job.fo_hz,
                                             job.sweep_ticket.k0, &rxdataF[0][0], &g_fep_gen[idx]);
-      nr_pdsch_passive_set_grantwork(gw, s_gw_probe != 0);
+      nr_pdsch_passive_set_grantwork(gw, false);
     }
-    /* CB0 ELIMINATION CHANNEL (ISAC_TD_CB0_ELIM, default ON, 0 disables; nr_td_cb0_wire.h): the CB0 hypothesis set of this grant is
+    /* CB0 ELIMINATION CHANNEL (nr_td_cb0_wire.h): the CB0 hypothesis set of this grant is
      * fixed HERE, before any decode of the grant; the TB decodes on the CPU only when this grant's CB0 batch will run on the
      * CPU backend (dominance rule; a CUDA CB0 batch dominates either TB decoder). */
     bool cb0_tb_cpu = false;
     const nr_td_cb0_job_t cb0_job = {.abs_slot = job.absolute_slot, .job_k0 = job.sweep_ticket.k0, .layout_probe = job.layout_probe != 0,
-                                     .gpu_job = gpu_job != NULL, .gw_on = s_gw_on != 0};
+                                     .gpu_job = false, .gw_on = true};
     const bool cb0_on = nr_td_cb0_wire_pre(&job.sweep_ticket, gw, &cb0_job, &cb0_tb_cpu);
     if (cb0_tb_cpu)
       nr_pdsch_passive_force_cpu_tb(true);
@@ -1698,228 +1523,150 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     /* PT-RS density sweep only once the layout and the Technique-D context are settled (a pinned
      * conf has no ticket: generation 0). */
     nr_pdsch_passive_ptrs_sweep_allow(!job.layout_probe && (job.sweep_ticket.generation == 0 || job.sweep_ticket.settled));
-    if (gpu_job)
-      nr_pdsch_passive_set_llr_override(t_gpu_llr + gpu_job->llr_offset, gpu_job->n_llr);
     extern __thread int nr_dlsch_mrc_mode_override, nr_dlsch_irc_override;
     /* T26d ISAC_RX_MRC_PER_RNTI receivers: 1 best branch, 3 MRC (+ALIGN env), 4 noise-weighted MRC (IRC diag), 5 IRC */
     nr_dlsch_mrc_mode_override = job.mrc_mode >= 4 ? 1 : (job.mrc_mode > 0 ? job.mrc_mode : -1);
     nr_dlsch_irc_override = job.mrc_mode == 4 ? 3 : job.mrc_mode == 5 ? 2 : job.mrc_mode == 6 ? 4 : (job.mrc_mode > 0 ? 0 : -1);
     extern __thread int nr_dlsch_eq_override;
-    { /* ISAC_RX_EQ_AB=1 (T26d): multi-layer post-solve grants (needs ISAC_RX_MRC_PER_RNTI) rotate the equaliser {fixed MMSE, float MMSE, ML} (paired A/B); the search keeps the default */
-      static int s_eqab = -1;
-      static _Atomic unsigned s_eqn = 0;
-      if (s_eqab < 0) s_eqab = getenv("ISAC_RX_EQ_AB") ? atoi(getenv("ISAC_RX_EQ_AB")) : 0;
-      nr_dlsch_eq_override = (s_eqab && job.mrc_mode > 0 && !job.layout_probe && __builtin_popcount(job.dlsch_pdu.dmrs_ports) >= 2) ? (int)(atomic_fetch_add(&s_eqn, 1) % 3u) : -1;
-    }
-    const int eq_used = nr_dlsch_eq_override;
     extern __thread int nr_pdsch_chest_occ_override;
-    { /* ISAC_CHEST_OCC_AB=1 (T26d): multi-layer post-solve grants alternate stock / OCC-after-delay chest (paired A/B) */
-      static int s_ocab = -1;
-      static _Atomic unsigned s_ocn = 0;
-      if (s_ocab < 0) s_ocab = getenv("ISAC_CHEST_OCC_AB") ? atoi(getenv("ISAC_CHEST_OCC_AB")) : 0;
-      nr_pdsch_chest_occ_override = (s_ocab && job.mrc_mode > 0 && !job.layout_probe && __builtin_popcount(job.dlsch_pdu.dmrs_ports) >= 2) ? (int)(atomic_fetch_add(&s_ocn, 1) % 2u) : -1;
-    }
-    const int occ_used = nr_pdsch_chest_occ_override;
     extern __thread int nr_pdsch_ldpc_iters_override;
-    { /* ISAC_LDPC_ITERS_AB=<a>,<b> (T26d): post-solve full decodes alternate the LDPC iteration limit (paired A/B) */
-      static int s_ia = -1, s_ib = -1;
-      static _Atomic unsigned s_in = 0;
-      if (s_ia < 0) {
-        const char *e = getenv("ISAC_LDPC_ITERS_AB");
-        if (e == NULL || sscanf(e, "%d,%d", &s_ia, &s_ib) != 2) { s_ia = 0; s_ib = 0; }
-      }
-      nr_pdsch_ldpc_iters_override = (s_ia > 0 && s_ib > 0 && job.mrc_mode > 0 && !job.layout_probe)
-                                         ? ((atomic_fetch_add(&s_in, 1) & 1u) ? s_ib : s_ia) : -1;
-    }
-    const int it_used = nr_pdsch_ldpc_iters_override;
+    /* FATTAILS DECSLOW: a full decode call above 20 ms says where its wall time went --
+     * thread CPU, voluntary (blocking: mutex, GPU poll sleep) / involuntary (preempted) switches, page faults, cores */
+    void nr_pdsch_passive_decode_slow_stats(unsigned *bodies, uint64_t *body_ns, uint64_t *stage_ns);
+    struct rusage ds_ru0 = {0};
+    struct timespec ds_c0 = {0};
+    const int ds_cpu0 = sched_getcpu();
+    getrusage(RUSAGE_THREAD, &ds_ru0);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ds_c0);
     const uint64_t dec_t0 = now_ns();
+    nr_pdsch_passive_recov_mode(g_recov_ok && owned && !job.layout_probe ? 1 : 0); /* RECOVERY_ASYNC: arms go to pdschRecov (owned IQ only: the snapshot is handed off) */
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
-    { /* GPUSCHED ISAC_PDSCH_GPU_PRIO=1: back to real-time streams; a demod context still held for a deferred EVM of a
-       * decode that returned before its LDPC stage is freed now, not at this thread's next grant (8-context pool, 5+ consumers) */
-      static _Atomic int s_prio = -1;
-      if (s_prio < 0) s_prio = getenv("ISAC_PDSCH_GPU_PRIO") && atoi(getenv("ISAC_PDSCH_GPU_PRIO")) == 1;
-      if (s_prio) {
-        nr_pdsch_gpu_exact_set_lowprio(0);
-        if (nr_pdsch_gpu_demod_evm_deferred())
-          nr_pdsch_gpu_demod_evm_finish(0);
-      }
+    const bool recov_deferred = nr_pdsch_passive_recov_deferred();
+    nr_pdsch_passive_recov_mode(0);
+    if (now_ns() - dec_t0 > 20000000ull) {
+      static _Atomic int s_left = 300;
+      struct rusage ru1;
+      struct timespec c1;
+      getrusage(RUSAGE_THREAD, &ru1);
+      clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c1);
+      struct timespec ts;
+      clock_gettime(CLOCK_MONOTONIC, &ts);
+      unsigned ds_bodies = 0;
+      uint64_t ds_body = 0, ds_stage = 0;
+      nr_pdsch_passive_decode_slow_stats(&ds_bodies, &ds_body, &ds_stage);
+      if (atomic_fetch_sub(&s_left, 1) > 0)
+        LOG_I(PHY, "SENSING: DECSLOW t=%ld.%03ld rnti=0x%04x mcs=%u Nl=%u rb=%u+%u probe=%d st=%d wall_us=%lu bodies=%u body_us=%lu stage_us=%lu "
+                   "cpu_us=%ld vcsw=%ld ivcsw=%ld minflt=%ld majflt=%ld core=%d->%d\n",
+              (long)ts.tv_sec, ts.tv_nsec / 1000000, job.rnti, job.grant.mcs, (unsigned)__builtin_popcount(job.dlsch_pdu.dmrs_ports),
+              job.freq_alloc.first_rb, job.freq_alloc.num_rbs, (int)job.layout_probe, (int)st_raw, (unsigned long)((now_ns() - dec_t0) / 1000),
+              ds_bodies, (unsigned long)(ds_body / 1000), (unsigned long)(ds_stage / 1000), (long)((c1.tv_sec - ds_c0.tv_sec) * 1000000L + (c1.tv_nsec - ds_c0.tv_nsec) / 1000), ru1.ru_nvcsw - ds_ru0.ru_nvcsw,
+              ru1.ru_nivcsw - ds_ru0.ru_nivcsw, ru1.ru_minflt - ds_ru0.ru_minflt, ru1.ru_majflt - ds_ru0.ru_majflt, ds_cpu0, sched_getcpu());
     }
-    if (!gpu_job) nr_pdsch_gpu_record_cpu(ue, &job, &dec, &rxdataF[0][0], rxdataF_sz);
     nr_dlsch_mrc_mode_override = -1;
     nr_dlsch_irc_override = -1;
     nr_dlsch_eq_override = -1;
     nr_pdsch_chest_occ_override = -1;
     nr_pdsch_ldpc_iters_override = -1;
-    const double dec_us = (double)(now_ns() - dec_t0) / 1000.0;
+    const uint64_t dec_t1 = now_ns();
+    const double dec_us = (double)(dec_t1 - dec_t0) / 1000.0;
     if (owned) {
       const uint64_t done = now_ns();
       const uint64_t cpu_fep = nr_pdsch_passive_last_fep_ns();
-      const uint64_t fep = cpu_fep ? cpu_fep : (gpu_job ? group_fep_ns : 0);
+      const uint64_t fep = cpu_fep;
       latency_note(NR_PDSCH_LAT_FEP, enqueue_ns, fep);
       if (st_raw == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st_raw == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL) {
         latency_note(NR_PDSCH_LAT_LDPC, fep, done);
         latency_note(NR_PDSCH_LAT_TOTAL, enqueue_ns, done);
       }
     }
-    nr_pdsch_passive_set_llr_override(NULL, 0);
     if (cb0_tb_cpu)
       nr_pdsch_passive_force_cpu_tb(false);
     const uint8_t cb0_tb_decoder = cb0_on ? nr_pdsch_passive_last_decoder_used() : 0; /* the main decode's, before any rerun */
     const bool probe_outcome = nr_pdsch_passive_probe_outcome(); /* before the self-check re-runs the decode */
-    bool gpu_health_failed = false;
     if (cb0_on) /* the CB0 batch: after the main decode published its signature, on this (job) thread, before job_end */
       nr_td_cb0_wire_run(gw);
-    if (job.layout_probe && !gpu_job && st_raw != NR_PDSCH_PASSIVE_DECODE_ERROR && st_raw != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
+    if (job.layout_probe && st_raw != NR_PDSCH_PASSIVE_DECODE_ERROR && st_raw != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
       nr_pdsch_passive_probe_equiv_check(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF); /* debug, env-gated */
     nr_pdsch_passive_set_grantwork(NULL, false);
-    /* ISAC_GPU_SELFCHECK=N: first 32 comparable GPU-fed decodes by default; enforce is opt-in. */
-    {
-      if (gpu_job && g_gpu_chk_limit > 0 && atomic_load(&g_gpu_chk_n) < (uint64_t)g_gpu_chk_limit
-          && st_raw != NR_PDSCH_PASSIVE_DECODE_ERROR && st_raw != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
-        const bool gpu_ok = job.layout_probe ? probe_outcome : st_raw == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
-        nr_pdsch_passive_decode_result_t dec2 = {0};
-        fapi_nr_dl_config_dlsch_pdu_rel15_t pdu2 = job.dlsch_pdu;
-        nr_pdsch_passive_probe_mode(job.layout_probe != 0);
-        const nr_pdsch_passive_decode_status_t st2 =
-            nr_pdsch_passive_decode(ue, &proc, &pdu2, &job.freq_alloc, &job.grant, rxdataF, &dec2);
-        if (st2 != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
-        const bool cpu_ok = job.layout_probe ? nr_pdsch_passive_probe_outcome() : st2 == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
-        const int16_t *lc = NULL;
-        uint32_t G = st2 == NR_PDSCH_PASSIVE_DECODE_ERROR ? 0 : nr_pdsch_passive_last_llr(&lc);
-        if (G > (1u << 22) || lc == NULL) G = 0; /* a bogus blind grant can leave an out-of-range G (OTA SIGSEGV 2026-10-08) */
-        const uint32_t n = gpu_job->n_llr < G ? gpu_job->n_llr : G;
-        /* nr_codeword_unscrambling() processes ceil(G/32) full SIMD blocks. */
-        const size_t G_padded = ((size_t)G + 31u) & ~(size_t)31u;
-        int16_t *lg = G ? calloc(G_padded, sizeof(int16_t)) : NULL;
-        double sa = NAN, mc = 0, mg = 0, dmax = 0, sab[8] = {0}; /* sign agreement per bit position of the RE */
-        if (lc && lg && n && gpu_job->Qm && gpu_job->Nl) {
-          memcpy(lg, t_gpu_llr + gpu_job->llr_offset, (size_t)n * sizeof(int16_t));
-          if (n < G) memset(lg + n, 0, (size_t)(G - n) * sizeof(int16_t));
-          nr_dlsch_unscrambling(lg, G, 0, pdu2.dlDataScramblingId, job.grant.rnti);
-          double sas[14] = {0}, sal[4] = {0}; uint32_t nss[14] = {0}, nsl[4] = {0}; /* b0 agreement per symbol / per layer */
-          const uint32_t per_re = gpu_job->Nl * gpu_job->Qm, per_sym = 12u * gpu_job->nb_rb * per_re; /* no data on DM-RS symbols assumed */
-          for (uint32_t i = 0; i < n; i++) {
-            mc += abs(lc[i]); mg += abs(lg[i]);
-            const int e = (lc[i] < 0) == (lg[i] < 0); sab[i % gpu_job->Qm] += e;
-            if (i % gpu_job->Qm == 0) { const uint32_t sy = i / per_sym, ly = (i / gpu_job->Qm) % gpu_job->Nl; if (sy < 14) { sas[sy] += e; nss[sy]++; } sal[ly] += e; nsl[ly]++; }
-          }
-          for (int b = 0; b < gpu_job->Qm; b++) sab[b] /= (double)n / gpu_job->Qm;
-          char extra[400]; int u = snprintf(extra, sizeof extra, " b0/sym[");
-          for (int q = 0; q < 14 && nss[q]; q++) u += snprintf(extra + u, sizeof extra - u, " %.2f", sas[q] / nss[q]);
-          u += snprintf(extra + u, sizeof extra - u, " ] b0/layer[");
-          for (int q = 0; q < gpu_job->Nl; q++) u += snprintf(extra + u, sizeof extra - u, " %.2f", nsl[q] ? sal[q] / nsl[q] : 0);
-          snprintf(extra + u, sizeof extra - u, " ]");
-          LOG_A(PHY, "SENSING: GPU_SELFCHECK_DETAIL%s\n", extra);
-          const double f = mg > 0 ? mc / mg : 1.0; /* match the GPU scale to the CPU's mean |LLR| */
-          for (uint32_t i = 0; i < n; i++) { const double d = fabs((double)lc[i] - f * lg[i]); if (d > dmax) dmax = d; }
-          sa = nr_gpu_fep_sign_agreement(lc, lg, n); mc /= n; mg /= n;
-          gpu_dump_record(ue, &job, gpu_job, lc, lg, G);
-        }
-        free(lg);
-        /* FEP stage on its own: GPU rxdataF vs the CPU's for antenna 0 on the first DM-RS symbol over
-         * the grant's subcarriers -- normalised correlation (1 = same up to a scale) and scale ratio. */
-        double corr = -1, ratio = 0;
-        {
-          const int sym = __builtin_ctz((unsigned)job.dlsch_pdu.dlDmrsSymbPos | (1u << 15));
-          if (group_rxF) {
-            double cr = 0, ci = 0, pa = 0, pb = 0;
-            const int k0 = fp->first_carrier_offset + 12 * (job.dlsch_pdu.BWPStart + job.freq_alloc.first_rb);
-            for (int k = 0; k < 12 * job.freq_alloc.num_rbs; k++) {
-              const int kk = (k0 + k) % fp->ofdm_symbol_size;
-              const double ar = rxdataF[0][sym * fp->ofdm_symbol_size + kk].r, ai = rxdataF[0][sym * fp->ofdm_symbol_size + kk].i;
-              const double br = group_rxF[2 * (sym * fp->ofdm_symbol_size + kk)], bi = group_rxF[2 * (sym * fp->ofdm_symbol_size + kk) + 1];
-              cr += ar * br + ai * bi; ci += ai * br - ar * bi; pa += ar * ar + ai * ai; pb += br * br + bi * bi;
-            }
-            if (pa > 0 && pb > 0) { corr = sqrt(cr * cr + ci * ci) / sqrt(pa * pb); ratio = sqrt(pb / pa); }
-          }
-        }
-        const bool crc_match = st2 != NR_PDSCH_PASSIVE_DECODE_ERROR && gpu_ok == cpu_ok;
-        const nr_gpu_fep_check_t check = nr_gpu_fep_reference_result(
-            owned ? job.absolute_slot : atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
-            job.absolute_slot, slots_per_frame, st2 != NR_PDSCH_PASSIVE_DECODE_ERROR && lc && lg && n
-                && group_rxF && gpu_job->Qm && gpu_job->Nl, corr, ratio, sa, crc_match);
-        if (check == NR_GPU_FEP_SKIPPED) {
-          atomic_fetch_add(&g_gpu_chk_skipped, 1);
-        } else {
-          uint64_t checked = atomic_load(&g_gpu_chk_n);
-          const int limit = atomic_load(&g_gpu_chk_limit);
-          while (checked < (uint64_t)limit && !atomic_compare_exchange_weak(&g_gpu_chk_n, &checked, checked + 1)) {}
-          if (checked < (uint64_t)limit) {
-            atomic_fetch_add(&g_gpu_chk_crc_agree, crc_match);
-            atomic_fetch_add(&g_gpu_chk_crc_gpu_ok, gpu_ok);
-            atomic_fetch_add(&g_gpu_chk_crc_cpu_ok, cpu_ok);
-            if (check == NR_GPU_FEP_FAIL) {
-              const uint64_t prior = atomic_fetch_add(&g_gpu_chk_fail, 1);
-              if (atomic_load(&g_gpu_chk_enforce)) gpu_health_failed = true;
-              if (nr_gpu_fep_should_disable(atomic_load(&g_gpu_chk_enforce), prior)) {
-                const int was_disabled = atomic_exchange(&g_gpu_disabled, 1);
-                const nr_gpu_fep_api_t *was_gpu = atomic_exchange(&g_gpu, NULL);
-                if (!was_disabled && was_gpu)
-                  LOG_E(PHY, "SENSING: GPU_FEP disabled: 2 self-check tolerance failures; CPU path for remainder of run\n");
-              }
-            }
-            LOG_A(PHY, "SENSING: GPU_SELFCHECK slot=%ld rnti=0x%x probe=%u nrb=%u Nl=%u Qm=%u crc_gpu=%d crc_cpu=%d evm_gpu=%.3f evm_cpu=%.3f sign_agree=%.4f mean|llr| cpu=%.1f gpu=%.1f max|dllr|(scaled)=%.0f over %u | per-bit [%.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f] | rxdataF corr=%.4f gpu/cpu scale=%.3f\n",
-                  job.absolute_slot, job.rnti, job.layout_probe, job.freq_alloc.num_rbs, gpu_job->Nl, gpu_job->Qm, gpu_ok, cpu_ok,
-                  dec.evm_valid ? dec.evm_pct : -1.0, dec2.evm_valid ? dec2.evm_pct : -1.0, sa, mc, mg, dmax, n,
-                  sab[0], sab[1], sab[2], sab[3], sab[4], sab[5], sab[6], sab[7], corr, ratio);
-          }
-        }
-        } else {
-          atomic_fetch_add(&g_gpu_chk_skipped, 1);
-        }
-      } else if (gpu_job && atomic_load(&g_gpu_chk_limit) > 0
-                 && atomic_load(&g_gpu_chk_n) < (uint64_t)atomic_load(&g_gpu_chk_limit)) {
-        atomic_fetch_add(&g_gpu_chk_skipped, 1);
-      }
-    }
     /* A layout probe's outcome is code block 0's CRC, mapped onto the TB status the feedback below
      * reads; the TB itself was not decoded and must not be submitted or counted. */
-    if (gpu_job && !atomic_load(&g_gpu)) gpu_health_failed = true;
     const nr_pdsch_passive_decode_status_t st =
-        gpu_health_failed ? NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED
-        : !job.layout_probe ? st_raw
+        !job.layout_probe ? st_raw
         : (st_raw == NR_PDSCH_PASSIVE_DECODE_ERROR || st_raw == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) ? st_raw
         : (probe_outcome ? NR_PDSCH_PASSIVE_DECODE_CRC_OK : NR_PDSCH_PASSIVE_DECODE_CRC_FAIL);
     nr_pdsch_passive_probe_mode(false);
-    if (dec.evm_valid && (!job.layout_probe || getenv("ISAC_PDSCH_EVM_PROBES"))
+    /* RECOVERY_ASYNC: the failed first pass goes to the worker, which delivers the held-back outcome feedback of this grant exactly once
+     * (recov_feedback: CRC-OK when an arm rescues it, the failure otherwise) -- so the learning state sees one verdict per grant, as inline.
+     * Submit failed (ring full): not held, the failure is fed here as without the flag. */
+    bool recov_hold = false;
+    if (recov_deferred && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL) {
+      recov_wjob_t *wj = nr_pdsch_recovery_acquire(); /* preallocated slot; NULL = full / busy, counted dropped_full */
+      if (wj) {
+        wj->job = job;
+        wj->snap = NULL;
+        rkeys[n_rpend] = (nr_recov_key_t){.rnti = job.rnti, .harq_pid = (uint8_t)job.grant.harq_pid, .ndi = (uint8_t)job.grant.ndi,
+                                          .abs_slot = (uint32_t)job.absolute_slot, .arm_mask = 0x1f};
+        rpend[n_rpend++] = wj;
+        recov_hold = true;
+      }
+    }
+    if ((dec.evm_valid || dec.skip)
         && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
-      /* ISAC_PDSCH_EVM_GRANT (T26c): one line per full decode, decoded AND failed. snr = -20 log10(evm). */
+      /* T26c: one line per full decode, decoded AND failed. snr = -20 log10(evm). */
+      /* SYSAN e2e trace: e2e=arr2enq,qwait,pre,dec,first_body,bodies,tot,lag (us; lag = producer slots ahead at done):
+       * slot samples read -> DCI accepted (scan) -> dequeued -> decode call start (IQ copy, GPU FEP group) -> decode end */
+      char e2e[256] = "", stg[192] = "", gq[256] = "";
+      if (nr_gp_tt[10]) /* measurement only: the DL GPU pass's sub-graph spans, seq and LDPC launch summary (nr_gpu_pass_dl.c nr_gp_tt) */
+        snprintf(gq, sizeof(gq), " gq=%u,%u,%u,%u li=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u", nr_gp_tt[7], nr_gp_tt[8], nr_gp_tt[9], nr_gp_tt[10], nr_gp_tt[11], nr_gp_tt[12], nr_gp_tt[13],
+                 nr_gp_tt[14], nr_gp_tt[15], nr_gp_tt[16], nr_gp_tt[17], nr_gp_tt[18], nr_gp_tt[19], nr_gp_tt[20], nr_gp_tt[21], nr_gp_tt[22], nr_gp_tt[23], nr_gp_tt[24], nr_gp_tt[25]);
+      if (nr_passive_e2e_trace()) {
+        extern int nr_pdsch_passive_decode_stg(char *, size_t);
+        nr_pdsch_passive_decode_stg(stg, sizeof(stg));
+        extern uint64_t nr_pdsch_passive_decode_first_body_ns(void);
+        unsigned eb = 0;
+        uint64_t ebody = 0, estage = 0;
+        nr_pdsch_passive_decode_slow_stats(&eb, &ebody, &estage);
+        const uint64_t arr = nr_passive_slot_arrival_ns(job.absolute_slot);
+#define E2E_US(a, b) ((a) && (b) && (b) >= (a) ? (long)(((b) - (a)) / 1000) : -1L)
+        snprintf(e2e, sizeof(e2e), " e2e=%ld,%ld,%ld,%ld,%ld,%u,%ld,%ld", E2E_US(arr, enqueue_ns), E2E_US(enqueue_ns, taken_ns),
+                 E2E_US(taken_ns, dec_t0), E2E_US(dec_t0, dec_t1), (long)(nr_pdsch_passive_decode_first_body_ns() / 1000), eb,
+                 E2E_US(arr, dec_t1), atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed) - job.absolute_slot);
+        if (job.es_sym1) { /* early grant: accepted at symbol k of its slot, `lead` us before the slot's read returned (arr2enq is then <= 0) */
+          const size_t l_es = strlen(e2e);
+          snprintf(e2e + l_es, sizeof(e2e) - l_es, " es=%d,%ld", (int)job.es_sym1 - 1,
+                   (arr && enqueue_ns && arr >= enqueue_ns) ? (long)((arr - enqueue_ns) / 1000) : -1L);
+        }
+#undef E2E_US
+      }
       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
                  "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f probe=%d kappa=%.2f alpha=%.2f,%.2f,%.2f,%.2f "
-                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f\n",
+                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f dmrs_snr=%.1f,%.1f,%.1f,%.1f,%.1f dmrs_pw=%.1f dmrs_ref=%.1f dsp=%u skip=%d gp=%u,%u,%u,%u,%u,%u,%u%s%s%s\n",
             job.rnti, job.frame_rx, job.nr_slot_rx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.grant.mcs, job.grant.mcs_table,
             dec.cw.qamModOrder, dec.cw.Nl, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, dec.evm_nsym, dec.evm_pct,
             dec.evm_pct > 0.f ? -20.0 * log10(dec.evm_pct / 100.0) : 99.0, dec.br_snr_db[0], dec.br_snr_db[1], dec.br_snr_db[2],
             dec.br_snr_db[3], dec.evm_nbrx, job.solver_token,
             dec.evm_cpe_pct > 0.f ? -20.0 * log10(dec.evm_cpe_pct / 100.0) : 99.0, (int)job.layout_probe, dec.kappa,
             dec.br_alpha[0], dec.br_alpha[1], dec.br_alpha[2], dec.br_alpha[3], dec.br_nvar_db[0], dec.br_nvar_db[1],
-            dec.br_nvar_db[2], dec.br_nvar_db[3], dec.rho, (int)job.mrc_mode, dec.dmrs_ports, dec.n_cdm, dec.dmrs_add, eq_used, occ_used, it_used, dec_us,
+            dec.br_nvar_db[2], dec.br_nvar_db[3], dec.rho, (int)job.mrc_mode, dec.dmrs_ports, dec.n_cdm, dec.dmrs_add, -1, -1, -1, dec_us,
             job.grant.rv, job.grant.ndi, job.grant.harq_pid, (unsigned)dec.cw.TBS, dec.layer_snr_db[0], dec.layer_snr_db[1],
-            dec.layer_snr_db[2], dec.layer_snr_db[3], (int)dec.l2maxh, dec.zabs);
+            dec.layer_snr_db[2], dec.layer_snr_db[3], (int)dec.l2maxh, dec.zabs,
+            dec.dmrs_snr.snr_db[0], dec.dmrs_snr.snr_db[1], dec.dmrs_snr.snr_db[2], dec.dmrs_snr.snr_db[3], dec.dmrs_snr.comb_db, dec.dmrs_snr.pw_db,
+            dec.dmrs_snr.ref_db, (unsigned)dec.dmrs_path, (int)dec.skip, nr_gp_tt[0], nr_gp_tt[1], nr_gp_tt[2], nr_gp_tt[3], nr_gp_tt[4], nr_gp_tt[5], nr_gp_tt[6], gq, e2e, stg);
+      memset(nr_gp_tt, 0, sizeof(nr_gp_tt));
       if (dec.evm_pct > 0.f && !job.layout_probe)
         nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)), (int)job.mrc_mode, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     }
-    if (job.solver_token) {
+    if (job.solver_token && !recov_hold) {
       const bool sv_credit = owned || nr_passive_credit_allowed(
           atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), job.absolute_slot, slots_per_frame);
       /* A CRC pass is evidence even on IQ that expired meanwhile (overwritten samples cannot pass a CRC but by the
        * same chance any wrong hypothesis can); a FAILURE on expired IQ says nothing and is not credited. */
       const bool sv_ok = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
-      if (getenv("ISAC_PDSCH_SOLVER_PROBELOG") && atoi(getenv("ISAC_PDSCH_SOLVER_PROBELOG")))
-        LOG_A(PHY, "SENSING: PDSCH_SOLVER identity tok=%u rnti=0x%04x key=%d abs=%ld dmrs=%u data=%u nscid=%u crc=%d probe=%d\n",
+      LOG_A(PHY, "SENSING: PDSCH_SOLVER identity tok=%u rnti=0x%04x key=%d abs=%ld dmrs=%u data=%u nscid=%u crc=%d probe=%d\n",
               job.solver_token, job.rnti, job.coreset_key, (long)job.absolute_slot,
               job.dlsch_pdu.dlDmrsScramblingId, job.dlsch_pdu.dlDataScramblingId,
               job.dlsch_pdu.nscid, sv_ok, (int)job.layout_probe);
-      static int s_sdiag = -1;
-      static _Atomic int s_sdiag_left = 400;
-      if (s_sdiag < 0) s_sdiag = getenv("ISAC_PDSCH_SOLVER_DIAG") ? 1 : 0;
-      if (s_sdiag && !job.layout_probe && atomic_fetch_sub(&s_sdiag_left, 1) > 0)
-        LOG_A(PHY, "SENSING: PDSCH_SOLVER_FULL rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u rb=%u+%u ports=0x%x cdm=%u S=%u L=%u dmrs=0x%x csirs_rm=%u slot160=%ld st=%d\n",
-              job.rnti, job.frame_rx, job.nr_slot_rx, sv_ok, job.grant.mcs, job.grant.mcs_table, job.freq_alloc.first_rb,
-              job.freq_alloc.num_rbs, job.dlsch_pdu.dmrs_ports, job.dlsch_pdu.n_dmrs_cdm_groups, job.dlsch_pdu.start_symbol,
-              job.dlsch_pdu.number_symbols, job.dlsch_pdu.dlDmrsSymbPos, job.dlsch_pdu.numCsiRsForRateMatching,
-              (long)(job.dci_abs_slot % 160), (int)st);
       nr_pdsch_solver_feedback(job.solver_token, sv_ok,
                                (sv_ok || sv_credit) && nr_cfg_epoch_work_current() && st != NR_PDSCH_PASSIVE_DECODE_ERROR
                                    && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED);
@@ -1937,7 +1684,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       const uint64_t pn = atomic_load_explicit(&s_probe_n, memory_order_relaxed);
       if (pn == 100 || pn == 400 || (pn % 2000) == 0)
         LOG_A(PHY, "SENSING: LAYOUT_PROBE n=%lu cb0_ok=%lu\n", (unsigned long)atomic_load(&s_probe_n), (unsigned long)atomic_load(&s_probe_ok));
-    } else if (!gpu_health_failed)
+    } else
       nr_passive_replay_dl(&job, &dec);
     nr_slot_fep_fo_override_hz = saved_fo;
     /* Owned IQ passed both copy guards and cannot expire during LDPC. Epoch
@@ -1954,7 +1701,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     /* A TB-CRC fail under a Technique D hypothesis that is still being searched says nothing about the BWP geometry (measured on the sa-bed:
      * 131 un-resolves in 101 s with the geometry correct every time, which also dropped the layout pin and reset the search). Only a
      * job outside that search -- the manual, single-hypothesis layout -- may refute the BWP. */
-    if (credit_ok && job.bwp_entry > 0 && st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
+    if (credit_ok && !recov_hold && job.bwp_entry > 0 && st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
       if (job.sweep_ticket.generation == 0)
         nr_pdcch_bwp_crc_result(job.bwp_entry, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       else /* 32 failures mean nothing here, but thousands without one pass do */
@@ -1977,7 +1724,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       /* Scrambling-identity walk eligibility + link health (final review I1): every decode path reports
        * here; the in-line decode in nr_pdcch_blind_monitor_rt.c makes the same call. */
-      if (!job.layout_probe && credit_ok)
+      if (!job.layout_probe && credit_ok && !recov_hold)
         nr_pdsch_passive_crc_note(job.rnti, job.grant.scr_dedicated, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       /* TIMING ADVANCE FROM AN OVERHEARD PDU (nr_passive_mac_ta.h). The payload of a CRC-verified
        * transport block was being discarded; a RAR carries the gNB's absolute advance for the UE it
@@ -2090,56 +1837,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) rx[a] = (const int16_t *)&rxdataF[a][sym * fp->ofdm_symbol_size];
           if (fp->nb_antennas_rx <= 8) dmrs_scan_job(fp, job.rnti, job.absolute_slot, job.nr_slot_rx, sym, rx);
         }
-        if (credit_ok && job.solver_token && job.coreset_key >= 0 && pr_nrb > 0 && pdu->dlDmrsSymbPos && per_coreset_dmrs_on()) {
+        if (credit_ok && job.solver_token && job.coreset_key >= 0 && pr_nrb > 0 && pdu->dlDmrsSymbPos) {
           /* T26c: the same blind DM-RS identity estimator, per discovered CORESET population */
-          coreset_dmrs_t *cd = coreset_dmrs_slot(job.coreset_key, ue->frame_parms.Nid_cell);
-          const int refresh = coreset_dmrs_refresh();
-          if (cd && (refresh || __atomic_load_n(&cd->decided, __ATOMIC_ACQUIRE) < 0)
-              && pthread_mutex_trylock(&cd->mu) == 0) {
-            const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-            const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
-            const int rb_offset = pr_rb0 + (pdu->refPoint ? 0 : pdu->BWPStart);
-            const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12;
-            /* A batch of layout variants observes the SAME pilots, not independent
-             * grants. Count at most one observation per signal slot. A frozen
-             * coherence winner without CRC support must eventually be reconsidered. */
-            const bool fresh = !refresh || (job.absolute_slot >= 0 && (uint64_t)job.absolute_slot > cd->last_slot);
-            if (refresh && crc) cd->failed_slots = 0;
-            if (refresh && fresh) {
-              cd->last_slot = (uint64_t)job.absolute_slot;
-              if (!crc && __atomic_load_n(&cd->decided, __ATOMIC_ACQUIRE) >= 0
-                  && ++cd->failed_slots >= (uint32_t)refresh) {
-                const int old = __atomic_load_n(&cd->decided, __ATOMIC_ACQUIRE);
-                nr_dmrs_id_set_range(&cd->est.s1, 0, NR_DMRS_ID_CANDIDATES);
-                __atomic_store_n(&cd->est.decided_p1, 0, __ATOMIC_RELEASE);
-                __atomic_store_n(&cd->decided, -1, __ATOMIC_RELEASE);
-                cd->failed_slots = 0;
-                LOG_A(PHY, "SENSING: DMRS_ID REFRESH nid=%d old=%d abs=%ld after %d independent failed slots\n",
-                      job.coreset_key, old, (long)job.absolute_slot, refresh);
-              }
-            }
-            if (fresh && nr_dmrs_id_2stage_accumulate(&cd->est, &rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
-                                             start_sc, rb_offset, pr_nrb, fp->N_RB_DL, fp->symbols_per_slot,
-                                             job.nr_slot_rx, sym, pdu->nscid, fp->Ncp == NR_NORMAL, pdu->dmrsConfigType)) {
-              const int id = nr_dmrs_id_2stage_decided(&cd->est);
-              /* T26d: the population can mix DM-RS identities (replays: 249 or 442 on CORESET 10163): keep the three
-               * best-scoring ids; the solver tries them per RNTI and the CRC decides */
-              double sc[3] = {-1, -1, -1};
-              int tp[3] = {id, -1, -1};
-              for (int c = 0; c < 1024; c++) {
-                const double v = nr_dmrs_id_score(&cd->est.s1, c);
-                for (int q = 0; q < 3; q++)
-                  if (v > sc[q]) { for (int z = 2; z > q; z--) { sc[z] = sc[z - 1]; tp[z] = tp[z - 1]; } sc[q] = v; tp[q] = c; break; }
-              }
-              for (int q = 0; q < 3; q++) cd->top[q] = tp[q];
-              if (refresh) cd->failed_slots = 0;
-              __atomic_store_n(&cd->decided, id, __ATOMIC_RELEASE);
-              LOG_A(PHY, "SENSING: DMRS_ID per-CORESET nid=%d top3 %d %d %d\n", job.coreset_key, tp[0], tp[1], tp[2]);
-              LOG_A(PHY, "SENSING: DMRS_ID per-CORESET nid=%d PDSCH DM-RS id DECIDED %d (cell %d)\n", job.coreset_key, id,
-                    fp->Nid_cell);
-            }
-            pthread_mutex_unlock(&cd->mu);
-          }
+          const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+          const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
+          const cdmrs_obs_t o = {.key = job.coreset_key, .nid_cell = fp->Nid_cell, .crc = crc, .abs_slot = job.absolute_slot,
+                                 .ofdm = fp->ofdm_symbol_size, .start_sc = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12,
+                                 .rb_offset = pr_rb0 + (pdu->refPoint ? 0 : pdu->BWPStart), .nrb = pr_nrb, .n_rb_dl = fp->N_RB_DL,
+                                 .nsym = fp->symbols_per_slot, .slot = job.nr_slot_rx, .sym = sym, .nscid = pdu->nscid,
+                                 .ncp_normal = fp->Ncp == NR_NORMAL, .cfg_type = pdu->dmrsConfigType};
+          coreset_dmrs_observe_or_defer(&o, &rxdataF[0][sym * fp->ofdm_symbol_size]);
         }
         const int dl_ns = pdu->nscid & 1;
         /* The DL DM-RS scrambling id defaults to the PCI. The 2-stage state below is initialised ONCE, so after a cell-identity change
@@ -2178,17 +1885,17 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * in nr_pdcch_blind_monitor_rt.c consulted when it chose this grant's dlDataScramblingId --
          * only for grants where that sweep's own candidate was actually used (data_id_advance),
          * so an attempt that used the PCI fallback never perturbs a sweep it did not use. */
-        if (job.data_id_advance && credit_ok)
+        if (job.data_id_advance && credit_ok && !recov_hold)
           nr_pdsch_passive_data_id_feed(job.rnti, crc);
       }
       /* Technique D scoring: the TB CRC is the only oracle that can tell a right payload
        * interpretation from a wrong one, and this is the one place it is known. */
       nr_pdsch_cfg_hypothesis_t winner;
-      if (credit_ok)
+      if (credit_ok && !recov_hold)
         nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       /* a layout-probe job never enters the CB0 wiring (cb0_on false): its outcome is exempt from note_tb_decoder (it feeds only
        * the full-TB election counters; nr_pdsch_config_sweep.h, DECODER DOMINANCE) */
-      if (credit_ok && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
+      if (credit_ok && !recov_hold && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
         char bc12[192];
         nr_pdsch_passive_bc12_census(&job.sweep_ticket, &winner, bc12, sizeof(bc12));
         LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u%s%s\n",
@@ -2198,18 +1905,18 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       /* CB0 elimination feed: AFTER this grant's TB feedback, BEFORE the BC9 / Qm steps that may re-index the context. */
       if (cb0_on) {
-        const nr_td_cb0_tb_t cb0_tb = {.tb_fed = credit_ok, .tb_pass = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, .tb_decoder = cb0_tb_decoder,
+        const nr_td_cb0_tb_t cb0_tb = {.tb_fed = credit_ok && !recov_hold, .tb_pass = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, .tb_decoder = cb0_tb_decoder,
                                        .iq_ok_after = credit_ok, .rv = job.grant.rv, .nl = dec.cw.Nl};
         nr_td_cb0_wire_feed(&job.sweep_ticket, &cb0_tb);
       }
       /* BC9 census AFTER the KL feedback: it only reads the sweep and must not delay or reorder the KL path (a trial whose
        * own feedback settled the context is not counted: ticket_siblings refuses a settled context). */
-      if (credit_ok)
+      if (credit_ok && !recov_hold)
         nr_pdsch_passive_bc9_note(&job.sweep_ticket, job.rnti, job.dci_abs_slot, &job.dlsch_pdu, job.grant.nb_rb_oh,
                                   st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       /* BC9d: a TB CRC pass (not a first-code-block layout probe) proves the DCI real: only now may it feed the hard TDD /
        * DCI-adjacency exclusions. After the KL feedback and the census, before the Qm oracle (both may re-index). */
-      if (credit_ok && !job.layout_probe)
+      if (credit_ok && !recov_hold && !job.layout_probe)
         nr_pdsch_passive_bc9_confirm(&job.sweep_ticket, job.rnti, job.dci_abs_slot, ue->frame_parms.numerology_index,
                                      st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       /* Qm-oracle prune runs AFTER this job's CRC feedback above: prune_tables() compacts and
@@ -2218,7 +1925,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
        * moved (nr_pdsch_config_sweep_feedback resolves job.sweep_ticket.hypothesis against the
        * pre-prune array). Ordering this after leaves the DM-RS observe at ~682 untouched -- that one
        * runs on a separate, earlier tap and is out of scope here. */
-      if (credit_ok && !job.sweep_ticket.settled && job.sweep_ticket.generation && dec.qm_measured) {
+      if (credit_ok && !recov_hold && !job.sweep_ticket.settled && job.sweep_ticket.generation && dec.qm_measured) {
         const int kept = nr_pdsch_config_sweep_observe_qm(&job.sweep_ticket, job.grant.mcs, dec.qm_measured);
         if (kept > 0)
           LOG_A(PHY, "SENSING: Technique D Qm oracle rnti=0x%x mcs=%u qm=%u -> %d hypotheses\n",
@@ -2301,16 +2008,156 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       nr_td_grantwork_release(gw);
     }
     } /* slot group */
-    if (slot_timing) {
-      const uint64_t slot_t1 = now_ns();
-      LOG_A(PHY, "SENSING: PDSCH_SLOT_TIME slot=%lu jobs=%d gpu_jobs=%d start_ns=%lu end_ns=%lu us=%.1f\n",
-            (unsigned long)job.absolute_slot, n_more + 1, group_gpu_jobs,
-            (unsigned long)slot_t0, (unsigned long)slot_t1, (double)(slot_t1 - slot_t0) / 1000.0);
-    }
+    if (n_rpend) recov_group_handoff(idx, rpend, rkeys, n_rpend);
   }
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d exiting\n", idx);
   return NULL;
+}
+
+void nr_pdsch_passive_queue_recov_fb_stats(uint64_t out[3]);
+/* ---- RECOVERY_ASYNC worker side (Task 6). Runs on the pdschRecov thread, which has its own rxdataF and IQ snapshot.
+ * The IQ is re-copied from the sample ring when the job starts (same guarded copy as the consumers'), so the consumer pays no copy; a slot that left
+ * the ring meanwhile is dropped as expired. The whole decode call is repeated there with the arms enabled (the first body is deterministic and
+ * fails again unless the CPU path rescues it; this keeps every thread-local of the decoder consistent) with the consumer's per-job overrides. */
+/* Held-back outcome feedback of a deferred job, the same calls the consumer makes for a decoded grant (credit_ok true: the worker's IQ is a private snapshot,
+ * except FAIL_NOCREDIT = IQ expired, where only the solver token is released). The hooks are the ones N consumers already call concurrently. */
+static __thread const nr_pdsch_passive_decode_result_t *t_recov_dec; /* the rescue's decode result, set by recov_run before publish */
+static _Atomic uint64_t g_recov_fb[3];
+static void recov_feedback(void *p, const nr_recov_key_t *k, int outcome)
+{
+  (void)k;
+  const nr_pdsch_passive_job_t *job = p;
+  const bool ok = outcome == NR_RECOV_FB_RESCUED, credit = outcome != NR_RECOV_FB_FAIL_NOCREDIT;
+  atomic_fetch_add_explicit(&g_recov_fb[outcome], 1, memory_order_relaxed);
+  NR_CFG_EPOCH_WORK(job->config_epoch, &g_dropped_epoch);
+  if (job->solver_token) nr_pdsch_solver_feedback(job->solver_token, ok, (ok || credit) && nr_cfg_epoch_work_current());
+  if (!credit || !nr_cfg_epoch_work_current()) return;
+  if (job->bwp_entry > 0) nr_pdcch_bwp_crc_result(job->bwp_entry, ok);
+  nr_pdsch_passive_crc_note(job->rnti, job->grant.scr_dedicated, ok);
+  if (job->data_id_advance) nr_pdsch_passive_data_id_feed(job->rnti, ok);
+  nr_pdcch_dci11_layout_feedback(job->sweep_ticket.layout_index, ok);
+  nr_pdsch_cfg_hypothesis_t winner;
+  if (nr_pdsch_config_sweep_feedback(&job->sweep_ticket, ok, &winner)) {
+    char bc12[192];
+    nr_pdsch_passive_bc12_census(&job->sweep_ticket, &winner, bc12, sizeof(bc12));
+    LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u%s%s\n", job->sweep_ticket.rnti, job->sweep_ticket.tda_index,
+          winner.tda_start, winner.tda_length, winner.dmrs_mask, winner.mcs_table, bc12, nr_td_cb0_wire_converged_suffix(&job->sweep_ticket));
+    nr_pdsch_passive_bc9_converged(&job->sweep_ticket, winner.k0);
+  }
+  nr_pdsch_passive_bc9_note(&job->sweep_ticket, job->rnti, job->dci_abs_slot, &job->dlsch_pdu, job->grant.nb_rb_oh, ok);
+  nr_pdsch_passive_bc9_confirm(&job->sweep_ticket, job->rnti, job->dci_abs_slot, g_ue->frame_parms.numerology_index, ok);
+  if (ok && t_recov_dec) {
+    const nr_pdsch_passive_decode_result_t *dec = t_recov_dec;
+    const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu = &job->dlsch_pdu;
+    nr_pdsch_xoverhead_observe(dec->cw.qamModOrder, dec->cw.targetCodeRate, job->freq_alloc.num_rbs, (uint16_t)pdu->number_symbols,
+                               (uint16_t)(get_num_dmrs_re_per_rb(pdu->dmrsConfigType, pdu->n_dmrs_cdm_groups) * get_num_dmrs(pdu->dlDmrsSymbPos)),
+                               job->grant.nb_rb_oh, job->grant.tb_scaling, dec->cw.Nl, true);
+    if (!job->sweep_ticket.settled && job->sweep_ticket.generation && dec->qm_measured)
+      nr_pdsch_config_sweep_observe_qm(&job->sweep_ticket, job->grant.mcs, dec->qm_measured);
+  }
+}
+void nr_pdsch_passive_queue_recov_fb_stats(uint64_t out[3])
+{
+  for (int i = 0; i < 3; i++) out[i] = atomic_load_explicit(&g_recov_fb[i], memory_order_relaxed);
+}
+static void recov_done(void *p) /* the job's snapshot reference goes back; the last one returns the holder to the pool */
+{
+  recov_snap_t *sn = ((recov_wjob_t *)p)->snap;
+  if (sn && atomic_fetch_sub(&sn->refs, 1) == 1) {
+    pthread_mutex_lock(&g_rsnap_mu);
+    g_rsnap_free[g_rsnap_nfree++] = (int)(sn - g_rsnap);
+    pthread_mutex_unlock(&g_rsnap_mu);
+  }
+}
+/* End of a slot group on consumer idx: swap its owned-IQ buffers with a free holder and queue the group's deferred jobs on it. No holder free
+ * (or a failed submit): the held failure verdict is delivered here by the consumer (counted nosnap) -- one verdict per grant either way. */
+static void recov_group_handoff(int idx, recov_wjob_t *const slots[], const nr_recov_key_t keys[], int n)
+{
+  recov_snap_t *sn = NULL;
+  if (pthread_mutex_trylock(&g_rsnap_mu) == 0) {
+    if (g_rsnap_nfree > 0) sn = &g_rsnap[g_rsnap_free[--g_rsnap_nfree]];
+    pthread_mutex_unlock(&g_rsnap_mu);
+  }
+  if (sn) {
+    for (int a = 0; a < g_ue->frame_parms.nb_antennas_rx; a++) {
+      c16_t *t = g_owned_iq[idx][a];
+      g_owned_iq[idx][a] = sn->iq[a];
+      sn->iq[a] = t;
+    }
+    atomic_store(&sn->refs, n);
+  }
+  for (int i = 0; i < n; i++) {
+    slots[i]->snap = sn;
+    if (!sn || nr_pdsch_recovery_submit(&keys[i], slots[i])) {
+      atomic_fetch_add_explicit(&g_recov_nosnap, 1, memory_order_relaxed);
+      recov_feedback(&slots[i]->job, &keys[i], NR_RECOV_FB_FAIL);
+      recov_done(slots[i]); /* drops its snapshot reference (no-op without a holder) */
+      nr_pdsch_recovery_release(slots[i]);
+    }
+  }
+}
+static int recov_run(void *p, const nr_recov_key_t *k)
+{
+  const recov_wjob_t *wj = p;
+  const nr_pdsch_passive_job_t *jb = &wj->job;
+  PHY_VARS_NR_UE *ue = g_ue;
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const size_t rxF_sz = fp->samples_per_slot_wCP;
+  static __thread c16_t *rxF; /* worker-thread scratch, allocated on the worker (not an RT thread) */
+  if (!rxF) rxF = malloc16_clear((size_t)fp->nb_antennas_rx * rxF_sz * sizeof(c16_t));
+  if (!rxF || !wj->snap) return 0;
+  NR_CFG_EPOCH_WORK(jb->config_epoch, &g_dropped_epoch);
+  if (!nr_cfg_epoch_work_current()) return 3; /* abandoned: config epoch changed; the worker delivers FAIL, recov_feedback releases the token without credit */
+  /* the consumer's owned-IQ snapshot of this slot, handed off without a copy: it cannot expire */
+  nr_pdsch_passive_set_owned_iq(wj->snap->iq, jb->nr_slot_rx);
+  UE_nr_rxtx_proc_t proc = {0};
+  proc.frame_rx = jb->frame_rx; proc.nr_slot_rx = jb->nr_slot_rx; proc.gNB_id = jb->gNB_id;
+  nr_pdsch_passive_job_t job = *jb;
+  job.grant.check_sample_lifetime = false;
+  job.grant.source_absolute_slot = job.absolute_slot;
+  const double saved_fo = nr_slot_fep_fo_override_hz;
+  nr_slot_fep_fo_override_hz = job.fo_hz;
+  extern __thread int nr_dlsch_mrc_mode_override, nr_dlsch_irc_override;
+  nr_dlsch_mrc_mode_override = job.mrc_mode >= 4 ? 1 : (job.mrc_mode > 0 ? job.mrc_mode : -1);
+  nr_dlsch_irc_override = job.mrc_mode == 4 ? 3 : job.mrc_mode == 5 ? 2 : job.mrc_mode == 6 ? 4 : (job.mrc_mode > 0 ? 0 : -1);
+  nr_pdsch_passive_probe_mode(false);
+  nr_pdsch_passive_ptrs_sweep_allow(job.sweep_ticket.generation == 0 || job.sweep_ticket.settled);
+  nr_pdsch_passive_recov_mode(2);
+  nr_pdsch_passive_decode_result_t dec = {0};
+  const nr_pdsch_passive_decode_status_t st = nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, (c16_t(*)[rxF_sz])rxF, &dec);
+  nr_pdsch_passive_recov_mode(0);
+  nr_dlsch_mrc_mode_override = -1;
+  nr_dlsch_irc_override = -1;
+  nr_slot_fep_fo_override_hz = saved_fo;
+  nr_pdsch_passive_set_owned_iq(NULL, -1);
+  int ret = 0;
+  if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && dec.tb && dec.cw.TBS > 0) {
+    if (!nr_cfg_epoch_work_current()) {
+      nr_pdsch_recovery_count_stale();
+      ret = 3;
+    } else if ((t_recov_dec = &dec, nr_pdsch_recovery_publish(k, dec.tb, dec.cw.TBS)) == 0) {
+      /* LATE EVENT: the first pass was already published as CRC-FAIL (obs record, decoded/rnti_dec counters; its outcome feedback was held
+       * back and is delivered once, as CRC-OK, by recov_feedback). The rescue adds
+       * crc_ok / rnti_ok (so the PDSCH CRC-OK totals include it), the payload consumers (RRC harvest, MAC TA), the replay capture and
+       * one RECOVLATE line. */
+      atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+      atomic_fetch_add_explicit(&g_rnti_ok[job.rnti], 1, memory_order_relaxed);
+      nr_passive_rrc_harvest(dec.tb, dec.cw.TBS / 8);
+      nr_passive_mac_report_ta(job.rnti, job.rnti_class == NR_BLIND_RNTI_CLASS_RA, job.frame_rx, job.nr_slot_rx, (int)fp->numerology_index,
+                               (uint32_t)job.absolute_slot, dec.tb, dec.cw.TBS / 8);
+      nr_passive_replay_dl(&job, &dec);
+      /* tot_us = rescue completion - slot arrival (same CLOCK_MONOTONIC as nr_passive_note_slot_arrival), -1 when the slot left the ring */
+      const uint64_t arr_ns = nr_passive_slot_arrival_ns(job.absolute_slot);
+      const uint64_t rec_now_ns = now_ns();
+      LOG_A(PHY, "SENSING: RECOVLATE rnti=0x%04x %d.%d abs=%ld pid=%u ndi=%u tbs=%u recovered_cfg=%d tot_us=%ld\n", job.rnti, job.frame_rx, job.nr_slot_rx,
+            (long)job.absolute_slot, job.grant.harq_pid, job.grant.ndi, (unsigned)dec.cw.TBS, (int)dec.config_recovered,
+            arr_ns && rec_now_ns >= arr_ns ? (long)((rec_now_ns - arr_ns) / 1000) : -1L);
+    }
+    if (!ret) ret = 1;
+  }
+  t_recov_dec = NULL;
+  return ret;
 }
 
 static void report_sweep(const nr_pdsch_sweep_report_t *r)
@@ -2353,49 +2200,13 @@ static void report_sweep(const nr_pdsch_sweep_report_t *r)
           r->hypothesis.tda_length,r->hypothesis.dmrs_mask,r->hypothesis.mcs_table,r->winner);
 }
 
-/* nr_pdsch_passive_gpu_warmup: prepares the optional GPU front end (NR_GPU_FEP=1): loads libpdsch_gpu.so, initialises it for the carrier and starts the GPU worker thread.
- *   Reads ISAC_GPU_SELFCHECK (default 32 checks) and ISAC_GPU_SELFCHECK_ENFORCE. Falls back to the CPU path (g_gpu = NULL) when loading or init fails or there are more than 4 RX antennas.
+/* nr_pdsch_passive_gpu_warmup: prepares the bit-exact GPU path (exact FEP, demod, LDPC, graph pass) before the consumers start.
  *   Caller: nr_pdcch_blind_monitor_rt.c (once, before the consumers start). Must run before nr_pdsch_passive_queue_start().
  */
 void nr_pdsch_passive_gpu_warmup(PHY_VARS_NR_UE *ue)
 {
-  /* GPU6: the bit-exact FEP path replaces the (non CPU-equivalent) GPU LLR path */
-  if (!nr_pdsch_gpu_exact_warmup(ue) && !atomic_load(&g_gpu_disabled)) g_gpu = nr_gpu_fep_prepare();
-  { const char *e = getenv("ISAC_GPU_SELFCHECK"); g_gpu_chk_limit = e ? atoi(e) : 32; }
-  { const char *e = getenv("ISAC_GPU_SELFCHECK_ENFORCE"); g_gpu_chk_enforce = e && !strcmp(e, "1"); }
-  if (g_gpu) {
-    void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_NOLOAD);
-    if (!h) h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_NOLOAD);
-    g_gpu_admit = h ? (int (*)(const nr_gpu_pdsch_job_t *, int, int))dlsym(h, "nr_gpu_fep_admit") : NULL;
-    if (!g_gpu_admit) { g_gpu = NULL; return; }
-    const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-    const nr_gpu_fep_cfg_t cfg = {.nant = fp->nb_antennas_rx <= 4 ? fp->nb_antennas_rx : 4,
-                                  .ofdm_symbol_size = fp->ofdm_symbol_size,
-                                  .nb_prefix_samples = fp->nb_prefix_samples,
-                                  .nb_prefix_samples0 = fp->nb_prefix_samples0,
-                                  .symbols_per_slot = fp->symbols_per_slot,
-                                  .first_carrier_offset = fp->first_carrier_offset,
-                                  .n_rb_dl = fp->N_RB_DL,
-                                  .samples_per_ms = fp->samples_per_subframe,
-                                  .ofdm_offset_divisor = (int)fp->ofdm_offset_divisor};
-    if (fp->nb_antennas_rx > 4 || g_gpu->init(&cfg) != 0) {
-      LOG_W(PHY, "SENSING: PDSCH_GPU requested but libpdsch_gpu.so init failed -- CPU path\n");
-      g_gpu = NULL;
-    } else {
-      LOG_A(PHY, "SENSING: GPU_FEP enabled: %d RX, N=%d, per-slot FEP + chest + MMSE + LLR on the GPU\n", cfg.nant, cfg.ofdm_symbol_size);
-      if (atomic_fetch_or(&g_gpu_worker_running, 1) == 0) {
-        /* Deliberately its OWN thread/core, not one of the passive-PDSCH consumers: see the worker's
-         * header comment. Default core 3 -- isolcpus=2,3 keeps the scheduler off it, ISAC_UE_RT_CORE
-         * only pins the receive thread to core 2, so 3 is otherwise unused by any pinned thread here. */
-        static int s_gpu_worker_core = -2;
-        if (s_gpu_worker_core == -2) {
-          const char *e = getenv("ISAC_GPU_WORKER_CORE");
-          s_gpu_worker_core = e ? atoi(e) : 3;
-        }
-        threadCreate(&g_gpu_worker_thread, gpu_fep_worker_thread, NULL, "gpuFepWorker", s_gpu_worker_core, 40);
-      }
-    }
-  }
+  if (nr_pdsch_gpu_exact_warmup(ue))
+    nr_gpu_pass_warmup(ue); /* GPUPASS: the graph pass */
 }
 
 /* nr_pdsch_passive_queue_start: starts the passive PDSCH decode pool: allocates per-consumer rxdataF (and owned-IQ / GPU buffers) and launches n_consumers threads.
@@ -2428,11 +2239,6 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     g_rxdataF_gw = false;
     g_rxdataF[i] = (c16_t *)malloc16_clear(rxF_bytes);
     nr_pdsch_gpu_host_pin(g_rxdataF[i], rxF_bytes); /* DECODETIME (ISAC_PDSCH_GPU_HOST_PIN=1 only): the exact GPU FEP writes it */
-    if (g_gpu) {
-      g_consumer_gpu_llr[i] = calloc(GPU_LLR_CAP, sizeof(int16_t));
-      g_consumer_gpu_rxF[i] = calloc((size_t)ue->frame_parms.symbols_per_slot * ue->frame_parms.ofdm_symbol_size * 2, sizeof(int16_t));
-      if (!g_consumer_gpu_llr[i] || !g_consumer_gpu_rxF[i]) g_gpu = NULL;
-    }
     if (g_rxdataF[i] == NULL) {
       LOG_E(PHY, "SENSING: passive PDSCH queue: rxdataF allocation failed for consumer %d\n", i);
       for (int j = 0; j < i; j++) { if (g_rxdataF_gw) nr_td_gw_free(g_rxdataF[j]); else free(g_rxdataF[j]); g_rxdataF[j] = NULL; }
@@ -2444,14 +2250,14 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     for (int i = 0; i < n_consumers; ++i)
       for (int a = 0; a < ue->frame_parms.nb_antennas_rx; ++a) {
         g_owned_iq[i][a] = malloc16_clear(2u * (size_t)ue->frame_parms.samples_per_frame * sizeof(c16_t));
+        if (g_owned_iq[i][a] && nr_pdsch_recovery_enabled()) /* RECOVERY_ASYNC swaps these with the pinned snapshot holders: keep the two sets alike */
+          nr_pdsch_gpu_host_pin(g_owned_iq[i][a], 2u * (size_t)ue->frame_parms.samples_per_frame * sizeof(c16_t));
         if (!g_owned_iq[i][a]) {
           for (int j = 0; j < n_consumers; ++j) {
             for (int b = 0; b < ue->frame_parms.nb_antennas_rx; ++b) {
               free(g_owned_iq[j][b]); g_owned_iq[j][b] = NULL;
             }
             free(g_rxdataF[j]); g_rxdataF[j] = NULL;
-            free(g_consumer_gpu_llr[j]); g_consumer_gpu_llr[j] = NULL;
-            free(g_consumer_gpu_rxF[j]); g_consumer_gpu_rxF[j] = NULL;
           }
           return false;
         }
@@ -2464,7 +2270,9 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   g_head     = 0;
   g_tail     = 0;
   g_count    = 0;
+  atomic_store(&g_real_n, 0);
   g_nthreads = n_consumers;
+  g_idle = 0;
   atomic_store_explicit(&g_stop, 0, memory_order_relaxed);
   atomic_store_explicit(&g_running, 1, memory_order_release);
 
@@ -2479,7 +2287,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
      * the X410 host) held NAPI off until they blocked. One core each from base_core; <0 unpinned. */
     int core = nr_core_plan_cpu(NR_CP_PDSCH, i, (affinity >= 0) ? (affinity + i) : -1);
     { /* ISAC_PDSCH_CORES="6,7,8,9,15,16" (T26c): explicit, non-contiguous consumer cores (GB10 big cores are 5-9,15-19) */
-      const char *cl = getenv("ISAC_PDSCH_CORES");
+      const char *cl = nr_env_core("ISAC_PDSCH_CORES");
       for (int k = 0; cl && *cl; k++) {
         char *end;
         const long c = strtol(cl, &end, 10);
@@ -2489,6 +2297,28 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
       }
     }
     threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name, core, 40);
+  }
+  if (nr_pdsch_recovery_enabled() && nr_csirs_disc_enabled()) { /* needs the owned IQ (snapshot hand-off) */
+    g_rsnap_n = 8; /* snapshot holders, one set of ring-sized IQ buffers each */
+    bool ok = true;
+    int n_pinned = 0;
+    for (int i = 0; i < g_rsnap_n && ok; i++)
+      for (int a = 0; a < ue->frame_parms.nb_antennas_rx; a++) {
+        const size_t bytes = 2u * (size_t)ue->frame_parms.samples_per_frame * sizeof(c16_t);
+        g_rsnap[i].iq[a] = malloc16_clear(bytes); /* first-touched here (before the RX fence), like the consumers' owned buffers */
+        ok = ok && g_rsnap[i].iq[a];
+        if (g_rsnap[i].iq[a] && nr_pdsch_gpu_host_pin_enabled() && nr_pdsch_gpu_host_pin(g_rsnap[i].iq[a], bytes) == 0) n_pinned++;
+      }
+    g_rsnap_nfree = 0;
+    for (int i = 0; i < g_rsnap_n; i++) g_rsnap_free[g_rsnap_nfree++] = i;
+    nr_pdsch_recovery_set_job_bytes(sizeof(recov_wjob_t));
+    nr_pdsch_recovery_set_hooks(recov_run, NULL, recov_feedback, recov_done);
+    nr_pdsch_recovery_set_busy_hook(nr_pdsch_passive_first_pass_waiting);
+    g_recov_ok = ok && nr_pdsch_recovery_start(0, NULL) == 0;
+    LOG_A(PHY, "SENSING: RECOV worker %s (%d snapshot holders, %d/%d buffers host-pinned, pin %s)\n", g_recov_ok ? "started" : "FAILED to start",
+          g_rsnap_n, n_pinned, g_rsnap_n * ue->frame_parms.nb_antennas_rx, nr_pdsch_gpu_host_pin_enabled() ? "on" : "off");
+  } else if (nr_pdsch_recovery_enabled()) {
+    LOG_W(PHY, "SENSING: async recovery needs the owned IQ: recovery stays inline\n");
   }
   LOG_I(PHY, "SENSING: passive PDSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1);
@@ -2537,8 +2367,9 @@ static void nr_pdsch_passive_queue_flush_locked(void) /* g_pending_mu held */
   for (int i = 0; i < g_n_pending; i++)
     enqueue_one(&g_pending[i], g_pending_ns[i]);
   g_n_pending = 0;
-  pthread_cond_broadcast(&g_cv);
+  nr_spin_pred_note(&g_spin_pred, nr_spin_now_ns());
   pthread_mutex_unlock(&g_lock);
+  pthread_cond_broadcast(&g_cv); /* after the unlock: a consumer woken under g_lock blocks on it again (second futex round trip) */
 }
 
 void nr_pdsch_passive_queue_flush(void)
@@ -2561,6 +2392,14 @@ int nr_pdsch_passive_queue_fill_pct(void)
  *   Stamps the config epoch and sensing epoch, normalises the PRB allocation (refuses invalid PRB lists), and flushes at once when CSI-RS discovery is on.
  *   Returns false when the pool is not running or the grant is refused. Caller: nr_pdcch_blind_monitor_rt.c (per PDCCH grant).
  */
+__thread uint64_t nr_a2e_ts[9];
+__thread int8_t nr_a2e_kind, nr_a2e_bank;
+__thread uint32_t nr_a2e_stg[NR_A2E_STG];
+int nr_a2e_trace(void)
+{
+  return 0; /* the arrival-to-enqueue trace is off; its callers in nr_pdcch_blind_monitor_rt.c remain */
+}
+
 bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
 {
   if (!atomic_load_explicit(&g_running, memory_order_acquire)) {
@@ -2568,10 +2407,14 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   }
   pthread_mutex_lock(&g_pending_mu);
   if (g_n_pending > 0 && (g_pending[0].absolute_slot != job->absolute_slot
-                          || g_n_pending == (atomic_load(&g_gpu) ? NR_PDSCH_PASSIVE_SLOT_GROUP_MAX : 8)))
+                          || g_n_pending == 8))
     nr_pdsch_passive_queue_flush_locked();
   g_pending[g_n_pending] = *job;
   g_pending_ns[g_n_pending] = nr_csirs_disc_enabled() ? now_ns() : 0;
+  if (nr_es_tls_early) { /* accepted by an early scan job: hold the consumer back until the slot has been read */
+    g_pending[g_n_pending].slot_gate = true;
+    g_pending[g_n_pending].es_sym1 = (uint8_t)(1 + nr_es_progress_symbols(&nr_es_progress, job->absolute_slot, nr_es_tls_symbols_per_slot));
+  }
   /* BLINDPIPE traffic probe: every decoded PDSCH allocation (grid RBs) explains occupancy in its slot */
   nr_dltp_note_grant((uint16_t)job->frame_rx, (uint8_t)job->nr_slot_rx, job->dlsch_pdu.BWPStart + job->dlsch_pdu.start_rb,
                      job->dlsch_pdu.number_rbs, job->dlsch_pdu.start_symbol, job->dlsch_pdu.number_symbols);
@@ -2603,23 +2446,16 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   return true;
 }
 
-static _Atomic uint64_t g_dropped_probe; /* ISAC_PDSCHQ_PROBE_LAST: probes refused/evicted (also in dropped_full) */
-/* probe_last_enabled: returns ISAC_PDSCHQ_PROBE_LAST (cached): when on, under overload layout probes are evicted before full decodes.
- *   Caller: enqueue_one().
- */
-static bool probe_last_enabled(void)
-{
-  static int en = -1;
-  if (en < 0) en = getenv("ISAC_PDSCHQ_PROBE_LAST") && atoi(getenv("ISAC_PDSCHQ_PROBE_LAST")) ? 1 : 0;
-  return en == 1;
-}
-
+static _Atomic uint64_t g_age_hist[2][NR_PASSIVE_LAG_BINS]; /* P99: job age at enqueue in slots, [probe] x bin */
+static _Atomic uint64_t g_dropped_probe; /* probes refused/evicted (also in dropped_full) */
 /* enqueue_one: inserts one job into the consumer ring (g_lock held by the caller), applying the overload rules when the ring is full.
- *   Narrow grants (< 1/8 of the band) are refused at >= 90 % fill; with ISAC_PDSCHQ_PROBE_LAST a probe may be evicted or refused first.
+ *   Narrow grants (< 1/8 of the band) are refused at >= 90 % fill; a probe may be evicted or refused first.
  *   Otherwise the oldest job of the RNTI with most entries is dropped (per-RNTI fairness). Counters: dropped_narrow, dropped_full. Caller: nr_pdsch_passive_queue_flush_locked().
  */
 static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) /* g_lock held by the caller */
 {
+  if (nr_pdsch_recovery_enabled() && job->rnti_class < NR_BLIND_RNTI_CLASS_SI && !job->bwp_probe_entry) /* a newer TB on this HARQ process stales older late rescues */
+    nr_pdsch_recovery_note_newer(job->rnti, (uint8_t)job->grant.harq_pid, (uint8_t)job->grant.ndi, (uint32_t)job->absolute_slot);
   /* DECODE BUDGET BY SENSING VALUE (2026-09-15). Under overload the sensing pipeline wants the
    * slot's CFR coverage, so a grant narrower than 1/8 of the band is refused while the ring is
    * >= 90 % full rather than evicting an older, wider one. Narrow grants of a shared slot still
@@ -2630,8 +2466,8 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
     release_solver(job);
     return false;
   }
-  if (g_count == g_depth && probe_last_enabled()) {
-    /* ISAC_PDSCHQ_PROBE_LAST=1 (T26c): under overload a layout PROBE (blind solver search, CB0 only) is the cheapest
+  if (g_count == g_depth) {
+    /* T26c: under overload a layout PROBE (blind solver search, CB0 only) is the cheapest
      * loss -- a later grant of the same RNTI probes again -- while a full decode of a solved RNTI is that grant's only
      * chance. Evict the oldest probe of the RNTI holding the most probes; with no probe resident, an incoming probe is
      * refused instead of evicting a full decode. Full decodes then fall through to the per-RNTI fair rule below. */
@@ -2660,6 +2496,7 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
       return false;
     }
     if (victim >= 0) {
+      REAL_ADD(g_ring[(g_tail + victim) % g_depth], -1);
       release_solver(&g_ring[(g_tail + victim) % g_depth]);
       for (int i = victim; i > 0; i--) {
         g_ring[(g_tail + i) % g_depth] = g_ring[(g_tail + i - 1) % g_depth];
@@ -2687,6 +2524,7 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
     int victim = 0;
     while (victim < g_count && g_ring[(g_tail + victim) % g_depth].rnti != top_rnti) victim++;
     if (victim >= g_count) victim = 0;
+    REAL_ADD(g_ring[(g_tail + victim) % g_depth], -1);
     release_solver(&g_ring[(g_tail + victim) % g_depth]);
     for (int i = victim; i > 0; i--) { /* shift the entries older than the victim up by one */
       g_ring[(g_tail + i) % g_depth] = g_ring[(g_tail + i - 1) % g_depth];
@@ -2696,7 +2534,13 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
     g_count--;
     atomic_fetch_add_explicit(&g_dropped_full, 1, memory_order_relaxed);
   }
+  {
+    const long age = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed) - job->absolute_slot;
+    atomic_fetch_add_explicit(&g_age_hist[job->layout_probe != 0][nr_passive_lag_bin(age)], 1, memory_order_relaxed);
+  }
   g_ring[g_head] = *job;
+  g_ring[g_head].spread_solo = 0;
+  REAL_ADD(*job, 1);
   g_ring_ns[g_head] = enqueue_ns;
   g_head         = (g_head + 1) % g_depth;
   g_count++;
@@ -2704,7 +2548,51 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
   return true;
 }
 
-/* nr_pdsch_passive_queue_get_stats: copies the queue statistics (latency histograms, drop reasons, queued/decoded/CRC counts, batches, GPU counters) into *out.
+/* nr_pdsch_passive_queue_backlog_real: full-decode (non-probe) jobs waiting in the ring for a consumer right now; 0 when
+ *   the pool is not running. A waiting job means every consumer is busy. Caller: passive_decode_retry() (ISAC_PDSCH_RETRY_YIELD). */
+int nr_pdsch_passive_queue_backlog_real(void)
+{
+  if (!atomic_load_explicit(&g_running, memory_order_acquire))
+    return 0;
+  return atomic_load_explicit(&g_real_n, memory_order_relaxed); /* lock-free: polled by the background gate */
+}
+
+/* TAIL-FIX: true while any first-pass decode waits for a consumer, DL (full-decode ring) or UL (real queue). The recovery lane runs only when this is false. */
+extern int nr_pusch_passive_queue_real_pending(void) __attribute__((weak));
+bool nr_pdsch_passive_first_pass_waiting(void)
+{
+  return nr_pdsch_passive_queue_backlog_real() > 0 || (nr_pusch_passive_queue_real_pending && nr_pusch_passive_queue_real_pending() > 0);
+}
+
+/* nr_pdsch_passive_queue_p99_dump: P99 tail-decomposition lines: PDSCH job age at enqueue
+ *   (producer slot - PDSCH slot; real / probe), scan occasion lag at dequeue, ISAC_SCANQ_FRESH picks, ISAC_PDSCH_RETRY_YIELD
+ *   counters. Bins in slots: < 2/4/8/12/16/18/24/32/inf. Caller: nr_pdcch_blind_monitor_rt.c (PDSCHQ summary). */
+void nr_pdsch_passive_queue_p99_dump(void)
+{
+  if (nr_pdsch_recovery_enabled()) {
+    char rs[200];
+    nr_pdsch_recovery_stats(rs, sizeof rs);
+    uint64_t fb[3];
+    nr_pdsch_passive_queue_recov_fb_stats(fb);
+    LOG_A(PHY, "SENSING: %s fb_ok=%lu fb_fail=%lu fb_nocredit=%lu nosnap=%lu\n", rs, (unsigned long)fb[0], (unsigned long)fb[1], (unsigned long)fb[2],
+            (unsigned long)atomic_load(&g_recov_nosnap));
+  }
+  uint64_t sc[NR_PASSIVE_LAG_BINS], fresh = 0, chains = 0, yields = 0, gated = 0;
+  nr_pdcch_passive_queue_lag_hist(sc, &fresh);
+  nr_pdsch_retry_yield_stats(&chains, &yields, &gated);
+  char a[3][160];
+  for (int k = 0; k < 3; k++) {
+    int u = 0;
+    for (int b = 0; b < NR_PASSIVE_LAG_BINS; b++)
+      u += snprintf(a[k] + u, sizeof(a[k]) - u, "%s%lu", b ? "," : "",
+                    (unsigned long)(k < 2 ? atomic_load_explicit(&g_age_hist[k][b], memory_order_relaxed) : sc[b]));
+  }
+  LOG_I(PHY, "SENSING: P99AGE slots(<2/4/8/12/16/18/24/32/inf) pdsch_enq_real=[%s] pdsch_enq_probe=[%s] scan_deq=[%s] "
+        "scanq_fresh=%lu retry_chains=%lu retry_yields=%lu retry_gated=%lu\n", a[0], a[1], a[2], (unsigned long)fresh,
+        (unsigned long)chains, (unsigned long)yields, (unsigned long)gated);
+}
+
+/* nr_pdsch_passive_queue_get_stats: copies the queue statistics (latency histograms, drop reasons, queued/decoded/CRC counts, batches) into *out.
  *   Reads atomics only; out == NULL is a no-op. Callers: nr_passive_metrics.c and nr_pdcch_blind_monitor_rt.c (periodic summary).
  */
 void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)
@@ -2729,14 +2617,10 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)
   out->slot_groups   = atomic_load_explicit(&g_slot_groups, memory_order_relaxed);
   out->batches       = atomic_load_explicit(&g_batches, memory_order_relaxed);
   out->batches_multi = atomic_load_explicit(&g_batches_multi, memory_order_relaxed);
-  out->gpu_stale_pre = atomic_load_explicit(&g_gpu_stale_pre, memory_order_relaxed);
-  out->gpu_stale_post = atomic_load_explicit(&g_gpu_stale_post, memory_order_relaxed);
-  out->gpu_selfcheck_fail = atomic_load_explicit(&g_gpu_chk_fail, memory_order_relaxed);
-  out->gpu_selfcheck_skipped = atomic_load_explicit(&g_gpu_chk_skipped, memory_order_relaxed);
-  out->gpu_disabled = atomic_load_explicit(&g_gpu_disabled, memory_order_relaxed);
+  out->gpu_stale_pre = out->gpu_stale_post = out->gpu_selfcheck_fail = out->gpu_selfcheck_skipped = out->gpu_disabled = 0; /* the GPU front end is gone */
 }
 
-/* nr_pdsch_passive_queue_stop: stops the passive decode pool: sets g_stop, joins the consumer threads, frees their buffers and stops the GPU worker.
+/* nr_pdsch_passive_queue_stop: stops the passive decode pool: sets g_stop, joins the consumer threads, frees their buffers and the recovery pool.
  *   Idempotent when not running. Frees the owned-IQ arenas per consumer. Caller: executables/nr-uesoftmodem.c (teardown). Clears g_running last.
  */
 void nr_pdsch_passive_queue_stop(void)
@@ -2744,6 +2628,7 @@ void nr_pdsch_passive_queue_stop(void)
   if (!atomic_load_explicit(&g_running, memory_order_acquire)) {
     return;
   }
+  g_recov_ok = false; /* consumers defer nothing from here on */
   atomic_store_explicit(&g_stop, 1, memory_order_release);
   pthread_mutex_lock(&g_lock);
   pthread_cond_broadcast(&g_cv);
@@ -2756,16 +2641,21 @@ void nr_pdsch_passive_queue_stop(void)
       free(g_rxdataF[i]);
     g_rxdataF[i] = NULL;
     for (int a = 0; a < g_ue->frame_parms.nb_antennas_rx; ++a) {
-      free(g_owned_iq[i][a]); g_owned_iq[i][a] = NULL;
+      nr_pdsch_gpu_host_unpin(g_owned_iq[i][a]); free(g_owned_iq[i][a]); g_owned_iq[i][a] = NULL;
     }
-    free(g_consumer_gpu_llr[i]); g_consumer_gpu_llr[i] = NULL;
-    free(g_consumer_gpu_rxF[i]); g_consumer_gpu_rxF[i] = NULL;
   }
-  if (atomic_exchange(&g_gpu_worker_running, 0)) {
-    pthread_mutex_lock(&g_gpu_wq_lock);
-    pthread_cond_broadcast(&g_gpu_wq_work);
-    pthread_mutex_unlock(&g_gpu_wq_lock);
-    pthread_join(g_gpu_worker_thread, NULL);
+  /* Only now (consumers joined: none holds an acquired slot or swaps buffers any more) stop the worker, which drains its queue, and free the pool. */
+  if (nr_pdsch_recovery_enabled()) {
+    char rs[200];
+    nr_pdsch_recovery_stop();
+    nr_pdsch_recovery_stats(rs, sizeof rs);
+    uint64_t fb[3];
+    nr_pdsch_passive_queue_recov_fb_stats(fb);
+    LOG_A(PHY, "SENSING: %s fb_ok=%lu fb_fail=%lu fb_nocredit=%lu nosnap=%lu\n", rs, (unsigned long)fb[0], (unsigned long)fb[1], (unsigned long)fb[2],
+            (unsigned long)atomic_load(&g_recov_nosnap));
   }
+  for (int i = 0; i < g_rsnap_n; i++)
+    for (int a = 0; a < NB_ANTENNAS_RX; a++) { nr_pdsch_gpu_host_unpin(g_rsnap[i].iq[a]); free(g_rsnap[i].iq[a]); g_rsnap[i].iq[a] = NULL; }
+  g_rsnap_n = 0;
   atomic_store_explicit(&g_running, 0, memory_order_release);
 }

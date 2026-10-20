@@ -5,11 +5,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
-#ifndef NR_CSIRS_DISC_GPU_MODULE
-/* fp_us: returns CLOCK_MONOTONIC time in microseconds (timing of the footprint detector). */
-static uint64_t fp_us(void) {struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000+t.tv_nsec/1000;}
-
-#endif
 
 /* Local period table avoids coupling U2 to the ring implementation's table. */
 static const int periods[] = {4,5,8,10,16,20,32,40,64,80,160,320,640};
@@ -619,13 +614,12 @@ static int cluster_parallel(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp
 /* detect: incremental footprint detector: folds only the new slots of the ring into the cumulative history, then runs the search (cluster_parallel) for the scheduled group.
  *   GPU path when the GPU module provides detect or accumulate (resident IQ must be scored on the GPU); otherwise the CPU path (warned once, not real-time).
  *   Resets the history when the grid, geometry, symbol mask, exclusion mask or write cursor changes; an overrun of more than one ring capacity returns -1 without touching the history.
- *   Diagnostic: ISAC_CSIRS_DISC_DIAG prints the normalise/fold/cluster times. Callers: nr_csirs_disc_detect() and nr_csirs_disc_detect_candidates().
+ *   Callers: nr_csirs_disc_detect() and nr_csirs_disc_detect_candidates().
  */
 static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
                          nr_csirs_disc_fp_t *out, int max_out, bool scheduled, bool force_cpu)
 {
   if(!nr_disc_fp_valid(r) || !out || max_out<=0) return -1;
-  uint64_t begin=fp_us(), norm=0;
   history_t *h=&history;
   const nr_csirs_disc_gpu_ops_t *ops=force_cpu?NULL:nr_csirs_disc_gpu_load();
   if(r->device_valid && (!ops || !ops->detect)) return -1;
@@ -667,7 +661,6 @@ static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c
     if(count>100) count=100;
     nr_csirs_disc_ring_t batch=*r;
     batch.grid_base+=start*r->slot_stride;batch.meta+=start;batch.capacity=count;
-    uint64_t nbegin=fp_us();
     if(gpu) {
       if(ops->accumulate(&batch,cfg,h->sum,h->sq,h->sum80,h->sum64,h->total,h->totalq)<0) {
         /* A device error may have partially updated statistics. Discard them;
@@ -676,12 +669,10 @@ static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c
         return detect(r,cfg,out,max_out,scheduled,true);
       }
       for(int t=0;t<count;++t) if(batch.meta[t].valid) {++h->counts[batch.meta[t].abs_slot%640];++h->nt;}
-      norm+=fp_us()-nbegin;
     } else {
       uint32_t *x=calloc((size_t)count*nr,sizeof(*x));
       if(!x) return -1;
       normalize_parallel(&batch,cfg,x);
-      norm+=fp_us()-nbegin;
       fold_parallel(&batch,x);free(x);
     }
     h->written+=count;
@@ -693,11 +684,8 @@ static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c
     if(!warned) {fprintf(stderr,"SENSING: CSIRS_DISC CPU detector fallback (not real-time)\n");warned=true;}
   }
   if(max_out>128) max_out=128;
-  uint64_t folded=fp_us();
   int group=scheduled && new_slots<(uint64_t)r->capacity?h->round++%FP_GROUPS:-1;
   int result=cluster_parallel(r,cfg,out,max_out,group);
-  if(getenv("ISAC_CSIRS_DISC_DIAG")) fprintf(stderr,"DETECT normalize=%llu fold=%llu cluster=%llu us\n",
-    (unsigned long long)norm,(unsigned long long)(folded-begin-norm),(unsigned long long)(fp_us()-folded));
   return result;
 }
 

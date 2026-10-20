@@ -1,4 +1,6 @@
 #include "common/utils/nr_core_plan.h"
+#include "PHY/TOOLS/nr_stage_split.h"
+extern uint64_t *nr_ss_gpu_ptr(void);
 #include "nr_passive_sample_lifetime.h"
 #include "nr_pdcch_ul_discovery.h"
 /*
@@ -36,6 +38,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_dci01_fdra_feedback
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +57,8 @@
 #include "nr_pdcch_ul_config_disc.h"
 #include "nr_pdcch_ul_layout_lock.h"
 #include "nr_pusch_passive_decode.h"
+#include "nr_ul_nid_bg.h" // nr_ul_nid_bg_wants_next
+#include <math.h>
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // nr_get_Qm_ul
 
 /* The RF producer's own position, published in executables/nr-ue.c immediately BEFORE nrue_ru_read()
@@ -62,8 +67,35 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 
 static nr_pusch_passive_job_t g_ring[NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH];
 static nr_pusch_queue_cursor_t g_cursor;
+/* ULQ: layout probes and CRC-first trials go to their own ring (depth 8) and are dequeued only when no real grant waits; a probe can
+ * no longer evict a real grant. Pipeline mode: 2 consumers / decode contexts on ISAC_PUSCH_CORES, real-grant ring depth 32. One shared
+ * IQ snapshot per UL slot, copied by a capture thread right after booking (ISAC_UL_SNAP_CORE), so a real grant stays decodable while it
+ * waits. UCI explore search and UL_RETRY alternates run only while no real grant waits. A job holding a shared snapshot is dropped at
+ * dequeue by the same age rule as a job without one (nr_pusch_queue_snapshot_fresh: one frame minus 5 slots), so a GPU/CPU stall costs
+ * the grants older than that instead of draining tens of ms of backlog (VL2: 60 ms). The age is also taken in wall time (the same
+ * number of slot durations since the slot's samples arrived), since the producer's slot counter itself lags when the host stalls.
+ * Real-grant stale drops are printed as PUSCHQ2 real_stale= and scored as UL drops. */
+static nr_pusch_passive_job_t g_pring[NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH];
+static nr_pusch_queue_cursor_t g_pcursor;
+#define ULQ_POOL_MAX (NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH + NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS + 2)
+typedef struct {
+  c16_t *iq[4];
+  long abs;
+  uint32_t origin, len;
+} ulq_snap_t;
+static ulq_snap_t g_pool[ULQ_POOL_MAX];
+/* stage B of the n_ID search: the capture thread also copies the slot AFTER each booked slot (hypotheses with k2 + 1 read it); same index as g_pool */
+static ulq_snap_t g_pool2[ULQ_POOL_MAX];
+static int g_snap_next;
+static int g_pool_refs[ULQ_POOL_MAX]; /* under g_lock */
+static int g_pool_n;
+static pthread_t g_cap_thread;
+static pthread_cond_t g_cap_cv = PTHREAD_COND_INITIALIZER;
+static _Atomic uint64_t g_q_real, g_q_probe, g_dec_probe, g_full_probe, g_snap_ok, g_snap_fail, g_snap_nobuf,
+    g_snap_used, g_rescue_skipped, g_stale_real;
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool ulq_is_probe(const nr_pdcch_blind_ul_result_t *g);
 static pthread_mutex_t g_lifecycle_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
 
@@ -137,59 +169,34 @@ static int solver_readings(const nr_pusch_passive_job_t *job,
   return n;
 }
 
-/* ISAC_UL_SOLVER_FALLTHROUGH=1 (default off): with ISAC_UL_PUSCH_SOLVER=1 every ticketed grant used to be
- * consumed by the solver branch, whose unsolved state only probes one-CB QPSK grants of <= 48 PRB
- * (one_cb_qpsk()). A grant outside that class (64/256QAM, e.g. the 3-PRB MCS 17-27 grants that are the only
- * detectable PUSCH at the DGX position) was therefore never decoded. With the flag such a grant also takes the
- * ordinary full-decode path below when the solver issued no full decode for it. */
-static bool ul_solver_fallthrough(void)
+/* A ticketed grant the solver did not fully decode (it only probes one-CB QPSK grants of <= 48 PRB, e.g. never the 3-PRB MCS 17-27
+ * 64/256QAM grants that are the only detectable PUSCH at the DGX position) also takes the ordinary full-decode path, probe class included. */
+
+/* UL twin of the PDSCH DM-RS CDM / TDRA retries. The DCI antenna-ports code point fixes the number of CDM groups without data, but its
+ * field width is a hypothesis (U3 width splits), so the group count can be wrong while everything else is right; likewise S=0/L=14 can
+ * alias S=1/L=13. A CRC-failed full decode of an allocation of at most 12 PRB (the detectable class at this position) is retried with
+ * each alternative, if the DM-RS SNR reaches the Shannon bound of the grant's MCS minus 3 dB, 10 log10(2^(Qm R) - 1) - 3: the alternates
+ * change the data REs / symbol 0, never the DM-RS, so below that bound no alternate can pass CRC. Without the SNR gate every CRC-failed
+ * small grant paid 3 decode calls (the UL p99 tail on replays). */
+static bool ul_retry_snr_ok(const nr_pdcch_blind_ul_result_t *g, float snr_db)
 {
-  static int on = -1;
-  if (on < 0) {
-    const char *v = getenv("ISAC_UL_SOLVER_FALLTHROUGH");
-    on = (v && !strcmp(v, "1")) ? 1 : 0;
-  }
-  return on == 1;
+  return snr_db >= nr_pusch_passive_shannon_db(g->mcs, g->mcs_table) - 3.0f;
 }
 
-/* ISAC_UL_RETRY=1 (default off): UL twin of ISAC_PDSCH_DMRS_CDM_RETRY / ISAC_PDSCH_TDRA_RETRY. The DCI antenna-ports code
- * point fixes the number of CDM groups without data, but its field width is a hypothesis (U3 width splits), so the group
- * count can be wrong while everything else is right; likewise S=0/L=14 can alias S=1/L=13. A CRC-failed full decode whose
- * allocation is at most ISAC_UL_RETRY_MAX_RB PRB (default 12) and, if ISAC_UL_RETRY_SNR_DB is set, whose post-estimation SNR reaches it, is retried with each alternative. */
-static bool ul_retry_enabled(void)
+/* ULST: true when the slot's samples arrived more than (slots_per_frame - 5) slot durations ago (the
+ * nr_pusch_queue_snapshot_fresh budget in wall time); false when the arrival is unknown */
+static bool ulq_wall_stale(long abs_slot, long slots_per_frame)
 {
-  static int on = -1;
-  if (on < 0) {
-    const char *v = getenv("ISAC_UL_RETRY");
-    on = (v && !strcmp(v, "1")) ? 1 : 0;
-  }
-  return on == 1;
-}
-static float ul_retry_snr_db(void)
-{
-  static float t = -1000.0f;
-  if (t < -999.0f) {
-    const char *v = getenv("ISAC_UL_RETRY_SNR_DB");
-    t = v ? (float)atof(v) : -500.0f; /* post-estimation snr_db is not populated by the PUSCH path (0.0): gate off by default */
-  }
-  return t;
-}
-/* Default size gate instead: only small allocations (the detectable class at this position) are retried. */
-static int ul_retry_max_rb(void)
-{
-  static int m = -1;
-  if (m < 0) {
-    const char *v = getenv("ISAC_UL_RETRY_MAX_RB");
-    m = v ? atoi(v) : 12;
-  }
-  return m;
+  extern uint64_t nr_passive_slot_arrival_ns(long abs_slot);
+  const uint64_t arr = nr_passive_slot_arrival_ns(abs_slot);
+  if (!arr || slots_per_frame <= 5) return false;
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  const uint64_t now = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+  return now > arr && now - arr > (uint64_t)(slots_per_frame - 5) * (10000000ull / (uint64_t)slots_per_frame);
 }
 
-bool nr_pusch_passive_pipeline_enabled(void)
-{
-  const char *v = getenv("ISAC_UL_PIPELINE");
-  return nr_ul_chain_on() || (v && strcmp(v, "1") == 0);
-}
+bool nr_pusch_passive_pipeline_enabled(void) { return true; }
 
 void nr_pusch_passive_queue_note_unready(void)
 {
@@ -212,11 +219,18 @@ static void *nr_pusch_passive_queue_thread(void *arg)
 
   LOG_I(PHY, "SENSING: passive PUSCH decode consumer %d started\n", idx);
 
+  int held = -1; /* ULQ shared snapshot this consumer holds a reference on */
   while (1) {
     nr_pusch_passive_job_t job;
-
+    if (held >= 0) {
+      pthread_mutex_lock(&g_lock);
+      g_pool_refs[held]--;
+      pthread_cond_signal(&g_cap_cv);
+      pthread_mutex_unlock(&g_lock);
+      held = -1;
+    }
     pthread_mutex_lock(&g_lock);
-    while (g_cursor.count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) == 0) {
+    while (nr_pusch_queue_pick(&g_cursor, &g_pcursor) < 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) == 0) {
       /* Timed wait so a stop cannot be missed if it lands between the predicate and the wait. */
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
@@ -224,12 +238,25 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
       pthread_cond_timedwait(&g_cv, &g_lock, &ts);
     }
-    if (g_cursor.count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) != 0) {
+    const int pick = nr_pusch_queue_pick(&g_cursor, &g_pcursor);
+    if (pick < 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) != 0) {
       pthread_mutex_unlock(&g_lock);
       break;
     }
-    job = g_ring[nr_pusch_queue_pop(&g_cursor)];
+    job = pick == 0 ? g_ring[nr_pusch_queue_pop(&g_cursor)] : g_pring[nr_pusch_queue_pop(&g_pcursor)];
+    extern int nr_passive_e2e_trace(void);
+    extern uint64_t nr_passive_slot_arrival_ns(long abs_slot);
+    struct timespec e2e_t0 = {0}; /* dequeue time */
+    if (nr_passive_e2e_trace()) {
+      clock_gettime(CLOCK_MONOTONIC, &e2e_t0);
+      nr_ss_ns[NRSS_PREP] = 0;
+      uint64_t *gp = nr_ss_gpu_ptr();
+      nr_ss_ns[NRSS_LDPC] = 0;
+      if (gp) gp[NRSS_LDPC] = 0;
+    }
+    held = job.snap_idx; /* the queue's reference moves to this consumer */
     pthread_mutex_unlock(&g_lock);
+    if (pick == 1) atomic_fetch_add_explicit(&g_dec_probe, 1, memory_order_relaxed);
 
     NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
     if (!nr_cfg_epoch_work_current()) {
@@ -244,23 +271,29 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     if (lag > (long)atomic_load_explicit(&g_max_lag, memory_order_relaxed)) {
       atomic_store_explicit(&g_max_lag, (uint64_t)(lag > 0 ? lag : 0), memory_order_relaxed);
     }
-    if (!(nr_pusch_passive_pipeline_enabled() ?
-          nr_pusch_queue_snapshot_fresh(prod, job.absolute_slot, slots_per_frame) :
-          nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame))) {
+    if ((held < 0 && !nr_pusch_queue_snapshot_fresh(prod, job.absolute_slot, slots_per_frame))
+        || (held >= 0 && (!nr_pusch_queue_snapshot_fresh(prod, job.absolute_slot, slots_per_frame)
+                          || ulq_wall_stale(job.absolute_slot, slots_per_frame)))) {
       atomic_fetch_add_explicit(&g_dropped_stale, 1, memory_order_relaxed);
+      if (pick == 0) atomic_fetch_add_explicit(&g_stale_real, 1, memory_order_relaxed);
       continue;
     }
 
     const bool pipeline = nr_pusch_passive_pipeline_enabled();
+    /* first decode of a real-grant job may combine/store; probes and CRC-first trials (hypothesis reads) never do */
+    nr_pusch_passive_harq_arm(!ulq_is_probe(&job.grant));
     struct timespec grant_cpu_start={0},grant_cpu_end={0};
-    if (nr_ul_chain_on()) clock_gettime(CLOCK_THREAD_CPUTIME_ID,&grant_cpu_start);
-    if (pipeline && !nr_pusch_passive_decode_capture(ue, idx, (uint8_t)job.nr_slot_rx,
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID,&grant_cpu_start);
+    if (held >= 0) {
+      nr_pusch_passive_decode_attach(idx, g_pool[held].iq, g_pool[held].origin, g_pool[held].len);
+      atomic_fetch_add_explicit(&g_snap_used, 1, memory_order_relaxed);
+    } else if (pipeline && !nr_pusch_passive_decode_capture(ue, idx, (uint8_t)job.nr_slot_rx,
                                                      (uint64_t)job.absolute_slot)) {
       atomic_fetch_add_explicit(&g_dropped_snapshot, 1, memory_order_relaxed);
       continue;
     }
     if (nr_ul_layout_is_probe(&job.grant)) {
-      /* UL-LAYOUT probe (ISAC_UL_LAYOUT_LOCK=1): DM-RS evidence for every UL BWP hypothesis, never a decode. */
+      /* UL-LAYOUT probe (layout lock): DM-RS evidence for every UL BWP hypothesis, never a decode. */
       uint16_t p0[NR_UL_LAYOUT_MAX_HYP], np[NR_UL_LAYOUT_MAX_HYP], nid = 0;
       uint8_t l0 = 2;
       const int nh = nr_ul_layout_probe_plan(&job.grant, p0, np, NR_UL_LAYOUT_MAX_HYP, &nid, &l0);
@@ -271,7 +304,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       if (pipeline) nr_pusch_passive_decode_capture_release(idx);
       continue;
     }
-    if (nr_pusch_solver_enabled() && job.ul_ticket_valid && !job.cfr_only) {
+    if (job.ul_ticket_valid && !job.cfr_only) {
       /* Review fix (REVIEW1 s2 defects 1+2): reset the solver once per broad invalidation
        * (HARD epoch / identity change / dedicated-change-suspected), not on every SOFT epoch
        * such as an RX-recovery restart, and only from the one consumer that wins the CAS. */
@@ -365,8 +398,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
           }
         }
       }
-      const bool not_probe_class = nr_get_Qm_ul(job.grant.mcs, job.grant.mcs_table) != 2 || job.grant.num_rb > 48;
-      if (!(ul_solver_fallthrough() && !ran_full && not_probe_class)) {
+      if (ran_full) {
         if (pipeline) nr_pusch_passive_decode_capture_release(idx);
         continue;
       }
@@ -375,48 +407,21 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     nr_pusch_passive_out_t out;
     nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &job.grant,
                             job.ta_offset_samples, (uint64_t)job.absolute_slot, job.cfr_only, job.fo_hz, &out);
-    if (ul_retry_enabled() && !job.cfr_only && out.status == NR_PUSCH_PASSIVE_CRC_FAIL && out.snr_db >= ul_retry_snr_db() &&
-        job.grant.num_rb <= ul_retry_max_rb()) {
-      /* Only grants with a measurable signal are retried (the extra LDPC runs cost CPU). Alternates, in order:
-       * the other CDM-group count (data-RE set and G change), then the S=1/L=13 alias of S=0/L=14 (the DL TDRA
-       * aliasing class: a symbol-0 mismatch leaves one wrong data symbol that LDPC cannot absorb at high MCS). */
-      nr_pdcch_blind_ul_result_t alts[2];
-      int na = 0;
-      if ((job.grant.n_dmrs_cdm_groups == 1 || job.grant.n_dmrs_cdm_groups == 2) && !job.grant.transform_precoding) {
-        alts[na] = job.grant;
-        alts[na].n_dmrs_cdm_groups = (uint8_t)(3 - job.grant.n_dmrs_cdm_groups);
-        na++;
-      }
-      if (job.grant.start_symbol == 0 && job.grant.num_symbols == 14) {
-        alts[na] = job.grant;
-        alts[na].start_symbol = 1;
-        alts[na].num_symbols = 13;
-        na++;
-      }
-      for (int a = 0; a < na; ++a) {
-        nr_pusch_passive_out_t out2;
-        nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &alts[a],
-                                job.ta_offset_samples, (uint64_t)job.absolute_slot, false, job.fo_hz, &out2);
-        if (out2.status == NR_PUSCH_PASSIVE_OK) {
-          out = out2;
-          LOG_A(PHY, "SENSING: UL_RETRY rnti=0x%04x CRC OK with cdm_groups=%u S=%u L=%u (reading said cdm=%u S=%u L=%u)\n",
-                alts[a].rnti, alts[a].n_dmrs_cdm_groups, alts[a].start_symbol, alts[a].num_symbols,
-                job.grant.n_dmrs_cdm_groups, job.grant.start_symbol, job.grant.num_symbols);
-          break;
-        }
-      }
-    }
-    if (nr_ul_chain_on()) clock_gettime(CLOCK_THREAD_CPUTIME_ID,&grant_cpu_end);
-    if (pipeline) nr_pusch_passive_decode_capture_release(idx);
+    /* TAIL-FIX: the alternates of a failed grant (UL_RETRY below the verdict) run AFTER its verdict (UL_E2E / UL_PUSCH_CRC, first-decode time), on this same consumer,
+     * and only while no real grant waits (re-checked before each alternate). A rescue is a late event, logged with its own arrival-to-rescue time. */
+    const bool ul_retry_wanted = !job.cfr_only && !out.skip && out.status == NR_PUSCH_PASSIVE_CRC_FAIL &&
+                                 ul_retry_snr_ok(&job.grant, out.snr_db) && job.grant.num_rb <= 12;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID,&grant_cpu_end);
     if (!nr_cfg_epoch_work_current()) {
+      if (pipeline) nr_pusch_passive_decode_capture_release(idx);
       continue;
     }
     if (nr_ul_layout_is_tagged(&job.grant) && (out.status==NR_PUSCH_PASSIVE_OK || out.status==NR_PUSCH_PASSIVE_CRC_FAIL))
       nr_ul_layout_crc_verdict(&job.grant, out.status==NR_PUSCH_PASSIVE_OK, out.tbs_bytes*8u, out.n_segments, out.segments_ok,
-                               job.absolute_slot); /* no-op without ISAC_UL_LOCK_CRC_FIRST */
+                               job.absolute_slot);
     if (nr_ul_layout_is_tagged(&job.grant) && out.G > 0 && (out.status==NR_PUSCH_PASSIVE_OK || out.status==NR_PUSCH_PASSIVE_CRC_FAIL))
       nr_ul_layout_prior_note(&job.grant, out.status==NR_PUSCH_PASSIVE_OK, out.tbs_bytes*8u, out.n_segments, out.segments_ok,
-                              job.absolute_slot, out.snr_db, (float)out.tbs_bytes*8.f*(float)out.qam_mod_order/(float)out.G); /* no-op without ISAC_UL_LOCK_PRIOR_SEARCH */
+                              job.absolute_slot, out.snr_db, (float)out.tbs_bytes*8.f*(float)out.qam_mod_order/(float)out.G);
     if (job.ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_OK) {
       nr_ue_ul_update_t confirmed=job.ul_update;
       confirmed.ta_samples=out.ta_applied_samples;
@@ -435,7 +440,20 @@ static void *nr_pusch_passive_queue_thread(void *arg)
         nr_pdcch_ul_discovery_feedback(&job.grant,out.status==NR_PUSCH_PASSIVE_OK);
       nr_pdcch_dci01_fdra_feedback(&job.grant, out.status==NR_PUSCH_PASSIVE_OK);
     }
-    if (nr_ul_chain_on()) {
+    if (nr_passive_e2e_trace() && !job.cfr_only) {
+      /* UL_E2E: per real-grant full decode (incl. UL_RETRY alternates): arr2deq = target-slot samples read -> dequeued,
+       * wall = dequeued -> decoded (us), tot = arrival -> decoded; pick 1 = probe ring (layout search, not a locked real grant) */
+      struct timespec e2e_t1;
+      clock_gettime(CLOCK_MONOTONIC, &e2e_t1);
+      const uint64_t t0 = (uint64_t)e2e_t0.tv_sec * 1000000000ull + e2e_t0.tv_nsec, t1 = (uint64_t)e2e_t1.tv_sec * 1000000000ull + e2e_t1.tv_nsec;
+      const uint64_t arr = nr_passive_slot_arrival_ns(job.absolute_slot);
+      LOG_A(PHY, "SENSING: UL_E2E rnti=0x%04x st=%u prb=%u mcs=%u pick=%d arr2deq=%ld wall=%lu tot=%ld cpu_us=%ld stg=ldpc:g%lu,prep:%lu probe=%d\n", job.grant.rnti,
+            (unsigned)out.status, (unsigned)job.grant.num_rb, (unsigned)job.grant.mcs, pick, arr && t0 >= arr ? (long)((t0 - arr) / 1000) : -1L,
+            (unsigned long)((t1 - t0) / 1000), arr && t1 >= arr ? (long)((t1 - arr) / 1000) : -1L,
+            (long)((grant_cpu_end.tv_sec-grant_cpu_start.tv_sec)*1000000L+(grant_cpu_end.tv_nsec-grant_cpu_start.tv_nsec)/1000L),
+            (unsigned long)(((nr_ss_gpu_ptr() && nr_ss_gpu_ptr() != nr_ss_ns ? nr_ss_gpu_ptr()[NRSS_LDPC] : 0) + nr_ss_ns[NRSS_LDPC]) / 1000), (unsigned long)(nr_ss_ns[NRSS_PREP] / 1000), (int)(pick == 1 || ulq_is_probe(&job.grant)));
+    }
+    {
       const uint64_t cpu_us=(uint64_t)((grant_cpu_end.tv_sec-grant_cpu_start.tv_sec)*1000000L+
                                       (grant_cpu_end.tv_nsec-grant_cpu_start.tv_nsec)/1000L);
       nr_pusch_first_crc_result(&job.grant,&job.ul_ticket,job.ul_ticket_valid,&out,
@@ -449,8 +467,58 @@ static void *nr_pusch_passive_queue_thread(void *arg)
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
       }
     }
+    if (ul_retry_wanted) {
+      /* Only grants with a measurable signal are retried (the extra LDPC runs cost CPU). Alternates, in order:
+       * the other CDM-group count (data-RE set and G change), then the S=1/L=13 alias of S=0/L=14 (the DL TDRA
+       * aliasing class: a symbol-0 mismatch leaves one wrong data symbol that LDPC cannot absorb at high MCS). */
+      nr_pdcch_blind_ul_result_t alts[2];
+      int na = 0;
+      if ((job.grant.n_dmrs_cdm_groups == 1 || job.grant.n_dmrs_cdm_groups == 2) && !job.grant.transform_precoding) {
+        alts[na] = job.grant;
+        alts[na].n_dmrs_cdm_groups = (uint8_t)(3 - job.grant.n_dmrs_cdm_groups);
+        na++;
+      }
+      if (job.grant.start_symbol == 0 && job.grant.num_symbols == 14) {
+        alts[na] = job.grant;
+        alts[na].start_symbol = 1;
+        alts[na].num_symbols = 13;
+        na++;
+      }
+      for (int a = 0; a < na && nr_pusch_passive_rescue_allowed(); ++a) {
+        nr_pusch_passive_out_t out2;
+        nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &alts[a],
+                                job.ta_offset_samples, (uint64_t)job.absolute_slot, false, job.fo_hz, &out2);
+        if (out2.status != NR_PUSCH_PASSIVE_OK) continue;
+        struct timespec t_r;
+        clock_gettime(CLOCK_MONOTONIC, &t_r);
+        const uint64_t arr_r = nr_passive_slot_arrival_ns(job.absolute_slot), now_r = (uint64_t)t_r.tv_sec * 1000000000ull + t_r.tv_nsec;
+        LOG_A(PHY, "SENSING: UL_RETRY rnti=0x%04x CRC OK with cdm_groups=%u S=%u L=%u (reading said cdm=%u S=%u L=%u) late tot_us=%ld\n",
+              alts[a].rnti, alts[a].n_dmrs_cdm_groups, alts[a].start_symbol, alts[a].num_symbols,
+              job.grant.n_dmrs_cdm_groups, job.grant.start_symbol, job.grant.num_symbols, arr_r && now_r >= arr_r ? (long)((now_r - arr_r) / 1000) : -1L);
+        /* the updates the first pass withheld: CRC-OK counter and the CRC-OK feedback of the solver ticket, the ID store, the discovery / FDRA searches */
+        atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+        if (job.ul_ticket_valid) {
+          nr_ue_ul_update_t confirmed = job.ul_update;
+          confirmed.ta_samples = out2.ta_applied_samples;
+          confirmed.dmrs_id = out2.dmrs_id;
+          confirmed.data_id = out2.data_id;
+          confirmed.nscid = out2.nscid;
+          nr_ue_ctx_ul_feedback(&job.ul_ticket, &confirmed, true);
+          nr_pusch_passive_ul_ids_confirm(&job.ul_ticket, out2.nscid, out2.dmrs_id, out2.data_id);
+        }
+        if (!nr_ul_layout_is_tagged(&job.grant)) nr_pdcch_ul_discovery_feedback(&job.grant, true);
+        nr_pdcch_dci01_fdra_feedback(&job.grant, true);
+        break;
+      }
+    }
+    if (pipeline) nr_pusch_passive_decode_capture_release(idx);
   }
 
+  if (held >= 0) {
+    pthread_mutex_lock(&g_lock);
+    g_pool_refs[held]--;
+    pthread_mutex_unlock(&g_lock);
+  }
   if(nr_pusch_passive_pipeline_enabled()) {
     struct timespec wall_end,cpu_end;
     clock_gettime(CLOCK_MONOTONIC,&wall_end);
@@ -466,6 +534,111 @@ static void *nr_pusch_passive_queue_thread(void *arg)
   return NULL;
 }
 
+static bool ulq_is_probe(const nr_pdcch_blind_ul_result_t *g)
+{
+  return nr_ul_layout_is_probe(g) || nr_ul_layout_is_trial(g);
+}
+
+/* ULQ capture thread: copies each booked UL slot ONCE, oldest real grant first, into a free
+ * pool buffer and hands one reference to every queued job of that slot (probes of the same slot share it for free;
+ * a probe alone never takes a buffer). A job it cannot serve (no free buffer, IQ already overwritten) gets
+ * snap_idx -2 and takes the old per-consumer copy at dequeue, with the old freshness check. Under g_lock except
+ * for the copy itself. */
+static void ulq_assign(long abs, int b)
+{
+  for (int r = 0; r < 2; r++) {
+    nr_pusch_queue_cursor_t *c = r ? &g_pcursor : &g_cursor;
+    nr_pusch_passive_job_t *ring = r ? g_pring : g_ring;
+    for (int k = 0; k < c->count; k++) {
+      nr_pusch_passive_job_t *j = &ring[(c->tail + k) % c->depth];
+      if (j->absolute_slot != abs || j->snap_idx != -1) continue;
+      j->snap_idx = (int16_t)b;
+      if (b >= 0) g_pool_refs[b]++;
+    }
+  }
+}
+
+static void *ulq_capture_thread(void *arg)
+{
+  (void)arg;
+  PHY_VARS_NR_UE *ue = g_ue;
+  const uint32_t cap = nr_pusch_passive_snapshot_len(&ue->frame_parms);
+  pthread_mutex_lock(&g_lock);
+  while (!atomic_load_explicit(&g_stop, memory_order_relaxed)) {
+    long abs = -1;
+    int slot = 0;
+    bool want_next = false;
+    for (int k = 0; k < g_cursor.count && abs < 0; k++) {
+      const nr_pusch_passive_job_t *j = &g_ring[(g_cursor.tail + k) % g_cursor.depth];
+      if (j->snap_idx == -1 && !ulq_is_probe(&j->grant)) {
+        abs = j->absolute_slot;
+        slot = j->nr_slot_rx;
+      }
+    }
+    for (int k = 0; g_snap_next && abs >= 0 && k < g_cursor.count && !want_next; k++) { /* the slot after it, only if a job of this slot could become a stage-B job */
+      const nr_pusch_passive_job_t *j = &g_ring[(g_cursor.tail + k) % g_cursor.depth];
+      if (j->absolute_slot == abs && !ulq_is_probe(&j->grant)) want_next = nr_ul_nid_bg_wants_next(&j->grant);
+    }
+    const int b = abs >= 0 ? nr_pusch_snap_free(g_pool_refs, g_pool_n) : -1;
+    if (abs >= 0 && b < 0) {
+      ulq_assign(abs, -2);
+      atomic_fetch_add_explicit(&g_snap_nobuf, 1, memory_order_relaxed);
+    }
+    if (b < 0) {
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      ts.tv_nsec += 20 * 1000 * 1000;
+      if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+      pthread_cond_timedwait(&g_cap_cv, &g_lock, &ts);
+      continue;
+    }
+    g_pool_refs[b] = 1; /* this thread's hold during the copy */
+    g_pool[b].abs = -1; /* not shareable by enqueue until the copy is complete */
+    g_pool[b].len = 0;
+    g_pool2[b].abs = -1;
+    g_pool2[b].len = 0;
+    pthread_mutex_unlock(&g_lock);
+    uint32_t origin = 0, len = 0, origin2 = 0, len2 = 0;
+    const bool ok = nr_pusch_passive_snapshot_copy(ue, (uint8_t)slot, (uint64_t)abs, g_pool[b].iq, cap, &origin, &len);
+    bool ok2 = false;
+    for (int w = 0; ok && want_next && w < 40; w++) { /* the next slot is produced 0.5 ms after the target slot: wait for it (<= 4 ms), once it exists copy once */
+      if (atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_acquire) < abs + 1) { usleep(100); continue; }
+      ok2 = nr_pusch_passive_snapshot_copy(ue, (uint8_t)((slot + 1) % ue->frame_parms.slots_per_frame), (uint64_t)(abs + 1), g_pool2[b].iq, cap, &origin2, &len2);
+      break;
+    }
+    pthread_mutex_lock(&g_lock);
+    if (ok2) { g_pool2[b].abs = abs + 1; g_pool2[b].origin = origin2; g_pool2[b].len = len2; }
+    g_pool[b].abs = abs;
+    g_pool[b].origin = origin;
+    g_pool[b].len = len;
+    ulq_assign(abs, ok ? b : -2);
+    g_pool_refs[b]--;
+    atomic_fetch_add_explicit(ok ? &g_snap_ok : &g_snap_fail, 1, memory_order_relaxed);
+  }
+  pthread_mutex_unlock(&g_lock);
+  return NULL;
+}
+
+/* n_ID search stage B: a private copy of the slot AFTER `abs` (hypotheses with k2 + 1), taken by the capture thread together with the pool snapshot of
+ * `abs`. The copy runs without g_lock under a reference. false = not captured (or larger than cap). */
+bool nr_pusch_passive_queue_pool_copy_next(long abs, int nant, c16_t *const *dst, uint32_t cap, uint32_t *origin, uint32_t *len)
+{
+  int b = -1;
+  pthread_mutex_lock(&g_lock);
+  for (int i = 0; g_snap_next && i < g_pool_n; i++)
+    if (g_pool[i].abs == abs && g_pool2[i].abs == abs + 1 && g_pool2[i].len > 0 && g_pool2[i].len <= cap) { b = i; break; }
+  if (b >= 0) g_pool_refs[b]++;
+  pthread_mutex_unlock(&g_lock);
+  if (b < 0) return false;
+  for (int a = 0; a < nant && a < 4; a++) memcpy(dst[a], g_pool2[b].iq[a], (size_t)g_pool2[b].len * sizeof(c16_t));
+  *origin = g_pool2[b].origin;
+  *len = g_pool2[b].len;
+  pthread_mutex_lock(&g_lock);
+  g_pool_refs[b]--;
+  pthread_mutex_unlock(&g_lock);
+  return true;
+}
+
 /* nr_pusch_passive_queue_start: starts the passive PUSCH decode pool: sizes the ring (depth clamped to [2, MAX]) and launches n_consumers consumer threads at SCHED_OTHER priority 50, below the RT receive thread.
  *   Idempotent: returns true at once when the pool already runs. Consumer cores come from nr_core_plan_cpu(NR_CP_PUSCH) or from affinity + index. The frequency offset is sampled by the producer and carried per job (fo_hz), so no --cont-fo-comp refusal is needed.
  *   Caller: nr_pusch_passive_monitor_rt.c (UL monitor start-up). Returns false only when ue is NULL.
@@ -479,8 +652,17 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     return false;
   }
   if (nr_pusch_passive_pipeline_enabled()) {
-    n_consumers = 1;
-    if (!nr_pusch_passive_decode_prewarminit(ue)) return false;
+    /* One prewarmed context per consumer (the consumer index IS the context index). Default 1 as before. */
+    n_consumers = 2;
+    if (n_consumers < 1) n_consumers = 1;
+    if (n_consumers > NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS) n_consumers = NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS;
+    for (int c = 0; c < n_consumers; c++)
+      if (!nr_pusch_passive_decode_prewarminit(ue, c)) {
+        if (c == 0) return false;
+        n_consumers = c;
+        break;
+      }
+    depth = 32;
   }
   /* The --cont-fo-comp refusal that used to live here is GONE, and the hazard it named is fixed
    * rather than avoided. It read: a deferred nr_slot_fep() would de-rotate using
@@ -504,6 +686,30 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   g_ue       = ue;
   g_cursor   = (nr_pusch_queue_cursor_t){.depth=depth};
   g_nthreads = n_consumers;
+  g_pcursor = (nr_pusch_queue_cursor_t){.depth=8}; /* probe queue depth */
+  g_pool_n = 0;
+  g_snap_next = 1;
+  {
+    /* Distinct slots alive at once <= queued real jobs + one per consumer + the one being copied. */
+    const uint32_t len = nr_pusch_passive_snapshot_len(&ue->frame_parms);
+    const int nant = nr_pusch_passive_snapshot_nant();
+    int want = depth + n_consumers + 2;
+    if (want > ULQ_POOL_MAX) want = ULQ_POOL_MAX;
+    for (int b = 0; b < want && len && nant > 0 && nant <= 4; b++) {
+      bool okb = true;
+      for (int a = 0; a < nant; a++) {
+        if (!g_pool[b].iq[a]) g_pool[b].iq[a] = malloc16_clear((size_t)len * sizeof(c16_t));
+        okb &= g_pool[b].iq[a] != NULL;
+        if (g_snap_next) {
+          if (!g_pool2[b].iq[a]) g_pool2[b].iq[a] = malloc16_clear((size_t)len * sizeof(c16_t));
+          if (!g_pool2[b].iq[a]) g_snap_next = 0;
+        }
+      }
+      if (!okb) break;
+      g_pool_refs[b] = 0;
+      g_pool_n = b + 1;
+    }
+  }
   atomic_store_explicit(&g_stop, 0, memory_order_relaxed);
   atomic_store_explicit(&g_running, 1, memory_order_release);
 
@@ -515,15 +721,20 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
      * it must lose. Losing here costs one deferred decode; losing there costs time sync, which is
      * the whole problem this module exists to fix. */
     int core = nr_core_plan_cpu(NR_CP_PUSCH, i, (affinity >= 0) ? (affinity + i) : -1);
-    int prio = 50;
-    /* ISAC_PUSCH_CORES="17,18" / ISAC_PUSCH_PRIO=<0..49> (default off): the UL trial decodes (ISAC_UL_LOCK_CRC_FIRST) ran unpinned at
-     * FIFO 50, above the PDSCH consumers (40), and inflated every PDSCH stage (DECQUEUE report). Pin them off the PDSCH cores, lower. */
+    /* ISAC_PUSCH_CORES="17,18": the UL trial decodes ran unpinned at FIFO 50, above the PDSCH consumers (40), and inflated every PDSCH
+     * stage (DECQUEUE report). Pin them off the PDSCH cores, at the default priority. */
     core = nr_env_list_nth("ISAC_PUSCH_CORES", i, core);
-    if (getenv("ISAC_PUSCH_PRIO")) prio = atoi(getenv("ISAC_PUSCH_PRIO"));
+    const int prio = 0;
     threadCreate(&g_threads[i], nr_pusch_passive_queue_thread, &g_args[i], name, core, prio);
   }
-  LOG_I(PHY, "SENSING: passive PUSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
-        n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1);
+  if (g_pool_n > 0) {
+    const char *ce = getenv("ISAC_UL_SNAP_CORE");
+    const int core = ce && *ce ? atoi(ce) : 8;
+    const int prio = 0;
+    threadCreate(&g_cap_thread, ulq_capture_thread, NULL, "passivePuschCap", core, prio);
+  }
+  LOG_I(PHY, "SENSING: passive PUSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest; ULQ probe_depth=%d snap_pool=%d\n",
+        n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1, g_pcursor.depth, g_pool_n);
   return true;
 }
 
@@ -543,14 +754,31 @@ bool nr_pusch_passive_queue_enqueue(const nr_pusch_passive_job_t *job)
     return false;
   }
   int evicted;
-  const int index=nr_pusch_queue_push(&g_cursor,&evicted);
-  /* DROP-OLDEST: the evicted entry is closest to IQ overwrite. */
-  if(evicted>=0) atomic_fetch_add_explicit(&g_dropped_full, 1, memory_order_relaxed);
-  g_ring[index] = *job;
-  g_ring[index].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_work_stamp);
+  const bool probe = ulq_is_probe(&job->grant);
+  nr_pusch_queue_cursor_t *cur = probe ? &g_pcursor : &g_cursor;
+  nr_pusch_passive_job_t *ring = probe ? g_pring : g_ring;
+  const int index=nr_pusch_queue_push(cur,&evicted);
+  /* DROP-OLDEST: the evicted entry is closest to IQ overwrite. A probe evicts only probes. */
+  if(evicted>=0) {
+    atomic_fetch_add_explicit(probe ? &g_full_probe : &g_dropped_full, 1, memory_order_relaxed);
+    if (ring[evicted].snap_idx >= 0) g_pool_refs[ring[evicted].snap_idx]--;
+  }
+  ring[index] = *job;
+  ring[index].snap_idx = -1;
+  ring[index].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_work_stamp);
+  /* A probe of an already-copied slot shares that copy (its real grant may have been booked first). */
+  if (g_pool_n > 0)
+    for (int b = 0; b < g_pool_n; b++)
+      if (g_pool_refs[b] > 0 && g_pool[b].abs == job->absolute_slot && g_pool[b].len) {
+        ring[index].snap_idx = (int16_t)b;
+        g_pool_refs[b]++;
+        break;
+      }
   pthread_cond_signal(&g_cv);
+  if (g_pool_n > 0) pthread_cond_signal(&g_cap_cv);
   pthread_mutex_unlock(&g_lock);
   atomic_fetch_add_explicit(&g_queued, 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(probe ? &g_q_probe : &g_q_real, 1, memory_order_relaxed);
   return true;
 }
 
@@ -580,11 +808,44 @@ void nr_pusch_passive_queue_stop(void)
   atomic_store_explicit(&g_stop, 1, memory_order_release);
   pthread_mutex_lock(&g_lock);
   atomic_fetch_add_explicit(&g_dropped_unready,nr_pusch_queue_discard_all(&g_cursor),memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_dropped_unready,nr_pusch_queue_discard_all(&g_pcursor),memory_order_relaxed);
   pthread_cond_broadcast(&g_cv);
+  pthread_cond_broadcast(&g_cap_cv);
   pthread_mutex_unlock(&g_lock);
   for (int i = 0; i < g_nthreads; i++) {
     pthread_join(g_threads[i], NULL);
   }
+  if (g_pool_n > 0) pthread_join(g_cap_thread, NULL);
+  for (int b = 0; b < g_pool_n; b++) g_pool_refs[b] = 0; /* discarded jobs drop their references with the rings */
   atomic_store_explicit(&g_running, 0, memory_order_release);
   pthread_mutex_unlock(&g_lifecycle_lock);
+}
+
+int nr_pusch_passive_queue_real_pending(void)
+{
+  pthread_mutex_lock(&g_lock);
+  const int n = g_cursor.count;
+  pthread_mutex_unlock(&g_lock);
+  return n;
+}
+
+bool nr_pusch_passive_rescue_allowed(void)
+{
+  pthread_mutex_lock(&g_lock);
+  const int n = g_cursor.count;
+  pthread_mutex_unlock(&g_lock);
+  if (n > 0) atomic_fetch_add_explicit(&g_rescue_skipped, 1, memory_order_relaxed);
+  return n == 0;
+}
+
+void nr_pusch_passive_queue_ulq_dump(void)
+{
+  LOG_I(PHY, "SENSING: PUSCHQ2 consumers=%d real[queued=%lu full=%lu] real_stale=%lu probe[queued=%lu decoded=%lu full=%lu] "
+             "snap[pool=%d ok=%lu fail=%lu nobuf=%lu used=%lu] rescue_skipped=%lu\n",
+        g_nthreads, (unsigned long)atomic_load(&g_q_real), (unsigned long)atomic_load(&g_dropped_full),
+        (unsigned long)atomic_load(&g_stale_real),
+        (unsigned long)atomic_load(&g_q_probe), (unsigned long)atomic_load(&g_dec_probe),
+        (unsigned long)atomic_load(&g_full_probe), g_pool_n, (unsigned long)atomic_load(&g_snap_ok),
+        (unsigned long)atomic_load(&g_snap_fail), (unsigned long)atomic_load(&g_snap_nobuf),
+        (unsigned long)atomic_load(&g_snap_used), (unsigned long)atomic_load(&g_rescue_skipped));
 }

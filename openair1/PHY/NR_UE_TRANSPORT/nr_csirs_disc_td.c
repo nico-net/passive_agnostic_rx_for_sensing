@@ -36,25 +36,15 @@ uint64_t csirs_disc_fep_us, csirs_disc_fep_max_us;
 uint64_t csirs_disc_fft_us, csirs_disc_fft_batches, csirs_disc_td_overflows;
 
 
-/* ISAC_CSIRS_DISC_RATELIMIT shared state (written by nr_csirs_disc_process, read by td_push). rl_div == 0: baseline duty. */
+/* Rate-limit shared state (written by nr_csirs_disc_process, read by td_push). rl_div == 0: baseline duty. */
 static int rl_div, rl_G, rl_rearm;
 uint64_t csirs_disc_rl_skipped;
-static int feed_div = -1, feed_win = 640;
-static long burst_end = -1, burst_len = -1;
-
-/* td_feed_cfg: reads ISAC_CSIRS_DISC_FEED_DIV (default 7) and _FEED_WIN (default 640, min 160) once. */
-static void td_feed_cfg(void)
-{
-  if (feed_div >= 0) return;
-  const char *e = getenv("ISAC_CSIRS_DISC_FEED_DIV"), *w = getenv("ISAC_CSIRS_DISC_FEED_WIN");
-  feed_div = e && atoi(e) > 0 ? atoi(e) : 7;
-  if (w && atoi(w) >= 160) feed_win = atoi(w);
-}
+enum { feed_div = 7, feed_win = 640, burst_len = 5120, acq_div = 2 }; /* ingest duty: 1 window of feed_win slots per feed_div; acquisition burst at acq_div */
+static long burst_end = -1;
 
 /* nr_csirs_disc_td_feed_params: the SEARCH ingest duty (window slots, windows per period). */
 void nr_csirs_disc_td_feed_params(uint32_t *win, uint32_t *div)
 {
-  td_feed_cfg();
   *win = (uint32_t)feed_win; *div = (uint32_t)feed_div;
 }
 
@@ -177,7 +167,7 @@ int nr_csirs_disc_td_pending(void)
 }
 
 /* nr_csirs_disc_td_push: producer side of the front end, called from the PHY receive path for each DL slot: copies the slot's CP-bearing sample window of all antennas into the queue.
- *   Duty-cycled ingest for real-time safety: ISAC_CSIRS_DISC_FEED_WIN (default 640 slots) and ISAC_CSIRS_DISC_FEED_DIV (default 7) skip windows; an acquisition burst (ISAC_CSIRS_DISC_FEED_BURST, default 5120 slots) runs at ISAC_CSIRS_DISC_FEED_ACQ_DIV.
+ *   Duty-cycled ingest for real-time safety: a 640-slot window every 7 (feed_win, feed_div) skips windows; an acquisition burst of 5120 slots runs at acq_div.
  *   Returns 0 when queued, 1 when skipped by the duty cycle, -1 when dropped (format change, full queue, lock busy; counted as feed drops). Caller: phy_procedures_nr_ue.c (PHY receive path).
  */
 int nr_csirs_disc_td_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t frame, uint8_t slot)
@@ -185,20 +175,13 @@ int nr_csirs_disc_td_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t frame,
   if (!td.ready || !ue) return -1;
   /* Bounded, contiguous ingest duty cycle. OTA 2026-10-07 (DGX + X410, 4 x 122.88 Msps DPDK): any
    * ~2 GB/s of CPU-coherent memory traffic (CPU memcpy or GPU access to host memory) kills the radio
-   * stream, and full-rate ingest is exactly that (re-reading 1 MB/slot). Feed ISAC_CSIRS_DISC_FEED_WIN
-   * (default 640) contiguous slots, then skip FEED_DIV-1 windows (default 7: ~14 %, odd so successive
+   * stream, and full-rate ingest is exactly that (re-reading 1 MB/slot). Feed feed_win
+   * (640) contiguous slots, then skip feed_div-1 windows (7: ~14 %, odd so successive
    * windows rotate through P=640 residues). Contiguous windows keep TRS burst pairs and off-evidence. */
-  td_feed_cfg();
-  /* Acquisition phase: for the first ISAC_CSIRS_DISC_FEED_BURST slots (default 5120 = 2.56 s) after the
-   * first push, feed at ISAC_CSIRS_DISC_FEED_ACQ_DIV duty (default 2: alternate 320-slot windows, ~50 %),
+  /* Acquisition phase: for the first burst_len slots (5120 = 2.56 s) after the
+   * first push, feed at acq_div duty (2: alternate 320-slot windows, ~50 %),
    * then the steady duty cycle. A full-rate 2560-slot burst killed the radio stream in ~1 of 7 starts
    * (OTA 2026-10-07 adapt2_5, t9wb); 50 % keeps the same amount of data at half the memory pressure. */
-  static int acq_div = -1;
-  if (burst_len < 0) {
-    const char *b = getenv("ISAC_CSIRS_DISC_FEED_BURST"), *ad = getenv("ISAC_CSIRS_DISC_FEED_ACQ_DIV");
-    burst_len = b && atol(b) >= 0 ? atol(b) : 5120;
-    acq_div = ad && atoi(ad) > 0 ? atoi(ad) : 2;
-  }
   if (burst_end < 0 || __atomic_exchange_n(&rl_rearm, 0, __ATOMIC_RELAXED)) burst_end = (long)abs_slot + burst_len;
   const bool in_burst = (long)abs_slot < burst_end;
   if (in_burst && acq_div > 1 && ((long)abs_slot - (burst_end - burst_len)) / 320 % acq_div != 0) return 1;
@@ -206,7 +189,7 @@ int nr_csirs_disc_td_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t frame,
   static long feed_origin = -1;
   if (feed_origin < 0) feed_origin = (long)abs_slot;
   const long rel = (long)abs_slot - feed_origin;
-  /* ISAC_CSIRS_DISC_RATELIMIT steady state: G windows every div_s (nr_csirs_disc_rate_internal.h). */
+  /* Rate-limit steady state: G windows every div_s (nr_csirs_disc_rate_internal.h). */
   const int rl_div_s = __atomic_load_n(&rl_div, __ATOMIC_RELAXED);
   if (!in_burst && rl_div_s > 0 && rel >= 0) {
     if ((rel / feed_win) % rl_div_s >= __atomic_load_n(&rl_G, __ATOMIC_RELAXED)) {

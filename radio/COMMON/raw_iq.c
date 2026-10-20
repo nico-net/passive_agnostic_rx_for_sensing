@@ -178,13 +178,13 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
   {
     /* ISAC_RAW_IQ_GAP_AT_S / ISAC_RAW_IQ_GAP_S: inject one stream discontinuity (seconds into
      * the recording, seconds skipped). Replay-only; there is no live-radio equivalent. */
-    const char *gat = getenv("ISAC_RAW_IQ_GAP_AT_S"), *glen = getenv("ISAC_RAW_IQ_GAP_S");
+        const char *gat = getenv("ISAC_RAW_IQ_GAP_AT_S"), *glen = getenv("ISAC_RAW_IQ_GAP_S");
     if (gat && glen && atof(gat) > 0 && atof(glen) > 0) {
       s->source.gap_at  = (uint64_t)(atof(gat)  * s->source.rate);
       s->source.gap_len = (uint64_t)(atof(glen) * s->source.rate);
       fprintf(stderr, "RAW_IQ_GAP armed at_s=%s len_s=%s\n", gat, glen);
     }
-    const char *gat2 = getenv("ISAC_RAW_IQ_GAP2_AT_S"), *glen2 = getenv("ISAC_RAW_IQ_GAP2_S");
+        const char *gat2 = getenv("ISAC_RAW_IQ_GAP2_AT_S"), *glen2 = getenv("ISAC_RAW_IQ_GAP2_S");
     if (gat2 && glen2 && atof(gat2) > 0 && atof(glen2) > 0) {
       s->source.gap2_at = (uint64_t)(atof(gat2) * s->source.rate);
       s->source.gap2_len = (uint64_t)(atof(glen2) * s->source.rate);

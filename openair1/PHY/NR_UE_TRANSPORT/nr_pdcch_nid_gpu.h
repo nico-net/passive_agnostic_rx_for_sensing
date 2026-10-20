@@ -14,6 +14,13 @@ extern "C" {
 #define NR_PDCCH_NID_KERNEL_KINDS 13
 typedef struct { int16_t r, i; } nr_pdcch_nid_iq_t;
 typedef struct { int nid, sym, dur, grid_rb, groups, L, R, shift, ties; } nr_pdcch_nid_record_t;
+/* ISAC_DMRS_NID_SOLVE=2: the DM-RS solver's leader as a one-record hint (nr_dmrs_nid_solve_live.c); false when none. */
+bool nr_dmrs_nid_live_hint(nr_pdcch_nid_record_t *r);
+/* ISAC_DMRS_NID_SOLVE=3: top-2 ids with >= 8 votes as records; *sig names the id set. */
+void nr_dmrs_nid_live_reset(void);
+int nr_dmrs_nid_live_hints(nr_pdcch_nid_record_t *r, int cap, uint64_t *sig);
+/* generation value of a hint set (bit 63 set), as returned by records()/snapshot() and echoed to feedback() */
+#define NR_PDCCH_NID_HINT_GEN(sig) (UINT64_C(1) << 63 | (sig))
 typedef struct {
  int count;
  nr_pdcch_nid_record_t records[NR_PDCCH_NID_MAX_RECORDS];
@@ -60,6 +67,10 @@ int nr_pdcch_nid_gpu_start(int max_rb);
 void nr_pdcch_nid_gpu_stop(void);
 /* ISAC_PDCCH_NID_GPU_NODROP: snapshots (one slot's pushes) refused whole because the first symbol found neither the mutex nor a free staging batch within 500 us. 0 with the flag off. */
 uint64_t nr_pdcch_nid_gpu_dropped_snapshots(void);
+void nr_pdcch_nid_gpu_rearm(void);
+/* ISAC_DMRS_NID_SOLVE=3 active: one CRC-confirmed record is enough to stop the on-demand sweep (a DCI-less id never confirms). */
+bool nr_pdcch_nid_gpu_primary(void);
+uint64_t nr_pdcch_nid_gpu_passes(void);
 /* Single producer; bounded try-lock, drops if staging is full. rx points to the
  * first requested FFT symbol, with fft complex samples between symbols. */
 int nr_pdcch_nid_gpu_push(const void *rx, int fft, int fco, int slot, int sym,

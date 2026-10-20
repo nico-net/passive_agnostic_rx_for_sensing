@@ -84,6 +84,10 @@ typedef struct {
   /// FO (Hz) sampled on the RECEIVE thread with these samples; replayed by the consumer
   /// via nr_slot_fep_fo_override_hz. NAN would mean "read live", which is the bug.
   double fo_hz;
+  uint64_t enq_ns; ///< CLOCK_MONOTONIC at admission (only with ISAC_E2E_TRACE): splits the scan-queue wait into producer-side and queue/wake
+  /// Early start (nr_early_start.h): > 0 = this job was posted mid-slot, `early_sym` OFDM symbols of absolute_slot are in the ring and the
+  /// slot itself is still being read. The consumer runs only the banked CORESET passes that are due.
+  uint8_t early_sym;
 } nr_pdcch_passive_job_t;
 
 typedef struct {
@@ -121,6 +125,19 @@ void nr_pdcch_passive_queue_get_stats(nr_pdcch_passive_queue_stats_t *out);
 
 /// Occasions waiting in the ring right now, or -1 when the pool is not running (in-line scan).
 int nr_pdcch_passive_queue_backlog(void);
+
+/// Side work (ISAC_PDCCH_BANK_HANDOFF): a consumer posts fn(arg) for an IDLE consumer of the same pool; returns the slot to pass to
+/// nr_pdcch_passive_queue_side_finish(), or -1 (pool not running, one consumer, or no free slot: run it yourself).
+int nr_pdcch_passive_queue_side_post(void (*fn)(void *), void *arg);
+/// Joins a posted side work: runs it here when no consumer took it yet, else waits for the consumer running it.
+void nr_pdcch_passive_queue_side_finish(int slot);
+void nr_pdcch_passive_queue_side_stats(uint64_t *posted, uint64_t *taken);
+
+/// P99: lag histograms in slots, bins < 2/4/8/12/16/18/24/32/inf (nr_passive_lag_bin()).
+#define NR_PASSIVE_LAG_BINS 9
+int nr_passive_lag_bin(long lag);
+/// Scan occasions by lag at dequeue, and the ISAC_SCANQ_FRESH newest-first picks.
+void nr_pdcch_passive_queue_lag_hist(uint64_t out[NR_PASSIVE_LAG_BINS], uint64_t *fresh_picks);
 
 void nr_pdcch_passive_queue_stop(void);
 void *nr_pdcch_passive_queue_epoch_counter(void);

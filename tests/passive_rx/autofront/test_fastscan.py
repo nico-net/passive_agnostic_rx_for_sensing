@@ -12,6 +12,8 @@ def test_pci_group():
     sc = np.full(336, 1.0); sc[170] = 100.0; assert pci_group(sc, 1) == ([511], 10.0)                         # one cell
     sc = np.full(336, 1.0); sc[169] = 100.0; sc[1] = 60.0; g, r = pci_group(sc, 1); assert g == [508, 4] and r > 2        # two cells, same N_ID_2
     sc = np.ones(336) * np.linspace(1, 1.2, 336); assert pci_group(sc, 0)[0] == []                          # noise: no group
+    sc = np.linspace(26.0, 34.0, 336); sc[204] = 100.0; g, r = pci_group(sc, 2, halves=(204, 204)); assert g == [614] and 1.5 <= r < 2      # weak single winner (614), halves agree
+    assert pci_group(sc, 2, halves=(204, 17))[0] == [] and pci_group(sc, 2)[0] == []                              # halves disagree (noise): none
 def test_clusters():
     rng = np.random.default_rng(1); ccs = []
     for _ in range(20):
@@ -23,9 +25,9 @@ def test_period_k():
     assert period_k(a, 1, 40, 8, 16) == (4, 3)
     a[:, 1, 40] = 50; assert period_k(a, 1, 40, 8, 16)[0] == 1
 def test_keep_dedupe():
-    r = [dict(gscn=1, pci=2, sss_ratio=4, dmrs_ratio=4), dict(gscn=2, pci=3, sss_ratio=4, dmrs_ratio=2.2),
+    r = [dict(gscn=1, pci=2, sss_ratio=4, dmrs_ratio=4), dict(gscn=2, pci=3, sss_ratio=2.9, dmrs_ratio=2.2), dict(gscn=4, pci=5, sss_ratio=3.74, dmrs_ratio=2.47), dict(gscn=5, pci=6, sss_ratio=3.5, dmrs_ratio=1.5), dict(gscn=8, pci=614, sss_ratio=1.7, dmrs_ratio=2.1),
          dict(gscn=2, pci=4, sss_ratio=2.1, dmrs_ratio=2.2, n_cells=2), dict(gscn=3, pci=9, sss_ratio=1.3, dmrs_ratio=9)]
-    assert sorted(c['pci'] for c in keep(r)) == [2, 4]
+    assert sorted(c['pci'] for c in keep(r)) == [2, 4, 5, 614]
     d = dedupe([dict(gscn=7895, pci=508, sss_ratio=2.1), dict(gscn=7896, pci=508, sss_ratio=3.9), dict(gscn=7895, pci=4, sss_ratio=2.1)])
     assert [(c['gscn'], c['pci']) for c in d] == [(7895, 4), (7896, 508)]
 def test_refine_json():

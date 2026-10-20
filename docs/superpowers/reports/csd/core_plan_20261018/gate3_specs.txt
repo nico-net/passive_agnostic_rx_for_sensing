@@ -1,0 +1,1 @@
+tim:L:1 tim:F:1 tim:K:1 tim:F:2 tim:K:2 tim:L:2 tim:K:3 tim:L:3 tim:F:3

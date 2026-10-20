@@ -6,15 +6,16 @@
  * separation and max-log LLRs -- batched into one launch set and downloaded as int16 LLRs in
  * nr_rx_pdsch()'s order (RE-major, layer, bit; positive = bit 0).
  *
- * Built as libpdsch_gpu.so (ENABLE_LDPC_CUDA); loaded at run time by nr_gpu_fep_load() when
- * ISAC_PDSCH_GPU=1 (NR_GPU_FEP remains a legacy alias), so a build without CUDA -- or a run without either knob -- is the CPU path exactly as
- * before. Measured numbers and the reason LDPC was NOT the part to offload: memory gpu-ldpc-on-sens6.
+ * Built as libpdsch_gpu.so (ENABLE_LDPC_CUDA). The whole-slot LLR front end of this API is not loaded (ISAC_PDSCH_GPU=0 in the
+ * production config); the bit-exact path dlopens the module itself (nr_pdsch_gpu_exact.c). Measured numbers and the reason LDPC was
+ * NOT the part to offload: memory gpu-ldpc-on-sens6.
  */
 #ifndef NR_PDSCH_GPU_FEP_H
 #define NR_PDSCH_GPU_FEP_H
 
 #include <stdint.h>
 #include <stddef.h>
+#include "PHY/TOOLS/nr_gpu_mem.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,13 +54,39 @@ typedef struct {
   uint32_t n_llr;                ///< out: LLRs written (0 = unsupported, caller falls back to the CPU)
 } nr_gpu_pdsch_job_t;
 
+/** Launch-only exact FEP of one slot (nr_pdsch_gpu_fep_dev, nr_pdsch_gpu_exact.h GPU6 bit-exact path). */
+typedef struct {
+  const int16_t *const *rxdata; ///< per-antenna host IQ ring (ring_len samples)
+  uint32_t ring_len, ring_offset;
+  const int16_t *symbol_rot;    ///< symbols_per_slot OAI c16 {r,i}
+  uint16_t sym_mask;            ///< symbols to transform
+  int16_t *out;                 ///< nr_pdsch_gpu_fep_stage_at, DIRECT only: write this rxdataF (OAI layout, c16) instead of the buffer given to _dev; NULL = no redirect
+  uint32_t out_stride;          ///< c16 between two antennas of `out`
+} nr_gpu_fep_job_t;
+/* GPUPASS contract (graph-capturable): call nr_pdsch_gpu_fep_stage on the HOST first (waits until the slot's previous pass has finished
+ * reading it, then copies the IQ window -- DISCRETE only -- and the per-slot origin/rotation into pinned staging; returns the slot,
+ * 0 <= slot < NR_GPU_PASS_RING), then launch or replay nr_pdsch_gpu_fep_dev(j, rxF, slot, stream), which only enqueues device work (H2D
+ * from that slot's fixed pinned memory on DISCRETE, the kernel, an event marking the slot free). A graph is captured per slot index;
+ * rxdata pointers, ring_len and sym_mask of the captured job are baked in, the window position (ring_offset) and rotation are not. */
+/* Fix A+D: the pass instances are three disjoint pools, each with its own streams, graph executables, FEP staging slot, demod and LDPC context (all indexed by the
+ * instance), so a submission of one pool can never wait for an instance or a stream of another: real DL grants [0, DL), real UL grants [DL, DL + UL), probes (DL layout
+ * probes, UL probes) the last NR_GPU_PASS_PROBE. See nr_gpu_pass_graph.cu. */
+#define NR_GPU_PASS_DL 4
+#define NR_GPU_PASS_UL 2
+#define NR_GPU_PASS_PROBE 1
+#define NR_GPU_PASS_RING (NR_GPU_PASS_DL + NR_GPU_PASS_UL + NR_GPU_PASS_PROBE)
+typedef int (*nr_gpu_fep_stage_fn)(const nr_gpu_fep_job_t *j, int *slot_out);
+typedef int (*nr_gpu_fep_dev_fn)(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF_dev, int slot, void *stream);
+/* stage into a slot chosen by the caller (the rx pointers, ring length, origin and rotation are read from the slot when the kernel runs) */
+typedef int (*nr_gpu_fep_stage_at_fn)(const nr_gpu_fep_job_t *j, int slot);
+
 typedef struct {
   int (*init)(const nr_gpu_fep_cfg_t *cfg);
   /** Upload + FEP one slot: rxdata[ant] is the per-antenna sample ring (ring_len samples); the slot's
    *  symbol 0 CP starts at ring_offset (wraps). abs_sample is that same position as the FO phase
    *  origin (nr_fo_compensation's sample_offset). symbol_rot = fp->symbol_rotation[link] + symb_offset
    *  (symbols_per_slot entries as OAI c16 {r,i}; NULL = no rotation). Blocks until resident by
-   *  default; ISAC_PDSCH_GPU_BATCH_ASYNC=1 queues on the same stream for the following pdsch_llr. */
+   *  default; the call always waits for the stream. */
   int (*fep_slot)(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, uint32_t abs_sample,
                   double fo_hz, const int16_t *symbol_rot);
   /** Chest + MMSE + LLR for n jobs of the resident slot; LLRs land in llr_out (llr_cap int16s) at each
@@ -77,36 +104,6 @@ typedef struct {
 
 #ifdef __cplusplus
 }
-#endif
-
-#ifndef NR_GPU_FEP_NO_LOADER
-#include <dlfcn.h>
-#include <stdlib.h>
-#include <string.h>
-/** dlopen libpdsch_gpu.so next to the executable when ISAC_PDSCH_GPU=1; NULL = CPU path. */
-static inline const nr_gpu_fep_api_t *nr_gpu_fep_load_impl(int prepare)
-{
-  static const nr_gpu_fep_api_t *api = NULL;
-  static int tried = 0;
-  if (tried)
-    return api;
-  if (!prepare) return NULL;
-  tried = 1;
-  const char *e = getenv("ISAC_PDSCH_GPU");
-  if (e == NULL) e = getenv("NR_GPU_FEP");
-  if (e == NULL || atoi(e) == 0)
-    return NULL;
-  void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
-  if (h == NULL)
-    h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
-  if (h == NULL)
-    return NULL;
-  const nr_gpu_fep_api_t *(*get)(void) = (const nr_gpu_fep_api_t * (*)(void)) dlsym(h, "nr_gpu_fep_api");
-  api = get ? get() : NULL;
-  return api;
-}
-static inline const nr_gpu_fep_api_t *nr_gpu_fep_load(void) { return nr_gpu_fep_load_impl(0); }
-static inline const nr_gpu_fep_api_t *nr_gpu_fep_prepare(void) { return nr_gpu_fep_load_impl(1); }
 #endif
 
 #endif

@@ -16,6 +16,11 @@ uint64_t nr_gpu_budget_rt_start_us(void);
 /* RT admission never waits for discovery; blocks new discovery submissions. */
 int nr_gpu_budget_rt_begin(void);
 void nr_gpu_budget_rt_end(void);
+int nr_gpu_budget_rt_active(void); /* RT users in flight, 0 when the budget is off */
+/* large real grants (> 96 PRB) in flight; discovery picks its low-SM stream while this is > 0 (nr_gpu_green.h) */
+void nr_gpu_budget_rt_large_begin(void);
+void nr_gpu_budget_rt_large_end(void);
+int nr_gpu_budget_rt_large_active(void);
 void nr_gpu_budget_rt_result(uint64_t waited_us, int fallback);
 /* Query uses CUDA scalar ABI: 0 complete, 600 not ready. Clock injection permits
  * contention tests to exercise the production deadline loop without a device. */

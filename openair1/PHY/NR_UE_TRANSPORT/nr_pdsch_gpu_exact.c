@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* GPU6: bit-exact GPU FEP for the passive PDSCH decoder -- see nr_pdsch_gpu_exact.h. */
+#include "PHY/TOOLS/nr_stage_split.h"
 #include "nr_pdsch_gpu_exact.h"
 #include "nr_pdsch_gpu_fep.h"
 #include "nr_pdsch_gpu_demod_host.h"
@@ -22,10 +23,8 @@ static int (*g_delay_fn)(const int16_t *const *, int, int *);
 static nr_gpu_chest_fn g_chest_fn; /* GPU-DEMOD stage 2 */
 static _Atomic uint64_t g_delay_rows, g_delay_calls, g_delay_cpu, g_delay_checked, g_delay_bad;
 static _Atomic int g_on;
-static int g_check = 1;
 static _Atomic uint64_t g_calls, g_fallback, g_chk_ok, g_chk_bad, g_ns_sum, g_ns_max;
 static _Atomic uint64_t g_hist[16];
-static _Atomic uint64_t g_pdcch_gpu, g_pdcch_cpu; /* ISAC_PDCCH_GPU_EXACT_FEP: CORESET symbols on the GPU / CPU */ /* wall time incl. lock wait, 64 us buckets */
 
 /* now_ns: monotonic clock in nanoseconds (timing of GPU calls).
  *   How it works: clock_gettime(CLOCK_MONOTONIC).
@@ -39,34 +38,36 @@ static uint64_t now_ns(void)
   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-/* nr_pdsch_gpu_exact_warmup: one-time setup of the bit-exact GPU FEP: enables it only when ISAC_PDSCH_GPU_EXACT_FEP == 1 and the cell matches.
- *   How it works: Requires N=4096, <= 4 RX and 14 symbols, else logs and returns 0 (CPU FEP). dlopens libpdsch_gpu.so (cwd fallback), resolves nr_gpu_fep_api, nr_pdsch_gpu_exact_fep2, _stats and _delay, calls api->init. ISAC_PDSCH_GPU_EXACT_CHECK sets g_check (default 1) and g_on is set. Returns 1 when enabled.
- *   ISAC_* flags read: ISAC_PDSCH_GPU_EXACT_CHECK, ISAC_PDSCH_GPU_EXACT_FEP.
+/* nr_pdsch_gpu_exact_warmup: one-time setup of the bit-exact GPU FEP: enables it only when the cell matches.
+ *   How it works: Requires N=4096, <= 4 RX and 14 symbols, else logs and returns 0 (CPU FEP). dlopens libpdsch_gpu.so (cwd fallback), resolves nr_gpu_fep_api, nr_pdsch_gpu_exact_fep2, _stats and _delay, calls api->init. g_on is set. Returns 1 when enabled.
+ *   ISAC_* flags read: none.
  *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.h:14, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2116.
  */
-static void (*g_lowprio_fn)(int); /* GPUSCHED ISAC_PDSCH_GPU_PRIO=1: libpdsch_gpu.so nr_pdsch_gpu_set_lowprio */
-void nr_pdsch_gpu_exact_set_lowprio(int low)
+/* ISAC_E2E_TRACE stage split: switches the accumulators of this process and of libpdsch_gpu.so on; nr_ss_gpu_ptr() = the calling thread's GPU-side ones */
+static uint64_t *(*g_ss_ptr_fn)(void);
+extern int nr_passive_e2e_trace(void);
+uint64_t *nr_ss_gpu_ptr(void) { return g_ss_ptr_fn ? g_ss_ptr_fn() : NULL; }
+static void nr_ss_gpu_init(void)
 {
-  if (g_lowprio_fn)
-    g_lowprio_fn(low);
+  if (!nr_passive_e2e_trace())
+    return;
+  nr_ss_on = 1;
+  void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
+  if (!h)
+    h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
+  void (*en)(int) = h ? (void (*)(int))dlsym(h, "nr_pdsch_gpu_ss_enable") : NULL;
+  g_ss_ptr_fn = h ? (uint64_t * (*)(void)) dlsym(h, "nr_pdsch_gpu_ss_ptr") : NULL;
+  if (en)
+    en(1);
 }
 
 int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
 {
-  const char *pr = getenv("ISAC_PDSCH_GPU_PRIO");
-  if (pr && atoi(pr) == 1) {
-    void *hp = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
-    if (!hp)
-      hp = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
-    g_lowprio_fn = hp ? (void (*)(int))dlsym(hp, "nr_pdsch_gpu_set_lowprio") : NULL;
-    LOG_A(PHY, "SENSING: ISAC_PDSCH_GPU_PRIO=1: probes and retry bodies on low-priority PDSCH GPU streams (%s)\n",
-          g_lowprio_fn ? "ok" : "module unavailable, off");
-  }
+  nr_ss_gpu_init();
   if (ue)
     nr_pdsch_gpu_demod_warmup(&ue->frame_parms); /* GPU-DEMOD: independent knob, same module and warm-up point */
   nr_pdsch_gpu_ldpc_enabled(); /* GPUSHARE: GPU LDPC contexts and graphs before RX, not at the first TB (no-op when off) */
-  const char *e = getenv("ISAC_PDSCH_GPU_EXACT_FEP");
-  if (!e || atoi(e) != 1 || !ue)
+  if (!ue)
     return 0;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   if (fp->ofdm_symbol_size != 4096 || fp->nb_antennas_rx > 4 || fp->symbols_per_slot != 14) {
@@ -95,11 +96,9 @@ int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
     LOG_W(PHY, "SENSING: GPU_EXACT_FEP requested but libpdsch_gpu.so is unavailable -- CPU FEP\n");
     return 0;
   }
-  const char *c = getenv("ISAC_PDSCH_GPU_EXACT_CHECK");
-  g_check = c ? atoi(c) : 1;
   atomic_store(&g_on, 1);
-  LOG_A(PHY, "SENSING: GPU_EXACT_FEP enabled: %d RX, N=%d, bit-exact FEP on the GPU, CPU chest/demod/decode; check=%d\n",
-        fp->nb_antennas_rx, fp->ofdm_symbol_size, g_check);
+  LOG_A(PHY, "SENSING: GPU_EXACT_FEP enabled: %d RX, N=%d, bit-exact FEP on the GPU, CPU chest/demod/decode; check=1\n",
+        fp->nb_antennas_rx, fp->ofdm_symbol_size);
   return 1;
 }
 
@@ -147,29 +146,16 @@ int nr_pdsch_gpu_exact_fep_ranges(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *f
   return exact_run(ue, fp, slot, mask, rxdataF, stride, rxdata, 0);
 }
 
-/* nr_pdcch_gpu_exact_fep_symbol: GPU exact FEP for one PDCCH symbol.
- *   How it works: ISAC_PDCCH_GPU_EXACT_FEP == 1 enables it (read once). Calls exact_run with try_only = 1, so the scan falls back to CPU when the GPU is busy. Counts GPU and CPU uses.
- *   ISAC_* flags read: ISAC_PDCCH_GPU_EXACT_FEP.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5448, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.h:21.
- */
+/* the PDCCH scan always runs the CPU FEP (the GPU PDCCH FEP measured no scan gain); kept only for its caller */
 int nr_pdcch_gpu_exact_fep_symbol(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, int symbol, c16_t *rxdataF,
                                   c16_t **rxdata)
 {
-  static int on = -1;
-  if (on < 0) {
-    const char *e = getenv("ISAC_PDCCH_GPU_EXACT_FEP");
-    on = e && atoi(e) == 1;
-  }
-  if (!on || !atomic_load_explicit(&g_on, memory_order_relaxed) || symbol < 0 || symbol >= 14)
-    return -1;
-  /* the scan never waits for a PDSCH consumer's GPU call: busy -> CPU FEP */
-  const int rc = exact_run(ue, fp, slot, (uint16_t)(1u << symbol), rxdataF, fp->samples_per_slot_wCP, rxdata, 1);
-  atomic_fetch_add_explicit(rc ? &g_pdcch_cpu : &g_pdcch_gpu, 1, memory_order_relaxed);
-  return rc;
+  (void)ue; (void)fp; (void)slot; (void)symbol; (void)rxdataF; (void)rxdata;
+  return -1;
 }
 
 /* exact_run: core of the GPU exact FEP: runs the masked symbols on the GPU and self-checks them.
- *   How it works: Refuses slots with a frequency offset (cont_fo_comp, not synchronized, or a branch FO) and returns -1 with a one-time log. Calls the GPU entry, times it, and records the histogram. Self-check follows g_check: 1 checks a rotating symbol every 16 calls (or on every try-only call), 2 checks all symbols.
+ *   How it works: Refuses slots with a frequency offset (cont_fo_comp, not synchronized, or a branch FO) and returns -1 with a one-time log. Calls the GPU entry, times it, and records the histogram. Self-check: a rotating symbol every 16 calls (every call when try-only).
  *   ISAC_* flags read: none.
  *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c:102, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c:116.
  */
@@ -206,8 +192,8 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
   uint64_t mx = atomic_load(&g_ns_max);
   while (dt > mx && !atomic_compare_exchange_weak(&g_ns_max, &mx, dt)) {}
   atomic_fetch_add_explicit(&g_hist[dt / 64000 < 15 ? dt / 64000 : 15], 1, memory_order_relaxed);
-  if (g_check == 2 || (g_check == 1 && (!try_only || n % 16 == 0))) {
-    /* spot check (1): one masked (antenna, symbol) per call, rotating; full check (2): all of them */
+  if (!try_only || n % 16 == 0) {
+    /* spot check: one masked (antenna, symbol) per call, rotating */
     int pairs[4 * 14][2], np = 0, ok = 1;
     for (int a = 0; a < fp->nb_antennas_rx; a++)
       for (int m = 0; m < 14; m++)
@@ -215,11 +201,8 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
           pairs[np][0] = a;
           pairs[np++][1] = m;
         }
-    for (int k = g_check == 1 ? (int)(n % np) : 0; k < np && ok; k++) {
-      ok = check_symbol(ue, fp, slot, pairs[k][0], pairs[k][1], rxdataF, rxdata);
-      if (g_check == 1)
-        break;
-    }
+    const int k = (int)(n % np);
+    ok = check_symbol(ue, fp, slot, pairs[k][0], pairs[k][1], rxdataF, rxdata);
     atomic_fetch_add_explicit(ok ? &g_chk_ok : &g_chk_bad, 1, memory_order_relaxed);
     if (!ok) {
       atomic_store(&g_on, 0);
@@ -240,12 +223,11 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
     uint64_t late = 0, busy = 0;
     if (g_stats)
       g_stats(&direct, &late, &busy);
-    LOG_A(PHY, "SENSING: GPU_EXACT_FEP calls=%lu fallback=%lu (late=%lu busy=%lu) check_ok=%lu check_bad=%lu direct=%d pdcch_gpu=%lu pdcch_cpu=%lu "
+    LOG_A(PHY, "SENSING: GPU_EXACT_FEP calls=%lu fallback=%lu (late=%lu busy=%lu) check_ok=%lu check_bad=%lu direct=%d "
           "delay_calls=%lu delay_rows=%lu delay_cpu=%lu delay_checked=%lu delay_bad=%lu "
           "mean=%.0f us p50<=%d us p99<=%d us max=%.0f us (wall)\n",
           (unsigned long)n, (unsigned long)atomic_load(&g_fallback), (unsigned long)late, (unsigned long)busy,
           (unsigned long)atomic_load(&g_chk_ok), (unsigned long)atomic_load(&g_chk_bad), direct,
-          (unsigned long)atomic_load(&g_pdcch_gpu), (unsigned long)atomic_load(&g_pdcch_cpu),
           (unsigned long)atomic_load(&g_delay_calls), (unsigned long)atomic_load(&g_delay_rows),
           (unsigned long)atomic_load(&g_delay_cpu), (unsigned long)atomic_load(&g_delay_checked),
           (unsigned long)atomic_load(&g_delay_bad),
@@ -291,18 +273,15 @@ nr_gpu_chest_fn nr_pdsch_gpu_exact_chest_entry(void)
   return atomic_load_explicit(&g_on, memory_order_relaxed) ? g_chest_fn : NULL;
 }
 
-/* DECODETIME ISAC_PDSCH_GPU_HOST_PIN=1 (default off): the GPU kernels read and write pageable host buffers (chest scratch,
+/* DECODETIME: the GPU kernels read and write pageable host buffers (chest scratch,
  * LLRs, estimates, equaliser outputs) through the GB10's unified memory; the GPU's first touch of every new 4 KB page is a
  * GPU page fault that stalls the whole device (~12 us each: a 1744-row chest scratch grew by 14 MB = 40 ms, hitting every
- * consumer at once). Pinning (cudaHostRegister) maps the buffer once, at allocation. Flag off: no call into the module. */
+ * consumer at once). Pinning (cudaHostRegister) maps the buffer once, at allocation. */
 static int (*g_pin_fn)(void *, size_t);
 static int (*g_unpin_fn)(void *);
 static pthread_once_t g_pin_once = PTHREAD_ONCE_INIT;
 static void pin_init(void)
 {
-  const char *e = getenv("ISAC_PDSCH_GPU_HOST_PIN");
-  if (!e || atoi(e) != 1)
-    return;
   void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!h)
     h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
@@ -310,7 +289,7 @@ static void pin_init(void)
   g_unpin_fn = h ? (int (*)(void *))dlsym(h, "nr_pdsch_gpu_exact_unpin") : NULL;
   if (!g_pin_fn || !g_unpin_fn)
     g_pin_fn = NULL;
-  LOG_A(PHY, "SENSING: ISAC_PDSCH_GPU_HOST_PIN=1: GPU-touched host buffers pinned at allocation (%s)\n", g_pin_fn ? "ok" : "module unavailable, off");
+  LOG_A(PHY, "SENSING: GPU host pin: GPU-touched host buffers pinned at allocation (%s)\n", g_pin_fn ? "ok" : "module unavailable, off");
 }
 int nr_pdsch_gpu_host_pin(void *p, size_t bytes)
 {

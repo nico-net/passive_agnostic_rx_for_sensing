@@ -1,0 +1,6 @@
+[PHY]    SENSING: SI_SOFTCOMBINE stats first=384 ok=93 | combined=363 ok=175
+[PHY]    SENSING: SI_SOFTCOMBINE cell 508: TB CRC ok after 2 combined repetitions (rv 1)
+[PHY]    SENSING: SI_SOFTCOMBINE cell 508: TB CRC ok after 6 combined repetitions (rv 0)
+[PHY]    SENSING: SI_SOFTCOMBINE cell 508: TB CRC ok after 2 combined repetitions (rv 2)
+[PHY]    SENSING: SI_SOFTCOMBINE cell 508: TB CRC ok after 3 combined repetitions (rv 3)
+[PHY]    SENSING: SI_SOFTCOMBINE cell 508: TB CRC ok after 2 combined repetitions (rv 1)

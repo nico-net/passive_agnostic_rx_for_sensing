@@ -18,6 +18,7 @@
 #include "PHY/NR_TRANSPORT/nr_ulsch_passive_branch.h"
 #include "PHY/NR_TRANSPORT/nr_ulsch_passive_timing.h"
 #include "PHY/nr_phy_common/inc/nr_passive_delay.h"
+#include "PHY/nr_phy_common/inc/nr_passive_delay_fast.h"
 #include "nr_phy_common.h"
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "T.h"
@@ -52,7 +53,30 @@ typedef struct puschAntennaProc_s {
   scopeData_t *scope;
   c16_t *pusch_ch_est_dmrs_pos_slot_mem;
   int dmrs_symbol_start_idx;
+  uint8_t lp; /* DM-RS symbol index within the grant */
 } puschAntennaProc_t;
+
+/* Passive RX only: the delay of an antenna is estimated on the grant's
+ * first DM-RS symbol and reused on its later DM-RS symbols (same UE, same slot: one arrival time), halving the n-point
+ * IDFTs of a 2-symbol DM-RS grant. Keyed by layer, start subcarrier, PRB count and slot, so a PRB-list segment or a new
+ * grant never reuses another allocation's estimate. */
+static __thread struct { delay_t d; int nl, k0, rb, ns; bool ok; } t_dly1[16];
+static void ul_passive_delay(const puschAntennaProc_t *rdata, int antenna, const c16_t *ls, c16_t *time, delay_t *delay)
+{
+  const int n = rdata->frame_parms->ofdm_symbol_size;
+  const bool once = antenna >= 0 && antenna < 16;
+  if (once && rdata->lp > 0 && t_dly1[antenna].ok && t_dly1[antenna].nl == rdata->nl && t_dly1[antenna].k0 == rdata->bwp_start_subcarrier
+      && t_dly1[antenna].rb == rdata->pusch_pdu->rb_size && t_dly1[antenna].ns == rdata->Ns) {
+    if (t_dly1[antenna].d.delay_max_val >= delay->delay_max_val)
+      *delay = t_dly1[antenna].d;
+    return;
+  }
+  if (!(nr_ul_delay_fast_on() && !rdata->scope && nr_passive_est_delay_fast(n, ls, delay)))
+    nr_passive_est_delay(n, ls, time, delay);
+  if (once && rdata->lp == 0)
+    t_dly1[antenna] = (typeof(t_dly1[0])){.d = *delay, .nl = rdata->nl, .k0 = rdata->bwp_start_subcarrier, .rb = rdata->pusch_pdu->rb_size,
+                                          .ns = rdata->Ns, .ok = true};
+}
 
 __attribute__((always_inline)) inline c16_t c32x16cumulVectVectWithSteps(c16_t *in1,
                                                                          int *offset1,
@@ -172,7 +196,7 @@ static void nr_pusch_antenna_processing(void *arg)
       }
       c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
       if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
-        nr_passive_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
+        ul_passive_delay(rdata, antenna, ul_ls_est, ch_estimates_time, delay);
       else
         nr_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
       if (rdata->scope && antenna == 0) {
@@ -277,7 +301,7 @@ static void nr_pusch_antenna_processing(void *arg)
       // Delay compensation
       c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
       if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
-        nr_passive_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
+        ul_passive_delay(rdata, antenna, ul_ls_est, ch_estimates_time, delay);
       else
         nr_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
       if (rdata->scope && antenna == 0) {
@@ -495,7 +519,7 @@ int nr_pusch_channel_estimation(PHY_VARS_gNB *gNB,
     // Note: pilot returned by the following function is already the complex conjugate of the transmitted DMRS
     const uint32_t *gold = nr_gold_pusch(fp->N_RB_UL,
                                          fp->symbols_per_slot,
-                                         gNB->gNB_config.cell_config.phy_cell_id.value,
+                                         pusch_pdu->ul_dmrs_scrambling_id, /* TS 38.211 6.4.1.1.1: scramblingID0/1 else PCI (MAC fills the PCI by default); was phy_cell_id, which ignored scramblingID0/1 (gNB could not decode non-PCI DM-RS ids). The passive receiver sets both to the same value. */
                                          pusch_pdu->scid,
                                          Ns,
                                          symbol);
@@ -605,6 +629,7 @@ int nr_pusch_channel_estimation(PHY_VARS_gNB *gNB,
     rdata->ans = &ans;
     rdata->pusch_ch_est_dmrs_pos_slot_mem = pusch_ch_est_dmrs_pos_slot_mem;
     rdata->dmrs_symbol_start_idx = dmrs_symbol_start_idx;
+    rdata->lp = lp;
     // Call the nr_pusch_antenna_processing function
     if (job_id == num_jobs - 1) {
       // Run the last job inline
@@ -629,13 +654,9 @@ int nr_pusch_channel_estimation(PHY_VARS_gNB *gNB,
   if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
     int peak_power[nb_antennas_rx];
     for (int a=0;a<nb_antennas_rx;++a) peak_power[a]=delay_arr[a].delay_max_val;
-    const int keep=nr_ulsch_passive_branch_selection(true,nb_antennas_rx,
-                       getenv("ISAC_UL_RX_BRANCH"),getenv("ISAC_RX_MRC_MODE"));
+    const int keep=nb_antennas_rx>1 ? 0 : -1; /* ISAC_RX_MRC_MODE=1: branch 0 */
     const int best=nr_ulsch_passive_timing_branch(nb_antennas_rx,keep,peak_power);
     if (best>=0) *delay=delay_arr[best];
-    if (getenv("ISAC_UL_TIMING_DIAG"))
-      LOG_I(PHY,"UL-TIMING rnti=%04x slot=%u sym=%u branch=%d delay=%d peak=%d\n",
-            pusch_pdu->rnti,Ns,symbol,best,delay->est_delay,delay->delay_max_val);
   } else {
     for (int aarx = 1; aarx < nb_antennas_rx; aarx++) {
       if (delay_arr[aarx].est_delay >= delay->est_delay) {
@@ -726,7 +747,7 @@ void nr_pusch_ptrs_processing(PHY_VARS_gNB *gNB,
       /*------------------------------------------------------------------------------------------------------- */
       const uint32_t *gold = nr_gold_pusch(frame_parms->N_RB_UL,
                                            frame_parms->symbols_per_slot,
-                                           gNB->gNB_config.cell_config.phy_cell_id.value,
+                                           rel15_ul->ul_dmrs_scrambling_id,
                                            rel15_ul->scid,
                                            nr_tti_rx,
                                            symbol);

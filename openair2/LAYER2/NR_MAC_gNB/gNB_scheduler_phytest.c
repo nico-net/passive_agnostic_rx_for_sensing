@@ -246,6 +246,17 @@ void nr_ul_preprocessor_phytest(gNB_MAC_INST *nr_mac, post_process_pusch_t *pp_p
   const int BWPStart = ul_bwp->BWPStart;
   uint16_t rbStart = 0;
   uint16_t rbSize = min(bw, target_ul_bw);
+  uint32_t ul_mcs = target_ul_mcs;
+  /* UL rfsim test bed ONLY (ISAC_TB_UL_VARY=1, default unset = unchanged): vary the PRB range and MCS per grant like a link-adaptive gNB.
+   * The fixed phy-test grant (106 PRB, MCS 9) has constant RIV/MCS fields, which a blind DCI-layout fit cannot separate from padding. */
+  static int tb_vary = -1;
+  if (tb_vary < 0)
+    tb_vary = getenv("ISAC_TB_UL_VARY") && atoi(getenv("ISAC_TB_UL_VARY")) ? 1 : 0;
+  if (tb_vary && sched_ctrl->retrans_ul_harq.head == -1) { // a pending retransmission keeps its original (full-band) allocation request
+    rbSize = 4 + (uint16_t)(lrand48() % (rbSize - 3)); // 4..rbSize (transform-precoding sizes are not enforced here)
+    rbStart = (uint16_t)(lrand48() % (bw - rbSize + 1));
+    ul_mcs = (uint32_t)(lrand48() % 17); // 0..16: decodable at the bed's SNR in either MCS table
+  }
 
   DevAssert(seq_arr_size(&nr_mac->ul_tda) > 0);
   const int tda = 0;
@@ -276,7 +287,8 @@ void nr_ul_preprocessor_phytest(gNB_MAC_INST *nr_mac, post_process_pusch_t *pp_p
   /* check only the first TDA: we are only interested in finding out if this TDA fits completely */
   int rb_s = rbStart, rb_l = rbSize;
   get_best_ul_tda(nr_mac, beam, tda_p, 1, sched_frame, sched_slot, &rb_s, &rb_l);
-  DevAssert(rb_s == rbStart && rb_l == rbSize);
+  if (!tb_vary)
+    DevAssert(rb_s == rbStart && rb_l == rbSize);
 
   const int buffer_index = ul_buffer_index(sched_frame, sched_slot, slots_frame, nr_mac->vrb_map_UL_size);
   uint16_t *vrb_map_UL = &nr_mac->common_channels[CC_id].vrb_map_UL[beam][buffer_index * MAX_BWP_SIZE];
@@ -307,7 +319,7 @@ void nr_ul_preprocessor_phytest(gNB_MAC_INST *nr_mac, post_process_pusch_t *pp_p
       .slot = sched_slot,
       .rbSize = rbSize,
       .rbStart = rbStart,
-      .mcs = target_ul_mcs,
+      .mcs = ul_mcs,
       // R, Qm, tb_size set further below
       // PID of a HARQ process awaiting retransmission, or -1 for "any new"
       .ul_harq_pid = sched_ctrl->retrans_ul_harq.head,
@@ -315,7 +327,7 @@ void nr_ul_preprocessor_phytest(gNB_MAC_INST *nr_mac, post_process_pusch_t *pp_p
       // tpmi in post-process
       .time_domain_allocation = tda,
       .tda_info = tda_info,
-      .dmrs_info = get_ul_dmrs_params(scc, ul_bwp, &tda_info, target_ul_Nl, 0, 1),
+      .dmrs_info = get_ul_dmrs_params(scc, ul_bwp, &tda_info, target_ul_Nl, 0, (ul_bwp->transform_precoding || !getenv("ISAC_TB_PUSCH_TP")) ? 1 : 2), /* test bed only (ISAC_TB_PUSCH_TP set), default unchanged; TP: DCI antenna-port table 7.3.1.1.2-6 only has 2 CDM groups without data */
       .bwp_info = get_pusch_bwp_start_size(UE),
       .ant_port_idx.numSpatialStreamIndices = nr_mac->radio_config.pusch_AntennaPorts,
   };

@@ -1,4 +1,5 @@
 #include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
+#include "PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_rx_continuity.h"
 /* Set once the first initial sync succeeds; read by the USRP driver (dlsym) to bound its pre-sync stream restarts. */
@@ -8,6 +9,8 @@ int nr_ue_rx_synced_g = 0;
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_early_start.h" // per-CORESET early start: split slot read, symbol progress, slot gate
+#include "PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe.h" // ACQMISS-2 sync-quality metric
 #include "PHY/NR_UE_TRANSPORT/nr_passive_metrics.h" // ISAC_METRICS pci
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include <dlfcn.h>
@@ -197,24 +200,6 @@ void init_nr_ue_vars(PHY_VARS_NR_UE *ue, uint8_t UE_id)
   ue->if_inst     = nr_ue_if_module_init(UE_id);
   ue->dci_thres   = 0;
   ue->target_Nid_cell = -1;
-  /* ISAC_TARGET_PCI=<pci>: pin the initial SSB search to one N_ID_2 (PCI%3), a hard filter in
-   * pss_nr.c (pss_index_start=pss_index_end-1=GET_NID2(target)) -- correlates against exactly
-   * that one PSS sequence, never even evaluates the other two. Existing target_Nid_cell plumbing
-   * (nr_initial_sync.c/nr_ue_measurements.c) was previously only reachable via a NAS-triggered
-   * re-sync request; this is the FIRST wiring for the initial blind acquisition itself. Unset =
-   * -1 = unchanged blind-scan behaviour, bit-identical to before. Does not disambiguate two
-   * cells sharing the same N_ID_2 (SSS/N_ID_1 is still whichever correlates -- see
-   * wideband-tracking-uses-wrong-cell-dmrs memory); only rules out N_ID_2-distinct co-channel
-   * cells entirely, which is what it is being used for here. */
-  {
-    const char *e = getenv("ISAC_TARGET_PCI");
-    if (e && *e) {
-      ue->target_Nid_cell = atoi(e);
-      LOG_W(NR_PHY, "ISAC_TARGET_PCI=%d: pinning initial acquisition to N_ID_2=%d\n",
-            ue->target_Nid_cell, ue->target_Nid_cell % 3);
-    }
-  }
-
   // initialize all signal buffers
   init_nr_ue_signal(ue, nb_connected_gNB);
 
@@ -248,9 +233,6 @@ typedef struct {
   uint64_t recover_epoch;
 } syncData_t;
 
-extern _Atomic int nr_ue_cfo_resync_request; // set by the CFO trim loop (phy_procedures_nr_ue.c)
-extern int         nr_ue_cfo_resync_hz;
-
 /* UE_synch: initial synchronisation job (run on the sync actor): searches the SSB raster for the cell (full search, or the fast PSS search around the predicted position with radius and coarse fallbacks under ISAC_RX_RECOVER), then retunes the radio when not on continuous FO compensation and applies the post-sync gain.
  *   On success it sets pss_tick, rx_offset, UE->is_synchronized and nr_ue_rx_synced_g. On failure it raises the RX gain (AGC) and reports the failure. Sidelink mode uses the SLSS search. Caller: UE_thread() as the job of the sync notified FIFO.
  */
@@ -278,22 +260,18 @@ static void UE_synch(void *arg) {
   } else {
     nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier);
     if (syncD->fast_pss_position >= 0) {
-      /* Test-only path to exercise the coarse fallback with a replay gap. */
-      const char *force_coarse_env = getenv("ISAC_RX_RECOVER_TEST_COARSE_EPOCH");
-      const bool force_coarse = force_coarse_env && atoll(force_coarse_env) == (long long)syncD->recover_epoch;
       LOG_I(PHY, "SENSING: RX_RECOVER fast PSS/SSS pci=%d ssb_sc=%d frame=%d expected_pos=%d radius=%d\n",
             UE->target_Nid_cell, syncD->gscnInfo[0].ssbFirstSC, syncD->fast_pss_frame, syncD->fast_pss_position,
             syncD->fast_pss_radius);
-      if (!force_coarse)
-        ret = nr_initial_sync_fast(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn,
-                                   syncD->fast_pss_frame, syncD->fast_pss_position, syncD->fast_pss_radius, 1, 0);
-      if (!ret.cell_detected && !force_coarse) {
+      ret = nr_initial_sync_fast(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn,
+                                 syncD->fast_pss_frame, syncD->fast_pss_position, syncD->fast_pss_radius, 1, 0);
+      if (!ret.cell_detected) {
         const int medium_radius = 2 * fp->ofdm_symbol_size;
         LOG_W(PHY, "SENSING: RX_RECOVER widening predicted-frame PSS radius to %d samples\n", medium_radius);
         ret = nr_initial_sync_fast(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn,
                                    syncD->fast_pss_frame, syncD->fast_pss_position, medium_radius, 1, 0);
       }
-      if (!ret.cell_detected && !force_coarse) {
+      if (!ret.cell_detected) {
         /* The X410 can report a frozen stream origin across a restart. Keep
          * the expected local PSS phase but test the other capture frame too. */
         LOG_W(PHY, "SENSING: RX_RECOVER probing other SSB frame=%d radius=%d\n",
@@ -345,7 +323,7 @@ static void UE_synch(void *arg) {
         + round((float)((ret.rx_offset << 1) % fp->samples_per_subframe) / fp->samples_per_slot0);
 
     UE->freq_offset = freq_offset - UE->dl_Doppler_shift;
-    nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier); /* ISAC_KSSB_ALIGN may have moved the carrier */
+    nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier); /* the k_SSB grid alignment may have moved the carrier */
     if (!get_nrUE_params()->cont_fo_comp) {
       // rerun with new cell parameters and frequency-offset
       nrue_ru_set_freq(UE, ul_carrier, dl_carrier, freq_offset);
@@ -824,7 +802,7 @@ bool readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
   }
 
   c16_t *rxp[fp->nb_antennas_rx];
-  const bool check_capture = getenv("ISAC_RX_RECOVER") && atoi(getenv("ISAC_RX_RECOVER")) != 0;
+  const bool check_capture = getenv("ISAC_RX_RECOVER") ? atoi(getenv("ISAC_RX_RECOVER")) != 0 : IS_PASSIVE_RX_MODE(get_softmodem_params());
   static uint64_t (*ring_epoch_get)(void) = NULL;
   static bool ring_epoch_checked = false;
   if (check_capture && !ring_epoch_checked) {
@@ -971,20 +949,6 @@ static double nr_ue_rx_power_reference_dbm(int ch)
   }
   return g_pwr_ref_fn ? g_pwr_ref_fn(ch) : NAN;
 }
-/* ULPROBE (ISAC_UL_PROBE=1, default OFF): the three Phase-0 questions the UL work is gated on, and
- * none of them can be answered from an existing capture.
- *   1. Does this receiver even KNOW the TDD pattern? nr_ue_slot_select() returns NR_DOWNLINK_SLOT
- *      for EVERY slot until UE->received_config_request goes true (this file's own fallback), so a
- *      passive receiver that never got a config request silently treats UL slots as DL.
- *   2. Are UL-slot samples present in rxdata at all? Passive mode skips RU_write entirely on a real
- *      radio, so they should be -- but "should be" is how this project acquires wrong conclusions.
- *   3. Is the UE AUDIBLE in UL slots? This is the go/no-go for the whole PUSCH path: the gNB
- *      transmits at tens of watts, a UE at a fraction of one, under power control that minimises it.
- * Splitting the SAME per-antenna accumulator by slot type answers 2 and 3 together, and costs one
- * compare per slot when enabled and nothing at all when not. */
-static double g_ulprobe_pow[2][CENSUS_MAX_ANT];
-static long g_ulprobe_n[2];
-static int g_ulprobe_on = -1;
 static long g_census_pow_ant_n;
 static long g_census_ssb_slots;
 static long g_census_slots;
@@ -1046,8 +1010,57 @@ void trs_freq_correction(PHY_VARS_NR_UE *ue, int cfo)
   }
 }
 
+/* nr_rx_read_slot: reads one slot. When verified CORESETs end before the slot does (nr_early_start.h) the read is split at the end of
+ *   each CORESET's last symbol: the symbol progress is published and an early scan job posted at each point, so the PDCCH fast lane
+ *   starts while the rest of the slot is still arriving. With no early-eligible CORESET it is exactly one nrue_ru_read(), as before.
+ *   Returns the samples read (sum of the pieces) or < 0 on cancellation; *ts is the slot's first-sample timestamp. */
+static int nr_rx_read_slot(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ts, c16_t **rxp, int readBlockSize, int firstSymSamp, int slot_nr,
+                           long abs_slot, const UE_nr_rxtx_proc_t *proc)
+{
+  NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
+  const int nant = fp->nb_antennas_rx;
+  nr_es_point_t pts[NR_ES_MAX_POINTS];
+  int np = 0;
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+    nr_es_cs_t cs[NR_ES_MAX_BANKS];
+    int nb = 0;
+    if (nr_es_banks_read(&nr_es_banks, cs, &nb) && nb > 0 && fp->symbols_per_slot <= 14) {
+      uint32_t cum[15];
+      cum[0] = 0;
+      for (int k = 1; k <= fp->symbols_per_slot; k++)
+        cum[k] = get_samples_symbol_duration(fp, slot_nr, 0, k);
+      np = nr_es_plan(cs, nb, fp->symbols_per_slot, cum, (uint32_t)firstSymSamp, pts, NR_ES_MAX_POINTS);
+      while (np > 0 && pts[np - 1].sample_off >= readBlockSize) np--; /* a point must fall inside this (possibly shortened) read */
+    }
+  }
+  if (np == 0)
+    return nrue_ru_read(UE, ts, (void **)rxp, readBlockSize, nant);
+  int done = 0;
+  bool first = true;
+  for (int p = 0; p < np; p++) {
+    const int want = pts[p].sample_off - done;
+    if (want > 0) {
+      void *bp[nant];
+      for (int a = 0; a < nant; a++) bp[a] = rxp[a] + done;
+      openair0_timestamp_t t2;
+      const int n = nrue_ru_read(UE, first ? ts : &t2, bp, want, nant);
+      if (n < 0) return n;
+      first = false;
+      done += n;
+      if (n != want) break; /* short read: the rest is read in one piece below, no further early points this slot */
+    }
+    nr_es_progress_publish(&nr_es_progress, abs_slot, pts[p].sym_end);
+    nr_pdcch_blind_monitor_early_post(UE, proc, abs_slot, pts[p].sym_end);
+  }
+  void *bp[nant];
+  for (int a = 0; a < nant; a++) bp[a] = rxp[a] + done;
+  openair0_timestamp_t t2;
+  const int n = nrue_ru_read(UE, first ? ts : &t2, bp, readBlockSize - done, nant);
+  return n < 0 ? n : done + n;
+}
+
 /* UE_thread: the PHY receive thread of the NR UE (the real-time loop): acquires the cell with UE_synch() through the sync actor, tracks timing and frequency, reads one slot per iteration, and dispatches each slot's RX/TX processing to the actors and barriers.
- *   The stream status moves UNSYNC -> SYNCING -> SYNCED and back on loss. Loss is detected by PBCH tracking, the RF stall watchdog (ISAC_RF_STALL_WATCHDOG, with up to ISAC_RF_STALL_MAX_REINIT device re-inits) and the RX recovery path (ISAC_RX_RECOVER). Other flags: ISAC_AUTO_ACQUIRE, ISAC_SCAN_CONFIRM, ISAC_TSYNC_RESET, ISAC_UL_PROBE, ISAC_SHIFT_CENSUS, ISAC_DISC_NO_RESYNC, ISAC_PBCH_SHIFT_CLAMP.
+ *   The stream status moves UNSYNC -> SYNCING -> SYNCED and back on loss. Loss is detected by PBCH tracking, the RF stall watchdog (up to 4 device re-inits) and the RX recovery path (ISAC_RX_RECOVER).
  *   Exits when shutdown is requested and requests shutdown with the final status. Started by init_NR_UE_threads() (summary; the function is long and this header gives its structure, not every branch).
  */
 void *UE_thread(void *arg)
@@ -1089,7 +1102,7 @@ void *UE_thread(void *arg)
   NR_UE_MAC_INST_t *mac = get_mac_inst(UE->Mod_id);
 
   bool syncRunning = false;
-  const bool rx_recover_on = getenv("ISAC_RX_RECOVER") && atoi(getenv("ISAC_RX_RECOVER")) != 0;
+  const bool rx_recover_on = getenv("ISAC_RX_RECOVER") ? atoi(getenv("ISAC_RX_RECOVER")) != 0 : IS_PASSIVE_RX_MODE(get_softmodem_params());
   uint64_t rx_recover_epoch = 0;
   long long rx_recover_gap = 0;
   struct timespec rx_recover_start = {0};
@@ -1105,9 +1118,7 @@ void *UE_thread(void *arg)
   }
   int shiftForNextFrame = 0;
   int intialSyncOffset = 0;
-  const char *auto_acquire_env = getenv("ISAC_AUTO_ACQUIRE");
-  const bool auto_timing = IS_PASSIVE_RX_MODE(get_softmodem_params())
-                           && auto_acquire_env && !strcmp(auto_acquire_env, "1");
+  const bool auto_timing = nr_auto_acquire_on; // passive and no --ssb/--initial-fo
   /* BLIND-SCAN CONFIRM PASS (2026-09-19). MEASURED on the Swisscom macro (PCI 382, 3610.56 MHz SSB,
    * 273 PRB, identical -C and RX gain): from a 64-GSCN blind scan the receiver acquires and decodes
    * the MIB every time, then NEVER tracks PBCH (0/50 in all 45 windows, in-window CIR energy
@@ -1117,9 +1128,7 @@ void *UE_thread(void *arg)
    * path sets correctly. Rather than model that difference: once the scan has WON a GSCN, redo the
    * acquisition against that SSB alone -- the second pass IS the pinned path. Costs one extra
    * acquisition (~0.7 s) on a blind-scan start only; a pinned start never triggers it.
-   * ISAC_SCAN_CONFIRM=0 disables. */
-  const char *scan_confirm_env = getenv("ISAC_SCAN_CONFIRM");
-  const bool scan_confirm_on = (scan_confirm_env == NULL) || (atoi(scan_confirm_env) != 0);
+   */
   bool scan_confirm_pending = false;
   int scan_confirm_left = 1; /* once per process: a second pass that also fails must not loop */
   nr_gscn_info_t scan_confirm_ssb = {0};
@@ -1174,6 +1183,7 @@ void *UE_thread(void *arg)
           nr_passive_acq_set_phy_geometry(UE->frame_parms.N_RB_DL, UE->frame_parms.numerology_index,
                                           UE->frame_parms.ssb_start_subcarrier, (double)UE->frame_parms.dl_CarrierFreq);
           nr_passive_acq_note_pbch_locked(); // acquisition-state tracker: MIB applied, frame known
+          nr_passive_acq_try_sibling_carrier((int)mac->ssb_subcarrier_offset); // ISAC_SIB1_SIBLING (default off)
           if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()) {
             /* The acquired SSB centre is stable across SFN/beam-index changes. Point A is refined on SIB1. */
             const uint64_t ssb_hz = UE->frame_parms.dl_CarrierFreq
@@ -1262,9 +1272,9 @@ void *UE_thread(void *arg)
                     "reset to the initial CFO seed, the confirm result is a residual applied as a total\n",
                     fo2, scan_confirm_fo1);
           }
-          /* See scan_confirm_on: re-acquire against the SSB this scan just won, so tracking starts
+          /* Re-acquire against the SSB this scan just won, so tracking starts
            * from the single-SSB path's state rather than the multi-GSCN scan's. */
-          if (scan_confirm_on && scan_confirm_left > 0 && syncMsg->numGscn > 1) {
+          if (scan_confirm_left > 0 && syncMsg->numGscn > 1) {
             scan_confirm_left--;
             scan_confirm_ssb = (nr_gscn_info_t){.ssbFirstSC = fp->ssb_start_subcarrier};
             for (int i = 0; i < syncMsg->numGscn; ++i)
@@ -1406,7 +1416,7 @@ void *UE_thread(void *arg)
         syncMsg->gscnInfo[0] = auto_anchor_ssb;
         syncMsg->numGscn = 1;
       } else if (scan_confirm_pending) {
-        // Confirm pass: only the SSB the blind scan just won (see scan_confirm_on).
+        // Confirm pass: only the SSB the blind scan just won .
         scan_confirm_pending = false;
         syncMsg->gscnInfo[0] = scan_confirm_ssb;
         syncMsg->numGscn = 1;
@@ -1442,23 +1452,7 @@ void *UE_thread(void *arg)
        * Bound the projection so a corrupt integrator cannot move the sync point further than a
        * plausible real drift. At the measured 0.11 ppm this link drifts ~0.14 samples/frame, so a
        * cap of one sample per frame is already an order of magnitude of headroom. */
-      static int tsync_cap = -1;
-      if (tsync_cap < 0) {
-        const char *e = getenv("ISAC_TSYNC_RESET");
-        tsync_cap = (e != NULL) ? atoi(e) : 0;
-      }
       double drift = elapsed_frames * (double)UE->max_pos_acc * get_nrUE_params()->time_sync_I;
-      if (tsync_cap) {
-        /* Same switch, same reason: unvalidated. At the measured 0.11 ppm this link drifts ~0.14
-         * samples/frame, so one sample per frame is an order of magnitude of headroom -- but a cap
-         * that is wrong in the other direction breaks a legitimate long-gap re-acquisition. */
-        const double drift_cap = (double)elapsed_frames;
-        if (drift > drift_cap) {
-          drift = drift_cap;
-        } else if (drift < -drift_cap) {
-          drift = -drift_cap;
-        }
-      }
       const int initial_drift_shift = auto_timing && auto_drift_ready
           ? lround((elapsed_frames - 1) * auto_drift_samples_per_frame) : -round(drift);
       int corrected_sync_offset = intialSyncOffset + initial_drift_shift;
@@ -1491,49 +1485,6 @@ void *UE_thread(void *arg)
        * re-acquisition inherit a wound-up (often sign-flipped) value and never recover PBCH. The
        * loop re-learns the standing offset within a few frames -- healthy runs settle back to
        * ~+450-500 -- so there is nothing to preserve. */
-      /* OPT-IN, DEFAULT OFF (ISAC_TSYNC_RESET=1).
-       *
-       * The reasoning is sound -- max_pos_acc is an integral against the OLD timing origin and
-       * syncInFrame() above has just replaced that origin -- and the defect it targets is real:
-       * max_pos_acc < 0 appears in 23/100 "signal present, PBCH dead" windows against 2/1126
-       * healthy ones. But it is NOT VALIDATED and the first evidence points the wrong way: runs
-       * since it went in last 4-16 s against 164 s before, and this rig is documented as swinging
-       * wildly run to run, so a handful of short runs cannot attribute that either way.
-       *
-       * There is also a real mechanism for it to HURT: the standing offset a healthy receiver holds
-       * (+450 to +500, i.e. shift -5) may be a genuine constant of this signal path rather than
-       * accumulated error, in which case zeroing it starts every re-acquisition 4-5 samples off and
-       * makes the loop re-learn it while PBCH is trying to decode. Default off until an A/B of >=5
-       * runs per arm says otherwise. */
-      /* DEFAULT OFF. Opt in with ISAC_TSYNC_RESET=1.
-       *
-       * The DIAGNOSIS stands: max_pos_acc is an integral against the OLD timing origin, syncInFrame()
-       * has just replaced that origin, and the acquisition path then AMPLIFIES the stale value by
-       * elapsed_frames when projecting drift across the gap. max_pos_acc < 0 appears in 23/100
-       * "signal present, PBCH dead" windows against 2/1126 healthy ones.
-       *
-       * But the BENEFIT does not survive a clean measurement. An early A/B showed off 38/57 s vs on
-       * 229/249 s, zero overlap, and this default was flipped on that. Those runs were later found
-       * to have been taken while the host had lost its 100 GbE address and UHD was falling back to
-       * the 1 GbE management link -- a starved stream, not a fair test. Repeated on a healthy rig,
-       * 5 reps per arm, alternated:
-       *
-       *     off  mean  42.8 s  median 30 s   runs 30, 75, 0, 89, 20
-       *     on   mean 122.4 s  median 32 s   runs 32, 254, 23, 25, 278
-       *     Welch t=1.30, df=4.7, p ~ 0.2-0.3, arms overlap
-       *
-       * The higher ON mean rests entirely on two outlier runs; its other three are
-       * indistinguishable from off, and the medians match. No demonstrated benefit, so it does not
-       * ship on. Re-test with more reps, or with a metric less noisy than run length, before
-       * enabling it. */
-      static int tsync_reset = -1;
-      if (tsync_reset < 0) {
-        const char *e = getenv("ISAC_TSYNC_RESET");
-        tsync_reset = (e != NULL) ? atoi(e) : 0;
-      }
-      if (tsync_reset) {
-        nr_ue_reset_time_sync_loop(UE);
-      }
       shiftForNextFrame = -round(UE->max_pos_acc * get_nrUE_params()->time_sync_I);
       LOG_I(PHY,
             "max_pos_acc = %d, initial_drift_shift = %d, shiftForNextFrame = %d\n",
@@ -1643,26 +1594,6 @@ void *UE_thread(void *arg)
     curMsg.proc.frame_tx    = ((absolute_slot + duration_rx_to_tx) / nb_slot_frame) % MAX_FRAME_NUMBER;
     curMsg.proc.hfn_rx      = (absolute_slot / nb_slot_frame) / MAX_FRAME_NUMBER;
     curMsg.proc.hfn_tx      = ((absolute_slot + duration_rx_to_tx) / nb_slot_frame) / MAX_FRAME_NUMBER;
-    if (g_ulprobe_on < 0)
-      g_ulprobe_on = (getenv("ISAC_UL_PROBE") != NULL) ? atoi(getenv("ISAC_UL_PROBE")) : 0;
-    if (g_ulprobe_on > 0 && UE->received_config_request) {
-      /* One shot, the first time a config request has landed: the actual slot-type MAP. Printing
-       * the map rather than a yes/no matters -- "received_config_request is true" does not tell you
-       * the TDD table was populated, and nr_ue_slot_select() returns NR_DOWNLINK_SLOT for a NULL
-       * max_tdd_periodicity_list too, which is indistinguishable from a genuinely all-DL cell. */
-      static int s_map_done = 0;
-      if (!s_map_done) {
-        s_map_done = 1;
-        char map[64];
-        int mu2 = 0;
-        for (int sl = 0; sl < nb_slot_frame && sl < 40; sl++) {
-          const int t = nr_ue_slot_select(cfg, sl);
-          map[mu2++] = (t == NR_UPLINK_SLOT) ? 'U' : ((t == NR_MIXED_SLOT) ? 'M' : 'D');
-        }
-        map[mu2] = 0;
-        LOG_I(PHY, "SENSING: ULPROBE slot_map(frame)=%s  (D=downlink U=uplink M=mixed)\n", map);
-      }
-    }
     if (UE->received_config_request) {
       if (UE->sl_mode) {
         curMsg.proc.rx_slot_type = sl_nr_ue_slot_select(sl_cfg, curMsg.proc.nr_slot_rx, TDD);
@@ -1686,37 +1617,6 @@ void *UE_thread(void *arg)
     if (slot_nr == nb_slot_frame - 1) {
       // we shift of half of measured drift, at each beginning of frame for both rx and tx
       iq_shift_to_apply = shiftForNextFrame;
-      /* ISAC_SHIFT_CENSUS=<frames> (default off): the CUMULATIVE window motion actually applied.
-       * The 2026-09-17 offline analysis could not obtain this. Measured from raw SSB IQ at 217 PRB,
-       * the PBCH DM-RS peak ramps away from the FFT window (R^2 = 0.983) until it leaves
-       * +-nb_prefix_samples, while at 51 PRB it settles. That ramp is not clock drift -- the LO and
-       * the ADC clock share a reference and the residual CFO puts it at ~4.1 ppm -- so the receiver
-       * is moving its own window. rx_offset cannot show it (it is a pure function of (slot,symbol)
-       * and reads nominal at BOTH widths; an applied shift moves the DATA within the ring, not the
-       * index). This census names the source: if the cumulative rate here matches the ramp seen on
-       * air, the motion comes through shiftForNextFrame and LOG_TIMEMUT says who wrote it; if it
-       * does not, the stream is being moved somewhere other than readBlockSize. */
-      {
-        static int s_census = -1;
-        static long s_cum = 0, s_frames = 0, s_nz = 0;
-        if (s_census < 0) {
-          const char *e = getenv("ISAC_SHIFT_CENSUS");
-          s_census = e ? atoi(e) : 0;
-        }
-        if (s_census > 0) {
-          s_cum += iq_shift_to_apply;
-          s_frames++;
-          if (iq_shift_to_apply)
-            s_nz++;
-          if (s_frames % s_census == 0)
-            LOG_W(PHY,
-                  "SENSING: SHIFTCENSUS frames=%ld applied_cum=%ld mean=%.3f samples/frame "
-                  "(%.2f ppm) nonzero=%ld/%ld max_pos_acc=%d shiftForNextFrame=%d\n",
-                  s_frames, s_cum, (double)s_cum / s_frames,
-                  (double)s_cum / s_frames / (double)fp->samples_per_frame * 1e6,
-                  s_nz, s_frames, UE->max_pos_acc, shiftForNextFrame);
-        }
-      }
       // autonomous timing advance calculation, which does not use SIB19 information
       if (ntn_koffset && get_nrUE_params()->autonomous_ta)
         UE->timing_advance_ntn -= 2 * shiftForNextFrame;
@@ -1734,7 +1634,7 @@ void *UE_thread(void *arg)
 
     const int readBlockSize = get_readBlockSize(slot_nr, fp) - iq_shift_to_apply;
     openair0_timestamp_t rx_timestamp;
-    int tmp = nrue_ru_read(UE, &rx_timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
+    int tmp = nr_rx_read_slot(UE, &rx_timestamp, rxp, readBlockSize, firstSymSamp, slot_nr, absolute_slot, &curMsg.proc);
     /* Cancellation has no sample timestamp and must never reach continuity
      * checks or the decoder/sensing consumers. */
     if (oai_exit || tmp < 0)
@@ -1743,13 +1643,14 @@ void *UE_thread(void *arg)
       struct timespec diag_ts;
       clock_gettime(CLOCK_REALTIME, &diag_ts);
       atomic_store_explicit(&nr_ue_diag_producer_absolute_slot, absolute_slot, memory_order_relaxed);
-      /* ISAC_UL_DBG_LOG=1 (diagnostic, default off): absolute slot -> radio timestamp once per frame,
-       * so offline tools can map a DCI's source slot onto raw IQ sample indices. */
-      static int s_uldbg_ts = -1;
-      if (s_uldbg_ts < 0) s_uldbg_ts = getenv("ISAC_UL_DBG_LOG") && atoi(getenv("ISAC_UL_DBG_LOG")) ? 1 : 0;
-      if (s_uldbg_ts && slot_nr == 0)
-        LOG_A(PHY, "SENSING: ULDBG_TS abs_slot=%d ts=%lld read=%d shift=%d\n", absolute_slot,
-              (long long)rx_timestamp, readBlockSize, iq_shift_to_apply);
+      nr_es_progress_publish(&nr_es_progress, absolute_slot, fp->symbols_per_slot); /* the slot is complete: early-start progress and the PDSCH slot gate */
+      nr_slot_gate_complete(&nr_slot_gate, absolute_slot);
+      { /* SYSAN ISAC_E2E_TRACE=1: slot arrival time for per-grant end-to-end latency */
+        extern int nr_passive_e2e_trace(void);
+        extern void nr_passive_note_slot_arrival(long abs_slot);
+        if (nr_passive_e2e_trace())
+          nr_passive_note_slot_arrival(absolute_slot);
+      }
       atomic_store_explicit(&nr_ue_diag_producer_wall_ns,
                             (long)diag_ts.tv_sec * 1000000000L + diag_ts.tv_nsec, memory_order_relaxed);
     }
@@ -1806,10 +1707,7 @@ void *UE_thread(void *arg)
               absolute_slot, curMsg.proc.frame_rx, curMsg.proc.nr_slot_rx,
               (unsigned long long)expected, (unsigned long long)rx_timestamp, jump,
               s_rxts_prev_consumed, s_rxts_discont_total);
-        static int s_disc_invalidate = -1;
-        if (s_disc_invalidate < 0)
-          s_disc_invalidate = (getenv("ISAC_DISC_NO_RESYNC") && atoi(getenv("ISAC_DISC_NO_RESYNC"))) ? 0 : 1;
-        if (s_disc_invalidate && UE->is_synchronized) {
+        if (UE->is_synchronized) {
           if (rx_recover_on) {
             rx_recover_epoch++;
             rx_recover_gap = jump;
@@ -1944,15 +1842,6 @@ void *UE_thread(void *arg)
         }
         if (cnta) {
           g_census_pow_ant[a2] += acca / cnta;
-          if (g_ulprobe_on > 0) {
-            /* NR_MIXED_SLOT counts as DL here: its UL symbols sit at the END of the slot while this
-             * accumulator spans the whole slot, so a mixed slot cannot be attributed cleanly and
-             * would only dilute both bins. This cell configures nrofUplinkSymbols=0 anyway. */
-            const int ul = (curMsg.proc.rx_slot_type == NR_UPLINK_SLOT) ? 1 : 0;
-            g_ulprobe_pow[ul][a2] += acca / cnta;
-            if (a2 == 0)
-              g_ulprobe_n[ul]++;
-          }
         }
       }
       g_census_pow_ant_n++;
@@ -1996,18 +1885,11 @@ void *UE_thread(void *arg)
     *curMsgRx = (nr_rxtx_thread_data_t){.proc = curMsg.proc, .UE = UE};
     int ret = UE_dl_preprocessing(UE, &curMsgRx->proc, tx_wait_for_dlsch, &curMsgRx->phy_data, &stats_printed);
     if (ret != INT_MAX) {
-      /* ISAC_PBCH_SHIFT_CLAMP=<samples> (default 0 = off): the PBCH-based timing step is read off a
-       * peaky multipath CIR and jumps +/-50 samples per SSB (TSYNC_OBS corr_pos swings +/-200) while
-       * the true drift is ~6 samples/frame (5 ppm SFO; the per-frame estimator reads 5-8). Unclamped,
-       * the loop walks off the CP in ~30 % of starts ("timing runaway"). Clamp the step, keep the sign. */
-      static int s_clamp = -1;
-      if (s_clamp < 0) {
-        const char *e = getenv("ISAC_PBCH_SHIFT_CLAMP");
-        s_clamp = (e != NULL) ? atoi(e) : 0;
-      }
-      if (s_clamp > 0) {
-        if (ret > s_clamp) ret = s_clamp;
-        if (ret < -s_clamp) ret = -s_clamp;
+      if (nr_syncq_enabled()) { /* ACQMISS-2 (default off): sync-quality input, and the SYNC_POOR recovery (tracker reset + step clamp) */
+        nr_syncq_note(ret);
+        if (nr_syncq_take_reacquire()) UE->max_pos_acc = 0;
+        const int dyn = nr_syncq_clamp();
+        if (dyn > 0) { if (ret > dyn) ret = dyn; if (ret < -dyn) ret = -dyn; }
       }
       const int b = shiftForNextFrame;
       shiftForNextFrame = ret;
@@ -2049,14 +1931,9 @@ void *UE_thread(void *arg)
      * is correct.
      */
     {
-      static int s_wd_on = -1;
       static double s_ref;      /* healthy reference power; never follows the signal downward */
       static int s_bad;         /* consecutive collapsed census windows */
       static long s_fires;
-      if (s_wd_on < 0) {
-        const char *e = getenv("ISAC_RF_STALL_WATCHDOG");
-        s_wd_on = e ? atoi(e) : 1; /* 0 disables */
-      }
       if (ret != INT_MAX)
         g_census_ssb_slots++;
       if (++g_census_slots >= 2000) { /* 2000 slots = 100 frames = 1 s at mu=1 */
@@ -2163,42 +2040,6 @@ void *UE_thread(void *arg)
             LOG_I(PHY, "SENSING: ADCPEAK max|I|,|Q| since start; hot = samples above 0.9 full scale: %s\n", pb);
           }
 
-          /* ---- BRSNR: per-branch signal-to-noise, from the only valid noise window available ----
-           * NOT from nr_dl_chest_nvar_ant[]. That array is |dl_ls_est - dl_ch|^2 -- the residual
-           * between the raw LS estimate and the FILTERED one -- so it is noise PLUS filter
-           * mismatch, and the mismatch term scales with |H|. Using it as an SNR denominator gives a
-           * denominator that tracks its own numerator: measured pw/resid = 2.3 on three branches at
-           * once while raw power said those branches clearly differed. It cannot separate a branch
-           * that is quiet from a branch that is noisy, which is the entire question here.
-           *
-           * The gNB does not transmit in the UL slots of this TDD pattern, so UL-slot receive power
-           * is a genuine per-branch NOISE FLOOR, measured on the same samples and the same scale as
-           * the DL power directly above it. SNR is then (P_dl - P_ul) / P_ul per branch.
-           *
-           * CONTAMINATION, stated rather than hidden: the served UE transmits in those UL slots, so
-           * P_ul is noise PLUS whatever of that UE's uplink reaches this receiver. That inflates
-           * P_ul and makes this an SNR LOWER BOUND. It is common-mode across branches, so the
-           * RELATIVE ordering between branches -- which is what the imbalance question needs -- is
-           * far more trustworthy than the absolute value. Requires ISAC_UL_PROBE=1.
-           * The two accumulators use the same sub-sampling and the same window, so no rescaling. */
-          if (g_ulprobe_on > 0 && g_ulprobe_n[0] > 0 && g_ulprobe_n[1] > 0) {
-            char sb[300];
-            size_t v = 0;
-            for (int a2 = 0; a2 < na && v < sizeof(sb) - 40; a2++) {
-              const double pdl = g_ulprobe_pow[0][a2] / (double)g_ulprobe_n[0];
-              const double pul = g_ulprobe_pow[1][a2] / (double)g_ulprobe_n[1];
-              /* These are mean(|I|+|Q|) amplitudes, so square before forming a power ratio. */
-              const double sdl = pdl * pdl, sul = pul * pul;
-              const double snr = (sul > 0.0 && sdl > sul) ? 10.0 * log10((sdl - sul) / sul) : -99.0;
-              v += snprintf(sb + v, sizeof(sb) - v, "ch%d=%.1fdB(n=%.0f) ", a2, snr, pul);
-            }
-            if (v > 0) {
-              LOG_I(PHY,
-                    "SENSING: BRSNR per-branch SNR lower bound from UL-slot noise floor "
-                    "(NOT from chest nvar, which is invalid here); n= is the noise amplitude: %s\n",
-                    sb);
-            }
-          }
         }
         if (g_census_pow_ant_n > 0) {
           double pa[CENSUS_MAX_ANT], mx = 0.0;
@@ -2223,33 +2064,6 @@ void *UE_thread(void *arg)
                 nant > 1 ? 20.0 * log10((pa[1] > 0 ? pa[1] : 1e-9) / mx) : 0.0,
                 nant > 2 ? 20.0 * log10((pa[2] > 0 ? pa[2] : 1e-9) / mx) : 0.0,
                 nant > 3 ? 20.0 * log10((pa[3] > 0 ? pa[3] : 1e-9) / mx) : 0.0);
-        }
-        if (g_ulprobe_on > 0) {
-          const int nantu = (UE->frame_parms.nb_antennas_rx < CENSUS_MAX_ANT) ? UE->frame_parms.nb_antennas_rx
-                                                                              : CENSUS_MAX_ANT;
-          double d[CENSUS_MAX_ANT] = {0}, u[CENSUS_MAX_ANT] = {0};
-          for (int a2 = 0; a2 < nantu; a2++) {
-            d[a2] = g_ulprobe_n[0] ? g_ulprobe_pow[0][a2] / (double)g_ulprobe_n[0] : 0.0;
-            u[a2] = g_ulprobe_n[1] ? g_ulprobe_pow[1][a2] / (double)g_ulprobe_n[1] : 0.0;
-          }
-          /* ul_slots=0 with cfg_req=1 would mean the TDD table says this cell has no UL slot;
-           * ul_slots=0 with cfg_req=0 means the receiver never learned the pattern and is treating
-           * every slot as DL. Completely different problems, so both numbers are printed. */
-          LOG_I(PHY,
-                "SENSING: ULPROBE cfg_req=%d dl_slots=%ld ul_slots=%ld dl_pow=[%.2f %.2f %.2f %.2f] "
-                "ul_pow=[%.2f %.2f %.2f %.2f] ul_minus_dl_dB=[%.1f %.1f %.1f %.1f]\n",
-                UE->received_config_request ? 1 : 0, g_ulprobe_n[0], g_ulprobe_n[1],
-                d[0], d[1], d[2], d[3], u[0], u[1], u[2], u[3],
-                (d[0] > 0 && u[0] > 0) ? 20.0 * log10(u[0] / d[0]) : -99.0,
-                (d[1] > 0 && u[1] > 0) ? 20.0 * log10(u[1] / d[1]) : -99.0,
-                (d[2] > 0 && u[2] > 0) ? 20.0 * log10(u[2] / d[2]) : -99.0,
-                (d[3] > 0 && u[3] > 0) ? 20.0 * log10(u[3] / d[3]) : -99.0);
-          for (int a2 = 0; a2 < CENSUS_MAX_ANT; a2++) {
-            g_ulprobe_pow[0][a2] = 0.0;
-            g_ulprobe_pow[1][a2] = 0.0;
-          }
-          g_ulprobe_n[0] = 0;
-          g_ulprobe_n[1] = 0;
         }
         g_census_slots = 0;
         g_census_ssb_slots = 0;
@@ -2285,7 +2099,7 @@ void *UE_thread(void *arg)
          * windows; a genuine runaway still trips after 8 (16 s), one reacquisition later than
          * before, while a beam that decodes even one SSB per window resets the count and survives. */
         const int bad_needed = 8;
-        if (s_wd_on && s_bad >= bad_needed && UE->is_synchronized) {
+        if (s_bad >= bad_needed && UE->is_synchronized) {
           s_fires++;
           LOG_E(PHY,
                 "SENSING: RFSTALL %s (rf_pow=%.2f ref=%.2f pbch_ok=%lu pbch_fail=%lu "
@@ -2302,35 +2116,11 @@ void *UE_thread(void *arg)
              * to the device throws (measured: set_gpio_src, then get_timekeeper_time at a 2000 ms
              * timeout). Escalate to a full teardown + re-open, which releases the stale claim and
              * takes a fresh one. Bounded, so a device that is genuinely gone cannot spin here. */
-            /* Cap is generous on purpose. MEASURED: this device can stall 8 times in 42 s, and
-             * each re-init recovers it with the real-accept rate staying flat across the gap --
-             * so giving up after a handful throws away a capture that was still working. The cap
-             * exists only so a permanently dead device cannot spin forever. Override with
-             * ISAC_RF_STALL_MAX_REINIT. */
-            /* IN-PROCESS RE-INIT IS OFF BY DEFAULT. It demonstrably restores the RF stream and
-             * PDCCH decoding -- real DCI accepts resume at full rate across the gap -- but whether
-             * PDSCH decoding survives it is NOT established. On one run whose re-init landed 15 %
-             * in, pdsch crc_ok froze at 726 for the remainder (84.7 % -> 10.1 % cumulative), which
-             * looked causal; it is not safe to read it that way, because a change in the SERVED
-             * UE's reported PMI produces the identical signature and was not ruled out. (Measured
-             * separately: PDSCH is precoded toward the served UE while PDCCH carries no pm_index
-             * at all, so a PMI change can null PDSCH at a passive receiver while leaving PDCCH at
-             * 84 % -- observed exactly, pm_index moving 3 -> 15/19 after a UE re-attach.)
-             * Defaulting to exit is the safe choice under that ambiguity: a capture is then either
-             * good or absent, never silently half-working. Set ISAC_RF_STALL_MAX_REINIT > 0 to opt
-             * in, and re-test the PDSCH question with the PMI held constant before trusting it. */
+            /* Cap is generous on purpose: this device can stall 8 times in 42 s and each re-init recovers it with
+             * the real-accept rate flat across the gap (4/4 recovered runs kept decoding PDSCH, 2026-08-26). The
+             * cap only stops a permanently dead device from spinning forever. */
             static int s_reinits;
-            static int s_reinit_cap = -1;
-            if (s_reinit_cap < 0) {
-              /* DEFAULT NOW 4, was 0. The open question that kept this off -- whether PDSCH
-               * decoding SURVIVES a re-init -- was answered 2026-08-26 at ~160 grants/s, where CRC
-               * is a stable 91 % and a post-recovery freeze would be unambiguous: 4/4 recovered runs
-               * kept decoding (crc_ok grew 749->28547, 833->2447, 4168->7683, 739->1782), and dwell
-               * went from active_s=8 (run dies at the stall) to 50-66 s. Set 0 to restore exit-on-
-               * stall. */
-              const char *e = getenv("ISAC_RF_STALL_MAX_REINIT");
-              s_reinit_cap = e ? atoi(e) : 4;
-            }
+            const int s_reinit_cap = 4;
             if (s_reinits < s_reinit_cap && nrue_ru_reinit() == 0) {
               s_reinits++;
               LOG_W(PHY, "SENSING: RFSTALL recovered by full device re-init (n=%d)\n", s_reinits);
@@ -2358,53 +2148,6 @@ void *UE_thread(void *arg)
       }
     }
 
-    /* ---- CFO TRIM: retune + clean re-acquisition, requested by the trim loop in pbch_process().
-     * Done HERE because this scope owns stream_status / shiftForNextFrame / the rebase flag, which
-     * an in-place retune from the PBCH path leaves stale -- measured as a run dying at active_s=4
-     * immediately after an otherwise CORRECT correction (GT_r4, proposal -14968 vs a true -14390).
-     * Re-acquiring with the radio already on the corrected frequency means the fresh acquisition
-     * measures a near-zero offset, which is the state a healthy run starts from anyway. */
-    if (atomic_load_explicit(&nr_ue_cfo_resync_request, memory_order_acquire)) {
-      atomic_store_explicit(&nr_ue_cfo_resync_request, 0, memory_order_relaxed);
-      uint64_t dl_carrier = 0, ul_carrier = 0;
-      nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier);
-      /* DELIVERY VIA FULL DEVICE RE-INIT, not a bare retune.
-       * MEASURED 2026-08-26: retuning under a running stream and clearing is_synchronized produced
-       * CORRECT corrections (-13677->-14310, -13051->-14293, -15723->-14312, all within ~100 Hz of
-       * the true -14390) and the receiver never came back -- 3/3 runs died at active_s=4. The
-       * lighter path does not recover on this hardware.
-       * The stall-recovery path DOES: nrue_ru_reinit() tears the device down and re-opens it, and
-       * 4/4 runs resumed decoding afterwards (grew=YES, one going 749 -> 28547 crc_ok). So the
-       * correction is delivered the way that is already proven to survive on this X410, rather than
-       * the way that is cheaper. */
-      LOG_W(PHY, "SENSING: CFOTRK retuning %d -> %d Hz and re-initialising the device\n",
-            UE->common_vars.freq_offset, nr_ue_cfo_resync_hz);
-      nrue_ru_set_freq(UE, ul_carrier, dl_carrier, nr_ue_cfo_resync_hz);
-      UE->common_vars.freq_offset = nr_ue_cfo_resync_hz;
-      UE->initial_fo = nr_ue_cfo_resync_hz; /* the seed the comment below demands; was MISSING */
-      /* SEED THE RE-ACQUISITION WITH THE CORRECTION WE JUST APPLIED.
-       * Without this the fix silently undoes itself. MEASURED (F2_r7): acquisition #1 gave -20234,
-       * the loop correctly retuned to -15066, and the re-acquisition then measured -1176 -- the
-       * RESIDUAL left on an already-corrected radio -- and UE_synch applied that -1176 as the TOTAL
-       * via its unconditional nrue_ru_set_freq(). The radio went from nearly right back to ~14 kHz
-       * off and the run decoded 0.0 %, with the trim loop afterwards proposing nonsense (-844/-691/
-       * -741) because common_vars.freq_offset no longer described the hardware.
-       * nr_initial_sync() seeds its accumulator from ue->initial_fo (`ssbInfo->freqOffset =
-       * ue->initial_fo`), so setting it here makes the next acquisition ACCUMULATE onto the applied
-       * correction (-15066 + -1176 = -16242) instead of replacing it. That accumulator is known to
-       * converge: seeding +6000 Hz took it back to within 34-276 Hz on 3/3 runs. */
-      if (nrue_ru_reinit() != 0) {
-        LOG_E(PHY, "SENSING: CFOTRK device re-init FAILED; the offset is set but the stream may not recover\n");
-      }
-      UE->is_synchronized = 0;
-      stream_status = STREAM_STATUS_UNSYNC;
-      UE->max_pos_acc = 0;
-      UE->max_pos_iir = 0;
-      shiftForNextFrame = 0;
-      atomic_store_explicit(&nr_ue_pending_rebase_valid, 0, memory_order_relaxed);
-      decoded_frame_rx = MAX_FRAME_NUMBER - 1;
-      trashed_frames = 0;
-    }
     if (get_nrUE_params()->num_dl_actors > 0) {
       pushNotifiedFIFO(&UE->dl_actors[curMsg.proc.nr_slot_rx % get_nrUE_params()->num_dl_actors].fifo, newRx);
     } else {

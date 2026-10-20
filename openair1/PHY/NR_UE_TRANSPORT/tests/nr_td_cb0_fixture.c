@@ -144,7 +144,7 @@ nr_td_cb0_item_t cb0_fx_item(const cb0_fx_t *fx)
 }
 
 /* passive_ldpc_decode_core (nr_pdsch_passive_decode.c), minus its HARQ / statistics side effects. */
-static int rx_decode(const nr_td_cb0_item_t *it, int probe, int *seg0_ok, const uint8_t *expect, int *bits_match)
+static int rx_decode_d(const nr_td_cb0_item_t *it, int probe, int *seg0_ok, const uint8_t *expect, int *bits_match, int16_t *d_keep, int clear)
 {
   if (bits_match)
     *bits_match = 0;
@@ -172,7 +172,7 @@ static int rx_decode(const nr_td_cb0_item_t *it, int probe, int *seg0_ok, const 
   TB->llr = (short *)it->llr;
   uint8_t *c = calloc((size_t)TB->C * (TB->K >> 3) + 64, 1);
   uint8_t *b = calloc((size_t)TB->C * (TB->K >> 3) + 64, 1);
-  int16_t *d = calloc((size_t)TB->C * 68 * 384, sizeof(int16_t));
+  int16_t *d = d_keep ? d_keep : calloc((size_t)TB->C * 68 * 384, sizeof(int16_t));
   TB->c = c;
   TB->d = d;
   int llrLen;
@@ -189,7 +189,7 @@ static int rx_decode(const nr_td_cb0_item_t *it, int probe, int *seg0_ok, const 
       break;
     }
   }
-  TB->d_to_be_cleared = true;
+  TB->d_to_be_cleared = clear;
   const uint32_t C_full = TB->C;
   TB->nb_segments_to_decode = (probe && C_full > 1) ? 1 : 0;
   const uint32_t C_dec = TB->nb_segments_to_decode ? 1 : C_full;
@@ -244,8 +244,28 @@ static int rx_decode(const nr_td_cb0_item_t *it, int probe, int *seg0_ok, const 
   }
   free(c);
   free(b);
-  free(d);
+  if (!d_keep)
+    free(d);
   free(TB);
+  return pass;
+}
+
+static int rx_decode(const nr_td_cb0_item_t *it, int probe, int *seg0_ok, const uint8_t *expect, int *bits_match)
+{
+  return rx_decode_d(it, probe, seg0_ok, expect, bits_match, NULL, 1);
+}
+
+int cb0_fx_rx_decode_hq(const nr_td_cb0_item_t *its, int n, const uint8_t *expect, int *bits_match)
+{
+  uint32_t C = 0, K = 0, Z = 0, F = 0;
+  const uint8_t BG = its[0].bg ? its[0].bg : get_BG(its[0].tbs, its[0].R);
+  if (n <= 0 || nr_segmentation(NULL, NULL, lenWithCrc(1, its[0].tbs), &C, &K, &Z, &F, BG) < 0)
+    return -1;
+  int16_t *d = calloc((size_t)C * 68 * 384, sizeof(int16_t));
+  int pass = 0;
+  for (int i = 0; i < n; i++) /* one soft buffer: the first transmission clears it, every later one adds into it */
+    pass = rx_decode_d(&its[i], 0, NULL, expect, bits_match, d, i == 0);
+  free(d);
   return pass;
 }
 

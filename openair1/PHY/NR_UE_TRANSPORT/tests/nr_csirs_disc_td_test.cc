@@ -28,7 +28,7 @@ TEST(CsirsDiscTd, DISABLED_ActorCopyBudget) {
   EXPECT_GT(us,0);EXPECT_LE(us,60);
 }
 TEST(CsirsDiscTd, DISABLED_GpuParityAndBudget) {
-  setenv("ISAC_CSIRS_DISC","1",1);setenv("ISAC_CSIRS_DISC_BACKEND","gpu",1);
+  setenv("ISAC_CSIRS_DISC_BACKEND","gpu",1);
   csirs_td_test_init();
   const auto *ops=nr_csirs_disc_gpu_load();
   ASSERT_TRUE(ops && ops->fft && nr_csirs_disc_alloc_unified) << "GPU required";
@@ -55,7 +55,7 @@ TEST(CsirsDiscTd, DISABLED_GpuParityAndBudget) {
 }
 
 TEST(CsirsDiscTd, DISABLED_GpuSustained2000SlotsPerSecond) {
-  setenv("ISAC_CSIRS_DISC","1",1);setenv("ISAC_CSIRS_DISC_BACKEND","gpu",1);
+  setenv("ISAC_CSIRS_DISC_BACKEND","gpu",1);
   const auto *ops=nr_csirs_disc_gpu_load();
   ASSERT_TRUE(ops && ops->fep && ops->accumulate && ops->lattice && ops->sweep) << "Full GPU pipeline required";
   ASSERT_EQ(csirs_td_throughput(),0);

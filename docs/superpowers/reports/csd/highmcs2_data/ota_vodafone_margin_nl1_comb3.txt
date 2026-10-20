@@ -1,0 +1,87 @@
+Qm=2 margin[ -6, -4)   0.0% n=2
+Qm=2 margin[ -4, -2)   0.0% n=6
+Qm=2 margin[ -2,  0)   0.0% n=136
+Qm=2 margin[  0,  2)   0.0% n=326
+Qm=2 margin[  2,  4)   0.0% n=524
+Qm=2 margin[  4,  6)   1.8% n=793
+Qm=2 margin[  6,  8)  13.7% n=1420
+Qm=2 margin[  8, 10)  29.3% n=2512
+Qm=2 margin[ 10, 12)  47.5% n=3011
+Qm=2 margin[ 12, 14)  70.7% n=2372
+Qm=2 margin[ 14, 16)  85.9% n=2057
+Qm=2 margin[ 16, 18)  91.7% n=2096
+Qm=2 margin[ 18, 20)  93.6% n=2166
+Qm=2 margin[ 20, 22)  95.9% n=2228
+Qm=2 margin[ 22, 24)  96.4% n=2084
+Qm=2 margin[ 24, 26)  96.3% n=2175
+Qm=2 margin[ 26, 28)  97.2% n=1745
+Qm=2 margin[ 28, 30)  97.4% n=1372
+Qm=2 margin[ 30, 32)  98.0% n=987
+Qm=2 margin[ 32, 34)  99.0% n=764
+Qm=2 margin[ 34, 36)  98.9% n=662
+Qm=2 margin[ 36, 38)  99.5% n=566
+Qm=2 margin[ 38, 40)  99.0% n=516
+Qm=2 margin[ 40, 42)  99.7% n=376
+Qm=2 margin[ 42, 44)  99.2% n=121
+Qm=2 margin[ 44, 46) 100.0% n=17
+Qm=4 margin[-10, -8)   0.0% n=1
+Qm=4 margin[ -8, -6)   0.0% n=7
+Qm=4 margin[ -6, -4)   0.0% n=45
+Qm=4 margin[ -4, -2)   0.0% n=1034
+Qm=4 margin[ -2,  0)   0.0% n=1452
+Qm=4 margin[  0,  2)   0.0% n=1445
+Qm=4 margin[  2,  4)   0.0% n=1038
+Qm=4 margin[  4,  6)   3.8% n=772
+Qm=4 margin[  6,  8)  42.7% n=646
+Qm=4 margin[  8, 10)  77.6% n=665
+Qm=4 margin[ 10, 12)  91.4% n=806
+Qm=4 margin[ 12, 14)  93.0% n=847
+Qm=4 margin[ 14, 16)  94.6% n=939
+Qm=4 margin[ 16, 18)  94.7% n=1077
+Qm=4 margin[ 18, 20)  96.3% n=925
+Qm=4 margin[ 20, 22)  96.3% n=979
+Qm=4 margin[ 22, 24)  96.8% n=1050
+Qm=4 margin[ 24, 26)  98.7% n=1166
+Qm=4 margin[ 26, 28)  99.3% n=940
+Qm=4 margin[ 28, 30)  99.3% n=542
+Qm=4 margin[ 30, 32) 100.0% n=285
+Qm=4 margin[ 32, 34)  98.0% n=51
+Qm=4 margin[ 34, 36) 100.0% n=5
+Qm=6 margin[-14,-12)   0.0% n=1
+Qm=6 margin[-12,-10)   0.0% n=1
+Qm=6 margin[-10, -8)   0.0% n=14
+Qm=6 margin[ -8, -6)   0.0% n=69
+Qm=6 margin[ -6, -4)   0.0% n=85
+Qm=6 margin[ -4, -2)   0.0% n=91
+Qm=6 margin[ -2,  0)   0.0% n=105
+Qm=6 margin[  0,  2)   0.0% n=152
+Qm=6 margin[  2,  4)   0.0% n=251
+Qm=6 margin[  4,  6)   2.2% n=358
+Qm=6 margin[  6,  8)  29.0% n=411
+Qm=6 margin[  8, 10)  72.8% n=500
+Qm=6 margin[ 10, 12)  83.0% n=546
+Qm=6 margin[ 12, 14)  92.3% n=556
+Qm=6 margin[ 14, 16)  95.7% n=391
+Qm=6 margin[ 16, 18)  97.0% n=198
+Qm=6 margin[ 18, 20)  96.9% n=191
+Qm=6 margin[ 20, 22)  97.9% n=243
+Qm=6 margin[ 22, 24)  99.7% n=350
+Qm=6 margin[ 24, 26) 100.0% n=178
+Qm=6 margin[ 26, 28) 100.0% n=11
+Qm=6 margin[ 30, 32) 100.0% n=1
+Qm=8 margin[-18,-16)   0.0% n=1
+Qm=8 margin[-16,-14)   0.0% n=1
+Qm=8 margin[-14,-12)   0.0% n=1
+Qm=8 margin[-12,-10)   0.0% n=3
+Qm=8 margin[-10, -8)   0.0% n=8
+Qm=8 margin[ -8, -6)   0.0% n=3
+Qm=8 margin[ -6, -4)   0.0% n=5
+Qm=8 margin[ -4, -2)   0.0% n=1
+Qm=8 margin[ -2,  0)   0.0% n=11
+Qm=8 margin[  0,  2)   0.0% n=13
+Qm=8 margin[  2,  4)   0.0% n=4
+Qm=8 margin[  4,  6)   0.0% n=5
+Qm=8 margin[  6,  8)   0.0% n=4
+Qm=8 margin[  8, 10)   0.0% n=2
+Qm=8 margin[ 10, 12)  42.9% n=7
+Qm=8 margin[ 12, 14) 100.0% n=1

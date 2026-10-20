@@ -84,10 +84,7 @@ int init()
   if (!nr_gpu_module_ready()) return 0;
   if (g.ok >= 0) return g.ok;
   g.ok = 0;
-  const char *e = getenv("LDPC_CB0_MAX_ITEMS");
-  g.max_items = e ? atoi(e) : 2048;
-  if (g.max_items < 1) g.max_items = 1;
-  if (g.max_items > 65536) g.max_items = 65536;
+  g.max_items = 2048;
   g.cap[0] = (size_t)g.max_items * NR_TD_CB0_L_STRIDE;
   g.cap[1] = (size_t)g.max_items * NR_TD_CB0_D_STRIDE * sizeof(int16_t);
   g.cap[2] = (size_t)g.max_items * sizeof(nr_td_cb0_gpu_item_t);

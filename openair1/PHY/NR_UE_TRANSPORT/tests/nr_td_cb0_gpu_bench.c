@@ -9,10 +9,9 @@
  * Item sets: "wrong" (wrong MCS / Qm / rv / rank Nl 1..Nl_true: every one runs all iterations), "truth" (the true
  * hypothesis on N private copies: early stop), "mixed" (1 truth + wrong). CB0 E and the LLR count follow from Nl and
  * Qm (G = RE x Qm x Nl), not from the RX count. GPU busy % = mean nvidia-smi utilization.gpu
- * sampled every 100 ms over the gpu_pipe loop. Memory strategy: the CB0 entry's (LDPC_CB0_MEM=explicit forces the copy
- * path); printed per row.
+ * sampled every 100 ms over the gpu_pipe loop. Memory strategy: the CB0 entry's; printed per row.
  * Run with flock -x /tmp/td_measure.lock, nothing else on the GPU.
- * Usage: nr_td_cb0_gpu_bench [threads=8] [seconds=1] [gpu_iters=0 (= 2 x max_it)] [cpu=1] [rank=4] */
+ * Usage: nr_td_cb0_gpu_bench [threads=8] [seconds=1] [cpu=1] [rank=4] */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <pthread.h>
@@ -81,14 +80,8 @@ int main(int argc, char **argv)
 {
   const int T = argc > 1 ? atoi(argv[1]) : 8;
   const double secs = argc > 2 ? atof(argv[2]) : 1.0;
-  const int gpu_iters = argc > 3 ? atoi(argv[3]) : 0;
-  const int do_cpu = argc > 4 ? atoi(argv[4]) : 1;
-  const int rank = argc > 5 ? atoi(argv[5]) : 4;
-  if (gpu_iters > 0) {
-    char b[16];
-    snprintf(b, sizeof(b), "%d", gpu_iters);
-    setenv("ISAC_TD_CB0_GPU_ITERS", b, 1);
-  }
+  const int do_cpu = argc > 3 ? atoi(argv[3]) : 1;
+  const int rank = argc > 4 ? atoi(argv[4]) : 4;
   cb0_fx_init();
   const int dm = nr_td_cb0_use_gpu(1);
   nr_td_cb0_gpu_warmup(1);
@@ -104,8 +97,8 @@ int main(int argc, char **argv)
   if (h)
     mode = (int (*)(void))dlsym(h, "ldpc_cb0_mem_mode");
   const int mm = mode ? mode() : 0;
-  printf("# GPU dematch %s, CB0 entry memory %s, CPU threads %d, gpu iters %s\n", dm ? "on" : "OFF",
-         mm == 1 ? "unified" : mm == 2 ? "explicit" : "?", T, gpu_iters > 0 ? argv[3] : "2 x max_it");
+  printf("# GPU dematch %s, CB0 entry memory %s, CPU threads %d, gpu iters 2 x max_it\n", dm ? "on" : "OFF",
+         mm == 1 ? "unified" : mm == 2 ? "explicit" : "?", T);
   pthread_t sp;
   pthread_create(&sp, NULL, sampler, NULL);
   printf("# 4-RX grant, true rank %d\n", rank);

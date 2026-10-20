@@ -57,11 +57,13 @@
  * assignment being found in nr_radio_config.c).
  */
 
+#include "PHY/CODING/nrPolar_tools/nr_polar_fssc.h"
 #include "nr_pdcch_nid_gpu.h"
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_pdcch_sib1_prior.h"
 #include "nr_pdcch_coreset_bank.h"
-#include "nr_passive_acq_state.h" // nr_pdcch_crb0_grid_rb(): Point A from SIB1 (ISAC_PDCCH_POINTA_REF)
+#include "nr_pdsch_solver.h"        // nr_tda_field_set_rows() (ISAC_PDSCH_TDA_FIELD)
+#include "nr_passive_acq_state.h" // nr_pdcch_crb0_grid_rb(): Point A from SIB1
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_cfg_sources.h"
 #include "nr_pdcch_blind_monitor_rt.h" // nr_pdcch_blind_monitor_cfg_t + get_cfg() accessor (implemented
@@ -89,7 +91,6 @@
 #include "nr_pdcch_dci_length_sweep.h"   // Phase 3 Technique C: nr_pdcch_dci_length_sweep()
 #include "nr_dmrs_id_estimate.h"         // blind UL DM-RS scrambling-identity estimate (Task 13)
 #include "nr_pusch_passive_decode.h"     // nr_pusch_passive_ul_dmrs_id / data-ID sweep (Task 13)
-#include "nr_pdcch_al1_map.h"            // AL1 cover lap (ISAC_AL1_COVER=1)
 #include "nr_pdsch_prb_set.h"            // FDRA width / RA type 0 PRB sets
 
 // ---------------------------------------------------------------------------------------------
@@ -158,13 +159,6 @@ void nr_pdcch_blind_monitor_occasion_gate(int *period, int *offset, int *duratio
   *offset = (int)(int32_t)(uint32_t)w;
   *period = (int)((w >> 32) & ((1u << 19) - 1));
   *duration = (int)((w >> 51) & ((1u << 12) - 1));
-}
-
-static bool map_staging_enabled(void)
-{
-  /* Explicit 0 means exhaustive immediately; explicit 1 deliberately limits the search to the
-   * pass-0 prior. Only the default staged mode promises a later exhaustive lap. */
-  return getenv("ISAC_MAP_PASS0_ONLY") == NULL;
 }
 
 const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_css0_cfg(void)
@@ -259,6 +253,7 @@ void nr_pdcch_blind_monitor_set_tda_common(const uint8_t *start, const uint8_t *
   }
   g_cfg.extract.tda_common_count      = n;
   g_css0_cfg.extract.tda_common_count = n;
+  nr_tda_field_set_rows(start, len, n); /* Fix A (ISAC_PDSCH_TDA_FIELD): the same list gives the DCI 1_1 TDRA field width and rows */
   static bool tda_logged = false;
   if (!tda_logged) {
     tda_logged = true;
@@ -383,23 +378,6 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
   g_cfg.ss_al_candidates[1] = -1; // AL2 -- not used by SS0
   g_cfg.ss_al_candidates[2] = 4;  // AL4
   g_cfg.ss_al_candidates[3] = 2;  // AL8
-  /* ISAC_CSS0_ALS="a1:a2:a4:a8" overrides the four above. The Table 10.1-1 pin is correct for
-   * SEARCH SPACE #0, but RAR and Msg4 live in the ra-SearchSpace -- a different common search
-   * space, with its own nrofCandidates, that happens to share CORESET#0 on this cell. Disabling
-   * AL1/AL2 is therefore an SS#0 fact applied to SS#1, which is exactly the kind of assumption
-   * that makes a scan cover the wrong geometry and report no error. Measured on Swisscom PCI 382:
-   * 450+ RARs decoded at 100 % CRC, TC-RNTIs harvested, and ZERO Msg4 DCIs ever accepted. */
-  {
-    const char *e = getenv("ISAC_CSS0_ALS");
-    int a[4];
-    if (e != NULL && sscanf(e, "%d:%d:%d:%d", &a[0], &a[1], &a[2], &a[3]) == 4) {
-      for (int i = 0; i < 4; i++)
-        g_cfg.ss_al_candidates[i] = a[i];
-      LOG_A(PHY, "SENSING: CSS0 AL ladder OVERRIDDEN by ISAC_CSS0_ALS: AL1=%d AL2=%d AL4=%d AL8=%d\n",
-            a[0], a[1], a[2], a[3]);
-    }
-  }
-
   /* Format 1_0 ONLY. 1_1 lives in the DEDICATED search space, whose description is ciphered and
    * therefore not available to us -- scanning for it here would only manufacture false accepts. */
   g_cfg.dci10_scan        = 2;
@@ -689,8 +667,6 @@ bool nr_pdcch_blind_monitor_autodiscover_apply_pending(void)
  * from this cell's own measured accept rate (~700 accepts/s at ~2000 occasions/s, and a
  * confirmation needs two sightings of the same RNTI), with a wide margin for a quieter cell. */
 #define NR_PDCCH_EXTENT_VERIFY_OCC 4000
-/* ISAC_PDCCH_DWELL_ADAPTIVE: hard cap on stepped occasions of one discovered dwell, counted whether or not the prescreen passed */
-#define NR_PDCCH_DWELL_ADAPTIVE_CAP 40000
 
 static nr_pdcch_extent_cand_t s_ext_cand[NR_PDCCH_EXTENT_MAX_CAND];
 static int  s_ext_n        = 0;
@@ -719,7 +695,6 @@ static nr_pdcch_map_cand_t s_map_cand[NR_PDCCH_MAP_MAX_CAND];
 static int s_map_stage = 0;          /* 0 = pass-0 mappings only; 1 = full list (see nr_pdcch_map_candidates) */
 static int s_map_pass0_n = 0;        /* pass-0 prefix length of the last nr_pdcch_map_candidates() call */
 static int map_stage_truncate(int n);
-static bool map_staging_enabled(void);
 static int  s_map_n        = 0;
 static int  s_map_idx      = 0;
 static void map_apply(void)
@@ -736,8 +711,8 @@ static void map_restart(int span_rb, int duration, int pci)
   s_map_idx = 0;
   map_apply();
 }
-/* ISAC_PDCCH_EARLY_COMMIT=1 (sa-bed 2026-10-07, default off: not validated on the DGX OTA pipeline); -1 = read the env once; tests set it */
-static int s_early_commit_enabled = -1;
+/* early (unseeded) oracle commit (sa-bed 2026-10-07): baked OFF, not validated on the DGX OTA pipeline (was ISAC_PDCCH_EARLY_COMMIT); tests enable it */
+static int s_early_commit_enabled = 0;
 static bool s_early_applied = false;       /* the unseeded commit has been posted/applied */
 static bool s_reseeded = false;            /* the oracle has since re-ordered the catalogue (once) */
 static bool s_early_commit_used = false; /* the unseeded first commit of this discovery epoch has been taken */
@@ -847,13 +822,10 @@ static void extent_log_evidence_before_clear(void)
   LOG_I(PHY, "SENSING: CORESET candidate %d/%d mapping %d/%d abandoned: offset=%d span=%d rnti_votes=%d [%s]\n",
         s_ext_idx + 1, s_ext_n, s_map_idx + 1, s_map_n, g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6, n, buf);
 }
-static void discovered_restore(void);
-static void discovered_verified(void);
 static bool extent_advance(void)
 {
   if (!s_dedicated_found || s_ext_verified || s_ext_n <= 0)
     return false;
-  discovered_restore(); /* a discovered geometry that failed hands back to the walk unchanged */
   extent_log_evidence_before_clear();
   extent_clear_evidence();
   g_cfg.dci_length_override = 0;
@@ -884,7 +856,7 @@ static bool extent_advance(void)
     return true;
   }
   if (++s_ext_idx >= s_ext_n) {
-    if (s_map_stage == 0 && map_staging_enabled()) {
+    if (s_map_stage == 0) {
       s_map_stage = 1;
       s_ext_idx = 0;
       LOG_A(PHY, "SENSING: autodiscover mapping stage 1: primary fast lap exhausted, widening to all shifts\n");
@@ -917,25 +889,13 @@ static bool extent_advance(void)
 }
 
 
-/* STAGE 1-2 HAND-OFF (2026-09-23). The decode-free discovery process (captures/idsweep_offline --stage2,
- * GPU stage 1) writes /tmp/coresets_discovered.txt from THIS cell's own snapshots, one line per CORESET.
- * They are applied in order as the CURRENT candidate. A verified one is banked by the caller (and
- * autodiscover_next() moves on to the next line); one that fails its dwell hands back to the walk's saved
- * position and geometry and the next line is tried. When every line is verified, decode-free evidence
- * says nothing else is significant, so the catalog walk PAUSES -- one whole decode pass per occasion
- * saved -- until the file changes. If any line failed, the walk resumes as the fallback. */
-#define DISC_MAX 8
-typedef struct { int nid, sym, dur, rb, ng, L, R, sh, ex; } disc_coreset_t; /* ex = 1: ISAC_PDCCH_DISC_ENUM hypothesis, R is explicit */
-static disc_coreset_t s_disc[DISC_MAX];
-static int s_disc_n, s_disc_next, s_disc_failed;
-static bool s_disc_active, s_disc_pending;
-static _Atomic bool s_disc_paused; /* _Atomic: read by the PHY receive thread (discovery gate), written by a consumer */
+/* Discovered CORESET queue entry (the in-process GPU stage-1/2 records, see s_add_disc below). */
+typedef struct { int nid, sym, dur, rb, ng, L, R, sh; } disc_coreset_t;
 static _Atomic bool s_outside_occupancy;
-static int s_disc_saved[8];
 
 bool nr_pdcch_blind_monitor_discovery_paused(void)
 {
-  return s_disc_paused;
+  return false; /* the catalog walk is never paused by the discovery hand-off */
 }
 
 bool nr_pdcch_blind_monitor_discovery_duty_due(bool reconf, int bank_count, bool paused,
@@ -979,113 +939,20 @@ bool nr_pdcch_blind_monitor_discovery_pass_due(int backlog, uint32_t *skipped)
   return false;
 }
 
-static void discovered_restore(void) /* called from extent_advance(): the applied line failed its dwell */
-{
-  if (!s_disc_active)
-    return;
-  g_cfg.coreset_rb_offset = s_disc_saved[0];
-  g_cfg.coreset_freq_domain = s_disc_saved[1];
-  g_cfg.coreset_duration = s_disc_saved[2];
-  g_cfg.coreset_reg_bundle_size = s_disc_saved[3];
-  g_cfg.coreset_interleaver_size = s_disc_saved[4];
-  g_cfg.coreset_shift_index = s_disc_saved[5];
-  g_cfg.coreset_pdcch_dmrs_scrambling_id = s_disc_saved[6];
-  g_cfg.ss_first_symbol = s_disc_saved[7];
-  s_disc_active = false;
-  s_disc_failed++;
-  s_disc_next++;
-  s_disc_pending = s_disc_next < s_disc_n;
-  LOG_A(PHY, "SENSING: discovered CORESET %d/%d did not verify in its dwell; %s\n", s_disc_next, s_disc_n,
-        s_disc_pending ? "trying the next discovered one" : "resuming the catalog walk");
-}
-
-/* called from autodiscover_next(): the applied line was verified and banked */
-static void discovered_verified(void)
-{
-  if (!s_disc_active)
-    return;
-  s_disc_active = false;
-  s_disc_next++;
-  s_disc_pending = s_disc_next < s_disc_n;
-  if (!s_disc_pending && s_disc_failed == 0) {
-    s_disc_paused = true;
-    LOG_A(PHY, "SENSING: all %d discovered CORESET(s) verified and banked; decode-free discovery reports nothing "
-               "else significant -> catalog walk PAUSED until the discovery file changes\n", s_disc_n);
-  }
-}
-
-/* discovered_load: loads the discovered-CORESET list into s_disc: from the in-process GPU stage-1/2 records (when nr_pdcch_nid_gpu is enabled) or from a text file (CORESET nid=... lines).
- *   Keeps only lines inside the legal ranges for the carrier (BWP size, symbol, duration, bundle size). Returns true when at least one CORESET was read. Caller: nr_pdcch_blind_monitor_discovered_poll().
- */
-static bool discovered_load(const char *path)
-{
-  FILE *f;
-  char memory[2048];
-  if (nr_pdcch_nid_gpu_enabled()) {
-    /* Let the current dwell finish before replacing the list underneath it. */
-    if (s_disc_active) return false;
-    static uint64_t generation;
-    nr_pdcch_nid_record_t records[NR_PDCCH_NID_MAX_RECORDS];
-    int n = nr_pdcch_nid_gpu_records(records, NR_PDCCH_NID_MAX_RECORDS, &generation);
-    if (n < 0) return false;
-    if (n == 0) {
-      s_disc_n = s_disc_next = s_disc_failed = 0;
-      s_disc_pending = false;
-      return false;
-    }
-    size_t used = 0;
-    for (int i = 0; i < n; i++) {
-      const nr_pdcch_nid_record_t *r = &records[i];
-      int bytes = snprintf(memory + used, sizeof(memory) - used,
-                          "CORESET nid=%d sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d ties=%d\n",
-                          r->nid, r->sym, r->dur, r->grid_rb, r->groups, r->L, r->R, r->shift, r->ties);
-      if (bytes < 0 || (size_t)bytes >= sizeof(memory) - used) break;
-      used += bytes;
-    }
-    f = fmemopen(memory, used, "r");
-  } else {
-    f = fopen(path, "r");
-  }
-  if (f == NULL)
-    return false;
-  char line[256];
-  s_disc_n = 0;
-  while (s_disc_n < DISC_MAX && fgets(line, sizeof(line), f)) {
-    disc_coreset_t d = {0};
-    if (sscanf(line, "CORESET nid=%d sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d", &d.nid, &d.sym, &d.dur,
-               &d.rb, &d.ng, &d.L, &d.R, &d.sh) != 8)
-      continue;
-    if (d.nid < 0 || d.nid > 65535 || d.sym < 0 || d.sym > 13 || d.dur < 1 || d.dur > 3 || d.rb < 0 || d.ng < 1
-        || d.rb + 6 * d.ng > (int)g_cfg.bwp_size || (d.L != 0 && d.L != 2 && d.L != 3 && d.L != 6))
-      continue;
-    s_disc[s_disc_n++] = d;
-  }
-  fclose(f);
-  s_disc_next = s_disc_failed = 0;
-  return s_disc_n > 0;
-}
-
-/* Independent stage-1/2 queue. The legacy handoff below remains the feature-off
- * control. File refreshes wait for the current dwell; they never erase its evidence. */
+/* Stage-1/2 queue fed by the in-process GPU records; a new list waits for the current dwell, it never erases its evidence. */
 static struct {
   disc_coreset_t line[256]; /* candidate queue may exceed the eight verified bank slots */
   int n, next, occasions;
-  uint64_t total_occ; /* every stepped occasion of the dwell (ISAC_PDCCH_DWELL_ADAPTIVE hard cap) */
   uint64_t generation, last_slot;
   uint32_t epoch;
   bool active;
   nr_pdcch_blind_monitor_cfg_t cfg;
   struct { uint16_t rnti; int length; uint64_t slot; nr_dci_bits_t payload; } evidence[NR_PDCCH_BLIND_MAX_UE];
-  struct stat file;
   uint64_t polls;
 } s_add_disc;
 
-/* nr_pdcch_discovered_enabled: returns true when the discovered-CORESET bank is enabled (ISAC_PDCCH_NID_BANK=1). Callers: the discovered-CORESET entry points in this file and nr_pdcch_blind_monitor_rt.c. */
-bool nr_pdcch_discovered_enabled(void)
-{
-  const char *v = getenv("ISAC_PDCCH_NID_BANK"); /* own flag; was mistakenly ISAC_CSIRS_DISC */
-  return v && strcmp(v, "1") == 0;
-}
+/* nr_pdcch_discovered_enabled: the discovered-CORESET bank is always enabled. Callers: the discovered-CORESET entry points in this file and nr_pdcch_blind_monitor_rt.c. */
+bool nr_pdcch_discovered_enabled(void) { return true; }
 
 /* nr_pdcch_discovered_reset: clears the discovered-CORESET queue and its evidence, keeping the generation counter increasing, and records the current configuration epoch. Caller: nr_pdcch_blind_monitor_autodiscover_reset() and discovered_additional_poll() on an epoch change. */
 void nr_pdcch_discovered_reset(void)
@@ -1100,32 +967,19 @@ static bool discovered_load_stream(FILE *f);
 /* nr_pdcch_discovered_load: loads the discovered-CORESET list from a file when the bank is enabled and no dwell is active; returns the result of discovered_load_stream(). Caller: discovered_additional_poll(). */
 bool nr_pdcch_discovered_load(const char *path)
 {
-  if (!nr_pdcch_discovered_enabled() || s_add_disc.active)
+  if (s_add_disc.active)
     return false;
   FILE *f = fopen(path, "r");
   if (!f) return false;
   return discovered_load_stream(f);
 }
 
-/* nr_pdcch_discovered_cover_enabled: ISAC_PDCCH_DISC_COVER=1 (ACQ-FIX, default off); read per call like
- *   nr_pdcch_discovered_enabled(). Callers: the discovered queue (load/snapshot) and nid_budget_feedback(). */
-bool nr_pdcch_discovered_cover_enabled(void)
-{
-  const char *e = getenv("ISAC_PDCCH_DISC_COVER");
-  return e && strcmp(e, "1") == 0;
-}
+/* nr_pdcch_discovered_cover_enabled: ACQ-FIX cover dwells are always on. Callers: the discovered queue (load/snapshot) and nid_budget_feedback(). */
+bool nr_pdcch_discovered_cover_enabled(void) { return true; }
 
-/* nr_pdcch_pointa_ref_enabled: ISAC_PDCCH_POINTA_REF=1 (TIM-ACQ, default off). Read once.
+/* nr_pdcch_pointa_ref_enabled: CRB 0 (Point A) is the DM-RS reference of PDCCH-Config CORESETS.
  *   Caller: nr_pdcch_crb0_grid_rb(). */
-bool nr_pdcch_pointa_ref_enabled(void)
-{
-  static _Atomic int en = -1;
-  if (en < 0) {
-    const char *e = getenv("ISAC_PDCCH_POINTA_REF");
-    en = (e && strcmp(e, "1") == 0) ? 1 : 0;
-  }
-  return en == 1;
-}
+bool nr_pdcch_pointa_ref_enabled(void) { return true; }
 
 /* nr_pdcch_crb0_grid_rb: grid RB of CRB 0 (Point A) as derived from SIB1 offsetToPointA and the MIB k_SSB against
  *   the SSB position in the started grid (nr_passive_acq_verify_carrier()). 0 = legacy (flag off, SIB1 not yet
@@ -1134,8 +988,6 @@ bool nr_pdcch_pointa_ref_enabled(void)
  *   nr_pdcch_blind_monitor_rt.c (DM-RS reference of the PDCCH-Config decode). */
 int nr_pdcch_crb0_grid_rb(void)
 {
-  if (!nr_pdcch_pointa_ref_enabled() && !nr_carrier_from_sib1_enabled()) /* the carrier flag implies Point A as CRB 0 */
-    return 0;
   static _Atomic int cached = 0;
   static _Atomic unsigned calls = 0;
   if ((atomic_fetch_add_explicit(&calls, 1, memory_order_relaxed) & 255u) == 0) {
@@ -1160,12 +1012,8 @@ int nr_pdcch_cover_start_rb(int crb0_grid_rb, int carrier_rb)
 static int s_disc_pci = -1; /* PHY cell ID, for the default shiftIndex of the interleaved cover */
 void nr_pdcch_discovered_note_pci(int pci) { s_disc_pci = pci; }
 
-/* nr_carrier_from_sib1_enabled: ISAC_CARRIER_FROM_SIB1=1 (CARRIERGEOM, default off); read per call (dwell start only). */
-bool nr_carrier_from_sib1_enabled(void)
-{
-  const char *e = getenv("ISAC_CARRIER_FROM_SIB1");
-  return e && strcmp(e, "1") == 0;
-}
+/* nr_carrier_from_sib1_enabled: the SIB1 carrier replaces the grid as the discovery BWP (CARRIERGEOM). */
+bool nr_carrier_from_sib1_enabled(void) { return true; }
 
 /* nr_carrier_geom: see header. shortcut: a carrier starting below the grid or ending above it is reported invalid
  *   (legacy grid geometry); the in-process fix for that case is a retune (ISAC_ACQ_RETUNE), not a mapping. */
@@ -1184,8 +1032,6 @@ nr_carrier_geom_t nr_carrier_geom(int point_a_sc, int carrier_start_sc, int carr
 nr_carrier_geom_t nr_carrier_geom_now(int grid_n_rb)
 {
   nr_carrier_geom_t none = {0};
-  if (!nr_carrier_from_sib1_enabled())
-    return none;
   const nr_passive_acq_snapshot_t s = nr_passive_acq_snapshot();
   if (!s.carrier_verified || !s.carrier.mu_match)
     return none;
@@ -1213,76 +1059,6 @@ bool nr_pdcch_discovered_cover_banked(int nid, int sym, int dur, int rb, int gro
   return false;
 }
 
-/* ISAC_PDCCH_DISC_ENUM=1 (CORESETALL, default off; needs ISAC_PDCCH_DISC_COVER): bounded enumeration of the CORESET
- *   geometries TS 38.211 7.3.2 / 38.213 10.1 permit, for every nID the GPU stage reports (first ISAC_PDCCH_DISC_ENUM_NIDS,
- *   default 4) and for nID = PCI (pdcch-DMRS-ScramblingID absent). The GPU sweep runs with ISAC_COREMAP_IDSWEEP_DUR=1, so
- *   it can only report duration 1; the interleaver is not recoverable from DM-RS occupancy. Each extra is a cover dwell
- *   (whole carrier on the CRB-0 grid) verified like every dwell: TB CRC recovers an RNTI that recurs with a fresh payload.
- *   Entry order, cut at ISAC_PDCCH_DISC_ENUM_MAX (default 24) per nID: A other durations non-interleaved; B bundle 6, R 3/2/6
- *   x size {full, largest even, largest multiple of 6} (ng code 0 / -1 / -2), shift = PCI; C shift 0; D bundle 2; E other
- *   durations interleaved. Combinations the group count cannot satisfy are skipped at dwell start (needs the carrier width). */
-static bool nr_disc_enum_enabled(void)
-{
-  const char *e = getenv("ISAC_PDCCH_DISC_ENUM");
-  return e && strcmp(e, "1") == 0;
-}
-static int disc_env_int(const char *name, int def, int lo, int hi)
-{
-  const char *e = getenv(name);
-  char *end = NULL;
-  const long v = e ? strtol(e, &end, 10) : def;
-  return e && end != e && !*end && v >= lo && v <= hi ? (int)v : def;
-}
-static int disc_enum_one(disc_coreset_t *line, int n, int max, int nid, int sym, int dur0, int cap)
-{
-  static const int Rs[3] = {3, 2, 6};
-  const int n0 = n;
-#define DISC_ADD(...) do { if (n - n0 < cap && n < max) line[n++] = (disc_coreset_t){.nid = nid, .sym = sym, .ex = 1, __VA_ARGS__}; } while (0)
-  for (int d = 1; d <= 3; ++d)
-    if (d != dur0 && sym + d <= 14) DISC_ADD(.dur = d);
-  for (int g = 0; g >= -2; --g)
-    for (int k = 0; k < 3; ++k) DISC_ADD(.dur = dur0, .ng = g, .L = 6, .R = Rs[k], .sh = -1);
-  for (int k = 0; k < 3; ++k) DISC_ADD(.dur = dur0, .L = 6, .R = Rs[k], .sh = 0);
-  if (dur0 < 3)
-    for (int k = 0; k < 3; ++k) DISC_ADD(.dur = dur0, .L = 2, .R = Rs[k], .sh = -1);
-  for (int d = 1; d <= 3; ++d)
-    if (d != dur0 && sym + d <= 14)
-      for (int k = 0; k < 3; ++k) DISC_ADD(.dur = d, .L = 6, .R = Rs[k], .sh = -1);
-#undef DISC_ADD
-  return n;
-}
-static int disc_enum_append_all(disc_coreset_t *line, int n, int max, int ncov)
-{
-  const int cap = disc_env_int("ISAC_PDCCH_DISC_ENUM_MAX", 24, 1, 64), nids = disc_env_int("ISAC_PDCCH_DISC_ENUM_NIDS", 4, 1, 16);
-  int seen[16], ns = 0;
-  bool have_pci = false, pci_done = false;
-  for (int i = 0; i < ncov; ++i) {
-    have_pci |= line[i].nid == s_disc_pci;
-    bool dup = false;
-    for (int j = 0; j < ns; ++j) dup |= seen[j] == line[i].nid;
-    if (dup || ns >= nids) continue;
-    seen[ns++] = line[i].nid;
-    pci_done |= line[i].nid == s_disc_pci;
-    n = disc_enum_one(line, n, max, line[i].nid, line[i].sym, line[i].dur, cap);
-  }
-  if (s_disc_pci >= 0 && n < max) { /* the default DM-RS identity: nID = PCI. Also its own non-interleaved cover. */
-    if (!have_pci) line[n++] = (disc_coreset_t){.nid = s_disc_pci, .dur = 1, .ex = 1};
-    if (!pci_done) n = disc_enum_one(line, n, max, s_disc_pci, 0, 1, cap);
-  }
-  return n;
-}
-/* disc_bank_verified: any VERIFIED bank entry. The enumeration is for a cell where nothing is verified yet: an active dwell
- *   costs the verified CORESET most of its decoded DCIs (923 replay, 4 runs each: C-RNTI 0x4e32 seen 477/641 times per 3000
- *   slots without a dwell, 13/18 with one; PDSCH crc_ok 16-187 with the extras queued vs 231-269 without). */
-static bool disc_bank_verified(void)
-{
-  for (int i = 0, n = nr_pdcch_coreset_bank_count(); i < n; ++i)
-    if (nr_pdcch_coreset_bank_state(i) == NR_CORESET_VERIFIED) return true;
-  return false;
-}
-static struct { int nid, sym, dur, ng, L, R, sh; } s_enum_tried[96]; /* interleaved dwells started for this queue */
-static int s_enum_tried_n;
-
 /* discovered_cover_queue: ACQ-FIX. Rewrites the freshly parsed queue as [one cover entry per distinct
  *   (nID, symbol, duration), in publication order] + [the published lines]. A cover entry is non-interleaved, starts
  *   at grid RB 0 and is marked ng = 0 ("whole carrier", resolved by nr_pdcch_discovered_snapshot()).
@@ -1295,7 +1071,6 @@ static int s_enum_tried_n;
  *   != 0) and interleaved CORESETs. Caller: discovered_load_stream(). */
 static void discovered_cover_queue(void)
 {
-  s_enum_tried_n = 0;
   const int max = (int)(sizeof(s_add_disc.line) / sizeof(s_add_disc.line[0]));
   disc_coreset_t raw[sizeof(s_add_disc.line) / sizeof(s_add_disc.line[0])];
   const int nraw = s_add_disc.n;
@@ -1308,12 +1083,11 @@ static void discovered_cover_queue(void)
     if (!seen)
       s_add_disc.line[n++] = (disc_coreset_t){.nid = raw[i].nid, .sym = raw[i].sym, .dur = raw[i].dur};
   }
-  /* ISAC_CARRIER_FROM_SIB1: second cover per distinct nID = the whole carrier INTERLEAVED (bundle 6, R resolved in
+  /* CARRIERGEOM: second cover per distinct nID = the whole carrier INTERLEAVED (bundle 6, R resolved in
    * nr_pdcch_discovered_snapshot(), shift = PCI (sh -1 = resolve there), the TS 38.331 default shiftIndex). ng = 0 && L != 0 marks it.
    * HYPOTHESIS: on 508 the GPU stage found bundle-6 CORESETs (R 2/3/6) whose window-truncated ranges cannot be
    * de-interleaved, and 162 PRB = 27 groups only divides by R = 3. */
-  const int ncov0 = n; /* distinct (nID, symbol, duration) covers; ISAC_PDCCH_DISC_ENUM extras refer to them */
-  if (nr_carrier_from_sib1_enabled()) {
+  {
     const int ncov = n;
     for (int i = 0; i < ncov && n < max; ++i)
       s_add_disc.line[n++] = (disc_coreset_t){.nid = s_add_disc.line[i].nid, .sym = s_add_disc.line[i].sym,
@@ -1321,8 +1095,6 @@ static void discovered_cover_queue(void)
   }
   for (int i = 0; i < nraw && n < max; ++i)
     s_add_disc.line[n++] = raw[i];
-  if (nr_disc_enum_enabled()) /* lowest priority: the published lines and the legacy covers keep their time-to-bank */
-    n = disc_enum_append_all(s_add_disc.line, n, max, ncov0);
   s_add_disc.n = n;
 }
 
@@ -1351,12 +1123,12 @@ static bool discovered_load_stream(FILE *f)
     s_add_disc.line[s_add_disc.n++] = d;
   }
   fclose(f);
-  if (nr_pdcch_discovered_cover_enabled() && s_add_disc.n > 0)
+  if (s_add_disc.n > 0)
     discovered_cover_queue();
   return s_add_disc.n > 0;
 }
 
-/* discovered_additional_poll: polls for new discovered CORESETs at most once every 1024 calls: reads the GPU records (or the discovery file, when it changed), and loads the queue when no dwell is running.
+/* discovered_additional_poll: polls for new discovered CORESETs at most once every 1024 calls: reads the GPU records, and loads the queue when no dwell is running.
  *   Also resets the queue on a configuration epoch change. Returns true when a queue was loaded. Caller: nr_pdcch_blind_monitor_discovered_poll().
  */
 static bool discovered_additional_poll(void)
@@ -1365,33 +1137,22 @@ static bool discovered_additional_poll(void)
     nr_pdcch_discovered_reset();
   if (s_add_disc.active || s_add_disc.next < s_add_disc.n || (++s_add_disc.polls & 1023) != 1)
     return false;
-  if (nr_pdcch_nid_gpu_enabled()) {
-    /* In-process GPU stage-1/2 (T17): bank its records too, not only the walk's catalogue hand-off. */
-    static uint64_t generation;
-    nr_pdcch_nid_record_t records[NR_PDCCH_NID_MAX_RECORDS];
-    const int n = nr_pdcch_nid_gpu_records(records, NR_PDCCH_NID_MAX_RECORDS, &generation);
-    if (n <= 0)
-      return false;
-    char text[4096];
-    size_t used = 0;
-    for (int i = 0; i < n && used < sizeof(text); i++)
-      used += (size_t)snprintf(text + used, sizeof(text) - used,
-                               "CORESET nid=%d sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d ties=%d\n",
-                               records[i].nid, records[i].sym, records[i].dur, records[i].grid_rb, records[i].groups,
-                               records[i].L, records[i].R, records[i].shift, records[i].ties);
-    if (used >= sizeof(text)) used = sizeof(text) - 1;
-    FILE *m = fmemopen(text, used, "r");
-    return m && nr_pdcch_discovered_enabled() && !s_add_disc.active ? discovered_load_stream(m) : (m && fclose(m), false);
-  }
-  const char *path = getenv("ISAC_PDCCH_DISCOVERED_FILE");
-  if (!path || !*path) path = "/tmp/coresets_discovered.txt";
-  struct stat st;
-  if (stat(path, &st) || (st.st_ino == s_add_disc.file.st_ino && st.st_size == s_add_disc.file.st_size
-      && st.st_mtim.tv_sec == s_add_disc.file.st_mtim.tv_sec
-      && st.st_mtim.tv_nsec == s_add_disc.file.st_mtim.tv_nsec))
+  /* In-process GPU stage-1/2 (T17): bank its records too, not only the walk's catalogue hand-off. */
+  static uint64_t generation;
+  nr_pdcch_nid_record_t records[NR_PDCCH_NID_MAX_RECORDS];
+  const int n = nr_pdcch_nid_gpu_records(records, NR_PDCCH_NID_MAX_RECORDS, &generation);
+  if (n <= 0)
     return false;
-  s_add_disc.file = st;
-  return nr_pdcch_discovered_load(path);
+  char text[4096];
+  size_t used = 0;
+  for (int i = 0; i < n && used < sizeof(text); i++)
+    used += (size_t)snprintf(text + used, sizeof(text) - used,
+                             "CORESET nid=%d sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d ties=%d\n",
+                             records[i].nid, records[i].sym, records[i].dur, records[i].grid_rb, records[i].groups,
+                             records[i].L, records[i].R, records[i].shift, records[i].ties);
+  if (used >= sizeof(text)) used = sizeof(text) - 1;
+  FILE *m = fmemopen(text, used, "r");
+  return m && !s_add_disc.active ? discovered_load_stream(m) : (m && fclose(m), false);
 }
 
 /* nr_pdcch_discovered_snapshot: starts the next queued discovered CORESET as a dwell: skips the entries outside the carrier or already banked, builds a monitor configuration for the CORESET, and returns it with a token (the dwell generation).
@@ -1399,59 +1160,45 @@ static bool discovered_additional_poll(void)
  */
 bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *token, int carrier_rb)
 {
-  if (!nr_pdcch_discovered_enabled() || !nr_cfg_epoch_work_current()) return false;
+  if (!nr_cfg_epoch_work_current()) return false;
   if (nr_cfg_reconf_enabled() && s_add_disc.epoch != nr_cfg_epoch_current())
     nr_pdcch_discovered_reset();
   while (!s_add_disc.active && s_add_disc.next < s_add_disc.n) {
     disc_coreset_t dd = s_add_disc.line[s_add_disc.next];
     const disc_coreset_t *d = &dd;
-    const bool cover = nr_pdcch_discovered_cover_enabled();
-    /* ISAC_PDCCH_POINTA_REF: the cover starts at CRB 0 (Point A), not at grid RB 0; flag off -> 0 (legacy). */
-    /* ISAC_CARRIER_FROM_SIB1: the SIB1 carrier [geom.start_rb, +n_rb) inside the grid replaces the grid as the BWP and
+    /* The cover starts at CRB 0 (Point A), not at grid RB 0. */
+    /* CARRIERGEOM: the SIB1 carrier [geom.start_rb, +n_rb) inside the grid replaces the grid as the BWP and
      * as the extent of the cover; geom invalid (flag off, unchecked, carrier not inside the grid) = legacy grid. */
     const nr_carrier_geom_t geom = nr_carrier_geom_now(carrier_rb);
     const int lo = geom.valid ? geom.start_rb : 0, hi = geom.valid ? geom.start_rb + geom.n_rb : carrier_rb;
-    int cover_rb = cover ? nr_pdcch_cover_start_rb(geom.valid ? geom.crb0_rb : nr_pdcch_crb0_grid_rb(), hi) : 0;
+    int cover_rb = nr_pdcch_cover_start_rb(geom.valid ? geom.crb0_rb : nr_pdcch_crb0_grid_rb(), hi);
     if (geom.valid && cover_rb < lo)
       cover_rb += 6 * ((lo - cover_rb + 5) / 6); /* CRB-0 grid of 6 RBs, first group inside the carrier */
     if (geom.valid && !dd.L && dd.ng > 0 && dd.rb >= lo && dd.rb + dd.ng * 6 > hi)
       dd.ng = (hi - dd.rb) / 6; /* published hull wider than the carrier: noise beyond it, clip (non-interleaved only) */
-    if (cover && dd.ex && disc_bank_verified()) {
-      ++s_add_disc.next;
-      continue;
-    }
-    if (cover && dd.ng <= 0) {
+    if (dd.ng <= 0) {
       dd.rb = cover_rb;
       const int gfull = (hi - cover_rb) / 6;
-      /* ng code (ISAC_PDCCH_DISC_ENUM only): 0 = whole carrier, -1 = largest even size, -2 = largest multiple of 6 */
-      dd.ng = dd.ng == -1 ? gfull & ~1 : dd.ng == -2 ? gfull / 6 * 6 : gfull; /* cover entry: whole carrier on the CRB-0 grid (see discovered_cover_queue()) */
-      if (dd.ng < 1 || dd.sym + dd.dur > 14 || (dd.ex && s_add_disc.line[s_add_disc.next].ng < 0 && dd.ng == gfull)) {
+      dd.ng = gfull; /* cover entry: whole carrier on the CRB-0 grid (see discovered_cover_queue()) */
+      if (dd.ng < 1 || dd.sym + dd.dur > 14) {
         ++s_add_disc.next;
         continue;
       }
       if (dd.L) { /* carrier-wide interleaved cover: first R in {3, 2, 6} that divides the REG count */
         if (dd.sh < 0) dd.sh = s_disc_pci >= 0 ? s_disc_pci : 0;
         const int R0[3] = {3, 2, 6};
-        const int R1 = dd.ex ? dd.R : 0;
         dd.R = 0;
         for (int k = 0; k < 3 && !dd.R; ++k)
-          if (dd.ng > 0 && (!R1 || R1 == R0[k]) && !((dd.ng * 6 * dd.dur) % (dd.L * R0[k])) && !(dd.L % dd.dur) && !(dd.dur < 3 && dd.L == 3))
+          if (dd.ng > 0 && !((dd.ng * 6 * dd.dur) % (dd.L * R0[k])) && !(dd.L % dd.dur) && !(dd.dur < 3 && dd.L == 3))
             dd.R = R0[k];
-        bool tried = false;
-        for (int k = 0; k < s_enum_tried_n && dd.ex; ++k)
-          tried |= s_enum_tried[k].nid == dd.nid && s_enum_tried[k].sym == dd.sym && s_enum_tried[k].dur == dd.dur
-                   && s_enum_tried[k].ng == dd.ng && s_enum_tried[k].L == dd.L && s_enum_tried[k].R == dd.R && s_enum_tried[k].sh == dd.sh;
-        /* grid == carrier (415, retuned 923): the legacy interleaved cover is a dwell the cell does not need; skip it.
-         * Enumerated hypotheses (ex) are by design for such cells and are only deduplicated against dwells already run. */
-        if ((!dd.ex && (!geom.valid || (lo == 0 && hi == carrier_rb))) || !dd.R || tried
+        /* grid == carrier (415, retuned 923): the legacy interleaved cover is a dwell the cell does not need; skip it. */
+        if (!geom.valid || (lo == 0 && hi == carrier_rb) || !dd.R
             || nr_pdcch_discovered_cover_banked(dd.nid, dd.sym, dd.dur, dd.rb, dd.ng)) {
           ++s_add_disc.next;
           continue;
         }
-        if (s_enum_tried_n < (int)(sizeof(s_enum_tried) / sizeof(s_enum_tried[0])))
-          s_enum_tried[s_enum_tried_n++] = (typeof(s_enum_tried[0])){dd.nid, dd.sym, dd.dur, dd.ng, dd.L, dd.R, dd.sh};
       }
-    } else if (cover && ((!dd.L && dd.rb == cover_rb && dd.ng == (hi - cover_rb) / 6) /* this queue's cover already tried it */
+    } else if (((!dd.L && dd.rb == cover_rb && dd.ng == (hi - cover_rb) / 6) /* this queue's cover already tried it */
                          || nr_pdcch_discovered_cover_banked(dd.nid, dd.sym, dd.dur, dd.rb, dd.ng))) {
       ++s_add_disc.next;
       continue;
@@ -1502,14 +1249,13 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
     memset(s_add_disc.evidence, 0, sizeof(s_add_disc.evidence));
     s_add_disc.active = true;
     s_add_disc.occasions = 0;
-    s_add_disc.total_occ = 0;
     s_add_disc.last_slot = UINT64_MAX;
     ++s_add_disc.generation;
     LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d dwell start sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d\n",
           s_add_disc.next + 1, s_add_disc.n, d->nid, d->sym, d->dur, d->rb, d->ng, d->L, d->R, d->sh);
-    if (cover && s_add_disc.line[s_add_disc.next].ng <= 0)
-      LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d is the %s dwell (ISAC_PDCCH_DISC_COVER)\n",
-            s_add_disc.next + 1, s_add_disc.n, d->nid, d->ex ? "ISAC_PDCCH_DISC_ENUM hypothesis" : "ACQ-FIX cover");
+    if (s_add_disc.line[s_add_disc.next].ng <= 0)
+      LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d is the ACQ-FIX cover dwell\n",
+            s_add_disc.next + 1, s_add_disc.n, d->nid);
   }
   if (!s_add_disc.active) return false;
   *cfg = s_add_disc.cfg;
@@ -1517,34 +1263,15 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
   return true;
 }
 
-/* nr_pdcch_dwell_adaptive_enabled: ISAC_PDCCH_DWELL_ADAPTIVE=1 (ACQ-ROBUST, default off); read per call like the other discovered-queue flags.
- *   Caller: nr_pdcch_discovered_step_ex(). */
-bool nr_pdcch_dwell_adaptive_enabled(void)
-{
-  const char *e = getenv("ISAC_PDCCH_DWELL_ADAPTIVE");
-  return e && strcmp(e, "1") == 0;
-}
-
 /* nr_pdcch_discovered_step_ex: advances the active dwell by one occasion; prescreen_passed says whether at least one candidate of THIS dwell pass in THIS occasion passed the prescreen (energy / DM-RS gates) and reached decoding.
- *   Flag off (ISAC_PDCCH_DWELL_ADAPTIVE unset): prescreen_passed is ignored; after NR_PDCCH_EXTENT_VERIFY_OCC occasions without fresh CRC evidence the CORESET is rejected and the next queued one starts.
- *   Flag on: only occasions with prescreen_passed count toward NR_PDCCH_EXTENT_VERIFY_OCC (a quiet cell sends almost no DCI, so the correct geometry must not be rejected for silence); every occasion counts toward the hard cap NR_PDCCH_DWELL_ADAPTIVE_CAP, which rejects anyway.
+ *   prescreen_passed is ignored; after NR_PDCCH_EXTENT_VERIFY_OCC occasions without fresh CRC evidence the CORESET is rejected and the next queued one starts.
  *   Ignores stale tokens and repeated slots. Callers: nr_pdcch_discovered_step(), run_discovered_occasion() in nr_pdcch_blind_monitor_rt.c. */
 void nr_pdcch_discovered_step_ex(uint64_t token, uint64_t slot, bool prescreen_passed)
 {
-  if (!nr_pdcch_discovered_enabled() || !nr_cfg_epoch_work_current() || !s_add_disc.active || token != s_add_disc.generation
+  if (!nr_cfg_epoch_work_current() || !s_add_disc.active || token != s_add_disc.generation
       || (s_add_disc.last_slot != UINT64_MAX && slot <= s_add_disc.last_slot)) return;
   s_add_disc.last_slot = slot;
-  if (nr_pdcch_dwell_adaptive_enabled()) {
-    ++s_add_disc.total_occ;
-    if (prescreen_passed) ++s_add_disc.occasions;
-    if (s_add_disc.occasions < NR_PDCCH_EXTENT_VERIFY_OCC && s_add_disc.total_occ < NR_PDCCH_DWELL_ADAPTIVE_CAP) return;
-    LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d rejected (no fresh CRC evidence: %d prescreen-passing occasions, %llu total, ISAC_PDCCH_DWELL_ADAPTIVE)\n",
-          s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, s_add_disc.occasions,
-          (unsigned long long)s_add_disc.total_occ);
-    s_add_disc.active = false;
-    ++s_add_disc.next;
-    return;
-  }
+  (void)prescreen_passed; /* every occasion counts: a rejected geometry must not wait for traffic */
   if (++s_add_disc.occasions < NR_PDCCH_EXTENT_VERIFY_OCC) return;
   LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d rejected (no fresh CRC evidence in %d occasions)\n",
         s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, s_add_disc.occasions);
@@ -1558,18 +1285,11 @@ void nr_pdcch_discovered_step(uint64_t token, uint64_t slot)
   nr_pdcch_discovered_step_ex(token, slot, true);
 }
 
-/* nr_pdcch_no_fake_footprint_enabled: ISAC_PDCCH_NO_FAKE_FOOTPRINT=1 (ACQ-ROBUST, default off). Caller: techA_commit_apply(). */
-bool nr_pdcch_no_fake_footprint_enabled(void)
-{
-  const char *e = getenv("ISAC_PDCCH_NO_FAKE_FOOTPRINT");
-  return e && strcmp(e, "1") == 0;
-}
-
-/* nr_pdcch_discovered_unverified_pending: true while the discovered-CORESET queue is on (ISAC_PDCCH_NID_BANK) and has an active dwell or queued entries not yet verified or rejected.
+/* nr_pdcch_discovered_unverified_pending: true while the discovered-CORESET queue has an active dwell or queued entries not yet verified or rejected.
  *   Racy read of queue counters (benign: a decision made one slot late). Callers: techA_commit_apply(), unit tests. */
 bool nr_pdcch_discovered_unverified_pending(void)
 {
-  return nr_pdcch_discovered_enabled() && (s_add_disc.active || s_add_disc.next < s_add_disc.n);
+  return s_add_disc.active || s_add_disc.next < s_add_disc.n;
 }
 
 /* nr_pdcch_discovered_observe: records one accepted DCI of the active dwell (RNTI, length, slot, payload); when the same RNTI and length show a different payload at a later slot the CORESET is verified and added to the bank.
@@ -1578,7 +1298,7 @@ bool nr_pdcch_discovered_unverified_pending(void)
 int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
                                 nr_dci_bits_t payload, int length)
 {
-  if (!nr_pdcch_discovered_enabled() || !nr_cfg_epoch_work_current() || !s_add_disc.active || token != s_add_disc.generation
+  if (!nr_cfg_epoch_work_current() || !s_add_disc.active || token != s_add_disc.generation
       || !rnti || length < 1 || length > NR_DCI_MAX_PAYLOAD) return -1;
   int victim = 0;
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; ++i) {
@@ -1589,6 +1309,8 @@ int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
       const int bank = nr_pdcch_coreset_bank_add(&c, rnti);
       if (bank >= 0) {
         nr_pdcch_coreset_bank_note_accept(bank, slot);
+        nr_pdcch_coreset_bank_note_confirm(bank, s_add_disc.evidence[i].slot); /* the earlier evidence DCI (same RNTI, other slot, other payload) */
+        nr_pdcch_coreset_bank_note_confirm(bank, slot);
         LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d VERIFIED -> bank add index=%d rnti=0x%04x len=%d\n",
               s_add_disc.next + 1, s_add_disc.n, c.coreset_pdcch_dmrs_scrambling_id, bank, rnti, length);
       } else {
@@ -1641,11 +1363,11 @@ static void nid_budget_feedback(void)
   int n=nr_pdcch_nid_gpu_snapshot(records,NR_PDCCH_NID_MAX_RECORDS,&generation);
   if(n<0)return;
   bool verified=n>0;
-  for(int i=0;i<n && verified;++i) {
+  for(int i=0;i<n;++i) {
     const nr_pdcch_nid_record_t *r=records+i;
-    verified=nr_pdcch_coreset_bank_verified_footprint(r->grid_rb,r->groups,r->dur,r->sym,r->L,r->R,r->shift,r->nid)
-        || (nr_pdcch_discovered_cover_enabled()
-            && nr_pdcch_discovered_cover_banked(r->nid,r->sym,r->dur,r->grid_rb,r->groups));
+    const bool ok=nr_pdcch_coreset_bank_verified_footprint(r->grid_rb,r->groups,r->dur,r->sym,r->L,r->R,r->shift,r->nid)
+        || nr_pdcch_discovered_cover_banked(r->nid,r->sym,r->dur,r->grid_rb,r->groups);
+    verified&=ok;
   }
   nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),generation,verified,false);
 }
@@ -1657,64 +1379,7 @@ bool nr_pdcch_blind_monitor_discovered_poll(void)
 {
   static unsigned budget_polls;
   if((++budget_polls & 255)==1)nid_budget_feedback();
-  if (nr_pdcch_discovered_enabled()) return discovered_additional_poll();
-  static uint64_t s_calls;
-  static time_t s_mtime;
-  if ((++s_calls & 1023) != 1)
-    return false;
-  const char *path = "/tmp/coresets_discovered.txt";
-  struct stat st;
-  if (nr_pdcch_nid_gpu_enabled() || (stat(path, &st) == 0 && st.st_mtime != s_mtime)) {
-    if (!nr_pdcch_nid_gpu_enabled()) s_mtime = st.st_mtime;
-    if (discovered_load(path)) {
-      s_disc_pending = true;
-      if (s_disc_paused) {
-        s_disc_paused = false;
-        LOG_A(PHY, "SENSING: discovery %s changed; catalog walk un-paused\n",
-              nr_pdcch_nid_gpu_enabled() ? "GPU results" : "file");
-      }
-    } else if (!nr_pdcch_nid_gpu_enabled()) {
-      LOG_W(PHY, "SENSING: %s present but no usable CORESET line; ignored\n", path);
-    }
-  }
-  /* discovered CORESETs the bank already holds are verified: skip them without a dwell */
-  while (s_disc_pending && !s_disc_active) {
-    const disc_coreset_t *b = &s_disc[s_disc_next];
-    if (!nr_pdcch_blind_monitor_bank_has_geometry(b->rb, b->ng, b->dur, b->L, b->R, b->sh, b->nid))
-      break;
-    LOG_A(PHY, "SENSING: discovered CORESET %d/%d is already a verified bank entry -- no dwell needed\n",
-          s_disc_next + 1, s_disc_n);
-    s_disc_active = true; /* discovered_verified() consumes an active entry */
-    discovered_verified();
-  }
-  if (!s_disc_pending || s_disc_active || !s_dedicated_found || s_ext_verified || s_ext_n <= 0)
-    return false;
-  const disc_coreset_t *d = &s_disc[s_disc_next];
-  s_disc_saved[0] = g_cfg.coreset_rb_offset;
-  s_disc_saved[1] = g_cfg.coreset_freq_domain;
-  s_disc_saved[2] = g_cfg.coreset_duration;
-  s_disc_saved[3] = g_cfg.coreset_reg_bundle_size;
-  s_disc_saved[4] = g_cfg.coreset_interleaver_size;
-  s_disc_saved[5] = g_cfg.coreset_shift_index;
-  s_disc_saved[6] = g_cfg.coreset_pdcch_dmrs_scrambling_id;
-  s_disc_saved[7] = g_cfg.ss_first_symbol;
-  extent_log_evidence_before_clear();
-  extent_clear_evidence(); /* bumps the generation: the RT path invalidates its length sweep */
-  g_cfg.dci_length_override = 0;
-  g_cfg.coreset_rb_offset = d->rb;
-  g_cfg.coreset_freq_domain = d->ng;
-  g_cfg.coreset_duration = d->dur;
-  g_cfg.coreset_reg_bundle_size = d->L;
-  g_cfg.coreset_interleaver_size = d->R;
-  g_cfg.coreset_shift_index = d->sh;
-  g_cfg.coreset_pdcch_dmrs_scrambling_id = d->nid;
-  g_cfg.ss_first_symbol = d->sym;
-  s_disc_active = true;
-  s_disc_pending = false;
-  LOG_A(PHY, "SENSING: CORESET %d/%d from decode-free discovery: nID=%d sym=%d dur=%d grid_rb=%d groups=%d "
-             "bundle=%d interleaver=%d shift=%d (unverified)\n",
-        s_disc_next + 1, s_disc_n, d->nid, d->sym, d->dur, d->rb, d->ng, d->L, d->R, d->sh);
-  return true;
+  return discovered_additional_poll();
 }
 
 /* ---- Lookahead lanes: see nr_pdcch_blind_monitor.h's own comment for the design. Lanes draw
@@ -1741,54 +1406,10 @@ static int s_lane_dispatch_map;
 static int s_lane_dispatch_phase;
 static int s_lane_dispatch_stage;
 static int s_lane_dispatch_map_max;
-static int s_lane_after_cover_stage = 0;
-
-/* ISAC_AL1_COVER=1: before the staged mapping walk, one lap over only the AL1 COVER of each extent,
- * scanning AL1 only (nr_pdcch_al1_map.h: 2-11 mappings reproduce every AL1 candidate of an 81-1081
- * mapping catalogue). Default off: discovery order unchanged unless asked for. */
-static int al1_cover_enabled(void)
-{
-  static int v = -1;
-  if (v < 0) {
-    const char *e = getenv("ISAC_AL1_COVER");
-    v = (e != NULL && atoi(e) == 1) ? 1 : 0;
-  }
-  return v;
-}
-
-/* Covers depend only on (span, duration): cache the last few so each extent pays once. */
-static int al1_cover_for_span(int span_rb, int duration, nr_pdcch_map_cand_t *out)
-{
-  static struct { int span, dur, n; nr_pdcch_al1_map_t c[NR_PDCCH_AL1_MAX_COVER]; } cache[8];
-  static int next_slot = 0;
-  int at = -1;
-  for (int i = 0; i < 8; i++)
-    if (cache[i].n > 0 && cache[i].span == span_rb && cache[i].dur == duration) { at = i; break; }
-  if (at < 0) {
-    at = next_slot;
-    next_slot = (next_slot + 1) % 8;
-    cache[at].span = span_rb;
-    cache[at].dur = duration;
-    cache[at].n = nr_pdcch_al1_cover(span_rb, duration, cache[at].c, NR_PDCCH_AL1_MAX_COVER);
-  }
-  for (int i = 0; i < cache[at].n; i++)
-    out[i] = (nr_pdcch_map_cand_t){cache[at].c[i].bundle, cache[at].c[i].interleaver, cache[at].c[i].shift};
-  return cache[at].n;
-}
 
 int nr_pdcch_blind_lookahead_count(void)
 {
-  static int s_k = -1;
-  if (s_k < 0) {
-    const char *e = getenv("ISAC_PDCCH_EXTENT_BATCH");
-    int v = e ? atoi(e) : 1;
-    if (v < 1) v = 1;
-    if (v > NR_PDCCH_LOOKAHEAD_MAX + 1) v = NR_PDCCH_LOOKAHEAD_MAX + 1;
-    s_k = v - 1;
-    LOG_A(PHY, "SENSING: PDCCH_LOOKAHEAD configured ISAC_PDCCH_EXTENT_BATCH=%s -> K=%d (%d lookahead lane%s active)\n",
-          e ? e : "(unset)", v, s_k, s_k == 1 ? "" : "s");
-  }
-  return s_k;
+  return 0; /* no lookahead lanes: the primary walks the extent catalogue alone */
 }
 
 static void lane_map_apply(int lane)
@@ -1803,14 +1424,9 @@ static void lane_map_apply(int lane)
 static int lane_map_count(int ext, nr_pdcch_map_cand_t *out)
 {
   const int span_rb = (s_ext_cand[ext].last_w - s_ext_cand[ext].first_w + 1) * 6;
-  if (s_lane_dispatch_stage < 0)
-    return al1_cover_for_span(span_rb, g_cfg.coreset_duration, out);
   const int full_n = nr_pdcch_map_candidates(span_rb, g_cfg.coreset_duration,
                                              g_cfg.coreset_pdcch_dmrs_scrambling_id,
                                              out, NR_PDCCH_MAP_MAX_CAND);
-  const char *e = getenv("ISAC_MAP_PASS0_ONLY");
-  if (e != NULL && atoi(e) == 0)
-    return full_n; /* explicitly exhaustive from the first lap */
   if (s_lane_dispatch_stage == 0 && s_map_pass0_n > 0 && s_map_pass0_n < full_n)
     return s_map_pass0_n;
   return full_n;
@@ -1818,8 +1434,6 @@ static int lane_map_count(int ext, nr_pdcch_map_cand_t *out)
 
 static int lane_catalog_map_max(void)
 {
-  if (s_lane_dispatch_stage < 0)
-    return NR_PDCCH_AL1_MAX_COVER;
   nr_pdcch_map_cand_t tmp[NR_PDCCH_MAP_MAX_CAND];
   int max_n = 0;
   for (int ext = 0; ext < s_ext_n; ++ext) {
@@ -1835,16 +1449,7 @@ static bool lane_assign_next(int lane)
   nr_pdcch_lookahead_lane_t *ln = &s_lane[lane];
   while (s_ext_n > 0) {
     if (s_lane_dispatch_map >= s_lane_dispatch_map_max) {
-      if (s_lane_dispatch_stage < 0) {
-        s_lane_dispatch_stage = s_lane_after_cover_stage;
-        s_lane_dispatch_ext = 0;
-        s_lane_dispatch_map = 0;
-        s_lane_dispatch_phase = 0;
-        s_lane_dispatch_map_max = lane_catalog_map_max();
-        LOG_A(PHY, "SENSING: autodiscover AL1 cover lap done, continuing with the staged mapping walk\n");
-        continue;
-      }
-      if (s_lane_dispatch_stage == 0 && map_staging_enabled()) {
+      if (s_lane_dispatch_stage == 0) {
         s_lane_dispatch_stage = 1;
         s_lane_dispatch_ext = 0;
         s_lane_dispatch_map = 0;
@@ -1886,16 +1491,12 @@ static bool lane_assign_next(int lane)
       continue;
 
     ln->map_idx = map_idx;
-    ln->fast_length_only = (s_lane_dispatch_stage == 0 && map_staging_enabled());
-    ln->al1_only = (s_lane_dispatch_stage < 0);
+    ln->fast_length_only = (s_lane_dispatch_stage == 0);
+    ln->al1_only = false;
     memset(ln->evidence, 0, sizeof(ln->evidence));
     ln->occ = 0;
     ln->active = true;
     lane_map_apply(lane);
-    if (getenv("ISAC_DISCOVER_DIAG") != NULL)
-      LOG_I(PHY, "SENSING: LOOKAHEAD_ASSIGN lane=%d extent=%d offset=%d span=%d bundle=%d interleaver=%d shift=%d fast=%d al1=%d\n",
-            lane, ext, ln->rb_offset, span_rb, ln->reg_bundle_size, ln->interleaver_size,
-            ln->shift_index, ln->fast_length_only, ln->al1_only);
     return true;
   }
   ln->active = false;
@@ -1911,9 +1512,7 @@ static void lookahead_lanes_init(void)
    * from one shared two-dimensional catalogue. The old design spread lanes over extents but put
    * every one at mapping 0, making an L=6 interleaved CORESET wait behind thousands of occasions
    * of unrelated mappings. */
-  const char *map_env = getenv("ISAC_MAP_PASS0_ONLY");
-  s_lane_after_cover_stage = (map_env != NULL && atoi(map_env) == 0) ? 1 : 0;
-  s_lane_dispatch_stage = al1_cover_enabled() ? -1 : s_lane_after_cover_stage;
+  s_lane_dispatch_stage = 0;
   s_lane_dispatch_ext = 1; /* primary owns extent 0 / mapping 0 / preferred phase */
   s_lane_dispatch_map = 0;
   s_lane_dispatch_phase = 0;
@@ -2103,23 +1702,11 @@ static int map_candidates_impl(int span_rb, int duration, int pci, nr_pdcch_map_
    * remaining shifts. The single-pass order walked all shifts of one (L, R) before the next, so on
    * the macro's 216 RB x 2-symbol CORESET (865 legal) the 512 cap cut the list before ANY L=6
    * mapping -- CORESET#0's own bundle size -- and no run length could ever reach it. */
-  /* ISAC_MAP_PASS0_ONLY=1: emit ONLY pass 0 -- the PCI residue and shift 0 of every legal (L, R).
-   * Pass 1 is the blind crawl over every remaining shift, and it is ~96 % of the 271 mappings, so
-   * skipping it turns a 133 x 271 = 36,043-hypothesis catalogue into ~133 x 12 = 1,600: a full walk
-   * in seconds rather than minutes. shiftIndex is overwhelmingly either 0 or PCI-derived in real
-   * deployments, so this covers the likely answers first and simply MISSES an exotic shift -- run
-   * without the knob to get the exhaustive walk back. Default off; nothing changes silently. */
   /* 2026-09-21 (user: shrink the search from what SIB1/PCI give): pass 0 is now the DEFAULT first
    * lap -- every extent is walked with only the PCI residue / shift 0 mappings, and pass 1 (every
    * other shift) is added only after the whole extent catalogue has been assigned once at pass 0
-   * (s_map_stage, advanced by lane_assign). ISAC_MAP_PASS0_ONLY=1 never widens; =0 is the old
-   * exhaustive walk from the start. */
-  static int s_pass0_env = -1;
-  if (s_pass0_env < 0) {
-    const char *e = getenv("ISAC_MAP_PASS0_ONLY");
-    s_pass0_env = (e == NULL) ? -2 : ((atoi(e) == 1) ? 1 : 0);   /* -2 = staged (default) */
-  }
-  const int n_pass = (s_pass0_env == 1) ? 1 : 2;   /* staging is applied by the callers, see map_stage_truncate() */
+   * (s_map_stage, advanced by lane_assign). */
+  const int n_pass = 2;   /* staging is applied by the callers, see map_stage_truncate() */
   int n_pass0 = 0;
   for (int pass = 0; pass < n_pass; pass++) {
     if (pass == 1) n_pass0 = n;
@@ -2145,16 +1732,14 @@ static int map_candidates_impl(int span_rb, int duration, int pci, nr_pdcch_map_
       }
     }
   }
-  *pass0_n_out = (n_pass == 1) ? n : n_pass0;
+  *pass0_n_out = n_pass0; /* staging: two passes always (stage2 baked ISAC_MAP_PASS0_ONLY) */
   return n;
 }
 
 /* Stage 0 keeps only the pass-0 prefix (PCI residue / shift 0 of every legal (L, R)); stage 1 is
- * the full list. ISAC_MAP_PASS0_ONLY=0 disables staging (exhaustive from the start). */
+ * the full list. */
 static int map_stage_truncate(int n)
 {
-  const char *e = getenv("ISAC_MAP_PASS0_ONLY");
-  if (e != NULL && atoi(e) == 0) return n;
   return (s_map_stage == 0 && s_map_pass0_n > 0 && s_map_pass0_n < n) ? s_map_pass0_n : n;
 }
 
@@ -2415,8 +2000,6 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * the configured CORESET and the proposal stays 6 RB x 1 symbol (measured). Waiting for 2-8 hit-driven dwells therefore cost 30-110 s for
    * seeds that were noise on the SA bed (the oracle excludes CORESET#0's windows, where the real CORESET sits). A later exhaustion restarts
    * the discovery epoch and goes through the oracle as before, so its ordering is still used where it exists. */
-  if (s_early_commit_enabled < 0)
-    s_early_commit_enabled = getenv("ISAC_PDCCH_EARLY_COMMIT") && atoi(getenv("ISAC_PDCCH_EARLY_COMMIT")) ? 1 : 0;
   if (s_early_commit_enabled && !s_early_commit_used) {
     s_early_commit_used = true;
     techA_commit_t *c = &s_commit_rx;
@@ -2449,7 +2032,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   const int n = nr_pdcch_coreset_map_scan((const c16_t*)rxdataF_symbol, ofdm_symbol_size, n_rb_carrier,
                                           first_carrier_offset, pci, slot, symbol, candidates,
                                           NR_PDCCH_MAX_CANDIDATE_WINDOWS);
-  if (nr_pdcch_reconf_enabled()) {
+  {
     static uint8_t outside_history; /* receive thread, one bit per discovery sample */
     bool hit = false;
     for (int c = 0; c < n; ++c)
@@ -2461,27 +2044,6 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
       }
     if (nr_pdcch_coreset_bank_occupancy_sample(&outside_history, hit))
       atomic_store_explicit(&s_outside_occupancy, true, memory_order_relaxed);
-  }
-  {
-    /* DIAGNOSTIC (env-gated, kept permanently -- same convention as this project's other ISAC_*
-     * debug flags). Originally added 2026-09-05 to debug a then-zero-convergence result; kept
-     * because it is what surfaced the real picture 2026-09-06 (see this function's convergence-
-     * criterion comment above): n>0 with strong (0.9+) correlation on most calls, but the winning
-     * window changing call to call. Rate-limited to avoid flooding the RT thread's own log volume. */
-    static int s_diag = -1;
-    if (s_diag < 0)
-      s_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
-    static int s_calls = 0;
-    s_calls++;
-    if (s_diag && (n > 0 || (s_calls % 200) == 1)) {
-      if (n > 0) {
-        printf("DISCOVERDIAG calls=%d n=%d top_rb=%d top_corr=%.3f\n", s_calls, n,
-              candidates[0].rb_offset, candidates[0].corr);
-      } else {
-        printf("DISCOVERDIAG calls=%d n=0\n", s_calls);
-      }
-      fflush(stdout);
-    }
   }
   // Accumulate hits toward the observation window regardless of n==0 -- a genuinely idle call is
   // itself informative (real windows stay at 0 too on an idle call), and returning early here would
@@ -2560,14 +2122,6 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
     obs_lit += (hc[w] >= lit_floor);
   const int obs_nw = obs_lit > 0 ? obs_lit : 1;
   const int obs_hits_needed = obs_nw * AUTODISCOVER_HITS_PER_WINDOW;
-  {
-    static int s_gate_diag = -1;
-    if (s_gate_diag < 0) s_gate_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
-    if (s_gate_diag && (obs_calls % 5000) == 0) {
-      printf("DISCOVERGATE calls=%d total_hits=%d top=%d floor=%d lit=%d needed=%d\n", obs_calls, obs_total_hits, obs_top, lit_floor, obs_lit, obs_hits_needed);
-      fflush(stdout);
-    }
-  }
   if (obs_calls >= AUTODISCOVER_MAX_OBS_CALLS && obs_total_hits < obs_hits_needed) {
     /* Waited long enough and the evidence never arrived -- reset rather than decide on noise. */
     techA_clear_dwell();
@@ -2580,12 +2134,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * Hold the decision until the median window count is meaningful. Still bounded by
    * AUTODISCOVER_MAX_OBS_CALLS, so a genuinely empty cell gives up exactly as before. */
   {
-    static int s_min_bg = -1;
-    if (s_min_bg < 0) {
-      const char *e = getenv("ISAC_DISCOVER_MIN_BG");
-      s_min_bg = (e != NULL) ? atoi(e) : 3;
-      if (s_min_bg < 0) s_min_bg = 0;
-    }
+    const int s_min_bg = 3; /* median hit count of the windows needed before the significance test may run */
     if (s_min_bg > 0) {
       int v[NR_PDCCH_MAX_CANDIDATE_WINDOWS], m = 0;
       for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
@@ -2600,9 +2149,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
          * reached 3. Admit a decision anyway when one window DOMINATES every other window it is
          * actually being compared against -- not merely "is the maximum", which is exactly the
          * failure the lit_floor comment above already documents (11 hits vs a background of 6, ~2
-         * sigma, wrongly declared a footprint). Two named constants (overridable via
-         * ISAC_DISCOVER_DOMINANCE_K / ISAC_DISCOVER_DOMINANCE_N, same convention as
-         * ISAC_DISCOVER_MIN_BG above; defaults unchanged), both reused from statistics this
+         * sigma, wrongly declared a footprint). Two named constants, both reused from statistics this
          * file already trusts rather than fitted to any one cell:
          *   K = 4 -- the same margin nr_pdcch_coreset_map.c already treats as decisive for a single
          *            correlation sample (CORESET_MAP_CORR_THRESHOLD = 4x the pure-noise correlation
@@ -2625,21 +2172,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
          * CORESET#0's window range is excluded from both sides of the comparison (mirrors the
          * exclusion already applied below in COREMAPTOP/long-term accumulation), so this cannot
          * short-circuit on the already-known common CORESET instead of the sought dedicated one. */
-        /* K/N are overridable (fix round 1), same pattern as ISAC_DISCOVER_MIN_BG just above:
-         * read once, default unchanged, floored at 1 so neither can degenerate the test (K=0 would
-         * make dominance trivially true, N=0 would zero the absolute-evidence floor). */
-        static int s_dom_k = -1;
-        if (s_dom_k < 0) {
-          const char *e = getenv("ISAC_DISCOVER_DOMINANCE_K");
-          s_dom_k = (e != NULL) ? atoi(e) : 4;
-          if (s_dom_k < 1) s_dom_k = 1;
-        }
-        static int s_dom_n = -1;
-        if (s_dom_n < 0) {
-          const char *e = getenv("ISAC_DISCOVER_DOMINANCE_N");
-          s_dom_n = (e != NULL) ? atoi(e) : 3;
-          if (s_dom_n < 1) s_dom_n = 1;
-        }
+        const int s_dom_k = 4, s_dom_n = 3;
         int top_w = -1, top_hits = 0;
         for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
           if (s_css0_excl_first_w >= 0 && w >= s_css0_excl_first_w && w <= s_css0_excl_last_w) continue;
@@ -2674,33 +2207,6 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   }
   if (obs_calls < AUTODISCOVER_OBS_CALLS || obs_total_hits < obs_hits_needed) {
     return false;
-  }
-
-  /* DISCOVERHIST (ISAC_DISCOVER_DIAG=1): dump the WHOLE per-window hit histogram at the decision
-   * point. Added 2026-09-07 because three consecutive live runs converged to three DIFFERENT
-   * footprints (84/168, 240/12, 12/240) against a known truth of rb_offset=0 span_rb=270, all of
-   * them ending at RB 252 -- which the first_w/last_w rule alone cannot explain. Whether the fix is
-   * "the MIN_HITS threshold is too strict" or "there is a real artifact at the top of the band"
-   * depends on the SHAPE of this histogram, so measure it before changing the rule. */
-  {
-    static int s_hist_diag = -1;
-    if (s_hist_diag < 0) {
-      s_hist_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
-    }
-    if (s_hist_diag) {
-      char h[1400];
-      int p = 0, tot = 0;
-      const int nw = n_rb_carrier / 6;
-      for (int w = 0; w < nw && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
-        tot += hc[w];
-        if (p < (int)sizeof(h) - 12) {
-          p += snprintf(h + p, sizeof(h) - p, "%u ", (unsigned)hc[w]);
-        }
-      }
-      printf("DISCOVERHIST calls=%d nw=%d total_hits=%d min_hits=%d hits: %s\n",
-             obs_calls, nw, tot, AUTODISCOVER_MIN_HITS, h);
-      fflush(stdout);
-    }
   }
 
   // Decision point: which windows repeatedly cleared the threshold over the observation window?
@@ -3013,20 +2519,16 @@ static void techA_commit_apply(const techA_commit_t *c)
    * hypotheses follow, each with the same dwell, when the non-interleaved one collects no
    * dedicated-DCI evidence (nr_pdcch_map_candidates, extent_advance). */
   map_restart(span_rb, g_cfg.coreset_duration, pci);
-  /* ISAC_PDCCH_NO_FAKE_FOOTPRINT: while the discovered-CORESET queue still has unverified entries the root period/offset/duration
-   * stays as is; forcing 1/0/1 makes nr_pdcch_ss0_occasion() true every slot and the dedicated-only scan path never runs again. */
-  if (!(nr_pdcch_no_fake_footprint_enabled() && nr_pdcch_discovered_unverified_pending())) {
-    g_cfg.ss_monitoring_slot_periodicity   = 1;
-    g_cfg.ss_monitoring_slot_offset        = 0;
-    g_cfg.ss_duration                      = 1;
-  }
+  g_cfg.ss_monitoring_slot_periodicity   = 1;
+  g_cfg.ss_monitoring_slot_offset        = 0;
+  g_cfg.ss_duration                      = 1;
   gate_publish();
   g_cfg.ss_first_symbol                  = symbol;
   /* dmrs_typeA_position is the ASN.1 ENUM (NR_MIB__dmrs_TypeA_Position_pos2 = 0, pos3 = 1), NOT a
    * symbol index. 0 IS the spec default (pos2), so it needs no fixing up -- and writing 2 here made
    * blind_fill_dmrs_mask() match neither enum branch and return -1, rejecting EVERY genuine grant
    * with "DM-RS symbol mask undefined for this TDRA entry / additional-position". Measured
-   * 2026-09-07 with ISAC_DCI_WATCH_RNTI: 100 % of real C-RNTI decodes rejected there in auto,
+   * 2026-09-07 with a per-RNTI reject trace: 100 % of real C-RNTI decodes rejected there in auto,
    * while the manual conf (which pins 0 via pdcch_blind_monitor_bwp field 3) accepted 29,331.
    * Leave the parsed/CSS0 value alone. */
 
@@ -3079,7 +2581,6 @@ void nr_pdcch_blind_monitor_autodiscover_next(void)
   g_cfg.dci_length_override = 0;
   memset(s_lane, 0, sizeof(s_lane));
   extent_clear_evidence();
-  discovered_verified(); /* a banked discovered CORESET moves the hand-off on (and may pause the walk) */
   LOG_A(PHY, "SENSING: multi-CORESET discovery resumed (verified bank retained by RT monitor)\n");
 }
 
@@ -3858,11 +3359,8 @@ void nr_pdcch_blind_monitor_init(void)
   }
   /* The integrated first-PUSCH mode supplies the two config switches the DL-only
    * OTA configuration lacks. Full-auto keeps the UL BWP/TDRA unknown until U3
-   * proposes a ticket; the flag is the only new default-off activation point. */
-  const char *ul_chain = getenv("ISAC_UL_PUSCH_CHAIN");
-  const char *ul_solver = getenv("ISAC_UL_PUSCH_SOLVER");
-  if (((ul_chain && strcmp(ul_chain,"1") == 0) ||
-       (ul_solver && strcmp(ul_solver,"1") == 0)) && g_cfg.dl_full_auto) {
+   * proposes a ticket. */
+  if (g_cfg.dl_full_auto) {
     g_cfg.dci01_scan = 1;
     g_cfg.dci01_length_override = 0;
     g_cfg.ul_pusch_decode = 1;
@@ -4284,36 +3782,9 @@ static uint32_t blind_polar_decode(const int16_t* llr,
     crc = tls_polar_pre.crc;
     tls_polar_pre.llr = NULL;
   } else {
-    crc = polar_decoder_int16((int16_t*)llr, dci_estimation, 1, NR_POLAR_DCI_MESSAGE_TYPE,
-                              dci_length, aggregation_level);
+    crc = nr_polar_dci_decode_fssc(llr, dci_estimation, dci_length, aggregation_level); /* fast-SSC, decisions == polar_decoder_int16 */
   }
 
-  /* FULLCRC probe: polar_decoder_int16() returns a 24-bit CRC, and only a genuine match has its
-   * upper bits zero (the live path relies on exactly that when it does `crc == n_rnti`). Logging
-   * out->rnti instead -- which is (uint16_t)crc -- makes a false decode whose LOW 16 bits happen to
-   * equal the target look like a success. Print the untruncated value. */
-  {
-    static int s_fullcrc = -1;
-    if (s_fullcrc < 0)
-      s_fullcrc = (getenv("ISAC_PDCCH_FULLCRC") != NULL) ? 1 : 0;
-    /* RNTI-AGNOSTIC detector: a genuine polar decode has the upper 8 bits of the 24-bit CRC zero.
-     * Keying this on a PINNED rnti_min was a mistake -- the C-RNTI churns on every re-attach, so a
-     * pinned probe only sees the window where the guess happened to be live. Logging every crc with
-     * upper==0 finds real DCIs no matter which RNTI they carry. */
-    char payload_hex[49];
-    if (s_fullcrc && (crc >> 16) == 0)
-      /* payload= is the RAW decoded bits, printed here rather than in DCIGT because DCIGT sits
-       * DOWNSTREAM of the accept gate: when the per-field widths are wrong the payload is rejected
-       * as an implausible DCI 1_1 and DCIGT never fires, which is exactly the case that needs the
-       * dump. Combined with `crc` equal to the C-RNTI read from the gNB log at capture time, these
-       * lines are a ground-truth-scorable record of real grants that the field-width solve can be
-       * run against offline (the method CLAUDE.md section 12 used). MSB-first: bit i of the
-       * dci_length-bit payload is bit (dci_length-1-i) of the value. */
-      printf("FULLCRC L=%u dci_len=%u crc=0x%x upper=0x%x in_range=%d payload=0x%s\n",
-             (unsigned)aggregation_level, (unsigned)dci_length, crc, crc >> 16,
-             (crc >= rnti_min && crc <= rnti_max) ? 1 : 0,
-             nr_dci_bits_hex(dci_estimation, dci_length, true, payload_hex));
-  }
   return crc;
 }
 
@@ -4938,11 +4409,32 @@ bool nr_pdcch_blind_decode_raw_11(const int16_t *llr, uint8_t aggregation_level,
   return nr_pdcch_blind_decode_raw(llr, aggregation_level, dci_length, rnti_min, rnti_max, true, out);
 }
 
+_Static_assert(sizeof(blind_field_bits_t) <= sizeof(((nr_pdcch_blind_extract_pre_t *)0)->f), "extract pre: field-bit storage too small");
+void nr_pdcch_blind_extract_pre(uint16_t bwp_size, const nr_pdcch_blind_extract_opts_t *opts, nr_pdcch_blind_extract_pre_t *pre)
+{
+  const blind_field_bits_t f = blind_field_bits(bwp_size, opts);
+  memset(pre, 0, sizeof(*pre));
+  memcpy(pre->f, &f, sizeof(f));
+  pre->size = nr_pdcch_blind_dci_size_ex(bwp_size, opts);
+}
+static bool extract_11_impl(const nr_pdcch_blind_raw_result_t *raw, uint16_t dci_length, uint16_t bwp_size, uint8_t dmrs_typeA_position,
+                            const nr_pdcch_blind_extract_opts_t *opts, const nr_pdcch_blind_extract_pre_t *pre, nr_pdcch_blind_result_t *out);
 bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
                                uint16_t dci_length, uint16_t bwp_size,
                                uint8_t dmrs_typeA_position,
                                const nr_pdcch_blind_extract_opts_t *opts,
                                nr_pdcch_blind_result_t *out)
+{
+  return extract_11_impl(raw, dci_length, bwp_size, dmrs_typeA_position, opts, NULL, out);
+}
+bool nr_pdcch_blind_extract_11_pre(const nr_pdcch_blind_raw_result_t *raw, uint16_t dci_length, uint16_t bwp_size,
+                                   uint8_t dmrs_typeA_position, const nr_pdcch_blind_extract_opts_t *opts,
+                                   const nr_pdcch_blind_extract_pre_t *pre, nr_pdcch_blind_result_t *out)
+{
+  return extract_11_impl(raw, dci_length, bwp_size, dmrs_typeA_position, opts, pre, out);
+}
+static bool extract_11_impl(const nr_pdcch_blind_raw_result_t *raw, uint16_t dci_length, uint16_t bwp_size, uint8_t dmrs_typeA_position,
+                            const nr_pdcch_blind_extract_opts_t *opts, const nr_pdcch_blind_extract_pre_t *pre, nr_pdcch_blind_result_t *out)
 {
   if (!out) return false;
   memset(out, 0, sizeof(*out));
@@ -4952,11 +4444,6 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
   }
   out->rnti = raw->rnti;
   out->mismatched_bits = raw->mismatched_bits;
-  { /* TIMRM diagnostic (ISAC_PDSCH_RM_GENIE): hand the payload bits to the grant so RMDCI can print them; off = untouched */
-    static int s_keep = -1;
-    if (s_keep < 0) { const char *e = getenv("ISAC_PDSCH_RM_GENIE"); s_keep = (e && atoi(e) > 0) ? 1 : 0; }
-    if (s_keep) { out->payload = raw->payload; out->dci_len = dci_length; }
-  }
   // ---- Step 3: field extraction, in TS 38.212 spec order (MSB-first, matches
   // nr_mac_common.c's nr_dci_size() accumulation order and nr_ue_procedures.c's readBits()).
   // NOTE: this does NOT re-check dci_length against nr_pdcch_blind_dci_size(bwp_size) -- it used to,
@@ -4970,11 +4457,15 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
   // deployment that needed dci_length_override=45 has NOT been isolated, so the per-field bit
   // positions below may still be misaligned for that deployment even once decode (Step 1-2) starts
   // succeeding. Flagged, not fixed -- see the Stage 1 handover note this session leaves behind. ----
-  const blind_field_bits_t f = blind_field_bits(bwp_size, opts);
+  blind_field_bits_t f;
+  if (pre) /* precomputed by nr_pdcch_blind_extract_pre() for the same bwp_size and opts: the same values */
+    memcpy(&f, pre->f, sizeof(f));
+  else
+    f = blind_field_bits(bwp_size, opts);
   // read_field() walks DOWN from dci_length, so a field list wider than the payload would shift by
   // a negative count (undefined behaviour) -- and, long before that, would mean every field is
   // being read from the wrong offset anyway. Reject rather than produce confident garbage.
-  if (nr_pdcch_blind_dci_size_ex(bwp_size, opts) > dci_length) {
+  if ((pre ? pre->size : nr_pdcch_blind_dci_size_ex(bwp_size, opts)) > dci_length) {
     out->reject_reason = "configured DCI field widths exceed dci_length";
     return false;
   }
@@ -5154,11 +4645,6 @@ static bool blind_decode_and_extract_11_inner(const int16_t* llr,
   return nr_pdcch_blind_extract_11(&raw, dci_length, bwp_size, dmrs_typeA_position, opts, out);
 }
 
-/* ISAC_DCI_WATCH_RNTI=0x<rnti>: print WHY a GENUINE candidate is rejected. The existing
- * last_reject= summary is useless for this because noise candidates that clear the RNTI range
- * check outnumber real grants ~100:1, so it always reports a noise RNTI. Filtering on the live
- * C-RNTI (re-read from the gNB log at capture time -- it churns on re-attach) makes the reason
- * read off real grants only. Zero cost when unset: one cached getenv plus an integer compare. */
 bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
                                           uint8_t         aggregation_level,
                                           uint16_t        dci_length,
@@ -5169,31 +4655,8 @@ bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
                                           const nr_pdcch_blind_extract_opts_t* opts,
                                           nr_pdcch_blind_result_t* out)
 {
-  const bool ok = blind_decode_and_extract_11_inner(llr, aggregation_level, dci_length, bwp_size,
-                                                    dmrs_typeA_position, rnti_min, rnti_max, opts, out);
-  static int s_watch = -1;
-  if (s_watch < 0) {
-    const char* e = getenv("ISAC_DCI_WATCH_RNTI");
-    s_watch = (e != NULL) ? (int)strtol(e, NULL, 0) : 0;
-  }
-  if (s_watch > 0 && out->rnti == (uint16_t)s_watch) {
-    static unsigned long n_hit = 0, n_ok = 0;
-    n_hit++;
-    if (ok) {
-      n_ok++;
-    }
-    if (n_hit <= 20 || (n_hit % 2000) == 0) {
-      printf("DCIWATCH n=%lu ok=%lu L=%u dci_len=%u bwp=%u tda_cnt=%d dmrs_pos=%u "
-             "reason=\"%s\" mcs=%u rv=%u ant=%u tda_idx=%u rb=[%u..%u)\n",
-             n_hit, n_ok, (unsigned)aggregation_level, (unsigned)dci_length, (unsigned)bwp_size,
-             (opts != NULL) ? opts->tda_count : -1, (unsigned)dmrs_typeA_position,
-             ok ? "ACCEPT" : (out->reject_reason ? out->reject_reason : "(null)"),
-             out->mcs, out->rv, out->n_dmrs_cdm_groups, out->tda_index,
-             out->start_rb, out->start_rb + out->num_rb);
-      fflush(stdout);
-    }
-  }
-  return ok;
+  return blind_decode_and_extract_11_inner(llr, aggregation_level, dci_length, bwp_size,
+                                           dmrs_typeA_position, rnti_min, rnti_max, opts, out);
 }
 
 // =============================================================================================
@@ -6127,7 +5590,7 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
  * acquisitions (2026-09-15: 0 hits in 31k CORESET#0 candidates with PBCH at 50/50, on the same cell
  * that decoded SIB1 at once one attempt earlier). A real receiver keeps SIB1 per cell too. The
  * cached facts are loaded only when the live ones are absent, are logged as CACHED, and stay what
- * they always were: a hypothesis the TB CRC judges. ISAC_SIB1_CACHE=0 disables; the path is
+ * they always were: a hypothesis the TB CRC judges. The path is
  * ISAC_SIB1_CACHE_DIR (default /tmp/passive_rx). */
 static void sib1_cache_path(uint16_t pci, uint32_t hash, char *out, size_t n)
 {
@@ -6141,20 +5604,14 @@ static void sib1_cache_index_path(uint16_t pci, char *out, size_t n)
   const char *dir = getenv("ISAC_SIB1_CACHE_DIR");
   snprintf(out, n, "%s/sib1_common_pci%u_last_hash.bin", dir && *dir ? dir : "/tmp/passive_rx", pci);
 }
-static bool sib1_cache_enabled(void)
-{
-  const char *e = getenv("ISAC_SIB1_CACHE");
-  return e == NULL || atoi(e) != 0;
-}
 static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f)
 {
-  if (!sib1_cache_enabled()) return;
   if (nr_cfg_reconf_enabled() && !atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire)) return;
   char path[256];
   const uint32_t hash = atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire);
   sib1_cache_path(f->pci, hash, path, sizeof(path));
   FILE *fp = fopen(path, "wb");
-  if (fp == NULL) { mkdir("/tmp/passive_rx", 0777); fp = fopen(path, "wb"); }
+  if (fp == NULL) { if (mkdir("/tmp/passive_rx", 0777) == 0) chmod("/tmp/passive_rx", 01777); fp = fopen(path, "wb"); }
   if (fp == NULL) return;
   const uint32_t magic = 0x53494231u; /* "SIB1" */
   const bool written = fwrite(&magic, sizeof(magic), 1, fp) == 1 && fwrite(f, sizeof(*f), 1, fp) == 1;
@@ -6167,7 +5624,6 @@ static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f)
 }
 static bool sib1_cache_load(uint16_t pci, nr_pdcch_blind_common_config_t *f)
 {
-  if (!sib1_cache_enabled()) return false;
   uint32_t hash = atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire);
   char path[256];
   if (nr_cfg_reconf_enabled() && !hash) {

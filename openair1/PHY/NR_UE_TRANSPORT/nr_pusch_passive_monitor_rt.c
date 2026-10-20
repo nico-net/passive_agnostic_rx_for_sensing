@@ -59,7 +59,7 @@ void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, long source_ab
     }
     /* The first no-HARQ-history decoder rejects RV != 0 before FEP. Keep
      * those grants out of the bounded IQ queue while U3 rotates hypotheses. */
-    if (g->rv != 0) {
+    if (g->rv != 0 && !nr_pusch_passive_harq_combine_enabled()) { /* ULQ: retransmissions combine when enabled */
       atomic_fetch_add_explicit(&g_chain_skip_rv,1,memory_order_relaxed);
       return;
     }
@@ -97,13 +97,14 @@ void nr_pusch_first_crc_result(const nr_pdcch_blind_ul_result_t *g,
     for (unsigned i=0;i<n;++i) snprintf(tbhex+2*i,3,"%02x",out->tb[i]);
   }
   LOG_A(PHY,"SENSING: UL_PUSCH_CRC rnti=0x%04x ok=%d mcs=%u prb=%u+%u ta=%d t=%ld cpu_us=%lu status=%u reason=%s uci_hint=%d uci_re=%u dmrs_id=%u data_id=%u"
-            " snr_db=%.1f delay=%d seg=%d/%d tbs=%u cdm=%u tb=%s\n",
+            " snr_db=%.1f delay=%d seg=%d/%d tbs=%u cdm=%u tb=%s probe=%d tbl=%u hyp=%u@%u nid=%d skip=%d\n",
         g->rnti,ok,g->mcs,g->bwp_start+g->start_rb,g->num_rb,
         out->ta_applied_samples,(long)target_slot,(unsigned long)cpu_us,out->status,
         out->reject_reason ? out->reject_reason : "-",
         g->csi_request!=0 || g->dai!=0,out->uci_ack_re,out->dmrs_id,out->data_id,
         (double)out->snr_db,out->est_delay,out->segments_ok,out->n_segments,out->tbs_bytes,
-        (unsigned)g->n_dmrs_cdm_groups,tbhex);
+        (unsigned)g->n_dmrs_cdm_groups,tbhex,
+        (int)(nr_ul_layout_is_probe(g) || nr_ul_layout_is_trial(g)),(unsigned)(out->hyp_n ? out->tbl : g->mcs_table),(unsigned)out->hyp_n,(unsigned)out->hyp_s,(int)out->nid_conf,(int)out->skip); /* probe= same rule as the PUSCHQ2 probe counters */
   if (first_ok && slots_per_frame>0)
     LOG_A(PHY,"SENSING: UL_FIRST_TB_OK rnti=0x%04x elapsed_ms=%.3f elapsed_slots=%ld first_dci_to_tb=1\n",
           g->rnti,10000.0*(double)elapsed_slots/slots_per_frame,(long)elapsed_slots);
@@ -320,6 +321,7 @@ void nr_pusch_grant_book_stats_dump(void)
             (unsigned long)q.queued, (unsigned long)q.decoded, (unsigned long)q.crc_ok,
             (unsigned long)q.dropped_full, (unsigned long)q.dropped_stale,
             (unsigned long)q.max_lag_slots, NR_PUSCH_PASSIVE_QUEUE_MARGIN_SLOTS);
+    nr_pusch_passive_queue_ulq_dump();
   }
   if (nr_pusch_passive_ul_ue_state_enabled())
     LOG_I(PHY,"SENSING: UL_UE_IDS dropped=%lu\n",(unsigned long)nr_pusch_passive_ul_ids_dropped());

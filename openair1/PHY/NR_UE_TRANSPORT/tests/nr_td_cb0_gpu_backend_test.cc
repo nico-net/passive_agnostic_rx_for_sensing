@@ -270,7 +270,7 @@ TEST_F(Cb0Gpu, ExecUsesGpuAndFallsBackToCpuAfterFailure)
   Hooks hk;
   ASSERT_TRUE(hk.hooks && hk.reset);
   ASSERT_EQ(nr_td_cb0_gpu_register(), 1);
-  setenv("ISAC_TD_CB0_GPU_BACKOFF", "2", 1);
+  nr_td_cb0_backend_test_backoff(2);
   nr_td_cb0_backend_mode_set(NR_TD_CB0_BE_AUTO);
   Fx *b = big(), *s = small();
   Set set;
@@ -335,7 +335,7 @@ TEST_F(Cb0Gpu, ExecUsesGpuAndFallsBackToCpuAfterFailure)
   EXPECT_GE(gc.trips, 1u);
   nr_td_cb0_register_gpu_backend(nullptr);
   nr_td_cb0_backend_mode_set(-1);
-  unsetenv("ISAC_TD_CB0_GPU_BACKOFF");
+  nr_td_cb0_backend_test_backoff(64);
   delete b;
   delete s;
 }

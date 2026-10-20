@@ -352,14 +352,9 @@ TEST(GrantWork, AllocatorPoolsAndIsUsable)
   EXPECT_EQ(f1, f0);
   nr_td_gw_free(q);
   nr_td_gw_free(nullptr);
-#ifdef NR_TD_GW_CUDA
-  /* CUDA build on a host with libcudart: the buffers are unified (managed) memory. */
-  if (getenv("ISAC_TD_GW_UNIFIED") == nullptr) {
-    EXPECT_TRUE(nr_td_gw_unified()) << "CUDA build but cudaMallocManaged unavailable";
-  }
-#else
+  /* pre-existing stale expectation: the pool is ordinary host memory in every build (nr_td_gw_unified() is constant false since d85fb530f7) */
   EXPECT_FALSE(nr_td_gw_unified());
-#endif
+
 }
 
 /* ---- CB0 extraction fixture -------------------------------------------------------------------

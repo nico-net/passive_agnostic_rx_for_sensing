@@ -101,8 +101,10 @@ static nrUE_RU_params_t *nrue_rus;
 
 openair0_config_t openair0_cfg_g[MAX_CARDS] = {};
 static openair0_device_t openair0_dev[MAX_CARDS] = {};
+#ifdef NRUE_RU_SHUTDOWN_TEST
 static unsigned long rf_fail_after_reads;
 static atomic_ulong rf_read_count;
+#endif
 
 int nrue_get_cell_count(void)
 {
@@ -153,15 +155,6 @@ void nrue_set_cell_params(configmodule_interface_t *cfg)
                                            get_nrUE_params()->N_RB_DL, s_band_scan_c, NRUE_BAND_SCAN_MAX);
       AssertFatal(s_band_scan_n > 0, "band-wide search: no synchronisation raster for band %d\n", get_softmodem_params()->band);
       s_band_scan_i = 0;
-      /* rfsim carries the gNB's baseband whatever the UE is tuned to, so a band scan there can only
-       * be exercised mechanically; ISAC_BANDSCAN_FIRST_HZ puts the cell's centre first (test knob). */
-      const char *first = getenv("ISAC_BANDSCAN_FIRST_HZ");
-      if (first != NULL && strtoull(first, NULL, 10) > 0) {
-        for (int i = s_band_scan_n; i > 0; i--)
-          s_band_scan_c[i] = s_band_scan_c[i - 1];
-        s_band_scan_c[0] = strtoull(first, NULL, 10);
-        s_band_scan_n = s_band_scan_n < NRUE_BAND_SCAN_MAX ? s_band_scan_n + 1 : NRUE_BAND_SCAN_MAX;
-      }
       rf_frequency = s_band_scan_c[0];
       LOG_W(PHY, "SENSING: BANDSCAN band %d: %d windows of %d RB, first centre %lu Hz\n",
             get_softmodem_params()->band, s_band_scan_n, get_nrUE_params()->N_RB_DL, rf_frequency);
@@ -368,28 +361,11 @@ void nrue_init_openair0(void)
   }
 }
 
-/* nrue_ru_fault_config: reads the default-off fault-injection switch ISAC_RF_FAIL_AFTER_READS and stores the read count after which nrue_ru_read_impl() fails.
- *   Used by the orchestrator's shutdown acceptance test; the same fatal-read path as a real driver failure. Callers: nrue_ru_start_impl() and the test fixture nrue_ru_test_device().
- */
-static void nrue_ru_fault_config(void)
-{
-  /* Independent, default-off fault injection for the orchestrator's shutdown
-   * acceptance test. It uses the same fatal-read path as a driver failure. */
-  const char *fail = getenv("ISAC_RF_FAIL_AFTER_READS");
-  if (fail) {
-    char *end;
-    long value = strtol(fail, &end, 10);
-    if (*fail && !*end && value > 0)
-      rf_fail_after_reads = value;
-  }
-}
-
 /* nrue_ru_start_impl: loads and starts every radio device (openair0_device_load, then trx_start_func), and initialises the TX write thread when usrp_tx_thread is set.
  *   Returns 0, or -1 on the first failure or when shutdown was requested. Called only through nrue_ru_start(), which holds the lifetime gate.
  */
 static int nrue_ru_start_impl(void)
 {
-  nrue_ru_fault_config();
   for (int ru_id = 0; ru_id < nrue_ru_count; ru_id++) {
     openair0_config_t *cfg = &openair0_cfg_g[ru_id];
     openair0_device_t *dev = &openair0_dev[ru_id];
@@ -608,13 +584,17 @@ static int nrue_ru_adjust_rx_gain_impl(PHY_VARS_NR_UE *UE, int gain_change)
 
 /* nrue_ru_read_impl: reads nsamps from the UE's radio card and, for UE 0, also reads (and discards) one block from every RU not used by another UE so that they keep streaming.
  *   Short reads are continued up to 20 times on contiguous timestamps; any gap or failure sets the RFSTALL shutdown and returns -1 (never invalid IQ). The returned timestamp is relative to the device's first timestamp.
- *   Called only through nrue_ru_read(). Injected failures (ISAC_RF_FAIL_AFTER_READS) take this path too.
+ *   Called only through nrue_ru_read(). Test-injected failures take this path too.
  */
 static int nrue_ru_read_impl(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int num_antennas)
 {
   openair0_device_t *dev = &openair0_dev[UE->rf_map.card];
   openair0_timestamp_t tmp_timestamp = 0;
+#ifdef NRUE_RU_SHUTDOWN_TEST
   bool inject_failure = rf_fail_after_reads && atomic_fetch_add(&rf_read_count, 1) >= rf_fail_after_reads;
+#else
+  const bool inject_failure = false;
+#endif
   int ret = inject_failure ? -1 : dev->trx_read_func(dev, &tmp_timestamp, buff, nsamps, num_antennas);
   if (ret < 0) {
     *ptimestamp = 0;
@@ -891,6 +871,11 @@ void nrue_ru_test_device(openair0_device_t device)
   nrue_rus = &ru;
   nrue_cells = &cell;
   openair0_dev[0] = device;
-  nrue_ru_fault_config();
+}
+
+/* Fault injection for the shutdown acceptance test: the n-th and later reads fail like a real driver failure. */
+void nrue_ru_test_fail_after_reads(unsigned long n)
+{
+  rf_fail_after_reads = n;
 }
 #endif

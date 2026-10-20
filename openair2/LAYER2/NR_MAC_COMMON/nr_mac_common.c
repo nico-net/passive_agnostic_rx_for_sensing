@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include <stdlib.h>
 #include <math.h>
 #include "nr_mac.h"
 #include "nr_mac_common.h"
@@ -3164,6 +3165,19 @@ uint16_t nr_dci_size(const NR_UE_DL_BWP_t *DL_BWP,
       if (transformPrecoder == NR_PUSCH_Config__transformPrecoder_disabled) {
          dci_pdu->dmrs_sequence_initialization.nbits = 1;
          size += dci_pdu->dmrs_sequence_initialization.nbits;
+      }
+      { /* UL rfsim test bed ground truth (logged once; packer-order widths for pdcch_blind_monitor_ul_dci_bits) */
+        static bool logged;
+        if (!logged && getenv("ISAC_TB_LOG_WIDTHS")) { /* gNB-side rfsim test bed ground truth (tests/passive_rx/dgx/ul_rfsim_arm.sh), never the receiver */
+          logged = true;
+          LOG_A(NR_MAC, "DCI01_WIDTHS total=%d carrier=%d ulsul=%d bwp=%d hop=%d harq=%d dai1=%d dai2=%d sri=%d prec=%d ant=%d srs=%d csi=%d cbg=%d ptrs=%d beta=%d dmrsseq=%d fdra=%d tda=%d\n",
+                size, dci_pdu->carrier_indicator.nbits, dci_pdu->ul_sul_indicator.nbits, dci_pdu->bwp_indicator.nbits,
+                dci_pdu->frequency_hopping_flag.nbits, dci_pdu->harq_pid.nbits, dci_pdu->dai[0].nbits, dci_pdu->dai[1].nbits,
+                dci_pdu->srs_resource_indicator.nbits, dci_pdu->precoding_information.nbits, dci_pdu->antenna_ports.nbits,
+                dci_pdu->srs_request.nbits, dci_pdu->csi_request.nbits, dci_pdu->cbgti.nbits, dci_pdu->ptrs_dmrs_association.nbits,
+                dci_pdu->beta_offset_indicator.nbits, dci_pdu->dmrs_sequence_initialization.nbits,
+                dci_pdu->frequency_domain_assignment.nbits, dci_pdu->time_domain_assignment.nbits);
+        }
       }
       break;
 

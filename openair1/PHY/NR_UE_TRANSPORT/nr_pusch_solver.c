@@ -11,12 +11,11 @@
 #define UL_SOLVER_UES 64
 #define UL_SOLVER_BUCKET 4
 #define UL_SOLVER_REFILL_SLOTS 40 /* 50 probes/s at 30 kHz SCS */
-/* ISAC_SLOT_SCALE=1 (default off): 20 ms per probe at any numerology (20 << mu slots; mu=1 gives 40). */
+/* 20 ms per probe at any numerology (20 << mu slots; mu=1 gives 40). */
 static _Atomic uint32_t refill_slots = UL_SOLVER_REFILL_SLOTS;
 void nr_pusch_solver_set_mu(int mu)
 {
-  const char *e = getenv("ISAC_SLOT_SCALE");
-  if (e && atoi(e) == 1 && mu >= 0 && mu <= 4)
+  if (mu >= 0 && mu <= 4)
     atomic_store_explicit(&refill_slots, 20u << mu, memory_order_relaxed);
 }
 #define UL_SOLVER_CPU_CAP_US 200000 /* burst cap; refill is 0.5 core in signal time */
@@ -52,15 +51,7 @@ static uint8_t prior_tp, prior_cdm, prior_mapping;
 static uint16_t prior_data_id, prior_dmrs_id, prior_ports;
 static uint64_t prior_layouts;
 
-bool nr_pusch_solver_enabled(void)
-{
-  static int enabled = -1;
-  if (enabled < 0) {
-    const char *v = getenv("ISAC_UL_PUSCH_SOLVER");
-    enabled = v && !strcmp(v, "1");
-  }
-  return enabled == 1;
-}
+bool nr_pusch_solver_enabled(void) { return true; }
 
 void nr_pusch_solver_reset(void)
 {
@@ -186,7 +177,7 @@ static void apply_physical(nr_pdcch_blind_ul_result_t *g, int physical, int l0,
     g->ul_dmrs_symb_pos = (uint16_t)mask;
   }
   if (nids > 0) {
-    g->data_scrambling_id = ids[id_index];
+    if (ids[id_index] <= 1023) g->data_scrambling_id = ids[id_index]; /* n_ID is 0..1023; DL priors may be larger (DM-RS ids reach 65535) */
     if (dmrs_override) g->ul_dmrs_scrambling_id = ids[dmrs_index];
   }
   g->data_id_advance = false;
@@ -228,7 +219,7 @@ int nr_pusch_solver_plan(const nr_ue_ul_ticket_t *ticket,
                          const uint16_t *ids, int nids,
                          nr_pusch_solver_var_t *out, int max_out)
 {
-  if (!nr_pusch_solver_enabled() || !ticket || !ticket->rnti || !rd || nrd <= 0 || !out || max_out <= 0)
+  if (!ticket || !ticket->rnti || !rd || nrd <= 0 || !out || max_out <= 0)
     return 0;
   if (max_out > UL_SOLVER_BUCKET) max_out = UL_SOLVER_BUCKET;
   if (nids < 0) nids = 0;

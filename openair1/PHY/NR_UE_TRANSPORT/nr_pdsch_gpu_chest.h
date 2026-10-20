@@ -6,12 +6,15 @@
 #ifndef NR_PDSCH_GPU_CHEST_H
 #define NR_PDSCH_GPU_CHEST_H
 #include <stdint.h>
+#include <stddef.h>
+#include "PHY/TOOLS/nr_gpu_mem.h"
 #define NR_GPU_CHEST_MAX_ROWS 2048 /* rows are read from a pinned copy, not the kernel arguments */
 typedef struct {
   const int16_t *rxF;  /* c16: &rxdataF[a][symbol * N + delta] */
   const int16_t *pil;  /* c16: &pilot[(6 or 4) * rb_offset] of this (symbol, layer) */
   int16_t *out;        /* c16: N entries rewritten (the estimate row, or a scratch row for a PRG segment) */
   int k0, nb_rb;       /* first LS subcarrier (bwp_start_subcarrier % N) and contiguous RBs of this row */
+  int type;            /* 0 = the job's type; 1 / 2 = this row's DM-RS type (the DL graph pass: a captured k_ls has the job's type baked in) */
 } nr_gpu_chest_row_t;
 typedef struct {
   int n_rows, type, N;
@@ -24,4 +27,12 @@ typedef struct {
   int delay[NR_GPU_CHEST_MAX_ROWS][3];
 } nr_gpu_chest_job_t;
 typedef int (*nr_gpu_chest_fn)(nr_gpu_chest_job_t *job);
+/* nr_pdsch_gpu_chest_dev (launch-only, graph-capturable): nvar_dev (NR_GPU_CHEST_DEV_BYTES) receives delay int[MAX_ROWS][3] then nvar u32[MAX_ROWS].
+ * Row pointers (rxF, pil, out) must be device-accessible and every out row must lie inside est_dev. Contract: nr_pdsch_gpu_chest_stage on the
+ * HOST (waits for the slot's previous pass, copies the rows to pinned staging, returns slot 0..NR_GPU_PASS_RING-1), then launch/replay
+ * nr_pdsch_gpu_chest_dev(job, n, est_dev, nvar_dev, slot, stream), which only enqueues the rows H2D from that slot and the kernels. */
+#define NR_GPU_CHEST_DEV_BYTES (4 * NR_GPU_CHEST_MAX_ROWS * sizeof(int))
+typedef int (*nr_gpu_chest_stage_fn)(const nr_gpu_chest_job_t *job, int n, int *slot_out);
+typedef int (*nr_gpu_chest_stage_at_fn)(const nr_gpu_chest_job_t *job, int n, int slot); /* the slot chosen by the caller; n <= 512 rows */
+typedef int (*nr_gpu_chest_dev_fn)(const nr_gpu_chest_job_t *job, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, int slot, void *stream);
 #endif

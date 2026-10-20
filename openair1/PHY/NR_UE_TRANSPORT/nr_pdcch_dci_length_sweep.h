@@ -159,7 +159,16 @@ typedef struct {
   uint64_t decodes;
   uint32_t feed_serial; /* distinct OTA occasions; resumed work never manufactures recurrence */
   int relock_old_len; /* SUSPECT only: old length, then seen lengths, then full range */
+  /* ANONLEN (default off, set by the caller before each feed; 0 learned_n = every round is a full one): lengths already
+   * established by CRC-valid evidence on this CORESET. A round tests only those, except one round in learned_every
+   * (hashed on feed_serial) which is a full lap, so a length not yet learned is still found, only later. Restricted rounds
+   * do not advance rot_phase or occasions_fed (the give-up cap counts full laps only). */
+  int      learned_len[4], learned_n;
+  uint32_t learned_every, lap_count; /* lap_count: laps started while learned_n > 0 (restricted or full) */
+  bool     restricted_lap; /* the lap in progress (or suspended) is restricted */
 } nr_pdcch_dci_length_sweep_state_t;
+/* Cumulative restricted / full rounds of every sweep in the process (diagnostics). */
+uint64_t nr_pdcch_dci_length_learn_rounds(bool restricted);
 /* Active range shared by CPU scoring, prefill and UL uniqueness checks. Explicit
  * ISAC_DCI_LEN_MAX or a cell-seen wide length bypasses the cold 63-bit cap. */
 int nr_pdcch_dci_length_active_max(const nr_pdcch_dci_length_sweep_state_t *state,

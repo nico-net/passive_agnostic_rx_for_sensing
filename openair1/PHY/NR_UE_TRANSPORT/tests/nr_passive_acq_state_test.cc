@@ -19,6 +19,8 @@
  *      contact@openairinterface.org
  */
 #include <gtest/gtest.h>
+#include <cstdio>
+#include <cstdlib>
 extern "C" {
 #include "nr_passive_acq_state.h"
 #include "common/utils/LOG/log.h"
@@ -179,6 +181,20 @@ TEST_F(AcqState, CarrierCheckReachesTheSnapshotAndNeedsPhyGeometryFirst) {
   EXPECT_EQ(nr_passive_acq_snapshot().carrier_verified, 1);
   nr_passive_acq_note_sib1_carrier(106, 1, 24, 0, 12);
   EXPECT_EQ(nr_passive_acq_snapshot().carrier_verified, -1);
+}
+TEST(CellState, BarredOrIdleCellsGetAVerdictAfterTheWindowAndAnyRecurringUeRntiWins) {
+  nr_cell_state_t c{};
+  c.barred = true;
+  EXPECT_EQ(nr_cell_state_update(&c, 1000, 600), NR_CELL_UNKNOWN);       // first call starts the clock
+  nr_cell_state_note_rnti(&c, 0x1d); nr_cell_state_note_rnti(&c, 0x63);   // two single RNTIs (RA/TC): not recurrence
+  EXPECT_EQ(nr_cell_state_update(&c, 1599, 600), NR_CELL_UNKNOWN);
+  EXPECT_EQ(nr_cell_state_update(&c, 1600, 600), NR_CELL_BARRED_IDLE);
+  nr_cell_state_note_rnti(&c, 0x1d); nr_cell_state_note_rnti(&c, 0x1d);   // third accept of one RNTI
+  EXPECT_EQ(nr_cell_state_update(&c, 1700, 600), NR_CELL_ACTIVE);
+  nr_cell_state_t d{};                                                    // a second cell context shares nothing
+  EXPECT_EQ(nr_cell_state_update(&d, 4000000000u, 600), NR_CELL_UNKNOWN);
+  EXPECT_EQ(nr_cell_state_update(&d, 4000000000u + 700, 600), NR_CELL_IDLE);  // not barred -> IDLE; also across uint32 wrap
+  EXPECT_EQ(nr_cell_state_update(&d, 100, 600), NR_CELL_IDLE);
 }
 TEST_F(AcqState, ResetReturnsToSearchingAndClearsCounters) {
   nr_passive_acq_inputs_t in{}; in.pdcch_length_found = true;

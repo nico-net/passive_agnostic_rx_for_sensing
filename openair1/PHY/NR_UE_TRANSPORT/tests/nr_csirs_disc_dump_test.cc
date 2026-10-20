@@ -29,7 +29,6 @@ TEST(CsirsDiscDump, ProductionStream)
 {
   const char *path = getenv("ISAC_CSIRS_DISC_DUMP_IN");
   if (!path) GTEST_SKIP() << "Set ISAC_CSIRS_DISC_DUMP_IN to the OTA ring dump";
-  setenv("ISAC_CSIRS_DISC", "1", 1);
   nr_csirs_disc_synth_init(); set_glog(OAILOG_INFO);
   FILE *file=fopen(path,"rb"); ASSERT_NE(file,nullptr);
   int32_t header[5]; ASSERT_EQ(fread(header,sizeof(header),1,file),1u);
@@ -192,3 +191,6 @@ TEST(CsirsDiscDump, ProductionStream)
   EXPECT_EQ(fed,5468u);EXPECT_EQ(csirs_disc_feed_drops,drops_before);
   nr_csirs_disc_ring_free(&snapshot);nr_csirs_disc_ring_free(&ring);nr_csirs_disc_detect_reset();fclose(file);
 }
+
+/* link stub: nr_dl_traffic_probe.c / nr_csirs_monitor.c read the passive-mode flag (zeroed params = not passive) */
+softmodem_params_t *get_softmodem_params(void) { static softmodem_params_t p; return &p; }

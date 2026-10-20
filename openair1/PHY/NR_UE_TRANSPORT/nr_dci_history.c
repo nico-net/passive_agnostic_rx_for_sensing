@@ -201,7 +201,7 @@ bool nr_dci_hist_k0_certified(nr_dci_hist_t *h, const nr_dci_hist_entry_t *g, in
   if (sib == 0)
     return false; /* an empty sibling set never certifies */
   const uint32_t u = slot_add(h, g->abs_slot, k_lead);
-  const bool conf_only = h->cert_confirmed; /* ISAC_TD_CERT_CONFIRMED: only confirmed occupants count as observed */
+  const bool conf_only = h->cert_confirmed; /* only confirmed occupants count as observed (off in the receiver) */
   nr_dci_hist_entry_t nb[NEAR_MAX];
   const int n = nr_dci_hist_near(h, g->rnti, u, 2 * NR_DCI_HIST_K0_MAX, nb, NEAR_MAX);
   for (int ks = 0; ks <= NR_DCI_HIST_K0_MAX; ks++) {
@@ -305,18 +305,12 @@ int nr_dci_hist_confirm(nr_dci_hist_t *h, uint16_t rnti, uint32_t abs_slot, uint
   return newly;
 }
 
-static int s_enabled = -1; /* -1 = not read yet */
+static int s_enabled = 1; /* tests switch the BC9 path off with nr_dci_hist_enabled_set() */
 bool nr_dci_hist_enabled(void)
 {
-  int on = __atomic_load_n(&s_enabled, __ATOMIC_ACQUIRE);
-  if (on < 0) {
-    const char *e = getenv("ISAC_TD_DCI_ADJ");
-    on = (e != NULL && atoi(e) == 0) ? 0 : 1;
-    __atomic_store_n(&s_enabled, on, __ATOMIC_RELEASE);
-  }
-  return on != 0;
+  return __atomic_load_n(&s_enabled, __ATOMIC_ACQUIRE) != 0;
 }
-void nr_dci_hist_enabled_set(int on) { __atomic_store_n(&s_enabled, on < 0 ? -1 : (on ? 1 : 0), __ATOMIC_RELEASE); }
+void nr_dci_hist_enabled_set(int on) { __atomic_store_n(&s_enabled, on < 0 ? 1 : (on ? 1 : 0), __ATOMIC_RELEASE); }
 
 void nr_dci_hist_on_accept(nr_dci_hist_t *h, const nr_dci_hist_entry_t *e)
 {
@@ -383,9 +377,8 @@ nr_dci_hist_t *nr_dci_hist_global(void)
 void nr_dci_hist_global_init(uint32_t period)
 {
   nr_dci_hist_t *h = nr_dci_hist_global();
-  const char *cc = getenv("ISAC_TD_CERT_CONFIRMED");
   pthread_mutex_lock(&h->lock);
   __atomic_store_n(&h->period, period, __ATOMIC_RELEASE);
-  h->cert_confirmed = cc != NULL && atoi(cc) != 0;
+  h->cert_confirmed = false;
   pthread_mutex_unlock(&h->lock);
 }

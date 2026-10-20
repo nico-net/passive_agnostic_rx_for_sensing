@@ -22,28 +22,7 @@ static void (*f_counters)(ldpc_cb0_counters_t *);
 
 uint8_t nr_td_cb0_gpu_iters(uint8_t max_iter)
 {
-  static int over = -1;
-  if (over < 0) {
-    const char *e = getenv("ISAC_TD_CB0_GPU_ITERS");
-    over = (e && atoi(e) > 0) ? atoi(e) : 0;
-    if (over > LDPC_CB0_MAX_ITERS)
-      over = LDPC_CB0_MAX_ITERS;
-    if (over)
-      fprintf(stderr, "nr_td_cb0: ISAC_TD_CB0_GPU_ITERS=%d overrides 2 x max_iter (dominance proof required)\n", over);
-  }
-  /* dominance: a cap below 2 x max_iter is only proven against the CPU TB decoder (paired harness), so it is honoured
-   * only while the wiring may force the CPU TB decoder (ISAC_TD_TB_CPU_WHILE_ACQ, default 1); with a cap set the wiring
-   * forces it for every grant with a CB0 batch, whatever the backend (nr_td_cb0_wire_pre) */
-  static int tb_cpu = -1;
-  if (tb_cpu < 0) {
-    const char *e = getenv("ISAC_TD_TB_CPU_WHILE_ACQ");
-    tb_cpu = !(e && *e && atof(e) == 0.0);
-    if (over && !tb_cpu && over < 2 * max_iter)
-      fprintf(stderr, "nr_td_cb0: ISAC_TD_CB0_GPU_ITERS=%d ignored: TB decodes are not forced onto the CPU decoder\n", over);
-  }
-  if (over && (tb_cpu || over >= 2 * max_iter))
-    return (uint8_t)over;
-  const int it = 2 * max_iter;
+  const int it = 2 * max_iter; /* dominance: 2 x max_iter, G1's TB rule */
   return (uint8_t)(it > LDPC_CB0_MAX_ITERS ? LDPC_CB0_MAX_ITERS : it);
 }
 

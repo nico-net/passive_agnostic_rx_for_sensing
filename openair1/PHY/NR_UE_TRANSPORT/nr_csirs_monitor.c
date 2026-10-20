@@ -31,6 +31,7 @@
 
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
+#include "executables/softmodem-common.h"
 
 /// One configured monitor resource: its CSI-RS PDU plus a (period, offset) occurrence rule.
 typedef struct {
@@ -42,7 +43,7 @@ typedef struct {
 } nr_csirs_monitor_res_t;
 
 /* Reserve two phases for each discovery confirmation, in addition to the
- * unchanged manually configured bank. Used only with ISAC_CSIRS_DISC=1. */
+ * unchanged manually configured bank. Used only in passive-rx mode. */
 enum { DISC_MONITOR_CAPACITY = NR_CSIRS_MONITOR_MAX + 64 };
 static nr_csirs_monitor_res_t g_monitors[DISC_MONITOR_CAPACITY];
 static int                    g_n_monitors = 0;
@@ -225,7 +226,7 @@ int nr_csirs_monitor_due_ex(int frame,
 }
 
 /* nr_csirs_monitor_add_dynamic: adds a discovered CSI-RS resource (period, offset, slot delta) to the monitor list, or updates its slot delta when it already exists as a dynamic entry.
- *   A manually configured entry is never converted into a dynamic one. The capacity is larger when ISAC_CSIRS_DISC=1. Returns the entry index, or -1 when full or invalid.
+ *   A manually configured entry is never converted into a dynamic one. The capacity is larger in passive-rx mode. Returns the entry index, or -1 when full or invalid.
  *   Logs CSIRS_DISC MONITOR_ADD. Caller: nr_csirs_blind_rt_slot() (confirmed discovery resources).
  */
 int nr_csirs_monitor_add_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *pdu,
@@ -253,8 +254,7 @@ int nr_csirs_monitor_add_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *pdu,
       }
     }
   }
-  const char *discovery=getenv("ISAC_CSIRS_DISC");
-  const int capacity=discovery && !strcmp(discovery,"1")?DISC_MONITOR_CAPACITY:NR_CSIRS_MONITOR_MAX;
+  const int capacity=IS_PASSIVE_RX_MODE(get_softmodem_params())?DISC_MONITOR_CAPACITY:NR_CSIRS_MONITOR_MAX;
   if (g_n_monitors >= capacity) {
     pthread_mutex_unlock(&g_monitor_lock);
     return -1;

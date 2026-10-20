@@ -313,7 +313,6 @@ TEST(DciLengthBank, InterleavedUesKeepDifferentLengthsAndBudgets) {
 }
 
 TEST(DciLengthBank, LockedToSuspectAfterNMisses) {
-  unsetenv("ISAC_RECONF_N_SUSPECT");
   EXPECT_EQ(nr_pdcch_dci_length_n_suspect_from_env(),200u);
   nr_pdcch_dci_length_context_t c{};
   c.rnti=0x1234;
@@ -326,9 +325,6 @@ TEST(DciLengthBank, LockedToSuspectAfterNMisses) {
   EXPECT_EQ(c.len_state,NR_LEN_SUSPECT);
   EXPECT_EQ(c.found[0],47);
   EXPECT_EQ(c.state.preferred_len,47);
-  setenv("ISAC_RECONF_N_SUSPECT","3",1);
-  EXPECT_EQ(nr_pdcch_dci_length_n_suspect_from_env(),3u);
-  unsetenv("ISAC_RECONF_N_SUSPECT");
 }
 
 TEST(DciLengthBank, InactiveRntiNeverSuspect) {
@@ -569,6 +565,60 @@ struct RecurrentFixture {
 };
 } // namespace
 
+TEST(DciLengthSweepLearned, RestrictedRoundsTestOnlyLearnedLengthsAndOneInNIsFull)
+{
+  for (int stride : {1, 8}) {
+    memset(RotProbe::visits, 0, sizeof(RotProbe::visits));
+    nr_pdcch_dci_length_sweep_state_t st{};
+    st.stride = stride;
+    st.learned_n = 2;
+    st.learned_len[0] = 47;
+    st.learned_len[1] = 52;
+    st.learned_every = 8;
+    for (int call = 0; call < 400; call++)
+      nr_pdcch_dci_length_sweep_feed(&st, RotProbe::decode, nullptr, /*n_trials=*/1, 30, 63, 0);
+    const int laps = static_cast<int>(st.lap_count);
+    // learned lengths are visited once per lap (restricted or full), the others only inside full laps
+    EXPECT_NEAR(RotProbe::visits[47], laps, 1) << "stride " << stride;
+    EXPECT_NEAR(RotProbe::visits[52], laps, 1) << "stride " << stride;
+    EXPECT_GT(RotProbe::visits[40], 0) << "a non-learned length is still re-verified, stride " << stride;
+    EXPECT_NEAR(RotProbe::visits[40], st.occasions_fed, 1) << "stride " << stride;
+    EXPECT_NEAR(st.occasions_fed, laps / 8.0, 1.0) << "one lap in learned_every is a full one, stride " << stride;
+  }
+}
+
+TEST(DciLengthSweepLearned, NoLearnedLengthsMeansTheOldSweepExactly)
+{
+  nr_pdcch_dci_length_sweep_state_t a{}, b{};
+  a.stride = b.stride = 4;
+  b.learned_every = 8; /* learned_n == 0: inert */
+  memset(RotProbe::visits, 0, sizeof(RotProbe::visits));
+  for (int i = 0; i < 40; i++) nr_pdcch_dci_length_sweep_feed(&a, RotProbe::decode, nullptr, 2, 30, 63, 0);
+  int va[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
+  memcpy(va, RotProbe::visits, sizeof(va));
+  memset(RotProbe::visits, 0, sizeof(RotProbe::visits));
+  for (int i = 0; i < 40; i++) nr_pdcch_dci_length_sweep_feed(&b, RotProbe::decode, nullptr, 2, 30, 63, 0);
+  EXPECT_EQ(0, memcmp(va, RotProbe::visits, sizeof(va)));
+  EXPECT_EQ(a.occasions_fed, b.occasions_fed);
+}
+
+TEST(DciLengthSweepLearned, ANewLengthIsStillFoundWithinOneFullLapPeriod)
+{
+  /* a UE appears with a length nobody learned (40): it locks, delayed by at most `learned_every` calls per lap */
+  nr_pdcch_dci_length_sweep_state_t st{};
+  st.learned_n = 1;
+  st.learned_len[0] = 47;
+  st.learned_every = 16;
+  RecurrentFixture f{0, 40, 99, false};
+  int found = -1, calls = 0;
+  for (; calls < 400 && found < 0; calls++) {
+    f.occasion = calls;
+    found = nr_pdcch_dci_length_sweep_feed(&st, RecurrentFixture::decode, &f, 1, 30, 63, 0);
+  }
+  EXPECT_EQ(found, 40);
+  EXPECT_LE(calls, 5 * 16 + 16); /* 5 distinct payloads = 5 full laps */
+}
+
 TEST(DciLengthSweepRntiRecurrence, FiveDistinctPayloadsLockWithoutBootstrapOrStatisticalFloor)
 {
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -696,7 +746,6 @@ TEST(DciLengthSweep, LocksLength100) {
 TEST(DciLengthSweep, SeenLengthFirstOutwardOrder) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
   EXPECT_EXIT(([]{
-  setenv("ISAC_RECONF", "1", 1);
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_note_seen(47);
   int order[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
@@ -718,7 +767,6 @@ TEST(DciLengthSweep, SeenLengthFirstOutwardOrder) {
 TEST(DciLengthSweep, SeenOrderSurvivesBudgetResumeAndNewHints) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
   EXPECT_EXIT(([]{
-  setenv("ISAC_RECONF", "1", 1);
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_note_seen(47);
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -755,18 +803,6 @@ TEST(DciLengthSweep, SeenOrderSurvivesBudgetResumeAndNewHints) {
   EXPECT_EQ(visits.lengths[3], 48);
   nr_pdcch_dci_length_seen_reset();
   _exit(::testing::Test::HasFailure() ? 1 : 0);
-  }()), ::testing::ExitedWithCode(0), "");
-}
-
-TEST(DciLengthSweep, DefaultOrderIsAscending) {
-  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
-  EXPECT_EXIT(([]{
-    unsetenv("ISAC_RECONF");
-    nr_pdcch_dci_length_note_seen(47);
-    int order[141];
-    EXPECT_EQ(nr_pdcch_dci_length_order(30, 140, order), 111);
-    for (int i = 0; i < 111; ++i) EXPECT_EQ(order[i], 30 + i);
-    _exit(::testing::Test::HasFailure() ? 1 : 0);
   }()), ::testing::ExitedWithCode(0), "");
 }
 
@@ -879,29 +915,6 @@ TEST(DciLengthSweep, LanesNeverBatchFullWideRangeWithoutEvidence) {
   nr_pdcch_dci_length_seen_reset();
 }
 
-TEST(DciLengthSweep, WideProbeCadenceFromEnv) {
-  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
-  EXPECT_EXIT(([]{
-    setenv("ISAC_DCI_WIDE_PROBE_EVERY", "32", 1);
-    unsetenv("ISAC_DCI_LEN_MAX");
-    nr_pdcch_dci_length_seen_reset();
-    nr_pdcch_dci_length_sweep_state_t state{};
-    state.stage_one_exhausted = true;
-    auto scorer = [](int, int, uint16_t *, uint32_t *, void *) -> bool { return false; };
-    const auto before = nr_pdcch_dci_length_wide_probes();
-    for (int i = 0; i < 64; ++i) {
-      int lengths[141];
-      EXPECT_EQ(nr_pdcch_dci_length_batch_lengths(&state, 30, 140, lengths),
-                (i + 1) % 32 == 0 ? 35 : 34);
-      nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0);
-    }
-    EXPECT_EQ(state.trials[64], 1);
-    EXPECT_EQ(state.trials[65], 1);
-    EXPECT_EQ(nr_pdcch_dci_length_wide_probes() - before, 2u);
-    _exit(::testing::Test::HasFailure() ? 1 : 0);
-  }()), ::testing::ExitedWithCode(0), "");
-}
-
 TEST(DciLengthSweep, WideProbesRespectBudgetAndNarrowResume) {
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -928,19 +941,6 @@ TEST(DciLengthSweep, SeenWideLengthWidensImmediately) {
   nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0);
   EXPECT_EQ(state.trials[100], 1);
   nr_pdcch_dci_length_seen_reset();
-}
-
-TEST(DciLengthSweep, ExplicitMaximumEnablesColdWideRound) {
-  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
-  EXPECT_EXIT(([]{
-    setenv("ISAC_DCI_LEN_MAX", "100", 1);
-    nr_pdcch_dci_length_seen_reset();
-    nr_pdcch_dci_length_sweep_state_t state{};
-    auto scorer = [](int, int, uint16_t *, uint32_t *, void *) -> bool { return false; };
-    nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 100, 0);
-    EXPECT_EQ(state.trials[100], 1);
-    _exit(::testing::Test::HasFailure() ? 1 : 0);
-  }()), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(DciLengthBank, IdleThenUlResumeStaysLocked) {

@@ -1,13 +1,13 @@
 /* GPU FEP + DM-RS channel estimation + MMSE + LLR for the passive PDSCH decoder. See the header. */
-#define NR_GPU_FEP_NO_LOADER
 #include "nr_pdsch_gpu_fep.h"
+#include "../TOOLS/nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include "nr_pdsch_gpu_chest.h"
+#include "PHY/TOOLS/nr_gpu_mem.h"
 #include <cuda_runtime.h>
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include "nr_dl_gpu_memory.h"
 #include "nr_dl_gpu_budget.h"
 #include "nr_gpu_green.h"
-#include "nr_pdsch_gpu_prio.cuh"
 #include <cufft.h>
 #include <chrono>
 #include <cmath>
@@ -106,15 +106,15 @@ static int16_t *g_h_llr, *g_d_llr;
 static size_t g_llr_cap;
 static double g_fep_us, g_llr_us;
 static int g_last_chunks;
-static float g_llr_scale = 4.0f;
-static int g_force_ant = -1; /* recorded-input branch isolation; unset in production */
-static bool g_batch_async; /* opt-in: caller follows FEP with LLR on the same stream */
+static const float g_llr_scale = 4.0f;
+static const int g_force_ant = -1; /* no antenna forced */
 /* GPU6 bit-exact FEP (nr_pdsch_gpu_exact_fep.cuh): tables + per-slot int16 rxdataF */
 static uint16_t *g_d_perm;
 static short *g_d_tw1024, *g_d_tw4096;
 static short2 *g_d_ts, *g_d_exact, *g_h_exact;
 static bool g_exact_ok, g_exact_direct, g_exact_pending;
-static double g_exact_us, g_exact_deadline_us = 2000;
+static double g_exact_us;
+static const double g_exact_deadline_us = 2000;
 static std::atomic<uint64_t> g_exact_late, g_exact_busy;
 /* Exact-path contexts: one stream and one small mapped output each. Rotation and symbol list ride in the kernel
  * argument and the kernels read/write the caller's memory, so concurrent consumers never share a mutable buffer
@@ -122,15 +122,37 @@ static std::atomic<uint64_t> g_exact_late, g_exact_busy;
  * keeps a lock. */
 static const int EXACT_CTX = 8;
 static cudaStream_t g_ctx_stream[EXACT_CTX];
-static cudaStream_t g_ctx_hi[EXACT_CTX], g_ctx_lo[EXACT_CTX]; /* GPUSCHED ISAC_PDSCH_GPU_PRIO: the two streams of a context */
-static bool g_ctx_prio;
-__thread int nr_pdsch_gpu_low;
-extern "C" void nr_pdsch_gpu_set_lowprio(int low) { nr_pdsch_gpu_low = low; }
+/* ISAC_E2E_TRACE stage split: this module (dlopen RTLD_LOCAL) has its own copy of the per-thread wait accumulators; the host reads them here */
+extern "C" uint64_t *nr_pdsch_gpu_ss_ptr(void) { return nr_ss_ns; }
+extern "C" void nr_pdsch_gpu_ss_enable(int on) { nr_ss_on = on; }
 static int *g_ctx_delay[EXACT_CTX];
 static short2 *g_ctx_ls[EXACT_CTX];    /* GPU-DEMOD chest: LS rows [64][4096] */
 static int *g_ctx_cout[EXACT_CTX];     /* GPU-DEMOD chest: delay triples + nvar (staging) */
 static nr_gpu_chest_row_t *g_ctx_rows[EXACT_CTX]; /* GPU-DEMOD chest: the job's rows (staging) */
 static std::atomic<unsigned> g_ctx_busy{0};
+/* GPUPASS (launch-only _dev entry points): 4-slot IQ window ring for the DISCRETE model (pinned host + device, allocated before
+ * the RX fence) and the chest LS scratch of the single pass in flight. */
+static const int PASS_RING = NR_GPU_PASS_RING;
+static const int PASS_SLOTS = NR_GPU_PASS_RING + 1; /* [0, RING): graph-pass instances; [RING]: the test-only round-robin _stage helpers (never a live instance's slot) */
+static short2 *g_pass_h[PASS_SLOTS], *g_pass_d[PASS_SLOTS], *g_pass_ls[PASS_SLOTS];
+static const int PASS_LS_ROWS = 1024; /* v2 split: 32 segments (nr_gpu_pass_graph.cu SEG_ROWS); LS rows per slot: a graph pass needs nd x nl x nrx x segments rows (nr_gpu_pass_graph.cu SEG_ROWS): 2 x 4 x 4 x 16 or 3 x 4 x 4 x 8 */
+static uint32_t *g_pass_par[PASS_SLOTS];              /* per slot staging block read by the kernel (nr_exact::ExactIO::par layout) */
+static nr_gpu_chest_row_t *g_pass_rh[PASS_SLOTS], *g_pass_rd[PASS_SLOTS]; /* chest rows: pinned staging, device copy */
+static cudaEvent_t g_pass_fev[PASS_SLOTS], g_pass_cev[PASS_SLOTS];        /* recorded when a pass is done with the slot */
+static std::atomic<unsigned> g_pass_next{0}, g_pass_cnext{0};
+/* the done-events are recorded with cudaEventRecordExternal: inside a stream capture that makes a real event-record node of the graph, so
+ * cudaEventQuery on the event stays legal after the capture (a plain captured record would turn it into a capture-only event) */
+static cudaError_t pass_slot_done(cudaEvent_t ev, cudaStream_t s)
+{
+  cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
+  cudaStreamIsCapturing(s, &st);
+  return st == cudaStreamCaptureStatusActive ? cudaEventRecordWithFlags(ev, s, cudaEventRecordExternal) : cudaEventRecord(ev, s);
+}
+static void pass_slot_wait(cudaEvent_t ev) /* host: the slot's previous pass has finished */
+{
+  uint64_t pt = 0;
+  while (cudaEventQuery(ev) == cudaErrorNotReady) nr_gpu_poll_relax(&pt);
+}
 static std::mutex g_exact_staged_lock;
 /* ctx_acquire: claims a free bit-exact FEP context (bitmask compare-and-swap over EXACT_CTX).
  *   How it works: try_only returns -1 when all are busy; otherwise it spins with yield.
@@ -139,12 +161,12 @@ static std::mutex g_exact_staged_lock;
  */
 static int ctx_acquire(bool try_only)
 {
+  const uint64_t ss0 = nr_ss_now();
   for (;;) {
     unsigned m = g_ctx_busy.load();
     for (int i = 0; i < nr_gpu_ctx_limit(EXACT_CTX); i++)
       if (!(m >> i & 1u) && g_ctx_busy.compare_exchange_strong(m, m | 1u << i)) {
-        if (g_ctx_prio) /* the context is ours and idle: point it at the stream of this body's class */
-          g_ctx_stream[i] = nr_pdsch_gpu_low ? g_ctx_lo[i] : g_ctx_hi[i];
+        nr_ss_add(NRSS_LK, ss0);
         return i;
       }
     if (try_only) return -1;
@@ -163,112 +185,22 @@ static void ctx_release(int i) { g_ctx_busy.fetch_and(~(1u << i)); }
  *   ISAC_* flags read: none.
  *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:908, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:983.
  */
-static int ctx_wait(int c, std::chrono::steady_clock::time_point t0)
+static int ctx_wait(int c, std::chrono::steady_clock::time_point t0, int sb)
 {
   bool late = false;
+  uint64_t pt = 0;
+  const uint64_t ss0 = nr_ss_now();
   for (;;) {
     const cudaError_t q = cudaStreamQuery(g_ctx_stream[c]);
+    if (q != cudaErrorNotReady) nr_ss_add(sb, ss0);
     if (q == cudaSuccess) return 0;
     if (q != cudaErrorNotReady) return (int)q;
+    nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
     if (!late && std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() > g_exact_deadline_us) {
       late = true;
       ++g_exact_late;
     }
   }
-}
-
-/* OTATAIL: ISAC_GPU_HEARTBEAT=1 (default off). A probe thread times two one-block kernels every 10 ms on a
- * real-time-partition stream: k_hb over device memory only, then k_hb over 4 KB of pageable host memory (direct
- * mode, the way the chest kernels read rxdataF). Every 5 s it logs the GPU-time and launch-to-completion maxima and
- * the probes above 2 ms (GPU_HEARTBEAT); a probe above 5 ms is logged at once (GPU_HEARTBEAT STALL). An on-air
- * stall is then device-wide (both probes slow), host-memory-path only (host probe slow) or PDSCH-specific
- * (neither). At start it also writes %smid from the RT stream and from a discovery-partition stream
- * (GPU_GREEN_VERIFY): with ISAC_GPU_RT_ISOLATE=1 the two SM sets must not overlap. */
-__global__ void k_hb(const int *__restrict__ src, int *dst, int n)
-{
-  int s = 0;
-  if (src) for (int i = threadIdx.x; i < n; i += blockDim.x) s += src[i];
-  if (threadIdx.x == 0) dst[0] = s;
-}
-__global__ void k_smid(unsigned *out)
-{
-  unsigned id;
-  asm("mov.u32 %0, %%smid;" : "=r"(id));
-  for (volatile int i = 0; i < 20000; i++) {} /* stay resident so the blocks spread over the partition */
-  if (threadIdx.x == 0) out[blockIdx.x] = id;
-}
-static std::atomic<bool> g_hb_stop{false};
-static std::thread g_hb_thread;
-static void hb_join(void) { g_hb_stop = true; if (g_hb_thread.joinable()) g_hb_thread.join(); }
-static void hb_loop(cudaStream_t s, cudaEvent_t e0, cudaEvent_t e1, int *dst, const int *host_src)
-{
-  float max_gpu[2] = {0, 0}, max_wall[2] = {0, 0};
-  unsigned over2[2] = {0, 0}, n = 0;
-  auto last = std::chrono::steady_clock::now();
-  while (!g_hb_stop) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    struct timespec ts;
-    for (int k = 0; k < 2; k++) {
-      if (k && !host_src) break;
-      const auto t0 = std::chrono::steady_clock::now();
-      cudaEventRecord(e0, s);
-      k_hb<<<1, 128, 0, s>>>(k ? host_src : nullptr, dst, 1024);
-      cudaEventRecord(e1, s);
-      if (cudaEventSynchronize(e1) != cudaSuccess) return;
-      float gpu = 0;
-      cudaEventElapsedTime(&gpu, e0, e1);
-      const float wall = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
-      max_gpu[k] = std::max(max_gpu[k], gpu);
-      max_wall[k] = std::max(max_wall[k], wall);
-      if (wall > 2.f) over2[k]++;
-      if (wall > 5.f) {
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        fprintf(stderr, "SENSING: GPU_HEARTBEAT STALL t=%ld.%03ld kind=%s gpu_ms=%.2f wall_ms=%.2f\n", (long)ts.tv_sec,
-                ts.tv_nsec / 1000000, k ? "host" : "dev", gpu, wall);
-      }
-    }
-    n++;
-    if (std::chrono::steady_clock::now() - last >= std::chrono::seconds(5)) {
-      clock_gettime(CLOCK_MONOTONIC, &ts);
-      fprintf(stderr, "SENSING: GPU_HEARTBEAT t=%ld.%03ld n=%u dev_max_ms=%.2f/%.2f dev_over2=%u host_max_ms=%.2f/%.2f host_over2=%u (gpu/wall)\n",
-              (long)ts.tv_sec, ts.tv_nsec / 1000000, n, max_gpu[0], max_wall[0], over2[0], max_gpu[1], max_wall[1], over2[1]);
-      max_gpu[0] = max_gpu[1] = max_wall[0] = max_wall[1] = 0;
-      over2[0] = over2[1] = n = 0;
-      last = std::chrono::steady_clock::now();
-    }
-  }
-}
-/* hb_start: creates the probe's stream, events and buffers (before the RX allocation fence), runs the SM check and
- * starts the thread. Returns a CUDA error only for the probe's own resources. */
-static int hb_start(int greatest)
-{
-  cudaStream_t s = nullptr, sd = nullptr;
-  cudaEvent_t e0, e1;
-  int *dst = nullptr;
-  unsigned *smid = nullptr;
-  if (!nr_gpu_green_stream(&s, greatest, true, 7)) CK(cudaStreamCreateWithPriority(&s, cudaStreamNonBlocking, greatest));
-  CK(cudaEventCreate(&e0));
-  CK(cudaEventCreateWithFlags(&e1, cudaEventBlockingSync));
-  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&dst, 4096));
-  CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&smid, 2 * 1024 * sizeof(unsigned)));
-  unsigned *dsm = (unsigned *)nr_gpu_device_ptr(smid);
-  const bool disc = nr_gpu_green_stream(&sd, 0, false);
-  k_smid<<<1024, 64, 0, s>>>(dsm);
-  if (disc) k_smid<<<1024, 64, 0, sd>>>(dsm + 1024);
-  CK((cudaError_t)nr_gpu_sync(s));
-  if (disc) CK((cudaError_t)nr_gpu_sync(sd));
-  uint64_t mrt = 0, mds = 0;
-  for (int i = 0; i < 1024; i++) {
-    mrt |= 1ull << (smid[i] & 63);
-    if (disc) mds |= 1ull << (smid[1024 + i] & 63);
-  }
-  fprintf(stderr, "SENSING: GPU_GREEN_VERIFY rt_sms=%d disc_sms=%d overlap=%d rt_mask=%016llx disc_mask=%016llx\n",
-          __builtin_popcountll(mrt), __builtin_popcountll(mds), __builtin_popcountll(mrt & mds), (unsigned long long)mrt,
-          (unsigned long long)mds);
-  const int *host_src = g_exact_direct ? (const int *)calloc(1024, sizeof(int)) : nullptr;
-  g_hb_thread = std::thread(hb_loop, s, e0, e1, dst, host_src);
-  atexit(hb_join);
-  return 0;
 }
 
 /* ---------------------------------------------------------------- FEP ---- */
@@ -731,12 +663,6 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   CK(nr_gpu_allocate(NR_GPU_SHARED_RW, (void **)&g_h_llr, g_llr_cap * sizeof(int16_t)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_llr, g_llr_cap * sizeof(int16_t)));
   cudaFuncAttributes attr;
-  if (const char *e = getenv("NR_GPU_LLR_SCALE"))
-    g_llr_scale = (float)atof(e);
-  if (const char *e = getenv("NR_GPU_FORCE_ANT")) {
-    const int a = atoi(e);
-    if (a >= 0 && a < cfg->nant) g_force_ant = a;
-  }
   if (N == nr_exact::N && cfg->nant <= MAX_ANT) {
     /* Bit-exact FEP working set: allocated with the rest before the RX fence. The timeshift table is
      * computed exactly as init_timeshift_rotation() does (same libm, same formula). */
@@ -769,26 +695,28 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
       CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
       for (int c = 0; c < EXACT_CTX; c++) {
         if (!nr_gpu_green_stream(&g_ctx_stream[c], greatest, true, c)) CK(cudaStreamCreateWithPriority(&g_ctx_stream[c], cudaStreamNonBlocking, greatest));
-        g_ctx_hi[c] = g_ctx_lo[c] = g_ctx_stream[c];
-        if (nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&g_ctx_lo[c], least, greatest)) g_ctx_lo[c] = g_ctx_stream[c];
         CK(nr_gpu_allocate(NR_GPU_STAGING, &g_ctx_delay[c], 3 * nr_exact::DELAY_MAX_ROWS * sizeof(int)));
         CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_ctx_ls[c], NR_GPU_CHEST_MAX_ROWS * 4096 * sizeof(short2)));
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_ctx_cout[c], 4 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)));
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_ctx_rows[c], NR_GPU_CHEST_MAX_ROWS * sizeof(nr_gpu_chest_row_t)));
       }
-      g_ctx_prio = nr_pdsch_gpu_prio_on();
+      const size_t ring = (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2);
+      for (int k = 0; k < PASS_SLOTS; k++) {
+        CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_pass_h[k], ring));
+        CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_pass_d[k], ring));
+        CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_pass_par[k], nr_exact::PAR_WORDS * sizeof(uint32_t)));
+        CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_pass_ls[k], (size_t)PASS_LS_ROWS * 4096 * sizeof(short2)));
+        CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_pass_rh[k], NR_GPU_CHEST_MAX_ROWS * sizeof(nr_gpu_chest_row_t)));
+        CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_pass_rd[k], NR_GPU_CHEST_MAX_ROWS * sizeof(nr_gpu_chest_row_t)));
+        CK(cudaEventCreateWithFlags(&g_pass_fev[k], cudaEventDisableTiming));
+        CK(cudaEventCreateWithFlags(&g_pass_cev[k], cudaEventDisableTiming));
+      }
     }
     /* Direct mode: the kernel reads the receiver's host IQ ring and writes its rxdataF in place. Only on a
      * coherent shared-memory platform (GB10: pageable access through the host page tables). */
-    const nr_gpu_caps_t *caps = nr_gpu_platform_probe();
-    const char *d = getenv("ISAC_PDSCH_GPU_EXACT_DIRECT");
-    g_exact_direct = caps && caps->model == NR_GPU_SHARED && caps->pageable_memory_access && caps->host_page_tables
-                     && !(d && atoi(d) == 0);
-    if (const char *e = getenv("ISAC_PDSCH_GPU_EXACT_DEADLINE_US"))
-      g_exact_deadline_us = std::max(50.0, atof(e));
+    g_exact_direct = nr_gpu_platform_shared_direct();
     g_exact_ok = true;
   }
-  g_batch_async = getenv("ISAC_PDSCH_GPU_BATCH_ASYNC") && !strcmp(getenv("ISAC_PDSCH_GPU_BATCH_ASYNC"), "1");
   CK(cudaFuncGetAttributes(&attr, k_fep_gather));
   CK(cudaFuncGetAttributes(&attr, k_fep_rotate));
   CK(cudaFuncGetAttributes(&attr, k_gold));
@@ -799,11 +727,6 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   CK(cudaMemsetAsync(g_d_fft_in, 0, (size_t)cfg->nant * ns * N * sizeof(float2), g_stream));
   if (cufftExecC2C(g_plan, (cufftComplex *)g_d_fft_in, (cufftComplex *)g_d_rxF, CUFFT_FORWARD) != CUFFT_SUCCESS) return -1;
   CK((cudaError_t)nr_gpu_sync(g_stream));
-  if (getenv("ISAC_GPU_HEARTBEAT") && atoi(getenv("ISAC_GPU_HEARTBEAT")) == 1) {
-    int least = 0, greatest = 0;
-    CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
-    if (hb_start(greatest)) return -1;
-  }
   return 0;
 }
 
@@ -869,7 +792,7 @@ static cudaError_t upload_window(const int16_t *const *rxdata, uint32_t ring_len
 }
 
 /* api_fep_slot: API entry: runs the FEP for one slot on the GPU.
- *   How it works: Admits the RT budget scope. Uploads the window and the optional symbol rotation. k_fep_gather applies the sample gather and the frequency-offset phase. cuFFT forward, then k_fep_rotate. Waits for the stream unless g_batch_async is set. Records g_fep_us.
+ *   How it works: Admits the RT budget scope. Uploads the window and the optional symbol rotation. k_fep_gather applies the sample gather and the frequency-offset phase. cuFFT forward, then k_fep_rotate. Waits for the stream. Records g_fep_us.
  *   ISAC_* flags read: none.
  *   Callers: PDSCH GPU API table (function pointer).
  */
@@ -894,11 +817,7 @@ static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_
     g_init_state=-1;nr_gpu_budget_fault();return -1;
   }
   k_fep_rotate<<<grd, blk, 0, g_stream>>>(g_d_rxF, symbol_rot ? g_d_rot : nullptr, N, ns, early);
-  /* The next pdsch_llr() call uses this stream and waits for the full batch.
-   * The queue owns an outer RT budget scope across both calls. This flag is
-   * reserved for that paired call path; default preserves the blocking API. */
-  if (g_batch_async) CK(cudaPeekAtLastError());
-  else CK(rt.wait(g_stream));
+  CK(rt.wait(g_stream));
   g_fep_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   return 0;
 }
@@ -1114,7 +1033,7 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
         io, g_cfg.nb_prefix_samples, g_cfg.nb_prefix_samples0, g_d_perm, g_d_tw1024, g_d_tw4096, g_d_ts, g_cfg.n_rb_dl,
         g_cfg.first_carrier_offset);
     cudaError_t e = cudaPeekAtLastError();
-    if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0);
+    if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0, NRSS_FEP);
     ctx_release(c);
     if (e != cudaSuccess) {
       g_init_state = -1;
@@ -1124,10 +1043,12 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
     g_exact_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
     return 0;
   }
+  const uint64_t ss_lk = nr_ss_now();
   if (try_only) {
     if (!g_exact_staged_lock.try_lock()) { ++g_exact_busy; return -1; }
   } else
     g_exact_staged_lock.lock();
+  nr_ss_add(NRSS_LK, ss_lk);
   std::lock_guard<std::mutex> hold(g_exact_staged_lock, std::adopt_lock);
   if (g_exact_pending) {
     if (cudaStreamQuery(g_stream) == cudaErrorNotReady) { ++g_exact_busy; return -1; }
@@ -1150,16 +1071,21 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
     const size_t off = ((size_t)a * MAX_SYM + lo) * N;
     CK((cudaError_t)nr_gpu_copy_async(g_h_exact + off, g_d_exact + off, (size_t)(hi - lo + 1) * N * sizeof(short2), g_stream));
   }
+  uint64_t pt = 0;
+  const uint64_t ss_w = nr_ss_now();
   for (;;) {
     const cudaError_t q = cudaStreamQuery(g_stream);
     if (q == cudaSuccess) break;
     if (q != cudaErrorNotReady) CK(q);
+    nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
     if (std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() > g_exact_deadline_us) {
       g_exact_pending = true;
       ++g_exact_late;
+      nr_ss_add(NRSS_FEP, ss_w);
       return -1;
     }
   }
+  nr_ss_add(NRSS_FEP, ss_w);
   for (int a = 0; a < nant; a++)
     for (int l = lo; l <= hi; l++)
       if (sym_mask >> l & 1)
@@ -1167,6 +1093,100 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
                (size_t)N * sizeof(short2));
   g_exact_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   return 0;
+}
+/* GPUPASS host step: pick the next staging slot, wait until its previous pass is done with it, then write the per-slot origin / rotation
+ * and (DISCRETE model only) copy the IQ window into the slot's pinned ring. Host only: no CUDA work is enqueued. See nr_pdsch_gpu_fep.h. */
+static int fep_stage_impl(const nr_gpu_fep_job_t *j, int k)
+{
+  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
+  pass_slot_wait(g_pass_fev[k]);
+  const int early = g_cfg.nb_prefix_samples / g_cfg.ofdm_offset_divisor;
+  const uint32_t origin = (j->ring_offset + j->ring_len - early) % j->ring_len;
+  uint32_t *par = g_pass_par[k];
+  memset(par, 0, nr_exact::PAR_WORDS * sizeof(uint32_t));
+  memcpy(par + 1, j->symbol_rot, (size_t)ns * sizeof(short2));
+  if (nr_gpu_model() == NR_GPU_MODEL_DISCRETE) {
+    const size_t len = (size_t)g_samples_per_slot + N; /* the last symbol + slack, as upload_window */
+    for (int a = 0; a < nant; a++) {
+      short2 *dst = g_pass_h[k] + (size_t)a * len;
+      const short2 *src = (const short2 *)j->rxdata[a];
+      const size_t first = std::min<size_t>(len, j->ring_len - origin);
+      memcpy(dst, src + origin, first * sizeof(short2));
+      if (first < len) memcpy(dst + first, src, (len - first) * sizeof(short2));
+      const unsigned long long p = (unsigned long long)(g_pass_d[k] + (size_t)a * len);
+      memcpy(par + 22 + 2 * a, &p, sizeof(p));
+    }
+    par[0] = 0;
+    par[16] = 0xffffffffu;
+  } else {
+    par[0] = origin;
+    par[16] = j->ring_len;
+    for (int a = 0; a < nant; a++) {
+      const unsigned long long p = (unsigned long long)j->rxdata[a];
+      memcpy(par + 22 + 2 * a, &p, sizeof(p));
+    }
+    if (j->out) { /* DIRECT only: write the caller's rxdataF in place (j->out_stride short2 per antenna) */
+      const unsigned long long p = (unsigned long long)j->out;
+      par[17] = 1;
+      memcpy(par + 18, &p, sizeof(p));
+      par[20] = j->out_stride;
+    }
+  }
+  return 0;
+}
+extern "C" int nr_pdsch_gpu_fep_stage(const nr_gpu_fep_job_t *j, int *slot_out)
+{
+  if (g_init_state != 1 || !g_exact_ok || !j || !j->rxdata || !j->symbol_rot || !slot_out || !j->ring_len) return -1;
+  const int k = PASS_RING; /* the helper's own slot: one test pass in flight, no sharing with live instances */
+  fep_stage_impl(j, k);
+  *slot_out = k;
+  return 0;
+}
+/* the same for a slot chosen by the caller (a graph instance owns its slot: the graph is captured per slot index) */
+extern "C" int nr_pdsch_gpu_fep_stage_at(const nr_gpu_fep_job_t *j, int slot)
+{
+  if (g_init_state != 1 || !g_exact_ok || !j || !j->rxdata || !j->symbol_rot || !j->ring_len || slot < 0 || slot >= PASS_SLOTS
+      || (j->out && nr_gpu_model() == NR_GPU_MODEL_DISCRETE))
+    return -1;
+  return fep_stage_impl(j, slot);
+}
+
+/* GPUPASS: launch-only exact FEP of one slot into rxF (nr_gpu_buf_t, [ant][14][N] c16, OAI rxdataF), after nr_pdsch_gpu_fep_stage returned
+ * `slot`. Enqueues on `stream` only (no wait, no host copy), so it can be captured in a graph and replayed after each _stage. rxF->model must
+ * be nr_gpu_model(). DIRECT: the kernel reads the host IQ ring in place (GB10); DISCRETE: one H2D from the slot's pinned ring into its device
+ * ring slot, the kernel reads that. 0 or -1. */
+extern "C" int nr_pdsch_gpu_fep_dev(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF, int slot, void *stream)
+{
+  if (g_init_state != 1 || !g_exact_ok || !j || !j->rxdata || !rxF || !rxF->dev || slot < 0 || slot >= PASS_SLOTS
+      || rxF->model != nr_gpu_model())
+    return -1;
+  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
+  const uint16_t sym_mask = j->sym_mask & (uint16_t)((1u << ns) - 1u);
+  if (!sym_mask || rxF->bytes < (size_t)nant * MAX_SYM * N * sizeof(short2)) return -1;
+  nr_exact::ExactIO io = {};
+  int nsym = 0;
+  for (int l = 0; l < ns; l++)
+    if (sym_mask >> l & 1) io.sym_list[nsym++] = (uint16_t)l;
+  const cudaStream_t s = (cudaStream_t)stream;
+  io.par = (const uint32_t *)nr_gpu_device_ptr(g_pass_par[slot]);
+  if (rxF->model == NR_GPU_MODEL_DIRECT) {
+    if (!nr_gpu_platform_shared_direct()) return -1;
+    for (int a = 0; a < nant; a++) io.rx[a] = (const short2 *)j->rxdata[a];
+    io.ring_len = j->ring_len;
+  } else {
+    const size_t len = (size_t)g_samples_per_slot + N;
+    for (int a = 0; a < nant; a++) io.rx[a] = g_pass_d[slot] + (size_t)a * len;
+    if (cudaMemcpyAsync(g_pass_d[slot], g_pass_h[slot], (size_t)nant * len * sizeof(short2), cudaMemcpyHostToDevice, s) != cudaSuccess)
+      return -1;
+    io.ring_len = 0xffffffffu;
+  }
+  io.out = (short2 *)rxF->dev;
+  io.ant_stride = (size_t)MAX_SYM * N;
+  nr_exact::k_fep_exact<<<dim3(nsym, nant), nr_exact::THREADS, 0, s>>>(io, g_cfg.nb_prefix_samples, g_cfg.nb_prefix_samples0, g_d_perm,
+                                                                      g_d_tw1024, g_d_tw4096, g_d_ts, g_cfg.n_rb_dl,
+                                                                      g_cfg.first_carrier_offset);
+  if (cudaPeekAtLastError() != cudaSuccess) return -1;
+  return pass_slot_done(g_pass_fev[slot], s) == cudaSuccess ? 0 : -1;
 }
 extern "C" int nr_pdsch_gpu_exact_fep(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, double fo_hz,
                                       const int16_t *symbol_rot, uint16_t sym_mask, int16_t *out, size_t ant_stride)
@@ -1189,7 +1209,7 @@ extern "C" int nr_pdsch_gpu_exact_delay(const int16_t *const *rows, int nrows, i
   nr_exact::k_delay_exact<<<nrows, nr_exact::THREADS, 0, g_ctx_stream[c]>>>(io, g_d_perm, g_d_tw1024, g_d_tw4096,
                                                                            (int *)nr_gpu_device_ptr(g_ctx_delay[c]));
   cudaError_t e = cudaPeekAtLastError();
-  if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0);
+  if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0, NRSS_CHEST);
   if (e == cudaSuccess) memcpy(out, g_ctx_delay[c], 3 * nrows * sizeof(int));
   ctx_release(c);
   if (e != cudaSuccess) {
@@ -1218,7 +1238,7 @@ struct Par { /* the job without its rows (kernel argument size) */
   int type, N, dt_stride, max_delay_comp;
   const int16_t *delay_table;
   int16_t filt[4][16];
-  int trim; /* DECTAIL: ISAC_PDSCH_GPU_CHEST_TRIM=1, k_fir computes only k < 12 nb_rb + 16 and zero-fills the rest */
+  unsigned long long *acc; /* GPUPASS Task 7 (type 3): the noise sum of every row, exact (nvar = acc / 12 nb_rb loses the remainder the UL aggregation needs); null = not written */
 };
 __device__ __forceinline__ short2 mulshift(short2 a, short2 b, int s) /* c16mulShift (int arithmetic, wraps) */
 {
@@ -1238,7 +1258,7 @@ __global__ void k_ls(const Par j, const nr_gpu_chest_row_t *rows, short2 *ls)
     short2 v = make_short2(0, 0);
     if (k < idx) {
       int q, a, b;
-      if (j.type == 1) { q = k >> 2; a = R.k0 + 4 * q; b = a + 2; }
+      if ((R.type ? R.type : j.type) == 1) { q = k >> 2; a = R.k0 + 4 * q; b = a + 2; }
       else { q = k / 6; a = R.k0 + 6 * q; b = a + 1; }
       const short2 l = mulshift(pil[2 * q], rx[a % N], 15), r = mulshift(pil[2 * q + 1], rx[b % N], 15);
       v = make_short2((short)(((int)l.x + r.x) >> 1), (short)(((int)l.y + r.y) >> 1));
@@ -1261,11 +1281,7 @@ __global__ void k_fir(const Par j, const nr_gpu_chest_row_t *rows, const short2 
   const short2 *dt = (const short2 *)j.delay_table + (size_t)di * j.dt_stride;
   const short2 *it = (const short2 *)j.delay_table + (size_t)ii * j.dt_stride;
   unsigned long long acc = 0;
-  /* the last pilot's 16-tap window ends at fir_base(np - 1) + 15 = idx + 7 < idx + 16: every output beyond is exactly zero */
-  const int kend = j.trim ? min(N, idx + 16) : N;
-  for (int k = kend + threadIdx.x; k < N; k += blockDim.x)
-    out[k] = make_short2(0, 0);
-  for (int k = threadIdx.x; k < kend; k += blockDim.x) {
+  for (int k = threadIdx.x; k < N; k += blockDim.x) {
     short yr = 0, yi = 0;
     const int p0 = max(0, (k - 16) / 2 - 1), p1 = min(np - 1, k / 2 + 6);
     for (int p = p0; p <= p1; p++) {
@@ -1294,10 +1310,15 @@ __global__ void k_fir(const Par j, const nr_gpu_chest_row_t *rows, const short2 
       red[threadIdx.x] += red[threadIdx.x + s];
     __syncthreads();
   }
-  if (threadIdx.x == 0)
+  if (threadIdx.x == 0) {
     nvar[blockIdx.x] = idx > 0 ? (unsigned)(red[0] / (unsigned long long)idx) : 0u;
+    if (j.acc) j.acc[blockIdx.x] = red[0];
+  }
 }
 } // namespace nrch
+#define NR_GPU_PASS_UL_CHEST
+#include "nr_gpu_pass_ul.cuh"
+#undef NR_GPU_PASS_UL_CHEST
 
 extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
 {
@@ -1320,11 +1341,7 @@ extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
   par.max_delay_comp = j->max_delay_comp;
   par.delay_table = j->delay_table;
   memcpy(par.filt, j->filt, sizeof(par.filt));
-  {
-    static int trim = -1;
-    if (trim < 0) trim = getenv("ISAC_PDSCH_GPU_CHEST_TRIM") && atoi(getenv("ISAC_PDSCH_GPU_CHEST_TRIM")) == 1;
-    par.trim = trim;
-  }
+  par.acc = nullptr;
   nrch::k_ls<<<j->n_rows, 256, 0, g_ctx_stream[c]>>>(par, rows, g_ctx_ls[c]);
   {
     nr_exact::DelayIO io = {};
@@ -1333,7 +1350,7 @@ extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
   }
   nrch::k_fir<<<j->n_rows, 256, 0, g_ctx_stream[c]>>>(par, rows, g_ctx_ls[c], dout, (unsigned *)(dout + 3 * NR_GPU_CHEST_MAX_ROWS));
   cudaError_t e = cudaPeekAtLastError();
-  if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0);
+  if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0, NRSS_CHEST);
   if (e == cudaSuccess) {
     memcpy(j->delay, g_ctx_cout[c], 3 * j->n_rows * sizeof(int));
     memcpy(j->nvar, g_ctx_cout[c] + 3 * NR_GPU_CHEST_MAX_ROWS, j->n_rows * sizeof(int));
@@ -1346,3 +1363,77 @@ extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
   }
   return 0;
 }
+
+/* GPUPASS host step of the chest: next staging slot, wait for its previous pass, copy the job's first n rows to pinned staging. */
+extern "C" int nr_pdsch_gpu_chest_stage(const nr_gpu_chest_job_t *j, int n, int *slot_out)
+{
+  if (g_init_state != 1 || !g_exact_ok || !j || !slot_out || n < 1 || n > j->n_rows || n > NR_GPU_CHEST_MAX_ROWS) return -1;
+  const int k = PASS_RING;
+  pass_slot_wait(g_pass_cev[k]);
+  memcpy(g_pass_rh[k], j->rows, (size_t)n * sizeof(nr_gpu_chest_row_t));
+  *slot_out = k;
+  return 0;
+}
+/* the same for a slot chosen by the caller (a graph instance owns its slot) */
+extern "C" int nr_pdsch_gpu_chest_stage_at(const nr_gpu_chest_job_t *j, int n, int slot)
+{
+  /* up to NR_GPU_CHEST_MAX_ROWS rows (the staging size); one launch takes at most PASS_LS_ROWS of them (nr_pdsch_gpu_chest_dev_at chunks) */
+  if (g_init_state != 1 || !g_exact_ok || !j || n < 1 || n > j->n_rows || n > NR_GPU_CHEST_MAX_ROWS || slot < 0 || slot >= PASS_SLOTS) return -1;
+  pass_slot_wait(g_pass_cev[slot]);
+  memcpy(g_pass_rh[slot], j->rows, (size_t)n * sizeof(nr_gpu_chest_row_t));
+  return 0;
+}
+
+/* GPUPASS: launch-only bit-exact chest of n rows of j after nr_pdsch_gpu_chest_stage returned `slot` (see nr_pdsch_gpu_chest.h). Enqueues the
+ * rows H2D from the slot's pinned copy and the kernels on `stream`; graph-capturable. Delay triples and nvar go into nvar_dev, estimates to
+ * row.out (all inside est_dev). One pass in flight (shared LS scratch). 0 or -1.
+ * _at (v2 SEG128, the chunked C sub-graph): rows [r0, r0 + n) of a job staged whole (up to NR_GPU_CHEST_MAX_ROWS rows); the LS scratch is reused by the next chunk in stream
+ * order; the delay triples and nvar of row r0 + i land at index r0 + i, as one launch of every row would write them (every row is independent: bit-exact). */
+extern "C" int nr_pdsch_gpu_chest_dev_at(const nr_gpu_chest_job_t *j, int r0, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, int slot, void *stream)
+{
+  if (g_init_state != 1 || !g_exact_ok || !j || !est_dev || !est_dev->dev || !nvar_dev || !nvar_dev->dev || nvar_dev->bytes < NR_GPU_CHEST_DEV_BYTES
+      || r0 < 0 || n < 1 || r0 + n > j->n_rows || r0 + n > NR_GPU_CHEST_MAX_ROWS || n > PASS_LS_ROWS || (r0 && j->type == 3) || j->N != 4096 || slot < 0 || slot >= PASS_SLOTS)
+    return -1;
+  for (int r = r0; r < r0 + n; r++) {
+    const char *o = (const char *)j->rows[r].out;
+    if (j->rows[r].nb_rb < 1 || 12 * j->rows[r].nb_rb > 4096 || o < (const char *)est_dev->dev
+        || o + 4096 * sizeof(short2) > (const char *)est_dev->dev + est_dev->bytes)
+      return -1;
+  }
+  const cudaStream_t s = (cudaStream_t)stream;
+  if (cudaMemcpyAsync(g_pass_rd[slot] + r0, g_pass_rh[slot] + r0, (size_t)n * sizeof(nr_gpu_chest_row_t), cudaMemcpyHostToDevice, s) != cudaSuccess) return -1;
+  const nr_gpu_chest_row_t *rows = g_pass_rd[slot] + r0;
+  int *const dbase = (int *)nvar_dev->dev, *dout = dbase + 3 * r0; /* delay triples of the chunk's rows; nvar below at dbase + 3 * MAX_ROWS + r0 */
+  nrch::Par par;
+  par.type = j->type;
+  par.N = j->N;
+  par.dt_stride = j->dt_stride;
+  par.max_delay_comp = j->max_delay_comp;
+  par.delay_table = j->delay_table;
+  memcpy(par.filt, j->filt, sizeof(par.filt));
+  /* type 3 (GPUPASS Task 7, the PUSCH pass): the UL least-squares step, and the exact noise sum of every row at u64 [512 + row] of the nvar area */
+  par.acc = j->type == 3 ? (unsigned long long *)(dbase + 3 * NR_GPU_CHEST_MAX_ROWS) + 512 : nullptr;
+  if (j->type == 3) nrch::k_ul_ls<<<n, 256, 0, s>>>(par, rows, g_pass_ls[slot]);
+  else nrch::k_ls<<<n, 256, 0, s>>>(par, rows, g_pass_ls[slot]);
+  {
+    nr_exact::DelayIO io = {};
+    io.base = g_pass_ls[slot];
+    nr_exact::k_delay_exact<<<n, nr_exact::THREADS, 0, s>>>(io, g_d_perm, g_d_tw1024, g_d_tw4096, dout);
+  }
+  nrch::k_fir<<<n, 256, 0, s>>>(par, rows, g_pass_ls[slot], dout, (unsigned *)(dbase + 3 * NR_GPU_CHEST_MAX_ROWS) + r0);
+  if (cudaPeekAtLastError() != cudaSuccess) return -1;
+  return pass_slot_done(g_pass_cev[slot], s) == cudaSuccess ? 0 : -1;
+}
+extern "C" int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, int slot, void *stream)
+{
+  return nr_pdsch_gpu_chest_dev_at(j, 0, n, est_dev, nvar_dev, slot, stream);
+}
+
+/* GPUPASS: LS rows per pass the chest can take (the graph classes are limited to it) */
+extern "C" int nr_pdsch_gpu_pass_ls_rows(void) { return PASS_LS_ROWS; }
+
+/* ULFEP: GPU front end of the passive PUSCH decoder (own file, own streams; see the header comment) */
+#include "nr_pusch_gpu_fep.cuh"
+
+/* GPUPASS: device kernels for the host steps between the stages (chest post, rate dematching, CRC) */
+#include "nr_gpu_pass_post.cuh"

@@ -31,7 +31,6 @@ static nr_pusch_solver_reading_t reading(unsigned rb, uint64_t layouts, unsigned
 
 TEST(PuschSolver, HiddenReadingNeedsTwoDistinctDcis)
 {
-  setenv("ISAC_UL_PUSCH_SOLVER","1",1);
   nr_pusch_solver_reset();
   const nr_ue_ul_ticket_t ticket={1,2,3,0x8f5a};
   const uint16_t ids[]={415};

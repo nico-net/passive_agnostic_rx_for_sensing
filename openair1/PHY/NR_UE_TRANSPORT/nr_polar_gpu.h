@@ -7,7 +7,7 @@
  * stalls the DCI-layout sweep.
  *
  * Same shape as nr_pdsch_gpu_fep.h and for the same reason: the CUDA side is built as a MODULE
- * (libpolar_gpu.so) and dlopen'd at run time when NR_GPU_POLAR=1, so a build without CUDA -- or a
+ * (libpolar_gpu.so) and not loaded by the receiver, so a build without CUDA -- or a
  * run without the knob -- is the CPU path, byte for byte. This header is the whole contract between
  * the receiver and the CUDA decoder; nothing in NR_UE_TRANSPORT includes nr_polar_sc_cuda.h.
  */
@@ -40,31 +40,9 @@ typedef struct {
 } nr_gpu_polar_api_t;
 
 #ifndef NR_GPU_POLAR_NO_LOADER
-#include <dlfcn.h>
-#include <stdlib.h>
-/** dlopen libpolar_gpu.so next to the executable when NR_GPU_POLAR=1; NULL = CPU path. */
-static inline const nr_gpu_polar_api_t *nr_gpu_polar_load_impl(int prepare)
-{
-  static const nr_gpu_polar_api_t *api = NULL;
-  static int tried = 0;
-  if (tried)
-    return api;
-  if (!prepare) return NULL;
-  tried = 1;
-  const char *e = getenv("NR_GPU_POLAR");
-  if (e == NULL || atoi(e) == 0)
-    return NULL;
-  void *h = dlopen("libpolar_gpu.so", RTLD_NOW | RTLD_LOCAL);
-  if (h == NULL)
-    h = dlopen("./libpolar_gpu.so", RTLD_NOW | RTLD_LOCAL);
-  if (h == NULL)
-    return NULL;
-  const nr_gpu_polar_api_t *(*get)(void) = (const nr_gpu_polar_api_t *(*)(void))dlsym(h, "nr_gpu_polar_api_v2");
-  api = get ? get() : NULL;
-  return api;
-}
-static inline const nr_gpu_polar_api_t *nr_gpu_polar_load(void) { return nr_gpu_polar_load_impl(0); }
-static inline const nr_gpu_polar_api_t *nr_gpu_polar_prepare(void) { return nr_gpu_polar_load_impl(1); }
+/** The GPU polar module is not loaded by the receiver (off in the one configuration): NULL = CPU path. */
+static inline const nr_gpu_polar_api_t *nr_gpu_polar_load(void) { return NULL; }
+static inline const nr_gpu_polar_api_t *nr_gpu_polar_prepare(void) { return NULL; }
 #endif
 
 #ifdef __cplusplus

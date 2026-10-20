@@ -1,11 +1,14 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_core_plan.h"
+#include "nr_bg_lane.h"
 #include <gtest/gtest.h>
 #include <sched.h>
 #include <cstring>
 #include <set>
 #include <climits>
 #include <unistd.h>
+#include <sys/resource.h>
+#include <initializer_list>
 
 static nr_core_machine_t host(int count, int dpdk_first = -1, bool big_little = false)
 {
@@ -239,6 +242,27 @@ TEST(CorePlan,ApplyBeforeThreadEntry)
   },::testing::ExitedWithCode(0),"CORE_PLAN");
 }
 
+static void test_mark_critical(std::initializer_list<int> cs){nr_core_plan_mark_critical_for_test(-1);for(int c:cs) nr_core_plan_mark_critical_for_test(c);}
+TEST(BgLane,DropsCriticalCores){
+  setenv("ISAC_BG_CORES","2,5,7,10,11",1);   // 5 = slot producer, 7 = PDSCH/scan
+  test_mark_critical({5,6,7,8,9});
+  int c[8];int n=nr_bg_lane_cores(c,8);
+  EXPECT_EQ(3,n);EXPECT_EQ(2,c[0]);EXPECT_EQ(10,c[1]);EXPECT_EQ(11,c[2]);
+}
+TEST(BgLane,EmptyListFallsBackUnpinned){
+  setenv("ISAC_BG_CORES","5,6",1);test_mark_critical({5,6});
+  int c[8];EXPECT_EQ(0,nr_bg_lane_cores(c,8));
+  setenv("ISAC_BG_CORES","x",1);EXPECT_EQ(0,nr_bg_lane_cores(c,8));
+  nr_core_plan_mark_critical_for_test(-1);
+}
+TEST(BgLane,PlanOffUsesEnvCores){
+  nr_core_plan_mark_critical_for_test(-1);   // plan inactive in this process: env vars define the critical lane
+  setenv("ISAC_GPU_WORKER_CORE","10",1);setenv("ISAC_PDSCH_CORES","7,8,9",1);setenv("ISAC_UE_RT_CORE","5",1);
+  setenv("ISAC_BG_CORES","2,5,7,10,11,12,999",1);
+  int c[8];int n=nr_bg_lane_cores(c,8);
+  EXPECT_EQ(3,n);EXPECT_EQ(2,c[0]);EXPECT_EQ(11,c[1]);EXPECT_EQ(12,c[2]);   // 5,7,10 critical; 999 beyond online CPUs
+  unsetenv("ISAC_GPU_WORKER_CORE");unsetenv("ISAC_PDSCH_CORES");unsetenv("ISAC_UE_RT_CORE");
+}
 TEST(EnvList,Nth){
   unsetenv("DTQ_L");
   EXPECT_EQ(nr_env_list_nth("DTQ_L",0,-1),-1);
@@ -251,3 +275,32 @@ TEST(EnvList,Nth){
 }
 
 int main(int argc,char **argv){::testing::InitGoogleTest(&argc,argv);return RUN_ALL_TESTS();}
+static void *float_probe(void *out)
+{
+  sched_getaffinity(0, sizeof(cpu_set_t), (cpu_set_t *)out);
+  return nullptr;
+}
+TEST(FloatCores,UnpinnedThreadsGoToTheLaneAndPinsAreKept){
+  EXPECT_EXIT({
+    if (sysconf(_SC_NPROCESSORS_ONLN) < 2) _exit(0);
+    cpu_set_t one; CPU_ZERO(&one); CPU_SET(1, &one);
+    pthread_t pinned; static volatile int stop = 0;
+    if (pthread_create(&pinned, nullptr, [](void *) -> void * { while (!stop) usleep(1000); return nullptr; }, nullptr)) _exit(10);
+    if (pthread_setaffinity_np(pinned, sizeof(one), &one)) _exit(11);
+    setenv("ISAC_FLOAT_CORES", "0", 1);
+    if (nr_core_float_apply()) _exit(12);
+    cpu_set_t s;
+    if (sched_getaffinity(0, sizeof(s), &s) || CPU_COUNT(&s) != 1 || !CPU_ISSET(0, &s)) _exit(13);   // main moved
+    if (pthread_getaffinity_np(pinned, sizeof(s), &s) || !CPU_EQUAL(&s, &one)) _exit(14);           // pin kept
+    pthread_t t; cpu_set_t got; CPU_ZERO(&got);
+    sched_setaffinity(0, sizeof(one), &one);                     // a pinned creator: core -1 still lands in the lane
+    if (nr_core_plan_create(&t, nullptr, float_probe, &got, -1) || pthread_join(t, nullptr)) _exit(15);
+    if (CPU_COUNT(&got) != 1 || !CPU_ISSET(0, &got)) _exit(16);
+    if (nr_core_plan_create(&t, nullptr, float_probe, &got, 1) || pthread_join(t, nullptr)) _exit(17);
+    if (!CPU_ISSET(1, &got)) _exit(18);                          // core >= 0 without a plan: plain create (inherits)
+    setenv("ISAC_FLOAT_CORES", "x", 1);
+    if (nr_core_float_apply()) _exit(19);                        // malformed list: ignored, not fatal
+    stop = 1; pthread_join(pinned, nullptr);
+    _exit(0);
+  },::testing::ExitedWithCode(0),"");
+}

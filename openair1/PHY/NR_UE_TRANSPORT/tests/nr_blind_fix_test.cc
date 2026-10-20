@@ -133,11 +133,9 @@ static int fit_mcs_bank(bool structured, int nrnti, int per, unsigned seed)
 
 TEST(BlindFix, McsOffsetFitIsStatistical)
 {
-  setenv("ISAC_UL_LOCK_MCS_STAT", "1", 1);
   EXPECT_EQ(fit_mcs_bank(true, 4, 100, 1), 20);   /* 400 DCIs */
   EXPECT_EQ(fit_mcs_bank(true, 3, 30, 2), 20);    /* 90 DCIs, 87 HARQ pairs: locks on significance, not a fixed score */
   EXPECT_EQ(fit_mcs_bank(false, 4, 100, 3), -1);  /* random bits: no offset */
-  unsetenv("ISAC_UL_LOCK_MCS_STAT");
 }
 
 extern "C" {

@@ -63,9 +63,7 @@ uint32_t nr_cfg_si_period_slots(unsigned coefficient, unsigned paging_cycle_fram
 
 bool nr_cfg_sib1_window_expired(uint64_t abs_slot, uint64_t start, unsigned occasions, unsigned slots_per_second)
 {
-  const char *setting = getenv("ISAC_RECONF_SIB1_MAX_OCCASIONS");
-  const unsigned max = setting && atoi(setting) > 0 ? (unsigned)atoi(setting) : 8;
-  return occasions >= max || (abs_slot >= start && abs_slot - start >= slots_per_second);
+  return occasions >= 8 || (abs_slot >= start && abs_slot - start >= slots_per_second);
 }
 
 bool nr_cfg_sib1_redecode_due(uint64_t abs_slot, uint64_t last_request_slot, unsigned slots_per_second)

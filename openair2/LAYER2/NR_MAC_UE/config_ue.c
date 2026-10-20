@@ -1771,8 +1771,7 @@ static void configure_common_BWP_dl(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_Do
         asn1cFreeStruc(asn_DEF_NR_PDSCH_TimeDomainResourceAllocationList, bwp->tdaList_Common);
     }
 
-    /* Publish the cell's own PDSCH TDRA list to the blind monitor. The probe below decodes the
-     * same SLIV values but is gated on ISAC_OTA_CFG and only LOGS them, so tda_common_count stayed
+    /* Publish the cell's own PDSCH TDRA list to the blind monitor. Without it tda_common_count stays
      * 0 and every RA-RNTI / TC-RNTI grant silently fell back to the spec DEFAULT table.
      * MEASURED 2026-09-21: SIB1 decodes at S=1,L=13 (it must use the default table -- the list
      * travels inside SIB1) while RARs resolved to the default S=2,L=12 and failed CRC 19/19 with
@@ -1803,51 +1802,6 @@ static void configure_common_BWP_dl(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_Do
       nr_td_sib1_store_set(census, nt);
     } else if (bwp_id == 0) {
       nr_td_sib1_store_set(NULL, 0); /* BC12a: no common list now -> census reports sib1_row=none */
-    }
-
-    /* ---- OTA CONFIG DERIVATION PROBE (ISAC_OTA_CFG=1) -------------------------------------
-     * Everything the blind PDCCH monitor is currently TOLD via pdcch_blind_monitor_* is, for the
-     * COMMON configuration, already available here -- decoded from SIB1 over the air, with no
-     * attach and no transmission. Printed in the same units the config file uses so the two can be
-     * reconciled directly; this is the first step toward a self-configuring receiver.
-     *
-     * Also derives the two DCI-1_1 field widths that depend on this config:
-     *   frequency-domain RA : ceil(log2(N*(N+1)/2))  with N = BWPSize
-     *   time-domain RA      : ceil(log2(#TDRA entries))
-     * Those are exactly the widths that were WRONG when the DCI payload was first decoded
-     * (CLAUDE.md sec 12), so deriving them beats guessing. NOT obtainable from SIB1: the DEDICATED
-     * CORESET/search space, DM-RS additional position, MCS table, CSI-RS resources -> RRCSetup. */
-    if (bwp_id == 0 && getenv("ISAC_OTA_CFG")) {
-      const int N = bwp->BWPSize;
-      int fd_bits = 0;
-      const long long riv_max = (long long)N * (N + 1) / 2;
-      while ((1LL << fd_bits) < riv_max)
-        fd_bits++;
-      const int n_tda = bwp->tdaList_Common ? bwp->tdaList_Common->list.count : 0;
-      int tda_bits = 0;
-      while ((1 << tda_bits) < n_tda)
-        tda_bits++;
-      LOG_I(NR_MAC,
-            "SENSING: OTACFG from SIB1 -- BWPStart=%d BWPSize=%d tdra_entries=%d => "
-            "dci freq_domain_bits=%d time_domain_bits=%d\n",
-            bwp->BWPStart, bwp->BWPSize, n_tda, fd_bits, tda_bits);
-      for (int t = 0; t < n_tda; t++) {
-        const NR_PDSCH_TimeDomainResourceAllocation_t *e = bwp->tdaList_Common->list.array[t];
-        const int sliv = (int)e->startSymbolAndLength;
-        /* TS 38.214 5.1.2.1. SLIV is AMBIGUOUS on its own: SLIV=40 encodes both (S=12,L=3) and
-         * (S=1,L=13). The spec disambiguates with S + L <= 14, so the constraint -- not the
-         * (L-1)<=7 branch alone -- is what selects the right pair. Getting this wrong silently
-         * yields a valid-looking but wrong PDSCH symbol allocation. */
-        int S, L;
-        L = (sliv / 14) + 1;
-        S = sliv % 14;
-        if (S + L > 14) {
-          L = 14 - (sliv / 14) + 1;
-          S = 14 - 1 - (sliv % 14);
-        }
-        LOG_I(NR_MAC, "SENSING: OTACFG   tda[%d] k0=%ld mappingType=%ld SLIV=%d -> S=%d L=%d\n",
-              t, e->k0 ? *e->k0 : 0, (long)e->mappingType, sliv, S, L);
-      }
     }
 
     NR_BWP_PDCCH_t *pdcch = &mac->config_BWP_PDCCH[bwp_id];
@@ -2391,15 +2345,14 @@ static void publish_sib1_pdcch_prior(const NR_UE_MAC_INST_t *mac, const NR_Servi
   nr_pdcch_sib1_prior_set(&pr);
 }
 
-/* Probe mode stops at broadcast facts: applying SIB1 to a trial RF window
- * would incorrectly promote the scan center to the actual carrier center.
- * The supervisor derives Point A and restarts with the broadcast geometry.
- * In capture mode the same event revalidates the handoff before declaring LIVE. */
+extern int nr_auto_acquire_on __attribute__((weak)); // unit tests link config_ue.c without the PHY lib
+/* Automatic acquisition: log the broadcast geometry (ISAC_ACQ_SIB1) for the supervisor; always continues applying SIB1. */
 static bool passive_acquisition_sib1(NR_UE_MAC_INST_t *mac, NR_ServingCellConfigCommonSIB_t *scc)
 {
-  const char *automatic = getenv("ISAC_AUTO_ACQUIRE");
-  if (!IS_PASSIVE_RX_MODE(get_softmodem_params()) || !automatic || strcmp(automatic, "1"))
+  if (!&nr_auto_acquire_on || !nr_auto_acquire_on)
     return false;
+  /* ISAC_ACQ_PROBE=1 (tests/passive_rx/auto_acquire.py probe phase): stop at broadcast facts. Applying SIB1 to a trial
+   * RF window would promote the scan center to the carrier center; the supervisor restarts with the broadcast geometry. */
   const char *probe_env = getenv("ISAC_ACQ_PROBE");
   const bool probe = probe_env && !strcmp(probe_env, "1");
   const NR_FrequencyInfoDL_SIB_t *dl = &scc->downlinkConfigCommon.frequencyInfoDL;

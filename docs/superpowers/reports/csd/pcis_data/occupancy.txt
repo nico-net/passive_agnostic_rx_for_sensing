@@ -1,0 +1,5 @@
+occupancy 675 {"windows": 8100, "wide": 0.0007, "partial": 0.0836, "idle": 0.9157, "wide_per_s": 22.2}
+occupancy 508 {"windows": 8100, "wide": 0.6635, "partial": 0.1226, "idle": 0.214, "wide_per_s": 19903.7}
+occupancy 403 {"windows": 8100, "wide": 0.7204, "partial": 0.0011, "idle": 0.2785, "wide_per_s": 21611.1}
+occupancy 415 {"windows": 8100, "wide": 0.7467, "partial": 0.0033, "idle": 0.25, "wide_per_s": 22400.0}
+occupancy 923 {"windows": 8100, "wide": 0.7246, "partial": 0.0321, "idle": 0.2433, "wide_per_s": 21737.0}

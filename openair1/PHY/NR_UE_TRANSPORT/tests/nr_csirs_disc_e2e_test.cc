@@ -69,38 +69,10 @@ bool exact(const fapi_nr_dl_config_csirs_pdu_rel15_t &p,
 }
 } // namespace
 
-TEST(CsirsDiscE2E, DisabledPipelineIsByteIdentical)
-{
-  // The enable bit is process-lifetime state. Use a fresh death-test child.
-  ::testing::FLAGS_gtest_death_test_style="threadsafe";
-  EXPECT_EXIT(([] {
-    unsetenv("ISAC_CSIRS_DISC");
-    nr_csirs_disc_ring_t ring={};
-    nr_csirs_disc_slot_meta_t meta={};
-    std::vector<int16_t> samples(4*14*24*8,12345);
-    ring.n_ant=4; ring.n_rb=8; ring.capacity=1; ring.slots_per_frame=20;
-    ring.slot_stride=samples.size(); ring.grid_base=samples.data(); ring.meta=&meta;
-    std::array<unsigned char,sizeof(ring)> before;
-    memcpy(before.data(),&ring,sizeof(ring));
-    const auto iq_before=samples;
-    nr_csirs_disc_metrics_t a={},b={};
-    nr_csirs_disc_get_metrics(&a);
-    nr_csirs_disc_pipeline_init(nullptr);
-    nr_csirs_disc_process(&ring);
-    nr_csirs_disc_get_metrics(&b);
-    EXPECT_EQ(memcmp(before.data(),&ring,sizeof(ring)),0);
-    EXPECT_EQ(memcmp(&a,&b,sizeof(a)),0);
-    EXPECT_EQ(samples,iq_before);
-    EXPECT_EQ(meta.valid,0);
-    _exit(::testing::Test::HasFailure()?1:0);
-  }()), ::testing::ExitedWithCode(0), "");
-}
-
 TEST(CsirsDiscE2E, ANoConfirmationOnDmrsOnlyCell)
 {
-  setenv("ISAC_CSIRS_DISC", "1", 1);
   setenv("ISAC_CSIRS_DISC_BACKEND", "cpu", 1);
-  setenv("ISAC_CSIRS_DISC_SWEEP_HYPS", "32", 1);
+  nr_csirs_disc_test_sweep_limit = 32;
   nr_csirs_disc_synth_init();
   Ring r;
   auto cfg = config(nullptr, 0);
@@ -115,9 +87,8 @@ TEST(CsirsDiscE2E, ANoConfirmationOnDmrsOnlyCell)
 
 TEST(CsirsDiscE2E, MixedRowsDiscoverConfirmAndExportExact)
 {
-  setenv("ISAC_CSIRS_DISC", "1", 1);
   setenv("ISAC_CSIRS_DISC_BACKEND", "cpu", 1);
-  setenv("ISAC_CSIRS_DISC_SWEEP_HYPS", "64", 1);
+  nr_csirs_disc_test_sweep_limit = 64;
   nr_csirs_disc_synth_init();
   nr_csirs_disc_synth_resource_t resources[] = {
       {.row = 1, .l0 = 4, .l1 = 0, .cdm = 0, .density = 3, .fd_bitmap = 1, .rb_start = 0,
@@ -170,7 +141,6 @@ TEST(CsirsDiscE2E, MixedRowsDiscoverConfirmAndExportExact)
 // Explicit opt-in: Monte Carlo calibration is deliberately outside ordinary ctest.
 static void calibrate_gate(bool loaded)
 {
-  setenv("ISAC_CSIRS_DISC", "1", 1);
   nr_csirs_disc_synth_init();
   const int trials=getenv("CSD_T12_TRIALS")?atoi(getenv("CSD_T12_TRIALS")):10000;
   ASSERT_GT(trials,0);
@@ -245,50 +215,6 @@ int nr_csirs_blind_rt_test_discovery_feed(int, uint32_t, double);
 int nr_csirs_blind_rt_test_discovered(int, fapi_nr_dl_config_csirs_pdu_rel15_t *, uint16_t *, uint16_t *);
 extern uint64_t csirs_disc_readmit_skipped;
 }
-TEST(CsirsDiscE2E, ReadmissionMergesPeriodExtentAndLatePhase)
-{
-  setenv("ISAC_CSIRS_DISC", "1", 1);
-  nr_csirs_disc_synth_init();
-  nr_csirs_blind_rt_test_discovery_reset();
-  nr_csirs_disc_hyp_t h = {};
-  h.row=1; h.freq_domain=2; h.symb_l0=5; h.density=3;
-  h.rb_start=144; h.n_rb=32; h.period=160; h.offset=16;
-  nr_csirs_disc_win_t w = {}; w.scramb_id=380;
-  ASSERT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
-  const uint64_t before=csirs_disc_readmit_skipped;
-  for (unsigned slot : {16u,176u,336u}) nr_csirs_blind_rt_test_discovery_feed(0,slot,5);
-  for (int p : {80,160,320,640}) {
-    h.period=p; h.offset=16;
-    for (int repeat=0;repeat<12;++repeat) EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
-  }
-  h.period=160; h.offset=15; h.rb_start=132; h.n_rb=48;
-  EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
-  h.rb_start=128; h.n_rb=52;
-  EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
-  ASSERT_EQ(nr_csirs_blind_rt_test_candidate_count(),1);
-  EXPECT_EQ(csirs_disc_readmit_skipped-before,50u);
-  fapi_nr_dl_config_csirs_pdu_rel15_t p = {}; uint16_t period=0, phases[2]={};
-  EXPECT_EQ(nr_csirs_blind_rt_test_discovered(0,&p,&period,phases),2);
-  EXPECT_EQ(p.start_rb,128); EXPECT_EQ(p.nr_of_rbs,52); EXPECT_EQ(period,80);
-  // A non-nested two-RB boundary shift and a weaker incompatible burst also
-  // reuse this physical index; neither expands an unverified extent.
-  h.rb_start=130;
-  EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
-  h.rb_start=128; h.offset=20;
-  EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
-  EXPECT_EQ(nr_csirs_blind_rt_test_discovered(0,&p,&period,phases),2);
-  EXPECT_EQ(p.start_rb,128); EXPECT_EQ(p.nr_of_rbs,52); EXPECT_EQ(period,80);
-  EXPECT_EQ(csirs_disc_readmit_skipped-before,52u);
-  h.offset=15;
-  // Different ID, disjoint extent, slot correction and non-dividing lattice
-  // must remain independent candidates.
-  ++w.scramb_id; EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),1);
-  --w.scramb_id; h.rb_start=0; EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),2);
-  h.rb_start=128; w.slot_delta=1; EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),3);
-  w.slot_delta=0; h.period=64; EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),4);
-  nr_csirs_blind_rt_test_discovery_reset();
-}
-
 extern "C" {
 #include "nr_csirs_monitor.h"
 }
@@ -335,7 +261,7 @@ TEST(CsirsDiscE2E, AsyncConfirmationFourActors)
 {
   ::testing::FLAGS_gtest_death_test_style="threadsafe";
   EXPECT_EXIT(([] {
-    setenv("ISAC_CSIRS_DISC","1",1);setenv("ISAC_CSIRS_DISC_BACKEND","cpu",1);
+    setenv("ISAC_CSIRS_DISC_BACKEND","cpu",1);
     nr_csirs_disc_synth_init();
     int rc=nr_csirs_blind_rt_test_async_stress();fflush(stdout);_exit(rc?1:0);
   }()),::testing::ExitedWithCode(0),"");
@@ -344,7 +270,6 @@ TEST(CsirsDiscE2E, AsyncConfirmationFourActors)
 
 TEST(CsirsDiscE2E, CumulativeLowMarginRequiresFreshSequenceConfirmation)
 {
-  setenv("ISAC_CSIRS_DISC","1",1);
   nr_csirs_disc_synth_init();
   nr_csirs_blind_rt_test_discovery_reset();
   nr_csirs_disc_synth_resource_t resources[2]={
@@ -400,3 +325,6 @@ TEST(CsirsDiscE2E, CumulativeLowMarginRequiresFreshSequenceConfirmation)
   EXPECT_EQ(out[0].scramb_id,415);EXPECT_EQ(out[0].row,1);EXPECT_EQ(out[0].nr_of_rbs,16);
   nr_csirs_blind_rt_test_discovery_reset();
 }
+
+/* link stub: nr_dl_traffic_probe.c / nr_csirs_monitor.c read the passive-mode flag (zeroed params = not passive) */
+softmodem_params_t *get_softmodem_params(void) { static softmodem_params_t p; return &p; }

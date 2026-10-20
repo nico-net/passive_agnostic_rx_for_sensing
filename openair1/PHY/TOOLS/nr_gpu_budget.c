@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_gpu_budget.h"
+#include "nr_gpu_poll.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -44,21 +45,14 @@ uint64_t nr_gpu_budget_now_us(void) {
   struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);
   return (uint64_t)t.tv_sec*1000000+t.tv_nsec/1000;
 }
-/* setting: reads an unsigned environment setting in [lo, hi]; returns def when unset, malformed or out of range. */
-static unsigned setting(const char *name,unsigned def,unsigned lo,unsigned hi) {
-  const char *s=getenv(name);if(!s || !*s)return def;
-  char *end;long v=strtol(s,&end,10);return *end || v<(long)lo || v>(long)hi?def:(unsigned)v;
-}
-/* init: one-time setup (pthread_once): reads ISAC_GPU_BUDGET (enabled when "1"), ISAC_GPU_DISCOVERY_BUDGET_PCT (default 30) and ISAC_GPU_RT_DEADLINE_US (default 250), and records the start time. */
+/* init: one-time setup (pthread_once): reads ISAC_GPU_BUDGET (enabled when "1", set by the passive receiver's main) and records the start time; discovery share 30 %, RT deadline 250 us. */
 static void init(void) {
   const char *s=getenv("ISAC_GPU_BUDGET");enabled=s && !strcmp(s,"1");
-  pct=setting("ISAC_GPU_DISCOVERY_BUDGET_PCT",30,1,100);
-  deadline=setting("ISAC_GPU_RT_DEADLINE_US",250,1,5000);
   start_us=nr_gpu_budget_now_us();
 }
 /* nr_gpu_budget_enabled: returns 1 when the GPU time budget is enabled (ISAC_GPU_BUDGET=1), else 0; runs init() on first use. Every other entry point checks this and does nothing when disabled. */
 int nr_gpu_budget_enabled(void) {pthread_once(&once,init);return enabled;}
-/* nr_gpu_rt_deadline_us: returns the real-time GPU completion deadline in us (ISAC_GPU_RT_DEADLINE_US). Callers: nr_gpu_budget_rt_wait() and the GPU paths. */
+/* nr_gpu_rt_deadline_us: returns the real-time GPU completion deadline in us (250). Callers: nr_gpu_budget_rt_wait() and the GPU paths. */
 unsigned nr_gpu_rt_deadline_us(void) {nr_gpu_budget_enabled();return deadline;}
 /* nr_gpu_budget_rt_begin: admits one real-time GPU job: refused (counted as a fallback) when the job has already exceeded the deadline; otherwise registers it as an RT user of the device.
  *   While any RT user is active the next discovery slice cannot start. Returns 1 to proceed on the GPU, 0 to use the CPU fallback. Callers: nr_pdsch_passive_queue.c and the CUDA budget header.
@@ -76,6 +70,13 @@ int nr_gpu_budget_rt_begin(void) {
 }
 /* nr_gpu_budget_rt_end: releases one RT user registered by nr_gpu_budget_rt_begin(). No-op when the budget is disabled. */
 void nr_gpu_budget_rt_end(void) {if(nr_gpu_budget_enabled())atomic_fetch_sub(&owner,1);}
+/* nr_gpu_budget_rt_active: number of RT GPU users in flight (0 when the budget is off). Read-only; best-effort GPU users (ISAC_UL_GPU_FEP) defer to the CPU while it is non-zero and they have no SM partition of their own. */
+int nr_gpu_budget_rt_active(void) {return nr_gpu_budget_enabled()?(int)(atomic_load(&owner)&~DISC_OWNER):0;}
+/* Dynamic discovery partition: large (> 96 PRB) real grants in flight. Independent of ISAC_GPU_BUDGET; end() never goes below 0. */
+static _Atomic int large_active;
+void nr_gpu_budget_rt_large_begin(void) {atomic_fetch_add(&large_active,1);}
+void nr_gpu_budget_rt_large_end(void) {int v=atomic_load(&large_active);while(v>0 && !atomic_compare_exchange_weak(&large_active,&v,v-1));}
+int nr_gpu_budget_rt_large_active(void) {return atomic_load(&large_active);}
 /* nr_gpu_budget_rt_result: records the outcome of one RT GPU call: its wait time updates the maximum wait; a fallback is counted when `fallback` is set. No-op when disabled. */
 void nr_gpu_budget_rt_result(uint64_t us,int fallback) {
   if(!nr_gpu_budget_enabled())return;
@@ -88,9 +89,10 @@ void nr_gpu_budget_rt_result(uint64_t us,int fallback) {
  */
 int nr_gpu_budget_rt_wait(int (*query)(void *),void *job,uint64_t start,
                           uint64_t (*clock_us)(void *),void *clock_arg) {
-  int rc;uint64_t elapsed;
+  int rc;uint64_t elapsed,pt=0;
   do {
     rc=query(job);
+    if(rc==600)nr_gpu_poll_relax(&pt);
     uint64_t now=clock_us?clock_us(clock_arg):nr_gpu_budget_now_us();
     elapsed=now-start;
     if(elapsed>=nr_gpu_rt_deadline_us()) {rc=600;break;}

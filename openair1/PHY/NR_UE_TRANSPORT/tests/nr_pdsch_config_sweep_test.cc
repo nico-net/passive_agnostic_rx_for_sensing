@@ -212,6 +212,7 @@ TEST(PdschConfigSweep, InvalidTicketAndUnavailableContextCannotScore) {
 
 int main(int argc, char **argv)
 {
+  setenv("ISAC_RECONF", "0", 1); /* RECONF is baked on; this binary tests the reconf-off baseline (epoch fixtures skip) */
   testing::InitGoogleTest(&argc, argv);
   /* every test starts at the documented baseline (fb0, CB0 elimination off), whatever ran before it: nr_td_test_baseline.h */
   nr_td_test::register_baseline();
@@ -260,7 +261,6 @@ struct PdschRecovery : testing::Test {
     nr_pdsch_config_sweep_set_reporter(recovery_report);
   }
   void TearDown() override {
-    nr_pdsch_config_sweep_k0_legacy_set(-1);
     nr_pdsch_config_sweep_set_reporter(nullptr);
     nr_pdsch_config_sweep_set_recovery_policy(32,1e-6);
     nr_pdsch_config_sweep_reset_all();
@@ -675,30 +675,6 @@ TEST(PdschConfigSweepOracle, LaterShortTdaObservationRestoresCandidatesPrunedByE
   EXPECT_TRUE(long_seen);
 }
 
-TEST(PdschConfigSweepOracle, MaskLastSymbolAndK0CollapseAContextToTheEndAmbiguity) {
-  // A mask alone leaves every (S,L,k0,mcs) that produces it; the allocation END (last symbol with
-  // energy on the grant's PRBs) and the job's k0 are observable in the same FEP. With test_legal's
-  // synthetic masks (unique per S,L,add,len) the mask already pins (S,L,add,len); the end and k0
-  // observation must then remove the k0 dimension and leave only the 3 MCS tables.
-  nr_pdsch_config_sweep_reset_all();
-  nr_pdsch_config_sweep_prior_reset();
-  nr_pdsch_sweep_ticket_t t{};
-  nr_pdsch_cfg_hypothesis_t h{};
-  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 2, 0, test_legal, &t, &h));
-  const uint16_t mask = (uint16_t)test_legal(0, 13, 1, 0, 2, 1); // S=1 L=13 add 2 len 1
-  nr_pdsch_config_sweep_k0_legacy_set(1); // this test documents the OLD pinning (A/B flag)
-  const int n = nr_pdsch_config_sweep_observe(&t, mask, 13, 0);
-  nr_pdsch_config_sweep_k0_legacy_set(-1);
-  EXPECT_EQ(n, 3);
-  nr_pdsch_sweep_ticket_t t2{};
-  for (int i = 0; i < 12; i++) {
-    ASSERT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 2, 0, test_legal, &t2, &h));
-    EXPECT_EQ(h.dmrs_mask, mask);
-    EXPECT_EQ(h.tda_start + h.tda_length - 1, 13);
-    EXPECT_EQ(h.k0, 0);
-  }
-}
-
 /* K39: DM-RS presence marks k0 plausible, never pins it. */
 static int count_snapshot_k0(const nr_pdsch_sweep_ticket_t &t, int k0, int *total = nullptr)
 {
@@ -714,7 +690,6 @@ static nr_pdsch_sweep_ticket_t k39_open(uint16_t *mask_out)
 {
   nr_pdsch_config_sweep_reset_all();
   nr_pdsch_config_sweep_prior_reset();
-  nr_pdsch_config_sweep_k0_legacy_set(0); // default behaviour regardless of the environment; tests restore -1
   nr_pdsch_sweep_ticket_t t{};
   nr_pdsch_cfg_hypothesis_t h{};
   EXPECT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 2, 0, test_legal, &t, &h));
@@ -728,9 +703,8 @@ static nr_pdsch_sweep_ticket_t k39_fresh(uint8_t tda = 0, uint64_t cfg = 0x1234,
   EXPECT_TRUE(nr_pdsch_config_sweep_select(cfg, rnti, tda, 2, 0, test_legal, &t, &h));
   return t;
 }
-/* K39 fixture: the legacy-pinning flag is restored to its environment default after every test. */
+/* K39 fixture. */
 struct PdschConfigSweepK39 : testing::Test {
-  void TearDown() override { nr_pdsch_config_sweep_k0_legacy_set(-1); }
 };
 TEST_F(PdschConfigSweepK39, DmrsObservationDoesNotPruneOtherK0) {
   uint16_t mask;
@@ -750,7 +724,6 @@ TEST_F(PdschConfigSweepK39, DmrsObservationDoesNotPruneOtherK0) {
     k1 |= h.k0 == 1;
   }
   EXPECT_TRUE(k1);
-  nr_pdsch_config_sweep_k0_legacy_set(-1);
 }
 TEST_F(PdschConfigSweepK39, CertifiedK0Prunes) {
   uint16_t mask;
@@ -768,19 +741,7 @@ TEST_F(PdschConfigSweepK39, CertifiedK0Prunes) {
   t = k39_fresh();
   EXPECT_EQ(count_snapshot_k0(t, 1), 3);
   EXPECT_EQ(nr_pdsch_config_sweep_certify_k0(&t, 0), 0);
-  nr_pdsch_config_sweep_k0_legacy_set(-1);
 }
-TEST_F(PdschConfigSweepK39, LegacyFlagRestoresPinning) {
-  uint16_t mask;
-  auto t = k39_open(&mask);
-  nr_pdsch_config_sweep_k0_legacy_set(1);
-  EXPECT_EQ(nr_pdsch_config_sweep_observe(&t, mask, 13, 0), 3);
-  t = k39_fresh();
-  EXPECT_EQ(count_snapshot_k0(t, 1), 0);
-  EXPECT_EQ(count_snapshot_k0(t, 0), 3);
-  nr_pdsch_config_sweep_k0_legacy_set(-1);
-}
-
 static int32_t ab_legal(int, int length, int start, int mapping_b, int add, int maxlen);
 static int k39_count(const nr_pdsch_sweep_ticket_t &t, int k0) { return count_snapshot_k0(t, k0); }
 TEST_F(PdschConfigSweepK39, CertificationDoesNotLeakAcrossTdaRows) {
@@ -799,13 +760,11 @@ TEST_F(PdschConfigSweepK39, CertificationDoesNotLeakAcrossTdaRows) {
   // A different configuration of the same RNTI/row is not bound either.
   const auto tc = k39_fresh(0, 0x9999);
   EXPECT_GT(k39_count(tc, 0), 0);
-  nr_pdsch_config_sweep_k0_legacy_set(-1);
 }
 /* M1: the certification binds on every path that could bring another k0 back. */
 TEST_F(PdschConfigSweepK39, CertificationBindsOverTypeBLayerAndK0LayerAppends) {
   nr_pdsch_config_sweep_reset_all();
   nr_pdsch_config_sweep_prior_reset();
-  nr_pdsch_config_sweep_k0_legacy_set(0);
   nr_pdsch_sweep_ticket_t a{}, b{};
   nr_pdsch_cfg_hypothesis_t h{};
   ASSERT_TRUE(nr_pdsch_config_sweep_select(77, 0x4602, 0, 2, 0, ab_legal, &b, &h));
@@ -820,7 +779,6 @@ TEST_F(PdschConfigSweepK39, CertificationBindsOverTypeBLayerAndK0LayerAppends) {
   ASSERT_TRUE(nr_pdsch_config_sweep_select(77, 0x4601, 0, 2, 0, ab_legal, &a, &h));
   EXPECT_EQ(count_snapshot_k0(a, 1), 0);
   EXPECT_GT(count_snapshot_k0(a, 0), 0);
-  nr_pdsch_config_sweep_k0_legacy_set(-1);
 }
 TEST_F(PdschConfigSweepK39, CertificationSurvivesContextEvictionForTheSameKey) {
   uint16_t mask;
@@ -831,12 +789,10 @@ TEST_F(PdschConfigSweepK39, CertificationSurvivesContextEvictionForTheSameKey) {
   const auto again = k39_fresh(0); // recreated: inherits its key's certification
   EXPECT_EQ(k39_count(again, 0), 0);
   EXPECT_GT(k39_count(again, 1), 0);
-  nr_pdsch_config_sweep_k0_legacy_set(-1);
 }
 TEST_F(PdschConfigSweepK39, CertificationSurvivesPriorProbationRestore) {
   nr_pdsch_config_sweep_reset_all();
   nr_pdsch_config_sweep_prior_reset();
-  nr_pdsch_config_sweep_k0_legacy_set(0);
   const nr_pdsch_cfg_hypothesis_t truth0{1, 13, 0, 1, 1, 0, 1};
   nr_pdsch_cfg_hypothesis_t w{};
   ASSERT_GT(drive_context(9, 0x4601, 0, truth0, 0.54, 400000, &w), 0); // publishes a prior (mcs_table 1)
@@ -931,9 +887,7 @@ struct PdschConfigSweepK42 : testing::Test {
   {
     nr_pdsch_config_sweep_reset_all();
     nr_pdsch_config_sweep_prior_reset();
-    nr_pdsch_config_sweep_k0_legacy_set(0);
   }
-  void TearDown() override { nr_pdsch_config_sweep_k0_legacy_set(-1); }
   nr_pdsch_sweep_ticket_t sel(uint8_t tda = 0, uint16_t rnti = 0x4601)
   {
     nr_pdsch_sweep_ticket_t t{};
@@ -1213,21 +1167,7 @@ TEST_F(PdschConfigSweepK42, PromotionIsTheUnionOfEveryHolder) {
   EXPECT_EQ(c(11), 6);
   EXPECT_EQ(c(13), 6);
 }
-TEST_F(PdschConfigSweepK42, LegacyPinKeepsK0AndTheLastSymbolSetIsMonotone) {
-  nr_pdsch_config_sweep_k0_legacy_set(1);
-  ASSERT_EQ(observe(0x884, 13), 3); // legacy: the job's k0 = 0 is pinned
-  observe(0x884, 11);
-  EXPECT_EQ(count([](const auto &h) { return h.k0 == 1; }), 0);
-  EXPECT_EQ(count([](const auto &h) { return ends(h, 11); }), 3);
-  fail(10);
-  for (int i = 0; i < 4; i++)
-    observe(0x884, (i & 1) ? 11 : 13);
-  EXPECT_EQ(count([](const auto &h) { return h.k0 == 1; }), 0);
-  EXPECT_EQ(count([](const auto &) { return true; }), 6);
-  EXPECT_EQ(trials(), 10u);
-}
 TEST_F(PdschRecovery, CertificationClearedOnReopen) {
-  nr_pdsch_config_sweep_k0_legacy_set(0);
   auto t = recovery_select();
   ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&t, 0x1), 0);
   const auto old = recovery_settle(0);
@@ -1243,11 +1183,9 @@ TEST_F(PdschRecovery, CertificationClearedOnReopen) {
   fresh = recovery_select();
   EXPECT_GT(count_snapshot_k0(fresh, 1), 0);
   EXPECT_GT(count_snapshot_k0(fresh, 0), 0);
-  nr_pdsch_config_sweep_k0_legacy_set(-1);
 }
 
 TEST_F(PdschRecovery, ClearedCertificationDoesNotComeBackAfterEvictionAndRecreation) {
-  nr_pdsch_config_sweep_k0_legacy_set(0);
   auto t = recovery_select();
   ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&t, 0x1), 0);
   ASSERT_TRUE(recovery_settle(0).settled);
@@ -1470,20 +1408,6 @@ TEST(PdschSweepDefaults, EmptyEnvironmentResolvesToFb2AndCb0On)
   nr_td_test::pin_defaults();
   EXPECT_EQ(nr_pdsch_config_sweep_fieldbook_mode(), 2);
   EXPECT_TRUE(nr_pdsch_config_sweep_cb0_elim_env());
-  const struct {
-    const char *v;
-    int mode;
-  } fb[] = {{"0", 0}, {"00", 0}, {"2", 2}, {"1", 2} /* meant off before 2026-10-04: now fb2, logged */, {"yes", 2}, {"", 2}, {"0x", 2}};
-  for (const auto &c : fb) {
-    nr_td_test::ScopedEnv e("ISAC_TD_FIELDBOOK", c.v);
-    nr_pdsch_config_sweep_fieldbook_set_mode(-1);
-    EXPECT_EQ(nr_pdsch_config_sweep_fieldbook_mode(), c.mode) << "ISAC_TD_FIELDBOOK='" << c.v << "'";
-  }
-  {
-    nr_td_test::ScopedEnv e("ISAC_TD_CB0_ELIM", "0");
-    nr_pdsch_config_sweep_cb0_elim_env_set(-1);
-    EXPECT_FALSE(nr_pdsch_config_sweep_cb0_elim_env());
-  }
   nr_td_test::pin_defaults();
   nr_pdsch_config_sweep_reset_all();
   nr_pdsch_config_sweep_prior_reset();
@@ -2998,9 +2922,7 @@ struct PdschBc9 : testing::Test {
   {
     nr_pdsch_config_sweep_reset_all();
     nr_pdsch_config_sweep_prior_reset();
-    nr_pdsch_config_sweep_k0_legacy_set(0);
   }
-  void TearDown() override { nr_pdsch_config_sweep_k0_legacy_set(-1); }
 };
 
 TEST_F(PdschBc9, TddUlSlotExcludesK0)
@@ -3403,11 +3325,10 @@ TEST_F(PdschBc9, CensusReadsLeaveTheKlSequenceUnchanged)
   EXPECT_GT(settled, 0); /* the run reached convergence (and the prior/sibling-row path) */
 }
 
-/* ---- Reversible field book (fb2) wiring: ISAC_TD_FIELDBOOK=0|2 ---- */
+/* ---- Reversible field book (fb2) wiring: fb0|fb2 ---- */
 struct PdschFieldBook : testing::Test {
   void SetUp() override
   {
-    nr_pdsch_config_sweep_k0_legacy_set(0);
     nr_pdsch_config_sweep_fieldbook_set_mode(0);
     nr_pdsch_config_sweep_reset_all();
     nr_pdsch_config_sweep_prior_reset();
@@ -3416,7 +3337,6 @@ struct PdschFieldBook : testing::Test {
   {
     nr_pdsch_config_sweep_fieldbook_set_mode(0);
     nr_pdsch_config_sweep_reset_all();
-    nr_pdsch_config_sweep_k0_legacy_set(-1);
   }
   static nr_pdsch_config_sweep_state_t &snap(const nr_pdsch_sweep_ticket_t &t)
   {
@@ -3702,7 +3622,7 @@ TEST_F(PdschFieldBook, ProbationFailureLeavesNoStaleFieldState)
   EXPECT_TRUE(nr_pdsch_config_sweep_is_active(&s, s.winner)) << "the truth must not be asleep";
 }
 
-// ---- CB0 elimination channel (levers spec 5.4 redesign; ISAC_TD_CB0_ELIM) ----------------------------------------------------
+// ---- CB0 elimination channel (levers spec 5.4 redesign) ----------------------------------------------------
 /* One grant of the CB0 channel model: a shared latent draw u (same IQ for every decode of the grant). The truth's TB passes iff u < p,
  * its CB0 iff u < q (q >= p: pointwise CB0 >= TB, the section 9.3 same-decoder condition). The twin (index `twin`, -1 = none) is
  * computation-identical on grants that do not exercise its field (prob 1 - e): then it passes exactly as the truth, else it fails.
@@ -4090,9 +4010,8 @@ TEST(PdschSweepCb0, Saturation)
 }
 /* ---- context level (ticket API) ---- */
 struct PdschCb0Ctx : testing::Test {
-  void SetUp() override { nr_pdsch_config_sweep_reset_all(); nr_pdsch_config_sweep_prior_reset(); nr_pdsch_config_sweep_cb0_elim_env_set(1);
-                          nr_pdsch_config_sweep_k0_legacy_set(0); }
-  void TearDown() override { nr_pdsch_config_sweep_cb0_elim_env_set(-1); nr_pdsch_config_sweep_k0_legacy_set(-1); nr_pdsch_config_sweep_reset_all(); }
+  void SetUp() override { nr_pdsch_config_sweep_reset_all(); nr_pdsch_config_sweep_prior_reset(); nr_pdsch_config_sweep_cb0_elim_env_set(1); }
+  void TearDown() override { nr_pdsch_config_sweep_cb0_elim_env_set(-1); nr_pdsch_config_sweep_reset_all(); }
   static nr_pdsch_config_sweep_state_t snap(const nr_pdsch_sweep_ticket_t &t)
   {
     static nr_pdsch_config_sweep_state_t st;

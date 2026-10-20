@@ -104,7 +104,8 @@ if(ENABLE_LDPC_CUDA)
   # NR_GPU_FEP=1). Lives in NR_UE_TRANSPORT; built here because this is where CUDA is enabled.
   add_library(pdsch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu
               ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu
-              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu)
+              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu
+              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_pass_graph.cu)
   # GPU-DEMOD: no automatic FMA contraction; the kernels spell out the CPU's (GCC's) fused operations themselves
   set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
   set_target_properties(pdsch_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -122,6 +123,18 @@ if(ENABLE_LDPC_CUDA)
   add_dependencies(test_nr_pdsch_gpu_ldpc pdsch_gpu ldpc)
   add_dependencies(tests test_nr_pdsch_gpu_ldpc)
   add_test(NAME test_nr_pdsch_gpu_ldpc COMMAND ./test_nr_pdsch_gpu_ldpc 2 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  # non-cluster kernels (sm_89 path) forced on this device: same CPU-reference comparison
+  add_test(NAME test_nr_pdsch_gpu_ldpc_nc COMMAND ./test_nr_pdsch_gpu_ldpc 2 nc WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  # ISAC_GPU_LDPC_NC_MIN_CB=4: mixed cluster / non-cluster selection per launch
+  add_test(NAME test_nr_pdsch_gpu_ldpc_mix COMMAND ./test_nr_pdsch_gpu_ldpc 2 mix WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  # cluster-2/4 kernels (ISAC_GPU_LDPC_CL_FORCE) and the host-only selection function
+  add_test(NAME test_nr_pdsch_gpu_ldpc_pick COMMAND ./test_nr_pdsch_gpu_ldpc 2 pick WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_test(NAME test_nr_pdsch_gpu_ldpc_cl2 COMMAND ./test_nr_pdsch_gpu_ldpc 2 cl2 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_test(NAME test_nr_pdsch_gpu_ldpc_cl4 COMMAND ./test_nr_pdsch_gpu_ldpc 2 cl4 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  # ISAC_GPU_LDPC_SM=1: hard-decision state in shared memory (_nc kernel), counted launches
+  add_test(NAME test_nr_pdsch_gpu_ldpc_sm COMMAND ./test_nr_pdsch_gpu_ldpc 2 sm WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  # ULLDPC: the same comparison through the UL pool of libpdsch_gpu.so
+  add_test(NAME test_nr_pusch_gpu_ldpc COMMAND ./test_nr_pdsch_gpu_ldpc 2 ul WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   # GPUSHARE: green-context SM partition helper (nr_gpu_green.h); exit 77 = skipped (no device / no green contexts)
   add_executable(test_nr_gpu_green ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_green_test.cu)
   set_target_properties(test_nr_gpu_green PROPERTIES CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -129,6 +142,31 @@ if(ENABLE_LDPC_CUDA)
   add_dependencies(tests test_nr_gpu_green)
   add_test(NAME test_nr_gpu_green COMMAND ./test_nr_gpu_green WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   set_tests_properties(test_nr_gpu_green PROPERTIES SKIP_RETURN_CODE 77)
+  add_executable(test_nr_gpu_pass ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_pass_test.cc)
+  # the CPU references of the Task 3 kernels: OAI check_crc/crc24x and the RX rate matching, linked as the real functions
+  target_sources(test_nr_gpu_pass PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
+  # Task 7 (PUSCH pass): the host builder and its hypothesis cache, the CPU reference of the chest / equaliser (real nr_channel_* / nr_compute_llr / nr_passive_est_delay) and the DFT library loader
+  target_sources(test_nr_gpu_pass PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_pass_ul.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_pass_ul_ref.c ${OPENAIR1_DIR}/PHY/TOOLS/dfts_load.c ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
+  target_link_libraries(test_nr_gpu_pass PRIVATE GTest::gtest_main nr_gpu_platform CUDA::cudart thread-pool LOG minimal_lib crc_byte UTIL PHY_NR PHY_NR_COMMON shlib_loader ${CMAKE_DL_LIBS} pthread m)
+  add_dependencies(test_nr_gpu_pass dfts)
+  # ./libldpc.so (the OAI LDPC encoder of the pass fixture) resolves these from the executable, as in test_nr_pdsch_gpu_ldpc
+  foreach(sym check_crc crc24a crc24b crc16 crcTableInit completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+    target_link_options(test_nr_gpu_pass PRIVATE "LINKER:--undefined=${sym}")
+  endforeach()
+  set_target_properties(test_nr_gpu_pass PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_dependencies(tests test_nr_gpu_pass)
+  target_include_directories(test_nr_gpu_pass PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT ${OPENAIR1_DIR} ${OPENAIR_DIR} ${CUDAToolkit_INCLUDE_DIRS})
+  add_dependencies(test_nr_gpu_pass pdsch_gpu)
+  add_test(NAME test_nr_gpu_pass COMMAND test_nr_gpu_pass WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_gpu_pass PROPERTIES ENVIRONMENT "CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_RETURN_CODE 77)
+  add_dependencies(test_nr_gpu_pass ldpc)
+  # the graph pass under the DISCRETE memory model (device buffers, explicit copies): its own process, the instances are allocated once per process
+  add_test(NAME test_nr_gpu_pass_discrete COMMAND test_nr_gpu_pass --gtest_filter=GpuPassDl.*:GpuPassUl.*:GpuPassFence.NoAllocAfterFence:GpuPassFence.UlNoAllocAfterFence WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_gpu_pass_discrete PROPERTIES ENVIRONMENT "NR_GPU_PASS_DISCRETE=1;CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_RETURN_CODE 77)
+  # GPUPASS Task 5: no FP64 instruction in the SASS of the float demod kernels (cuobjdump; exit 77 = skipped)
+  add_test(NAME test_nr_gpu_fp32_sass COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/check_no_fp64_sass.sh ${CMAKE_BINARY_DIR}/libpdsch_gpu.so)
+  set_tests_properties(test_nr_gpu_fp32_sass PROPERTIES SKIP_RETURN_CODE 77)
   add_executable(nr_pdsch_gpu_fep_test ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc)
   target_include_directories(nr_pdsch_gpu_fep_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT)
   target_link_libraries(nr_pdsch_gpu_fep_test PRIVATE ${CMAKE_DL_LIBS})
@@ -197,6 +235,7 @@ if(ENABLE_LDPC_CUDA)
   set_target_properties(nr_polar_sc_cuda_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   if(ENABLE_TESTS)
     add_test(NAME nr_polar_sc_cuda_test COMMAND nr_polar_sc_cuda_test quick)
+    add_dependencies(tests nr_polar_sc_cuda_test) # was 'Not Run': the target was not built by `ninja tests`
   endif()
   # ... wired into the live candidate scan through libpolar_gpu.so, dlopen'd when NR_GPU_POLAR=1
   # (nr_polar_gpu.h). A MODULE, like pdsch_gpu/pdcch_gpu above, so nr-uesoftmodem itself keeps no

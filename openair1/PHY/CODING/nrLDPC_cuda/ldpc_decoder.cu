@@ -875,14 +875,7 @@ extern "C" uint8_t const* ldpc_batch_decode(uint32_t BG, uint32_t Z, uint32_t fi
     llr_accumulator_t* total = c.b_total + (size_t)first * BATCH_LLR_STRIDE;
     llr_msg_t* msg = c.b_msg + (size_t)first * BATCH_MSG_STRIDE;
     uint8_t* bits_dev = c.b_bits_dev + (size_t)first * BATCH_BITS_STRIDE;
-    static int bench = -1;
-    if (bench < 0) { const char* e = getenv("LDPC_BENCH"); bench = e && atoi(e); }
-    if (bench && !nr_gpu_allocations_allowed()) bench = 0;
-    cudaEvent_t ev[4];
-    if (bench) for (int e = 0; e < 4; e++) cudaEventCreate(&ev[e]);
-    if (bench) cudaEventRecord(ev[0], stream);
     CHECK_CUDA((cudaError_t)nr_gpu_copy_async(llr_dev, c.b_llr_host + (size_t)first * BATCH_LLR_STRIDE, (size_t)n * BATCH_LLR_STRIDE, stream));
-    if (bench) cudaEventRecord(ev[1], stream);
     uint32_t* done = c.b_done + first;
     uint32_t* unsat = c.b_unsat + first;
     CHECK_CUDA(cudaMemsetAsync(done, 0, n * sizeof(uint32_t), stream));
@@ -906,30 +899,13 @@ extern "C" uint8_t const* ldpc_batch_decode(uint32_t BG, uint32_t Z, uint32_t fi
             batch_done_kernel<<<blocks_for(n, 128), 128, 0, stream>>>(unsat, done, n);
         }
     }
-    if (bench) cudaEventRecord(ev[2], stream);
     dim3 threads_pack(PACK_BITS_KERNEL_THREADS);
     dim3 blocks_pack(blocks_for(block_length, threads_pack.x), n);
     pack_bits_kernel<<<blocks_pack, threads_pack, 0, stream>>>(llr_total, bits_dev, block_length, BATCH_LLR_STRIDE,
                                                                BATCH_BITS_STRIDE);
     uint8_t* bits_host = c.b_bits_host + (size_t)first * BATCH_BITS_STRIDE;
     CHECK_CUDA((cudaError_t)nr_gpu_copy_async(bits_host, bits_dev, (size_t)n * BATCH_BITS_STRIDE, stream));
-    if (bench) cudaEventRecord(ev[3], stream);
     CHECK_CUDA((cudaError_t)nr_gpu_sync(stream));
-    if (bench) {
-        static __thread double t_in, t_it, t_out; static __thread long nb, n_done, n_cw;
-        float a, b, d;
-        cudaEventElapsedTime(&a, ev[0], ev[1]); cudaEventElapsedTime(&b, ev[1], ev[2]); cudaEventElapsedTime(&d, ev[2], ev[3]);
-        t_in += a; t_it += b; t_out += d;
-        uint32_t h_done[1024]; const uint32_t m = n < 1024 ? n : 1024;
-        nr_gpu_copy(h_done, done, m * sizeof(uint32_t));
-        for (uint32_t k = 0; k < m; k++) n_done += h_done[k];
-        n_cw += m;
-        for (int e = 0; e < 4; e++) cudaEventDestroy(ev[e]);
-        if (++nb % 200 == 0)
-            printf("LDPC_BENCH gpu kernel: copy-in %.1f us, %u iterations %.1f us, pack+copy-out %.1f us per batch; "
-                   "early-terminated %.1f%% of code blocks\n", 1000.0 * t_in / nb, num_iter, 1000.0 * t_it / nb,
-                   1000.0 * t_out / nb, 100.0 * n_done / (n_cw ? n_cw : 1));
-    }
     return bits_host;
 }
 
@@ -1041,16 +1017,7 @@ static int g_pool_capturing;   /* the worker is capturing a graph (first use of 
 static uint32_t g_pool_capture_epoch; /* ++ at every capture start: a timeout that overlapped a capture is not a GPU fault */
 #define AST(v, x) __atomic_store_n(&(v), (x), __ATOMIC_SEQ_CST)
 #define ALD(v) __atomic_load_n(&(v), __ATOMIC_SEQ_CST)
-static void pool_hooks_env_once() {
-    static bool done;
-    if (done) return;
-    done = true;
-    if (getenv("LDPC_CUDA_TEST_SKIP_LAUNCH")) g_hook_skip = atoi(getenv("LDPC_CUDA_TEST_SKIP_LAUNCH"));
-    if (getenv("LDPC_CUDA_TEST_STALL_MS")) g_hook_stall_ms = atoi(getenv("LDPC_CUDA_TEST_STALL_MS"));
-    if (getenv("LDPC_CUDA_TEST_INJECT")) g_hook_inject = atoi(getenv("LDPC_CUDA_TEST_INJECT"));
-}
 extern "C" void ldpc_pool_test_hooks(int skip, int stall_ms, int inject) {
-    pool_hooks_env_once();
     g_hook_skip = skip; g_hook_stall_ms = stall_ms; g_hook_inject = inject;
     if (!inject) AST(g_pool_sticky, 0);
 }
@@ -1134,7 +1101,6 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
         __atomic_fetch_add(&g_pool_errors, 1, __ATOMIC_RELAXED);
         return -2; /* never a silent skip */
     }
-    pool_hooks_env_once();
     if (g_hook_skip) { /* test hook (K34 test a) */
         __atomic_fetch_add(&g_pool_errors, 1, __ATOMIC_RELAXED);
         return -3;
@@ -1152,12 +1118,10 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
     BaseGraph bg = get_basegraph(BG, Z);
     /* The ~4*num_iter iteration launches are replayed from a CUDA graph per (BG, Z, nb, num_iter), nb = n
      * rounded up to a power of two; codewords [n, nb) are pre-marked done (any non-zero word) so their
-     * blocks exit at once. LDPC_CUDA_GRAPH=0 launches them directly (A/B). */
-    static const bool use_graph = !getenv("LDPC_CUDA_GRAPH") || atoi(getenv("LDPC_CUDA_GRAPH")) != 0;
-    uint32_t nb = n;
-    if (use_graph)
-        for (nb = 1; nb < n; nb <<= 1)
-            ;
+     * blocks exit at once. */
+    uint32_t nb = 1;
+    while (nb < n)
+        nb <<= 1;
     POOL_CHECK(cudaMemsetAsync(c.b_done, 0, n * sizeof(uint32_t), stream));
     if (nb > n)
         POOL_CHECK(cudaMemsetAsync(c.b_done + n, 1, (nb - n) * sizeof(uint32_t), stream));
@@ -1165,8 +1129,8 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
     static std::map<uint64_t, cudaGraphExec_t> graphs; /* only the pool worker thread gets here */
     const uint64_t key = (uint64_t)BG << 40 | (uint64_t)Z << 24 | (uint64_t)nb << 8 | num_iter;
     cudaGraphExec_t& ge = graphs[key];
-    const bool capture = use_graph && nr_gpu_allocations_allowed();
-    if (use_graph && ge) {
+    const bool capture = nr_gpu_allocations_allowed();
+    if (ge) {
         POOL_CHECK(cudaGraphLaunch(ge, stream));
     } else {
         if (capture) {

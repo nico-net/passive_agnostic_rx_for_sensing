@@ -1,0 +1,9 @@
+tim CHK 1      p50=1069 p99=2613 p999=5838 crc_q=73.2 n_real=5198 drops=0.0 | tail n=52 a2e p10/50/90=450/659/1008 x_read=214 dec=2091.5 | all a2e=449.0 x_read=123.0
+b CHK 1 high p50=1324 p99=3348 p999=5713 crc_q=96.4 n_real=4563 drops=0.0 | tail n=46 a2e p10/50/90=504/1198/2674 x_read=254 dec=1913.5 | all a2e=712 x_read=239.0
+tim ON 4      p50=986 p99=2551 p999=5068 crc_q=74.3 n_real=5752 drops=0.0 | tail n=58 a2e p10/50/90=332/459/838 x_read=96 dec=2485.5 | all a2e=385.0 x_read=68
+tim OFF 4      p50=950 p99=2362 p999=3734 crc_q=74.9 n_real=5762 drops=0.0 | tail n=58 a2e p10/50/90=279/469/1139 x_read=62 dec=2024.0 | all a2e=374.0 x_read=71.0
+
+b   high CHK n=1 p50 1324 p99 3348 [3348] p99.9 5713 crc_q 96.4 [96.4-96.4] n_real 4563 drops max 0.0 | tail a2e 1197 x_read 254 acc2enq 292 pass2p1 222 occ2pass 62 dec 1914 | all a2e 712 x_read 239
+tim      CHK n=1 p50 1069 p99 2613 [2613] p99.9 5838 crc_q 73.2 [73.2-73.2] n_real 5198 drops max 0.0 | tail a2e 654 x_read 214 acc2enq 249 pass2p1 170 occ2pass 2 dec 2092 | all a2e 449 x_read 123
+tim      OFF n=1 p50 950 p99 2362 [2362] p99.9 3734 crc_q 74.9 [74.9-74.9] n_real 5762 drops max 0.0 | tail a2e 457 x_read 62 acc2enq 88 pass2p1 192 occ2pass 3 dec 2024 | all a2e 374 x_read 71
+tim      ON  n=1 p50 986 p99 2551 [2551] p99.9 5068 crc_q 74.3 [74.3-74.3] n_real 5752 drops max 0.0 | tail a2e 458 x_read 96 acc2enq 142 pass2p1 164 occ2pass 1 dec 2486 | all a2e 385 x_read 68

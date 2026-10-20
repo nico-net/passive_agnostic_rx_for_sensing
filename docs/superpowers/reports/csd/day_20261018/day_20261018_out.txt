@@ -1,0 +1,36 @@
+ab_dTG1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=2 err=[]
+dTG1 -> /home/nicola/NICOLA/ota_runs/ab_dTG1_1_082315
+ab_dTL1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=2 err=[]
+dTL1 -> /home/nicola/NICOLA/ota_runs/ab_dTL1_1_082617
+ab_dTC1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=1 err=[]
+dTC1 -> /home/nicola/NICOLA/ota_runs/ab_dTC1_1_082920
+ab_dVG1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=82 err=[]
+dVG1 -> /home/nicola/NICOLA/ota_runs/ab_dVG1_1_083223
+ab_dVL1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=159 err=[]
+dVL1 -> /home/nicola/NICOLA/ota_runs/ab_dVL1_1_083526
+ab_dVC1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=120 err=[]
+dVC1 -> /home/nicola/NICOLA/ota_runs/ab_dVC1_1_083828
+ab_dTC2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=2 err=[]
+dTC2 -> /home/nicola/NICOLA/ota_runs/ab_dTC2_1_084131
+ab_dTG2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=1 err=[]
+dTG2 -> /home/nicola/NICOLA/ota_runs/ab_dTG2_1_084435
+ab_dTL2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=1 err=[]
+dTL2 -> /home/nicola/NICOLA/ota_runs/ab_dTL2_1_084738
+ab_dVC2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=144 err=[]
+dVC2 -> /home/nicola/NICOLA/ota_runs/ab_dVC2_1_085041
+ab_dVG2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=40 err=[]
+dVG2 -> /home/nicola/NICOLA/ota_runs/ab_dVG2_1_085344
+ab_dVL2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=85 err=[]
+dVL2 -> /home/nicola/NICOLA/ota_runs/ab_dVL2_1_085646
+ab_dTL3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=1 err=[]
+dTL3 -> /home/nicola/NICOLA/ota_runs/ab_dTL3_1_085948
+ab_dTC3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=3 err=[]
+dTC3 -> /home/nicola/NICOLA/ota_runs/ab_dTC3_1_090250
+ab_dTG3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=3 err=[]
+dTG3 -> /home/nicola/NICOLA/ota_runs/ab_dTG3_1_090554
+ab_dVL3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=40 err=[]
+dVL3 -> /home/nicola/NICOLA/ota_runs/ab_dVL3_1_090901
+ab_dVC3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=43 err=[]
+dVC3 -> /home/nicola/NICOLA/ota_runs/ab_dVC3_1_091206
+ab_dVG3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=75 err=[]
+dVG3 -> /home/nicola/NICOLA/ota_runs/ab_dVG3_1_091510

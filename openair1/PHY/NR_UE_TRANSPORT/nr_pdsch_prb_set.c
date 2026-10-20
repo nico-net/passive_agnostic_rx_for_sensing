@@ -177,6 +177,28 @@ int nr_prb_gather_index(const nr_prb_seg_t *seg, int nseg, int re_per_prb, int *
   return n;
 }
 
+int nr_prb_gather_copy(const void *src, void *dst, const nr_prb_seg_t *seg, int nseg, int re_per_prb, int off0, int N)
+{
+  const uint32_t *s32 = src;
+  uint32_t *d32 = dst;
+  int n = 0;
+  for (int s = 0; s < nseg; s++) {
+    int g = seg[s].prb_start * re_per_prb;
+    int left = seg[s].n_prb * re_per_prb;
+    while (left > 0) {
+      const int di = (off0 + n) % N, si = (off0 + g) % N;
+      int run = left < N - di ? left : N - di;
+      if (run > N - si)
+        run = N - si;
+      memcpy(d32 + di, s32 + si, (size_t)run * sizeof(uint32_t));
+      n += run;
+      g += run;
+      left -= run;
+    }
+  }
+  return n;
+}
+
 int nr_dmrs_oracle_crb(int bwp_start, int rb0)
 {
   return bwp_start + rb0;

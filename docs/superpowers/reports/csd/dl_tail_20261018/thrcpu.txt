@@ -1,0 +1,54 @@
+12:04:14 pid=3439436 flags=[] passivePdcch0=3.98 passivePdcch1=4.47 passivePdcch1=0.00 
+12:05:54 pid=3445554 flags=[] passivePdcch0=3.80 passivePdcch1=4.30 passivePdcch1=0.00 
+12:07:33 pid=3451751 flags=[] passivePdcch0=3.96 passivePdcch1=4.42 passivePdcch0=0.00 
+12:08:48 pid=3457122 flags=[] passivePdcch0=4.47 passivePdcch1=4.95 passivePdcch1=0.00 
+12:10:02 pid=3462381 flags=[] passivePdcch0=3.83 passivePdcch1=4.51 passivePdcch1=0.00 
+12:11:16 pid=3467731 flags=[] passivePdcch0=2.89 passivePdcch1=3.34 passivePdcch1=0.00 
+12:12:31 pid=3473098 flags=[] passivePdcch0=3.32 passivePdcch1=3.78 passivePdcch0=0.00 
+12:13:45 pid=3478700 flags=[] passivePdcch0=4.36 passivePdcch1=4.77 passivePdcch1=0.00 
+12:15:29 pid=3483759 flags=[ISAC_DCI11_READ_MEMO=1 ] passivePdcch0=2.91 
+12:19:15 pid=3489735 flags=[] passivePdcch0=3.91 passivePdcch1=3.53 passivePdcch1=0.00 
+12:20:27 pid=3493411 flags=[ISAC_DCI11_READ_MEMO=1 ] passivePdcch0=4.38 passivePdcch1=4.82 passivePdcch1=0.00 
+12:21:41 pid=3497059 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=4.73 passivePdcch1=5.43 passivePdcch1=0.00 
+12:22:55 pid=3500789 flags=[ISAC_DCI11_READ_MEMO=1 ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=4.95 passivePdcch1=5.57 passivePdcch0=0.00 
+12:24:07 pid=3504540 flags=[] passivePdcch0=2.80 passivePdcch1=2.55 passivePdcch1=0.00 
+12:25:19 pid=3508193 flags=[ISAC_DCI11_READ_MEMO=1 ] passivePdcch0=2.41 passivePdcch1=2.91 passivePdcch0=0.00 
+12:26:32 pid=3512007 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=2.20 passivePdcch1=2.72 passivePdcch0=0.00 
+12:28:22 pid=3517869 flags=[ISAC_DCI11_READ_MEMO=1 ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=2.15 passivePdcch1=2.74 passivePdcch0=0.00 
+12:30:13 pid=3524376 flags=[] passivePdcch0=4.25 passivePdcch1=4.79 passivePdcch1=0.00 
+12:32:03 pid=3530951 flags=[ISAC_DCI11_READ_MEMO=1 ] passivePdcch0=3.70 passivePdcch1=4.32 passivePdcch1=0.00 
+12:33:54 pid=3537492 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=2.96 passivePdcch1=3.60 passivePdcch1=0.00 
+12:35:44 pid=3543997 flags=[ISAC_DCI11_READ_MEMO=1 ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=4.78 passivePdcch1=5.41 passivePdcch0=0.00 
+12:39:38 pid=3581539 flags=[ISAC_DCI11_READ_MEMO=1 ] passivePdcch0=4.09 passivePdcch1=4.58 passivePdcch1=0.00 
+12:41:28 pid=3588131 flags=[ISAC_DCI11_READ_MEMO=1 ] passivePdcch0=2.34 passivePdcch1=2.81 passivePdcch0=0.00 
+12:44:54 pid=3596831 flags=[] passivePdcch0=4.94 passivePdcch1=4.56 passivePdcch1=0.00 
+12:48:21 pid=3605766 flags=[] passivePdcch0=4.84 passivePdcch1=4.50 passivePdcch1=0.00 
+12:50:13 pid=3612309 flags=[ISAC_DCI11_READ_MEMO=1 ] passivePdcch0=4.02 passivePdcch1=4.50 passivePdcch0=0.00 
+12:54:46 pid=3623866 flags=[] passivePdcch0=4.48 passivePdcch1=4.10 passivePdcch0=0.00 
+12:56:36 pid=3630476 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=4.31 passivePdcch1=4.85 passivePdcch1=0.00 
+12:58:27 pid=3636921 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=3.45 passivePdcch1=3.95 passivePdcch0=0.00 
+13:00:16 pid=3643447 flags=[] passivePdcch0=2.87 passivePdcch1=2.52 passivePdcch0=0.00 
+13:02:06 pid=3649903 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=2.41 passivePdcch1=2.13 passivePdcch1=0.00 
+13:03:55 pid=3656280 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=2.85 passivePdcch1=2.62 passivePdcch0=0.00 
+13:05:08 pid=3661578 flags=[] passivePdcch0=4.49 passivePdcch1=4.07 passivePdcch1=0.00 
+13:06:23 pid=3666812 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=4.33 passivePdcch1=4.78 passivePdcch0=0.00 
+13:07:47 pid=3672149 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=4.92 passivePdcch1=5.69 passivePdcch1=0.00 
+13:09:38 pid=3678679 flags=[] passivePdcch0=2.65 passivePdcch1=2.31 passivePdcch0=0.00 
+13:11:28 pid=3685197 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=2.02 passivePdcch1=2.58 passivePdcch1=0.00 
+13:13:18 pid=3691590 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=2.06 passivePdcch1=2.48 passivePdcch1=0.00 
+13:15:08 pid=3698152 flags=[] passivePdcch0=4.23 passivePdcch1=3.92 passivePdcch1=0.00 
+13:16:59 pid=3704767 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=5.13 passivePdcch1=4.57 passivePdcch0=0.00 
+13:18:52 pid=3711368 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=4.31 passivePdcch1=4.83 passivePdcch0=0.00 
+13:20:39 pid=3717815 flags=[] passivePdcch0=1.97 passivePdcch1=2.49 passivePdcch1=0.00 
+13:22:28 pid=3724137 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=2.56 passivePdcch1=2.19 passivePdcch1=0.00 
+13:24:19 pid=3730665 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=2.21 passivePdcch1=2.68 passivePdcch1=0.00 
+13:26:11 pid=3737214 flags=[] passivePdcch0=3.61 passivePdcch1=4.17 passivePdcch1=0.00 
+13:28:01 pid=3743445 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=4.78 passivePdcch1=4.42 passivePdcch1=0.00 
+13:29:49 pid=3749917 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=4.22 passivePdcch1=5.01 passivePdcch0=0.00 
+13:31:41 pid=3756504 flags=[] passivePdcch0=3.27 passivePdcch1=3.73 passivePdcch1=0.00 
+13:33:34 pid=3763070 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=3.89 passivePdcch1=4.63 passivePdcch0=0.00 
+13:35:23 pid=3769582 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=4.07 passivePdcch1=4.66 passivePdcch0=0.00 
+13:37:13 pid=3776178 flags=[] passivePdcch0=4.46 passivePdcch1=4.06 passivePdcch0=0.00 
+13:39:06 pid=3797439 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=4.95 passivePdcch1=4.45 passivePdcch0=0.00 
+13:40:57 pid=3815955 flags=[ISAC_PDCCH_BANK_HANDOFF=1 ] passivePdcch0=4.25 passivePdcch1=4.81 
+13:43:25 pid=3824315 flags=[] passivePdcch0=2.17 passivePdcch1=2.62 passivePdcch0=0.00 

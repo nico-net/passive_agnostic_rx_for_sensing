@@ -1,0 +1,39 @@
+b OFF 1 low  DL p50=1380 p99=3998 p999=10068 crc_q=96.5 n_real=1991 drops=0.0 | UL p99=3801 drops=0.0 | tail a2e=1044.5 occ2pass=418.0 x_read=161.5 | all a2e=748 x_read=23.0 | replay_g3_b_OFF_1_125306
+b H 1 high DL p50=1153 p99=2832 p999=4834 crc_q=95.3 n_real=4623 drops=0.0 | UL p99=3460 drops=0.0 | tail a2e=1095 occ2pass=3 x_read=155.0 | all a2e=571 x_read=153.0 | replay_g3_b_H_1_125445
+b HP 1 mid  DL p50=1110 p99=3080 p999=4936 crc_q=96.1 n_real=2826 drops=0.0 | UL p99=3641 drops=0.0 | tail a2e=718 occ2pass=3 x_read=183 | all a2e=502.0 x_read=110.0 | replay_g3_b_HP_1_125637
+tim OFF 1      DL p50=936 p99=2355 p999=6520 crc_q=74.0 n_real=5787 drops=0.0 | UL p99=3701 drops=0.0 | tail a2e=515.0 occ2pass=2.0 x_read=109 | all a2e=382 x_read=74 | replay_g3_tim_OFF_1_125828
+tim H 1      DL p50=923 p99=2112 p999=6281 crc_q=73.6 n_real=4988 drops=0.0 | UL p99=5188 drops=0.0 | tail a2e=507.0 occ2pass=1.0 x_read=112 | all a2e=349.0 x_read=77 | replay_g3_tim_H_1_130017
+tim HP 1      DL p50=912 p99=2188 p999=3438 crc_q=74.7 n_real=4849 drops=0.0 | UL p99=5216 drops=0.0 | tail a2e=497 occ2pass=1 x_read=96 | all a2e=340 x_read=66.0 | replay_g3_tim_HP_1_130207
+b OFF 2 high DL p50=1285 p99=3209 p999=4413 crc_q=96.5 n_real=4435 drops=0.0 | UL p99=3881 drops=0.0 | tail a2e=1170 occ2pass=549 x_read=177 | all a2e=694 x_read=160 | replay_g3_b_OFF_2_130354
+b H 2 high DL p50=1122 p99=2903 p999=4537 crc_q=96.1 n_real=5133 drops=0.0 | UL p99=3471 drops=0.0 | tail a2e=1019.0 occ2pass=3.0 x_read=165.0 | all a2e=567 x_read=144.0 | replay_g3_b_H_2_130510
+b HP 2 low  DL p50=1091 p99=3111 p999=4393 crc_q=95.8 n_real=1761 drops=0.0 | UL p99=3556 drops=0.0 | tail a2e=1205.5 occ2pass=5.0 x_read=29.5 | all a2e=521 x_read=123 | replay_g3_b_HP_2_130625
+tim OFF 2      DL p50=926 p99=2203 p999=5104 crc_q=75.1 n_real=5828 drops=0.0 | UL p99=3658 drops=0.0 | tail a2e=423 occ2pass=2 x_read=91.0 | all a2e=370.0 x_read=72.0 | replay_g3_tim_OFF_2_130748
+tim H 2      DL p50=953 p99=2263 p999=5523 crc_q=73.5 n_real=4902 drops=0.0 | UL p99=4049 drops=0.0 | tail a2e=417.5 occ2pass=1.0 x_read=110 | all a2e=373.0 x_read=73.0 | replay_g3_tim_H_2_130939
+tim HP 2      DL p50=962 p99=2216 p999=5514 crc_q=73.1 n_real=4778 drops=0.0 | UL p99=4517 drops=0.0 | tail a2e=435.5 occ2pass=2.0 x_read=45.5 | all a2e=360.0 x_read=66 | replay_g3_tim_HP_2_131129
+b OFF 3 high DL p50=1258 p99=3500 p999=5474 crc_q=94.9 n_real=5132 drops=0.0 | UL p99=3445 drops=0.0 | tail a2e=864.5 occ2pass=199.0 x_read=135.5 | all a2e=625.0 x_read=138.0 | replay_g3_b_OFF_3_131318
+b H 3 high DL p50=1151 p99=3036 p999=4319 crc_q=96.5 n_real=5056 drops=0.0 | UL p99=3786 drops=0.0 | tail a2e=1071 occ2pass=5 x_read=160 | all a2e=555.0 x_read=153 | replay_g3_b_H_3_131510
+b HP 3 high DL p50=1121 p99=3229 p999=4990 crc_q=97.2 n_real=4980 drops=0.0 | UL p99=3490 drops=0.0 | tail a2e=1005.5 occ2pass=3.5 x_read=166.5 | all a2e=555.0 x_read=127 | replay_g3_b_HP_3_131659
+tim OFF 3      DL p50=956 p99=2238 p999=5043 crc_q=76.5 n_real=5613 drops=0.0 | UL p99=4231 drops=0.0 | tail a2e=516 occ2pass=1 x_read=112 | all a2e=371 x_read=76 | replay_g3_tim_OFF_3_131853
+tim H 3      DL p50=925 p99=2242 p999=4147 crc_q=73.5 n_real=5194 drops=0.0 | UL p99=4028 drops=0.0 | tail a2e=592.5 occ2pass=3.0 x_read=115 | all a2e=369.0 x_read=76.0 | replay_g3_tim_H_3_132040
+tim HP 3      DL p50=937 p99=2438 p999=5013 crc_q=74.7 n_real=5159 drops=0.0 | UL p99=4565 drops=0.0 | tail a2e=638.0 occ2pass=2.0 x_read=98 | all a2e=369 x_read=68.0 | replay_g3_tim_HP_3_132229
+b OFF 4 mid  DL p50=1239 p99=3194 p999=5019 crc_q=97.6 n_real=3863 drops=0.0 | UL p99=3343 drops=0.0 | tail a2e=1112 occ2pass=372 x_read=167 | all a2e=676 x_read=159 | replay_g3_b_OFF_4_132419
+b H 4 high DL p50=1145 p99=2915 p999=4629 crc_q=96.3 n_real=4427 drops=0.0 | UL p99=3464 drops=0.0 | tail a2e=997 occ2pass=5 x_read=176.0 | all a2e=573 x_read=151.0 | replay_g3_b_H_4_132612
+b HP 4 high DL p50=1137 p99=2787 p999=4774 crc_q=96.0 n_real=4173 drops=0.0 | UL p99=3127 drops=0.0 | tail a2e=985.5 occ2pass=5.0 x_read=164.0 | all a2e=573 x_read=130 | replay_g3_b_HP_4_132802
+b OFF 5 low  DL p50=1171 p99=3067 p999=5138 crc_q=96.4 n_real=2334 drops=0.0 | UL p99=3389 drops=0.0 | tail a2e=1148.5 occ2pass=3.0 x_read=166 | all a2e=569.0 x_read=136.0 | replay_g3_b_OFF_5_132951
+b H 5 high DL p50=1157 p99=2877 p999=6278 crc_q=97.0 n_real=4092 drops=0.0 | UL p99=3609 drops=0.0 | tail a2e=1272 occ2pass=10 x_read=166.0 | all a2e=592.0 x_read=159 | replay_g3_b_H_5_133142
+b HP 5 high DL p50=1136 p99=2926 p999=4890 crc_q=95.9 n_real=4981 drops=0.0 | UL p99=3505 drops=0.0 | tail a2e=1206.5 occ2pass=4.0 x_read=138 | all a2e=569 x_read=130.0 | replay_g3_b_HP_5_133334
+b OFF 6 high DL p50=1195 p99=2876 p999=4852 crc_q=96.8 n_real=4521 drops=0.0 | UL p99=3392 drops=0.0 | tail a2e=1002 occ2pass=275 x_read=145 | all a2e=618 x_read=144.0 | replay_g3_b_OFF_6_133523
+b H 6 mid  DL p50=1186 p99=2910 p999=4806 crc_q=97.0 n_real=3920 drops=0.0 | UL p99=3194 drops=0.0 | tail a2e=921.0 occ2pass=5.0 x_read=191.5 | all a2e=590.0 x_read=160.0 | replay_g3_b_H_6_133713
+b HP 6 high DL p50=1096 p99=2978 p999=7154 crc_q=95.5 n_real=4789 drops=0.0 | UL p99=3779 drops=0.0 | tail a2e=818.5 occ2pass=3.0 x_read=168 | all a2e=528 x_read=128 | replay_g3_b_HP_6_133906
+
+b   high H    n=5 DL p99 med 2903 [2832, 2877, 2903, 2915, 3036] p50 1151 p99.9 4629 crc_q 96.3 [95.3-97.0] n_real [4092, 4427, 4623, 5056, 5133] drops max 0.0 | UL p99 med 3471 drops max 0.0 | tail a2e 1071 occ2pass 5 x_read 165 | all a2e 571 x_read 153 pass 225
+b   high HP   n=4 DL p99 med 2952 [2787, 2926, 2978, 3229] p50 1128 p99.9 4940 crc_q 96.0 [95.5-97.2] n_real [4173, 4789, 4980, 4981] drops max 0.0 | UL p99 med 3498 drops max 0.0 | tail a2e 996 occ2pass 4 x_read 165 | all a2e 562 x_read 129 pass 228
+b   high OFF  n=3 DL p99 med 3209 [2876, 3209, 3500] p50 1258 p99.9 4852 crc_q 96.5 [94.9-96.8] n_real [4435, 4521, 5132] drops max 0.0 | UL p99 med 3445 drops max 0.0 | tail a2e 1002 occ2pass 275 x_read 145 | all a2e 625 x_read 144 pass 192
+b   low  HP   n=1 DL p99 med 3111 [3111] p50 1091 p99.9 4393 crc_q 95.8 [95.8-95.8] n_real [1761] drops max 0.0 | UL p99 med 3556 drops max 0.0 | tail a2e 1206 occ2pass 5 x_read 30 | all a2e 521 x_read 123 pass 243
+b   low  OFF  n=2 DL p99 med 3532 [3067, 3998] p50 1276 p99.9 7603 crc_q 96.5 [96.4-96.5] n_real [1991, 2334] drops max 0.0 | UL p99 med 3595 drops max 0.0 | tail a2e 1096 occ2pass 210 x_read 164 | all a2e 658 x_read 80 pass 206
+b   mid  H    n=1 DL p99 med 2910 [2910] p50 1186 p99.9 4806 crc_q 97.0 [97.0-97.0] n_real [3920] drops max 0.0 | UL p99 med 3194 drops max 0.0 | tail a2e 921 occ2pass 5 x_read 192 | all a2e 590 x_read 160 pass 217
+b   mid  HP   n=1 DL p99 med 3080 [3080] p50 1110 p99.9 4936 crc_q 96.1 [96.1-96.1] n_real [2826] drops max 0.0 | UL p99 med 3641 drops max 0.0 | tail a2e 718 occ2pass 3 x_read 183 | all a2e 502 x_read 110 pass 215
+b   mid  OFF  n=1 DL p99 med 3194 [3194] p50 1239 p99.9 5019 crc_q 97.6 [97.6-97.6] n_real [3863] drops max 0.0 | UL p99 med 3343 drops max 0.0 | tail a2e 1112 occ2pass 372 x_read 167 | all a2e 676 x_read 159 pass 197
+tim      H    n=3 DL p99 med 2242 [2112, 2242, 2263] p50 925 p99.9 5523 crc_q 73.5 [73.5-73.6] n_real [4902, 4988, 5194] drops max 0.0 | UL p99 med 4049 drops max 0.0 | tail a2e 507 occ2pass 1 x_read 112 | all a2e 369 x_read 76 pass 148
+tim      HP   n=3 DL p99 med 2216 [2188, 2216, 2438] p50 937 p99.9 5013 crc_q 74.7 [73.1-74.7] n_real [4778, 4849, 5159] drops max 0.0 | UL p99 med 4565 drops max 0.0 | tail a2e 497 occ2pass 2 x_read 96 | all a2e 360 x_read 66 pass 148
+tim      OFF  n=3 DL p99 med 2238 [2203, 2238, 2355] p50 936 p99.9 5104 crc_q 75.1 [74.0-76.5] n_real [5613, 5787, 5828] drops max 0.0 | UL p99 med 3701 drops max 0.0 | tail a2e 515 occ2pass 2 x_read 109 | all a2e 371 x_read 74 pass 151

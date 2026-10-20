@@ -220,10 +220,5 @@ bool nr_dci01_fdra_book(int verdict, bool oracle_grant, unsigned long refused_so
 
 bool nr_dci01_fdra_refuse_enforced(void)
 {
-  static int on = -1;
-  if (on < 0) {
-    const char *e = getenv("ISAC_UL_FDRA_REFUSE");
-    on = (e != NULL && atoi(e) != 0) ? 1 : 0;
-  }
-  return on;
+  return false;
 }

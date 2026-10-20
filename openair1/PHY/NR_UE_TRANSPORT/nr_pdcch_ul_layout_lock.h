@@ -46,13 +46,16 @@ typedef struct {
   uint8_t mu;
   uint8_t typeA_pos; /* MIB enum: 0 = pos2, 1 = pos3 */
   uint8_t slots_per_frame;
+  uint8_t sib1_ul_cfg;                  /* the "SIB1" BWP is the operator-configured one (ISAC_UL_BWP_SEED short-circuits the vote) */
   uint16_t sib1_ul_start, sib1_ul_size; /* SIB1 initialUplinkBWP (0 size = unknown); a hypothesis, ISAC_UL_LOCK_SIB1_FIRST */
   uint16_t dl_bwp_start; /* solved DL BWP start (valid with dl_bwp_size > 0): ISAC_UL_LOCK_PRIOR_SEARCH prior, never fixed truth */
+  uint8_t sib1_ul_dl;    /* the "SIB1" BWP is receiver-derived (SIB1 initial UL BWP or own DL BWP; ISAC_UL_BWP_DL_PRIOR): seeds an UNCERTAIN lock, CRC trials stay open */
 } nr_ul_layout_cell_t;
 
 typedef struct {
   uint8_t bwp_ind, riv, tda, fh; /* widths after the 1-bit identifier (no carrier / UL-SUL indicator) */
   uint16_t n_max;                /* largest candidate N_BWP with this RIV width */
+  float ent;                     /* bits of entropy of the TDRA + FH region this split leaves (ISAC_UL_PREFIX_ENT ranking) */
 } nr_ul_layout_prefix_t;
 
 typedef struct {
@@ -103,6 +106,15 @@ bool nr_ul_layout_coherent_enabled(void);
  * which N(N+1)/2 > maxriv (the largest RIV observed), N descending, start ascending. count = size; at(idx) = the idx-th. */
 uint32_t nr_ul_layout_enum_count(int carrier_rb, int w, uint32_t maxriv);
 bool nr_ul_layout_enum_at(int carrier_rb, int w, uint32_t maxriv, uint32_t idx, uint16_t *n, uint16_t *start);
+/* ISAC_UL_LOCK_LLR=1 (default off, needs the lock): log-odds lock rule. votes/prior(0|1)/nrnti per BWP hypothesis; true and *lead = the
+ * leader when it beats every other hypothesis by the margin (see nr_pdcch_ul_layout_lock.c). The prior (solved DL BWP, SIB1 UL BWP) shifts
+ * the margin by one vote and lowers the leader's own minimum from 6 to 4 votes; it can never lock without votes. Also makes the probe booking
+ * skip grants that do not discriminate the current contenders. */
+/* ISAC_UL_LOCK_SIGN: only[a * stride + b] = probes where a detected and b did not; det[] = detections per hypothesis. */
+bool nr_ul_layout_sign_decide(const uint16_t *only, int stride, const uint32_t *det, const uint8_t *prior, const uint8_t *nrnti, int n, int *lead);
+bool nr_ul_layout_llr_decide(const uint32_t *votes, const uint8_t *prior, const uint8_t *nrnti, int n, int *lead);
+/* lock enabled, cell known and no BWP locked yet: the layout search phase (used for ISAC_PUSCH_SEARCH_PRIO) */
+bool nr_ul_layout_searching(void);
 void nr_ul_layout_lock_reset(void);
 /* Any accepted PDCCH (DL or UL format) in this slot: the slot has DL symbols, so no full-slot PUSCH lands there. */
 void nr_ul_layout_note_pdcch_slot(long abs_slot);
@@ -112,6 +124,10 @@ void nr_ul_layout_note_pdcch_slot(long abs_slot);
  *   0: banked only. */
 int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_t payload,
                         const nr_ul_layout_cell_t *cell, nr_pdcch_blind_ul_result_t *out);
+/* ISAC_UL_FIT_READ=1 (default off, needs the lock): read a grant of a FITTED but not yet locked length with the fitted layout
+ * (BWP-independent fields exact, RIV provisional). false = no fit / not enabled / not a plausible grant. */
+bool nr_ul_layout_fit_read_enabled(void);
+bool nr_ul_layout_read_fitted(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, nr_pdcch_blind_ul_result_t *out);
 static inline bool nr_ul_layout_is_probe(const nr_pdcch_blind_ul_result_t *g)
 {
   return g && (g->hyp_generation & NR_UL_LAYOUT_TAG) && (g->hyp_generation & NR_UL_LAYOUT_PROBE);
@@ -130,11 +146,19 @@ void nr_ul_layout_stats_dump(void);
  * top-K (ISAC_UL_LOCK_CRC_K, default 3) layout hypotheses before the lock (and, once locked, after a run of CRC failures);
  * a PUSCH TB CRC pass locks/re-locks that hypothesis at once. Both default off. */
 bool nr_ul_layout_sib1_first_enabled(void);
+bool nr_ul_layout_bwp_seed_enabled(void);
+bool nr_ul_layout_dl_prior_enabled(void); /* ISAC_UL_BWP_DL_PRIOR=1 (needs ISAC_UL_BWP_SEED=1): TDD UL BWP = DL BWP (38.331 same-centre pair) */ /* ISAC_UL_BWP_SEED=1, default off: configured UL BWP locks, look-alike partners get CRC trials */
 bool nr_ul_layout_crc_first_enabled(void);
 /* Call after nr_ul_layout_on_dci for the same DCI. Fills out[0..n) with CRC trial grants (hyp_generation TAG|TRIAL|..) to
  * book as ordinary PUSCH jobs; returns n (0 = none; at most one DCI per slot, small MCS only). */
 int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_t payload,
                             const nr_ul_layout_cell_t *cell, nr_pdcch_blind_ul_result_t *out, int cap);
+/* ISAC_UL_NID_BG stage B: the CRC-first hypotheses of one DCI, enumerated without booking (ap_n = 1: the current dmrs-AdditionalPosition reading only, 3: all three values; cursor `first` over *total combinations, *next = the cursor after the last one examined, at most nhyp BWP
+ * hypotheses); tagged like the trials, so nr_ul_layout_crc_verdict() accepts their verdicts. nr_ul_layout_trial_add(): n more candidates were tried under a tagged grant's hypothesis. */
+int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uint32_t first, int nhyp, int ap_n, nr_pdcch_blind_ul_result_t *out, int cap,
+                          uint32_t *total, uint32_t *next);
+void nr_ul_layout_trial_add(const nr_pdcch_blind_ul_result_t *g, uint32_t n);
+void nr_ul_layout_nid_verdict(const nr_pdcch_blind_ul_result_t *g, bool keep_table, uint32_t tbs_bits, long slot); /* a confirmed n_ID hit = decisive CRC pass of the tagged hypothesis */
 /* PUSCH worker: TB CRC verdict of a tagged (locked or trial) grant. */
 void nr_ul_layout_crc_result(const nr_pdcch_blind_ul_result_t *g, bool ok);
 /* ISAC_UL_LOCK_CRC_GUARD=1 (default off, needs CRC_FIRST): a CRC16 pass (TBS <= 3824 bits) is a false pass with p = 2^-16, so it only
@@ -150,9 +174,7 @@ static inline bool nr_ul_layout_is_trial(const nr_pdcch_blind_ul_result_t *g)
  * start, neighbours) hypothesis at the fit, demoted by a run of CRC-EXPECTED failures, confirmed by a CRC pass or by DM-RS votes.
  * prior_note: verdict of a grant read with the locked layout + decoder SNR and TB bits per coded RE. */
 bool nr_ul_layout_prior_enabled(void);
-bool nr_ul_layout_prior_expected(float snr_db, float se); /* pure: snr_db >= Shannon(se) + 2 dB */
 /* returns true while the adoption is provisional */
-bool nr_ul_layout_prior_state(uint16_t *start, uint16_t *size, uint32_t *crc_expected_n, uint32_t *crc_ok, uint32_t *demotions);
 void nr_ul_layout_prior_note(const nr_pdcch_blind_ul_result_t *g, bool ok, uint32_t tbs_bits, int nseg, int seg_ok, long slot,
                              float snr_db, float se);
 /* One fit pass over every length's bank: the eval thread runs it every 100 ms; unit tests call it directly. */

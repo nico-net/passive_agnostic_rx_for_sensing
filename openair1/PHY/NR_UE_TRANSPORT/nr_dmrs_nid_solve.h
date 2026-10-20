@@ -52,12 +52,72 @@ typedef struct {
 int nr_dmrs_nid_solve(const float *yr, const float *yi, const int *m, int n, int slot, int symbol, int symbols_per_slot, int nscid,
                       nr_nid_solution_t *out, int max_out);
 
+/** Same, with fast=1: rotation classes share one cos/sin and the search stops at the first class that gives a confirmed solution (>= 4 top
+ *  checks, none violated, <= 1 violated overall). The best solution is the same whenever the sure class is the best-scoring one. */
+int nr_dmrs_nid_solve_ex(const float *yr, const float *yi, const int *m, int n, int slot, int symbol, int symbols_per_slot, int nscid,
+                         nr_nid_solution_t *out, int max_out, int fast);
+
 /** The two bits (c(2m) | c(2m+1) << 1) the sequence with state `cinit` puts on pilot m: lets a caller test which pilots of a window or
  *  carrier agree with a solved sequence (per-RB occupancy). */
 int nr_dmrs_nid_predict_bits(uint32_t cinit, int m);
 
 /** c_init for a given N_ID (the forward map), exposed for tests and callers that want to verify a candidate. */
 uint32_t nr_dmrs_nid_cinit(int nid, int slot, int symbol, int symbols_per_slot, int nscid);
+
+/** Live observer (nr_dmrs_nid_solve_live.c), default OFF: ISAC_DMRS_NID_SOLVE=1 solves N_ID from FFT'd DL symbols on its own thread and logs
+ *  "SENSING: DMRS_NID_SOLVE leader/summary" lines; it changes nothing else in the receiver. Called from the NID capture path with the
+ *  symbol the GPU sweep also gets: rx = first FFT bin array of the symbol (fft bins), fco = first carrier bin, nsc = carrier subcarriers,
+ *  pa = Point A subcarrier on that grid. Cheap no-op when off. */
+struct nr_pdcch_nid_record_s;
+void nr_dmrs_nid_live_offer(const void *rx_c16, int fft, int fco, int nsc, int pa, int slot, int sym);
+
+/** ISAC_DMRS_NID_SOLVE=3 (solver primary). Pure helpers, unit tested.
+ *  top2: the (at most 2) ids with >= minv votes, most votes first. A DCI-less id with many votes takes one slot, never both. */
+static inline int nr_dmrs_nid_top2(const uint32_t *votes, int n, uint32_t minv, int out[2])
+{
+  int c = 0;
+  for (int r = 0; r < 2; r++) {
+    int best = -1;
+    for (int i = 0; i < n; i++)
+      if (votes[i] >= minv && (c == 0 || i != out[0]) && (best < 0 || votes[i] > votes[best])) best = i;
+    if (best < 0) break;
+    out[c++] = best;
+  }
+  return c;
+}
+/** Hint signature: folds one hinted record (id AND footprint) so a widened footprint is re-served. */
+static inline uint64_t nr_dmrs_nid_hint_sig(uint64_t sig, int nid, int grid_rb, int groups, int sym, int dur)
+{
+  sig = sig * 65537u + (uint64_t)nid + 1;
+  return (sig * 1000003u) ^ ((uint64_t)(grid_rb & 0x1ff) | (uint64_t)(groups & 0x1ff) << 9 | (uint64_t)(sym & 15) << 18 | (uint64_t)(dur & 3) << 22);
+}
+/** CRC-confirmation score of a banked id: >= 2 means verified. Two CRC-valid DCIs, or one whose RNTI is already an owner elsewhere. A single chance hit is 1. */
+static inline int nr_dmrs_nid_confirm_score(int confirms, int owner_seen_elsewhere)
+{
+  return confirms >= 2 || (confirms == 1 && owner_seen_elsewhere) ? 2 : confirms;
+}
+/** Only a UE-specific RNTI can tie two CORESETs together: SI-RNTI 0xFFFF, P-RNTI 0xFFFE and the RA-RNTI range (1..17920) are common to all. */
+static inline int nr_dmrs_nid_rnti_is_ue(unsigned rnti) { return rnti > 17920 && rnti < 0xFFFE; }
+/** Primary-mode scheduler state; reset on a geometry/retune change (cfg_hash differs) so the grace restarts at the retune. Returns 1 when reset. */
+typedef struct { uint64_t cfg_hash, first_us, last_run_us; int valid, verified; unsigned burst; } nr_dmrs_prim_state_t;
+static inline int nr_dmrs_prim_cfg(nr_dmrs_prim_state_t *s, uint64_t cfg_hash, uint64_t now)
+{
+  if (s->valid && s->cfg_hash == cfg_hash) return 0;
+  const int changed = s->valid;
+  *s = (nr_dmrs_prim_state_t){.cfg_hash = cfg_hash, .first_us = now, .valid = 1};
+  return changed;
+}
+/** On-demand sweep trigger: 1 when the GPU nID sweep must run now. published = a solver hint or a sweep record exists; verified = a CRC-valid
+ *  DCI confirmed it; wake = unexplained PDCCH occupancy edge (always runs). No result: held for grace_us, then every call (fallback).
+ *  Unverified result: every maintain_us. Verified: every recheck_us (slow re-verify). Times in us; last_run 0 = never ran. */
+static inline int nr_dmrs_nid_sweep_demand(int published, int verified, int wake, uint64_t now, uint64_t first, uint64_t last_run, uint64_t grace,
+                                           uint64_t maintain, uint64_t recheck)
+{
+  if (wake) return 1;
+  if (!published) return now - first >= grace;
+  if (last_run == 0) return !verified;
+  return now - last_run >= (verified ? recheck : maintain);
+}
 
 #ifdef __cplusplus
 }

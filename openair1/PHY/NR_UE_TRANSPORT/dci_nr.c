@@ -231,16 +231,11 @@ int nr_pdcch_set_crb0_grid_rb(int crb0_grid_rb)
   return old;
 }
 
-/* nr_pdcch_rboffset_fix_enabled: ISAC_PDCCH_RBOFFSET_FIX=1 (default off) selects the TS 38.213 10.1 group positions in
- *   nr_pdcch_coreset_group_rbs(). Read once. Caller: nr_pdcch_extract_rbs_single(). */
+/* nr_pdcch_rboffset_fix_enabled: the TS 38.213 10.1 group positions in nr_pdcch_coreset_group_rbs() apply in passive-rx only.
+ *   Caller: nr_pdcch_extract_rbs_single(). */
 static bool nr_pdcch_rboffset_fix_enabled(void)
 {
-  static _Atomic int en = -1;
-  if (en < 0) {
-    const char *e = getenv("ISAC_PDCCH_RBOFFSET_FIX");
-    en = (e && strcmp(e, "1") == 0) ? 1 : 0;
-  }
-  return en == 1;
+  return IS_PASSIVE_RX_MODE(get_softmodem_params());
 }
 
 /* nr_pdcch_coreset_group_rbs: first RB (relative to the BWP start) of every 6-RB CORESET group whose data REs the
@@ -446,31 +441,6 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
     if (crb0 && dmrs_ref - crb0 + rb_offset >= 0 && dmrs_ref - crb0 + rb_offset + n_rb <= fp->N_RB_DL)
       dmrs_ref -= crb0;
   }
-  /* CFGTRACE (ISAC_PDCCH_CFGTRACE=1): dump every DERIVED PDCCH parameter for each invocation.
-   * The blind monitor and the normal MAC-driven path both call this function, so with an attached
-   * UE both appear in one log and can be diffed line-by-line for the SAME slot -- which is the only
-   * way to see which derived value the synthetic blind config gets wrong. Read-only, off by default. */
-  {
-    static _Atomic int s_cfgtrace = -1;
-    if (s_cfgtrace < 0)
-      s_cfgtrace = (getenv("ISAC_PDCCH_CFGTRACE") != NULL) ? 1 : 0;
-    static _Atomic int s_cfgslot = -2;
-    if (s_cfgslot == -2) {
-      const char *e = getenv("ISAC_PDCCH_CFGTRACE_SLOT");
-      s_cfgslot = e ? atoi(e) : -1; // -1 = every slot
-    }
-    if (s_cfgtrace && (s_cfgslot < 0 || proc->nr_slot_rx == s_cfgslot))
-      LOG_I(PHY,
-            "PDCCHCFG f=%d s=%d ss=%d type=%d n_rb=%d cset_start=%d rb_offset=%d dmrs_ref=%d "
-            "scr_id=%d BWPStart=%d BWPSize=%d dur=%d bundle=%d ilv=%d shift=%d ncand=%d\n",
-            proc->frame_rx, proc->nr_slot_rx, ss_idx, (int)coreset->CoreSetType, n_rb, cset_start,
-            (int)rb_offset, dmrs_ref, (int)scrambling_id,
-            (int)phy_pdcch_config->pdcch_config[ss_idx].BWPStart,
-            (int)phy_pdcch_config->pdcch_config[ss_idx].BWPSize, (int)coreset->duration,
-            (int)coreset->RegBundleSize, (int)coreset->InterleaverSize, (int)coreset->ShiftIndex,
-            (int)phy_pdcch_config->pdcch_config[ss_idx].number_of_candidates);
-  }
-
   // generate pilot
   c16_t pilot[(n_rb + rb_offset + dmrs_ref) * 3] __attribute__((aligned(16)));
   // Note: pilot returned by the following function is already the complex conjugate of the transmitted DMRS
@@ -655,71 +625,6 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
                               rxdataF,
                               pilot);
 
-  // TIME-TRACKING AUDIT (2026-08-04, instrumentation only -- no behavioural change, nothing below
-  // this block reads these values). Reports, per PDCCH occasion, the DM-RS phase slope across the
-  // CORESET and the resulting implied receive delay, plus a coherence figure.
-  //
-  //   z_k       = Y_k * pilot_k          (pilot is already conj(X), so z is the raw channel)
-  //   coherence = |sum z_k conj(z_k+1)| / sum |z_k|^2
-  //
-  // Coherence is the load-bearing number: adjacent DM-RS REs are 4 subcarriers apart, so a smooth
-  // channel gives ~1 and an incoherent one ~1/sqrt(n). It is delay- and per-RB-phase tolerant, unlike
-  // a plain coherent sum. tau is reported too but is only meaningful WHEN coherence is high -- a phase
-  // slope fitted to incoherent pilots is noise, and is ambiguous beyond +-ofdm_symbol_size/8.
-  {
-    static _Atomic int audit = -1;
-    if (audit < 0) {
-      /* SAME DECIMATION FACTOR as the per-SSB trace in nr_adjust_synch_ue.c, and for a much
-       * sharper reason: this probe fires per PDCCH CANDIDATE, not per SSB. Left undecimated while
-       * the SSB trace was decimated, it alone produced 40 % of a 683 line/s (90 kB/s) log written
-       * from the PHY receive thread, and 14837 lines in a single short run. That is the "overflow
-       * and block" a live operator sees, and it is also the observer effect that made both traced
-       * runs come out 100 % PBCH-dead while untraced runs held 164 healthy windows.
-       *
-       * "1" logs every candidate (only ever do this on a short, deliberate capture); "25" every
-       * 25th. Unset is off. */
-      const char *e_ = getenv("ISAC_TSYNC_AUDIT");
-      audit = (e_ != NULL) ? atoi(e_) : 0;
-      if (e_ != NULL && audit < 1) {
-        audit = 1;
-      }
-    }
-    static _Atomic unsigned audit_n_ = 0;
-    const int audit_now_ = audit && ((audit_n_++ % (unsigned)audit) == 0);
-    if (audit_now_) {
-      const int symb_sz = fp->ofdm_symbol_size;
-      const unsigned short cs_sc =
-          (fp->first_carrier_offset + (phy_pdcch_config->pdcch_config[ss_idx].BWPStart + rb_offset) * 12) % symb_sz;
-      const c16_t *pil = &pilot[(dmrs_ref + rb_offset) * 3];
-      const int npil = 3 * n_rb;
-      double lr = 0.0, li = 0.0, e = 0.0;
-      double pr = 0.0, pi = 0.0;
-      for (int n = 0; n < npil; n++) {
-        const int k = (cs_sc + 4 * n + 1) % symb_sz;
-        const c16_t y = rxdataF[0][k];
-        const c16_t x = pil[n];
-        const double zr = (double)y.r * x.r - (double)y.i * x.i;
-        const double zi = (double)y.r * x.i + (double)y.i * x.r;
-        if (n > 0) { // accumulate z_{n-1} * conj(z_n)
-          lr += pr * zr + pi * zi;
-          li += pi * zr - pr * zi;
-        }
-        pr = zr; pi = zi;
-        e += zr * zr + zi * zi;
-      }
-      const double coh = (e > 0.0) ? sqrt(lr * lr + li * li) / e : 0.0;
-      const double dphi = -atan2(li, lr);
-      struct timespec ts;
-      clock_gettime(CLOCK_REALTIME, &ts);
-      LOG_I(PHY,
-            "TSYNC_PDCCH utc_ns=%lld frame=%d slot=%d symbol=%d ss=%d n_rb=%d coherence=%.4f "
-            "tau_samples=%.1f tau_ambig=%d\n",
-            (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec,
-            proc->frame_rx, proc->nr_slot_rx, symbol, ss_idx, n_rb, coh,
-            dphi * symb_sz / (2.0 * M_PI * 4.0), symb_sz / 8);
-    }
-  }
-
   const int32_t rx_size = ceil_mod(fp->N_RB_DL * 12, 32);
   __attribute__((aligned(32))) c16_t rxdataF_ext[fp->nb_antennas_rx][rx_size];
   __attribute__((aligned(32))) c16_t pdcch_dl_ch_estimates_ext[fp->nb_antennas_rx][rx_size];
@@ -764,15 +669,9 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
       rough[a] = pw > 0.0 ? dp / pw : 1e30;
       if (rough[a] < best_r) best_r = rough[a];
     }
-    /* ISAC_PDCCH_ANT_MASK=<hex>: force the kept set (A/B tool: 0x3 = branches 0+1, what 2 RX uses). */
-    static _Atomic int s_force_mask = -1;
-    if (s_force_mask < 0) {
-      const char *e = getenv("ISAC_PDCCH_ANT_MASK");
-      s_force_mask = e ? (int)strtol(e, NULL, 0) : 0;
-    }
     int kept = 0;
     for (int a = 0; a < fp->nb_antennas_rx; a++) {
-      if ((s_force_mask && !(s_force_mask & (1 << a))) || (!s_force_mask && rough[a] > 4.0 * best_r)) {
+      if (rough[a] > 4.0 * best_r) {
         memset(pdcch_dl_ch_estimates_ext[a], 0, sizeof(c16_t) * rx_size);
         avg[a] = 0;
       } else {
@@ -1163,40 +1062,10 @@ void nr_pdcch_unscrambling(c16_t *e_rx,
 }
 
 
-/* LLRPROBE (ISAC_PDCCH_LLRPROBE=1): compact signature of the unscrambled soft bits a PDCCH
- * candidate feeds to polar_decoder_int16(), plus the CRC that decoder recovered.
- *
- * Why this exists: the normal path and the blind monitor call polar_decoder_int16() with IDENTICAL
- * arguments and advance their candidate index identically, so if their `tmp_e` agree for the same
- * (frame, slot, CCE, L) they MUST recover the same CRC. Printing the signature from both therefore
- * localises the defect to LLR PRODUCTION vs anything downstream, with no ground truth needed.
- * Read-only, off by default. */
+/* LLR probe removed (diagnostic); the definition stays because nr_pdcch_blind_monitor_rt.c still calls it. */
 void nr_pdcch_llr_probe(const char *path, int frame, int slot, int cce, int L, uint32_t crc, const int16_t *e, int n)
 {
-  static _Atomic int s_on = -1;
-  if (s_on < 0)
-    s_on = (getenv("ISAC_PDCCH_LLRPROBE") != NULL) ? 1 : 0;
-  if (!s_on)
-    return;
-  /* Slot filter: full-rate probing floods the log and has been MEASURED to break the attach that
-   * provides the control arm. SIB1 sits in one slot index, so filtering to it costs nothing. */
-  static _Atomic int s_slot = -2;
-  if (s_slot == -2) {
-    const char *e2 = getenv("ISAC_PDCCH_LLRPROBE_SLOT");
-    s_slot = e2 ? atoi(e2) : -1;
-  }
-  if (s_slot >= 0 && slot != s_slot)
-    return;
-  long sum = 0;
-  int nz = 0;
-  for (int i = 0; i < n; i++) {
-    sum += e[i] < 0 ? -e[i] : e[i];
-    if (e[i] != 0)
-      nz++;
-  }
-  LOG_I(PHY, "LLRPROBE path=%s f=%d s=%d cce=%d L=%d crc=0x%x n=%d sum=%ld nz=%d e=%d,%d,%d,%d,%d,%d,%d,%d\n",
-        path, frame, slot, cce, L, crc, n, sum, nz,
-        e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]);
+  (void)path; (void)frame; (void)slot; (void)cce; (void)L; (void)crc; (void)e; (void)n;
 }
 
 static void nr_dci_decoding_procedure(const UE_nr_rxtx_proc_t *proc,

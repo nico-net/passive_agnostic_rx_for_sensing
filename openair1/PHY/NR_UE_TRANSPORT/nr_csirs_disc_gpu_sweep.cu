@@ -3,12 +3,12 @@
 #include "nr_csirs_disc_evidence_internal.h"
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
-#include "nr_csirs_disc_gpu_budget.cuh"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
 #include <mutex>
+#include <climits>
 
 namespace {
 /* Word-wise recurrence from PHY/gold.h; skip Nc=1600. The frozen idsweep
@@ -48,11 +48,11 @@ __device__ float warp_sum(float x)
  *   Launched by run() and by nr_csirs_disc_gpu_sweep_prepare().
  */
 __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int *slot,
-                      int ants, int spf, nr_csirs_disc_sweep_cfg_t cfg, float *scores)
+                      int ants, int spf, nr_csirs_disc_sweep_cfg_t cfg, float *scores, int cand0 = 0, int nctot = 0)
 {
   __shared__ uint32_t gold[14][words_max];
   __shared__ float sums[4];
-  int candidate = blockIdx.x;
+  int candidate = cand0 + blockIdx.x; /* CSIRS_DISC_CHUNK: a chunk launch covers candidates [cand0, cand0+gridDim.x) of nctot */
   int id = cfg.id_first + candidate / cfg.delta_max;
   int delta = candidate % cfg.delta_max;
   int l = threadIdx.x;
@@ -105,7 +105,7 @@ __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int
     sums[warp] = total;
   __syncthreads();
   if (threadIdx.x == 0)
-    scores[(size_t)blockIdx.y * gridDim.x + candidate] = (sums[0]+sums[1]+sums[2]+sums[3]) / (map.ports*ants);
+    scores[(size_t)blockIdx.y * (nctot ? nctot : gridDim.x) + candidate] = (sums[0]+sums[1]+sums[2]+sums[3]) / (map.ports*ants);
 }
 
 /* Average occasions before computing the candidate distribution. */
@@ -205,8 +205,9 @@ template<typename T> struct Device {
     return true;
   }
 };
+struct RefineAcc {double a[NR_CSIRS_DISC_MAX_RB],b[NR_CSIRS_DISC_MAX_RB];}; /* refine accumulators (evidence; or signal and weight) */
 struct Workspace {
-  cudaStream_t stream=nullptr;
+  cudaStream_t stream=nullptr,stream_hi=nullptr,stream_lo=nullptr; // stream = the one of the current job (ISAC_GPU_DISC_SMS_LOW)
   cudaEvent_t done=nullptr;
   Device<nr_csirs_disc_re_t> dm;
   Device<short2> dx,grid;
@@ -220,9 +221,19 @@ struct Workspace {
   std::vector<int> slots,indices;
   std::vector<float> mean;
   nr_csirs_disc_evidence_t evidence={};
+  Device<RefineAcc> acc;
   int rb=0,ant=0,capacity=0;
 } workspace;
 static std::mutex workspace_mutex;
+extern "C" int nr_gpu_budget_rt_large_active(void) __attribute__((weak)); // the executable's nr_gpu_budget.c (weak: the module is dlopen'd)
+/* pick_stream: start of a job (workspace_mutex held): the low-SM stream while a large real grant is in flight, else the normal one. The previous job is synchronised first, so no queued kernel ever sees the switch. */
+static void pick_stream()
+{
+  auto &w=workspace;
+  if(!w.stream_lo) return;
+  cudaStream_t s=nr_gpu_green_disc_pick(w.stream_hi,w.stream_lo,nr_gpu_budget_rt_large_active?nr_gpu_budget_rt_large_active():0);
+  if(s!=w.stream){cudaStreamSynchronize(w.stream);w.stream=s;}
+}
 /* prepare: prepares the GPU sweep workspace for a carrier (rb RBs, ant antennas, capacity slots): creates the stream and completion event and grows every device buffer (mapping, packed samples, scores, metadata).
  *   Grow-only: returns at once when the existing buffers already fit. Returns 0, or -1 on failure. Callers: run(), nr_csirs_disc_gpu_sweep_prepare(), nr_csirs_disc_gpu_refine_entry().
  */
@@ -230,7 +241,11 @@ static int prepare(int rb,int ant,int capacity)
 {
   auto &w=workspace;
   if(w.rb>=rb && w.ant>=ant && w.capacity>=capacity) return 0;
-  if(!w.stream && !nr_gpu_green_stream(&w.stream,0,false) && cudaStreamCreateWithFlags(&w.stream,cudaStreamNonBlocking)!=cudaSuccess) return -1;
+  if(!w.stream_hi){
+    if(!nr_gpu_green_stream(&w.stream_hi,0,false) && cudaStreamCreateWithFlags(&w.stream_hi,cudaStreamNonBlocking)!=cudaSuccess) return -1;
+    if(!nr_gpu_green_stream(&w.stream_lo,0,false,-1)) w.stream_lo=nullptr;
+    w.stream=w.stream_hi;
+  }
   if(!w.done && cudaEventCreateWithFlags(&w.done,cudaEventBlockingSync|cudaEventDisableTiming)!=cudaSuccess) return -1;
   size_t maps=(size_t)rb*16*8*2*4; // conservative mapping capacity for all rows
   // Occupied REs <= 32 ports * 8 RE/RB (row 18).
@@ -238,7 +253,7 @@ static int prepare(int rb,int ant,int capacity)
   if(!w.dm.alloc(maps) || !w.dx.alloc(packed) || !w.grid.alloc((size_t)capacity*ant*14*12*rb)
      || !w.ds.alloc(capacity) || !w.di.alloc(capacity) || !w.dz.alloc((size_t)1024*160*capacity)
      || !w.dmean.alloc(1024*160) || !w.dw.alloc(1) || !w.meta.alloc(capacity)
-     || !w.energy.alloc(5) || !w.refined.alloc(1) || !w.result.alloc(1)) return -1;
+     || !w.energy.alloc(5) || !w.acc.alloc(1) || !w.refined.alloc(1) || !w.result.alloc(1)) return -1;
   w.mapping.resize(maps);w.slots.reserve(capacity);w.indices.reserve(capacity);w.mean.resize(1024*160);
   w.rb=rb;w.ant=ant;w.capacity=capacity;return 0;
 }
@@ -251,6 +266,8 @@ static cudaError_t complete() {
 }
 /* copy: asynchronous memcpy on the workspace stream followed by complete(); returns the CUDA status. */
 static cudaError_t copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
+  /* wait for queued kernels first: a copy queued behind a long kernel stalls other streams' copies [MEASURED, DGX 300-400 ms] */
+  {cudaError_t f=complete();if(f!=cudaSuccess) return f;}
   cudaError_t rc=cudaMemcpyAsync(dst,src,n,kind,workspace.stream);
   return rc==cudaSuccess?complete():rc;
 }
@@ -271,20 +288,16 @@ __global__ void gather(const short2 *grid,size_t stride,const nr_csirs_disc_re_t
 static const short2 *upload_grid(const nr_csirs_disc_ring_t *r)
 {
   if(r->device_grid && r->device_valid) return (const short2 *)r->device_grid;
-  CsirsDiscGate gate;
   if(copy(workspace.grid.p,r->grid_base,(size_t)r->capacity*r->slot_stride*2,cudaMemcpyHostToDevice)!=cudaSuccess) return nullptr;
   return workspace.grid.p;
 }
 
 /* run: GPU sweep of a list of hypotheses over the ring (the GPU counterpart of nr_csirs_disc_sweep_cpu()): builds the mapping, gathers the slots, runs sweep(), averages with the cumulative evidence and reduces to a window per hypothesis.
- *   Returns nh on success, 0 when ISAC_CSIRS_DISC is not "1", -1 on error. Serialised by the caller's workspace mutex. Caller: nr_csirs_disc_gpu_sweep_entry().
+ *   Returns nh on success, -1 on error. Serialised by the caller's workspace mutex. Caller: nr_csirs_disc_gpu_sweep_entry().
  */
 int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
         const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out)
 {
-  const char *enable = getenv("ISAC_CSIRS_DISC");
-  if (!enable || strcmp(enable, "1"))
-    return 0;
   nr_csirs_disc_sweep_cfg_t c;
   if (!out || nr_csirs_disc_sweep_validate(r, hyps, nh, cfg, &c))
     return -1;
@@ -319,7 +332,6 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
       slots.clear();for(int i:indices) slots.push_back(r->meta[i].slot);
     }
     std::fill(mean.begin(), mean.begin()+nc, 0);
-    CsirsDiscGate gate; /* one budget slice per hypothesis: launches + the wait below */
     if (entry && slots.empty() && entry->count) {
       reduce_scores<<<1,256,0,stream>>>(history,c,h,entry->count,dw.p);
       if (cudaGetLastError()!=cudaSuccess || copy(out+h,dw.p,sizeof(*out),cudaMemcpyDeviceToHost)!=cudaSuccess)
@@ -330,7 +342,8 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
       nr_csirs_disc_sweep_winner(mean.data(), &c, h, slots.size(), out + h);
       continue;
     }
-    if(cudaMemcpyAsync(dm.p,map.re,map.n_re*sizeof(*map.re),cudaMemcpyHostToDevice,stream)!=cudaSuccess
+    if((complete()!=cudaSuccess)
+       || cudaMemcpyAsync(dm.p,map.re,map.n_re*sizeof(*map.re),cudaMemcpyHostToDevice,stream)!=cudaSuccess
        || cudaMemcpyAsync(ds.p,slots.data(),slots.size()*sizeof(int),cudaMemcpyHostToDevice,stream)!=cudaSuccess
        || cudaMemcpyAsync(w.di.p,indices.data(),indices.size()*sizeof(int),cudaMemcpyHostToDevice,stream)!=cudaSuccess) return -1;
     size_t packed=(size_t)slots.size()*r->n_ant*map.n_re;
@@ -344,7 +357,7 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
     else average_scores<false><<<(nc + 255) / 256, 256, 0, stream>>>(dz.p, nc, slots.size(), dmean.p);
     if (cudaGetLastError() != cudaSuccess) return -1;
     reduce_scores<<<1, 256, 0, stream>>>(dmean.p, c, h, slots.size()+previous, dw.p);
-    if (cudaGetLastError() != cudaSuccess
+    if (cudaGetLastError() != cudaSuccess || (complete() != cudaSuccess)
         || cudaMemcpyAsync(out + h, dw.p, sizeof(*out), cudaMemcpyDeviceToHost, stream) != cudaSuccess
         || complete() != cudaSuccess)
       return -1;
@@ -360,11 +373,18 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
  *   Returns 0 and updates h->rb_start and h->n_rb, or -1 when no span is found. Called from refine_kernel() (through nr_csirs_disc_refine_cpu).
  */
 __device__ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc_hyp_t *h,
-                         const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map)
+                         const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map,
+                         RefineAcc *acc, long u0, long u1, bool fin)
 {
-  double evidence[NR_CSIRS_DISC_MAX_RB]={0};
+  /* CSIRS_DISC_CHUNK: this call does the units [u0,u1) of (valid slot, antenna, port) in the original order; the evidence sums live in acc
+   * between calls; fin (the last chunk) also does the tail. u0 = 0, u1 = LONG_MAX, fin = true is the whole job in one call. */
+  double *evidence=acc->a;
+  if(u0==0) for(int i=0;i<NR_CSIRS_DISC_MAX_RB;++i) evidence[i]=0;
   uint32_t gold[14][64];
+  long unit=0;
   for(int s=0;s<r->capacity;++s) if(r->meta[s].valid && r->meta[s].abs_slot%h->period==h->offset) {
+    const long first=unit;unit+=(long)r->n_ant*map.ports;
+    if(unit<=u0 || first>=u1) continue;
     for(int l=0;l<14;++l) if(map.sym_mask&(1u<<l)) {
       uint64_t t=14*((r->meta[s].slot+win->slot_delta)%r->slots_per_frame)+l+1;
       uint32_t init=((t*(2*win->scramb_id+1)<<10)+win->scramb_id)&0x7fffffff;
@@ -372,6 +392,8 @@ __device__ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc
       for(int w=0;w<map.words;++w) gold[l][w]=generator.next();
     }
     for(int a=0;a<r->n_ant;++a) for(int p=0;p<map.ports;++p) {
+      const long ua=first+(long)a*map.ports+p;
+      if(ua<u0 || ua>=u1) continue;
       double cr[NR_CSIRS_DISC_MAX_RB]={0},ci[NR_CSIRS_DISC_MAX_RB]={0};
       int count[NR_CSIRS_DISC_MAX_RB]={0};
       const int16_t *rx=(r->grid_base+(size_t)s*r->slot_stride+(size_t)a*14*24*r->n_rb);
@@ -397,6 +419,7 @@ __device__ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc
       }
     }
   }
+  if(!fin) return 0;
   int step=h->density<2?2:1,first=h->density<2?h->density:0;
   double run=0,best=0;int start=first,bs=0,be=-1;
   for(int rb=first;rb<r->n_rb;rb+=step) {
@@ -411,19 +434,26 @@ __device__ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc
  *   Returns 0 and updates h->rb_start and h->n_rb, or -1 when the evidence is too weak. Called from refine_kernel().
  */
 __device__ static int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *r, nr_csirs_disc_hyp_t *h,
-                           const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map)
+                           const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map,
+                           RefineAcc *acc, long u0, long u1, bool fin)
 {
-  if (h->row != 1) return refine_extent(r,h,win,map);
-  double signal[NR_CSIRS_DISC_MAX_RB]={0}, weight[NR_CSIRS_DISC_MAX_RB]={0};
+  if (h->row != 1) return refine_extent(r,h,win,map,acc,u0,u1,fin);
+  /* CSIRS_DISC_CHUNK: units [u0,u1) of (valid slot, antenna); signal / weight are carried in acc (see refine_extent) */
+  double *signal=acc->a,*weight=acc->b;
+  if(u0==0) for(int i=0;i<NR_CSIRS_DISC_MAX_RB;++i) signal[i]=weight[i]=0;
   uint32_t gold[64];
   int slots=0;
+  long unit=0;
   for(int s=0;s<r->capacity;++s) if(r->meta[s].valid && r->meta[s].abs_slot%h->period==h->offset) {
     ++slots;
+    const long first=unit;unit+=r->n_ant;
+    if(unit<=u0 || first>=u1) continue;
     uint64_t t=14*((r->meta[s].slot+win->slot_delta)%r->slots_per_frame)+h->symb_l0+1;
     uint32_t init=((t*(2*win->scramb_id+1)<<10)+win->scramb_id)&0x7fffffff;
     Gold generator;generator.reset(init);
     for(int w=0;w<map.words;++w) gold[w]=generator.next();
     for(int a=0;a<r->n_ant;++a) for(int rb=0;rb<r->n_rb;++rb) {
+      if(first+a<u0 || first+a>=u1) continue;
       const int16_t *rx=(r->grid_base+(size_t)s*r->slot_stride+(size_t)a*14*24*r->n_rb);
       double ar=0,ai=0,energy=0;
       for(int i=3*rb;i<3*rb+3;++i) {
@@ -438,6 +468,7 @@ __device__ static int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *r, nr
       weight[rb]+=energy;
     }
   }
+  if(!fin) return 0;
   /* TS 38.214 5.2.2.3.1: configured startingRB/nrofRBs are multiples
    * of four. Maximize measured support over that legal grid; no width prior.
    * A capture boundary may clip the final group. */
@@ -455,9 +486,18 @@ __device__ static int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *r, nr
 
 /* refine_kernel: GPU kernel (one thread): runs the device refinement (nr_csirs_disc_refine_cpu) on the ring and stores the refined hypothesis and the result code. */
 __global__ void refine_kernel(nr_csirs_disc_ring_t ring,nr_csirs_disc_hyp_t h,nr_csirs_disc_win_t win,
-                             nr_csirs_disc_sweep_map_t map,nr_csirs_disc_hyp_t *out,int *result)
+                             nr_csirs_disc_sweep_map_t map,nr_csirs_disc_hyp_t *out,int *result,
+                             RefineAcc *acc,long u0,long u1,bool fin)
 {
-  *result=nr_csirs_disc_refine_cpu(&ring,&h,&win,map);*out=h;
+  const int rc=nr_csirs_disc_refine_cpu(&ring,&h,&win,map,acc,u0,u1,fin);
+  if(fin) {*result=rc;*out=h;}
+}
+/* refine_launch: host side: the whole refinement as one launch. */
+static void refine_launch(const nr_csirs_disc_ring_t &ring,const nr_csirs_disc_hyp_t &h,
+                          const nr_csirs_disc_win_t &win,const nr_csirs_disc_sweep_map_t &map,cudaStream_t s)
+{
+  auto &w=workspace;
+  refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,0,LONG_MAX,true);
 }
 
 /* energy_score: device energy statistic of one symbol: returns the energy ratio of the occupied REs against the weakest or the mean of the unoccupied subcarrier classes (EPR when epr is set).
@@ -511,6 +551,7 @@ extern "C" int nr_csirs_disc_gpu_sweep_entry(const nr_csirs_disc_ring_t *r, cons
 {
   try {
     std::lock_guard<std::mutex> guard(workspace_mutex);
+    pick_stream();
     int rc=run(r, hyps, nh, cfg, out);
     if (rc<0) memset(&workspace.evidence,0,sizeof(workspace.evidence));
     return rc;
@@ -526,6 +567,7 @@ extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
 {
   try {
     std::lock_guard<std::mutex> guard(workspace_mutex);
+    pick_stream();
     if(prepare(rb,ant,capacity)<0) return -1;
     auto &w=workspace;nr_csirs_disc_sweep_map_t map={};map.ports=1;map.n_re=1;map.words=1;map.sym_mask=1;map.begin[1]=1;map.re=w.dm.p;
     nr_csirs_disc_re_t re={};nr_csirs_disc_slot_meta_t meta={};int zero=0;
@@ -538,14 +580,12 @@ extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
     nr_csirs_disc_sweep_cfg_t cfg={0,1,1,32,1};
     sweep<<<dim3(1,1),128,0,w.stream>>>(map,w.dx.p,w.ds.p,ant,20,cfg,w.dz.p);
     average_scores<false><<<1,256,0,w.stream>>>(w.dz.p,1,1,w.dmean.p);
-    const char *cum=getenv("ISAC_CSIRS_DISC_CUMULATIVE");
-    if(cum && !strcmp(cum,"1"))
-      average_scores<true><<<1,256,0,w.stream>>>(w.dz.p,1,1,w.dmean.p,w.dz.p+w.dz.capacity-1024,0);
+    average_scores<true><<<1,256,0,w.stream>>>(w.dz.p,1,1,w.dmean.p,w.dz.p+w.dz.capacity-1024,0);
     reduce_scores<<<1,256,0,w.stream>>>(w.dmean.p,cfg,0,1,w.dw.p);
     nr_csirs_disc_ring_t ring={};ring.n_ant=ant;ring.n_rb=rb;ring.capacity=1;ring.slots_per_frame=20;
     ring.slot_stride=(size_t)ant*14*24*rb;ring.grid_base=(int16_t *)w.grid.p;ring.meta=w.meta.p;
     nr_csirs_disc_hyp_t h={};h.row=1;h.period=4;nr_csirs_disc_win_t win={};
-    refine_kernel<<<1,1,0,w.stream>>>(ring,h,win,map,w.refined.p,w.result.p);
+    refine_kernel<<<1,1,0,w.stream>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,0,LONG_MAX,true);
     energies<<<1,1,0,w.stream>>>(w.grid.p,rb,h,map,w.energy.p);
     return cudaGetLastError()==cudaSuccess && complete()==cudaSuccess?0:-1;
   } catch(...) {return -1;}
@@ -557,16 +597,16 @@ extern "C" int nr_csirs_disc_gpu_refine_entry(const nr_csirs_disc_ring_t *r,nr_c
 {
   try {
     std::lock_guard<std::mutex> guard(workspace_mutex);
+    pick_stream();
     if(prepare(r->n_rb,r->n_ant,r->capacity)<0) return -1;
     auto &w=workspace;nr_csirs_disc_hyp_t full=*h;full.rb_start=0;full.n_rb=r->n_rb;
     nr_csirs_disc_sweep_map_t map={};
     if(nr_csirs_disc_sweep_map_into(&full,r->n_rb,&map,w.mapping.data(),w.mapping.size())) return -1;
     const short2 *grid=upload_grid(r);if(!grid) return -1;
-    CsirsDiscGate gate;
     if(copy(w.dm.p,map.re,map.n_re*sizeof(*map.re),cudaMemcpyHostToDevice)!=cudaSuccess
        || copy(w.meta.p,r->meta,r->capacity*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
     map.re=w.dm.p;auto ring=*r;ring.grid_base=(int16_t *)grid;ring.meta=w.meta.p;
-    refine_kernel<<<1,1,0,workspace.stream>>>(ring,*h,*win,map,w.refined.p,w.result.p);
+    refine_launch(ring,*h,*win,map,workspace.stream);
     int result=-1;
     if(cudaGetLastError()!=cudaSuccess || copy(&result,w.result.p,sizeof(int),cudaMemcpyDeviceToHost)!=cudaSuccess
        || copy(h,w.refined.p,sizeof(*h),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
@@ -581,13 +621,13 @@ extern "C" int nr_csirs_disc_gpu_confirm_entry(const nr_csirs_disc_ring_t *r,con
 {
   try {
     std::lock_guard<std::mutex> guard(workspace_mutex);
+    pick_stream();
     nr_csirs_disc_sweep_cfg_t cfg={id,1,1,32,1};nr_csirs_disc_win_t win={};
     if(run(r,h,1,&cfg,&win)!=1) return -1;
     auto &w=workspace;nr_csirs_disc_sweep_map_t map={};
     if(nr_csirs_disc_sweep_map_into(h,r->n_rb,&map,w.mapping.data(),w.mapping.size())) return -1;
     map.re=w.dm.p;
     const short2 *grid=r->device_valid?(const short2 *)r->device_grid:w.grid.p;
-    CsirsDiscGate gate;
     energies<<<1,1,0,workspace.stream>>>(grid,r->n_rb,*h,map,w.energy.p);
     if(cudaGetLastError()!=cudaSuccess || copy(scores,w.energy.p,5*sizeof(double),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
     scores[0]=win.z;return 0;

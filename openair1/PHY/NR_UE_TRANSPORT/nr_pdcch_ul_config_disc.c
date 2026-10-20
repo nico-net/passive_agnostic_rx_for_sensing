@@ -75,20 +75,7 @@ typedef struct {
 static bank_note_t bank_note[64];
 static uint32_t bank_note_clock;
 
-bool nr_pdcch_ul_bank_enabled(void)
-{
-  static _Atomic int enabled = -1;
-  int on = atomic_load_explicit(&enabled, memory_order_relaxed);
-  if (on < 0) {
-    const char *s = getenv("ISAC_UL_DCI_BANK");
-    const char *chain = getenv("ISAC_UL_PUSCH_CHAIN");
-    const char *solver = getenv("ISAC_UL_PUSCH_SOLVER");
-    on = (s && strcmp(s, "1") == 0) || (chain && strcmp(chain, "1") == 0) ||
-         (solver && strcmp(solver, "1") == 0);
-    atomic_store_explicit(&enabled, on, memory_order_relaxed);
-  }
-  return on != 0;
-}
+bool nr_pdcch_ul_bank_enabled(void) { return true; }
 
 void nr_pdcch_ul_bank_note(uint64_t bank_key, uint16_t rnti, uint16_t length,
                            uint32_t abs_slot, bool length_lock)
@@ -132,20 +119,7 @@ void nr_pdcch_ul_bank_note(uint64_t bank_key, uint16_t rnti, uint16_t length,
   pthread_mutex_unlock(&mu);
 }
 
-bool nr_pdcch_ul_config_disc_enabled(void)
-{
-  static _Atomic int enabled = -1;
-  int on = atomic_load_explicit(&enabled, memory_order_relaxed);
-  if (on < 0) {
-    const char *s = getenv("ISAC_UL_CONFIG_DISC");
-    const char *chain = getenv("ISAC_UL_PUSCH_CHAIN");
-    const char *solver = getenv("ISAC_UL_PUSCH_SOLVER");
-    on = (s && strcmp(s, "1") == 0) || (chain && strcmp(chain, "1") == 0) ||
-         (solver && strcmp(solver, "1") == 0);
-    atomic_store_explicit(&enabled, on, memory_order_relaxed);
-  }
-  return on != 0;
-}
+bool nr_pdcch_ul_config_disc_enabled(void) { return true; }
 
 void nr_pdcch_ul_config_disc_note_dl_slot(uint32_t abs_slot)
 {
@@ -191,13 +165,7 @@ static void geometry(ue_t *u, const nr_pdcch_blind_ul_opts_t *base,
   static const uint8_t width_pairs[][2] = {
     {0,0}, {1,0}, {0,1}, {1,1}, {0,2}, {2,0}, {1,2}, {2,1}, {2,2}
   };
-  static int solver_cached=-1; /* read once (review fix: no per-proposal getenv) */
-  if (__atomic_load_n(&solver_cached,__ATOMIC_RELAXED)<0) {
-    const char *solver_flag=getenv("ISAC_UL_PUSCH_SOLVER");
-    __atomic_store_n(&solver_cached,(solver_flag && strcmp(solver_flag,"1")==0)?1:0,__ATOMIC_RELAXED);
-  }
-  const bool solver=__atomic_load_n(&solver_cached,__ATOMIC_RELAXED)==1;
-  for (int pass = 0; pass < (solver ? 5 : 4) && u->n < UL_CFG_HYP; ++pass)
+  for (int pass = 0; pass < 5 && u->n < UL_CFG_HYP; ++pass)
   for (int g = 0; g < 10 && u->n < UL_CFG_HYP; ++g) {
     const int start = starts[g], size = sizes[g];
     if (start < 0 || size < 1 || start + size > carrier || size > 275) continue;
@@ -209,7 +177,7 @@ static void geometry(ue_t *u, const nr_pdcch_blind_ul_opts_t *base,
       o.fdra_mode = mode == 0 ? NR_FDRA_TYPE1 : mode == 1 ? NR_FDRA_TYPE0_CFG1 : NR_FDRA_DYN_CFG1;
       /* A configured hopping flag consumes one DCI bit. Give its first
        * equal-length width split an early slot in the catalogue. */
-      if (solver && pass == 1) o.freq_hopping_bits = 1;
+      if (pass == 1) o.freq_hopping_bits = 1;
       if (td) {
         /* Unknown RRC list: search two small legal tables as alternatives
          * to TS 38.214's 16-row default. The row is intentionally a
@@ -232,7 +200,7 @@ static void geometry(ue_t *u, const nr_pdcch_blind_ul_opts_t *base,
         const int bw = width_pairs[w][0], sri = width_pairs[w][1];
         const int csi = csi_total - bw - sri;
         if (csi < 0 || csi > 6) continue;
-        if (nth++ != (solver ? (pass <= 1 ? 0 : pass - 1) : pass)) continue;
+        if (nth++ != (pass <= 1 ? 0 : pass - 1)) continue;
         o.bwp_indicator_bits = bw;
         o.sri_bits = sri;
         o.csi_request_bits = csi;

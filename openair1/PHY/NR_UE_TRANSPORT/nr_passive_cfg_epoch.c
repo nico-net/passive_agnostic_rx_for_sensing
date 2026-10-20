@@ -1,7 +1,6 @@
 #include "nr_passive_cfg_epoch.h"
 #include "common/utils/LOG/log.h"
 #include <pthread.h>
-#include <errno.h>
 #include <inttypes.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -60,11 +59,7 @@ static atomic_flag draining = ATOMIC_FLAG_INIT;
 static _Thread_local nr_cfg_epoch_work_t *current_work;
 static pthread_once_t enable_once = PTHREAD_ONCE_INIT;
 static bool enabled;
-static pthread_once_t ignore_sib1_once = PTHREAD_ONCE_INIT;
-static bool ignore_sib1;
-static pthread_once_t si_options_once = PTHREAD_ONCE_INIT;
-static unsigned si_grace_ms;
-static bool si_bump_without_sib1;
+enum { si_grace_ms = 5000 }; /* SI-modification boundary grace before the bump */
 
 static void read_enable(void)
 {
@@ -77,34 +72,10 @@ static bool is_enabled(void)
   return enabled;
 }
 bool nr_cfg_reconf_enabled(void) { return is_enabled(); }
-static void read_ignore_sib1(void)
-{
-  const char *value = getenv("ISAC_TD_IGNORE_SIB1");
-  ignore_sib1 = value && strcmp(value, "1") == 0;
-}
-bool nr_cfg_ignore_sib1(void)
-{
-  pthread_once(&ignore_sib1_once, read_ignore_sib1);
-  return ignore_sib1;
-}
-void nr_cfg_ignore_sib1_reset_for_test(void)
-{
-  /* Test harnesses call this only between receiver operations, never concurrently. */
-  ignore_sib1_once = PTHREAD_ONCE_INIT;
-  ignore_sib1 = false;
-}
-static void read_si_options(void)
-{
-  const char *grace = getenv("ISAC_RECONF_SI_GRACE_MS");
-  si_grace_ms = grace && atoi(grace) > 0 ? (unsigned)atoi(grace) : 5000;
-  const char *setting = getenv("ISAC_RECONF_SI_BUMP_WITHOUT_SIB1");
-  si_bump_without_sib1 = !setting || strcmp(setting, "0") != 0;
-}
-void nr_cfg_si_options_reset_for_test(void)
-{
-  /* Test harnesses call this only between receiver operations. */
-  si_options_once = PTHREAD_ONCE_INIT;
-}
+/* The SIB1-less test arm is gone; the API stays for the callers outside this file. */
+bool nr_cfg_ignore_sib1(void) { return false; }
+void nr_cfg_ignore_sib1_reset_for_test(void) {}
+void nr_cfg_si_options_reset_for_test(void) {}
 static const char *class_name(nr_epoch_class_t c)
 {
   switch (c) {
@@ -273,17 +244,14 @@ void nr_cfg_epoch_set_slots_per_second(uint32_t value)
 }
 void nr_cfg_epoch_set_si_period(uint32_t value)
 {
-  if (nr_cfg_ignore_sib1()) return;
   if (is_enabled()) atomic_store_explicit(&si_period_slots, value, memory_order_release);
 }
 uint32_t nr_cfg_epoch_si_period(void)
 {
-  if (nr_cfg_ignore_sib1()) return 0;
   return atomic_load_explicit(&si_period_slots, memory_order_acquire);
 }
 uint64_t nr_cfg_epoch_si_boundary(void)
 {
-  if (nr_cfg_ignore_sib1()) return 0;
   pthread_mutex_lock(&lock);
   const uint64_t boundary = pending.active ? pending.boundary : 0;
   pthread_mutex_unlock(&lock);
@@ -291,7 +259,6 @@ uint64_t nr_cfg_epoch_si_boundary(void)
 }
 bool nr_cfg_epoch_sib1_request_allowed(uint64_t abs_slot)
 {
-  if (nr_cfg_ignore_sib1()) return false;
   pthread_mutex_lock(&lock);
   const bool allowed = !pending.active || abs_slot >= pending.boundary;
   pthread_mutex_unlock(&lock);
@@ -299,7 +266,7 @@ bool nr_cfg_epoch_sib1_request_allowed(uint64_t abs_slot)
 }
 bool nr_cfg_epoch_si_redecode_pending(uint64_t abs_slot)
 {
-  if (!is_enabled() || nr_cfg_ignore_sib1()) return false;
+  if (!is_enabled()) return false;
   pthread_mutex_lock(&lock);
   const bool needed = pending.active && abs_slot >= pending.boundary;
   pthread_mutex_unlock(&lock);
@@ -339,7 +306,7 @@ void nr_cfg_epoch_note_identity(uint16_t pci, uint64_t ssb_arfcn, uint64_t point
 }
 void nr_cfg_epoch_refine_point_a(uint64_t point_a)
 {
-  if (!is_enabled() || nr_cfg_ignore_sib1() || !point_a) return;
+  if (!is_enabled() || !point_a) return;
   epoch_event_t event = {0};
   pthread_mutex_lock(&lock);
   if (identity.valid && identity.point_a && identity.point_a != point_a) {
@@ -366,7 +333,6 @@ void nr_cfg_epoch_note_mib(uint32_t hash)
 }
 bool nr_cfg_epoch_note_sib1(uint32_t hash, uint64_t abs_slot)
 {
-  if (nr_cfg_ignore_sib1()) return false;
   if (!is_enabled()) return true;
   epoch_event_t event = {0};
   pthread_mutex_lock(&lock);
@@ -382,7 +348,7 @@ bool nr_cfg_epoch_note_sib1(uint32_t hash, uint64_t abs_slot)
 }
 void nr_cfg_epoch_note_si_modification(uint64_t abs_slot, uint32_t period)
 {
-  if (!is_enabled() || nr_cfg_ignore_sib1() || !period) return;
+  if (!is_enabled() || !period) return;
   pthread_mutex_lock(&lock);
   /* TS 38.331 5.2.2.2.2 defines SFN mod m = 0, not an arbitrary unwrapped
    * frame origin. For m > 1024 the only representable boundary SFN is zero. */
@@ -404,14 +370,11 @@ void nr_cfg_epoch_tick(uint64_t abs_slot)
 {
   if (!is_enabled()) return;
   atomic_store_explicit(&current_slot, abs_slot, memory_order_release);
-  if (nr_cfg_ignore_sib1()) return; /* SIB1-less arm: no SI-modification boundary handling */
-  pthread_once(&si_options_once, read_si_options);
   epoch_event_t event = {0};
   pthread_mutex_lock(&lock);
   if (pending.active && abs_slot >= pending.boundary
       && abs_slot - pending.boundary >= (uint64_t)si_grace_ms * slots_per_second / 1000) {
-    if (si_bump_without_sib1)
-      bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_SI_MODIFICATION_ANNOUNCED);
+    bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_SI_MODIFICATION_ANNOUNCED);
     pending.active = false;
   }
   pthread_mutex_unlock(&lock);
@@ -432,14 +395,7 @@ void nr_cfg_epoch_note_rx_recovery(void) { simple_bump(NR_EPOCH_SOFT, NR_CAUSE_R
 void nr_cfg_epoch_note_continuity_loss_samples(int64_t gap_samples, uint64_t samples_per_ms)
 {
   if (!is_enabled()) return;
-  uint64_t threshold_ms = 10;
-  const char *setting = getenv("ISAC_RECONF_GAP_HARD_MS");
-  if (setting && *setting) {
-    char *end;
-    errno = 0;
-    unsigned long long parsed = strtoull(setting, &end, 10);
-    if (!errno && end != setting && !*end && setting[0] != '-') threshold_ms = parsed;
-  }
+  const uint64_t threshold_ms = 10;
   const bool hard = gap_samples <= 0 || !samples_per_ms ||
       (threshold_ms <= UINT64_MAX / samples_per_ms && (uint64_t)gap_samples >= threshold_ms * samples_per_ms);
   epoch_event_t event = {.has_gap = true, .gap_samples = gap_samples,

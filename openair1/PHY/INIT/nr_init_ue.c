@@ -247,9 +247,8 @@ int init_nr_ue_signal(PHY_VARS_NR_UE *ue, int nb_connected_gNB)
     // ceil((NB_RB*8(max allocation per RB)*2(QPSK))/32)
     ue->nr_csi_info = malloc16_clear(sizeof(nr_csi_info_t));
     /* TS 38.211 table 7.4.1.5.3-1 rows 11-18 use 16/24/32 ports; those port buffers (32 x one slot, ~4 MB at 273 PRB) exist only
-     * with ISAC_CSIRS_PORTS_GT8=1, otherwise the capture skips such resources (csi_rx.c). */
-    const char *gt8 = getenv("ISAC_CSIRS_PORTS_GT8");
-    ue->nr_csi_info->csi_rs_generated_ports = (gt8 && atoi(gt8) != 0) ? 32 : NR_MAX_CSI_PORTS;
+     * in passive mode, otherwise the capture skips such resources (csi_rx.c). */
+    ue->nr_csi_info->csi_rs_generated_ports = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 32 : NR_MAX_CSI_PORTS;
     ue->nr_csi_info->csi_rs_generated_signal =
         malloc16(ue->nr_csi_info->csi_rs_generated_ports * sizeof(*ue->nr_csi_info->csi_rs_generated_signal));
     for (int i = 0; i < ue->nr_csi_info->csi_rs_generated_ports; i++) {

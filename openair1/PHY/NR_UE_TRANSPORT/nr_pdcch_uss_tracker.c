@@ -1,4 +1,6 @@
 #define _GNU_SOURCE
+#include "common/utils/nr_bg_lane.h"
+#include "PHY/TOOLS/nr_admit.h"
 #include "common/utils/nr_core_plan.h"
 #include "nr_pdcch_uss_tracker.h"
 
@@ -35,6 +37,7 @@ typedef struct {
   uint32_t scored_generation;
   uint32_t score_round;
   uint64_t observations;
+  bool settled; /* a scoring round found a stable RNTI: rescoring may back off */
   int n;
   int head;
   uss_sample_t sample[USS_TRACK_HISTORY];
@@ -73,6 +76,12 @@ static const uint32_t k_a[3] = {39827, 39829, 39839};
 /* allowed[N][M-index][delta] says whether delta=floor(m*N/M) for some candidate m. */
 static uint8_t g_allowed[136][7][136];
 static uint8_t g_count[136][7];
+/* Fast-scorer tables (tables_init): per (N, delta) bit mi = "M hypothesis mi carries identity information at this N and allows delta"; per (N, mi) the normalised hit / miss increments; 2^32/N+1 for the exact reciprocal modulo. */
+static uint8_t g_hitmask[136][136];
+static float g_vh[136][7], g_vm[136][7];
+static uint32_t g_magic[136];
+#define USS_TRACK_BACKOFF 4 /* a settled geometry is rescored every 256*4 observations */
+static pthread_once_t g_tables_once = PTHREAD_ONCE_INIT;
 
 static bool same_geometry(const nr_pdcch_uss_geometry_t *a, const nr_pdcch_uss_geometry_t *b)
 {
@@ -123,14 +132,16 @@ static void insert_top(uint16_t rnti, float score, uint16_t hits, uint8_t hash, 
   out_hash[at] = hash; out_m[at] = m;
 }
 
-static void score_snapshot(int state_index, uint32_t generation,
-                           const nr_pdcch_uss_geometry_t *geometry,
-                           const uss_sample_t *sample, int n)
+/* score_compute_ref: the original exact scorer (all 65535 RNTIs x 3 hash ids x n samples x 7 M values, with a 64-bit modulo and a float division in the innermost loop). Kept as the A/B reference of score_compute_fast. */
+static void score_compute_ref(const uss_sample_t *sample, int n,
+                              uint16_t best_rnti[NR_PDCCH_USS_TRACKER_TOP], float best_score[NR_PDCCH_USS_TRACKER_TOP],
+                              uint16_t best_hits[NR_PDCCH_USS_TRACKER_TOP], uint8_t best_hash[NR_PDCCH_USS_TRACKER_TOP],
+                              uint8_t best_m[NR_PDCCH_USS_TRACKER_TOP])
 {
-  uint16_t best_rnti[NR_PDCCH_USS_TRACKER_TOP] = {0};
-  float best_score[NR_PDCCH_USS_TRACKER_TOP];
-  uint16_t best_hits[NR_PDCCH_USS_TRACKER_TOP] = {0};
-  uint8_t best_hash[NR_PDCCH_USS_TRACKER_TOP] = {0}, best_m[NR_PDCCH_USS_TRACKER_TOP] = {0};
+  memset(best_rnti, 0, NR_PDCCH_USS_TRACKER_TOP * sizeof(uint16_t));
+  memset(best_hits, 0, NR_PDCCH_USS_TRACKER_TOP * sizeof(uint16_t));
+  memset(best_hash, 0, NR_PDCCH_USS_TRACKER_TOP);
+  memset(best_m, 0, NR_PDCCH_USS_TRACKER_TOP);
   for (int i = 0; i < NR_PDCCH_USS_TRACKER_TOP; ++i)
     best_score[i] = -INFINITY;
 
@@ -189,6 +200,104 @@ static void score_snapshot(int state_index, uint32_t generation,
     insert_top((uint16_t)rnti, rnti_best, rnti_hits, rnti_hash, rnti_m,
                best_rnti, best_score, best_hits, best_hash, best_m);
   }
+}
+
+/* score_compute_fast : same scoring as score_compute_ref, same candidate ranking, with the per-sample invariants hoisted out of the RNTI loop:
+ *   - y = (a^(slot+1) * rnti mod 65537) mod N via the 2^16 = -1 mod 65537 fold and a reciprocal multiply (exact for N <= 135), no 64-bit % in the loop;
+ *   - the float division and the sqrt of the 7 M hypotheses become per-sample weight tables w*vh / w*vm, the hit test one byte of a (N, delta) mask.
+ *   Only the float summation rounding differs from the reference (last ulp). */
+static void score_compute_fast(const uss_sample_t *sample, int n,
+                               uint16_t best_rnti[NR_PDCCH_USS_TRACKER_TOP], float best_score[NR_PDCCH_USS_TRACKER_TOP],
+                               uint16_t best_hits[NR_PDCCH_USS_TRACKER_TOP], uint8_t best_hash[NR_PDCCH_USS_TRACKER_TOP],
+                               uint8_t best_m[NR_PDCCH_USS_TRACKER_TOP])
+{
+  memset(best_rnti, 0, NR_PDCCH_USS_TRACKER_TOP * sizeof(uint16_t));
+  memset(best_hits, 0, NR_PDCCH_USS_TRACKER_TOP * sizeof(uint16_t));
+  memset(best_hash, 0, NR_PDCCH_USS_TRACKER_TOP);
+  memset(best_m, 0, NR_PDCCH_USS_TRACKER_TOP);
+  for (int i = 0; i < NR_PDCCH_USS_TRACKER_TOP; ++i)
+    best_score[i] = -INFINITY;
+
+  struct { uint8_t ai, N, pos; uint32_t mult[3]; uint32_t magic; float wvh[8], wvm[8]; } v[USS_TRACK_HISTORY];
+  int nv = 0;
+  for (int j = 0; j < n; ++j) {
+    const int ai = al_index(sample[j].o.al);
+    if (ai < 0 || sample[j].o.al == 0 || sample[j].o.cce % sample[j].o.al)
+      continue;
+    const int N = sample[j].n_cces / sample[j].o.al;
+    const int pos = sample[j].o.cce / sample[j].o.al;
+    if (N < 2 || N > 135 || pos >= N)
+      continue;
+    const float w = fminf(fmaxf(sample[j].o.score, 0.0f), 1.0f);
+    v[nv].ai = (uint8_t)ai; v[nv].N = (uint8_t)N; v[nv].pos = (uint8_t)pos; v[nv].magic = g_magic[N];
+    for (int cid = 0; cid < 3; ++cid)
+      v[nv].mult[cid] = mod_pow(k_a[cid], (uint32_t)sample[j].slot + 1u);
+    for (int mi = 0; mi < 8; ++mi) {
+      v[nv].wvh[mi] = mi < 7 ? w * g_vh[N][mi] : 0.0f;
+      v[nv].wvm[mi] = mi < 7 ? w * g_vm[N][mi] : 0.0f;
+    }
+    ++nv;
+  }
+
+  for (uint32_t rnti = 1; rnti <= 65535u; ++rnti) {
+    float rnti_best = -INFINITY;
+    uint16_t rnti_hits = 0;
+    uint8_t rnti_hash = 0, rnti_m = 0;
+    for (int cid = 0; cid < 3; ++cid) {
+      float acc[NR_PDCCH_USS_TRACKER_AL][8] = {{0}};
+      uint16_t hits[NR_PDCCH_USS_TRACKER_AL][8] = {{0}};
+      bool seen_al[NR_PDCCH_USS_TRACKER_AL] = {false};
+      for (int j = 0; j < nv; ++j) {
+        const uint32_t t = v[j].mult[cid] * rnti; /* < 2^32: mult <= 65536, rnti <= 65535 */
+        int32_t r = (int32_t)(t & 0xffffu) - (int32_t)(t >> 16);
+        r += (r < 0) * 65537;
+        const uint32_t q = (uint32_t)(((uint64_t)(uint32_t)r * v[j].magic) >> 32);
+        int d = (int)v[j].pos - (r - (int)(q * v[j].N));
+        d += (d < 0) * v[j].N;
+        const unsigned mask = g_hitmask[v[j].N][d];
+        float *a = acc[v[j].ai];
+        uint16_t *h = hits[v[j].ai];
+        seen_al[v[j].ai] = true;
+        for (int mi = 0; mi < 8; ++mi) {
+          const unsigned b = (mask >> mi) & 1u;
+          a[mi] += b ? v[j].wvh[mi] : v[j].wvm[mi];
+          h[mi] += (uint16_t)b;
+        }
+      }
+      float total = 0.0f;
+      uint16_t total_hits = 0;
+      uint8_t strongest_m = 0;
+      float strongest = -INFINITY;
+      for (int ai = 0; ai < NR_PDCCH_USS_TRACKER_AL; ++ai) {
+        if (!seen_al[ai]) continue;
+        int bmi = 0;
+        for (int mi = 1; mi < 7; ++mi)
+          if (acc[ai][mi] > acc[ai][bmi]) bmi = mi;
+        if (acc[ai][bmi] > 0.0f) total += acc[ai][bmi];
+        total_hits += hits[ai][bmi];
+        if (acc[ai][bmi] > strongest) { strongest = acc[ai][bmi]; strongest_m = k_m[bmi]; }
+      }
+      if (total > rnti_best) {
+        rnti_best = total; rnti_hits = total_hits; rnti_hash = (uint8_t)cid; rnti_m = strongest_m;
+      }
+    }
+    insert_top((uint16_t)rnti, rnti_best, rnti_hits, rnti_hash, rnti_m,
+               best_rnti, best_score, best_hits, best_hash, best_m);
+  }
+}
+
+static void tables_init(void);
+
+static void score_snapshot(int state_index, uint32_t generation,
+                           const nr_pdcch_uss_geometry_t *geometry,
+                           const uss_sample_t *sample, int n)
+{
+  uint16_t best_rnti[NR_PDCCH_USS_TRACKER_TOP];
+  float best_score[NR_PDCCH_USS_TRACKER_TOP];
+  uint16_t best_hits[NR_PDCCH_USS_TRACKER_TOP];
+  uint8_t best_hash[NR_PDCCH_USS_TRACKER_TOP], best_m[NR_PDCCH_USS_TRACKER_TOP];
+  tables_init();
+  score_compute_fast(sample, n, best_rnti, best_score, best_hits, best_hash, best_m);
 
   pthread_mutex_lock(&g_lock);
   uss_geometry_state_t *s = &g_state[state_index];
@@ -228,6 +337,7 @@ static void score_snapshot(int state_index, uint32_t generation,
     for (int i = 0; i < USS_TRACK_MEMORY; ++i)
       stable += s->observations >= 256 && s->memory[i].rnti
                 && s->memory[i].streak >= USS_TRACK_STABLE_ROUNDS;
+    if (stable > 0) s->settled = true;
     LOG_A(PHY, "SENSING: USS_TRACK geometry=rb%u+%u dur%u map=%u/%u/%u id=%u obs=%d "
                "top=0x%04x score=%.3f hits=%u hash=%u M=%u gap=%.3f stable=%d\n",
           geometry->rb_offset, geometry->span_rb, geometry->duration, geometry->bundle,
@@ -247,7 +357,7 @@ static void *tracker_worker(void *unused)
   const int sched_rc = pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
   int affinity_rc = 0;
   int core = -1;
-  const char *core_env = getenv("ISAC_PDCCH_USS_CORE");
+  const char *core_env = nr_env_core("ISAC_PDCCH_USS_CORE");
   if (core_env && *core_env) {
     core = atoi(core_env);
     if (core >= 0 && core < CPU_SETSIZE) {
@@ -266,6 +376,7 @@ static void *tracker_worker(void *unused)
       affinity_rc = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
   }
   pthread_setname_np(pthread_self(), "pdcchUssHash");
+  nr_bg_lane_enter("ISAC_PDCCH_USS_CORE");
   LOG_A(PHY, "SENSING: USS_TRACK worker policy=SCHED_OTHER sched_rc=%d core=%d affinity_rc=%d\n",
         sched_rc, core, affinity_rc);
   for (;;) {
@@ -295,19 +406,20 @@ static void *tracker_worker(void *unused)
       }
     }
     pthread_mutex_unlock(&g_lock);
-    if (n >= USS_TRACK_MIN_OBS)
-      score_snapshot(job.state, generation, &geometry, sample, n);
+    if (n >= USS_TRACK_MIN_OBS) {
+      /* ISAC_BG_LANE: the history stays in the tracker, so a skipped round loses nothing (the next job rescans it) */
+      const uint64_t t0 = nr_admit_now_ns();
+      if (nr_admit_try(NR_ADMIT_USS, t0, 0, 0)) {
+        score_snapshot(job.state, generation, &geometry, sample, n);
+        nr_admit_done(NR_ADMIT_USS, nr_admit_now_ns() - t0);
+      }
+    }
   }
   return NULL;
 }
 
-/* tracker_init: one-time setup (pthread_once): reads ISAC_PDCCH_USS_TRACKER (on by default), builds the table of allowed USS hash positions per CORESET size and starts the tracker worker.
- *   Disables the tracker when the worker cannot be started. Callers: the USS tracker entry points in this file.
- */
-static void tracker_init(void)
+static void tables_init_once(void)
 {
-  const char *e = getenv("ISAC_PDCCH_USS_TRACKER");
-  g_enabled = !e || atoi(e) != 0;
   for (int N = 1; N <= 135; ++N)
     for (int mi = 0; mi < 7; ++mi)
       for (int m = 0; m < k_m[mi]; ++m) {
@@ -317,6 +429,32 @@ static void tracker_init(void)
           ++g_count[N][mi];
         }
       }
+  for (int N = 2; N <= 135; ++N) {
+    g_magic[N] = (uint32_t)((1ull << 32) / (uint32_t)N) + 1u;
+    for (int mi = 0; mi < 7; ++mi) {
+      const float p = (float)g_count[N][mi] / (float)N;
+      if (p >= 1.0f) continue; /* carries no identity information at this N: increments stay 0, no bit */
+      const float sd = sqrtf(p * (1.0f - p));
+      g_vh[N][mi] = (1.0f - p) / sd;
+      g_vm[N][mi] = (0.0f - p) / sd;
+      for (int d = 0; d < N; ++d)
+        if (g_allowed[N][mi][d]) g_hitmask[N][d] |= (uint8_t)(1u << mi);
+    }
+  }
+}
+
+static void tables_init(void)
+{
+  pthread_once(&g_tables_once, tables_init_once);
+}
+
+/* tracker_init: one-time setup (pthread_once): builds the table of allowed USS hash positions per CORESET size and starts the tracker worker.
+ *   Disables the tracker when the worker cannot be started. Callers: the USS tracker entry points in this file.
+ */
+static void tracker_init(void)
+{
+  g_enabled = true;
+  tables_init();
   if (g_enabled && nr_core_plan_create(&g_thread, NULL, tracker_worker, NULL, nr_core_plan_cpu(NR_CP_USS, 0, -1)) == 0) {
     g_thread_started = true;
     LOG_A(PHY, "SENSING: USS_TRACK enabled: bounded producer, asynchronous 65535-RNTI hash scorer\n");
@@ -379,7 +517,7 @@ void nr_pdcch_uss_tracker_observe(const nr_pdcch_uss_geometry_t *geometry,
   /* Rescore on distinct-slot milestones. Duplicate geometry passes cannot manufacture recurrence. */
   const bool due = !replaced && (s->observations == 8 || s->observations == 16
                    || s->observations == 32 || s->observations == 64
-                   || (s->observations > 64 && (s->observations & 255u) == 0));
+                   || (s->observations > 64 && s->observations % (256u * (s->settled ? (unsigned)USS_TRACK_BACKOFF : 1u)) == 0));
   if (due && s->n >= USS_TRACK_MIN_DISTINCT_SLOTS && g_q_count < USS_TRACK_QUEUE) {
     g_queue[g_q_tail] = (uss_job_t){.state = si, .generation = s->generation};
     g_q_tail = (g_q_tail + 1) % USS_TRACK_QUEUE;
@@ -445,4 +583,18 @@ void nr_pdcch_uss_tracker_stop(void)
   pthread_join(g_thread, NULL);
   g_thread_started = false;
   g_enabled = false;
+}
+
+/* nr_pdcch_uss_tracker_score_test: unit-test hook, runs the reference (fast=0) or fast (fast=1) scorer on n observations (n <= 64) without the worker thread and returns the top-4 RNTIs. */
+void nr_pdcch_uss_tracker_score_test(int fast, const nr_pdcch_uss_test_sample_t *in, int n,
+                                     uint16_t rnti[NR_PDCCH_USS_TRACKER_TOP], float score[NR_PDCCH_USS_TRACKER_TOP],
+                                     uint16_t hits[NR_PDCCH_USS_TRACKER_TOP])
+{
+  uss_sample_t smp[USS_TRACK_HISTORY];
+  uint8_t hash[NR_PDCCH_USS_TRACKER_TOP], m[NR_PDCCH_USS_TRACKER_TOP];
+  if (n > USS_TRACK_HISTORY) n = USS_TRACK_HISTORY;
+  for (int i = 0; i < n; ++i)
+    smp[i] = (uss_sample_t){.absolute_slot = (uint32_t)i, .slot = in[i].slot, .n_cces = in[i].n_cces, .o = in[i].o};
+  tables_init();
+  (fast ? score_compute_fast : score_compute_ref)(smp, n, rnti, score, hits, hash, m);
 }

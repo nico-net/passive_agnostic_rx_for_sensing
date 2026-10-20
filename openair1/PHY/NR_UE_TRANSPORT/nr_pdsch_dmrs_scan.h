@@ -55,6 +55,11 @@ int nr_dmrs_scan_slot_pool(const int16_t *const *rx, int nant, int N, int fco, i
 float nr_dmrs_scan_prb_score(const int16_t *const *rx, int nant, int N, int fco, int slot, int symbol, int symbols_per_slot,
                              int nid, int nscid, const uint16_t *crb, int n_crb);
 
+/** Gold bits 0..n-1 of identity (nid, nscid) on (slot, symbol), as nr_dmrs_scan_prb_score() uses them (n = 12 * (max CRB + 1)). */
+void nr_dmrs_scan_prb_gold(int slot, int symbol, int symbols_per_slot, int nid, int nscid, int n, uint8_t *out);
+/** nr_dmrs_scan_prb_score() on bits from nr_dmrs_scan_prb_gold() (>= 12 * (max CRB + 1) of them); the caller validates. */
+float nr_dmrs_scan_prb_score_gold(const int16_t *const *rx, int nant, int N, int fco, const uint8_t *c, const uint16_t *crb,
+                                  int n_crb);
 /** Vote the hits of PDSCH slot abs_slot for rnti (once per (rnti, abs_slot)). */
 void nr_dmrs_scan_vote(uint16_t rnti, int64_t abs_slot, const nr_dmrs_scan_hit_t *hits, int n);
 /** Up to max identities of rnti with >= NR_DMRS_SCAN_MIN_VOTES votes, most voted first. */

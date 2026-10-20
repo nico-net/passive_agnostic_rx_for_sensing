@@ -73,6 +73,8 @@ void nr_pdcch_coreset_map_get_css0(int *first_rb, int *n_rb); /* grid RB, as set
 /** Stage-1 blind nID sweep (ISAC_COREMAP_IDSWEEP=1): want() says whether/where to snapshot this
  * slot (the FIRST of nr_pdcch_coreset_map_idsweep_dur() consecutive symbols to FEP and hand to
  * push(), antenna 0). Heavy work is on a worker thread. */
+void nr_pdcch_coreset_map_idsweep_gate_bypass(int on); /* ACQMISS recovery */
+void nr_pdcch_nid_capture_metrics(uint64_t *offered, uint64_t *taken, uint64_t *empty, float *noise);
 int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps); /* start symbol to capture, or -1 */
 /** Consecutive symbols captured per snapshot (ISAC_COREMAP_IDSWEEP_DUR, default 1, max 3) -- the
  * "second capture pass" for a CORESET whose duration a dur=1 run's per-symbol lit rate already

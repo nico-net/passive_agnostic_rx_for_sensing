@@ -1,14 +1,15 @@
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  *
- * ISAC_PUSCH_MMSE_MODE=2: unbiased 2-layer UL equaliser (nr_mmse_2layers_unbiased) against the stock
+ * Passive-RX UL MMSE mode 2: unbiased 2-layer UL equaliser (nr_mmse_2layers_unbiased) against the stock
  * nr_mmse_2layers(), on synthetic 2-layer 256QAM through OAI's own nr_channel_compensation().
  *   kappa = mean(|Re z|, |Im z|) / mean(threshold n1): an unbiased equaliser gives ~1 (mean |coord| of 256QAM per
  *   dimension = 8/sqrt(170) = QAM256_n1). Stock with diagonal loading on correlated layers: < 1 (QAM-FIX, DL twin).
- * Flag off is the stock function itself (the UL call site only branches on ISAC_PUSCH_MMSE_MODE == 2), checked
+ * Mode 0 is the stock function itself (the UL call site only branches on mode == 2), checked
  * byte for byte against a second stock call on the same input.
  */
 #include <gtest/gtest.h>
+#include "../nr_ulsch_passive_branch.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -149,4 +150,12 @@ TEST(PuschMmse2, FlagOffPathIsTheUnchangedDeterministicStockFunction)
   nr_mmse_2layers(ca, kBuf, kBuf, kRx, kL, a.maga, a.magb, a.magc, a.chf, kRb, 8, kShift, 0, kRe, 1000);
   nr_mmse_2layers(cb, kBuf, kBuf, kRx, kL, b.maga, b.magb, b.magc, b.chf, kRb, 8, kShift, 0, kRe, 1000);
   EXPECT_EQ(0, memcmp(&a, &b, sizeof(a)));
+}
+
+/* |H|^2 = 1e6, LS noise sigma^2 = 1e4, smoother gain g = 1/8: sig2 = 1e6 + 1250, resid2 = 8750 => SNR = 20 dB */
+TEST(UlDmrsSnr, KnownNoise) {
+  EXPECT_NEAR(20.0f, nr_ulsch_dmrs_snr_db(1e6 + 1250, 8750), 1e-3);
+  EXPECT_TRUE(std::isnan(nr_ulsch_dmrs_snr_db(1e6, 0)));
+  EXPECT_TRUE(std::isnan(nr_ulsch_dmrs_snr_db(0, 5)));
+  EXPECT_NEAR(-30.0f, nr_ulsch_dmrs_snr_db(1.0, 1e4), 1e-3); /* signal below the noise floor clamps, never NaN/inf */
 }

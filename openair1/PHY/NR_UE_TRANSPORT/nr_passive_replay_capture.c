@@ -44,8 +44,6 @@ typedef struct {
   replay_ul_t ul[REPLAY_UL];
   replay_dl_t dl[REPLAY_DL];
 } replay_header_t;
-#include "nr_passive_replay_probe.h"
-#include "nr_passive_replay_ul_config.h"
 #include "nr_passive_delay_contract.h"
 static replay_header_t *header;
 static unsigned char *iq;
@@ -122,7 +120,7 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
   }
   memset(iq,0,bytes); /* Prefault before RF start, never page in 157 MB at capture time. */
   header->magic=UINT64_C(0x314951525041534e);
-  header->version=getenv("ISAC_PASSIVE_REPLAY_FAILURES")?4:3;
+  header->version=3;
   header->header_bytes=sizeof(*header);
   header->job_bytes=sizeof(nr_pdsch_passive_job_t); header->fp_bytes=sizeof(*fp);
   header->iq_bytes=bytes; header->slots=REPLAY_FRAMES*fp->slots_per_frame;
@@ -315,8 +313,6 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
   if (h->n_ul<8) printf("UL-SEARCH UNRESOLVED: fewer than eight raw observations; no UL convergence claim\n");
   printf("REPLAY %s: identical DL controls=%u failed=%u raw UL=%u; no radio opened\n",
          failed?"VOID":"PASS",matches,failed,h->n_ul);
-  if (!failed && getenv("ISAC_PASSIVE_REPLAY_UL_PROBE")) replay_probe_ul(ue,h,samples);
-  if (!failed && getenv("ISAC_PASSIVE_REPLAY_UL_CONFIG")) replay_ul_config(ue,h,samples);
   free(rxF); free(samples); free(h);
   return failed?2:0;
 }

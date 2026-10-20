@@ -17,15 +17,6 @@ void exit_function(const char *, const char *, int, const char *, int) { std::ab
 }
 
 namespace {
-struct IgnoreSib1Guard {
-  bool present = getenv("ISAC_TD_IGNORE_SIB1") != nullptr;
-  std::string value = present ? getenv("ISAC_TD_IGNORE_SIB1") : "";
-  ~IgnoreSib1Guard() {
-    if (present) setenv("ISAC_TD_IGNORE_SIB1", value.c_str(), 1);
-    else unsetenv("ISAC_TD_IGNORE_SIB1");
-    nr_cfg_ignore_sib1_reset_for_test();
-  }
-};
 std::atomic<int> calls{0};
 nr_cfg_epoch_snapshot_t last{};
 void listener(const nr_cfg_epoch_snapshot_t *s) { last = *s; ++calls; }
@@ -34,7 +25,6 @@ class CfgEpoch : public ::testing::Test {
  protected:
   void SetUp() override {
     nr_cfg_epoch_reset();
-    nr_cfg_si_options_reset_for_test();
     calls = 0;
     nr_cfg_epoch_subscribe(listener);
     nr_cfg_epoch_note_identity(10, 100, 200);
@@ -103,34 +93,6 @@ TEST_F(CfgEpoch, Sib1SameSemanticNoBump) {
   nr_cfg_epoch_drain();
   EXPECT_EQ(calls, 0);
 }
-TEST_F(CfgEpoch, IgnoreSib1ArmKeepsOnlyNonSib1EpochSources) {
-  IgnoreSib1Guard guard;
-  setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
-  nr_cfg_ignore_sib1_reset_for_test();
-  EXPECT_TRUE(nr_cfg_ignore_sib1());
-  EXPECT_FALSE(nr_cfg_epoch_note_sib1(42, 0));
-  EXPECT_FALSE(nr_cfg_epoch_note_sib1(43, 100));
-  nr_cfg_epoch_set_si_period(100);
-  nr_cfg_epoch_note_si_modification(51, 100);
-  nr_cfg_epoch_tick(5200);
-  EXPECT_EQ(nr_cfg_epoch_current_slot(), 5200u);
-  nr_cfg_epoch_refine_point_a(201); // SIB1-derived Point A cannot reset identity in this arm
-  EXPECT_EQ(nr_cfg_epoch_current(), 0u);
-  EXPECT_EQ(nr_cfg_epoch_si_period(), 0u);
-  EXPECT_EQ(nr_cfg_epoch_si_boundary(), 0u);
-  EXPECT_FALSE(nr_cfg_epoch_sib1_request_allowed(5200));
-  EXPECT_FALSE(nr_cfg_epoch_si_redecode_pending(5200));
-  nr_cfg_epoch_note_mib(1);
-  nr_cfg_epoch_note_mib(2);
-  EXPECT_EQ(nr_cfg_epoch_current(), 1u);
-  unsetenv("ISAC_TD_IGNORE_SIB1");
-  EXPECT_TRUE(nr_cfg_ignore_sib1()); // cached until the test-only reset
-  nr_cfg_ignore_sib1_reset_for_test();
-  EXPECT_FALSE(nr_cfg_ignore_sib1());
-  EXPECT_TRUE(nr_cfg_epoch_note_sib1(42, 0));
-  EXPECT_TRUE(nr_cfg_epoch_note_sib1(43, 100));
-  EXPECT_EQ(nr_cfg_epoch_current(), 2u);
-}
 TEST_F(CfgEpoch, SiModAnnouncedBumpsOnlyAtBoundaryIfChanged) {
   nr_cfg_epoch_note_sib1(42, 0);
   nr_cfg_epoch_note_si_modification(51, 100);
@@ -163,32 +125,6 @@ TEST_F(CfgEpoch, SiModBoundaryWithoutSib1ReacquiredBumps) {
   nr_cfg_epoch_drain();
   EXPECT_EQ(calls, 1);
 }
-TEST_F(CfgEpoch, SiModNoReacquireFallbackCanBeDisabled) {
-  setenv("ISAC_RECONF_SI_BUMP_WITHOUT_SIB1", "0", 1);
-  nr_cfg_si_options_reset_for_test();
-  nr_cfg_epoch_note_sib1(42, 0);
-  nr_cfg_epoch_note_si_modification(51, 100);
-  nr_cfg_epoch_tick(100);
-  nr_cfg_epoch_drain();
-  EXPECT_EQ(calls, 0);
-  unsetenv("ISAC_RECONF_SI_BUMP_WITHOUT_SIB1");
-  nr_cfg_si_options_reset_for_test();
-}
-TEST_F(CfgEpoch, SiOptionsAreCachedAfterFirstTick) {
-  setenv("ISAC_RECONF_SI_GRACE_MS", "100", 1);
-  nr_cfg_si_options_reset_for_test();
-  nr_cfg_epoch_note_sib1(42, 0);
-  nr_cfg_epoch_note_si_modification(51, 100);
-  nr_cfg_epoch_tick(199);
-  EXPECT_EQ(nr_cfg_epoch_current(), 0u);
-  setenv("ISAC_RECONF_SI_GRACE_MS", "1", 1);
-  nr_cfg_epoch_tick(199);
-  EXPECT_EQ(nr_cfg_epoch_current(), 0u);
-  nr_cfg_epoch_tick(200);
-  EXPECT_EQ(nr_cfg_epoch_current(), 1u);
-  unsetenv("ISAC_RECONF_SI_GRACE_MS");
-  nr_cfg_si_options_reset_for_test();
-}
 TEST_F(CfgEpoch, ContinuityLossLoggedAsContinuity) {
   nr_cfg_epoch_note_continuity_loss_samples(10000, 1000);
   nr_cfg_epoch_drain();
@@ -220,16 +156,6 @@ TEST_F(CfgEpoch, LongGapIsHardReverify) {
     EXPECT_EQ(last.last_cause, NR_CAUSE_CONTINUITY_LOSS);
   }
   EXPECT_EQ(calls, 2);
-}
-TEST_F(CfgEpoch, GapThresholdFromEnv) {
-  setenv("ISAC_RECONF_GAP_HARD_MS", "20", 1);
-  nr_cfg_epoch_note_continuity_loss_samples(19000, 1000);
-  nr_cfg_epoch_drain();
-  EXPECT_EQ(last.last_class, NR_EPOCH_SOFT);
-  nr_cfg_epoch_note_continuity_loss_samples(20000, 1000);
-  nr_cfg_epoch_drain();
-  EXPECT_EQ(last.last_class, NR_EPOCH_HARD_REVERIFY);
-  unsetenv("ISAC_RECONF_GAP_HARD_MS");
 }
 TEST_F(CfgEpoch, TwoConvergedRntisWithin2sIsSoft) {
   nr_cfg_epoch_note_rnti_reopened(1, true, 100);

@@ -164,3 +164,10 @@ TEST(GpuBudget, RepeatedOutsideOccupancyCannotResetMaintain) {
   EXPECT_TRUE(due(500003,0,1));EXPECT_EQ(s.mode,NR_GPU_DISC_MAINTAIN);
   EXPECT_FALSE(due(500004,0,1));
 }
+TEST(GpuBudget, LargeGrantCounter) {
+  EXPECT_EQ(nr_gpu_budget_rt_large_active(),0);
+  nr_gpu_budget_rt_large_begin();nr_gpu_budget_rt_large_begin();
+  EXPECT_EQ(nr_gpu_budget_rt_large_active(),2);
+  nr_gpu_budget_rt_large_end();nr_gpu_budget_rt_large_end();nr_gpu_budget_rt_large_end(); /* extra end clamps at 0 */
+  EXPECT_EQ(nr_gpu_budget_rt_large_active(),0);
+}

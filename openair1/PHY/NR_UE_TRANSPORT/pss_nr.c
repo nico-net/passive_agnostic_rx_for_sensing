@@ -172,24 +172,14 @@ static int cmp_pss_peak(const void *a, const void *b)
 *
 *********************************************************************/
 
-/* ISAC_PSS_DECIM=1 (default off): decimated float PSS search for the initial-sync full search (see nr_pss_decim.h:
- * ~60x less work than the 4096-tap int16 search and no dot_product() floor-shift bias on weak inputs).
- * ISAC_PSS_ACC=K (needs ISAC_PSS_DECIM): non-coherent fold of the decimated profile over captures on the absolute 20 ms
- * grid, acc = acc*(1-1/K) + new; SSS/PBCH CRC still decide on the newest capture. */
-static int pss_env_int(const char *name, int *cache)
-{
-  if (*cache < 0) {
-    const char *e = getenv(name);
-    *cache = e ? atoi(e) : 0;
-  }
-  return *cache;
-}
+/* Passive only: decimated float PSS search for the initial-sync full search (see nr_pss_decim.h): ~60x less work than the
+ * 4096-tap int16 search and no dot_product() floor-shift bias on weak inputs. K=8: non-coherent fold of the decimated profile
+ * over captures on the absolute 20 ms grid, acc = acc*(1-1/K) + new; SSS/PBCH CRC still decide on the newest capture. */
 static nr_pss_fold_t s_pss_fold; /* initial sync only (single GSCN, sync actor) */
 
 static nr_pss_info_t pss_search_decim(const pss_search_t *p, int D, int pss_index_start, int pss_index_end)
 {
-  static int s_k = -1;
-  const int K = min(max(pss_env_int("ISAC_PSS_ACC", &s_k), 1), 64);
+  const int K = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 8 : 1;
   const int N = p->ofdm_symbol_size;
   c16_t(*pssTime)[N] = (c16_t(*)[N])p->pssTime;
   const int npos = p->rxdata_length / D;
@@ -210,13 +200,8 @@ static nr_pss_info_t pss_search_decim(const pss_search_t *p, int D, int pss_inde
   }
   free(xd);
   const bool fold = p->abs_valid && K > 1;
-  /* ISAC_PSS_PEAK_RATIO (default 5 = 7 dB): lowering it passes weaker PSS candidates to SSS and the PBCH CRC24, which decide anyway */
-  static double s_ratio = -1;
-  if (s_ratio < 0) {
-    const char *e = getenv("ISAC_PSS_PEAK_RATIO");
-    s_ratio = e && atof(e) >= 1 ? atof(e) : 5;
-  }
-  const double ratio_min = s_ratio;
+  /* 5 = 7 dB; weaker PSS candidates are left to SSS and the PBCH CRC24 only above this */
+  const double ratio_min = 5;
   nr_pss_info_t info = {0};
   int count = 0;
   for (int s = pss_index_start; s < pss_index_end; s++) {
@@ -346,9 +331,8 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
     pss_index_end = max_size;
   }
 
-  static int s_decim = -1;
   const int D = nr_pss_decim_factor(p->ofdm_symbol_size);
-  if (p->decim && D > 0 && p->window_radius == 0 && p->search_stride <= 4 && pss_env_int("ISAC_PSS_DECIM", &s_decim) > 0
+  if (p->decim && D > 0 && p->window_radius == 0 && p->search_stride <= 4 && IS_PASSIVE_RX_MODE(get_softmodem_params())
       && get_softmodem_params()->sl_mode == 0)
     return pss_search_decim(p, D, pss_index_start, pss_index_end);
 

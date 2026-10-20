@@ -40,6 +40,7 @@ extern void nr_csirs_monitor_remove_dynamic(const fapi_nr_dl_config_csirs_pdu_re
 
 /* Weak for the standalone blind-search fixture; the receiver links the epoch owner. */
 __attribute__((weak)) void nr_cfg_epoch_note_csirs_map_change(void);
+__attribute__((weak)) bool nr_cfg_reconf_enabled(void);
 static nr_csirs_observer_t g_csirs_obs;
 /* DL processing can use multiple workers, and rate matching is read by decode workers. */
 static __thread bool *g_disc_fep_map;
@@ -71,7 +72,6 @@ static void discovery_mark_admitted(int);
  *   Used with __attribute__((cleanup)) in nr_csirs_blind_rt_slot() and nr_csirs_blind_rt_rate_match_all(). A NULL lock is a no-op.
  */
 static void csirs_unlock(pthread_mutex_t **lock) { if (*lock) { discovery_publish(); pthread_mutex_unlock(*lock); } }
-static int g_timing = -1;
 static int g_reconf = -1;
 static uint64_t now_us(void)
 {
@@ -161,7 +161,6 @@ static bool nzp_observer_score(int idx, uint32_t slot, double rho)
 static double   g_zp_null[64];
 static int      g_zp_null_n, g_zp_null_w;
 static int      g_on = -1;      /* -1 = not read, 0 = off, 1 = on */
-static int      g_rank = -1;    /* ISAC_CSIRS_BLIND_RANK: keep scoring after a confirmation */
 static int      g_conf_logged;   /* g_st confirmations already logged */
 /* Candidate-indexed counters survive export-bank compaction. Diagnostic details are capped;
  * every confirmation still carries its complete bounded epoch history in the normal log. */
@@ -339,12 +338,12 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csir
     uint16_t old = g_st.seed_period[i];
     if (!old || (old % h->period && h->period % old)) continue;
     if (!discovery_union_seed(i, h->period, h->offset, &period, offsets, &n)) {
-      /* CSI-FULL (ISAC_CSIRS_FULL_BURSTS=1): a cell sends the same row-1 TRS geometry in more than one burst per period
+      /* CSI-FULL: a cell sends the same row-1 TRS geometry in more than one burst per period
        * (OTA PCI 415, captures 2026-10-08: ID 415 k0=0 l=4/8 and k0=1 l=5/9, RB 0-51, at abs%160 in {15,16} AND
        * {20,21}). An entry holds one burst (<= 2 adjacent phases), so a second burst is its own entry; it is
        * confirmed independently on its own occasions by the unchanged per-slot confirm path. Keep scanning for an
        * existing entry of that burst; none -> a new entry below. */
-      if (nr_csirs_full_bursts_enabled() && h->row == 1) { /* ISAC_CSIRS_FULL_BURSTS */
+      if (h->row == 1) {
         period = h->period; offsets[0] = h->offset; offsets[1] = 0; n = 1;
         continue;
       }
@@ -477,47 +476,6 @@ void nr_csirs_blind_rt_discovery_reset(void)
 #define NULLWIN 64
 static double   g_null[NULLWIN];
 static int      g_null_n, g_null_w;
-/* Rows 6-18, footprint-first (nr_csirs_blind_search.h): per-slot on/off evidence from the symbol
- * this tap FFTs anyway, matched against OAI's mapping table at most once per FP_MATCH_EVERY calls.
- * OPT-IN (ISAC_CSIRS_BLIND_WIDE=1, default off): appending and pinning fits changes the order in which
- * the population is searched, and a union of two narrow resources sharing a period/offset (e.g. two
- * row-4 resources at k0=0 and k0=4) fits a row-6 footprint. Off, none of this code runs and the rows
- * 1-5 search is exactly what it was. */
-#define FP_MATCH_EVERY 1000
-static int      g_wide = -1;   /* -1 = not read, 0 = off, 1 = on */
-static nr_csirs_blind_fp_t g_fp;
-static bool     g_fp_dirty;
-static uint64_t g_fp_last;
-/* Per-candidate sequence-free evidence: mean power ON the candidate's REs vs the rest of its RBs.
- * Accumulated for EVERY scoring, not just the ones that pass a correlation bar -- the first cut
- * logged EPR only for z>3 candidates, which is 25 biased samples and cannot rank a 198-candidate
- * space. If the scramblingID is not the PCI, this is the ONLY statistic that can still see the
- * resource, because it never touches the sequence. */
-static double   g_epr_sum[NR_CSIRS_BLIND_MAX_CAND];
-static uint32_t g_epr_n[NR_CSIRS_BLIND_MAX_CAND];
-/* IS IT THE SSB? (2026-09-19) Both sequence inputs are excluded by complete sweeps, yet the energy
- * test keeps finding the same pair. SSB blocks always start at symbol 2 or 8 WITHIN a slot, so
- * l=4/l=8 cannot separate "SSB" from "CSI-RS" by symbol. The SLOT can: an SSB burst only occupies
- * slots 0-3 (Case C, L=8) of the SSB-period frames, while a real CSI-RS follows its own periodicity.
- * So bin every high-EPR sighting of the leading candidate by slot and print the histogram. */
-#define EPR_SLOT_BINS 20
-static uint32_t g_epr_slot_hi[EPR_SLOT_BINS];
-static uint32_t g_epr_slot_all[EPR_SLOT_BINS];
-/* scramblingID sweep (ISAC_CSIRS_BLIND_IDSWEEP=1). MEASURED 2026-09-19 on Swisscom PCI 382: the
- * sequence-free EPR finds a TRS pair (row 1, same fd, symbols 4 and 8) at 4-5x the power of its
- * neighbouring REs, while the correlation against the PCI-derived sequence stays at the noise level
- * -- i.e. the POSITIONS are right and the SEQUENCE is wrong. scramblingID is dedicated RRC and need
- * not be the PCI, so sweep it: 8 ids per qualifying slot (a slot where EPR says the pilot is there),
- * which keeps the added RT cost ~0.3 ms and covers all 1024 in 128 such slots. */
-static int      g_ids = -1;
-static int      g_slotsweep = -1;   /* ISAC_CSIRS_BLIND_SLOTSWEEP: sweep the slot index in c_init */
-static double   g_slot_best_z;
-static int      g_slot_best_off = -1;
-static uint16_t g_id_next;
-static int      g_id_pin = -1;   /* candidate the sweep is locked to; -1 = not chosen yet */
-static double   g_id_best_z;
-static uint16_t g_id_best;
-static bool     g_id_solved;
 
 /* DECODED-GRANT ZP EVIDENCE (G5 review of 060edd290c, Important 1). The passive PDSCH decode consumers score
  * every ZP entry they were handed against the grant's own PRBs (nr_pdsch_passive_decode.c) and post it here.
@@ -702,9 +660,8 @@ void nr_csirs_blind_rt_slot_fep(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_
 }
 
 /* nr_csirs_blind_rt_slot: one slot of the CSI-RS blind search: arms the search state on first use, logs confirmations, runs the per-slot scoring rotation and the ZP maintenance.
- *   Scores the due zero-power candidates, then one ordinary candidate per slot (ISAC_CSIRS_BLIND_PER_SLOT), then the re-scoring of confirmed NZP occasions when reconfiguration detection is on.
- *   Optional diagnostics: ISAC_CSIRS_BLIND_RANK (ranking mode, which keeps scoring after a confirmation), ISAC_CSIRS_BLIND_EPRDUMP, ISAC_CSIRS_BLIND_IDSWEEP, ISAC_CSIRS_DISC_CONFIRM_MAX, ISAC_PDCCH_TIMING, ISAC_RECONF.
- *   Writes the shared state under g_csirs_state_lock (cleanup releases it). Enabled by ISAC_CSIRS_BLIND=1 or by discovery. Caller: nr_csirs_blind_rt_slot_fep().
+ *   Scores the due zero-power candidates, then one ordinary candidate per slot (legacy search only), then the re-scoring of confirmed NZP occasions when reconfiguration detection is on.
+ * *   Writes the shared state under g_csirs_state_lock (cleanup releases it). Enabled by discovery. Caller: nr_csirs_blind_rt_slot_fep().
  */
 void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
@@ -726,22 +683,16 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   }
   const c16_t *rxdataF_ant0 = (rxdataF != NULL) ? &rxdataF[0][0] : NULL;
   if (g_on < 0) {
-    const char *e = getenv("ISAC_CSIRS_BLIND");
     g_disc = nr_csirs_disc_enabled && nr_csirs_disc_enabled();
-    g_on = (e != NULL && atoi(e) != 0) || g_disc;
+    g_on = g_disc;
   }
   if (!g_on || ue == NULL || rxdataF_ant0 == NULL) {
     return;
   }
-  if (g_timing < 0) {
-    const char *e = getenv("ISAC_PDCCH_TIMING");
-    g_timing = e && atoi(e) != 0;
-  }
   if (g_reconf < 0) {
-    const char *e = getenv("ISAC_RECONF");
-    g_reconf = e && strcmp(e, "1") == 0;
+    g_reconf = nr_cfg_reconf_enabled && nr_cfg_reconf_enabled();
   }
-  const uint64_t slot_start_us = g_timing ? now_us() : 0;
+  const uint64_t slot_start_us = now_us();
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   if (g_armed == 0) {
     /* scramblingID is taken as the PCI, which acquisition already gives us. Sweeping 1024 values
@@ -777,22 +728,6 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * on for other resources until capacity is reached. The OCUDU bed carries a TRS pair, a CQI row 2
    * and a ZP. Failed MCS-10 grants align with these slots; a CRC improvement still needs live
    * validation, as does the CPU cost of this opt-in search. Silence cannot prove completeness. */
-  /* RANKING MODE (ISAC_CSIRS_BLIND_RANK=1, diagnostic only). MEASURED 2026-09-19 on a live
-   * commercial cell: two identical 300 s runs both CONFIRMED, but on DIFFERENT resources
-   * ("...:2:6:...:16:3" vs "...:4:5:...:16:8"; agreeing only on row 2 / density / period 16). The
-   * cell may genuinely carry several CSI-RS resources -- the search stops at the FIRST confirmation,
-   * so different runs would legitimately land on different real ones -- or some confirmations are
-   * false at a 3x-null-median, 3-hit bar over 198 candidates x thousands of slots. The stored
-   * ranking is what separates those, and stopping early throws it away.
-   *
-   * So in this mode: log EVERY confirmation, clear it, and keep scoring the whole population, then
-   * print the top candidates by best correlation. A real resource sits far above the rest and
-   * repeats across runs; a false positive shuffles. The rate-matcher gets no resource while this is
-   * on (the export explicitly suppresses both banks), which is why it is diagnostic only. */
-  if (g_rank < 0) {
-    const char *e = getenv("ISAC_CSIRS_BLIND_RANK");
-    g_rank = (e != NULL && atoi(e) != 0) ? 1 : 0;
-  }
   /* Every confirmation is logged once; nr_csirs_blind_next() skips confirmed candidates. */
   for (int k = g_disc > 0 ? 0 : g_conf_logged; k < g_st.n_conf; ++k) {
     const int widx = g_st.conf_idx[k];
@@ -823,8 +758,8 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     }
     g_conf_logged = k + 1;
     const nr_csirs_resource_t key = resource_key(&g_st, k, false);
-    if (!g_rank && nr_csirs_observer_confirm(&g_csirs_obs, &key, absolute_slot)) map_changed();
-    if (!g_rank && g_disc > 0 && nr_csirs_monitor_add_dynamic) {
+    if (nr_csirs_observer_confirm(&g_csirs_obs, &key, absolute_slot)) map_changed();
+    if (g_disc > 0 && nr_csirs_monitor_add_dynamic) {
       fapi_nr_dl_config_csirs_pdu_rel15_t pdu;
       fill_pdu(&g_st.cand[widx], 1, &pdu);
       for (int phase = 0; phase < g_st.conf_n_off[k]; ++phase)
@@ -838,100 +773,12 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       continue;
     if (g_st.conf_n_off[k] == 2)
       snprintf(phase, sizeof(phase), " and offset %u", (unsigned)g_st.conf_off[k][1]);
-    if (g_rank)
-      LOG_A(PHY,
-            "SENSING: CSIRS_BLIND CONFIRMED[rank] after %llu slots -- \"%s\"%s z=%.2f hits=%u "
-            "tried=%u z_median=%.2f (search continues)\n",
-            (unsigned long long)g_slots, line, g_st.conf_n_off[k] == 2 ? " (two phases)" : "", g_st.best_rho[widx],
-            g_st.hits[widx], g_st.tried[widx], null_median());
-    else
-      LOG_A(PHY, "SENSING: CSIRS_BLIND CONFIRMED #%d after %llu slots -- csirs_monitor = \"%s\"%s (search continues)\n",
+    LOG_A(PHY, "SENSING: CSIRS_BLIND CONFIRMED #%d after %llu slots -- csirs_monitor = \"%s\"%s (search continues)\n",
             k, (unsigned long long)g_slots, line, phase);
     /* A sequence-confirmed NZP CSI-RS proves the grid's CRB indexing (Point A): verify the carrier when
      * SIB1 carried none (NSA), which arms the carrier-gated stages (e.g. the PDCCH nID snapshot sweep). */
-    if (g_disc > 0 && !g_rank && nr_passive_acq_note_carrier_from_rs)
+    if (g_disc > 0 && nr_passive_acq_note_carrier_from_rs)
       nr_passive_acq_note_carrier_from_rs(line);
-  }
-  if (g_rank && g_st.n_conf > 0) {
-    /* keep the population moving; see RANKING MODE above */
-    g_st.n_conf = 0;
-    g_st.confirmed = -1;
-    g_conf_logged = 0;
-  }
-    /* ISAC_CSIRS_BLIND_EPRDUMP=<path> (diagnostic, rank mode only): every candidate's mean EPR,
-     * observation count and best z, so a real CSI-RS can be told from PDSCH DM-RS / PDCCH energy
-     * (added 2026-10-06 for the offline replay of PCI 415/421, where the top-5 lists were all DM-RS). */
-  if (g_rank && (g_slots % 500) == 499) {
-    const char *dump = getenv("ISAC_CSIRS_BLIND_EPRDUMP");
-    if (dump) {
-      FILE *f = fopen(dump, "w");
-      if (f) {
-        fprintf(f, "idx\trow\tfd\tl0\tl1\tcdm\tdensity\tepr_mean\tepr_n\tbest_z\thits\ttried\n");
-        for (int i = 0; i < g_st.n && i < NR_CSIRS_BLIND_MAX_CAND; i++) {
-          const nr_csirs_candidate_t *c = &g_st.cand[i];
-          fprintf(f, "%d\t%u\t%u\t%u\t%u\t%u\t%u\t%.3f\t%u\t%.3f\t%u\t%u\n", i, c->row, c->freq_domain, c->symb_l0,
-                  c->symb_l1, c->cdm_type, c->freq_density, g_epr_n[i] ? g_epr_sum[i] / g_epr_n[i] : 0.0, g_epr_n[i],
-                  g_st.best_rho[i], g_st.hits[i], g_st.tried[i]);
-        }
-        fclose(f);
-      }
-    }
-  }
-  if (g_rank && (g_slots % 4000) == 3999) {
-    /* Top 5 by best SCALE-FREE score (best_rho now holds z = rho*sqrt(n_re); noise ~0.89). */
-    int top[5] = {-1, -1, -1, -1, -1};
-    for (int i = 0; i < g_st.n; i++)
-      for (int k = 0; k < 5; k++)
-        if (top[k] < 0 || g_st.best_rho[i] > g_st.best_rho[top[k]]) {
-          for (int m = 4; m > k; m--)
-            top[m] = top[m - 1];
-          top[k] = i;
-          break;
-        }
-    char buf[512];
-    int off2 = 0;
-    for (int k = 0; k < 5 && top[k] >= 0 && off2 < (int)sizeof(buf) - 64; k++) {
-      const nr_csirs_candidate_t *c2 = &g_st.cand[top[k]];
-      off2 += snprintf(buf + off2, sizeof(buf) - off2, "[row%u fd%u l%u rho=%.3f hits=%u/%u] ",
-                       c2->row, c2->freq_domain, c2->symb_l0, g_st.best_rho[top[k]],
-                       g_st.hits[top[k]], g_st.tried[top[k]]);
-    }
-    LOG_A(PHY, "SENSING: CSIRS_BLIND RANK slots=%llu z_median=%.2f (noise ~0.89) top: %s\n",
-          (unsigned long long)g_slots, null_median(), buf);
-    /* Same ranking by the SEQUENCE-FREE statistic. A real boosted pilot sits above 1 here even when
-     * the sequence hypothesis is wrong; if the whole space reads ~1, no enumerated position carries
-     * one and the resource is outside the search space rather than mis-sequenced. */
-    int etop[5] = {-1, -1, -1, -1, -1};
-    for (int i = 0; i < g_st.n && i < NR_CSIRS_BLIND_MAX_CAND; i++) {
-      if (g_epr_n[i] < 4)
-        continue;   /* too few samples to average */
-      const double mi = g_epr_sum[i] / g_epr_n[i];
-      for (int k = 0; k < 5; k++)
-        if (etop[k] < 0 || mi > g_epr_sum[etop[k]] / g_epr_n[etop[k]]) {
-          for (int m = 4; m > k; m--)
-            etop[m] = etop[m - 1];
-          etop[k] = i;
-          break;
-        }
-    }
-    char ebuf[512];
-    int eo = 0;
-    for (int k = 0; k < 5 && etop[k] >= 0 && eo < (int)sizeof(ebuf) - 64; k++) {
-      const nr_csirs_candidate_t *c3 = &g_st.cand[etop[k]];
-      eo += snprintf(ebuf + eo, sizeof(ebuf) - eo, "[row%u fd%u l%u epr=%.2f n=%u] ", c3->row,
-                     c3->freq_domain, c3->symb_l0, g_epr_sum[etop[k]] / g_epr_n[etop[k]], g_epr_n[etop[k]]);
-    }
-    LOG_A(PHY, "SENSING: CSIRS_BLIND EPRRANK slots=%llu (1.0 = no pilot) top: %s\n",
-          (unsigned long long)g_slots, ebuf);
-    if (g_id_pin >= 0) {
-      char hb[256];
-      int ho = 0;
-      for (int b = 0; b < EPR_SLOT_BINS && ho < (int)sizeof(hb) - 12; b++)
-        ho += snprintf(hb + ho, sizeof(hb) - ho, "%u/%u ", g_epr_slot_hi[b], g_epr_slot_all[b]);
-      LOG_A(PHY, "SENSING: CSIRS_BLIND EPRSLOT pinned row%u fd%u l%u, epr>2 by slot%%20 (SSB lives in "
-                 "slots 0-3): %s\n",
-            g_st.cand[g_id_pin].row, g_st.cand[g_id_pin].freq_domain, g_st.cand[g_id_pin].symb_l0, hb);
-    }
   }
   zp_grant_drain();
   /* Shared bounded admission bank: exported maintenance plus unexported probation
@@ -940,13 +787,8 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   int occurring[NR_CSIRS_BLIND_DISC_MAX_CONF];
   const int n = nr_csirs_blind_zp_due(&g_zp, absolute_slot, occurring, NR_CSIRS_BLIND_MAX_CONF);
   /* Preserve the T14 four-score admission rotation on the worker. */
-  static int s_conf_max = -1;
   static unsigned s_conf_rot;
-  if (s_conf_max < 0) {
-    const char *e = getenv("ISAC_CSIRS_DISC_CONFIRM_MAX");
-    s_conf_max = e && atoi(e) > 0 ? atoi(e) : 4;
-  }
-  int budget = g_disc > 0 ? s_conf_max : 1 << 30;
+  int budget = g_disc > 0 ? 4 : 1 << 30;
   const unsigned rot0 = g_disc > 0 ? s_conf_rot++ : 0;
   for (int kk = 0; kk < n && budget > 0; kk++) {
     const int k = (int)((rot0 + kk) % (unsigned)n);
@@ -957,10 +799,6 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   /* Alternate independent discovery rotations. A geometry retired by NZP must
    * remain eligible for ZP re-admission after pressure eviction. Still at most
    * one ordinary score, deduplicated against the bounded maintenance snapshot. */
-  /* ISAC_CSIRS_BLIND_PER_SLOT=N (default 1): ordinary discovery scores per slot. N > 1 is for slow
-   * offline replay of a raw capture, where the real-time budget does not apply: the default one score
-   * per slot gave each of ~767 candidates only 10-16 observations in 240 s OTA (2026-10-06, PCI 421),
-   * below the IDSWEEP pin floor of 32, so the scramblingID sweep never started. */
   if (g_disc > 0) {
     /* Bound work to due canonical resources. Balance visits PER PHASE and
      * reverse tie order on alternate rounds; a slot-index rotation or a fixed
@@ -996,19 +834,8 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       --budget;
     }
   }
-  static int s_per_slot = -1;
-  if (s_per_slot < 0) {
-    const char *e = getenv("ISAC_CSIRS_BLIND_PER_SLOT");
-    s_per_slot = e ? atoi(e) : 1;
-    if (s_per_slot < 1)
-      s_per_slot = 1;
-    if (s_per_slot > 2 * NR_CSIRS_BLIND_MAX_CAND)
-      s_per_slot = 2 * NR_CSIRS_BLIND_MAX_CAND;
-    if (s_per_slot > 1)
-      LOG_W(PHY, "SENSING: CSIRS_BLIND scoring %d discovery candidates per slot (offline/replay setting)\n", s_per_slot);
-  }
   int idx = -1;
-  for (int r = 0; r < (g_disc > 0 ? 0 : s_per_slot); r++) {
+  for (int r = 0; r < (g_disc > 0 ? 0 : 1); r++) {
     nr_csirs_blind_state_t *first = ((g_slots + r) & 1) ? &g_st : &g_zp;
     nr_csirs_blind_state_t *other = (first == &g_st) ? &g_zp : &g_st;
     nr_csirs_blind_state_t *bank = first;
@@ -1023,14 +850,6 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     for (int k = 0; k < n; k++)
       if (occurring[k] == idx)
         measured = true;
-    /* both banks index the same candidate population (score_candidate updates both for idx); a
-     * pinned candidate comes back every call, so score each idx at most once per slot */
-    static uint32_t s_seen_slot[NR_CSIRS_BLIND_MAX_CAND];
-    if (s_per_slot > 1 && idx < NR_CSIRS_BLIND_MAX_CAND) {
-      if (s_seen_slot[idx] == absolute_slot + 1)
-        continue;
-      s_seen_slot[idx] = absolute_slot + 1;
-    }
     if (!measured)
       score_candidate(ue, slot, absolute_slot, rxdataF, idx, false, false);
   }
@@ -1042,9 +861,9 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     for (int k = 0; k < nn; ++k)
       if (due[k] != idx) score_candidate(ue, slot, absolute_slot, rxdataF, due[k], false, true);
   }
-  if (g_timing) nr_csirs_observer_add_time(&g_csirs_obs, NR_CSIRS_TIME_SEARCH, now_us() - slot_start_us);
+  nr_csirs_observer_add_time(&g_csirs_obs, NR_CSIRS_TIME_SEARCH, now_us() - slot_start_us);
   if ((++g_slots % 20000) == 0) {
-    if (g_timing) {
+    {
       nr_passive_metrics_t tm = {0};
       nr_csirs_observer_metrics(&g_csirs_obs, &tm);
       LOG_A(PHY, "SENSING: CSIRS_TIMING slots=%llu search_us_per_slot=%.2f idsweep_us_per_slot=%.2f "
@@ -1065,8 +884,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
 }
 
 /* score_candidate: scores one CSI-RS candidate on the current slot: builds the reference signal, correlates it with the received symbol, and feeds the scale-free z score to the search.
- *   Also computes the zero-power (ZP) occupancy score, the sequence-free energy ratio, and the footprint match for rows 6-18 (ISAC_CSIRS_BLIND_WIDE).
- *   Optional sweeps: scramblingID (ISAC_CSIRS_BLIND_IDSWEEP) and slot index (ISAC_CSIRS_BLIND_SLOTSWEEP) on a candidate whose positions already look like a pilot.
+ *   Also computes the zero-power (ZP) occupancy score.
  *   maintenance = re-score of an exported resource (no new evidence); nzp_recheck = re-score of a confirmed NZP occasion. Callers: nr_csirs_blind_rt_slot() only.
  */
 static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
@@ -1087,7 +905,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
         .start_rb = c->start_rb, .nr_of_rbs = c->nr_of_rbs};
     nr_csirs_observer_candidate(&g_csirs_obs, &candidate, absolute_slot);
   }
-  const uint64_t confirm_start_us = (maintenance || nzp_recheck) && g_timing ? now_us() : 0;
+  const uint64_t confirm_start_us = (maintenance || nzp_recheck) ? now_us() : 0;
   /* Snapshot the feed's existing duplicate predicate before any feed mutates it. This affects
    * accounting only: repeated calls still execute exactly the historical receiver path. */
   const bool duplicate = (g_zp.tried[idx] > 0 || g_zp.zp_epoch[idx] > 0)
@@ -1107,7 +925,6 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   double rho=-1, gpu_scores[5];
   bool gpu_scored=g_disc>0 && discovery_gpu_score(fp,c,slot,&rxdataF[0][0],gpu_scores)==0;
   if(discovery_gpu && discovery_gpu->prepare && !gpu_scored) return;
-  c16_t *ref=NULL;
   int n_planes=0;
   const uint32_t off_sym=(uint32_t)c->symb_l0*fp->ofdm_symbol_size;
   if(gpu_scored) {rho=gpu_scores[0];goto have_rho;}
@@ -1157,7 +974,6 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   for (int p = 0; p < n_planes; p++) {
     memset(t_refbuf[p], 0, (size_t)n_re * sizeof(c16_t));
   }
-  ref = t_refbuf[0];
   c16_t *refp[NR_CSIRS_BLIND_RT_ALL_PORTS];
   for (int p = 0; p < NR_CSIRS_BLIND_RT_ALL_PORTS; p++)
     refp[p] = t_refbuf[p < n_planes ? p : n_planes - 1];
@@ -1187,18 +1003,6 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * scored an empty buffer and never fired (OTA 2026-09-14: 15 min, zero progress lines). */
   if (g_disc <= 0)
     nr_slot_fep_ant(ue, fp, (unsigned)slot, (unsigned)c->symb_l0, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
-  /* Footprint evidence for rows 6-18 from the symbol just transformed: one pass over the carrier. */
-  if (g_wide < 0) {
-    const char *e = getenv("ISAC_CSIRS_BLIND_WIDE");
-    g_wide = (e != NULL && atoi(e) != 0) ? 1 : 0;
-  }
-  if (g_wide && !maintenance && !nzp_recheck) {
-    uint16_t on_even = 0, on_odd = 0;
-    nr_csirs_blind_symbol_on((const int16_t *)&rxdataF_ant0[off_sym], fp->ofdm_symbol_size,
-                             fp->first_carrier_offset, fp->N_RB_DL, &on_even, &on_odd);
-    if (nr_csirs_blind_fp_record(&g_fp, c->symb_l0, on_even, on_odd, absolute_slot))
-      g_fp_dirty = true;
-  }
   /* Sub-band size for the channel-robust score, in OCCUPIED REs. 32 REs is ~11 RB for a density-3
    * row (4 MHz at 30 kHz) -- narrow enough that the channel is flat across it, wide enough that
    * noise stays well below a match: noise reads ~1.0, a perfect match sqrt(32)/0.886 = 6.4, and a
@@ -1238,10 +1042,9 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
 have_rho:
   if(g_disc>0) __atomic_fetch_add(gpu_scored?&csirs_disc_confirm_gpu_scores:&csirs_disc_confirm_cpu_scores,1,__ATOMIC_RELAXED);
   if (nzp_observer_score(idx, absolute_slot, rho)) map_changed();
-  if ((maintenance || nzp_recheck) && g_timing)
+  if (maintenance || nzp_recheck)
     nr_csirs_observer_add_time(&g_csirs_obs, NR_CSIRS_TIME_CONFIRM, now_us() - confirm_start_us);
   if (nzp_recheck) return;
-  double epr = NAN;
   bool done = false;
   if (rho < 0.0) {
     /* A zero-energy mapped comb is unscorable as an NZP sequence but is exactly the observation
@@ -1255,45 +1058,6 @@ have_rho:
    * produced OTA was that artefact. z = rho*sqrt(n_used) is ~0.89 for noise at any size and
    * sqrt(n_used) (>16 here) for a true match, so the bar below is absolute, not relative. */
   const double z = rho; /* already normalised: ~1.0 noise, ~6.4 perfect, at any candidate size */
-  /* Sequence-free positional evidence, logged next to z: if z stays at noise while this shows
-   * periodic structure, the POSITIONS are right and the SEQUENCE (scramblingID != PCI) is wrong --
-   * which the correlation alone cannot distinguish from an empty hypothesis. */
-  epr = gpu_scored ? gpu_scores[1] : nr_csirs_blind_energy_ratio_shift((const int16_t *)&rxdataF_ant0[off_sym],
-                                                 (const int16_t *)&ref[off_sym], fp->ofdm_symbol_size,
-                                                 fp->first_carrier_offset);
-  if (!maintenance && epr > 0.0 && idx < NR_CSIRS_BLIND_MAX_CAND) {
-    g_epr_sum[idx] += epr;
-    g_epr_n[idx]++;
-  }
-  if (!maintenance && epr > 0.0 && idx == g_id_pin && slot >= 0) {
-    const int b = slot % EPR_SLOT_BINS;
-    g_epr_slot_all[b]++;
-    if (epr > 2.0)
-      g_epr_slot_hi[b]++;
-  }
-  /* SPAN PROFILE (rank mode). MEASURED 2026-09-19 on Swisscom: the best candidate scores rho 0.22
-   * against a 0.045 null -- 5x the null, but nowhere near the ~1 a correct known sequence must give,
-   * while its HIT RATE (93/1798 = 5.2 %) matches a real period-16 resource. The candidates fix
-   * start_rb=0 / nr_of_rbs=N_RB_DL, so a resource covering a NARROWER band dilutes the whole-symbol
-   * correlation by ~sqrt(real_RBs / N_RB_DL) and can never score high. Correlating G slices of the
-   * SAME buffers separates the two: a real resource is a contiguous block of high slices, a wrong
-   * SEQUENCE (e.g. scramb_id != PCI) is flat. Slices are FFT-index ranges, so a carrier-contiguous
-   * resource shows up as high slices at BOTH ends when it straddles DC. */
-  static uint64_t s_span_last;
-  if (!gpu_scored && !maintenance && g_rank && z > 3.0 && g_slots - s_span_last >= 200) {
-    s_span_last = g_slots;
-    enum { G = 12 };
-    const uint32_t step = (uint32_t)fp->ofdm_symbol_size / G;
-    char prof[256];
-    int po = 0;
-    for (int g = 0; g < G && po < (int)sizeof(prof) - 8; g++) {
-      const double r = nr_csirs_blind_correlate((const int16_t *)&rxdataF_ant0[off_sym + (uint32_t)g * step],
-                                                (const int16_t *)&ref[off_sym + (uint32_t)g * step], (int)step);
-      po += snprintf(prof + po, sizeof(prof) - po, "%s%.2f", g ? " " : "", (r < 0.0) ? 0.0 : r);
-    }
-    LOG_A(PHY, "SENSING: CSIRS_BLIND SPAN row%u fd%u l%u z=%.2f rho=%.3f n_re=%d epr=%.2f slices[%d]: %s\n",
-          c->row, c->freq_domain, c->symb_l0, z, rho, n_used, epr, G, prof);
-  }
   /* Legacy confirmation retains z >= 4. A discovery-qualified row-1 burst
    * has two independently swept adjacent phases: require three fresh z >= 3
    * hits on EACH phase. This permits weak TRS without admitting single-phase
@@ -1442,172 +1206,6 @@ score_zero_power:
       }
     }
   }
-  if (maintenance || rho < 0.0)
-    return;
-  /* ---- scramblingID sweep on a candidate whose POSITIONS already look like a pilot ---- */
-  if (g_ids < 0) {
-    const char *e = getenv("ISAC_CSIRS_BLIND_IDSWEEP");
-    g_ids = g_disc <= 0 && (e != NULL && atoi(e) != 0);
-  }
-  /* PIN THE SWEEP TO ONE CANDIDATE. First cut advanced the id cursor on ANY slot whose candidate
-   * had epr > 2, but the round-robin serves a different candidate every slot, so a "full pass"
-   * spread its 1024 ids over many candidates and tested none of them -- the verdict it printed was
-   * meaningless. The sweep now locks onto the candidate with the highest MEAN epr (>= 32 samples,
-   * so the choice is not made on noise) and only advances while that same candidate is scored. */
-  if (g_ids && !g_id_solved && g_id_pin < 0) {
-    double best_m = 2.0;   /* nothing below 2x its neighbours is worth sweeping 1024 ids for */
-    for (int i = 0; i < g_st.n && i < NR_CSIRS_BLIND_MAX_CAND; i++) {
-      if (g_epr_n[i] < 32)
-        continue;
-      const double m = g_epr_sum[i] / g_epr_n[i];
-      if (m > best_m) {
-        best_m = m;
-        g_id_pin = i;
-      }
-    }
-    if (g_id_pin >= 0) {
-      LOG_A(PHY, "SENSING: CSIRS_BLIND IDSWEEP pinned to row%u fd%u l%u (mean epr=%.2f over %u) -- "
-                 "sweeping 1024 scramblingIDs on THAT candidate only\n",
-            g_st.cand[g_id_pin].row, g_st.cand[g_id_pin].freq_domain, g_st.cand[g_id_pin].symb_l0,
-            best_m, g_epr_n[g_id_pin]);
-      /* The sweep advances only on visits that land on a CSI-RS slot; visit it every call. */
-      nr_csirs_blind_pin(&g_st, g_id_pin, NR_CSIRS_BLIND_PIN_SWEEP_CALLS);
-    }
-  }
-  /* SLOT-INDEX SWEEP (ISAC_CSIRS_BLIND_SLOTSWEEP=1). MEASURED 2026-09-19 on Swisscom PCI 382: a
-   * COMPLETE 1024-value scramblingID sweep, pinned to one candidate and scored with the
-   * channel-robust statistic, peaked at z=1.40 against a noise floor of 1.0 and a bar of 4 -- so the
-   * scramblingID is NOT what makes the sequence wrong, while the sequence-free energy test keeps
-   * finding the same TRS pair at ~3x its neighbours.
-   *
-   * The remaining input to the sequence is the SLOT: c_init = 2^10*(14*n_s + l + 1)*(2*N_ID+1) + N_ID
-   * (TS 38.211 7.4.1.5.2). Crucially the RE MAPPING does not depend on n_s at all -- so if our slot
-   * numbering is offset from the cell's (half-frame ambiguity, or an SFN/slot origin off by a fixed
-   * amount), every sequence we generate is wrong while the positions stay exactly right. That is
-   * precisely the pattern observed. Only ~20 offsets at mu=1, so the whole space fits in ONE visit. */
-  if (g_slotsweep < 0) {
-    const char *e = getenv("ISAC_CSIRS_BLIND_SLOTSWEEP");
-    g_slotsweep = (e != NULL && atoi(e) != 0) ? 1 : 0;
-  }
-  if (g_disc<=0 && g_slotsweep && idx == g_id_pin && epr > 1.5 && g_slot_best_off < 0) {
-    const int n_slots = fp->slots_per_frame;
-    for (int off = 0; off < n_slots; off++) {
-      const int trial_slot = (slot + off) % n_slots;
-      memset(&t_refbuf[0][off_sym], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
-      for (int pp = 1; pp < n_planes; pp++)
-        memset(&t_refbuf[pp][off_sym], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
-      const csi_mapping_parms_t sp = get_csi_mapping_parms(c->row, c->freq_domain, c->symb_l0, c->symb_l1);
-      nr_generate_csi_rs(fp, &sp, AMP, trial_slot, c->freq_density, c->start_rb, c->nr_of_rbs,
-                         c->symb_l0, c->symb_l1, c->row, c->scramb_id, 0, c->cdm_type, refp);
-      int sn = 0;
-      const double sz = nr_csirs_blind_correlate_blocks_shift((const int16_t *)&rxdataF_ant0[off_sym],
-                                                        (const int16_t *)&ref[off_sym],
-                                                        fp->ofdm_symbol_size, CSIRS_BLIND_SUBBAND_RE,
-                                                        fp->first_carrier_offset, &sn);
-      if (sz > g_slot_best_z) {
-        g_slot_best_z = sz;
-        if (sz >= 4.0) {
-          g_slot_best_off = off;
-          LOG_A(PHY,
-                "SENSING: CSIRS_BLIND SLOTSWEEP SOLVED row%u fd%u l%u slot_offset=%+d z=%.2f "
-                "(our slot %d -> cell slot %d, epr=%.2f) -- the receiver's slot numbering is the "
-                "sequence error, not the scramblingID\n",
-                c->row, c->freq_domain, c->symb_l0, off, sz, slot, trial_slot, epr);
-        }
-      }
-    }
-    if (g_slot_best_off < 0)
-      LOG_A(PHY, "SENSING: CSIRS_BLIND SLOTSWEEP all %d offsets, best z=%.2f (bar 4, noise ~1) -- the "
-                 "slot index is NOT the sequence error either\n", fp->slots_per_frame, g_slot_best_z);
-  }
-  if (g_ids && !g_id_solved && idx == g_id_pin && epr > 1.5) {
-    const uint64_t ids_start_us = g_timing ? now_us() : 0;
-    /* 32 ids per visit, not 8: the pinned candidate comes round only once per pass over the
-     * candidate list (~0.3 s), so at 8 the 1024 ids did not finish inside a 300 s capture and the
-     * run ended with no verdict at all. 32 ids is ~1.3 ms of extra work on a visit that already
-     * costs an FEP plus a reference generation. */
-    nr_csirs_candidate_t trial = *c;
-    for (int k = 0; k < 32; k++) {
-      trial.scramb_id = g_id_next;
-      g_id_next = (uint16_t)((g_id_next + 1) & 1023);
-      memset(&t_refbuf[0][off_sym], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
-      for (int pp = 1; pp < n_planes; pp++)
-        memset(&t_refbuf[pp][off_sym], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
-      const csi_mapping_parms_t tp = get_csi_mapping_parms(trial.row, trial.freq_domain, trial.symb_l0,
-                                                           trial.symb_l1);
-      nr_generate_csi_rs(fp, &tp, AMP, slot, trial.freq_density, trial.start_rb, trial.nr_of_rbs,
-                         trial.symb_l0, trial.symb_l1, trial.row, trial.scramb_id, 0, trial.cdm_type,
-                         refp);
-      int tn = 0;
-      const double tz = nr_csirs_blind_correlate_blocks_shift((const int16_t *)&rxdataF_ant0[off_sym],
-                                                        (const int16_t *)&ref[off_sym], fp->ofdm_symbol_size,
-                                                        CSIRS_BLIND_SUBBAND_RE,
-                                                        fp->first_carrier_offset, &tn);
-      if (tz > g_id_best_z) {
-        g_id_best_z = tz;
-        g_id_best = trial.scramb_id;
-        if (tz >= 4.0) {   /* noise ~1.0; 1024 ids give a noise max near 2.5-3 */
-          g_id_solved = true;
-          /* CLOSE THE GAP: until this line the solved id was print-only -- the pinned candidate's
-           * OWN scramb_id (assumed = PCI at init) stayed wrong, so the ordinary per-slot
-           * nr_csirs_blind_feed() below kept scoring the wrong sequence forever and g_st.confirmed
-           * never left -1 even after a correct id was found. The candidate's tried/hits/best_rho
-           * history under the WRONG id is harmless to leave in place: hits[] only increments past
-           * feed()'s CSIRS_DETECT_MARGIN bar, which the wrong sequence could never clear, so it is
-           * already at 0. Patching the id in place lets the existing, already-tested confirm path
-           * (feed() + nr_csirs_blind_infer_period()) take over on the next visit rather than
-           * duplicating that logic here. */
-          g_st.cand[g_id_pin].scramb_id = trial.scramb_id;
-          nr_csirs_blind_pin(&g_st, g_id_pin, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
-          LOG_A(PHY,
-                "SENSING: CSIRS_BLIND IDSWEEP SOLVED row%u fd%u l%u scramb_id=%u z=%.1f (PCI=%d, "
-                "epr=%.2f) -- csirs_monitor scramblingID is NOT the PCI; candidate corrected, "
-                "confirmation resumes on next visit\n",
-                trial.row, trial.freq_domain, trial.symb_l0, trial.scramb_id, tz, fp->Nid_cell, epr);
-          break;
-        }
-      }
-    }
-    if (!g_id_solved && (g_id_next % 256) == 0)
-      LOG_A(PHY, "SENSING: CSIRS_BLIND IDSWEEP progress %u/1024 ids, best so far id=%u z=%.2f (bar 4, noise ~1)\n",
-            (unsigned)g_id_next, g_id_best, g_id_best_z);
-    if (!g_id_solved && g_id_next == 0)
-      LOG_A(PHY, "SENSING: CSIRS_BLIND IDSWEEP full pass, no id reached z=4: best id=%u z=%.2f "
-                 "(row%u fd%u l%u epr=%.2f) -- sequence error is NOT the scramblingID\n",
-            g_id_best, g_id_best_z, c->row, c->freq_domain, c->symb_l0, epr);
-    if (g_timing) nr_csirs_observer_add_time(&g_csirs_obs, NR_CSIRS_TIME_IDSWEEP, now_us() - ids_start_us);
-  }
-  /* Rows 6-18: match the measured footprints against OAI's table (~60 us, hence rate-limited) and
-   * hand each new fit to the ordinary confirm path -- round-robin, feed(), IDSWEEP -- by appending it
-   * to the population. Pinned for a confirm budget when nothing else holds the pin, since round-robin
-   * alone would reach it only once per ~700 calls. Nothing is appended on a cell without periodic
-   * pair-structured energy, which leaves the rows 1-5 search exactly as it was. */
-  if (g_wide && g_fp_dirty && g_slots - g_fp_last >= FP_MATCH_EVERY) {
-    g_fp_dirty = false;
-    g_fp_last = g_slots;
-    nr_csirs_candidate_t fit[16];
-    const int n_fit = nr_csirs_blind_fp_match(&g_fp, fp->N_RB_DL, fp->Nid_cell, fit, 16);
-    for (int i = 0; i < n_fit; i++) {
-      const int at = nr_csirs_blind_append(&g_st, &fit[i]);
-      if (at < 0)
-        continue;
-      /* g_zp mirrors g_st index for index: the ZP feed below scores g_zp at g_st's idx. */
-      const int zat = nr_csirs_blind_append(&g_zp, &fit[i]);
-      static bool s_zp_diverged;
-      if (zat != at && !s_zp_diverged) {
-        s_zp_diverged = true;
-        LOG_E(PHY, "SENSING: CSIRS_BLIND FOOTPRINT g_zp append index %d != g_st index %d -- ZP search no longer "
-                   "mirrors the NZP population\n", zat, at);
-      }
-      if (g_st.pin_left == 0)
-        nr_csirs_blind_pin(&g_st, at, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
-      LOG_A(PHY, "SENSING: CSIRS_BLIND FOOTPRINT row%u fd0x%x l0=%u l1=%u density=%u cdm=%u (%d ports) "
-                 "fits the measured periodic RE pattern -- candidate %d added to the confirm path\n",
-            fit[i].row, fit[i].freq_domain, fit[i].symb_l0, fit[i].symb_l1, fit[i].freq_density,
-            fit[i].cdm_type, nr_csirs_blind_row_ports(fit[i].row), at);
-    }
-  }
-  /* the sweep above reused the shared reference buffer; the candidate's own reference is stale now */
   (void)done; // logged once at the start of the next call
 }
 
@@ -1631,7 +1229,7 @@ static void fill_pdu(const nr_csirs_candidate_t *c, uint8_t csi_type, fapi_nr_dl
   out->scramb_id = c->scramb_id;
 }
 /* nr_csirs_blind_rt_observed_nzp: returns, in *out, one confirmed NZP CSI-RS resource occurring on this slot (for the observer and the rate matcher), if any.
- *   Discovery mode reads the exported set; otherwise it uses the search state under a trylock (no wait). Ranking mode (g_rank) reports nothing.
+ *   Discovery mode reads the exported set; otherwise it uses the search state under a trylock (no wait).
  *   Caller: nr_pdcch_blind_monitor_rt.c (observed NZP occasion of a slot).
  */
 bool nr_csirs_blind_rt_observed_nzp(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out)
@@ -1645,7 +1243,7 @@ bool nr_csirs_blind_rt_observed_nzp(uint32_t absolute_slot, fapi_nr_dl_config_cs
   }
   if (!out || pthread_mutex_trylock(&g_csirs_state_lock) != 0) return false;
   bool found = false;
-  if (g_on > 0 && g_armed != 0 && g_rank <= 0) {
+  if (g_on > 0 && g_armed != 0) {
     int idx[NR_CSIRS_BLIND_DISC_MAX_CONF];
     const int n = nr_csirs_blind_occurring(&g_st, absolute_slot, idx, NR_CSIRS_BLIND_DISC_MAX_CONF);
     if (n > 0) {
@@ -1658,7 +1256,7 @@ bool nr_csirs_blind_rt_observed_nzp(uint32_t absolute_slot, fapi_nr_dl_config_cs
 }
 static int rate_match_all_n(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max);
 /* nr_csirs_blind_rt_rate_match_all: fills out[] with every CSI-RS resource that occurs on this slot for PDSCH rate matching: confirmed NZP (csi_type 1) first, then retained ZP (csi_type 2).
- *   Returns the count (at most max). Returns 0 when the search is off, not armed, or in ranking mode, so that the diagnostic never changes PDSCH.
+ *   Returns the count (at most max). Returns 0 when the search is off or not armed.
  *   Callers: nr_pdsch_passive_decode.c (CSI-RS rate matching in passive_decode_retry and the CSI population retry).
  */
 int nr_csirs_blind_rt_rate_match_all(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
@@ -1678,7 +1276,7 @@ static int rate_match_all_n(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_
   pthread_mutex_t *guard __attribute__((cleanup(csirs_unlock))) = &g_csirs_state_lock;
   pthread_mutex_lock(guard);
   /* Ranking is diagnostic only: neither newly confirmed NZP nor retained ZP may alter PDSCH. */
-  if (out == NULL || max <= 0 || g_on <= 0 || g_armed == 0 || g_rank > 0)
+  if (out == NULL || max <= 0 || g_on <= 0 || g_armed == 0)
     return 0;
   int n = 0, idx[NR_CSIRS_BLIND_DISC_MAX_CONF];
   const int nn = nr_csirs_blind_occurring(&g_st, absolute_slot, idx, NR_CSIRS_BLIND_DISC_MAX_CONF);
@@ -1693,7 +1291,7 @@ static int rate_match_all_n(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_
   return n;
 }
 
-/* CSI-FULL (ISAC_CSIRS_FULL=1, default off). The complete CSI-RS set a grant's cell transmits in the PDSCH slot,
+/* CSI-FULL (always on). The complete CSI-RS set a grant's cell transmits in the PDSCH slot,
  * for the PDSCH rate matching of TS 38.214 5.1.4.1. Measured ground truth (tools/csirs_capture_map.py on both
  * PCI-415 captures, docs/superpowers/reports/csd/CSIFULL.md): six TRS scrambling IDs on one carrier, one per cell,
  * each a 52-RB row-1 density-3 TRS pair in its own RB third; a grant of DM-RS/data scrambling ID X decodes only
@@ -1701,10 +1299,8 @@ static int rate_match_all_n(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_
  * is "scramblingID == the grant's DM-RS scrambling ID" (NZP and the ZP geometries the search attached to that ID),
  * deduplicated by RE geometry, without resources that would land on the grant's DM-RS symbols (the standard
  * forbids the overlap; nr_dlsch_extract_rbs() asserts on it). The CSI-RS-to-cell association by scramblingID is a
- * measured property of this network, not a TS requirement, hence the flag. RB extent: nr_dlsch_csi_rb_extent()
- * is on with this flag (TS 38.211 7.4.1.5.3). */
+ * measured property of this network, not a TS requirement. RB extent: nr_dlsch_csi_rb_extent() (TS 38.211 7.4.1.5.3). */
 extern void nr_dlsch_csi_erase_set(const fapi_nr_dl_config_csirs_pdu_rel15_t *list, int n) __attribute__((weak));
-static __thread int t_full_ab_depth; /* CSIFULLAB recursion guard */
 static bool csirs_full_same_geometry(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, const fapi_nr_dl_config_csirs_pdu_rel15_t *b)
 {
   return a->row == b->row && a->freq_domain == b->freq_domain && a->symb_l0 == b->symb_l0 && a->symb_l1 == b->symb_l1
@@ -1747,7 +1343,7 @@ static int full_all_confirmed(fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
     return n;
   }
   pthread_mutex_lock(&g_csirs_state_lock);
-  if (g_on > 0 && g_armed != 0 && g_rank <= 0)
+  if (g_on > 0 && g_armed != 0)
     for (int bank = 0; bank < 2; ++bank) {
       nr_csirs_blind_state_t *st = bank ? &g_zp : &g_st;
       for (int k = 0; k < st->n_conf && n < max; ++k)
@@ -1763,17 +1359,11 @@ static bool full_rb_overlap_half(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, c
   const int m = a->nr_of_rbs < b->nr_of_rbs ? a->nr_of_rbs : b->nr_of_rbs;
   return hi - lo > 0 && 2 * (hi - lo) >= m;
 }
-/* ISAC_CSIRS_FULL_TRS_PAIR=1 (default off). TS 38.214 5.1.6.1.1: a TRS (NZP-CSI-RS-ResourceSet with trs-Info) is
+/* TS 38.214 5.1.6.1.1: a TRS (NZP-CSI-RS-ResourceSet with trs-Info) is
  * row 1, density 3, and its resources come in pairs in one slot at symbols l and l+4 (l in {4,5,6}) with one
  * frequency allocation, period and slot. Discovery confirms the members independently, so in a short run one
  * member of a pair, or one of its two slot phases, is often missing. Occurrence of either member in this slot
  * implies both. */
-static int full_trs_pair_enabled(void)
-{
-  static int s = -1;
-  if (s < 0) s = getenv("ISAC_CSIRS_FULL_TRS_PAIR") && atoi(getenv("ISAC_CSIRS_FULL_TRS_PAIR")) ? 1 : 0;
-  return s;
-}
 static bool full_trs_partner(const fapi_nr_dl_config_csirs_pdu_rel15_t *c, fapi_nr_dl_config_csirs_pdu_rel15_t *p)
 {
   if (c->row != 1 || c->freq_density != 3 || c->csi_type == 2)
@@ -1801,21 +1391,8 @@ static int full_add_trs_pairs(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, i
   }
   return n_all;
 }
-/* ISAC_CSIRS_FULL_BLOCK_INFER=1 (default off; a measured network property, not a TS rule). On the PCI-415 carrier
- * every TRS RB block carries all its row-1 TRS resources (both cells' pairs) in both bursts of the period
- * (tools/csirs_capture_map.py, both captures). Discovery confirms each (resource, burst) separately and a 12 s
- * run misses many. When any row-1 density-3 resource of a block occurs in this slot, every confirmed row-1
- * density-3 geometry of that block is taken to occur too. */
-/* BLINDFIX F1: ISAC_CSIRS_FULL_BLOCK_INFER=2 infers a block member c into this slot only from a resource a that occurs in it
- * AND was measured co-scheduled with c in >= 2 slots of the 640-slot window (a network that never co-schedules its TRS
- * resources, or whose co-occurrence discovery has not seen, gets no inference: only measured resources rate-match).
- * =1 keeps the unconditional PCI-415 rule. */
-static int full_block_infer_enabled(void)
-{
-  static int s = -1;
-  if (s < 0) s = getenv("ISAC_CSIRS_FULL_BLOCK_INFER") ? atoi(getenv("ISAC_CSIRS_FULL_BLOCK_INFER")) : 0;
-  return s;
-}
+/* A block member c is inferred into this slot only from a resource a that occurs in it AND was measured co-scheduled with c
+ * in >= 2 slots of the 640-slot window (a network that never co-schedules its TRS resources gets no inference). */
 static bool full_rb_overlap_half(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, const fapi_nr_dl_config_csirs_pdu_rel15_t *b);
 static int full_add_block(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, int n_conf, fapi_nr_dl_config_csirs_pdu_rel15_t *all,
                           int n_all, int max)
@@ -1830,7 +1407,7 @@ static int full_add_block(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, int n
       present = csirs_full_same_geometry(&all[i], c) && all[i].scramb_id == c->scramb_id;
     for (int i = 0; i < n0 && !block; i++) {
       block = all[i].row == 1 && all[i].freq_density == 3 && all[i].csi_type != 2 && full_rb_overlap_half(&all[i], c);
-      if (block && full_block_infer_enabled() == 2 && discovery_cooccur(&all[i], c) < 2)
+      if (block && discovery_cooccur(&all[i], c) < 2)
         block = false;
     }
     if (!present && block)
@@ -1850,10 +1427,8 @@ static void full_select(uint32_t slot, uint16_t pop, uint16_t dmrs_mask, fapi_nr
   fapi_nr_dl_config_csirs_pdu_rel15_t conf[2 * NR_CSIRS_BLIND_DISC_MAX_CONF], all[2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
   const int n_conf = full_all_confirmed(conf, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
   int n_all = rate_match_all_n(slot, all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
-  if (full_trs_pair_enabled())
-    n_all = full_add_trs_pairs(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
-  if (full_block_infer_enabled())
-    n_all = full_add_block(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  n_all = full_add_trs_pairs(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  n_all = full_add_block(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
   *nsel = 0;
   if (ner) *ner = 0;
   for (int i = 0; i < n_all; i++) {
@@ -1881,124 +1456,33 @@ int nr_csirs_full_rate_match(uint32_t pdsch_absolute_slot, uint16_t population_i
   full_select(pdsch_absolute_slot, population_id, dmrs_mask, out, &n, max, NULL, NULL, 0);
   return n;
 }
+/* The CRC-validated rate-match phases (ISAC_CSIRS_FULL_VALID) were off and are gone; the hook stays for its caller. */
+void nr_csirs_full_validate(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
+                            const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant,
+                            c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
+{
+  (void)ue; (void)proc; (void)cfg; (void)fa; (void)grant; (void)rxdataF;
+}
+
 void nr_csirs_full_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, uint32_t pdsch_absolute_slot)
 {
-  if (!nr_csirs_full_enabled() || !cfg || t_full_ab_depth > 0) /* inside a CSIFULLAB hypothesis: keep its list */
+  if (!cfg)
     return;
-  /* ISAC_CSIRS_FULL_ERASE=1 (default off): the resources NOT selected for this population (other RB blocks' TRS)
-   * become LLR erasures in nr_dlsch_extract_rbs() (their REs carry this grant's data under a foreign TRS). */
-  static int s_erase = -1;
-  if (s_erase < 0)
-    s_erase = getenv("ISAC_CSIRS_FULL_ERASE") && atoi(getenv("ISAC_CSIRS_FULL_ERASE")) ? 1 : 0;
+  /* The resources NOT selected for this population (other RB blocks' TRS) become LLR erasures in
+   * nr_dlsch_extract_rbs() (their REs carry this grant's data under a foreign TRS). */
   fapi_nr_dl_config_csirs_pdu_rel15_t erase[NFAPI_MAX_NUM_CSI_RATEMATCH];
   int n_sel = 0, n_erase = 0;
   full_select(pdsch_absolute_slot, cfg->dlDmrsScramblingId, cfg->dlDmrsSymbPos, cfg->csiRsForRateMatching, &n_sel,
-              NFAPI_MAX_NUM_CSI_RATEMATCH, s_erase ? erase : NULL, s_erase ? &n_erase : NULL, NFAPI_MAX_NUM_CSI_RATEMATCH);
+              NFAPI_MAX_NUM_CSI_RATEMATCH, erase, &n_erase, NFAPI_MAX_NUM_CSI_RATEMATCH);
   cfg->numCsiRsForRateMatching = (uint8_t)n_sel;
   if (nr_dlsch_csi_erase_set) /* weak: fixtures link this file without the demodulator */
     nr_dlsch_csi_erase_set(erase, n_erase);
 }
 
-/* ISAC_CSIRS_FULL_AB=1 (diagnostic, default off; needs ISAC_CSIRS_FULL=1). Every eligible dedicated full decode in a
- * slot carrying discovered CSI-RS is first decoded under a fixed set of rate-matching hypotheses on the SAME
- * samples, and one CSIFULLAB line reports each hypothesis' CRC (1 = CRC on the hypothesis itself, r = only a
- * DECODE-FIX recovery arm passed, 0 = fail): none / own population / own + every resource sharing an own
- * resource's RB block (= the ISAC_CSIRS_FULL rule) / every resource in the slot / own with extents rounded out to 16 RBs; each with the
- * grant's S and, when legal (S<=1, end 14), with S toggled. With ISAC_CSIRS_FULL_ERASE=1 every resource NOT in the
- * hypothesis is erased. The caller then decodes normally; the AB results are never fed back. */
-extern nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
-                                                                fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
-                                                                const freq_alloc_bitmap_t *freq_alloc,
-                                                                const nr_pdsch_passive_grant_t *grant,
-                                                                c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                                                nr_pdsch_passive_decode_result_t *out) __attribute__((weak));
+/* The A/B rate-matching hypothesis diagnostic (ISAC_CSIRS_FULL_AB) was off and is gone; the hook stays for its caller. */
 void nr_csirs_full_ab(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
                       const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant,
                       c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
 {
-  static int s_ab = -1;
-  if (s_ab < 0)
-    s_ab = getenv("ISAC_CSIRS_FULL_AB") && atoi(getenv("ISAC_CSIRS_FULL_AB")) ? 1 : 0;
-  if (!s_ab || !nr_csirs_full_enabled() || t_full_ab_depth > 0 || !nr_pdsch_passive_decode || !cfg)
-    return;
-  const uint32_t slot = (uint32_t)(proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx);
-  fapi_nr_dl_config_csirs_pdu_rel15_t all[2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
-  int n_all = rate_match_all_n(slot, all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
-  fapi_nr_dl_config_csirs_pdu_rel15_t conf[2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
-  const int n_conf = full_all_confirmed(conf, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
-  if (full_trs_pair_enabled())
-    n_all = full_add_trs_pairs(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
-  if (full_block_infer_enabled())
-    n_all = full_add_block(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
-  if (n_all <= 0)
-    return;
-  static int s_erase = -1;
-  if (s_erase < 0)
-    s_erase = getenv("ISAC_CSIRS_FULL_ERASE") && atoi(getenv("ISAC_CSIRS_FULL_ERASE")) ? 1 : 0;
-  const uint16_t pop = cfg->dlDmrsScramblingId;
-  bool in_h[6][2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
-  memset(in_h, 0, sizeof(in_h));
-  int n_own = 0, n_range = 0;
-  for (int i = 0; i < n_all; i++) {
-    const bool own = all[i].scramb_id == pop;
-    bool range = own; /* = the ISAC_CSIRS_FULL rule (full_select): own + own confirmed RB blocks */
-    for (int j = 0; j < n_conf && !range; j++)
-      range = conf[j].scramb_id == pop && conf[j].csi_type != 2 && full_rb_overlap_half(&conf[j], &all[i]);
-    in_h[1][i] = in_h[4][i] = own;
-    in_h[2][i] = in_h[5][i] = range;
-    n_own += own;
-    n_range += range;
-    in_h[3][i] = true;
-  }
-  const bool can_toggle = cfg->start_symbol <= 1 && cfg->start_symbol + cfg->number_symbols == 14;
-  char res[6][3];
-  memset(res, '-', sizeof(res));
-  t_full_ab_depth++;
-  for (int h = 0; h < 6; h++) {
-    for (int t = 0; t < (can_toggle ? 2 : 1); t++) {
-      fapi_nr_dl_config_dlsch_pdu_rel15_t c = *cfg;
-      c.numCsiRsForRateMatching = 0;
-      fapi_nr_dl_config_csirs_pdu_rel15_t er[NFAPI_MAX_NUM_CSI_RATEMATCH];
-      int ne = 0;
-      for (int i = 0; i < n_all; i++) {
-        if (csirs_full_dmrs_clash(&all[i], c.dlDmrsSymbPos))
-          continue;
-        fapi_nr_dl_config_csirs_pdu_rel15_t r = all[i];
-        if (h == 4) {
-          const int st = r.start_rb & ~15, en = ((r.start_rb + r.nr_of_rbs + 15) / 16) * 16;
-          r.start_rb = st;
-          r.nr_of_rbs = en - st;
-        }
-        bool dup = false;
-        if (in_h[h][i]) {
-          for (int j = 0; j < c.numCsiRsForRateMatching && !dup; j++)
-            dup = csirs_full_same_geometry(&c.csiRsForRateMatching[j], &r);
-          if (!dup && c.numCsiRsForRateMatching < NFAPI_MAX_NUM_CSI_RATEMATCH)
-            c.csiRsForRateMatching[c.numCsiRsForRateMatching++] = r;
-        } else if (s_erase && h != 5 && r.csi_type != 2) { /* h 5 = the rule without erasure */
-          for (int j = 0; j < ne && !dup; j++)
-            dup = csirs_full_same_geometry(&er[j], &r);
-          if (!dup && ne < NFAPI_MAX_NUM_CSI_RATEMATCH)
-            er[ne++] = r;
-        }
-      }
-      if (t) {
-        c.start_symbol = 1 - cfg->start_symbol;
-        c.number_symbols = 14 - c.start_symbol;
-      }
-      if (nr_dlsch_csi_erase_set)
-        nr_dlsch_csi_erase_set(er, ne);
-      nr_pdsch_passive_decode_result_t o;
-      memset(&o, 0, sizeof(o));
-      const nr_pdsch_passive_decode_status_t st = nr_pdsch_passive_decode(ue, proc, &c, fa, grant, rxdataF, &o);
-      res[h][t] = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? (o.config_recovered ? 'r' : '1') : '0';
-    }
-    res[h][2] = 0;
-  }
-  t_full_ab_depth--;
-  LOG_I(PHY, "SENSING: CSIFULLAB rnti=0x%04x fs=%d.%d ph=%u nl=%d mcs=%u rb=%u+%u S=%u L=%u pop=%u n_all=%d n_own=%d n_range=%d "
-        "none=%s own=%s range=%s all=%s own16=%s range_noerase=%s\n",
-        grant->rnti, proc->frame_rx, proc->nr_slot_rx, slot % 160, __builtin_popcount(cfg->dmrs_ports), grant->mcs,
-        fa->first_rb, fa->num_rbs, cfg->start_symbol, cfg->number_symbols, pop, n_all, n_own, n_range, res[0], res[1], res[2], res[3],
-        res[4], res[5]);
+  (void)ue; (void)proc; (void)cfg; (void)fa; (void)grant; (void)rxdataF;
 }

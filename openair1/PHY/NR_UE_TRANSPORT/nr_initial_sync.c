@@ -7,7 +7,7 @@
  */
 #include "PHY/defs_nr_UE.h"
 #include "PHY/MODULATION/modulation_UE.h"
-#include "PHY/MODULATION/nr_modulation.h" // init_symbol_rotation (ISAC_KSSB_ALIGN)
+#include "PHY/MODULATION/nr_modulation.h" // init_symbol_rotation
 #include "nr_transport_proto_ue.h"
 #include "nr_initial_sync_budget.h"
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
@@ -29,7 +29,7 @@
 
 /* The scan scratch budget (upper bound on the memory nr_initial_sync() may hold for parallel GSCN scanning: each
  * concurrently scanned GSCN needs a private copy of the capture, ~1.6 GB unbounded at 273 PRB / 4 RX / ~40 GSCN) is
- * runtime-configurable: env ISAC_SCAN_SCRATCH_MB, clamped 64..16384, default 512 MB. See nr_initial_sync_budget.c. */
+ * NR_INITIAL_SYNC_SCRATCH_MB_DEFAULT (512 MB). See nr_initial_sync_budget.c. */
 
 // structure used for multiple SSB detection
 typedef struct NR_UE_SSB {
@@ -369,10 +369,8 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
 
     c16_t(*rxdataF)[params->nb_antennas_rx][params->ofdm_symbol_size] =
         (c16_t(*)[params->nb_antennas_rx][params->ofdm_symbol_size])params->rxdataF;
-    /* ISAC_SSS_MULTI also makes ISAC_TARGET_PCI an operator choice of ONE PCI (N_ID_1 pinned too); unset: N_ID_2 only */
-    static int s_multi = -1;
-    if (s_multi < 0)
-      s_multi = getenv("ISAC_SSS_MULTI") && atof(getenv("ISAC_SSS_MULTI")) > 0;
+    /* passive: a pinned target PCI also pins N_ID_1; else N_ID_2 only */
+    const int s_multi = IS_PASSIVE_RX_MODE(get_softmodem_params());
     params->sss_res = rx_sss_nr(&p_sss, pss_res, s_multi && params->target_nid_cell >= 0 ? params->target_nid_cell : -1, rxdataF);
 
     if (!params->sss_res.success || params->sss_res.nid_cell < 0) {
@@ -525,8 +523,8 @@ static void nr_scan_ssb(void *arg)
                                                          &ssbInfo->symbolOffset,
                                                          &ssbInfo->pbchResult,
                                                          rxdataF); // start pbch detection at first symbol after pss
-      /* ISAC_SSS_MULTI: every SSS candidate PCI gets its own PBCH CRC; all are reported, the first that decodes in SSS
-       * order is kept (strongest verified cell). ISAC_TARGET_PCI pins the search to one PCI instead. */
+      /* passive: every SSS candidate PCI gets its own PBCH CRC; all are reported, the first that decodes in SSS
+       * order is kept (strongest verified cell). A pinned target PCI restricts the search to that PCI instead. */
       const sss_detection_result_t *sr = &search_params.sss_res;
       if (sr->ncand > 1) {
         char cb[192];
@@ -562,34 +560,6 @@ static void nr_scan_ssb(void *arg)
         int rsrp_db_per_re = 10 * log10(rsrp_avg);
         ssbInfo->adjust_rxgain = TARGET_RX_POWER - rsrp_db_per_re;
         LOG_I(PHY, "pbch rx ok. rsrp:%d dB/RE, adjust_rxgain:%d dB\n", rsrp_db_per_re, ssbInfo->adjust_rxgain);
-
-        // ---- GOLDEN-BUFFER PBCH REPLAY (2026-08-06) ----------------------------------------
-        // This is the ONE point where the time-domain samples are known-good: PBCH just decoded
-        // from them. Snapshot them with every decode parameter, then immediately re-run the full
-        // chain over a swept FFT-window offset. delta=0 MUST decode -- if it does not, the fault
-        // is in the chain rather than in sample selection, and every timing hypothesis is dead.
-        // Runs on this thread while everything is in scope, so no cross-thread plumbing.
-        if (getenv("ISAC_PBCH_REPLAY") && atoi(getenv("ISAC_PBCH_REPLAY"))) {
-          extern void nr_pbch_golden_capture(int, int, c16_t *const *, int, int, int, int, int, int, int);
-          extern void nr_pbch_replay_golden(const NR_DL_FRAME_PARMS *, const UE_nr_rxtx_proc_t *);
-          // search_params.rxdata is rxdataShift -- the FRAME-SHIFTED base pointer of the frame that
-          // actually succeeded. Passing the caller's `rxdata` here instead (as an earlier version
-          // did) takes samples from frame 0 while taking the offset from whichever frame decoded,
-          // so a frame_id=1 success mis-points by exactly samples_per_frame and the "golden"
-          // snapshot silently contains no SSB. The offset and the samples must come from the same
-          // frame -- hence both are read from search_params.
-          nr_pbch_golden_capture(fp->nb_antennas_rx,
-                                 search_params.rxdata_size,
-                                 search_params.rxdata,
-                                 search_params.pss_res.pos - fp->nb_prefix_samples,
-                                 ssbInfo->nidCell,
-                                 ssbInfo->ssbIndex,
-                                 ssbInfo->halfFrameBit,
-                                 ssbInfo->gscnInfo.ssbFirstSC,
-                                 fp->ofdm_symbol_size,
-                                 fp->nb_prefix_samples);
-          nr_pbch_replay_golden(fp, ssbInfo->proc);
-        }
       }
     }
   }
@@ -598,16 +568,16 @@ static void nr_scan_ssb(void *arg)
 }
 
 /* Absolute sample index of the first sample of the capture being scanned (UE_synch sets it before each search, -1 when
- * unknown). Lets ISAC_PSS_ACC fold PSS profiles of successive captures on the cell's 20 ms grid. */
+ * unknown). Lets the PSS accumulator folds PSS profiles of successive captures on the cell's 20 ms grid. */
 int64_t nr_initial_sync_capture_start = -1;
 
-/* ISAC_KSSB_ALIGN=1 (default off, WEAKSYNC 2026-10-11): align the receiver RB grid to the cell's CRB grid. CORESET#0, PDCCH
+/* (passive only, WEAKSYNC 2026-10-11): align the receiver RB grid to the cell's CRB grid. CORESET#0, PDCCH
  * and PDSCH REs sit on 12-subcarrier RBs counted from the receiver grid, while the cell's CRB boundary lies k_SSB (in
  * 15 kHz units in FR1, MIB + PBCH bit a_{A+5}) below the SSB. If (--ssb - k_SSB/2^mu) is not a multiple of 12 every RB is
  * off by s subcarriers and no CSS0 DCI decodes ([MEASURED replay c3610 PCI 403]: --ssb 1171 SI-RNTI hits 0, --ssb 1170
  * SIB1 decoded). Fix: move the SSB by -s subcarriers and the nominal carrier by +s*SCS (UE_synch retunes to it), exactly
- * what an operator does with --ssb/-C. Without the flag only the advisory line is printed.
- * shortcut: not combined with --ue-scan-carrier/ISAC_AUTO_ACQUIRE confirm passes (they match gscnInfo by the old SSB). */
+ * what an operator does with --ssb/-C. Non-passive: only the advisory line is printed.
+ * shortcut: not combined with --ue-scan-carrierconfirm passes (they match gscnInfo by the old SSB). */
 static void nr_kssb_grid_align(PHY_VARS_NR_UE *ue, nr_ue_ssb_scan_t *res)
 {
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
@@ -620,12 +590,10 @@ static void nr_kssb_grid_align(PHY_VARS_NR_UE *ue, nr_ue_ssb_scan_t *res)
     sh -= 12;
   if (sh == 0)
     return;
-  static int s_on = -1;
-  if (s_on < 0)
-    s_on = getenv("ISAC_KSSB_ALIGN") && atoi(getenv("ISAC_KSSB_ALIGN")) > 0;
+  const int s_on = IS_PASSIVE_RX_MODE(get_softmodem_params());
   LOG_W(NR_PHY, "SENSING: KSSB_GRID k_ssb=%d ssb_sc=%d: receiver RB grid off the CRB grid by %d subcarriers (aligned: --ssb %d -C %lu)%s\n",
         k_ssb, fp->ssb_start_subcarrier, sh, fp->ssb_start_subcarrier - sh,
-        (unsigned long)(fp->dl_CarrierFreq + (int64_t)sh * fp->subcarrier_spacing), s_on ? "; ISAC_KSSB_ALIGN retunes" : "");
+        (unsigned long)(fp->dl_CarrierFreq + (int64_t)sh * fp->subcarrier_spacing), s_on ? "; retunes" : "");
   if (!s_on)
     return;
   /* move the nominal carrier (as -C would) so the symbol-rotation tables follow; UE_synch retunes to the new carrier.
@@ -636,8 +604,8 @@ static void nr_kssb_grid_align(PHY_VARS_NR_UE *ue, nr_ue_ssb_scan_t *res)
   init_symbol_rotation(fp);
 }
 
-/* nr_initial_sync_impl: shared implementation of the initial cell search over the GSCN raster: optionally pre-selects the antennas by energy, sizes the scan batches from the scratch budget (ISAC_SCAN_SCRATCH_MB), and scans the GSCNs in batches on the thread pool, first detected cell wins in GSCN order.
- *   Automatic acquisition (ISAC_AUTO_ACQUIRE=1, passive only) adds a coarse CFO search bounded by ISAC_ACQ_CFO_MAX_HZ. With pss_window_frame >= 0 only that frame of the capture is scanned.
+/* nr_initial_sync_impl: shared implementation of the initial cell search over the GSCN raster: optionally pre-selects the antennas by energy, sizes the scan batches from the scratch budget, and scans the GSCNs in batches on the thread pool, first detected cell wins in GSCN order.
+ *   With pss_window_frame >= 0 only that frame of the capture is scanned.
  *   Returns the detected cell result (cell_detected false when none). Callers: nr_initial_sync() and nr_initial_sync_fast().
  */
 static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
@@ -659,19 +627,15 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
     LOG_W(NR_PHY, "ISAC_ACQ_EMPTY_WINDOW: no synchronization raster points\n");
     return (nr_initial_sync_t){.cell_detected = false};
   }
-  const char *auto_env = getenv("ISAC_AUTO_ACQUIRE");
-  const bool auto_acquire = auto_env && !strcmp(auto_env, "1");
+  const bool auto_acquire = nr_auto_acquire_on;
   int cfo_bins = 0;
   int cfo_limit_hz = 0;
   if (auto_acquire) {
-    AssertFatal(IS_PASSIVE_RX_MODE(get_softmodem_params()), "Automatic acquisition is passive-only\n");
-    AssertFatal(ue->UE_fo_compensation, "Automatic acquisition requires --ue-fo-compensation\n");
-    const char *bound = getenv("ISAC_ACQ_CFO_MAX_HZ");
-    char *end = NULL;
-    const double max_hz = bound ? strtod(bound, &end) : 0;
-    AssertFatal(bound && end != bound && !*end && isfinite(max_hz) && max_hz > 0
-                    && max_hz <= 32.0 * fp->subcarrier_spacing,
-                "ISAC_ACQ_CFO_MAX_HZ must be a positive search bound <= 32 SCS\n");
+    AssertFatal(ue->UE_fo_compensation,
+                "Automatic acquisition (--passive-rx without --ssb/--initial-fo) requires --ue-fo-compensation; "
+                "pin the cell with --ssb and --initial-fo to disable it\n");
+    const double max_hz = NR_ACQ_CFO_MAX_HZ;
+    AssertFatal(max_hz <= 32.0 * fp->subcarrier_spacing, "NR_ACQ_CFO_MAX_HZ must be <= 32 SCS\n");
     AssertFatal(fabs((double)ue->initial_fo) <= max_hz, "Initial CFO measurement exceeds search bound\n");
     cfo_limit_hz = (int)floor(max_hz);
     cfo_bins = (int)ceil((max_hz + fabs((double)ue->initial_fo)) / fp->subcarrier_spacing);
@@ -701,7 +665,7 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
    * power over the antennas it is given and the PBCH step MRCs them, so the scan gets the full
    * combining gain simply by being handed all branches. It used to be handed ONE (antenna 0)
    * because 273 PRB x 4 RX x ~40 GSCN of scratch once exhausted memory; the scratch is now
-   * batched under the scan scratch budget (ISAC_SCAN_SCRATCH_MB) (4 branches at 273 PRB = 6 GSCN per batch
+   * batched under the scan scratch budget (4 branches at 273 PRB = 6 GSCN per batch
    * instead of 24), so that reason is gone. The receive chain itself is unchanged: nothing is
    * retuned, the stream is the same channels before and after lock. ISAC_SCAN_ANT=N narrows the
    * scan to the N strongest branches (A/B only). */
@@ -742,24 +706,12 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
   const size_t scan_source_start = one_frame ? (size_t)pss_window_frame * fp->samples_per_frame : 0;
   const size_t rxdata_len = (size_t)fp->samples_per_frame * scan_nframes + fp->ofdm_symbol_size;
   const size_t bytes_per_gscn = (size_t)scan_fp.nb_antennas_rx * rxdata_len * sizeof(c16_t);
-  nr_scan_scratch_parse_t scratch_status;
-  const long scratch_mb = nr_initial_sync_scratch_mb(&scratch_status);
-  static bool scratch_warned = false; // env problems are reported once, not per scan
-  if (!scratch_warned && (scratch_status == NR_SCAN_SCRATCH_CLAMPED || scratch_status == NR_SCAN_SCRATCH_INVALID)) {
-    scratch_warned = true;
-    LOG_W(NR_PHY,
-          "ISAC_SCAN_SCRATCH_MB=\"%s\" is %s, using %ld MB (valid range %ld..%ld)\n",
-          getenv("ISAC_SCAN_SCRATCH_MB"),
-          scratch_status == NR_SCAN_SCRATCH_CLAMPED ? "out of range, clamped" : "not a number, defaulted",
-          scratch_mb,
-          NR_INITIAL_SYNC_SCRATCH_MB_MIN,
-          NR_INITIAL_SYNC_SCRATCH_MB_MAX);
-  }
+  const long scratch_mb = NR_INITIAL_SYNC_SCRATCH_MB_DEFAULT;
   int batch = nr_initial_sync_scan_batch(bytes_per_gscn, (size_t)get_nrUE_params()->Tpool.len_thr, scratch_mb);
   if (batch > numGscn)
     batch = numGscn;
   LOG_I(NR_PHY,
-        "Scan scratch budget %ld MB (ISAC_SCAN_SCRATCH_MB), %zu MB per GSCN, %zu worker threads: scanning %d GSCN in batches of %d\n",
+        "Scan scratch budget %ld MB, %zu MB per GSCN, %zu worker threads: scanning %d GSCN in batches of %d\n",
         scratch_mb,
         bytes_per_gscn >> 20,
         (size_t)get_nrUE_params()->Tpool.len_thr,
@@ -782,10 +734,9 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
   for (int trial = 0; trial <= 2 * cfo_bins && !res; ++trial) {
     /* Probe starts at zero; handoff starts at this run's PBCH-derived CFO.
      * Fresh PBCH CRC still accepts every trial, including the initial seed. */
-    /* SIGNED arithmetic: fp->subcarrier_spacing is uint32_t, so the -1 direction was promoted to
-     * unsigned and wrapped -- every negative trial evaluated to INT_MIN and was then skipped by the
-     * abs() guard (whose INT_MIN case is itself UB). The search therefore only ever probed the
-     * POSITIVE hypotheses, which is why a rig sitting below -SCS/2 could never acquire. */
+    /* SIGNED arithmetic: fp->subcarrier_spacing is uint32_t, so the -1 direction would be promoted to
+     * unsigned and wrap -- every negative trial evaluated to INT_MIN and was then skipped by the
+     * abs() guard. The search then only probes the POSITIVE hypotheses. */
     const int scs_hz = (int)fp->subcarrier_spacing;
     const int step = ((trial + 1) / 2) * scs_hz;
     const int coarse_offset = ue->initial_fo + ((trial & 1) ? step : -step);
@@ -904,7 +855,7 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
   clock_gettime(CLOCK_MONOTONIC, &scan_t1);
   LOG_I(NR_PHY, "SENSING: SYNC_SCAN ms=%.1f gscn=%d ant=%d frames=%d decim=%s detected=%d\n",
         (scan_t1.tv_sec - scan_t0.tv_sec) * 1e3 + (scan_t1.tv_nsec - scan_t0.tv_nsec) / 1e6, numGscn, scan_fp.nb_antennas_rx,
-        scan_nframes, getenv("ISAC_PSS_DECIM") ? getenv("ISAC_PSS_DECIM") : "0", res != NULL);
+        scan_nframes, IS_PASSIVE_RX_MODE(get_softmodem_params()) ? "1" : "0", res != NULL);
   // Set globals based on detected cell
   if (res) {
     fp->Nid_cell = res->nidCell;
@@ -998,7 +949,6 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
             fp->Nid_cell, res->gscnInfo.gscn, ss_ref, fp->numerology_index,
             res->freqOffset, res->syncRes.rx_offset, fp->samples_per_subframe * 1000);
     }
-
     return res->syncRes;
   } else {
 #ifdef DEBUG_INITIAL_SYNC

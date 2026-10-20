@@ -55,37 +55,8 @@ static _Atomic uint64_t g_ue_ids_dropped;
 uint64_t nr_pusch_passive_ul_ids_dropped(void)
 { return atomic_load_explicit(&g_ue_ids_dropped,memory_order_relaxed); }
 
-static int g_ue_state_cached=-1; /* read once (review fix: no per-call getenv) */
-static int g_chain_cached=-1;    /* same for ISAC_UL_PUSCH_CHAIN/SOLVER as seen by this file */
-void nr_pusch_passive_ul_ids_flags_reset_for_test(void)
-{
-  __atomic_store_n(&g_ue_state_cached,-1,__ATOMIC_RELAXED);
-  __atomic_store_n(&g_chain_cached,-1,__ATOMIC_RELAXED);
-}
-static bool ids_chain_on(void)
-{
-  int on=__atomic_load_n(&g_chain_cached,__ATOMIC_RELAXED);
-  if (on<0) {
-    const char *v=getenv("ISAC_UL_PUSCH_CHAIN"), *s=getenv("ISAC_UL_PUSCH_SOLVER");
-    on=(v && strcmp(v,"1")==0) || (s && strcmp(s,"1")==0);
-    __atomic_store_n(&g_chain_cached,on,__ATOMIC_RELAXED);
-  }
-  return on!=0;
-}
-bool nr_pusch_passive_ul_ue_state_enabled(void)
-{
-  int *cp=&g_ue_state_cached;
-  int on=__atomic_load_n(cp,__ATOMIC_RELAXED);
-  if (on<0) {
-    const char *v=getenv("ISAC_UL_UE_STATE");
-    const char *chain=getenv("ISAC_UL_PUSCH_CHAIN");
-    const char *solver=getenv("ISAC_UL_PUSCH_SOLVER");
-    on=(chain && strcmp(chain,"1")==0) || (solver && strcmp(solver,"1")==0) ||
-       (v && strcmp(v,"1")==0);
-    __atomic_store_n(cp,on,__ATOMIC_RELAXED);
-  }
-  return on!=0;
-}
+void nr_pusch_passive_ul_ids_flags_reset_for_test(void) {} /* the UL chain is always on: nothing cached */
+bool nr_pusch_passive_ul_ue_state_enabled(void) { return true; }
 static bool same_ticket(const nr_ue_ul_ticket_t *a,const nr_ue_ul_ticket_t *b)
 {
   return a->rnti==b->rnti && a->identity_gen==b->identity_gen &&
@@ -155,10 +126,13 @@ void nr_pusch_passive_ul_ids_current(uint16_t rnti,uint8_t nscid,uint16_t pci,
       if(dmrs_id) *dmrs_id=(s->confirmed_mask&(1u<<ns))?s->dmrs_id[ns]:s->priors[(s->trial/s->n_priors)%s->n_priors];
       if(data_id) {
         if (s->confirmed_mask) *data_id=s->data_id;
-        else if (ids_chain_on() &&
-                 s->failed_grants>=9 && (s->failed_grants%16)!=0)
+        else if (s->failed_grants>=9 && (s->failed_grants%16)!=0)
           *data_id=(uint16_t)((s->failed_grants-9-(s->failed_grants-1)/16)%1024);
-        else *data_id=s->priors[s->trial%s->n_priors];
+        else { /* a data id is 0..1023; DL scrambling priors may be larger (DM-RS ids go to 65535): skip those, fall back to the PCI */
+          uint16_t d=pci;
+          for(int k=0;k<s->n_priors;k++) { const uint16_t c=s->priors[(s->trial+k)%s->n_priors]; if(c<=1023) {d=c;break;} }
+          *data_id=d;
+        }
       }
     }
     break;

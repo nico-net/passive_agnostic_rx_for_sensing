@@ -56,41 +56,17 @@ TEST(ScanBatch, SizeTThreadCountNoNarrowing)
   EXPECT_EQ(nr_initial_sync_scan_batch(8UL << 20, (size_t)1 << 33, 64), 64 / 8);
 }
 
-TEST(ScanBatch, CachedScratchPublishesFinalValue)
+TEST(AutoAcquire, TriggerOnlyPassiveAndUnpinned)
 {
-  setenv("ISAC_SCAN_SCRATCH_MB", "100000", 1);
-  nr_scan_scratch_parse_t st = NR_SCAN_SCRATCH_UNSET;
-  EXPECT_EQ(nr_initial_sync_scratch_mb(&st), 16384);
-  EXPECT_EQ(st, NR_SCAN_SCRATCH_CLAMPED);
-  nr_scan_scratch_parse_t st2 = NR_SCAN_SCRATCH_UNSET;
-  EXPECT_EQ(nr_initial_sync_scratch_mb(&st2), 16384);
-  EXPECT_EQ(st2, NR_SCAN_SCRATCH_CLAMPED);
-  unsetenv("ISAC_SCAN_SCRATCH_MB");
+  EXPECT_TRUE(nr_auto_acquire_trigger(1, 0, 0));
+  EXPECT_FALSE(nr_auto_acquire_trigger(1, 1, 0)); // --ssb given
+  EXPECT_FALSE(nr_auto_acquire_trigger(1, 0, 1)); // --initial-fo given
+  EXPECT_FALSE(nr_auto_acquire_trigger(1, 1, 1));
+  EXPECT_FALSE(nr_auto_acquire_trigger(0, 0, 0)); // not passive
 }
 
-TEST(ScanBatch, Parse)
+TEST(AutoAcquire, CfoBoundDefault)
 {
-  long mb = 0;
-  EXPECT_EQ(nr_initial_sync_parse_scratch_mb(nullptr, &mb), NR_SCAN_SCRATCH_UNSET);
-  EXPECT_EQ(mb, 512);
-  EXPECT_EQ(nr_initial_sync_parse_scratch_mb("", &mb), NR_SCAN_SCRATCH_UNSET);
-  EXPECT_EQ(mb, 512);
-  EXPECT_EQ(nr_initial_sync_parse_scratch_mb("2048", &mb), NR_SCAN_SCRATCH_OK);
-  EXPECT_EQ(mb, 2048);
-  EXPECT_EQ(nr_initial_sync_parse_scratch_mb("64", &mb), NR_SCAN_SCRATCH_OK);
-  EXPECT_EQ(mb, 64);
-  EXPECT_EQ(nr_initial_sync_parse_scratch_mb("16384", &mb), NR_SCAN_SCRATCH_OK);
-  EXPECT_EQ(mb, 16384);
-  EXPECT_EQ(nr_initial_sync_parse_scratch_mb("8", &mb), NR_SCAN_SCRATCH_CLAMPED);
-  EXPECT_EQ(mb, 64);
-  EXPECT_EQ(nr_initial_sync_parse_scratch_mb("-3", &mb), NR_SCAN_SCRATCH_CLAMPED);
-  EXPECT_EQ(mb, 64);
-  EXPECT_EQ(nr_initial_sync_parse_scratch_mb("99999", &mb), NR_SCAN_SCRATCH_CLAMPED);
-  EXPECT_EQ(mb, 16384);
-  EXPECT_EQ(nr_initial_sync_parse_scratch_mb("99999999999999999999999", &mb), NR_SCAN_SCRATCH_CLAMPED);
-  EXPECT_EQ(mb, 16384);
-  EXPECT_EQ(nr_initial_sync_parse_scratch_mb("abc", &mb), NR_SCAN_SCRATCH_INVALID);
-  EXPECT_EQ(mb, 512);
-  EXPECT_EQ(nr_initial_sync_parse_scratch_mb("12x", &mb), NR_SCAN_SCRATCH_INVALID);
-  EXPECT_EQ(mb, 512);
+  EXPECT_EQ(NR_ACQ_CFO_MAX_HZ, 60000.0);
+  EXPECT_LE(NR_ACQ_CFO_MAX_HZ, 32.0 * 15000); // the bound must fit 32 SCS at the narrowest FR1 SCS
 }

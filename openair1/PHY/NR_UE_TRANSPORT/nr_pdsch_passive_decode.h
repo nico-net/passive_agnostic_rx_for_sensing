@@ -57,6 +57,7 @@
 #include "common/utils/bits.h" // freq_alloc_bitmap_t
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_pdsch_passive_alloc_normalise (pure, lives there)
 #include "PHY/defs_nr_UE.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_snr.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h"
 
 #ifdef __cplusplus
@@ -113,6 +114,11 @@ typedef struct {
   /// common RBs its REG bundles occupy (bit c%8 of byte c/8). Filled by the blind monitor's DCI 1_1 path.
   uint8_t  pdcch_sym0, pdcch_nsym;
   uint8_t  pdcch_crb[35];
+  /// Fix A (ISAC_PDSCH_TDA_FIELD): TDRA-field window of the DCI (bit position + 1, 0 = none), the TDD last PDSCH symbol of the slot (13 = full slot / unknown),
+  /// and up to two legal (S,L) rows (tda_n); row 0 is already in the decode's configuration, row 1 is the retry. tda_addpos = dmrs-AdditionalPosition used.
+  uint8_t  tda_pos1, tda_n, tda_addpos;
+  int8_t   tda_last;
+  uint8_t  tda_S[2], tda_L[2];
 } nr_pdsch_passive_grant_t;
 
 /// Pick this RNTI's current DCI 1_1 interleaved VRB-to-PRB bundle-size hypothesis (2 or 4). The
@@ -150,6 +156,8 @@ typedef struct {
   float                br_nvar_db[4];///< per-branch chest noise variance (dB, chest's own DM-RS estimate)
   float                rho;          ///< mean |cross-branch residual correlation|       ///< mean QAM amplitude consistency (1 = coherent), 0 = n/a ///< EVM after a per-symbol complex scale (what CPE/amplitude tracking would leave)
   float                br_snr_db[4];
+  nr_dmrs_snr_t        dmrs_snr;     ///< EVMGRANT dmrs_snr= / dmrs_pw= / dmrs_ref= (chest-based, valid when dmrs_path != 0)
+  uint8_t              dmrs_path;    ///< 0 none (-99), 1 CPU chest, 2 GPU exact chest, 3 GPU graph pass, 4 chest cache (EVMGRANT dsp=)
   float                layer_snr_db[4]; ///< HIGHMCS: per-layer decision-directed SNR (dB), -99 = n/a (EVMGRANT snr_l=)
   int8_t               l2maxh;       ///< MRCBUG diag: the fixed-point output shift of this decode (EVMGRANT l2=)
   float                zabs;         ///< MRCBUG diag: mean |Re z|,|Im z| of the int16 equaliser output in LSB (EVMGRANT zabs=)
@@ -158,6 +166,7 @@ typedef struct {
   uint16_t             dmrs_ports;   ///< T26d diag: DM-RS port bitmap the decode used
   uint8_t              n_cdm;        ///< T26d diag: CDM groups without data
   uint8_t              dmrs_add;     ///< T26d diag: number of DM-RS symbols
+  uint8_t              skip;         ///< TAIL-FIX no-chance gate (nr_snr_gate.h): 1 = DM-RS SNR far below the MCS requirement, not demodulated / decoded / retried (EVMGRANT skip=)
 } nr_pdsch_passive_decode_result_t;
 
 /**
@@ -287,6 +296,10 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
 /* Queue-owned IQ: installed only after a guarded copy, valid until the next group.
  * FEP tasks receive these pointers explicitly; no borrowed TLS on pool workers. */
 void nr_pdsch_passive_set_owned_iq(c16_t **rx, int slot);
+/// RECOVERY_ASYNC (Task 6): per-thread mode, 1 consumer (defer the recovery arms), 2 recovery worker, 0 off; setting it clears the deferred flag.
+void nr_pdsch_passive_recov_mode(int mode);
+/// True when the last decode of this thread returned a failed first pass with its recovery arms deferred.
+bool nr_pdsch_passive_recov_deferred(void);
 c16_t **nr_pdsch_passive_iq_for_slot(int slot, c16_t **live);
 uint64_t nr_pdsch_passive_last_fep_ns(void);
 

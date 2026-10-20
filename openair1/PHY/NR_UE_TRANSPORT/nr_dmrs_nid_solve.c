@@ -242,6 +242,12 @@ static int solve_nullspace(const eq_t *sorted, int ne, float bar, int slot, int 
 int nr_dmrs_nid_solve(const float *yr, const float *yi, const int *m, int n, int slot, int symbol, int symbols_per_slot, int nscid,
                       nr_nid_solution_t *out, int max_out)
 {
+  return nr_dmrs_nid_solve_ex(yr, yi, m, n, slot, symbol, symbols_per_slot, nscid, out, max_out, 0);
+}
+
+int nr_dmrs_nid_solve_ex(const float *yr, const float *yi, const int *m, int n, int slot, int symbol, int symbols_per_slot, int nscid,
+                         nr_nid_solution_t *out, int max_out, int fast)
+{
   if (n < 16 || n > NR_NID_SOLVE_MAX_PILOT || max_out < 1 || !yr || !yi || !m)
     return 0;
   pthread_once(&s_once, tables_init);
@@ -277,7 +283,17 @@ int nr_dmrs_nid_solve(const float *yr, const float *yi, const int *m, int n, int
   const int ne = 2 * n;
   for (int rot = 0; rot < 4; rot++) {
     const double phi = phi0 + rot * (M_PI / 2.0);
-    const double cr = cos(-phi), sr = sin(-phi);
+    /* fast: one cos/sin for all four classes (rotation by k*90 degrees is exact) */
+    double cr, sr;
+    if (fast) {
+      static const int cs[4][2] = {{1, 0}, {0, 1}, {-1, 0}, {0, -1}}; /* cos/sin of k*90 degrees */
+      const double c0 = cos(-phi0), s0 = sin(-phi0), ck = cs[rot][0], sk = -cs[rot][1]; /* e^{-j k 90} */
+      cr = c0 * ck - s0 * sk;
+      sr = s0 * ck + c0 * sk;
+    } else {
+      cr = cos(-phi);
+      sr = sin(-phi);
+    }
     for (int i = 0; i < n; i++) {
       const double dr = yr[i] * cr - yi[i] * sr, di = yr[i] * sr + yi[i] * cr; /* y * e^{-j phi} */
       const int c0 = 2 * m[i], c1 = 2 * m[i] + 1;
@@ -320,14 +336,22 @@ int nr_dmrs_nid_solve(const float *yr, const float *yi, const int *m, int n, int
     /* Randomised information sets only help when there are spare equations to choose among: a 36-equation window system has 5. */
     const int ntrials = ne >= 31 + 40 ? 8 : 2;
     for (int trial = 0; trial < ntrials; trial++) {
-      memcpy(work, top, sizeof(eq_t) * (size_t)K);
-      if (trial > 0) { /* randomised information sets: perturb the reliabilities multiplicatively before ordering */
-        for (int i = 0; i < K; i++)
-          work[i].rel *= 0.5f + (float)(xs_next(&seed) & 0xffff) / 65536.0f;
-        qsort(work, (size_t)K, sizeof(eq_t), cmp_eq_desc);
+      /* fast: the information-set trials only ever look at the leading ~40 rows, so perturb and sort the 128 most reliable (profile: 76 % of
+       * the time was memcpy + qsort of 384 rows x 8 trials x 4 classes); a rank-deficient head falls back to all K rows. */
+      uint32_t x = 0;
+      bool solved = false;
+      for (int kk = (fast && K > 128) ? 128 : K;; kk = K) {
+        memcpy(work, top, sizeof(eq_t) * (size_t)kk);
+        if (trial > 0) { /* randomised information sets: perturb the reliabilities multiplicatively before ordering */
+          for (int i = 0; i < kk; i++)
+            work[i].rel *= 0.5f + (float)(xs_next(&seed) & 0xffff) / 65536.0f;
+          qsort(work, (size_t)kk, sizeof(eq_t), cmp_eq_desc);
+        }
+        solved = solve_ordered(work, kk, &x);
+        if (solved || kk == K)
+          break;
       }
-      uint32_t x;
-      if (!solve_ordered(work, K, &x))
+      if (!solved)
         continue;
       const int nid = nid_from_cinit(x, slot, symbol, symbols_per_slot, nscid);
       if (nid < 0)
@@ -360,6 +384,15 @@ int nr_dmrs_nid_solve(const float *yr, const float *yi, const int *m, int n, int
       found[nfound].cinit = x;
       found[nfound].phi = phi;
       nfound++;
+    }
+    /* fast: a confirmed solution (every top check agrees) in this rotation class ends the search; the other three classes can only
+     * add chance solutions (valid with probability 2^-15) */
+    if (fast) {
+      bool sure = false;
+      for (int f = 0; f < nfound; f++)
+        sure |= found[f].rot == rot && found[f].top_checks >= 4 && found[f].top_mismatches == 0 && found[f].mismatches <= 1;
+      if (sure)
+        break;
     }
     /* path 2: reliable equations that do not span all 31 dimensions */
     {

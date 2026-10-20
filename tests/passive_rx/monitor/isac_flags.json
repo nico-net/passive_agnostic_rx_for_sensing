@@ -1,0 +1,337 @@
+{
+"ISAC_ACQ_PROBE": {
+"desc": "ISAC_ACQ_PROBE=1 (tests/passive_rx/auto_acquire.py probe phase): stop at broadcast facts. Applying SIB1 to a trial RF window would promote the scan center to the carrier center;...",
+"src": "openair2/LAYER2/NR_MAC_UE/config_ue.c:2352",
+"how": "code comment"
+},
+"ISAC_BG_CORES": {
+"desc": "5 = slot producer, 7 = PDSCH/scan",
+"src": "common/utils/nr_bg_lane.c:17",
+"how": "code comment"
+},
+"ISAC_BG_CRITICAL_CORES": {
+"desc": "plan off: the critical lane is whatever the env core variables and --thread-pool name",
+"src": "common/utils/nr_core_plan.c:343",
+"how": "code comment"
+},
+"ISAC_CSIRS_DISC": {
+"desc": "read by shared code (LDPC pool, GPU budget)",
+"src": "openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:1049",
+"how": "code comment"
+},
+"ISAC_CSIRS_DISC_BACKEND": {
+"desc": "test-only cpu/gpu selector; unset = auto",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c:223",
+"how": "code comment"
+},
+"ISAC_CSIRS_DISC_CORE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c:143",
+"how": null
+},
+"ISAC_CSIRS_DISC_DETECT_CORES": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c:143",
+"how": null
+},
+"ISAC_DMRS_SCAN_CORE": {
+"desc": "t26r = t26q + ISAC_PUSCH_CORES=6 ISAC_PUSCH_PRIO=30 ISAC_PDSCH_DMRS_SCAN_ASYNC=1 ISAC_DMRS_SCAN_CORE=2 ISAC_PDTIM_PCT=1 ISAC_UL_LOCK_CRC_GUARD=1 ISAC_PDSCH_GPU_EXACT_DEMOD_NL34=...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:272",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_FLOAT_CORES": {
+"desc": "ISAC_FLOAT_CORES: unpinned threads (and everything they start) stay in one lane",
+"src": "executables/nr-uesoftmodem.c:290",
+"how": "code comment"
+},
+"ISAC_GNB_PDCCH_DMRS_ID": {
+"desc": "TEST HOOK (simulation only, default off): ISAC_GNB_PDCCH_DMRS_ID=<0..65535> configures the dedicated CORESET's pdcch-DMRS-ScramblingID, which makes the gNB scramble UE-specific ...",
+"src": "openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c:332",
+"how": "code comment"
+},
+"ISAC_GPU_BUDGET": {
+"desc": "init: one-time setup (pthread_once): reads ISAC_GPU_BUDGET (enabled when \"1\", set by the passive receiver's main) and records the start time; discovery share 30 %, RT deadline 2...",
+"src": "openair1/PHY/TOOLS/nr_gpu_budget.c:50",
+"how": "code comment"
+},
+"ISAC_GPU_CHECK_CORES": {
+"desc": "One SCHED_OTHER nice-19 worker draining q, on the cores ISAC_GPU_CHECK_CORES (default the little cores 0-4,10-14). 0 = started. Also used by nr_pdsch_passive_queue.c (FATTAILS I...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c:738",
+"how": "code comment"
+},
+"ISAC_GPU_WORKER_CORE": {
+"desc": "plan off: the critical lane is whatever the env core variables and --thread-pool name",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c:144",
+"how": "code comment"
+},
+"ISAC_HIDDEN_MULTI_CORESET": {
+"desc": "DEFERRED/DO NOT USE: ISAC_HIDDEN_MULTI_CORESET not in the frozen config t26zE (2026-10-18); slated for removal",
+"src": "openair1/SIMULATION/NR_PHY/hidden_waveform.h:90",
+"how": "code comment"
+},
+"ISAC_HIDDEN_RECONFIG": {
+"desc": "DEFERRED/DO NOT USE: ISAC_HIDDEN_RECONFIG not in the frozen config t26zE (2026-10-18); slated for removal",
+"src": "openair1/SIMULATION/NR_PHY/hidden_waveform.h:94",
+"how": "code comment"
+},
+"ISAC_HIDDEN_SEED": {
+"desc": "DEFERRED/DO NOT USE: ISAC_HIDDEN_SEED not in the frozen config t26zE (2026-10-18); slated for removal",
+"src": "openair1/SIMULATION/NR_PHY/dlsim.c:786",
+"how": "code comment"
+},
+"ISAC_HIDDEN_WAVEFORM_DIR": {
+"desc": "DEFERRED/DO NOT USE: ISAC_HIDDEN_WAVEFORM_DIR not in the frozen config t26zE (2026-10-18); slated for removal",
+"src": "openair1/SIMULATION/NR_PHY/dlsim.c:784",
+"how": "code comment"
+},
+"ISAC_METRICS_PATH": {
+"desc": "Also append every ISAC_METRICS JSON line to this file (\u00a711.13)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:232",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_MLOCK": {
+"desc": "ISAC_MLOCK=0 skips mlockall (default 1 = upstream behaviour). 2026-10-08, DGX GB10: with a CUDA context the call keeps the main thread at ~100 % system time for seconds across t...",
+"src": "common/utils/system.c:397",
+"how": "code comment"
+},
+"ISAC_PASSIVE_REPLAY_CAPTURE": {
+"desc": "Offline replay exits before any radio initialization.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c:109",
+"how": "code comment"
+},
+"ISAC_PASSIVE_REPLAY_INPUT": {
+"desc": "Offline replay exits before any radio initialization.",
+"src": "executables/nr-uesoftmodem.c:524",
+"how": "code comment"
+},
+"ISAC_PDCCH_JOINT_ANON_CORE": {
+"desc": "ISAC_BG_LANE: shared background core list, nice 10",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c:143",
+"how": "code comment"
+},
+"ISAC_PDCCH_NID_GPU_CORE": {
+"desc": "nr_pdcch_nid_gpu_start: loads the device module and starts the worker thread, pinned to ISAC_PDCCH_NID_GPU_CORE (default 13).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:61",
+"how": "code comment"
+},
+"ISAC_PDCCH_PAR_CORE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c:143",
+"how": null
+},
+"ISAC_PDCCH_USS_CORE": {
+"desc": "> ISAC_SCAN_ANT=1 ISAC_UE_RT_CORE=5 ISAC_PDCCH_USS_CORE=7 ISAC_CSIRS_BLIND=1 ISAC_CSIRS_BLIND_IDSWEEP=1 nr-uesoftmodem",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c:142",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_PDSCH_CORES": {
+"desc": "ISAC_PDSCH_CORES=\"6,7,8,9,15,16\" (T26c): explicit, non-contiguous consumer cores (GB10 big cores are 5-9,15-19)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c:142",
+"how": "code comment"
+},
+"ISAC_PUSCH_CORES": {
+"desc": "ISAC_PUSCH_CORES=\"17,18\": the UL trial decodes ran unpinned at FIFO 50, above the PDSCH consumers (40), and inflated every PDSCH",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c:142",
+"how": "code comment"
+},
+"ISAC_RAW_IQ_CENTER": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:156",
+"how": null
+},
+"ISAC_RAW_IQ_CHANNELS": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:151",
+"how": null
+},
+"ISAC_RAW_IQ_DECIM": {
+"desc": "ISAC_RAW_IQ_DECIM=D (default 1, replay only): serve a recording made at rate D*fs at rate fs (windowed-sinc LPF + decimate),",
+"src": "radio/COMMON/raw_iq.c:163",
+"how": "code comment"
+},
+"ISAC_RAW_IQ_DIRECTORY": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:154",
+"how": null
+},
+"ISAC_RAW_IQ_FIRST_TICK": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:155",
+"how": null
+},
+"ISAC_RAW_IQ_GAP2_AT_S": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:187",
+"how": null
+},
+"ISAC_RAW_IQ_GAP2_S": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:187",
+"how": null
+},
+"ISAC_RAW_IQ_GAP_AT_S": {
+"desc": "the recording, seconds skipped). Replay-only; there is no live-radio equivalent.",
+"src": "radio/COMMON/raw_iq.c:181",
+"how": "code comment"
+},
+"ISAC_RAW_IQ_GAP_S": {
+"desc": "ISAC_RAW_IQ_GAP_AT_S / ISAC_RAW_IQ_GAP_S: inject one stream discontinuity (seconds into the recording, seconds skipped). Replay-only; there is no live-radio equivalent.",
+"src": "radio/COMMON/raw_iq.c:181",
+"how": "code comment"
+},
+"ISAC_RAW_IQ_RATE": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:156",
+"how": null
+},
+"ISAC_RAW_IQ_SAMPLES": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:155",
+"how": null
+},
+"ISAC_RAW_IQ_SHIFT": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:152",
+"how": null
+},
+"ISAC_RAW_IQ_SPEED": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:159",
+"how": null
+},
+"ISAC_RX_RECOVER": {
+"desc": "usrp_rx_recover: returns true when ISAC_RX_RECOVER=1 (cached): in-place RX recovery is enabled (the producer re-arms the stream after a fault instead of stopping).",
+"src": "executables/nr-ue.c:805",
+"how": "code comment"
+},
+"ISAC_SCAN_ANT": {
+"desc": "retuned, the stream is the same channels before and after lock. ISAC_SCAN_ANT=N narrows the scan to the N strongest branches (A/B only).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:674",
+"how": "code comment"
+},
+"ISAC_SIB1_CACHE_DIR": {
+"desc": "ISAC_SIB1_CACHE_DIR (default /tmp/passive_rx).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:5467",
+"how": "code comment"
+},
+"ISAC_TB_LOG_WIDTHS": {
+"desc": "gNB-side rfsim test bed ground truth (tests/passive_rx/dgx/ul_rfsim_arm.sh), never the receiver",
+"src": "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c:3171",
+"how": "code comment"
+},
+"ISAC_TB_PUSCH_IDS": {
+"desc": "ISAC_TB_PUSCH_IDS=\"dmrs:data\" -> scramblingID0 and dataScramblingIdentityPUSCH ISAC_TB_PUSCH_TP=1 -> transform precoding enabled (pusch_Config.transformPrecoder)",
+"src": "openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c:1678",
+"how": "code comment"
+},
+"ISAC_TB_PUSCH_MCSTAB": {
+"desc": "ISAC_TB_PUSCH_MCSTAB=256 -> mcs_Table qam256 (and mcs_TableTransformPrecoder qam256) */ DEFERRED/DO NOT USE: ISAC_TB_PUSCH_IDS not in the frozen config t26zE (2026-10-18); slate...",
+"src": "openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c:1692",
+"how": "code comment"
+},
+"ISAC_TB_PUSCH_TP": {
+"desc": "ISAC_TB_PUSCH_TP=1 -> transform precoding enabled (pusch_Config.transformPrecoder) ISAC_TB_PUSCH_MCSTAB=256 -> mcs_Table qam256 (and mcs_TableTransformPrecoder qam256)",
+"src": "openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c:1687",
+"how": "code comment"
+},
+"ISAC_TD_IGNORE_SIB1": {
+"desc": "unset/0",
+"src": "openair1/SIMULATION/NR_PHY/hidden_waveform.h:97",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_UE_RT_CORE": {
+"desc": "plan off: the critical lane is whatever the env core variables and --thread-pool name",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c:142",
+"how": "code comment"
+},
+"ISAC_UHD_CTRL_CORES": {
+"desc": "ISAC_UHD_CTRL_CORES=\"a,b,c\": move UHD's control-endpoint threads (uhd_ctrl*) to these cores. MEASURED 2026-10-06 (X410 34B2AF1, DPDK lcores 17-19): the device is created from a ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c:144",
+"how": "code comment"
+},
+"ISAC_UL_BGDISC_CORE": {
+"desc": "the discovery lane never competes with the grant consumers",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c:51",
+"how": "code comment"
+},
+"ISAC_UL_NID_BG_CORE": {
+"desc": "ISAC_UL_NID_BG_CORE=<cpu> pins the worker thread (default: unpinned, nice 19, SCHED_IDLE).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c:81",
+"how": "code comment"
+},
+"ISAC_UL_SNAP_CORE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c:731",
+"how": null
+},
+"ISAC_USRP_CATCHUP_X": {
+"desc": "USRP driver (hardware radio shared with the gNB): site defaults of the receiver",
+"src": "executables/nr-uesoftmodem.c:289",
+"how": "code comment"
+},
+"ISAC_USRP_CHPOW_S": {
+"desc": "PER-ANTENNA POWER (ISAC_USRP_CHPOW_S=N, default 0 = off): every N seconds log each channel's mean power over this read's first ring segment (dBFS, sc16 full scale 32768). One re...",
+"src": "executables/nr-uesoftmodem.c:289",
+"how": "code comment"
+},
+"ISAC_USRP_ISOLATION_CHECK": {
+"desc": "usrp_isolation_check: diagnostic (ISAC_USRP_ISOLATION_CHECK=1): warns when the ring producer or the UHD control cores are not isolated (isolcpus) or tickless (nohz_full).",
+"src": "radio/USRP/usrp_lib.cpp:1418",
+"how": "code comment"
+},
+"ISAC_USRP_NO_TX": {
+"desc": "ISAC_USRP_NO_TX=1: create no TX streamer at all (receive-only / passive). MEASURED 2026-10-06 (X410 34B2AF1, DPDK, 4 x 122.88 MS/s): intermittently the DPDK mbuf pool was exhaus...",
+"src": "executables/nr-uesoftmodem.c:289",
+"how": "code comment"
+},
+"ISAC_USRP_RESTART_MAX": {
+"desc": "usrp_restart_max: returns ISAC_USRP_RESTART_MAX (cached, default 10): how many pre-sync restarts of the RX stream are allowed in the legacy (non-recovery) mode.",
+"src": "radio/USRP/usrp_lib.cpp:1013",
+"how": "code comment"
+},
+"ISAC_USRP_RESTART_UNTIL_SYNC": {
+"desc": null,
+"src": "radio/USRP/usrp_lib.cpp:1075",
+"how": null
+},
+"ISAC_USRP_RING_CORE": {
+"desc": "plan off: the critical lane is whatever the env core variables and --thread-pool name",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c:142",
+"how": "code comment"
+},
+"ISAC_USRP_RING_MS": {
+"desc": "usrp_ring_ms: returns ISAC_USRP_RING_MS (0..5000, cached): the duration in ms of the decoupled RX ring; 0 disables it. Used to size the ring and to decide whether the producer t...",
+"src": "radio/USRP/usrp_lib.cpp:992",
+"how": "code comment"
+},
+"ISAC_USRP_RING_PKTS": {
+"desc": "ISAC_USRP_RING_PKTS: packets requested per recv() (default 8). benchmark_rate asks for one packet per call and never exhausted the DPDK mbuf pool, while the 8-packet producer in...",
+"src": "radio/USRP/usrp_lib.cpp:1109",
+"how": "code comment"
+},
+"ISAC_USRP_RING_POLL": {
+"desc": "ISAC_USRP_RING_POLL=1 (default off): once streaming, busy-poll recv() with a zero timeout. The producer owns an isolated core, so spinning is free, whereas the blocking recv() m...",
+"src": "radio/USRP/usrp_lib.cpp:1118",
+"how": "code comment"
+},
+"ISAC_USRP_RING_POLL_TIMEOUT_MS": {
+"desc": "futex wake (syscall + IPI) for most packets. ISAC_USRP_RING_POLL_TIMEOUT_MS (default 100) of continuous silence is still a receive timeout (fault), as with the blocking 0.1 s re...",
+"src": "radio/USRP/usrp_lib.cpp:1119",
+"how": "code comment"
+},
+"ISAC_USRP_RING_PRIO": {
+"desc": "ISAC_USRP_RING_PRIO (default 95): SCHED_FIFO priority of the producer. OAI's actors and ru_start_thread run at FIFO 97 with no CPU pinning; on a core that is not isolated one of...",
+"src": "radio/USRP/usrp_lib.cpp:1098",
+"how": "code comment"
+},
+"ISAC_USRP_RING_ZEROCOPY": {
+"desc": "USRP driver (hardware radio shared with the gNB): site defaults of the receiver",
+"src": "executables/nr-uesoftmodem.c:289",
+"how": "code comment"
+},
+"ISAC_USRP_START_TIMEOUT_MS": {
+"desc": "ACQMISS (task B): ISAC_USRP_START_TIMEOUT_MS (default 5000 = unchanged). MEASURED 2026-10-09 gs2_38 (9.5 h idle) and 2026-10-13",
+"src": "executables/nr-uesoftmodem.c:288",
+"how": "code comment"
+}
+}

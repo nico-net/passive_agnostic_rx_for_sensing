@@ -1,0 +1,4 @@
+AL1 N=128: dematch 0.084 | tree 0.481 | transform 0.264 | extract+crc 0.179 us (timer overhead ~0.03 each) (0)
+AL2 N=256: dematch 0.128 | tree 0.593 | transform 0.473 | extract+crc 0.178 us (timer overhead ~0.03 each) (0)
+AL4 N=512: dematch 0.223 | tree 0.845 | transform 0.893 | extract+crc 0.177 us (timer overhead ~0.03 each) (0)
+AL8 N=512: dematch 0.539 | tree 0.848 | transform 0.892 | extract+crc 0.178 us (timer overhead ~0.03 each) (0)

@@ -290,23 +290,10 @@ TEST(CsirsDiscSweep, AdaptiveGateBoundariesAndLegacyOverride)
   w.z=4; w.n_slots=0; EXPECT_FALSE(nr_csirs_disc_gate_accept(&w,&legacy));
 }
 
-TEST(CsirsDiscSweep, GateEnvironmentValidation)
+TEST(CsirsDiscSweep, GateDefaults)
 {
-  const char *names[]={"ISAC_CSIRS_DISC_WIN_K","ISAC_CSIRS_DISC_WIN_M","ISAC_CSIRS_DISC_WIN_FLOOR","ISAC_CSIRS_DISC_WIN_Z"};
-  std::vector<std::string> saved;
-  std::vector<bool> present;
-  for (auto name:names) { const char *v=getenv(name); present.push_back(v); saved.emplace_back(v?v:""); unsetenv(name); }
-  auto c=nr_csirs_disc_gate_config();
+  const auto c=nr_csirs_disc_gate_config();
   EXPECT_FLOAT_EQ(c.k,12); EXPECT_FLOAT_EQ(c.m,4); EXPECT_FLOAT_EQ(c.floor,2); EXPECT_FLOAT_EQ(c.fixed,0);
-  for (auto bad:{"nan","inf","-1","3junk",""}) {
-    for (auto name:names) setenv(name,bad,1);
-    c=nr_csirs_disc_gate_config();
-    EXPECT_FLOAT_EQ(c.k,12); EXPECT_FLOAT_EQ(c.m,4); EXPECT_FLOAT_EQ(c.floor,2); EXPECT_FLOAT_EQ(c.fixed,0);
-  }
-  for (auto name:names) setenv(name,"2.5",1);
-  c=nr_csirs_disc_gate_config();
-  EXPECT_FLOAT_EQ(c.k,2.5); EXPECT_FLOAT_EQ(c.m,2.5); EXPECT_FLOAT_EQ(c.floor,2.5); EXPECT_FLOAT_EQ(c.fixed,2.5);
-  for (int i=0;i<4;++i) { if(present[i]) setenv(names[i],saved[i].c_str(),1); else unsetenv(names[i]); }
 }
 
 TEST(CsirsDiscSweep, LatticeAndFourAntennas)
@@ -353,15 +340,7 @@ TEST(CsirsDiscSweep, InvalidEmptyAndDisabled)
   ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&w),1);
   EXPECT_EQ(w.z,0);
   EXPECT_EQ(w.n_slots,0);
-  unsetenv("ISAC_CSIRS_DISC");
-  memset(&w,0xa5,sizeof(w));
-  std::array<unsigned char,sizeof(w)> before; memcpy(before.data(),&w,sizeof(w));
-  const auto samples=grid.samples;
-  EXPECT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&w),0);
-  EXPECT_EQ(memcmp(&w,before.data(),sizeof(w)),0);
-  EXPECT_EQ(grid.samples,samples);
-  EXPECT_EQ(nr_csirs_disc_sweep_cpu(nullptr,nullptr,0,nullptr,nullptr),0);
-  setenv("ISAC_CSIRS_DISC","1",1);
+  EXPECT_EQ(nr_csirs_disc_sweep_cpu(nullptr,nullptr,0,nullptr,nullptr),-1);
 }
 
 [[maybe_unused]] Sweep gpu(void **module)
@@ -667,7 +646,6 @@ int main(int argc,char **argv)
 {
   ::testing::InitGoogleTest(&argc,argv);
   nr_csirs_disc_test_init();
-  setenv("ISAC_CSIRS_DISC","1",1);
   return RUN_ALL_TESTS();
 }
 

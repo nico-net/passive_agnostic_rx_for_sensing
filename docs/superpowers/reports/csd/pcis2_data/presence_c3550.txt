@@ -1,0 +1,20 @@
+pcis [508, 688, 614, 4]
+thermal noise sum_rx per RE dB 71.2
+slot 10
+  odd: total dB  92.5  resid dB  92.0 | 508: pres 0.79 pow  79.2dB | 688: pres 0.79 pow  79.0dB | 614: pres 0.00 pow -30.0dB | 4: pres 0.79 pow  78.7dB
+  even: total dB  83.7  resid dB  83.7 | 508: pres 0.00 pow -30.0dB | 688: pres 0.00 pow -30.0dB | 614: pres 0.00 pow -30.0dB | 4: pres 0.00 pow -30.0dB
+slot 11
+  odd: total dB  94.1  resid dB  90.7 | 508: pres 1.00 pow  88.9dB | 688: pres 1.00 pow  87.4dB | 614: pres 0.75 pow  75.5dB | 4: pres 0.00 pow -30.0dB
+  even: total dB  83.3  resid dB  83.3 | 508: pres 0.00 pow -30.0dB | 688: pres 0.00 pow -30.0dB | 614: pres 0.00 pow -30.0dB | 4: pres 0.00 pow -30.0dB
+slot 12
+  odd: total dB  91.6  resid dB  89.5 | 508: pres 1.00 pow  81.3dB | 688: pres 1.00 pow  85.8dB | 614: pres 0.92 pow  76.9dB | 4: pres 0.08 pow  74.0dB
+  even: total dB  83.2  resid dB  83.3 | 508: pres 0.00 pow -30.0dB | 688: pres 0.00 pow -30.0dB | 614: pres 0.00 pow -30.0dB | 4: pres 0.00 pow -30.0dB
+slot 13
+  odd: total dB  88.6  resid dB  86.8 | 508: pres 1.00 pow  81.2dB | 688: pres 0.96 pow  76.4dB | 614: pres 1.00 pow  75.9dB | 4: pres 1.00 pow  76.4dB
+  even: total dB  79.2  resid dB  79.2 | 508: pres 0.00 pow -30.0dB | 688: pres 0.04 pow  75.3dB | 614: pres 0.00 pow -30.0dB | 4: pres 0.04 pow  63.0dB
+slot 16
+  odd: total dB  90.9  resid dB  89.6 | 508: pres 0.96 pow  80.2dB | 688: pres 0.92 pow  76.7dB | 614: pres 1.00 pow  82.3dB | 4: pres 0.79 pow  76.0dB
+  even: total dB  78.4  resid dB  78.4 | 508: pres 0.00 pow -30.0dB | 688: pres 0.00 pow -30.0dB | 614: pres 0.00 pow -30.0dB | 4: pres 0.00 pow -30.0dB
+slot 17
+  odd: total dB  92.1  resid dB  90.1 | 508: pres 1.00 pow  84.1dB | 688: pres 1.00 pow  82.1dB | 614: pres 1.00 pow  83.0dB | 4: pres 0.75 pow  76.4dB
+  even: total dB  83.9  resid dB  83.9 | 508: pres 0.00 pow -30.0dB | 688: pres 0.00 pow -30.0dB | 614: pres 0.00 pow -30.0dB | 4: pres 0.00 pow -30.0dB

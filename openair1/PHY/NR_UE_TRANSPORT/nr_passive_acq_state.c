@@ -28,6 +28,9 @@
 #include "common/utils/LOG/log.h"
 #include <string.h>
 #include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 
 static const char *state_names[NR_ACQ_NUM_STATES] = {
   "SEARCHING", "PBCH_LOCKED", "SIB1_DECODED", "PDCCH_LOCKED", "CORESET_VERIFIED",
@@ -252,18 +255,11 @@ bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot)
   pthread_mutex_unlock(&g_lock);
   return t.valid ? nr_tdd_slot_has_downlink(&t, absolute_slot) : true;
 }
-/* nr_passive_acq_note_carrier_from_rs: confirms the carrier grid without SIB1 carrier information, when a CSI-RS sequence has been decoded on the grid: marks the carrier verified with Point A at the grid start and the centre of the started carrier (ISAC_ACQ_CARRIER_FROM_RS=0 disables it).
+/* nr_passive_acq_note_carrier_from_rs: confirms the carrier grid without SIB1 carrier information, when a CSI-RS sequence has been decoded on the grid: marks the carrier verified with Point A at the grid start and the centre of the started carrier.
  *   Does nothing when the carrier is already verified or the physical geometry is not set. Logs the confirmation with its evidence. Caller: nr_csirs_blind_rt.c (confirmed CSI-RS, discovery path).
  */
 void nr_passive_acq_note_carrier_from_rs(const char *evidence)
 {
-  static int s_enabled = -1; /* ISAC_ACQ_CARRIER_FROM_RS=0 disables this SIB1-free path */
-  if (s_enabled < 0) {
-    const char *e = getenv("ISAC_ACQ_CARRIER_FROM_RS");
-    s_enabled = !(e && atoi(e) == 0);
-  }
-  if (!s_enabled)
-    return;
   pthread_mutex_lock(&g_lock);
   if (g_snap.carrier_verified != 0 || !g_phy_geom_set) {
     pthread_mutex_unlock(&g_lock);
@@ -308,6 +304,8 @@ void nr_passive_acq_note_carrier_hypothesis(int point_a_sc, const char *evidence
         point_a_sc, point_a_sc / 12, g_carrier.phy_n_rb, evidence ? evidence : "?");
   pthread_mutex_unlock(&g_lock);
 }
+
+void nr_passive_acq_try_sibling_carrier(int k_ssb) { (void)k_ssb; } /* sibling-carrier hypothesis removed; kept for the caller in nr-ue.c */
 
 void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, int offset_to_carrier, int k_ssb)
 {
@@ -375,4 +373,44 @@ void nr_passive_acq_reset(void)
   memset(&g_carrier, 0, sizeof(g_carrier)); g_phy_geom_set = false;
   g_snap.state = NR_ACQ_SEARCHING;
   pthread_mutex_unlock(&g_lock);
+}
+
+/* ---- CELL TRAFFIC STATE: see nr_passive_acq_state.h ---- */
+const char *nr_cell_verdict_name(nr_cell_verdict_t v)
+{
+  static const char *const n[] = {"UNKNOWN", "ACTIVE", "BARRED_IDLE", "IDLE"};
+  return (unsigned)v < 4 ? n[v] : "?";
+}
+
+void nr_cell_state_note_rnti(nr_cell_state_t *c, uint16_t rnti)
+{
+  int free_i = -1;
+  for (int i = 0; i < 8; i++) {
+    if (c->cnt[i] && c->rnti[i] == rnti) {
+      if (c->cnt[i] < 255) c->cnt[i]++;
+      if (c->cnt[i] >= 3) c->verdict = NR_CELL_ACTIVE;
+      return;
+    }
+    if (!c->cnt[i] && free_i < 0) free_i = i;
+  }
+  if (free_i < 0) free_i = (int)(rnti & 7); /* shortcut: 8 slots, a colliding RNTI evicts one; recurrence >= 3 of the survivor is all that matters */
+  c->rnti[free_i] = rnti;
+  c->cnt[free_i] = 1;
+}
+
+nr_cell_verdict_t nr_cell_state_update(nr_cell_state_t *c, uint32_t abs_slot, uint32_t window_slots)
+{
+  if (!c->started) { c->started = true; c->t0 = abs_slot; }
+  if (c->verdict == NR_CELL_ACTIVE) return c->verdict;
+  if ((uint32_t)(abs_slot - c->t0) >= window_slots) c->verdict = c->barred ? NR_CELL_BARRED_IDLE : NR_CELL_IDLE;
+  return c->verdict;
+}
+
+/* The process-wide cell-state instance was off by default and is gone; the hooks stay for their callers. */
+void nr_cell_state_note_mib_barred(bool barred) { (void)barred; }
+void nr_cell_state_note_ue_rnti(uint16_t rnti) { (void)rnti; }
+bool nr_cell_state_sweep_blocked(uint32_t abs_slot, uint64_t cap_offered, uint64_t cap_taken, uint64_t cap_empty)
+{
+  (void)abs_slot; (void)cap_offered; (void)cap_taken; (void)cap_empty;
+  return false;
 }

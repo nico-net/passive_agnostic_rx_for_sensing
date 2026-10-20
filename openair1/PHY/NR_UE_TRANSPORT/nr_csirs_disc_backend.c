@@ -215,14 +215,13 @@ const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
 }
 
 /* nr_csirs_disc_gpu_load: returns the GPU operations for the discovery pipeline, loading the modules on first use; NULL when disabled or on the CPU backend.
- *   Enabled only with ISAC_CSIRS_DISC=1 and ISAC_CSIRS_DISC_BACKEND not "cpu" (auto or gpu). Returns NULL while the breaker is open.
+ *   NULL when ISAC_CSIRS_DISC_BACKEND is "cpu" (test hook). Returns NULL while the breaker is open.
  *   Callers: nr_csirs_disc.c (pipeline init and batches), nr_csirs_disc_feed.c (ring allocation and worker), nr_csirs_disc_td.c and the confirmation internals.
  */
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void)
 {
-  const char *enabled = getenv("ISAC_CSIRS_DISC");
-  const char *backend = getenv("ISAC_CSIRS_DISC_BACKEND");
-  if (!enabled || strcmp(enabled, "1") || (backend && !strcmp(backend, "cpu")))
+  const char *backend = getenv("ISAC_CSIRS_DISC_BACKEND"); /* test-only cpu/gpu selector; unset = auto */
+  if (backend && !strcmp(backend, "cpu"))
     return NULL;
   if (backend && strcmp(backend, "auto") && strcmp(backend, "gpu"))
     return NULL;

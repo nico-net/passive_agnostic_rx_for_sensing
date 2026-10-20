@@ -25,6 +25,8 @@ static ul_disc_track_t tracks[UL_DISC_TRACKS];
 static pthread_mutex_t track_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned evict_next;
 static uint32_t current_epoch;
+#define UL_DISC_CELL_N 16
+static int cell_res[UL_DISC_CELL_N], cell_n; /* cell prior of the timing tracker; kept across epochs (timing is physical) */
 
 static ul_disc_track_t *track(uint16_t rnti)
 {
@@ -60,6 +62,7 @@ void nr_pusch_ul_disc_reset(void)
   memset(tracks, 0, sizeof(tracks));
   evict_next = 0;
   current_epoch = 0;
+  cell_n = 0;
   pthread_mutex_unlock(&track_lock);
 }
 
@@ -74,13 +77,27 @@ void nr_pusch_ul_disc_epoch(uint32_t dedicated_epoch)
   pthread_mutex_unlock(&track_lock);
 }
 
+/* cell-level prior for RNTIs never timed: the residual most other accepted residuals agree with (+-64), from the last 16 */
+static bool cell_mode(int *out)
+{
+  int best = -1, bv = 0;
+  for (int i = 0; i < cell_n && i < UL_DISC_CELL_N; i++) {
+    int v = 0;
+    for (int k = 0; k < cell_n && k < UL_DISC_CELL_N; k++) v += abs(cell_res[k] - cell_res[i]) <= 64;
+    if (v > bv) { bv = v; best = i; }
+  }
+  if (best >= 0) *out = cell_res[best];
+  return best >= 0;
+}
+
 int nr_pusch_ul_disc_timing_seed(uint16_t rnti, int nominal_advance, long abs_slot, bool *tracked)
 {
   pthread_mutex_lock(&track_lock);
   ul_disc_track_t *t = track(rnti);
-  if (t->timed && (abs_slot <= t->last_slot || abs_slot - t->last_slot > 2000)) t->timed = false;
-  if (tracked) *tracked = t->timed;
-  const int correction = t->timed ? (int)lrint(t->correction) : 0;
+  /* a learned advance outlives the grant that measured it (older slots, 1 s of silence): a failed search decodes near the real timing */
+  if (tracked) *tracked = t->timed && labs(abs_slot - t->last_slot) <= 2000;
+  int correction = t->timed ? (int)lrint(t->correction) : 0;
+  if (!t->timed && !cell_mode(&correction)) correction = 0;
   pthread_mutex_unlock(&track_lock);
   return nominal_advance + correction;
 }
@@ -92,13 +109,14 @@ void nr_pusch_ul_disc_timing_update(uint16_t rnti, int nominal_advance,
   pthread_mutex_lock(&track_lock);
   ul_disc_track_t *t = track(rnti);
   const double correction = measured_advance - nominal_advance;
-  if (!t->timed || abs_slot <= t->last_slot || abs_slot - t->last_slot > 2000) {
+  cell_res[cell_n++ % UL_DISC_CELL_N] = (int)correction;
+  if (!t->timed || labs(abs_slot - t->last_slot) > 2000) {
     t->correction = correction;
     t->timed = true;
   } else if (fabs(correction - t->correction) <= 256.0) {
     t->correction += 0.25 * (correction - t->correction);
   }
-  t->last_slot = abs_slot;
+  if (abs_slot > t->last_slot || !t->timed) t->last_slot = abs_slot;
   pthread_mutex_unlock(&track_lock);
 }
 
@@ -234,6 +252,23 @@ static void consider(const nr_pusch_ul_disc_grid_t *g, nr_pusch_ul_disc_result_t
   }
 }
 
+/* background discovery worker: the scan below covers [lo, lo+n) in one call instead of 64 ids per grant; the per-RNTI cursor is left alone. */
+static __thread int t_sweep_lo, t_sweep_n;
+
+int nr_pusch_ul_disc_known_ids(int *ids, int max)
+{
+  int n = 0;
+  pthread_mutex_lock(&track_lock);
+  for (int i = 0; i < UL_DISC_TRACKS && n < max; ++i)
+    if (tracks[i].used && tracks[i].found.accepted) {
+      bool seen = false;
+      for (int k = 0; k < n; ++k) seen |= ids[k] == tracks[i].found.id;
+      if (!seen) ids[n++] = tracks[i].found.id;
+    }
+  pthread_mutex_unlock(&track_lock);
+  return n;
+}
+
 nr_pusch_ul_disc_result_t nr_pusch_ul_disc_search(const nr_pusch_ul_disc_grid_t *g,
                                                   uint16_t rnti, uint8_t type_a_pos,
                                                   const int *prior_ids, int npriors,
@@ -247,8 +282,10 @@ nr_pusch_ul_disc_result_t nr_pusch_ul_disc_search(const nr_pusch_ul_disc_grid_t 
   pthread_mutex_lock(&track_lock);
   ul_disc_track_t *t = track(rnti);
   const nr_pusch_ul_disc_result_t cached = t->found;
-  const uint32_t cursor = t->scan_cursor;
-  t->scan_cursor = cursor + UL_DISC_SCAN_PER_GRANT;
+  const uint32_t cursor = t_sweep_n ? (uint32_t)t_sweep_lo : t->scan_cursor;
+  const int scan_total = t_sweep_n ? t_sweep_n : UL_DISC_SCAN_PER_GRANT;
+  if (!t_sweep_n)
+    t->scan_cursor = cursor + UL_DISC_SCAN_PER_GRANT;
   pthread_mutex_unlock(&track_lock);
   int front_load[2] = {0,0};
   for (int type = 0; type < 2; ++type) {
@@ -262,7 +299,7 @@ nr_pusch_ul_disc_result_t nr_pusch_ul_disc_search(const nr_pusch_ul_disc_grid_t 
   }
 
   /* DL-known physical IDs first, full legal symbol-layout family. */
-  for (int i = -1; i < npriors && i < 8; ++i) {
+  for (int i = -1; i < npriors && i < 16; ++i) {
     if (i == -1 && !cached.accepted) continue;
     const int id = i == -1 ? cached.id : prior_ids[i];
     if (id < 0 || id > 65535) continue;
@@ -291,8 +328,9 @@ nr_pusch_ul_disc_result_t nr_pusch_ul_disc_search(const nr_pusch_ul_disc_grid_t 
     const int firsts[3] = {g->start_symbol, 2, 3};
     nr_pusch_ul_disc_hyp_t h[UL_DISC_SCAN_PER_GRANT * 12];
     nr_pusch_ul_disc_metric_t m[UL_DISC_SCAN_PER_GRANT * 12];
+    for (int base = 0; base < scan_total && !best.accepted; base += UL_DISC_SCAN_PER_GRANT) {
     int n = 0;
-    for (int k = 0; k < UL_DISC_SCAN_PER_GRANT; ++k)
+    for (int k = base; k < base + UL_DISC_SCAN_PER_GRANT && k < scan_total; ++k)
       for (int ns = 0; ns < 2; ++ns)
         for (int type = 0; type < 2; ++type)
           for (int s = 0; s < 3; ++s) {
@@ -314,6 +352,7 @@ nr_pusch_ul_disc_result_t nr_pusch_ul_disc_search(const nr_pusch_ul_disc_grid_t 
             consider(g, &best, observed, id, ns, type, mapping, add, len,
                      front_load[type], type_a_pos);
     }
+    }
   }
 publish:
   if (best.accepted) {
@@ -326,4 +365,15 @@ publish:
     pthread_mutex_unlock(&track_lock);
   }
   return best;
+}
+
+nr_pusch_ul_disc_result_t nr_pusch_ul_disc_search_sweep(const nr_pusch_ul_disc_grid_t *g, uint16_t rnti, uint8_t type_a_pos, const int *prior_ids,
+                                                        int npriors, int preferred_type, int preferred_nscid, uint8_t antenna_ports_field,
+                                                        int id_lo, int id_n)
+{
+  t_sweep_lo = id_lo;
+  t_sweep_n = id_n > 0 ? id_n : 0;
+  const nr_pusch_ul_disc_result_t r = nr_pusch_ul_disc_search(g, rnti, type_a_pos, prior_ids, npriors, preferred_type, preferred_nscid, antenna_ports_field);
+  t_sweep_n = 0;
+  return r;
 }

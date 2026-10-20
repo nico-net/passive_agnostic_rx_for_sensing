@@ -108,7 +108,6 @@ int nr_csirs_blind_rt_test_slot_pattern(int row, uint32_t slot, int holes, int e
         .cdm_type = row >= 3, .freq_density = 2, .scramb_id = 17};
     g_on = g_armed = 1;
     g_reconf = 0;
-    g_rank = g_wide = g_ids = g_slotsweep = 0;
     g_conf_logged = g_null_n = g_null_w = g_zp_null_n = g_zp_null_w = 0;
     memset(g_zp_logged, 0, sizeof(g_zp_logged));
     memset(g_zp_events, 0, sizeof(g_zp_events));
@@ -253,7 +252,7 @@ int nr_csirs_blind_rt_test_export(int rank, int banks, int types[2], int *untouc
     states[b]->conf_off[0][0] = 2;
   }
   g_on = g_armed = 1;
-  g_rank = rank;
+  (void)rank; /* ranking mode is gone */
   fapi_nr_dl_config_csirs_pdu_rel15_t out[2], before[2];
   memset(out, 0xa5, sizeof(out));
   memcpy(before, out, sizeof(out));
@@ -298,7 +297,7 @@ int nr_csirs_blind_rt_test_confirm_ring(const nr_csirs_disc_ring_t *ring,
                                        .samples_per_slot_wCP = samples};
   c16_t(*rx)[samples] = (c16_t(*)[samples])storage;
   g_on = g_disc = g_armed = 1;
-  g_reconf = g_rank = g_wide = g_ids = g_slotsweep = 0;
+  g_reconf = 0;
   const int initial = g_st.n_conf;
   uint32_t calls = 0;
   for (int t = 0; t < ring->capacity; ++t) {
@@ -349,7 +348,6 @@ int nr_csirs_blind_rt_test_zp_feed(uint32_t slot, double score, int reset)
         .row = 2, .nr_of_rbs = 4, .freq_domain = 1, .symb_l0 = 7,
         .freq_density = 2, .scramb_id = 17};
     g_on = g_armed = 1;
-    g_rank = 0;
   }
   nr_csirs_blind_zp_feed(&g_zp, 0, slot, score, 0.02);
   fapi_nr_dl_config_csirs_pdu_rel15_t out[2];
@@ -488,7 +486,7 @@ static void *stress_actor(void *arg)
 }
 int nr_csirs_blind_rt_test_async_stress(void)
 {
-  g_disc=g_on=g_armed=1;g_rank=g_wide=g_ids=g_slotsweep=0;g_reconf=1;
+  g_disc=g_on=g_armed=1;g_reconf=1;
   discovery_empty_state(&g_st);discovery_empty_state(&g_zp);g_st.discovery_bank=true;
   stress_ue.frame_parms=(NR_DL_FRAME_PARMS){.N_RB_DL=217,.ofdm_symbol_size=4096,
       .first_carrier_offset=4096-12*217,.nb_antennas_rx=4,.symbols_per_slot=14,

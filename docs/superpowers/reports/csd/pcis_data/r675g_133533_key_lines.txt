@@ -1,0 +1,40 @@
+[PHY]    Init: N_RB_DL 51, first_carrier_offset 718, nb_prefix_samples 72,nb_prefix_samples0 88, ofdm_symbol_size 1024
+[PHY]    Set UE_fo_compensation 1, UE_scan_carrier 0, UE_no_timing_correction 0 
+[PHY]    Initial sync: pbch not decoded on any branch, ssb index 0
+[PHY]    Initial sync: pbch decoded sucessfully on BRANCH 2 alone (combined attempt failed), ssb index 0
+[PHY]    Initial sync successful, PCI: 675
+[PHY]    Got synch: hw_slot_offset 16, carrier off 61 Hz
+[MAC]    SENSING: MIB fields sfn=744 k_ssb=22 scs_common=1 coreset0=12 ss0=4 dmrs_typeA=0 barred=0 intraFreqResel=0
+[PHY]    SENSING: DL_TRAFFIC_PROBE on: one DL slot in 2, antenna 0, SCHED_OTHER worker; POINTA_SWEEP=0
+[PHY]    SENSING: PDSCHQ queued=0 decoded=0 crc_ok=0 (0.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+[PHY]    SENSING: ACQ state=CORESET_VERIFIED time_in_state=0 transitions=2 regressions=0 in[len=0 coreset=1 ul_bwp=0 dl_win=0 ul_win[w=0 i=0]] uldisc[gen=1 raw=0 wcls=0 icls=0 wtrials=0 itrials=0 rejected_fb=0] carrier=unchecked xoh[assumed=0 unresolved crc_ok=0] dmrs_id[dl=pending:-1/0 ul=pending:-1/0]
+[PHY]    SENSING: ACQ carrier CONFIRMED from SIB1: 51 PRB mu=1, Point A at grid subcarrier 0, carrier ends at 612 = grid end (started with 51 PRB mu=1, SSB found at subcarrier 227); derived carrier centre 3425.010000 MHz (started 3425.010000 MHz)
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891442620473287 rnti=0xffff sfn=772 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891448137364526 rnti=0xffff sfn=808 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: PDSCHQ queued=2 decoded=2 crc_ok=2 (100.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+[PHY]    SENSING: ACQ state=CELL_CONFIGURED time_in_state=1714 transitions=3 regressions=0 in[len=0 coreset=1 ul_bwp=1 dl_win=0 ul_win[w=0 i=0]] uldisc[gen=1 raw=0 wcls=0 icls=0 wtrials=0 itrials=0 rejected_fb=0] carrier=CONFIRMED xoh[assumed=0 CONFIRMED crc_ok=2] dmrs_id[dl=pending:-1/0 ul=pending:-1/0]
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891449362873291 rnti=0xffff sfn=816 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: PDCCH_NID_GPU pass 1: stage1 95.740 ms stage2 0.001 ms t=10165.894 (kernels max 0.803 ms) -> 0 CORESETs:
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891451813748611 rnti=0xffff sfn=832 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891452425303319 rnti=0xffff sfn=836 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891453033874835 rnti=0xffff sfn=840 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891453647117157 rnti=0xffff sfn=844 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891454869229286 rnti=0xffff sfn=852 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891455481949859 rnti=0xffff sfn=856 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891456098069293 rnti=0xffff sfn=860 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891457934161909 rnti=0xffff sfn=872 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: PDSCHQ queued=11 decoded=11 crc_ok=9 (81.8%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+[PHY]    SENSING: ACQ state=CELL_CONFIGURED time_in_state=3544 transitions=3 regressions=0 in[len=0 coreset=1 ul_bwp=1 dl_win=0 ul_win[w=0 i=0]] uldisc[gen=1 raw=0 wcls=0 icls=0 wtrials=0 itrials=0 rejected_fb=0] carrier=CONFIRMED xoh[assumed=0 CONFIRMED crc_ok=9] dmrs_id[dl=pending:-1/0 ul=pending:-1/0]
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891459787048725 rnti=0xffff sfn=884 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891460404000612 rnti=0xffff sfn=888 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891461636321975 rnti=0xffff sfn=896 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891462871892595 rnti=0xffff sfn=904 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: PDCCH_NID_GPU pass 2: stage1 118.989 ms stage2 0.007 ms t=10178.026 (kernels max 1.244 ms) -> 0 CORESETs:
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891464107734402 rnti=0xffff sfn=912 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891464723350134 rnti=0xffff sfn=916 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891466575783425 rnti=0xffff sfn=928 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891467198866738 rnti=0xffff sfn=932 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891467818089892 rnti=0xffff sfn=936 slot=10 fmt=1_0 cce=0 al=8
+[PHY]    SENSING: PDSCHQ queued=20 decoded=20 crc_ok=15 (75.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+[PHY]    SENSING: ACQ state=CELL_CONFIGURED time_in_state=5356 transitions=3 regressions=0 in[len=0 coreset=1 ul_bwp=1 dl_win=0 ul_win[w=0 i=0]] uldisc[gen=1 raw=0 wcls=0 icls=0 wtrials=0 itrials=0 rejected_fb=0] carrier=CONFIRMED xoh[assumed=0 CONFIRMED crc_ok=15] dmrs_id[dl=pending:-1/0 ul=pending:-1/0]
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791891469049582126 rnti=0xffff sfn=944 slot=10 fmt=1_0 cce=0 al=8

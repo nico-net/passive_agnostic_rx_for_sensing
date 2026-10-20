@@ -119,6 +119,22 @@ TEST(PrbSet, GatherConcatenatesSegmentsInDataOrder) {
   for (int i = 0; i < 8; i++) EXPECT_EQ(idx[i], want[i]);
 }
 
+extern "C" int nr_prb_gather_copy(const void *src, void *dst, const nr_prb_seg_t *seg, int nseg, int re_per_prb, int off0, int N);
+TEST(PrbSet, GatherCopyEqualsPerReLoopIncludingRingWrap) {
+  const int N = 64, rp = 3;
+  const nr_prb_seg_t s[4] = {{10, 5, 0}, {0, 3, 5}, {17, 4, 8}, {6, 2, 12}};  // REs 30..44, 0..8, 51..62, 18..23
+  for (int off0 : {0, 5, 20, 50, 63}) {  // wrap of the source and the destination ring at different places
+    uint32_t src[N], a[N], b[N];
+    for (int i = 0; i < N; i++) { src[i] = 0x1000u + i; a[i] = b[i] = 0xdeadbeefu; }
+    int idx[64];
+    const int n = nr_prb_gather_index(s, 4, rp, idx, 64);
+    ASSERT_EQ(n, 14 * rp);
+    for (int i = 0; i < n; i++) a[(off0 + i) % N] = src[(off0 + idx[i]) % N];
+    EXPECT_EQ(nr_prb_gather_copy(src, b, s, 4, rp, off0, N), n);
+    EXPECT_EQ(memcmp(a, b, sizeof(a)), 0) << "off0 " << off0;
+  }
+}
+
 TEST(PrbSet, ListNormaliseRejectsDuplicateOutOfBwpAndOverLength) {
   // The pure core of nr_pdsch_passive_alloc_normalise(): every producer's PRB list goes through it.
   uint32_t bm[9] = {0xdeadbeef};
@@ -214,4 +230,94 @@ int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+// ---- ISAC_PDSCH_HOST_FAST: nr_pdsch_host_fast.h vs the scalar originals ----
+#include <random>
+#include "nr_pdsch_host_fast.h"
+
+TEST(HostFast, UnscrambleEqualsScalarLoop) {
+  std::mt19937 g(7);
+  for (uint32_t size : {1u, 31u, 32u, 33u, 100u, 4096u, 12345u, 99999u}) {
+    const uint32_t words = (size + 31) / 32;
+    std::vector<uint32_t> seq(words);
+    for (auto &w : seq) w = g();
+    std::vector<int16_t> a(words * 32), b;
+    for (auto &x : a) x = (int16_t)g();
+    a[0] = -32768;  // the one value whose negation wraps
+    b = a;
+    nrhf_unscramble(a.data(), size, seq.data());
+    for (uint32_t i = 0; i < words * 32; i++)
+      if (seq[i / 32] & (1U << (i % 32))) b[i] = (int16_t)-b[i];
+    EXPECT_EQ(a, b) << size;
+  }
+}
+
+TEST(HostFast, DeinterleaveEqualsScalar) {
+  std::mt19937 g(8);
+  for (int Qm : {2, 4, 6, 8})
+    for (uint32_t n : {1u, 3u, 4u, 5u, 8u, 9u, 17u, 1000u, 4733u}) {
+      const uint32_t E = n * Qm;
+      std::vector<int16_t> f(E), a(E), b(E);
+      for (auto &x : f) x = (int16_t)g();
+      ASSERT_EQ(nrhf_deinterleave(E, Qm, a.data(), f.data()), 1);
+      for (uint32_t i = 0; i < n; i++)
+        for (int j = 0; j < Qm; j++) b[(size_t)j * n + i] = f[(size_t)i * Qm + j];
+      EXPECT_EQ(a, b) << Qm << " " << n;
+    }
+  std::vector<int16_t> x(8);
+  EXPECT_EQ(nrhf_deinterleave(7, 2, x.data(), x.data()), 0);  // E % Qm != 0: caller falls back
+}
+
+// verbatim control flow of nr_rate_matching_ldpc_rx (after the checks and the clear), one soft input at a time
+static void rm_ref(int16_t *d, const int16_t *soft, uint32_t E, uint32_t ind, uint32_t Ncb, uint32_t Foffset, uint32_t F) {
+  uint32_t k = 0;
+  if (ind < Foffset)
+    for (; (ind < Foffset) && (k < E); ind++) d[ind] += soft[k++];
+  if (ind >= Foffset && ind < Foffset + F) ind = Foffset + F;
+  for (; (ind < Ncb) && (k < E); ind++) d[ind] += soft[k++];
+  while (k < E) {
+    for (ind = 0; (ind < Foffset) && (k < E); ind++) d[ind] += soft[k++];
+    for (ind = Foffset + F; (ind < Ncb) && (k < E); ind++) d[ind] += soft[k++];
+  }
+}
+
+TEST(HostFast, RateMatchRxEqualsScalarIncludingWrapAndFiller) {
+  std::mt19937 g(9);
+  static const uint8_t k0[2][4] = {{0, 17, 33, 56}, {0, 13, 25, 43}};
+  for (int BG = 1; BG <= 2; BG++)
+    for (int Z : {2, 11, 36, 104, 384})
+      for (int rv = 0; rv < 4; rv++)
+        for (int lbrm : {0, 1})
+          for (double er : {0.3, 1.0, 2.5}) {
+            const uint32_t N = (BG == 1 ? 66u : 50u) * Z, Kb = BG == 1 ? 22 : 10, K = Kb * Z, F = (uint32_t)(g() % (Z + 1));
+            const uint32_t Ncb = lbrm ? N * 2 / 3 : N, Foff = K - F - 2 * Z;
+            const uint32_t E = (uint32_t)(er * Ncb) / 8 * 8 + 8, ind = (k0[BG - 1][rv] * Ncb / N) * Z;
+            std::vector<int16_t> s(E), a(N + 2 * Z), b;
+            for (auto &x : s) x = (int16_t)g();
+            for (auto &x : a) x = (int16_t)g();
+            b = a;
+            nrhf_rm_rx(a.data(), s.data(), E, ind, Ncb, Foff, F);
+            rm_ref(b.data(), s.data(), E, ind, Ncb, Foff, F);
+            EXPECT_EQ(a, b) << BG << " " << Z << " " << rv << " " << lbrm << " " << er;
+          }
+}
+
+TEST(HostFast, PackEqualsZBufferPack) {
+  std::mt19937 g(10);
+  for (int BG = 1; BG <= 2; BG++)
+    for (int Z : {2, 7, 11, 36, 384}) {
+      const int Kc = BG == 1 ? 68 : 52, K = (BG == 1 ? 22 : 10) * Z, F = (int)(g() % (Z + 1)), Kprime = K - F;
+      std::vector<int16_t> d(Kc * Z), z(Kc * Z + 16);
+      for (auto &x : d) x = (int16_t)g();
+      d[5] = 20000; d[6] = -20000;
+      std::fill(z.begin(), z.begin() + 2 * Z, 0);
+      std::fill(z.begin() + Kprime, z.begin() + K, 0x7f7f);
+      std::memcpy(&z[2 * Z], d.data(), (Kprime - 2 * Z) * 2);
+      std::memcpy(&z[K], d.data() + (K - 2 * Z), (Kc * Z - K) * 2);
+      std::vector<int8_t> l(Kc * Z + 32, 0), r(Kc * Z);
+      for (int i = 0; i < Kc * Z; i++) r[i] = z[i] > 127 ? 127 : (z[i] < -128 ? -128 : (int8_t)z[i]);
+      nrhf_pack(l.data(), d.data(), Z, K, F, Kprime, Kc * Z);
+      EXPECT_TRUE(std::equal(r.begin(), r.end(), l.begin())) << BG << " " << Z;
+    }
 }

@@ -1,0 +1,10 @@
+AL4 LLR amplitude 4: reference decodes (RNTI+payload exact) of 12 clean vectors: 12/12
+AL4 LLR amplitude 20: reference decodes (RNTI+payload exact) of 12 clean vectors: 12/12
+AL4 LLR amplitude 60: reference decodes (RNTI+payload exact) of 12 clean vectors: 12/12
+AL4 LLR amplitude 200: reference decodes (RNTI+payload exact) of 12 clean vectors: 11/12
+AL4 LLR amplitude 2000: reference decodes (RNTI+payload exact) of 12 clean vectors: 0/12
+AL8 LLR amplitude 4: reference decodes (RNTI+payload exact) of 12 clean vectors: 12/12
+AL8 LLR amplitude 20: reference decodes (RNTI+payload exact) of 12 clean vectors: 12/12
+AL8 LLR amplitude 60: reference decodes (RNTI+payload exact) of 12 clean vectors: 12/12
+AL8 LLR amplitude 200: reference decodes (RNTI+payload exact) of 12 clean vectors: 0/12
+AL8 LLR amplitude 2000: reference decodes (RNTI+payload exact) of 12 clean vectors: 0/12

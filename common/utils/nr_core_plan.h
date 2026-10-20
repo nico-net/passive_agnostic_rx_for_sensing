@@ -41,16 +41,37 @@ int nr_core_machine_read(nr_core_machine_t *, const char *usrp_args, char *error
 int nr_core_plan_activate(const nr_core_machine_t *, const nr_core_plan_t *);
 bool nr_core_plan_active(void);
 int nr_core_plan_cpu(nr_core_role_t, int index, int fallback);
+/* True for a core the critical lane uses (UE/ring/UHD/DL/UL/sync/scan/PDSCH/PUSCH roles); false without an active plan. */
+bool nr_core_plan_is_critical(int core);
+void nr_core_plan_mark_critical_for_test(int core); /* core < 0 clears */
 /* threadCreate hook: affinity is set in pthread attributes BEFORE the thread can run.
  * Background workers use SCHED_OTHER so forced sharing cannot starve lower FIFO priorities. */
 int nr_core_plan_thread_attr(pthread_attr_t *, int affinity, int *priority);
 /* For raw pthread background helpers, including those spawned by RT actors. */
 int nr_core_plan_create(pthread_t *, pthread_attr_t *, void *(*)(void *), void *, int core);
+/* ISAC_FLOAT_CORES=<cpu list> (unset = off, offline CPUs dropped): the core lane of every receiver thread without an
+ * explicit core; only without an active core plan (an active plan owns all masks). threadCreate()/nr_core_plan_create() with core -1 use it. */
+/* Called once early in main(): moves every existing task that still has the main thread's inherited mask
+ * to the float lane (explicitly pinned tasks keep their core). Threads created later inherit it. No-op when off. */
+int nr_core_float_apply(void);
+/* For a background thread created by a pinned thread: move the calling thread to the float lane. No-op when off. */
+void nr_core_float_enter(void);
 /* nr_env_list_nth: the k-th entry (0-based) of the comma list in env `name` ("17,18"), or `dflt` when unset/short/malformed. */
 #include <stdlib.h>
+#include <string.h>
+/* nr_env_core: getenv for the site core lists, with the on-air (t26yE) site map as the default when unset. */
+static inline const char *nr_env_core(const char *name)
+{
+  static const char *const dflt[][2] = {{"ISAC_PDSCH_CORES", "7,3,4,0,1"}, {"ISAC_PUSCH_CORES", "8,9"}, {"ISAC_GPU_WORKER_CORE", "10"},
+                                        {"ISAC_UHD_CTRL_CORES", "15"}, {"ISAC_PDCCH_USS_CORE", "12"}, {"ISAC_PDCCH_NID_GPU_CORE", "13"}};
+  const char *e = getenv(name);
+  for (unsigned i = 0; !e && i < sizeof(dflt) / sizeof(dflt[0]); i++)
+    if (!strcmp(name, dflt[i][0])) e = dflt[i][1];
+  return e;
+}
 static inline int nr_env_list_nth(const char *name, int k, int dflt)
 {
-  const char *cl = getenv(name);
+  const char *cl = nr_env_core(name);
   for (int j = 0; cl && *cl; j++) {
     char *end;
     const long c = strtol(cl, &end, 10);

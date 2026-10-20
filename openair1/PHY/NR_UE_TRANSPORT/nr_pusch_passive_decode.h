@@ -72,6 +72,10 @@ typedef struct {
   int      n_segments;    ///< transport-block segments (C)
   int      segments_ok;   ///< of which the CRC passed. 0 vs C-1 are different failures.
   const char *reject_reason; ///< non-NULL when status != OK
+  uint16_t hyp_n, hyp_s; ///< UL BWP size@start the attempt decoded under (0 on an early reject)
+  uint8_t tbl;            ///< MCS table used
+  bool nid_conf;          ///< ISAC_UL_NID_BG confirmed entry applied
+  uint8_t skip;           ///< TAIL-FIX no-chance gate (nr_snr_gate.h): DM-RS SNR far below the MCS requirement; not demodulated / LDPC-decoded / retried (UL_PUSCH_CRC skip=)
 } nr_pusch_passive_out_t;
 
 /// Independent decode contexts. Each holds its own minimal PHY_VARS_gNB -- rxdataF ring, pusch_vars,
@@ -80,10 +84,26 @@ typedef struct {
 #define NR_PUSCH_PASSIVE_MAX_CTX 6
 
 /* U1: initialized before RX; capture a bounded private raw-IQ window before heavy work. */
-bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue);
+bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue, int ctx);
 bool nr_pusch_passive_decode_capture(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot,
                                      uint64_t absolute_slot);
 void nr_pusch_passive_decode_capture_release(int ctx);
+/* ULQ shared snapshots (ISAC_UL_SNAP_POOL): one copy per UL slot, made right after the slot is
+ * booked, shared by every job of that slot. The decode reads it through attach() instead of its own
+ * copy, so a job no longer has to start before the one-frame rxdata ring wraps. */
+uint32_t nr_pusch_passive_snapshot_len(const NR_DL_FRAME_PARMS *fp); ///< buffer length per antenna, 0 = unsupported
+int nr_pusch_passive_snapshot_nant(void);                           ///< antennas copied (valid after prewarm)
+bool nr_pusch_passive_snapshot_copy(PHY_VARS_NR_UE *ue, uint8_t slot, uint64_t absolute_slot, c16_t *const *dst,
+                                    uint32_t cap, uint32_t *origin, uint32_t *len);
+void nr_pusch_passive_decode_attach(int ctx, c16_t *const *iq, uint32_t origin, uint32_t length);
+/* UL HARQ soft combining (ISAC_UL_HARQ_COMBINE=1). The queue arms the calling thread before a job's first
+ * decode; only that first call may combine into or store a (rnti, pid) soft buffer. */
+bool nr_pusch_passive_harq_combine_enabled(void);
+void nr_pusch_passive_harq_arm(bool on);
+/* ISAC_PUSCH_TIMING: this thread's per-grant stage sums in us [fep, rx_pusch, cfr, decode] and [4] = decode calls */
+void nr_pusch_passive_grant_stages(uint64_t us[5], bool reset);
+/* SNR (dB) at the Shannon bound of a PUSCH MCS: 10 log10(2^(Qm R) - 1) */
+float nr_pusch_passive_shannon_db(uint8_t mcs, uint8_t mcs_table);
 
 /**
  * @brief Decode one passively-observed PUSCH.

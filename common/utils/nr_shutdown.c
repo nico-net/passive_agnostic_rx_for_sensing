@@ -156,7 +156,7 @@ static void *release_thread(void *unused)
   return NULL;
 }
 
-/* watchdog_thread: the shutdown watchdog: once shutdown is requested it waits until `timeout_s` seconds after the first request (ISAC_SHUTDOWN_TIMEOUT_S, default 15) and then exits the process with the shutdown status.
+/* watchdog_thread: the shutdown watchdog: once shutdown is requested it waits until `timeout_s` seconds after the first request (15 s) and then exits the process with the shutdown status.
  *   The timer starts at the first request, so the radio cleanup gets the whole budget. Started by nr_shutdown_init().
  */
 static void *watchdog_thread(void *unused)
@@ -198,7 +198,7 @@ static void fork_child(void)
   sigaction(SIGTERM, &action, NULL);
 }
 
-/* nr_shutdown_init: starts the shutdown subsystem: stores the three callbacks (notify, stop and release the radio), reads ISAC_SHUTDOWN_TIMEOUT_S, opens the log descriptor, starts the release and watchdog threads, installs the SIGINT/SIGTERM handlers, and registers the fork and exit hooks.
+/* nr_shutdown_init: starts the shutdown subsystem: stores the three callbacks (notify, stop and release the radio), opens the log descriptor, starts the release and watchdog threads, installs the SIGINT/SIGTERM handlers, and registers the fork and exit hooks.
  *   Returns 0, or -1 when a semaphore, thread or handler could not be set up. Caller: executables/nr-uesoftmodem.c (start-up).
  */
 int nr_shutdown_init(void (*notify_main)(void), void (*stop_radio)(void), void (*release_radio)(void))
@@ -207,13 +207,9 @@ int nr_shutdown_init(void (*notify_main)(void), void (*stop_radio)(void), void (
   notify_callback = notify_main;
   stop_callback = stop_radio;
   release_callback = release_radio;
-  const char *e = getenv("ISAC_SHUTDOWN_TIMEOUT_S");
-  if (e) {
-    char *end;
-    long value = strtol(e, &end, 10);
-    if (*e && !*end && value >= 1 && value <= 300)
-      timeout_s = value;
-  }
+#ifdef NRUE_RU_SHUTDOWN_TEST
+  timeout_s = 1; /* the acceptance test exercises the watchdog */
+#endif
   /* Separate open description: do not make the application's stderr nonblocking. */
   log_fd = open("/proc/self/fd/2", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
   if (sem_init(&radio_event, 0, 0) || sem_init(&watchdog_event, 0, 0))

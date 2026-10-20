@@ -165,28 +165,15 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
   (void)tda_count; /* Contexts are isolated by the observed index; list width is not inferred here. */
 
   /* R30 item 1 (2026-09-26, technique-d-regression.md): mapping type A only, unconditionally. Type B
-   * used to be built in here too (env ISAC_PDSCH_TYPEB, default on) and grew every fresh catalog
+   * used to be built in here too and grew every fresh catalog
    * 2.9x (750->2154 runtime, 2016->6336 pure) whether or not the cell even uses it -- diluting the
    * trial density on EVERY hypothesis, including this cell's true type-A one, by the same factor.
    * Measured: BASE (type-A only, pre-dilution) still occasionally decoded a TB on the phy-test rig
    * while the diluted catalog decoded 0/6 independent runs in the same wall time. Type B now enters a
    * context only once the air has shown it is needed -- see mask_needs_typeb()/add_typeb_layer()
-   * below, hooked from nr_pdsch_config_sweep_observe(). ISAC_PDSCH_TYPEB=0 (pdsch_typeb_enabled())
-   * still hard-disables it there, so the env knob keeps its old meaning as a kill switch. */
+   * below, hooked from nr_pdsch_config_sweep_observe().. */
   catalog_add_mapping_type(st, 0, typeA, legality);
   return st->n_hyp;
-}
-
-/* ISAC_PDSCH_TYPEB=0 (read once): hard-disables mapping type B, even via the evidence-triggered path
- * below. Unset/nonzero (default): type B stays available, gated purely by observation. */
-static bool pdsch_typeb_enabled(void)
-{
-  static int enabled = -1;
-  if (enabled < 0) {
-    const char *e = getenv("ISAC_PDSCH_TYPEB");
-    enabled = (e != NULL && atoi(e) == 0) ? 0 : 1;
-  }
-  return enabled != 0;
 }
 
 /* R30 item 1's admission test: true when NO mapping-type-A hypothesis of this cell's own catalog can
@@ -214,7 +201,7 @@ static bool mask_needs_typeb(uint16_t mask, int typeA, nr_pdsch_legality_fn_t le
  * a type-B entry (a sibling context already widened and this one inherited the same evidence). */
 static int add_typeb_layer(nr_pdsch_config_sweep_state_t *st, int typeA, nr_pdsch_legality_fn_t legality)
 {
-  if (st == NULL || st->n_hyp <= 0 || st->winner >= 0 || !legality || !pdsch_typeb_enabled())
+  if (st == NULL || st->n_hyp <= 0 || st->winner >= 0 || !legality)
     return 0;
   for (int i = 0; i < st->n_hyp; i++)
     if (st->hyp[i].mapping_type == 1)
@@ -430,25 +417,13 @@ typedef struct {
    * (another UE's PDSCH, the RNTI's own other TDRA rows, energy-threshold jitter), and the old relax-to-unknown / re-refine
    * cycle made every refine prune what the previous observation had restored, wiping all CRC evidence each time. */
   uint16_t lastset[OBS_MASKS_MAX];
-  int8_t   k0[OBS_MASKS_MAX];   /* LEGACY ONLY (ISAC_TD_K0_ORACLE_LEGACY=1): k0 pinned from the job's hypothesis, -1 = none */
   uint64_t plaus[OBS_MASKS_MAX]; /* bit k: k0 = k was hypothesised on a job that saw this mask (plausible, NOT proven; never prunes) */
   int n;
 } obs_set_t;
 
 /* K39: DM-RS presence in a slot proves only that SOME PDSCH is there, never which k0 the grant has (an adjacent
- * slot's traffic shows the same DM-RS). By default the oracle therefore prunes on mask / last symbol only and
- * records k0 as plausible; k0 is collapsed solely by nr_pdsch_config_sweep_certify_k0(). ISAC_TD_K0_ORACLE_LEGACY=1
- * (read once) restores the old pinning, for A/B only. s_k0_legacy: -1 = unread, test hook may force 0/1. */
-static int s_k0_legacy = -1;
-static bool k0_oracle_legacy(void)
-{
-  if (s_k0_legacy < 0) {
-    const char *e = getenv("ISAC_TD_K0_ORACLE_LEGACY");
-    s_k0_legacy = (e != NULL && atoi(e) != 0) ? 1 : 0;
-  }
-  return s_k0_legacy != 0;
-}
-void nr_pdsch_config_sweep_k0_legacy_set(int legacy) { s_k0_legacy = legacy; }
+ * slot's traffic shows the same DM-RS). The oracle therefore prunes on mask / last symbol only and records k0 as
+ * plausible; k0 is collapsed solely by nr_pdsch_config_sweep_certify_k0(). */
 typedef struct {
   bool valid;
   uint64_t configuration;
@@ -645,16 +620,12 @@ static int obs_record_set(obs_set_t *o, uint16_t mask, uint16_t lastset, int k0)
     k = o->n++;
     o->mask[k] = mask;
     o->lastset[k] = 0;
-    o->k0[k] = -1;
     o->plaus[k] = 0;
   }
   if (k >= 0) {
     o->lastset[k] |= lastset & 0x3FFF;
-    if (k0 >= 0 && k0 <= 32) {
+    if (k0 >= 0 && k0 <= 32)
       o->plaus[k] |= UINT64_C(1) << k0;
-      if (k0_oracle_legacy())
-        o->k0[k] = (o->k0[k] < 0 || o->k0[k] == k0) ? (int8_t)k0 : -1;
-    }
   }
   return k;
 }
@@ -671,8 +642,6 @@ static bool obs_admits(const nr_pdsch_cfg_hypothesis_t *h, const obs_set_t *o, i
     return false;
   const int end = (int)h->tda_start + (int)h->tda_length - 1;
   if (o->lastset[k] && !(end >= 0 && end < 14 && (o->lastset[k] >> end & 1)))
-    return false;
-  if (o->k0[k] >= 0 && h->k0 != o->k0[k])
     return false;
   return true;
 }
@@ -720,7 +689,7 @@ static uint64_t obs_sig(const obs_set_t *own)
     const int n = o ? o->n : -1;
     h = (h ^ (uint64_t)(n + 2)) * UINT64_C(1099511628211);
     for (int k = 0; k < n; k++)
-      h = (h ^ ((uint64_t)o->mask[k] | (uint64_t)o->lastset[k] << 16 | (uint64_t)(uint8_t)o->k0[k] << 32)) * UINT64_C(1099511628211);
+      h = (h ^ ((uint64_t)o->mask[k] | (uint64_t)o->lastset[k] << 16)) * UINT64_C(1099511628211);
   }
   return h;
 }
@@ -1281,18 +1250,11 @@ bool nr_pdsch_config_sweep_is_eliminated(const nr_pdsch_config_sweep_state_t *st
 {
   return st != NULL && i >= 0 && i < st->n_hyp && dorm_bit(st, NR_TD_DORMANT_ELIM, i);
 }
-static int s_cb0_elim_env = -1;
-bool nr_pdsch_config_sweep_cb0_elim_env(void)
-{
-  if (s_cb0_elim_env < 0) {
-    const char *e = getenv("ISAC_TD_CB0_ELIM"); /* default ON (operator 2026-10-04: fastest combination); 0 disables */
-    s_cb0_elim_env = (e != NULL && *e && atoi(e) == 0) ? 0 : 1;
-  }
-  return s_cb0_elim_env == 1;
-}
+static int s_cb0_elim_env = 1; /* CB0 elimination ON (operator 2026-10-04); test hook only */
+bool nr_pdsch_config_sweep_cb0_elim_env(void) { return s_cb0_elim_env != 0; }
 void nr_pdsch_config_sweep_cb0_elim_env_set(int on)
 {
-  s_cb0_elim_env = on < 0 ? -1 : (on ? 1 : 0);
+  s_cb0_elim_env = on < 0 || on;
 }
 
 /* Smallest m >= 2 with n_alive * C(t_max, m) * 2^(-24 m) <= 1e-6, in the log domain. */
@@ -1800,7 +1762,7 @@ int nr_pdsch_config_sweep_add_k0_layer_excl(nr_pdsch_config_sweep_state_t *st, u
 
 /* All shared accesses, including winner publication and reset, use one short mutex. */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-/* ---- fb2 field book (all under g_lock). Mode read once from ISAC_TD_FIELDBOOK (0 default, 2 = reversible pruning). ---- */
+/* ---- fb2 field book (all under g_lock). Mode 2 = reversible pruning (0 only via the test hook). ---- */
 static nr_td_fieldbook_t g_fb;
 static int g_fb_mode = -1; /* -1 = not read yet */
 static uint32_t g_fb_identity_gen;
@@ -1850,20 +1812,8 @@ static const char *const g_fb_name[NR_TD_F_COUNT] = {"tdra", "dmrs_add_pos", "dm
 static int fb_mode_locked(void)
 {
   if (g_fb_mode < 0) {
-    /* default fb2 (operator 2026-10-04: fastest combination). ONLY an explicit integer 0 disables it; any other value
-     * (1 included, which meant "off" before 2026-10-04, and non-numeric text) resolves to fb2 and says so. */
-    const char *e = getenv("ISAC_TD_FIELDBOOK");
-    char *end = NULL;
-    const long v = (e && *e) ? strtol(e, &end, 10) : 2;
-    const bool off = e && *e && end && end != e && *end == 0 && v == 0;
-    g_fb_mode = off ? 0 : 2;
+    g_fb_mode = 2; /* fb2 (operator 2026-10-04: fastest combination) */
     fb_init_locked();
-    static bool logged;
-    if (!logged) { /* once per process (a test re-read does not repeat it) */
-      logged = true;
-      LOG_W(PHY, "SWEEP: field book mode fb%d (ISAC_TD_FIELDBOOK=%s%s)\n", g_fb_mode, e ? e : "unset, default",
-            (e && *e && !off && !(end && *end == 0 && v == 2)) ? ": only 0 disables, resolved to fb2" : "");
-    }
   }
   return g_fb_mode;
 }
@@ -1889,7 +1839,7 @@ typedef struct {
    * caller having to hand the legality function back. */
   nr_pdsch_legality_fn_t legality;
   enum { PRIORED_NONE = 0, PRIORED_OWN, PRIORED_CELL } priored; /* which prior pruned this catalog */
-  /* fb2 (ISAC_TD_FIELDBOOK=2): field-book state of this context. fb_pruned bit f = FIELD cause f is applied (the context is not
+  /* fb2: field-book state of this context. fb_pruned bit f = FIELD cause f is applied (the context is not
    * independent of field f); fb_val = the value it was applied with; fb_untrusted bit f = a converged context relied on a field that is
    * no longer PROMOTED at that value; fb_gen = field-book generation this context last synchronised with. */
   uint32_t fb_pruned, fb_untrusted, fb_gen;
@@ -2606,12 +2556,12 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
  * left after that seed prune. Append only: pending tickets and existing CRC evidence stay valid.
  * Type B has its separate observation-gated expansion below. Called with g_lock held. */
 static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
-                                 uint16_t mask, int last_symbol, int k0)
+                                 uint16_t mask, int last_symbol)
 {
-  if (last_symbol < -1 || last_symbol >= 14 || k0 < -1 || k0 > 32)
+  if (last_symbol < -1 || last_symbol >= 14)
     return 0;
   nr_pdsch_config_sweep_state_t *st = c->state;
-  obs_set_t observation = {.n = 1, .mask = {mask}, .lastset = {last_bit(last_symbol)}, .k0 = {k0}};
+  obs_set_t observation = {.n = 1, .mask = {mask}, .lastset = {last_bit(last_symbol)}};
   for (int i = 0; i < st->n_hyp; i++)
     if (obs_admits(&st->hyp[i], &observation, 0))
       return 0;
@@ -2629,8 +2579,6 @@ static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
                         : g_prior.valid && g_prior.configuration == c->configuration ? &g_prior : NULL;
   for (int i = 0; i < catalog->n_hyp && st->n_hyp < NR_PDSCH_SWEEP_MAX_HYP; i++) {
     nr_pdsch_cfg_hypothesis_t h = catalog->hyp[i];
-    if (k0 >= 0)
-      h.k0 = (uint8_t)k0;
     if (h.mapping_type != 0 || !obs_admits(&h, &observation, 0))
       continue;
     /* K42 F3: a certified context never appends an entry apply_cert would remove again (wipe). BC7b M2: this filter deliberately
@@ -2666,7 +2614,7 @@ static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
   const int added = st->n_hyp - before;
   if (added)
     LOG_I(PHY, "SWEEP: ORACLE_RESTORE rnti=0x%04x tda=%u mask=0x%x last=%d k0=%d added=%d plaus_k0=0x%llx\n",
-          c->rnti, c->tda, mask, last_symbol, k0, added,
+          c->rnti, c->tda, mask, last_symbol, -1, added,
           (unsigned long long)(obs_find(&r->obs, mask) >= 0 ? r->obs.plaus[obs_find(&r->obs, mask)] : 0));
   return added;
 }
@@ -2692,7 +2640,7 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
     for (int i = 0; i < RNTI_CTX_MAX; i++)
       if (g_rnti[i].rnti && g_rnti[i].rnti != r->rnti && obs_find(&g_rnti[i].obs, dmrs_mask) >= 0) {
         const int j = obs_find(&g_rnti[i].obs, dmrs_mask);
-        obs_record_set(&g_obs, dmrs_mask, g_rnti[i].obs.lastset[j], g_rnti[i].obs.k0[j]); /* K42: the whole set; k0 is -1 unless legacy */
+        obs_record_set(&g_obs, dmrs_mask, g_rnti[i].obs.lastset[j], -1); /* K42: the whole set */
       }
   }
   if (obs_find(&g_obs, dmrs_mask) >= 0)
@@ -2702,7 +2650,7 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
    * cell is not type A only. Record it against the RNTI regardless of whether this ticket's own
    * context is still open to react to it (a converged context's evidence must still seed its later
    * siblings), mirroring how the k0 oracle records k0_seen unconditionally. */
-  if (c != NULL && pdsch_typeb_enabled() && mask_needs_typeb(dmrs_mask, c->typeA, c->legality))
+  if (c != NULL && mask_needs_typeb(dmrs_mask, c->typeA, c->legality))
     r->typeb_seen = true;
   int n = 0;
   if (c != NULL && c->state->winner < 0) {
@@ -2711,7 +2659,7 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
     /* K42 F2: a full r->obs dropped the mask; unless g_obs carries it nothing would admit a restore, and the prune below
      * would remove the restored entries again. */
     if (recorded || obs_find(&g_obs, dmrs_mask) >= 0)
-      restore_observed_typea(c, r, dmrs_mask, last_symbol, k0_oracle_legacy() ? k0 : -1);
+      restore_observed_typea(c, r, dmrs_mask, last_symbol);
     const uint64_t sig = obs_sig(&r->obs);
     const bool tb_added = r->typeb_seen && !(c->typeb_latched && c->typeb_latch_sig == sig)
                           && add_typeb_layer(c->state, c->typeA, c->legality) > 0;
@@ -2999,12 +2947,7 @@ int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
 int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint8_t mcs, int qm)
 {
   if (!nr_cfg_epoch_work_current()) return 0;
-  static int enabled = -1;
-  if (enabled < 0) {
-    const char *e = getenv("ISAC_QM_ORACLE");
-    enabled = (e != NULL && atoi(e) == 0) ? 0 : 1;
-  }
-  if (!enabled || ticket == NULL || ticket->generation == 0 || qm <= 0)
+  if (ticket == NULL || ticket->generation == 0 || qm <= 0)
     return 0;
   const uint8_t mask = qm_table_mask(mcs, qm);
   if (mask == 0 || mask == 0x7)
