@@ -1,0 +1,10 @@
+{
+ "figure": "discovery_milestones",
+ "source": "lab",
+ "mode": "lab",
+ "provenance": "live",
+ "host_label": "cloud x86",
+ "data_format": "parquet",
+ "needs": "summary.json cold_start",
+ "matplotlib": "3.11.2"
+}

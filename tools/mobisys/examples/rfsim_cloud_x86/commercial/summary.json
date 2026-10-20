@@ -1,0 +1,109 @@
+{
+ "clock_offset_real_minus_mono_ns": 1792527744339684784,
+ "cold_start": {
+  "attempts": 1,
+  "milestones_s": {
+   "coreset_verified": 83.385,
+   "dci_len_locked": 83.346,
+   "first_dci": 83.386,
+   "pbch_locked": 23.57,
+   "pbch_ok": 23.48,
+   "sync_ok": 23.486,
+   "sync_start": 23.242
+  },
+  "note": "t_s = exporter arrival time of the line, not event time",
+  "observed_from_start": true,
+  "success": false,
+  "time_to_first_crc_ok_s": null
+ },
+ "counts": {
+  "dci_accepts": 6045,
+  "health_rfcensus": 17,
+  "lines": 10832,
+  "metrics": 8,
+  "parsed_dci_seen": 6045,
+  "parsed_health": 17,
+  "parsed_life": 11,
+  "parsed_metrics": 8
+ },
+ "crc_fail": 0,
+ "crc_ok": 0,
+ "crc_ok_after_retry": 0,
+ "crc_ok_rate": null,
+ "crc_ok_rate_after_retry": null,
+ "grants": 0,
+ "last_metrics": {
+  "pdschq_crc_ok": 0,
+  "pdschq_decoded": 0,
+  "pdschq_drop_full": 0,
+  "pdschq_drop_stale": 0,
+  "pdschq_queued": 0,
+  "scanq_drop_full": 0,
+  "scanq_drop_stale": 0,
+  "scanq_queued": 36561
+ },
+ "latency_defs": {
+  "e2e_tot": "EVMGRANT e2e tot = slot arrival -> decode end",
+  "legacy_dec_us": "EVMGRANT dec_us = decode call start -> end",
+  "legacy_pdtim_real": "PDTIMCLS real = sum of FEP+CHEST+DEMOD+LDPC wall of a grant's first body, cumulative since receiver start",
+  "serial": "arr2enq+qwait+pre+dec; first_body and stage walls are nested inside dec and never added"
+ },
+ "latency_us": {
+  "arr2enq": {
+   "n": null,
+   "p50": null,
+   "p90": null,
+   "p99": null
+  },
+  "dec_span": {
+   "n": null,
+   "p50": null,
+   "p90": null,
+   "p99": null
+  },
+  "e2e_tot": {
+   "n": null,
+   "p50": null,
+   "p90": null,
+   "p99": null
+  },
+  "legacy_dec_us": {
+   "n": null,
+   "p50": null,
+   "p90": null,
+   "p99": null
+  },
+  "pre": {
+   "n": null,
+   "p50": null,
+   "p90": null,
+   "p99": null
+  },
+  "qwait": {
+   "n": null,
+   "p50": null,
+   "p90": null,
+   "p99": null
+  },
+  "serial": {
+   "n": null,
+   "p50": null,
+   "p90": null,
+   "p99": null
+  }
+ },
+ "legacy_pdtim_real": null,
+ "mode": "commercial",
+ "provenance": "live",
+ "rescued_unique": 0,
+ "schema": "mobisys-telemetry/1",
+ "telemetry_loss": {
+  "k_suppressed_events": 0,
+  "k_suppressed_rows": 0,
+  "parse_errors": 0,
+  "policy_refused_fields": 0,
+  "policy_refused_rows": 0,
+  "queue_drops": {},
+  "queue_drops_total": 0
+ }
+}
