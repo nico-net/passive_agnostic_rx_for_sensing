@@ -32,9 +32,10 @@ SYNC_HELP = ("looking for a cell (PSS correlation over the GSCN raster)",
              "downlink data decodes with CRC OK for at least one RNTI",
              "uplink layout locked (PUSCH can be interpreted)")
 DEFAULT_THRESHOLDS = {
-    "p99_target_us": 500.0,    # decode-time target (PROJECT_MEMORY merge gate: decode < 0.5 ms)
+    "p50_target_us": 500.0,    # decode-time goal 2026-10-17: p50 < 0.5 ms ...
+    "p99_target_us": 3000.0,   # ... and p99 < 3 ms
     "stale_pct": 10.0,          # PDSCH queue stale drops, % of queued
-    "drop_full_pct": 2.5,       # scan-queue full drops (4-RX gate, CLAUDE.md)
+    "drop_full_pct": 1.0,       # scan-queue full drops < 1 %
     "crc_warn_pct": 80.0,       # DL CRC-OK below this = amber
     "crc_bad_pct": 50.0,        # below this = red
     "gpu_budget_pct": 95.0,     # GPU discovery budget used
@@ -1300,14 +1301,14 @@ def tiles(snap, thr=None, host=None):
     if lat["p99"] is None and stale is None:
         lvl, s, val = "idle", "No decode timing yet (needs PDTIM/EVMGRANT lines or PDSCH queue counters).", "-"
     else:
-        bad = (lat["p99"] is not None and lat["p99"] > thr["p99_target_us"]) or (stale is not None and stale > thr["stale_pct"])
+        bad = (lat["p99"] is not None and lat["p99"] > thr["p99_target_us"]) or (lat["p50"] is not None and lat["p50"] > thr["p50_target_us"]) or (stale is not None and stale > thr["stale_pct"])
         lvl = "warn" if bad else "ok"
         if stale is not None and stale > 3 * thr["stale_pct"]:
             lvl = "bad"
         val = ("p99 %.2f ms" % (lat["p99"] / 1000.0)) if lat["p99"] is not None else "-"
-        s = "Decode p50 %s / p99 %s vs %.2f ms target; %s stale drops." % (
+        s = "Decode p50 %s / p99 %s vs %.1f / %.1f ms targets; %s stale drops." % (
             "%.2f ms" % (lat["p50"] / 1000.0) if lat["p50"] is not None else "n/a",
-            "%.2f ms" % (lat["p99"] / 1000.0) if lat["p99"] is not None else "n/a", thr["p99_target_us"] / 1000.0,
+            "%.2f ms" % (lat["p99"] / 1000.0) if lat["p99"] is not None else "n/a", thr["p50_target_us"] / 1000.0, thr["p99_target_us"] / 1000.0,
             "%.1f %%" % stale if stale is not None else "unknown")
     out.append({"id": "decode", "title": "Decode health", "value": val, "level": lvl, "sentence": s, "page": "perf"})
 
@@ -1350,6 +1351,9 @@ def alerts(snap, thr=None, host=None):
     if lat["p99"] is not None and lat["p99"] > thr["p99_target_us"]:
         out.append({"id": "p99", "sev": "warn", "text": "Decode p99 %.2f ms is above the %.2f ms target (%s)." % (
             lat["p99"] / 1000.0, thr["p99_target_us"] / 1000.0, lat["src"])})
+    if lat["p50"] is not None and lat["p50"] > thr["p50_target_us"]:
+        out.append({"id": "p50", "sev": "warn", "text": "Decode p50 %.2f ms is above the %.2f ms target (%s)." % (
+            lat["p50"] / 1000.0, thr["p50_target_us"] / 1000.0, lat["src"])})
     stale = w.get("stale_pct")
     if stale is not None and stale > thr["stale_pct"]:
         out.append({"id": "stale", "sev": "warn", "text": "PDSCH stale drops %.1f %% in the last window (threshold %.0f %%)." % (

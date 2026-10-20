@@ -248,10 +248,11 @@ class AlertsAndTiles(unittest.TestCase):
         self.assertIn("not synchronised", ul_reason(self.base()))
 
     def test_thresholds_are_honoured(self):
-        s = feed(["[PHY]   SENSING: PDTIMCLS us real[n=10 mean=600.0 p50=500 p90=700 p99=900 max=1000.0 gt5ms=0 gt20ms=0 share_gt1/5/20ms=0/0/0]"])
+        s = feed(["[PHY]   SENSING: PDTIMCLS us real[n=10 mean=600.0 p50=600 p90=700 p99=3500 max=4000.0 gt5ms=0 gt20ms=0 share_gt1/5/20ms=0/0/0]"])
         snap = s.snapshot()
         self.assertIn("p99", [a["id"] for a in alerts(snap)])
-        self.assertNotIn("p99", [a["id"] for a in alerts(snap, {"p99_target_us": 1000})])
+        self.assertIn("p50", [a["id"] for a in alerts(snap)])
+        self.assertNotIn("p99", [a["id"] for a in alerts(snap, {"p99_target_us": 4000})])
         snap["window"] = {"stale_pct": 12.0, "drop_full_pct": 3.0}
         ids = [a["id"] for a in alerts(snap)]
         self.assertIn("stale", ids)

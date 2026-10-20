@@ -25,7 +25,7 @@ Live tail of a real TIM stage2 log fed at 370 KB/s (real run was about 210 KB/s)
 - EVMGRANT: the existing regexes already match the new line (dmrs_snr, skip, gp, li, es, e2e, stg appended). New: `e2e=` total (slot arrival to CRC) is parsed into the DL aggregate (`e2e_us` p50/p90/p99 in the snapshot; not yet drawn in the UI). Test added with a real line.
 - Hints naming removed flags (ISAC_PDCCH_TIMING, ISAC_PDTIM_CLASS, ISAC_OBS_PATH, ISAC_UL_LAYOUT_LOCK, "set ISAC_USRP_CHPOW_S") reworded.
 - isac_flags.json regenerated with gen_flags.py: 67 ISAC_* names that production code reads (test-only sources excluded); the old 600+ entry table is gone. Names set by main() via setenv (ISAC_LOG_ASYNC, ISAC_RECONF) are not literal getenv strings and are not listed.
-- Stale and not touched: the dashboard still judges decode p99 against 0.5 ms (S.thr.p99_target_us); the current goal is 3 ms.
+- Targets updated 2026-10-20 to the goals: decode p50 < 0.5 ms and p99 < 3 ms, DL CRC-OK amber below 80 %, scan-queue full drops < 1 %.
 
 ## Tests
 - tests/passive_rx/monitor: test_monitor + test_health, 47 tests OK.

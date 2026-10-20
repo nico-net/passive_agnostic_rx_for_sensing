@@ -267,7 +267,7 @@ const PAGES = ["home", "dl", "ul", "sensing", "cell", "settings", "perf", "spect
 
 /* ------------------------------------------------------------------ settings (per viewer, localStorage) */
 const DEF = { refresh: 2, latUnit: "ms", theme: "auto", tiles: { radio: true, sync: true, dl: true, ul: true, decode: true, compute: true },
-              thr: { p99_target_us: 500, stale_pct: 10, drop_full_pct: 2.5, crc_warn_pct: 80, crc_bad_pct: 50, gpu_budget_pct: 95, silent_s: 60, ram_floor_gb: 16, temp_c: 80 } };
+              thr: { p50_target_us: 500, p99_target_us: 3000, stale_pct: 10, drop_full_pct: 1, crc_warn_pct: 80, crc_bad_pct: 50, gpu_budget_pct: 95, silent_s: 60, ram_floor_gb: 16, temp_c: 80 } };
 let S = JSON.parse(JSON.stringify(DEF));
 try { const s = JSON.parse(localStorage.getItem("rxdash") || "{}"); S = Object.assign(S, s); S.thr = Object.assign({}, DEF.thr, s.thr || {}); S.tiles = Object.assign({}, DEF.tiles, s.tiles || {}); } catch (e) {}
 function save() { try { localStorage.setItem("rxdash", JSON.stringify(S)); } catch (e) {} }
@@ -708,7 +708,7 @@ RENDER.glossary = (el) => {
 
 RENDER.settings = (el) => {
   const c = ST.config, t = S.thr;
-  const thrRows = [["p99_target_us", "Decode p99 target", "µs"], ["stale_pct", "Stale drops threshold", "%"], ["drop_full_pct", "Scan-queue full drops threshold", "%"], ["crc_warn_pct", "DL CRC-OK amber below", "%"], ["crc_bad_pct", "DL CRC-OK red below", "%"], ["gpu_budget_pct", "GPU budget exhausted at", "%"], ["silent_s", "Receiver silent after", "s"], ["ram_floor_gb", "Free RAM floor", "GB"], ["temp_c", "Temperature limit", "°C"]];
+  const thrRows = [["p50_target_us", "Decode p50 target", "µs"], ["p99_target_us", "Decode p99 target", "µs"], ["stale_pct", "Stale drops threshold", "%"], ["drop_full_pct", "Scan-queue full drops threshold", "%"], ["crc_warn_pct", "DL CRC-OK amber below", "%"], ["crc_bad_pct", "DL CRC-OK red below", "%"], ["gpu_budget_pct", "GPU budget exhausted at", "%"], ["silent_s", "Receiver silent after", "s"], ["ram_floor_gb", "Free RAM floor", "GB"], ["temp_c", "Temperature limit", "°C"]];
   let h = `<h2>Settings</h2><p class="lead">Dashboard preferences are stored in this browser only. The receiver configuration below is <b>read-only</b>: the dashboard never starts or stops the radio and never changes receiver flags.</p>
     <div class="grid2"><div class="card"><h3>Display</h3><div class="kv">
       <span class="k">Refresh every</span><span><select id="setRefresh">${[1, 2, 5, 10].map((v) => `<option ${v === S.refresh ? "selected" : ""} value="${v}">${v} s</option>`).join("")}</select></span>
