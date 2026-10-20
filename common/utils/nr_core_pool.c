@@ -114,7 +114,7 @@ int nr_pool_total_waiting(const nr_pool_t *p)
 static bool overdue(const nr_pool_t *p, const waiter_t *w, uint64_t now)
 {
   const uint64_t a = p->cfg.age_ns[w->prio];
-  return a && now - w->t_enq >= a;
+  return a && now > w->t_enq && now - w->t_enq >= a;
 }
 
 /* May a class `prio` be granted a token right now (ignoring who else waits)? The caps keep one token for each urgent class (see header (b)).
@@ -191,7 +191,7 @@ static void grant(nr_pool_t *p, waiter_t *w, int tok, uint64_t now, bool promote
   p->nfree--;
   p->cnt[w->prio]++;
   w->tok = tok;
-  const uint64_t wait = now - w->t_enq;
+  const uint64_t wait = now > w->t_enq ? now - w->t_enq : 0; /* now may predate a waiter that queued while an older dispatch ran */
   p->st.leases[w->prio]++;
   if (wait > 2000) p->st.waited[w->prio]++;
   if (promoted) p->st.promoted[w->prio]++;
