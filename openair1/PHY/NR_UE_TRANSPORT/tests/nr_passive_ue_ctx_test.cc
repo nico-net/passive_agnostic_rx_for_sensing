@@ -237,6 +237,16 @@ TEST_F(UeContext, Mixed00And01NoFlapping) {
   EXPECT_EQ(c.cfg[NR_UEP_PDCCH_SCR_ID].value,55);
   EXPECT_EQ(count(s,"\"type\":\"ue_reconfig\""),0);
 }
+TEST_F(UeContext, DciOnAnotherCoresetIsNotAReconfiguration) {
+  // TS 38.213 10.1: up to 3 CORESETs per BWP, each with its own PDCCH DM-RS identity. OTA TIM: two alternated 8839 times in 30 min.
+  for(uint16_t rnti: {0x2100,0x2101})
+    for(int k=0;k<6;k++)
+      nr_ue_ctx_on_dci_accept(rnti,true,false,true,47,k&1?0x100d80000:0x100b40024,k&1?1931:1000,100+k);
+  auto s=contents();
+  EXPECT_EQ(count(s,"\"type\":\"ue_reconfig\""),0);
+  EXPECT_EQ(reopened_count.load(),0);
+  EXPECT_LT(nr_reconf_rrc_effective_slot(0x2100),0); // no inferred RRC window either
+}
 TEST_F(UeContext, NoEpochNoteWithoutSlot) {
   nr_ue_ctx_on_param(19,NR_UEP_TD_WINNER,1,NR_UEV_TRUSTED,NR_UEC_CONVERGED,-1);
   nr_ue_ctx_on_param(19,NR_UEP_TD_WINNER,2,NR_UEV_TRUSTED,NR_UEC_REOPENED_NEW_WINNER,-1);
@@ -385,8 +395,17 @@ static nr_passive_obs_t harq_grant(uint16_t rnti,int pid,int ndi,int tbs,int64_t
   o.nb_rb=20; o.start_rb=10; o.tbs=tbs; o.harq_pid=pid; o.ndi=ndi; o.rv=0; o.rnti_class=0;
   o.snr_db=NAN; o.nvar=NAN; o.fo_comp_hz=NAN; o.delay_samples=NAN; return o;
 }
-TEST_F(UeContext, RarOnALiveRntiOpensANewIncarnationOnce) {
-  auto o=grant(0x2001,nowns(),100); nr_ue_ctx_on_obs(&o);
+TEST_F(UeContext, RarOnARecentlyActiveRntiIsTheSameUesContentionFreeRa) {
+  auto o=grant(0x2000,nowns(),100); nr_ue_ctx_on_obs(&o); // a live C-RNTI; the gNB answers its PDCCH-order / BFR preamble with its own C-RNTI
+  nr_ue_ctx_on_anchor(0x2000,NR_BLIND_RNTI_CLASS_TC_FOR_TEST,110);
+  auto s=contents();
+  EXPECT_EQ(s.find("\"cause\":\"REATTACH_"),std::string::npos);
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2000,&c));
+  EXPECT_EQ(c.incarnation,0);
+  EXPECT_EQ(c.cfg[NR_UEP_RNTI_CLASS].value,0); // still a C-RNTI, not demoted to TC
+}
+TEST_F(UeContext, RarAfterTheSilenceHorizonOpensANewIncarnationOnce) {
+  auto o=grant(0x2001,nowns()-11000000000ull,100); nr_ue_ctx_on_obs(&o); // last DCI 11 s ago: the value is free again
   nr_ue_ctx_on_anchor(0x2001,NR_BLIND_RNTI_CLASS_TC_FOR_TEST,110);
   nr_ue_ctx_on_anchor(0x2001,NR_BLIND_RNTI_CLASS_TC_FOR_TEST,111); // the same RAR decoded again is the same attachment
   auto s=contents();
@@ -463,16 +482,15 @@ TEST_F(UeContext, DciSizeChangeAfterSilenceIsAReattachButNotInTraffic) {
   EXPECT_EQ(count(s,"\"cause\":\"REATTACH_DCI_SIZE\""),1);
   nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2030,&c)); EXPECT_EQ(c.incarnation,1); EXPECT_EQ(c.cfg[NR_UEP_DCI_LEN_DL].value,52);
 }
-TEST_F(UeContext, RrcWindowReverifiesDedicatedParametersAndTellsTheEpochAtTheEffectiveSlot) {
+TEST_F(UeContext, RrcWindowReverifiesDedicatedParametersButIsNoEpochEvidence) {
   nr_ue_ctx_on_param(0x2040,NR_UEP_DCI_LEN_DL,44,NR_UEV_TRUSTED,NR_UEC_CONVERGED,100);
   nr_ue_ctx_on_rrc(0x2040,NR_RECONF_RRC_RECONF,1000,1); // effective at slot 1032
   EXPECT_EQ(nr_reconf_rrc_phase(0x2040,1031,1),NR_RECONF_PHASE_HOLD);
   auto o=grant(0x2040,nowns(),1020); nr_ue_ctx_on_obs(&o);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  EXPECT_EQ(reopened_count.load(),0); // window still open
   auto o2=grant(0x2040,nowns(),1040); nr_ue_ctx_on_obs(&o2);
   auto s=contents();
-  EXPECT_EQ(reopened_count.load(),1);
+  EXPECT_EQ(reopened_count.load(),0); // an RRC message without an observed change is not a reopened UE (OTA TIM: 7661 such windows)
   EXPECT_NE(s.find("RRC_WINDOW_CLOSED"),std::string::npos);
   nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2040,&c)); EXPECT_EQ(c.cfg[NR_UEP_DCI_LEN_DL].verif,NR_UEV_HINT);
 }

@@ -334,8 +334,12 @@ static void param(entry_t *e,nr_ue_param_t p,int64_t value,nr_ue_verif_t verif,
     if(cause==NR_UEC_FIRST_LEARNED && old>=0 && v->verif==NR_UEV_HINT) cause=NR_UEC_EPOCH_DISCARDED;
     change(e,p,old,value,cause,slot,ns,evidence);
     /* Cell-common SIB1 facts and RNTI anchor/class changes are logged, but are not evidence of
-     * a dedicated UE reconfiguration. The epoch authority handles cell-common changes. */
+     * a dedicated UE reconfiguration. The epoch authority handles cell-common changes.
+     * CORESET and its PDCCH DM-RS identity are per CORESET, and a UE monitors up to 3 CORESETs per BWP (TS 38.213 10.1,
+     * TS 38.331 PDCCH-Config): a DCI on another one is not a reconfiguration (OTA TIM 2026-10-20: two CORESETs alternated 8839 times in
+     * 30 min, each an inferred RRC window -> 2240 false DEDICATED_CHANGE_SUSPECTED epochs). A removed CORESET is the bank's (SUSPECT) path. */
     if(p!=NR_UEP_APERIODIC_CSI && p!=NR_UEP_RNTI_CLASS && p!=NR_UEP_ANCHOR &&
+       p!=NR_UEP_CORESET && p!=NR_UEP_PDCCH_SCR_ID &&
        p!=NR_UEP_UE_ID && p!=NR_UEP_REATTACH && p!=NR_UEP_RESUME_OF &&
        (p<NR_UEP_SIB1_HASH || p>NR_UEP_SIB1_TDRA_HASH) &&
        p!=NR_UEP_TD_STATE && p!=NR_UEP_DCI_LEN_STATE &&
@@ -560,7 +564,8 @@ static void rrc_fire(uint64_t ns)
     for(int p=0;p<NR_UEP_COUNT;p++) if(mask & (1ull<<p)) {fprintf(output,"%s\"%s\"",comma?",":"",param_name[p]); comma=true;}
     fputs("],\"class\":\"RRC_WINDOW_CLOSED\"}\n",output);
     line_done(); c->n_reconfigs++;
-    if(nr_cfg_epoch_note_rnti_reopened) nr_cfg_epoch_note_rnti_reopened(c->rnti,true,(uint64_t)eff);
+    /* No epoch note here: a closed window is not a reopened UE (spec 4.4/4.7: only a TRUSTED value that changed counts). An inferred window was
+     * already noted by flush_reconfig() for the change that opened it, and an RRC message seen without any change proves nothing. */
   }
 }
 static void ul_put(nr_ue_ul_state_t *s, nr_ue_ul_field_t f, int64_t value, uint8_t evidence)
@@ -677,6 +682,7 @@ static void handle(const event_t *v)
          ns>e->last_activity_ns && ns-e->last_activity_ns>=NR_RECONF_REATTACH_GAP_NS && ns-e->last_activity_ns<=NR_RECONF_REUSE_NS)
         e=reattach(e,NR_UEC_REATTACH_DCI_SIZE,v->slot,ns);
       if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); goto done;}
+      const uint64_t silent_ns=ns>e->last_activity_ns?ns-e->last_activity_ns:0;
       if(v->kind==EV_PARAM || v->kind==EV_ANCHOR || v->kind==EV_CSI) e->last_activity_ns=ns;
       e->n_events++;
       if(v->kind==EV_OBS) {
@@ -688,15 +694,19 @@ static void handle(const event_t *v)
         param(e,(nr_ue_param_t)v->p,v->value,v->verif,v->cause,v->slot,ns,-1);
       }
       else if(v->kind==EV_ANCHOR) {
-        /* RAR: a TC-RNTI is a NEW UE. An RNTI value that is still in use cannot be assigned again by the gNB (TS 38.321 7.1), so a context with history
-         * under that value belongs to a UE that has left (TS 38.321 5.1.4/5.1.5). */
-        if(e->n_events>1 && e->ctx.state!=NR_UE_GONE && !(e->attach_open && ns-e->attach_ns<2000000000ull)) { /* a repeated RAR decode is the same attachment */
+        /* RAR. An RNTI value still in use cannot be handed to ANOTHER UE (TS 38.321 7.1), but a contention-free RA (PDCCH order, beam failure recovery,
+         * reconfigurationWithSync; TS 38.321 5.1.4) is answered for a UE the gNB knows, and the RAR's TC-RNTI field then carries that UE's own C-RNTI
+         * (OTA TIM 2026-10-20: 1 RAR per run named an RNTI with a DCI in the previous 10 s). So a RAR naming a recently active RNTI is the same UE,
+         * still a C-RNTI; only after the IDLE/INACTIVE silence horizon is the value free for a new UE (TS 38.321 5.1.4/5.1.5). */
+        const bool repeat=e->attach_open && ns-e->attach_ns<2000000000ull; /* a repeated RAR decode is the same attachment */
+        const bool same_ue=e->n_events>1 && e->ctx.state!=NR_UE_GONE && !repeat && silent_ns<NR_RECONF_INACTIVE_NS;
+        if(e->n_events>1 && e->ctx.state!=NR_UE_GONE && !repeat && !same_ue) {
           e=reattach(e,NR_UEC_REATTACH_RAR,v->slot,ns);
           if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); goto done;}
           e->n_events++;
         }
-        e->attach_open=true; e->attach_ns=ns;
-        if(v->value==1) param(e,NR_UEP_RNTI_CLASS,1 /* TC */,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,v->slot,ns,-1);
+        if(!same_ue) {e->attach_open=true; e->attach_ns=ns;}
+        if(v->value==1 && !same_ue) param(e,NR_UEP_RNTI_CLASS,1 /* TC */,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,v->slot,ns,-1);
         param(e,NR_UEP_ANCHOR,v->value,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,v->slot,ns,-1);
       } else if(v->kind==EV_CSI)
         change(e,NR_UEP_APERIODIC_CSI,-1,v->value,NR_UEC_FIRST_LEARNED,v->slot,ns,v->extra);

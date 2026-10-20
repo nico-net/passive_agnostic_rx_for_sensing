@@ -430,6 +430,15 @@ static pthread_once_t g_nid_thr_once = PTHREAD_ONCE_INIT;
 static void *nid_worker(void *arg)
 {
   (void)arg;
+  /* The first nid_submit() runs on a scan consumer (SCHED_RR 50, pinned), and a thread inherits both: the solver ran at scan priority on a
+   * scan core and took RR quanta from it (replay 2026-10-20: 2 s CPU of 12 s on core 6). Leave the critical lane: SCHED_OTHER, nice 10, the
+   * process (main thread) affinity, as pdcchJanon does. */
+  struct sched_param sp = {0};
+  pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
+  cpu_set_t set;
+  if (sched_getaffinity(getpid(), sizeof(set), &set) == 0 && CPU_COUNT(&set) > 0)
+    pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
   static nid_job_t job;
   for (;;) {
     pthread_mutex_lock(&g_nid_q_lock);
@@ -5418,9 +5427,15 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       c16_t pilot[fp->N_RB_DL * 3];
       float corr[NR_PBWP_CS_MAXWIN];
       int16_t ref[NR_PBWP_CS_MAXWIN];
-      /* One decision per OCCASION (1 in 32; the solves run on a worker thread), applied to BOTH CORESET symbols: a per-symbol counter always landed on the same symbol. */
-      static _Atomic uint32_t s_nid_tick;
-      const bool nid_trig = nid_solve_enabled() && (atomic_fetch_add_explicit(&s_nid_tick, 1, memory_order_relaxed) & 31) == 0;
+      /* One decision per OCCASION (the solves run on a worker thread), applied to BOTH CORESET symbols: a per-symbol counter always landed on the same symbol.
+       * Bounded in TIME, at the ~3 scans/s the window decay (0.97 per scan, ~13 s memory) is designed for: 1 occasion in 32 was ~60/s at 2000
+       * occasions/s, a full core of solver work (replay 2026-10-20: 10 s CPU in 12 s once off the scan core) taken from the background lane. */
+      static _Atomic uint64_t s_nid_next_ns;
+      uint64_t nid_due = atomic_load_explicit(&s_nid_next_ns, memory_order_relaxed);
+      const uint64_t nid_now = btim_now_ns();
+      const bool nid_trig = nid_solve_enabled() && nid_now >= nid_due
+                            && atomic_compare_exchange_strong_explicit(&s_nid_next_ns, &nid_due, nid_now + 333000000ull, memory_order_relaxed,
+                                                                       memory_order_relaxed);
       for (int sym = 0; sym < 2; sym++) {
         const int symbol = cfg->ss_first_symbol + sym;
         if (sym >= rel15->coreset.duration)
