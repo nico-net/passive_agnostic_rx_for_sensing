@@ -2495,7 +2495,8 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_pdsch_gpu_demod COMMAND ./test_nr_pdsch_gpu_demod)
 
   add_executable(test_nr_pdsch_recovery ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_recovery_test.cc
-                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c)
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c
+                                        ${OPENAIR_DIR}/common/utils/nr_core_pool.c)
   target_include_directories(test_nr_pdsch_recovery PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_pdsch_recovery PRIVATE GTest::gtest_main pthread)
   add_dependencies(tests test_nr_pdsch_recovery)

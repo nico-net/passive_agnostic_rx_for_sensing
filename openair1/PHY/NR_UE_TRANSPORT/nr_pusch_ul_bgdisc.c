@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #define _GNU_SOURCE
 #include "nr_pusch_ul_bgdisc.h"
+#include "common/utils/nr_core_pool.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -79,7 +80,11 @@ static void *worker(void *arg)
     pthread_mutex_unlock(&g_lock);
     const int expired = now_ns() - s->j.submit_ns > g_max_age_ns;
     int rc = 0;
-    if (!expired && !g_stop) rc = g_run(&s->j);
+    if (!expired && !g_stop) {
+      nr_pool_site_acquire(NR_POOL_DISC, 0, 0); /* core pool: discovery class; the run is not chunked here (see CORE-POOL report) */
+      rc = g_run(&s->j);
+      nr_pool_site_release();
+    }
     pthread_mutex_lock(&g_lock);
     if (expired || rc) g_st.expired++;
     else g_st.done++;

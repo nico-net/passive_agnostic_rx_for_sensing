@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "nr_pdsch_recovery.h"
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_core_pool.h"
 #include "nr_recov_yield.h"
 #include <pthread.h>
 #include <sched.h>
@@ -199,7 +200,9 @@ static void *worker(void *arg)
       feedback(&e.k, NR_RECOV_FB_FAIL);
     } else if (g_run_fn) {
       t_cur_ns = e.t_ns;
+      nr_pool_site_acquire(NR_POOL_RETRY, 0, 0); /* core pool: async rescue arms, after the first-pass decodes */
       const int r = g_run_fn(e.job, &e.k);
+      nr_pool_site_release();
       if (r == 2) {
         atomic_fetch_add_explicit(&g_expd, 1, memory_order_relaxed);
         feedback(&e.k, NR_RECOV_FB_FAIL_NOCREDIT);
