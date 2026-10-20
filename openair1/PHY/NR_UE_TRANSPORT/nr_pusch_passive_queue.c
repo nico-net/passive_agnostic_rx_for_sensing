@@ -47,6 +47,7 @@ extern uint64_t *nr_ss_gpu_ptr(void);
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/system.h" // threadCreate
+#include "common/utils/nr_core_pool.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_job_epoch.h"
 #include "nr_pusch_passive_ul_ids.h"
@@ -222,6 +223,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
   int held = -1; /* ULQ shared snapshot this consumer holds a reference on */
   while (1) {
     nr_pusch_passive_job_t job;
+    nr_pool_site_release(); /* core pool: a lease never outlives one iteration (no-op when the pool is off) */
     if (held >= 0) {
       pthread_mutex_lock(&g_lock);
       g_pool_refs[held]--;
@@ -257,6 +259,8 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     held = job.snap_idx; /* the queue's reference moves to this consumer */
     pthread_mutex_unlock(&g_lock);
     if (pick == 1) atomic_fetch_add_explicit(&g_dec_probe, 1, memory_order_relaxed);
+    /* core pool: the first-pass UL decode is DECODE class; a layout probe (pick 1) is not a decode and queues as RETRY */
+    nr_pool_site_acquire(pick == 1 ? NR_POOL_RETRY : NR_POOL_DECODE, 0, nr_passive_slot_arrival_ns(job.absolute_slot));
 
     NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
     if (!nr_cfg_epoch_work_current()) {
@@ -725,7 +729,7 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
      * stage (DECQUEUE report). Pin them off the PDSCH cores, at the default priority. */
     core = nr_env_list_nth("ISAC_PUSCH_CORES", i, core);
     const int prio = 0;
-    threadCreate(&g_threads[i], nr_pusch_passive_queue_thread, &g_args[i], name, core, prio);
+    threadCreate(&g_threads[i], nr_pusch_passive_queue_thread, &g_args[i], name, nr_pool_site() ? -1 : core, prio);
   }
   if (g_pool_n > 0) {
     const char *ce = getenv("ISAC_UL_SNAP_CORE");

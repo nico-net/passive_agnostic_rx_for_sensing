@@ -1,4 +1,5 @@
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_core_pool.h"
 #include "nr_passive_sample_lifetime.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
@@ -141,6 +142,7 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
   while (1) {
     nr_pdcch_passive_job_t job;
 
+    nr_pool_site_release(); /* core pool: a lease never outlives one iteration (no-op when the pool is off) */
     pthread_mutex_lock(&g_lock);
     if (g_side_posted > 0) { /* another consumer's posted side work: it is for an occasion already running, run it first */
       for (int k = 0; k < NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS; k++)
@@ -149,6 +151,7 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
           g_side_posted--;
           pthread_mutex_unlock(&g_lock);
           atomic_fetch_add_explicit(&g_side_taken, 1, memory_order_relaxed);
+          nr_pool_site_acquire(NR_POOL_SCAN, 0, 0);
           g_side[k].fn(g_side[k].arg);
           pthread_mutex_lock(&g_lock);
           g_side[k].state = 3;
@@ -165,19 +168,30 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
       const nr_spin_action_t act = nr_spin_plan(&g_spin_pred, &spin_acct, nr_spin_now_ns(), &until);
       if (act == NR_SPIN_SPIN) { /* bounded busy-wait for the predicted occasion, then back to the ordinary wait */
         pthread_mutex_unlock(&g_lock);
-        nr_spin_run(&g_spin_pred, &spin_acct, &g_count, until);
+        /* the spin burns a core: with the pool it must be a core this thread owns, and only if one is free */
+        const bool leased = !nr_pool_site() || nr_pool_site_try_acquire(NR_POOL_SCAN, 0, 0) >= 0;
+        if (leased) {
+          if (!nr_spin_run(&g_spin_pred, &spin_acct, &g_count, until)) nr_pool_site_release();
+        } else {
+          atomic_store_explicit(&g_spin_pred.claim, 0, memory_order_release);
+          nr_pool_site_release();
+          struct timespec nap = {0, 20000};
+          nanosleep(&nap, NULL);
+        }
         pthread_mutex_lock(&g_lock);
         continue;
       }
       if (act == NR_SPIN_SLEEP && until - nr_spin_now_ns() < 20ull * 1000 * 1000) {
         ts.tv_sec = (time_t)(until / 1000000000ull);
         ts.tv_nsec = (long)(until % 1000000000ull);
+        nr_pool_site_release();
         pthread_cond_timedwait(&g_cv, &g_lock, &ts);
         nr_spin_note_wake(&spin_acct, until, nr_spin_now_ns());
         continue;
       }
       ts.tv_nsec += 20 * 1000 * 1000; // 20 ms
       if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+      nr_pool_site_release();
       pthread_cond_timedwait(&g_cv, &g_lock, &ts);
     }
     if (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) != 0) {
@@ -201,6 +215,7 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
     g_count--;
     pthread_mutex_unlock(&g_lock);
     const uint64_t take_ns = job.enq_ns ? scanq_now_ns() : 0;
+    nr_pool_site_acquire(NR_POOL_SCAN, (int)job.gNB_id, nr_passive_slot_arrival_ns(job.absolute_slot)); /* oldest slot first, one cell per gNB id */
 
     NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
     if (!nr_cfg_epoch_work_current()) {
@@ -270,6 +285,11 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
               q[k][j] = (b + 1) * bin;
             }
           }
+          if (nr_pool_site()) {
+            char pl[900];
+            nr_pool_stats_line(nr_pool_site(), pl, sizeof(pl));
+            LOG_A(PHY, "%s\n", pl);
+          }
           LOG_A(PHY, "SENSING: SCAN_E2E occ=%lu wait_us p50<=%d p90<=%d p99<=%d run_us p50<=%d p90<=%d p99<=%d "
                      "pre_us p50<=%d p90<=%d p99<=%d q_us p50<=%d p90<=%d p99<=%d\n",
                 (unsigned long)atomic_load(&n_occ), q[0][0], q[0][1], q[0][2], q[1][0], q[1][1], q[1][2],
@@ -329,8 +349,9 @@ bool nr_pdcch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     /* Priority below the RT receive thread's 97, same rationale as the PDSCH pool: if a consumer
      * ever competes with the receive path it must lose. Losing here costs one monitoring occasion;
      * losing there costs time sync, which is the whole reason this deferral exists. */
+    /* core pool on: no role core and no RT class (the lease owns the core, nothing else runs on it) */
     threadCreate(&g_threads[i], nr_pdcch_passive_queue_thread, &g_args[i], name,
-                 nr_core_plan_cpu(NR_CP_SCAN, i, (affinity >= 0) ? (affinity + i) : -1), 50);
+                 nr_pool_site() ? -1 : nr_core_plan_cpu(NR_CP_SCAN, i, (affinity >= 0) ? (affinity + i) : -1), nr_pool_site() ? 0 : 50);
   }
   LOG_I(PHY,
         "SENSING: blind PDCCH scan pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest -- "
