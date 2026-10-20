@@ -495,13 +495,15 @@ static void site_init(void)
     cores[k++] = cores[i];
   }
   n = k;
-  if (n == 0 && have_allowed) { /* a host smaller than the site map: every allowed core that is not RT/IO */
-    for (int c = 0; c < CPU_SETSIZE && n < NR_POOL_MAX_TOKENS; c++) {
+  if (n < 3 && have_allowed) { /* a host smaller than (or only partly overlapping) the site map: every allowed core that is not RT/IO, minus one */
+    int fb[NR_POOL_MAX_TOKENS], nf = 0;
+    for (int c = 0; c < CPU_SETSIZE && nf < NR_POOL_MAX_TOKENS; c++) {
       bool drop = !CPU_ISSET(c, &allowed);
       for (int j = 0; j < nex; j++) drop |= ex[j] == c;
-      if (!drop) cores[n++] = c;
+      if (!drop) fb[nf++] = c;
     }
-    if (n > 1) n--; /* keep one core for everything else */
+    if (nf > 1) nf--; /* keep one core for everything else */
+    if (nf > n) memcpy(cores, fb, (size_t)nf * sizeof(int)), n = nf;
   }
   if (n == 0) return;
   for (int i = 0; i < n; i++) {
@@ -516,6 +518,14 @@ static void site_init(void)
   }
   g_site = nr_pool_create(cores, cap, n, NULL);
   if (g_site) {
+    if (have_allowed) { /* home = allowed minus pool minus RT/ring/UHD cores (not whatever mask the first caller had) */
+      cpu_set_t h = allowed;
+      for (int c = 0; c < CPU_SETSIZE; c++)
+        if (CPU_ISSET(c, &g_site->poolset)) CPU_CLR(c, &h);
+      for (int j = 0; j < nex; j++)
+        if (ex[j] < CPU_SETSIZE) CPU_CLR(ex[j], &h);
+      if (CPU_COUNT(&h) > 0) g_site->home = h, g_site->have_home = true;
+    }
     char l[256];
     int o = snprintf(l, sizeof(l), "SENSING: CORE_POOL: %d cores:", n);
     for (int i = 0; i < n && o < (int)sizeof(l) - 8; i++) o += snprintf(l + o, sizeof(l) - (size_t)o, " %d", cores[i]);
@@ -544,22 +554,71 @@ int nr_pool_site_filter_core(int core)
   return core;
 }
 
-void nr_pool_site_gpu_wait(void)
+static __thread int tl_give;
+void nr_pool_site_gpu_give_begin(void) { tl_give++; }
+void nr_pool_site_gpu_give_end(void) { if (tl_give > 0) tl_give--; }
+
+/* Would some waiter be granted the token the caller releases now? (same caps as dispatch; the caller's own class count is lowered first) */
+static bool released_token_wanted(nr_pool_t *p)
 {
-  nr_pool_t *p = g_site;
+  const uint64_t now = nr_pool_now_ns();
+  const int prio = tl.prio;
+  const bool dl = prio == NR_POOL_DECODE && !tl.ul;
+  bool want = false;
+  pthread_mutex_lock(&p->mu);
+  p->nfree++, p->cnt[prio]--, p->cnt_dl -= dl;
+  for (int i = 0; i < p->nwq && !want; i++) want = class_ok(p, p->wq[i]->prio, overdue(p, p->wq[i], now), p->wq[i]->ul);
+  p->nfree--, p->cnt[prio]++, p->cnt_dl += dl;
+  pthread_mutex_unlock(&p->mu);
+  return want;
+}
+
+void nr_pool_gpu_wait(nr_pool_t *p)
+{
   const struct timespec ts = {0, 20000};
-  if (!p || tl.pool != p || nr_pool_total_waiting(p) == 0) {
+  if (!tl_give || !p || tl.pool != p || nr_pool_total_waiting(p) == 0 || !released_token_wanted(p)) {
     nanosleep(&ts, NULL);
     return;
   }
-  const int prio = tl.prio | (tl.ul ? NR_POOL_F_UL : 0), cell = tl.cell;
-  const uint64_t dl = tl.deadline;
-  nr_pool_release(p);
+  nr_pool_park_t pk;
+  nr_pool_park(p, &pk);
   pthread_mutex_lock(&p->mu);
   p->st.gpu_gives++;
   pthread_mutex_unlock(&p->mu);
   nanosleep(&ts, NULL);
-  nr_pool_acquire(p, prio, cell, dl);
+  nr_pool_unpark(p, &pk);
+}
+
+void nr_pool_park(nr_pool_t *p, nr_pool_park_t *pk)
+{
+  pk->held = p && tl.pool == p;
+  if (!pk->held) return;
+  pk->prio = tl.prio | (tl.ul ? NR_POOL_F_UL : 0);
+  pk->cell = tl.cell;
+  pk->deadline = tl.deadline;
+  nr_pool_release(p);
+}
+void nr_pool_unpark(nr_pool_t *p, const nr_pool_park_t *pk)
+{
+  if (pk->held) nr_pool_acquire(p, pk->prio, pk->cell, pk->deadline);
+}
+
+void nr_pool_note_scan_extra(nr_pool_t *p)
+{
+  if (!p || tl.pool != p || tl.prio != NR_POOL_SCAN) return;
+  pthread_mutex_lock(&p->mu);
+  p->st.nested++;
+  pthread_mutex_unlock(&p->mu);
+}
+void nr_pool_site_gpu_wait(void) { nr_pool_gpu_wait(g_site); }
+void nr_pool_site_park(nr_pool_park_t *pk) { nr_pool_park(g_site, pk); }
+void nr_pool_site_unpark(const nr_pool_park_t *pk) { nr_pool_unpark(g_site, pk); }
+void nr_pool_site_note_scan_extra(void) { nr_pool_note_scan_extra(g_site); }
+
+bool nr_pool_site_home_attr(pthread_attr_t *a)
+{
+  nr_pool_t *p = g_site;
+  return p && tl.pool == p && p->have_home && pthread_attr_setaffinity_np(a, sizeof(p->home), &p->home) == 0;
 }
 
 void nr_pool_site_enforce_tick(void)

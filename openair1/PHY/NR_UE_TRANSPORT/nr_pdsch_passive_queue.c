@@ -1150,6 +1150,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const bool owned = nr_csirs_disc_enabled();
 
     nr_pool_site_release(); /* core pool: a lease never outlives one iteration */
+    nr_pool_site_enforce_tick();
     pthread_mutex_lock(&g_lock);
     g_idle++;
     while (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) == 0) {
@@ -1189,6 +1190,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     g_idle--;
     if (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) != 0) {
       pthread_mutex_unlock(&g_lock);
+      nr_pool_site_release(); /* a spin-hit lease must not outlive the thread */
       break;
     }
     job    = g_ring[g_tail];
@@ -1243,10 +1245,13 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (give > 0) pthread_cond_broadcast(&g_cv);
     }
     pthread_mutex_unlock(&g_lock);
-    if (job.slot_gate && !nr_slot_gate_wait(&nr_slot_gate, job.absolute_slot, 50)) { /* the slot never completed (stream fault): drop, never decode half a slot */
-      release_solver(&job);
-      for (int k = 0; k < n_more; ++k) release_solver(&more[k]);
-      continue;
+    if (job.slot_gate) {
+      nr_pool_site_release(); /* a spin-hit lease must not span the wait for the slot */
+      if (!nr_slot_gate_wait(&nr_slot_gate, job.absolute_slot, 50)) { /* the slot never completed (stream fault): drop, never decode half a slot */
+        release_solver(&job);
+        for (int k = 0; k < n_more; ++k) release_solver(&more[k]);
+        continue;
+      }
     }
     /* core pool: first-pass decode class, oldest slot first; after the slot gate so a wait for the slot to complete holds no core */
     nr_pool_site_acquire(NR_POOL_DECODE, 0, nr_passive_slot_arrival_ns(job.absolute_slot));
@@ -1322,11 +1327,14 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
      * slot further out, so its bound grows by one slot duration per slot beyond k0 = 1; k0 <= 1 is
      * unchanged. */
     const int wait_max = 30 + (job.sweep_ticket.k0 > 1 ? (int)(job.sweep_ticket.k0 - 1) * (int)(100 / slots_per_frame) : 0);
+    const bool producer_wait = prod < job.absolute_slot;
+    if (producer_wait) nr_pool_site_release(); /* no core held across the wait for the producer */
     for (int w = 0; w < wait_max && prod < job.absolute_slot; w++) {
       struct timespec ts = {0, 100000};
       nanosleep(&ts, NULL);
       prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
     }
+    if (producer_wait) nr_pool_site_acquire(NR_POOL_DECODE, 0, nr_passive_slot_arrival_ns(job.absolute_slot));
     if (!nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame)) {
       const int count = owned ? n_more + 1 : 1;
       atomic_fetch_add_explicit(&g_dropped_stale, count, memory_order_relaxed);

@@ -197,6 +197,7 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
     }
     if (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) != 0) {
       pthread_mutex_unlock(&g_lock);
+      nr_pool_site_release(); /* a spin-hit lease must not outlive the thread */
       break;
     }
     if (g_count == 0) { /* woken for side work */
@@ -422,9 +423,12 @@ void nr_pdcch_passive_queue_side_finish(int slot)
     g_side[slot].fn(g_side[slot].arg);
     return;
   }
+  nr_pool_park_t pk; /* the taker may need our token (N=1, or fewer tokens than scan consumers): wait without holding it */
+  nr_pool_site_park(&pk);
   while (g_side[slot].state == 2) pthread_cond_wait(&g_side_done, &g_lock);
   g_side[slot].state = 0;
   pthread_mutex_unlock(&g_lock);
+  nr_pool_site_unpark(&pk);
 }
 void nr_pdcch_passive_queue_side_stats(uint64_t *posted, uint64_t *taken)
 {

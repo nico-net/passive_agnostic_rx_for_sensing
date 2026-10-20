@@ -14,15 +14,17 @@
  *      scan+low <= N-1 (the last token is the decode reserve, a scan cannot take it), decode+low <= N-1 (the scan reserve), low <= N-2.
  *      Waiters older than age_ns[prio] are promoted (starvation bound; they still never exceed busy < N).
  *  (c) NO DISCOVERY/SOLVER UNDER A SCAN LEASE. Discovery work leases class DISC on its own thread; a thread asking for a different class
- *      while it holds a lease is counted in stats.nested (a test and the OTA log must show 0).
+ *      while it holds a lease is counted in stats.nested; so is scan-side discovery/solver work that still runs inline under a SCAN lease
+ *      (nr_pool_site_note_scan_extra), i.e. nested > 0 on air is expected until that work moves to its own DISC thread.
  *  (d) WORKS WITH NO SETTING: the core list is the union of the existing site map (ISAC_PDSCH_CORES, ISAC_PUSCH_CORES; defaults built in)
  *      minus the RT/IO cores; a host with fewer cores gets the allowed cores that remain.
- * Chunking: long low-priority work calls nr_pool_yield() between steps; a GPU wait (nr_gpu_poll_relax) calls nr_pool_site_gpu_wait(), which
- * gives the token away for the poll sleep when somebody waits.
+ * Chunking: long low-priority work calls nr_pool_yield() between steps. A GPU poll sleep (nr_gpu_poll_relax -> nr_pool_site_gpu_wait) gives the
+ * token away only inside an explicit give scope (see below); a wait that must hand the token to the thread it waits for uses park/unpark.
  * Clock: CLOCK_MONOTONIC ns.
  */
 #ifndef NR_CORE_POOL_H
 #define NR_CORE_POOL_H
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #ifdef __cplusplus
@@ -81,7 +83,25 @@ nr_pool_t *nr_pool_site(void);
 void nr_pool_site_member_enter(void);
 int nr_pool_site_free(void);             /* -1 when no pool */
 int nr_pool_site_filter_core(int core); /* threadCreate hook: an explicit pool core for a non-member becomes -1 (counted + logged once) */
-void nr_pool_site_gpu_wait(void);        /* poll-loop hook: give the token away for one poll sleep when somebody waits */
+/* Poll-loop hook. Gives the token away for one poll sleep ONLY inside a give scope (begin/end, nestable, per thread) and only when a waiter
+ * that the freed token could actually be granted to exists; otherwise it just sleeps. Open a scope only around a long GPU wait that holds no
+ * lock another token holder blocks on and has no deadline abandonment (a re-acquire may take longer than the poll sleep). */
+void nr_pool_site_gpu_wait(void);
+void nr_pool_gpu_wait(nr_pool_t *);
+void nr_pool_site_gpu_give_begin(void);
+void nr_pool_site_gpu_give_end(void);
+/* Park: release the caller's lease (if it holds one) across a wait for another pool user, remembering class/cell/deadline; unpark re-acquires
+ * the same class (blocking). Needed when the waited-for thread needs a token too (e.g. scan side_finish at N=1). */
+typedef struct { int prio, cell; uint64_t deadline; bool held; } nr_pool_park_t;
+void nr_pool_park(nr_pool_t *, nr_pool_park_t *);
+void nr_pool_unpark(nr_pool_t *, const nr_pool_park_t *);
+void nr_pool_note_scan_extra(nr_pool_t *);
+void nr_pool_site_park(nr_pool_park_t *);
+void nr_pool_site_unpark(const nr_pool_park_t *);
+/* The caller does scan-side extra work (discovery, solver) inline: counted in stats.nested when it holds a SCAN lease of the site pool. */
+void nr_pool_site_note_scan_extra(void);
+/* threadCreate hook: when the caller holds a site lease, restrict the new thread's attr to the home mask (not the lessee's single core). True if set. */
+bool nr_pool_site_home_attr(pthread_attr_t *);
 void nr_pool_site_enforce_tick(void);    /* rate-limited (1/s) nr_pool_enforce(); cheap when called often */
 /* Wrappers on the site pool; all no-ops (return -1 / false) when it is off. */
 int nr_pool_site_acquire(int prio, int cell, uint64_t deadline_ns);
