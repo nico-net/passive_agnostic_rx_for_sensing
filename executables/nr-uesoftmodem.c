@@ -23,6 +23,8 @@
 #include "PHY/defs_nr_UE.h"
 #include "PHY/TOOLS/nr_gpu_platform.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "common/utils/nr_dashboard.h"
+#include <limits.h>
 #include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
@@ -319,6 +321,14 @@ int main(int argc, char **argv)
   // Blind PDCCH/DCI-1_1 monitor (TOTAL_PASSIVE_UE_HANDOVER.md Phase 3); no-op if unset.
   nr_pdcch_blind_monitor_init();
   const bool pas = IS_PASSIVE_RX_MODE(get_softmodem_params());
+  if (pas) { /* always-on dashboard (detached, non-root, own spare core, nice 19); its failure never affects the receiver */
+    nr_dashboard_cfg_t dc = {.metrics_path = getenv("ISAC_METRICS_PATH"), .core = -1};
+    char derr[200] = "", durl[64] = "", drun[PATH_MAX] = "";
+    if (nr_dashboard_start(&dc, derr, sizeof(derr), durl, sizeof(durl), drun, sizeof(drun)) == 0)
+      LOG_A(PHY, "SENSING: DASHBOARD %s (run %s)\n", durl, drun);
+    else
+      LOG_W(PHY, "SENSING: DASHBOARD not started: %s\n", derr);
+  }
   if (pas) { /* UL PUSCH chain + solver are on in passive mode */
     if (nr_ue_ctx_open(NULL, 16384, 5.0))
       nr_cfg_epoch_subscribe(nr_ue_ctx_on_epoch);

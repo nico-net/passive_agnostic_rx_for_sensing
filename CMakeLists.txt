@@ -2071,6 +2071,7 @@ add_executable(nr-uesoftmodem
   ${OPENAIR_DIR}/executables/nr-ue.c
   ${OPENAIR_DIR}/executables/nr-ue-ru.c
   ${OPENAIR_DIR}/common/utils/nr_shutdown.c
+  ${OPENAIR_DIR}/common/utils/nr_dashboard.c
   ${OPENAIR1_DIR}/PHY/TOOLS/phy_scope_interface.c
   ${NFAPI_USER_DIR}/nfapi.c
   ${PHY_INTERFACE_DIR}/queue_t.c
@@ -2401,6 +2402,11 @@ if(ENABLE_TESTS)
       COMMAND python3 ${OPENAIR_DIR}/common/utils/tests/test_nr_shutdown.py $<TARGET_FILE:test_nr_shutdown> ${shutdown_case})
     set_tests_properties(nr_shutdown_${shutdown_case} PROPERTIES TIMEOUT 8)
   endforeach()
+  add_executable(test_nr_dashboard common/utils/tests/nr_dashboard_test.c common/utils/nr_dashboard.c)
+  add_dependencies(tests test_nr_dashboard)
+  add_test(NAME nr_dashboard_spawn
+    COMMAND python3 ${OPENAIR_DIR}/common/utils/tests/test_nr_dashboard.py $<TARGET_FILE:test_nr_dashboard> ${OPENAIR_DIR}/tests/passive_rx/monitor/monitor.py)
+  set_tests_properties(nr_dashboard_spawn PROPERTIES TIMEOUT 60)
   add_library(nr_pdcch_nid_reference STATIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c)
   target_include_directories(nr_pdcch_nid_reference PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_compile_options(nr_pdcch_nid_reference PRIVATE -ffp-contract=off -Wno-unknown-pragmas)
