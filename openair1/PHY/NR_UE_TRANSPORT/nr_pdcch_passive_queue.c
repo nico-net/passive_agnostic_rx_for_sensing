@@ -142,7 +142,8 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
   while (1) {
     nr_pdcch_passive_job_t job;
 
-    nr_pool_site_release(); /* core pool: a lease never outlives one iteration (no-op when the pool is off) */
+    nr_pool_site_release(); /* core pool: a lease never outlives one iteration */
+    nr_pool_site_enforce_tick(); /* (a) exclusivity: pool cores stay free of non-members (1/s) */
     pthread_mutex_lock(&g_lock);
     if (g_side_posted > 0) { /* another consumer's posted side work: it is for an occasion already running, run it first */
       for (int k = 0; k < NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS; k++)

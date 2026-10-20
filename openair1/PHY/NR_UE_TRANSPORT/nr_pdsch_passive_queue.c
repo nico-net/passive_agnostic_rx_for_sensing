@@ -1149,7 +1149,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_passive_set_owned_iq(NULL, -1);
     const bool owned = nr_csirs_disc_enabled();
 
-    nr_pool_site_release(); /* core pool: a lease never outlives one iteration (no-op when the pool is off) */
+    nr_pool_site_release(); /* core pool: a lease never outlives one iteration */
     pthread_mutex_lock(&g_lock);
     g_idle++;
     while (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) == 0) {
@@ -1225,7 +1225,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         cost[k] = (uint64_t)all[k].freq_alloc.num_rbs * all[k].dlsch_pdu.number_symbols * (all[k].dlsch_pdu.cw_info[0].qamModOrder ? all[k].dlsch_pdu.cw_info[0].qamModOrder : 1) * (ly ? ly : 1);
       }
       nr_slot_spread_order(cost, n_all, ord);
-      const int give = nr_slot_spread_give(n_all, g_idle);
+      /* idle consumers are threads, not cores: with the pool a spread job can only run when a token is free */
+      const int tok_free = nr_pool_site_free();
+      const int give = nr_slot_spread_give(n_all, tok_free >= 0 && tok_free < g_idle ? tok_free : g_idle);
       const int keep = n_all - give;
       for (int k = keep; k < n_all; k++) { /* cheapest of the given first, so the dearest ends at the front */
         g_tail = (g_tail + g_depth - 1) % g_depth;

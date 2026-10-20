@@ -427,8 +427,10 @@ int nr_core_plan_thread_attr(pthread_attr_t *attr, int affinity, int *priority)
 /* nr_core_plan_create: creates a thread with the plan's affinity: an active plan gives the thread the CPU in `core` (or the background set) at SCHED_OTHER with explicit inheritance; with no plan it is a plain pthread_create().
  *   Uses the given attribute object or a local one. Returns the pthread_create() result.
  */
+extern int nr_pool_site_filter_core(int) __attribute__((weak));
 int nr_core_plan_create(pthread_t *thread, pthread_attr_t *attr, void *(*fn)(void *), void *arg, int core)
 {
+  if (nr_pool_site_filter_core) core = nr_pool_site_filter_core(core);
   cpu_set_t lane;
   if (!active && (core >= 0 || !nr_core_float_mask(&lane))) return pthread_create(thread, attr, fn, arg);
   pthread_attr_t local;

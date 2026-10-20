@@ -2,6 +2,11 @@
 /* Shared core pool with priority admission: see nr_core_pool.h for the model and the bounds. */
 #define _GNU_SOURCE
 #include "nr_core_pool.h"
+#include "nr_core_plan.h"
+#include <dirent.h>
+#include <limits.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -29,6 +34,11 @@ struct nr_pool {
   int rr[NR_POOL_NPRIO];
   uint64_t seq;
   _Atomic int nwait[NR_POOL_NPRIO]; /* lock-free view for should_yield */
+  int cnt[NR_POOL_NPRIO];           /* current leases per class */
+  cpu_set_t poolset, home;
+  bool have_home;
+  pid_t member[256];
+  int nmember;
   nr_pool_stats_t st;
 };
 
@@ -51,12 +61,10 @@ uint64_t nr_pool_now_ns(void)
 nr_pool_cfg_t nr_pool_cfg_default(void)
 {
   nr_pool_cfg_t c = {0};
-  /* DECODE is never promoted; RETRY 4 ms (a late rescue is worth little after that), DISC 20 ms, HOUSE 100 ms */
+  /* SCAN and DECODE are never promoted by age (the caps protect them); RETRY 4 ms (a late rescue is worth little after that), DISC 20 ms, HOUSE 100 ms */
   c.age_ns[NR_POOL_RETRY] = 4000000ull;
   c.age_ns[NR_POOL_DISC] = 20000000ull;
   c.age_ns[NR_POOL_HOUSE] = 100000000ull;
-  c.reserve = 1;
-  c.reserve_from = NR_POOL_RETRY;
   c.pin = true;
   return c;
 }
@@ -70,12 +78,19 @@ nr_pool_t *nr_pool_create(const int *cores, const int *capacity, int n, const nr
   p->cfg = cfg ? *cfg : nr_pool_cfg_default();
   p->n = p->nfree = n;
   for (int i = 0; i < NR_POOL_NPRIO; i++) p->rr[i] = NR_POOL_MAX_CELLS - 1; /* cell 0 is served first */
+  CPU_ZERO(&p->poolset);
   for (int i = 0; i < n; i++) {
     p->core[i] = cores[i];
     p->cap[i] = capacity ? capacity[i] : 0;
+    if (cores[i] >= 0 && cores[i] < CPU_SETSIZE) CPU_SET(cores[i], &p->poolset);
   }
-  if (p->cfg.reserve > n - 1) p->cfg.reserve = n - 1;
-  if (p->cfg.reserve < 0) p->cfg.reserve = 0;
+  cpu_set_t cur;
+  if (sched_getaffinity(0, sizeof(cur), &cur) == 0) {
+    CPU_ZERO(&p->home);
+    for (int c = 0; c < CPU_SETSIZE; c++)
+      if (CPU_ISSET(c, &cur) && !CPU_ISSET(c, &p->poolset)) CPU_SET(c, &p->home);
+    p->have_home = CPU_COUNT(&p->home) > 0;
+  }
   return p;
 }
 
@@ -88,6 +103,13 @@ void nr_pool_destroy(nr_pool_t *p)
 
 int nr_pool_size(const nr_pool_t *p) { return p ? p->n : 0; }
 int nr_pool_core_of(const nr_pool_t *p, int t) { return p && t >= 0 && t < p->n ? p->core[t] : -1; }
+bool nr_pool_core_in_pool(const nr_pool_t *p, int c) { return p && c >= 0 && c < CPU_SETSIZE && CPU_ISSET(c, &p->poolset); }
+int nr_pool_total_waiting(const nr_pool_t *p)
+{
+  int w = 0;
+  for (int i = 0; i < NR_POOL_NPRIO; i++) w += atomic_load_explicit(&((nr_pool_t *)p)->nwait[i], memory_order_relaxed);
+  return w;
+}
 
 static bool overdue(const nr_pool_t *p, const waiter_t *w, uint64_t now)
 {
@@ -95,12 +117,20 @@ static bool overdue(const nr_pool_t *p, const waiter_t *w, uint64_t now)
   return a && now - w->t_enq >= a;
 }
 
-/* May a class `prio` be granted a token right now (ignoring who else waits)? */
+/* May a class `prio` be granted a token right now (ignoring who else waits)? The caps keep one token for each urgent class (see header (b)).
+ * promoted (waited past its age): only the hard limit busy < N. */
 static bool class_ok(const nr_pool_t *p, int prio, bool promoted)
 {
+  const int n = p->n;
   if (p->nfree <= 0) return false;
-  if (promoted || prio < p->cfg.reserve_from) return true;
-  return p->nfree > p->cfg.reserve;
+  if (promoted) return true;
+  const int busy = n - p->nfree, low = p->cnt[NR_POOL_RETRY] + p->cnt[NR_POOL_DISC] + p->cnt[NR_POOL_HOUSE];
+  const int lim1 = n > 1 ? n - 1 : 1, lim2 = n > 2 ? n - 2 : 1;
+  switch (prio) {
+    case NR_POOL_SCAN: return p->cnt[NR_POOL_SCAN] + low < lim1;
+    case NR_POOL_DECODE: return p->cnt[NR_POOL_DECODE] + low < lim1;
+    default: return busy < lim2 && low < lim2;
+  }
 }
 
 /* Big cores to the urgent classes, small ones to the rest; the thread's previous token wins ties (cache). */
@@ -135,7 +165,7 @@ static int select_waiter(nr_pool_t *p, uint64_t now, bool *promoted)
   }
   *promoted = false;
   for (int pr = 0; pr < NR_POOL_NPRIO; pr++) {
-    if (!class_ok(p, pr, false)) break; /* classes are ordered: a blocked class blocks the lower ones */
+    if (!class_ok(p, pr, false)) continue; /* capped class: a lower class may still fit under its own cap */
     for (int k = 1; k <= NR_POOL_MAX_CELLS; k++) { /* round-robin over cells after the one served last */
       const int cell = (p->rr[pr] + k) % NR_POOL_MAX_CELLS;
       best = -1;
@@ -159,6 +189,7 @@ static void grant(nr_pool_t *p, waiter_t *w, int tok, uint64_t now, bool promote
 {
   p->busy[tok] = true;
   p->nfree--;
+  p->cnt[w->prio]++;
   w->tok = tok;
   const uint64_t wait = now - w->t_enq;
   p->st.leases[w->prio]++;
@@ -194,10 +225,27 @@ static void pin_to(const nr_pool_t *p, int core)
   if (sched_setaffinity(0, sizeof(cs), &cs) == 0) tl.cur_core = core;
 }
 
+static pid_t tl_tid(void)
+{
+  static __thread pid_t t;
+  if (!t) t = (pid_t)syscall(SYS_gettid);
+  return t;
+}
+
+static bool is_member(nr_pool_t *p, pid_t tid);
+static void go_home(const nr_pool_t *p)
+{
+  if (!p->cfg.pin || !p->have_home || tl.cur_core < 0) return;
+  if (sched_setaffinity(0, sizeof(p->home), &p->home) == 0) tl.cur_core = -1;
+}
+
 static int lease(nr_pool_t *p, int prio, int cell, uint64_t deadline, bool block)
 {
   if (!p) return -1;
-  if (tl.pool == p) return p->core[tl.tok]; /* already holds one */
+  if (tl.pool == p) { /* already holds one (nested request: keeps the outer class; a different class is counted, see header (c)) */
+    if (prio != tl.prio) { pthread_mutex_lock(&p->mu); p->st.nested++; pthread_mutex_unlock(&p->mu); }
+    return p->core[tl.tok];
+  }
   if (prio < 0) prio = 0;
   if (prio >= NR_POOL_NPRIO) prio = NR_POOL_NPRIO - 1;
   cell = (unsigned)cell % NR_POOL_MAX_CELLS;
@@ -205,19 +253,22 @@ static int lease(nr_pool_t *p, int prio, int cell, uint64_t deadline, bool block
   waiter_t w = {.prio = prio, .cell = cell, .tok = -1, .last = tl_last, .deadline = deadline ? deadline : now, .t_enq = now, .cv = &tl_cv};
   pthread_mutex_lock(&p->mu);
   w.seq = p->seq++;
-  bool ahead = false; /* someone of the same or a more urgent class is already queued */
-  for (int i = 0; i < p->nwq; i++)
-    if (p->wq[i]->prio <= prio) ahead = true;
-  if (!ahead && class_ok(p, prio, false)) {
+  if (!block) { /* grant only if no more urgent waiter could take this token */
+    bool ahead = false;
+    for (int i = 0; i < p->nwq; i++)
+      if (p->wq[i]->prio < prio && class_ok(p, p->wq[i]->prio, false)) ahead = true;
+    if (ahead || !class_ok(p, prio, false)) {
+      pthread_mutex_unlock(&p->mu);
+      return -1;
+    }
     grant(p, &w, pick_token(p, prio, false, w.last), now, false);
-  } else if (!block) {
-    pthread_mutex_unlock(&p->mu);
-    return -1;
   } else {
     p->wq[p->nwq++] = &w;
     atomic_fetch_add_explicit(&p->nwait[prio], 1, memory_order_relaxed);
+    dispatch(p, now); /* grants the best grantable waiter, possibly this one: a capped higher class must not hold a free token idle */
     while (w.tok < 0) pthread_cond_wait(&tl_cv, &p->mu);
   }
+  if (!is_member(p, tl_tid()) && p->nmember < (int)(sizeof(p->member) / sizeof(p->member[0]))) p->member[p->nmember++] = tl_tid(); /* a lessee is a member: enforce() leaves its mask alone */
   pthread_mutex_unlock(&p->mu);
   tl.pool = p;
   tl.tok = tl_last = w.tok;
@@ -243,10 +294,12 @@ void nr_pool_release(nr_pool_t *p)
   pthread_mutex_lock(&p->mu);
   p->busy[tok] = false;
   p->nfree++;
+  p->cnt[prio]--;
   p->st.hold_ns[prio] += now - tl.t_grant;
   p->st.busy_ns += now - tl.t_grant;
   dispatch(p, now);
   pthread_mutex_unlock(&p->mu);
+  go_home(p); /* a wake-up from now on lands on the home lane, not on a core that is somebody else's */
 }
 
 bool nr_pool_should_yield(const nr_pool_t *p, int prio)
@@ -304,16 +357,69 @@ int nr_pool_stats_line(nr_pool_t *p, char *buf, int len)
   return o;
 }
 
+/* ---- exclusivity (header (a)) ---- */
+static bool is_member(nr_pool_t *p, pid_t tid)
+{
+  for (int i = 0; i < p->nmember; i++)
+    if (p->member[i] == tid) return true;
+  return false;
+}
+
+void nr_pool_member_enter(nr_pool_t *p)
+{
+  if (!p) return;
+  pthread_mutex_lock(&p->mu);
+  const pid_t tid = tl_tid();
+  if (!is_member(p, tid) && p->nmember < (int)(sizeof(p->member) / sizeof(p->member[0]))) p->member[p->nmember++] = tid;
+  pthread_mutex_unlock(&p->mu);
+  tl.cur_core = 0; /* unknown: make go_home act */
+  go_home(p);
+}
+
+int nr_pool_enforce(nr_pool_t *p)
+{
+  if (!p) return 0;
+  DIR *d = opendir("/proc/self/task");
+  if (!d) return 0;
+  int changed = 0;
+  struct dirent *e;
+  while ((e = readdir(d))) {
+    char *end;
+    const long tid = strtol(e->d_name, &end, 10);
+    if (end == e->d_name || *end || tid <= 0 || tid > INT_MAX) continue;
+    pthread_mutex_lock(&p->mu);
+    const bool m = is_member(p, (pid_t)tid);
+    pthread_mutex_unlock(&p->mu);
+    if (m) continue;
+    cpu_set_t cur, nw;
+    if (sched_getaffinity((pid_t)tid, sizeof(cur), &cur)) continue;
+    CPU_ZERO(&nw);
+    bool hit = false;
+    for (int c = 0; c < CPU_SETSIZE; c++)
+      if (CPU_ISSET(c, &cur)) {
+        if (CPU_ISSET(c, &p->poolset)) hit = true;
+        else CPU_SET(c, &nw);
+      }
+    if (!hit) continue;
+    if (CPU_COUNT(&nw) == 0) nw = p->home; /* pinned to pool cores only: the home lane */
+    if (CPU_COUNT(&nw) > 0 && sched_setaffinity((pid_t)tid, sizeof(nw), &nw) == 0) changed++;
+  }
+  closedir(d);
+  if (changed) {
+    pthread_mutex_lock(&p->mu);
+    p->st.enforced += (uint64_t)changed;
+    pthread_mutex_unlock(&p->mu);
+  }
+  return changed;
+}
+
 /* ---- site pool ---- */
 static nr_pool_t *g_site;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 
-static void site_init(void)
+static void add_list(const char *e, int *v, int *n)
 {
-  const char *e = getenv("ISAC_POOL_CORES");
-  if (!e || !*e) return;
-  int cores[NR_POOL_MAX_TOKENS], cap[NR_POOL_MAX_TOKENS], n = 0;
-  while (*e && n < NR_POOL_MAX_TOKENS) {
+  while (e && *e && *n < NR_POOL_MAX_TOKENS) {
     char *end;
     long a = strtol(e, &end, 10), b = a;
     if (end == e) break;
@@ -321,10 +427,47 @@ static void site_init(void)
       e = end + 1;
       b = strtol(e, &end, 10);
     }
-    for (long c = a; c <= b && n < NR_POOL_MAX_TOKENS; c++) cores[n++] = (int)c;
+    for (long c = a; c <= b && *n < NR_POOL_MAX_TOKENS && c < CPU_SETSIZE; c++) {
+      bool dup = false;
+      for (int i = 0; i < *n; i++) dup |= v[i] == c;
+      if (!dup && c >= 0) v[(*n)++] = (int)c;
+    }
     e = (*end == ',') ? end + 1 : end;
-    if (end == e && *end != ',' && *end) break;
   }
+}
+
+/* The pool cores = the site core map: the PDSCH and PUSCH consumer lists (defaults built in, nr_env_core), minus the RT receive thread,
+ * radio ring and UHD control cores, and minus cores the process may not use. The scan consumers no longer have cores of their own. */
+static void site_init(void)
+{
+  int cores[NR_POOL_MAX_TOKENS], cap[NR_POOL_MAX_TOKENS], n = 0, ex[NR_POOL_MAX_TOKENS], nex = 0;
+  add_list(nr_env_core("ISAC_PDSCH_CORES"), cores, &n);
+  add_list(nr_env_core("ISAC_PUSCH_CORES"), cores, &n);
+  add_list(getenv("ISAC_UE_RT_CORE"), ex, &nex);
+  add_list(getenv("ISAC_USRP_RING_CORE"), ex, &nex);
+  add_list(nr_env_core("ISAC_UHD_CTRL_CORES"), ex, &nex);
+  cpu_set_t allowed;
+  const bool have_allowed = sched_getaffinity(0, sizeof(allowed), &allowed) == 0;
+  int k = 0;
+  for (int i = 0; i < n; i++) {
+    bool drop = have_allowed && !CPU_ISSET(cores[i], &allowed);
+    for (int j = 0; j < nex; j++) drop |= ex[j] == cores[i];
+    if (drop) {
+      fprintf(stderr, "SENSING: CORE_POOL: core %d not usable (RT/IO core or outside the allowed set), dropped\n", cores[i]);
+      continue;
+    }
+    cores[k++] = cores[i];
+  }
+  n = k;
+  if (n == 0 && have_allowed) { /* a host smaller than the site map: every allowed core that is not RT/IO */
+    for (int c = 0; c < CPU_SETSIZE && n < NR_POOL_MAX_TOKENS; c++) {
+      bool drop = !CPU_ISSET(c, &allowed);
+      for (int j = 0; j < nex; j++) drop |= ex[j] == c;
+      if (!drop) cores[n++] = c;
+    }
+    if (n > 1) n--; /* keep one core for everything else */
+  }
+  if (n == 0) return;
   for (int i = 0; i < n; i++) {
     char path[96];
     snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpu_capacity", cores[i]);
@@ -336,6 +479,13 @@ static void site_init(void)
     }
   }
   g_site = nr_pool_create(cores, cap, n, NULL);
+  if (g_site) {
+    char l[256];
+    int o = snprintf(l, sizeof(l), "SENSING: CORE_POOL: %d cores:", n);
+    for (int i = 0; i < n && o < (int)sizeof(l) - 8; i++) o += snprintf(l + o, sizeof(l) - (size_t)o, " %d", cores[i]);
+    fprintf(stderr, "%s\n", l);
+    nr_pool_enforce(g_site);
+  }
 }
 
 nr_pool_t *nr_pool_site(void)
@@ -347,3 +497,43 @@ int nr_pool_site_acquire(int prio, int cell, uint64_t dl) { return nr_pool_acqui
 int nr_pool_site_try_acquire(int prio, int cell, uint64_t dl) { return nr_pool_try_acquire(nr_pool_site(), prio, cell, dl); }
 void nr_pool_site_release(void) { if (g_site) nr_pool_release(g_site); }
 bool nr_pool_site_yield(void) { return g_site && nr_pool_yield(g_site); }
+void nr_pool_site_member_enter(void) { nr_pool_member_enter(nr_pool_site()); }
+int nr_pool_site_filter_core(int core)
+{
+  if (core >= 0 && g_site && nr_pool_core_in_pool(g_site, core)) {
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1)) fprintf(stderr, "SENSING: CORE_POOL: thread pinned to pool core %d moved to the home lane\n", core);
+    return -1;
+  }
+  return core;
+}
+
+void nr_pool_site_gpu_wait(void)
+{
+  nr_pool_t *p = g_site;
+  const struct timespec ts = {0, 20000};
+  if (!p || tl.pool != p || nr_pool_total_waiting(p) == 0) {
+    nanosleep(&ts, NULL);
+    return;
+  }
+  const int prio = tl.prio, cell = tl.cell;
+  const uint64_t dl = tl.deadline;
+  nr_pool_release(p);
+  pthread_mutex_lock(&p->mu);
+  p->st.gpu_gives++;
+  pthread_mutex_unlock(&p->mu);
+  nanosleep(&ts, NULL);
+  nr_pool_acquire(p, prio, cell, dl);
+}
+
+void nr_pool_site_enforce_tick(void)
+{
+  static _Atomic uint64_t next;
+  const uint64_t now = nr_pool_now_ns();
+  uint64_t n = atomic_load_explicit(&next, memory_order_relaxed);
+  if (now < n || !g_site || !atomic_compare_exchange_strong(&next, &n, now + 1000000000ull)) return;
+  nr_pool_enforce(g_site);
+}
+
+int nr_pool_free(const nr_pool_t *p) { return p ? __atomic_load_n(&p->nfree, __ATOMIC_RELAXED) : 0; }
+int nr_pool_site_free(void) { return g_site ? nr_pool_free(g_site) : -1; }

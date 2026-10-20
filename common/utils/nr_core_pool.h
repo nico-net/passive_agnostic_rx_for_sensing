@@ -1,19 +1,24 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /*
- * One shared pool of exclusive cores ("tokens") with priority admission, replacing one pinned core per role.
+ * One shared pool of EXCLUSIVE cores ("tokens") with priority admission. Always on; no env switch.
  *
- * MODEL. The pool owns N cores. A thread that wants to compute leases ONE token (nr_pool_acquire), pins itself to that core while it
- * holds it, and gives it back (nr_pool_release). At most N threads hold a lease, so no two pool threads ever time-share a core. The
- * consumers keep their own stacks and thread-local state (FEP/chest estimates, CUDA state, spin accounting): the pool schedules who
- * runs, never moves a job. Waiters are granted a free token in strict priority (SCAN, DECODE, RETRY, DISC, HOUSE); inside a priority
- * round-robin across cells, inside a cell oldest deadline first. No preemption (no RT class): a high-priority waiter waits for the
- * next release, which is bounded by (a) a reserve: lower classes (>= reserve_from) are never granted the last `reserve` tokens, so
- * a SCAN/DECODE arrival finds a free core unless that many high-priority jobs are already running; (b) chunking: long low-priority
- * work calls nr_pool_yield() between steps, which releases and re-queues when a more urgent waiter exists; (c) aging: a waiter older
- * than age_ns[prio] is promoted ahead of strict order (starvation bound), and ignores the reserve.
- * Tokens carry a capacity (cpu_capacity): SCAN/DECODE get the biggest free core, lower classes the smallest.
- * A GPU wait inside a job should be bracketed by nr_pool_release()/nr_pool_acquire() so a waiting decode frees its core.
- * Pool inactive (nr_pool_site() == NULL, ISAC_POOL_CORES unset): every call below is a no-op, and the receiver keeps per-role cores.
+ * MODEL. The pool owns N cores. A thread leases ONE token (nr_pool_acquire), pins itself to that core while it holds it and, on release,
+ * returns to the home mask (the float lane, never a pool core: no wake-up on a core somebody else now owns). At most N threads hold a
+ * lease, so no two pool threads time-share a core. Consumers keep their stacks and thread-local state: the pool decides who runs, never
+ * moves a job. Waiters are granted in strict priority (SCAN, DECODE, RETRY, DISC, HOUSE); inside a priority round-robin across cells,
+ * inside a cell oldest deadline first. No preemption (no RT class). Guarantees:
+ *  (a) EXCLUSIVITY. nr_pool_enforce() removes the pool cores from the mask of every task that is not a registered pool member (at start-up,
+ *      then about once a second from the scan consumers), threadCreate() refuses an explicit pool core for a non-member, and the site pool
+ *      never contains the RT receive / radio-ring / UHD-control cores. Members sit on the home mask unless they hold a lease.
+ *  (b) A DECODE ARRIVAL DOES NOT WAIT FOR SCANS. Leases are capped per class so that a token is always left for each urgent class:
+ *      scan+low <= N-1 (the last token is the decode reserve, a scan cannot take it), decode+low <= N-1 (the scan reserve), low <= N-2.
+ *      Waiters older than age_ns[prio] are promoted (starvation bound; they still never exceed busy < N).
+ *  (c) NO DISCOVERY/SOLVER UNDER A SCAN LEASE. Discovery work leases class DISC on its own thread; a thread asking for a different class
+ *      while it holds a lease is counted in stats.nested (a test and the OTA log must show 0).
+ *  (d) WORKS WITH NO SETTING: the core list is the union of the existing site map (ISAC_PDSCH_CORES, ISAC_PUSCH_CORES; defaults built in)
+ *      minus the RT/IO cores; a host with fewer cores gets the allowed cores that remain.
+ * Chunking: long low-priority work calls nr_pool_yield() between steps; a GPU wait (nr_gpu_poll_relax) calls nr_pool_site_gpu_wait(), which
+ * gives the token away for the poll sleep when somebody waits.
  * Clock: CLOCK_MONOTONIC ns.
  */
 #ifndef NR_CORE_POOL_H
@@ -30,13 +35,11 @@ enum { NR_POOL_SCAN = 0, NR_POOL_DECODE, NR_POOL_RETRY, NR_POOL_DISC, NR_POOL_HO
 
 typedef struct {
   uint64_t age_ns[NR_POOL_NPRIO]; /* promotion age per priority; 0 = never promoted (SCAN, and DECODE by default) */
-  int reserve;                    /* tokens kept free of classes >= reserve_from */
-  int reserve_from;
-  bool pin;                       /* sched_setaffinity on grant (tests turn it off on hosts without the cores) */
+  bool pin;                       /* sched_setaffinity on grant/release (tests turn it off on hosts without the cores) */
 } nr_pool_cfg_t;
 
 typedef struct {
-  uint64_t leases[NR_POOL_NPRIO], waited[NR_POOL_NPRIO], promoted[NR_POOL_NPRIO], yields;
+  uint64_t leases[NR_POOL_NPRIO], waited[NR_POOL_NPRIO], promoted[NR_POOL_NPRIO], yields, nested, gpu_gives, enforced;
   uint64_t wait_max_ns[NR_POOL_NPRIO], hold_ns[NR_POOL_NPRIO];
   uint64_t wait_hist[NR_POOL_NPRIO][NR_POOL_WAIT_BINS];
   uint64_t busy_ns; /* sum of lease hold time over all tokens */
@@ -55,6 +58,12 @@ int nr_pool_acquire(nr_pool_t *, int prio, int cell, uint64_t deadline_ns);
 int nr_pool_try_acquire(nr_pool_t *, int prio, int cell, uint64_t deadline_ns);
 void nr_pool_release(nr_pool_t *); /* no-op when the caller holds no lease of this pool */
 bool nr_pool_holds(const nr_pool_t *);
+/* Remove the pool cores from every task of this process that is not a registered member (see (a)); returns the number of tasks changed. */
+int nr_pool_enforce(nr_pool_t *);
+void nr_pool_member_enter(nr_pool_t *); /* register the calling thread as a pool member and send it to the home mask */
+int nr_pool_total_waiting(const nr_pool_t *);
+int nr_pool_free(const nr_pool_t *);   /* tokens free now (racy, for hints) */
+bool nr_pool_core_in_pool(const nr_pool_t *, int core);
 /* Waiter of a strictly more urgent class exists: a chunked job should return its token at its next step boundary. Lock-free. */
 bool nr_pool_should_yield(const nr_pool_t *, int prio);
 /* Release and re-acquire (same class/cell/deadline) iff should_yield; returns whether it yielded. */
@@ -64,8 +73,13 @@ int nr_pool_stats_line(nr_pool_t *, char *buf, int len); /* one log line: per cl
 int nr_pool_size(const nr_pool_t *);
 int nr_pool_core_of(const nr_pool_t *, int token);
 
-/* Site pool: built once from ISAC_POOL_CORES (cpu list, e.g. "6-11"; capacity from sysfs cpu_capacity). NULL = off. Thread-safe. */
+/* Site pool: built once on first use from the site core map (always non-NULL on a host with >= 1 allowed core). Thread-safe. */
 nr_pool_t *nr_pool_site(void);
+void nr_pool_site_member_enter(void);
+int nr_pool_site_free(void);             /* -1 when no pool */
+int nr_pool_site_filter_core(int core); /* threadCreate hook: an explicit pool core for a non-member becomes -1 (counted + logged once) */
+void nr_pool_site_gpu_wait(void);        /* poll-loop hook: give the token away for one poll sleep when somebody waits */
+void nr_pool_site_enforce_tick(void);    /* rate-limited (1/s) nr_pool_enforce(); cheap when called often */
 /* Wrappers on the site pool; all no-ops (return -1 / false) when it is off. */
 int nr_pool_site_acquire(int prio, int cell, uint64_t deadline_ns);
 int nr_pool_site_try_acquire(int prio, int cell, uint64_t deadline_ns);
