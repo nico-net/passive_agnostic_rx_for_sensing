@@ -43,6 +43,7 @@ typedef struct {
   uint8_t hq_viol_n;
   uint16_t hq_viol_mask;
   uint64_t hq_viol_ns;
+  uint64_t hq_armed_until;     /* violations only count right after a silence of >= NR_RECONF_REATTACH_GAP_NS (see hq_discontinuity) */
   int64_t rrc_eff_slot;        /* -1 none */
   int rrc_kind;
 } entry_t;
@@ -444,9 +445,14 @@ static entry_t *reattach(entry_t *old,int cause,int64_t slot,uint64_t ns)
   return n;
 }
 /* TS 38.321 5.3.2.2: a DL assignment with an untoggled NDI is a retransmission. Two HARQ processes that each decode (CRC pass) a DIFFERENT TBS
- * under an untoggled NDI within NR_RECONF_HQ_WINDOW_NS mean the HARQ entity was reset: a new UE on a reused RNTI. */
+ * under an untoggled NDI within NR_RECONF_HQ_WINDOW_NS mean the HARQ entity was reset: a new UE on a reused RNTI. Measured on a recorded capture (50 % of
+ * grants lost): inside continuous traffic a missed grant makes an untoggled NDI look like a violation (20 false events on one live UE in 12 s), so the
+ * test is armed only for NR_RECONF_HQ_WINDOW_NS after the RNTI was silent for NR_RECONF_REATTACH_GAP_NS..NR_RECONF_REUSE_NS, the situation of a reuse. */
 static bool hq_discontinuity(entry_t *e,const nr_passive_obs_t *o,uint64_t ns)
 {
+  if(ns>e->last_activity_ns && ns-e->last_activity_ns>=NR_RECONF_REATTACH_GAP_NS && ns-e->last_activity_ns<=NR_RECONF_REUSE_NS)
+    e->hq_armed_until=ns+NR_RECONF_HQ_WINDOW_NS;
+  if(ns>e->hq_armed_until) return false;
   if(o->dir!=NR_OBS_DIR_DL || o->crc!=NR_OBS_CRC_OK || o->harq_pid<0 || o->harq_pid>15 || (o->ndi!=0 && o->ndi!=1) || o->tbs<=0) return false;
   bool hit=false;
   if(nr_reconf_hq_discontinuity(e->hq[o->harq_pid].v,e->hq[o->harq_pid].ndi,e->hq[o->harq_pid].tbs,(uint8_t)o->ndi,o->tbs)) {

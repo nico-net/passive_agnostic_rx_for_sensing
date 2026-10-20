@@ -442,6 +442,7 @@ TEST_F(UeContext, RandomIdentityIsNeverLinked) {
 }
 TEST_F(UeContext, UntoggledNdiWithAnotherTbsOnTwoHarqProcessesIsANewUe) {
   auto a=harq_grant(0x2020,0,1,8000,100), b=harq_grant(0x2020,1,0,8000,101); nr_ue_ctx_on_obs(&a); nr_ue_ctx_on_obs(&b);
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));           // the old UE went silent; a new one uses the RNTI
   auto a2=harq_grant(0x2020,0,1,12000,102); nr_ue_ctx_on_obs(&a2);        // one violation: not enough
   auto b2=harq_grant(0x2020,1,0,9000,103); nr_ue_ctx_on_obs(&b2);         // second process: HARQ entity was reset
   auto s=contents();
@@ -541,4 +542,9 @@ TEST_F(UeContext, NoRrcNoMsg4_ReturningRntiAfterGoneIsANewIncarnationAndNeverLin
   nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2063,&c));
   EXPECT_EQ(c.incarnation,1);
   EXPECT_LT(c.cfg[NR_UEP_RESUME_OF].value,0);
+}
+TEST_F(UeContext, HarqViolationsInsideContinuousTrafficAreMissedGrantsNotAReattach) {
+  auto a=harq_grant(0x2070,0,1,8000,100), b=harq_grant(0x2070,1,0,8000,101); nr_ue_ctx_on_obs(&a); nr_ue_ctx_on_obs(&b);
+  auto a2=harq_grant(0x2070,0,1,12000,102), b2=harq_grant(0x2070,1,0,9000,103); nr_ue_ctx_on_obs(&a2); nr_ue_ctx_on_obs(&b2); // no silence before
+  EXPECT_EQ(contents().find("\"cause\":\"REATTACH_"),std::string::npos);
 }
