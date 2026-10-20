@@ -427,6 +427,19 @@ static int g_nid_head, g_nid_count;
 static pthread_mutex_t g_nid_q_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_nid_q_cond = PTHREAD_COND_INITIALIZER;
 static pthread_once_t g_nid_thr_once = PTHREAD_ONCE_INIT;
+/* Passive-BWP CORESET discovery correlation, off the scan thread (OTA Vodafone 2026-10-20: 52 us per scan pass in the RT scan consumer, the
+ * largest item of the restore; its RR 50 bursts pre-empted PDSCH consumer 0 on the shared core 7 -> 300 DECSLOW). The scan copies the 3
+ * DM-RS REs per RB of antenna 0 for both CORESET symbols; this worker correlates them and feeds the tracker. A full ring drops the
+ * observation: the tracker's evidence is relative and faded per observation, so fewer observations only slow it down. */
+typedef struct {
+  int slot, first_symbol, n_rb, n_win, base_lo, base_hi, bwp_start;
+  uint16_t sid;
+  c16_t re[2][3 * 276];
+} pbwp_corr_job_t;
+#define PBWP_CORR_RING 16
+static pbwp_corr_job_t g_cj_ring[PBWP_CORR_RING];
+static int g_cj_head, g_cj_count;
+static void pbwp_corr_run(const pbwp_corr_job_t *j); /* after g_pbwp */
 static void *nid_worker(void *arg)
 {
   (void)arg;
@@ -440,10 +453,19 @@ static void *nid_worker(void *arg)
     pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
   setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
   static nid_job_t job;
+  static pbwp_corr_job_t cj;
   for (;;) {
     pthread_mutex_lock(&g_nid_q_lock);
-    while (g_nid_count == 0)
+    while (g_nid_count == 0 && g_cj_count == 0)
       pthread_cond_wait(&g_nid_q_cond, &g_nid_q_lock);
+    if (g_cj_count) { /* cheap and per occasion: before a solve */
+      cj = g_cj_ring[g_cj_head];
+      g_cj_head = (g_cj_head + 1) % PBWP_CORR_RING;
+      g_cj_count--;
+      pthread_mutex_unlock(&g_nid_q_lock);
+      pbwp_corr_run(&cj);
+      continue;
+    }
     job = g_nid_ring[g_nid_head];
     g_nid_head = (g_nid_head + 1) % NID_RING;
     g_nid_count--;
@@ -3558,6 +3580,48 @@ static void pa_cleanup(nr_post_accept_t *p)
 static nr_pbwp_t g_pbwp;
 static pthread_mutex_t g_pbwp_lock = PTHREAD_MUTEX_INITIALIZER;
 static int nr_pbwp_enabled(void) { return 1; }
+/* The CORESET discovery correlation of one occasion (moved from the scan thread unchanged, see pbwp_corr_job_t): each 6-RB window of the two
+ * CORESET symbols against the PDCCH DM-RS under the spec reference (CRB 0) and the OAI one (the BWP start, within 5 RB below the window). */
+static void pbwp_corr_run(const pbwp_corr_job_t *j)
+{
+  static _Atomic bool s_cs_logged;
+  static c16_t y[12 * 276]; /* the compact REs laid back on a virtual symbol: first_carrier_offset 0, size 12 n_rb */
+  c16_t pilot[3 * 276];
+  float corr[NR_PBWP_CS_MAXWIN];
+  int16_t ref[NR_PBWP_CS_MAXWIN];
+  for (int sym = 0; sym < 2; sym++) {
+    for (int rb = 0; rb < j->n_rb; rb++)
+      for (int p = 0; p < 3; p++)
+        y[rb * 12 + 1 + 4 * p] = j->re[sym][3 * rb + p];
+    nr_pdcch_coreset_pilot((uint16_t)nid_pilot_id(j->sid), j->slot, j->first_symbol + sym, j->n_rb, pilot);
+    const int fft = 12 * j->n_rb;
+    for (int w = 0; w < j->n_win; w++) {
+      corr[w] = (float)nr_pdcch_coreset_window_corr(y, fft, 0, pilot, j->n_rb, w * 6, 0);
+      ref[w] = 0;
+      for (int d = 0; d <= 5 && w * 6 - d > 0; d++) {
+        const float c = (float)nr_pdcch_coreset_window_corr(y, fft, 0, pilot, j->n_rb, w * 6, w * 6 - d);
+        if (c > corr[w]) { corr[w] = c; ref[w] = (int16_t)(w * 6 - d); }
+      }
+      /* Half-window occupancy (3 RBs = one REG bundle at duration 2): an interleaved CORESET lights half of a window at a time. */
+      if (corr[w] < 0.8f)
+        for (int h = 0; h < 2; h++)
+          for (int d = 0; d <= 5 && w * 6 + h * 3 - d > 0; d++) {
+            const float c = (float)nr_pdcch_coreset_window_corr_n(y, fft, 0, pilot, j->n_rb, w * 6 + h * 3, w * 6 - d, 3);
+            if (c > corr[w]) { corr[w] = c; ref[w] = (int16_t)(w * 6 - d); }
+          }
+    }
+    pthread_mutex_lock(&g_pbwp_lock);
+    nr_pbwp_coreset_observe(&g_pbwp, j->n_win, j->base_lo, j->base_hi, j->bwp_start, corr, ref, sym, 0.8f);
+    pthread_mutex_unlock(&g_pbwp_lock);
+  }
+  int cs_start, cs_n, cs_dur, cs_ref;
+  pthread_mutex_lock(&g_pbwp_lock);
+  const bool have = nr_pbwp_coreset_hypothesis(&g_pbwp, &cs_start, &cs_n, &cs_dur, &cs_ref);
+  pthread_mutex_unlock(&g_pbwp_lock);
+  if (have && !atomic_exchange_explicit(&s_cs_logged, true, memory_order_relaxed))
+    LOG_A(PHY, "SENSING: BWP CORESET found: RB %d..%d (%d RB), %d symbol(s), DM-RS reference RB %d (%s)\n",
+          cs_start, cs_start + cs_n - 1, cs_n, cs_dur, cs_ref, cs_ref ? "BWP start, OAI-style" : "CRB 0, 38.211");
+}
 /* TB-CRC outcome of a grant decoded against a DISCOVERED BWP: 32 failures with no pass un-resolve it. */
 void nr_pdcch_bwp_crc_result(int entry, bool crc_ok)
 {
@@ -5416,17 +5480,14 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * start, within 5 RB below the window), and let the tracker find a second CORESET. ~6k MAC/symbol.
    * This ran on every 8th occasion; the CORESET proposal needs MIN_HITS lit windows per 6-RB window and each
    * grant lights one, so the subsampling stretched the proposal (6 RB x 1 symbol at 10 s, the real 24 x 2 at
-   * 57 s on the SA bed: 51 observations/s) for a saving of a few microseconds per occasion. */
+   * 57 s on the SA bed: 51 observations/s) for a saving of a few microseconds per occasion. The scan thread now only copies the DM-RS REs
+   * (antenna 0); the correlation runs in the nid_solver worker (pbwp_corr_run, off the RT lane). */
   const uint64_t btim_t_pbwp = btim_on ? btim_now() : 0;
   if (pbwp_on) {
-    static _Atomic bool s_cs_logged; /* _Atomic: N scan consumers (Task A7) */
     {
       const int n_win = fp->N_RB_DL / 6 < NR_PBWP_CS_MAXWIN ? fp->N_RB_DL / 6 : NR_PBWP_CS_MAXWIN;
       const int base_lo = (cfg->bwp_start + cfg->coreset_rb_offset) / 6;
       const int base_hi = base_lo + cfg->coreset_freq_domain - 1;
-      c16_t pilot[fp->N_RB_DL * 3];
-      float corr[NR_PBWP_CS_MAXWIN];
-      int16_t ref[NR_PBWP_CS_MAXWIN];
       /* One decision per OCCASION (the solves run on a worker thread), applied to BOTH CORESET symbols: a per-symbol counter always landed on the same symbol.
        * Bounded in TIME, at the ~3 scans/s the window decay (0.97 per scan, ~13 s memory) is designed for: 1 occasion in 32 was ~60/s at 2000
        * occasions/s, a full core of solver work (replay 2026-10-20: 10 s CPU in 12 s once off the scan core) taken from the background lane. */
@@ -5436,45 +5497,40 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       const bool nid_trig = nid_solve_enabled() && nid_now >= nid_due
                             && atomic_compare_exchange_strong_explicit(&s_nid_next_ns, &nid_due, nid_now + 333000000ull, memory_order_relaxed,
                                                                        memory_order_relaxed);
+      pthread_once(&g_nid_thr_once, nid_start_thread);
+      static __thread pbwp_corr_job_t t_cj; /* filled here, copied into the ring under its lock (N scan consumers) */
+      static __thread c16_t *fep1; /* antenna 0 only: the correlation reads antenna 0, and no other pass reuses this FFT */
+      if (fep1 == NULL)
+        fep1 = aligned_alloc(32, ((sizeof(c16_t) * fp->samples_per_slot_wCP + 31) / 32) * 32);
+      pbwp_corr_job_t *cj = fep1 && fp->N_RB_DL <= 276 && __atomic_load_n(&g_cj_count, __ATOMIC_RELAXED) < PBWP_CORR_RING
+                            ? &t_cj : NULL; /* racy pre-check: a full ring skips the copy */
       for (int sym = 0; sym < 2; sym++) {
         const int symbol = cfg->ss_first_symbol + sym;
-        if (sym >= rel15->coreset.duration)
-          nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
-        nr_pdcch_coreset_pilot((uint16_t)nid_pilot_id(cfg->coreset_pdcch_dmrs_scrambling_id), proc->nr_slot_rx, symbol, fp->N_RB_DL, pilot);
         const c16_t *y = &rxdataF[0][symbol * fp->ofdm_symbol_size];
-        for (int w = 0; w < n_win; w++) {
-          corr[w] = (float)nr_pdcch_coreset_window_corr(y, fp->ofdm_symbol_size, fp->first_carrier_offset, pilot,
-                                                        fp->N_RB_DL, w * 6, 0);
-          ref[w] = 0;
-          for (int d = 0; d <= 5 && w * 6 - d > 0; d++) {
-            const float c = (float)nr_pdcch_coreset_window_corr(y, fp->ofdm_symbol_size, fp->first_carrier_offset,
-                                                                pilot, fp->N_RB_DL, w * 6, w * 6 - d);
-            if (c > corr[w]) { corr[w] = c; ref[w] = (int16_t)(w * 6 - d); }
-          }
-          /* Half-window occupancy (3 RBs = one REG bundle at duration 2): an interleaved CORESET lights half of a window at a time. */
-          if (corr[w] < 0.8f)
-            for (int h = 0; h < 2; h++)
-              for (int d = 0; d <= 5 && w * 6 + h * 3 - d > 0; d++) {
-                const float c = (float)nr_pdcch_coreset_window_corr_n(y, fp->ofdm_symbol_size, fp->first_carrier_offset, pilot,
-                                                                      fp->N_RB_DL, w * 6 + h * 3, w * 6 - d, 3);
-                if (c > corr[w]) { corr[w] = c; ref[w] = (int16_t)(w * 6 - d); }
-              }
-        }
-        pthread_mutex_lock(&g_pbwp_lock);
-        nr_pbwp_coreset_observe(&g_pbwp, n_win, base_lo, base_hi, cfg->bwp_start, corr, ref, sym, 0.8f);
-        pthread_mutex_unlock(&g_pbwp_lock);
+        if (sym >= rel15->coreset.duration && (cj || nid_trig) && fep1) { /* the symbol after a 1-symbol CORESET: a 2-symbol dedicated one */
+          nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, symbol, 0, (c16_t(*)[fp->samples_per_slot_wCP])fep1, link_type_dl, 0, ue->common_vars.rxdata);
+          y = fep1 + (size_t)symbol * fp->ofdm_symbol_size;
+        } else if (sym >= rel15->coreset.duration)
+          continue;
+        if (cj)
+          for (int rb = 0; rb < fp->N_RB_DL; rb++)
+            for (int p = 0; p < 3; p++)
+              cj->re[sym][3 * rb + p] = y[(fp->first_carrier_offset + rb * 12 + 1 + 4 * p) % fp->ofdm_symbol_size];
         if (nid_trig) {
           nid_submit(y, fp->ofdm_symbol_size, fp->first_carrier_offset, fp->N_RB_DL, proc->nr_slot_rx, symbol, sym, (int)fp->Nid_cell,
                      cfg->bwp_start);
         }
       }
-      int cs_start, cs_n, cs_dur, cs_ref;
-      pthread_mutex_lock(&g_pbwp_lock);
-      const bool have = nr_pbwp_coreset_hypothesis(&g_pbwp, &cs_start, &cs_n, &cs_dur, &cs_ref);
-      pthread_mutex_unlock(&g_pbwp_lock);
-      if (have && !atomic_exchange_explicit(&s_cs_logged, true, memory_order_relaxed)) {
-        LOG_A(PHY, "SENSING: BWP CORESET found: RB %d..%d (%d RB), %d symbol(s), DM-RS reference RB %d (%s)\n",
-              cs_start, cs_start + cs_n - 1, cs_n, cs_dur, cs_ref, cs_ref ? "BWP start, OAI-style" : "CRB 0, 38.211");
+      if (cj) {
+        cj->slot = proc->nr_slot_rx; cj->first_symbol = cfg->ss_first_symbol; cj->n_rb = fp->N_RB_DL; cj->n_win = n_win;
+        cj->base_lo = base_lo; cj->base_hi = base_hi; cj->bwp_start = cfg->bwp_start; cj->sid = cfg->coreset_pdcch_dmrs_scrambling_id;
+        pthread_mutex_lock(&g_nid_q_lock);
+        if (g_cj_count < PBWP_CORR_RING) {
+          g_cj_ring[(g_cj_head + g_cj_count) % PBWP_CORR_RING] = *cj;
+          g_cj_count++;
+          pthread_cond_signal(&g_nid_q_cond);
+        }
+        pthread_mutex_unlock(&g_nid_q_lock);
       }
     }
   }
