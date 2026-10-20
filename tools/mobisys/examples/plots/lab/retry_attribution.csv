@@ -1,0 +1,4 @@
+n,what
+126,first-pass CRC fail
+33,rescued by retry (unique)
+0,retry lines without a seen failure

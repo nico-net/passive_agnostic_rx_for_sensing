@@ -1,0 +1,39 @@
+{
+ "clock_offset_real_minus_mono_ns": 1789999000000000000,
+ "datasets": {
+  "cell_aggregates": 1,
+  "configuration_events": 1,
+  "dci_attempts": 1,
+  "discovery_events": 1,
+  "discovery_summary": 1,
+  "latency_histograms": 1,
+  "retry_events": 1,
+  "rx_grants": 1,
+  "slot_health": 1,
+  "system_telemetry": 1
+ },
+ "duration_s": 0.459,
+ "format": "parquet",
+ "host_label": "synthetic (cloud x86 generator)",
+ "input": "file",
+ "k": 1,
+ "mode": "lab",
+ "provenance": "synthetic",
+ "pyarrow": "26.0.0",
+ "python": "3.13.16",
+ "rotate_rows": 50000,
+ "rows_written": 4356,
+ "schema": "mobisys-telemetry/1",
+ "slots_per_frame": 20,
+ "started_unix": 1792529523.4,
+ "telemetry_loss": {
+  "k_suppressed_events": 0,
+  "k_suppressed_rows": 0,
+  "parse_errors": 0,
+  "policy_refused_fields": 0,
+  "policy_refused_rows": 0,
+  "queue_drops": {},
+  "queue_drops_total": 0
+ },
+ "window_s": 60
+}
