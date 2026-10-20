@@ -296,6 +296,15 @@ TEST_F(UeContext, DirectlyNotifiedReopensAreOnlyRecorded) {
   EXPECT_EQ(count(s,"\"type\":\"ue_reconfig\""),2);
   EXPECT_EQ(reopened_count.load(),0);
 }
+TEST_F(UeContext, UlDciLengthFlipIsRecordedButIsNoEpochEvidence) {
+  for(uint16_t rnti: {13,14}) {
+    nr_ue_ctx_on_param(rnti,NR_UEP_DCI_LEN_UL,42,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
+    nr_ue_ctx_on_param(rnti,NR_UEP_DCI_LEN_UL,44,NR_UEV_TRUSTED,NR_UEC_RELOCK,20);
+  }
+  const auto s=contents();
+  EXPECT_EQ(count(s,"\"type\":\"ue_reconfig\""),2);
+  EXPECT_EQ(reopened_count.load(),0);
+}
 TEST_F(UeContext, JsonRoundTripSchemaV1) {
   nr_ue_ctx_on_param(12,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
   auto s=contents();

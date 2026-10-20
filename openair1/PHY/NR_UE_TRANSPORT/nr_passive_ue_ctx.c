@@ -235,8 +235,11 @@ static void flush_reconfig(entry_t *e)
   }
   fprintf(output,"],\"class\":\"%s\"}\n",reconfig_class(e->pending_params));
   line_done(); c->n_reconfigs++;
-  /* DL length and TD reopen owners already notify the epoch authority directly. */
-  const uint64_t directly_notified = (1ull << NR_UEP_DCI_LEN_DL) |
+  /* DL length and TD reopen owners already notify the epoch authority directly. The UL 0_1 length is not epoch evidence: its owner
+   * deliberately does not notify (nr_pdsch_config_sweep_relock_length), and OTA it flips between two decodable sizes on every UE of both
+   * cells (42 <-> 44, ab_rfxT1 2026-10-20: 39 flips, the 6 remaining DEDICATED_CHANGE_SUSPECTED epochs). A real reconfiguration of the
+   * DCI sizes moves the DL length too. */
+  const uint64_t directly_notified = (1ull << NR_UEP_DCI_LEN_DL) | (1ull << NR_UEP_DCI_LEN_UL) |
       (1ull << NR_UEP_TD_WINNER);
   if (nr_cfg_epoch_note_rnti_reopened && e->pending_slot >= 0 &&
       !(e->pending_params & directly_notified))
