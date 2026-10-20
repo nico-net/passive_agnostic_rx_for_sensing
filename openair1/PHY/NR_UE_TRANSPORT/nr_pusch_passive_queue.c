@@ -260,8 +260,8 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     held = job.snap_idx; /* the queue's reference moves to this consumer */
     pthread_mutex_unlock(&g_lock);
     if (pick == 1) atomic_fetch_add_explicit(&g_dec_probe, 1, memory_order_relaxed);
-    /* core pool: the first-pass UL decode is DECODE class; a layout probe (pick 1) is not a decode and queues as RETRY */
-    nr_pool_site_acquire(pick == 1 ? NR_POOL_RETRY : NR_POOL_DECODE, 0, nr_passive_slot_arrival_ns(job.absolute_slot));
+    /* core pool: DECODE class for the probes too: this consumer is serial, a probe that waited as RETRY would hold the real UL grants behind it */
+    nr_pool_site_acquire(NR_POOL_DECODE | NR_POOL_F_UL, 0, nr_passive_slot_arrival_ns(job.absolute_slot));
 
     NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
     if (!nr_cfg_epoch_work_current()) {
@@ -604,13 +604,13 @@ static void *ulq_capture_thread(void *arg)
     g_pool2[b].len = 0;
     pthread_mutex_unlock(&g_lock);
     uint32_t origin = 0, len = 0, origin2 = 0, len2 = 0;
-    nr_pool_site_acquire(NR_POOL_DECODE, 0, nr_passive_slot_arrival_ns(abs)); /* the copy gates the UL decode: a lease per copy, none across the wait below */
+    nr_pool_site_acquire(NR_POOL_DECODE | NR_POOL_F_UL, 0, nr_passive_slot_arrival_ns(abs)); /* the copy gates the UL decode: a lease per copy, none across the wait below */
     const bool ok = nr_pusch_passive_snapshot_copy(ue, (uint8_t)slot, (uint64_t)abs, g_pool[b].iq, cap, &origin, &len);
     nr_pool_site_release();
     bool ok2 = false;
     for (int w = 0; ok && want_next && w < 40; w++) { /* the next slot is produced 0.5 ms after the target slot: wait for it (<= 4 ms), once it exists copy once */
       if (atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_acquire) < abs + 1) { usleep(100); continue; }
-      nr_pool_site_acquire(NR_POOL_DECODE, 0, nr_passive_slot_arrival_ns(abs));
+      nr_pool_site_acquire(NR_POOL_DECODE | NR_POOL_F_UL, 0, nr_passive_slot_arrival_ns(abs));
       ok2 = nr_pusch_passive_snapshot_copy(ue, (uint8_t)((slot + 1) % ue->frame_parms.slots_per_frame), (uint64_t)(abs + 1), g_pool2[b].iq, cap, &origin2, &len2);
       nr_pool_site_release();
       break;

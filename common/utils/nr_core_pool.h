@@ -29,6 +29,9 @@
 extern "C" {
 #endif
 enum { NR_POOL_SCAN = 0, NR_POOL_DECODE, NR_POOL_RETRY, NR_POOL_DISC, NR_POOL_HOUSE, NR_POOL_NPRIO };
+/* OR into prio for first-pass UL decodes: the DECODE class keeps one more token for them than for DL (DL decode+low <= N-2, UL <= N-1), so a few DL
+ * consumers blocked in a GPU/driver call cannot take every token and starve the UL decode. */
+#define NR_POOL_F_UL 0x100
 #define NR_POOL_MAX_TOKENS 32
 #define NR_POOL_MAX_CELLS 16
 #define NR_POOL_WAIT_BINS 24 /* log2(us) histogram of the lease wait: bin b = [2^(b-1), 2^b) us, bin 0 = < 1 us */
