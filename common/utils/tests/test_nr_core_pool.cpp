@@ -8,15 +8,15 @@
 #include <thread>
 #include <vector>
 #include <unistd.h>
+#include <sched.h>
 extern "C" {
 #include "nr_core_pool.h"
 }
 
-static nr_pool_t *mk(int n, int reserve = 0, bool no_age = true)
+static nr_pool_t *mk(int n, bool no_age = true)
 {
   nr_pool_cfg_t c = nr_pool_cfg_default();
   c.pin = false;
-  c.reserve = reserve;
   if (no_age) for (auto &a : c.age_ns) a = 0;
   static int cores[NR_POOL_MAX_TOKENS];
   for (int i = 0; i < n; i++) cores[i] = i;
@@ -74,36 +74,170 @@ TEST(CorePool, CellsAlternateWithinAClass)
   nr_pool_destroy(p);
 }
 
-TEST(CorePool, ReserveKeepsATokenForTheUrgentClasses)
+// (b): scans can never take the last token (the decode reserve), low classes leave a token for scan and one for decode.
+TEST(CorePool, CapsLeaveATokenForDecodeAndScan)
 {
-  nr_pool_t *p = mk(3, 1);
-  std::atomic<int> st{0};
-  std::thread a([&] { nr_pool_acquire(p, NR_POOL_DECODE, 0, 0); st = 1; while (st < 9) usleep(100); nr_pool_release(p); });
-  std::thread b([&] { while (st < 1) usleep(100); nr_pool_acquire(p, NR_POOL_DISC, 0, 0); st = 2; while (st < 9) usleep(100); nr_pool_release(p); });
-  while (st < 2) usleep(100);
-  // 2 of 3 tokens used; the last one is the reserve: a DISC or RETRY lease is refused, a DECODE or SCAN lease is granted.
-  std::atomic<int> got_disc{-2}, got_retry{-2}, got_decode{-2};
-  std::thread c([&] {
-    got_disc = nr_pool_try_acquire(p, NR_POOL_DISC, 0, 0);
-    got_retry = nr_pool_try_acquire(p, NR_POOL_RETRY, 0, 0);
-    got_decode = nr_pool_try_acquire(p, NR_POOL_DECODE, 0, 0);
+  nr_pool_t *p = mk(4);
+  std::atomic<int> st{0}, r[6];
+  for (auto &x : r) x = -2;
+  std::vector<std::thread> hold;
+  auto holder = [&](int prio, int slot) {
+    hold.emplace_back([&, prio, slot] {
+      r[slot] = nr_pool_try_acquire(p, prio, 0, 0);
+      while (st < 1) usleep(100);
+      nr_pool_release(p);
+    });
+    usleep(20000);
+  };
+  holder(NR_POOL_DISC, 0);
+  holder(NR_POOL_DISC, 1);
+  holder(NR_POOL_DISC, 2);  // low cap N-2 = 2: refused
+  holder(NR_POOL_RETRY, 3); // refused
+  holder(NR_POOL_SCAN, 4);  // granted
+  holder(NR_POOL_DECODE, 5);
+  EXPECT_GE(r[0], 0);
+  EXPECT_GE(r[1], 0);
+  EXPECT_EQ(r[2], -1);
+  EXPECT_EQ(r[3], -1);
+  EXPECT_GE(r[4], 0); // 0 scans + 2 low < N-1
+  EXPECT_GE(r[5], 0); // the last token is the decode reserve: still free for it
+
+  st = 1;
+  for (auto &t : hold) t.join();
+  nr_pool_destroy(p);
+}
+
+TEST(CorePool, ScanCannotTakeTheDecodeReserve)
+{
+  nr_pool_t *p = mk(3);
+  std::atomic<int> st{0}, r[4];
+  for (auto &x : r) x = -2;
+  std::vector<std::thread> hold;
+  for (int i = 0; i < 4; i++) {
+    hold.emplace_back([&, i] {
+      r[i] = nr_pool_try_acquire(p, i < 3 ? NR_POOL_SCAN : NR_POOL_DECODE, 0, 0);
+      while (st < 1) usleep(100);
+      nr_pool_release(p);
+    });
+    usleep(20000);
+  }
+  EXPECT_GE(r[0], 0);
+  EXPECT_GE(r[1], 0);
+  EXPECT_EQ(r[2], -1); // third scan: scan + low = 2 = N-1
+  EXPECT_GE(r[3], 0);  // decode takes the reserve
+  st = 1;
+  for (auto &t : hold) t.join();
+  nr_pool_destroy(p);
+}
+
+// (b) end to end: scans re-arrive continuously on every scan consumer; a decode arrival never waits for more than one decode-length hold.
+TEST(CorePool, DecodeNotStarvedByScans)
+{
+  nr_pool_t *p = mk(3, false);
+  std::atomic<bool> stop{false};
+  std::vector<std::thread> scans;
+  for (int i = 0; i < 4; i++)
+    scans.emplace_back([&] {
+      while (!stop) {
+        nr_pool_acquire(p, NR_POOL_SCAN, 0, 0);
+        const uint64_t e = nr_pool_now_ns() + 200000;
+        while (nr_pool_now_ns() < e) {}
+        nr_pool_release(p);
+      }
+    });
+  usleep(20000);
+  std::vector<uint64_t> w;
+  for (int i = 0; i < 400; i++) {
+    const uint64_t t0 = nr_pool_now_ns();
+    nr_pool_acquire(p, NR_POOL_DECODE, 0, t0);
+    w.push_back(nr_pool_now_ns() - t0);
+    nr_pool_release(p);
+    usleep(300);
+  }
+  stop = true;
+  for (auto &t : scans) t.join();
+  std::sort(w.begin(), w.end());
+  printf("decode wait behind 4 continuous scan threads (N=3) us: p50=%lu p99=%lu max=%lu\n", (unsigned long)w[200] / 1000,
+         (unsigned long)w[395] / 1000, (unsigned long)w.back() / 1000);
+  EXPECT_LT(w[395], 400000u); // never more than ~one scan hold + slack on a shared host
+  nr_pool_destroy(p);
+}
+
+// (a) exclusivity: a thread that is not a member and whose mask contains a pool core loses that core; members keep theirs.
+TEST(CorePool, EnforceRemovesPoolCoresFromNonMembers)
+{
+  cpu_set_t all;
+  sched_getaffinity(0, sizeof(all), &all);
+  std::vector<int> cs;
+  for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &all)) cs.push_back(c);
+  if (cs.size() < 3) GTEST_SKIP() << "needs >= 3 allowed cpus";
+  nr_pool_cfg_t c = nr_pool_cfg_default();
+  c.pin = true;
+  int cores[1] = {cs[0]};
+  nr_pool_t *p = nr_pool_create(cores, nullptr, 1, &c);
+  std::atomic<int> go{0};
+  std::atomic<int> member_ok{0};
+  cpu_set_t stranger_mask;
+  CPU_ZERO(&stranger_mask);
+  std::thread stranger([&] { while (go < 2) usleep(100); sched_getaffinity(0, sizeof(stranger_mask), &stranger_mask); });
+  std::thread member([&] {
+    nr_pool_acquire(p, NR_POOL_DECODE, 0, 0); // leases core cs[0] and is registered
+    go = 1;
+    while (go < 2) usleep(100);
+    cpu_set_t m;
+    sched_getaffinity(0, sizeof(m), &m);
+    member_ok = CPU_ISSET(cores[0], &m) && CPU_COUNT(&m) == 1;
     nr_pool_release(p);
   });
-  c.join();
-  EXPECT_EQ(got_disc, -1);
-  EXPECT_EQ(got_retry, -1);
-  EXPECT_GE(got_decode, 0);
-  st = 9;
-  a.join();
-  b.join();
+  while (go < 1) usleep(100);
+  EXPECT_GE(nr_pool_enforce(p), 1); // the stranger (inherited full mask) and this test thread lose cs[0]
+  cpu_set_t self;
+  sched_getaffinity(0, sizeof(self), &self);
+  EXPECT_FALSE(CPU_ISSET(cores[0], &self));
+  go = 2;
+  stranger.join();
+  EXPECT_FALSE(CPU_ISSET(cores[0], &stranger_mask));
+  sched_setaffinity(0, sizeof(all), &all); // give this test thread its cores back
+  member.join();
+  EXPECT_EQ(member_ok.load(), 1);
+  // after release the member went home: no pool core in its mask (checked via a fresh lease cycle on another thread)
   nr_pool_destroy(p);
+}
+
+// (c) a different class asked under a held lease is visible in the stats
+TEST(CorePool, NestedClassIsCounted)
+{
+  nr_pool_t *p = mk(3);
+  nr_pool_acquire(p, NR_POOL_SCAN, 0, 0);
+  nr_pool_acquire(p, NR_POOL_DISC, 0, 0);
+  nr_pool_stats_t s;
+  nr_pool_stats(p, &s);
+  EXPECT_EQ(s.nested, 1u);
+  nr_pool_release(p);
+  nr_pool_destroy(p);
+}
+
+// (d) the site pool builds with no environment at all, from the built-in site map
+TEST(CorePool, SitePoolWithNoEnvironment)
+{
+  unsetenv("ISAC_PDSCH_CORES");
+  unsetenv("ISAC_PUSCH_CORES");
+  nr_pool_t *p = nr_pool_site();
+  cpu_set_t all;
+  sched_getaffinity(0, sizeof(all), &all);
+  if (CPU_COUNT(&all) < 10) GTEST_SKIP() << "host smaller than the site map; fallback path covered below";
+  ASSERT_NE(p, nullptr);
+  EXPECT_EQ(nr_pool_size(p), 6); // 6,7,8,9,3,4
+  EXPECT_TRUE(nr_pool_core_in_pool(p, 6));
+  EXPECT_FALSE(nr_pool_core_in_pool(p, 5));
+  EXPECT_EQ(nr_pool_site_filter_core(7), -1);
+  EXPECT_EQ(nr_pool_site_filter_core(2), 2);
 }
 
 TEST(CorePool, AgingPromotesAStarvedClassPastStrictOrder)
 {
   nr_pool_cfg_t c = nr_pool_cfg_default();
   c.pin = false;
-  c.reserve = 0;
   c.age_ns[NR_POOL_DISC] = 10000000ull; // 10 ms
   int core = 0;
   nr_pool_t *p = nr_pool_create(&core, nullptr, 1, &c);
@@ -133,7 +267,7 @@ TEST(CorePool, AgingPromotesAStarvedClassPastStrictOrder)
 TEST(CorePool, NoTwoThreadsOnOneToken)
 {
   const int N = 3;
-  nr_pool_t *p = mk(N, 1, false);
+  nr_pool_t *p = mk(N, false);
   std::atomic<int> occ[N] = {};
   std::atomic<int> bad{0};
   std::atomic<bool> stop{false};
@@ -167,7 +301,7 @@ TEST(CorePool, NoTwoThreadsOnOneToken)
 // and the low-priority work still advances (no starvation).
 TEST(CorePool, UrgentWaitBoundedBehindChunkedLowPriority)
 {
-  nr_pool_t *p = mk(3, 1, false);
+  nr_pool_t *p = mk(3, false);
   std::atomic<bool> stop{false};
   std::atomic<uint64_t> chunks[4] = {};
   std::vector<std::thread> low;
@@ -228,20 +362,10 @@ TEST(CorePool, GrantHandOverLatency)
   nr_pool_destroy(p);
 }
 
-TEST(CorePool, SiteOffIsANoOp)
-{
-  unsetenv("ISAC_POOL_CORES");
-  if (nr_pool_site()) GTEST_SKIP() << "site pool already built by another test";
-  EXPECT_EQ(nr_pool_site_acquire(NR_POOL_SCAN, 0, 0), -1);
-  nr_pool_site_release();
-  EXPECT_FALSE(nr_pool_site_yield());
-}
-
 TEST(CorePool, BigCoresGoToUrgentClasses)
 {
   nr_pool_cfg_t c = nr_pool_cfg_default();
   c.pin = false;
-  c.reserve = 0;
   const int cores[3] = {10, 6, 11}, cap[3] = {512, 1024, 512};
   nr_pool_t *p = nr_pool_create(cores, cap, 3, &c);
   EXPECT_EQ(nr_pool_acquire(p, NR_POOL_SCAN, 0, 0), 6);

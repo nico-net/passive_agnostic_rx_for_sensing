@@ -62,7 +62,7 @@ void nr_core_float_enter(void);
 /* nr_env_core: getenv for the site core lists, with the on-air (t26yE) site map as the default when unset. */
 static inline const char *nr_env_core(const char *name)
 {
-  static const char *const dflt[][2] = {{"ISAC_PDSCH_CORES", "7,3,4,0,1"}, {"ISAC_PUSCH_CORES", "8,9"}, {"ISAC_GPU_WORKER_CORE", "10"},
+  static const char *const dflt[][2] = {{"ISAC_PDSCH_CORES", "6,7,8,9,3,4"}, {"ISAC_PUSCH_CORES", "8,9"}, {"ISAC_GPU_WORKER_CORE", "10"},
                                         {"ISAC_UHD_CTRL_CORES", "15"}, {"ISAC_PDCCH_USS_CORE", "12"}, {"ISAC_PDCCH_NID_GPU_CORE", "13"}};
   const char *e = getenv(name);
   for (unsigned i = 0; !e && i < sizeof(dflt) / sizeof(dflt[0]); i++)

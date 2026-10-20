@@ -255,10 +255,12 @@ bool has_cap_sys_nice(void)
  *   With SYS_NICE capability it uses SCHED_OAI at the given priority (0 means SCHED_OTHER); without it the thread uses SCHED_OTHER and is pinned only through the plan. The name is set best-effort (a vanished thread is a warning, not a fatal error).
  *   Callers: about 48 thread start sites across the PHY, the PDCCH/PUSCH/PDSCH queues, the USRP ring and the shutdown code.
  */
+extern int nr_pool_site_filter_core(int) __attribute__((weak));
 void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name, int affinity, int priority)
 {
   int ret;
   bool set_prio = has_cap_sys_nice();
+  if (nr_pool_site_filter_core) affinity = nr_pool_site_filter_core(affinity); /* a pool core belongs to the pool: no other thread is pinned there */
 
   pthread_attr_t attr;
   ret=pthread_attr_init(&attr);
