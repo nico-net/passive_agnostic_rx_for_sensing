@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "common/utils/nr_core_plan.h"
 #include "nr_passive_ue_ctx.h"
+#include "nr_passive_reconf_rules.h"
 #include <inttypes.h>
 #include <math.h>
 #include <pthread.h>
@@ -11,7 +12,7 @@
 #include <time.h>
 
 typedef enum { EV_OBS, EV_PARAM, EV_ANCHOR, EV_EPOCH, EV_SIB1, EV_CSI, EV_TICK,
-               EV_UL_GRANT, EV_UL_FEEDBACK, EV_UL_TA } kind_t;
+               EV_UL_GRANT, EV_UL_FEEDBACK, EV_UL_TA, EV_MSG3, EV_MSG4, EV_RRC } kind_t;
 typedef struct {
   kind_t kind;
   uint64_t ns;
@@ -31,7 +32,23 @@ typedef struct {
   uint64_t last_activity_ns, pending_ns;
   int64_t pending_slot;
   uint64_t pending_params;
+  uint64_t inferred_hint;      /* params downgraded to HINT by an inferred reconfiguration: still count as trusted for the reconfiguration grouping */
+  /* re-attachment evidence (nr_passive_reconf_rules.h) */
+  uint32_t n_events;           /* events seen by this incarnation; 0 = freshly created by the event being handled */
+  bool attach_open;            /* created by a RAR / Msg4: the next Msg4 completes it instead of replacing it */
+  uint64_t attach_ns;
+  bool msg3_valid;
+  uint64_t msg3;
+  struct { bool v; uint8_t ndi; int tbs; } hq[16];
+  uint8_t hq_viol_n;
+  uint16_t hq_viol_mask;
+  uint64_t hq_viol_ns;
+  int64_t rrc_eff_slot;        /* -1 none */
+  int rrc_kind;
 } entry_t;
+static int cur_mu=1; /* numerology of the observed cell, from the grants */
+static int64_t latest_slot; /* newest event slot: the clock of the RRC windows */
+static uint32_t rrc_pending;
 static ring_slot_t *ring;
 static entry_t *entries;
 static int16_t active_index[UINT16_MAX + 1];
@@ -101,18 +118,19 @@ static const char *param_name[NR_UEP_COUNT] = {
   "RNTI_CLASS","ANCHOR","CORESET","DCI_LEN_DL","DCI_LEN_UL","DCI_LEN_STATE",
   "PDCCH_SCR_ID","PDSCH_SCR_ID","TD_WINNER","TD_STATE","MCS_TABLE","DMRS_CFG",
   "MAX_LAYERS","LBRM","BWP","PUSCH_LAYOUT","SIB1_HASH","SIB1_BWP",
-  "SIB1_TDRA_HASH","APERIODIC_CSI"
+  "SIB1_TDRA_HASH","APERIODIC_CSI","UE_ID","REATTACH","RESUME_OF"
 };
-static const char *state_name[] = {"FIRST_SEEN","ACTIVE","IDLE","GONE"};
+static const char *state_name[] = {"FIRST_SEEN","ACTIVE","IDLE","GONE","INACTIVE"};
 static const char *verif_name[] = {"TRUSTED","HINT","SUSPECT"};
 static const char *cause_name[] = {
   "FIRST_LEARNED","CONVERGED","RELOCK","REOPENED_NEW_WINNER","BWP_CHANGE",
-  "CORESET_CHANGE","EPOCH_REVERIFIED","EPOCH_DISCARDED","HARD_RESET"
+  "CORESET_CHANGE","EPOCH_REVERIFIED","EPOCH_DISCARDED","HARD_RESET",
+  "REATTACH_RAR","REATTACH_MSG4","REATTACH_HARQ","REATTACH_DCI_SIZE","RESUME_LINK","RRC_WINDOW"
 };
 static uint8_t source_for_param(nr_ue_param_t p)
 {
   if(p>=NR_UEP_SIB1_HASH && p<=NR_UEP_SIB1_TDRA_HASH) return NR_UES_SIB1;
-  if(p==NR_UEP_ANCHOR) return NR_UES_RAR;
+  if(p==NR_UEP_ANCHOR || p==NR_UEP_UE_ID || p==NR_UEP_REATTACH || p==NR_UEP_RESUME_OF) return NR_UES_RAR;
   if(p==NR_UEP_BWP) return NR_UES_BWP;
   if(p==NR_UEP_TD_WINNER || p==NR_UEP_TD_STATE || p==NR_UEP_MCS_TABLE || p==NR_UEP_DMRS_CFG)
     return NR_UES_SWEEP;
@@ -121,7 +139,14 @@ static uint8_t source_for_param(nr_ue_param_t p)
 }
 static void json_int(int64_t v) { if (v < 0) fputs("null", output); else fprintf(output, "%" PRId64, v); }
 static void json_float(double v) { if (isfinite(v)) fprintf(output, "%.8g", v); else fputs("null", output); }
-static void line_done(void) { if (!ferror(output)) atomic_fetch_add_explicit(&written, 1, memory_order_relaxed); }
+/* The file is bounded: past nr_ue_ctx_test_file_cap bytes (512 MiB; settable by tests) the output moves to /dev/null and every later line is counted as dropped. */
+int64_t nr_ue_ctx_test_file_cap = 512ll << 20;
+static bool file_capped;
+static void line_done(void)
+{
+  if (file_capped) atomic_fetch_add_explicit(&dropped, 1, memory_order_relaxed);
+  else if (!ferror(output)) atomic_fetch_add_explicit(&written, 1, memory_order_relaxed);
+}
 static void snapshot(entry_t *e, uint64_t ns)
 {
   nr_ue_ctx_t *c = &e->ctx;
@@ -227,7 +252,7 @@ static void change(entry_t *e,nr_ue_param_t p,int64_t old,int64_t value,int caus
           epoch,c->identity_gen,c->rnti,c->incarnation,param_name[p]);
   json_int(old); fputs(",\"new\":",output); json_int(value);
   fprintf(output,",\"cause\":\"%s\",\"evidence\":",
-          cause>=0 && cause<=NR_UEC_HARD_RESET?cause_name[cause]:"FIRST_LEARNED");
+          cause>=0 && cause<=NR_UEC_RRC_WINDOW?cause_name[cause]:"FIRST_LEARNED");
   if(p==NR_UEP_APERIODIC_CSI && evidence>=0) {
     const uint64_t bits=(uint64_t)evidence;
     fprintf(output,"{\"row\":%u,\"freq_domain\":%u,\"start_rb\":%u,\"nr_of_rbs\":%u,\"symb_l0\":%u,\"scramb_id\":%u}",
@@ -241,6 +266,7 @@ static void init_entry(entry_t *e,uint16_t rnti,uint16_t incarnation,uint64_t ns
 {
   if(nr_pusch_passive_ul_ids_reset) nr_pusch_passive_ul_ids_reset(rnti);
   memset(e,0,sizeof(*e));
+  e->rrc_eff_slot=-1;
   e->used=true; e->ctx.rnti=rnti; e->ctx.incarnation=incarnation;
   e->ctx.identity_gen=identity; e->ctx.state=NR_UE_FIRST_SEEN; e->last_activity_ns=ns;
   e->ctx.ul.dl_bwp_prior=-1;
@@ -293,6 +319,9 @@ static void ul_dl_prior(entry_t *e,nr_ue_ul_field_t field,int64_t value)
   if(v->evidence<=NR_UL_EVID_DL_PRIOR)
     *v=(nr_ue_ul_value_t){.value=value,.evidence=NR_UL_EVID_DL_PRIOR,.epoch=epoch};
 }
+static const nr_ue_param_t rrc_params_inferred[]={NR_UEP_CORESET,NR_UEP_DCI_LEN_DL,NR_UEP_DCI_LEN_UL,NR_UEP_PDCCH_SCR_ID,NR_UEP_PDSCH_SCR_ID,NR_UEP_TD_WINNER,
+                                                  NR_UEP_MCS_TABLE,NR_UEP_DMRS_CFG,NR_UEP_MAX_LAYERS,NR_UEP_BWP,NR_UEP_PUSCH_LAYOUT};
+static void infer_reconfiguration(entry_t *e,nr_ue_param_t changed,int64_t slot);
 static void param(entry_t *e,nr_ue_param_t p,int64_t value,nr_ue_verif_t verif,
                   int cause,int64_t slot,uint64_t ns,int64_t evidence)
 {
@@ -306,13 +335,15 @@ static void param(entry_t *e,nr_ue_param_t p,int64_t value,nr_ue_verif_t verif,
     /* Cell-common SIB1 facts and RNTI anchor/class changes are logged, but are not evidence of
      * a dedicated UE reconfiguration. The epoch authority handles cell-common changes. */
     if(p!=NR_UEP_APERIODIC_CSI && p!=NR_UEP_RNTI_CLASS && p!=NR_UEP_ANCHOR &&
+       p!=NR_UEP_UE_ID && p!=NR_UEP_REATTACH && p!=NR_UEP_RESUME_OF &&
        (p<NR_UEP_SIB1_HASH || p>NR_UEP_SIB1_TDRA_HASH) &&
        p!=NR_UEP_TD_STATE && p!=NR_UEP_DCI_LEN_STATE &&
-       old>=0 && v->verif==NR_UEV_TRUSTED && verif==NR_UEV_TRUSTED) {
+       old>=0 && (v->verif==NR_UEV_TRUSTED || (e->inferred_hint>>p & 1)) && verif==NR_UEV_TRUSTED) {
       if(e->pending_params && ns>=e->pending_ns && ns-e->pending_ns>2000000000ull) flush_reconfig(e);
       if(!e->pending_params) {e->pending_ns=ns; e->pending_slot=slot;}
       else if(e->pending_slot<0 && slot>=0) e->pending_slot=slot;
       e->pending_params|=1ull<<p;
+      infer_reconfiguration(e,p,slot);
     }
     v->first_abs_slot=slot;
   } else if(v->verif==NR_UEV_HINT && verif==NR_UEV_TRUSTED) {
@@ -320,6 +351,7 @@ static void param(entry_t *e,nr_ue_param_t p,int64_t value,nr_ue_verif_t verif,
   } else if(v->verif!=verif && verif==NR_UEV_SUSPECT) {
     change(e,p,old,value,cause,slot,ns,evidence);
   }
+  if(verif==NR_UEV_TRUSTED) e->inferred_hint&=~(1ull<<p);
   v->value=value; v->verif=verif; v->epoch_learned=epoch;
   if(verif==NR_UEV_TRUSTED) v->last_confirmed_abs_slot=slot;
   v->source=source_for_param(p);
@@ -333,6 +365,14 @@ static void param(entry_t *e,nr_ue_param_t p,int64_t value,nr_ue_verif_t verif,
 }
 static float ema(float old,float v)
 { return isfinite(v)?(isfinite(old)?old*0.875f+v*0.125f:v):old; }
+/* TC-RNTI -> C-RNTI without any Msg4 (TS 38.321 5.1.5: the TC-RNTI becomes the C-RNTI on successful contention resolution): a TC-RNTI that is then
+ * scheduled with a C-RNTI-class grant, or a dedicated-format DCI (1_1/0_1, UE-specific), has completed contention resolution. The Msg4 identity is only a
+ * confirmation. */
+static void promote_tc(entry_t *e,int64_t slot,uint64_t ns)
+{
+  param(e,NR_UEP_RNTI_CLASS,0 /* NR_BLIND_RNTI_CLASS_C */,NR_UEV_TRUSTED,NR_UEC_CONVERGED,slot,ns,-1);
+  e->attach_open=false;
+}
 static void observe(entry_t *e,const nr_passive_obs_t *o,uint64_t ns)
 {
   nr_ue_ctx_t *c=&e->ctx; nr_ue_stats_t *s=&c->st;
@@ -366,8 +406,11 @@ static void observe(entry_t *e,const nr_passive_obs_t *o,uint64_t ns)
     s->prb_size_mean=isfinite(s->prb_size_mean)?s->prb_size_mean+((double)o->nb_rb-s->prb_size_mean)/n:o->nb_rb;
   }
   s->last_abs_slot=o->abs_slot;
+  if(o->scs_khz>=15) cur_mu=__builtin_ctz((unsigned)o->scs_khz/15u);
   if(o->rnti_class>=0 && c->cfg[NR_UEP_RNTI_CLASS].value<0)
     param(e,NR_UEP_RNTI_CLASS,o->rnti_class,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,o->abs_slot,ns,-1);
+  else if(o->rnti_class==0 && c->cfg[NR_UEP_RNTI_CLASS].value==1)
+    promote_tc(e,o->abs_slot,ns);
 }
 static void age(uint64_t ns)
 {
@@ -377,8 +420,141 @@ static void age(uint64_t ns)
        ns-e->pending_ns>=2000000000ull) flush_reconfig(e);
     if(!e->used || e->ctx.state==NR_UE_GONE || ns<e->last_activity_ns) continue;
     uint64_t delta=ns-e->last_activity_ns;
-    if(delta>=60000000000ull) {flush_reconfig(e); e->ctx.state=NR_UE_GONE; active_index[e->ctx.rnti]=-1; snapshot(e,ns);}
-    else if(delta>=10000000000ull && e->ctx.state==NR_UE_ACTIVE) {e->ctx.state=NR_UE_IDLE; snapshot(e,ns);}
+    if(delta>=NR_RECONF_GONE_NS) {flush_reconfig(e); e->ctx.state=NR_UE_GONE; active_index[e->ctx.rnti]=-1; snapshot(e,ns);}
+    else if(delta>=NR_RECONF_INACTIVE_NS && e->ctx.state==NR_UE_ACTIVE) {
+      /* a UE known by a resume identity has used RRC_INACTIVE before (TS 38.331 5.3.13); every other silent UE is IDLE or in DRX */
+      e->ctx.state=(e->ctx.cfg[NR_UEP_UE_ID].value>>48)==NR_RECONF_ID_RESUME ? NR_UE_INACTIVE : NR_UE_IDLE;
+      snapshot(e,ns);
+    }
+  }
+}
+
+/* ---- re-attachment (TS 38.321 5.1.5 contention resolution, 5.3.2.2 NDI), RRC delay (TS 38.331 12) ---- */
+/* Retire the live incarnation of rnti (a different UE now uses the value) and open the next one; returns it (NULL: table full). */
+static entry_t *reattach(entry_t *old,int cause,int64_t slot,uint64_t ns)
+{
+  const uint16_t rnti=old->ctx.rnti;
+  const int64_t prev=((int64_t)rnti<<16)|old->ctx.incarnation;
+  flush_reconfig(old);
+  old->ctx.state=NR_UE_GONE; active_index[rnti]=-1; snapshot(old,ns);
+  entry_t *n=find_entry(rnti,ns,true);
+  if(!n) return NULL;
+  n->attach_open=cause==NR_UEC_REATTACH_RAR || cause==NR_UEC_REATTACH_MSG4; n->attach_ns=ns;
+  param(n,NR_UEP_REATTACH,prev,NR_UEV_TRUSTED,cause,slot,ns,-1);
+  return n;
+}
+/* TS 38.321 5.3.2.2: a DL assignment with an untoggled NDI is a retransmission. Two HARQ processes that each decode (CRC pass) a DIFFERENT TBS
+ * under an untoggled NDI within NR_RECONF_HQ_WINDOW_NS mean the HARQ entity was reset: a new UE on a reused RNTI. */
+static bool hq_discontinuity(entry_t *e,const nr_passive_obs_t *o,uint64_t ns)
+{
+  if(o->dir!=NR_OBS_DIR_DL || o->crc!=NR_OBS_CRC_OK || o->harq_pid<0 || o->harq_pid>15 || (o->ndi!=0 && o->ndi!=1) || o->tbs<=0) return false;
+  bool hit=false;
+  if(nr_reconf_hq_discontinuity(e->hq[o->harq_pid].v,e->hq[o->harq_pid].ndi,e->hq[o->harq_pid].tbs,(uint8_t)o->ndi,o->tbs)) {
+    if(ns-e->hq_viol_ns>NR_RECONF_HQ_WINDOW_NS) {e->hq_viol_mask=0;}
+    e->hq_viol_ns=ns; e->hq_viol_mask|=(uint16_t)(1u<<o->harq_pid);
+    hit=__builtin_popcount(e->hq_viol_mask)>=NR_RECONF_HQ_VIOLATIONS;
+  }
+  return hit;
+}
+static void hq_store(entry_t *e,const nr_passive_obs_t *o)
+{
+  if(o->dir==NR_OBS_DIR_DL && o->crc==NR_OBS_CRC_OK && o->harq_pid>=0 && o->harq_pid<16 && (o->ndi==0 || o->ndi==1) && o->tbs>0) {
+    e->hq[o->harq_pid].v=true; e->hq[o->harq_pid].ndi=(uint8_t)o->ndi; e->hq[o->harq_pid].tbs=o->tbs;
+  }
+}
+static entry_t *find_by_id(int64_t packed,const entry_t *skip)
+{
+  entry_t *best=NULL;
+  for(int i=0;i<NR_UECTX_MAX_UE;i++) {
+    entry_t *x=&entries[i];
+    if(x!=skip && x->used && x->ctx.identity_gen==identity && x->ctx.cfg[NR_UEP_UE_ID].value==packed &&
+       (!best || x->last_activity_ns>best->last_activity_ns)) best=x;
+  }
+  return best;
+}
+/* Msg3 seen on a TC-RNTI: remember its 48-bit CCCH SDU for the contention-resolution check. */
+static void on_msg3(const event_t *v,uint64_t ns)
+{
+  entry_t *e=find_entry(v->rnti,ns,true);
+  if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); return;}
+  e->msg3=(uint64_t)v->value; e->msg3_valid=true; e->n_events++;
+}
+/* Msg4 with a UE Contention Resolution Identity: the TC-RNTI is now this UE's C-RNTI (TS 38.321 5.1.5). */
+static void on_msg4(const event_t *v,uint64_t ns)
+{
+  entry_t *e=find_entry(v->rnti,ns,true);
+  if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); return;}
+  /* A Msg4 starts an attachment: when the incarnation was not opened by this attachment's RAR (or earlier Msg4) and already has history, the RNTI was
+   * reused by a new UE. */
+  if(!(e->attach_open && ns-e->attach_ns<2000000000ull) && e->n_events>0) {
+    const bool msg3_kept=e->msg3_valid; const uint64_t m3=e->msg3;
+    e=reattach(e,NR_UEC_REATTACH_MSG4,v->slot,ns);
+    if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); return;}
+    e->msg3_valid=msg3_kept; e->msg3=m3; /* a Msg3 heard after the RAR belongs to this attachment */
+  }
+  e->n_events++; e->last_activity_ns=ns;
+  if(e->msg3_valid && e->msg3!=(uint64_t)v->value) e->msg3_valid=false; /* the Msg3 we heard lost the contention: its owner is not the winner */
+  uint8_t cr[6]; nr_reconf_unpack48((uint64_t)v->value,cr);
+  nr_reconf_id_t id;
+  if(nr_reconf_ccch_identity(cr,&id)) {
+    const int64_t packed=((int64_t)id.kind<<48)|(int64_t)id.value;
+    param(e,NR_UEP_UE_ID,packed,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,v->slot,ns,-1);
+    if(nr_reconf_id_linkable(&id)) {
+      const entry_t *prev=find_by_id(packed,e);
+      if(prev) param(e,NR_UEP_RESUME_OF,((int64_t)prev->ctx.rnti<<16)|prev->ctx.incarnation,NR_UEV_TRUSTED,NR_UEC_RESUME_LINK,v->slot,ns,-1);
+    }
+  }
+  param(e,NR_UEP_RNTI_CLASS,0 /* NR_BLIND_RNTI_CLASS_C */,NR_UEV_TRUSTED,NR_UEC_CONVERGED,v->slot,ns,-1);
+  e->attach_open=false;
+}
+/* RRC-free primary path (NSA cells show no RRCSetup / RRCReconfiguration): a dedicated parameter that changed under traffic (DCI size, layout, TD winner,
+ * MCS table ...) is the observable moment an RRCReconfiguration took effect. TS 38.331 12: it was received at most the processing delay earlier, so the
+ * window [slot - delay, slot] holds evidence of both configurations. The other dedicated parameters of the same UE came with the same message: they are
+ * re-verified (HINT) now, and the PDCCH monitor's per-RNTI re-lock runs accelerated from this slot (nr_reconf_rrc_phase ARMED). */
+static void infer_reconfiguration(entry_t *e,nr_ue_param_t changed,int64_t slot)
+{
+  if(slot<0) return;
+  const int d=nr_reconf_rrc_delay_slots(NR_RECONF_RRC_RECONF,cur_mu,false);
+  if(d>=0) nr_reconf_rrc_expect(e->ctx.rnti,slot-d,NR_RECONF_RRC_RECONF,cur_mu,false); /* effective slot = the observed change */
+  for(unsigned k=0;k<sizeof(rrc_params_inferred)/sizeof(rrc_params_inferred[0]);k++) {
+    nr_ue_cfg_value_t *v=&e->ctx.cfg[rrc_params_inferred[k]];
+    if(rrc_params_inferred[k]!=changed && v->value>=0 && v->verif==NR_UEV_TRUSTED) {v->verif=NR_UEV_HINT; e->inferred_hint|=1ull<<rrc_params_inferred[k];}
+  }
+}
+/* An RRC message (read, or its MAC header seen) reached rnti: after the TS 38.331 12 processing delay its dedicated configuration may differ. Parameters learned
+ * before are re-verified (HINT) and the epoch authority is told at that moment, not at reception. */
+static void on_rrc(const event_t *v,uint64_t ns)
+{
+  entry_t *e=find_entry(v->rnti,ns,true);
+  if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); return;}
+  const int d=nr_reconf_rrc_delay_slots((nr_reconf_rrc_kind_t)v->cause,v->p,false);
+  if(d<0 || v->slot<0) return;
+  if(e->rrc_eff_slot<0) rrc_pending++;
+  e->rrc_eff_slot=v->slot+d; e->rrc_kind=v->cause; e->n_events++; e->last_activity_ns=ns;
+}
+static void rrc_fire(uint64_t ns)
+{
+  if(!rrc_pending) return;
+  for(int i=0;i<NR_UECTX_MAX_UE;i++) {
+    entry_t *e=&entries[i];
+    if(!e->used || e->rrc_eff_slot<0 || latest_slot<e->rrc_eff_slot) continue;
+    nr_ue_ctx_t *c=&e->ctx; uint64_t mask=0;
+    for(unsigned k=0;k<sizeof(rrc_params_inferred)/sizeof(rrc_params_inferred[0]);k++) {
+      nr_ue_cfg_value_t *v=&c->cfg[rrc_params_inferred[k]];
+      if(v->value>=0 && v->verif==NR_UEV_TRUSTED) {v->verif=NR_UEV_HINT; mask|=1ull<<rrc_params_inferred[k];}
+    }
+    const int64_t eff=e->rrc_eff_slot;
+    e->rrc_eff_slot=-1; rrc_pending--;
+    if(c->state==NR_UE_GONE) continue;
+    flush_reconfig(e);
+    fprintf(output,"{\"schema\":\"uectx/1\",\"type\":\"ue_reconfig\",\"t_mono_ns\":%" PRIu64 ",\"abs_slot\":%" PRId64
+                   ",\"epoch\":%u,\"identity_gen\":%u,\"rnti\":%u,\"incarnation\":%u,\"params\":[",
+            ns,eff,epoch,c->identity_gen,c->rnti,c->incarnation);
+    bool comma=false;
+    for(int p=0;p<NR_UEP_COUNT;p++) if(mask & (1ull<<p)) {fprintf(output,"%s\"%s\"",comma?",":"",param_name[p]); comma=true;}
+    fputs("],\"class\":\"RRC_WINDOW_CLOSED\"}\n",output);
+    line_done(); c->n_reconfigs++;
+    if(nr_cfg_epoch_note_rnti_reopened) nr_cfg_epoch_note_rnti_reopened(c->rnti,true,(uint64_t)eff);
   }
 }
 static void ul_put(nr_ue_ul_state_t *s, nr_ue_ul_field_t f, int64_t value, uint8_t evidence)
@@ -481,25 +657,55 @@ static void handle(const event_t *v)
       }
       e->ctx.ul.ta_mu=(uint8_t)v->p;
     }
-  } else if(v->kind!=EV_TICK) {
+  } else if(v->kind==EV_MSG3) on_msg3(v,ns);
+  else if(v->kind==EV_MSG4) on_msg4(v,ns);
+  else if(v->kind==EV_RRC) on_rrc(v,ns);
+  else if(v->kind!=EV_TICK) {
     entry_t *e=find_entry(v->rnti,ns,true);
     if(e) {
+      if(v->kind==EV_OBS && hq_discontinuity(e,&v->obs,ns)) e=reattach(e,NR_UEC_REATTACH_HARQ,v->slot,ns); /* TS 38.321 5.3.2.2 */
+      /* A DCI size change after the RNTI went silent is a new attachment, not a reconfiguration (a reconfiguration needs DL traffic, which would have
+       * kept the RNTI sighted): the gap is NR_RECONF_REATTACH_GAP_NS..NR_RECONF_REUSE_NS. */
+      if(e && v->kind==EV_PARAM && (v->p==NR_UEP_DCI_LEN_DL || v->p==NR_UEP_DCI_LEN_UL) && v->verif==NR_UEV_TRUSTED &&
+         e->ctx.cfg[v->p].value>=0 && e->ctx.cfg[v->p].value!=v->value && e->ctx.cfg[v->p].verif==NR_UEV_TRUSTED &&
+         ns>e->last_activity_ns && ns-e->last_activity_ns>=NR_RECONF_REATTACH_GAP_NS && ns-e->last_activity_ns<=NR_RECONF_REUSE_NS)
+        e=reattach(e,NR_UEC_REATTACH_DCI_SIZE,v->slot,ns);
+      if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); goto done;}
       if(v->kind==EV_PARAM || v->kind==EV_ANCHOR || v->kind==EV_CSI) e->last_activity_ns=ns;
-      if(v->kind==EV_OBS) observe(e,&v->obs,ns);
-      else if(v->kind==EV_PARAM) param(e,(nr_ue_param_t)v->p,v->value,v->verif,v->cause,v->slot,ns,-1);
+      e->n_events++;
+      if(v->kind==EV_OBS) {
+        hq_store(e,&v->obs);
+        observe(e,&v->obs,ns);
+      }
+      else if(v->kind==EV_PARAM) {
+        if((v->p==NR_UEP_DCI_LEN_DL || v->p==NR_UEP_DCI_LEN_UL) && e->ctx.cfg[NR_UEP_RNTI_CLASS].value==1) promote_tc(e,v->slot,ns);
+        param(e,(nr_ue_param_t)v->p,v->value,v->verif,v->cause,v->slot,ns,-1);
+      }
       else if(v->kind==EV_ANCHOR) {
-        if(e->ctx.state==NR_UE_IDLE) {
-          e->ctx.state=NR_UE_GONE; active_index[e->ctx.rnti]=-1; snapshot(e,ns);
-          e=find_entry(v->rnti,ns,true);
+        /* RAR: a TC-RNTI is a NEW UE. An RNTI value that is still in use cannot be assigned again by the gNB (TS 38.321 7.1), so a context with history
+         * under that value belongs to a UE that has left (TS 38.321 5.1.4/5.1.5). */
+        if(e->n_events>1 && e->ctx.state!=NR_UE_GONE && !(e->attach_open && ns-e->attach_ns<2000000000ull)) { /* a repeated RAR decode is the same attachment */
+          e=reattach(e,NR_UEC_REATTACH_RAR,v->slot,ns);
+          if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); goto done;}
+          e->n_events++;
         }
-        if(e) param(e,NR_UEP_ANCHOR,v->value,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,v->slot,ns,-1);
+        e->attach_open=true; e->attach_ns=ns;
+        if(v->value==1) param(e,NR_UEP_RNTI_CLASS,1 /* TC */,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,v->slot,ns,-1);
+        param(e,NR_UEP_ANCHOR,v->value,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,v->slot,ns,-1);
       } else if(v->kind==EV_CSI)
         change(e,NR_UEP_APERIODIC_CSI,-1,v->value,NR_UEC_FIRST_LEARNED,v->slot,ns,v->extra);
     } else atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed);
   }
+done:
+  if(v->slot>latest_slot && v->kind!=EV_UL_TA) latest_slot=v->slot;
+  rrc_fire(ns);
   if(period_s>0 && (!last_period_ns || (ns>=last_period_ns && ns-last_period_ns>=(uint64_t)(period_s*1e9)))) {
     for(int i=0;i<NR_UECTX_MAX_UE;i++) if(entries[i].used && entries[i].ctx.state!=NR_UE_GONE) snapshot(&entries[i],ns);
     last_period_ns=ns;
+  }
+  if(!file_capped && ftell(output)>nr_ue_ctx_test_file_cap) {
+    FILE *nf=fopen("/dev/null","w");
+    if(nf) {fclose(output);output=nf;file_capped=true;}
   }
   pthread_mutex_unlock(&ctx_lock);
 }
@@ -551,7 +757,7 @@ bool nr_ue_ctx_open(const char *path,uint32_t ring_capacity,double snapshot_peri
   if(!r || !x) {free(r);free(x);fclose(f);return false;}
   free(entries);
   output=f; ring=r; entries=x; capacity=ring_capacity; head=0;
-  period_s=snapshot_period_s; last_period_ns=last_age_ns=0; epoch=identity=0;
+  period_s=snapshot_period_s; last_period_ns=last_age_ns=0; epoch=identity=0; file_capped=false; latest_slot=-1; rrc_pending=0;
   for(int i=0;i<=UINT16_MAX;i++) active_index[i]=-1;
   real_time_session=false;
   for(int i=0;i<3;i++) sib1_values[i]=-1;
@@ -676,6 +882,16 @@ void nr_ue_ctx_ul_ta_command(uint16_t rnti,int units,int mu,bool absolute)
   event_t e={.kind=EV_UL_TA,.ns=now_ns(),.rnti=rnti,.value=units,.p=mu,.cause=absolute?1:0};
   e.ul_ticket.epoch=nr_cfg_reconf_enabled()?nr_cfg_epoch_work_stamp():0;
   enqueue(&e);
+}
+void nr_ue_ctx_on_msg3(uint16_t rnti,uint64_t ccch48,int64_t slot)
+{ if(nr_ue_ctx_enabled() && rnti) {event_t e={.kind=EV_MSG3,.ns=now_ns(),.slot=slot,.rnti=rnti,.value=(int64_t)ccch48};enqueue(&e);} }
+void nr_ue_ctx_on_msg4(uint16_t rnti,uint64_t cr48,int64_t slot)
+{ if(nr_ue_ctx_enabled() && rnti) {event_t e={.kind=EV_MSG4,.ns=now_ns(),.slot=slot,.rnti=rnti,.value=(int64_t)cr48};enqueue(&e);} }
+void nr_ue_ctx_on_rrc(uint16_t rnti,int kind,int64_t rx_slot,int mu)
+{
+  if(rnti==0 || rx_slot<0) return;
+  nr_reconf_rrc_expect(rnti,rx_slot,(nr_reconf_rrc_kind_t)kind,mu,false); /* read lock-free by the PDCCH thread, even when the writer is off */
+  if(nr_ue_ctx_enabled()) {event_t e={.kind=EV_RRC,.ns=now_ns(),.slot=rx_slot,.rnti=rnti,.cause=kind,.p=mu};enqueue(&e);}
 }
 void nr_ue_ctx_stats(uint64_t *events,uint64_t *lines,uint64_t *drops)
 {if(events)*events=atomic_load(&pushed);if(lines)*lines=atomic_load(&written);if(drops)*drops=atomic_load(&dropped);}

@@ -430,6 +430,7 @@ def discover(run_dir):
         "label": _first(d, ("label.txt", "evidence.txt", "EVIDENCE")),
         "run_json": _first(d, ("run.json",)),
         "scan": _first(d, ("cells.json",)),
+        "uectx": _first(d, ("uectx.jsonl", "uectx_*.jsonl")),
     }
 
 
@@ -790,6 +791,40 @@ def config_view(run, flags):
             "env_groups": groups, "env_source": run.files.get("env") or ("/proc/<pid>/environ" if env is not None and run.live else None)}
 
 
+def uectx_summary(path, tail_bytes=8 << 20):
+    """uectx/1 JSON Lines written by the receiver: latest snapshot per (identity_gen, rnti, incarnation), event counts, last events."""
+    out = {"ues": [], "counts": {"ue_snapshot": 0, "ue_change": 0, "ue_reconfig": 0}, "recent": [], "incarnations": 0}
+    if not path or not os.path.exists(path):
+        return out
+    latest, recent = {}, []
+    with open(path, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        f.seek(max(0, size - tail_bytes))
+        if size > tail_bytes:
+            f.readline()  # drop the partial first line
+        for raw in f:
+            try:
+                r = json.loads(raw)
+            except ValueError:
+                continue
+            t = r.get("type")
+            if r.get("schema") != "uectx/1" or t not in out["counts"]:
+                continue
+            out["counts"][t] += 1
+            key = (r.get("identity_gen"), r.get("rnti"), r.get("incarnation"))
+            if t == "ue_snapshot":
+                latest[key] = r
+            else:
+                recent.append({k: r.get(k) for k in ("t_mono_ns", "type", "rnti", "incarnation", "param", "old", "new", "cause", "params", "class")})
+    for (g, rnti, inc), r in latest.items():
+        out["ues"].append({"identity_gen": g, "rnti": rnti, "incarnation": inc, "state": r.get("state"),
+                           "n_changes": r.get("n_changes"), "n_reconfigs": r.get("n_reconfigs")})
+    out["ues"].sort(key=lambda u: (u["rnti"] or 0, u["incarnation"] or 0))
+    out["incarnations"] = sum(1 for u in out["ues"] if (u["incarnation"] or 0) > 0)
+    out["recent"] = recent[-30:]
+    return out
+
+
 def scan_cells(paths):
     out = []
     for p in paths:
@@ -977,6 +1012,9 @@ def make_handler(mgr):
                 if mgr.primary and mgr.primary.files.get("scan"):
                     paths.append(mgr.primary.files["scan"])
                 return self._json({"cells": scan_cells(paths), "sources": paths})
+            if path == "/api/uectx":
+                run = mgr.resolve(q.get("run", "primary"))
+                return self._json(uectx_summary(run.files.get("uectx") if run else None))
             if path == "/api/flags":
                 return self._json(mgr.flags)
             return self._send(404, "not found", "text/plain")

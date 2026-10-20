@@ -1,3 +1,5 @@
+#include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_reconf_rules.h"
 #include "common/utils/nr_core_plan.h"
 #include "PHY/TOOLS/nr_stage_split.h"
 extern uint64_t *nr_ss_gpu_ptr(void);
@@ -422,6 +424,11 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     if (nr_ul_layout_is_tagged(&job.grant) && out.G > 0 && (out.status==NR_PUSCH_PASSIVE_OK || out.status==NR_PUSCH_PASSIVE_CRC_FAIL))
       nr_ul_layout_prior_note(&job.grant, out.status==NR_PUSCH_PASSIVE_OK, out.tbs_bytes*8u, out.n_segments, out.segments_ok,
                               job.absolute_slot, out.snr_db, (float)out.tbs_bytes*8.f*(float)out.qam_mod_order/(float)out.G);
+    if (out.status==NR_PUSCH_PASSIVE_OK && out.tb && out.tbs_bytes>=7) {
+      /* Msg3 (TS 38.321 5.1.5): the UL CCCH SDU is the 48 bits the Msg4 Contention Resolution Identity must repeat. */
+      uint8_t ccch[6];
+      if (nr_reconf_ulsch_ccch(out.tb,out.tbs_bytes,ccch)) nr_ue_ctx_on_msg3(job.grant.rnti,nr_reconf_pack48(ccch),(int64_t)job.absolute_slot);
+    }
     if (job.ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_OK) {
       nr_ue_ul_update_t confirmed=job.ul_update;
       confirmed.ta_samples=out.ta_applied_samples;

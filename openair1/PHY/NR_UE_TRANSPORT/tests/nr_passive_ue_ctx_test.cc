@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 #include "nr_passive_ue_ctx.h"
 #include "nr_passive_cfg_epoch.h"
+#include "nr_passive_reconf_rules.h"
+#include <sys/stat.h>
+#define NR_BLIND_RNTI_CLASS_TC_FOR_TEST 1
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -17,6 +20,8 @@ extern "C" void nr_cfg_epoch_note_rnti_reopened(uint16_t, bool, uint64_t) { ++re
 extern "C" bool nr_cfg_reconf_enabled(void) { return false; }
 extern "C" uint32_t nr_cfg_epoch_work_stamp(void) { return 0; }
 extern "C" int nr_ue_ctx_test_writer_pause_ms;
+extern "C" int64_t nr_ue_ctx_test_file_cap;
+static uint64_t nowns() { timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000000ull+t.tv_nsec; }
 
 class UeContext : public ::testing::Test {
  protected:
@@ -367,4 +372,173 @@ TEST(UeContextRing, CloseQuiescesConcurrentProducers) {
   uint64_t events=0,lines=0,drops=0; nr_ue_ctx_stats(&events,&lines,&drops);
   EXPECT_GT(events,0);
   EXPECT_GE(lines,1);
+}
+
+// ---- re-attachment, RRC window, INACTIVE (nr_passive_reconf_rules.h) ----
+static void put_bits(uint8_t *b,unsigned pos,unsigned n,uint64_t v) {
+  for(unsigned i=0;i<n;i++) { unsigned bit=(v>>(n-1-i))&1u,p=pos+i; b[p>>3]=(uint8_t)((b[p>>3]&~(0x80u>>(p&7)))|(bit?(0x80u>>(p&7)):0)); }
+}
+static uint64_t resume_ccch(uint32_t id) { uint8_t b[6]={0}; put_bits(b,1,2,1); put_bits(b,3,24,id); return nr_reconf_pack48(b); }
+static uint64_t stmsi_ccch(uint64_t id) { uint8_t b[6]={0}; put_bits(b,3,1,0); put_bits(b,4,39,id); return nr_reconf_pack48(b); }
+static nr_passive_obs_t harq_grant(uint16_t rnti,int pid,int ndi,int tbs,int64_t slot) {
+  nr_passive_obs_t o={}; o.rnti=rnti; o.dir=NR_OBS_DIR_DL; o.abs_slot=slot; o.t_mono_ns=nowns(); o.crc=NR_OBS_CRC_OK; o.mcs=4; o.nl=1;
+  o.nb_rb=20; o.start_rb=10; o.tbs=tbs; o.harq_pid=pid; o.ndi=ndi; o.rv=0; o.rnti_class=0;
+  o.snr_db=NAN; o.nvar=NAN; o.fo_comp_hz=NAN; o.delay_samples=NAN; return o;
+}
+TEST_F(UeContext, RarOnALiveRntiOpensANewIncarnationOnce) {
+  auto o=grant(0x2001,nowns(),100); nr_ue_ctx_on_obs(&o);
+  nr_ue_ctx_on_anchor(0x2001,NR_BLIND_RNTI_CLASS_TC_FOR_TEST,110);
+  nr_ue_ctx_on_anchor(0x2001,NR_BLIND_RNTI_CLASS_TC_FOR_TEST,111); // the same RAR decoded again is the same attachment
+  auto s=contents();
+  EXPECT_NE(s.find("\"param\":\"REATTACH\""),std::string::npos);
+  EXPECT_EQ(count(s,"\"cause\":\"REATTACH_RAR\""),1);
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2001,&c)); EXPECT_EQ(c.incarnation,1);
+}
+TEST_F(UeContext, RarOnAnUnseenRntiIsTheFirstIncarnation) {
+  nr_ue_ctx_on_anchor(0x2002,NR_BLIND_RNTI_CLASS_TC_FOR_TEST,110);
+  auto s=contents();
+  EXPECT_EQ(s.find("\"cause\":\"REATTACH_"),std::string::npos);
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2002,&c)); EXPECT_EQ(c.incarnation,0);
+}
+TEST_F(UeContext, Msg4ContentionResolutionPromotesTcToCAndRecordsTheIdentity) {
+  nr_ue_ctx_on_anchor(0x2003,NR_BLIND_RNTI_CLASS_TC_FOR_TEST,100);
+  const uint64_t id=resume_ccch(0x123456);
+  nr_ue_ctx_on_msg3(0x2003,id,101);
+  nr_ue_ctx_on_msg4(0x2003,id,105);
+  auto s=contents();
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2003,&c));
+  EXPECT_EQ(c.incarnation,0); // the RAR opened it, the Msg4 completes it
+  EXPECT_EQ(c.cfg[NR_UEP_UE_ID].value,((int64_t)NR_RECONF_ID_RESUME<<48)|0x123456);
+  EXPECT_EQ(c.cfg[NR_UEP_RNTI_CLASS].value,0);
+  EXPECT_NE(s.find("\"param\":\"RNTI_CLASS\""),std::string::npos);
+}
+TEST_F(UeContext, Msg4OnALiveRntiWithoutRarIsAReattach) {
+  auto o=grant(0x2004,nowns(),100); nr_ue_ctx_on_obs(&o);
+  nr_ue_ctx_on_msg4(0x2004,stmsi_ccch(77),110);
+  auto s=contents();
+  EXPECT_EQ(count(s,"\"cause\":\"REATTACH_MSG4\""),1);
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2004,&c)); EXPECT_EQ(c.incarnation,1);
+}
+TEST_F(UeContext, ResumeIdentityLinksTheReturningUeToItsEarlierContext) {
+  nr_ue_ctx_on_msg4(0x2005,resume_ccch(0xABC),100); // first attach, RNTI 0x2005
+  nr_ue_ctx_on_msg4(0x2006,resume_ccch(0xABC),900); // the same UE resumes on another RNTI
+  nr_ue_ctx_on_msg4(0x2007,resume_ccch(0xDEF),901); // a different UE: no link
+  nr_ue_ctx_on_msg4(0x2008,stmsi_ccch(5),902);      // S-TMSI part 1 is linkable too ...
+  nr_ue_ctx_on_msg4(0x2009,stmsi_ccch(5),903);
+  auto s=contents();
+  nr_ue_ctx_t a{},b{},d{},e{}; ASSERT_TRUE(nr_ue_ctx_get(0x2006,&a)); ASSERT_TRUE(nr_ue_ctx_get(0x2007,&b));
+  ASSERT_TRUE(nr_ue_ctx_get(0x2009,&d)); ASSERT_TRUE(nr_ue_ctx_get(0x2008,&e));
+  EXPECT_EQ(a.cfg[NR_UEP_RESUME_OF].value,((int64_t)0x2005<<16)|0);
+  EXPECT_LT(b.cfg[NR_UEP_RESUME_OF].value,0);
+  EXPECT_EQ(d.cfg[NR_UEP_RESUME_OF].value,((int64_t)0x2008<<16)|0);
+  EXPECT_LT(e.cfg[NR_UEP_RESUME_OF].value,0);
+  EXPECT_EQ(count(s,"\"cause\":\"RESUME_LINK\""),2);
+}
+TEST_F(UeContext, RandomIdentityIsNeverLinked) {
+  uint8_t b[6]={0}; put_bits(b,3,1,1); put_bits(b,4,39,9); const uint64_t rnd=nr_reconf_pack48(b);
+  nr_ue_ctx_on_msg4(0x2010,rnd,100); nr_ue_ctx_on_msg4(0x2011,rnd,101);
+  contents();
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2011,&c)); EXPECT_LT(c.cfg[NR_UEP_RESUME_OF].value,0);
+}
+TEST_F(UeContext, UntoggledNdiWithAnotherTbsOnTwoHarqProcessesIsANewUe) {
+  auto a=harq_grant(0x2020,0,1,8000,100), b=harq_grant(0x2020,1,0,8000,101); nr_ue_ctx_on_obs(&a); nr_ue_ctx_on_obs(&b);
+  auto a2=harq_grant(0x2020,0,1,12000,102); nr_ue_ctx_on_obs(&a2);        // one violation: not enough
+  auto b2=harq_grant(0x2020,1,0,9000,103); nr_ue_ctx_on_obs(&b2);         // second process: HARQ entity was reset
+  auto s=contents();
+  EXPECT_EQ(count(s,"\"cause\":\"REATTACH_HARQ\""),1);
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2020,&c)); EXPECT_EQ(c.incarnation,1);
+}
+TEST_F(UeContext, RetransmissionsAndToggledNdiAreNotAReattach) {
+  auto a=harq_grant(0x2021,0,1,8000,100), b=harq_grant(0x2021,0,1,8000,101), c2=harq_grant(0x2021,0,0,12000,102);
+  nr_ue_ctx_on_obs(&a); nr_ue_ctx_on_obs(&b); nr_ue_ctx_on_obs(&c2);
+  EXPECT_EQ(contents().find("\"cause\":\"REATTACH_"),std::string::npos);
+}
+TEST_F(UeContext, DciSizeChangeAfterSilenceIsAReattachButNotInTraffic) {
+  nr_ue_ctx_on_param(0x2030,NR_UEP_DCI_LEN_DL,44,NR_UEV_TRUSTED,NR_UEC_CONVERGED,100);
+  nr_ue_ctx_on_param(0x2030,NR_UEP_DCI_LEN_DL,46,NR_UEV_TRUSTED,NR_UEC_RELOCK,101); // in traffic: a reconfiguration, same UE
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  nr_ue_ctx_on_param(0x2030,NR_UEP_DCI_LEN_DL,52,NR_UEV_TRUSTED,NR_UEC_RELOCK,102); // after 300 ms of silence
+  auto s=contents();
+  EXPECT_EQ(count(s,"\"cause\":\"REATTACH_DCI_SIZE\""),1);
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2030,&c)); EXPECT_EQ(c.incarnation,1); EXPECT_EQ(c.cfg[NR_UEP_DCI_LEN_DL].value,52);
+}
+TEST_F(UeContext, RrcWindowReverifiesDedicatedParametersAndTellsTheEpochAtTheEffectiveSlot) {
+  nr_ue_ctx_on_param(0x2040,NR_UEP_DCI_LEN_DL,44,NR_UEV_TRUSTED,NR_UEC_CONVERGED,100);
+  nr_ue_ctx_on_rrc(0x2040,NR_RECONF_RRC_RECONF,1000,1); // effective at slot 1032
+  EXPECT_EQ(nr_reconf_rrc_phase(0x2040,1031,1),NR_RECONF_PHASE_HOLD);
+  auto o=grant(0x2040,nowns(),1020); nr_ue_ctx_on_obs(&o);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(reopened_count.load(),0); // window still open
+  auto o2=grant(0x2040,nowns(),1040); nr_ue_ctx_on_obs(&o2);
+  auto s=contents();
+  EXPECT_EQ(reopened_count.load(),1);
+  EXPECT_NE(s.find("RRC_WINDOW_CLOSED"),std::string::npos);
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2040,&c)); EXPECT_EQ(c.cfg[NR_UEP_DCI_LEN_DL].verif,NR_UEV_HINT);
+}
+TEST_F(UeContext, SilentUeBecomesIdleOrInactiveByItsIdentity) {
+  nr_ue_ctx_on_msg4(0x2050,resume_ccch(0x77),100); // resume identity: has used RRC_INACTIVE
+  auto a=grant(0x2050,nowns(),100); nr_ue_ctx_on_obs(&a);
+  auto b=grant(0x2051,nowns(),100); nr_ue_ctx_on_obs(&b);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  auto late=grant(0x2052,nowns()+11000000000ull,200); nr_ue_ctx_on_obs(&late); // the clock moves 11 s on
+  contents();
+  nr_ue_ctx_t x{},y{}; ASSERT_TRUE(nr_ue_ctx_get(0x2050,&x)); ASSERT_TRUE(nr_ue_ctx_get(0x2051,&y));
+  EXPECT_EQ(x.state,NR_UE_INACTIVE);
+  EXPECT_EQ(y.state,NR_UE_IDLE);
+}
+static nr_passive_obs_t grant_for_cap(uint16_t rnti) {
+  nr_passive_obs_t o={}; o.rnti=rnti; o.dir=NR_OBS_DIR_DL; o.abs_slot=1; o.t_mono_ns=nowns(); o.crc=NR_OBS_CRC_OK; o.mcs=4; o.nl=1; o.tbs=800;
+  o.harq_pid=-1; o.ndi=-1; o.snr_db=NAN; o.nvar=NAN; o.fo_comp_hz=NAN; o.delay_samples=NAN; return o;
+}
+TEST(UeContextFile, JsonlIsBoundedAndTheOverflowIsCountedAsDropped) {
+  char name[]="/tmp/rr-uectx-cap-XXXXXX"; int fd=mkstemp(name); ASSERT_GE(fd,0); close(fd);
+  nr_ue_ctx_test_file_cap=2000;
+  ASSERT_TRUE(nr_ue_ctx_open(name,128,0));
+  for(int i=0;i<40;i++) {auto o=grant_for_cap(0x3000+i); nr_ue_ctx_on_obs(&o);}
+  nr_ue_ctx_close();
+  uint64_t ev,w,d; nr_ue_ctx_stats(&ev,&w,&d);
+  struct stat st; ASSERT_EQ(stat(name,&st),0);
+  EXPECT_LT(st.st_size,20000); // 40 UEs would write far more than that unbounded
+  EXPECT_GT(d,0u);
+  nr_ue_ctx_test_file_cap=512ll<<20;
+  unlink(name);
+}
+
+// ---- NSA: no RRCSetup, no RRCReconfiguration, no Msg4 is ever decoded. Everything below uses DCI / HARQ / RAR / silence only. ----
+TEST_F(UeContext, NoRrcNoMsg4_TcBecomesCFromADedicatedDciAlone) {
+  nr_ue_ctx_on_anchor(0x2060,NR_BLIND_RNTI_CLASS_TC_FOR_TEST,100);
+  nr_ue_ctx_on_param(0x2060,NR_UEP_DCI_LEN_DL,44,NR_UEV_TRUSTED,NR_UEC_CONVERGED,120); // UE-specific 1_1 accepted under that RNTI
+  contents();
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2060,&c));
+  EXPECT_EQ(c.cfg[NR_UEP_RNTI_CLASS].value,0);
+  EXPECT_EQ(c.incarnation,0);
+  EXPECT_LT(c.cfg[NR_UEP_UE_ID].value,0); // no identity, and nothing is "unknown" about the class
+}
+TEST_F(UeContext, NoRrcNoMsg4_TcBecomesCFromACRntiGrant) {
+  nr_ue_ctx_on_anchor(0x2061,NR_BLIND_RNTI_CLASS_TC_FOR_TEST,100);
+  auto o=grant(0x2061,nowns(),130); o.rnti_class=1; nr_ue_ctx_on_obs(&o); // first sighting as TC
+  auto p=grant(0x2061,nowns(),131); p.rnti_class=0; nr_ue_ctx_on_obs(&p); // then scheduled as C-RNTI
+  contents();
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2061,&c)); EXPECT_EQ(c.cfg[NR_UEP_RNTI_CLASS].value,0);
+}
+TEST_F(UeContext, NoRrcNoMsg4_ReconfigurationIsInferredFromTheDciSizeChangeAndTimesTheRelock) {
+  nr_ue_ctx_on_param(0x2062,NR_UEP_DCI_LEN_DL,44,NR_UEV_TRUSTED,NR_UEC_CONVERGED,100);
+  nr_ue_ctx_on_param(0x2062,NR_UEP_TD_WINNER,7,NR_UEV_TRUSTED,NR_UEC_CONVERGED,101);
+  nr_ue_ctx_on_param(0x2062,NR_UEP_DCI_LEN_DL,46,NR_UEV_TRUSTED,NR_UEC_RELOCK,2000); // size changed in traffic at slot 2000
+  contents();
+  // TS 38.331 12: the change is the moment the RRCReconfiguration took effect: window ends there, the accelerated re-lock starts there
+  EXPECT_EQ(nr_reconf_rrc_effective_slot(0x2062),2000);
+  EXPECT_EQ(nr_reconf_rrc_phase(0x2062,1999,1),NR_RECONF_PHASE_HOLD);
+  EXPECT_EQ(nr_reconf_rrc_n_suspect(0x2062,2010,1,200),(uint32_t)NR_RECONF_ARM_N_SUSPECT);
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2062,&c));
+  EXPECT_EQ(c.cfg[NR_UEP_TD_WINNER].verif,NR_UEV_HINT);        // the same message changed the rest: re-verify
+  EXPECT_EQ(c.cfg[NR_UEP_DCI_LEN_DL].value,46);
+}
+TEST_F(UeContext, NoRrcNoMsg4_ReturningRntiAfterGoneIsANewIncarnationAndNeverLinked) {
+  auto a=grant(0x2063,nowns(),100); nr_ue_ctx_on_obs(&a);
+  auto late=grant(0x2063,nowns()+61000000000ull,900); nr_ue_ctx_on_obs(&late); // 61 s of DCI silence, then the value is sighted again
+  contents();
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(0x2063,&c));
+  EXPECT_EQ(c.incarnation,1);
+  EXPECT_LT(c.cfg[NR_UEP_RESUME_OF].value,0);
 }

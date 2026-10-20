@@ -488,5 +488,25 @@ class Http(unittest.TestCase):
             self.get("/api/log/download?run=../../etc")
 
 
+class UeCtx(unittest.TestCase):
+    def test_uectx_summary_and_discovery(self):
+        d = tempfile.mkdtemp(prefix="uectx_")
+        snap = lambda inc, st: {"schema": "uectx/1", "type": "ue_snapshot", "rnti": 17, "identity_gen": 0, "incarnation": inc,
+                                "state": st, "n_changes": 1, "n_reconfigs": 0}
+        recs = [snap(0, "ACTIVE"), snap(0, "GONE"), snap(1, "ACTIVE"),
+                {"schema": "uectx/1", "type": "ue_change", "rnti": 17, "incarnation": 1, "param": "BWP", "old": 1, "new": 2, "cause": "BWP_CHANGE"},
+                {"schema": "other", "type": "ue_change"}]
+        with open(os.path.join(d, "uectx.jsonl"), "w") as f:
+            f.write("\n".join(json.dumps(r) for r in recs) + "\nnot json\n")
+        self.assertEqual(monitor.discover(d)["uectx"], os.path.join(d, "uectx.jsonl"))
+        u = monitor.uectx_summary(monitor.discover(d)["uectx"])
+        self.assertEqual(u["counts"], {"ue_snapshot": 3, "ue_change": 1, "ue_reconfig": 0})
+        self.assertEqual([(x["incarnation"], x["state"]) for x in u["ues"]], [(0, "GONE"), (1, "ACTIVE")])
+        self.assertEqual(u["incarnations"], 1)
+        self.assertEqual(u["recent"][0]["cause"], "BWP_CHANGE")
+        self.assertEqual(monitor.uectx_summary(None)["ues"], [])
+        shutil.rmtree(d)
+
+
 if __name__ == "__main__":
     unittest.main()

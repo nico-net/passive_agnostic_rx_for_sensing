@@ -1434,6 +1434,7 @@ endif()
 add_library(nr_passive_cfg_epoch STATIC
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_reconf_rules.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c)
 target_link_libraries(nr_passive_cfg_epoch PRIVATE UTIL)
 add_library(MAC_UE_NR ${MAC_NR_SRC_UE})
@@ -2660,6 +2661,7 @@ if(ENABLE_TESTS)
   add_executable(test_nr_passive_cfg_epoch ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc
                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c
                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.c
+                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_reconf_rules.c
                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c)
   target_include_directories(test_nr_passive_cfg_epoch PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_passive_cfg_epoch PRIVATE UTIL GTest::gtest pthread m)
@@ -2846,6 +2848,7 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_sense_records COMMAND ./test_nr_sense_records)
 
   add_executable(test_nr_passive_ue_ctx ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_reconf_rules.c
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c)
   target_include_directories(test_nr_passive_ue_ctx PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_passive_ue_ctx PRIVATE utils GTest::gtest GTest::gtest_main pthread m)
@@ -3231,6 +3234,14 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_csirs_disc_hyp PRIVATE nr_phy_common nr_common UTIL GTest::gtest GTest::gtest_main pthread m)
   add_dependencies(tests test_nr_csirs_disc_hyp)
   add_test(NAME test_nr_csirs_disc_hyp COMMAND ./test_nr_csirs_disc_hyp)
+
+  add_executable(test_nr_passive_reconf_rules ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_reconf_rules_test.cc
+                                              ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_reconf_rules.c
+                                              ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c)
+  target_include_directories(test_nr_passive_reconf_rules PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_passive_reconf_rules PRIVATE GTest::gtest GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_passive_reconf_rules)
+  add_test(NAME test_nr_passive_reconf_rules COMMAND ./test_nr_passive_reconf_rules)
 
   add_executable(test_nr_passive_mac_ta ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_mac_ta_test.cc
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c)

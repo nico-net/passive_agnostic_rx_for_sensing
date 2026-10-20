@@ -693,6 +693,7 @@ static int extent_phase(int idx)
 #define NR_PDCCH_MAP_MAX_CAND 1024 /* 865 legal at 216 RB x 2 symbols; 512 truncated them */
 static nr_pdcch_map_cand_t s_map_cand[NR_PDCCH_MAP_MAX_CAND];
 static int s_map_stage = 0;          /* 0 = pass-0 mappings only; 1 = full list (see nr_pdcch_map_candidates) */
+static bool s_map_exhaustive_for_test = false; /* TEST ONLY (was ISAC_MAP_PASS0_ONLY=0): every mapping of an extent before the next extent */
 static int s_map_pass0_n = 0;        /* pass-0 prefix length of the last nr_pdcch_map_candidates() call */
 static int map_stage_truncate(int n);
 static int  s_map_n        = 0;
@@ -721,6 +722,10 @@ static _Atomic bool s_ext_verified = false; /* _Atomic: read by every blind-PDCC
 /* The walk began unseeded and nothing has verified yet: the oracle keeps observing and re-orders the catalogue once its evidence matures
  * (the SA bed's seeds are noise, the OCUDU bed's put the right extent first: an unseeded walk verified offset 3 there instead of 0). */
 static _Atomic int s_hint_first_w = -1, s_hint_last_w = -1;
+void nr_pdcch_blind_monitor_map_exhaustive_for_test(bool on)
+{
+  s_map_exhaustive_for_test = on;
+}
 void nr_pdcch_blind_monitor_autodiscover_extent_hint(int first_w, int last_w)
 {
   atomic_store(&s_hint_first_w, first_w);
@@ -856,7 +861,7 @@ static bool extent_advance(void)
     return true;
   }
   if (++s_ext_idx >= s_ext_n) {
-    if (s_map_stage == 0) {
+    if (s_map_stage == 0 && !s_map_exhaustive_for_test) {
       s_map_stage = 1;
       s_ext_idx = 0;
       LOG_A(PHY, "SENSING: autodiscover mapping stage 1: primary fast lap exhausted, widening to all shifts\n");
@@ -1427,7 +1432,7 @@ static int lane_map_count(int ext, nr_pdcch_map_cand_t *out)
   const int full_n = nr_pdcch_map_candidates(span_rb, g_cfg.coreset_duration,
                                              g_cfg.coreset_pdcch_dmrs_scrambling_id,
                                              out, NR_PDCCH_MAP_MAX_CAND);
-  if (s_lane_dispatch_stage == 0 && s_map_pass0_n > 0 && s_map_pass0_n < full_n)
+  if (!s_map_exhaustive_for_test && s_lane_dispatch_stage == 0 && s_map_pass0_n > 0 && s_map_pass0_n < full_n)
     return s_map_pass0_n;
   return full_n;
 }
@@ -1740,6 +1745,8 @@ static int map_candidates_impl(int span_rb, int duration, int pci, nr_pdcch_map_
  * the full list. */
 static int map_stage_truncate(int n)
 {
+  if (s_map_exhaustive_for_test)
+    return n;
   return (s_map_stage == 0 && s_map_pass0_n > 0 && s_map_pass0_n < n) ? s_map_pass0_n : n;
 }
 

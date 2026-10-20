@@ -1001,6 +1001,8 @@ int nr_pdcch_map_candidates_pass0(int span_rb, int duration, int pci, nr_pdcch_m
 bool nr_pdcch_blind_monitor_autodiscover_extent_step(uint32_t abs_slot);
 /** The first discovery call commits an UNSEEDED catalogue (default on). Tests of the oracle's seeded commit switch it off. */
 void nr_pdcch_blind_monitor_autodiscover_early_commit_enable(bool on);
+/** TEST ONLY: walk every mapping of an extent before the next extent (the exhaustive order; production walks a pass-0 lap first). */
+void nr_pdcch_blind_monitor_map_exhaustive_for_test(bool on);
 /** True while the oracle may still re-order a catalogue that began unseeded (nothing verified, not yet re-seeded). */
 bool nr_pdcch_blind_monitor_autodiscover_reseed_pending(void);
 /** The DM-RS solver's confirmed CORESET extent in 6-RB windows (first_w..last_w), or (-1,-1) for none. The oracle puts it FIRST in a

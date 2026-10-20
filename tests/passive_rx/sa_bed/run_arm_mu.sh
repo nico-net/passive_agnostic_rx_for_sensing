@@ -111,6 +111,8 @@ cleanup() {
   if [[ $NS2_CREATED == 1 ]]; then sudo -n ip netns del "$NS2" 2>/dev/null || true; fi
   if [[ $NS_CREATED == 1 ]]; then sudo -n ip netns del "$NS" 2>/dev/null || true; fi
   sleep 1  # let timestamping pipe readers drain before campaign.py scores the run
+  # stdout is a pipe here, so the receiver wrote uectx/1 into the default runs root as uectx_<pid>.jsonl: collect it for the scorer
+  if [[ -n ${RX:-} && -f "$HOME/NICOLA/ota_runs/uectx_$RX.jsonl" ]]; then mv -f "$HOME/NICOLA/ota_runs/uectx_$RX.jsonl" "$OUT/uectx.jsonl"; fi
   exit "$rc"
 }
 trap cleanup EXIT
@@ -179,15 +181,14 @@ ci() {
   exec 3<&-
 }
 RX_ENV=(env "ISAC_RECONF=$([[ $RECONF == on ]] && echo 1 || echo 0)"
-        "ISAC_BWP_TRACK=1"
         "ISAC_TD_IGNORE_SIB1=$([[ $SIB == sib1less ]] && echo 1 || echo 0)"
-        "ISAC_METRICS_PATH=$OUT/metrics.jsonl" "ISAC_UECTX_PATH=$OUT/uectx.jsonl")
+        "ISAC_METRICS_PATH=$OUT/metrics.jsonl")
 if [[ -n ${ISAC_OBS_PATH:-} ]]; then RX_ENV+=("ISAC_OBS_PATH=$ISAC_OBS_PATH"); fi
 if [[ -n ${ISAC_PBWP_K_ADJ:-} ]]; then RX_ENV+=("ISAC_PBWP_K_ADJ=$ISAC_PBWP_K_ADJ"); fi
 # DIAGNOSTIC pass-through of existing receiver diagnostic switches, e.g. R13_RX_EXTRA_ENV="ISAC_PDSCH_EVM=1 ISAC_CHEST_DIAG=1" (never part of a validation run)
 for kv in ${R13_RX_EXTRA_ENV:-}; do RX_ENV+=("$kv"); done
 if [[ -n ${ISAC_PDCCH_CFGTRACE:-} ]]; then RX_ENV+=("ISAC_PDCCH_CFGTRACE=$ISAC_PDCCH_CFGTRACE" "ISAC_PDCCH_CFGTRACE_SLOT=${ISAC_PDCCH_CFGTRACE_SLOT:--1}"); fi
-unset ISAC_RECONF ISAC_BWP_TRACK ISAC_TD_IGNORE_SIB1 ISAC_METRICS_PATH ISAC_UECTX_PATH ISAC_OBS_PATH ISAC_PBWP_K_ADJ
+unset ISAC_RECONF ISAC_TD_IGNORE_SIB1 ISAC_METRICS_PATH ISAC_OBS_PATH ISAC_PBWP_K_ADJ
 unset ISAC_RX_BRANCH_FO
 export LD_LIBRARY_PATH="$B${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 RX_ARGS=()

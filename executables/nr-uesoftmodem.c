@@ -25,6 +25,9 @@
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "common/utils/nr_dashboard.h"
 #include <limits.h>
+#include <libgen.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
@@ -330,7 +333,22 @@ int main(int argc, char **argv)
       LOG_W(PHY, "SENSING: DASHBOARD not started: %s\n", derr);
   }
   if (pas) { /* UL PUSCH chain + solver are on in passive mode */
-    if (nr_ue_ctx_open(NULL, 16384, 5.0))
+    /* uectx/1 JSONL (always on), next to run.log: the directory of /proc/self/fd/1 when stdout is a regular file, else the default runs
+     * root (the dashboard's discovery, common/utils/nr_dashboard.c); neither usable -> the records are discarded. */
+    char upath[PATH_MAX + 32] = "", ulog[PATH_MAX] = "";
+    struct stat ust;
+    const ssize_t ul = readlink("/proc/self/fd/1", ulog, sizeof(ulog) - 1);
+    ulog[ul > 0 ? ul : 0] = 0;
+    if (ulog[0] == '/' && !stat(ulog, &ust) && S_ISREG(ust.st_mode))
+      snprintf(upath, sizeof(upath), "%s/uectx.jsonl", dirname(ulog));
+    else {
+      const char *home = getenv("HOME");
+      char root[PATH_MAX];
+      snprintf(root, sizeof(root), "%s/NICOLA/ota_runs", home ? home : "/tmp");
+      if (!stat(root, &ust) && S_ISDIR(ust.st_mode))
+        snprintf(upath, sizeof(upath), "%s/uectx_%d.jsonl", root, (int)getpid());
+    }
+    if (nr_ue_ctx_open(upath, 16384, 5.0))
       nr_cfg_epoch_subscribe(nr_ue_ctx_on_epoch);
     else
       LOG_W(PHY, "SENSING: UE context writer/state could not be opened\n");

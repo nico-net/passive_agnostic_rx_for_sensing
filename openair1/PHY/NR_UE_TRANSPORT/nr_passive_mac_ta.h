@@ -44,6 +44,15 @@ bool nr_passive_mac_rar_ta(const uint8_t *pdu, uint32_t len, uint8_t *rapid_out,
  * subheaders of TS 38.321 6.1.2. Returns false when the PDU carries no TA CE. */
 bool nr_passive_mac_dlsch_ta(const uint8_t *pdu, uint32_t len, uint8_t *tag_id_out, uint8_t *ta_cmd_out);
 
+/** Evidence of a (re-)attachment in one DL-SCH PDU (TS 38.321 6.1.2): UE Contention Resolution Identity CE (LCID 62), CCCH SDU (LCID 0), SRB1 SDU (LCID 1). */
+typedef struct {
+  bool has_cr;
+  uint8_t cr[6];
+  uint32_t ccch_bytes;
+  uint32_t srb1_max_bytes;
+} nr_passive_mac_dl_scan_t;
+bool nr_passive_mac_dlsch_scan(const uint8_t *pdu, uint32_t len, nr_passive_mac_dl_scan_t *out);
+
 /** One-way range in metres for an ABSOLUTE advance (RAR's 12-bit T_A) at numerology `mu`. */
 double nr_passive_mac_ta_metres(uint16_t ta_absolute, int mu);
 
