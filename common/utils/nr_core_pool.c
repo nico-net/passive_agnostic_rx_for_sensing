@@ -4,6 +4,7 @@
 #include "nr_core_pool.h"
 #include "nr_core_plan.h"
 #include <dirent.h>
+#include <errno.h>
 #include <sys/prctl.h>
 #include <limits.h>
 #include <sys/syscall.h>
@@ -278,7 +279,19 @@ static int lease(nr_pool_t *p, int prio, int cell, uint64_t deadline, bool block
     p->wq[p->nwq++] = &w;
     atomic_fetch_add_explicit(&p->nwait[prio], 1, memory_order_relaxed);
     dispatch(p, now); /* grants the best grantable waiter, possibly this one: a capped higher class must not hold a free token idle */
-    while (w.tok < 0) pthread_cond_wait(&tl_cv, &p->mu);
+    const uint64_t age = p->cfg.age_ns[prio];
+    while (w.tok < 0) {
+      /* A waiter held back by a class cap while a token is free gets no release/arrival event: wake at its age limit and re-dispatch, or the
+       * aging bound would only hold while somebody else happens to release. */
+      const uint64_t t = nr_pool_now_ns();
+      if (!age || t >= w.t_enq + age) {
+        pthread_cond_wait(&tl_cv, &p->mu);
+        continue;
+      }
+      const uint64_t at = w.t_enq + age;
+      const struct timespec ts = {(time_t)(at / 1000000000ull), (long)(at % 1000000000ull)};
+      if (pthread_cond_clockwait(&tl_cv, &p->mu, CLOCK_MONOTONIC, &ts) == ETIMEDOUT) dispatch(p, nr_pool_now_ns());
+    }
   }
   if (!is_member(p, tl_tid()) && p->nmember < (int)(sizeof(p->member) / sizeof(p->member[0]))) p->member[p->nmember++] = tl_tid(); /* a lessee is a member: enforce() leaves its mask alone */
   pthread_mutex_unlock(&p->mu);
