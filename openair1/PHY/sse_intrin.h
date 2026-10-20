@@ -21,6 +21,7 @@
 #ifndef SSE_INTRIN_H
 #define SSE_INTRIN_H
 
+#include <string.h>
 #include <simde/simde-common.h>
 #include <simde/x86/avx2.h>
 #include <simde/x86/fma.h>
@@ -290,6 +291,17 @@ __attribute__((always_inline)) static inline simde__m512i oai_mm512_swap(simde__
                                           2,  3,  0,  1,  6,  7,  4,  5,  10, 11, 8,  9,  14, 15, 12, 13
                                       }};
   return simde_mm512_shuffle_epi8(a, shuffle_mask_swap.v);
+}
+
+/* simde < 0.8 has no simde_mm512_srai_epi32; do it per 256-bit half (same result) */
+__attribute__((always_inline)) static inline simde__m512i oai_mm512_srai_epi32(simde__m512i a, int shift)
+{
+  simde__m256i h[2];
+  memcpy(h, &a, sizeof(a));
+  h[0] = simde_mm256_srai_epi32(h[0], shift);
+  h[1] = simde_mm256_srai_epi32(h[1], shift);
+  memcpy(&a, h, sizeof(a));
+  return a;
 }
 #endif
 

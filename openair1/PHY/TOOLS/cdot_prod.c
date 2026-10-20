@@ -44,9 +44,9 @@ c32_t dot_product(const c16_t *x, const c16_t *y, const uint32_t N, const int ou
       const simde__m512i in1 = simde_mm512_loadu_si512((const simde__m512i *)(x + i));
       const simde__m512i in2 = simde_mm512_loadu_si512((const simde__m512i *)(y + i));
 
-      const simde__m512i tmpRe = simde_mm512_srai_epi32(simde_mm512_madd_epi16(in1, in2), output_shift);
+      const simde__m512i tmpRe = oai_mm512_srai_epi32(simde_mm512_madd_epi16(in1, in2), output_shift);
       const simde__m512i conj_swap = oai_mm512_swap(simde_mm512_mullo_epi16(in1, neg_imag));
-      const simde__m512i tmpIm = simde_mm512_srai_epi32(simde_mm512_madd_epi16(conj_swap, in2), output_shift);
+      const simde__m512i tmpIm = oai_mm512_srai_epi32(simde_mm512_madd_epi16(conj_swap, in2), output_shift);
 
       cumul_re = simde_mm512_add_epi32(cumul_re, tmpRe);
       cumul_im = simde_mm512_add_epi32(cumul_im, tmpIm);

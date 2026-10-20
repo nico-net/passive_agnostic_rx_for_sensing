@@ -15,6 +15,12 @@
 #include <zmq.h>
 #endif
 
+// libLOG/libCONFIG link-time deps pulled in via nr_sense_api (no config module in this test)
+extern "C" {
+void *uniqCfg = nullptr;
+void exit_function(const char *, const char *, int, const char *, int) { abort(); }
+}
+
 namespace {
 std::string temp_path() {
   char path[] = "/tmp/sense_api_XXXXXX";

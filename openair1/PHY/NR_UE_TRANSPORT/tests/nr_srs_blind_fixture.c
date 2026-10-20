@@ -46,7 +46,8 @@ void srs_test_realistic(const nr_srs_grid_t *g,const nr_srs_candidate_t *c,int d
                         int16_t *srs,float *pusch,uint16_t *pk,double *pusch_delay)
 {
   const int N=g->fft_size,width=c->nb_rb*12,np=width/2;
-  c16_t ref[np],spectrum[N],raw[N],rx[N],shift[N],rot[28];
+  c16_t ref[np],shift[N],rot[28];
+  c16_t spectrum[N] __attribute__((aligned(32))), raw[N] __attribute__((aligned(32))), rx[N] __attribute__((aligned(32))); // x86 AVX2 (i)dft needs 32 B
   uint32_t gold[64]={0},bits[2048];pseudo_random_sequence(2048,bits,123456);
   for(int i=0;i<2048;i++) gold[i/32]|=bits[i]<<(i%32);
   nr_pusch_dmrs_rx(NR_NORMAL,gold,ref,1000,0,c->nb_rb,0,pusch_dmrs_type1,1024);
