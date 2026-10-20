@@ -66,3 +66,25 @@ Labels: [MEASURED OTA DGX] run dirs in ~/NICOLA/ota_runs (ab_rcfT1/T2 = TIM PCI 
 
 Verification (this commit): build only the 3 known link failures; ctest 257, only the known failures; dashboard unchanged; effective_config_check 0 hits; sens6 frozen gate clean [CTEST]. No OTA.
 - The 6 remaining TIM epochs (ab_rfxT1) [MEASURED OTA]: all from uectx `DCI_SIZE` flushes of DCI_LEN_UL only. There were 39 UL 0_1 length flips, 42 <-> 44: 17 UEs flipped once, 9 flipped several times. They came from the primary UL lock path: 5025 "UL automatic DCI length locked" lines, 0 "additional length" lines, 1 RELOCK. The UL length owner deliberately sends no epoch note (`nr_pdsch_config_sweep_relock_length` returns early for uplink), and every UE of both cells shows both sizes (reconf_audit multi-length). A flip is therefore a receiver ambiguity, not a reconfiguration. Fix [CODE]: flush_reconfig treats DCI_LEN_UL like the directly-owned DL length: the change is still recorded, but there is no epoch note. [UNIT] UlDciLengthFlipIsRecordedButIsNoEpochEvidence. Not fixed: the 42/44 ambiguity itself (UL decode side).
+
+### 5. Re-test of 217fbfbb0b (night, low load): TIM SEGV at start-up, Vodafone GPU-wide stalls
+- TIM crash (ab_rfyT1, RX_EXIT 139, thread passivePdcch1, in nr_pdcch_dmrs_ref <- nr_rx_pdcch_symbol <- the restored second CORESET pass, rt.c generate_llr) [CODE + UNIT].
+  - The tracker's hypothesis takes its DM-RS reference as the most voted one over ALL lit windows, so the reference can lie above the run's first window. The run logged "BWP CORESET found: RB 186..191, reference RB 181": window 31, and window 30 at RB 180 can light too. That gives start 180 < reference 181.
+  - On the inherited-mapping rotation the second pass writes `coreset.rb_offset = (uint16)(start - ref)`, which wraps to 65535. The pilot length becomes ~65.7k RB; the PDCCH chain overruns at a page boundary.
+  - Not 03cd765fad: that commit touches only the correlation feed, not this geometry. The DM-RS solver proposal has the same hazard: its start is the lit window rounded down to 6 RB, its reference is any RB.
+  - Fix:
+    - `nr_pbwp_coreset_hypothesis` drops the windows below its reference (a CORESET lies inside the BWP its DM-RS is referenced to).
+    - New `nr_pbwp_pass2_geometry_ok` gates the second pass for both sources: 6..270 RB, 1..3 symbols, start >= reference, inside the carrier.
+  - [UNIT] Pbwp.CoresetNeverStartsBelowItsReference reproduces the OTA geometry: on the old code it returns start 180 for reference 181 (verified failing, then passing). Pbwp.SecondPassGeometryGate also added.
+  - [REPLAY] tim/b: no SEGV; BWP CORESET found RB 144 ref 144 / RB 60 ref 55; crc_q 73.0 / 97.1 %.
+- Vodafone stalls (ab_rfyV1, 123 DECSLOW, max 956 ms) [MEASURED OTA]: a GPU-wide stall, not a restore effect.
+  - In each episode one decoder polls the GPU (vcsw 38857 over 950 ms) and the others wait on it (vcsw 1-2). The UL GPU FEP reports `ULSTALL gpu_us=937325 / 952162` at the same instant.
+  - nid_solver and pbwp_corr_run are CPU-only (GF(2) solve, scalar correlation); they launch no GPU work.
+  - ULSTALL gpu_us > 100 ms (max per run):
+    - before the pbwp move: rcfV1 3.65 s (23 episodes), rcfV2 0.95 s (6);
+    - rfxV1 (with the solver fix only): none;
+    - rfyV1: 0.95 s (4).
+  - Older Vodafone runs of earlier builds show the same ~0.9 s stalls in 2-min runs: ab_aVB3 0.94 s, ab_cVX2 0.90 s, ab_dVB2 0.95 s, ab_eVC2 0.95 s, ab_cVN2 0.65 s.
+  - The cleaned references ab_s2VM1/ab_dbV1 are 2-min runs (max 5.7 / 10.4 ms), so missing a ~1-per-5-min event there proves nothing.
+  - The stall ends do not coincide with CSI-RS discovery HYPOTHESES lines (5 of 47 within 60 ms, chance 12 %). The mechanism of GPU-SPAN-ROOTCAUSE-20261019 §2.1 (launches blocked by long discovery kernels) is the documented candidate [INFERRED].
+  - Not fixed here: it is pre-existing and belongs to the GPU-span work. What would prove it: one 30-min Vodafone run of the cleaned build (3f0d9217fa) at the same load.

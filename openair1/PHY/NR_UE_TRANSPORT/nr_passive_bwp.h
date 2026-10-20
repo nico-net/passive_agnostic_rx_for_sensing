@@ -174,6 +174,9 @@ void nr_pbwp_coreset_observe(nr_pbwp_t *t, int n_win, int base_lo, int base_hi, 
 /** The discovered CORESET, if any: first RB, size in RB (multiple of 6), duration (1 or 2 symbols) and
  *  the DM-RS reference RB (0 = CRB 0; on OAI the BWP start). */
 bool nr_pbwp_coreset_hypothesis(const nr_pbwp_t *t, int *start_rb, int *n_rb, int *duration, int *ref_rb);
+/* A CORESET geometry the PDCCH chain can take (second monitoring pass): 6..270 RB, 1..3 symbols, inside the carrier, not below its DM-RS
+ * reference RB (the pass writes rb_offset = start - ref as uint16). Applied to the tracker's and to the DM-RS solver's proposal. */
+bool nr_pbwp_pass2_geometry_ok(int start_rb, int n_rb, int duration, int ref_rb, int n_rb_dl);
 
 #ifdef __cplusplus
 }

@@ -6663,7 +6663,8 @@ constdiag_done:;
    * differs, and only the lengths of discovered BWPs are tried there (the resolved ones + the probe).
    * DM-RS reference = the voted reference RB: the BWP start on OAI, 0 (CRB 0) per 38.211. ---- */
   static __thread c16_t s_pdcch_e_rx2[NR_MAX_PDCCH_SIZE];
-  if (pbwp_on && cs_have && pbwp_pass2_ok && (pbwp_n > 1 || pbwp_probe_len) && cs_n >= 6
+  if (pbwp_on && cs_have && pbwp_pass2_ok && (pbwp_n > 1 || pbwp_probe_len)
+      && nr_pbwp_pass2_geometry_ok(cs_start, cs_n, cs_dur, cs_ref, fp->N_RB_DL)
       && cs_n <= NR_PDCCH_BLIND_MAX_CORESET_RB && cs_dur <= NR_PDCCH_BLIND_MAX_CORESET_DURATION) {
     nr_phy_data_t phy_b = local_phy_data;
     fapi_nr_dl_config_dci_dl_pdu_rel15_t *rb = &phy_b.phy_pdcch_config.pdcch_config[0];
