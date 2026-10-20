@@ -256,6 +256,7 @@ bool has_cap_sys_nice(void)
  *   Callers: about 48 thread start sites across the PHY, the PDCCH/PUSCH/PDSCH queues, the USRP ring and the shutdown code.
  */
 extern int nr_pool_site_filter_core(int) __attribute__((weak));
+extern bool nr_pool_site_home_attr(pthread_attr_t *) __attribute__((weak));
 void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name, int affinity, int priority)
 {
   int ret;
@@ -268,6 +269,7 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
 
   ret = nr_core_plan_thread_attr(&attr, affinity, &priority);
   AssertFatal(ret == 0, "CORE_PLAN cannot apply thread affinity for %s: %d\n", name, ret);
+  if (affinity < 0 && nr_pool_site_home_attr) nr_pool_site_home_attr(&attr); /* a lessee's child must not inherit its single leased core */
 
   if (set_prio) {
     ret = pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);

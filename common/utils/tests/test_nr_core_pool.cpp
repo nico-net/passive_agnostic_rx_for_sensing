@@ -10,6 +10,7 @@
 #include <vector>
 #include <unistd.h>
 #include <sched.h>
+#include <sys/wait.h>
 extern "C" {
 #include "nr_core_pool.h"
 }
@@ -52,6 +53,37 @@ static std::vector<int> grant_order(nr_pool_t *p, const std::vector<W> &ws)
   nr_pool_release(p);
   for (auto &t : th) t.join();
   return order;
+}
+
+// Site sizing: fewer than 3 site cores survive the allowed set -> "allowed non-RT cores minus one" (runs in a child: the site pool is a per-process singleton)
+TEST(CorePool, SiteSizingFallsBackWhenFewSiteCoresSurvive)
+{
+  if (nr_pool_site_free() != -1) GTEST_SKIP() << "site pool already built in this process";
+  cpu_set_t all;
+  sched_getaffinity(0, sizeof(all), &all);
+  std::vector<int> cs;
+  for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &all)) cs.push_back(c);
+  if (cs.size() < 4) GTEST_SKIP() << "needs >= 4 allowed cpus";
+  const pid_t pid = fork();
+  ASSERT_GE(pid, 0);
+  if (pid == 0) {
+    cpu_set_t sub;
+    CPU_ZERO(&sub);
+    for (int i = 0; i < 4; i++) CPU_SET(cs[i], &sub);
+    sched_setaffinity(0, sizeof(sub), &sub);
+    char l[32];
+    snprintf(l, sizeof(l), "%d,%d", cs[0], CPU_SETSIZE - 1); // one survivor, one outside the allowed set
+    setenv("ISAC_PDSCH_CORES", l, 1);
+    setenv("ISAC_PUSCH_CORES", l, 1);
+    unsetenv("ISAC_UE_RT_CORE");
+    unsetenv("ISAC_USRP_RING_CORE");
+    unsetenv("ISAC_UHD_CTRL_CORES");
+    nr_pool_t *p = nr_pool_site();
+    _exit(p && nr_pool_size(p) == 3 && nr_pool_core_in_pool(p, cs[0]) && !nr_pool_core_in_pool(p, cs[3]) ? 0 : 1);
+  }
+  int st = 0;
+  ASSERT_EQ(waitpid(pid, &st, 0), pid);
+  EXPECT_TRUE(WIFEXITED(st) && WEXITSTATUS(st) == 0);
 }
 
 TEST(CorePool, StrictPriorityOrder)
@@ -259,11 +291,13 @@ TEST(CorePool, SitePoolWithNoEnvironment)
   nr_pool_t *p = nr_pool_site();
   ASSERT_NE(p, nullptr);
   int want = 0;
-  for (int c : {6, 7, 8, 9, 3, 4}) {
-    want += CPU_ISSET(c, &all) ? 1 : 0;
-    EXPECT_EQ(nr_pool_core_in_pool(p, c), CPU_ISSET(c, &all) != 0) << "core " << c;
+  for (int c : {6, 7, 8, 9, 3, 4}) want += CPU_ISSET(c, &all) ? 1 : 0;
+  const int a = CPU_COUNT(&all);
+  if (want < 3) { // fewer than 3 site cores survive: the allowed cores minus one (a host smaller than the site map)
+    EXPECT_EQ(nr_pool_size(p), std::max(want, a > 1 ? a - 1 : a));
+    return;
   }
-  if (want == 0) GTEST_SKIP() << "none of the site cores is allowed on this host";
+  for (int c : {6, 7, 8, 9, 3, 4}) EXPECT_EQ(nr_pool_core_in_pool(p, c), CPU_ISSET(c, &all) != 0) << "core " << c;
   EXPECT_EQ(nr_pool_size(p), want); // 6 on the DGX
   EXPECT_FALSE(nr_pool_core_in_pool(p, 5));
   EXPECT_EQ(nr_pool_site_filter_core(2), 2);
@@ -523,6 +557,111 @@ TEST(CorePool, BigCoresGoToUrgentClasses)
   EXPECT_NE(lo, 6);
   nr_pool_release(p);
   nr_pool_destroy(p);
+}
+
+// B1 shape (scan side_finish at N=1): the holder waits for a thread that needs the only token. Parked, it does not deadlock; unpark restores the class.
+TEST(CorePool, ParkLetsTheWaitedForThreadTakeTheOnlyToken)
+{
+  nr_pool_t *p = mk(1);
+  nr_pool_acquire(p, NR_POOL_SCAN, 0, 0);
+  std::atomic<int> done{0};
+  std::thread t([&] {
+    nr_pool_acquire(p, NR_POOL_SCAN, 0, 0);
+    nr_pool_release(p);
+    done = 1;
+  });
+  wait_waiting(p, 1);
+  nr_pool_park_t pk;
+  nr_pool_park(p, &pk);
+  EXPECT_FALSE(nr_pool_holds(p));
+  wait_until([&] { return done.load() == 1; }); // would hang forever without the park
+  nr_pool_unpark(p, &pk);
+  EXPECT_TRUE(nr_pool_holds(p));
+  nr_pool_stats_t s;
+  nr_pool_stats(p, &s);
+  EXPECT_EQ(s.leases[NR_POOL_SCAN], 3u); // holder, taker, holder again: same class
+  EXPECT_EQ(s.nested, 0u);
+  nr_pool_release(p);
+  t.join();
+  nr_pool_park(p, &pk); // no lease: both are no-ops
+  EXPECT_FALSE(pk.held);
+  nr_pool_unpark(p, &pk);
+  EXPECT_FALSE(nr_pool_holds(p));
+  nr_pool_destroy(p);
+}
+
+// B2: the GPU-wait hook gives the token away only inside a give scope and only to a waiter the token could go to.
+TEST(CorePool, GpuWaitGivesOnlyInsideAGiveScopeToAGrantableWaiter)
+{
+  nr_pool_t *p = mk(2); // SCAN cap N-1 = 1; DISC needs busy < N-2 -> 1
+  nr_pool_acquire(p, NR_POOL_SCAN, 0, 0);
+  std::atomic<int> h2_go{0}, w_got{0};
+  std::thread h2([&] {
+    nr_pool_acquire(p, NR_POOL_DECODE | NR_POOL_F_UL, 0, 0);
+    while (!h2_go) usleep(100);
+    nr_pool_release(p);
+  });
+  wait_until([&] { nr_pool_stats_t t; nr_pool_stats(p, &t); return t.leases[NR_POOL_DECODE] == 1; });
+  std::thread disc([&] { nr_pool_acquire(p, NR_POOL_DISC, 0, 0); nr_pool_release(p); });
+  wait_waiting(p, 1);
+  nr_pool_stats_t s;
+  nr_pool_gpu_wait(p); // no scope
+  nr_pool_stats(p, &s);
+  EXPECT_EQ(s.gpu_gives, 0u);
+  EXPECT_TRUE(nr_pool_holds(p));
+  nr_pool_site_gpu_give_begin();
+  nr_pool_gpu_wait(p); // scope, but the freed token cannot go to a DISC waiter (cap)
+  nr_pool_stats(p, &s);
+  EXPECT_EQ(s.gpu_gives, 0u);
+  EXPECT_TRUE(nr_pool_holds(p));
+  std::thread scan([&] { nr_pool_acquire(p, NR_POOL_SCAN, 0, 0); w_got = 1; nr_pool_release(p); });
+  wait_waiting(p, 2);
+  nr_pool_site_gpu_give_begin(); // nested
+  nr_pool_site_gpu_give_end();
+  nr_pool_gpu_wait(p); // a SCAN waiter exists: give
+  nr_pool_stats(p, &s);
+  EXPECT_EQ(s.gpu_gives, 1u);
+  EXPECT_EQ(w_got.load(), 1);
+  EXPECT_TRUE(nr_pool_holds(p));
+  nr_pool_site_gpu_give_end();
+  nr_pool_gpu_wait(p); // scope closed again: sleeps only
+  nr_pool_stats(p, &s);
+  EXPECT_EQ(s.gpu_gives, 1u);
+  nr_pool_release(p);
+  h2_go = 1;
+  h2.join();
+  scan.join();
+  disc.join();
+  nr_pool_destroy(p);
+}
+
+// B4: scan-side extra work is counted only under a SCAN lease
+TEST(CorePool, ScanExtraCountedOnlyUnderAScanLease)
+{
+  nr_pool_t *p = mk(3);
+  nr_pool_stats_t s;
+  nr_pool_note_scan_extra(p); // no lease
+  nr_pool_acquire(p, NR_POOL_DECODE, 0, 0);
+  nr_pool_note_scan_extra(p); // wrong class
+  nr_pool_release(p);
+  nr_pool_stats(p, &s);
+  EXPECT_EQ(s.nested, 0u);
+  nr_pool_acquire(p, NR_POOL_SCAN, 0, 0);
+  nr_pool_note_scan_extra(p);
+  nr_pool_note_scan_extra(p);
+  nr_pool_release(p);
+  nr_pool_stats(p, &s);
+  EXPECT_EQ(s.nested, 2u);
+  nr_pool_destroy(p);
+}
+
+// M1: a lessee's child thread gets the home mask attr; a non-lessee does not (site pool: needs it to exist)
+TEST(CorePool, HomeAttrOnlyForALessee)
+{
+  pthread_attr_t a;
+  pthread_attr_init(&a);
+  EXPECT_FALSE(nr_pool_site_home_attr(&a)); // no lease
+  pthread_attr_destroy(&a);
 }
 
 int main(int argc, char **argv)

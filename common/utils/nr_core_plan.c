@@ -437,17 +437,26 @@ int nr_core_plan_thread_attr(pthread_attr_t *attr, int affinity, int *priority)
  *   Uses the given attribute object or a local one. Returns the pthread_create() result.
  */
 extern int nr_pool_site_filter_core(int) __attribute__((weak));
+extern bool nr_pool_site_home_attr(pthread_attr_t *) __attribute__((weak));
 int nr_core_plan_create(pthread_t *thread, pthread_attr_t *attr, void *(*fn)(void *), void *arg, int core)
 {
   if (nr_pool_site_filter_core) core = nr_pool_site_filter_core(core);
   cpu_set_t lane;
-  if (!active && (core >= 0 || !nr_core_float_mask(&lane))) return pthread_create(thread, attr, fn, arg);
+  if (!active && (core >= 0 || !nr_core_float_mask(&lane))) {
+    pthread_attr_t home; /* a lessee's child must not inherit its single leased core */
+    if (core >= 0 || !nr_pool_site_home_attr || pthread_attr_init(&home)) return pthread_create(thread, attr, fn, arg);
+    pthread_attr_t *a = attr ? attr : &home;
+    const int r = pthread_create(thread, nr_pool_site_home_attr(a) ? a : attr, fn, arg);
+    pthread_attr_destroy(&home);
+    return r;
+  }
   pthread_attr_t local;
   bool owned = attr == NULL;
   int rc = 0;
   if (owned) { rc = pthread_attr_init(&local); if (rc) return rc; attr = &local; }
   int priority = 0;
   rc = nr_core_plan_thread_attr(attr, core, &priority);
+  if (!rc && core < 0 && nr_pool_site_home_attr) nr_pool_site_home_attr(attr);
   if (!active) { /* float lane only: keep the caller's scheduling attributes */
     if (!rc) rc = pthread_create(thread, attr, fn, arg);
     if (owned) pthread_attr_destroy(attr);

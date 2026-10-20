@@ -225,6 +225,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
   while (1) {
     nr_pusch_passive_job_t job;
     nr_pool_site_release(); /* core pool: a lease never outlives one iteration */
+    nr_pool_site_enforce_tick();
     if (held >= 0) {
       pthread_mutex_lock(&g_lock);
       g_pool_refs[held]--;
