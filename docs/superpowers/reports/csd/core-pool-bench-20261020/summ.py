@@ -1,7 +1,9 @@
 import re,glob,statistics as st,collections,sys,os
 D=sys.argv[1]
+RAW=sys.argv[2] if len(sys.argv)>2 else 'raw'  # optional: raw dir + output suffix (e.g. raw-dlcap dlcap)
+SUF='_'+sys.argv[3] if len(sys.argv)>3 else ''
 R=collections.defaultdict(list)
-for f in glob.glob(D+'/raw/*.txt'):
+for f in glob.glob(D+'/'+RAW+'/*.txt'):
     m=re.match(r'(pool|cfs)_N(\d+)_s([\d.]+)_r(\d)',os.path.basename(f))
     mode,N,S,r=m.group(1),int(m.group(2)),float(m.group(3)),int(m.group(4))
     d={}
@@ -25,10 +27,10 @@ for (mode,N,S),L in sorted(R.items(),key=lambda x:(x[0][1],x[0][2],x[0][0])):
             row[k+'_'+f]=med([d[k][f] for d in L if k in d])
     rows.append(row)
 cols=list(rows[0].keys())
-open(D+'/summary_medians.csv','w').write(','.join(cols)+'\n'+'\n'.join(','.join(str(round(r[c],1)) if isinstance(r[c],float) else str(r[c]) for c in cols) for r in rows)+'\n')
-with open(D+'/summary_table.txt','w') as o:
+open(D+'/summary_medians'+SUF+'.csv','w').write(','.join(cols)+'\n'+'\n'.join(','.join(str(round(r[c],1)) if isinstance(r[c],float) else str(r[c]) for c in cols) for r in rows)+'\n')
+with open(D+'/summary_table'+SUF+'.txt','w') as o:
     o.write('[Bench, cloud x86] medians over repeats, 15 s runs, taskset -c 0-3, pool/cfs cores 0..N-1. times in us; wait = arrival->start, lat = arrival->done; miss%% = lat > deadline (scan 500 us, DL/UL 2 ms)\n')
     o.write('mode N scale load ratio | scan w99 l99 miss%% | dl w50 w99 l99 miss%% | ul w50 w99 l99 miss%% | retry w99 | busy nested | token wait scan p99<=/max decode p99<=/max\n')
     for r in rows:
         o.write('%-4s %d %.2f %.2f %.2f | %7.0f %7.0f %5.1f | %8.0f %8.0f %8.0f %5.1f | %8.0f %8.0f %8.0f %5.1f | %8.0f | %.2f %d | %5.0f %6.0f %7.0f %7.0f\n'%(r['mode'],r['N'],r['scale'],r['load'],r['ratio'],r['scan_w99'],r['scan_l99'],r['scan_miss'],r['dl_w50'],r['dl_w99'],r['dl_l99'],r['dl_miss'],r['ul_w50'],r['ul_w99'],r['ul_l99'],r['ul_miss'],r['retry_w99'],r['busy'],r['nested'],r['ts99'],r['tsmax'],r['td99'],r['tdmax']))
-print(open(D+'/summary_table.txt').read())
+print(open(D+'/summary_table'+SUF+'.txt').read())

@@ -19,7 +19,8 @@
  *      Waiters older than age_ns[prio] are promoted (starvation bound; they still never exceed busy < N).
  *  (c) NO DISCOVERY/SOLVER UNDER A SCAN LEASE. Discovery work leases class DISC on its own thread; a thread asking for a different class
  *      while it holds a lease is counted in stats.nested; so is scan-side discovery/solver work that still runs inline under a SCAN lease
- *      (nr_pool_site_note_scan_extra), i.e. nested > 0 on air is expected until that work moves to its own DISC thread.
+ *      (nr_pool_site_note_scan_extra). The discovered-dwell step/poll/snapshot already run on the pdcchDisc thread under a DISC lease; 11 of 13
+ *      sites (they read the live rxdataF window or gate this slot's decode) stay inline, so nested > 0 on air until those move too.
  *  (d) WORKS WITH NO SETTING: the core list is the union of the existing site map (ISAC_PDSCH_CORES, ISAC_PUSCH_CORES; defaults built in)
  *      minus the RT/IO cores; a host with fewer cores gets the allowed cores that remain.
  * Chunking: long low-priority work calls nr_pool_yield() between steps. A GPU poll sleep (nr_gpu_poll_relax -> nr_pool_site_gpu_wait) gives the
