@@ -280,7 +280,7 @@ static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cf
     const int16_t *grid=r->device_valid && r->device_grid?r->device_grid+(size_t)first*r->slot_stride:s.grid.p;
     if(!(r->device_valid && r->device_grid) && disc_copy(s.grid.p,r->grid_base+(size_t)first*r->slot_stride,n*r->slot_stride*2,cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
     if(disc_copy(s.meta.p,r->meta+first,n*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess || disc_zero(s.x.p,0,(size_t)n*nr*4)!=cudaSuccess) return -1;
-    static NrGpuChunker c_norm,c_pool,c_acc;
+    static NrGpuChunker c_norm{1,0,"c_norm"}; static NrGpuChunker c_pool{1,0,"c_pool"}; static NrGpuChunker c_acc{1,0,"c_acc"};
     if(disc_chunks(c_norm,(n*rb*14+127)/128,[&](long f,long k){normalize<<<k,128,0,disc_stream()>>>(grid,s.meta.p,r->slot_stride,n,r->n_ant,rb,symbols,s.exclude.p,s.x.p,tiles,1,(int)f);})!=cudaSuccess
        || disc_chunks(c_pool,(n*pooled+127)/128,[&](long f,long k){pool<<<k,128,0,disc_stream()>>>(s.x.p,n,rb,tiles,(int)f);})!=cudaSuccess
        || disc_chunks(c_acc,(nr+127)/128,[&](long f,long k){accumulate_kernel<<<k,128,0,disc_stream()>>>(s.x.p,s.meta.p,n,nr,pooled,s.sum.p,s.sq.p,s.s80.p,s.s64.p,s.total.p,s.totalq.p,(int)f);})!=cudaSuccess
@@ -296,7 +296,7 @@ static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cf
       int p=periods[pi];uint64_t counts[640]={};for(int i=0;i<640;++i) counts[i%p]+=s.counts[i];
       if(disc_copy(s.dc.p,counts,p*8,cudaMemcpyHostToDevice)!=cudaSuccess
          || disc_zero(s.masks.p,0,(size_t)p*14*tiles*6*2)!=cudaSuccess || disc_zero(s.count.p,0,4)!=cudaSuccess) return -1;
-      static NrGpuChunker c_lp,c_ls,c_seg;
+      static NrGpuChunker c_lp{1,0,"c_lp"}; static NrGpuChunker c_ls{1,0,"c_ls"}; static NrGpuChunker c_seg{1,0,"c_seg"};
       if(disc_chunks(c_lp,(p*pooled+127)/128,[&](long f,long k){lattice_pool<<<k,128,0,disc_stream()>>>(p,nr,pooled,s.sum.p,s.sq.p,s.ps.p,s.pq.p,(int)f);})!=cudaSuccess
          || disc_chunks(c_ls,(p*14+63)/64,[&](long f,long k){lattice_screen<<<k,64,0,disc_stream()>>>(p,tiles,s.nt,s.dc.p,s.ps.p,s.pq.p,s.total.p+nr-pooled,s.totalq.p+nr-pooled,s.masks.p,(int)f);})!=cudaSuccess
          || disc_chunks(c_seg,(p*14+31)/32,[&](long f,long k){segment<<<k,32,0,disc_stream()>>>(rb,p,s.nt,s.dc.p,s.sum.p,s.s80.p,s.s64.p,s.total.p,s.totalq.p,s.masks.p,symbols,

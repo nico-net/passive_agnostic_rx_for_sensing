@@ -9,6 +9,7 @@
  * measured host time of the previous chunk, so it follows the GPU (sm_89 / sm_121) with no constant to tune. Header-only, no CUDA dependency. */
 #include <stdint.h>
 #include <chrono>
+#include <cstdio>
 #include <thread>
 
 #define NR_GPU_CHUNK_TARGET_US 1000
@@ -18,6 +19,7 @@ extern "C" int nr_gpu_budget_rt_active(void) __attribute__((weak)); /* the execu
 struct NrGpuChunker {
   long per = 1;           /* units (blocks, slots, ...) per chunk, adapted */
   uint64_t chunks = 0;    /* chunks run (tests) */
+  const char *name = "?"; /* call site, for the slow-call line */
   uint64_t base = ~0ull;  /* per-chunk wall-time floor (launch + wake-up + queueing behind real-time graphs), not kernel run time */
 };
 static inline uint64_t nr_gpu_chunk_now_us()
@@ -33,19 +35,27 @@ static inline void nr_gpu_chunk_admit()
 }
 /* adaptation after a chunk of n units took us microseconds (pure, unit-tested). Only the time above the floor c.base counts as work: with per=1 starting
  * and a plain "us < target/2" growth rule, a floor above 500 us (poll wake-up + admission + GPU contention) pinned per at 1 for ever (3000 chunks instead of 20,
- * sim in DISC-CONFIRM-20261021.md). shortcut: the floor rises only through one-unit chunks, so a load that rises while per is large first shrinks the chunks (safe direction). */
+ * sim in DISC-CONFIRM-20261021.md). shortcut: the floor rises only through one-unit chunks, so a load that rises while per is large first shrinks the chunks to 1 (safe direction), then the floor follows. A 2*base guard on that rise pinned per at 1 at 4-5 ms per chunk on air (detect 4-14 s per batch, ab_dVD1/dVD2). */
 static inline void nr_gpu_chunk_adapt(NrGpuChunker &c, long n, uint64_t us, uint64_t target = NR_GPU_CHUNK_TARGET_US)
 {
-  if (us < c.base) c.base = us; else if (n == 1 && us < 2 * c.base) c.base += (us - c.base) / 4; /* only one-unit chunks measure the floor */
+  if (us < c.base) c.base = us; else if (n == 1) c.base += (us - c.base) / 2; /* only one-unit chunks measure the floor; it follows a floor that rises (GPU contention) within a few chunks */
   const uint64_t work = us > c.base ? us - c.base : 0;
   if (work > target + target / 2) { c.per = (long)((uint64_t)n * target / work); if (c.per < 1) c.per = 1; }
-  else if (work < target / 2 && n >= c.per) c.per = c.per * 2;
+  else if (work < target * 3 / 4 && n >= c.per) c.per = c.per * 2;
 }
 /* launch(first, n) enqueues the units [first, first+n) and returns 0 or an error; wait() drains the stream and returns 0 or an error; now() is the clock (us).
  * Every unit runs exactly once, in order. Returns the first non-zero launch/wait result. */
 template<class Launch, class Wait, class Admit, class Now>
 static inline int nr_gpu_chunked(NrGpuChunker &c, long total, Launch launch, Wait wait, Admit admit, Now now)
 {
+  const uint64_t call_t0 = now();
+  const uint64_t chunks0 = c.chunks;
+  struct SlowCall { NrGpuChunker &c; uint64_t t0, k0; long total; Now now; ~SlowCall() {
+    const uint64_t us = now() - t0;
+    /* always on: one stderr line per call longer than 200 ms, so the next run shows the chunk count, the floor and the final chunk size of the slow call sites */
+    if (us > 200000) fprintf(stderr, "[GPU] CHUNK_SLOW site=%s total_units=%ld chunks=%lu wall_us=%lu per_end=%ld base_us=%lu\n", c.name, total,
+                             (unsigned long)(c.chunks - k0), (unsigned long)us, c.per, (unsigned long)c.base);
+  } } slow_call{c, call_t0, chunks0, total, now};
   for (long first = 0; first < total;) {
     const long n = c.per < total - first ? c.per : total - first;
     admit();

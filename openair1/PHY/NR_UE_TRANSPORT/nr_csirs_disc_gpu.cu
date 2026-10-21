@@ -467,7 +467,7 @@ static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slo
   size_t active=(size_t)n*c->n_ant*14*c->fft;
   if(active<count && disc_zero(work.p+active,0,(count-active)*sizeof(cufftComplex))!=cudaSuccess) return -1;
   nr_csirs_disc_fep_cfg_t cfg=*c;cfg.timeshift=(int16_t *)shift.p;
-  static NrGpuChunker c_unpack,c_extract;
+  static NrGpuChunker c_unpack{1,0,"c_unpack"}; static NrGpuChunker c_extract{1,0,"c_extract"};
   if(disc_chunks(c_unpack,(long)n*14,[&](long f,long k){fep_unpack<<<k,128,0,disc_stream()>>>(cfg,desc.p,work.p,(int)f);})!=cudaSuccess) return -1;
   if(cufftExecC2C(n==1?fep_workspace.single_plan:plan,work.p,work.p,CUFFT_FORWARD)!=CUFFT_SUCCESS) { /* the FFT of one batch is not chunked (cuFFT plan batch): about 0.7-5 ms [MEASURED gsV2N] */
     disc_wait();return -1;

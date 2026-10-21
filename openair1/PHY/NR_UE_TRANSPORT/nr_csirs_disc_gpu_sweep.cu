@@ -358,7 +358,7 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
     gather<<<(packed+255)/256,256,0,stream>>>(grid,r->slot_stride/2,dm.p,map.n_re,w.di.p,slots.size(),r->n_ant,r->n_rb,dx.p);
     auto device_map = map;
     device_map.re = dm.p;
-    static NrGpuChunker c_sweep;
+    static NrGpuChunker c_sweep{1,0,"c_sweep"};
     if (chunks(c_sweep, nc, [&](long f, long n) {
           sweep<<<dim3(n, slots.size()), 128, 0, stream>>>(device_map, dx.p, ds.p, r->n_ant, r->slots_per_frame, c, dz.p, (int)f, nc);
         }) != cudaSuccess) return -1;
@@ -509,7 +509,7 @@ static cudaError_t refine_launch(const nr_csirs_disc_ring_t &ring,const nr_csirs
   /* The refinement was ONE single-thread kernel of 24 ms on average and up to 652 ms [MEASURED gsV2N]. It runs the units [f,f+n) of (valid slot, antenna[, port]) per launch,
    * accumulators in w.acc, the last launch (u1 = LONG_MAX) also the tail: the same additions in the same order, so the result is bit-identical. */
   auto &w=workspace;
-  static NrGpuChunker c_refine;
+  static NrGpuChunker c_refine{1,0,"c_refine"};
   if(total<=0) {refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,0,LONG_MAX,true);return cudaGetLastError();}
   return chunks(c_refine,total,[&](long f,long n) {
     const bool last=f+n>=total;

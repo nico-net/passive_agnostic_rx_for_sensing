@@ -702,8 +702,8 @@ TEST(GpuChunk, CoversEveryUnitOnceInOrderAndBoundsChunkTime)
         [&]() { clock += 50; return 0; }, [] {}, [&] { return clock; });
     EXPECT_EQ(rc, 0);
     EXPECT_EQ(ran, (uint64_t)total) << cost;
-    /* after the first adaptation no chunk exceeds 1.5 targets (+ one unit); the very first chunk is one unit */
-    EXPECT_LE(worst, std::max<uint64_t>(NR_GPU_CHUNK_TARGET_US * 3 / 2, cost) + cost) << cost;
+    /* after the first adaptation no chunk exceeds 1.5 targets (+ two units); the very first chunk is one unit */
+    EXPECT_LE(worst, std::max<uint64_t>(NR_GPU_CHUNK_TARGET_US * 3 / 2, cost) + 2 * cost) << cost; /* the floor estimate contains one unit */
     if (cost <= 100) EXPECT_GT(c.per, 1);
   }
   NrGpuChunker c;
@@ -726,4 +726,21 @@ TEST(GpuChunk, FloorOfWallTimeDoesNotPinChunkAtOneUnit)
     EXPECT_LT(c.chunks, 40u) << floor_us;                                   /* was 3000 for floor >= 1000 */
     EXPECT_LE(worst_work, (uint64_t)NR_GPU_CHUNK_TARGET_US * 3 / 2 + cost * 2) << floor_us; /* run time per chunk stays bounded */
   }
+}
+
+/* ab_dVD1/dVD2 2026-10-21: the per-chunk wall floor rises from a few hundred us to 4-5 ms when the real-time graphs load the GPU; the chunk size must follow, not stay at one unit (detect took 4-14 s per batch). */
+TEST(GpuChunk, FloorThatRisesMidCallDoesNotPinChunkAtOneUnit)
+{
+  NrGpuChunker c;
+  uint64_t clock = 0;
+  const long total = 3000;
+  const uint64_t cost = 2;
+  uint64_t calls = 0;
+  for (int rep = 0; rep < 3; ++rep) { /* the same call site is reused: per and base persist */
+    int rc = nr_gpu_chunked(c, total,
+        [&](long, long n) { ++calls; clock += (calls < 6 ? 300 : 5000) + n * cost; return 0; },
+        [&]() { clock += 100; return 0; }, [] {}, [&] { return clock; });
+    EXPECT_EQ(rc, 0);
+  }
+  EXPECT_LT(c.chunks, 150u); /* with the 2*base guard: about 9000 */
 }
