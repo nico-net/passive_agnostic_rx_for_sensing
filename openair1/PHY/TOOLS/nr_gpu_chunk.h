@@ -18,6 +18,7 @@ extern "C" int nr_gpu_budget_rt_active(void) __attribute__((weak)); /* the execu
 struct NrGpuChunker {
   long per = 1;           /* units (blocks, slots, ...) per chunk, adapted */
   uint64_t chunks = 0;    /* chunks run (tests) */
+  uint64_t base = ~0ull;  /* per-chunk wall-time floor (launch + wake-up + queueing behind real-time graphs), not kernel run time */
 };
 static inline uint64_t nr_gpu_chunk_now_us()
 {
@@ -30,11 +31,15 @@ static inline void nr_gpu_chunk_admit()
   const uint64_t t0 = nr_gpu_chunk_now_us();
   while (nr_gpu_budget_rt_active() > 0 && nr_gpu_chunk_now_us() - t0 < NR_GPU_ADMIT_MAX_US) std::this_thread::yield();
 }
-/* adaptation after a chunk of n units took us microseconds (pure, unit-tested) */
+/* adaptation after a chunk of n units took us microseconds (pure, unit-tested). Only the time above the floor c.base counts as work: with per=1 starting
+ * and a plain "us < target/2" growth rule, a floor above 500 us (poll wake-up + admission + GPU contention) pinned per at 1 for ever (3000 chunks instead of 20,
+ * sim in DISC-CONFIRM-20261021.md). shortcut: the floor rises only through one-unit chunks, so a load that rises while per is large first shrinks the chunks (safe direction). */
 static inline void nr_gpu_chunk_adapt(NrGpuChunker &c, long n, uint64_t us, uint64_t target = NR_GPU_CHUNK_TARGET_US)
 {
-  if (us > target + target / 2) { c.per = (long)((uint64_t)n * target / us); if (c.per < 1) c.per = 1; }
-  else if (us < target / 2 && n >= c.per) c.per = c.per * 2;
+  if (us < c.base) c.base = us; else if (n == 1 && us < 2 * c.base) c.base += (us - c.base) / 4; /* only one-unit chunks measure the floor */
+  const uint64_t work = us > c.base ? us - c.base : 0;
+  if (work > target + target / 2) { c.per = (long)((uint64_t)n * target / work); if (c.per < 1) c.per = 1; }
+  else if (work < target / 2 && n >= c.per) c.per = c.per * 2;
 }
 /* launch(first, n) enqueues the units [first, first+n) and returns 0 or an error; wait() drains the stream and returns 0 or an error; now() is the clock (us).
  * Every unit runs exactly once, in order. Returns the first non-zero launch/wait result. */

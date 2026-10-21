@@ -710,3 +710,20 @@ TEST(GpuChunk, CoversEveryUnitOnceInOrderAndBoundsChunkTime)
   EXPECT_EQ(nr_gpu_chunked(c, 0, [](long, long) { return 7; }, [] { return 0; }, [] {}, [] { return (uint64_t)0; }), 0);
   EXPECT_EQ(nr_gpu_chunked(c, 5, [](long, long) { return 7; }, [] { return 0; }, [] {}, [] { return (uint64_t)0; }), 7);
 }
+
+/* DISC-CONFIRM-20261021: a per-chunk wall-time floor (poll wake-up, admission, queueing behind real-time graphs) above target/2 must not pin the chunk at one unit. */
+TEST(GpuChunk, FloorOfWallTimeDoesNotPinChunkAtOneUnit)
+{
+  for (uint64_t floor_us : {0, 200, 1000, 1600, 3000}) {
+    NrGpuChunker c;
+    uint64_t clock = 0, worst_work = 0;
+    const long total = 3000;
+    const uint64_t cost = 2; /* us per unit */
+    int rc = nr_gpu_chunked(c, total,
+        [&](long, long n) { clock += floor_us + n * cost; worst_work = std::max(worst_work, (uint64_t)n * cost); return 0; },
+        [&]() { clock += 100; return 0; }, [] {}, [&] { return clock; });
+    EXPECT_EQ(rc, 0);
+    EXPECT_LT(c.chunks, 40u) << floor_us;                                   /* was 3000 for floor >= 1000 */
+    EXPECT_LE(worst_work, (uint64_t)NR_GPU_CHUNK_TARGET_US * 3 / 2 + cost * 2) << floor_us; /* run time per chunk stays bounded */
+  }
+}
