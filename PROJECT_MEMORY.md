@@ -4634,6 +4634,116 @@ Correction to the brief: the 13:36–14:25 window is **merge19 (`uu`, M) vs merg
 4. Then multi-PCI (single process, decided 2026-10-16).
 - Keep frozen as the OTA default until merge19 passes on air. Each on-air claim names its cell and n.
 
+### 2026-10-20/21 block (`csd/int16-pmem21`, worktree `rr-csd-int16pm21`, from main `a378f7dc5a` + merge `0c73388ef5`; docs only: no build, no hardware, no OTA and no replay in this block)
+
+**Goals (user, 2026-10-21). These supersede the 2026-10-18 goals (DL and UL median < 0.5 ms, p99 < 3 ms).**
+- DL p50 about 1 ms (lower is better); DL p99 < 5 ms.
+- Decoding ALL grants is the main thing; the big and multi-layer grants first.
+- Drops of 3-4 % are acceptable if they save cores or GPU work.
+- PDSCH payload is used for sensing: never trade CRC for latency.
+- Cells are mainly NSA: RRC / Msg4 is never mandatory.
+
+**Main = `a378f7dc5a` (pushed) [CODE-READ, git].** Cleaned stage 2 (one config, no flags, always-on dashboard) plus restore: BWP tracker, live DM-RS identity solver, uectx writer, NSA-first re-attach, TIM epoch-storm and rb_offset-wrap fixes.
+- [MEASURED, DGX+X410, 2026-10-21 07:30, n=1 each] restore, TIM, 10 min, crash-free: DL p50/p99 1.43 / 11.0 ms, crc_q 88.6 %.
+- [MEASURED, DGX+X410, 2026-10-21 07:30, n=1 each] restore, Vodafone, 30 min: DL p50/p99 1.52 / 10.1 ms, crc_q 94.4 %, drops 0.3 %.
+- [MEASURED, DGX+X410, 2026-10-21 07:30, n=1 each] cleaned main, Vodafone, same day: DL p50/p99 1.61 / 15.5 ms, crc_q 93.2 %, drops 0.9 %.
+- [MEASURED, DGX+X410, 2026-10-21 runs] no ~1 s GPU stalls in any 2026-10-21 run.
+- The TIM and Vodafone numbers are separate claims (cells never pooled).
+
+**Reports read on 2026-10-21.** Source: `docs/superpowers/reports/csd/` on `csd/int16-grantsize` (worktree `rr-csd-int16gs`), except RECONF-AUDIT-20261020.md, which is on `csd/int16-reconf-audit` (2a82acd3a2, worktree `rr-csd-int16ra`); it is not in the grantsize tree.
+
+1. **RESTORE-RECONF-20261020.md** (branch `merge/stage2-into-main`, base 3f0d9217fa).
+   - Restored always on, no env flag: passive BWP tracker, live DM-RS solver (`NID_SOLVE` logs), uectx/1 JSONL always on (512 MiB cap), NSA-first reconfiguration rules (REATTACH, TC to C-RNTI, RRC delay windows, BWP switch delay) [CODE-READ] [OFFLINE VERIFIED, DGX aarch64 unit tests].
+   - Replay, correctness only [MEASURED, DGX replay, PCI 415, 12 s capture, 4 RX]: CRC and RNTI sets agree with base; DL n_real base 4410 / 4135, new 4491 / 3163.
+   - On-air regressions of the cleaned build, found 2026-10-20 [MEASURED, DGX+X410, 30 min runs, TIM PCI 923 and Vodafone PCI 415], each fixed in code and tested:
+     - TIM false DEDICATED_CHANGE_SUSPECTED storm: 2240 / 3049 epochs. Cause: CORESET alternations and SRB1 windows were counted as reconfiguration evidence. Replay after fix: 0 CONFIG_EPOCH.
+     - Vodafone stale drops (DL 9.1 / 14.2 %, UL 4.4 / 10.2 %): the live DM-RS solver thread inherited SCHED_RR 50 and a scan core. Fix: nice 10, SCHED_OTHER. [MEASURED, DGX replay, n=5] scan wait p99 300-350 us.
+     - TIM SEGV at start-up (thread passivePdcch1): `rb_offset` wrapped to 65535 when the tracker's reference lay above the window start. Fix: geometry gate. [OFFLINE VERIFIED] Pbwp.CoresetNeverStartsBelowItsReference.
+     - Vodafone core-7 decode stalls: passive-BWP CORESET correlation ran in the RT scan pass (52.2 us mean per pass against a 218 us pass total). Moved to the background lane.
+     - RAR TC-RNTIs not promoted (1/254 and 0/459 within the contention-resolution window) [MEASURED, DGX+X410]. Fix: a RAR naming a recently active RNTI stays the same UE. The 83 later grants were value reuse, not promotion.
+   - Not fixed: Vodafone GPU-wide stalls (ULSTALL gpu_us > 100 ms, up to 0.95 s) [MEASURED, DGX+X410, older builds]. [INFERRED] they are the discovery-kernel launch blocking described in DISC-NONBLOCK below. Not checked against the TS text: 10/16 ms RRC delays and the 38.133 BWP table are [RECALLED].
+   - Not verified: no sa-bed run (BWP-switch arms re-wired, not executed); no OTA of the NSA-first rules at the end of 2026-10-20.
+
+2. **RECONF-AUDIT-20261020.md** (read-only audit; cleaned build `541f95069e` against merge19 `9281e24732`).
+   - Scope: [MEASURED, log parse] 24 runs (`ab_s2*`, `ab_mm*`, `ab_ll*`), DGX+X410, 4 RX, 217 PRB, 50.6 min in total, TIM PCI 923 and Vodafone PCI 415 counted per PCI, never pooled.
+   - All reconfiguration machinery that was live under the frozen env is still live with no env. `ISAC_RECONF` is set by main() when `--passive-rx` is on the command line (nr-uesoftmodem.c:286) [CODE-READ].
+   - Dead in both builds: DL BWP-switch detection, the HARD continuity epoch, any RRC-timing prediction [CODE-READ]. The uectx JSONL path was /dev/null at that commit; restore (item 1) made it always on.
+   - Natural events are rare: over 762 `ab_*` runs on disk, only CSIRS_MAP_CHANGE (2632), DEDICATED_CHANGE_SUSPECTED (60), RX_RECOVERY (32) and CELL_IDENTITY_CHANGE (1) were logged. No MIB_CHANGE, SIB1_CHANGE, SI_MODIFICATION, CONTINUITY_LOSS or BWP_CHANGE, ever [MEASURED, log parse, all cells, counts only]. A genuine reconfiguration or reconnection proof needs a very long run or a controlled UE (not done).
+
+3. **DASHBOARD-ALWAYSON-20261020.md** (`csd/int16-stage2`, phase 1 of 2).
+   - The dashboard starts with every `nr-uesoftmodem --passive-rx`, no flag. It binds 127.0.0.1:8080, runs SCHED_IDLE, nice 19, on core 2, with RLIMIT_AS 4 GiB, and survives the receiver exit [CODE-READ].
+   - Cost: 1.2 % of one core, RSS 25 MB [MEASURED, DGX idle host, synthetic log feed at 370 KB/s].
+   - Tests: monitor 47 tests OK; ctest `nr_dashboard_spawn` passed [CTEST, DGX]. The root-to-SUDO_UID drop under sudo is not verified.
+   - Its targets are still the 2026-10-20 goals (decode p50 < 0.5 ms, p99 < 3 ms). They must be changed to the 2026-10-21 goals (TODO).
+
+4. **MERGE-STAGE2-INTO-MAIN-20261020.md** (stage2 `828822adf8` into main `d21811d53a`, base fcf6c6fc2e) [CODE-READ].
+   - Limit: main's solver wiring sat inside the passive-BWP block that stage2 deleted, so the solver did not run in that merge. Restore (item 1) re-wired it. The sa-bed BWP-switch arms still need a run.
+
+5. **CORE-POOL-20261020.md** (`csd/int16-corepool`, cloud x86 only; no DGX run).
+   - One shared pool of exclusive core tokens; default 6 cores (6,7,8,9,3,4) instead of 11 role cores; leases by class SCAN / DECODE / RETRY / DISC [CODE-READ].
+   - [MEASURED, cloud x86 bench, 4 CPUs, n=3 medians] decode token wait p99 still misses the 200 us target (N=3: 1-4 ms; N=2: 8-65 ms). N=6 is an extrapolation, not measured.
+   - Known fail: `nested` > 0. Three discovery passes still run inline under the SCAN lease. GPU waits hold the token (no give scope is used at any call site).
+   - Branch state (checked 2026-10-21): the pushed tip is `5f5373ed94`, the commit merged into pooldisc. The local `csd/int16-corepool` is at `8f03e06cbb` (WIP, "uncommitted edits at hand-off to the cloud session, unbuilt/untested"); `5f5373ed94` is not its ancestor. Do not quote numbers from `8f03e06cbb`.
+
+6. **DISC-NONBLOCK-20261021.md** (`ecc628467b`; [BENCH GB10], [MEASURED nsys], [OTA UNVERIFIED]).
+   - Mechanism [BENCH GB10]: a blocking `cudaEventSynchronize` in discovery, plus a conditional node in the real-time graphs, holds the RT graph launch until the discovery kernel ends. Bench, 600 ms kernel: 116 of 107 497 passes > 1 ms before the fix.
+   - On air [MEASURED nsys, gsV2N, merge19 build]: the first blocked UL graph launch started 596.5 ms after the call, when `refine_kernel` ended. 44 of 45 Vodafone and 21 of 21 TIM graph launches > 5 ms overlap a discovery busy period.
+   - Fix: polled waits, discovery kernels in chunks of about 1 ms, two single-thread kernels moved to the host, a 100 us admission poll. Bench, 600 ms kernel: 1 of 227 386 passes > 1 ms after the fix [BENCH GB10]. The residual stall bound is about 5 ms.
+   - Not on air yet. Pass criteria are in the report (ULSTALL gpu_us > 100 ms count, DECSLOW, EVMGRANT gp/gspan).
+
+7. **DISC-CONFIRM-20261021.md** (fixes `a879b1972b` and `7a1621e182`; [MEASURED], n=1 per arm and cell; [CODE-READ]; [SIM]).
+   - Vodafone: no layout lost. The same 24 identities (nIDs 380, 748, 713, 415, 582, 249) are confirmed in all three runs. TIM: undetermined (3 vs 5 layouts, n=1).
+   - Discovery processes fewer slots. Vodafone FEP slots 102 471 (disc) vs 462 892 (base 3f0d9217fa); feed_drops 399 370 vs 44 879 [MEASURED, one run each]. Detect per batch 7.75 s vs 0.30 s.
+   - Defect [CODE-READ, SIM]: `NrGpuChunker` stays pinned at one unit when the wall-time floor is >= 1000 us. Fixed in the chunker (`nr_gpu_chunk.h`).
+   - `a879b1972b` did not remove the deficit [MEASURED, interleaved A/B 14:47-16:27, M = a378f7dc5a, D = a879b1972b, Vodafone 15 min, TIM 8 min]. Vodafone detect totals 34.8 and 41.9 s in 9-10 batches (single batches up to 11.8 and 14.6 s) for D, against 8.3-9.6 s in 35-55 batches (max 2.7-3.4 s) for M. [INFERRED] the detect call is bimodal: about 2.5 ms when the GPU is quiet, 4-14 s under real-time load.
+   - `7a1621e182` (floor follows rising contention, always-on `CHUNK_SLOW` line) is the next fix. [UNVERIFIED on air]. Not merged.
+
+8. **GRANT-SIZED-20261021.md** (`696a23b691`, `7f56f5b7df`; report `579cf45229`; base `csd/int16-pooldisc`).
+   - Grant-sized GPU work: `k_fep_exact` skips symbols outside the grant's set, and LDPC padding blocks exit at entry [CODE-READ]. Both DL and UL.
+   - Equality [OFFLINE VERIFIED, DGX GB10 unit]: `GpuPassSized.GrantSizedEqualsFullSlot`, 9 grants, bit-exact LLRs and TB bytes against the full-slot pass.
+   - Bench [MEASURED, DGX GB10 synthetic grants, ABAB, not on air]: solo p50 unchanged (within +-1 us). Four-way sharing: p50 -3 to -4 % (12 symbols), -6 to -10 % (6 symbols); short-window p99 -20 to -45 % in 3 of 4 arms. The bench grants do not show the padding cost.
+   - ABI change: rebuild every target. The discrete (sm_89) PCIe copies are not changed and not measured.
+
+9. **SENS6-READINESS-20261021.md** (read-only audit; nothing built, run or measured [CODE-READ]).
+   - The discrete GPU is refused at the platform gate (`nr_gpu_platform.c:171-187`). Every GPU decode module reports not ready, so the DL GPU pass is unreachable on sens6: the receiver runs the CPU DL decode path there [CODE-READ].
+   - Build: the default `89;121` fails on nvcc 12.4.131. `cudaGetDriverEntryPointByVersion` needs >= 12.5. Use `LDPC_CUDA_ARCH=89` with nvcc >= 12.5, or `ENABLE_LDPC_CUDA=OFF` for a CPU-only run [CODE-READ].
+   - Green contexts: the discovery group is hard-coded to 8 SMs (`nr_gpu_green.h:44`). Below 32 RT SMs there is one context only [CODE-READ].
+   - DGX core numbers are hard-coded, so the core pool is needed on sens6. A `taskset` or cgroup shrinks the pool silently (`taskset -c 0-7` gives N = 3).
+   - Host facts [MEASURED, sens6 snapshot 2026-09-30, read only]: 14 CPUs, `isolcpus=2-3`, RTX 4060 Ti 8188 MiB, driver 580.178.04.
+
+**Branch and merge state (checked 2026-10-21 with git).**
+- `main` = `a378f7dc5a` (pushed).
+- `csd/int16-disc-nonblock` = `7a1621e182` (pushed).
+- `csd/int16-corepool`: pushed tip `5f5373ed94`; the local branch is at WIP `8f03e06cbb` (see item 5).
+- `csd/int16-pooldisc` = `028032217e` (local): main + corepool `5f5373ed94` + disc-nonblock.
+- `csd/int16-grantsize` = `579cf45229` (local): pooldisc + grant-sized `84d5e9e7c0` + sens6 readiness report.
+- Merge rule (2026-10-21): disc, pool and grantsize are NOT merged into main until the discovery regression is fixed on air.
+
+**On-air A/B 2026-10-21 evening** [MEASURED, DGX+X410, interleaved, 2 runs per arm, Vodafone 15 min, TIM 8 min; cells never pooled; n=2 per arm].
+
+| comparison | cell | arm | DL p50 / p99 (ms), run 1 / run 2 | UL p99 (ms) |
+|---|---|---|---|---|
+| M vs P | Vodafone | M = main | 1.61 / 11.95, 1.51 / 14.95 | 2.77, 3.02 |
+| M vs P | Vodafone | P = pool+disc | 2.00 / 7.22, 1.57 / 15.42 | 4.26, 3.03 |
+| M vs P | TIM | M = main | 0.86 / 4.07, 1.19 / 14.26 | 1.77, 2.92 |
+| M vs P | TIM | P = pool+disc | 1.22 / 4.95, 0.96 / 4.29 | 3.88, 2.57 |
+| A vs B | Vodafone | A = pool+disc | 1.33 / 8.15, 1.56 / 6.39 | |
+| A vs B | Vodafone | B = A + grant sizing | 1.48 / 5.57, 1.63 / 6.03 | |
+| A vs B | TIM | A = pool+disc | 0.99 / 5.75, 1.73 / 5.51 | |
+| A vs B | TIM | B = A + grant sizing | 0.99 / 4.99, 1.46 / 5.92 | |
+
+- M vs P: inconclusive on latency. Pool UL p99 is worse in 2 of 4 runs. Pool nested 290k-986k (known fail).
+- A vs B: grant sizing gives slightly better p99 on Vodafone and p50 unchanged, within the 2-run spread. TIM crc_q B 95.2 / 85.4 % vs A 95.2 / 94.3 %. One B Vodafone run had a 742 ms decode-wait max in the pool.
+- Discovery regression NOT fixed [MEASURED, same A/B]: disc builds (`7a1621e182`) process 3-5x fewer CSI-RS discovery FEP slots than main (46k-90k vs 247k-249k, Vodafone 15 min). feed_drops 35k-196k vs 0.9k-6k. Single detect batches up to 8-19 s. 500-1100 `CHUNK_SLOW` lines per run (sites c_seg, c_ls, c_sweep, c_refine; base_us ~1000-1550 against a 1 ms chunk target).
+
+**Next steps (in order; no new claim is made here).**
+1. On air, check the discovery fix against the pass criteria in DISC-CONFIRM-20261021.md section 7: no `CHUNK_SLOW` lines (or only lines with chunks below about 200 and per_end above 10); BATCH detect total of the order of M (8-10 s per 15 min Vodafone, 1.6 s per 8 min TIM); no batch above 3 s; FEP slots within 20 % of M; feed_drops of the same order as M.
+2. Merge disc / pool / grantsize into main only after step 1 passes on air.
+3. Core pool: fix the three inline discovery passes (nested > 0) and the GPU-wait token hold before any N=2 or N=6 claim.
+4. sens6: simulation first with an agent on that host (user decision). A simulation there runs the CPU DL path only (item 9). Multi-PCI work starts on the cloud in parallel.
+5. Reconfiguration: a controlled-UE or long-run proof (RECONF-AUDIT section 5); a 30 min cleaned-build Vodafone run to prove or disprove the GPU-wide stall mechanism (RESTORE item "Not fixed"); the sa-bed BWP-switch arms.
+6. Dashboard targets to the 2026-10-21 goals; PROJECT_MEMORY §16 and the §25 targets are not re-based in this block.
+
 ---
 
 ## 26. Working rules for any agent on this project (carried over from the old setup)
