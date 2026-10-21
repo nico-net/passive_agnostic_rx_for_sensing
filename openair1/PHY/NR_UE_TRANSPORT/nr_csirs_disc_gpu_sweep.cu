@@ -276,7 +276,8 @@ static cudaError_t copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) 
 template<class L> static cudaError_t chunks(NrGpuChunker &c,long total,L launch)
 {
   cudaError_t err=cudaSuccess;
-  int rc=nr_gpu_chunked(c,total,[&](long f,long n){launch(f,n);err=cudaGetLastError();return (int)err;},[&](){err=complete();return (int)err;});
+  static thread_local NrGpuSpan span; /* GPU run time of the chunk, not its host time (nr_gpu_chunk.h) */
+  int rc=nr_gpu_chunked(c,total,[&](long f,long n){span.begin(workspace.stream);launch(f,n);span.end(workspace.stream);err=cudaGetLastError();return (int)err;},[&](){err=complete();return (int)err;},[&](){return span.us();});
   return rc?err:cudaSuccess;
 }
 /* gather: GPU kernel: packs the mapped resource elements of the selected slots and antennas from the ring grid into the packed sample buffer (one thread per packed element).

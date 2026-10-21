@@ -62,3 +62,26 @@ Runs M = main a378f7dc5a, D = a879b1972b; Vodafone 15 min, TIM 8 min [MEASURED, 
 - The DL latency gain absent and UL p99 worse (3.3-3.5 vs 2.8-3.2 ms) in D were not analysed here. A GPU that is busy 4-5 ms per chunk for 10 s with many small launches and waits is consistent with more, not less, interference, but that is not measured.
 
 Next on-air run must show: (1) no CHUNK_SLOW lines, or lines with chunks below about 200 and per_end above 10; (2) BATCH detect_us total in the order of M (8-10 s per 15 min Vodafone, 1.6 s per 8 min TIM) and no batch above 3 s; (3) fep_slots within 20 % of M, feed_drops of the same order as M (3k-29k on Vodafone, 0.3-1.3k on TIM); (4) if CHUNK_SLOW still appears, its base_us and per_end say whether the floor or the size is the problem. If (2) holds but the latency gain is still absent, the gap is not in discovery throughput.
+
+## 8. Update after 12 runs with 7a1621e182 (ab_p*P*, ab_g*): chunk size must follow GPU time, not host time
+
+[MEASURED by the coordinator, DGX + X410] 500-1100 CHUNK_SLOW lines per run (c_seg 75 %, c_ls, c_sweep, c_refine), per_end=2, base_us 1.0-1.55 ms, e.g. c_refine total_units=2560 chunks=1127 wall_us=2.56 s. Discovery vs main (Vodafone 15 min): FEP slots 46-90k vs 247-249k, feed_drops 35-196k vs 0.9-6k, batches 5-13 vs 56.
+
+Root cause [CODE-READ + MEASURED floor]: under real-time GPU load every chunk costs a fixed 1-1.5 ms (launch, wake-up, scheduling) that is above the 1 ms target and jitters by about as much as the signal. Any rule that derives the work from the host wall time (a879b1972b, 7a1621e182) cannot tell a 2-unit chunk from a 20-unit one, so the chunk stays tiny and the call time is chunks x floor. The wall time was the wrong quantity from the start.
+
+Fix (this commit):
+- Chunk size follows the GPU run time of the previous chunk: two timing events around the launch on the same stream (NrGpuSpan in TOOLS/nr_gpu_wait.h, one per thread, created on first use), read after the existing polled wait. Rule (nr_gpu_chunk_adapt): per = n x target / gpu_us, at most 16x bigger per step, at least 1; unchanged inside [0.75, 1.5] x target. No floor estimate, no wall time. Falls back to wall time only when the events fail.
+- Fail-safe: a call never uses more than NR_GPU_CHUNK_MAX_CALLS = 64 chunks; from chunk 32 the rest is spread over the remaining budget. This lets a very large kernel (hundreds of ms of GPU work) exceed the 1 ms chunk bound (about 10 ms chunks at 600 ms), deliberately, because the cost of a chunk under load is 1.5 ms, not the kernel.
+- CHUNK_SLOW stays (always on, calls over 200 ms), now with `gpu_us` (sum of chunk GPU time of the call), `per_end` and `last_chunk_gpu_us` instead of base_us.
+
+Tests [MEASURED on this host, build_t26, GB10; receiver not running]: test_nr_csirs_disc_sweep GpuChunk.* (4 tests) pass:
+- FloorAboveTargetKeepsChunksFewAndKernelsShort: floor 0, 0.3, 1, 1.5, 3, 5 ms, 3000 units at 2 us: at most 16 chunks per call (first call included), GPU time per chunk at most 1.5 ms + one unit.
+- FollowsGpuTimePerUnit: GPU time per unit grows 5x mid-run, chunk shrinks back to the target.
+- FailSafeCapsChunksPerCall: no GPU time, 5 ms floor, at most 64 chunks.
+- The two earlier tests of the series were replaced; CoversEveryUnitOnceInOrderAndBoundsChunkTime kept (total limited to 30 ms of work, larger work is the fail-safe's case).
+- Also passing with the new code: all 20 CsirsDiscSweep.* tests including GpuEqualsCpu (GPU vs CPU, 11.6 s), CumulativeGpuParity and GpuRefinementAndConfirmation. libcsirs_disc_gpu.so and libnr_csirs_disc_gpu_sweep.so link.
+
+Next on-air run must show (Vodafone 15 min, TIM 8 min, interleaved with main, per cell):
+1. CHUNK_SLOW lines: none, or with chunks at most 64 and last_chunk_gpu_us near 1000 or below; gpu_us much lower than wall_us tells that the time is not in the kernels.
+2. BATCH detect_us per batch at most about 1 s (main: at most 0.9 s) and 50+ batches on Vodafone; FEP slots within 20 % of main (about 247k); feed_drops of the order of main (0.9-6k).
+3. Only then the real-time effect (ULSTALL, gspan, UL p99) is worth reading; if (1) and (2) hold and the UL p99 is still worse than main, the cause is the chunk gaps or the polling themselves, not throughput.

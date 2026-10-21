@@ -22,4 +22,20 @@ template<class Q> static inline cudaError_t nr_gpu_wait_poll(Q query)
 }
 static inline cudaError_t nr_gpu_wait_event(cudaEvent_t e) { return nr_gpu_wait_poll([&] { return cudaEventQuery(e); }); }
 static inline cudaError_t nr_gpu_wait_stream(cudaStream_t s) { return nr_gpu_wait_poll([&] { return cudaStreamQuery(s); }); }
+/* GPU run time of one chunk (nr_gpu_chunk.h): two timing events around the launch on the same stream; us() after the host wait. The events are created on first use
+ * of the thread (a cudaEventCreate is not a memory call); 0 when anything fails (the chunker then uses the host time). Not a wait: no CUDA wait is issued here. */
+struct NrGpuSpan {
+  cudaEvent_t a = nullptr, b = nullptr;
+  bool ok = false, tried = false;
+  void begin(cudaStream_t s) {
+    if (!tried) { tried = true; ok = cudaEventCreate(&a) == cudaSuccess && cudaEventCreate(&b) == cudaSuccess; }
+    if (ok) cudaEventRecord(a, s);
+  }
+  void end(cudaStream_t s) { if (ok) cudaEventRecord(b, s); }
+  uint64_t us() const {
+    float ms = 0;
+    if (!ok || cudaEventElapsedTime(&ms, a, b) != cudaSuccess) return 0;
+    return (uint64_t)(ms * 1000.f) + 1;
+  }
+};
 #endif
