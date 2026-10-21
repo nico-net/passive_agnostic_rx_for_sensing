@@ -3076,6 +3076,69 @@ TEST(GpuPassSized, BenchSpanVsGrantSize) {
   m.pass_split(0);
 }
 
+/* BENCH [Bench, DGX]: the same with four decode threads in flight at once (the DL pool has four instances): SM sharing, where grant-sized work should show. Per-thread gspan, all threads pooled */
+TEST(GpuPassSized, BenchFourConcurrent) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split && m.set_spin);
+  auto sized = (void (*)(int))dlsym(m.dl, "nr_gpu_pass_test_sized");
+  ASSERT_TRUE(sized);
+  struct Case { int shape, first_sym; const char *name; };
+  const Case cases[] = {{0, 2, "24 PRB nl1 qm2, 12 sym"}, {0, 8, "24 PRB nl1 qm2, 6 sym"}, {10, 1, "24 PRB nl3 qm6"}, {63, 1, "217 PRB nl4 qm8"}};
+  m.pass_split(1);
+  m.set_spin(60);
+  const int NT = 4, N = 300;
+  for (const Case &cs : cases) {
+    std::vector<GpuPassFixture> fx;
+    fx.reserve(NT);
+    for (int t = 0; t < NT; t++) {
+      GpuPassFixture::first_sym = cs.first_sym;
+      fx.push_back(GpuPassFixture::from_shape(GpuPassFixture::warm_shapes()[cs.shape], 11 + t));
+      GpuPassFixture::first_sym = 1;
+      ASSERT_TRUE(fx.back().tb_ok_built);
+      fx.back().shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.back().tb.C);
+    }
+    for (auto &f : fx) f.bind();
+    nr_gpu_pass_shape_t w = fx[0].job->shape;
+    ASSERT_EQ(0, m.pass_warm(&w, fx[0].job->dj.qam_mode, fx[0].job->dj.align, fx[0].job->dj.want_evm)) << cs.name;
+    for (int on : {0, 1, 0, 1}) {
+      sized(on);
+      std::vector<fixad::Lat> lat(NT);
+      std::vector<std::thread> th;
+      std::atomic<int> bad{0};
+      for (int t = 0; t < NT; t++)
+        th.emplace_back([&, t] {
+          GpuPassFixture &f = fx[t];
+          f.job->copy_mask = on ? grant_mask(f) : 0x3fff;
+          std::vector<uint8_t> tb(f.tb.A / 8 + 64);
+          nr_gpu_pass_result_t r{};
+          r.tb = tb.data();
+          for (int i = 0; i < 30; i++) m.pass_try(f.job, &r);
+          for (int i = 0; i < N; i++) {
+            if (m.pass_try(f.job, &r) != 0) { bad++; continue; }
+            lat[t].add(r);
+          }
+        });
+      for (auto &t : th) t.join();
+      ASSERT_EQ(0, bad.load()) << cs.name;
+      fixad::Lat all;
+      for (auto &l : lat) {
+        all.wall.insert(all.wall.end(), l.wall.begin(), l.wall.end()); all.prep.insert(all.prep.end(), l.prep.begin(), l.prep.end());
+        all.launch.insert(all.launch.end(), l.launch.begin(), l.launch.end()); all.gstart.insert(all.gstart.end(), l.gstart.begin(), l.gstart.end());
+        all.gspan.insert(all.gspan.end(), l.gspan.begin(), l.gspan.end()); all.wake.insert(all.wake.end(), l.wake.begin(), l.wake.end());
+      }
+      char what[96];
+      snprintf(what, sizeof(what), "x4 %s", cs.name);
+      fixad::line(what, on ? "grant-sized" : "full-slot", all);
+    }
+    sized(1);
+  }
+  m.pass_split(0);
+}
+
 /* typical shapes: DL 1/4/8/16 code blocks, before (the Task 2 stage path: separate FEP / chest / demod / LDPC submissions with host steps between) and after (one submission), and the
  * completion wait before (spin 600 us then 20 us naps) and after (spin 150 us then a blocking event wait; and blocking only). */
 TEST(GpuPassBench, DlSubmissionBreakdown) {
