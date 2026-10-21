@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: LicenseRef-CSSL-1.0
-// Job latency of the shared core pool under a synthetic mix shaped like the measured receiver (cores 0-4 only; run via taskset -c 0-4):
+// Job latency of the shared core pool under a synthetic mix shaped like the measured receiver (run via taskset; pool cores = first..first+n-1):
 //   scan occasion 225 us every slot (500 us), DL decode 600 us at 1.2/slot, UL decode 400 us at 0.4/slot, retry 1500 us at 0.1/slot,
 //   discovery 2 threads x 200 us chunks at ~45 % duty. Offered load at scale 1 = 3.4 cores. Latency = arrival -> job done.
 // usage: bench_nr_core_pool <first_core> <n_cores> <load_scale> <seconds> [cfs]
@@ -28,10 +28,13 @@ struct Q {
   std::deque<Job> d;
   int prio;
   const char *name;
-  std::vector<uint64_t> lat, svc;
+  std::vector<uint64_t> lat, svc, wt;
+  uint64_t dl_ns; // deadline: latency above it counts as a miss
+  std::atomic<uint64_t> done{0}, pushed{0};
   std::mutex lm;
 };
 static std::atomic<bool> g_stop{false};
+static std::atomic<uint64_t> g_t_end{0}; // after this + 200 ms the consumers abandon their backlog (counted as drop)
 static bool g_cfs;
 static int g_first, g_n;
 static std::atomic<int> g_pin_rr{0};
@@ -46,14 +49,14 @@ static void spin_for(uint64_t ns) { const uint64_t e = nr_pool_now_ns() + ns; wh
 
 static void consumer(nr_pool_t *p, Q *q)
 {
-  std::vector<uint64_t> lat, svc;
+  std::vector<uint64_t> lat, svc, wt;
   if (g_cfs) pin_rr();
   for (;;) {
     Job j;
     {
       std::unique_lock<std::mutex> l(q->m);
       q->cv.wait(l, [&] { return !q->d.empty() || g_stop; });
-      if (q->d.empty()) break;
+      if (q->d.empty() || (g_stop && nr_pool_now_ns() > g_t_end + 200000000ull)) break;
       j = q->d.front();
       q->d.pop_front();
     }
@@ -64,10 +67,13 @@ static void consumer(nr_pool_t *p, Q *q)
     const uint64_t t1 = nr_pool_now_ns();
     lat.push_back(t1 - j.arr);
     svc.push_back(t1 - t0);
+    wt.push_back(t0 - j.arr);
+    q->done++;
   }
   std::lock_guard<std::mutex> g(q->lm);
   q->lat.insert(q->lat.end(), lat.begin(), lat.end());
   q->svc.insert(q->svc.end(), svc.begin(), svc.end());
+  q->wt.insert(q->wt.end(), wt.begin(), wt.end());
 }
 
 static void disc(nr_pool_t *p, double scale, unsigned seed, std::atomic<uint64_t> *chunks)
@@ -88,14 +94,19 @@ static void disc(nr_pool_t *p, double scale, unsigned seed, std::atomic<uint64_t
   }
 }
 
-static void report(const char *name, std::vector<uint64_t> &v, std::vector<uint64_t> &s)
+// wait = arrival -> job start (queue + token); lat = arrival -> done; miss = lat > deadline; drop = never started by the end of the run
+static void report(Q *Qp)
 {
+  auto &v = Qp->lat; auto &w = Qp->wt; auto &s = Qp->svc;
   if (v.empty()) return;
-  std::sort(v.begin(), v.end());
-  std::sort(s.begin(), s.end());
-  auto q = [&](double f) { return v[std::min(v.size() - 1, (size_t)(f * (double)v.size()))] / 1000.0; };
-  printf("  %-7s n=%-6zu lat_us p50=%7.0f p90=%7.0f p99=%7.0f p99.9=%7.0f max=%7.0f | svc_us p50=%6.0f\n", name, v.size(), q(0.5), q(0.9), q(0.99),
-         q(0.999), v.back() / 1000.0, s[s.size() / 2] / 1000.0);
+  uint64_t miss = 0;
+  for (uint64_t x : v) miss += x > Qp->dl_ns;
+  miss += Qp->pushed - Qp->done; // drops count as misses
+  std::sort(v.begin(), v.end()); std::sort(w.begin(), w.end()); std::sort(s.begin(), s.end());
+  auto q = [](std::vector<uint64_t> &x, double f) { return x[std::min(x.size() - 1, (size_t)(f * (double)x.size()))] / 1000.0; };
+  printf("  %-6s n=%-6zu wait_us p50=%7.0f p99=%8.0f max=%8.0f | lat_us p50=%7.0f p99=%8.0f max=%8.0f | svc_p50=%5.0f miss=%lu/%lu drop=%lu\n", Qp->name,
+         v.size(), q(w, .5), q(w, .99), w.back() / 1000.0, q(v, .5), q(v, .99), v.back() / 1000.0, s[s.size() / 2] / 1000.0, (unsigned long)miss, (unsigned long)Qp->pushed,
+         (unsigned long)(Qp->pushed - Qp->done));
 }
 
 int main(int argc, char **argv)
@@ -113,10 +124,10 @@ int main(int argc, char **argv)
   nr_pool_t *p = nr_pool_create(cores, nullptr, n, &cfg);
 
   Q scan, dl, ul, rt;
-  scan.prio = NR_POOL_SCAN; scan.name = "scan";
-  dl.prio = NR_POOL_DECODE; dl.name = "dl";
-  ul.prio = NR_POOL_DECODE; ul.name = "ul";
-  rt.prio = NR_POOL_RETRY; rt.name = "retry";
+  scan.prio = NR_POOL_SCAN; scan.name = "scan"; scan.dl_ns = 500000;
+  dl.prio = NR_POOL_DECODE; dl.name = "dl"; dl.dl_ns = 2000000;
+  ul.prio = NR_POOL_DECODE | NR_POOL_F_UL; ul.name = "ul"; ul.dl_ns = 2000000;
+  rt.prio = NR_POOL_RETRY; rt.name = "retry"; rt.dl_ns = 10000000;
   std::vector<std::thread> th;
   for (int i = 0; i < 2; i++) th.emplace_back(consumer, p, &scan);
   for (int i = 0; i < 5; i++) th.emplace_back(consumer, p, &dl);
@@ -130,10 +141,12 @@ int main(int argc, char **argv)
   auto push = [&](Q &q, uint64_t svc) {
     const double j = 0.8 + 0.4 * (double)(rng() % 1000) / 1000.0;
     { std::lock_guard<std::mutex> l(q.m); q.d.push_back({nr_pool_now_ns(), (uint64_t)((double)svc * j)}); }
+    q.pushed++;
     q.cv.notify_one();
   };
   auto poisson = [&](double lam) { return std::poisson_distribution<int>(lam)(rng); };
   const uint64_t t_begin = nr_pool_now_ns(), t_end = t_begin + (uint64_t)secs * 1000000000ull;
+  g_t_end = t_end;
   uint64_t next = t_begin;
   while (next < t_end) {
     next += 500000;
@@ -150,9 +163,9 @@ int main(int argc, char **argv)
   for (auto &t : dt) t.join();
   nr_pool_stats_t st;
   nr_pool_stats(p, &st);
-  printf("%s N=%d first_core=%d scale=%.2f  busy_cores=%.2f disc_chunks/s=%.0f yields=%lu\n", g_cfs ? "CFS" : "POOL", n, first, scale,
-         (double)st.busy_ns / (double)(nr_pool_now_ns() - t_begin), (double)chunks / secs, (unsigned long)st.yields);
-  for (Q *q : {&scan, &dl, &ul, &rt}) report(q->name, q->lat, q->svc);
+  printf("%s N=%d first_core=%d scale=%.2f  busy_cores=%.2f disc_chunks/s=%.0f yields=%lu nested=%lu\n", g_cfs ? "CFS" : "POOL", n, first, scale,
+         (double)st.busy_ns / (double)(nr_pool_now_ns() - t_begin), (double)chunks / secs, (unsigned long)st.yields, (unsigned long)st.nested);
+  for (Q *q : {&scan, &dl, &ul, &rt}) report(q);
   char line[1024];
   nr_pool_stats_line(p, line, sizeof(line));
   printf("  %s\n", line);

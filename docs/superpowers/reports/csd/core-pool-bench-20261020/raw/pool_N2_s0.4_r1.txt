@@ -1,0 +1,6 @@
+POOL N=2 first_core=0 scale=0.40  busy_cores=1.45 disc_chunks/s=298 yields=4037 nested=0
+  scan   n=30000  wait_us p50=     99 p99=    1908 max=   10772 | lat_us p50=    367 p99=    2187 max=   11025 | svc_p50=  259 miss=11120/30000 drop=0
+  dl     n=14675  wait_us p50=   1229 p99=   12981 max=   24017 | lat_us p50=   1871 p99=   13618 max=   24764 | svc_p50=  641 miss=6842/14675 drop=0
+  ul     n=4809   wait_us p50=   1551 p99=   13577 max=   24041 | lat_us p50=   1996 p99=   14009 max=   24445 | svc_p50=  436 miss=2400/4809 drop=0
+  retry  n=1256   wait_us p50=   4092 p99=   23800 max=   34900 | lat_us p50=   5606 p99=   25110 max=   36239 | svc_p50= 1539 miss=175/1256 drop=0
+  SENSING: CORE_POOL n=2 yields=4037 gpu_gives=0 nested=0 enforced=0 scan[n=30000 waited=16066 promo=0 wait_us p50<=32 p99<=2048 max=6163] decode[n=19484 waited=18650 promo=0 wait_us p50<=2048 p99<=8192 max=21529] retry[n=1256 waited=1252 promo=584 wait_us p50<=4096 p99<=8192 max=4539] disc[n=4930 waited=4886 promo=609 wait_us p50<=1024 p99<=32768 max=20523] house[n=0 waited=0 promo=0 wait_us p50<=0 p99<=0 max=0]
