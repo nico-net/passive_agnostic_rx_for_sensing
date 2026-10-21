@@ -3,6 +3,7 @@
 #endif
 #include "common/utils/nr_bg_lane.h"
 #include "common/utils/nr_core_pool.h"
+#include "common/utils/nr_drop_queue.h"
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include "nr_pdsch_gpu_exact.h"
@@ -4216,6 +4217,68 @@ static void occasion_reconf_prologue(PHY_VARS_NR_UE *ue, long source_absolute_sl
   }
 }
 
+/* DISC worker: the discovered-CORESET bookkeeping (nr_pdcch_discovered_step_ex, discovered_poll, discovered_snapshot) is state-only work on
+ * the Phase-2 state machine. It runs on ONE low-priority thread that leases NR_POOL_DISC per job (none while idle), never on the scan
+ * consumer under its SCAN lease (core pool guarantee (c)). The scan thread enqueues {pci, carrier, token, slot, step?} into a bounded
+ * drop-oldest queue (never blocks, drops counted) and reads the dwell the worker last published, so a new/rejected dwell takes effect one job
+ * later (discovery latency only; the bank decode of discovered config is untouched). */
+typedef struct { uint64_t token, slot, enq_ns; uint32_t stamp; int pci, carrier_rb; uint8_t step, prescreen; } disc_job_t;
+static nr_dq_t g_disc_q = NR_DQ_INIT;
+static pthread_mutex_t g_disc_pub_mu = PTHREAD_MUTEX_INITIALIZER; /* leaf lock: never held with the Phase-2 lock or a pool token request */
+static struct { bool valid; uint64_t token; nr_pdcch_blind_monitor_cfg_t cfg; } g_disc_pub;
+static _Atomic uint64_t g_disc_drop_epoch, g_disc_jobs, g_disc_pending_poll;
+static pthread_once_t g_disc_once = PTHREAD_ONCE_INIT;
+static void *disc_worker(void *arg)
+{
+  (void)arg;
+  pthread_setname_np(pthread_self(), "pdcchDisc");
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
+  static __thread nr_pdcch_blind_monitor_cfg_t cfg;
+  for (;;) {
+    disc_job_t j;
+    nr_dq_pop(&g_disc_q, &j, sizeof(j));
+    atomic_store_explicit(&g_disc_pending_poll, 0, memory_order_relaxed); /* every job polls */
+    nr_pool_site_acquire(NR_POOL_DISC, 0, j.enq_ns);
+    NR_CFG_EPOCH_WORK(j.stamp, &g_disc_drop_epoch);
+    uint64_t token = 0;
+    nr_pdcch_blind_phase2_lock();
+    nr_pdcch_discovered_note_pci(j.pci); /* before the poll: ISAC_PDCCH_DISC_ENUM queues nID = PCI */
+    if (j.step) nr_pdcch_discovered_step_ex(j.token, j.slot, j.prescreen);
+    nr_pdcch_blind_monitor_discovered_poll();
+    const bool ok = nr_pdcch_discovered_snapshot(&cfg, &token, j.carrier_rb);
+    nr_pdcch_blind_phase2_unlock();
+    pthread_mutex_lock(&g_disc_pub_mu);
+    g_disc_pub.valid = ok;
+    if (ok) { g_disc_pub.cfg = cfg; g_disc_pub.token = token; }
+    pthread_mutex_unlock(&g_disc_pub_mu);
+    atomic_fetch_add_explicit(&g_disc_jobs, 1, memory_order_relaxed);
+    nr_pool_site_release();
+  }
+  return NULL;
+}
+static void disc_start(void)
+{
+  pthread_t th;
+  if (nr_core_plan_create(&th, NULL, disc_worker, NULL, -1) == 0) pthread_detach(th);
+}
+/* Scan side. A poll job is coalesced while one is still queued (idempotent); a step job is always queued. */
+static void disc_submit(const PHY_VARS_NR_UE *ue, bool step, uint64_t token, uint64_t slot, bool prescreen)
+{
+  pthread_once(&g_disc_once, disc_start);
+  if (!step && atomic_exchange_explicit(&g_disc_pending_poll, 1, memory_order_relaxed)) return;
+  disc_job_t j = {.token = token, .slot = slot, .enq_ns = nr_pool_now_ns(), .stamp = nr_cfg_epoch_work_stamp(),
+                  .pci = ue->frame_parms.Nid_cell, .carrier_rb = ue->frame_parms.N_RB_DL, .step = step, .prescreen = prescreen};
+  nr_dq_push(&g_disc_q, &j, sizeof(j));
+}
+static bool disc_published(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *token)
+{
+  pthread_mutex_lock(&g_disc_pub_mu);
+  const bool ok = g_disc_pub.valid;
+  if (ok) { *cfg = g_disc_pub.cfg; *token = g_disc_pub.token; }
+  pthread_mutex_unlock(&g_disc_pub_mu);
+  return ok;
+}
+
 /* run_discovered_occasion: runs one occasion of the discovered (dedicated) CORESET geometry: sets the discovery token and share, runs the pass under the Phase-2 lock and feeds the discovery step.
  *   Caller: nr_pdcch_blind_monitor_run_occasion() (the discovered dwell, in the three slot paths).
  */
@@ -4232,12 +4295,8 @@ static void run_discovered_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   nr_pdcch_blind_monitor_cfg_override(cfg);
   nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial, slot);
   nr_pdcch_blind_monitor_cfg_override(NULL);
-  nr_pdcch_blind_phase2_lock();
-  if (t_discovered_attempted) {
-    nr_pool_site_note_scan_extra(); /* discovery/solver runs inline under the scan lease: counted (core pool nested) */
-    nr_pdcch_discovered_step_ex(token, t_discovered_slot, t_discovered_prescreen_passed);
-  }
-  nr_pdcch_blind_phase2_unlock();
+  if (t_discovered_attempted)
+    disc_submit(ue, true, token, t_discovered_slot, t_discovered_prescreen_passed);
   t_discovered_token = 0;
   t_candidate_share = 0;
 }
@@ -4330,12 +4389,8 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   uint64_t discovered_token = 0;
   bool discovered = false;
   if (additional) {
-    nr_pdcch_blind_phase2_lock();
-    nr_pdcch_discovered_note_pci(ue->frame_parms.Nid_cell); /* before the poll: ISAC_PDCCH_DISC_ENUM queues nID = PCI */
-    nr_pool_site_note_scan_extra();
-    nr_pdcch_blind_monitor_discovered_poll();
-    discovered = nr_pdcch_discovered_snapshot(&discovered_cfg, &discovered_token, ue->frame_parms.N_RB_DL);
-    nr_pdcch_blind_phase2_unlock();
+    disc_submit(ue, false, 0, 0, false);
+    discovered = disc_published(&discovered_cfg, &discovered_token);
   }
   /* A slot admitted only for the dedicated CORESETs runs the banks + the discovered dwell. */
   if (proc != NULL
