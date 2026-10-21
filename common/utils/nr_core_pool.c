@@ -133,7 +133,8 @@ static bool class_ok(const nr_pool_t *p, int prio, bool promoted, bool ul)
   const int lim1 = n > 1 ? n - 1 : 1, lim2 = n > 2 ? n - 2 : 1;
   switch (prio) {
     case NR_POOL_SCAN: return p->cnt[NR_POOL_SCAN] + low < lim1;
-    case NR_POOL_DECODE: return ul ? p->cnt[NR_POOL_DECODE] + low < lim1 : p->cnt_dl + low < lim2;
+    /* DL: min(NR_POOL_DL_TOKENS, N-1) first-pass decodes, low classes not counted (they never eat DL's share); UL: all decode + low <= N-1 */
+    case NR_POOL_DECODE: return ul ? p->cnt[NR_POOL_DECODE] + low < lim1 : p->cnt_dl < (NR_POOL_DL_TOKENS < lim1 ? NR_POOL_DL_TOKENS : lim1);
     default: return busy < lim2 && low < lim2;
   }
 }

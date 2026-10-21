@@ -11,7 +11,10 @@
  *      then about once a second from the scan consumers), threadCreate() refuses an explicit pool core for a non-member, and the site pool
  *      never contains the RT receive / radio-ring / UHD-control cores. Members sit on the home mask unless they hold a lease.
  *  (b) A DECODE ARRIVAL DOES NOT WAIT FOR SCANS. Leases are capped per class so that a token is always left for each urgent class:
- *      scan+low <= N-1 (the last token is the decode reserve, a scan cannot take it), decode+low <= N-1 (the scan reserve), low <= N-2.
+ *      scan+low <= N-1 (the last token is the decode reserve, a scan cannot take it), UL decode+all decode+low <= N-1 (the scan reserve), low <= N-2.
+ *      DL first-pass decodes hold up to min(NR_POOL_DL_TOKENS, N-1) tokens, low classes not counted (DL has as many consumers as its default
+ *      core list, so it is never worse off than time-sharing); with D=5 >= N-1 DL may take every token but the scan reserve and UL decode then
+ *      competes for a freed token instead of owning a reserve. Low classes start only at busy < N-2 and yield to urgent waiters.
  *      Waiters older than age_ns[prio] are promoted (starvation bound; they still never exceed busy < N).
  *  (c) NO DISCOVERY/SOLVER UNDER A SCAN LEASE. Discovery work leases class DISC on its own thread; a thread asking for a different class
  *      while it holds a lease is counted in stats.nested; so is scan-side discovery/solver work that still runs inline under a SCAN lease
@@ -31,8 +34,8 @@
 extern "C" {
 #endif
 enum { NR_POOL_SCAN = 0, NR_POOL_DECODE, NR_POOL_RETRY, NR_POOL_DISC, NR_POOL_HOUSE, NR_POOL_NPRIO };
-/* OR into prio for first-pass UL decodes: the DECODE class keeps one more token for them than for DL (DL decode+low <= N-2, UL <= N-1), so a few DL
- * consumers blocked in a GPU/driver call cannot take every token and starve the UL decode. */
+/* OR into prio for first-pass UL decodes (own cap: all decode+low <= N-1; DL has its own count, see (b)). */
+#define NR_POOL_DL_TOKENS 5 /* DL consumers today: default ISAC_PDSCH_CORES 7,3,4,0,1 at 3f0d921 */
 #define NR_POOL_F_UL 0x100
 #define NR_POOL_MAX_TOKENS 32
 #define NR_POOL_MAX_CELLS 16

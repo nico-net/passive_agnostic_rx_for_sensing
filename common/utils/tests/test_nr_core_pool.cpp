@@ -170,8 +170,8 @@ TEST(CorePool, ScanCannotTakeTheDecodeReserve)
   nr_pool_destroy(p);
 }
 
-// DL decode may not take the token kept for UL decode (and scan): 2 DL decodes fill their cap, a third DL is refused, UL is granted.
-TEST(CorePool, UlDecodeKeepsATokenAgainstDl)
+// DL decode may hold min(5, N-1) tokens, low classes not counted; the last token stays the scan reserve, so UL waits for a DL release.
+TEST(CorePool, DlTakesEveryTokenButTheScanReserve)
 {
   nr_pool_t *p = mk(4);
   std::atomic<int> st{0}, r[4];
@@ -187,8 +187,31 @@ TEST(CorePool, UlDecodeKeepsATokenAgainstDl)
   }
   EXPECT_GE(r[0], 0);
   EXPECT_GE(r[1], 0);
-  EXPECT_EQ(r[2], -1);
-  EXPECT_GE(r[3], 0);
+  EXPECT_GE(r[2], 0);
+  EXPECT_EQ(r[3], -1); // N-1 = 3 decodes: the UL one waits
+  st = 1;
+  for (auto &t : hold) t.join();
+  nr_pool_destroy(p);
+}
+
+// D = 5 DL consumers at the default N = 6: all five run at once even with a low-class lease held; a sixth DL (the scan reserve) is refused.
+TEST(CorePool, DlHoldsDTokensAtN6)
+{
+  nr_pool_t *p = mk(6);
+  std::atomic<int> st{0}, r[7];
+  for (auto &x : r) x = -2;
+  std::vector<std::thread> hold;
+  for (int i = 0; i < 7; i++) {
+    hold.emplace_back([&, i] {
+      r[i] = nr_pool_try_acquire(p, i == 0 ? NR_POOL_RETRY : NR_POOL_DECODE, 0, 0);
+      while (st < 1) usleep(100);
+      nr_pool_release(p);
+    });
+    wait_until([&] { return r[i] != -2; });
+  }
+  EXPECT_GE(r[0], 0);
+  for (int i = 1; i <= NR_POOL_DL_TOKENS; i++) EXPECT_GE(r[i], 0) << "DL " << i;
+  EXPECT_EQ(r[6], -1);
   st = 1;
   for (auto &t : hold) t.join();
   nr_pool_destroy(p);
