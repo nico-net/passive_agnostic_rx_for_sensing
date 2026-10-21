@@ -133,7 +133,9 @@ static bool class_ok(const nr_pool_t *p, int prio, bool promoted, bool ul)
   const int lim1 = n > 1 ? n - 1 : 1, lim2 = n > 2 ? n - 2 : 1;
   switch (prio) {
     case NR_POOL_SCAN: return p->cnt[NR_POOL_SCAN] + low < lim1;
-    case NR_POOL_DECODE: return ul ? p->cnt[NR_POOL_DECODE] + low < lim1 : p->cnt_dl + low < lim2;
+    /* DL: counted alone, low classes do not shrink it (they yield at their next chunk step to a waiting decode). The last free token stays
+     * the scan reserve unless a scan already holds one. So DL holds min(#DL consumers, N-1) tokens, N-1 only when scan is idle. */
+    case NR_POOL_DECODE: return ul ? p->cnt[NR_POOL_DECODE] + low < lim1 : p->cnt_dl < lim1 && (busy < lim1 || p->cnt[NR_POOL_SCAN] > 0);
     default: return busy < lim2 && low < lim2;
   }
 }

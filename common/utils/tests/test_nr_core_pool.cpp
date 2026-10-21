@@ -170,27 +170,62 @@ TEST(CorePool, ScanCannotTakeTheDecodeReserve)
   nr_pool_destroy(p);
 }
 
-// DL decode may not take the token kept for UL decode (and scan): 2 DL decodes fill their cap, a third DL is refused, UL is granted.
-TEST(CorePool, UlDecodeKeepsATokenAgainstDl)
+// Try to take one token per entry (in order, held until the end); returns the cores (-1 = refused).
+static std::vector<int> take_all(nr_pool_t *p, const std::vector<int> &prios)
 {
-  nr_pool_t *p = mk(4);
-  std::atomic<int> st{0}, r[4];
+  std::atomic<int> st{0};
+  std::vector<std::atomic<int>> r(prios.size());
   for (auto &x : r) x = -2;
   std::vector<std::thread> hold;
-  for (int i = 0; i < 4; i++) {
+  for (size_t i = 0; i < prios.size(); i++) {
     hold.emplace_back([&, i] {
-      r[i] = nr_pool_try_acquire(p, i < 3 ? NR_POOL_DECODE : (NR_POOL_DECODE | NR_POOL_F_UL), 0, 0);
+      r[i] = nr_pool_try_acquire(p, prios[i], 0, 0);
       while (st < 1) usleep(100);
       nr_pool_release(p);
     });
     wait_until([&] { return r[i] != -2; });
   }
-  EXPECT_GE(r[0], 0);
-  EXPECT_GE(r[1], 0);
-  EXPECT_EQ(r[2], -1);
-  EXPECT_GE(r[3], 0);
+  std::vector<int> out(r.begin(), r.end());
   st = 1;
   for (auto &t : hold) t.join();
+  return out;
+}
+
+// DL first-pass decode holds N-1 tokens (low classes not counted); the last token is the scan reserve, so UL waits for a DL release.
+TEST(CorePool, DlTakesEveryTokenButTheScanReserve)
+{
+  nr_pool_t *p = mk(4);
+  const int DL = NR_POOL_DECODE, UL = NR_POOL_DECODE | NR_POOL_F_UL;
+  const auto r = take_all(p, {DL, DL, DL, DL, UL, NR_POOL_SCAN});
+  EXPECT_GE(r[0], 0);
+  EXPECT_GE(r[1], 0);
+  EXPECT_GE(r[2], 0);
+  EXPECT_EQ(r[3], -1); // N-1 = 3 DL
+  EXPECT_EQ(r[4], -1); // UL: decode already at N-1
+  EXPECT_GE(r[5], 0);  // the scan still gets its token
+  nr_pool_destroy(p);
+}
+
+// Default site size N = 6 with D = 5 DL consumers: all five hold a token at once, a scan still gets the sixth; with a scan already
+// running the five DL still fit (N-1 DL + 1 scan).
+TEST(CorePool, FiveDlDecodesRunAtOnceAtN6AndAScanStillGetsAToken)
+{
+  const int DL = NR_POOL_DECODE, UL = NR_POOL_DECODE | NR_POOL_F_UL;
+  nr_pool_t *p = mk(6);
+  auto r = take_all(p, {DL, DL, DL, DL, DL, DL, UL, NR_POOL_SCAN});
+  for (int i = 0; i < 5; i++) EXPECT_GE(r[i], 0) << "DL " << i;
+  EXPECT_EQ(r[5], -1);
+  EXPECT_EQ(r[6], -1);
+  EXPECT_GE(r[7], 0);
+  nr_pool_destroy(p);
+  p = mk(6);
+  r = take_all(p, {NR_POOL_SCAN, DL, DL, DL, DL, DL, DL});
+  for (int i = 0; i < 6; i++) EXPECT_GE(r[i], 0) << i;
+  EXPECT_EQ(r[6], -1);
+  nr_pool_destroy(p);
+  p = mk(6); // UL keeps working when DL has fewer consumers than tokens: 3 DL + 2 UL
+  r = take_all(p, {DL, DL, DL, UL, UL, NR_POOL_SCAN});
+  for (int i = 0; i < 6; i++) EXPECT_GE(r[i], 0) << i;
   nr_pool_destroy(p);
 }
 
