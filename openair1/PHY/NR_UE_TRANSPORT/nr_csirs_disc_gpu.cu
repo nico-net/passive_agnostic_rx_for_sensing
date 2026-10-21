@@ -46,7 +46,8 @@ static cudaError_t disc_zero(void *dst,int value,size_t n) {return cudaMemsetAsy
 template<class L> static cudaError_t disc_chunks(NrGpuChunker &c,long blocks,L launch)
 {
   cudaError_t err=cudaSuccess;
-  int rc=nr_gpu_chunked(c,blocks,[&](long f,long n){launch(f,n);err=cudaGetLastError();return (int)err;},[&](){err=disc_wait();return (int)err;});
+  static thread_local NrGpuSpan span; /* GPU run time of the chunk, not its host time (nr_gpu_chunk.h) */
+  int rc=nr_gpu_chunked(c,blocks,[&](long f,long n){span.begin(disc_stream());launch(f,n);span.end(disc_stream());err=cudaGetLastError();return (int)err;},[&](){err=disc_wait();return (int)err;},[&](){return span.us();});
   return rc?err:cudaSuccess;
 }
 
