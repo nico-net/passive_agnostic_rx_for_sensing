@@ -261,7 +261,7 @@ struct ExactIO {
   uint16_t sym_list[14];
   const uint32_t *par; /* GPUPASS: non-null = the per-slot staging block, read at execution (graph replay); null = the fields above. Layout (u32 words):
                         * [0] origin, [1..14] rot[14] as short2, [16] ring_len, [17] 1 = out / ant_stride below override io.out / io.ant_stride,
-                        * [18..19] out (u64), [20] ant_stride (short2 per antenna), [22 + 2 a .. 23 + 2 a] rx[a] (u64) */
+                        * [18..19] out (u64), [20] ant_stride (short2 per antenna), [21] symbols to transform (bit l), [22 + 2 a .. 23 + 2 a] rx[a] (u64) */
 };
 enum { PAR_WORDS = 32 };
 
@@ -273,6 +273,7 @@ __global__ void __launch_bounds__(THREADS) k_fep_exact(const ExactIO io, int ncp
 {
   __shared__ short2 s[N];
   const int sym = io.sym_list[blockIdx.x], ant = blockIdx.y, t = threadIdx.x;
+  if (io.par && !(io.par[21] >> sym & 1u)) return; /* GPUPASS: this grant's symbol set, read when the kernel runs (the graph keeps its full grid) */
   const short2 *in = io.par ? (const short2 *)*(const unsigned long long *)(io.par + 22 + 2 * ant) : io.rx[ant];
   const uint32_t ring_len = io.par ? io.par[16] : io.ring_len;
   const uint32_t first = (io.par ? io.par[0] : io.origin) + (uint32_t)(ncp0 + sym * (N + ncp));

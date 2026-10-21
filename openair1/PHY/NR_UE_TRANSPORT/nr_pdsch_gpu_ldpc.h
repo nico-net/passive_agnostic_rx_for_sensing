@@ -32,6 +32,7 @@ typedef struct {
   int nsnap;         /* snapshots written (after iterations 3 .. nsnap + 2) */
   int syn0;          /* 1: stopped at a zero syndrome after the last snapshot (later iterations not run) */
   uint8_t snap[NR_GPU_LDPC_MAX_SNAP][NR_GPU_LDPC_KB_MAX];
+  uint8_t pad;       /* graph pass only (nr_pdsch_gpu_ldpc_pass_set): 1 = a padding block of the shape class; its code block stops at entry (nsnap 0, syn0 1), nobody reads its output */
 } nr_gpu_ldpc_job_t;
 
 /* nr_pdsch_gpu_ldpc_dev (launch-only) buffer layouts. llr_dev: job k's Kc * Z int8 inputs at k * NR_GPU_LDPC_DEV_IN_STRIDE.

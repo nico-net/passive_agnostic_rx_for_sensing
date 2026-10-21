@@ -62,6 +62,7 @@ typedef struct {
   uint16_t sym_mask;            ///< symbols to transform
   int16_t *out;                 ///< nr_pdsch_gpu_fep_stage_at, DIRECT only: write this rxdataF (OAI layout, c16) instead of the buffer given to _dev; NULL = no redirect
   uint32_t out_stride;          ///< c16 between two antennas of `out`
+  uint16_t run_mask;            ///< graph pass: symbols this replay transforms (0 = sym_mask); must be a subset of the captured sym_mask (the grid is baked, the other blocks return at once)
 } nr_gpu_fep_job_t;
 /* GPUPASS contract (graph-capturable): call nr_pdsch_gpu_fep_stage on the HOST first (waits until the slot's previous pass has finished
  * reading it, then copies the IQ window -- DISCRETE only -- and the per-slot origin/rotation into pinned staging; returns the slot,

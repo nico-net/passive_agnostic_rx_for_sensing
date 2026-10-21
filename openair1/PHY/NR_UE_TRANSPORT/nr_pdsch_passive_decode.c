@@ -3000,7 +3000,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
         nr_slot_fep(ue, fp, proc->nr_slot_rx, m, rxdataF, link_type_dl, 0, nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata));
   }
   if (!fep_hit && !gpu_llr && !gw_ready && !gw_fep_hit) {
-    t_fep_cache.slot = share_slot; t_fep_cache.fo = fep_fo; t_fep_cache.valid = t_share.on;
+    t_fep_cache.slot = share_slot; t_fep_cache.fo = fep_fo; t_fep_cache.valid = t_share.on && (!gp_ok || t_gpp->fep_mask == 0x3fff); /* a grant-sized pass leaves the rest of the slot untransformed */
   }
   if (t_gw_owner && !fep_hit)
     nr_td_grantwork_fep_done(t_gw, fep_fo, gw_fep_need);

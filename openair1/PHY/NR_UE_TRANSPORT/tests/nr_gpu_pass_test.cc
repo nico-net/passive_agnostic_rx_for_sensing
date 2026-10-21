@@ -2885,6 +2885,197 @@ static void line(const char *what, const char *mode, const Lat &l, double stage_
 }
 }  // namespace fixad
 
+/* ===================================================== grant-sized work (csd/int16-grantsize) ===================================================== */
+/* The pass transforms only the symbols a grant reads (job.copy_mask: its window, its DM-RS symbols, the demod's symbols) and the LDPC padding blocks of the shape class stop at entry.
+ * nr_gpu_pass_test_sized(0) restores the full-slot FEP and the running padding blocks (the pre-change behaviour); the tests compare the two bit for bit. */
+static uint16_t grant_mask(const GpuPassFixture &f)
+{
+  uint32_t mk = f.job->dj.sym_mask;
+  for (int d = 0; d < f.ndm; d++) mk |= 1u << f.dm_sym[d];
+  return (uint16_t)(mk & 0x3fff);
+}
+struct SizedRun {
+  int rc = -1;
+  nr_gpu_pass_result_t r{};
+  std::vector<uint8_t> tb;
+  std::vector<int16_t> llr, rxF;
+};
+static SizedRun sized_run(GpuPassModule &m, GpuPassFixture &fx, void (*sized)(int), int on, uint16_t mask, uint8_t poison)
+{
+  SizedRun o;
+  sized(on);
+  fx.job->copy_mask = mask;
+  fx.job->llr_out_all = 1;
+  std::fill(fx.rxF_out.begin(), fx.rxF_out.end(), (int16_t)((poison << 8) | poison)); /* what a symbol the pass does not transform keeps */
+  o.tb.assign(fx.tb.A / 8 + 64, 0xAA);
+  o.r.tb = o.tb.data();
+  o.rc = m.pass_try(fx.job, &o.r);
+  sized(1);
+  o.llr.assign(fx.llr_pass.begin(), fx.llr_pass.begin() + fx.job->G);
+  o.rxF = fx.rxF_out;
+  return o;
+}
+TEST(GpuPassSized, GrantSizedEqualsFullSlot) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  auto sized = (void (*)(int))dlsym(m.dl, "nr_gpu_pass_test_sized");
+  ASSERT_TRUE(sized) << "libpdsch_gpu.so has no nr_gpu_pass_test_sized";
+  struct Case { int shape, first_sym, A; }; /* shape: warm_shapes() index (nrb x nl x qm); first_sym: the grant's first symbol; A: forced TBS (0 = the target rate's) */
+  const Case cases[] = {{0, 5, 0}, {5, 3, 0}, {10, 1, 0}, {22, 2, 0}, {41, 7, 0}, {53, 1, 0}, {63, 2, 0}, /* small / big / 2-4 layers, windows of 7..13 symbols */
+                        {26, 1, 40000}, {58, 2, 150000}};                                           /* several code blocks (ncb class > C: padding blocks) */
+  int n = 0, n_ok = 0, npad = 0;
+  m.pass_split(1);
+  for (const Case &cs : cases) {
+    GpuPassFixture::first_sym = cs.first_sym;
+    GpuPassFixture::force_A = cs.A;
+    const nr_gpu_pass_shape_t sh = GpuPassFixture::warm_shapes()[cs.shape];
+    GpuPassFixture fx = GpuPassFixture::from_shape(sh, 31 + cs.shape);
+    GpuPassFixture::first_sym = 1;
+    GpuPassFixture::force_A = 0;
+    ASSERT_TRUE(fx.tb_ok_built);
+    fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
+    fx.bind();
+    npad += (int)fx.shape.ncb_class - fx.tb.C;
+    nr_gpu_pass_shape_t w = fx.job->shape;
+    const std::string what = "shape " + std::to_string(cs.shape) + " nrb " + std::to_string(sh.nrb_class) + " nl " + std::to_string(sh.nl) + " qm " + std::to_string(sh.qm) + " C " + std::to_string(fx.tb.C) + " first_sym " + std::to_string(cs.first_sym);
+    ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm)) << what;
+    const uint16_t mask = grant_mask(fx);
+    ASSERT_NE(0x3fff, mask) << what << ": the case must leave some symbol out";
+    SizedRun full = sized_run(m, fx, sized, 0, 0x3fff, 0x00);
+    SizedRun cut = sized_run(m, fx, sized, 1, mask, 0xA5);
+    ASSERT_EQ(0, full.rc) << what;
+    ASSERT_EQ(0, cut.rc) << what;
+    EXPECT_EQ(full.r.need_cpu, cut.r.need_cpu) << what;
+    EXPECT_EQ(full.r.tb_ok, cut.r.tb_ok) << what;
+    EXPECT_EQ(full.r.nvar, cut.r.nvar) << what;
+    EXPECT_EQ(0, memcmp(full.r.seg_ok, cut.r.seg_ok, sizeof(full.r.seg_ok))) << what;
+    EXPECT_EQ(0, memcmp(&full.r.llr_stats, &cut.r.llr_stats, sizeof(full.r.llr_stats))) << what << ": LLR statistics";
+    EXPECT_EQ(full.llr, cut.llr) << what << ": final LLRs";
+    if (!full.r.need_cpu && full.r.tb_ok) EXPECT_EQ(0, memcmp(full.tb.data(), cut.tb.data(), fx.tb.A / 8)) << what;
+    n_ok += cut.r.tb_ok;
+    n++;
+    for (int a = 0; a < 4; a++)
+      for (int sy = 0; sy < 14; sy++) {
+        const size_t o = 2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096);
+        if (mask >> sy & 1)
+          EXPECT_EQ(0, memcmp(&full.rxF[o], &cut.rxF[o], 4096 * 4)) << what << ": rxdataF ant " << a << " sym " << sy << " (needed)";
+        else
+          for (int i = 0; i < 2 * 4096; i++) ASSERT_EQ((int16_t)0xA5A5, cut.rxF[o + i]) << what << ": rxdataF ant " << a << " sym " << sy << " was written but the grant does not read it";
+      }
+    /* the stage path (the CPU-equivalent reference) agrees with the sized pass too */
+    std::vector<uint8_t> sb(fx.tb.A / 8 + 64, 0x55);
+    nr_gpu_pass_result_t s{};
+    s.tb = sb.data();
+    ASSERT_EQ(0, fx.run_stage_path(&s)) << what;
+    EXPECT_EQ(s.tb_ok, cut.r.tb_ok) << what << ": stage path";
+    EXPECT_EQ(0, memcmp(s.seg_ok, cut.r.seg_ok, sizeof(s.seg_ok))) << what << ": stage path";
+    if (!cut.r.need_cpu) EXPECT_EQ(0, memcmp(fx.llr_ref.data(), cut.llr.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs vs the stage path";
+    printf("  sized %s: mask 0x%04x, tb_ok %d, padding blocks %d\n", what.c_str(), (unsigned)mask, (int)cut.r.tb_ok, (int)fx.shape.ncb_class - fx.tb.C);
+  }
+  m.pass_split(0);
+  printf("GpuPassSized.GrantSizedEqualsFullSlot: %d grants, decoded %d, padding blocks %d\n", n, n_ok, npad);
+  EXPECT_GE(n_ok, n / 2);
+  EXPECT_GE(npad, 4) << "the multi-code-block cases must have padding blocks";
+}
+/* a held decode call (retry arms on one instance): a retry whose symbol set is inside what C transformed skips C, one that needs another symbol re-runs C and gets it */
+TEST(GpuPassSized, HeldRetryFollowsTheSymbolSet) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split && m.call_begin && m.call_end && m.retry_counters);
+  GpuPassFixture::first_sym = 5;
+  GpuPassFixture fx = GpuPassFixture::from_shape(GpuPassFixture::warm_shapes()[5], 77);
+  GpuPassFixture::first_sym = 1;
+  ASSERT_TRUE(fx.tb_ok_built);
+  m.pass_split(1);
+  nr_gpu_pass_shape_t w = fx.job->shape;
+  ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm));
+  const uint16_t small = grant_mask(fx), wide = (uint16_t)(small | 1u << 3), inner = (uint16_t)(small & ~(1u << 13));
+  fx.job->llr_out_all = 1;
+  fx.rxF_out.assign(fx.rxF_out.size(), (int16_t)0xA5A5);
+  std::vector<uint8_t> tb(fx.tb.A / 8 + 64);
+  nr_gpu_pass_result_t r{};
+  r.tb = tb.data();
+  auto body = [&](uint16_t mk, int want_d, const char *what) {
+    uint64_t c0[4], c1[4];
+    m.retry_counters(c0);
+    fx.job->copy_mask = mk;
+    ASSERT_EQ(0, m.pass_try(fx.job, &r)) << what;
+    m.retry_counters(c1);
+    EXPECT_EQ(c0[1] + (want_d ? 1 : 0), c1[1]) << what << ": entry at D";
+    EXPECT_EQ(c0[0] + (want_d ? 0 : 1), c1[0]) << what << ": entry at C";
+  };
+  m.call_begin();
+  body(small, 0, "first body");
+  body(inner, 1, "retry inside the transformed set");
+  body(wide, 0, "retry that needs symbol 3");
+  m.call_end();
+  SizedRun ref;
+  auto sized = (void (*)(int))dlsym(m.dl, "nr_gpu_pass_test_sized");
+  ASSERT_TRUE(sized);
+  const std::vector<int16_t> got = fx.rxF_out;
+  ref = sized_run(m, fx, sized, 0, 0x3fff, 0x00);
+  for (int a = 0; a < 4; a++)
+    for (int sy = 0; sy < 14; sy++)
+      if (wide >> sy & 1)
+        EXPECT_EQ(0, memcmp(&ref.rxF[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], &got[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], 4096 * 4)) << "ant " << a << " sym " << sy;
+  m.pass_split(0);
+}
+/* BENCH [Bench, DGX]: GPU time of one grant vs its size, full-slot (nr_gpu_pass_test_sized(0)) vs grant-sized; synthetic grants, no receiver running, not on air. gspan = first graph node -> completion */
+TEST(GpuPassSized, BenchSpanVsGrantSize) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split && m.set_spin);
+  auto sized = (void (*)(int))dlsym(m.dl, "nr_gpu_pass_test_sized");
+  ASSERT_TRUE(sized);
+  struct Case { int shape, first_sym, A; const char *name; };
+  const Case cases[] = {{0, 2, 0, "24 PRB nl1 qm2, 12 sym"}, {0, 8, 0, "24 PRB nl1 qm2, 6 sym"}, {10, 1, 0, "24 PRB nl3 qm6"}, {41, 1, 0, "96 PRB nl3 qm4"}, {63, 1, 0, "217 PRB nl4 qm8"},
+                        {58, 1, 150000, "217 PRB nl3 qm6, ~19 CB"}, {53, 1, 40000, "217 PRB nl2 qm4, ~5 CB"}};
+  m.pass_split(1);
+  m.set_spin(60);
+  const char *nrep = getenv("NR_GPU_SIZED_BENCH_N");
+  const int N = nrep ? atoi(nrep) : 300;
+  for (const Case &cs : cases) {
+    GpuPassFixture::first_sym = cs.first_sym;
+    GpuPassFixture::force_A = cs.A;
+    GpuPassFixture fx = GpuPassFixture::from_shape(GpuPassFixture::warm_shapes()[cs.shape], 11);
+    GpuPassFixture::first_sym = 1;
+    GpuPassFixture::force_A = 0;
+    ASSERT_TRUE(fx.tb_ok_built) << cs.name;
+    fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
+    fx.bind();
+    nr_gpu_pass_shape_t w = fx.job->shape;
+    ASSERT_EQ(0, m.pass_warm(&w, fx.job->dj.qam_mode, fx.job->dj.align, fx.job->dj.want_evm)) << cs.name;
+    std::vector<uint8_t> tb(fx.tb.A / 8 + 64);
+    for (int on : {0, 1, 0, 1}) { /* ABAB: the host's thermal / clock drift hits both arms */
+      sized(on);
+      fx.job->copy_mask = on ? grant_mask(fx) : 0x3fff;
+      nr_gpu_pass_result_t r{};
+      r.tb = tb.data();
+      for (int i = 0; i < 30; i++) m.pass_try(fx.job, &r);
+      fixad::Lat l;
+      for (int i = 0; i < N; i++) {
+        ASSERT_EQ(0, m.pass_try(fx.job, &r)) << cs.name;
+        l.add(r);
+      }
+      char what[96];
+      snprintf(what, sizeof(what), "%s C=%d", cs.name, fx.tb.C);
+      fixad::line(what, on ? "grant-sized" : "full-slot", l);
+    }
+    sized(1);
+  }
+  m.pass_split(0);
+}
+
 /* typical shapes: DL 1/4/8/16 code blocks, before (the Task 2 stage path: separate FEP / chest / demod / LDPC submissions with host steps between) and after (one submission), and the
  * completion wait before (spin 600 us then 20 us naps) and after (spin 150 us then a blocking event wait; and blocking only). */
 TEST(GpuPassBench, DlSubmissionBreakdown) {

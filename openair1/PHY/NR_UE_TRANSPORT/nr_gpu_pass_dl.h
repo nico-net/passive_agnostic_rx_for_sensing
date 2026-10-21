@@ -55,6 +55,7 @@ typedef struct {
   uint32_t K, F, Z, E, R;           /* TB parameters of the pass (the body's t_seg_* statics) */
   int BG;
   int16_t *llr;                     /* heap [G]: the final LLRs of a pass whose TB failed its CRC (the retry arms re-decode them) */
+  uint16_t fep_mask;                /* symbols of the caller's rxdataF the pass transformed (the grant's window, its DM-RS and demod symbols); 0x3fff = the whole slot */
 } nr_gpu_pass_dl_out_t;
 
 /* 1 = the module is up (set by nr_gpu_pass_warmup) */
