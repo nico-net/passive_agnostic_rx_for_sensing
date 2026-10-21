@@ -54,6 +54,10 @@ int nr_core_plan_create(pthread_t *, pthread_attr_t *, void *(*)(void *), void *
 /* Called once early in main(): moves every existing task that still has the main thread's inherited mask
  * to the float lane (explicitly pinned tasks keep their core). Threads created later inherit it. No-op when off. */
 int nr_core_float_apply(void);
+#ifdef _GNU_SOURCE
+#include <sched.h>
+int nr_core_inherited_mask(cpu_set_t *out);
+#endif
 /* For a background thread created by a pinned thread: move the calling thread to the float lane. No-op when off. */
 void nr_core_float_enter(void);
 /* nr_env_list_nth: the k-th entry (0-based) of the comma list in env `name` ("17,18"), or `dflt` when unset/short/malformed. */
@@ -62,7 +66,7 @@ void nr_core_float_enter(void);
 /* nr_env_core: getenv for the site core lists, with the on-air (t26yE) site map as the default when unset. */
 static inline const char *nr_env_core(const char *name)
 {
-  static const char *const dflt[][2] = {{"ISAC_PDSCH_CORES", "7,3,4,0,1"}, {"ISAC_PUSCH_CORES", "8,9"}, {"ISAC_GPU_WORKER_CORE", "10"},
+  static const char *const dflt[][2] = {{"ISAC_PDSCH_CORES", "6,7,8,9,3,4"}, {"ISAC_PUSCH_CORES", "8,9"}, {"ISAC_GPU_WORKER_CORE", "10"},
                                         {"ISAC_UHD_CTRL_CORES", "15"}, {"ISAC_PDCCH_USS_CORE", "12"}, {"ISAC_PDCCH_NID_GPU_CORE", "13"}};
   const char *e = getenv(name);
   for (unsigned i = 0; !e && i < sizeof(dflt) / sizeof(dflt[0]); i++)

@@ -49,6 +49,8 @@ extern uint64_t *nr_ss_gpu_ptr(void);
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/system.h" // threadCreate
+#include "common/utils/nr_core_pool.h"
+extern uint64_t nr_passive_slot_arrival_ns(long abs_slot);
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_job_epoch.h"
 #include "nr_pusch_passive_ul_ids.h"
@@ -224,6 +226,8 @@ static void *nr_pusch_passive_queue_thread(void *arg)
   int held = -1; /* ULQ shared snapshot this consumer holds a reference on */
   while (1) {
     nr_pusch_passive_job_t job;
+    nr_pool_site_release(); /* core pool: a lease never outlives one iteration */
+    nr_pool_site_enforce_tick();
     if (held >= 0) {
       pthread_mutex_lock(&g_lock);
       g_pool_refs[held]--;
@@ -259,6 +263,8 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     held = job.snap_idx; /* the queue's reference moves to this consumer */
     pthread_mutex_unlock(&g_lock);
     if (pick == 1) atomic_fetch_add_explicit(&g_dec_probe, 1, memory_order_relaxed);
+    /* core pool: DECODE class for the probes too: this consumer is serial, a probe that waited as RETRY would hold the real UL grants behind it */
+    nr_pool_site_acquire(NR_POOL_DECODE | NR_POOL_F_UL, 0, nr_passive_slot_arrival_ns(job.absolute_slot));
 
     NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
     if (!nr_cfg_epoch_work_current()) {
@@ -606,11 +612,15 @@ static void *ulq_capture_thread(void *arg)
     g_pool2[b].len = 0;
     pthread_mutex_unlock(&g_lock);
     uint32_t origin = 0, len = 0, origin2 = 0, len2 = 0;
+    nr_pool_site_acquire(NR_POOL_DECODE | NR_POOL_F_UL, 0, nr_passive_slot_arrival_ns(abs)); /* the copy gates the UL decode: a lease per copy, none across the wait below */
     const bool ok = nr_pusch_passive_snapshot_copy(ue, (uint8_t)slot, (uint64_t)abs, g_pool[b].iq, cap, &origin, &len);
+    nr_pool_site_release();
     bool ok2 = false;
     for (int w = 0; ok && want_next && w < 40; w++) { /* the next slot is produced 0.5 ms after the target slot: wait for it (<= 4 ms), once it exists copy once */
       if (atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_acquire) < abs + 1) { usleep(100); continue; }
+      nr_pool_site_acquire(NR_POOL_DECODE | NR_POOL_F_UL, 0, nr_passive_slot_arrival_ns(abs));
       ok2 = nr_pusch_passive_snapshot_copy(ue, (uint8_t)((slot + 1) % ue->frame_parms.slots_per_frame), (uint64_t)(abs + 1), g_pool2[b].iq, cap, &origin2, &len2);
+      nr_pool_site_release();
       break;
     }
     pthread_mutex_lock(&g_lock);
@@ -732,13 +742,14 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
      * stage (DECQUEUE report). Pin them off the PDSCH cores, at the default priority. */
     core = nr_env_list_nth("ISAC_PUSCH_CORES", i, core);
     const int prio = 0;
-    threadCreate(&g_threads[i], nr_pusch_passive_queue_thread, &g_args[i], name, core, prio);
+    threadCreate(&g_threads[i], nr_pusch_passive_queue_thread, &g_args[i], name, nr_pool_site() ? -1 : core, prio);
   }
   if (g_pool_n > 0) {
     const char *ce = getenv("ISAC_UL_SNAP_CORE");
     const int core = ce && *ce ? atoi(ce) : 8;
     const int prio = 0;
-    threadCreate(&g_cap_thread, ulq_capture_thread, NULL, "passivePuschCap", core, prio);
+    (void)core; /* the snapshot copy leases a pool token per copy (DECODE class); the thread itself sits on the home lane */
+    threadCreate(&g_cap_thread, ulq_capture_thread, NULL, "passivePuschCap", nr_pool_site() ? -1 : core, prio);
   }
   LOG_I(PHY, "SENSING: passive PUSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest; ULQ probe_depth=%d snap_pool=%d\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1, g_pcursor.depth, g_pool_n);

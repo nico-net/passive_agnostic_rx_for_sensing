@@ -79,6 +79,7 @@ static void *worker(void *arg)
     pthread_mutex_unlock(&g_lock);
     const int expired = now_ns() - s->j.submit_ns > g_max_age_ns;
     int rc = 0;
+    /* core pool: NOT leased. One run holds a core 113-287 ms [MEASURED, replay tim] and is not chunked: it stays in the float lane until it yields between steps */
     if (!expired && !g_stop) rc = g_run(&s->j);
     pthread_mutex_lock(&g_lock);
     if (expired || rc) g_st.expired++;

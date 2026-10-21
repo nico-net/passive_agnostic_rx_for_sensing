@@ -12,6 +12,13 @@
 #include "nr_stage_split.h" /* ISAC_E2E_TRACE stage split: callers of the poll loops add their wait time */
 #include <time.h>
 
+/* core pool: a decode thread that has waited this long on the GPU gives its token away for the sleep when somebody waits (weak: absent in unit tests) */
+#ifdef __cplusplus
+extern "C" void nr_pool_site_gpu_wait(void) __attribute__((weak));
+#else
+extern void nr_pool_site_gpu_wait(void) __attribute__((weak));
+#endif
+
 static inline void nr_gpu_poll_relax_us(uint64_t *t0, int us)
 {
   if (!us)
@@ -24,6 +31,10 @@ static inline void nr_gpu_poll_relax_us(uint64_t *t0, int us)
     return;
   }
   if (ns - *t0 >= (uint64_t)us * 1000ull) {
+    if (nr_pool_site_gpu_wait) {
+      nr_pool_site_gpu_wait(); /* sleeps 20 us (giving the token away meanwhile when somebody waits) */
+      return;
+    }
     const struct timespec ts = {0, 20000};
     nanosleep(&ts, NULL);
   }
