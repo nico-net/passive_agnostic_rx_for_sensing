@@ -2,6 +2,7 @@
 #include "nr_csirs_disc.h"
 #include "nr_csirs_disc_sweep_internal.h"
 #include "nr_csirs_disc_gate_internal.h"
+#include "../../TOOLS/nr_gpu_chunk.h"
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <chrono>
@@ -686,4 +687,60 @@ TEST(CsirsDiscSweep, GpuRefinementAndConfirmation)
 #else
   GTEST_SKIP()<<"CPU build; CUDA comparison available in build_gpu";
 #endif
+}
+
+/* nr_gpu_chunk.h: every unit runs exactly once and in order, no chunk is much longer than the target, and the chunk size follows the cost per unit. */
+TEST(GpuChunk, CoversEveryUnitOnceInOrderAndBoundsChunkTime)
+{
+  for (uint64_t cost : {5, 100, 700, 5000}) { /* us per unit */
+    NrGpuChunker c;
+    uint64_t clock = 0, worst = 0, ran = 0;
+    long next = 0;
+    const long total = 3000;
+    int rc = nr_gpu_chunked(c, total,
+        [&](long f, long n) { EXPECT_EQ(f, next); next = f + n; clock += n * cost; worst = std::max(worst, (uint64_t)n * cost); ran += n; return 0; },
+        [&]() { clock += 50; return 0; }, [] {}, [&] { return clock; });
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(ran, (uint64_t)total) << cost;
+    /* after the first adaptation no chunk exceeds 1.5 targets (+ two units); the very first chunk is one unit */
+    EXPECT_LE(worst, std::max<uint64_t>(NR_GPU_CHUNK_TARGET_US * 3 / 2, cost) + 2 * cost) << cost; /* the floor estimate contains one unit */
+    if (cost <= 100) EXPECT_GT(c.per, 1);
+  }
+  NrGpuChunker c;
+  EXPECT_EQ(nr_gpu_chunked(c, 0, [](long, long) { return 7; }, [] { return 0; }, [] {}, [] { return (uint64_t)0; }), 0);
+  EXPECT_EQ(nr_gpu_chunked(c, 5, [](long, long) { return 7; }, [] { return 0; }, [] {}, [] { return (uint64_t)0; }), 7);
+}
+
+/* DISC-CONFIRM-20261021: a per-chunk wall-time floor (poll wake-up, admission, queueing behind real-time graphs) above target/2 must not pin the chunk at one unit. */
+TEST(GpuChunk, FloorOfWallTimeDoesNotPinChunkAtOneUnit)
+{
+  for (uint64_t floor_us : {0, 200, 1000, 1600, 3000}) {
+    NrGpuChunker c;
+    uint64_t clock = 0, worst_work = 0;
+    const long total = 3000;
+    const uint64_t cost = 2; /* us per unit */
+    int rc = nr_gpu_chunked(c, total,
+        [&](long, long n) { clock += floor_us + n * cost; worst_work = std::max(worst_work, (uint64_t)n * cost); return 0; },
+        [&]() { clock += 100; return 0; }, [] {}, [&] { return clock; });
+    EXPECT_EQ(rc, 0);
+    EXPECT_LT(c.chunks, 40u) << floor_us;                                   /* was 3000 for floor >= 1000 */
+    EXPECT_LE(worst_work, (uint64_t)NR_GPU_CHUNK_TARGET_US * 3 / 2 + cost * 2) << floor_us; /* run time per chunk stays bounded */
+  }
+}
+
+/* ab_dVD1/dVD2 2026-10-21: the per-chunk wall floor rises from a few hundred us to 4-5 ms when the real-time graphs load the GPU; the chunk size must follow, not stay at one unit (detect took 4-14 s per batch). */
+TEST(GpuChunk, FloorThatRisesMidCallDoesNotPinChunkAtOneUnit)
+{
+  NrGpuChunker c;
+  uint64_t clock = 0;
+  const long total = 3000;
+  const uint64_t cost = 2;
+  uint64_t calls = 0;
+  for (int rep = 0; rep < 3; ++rep) { /* the same call site is reused: per and base persist */
+    int rc = nr_gpu_chunked(c, total,
+        [&](long, long n) { ++calls; clock += (calls < 6 ? 300 : 5000) + n * cost; return 0; },
+        [&]() { clock += 100; return 0; }, [] {}, [&] { return clock; });
+    EXPECT_EQ(rc, 0);
+  }
+  EXPECT_LT(c.chunks, 150u); /* with the 2*base guard: about 9000 */
 }

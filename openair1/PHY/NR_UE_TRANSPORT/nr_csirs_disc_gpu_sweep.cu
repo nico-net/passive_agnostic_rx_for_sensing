@@ -3,6 +3,8 @@
 #include "nr_csirs_disc_evidence_internal.h"
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
+#include "../TOOLS/nr_gpu_chunk.h"
+#include "../TOOLS/nr_gpu_wait.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -216,7 +218,6 @@ struct Workspace {
   Device<nr_csirs_disc_win_t> dw;
   Device<nr_csirs_disc_slot_meta_t> meta;
   Device<nr_csirs_disc_hyp_t> refined;
-  Device<double> energy;
   std::vector<nr_csirs_disc_re_t> mapping;
   std::vector<int> slots,indices;
   std::vector<float> mean;
@@ -232,7 +233,7 @@ static void pick_stream()
   auto &w=workspace;
   if(!w.stream_lo) return;
   cudaStream_t s=nr_gpu_green_disc_pick(w.stream_hi,w.stream_lo,nr_gpu_budget_rt_large_active?nr_gpu_budget_rt_large_active():0);
-  if(s!=w.stream){cudaStreamSynchronize(w.stream);w.stream=s;}
+  if(s!=w.stream){nr_gpu_wait_stream(w.stream);w.stream=s;}
 }
 /* prepare: prepares the GPU sweep workspace for a carrier (rb RBs, ant antennas, capacity slots): creates the stream and completion event and grows every device buffer (mapping, packed samples, scores, metadata).
  *   Grow-only: returns at once when the existing buffers already fit. Returns 0, or -1 on failure. Callers: run(), nr_csirs_disc_gpu_sweep_prepare(), nr_csirs_disc_gpu_refine_entry().
@@ -246,14 +247,14 @@ static int prepare(int rb,int ant,int capacity)
     if(!nr_gpu_green_stream(&w.stream_lo,0,false,-1)) w.stream_lo=nullptr;
     w.stream=w.stream_hi;
   }
-  if(!w.done && cudaEventCreateWithFlags(&w.done,cudaEventBlockingSync|cudaEventDisableTiming)!=cudaSuccess) return -1;
+  if(!w.done && cudaEventCreateWithFlags(&w.done,cudaEventDisableTiming)!=cudaSuccess) return -1;
   size_t maps=(size_t)rb*16*8*2*4; // conservative mapping capacity for all rows
   // Occupied REs <= 32 ports * 8 RE/RB (row 18).
   size_t packed=(size_t)rb*32*8*ant*capacity;
   if(!w.dm.alloc(maps) || !w.dx.alloc(packed) || !w.grid.alloc((size_t)capacity*ant*14*12*rb)
      || !w.ds.alloc(capacity) || !w.di.alloc(capacity) || !w.dz.alloc((size_t)1024*160*capacity)
      || !w.dmean.alloc(1024*160) || !w.dw.alloc(1) || !w.meta.alloc(capacity)
-     || !w.energy.alloc(5) || !w.acc.alloc(1) || !w.refined.alloc(1) || !w.result.alloc(1)) return -1;
+     || !w.acc.alloc(1) || !w.refined.alloc(1) || !w.result.alloc(1)) return -1;
   w.mapping.resize(maps);w.slots.reserve(capacity);w.indices.reserve(capacity);w.mean.resize(1024*160);
   w.rb=rb;w.ant=ant;w.capacity=capacity;return 0;
 }
@@ -262,7 +263,7 @@ static int prepare(int rb,int ant,int capacity)
  */
 static cudaError_t complete() {
   cudaError_t rc=cudaEventRecord(workspace.done,workspace.stream);
-  return rc==cudaSuccess?cudaEventSynchronize(workspace.done):rc;
+  return rc==cudaSuccess?nr_gpu_wait_event(workspace.done):rc;
 }
 /* copy: asynchronous memcpy on the workspace stream followed by complete(); returns the CUDA status. */
 static cudaError_t copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
@@ -270,6 +271,13 @@ static cudaError_t copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) 
   {cudaError_t f=complete();if(f!=cudaSuccess) return f;}
   cudaError_t rc=cudaMemcpyAsync(dst,src,n,kind,workspace.stream);
   return rc==cudaSuccess?complete():rc;
+}
+/* chunks: runs total units through launch(first,n), draining the workspace stream between chunks (nr_gpu_chunk.h: a long discovery kernel holds the body launch of the real-time pass graphs). */
+template<class L> static cudaError_t chunks(NrGpuChunker &c,long total,L launch)
+{
+  cudaError_t err=cudaSuccess;
+  int rc=nr_gpu_chunked(c,total,[&](long f,long n){launch(f,n);err=cudaGetLastError();return (int)err;},[&](){err=complete();return (int)err;});
+  return rc?err:cudaSuccess;
 }
 /* gather: GPU kernel: packs the mapped resource elements of the selected slots and antennas from the ring grid into the packed sample buffer (one thread per packed element).
  *   Launched by run() and nr_csirs_disc_gpu_sweep_prepare().
@@ -350,8 +358,10 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
     gather<<<(packed+255)/256,256,0,stream>>>(grid,r->slot_stride/2,dm.p,map.n_re,w.di.p,slots.size(),r->n_ant,r->n_rb,dx.p);
     auto device_map = map;
     device_map.re = dm.p;
-    sweep<<<dim3(nc, slots.size()), 128, 0, stream>>>(device_map, dx.p, ds.p, r->n_ant, r->slots_per_frame, c, dz.p);
-    if (cudaGetLastError() != cudaSuccess) return -1;
+    static NrGpuChunker c_sweep{1,0,"c_sweep"};
+    if (chunks(c_sweep, nc, [&](long f, long n) {
+          sweep<<<dim3(n, slots.size()), 128, 0, stream>>>(device_map, dx.p, ds.p, r->n_ant, r->slots_per_frame, c, dz.p, (int)f, nc);
+        }) != cudaSuccess) return -1;
     int previous=nr_csirs_disc_evidence_previous(entry,slots.size());
     if (entry) average_scores<true><<<(nc + 255) / 256, 256, 0, stream>>>(dz.p, nc, slots.size(), dmean.p, history, previous);
     else average_scores<false><<<(nc + 255) / 256, 256, 0, stream>>>(dz.p, nc, slots.size(), dmean.p);
@@ -492,18 +502,25 @@ __global__ void refine_kernel(nr_csirs_disc_ring_t ring,nr_csirs_disc_hyp_t h,nr
   const int rc=nr_csirs_disc_refine_cpu(&ring,&h,&win,map,acc,u0,u1,fin);
   if(fin) {*result=rc;*out=h;}
 }
-/* refine_launch: host side: the whole refinement as one launch. */
-static void refine_launch(const nr_csirs_disc_ring_t &ring,const nr_csirs_disc_hyp_t &h,
-                          const nr_csirs_disc_win_t &win,const nr_csirs_disc_sweep_map_t &map,cudaStream_t s)
+/* refine_launch: host side: the refinement in launches of about 1 ms; total = number of units. */
+static cudaError_t refine_launch(const nr_csirs_disc_ring_t &ring,const nr_csirs_disc_hyp_t &h,
+                                 const nr_csirs_disc_win_t &win,const nr_csirs_disc_sweep_map_t &map,cudaStream_t s,long total)
 {
+  /* The refinement was ONE single-thread kernel of 24 ms on average and up to 652 ms [MEASURED gsV2N]. It runs the units [f,f+n) of (valid slot, antenna[, port]) per launch,
+   * accumulators in w.acc, the last launch (u1 = LONG_MAX) also the tail: the same additions in the same order, so the result is bit-identical. */
   auto &w=workspace;
-  refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,0,LONG_MAX,true);
+  static NrGpuChunker c_refine{1,0,"c_refine"};
+  if(total<=0) {refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,0,LONG_MAX,true);return cudaGetLastError();}
+  return chunks(c_refine,total,[&](long f,long n) {
+    const bool last=f+n>=total;
+    refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,f,last?LONG_MAX:f+n,last);
+  });
 }
 
 /* energy_score: device energy statistic of one symbol: returns the energy ratio of the occupied REs against the weakest or the mean of the unoccupied subcarrier classes (EPR when epr is set).
  *   Also reports the old-style score through *old. Returns -1 when the statistic is not defined. Called from energies().
  */
-__device__ double energy_score(const short2 *rx,int rb_count,int symbol,nr_csirs_disc_sweep_map_t map,
+__host__ __device__ double energy_score(const short2 *rx,int rb_count,int symbol,nr_csirs_disc_sweep_map_t map,
                               bool epr,double *old)
 {
   uint16_t occupied[NR_CSIRS_DISC_MAX_RB]={};
@@ -530,10 +547,10 @@ __device__ double energy_score(const short2 *rx,int rb_count,int symbol,nr_csirs
   if(epr) return non && n && total>0?(on/non)/(total/n):-1.;
   return non && classes>3 && weakest>0?1-fmin(1.,(on/non)/weakest):-1.;
 }
-/* energies: GPU kernel (one thread): computes the energy statistics of a hypothesis's symbol (sequence-free EPR, the energy score and the optional row-5 second symbol) into scores[1..4].
+/* energies: (host) computes the energy statistics of a hypothesis's symbol (sequence-free EPR, the energy score and the optional row-5 second symbol) into scores[1..4].
  *   Called by nr_csirs_disc_gpu_confirm_entry() and by the prepare path.
  */
-__global__ void energies(const short2 *grid,int rb,nr_csirs_disc_hyp_t h,nr_csirs_disc_sweep_map_t map,double *scores)
+static void energies(const short2 *grid,int rb,nr_csirs_disc_hyp_t h,nr_csirs_disc_sweep_map_t map,double *scores)
 {
   double old=-1;
   scores[1]=energy_score(grid,rb,h.symb_l0,map,true,nullptr);
@@ -586,7 +603,6 @@ extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
     ring.slot_stride=(size_t)ant*14*24*rb;ring.grid_base=(int16_t *)w.grid.p;ring.meta=w.meta.p;
     nr_csirs_disc_hyp_t h={};h.row=1;h.period=4;nr_csirs_disc_win_t win={};
     refine_kernel<<<1,1,0,w.stream>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,0,LONG_MAX,true);
-    energies<<<1,1,0,w.stream>>>(w.grid.p,rb,h,map,w.energy.p);
     return cudaGetLastError()==cudaSuccess && complete()==cudaSuccess?0:-1;
   } catch(...) {return -1;}
 }
@@ -606,9 +622,9 @@ extern "C" int nr_csirs_disc_gpu_refine_entry(const nr_csirs_disc_ring_t *r,nr_c
     if(copy(w.dm.p,map.re,map.n_re*sizeof(*map.re),cudaMemcpyHostToDevice)!=cudaSuccess
        || copy(w.meta.p,r->meta,r->capacity*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
     map.re=w.dm.p;auto ring=*r;ring.grid_base=(int16_t *)grid;ring.meta=w.meta.p;
-    refine_launch(ring,*h,*win,map,workspace.stream);
+    long ns=0;for(int i=0;i<r->capacity;++i) ns+=r->meta[i].valid && r->meta[i].abs_slot%h->period==h->offset;
     int result=-1;
-    if(cudaGetLastError()!=cudaSuccess || copy(&result,w.result.p,sizeof(int),cudaMemcpyDeviceToHost)!=cudaSuccess
+    if(refine_launch(ring,*h,*win,map,workspace.stream,ns*r->n_ant*(h->row==1?1:map.ports))!=cudaSuccess || copy(&result,w.result.p,sizeof(int),cudaMemcpyDeviceToHost)!=cudaSuccess
        || copy(h,w.refined.p,sizeof(*h),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
     return result;
   } catch(...) {return -1;}
@@ -626,10 +642,16 @@ extern "C" int nr_csirs_disc_gpu_confirm_entry(const nr_csirs_disc_ring_t *r,con
     if(run(r,h,1,&cfg,&win)!=1) return -1;
     auto &w=workspace;nr_csirs_disc_sweep_map_t map={};
     if(nr_csirs_disc_sweep_map_into(h,r->n_rb,&map,w.mapping.data(),w.mapping.size())) return -1;
-    map.re=w.dm.p;
     const short2 *grid=r->device_valid?(const short2 *)r->device_grid:w.grid.p;
-    energies<<<1,1,0,workspace.stream>>>(grid,r->n_rb,*h,map,w.energy.p);
-    if(cudaGetLastError()!=cudaSuccess || copy(scores,w.energy.p,5*sizeof(double),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
+    /* The energy statistics were a <<<1,1>>> kernel of 1.9 ms on average and up to 8 ms, 300 times a second [MEASURED gsT2N, gsV2N]: a stall of the real-time graphs'
+     * body launches (nr_gpu_chunk.h). They need only the one or two symbol rows of the first antenna: copy those and run the same function on the host. */
+    {
+      const int rows=h->row==5?2:1;const size_t rowlen=(size_t)12*r->n_rb;
+      static std::vector<short2> stage;stage.assign(14*rowlen,short2{0,0});
+      if(h->symb_l0<0 || h->symb_l0+rows>14 || cudaMemcpyAsync(stage.data()+h->symb_l0*rowlen,grid+h->symb_l0*rowlen,rows*rowlen*sizeof(short2),cudaMemcpyDeviceToHost,workspace.stream)!=cudaSuccess
+         || complete()!=cudaSuccess) return -1;
+      energies(stage.data(),r->n_rb,*h,map,scores);
+    }
     scores[0]=win.z;return 0;
   } catch(...) {return -1;}
 }
