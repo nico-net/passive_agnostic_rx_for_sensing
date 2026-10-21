@@ -2,6 +2,7 @@
 #include "nr_csirs_disc.h"
 #include "nr_csirs_disc_sweep_internal.h"
 #include "nr_csirs_disc_gate_internal.h"
+#include "../../TOOLS/nr_gpu_chunk.h"
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <chrono>
@@ -686,4 +687,26 @@ TEST(CsirsDiscSweep, GpuRefinementAndConfirmation)
 #else
   GTEST_SKIP()<<"CPU build; CUDA comparison available in build_gpu";
 #endif
+}
+
+/* nr_gpu_chunk.h: every unit runs exactly once and in order, no chunk is much longer than the target, and the chunk size follows the cost per unit. */
+TEST(GpuChunk, CoversEveryUnitOnceInOrderAndBoundsChunkTime)
+{
+  for (uint64_t cost : {5, 100, 700, 5000}) { /* us per unit */
+    NrGpuChunker c;
+    uint64_t clock = 0, worst = 0, ran = 0;
+    long next = 0;
+    const long total = 3000;
+    int rc = nr_gpu_chunked(c, total,
+        [&](long f, long n) { EXPECT_EQ(f, next); next = f + n; clock += n * cost; worst = std::max(worst, (uint64_t)n * cost); ran += n; return 0; },
+        [&]() { clock += 50; return 0; }, [] {}, [&] { return clock; });
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(ran, (uint64_t)total) << cost;
+    /* after the first adaptation no chunk exceeds 1.5 targets (+ one unit); the very first chunk is one unit */
+    EXPECT_LE(worst, std::max<uint64_t>(NR_GPU_CHUNK_TARGET_US * 3 / 2, cost) + cost) << cost;
+    if (cost <= 100) EXPECT_GT(c.per, 1);
+  }
+  NrGpuChunker c;
+  EXPECT_EQ(nr_gpu_chunked(c, 0, [](long, long) { return 7; }, [] { return 0; }, [] {}, [] { return (uint64_t)0; }), 0);
+  EXPECT_EQ(nr_gpu_chunked(c, 5, [](long, long) { return 7; }, [] { return 0; }, [] {}, [] { return (uint64_t)0; }), 7);
 }

@@ -5,13 +5,13 @@ namespace resident {
 constexpr int CAND_CAP=2048, GPU_CAND_CAP=65536;
 struct candidate_t { nr_csirs_disc_fp_t fp; double significance; };
 /* gcd_period: device helper: greatest common divisor of two periods (see the CPU gcd_period() in nr_csirs_disc_fp.c). */
-__device__ static int gcd_period(int a,int b)
+__host__ __device__ static int gcd_period(int a,int b)
 {
   while(b) {int t=a%b;a=b;b=t;}return a;
 }
 
 /* rank_candidate: device comparator of footprint candidates (same order as the CPU rank_candidate()): significance x (strength - 1), then period, offset, symbol mask and RB start. */
-__device__ static int rank_candidate(const void *a, const void *b)
+__host__ __device__ static int rank_candidate(const void *a, const void *b)
 {
   const candidate_t *x=(const candidate_t *)a,*y=(const candidate_t *)b;
   double xs=x->significance*(x->fp.strength-1), ys=y->significance*(y->fp.strength-1);
@@ -22,7 +22,7 @@ __device__ static int rank_candidate(const void *a, const void *b)
   return x->fp.rb_start-y->fp.rb_start;
 }
 /* add_candidate: device bounded max-heap insert of a candidate (CAND_CAP entries), same policy as the CPU add_candidate(). */
-__device__ static void add_candidate(candidate_t *heap, int *count, candidate_t c)
+__host__ __device__ static void add_candidate(candidate_t *heap, int *count, candidate_t c)
 {
   int at;
   if(*count<CAND_CAP) {
@@ -39,7 +39,7 @@ __device__ static void add_candidate(candidate_t *heap, int *count, candidate_t 
 }
 
 /* rank_strength: device comparator of finished footprints (strength, period, offset, symbol mask); same order as the CPU rank_strength(). */
-__device__ static int rank_strength(const void *a, const void *b)
+__host__ __device__ static int rank_strength(const void *a, const void *b)
 {
   const nr_csirs_disc_fp_t *x=(const nr_csirs_disc_fp_t *)a,*y=(const nr_csirs_disc_fp_t *)b;
   if(x->strength!=y->strength) return x->strength<y->strength ? 1:-1;
@@ -49,7 +49,7 @@ __device__ static int rank_strength(const void *a, const void *b)
 }
 
 
-template<class T, class Compare> __device__ void device_sort(T *a,int n,Compare cmp)
+template<class T, class Compare> __host__ __device__ void device_sort(T *a,int n,Compare cmp)
 {
   // In-place heapsort, bounded workspace, same comparator as the CPU.
   for(int start=n/2-1;start>=-1;--start) {
@@ -72,7 +72,7 @@ template<class T, class Compare> __device__ void device_sort(T *a,int n,Compare 
 /* finish_candidates: device version of finish_candidates(): drops duplicates and harmonics, merges symbol masks, removes contained fragments, and orders the output by strength.
  *   Uses device_sort() for the ordering. Returns the number of footprints written (at most max_out). Caller: finish().
  */
-__device__ static int finish_candidates(candidate_t *cand,int nc,nr_csirs_disc_fp_t *out,int max_out)
+__host__ __device__ static int finish_candidates(candidate_t *cand,int nc,nr_csirs_disc_fp_t *out,int max_out)
 {
   device_sort(cand,nc,rank_candidate);
   int n=0;
@@ -122,9 +122,9 @@ __device__ static int finish_candidates(candidate_t *cand,int nc,nr_csirs_disc_f
 __global__ void segment(int rb_count,int p,uint64_t nt,const uint64_t *counts,
     const uint64_t *sum,const uint64_t *sum80,const uint64_t *sum64,
     const uint64_t *tot,const uint64_t *totq,const uint16_t *masks,
-    uint16_t excluded,float min_strength,candidate_t *cand,unsigned *count)
+    uint16_t excluded,float min_strength,candidate_t *cand,unsigned *count,int bx0=0)
 {
-  int id=blockIdx.x*blockDim.x+threadIdx.x;if(id>=p*14) return;
+  int id=(blockIdx.x+bx0)*blockDim.x+threadIdx.x;if(id>=p*14) return;
   int o=id/14,l=id%14,tiles=(rb_count+15)/16,nk=12*rb_count,nr=14*nk+168*tiles;
   uint64_t on=counts[o],off=nt-on;
   if(on<3 || off<3 || (excluded&(1<<l))) return;
@@ -207,11 +207,13 @@ __global__ void collect(candidate_t *raw,unsigned *count,candidate_t *groups,int
   for(unsigned i=0;i<min(*count,(unsigned)GPU_CAND_CAP);++i) add_candidate(groups+group*CAND_CAP,&n,raw[i]);
   sizes[group]=n;
 }
-/* finish: GPU kernel (single thread): merges the four scheduling groups and runs finish_candidates() on the result, writing the footprint count to *nout. Launched by detect(). */
-__global__ void finish(candidate_t *groups,int *sizes,candidate_t *all,nr_csirs_disc_fp_t *out,int *nout,int maxout)
+/* finish_host: merges the four scheduling groups and runs finish_candidates() (the same code as on the CPU reference, compiled for the host). It used to be a <<<1,1>>> kernel:
+ *   one GPU thread ran this job for 6-56 ms [MEASURED gsV2N], a stall of the real-time graphs' body launches (nr_gpu_chunk.h); on a CPU core it takes well under a millisecond. */
+static int finish_host(const candidate_t *groups,const int *sizes,nr_csirs_disc_fp_t *out,int maxout)
 {
+  static candidate_t all[CAND_CAP];
   int n=0;for(int g=0;g<4;++g) for(int i=0;i<sizes[g];++i) add_candidate(all,&n,groups[g*CAND_CAP+i]);
-  *nout=finish_candidates(all,n,out,maxout);
+  return finish_candidates(all,n,out,maxout);
 }
 struct State {
   Buffer<uint64_t> sum,sq,s80,s64,total,totalq,ps,pq,dc;
@@ -220,10 +222,9 @@ struct State {
   Buffer<int16_t> grid;
   Buffer<uint8_t> exclude;
   Buffer<uint16_t> masks;
-  Buffer<candidate_t> raw,groups,all;
+  Buffer<candidate_t> raw,groups;
   Buffer<unsigned> count;
-  Buffer<int> sizes,nout;
-  Buffer<nr_csirs_disc_fp_t> out;
+  Buffer<int> sizes;
   uint64_t counts[640]={},nt=0,written=0;
   const int16_t *identity=nullptr;
   int rb=0,ant=0,capacity=0,round=0;
@@ -241,8 +242,8 @@ static bool prepare(int rb,int ant,int capacity)
     && s.pq.reserve((size_t)640*pooled) && s.dc.reserve(640) && s.x.reserve((size_t)100*nr)
     && s.meta.reserve(100) && s.grid.reserve((size_t)100*ant*14*24*rb)
     && s.exclude.reserve(14*12*rb) && s.masks.reserve((size_t)640*14*((rb+15)/16)*6)
-    && s.raw.reserve(GPU_CAND_CAP) && s.groups.reserve(4*CAND_CAP) && s.all.reserve(CAND_CAP)
-    && s.count.reserve(1) && s.sizes.reserve(4) && s.nout.reserve(1) && s.out.reserve(128);
+    && s.raw.reserve(GPU_CAND_CAP) && s.groups.reserve(4*CAND_CAP)
+    && s.count.reserve(1) && s.sizes.reserve(4);
 }
 /* reset: forgets the resident history (clears the cached identity of the ring grid) so that the next detect() rebuilds it.
  *   Called by nr_csirs_disc_gpu.cu (resident reset after the warm-up) and by the detector reset path.
@@ -279,10 +280,11 @@ static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cf
     const int16_t *grid=r->device_valid && r->device_grid?r->device_grid+(size_t)first*r->slot_stride:s.grid.p;
     if(!(r->device_valid && r->device_grid) && disc_copy(s.grid.p,r->grid_base+(size_t)first*r->slot_stride,n*r->slot_stride*2,cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
     if(disc_copy(s.meta.p,r->meta+first,n*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess || disc_zero(s.x.p,0,(size_t)n*nr*4)!=cudaSuccess) return -1;
-    normalize<<<(n*rb*14+127)/128,128,0,disc_stream()>>>(grid,s.meta.p,r->slot_stride,n,r->n_ant,rb,symbols,s.exclude.p,s.x.p,tiles,1);
-    pool<<<(n*pooled+127)/128,128,0,disc_stream()>>>(s.x.p,n,rb,tiles);
-    accumulate_kernel<<<(nr+127)/128,128,0,disc_stream()>>>(s.x.p,s.meta.p,n,nr,pooled,s.sum.p,s.sq.p,s.s80.p,s.s64.p,s.total.p,s.totalq.p);
-    if(cudaGetLastError()!=cudaSuccess || disc_wait()!=cudaSuccess) {reset();return -1;}
+    static NrGpuChunker c_norm,c_pool,c_acc;
+    if(disc_chunks(c_norm,(n*rb*14+127)/128,[&](long f,long k){normalize<<<k,128,0,disc_stream()>>>(grid,s.meta.p,r->slot_stride,n,r->n_ant,rb,symbols,s.exclude.p,s.x.p,tiles,1,(int)f);})!=cudaSuccess
+       || disc_chunks(c_pool,(n*pooled+127)/128,[&](long f,long k){pool<<<k,128,0,disc_stream()>>>(s.x.p,n,rb,tiles,(int)f);})!=cudaSuccess
+       || disc_chunks(c_acc,(nr+127)/128,[&](long f,long k){accumulate_kernel<<<k,128,0,disc_stream()>>>(s.x.p,s.meta.p,n,nr,pooled,s.sum.p,s.sq.p,s.s80.p,s.s64.p,s.total.p,s.totalq.p,(int)f);})!=cudaSuccess
+       || disc_wait()!=cudaSuccess) {reset();return -1;}
     for(int i=0;i<n;++i) if(r->meta[first+i].valid) {++s.counts[r->meta[first+i].abs_slot%640];++s.nt;}
     s.written+=n;
   }
@@ -294,17 +296,22 @@ static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cf
       int p=periods[pi];uint64_t counts[640]={};for(int i=0;i<640;++i) counts[i%p]+=s.counts[i];
       if(disc_copy(s.dc.p,counts,p*8,cudaMemcpyHostToDevice)!=cudaSuccess
          || disc_zero(s.masks.p,0,(size_t)p*14*tiles*6*2)!=cudaSuccess || disc_zero(s.count.p,0,4)!=cudaSuccess) return -1;
-      lattice_pool<<<(p*pooled+127)/128,128,0,disc_stream()>>>(p,nr,pooled,s.sum.p,s.sq.p,s.ps.p,s.pq.p);
-      lattice_screen<<<(p*14+63)/64,64,0,disc_stream()>>>(p,tiles,s.nt,s.dc.p,s.ps.p,s.pq.p,s.total.p+nr-pooled,s.totalq.p+nr-pooled,s.masks.p);
-      segment<<<(p*14+31)/32,32,0,disc_stream()>>>(rb,p,s.nt,s.dc.p,s.sum.p,s.s80.p,s.s64.p,s.total.p,s.totalq.p,s.masks.p,symbols,
-        cfg && cfg->min_strength>0?cfg->min_strength:2.f,s.raw.p,s.count.p);
+      static NrGpuChunker c_lp,c_ls,c_seg;
+      if(disc_chunks(c_lp,(p*pooled+127)/128,[&](long f,long k){lattice_pool<<<k,128,0,disc_stream()>>>(p,nr,pooled,s.sum.p,s.sq.p,s.ps.p,s.pq.p,(int)f);})!=cudaSuccess
+         || disc_chunks(c_ls,(p*14+63)/64,[&](long f,long k){lattice_screen<<<k,64,0,disc_stream()>>>(p,tiles,s.nt,s.dc.p,s.ps.p,s.pq.p,s.total.p+nr-pooled,s.totalq.p+nr-pooled,s.masks.p,(int)f);})!=cudaSuccess
+         || disc_chunks(c_seg,(p*14+31)/32,[&](long f,long k){segment<<<k,32,0,disc_stream()>>>(rb,p,s.nt,s.dc.p,s.sum.p,s.s80.p,s.s64.p,s.total.p,s.totalq.p,s.masks.p,symbols,
+              cfg && cfg->min_strength>0?cfg->min_strength:2.f,s.raw.p,s.count.p,(int)f);})!=cudaSuccess) return -1;
       collect<<<1,1,0,disc_stream()>>>(s.raw.p,s.count.p,s.groups.p,s.sizes.p,g,clear);clear=false;
       unsigned count=0;if(disc_copy(&count,s.count.p,4,cudaMemcpyDeviceToHost)!=cudaSuccess || count>GPU_CAND_CAP) return -1;
     }
   }
-  finish<<<1,1,0,disc_stream()>>>(s.groups.p,s.sizes.p,s.all.p,s.out.p,s.nout.p,std::min(maxout,128));
-  int n=0;if(cudaGetLastError()!=cudaSuccess || disc_copy(&n,s.nout.p,4,cudaMemcpyDeviceToHost)!=cudaSuccess
-     || disc_copy(out,s.out.p,n*sizeof(*out),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
-  return n;
+  static candidate_t groups_h[4*CAND_CAP];
+  int sizes_h[4];
+  if(disc_copy(sizes_h,s.sizes.p,sizeof(sizes_h),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
+  for(int g=0;g<4;++g) {
+    if(sizes_h[g]<0 || sizes_h[g]>CAND_CAP) return -1;
+    if(sizes_h[g] && disc_copy(groups_h+g*CAND_CAP,s.groups.p+g*CAND_CAP,sizes_h[g]*sizeof(candidate_t),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
+  }
+  return finish_host(groups_h,sizes_h,out,std::min(maxout,128));
 }
 } // namespace resident
