@@ -15,12 +15,14 @@
  *      reserve). DL first-pass decode: DL alone <= N-1, low classes not counted (lows yield to a waiting decode at their next chunk step), and
  *      the last free token stays the scan reserve unless a scan already holds a lease. DL therefore holds min(#DL consumers, N-1) tokens: at
  *      N=6 with 5 DL consumers all five run at once and a scan still gets the sixth. UL shares what DL leaves: with D >= N-1 DL consumers UL
- *      waits for a DL release (one DL job) instead of owning a reserve.
+ *      waits for a DL release (one DL job). While a UL decode waits DL gives up its last core: DL is capped at N-2 (scan reserve unchanged),
+ *      so a new DL is refused and the next DL release goes to UL, never to the next DL.
  *      Waiters older than age_ns[prio] are promoted (starvation bound; they still never exceed busy < N).
  *  (c) NO DISCOVERY/SOLVER UNDER A SCAN LEASE. Discovery work leases class DISC on its own thread; a thread asking for a different class
- *      while it holds a lease is counted in stats.nested; so is scan-side discovery/solver work that still runs inline under a SCAN lease
- *      (nr_pool_site_note_scan_extra). The discovered-dwell step/poll/snapshot already run on the pdcchDisc thread under a DISC lease; 11 of 13
- *      sites (they read the live rxdataF window or gate this slot's decode) stay inline, so nested > 0 on air until those move too.
+ *      while it holds a lease is counted in stats.nested. nested also counts the grid-reading discovery passes still run inline under a SCAN
+ *      lease (nr_pool_site_note_scan_extra: discovery occasion, autodiscover pass, blind CSI-RS). Decode-gating steps (DCI length sweeps, UL
+ *      layout, UL discovery grants, DM-RS scan filter, PDSCH solver) are real-time decode work and run under the scan lease by design: not counted.
+ *      A non-zero nested on air is a known fail (the inline discovery passes), not a decode-gating step.
  *  (d) WORKS WITH NO SETTING: the core list is the union of the existing site map (ISAC_PDSCH_CORES, ISAC_PUSCH_CORES; defaults built in)
  *      minus the RT/IO cores; a host with fewer cores gets the allowed cores that remain.
  * Chunking: long low-priority work calls nr_pool_yield() between steps. A GPU poll sleep (nr_gpu_poll_relax -> nr_pool_site_gpu_wait) gives the
@@ -36,7 +38,7 @@
 extern "C" {
 #endif
 enum { NR_POOL_SCAN = 0, NR_POOL_DECODE, NR_POOL_RETRY, NR_POOL_DISC, NR_POOL_HOUSE, NR_POOL_NPRIO };
-/* OR into prio for first-pass UL decodes (own cap: all decode + low <= N-1; DL is counted separately, see (b)). */
+/* OR into prio for first-pass UL decodes (own cap: all decode + low <= N-1; DL is counted separately and yields its last core to a waiting UL, see (b)). */
 #define NR_POOL_F_UL 0x100
 #define NR_POOL_MAX_TOKENS 32
 #define NR_POOL_MAX_CELLS 16

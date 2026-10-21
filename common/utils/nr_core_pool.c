@@ -131,11 +131,16 @@ static bool class_ok(const nr_pool_t *p, int prio, bool promoted, bool ul)
   if (promoted) return true;
   const int busy = n - p->nfree, low = p->cnt[NR_POOL_RETRY] + p->cnt[NR_POOL_DISC] + p->cnt[NR_POOL_HOUSE];
   const int lim1 = n > 1 ? n - 1 : 1, lim2 = n > 2 ? n - 2 : 1;
+  bool ulw = false; /* a UL decode is queued: DL gives up its last core (cap N-2) so the freed token goes to UL */
+  if (prio == NR_POOL_DECODE && !ul)
+    for (int i = 0; i < p->nwq && !ulw; i++) ulw = p->wq[i]->prio == NR_POOL_DECODE && p->wq[i]->ul;
   switch (prio) {
     case NR_POOL_SCAN: return p->cnt[NR_POOL_SCAN] + low < lim1;
     /* DL: counted alone, low classes do not shrink it (they yield at their next chunk step to a waiting decode). The last free token stays
-     * the scan reserve unless a scan already holds one. So DL holds min(#DL consumers, N-1) tokens, N-1 only when scan is idle. */
-    case NR_POOL_DECODE: return ul ? p->cnt[NR_POOL_DECODE] + low < lim1 : p->cnt_dl < lim1 && (busy < lim1 || p->cnt[NR_POOL_SCAN] > 0);
+     * the scan reserve unless a scan already holds one. So DL holds min(#DL consumers, N-1) tokens, N-1 only when scan is idle and no UL decode
+     * waits; while one waits DL is capped at N-2, so the next DL release goes to UL (DL is refused, UL is the only DECODE waiter grantable). */
+    case NR_POOL_DECODE:
+      return ul ? p->cnt[NR_POOL_DECODE] + low < lim1 : p->cnt_dl < lim1 - ulw && (busy < lim1 || p->cnt[NR_POOL_SCAN] > 0);
     default: return busy < lim2 && low < lim2;
   }
 }

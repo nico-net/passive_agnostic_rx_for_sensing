@@ -229,6 +229,79 @@ TEST(CorePool, FiveDlDecodesRunAtOnceAtN6AndAScanStillGetsAToken)
   nr_pool_destroy(p);
 }
 
+static void wait_leased(nr_pool_t *p, int k) // (stats are read under the pool lock; nr_pool_free is a deliberately racy hint)
+{
+  wait_until([&] { nr_pool_stats_t s; nr_pool_stats(p, &s); return s.leases[NR_POOL_DECODE] >= (uint64_t)k; });
+}
+// UL waits behind N-1 DL: DL gives up its last core while a UL decode waits (cap N-2), so the next DL release goes to UL, even to a DL waiter that queued first.
+TEST(CorePool, WaitingUlGetsTheNextDlRelease)
+{
+  const int DL = NR_POOL_DECODE, UL = NR_POOL_DECODE | NR_POOL_F_UL;
+  nr_pool_t *p = mk(6);
+  std::atomic<int> go{0}, ulgot{0}, dlgot{0};
+  std::vector<std::thread> th;
+  for (int i = 0; i < 5; i++) // 5 DL held (no UL waiting: DL still gets N-1)
+    th.emplace_back([&] { ASSERT_GE(nr_pool_acquire(p, DL, 0, 0), 0); while (go < 1) usleep(100); nr_pool_release(p); });
+  wait_leased(p, 5);
+  th.emplace_back([&] { nr_pool_acquire(p, DL, 0, 0); dlgot = 1; while (go < 2) usleep(100); nr_pool_release(p); }); // 6th DL: refused, queued first
+  wait_waiting(p, 1);
+  th.emplace_back([&] { nr_pool_acquire(p, UL, 0, 0); ulgot = 1; while (go < 2) usleep(100); nr_pool_release(p); });
+  wait_waiting(p, 2);
+  EXPECT_EQ(nr_pool_try_acquire(p, DL, 0, 0), -1); // a new DL is refused while UL waits
+  go = 1;                                           // all 5 DL release: the first release must serve UL
+  wait_until([&] { return ulgot == 1; });
+  wait_until([&] { return dlgot == 1; });
+  go = 2;
+  for (auto &t : th) t.join();
+  nr_pool_destroy(p);
+  // order check, one release at a time: N=3, 2 DL held (= N-1), DL waiter queued before the UL waiter
+  p = mk(3);
+  std::atomic<int> rel{0};
+  std::vector<std::thread> h2;
+  std::vector<int> got;
+  std::mutex m;
+  for (int i = 0; i < 2; i++)
+    h2.emplace_back([&, i] { nr_pool_acquire(p, DL, 0, 0); while (rel <= i) usleep(100); nr_pool_release(p); });
+  wait_leased(p, 2);
+  for (int c : {0, 1}) // DL (queued first) then UL
+    h2.emplace_back([&, c] {
+      nr_pool_acquire(p, c ? UL : DL, 0, 0);
+      { std::lock_guard<std::mutex> g(m); got.push_back(c); }
+      usleep(500);
+      nr_pool_release(p);
+    }), wait_waiting(p, c + 1);
+  rel = 1; // one DL releases
+  wait_until([&] { std::lock_guard<std::mutex> g(m); return got.size() >= 2; });
+  rel = 2;
+  for (auto &t : h2) t.join();
+  ASSERT_EQ(got.size(), 2u);
+  EXPECT_EQ(got[0], 1) << "UL must win the first released token";
+  nr_pool_destroy(p);
+}
+
+// No UL starvation under continuous DL load: with more DL threads than tokens, a UL decode gets a token within about one DL hold.
+TEST(CorePool, UlNotStarvedByContinuousDl)
+{
+  const int DL = NR_POOL_DECODE, UL = NR_POOL_DECODE | NR_POOL_F_UL;
+  nr_pool_t *p = mk(3);
+  std::atomic<bool> stop{false};
+  std::vector<std::thread> th;
+  for (int i = 0; i < 5; i++)
+    th.emplace_back([&] { while (!stop) { nr_pool_acquire(p, DL, 0, 0); usleep(1000); nr_pool_release(p); } });
+  uint64_t worst = 0;
+  for (int i = 0; i < 200; i++) {
+    const uint64_t t0 = nr_pool_now_ns();
+    nr_pool_acquire(p, UL, 0, 0);
+    worst = std::max(worst, nr_pool_now_ns() - t0);
+    nr_pool_release(p);
+    usleep(500);
+  }
+  stop = true;
+  for (auto &t : th) t.join();
+  EXPECT_LT(worst, 50000000ull) << "worst UL wait ns"; // one DL hold is 1 ms; 50 ms leaves room for a loaded host, starvation would be unbounded
+  nr_pool_destroy(p);
+}
+
 // (b) end to end: scans re-arrive continuously on every scan consumer; a decode arrival never waits for more than one decode-length hold.
 TEST(CorePool, DecodeNotStarvedByScans)
 {

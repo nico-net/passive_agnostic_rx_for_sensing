@@ -5776,7 +5776,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
           jfc.known = here_known;
           jfc.n_known = nh;
         }
-        nr_pool_site_note_scan_extra();
+        /* decode-gating (length sweeps, UL layout/grants, DM-RS filter, PDSCH solver): runs under the scan lease by design, not counted in nested */
         int found_len = janon_async
             ? nr_pdcch_dci_length_sweep_feed_budget(dl_state, janon_hit_scorer, &jfc, n_jhits > 0 ? n_jhits : 1,
                                                     dci_len_min(), dci_len_max(), 0, 0, 0)
@@ -6129,7 +6129,6 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
                             .bank_key=geom,.abs_slot=abs_slot,
                             .gpu_ctx=gpu?&gctx:NULL,
                             .skip=ul_skip,.audit=ul_audit};
-        nr_pool_site_note_scan_extra();
         const int found=nr_pdcch_dci_length_sweep_feed_budget(&ulc->state,ul_length_score,&ctx,
                                                      sweep_trials, dci_len_min(), dci_len_max(),
                                                      boot_rnti, 0, 0);
@@ -6912,7 +6911,6 @@ constdiag_done:;
     int found_len = lane_len_ctx ? lane_len_ctx->found[0]
                                  : (lane_anonymous ? lane_bank->anonymous_found : 0);
     if (found_len <= 0) {
-      nr_pool_site_note_scan_extra();
       found_len = nr_pdcch_dci_length_sweep_feed_budget(lane_state,
               nr_pdcch_autodiscover_length_scorer, lane_ctx, disc_n,
               dci_len_min(), dci_len_max(), lane_boot, 0, 0);
@@ -7149,7 +7147,6 @@ constdiag_done:;
             if (!ull_cell2.sib1_ul_size && cfg->bwp_size > 0 && nr_ul_layout_dl_prior_enabled()) {
               ull_cell2.sib1_ul_start = (uint16_t)cfg->bwp_start; ull_cell2.sib1_ul_size = (uint16_t)cfg->bwp_size; ull_cell2.sib1_ul_dl = 1; } }
           ull_cell2.dl_bwp_start = (uint16_t)cfg->bwp_start;
-          nr_pool_site_note_scan_extra();
           ull = nr_ul_layout_on_dci(cand_task[ti].rnti_min, cand_task[ti].dci_length, source_absolute_slot,
                                     cand_task[ti].ul_out.raw_payload, &ull_cell2, &ull_g);
           if (ull == 2 && nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(&ull_g, source_absolute_slot);
@@ -7172,7 +7169,6 @@ constdiag_done:;
           discovered = ull_fit;
         } else if (nr_pdcch_ul_config_disc_enabled() && ul_opts.bwp_size == 0) {
           nr_pdcch_blind_ul_opts_t confirmed;
-          nr_pool_site_note_scan_extra();
           nr_pdcch_ul_config_prior_t prior = {.dl_bwp_start=cfg->bwp_start,
               .dl_bwp_size=cfg->bwp_size, .carrier_rb=fp->N_RB_DL,
               .source_abs_slot=source_absolute_slot, .bank_key=geom};
@@ -7196,7 +7192,6 @@ constdiag_done:;
                 cand_task[ti].dci_length, cand_task[ti].ul_out.raw_payload,
                 &ul_opts, &prior, &discovered);
         } else {
-          nr_pool_site_note_scan_extra();
           cand_task[ti].ok=nr_pdcch_ul_discovery_grant(&ul_opts,cand_task[ti].dci_length,cand_task[ti].rnti_min,
                                                       cand_task[ti].ul_out.raw_payload,&discovered);
         }
@@ -8297,7 +8292,6 @@ constdiag_done:;
                                     sv_did >= 0 && sv_did != fp->Nid_cell);
       int sv_kept = -1;
       if (sv_nown > 0) {
-        nr_pool_site_note_scan_extra();
         nrd = dmrs_scan_filter_readings(ue, proc, cfg, out.rnti, sv_own, sv_nown, rparsed, rd, nrd, &sv_kept);
       }
       /* T26c: an unsolved RNTI is planned only with the probes the admission bucket can take NOW, so the search
@@ -8319,7 +8313,6 @@ constdiag_done:;
       }
       if (nrd <= 0) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_NOREAD);
       else if (sv_budget <= 0 && !sv_weak) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_BUDGET0);
-      if (nrd > 0 && sv_budget > 0) nr_pool_site_note_scan_extra();
       const int nv = nrd > 0 && sv_budget > 0 ? nr_pdsch_solver_plan_slot(out.rnti, rw->payload, dlen, out.mcs,
                                                     cfg->dmrs_typeA_position + 2, sv_nrm > 0, rd, nrd, sv_budget, var) : 0;
       int v = 0;
