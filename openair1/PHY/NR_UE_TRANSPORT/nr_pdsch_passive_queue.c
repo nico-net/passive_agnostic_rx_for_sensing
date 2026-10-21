@@ -61,6 +61,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_solver.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"         // T26b grant solver feedback
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"    // MAC timing-advance parsers + this file's reporter
+#include "PHY/NR_UE_TRANSPORT/nr_passive_reconf_rules.h" // contention resolution identity, RRC processing delay
 #include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
 void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/LAYER2/NR_MAC_UE
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.h"   // reject-only xOverhead elimination by TB CRC
@@ -630,6 +631,23 @@ void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slo
       }
     }
     return;
+  }
+  /* Re-attachment and RRC evidence of this transport block (TS 38.321 5.1.5, 6.1.2; TS 38.331 12). */
+  nr_passive_mac_dl_scan_t scan;
+  if (rnti <= 0xFFEF && nr_passive_mac_dlsch_scan(tb, tb_bytes, &scan)) { /* SI/P-RNTI blocks carry raw BCCH/PCCH RRC, no MAC subheaders */
+    if (scan.has_cr) {
+      /* Msg4: the UE Contention Resolution Identity CE proves the contention was resolved for the UE whose Msg3 CCCH SDU starts with these 48 bits
+       * (TS 38.321 5.1.5); the TC-RNTI is its C-RNTI from here on, with no 400 ms guess. */
+      nr_ue_ctx_on_msg4(rnti, nr_reconf_pack48(scan.cr), abs_slot);
+      nr_pdcch_blind_rnti_bootstrap_record_verified(rnti, NR_BLIND_RNTI_CLASS_C, abs_slot);
+      LOG_A(PHY, "SENSING: MSG4 CONTENTION RESOLUTION (%d.%d) rnti=0x%x identity=0x%012llx -> C-RNTI\n", frame, slot, rnti,
+            (unsigned long long)nr_reconf_pack48(scan.cr));
+    }
+    /* RRC message inferred from the unciphered MAC header: a CCCH SDU is RRCSetup (Msg4); a large SRB1 SDU on a C-RNTI is RRCReconfiguration-sized. */
+    if (scan.ccch_bytes)
+      nr_ue_ctx_on_rrc(rnti, NR_RECONF_RRC_SETUP, abs_slot, mu);
+    else if (scan.srb1_max_bytes >= NR_RECONF_RRC_MIN_SDU)
+      nr_ue_ctx_on_rrc(rnti, NR_RECONF_RRC_RECONF, abs_slot, mu);
   }
   uint8_t tag = 0, cmd = 0;
   if (nr_passive_mac_dlsch_ta(tb, tb_bytes, &tag, &cmd)) {

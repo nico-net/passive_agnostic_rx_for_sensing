@@ -247,6 +247,39 @@ void observe_cs(nr_pbwp_t *t, int n_occ, int lo, int hi, int ref_rb, bool two_sy
   }
 }
 
+TEST_F(Pbwp, CoresetNeverStartsBelowItsReference)
+{
+  /* OTA TIM 2026-10-20 crash: the real CORESET is RB 186-191 referenced to the BWP start RB 181 (window 31); window 30 is lit too, at a
+   * reference <= 180. The run then started at RB 180, below the voted reference 181, and the second pass wrapped rb_offset. */
+  nr_pbwp_init(t, 217, 0, 217, 46, 0);
+  const int n_win = 36;
+  for (int o = 0; o < 400; o++)
+    for (int sym = 0; sym < 2; sym++) {
+      std::vector<float> corr(n_win, 0.1f);
+      std::vector<int16_t> ref(n_win, 0);
+      if (sym == 0) {
+        corr[31] = 0.95f; ref[31] = 181;
+        if (o % 2) { corr[30] = 0.9f; ref[30] = 180; }
+      }
+      nr_pbwp_coreset_observe(t, n_win, 0, 7, 0, corr.data(), ref.data(), sym, 0.8f);
+    }
+  int start, n, dur, ref;
+  ASSERT_TRUE(nr_pbwp_coreset_hypothesis(t, &start, &n, &dur, &ref));
+  EXPECT_EQ(ref, 181);
+  EXPECT_EQ(start, 186);
+  EXPECT_EQ(n, 6);
+  EXPECT_TRUE(nr_pbwp_pass2_geometry_ok(start, n, dur, ref, 217));
+}
+
+TEST_F(Pbwp, SecondPassGeometryGate)
+{
+  EXPECT_TRUE(nr_pbwp_pass2_geometry_ok(186, 6, 1, 181, 217));
+  EXPECT_FALSE(nr_pbwp_pass2_geometry_ok(180, 6, 1, 181, 217)); /* start below the reference: the SEGV geometry */
+  EXPECT_FALSE(nr_pbwp_pass2_geometry_ok(216, 6, 1, 0, 217));   /* past the carrier */
+  EXPECT_FALSE(nr_pbwp_pass2_geometry_ok(0, 0, 1, 0, 217));
+  EXPECT_FALSE(nr_pbwp_pass2_geometry_ok(0, 6, 4, 0, 217));
+}
+
 TEST_F(Pbwp, CoresetOfADedicatedBwpIsFoundWithItsOaiReference)
 {
   /* OAI: BWP 1 = 40 PRB at CRB 30 -> CORESET 24 RB at CRB 30, 2 symbols, DM-RS referenced to CRB 30 */

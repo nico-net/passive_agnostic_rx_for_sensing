@@ -16,6 +16,7 @@
  */
 
 #include "nr_passive_mac_ta.h"
+#include <string.h>
 /* The three DL-SCH LCIDs this walk needs, from TS 38.321 table 6.2.1-1. Deliberately NOT included
  * from openair2's nr_mac.h: that header pulls in the generated ASN.1 tree, which would make this
  * parser -- pure byte handling with no MAC state -- undeployable in a standalone unit test. */
@@ -184,6 +185,69 @@ bool nr_passive_mac_dlsch_ta(const uint8_t *pdu, uint32_t len, uint8_t *tag_id_o
     i += l;
   }
   return false;
+}
+
+/* One pass over a DL-SCH MAC PDU for the re-attachment / RRC evidence (TS 38.321 6.1.2, Table 6.2.1-1): the UE Contention Resolution Identity CE
+ * (LCID 62), a CCCH SDU (LCID 0, Msg4 RRCSetup) and the largest SRB1 SDU (LCID 1). Same walk and same stop rules as nr_passive_mac_dlsch_ta(). */
+bool nr_passive_mac_dlsch_scan(const uint8_t *pdu, uint32_t len, nr_passive_mac_dl_scan_t *out)
+{
+  if (out == NULL) {
+    return false;
+  }
+  *out = (nr_passive_mac_dl_scan_t){0};
+  if (pdu == NULL || len < 2) {
+    return false;
+  }
+  uint32_t i = 0;
+  while (i < len) {
+    const uint8_t sub = pdu[i];
+    const uint8_t lcid = sub & 0x3F;
+    const bool F = (sub & 0x40) != 0;
+    i += 1;
+    if (lcid == DL_SCH_LCID_PADDING) {
+      break;
+    }
+    const int fixed = dl_ce_fixed_len(lcid);
+    if (fixed >= 0) {
+      if ((uint32_t)fixed > len - i) {
+        break;
+      }
+      if (lcid == DL_SCH_LCID_CON_RES_ID) {
+        out->has_cr = true;
+        memcpy(out->cr, pdu + i, 6);
+      }
+      i += (uint32_t)fixed;
+      continue;
+    }
+    if (lcid > 32) {
+      break;
+    }
+    uint32_t l;
+    if (F) {
+      if (i + 2 > len) {
+        break;
+      }
+      l = ((uint32_t)pdu[i] << 8) | pdu[i + 1];
+      i += 2;
+    } else {
+      if (i + 1 > len) {
+        break;
+      }
+      l = pdu[i];
+      i += 1;
+    }
+    if (l > len - i) {
+      break;
+    }
+    if (lcid == 0 && l > out->ccch_bytes) {
+      out->ccch_bytes = l;
+    }
+    if (lcid == 1 && l > out->srb1_max_bytes) {
+      out->srb1_max_bytes = l;
+    }
+    i += l;
+  }
+  return out->has_cr || out->ccch_bytes || out->srb1_max_bytes;
 }
 
 double nr_passive_mac_ta_metres(uint16_t ta_absolute, int mu)

@@ -17,6 +17,10 @@
  * row,freq_domain,start_rb,nr_of_rbs,symb_l0,scramb_id. It never emits ue_reconfig.
  * SIB1_HASH, SIB1_BWP and SIB1_TDRA_HASH are present only when an actual SIB1 has been decoded
  * (SA and NSA alike). SIB1_BWP uses the BWP packing above; TDRA_HASH is FNV-1a over common rows.
+ * UE_ID (Msg4 Contention Resolution Identity, TS 38.321 5.1.5): kind<<48 | value, kind 1 random, 2 S-TMSI part 1, 3 resume identity (nr_reconf_id_kind_t).
+ * REATTACH: (rnti<<16|incarnation) of the earlier incarnation of the same RNTI this one replaces (a different UE); the change cause is the evidence
+ * (REATTACH_RAR / _MSG4 / _HARQ / _DCI_SIZE). RESUME_OF: (rnti<<16|incarnation) of an earlier context whose linkable UE_ID is equal (same UE, cause RESUME_LINK).
+ * ue_reconfig class RRC_WINDOW_CLOSED: the 38.331 12 processing delay of an inferred RRC message elapsed. An incarnation is never reused for another UE.
  * The writer owns contexts; producers only copy bounded events into a lock-free MPSC ring. */
 #ifndef NR_PASSIVE_UE_CTX_H
 #define NR_PASSIVE_UE_CTX_H
@@ -29,7 +33,9 @@ extern "C" {
 #endif
 #define NR_UECTX_SCHEMA "uectx/1"
 #define NR_UECTX_MAX_UE 1024
-typedef enum { NR_UE_FIRST_SEEN, NR_UE_ACTIVE, NR_UE_IDLE, NR_UE_GONE } nr_ue_state_t;
+/* IDLE: silent for NR_RECONF_INACTIVE_NS (RRC_IDLE, RRC_INACTIVE or DRX cannot be told apart passively). INACTIVE: the same for a UE whose identity is a resume
+ * identity (it has resumed from RRC_INACTIVE before). GONE after NR_RECONF_GONE_NS. Appended last: existing numeric values keep their meaning. */
+typedef enum { NR_UE_FIRST_SEEN, NR_UE_ACTIVE, NR_UE_IDLE, NR_UE_GONE, NR_UE_INACTIVE } nr_ue_state_t;
 typedef enum { NR_UEV_TRUSTED, NR_UEV_HINT, NR_UEV_SUSPECT } nr_ue_verif_t;
 typedef enum { NR_UES_UNKNOWN, NR_UES_OBSERVATION, NR_UES_PDCCH, NR_UES_SWEEP,
                NR_UES_BWP, NR_UES_SIB1, NR_UES_RAR } nr_ue_source_t;
@@ -38,12 +44,15 @@ typedef enum {
   NR_UEP_DCI_LEN_STATE, NR_UEP_PDCCH_SCR_ID, NR_UEP_PDSCH_SCR_ID, NR_UEP_TD_WINNER,
   NR_UEP_TD_STATE, NR_UEP_MCS_TABLE, NR_UEP_DMRS_CFG, NR_UEP_MAX_LAYERS, NR_UEP_LBRM,
   NR_UEP_BWP, NR_UEP_PUSCH_LAYOUT, NR_UEP_SIB1_HASH, NR_UEP_SIB1_BWP,
-  NR_UEP_SIB1_TDRA_HASH, NR_UEP_APERIODIC_CSI, NR_UEP_COUNT
+  NR_UEP_SIB1_TDRA_HASH, NR_UEP_APERIODIC_CSI,
+  NR_UEP_UE_ID, NR_UEP_REATTACH, NR_UEP_RESUME_OF, NR_UEP_COUNT
 } nr_ue_param_t;
 typedef enum {
   NR_UEC_FIRST_LEARNED, NR_UEC_CONVERGED, NR_UEC_RELOCK, NR_UEC_REOPENED_NEW_WINNER,
   NR_UEC_BWP_CHANGE, NR_UEC_CORESET_CHANGE, NR_UEC_EPOCH_REVERIFIED,
-  NR_UEC_EPOCH_DISCARDED, NR_UEC_HARD_RESET
+  NR_UEC_EPOCH_DISCARDED, NR_UEC_HARD_RESET,
+  NR_UEC_REATTACH_RAR, NR_UEC_REATTACH_MSG4, NR_UEC_REATTACH_HARQ, NR_UEC_REATTACH_DCI_SIZE,
+  NR_UEC_RESUME_LINK, NR_UEC_RRC_WINDOW
 } nr_ue_cause_t;
 typedef struct {
   int64_t value;
@@ -114,6 +123,11 @@ void nr_ue_ctx_on_dci01_csi(uint16_t rnti, uint8_t request, int64_t trigger_slot
                             const nr_ue_csi_resource_t *observed);
 void nr_ue_ctx_tick(int64_t abs_slot, uint64_t t_mono_ns);
 bool nr_ue_ctx_get(uint16_t rnti, nr_ue_ctx_t *out);
+/* Msg3 (UL CCCH SDU of a TC-RNTI, 48 bits packed) / Msg4 (UE Contention Resolution Identity CE, 48 bits packed): TS 38.321 5.1.5. */
+void nr_ue_ctx_on_msg3(uint16_t rnti, uint64_t ccch48, int64_t abs_slot);
+void nr_ue_ctx_on_msg4(uint16_t rnti, uint64_t cr48, int64_t abs_slot);
+/* An RRC message was received by rnti at rx_slot (kind: nr_reconf_rrc_kind_t); the new dedicated configuration applies after TS 38.331 12. */
+void nr_ue_ctx_on_rrc(uint16_t rnti, int kind, int64_t rx_slot, int mu);
 bool nr_ue_ctx_try_get(uint16_t rnti, nr_ue_ctx_t *out); /* producer: miss on lock contention */
 bool nr_ue_ctx_ul_ticket(uint16_t rnti, nr_ue_ul_ticket_t *out);
 void nr_ue_ctx_ul_grant(const nr_ue_ul_ticket_t *ticket, const nr_ue_ul_update_t *update);

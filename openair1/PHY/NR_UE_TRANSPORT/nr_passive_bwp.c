@@ -469,9 +469,20 @@ bool nr_pbwp_coreset_hypothesis(const nr_pbwp_t *t, int *start_rb, int *n_rb, in
     for (int k = 0; k < 276; k++)
       if (cs->ref_votes[k] > cs->ref_votes[r])
         r = k;
+  /* r is the most voted reference over ALL lit windows, so it can lie above the run's first window (OTA TIM 2026-10-20: windows 30-31 lit,
+   * r = 181 -> start 180 < reference 181, and the second pass's rb_offset = start - ref wrapped to 65535: SEGV). A CORESET lies inside the
+   * BWP its DM-RS is referenced to, so windows below r are not part of it. */
+  if (best_lo * 6 < r)
+    best_lo = (r + 5) / 6;
+  if (best_lo > best_hi)
+    return false;
   *start_rb = best_lo * 6;
   *n_rb = (best_hi - best_lo + 1) * 6;
   *duration = (h1 * 10 >= h0 * 3) ? 2 : 1; /* symbol 1 lit in >= 30 % of symbol-0 hits */
   *ref_rb = r;
   return true;
+}
+bool nr_pbwp_pass2_geometry_ok(int start_rb, int n_rb, int duration, int ref_rb, int n_rb_dl)
+{
+  return n_rb >= 6 && n_rb <= 270 && duration >= 1 && duration <= 3 && ref_rb >= 0 && start_rb >= ref_rb && start_rb + n_rb <= n_rb_dl;
 }

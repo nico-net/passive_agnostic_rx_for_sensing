@@ -95,7 +95,7 @@ The single-arm syntax is `bash "$R/tests/passive_rx/sa_bed/run_arm.sh" <stable|b
 
 `sa` leaves SIB1 evidence available and waits for a pre-apply SIB1 decode. `sib1less` sets `ISAC_TD_IGNORE_SIB1=1`, which suppresses SIB1-derived receiver evidence while the **actual serving cell remains SA and broadcasts SIB1**. The scorer checks UeContext snapshots for present SIB1 evidence in the enabled SA arm and null SIB1 evidence in the enabled SIB1-less arm. This models a SIB1-absent observation; it is not a live NSA cell. `on` sets `ISAC_RECONF=1`; `off` is the flag-off control. Do not infer NSA OTA performance from this bed.
 
-Both flag states set receiver-only `ISAC_BWP_TRACK=1`, matching `run_bwp_switch.sh`; OAI otherwise leaves BWP tracking off unless `ISAC_AGNOSTIC_V2=1`. This keeps the switch observable in the control while isolating `ISAC_RECONF`.
+Both flag states run with the passive BWP tracker, which is always on in the receiver (no ISAC_BWP_TRACK flag any more); this keeps the switch observable in the control while isolating `ISAC_RECONF`.
 
 ## 6. Logs, scoring and validation rules
 

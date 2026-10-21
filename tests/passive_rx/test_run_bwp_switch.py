@@ -61,7 +61,7 @@ def fake_runner(tmp, rc=0, straddle=False):
     runner.write_text(
         "#!/bin/bash\n"
         "# args: duration out_dir -- same contract as run_passive_rx.sh\n"
-        'echo "env GNB_CONF_OVERRIDE=$GNB_CONF_OVERRIDE CONF_TAG=$CONF_TAG ISAC_BWP_TRACK=$ISAC_BWP_TRACK GNB_EXTRA=$GNB_EXTRA" > "$2/env.txt"\n'
+        'echo "env GNB_CONF_OVERRIDE=$GNB_CONF_OVERRIDE CONF_TAG=$CONF_TAG GNB_EXTRA=$GNB_EXTRA" > "$2/env.txt"\n'
         f"cat > \"$2/ue_rx1.log\" <<'EOF'\n{PRE}EOF\n"
         f"printf '%s' '{head}' >> \"$2/ue_rx1.log\"\n"
         "sleep 3\n"
@@ -92,7 +92,6 @@ class RunBwpSwitchTest(unittest.TestCase):
         env = (out / "env.txt").read_text()
         self.assertIn("GNB_CONF_OVERRIDE=gnb.sa.rfsim.bwp.conf", env)
         self.assertIn("CONF_TAG=.bwp.agn", env)
-        self.assertIn("ISAC_BWP_TRACK=1", env)  # the receiver feature under test
         self.assertIn("--telnetsrv", env)
         self.assertIn("--telnetsrv.shrmod ci", env)
         self.assertIn("triggered BWP switch", (out / "telnet.log").read_text())

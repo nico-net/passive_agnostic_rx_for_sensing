@@ -18,7 +18,6 @@ RUNNER=${RUNNER:-$D/run_passive_rx.sh}
 AT=${TRIGGER_AT:-$((DUR / 2))}; PORT=${TELNET_PORT:-9090}; TGT=${BWP_TARGET:-2}
 export GNB_CONF_OVERRIDE=${GNB_CONF_OVERRIDE:-gnb.sa.rfsim.bwp.conf} CONF_TAG=${CONF_TAG:-.bwp.agn}
 export NUM_RX=${NUM_RX:-1} NUM_UE=${NUM_UE:-1}
-export ISAC_BWP_TRACK=${ISAC_BWP_TRACK:-1}   # passive BWP tracker (the receiver feature under test)
 export GNB_EXTRA="${GNB_EXTRA:-} --telnetsrv --telnetsrv.listenport $PORT --telnetsrv.shrmod ci"
 mkdir -p "$OUT"
 RXLOG=$OUT/ue_rx1.log

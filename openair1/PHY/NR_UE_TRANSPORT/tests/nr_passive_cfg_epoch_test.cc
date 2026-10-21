@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "nr_passive_cfg_epoch.h"
+#include "nr_passive_reconf_rules.h"
 #include "nr_passive_cfg_sources.h"
 #include "nr_passive_ue_ctx.h"
 #include "common/config/config_userapi.h"
@@ -361,6 +362,20 @@ TEST_F(CfgEpoch, IdentityRefinesUnknownPointAWithoutBump) {
   nr_cfg_epoch_note_identity(11, 100, 0);
   nr_cfg_epoch_drain();
   EXPECT_EQ(calls, 1);
+}
+// A DCI-triggered BWP switch raises the BWP_CHANGE epoch only after the TS 38.133 8.6.2 switch delay (nr_reconf_bwp_due), and listeners re-lock then.
+TEST_F(CfgEpoch, DciTriggeredBwpSwitchRaisesTheEpochAtTheSwitchDelay) {
+  nr_reconf_reset();
+  const uint32_t before = nr_cfg_epoch_current();
+  nr_reconf_bwp_switch_dci(0x4601, 1, 7000, 1);
+  uint16_t rnti;
+  int entry;
+  EXPECT_FALSE(nr_reconf_bwp_due(7004, &rnti, &entry)); // mu 1: type 2 delay is 5 slots
+  EXPECT_EQ(nr_cfg_epoch_current(), before);
+  ASSERT_TRUE(nr_reconf_bwp_due(7005, &rnti, &entry));
+  nr_cfg_epoch_note_bwp_change(); // what the PDCCH monitor does for a due switch
+  EXPECT_EQ(nr_cfg_epoch_current(), before + 1);
+  EXPECT_EQ(nr_cfg_epoch_snapshot().last_cause, NR_CAUSE_BWP_CHANGE);
 }
 TEST_F(CfgEpoch, DecodedBwpAndContinuitySources) {
   nr_cfg_epoch_note_bwp_change();
