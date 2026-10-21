@@ -181,6 +181,24 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
   if (m->csirs_disc_readmit_skipped)
     snprintf(discovery, sizeof(discovery), ",\"csirs_disc_readmit_skipped\":%" PRIu64,
              m->csirs_disc_readmit_skipped);
-  const int z = snprintf(buf + w, n - (size_t)w, "%s}", discovery);
+  /* tail keys: own bounded buffer, appended after every pre-existing key */
+  char tail[768];
+  int t = snprintf(tail, sizeof(tail), ",\"t_real_ns\":%" PRIu64 ",\"proc_utime_us\":%" PRIu64 ",\"proc_stime_us\":%" PRIu64
+                   ",\"proc_maxrss_kb\":%" PRIu64 ",\"proc_minflt\":%" PRIu64 ",\"proc_majflt\":%" PRIu64,
+                   m->t_real_ns, m->proc_utime_us, m->proc_stime_us, m->proc_maxrss_kb, m->proc_minflt, m->proc_majflt);
+  if (m->has_cfg_epoch && t > 0 && (size_t)t < sizeof(tail))
+    t += snprintf(tail + t, sizeof(tail) - (size_t)t, ",\"cfg_epoch\":%u,\"cfg_identity_gen\":%u", m->cfg_epoch, m->cfg_identity_gen);
+  if (m->has_recov && t > 0 && (size_t)t < sizeof(tail))
+    t += snprintf(tail + t, sizeof(tail) - (size_t)t,
+                  ",\"recov_submitted\":%" PRIu64 ",\"recov_rescued\":%" PRIu64 ",\"recov_stale\":%" PRIu64 ",\"recov_expired\":%" PRIu64
+                  ",\"recov_dropped_full\":%" PRIu64 ",\"recov_dropped_old\":%" PRIu64 ",\"recov_yielded\":%" PRIu64
+                  ",\"recov_late_ms_p50\":%d,\"recov_late_ms_p99\":%d",
+                  m->recov_submitted, m->recov_rescued, m->recov_stale, m->recov_expired, m->recov_dropped_full, m->recov_dropped_old,
+                  m->recov_yielded, m->recov_late_ms_p50, m->recov_late_ms_p99);
+  if (m->has_retry_yield && t > 0 && (size_t)t < sizeof(tail))
+    t += snprintf(tail + t, sizeof(tail) - (size_t)t, ",\"retry_yield_chains\":%" PRIu64 ",\"retry_yield_yields\":%" PRIu64 ",\"retry_yield_gated\":%" PRIu64,
+                  m->retry_yield_chains, m->retry_yield_yields, m->retry_yield_gated);
+  if (t < 0 || (size_t)t >= sizeof(tail)) return -1;
+  const int z = snprintf(buf + w, n - (size_t)w, "%s%s}", discovery, tail);
   return (z < 0 || (size_t)z >= n - (size_t)w) ? -1 : w + z;
 }

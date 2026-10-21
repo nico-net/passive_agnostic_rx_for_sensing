@@ -1,0 +1,26 @@
+{
+ "classes": {
+  "correct_tb": 1194,
+  "dci_ok_tb_failed": 126,
+  "dropped_undecidable": 19,
+  "missed_tb": 28
+ },
+ "f1": 0.9834741094381197,
+ "false_alarms_per_1000_slots": 0.05874730021598272,
+ "fn_dci": 28,
+ "fp_dci": 17,
+ "gnb_grants": 1367,
+ "label": "gNB MAC log = scheduled grants (not PHY-emitted); mismatches may be gNB-side non-transmissions",
+ "offset_slots": 0,
+ "offset_votes": 1341,
+ "precision": 0.9874631268436578,
+ "provenance": "synthetic",
+ "recall": 0.9795171909290417,
+ "recall_ci95": [
+  0.9705556420542766,
+  0.9857911743831587
+ ],
+ "span_slots": 289375,
+ "tb_success_over_gnb_grants": 0.8734455010972934,
+ "tp_dci": 1339
+}

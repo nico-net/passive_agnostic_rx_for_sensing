@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <sys/resource.h>
 #include <dlfcn.h>
 #include "common/utils/LOG/log.h"
 #include "nr_passive_acq_state.h"
@@ -32,6 +33,11 @@ __attribute__((weak)) void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
 __attribute__((weak)) void nr_csirs_disc_get_metrics(nr_csirs_disc_metrics_t *m);
 __attribute__((weak)) void nr_srs_passive_metrics(uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *);
 __attribute__((weak)) uint64_t nr_pdcch_blind_inline_drop_epoch(void);
+__attribute__((weak)) uint32_t nr_cfg_epoch_current(void);
+__attribute__((weak)) uint32_t nr_cfg_epoch_identity_gen(void);
+__attribute__((weak)) void nr_pdsch_recovery_stats(char *buf, int n);
+__attribute__((weak)) bool nr_pdsch_recovery_enabled(void);
+__attribute__((weak)) void nr_pdsch_retry_yield_stats(uint64_t *chains, uint64_t *yields, uint64_t *gated);
 
 extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
 _Atomic int nr_passive_metrics_pci = -1;
@@ -58,6 +64,38 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     m->nid_capture_noise_floor_db = noise > 0 ? 10.0 * log10(noise) : -120.0;
   }
   m->t_mono_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  m->t_real_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+  struct rusage ru;
+  if (getrusage(RUSAGE_SELF, &ru) == 0) {
+    m->proc_utime_us = (uint64_t)ru.ru_utime.tv_sec * 1000000ull + (uint64_t)ru.ru_utime.tv_usec;
+    m->proc_stime_us = (uint64_t)ru.ru_stime.tv_sec * 1000000ull + (uint64_t)ru.ru_stime.tv_usec;
+    m->proc_maxrss_kb = (uint64_t)ru.ru_maxrss;
+    m->proc_minflt = (uint64_t)ru.ru_minflt;
+    m->proc_majflt = (uint64_t)ru.ru_majflt;
+  }
+  if (nr_cfg_epoch_current && nr_cfg_epoch_identity_gen) {
+    m->cfg_epoch = nr_cfg_epoch_current();
+    m->cfg_identity_gen = nr_cfg_epoch_identity_gen();
+    m->has_cfg_epoch = 1;
+  }
+  if (nr_pdsch_recovery_stats && nr_pdsch_recovery_enabled && nr_pdsch_recovery_enabled()) { /* text getter: parsed back, a short parse leaves has_recov 0; recovery off = keys absent, not 0 */
+    char rs[256];
+    nr_pdsch_recovery_stats(rs, sizeof rs);
+    unsigned long v[7];
+    int p50, p99;
+    if (sscanf(rs, "RECOV submitted=%lu rescued=%lu stale=%lu expired=%lu dropped_full=%lu dropped_old=%lu yielded=%lu late_ms_p50/p99=%d/%d",
+               &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &p50, &p99) == 9) {
+      m->recov_submitted = v[0]; m->recov_rescued = v[1]; m->recov_stale = v[2]; m->recov_expired = v[3];
+      m->recov_dropped_full = v[4]; m->recov_dropped_old = v[5]; m->recov_yielded = v[6];
+      m->recov_late_ms_p50 = p50; m->recov_late_ms_p99 = p99;
+      m->has_recov = 1;
+    }
+  }
+  if (nr_pdsch_retry_yield_stats) {
+    nr_pdsch_retry_yield_stats(&m->retry_yield_chains, &m->retry_yield_yields, &m->retry_yield_gated);
+    m->has_retry_yield = 1;
+  }
   m->abs_slot = (int64_t)atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
   if(nr_srs_passive_metrics) nr_srs_passive_metrics(&m->srs_us,&m->srs_jobs_dropped,
       &m->srs_pregate_skip,&m->srs_backoff_skip,&m->srs_budget_skip,&m->srs_idle_resets);

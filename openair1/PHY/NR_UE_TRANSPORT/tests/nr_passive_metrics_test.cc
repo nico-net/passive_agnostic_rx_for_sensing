@@ -60,7 +60,7 @@ TEST(PassiveMetrics, NullStateNameIsReportedAsUnknown) {
 TEST(PassiveMetrics, UnknownSlotAndPciSerializeAsMinusOne) {
   nr_passive_metrics_t m = {};
   m.abs_slot = -1; m.pci = -1; m.acq_state = "SEARCHING";
-  char buf[4096];
+  char buf[8192];
   ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
   const std::string s(buf);
   EXPECT_NE(s.find("\"abs_slot\":-1"), std::string::npos);
@@ -70,7 +70,7 @@ TEST(PassiveMetrics, UnknownSlotAndPciSerializeAsMinusOne) {
 TEST(PassiveMetrics, ExactSizeBufferBoundary) {
   nr_passive_metrics_t m = {};
   m.acq_state = "TRACKING";
-  char big[4096];
+  char big[8192];
   const int w = nr_passive_metrics_to_json(&m, big, sizeof(big));
   ASSERT_GT(w, 0);
   std::string a(w + 1, 'x'), b(w, 'x');
@@ -82,7 +82,7 @@ TEST(PassiveMetrics, TdExclRestartKeysPresent) {
   nr_passive_metrics_t m = {};
   m.acq_state = "TRACKING";
   m.td_excl_restarts = 3; m.td_excl_truncs = 4; m.td_excl_restart_alarms = 5;
-  char buf[4096];
+  char buf[8192];
   ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
   const std::string s(buf);
   for (const char *k : {"\"td_excl_restarts\":3", "\"td_excl_truncs\":4", "\"td_excl_restart_alarms\":5"})
@@ -92,7 +92,7 @@ TEST(PassiveMetrics, FieldBookKeysPresent) {
   nr_passive_metrics_t m = {};
   m.acq_state = "TRACKING";
   m.td_fb_promotions = 1; m.td_fb_withdrawals = 2; m.td_fb_failopens = 3; m.td_fb_pruned_contexts = 4; m.td_fb_untrusted_ctx = 5;
-  char buf[4096];
+  char buf[8192];
   ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
   const std::string s(buf);
   for (const char *k : {"\"td_fb_promotions\":1", "\"td_fb_withdrawals\":2", "\"td_fb_failopens\":3", "\"td_fb_pruned_contexts\":4", "\"td_fb_untrusted_ctx\":5"})
@@ -104,7 +104,7 @@ TEST(PassiveMetrics, Bc12aSib1CensusKeysPresentPerDciFormat) {
   m.td_sib1_tdra_match_10 = 1; m.td_sib1_tdra_mismatch_10 = 2; m.td_sib1_tdra_none_10 = 3;
   m.td_sib1_tdra_match_11 = 4; m.td_sib1_tdra_mismatch_11 = 5; m.td_sib1_tdra_none_11 = 6;
   m.td_deftab_match_11 = 7; m.td_deftab_mismatch_11 = 8;
-  char buf[4096];
+  char buf[8192];
   ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
   const std::string s(buf);
   for (const char *k : {"\"td_sib1_tdra_match_10\":1", "\"td_sib1_tdra_mismatch_10\":2", "\"td_sib1_tdra_none_10\":3",
@@ -119,7 +119,7 @@ TEST(PassiveMetrics, Cb0EliminationKeysPresent) {
   m.td_cb0_grants = 11; m.td_cb0_items = 22; m.td_cb0_budget_skips = 3; m.td_cb0_us_per_item = 361.25;
   m.td_cb0_backend_cpu = 7; m.td_cb0_backend_gpu = 0; m.td_cb0_premise_alarms = 0; m.td_cb0_eliminations = 9;
   m.td_cb0_inadmissible[0] = 4; m.td_cb0_inadmissible[13] = 3; m.td_cb0_inadmissible[15] = 1;
-  char buf[4096];
+  char buf[8192];
   const int n = nr_passive_metrics_to_json(&m, buf, sizeof(buf));
   ASSERT_GT(n, 0);
   const std::string s(buf, n);
@@ -147,7 +147,7 @@ TEST(PassiveMetrics, MergedSchemaFitsWithFullResourceListAndLargeCounters) {
     EXPECT_NE(s.find(std::string("\"") + key + "\":"), std::string::npos) << key;
 }
 TEST(PassiveMetrics,SrsCountersPresent) {
-  nr_passive_metrics_t m={};char buf[6144];
+  nr_passive_metrics_t m={};char buf[8192];
   ASSERT_GT(nr_passive_metrics_to_json(&m,buf,sizeof(buf)),0);
   EXPECT_NE(std::string(buf).find("\"srs_us\":0"),std::string::npos);
   EXPECT_NE(std::string(buf).find("\"srs_jobs_dropped\":0"),std::string::npos);
@@ -189,4 +189,26 @@ TEST(PassiveMetrics, NidCapturePolicyCounters) {
   EXPECT_NE(s.find("\"nid_capture_taken\":10"),std::string::npos);
   EXPECT_NE(s.find("\"nid_capture_skipped_empty\":89"),std::string::npos);
   EXPECT_NE(s.find("\"nid_capture_noise_floor_db\":42.125"),std::string::npos);
+}
+
+TEST(PassiveMetrics, TailKeysSerializedAndWeakGetterKeysOmitted) {
+  nr_passive_metrics_t m = {};
+  m.acq_state = "TRACKING";
+  m.t_real_ns = 1700000000123456789ull; m.proc_utime_us = 11; m.proc_stime_us = 22; m.proc_maxrss_kb = 33; m.proc_minflt = 44; m.proc_majflt = 5;
+  char buf[16384];
+  ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
+  std::string s(buf);
+  EXPECT_NE(s.find("\"t_real_ns\":1700000000123456789,\"proc_utime_us\":11,\"proc_stime_us\":22,\"proc_maxrss_kb\":33,\"proc_minflt\":44,\"proc_majflt\":5"), std::string::npos);
+  for (const char *k : {"cfg_epoch", "cfg_identity_gen", "recov_", "retry_yield_"})  // getter absent: omitted, not 0
+    EXPECT_EQ(s.find(k), std::string::npos) << k;
+  m.has_cfg_epoch = m.has_recov = m.has_retry_yield = 1;
+  m.cfg_epoch = 7; m.cfg_identity_gen = 2; m.recov_submitted = 9; m.recov_yielded = 3; m.recov_late_ms_p50 = 1; m.recov_late_ms_p99 = 6;
+  m.retry_yield_chains = 100; m.retry_yield_yields = 4; m.retry_yield_gated = 8;
+  const int n = nr_passive_metrics_to_json(&m, buf, sizeof(buf));
+  ASSERT_GT(n, 0);
+  s.assign(buf, n);
+  EXPECT_EQ(s.back(), '}');
+  for (const char *k : {"\"cfg_epoch\":7,\"cfg_identity_gen\":2", "\"recov_submitted\":9", "\"recov_yielded\":3,\"recov_late_ms_p50\":1,\"recov_late_ms_p99\":6",
+                        "\"retry_yield_chains\":100,\"retry_yield_yields\":4,\"retry_yield_gated\":8"})
+    EXPECT_NE(s.find(k), std::string::npos) << k;
 }
