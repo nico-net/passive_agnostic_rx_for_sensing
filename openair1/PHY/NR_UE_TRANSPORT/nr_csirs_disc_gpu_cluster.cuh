@@ -296,7 +296,9 @@ static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cf
       int p=periods[pi];uint64_t counts[640]={};for(int i=0;i<640;++i) counts[i%p]+=s.counts[i];
       if(disc_copy(s.dc.p,counts,p*8,cudaMemcpyHostToDevice)!=cudaSuccess
          || disc_zero(s.masks.p,0,(size_t)p*14*tiles*6*2)!=cudaSuccess || disc_zero(s.count.p,0,4)!=cudaSuccess) return -1;
-      static NrGpuChunker c_lp{1,0,"c_lp"}; static NrGpuChunker c_ls{1,0,"c_ls"}; static NrGpuChunker c_seg{1,0,"c_seg"};
+      static NrGpuChunker c_lp{1,0,"c_lp"}; static NrGpuChunker c_ls{1,0,"c_ls"}; static NrGpuChunker c_seg{32,0,"c_seg",0,32};
+      /* c_seg: one unit (one 32-thread CTA) runs 18-125 ms, so 1-unit chunks serialise a call into one kernel per unit with 7 of 8 SMs idle (1.2 s vs 0.12 s in one
+       * launch); 32 units per chunk run about as long as one (27-33 ms). MEASURED DISC-GPU-TIMING-20261022 (DGX bench idle) */
       if(disc_chunks(c_lp,(p*pooled+127)/128,[&](long f,long k){lattice_pool<<<k,128,0,disc_stream()>>>(p,nr,pooled,s.sum.p,s.sq.p,s.ps.p,s.pq.p,(int)f);})!=cudaSuccess
          || disc_chunks(c_ls,(p*14+63)/64,[&](long f,long k){lattice_screen<<<k,64,0,disc_stream()>>>(p,tiles,s.nt,s.dc.p,s.ps.p,s.pq.p,s.total.p+nr-pooled,s.totalq.p+nr-pooled,s.masks.p,(int)f);})!=cudaSuccess
          || disc_chunks(c_seg,(p*14+31)/32,[&](long f,long k){segment<<<k,32,0,disc_stream()>>>(rb,p,s.nt,s.dc.p,s.sum.p,s.s80.p,s.s64.p,s.total.p,s.totalq.p,s.masks.p,symbols,

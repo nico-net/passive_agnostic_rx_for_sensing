@@ -748,6 +748,17 @@ TEST(GpuChunk, FollowsGpuTimePerUnit)
   EXPECT_LE(worst_after, (uint64_t)NR_GPU_CHUNK_TARGET_US * 3 / 2 + cost);
 }
 
+/* A site with a minimum (c_seg: one unit is far above the target) never chunks below it, however slow a chunk is. */
+TEST(GpuChunk, MinimumUnitsPerChunk)
+{
+  NrGpuChunker c{32, 0, "t", 0, 32};
+  long smallest = 1 << 30;
+  nr_gpu_chunked(c, 280, [&](long, long n) { smallest = std::min(smallest, n); return 0; }, [] { return 0; }, [] {}, [] { return (uint64_t)0; },
+                 [] { return (uint64_t)30000; });
+  EXPECT_EQ(smallest, 24); /* 280 = 8 x 32 + the 24-unit tail */
+  EXPECT_EQ(c.per, 32);
+}
+
 /* No GPU time available (event creation failed): the host time is used and a call never exceeds NR_GPU_CHUNK_MAX_CALLS chunks, even with a floor of 5 ms. */
 TEST(GpuChunk, FailSafeCapsChunksPerCall)
 {

@@ -24,6 +24,7 @@ struct NrGpuChunker {
   uint64_t chunks = 0;    /* chunks run (tests) */
   const char *name = "?"; /* call site, for the slow-call line */
   uint64_t gpu_us = 0;    /* GPU run time of the last chunk (or its wall time when the GPU time is unavailable), for the slow-call line */
+  long min = 1;           /* fewest units per chunk: a site whose single unit already exceeds the target (c_seg) */
 };
 static inline uint64_t nr_gpu_chunk_now_us()
 {
@@ -42,7 +43,7 @@ static inline void nr_gpu_chunk_adapt(NrGpuChunker &c, long n, uint64_t gpu_us, 
 {
   c.gpu_us = gpu_us;
   if (gpu_us < 1) gpu_us = 1;
-  if (gpu_us > target + target / 2) { c.per = (long)((uint64_t)n * target / gpu_us); if (c.per < 1) c.per = 1; }
+  if (gpu_us > target + target / 2) { c.per = (long)((uint64_t)n * target / gpu_us); if (c.per < c.min) c.per = c.min; }
   else if (gpu_us < target * 3 / 4 && n >= c.per) {
     long up = (long)((uint64_t)n * target / gpu_us);
     if (up > c.per * 16) up = c.per * 16;
