@@ -24,7 +24,8 @@ struct NrGpuChunker {
   uint64_t chunks = 0;    /* chunks run (tests) */
   const char *name = "?"; /* call site, for the slow-call line */
   uint64_t gpu_us = 0;    /* GPU run time of the last chunk (or its wall time when the GPU time is unavailable), for the slow-call line */
-  long min = 1;           /* fewest units per chunk: a site whose single unit already exceeds the target (c_seg) */
+  long min = 32;          /* fewest units per chunk: a unit (a CTA) runs in parallel with the others on the discovery SMs, so a chunk of 32 costs about one unit; below
+                           * that a site whose single unit exceeds the target (c_seg 18-125 ms, c_ls ~21 ms on air) ran one CTA per launch with most SMs idle (DISC-GPU-TIMING-20261022) */
 };
 static inline uint64_t nr_gpu_chunk_now_us()
 {
@@ -66,7 +67,8 @@ static inline int nr_gpu_chunked(NrGpuChunker &c, long total, Launch launch, Wai
                              (unsigned long)(c.chunks - k0), (unsigned long)us, (unsigned long)gpu_sum, c.per, (unsigned long)c.gpu_us);
   } } slow_call{c, call_t0, chunks0, total, now, gpu_sum};
   for (long first = 0; first < total;) {
-    long n = c.per < total - first ? c.per : total - first;
+    const long per = c.per > c.min ? c.per : c.min;
+    long n = per < total - first ? per : total - first;
     const uint64_t done = c.chunks - chunks0;
     if (done + 1 >= NR_GPU_CHUNK_MAX_CALLS / 2) { /* fail-safe: spread what is left over the chunks that remain in the budget */
       const uint64_t left = NR_GPU_CHUNK_MAX_CALLS > done ? NR_GPU_CHUNK_MAX_CALLS - done : 1;

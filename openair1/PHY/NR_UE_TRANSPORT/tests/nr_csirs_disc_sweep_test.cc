@@ -702,8 +702,8 @@ TEST(GpuChunk, CoversEveryUnitOnceInOrderAndBoundsChunkTime)
         [&]() { clock += 50; return 0; }, [] {}, [&] { return clock; });
     EXPECT_EQ(rc, 0);
     EXPECT_EQ(ran, (uint64_t)total) << cost;
-    /* after the first adaptation no chunk exceeds 1.5 targets (+ two units); the very first chunk is one unit */
-    EXPECT_LE(worst, std::max<uint64_t>(NR_GPU_CHUNK_TARGET_US * 3 / 2, cost) + 2 * cost) << cost; /* the floor estimate contains one unit */
+    /* no chunk exceeds 1.5 targets (+ two units) or the minimum chunk (serial cost model here; on the GPU the min units run in parallel) */
+    EXPECT_LE(worst, std::max<uint64_t>(NR_GPU_CHUNK_TARGET_US * 3 / 2, c.min * cost) + 2 * cost) << cost;
     if (cost <= 100) { EXPECT_GT(c.per, 1); }
   }
   NrGpuChunker c;
