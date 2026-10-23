@@ -253,7 +253,9 @@ void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
   sr.search=nr_srs_blind_create(&sr.grid);
   if(!sr.search) return;
   const int N=sr.grid.fft_size;
-  sr.freq=calloc(sr.grid.n_ant*14*N,sizeof(c16_t));
+  /* dft() output (nr_srs_fep_symbol): 32-B alignment required on every arch; calloc() gives 16 B */
+  const size_t freq_bytes=((size_t)sr.grid.n_ant*14*N*sizeof(c16_t)+63)/64*64;
+  if((sr.freq=aligned_alloc(64,freq_bytes))) memset(sr.freq,0,freq_bytes);
   sr.cfr=calloc(sr.grid.n_ant*NR_SRS_MAX_RE*2,sizeof(float));
   sr.k=calloc(NR_SRS_MAX_RE,sizeof(uint16_t));sr.l=calloc(NR_SRS_MAX_RE,1);
   for(int i=0;i<SRS_DEPTH;i++) sr.jobs[i].raw=calloc(sr.grid.n_ant*6*(N+2*SRS_MARGIN),sizeof(c16_t));

@@ -211,11 +211,14 @@ static void *worker(void *arg)
 static bool start(const NR_DL_FRAME_PARMS *fp)
 {
   const size_t fft = (size_t)fp->ofdm_symbol_size;
+  /* g.in/g.out are dft() buffers: dft_implementation() asserts 32-B output alignment for non-multiple-of-3 sizes
+   * on every arch, malloc() only guarantees 16 B. 64 B covers AVX2, AVX-512 and NEON. */
+  const size_t fft_bytes = (sizeof(c16_t) * NR_DLTP_NSYM * fft + 63) / 64 * 64;
   g.fp = fp;
   for (int i = 0; i < DLTP_RING; ++i)
     if (!(g.ring[i].td = malloc(sizeof(c16_t) * NR_DLTP_NSYM * fft))) return false;
-  g.in = malloc(sizeof(c16_t) * NR_DLTP_NSYM * fft);
-  g.out = malloc(sizeof(c16_t) * NR_DLTP_NSYM * fft);
+  g.in = aligned_alloc(64, fft_bytes);
+  g.out = aligned_alloc(64, fft_bytes);
   g.pilot = malloc(sizeof(c16_t) * 3 * (size_t)(fp->N_RB_DL + DLTP_PA_H));
   g.e = malloc(sizeof(float) * NR_DLTP_NSYM * (size_t)fp->N_RB_DL);
   g.scratch = malloc(sizeof(float) * NR_DLTP_NSYM * (size_t)fp->N_RB_DL);
@@ -237,9 +240,16 @@ void nr_dl_traffic_probe_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t fr
   }
   if (!g.every) return;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-  if (!g.running) {
-    if (fp->N_RB_DL > NR_DLTP_MAX_RB || !start(fp)) { g.every = 0; return; }
-    g.running = true;
+  if (!__atomic_load_n(&g.running, __ATOMIC_ACQUIRE)) {
+    /* concurrent DL actors call this: start() exactly once (one worker on g.in/g.out) */
+    static pthread_mutex_t start_mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&start_mu);
+    if (!g.running && g.every) {
+      if (fp->N_RB_DL > NR_DLTP_MAX_RB || !start(fp)) g.every = 0;
+      else __atomic_store_n(&g.running, true, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&start_mu);
+    if (!g.running) return;
   }
   if (pthread_mutex_trylock(&g.mu)) return;
   g.now_slot = abs_slot; /* the worker's delay clock */
