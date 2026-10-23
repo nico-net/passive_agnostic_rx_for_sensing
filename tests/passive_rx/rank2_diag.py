@@ -17,7 +17,7 @@ EVKEY = re.compile(r'EVMGRANT rnti=(\S+) (\d+\.\d+) ')
 RECOV = re.compile(r'RECOVLATE rnti=(\S+) (\d+\.\d+) ')
 CONF_MIN = 3
 NUMF = ('mcs', 'tbl', 'Qm', 'Nl', 'nsym', 'evm', 'snr', 'nbrx', 'snr_cpe', 'probe', 'kappa', 'rho', 'comb', 'cdm', 'ndmrs',
-        'it', 'dec_us', 'rv', 'ndi', 'pid', 'tbs', 'l2', 'zabs', 'dmrs_pw', 'dmrs_ref', 'cb', 'core', 'crc', 'skip')
+        'it', 'itc', 'its', 'dec_us', 'rv', 'ndi', 'pid', 'tbs', 'l2', 'zabs', 'dmrs_pw', 'dmrs_ref', 'cb', 'core', 'crc', 'skip')
 
 
 def _fl(s):

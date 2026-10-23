@@ -136,6 +136,7 @@ TEST(PdschLdpcCap, ProductDefaultWithoutEnv)
 {
   unsetenv("NR_TEST_PDSCH_LDPC_ITERS");
   EXPECT_EQ(nr_pdsch_ldpc_cap(), NR_PDSCH_LDPC_CAP_DEFAULT);
+  EXPECT_EQ(NR_PDSCH_LDPC_CAP_DEFAULT, 16);
   EXPECT_LE(NR_PDSCH_LDPC_CAP_DEFAULT, NR_PDSCH_LDPC_GPU_MAX); // the product cap must run on the GPU LDPC
 }
 

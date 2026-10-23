@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* RANK2-ITER: the one LDPC iteration cap of every PDSCH decode path (CPU TB decode, GPU exact LDPC, GPU graph pass, CB0 mirrors).
- * Product value: NR_PDSCH_LDPC_CAP_DEFAULT, one value for all cells, no flag.
+ * Product value: NR_PDSCH_LDPC_CAP_DEFAULT = 16 (RANK2-ITER-20261023: largest cap the GPU LDPC runs without CPU fallback), one value for all cells, no flag.
  * Test-only override: environment NR_TEST_PDSCH_LDPC_ITERS (1..NR_PDSCH_LDPC_CAP_MAX), read once; used by the replay A/B of
  * docs/superpowers/reports/csd/RANK2-ITER-20261023.md. Caps above NR_PDSCH_LDPC_GPU_MAX run on the CPU decoder (the GPU LDPC keeps 16 hard-decision snapshots). */
 #ifndef NR_PDSCH_LDPC_CAP_H
@@ -9,7 +9,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define NR_PDSCH_LDPC_CAP_DEFAULT 8
+#define NR_PDSCH_LDPC_CAP_DEFAULT 16
 #define NR_PDSCH_LDPC_CAP_MAX 30
 #define NR_PDSCH_LDPC_GPU_MAX 17
 
