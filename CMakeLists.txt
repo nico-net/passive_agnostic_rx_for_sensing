@@ -2955,6 +2955,13 @@ if(ENABLE_TESTS)
   endif()
   add_dependencies(tests test_nr_td_cb0_batch)
   add_test(NAME test_nr_td_cb0_batch COMMAND ./test_nr_td_cb0_batch)
+  if(ENABLE_LDPC_CUDA)
+    # tier variants: forced DISCRETE (device buffers on any GPU) and forced CPU (the GPU backends refuse, GPU comparisons skip)
+    add_test(NAME test_nr_td_cb0_batch_discrete COMMAND ./test_nr_td_cb0_batch)
+    add_test(NAME test_nr_td_cb0_batch_cpu COMMAND ./test_nr_td_cb0_batch)
+    set_tests_properties(test_nr_td_cb0_batch_discrete PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=discrete)
+    set_tests_properties(test_nr_td_cb0_batch_cpu PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=cpu)
+  endif()
   # CB0 elimination runtime wiring (td/cb0-cpu-wiring): scheduler, backend selection / GPU fallback, admissibility,
   # engine adapter and the per-grant glue (decode-side GrantWork calls stubbed by the test), real CPU LDPC via the fixture.
   add_executable(test_nr_td_cb0_wire ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc ${NR_TD_CB0_FX_SRCS}

@@ -11,6 +11,18 @@
 #include <math.h>
 #include <time.h>
 #include <vector>
+
+/* GPU module refused to start: on the CPU tier (NR_GPU_FORCE_MODEL=cpu) that is the design (the host keeps the CPU polar decoder) -> exit 77 (skipped);
+ * on any other tier it is a failure. */
+static int warm_failed(void)
+{
+  const char *fm = getenv("NR_GPU_FORCE_MODEL");
+  if (fm && !strcmp(fm, "cpu")) {
+    printf("nr_polar_sc_cuda_test skipped: NR_GPU_FORCE_MODEL=cpu, GPU polar refused by design\n");
+    return 77;
+  }
+  return 1;
+}
 #include "nr_polar_sc_cuda.h"
 #include "nr_polar_sc_cuda_int.h"
 
@@ -118,7 +130,7 @@ static void cpu_u_from_outputs(int pid, int len, uint64_t Ar, uint32_t ret, uint
 static int debug_one(void)
 {
   npc_gpu_dbg_device_params(NULL);
-  if (npc_warmup(8192)) return 1;
+  if (npc_warmup(8192)) return warm_failed();
   const pset p = {39, 1}; const int E = E_of(p); const int pid = npc_register(p.len, p.al);
   { int16_t z[NPC_MAX_E] = {0}; nr_dci_bits_t o; cpu_decode(p, z, &o); }
   int N, K; const uint8_t *info; const uint16_t *il; npc_dbg_params(pid, &N, &K, &info, &il);
@@ -173,7 +185,7 @@ int main(int argc, char **argv)
   crcTableInit();
   const bool quick = argc > 1 && !strcmp(argv[1], "quick");
   if (argc > 1 && !strcmp(argv[1], "dbg")) return debug_one();
-  if (npc_warmup(131072)) return 1;
+  if (npc_warmup(131072)) return warm_failed();
   uint64_t alloc_before, denied_before;
   nr_dl_gpu_memory_stats(&alloc_before, &denied_before);
   int total_bad = 0;
