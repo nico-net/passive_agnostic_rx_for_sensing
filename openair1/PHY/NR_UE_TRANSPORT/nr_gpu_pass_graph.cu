@@ -99,6 +99,10 @@ struct PassBlk { /* written by the host before every replay */
   const short2 *gate_est;               /* row of antenna 0; antenna a at + a * gate_astride */
   size_t gate_astride;
   const uint32_t *gate_nvar;            /* per antenna residual noise (non-segmented); segmented: ResBlk.post.nvar_ant */
+  /* DISCRETE: the rows of the estimate and of the equaliser output the host reads (k_gather): ge_row[r] = element offset of antenna 0's row (r = 0 / 1: layer 0 at the first / last DM-RS symbol of the
+   * frequency-offset measurement, the branch FO rows; r = 2: layer nl - 1 at the last DM-RS symbol, the DM-RS SNR rows), -1 = none; qm_off / qm_n: the equalised symbol row of scratch (comp), qm_n = 0 none */
+  int ge_row[3];
+  int qm_off, qm_n;
 };
 struct ResBlk { /* written by the kernels, read by the host after the pass */
   nr_gpu_chest_post_out_t post;
@@ -354,6 +358,7 @@ struct Inst {
   cudaEvent_t done = nullptr, ev0 = nullptr, evh = nullptr; /* ev0: stream marker before the launches; evh: external event node at the head of the (first sub-)graph; done: after the last. Timing on: gstart = ev0->evh, gspan = evh->done */
   cudaEvent_t evC = nullptr, evD = nullptr; /* measurement only: stream markers after the C and after the D sub-graph launch (split DL pass): cspan = evh->evC, dspan = evC->evD, lspan = evD->done */
   nr_gpu_buf_t rxF = {}, est = {}, nvar = {}, geo = {}, scratch = {}, llr = {}, lin = {}, bits = {}, pil = {}, scr = {}, pb = {}, res = {}, segsc = {};
+  nr_gpu_buf_t gath = {}; /* DISCRETE DL: k_gather's output */
   nr_gpu_buf_t uli = {}, ulb = {}, ulwin = {}; /* Task 7: the FEP items + geometry, the UlBlk, the DISCRETE IQ window copy */
   nr_gpu_chest_job_t *cj = nullptr;
   nr_gpu_fep_job_t fj = {};
@@ -437,12 +442,12 @@ static void split_stamps(const Inst &I, bool c_ran, nr_gpu_pass_result_t *r)
   r->dspan_ns = (uint32_t)(d * 1e6f);
   r->lspan_ns = (uint32_t)(l * 1e6f);
 }
-/* measurement only: the L sub-graph's LDPC launch from its per-code-block verdicts (res) and %globaltimer stamps (ts), host-readable in the DIRECT model only. nd = the TB's blocks,
+/* measurement only: the L sub-graph's LDPC launch from its per-code-block verdicts (res) and %globaltimer stamps (ts); host-readable in the DIRECT model in place, in the DISCRETE model after bits_tail_d2h. nd = the TB's blocks,
  * ncb = the class's (padding blocks repeat block 0 on zero LLRs and stop at the first check). */
 static void ldpc_info(const Inst &I, int nd, int ncb, nr_gpu_pass_result_t *r)
 {
   memset(&r->li, 0, sizeof(r->li));
-  if (nr_gpu_model() != NR_GPU_MODEL_DIRECT || !I.bits.host || nd < 1 || ncb < nd || ncb > NR_GPU_PASS_LDPC_JOBS) return;
+  if (!I.bits.host || nd < 1 || ncb < nd || ncb > NR_GPU_PASS_LDPC_JOBS) return;
   const int *res = (const int *)((const char *)I.bits.host + NR_GPU_PASS_LDPC_RES_OFF);
   const unsigned long long *ts = (const unsigned long long *)((const char *)I.bits.host + NR_GPU_PASS_LDPC_TS_OFF);
   unsigned long long e0 = ~0ull, e1 = 0, x1 = 0;
@@ -621,6 +626,41 @@ static int res_d2h(Inst &I, int ncb, cudaStream_t s)
   return nr_gpu_buf_d2h_async(&I.res, 0, offsetof(ResBlk, c) + (size_t)ncb * KBMAX, s) || nr_gpu_buf_d2h_async(&I.res, offsetof(ResBlk, ul), sizeof(ResBlk) - offsetof(ResBlk, ul), s);
 }
 
+/* DISCRETE only: the estimate and equaliser rows the host reads, gathered into one compact buffer (3 * nrx rows of N c16, then the qm row) so that a rank > 1 pass copies them instead of the whole
+ * estimate (layers 1.. never reached the host) and the equalised symbol row needs no copy of the scratch. Block b < 3 * nrx: row (b / nrx, antenna b % nrx); block 3 * nrx: the qm row. */
+__global__ void k_gather(const short2 *est, const short2 *comp, short2 *out, const PassBlk *pb, int nrx)
+{
+  const int b = blockIdx.x;
+  const short2 *src;
+  int n;
+  if (b < 3 * nrx) {
+    const int row = pb->ge_row[b / nrx];
+    if (row < 0) return;
+    src = est + (size_t)row + (size_t)(b % nrx) * NSYM * N;
+    n = N;
+  } else {
+    n = pb->qm_n;
+    if (n <= 0) return;
+    src = comp + pb->qm_off;
+  }
+  short2 *dst = out + (size_t)b * N;
+  for (int i = threadIdx.x; i < n; i += blockDim.x) dst[i] = src[i];
+}
+/* DISCRETE (DL): the tail of the LDPC result buffer the measurement-only ldpc_info reads: the iteration counts / verdicts and the %globaltimer stamps of the class's code blocks. A no-op in the shared model. */
+static int bits_tail_d2h(Inst &I, int ncb, cudaStream_t s)
+{
+  return nr_gpu_buf_d2h_async(&I.bits, NR_GPU_PASS_LDPC_RES_OFF, (size_t)2 * ncb * sizeof(int), s) ||
+         nr_gpu_buf_d2h_async(&I.bits, NR_GPU_PASS_LDPC_TS_OFF, (size_t)2 * ncb * sizeof(unsigned long long), s);
+}
+/* DISCRETE (DL): the rows of the estimate / equaliser output the host consumers read (brfo, DM-RS SNR at layer nl - 1, the qm row), gathered by k_gather and copied; DIRECT: the host reads the
+ * mapped estimate in place and the node is the former (no-op) copy, so that graph is unchanged. */
+static int est_d2h(Inst &I, int nbRx, cudaStream_t s)
+{
+  if (nr_gpu_model() == NR_GPU_MODEL_DIRECT) return nr_gpu_buf_d2h_async(&I.est, 0, (size_t)nbRx * NSYM * N * 4, s);
+  k_gather<<<3 * nbRx + 1, 256, 0, s>>>((const short2 *)I.est.dev, (const short2 *)I.scratch.dev, (short2 *)I.gath.dev, I.PBd(), nbRx);
+  return nr_gpu_buf_d2h_async(&I.gath, 0, (size_t)(3 * nbRx + 1) * N * 4, s);
+}
+
 /* the host side of a pass: writes every block the kernels read. Used for the synthetic job (capture / warm replay) and for real grants. `cls` = the key the
  * graph structure comes from (the job must fit it). 0 or -1. */
 /* the symbols of the slot this job's FEP transforms (prepare: I.fj.run_mask); 0 = a job that did not size it (the synthetic job of a class, tests): all 14 */
@@ -721,6 +761,18 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
     gb.gate_est = (const short2 *)I.est.dev + ((size_t)(llast * nbRx) * NSYM * N + (size_t)mlast * N);
     gb.gate_astride = (size_t)NSYM * N;
     gb.gate_nvar = (const uint32_t *)((const char *)I.nvar.dev + 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)) + (size_t)(nd * nl - 1) * nbRx;
+    gb.ge_row[0] = gb.ge_row[1] = -1;
+    if (j->fo_first >= 0 && j->fo_last > j->fo_first) { /* the rows brfo_rows copies: layer 0 */
+      gb.ge_row[0] = j->dmrs_sym[j->fo_first] * N;
+      gb.ge_row[1] = j->dmrs_sym[j->fo_last] * N;
+    }
+    gb.ge_row[2] = (llast * nbRx) * NSYM * N + mlast * N; /* the DM-RS SNR rows: layer nl - 1 */
+    gb.qm_n = 0;
+    gb.qm_off = 0;
+    if (j->qm_sym >= 0 && j->qm_sym < NSYM && j->qm_n > 0 && j->qm_n <= (uint32_t)N) { /* comp[(m * NR_GPU_DEMOD_MAX_NL + layer) * buf + i], layer 0 */
+      gb.qm_off = (int)((size_t)j->qm_sym * NR_GPU_DEMOD_MAX_NL * ext);
+      gb.qm_n = (int)j->qm_n;
+    }
   }
   return prepare_tb(I, j);
 }
@@ -770,11 +822,11 @@ static int enqueue(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, cudaStrea
     if (g_cfg.v2) k_llr_stats<<<1, 1024, 0, s>>>((const int16_t *)I.llr.dev, I.PBd(), I.RBd()); /* v2 only: the v1 graph is unchanged */
     k_norm_sum<<<1, 1024, 0, s>>>((const int16_t *)I.llr.dev, I.PBd(), I.RBd());
     k_norm_apply<<<256, 256, 0, s>>>((int16_t *)I.llr.dev, I.PBd(), I.RBd());
-    if (!full && (nr_gpu_buf_d2h_async(&I.llr, 0, llr_bytes, s) || nr_gpu_buf_d2h_async(&I.est, 0, (size_t)nbRx * NSYM * N * 4, s) ||
+    if (!full && (nr_gpu_buf_d2h_async(&I.llr, 0, llr_bytes, s) || est_d2h(I, nbRx, s) ||
                   nr_gpu_buf_d2h_async(&I.rxF, 0, (size_t)nbRx * NSYM * N * 4, s)))
       return -1;
   }
-  if (sub == SUB_L && part == 3) return res_d2h(I, k.ncb, s) ? -1 : (cudaPeekAtLastError() == cudaSuccess ? 0 : -1);
+  if (sub == SUB_L && part == 3) return res_d2h(I, k.ncb, s) || bits_tail_d2h(I, k.ncb, s) ? -1 : (cudaPeekAtLastError() == cudaSuccess ? 0 : -1);
   if (sub == SUB_L && part == 1) return 0;
   if (full || sub == SUB_L) {
     if (nr_gpu_pass_launch_rdm((const int16_t *)I.llr.dev, I.PBd()->rdm, ncb, (int8_t *)I.lin.dev, s) != 0) return -1;
@@ -784,10 +836,10 @@ static int enqueue(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, cudaStrea
     if (nr_gpu_pass_launch_crc_p(snaps, I.PBd()->cand, ncb * NSNAP, &I.PBd()->tbs, I.RBd()->cand_ok, &I.RBd()->dummy_tb, s) != 0) return -1;
     k_pick<<<1, 128, 0, s>>>(snaps, dres, I.PBd(), I.RBd());
     if (nr_gpu_pass_launch_crc_p((const uint8_t *)I.res.dev, I.PBd()->sel, ncb, &I.PBd()->tbs, I.RBd()->seg_crc, &I.RBd()->tb_crc, s) != 0) return -1;
-    if (!full && part == 0 && res_d2h(I, k.ncb, s)) return -1;
+    if (!full && part == 0 && (res_d2h(I, k.ncb, s) || bits_tail_d2h(I, k.ncb, s))) return -1;
   }
   if (full && (nr_gpu_buf_d2h_async(&I.llr, 0, llr_bytes, s) || nr_gpu_buf_d2h_async(&I.nvar, 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int), nvar_bytes, s) ||
-               res_d2h(I, k.ncb, s) || nr_gpu_buf_d2h_async(&I.est, 0, (size_t)nbRx * NSYM * N * 4, s) ||
+               res_d2h(I, k.ncb, s) || est_d2h(I, nbRx, s) ||
                nr_gpu_buf_d2h_async(&I.rxF, 0, (size_t)nbRx * NSYM * N * 4, s)))
     return -1;
   return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
@@ -1257,11 +1309,12 @@ static int alloc_inst(int id)
   if (g_cfg.v2 && nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&I.s_lo, lo, hi, pass_green_idx(id))) I.s_lo = nullptr; /* v2 Task 2: probes on the twin, in the instance's own green context (a graph captured on I.s cannot launch in another); none = the RT stream */
   if (nr_gpu_buf_alloc(&I.rxF, (size_t)4 * NSYM * N * 4) || nr_gpu_buf_alloc(&I.est, (size_t)16 * NSYM * N * 4) ||
       nr_gpu_buf_alloc(&I.nvar, NR_GPU_CHEST_DEV_BYTES) || nr_gpu_buf_alloc(&I.geo, (size_t)2 * NSYM * ext * 4) ||
-      nr_gpu_buf_alloc(&I.scratch, 4 * I.bn * 2) || nr_gpu_buf_alloc(&I.llr, (size_t)LLR_CAP * 2) ||
-      nr_gpu_buf_alloc(&I.lin, NR_GPU_PASS_LDPC_IN_BYTES) || nr_gpu_buf_alloc(&I.bits, NR_GPU_PASS_LDPC_BITS_BYTES) ||
+      nr_gpu_buf_alloc_dev(&I.scratch, 4 * I.bn * 2) || nr_gpu_buf_alloc(&I.llr, (size_t)LLR_CAP * 2) || /* scratch, lin, segsc: device intermediates the host never reads (DISCRETE: no pinned mirror) */
+      nr_gpu_buf_alloc_dev(&I.lin, NR_GPU_PASS_LDPC_IN_BYTES) || nr_gpu_buf_alloc(&I.bits, NR_GPU_PASS_LDPC_BITS_BYTES) ||
       nr_gpu_buf_alloc(&I.pil, (size_t)NR_GPU_PASS_MAX_DMRS * 4 * PIL_STRIDE * 4) || nr_gpu_buf_alloc(&I.scr, (size_t)(LLR_CAP / 32 + 2) * 4) ||
       nr_gpu_buf_alloc(&I.pb, sizeof(PassBlk)) || nr_gpu_buf_alloc(&I.res, sizeof(ResBlk)) ||
-      nr_gpu_buf_alloc(&I.segsc, (size_t)SEG_ROWS * N * 4) ||
+      nr_gpu_buf_alloc_dev(&I.segsc, (size_t)SEG_ROWS * N * 4) ||
+      (nr_gpu_model() == NR_GPU_MODEL_DISCRETE && nr_gpu_buf_alloc(&I.gath, (size_t)(3 * 4 + 1) * N * 4)) ||
       nr_gpu_buf_alloc(&I.uli, NSYM * sizeof(nr_pusch_gpu_fep_item_t) + 64) || nr_gpu_buf_alloc(&I.ulb, sizeof(nrul::UlBlk)) ||
       nr_gpu_buf_alloc(&I.ulwin, (size_t)4 * ULW_LEN * 4))
     return -1;
@@ -1720,23 +1773,32 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   if (j->ndmrs > 0 && j->nl > 0) { /* last DM-RS symbol and layer, as nvar_ant; a segmented estimate is composed in data order, so [0, 12 nrb) is the grant's */
     const int m = j->dmrs_sym[j->ndmrs - 1], l = j->nl - 1;
     const int16_t *rows[4] = {0, 0, 0, 0};
-    for (int a = 0; a < g_cfg.nbRx && a < 4; a++) rows[a] = (const int16_t *)I.est.host + 2 * ((size_t)(l * g_cfg.nbRx + a) * NSYM * N + (size_t)m * N);
+    const bool gd = nr_gpu_model() == NR_GPU_MODEL_DISCRETE; /* DISCRETE: the compact rows k_gather copied (block 2 * nbRx + a); DIRECT: the mapped estimate */
+    for (int a = 0; a < g_cfg.nbRx && a < 4; a++)
+      rows[a] = gd ? (const int16_t *)I.gath.host + 2 * ((size_t)(2 * g_cfg.nbRx + a) * N)
+                   : (const int16_t *)I.est.host + 2 * ((size_t)(l * g_cfg.nbRx + a) * NSYM * N + (size_t)m * N);
     nr_dmrs_snr_fill(&r->dsnr, rows, g_cfg.nbRx, 12 * j->nrb, r->nvar_ant, j->dmrs_type, 1.0);
     if (!j->nseg) r->dsnr.ref_db = nr_dmrs_ref_db(nr_gpu_model() == NR_GPU_MODEL_DISCRETE || !j->rxdataF ? (const int16_t *)I.rxF.host + 2 * (size_t)m * N : j->rxdataF + 2 * (size_t)m * N, N, j->car_k0, j->car_n, j->k0, 12 * j->nrb);
   }
   if (!r->need_cpu && (!r->tb_ok || j->llr_out_all) && j->llr_out)
     memcpy(j->llr_out, I.llr.host, (size_t)j->G * 2); /* the first body's LLRs for the caller's retry arms */
   r->qm_valid = 0;
-  if (r->qm_row && nr_gpu_model() == NR_GPU_MODEL_DIRECT && j->qm_sym >= 0 && j->qm_sym < NSYM && j->qm_n > 0 && j->qm_n <= (uint32_t)N) {
-    /* comp[(m * NR_GPU_DEMOD_MAX_NL + layer) * buf + i], c16 */
-    memcpy(r->qm_row, (const int16_t *)I.scratch.host + 2 * (size_t)((size_t)j->qm_sym * NR_GPU_DEMOD_MAX_NL * ext), (size_t)j->qm_n * 4);
+  if (r->qm_row && j->qm_sym >= 0 && j->qm_sym < NSYM && j->qm_n > 0 && j->qm_n <= (uint32_t)N) {
+    /* comp[(m * NR_GPU_DEMOD_MAX_NL + layer) * buf + i], c16; DISCRETE: the row k_gather copied (block 3 * nbRx) */
+    memcpy(r->qm_row,
+           nr_gpu_model() == NR_GPU_MODEL_DISCRETE ? (const int16_t *)I.gath.host + 2 * (size_t)3 * g_cfg.nbRx * N
+                                                   : (const int16_t *)I.scratch.host + 2 * (size_t)((size_t)j->qm_sym * NR_GPU_DEMOD_MAX_NL * ext),
+           (size_t)j->qm_n * 4);
     r->qm_valid = 1;
   }
   if (r->brfo_rows && j->fo_first >= 0 && j->fo_last > j->fo_first) {
     const int16_t *e0 = (const int16_t *)I.est.host;
+    const bool gd = nr_gpu_model() == NR_GPU_MODEL_DISCRETE; /* DISCRETE: blocks a and nbRx + a of k_gather */
     for (int a = 0; a < g_cfg.nbRx; a++) {
-      memcpy(r->brfo_rows + ((size_t)a * 2) * N * 2, e0 + 2 * ((size_t)(0 * g_cfg.nbRx + a) * NSYM * N + (size_t)j->dmrs_sym[j->fo_first] * N), (size_t)N * 4);
-      memcpy(r->brfo_rows + ((size_t)a * 2 + 1) * N * 2, e0 + 2 * ((size_t)(0 * g_cfg.nbRx + a) * NSYM * N + (size_t)j->dmrs_sym[j->fo_last] * N), (size_t)N * 4);
+      memcpy(r->brfo_rows + ((size_t)a * 2) * N * 2,
+             gd ? (const int16_t *)I.gath.host + 2 * ((size_t)a * N) : e0 + 2 * ((size_t)(0 * g_cfg.nbRx + a) * NSYM * N + (size_t)j->dmrs_sym[j->fo_first] * N), (size_t)N * 4);
+      memcpy(r->brfo_rows + ((size_t)a * 2 + 1) * N * 2,
+             gd ? (const int16_t *)I.gath.host + 2 * ((size_t)(g_cfg.nbRx + a) * N) : e0 + 2 * ((size_t)(0 * g_cfg.nbRx + a) * NSYM * N + (size_t)j->dmrs_sym[j->fo_last] * N), (size_t)N * 4);
     }
   }
   if (nr_gpu_model() == NR_GPU_MODEL_DISCRETE && j->rxdataF) { /* the symbols the caller needs, from the pinned copy of the instance's rxdataF */
