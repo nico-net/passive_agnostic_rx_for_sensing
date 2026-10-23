@@ -422,6 +422,72 @@ TEST(PdschSolver, SignificanceRuleScalesTheSolveEvidenceWithTheProbesSpent)
   EXPECT_GT(grants[1], grants[0]) << "a busy RNTI needs more passes";
 }
 
+/* SOLVERWIDE (2026-10-23). The search probes only readings <= 48 PRB; an RNTI whose every grant is full-carrier (106/273 PRB) used to
+ * get no probe at all (why wide=N, never solved). After 16 grants with no narrow reading it searches the wide ones; one narrow reading
+ * ever seen keeps the old bound. */
+static int CountProbes(uint16_t rnti, const Cell &c, int nrb, int grants, std::mt19937 &rng)
+{
+  nr_pdsch_solver_reading_t rd[2] = {{c.wrong.data(), (int)c.wrong.size(), (uint16_t)nrb, 1, 1, 0},
+                                     {c.truth.data(), (int)c.truth.size(), (uint16_t)nrb, 1, 1, 0}};
+  int total = 0;
+  for (int g = 0; g < grants; g++) {
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(rnti, p, 49, 0, 2, rd, 2, 8, v);
+    for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, false, true);
+    total += n;
+  }
+  return total;
+}
+TEST(PdschSolverWide, WideOnlyRntiIsSolvedAfterTheWaitAndNarrowIsUnchanged)
+{
+  Cell c;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(41);
+  EXPECT_EQ(CountProbes(0x1234, c, 106, 15, rng), 0) << "wide grants: nothing is probed before the 16-grant wait";
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  const int gw = SolveGrants(0x1234, c, 0, 106, 4000, rng);
+  const int g273 = SolveGrants(0x2345, c, 0, 273, 4000, rng);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 ra(42), rb(42);
+  const int gn = SolveGrants(0x0101, c, 0, 16, 4000, ra);
+  const int g48 = SolveGrants(0x0202, c, 0, 48, 4000, rb);
+  printf("[solver] wide-only: 106 PRB solved after %d grants, 273 PRB after %d; narrow control 16 PRB %d, 48 PRB %d\n", gw, g273, gn, g48);
+  ASSERT_GT(gw, 16);
+  ASSERT_GE(g273, 16); // 16: the second RNTI takes the first one's cell prior on its first wide probe
+  ASSERT_GT(gn, 0);
+  EXPECT_EQ(g48, gn) << "a reading at the bound is narrow: N=1 equivalence (same grants to solve as at 16 PRB)";
+  EXPECT_LT(gn, gw) << "the wide-only RNTI pays the wait";
+}
+TEST(PdschSolverWide, OneNarrowReadingKeepsTheOldBound)
+{
+  Cell c;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  const uint16_t narrow_ids[1] = {99};
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(43);
+  // a wrong layout reads a narrow PRB set on every grant, the true layout reads the full carrier: as before, never solved
+  nr_pdsch_solver_reading_t rd[3] = {{c.wrong.data(), (int)c.wrong.size() - 1, 106, 1, 1, 0},
+                                     {c.truth.data(), (int)c.truth.size(), 106, 1, 1, 0},
+                                     {narrow_ids, 1, 16, 1, 1, 0}};
+  for (int g = 0; g < 600; g++) {
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(0x4321, p, 49, 0, 2, rd, 3, 8, v);
+    for (int i = 0; i < n; i++) {
+      EXPECT_EQ(v[i].reading, 2) << "only the narrow reading is probed";
+      nr_pdsch_solver_feedback(v[i].token, v[i].reading == 1, true);
+    }
+  }
+  EXPECT_LT(nr_pdsch_solver_rep(0x4321), 0);
+  nr_pdsch_solver_reset();
+}
+
 /* TIMSOLVE2: once a solution is CRC-proven, an unsolved RNTI tries the proven layout dims with
  * EACH of its own identities in the proven form (here DM-RS id + data id 923) on one grant. */
 TEST(PdschSolver, ProvenDimsAreTriedWithEveryOwnIdentity)

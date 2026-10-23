@@ -12,6 +12,7 @@
 #define SOLVER_PENDING 4096 /* FIFO-overwritten: probes dropped stale in the queue never report back */
 #define SOLVER_MAX_IDS 1024
 #define SOLVER_SEARCH_MAX_RB 48   /* search probes only readings this narrow (cost; the small grants decode best) */
+#define SOLVER_WIDE_AFTER 16      /* SOLVERWIDE: grants with no reading <= SOLVER_SEARCH_MAX_RB (none narrow ever seen) after which the search takes wide readings */
 #define SOLVER_CAND_TRIES 96      /* confirmation probes before an unconfirmed candidate is dropped */
 #define BM_BYTES (NR_PDSCH_SOLVER_MAX_LAYOUTS / 8)
 #define HQ_RING 64
@@ -52,6 +53,7 @@ typedef struct {
   /* T26c per-RNTI report: absolute slots (signal time) of the first grant and of the solving CRC pass */
   uint64_t first_abs, solved_abs;
   uint32_t grants;
+  uint32_t n_narrow, n_wide; /* SOLVERWIDE: grants with / without a reading <= SOLVER_SEARCH_MAX_RB */
   int32_t scr, cand_scr;   /* T26c: PDSCH scrambling id hypothesis (-1 = default ids; else the id); solved/candidate */
   int32_t key;             /* T26c: CORESET key of this RNTI's last planned DCI */
   uint32_t n_probe;        /* T26c: probes planned while unsolved (search backoff) */
@@ -680,6 +682,15 @@ static bool search_backoff(const solver_rnti_t *r)
   return !r->has_cand && r->n_probe >= 200u && (r->grants % 8u) != 0;
 }
 
+/* rb_limit: widest reading the search and refinement of this RNTI probe. SOLVERWIDE (2026-10-23): the narrow bound is a cost guard,
+ * but an RNTI that never gets a narrow reading (a bulk transfer scheduled on the whole carrier: rfsim 106/273 PRB) would never be
+ * planned at all (0fb22ecbd0 made the solver the only path). After SOLVER_WIDE_AFTER such grants, with no narrow one ever seen,
+ * its wide readings are probed too, under the unchanged probe budget. One narrow reading ever seen restores the bound for good. */
+static uint16_t rb_limit(const solver_rnti_t *r)
+{
+  return (r->n_narrow == 0 && r->n_wide >= SOLVER_WIDE_AFTER) ? UINT16_MAX : SOLVER_SEARCH_MAX_RB;
+}
+
 static const uint8_t kS[4] = {1, 0, 2, 3};
 
 /* has_id: true when a reading's layout list (ids) contains layout id. Linear scan over at most a few dozen ids.
@@ -876,6 +887,14 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   r->alt_hash = ctx->hash;
   r->key = ctx->key;
   r->grants++;
+  { bool narrow = false; /* SOLVERWIDE */
+    for (int i = 0; i < n_rd && !narrow; i++) narrow = rd[i].num_rb > 0 && rd[i].num_rb <= SOLVER_SEARCH_MAX_RB;
+    if (narrow) r->n_narrow++; else r->n_wide++;
+    if (!r->solved && r->n_narrow == 0 && r->n_wide == SOLVER_WIDE_AFTER)
+      LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x wide-only for %u grants: searching readings above %d RB\n", rnti, r->n_wide,
+            SOLVER_SEARCH_MAX_RB);
+  }
+  const uint16_t rblim = rb_limit(r);
   bool nl_preferred = false, nl_fallback = false;
   if (!r->solved) { /* prefer one-layer QPSK readings; with none, the preference is dropped at once (frozen ISAC_PDSCH_SOLVER_NL_PREF=1) */
     for (int i = 0; i < n_rd; i++)
@@ -953,7 +972,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     const int S_here = r->S_by_tda[tda_of(r->rep, payload)];
     int refine = 0;
     for (int i = 0; i < n_rd && n < budget && refine < 4; i++) {
-      if (i == ri || rd[i].num_rb > SOLVER_SEARCH_MAX_RB) continue;
+      if (i == ri || rd[i].num_rb > rblim) continue;
       int ov = 0;
       for (int k = 0; k < rd[i].n_ids && !ov; k++)
         ov = (r->cand_bm[rd[i].ids[k] >> 3] >> (rd[i].ids[k] & 7)) & 1;
@@ -984,7 +1003,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
           ov += (r->cand_bm[rd[i].ids[k] >> 3] >> (rd[i].ids[k] & 7)) & 1;
         if (ov > best_ov) { best_ov = ov; best = i; }
       }
-      if (best >= 0 && rd[best].num_rb <= SOLVER_SEARCH_MAX_RB) {
+      if (best >= 0 && rd[best].num_rb <= rblim) {
         uint8_t tl[3];
         const int nt = tables_for(rd[best].mcs, tl);
         for (int si = 0; si < 4; si++)
@@ -1085,7 +1104,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     /* 3. the search: (S, add_pos) outer, readings (most-shared first) inner, then tables */
     int order[128], no = 0;
     for (int i = 0; i < n_rd && no < 128; i++)
-      if (rd[i].num_rb > 0 && rd[i].num_rb <= SOLVER_SEARCH_MAX_RB
+      if (rd[i].num_rb > 0 && rd[i].num_rb <= rblim
           && (!nl_preferred || nl_fallback || reading_nl_qpsk(&rd[i]))) order[no++] = i;
     for (int a = 1; a < no; a++)
       for (int b = a; b > 0 && rd[order[b]].n_ids > rd[order[b - 1]].n_ids; b--) {
