@@ -106,6 +106,7 @@ struct ResBlk { /* written by the kernels, read by the host after the pass */
   uint8_t tb_crc, dummy_tb;
   uint8_t seg_ok[MAXCB];
   uint8_t seg_crc[MAXCB];
+  uint8_t it[MAXCB]; /* RANK2-ITER: OAI numIter of every code block (hit snapshot + 1; 255 = the block that hit the cap, the host reports it_max; 0 = aborted / not decoded) */
   uint8_t cand_ok[MAXCB * NSNAP];
   uint8_t c[MAXCB][KBMAX];
   nrul::UlOut ul; /* Task 7: after c[] so that offsetof(ResBlk, c) is unchanged */
@@ -297,6 +298,7 @@ __global__ void k_pick(const uint8_t *snaps, const int *res, const PassBlk *pb, 
   for (int r = 0; r < C; r++) {
     if (threadIdx.x == 0) {
       int h = -1;
+      const int was_aborted = aborted;
       const int ns = res[2 * r], syn0 = res[2 * r + 1];
       if (ns < 0 || ns > NSNAP) { err = 1; } /* the decoder did not write this block */
       else if (!aborted)
@@ -309,6 +311,7 @@ __global__ void k_pick(const uint8_t *snaps, const int *res, const PassBlk *pb, 
       }
       hit = h;
       rb->seg_ok[r] = h >= 0;
+      rb->it[r] = (uint8_t)(h >= 0 ? h + 1 : (was_aborted ? 0 : 255));
     }
     __syncthreads();
     for (int i = threadIdx.x; i < KB; i += blockDim.x) rb->c[r][i] = hit >= 0 ? snaps[((size_t)r * NSNAP + hit) * KBMAX + i] : 0;
@@ -1661,6 +1664,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   }
   const ResBlk &rb = *I.RB();
   memset(r->seg_ok, 0, sizeof(r->seg_ok));
+  memset(r->iters, 0, sizeof(r->iters));
   r->tbs = j->A;
   r->gpu_us = (uint32_t)us;
   r->instance = (int8_t)id;
@@ -1683,6 +1687,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     return 0;
   }
   for (uint32_t s = 0; s < nd; s++) r->seg_ok[s] = rb.seg_ok[s];
+  for (uint32_t s = 0; s < nd; s++) r->iters[s] = rb.it[s] == 255 ? (uint8_t)j->it_max : rb.it[s];
   if (split) ldpc_info(I, (int)nd, (int)k.ncb, r);
   if (rb.need_cpu) ++g_need_cpu;
   if (!r->need_cpu) {

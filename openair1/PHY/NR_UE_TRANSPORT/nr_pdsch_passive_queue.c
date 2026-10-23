@@ -1570,7 +1570,6 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_dlsch_irc_override = job.mrc_mode == 4 ? 3 : job.mrc_mode == 5 ? 2 : job.mrc_mode == 6 ? 4 : (job.mrc_mode > 0 ? 0 : -1);
     extern __thread int nr_dlsch_eq_override;
     extern __thread int nr_pdsch_chest_occ_override;
-    extern __thread int nr_pdsch_ldpc_iters_override;
     /* FATTAILS DECSLOW: a full decode call above 20 ms says where its wall time went --
      * thread CPU, voluntary (blocking: mutex, GPU poll sleep) / involuntary (preempted) switches, page faults, cores */
     void nr_pdsch_passive_decode_slow_stats(unsigned *bodies, uint64_t *body_ns, uint64_t *stage_ns);
@@ -1608,7 +1607,6 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_dlsch_irc_override = -1;
     nr_dlsch_eq_override = -1;
     nr_pdsch_chest_occ_override = -1;
-    nr_pdsch_ldpc_iters_override = -1;
     const uint64_t dec_t1 = now_ns();
     const double dec_us = (double)(dec_t1 - dec_t0) / 1000.0;
     if (owned) {
@@ -1682,14 +1680,14 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
                  "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f probe=%d kappa=%.2f alpha=%.2f,%.2f,%.2f,%.2f "
-                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f dmrs_snr=%.1f,%.1f,%.1f,%.1f,%.1f dmrs_pw=%.1f dmrs_ref=%.1f dsp=%u skip=%d gp=%u,%u,%u,%u,%u,%u,%u%s%s%s\n",
+                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d itc=%d its=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f dmrs_snr=%.1f,%.1f,%.1f,%.1f,%.1f dmrs_pw=%.1f dmrs_ref=%.1f dsp=%u skip=%d gp=%u,%u,%u,%u,%u,%u,%u%s%s%s\n",
             job.rnti, job.frame_rx, job.nr_slot_rx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.grant.mcs, job.grant.mcs_table,
             dec.cw.qamModOrder, dec.cw.Nl, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, dec.evm_nsym, dec.evm_pct,
             dec.evm_pct > 0.f ? -20.0 * log10(dec.evm_pct / 100.0) : 99.0, dec.br_snr_db[0], dec.br_snr_db[1], dec.br_snr_db[2],
             dec.br_snr_db[3], dec.evm_nbrx, job.solver_token,
             dec.evm_cpe_pct > 0.f ? -20.0 * log10(dec.evm_cpe_pct / 100.0) : 99.0, (int)job.layout_probe, dec.kappa,
             dec.br_alpha[0], dec.br_alpha[1], dec.br_alpha[2], dec.br_alpha[3], dec.br_nvar_db[0], dec.br_nvar_db[1],
-            dec.br_nvar_db[2], dec.br_nvar_db[3], dec.rho, (int)job.mrc_mode, dec.dmrs_ports, dec.n_cdm, dec.dmrs_add, -1, -1, -1, dec_us,
+            dec.br_nvar_db[2], dec.br_nvar_db[3], dec.rho, (int)job.mrc_mode, dec.dmrs_ports, dec.n_cdm, dec.dmrs_add, -1, -1, dec.ldpc_it_max ? (int)dec.ldpc_it_max : -1, (int)dec.ldpc_it_cap, (int)dec.ldpc_it_sum, dec_us,
             job.grant.rv, job.grant.ndi, job.grant.harq_pid, (unsigned)dec.cw.TBS, dec.layer_snr_db[0], dec.layer_snr_db[1],
             dec.layer_snr_db[2], dec.layer_snr_db[3], (int)dec.l2maxh, dec.zabs,
             dec.dmrs_snr.snr_db[0], dec.dmrs_snr.snr_db[1], dec.dmrs_snr.snr_db[2], dec.dmrs_snr.snr_db[3], dec.dmrs_snr.comb_db, dec.dmrs_snr.pw_db,

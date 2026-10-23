@@ -226,8 +226,10 @@ static int gpu_tb(gl_t *G, nrLDPC_TB_decoding_parameters_t *tb, uint8_t *c, bool
       if (hit >= 0) {
         memcpy(cr, j->snap[hit], KB);
         ok[r] = true;
+        if (!G->ul) tb->decodeIters[r] = (uint8_t)(hit + 1); /* snapshot s = after iteration s + 3 = OAI numIter s + 1 */
         continue;
       }
+      if (!G->ul && !aborted) tb->decodeIters[r] = tb->max_ldpc_iterations; /* the block that hit the cap (later blocks are aborted: 0) */
       if (!aborted && j->syn0) { /* stopped on a codeword whose CRC fails: OAI would iterate on */
         atomic_fetch_add_explicit(&G->fb_syn, 1, memory_order_relaxed);
         return 1;
