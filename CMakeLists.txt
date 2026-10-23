@@ -21,9 +21,8 @@ if(ENABLE_CHANNEL_SIM_CUDA)
     find_package(CUDAToolkit REQUIRED)
     message(STATUS "CUDA explicitly enabled, building with GPU acceleration support.")
 
-    enable_language(CUDA)
-
     include(cmake_targets/nr_gpu_arch.cmake)
+    nr_gpu_enable_cuda()
     nr_gpu_architectures("${CMAKE_CUDA_ARCHITECTURES}" NR_GPU_SIM_ARCHS)
     set(CMAKE_CUDA_ARCHITECTURES "${NR_GPU_SIM_ARCHS}")
 

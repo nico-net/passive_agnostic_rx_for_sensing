@@ -15,6 +15,7 @@
 #include "nr_pdsch_gpu_ldpc.h"
 #include "nr_gpu_pass_post.h"
 #include "PHY/TOOLS/nr_gpu_platform.h"
+#include "PHY/TOOLS/nr_gpu_compat.h"
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
 #include <cuda_runtime.h>
 #include <nvtx3/nvToolsExt.h> /* header-only; a no-op unless a tool (nsys -t nvtx) is attached */
@@ -1081,11 +1082,12 @@ static bool split_cap_hit(uint64_t extra_kb)
 /* ---- Fix A+D: graphs with the in-graph no-chance gate. The driver entry points (no -lcuda) for a conditional node in a green-context graph: the handle and the node need the
  * green context's CUcontext (with the primary context cudaGraphInstantiate refuses the graph). ---- */
 struct GateDrv {
-  CUresult (*stream_ctx)(CUstream, CUcontext *, CUgreenCtx *) = nullptr;
+  void *stream_ctx = nullptr; /* cuStreamGetCtx, called through nr_stream_ctx */
   CUresult (*from_green)(CUcontext *, CUgreenCtx) = nullptr;
   CUresult (*hcreate)(CUgraphConditionalHandle *, CUgraph, CUcontext, unsigned, unsigned) = nullptr;
   CUresult (*addnode)(CUgraphNode *, CUgraph, const CUgraphNode *, const CUgraphEdgeData *, size_t, CUgraphNodeParams *) = nullptr;
   bool ok = false;
+  const char *missing = nullptr; /* the first entry point the driver lacks */
 };
 static const GateDrv &gate_drv()
 {
@@ -1093,23 +1095,25 @@ static const GateDrv &gate_drv()
     GateDrv g;
     void *f[4] = {};
     static const char *const nm[4] = {"cuStreamGetCtx", "cuCtxFromGreenCtx", "cuGraphConditionalHandleCreate", "cuGraphAddNode"};
-    static const int ver[4] = {12050, 12050, 12030, 13000};
-    cudaDriverEntryPointQueryResult q;
+    static const int ver[4] = {NR_DRV_VER_STREAM_CTX, NR_DRV_VER_STREAM_CTX, NR_DRV_VER_COND_HANDLE, NR_DRV_VER_GRAPH_ADD_NODE};
     for (int i = 0; i < 4; i++)
-      if (cudaGetDriverEntryPointByVersion(nm[i], &f[i], ver[i], cudaEnableDefault, &q) != cudaSuccess || q != cudaDriverEntryPointSuccess) { fprintf(stderr, "nr_gpu_pass: driver entry point %s not available\n", nm[i]); f[i] = nullptr; }
-    g.stream_ctx = (decltype(g.stream_ctx))f[0]; g.from_green = (decltype(g.from_green))f[1]; g.hcreate = (decltype(g.hcreate))f[2]; g.addnode = (decltype(g.addnode))f[3];
+      if (!(f[i] = nr_drv_sym(nm[i], ver[i])) && !g.missing) g.missing = nm[i];
+    g.stream_ctx = f[0]; g.from_green = (decltype(g.from_green))f[1]; g.hcreate = (decltype(g.hcreate))f[2]; g.addnode = (decltype(g.addnode))f[3];
     g.ok = f[0] && f[1] && f[2] && f[3];
     return g;
   }();
   return d;
 }
+/* test hook (nr_gpu_pass_test_no_gate_drv): behave as a driver without the conditional-node entry points */
+static std::atomic<int> g_test_no_gate{0};
+static bool gate_ok() { return !g_test_no_gate && gate_drv().ok; }
 /* sub: SUB_D / SUB_L (a split DL sub-graph) or -1 (the PUSCH pass). Captures  [part 1] -> gate kernel -> IF(run){ [part 2] } -> [part 3]  into one graph; the IF body is a captured child graph. */
 static int g_gate_step = 0;
 static int capture_gated(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, int sub, cudaGraph_t *out)
 {
   const GateDrv &d = gate_drv();
   g_gate_step = 0;
-  if (!d.ok) { g_gate_step = 20; return -1; }
+  if (!gate_ok()) { g_gate_step = 20; return -1; }
   cudaStream_t s = I.s;
   auto part = [&](int p) { return sub < 0 ? enqueue_ul(I, k, s, p) : enqueue(I, k, sj, s, sub, p); };
   cudaGraph_t body = nullptr, w = nullptr;
@@ -1127,7 +1131,7 @@ static int capture_gated(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, int
     size_t nd = 0;
     CUcontext cx = nullptr;
     CUgreenCtx gc = nullptr;
-    if (cudaStreamGetCaptureInfo(s, &st, &id, &cg, &deps, &ed, &nd) != cudaSuccess || d.stream_ctx((CUstream)s, &cx, &gc) != CUDA_SUCCESS) { g_gate_step = 1; break; }
+    if (nr_capture_info(s, &st, &id, &cg, &deps, &ed, &nd) != cudaSuccess || nr_stream_ctx(d.stream_ctx, (CUstream)s, &cx, &gc) != CUDA_SUCCESS) { g_gate_step = 1; break; }
     if (gc && d.from_green(&cx, gc) != CUDA_SUCCESS) { g_gate_step = 2; break; }
     CUgraphConditionalHandle h;
     if (d.hcreate(&h, (CUgraph)cg, cx, 1, CU_GRAPH_COND_ASSIGN_DEFAULT) != CUDA_SUCCESS) { g_gate_step = 3; break; }
@@ -1135,7 +1139,7 @@ static int capture_gated(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, int
     if (sub == SUB_D) k_gate_d<<<1, 256, 0, s>>>(I.PBd(), I.RBd(), (cudaGraphConditionalHandle)h);
     else if (sub == SUB_L) k_gate_l<<<1, 32, 0, s>>>(I.RBd(), (cudaGraphConditionalHandle)h);
     else k_gate_ul<<<1, 32, 0, s>>>(I.UBd(), I.RBd(), (const uint64_t *)((const int *)I.nvar.dev + 3 * NR_GPU_CHEST_MAX_ROWS) + 512, (cudaGraphConditionalHandle)h);
-    if (cudaGetLastError() != cudaSuccess || cudaStreamGetCaptureInfo(s, &st, &id, &cg, &deps, &ed, &nd) != cudaSuccess) { g_gate_step = 5; break; }
+    if (cudaGetLastError() != cudaSuccess || nr_capture_info(s, &st, &id, &cg, &deps, &ed, &nd) != cudaSuccess) { g_gate_step = 5; break; }
     CUgraphNodeParams np = {};
     np.type = CU_GRAPH_NODE_TYPE_CONDITIONAL;
     np.conditional.handle = h;
@@ -1147,7 +1151,7 @@ static int capture_gated(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, int
     cudaGraphNode_t cb;
     if (cudaGraphAddChildGraphNode(&cb, (cudaGraph_t)np.conditional.phGraph_out[0], nullptr, 0, body) != cudaSuccess) { g_gate_step = 7; break; }
     cudaGraphNode_t cn2 = (cudaGraphNode_t)cn;
-    if (cudaStreamUpdateCaptureDependencies(s, &cn2, nullptr, 1, cudaStreamSetCaptureDependencies) != cudaSuccess) { g_gate_step = 8; break; }
+    if (nr_capture_set_deps(s, &cn2, nullptr, 1) != cudaSuccess) { g_gate_step = 8; break; }
     if (part(3) != 0) { g_gate_step = 9; break; }
     rc = 0;
   } while (0);
@@ -1279,6 +1283,7 @@ static int g_fp32 = 1;
 static int g_fp32_default() { return g_fp32; }
 extern "C" void nr_gpu_pass_test_fp32(int on) { g_fp32 = on; }
 extern "C" void nr_gpu_pass_test_sized(int on) { g_sized = on; }
+extern "C" void nr_gpu_pass_test_no_gate_drv(int on) { g_test_no_gate = on; }
 extern "C" int nr_gpu_pass_fp32_default(void) { return g_fp32_default(); }
 
 /* default warm set (max_classes): nrb 24/48/96/217 x nl 1..4, 2 DM-RS symbols, a typical padded block count, float */
@@ -1323,7 +1328,13 @@ extern "C" int nr_gpu_pass_init(int max_classes)
   std::lock_guard<std::mutex> lk(g_mu);
   if (g_ready) return 0;
   { size_t fr = 0, tb = 0; if (cudaMemGetInfo(&fr, &tb) == cudaSuccess) g_base_mb = (tb - fr) >> 20; }
-  if (!g_cfg_set || !guard_alloc()) return -1;
+  if (!g_cfg_set) return -1;
+  if (!gate_ok()) { /* no conditional graph nodes (driver or toolkit): the pass is off, once; the receiver runs the non-pass GPU / CPU path */
+    static std::atomic<int> logged{0};
+    if (!logged.exchange(1)) fprintf(stderr, "GPUPASS: graph conditional nodes unavailable (driver/toolkit%s%s) -- pass off\n", gate_drv().missing ? ", no " : "", gate_drv().missing ? gate_drv().missing : "");
+    return -1;
+  }
+  if (!guard_alloc()) return -1;
   for (int a = 0; a < 4; a++)
     if (nr_gpu_buf_alloc(&g_ring[a], (size_t)RING_LEN * 4)) return -1;
   if (nr_gpu_buf_alloc(&g_rot, 64 * 4)) return -1;
