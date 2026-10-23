@@ -24,6 +24,7 @@ extern "C" {
 #include <memory>
 #include <string>
 #include <array>
+#include <unistd.h>
 static bool have_gpu() { return nr_gpu_model() >= 0 && getenv("NR_GPU_TEST_SKIP") == nullptr; }
 
 TEST(GpuMem, RoundTripBothModels) {
@@ -3760,4 +3761,37 @@ TEST(GpuPassRetry, OnlyRetryBodiesGoOld)
   EXPECT_EQ(nr_gpu_pass_retry_to_old(0, 3, 1, 0), 0);
   EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 2, 0, 1), 0); /* quiet / predicted / A-B alternate body keeps the pass */
   EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 1, 1, 1), 0);
+}
+
+/* ===================================================== CUDA compat: no conditional-node driver entry points ===================================================== */
+/* The pass needs the driver's conditional graph nodes (the in-graph no-chance gate). Without them nr_gpu_pass_init turns the pass off: it returns -1, with exactly one log line however often it
+ * is called, and the receiver keeps the non-pass GPU / CPU path. Own ctest process (test_nr_gpu_pass_compat): the init of a pass that is already running returns 0 before the check. */
+TEST(GpuPassCompat, NoGateDriverDisablesPassOnce) {
+  void *dl = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
+  if (!dl) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  auto cfg = (nr_gpu_pass_config_fn)dlsym(dl, "nr_gpu_pass_config");
+  auto init = (nr_gpu_pass_init_fn)dlsym(dl, "nr_gpu_pass_init");
+  auto no_gate = (void (*)(int))dlsym(dl, "nr_gpu_pass_test_no_gate_drv");
+  ASSERT_TRUE(cfg && init && no_gate) << "libpdsch_gpu.so lacks nr_gpu_pass_config / nr_gpu_pass_init / nr_gpu_pass_test_no_gate_drv";
+  static int16_t dt[4096 * 4]; /* never read: the init stops before it allocates anything */
+  nr_gpu_pass_cfg_t c = {4, 273, dt, 4096, 20, 1};
+  ASSERT_EQ(0, cfg(&c));
+  no_gate(1);
+  fflush(stderr);
+  const int saved = dup(2);
+  FILE *tmp = tmpfile();
+  ASSERT_TRUE(saved >= 0 && tmp);
+  dup2(fileno(tmp), 2);
+  const int r1 = init(16), r2 = init(16);
+  fflush(stderr);
+  dup2(saved, 2);
+  close(saved);
+  std::string log;
+  rewind(tmp);
+  for (int ch; (ch = fgetc(tmp)) != EOF;) log += (char)ch;
+  fclose(tmp);
+  EXPECT_EQ(-1, r1);
+  EXPECT_EQ(-1, r2);
+  EXPECT_EQ(1, (int)std::count(log.begin(), log.end(), '\n')) << "log: " << log;
+  EXPECT_NE(std::string::npos, log.find("GPUPASS: graph conditional nodes unavailable")) << "log: " << log;
 }

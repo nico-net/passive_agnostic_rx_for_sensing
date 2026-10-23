@@ -9,6 +9,7 @@
  * memory, events and modules. On any failure the caller creates its stream the usual way. */
 #include <cuda_runtime.h>
 #include <cuda.h>
+#include "../TOOLS/nr_gpu_compat.h"
 #include <cstdio>
 #include <cstdlib>
 
@@ -56,10 +57,7 @@ static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, i
     void *f[6] = {};
     const char *name[6] = {"cuDeviceGet", "cuDeviceGetDevResource", "cuDevSmResourceSplitByCount",
                            "cuDevResourceGenerateDesc", "cuGreenCtxCreate", "cuGreenCtxStreamCreate"};
-    cudaDriverEntryPointQueryResult q;
-    for (int i = 0; i < 6; ++i)
-      if (cudaGetDriverEntryPointByVersion(name[i], &f[i], 12050, cudaEnableDefault, &q) != cudaSuccess
-          || q != cudaDriverEntryPointSuccess) f[i] = nullptr;
+    for (int i = 0; i < 6; ++i) f[i] = nr_drv_sym(name[i], NR_DRV_VER_STREAM_CTX);
     unsigned groups = 1;
     int device = 0;
     cudaGetDevice(&device);
