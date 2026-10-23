@@ -1,5 +1,7 @@
 # PROJECT_MEMORY — Passive Agnostic 5G NR Receiver (OAI-UE based)
 
+> **Update 2026-10-23/24 (DGX spark-74c3, X410 34B2AF1, OTA night round and live blind front end, provisional): see §25, block 2026-10-23/24 status.** `csd/single-int` (rank-2 LLR and LDPC cap 16, solver wide-only RNTIs) is NOT yet merged into `adaptive-rx-UL-DL`. Blind front end found and tuned 4 operators live (PCI 675 restart failed, open). The 4-RX gate cannot pass on builds since `0fb22ecbd0`; a re-based gate is not adopted.
+>
 > **Update 2026-10-22 (DGX spark-74c3, X410 34B2AF1, night A/B and final OTA, LOW LOAD, provisional): see §25, block 2026-10-22 status.** Merge `96a2097740` on `adaptive-rx-UL-DL` carries the floatpool code and the 32-unit discovery chunk minimum. Vodafone discovery throughput is about 60 % of main (n=1). Iliad/WindTre and the daytime Vodafone repeat are still open.
 >
 > **Update 2026-10-12 (csd/otatest, OTA at DEIB 10-12 and 22 offline reports): see §25, block 2026-10-12.** Recommended OTA env is now t26z (t26s superseded); four operators seen live (PCI 415, 923, 675, 403, 508; PCI 4 co-channel with 508); merge gate still NOT MET.
@@ -4806,6 +4808,58 @@ Scope: DGX spark-74c3, X410 unit 34B2AF1, OTA at DEIB. Every run in this block i
 4. Float-lane rule by host size: `docs/superpowers/reports/csd/FLOAT-LANE-POOL-20261021.md`.
 5. Daytime Vodafone repeat of N vs M; the `c_sweep` contention fix.
 6. Goals (2026-10-21, unchanged): DL p50 about 1 ms, DL p99 < 5 ms, decode all grants; drops <= 4 % acceptable.
+
+---
+
+### 2026-10-23/24 status (rank-2 fixes, solver wide-only, blind front end live on 4 operators)
+
+Scope: DGX spark-74c3, X410 unit 34B2AF1, OTA at DEIB. Branch `csd/single-int` (worktree `rr-int`, HEAD `89fe062d85` at this writing). Cells are never pooled. Commit facts are `[CODE-READ, git]`.
+
+**Merge state.** `csd/single-int` is **NOT yet an ancestor of `adaptive-rx-UL-DL`** (checked at `e9c874c308`) [CODE-READ, git]. The three fixes below are on `csd/single-int` only until that merge lands. Pending: the merge into `adaptive-rx-UL-DL`.
+
+**1. Rank-2 and solver fixes on `csd/single-int`** (reports in `docs/superpowers/reports/csd/`: `RANK2-BIG-20261023.md`, `RANK2-ITER-20261023.md`, `RANK2-WEAK-20261023.md`, `SOLVER-WIDE-20261023.md`).
+- **a. PDSCH LDPC iteration cap 8 -> 16**, one value for all cells, no flag (`6591eeb471`).
+  - One accessor `nr_pdsch_ldpc_cap()` in `nr_pdsch_ldpc_cap.h`. Test-only override `NR_TEST_PDSCH_LDPC_ITERS`. The GPU LDPC supports caps up to 17.
+  - `EVMGRANT` logs `it=` (max iterations), `itc=` (cap) and `its=` (sum).
+  - [MEASURED, DGX replay] paired grants, cap 8 vs 16: TIM +309/-10 and +323/-14 (noise +3/-8); Vodafone +116/-11 and +120/-12 (noise +40/-39).
+  - [MEASURED, DGX replay] TIM rank-2 rb>=200 CRC 2.4/0 % -> 40.5/32.1 %.
+  - [MEASURED, DGX replay] DL p99 2.5-3.5 ms at every cap.
+- **b. Rank-2 weak-layer LLR normalisation** (`e7d36237e5`).
+  - The 2-layer LLR shift sampled only the strong layer, so the weak layer was starved: 22-35 % zero LLRs at layer gap >= 8 dB [MEASURED, DGX replay raw_pci415_12s_b].
+  - New `nr_llr_norm_shift_nl()` for `nl == 2` with Qm 4/6/8, on CPU and GPU. Test seam `NR_TEST_L2NORM_OLD=1`.
+  - Replay CRC change is within noise; the target bin is rare in that capture.
+- **c. Solver wide-only RNTIs** (`08d2906482`).
+  - After 16 grants with no reading <= 48 RB (`SOLVER_WIDE_AFTER`), the solver searches any width.
+  - [MEASURED, DGX rfsim] the wide-only RNTI goes from never solved to solved after 1354 ms, CRC 84.69 %.
+
+**2. 4-RX rfsim gate: cannot pass on any build since `0fb22ecbd0` (10-18)** [CODE-READ, git]. The gate counts `Technique D CONVERGED` contexts and `ttc`, which the always-on solver no longer emits (`tests/passive_rx/dgx/score_rx_solver.py`, header). Current CRC is 84.69 % against the 93.4 % floor [MEASURED, DGX rfsim]. A re-based gate on solver metrics is being prepared and is **NOT adopted**. The gate in §12 is unchanged.
+
+**3. OTA night functional round 2026-10-23 22:12-22:56** [MEASURED, DGX OTA, LOW LOAD, provisional, n=1 per arm, not interleaved].
+- Main `e9c874c308` (M) vs `csd/single-int` (I). Env `POOL_20261021`, 300 s per run, 4 RX. Logs `ota_runs/ab_n{V,T,W,L}{M,I}_1_*`.
+- All 8 runs synced and exited cleanly. Unit tests 30/30.
+- Vodafone: all-grant CRC 72.7 -> 83.5 %; rank-2 rb>=100 46.7 -> 62.0 %; DL tot p99 14.08 -> 8.75 ms.
+- TIM: queue CRC 17.0 -> 35.6 %; DL tot p99 8.10 -> 5.29 ms. Rank-2 rb>=100 34.4 -> 9.8 %, a different UE population. Daytime interleaved A/B pending.
+- Stale drops <= 0.2 %.
+- WindTre and Iliad: 0 C-RNTIs solved on **both** builds. Only SI is decoded. **OPEN**, under investigation on `csd/wl-solver`.
+
+**4. Blind front end live** [MEASURED, DGX OTA], branch `csd/blind-front`, `tests/passive_rx/autofront/live_chain.sh`, OTA 2026-10-23.
+- 21-centre scan, 3350-3750 MHz in 20 MHz steps, 1 s x 4 ch each, all PASS: `ota_runs/blind_20261023_2028`. Discovery found 9 PCIs.
+- Live pass1 -> pass2 -> restart, no hand input:
+  - Vodafone PCI 415: `-C 3680010000 --ssb 1171 -r 217`, Point A 3640.950 MHz, initial FO -4827 Hz. Confirmed from SIB1; no restart needed.
+  - TIM PCI 923: `-C 3759990000 --ssb 233 -r 217`, Point A 3720.930 MHz, FO -4832. Confirmed from SIB1 after restart.
+  - WindTre PCI 508: `-C 3590010000 --ssb 193 -r 162`, Point A 3560.850 MHz, FO -4868, SIB1 offsetToPointA 32. Confirmed from SIB1 after restart.
+  - Iliad PCI 403 (NSA): `-C 3630000000 --ssb 18 -r 51`, Point A 3620.820 MHz, FO +2178. PSD edges 3620.77-3639.25 MHz. Confirmed without SIB1 carrier info (CRB-indexed reference signal) after restart.
+  - PCI 675 (new cell, operator unknown): SIB1 says 51 PRB, offsetToPointA 36, k_ssb 22 -> `-C 3425010000 --ssb 227 -r 51`, Point A 3415.830 MHz, FO -4825. **Restart FAILED**: PBCH polar-decode failures x2629, 5 resyncs, exit 3. **OPEN**, under investigation on `csd/narrow51`.
+  - PCI 347 (~3515.85 MHz, FO +2200): no MIB in 150 s; too weak.
+  - PCI 380 (co-channel with 415 at 3680), and PCI 4 and 614 (co-channel with 508 at the WindTre SSB): the single-PCI receiver always syncs the strongest PCI on the SSB. Selecting a weaker co-channel PCI needs multi-PCI.
+- All hand-measured tunings were reproduced blind. FO seed about -4.8 kHz for Vodafone, TIM and WindTre (X410 LO offset); +2.2 kHz for Iliad.
+- Raw captures for replay (4 s x 4 ch, 122.88 MS/s, night): `ota_runs/raw_windtre508_4s_1023_2315` and `ota_runs/raw_iliad403_4s_1023_2315`.
+
+**5. Ops note** [MEASURED, DGX].
+- A DGX reboot drops the X410 mgmt alias 192.168.30.1/24 on `enP7s7`. `rr-orchestration/llm/guardian.sh enter-ota` now re-adds it.
+- `capture_raw` needs its output directory to exist.
+
+**6. Open work (agents running).** WindTre/Iliad solver (`csd/wl-solver`); discovery GPU contention (`csd/disc-contention`); PCI 675 narrow-grid sync (`csd/narrow51`); solver CRC gap and gate re-base (`csd/solver-wide` round 2). Daytime interleaved A/B on all 4 operators scheduled 2026-10-24 09:00 (`rr-orchestration/ota/run_int_20261023.sh day`).
 
 ---
 
