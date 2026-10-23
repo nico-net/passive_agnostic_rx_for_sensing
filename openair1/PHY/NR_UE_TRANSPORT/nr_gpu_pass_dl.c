@@ -15,6 +15,7 @@
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/TOOLS/nr_gpu_mem.h"
+#include "PHY/TOOLS/nr_gpu_platform.h"
 #include "common/utils/LOG/log.h"
 #include "nr_gpu_pass_fp32_gate.h"
 #include "nr_gpu_graph_pool.h"
@@ -243,6 +244,12 @@ static const int g_nrbs[] = {273, 217, 136, 96, 48, 24, 12, 6};
 static const int g_ncbc[9] = {1, 2, 4, 8, 16, 32, 64, 128, NR_GPU_PASS_MAX_CB}; /* the code-block count classes (nr_gpu_pass_ncb_class) */
 static const int g_nls[] = {1, 2, 4, 3};
 /* the contiguous classes of the DM-RS counts nds: PRB classes x layers x code-block count classes x demod variants */
+/* the platform tier word of the GPUPASS log line (shared|discrete|cpu); the memory model beside it is the pass's own (a test can force DISCRETE buffers on a SHARED tier) */
+static const char *gpass_tier(void)
+{
+  const nr_gpu_caps_t *c = nr_gpu_platform_probe();
+  return c && c->model == NR_GPU_SHARED ? "shared" : c && c->model == NR_GPU_DISCRETE ? "discrete" : "cpu";
+}
 static void warm_contiguous(nr_gpu_pass_warm_fn warmf, PHY_VARS_NR_UE *ue, int nbrx, const int *nds, int nnds, int budget, int evm, int *made, int *failed)
 {
   for (int di = 0; di < nnds; di++)
@@ -316,7 +323,11 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
       return;
     }
     memcpy(dt.host, fp->delay_table, bytes);
-    nr_gpu_buf_h2d_async(&dt, 0, bytes, NULL);
+    /* the copy runs on the legacy default stream and the pass streams are cudaStreamNonBlocking (no implicit ordering with it): wait for it before the graphs are captured and replayed */
+    if (nr_gpu_buf_h2d_async(&dt, 0, bytes, NULL) != 0 || nr_gpu_sync(NULL) != 0) {
+      LOG_W(PHY, "SENSING: GPUPASS: delay table copy to the device failed: off\n");
+      return;
+    }
     c.delay_table = (const int16_t *)dt.dev;
   }
   if (cfgf(&c) != 0 || initf(0) != 0) {
@@ -401,8 +412,8 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     LOG_A(PHY, "SENSING: GPUGRAPH v2 mode: %d of %d prewarmed host buffer sets for late threads\n",
           nr_gpu_graph_pool_fill(&g_pool, NR_GPU_GRAPH_POOL, sizeof(nr_gpu_pass_dl_out_t), sizeof(nr_gpu_pass_job_t)), NR_GPU_GRAPH_POOL);
   atomic_store(&G.on, made > 0);
-  LOG_A(PHY, "SENSING: GPUPASS %s: %d shape classes (+ %d segmented) x %d instances captured (EVM branch %d, %d failed), shadow check every %d passes, %s memory model, demod %s\n",
-        made > 0 ? "enabled" : "NOT enabled", made, smade, NR_GPU_PASS_RING, evm, failed, G.check, nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE", G.fp32 ? "FP32 (sign/CRC shadow checks)" : "FP64 (bit-exact)");
+  LOG_A(PHY, "SENSING: GPUPASS %s: %d shape classes (+ %d segmented) x %d instances captured (EVM branch %d, %d failed), shadow check every %d passes, %s memory model (tier %s), demod %s\n",
+        made > 0 ? "enabled" : "NOT enabled", made, smade, NR_GPU_PASS_RING, evm, failed, G.check, nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE", gpass_tier(), G.fp32 ? "FP32 (sign/CRC shadow checks)" : "FP64 (bit-exact)");
   if (G.stats) {
     char buf[1024];
     G.stats(buf, sizeof(buf));

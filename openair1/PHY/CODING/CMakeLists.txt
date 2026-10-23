@@ -178,6 +178,12 @@ if(ENABLE_LDPC_CUDA)
   # the graph pass under the DISCRETE memory model (device buffers, explicit copies): its own process, the instances are allocated once per process
   add_test(NAME test_nr_gpu_pass_discrete COMMAND test_nr_gpu_pass --gtest_filter=GpuPassDl.*:GpuPassUl.*:GpuPassFence.NoAllocAfterFence:GpuPassFence.UlNoAllocAfterFence WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   set_tests_properties(test_nr_gpu_pass_discrete PROPERTIES ENVIRONMENT "NR_GPU_PASS_DISCRETE=1;CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_RETURN_CODE 77)
+  # T5: DISCRETE == DIRECT on the full nr_gpu_pass_result_t. Two processes (the memory model is per process): a DIRECT one records the results of the synthetic grants, a DISCRETE one
+  # compares with the recording and with the CPU stage path. Without a DIRECT model (a discrete GPU) the first half skips, the second one checks against the CPU path only.
+  add_test(NAME test_nr_gpu_pass_deq_direct COMMAND test_nr_gpu_pass --gtest_filter=GpuPassDl.DiscreteEqualsDirectFullResult WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_gpu_pass_deq_direct PROPERTIES ENVIRONMENT "NR_GPU_DEQ_ROLE=write;NR_GPU_DEQ_FILE=${CMAKE_BINARY_DIR}/gpupass_deq.bin;CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\]" SKIP_RETURN_CODE 77)
+  add_test(NAME test_nr_gpu_pass_deq_discrete COMMAND test_nr_gpu_pass --gtest_filter=GpuPassDl.DiscreteEqualsDirectFullResult WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_gpu_pass_deq_discrete PROPERTIES ENVIRONMENT "NR_GPU_PASS_DISCRETE=1;NR_GPU_DEQ_ROLE=compare;NR_GPU_DEQ_FILE=${CMAKE_BINARY_DIR}/gpupass_deq.bin;CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" DEPENDS test_nr_gpu_pass_deq_direct SKIP_RETURN_CODE 77)
   # CUDA compat: a driver without conditional graph nodes turns the pass off once (its own process: the pass is initialised once per process)
   add_test(NAME test_nr_gpu_pass_compat COMMAND test_nr_gpu_pass --gtest_filter=GpuPassCompat.* WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   set_tests_properties(test_nr_gpu_pass_compat PROPERTIES SKIP_RETURN_CODE 77)
