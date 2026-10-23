@@ -1,5 +1,7 @@
 # PROJECT_MEMORY — Passive Agnostic 5G NR Receiver (OAI-UE based)
 
+> **Update 2026-10-22 (DGX spark-74c3, X410 34B2AF1, night A/B and final OTA, LOW LOAD, provisional): see §25, block 2026-10-22 status.** Merge `96a2097740` on `adaptive-rx-UL-DL` carries the floatpool code and the 32-unit discovery chunk minimum. Vodafone discovery throughput is about 60 % of main (n=1). Iliad/WindTre and the daytime Vodafone repeat are still open.
+>
 > **Update 2026-10-12 (csd/otatest, OTA at DEIB 10-12 and 22 offline reports): see §25, block 2026-10-12.** Recommended OTA env is now t26z (t26s superseded); four operators seen live (PCI 415, 923, 675, 403, 508; PCI 4 co-channel with 508); merge gate still NOT MET.
 >
 > **Update 2026-10-11 (csd/otatest, OTA 10-10/11 and offline reports): see §25, block 2026-10-10/11.** Recommended OTA env was t26s [SUPERSEDED 2026-10-12 by t26z]; the t26j recommendation below is superseded. Merge gate NOT MET (TIM bimodal, decode mean > 0.5 ms).
@@ -2451,6 +2453,8 @@ reaching SIB1.**
 | Multi-cell / carrier / operator (G12–G14) | **None** (one process = one cell). Parallelism: N<=4 blind-PDCCH scan consumers implemented (A7); core-map launcher + scan-scratch knob implemented (A6, A11) | PASS (gtest, TSAN consumer<->consumer 0, cloud x86) | cloud x86 A/B only (§14.5); core map and 273-PRB A/B **not measured** | — | Architecture; `UEthread_0` and `pdcchUssHash` still serial; K27, K30 | §14.3, §25 (A8–A10, A12), §17–§20 |
 | Sensing consumer | Separate subsystem; newest work on unmerged branch | PASS (with sensing ON) | — | CPIs produced | Merge debt | Decide merge policy for `feature/multirx-clean-adaptive` |
 
+Pointer (2026-10-22): this table is not re-based. The latest DGX+X410 state (DL p50/p99, discovery, merge `96a2097740`) is in §25, blocks 2026-10-20/21 and 2026-10-22 status.
+
 ---
 
 ## 17. The final intended pipeline (DESIGN TARGET)
@@ -4745,6 +4749,64 @@ Correction to the brief: the 13:36–14:25 window is **merge19 (`uu`, M) vs merg
 5. Reconfiguration: a controlled-UE or long-run proof (RECONF-AUDIT section 5); a 30 min cleaned-build Vodafone run to prove or disprove the GPU-wide stall mechanism (RESTORE item "Not fixed"); the sa-bed BWP-switch arms.
 6. Dashboard targets to the 2026-10-21 goals; PROJECT_MEMORY §16 and the §25 targets are not re-based in this block.
 
+### 2026-10-22 status (combined A/B, discovery chunk minimum, merge 96a2097740)
+
+Scope: DGX spark-74c3, X410 unit 34B2AF1, OTA at DEIB. Every run in this block is a **night run = LOW LOAD**, and all results are **provisional**. Cells are never pooled (Vodafone and TIM are separate claims). Commit/merge facts are `[CODE-READ, git]`.
+
+**Merge state.**
+- `96a2097740` on `adaptive-rx-UL-DL` = merge of `csd/int16-final` (`516b841f5f`). It is contained in `origin/adaptive-rx-UL-DL`, so it is pushed [CODE-READ, git].
+- Its ancestry includes `199893c892` (the floatpool arm below), `2f1309befa`, `516b841f5f` and `fbb72bd960` [CODE-READ, git]. The floatpool code is therefore already in main; "unmerged" no longer applies to it.
+- Date: merged and pushed 2026-10-23 15:52 +0200 (`96a2097740`); the OTA runs are from the night of 2026-10-21/22.
+
+**1. Combined A/B, night 2026-10-21/22, 8 runs** [MEASURED, DGX+X410 34B2AF1, LOW LOAD, n=2 per cell per arm].
+- Arms: M = main with the `FROZEN_20261018` env. F = `csd/int16-floatpool` @ `199893c892` (core pool + discovery fix v3 + grant sizing), `POOL_20261021` env.
+- DL p99 (ms), run 1 / run 2: Vodafone F 7.53 / 4.55 vs M 14.07 / 12.54; TIM F 4.50 / 5.24 vs M 8.09 / 7.48. F roughly halves DL p99 in both cells. DL p50 is not part of this A/B summary.
+- Big-grant CRC-ok, Vodafone: F 66-75 % vs M 33-35 %.
+- Discovery failed on F [MEASURED, n=2 per cell]: Vodafone discovery batches 4-13 (F) vs 47-54 (M); detect_max 12-16 s (F) vs at most 1 s (M); feed drops 109k-140k (F) vs 2.5k-5k (M); 328-1331 `CHUNK_SLOW` lines per run (F).
+- F is the reason the discovery fixes below were made. F's latency gain is not a claim about discovery.
+
+**2. Idle-GPU timing of the discovery kernels** [MEASURED, DGX bench, idle GPU]. Report `docs/superpowers/reports/csd/DISC-GPU-TIMING-20261022.md` on local branch `csd/int16-disctime` @ `eb082ca709`. Not pushed, not an ancestor of `96a2097740`.
+- One `c_seg` unit (a 32-thread CTA) takes 18-125 ms. With 1-unit chunks a call is serialized: at p=640 it takes 1215 ms chunked vs 124 ms in one launch.
+- `c_sweep` chunk: 0.06 ms idle vs 33 ms on air. The 33 ms is contention, not kernel cost [INFERRED].
+- `c_refine` is a 1-thread kernel: 231 ms/call on both main and the branch.
+- Discovery stream: priority 0, green context of 8 SMs.
+
+**3. Fixes merged to main** [CODE-READ, git].
+- `2f1309befa`: `c_seg` runs at least 32 units per chunk.
+- `516b841f5f`: `NrGpuChunker` default minimum of 32 units per chunk at every discovery site (no per-site value; `nr_gpu_chunk.h` `min`), with a unit test. The unit-test result is not recorded in this block.
+- `fbb72bd960`: merge of the MobiSys metrics report (`origin/claude/optimistic-euler-mpdyvh`): `tools/mobisys`, additive `ISAC_METRICS` tail keys, docs.
+
+**4. Final OTA, 2026-10-22 03:54-04:25** [MEASURED, DGX+X410 34B2AF1, LOW LOAD, n=1 per arm]. N = `csd/int16-final` @ `516b841f5f`. M = main arms run 02:22-02:54. **Not interleaved**: N and M are sequential, one run each.
+- Vodafone, N vs M: DL p50/p99 0.77/3.38 vs 0.82/4.22 ms; CRC_q 97.9 vs 96.2 %; drops 0.1 vs 0.3 %; ml-ok 89 vs 67 %; discovery batches 21 vs 34; FEP slots 163k vs 230k (-29 %); feed drops 12k vs 1.6k (about 7.5x).
+- Vodafone traffic was very low in the N run (n_real 9k vs 59k). The N Vodafone numbers are therefore not at equal load to M.
+- TIM, N vs M: DL p50/p99 0.75/2.88 vs 1.87/9.10 ms; CRC_q 93.9 vs 94.6 %; discovery batches 38 vs 37; detect_max 1.4 vs 1.7 s; FEP slots 203k vs 209k; feed drops 2.8k vs 2.1k.
+- Against the 2026-10-20/21 discovery pass criteria (DISC-CONFIRM-20261021.md section 7, step 1 of the 2026-10-20/21 next steps): TIM meets the FEP-within-20 % and feed-drop-same-order criteria [MEASURED, n=1]. Vodafone does not: FEP -29 %, feed drops about 7.5x M [MEASURED, n=1]. Vodafone `CHUNK_SLOW` count for N is not recorded here.
+- Earlier arm N2 (`c_seg` minimum only, no `c_ls` fix): `c_ls` became the bottleneck, 70 units in 64 chunks of about 21 ms, 1.2 s per call [MEASURED, n=1].
+- Remaining cost: on air `c_sweep` runs as one launch of about 212 ms, against 3.5 ms on the idle bench. The gap is GPU contention [INFERRED]. Not fixed.
+
+**5. Merge limit and pending work.**
+- Known limit: Vodafone discovery throughput is about 60 % of main [MEASURED, n=1, LOW LOAD].
+- Pending: a daytime Vodafone repeat of N vs M (none in this block); the `c_sweep` contention fix.
+
+**6. Build pitfall** [MEASURED, fresh build directory]. A fresh build dir needs all three:
+- cmake: `-DENABLE_ISAC_SENSING=ON -DENABLE_LDPC_CUDA=ON "-DLDPC_CUDA_ARCH=89;121"` (both options default OFF);
+- `ninja -k 0`. Without it, the `nr_pusch_ra0sim` link failure stops ninja before `oai_usrpdevif` and the GPU plugins are built;
+- a manual symlink `liboai_device.so` -> `liboai_usrpdevif.so`.
+- Without these, the first hour of the N arms died at `load_lib`. The build line in `CLAUDE.md` does not carry the cmake options.
+
+**7. Known ctest failures on main and on `csd/int16-final`** [MEASURED, serial run unless stated].
+- Failing: `nr_td_sim_test`, `test_nr_ssb_rate_match_prod`, `test_nr_modulation`, `dft_test`, and the `test_nr_pusch_ra0_*` family (link failure of `nr_pusch_ra0sim`).
+- `test_nr_gpu_pass` fails only under `ctest -j4` (GPU contention) and passes serially.
+- Not all of these are in the `CLAUDE.md` known-ARM list (`dft_test`, `test_nr_modulation`, `test_nr_pusch_ra0_qam256/qam64`). `nr_td_sim_test`, `test_nr_ssb_rate_match_prod` and `test_nr_gpu_pass` are new to that list and need reconciling.
+
+**8. Next steps (in order; no new claim is made here).**
+1. Iliad and WindTre OTA on main.
+2. Multi-PCI on the cloud, from main.
+3. sens6 simulation by the user. Readiness: `docs/superpowers/reports/csd/SENS6-READINESS-20261021.md`. Key facts [CODE-READ]: the discrete GPU gate at `nr_gpu_platform.c:171-187` sends DL decode to the CPU; CUDA 12.4 lacks `cudaGetDriverEntryPointByVersion` (`nr_gpu_pass_graph.cu:1099`, needs 12.5) and sm_121; the 106-PRB rfsim bed does not use the GPU; use the core pool.
+4. Float-lane rule by host size: `docs/superpowers/reports/csd/FLOAT-LANE-POOL-20261021.md`.
+5. Daytime Vodafone repeat of N vs M; the `c_sweep` contention fix.
+6. Goals (2026-10-21, unchanged): DL p50 about 1 ms, DL p99 < 5 ms, decode all grants; drops <= 4 % acceptable.
+
 ---
 
 ## 26. Working rules for any agent on this project (carried over from the old setup)
@@ -4810,7 +4872,7 @@ other OTA result is in §15.5 or §8, labelled HISTORICAL. Results from differen
 | 3 | What currently works? | §16 (+ §13, §15) |
 | 4 | What does not work? | §16, §24 |
 | 5 | Which statements are offline-only? | labels throughout; §13, §16 "Offline" column |
-| 6 | Latest OTA test? | §15.1–15.3 (2026-09-25, `aa872eba3b`, lab + Salt) |
+| 6 | Latest OTA test? | DGX+X410 (unit 34B2AF1, DGX spark-74c3): §25 blocks 2026-10-20/21 and 2026-10-22 status (latest: night 2026-10-21/22, LOW LOAD, provisional). §15.1–15.3 is the 2026-09-25 campaign only (HISTORICAL for this site) |
 | 7 | Operator and how we know | §15.3: PLMN 228-03 decoded from SIB1 (Salt via public MNC mapping); lab PLMN 001/06 test network |
 | 8 | Files per stage | §2.2, §3.2, §3.3, §23 |
 | 9 | Build | §9 |
