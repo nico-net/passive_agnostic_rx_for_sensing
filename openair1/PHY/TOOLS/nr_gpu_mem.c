@@ -7,6 +7,15 @@
 enum { MEMCPY_H2D = 1, MEMCPY_D2H = 2, HOST_MAPPED_PORTABLE = 3 };
 static int g_force_discrete;
 void nr_gpu_mem_test_force_discrete(int on) { g_force_discrete = on; }
+/* OOM injection (test only): after n further successful nr_gpu_buf_alloc / _dev calls every later one fails with -1 (n = 0: the very next); n < 0 = off (default) */
+static int g_fail_after = -1;
+void nr_gpu_mem_test_fail_after(int n) { __atomic_store_n(&g_fail_after, n, __ATOMIC_RELAXED); }
+static int oom_injected(void)
+{
+  int n = __atomic_load_n(&g_fail_after, __ATOMIC_RELAXED);
+  while (n > 0 && !__atomic_compare_exchange_n(&g_fail_after, &n, n - 1, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+  return n == 0;
+}
 nr_gpu_model_t nr_gpu_model(void)
 {
   if (g_force_discrete) return NR_GPU_MODEL_DISCRETE;
@@ -16,7 +25,7 @@ int nr_gpu_buf_alloc(nr_gpu_buf_t *b, size_t bytes)
 {
   const nr_gpu_runtime_t *rt = nr_gpu_platform_runtime();
   memset(b, 0, sizeof(*b));
-  if (!rt || !bytes || !nr_gpu_allocations_allowed()) return -1; /* allocation fence */
+  if (!rt || !bytes || !nr_gpu_allocations_allowed() || oom_injected()) return -1; /* allocation fence */
   b->bytes = bytes;
   b->model = nr_gpu_model();
   if (b->model == NR_GPU_MODEL_DIRECT) {
@@ -41,7 +50,7 @@ int nr_gpu_buf_alloc_dev(nr_gpu_buf_t *b, size_t bytes)
     return nr_gpu_buf_alloc(b, bytes);
   const nr_gpu_runtime_t *rt = nr_gpu_platform_runtime();
   memset(b, 0, sizeof(*b));
-  if (!rt || !bytes || !nr_gpu_allocations_allowed()) return -1; /* allocation fence */
+  if (!rt || !bytes || !nr_gpu_allocations_allowed() || oom_injected()) return -1; /* allocation fence */
   b->bytes = bytes;
   b->model = NR_GPU_MODEL_DISCRETE;
   if (rt->malloc_device(&b->dev, bytes)) goto fail;

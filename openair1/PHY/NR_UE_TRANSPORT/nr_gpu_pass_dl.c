@@ -373,6 +373,14 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   int smade = 0;
   static const int segc[] = {1, 2, 4, 8, 16, 32, 64, 128}, segnl[] = {1, 2, 3, 4};
   const int nsegc = c.split ? (g_sub_on[4] ? 8 : 6) : 5, segrows = c.split ? 1024 : 512; /* split: the 32-segment class and the module's 1024 chest rows; SEG128: 64, 128 in C chunks */
+  void (*memf)(uint64_t *) = (void (*)(uint64_t *))dlsym(h, "nr_gpu_pass_mem");
+  if (memf) { /* T6: the memory census of the pass (device MB; the receiver's other GPU modules are not in it) */
+    uint64_t m[6] = {0};
+    memf(m);
+    LOG_A(PHY, "SENSING: GPU_MEM tier=%s model=%s total=%lu free_at_probe=%lu pass_inst_mb=%lu graph_mb=%lu harq_mb=%lu allocated_mb=%lu graph_cap_mb=%lu pinned_host_mb=%lu\n", gpass_tier(),
+          nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE", (unsigned long)m[0], (unsigned long)(nr_gpu_platform_free_at_probe() >> 20), (unsigned long)m[1], (unsigned long)m[2],
+          (unsigned long)m[4], (unsigned long)(m[1] + m[2] + m[4]), (unsigned long)m[3], (unsigned long)m[5]);
+  }
   if (G.stats) {
     char buf[1024];
     G.stats(buf, sizeof(buf));

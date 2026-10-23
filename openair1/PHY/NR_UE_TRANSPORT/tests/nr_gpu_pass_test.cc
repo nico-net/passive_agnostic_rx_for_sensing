@@ -15,6 +15,7 @@ extern "C" {
 #include "nr_gpu_pass_hq.h"
 #include "nr_gpu_platform.h"
 #include "nr_gpu_pass_post.h"
+#include "nr_gpu_pass_cap.h"
 #include <random>
 #include <dlfcn.h>
 #include <cmath>
@@ -3773,6 +3774,18 @@ TEST(GpuPassGate, UlSkipsNoChanceAndKeepsTheRest) {
   EXPECT_GT(n_run, 0);
 }
 
+/* T6: the graph memory cap is a pure function of the device memory and the memory free at the platform probe (1 GB = 1000 MiB in this table). */
+TEST(GpuPassCap, Table) {
+  const auto gb = [](double g) { return (size_t)(g * 1000.0) << 20; };
+  EXPECT_EQ(3072, nr_gpu_pass_cap_mb(gb(128), gb(120)));
+  EXPECT_EQ(2048, nr_gpu_pass_cap_mb(gb(8), gb(7.6)));
+  EXPECT_EQ(1050, nr_gpu_pass_cap_mb(gb(4), gb(3.5)));
+  EXPECT_EQ(360, nr_gpu_pass_cap_mb(gb(2), gb(1.2)));
+  EXPECT_EQ(256, nr_gpu_pass_cap_mb(gb(1), gb(0.3))); /* the floor */
+  EXPECT_EQ(2048, nr_gpu_pass_cap_mb(gb(8), 0));      /* free memory unknown: the quarter-of-total term alone */
+  EXPECT_EQ(2560, nr_gpu_pass_cap_mb((size_t)10240 << 20, (size_t)20000 << 20)); /* 10 GiB: a quarter, inside the clamp */
+}
+
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
  * allocated or built on the launch path. */
 extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);
@@ -3977,4 +3990,32 @@ TEST(GpuPassCompat, NoGateDriverDisablesPassOnce) {
   for (size_t p = log.find("GPUPASS: graph conditional nodes unavailable"); p != std::string::npos; p = log.find("GPUPASS: graph conditional nodes unavailable", p + 1)) n_gate++;
   EXPECT_EQ(1, n_gate) << "log: " << log;
   EXPECT_NE(std::string::npos, log.find("GPUPASS: graph conditional nodes unavailable")) << "log: " << log;
+}
+
+/* T6: an allocation failure (device OOM) during the pass init: nr_gpu_pass_init returns -1 (the host logs "GPUPASS: nr_gpu_pass_config/init failed: off"), the pass is never ready,
+ * and nr_gpu_pass_dl_try refuses every grant (return 1: the caller decodes on the CPU path). Own ctest process (test_nr_gpu_pass_oom): the init of a pass that is running returns 0 first. */
+TEST(GpuPassFence, OomFallsBackToCpu) {
+  if (!have_gpu()) GTEST_SKIP();
+  void *dl = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
+  if (!dl) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  auto cfg = (nr_gpu_pass_config_fn)dlsym(dl, "nr_gpu_pass_config");
+  auto init = (nr_gpu_pass_init_fn)dlsym(dl, "nr_gpu_pass_init");
+  auto try_ = (nr_gpu_pass_dl_try_fn)dlsym(dl, "nr_gpu_pass_dl_try");
+  ASSERT_TRUE(cfg && init && try_);
+  static int16_t dt[4096 * 4]; /* never read by the init */
+  nr_gpu_pass_cfg_t c = {4, 273, dt, 4096, 20, 1};
+  ASSERT_EQ(0, cfg(&c));
+  int r[2];
+  const int after[2] = {2, 40}; /* the ring buffers (4 allocations), then inside the instances */
+  for (int i = 0; i < 2; i++) {
+    nr_gpu_mem_test_fail_after(after[i]);
+    r[i] = init(16);
+    nr_gpu_mem_test_fail_after(-1);
+    EXPECT_EQ(-1, r[i]) << "fail after " << after[i];
+  }
+  static nr_gpu_pass_job_t job;
+  uint8_t tb[64] = {};
+  nr_gpu_pass_result_t res{};
+  res.tb = tb;
+  EXPECT_EQ(1, try_(&job, &res)) << "a pass whose init failed must refuse (the CPU path decodes)";
 }

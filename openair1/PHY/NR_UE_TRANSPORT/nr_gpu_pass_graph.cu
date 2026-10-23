@@ -14,6 +14,7 @@
 #include "nr_pdsch_gpu_demod.h"
 #include "nr_pdsch_gpu_ldpc.h"
 #include "nr_gpu_pass_post.h"
+#include "nr_gpu_pass_cap.h"
 #include "PHY/TOOLS/nr_gpu_platform.h"
 #include "PHY/TOOLS/nr_gpu_compat.h"
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
@@ -1115,12 +1116,13 @@ static bool key_ok(const Key &k)
  * (all instances), the worst case a class is checked against before any of its sub-graphs is built (review S4: no orphan sub-graph when the cap is hit mid-class). */
 static std::atomic<uint64_t> g_split_n[4], g_split_unseen[4], g_split_mb{0}, g_inst_mb{0}, g_split_warm_us{0}, g_split_capped{0}, g_split_kb{0};
 static uint64_t g_sub_kb_max[4];
-/* The memory cap of the split graphs: a quarter of the device's memory between 2048 and 3072 MB (8 GB card: 2048; the GB10's unified memory: 3072). */
+/* The memory cap of the split graphs: nr_gpu_pass_cap_mb (a quarter of the device's memory between 2048 and 3072 MB, at most 30 % of the memory free at the platform probe; 8 GB card: 2048; the GB10's unified memory: 3072). */
+static size_t g_pinned_b; /* g_pinned_b: pinned host mirrors of the instance buffers (DISCRETE only) */
 static int split_cap_auto()
 {
   size_t fr = 0, tb = 0;
-  const long q = cudaMemGetInfo(&fr, &tb) == cudaSuccess ? (long)(tb >> 20) / 4 : 2048;
-  return q < 2048 ? 2048 : q > 3072 ? 3072 : (int)q;
+  if (cudaMemGetInfo(&fr, &tb) != cudaSuccess) tb = 0;
+  return nr_gpu_pass_cap_mb(tb ? tb : (size_t)8 << 30, nr_gpu_platform_free_at_probe()); /* no device info: the 8 GB card's value */
 }
 static int split_cap_mb() { return g_cfg.split_mb > 0 ? g_cfg.split_mb : split_cap_auto(); /* measured 0.55 MB per graph executable (the gated D / L wrappers included): 5 DL-shape executables (4 real + overflow) per class need ~1.5 GB for the full warm set of the unit test (was 1008 MB with 4); production warms fewer classes */ }
 static bool split_cap_hit(uint64_t extra_kb)
@@ -1399,7 +1401,10 @@ extern "C" int nr_gpu_pass_init(int max_classes)
   for (int i = 0; i < NI; i++) {
     if (alloc_inst(i) != 0) return -1;
     const Inst &I = g_inst[i];
-    for (const nr_gpu_buf_t *b : {&I.rxF, &I.est, &I.nvar, &I.geo, &I.scratch, &I.llr, &I.lin, &I.bits, &I.pil, &I.scr, &I.pb, &I.res, &I.segsc, &I.uli, &I.ulb, &I.ulwin}) ib += b->bytes;
+    for (const nr_gpu_buf_t *b : {&I.rxF, &I.est, &I.nvar, &I.geo, &I.scratch, &I.llr, &I.lin, &I.bits, &I.pil, &I.scr, &I.pb, &I.res, &I.segsc, &I.uli, &I.ulb, &I.ulwin}) {
+      ib += b->bytes;
+      if (b->host && b->model == NR_GPU_MODEL_DISCRETE) g_pinned_b += b->bytes;
+    }
   }
   g_inst_mb = ib >> 20;
   if (g_cfg.split && g_inst_mb >= (uint64_t)split_cap_mb()) { /* review S5: no room for any sub-graph: the single-graph (v1 class) mode; the host reads nr_gpu_pass_split_on() */
@@ -1613,6 +1618,17 @@ static size_t c_sig(const nr_gpu_pass_job_t *j, const Key &k, uint8_t *o, size_t
   return n;
 }
 
+/* T6: the memory census of the pass for the SENSING: GPU_MEM line: out = {device total MB, pass instance buffers MB, split graphs MB (estimate), cap MB, HARQ store MB, pinned host MB}. */
+extern "C" void nr_gpu_pass_mem(uint64_t out[6])
+{
+  size_t fr = 0, tb = 0;
+  out[0] = cudaMemGetInfo(&fr, &tb) == cudaSuccess ? tb >> 20 : 0;
+  out[1] = g_inst_mb;
+  out[2] = g_split_mb;
+  out[3] = (uint64_t)split_cap_mb();
+  out[4] = g_hq ? ((uint64_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2) >> 20 : 0;
+  out[5] = g_pinned_b >> 20;
+}
 extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result_t *r)
 {
   const uint64_t ts_e = nr_gpu_pass_now_ns();
