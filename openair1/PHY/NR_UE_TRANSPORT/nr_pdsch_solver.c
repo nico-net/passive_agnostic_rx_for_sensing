@@ -48,6 +48,7 @@ typedef struct {
   uint8_t add_pos;
   int8_t table;
   int8_t S_by_tda[16];
+  int8_t L_by_tda[16];     /* SOLVERTDDL: PDSCH length per TDA index when it is not 14 - S (TDD special slot); -1 = 14 - S */
   int8_t rm;               /* CSI-RS rate matching for this RNTI: -1 unknown, 0 no, 1 yes (CRC-selected) */
   uint32_t full_tr, full_ok, cons_fail;
   /* T26c per-RNTI report: absolute slots (signal time) of the first grant and of the solving CRC pass */
@@ -78,7 +79,7 @@ typedef struct {
   uint32_t token;
   int slot;
   uint8_t phase;          /* 0 = search/candidate, 1 = solved */
-  uint8_t S, add_pos, table, probe;
+  uint8_t S, L, add_pos, table, probe;
   bool table_disc;        /* this MCS's (Qm, R) differ between the tables tried */
   bool learn_S, learn_table, learn_rm;
   uint8_t rm;
@@ -123,7 +124,9 @@ static void *g_hq_ctx;
 static bool g_have_prior;
 static int g_prior_rep;
 static uint8_t g_prior_add_pos;
-static int8_t g_prior_table, g_prior_S_by_tda[16];
+static int8_t g_prior_table, g_prior_S_by_tda[16], g_prior_L_by_tda[16];
+static uint32_t g_lcur[SOLVER_RNTIS][16]; /* SOLVERTDDL: rotation cursor of the length search per RNTI and TDA index */
+static int t_L; /* length of the variants being emitted (0 = 14 - S); set by plan_known under g_mu */
 
 /* nr_pdsch_solver_enabled: Callers: nr_pdsch_passive_decode.c (probe-c1 switch), nr_pdcch_blind_monitor_rt.c (RNTI routing). */
 bool nr_pdsch_solver_enabled(void)
@@ -154,6 +157,7 @@ void nr_pdsch_solver_reset(void)
     memset(&g_r[i], 0, sizeof(g_r[i]));
   }
   memset(g_p, 0, sizeof(g_p));
+  memset(g_lcur, 0, sizeof(g_lcur));
   memset(&g_st, 0, sizeof(g_st));
   g_have_prior = false;
   g_n_key_scr = 0;
@@ -248,6 +252,8 @@ static solver_rnti_t *slot_of(uint16_t rnti, bool create, int *idx)
       g_r[i].rm = -1;
       g_r[i].scr = g_r[i].cand_scr = -1;
       memset(g_r[i].S_by_tda, -1, sizeof(g_r[i].S_by_tda));
+      memset(g_r[i].L_by_tda, -1, sizeof(g_r[i].L_by_tda));
+      memset(g_lcur[i], 0, sizeof(g_lcur[i]));
       if (idx) *idx = i;
       return &g_r[i];
     }
@@ -383,6 +389,7 @@ static void promote(const solver_rnti_t *r)
     g_prior_add_pos = r->add_pos;
     g_prior_table = r->table;
     memcpy(g_prior_S_by_tda, r->S_by_tda, sizeof(g_prior_S_by_tda));
+    memcpy(g_prior_L_by_tda, r->L_by_tda, sizeof(g_prior_L_by_tda));
   }
 }
 
@@ -426,11 +433,11 @@ static bool significant(const solver_rnti_t *r)
 /* tb_crc24: TS 38.214 5.1.3.2: TBS > 3824 (CRC24A, or code block 0 with CRC24B) iff N_info > 3824. The DM-RS overhead is
  * taken as 12 REs per DM-RS symbol and PRB (2 CDM groups): over-counting it can only under-estimate N_info, so an unsure
  * TB counts as CRC16 (the stricter rule). */
-static bool tb_crc24(int table, int mcs, int nrb, int S, int l0, int add_pos, int nl)
+static bool tb_crc24(int table, int mcs, int nrb, int S, int L, int l0, int add_pos, int nl)
 {
   int qm, r2;
   if (nrb <= 0 || !nr_pdsch_solver_mcs_qr(table, mcs, &qm, &r2)) return false;
-  const int L = 14 - S, nd = __builtin_popcount(nr_pdsch_solver_dmrs_mask(l0, S, L, add_pos));
+  const int nd = __builtin_popcount(nr_pdsch_solver_dmrs_mask(l0, S, L, add_pos));
   int nre = 12 * L - 12 * nd;
   if (nre > 156) nre = 156;
   return (double)nre * nrb * (r2 / 2048.0) * qm * (nl > 0 ? nl : 1) > 3824.0;
@@ -620,8 +627,9 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
     return false;
   if (S > l0) /* type A: the first DM-RS symbol l0 must lie inside the PDSCH (S <= l0); else the demapper overruns */
     return true;
+  const int L = t_L > 0 ? t_L : 14 - S;
   for (int i = 0; i < *n; i++) /* never the same decode twice for one grant */
-    if (out[i].reading == reading && out[i].S == S && out[i].add_pos == add_pos && out[i].table == table && out[i].rm == t_rm
+    if (out[i].reading == reading && out[i].S == S && out[i].L == L && out[i].add_pos == add_pos && out[i].table == table && out[i].rm == t_rm
         && out[i].scr == t_scr)
       return true;
   pending_t *p = pend_new();
@@ -632,7 +640,7 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   p->abs = plan_ctx()->now_abs;
   p->slot = slot;
   p->phase = phase;
-  p->S = (uint8_t)S; p->add_pos = (uint8_t)add_pos; p->table = (uint8_t)table; p->probe = probe;
+  p->S = (uint8_t)S; p->L = (uint8_t)L; p->add_pos = (uint8_t)add_pos; p->table = (uint8_t)table; p->probe = probe;
   p->table_disc = table_disc; p->learn_S = learn_S; p->learn_table = learn_table; p->tda = tda;
   p->dci = dci;
   p->rm = (uint8_t)t_rm;
@@ -640,7 +648,7 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   p->comb = t_comb;
   p->n_layers = rd[reading].n_layers;
   p->mcs = rd[reading].mcs;
-  p->crc24 = tb_crc24(table, rd[reading].mcs, rd[reading].num_rb, S, l0, add_pos, rd[reading].n_layers);
+  p->crc24 = tb_crc24(table, rd[reading].mcs, rd[reading].num_rb, S, L, l0, add_pos, rd[reading].n_layers);
   p->dmrs_ports = rd[reading].dmrs_ports;
   p->learn_rm = t_learn_rm;
   p->payload = payload;
@@ -649,10 +657,10 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   nr_pdsch_solver_var_t *v = &out[(*n)++];
   v->reading = reading;
   v->S = (uint8_t)S;
-  v->L = (uint8_t)(14 - S);
+  v->L = (uint8_t)L;
   v->add_pos = (uint8_t)add_pos;
   v->table = (uint8_t)table;
-  v->dmrs_mask = nr_pdsch_solver_dmrs_mask(l0, S, 14 - S, add_pos);
+  v->dmrs_mask = nr_pdsch_solver_dmrs_mask(l0, S, L, add_pos);
   v->probe = probe;
   v->token = p->token;
   v->rm = (uint8_t)t_rm;
@@ -825,7 +833,7 @@ static void plan_coverage(solver_rnti_t *r, nr_pdsch_solver_var_t *out, int *n, 
  */
 static void plan_known(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t phase, int reading,
                        const nr_pdsch_solver_reading_t *rd, int l0, int rep, uint8_t add_pos, int8_t table,
-                       const int8_t *S_by_tda, int mcs, uint64_t dci, nr_dci_bits_t payload)
+                       const int8_t *S_by_tda, const int8_t *L_by_tda, int mcs, uint64_t dci, nr_dci_bits_t payload)
 {
   uint8_t tl[3];
   const int nt = tables_for(rd[reading].mcs, tl);
@@ -835,17 +843,44 @@ static void plan_known(nr_pdsch_solver_var_t *out, int *n, int max, int slot, ui
   const int S = S_by_tda[tda];
   const bool t_known = table >= 0 || nt == 1;
   const int t_use = table >= 0 ? table : tl[0];
+  const int Lk = L_by_tda ? L_by_tda[tda & 15] : -1;
   if (phase == 1 && S >= 0 && t_known) {
+    t_L = Lk > 0 ? Lk : 0;
     emit(out, n, max, slot, phase, reading, rd, l0, S, add_pos, t_use, false, nt > 1, false, false, tda, dci, payload);
+    t_L = 0;
     return;
   }
-  for (int si = 0; si < 4; si++) {
-    const int s = S >= 0 ? S : kS[si];
-    for (int ti = 0; ti < (t_known ? 1 : nt); ti++)
-      emit(out, n, max, slot, phase, reading, rd, l0, s, add_pos, t_known ? t_use : tl[ti], true, nt > 1, S < 0,
-           !t_known && nt > 1, tda, dci, payload);
-    if (S >= 0)
-      break;
+  /* SOLVERTDDL: a solved RNTI's TDA index with no S yet is also searched with PDSCH lengths shorter than 14 - S (TDD special
+   * slot: the PDSCH ends where the DL symbols end; every length 14 - S probe fails there and S would never be learnt). 4 (S, end
+   * symbol) hypotheses per grant, rotating, alternating with the full-length ones so that neither starves under the probe bucket. */
+  static const uint8_t kE[10] = {5, 9, 10, 11, 8, 7, 6, 12, 4, 3};
+  const uint32_t lc = (phase == 1 && S < 0) ? g_lcur[slot][tda & 15]++ : 0;
+  for (int pass = 0; pass < 2; pass++) {
+    const bool shortp = (pass == 0) == ((lc & 1u) != 0u);
+    if (shortp) {
+      if (!(phase == 1 && S < 0)) continue;
+      for (int q = 0; q < 4; q++) {
+        const uint32_t j = ((lc >> 1) * 4u + (uint32_t)q) % 40u;
+        const int s = kS[j % 4], e = kE[j / 4], Ls = e - s + 1;
+        if (e < l0 || Ls < 2) continue;
+        t_L = Ls;
+        for (int ti = 0; ti < (t_known ? 1 : nt); ti++)
+          emit(out, n, max, slot, phase, reading, rd, l0, s, add_pos, t_known ? t_use : tl[ti], true, nt > 1, true,
+               !t_known && nt > 1, tda, dci, payload);
+        t_L = 0;
+      }
+      continue;
+    }
+    for (int si = 0; si < 4; si++) {
+      const int s = S >= 0 ? S : kS[si];
+      t_L = (S >= 0 && Lk > 0) ? Lk : 0;
+      for (int ti = 0; ti < (t_known ? 1 : nt); ti++)
+        emit(out, n, max, slot, phase, reading, rd, l0, s, add_pos, t_known ? t_use : tl[ti], true, nt > 1, S < 0,
+             !t_known && nt > 1, tda, dci, payload);
+      t_L = 0;
+      if (S >= 0)
+        break;
+    }
   }
 }
 
@@ -942,6 +977,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
           (unsigned long long)g_st.probe_ok, (unsigned long long)g_st.fulls, (unsigned long long)g_st.full_ok,
           (unsigned long long)g_st.candidates, (unsigned long long)g_st.solved, (unsigned long long)g_st.dropped);
   t_rm = 0;
+  t_L = 0;
   t_learn_rm = false;
   t_scr = r->solved ? r->scr : -1;
   t_comb = comb_pick(r);
@@ -958,13 +994,13 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
         t_rm = k;
         t_learn_rm = true;
         const int n0 = n;
-        plan_known(out, &n, budget, slot, 1, ri, rd, l0, r->rep, r->add_pos, r->table, r->S_by_tda, mcs, dci, payload);
+        plan_known(out, &n, budget, slot, 1, ri, rd, l0, r->rep, r->add_pos, r->table, r->S_by_tda, r->L_by_tda, mcs, dci, payload);
         for (int q = n0; q < n; q++) out[q].probe = 1; /* a rate-match trial is a probe, never a counted TB */
       }
       t_learn_rm = false;
     } else {
       t_rm = csirs_slot ? r->rm : 0;
-      plan_known(out, &n, budget, slot, 1, ri, rd, l0, r->rep, r->add_pos, r->table, r->S_by_tda, mcs, dci, payload);
+      plan_known(out, &n, budget, slot, 1, ri, rd, l0, r->rep, r->add_pos, r->table, r->S_by_tda, r->L_by_tda, mcs, dci, payload);
     }
     /* REFINEMENT: the solution's layouts can still disagree on fields two passes did not separate (e.g. where the
      * antenna-ports field sits). Each other reading those layouts give for THIS DCI gets one probe with the same
@@ -980,8 +1016,10 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       uint8_t tl[3];
       const int nt = tables_for(rd[i].mcs, tl);
       if (nt == 0) break;
+      { const int Lh = r->L_by_tda[tda_of(r->rep, payload) & 15]; t_L = (S_here >= 0 && Lh > 0) ? Lh : 0; }
       emit(out, &n, budget, slot, 1, i, rd, l0, S_here >= 0 ? S_here : 1, r->add_pos, r->table >= 0 ? r->table : tl[0],
            true, nt > 1, false, false, tda_of(r->rep, payload), dci, payload);
+      t_L = 0;
       refine++;
     }
   } else if (csirs_slot) {
@@ -1075,7 +1113,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
               for (int u = 0; u < nu; u++) seen |= used[u] == i;
               if (!seen) {
                 used[nu++] = i;
-                plan_known(out, &n, budget, slot, 0, i, rd, l0, src[j]->rep, src[j]->add_pos, src[j]->table, src[j]->S_by_tda,
+                plan_known(out, &n, budget, slot, 0, i, rd, l0, src[j]->rep, src[j]->add_pos, src[j]->table, src[j]->S_by_tda, src[j]->L_by_tda,
                            mcs, dci, payload);
               }
               break;
@@ -1089,7 +1127,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     } else if (best) {
       for (int i = 0; i < n_rd; i++)
         if (has_id(&rd[i], best->rep)) {
-          plan_known(out, &n, budget, slot, 0, i, rd, l0, best->rep, best->add_pos, best->table, best->S_by_tda, mcs, dci,
+          plan_known(out, &n, budget, slot, 0, i, rd, l0, best->rep, best->add_pos, best->table, best->S_by_tda, best->L_by_tda, mcs, dci,
                      payload);
           break;
         }
@@ -1097,7 +1135,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       for (int i = 0; i < n_rd; i++)
         if (has_id(&rd[i], g_prior_rep)) {
           plan_known(out, &n, budget, slot, 0, i, rd, l0, g_prior_rep, g_prior_add_pos, g_prior_table,
-                     g_prior_S_by_tda, mcs, dci, payload);
+                     g_prior_S_by_tda, g_prior_L_by_tda, mcs, dci, payload);
           break;
         }
     }
@@ -1243,6 +1281,7 @@ static void solve_now(solver_rnti_t *r, const pending_t *p, int kept)
 {
   r->solved = true;
   memset(r->S_by_tda, -1, sizeof(r->S_by_tda));
+  memset(r->L_by_tda, -1, sizeof(r->L_by_tda));
   bool refuted = false;
   r->rep = choose_rep(r, true, &refuted);
   if (refuted) { /* DCIRV: every layout the CRC passes allow reads inconsistent NDI/RV/pid: keep searching */
@@ -1367,6 +1406,10 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     if (crc_ok) {
       r->cons_fail = 0;
       add_ev(r, p->payload, p->S);
+      if (p->learn_S && p->probe && p->tda >= 0 && p->tda < 16 && p->L != 14 - p->S) { /* SOLVERTDDL */
+        r->L_by_tda[p->tda] = (int8_t)p->L;
+        LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x tda %d learnt S=%u L=%u (shorter than 14 - S: TDD special slot)\n", r->rnti, p->tda, p->S, p->L);
+      }
       const int old_rep = r->rep;
       const int nr = choose_rep(r, false, NULL);
       if (nr >= 0) r->rep = nr;
