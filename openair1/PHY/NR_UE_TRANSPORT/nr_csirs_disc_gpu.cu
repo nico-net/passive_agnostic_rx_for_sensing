@@ -2,6 +2,7 @@
 #include "nr_csirs_disc_fp_internal.h"
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
+#include "../TOOLS/nr_gpu_cuda.h"
 #include "../TOOLS/nr_gpu_chunk.h"
 #include "../TOOLS/nr_gpu_wait.h"
 #include <cstdio>
@@ -223,6 +224,7 @@ namespace resident {static int detect(const nr_csirs_disc_ring_t *,const nr_csir
 static void lmem_prereserve(void);
 extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
 {
+  if(!nr_gpu_module_ready()) return nullptr; // CPU tier: no device, module/arch mismatch or forced CPU (the caller keeps the CPU path)
   if(!discovery_stream.init()) return nullptr;
   lmem_prereserve();
   int devices=0;if(cudaGetDeviceCount(&devices)!=cudaSuccess || devices<1) return nullptr;
@@ -512,7 +514,9 @@ static int accumulate_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_
   if(!grid.reserve(gb) || !meta.reserve(r->capacity) || !x.reserve(xb) || !excl.reserve(14*12*r->n_rb)) return -1;
   // Reuse managed input directly, explicit-copy ordinary CPU fixture rings.
   cudaPointerAttributes attr={};
-  bool managed=cudaPointerGetAttributes(&attr,r->grid_base)==cudaSuccess && (attr.type==cudaMemoryTypeManaged || attr.type==cudaMemoryTypeHost);
+  // Host-mapped ring storage is read in place only on the SHARED tier; on DISCRETE it would cross PCIe on every batch.
+  bool managed=cudaPointerGetAttributes(&attr,r->grid_base)==cudaSuccess &&
+               (attr.type==cudaMemoryTypeManaged || (attr.type==cudaMemoryTypeHost && nr_gpu_platform_shared_direct()));
   cudaGetLastError();
   const int16_t *input=managed?r->grid_base:grid.p;
   if((!managed && disc_copy(grid.p,r->grid_base,gb*sizeof(int16_t),cudaMemcpyHostToDevice)!=cudaSuccess) ||

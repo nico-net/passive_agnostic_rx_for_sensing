@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdint.h>
+#include <unistd.h>
 
 /* Values from CUDA's stable cudaDeviceAttr ABI (driver_types.h). */
 enum { ATTR_INTEGRATED=18, ATTR_MAP_HOST=19, ATTR_UVA=41, ATTR_MAJOR=75, ATTR_MINOR=76,
@@ -15,6 +17,10 @@ static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static nr_gpu_runtime_t rt;
 static nr_gpu_caps_t caps;
 static int probed, sealed, warned_late;
+static int force_hook = -1; /* nr_gpu_platform_test_force_model(): -1 automatic */
+#ifdef NR_GPU_PLATFORM_TEST
+static int (*probe_hook)(void);
+#endif
 static uint64_t allocations, denied;
 static void (*logger)(int, const char *);
 typedef struct allocation {
@@ -48,20 +54,50 @@ void nr_gpu_set_logger(void (*fn)(int, const char *))
   logger = fn;
   pthread_mutex_unlock(&mu);
 }
-/* nr_gpu_choose_model: selects the memory model from the probed capabilities.
- *   Chooses SHARED for integrated devices or devices with pageable memory access and host page tables, else DISCRETE. Returns NR_GPU_NONE when the device is unavailable.
+/* nr_gpu_choose_model: selects the memory model (tier) from the probed capabilities, before the SHARED proof probe.
+ *   NONE (CPU tier) when the device is unavailable or lacks unified addressing or mapped host memory. SHARED candidate iff pageable memory access
+ *   and (integrated or host page tables): GB10 and ATS / C2C parts. HMM over PCIe (pageable, no host page tables) is correct but every access
+ *   crosses the bus, and an integrated GPU without pageable access cannot read caller memory: both are DISCRETE. Pure function.
  */
 nr_gpu_platform_model_t nr_gpu_choose_model(const nr_gpu_caps_t *c)
 {
-  if (!c || !c->available) return NR_GPU_NONE;
-  return c->integrated || (c->pageable_memory_access && c->host_page_tables) ? NR_GPU_SHARED : NR_GPU_DISCRETE;
+  if (!c || !c->available || !c->unified_addressing || !c->can_map_host_memory) return NR_GPU_NONE;
+  return c->pageable_memory_access && (c->integrated || c->host_page_tables) ? NR_GPU_SHARED : NR_GPU_DISCRETE;
+}
+/* nr_gpu_choose_reason: the rule behind nr_gpu_choose_model() for the GPU_PLATFORM log line:
+ *   no_device | no_uva | no_mapped | integrated | ats | hmm_pcie | no_pageable. Pure function. */
+const char *nr_gpu_choose_reason(const nr_gpu_caps_t *c)
+{
+  if (!c || !c->available) return "no_device";
+  if (!c->unified_addressing) return "no_uva";
+  if (!c->can_map_host_memory) return "no_mapped";
+  if (!c->pageable_memory_access) return "no_pageable";
+  return c->integrated ? "integrated" : c->host_page_tables ? "ats" : "hmm_pcie";
+}
+/* nr_gpu_platform_parse_force: parses an NR_GPU_FORCE_MODEL value: "discrete" -> NR_GPU_DISCRETE, "cpu" -> NR_GPU_NONE,
+ *   NULL or "" -> -1 (automatic), anything else -> -2 (unknown: the caller warns and stays automatic). Pure function. */
+int nr_gpu_platform_parse_force(const char *v)
+{
+  if (!v || !*v) return -1;
+  if (!strcmp(v, "discrete")) return NR_GPU_DISCRETE;
+  if (!strcmp(v, "cpu")) return NR_GPU_NONE;
+  return -2;
+}
+/* nr_gpu_platform_test_force_model: sets the diagnostic tier override (see nr_gpu_platform.h). Takes effect at the next probe (before the first
+ *   use, or after nr_gpu_test_reset() in the tests). Only DISCRETE and NONE force; anything else restores automatic selection. */
+void nr_gpu_platform_test_force_model(int model)
+{
+  pthread_mutex_lock(&mu);
+  force_hook = model == NR_GPU_DISCRETE || model == NR_GPU_NONE ? model : -1;
+  pthread_mutex_unlock(&mu);
 }
 /* nr_gpu_storage: maps a buffer kind (device, staging or shared read-write) to the allocation type for the model: device memory or mapped host memory.
- *   Only the SHARED model allocates; any other model returns NR_GPU_ALLOC_UNAVAILABLE. Used by nr_gpu_alloc().
+ *   SHARED and DISCRETE map identically (staging and small polled results are mapped pinned host memory on both; the bulk data path of the
+ *   DISCRETE tier is nr_gpu_buf_t). The CPU tier (NONE) returns NR_GPU_ALLOC_UNAVAILABLE. Used by nr_gpu_alloc().
  */
 nr_gpu_storage_t nr_gpu_storage(nr_gpu_platform_model_t model, nr_gpu_kind_t kind)
 {
-  if (model != NR_GPU_SHARED) return NR_GPU_ALLOC_UNAVAILABLE;
+  if (model != NR_GPU_SHARED && model != NR_GPU_DISCRETE) return NR_GPU_ALLOC_UNAVAILABLE;
   switch (kind) {
     case NR_GPU_DEVICE: return NR_GPU_ALLOC_DEVICE;
     case NR_GPU_STAGING: return NR_GPU_ALLOC_MAPPED;
@@ -69,16 +105,25 @@ nr_gpu_storage_t nr_gpu_storage(nr_gpu_platform_model_t model, nr_gpu_kind_t kin
   }
   return NR_GPU_ALLOC_UNAVAILABLE;
 }
-/* nr_gpu_platform_shared_direct: probes (idempotent) and returns 1 iff the model is SHARED with pageable memory access through the host page tables. */
+/* nr_gpu_platform_shared_direct: probes (idempotent) and returns 1 iff the tier is SHARED. SHARED implies pageable access (integrated or through
+ *   the host page tables) confirmed by the probe kernel, so it is the predicate for kernels reading caller memory in place. */
 int nr_gpu_platform_shared_direct(void)
 {
   const nr_gpu_caps_t *c = nr_gpu_platform_probe();
-  return c && c->model == NR_GPU_SHARED && c->pageable_memory_access && c->host_page_tables;
+  return c && c->model == NR_GPU_SHARED;
 }
-/* nr_gpu_platform_runtime: the resolved CUDA runtime entry points (valid after a successful probe, else NULL); used by nr_gpu_mem.c. */
+/* nr_gpu_platform_free_at_probe: free device memory (bytes) when the platform was probed; 0 without a device. */
+size_t nr_gpu_platform_free_at_probe(void)
+{
+  const nr_gpu_caps_t *c = nr_gpu_platform_probe();
+  return c && c->available ? c->free_memory : 0;
+}
+/* nr_gpu_platform_runtime: the resolved CUDA runtime entry points (valid after a successful probe on the SHARED or DISCRETE tier, else NULL:
+ *   the CPU tier hands out no CUDA); used by nr_gpu_mem.c. */
 const nr_gpu_runtime_t *nr_gpu_platform_runtime(void)
 {
-  return nr_gpu_platform_probe() && rt.malloc_host ? &rt : NULL;
+  const nr_gpu_caps_t *c = nr_gpu_platform_probe();
+  return c->model != NR_GPU_NONE && rt.malloc_host ? &rt : NULL;
 }
 /* nr_gpu_arch_compatible: true when a CUDA module built for the architecture list archs (for example "80,89-virtual") can run on the device with compute capability major.minor.
  *   A real (cubin) entry must match the major version and not exceed the device; a virtual (PTX) entry is forward compatible. Pure function. Caller: nr_gpu_module_check().
@@ -119,6 +164,7 @@ static int load_runtime(void)
   LOAD(copy_async,"cudaMemcpyAsync"); LOAD(stream_sync,"cudaStreamSynchronize"); LOAD(device_sync,"cudaDeviceSynchronize");
   LOAD(set_flags,"cudaSetDeviceFlags"); LOAD(get_last_error,"cudaGetLastError");
 #undef LOAD
+  *(void **)(&rt.memset_device)=dlsym(h,"cudaMemset"); /* optional */
   return 1; /* runtime remains resident for module lifetime */
 }
 /* attribute: reads one device attribute (cudaDeviceGetAttribute) and returns it, or 0 when the attribute is missing on this driver (the error is cleared). */
@@ -131,14 +177,82 @@ static int attribute(int attr)
   }
   return value;
 }
-/* probe_locked: probes the GPU once (caller holds mu): loads the runtime, selects device 0, reads its capabilities, chooses the memory model.
- *   Logs the device summary, a warning for DISCRETE (not implemented) and for an unusable shared model. Sets caps.available = 0 when the probe fails.
+/* The SHARED-access proof kernel (PTX, JIT-compiled by the driver for any device): one thread sums n u32 words of the buffer in place and
+ * stores the sum in the word after them. The buffer is plain malloc memory, so a pass proves that the device reads and writes caller memory. */
+static const char probe_ptx[] =
+  ".version 6.0\n.target sm_60\n.address_size 64\n"
+  ".visible .entry nr_gpu_probe(.param .u64 p_buf, .param .u32 p_n)\n{\n"
+  ".reg .pred q; .reg .b32 rn, ri, rv, rs; .reg .b64 rb, ra;\n"
+  "ld.param.u64 rb, [p_buf]; ld.param.u32 rn, [p_n];\n"
+  "cvta.to.global.u64 rb, rb;\n"
+  "mov.u32 rs, 0; mov.u32 ri, 0;\n"
+  "$L: setp.ge.u32 q, ri, rn; @q bra $D;\n"
+  "mul.wide.u32 ra, ri, 4; add.u64 ra, rb, ra; ld.global.u32 rv, [ra]; add.u32 rs, rs, rv; add.u32 ri, ri, 1; bra $L;\n"
+  "$D: mul.wide.u32 ra, rn, 4; add.u64 ra, rb, ra; st.global.u32 [ra], rs; ret;\n}\n";
+enum { PROBE_WORDS = 16384, PROBE_TIMEOUT_MS = 1000, CU_NOT_READY = 600 };
+/* nr_gpu_platform_run_probe: launches probe_ptx on the current context over a 64 KiB malloc buffer (libcuda driver API through dlopen, so this
+ *   library keeps no CUDA link) and verifies the checksum. Returns NR_GPU_PROBE_OK or NR_GPU_PROBE_FAIL (wrong sum, kernel error, 1 s timeout; a
+ *   timed-out buffer is leaked because the kernel may still run). NR_GPU_PROBE_SKIPPED when any tooling step is unavailable (missing libcuda or
+ *   symbol, no current context, PTX load error): the caller then trusts the device properties.
+ */
+int nr_gpu_platform_run_probe(void)
+{
+  typedef int (*fn_ctx)(void **);
+  typedef int (*fn_load)(void **, const void *);
+  typedef int (*fn_func)(void **, void *, const char *);
+  typedef int (*fn_launch)(void *, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, void *, void **, void **);
+  typedef int (*fn_screate)(void **, unsigned);
+  typedef int (*fn_stream)(void *);
+  int result = NR_GPU_PROBE_SKIPPED;
+  void *drv = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL), *ctx = NULL, *mod = NULL, *fn = NULL, *stream = NULL;
+  uint32_t *buf = NULL;
+  if (!drv) return result;
+  fn_ctx ctx_get = NULL; fn_load mod_load = NULL; fn_func mod_func = NULL; fn_launch launch = NULL;
+  fn_screate stream_create = NULL; fn_stream stream_query = NULL, stream_destroy = NULL, mod_unload = NULL;
+  *(void **)&ctx_get = dlsym(drv, "cuCtxGetCurrent"); *(void **)&mod_load = dlsym(drv, "cuModuleLoadData");
+  *(void **)&mod_func = dlsym(drv, "cuModuleGetFunction"); *(void **)&launch = dlsym(drv, "cuLaunchKernel");
+  *(void **)&stream_create = dlsym(drv, "cuStreamCreate"); *(void **)&stream_query = dlsym(drv, "cuStreamQuery");
+  *(void **)&stream_destroy = dlsym(drv, "cuStreamDestroy"); *(void **)&mod_unload = dlsym(drv, "cuModuleUnload");
+  if (!ctx_get || !mod_load || !mod_func || !launch || !stream_create || !stream_query || !stream_destroy || !mod_unload) goto out;
+  if (ctx_get(&ctx) || !ctx) goto out; /* the runtime's primary context is current on the probing thread */
+  if (mod_load(&mod, probe_ptx) || mod_func(&fn, mod, "nr_gpu_probe") || stream_create(&stream, 1)) goto out;
+  if (posix_memalign((void **)&buf, 4096, 4096 + PROBE_WORDS * 4)) goto out;
+  uint32_t sum = 0, n = PROBE_WORDS;
+  for (uint32_t i = 0; i < n; ++i) sum += buf[i] = 0x9e3779b9u * (i + 1);
+  buf[n] = 0;
+  void *args[] = {&buf, &n};
+  if (launch(fn, 1, 1, 1, 1, 1, 1, 0, stream, args, NULL)) { result = NR_GPU_PROBE_FAIL; goto out; }
+  int rc = CU_NOT_READY;
+  for (int ms = 0; ms < PROBE_TIMEOUT_MS && (rc = stream_query(stream)) == CU_NOT_READY; ++ms) usleep(1000);
+  if (rc == CU_NOT_READY) { buf = NULL; result = NR_GPU_PROBE_FAIL; goto out; } /* timeout: the kernel may still use buf */
+  result = !rc && buf[n] == sum ? NR_GPU_PROBE_OK : NR_GPU_PROBE_FAIL;
+out:
+  free(buf);
+  if (stream && result != NR_GPU_PROBE_FAIL) stream_destroy(stream);
+  if (mod && result != NR_GPU_PROBE_FAIL) mod_unload(mod);
+  dlclose(drv);
+  return result;
+}
+/* run_shared_probe: the proof used by probe_locked(): the real probe, or the injected one in the mocked tests (skipped by default there). */
+static int run_shared_probe(void)
+{
+#ifdef NR_GPU_PLATFORM_TEST
+  return probe_hook ? probe_hook() : NR_GPU_PROBE_SKIPPED;
+#else
+  return nr_gpu_platform_run_probe();
+#endif
+}
+/* probe_locked: probes the GPU once (caller holds mu): loads the runtime, selects device 0, reads its capabilities and picks the tier.
+ *   Tier rule: SHARED when the device proves direct host access (SHARED candidate by properties, then the probe kernel; a skipped probe trusts
+ *   the properties), else DISCRETE, else NONE (CPU). The diagnostic override (test hook, else NR_GPU_FORCE_MODEL=discrete|cpu) replaces the
+ *   decision and is logged as FORCED. Logs the device summary with tier, reason and probe state; sets caps.available = 0 when the probe fails.
  */
 static void probe_locked(void)
 {
   if (probed) return;
   probed=1;
-  int count=0;
+  int count=0, force=-1;
+  const char *force_env=NULL;
   if (!rt.get_count && !load_runtime()) goto finish;
   if (rt.get_count(&count) || !count || rt.get_device(&caps.device)) goto finish;
   /* Schedule flags before memory info creates a context; tolerate an existing context. */
@@ -164,13 +278,32 @@ static void probe_locked(void)
 #endif
 finish:
   caps.model=nr_gpu_choose_model(&caps);
-  report(0,"SENSING: GPU_PLATFORM device=%d name=\"%s\" cc=%d.%d integrated=%d pageableMemoryAccess=%d pageableMemoryAccessUsesHostPageTables=%d canMapHostMemory=%d concurrentManagedAccess=%d hostNativeAtomicSupported=%d total=%zu free=%zu model=%s",
+  caps.reason=nr_gpu_choose_reason(&caps);
+  caps.probe=NR_GPU_PROBE_SKIPPED;
+  force_env=getenv("NR_GPU_FORCE_MODEL");
+  force=force_hook>=0 ? force_hook : nr_gpu_platform_parse_force(force_env);
+  if (force==-2) {
+    report(1,"SENSING: GPU_PLATFORM NR_GPU_FORCE_MODEL=\"%s\" is not discrete|cpu; ignored (automatic tier)",force_env);
+    force=-1;
+  }
+  if (force>=0) {
+    /* Diagnostic override: never beyond what the device offers (no device stays CPU), never SHARED. */
+    caps.forced=force+1;
+    if (caps.model!=NR_GPU_NONE) { caps.model=(nr_gpu_platform_model_t)force; caps.reason="forced"; }
+  } else if (caps.model==NR_GPU_SHARED) {
+    caps.probe=run_shared_probe();
+    if (caps.probe==NR_GPU_PROBE_FAIL) { caps.model=NR_GPU_DISCRETE; caps.reason="probe_fail"; }
+  }
+  report(0,"SENSING: GPU_PLATFORM device=%d name=\"%s\" cc=%d.%d integrated=%d pageableMemoryAccess=%d pageableMemoryAccessUsesHostPageTables=%d canMapHostMemory=%d concurrentManagedAccess=%d hostNativeAtomicSupported=%d total=%zu free=%zu model=%s tier=%s reason=%s probe=%s%s%s",
          caps.device,caps.name,caps.major,caps.minor,caps.integrated,caps.pageable_memory_access,caps.host_page_tables,
          caps.can_map_host_memory,caps.concurrent_managed_access,caps.host_native_atomic_supported,caps.total_memory,caps.free_memory,
-         caps.model==NR_GPU_SHARED?"shared":caps.model==NR_GPU_DISCRETE?"discrete":"unavailable");
+         caps.model==NR_GPU_SHARED?"shared":caps.model==NR_GPU_DISCRETE?"discrete":"unavailable",
+         caps.model==NR_GPU_SHARED?"shared":caps.model==NR_GPU_DISCRETE?"discrete":"cpu",caps.reason,
+         caps.probe==NR_GPU_PROBE_OK?"ok":caps.probe==NR_GPU_PROBE_FAIL?"fail":"skipped",
+         caps.forced?" FORCED=":"",caps.forced?(caps.forced-1==NR_GPU_NONE?"cpu":"discrete"):"");
   if (caps.model==NR_GPU_DISCRETE)
-    report(1,"SENSING: GPU_PLATFORM DISCRETE backend is not implemented (phase 2); GPU paths use CPU fallback");
-  else if (caps.model!=NR_GPU_SHARED || !caps.can_map_host_memory || !caps.unified_addressing)
+    report(0,"SENSING: GPU_PLATFORM DISCRETE: device buffers + pinned staging + explicit copies");
+  else if (caps.model!=NR_GPU_SHARED)
     report(1,"SENSING: GPU_PLATFORM unavailable/invalid model or mapped-memory capability; CPU fallback");
 }
 /* nr_gpu_platform_probe: returns the GPU capabilities (probing on first use, under mu). Callers: nr_gpu_platform_ready(), nr_gpu_module_check() and the GPU module start-up code. */
@@ -178,13 +311,13 @@ const nr_gpu_caps_t *nr_gpu_platform_probe(void)
 {
   pthread_mutex_lock(&mu); probe_locked(); pthread_mutex_unlock(&mu); return &caps;
 }
-/* nr_gpu_platform_ready: true when a device is available with the SHARED model, mapped host memory and unified addressing: the condition for any GPU path to run.
+/* nr_gpu_platform_ready: true when a device is available on the SHARED or DISCRETE tier (not the CPU tier) with mapped host memory and unified addressing: the condition for any GPU path to run.
  *   Callers: nr_gpu_module_check(), nr_gpu_copy_async(), nr_gpu_sync(), nr_gpu_sync_all().
  */
 int nr_gpu_platform_ready(void)
 {
   const nr_gpu_caps_t *c=nr_gpu_platform_probe();
-  return c->available && c->model==NR_GPU_SHARED && c->can_map_host_memory && c->unified_addressing;
+  return c->available && c->model!=NR_GPU_NONE && c->can_map_host_memory && c->unified_addressing;
 }
 /* nr_gpu_module_check: checks that a GPU module built for `archs` can run on the device; logs a warning and returns 0 otherwise (the caller then uses the CPU path).
  *   Returns 0 when the platform itself is not ready. Callers: the GPU module wrappers (nr_gpu_module.c) and the tests.
@@ -289,7 +422,8 @@ int nr_gpu_free(void *ptr) { return release(ptr,0); }
 /* nr_gpu_unregister_host: unregisters a host buffer registered with nr_gpu_register_host(). Returns 0 on success, or an error code. */
 int nr_gpu_unregister_host(void *ptr) { return release(ptr,1); }
 /* nr_gpu_register_host: registers an existing host buffer as mapped and portable, and records its device pointer; a second registration of the same buffer returns 0 when the size matches.
- *   Denied after the seal. Returns 0, or an error code (GPU_NO_MEMORY, GPU_ERROR). Callers: GPU modules and tests.
+ *   Allowed on the SHARED and DISCRETE tiers (on DISCRETE for staging sources only, never as a kernel read path). Denied after the seal.
+ *   Returns 0, or an error code (GPU_NO_MEMORY, GPU_ERROR). Callers: GPU modules and tests.
  */
 int nr_gpu_register_host(void *ptr,size_t bytes)
 {
@@ -297,7 +431,7 @@ int nr_gpu_register_host(void *ptr,size_t bytes)
   int rc=GPU_ERROR;
   if (!allowed_locked()) { rc=GPU_NOT_READY; goto done; }
   probe_locked();
-  if (!ptr || !bytes || caps.model!=NR_GPU_SHARED || !caps.can_map_host_memory || !caps.unified_addressing) goto done;
+  if (!ptr || !bytes || caps.model==NR_GPU_NONE || !caps.can_map_host_memory || !caps.unified_addressing) goto done;
   allocation *a=lookup(ptr);
   if (a) { rc=a->registered && a->bytes==bytes ? 0 : GPU_ERROR; goto done; }
   a=calloc(1,sizeof(*a));
@@ -340,5 +474,8 @@ void nr_gpu_test_reset(const nr_gpu_runtime_t *runtime)
   while (live) { allocation *a=live; live=a->next; free(a); }
   rt=*runtime; memset(&caps,0,sizeof(caps));
   probed=sealed=warned_late=0; allocations=denied=0;
+  force_hook=-1; probe_hook=NULL;
 }
+/* nr_gpu_test_set_probe: test-only: injects the SHARED-access proof used at the next probe (NULL = skipped). */
+void nr_gpu_test_set_probe(int (*probe)(void)) { probe_hook=probe; }
 #endif
