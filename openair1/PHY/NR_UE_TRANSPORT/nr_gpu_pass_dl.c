@@ -8,6 +8,7 @@
 #include "nr_pdsch_gpu_ldpc.h"
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pdsch_cpu_route.h"
+#include "nr_pdsch_ldpc_cap.h"
 #include "nr_llr_norm.h"
 #include "nr_pdsch_evm_acc.h"
 #include "PHY/CODING/coding_defs.h"
@@ -487,7 +488,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   dlsch.rnti = in->rnti;
   dlsch.rnti_type = TYPE_C_RNTI_;
   dlsch.active = true;
-  dlsch.max_ldpc_iterations = 8;
+  dlsch.max_ldpc_iterations = (uint8_t)nr_pdsch_ldpc_cap();
   NR_DL_UE_HARQ_t harq = {0};
   harq.status = NR_ACTIVE;
   harq.first_rx = 1;
