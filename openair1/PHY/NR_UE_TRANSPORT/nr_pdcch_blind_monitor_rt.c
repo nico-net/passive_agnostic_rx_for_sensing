@@ -2,6 +2,8 @@
 #define _GNU_SOURCE /* T26c: CPU_SET / sched_getaffinity for the janon worker */
 #endif
 #include "common/utils/nr_bg_lane.h"
+#include "common/utils/nr_core_pool.h"
+#include "common/utils/nr_drop_queue.h"
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include "nr_pdsch_gpu_exact.h"
@@ -4288,6 +4290,68 @@ static void occasion_reconf_prologue(PHY_VARS_NR_UE *ue, long source_absolute_sl
   }
 }
 
+/* DISC worker: the discovered-CORESET bookkeeping (nr_pdcch_discovered_step_ex, discovered_poll, discovered_snapshot) is state-only work on
+ * the Phase-2 state machine. It runs on ONE low-priority thread that leases NR_POOL_DISC per job (none while idle), never on the scan
+ * consumer under its SCAN lease (core pool guarantee (c)). The scan thread enqueues {pci, carrier, token, slot, step?} into a bounded
+ * drop-oldest queue (never blocks, drops counted) and reads the dwell the worker last published, so a new/rejected dwell takes effect one job
+ * later (discovery latency only; the bank decode of discovered config is untouched). */
+typedef struct { uint64_t token, slot, enq_ns; uint32_t stamp; int pci, carrier_rb; uint8_t step, prescreen; } disc_job_t;
+static nr_dq_t g_disc_q = NR_DQ_INIT;
+static pthread_mutex_t g_disc_pub_mu = PTHREAD_MUTEX_INITIALIZER; /* leaf lock: never held with the Phase-2 lock or a pool token request */
+static struct { bool valid; uint64_t token; nr_pdcch_blind_monitor_cfg_t cfg; } g_disc_pub;
+static _Atomic uint64_t g_disc_drop_epoch, g_disc_jobs, g_disc_pending_poll;
+static pthread_once_t g_disc_once = PTHREAD_ONCE_INIT;
+static void *disc_worker(void *arg)
+{
+  (void)arg;
+  pthread_setname_np(pthread_self(), "pdcchDisc");
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
+  static __thread nr_pdcch_blind_monitor_cfg_t cfg;
+  for (;;) {
+    disc_job_t j;
+    nr_dq_pop(&g_disc_q, &j, sizeof(j));
+    atomic_store_explicit(&g_disc_pending_poll, 0, memory_order_relaxed); /* every job polls */
+    nr_pool_site_acquire(NR_POOL_DISC, 0, j.enq_ns);
+    NR_CFG_EPOCH_WORK(j.stamp, &g_disc_drop_epoch);
+    uint64_t token = 0;
+    nr_pdcch_blind_phase2_lock();
+    nr_pdcch_discovered_note_pci(j.pci); /* before the poll: ISAC_PDCCH_DISC_ENUM queues nID = PCI */
+    if (j.step) nr_pdcch_discovered_step_ex(j.token, j.slot, j.prescreen);
+    nr_pdcch_blind_monitor_discovered_poll();
+    const bool ok = nr_pdcch_discovered_snapshot(&cfg, &token, j.carrier_rb);
+    nr_pdcch_blind_phase2_unlock();
+    pthread_mutex_lock(&g_disc_pub_mu);
+    g_disc_pub.valid = ok;
+    if (ok) { g_disc_pub.cfg = cfg; g_disc_pub.token = token; }
+    pthread_mutex_unlock(&g_disc_pub_mu);
+    atomic_fetch_add_explicit(&g_disc_jobs, 1, memory_order_relaxed);
+    nr_pool_site_release();
+  }
+  return NULL;
+}
+static void disc_start(void)
+{
+  pthread_t th;
+  if (nr_core_plan_create(&th, NULL, disc_worker, NULL, -1) == 0) pthread_detach(th);
+}
+/* Scan side. A poll job is coalesced while one is still queued (idempotent); a step job is always queued. */
+static void disc_submit(const PHY_VARS_NR_UE *ue, bool step, uint64_t token, uint64_t slot, bool prescreen)
+{
+  pthread_once(&g_disc_once, disc_start);
+  if (!step && atomic_exchange_explicit(&g_disc_pending_poll, 1, memory_order_relaxed)) return;
+  disc_job_t j = {.token = token, .slot = slot, .enq_ns = nr_pool_now_ns(), .stamp = nr_cfg_epoch_work_stamp(),
+                  .pci = ue->frame_parms.Nid_cell, .carrier_rb = ue->frame_parms.N_RB_DL, .step = step, .prescreen = prescreen};
+  nr_dq_push(&g_disc_q, &j, sizeof(j));
+}
+static bool disc_published(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *token)
+{
+  pthread_mutex_lock(&g_disc_pub_mu);
+  const bool ok = g_disc_pub.valid;
+  if (ok) { *cfg = g_disc_pub.cfg; *token = g_disc_pub.token; }
+  pthread_mutex_unlock(&g_disc_pub_mu);
+  return ok;
+}
+
 /* run_discovered_occasion: runs one occasion of the discovered (dedicated) CORESET geometry: sets the discovery token and share, runs the pass under the Phase-2 lock and feeds the discovery step.
  *   Caller: nr_pdcch_blind_monitor_run_occasion() (the discovered dwell, in the three slot paths).
  */
@@ -4304,9 +4368,8 @@ static void run_discovered_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   nr_pdcch_blind_monitor_cfg_override(cfg);
   nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial, slot);
   nr_pdcch_blind_monitor_cfg_override(NULL);
-  nr_pdcch_blind_phase2_lock();
-  if (t_discovered_attempted) nr_pdcch_discovered_step_ex(token, t_discovered_slot, t_discovered_prescreen_passed);
-  nr_pdcch_blind_phase2_unlock();
+  if (t_discovered_attempted)
+    disc_submit(ue, true, token, t_discovered_slot, t_discovered_prescreen_passed);
   t_discovered_token = 0;
   t_candidate_share = 0;
 }
@@ -4399,11 +4462,8 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   uint64_t discovered_token = 0;
   bool discovered = false;
   if (additional) {
-    nr_pdcch_blind_phase2_lock();
-    nr_pdcch_discovered_note_pci(ue->frame_parms.Nid_cell); /* before the poll: ISAC_PDCCH_DISC_ENUM queues nID = PCI */
-    nr_pdcch_blind_monitor_discovered_poll();
-    discovered = nr_pdcch_discovered_snapshot(&discovered_cfg, &discovered_token, ue->frame_parms.N_RB_DL);
-    nr_pdcch_blind_phase2_unlock();
+    disc_submit(ue, false, 0, 0, false);
+    discovered = disc_published(&discovered_cfg, &discovered_token);
   }
   /* A slot admitted only for the dedicated CORESETs runs the banks + the discovered dwell. */
   if (proc != NULL
@@ -4570,6 +4630,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     const uint64_t disc_yield = disc_due ? s_disc_yield : ++s_disc_yield;
     nr_pdcch_blind_phase2_unlock();
     if (disc_due) {
+      nr_pool_site_note_scan_extra();
       nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
     } else if ((disc_yield % 20000) == 1) {
       LOG_A(PHY, "SENSING: discovery pass yielded to scan backlog: yielded=%llu ran=%llu\n",
@@ -4755,6 +4816,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * Every other pass (verified bank entries, the CORESET#0-USS cfg, the CSS0 snapshot, a manual config)
    * carries autodiscover=0, never enters that machine, and runs Phase 1 unlocked in parallel. */
   if (cfg->autodiscover) {
+    nr_pool_site_note_scan_extra();
     nr_pdcch_blind_phase2_lock();
     phase2.held = true;
   }
@@ -5551,10 +5613,12 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * dropped stretches the round-robin search's time-to-confirm by the same factor. Correctness over
    * cleverness: the body costs the csirs bucket below only while unconfirmed. */
   const uint64_t btim_t_csirs = btim_on ? btim_now() : 0;
-  if (!nr_csirs_disc_enabled())
+  if (!nr_csirs_disc_enabled()) {
+    nr_pool_site_note_scan_extra();
     nr_csirs_blind_rt_slot(ue, proc->nr_slot_rx,
                            source_absolute_slot >= 0 ? (uint32_t)source_absolute_slot : 0u,
                            rxdataF);
+  }
   btim_add(BTIM_CSIRS, btim_t_csirs);
 
   // ---- Demapping/deinterleaving + per-candidate unscrambling/decode. Mirrors dci_nr.c's own
@@ -5973,6 +6037,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
           jfc.known = here_known;
           jfc.n_known = nh;
         }
+        /* decode-gating (length sweeps, UL layout/grants, DM-RS filter, PDSCH solver): runs under the scan lease by design, not counted in nested */
         int found_len = janon_async
             ? nr_pdcch_dci_length_sweep_feed_budget(dl_state, janon_hit_scorer, &jfc, n_jhits > 0 ? n_jhits : 1,
                                                     dci_len_min(), dci_len_max(), 0, 0, 0)
@@ -7259,10 +7324,11 @@ constdiag_done:;
 
     int found_len = lane_len_ctx ? lane_len_ctx->found[0]
                                  : (lane_anonymous ? lane_bank->anonymous_found : 0);
-    if (found_len <= 0)
+    if (found_len <= 0) {
       found_len = nr_pdcch_dci_length_sweep_feed_budget(lane_state,
               nr_pdcch_autodiscover_length_scorer, lane_ctx, disc_n,
               dci_len_min(), dci_len_max(), lane_boot, 0, 0);
+    }
     uint16_t lane_locked_rnti = lane_boot;
     if (found_len > 0 && lane_anonymous) {
       lane_locked_rnti = nr_pdcch_dci_length_sweep_winner_rnti(lane_state, found_len);
@@ -8722,8 +8788,9 @@ constdiag_done:;
         nr_pdsch_solver_set_alt_scr(cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, sv_alt, sv_nalt,
                                     sv_did >= 0 && sv_did != fp->Nid_cell);
       int sv_kept = -1;
-      if (sv_nown > 0)
+      if (sv_nown > 0) {
         nrd = dmrs_scan_filter_readings(ue, proc, cfg, out.rnti, sv_own, sv_nown, rparsed, rd, nrd, &sv_kept);
+      }
       /* T26c: an unsolved RNTI is planned only with the probes the admission bucket can take NOW, so the search
        * cursor never advances over hypotheses that would be throttled untested */
       const int p_avail = rep < 0 ? pdsch_gate_admit(NULL, out.rnti, out.mcs, source_absolute_slot) : -1;

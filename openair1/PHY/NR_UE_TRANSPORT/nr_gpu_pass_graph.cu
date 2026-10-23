@@ -77,6 +77,7 @@ constexpr uint32_t LLR_CAP = 1500000;      /* LLRs of one pass: 273 PRB x 13 sym
 constexpr int PIL_STRIDE = 3328;           /* c16 per (DM-RS symbol, layer) pilot row */
 constexpr int ULW_LEN = 66368;             /* PUSCH pass, DISCRETE: c16 of IQ copied per antenna (14 symbols + one FFT window: 14 * (4096 + 352) + 4096) */
 static int SEG_ROWS = 512;                 /* chest rows of one pass: nd * nl * nrx * nseg_class (<= PASS_LS_ROWS of nr_pdsch_gpu_fep.cu); 1024 in split mode (32 segments) */
+static std::atomic<int> g_sized{1};       /* grant-sized work (FEP symbol set, LDPC padding blocks stop at entry): always 1 in the receiver; nr_gpu_pass_test_sized() switches it for the equality tests and the bench only */
 
 /* ---- device-accessible blocks ---- */
 struct PassBlk { /* written by the host before every replay */
@@ -364,6 +365,7 @@ struct Inst {
   size_t sig_n[2] = {};
   int sig_cur = 0;
   bool c_ok = false;
+  uint16_t fep_run = 0; /* symbols the last C of this instance transformed (grant-sized FEP): a held retry skips C only when its own set is inside */
   PassBlk *PB() const { return (PassBlk *)pb.host; }
   ResBlk *RB() const { return (ResBlk *)res.host; }
   const PassBlk *PBd() const { return (const PassBlk *)pb.dev; }
@@ -606,7 +608,7 @@ static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
   for (int s = 0; s < ncb; s++) {
     const uint32_t q = (uint32_t)s < nd ? (uint32_t)s : 0u;
     nr_gpu_ldpc_job_t &l = I.lj[s];
-    l.BG = j->BG; l.R = q < j->first_rE2 ? j->R : j->R2; l.Z = (uint16_t)j->Z; l.K = (uint16_t)j->K; l.it_max = j->it_max; l.llr = nullptr;
+    l.BG = j->BG; l.R = q < j->first_rE2 ? j->R : j->R2; l.Z = (uint16_t)j->Z; l.K = (uint16_t)j->K; l.it_max = j->it_max; l.llr = nullptr; l.pad = g_sized.load(std::memory_order_relaxed) && (uint32_t)s >= nd;
   }
   if (nr_pdsch_gpu_ldpc_pass_set(I.id, I.lj, ncb, &I.lin) != 0) return -2; /* an LDPC (BG, Z, R) the init did not build */
   return 0;
@@ -620,6 +622,8 @@ static int res_d2h(Inst &I, int ncb, cudaStream_t s)
 
 /* the host side of a pass: writes every block the kernels read. Used for the synthetic job (capture / warm replay) and for real grants. `cls` = the key the
  * graph structure comes from (the job must fit it). 0 or -1. */
+/* the symbols of the slot this job's FEP transforms (prepare: I.fj.run_mask); 0 = a job that did not size it (the synthetic job of a class, tests): all 14 */
+static inline uint16_t fep_need(const nr_gpu_pass_job_t *j) { return g_sized.load(std::memory_order_relaxed) && j->copy_mask ? (uint16_t)(j->copy_mask & 0x3fff) : (uint16_t)0x3fff; }
 static Key key_of(const nr_gpu_pass_job_t *j);
 static int c_groups_per_chunk(const Key &k);
 static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
@@ -633,7 +637,8 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
   const size_t rxstride = redirect ? j->rx_stride : (size_t)NSYM * N; /* c16 between antennas */
   /* FEP block */
   for (int a = 0; a < 4; a++) I.rx[a] = j->rxdata[a];
-  I.fj = {I.rx, j->ring_len, j->ring_offset, j->symbol_rot, 0x3fff, redirect ? (int16_t *)j->rxdataF : nullptr, redirect ? (uint32_t)j->rx_stride : 0u};
+  I.fj = {I.rx, j->ring_len, j->ring_offset, j->symbol_rot, 0x3fff, redirect ? (int16_t *)j->rxdataF : nullptr, redirect ? (uint32_t)j->rx_stride : 0u, 0};
+  I.fj.run_mask = fep_need(j); /* grant-sized: the captured grid stays 14 symbols, the blocks of the other symbols return at once */
   if (nr_pdsch_gpu_fep_stage_at(&I.fj, I.id) != 0) return -1;
   /* chest rows: one per (DM-RS symbol, layer, segment, antenna), the order of nr_pdsch_gpu_chest_grant (ns == 1: one segment = the grant). A class with several
    * segments estimates into scratch rows (the estimator writes a whole row) and k_seg_compose lays them out in data order. */
@@ -1273,6 +1278,7 @@ static int alloc_inst(int id)
 static int g_fp32 = 1;
 static int g_fp32_default() { return g_fp32; }
 extern "C" void nr_gpu_pass_test_fp32(int on) { g_fp32 = on; }
+extern "C" void nr_gpu_pass_test_sized(int on) { g_sized = on; }
 extern "C" int nr_gpu_pass_fp32_default(void) { return g_fp32_default(); }
 
 /* default warm set (max_classes): nrb 24/48/96/217 x nl 1..4, 2 DM-RS symbols, a typical padded block count, float */
@@ -1532,7 +1538,7 @@ static size_t c_sig(const nr_gpu_pass_job_t *j, const Key &k, uint8_t *o, size_t
   const int16_t *rxf = redirect ? j->rxdataF : nullptr;
   const uint32_t rst = redirect ? j->rx_stride : 0;
   put(&kc, sizeof(kc)); put(j->rxdata, sizeof(j->rxdata)); put(&j->ring_len, 4); put(&j->ring_offset, 4); put(&j->symbol_rot, sizeof(j->symbol_rot));
-  put(&rxf, sizeof(rxf)); put(&rst, 4); put(&j->copy_mask, sizeof(j->copy_mask)); /* review nit: the DISCRETE copy-back mask */
+  put(&rxf, sizeof(rxf)); put(&rst, 4); /* the FEP symbol set (copy_mask) is not part of it: skip_c checks it against the symbols C last transformed (Inst::fep_run) */
   put(&j->dmrs_type, 1); put(&j->nl, 4); put(&j->ndmrs, 4); put(&j->nrb, 4); put(&j->k0, 4); put(&j->nseg, 4); put(&j->seg_pil_nrb, 4);
   put(j->dmrs_sym, sizeof(int) * j->ndmrs); put(j->delta, sizeof(int) * j->nl);
   for (int s = 0; s < j->nseg; s++) { put(&j->seg[s].n_prb, 2); put(&j->seg[s].data_index, 2); put(&j->seg[s].pil_rb, 4); put(&j->seg[s].k0, 4); }
@@ -1606,11 +1612,12 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   size_t sig_n = SIG_CAP + 1;
   if (split && t_held == id) {
     sig_n = c_sig(j, k, I.sig[I.sig_cur ^ 1].data(), SIG_CAP);
-    skip_c = I.c_ok && sig_n <= SIG_CAP && sig_n == I.sig_n[I.sig_cur] && !memcmp(I.sig[I.sig_cur ^ 1].data(), I.sig[I.sig_cur].data(), sig_n);
+    skip_c = I.c_ok && sig_n <= SIG_CAP && sig_n == I.sig_n[I.sig_cur] && !memcmp(I.sig[I.sig_cur ^ 1].data(), I.sig[I.sig_cur].data(), sig_n) && !(fep_need(j) & ~I.fep_run);
     I.sig_cur ^= 1;
     I.sig_n[I.sig_cur] = sig_n;
   }
   I.c_ok = false; /* until this launch completes */
+  if (!skip_c) I.fep_run = fep_need(j);
   const uint64_t ts_l = nr_gpu_pass_now_ns();
   const auto t0 = std::chrono::steady_clock::now();
   cudaStream_t ls = j->probe && I.s_lo ? I.s_lo : I.s; /* a captured graph launches on either stream */

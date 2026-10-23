@@ -2,13 +2,15 @@
 #include "nr_csirs_disc_fp_internal.h"
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
+#include "../TOOLS/nr_gpu_chunk.h"
+#include "../TOOLS/nr_gpu_wait.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
 
-/* Dedicated nonblocking stream and blocking host completion: CUDA's default
- * spin-wait must not consume the single discovery CPU while kernels execute. */
+/* Dedicated nonblocking stream; the host completion is a sleeping poll (nr_gpu_wait.h): neither CUDA's default spin-wait (a whole core) nor an
+ * interrupt-based wait (it holds the real-time graphs' body launches) while kernels execute. */
 struct DiscoveryStream {
   cudaStream_t stream=nullptr;cudaEvent_t done=nullptr;
 /* init: creates the discovery CUDA stream (non-blocking) and its blocking-sync completion event; returns false when either creation fails.
@@ -17,7 +19,7 @@ struct DiscoveryStream {
   bool init() {
     if(stream && done) return true;
     return (nr_gpu_green_stream(&stream,0,false) || cudaStreamCreateWithFlags(&stream,cudaStreamNonBlocking)==cudaSuccess)
-        && cudaEventCreateWithFlags(&done,cudaEventBlockingSync|cudaEventDisableTiming)==cudaSuccess;
+        && cudaEventCreateWithFlags(&done,cudaEventDisableTiming)==cudaSuccess;
   }
 };
 static DiscoveryStream discovery_stream;
@@ -28,7 +30,7 @@ static cudaStream_t disc_stream() {return discovery_stream.stream;}
  */
 static cudaError_t disc_wait() {
   cudaError_t rc=cudaEventRecord(discovery_stream.done,disc_stream());
-  return rc==cudaSuccess?cudaEventSynchronize(discovery_stream.done):rc;
+  return rc==cudaSuccess?nr_gpu_wait_event(discovery_stream.done):rc;
 }
 /* disc_copy: asynchronous memcpy on the discovery stream followed by disc_wait(); returns the CUDA status of the copy. */
 static cudaError_t disc_copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
@@ -39,15 +41,24 @@ static cudaError_t disc_copy(void *dst,const void *src,size_t n,cudaMemcpyKind k
 }
 /* disc_zero: asynchronous memset of n bytes on the discovery stream (no wait); the caller waits before reading the result. */
 static cudaError_t disc_zero(void *dst,int value,size_t n) {return cudaMemsetAsync(dst,value,n,disc_stream());}
+/* disc_chunks: runs a kernel over `blocks` blocks in chunks of about 1 ms with the stream drained in between (nr_gpu_chunk.h): a long discovery kernel would hold
+ *   the device-side body launch of the real-time pass graphs. launch(first,n) enqueues blocks [first,first+n) (the kernel adds `first` to blockIdx.x). The blocks are independent, so the result is unchanged. */
+template<class L> static cudaError_t disc_chunks(NrGpuChunker &c,long blocks,L launch)
+{
+  cudaError_t err=cudaSuccess;
+  static thread_local NrGpuSpan span; /* GPU run time of the chunk, not its host time (nr_gpu_chunk.h) */
+  int rc=nr_gpu_chunked(c,blocks,[&](long f,long n){span.begin(disc_stream());launch(f,n);span.end(disc_stream());err=cudaGetLastError();return (int)err;},[&](){err=disc_wait();return (int)err;},[&](){return span.us();});
+  return rc?err:cudaSuccess;
+}
 
 /* normalize: GPU kernel: per (slot, RB, symbol) thread, normalises the 12 RE powers against the mean of the lowest third (excluded REs skipped), in the same integer arithmetic as the CPU.
  *   Output x holds 4096 x power / reference (capped at 8192) per RE, and invalid slots are skipped. Launched by footprints(), normalize_host(), accumulate_host() and prepare_host().
  */
 __global__ static void normalize(const int16_t *grid,const nr_csirs_disc_slot_meta_t *meta,
                                  size_t stride,int nt,int na,int nb,uint16_t symbols,
-                                 const uint8_t *exclude,uint32_t *x,int tiles,int rbfast)
+                                 const uint8_t *exclude,uint32_t *x,int tiles,int rbfast,int bx0=0)
 {
-  int id=blockIdx.x*blockDim.x+threadIdx.x;
+  int id=(blockIdx.x+bx0)*blockDim.x+threadIdx.x;
   if(id>=nt*nb*14) return;
   /* DECTAIL: rbfast=1 makes adjacent threads adjacent RBs (contiguous 48-byte runs) instead of adjacent symbols (10 KB apart);
    * every thread is independent and writes the same x index, so the result is bit-identical. */
@@ -84,9 +95,9 @@ __global__ static void normalize(const int16_t *grid,const nr_csirs_disc_slot_me
 /* pool: GPU kernel: averages the normalised values over each tile of 16 RBs (168 values per tile per slot) into the pooled area of x.
  *   Launched after normalize() by footprints(), normalize_host(), accumulate_host() and prepare_host().
  */
-__global__ static void pool(uint32_t *x,int nt,int nb,int tiles)
+__global__ static void pool(uint32_t *x,int nt,int nb,int tiles,int bx0=0)
 {
-  int id=blockIdx.x*blockDim.x+threadIdx.x;
+  int id=(blockIdx.x+bx0)*blockDim.x+threadIdx.x;
   if(id>=nt*168*tiles) return;
   int sc=id%12,l=(id/12)%14,tile=(id/168)%tiles,t=id/(168*tiles),nk=12*nb,nr=14*nk+168*tiles;
   int first=tiles==1?0:tile*16,end=tiles==1?nb:min(nb,first+16);
@@ -320,9 +331,10 @@ __device__ static short2 multiply(short2 x,short2 y,int shift,bool saturate)
  *   The ramp is built once per block (128 values) with the Q14 LUT; the saturating rotation follows the CPU rotate_cpx_vector. Launched by fep_host() and prepare_host().
  */
 __global__ static void fep_unpack(nr_csirs_disc_fep_cfg_t cfg,const nr_csirs_disc_fep_slot_t *slots,
-                                  cufftComplex *work)
+                                  cufftComplex *work,int bx0=0)
 {
-  int t=blockIdx.x/14,l=blockIdx.x%14,lane=threadIdx.x;
+  const int bx=blockIdx.x+bx0;
+  int t=bx/14,l=bx%14,lane=threadIdx.x;
   const auto &s=slots[t];
   __shared__ short2 ramp[128],step;
   if(lane==0 && s.compensate) {
@@ -361,9 +373,9 @@ __device__ static short2 symbol_rotate(short2 x,short2 a,int mode)
  *   Writes slot (first + t) mod capacity of the ring. Launched by fep_host() and prepare_host().
  */
 __global__ static void fep_extract(nr_csirs_disc_fep_cfg_t cfg,const nr_csirs_disc_fep_slot_t *slots,
-                                   const cufftComplex *work,short2 *grid,int n,int capacity,int first)
+                                   const cufftComplex *work,short2 *grid,int n,int capacity,int first,int bx0=0)
 {
-  size_t id=(size_t)blockIdx.x*blockDim.x+threadIdx.x;
+  size_t id=(size_t)(blockIdx.x+bx0)*blockDim.x+threadIdx.x;
   int nk=12*cfg.n_rb;
   size_t stride=(size_t)cfg.n_ant*14*nk;
   if(id>=(size_t)n*stride) return;
@@ -456,15 +468,16 @@ static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slo
   size_t active=(size_t)n*c->n_ant*14*c->fft;
   if(active<count && disc_zero(work.p+active,0,(count-active)*sizeof(cufftComplex))!=cudaSuccess) return -1;
   nr_csirs_disc_fep_cfg_t cfg=*c;cfg.timeshift=(int16_t *)shift.p;
-  fep_unpack<<<n*14,128,0,disc_stream()>>>(cfg,desc.p,work.p);
-  if(cudaGetLastError()!=cudaSuccess || cufftExecC2C(n==1?fep_workspace.single_plan:plan,work.p,work.p,CUFFT_FORWARD)!=CUFFT_SUCCESS) {
+  static NrGpuChunker c_unpack{1,0,"c_unpack"}; static NrGpuChunker c_extract{1,0,"c_extract"};
+  if(disc_chunks(c_unpack,(long)n*14,[&](long f,long k){fep_unpack<<<k,128,0,disc_stream()>>>(cfg,desc.p,work.p,(int)f);})!=cudaSuccess) return -1;
+  if(cufftExecC2C(n==1?fep_workspace.single_plan:plan,work.p,work.p,CUFFT_FORWARD)!=CUFFT_SUCCESS) { /* the FFT of one batch is not chunked (cuFFT plan batch): about 0.7-5 ms [MEASURED gsV2N] */
     disc_wait();return -1;
   }
   size_t out=(size_t)n*c->n_ant*14*12*c->n_rb;
-  fep_extract<<<(out+255)/256,256,0,disc_stream()>>>(cfg,desc.p,work.p,(short2 *)(ring->device_grid?ring->device_grid:ring->grid_base),n,ring->capacity,first);
+  short2 *dst=(short2 *)(ring->device_grid?ring->device_grid:ring->grid_base);
+  cudaError_t rc=disc_chunks(c_extract,(long)((out+255)/256),[&](long f,long k){fep_extract<<<k,256,0,disc_stream()>>>(cfg,desc.p,work.p,dst,n,ring->capacity,first,(int)f);});
   ring->device_valid=ring->device_grid!=nullptr;
-  cudaError_t launch=cudaGetLastError(),complete=disc_wait();
-  return launch==cudaSuccess && complete==cudaSuccess?0:-1;
+  return rc==cudaSuccess?0:-1;
 }
 
 /* accumulate_kernel: GPU kernel: adds the normalised values of a batch into the cumulative history (period-640 sums, 80- and 64-residue sums, totals and pooled squares), one thread per statistic.
@@ -472,9 +485,9 @@ static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slo
  */
 __global__ static void accumulate_kernel(const uint32_t *x,const nr_csirs_disc_slot_meta_t *meta,
                                          int nt,int nr,int pooled,uint64_t *sum,uint64_t *sq,
-                                         uint64_t *s80,uint64_t *s64,uint64_t *total,uint64_t *totalq)
+                                         uint64_t *s80,uint64_t *s64,uint64_t *total,uint64_t *totalq,int bx0=0)
 {
-  int j=blockIdx.x*blockDim.x+threadIdx.x;if(j>=nr) return;
+  int j=(blockIdx.x+bx0)*blockDim.x+threadIdx.x;if(j>=nr) return;
   uint64_t st=total[j],qt=totalq[j];
   for(int t=0;t<nt;++t) if(meta[t].valid) {
     int residue=meta[t].abs_slot%640;uint64_t v=x[(size_t)t*nr+j],q=v*v;
@@ -516,9 +529,9 @@ static int accumulate_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_
 
 /* lattice_pool: GPU kernel: pools the pooled-tile statistics of the history per period residue class (period p) for the lattice screen. */
 __global__ static void lattice_pool(int p,int nr,int pooled,const uint64_t *sum,const uint64_t *sq,
-                                    uint64_t *ps,uint64_t *pq)
+                                    uint64_t *ps,uint64_t *pq,int bx0=0)
 {
-  int id=blockIdx.x*blockDim.x+threadIdx.x;if(id>=p*pooled) return;
+  int id=(blockIdx.x+bx0)*blockDim.x+threadIdx.x;if(id>=p*pooled) return;
   int o=id/pooled,j=id%pooled;uint64_t s=0,q=0;
   for(int residue=o;residue<640;residue+=p) {s+=sum[(size_t)residue*nr+nr-pooled+j];q+=sq[(size_t)residue*pooled+j];}
   ps[id]=s;pq[id]=q;
@@ -528,9 +541,9 @@ __global__ static void lattice_pool(int p,int nr,int pooled,const uint64_t *sum,
  */
 __global__ static void lattice_screen(int p,int tiles,uint64_t nt,const uint64_t *counts,
                                       const uint64_t *ps,const uint64_t *pq,const uint64_t *total,
-                                      const uint64_t *totalq,uint16_t *masks)
+                                      const uint64_t *totalq,uint16_t *masks,int bx0=0)
 {
-  int id=blockIdx.x*blockDim.x+threadIdx.x;if(id>=p*14) return;
+  int id=(blockIdx.x+bx0)*blockDim.x+threadIdx.x;if(id>=p*14) return;
   int o=id/14,l=id%14,pooled=168*tiles;
   uint64_t on=counts[o],off=nt-on;if(on<3 || off<3) return;
   double ion=1.0/on/4096.,ioff=1.0/off/4096.;
@@ -649,7 +662,6 @@ static void lmem_prereserve(void)
   done=true;
   size_t need=0,cur=0;cudaFuncAttributes fa;
   if(cudaFuncGetAttributes(&fa,resident::segment)==cudaSuccess) need=std::max(need,fa.localSizeBytes);
-  if(cudaFuncGetAttributes(&fa,resident::finish)==cudaSuccess) need=std::max(need,fa.localSizeBytes);
   if(cudaDeviceGetLimit(&cur,cudaLimitStackSize)!=cudaSuccess) return;
   const cudaError_t r=need>cur?cudaDeviceSetLimit(cudaLimitStackSize,need):cudaSuccess;
   fprintf(stderr,"[GPU] lmem prereserve: per-thread local memory %zu -> %zu bytes (%s)\n",cur,std::max(cur,need),cudaGetErrorString(r));

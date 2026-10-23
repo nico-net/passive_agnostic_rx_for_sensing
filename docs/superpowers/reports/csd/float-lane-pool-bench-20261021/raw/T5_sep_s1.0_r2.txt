@@ -1,0 +1,14 @@
+POOL+FLOAT-SEP N=4 first_core=0 scale=1.00  busy_cores=2.95 disc_chunks/s=1412 yields=7125 nested=0
+  scan   n=40000  wait_us p50=      8 p99=     100 max=   27079 | lat_us p50=    244 p99=     379 max=   28848 | svc_p50=  233 miss=215/40000 drop=0
+  dl     n=47979  wait_us p50=    116 p99=    1919 max=   32344 | lat_us p50=    778 p99=    2563 max=   33002 | svc_p50=  612 miss=851/47979 drop=0
+  ul     n=15916  wait_us p50=    162 p99=    1285 max=   25152 | lat_us p50=    581 p99=    1705 max=   26164 | svc_p50=  410 miss=91/15916 drop=0
+  retry  n=3979   wait_us p50=   1569 p99=   16007 max=   46756 | lat_us p50=   3147 p99=   17844 max=   48399 | svc_p50= 1513 miss=164/3979 drop=0
+  F janon     duty_target=0.30 duty_got=0.20 jobs=1960 start_wait_us p50=0 p99=0 max=0 | done_us p50=2000 p99=13079 max=15863 (job 2.0 ms)
+  F nidgpu    duty_target=0.30 duty_got=0.20 jobs=1352 start_wait_us p50=0 p99=0 max=0 | done_us p50=3000 p99=18500 max=22290 (job 3.0 ms)
+  F uss       duty_target=0.25 duty_got=0.15 jobs=2941 start_wait_us p50=0 p99=0 max=0 | done_us p50=1000 p99=6685 max=10525 (job 1.0 ms)
+  F dmrsScan  duty_target=0.15 duty_got=0.12 jobs=1171 start_wait_us p50=0 p99=0 max=0 | done_us p50=2000 p99=9730 max=15239 (job 2.0 ms)
+  F dmrsIdBg  duty_target=0.30 duty_got=0.16 jobs=3293 start_wait_us p50=0 p99=0 max=0 | done_us p50=1000 p99=7138 max=11592 (job 1.0 ms)
+  F csirsDisc duty_target=0.05 duty_got=0.04 jobs=1639 start_wait_us p50=0 p99=0 max=0 | done_us p50=500 p99=1799 max=9609 (job 0.5 ms)
+  F ulBgDisc  duty_target=0.45 duty_got=0.32 jobs=43 start_wait_us p50=0 p99=0 max=0 | done_us p50=291631 p99=355041 max=355041 (job 150.0 ms)
+  F ulNidBg   duty_target=0.03 duty_got=0.03 jobs=271 start_wait_us p50=0 p99=0 max=0 | done_us p50=2000 p99=8947 max=11796 (job 2.0 ms)
+  SENSING: CORE_POOL n=4 yields=7125 gpu_gives=0 nested=0 enforced=0 scan[n=40000 waited=232 promo=0 wait_us p50<=1 p99<=1 max=551] decode[n=63895 waited=41232 promo=0 wait_us p50<=128 p99<=1024 max=19007] retry[n=3979 waited=3878 promo=134 wait_us p50<=1024 p99<=4096 max=4336] disc[n=12772 waited=11934 promo=24 wait_us p50<=2048 p99<=16384 max=21775] house[n=0 waited=0 promo=0 wait_us p50<=0 p99<=0 max=0]

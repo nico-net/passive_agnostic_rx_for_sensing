@@ -1,0 +1,46 @@
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=51 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=51 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1 waited_ms=52 free=0 held scan=0 decode=1(dl 1) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1 waited_ms=52 free=0 held scan=0 decode=1(dl 1) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1 waited_ms=57 free=0 held scan=0 decode=1(dl 1) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1 waited_ms=61 free=0 held scan=0 decode=1(dl 1) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=141 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=143 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=56 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=62 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=82 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=51 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=53 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1 waited_ms=69 free=0 held scan=0 decode=1(dl 1) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1 waited_ms=55 free=0 held scan=0 decode=1(dl 1) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1 waited_ms=59 free=0 held scan=0 decode=1(dl 1) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=52 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1 waited_ms=66 free=0 held scan=0 decode=1(dl 1) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1 waited_ms=65 free=0 held scan=0 decode=1(dl 1) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=59 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=59 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1 waited_ms=51 free=0 held scan=0 decode=1(dl 1) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1 waited_ms=51 free=0 held scan=0 decode=1(dl 1) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1 waited_ms=51 free=0 held scan=0 decode=1(dl 1) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=93 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=92 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=69 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=75 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=69 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=71 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=72 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=57 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=97 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=52 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=60 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=60 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=51 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=69 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1(ul) waited_ms=144 free=0 held scan=0 decode=1(dl 0) retry=0 disc=0 house=0
+SENSING: CORE_POOL long wait class=1 waited_ms=158 free=0 held scan=0 decode=1(dl 1) retry=0 disc=0 house=0
+POOL N=1 first_core=0 scale=1.00  busy_cores=0.91 disc_chunks/s=81 yields=1208 nested=0
+  scan   n=30000  wait_us p50=    927 p99=    7264 max=   24805 | lat_us p50=   1202 p99=    7554 max=   25136 | svc_p50=  270 miss=27401/30000 drop=0
+  dl     n=2934   wait_us p50=7324845 p99=13944105 max=13962796 | lat_us p50=7325388 p99=13944706 max=13963469 | svc_p50=  643 miss=36020/36021 drop=33087
+  ul     n=988    wait_us p50=7855933 p99=13944067 max=13961961 | lat_us p50=7856382 p99=13944474 max=13962351 | svc_p50=  446 miss=11889/11889 drop=10901
+  retry  n=2591   wait_us p50=1042486 p99= 2189039 max= 2218150 | lat_us p50=1043904 p99= 2190575 max= 2219908 | svc_p50= 1561 miss=2974/2984 drop=393
+  SENSING: CORE_POOL n=1 yields=1208 gpu_gives=0 nested=0 enforced=0 scan[n=30000 waited=29961 promo=0 wait_us p50<=256 p99<=4096 max=23729] decode[n=3922 waited=3922 promo=0 wait_us p50<=32768 p99<=131072 max=169723] retry[n=2591 waited=2591 promo=2591 wait_us p50<=8192 p99<=8192 max=22419] disc[n=1450 waited=1449 promo=1449 wait_us p50<=32768 p99<=32768 max=38493] house[n=0 waited=0 promo=0 wait_us p50<=0 p99<=0 max=0]

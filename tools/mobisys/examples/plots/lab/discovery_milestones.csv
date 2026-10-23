@@ -1,0 +1,10 @@
+milestone,t_s
+sync_start,0.0
+sync_ok,1.3
+pbch_ok,1.5
+sib1_decoded,2.4
+coreset_verified,3.2
+first_dci,3.518
+dci_len_locked,4.0
+td_converged,4.8
+first_crc_ok,5.008

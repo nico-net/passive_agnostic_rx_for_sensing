@@ -99,6 +99,7 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
 #include <sched.h>
 #include <sys/prctl.h>
 #include "nr_spin_handoff.h"
+#include "common/utils/nr_core_pool.h"
 #include "nr_early_start.h"
 #include <sys/resource.h> /* FATTAILS DECSLOW: getrusage(RUSAGE_THREAD) */
 
@@ -1166,6 +1167,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_passive_set_owned_iq(NULL, -1);
     const bool owned = nr_csirs_disc_enabled();
 
+    nr_pool_site_release(); /* core pool: a lease never outlives one iteration */
+    nr_pool_site_enforce_tick();
     pthread_mutex_lock(&g_lock);
     g_idle++;
     while (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) == 0) {
@@ -1177,7 +1180,14 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (act == NR_SPIN_SPIN) {
         g_idle--; /* spinning is not idle for the slot-spread accounting */
         pthread_mutex_unlock(&g_lock);
-        nr_spin_run(&g_spin_pred, &spin_acct, &g_count, until);
+        /* the spin burns a core: with the pool it must be one this thread owns, and only if one is free */
+        if (!nr_pool_site() || nr_pool_site_try_acquire(NR_POOL_DECODE, 0, 0) >= 0) {
+          if (!nr_spin_run(&g_spin_pred, &spin_acct, &g_count, until)) nr_pool_site_release();
+        } else {
+          atomic_store_explicit(&g_spin_pred.claim, 0, memory_order_release);
+          struct timespec nap = {0, 20000};
+          nanosleep(&nap, NULL);
+        }
         pthread_mutex_lock(&g_lock);
         g_idle++;
         continue;
@@ -1185,17 +1195,20 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (act == NR_SPIN_SLEEP && until - nr_spin_now_ns() < 20ull * 1000 * 1000) {
         ts.tv_sec = (time_t)(until / 1000000000ull);
         ts.tv_nsec = (long)(until % 1000000000ull);
+        nr_pool_site_release();
         pthread_cond_timedwait(&g_cv, &g_lock, &ts);
         nr_spin_note_wake(&spin_acct, until, nr_spin_now_ns());
         continue;
       }
       ts.tv_nsec += 20 * 1000 * 1000; // 20 ms
       if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+      nr_pool_site_release();
       pthread_cond_timedwait(&g_cv, &g_lock, &ts);
     }
     g_idle--;
     if (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) != 0) {
       pthread_mutex_unlock(&g_lock);
+      nr_pool_site_release(); /* a spin-hit lease must not outlive the thread */
       break;
     }
     job    = g_ring[g_tail];
@@ -1232,7 +1245,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         cost[k] = (uint64_t)all[k].freq_alloc.num_rbs * all[k].dlsch_pdu.number_symbols * (all[k].dlsch_pdu.cw_info[0].qamModOrder ? all[k].dlsch_pdu.cw_info[0].qamModOrder : 1) * (ly ? ly : 1);
       }
       nr_slot_spread_order(cost, n_all, ord);
-      const int give = nr_slot_spread_give(n_all, g_idle);
+      /* idle consumers are threads, not cores: with the pool a spread job can only run when a token is free */
+      const int tok_free = nr_pool_site_free();
+      const int give = nr_slot_spread_give(n_all, tok_free >= 0 && tok_free < g_idle ? tok_free : g_idle);
       const int keep = n_all - give;
       for (int k = keep; k < n_all; k++) { /* cheapest of the given first, so the dearest ends at the front */
         g_tail = (g_tail + g_depth - 1) % g_depth;
@@ -1248,11 +1263,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (give > 0) pthread_cond_broadcast(&g_cv);
     }
     pthread_mutex_unlock(&g_lock);
-    if (job.slot_gate && !nr_slot_gate_wait(&nr_slot_gate, job.absolute_slot, 50)) { /* the slot never completed (stream fault): drop, never decode half a slot */
-      release_solver(&job);
-      for (int k = 0; k < n_more; ++k) release_solver(&more[k]);
-      continue;
+    if (job.slot_gate) {
+      nr_pool_site_release(); /* a spin-hit lease must not span the wait for the slot */
+      if (!nr_slot_gate_wait(&nr_slot_gate, job.absolute_slot, 50)) { /* the slot never completed (stream fault): drop, never decode half a slot */
+        release_solver(&job);
+        for (int k = 0; k < n_more; ++k) release_solver(&more[k]);
+        continue;
+      }
     }
+    /* core pool: first-pass decode class, oldest slot first; after the slot gate so a wait for the slot to complete holds no core */
+    nr_pool_site_acquire(NR_POOL_DECODE, 0, nr_passive_slot_arrival_ns(job.absolute_slot));
     const uint64_t taken_ns = nr_passive_e2e_trace() ? now_ns() : 0; /* SYSAN e2e: dequeue time */
     nr_ss_ns[NRSS_WQ] = 0;
     if (owned) {
@@ -1325,11 +1345,14 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
      * slot further out, so its bound grows by one slot duration per slot beyond k0 = 1; k0 <= 1 is
      * unchanged. */
     const int wait_max = 30 + (job.sweep_ticket.k0 > 1 ? (int)(job.sweep_ticket.k0 - 1) * (int)(100 / slots_per_frame) : 0);
+    const bool producer_wait = prod < job.absolute_slot;
+    if (producer_wait) nr_pool_site_release(); /* no core held across the wait for the producer */
     for (int w = 0; w < wait_max && prod < job.absolute_slot; w++) {
       struct timespec ts = {0, 100000};
       nanosleep(&ts, NULL);
       prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
     }
+    if (producer_wait) nr_pool_site_acquire(NR_POOL_DECODE, 0, nr_passive_slot_arrival_ns(job.absolute_slot));
     if (!nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame)) {
       const int count = owned ? n_more + 1 : 1;
       atomic_fetch_add_explicit(&g_dropped_stale, count, memory_order_relaxed);
@@ -2314,7 +2337,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
         cl = (*end == ',') ? end + 1 : end;
       }
     }
-    threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name, core, 40);
+    threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name, nr_pool_site() ? -1 : core, nr_pool_site() ? 0 : 40);
   }
   if (nr_pdsch_recovery_enabled() && nr_csirs_disc_enabled()) { /* needs the owned IQ (snapshot hand-off) */
     g_rsnap_n = 8; /* snapshot holders, one set of ring-sized IQ buffers each */

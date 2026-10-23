@@ -1,0 +1,31 @@
+{
+ "clock_offset_real_minus_mono_ns": 1792527744339684784,
+ "datasets": {
+  "discovery_summary": 2,
+  "system_telemetry": 11
+ },
+ "duration_s": 106.444,
+ "format": "parquet",
+ "host_label": "cloud x86",
+ "input": "stdin",
+ "k": 10,
+ "mode": "commercial",
+ "provenance": "live",
+ "pyarrow": "26.0.0",
+ "python": "3.13.16",
+ "rotate_rows": 50000,
+ "rows_written": 116,
+ "schema": "mobisys-telemetry/1",
+ "slots_per_frame": 20,
+ "started_unix": 1792532241.986,
+ "telemetry_loss": {
+  "k_suppressed_events": 0,
+  "k_suppressed_rows": 0,
+  "parse_errors": 0,
+  "policy_refused_fields": 0,
+  "policy_refused_rows": 0,
+  "queue_drops": {},
+  "queue_drops_total": 0
+ },
+ "window_s": 60
+}

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include <gtest/gtest.h>
+#include <new>
 #include <vector>
 #include <cmath>
 #include "nr_srs_blind.h"
@@ -7,11 +8,21 @@
 #include "PHY/NR_UE_ISAC/nr_isac_ssb_axis.h"
 extern "C" void srs_test_init(void);
 extern "C" bool srs_test_generate(const nr_srs_grid_t *,const nr_srs_candidate_t *,int16_t *);
+// x86 AVX2 dft() requires 32 B aligned output; the SRS FEP writes straight into iq
+template <class T> struct Align32 {
+  using value_type = T;
+  Align32() = default;
+  template <class U> Align32(const Align32<U> &) {}
+  T *allocate(size_t n) { return static_cast<T *>(::operator new(n * sizeof(T), std::align_val_t(32))); }
+  void deallocate(T *p, size_t) { ::operator delete(p, std::align_val_t(32)); }
+  template <class U> bool operator==(const Align32<U> &) const { return true; }
+  template <class U> bool operator!=(const Align32<U> &) const { return false; }
+};
 class SrsBlind : public testing::Test {
 protected:
   nr_srs_grid_t g{512,356,24,4,14,20};
   nr_srs_candidate_t truth{2,0,12,2,4,8,17,3};
-  std::vector<int16_t> iq;
+  std::vector<int16_t, Align32<int16_t>> iq;
   nr_srs_blind_t *s=nullptr;
   static void SetUpTestSuite() { srs_test_init(); }
   void SetUp() override { iq.resize(4*14*512*2); s=nr_srs_blind_create(&g); ASSERT_NE(s,nullptr); }

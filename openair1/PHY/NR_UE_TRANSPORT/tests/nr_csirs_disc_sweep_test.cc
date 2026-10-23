@@ -2,6 +2,7 @@
 #include "nr_csirs_disc.h"
 #include "nr_csirs_disc_sweep_internal.h"
 #include "nr_csirs_disc_gate_internal.h"
+#include "../../TOOLS/nr_gpu_chunk.h"
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <chrono>
@@ -686,4 +687,88 @@ TEST(CsirsDiscSweep, GpuRefinementAndConfirmation)
 #else
   GTEST_SKIP()<<"CPU build; CUDA comparison available in build_gpu";
 #endif
+}
+
+/* nr_gpu_chunk.h: every unit runs exactly once and in order, no chunk is much longer than the target, and the chunk size follows the cost per unit. */
+TEST(GpuChunk, CoversEveryUnitOnceInOrderAndBoundsChunkTime)
+{
+  for (uint64_t cost : {5, 100, 700, 5000}) { /* us per unit */
+    NrGpuChunker c;
+    uint64_t clock = 0, worst = 0, ran = 0;
+    long next = 0;
+    const long total = std::min<long>(3000, 30000 / (long)cost); /* at most 30 ms of work: more is the fail-safe's business (below) */
+    int rc = nr_gpu_chunked(c, total,
+        [&](long f, long n) { EXPECT_EQ(f, next); next = f + n; clock += n * cost; worst = std::max(worst, (uint64_t)n * cost); ran += n; return 0; },
+        [&]() { clock += 50; return 0; }, [] {}, [&] { return clock; });
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(ran, (uint64_t)total) << cost;
+    /* no chunk exceeds 1.5 targets (+ two units) or the minimum chunk (serial cost model here; on the GPU the min units run in parallel) */
+    EXPECT_LE(worst, std::max<uint64_t>(NR_GPU_CHUNK_TARGET_US * 3 / 2, c.min * cost) + 2 * cost) << cost;
+    if (cost <= 100) { EXPECT_GT(c.per, 1); }
+  }
+  NrGpuChunker c;
+  EXPECT_EQ(nr_gpu_chunked(c, 0, [](long, long) { return 7; }, [] { return 0; }, [] {}, [] { return (uint64_t)0; }), 0);
+  EXPECT_EQ(nr_gpu_chunked(c, 5, [](long, long) { return 7; }, [] { return 0; }, [] {}, [] { return (uint64_t)0; }), 7);
+}
+
+/* On air (ab_p*, ab_g* 2026-10-21) every chunk carried 1-1.5 ms of launch / wake-up / scheduling latency, more than the 1 ms target: the chunk size must follow the GPU run
+ * time of the chunk (gpu() callback = event timing), not its host time. Model: host time = floor + GPU time. */
+TEST(GpuChunk, FloorAboveTargetKeepsChunksFewAndKernelsShort)
+{
+  for (uint64_t floor_us : {0, 300, 1000, 1500, 3000, 5000}) {
+    NrGpuChunker c;
+    uint64_t clock = 0, last_gpu = 0, worst_gpu = 0, max_calls_chunks = 0;
+    const long total = 3000;
+    const uint64_t cost = 2; /* GPU us per unit */
+    for (int call = 0; call < 3; ++call) { /* the call site is reused: per persists */
+      const uint64_t k0 = c.chunks;
+      int rc = nr_gpu_chunked(c, total,
+          [&](long, long n) { last_gpu = n * cost; worst_gpu = std::max(worst_gpu, last_gpu); clock += floor_us + last_gpu; return 0; },
+          [&]() { clock += 100; return 0; }, [] {}, [&] { return clock; }, [&] { return last_gpu; });
+      EXPECT_EQ(rc, 0);
+      if (call == 0) max_calls_chunks = c.chunks - k0;
+      else EXPECT_LE(c.chunks - k0, 16u) << floor_us; /* warm call site */
+    }
+    EXPECT_LE(max_calls_chunks, 16u) << floor_us;   /* also the first call, including the ramp-up from one unit */
+    EXPECT_LE(worst_gpu, (uint64_t)NR_GPU_CHUNK_TARGET_US * 3 / 2 + cost) << floor_us; /* kernel time per chunk stays at the target */
+  }
+}
+
+/* GPU time per unit grows 100x mid-run (contention, or a heavier call): the chunk shrinks back to the target within a few chunks. */
+TEST(GpuChunk, FollowsGpuTimePerUnit)
+{
+  NrGpuChunker c;
+  uint64_t clock = 0, last_gpu = 0, cost = 2, worst_after = 0;
+  for (int call = 0; call < 6; ++call) {
+    if (call == 3) cost = 10;
+    nr_gpu_chunked(c, 3000,
+        [&](long, long n) { last_gpu = n * cost; if (call >= 4) worst_after = std::max(worst_after, last_gpu); clock += 1500 + last_gpu; return 0; },
+        [&]() { return 0; }, [] {}, [&] { return clock; }, [&] { return last_gpu; });
+  }
+  EXPECT_LE(worst_after, (uint64_t)NR_GPU_CHUNK_TARGET_US * 3 / 2 + cost);
+}
+
+/* A site with a minimum (c_seg: one unit is far above the target) never chunks below it, however slow a chunk is. */
+TEST(GpuChunk, MinimumUnitsPerChunk)
+{
+  NrGpuChunker c{32, 0, "t", 0, 32};
+  long smallest = 1 << 30;
+  nr_gpu_chunked(c, 280, [&](long, long n) { smallest = std::min(smallest, n); return 0; }, [] { return 0; }, [] {}, [] { return (uint64_t)0; },
+                 [] { return (uint64_t)30000; });
+  EXPECT_EQ(smallest, 24); /* 280 = 8 x 32 + the 24-unit tail */
+  EXPECT_EQ(c.per, 32);
+}
+
+/* No GPU time available (event creation failed): the host time is used and a call never exceeds NR_GPU_CHUNK_MAX_CALLS chunks, even with a floor of 5 ms. */
+TEST(GpuChunk, FailSafeCapsChunksPerCall)
+{
+  NrGpuChunker c;
+  uint64_t clock = 0;
+  long covered = 0;
+  int rc = nr_gpu_chunked(c, 3000,
+      [&](long f, long n) { EXPECT_EQ(f, covered); covered += n; clock += 5000 + n * 2; return 0; },
+      [&]() { return 0; }, [] {}, [&] { return clock; });
+  EXPECT_EQ(rc, 0);
+  EXPECT_EQ(covered, 3000);
+  EXPECT_LE(c.chunks, (uint64_t)NR_GPU_CHUNK_MAX_CALLS);
 }

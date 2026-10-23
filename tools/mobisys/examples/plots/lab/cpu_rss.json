@@ -1,0 +1,10 @@
+{
+ "figure": "cpu_rss",
+ "source": "lab",
+ "mode": "lab",
+ "provenance": "synthetic",
+ "host_label": "synthetic (cloud x86 generator)",
+ "data_format": "parquet",
+ "needs": "system_telemetry (metrics rows with proc_*)",
+ "matplotlib": "3.11.2"
+}

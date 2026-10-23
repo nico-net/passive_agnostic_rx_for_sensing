@@ -1105,6 +1105,7 @@ static int fep_stage_impl(const nr_gpu_fep_job_t *j, int k)
   uint32_t *par = g_pass_par[k];
   memset(par, 0, nr_exact::PAR_WORDS * sizeof(uint32_t));
   memcpy(par + 1, j->symbol_rot, (size_t)ns * sizeof(short2));
+  par[21] = (uint32_t)((j->run_mask ? j->run_mask : j->sym_mask) & ((1u << ns) - 1u)); /* sized to the grant for the graph pass; fep_dev's grid is sym_mask */
   if (nr_gpu_model() == NR_GPU_MODEL_DISCRETE) {
     const size_t len = (size_t)g_samples_per_slot + N; /* the last symbol + slack, as upload_window */
     for (int a = 0; a < nant; a++) {

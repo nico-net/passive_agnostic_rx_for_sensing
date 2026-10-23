@@ -662,7 +662,7 @@ int upload(void *ptr,const nr_pdcch_nid_batch_t *b) {
  v.n=(c->batches<c->window?c->batches:c->window)*count;
  v.begin=c->batches<c->window?0:(c->batches%c->window)*count;
  c->first_new=v.n-count;
- return cudaStreamSynchronize(stream)==cudaSuccess?0:-1;
+ return nr_gpu_wait_stream(stream)==cudaSuccess?0:-1;
 }
 // Events are allocated/touched before RX. No CUDA allocation or chunk wait here.
 bool timing_begin(Context *c,int kind,const char *operation) {
@@ -853,6 +853,6 @@ extern "C" int nr_pdcch_nid_gpu_statistics_check(void *ctx,uint16_t *hits,float 
  diagnostic_stats<<<STAT/256,256,0,c->stream>>>(c->dev);
  if(budget_copy(c,c->transfer->hits,c->host.hits,sizeof(c->transfer->hits),cudaMemcpyDeviceToHost,c->stream)!=cudaSuccess
     || budget_copy(c,c->transfer->zsum,c->host.zsum,sizeof(c->transfer->zsum),cudaMemcpyDeviceToHost,c->stream)!=cudaSuccess
-    || cudaStreamSynchronize(c->stream)!=cudaSuccess)return -1;
+    || nr_gpu_wait_stream(c->stream)!=cudaSuccess)return -1;
  memcpy(hits,c->transfer->hits,sizeof(c->transfer->hits));memcpy(zs,c->transfer->zsum,sizeof(c->transfer->zsum));return 0;
 }

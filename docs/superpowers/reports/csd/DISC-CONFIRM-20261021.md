@@ -1,0 +1,87 @@
+# Why the discovery non-blocking build logs fewer CSIRS_BLIND CONFIRMED lines, 2026-10-21
+
+Labels: [MEASURED] = counted in run.log of the named runs (DGX + X410, daytime, n=1 per arm, never pooled across cells); [CODE-READ]; [SIM] = host-only g++ simulation of nr_gpu_chunk.h (no CUDA); [INFERRED]. Runs: TIM PCI 923 ab_m7TR1_1_073002 (restore ref) vs ab_m7TD1_1_092142 (disc); Vodafone PCI 415 ab_m7VR1_1_074100 (restore ref), ab_m7VC1_1_081200 (cleaned main 3f0d9217fa, same base as disc), ab_m7VD1_1_093301 (disc).
+
+## 1. Verdict
+
+Vodafone: no layout is lost. TIM: undetermined (n=1, 3 vs 5 layouts, ambiguous row-6/11/16 family). Separately, the disc build processes 4.5x fewer slots and its resident-detect stage is about 26x slower per batch; a defect in the chunk adaptation (nr_gpu_chunk.h) is the most likely cause and is fixed in this commit [fix UNVERIFIED on air].
+
+## 2. Vodafone 415 [MEASURED]
+
+| | VR1 (restore) | VC1 (main) | VD1 (disc) |
+|---|---|---|---|
+| CONFIRMED lines | 1857 | 1862 | 228 |
+| distinct strings | 175 | 167 | 52 |
+| resource identities (row, ports, density, nID; 24 each) | 24 | 24 | 24 |
+| distinct (start RB, nRB) spans | 73 | 82 | 31 |
+| identities with more than one span | 19 | 22 | 5 |
+| CONFIG_EPOCH (all cause CSIRS_MAP_CHANGE except 1 DEDICATED in VD1) | 147 | 187 | 10 |
+| search restarts ("#N" falls back) | 225 | 229 | 29 |
+| FEP slots processed (sum of FEP lines) | 472 080 | 462 892 | 102 471 |
+| BATCH lines / detect_us per batch | 88 / 0.27 s | 85 / 0.30 s | 12 / 7.75 s |
+| final feed_drops / confirm_drops | 13 028 / 45 814 | 44 879 / 63 483 | 399 370 / 125 827 |
+
+- The same 24 identities (nIDs 380, 748, 713, 415, 582, 249; 4 rows of port/density each) are confirmed in all three runs; the modal span is identical for 24 of 24 (52 RB); the modal period/offset pairs match (160/15+16, 160/20+21).
+- Layouts the refs confirm and disc does not (46 and 56 at 9-field level) account for 79 and 81 of about 1860 refs lines; each appears at most 8 times (the 24 stable identities appear 39 to 108 times in the refs). They are start/width variants (for example 128:32, 128:40, 128:48, 128:56 for nID 713) of the same identities: extent jitter of the refinement, not other resources. Disc-only variants also exist (5 spans).
+- The refs re-confirm because the search is reset about every 8 s: each CSIRS_MAP_CHANGE epoch is not an RX recovery, so epoch_listener (nr_csirs_disc.c) calls nr_csirs_blind_rt_discovery_reset, which forgets all confirmations, removes the monitor exports and resets the ring [CODE-READ]. The next batch re-logs every identity (CONFIRMED #0, #1, ...). 1682 of 1857 ref lines (91 %) repeat a string already logged; disc 176 of 228 (77 %) with 29 restarts.
+- The CONFIRMED rate per 10 min in disc follows its epochs: 136 / 7 / 85 lines with 6 / 0 / 4 epochs.
+
+## 3. TIM 923 [MEASURED, n=1 each]
+
+- Ref: 12 lines, 6 strings, 9 epochs, all DEDICATED_CHANGE_SUSPECTED (first 20 s). Disc: 3 lines, 3 strings, 0 epochs. The repeats in the ref come from those 9 resets.
+- Both confirm row 1 (period 80, offsets 16/17, symbol 9 and 5). The ref also confirms row 6 symbol 13 (40/8), row 11 and 16 (40/8) and logs MONITOR_ADD for them (16 adds against 5); disc confirms one row 6 symbol 12 period 80 offset 48 and adds only row 6 80/48. Row 16 40/8 is a WINNER 10 times in disc and is never added. In disc 4.5x fewer slots were processed (36 989 vs 136 956 FEP slots), detect_us per batch 7.7 s vs 0.24 s.
+- This is the row 6/11/16/17 family at period 40 offset 8 (the same slot lattice with different symbol hypotheses); with n=1 and different symbols found per run, the data cannot say whether disc missed a resource or settled on a different alias. Undetermined.
+
+## 4. Diff review (3f0d9217fa..ecc628467b) [CODE-READ]
+
+- Chunking: normalize, pool, accumulate, lattice_*, segment, fep_unpack/extract, sweep (candidate dimension, existing cand0/nctot), refine (unit range, accumulators in device memory): block offsets only, independent blocks run in the same order; refine unit count (valid slots with abs_slot%period==offset, times antennas, times ports for rows other than 1) matches refine_cpu; a short count only moves work into the last launch. Bit-identical as the report claims; no semantic change found.
+- finish_host and energies on the host run the same functions (`__host__ __device__`); the only numerical difference possible is FMA contraction in nvcc device code vs the host compiler (double, last-bit) and not tested here. energies read one or two symbol rows of antenna 0, the same elements the kernel read.
+- Polled waits: results are consumed in the same order; only the latency changes.
+- No confirm threshold or admission rule changed. The only effect on confirmation counts is throughput (next section).
+
+## 5. Defect found: chunk size pinned at one unit [CODE-READ + SIM, on-air cause INFERRED]
+
+NrGpuChunker starts at per=1 (a static per call site) and grows only when the chunk's whole wall time (launch, poll wake-up, up to 100 us admission, queueing behind the always-busy real-time graphs) is under 500 us; it shrinks above 1500 us. With a wall-time floor of 1000 us or more the chunk never grows from one unit [SIM, 3000 chunks for 3000 units, 3.3 s instead of 7.4 ms in the model; with the old rule at floor 1000 us]. A resident detect of a few thousand blocks then costs seconds [consistent with MEASURED 7.75 s vs 0.27 s per batch, FEP us/slot 196 vs 158, 4.5x fewer slots, feed_drops 9x higher]. Not proven on air: no per-chunk count is logged.
+
+Fix (nr_gpu_chunk.h): the adaptation counts only the time above a measured floor (minimum wall time, raised only by one-unit chunks) as work. Tests: existing GpuChunk test unchanged and passing in a standalone g++ replica; new GpuChunk.FloorOfWallTimeDoesNotPinChunkAtOneUnit (floor 0 to 3000 us: fewer than 40 chunks for 3000 units, run time per chunk bounded). Not compiled with the project build.
+
+## 6. On-air check
+
+Same cell, same hour, 30 min each, Vodafone: ref (3f0d9217fa) and disc with this fix, 2 runs each. Pass: BATCH detect_us per batch within 2x of the ref (about 0.3 s), FEP slots sum within 20 % of the ref, feed_drops of the same order, 24 identities and the same modal spans, and ULSTALL/EVMGRANT gspan criteria of DISC-NONBLOCK-20261021.md still met. TIM: 3 runs each; compare the set of MONITOR_ADD rows, not the number of CONFIRMED lines. Count identities (row, ports, density, nID) and modal spans, never CONFIRMED lines.
+
+## 7. Update after the interleaved A/B (14:47-16:27): a879b1972b did not remove the deficit
+
+Runs M = main a378f7dc5a, D = a879b1972b; Vodafone 15 min, TIM 8 min [MEASURED, one run per arm and cell, never pooled].
+
+- Counters: td_overflows = the time-domain slot queue was full at feed time (the discovery worker was not draining); feed_drops includes it; confirm_drops = the confirm-scoring queue was full or its upload failed (nr_csirs_disc_confirm_internal.h). Both are consequences of the worker being busy, not separate faults. M has 23 / 0 td_overflows early and 29k feed_drops (VM2) against 174-181k in D.
+- Restore commits ruled out: the base 3f0d9217fa run VC1 has fep_slots 462 892 (30 min), feed_drops 44 879, detect 0.30 s per batch, the same as M.
+- Where the worker's time goes [MEASURED, sums over BATCH lines]: D Vodafone: 9-10 batches, detect 34.8 s and 41.9 s in total (max single batch 11.8 s and 14.6 s), FEP 13.3-13.9 s; M: 35-55 batches, detect 8.3-9.6 s (max batch 2.7-3.4 s), FEP 41.5 s. TIM: D detect 13.6 and 27.0 s in 3 batches (max 9.2 and 12.7 s), M 1.6 s in 87 batches. FEP cost per slot is the same (D 196-209 us, M 172 us), so the FEP path is not the bottleneck: D simply spends its time inside a few detect calls of 4.4, 10.9, 11.4, 14.1 s (VD2) while the same code does the same job in 2.5-70 ms in other batches. During a 10 s call nothing drains the 384-slot queue: that is td_overflows and the 3.5x fewer slots and 4-30x fewer batches.
+- Cause: the detect call is bimodal, 2.5 ms when the GPU is quiet and 4-14 s when the real-time graphs load it. Per-chunk wall time rises to about 4-5 ms (GPU scheduling behind the real-time work); with 3000+ chunks that is the 11-14 s [INFERRED from the bimodality, the 150x gap and the call size; no per-chunk log existed]. The a879 fix let the floor estimate rise only while a one-unit chunk was under 2x the old floor (`us < 2 * c.base`): a jump from a few hundred us to 5 ms never passed, the floor stayed low, the "work" stayed above 1.5 ms, per stayed at 1 [SIM: 2000 chunks, 15.1 s]. The guard was my error.
+- Fix: no guard (the floor follows one-unit chunks, moving half the gap per chunk), growth below 0.75 target instead of 0.5 (the floor estimate contains one unit). SIM, floor jumping 300 us -> 5000 us after 5 chunks, call site reused: 86 chunks for 3 x 3000 units instead of about 9000. Tests: GpuChunk.FloorThatRisesMidCallDoesNotPinChunkAtOneUnit (new), the two earlier GpuChunk tests (bound loosened to two units). Standalone g++ replica passes; not built with the project.
+- Always-on evidence: nr_gpu_chunked writes `[GPU] CHUNK_SLOW site=<name> total_units chunks wall_us per_end base_us` to stderr for every call longer than 200 ms (sites: c_norm, c_pool, c_acc, c_lp, c_ls, c_seg, c_unpack, c_extract, c_sweep, c_refine). No flag.
+- The DL latency gain absent and UL p99 worse (3.3-3.5 vs 2.8-3.2 ms) in D were not analysed here. A GPU that is busy 4-5 ms per chunk for 10 s with many small launches and waits is consistent with more, not less, interference, but that is not measured.
+
+Next on-air run must show: (1) no CHUNK_SLOW lines, or lines with chunks below about 200 and per_end above 10; (2) BATCH detect_us total in the order of M (8-10 s per 15 min Vodafone, 1.6 s per 8 min TIM) and no batch above 3 s; (3) fep_slots within 20 % of M, feed_drops of the same order as M (3k-29k on Vodafone, 0.3-1.3k on TIM); (4) if CHUNK_SLOW still appears, its base_us and per_end say whether the floor or the size is the problem. If (2) holds but the latency gain is still absent, the gap is not in discovery throughput.
+
+## 8. Update after 12 runs with 7a1621e182 (ab_p*P*, ab_g*): chunk size must follow GPU time, not host time
+
+[MEASURED by the coordinator, DGX + X410] 500-1100 CHUNK_SLOW lines per run (c_seg 75 %, c_ls, c_sweep, c_refine), per_end=2, base_us 1.0-1.55 ms, e.g. c_refine total_units=2560 chunks=1127 wall_us=2.56 s. Discovery vs main (Vodafone 15 min): FEP slots 46-90k vs 247-249k, feed_drops 35-196k vs 0.9-6k, batches 5-13 vs 56.
+
+Root cause [CODE-READ + MEASURED floor]: under real-time GPU load every chunk costs a fixed 1-1.5 ms (launch, wake-up, scheduling) that is above the 1 ms target and jitters by about as much as the signal. Any rule that derives the work from the host wall time (a879b1972b, 7a1621e182) cannot tell a 2-unit chunk from a 20-unit one, so the chunk stays tiny and the call time is chunks x floor. The wall time was the wrong quantity from the start.
+
+Fix (this commit):
+- Chunk size follows the GPU run time of the previous chunk: two timing events around the launch on the same stream (NrGpuSpan in TOOLS/nr_gpu_wait.h, one per thread, created on first use), read after the existing polled wait. Rule (nr_gpu_chunk_adapt): per = n x target / gpu_us, at most 16x bigger per step, at least 1; unchanged inside [0.75, 1.5] x target. No floor estimate, no wall time. Falls back to wall time only when the events fail.
+- Fail-safe: a call never uses more than NR_GPU_CHUNK_MAX_CALLS = 64 chunks; from chunk 32 the rest is spread over the remaining budget. This lets a very large kernel (hundreds of ms of GPU work) exceed the 1 ms chunk bound (about 10 ms chunks at 600 ms), deliberately, because the cost of a chunk under load is 1.5 ms, not the kernel.
+- CHUNK_SLOW stays (always on, calls over 200 ms), now with `gpu_us` (sum of chunk GPU time of the call), `per_end` and `last_chunk_gpu_us` instead of base_us.
+
+Tests [MEASURED on this host, build_t26, GB10; receiver not running]: test_nr_csirs_disc_sweep GpuChunk.* (4 tests) pass:
+- FloorAboveTargetKeepsChunksFewAndKernelsShort: floor 0, 0.3, 1, 1.5, 3, 5 ms, 3000 units at 2 us: at most 16 chunks per call (first call included), GPU time per chunk at most 1.5 ms + one unit.
+- FollowsGpuTimePerUnit: GPU time per unit grows 5x mid-run, chunk shrinks back to the target.
+- FailSafeCapsChunksPerCall: no GPU time, 5 ms floor, at most 64 chunks.
+- The two earlier tests of the series were replaced; CoversEveryUnitOnceInOrderAndBoundsChunkTime kept (total limited to 30 ms of work, larger work is the fail-safe's case).
+- Also passing with the new code: all 20 CsirsDiscSweep.* tests including GpuEqualsCpu (GPU vs CPU, 11.6 s), CumulativeGpuParity and GpuRefinementAndConfirmation. libcsirs_disc_gpu.so and libnr_csirs_disc_gpu_sweep.so link.
+
+Next on-air run must show (Vodafone 15 min, TIM 8 min, interleaved with main, per cell):
+1. CHUNK_SLOW lines: none, or with chunks at most 64 and last_chunk_gpu_us near 1000 or below; gpu_us much lower than wall_us tells that the time is not in the kernels.
+2. BATCH detect_us per batch at most about 1 s (main: at most 0.9 s) and 50+ batches on Vodafone; FEP slots within 20 % of main (about 247k); feed_drops of the order of main (0.9-6k).
+3. Only then the real-time effect (ULSTALL, gspan, UL p99) is worth reading; if (1) and (2) hold and the UL p99 is still worse than main, the cause is the chunk gaps or the polling themselves, not throughput.

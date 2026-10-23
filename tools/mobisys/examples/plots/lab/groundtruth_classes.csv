@@ -1,0 +1,6 @@
+class,n
+correct_tb,1194
+dci_ok_tb_failed,126
+dropped_undecidable,19
+missed_tb,28
+false_positive_dci,17

@@ -177,6 +177,10 @@ template <int CB> __global__ void __launch_bounds__(THREADS) k_ldpc_t(const DJob
   const int c = blockIdx.x / CB, b = blk_rank<CB>(), t = threadIdx.x;
   const DJob J = jobs[c];
   if (J.ts && b == 0 && t == 0) J.ts[0] = gtimer();
+  if (J.K == 0) { /* a padding block of the shape class (pass_set): every block of its cluster reads the same job, so all return here, before any cluster barrier */
+    if (b == 0 && t == 0) { g_out[2 * c] = 0; g_out[2 * c + 1] = 1; if (J.ts) J.ts[1] = gtimer(); }
+    return;
+  }
   {
     const int *src = (const int *)J.g;
     int *dst = (int *)&G;
@@ -355,6 +359,10 @@ __global__ void __launch_bounds__(THREADS) k_ldpc4_t(const DJob *jobs, int8_t *g
   const int c = blockIdx.x / CB, b = blk_rank<CB>(), t = threadIdx.x;
   const DJob J = jobs[c];
   if (J.ts && b == 0 && t == 0) J.ts[0] = gtimer();
+  if (J.K == 0) { /* a padding block of the shape class (pass_set): every block of its cluster reads the same job, so all return here, before any cluster barrier */
+    if (b == 0 && t == 0) { g_out[2 * c] = 0; g_out[2 * c + 1] = 1; if (J.ts) J.ts[1] = gtimer(); }
+    return;
+  }
   {
     const int *src = (const int *)J.g;
     int *dst = (int *)&G;
@@ -825,7 +833,7 @@ static int pass_set(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu
   }
   Ctx &x = g_ctx[CTX + inst];
   for (int k = 0; k < n; k++)
-    x.dj[k] = DJob{gr[k], (const int8_t *)llr_dev->dev + (size_t)k * NR_GPU_LDPC_DEV_IN_STRIDE, jobs[k].K, jobs[k].it_max, x.ts ? x.ts + 2 * k : nullptr};
+    x.dj[k] = DJob{gr[k], (const int8_t *)llr_dev->dev + (size_t)k * NR_GPU_LDPC_DEV_IN_STRIDE, jobs[k].pad ? 0 : jobs[k].K, jobs[k].it_max, x.ts ? x.ts + 2 * k : nullptr};
   if (z4) {
     *z4 = true;
     for (int k = 0; k < n; k++)

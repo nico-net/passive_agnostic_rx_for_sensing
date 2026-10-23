@@ -577,7 +577,16 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   j->symbol_rot = (const int16_t *)(fp->symbol_rotation[link_type_dl] + (in->proc->nr_slot_rx % fp->slots_per_subframe) * fp->symbols_per_slot);
   j->rxdataF = (int16_t *)in->rxdataF;
   j->rx_stride = in->rx_stride;
-  j->copy_mask = 0x3fff;
+  /* the pass transforms (and in DISCRETE copies back) only the symbols this grant reads: its PDSCH window, every DM-RS symbol of the grant (the chest key), the demod's symbols. This is the
+   * set the CPU body transforms without the slot share; the rest of the slot is not touched, so a later consumer of the slot must not assume a whole-slot rxdataF (fep_mask below). */
+  {
+    uint32_t fm = (uint32_t)j->dj.sym_mask | (uint32_t)(in->dmrs_full & 0x3fff);
+    for (int m = in->dlsch_config->start_symbol; m < in->dlsch_config->start_symbol + (int)in->dlsch_config->number_symbols && m < 14; m++)
+      fm |= 1u << m;
+    for (int k = 0; k < ndmrs; k++)
+      fm |= 1u << j->dmrs_sym[k];
+    j->copy_mask = (uint16_t)(fm & 0x3fff);
+  }
   /* ---- chest post: nvar normalisation, per-branch substitution, DM-RS FO/SFO sums */
   j->number_symbols = in->dlsch_config->number_symbols;
   j->nvfix = in->nvfix;
@@ -621,6 +630,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
     return fb(FB_MODULE);
   for (int m = 0; m < 14; m++)
     out->dl_valid_re[m] = j->dj.sym_mask >> m & 1 ? j->dj.nre[m] : 0;
+  out->fep_mask = j->copy_mask;
   out->qm_sym = qm_sym;
   out->qm_n = j->qm_n;
   out->ndmrs = ndmrs;

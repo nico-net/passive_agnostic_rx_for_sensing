@@ -3,6 +3,7 @@
 #define NR_GPU_BUDGET_CUDA_H
 #include "nr_gpu_cuda.h"
 #include "nr_gpu_budget.h"
+#include "nr_gpu_wait.h"
 #include <cmath>
 #include <cstdio>
 #include <thread>
@@ -34,7 +35,7 @@ struct NrGpuDiscoverySlice {
     if(e==cudaSuccess)e=submit();
     if(e==cudaSuccess)e=cudaEventRecord(last,stream);
     if(e==cudaSuccess) {
-      e=cudaEventSynchronize(last);
+      e=nr_gpu_wait_event(last); /* polled: an interrupt-based wait holds the real-time graphs' body launches (nr_gpu_wait.h) */
     }
     float ms=0;
     if(e==cudaSuccess)e=cudaEventElapsedTime(&ms,first,last);
