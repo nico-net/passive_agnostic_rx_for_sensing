@@ -295,10 +295,15 @@ TEST(MmseExact, Mode3SymbolKnownNoise)
  * synthetic 13-symbol grant per (Nl, Qm). Skipped without the module or a device (the module is built next to this test). */
 #include <dlfcn.h>
 #include "nr_pdsch_gpu_demod.h"
+#include "../../TOOLS/nr_gpu_mem.h"
 TEST(MmseExact, GpuMode3BitExact)
 {
-  if (!dlopen("./libnr_gpu_platform.so", RTLD_NOW | RTLD_GLOBAL)) /* the module's nr_gpu_* imports (the softmodem links it) */
+  void *plat = dlopen("./libnr_gpu_platform.so", RTLD_NOW | RTLD_GLOBAL); /* the module's nr_gpu_* imports (the softmodem links it) */
+  if (!plat)
     GTEST_SKIP() << "no ./libnr_gpu_platform.so: " << dlerror();
+  auto model = (nr_gpu_model_t(*)(void))dlsym(plat, "nr_gpu_model");
+  if (!model || model() != NR_GPU_MODEL_DIRECT) /* the standalone demod is DIRECT-only: it refuses on the DISCRETE and CPU tiers by design */
+    GTEST_SKIP() << "tier is not DIRECT (SHARED): the standalone GPU demod refuses by design";
   void *dl = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!dl)
     GTEST_SKIP() << "no ./libpdsch_gpu.so: " << dlerror();
