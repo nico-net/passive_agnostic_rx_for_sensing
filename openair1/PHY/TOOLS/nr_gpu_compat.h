@@ -3,21 +3,33 @@
  *
  * The runtime API renamed or re-versioned four things the graph pass uses between 12.3 and 13.0; each wrapper below picks the
  * spelling of the toolkit that compiles it. On 13.x (the DGX) every wrapper is the plain call the code made before this header existed.
- *   nr_drv_sym            driver entry point: cudaGetDriverEntryPointByVersion (12.5+) / cudaGetDriverEntryPoint (older: the ABI of the compile-time toolkit)
+ *   nr_drv_sym            driver entry point at an explicit ABI version: cudaGetDriverEntryPointByVersion (12.5+) / cuGetProcAddress_v2 from libcuda (older: the
+ *                         runtime's own cudaGetDriverEntryPoint resolves at the libcudart version loaded at run time, which may be newer than the
+ *                         compile-time toolkit and then returns a different signature, e.g. cuStreamGetCtx_v2)
  *   nr_capture_info       cudaStreamGetCaptureInfo with the edge-data out-parameter: _v3 in 12.3 .. 12.x, the plain name in 13.x
  *   nr_capture_set_deps   cudaStreamUpdateCaptureDependencies with edge data: _v2 in 12.x, the plain name in 13.x
  *   nr_stream_ctx         cuStreamGetCtx: the green-context out-parameter form is 12.5+ (cuStreamGetCtx_v2); below it the 2-argument form, no green context
+ *   CUgreenCtx            a driver type of 12.4+; a placeholder below it (the green-context handle is then always nullptr)
  * Conditional graph nodes (the in-graph no-chance gate) need toolkit 12.3; the driver is probed at run time by the caller. */
 #pragma once
 #include <cuda_runtime.h>
 #include <cuda.h>
+#include <dlfcn.h>
 
 #if CUDART_VERSION < 12030
 #error "the GPU pass needs CUDA toolkit 12.3 or newer (graph conditional nodes)"
 #endif
 
-/* driver ABI versions for nr_drv_sym lookups (ignored below 12.5, where the entry point is the compile-time toolkit's) */
+#if CUDART_VERSION < 12040
+typedef struct CUgreenCtx_st *CUgreenCtx; /* placeholder: below 12.4 no green context exists, nr_stream_ctx returns nullptr in it */
+#endif
+
+/* driver ABI versions for nr_drv_sym lookups: the version whose signature the code calls on this toolkit */
+#if CUDART_VERSION >= 12050
 #define NR_DRV_VER_STREAM_CTX 12050  /* cuStreamGetCtx_v2, cuCtxFromGreenCtx, the green-context entry points */
+#else
+#define NR_DRV_VER_STREAM_CTX CUDART_VERSION /* cuStreamGetCtx v1 (2 arguments): never the newer _v2 a later driver would otherwise pick */
+#endif
 #define NR_DRV_VER_COND_HANDLE 12030 /* cuGraphConditionalHandleCreate */
 #if CUDART_VERSION >= 13000
 #define NR_DRV_VER_GRAPH_ADD_NODE 13000 /* cuGraphAddNode with CUgraphEdgeData (13.x signature) */
@@ -33,8 +45,15 @@ static inline void *nr_drv_sym(const char *name, int ver)
 #if CUDART_VERSION >= 12050
   if (cudaGetDriverEntryPointByVersion(name, &f, ver, cudaEnableDefault, &q) != cudaSuccess || q != cudaDriverEntryPointSuccess) return nullptr;
 #else
-  (void)ver;
-  if (cudaGetDriverEntryPoint(name, &f, cudaEnableDefault, &q) != cudaSuccess || q != cudaDriverEntryPointSuccess) return nullptr;
+  /* cuGetProcAddress_v2 from the driver itself, with the explicit ABI version (the runtime's lookup would use the loaded libcudart's version) */
+  typedef CUresult (*get_proc_t)(const char *, void **, int, cuuint64_t, CUdriverProcAddressQueryResult *);
+  static get_proc_t get_proc = [] {
+    void *h = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+    return h ? (get_proc_t)dlsym(h, "cuGetProcAddress_v2") : (get_proc_t) nullptr;
+  }();
+  CUdriverProcAddressQueryResult dq;
+  if (!get_proc || get_proc(name, &f, ver, CU_GET_PROC_ADDRESS_DEFAULT, &dq) != CUDA_SUCCESS || dq != CU_GET_PROC_ADDRESS_SUCCESS) return nullptr;
+  (void)q;
 #endif
   return f;
 }
