@@ -3506,3 +3506,7 @@ endif()
 
 # Keep the CUDA-independent core platform beside a relocated receiver binary.
 set_property(TARGET nr-uesoftmodem PROPERTY BUILD_RPATH_USE_ORIGIN ON)
+
+# Multi-PCI seams (mpci-main plan T0): no other task edits this file.
+include(${CMAKE_SOURCE_DIR}/cmake_targets/mpci_cloud.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake_targets/mpci_gpu.cmake)
