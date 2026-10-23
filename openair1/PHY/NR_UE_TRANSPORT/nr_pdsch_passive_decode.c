@@ -2733,6 +2733,11 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     const bool gp_probe_cov = gp_cover;
     const bool gp_share_cov = gp_cover;
     /* v2 Task 4: with ISAC_PDSCH_GPU_GRAPH_RETRY the retry bodies stay on the pass (held instance), RETRY_OLD is not consulted */
+    { /* NR_TEST_FORCE_CPU_TB=1 (test seam, replay only): every grant takes the old path (host LLR normalisation, per-layer diagnostics) */
+      static int fct = -1;
+      if (fct < 0) fct = getenv("NR_TEST_FORCE_CPU_TB") ? 1 : 0;
+      if (fct) t_tb_force_cpu = true;
+    }
     gp_gate = (!nr_gpu_graph_flag("RETRY") && nr_gpu_pass_retry_to_old(gp_retry_old, t_pdtim_body, t_recov_mode == 2, t_quiet || t_decode_tdra_attempt != 0)) ? NR_GPU_PASS_GATE_RETRY
             : (seg_path && nseg > nr_gpu_pass_seg_max()) ? NR_GPU_PASS_GATE_SEG /* more segments than the largest class; fewer run the segmented classes */
             : ((t_probe_first_seg || probe_last_sym >= 0) && !gp_probe_cov) ? NR_GPU_PASS_GATE_PROBE
@@ -3699,7 +3704,13 @@ gpu_llr_ready:;
          * the probe a smaller shift than the whole-slot decode of the same hypothesis (rank 4: CB0
          * LLRs 2^dk times larger, clipped at the int8 rail). Every decode has demodulated that span. */
         const uint32_t span = nr_llr_norm_span(G, nr_llr_norm_num_cb(cw->TBS, cw->ldpcBaseGraph));
-        const int k = nr_llr_norm_shift(llr, span);
+        const int k = nr_llr_norm_shift_nl(llr, span, (int)cw->Nl, (int)cw->qamModOrder);
+        {
+          static int r2w_diag = -1; /* NR_TEST_RANK2W_DIAG=1: per-layer |LLR| statistics of 2-layer grants (test seam, replay only) */
+          if (r2w_diag < 0) r2w_diag = getenv("NR_TEST_RANK2W_DIAG") ? 1 : 0;
+          if (r2w_diag && cw->Nl == 2 && cw->qamModOrder >= 2)
+            nr_llr_layer_diag(llr, G, cw->qamModOrder, k, grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->mcs);
+        }
         if (k > 0) {
           for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)(llr[i] >> k);
           atomic_fetch_add(&g_llr_norm_shift[k], 1);
@@ -4697,7 +4708,7 @@ int nr_pdsch_passive_gw_cb0_item(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypot
     *flags |= hflags;
   int k = 0;
   if (v.G >= 64)
-    k = nr_llr_norm_shift(v.llr, nr_llr_norm_span(v.G, nr_llr_norm_num_cb(p.A, p.BG)));
+    k = nr_llr_norm_shift_nl(v.llr, nr_llr_norm_span(v.G, nr_llr_norm_num_cb(p.A, p.BG)), nl, qm);
   memset(it, 0, sizeof(*it));
   it->llr = v.llr;
   it->G = v.G;

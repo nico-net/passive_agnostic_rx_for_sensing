@@ -523,7 +523,7 @@ int nr_td_gw_cb0_input(const int16_t *llr, uint32_t G, const nr_td_cb0_params_t 
     return NR_TD_GW_E_ARG;
   int k = -1;
   if (norm && G >= 64) /* the decode's ISAC_LLR_NORM block, with this hypothesis's own C (K38) */
-    k = nr_llr_norm_shift(llr, nr_llr_norm_span(G, nr_llr_norm_num_cb(p->A, p->BG)));
+    k = nr_llr_norm_shift_nl(llr, nr_llr_norm_span(G, nr_llr_norm_num_cb(p->A, p->BG)), (int)p->Nl, (int)p->Qm);
   if (k > 0)
     for (uint32_t i = 0; i < p->E; i++)
       e0[i] = (int16_t)(llr[i] >> k);
