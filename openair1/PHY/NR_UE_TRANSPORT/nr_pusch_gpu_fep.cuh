@@ -130,8 +130,7 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int s
   if (U.ok) return U.nant == nant ? 0 : -1;
   if (N != nr_exact::N || nant < 1 || nant > 4 || offset_div <= 0) return -1;
   if (!nr_gpu_module_ready()) return -1;
-  const nr_gpu_caps_t *caps = nr_gpu_platform_probe();
-  if (!(caps && caps->model == NR_GPU_SHARED && caps->pageable_memory_access && caps->host_page_tables)) {
+  if (!nr_gpu_platform_shared_direct()) {
     fprintf(stderr, "nr_pusch_gpu_fep: no coherent host memory access -- CPU FEP\n");
     return -1;
   }

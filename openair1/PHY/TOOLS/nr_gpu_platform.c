@@ -190,48 +190,79 @@ static const char probe_ptx[] =
   "mul.wide.u32 ra, ri, 4; add.u64 ra, rb, ra; ld.global.u32 rv, [ra]; add.u32 rs, rs, rv; add.u32 ri, ri, 1; bra $L;\n"
   "$D: mul.wide.u32 ra, rn, 4; add.u64 ra, rb, ra; st.global.u32 [ra], rs; ret;\n}\n";
 enum { PROBE_WORDS = 16384, PROBE_TIMEOUT_MS = 1000, CU_NOT_READY = 600 };
-/* nr_gpu_platform_run_probe: launches probe_ptx on the current context over a 64 KiB malloc buffer (libcuda driver API through dlopen, so this
- *   library keeps no CUDA link) and verifies the checksum. Returns NR_GPU_PROBE_OK or NR_GPU_PROBE_FAIL (wrong sum, kernel error, 1 s timeout; a
- *   timed-out buffer is leaked because the kernel may still run). NR_GPU_PROBE_SKIPPED when any tooling step is unavailable (missing libcuda or
- *   symbol, no current context, PTX load error): the caller then trusts the device properties.
+/* nr_gpu_platform_run_probe: launches probe_ptx over a 64 KiB malloc buffer in a PRIVATE context of the given device (libcuda driver API through dlopen,
+ *   so this library keeps no CUDA link): a fault of the probe kernel is sticky and destroys only that context, never the runtime's primary context.
+ *   The caller's current context is restored on return. Returns NR_GPU_PROBE_OK, NR_GPU_PROBE_FAIL (wrong checksum), NR_GPU_PROBE_TIMEOUT (no
+ *   completion in 1 s: the context, stream, module and buffer are leaked because the kernel may still run), NR_GPU_PROBE_FAULT (launch or stream
+ *   error) or NR_GPU_PROBE_SKIPPED when any tooling step is unavailable (missing libcuda or symbol, context creation, PTX load error): the caller
+ *   then trusts the device properties.
  */
-int nr_gpu_platform_run_probe(void)
+int nr_gpu_platform_run_probe(int device)
 {
-  typedef int (*fn_ctx)(void **);
+  typedef int (*fn_init)(unsigned);
+  typedef int (*fn_dev)(int *, int);
+  typedef int (*fn_cget)(void **);
+  typedef int (*fn_cset)(void *);
+  typedef int (*fn_ccreate)(void **, unsigned, int);
+  typedef int (*fn_cdestroy)(void *);
   typedef int (*fn_load)(void **, const void *);
   typedef int (*fn_func)(void **, void *, const char *);
   typedef int (*fn_launch)(void *, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, void *, void **, void **);
   typedef int (*fn_screate)(void **, unsigned);
   typedef int (*fn_stream)(void *);
-  int result = NR_GPU_PROBE_SKIPPED;
-  void *drv = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL), *ctx = NULL, *mod = NULL, *fn = NULL, *stream = NULL;
+  int result = NR_GPU_PROBE_SKIPPED, cudev = 0;
+  void *drv = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL), *prev = NULL, *pctx = NULL, *mod = NULL, *fn = NULL, *stream = NULL;
   uint32_t *buf = NULL;
   if (!drv) return result;
-  fn_ctx ctx_get = NULL; fn_load mod_load = NULL; fn_func mod_func = NULL; fn_launch launch = NULL;
-  fn_screate stream_create = NULL; fn_stream stream_query = NULL, stream_destroy = NULL, mod_unload = NULL;
-  *(void **)&ctx_get = dlsym(drv, "cuCtxGetCurrent"); *(void **)&mod_load = dlsym(drv, "cuModuleLoadData");
+  fn_init cu_init = NULL; fn_dev dev_get = NULL; fn_cget ctx_get = NULL; fn_cset ctx_set = NULL; fn_ccreate ctx_create = NULL; fn_cdestroy ctx_destroy = NULL;
+  fn_load mod_load = NULL; fn_func mod_func = NULL; fn_launch launch = NULL; fn_screate stream_create = NULL; fn_stream stream_query = NULL, stream_destroy = NULL, mod_unload = NULL;
+  *(void **)&cu_init = dlsym(drv, "cuInit"); *(void **)&dev_get = dlsym(drv, "cuDeviceGet");
+  *(void **)&ctx_get = dlsym(drv, "cuCtxGetCurrent"); *(void **)&ctx_set = dlsym(drv, "cuCtxSetCurrent");
+  *(void **)&ctx_create = dlsym(drv, "cuCtxCreate_v2"); *(void **)&ctx_destroy = dlsym(drv, "cuCtxDestroy_v2");
+  *(void **)&mod_load = dlsym(drv, "cuModuleLoadData");
   *(void **)&mod_func = dlsym(drv, "cuModuleGetFunction"); *(void **)&launch = dlsym(drv, "cuLaunchKernel");
   *(void **)&stream_create = dlsym(drv, "cuStreamCreate"); *(void **)&stream_query = dlsym(drv, "cuStreamQuery");
   *(void **)&stream_destroy = dlsym(drv, "cuStreamDestroy"); *(void **)&mod_unload = dlsym(drv, "cuModuleUnload");
-  if (!ctx_get || !mod_load || !mod_func || !launch || !stream_create || !stream_query || !stream_destroy || !mod_unload) goto out;
-  if (ctx_get(&ctx) || !ctx) goto out; /* the runtime's primary context is current on the probing thread */
+  if (!cu_init || !dev_get || !ctx_get || !ctx_set || !ctx_create || !ctx_destroy || !mod_load || !mod_func || !launch || !stream_create || !stream_query
+      || !stream_destroy || !mod_unload) {
+    dlclose(drv);
+    return result;
+  }
+  if (cu_init(0) || dev_get(&cudev, device) || ctx_get(&prev)) { dlclose(drv); return result; }
+  if (ctx_create(&pctx, 0, cudev) || !pctx) { ctx_set(prev); dlclose(drv); return result; } /* the new context is current on this thread */
+  int leak = 0;
   if (mod_load(&mod, probe_ptx) || mod_func(&fn, mod, "nr_gpu_probe") || stream_create(&stream, 1)) goto out;
   if (posix_memalign((void **)&buf, 4096, 4096 + PROBE_WORDS * 4)) goto out;
   uint32_t sum = 0, n = PROBE_WORDS;
   for (uint32_t i = 0; i < n; ++i) sum += buf[i] = 0x9e3779b9u * (i + 1);
   buf[n] = 0;
   void *args[] = {&buf, &n};
-  if (launch(fn, 1, 1, 1, 1, 1, 1, 0, stream, args, NULL)) { result = NR_GPU_PROBE_FAIL; goto out; }
+  if (launch(fn, 1, 1, 1, 1, 1, 1, 0, stream, args, NULL)) { result = NR_GPU_PROBE_FAULT; goto out; }
   int rc = CU_NOT_READY;
   for (int ms = 0; ms < PROBE_TIMEOUT_MS && (rc = stream_query(stream)) == CU_NOT_READY; ++ms) usleep(1000);
-  if (rc == CU_NOT_READY) { buf = NULL; result = NR_GPU_PROBE_FAIL; goto out; } /* timeout: the kernel may still use buf */
-  result = !rc && buf[n] == sum ? NR_GPU_PROBE_OK : NR_GPU_PROBE_FAIL;
+  if (rc == CU_NOT_READY) { leak = 1; result = NR_GPU_PROBE_TIMEOUT; goto out; } /* the kernel may still use buf, stream and the context */
+  if (rc) { result = NR_GPU_PROBE_FAULT; goto out; }
+  result = buf[n] == sum ? NR_GPU_PROBE_OK : NR_GPU_PROBE_FAIL;
 out:
-  free(buf);
-  if (stream && result != NR_GPU_PROBE_FAIL) stream_destroy(stream);
-  if (mod && result != NR_GPU_PROBE_FAIL) mod_unload(mod);
-  dlclose(drv);
+  if (!leak) {
+    free(buf);
+    if (stream) stream_destroy(stream);
+    if (mod) mod_unload(mod);
+    ctx_destroy(pctx); /* also frees whatever a faulted kernel left behind; pops pctx from this thread */
+  }
+  ctx_set(prev); /* the caller's context (the runtime's primary context) is current again */
+  if (!leak) dlclose(drv);
   return result;
+}
+/* primary_context_works: after a probe fault, a trivial cudaMalloc + cudaMemcpy + sync in the runtime's primary context; 1 when it all succeeds. */
+static int primary_context_works(void)
+{
+  void *d=NULL;
+  uint32_t h=0x5a5a5a5au;
+  int ok=!rt.malloc_device(&d,sizeof(h)) && d && !rt.copy_async(d,&h,sizeof(h),1,NULL) && !rt.stream_sync(NULL); /* cudaMemcpyHostToDevice */
+  if (d) rt.free_device(d);
+  rt.get_last_error();
+  return ok;
 }
 /* run_shared_probe: the proof used by probe_locked(): the real probe, or the injected one in the mocked tests (skipped by default there). */
 static int run_shared_probe(void)
@@ -239,7 +270,7 @@ static int run_shared_probe(void)
 #ifdef NR_GPU_PLATFORM_TEST
   return probe_hook ? probe_hook() : NR_GPU_PROBE_SKIPPED;
 #else
-  return nr_gpu_platform_run_probe();
+  return nr_gpu_platform_run_probe(caps.device);
 #endif
 }
 /* probe_locked: probes the GPU once (caller holds mu): loads the runtime, selects device 0, reads its capabilities and picks the tier.
@@ -293,13 +324,19 @@ finish:
   } else if (caps.model==NR_GPU_SHARED) {
     caps.probe=run_shared_probe();
     if (caps.probe==NR_GPU_PROBE_FAIL) { caps.model=NR_GPU_DISCRETE; caps.reason="probe_fail"; }
+    else if (caps.probe==NR_GPU_PROBE_TIMEOUT) /* no verdict (a slow JIT or a busy device is not a wrong answer): the properties stand */
+      report(1,"SENSING: GPU_PLATFORM SHARED probe timed out; trusting the device properties (tier stays shared)");
+    else if (caps.probe==NR_GPU_PROBE_FAULT) {
+      /* The fault destroyed only the private probe context; DISCRETE only when the primary context still does a trivial alloc + copy. */
+      caps.model=primary_context_works() ? NR_GPU_DISCRETE : NR_GPU_NONE; caps.reason="probe_fault";
+    }
   }
   report(0,"SENSING: GPU_PLATFORM device=%d name=\"%s\" cc=%d.%d integrated=%d pageableMemoryAccess=%d pageableMemoryAccessUsesHostPageTables=%d canMapHostMemory=%d concurrentManagedAccess=%d hostNativeAtomicSupported=%d total=%zu free=%zu model=%s tier=%s reason=%s probe=%s%s%s",
          caps.device,caps.name,caps.major,caps.minor,caps.integrated,caps.pageable_memory_access,caps.host_page_tables,
          caps.can_map_host_memory,caps.concurrent_managed_access,caps.host_native_atomic_supported,caps.total_memory,caps.free_memory,
          caps.model==NR_GPU_SHARED?"shared":caps.model==NR_GPU_DISCRETE?"discrete":"unavailable",
          caps.model==NR_GPU_SHARED?"shared":caps.model==NR_GPU_DISCRETE?"discrete":"cpu",caps.reason,
-         caps.probe==NR_GPU_PROBE_OK?"ok":caps.probe==NR_GPU_PROBE_FAIL?"fail":"skipped",
+         caps.probe==NR_GPU_PROBE_OK?"ok":caps.probe==NR_GPU_PROBE_FAIL?"fail":caps.probe==NR_GPU_PROBE_TIMEOUT?"timeout":caps.probe==NR_GPU_PROBE_FAULT?"fault":"skipped",
          caps.forced?" FORCED=":"",caps.forced?(caps.forced-1==NR_GPU_NONE?"cpu":"discrete"):"");
   if (caps.model==NR_GPU_DISCRETE)
     report(0,"SENSING: GPU_PLATFORM DISCRETE: device buffers + pinned staging + explicit copies");

@@ -13,7 +13,7 @@ unsigned flags;
 int copy_kind, syncs;
 void *copy_stream;
 char memory[64][256];
-int next_buffer, warnings, info_lines, failed_attribute, cleared_errors, probe_result, probe_calls, memsets;
+int next_buffer, warnings, info_lines, failed_attribute, cleared_errors, probe_result, probe_calls, memsets, fail_device_alloc;
 std::string last_platform_line;
 void log_message(int warning,const char *m) {
   if (warning) ++warnings; else ++info_lines;
@@ -25,7 +25,7 @@ int get_count(int *n) { ++calls; *n=count; return 0; }
 int get_device(int *d) { *d=0; return 0; }
 int attr(int *v,int a,int) { *v=attrs[a]; return a==failed_attribute ? 1 : 0; }
 int mem_info(size_t *free,size_t *total) { *free=1024; *total=2048; return 0; }
-int device_alloc(void **p,size_t) { ++device_allocs; *p=memory[next_buffer++]; return 0; }
+int device_alloc(void **p,size_t) { if (fail_device_alloc) return 2; ++device_allocs; *p=memory[next_buffer++]; return 0; }
 int host_alloc(void **p,size_t,unsigned f) { ++host_allocs; flags=f; *p=memory[next_buffer++]; return 0; }
 int release(void *) { ++frees; return 0; }
 int device_ptr(void **d,void *h,unsigned) { *d=h; return 0; }
@@ -43,7 +43,7 @@ class Platform : public testing::Test {
     attrs[18]=attrs[19]=attrs[41]=attrs[89]=1; attrs[75]=12; attrs[76]=1;
     failed_attribute=-1; cleared_errors=0;
     count=1; calls=device_allocs=host_allocs=frees=registrations=next_buffer=syncs=0;
-    probe_result=NR_GPU_PROBE_OK; probe_calls=memsets=0; last_platform_line.clear();
+    probe_result=NR_GPU_PROBE_OK; probe_calls=memsets=fail_device_alloc=0; last_platform_line.clear();
     unsetenv("NR_GPU_FORCE_MODEL");
     nr_gpu_test_reset(&runtime);
     nr_gpu_test_set_probe(probe_hook);
@@ -145,6 +145,25 @@ TEST_F(Platform, ProbeFailFallsBackToDiscrete) {
   EXPECT_EQ(nr_gpu_platform_probe()->model,NR_GPU_DISCRETE);
   EXPECT_EQ(probe_calls,1);
   EXPECT_NE(last_platform_line.find("model=discrete tier=discrete reason=probe_fail probe=fail"),std::string::npos);
+}
+TEST_F(Platform, ProbeTimeoutKeepsShared) { // no verdict is not a wrong answer: the properties stand
+  attrs[88]=attrs[100]=1; probe_result=NR_GPU_PROBE_TIMEOUT;
+  EXPECT_TRUE(nr_gpu_platform_shared_direct());
+  EXPECT_EQ(nr_gpu_platform_probe()->model,NR_GPU_SHARED);
+  EXPECT_EQ(warnings,1);
+  EXPECT_NE(last_platform_line.find("model=shared tier=shared reason=integrated probe=timeout"),std::string::npos);
+}
+TEST_F(Platform, ProbeFaultWithHealthyPrimaryIsDiscrete) {
+  attrs[88]=attrs[100]=1; probe_result=NR_GPU_PROBE_FAULT;
+  EXPECT_FALSE(nr_gpu_platform_shared_direct());
+  EXPECT_EQ(nr_gpu_platform_probe()->model,NR_GPU_DISCRETE);
+  EXPECT_NE(last_platform_line.find("tier=discrete reason=probe_fault probe=fault"),std::string::npos);
+}
+TEST_F(Platform, ProbeFaultWithBrokenPrimaryIsCpu) {
+  attrs[88]=attrs[100]=1; probe_result=NR_GPU_PROBE_FAULT; fail_device_alloc=1;
+  EXPECT_FALSE(nr_gpu_platform_ready()); EXPECT_FALSE(nr_gpu_platform_shared_direct());
+  EXPECT_EQ(nr_gpu_platform_probe()->model,NR_GPU_NONE);
+  EXPECT_NE(last_platform_line.find("tier=cpu reason=probe_fault probe=fault"),std::string::npos);
 }
 TEST_F(Platform, ProbeSkippedTrustsProperties) { // no probe tooling: GB10 must not regress
   attrs[88]=attrs[100]=1; probe_result=NR_GPU_PROBE_SKIPPED;

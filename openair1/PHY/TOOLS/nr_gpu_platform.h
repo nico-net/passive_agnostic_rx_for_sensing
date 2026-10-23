@@ -19,9 +19,9 @@ typedef struct {
   nr_gpu_platform_model_t model;
   int probe;              /* NR_GPU_PROBE_*: the SHARED-access proof (only run for a SHARED candidate) */
   int forced;             /* 0 automatic, else the forced model + 1 (diagnostic override: NR_GPU_FORCE_MODEL or the test hook) */
-  const char *reason;     /* why this tier: integrated|ats|hmm_pcie|no_pageable|probe_fail|no_device|no_uva|no_mapped|forced */
+  const char *reason;     /* why this tier: integrated|ats|hmm_pcie|no_pageable|probe_fail|probe_fault|no_device|no_uva|no_mapped|forced */
 } nr_gpu_caps_t;
-enum { NR_GPU_PROBE_SKIPPED = 0, NR_GPU_PROBE_OK = 1, NR_GPU_PROBE_FAIL = 2 };
+enum { NR_GPU_PROBE_SKIPPED = 0, NR_GPU_PROBE_OK = 1, NR_GPU_PROBE_FAIL = 2, NR_GPU_PROBE_TIMEOUT = 3, NR_GPU_PROBE_FAULT = 4 };
 /* Pure policy functions also used by the mocked-capability tests.
  * nr_gpu_choose_model is the property-based decision (before the SHARED proof probe):
  *   NONE (CPU tier) without a device, UVA or mapped host memory; SHARED candidate iff pageable_memory_access && (integrated || host_page_tables);

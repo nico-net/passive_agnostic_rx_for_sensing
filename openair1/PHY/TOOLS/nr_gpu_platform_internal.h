@@ -27,10 +27,11 @@ extern "C" {
 #endif
 /* The runtime table once a tier other than CPU is selected, else NULL. */
 const nr_gpu_runtime_t *nr_gpu_platform_runtime(void);
-/* The SHARED-access proof: a kernel (libcuda driver API, embedded PTX) sums a malloc'd host buffer and writes the checksum back into it.
- * NR_GPU_PROBE_OK / NR_GPU_PROBE_FAIL (wrong checksum, kernel error or 1 s timeout), NR_GPU_PROBE_SKIPPED when the probe tooling is unavailable
- * (no libcuda symbol, no current context, PTX JIT error). Real GPU only; probe_locked() calls it for a SHARED candidate. */
-int nr_gpu_platform_run_probe(void);
+/* The SHARED-access proof: a kernel (libcuda driver API, embedded PTX) sums a malloc'd host buffer and writes the checksum back into it, in a private
+ * context of `device` (a fault never reaches the primary context; the caller's current context is restored).
+ * NR_GPU_PROBE_OK / FAIL (wrong checksum) / TIMEOUT (1 s, no verdict) / FAULT (launch or stream error), NR_GPU_PROBE_SKIPPED when the probe tooling
+ * is unavailable (no libcuda symbol, context creation, PTX JIT error). Real GPU only; probe_locked() calls it for a SHARED candidate. */
+int nr_gpu_platform_run_probe(int device);
 #ifdef __cplusplus
 }
 #endif
