@@ -1,6 +1,6 @@
 # PROJECT_MEMORY — Passive Agnostic 5G NR Receiver (OAI-UE based)
 
-> **Update 2026-10-23/24 (DGX spark-74c3, X410 34B2AF1, OTA night round and live blind front end, provisional): see §25, block 2026-10-23/24 status.** `csd/single-int` (rank-2 LLR and LDPC cap 16, solver wide-only RNTIs) is NOT yet merged into `adaptive-rx-UL-DL`. Blind front end found and tuned 4 operators live (PCI 675 restart failed, open). The 4-RX gate cannot pass on builds since `0fb22ecbd0`; a re-based gate is not adopted.
+> **Update 2026-10-23/24 (DGX spark-74c3, X410 34B2AF1, OTA night round and live blind front end, provisional): see §25, block 2026-10-23/24 status.** `csd/single-int` (rank-2 LLR and LDPC cap 16, solver wide-only RNTIs) is merged into `adaptive-rx-UL-DL` (fast-forward 2026-10-23 after the night OTA functional round; daytime interleaved A/B 2026-10-24 pending). Blind front end found and tuned 4 operators live (PCI 675 restart failed, open). The 4-RX gate cannot pass on builds since `0fb22ecbd0`; a re-based gate is not adopted.
 >
 > **Update 2026-10-22 (DGX spark-74c3, X410 34B2AF1, night A/B and final OTA, LOW LOAD, provisional): see §25, block 2026-10-22 status.** Merge `96a2097740` on `adaptive-rx-UL-DL` carries the floatpool code and the 32-unit discovery chunk minimum. Vodafone discovery throughput is about 60 % of main (n=1). Iliad/WindTre and the daytime Vodafone repeat are still open.
 >
@@ -4815,7 +4815,7 @@ Scope: DGX spark-74c3, X410 unit 34B2AF1, OTA at DEIB. Every run in this block i
 
 Scope: DGX spark-74c3, X410 unit 34B2AF1, OTA at DEIB. Branch `csd/single-int` (worktree `rr-int`, HEAD `89fe062d85` at this writing). Cells are never pooled. Commit facts are `[CODE-READ, git]`.
 
-**Merge state.** `csd/single-int` is **NOT yet an ancestor of `adaptive-rx-UL-DL`** (checked at `e9c874c308`) [CODE-READ, git]. The three fixes below are on `csd/single-int` only until that merge lands. Pending: the merge into `adaptive-rx-UL-DL`.
+**Merge state.** `csd/single-int` was fast-forwarded into `adaptive-rx-UL-DL` on 2026-10-23 at the user's request, after the night OTA functional round (item 3: LOW LOAD, n=1). The daytime interleaved A/B on 4 operators (2026-10-24 09:00, old main vs new main) is the adoption confirmation; a regression there reverts the offending fix.
 
 **1. Rank-2 and solver fixes on `csd/single-int`** (reports in `docs/superpowers/reports/csd/`: `RANK2-BIG-20261023.md`, `RANK2-ITER-20261023.md`, `RANK2-WEAK-20261023.md`, `SOLVER-WIDE-20261023.md`).
 - **a. PDSCH LDPC iteration cap 8 -> 16**, one value for all cells, no flag (`6591eeb471`).
