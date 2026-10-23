@@ -372,3 +372,48 @@ TEST(MmseExact, GpuMode3BitExact)
   std::printf("GPU mode 3 vs CPU nr_mmse3_symbol: %ld of %ld int16 outputs differ\n", tot_bad, tot);
   EXPECT_EQ(tot_bad, 0);
 }
+
+/* RANK2-WEAK: two layers alternate one modulation symbol per layer in the LLR buffer. A layer 10 dB down (weak layer = index 1) must
+ * not collapse: the shift gives it up to 2 more bits than the strong layer would; rank 1 and QPSK are bit for bit the old rule. */
+static std::vector<int16_t> two_layer(int qm, double s0, double s1, uint32_t nre, uint32_t seed)
+{
+  std::mt19937 rng(seed);
+  std::normal_distribution<double> d(0.0, 1.0);
+  std::vector<int16_t> v((size_t)nre * 2 * qm);
+  for (uint32_t re = 0; re < nre; re++)
+    for (int l = 0; l < 2; l++)
+      for (int b = 0; b < qm; b++) {
+        const double x = (l ? s1 : s0) * (std::fabs(d(rng)) + 0.3) * ((rng() & 1) ? 1 : -1);
+        v[((size_t)re * 2 + l) * qm + b] = (int16_t)std::lround(std::fmax(-32000.0, std::fmin(32000.0, x)));
+      }
+  return v;
+}
+static double weak_mean(const std::vector<int16_t> &v, int qm, int k)
+{
+  const size_t nre = v.size() / (2 * (size_t)qm);
+  double m = 0;
+  for (size_t re = 0; re < nre; re++)
+    for (int b = 0; b < qm; b++) m += std::abs(v[(re * 2 + 1) * qm + b] >> k);
+  return m / ((double)nre * qm);
+}
+TEST(LlrNorm, TwoLayerWeakLayerSizesTheShift)
+{
+  for (int qm : {4, 6, 8}) {
+    const auto v = two_layer(qm, 3000.0, 3000.0 / std::pow(10.0, 14.0 / 20.0), 20000, 3 + qm);
+    const uint32_t span = (uint32_t)v.size();
+    const int kold = nr_llr_norm_shift(v.data(), span);
+    const int knew = nr_llr_norm_shift_nl(v.data(), span, 2, qm);
+    EXPECT_GE(kold, knew) << "qm " << qm;
+    if (qm != 6) EXPECT_LT(knew, kold) << "qm " << qm; /* Qm 6: the stride-16 sample already reads both layers */
+    EXPECT_GE(weak_mean(v, qm, knew), 1.9 * weak_mean(v, qm, kold) - 1.0) << "qm " << qm << " weak layer gains >= 1 bit";
+    EXPECT_LE(knew, 8);
+    EXPECT_EQ(nr_llr_norm_shift_nl(v.data(), span, 1, qm), nr_llr_norm_shift(v.data(), span)); /* rank 1: unchanged */
+  }
+  /* Qm 4: the old stride-16 sample reads layer 0 only, the weak layer is left small */
+  const auto v = two_layer(4, 3000.0, 3000.0 / std::pow(10.0, 14.0 / 20.0), 20000, 9);
+  EXPECT_LT(weak_mean(v, 4, nr_llr_norm_shift(v.data(), (uint32_t)v.size())), 15.0);
+  const auto q = two_layer(2, 3000.0, 300.0, 20000, 5); /* QPSK: the plain rule, bit for bit */
+  EXPECT_EQ(nr_llr_norm_shift_nl(q.data(), (uint32_t)q.size(), 2, 2), nr_llr_norm_shift(q.data(), (uint32_t)q.size()));
+  const auto w = two_layer(4, 3000.0, 3000.0, 20000, 11);
+  EXPECT_LE(std::abs(nr_llr_norm_shift_nl(w.data(), (uint32_t)w.size(), 2, 4) - nr_llr_norm_shift(w.data(), (uint32_t)w.size())), 1);
+}
