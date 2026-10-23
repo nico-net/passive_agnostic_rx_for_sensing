@@ -3792,6 +3792,9 @@ TEST(GpuPassCompat, NoGateDriverDisablesPassOnce) {
   fclose(tmp);
   EXPECT_EQ(-1, r1);
   EXPECT_EQ(-1, r2);
-  EXPECT_EQ(1, (int)std::count(log.begin(), log.end(), '\n')) << "log: " << log;
+  /* the first init also probes the platform (GPU_PLATFORM lines): only the GPUPASS message must appear, once */
+  int n_gate = 0;
+  for (size_t p = log.find("GPUPASS: graph conditional nodes unavailable"); p != std::string::npos; p = log.find("GPUPASS: graph conditional nodes unavailable", p + 1)) n_gate++;
+  EXPECT_EQ(1, n_gate) << "log: " << log;
   EXPECT_NE(std::string::npos, log.find("GPUPASS: graph conditional nodes unavailable")) << "log: " << log;
 }

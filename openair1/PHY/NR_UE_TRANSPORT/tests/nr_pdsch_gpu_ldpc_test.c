@@ -258,6 +258,21 @@ int main(int argc, char **argv)
     g_urun = grun;
     grun = ul_retry_run;
   }
+  const char *fm = getenv("NR_GPU_FORCE_MODEL");
+  const int forced_cpu = fm && !strcmp(fm, "cpu");
+  if (argc > 2 && !strcmp(argv[2], "cpu")) { /* CPU tier: every standalone init must refuse, so the host keeps the CPU decoder (no GPU decode) */
+    nr_gpu_ldpc_ul_init_fn ui = uinit;
+    if (!forced_cpu || !ginit || !ui || ginit() == 0 || ui(100, 1000000) == 0) {
+      printf("LDPC_GPU_TEST cpu tier: init did not refuse\n");
+      return 3;
+    }
+    printf("LDPC_GPU_TEST cpu tier OK: DL and UL init refused, no GPU decode\n");
+    return 0;
+  }
+  if (forced_cpu && grun && (ul ? (uinit && uinit(100, 1000000) != 0) : (ginit && ginit() != 0))) {
+    printf("LDPC_GPU_TEST skipped: NR_GPU_FORCE_MODEL=cpu, GPU init refused by design\n");
+    return 77;
+  }
   if (!cpu || !grun || (ul ? (!uinit || uinit(100, 1000000) != 0) : (!ginit || ginit() != 0))) {
     printf("LDPC_GPU_TEST setup failed (%s)\n", dlerror());
     return 2;

@@ -1097,9 +1097,9 @@ static const GateDrv &gate_drv()
     static const char *const nm[4] = {"cuStreamGetCtx", "cuCtxFromGreenCtx", "cuGraphConditionalHandleCreate", "cuGraphAddNode"};
     static const int ver[4] = {NR_DRV_VER_STREAM_CTX, NR_DRV_VER_STREAM_CTX, NR_DRV_VER_COND_HANDLE, NR_DRV_VER_GRAPH_ADD_NODE};
     for (int i = 0; i < 4; i++)
-      if (!(f[i] = nr_drv_sym(nm[i], ver[i])) && !g.missing) g.missing = nm[i];
+      if (!(f[i] = nr_drv_sym(nm[i], ver[i])) && !g.missing && i != 1) g.missing = nm[i];
     g.stream_ctx = f[0]; g.from_green = (decltype(g.from_green))f[1]; g.hcreate = (decltype(g.hcreate))f[2]; g.addnode = (decltype(g.addnode))f[3];
-    g.ok = f[0] && f[1] && f[2] && f[3];
+    g.ok = f[0] && f[2] && f[3]; /* cuCtxFromGreenCtx (12.4+) is only needed for a stream in a green context, which the toolkit may not have */
     return g;
   }();
   return d;
@@ -1132,7 +1132,7 @@ static int capture_gated(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, int
     CUcontext cx = nullptr;
     CUgreenCtx gc = nullptr;
     if (nr_capture_info(s, &st, &id, &cg, &deps, &ed, &nd) != cudaSuccess || nr_stream_ctx(d.stream_ctx, (CUstream)s, &cx, &gc) != CUDA_SUCCESS) { g_gate_step = 1; break; }
-    if (gc && d.from_green(&cx, gc) != CUDA_SUCCESS) { g_gate_step = 2; break; }
+    if (gc && (!d.from_green || d.from_green(&cx, gc) != CUDA_SUCCESS)) { g_gate_step = 2; break; }
     CUgraphConditionalHandle h;
     if (d.hcreate(&h, (CUgraph)cg, cx, 1, CU_GRAPH_COND_ASSIGN_DEFAULT) != CUDA_SUCCESS) { g_gate_step = 3; break; }
     if (part(1) != 0) { g_gate_step = 4; break; }
@@ -1325,6 +1325,7 @@ extern "C" int nr_gpu_pass_hq_down(const uint16_t *blk, int16_t *d, int C, int k
 
 extern "C" int nr_gpu_pass_init(int max_classes)
 {
+  if (!nr_gpu_module_ready()) return -1; // CPU tier (no device, arch mismatch or NR_GPU_FORCE_MODEL=cpu): refuse, the host keeps the CPU path
   std::lock_guard<std::mutex> lk(g_mu);
   if (g_ready) return 0;
   { size_t fr = 0, tb = 0; if (cudaMemGetInfo(&fr, &tb) == cudaSuccess) g_base_mb = (tb - fr) >> 20; }

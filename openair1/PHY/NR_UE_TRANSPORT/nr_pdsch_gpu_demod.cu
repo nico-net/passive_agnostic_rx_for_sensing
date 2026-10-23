@@ -1444,6 +1444,7 @@ using namespace nrdm;
 
 extern "C" int nr_pdsch_gpu_demod_init(int nant)
 {
+  if (!nr_gpu_module_ready()) return -1; // CPU tier (no device, arch mismatch or NR_GPU_FORCE_MODEL=cpu): refuse, the host keeps the CPU path
   if (g_ok)
     return 0;
   if (nant > NR_GPU_DEMOD_MAX_RX)

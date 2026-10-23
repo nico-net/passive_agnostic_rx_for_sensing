@@ -135,6 +135,11 @@ if(ENABLE_LDPC_CUDA)
   add_test(NAME test_nr_pdsch_gpu_ldpc_sm COMMAND ./test_nr_pdsch_gpu_ldpc 2 sm WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   # ULLDPC: the same comparison through the UL pool of libpdsch_gpu.so
   add_test(NAME test_nr_pusch_gpu_ldpc COMMAND ./test_nr_pdsch_gpu_ldpc 2 ul WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_pdsch_gpu_ldpc test_nr_pdsch_gpu_ldpc_nc test_nr_pdsch_gpu_ldpc_mix test_nr_pdsch_gpu_ldpc_cl2 test_nr_pdsch_gpu_ldpc_cl4
+                       test_nr_pdsch_gpu_ldpc_sm test_nr_pusch_gpu_ldpc PROPERTIES SKIP_RETURN_CODE 77)
+  # CPU tier: the standalone inits refuse (NR_GPU_FORCE_MODEL=cpu), nothing decodes on the GPU
+  add_test(NAME test_nr_pdsch_gpu_ldpc_cpu COMMAND ./test_nr_pdsch_gpu_ldpc 2 cpu WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_pdsch_gpu_ldpc_cpu PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=cpu)
   # GPUSHARE: green-context SM partition helper (nr_gpu_green.h); exit 77 = skipped (no device / no green contexts)
   add_executable(test_nr_gpu_green ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_green_test.cu)
   set_target_properties(test_nr_gpu_green PROPERTIES CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
