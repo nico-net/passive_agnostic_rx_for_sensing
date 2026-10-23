@@ -35,14 +35,32 @@ fail:
   nr_gpu_buf_free(b);
   return -1;
 }
+int nr_gpu_buf_alloc_dev(nr_gpu_buf_t *b, size_t bytes)
+{
+  if (nr_gpu_model() == NR_GPU_MODEL_DIRECT)
+    return nr_gpu_buf_alloc(b, bytes);
+  const nr_gpu_runtime_t *rt = nr_gpu_platform_runtime();
+  memset(b, 0, sizeof(*b));
+  if (!rt || !bytes || !nr_gpu_allocations_allowed()) return -1; /* allocation fence */
+  b->bytes = bytes;
+  b->model = NR_GPU_MODEL_DISCRETE;
+  if (rt->malloc_device(&b->dev, bytes)) goto fail;
+  if (rt->memset_device ? rt->memset_device(b->dev, 0, bytes) : 0) goto fail; /* same zeroed contents as the DIRECT variant */
+  return 0;
+fail:
+  nr_gpu_buf_free(b);
+  return -1;
+}
 int nr_gpu_buf_h2d_async(nr_gpu_buf_t *b, size_t off, size_t n, void *s)
 {
   if (b->model == NR_GPU_MODEL_DIRECT) return 0;
+  if (!b->host) return -1; /* device-only buffer: no host mirror to copy from */
   return nr_gpu_platform_runtime()->copy_async((char *)b->dev + off, (char *)b->host + off, n, MEMCPY_H2D, s) ? -1 : 0;
 }
 int nr_gpu_buf_d2h_async(nr_gpu_buf_t *b, size_t off, size_t n, void *s)
 {
   if (b->model == NR_GPU_MODEL_DIRECT) return 0;
+  if (!b->host) return -1; /* device-only buffer: no host mirror to copy to */
   return nr_gpu_platform_runtime()->copy_async((char *)b->host + off, (char *)b->dev + off, n, MEMCPY_D2H, s) ? -1 : 0;
 }
 void nr_gpu_buf_free(nr_gpu_buf_t *b)

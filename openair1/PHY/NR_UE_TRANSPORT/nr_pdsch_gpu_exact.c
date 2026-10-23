@@ -8,6 +8,7 @@
 #include "nr_pdsch_gpu_chest.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "common/utils/LOG/log.h"
+#include "PHY/TOOLS/nr_gpu_mem.h" /* nr_gpu_model() */
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -282,6 +283,10 @@ static int (*g_unpin_fn)(void *);
 static pthread_once_t g_pin_once = PTHREAD_ONCE_INIT;
 static void pin_init(void)
 {
+  if (nr_gpu_model() != NR_GPU_MODEL_DIRECT) { /* the page-fault fix is for in-place reads (SHARED tier); on DISCRETE it would pin hundreds of MB for nothing */
+    LOG_A(PHY, "SENSING: GPU host pin: off (tier is not SHARED)\n");
+    return;
+  }
   void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!h)
     h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);

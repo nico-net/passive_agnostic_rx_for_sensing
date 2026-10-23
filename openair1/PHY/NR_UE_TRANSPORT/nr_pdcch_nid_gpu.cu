@@ -10,6 +10,7 @@
 #include <algorithm>
 #include "nr_dl_gpu_memory.h"
 #include "nr_gpu_green.h"
+#include "PHY/TOOLS/nr_gpu_cuda.h"
 #define NID_FN __device__
 #include "nr_pdcch_nid_stage1.h"
 #include "nr_pdcch_nid_chunks.h"
@@ -838,7 +839,7 @@ int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *s
 int run(void *ptr,nr_pdcch_nid_result_t *out) {return run_impl(ptr,out,nullptr);}
 const nr_pdcch_nid_ops_t ops={NR_PDCCH_NID_ABI,create,upload,run,destroy};
 }
-extern "C" const nr_pdcch_nid_ops_t *nr_pdcch_nid_gpu_ops(void) {return &ops;}
+extern "C" const nr_pdcch_nid_ops_t *nr_pdcch_nid_gpu_ops(void) {return nr_gpu_module_ready() ? &ops : nullptr;} // CPU tier: no ops, the caller keeps the CPU path
 
 // Synthetic parity harness only; the receiver's ABI always calls the full pipeline.
 extern "C" int nr_pdcch_nid_gpu_stage2_check(void *ctx,const nr_pdcch_nid_result_t *seed,nr_pdcch_nid_result_t *out) {
