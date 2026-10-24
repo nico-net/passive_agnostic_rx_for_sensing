@@ -5,6 +5,7 @@
 #include <thread>
 extern "C" {
 #include "nr_hq_retry.h"
+#include "nr_pdsch_ldpc_cap.h"
 }
 
 struct Entry {
@@ -114,4 +115,43 @@ TEST(HqRetxRule, SameNdiAndTbsCombineAnotherTbsDecodesAlone)
   EXPECT_EQ(nr_hq_retx_rule(true, 1, 0, 1, 1, 984, false), 1);      // no TBS recorded: unchanged behaviour
   EXPECT_EQ(nr_hq_retx_rule(true, 1, 1128, 1, 0, 1128, false), 0);  // rv 0 on the same NDI: combined only once admitted
   EXPECT_EQ(nr_hq_retx_rule(true, 1, 1128, 1, 0, 1128, true), 1);
+}
+
+// RANK2-ITER: the one LDPC iteration cap and the per-TB iteration summary (nr_pdsch_ldpc_cap.h)
+TEST(PdschLdpcCap, ParseEnv)
+{
+  EXPECT_EQ(nr_pdsch_ldpc_cap_parse(nullptr), 0);
+  EXPECT_EQ(nr_pdsch_ldpc_cap_parse(""), 0);
+  EXPECT_EQ(nr_pdsch_ldpc_cap_parse("abc"), 0);
+  EXPECT_EQ(nr_pdsch_ldpc_cap_parse("12x"), 0);
+  EXPECT_EQ(nr_pdsch_ldpc_cap_parse("0"), 0);
+  EXPECT_EQ(nr_pdsch_ldpc_cap_parse("-3"), 0);
+  EXPECT_EQ(nr_pdsch_ldpc_cap_parse("31"), 0);
+  EXPECT_EQ(nr_pdsch_ldpc_cap_parse("1"), 1);
+  EXPECT_EQ(nr_pdsch_ldpc_cap_parse("16"), 16);
+  EXPECT_EQ(nr_pdsch_ldpc_cap_parse("30"), 30);
+}
+
+TEST(PdschLdpcCap, ProductDefaultWithoutEnv)
+{
+  unsetenv("NR_TEST_PDSCH_LDPC_ITERS");
+  EXPECT_EQ(nr_pdsch_ldpc_cap(), NR_PDSCH_LDPC_CAP_DEFAULT);
+  EXPECT_EQ(NR_PDSCH_LDPC_CAP_DEFAULT, 16);
+  EXPECT_LE(NR_PDSCH_LDPC_CAP_DEFAULT, NR_PDSCH_LDPC_GPU_MAX); // the product cap must run on the GPU LDPC
+}
+
+TEST(PdschLdpcCap, IterSummary)
+{
+  const uint8_t its[5] = {3, 5, 8, 0, 0}; // block 2 hit the cap (8), blocks 3 and 4 were aborted (not reported)
+  const bool ok[5] = {true, true, false, false, false};
+  uint8_t mx = 99;
+  uint16_t sum = 99;
+  EXPECT_EQ(nr_pdsch_ldpc_iters_summary(its, ok, 5, &mx, &sum), 3);
+  EXPECT_EQ(mx, 8);
+  EXPECT_EQ(sum, 8); // 3 + 5: only the blocks that decoded
+  const uint8_t none[2] = {0, 0};
+  const bool nok[2] = {false, false};
+  EXPECT_EQ(nr_pdsch_ldpc_iters_summary(none, nok, 2, &mx, &sum), 0);
+  EXPECT_EQ(mx, 0);
+  EXPECT_EQ(sum, 0);
 }

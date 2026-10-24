@@ -1013,7 +1013,7 @@ class GpuPassFixture {
     for (uint32_t i = 0; i < G; i++) if (tb.scr[i >> 5] >> (i & 31) & 1u) llr[i] = (int16_t)(-llr[i]);
     llr_post = llr;
     if (G >= 64) {
-      const int k = nr_llr_norm_shift(llr.data(), nr_llr_norm_span(G, (uint32_t)tb.C));
+      const int k = nr_llr_norm_shift_nl(llr.data(), nr_llr_norm_span(G, (uint32_t)tb.C), nl, qm);
       if (k > 0) for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)(llr[i] >> k);
     }
     return decode_llr(m, P, st, llr, s);

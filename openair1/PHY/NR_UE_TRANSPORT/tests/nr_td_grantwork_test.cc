@@ -483,7 +483,7 @@ TEST(GrantWorkCb0, SameSignatureDifferentCNormalisesPerHypothesis)
     const int dlen = nr_td_gw_cb0_dlen(&p);
     /* reference: the decode without GrantWork */
     std::vector<int16_t> full = shared;
-    const int k = nr_llr_norm_shift(full.data(), nr_llr_norm_span(G, nr_llr_norm_num_cb(p.A, p.BG)));
+    const int k = nr_llr_norm_shift_nl(full.data(), nr_llr_norm_span(G, nr_llr_norm_num_cb(p.A, p.BG)), p.Nl, p.Qm);
     for (uint32_t i = 0; i < G; i++)
       full[i] = (int16_t)(full[i] >> k);
     std::vector<int16_t> ref(dlen, 0), harq_e(p.E);

@@ -166,6 +166,9 @@ typedef struct {
   uint16_t             dmrs_ports;   ///< T26d diag: DM-RS port bitmap the decode used
   uint8_t              n_cdm;        ///< T26d diag: CDM groups without data
   uint8_t              dmrs_add;     ///< T26d diag: number of DM-RS symbols
+  uint8_t              ldpc_it_max;  ///< RANK2-ITER: max OAI numIter over the code blocks of the last LDPC run (cap = a block hit it), 0 = no LDPC ran (EVMGRANT it=)
+  uint8_t              ldpc_it_cap;  ///< RANK2-ITER: the LDPC iteration cap in force (EVMGRANT itc=)
+  uint16_t             ldpc_it_sum;  ///< RANK2-ITER: sum of numIter over the code blocks that decoded (EVMGRANT its=)
   uint8_t              skip;         ///< TAIL-FIX no-chance gate (nr_snr_gate.h): 1 = DM-RS SNR far below the MCS requirement, not demodulated / decoded / retried (EVMGRANT skip=)
 } nr_pdsch_passive_decode_result_t;
 
