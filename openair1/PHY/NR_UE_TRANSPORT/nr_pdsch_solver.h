@@ -27,7 +27,7 @@
 extern "C" {
 #endif
 
-#define NR_PDSCH_SOLVER_MAX_LAYOUTS 32768 /* = NR_DCI11_LAYOUT_MAX */
+#define NR_PDSCH_SOLVER_MAX_LAYOUTS 65536 /* >= NR_DCI11_LAYOUT_MAX (65535; id 0xFFFF is "none") */
 #define NR_PDSCH_SOLVER_MAX_VAR 24
 
 typedef struct {
@@ -37,11 +37,13 @@ typedef struct {
   uint16_t dmrs_ports; ///< parsed DCI 1_1 antenna-ports bitmap
   uint8_t n_layers;    ///< number of DM-RS ports / PDSCH layers in this reading
   uint8_t mcs;         ///< MCS parsed by this reading
+  float fit;           ///< DM-RS evidence for this reading's PRBs in this slot, 0..1 (F1 against the PRBs carrying the RNTI's
+                       ///< DM-RS); < 0 = not measured. Orders the search and weights its probe share; never a hard cut.
 } nr_pdsch_solver_reading_t;
 
-/* ISAC_PDSCH_SOLVER_NL_PREF=N (default off) probes one-layer QPSK readings first and waits up to N grants before
- * falling back when none is available. ISAC_PDSCH_SOLVER_THREAD_CTX=1 (default off) keeps each scan consumer's grant
- * scrambling/CORESET/slot context separate so concurrent plans cannot use another consumer's hypotheses. */
+/* Readings are ranked only by evidence: the DM-RS fit (reading.fit) orders and weights the search, the CRC decides. There is no
+ * width limit and no modulation preference (DCI11-RESOLVER 2026-10-24). Each scan consumer keeps its own grant
+ * scrambling/CORESET/slot context, so concurrent plans cannot use another consumer's hypotheses. */
 /* ISAC_PDSCH_SOLVER_COVERAGE=1 (default off) tracks search progress per stable layout, TDRA and scrambling identity,
  * so changes in the order/number of readings between grants cannot repeatedly skip a physical hypothesis. */
 
@@ -75,10 +77,9 @@ bool nr_pdsch_solver_owns(uint16_t rnti);
  * `budget` caps the probes; returns the number written to out[]. */
 int nr_pdsch_solver_plan(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uint8_t mcs, int l0,
                          const nr_pdsch_solver_reading_t *rd, int n_rd, int budget, nr_pdsch_solver_var_t *out);
-/** WL-SOLVER: BWP width in RB (0 = unknown); a BWP narrower than 2 x 48 RB is searched up to its full width. */
-void nr_pdsch_solver_set_bwp_rb(int rb);
-/** Widest reading searched for a BWP of bwp_rb RB (48 for wide or unknown BWPs). Pure. */
-uint16_t nr_pdsch_solver_search_max_rb(int bwp_rb);
+/** A SOLVED RNTI's layout set (the layouts consistent with its CRC passes, the representative among them), ascending, at most
+ * `max`: the caller then parses only these instead of every live layout. -1 when the RNTI is not solved or the set exceeds max. */
+int nr_pdsch_solver_layouts(uint16_t rnti, uint16_t *ids, int max);
 /** As nr_pdsch_solver_plan(), for a slot that carries run-time-discovered CSI-RS resources (csirs_slot): whether the
  * gNB rate-matches this RNTI's PDSCH around them (TS 38.214 5.1.4: only resources configured for THIS UE) is a per-RNTI
  * hypothesis chosen by TB CRC -- both are probed until one passes. The search never starts on such a slot, so a

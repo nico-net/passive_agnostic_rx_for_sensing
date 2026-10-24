@@ -1,7 +1,9 @@
 /* Deterministic DCI 1_1 resolver observe sequence + state hash. Header-only C99 so a standalone C harness (built against the
  * ORIGINAL nr_pdcch_dci11_layout_sweep.c to produce the golden value) and the gtest (built against the current one) run the
  * exact same code. Covers nr_dci11_resolver_observe_rnti(): HARQ-sequence bookkeeping, plausibility/impossibility counters,
- * histograms, hard refutation, Wilson drops, distribution ranking. */
+ * hard refutation, Wilson drops. (DCI11-RESOLVER 2026-10-24: the histograms / distribution ranking and the FDRA staging are gone, and
+ * the layout set is the full TS 38.212 7.3.1.2.2 space; the golden values were regenerated with this harness on the new code --
+ * they pin the observe() arithmetic from here on, not equality with the pre-resolver code.) */
 #ifndef NR_DCI11_OBSERVE_GOLDEN_H
 #define NR_DCI11_OBSERVE_GOLDEN_H
 #include <stdint.h>
@@ -39,7 +41,7 @@ static inline nr_dci11_resolver_t *g11_observe_state(int bwp, int n_obs, int *be
   nr_dci11_resolver_t *r = (nr_dci11_resolver_t *)calloc(1, sizeof(*r));
   const uint16_t span_bits = (uint16_t)(bwp > 200 ? 15 : bwp > 100 ? 13 : 12);
   int best_len = 0, best_n = 0;
-  for (int len = 40; len <= 90; len++) {
+  for (int len = 40; len <= 50; len++) { /* DCI11-RESOLVER: the full standard space grows ~25 %/bit; realistic lengths only */
     const int n = nr_dci11_resolver_init_fdra(r, 0, (uint16_t)bwp, span_bits, NR_DCI11_TDA_UNKNOWN, (uint16_t)len);
     if (n > best_n) { best_n = n; best_len = len; }
   }
@@ -81,16 +83,13 @@ static inline uint64_t g11_observe_run(int bwp, int n_obs, char *out_info, size_
   h = g11_fnv(h, &nh, sizeof(nh));
   h = g11_fnv(h, &r->n_alive, sizeof(r->n_alive));
   h = g11_fnv(h, &r->n_obs, sizeof(r->n_obs));
-  h = g11_fnv(h, &r->dropped_dist, sizeof(r->dropped_dist));
   h = g11_fnv(h, &r->winner, sizeof(r->winner));
-  h = g11_fnv(h, &r->fdra_next, sizeof(r->fdra_next));
   h = g11_fnv(h, r->alive, (size_t)nh * sizeof(r->alive[0]));
   h = g11_fnv(h, r->seen, (size_t)nh * sizeof(r->seen[0]));
   h = g11_fnv(h, r->pass, (size_t)nh * sizeof(r->pass[0]));
   h = g11_fnv(h, r->impossible, (size_t)nh * sizeof(r->impossible[0]));
   h = g11_fnv(h, r->harq_pairs, (size_t)nh * sizeof(r->harq_pairs[0]));
   h = g11_fnv(h, r->harq_inc, (size_t)nh * sizeof(r->harq_inc[0]));
-  h = g11_fnv(h, r->hist, (size_t)nh * sizeof(r->hist[0]));
   h = g11_fnv(h, r->harq_rnti, sizeof(r->harq_rnti));
   if (out_info) snprintf(out_info, info_n, "len=%d n_hyp=%d n_alive=%d n_obs=%u", best_len, nh, r->n_alive, r->n_obs);
   free(r);
