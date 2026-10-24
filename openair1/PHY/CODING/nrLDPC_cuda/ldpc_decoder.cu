@@ -4,6 +4,7 @@ SPDX-License-Identifier: Apache-2.0
 */
 #include <cuda_runtime.h>
 #include "PHY/TOOLS/nr_gpu_cuda.h"
+#include "PHY/TOOLS/nr_gpu_membudget.h"
 #include <vector>
 #include <map>
 #include <cstdio>
@@ -1006,7 +1007,9 @@ NB_MODULE(ldpc_decoder, m) {
  * with LDPC_POOL_POISON and returns non-zero; the caller must also treat a non-zero status as failure
  * (the poison pattern is defence in depth, not the guarantee: the CPU CRC cannot be proven to reject it
  * for every K). Requests above POOL_MAX_LAUNCH code blocks are split over several launches. */
-static const uint32_t POOL_MAX_LAUNCH = 512; /* code blocks per launch: bounds msg memory (~615 MB) */
+#define POOL_MAX_LAUNCH_FULL 512u /* code blocks per launch: bounds msg memory (~615 MB at 512) */
+#define POOL_MAX_LAUNCH_MIN 128u  /* T6b floor: below it the pool is not ready (CPU decode) */
+static uint32_t POOL_MAX_LAUNCH = POOL_MAX_LAUNCH_FULL; /* T6b: 512 down to 128 (powers of two: ldpc_batch_reserve rounds up) from the shared memory budget. Larger requests are split over several launches (ldpc_pool_decode), so only the throughput depends on it */
 static uint64_t g_pool_errors, g_pool_poisoned; /* ldpc_pool_counters() */
 /* Test hooks (K34). Defaults come from the environment ONCE (first use); tests override at run time through
  * ldpc_pool_test_hooks(). skip: skip the launch; stall_ms: sleep before the launch; inject: 1 = CUDA error
@@ -1045,6 +1048,24 @@ extern "C" int ldpc_pool_init(uint32_t cap) {
     if (!ldpc_decoder_init(1)) /* global base-graph tables */
         return -1;
     int rc = 0;
+    {
+        /* T6b: device bytes per code block of a launch: LLR in + posterior + messages + bits + done/unsat flags */
+        const size_t per_cb = 2ull * BATCH_LLR_STRIDE + BATCH_MSG_STRIDE + BATCH_BITS_STRIDE + 2 * sizeof(uint32_t);
+        const size_t share = nr_gpu_membudget_share(NR_GPU_MEM_LDPC_POOL);
+        uint32_t launch = POOL_MAX_LAUNCH_FULL;
+        while (launch > POOL_MAX_LAUNCH_MIN && per_cb * launch > share)
+            launch >>= 1;
+        if (per_cb * launch > share) {
+            fprintf(stderr, "[GPU] ldpc pool: memory budget share %zu MB < %zu MB for %u code blocks per launch; pool not ready (CPU LDPC)\n", share >> 20,
+                    (per_cb * launch) >> 20, launch);
+            nr_gpu_membudget_commit(NR_GPU_MEM_LDPC_POOL, 0, 0.0);
+            return -1;
+        }
+        if (launch != POOL_MAX_LAUNCH_FULL)
+            fprintf(stderr, "[GPU] ldpc pool: max launch %u -> %u code blocks (share %zu MB, %zu MB)\n", POOL_MAX_LAUNCH_FULL, launch, share >> 20, (per_cb * launch) >> 20);
+        POOL_MAX_LAUNCH = launch;
+        nr_gpu_membudget_commit(NR_GPU_MEM_LDPC_POOL, per_cb * launch, (double)launch / POOL_MAX_LAUNCH_FULL);
+    }
     {
         const char *disc = getenv("ISAC_CSIRS_DISC");
         int least = 0, greatest = 0;

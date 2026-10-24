@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_gpu_platform_internal.h"
+#include "nr_gpu_membudget.h"
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -516,3 +517,67 @@ void nr_gpu_test_reset(const nr_gpu_runtime_t *runtime)
 /* nr_gpu_test_set_probe: test-only: injects the SHARED-access proof used at the next probe (NULL = skipped). */
 void nr_gpu_test_set_probe(int (*probe)(void)) { probe_hook=probe; }
 #endif
+
+/* ---- shared device-memory budget (T6b), see nr_gpu_membudget.h ---- */
+static struct { size_t bytes[NR_GPU_MEM_N]; double scale[NR_GPU_MEM_N]; int committed[NR_GPU_MEM_N]; int logged; } mb;
+size_t nr_gpu_membudget_total(void)
+{
+  size_t freeb = nr_gpu_platform_free_at_probe();
+  const char *e = getenv("NR_GPU_MEM_BUDGET_MB"); /* diagnostic: emulate a smaller card (free memory at probe) */
+  if (e && *e) {
+    const unsigned long mbv = strtoul(e, NULL, 10);
+    if (mbv) {
+      freeb = (size_t)mbv << 20;
+      pthread_mutex_lock(&mu);
+      if (!mb.logged) { mb.logged = 1; report(1, "SENSING: GPU_MEM budget FORCED NR_GPU_MEM_BUDGET_MB=%lu (free memory at probe emulated)", mbv); }
+      pthread_mutex_unlock(&mu);
+    }
+  }
+  return nr_gpu_membudget_calc(freeb);
+}
+size_t nr_gpu_membudget_share(nr_gpu_mem_module_t m)
+{
+  return m < NR_GPU_MEM_N ? nr_gpu_membudget_share_of(nr_gpu_membudget_total(), m) : 0;
+}
+void nr_gpu_membudget_commit(nr_gpu_mem_module_t m, size_t bytes, double scale)
+{
+  if (m >= NR_GPU_MEM_N) return;
+  pthread_mutex_lock(&mu);
+  mb.bytes[m] = bytes; mb.scale[m] = scale; mb.committed[m] = 1;
+  pthread_mutex_unlock(&mu);
+}
+size_t nr_gpu_membudget_graph_bytes(void)
+{
+  const size_t B = nr_gpu_membudget_total();
+  if (B == SIZE_MAX) return SIZE_MAX;
+  size_t g = nr_gpu_membudget_share_of(B, NR_GPU_MEM_GRAPH);
+  pthread_mutex_lock(&mu);
+  for (int m = 0; m < NR_GPU_MEM_N - 1; m++) {
+    const size_t sh = nr_gpu_membudget_share_of(B, (nr_gpu_mem_module_t)m);
+    if (mb.committed[m] && mb.bytes[m] < sh) g += sh - mb.bytes[m];
+  }
+  pthread_mutex_unlock(&mu);
+  return g;
+}
+int nr_gpu_membudget_format(char *out, size_t n)
+{
+  const size_t B = nr_gpu_membudget_total();
+  int k = snprintf(out, n, "budget_mb=%lld", B == SIZE_MAX ? -1LL : (long long)(B >> 20));
+  pthread_mutex_lock(&mu);
+  for (int m = 0; m < NR_GPU_MEM_N && k > 0 && (size_t)k < n; m++) {
+    const size_t sh = nr_gpu_membudget_share_of(B, (nr_gpu_mem_module_t)m);
+    if (mb.committed[m])
+      k += snprintf(out + k, n - k, " %s=%lluMB/share=%lldMB/scale=%.3f%s", nr_gpu_mem_name[m], (unsigned long long)(mb.bytes[m] >> 20),
+                    sh == SIZE_MAX ? -1LL : (long long)(sh >> 20), mb.scale[m], mb.bytes[m] ? "" : "(CPU)");
+    else
+      k += snprintf(out + k, n - k, " %s=n/a", nr_gpu_mem_name[m]);
+  }
+  pthread_mutex_unlock(&mu);
+  return k;
+}
+void nr_gpu_membudget_test_reset(void)
+{
+  pthread_mutex_lock(&mu);
+  memset(&mb, 0, sizeof(mb));
+  pthread_mutex_unlock(&mu);
+}

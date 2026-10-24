@@ -15,6 +15,7 @@
 #include "nr_pdsch_gpu_ldpc.h"
 #include "nr_gpu_pass_post.h"
 #include "nr_gpu_pass_cap.h"
+#include "PHY/TOOLS/nr_gpu_membudget.h"
 #include "PHY/TOOLS/nr_gpu_platform.h"
 #include "PHY/TOOLS/nr_gpu_compat.h"
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
@@ -1122,7 +1123,15 @@ static int split_cap_auto()
 {
   size_t fr = 0, tb = 0;
   if (cudaMemGetInfo(&fr, &tb) != cudaSuccess) tb = 0;
-  return nr_gpu_pass_cap_mb(tb ? tb : (size_t)8 << 30, nr_gpu_platform_free_at_probe()); /* no device info: the 8 GB card's value */
+  int cap = nr_gpu_pass_cap_mb(tb ? tb : (size_t)8 << 30, nr_gpu_platform_free_at_probe()); /* no device info: the 8 GB card's value */
+  /* T6b: the shared budget. The cap covers the instances plus the graphs; the graphs get their share plus what the other modules left unused
+   * (unlimited / large budgets: SIZE_MAX or above the first term, so GB10 keeps 3072). */
+  const size_t gb = nr_gpu_membudget_graph_bytes();
+  if (gb != SIZE_MAX) {
+    const uint64_t b = (gb >> 20) + g_inst_mb.load();
+    if (b < (uint64_t)cap) cap = (int)(b ? b : 1);
+  }
+  return cap;
 }
 static int split_cap_mb() { return g_cfg.split_mb > 0 ? g_cfg.split_mb : split_cap_auto(); /* measured 0.55 MB per graph executable (the gated D / L wrappers included): 5 DL-shape executables (4 real + overflow) per class need ~1.5 GB for the full warm set of the unit test (was 1008 MB with 4); production warms fewer classes */ }
 static bool split_cap_hit(uint64_t extra_kb)
@@ -1407,6 +1416,7 @@ extern "C" int nr_gpu_pass_init(int max_classes)
     }
   }
   g_inst_mb = ib >> 20;
+  nr_gpu_membudget_commit(NR_GPU_MEM_PASS, ib + (size_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2, 1.0);
   if (g_cfg.split && g_inst_mb >= (uint64_t)split_cap_mb()) { /* review S5: no room for any sub-graph: the single-graph (v1 class) mode; the host reads nr_gpu_pass_split_on() */
     fprintf(stderr, "GPUGRAPH split: the pass instances alone (%lu MB) reach the cap %d MB: split mode off\n", (unsigned long)g_inst_mb.load(), split_cap_mb());
     g_cfg.split = 0;

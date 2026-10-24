@@ -35,6 +35,7 @@
 #include "nrLDPC_cb0_cuda.h"
 #include "ldpc_cuda_bg.h"
 #include "../../NR_UE_TRANSPORT/nr_dl_gpu_memory.h"
+#include "PHY/TOOLS/nr_gpu_membudget.h"
 
 namespace {
 
@@ -458,6 +459,37 @@ void slot_free_buffers(Slot& s)
   s.ev_done = b;
 }
 
+/* T6b: device bytes of the module for (cap items per slot, chunk_max codewords in the work buffers). WARMUP_EXTRA: graphs and driver state of the warm-up [MEASURED, sens6 census] */
+constexpr size_t CB0_WARMUP_EXTRA = (size_t)320 << 20; /* ldpc_cb0_warmup: +320 MB (graphs, driver state) [MEASURED, sens6, 273 PRB census] */
+size_t cb0_device_bytes(int cap, uint32_t chunk_max, int nslots)
+{
+  const size_t work = (size_t)chunk_max * MSG_MAX + 2 * (size_t)chunk_max * 8 * CH + (size_t)chunk_max * 8 * (sizeof(uint32_t) * 3 + 1);
+  const size_t slot = (size_t)cap * (sizeof(DMeta) + sizeof(ldpc_cb0_result_t) + LDPC_CB0_BITS_STRIDE + CH);
+  return work + (size_t)nslots * slot + CB0_WARMUP_EXTRA;
+}
+/* T6b: picks (cap, chunk_max) from the memory budget share: full size (2048, 256) when it fits (GB10: unchanged), else chunk_max first (the L2-sized chunk of
+ * chunk_for() is 16..64 codewords, so 64 changes nothing at BG1 Z=384), then cap down to 512. A submit above cap is refused (LDPC_CB0_E_TOOBIG) and the
+ * caller decodes that batch on the CPU: correctness never depends on the size. Returns false when even the smallest does not fit (module not ready). */
+bool cb0_pick_sizes()
+{
+  static const struct { int cap; uint32_t chunk; } steps[] = {{2048, 256}, {2048, 128}, {2048, 64}, {1024, 64}, {512, 64}, {512, 32}};
+  const size_t share = nr_gpu_membudget_share(NR_GPU_MEM_LDPC_CB0);
+  for (const auto& st : steps)
+    if (share == SIZE_MAX || cb0_device_bytes(st.cap, st.chunk, g.nslots) <= share) {
+      g.cap = st.cap;
+      g.chunk_max = st.chunk;
+      const size_t b = cb0_device_bytes(g.cap, g.chunk_max, g.nslots);
+      if (st.cap != 2048 || st.chunk != 256)
+        fprintf(stderr, "[GPU] ldpc cb0: cap %d chunk_max %u (share %zu MB, need %zu MB; full 2048/256 = %zu MB)\n", st.cap, st.chunk, share >> 20, b >> 20,
+                cb0_device_bytes(2048, 256, g.nslots) >> 20);
+      nr_gpu_membudget_commit(NR_GPU_MEM_LDPC_CB0, b, (double)b / (double)cb0_device_bytes(2048, 256, g.nslots));
+      return true;
+    }
+  fprintf(stderr, "[GPU] ldpc cb0: memory budget share %zu MB < %zu MB (smallest); module not ready (CPU)\n", share >> 20, cb0_device_bytes(512, 32, g.nslots) >> 20);
+  nr_gpu_membudget_commit(NR_GPU_MEM_LDPC_CB0, 0, 0.0);
+  return false;
+}
+
 /* (Re)allocate every slot's buffers for `mode`. Idle only (init, or the test switch). */
 int slots_alloc(int mode)
 {
@@ -524,6 +556,8 @@ int init_locked()
   cudaDeviceGetStreamPriorityRange(&lo, &hi); /* lo = numerically greatest = lowest priority: TB decodes go first */
   if (cudaStreamCreateWithPriority(&g.s, cudaStreamNonBlocking, lo) != cudaSuccess
       || cudaStreamCreateWithPriority(&g.s_copy, cudaStreamNonBlocking, lo) != cudaSuccess)
+    return 0;
+  if (!cb0_pick_sizes())
     return 0;
   g.msg_bytes = (size_t)g.chunk_max * MSG_MAX;
   if (nr_gpu_allocate(NR_GPU_DEVICE, &g.msg, g.msg_bytes) != cudaSuccess || nr_gpu_allocate(NR_GPU_DEVICE, &g.chan, (size_t)g.chunk_max * 8 * CH) != cudaSuccess

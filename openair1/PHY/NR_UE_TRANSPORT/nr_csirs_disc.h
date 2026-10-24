@@ -242,6 +242,10 @@ const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GP
  * The module exports gpu_ops above, plus nr_csirs_disc_gpu_alloc_unified/_free_unified; the loader installs them
  * into the core hooks nr_csirs_disc_alloc_unified/_free_unified (function pointers, see U1 above). */
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void);
+/* T6b: switches the GPU discovery off for the process (memory budget or an allocation failure): nr_csirs_disc_gpu_load() returns NULL from then on and the CPU path runs. */
+void nr_csirs_disc_gpu_disable(void);
+/* T6b: observation ring capacity (slots) chosen by nr_csirs_disc_pipeline_init() from the memory budget: NR_CSIRS_DISC_DEFAULT_CAPACITY (640) when it fits. */
+int nr_csirs_disc_ring_capacity(void);
 
 typedef struct {
   uint64_t batches, footprints, hyps, winners, ambiguous;
