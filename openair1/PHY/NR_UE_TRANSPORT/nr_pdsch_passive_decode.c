@@ -2780,8 +2780,11 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       int pst = nr_gpu_path_state(NR_GPU_PATH_PASS_DL);
       if (pst == NR_GPU_PATH_UNSET)
         pst = nr_gpu_path_begin(NR_GPU_PATH_PASS_DL, 1, NR_GPU_PATH_MEASURE_TRIAL);
-      if (pst == NR_GPU_PATH_TRIAL && t_gp_path_side == 0)
-        t_gp_path_side = nr_gpu_path_pick(NR_GPU_PATH_PASS_DL) ? 3 : 2; /* once per decode call of the queue (retries keep the side) */
+      /* once per decode call of the queue (retries keep the side). Layout probes (the solver's searches, on the pass with COVER) are never samples
+       * (nr_pdsch_passive_queue.c), so they take no pick: they run on the pass unsampled. Before (sens6 rfsim 273 PRB rank 1, 2026-10-24) the probes
+       * of the solve used up the 32 x n picks and the trial ended trial_incomplete with n_gpu = n_cpu = 0. */
+      if (pst == NR_GPU_PATH_TRIAL && t_gp_path_side == 0 && !t_probe_first_seg && probe_last_sym < 0)
+        t_gp_path_side = nr_gpu_path_pick(NR_GPU_PATH_PASS_DL) ? 3 : 2;
       if (pst == NR_GPU_PATH_CPU || (pst == NR_GPU_PATH_TRIAL && t_gp_path_side == 2))
         gp_gate = NR_GPU_PASS_GATE_PATH;
     }

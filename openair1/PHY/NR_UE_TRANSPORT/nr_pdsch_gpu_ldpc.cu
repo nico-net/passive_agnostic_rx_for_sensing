@@ -575,10 +575,24 @@ static int acquire(int limit = CTX) /* limit: Q4, the staged DISCRETE run only o
  * kernel can write) come back in async copies on the same stream; the host then reads the mirrors exactly as it read the mapped buffers. */
 static bool g_stg;      /* the standalone pools are staged (DISCRETE tier at init) */
 static int g_stg_n;     /* DL contexts with staging buffers (the others are never handed out on DISCRETE) */
+/* plain cudaMalloc like the context's own work buffers (x.llr / c2v): the UL pool initialises lazily, on the first PUSCH TB, which can be after the
+ * allocation fence of nr_gpu_buf_alloc* closed (receiver running) -- the fenced allocator refused it there (sens6 rfsim, 2026-10-24) */
+static bool dev_zalloc(nr_gpu_buf_t *b, size_t bytes)
+{
+  memset(b, 0, sizeof(*b));
+  if (cudaMalloc(&b->dev, bytes) != cudaSuccess || cudaMemset(b->dev, 0, bytes) != cudaSuccess) {
+    if (b->dev) cudaFree(b->dev);
+    b->dev = nullptr;
+    return false;
+  }
+  b->bytes = bytes;
+  b->model = NR_GPU_MODEL_DISCRETE;
+  return true;
+}
 static bool stage_alloc(Ctx &x, int cap, int cio)
 {
-  return nr_gpu_buf_alloc_dev(&x.sin, (size_t)cap * MAXC * ZMAX + 16) == 0 && nr_gpu_buf_alloc_dev(&x.ssnap, (size_t)cio * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX) == 0
-         && nr_gpu_buf_alloc_dev(&x.sres, sizeof(int) * 2 * (size_t)cio) == 0 && nr_gpu_buf_alloc_dev(&x.sdj, sizeof(DJob) * (size_t)cap) == 0;
+  return dev_zalloc(&x.sin, (size_t)cap * MAXC * ZMAX + 16) && dev_zalloc(&x.ssnap, (size_t)cio * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX)
+         && dev_zalloc(&x.sres, sizeof(int) * 2 * (size_t)cio) && dev_zalloc(&x.sdj, sizeof(DJob) * (size_t)cap);
 }
 static size_t stage_ctx_bytes(int cap, int cio)
 {

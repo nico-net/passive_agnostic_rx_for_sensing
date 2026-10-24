@@ -1864,8 +1864,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           int pst_ = nr_gpu_path_state(NR_GPU_PATH_PASS_UL);
           if (pst_ == NR_GPU_PATH_UNSET)
             pst_ = nr_gpu_path_begin(NR_GPU_PATH_PASS_UL, 1, NR_GPU_PATH_MEASURE_TRIAL);
-          if (pst_ == NR_GPU_PATH_TRIAL) {
-            t_ul_path_side = nr_gpu_path_pick(NR_GPU_PATH_PASS_UL);
+          if (pst_ == NR_GPU_PATH_TRIAL) { /* solver probes are never samples (below): they take no pick and run on the pass (as the DL trial, Q4 fix) */
+            t_ul_path_side = t_solver_probe ? -1 : nr_gpu_path_pick(NR_GPU_PATH_PASS_UL);
             t_ul_path_kllr = (double)in.num_rb * 12.0 * in.num_symbols * qm_ / 1000.0;
           }
           if (pst_ == NR_GPU_PATH_CPU || (pst_ == NR_GPU_PATH_TRIAL && t_ul_path_side == 0))
