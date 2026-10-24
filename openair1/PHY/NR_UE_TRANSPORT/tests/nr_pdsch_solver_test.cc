@@ -105,62 +105,53 @@ TEST(PdschSolver, ConcurrentScanConsumersKeepTheirOwnGrantContext)
   EXPECT_TRUE(result[1].own_scr);
 }
 
-TEST(PdschSolver, OneLayerQpskReadingsGetFirstProbesAndFallBackAtOnce)
+/* DCI11-RESOLVER: the one-layer-QPSK preference (and its WL-SOLVER rotation) and the 48-RB / BWP-width search cap are gone --
+ * the tests OneLayerQpskReadingsGetFirstProbesAndFallBackAtOnce, QpskPreferenceRotatesSoAnotherModulationIsProbed and
+ * SearchCapFollowsBwpWidth pinned exactly those priors. The search is now ordered and weighted by the DM-RS fit of each
+ * reading (reading.fit) and decided by CRC. */
+TEST(PdschSolver, TheDmrsFitOrdersTheSearchNotTheModulation)
 {
   nr_pdsch_solver_reset();
-  uint16_t two_ids[] = {1, 2}, one_ids[] = {3, 4};
-  nr_pdsch_solver_reading_t rd[] = {
-      {two_ids, 2, 16, 0x3, 2, 2}, {one_ids, 2, 16, 0x1, 1, 9}};
-  nr_dci_bits_t p = {{42, 0, 0}};
-  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
-  int n = nr_pdsch_solver_plan(0x1111, p, 49, 2, 2, rd, 2, 8, v);
-  ASSERT_GT(n, 0);
-  for (int i = 0; i < n; i++) {
-    EXPECT_EQ(v[i].reading, 1);
-    int qm, r2;
-    ASSERT_TRUE(nr_pdsch_solver_mcs_qr(v[i].table, rd[1].mcs, &qm, &r2));
-    EXPECT_EQ(qm, 2);
-    nr_pdsch_solver_feedback(v[i].token, false, true);
-  }
-  rd[1].n_layers = 2; // no one-layer QPSK reading left: the preference is dropped at once
-  n = nr_pdsch_solver_plan(0x2222, p, 49, 2, 2, rd, 2, 8, v);
-  EXPECT_GT(n, 0);
-  for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, false, true);
-  nr_pdsch_solver_reset();
-}
-
-// WL-SOLVER (a): a layout whose reading is 64QAM must still be probed although a garbage one-layer QPSK reading is always offered.
-TEST(PdschSolver, QpskPreferenceRotatesSoAnotherModulationIsProbed)
-{
-  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(nullptr, nullptr);
+  nr_pdsch_solver_set_alt_scr(-1, nullptr, 0, false);
+  /* Iliad's situation: a wrong layout always offers a one-layer QPSK reading, the true one is 64QAM over the full BWP. */
   uint16_t qpsk_ids[] = {1, 2}, qam_ids[] = {3, 4};
-  nr_pdsch_solver_reading_t rd[] = {{qpsk_ids, 2, 20, 0x1, 1, 3}, {qam_ids, 2, 20, 0x1, 1, 21}};
+  nr_pdsch_solver_reading_t rd[] = {{qpsk_ids, 2, 20, 0x1, 1, 3, 0.15f}, {qam_ids, 2, 51, 0x1, 1, 21, 0.95f}};
   nr_dci_bits_t p = {{42, 0, 0}};
   nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
-  int qam_probes = 0, total = 0;
-  for (int g = 0; g < 400; g++) {
-    const int n = nr_pdsch_solver_plan(0x3333, p, 49, 2, 2, rd, 2, 8, v);
-    for (int i = 0; i < n; i++) {
-      total++;
-      if (v[i].reading == 1) qam_probes++;
-      nr_pdsch_solver_feedback(v[i].token, false, true);
-    }
+  int n = nr_pdsch_solver_plan(0x3333, p, 48, 21, 2, rd, 2, 8, v);
+  ASSERT_GT(n, 0);
+  EXPECT_EQ(v[0].reading, 1) << "the reading the DM-RS supports is probed first, whatever its modulation";
+  int qam = 0, qpsk = 0;
+  for (int i = 0; i < n; i++) { (v[i].reading == 1 ? qam : qpsk)++; nr_pdsch_solver_feedback(v[i].token, false, true); }
+  for (int g = 0; g < 60; g++) {
+    p.w[0] = 100 + g;
+    n = nr_pdsch_solver_plan(0x3333, p, 48, 21, 2, rd, 2, 8, v);
+    for (int i = 0; i < n; i++) { (v[i].reading == 1 ? qam : qpsk)++; nr_pdsch_solver_feedback(v[i].token, false, true); }
   }
-  EXPECT_GT(total, 256);
-  EXPECT_GT(qam_probes, 0);
-  EXPECT_LT(qam_probes, total / 2); // the preference still dominates
+  EXPECT_GT(qam, 3 * qpsk) << "probe share follows the fit";
+  EXPECT_GT(qpsk, 0) << "a low fit lowers the share, it never removes a reading";
   nr_pdsch_solver_reset();
 }
 
-// WL-SOLVER (b): a BWP narrower than 2 x 48 RB is searched up to its full width, wide or unknown BWPs keep 48.
-TEST(PdschSolver, SearchCapFollowsBwpWidth)
+TEST(PdschSolver, WithoutDmrsEvidenceEveryReadingIsProbedAlike)
 {
-  EXPECT_EQ(nr_pdsch_solver_search_max_rb(51), 51);
-  EXPECT_EQ(nr_pdsch_solver_search_max_rb(95), 95);
-  EXPECT_EQ(nr_pdsch_solver_search_max_rb(106), 48);
-  EXPECT_EQ(nr_pdsch_solver_search_max_rb(217), 48);
-  EXPECT_EQ(nr_pdsch_solver_search_max_rb(0), 48);
-  EXPECT_EQ(nr_pdsch_solver_search_max_rb(40), 48);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(nullptr, nullptr);
+  nr_pdsch_solver_set_alt_scr(-1, nullptr, 0, false);
+  uint16_t a_ids[] = {1, 2}, b_ids[] = {3, 4};
+  nr_pdsch_solver_reading_t rd[] = {{a_ids, 2, 20, 0x1, 1, 3, -1.f}, {b_ids, 2, 273, 0x3, 2, 27, -1.f}};
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+  int a = 0, b = 0;
+  for (int g = 0; g < 40; g++) {
+    nr_dci_bits_t p = {{(uint64_t)(7 + g), 0, 0}};
+    const int n = nr_pdsch_solver_plan(0x3434, p, 49, 3, 2, rd, 2, 8, v);
+    for (int i = 0; i < n; i++) { (v[i].reading ? b : a)++; nr_pdsch_solver_feedback(v[i].token, false, true); }
+  }
+  EXPECT_GT(a, 0);
+  EXPECT_GT(b, 0) << "a 273-RB two-layer 64QAM reading is searched like any other (no width cap, no modulation preference)";
+  EXPECT_LT(abs(a - b), (a + b) / 3) << "equal weight without evidence";
+  nr_pdsch_solver_reset();
 }
 
 TEST(PdschSolver, ConfirmationRejectsIncompatibleMcsTables)
@@ -242,12 +233,15 @@ TEST(PdschSolver, IneligibleTablesDoNotConsumeLaterQpskTrials)
   nr_dci_bits_t p = {{42, 0, 0}};
   nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
   ASSERT_EQ(nr_pdsch_solver_plan(0x7788, p, 49, 14, 2, &rd, 1, 1, v), 1);
-  EXPECT_EQ(v[0].table, 2); // only the low-rate table is QPSK at this MCS
+  /* DCI11-RESOLVER: no QPSK-only table filter any more (it made MCS 14 try only table 2); every table this MCS reads
+   * differently is a hypothesis, the first in the coverage order being table 1 at S 1 */
+  EXPECT_EQ(v[0].table, 1);
+  EXPECT_EQ(v[0].S, 1);
   nr_pdsch_solver_feedback(v[0].token, false, true);
   rd.mcs = 1;
   ASSERT_EQ(nr_pdsch_solver_plan(0x7788, p, 49, 1, 2, &rd, 1, 1, v), 1);
   EXPECT_EQ(v[0].table, 1);
-  EXPECT_EQ(v[0].S, 1); // this physical hypothesis has not been tried yet
+  EXPECT_EQ(v[0].S, 0); // (table 1, S 1) was tried on the MCS-14 grant: the same physical hypothesis is not repeated
   nr_pdsch_solver_feedback(v[0].token, false, true);
   nr_pdsch_solver_reset();
 }
@@ -456,9 +450,10 @@ TEST(PdschSolver, SignificanceRuleScalesTheSolveEvidenceWithTheProbesSpent)
   EXPECT_GT(grants[1], grants[0]) << "a busy RNTI needs more passes";
 }
 
-/* SOLVERWIDE (2026-10-23). The search probes only readings <= 48 PRB; an RNTI whose every grant is full-carrier (106/273 PRB) used to
- * get no probe at all (why wide=N, never solved). After 16 grants with no narrow reading it searches the wide ones; one narrow reading
- * ever seen keeps the old bound. */
+/* SOLVERWIDE (2026-10-23) bounded the search to readings <= 48 PRB and opened wide readings only after 16 grants without a
+ * narrow one; WL-SOLVER widened the bound to the BWP below 96 PRB. DCI11-RESOLVER removes the bound: a full-carrier reading is
+ * searched from the first grant (the tests WideOnlyRntiIsSolvedAfterTheWaitAndNarrowIsUnchanged / OneNarrowReadingKeepsTheOldBound
+ * pinned the bound and the wait). */
 static int CountProbes(uint16_t rnti, const Cell &c, int nrb, int grants, std::mt19937 &rng)
 {
   nr_pdsch_solver_reading_t rd[2] = {{c.wrong.data(), (int)c.wrong.size(), (uint16_t)nrb, 1, 1, 0},
@@ -473,53 +468,28 @@ static int CountProbes(uint16_t rnti, const Cell &c, int nrb, int grants, std::m
   }
   return total;
 }
-TEST(PdschSolverWide, WideOnlyRntiIsSolvedAfterTheWaitAndNarrowIsUnchanged)
+TEST(PdschSolverWide, WideReadingsAreSearchedFromTheFirstGrant)
 {
   Cell c;
   for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
   nr_pdsch_solver_reset();
   nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
   std::mt19937 rng(41);
-  EXPECT_EQ(CountProbes(0x1234, c, 106, 15, rng), 0) << "wide grants: nothing is probed before the 16-grant wait";
+  EXPECT_GT(CountProbes(0x1234, c, 106, 1, rng), 0) << "a full-carrier grant is probed at once";
   nr_pdsch_solver_reset();
   nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
-  const int gw = SolveGrants(0x1234, c, 0, 106, 4000, rng);
-  const int g273 = SolveGrants(0x2345, c, 0, 273, 4000, rng);
+  std::mt19937 ra(42), rb(42), rc(42);
+  const int gw = SolveGrants(0x1234, c, 0, 106, 4000, ra);
   nr_pdsch_solver_reset();
   nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
-  std::mt19937 ra(42), rb(42);
-  const int gn = SolveGrants(0x0101, c, 0, 16, 4000, ra);
-  const int g48 = SolveGrants(0x0202, c, 0, 48, 4000, rb);
-  printf("[solver] wide-only: 106 PRB solved after %d grants, 273 PRB after %d; narrow control 16 PRB %d, 48 PRB %d\n", gw, g273, gn, g48);
-  ASSERT_GT(gw, 16);
-  ASSERT_GE(g273, 16); // 16: the second RNTI takes the first one's cell prior on its first wide probe
+  const int g273 = SolveGrants(0x2345, c, 0, 273, 4000, rb);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  const int gn = SolveGrants(0x0101, c, 0, 16, 4000, rc);
+  printf("[solver] 106 PRB solved after %d grants, 273 PRB after %d, 16 PRB %d\n", gw, g273, gn);
   ASSERT_GT(gn, 0);
-  EXPECT_EQ(g48, gn) << "a reading at the bound is narrow: N=1 equivalence (same grants to solve as at 16 PRB)";
-  EXPECT_LT(gn, gw) << "the wide-only RNTI pays the wait";
-}
-TEST(PdschSolverWide, OneNarrowReadingKeepsTheOldBound)
-{
-  Cell c;
-  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
-  const uint16_t narrow_ids[1] = {99};
-  nr_pdsch_solver_reset();
-  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
-  std::mt19937 rng(43);
-  // a wrong layout reads a narrow PRB set on every grant, the true layout reads the full carrier: as before, never solved
-  nr_pdsch_solver_reading_t rd[3] = {{c.wrong.data(), (int)c.wrong.size() - 1, 106, 1, 1, 0},
-                                     {c.truth.data(), (int)c.truth.size(), 106, 1, 1, 0},
-                                     {narrow_ids, 1, 16, 1, 1, 0}};
-  for (int g = 0; g < 600; g++) {
-    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
-    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
-    const int n = nr_pdsch_solver_plan(0x4321, p, 49, 0, 2, rd, 3, 8, v);
-    for (int i = 0; i < n; i++) {
-      EXPECT_EQ(v[i].reading, 2) << "only the narrow reading is probed";
-      nr_pdsch_solver_feedback(v[i].token, v[i].reading == 1, true);
-    }
-  }
-  EXPECT_LT(nr_pdsch_solver_rep(0x4321), 0);
-  nr_pdsch_solver_reset();
+  EXPECT_EQ(gw, gn) << "the width of a reading changes nothing in the search";
+  EXPECT_EQ(g273, gn);
 }
 
 /* SOLVERTDDL (2026-10-23). A solved RNTI's second TDA index is a TDD special-slot allocation whose PDSCH is shorter than 14 - S.
@@ -598,6 +568,43 @@ TEST(PdschSolverPhase, SpecialSlotPhaseIsLearntFromItsOwnFailures)
   ASSERT_GT(first_ok, 0);
   EXPECT_GE(special_ok, special - 400) << "after the learning the special slots decode";
   EXPECT_GE(full_ok, full - 5) << "full slots are unaffected";
+  nr_pdsch_solver_reset();
+}
+
+/* DCI11-RESOLVER: the mixed slot of the rfsim 106 bed. Of the five CRC-equivalent true layouts only layout 12 reads the TDA field
+ * (bit 1 here: index 1 in the mixed slot, whose PDSCH is S0 L8); the others read no TDA field (index 0 always), and the lowest of
+ * them solves first. The phase learner's pass in the mixed slot is (S, L) evidence: a layout mapping S1 L13 and S0 L8 to one index
+ * is inconsistent, so the representative moves to layout 12, and from then on the TDA value of EACH grant picks the allocation --
+ * also for a mixed-slot grant in a slot phase that was never learnt (which the phase learner alone cannot do). */
+static int tda_fn_mixed(void *, uint16_t layout, nr_dci_bits_t p) { return layout == 12 ? (int)((p.w[0] >> 1) & 1) : 0; }
+TEST(PdschSolverPhase, MixedSlotIsDecidedByTheTdaFieldOnceItExplainsThePasses)
+{
+  Cell c;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn_mixed, nullptr);
+  std::mt19937 rng(67);
+  nr_pdsch_solver_reading_t rd[2] = {{c.wrong.data(), (int)c.wrong.size(), 16, 1, 1, 2}, {c.truth.data(), (int)c.truth.size(), 16, 1, 1, 2}};
+  int late_ok = 0, late = 0;
+  for (int g = 0; g < 6000; g++) {
+    const int ph = g % 20;
+    const bool sp = g < 5000 ? (ph == 7 || ph == 17) : (ph == 3); /* last 1000 grants: the mixed slot moves to an unlearnt phase */
+    nr_pdsch_solver_set_now(1000 + g);
+    nr_dci_bits_t p = {{((uint64_t)rng() & ~3ull) | (sp ? 2u : 0u), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(0x1234, p, 49, 2, 2, rd, 2, 8, v);
+    for (int i = 0; i < n; i++) {
+      const bool ok = v[i].reading == 1 && v[i].add_pos == c.add_pos && v[i].table == c.table &&
+                      (sp ? (v[i].S == 0 && v[i].L == 8) : (v[i].S == 1 && v[i].L == 13));
+      if (!v[i].probe && g >= 5000 && sp) { late++; late_ok += ok; }
+      nr_pdsch_solver_feedback(v[i].token, ok, true);
+    }
+  }
+  printf("[solver] mixed slot by TDA field: rep %d, mixed-slot grants in an unlearnt phase %d of %d ok\n", nr_pdsch_solver_rep(0x1234),
+         late_ok, late);
+  EXPECT_EQ(nr_pdsch_solver_rep(0x1234), 12) << "the layout whose TDA field explains the mixed slot must represent the RNTI";
+  ASSERT_GT(late, 20);
+  EXPECT_GE(late_ok, late - 2) << "the TDA value of the grant, not the slot phase, picks the allocation";
   nr_pdsch_solver_reset();
 }
 
