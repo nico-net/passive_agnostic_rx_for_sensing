@@ -205,7 +205,8 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  rc|=pthread_attr_setschedparam(&attr,&sp);
  cpu_set_t allowed,pin;CPU_ZERO(&allowed);CPU_ZERO(&pin);
  if(sched_getaffinity(0,sizeof(allowed),&allowed)!=0)rc=-1;
- int core=env_int("ISAC_PDCCH_NID_GPU_CORE",13,0,CPU_SETSIZE-1);
+ // ISAC_PDCCH_NID_GPU_CORE: exported by the core plan (nr_core_layout.h); -1 = the highest CPU of this thread's mask; unset = legacy 13.
+ int core=env_int("ISAC_PDCCH_NID_GPU_CORE",13,-1,CPU_SETSIZE-1);
  if(core<0)for(int j=CPU_SETSIZE-1;j>=0;j--)if(CPU_ISSET(j,&allowed)){core=j;break;}
  if(core<0 || !CPU_ISSET(core,&allowed))rc=-1;
  else {CPU_SET(core,&pin);rc|=pthread_attr_setaffinity_np(&attr,sizeof(pin),&pin);}

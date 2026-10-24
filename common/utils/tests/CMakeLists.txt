@@ -20,6 +20,12 @@ target_link_libraries(test_nr_core_plan PRIVATE GTest::gtest pthread)
 add_dependencies(tests test_nr_core_plan)
 add_test(NAME test_nr_core_plan COMMAND test_nr_core_plan)
 
+add_executable(test_nr_core_layout test_nr_core_layout.cpp ../nr_core_layout.c ../nr_core_plan.c ../nr_bg_lane.c)
+target_include_directories(test_nr_core_layout PRIVATE ..)
+target_link_libraries(test_nr_core_layout PRIVATE GTest::gtest GTest::gtest_main pthread)
+add_dependencies(tests test_nr_core_layout)
+add_test(NAME test_nr_core_layout COMMAND test_nr_core_layout)
+
 add_executable(test_nr_core_pool test_nr_core_pool.cpp ../nr_core_pool.c)
 target_include_directories(test_nr_core_pool PRIVATE ..)
 target_link_libraries(test_nr_core_pool PRIVATE GTest::gtest pthread)

@@ -39,7 +39,10 @@ int nr_dashboard_start(const nr_dashboard_cfg_t *cfg, char *err, int errlen, cha
 {
   char logp[PATH_MAX] = "", rund[PATH_MAX] = "", script[PATH_MAX] = "", port[16], core_s[16], dlog[PATH_MAX + 20], glob[PATH_MAX];
   struct stat st;
-  const int port_n = cfg->port > 0 ? cfg->port : 8080, core = cfg->core >= 0 ? cfg->core : 2;
+  /* core: the caller's, else ISAC_DASHBOARD_CORE (exported by the core plan, nr_core_layout.h), else the legacy DGX CPU 2 */
+  const char *dce = getenv("ISAC_DASHBOARD_CORE");
+  const int env_core = dce && *dce && atoi(dce) >= 0 ? atoi(dce) : 2;
+  const int port_n = cfg->port > 0 ? cfg->port : 8080, core = cfg->core >= 0 ? cfg->core : env_core;
   snprintf(port, sizeof(port), "%d", port_n);
   snprintf(core_s, sizeof(core_s), "%d", core);
 
