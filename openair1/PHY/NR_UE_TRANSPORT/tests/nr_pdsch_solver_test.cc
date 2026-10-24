@@ -129,6 +129,40 @@ TEST(PdschSolver, OneLayerQpskReadingsGetFirstProbesAndFallBackAtOnce)
   nr_pdsch_solver_reset();
 }
 
+// WL-SOLVER (a): a layout whose reading is 64QAM must still be probed although a garbage one-layer QPSK reading is always offered.
+TEST(PdschSolver, QpskPreferenceRotatesSoAnotherModulationIsProbed)
+{
+  nr_pdsch_solver_reset();
+  uint16_t qpsk_ids[] = {1, 2}, qam_ids[] = {3, 4};
+  nr_pdsch_solver_reading_t rd[] = {{qpsk_ids, 2, 20, 0x1, 1, 3}, {qam_ids, 2, 20, 0x1, 1, 21}};
+  nr_dci_bits_t p = {{42, 0, 0}};
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+  int qam_probes = 0, total = 0;
+  for (int g = 0; g < 400; g++) {
+    const int n = nr_pdsch_solver_plan(0x3333, p, 49, 2, 2, rd, 2, 8, v);
+    for (int i = 0; i < n; i++) {
+      total++;
+      if (v[i].reading == 1) qam_probes++;
+      nr_pdsch_solver_feedback(v[i].token, false, true);
+    }
+  }
+  EXPECT_GT(total, 256);
+  EXPECT_GT(qam_probes, 0);
+  EXPECT_LT(qam_probes, total / 2); // the preference still dominates
+  nr_pdsch_solver_reset();
+}
+
+// WL-SOLVER (b): a BWP narrower than 2 x 48 RB is searched up to its full width, wide or unknown BWPs keep 48.
+TEST(PdschSolver, SearchCapFollowsBwpWidth)
+{
+  EXPECT_EQ(nr_pdsch_solver_search_max_rb(51), 51);
+  EXPECT_EQ(nr_pdsch_solver_search_max_rb(95), 95);
+  EXPECT_EQ(nr_pdsch_solver_search_max_rb(106), 48);
+  EXPECT_EQ(nr_pdsch_solver_search_max_rb(217), 48);
+  EXPECT_EQ(nr_pdsch_solver_search_max_rb(0), 48);
+  EXPECT_EQ(nr_pdsch_solver_search_max_rb(40), 48);
+}
+
 TEST(PdschSolver, ConfirmationRejectsIncompatibleMcsTables)
 {
   nr_pdsch_solver_reset();

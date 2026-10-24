@@ -705,9 +705,25 @@ static bool search_backoff(const solver_rnti_t *r)
  * but an RNTI that never gets a narrow reading (a bulk transfer scheduled on the whole carrier: rfsim 106/273 PRB) would never be
  * planned at all (0fb22ecbd0 made the solver the only path). After SOLVER_WIDE_AFTER such grants, with no narrow one ever seen,
  * its wide readings are probed too, under the unchanged probe budget. One narrow reading ever seen restores the bound for good. */
+static uint16_t g_bwp_rb; /* WL-SOLVER: BWP width of the monitored CORESET's cell (0 = unknown) */
+
+/* nr_pdsch_solver_set_bwp_rb: tells the solver the BWP width. Caller: nr_pdcch_blind_monitor_rt.c before planning. */
+void nr_pdsch_solver_set_bwp_rb(int rb)
+{
+  __atomic_store_n(&g_bwp_rb, (uint16_t)(rb > 0 && rb < 65535 ? rb : 0), __ATOMIC_RELAXED);
+}
+
+/* search_max_rb: widest reading searched without the wide-only rule. A BWP narrower than 2 x SOLVER_SEARCH_MAX_RB is searched up to
+ * its full width (a 51-PRB BWP's full-band grant is as cheap as a 48-RB one); wider BWPs keep the cost bound. Pure of cell identity. */
+uint16_t nr_pdsch_solver_search_max_rb(int bwp_rb)
+{
+  return (bwp_rb > SOLVER_SEARCH_MAX_RB && bwp_rb < 2 * SOLVER_SEARCH_MAX_RB) ? (uint16_t)bwp_rb : SOLVER_SEARCH_MAX_RB;
+}
+
 static uint16_t rb_limit(const solver_rnti_t *r)
 {
-  return (r->n_narrow == 0 && r->n_wide >= SOLVER_WIDE_AFTER) ? UINT16_MAX : SOLVER_SEARCH_MAX_RB;
+  return (r->n_narrow == 0 && r->n_wide >= SOLVER_WIDE_AFTER) ? UINT16_MAX
+                                                              : nr_pdsch_solver_search_max_rb(__atomic_load_n(&g_bwp_rb, __ATOMIC_RELAXED));
 }
 
 static const uint8_t kS[4] = {1, 0, 2, 3};
@@ -956,17 +972,17 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   r->key = ctx->key;
   r->grants++;
   { bool narrow = false; /* SOLVERWIDE */
-    for (int i = 0; i < n_rd && !narrow; i++) narrow = rd[i].num_rb > 0 && rd[i].num_rb <= SOLVER_SEARCH_MAX_RB;
+    for (int i = 0; i < n_rd && !narrow; i++) narrow = rd[i].num_rb > 0 && rd[i].num_rb <= nr_pdsch_solver_search_max_rb(__atomic_load_n(&g_bwp_rb, __ATOMIC_RELAXED));
     if (narrow) r->n_narrow++; else r->n_wide++;
     if (!r->solved && r->n_narrow == 0 && r->n_wide == SOLVER_WIDE_AFTER)
       LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x wide-only for %u grants: searching readings above %d RB\n", rnti, r->n_wide,
             SOLVER_SEARCH_MAX_RB);
   }
   const uint16_t rblim = rb_limit(r);
-  bool nl_preferred = false, nl_fallback = false;
+  bool nl_preferred = false, nl_fallback = false, rotate_all = false;
   if (!r->solved) { /* prefer one-layer QPSK readings; with none, the preference is dropped at once (frozen ISAC_PDSCH_SOLVER_NL_PREF=1) */
     for (int i = 0; i < n_rd; i++)
-      if (rd[i].num_rb > 0 && rd[i].num_rb <= SOLVER_SEARCH_MAX_RB && reading_nl_qpsk(&rd[i])) {
+      if (rd[i].num_rb > 0 && rd[i].num_rb <= nr_pdsch_solver_search_max_rb(__atomic_load_n(&g_bwp_rb, __ATOMIC_RELAXED)) && reading_nl_qpsk(&rd[i])) {
         if (r->has_cand) {
           bool overlaps = false;
           for (int k = 0; k < rd[i].n_ids && !overlaps; k++)
@@ -981,6 +997,14 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
         break;
       }
     if (!nl_preferred) nl_fallback = true;
+    /* WL-SOLVER: the QPSK preference must not starve a layout whose reading is another modulation (Iliad: wrong layouts always offer a
+     * garbage QPSK reading, the true 64QAM one was never probed). While the cell has no solved RNTI at all, an RNTI with >= 256 probes and no candidate searches every 4th
+     * grant over ALL readings, under the unchanged probe budget (and exempt from the 1-in-8 back-off, which this rotation replaces). */
+    if (nl_preferred && !r->has_cand && !g_have_prior && r->n_probe >= 256u && (r->grants % 4u) == 3u) {
+      nl_preferred = false;
+      nl_fallback = true;
+      rotate_all = true;
+    }
   }
   if ((g_st.planned % 1000) == 0) { /* T26c per-RNTI report: solve time in signal time (30 kHz: 0.5 ms per slot) */
     char b[3000];
@@ -1072,7 +1096,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   } else if (csirs_slot) {
     r->why[W_CSIRS]++;
     /* no search on a slot carrying discovered CSI-RS: its rate matching is unknown, a miss would be false evidence */
-  } else if (!nl_preferred && search_backoff(r)) {
+  } else if (!nl_preferred && !rotate_all && search_backoff(r)) {
     r->why[W_BACKOFF]++;
     /* T26c: an RNTI whose search has spent 200 probes without a single CRC pass is searched on 1 grant in 8 only --
      * the decode pool goes to RNTIs that decode */

@@ -8573,6 +8573,7 @@ constdiag_done:;
         nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_GATE);
         continue;
       }
+      nr_pdsch_solver_set_bwp_rb((int)cfg->bwp_size);
       if (nr_a2e_trace()) nr_a2e_ts[7] = btim_now_ns(); /* solver reading pass starts */
       static _Atomic int s_tda_set;
       if (!atomic_exchange(&s_tda_set, 1))
