@@ -2914,6 +2914,22 @@ TEST_F(BlindPdcchTest, DlLayoutCandidatesDoNotDeclareAUniqueConfiguration) {
   EXPECT_EQ(nr_pdcch_blind_dl_layout_candidates(nullptr,47,273,0,candidates,ids),0);
 }
 
+// WL-SOLVER: Iliad PCI 403 (OTA 2026-10-23): 51 PRB, DCI 1_1 length 48 needs bwp_ind+tda = 7 bits, which the standard
+// profile cannot explain; the layout-candidate helper then returns 0, and the grant must still be offered to the solver.
+TEST_F(BlindPdcchTest, DlLayoutCandidatesEmptyAtIliad51PrbLen48ButSolverFallbackAdmits) {
+  nr_pdcch_blind_raw_result_t raw{};
+  raw.rnti=0x85a;
+  raw.payload=nr_dci_bits_from_u64(UINT64_C(0xfffe150e2210));
+  nr_pdcch_blind_result_t candidates[3]{};
+  uint8_t ids[3]{};
+  EXPECT_EQ(nr_pdcch_blind_dl_layout_candidates(&raw,48,51,0,candidates,ids),0);
+  EXPECT_TRUE(nr_pdcch_dl_solver_fallback_ok(true,1,true,true));
+  EXPECT_FALSE(nr_pdcch_dl_solver_fallback_ok(false,1,true,true));
+  EXPECT_FALSE(nr_pdcch_dl_solver_fallback_ok(true,0,true,true));
+  EXPECT_FALSE(nr_pdcch_dl_solver_fallback_ok(true,1,false,true));
+  EXPECT_FALSE(nr_pdcch_dl_solver_fallback_ok(true,1,true,false));
+}
+
 TEST_F(BlindPdcchTest, PolarCleanupCannotFreeAnInFlightDecoderCacheEntry) {
   t_nrPolar_params *held=nr_polar_params(NR_POLAR_DCI_MESSAGE_TYPE,47,2);
   ASSERT_NE(held,nullptr);
