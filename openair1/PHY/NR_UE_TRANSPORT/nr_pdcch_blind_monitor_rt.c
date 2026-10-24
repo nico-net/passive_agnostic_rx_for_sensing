@@ -123,6 +123,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_scancost.h"
 #include "nr_tdd_learn.h"
 #include "nr_pdsch_prb_set.h" /* nr_ra_type0_prbs */
+#include "nr_early_start.h"  /* nr_es_progress: the DM-RS fit waits for the DM-RS symbol */
 /* dmrs_scan_filter_readings: keep the solver readings whose PRB set carries one of this RNTI's blind DM-RS identities
  * (same-k' coherence >= 0.5 on the type-A DM-RS symbol of this slot, k0 = 0). Readings of a wrong layout read PRBs that
  * carry no -- or another UE's -- DM-RS. When none passes (UE too weak, or k0 != 0) the readings are left untouched.
@@ -168,9 +169,21 @@ typedef struct {
   uint16_t prb[NR_PRB_SET_MAX];
 } dci11_fclass_t;
 static void dmrs_fit_classes(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdcch_blind_monitor_cfg_t *cfg, const int *ids,
-                             int n_ids, dci11_fclass_t *fk, int nfk)
+                             int n_ids, dci11_fclass_t *fk, int nfk, long src_abs)
 {
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  /* EARLY START scans a CORESET before the slot is in the ring: the type-A DM-RS symbol (l0 = 2/3) follows the CORESET by a symbol
+   * or two, so wait for it (bounded, ~2 symbols) instead of reading last frame's samples; on timeout there is no fit (-1). */
+  if (src_abs >= 0) {
+    const int need = cfg->dmrs_typeA_position + 3;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    while (nr_es_progress_symbols(&nr_es_progress, src_abs, fp->symbols_per_slot) < need) {
+      clock_gettime(CLOCK_MONOTONIC, &t1);
+      if ((t1.tv_sec - t0.tv_sec) * 1000000000L + (t1.tv_nsec - t0.tv_nsec) > 150000L) return;
+      sched_yield();
+    }
+  }
   const int16_t *rx[8];
   const int nant = dmrs_sym_rx(ue, proc, cfg, rx);
   if (nant <= 0) return;
@@ -8584,7 +8597,7 @@ constdiag_done:;
           for (int z = 0; z < nfid && !dup; z++) dup = fid[z] == cand_id[q];
           if (!dup) fid[nfid++] = cand_id[q];
         }
-        dmrs_fit_classes(ue, proc, cfg, fid, nfid, fk, nfk);
+        dmrs_fit_classes(ue, proc, cfg, fid, nfid, fk, nfk, source_absolute_slot);
         for (int a = 1; a < nfk; a++) /* stable insertion sort, best fit (either nSCID) first */
           for (int b = a; b > 0; b--) {
             const float x = fmaxf(fk[fk_order[b]].fit[0], fk[fk_order[b]].fit[1]);
