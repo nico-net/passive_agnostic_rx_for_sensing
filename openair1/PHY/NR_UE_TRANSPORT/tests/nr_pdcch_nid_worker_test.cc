@@ -21,7 +21,10 @@ extern "C" void nr_pdcch_nid_gpu_test_policy(int dur,int window,int batch_size,b
  *   ISAC_* flags read: ISAC_GPU_BUDGET (set to 0).
  *   Callers: none (program entry point).
  */
+extern "C" void nr_pdcch_nid_gpu_test_elastic(int idle_limit,int backoff);
+extern "C" void nr_pdcch_nid_gpu_elastic_stats(int *window,int *base,uint64_t *grows,uint64_t *shrinks,uint64_t *denied);
 int main(int argc,char **argv) {
+ bool elastic=argc>1 && !strcmp(argv[1],"--elastic");
  bool device=argc>1 && !strcmp(argv[1],"--device");
  bool duty=argc>1 && !strcmp(argv[1],"--duty");
  setenv("ISAC_GPU_BUDGET","0",1);
@@ -34,7 +37,8 @@ int main(int argc,char **argv) {
  nr_pdcch_nid_batch_t b={};nr_pdcch_nid_result_t expected={};
  if(device) {nid_reference_make(7,&b);nid_reference_run(1,&expected);}
  else b.cfg={432,0,0,6,2,14,dur};
- if(duty)nr_pdcch_nid_gpu_test_policy(dur,2,batch_size,true,5000,100,120);
+ if(elastic) {nr_pdcch_nid_gpu_test_policy(dur,6,batch_size,false,5000,500,10000);nr_pdcch_nid_gpu_test_elastic(3,2);}
+ else if(duty)nr_pdcch_nid_gpu_test_policy(dur,2,batch_size,true,5000,100,120);
  else nr_pdcch_nid_gpu_test_policy(dur,device?1:2,batch_size,false,5000,500,10000);
  CHECK(nr_pdcch_nid_gpu_start(36)==0 && nr_pdcch_nid_gpu_running());
  void *lib=dlopen("libpdcch_nid_gpu.so",RTLD_NOW|RTLD_LOCAL);CHECK(lib);
@@ -57,6 +61,38 @@ int main(int argc,char **argv) {
   return true;
  };
 
+ if(elastic) {
+  auto scenario=(void(*)(int,int))dlsym(lib,"nid_fake_scenario");
+  auto window=(int(*)())dlsym(lib,"nid_fake_window");
+  CHECK(scenario && window);
+  int w,base;uint64_t grows,shrinks,denied;
+  nr_pdcch_nid_gpu_elastic_stats(&w,&base,&grows,&shrinks,&denied);
+  CHECK(w==2 && base==2 && !grows && !shrinks && !denied);
+  /* not CHECK inside: its "return 1" would read as success here */
+  auto feed=[&](int passes)->bool {for(int i=0;i<passes;i++) {int r=runs();if(!push_batch(true))return false;for(int t=0;t<3000 && runs()<=r;t++)wait_ms(1);if(runs()<=r)return false;wait_ms(3);} return true;};
+  // 1. nothing found, headroom for 2 more batches: the window grows 2 -> 3 -> 4 (one batch per pass once the window is full), then the budget refuses
+  scenario(4,0);
+  CHECK(feed(14));
+  nr_pdcch_nid_gpu_elastic_stats(&w,&base,&grows,&shrinks,&denied);
+  CHECK(w==4 && window()==4 && grows==2 && denied>=1 && shrinks==0);
+  const uint64_t denied1=denied;
+  // 2. the refusals are counted and retried after the back-off, the window stays at 4 meanwhile
+  CHECK(feed(8));
+  nr_pdcch_nid_gpu_elastic_stats(&w,&base,&grows,&shrinks,&denied);
+  CHECK(w==4 && grows==2 && denied>denied1);
+  // 3. headroom appears: it grows to the requested 6 and not beyond
+  scenario(9,0);
+  CHECK(feed(24));
+  nr_pdcch_nid_gpu_elastic_stats(&w,&base,&grows,&shrinks,&denied);
+  CHECK(w==6 && window()==6 && grows==4);
+  // 4. records are published: after idle_limit ticks the extra batches go back (one shrink to the base)
+  scenario(9,1);
+  CHECK(feed(8));
+  nr_pdcch_nid_gpu_elastic_stats(&w,&base,&grows,&shrinks,&denied);
+  CHECK(w==2 && window()==2 && shrinks==1 && errors()==0);
+  nr_pdcch_nid_gpu_stop();dlclose(lib);
+  puts("PASS worker elastic window: grow on a full empty window, partial/refused grow counted, shrink when records exist");return 0;
+ }
  if(duty) {
   CHECK(push_batch(true));
   int n=-1;for(int i=0;i<2000 && n<0;++i) {wait_ms(1);n=nr_pdcch_nid_gpu_records(records,16,&generation);}

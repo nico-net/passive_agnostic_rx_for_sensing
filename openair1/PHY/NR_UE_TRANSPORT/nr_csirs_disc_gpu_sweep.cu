@@ -249,6 +249,13 @@ template<typename T> struct Device {
     capacity = n;
     return true;
   }
+  /* release: gives the buffer back (on-demand ring shrink); the next alloc() takes a new one. */
+  void release()
+  {
+    if (p) cudaFree(p);
+    p = nullptr;
+    capacity = 0;
+  }
 };
 struct RefineAcc {double a[NR_CSIRS_DISC_MAX_RB],b[NR_CSIRS_DISC_MAX_RB];}; /* refine accumulators (evidence; or signal and weight) */
 struct Workspace {
@@ -758,6 +765,16 @@ extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
   try {
     std::lock_guard<std::mutex> guard(workspace_mutex);
     pick_stream();
+    {
+      /* On-demand ring (PHY/TOOLS/nr_gpu_elastic.h): a smaller ring than the workspace was sized for gives the per-slot buffers back and re-allocates them at the new size
+       * (the first call, before RX, never takes this path: capacity is 0 then). */
+      auto &s=workspace;
+      if(s.capacity>capacity) {
+        if(s.stream && complete()!=cudaSuccess) return -1;
+        s.dx.release();s.grid.release();s.ds.release();s.di.release();s.dz.release();s.meta.release();s.terms.release();
+        s.capacity=0;
+      }
+    }
     if(prepare(rb,ant,capacity)<0) return -1;
     auto &w=workspace;nr_csirs_disc_sweep_map_t map={};map.ports=1;map.n_re=1;map.words=1;map.sym_mask=1;map.begin[1]=1;map.re=w.dm.p;
     nr_csirs_disc_re_t re={};nr_csirs_disc_slot_meta_t meta={};int zero=0;

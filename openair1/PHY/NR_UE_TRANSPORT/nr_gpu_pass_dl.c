@@ -434,6 +434,15 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     G.stats(buf, sizeof(buf));
     LOG_A(PHY, "SENSING: %s\n", buf);
   }
+  if (memf) { /* On-demand sizing: the capture is over (nothing is captured after the fence). The graphs hold what they allocated, not their cap: the rest is headroom for the elastic modules (csirs ring, nID window). */
+    uint64_t m[6] = {0};
+    memf(m);
+    char mb[768];
+    nr_gpu_membudget_commit(NR_GPU_MEM_GRAPH, (size_t)m[2] << 20, m[3] ? (double)m[2] / (double)m[3] : 1.0);
+    nr_gpu_membudget_format(mb, sizeof(mb));
+    const size_t hr = nr_gpu_membudget_headroom();
+    LOG_A(PHY, "SENSING: GPU_MEM final graph_mb=%lu graph_cap_mb=%lu elastic_headroom_mb=%lld %s\n", (unsigned long)m[2], (unsigned long)m[3], hr == SIZE_MAX ? -1LL : (long long)(hr >> 20), mb);
+  }
   nr_gpu_pass_ul_warm(h, fp->nb_antennas_rx, G.fp32); /* the PUSCH pass (Fix A+D) is THE UL path, its own instance pool; grants outside its scope fall back, counted */
 }
 

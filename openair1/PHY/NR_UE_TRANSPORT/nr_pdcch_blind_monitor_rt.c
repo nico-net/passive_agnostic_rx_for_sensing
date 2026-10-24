@@ -9790,6 +9790,11 @@ void nr_dl_gpu_get_stats(uint64_t *allocs, uint64_t *denied, uint64_t *bytes, ui
   }
 }
 
+#include "PHY/TOOLS/nr_host_membudget.h"
+extern size_t nr_host_membudget_share(nr_host_mem_module_t m) __attribute__((weak));
+extern void nr_host_membudget_commit(nr_host_mem_module_t m, size_t bytes, double scale) __attribute__((weak));
+extern void nr_host_membudget_note_failure(nr_host_mem_module_t m) __attribute__((weak));
+extern int nr_host_membudget_format(char *out, size_t n) __attribute__((weak));
 /* nr_dl_gpu_warmup: one-time start-up of the DL GPU path before the RF stream starts: probes the platform, prepares the CB0, polar, PDCCH and PDSCH GPU front ends and the GrantWork pool.
  *   Starts the passive PDSCH queue when the monitor's PDSCH decode is on (nr_pdsch_passive_queue_start). Loads the GPU modules for stats and enables their radio mode.
  *   Failures are sticky CPU fallback, never retried. Runs once (static guard). Caller: executables/nr-uesoftmodem.c (before nrue_init_openair0).
@@ -9820,8 +9825,29 @@ void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue)
   if (depth > NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH) depth = NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH;
   const bool want_gw = cfg->pdsch_decode >= 1;
   const size_t llr_bytes = (size_t)fp->N_RB_DL * 12 * 14 * 4 * 8 * sizeof(int16_t);
-  if (nr_td_gw_warmup(llr_bytes, want_gw ? (size_t)consumers * depth * NR_TD_GW_MAX_SIG : 0))
+  size_t gw_count = want_gw ? (size_t)consumers * depth * NR_TD_GW_MAX_SIG : 0;
+  /* Host-RAM budget (PHY/TOOLS/nr_host_membudget.h): the pool is pre-faulted (llr_bytes per buffer), 12 GB at 273 PRB / 4 RX / 4 consumers x depth 64 on a 14.8 GB host.
+   * Its size only decides how many LLR sets can be shared at once (a miss decodes on the CPU path without sharing), so it is scaled to its share of the budget;
+   * the full size is kept whenever the share covers it (a large host, DGX Spark: unchanged). */
+  if (gw_count && nr_host_membudget_share) {
+    const size_t share = nr_host_membudget_share(NR_HOST_MEM_GW_POOL);
+    const size_t floor_n = (size_t)consumers * 8 < gw_count ? (size_t)consumers * 8 : gw_count; /* a few sets per consumer */
+    const long fit = nr_host_membudget_fit(share, 0, llr_bytes, (long)floor_n, (long)gw_count);
+    if (fit == 0) {
+      LOG_W(PHY, "SENSING: HOST_MEM GrantWork pool: share %zu MB < %zu MB for the %zu-buffer floor; no pool, decode without LLR sharing (CPU)\n", share >> 20,
+            (floor_n * llr_bytes) >> 20, floor_n);
+      gw_count = 0;
+    } else if ((size_t)fit != gw_count) {
+      LOG_W(PHY, "SENSING: HOST_MEM GrantWork pool %zu -> %ld buffers of %zu KB (share %zu MB of the host budget); exhaustion decodes without LLR sharing\n", gw_count, fit,
+            llr_bytes >> 10, share >> 20);
+      gw_count = (size_t)fit;
+    }
+    if (nr_host_membudget_commit) nr_host_membudget_commit(NR_HOST_MEM_GW_POOL, gw_count * llr_bytes, want_gw ? (double)gw_count / ((double)consumers * depth * NR_TD_GW_MAX_SIG) : 1.0);
+  }
+  if (nr_td_gw_warmup(llr_bytes, gw_count)) {
+    if (nr_host_membudget_note_failure) nr_host_membudget_note_failure(NR_HOST_MEM_GW_POOL);
     LOG_W(PHY, "SENSING: DL_GPU GrantWork pool partly reserved; exhaustion uses CPU without sharing\n");
+  }
   if (cfg->pdsch_decode >= 1 && cfg->pdsch_thread)
     (void)nr_pdsch_passive_queue_start(ue, depth, consumers, cfg->pdsch_thread_core);
   static const char *modules[] = {"libtd_cb0_gpu.so", "libpolar_gpu.so", "libpdsch_gpu.so", "libpdcch_gpu.so", "libldpc_cuda.so"};
@@ -9836,7 +9862,12 @@ void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue)
     }
   }
   LOG_I(PHY, "SENSING: DL_GPU warm-up complete consumers=%d depth=%d gw_buffers=%zu llr_bytes=%zu (no late CUDA growth)\n",
-        consumers, depth, want_gw ? (size_t)consumers * depth * NR_TD_GW_MAX_SIG : 0, llr_bytes);
+        consumers, depth, gw_count, llr_bytes);
+  if (nr_host_membudget_format) {
+    char hm[512];
+    nr_host_membudget_format(hm, sizeof(hm));
+    LOG_A(PHY, "SENSING: HOST_MEM %s\n", hm);
+  }
 }
 
 /* T26c (diagnostic, always on): print the faulting thread's backtrace on SIGSEGV/SIGBUS (replay EOF-exit crash

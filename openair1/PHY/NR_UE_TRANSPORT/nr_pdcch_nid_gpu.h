@@ -10,7 +10,7 @@ extern "C" {
 #define NR_PDCCH_NID_BATCH 336
 #define NR_PDCCH_NID_MAX_RECORDS 16
 #define NR_PDCCH_NID_MAX_WINDOW 20
-#define NR_PDCCH_NID_ABI 4
+#define NR_PDCCH_NID_ABI 5
 #define NR_PDCCH_NID_KERNEL_KINDS 13
 typedef struct { int16_t r, i; } nr_pdcch_nid_iq_t;
 typedef struct { int nid, sym, dur, grid_rb, groups, L, R, shift, ties; } nr_pdcch_nid_record_t;
@@ -86,6 +86,9 @@ typedef struct {
  int (*upload)(void *, const nr_pdcch_nid_batch_t *);
  int (*run)(void *, nr_pdcch_nid_result_t *);
  void (*destroy)(void *);
+ /* ABI 5, on-demand window (PHY/TOOLS/nr_gpu_elastic.h): resize(ctx, 0) = the current window; resize(ctx, w) = the window reached (between the current one and w, the
+  * budget headroom decides), -1 = keep the current one. The evidence integration restarts on a change. Optional (NULL: fixed window). */
+ int (*resize)(void *, int window);
 } nr_pdcch_nid_ops_t;
 const nr_pdcch_nid_ops_t *nr_pdcch_nid_gpu_ops(void);
 #ifdef __cplusplus
