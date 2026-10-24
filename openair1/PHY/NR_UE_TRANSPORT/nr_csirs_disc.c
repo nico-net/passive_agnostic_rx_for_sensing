@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc.h"
+#include "nr_csirs_disc_mem.h"
+/* T6b: weak, so fixtures that link this file without the platform library keep an unlimited budget */
+extern size_t nr_gpu_membudget_share(nr_gpu_mem_module_t m) __attribute__((weak));
+extern void nr_gpu_membudget_commit(nr_gpu_mem_module_t m, size_t bytes, double scale) __attribute__((weak));
 #include "PHY/defs_nr_common.h"
 #include "nr_csirs_disc_gate_internal.h"
 #include "nr_csirs_disc_evidence_internal.h"
@@ -36,6 +40,8 @@ extern uint64_t csirs_disc_rl_skipped __attribute__((weak));
 
 #define DISC_VIEWS 128
 static bool pipeline_ready=true;
+static int g_ring_capacity=NR_CSIRS_DISC_DEFAULT_CAPACITY; /* T6b */
+int nr_csirs_disc_ring_capacity(void) {return g_ring_capacity;}
 /* nr_csirs_disc_pipeline_ready: returns whether the CSI-RS discovery pipeline is usable (false after a failed GPU preallocation or discovery prepare).
  *   Read by nr_csirs_disc_start() in nr_csirs_disc_feed.c (refuses to start when the pipeline is down).
  */
@@ -178,11 +184,32 @@ void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp)
     pthread_once(&g_once, init_once);
     const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load();
     if(fp && gpu && gpu->prepare) {
-      const int capacity=NR_CSIRS_DISC_DEFAULT_CAPACITY;
       size_t stride=14*(fp->ofdm_symbol_size+fp->nb_prefix_samples0+fp->nb_prefix_samples);
+      /* T6b: ring capacity from the shared memory budget (640 when it fits: GB10 unchanged); the floor not fitting = GPU discovery not ready -> CPU discovery */
+      const size_t share=nr_gpu_membudget_share?nr_gpu_membudget_share(NR_GPU_MEM_CSIRS):SIZE_MAX;
+      const int capacity=nr_csirs_disc_mem_capacity(share,fp->N_RB_DL,fp->nb_antennas_rx,fp->ofdm_symbol_size,stride,NR_CSIRS_DISC_DEFAULT_BATCH,NR_CSIRS_DISC_DEFAULT_CAPACITY);
+      if(!capacity) {
+        LOG_W(PHY,"SENSING: CSIRS_DISC GPU memory budget share %zu MB < %zu MB for the smallest ring (%d slots); GPU discovery not ready, CPU discovery\n",share>>20,
+              (nr_csirs_disc_mem_fixed(fp->N_RB_DL,fp->nb_antennas_rx,fp->ofdm_symbol_size,stride,NR_CSIRS_DISC_DEFAULT_BATCH)+NR_CSIRS_DISC_CAPACITY_MIN*nr_csirs_disc_mem_per_slot(fp->N_RB_DL,fp->nb_antennas_rx))>>20,NR_CSIRS_DISC_CAPACITY_MIN);
+        if(nr_gpu_membudget_commit) nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS,0,0.0);
+        nr_csirs_disc_gpu_disable();
+        gpu=NULL;
+      } else {
+      g_ring_capacity=capacity;
+      const size_t bytes=nr_csirs_disc_mem_fixed(fp->N_RB_DL,fp->nb_antennas_rx,fp->ofdm_symbol_size,stride,NR_CSIRS_DISC_DEFAULT_BATCH)+(size_t)capacity*nr_csirs_disc_mem_per_slot(fp->N_RB_DL,fp->nb_antennas_rx);
+      const size_t full=nr_csirs_disc_mem_fixed(fp->N_RB_DL,fp->nb_antennas_rx,fp->ofdm_symbol_size,stride,NR_CSIRS_DISC_DEFAULT_BATCH)+(size_t)NR_CSIRS_DISC_DEFAULT_CAPACITY*nr_csirs_disc_mem_per_slot(fp->N_RB_DL,fp->nb_antennas_rx);
+      if(nr_gpu_membudget_commit) nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS,bytes,(double)bytes/(double)full);
+      if(capacity!=NR_CSIRS_DISC_DEFAULT_CAPACITY)
+        LOG_W(PHY,"SENSING: CSIRS_DISC ring capacity %d -> %d slots (memory budget share %zu MB, need %zu MB)\n",NR_CSIRS_DISC_DEFAULT_CAPACITY,capacity,share>>20,bytes>>20);
       if(!gpu->sweep || !gpu->refine || !gpu->confirm || !gpu->sweep_prepare || gpu->prepare(fp->N_RB_DL,fp->nb_antennas_rx,capacity,fp->ofdm_symbol_size,stride)<0
          || (gpu->sweep_prepare && gpu->sweep_prepare(fp->N_RB_DL,fp->nb_antennas_rx,capacity)<0))
-        {pipeline_ready=false;LOG_E(PHY,"SENSING: CSIRS_DISC GPU preallocation failed; discovery disabled\n");}
+        {
+          /* T6b: an allocation failure makes the GPU discovery not ready (CPU discovery), not the discovery off */
+          LOG_E(PHY,"SENSING: CSIRS_DISC GPU preallocation failed; GPU discovery not ready, CPU discovery\n");
+          if(nr_gpu_membudget_commit) nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS,0,0.0);
+          nr_csirs_disc_gpu_disable();
+        }
+      }
     }
     if(fp && pipeline_ready && nr_csirs_blind_rt_discovery_prepare && nr_csirs_blind_rt_discovery_prepare(fp)<0) pipeline_ready=false;
     if(!pipeline_ready && nr_csirs_blind_rt_discovery_disable) nr_csirs_blind_rt_discovery_disable();

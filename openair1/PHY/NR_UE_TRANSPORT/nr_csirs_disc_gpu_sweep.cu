@@ -3,6 +3,7 @@
 #include "nr_csirs_disc_evidence_internal.h"
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
+#include "../TOOLS/nr_gpu_cuda.h"
 #include "../TOOLS/nr_gpu_chunk.h"
 #include "../TOOLS/nr_gpu_wait.h"
 #include <algorithm>
@@ -736,6 +737,7 @@ static void energies(const short2 *grid,int rb,nr_csirs_disc_hyp_t h,nr_csirs_di
 extern "C" int nr_csirs_disc_gpu_sweep_entry(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
                                             const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out)
 {
+  if (!nr_gpu_module_ready()) return -1; // CPU tier: the caller falls back to the CPU sweep
   try {
     std::lock_guard<std::mutex> guard(workspace_mutex);
     pick_stream();
@@ -752,6 +754,7 @@ extern "C" int nr_csirs_disc_gpu_sweep_entry(const nr_csirs_disc_ring_t *r, cons
  */
 extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
 {
+  if (!nr_gpu_module_ready()) return -1;
   try {
     std::lock_guard<std::mutex> guard(workspace_mutex);
     pick_stream();

@@ -16,4 +16,6 @@ if(ENABLE_LDPC_CUDA)
   add_dependencies(tests test_nr_pusch_gpu_fep)
   add_test(NAME test_nr_pusch_gpu_fep COMMAND ./test_nr_pusch_gpu_fep WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   set_tests_properties(test_nr_pusch_gpu_fep PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps")
+  # the documented skip on a non-DIRECT tier ("no coherent host memory access"): gtest skips exit 0, report it as Skipped
+  set_tests_properties(test_nr_pusch_gpu_fep PROPERTIES SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\] UlGpuFep.BitExactVsCpu")
 endif()

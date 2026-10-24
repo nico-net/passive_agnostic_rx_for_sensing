@@ -1444,6 +1444,7 @@ using namespace nrdm;
 
 extern "C" int nr_pdsch_gpu_demod_init(int nant)
 {
+  if (!nr_gpu_module_ready()) return -1; // CPU tier (no device, arch mismatch or NR_GPU_FORCE_MODEL=cpu): refuse, the host keeps the CPU path
   if (g_ok)
     return 0;
   if (nant > NR_GPU_DEMOD_MAX_RX)
@@ -1587,6 +1588,10 @@ extern "C" int nr_pdsch_gpu_demod_evm_wait(nr_gpu_demod_job_t *j)
 
 extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
 {
+  /* The kernels read j->rxdataF/est/geo/comp/mag/llr (caller memory) in place: DIRECT tier only. On DISCRETE this would fault or migrate
+   * pages over PCIe; refuse before any CUDA call (the host counts it as RF_MODEL). The pass demod (nr_pdsch_gpu_demod_dev) uses nr_gpu_buf_t. */
+  if (nr_gpu_model() != NR_GPU_MODEL_DIRECT)
+    return -1;
   if (!g_ok || j->nbRx > NR_GPU_DEMOD_MAX_RX || j->nl > NR_GPU_DEMOD_MAX_NL || j->ext > (uint32_t)EXT
       || j->nl * j->nbRx > 16)
     return -1;

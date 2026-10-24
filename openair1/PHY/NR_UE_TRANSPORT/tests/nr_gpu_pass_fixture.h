@@ -98,7 +98,7 @@ struct GpuPassModule {
         m.call_dirty = (void (*)(void))dlsym(m.dl, "nr_gpu_pass_call_dirty");
         m.retry_counters = (void (*)(uint64_t *))dlsym(m.dl, "nr_gpu_pass_retry_counters");
         if (!m.fep) fprintf(stderr, "libpdsch_gpu.so has no nr_pdsch_gpu_fep_dev\n");
-        good = api && m.fep_stage && m.chest_stage && m.fep_old && m.chest_old && m.demod_old && m.demod_rel && m.ldpc_old && dinit && linit && m.fep && m.chest && m.demod && m.ldpc && api()->init(&cfg) == 0 && dinit(4) == 0;
+        good = api && m.fep_stage && m.chest_stage && m.fep_old && m.chest_old && m.demod_old && m.demod_rel && m.ldpc_old && dinit && linit && m.fep && m.chest && m.demod && m.ldpc && api() && api()->init(&cfg) == 0 && dinit(4) == 0;
         if (good) linit(); /* may refuse (CC < 9): the LDPC stage then reports it */
       }
     }
@@ -908,6 +908,7 @@ class GpuPassFixture {
     }
     return r;
   }
+  std::vector<int16_t> est_all; /* stage path: the whole chest estimate [layer * nbRx + ant][14][N] c16 (segmented: in data order) */
   std::vector<int16_t> est_l0; /* segmented stage path: layer-0 estimates [ant][first, last DM-RS symbol][N] c16 (the pass's brfo_rows layout) */
   typedef struct { int16_t r, i; } c16;
   std::vector<int16_t> geo_buf, geo_real, rxF_ref; /* rxF_ref: the exact FEP of the stage path, [ant][14][N] c16 */
@@ -943,6 +944,7 @@ class GpuPassFixture {
       memcpy(P.nvar.host, acc.data(), acc.size() * sizeof(int));
     }
     nr_gpu_buf_d2h_async(&P.rxF, 0, P.rxsz, st);
+    nr_gpu_buf_d2h_async(&P.est, 0, P.est.bytes, st);
     if (seg) nr_gpu_buf_d2h_async(&P.sc, 0, P.sc.bytes, st);
     if (cudaStreamSynchronize(st)) return -1;
     rxF_ref.assign((int16_t *)P.rxF.host, (int16_t *)P.rxF.host + 2 * (size_t)NANT * NSYM * N);
@@ -996,6 +998,7 @@ class GpuPassFixture {
       nr_gpu_buf_h2d_async(&P.vrx, 0, P.vrx.bytes, st);
       if (cudaStreamSynchronize(st)) return -1;
     }
+    est_all.assign((const int16_t *)P.est.host, (const int16_t *)P.est.host + P.est.bytes / 2); /* [layer][ant][14][N] c16: every layer, for the DM-RS SNR reference */
     s->nvar = nvar;
     P.dj.nvar = nvar;
     if (is_probe) horizon(P.dj, probe_last, qm, nl); /* the LLRs past the horizon stay 0 (load() cleared the buffer), as the body's cleared buffer */

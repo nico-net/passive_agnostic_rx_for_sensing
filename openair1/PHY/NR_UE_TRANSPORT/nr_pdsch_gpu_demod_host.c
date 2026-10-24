@@ -32,6 +32,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 #include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"
 #include "PHY/TOOLS/nr_gpu_bgq.h" /* FATTAILS */
+#include "PHY/TOOLS/nr_gpu_mem.h" /* nr_gpu_model(): standalone entries need the SHARED tier */
 #include <pthread.h>
 #include <sched.h>
 #include <sys/resource.h>
@@ -94,6 +95,10 @@ int nr_pdsch_gpu_demod_warmup(const NR_DL_FRAME_PARMS *fp)
   if (!g_init || !g_run || !g_release || g_init(fp->nb_antennas_rx) != 0) {
     LOG_W(PHY, "SENSING: GPU_EXACT_DEMOD requested but libpdsch_gpu.so has no usable demod entry -- CPU demodulation\n");
     return 0;
+  }
+  if (nr_gpu_model() != NR_GPU_MODEL_DIRECT) { /* the standalone kernels read caller memory in place; the pass demod (g_on) still runs */
+    LOG_W(PHY, "SENSING: GPU_EXACT_DEMOD standalone needs the SHARED tier -- pass/CPU demodulation\n");
+    g_run = NULL;
   }
   g_check = 64;
   atomic_store(&g_on, 1);
@@ -295,7 +300,7 @@ static int cpu_loop(const nr_pdsch_gpu_demod_call_t *c, int16_t *llr, uint32_t *
 }
 
 /* Reasons the GPU path is refused (index into g_refuse, logged with the stats). */
-enum { RF_OFF, RF_NL, RF_QM, RF_PTRS, RF_FORCED, RF_ENV, RF_OVERRIDE, RF_MODE, RF_MASK, RF_GEOM, RF_NRE0, RF_CAP, RF_BUSY, RF_N };
+enum { RF_OFF, RF_NL, RF_QM, RF_PTRS, RF_FORCED, RF_ENV, RF_OVERRIDE, RF_MODE, RF_MASK, RF_GEOM, RF_NRE0, RF_CAP, RF_BUSY, RF_MODEL, RF_N };
 
 static __thread int t_qmode; /* refuse() -> gpu_grant(): the resolved multi-layer qam_mode */
 static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coef, int *align, int *l2d)
@@ -415,7 +420,7 @@ static void stats_log(uint64_t n)
   for (int k = 0; k < RF_N; k++)
     u += snprintf(rf + u, sizeof(rf) - u, "%s%lu", k ? "," : "", (unsigned long)atomic_load(&g_refuse[k]));
   LOG_A(PHY, "SENSING: GPU_EXACT_DEMOD calls=%lu check_ok=%lu check_bad=%lu evm_close=%lu evm_far=%lu evm_maxrel=%.2e mean=%.0f us (gpu %.0f geo %.0f) max=%.0f us refused[off,nl,qm,ptrs,"
-        "forced,env,override,mode,mask,geom,nre0,cap,busy]=[%s]\n",
+        "forced,env,override,mode,mask,geom,nre0,cap,busy,model]=[%s]\n",
         (unsigned long)n, (unsigned long)atomic_load(&g_chk_ok), (unsigned long)atomic_load(&g_chk_bad),
         (unsigned long)atomic_load(&g_evm_close), (unsigned long)atomic_load(&g_evm_far), atomic_load(&g_evm_maxrel) / 1e18,
         atomic_load(&g_ns_sum) / 1e3 / n, atomic_load(&g_ns_gpu) / 1e3 / n, atomic_load(&g_ns_geo) / 1e3 / n, atomic_load(&g_ns_max) / 1e3, rf);
@@ -604,6 +609,8 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
     return rf;
   const int last = cfg->start_symbol + cfg->number_symbols - 1;
   j.evm_defer = t_defer_ok && j.want_evm && t_def;
+  if (!g_run) /* standalone entry needs the SHARED tier (warmup leaves g_run NULL on DISCRETE) */
+    return RF_MODEL;
   const uint64_t t0 = now_ns();
   if (g_run(&j) != 0)
     return RF_BUSY;

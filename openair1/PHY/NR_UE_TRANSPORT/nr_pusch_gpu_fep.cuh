@@ -31,33 +31,27 @@ struct Item {
 };
 static const int MAX_ITEMS = 64, NCTX = 4;
 
-/* the body of one (item, antenna) block; src == null (a pass item that is not used) leaves the block without effect */
+/* the body of one (item, antenna) block; src == null (a pass item that is not used) leaves the block without effect.
+ * P: the nr_isa profile (DFT and rotation twins of the host CPU, nr_exact::isa_profile) */
+template <int P>
 __device__ __forceinline__ void ul_fep_blk(const Item &it, int ant, const uint16_t *__restrict__ perm, const short *__restrict__ tw1024,
                                            const short *__restrict__ tw4096, const short2 *__restrict__ ts, int nb_rb, int fco)
 {
   using namespace nr_exact;
-  __shared__ short2 s[N];
+  __shared__ short2 s[smem_c16(P)];
   const int t = threadIdx.x;
   const short2 *in = it.src[ant];
   if (!in) return; /* uniform over the block */
   for (int n = t; n < N; n += THREADS) s[n] = in[__ldg(&perm[n])];
   __syncthreads();
-  fft4096<false>(s, t, tw1024, tw4096);
+  fft_twin<P, false>(s, t, tw1024, tw4096);
   const int len = (nb_rb & 1) ? (nb_rb + 1) * 6 : nb_rb * 6, start2 = (nb_rb & 1) ? fco - 6 : fco;
-  const int ar = it.rot.x, ai = (short)(-(int)it.rot.y);
+  const int ar = it.rot.x, ai = nr_isa::xneg(it.rot.y);
   short2 *o = it.dst[ant];
   for (int k = t; k < N; k += THREADS) {
     short2 v = s[k];
-    if (it.rotate && (k < len || (k >= start2 && k < start2 + len))) {
-      /* identical arithmetic to k_fep_exact (rotate_cpx_vector QRDMX, then mult_cpx_vector with the timeshift table) */
-      const int br = v.x, bi = v.y;
-      const int re0 = sat16((int)((2LL * ar * br) >> 16)), im0 = sat16((int)((2LL * ar * bi) >> 16));
-      const short re = sat16((int)((((long long)re0 << 16) - 2LL * ai * bi + 32768) >> 16));
-      const short im = sat16((int)((((long long)im0 << 16) + 2LL * ai * br + 32768) >> 16));
-      const short2 w = __ldg(&ts[k]);
-      const short nim = (short)(-(int)im);
-      v = make_short2(sat16(padd(re * w.x, nim * w.y) >> 15), sat16(padd(im * w.x, re * w.y) >> 15));
-    }
+    if (it.rotate && (k < len || (k >= start2 && k < start2 + len)))
+      v = rot_ts<P>(v, ar, ai, __ldg(&ts[k])); /* identical arithmetic to k_fep_exact (rotation twin of P, then mult_cpx_vector) */
     o[k] = v;
   }
 }
@@ -69,28 +63,30 @@ __device__ __forceinline__ unsigned long long ul_gtimer()
   return t;
 }
 /* span (ULST KCHARGE, may be null): {start, end} ns of every block at [2 * (y * gridDim.x + x)] */
+template <int P>
 __global__ void __launch_bounds__(nr_exact::THREADS) k_ul_fep(const Item *__restrict__ items, const uint16_t *__restrict__ perm,
                                                               const short *__restrict__ tw1024, const short *__restrict__ tw4096,
                                                               const short2 *__restrict__ ts, int nb_rb, int fco, unsigned long long *span)
 {
   const int b = 2 * (blockIdx.y * gridDim.x + blockIdx.x);
   if (span && threadIdx.x == 0) span[b] = ul_gtimer();
-  ul_fep_blk(items[blockIdx.x], blockIdx.y, perm, tw1024, tw4096, ts, nb_rb, fco);
+  ul_fep_blk<P>(items[blockIdx.x], blockIdx.y, perm, tw1024, tw4096, ts, nb_rb, fco);
   if (span) {
     __syncthreads();
     if (threadIdx.x == 0) span[b + 1] = ul_gtimer();
   }
 }
 /* GPUPASS Task 7: the same block for the graph pass: the rotation geometry (nb_rb, fco) is read from device memory when the kernel runs, and an item with src[0] == null is skipped */
+template <int P>
 __global__ void __launch_bounds__(nr_exact::THREADS) k_ul_fep_p(const Item *__restrict__ items, const int *__restrict__ par, const uint16_t *__restrict__ perm,
                                                                 const short *__restrict__ tw1024, const short *__restrict__ tw4096, const short2 *__restrict__ ts)
 {
-  ul_fep_blk(items[blockIdx.x], blockIdx.y, perm, tw1024, tw4096, ts, par[0], par[1]);
+  ul_fep_blk<P>(items[blockIdx.x], blockIdx.y, perm, tw1024, tw4096, ts, par[0], par[1]);
 }
 
 struct State {
   bool ok = false, part = false;
-  int nant = 0, kind = 0;
+  int nant = 0, kind = 0, isa = 0; /* isa: nr_isa profile of the kernels */
   uint16_t *d_perm = nullptr;
   short *d_tw1024 = nullptr, *d_tw4096 = nullptr;
   short2 *d_ts = nullptr;
@@ -130,22 +126,24 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int s
   if (U.ok) return U.nant == nant ? 0 : -1;
   if (N != nr_exact::N || nant < 1 || nant > 4 || offset_div <= 0) return -1;
   if (!nr_gpu_module_ready()) return -1;
-  const nr_gpu_caps_t *caps = nr_gpu_platform_probe();
-  if (!(caps && caps->model == NR_GPU_SHARED && caps->pageable_memory_access && caps->host_page_tables)) {
+  if (!nr_gpu_platform_shared_direct()) {
     fprintf(stderr, "nr_pusch_gpu_fep: no coherent host memory access -- CPU FEP\n");
+    return -1;
+  }
+  U.isa = nr_exact::isa_profile();
+  if (U.isa == nr_isa::P_NONE) {
+    fprintf(stderr, "nr_pusch_gpu_fep: no bit-identical GPU twin of the host CPU DFT/rotation (%s) -- CPU FEP\n", nr_exact::g_isa_desc);
     return -1;
   }
   U.nant = nant;
   U.pct = pct > 0 && pct <= 100 ? (unsigned)pct : 20u;
+  std::vector<uint16_t> perm;
+  std::vector<short> tw1, tw4, ts(2 * N);
+  nr_exact::twin_tables(U.isa, perm, tw1, tw4);
   UCK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&U.d_perm, N * sizeof(uint16_t)));
-  UCK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&U.d_tw1024, 3 * 512 * sizeof(short)));
-  UCK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&U.d_tw4096, 3 * 2048 * sizeof(short)));
+  UCK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&U.d_tw1024, tw1.size() * sizeof(short)));
+  UCK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&U.d_tw4096, tw4.size() * sizeof(short)));
   UCK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&U.d_ts, N * sizeof(short2)));
-  std::vector<uint16_t> perm(N);
-  std::vector<short> tw1(3 * 512), tw4(3 * 2048), ts(2 * N);
-  nr_exact::build_perm(perm.data());
-  nr_exact::init_rad4_host(1024, tw1.data());
-  nr_exact::init_rad4_host(4096, tw4.data());
   const int so = ncp / offset_div; /* init_timeshift_rotation(): same libm, same formula as the DL exact FEP */
   for (int i = 0; i < N; i++) {
     const double poff = -i * 2.0 * M_PI * so / N;
@@ -157,7 +155,7 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int s
   UCK(cudaMemcpy(U.d_tw4096, tw4.data(), tw4.size() * sizeof(short), cudaMemcpyHostToDevice));
   UCK(cudaMemcpy(U.d_ts, ts.data(), ts.size() * sizeof(short), cudaMemcpyHostToDevice));
   cudaFuncAttributes attr;
-  UCK(cudaFuncGetAttributes(&attr, ulfep::k_ul_fep));
+  UCK(NR_EXACT_ATTR(U.isa, &attr, ulfep::k_ul_fep));
   int least = 0, greatest = 0;
   UCK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
   /* host buffers the warm-up launch reads and writes: written first, so the GPU never first-touches an unwritten page */
@@ -181,7 +179,7 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int s
     Item &it = U.h_items[c][0];
     for (int a = 0; a < 4; a++) { it.src[a] = buf; it.dst[a] = buf + N; }
     it.rotate = 1;
-    k_ul_fep<<<dim3(1, nant), nr_exact::THREADS, 0, U.st[c]>>>(U.d_items[c], U.d_perm, U.d_tw1024, U.d_tw4096, U.d_ts, 106, N - 636, U.d_span[c]);
+    NR_EXACT_LAUNCH(U.isa, k_ul_fep, dim3(1, nant), nr_exact::THREADS, U.st[c], U.d_items[c], U.d_perm, U.d_tw1024, U.d_tw4096, U.d_ts, 106, N - 636, U.d_span[c]);
     UCK(cudaPeekAtLastError());
     UCK((cudaError_t)nr_gpu_sync(U.st[c]));
   }
@@ -245,7 +243,7 @@ extern "C" int nr_pusch_gpu_fep_run(const void *items, int n, int nb_rb, int fco
   const uldiag::Snap r0 = dg ? uldiag::snap() : uldiag::Snap();
   memcpy(U.h_items[c], items, (size_t)n * sizeof(Item));
   if (dg) cudaEventRecord(U.ev0[c], U.st[c]);
-  k_ul_fep<<<dim3(n, U.nant), nr_exact::THREADS, 0, U.st[c]>>>(U.d_items[c], U.d_perm, U.d_tw1024, U.d_tw4096, U.d_ts, nb_rb, fco,
+  NR_EXACT_LAUNCH(U.isa, k_ul_fep, dim3(n, U.nant), nr_exact::THREADS, U.st[c], U.d_items[c], U.d_perm, U.d_tw1024, U.d_tw4096, U.d_ts, nb_rb, fco,
                                                                 U.d_span[c]);
   cudaError_t e = cudaPeekAtLastError();
   if (dg) cudaEventRecord(U.ev1[c], U.st[c]);
@@ -301,6 +299,6 @@ extern "C" void nr_pusch_gpu_fep_stats(uint64_t *o)
 extern "C" int nr_gpu_pass_ul_fep_dev(const void *items_dev, const int *par_dev, int nant, void *stream)
 {
   if (g_init_state != 1 || !g_exact_ok || !g_d_perm || !items_dev || !par_dev || nant < 1 || nant > 4) return -1;
-  ulfep::k_ul_fep_p<<<dim3(14, nant), nr_exact::THREADS, 0, (cudaStream_t)stream>>>((const ulfep::Item *)items_dev, par_dev, g_d_perm, g_d_tw1024, g_d_tw4096, g_d_ts);
+  NR_EXACT_LAUNCH(g_isa, ulfep::k_ul_fep_p, dim3(14, nant), nr_exact::THREADS, (cudaStream_t)stream, (const ulfep::Item *)items_dev, par_dev, g_d_perm, g_d_tw1024, g_d_tw4096, g_d_ts);
   return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
 }

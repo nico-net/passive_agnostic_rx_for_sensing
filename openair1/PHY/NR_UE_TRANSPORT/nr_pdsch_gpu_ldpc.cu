@@ -16,6 +16,7 @@
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
+#include "../TOOLS/nr_gpu_cuda.h" // nr_gpu_module_ready
 #include "nr_pusch_gpu_diag.h"
 #include <atomic>
 #include <cstdio>
@@ -706,6 +707,7 @@ using namespace nrldpc;
 
 extern "C" int nr_pdsch_gpu_ldpc_init(void)
 {
+  if (!nr_gpu_module_ready()) return -1; // CPU tier (no device, arch mismatch or NR_GPU_FORCE_MODEL=cpu): refuse, the host keeps the CPU path
   static std::once_flag once;
   std::call_once(once, [] {
     int dev = 0, cl = 0;
@@ -1056,6 +1058,7 @@ static int ul_acquire()
 
 extern "C" int nr_pusch_gpu_ldpc_init(int pct, int deadline_us)
 {
+  if (!nr_gpu_module_ready()) return -1; // CPU tier (no device, arch mismatch or NR_GPU_FORCE_MODEL=cpu): refuse, the host keeps the CPU path
   static std::mutex m;
   std::lock_guard<std::mutex> lk(m);
   if (UL.ok)

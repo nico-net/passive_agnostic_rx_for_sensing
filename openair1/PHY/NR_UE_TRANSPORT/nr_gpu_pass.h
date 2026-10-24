@@ -238,7 +238,7 @@ typedef struct {
   nr_gpu_chest_post_out_t post;
   nr_gpu_demod_job_t *demod_out; /* optional caller buffer: the decisions, kappa and EVM sums of the demod (for the host fold) */
   int16_t *brfo_rows;            /* optional caller buffer [nbRx][2][4096] c16: layer-0 estimates of the first and last DM-RS symbol */
-  int16_t *qm_row;               /* optional caller buffer [4096] c16: job.qm_n equalised layer-0 samples of symbol job.qm_sym (DIRECT model only: qm_valid) */
+  int16_t *qm_row;               /* optional caller buffer [4096] c16: job.qm_n equalised layer-0 samples of symbol job.qm_sym (both memory models: qm_valid) */
   uint8_t qm_valid;
   uint32_t nvar_ant[4];          /* the chest's per-antenna noise of the last DM-RS symbol and layer (what nr_dl_chest_nvar_ant holds after the old chest) */
   nr_dmrs_snr_t dsnr;            /* EVMGRANT dmrs_snr / dmrs_pw (LS units) / dmrs_ref of the last DM-RS symbol and layer, from the host copy of the estimate (no extra GPU work) */
@@ -258,7 +258,7 @@ typedef struct {
   /* ---- measurement only (GPU-span root cause, 2026-10-19; EVMGRANT gq= / li=). DL split pass only, else 0. */
   uint32_t cspan_ns, dspan_ns, lspan_ns; /* event-timed sub-graph spans: C head -> after C, after C -> after D, after D -> done (cspan + dspan + lspan = gspan; C skipped: cspan 0, gspan 0) */
   uint32_t seq;                  /* process-wide pass number, also the payload of the NVTX mark "gp" emitted just before the launches (joins an nsys capture to the log line) */
-  struct {                       /* the L sub-graph's LDPC launch, from the per-code-block verdicts and %globaltimer stamps (DIRECT model, decode not skipped; valid = 0 otherwise) */
+  struct {                       /* the L sub-graph's LDPC launch, from the per-code-block verdicts and %globaltimer stamps (both memory models, decode not skipped; valid = 0 otherwise) */
     uint8_t valid;
     uint16_t ncb, nconv, nlast;  /* code blocks of the TB decoded; stopped at a zero syndrome; ran to the iteration limit */
     uint16_t it_conv_max, it_conv_sum; /* snapshots (hard-decision iterations) of the converged blocks: max, sum */

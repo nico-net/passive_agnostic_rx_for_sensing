@@ -5,6 +5,7 @@
  * Synthetic NR PSS (TS 38.211 7.4.2.2) placed off-centre in a 4096-point grid, complex AWGN, 4 RX. */
 #include <algorithm>
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <random>

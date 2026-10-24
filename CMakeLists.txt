@@ -21,9 +21,8 @@ if(ENABLE_CHANNEL_SIM_CUDA)
     find_package(CUDAToolkit REQUIRED)
     message(STATUS "CUDA explicitly enabled, building with GPU acceleration support.")
 
-    enable_language(CUDA)
-
     include(cmake_targets/nr_gpu_arch.cmake)
+    nr_gpu_enable_cuda()
     nr_gpu_architectures("${CMAKE_CUDA_ARCHITECTURES}" NR_GPU_SIM_ARCHS)
     set(CMAKE_CUDA_ARCHITECTURES "${NR_GPU_SIM_ARCHS}")
 
@@ -2975,6 +2974,13 @@ if(ENABLE_TESTS)
   endif()
   add_dependencies(tests test_nr_td_cb0_batch)
   add_test(NAME test_nr_td_cb0_batch COMMAND ./test_nr_td_cb0_batch)
+  if(ENABLE_LDPC_CUDA)
+    # tier variants: forced DISCRETE (device buffers on any GPU) and forced CPU (the GPU backends refuse, GPU comparisons skip)
+    add_test(NAME test_nr_td_cb0_batch_discrete COMMAND ./test_nr_td_cb0_batch)
+    add_test(NAME test_nr_td_cb0_batch_cpu COMMAND ./test_nr_td_cb0_batch)
+    set_tests_properties(test_nr_td_cb0_batch_discrete PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=discrete)
+    set_tests_properties(test_nr_td_cb0_batch_cpu PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=cpu)
+  endif()
   # CB0 elimination runtime wiring (td/cb0-cpu-wiring): scheduler, backend selection / GPU fallback, admissibility,
   # engine adapter and the per-grant glue (decode-side GrantWork calls stubbed by the test), real CPU LDPC via the fixture.
   add_executable(test_nr_td_cb0_wire ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc ${NR_TD_CB0_FX_SRCS}
@@ -3515,12 +3521,19 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_admit COMMAND test_nr_admit)
   add_dependencies(tests test_nr_admit)
   add_executable(test_nr_gpu_platform openair1/PHY/TOOLS/tests/nr_gpu_platform_test.cc
-                 openair1/PHY/TOOLS/nr_gpu_platform.c)
+                 openair1/PHY/TOOLS/nr_gpu_platform.c openair1/PHY/TOOLS/nr_gpu_mem.c)
   target_compile_definitions(test_nr_gpu_platform PRIVATE NR_GPU_PLATFORM_TEST)
   target_include_directories(test_nr_gpu_platform PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS)
   target_link_libraries(test_nr_gpu_platform PRIVATE GTest::gtest_main ${CMAKE_DL_LIBS} pthread)
   add_test(NAME test_nr_gpu_platform COMMAND test_nr_gpu_platform)
   add_dependencies(tests test_nr_gpu_platform)
+  # T6b: shared device-memory budget (pure functions + state through NR_GPU_MEM_BUDGET_MB; no device)
+  add_executable(test_nr_gpu_membudget_mem openair1/PHY/TOOLS/tests/nr_gpu_membudget_test.cc openair1/PHY/TOOLS/nr_gpu_platform.c)
+  target_compile_definitions(test_nr_gpu_membudget_mem PRIVATE NR_GPU_PLATFORM_TEST)
+  target_include_directories(test_nr_gpu_membudget_mem PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS ${OPENAIR1_DIR})
+  target_link_libraries(test_nr_gpu_membudget_mem PRIVATE GTest::gtest_main ${CMAKE_DL_LIBS} pthread)
+  add_test(NAME test_nr_gpu_membudget_mem COMMAND test_nr_gpu_membudget_mem)
+  add_dependencies(tests test_nr_gpu_membudget_mem)
 endif()
 
 # Keep the CUDA-independent core platform beside a relocated receiver binary.

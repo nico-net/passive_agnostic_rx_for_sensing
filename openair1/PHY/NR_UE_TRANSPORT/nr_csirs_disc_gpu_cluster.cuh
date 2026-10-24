@@ -119,19 +119,21 @@ __host__ __device__ static int finish_candidates(candidate_t *cand,int nc,nr_csi
 /* segment: GPU kernel: the segmentation step of the CPU cluster() for one (period, offset, symbol) per thread, over the masks produced by lattice_screen().
  *   Builds the per-RB evidence from the history, segments each parity and density, and appends each significant candidate to cand[] through an atomic counter (capped at GPU_CAND_CAP). Launched by detect().
  */
-__global__ void segment(int rb_count,int p,uint64_t nt,const uint64_t *counts,
+/* T6b: the body of segment() for one id, working in caller-provided per-thread arrays: dr/vr/br (12*rb doubles each) and d/v/base/used (rb each). The local-memory kernel
+ * (segment, 86 KB frame per thread on the stack: GB10) and the scratch kernel (segment_scratch: the same arrays in a global scratch sized by the launched threads) share it,
+ * so the arithmetic is identical. */
+__device__ __forceinline__ void segment_body(int id,int rb_count,int p,uint64_t nt,const uint64_t *counts,
     const uint64_t *sum,const uint64_t *sum80,const uint64_t *sum64,
     const uint64_t *tot,const uint64_t *totq,const uint16_t *masks,
-    uint16_t excluded,float min_strength,candidate_t *cand,unsigned *count,int bx0=0)
+    uint16_t excluded,float min_strength,candidate_t *cand,unsigned *count,
+    double *dr,double *vr,double *br,double *d,double *v,double *base,bool *used)
 {
-  int id=(blockIdx.x+bx0)*blockDim.x+threadIdx.x;if(id>=p*14) return;
   int o=id/14,l=id%14,tiles=(rb_count+15)/16,nk=12*rb_count,nr=14*nk+168*tiles;
   uint64_t on=counts[o],off=nt-on;
   if(on<3 || off<3 || (excluded&(1<<l))) return;
   bool any=false;for(int k=0;k<tiles*6;++k) any|=masks[(size_t)id*tiles*6+k]!=0;
   if(!any) return;
   double ion=1.0/on/4096.,ioff=1.0/off/4096.;
-  double dr[NR_CSIRS_DISC_MAX_RB*12],vr[NR_CSIRS_DISC_MAX_RB*12],br[NR_CSIRS_DISC_MAX_RB*12];
   int basis=80%p==0?80:64%p==0?64:640;
   const uint64_t *values=basis==80?sum80:basis==64?sum64:sum;
   for(int k=0;k<nk;++k) {
@@ -145,7 +147,7 @@ __global__ void segment(int rb_count,int p,uint64_t nt,const uint64_t *counts,
         /* Noise-penalized contiguous segmentation, separately by RB parity.
          * A half-density extent is the minimal observable span (first..last
          * occupied RB); an unoccupied endpoint cannot be inferred from IQ. */
-        double d[NR_CSIRS_DISC_MAX_RB]={0}, v[NR_CSIRS_DISC_MAX_RB]={0}, base[NR_CSIRS_DISC_MAX_RB]={0};
+        for(int rb=0;rb<rb_count;++rb) {d[rb]=0;v[rb]=0;base[rb]=0;}
         int ns=__popc(mask);
         double peak=0;
         for(int rb=0;rb<rb_count;++rb) {
@@ -157,7 +159,7 @@ __global__ void segment(int rb_count,int p,uint64_t nt,const uint64_t *counts,
         }
         for(int density=0;density<3;++density) {
           int step=density<2 ? 2:1, first=density<2 ? density:0;
-          bool used[NR_CSIRS_DISC_MAX_RB]={0};
+          for(int rb=0;rb<rb_count;++rb) used[rb]=false;
           /* Long silent gaps separate colocated combs from different subbands.
            * Use pooled eight-RB support so a channel notch is not a boundary. */
           for(int rb=first;rb<rb_count;rb+=step) {
@@ -199,6 +201,33 @@ __global__ void segment(int rb_count,int p,uint64_t nt,const uint64_t *counts,
 
   }
 }
+__global__ void segment(int rb_count,int p,uint64_t nt,const uint64_t *counts,
+    const uint64_t *sum,const uint64_t *sum80,const uint64_t *sum64,
+    const uint64_t *tot,const uint64_t *totq,const uint16_t *masks,
+    uint16_t excluded,float min_strength,candidate_t *cand,unsigned *count,int bx0=0)
+{
+  int id=(blockIdx.x+bx0)*blockDim.x+threadIdx.x;if(id>=p*14) return;
+  double dr[NR_CSIRS_DISC_MAX_RB*12],vr[NR_CSIRS_DISC_MAX_RB*12],br[NR_CSIRS_DISC_MAX_RB*12];
+  double d[NR_CSIRS_DISC_MAX_RB],v[NR_CSIRS_DISC_MAX_RB],base[NR_CSIRS_DISC_MAX_RB];
+  bool used[NR_CSIRS_DISC_MAX_RB];
+  segment_body(id,rb_count,p,nt,counts,sum,sum80,sum64,tot,totq,masks,excluded,min_strength,cand,count,dr,vr,br,d,v,base,used);
+}
+/* segment_scratch: T6b. The same job with the per-thread arrays in global memory (scr: scratch_doubles(rb) doubles per launched thread slot) so the kernel's local frame is
+ * small and the driver does not reserve frame x SMs x max threads of local memory (4.2 GB on a 34-SM card). The launch is grid-stride: ids [bx0*32, bx_end*32) are walked by
+ * the launched threads, thread slot = blockIdx.x*32+threadIdx.x. Candidate order differs (atomic arrival, as before); the candidates and their values do not. */
+__global__ void segment_scratch(int rb_count,int p,uint64_t nt,const uint64_t *counts,
+    const uint64_t *sum,const uint64_t *sum80,const uint64_t *sum64,
+    const uint64_t *tot,const uint64_t *totq,const uint16_t *masks,
+    uint16_t excluded,float min_strength,candidate_t *cand,unsigned *count,int bx0,int bx_end,double *scr,size_t slot_doubles)
+{
+  const int slot=blockIdx.x*blockDim.x+threadIdx.x;
+  double *dr=scr+(size_t)slot*slot_doubles,*vr=dr+12*rb_count,*br=vr+12*rb_count,*d=br+12*rb_count,*v=d+rb_count,*base=v+rb_count;
+  bool *used=(bool *)(base+rb_count);
+  const int last=min(bx_end*(int)blockDim.x,p*14);
+  for(int id=bx0*blockDim.x+slot;id<last;id+=gridDim.x*blockDim.x)
+    segment_body(id,rb_count,p,nt,counts,sum,sum80,sum64,tot,totq,masks,excluded,min_strength,cand,count,dr,vr,br,d,v,base,used);
+}
+static size_t segment_scratch_doubles(int rb) {return (size_t)39*rb+((size_t)rb+7)/8+1;}
 /* collect: GPU kernel (single thread): merges the raw candidates of one scheduling group into that group's heap (capped at CAND_CAP), clearing it first when requested. Launched by detect(). */
 __global__ void collect(candidate_t *raw,unsigned *count,candidate_t *groups,int *sizes,int group,bool clear)
 {
@@ -224,6 +253,7 @@ struct State {
   Buffer<uint16_t> masks;
   Buffer<candidate_t> raw,groups;
   Buffer<unsigned> count;
+  Buffer<double> scr; /* T6b: segment_scratch arrays (g_segment_blocks*32 thread slots) */
   Buffer<int> sizes;
   uint64_t counts[640]={},nt=0,written=0;
   const int16_t *identity=nullptr;
@@ -243,7 +273,8 @@ static bool prepare(int rb,int ant,int capacity)
     && s.meta.reserve(100) && s.grid.reserve((size_t)100*ant*14*24*rb)
     && s.exclude.reserve(14*12*rb) && s.masks.reserve((size_t)640*14*((rb+15)/16)*6)
     && s.raw.reserve(GPU_CAND_CAP) && s.groups.reserve(4*CAND_CAP)
-    && s.count.reserve(1) && s.sizes.reserve(4);
+    && s.count.reserve(1) && s.sizes.reserve(4)
+    && (!g_segment_scratch || s.scr.reserve((size_t)g_segment_blocks*32*segment_scratch_doubles(rb)));
 }
 /* reset: forgets the resident history (clears the cached identity of the ring grid) so that the next detect() rebuilds it.
  *   Called by nr_csirs_disc_gpu.cu (resident reset after the warm-up) and by the detector reset path.
@@ -299,8 +330,13 @@ static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cf
       static NrGpuChunker c_lp{1,0,"c_lp"}; static NrGpuChunker c_ls{1,0,"c_ls"}; static NrGpuChunker c_seg{1,0,"c_seg"};
       if(disc_chunks(c_lp,(p*pooled+127)/128,[&](long f,long k){lattice_pool<<<k,128,0,disc_stream()>>>(p,nr,pooled,s.sum.p,s.sq.p,s.ps.p,s.pq.p,(int)f);})!=cudaSuccess
          || disc_chunks(c_ls,(p*14+63)/64,[&](long f,long k){lattice_screen<<<k,64,0,disc_stream()>>>(p,tiles,s.nt,s.dc.p,s.ps.p,s.pq.p,s.total.p+nr-pooled,s.totalq.p+nr-pooled,s.masks.p,(int)f);})!=cudaSuccess
-         || disc_chunks(c_seg,(p*14+31)/32,[&](long f,long k){segment<<<k,32,0,disc_stream()>>>(rb,p,s.nt,s.dc.p,s.sum.p,s.s80.p,s.s64.p,s.total.p,s.totalq.p,s.masks.p,symbols,
-              cfg && cfg->min_strength>0?cfg->min_strength:2.f,s.raw.p,s.count.p,(int)f);})!=cudaSuccess) return -1;
+         || disc_chunks(c_seg,(p*14+31)/32,[&](long f,long k){
+              const float min_strength=cfg && cfg->min_strength>0?cfg->min_strength:2.f;
+              if(g_segment_scratch) /* T6b: small local frame, per-thread arrays in the global scratch (s.scr) */
+                segment_scratch<<<(unsigned)std::min<long>(k,g_segment_blocks),32,0,disc_stream()>>>(rb,p,s.nt,s.dc.p,s.sum.p,s.s80.p,s.s64.p,s.total.p,s.totalq.p,s.masks.p,symbols,
+                  min_strength,s.raw.p,s.count.p,(int)f,(int)(f+k),s.scr.p,segment_scratch_doubles(rb));
+              else
+                segment<<<k,32,0,disc_stream()>>>(rb,p,s.nt,s.dc.p,s.sum.p,s.s80.p,s.s64.p,s.total.p,s.totalq.p,s.masks.p,symbols,min_strength,s.raw.p,s.count.p,(int)f);})!=cudaSuccess) return -1;
       collect<<<1,1,0,disc_stream()>>>(s.raw.p,s.count.p,s.groups.p,s.sizes.p,g,clear);clear=false;
       unsigned count=0;if(disc_copy(&count,s.count.p,4,cudaMemcpyDeviceToHost)!=cudaSuccess || count>GPU_CAND_CAP) return -1;
     }

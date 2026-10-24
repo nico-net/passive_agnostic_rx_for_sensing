@@ -43,7 +43,10 @@ void wait_slots_free() {
 
 class PoolTest : public ::testing::Test {
  protected:
-  static void SetUpTestSuite() { ASSERT_EQ(lcp_load(), 0) << dlerror(); }
+  static void SetUpTestSuite() {
+    ASSERT_EQ(lcp_load(), 0) << dlerror();
+    if (!lcp_host_llr()) GTEST_SKIP() << "GPU LDPC pool not ready (CPU tier: no device, forced CPU or module/arch mismatch)";
+  }
   void SetUp() override { lcp_hooks(0, 0, 0, 256, 50, 4, 5000); lcp_reset(); }
   void TearDown() override {
     lcp_hooks(0, 0, 0, 256, 50, 4, 5000);

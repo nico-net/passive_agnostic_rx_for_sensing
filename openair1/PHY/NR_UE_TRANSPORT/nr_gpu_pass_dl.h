@@ -48,7 +48,7 @@ typedef struct {
   nr_gpu_pass_result_t r;
   nr_gpu_demod_job_t demod;         /* decisions, kappa and EVM sums of the demod (r.demod_out) */
   int16_t brfo_rows[4 * 2 * 4096 * 2];
-  int16_t qm_row[4096 * 2];         /* the equalised layer-0 symbols of the symbol with the most data REs (the QM oracle's input), DIRECT only */
+  int16_t qm_row[4096 * 2];         /* the equalised layer-0 symbols of the symbol with the most data REs (the QM oracle's input), both memory models */
   uint32_t qm_n, dl_valid_re[14];
   int qm_sym, ndmrs, dmrs_first, dmrs_last, C;
   uint32_t nvar_ant[4];             /* the chest's per-antenna noise of the last DM-RS symbol and layer (nr_dl_chest_nvar_ant) */
