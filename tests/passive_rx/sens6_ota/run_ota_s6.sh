@@ -11,7 +11,8 @@
 #         default <worktree>/build_ota), CARRIER PRB SSB SCAN=1 NANT RXG INITIALFO DUR (override the env file), DATA (X410 data
 #         address, 192.168.20.2), RXENV (receiver KEY=VALUE list, from the env file), MGMT (default: what uhd_find_devices reports, else DATA), NIC (enp2s0f1np1), OUTBASE
 #         (/home/sens/NICOLA/captures), EXTRA (more receiver arguments), XENV (more KEY=VALUE for the receiver), FORCE=1 (start
-#         although the preflight found non-fatal items).
+#         although the preflight found non-fatal items), EXPORT=0 (no live tools/mobisys/export.py lab export into <run>/export),
+#         HOSTLABEL (export --host-label, default "sens6 X410 UC_200").
 #
 # Every run: under flock -x /tmp/td_measure.lock, only with MemAvailable >= 7 GB, inside
 #   systemd-run --user --scope -p MemoryMax=min(7G, MemAvailable-0.5G) -p MemorySwapMax=1G choom -n 1000 -- sudo -n env ... timeout -s INT
@@ -131,7 +132,11 @@ dry-run|run)
   miss0=$(cat /sys/class/net/$NIC/statistics/rx_missed_errors); oob0=$(ethtool -S "$NIC" 2>/dev/null | awk '/rx_out_of_buffer/{print $2}')
   ( exec 9>/tmp/td_measure.lock; flock -x 9
     ma=$(awk '/MemAvailable/{print $2}' /proc/meminfo); [ "$ma" -ge 7000000 ] || { echo "MemAvailable $ma kB < 7 GB at lock time: not started"; exit 3; }
-    cd "$OUT" && $CMD > "$OUT/run.log" 2>&1 < /dev/null ) &
+    cd "$OUT" || exit 1
+    if [ "${EXPORT:-1}" = 1 ]; then  # MobiSys lab export, live (docs/MOBISYS_EXPERIMENT_PROTOCOL.md 3.3); tee -p: a dead exporter never breaks the receiver's stdout
+      $CMD 2>&1 < /dev/null | tee -p "$OUT/run.log" | python3 -I "$R/tools/mobisys/export.py" --experiment-mode lab --out "$OUT/export" \
+        --host-label "${HOSTLABEL:-sens6 X410 UC_200}" > "$OUT/export.log" 2>&1; exit ${PIPESTATUS[0]}
+    else $CMD > "$OUT/run.log" 2>&1 < /dev/null; fi ) &
   LP=$!
   ( while kill -0 $LP 2>/dev/null; do echo "$(date +%s),$(cat /sys/class/net/$NIC/statistics/rx_missed_errors),$(wc -l < "$OUT/run.log" 2>/dev/null || echo 0)"; sleep 1; done > "$OUT/nic.csv" ) &
   # stall watchdog: a receiver whose log stops growing for 60 s gets SIGINT (twice), never SIGKILL
