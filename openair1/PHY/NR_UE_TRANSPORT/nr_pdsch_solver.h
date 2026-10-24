@@ -103,6 +103,10 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit);
 
 /** DM-RS symbol mask, type A, single-symbol DM-RS, PDSCH S..S+L-1 (TS 38.211 Table 7.4.1.1.2-3). */
 uint16_t nr_pdsch_solver_dmrs_mask(int l0, int S, int L, int add_pos);
+/** TDAEND (blind PDSCH end, TDD mixed/special slot): last symbol of a type-A PDSCH from the per-symbol received energy e[] on its
+ * PRBs, for a decode window S..S+L-1 whose first DM-RS symbol is l0. Returns the last symbol before the first clear energy gap
+ * (>= 3 dB below the symbols every legal allocation covers), or -1 when the window shows no gap (the PDSCH fills it, or too weak). */
+int nr_pdsch_solver_end_from_energy(const double e[14], int S, int L, int l0);
 /** (Qm, R x 1024 x 2) of MCS `mcs` in table 0/1/2; false if the index is reserved/out of range. */
 bool nr_pdsch_solver_mcs_qr(int table, int mcs, int *qm, int *r2);
 

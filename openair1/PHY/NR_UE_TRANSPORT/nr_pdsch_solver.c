@@ -210,6 +210,30 @@ uint16_t nr_pdsch_solver_dmrs_mask(int l0, int S, int L, int add_pos)
   return m;
 }
 
+/* TDAEND: see nr_pdsch_solver.h. ref = the weakest symbol every legal type-A allocation containing l0 covers (S..max(S+2, l0),
+ * L >= 3); floor = the weakest symbol after it. A 3 dB contrast is required; the end is the symbol before the first one below
+ * their geometric mean (the first gap: a later UL part of a special slot may carry energy again). */
+int nr_pdsch_solver_end_from_energy(const double e[14], int S, int L, int l0)
+{
+  if (!e || S < 0 || L < 4 || S + L > 14 || l0 < S || l0 >= S + L)
+    return -1;
+  const int lo = S + 2 > l0 ? S + 2 : l0, hi = S + L - 1;
+  if (lo >= hi)
+    return -1;
+  double ref = -1.0, floor_e = -1.0;
+  for (int s = S; s <= lo; s++)
+    if (ref < 0.0 || e[s] < ref) ref = e[s];
+  for (int s = lo + 1; s <= hi; s++)
+    if (floor_e < 0.0 || e[s] < floor_e) floor_e = e[s];
+  if (!(ref > 0.0) || floor_e < 0.0 || ref < 2.0 * floor_e)
+    return -1;
+  const double thr = sqrt(ref * floor_e);
+  for (int s = lo + 1; s <= hi; s++)
+    if (e[s] < thr)
+      return s - 1;
+  return -1;
+}
+
 /* tables_for: lists the MCS tables (priority qam256, then 64QAM, then 16QAM) whose (Qm, R) pair differs for one MCS index.
  *   Duplicates (same Qm and R) are dropped, so a result of one table means the MCS is unambiguous.
  *   Writes table ids to t[] and returns their count (0..3). Callers: plan_known(), plan_coverage(), nr_pdsch_solver_plan_slot().
