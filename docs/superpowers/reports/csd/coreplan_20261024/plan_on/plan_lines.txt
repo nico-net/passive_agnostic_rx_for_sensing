@@ -1,0 +1,8 @@
+0.016 SENSING: CORE_PLAN host=sens6 cpus=14 online=0-13 allowed=0,3-13 isolated=1-2 nohz_full=1-2 cap=1024:0-5/793:6-13 smt=0 llc=1 numa=1 gpu_node=-1 rt_cap=0 radio=0 dpdk=- -> mode=compact W=11 rt=3 uhd=- ring=-1 pool=4,5,6,7,8,9 n=6 lane=10-13 home=0,10-13 hk=0 dashboard=0 gpu=10 uss=12 nid=13 check=10-13 recov=11,13 src=auto
+0.016 SENSING: CORE_PLAN exported: UE_RT_CORE=3 PDSCH_CORES=4,5,6,7,8,9 PUSCH_CORES= FLOAT_CORES=10-13 GPU_CHECK_CORES=10-13 GPU_WORKER_CORE=10 PDCCH_USS_CORE=12 PDCCH_NID_GPU_CORE=13 DASHBOARD_CORE=0
+0.016 SENSING: CORE_PLAN warning: no CAP_SYS_NICE and RLIMIT_RTPRIO=0: every thread runs SCHED_OTHER (no RT priority); the plan is applied as CPU affinity only
+0.016 SENSING: FLOAT_CORES=10-13 (4 CPUs): 1 task(s) moved, 0 pinned task(s) kept
+0.027 [0m[32m[PHY]    SENSING: DASHBOARD http://127.0.0.1:8080 (run /home/sens/NICOLA/ota_runs/*)
+6.045 [0mSENSING: CORE_POOL: 6 cores: 4 5 6 7 8 9
+7.017 [0m[PHY]    SENSING: pinning the PHY receive thread to core 3 (ISAC_UE_RT_CORE)
+176.292 [0m[32m[PHY]    SENSING: CORE_POOL n=6 yields=0 gpu_gives=0 nested=20148 enforced=2 scan[n=514852 waited=0 promo=0 wait_us p50<=1 p99<=1 max=0] decode[n=300173 waited=0 promo=0 wait_us p50<=1 p99<=1 max=0] retry[n=18 waited=0 promo=0 wait_us p50<=1 p99<=1 max=0] disc[n=151641 waited=104 promo=0 wait_us p50<=1 p99<=1 max=7717] house[n=0 waited=0 promo=0 wait_us p50<=0 p99<=0 max=0]
