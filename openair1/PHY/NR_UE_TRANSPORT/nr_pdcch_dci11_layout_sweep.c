@@ -98,8 +98,8 @@ static const uint8_t kOneShot[]  = {0, 1};             /* Rel-16 one-shot HARQ-A
 static const uint8_t kGrpIdx[]   = {0, 1};             /* Rel-16 PDSCH group index (enhancedDynamic-r16) */
 static const uint8_t kNfi[]      = {0, 1, 2};          /* Rel-16 new feedback indicator */
 static const uint8_t kNGrp[]     = {0, 1};             /* Rel-16 number of requested PDSCH group(s) */
-static const uint8_t kHarqRetx[] = {0, 1};             /* Rel-17 HARQ-ACK retransmission indicator */
-static const uint8_t kPucchCell[]= {0, 1};             /* Rel-17 PUCCH cell indicator (PUCCH carrier switching) */
+static const uint8_t kEnhType3[] = {0, 1, 2, 3};       /* Rel-17 Enhanced Type 3 codebook indicator: log2(nCB) */
+static const uint8_t kHarqRetx[] = {0, 1};             /* Rel-17 HARQ-ACK retransmission indicator (pdsch-HARQ-ACK-Retx) */
 static const uint8_t kAnt[]      = {4, 5, 6};          /* DM-RS type x maxLength (Tables 7.3.1.2.2-1..4 and their -1A..-4A twins) */
 static const uint8_t kTci[]      = {0, 3};             /* tci-PresentInDCI */
 static const uint8_t kSrs[]      = {2, 3};             /* supplementaryUplink */
@@ -112,7 +112,11 @@ static const uint8_t kCpExt[]    = {0, 1, 2, 3, 4};    /* Rel-16 ChannelAccess-C
 static const uint8_t kMinOff[]   = {0, 1};             /* Rel-16 minimum applicable scheduling offset indicator */
 static const uint8_t kDormancy[] = {0, 1, 2, 3, 4, 5}; /* Rel-16 SCell dormancy indication (dormancy groups) */
 static const uint8_t kPdcchAd[]  = {0, 1, 2};          /* Rel-17 PDCCH monitoring adaptation indication */
-static const uint8_t kPad[]      = {0, 1};             /* TS 38.212 7.3.1.0 size alignment: one zero bit when 1_1 equals 0_0/1_0 */
+static const uint8_t kPucchCell[]= {0, 1};             /* Rel-17 PUCCH Cell indicator (pucch-sSCellDyn): the LAST field of the format */
+/* Zero padding: 7.3.1.0 size alignment (1 bit) and 7.3.1.2.2 "zeros shall be appended until the payload size of the DCI formats 1_1
+ * monitored in the multiple search spaces equal to the maximum" -- the CORESETs of one BWP differ in tci-PresentInDCI (3 bits), so
+ * up to 3 more. (Multi-PDSCH and SCell-to-PCell alignment are FR2-2 / cross-carrier cases.) */
+static const uint8_t kPad[]      = {0, 1, 2, 3, 4};
 
 #define DCI11_HARQ_PID 4
 #define DCI11_TPC      2
@@ -155,9 +159,9 @@ static void dci11_space_build(void)
                 for (int f = 0; f < NELEM(kNfi); f++)
                   for (int n = 0; n < NELEM(kNGrp); n++)
                     for (int x = 0; x < NELEM(kHarqRetx); x++)
-                      for (int y = 0; y < NELEM(kPucchCell); y++)
+                      for (int y = 0; y < NELEM(kEnhType3); y++)
                         sp.pre_ant[t] |= 1ULL << (kTb2[t] + kHarq[h] + kDai[d] + DCI11_TPC + kTpc2[q] + DCI11_PUCCH_RI + kP2H[k]
-                                                  + kOneShot[a] + kGrpIdx[g] + kNfi[f] + kNGrp[n] + kHarqRetx[x] + kPucchCell[y]);
+                                                  + kOneShot[a] + kEnhType3[y] + kGrpIdx[g] + kNfi[f] + kNGrp[n] + kHarqRetx[x]);
     const int n_tb = kTb2[t] ? 2 : 1;
     for (int j = 0; j < NELEM(kTci); j++)
       for (int k = 0; k < NELEM(kSrs); k++)
@@ -175,8 +179,9 @@ static void dci11_space_build(void)
       for (int c = 0; c < NELEM(kMinOff); c++)
         for (int d = 0; d < NELEM(kDormancy); d++)
           for (int e = 0; e < NELEM(kPdcchAd); e++)
-            for (int f = 0; f < NELEM(kPad); f++)
-              sp.tail |= 1ULL << (kPrio[a] + kCpExt[b] + kMinOff[c] + kDormancy[d] + kPdcchAd[e] + kPad[f]);
+            for (int y = 0; y < NELEM(kPucchCell); y++)
+              for (int f = 0; f < NELEM(kPad); f++)
+                sp.tail |= 1ULL << (kPrio[a] + kCpExt[b] + kMinOff[c] + kDormancy[d] + kPdcchAd[e] + kPucchCell[y] + kPad[f]);
   for (int v = 0; v < 64; v++)
     if (((sp.pre_ant[0] | sp.pre_ant[1]) >> v) & 1)
       sp.pre_ant_order[sp.n_pre_ant++] = (uint8_t)v;
