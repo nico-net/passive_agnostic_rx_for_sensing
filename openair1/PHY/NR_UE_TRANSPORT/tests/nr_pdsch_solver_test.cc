@@ -595,6 +595,59 @@ TEST(PdschSolverPhase, SpecialSlotPhaseIsLearntFromItsOwnFailures)
   nr_pdsch_solver_reset();
 }
 
+/* SOLVERTDDEND (2026-10-24). rfsim 273 PRB 4 RX: the special slot (6 DL symbols: PDSCH S1 L5) is decoded as a full slot (S1 L13) until
+ * SOLVER_PHASE_FAIL failed full decodes have accumulated at its phase -- 13 of the 15 post-solve full failures of the arm. With the
+ * slot's broadcast DL end the phase is searched from its first grant, DL end first; without it (-1) the old wait stands. */
+static int RunTddEnd(bool tdd_known, int *fail_before_first_ok, int *full_ok_out, int *full_out)
+{
+  Cell c;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(71);
+  nr_pdsch_solver_reading_t rd[2] = {{c.wrong.data(), (int)c.wrong.size(), 16, 1, 1, 2}, {c.truth.data(), (int)c.truth.size(), 16, 1, 1, 2}};
+  int first_ok = -1, sp_fail = 0, full_ok = 0, full = 0;
+  for (int g = 0; g < 3000; g++) {
+    const int ph = g % 20;
+    const bool sp = ph == 7 || ph == 17;
+    nr_pdsch_solver_set_now(1000 + g);
+    nr_pdsch_solver_set_slot_last(tdd_known ? (sp ? 5 : 13) : -1);
+    nr_dci_bits_t p = {{(uint64_t)rng() & ~1ull, 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(0x1234, p, 49, 2, 2, rd, 2, 8, v);
+    for (int i = 0; i < n; i++) {
+      const bool ok = v[i].reading == 1 && v[i].add_pos == c.add_pos && v[i].table == c.table &&
+                      (sp ? (v[i].S == 1 && v[i].L == 5) : (v[i].S == 1 && v[i].L == 13));
+      if (!v[i].probe) {
+        if (sp && ok && first_ok < 0) first_ok = g;
+        if (sp && !ok && first_ok < 0 && nr_pdsch_solver_rep(0x1234) >= 0) sp_fail++;
+        if (!sp) { full++; full_ok += ok; }
+      }
+      nr_pdsch_solver_feedback(v[i].token, ok, true);
+    }
+  }
+  nr_pdsch_solver_set_slot_last(-1);
+  nr_pdsch_solver_reset();
+  *fail_before_first_ok = sp_fail;
+  *full_ok_out = full_ok;
+  *full_out = full;
+  return first_ok;
+}
+TEST(PdschSolverPhase, TddEndSearchesTheSpecialSlotFromItsFirstGrant)
+{
+  int f_tdd, f_old, ok_tdd, ok_old, n_tdd, n_old;
+  const int first_tdd = RunTddEnd(true, &f_tdd, &ok_tdd, &n_tdd);
+  const int first_old = RunTddEnd(false, &f_old, &ok_old, &n_old);
+  printf("[solver] tdd end: special slot first ok at grant %d after %d failed full decodes (TDD known) vs %d after %d (unknown)\n",
+         first_tdd, f_tdd, first_old, f_old);
+  ASSERT_GT(first_tdd, 0);
+  ASSERT_GT(first_old, 0);
+  EXPECT_LE(f_tdd, 2) << "with the broadcast DL end the special slot is searched at its first post-solve grant";
+  EXPECT_GE(f_old, 8) << "without TDD knowledge the phase learner still waits for its failures (unchanged rule)";
+  EXPECT_LT(first_tdd, first_old);
+  EXPECT_GE(ok_tdd, n_tdd - 5) << "full slots are unaffected";
+}
+
 /* DCI11-RESOLVER: the mixed slot of the rfsim 106 bed. Of the five CRC-equivalent true layouts only layout 12 reads the TDA field
  * (bit 1 here: index 1 in the mixed slot, whose PDSCH is S0 L8); the others read no TDA field (index 0 always), and the lowest of
  * them solves first. The phase learner's pass in the mixed slot is (S, L) evidence: a layout mapping S1 L13 and S0 L8 to one index

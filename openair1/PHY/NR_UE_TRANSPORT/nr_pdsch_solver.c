@@ -114,8 +114,9 @@ typedef struct {
   uint64_t now_abs;
   bool decided;
   bool own; /* TIM-PDSCH: ids are this RNTI's own (nr_pdsch_solver_set_alt_scr32) */
+  int8_t last_dl; /* SOLVERTDDEND: last DL symbol of the grant's slot from the broadcast TDD pattern (-1 = unknown) */
 } solver_plan_ctx_t;
-static _Thread_local solver_plan_ctx_t t_plan_ctx = {.key = -1}; /* per scan consumer */
+static _Thread_local solver_plan_ctx_t t_plan_ctx = {.key = -1, .last_dl = -1}; /* per scan consumer */
 /* plan_ctx: the plan context (per scan consumer thread) that the grant planner reads its key, hash and slot time from. */
 static solver_plan_ctx_t *plan_ctx(void) { return &t_plan_ctx; }
 static struct { int32_t key, scr; } g_key_scr[16]; /* first solved scrambling per CORESET: its other RNTIs try it only */
@@ -593,6 +594,15 @@ void nr_pdsch_solver_set_now(uint64_t abs_slot)
   plan_ctx()->now_abs = abs_slot;
 }
 
+/* nr_pdsch_solver_set_slot_last: SOLVERTDDEND. Sets the last DL symbol (0..13) of the slot of the grant about to be planned, as read
+ *   from the cell's broadcast TDD pattern (SIB1 / learnt), or -1 when unknown. Per scan consumer thread, like set_now; the caller sets
+ *   it for every grant. Caller: nr_pdcch_blind_monitor_rt.c.
+ */
+void nr_pdsch_solver_set_slot_last(int last)
+{
+  plan_ctx()->last_dl = (int8_t)(last >= 0 && last <= 13 ? last : -1);
+}
+
 /* nr_pdsch_solver_owns: reports whether the solver takes over the grants of this RNTI; currently it is simply the global enable flag.
  *   The rnti argument is not used yet. Caller: declared in the header, no call site outside the header.
  */
@@ -957,7 +967,7 @@ static void plan_known(nr_pdsch_solver_var_t *out, int *n, int max, int slot, ui
 /* plan_ov_probes: SOLVERPHASE search of a failing slot phase: 4 (S, end symbol) hypotheses per grant, rotating over S in {1,0,2,3} and
  * end symbols of a TDD special slot, as first-code-block probes with the RNTI's solved add_pos / table. A pass sets the phase's (S, L). */
 static void plan_ov_probes(solver_rnti_t *r, int ph, nr_pdsch_solver_var_t *out, int *n, int max, int slot, int ri,
-                           const nr_pdsch_solver_reading_t *rd, int l0, uint64_t dci, nr_dci_bits_t payload)
+                           const nr_pdsch_solver_reading_t *rd, int l0, int e_first, uint64_t dci, nr_dci_bits_t payload)
 {
   static const uint8_t kE[10] = {5, 9, 10, 11, 8, 7, 6, 12, 4, 3};
   uint8_t tl[3];
@@ -966,8 +976,11 @@ static void plan_ov_probes(solver_rnti_t *r, int ph, nr_pdsch_solver_var_t *out,
   const int table = r->table >= 0 ? r->table : tl[0];
   t_ov = true;
   for (int q = 0; q < 4; q++) {
-    const uint32_t j = (r->ov_cur[ph]++) % 40u;
-    const int s = kS[j % 4], e = kE[j / 4], Ls = e - s + 1;
+    /* SOLVERTDDEND: the slot's broadcast DL end is tried first, with each start symbol (the first 4 hypotheses of the phase); the
+     * rotation over the other end symbols follows (a gNB may also use flexible symbols: the TDD end orders, it does not exclude) */
+    const uint32_t j0 = r->ov_cur[ph]++;
+    const uint32_t j = j0 % 40u;
+    const int s = kS[j % 4], e = (e_first >= 0 && j0 < 4u) ? e_first : kE[j / 4], Ls = e - s + 1;
     if (e < l0 || Ls < 2) continue;
     t_L = Ls;
     emit(out, n, max, slot, 1, ri, rd, l0, s, r->add_pos, table, true, nt > 1, false, false, -1, dci, payload);
@@ -1084,8 +1097,19 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       t_rm = csirs_slot ? r->rm : 0;
       plan_known(out, &n, budget, slot, 1, ri, rd, l0, r->rep, r->add_pos, r->table, r->S_by_tda, r->L_by_tda, mcs, dci, payload);
     }
-    if (ri >= 0 && r->ov_S[ph] < 0 && r->ph_tr[ph] >= SOLVER_PHASE_FAIL && r->ph_ok[ph] == 0 && r->full_ok >= 20 && !csirs_slot)
-      plan_ov_probes(r, ph, out, &n, budget, slot, ri, rd, l0, dci, payload);
+    /* SOLVERTDDEND: when the slot's broadcast TDD pattern ends the DL before the allocation the solution would decode (S + L - 1 >
+     * last DL symbol), the phase is searched from its first grant instead of after SOLVER_PHASE_FAIL failed full decodes [MEASURED,
+     * sens6 rfsim 273 PRB 4 RX: 13 of 15 post-solve full-decode failures were mixed-slot grants decoded as full-slot ones while the
+     * phase learner waited]. Without TDD knowledge (-1) the old rule stands. */
+    bool tdd_short = false;
+    if (ri >= 0 && ctx->last_dl >= 0 && ctx->last_dl < 13) {
+      const int tda_h = tda_of(r->rep, payload) & 15;
+      const int Sh = r->S_by_tda[tda_h] >= 0 ? r->S_by_tda[tda_h] : 1, Lh = r->L_by_tda[tda_h] > 0 ? r->L_by_tda[tda_h] : 14 - Sh;
+      tdd_short = Sh + Lh - 1 > ctx->last_dl;
+    }
+    if (ri >= 0 && r->ov_S[ph] < 0 && r->ph_ok[ph] == 0 && !csirs_slot
+        && ((r->ph_tr[ph] >= SOLVER_PHASE_FAIL && r->full_ok >= 20) || (tdd_short && r->full_ok >= 1)))
+      plan_ov_probes(r, ph, out, &n, budget, slot, ri, rd, l0, tdd_short ? ctx->last_dl : -1, dci, payload);
     /* REFINEMENT: the solution's layouts can still disagree on fields two passes did not separate (e.g. where the
      * antenna-ports field sits). Each other reading those layouts give for THIS DCI gets one probe with the same
      * physical parameters; a pass narrows the layout set to that reading (feedback), and the representative follows. */

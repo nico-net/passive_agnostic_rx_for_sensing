@@ -8753,6 +8753,11 @@ constdiag_done:;
       fapi_nr_dl_config_csirs_pdu_rel15_t sv_rm[NFAPI_MAX_NUM_CSI_RATEMATCH];
       const int sv_nrm = nr_csirs_blind_rt_rate_match_all(abs_slot, sv_rm, NR_CSI_RM_LEGACY_MAX);
       nr_pdsch_solver_set_now(source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot : 0);
+      { /* SOLVERTDDEND: the slot's DL end from the broadcast TDD pattern (k0 = 0, as for the TDA-field rows below); -1 = unknown */
+        int8_t sv_last = -1;
+        if (!nr_passive_acq_tdd_pdsch_last_symbols((uint32_t)abs_slot, (int)fp->numerology_index, 1, &sv_last)) sv_last = -1;
+        nr_pdsch_solver_set_slot_last(sv_last);
+      }
       uint16_t sv_alt[16];
       int sv_nalt = 0;
       int sv_did = -1;

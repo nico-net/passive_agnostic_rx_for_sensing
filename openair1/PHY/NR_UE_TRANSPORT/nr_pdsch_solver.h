@@ -88,6 +88,8 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
                               const nr_pdsch_solver_reading_t *rd, int n_rd, int budget, nr_pdsch_solver_var_t *out);
 /** T26c: absolute slot (signal time) of the grant about to be planned, for the per-RNTI solve-time report. */
 void nr_pdsch_solver_set_now(uint64_t abs_slot);
+/* SOLVERTDDEND: last DL symbol (0..13) of the planned grant's slot from the broadcast TDD pattern, -1 = unknown; set per grant */
+void nr_pdsch_solver_set_slot_last(int last);
 /** T26c: post-equalisation SNR (dB) of one full decode of `rnti` (EVMGRANT); kept as a per-RNTI EMA. */
 void nr_pdsch_solver_note_snr(uint16_t rnti, float snr_db, int comb, bool crc_ok); /* comb: the receiver of that decode (EVMGRANT comb=), 0 unknown; crc_ok: MRCBUG, mode 2 keeps only passing decodes */
 /** T26c: the RNTI's SNR EMA once >= 3 measurements exist; false otherwise. */
