@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include "nr_gpu_path.h"
 #include "nr_gpu_platform_internal.h"
+#include "nr_gpu_mem.h"
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -30,7 +31,7 @@ int lasterr() { return 0; }
 int probe_ok() { return NR_GPU_PROBE_OK; }
 const nr_gpu_runtime_t runtime = {get_count, get_device, attr, mem_info, fail_alloc, fail_host, ok0, ok0, dptr, reg, ok0, copy, sync0, dsync, flags, lasterr, nullptr};
 const char *envs[] = {"NR_GPU_PATH_SELECT", "NR_GPU_PATH_TRIAL", "NR_GPU_PATH_MARGIN", "NR_GPU_PATH_FEP", "NR_GPU_PATH_LDPC_DL", "NR_GPU_PATH_PASS_DL",
-                      "NR_GPU_PATH_CHEST", "NR_GPU_FORCE_MODEL"};
+                      "NR_GPU_PATH_CHEST", "NR_GPU_FORCE_MODEL", "NR_GPU_PATH_DEMOD", "NR_GPU_PATH_UL_FEP"};
 /* mocked device: GB10 (integrated, pageable through the host tables) or a PCIe card with HMM (sens6 RTX 4060 Ti) */
 void mock(bool gb10)
 {
@@ -171,6 +172,53 @@ TEST_F(Path, DiscreteTierMeasures)
   EXPECT_NE(std::string(nr_gpu_path_test_last_line()).find("path=fep tier=discrete choice=gpu reason=faster mode=bench"), std::string::npos);
   /* a second begin keeps the decision */
   EXPECT_EQ(nr_gpu_path_begin(NR_GPU_PATH_FEP, 1, NR_GPU_PATH_MEASURE_BENCH), NR_GPU_PATH_GPU);
+  nr_gpu_test_reset(&runtime);
+}
+
+/* Q4: the staged standalone entries (chest, demod, UL FEP) begin with measure = (nr_gpu_model() == DIRECT ? NONE : TRIAL), as the receiver's warm-ups do.
+ * GB10 (mocked SHARED / DIRECT): GPU at once, reason=shared, no trial, samples ignored (byte-identical to before Q4).
+ * sens6 (mocked DISCRETE): a paired online trial (no longer direct_only); a slower GPU -> CPU, a faster one -> GPU. */
+static int q4_measure() { return nr_gpu_model() == NR_GPU_MODEL_DIRECT ? NR_GPU_PATH_MEASURE_NONE : NR_GPU_PATH_MEASURE_TRIAL; }
+TEST_F(Path, Q4StagedEntriesSharedUnchangedDiscreteTrial)
+{
+  const nr_gpu_path_t q4[] = {NR_GPU_PATH_CHEST, NR_GPU_PATH_DEMOD, NR_GPU_PATH_UL_FEP};
+  mock(true);
+  ASSERT_EQ(nr_gpu_platform_probe()->model, NR_GPU_SHARED);
+  ASSERT_EQ(nr_gpu_model(), NR_GPU_MODEL_DIRECT);
+  for (nr_gpu_path_t p : q4) {
+    EXPECT_EQ(q4_measure(), NR_GPU_PATH_MEASURE_NONE);
+    EXPECT_EQ(nr_gpu_path_begin(p, 1, q4_measure()), NR_GPU_PATH_GPU) << nr_gpu_path_name(p);
+    for (int i = 0; i < 64; i++) {
+      nr_gpu_path_sample(p, 1, 1e6);
+      nr_gpu_path_sample(p, 0, 1);
+    }
+    EXPECT_EQ(nr_gpu_path_state(p), NR_GPU_PATH_GPU);
+  }
+  EXPECT_EQ(n_lines("tier=shared choice=gpu reason=shared"), 3);
+  EXPECT_EQ(n_lines("trial"), 0);
+  nr_gpu_test_reset(&runtime);
+  nr_gpu_path_test_reset();
+  lines.clear();
+  setenv("NR_GPU_PATH_TRIAL", "4", 1);
+  mock(false);
+  ASSERT_EQ(nr_gpu_platform_probe()->model, NR_GPU_DISCRETE);
+  ASSERT_EQ(nr_gpu_model(), NR_GPU_MODEL_DISCRETE);
+  for (nr_gpu_path_t p : q4) {
+    EXPECT_EQ(nr_gpu_path_begin(p, 1, q4_measure()), NR_GPU_PATH_TRIAL) << nr_gpu_path_name(p);
+    EXPECT_EQ(nr_gpu_path_use_gpu(p), 1); /* the trial runs the GPU side */
+    const bool gpu_fast = p != NR_GPU_PATH_DEMOD;
+    for (int i = 0; i < 4; i++) { /* paired samples, as the receiver's trials take them */
+      nr_gpu_path_sample(p, 1, gpu_fast ? 10 : 90);
+      nr_gpu_path_sample(p, 0, 50);
+    }
+    EXPECT_EQ(nr_gpu_path_state(p), gpu_fast ? NR_GPU_PATH_GPU : NR_GPU_PATH_CPU) << nr_gpu_path_name(p);
+    EXPECT_EQ(nr_gpu_path_use_gpu(p), gpu_fast ? 1 : 0);
+  }
+  EXPECT_EQ(n_lines("reason=direct_only"), 0);
+  /* no staging (gpu_ok = 0) fails closed */
+  nr_gpu_path_test_reset();
+  EXPECT_EQ(nr_gpu_path_begin(NR_GPU_PATH_CHEST, 0, q4_measure()), NR_GPU_PATH_CPU);
+  EXPECT_NE(std::string(nr_gpu_path_test_last_line()).find("reason=gpu_unavailable"), std::string::npos);
   nr_gpu_test_reset(&runtime);
 }
 
