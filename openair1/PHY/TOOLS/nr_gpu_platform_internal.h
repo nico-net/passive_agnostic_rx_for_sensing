@@ -32,6 +32,8 @@ const nr_gpu_runtime_t *nr_gpu_platform_runtime(void);
  * NR_GPU_PROBE_OK / FAIL (wrong checksum) / TIMEOUT (1 s, no verdict) / FAULT (launch or stream error), NR_GPU_PROBE_SKIPPED when the probe tooling
  * is unavailable (no libcuda symbol, context creation, PTX JIT error). Real GPU only; probe_locked() calls it for a SHARED candidate. */
 int nr_gpu_platform_run_probe(int device);
+/* One message through the logger installed by nr_gpu_set_logger() (stderr without one): used by nr_gpu_path.c. */
+void nr_gpu_platform_log(int warning, const char *text);
 #ifdef __cplusplus
 }
 #endif
