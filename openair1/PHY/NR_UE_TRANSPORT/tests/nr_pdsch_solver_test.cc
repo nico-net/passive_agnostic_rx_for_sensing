@@ -896,3 +896,68 @@ TEST(PdschSolver, SolvedRntiNeverFullDecodesAReadingWithoutItsRepresentative)
   EXPECT_EQ(full, 1) << "the representative's reading is the full decode";
   nr_pdsch_solver_reset();
 }
+
+/* SOLVERREFUND (2026-10-24). A planned probe the producer refuses before any decode (probe bucket, ring fill, per-occasion cap, expired
+ * IQ) comes back with credit=false. It used to stay charged to the coverage table, so the least-tried-first search skipped that
+ * hypothesis for a whole round: [MEASURED, sens6 rfsim 273 PRB 4 RX] half the planned probes were throttled and the true hypothesis,
+ * throttled once, was never planned again. An untested probe must be planned again first. */
+TEST(PdschSolverRefund, UntestedProbeIsPlannedAgainFirst)
+{
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(nullptr, nullptr);
+  nr_pdsch_solver_set_alt_scr(-1, nullptr, 0, false);
+  const uint16_t id = 100;
+  nr_pdsch_solver_reading_t rd = {&id, 1, 16, 1, 1, 2};
+  nr_dci_bits_t p = {{42, 0, 0}};
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR], w[NR_PDSCH_SOLVER_MAX_VAR];
+  ASSERT_EQ(nr_pdsch_solver_plan(0x7788, p, 49, 2, 2, &rd, 1, 3, v), 3);
+  nr_pdsch_solver_feedback(v[0].token, false, true);  // tested: CRC failed
+  nr_pdsch_solver_feedback(v[1].token, false, false); // throttled before decode
+  nr_pdsch_solver_feedback(v[2].token, false, false); // cut by the per-occasion cap
+  ASSERT_EQ(nr_pdsch_solver_plan(0x7788, p, 49, 2, 2, &rd, 1, 2, w), 2);
+  for (int i = 0; i < 2; i++) {
+    EXPECT_EQ(w[i].S, v[i + 1].S) << "variant " << i;
+    EXPECT_EQ(w[i].add_pos, v[i + 1].add_pos) << "variant " << i;
+    EXPECT_EQ(w[i].table, v[i + 1].table) << "variant " << i;
+    nr_pdsch_solver_feedback(w[i].token, false, true);
+  }
+  // the tested hypothesis keeps its charge: it is not planned before the remaining untried ones
+  ASSERT_EQ(nr_pdsch_solver_plan(0x7788, p, 49, 2, 2, &rd, 1, 1, w), 1);
+  EXPECT_FALSE(w[0].S == v[0].S && w[0].add_pos == v[0].add_pos && w[0].table == v[0].table);
+  nr_pdsch_solver_feedback(w[0].token, false, true);
+  nr_pdsch_solver_reset();
+}
+
+/* The 273-PRB failure as a cell: every grant's second planned probe is refused (throttled). The true reading still solves, and the
+ * refused probes neither burn the hypothesis nor push the RNTI into the 1-in-8 search back-off. */
+TEST(PdschSolverRefund, ThrottledSecondProbeStillSolves)
+{
+  Cell c;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  c.table = 0;
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  nr_pdsch_solver_set_alt_scr(-1, nullptr, 0, false);
+  std::mt19937 rng(77);
+  nr_pdsch_solver_reading_t rd[2] = {{c.wrong.data(), (int)c.wrong.size(), 273, 1, 1, 9},
+                                     {c.truth.data(), (int)c.truth.size(), 273, 1, 1, 9}};
+  int solved_at = -1;
+  for (int g = 0; g < 3000 && solved_at < 0; g++) {
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    const int tda = (int)(p.w[0] & 1);
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(0x4321, p, 49, 9, 2, rd, 2, 2, v);
+    for (int i = 0; i < n; i++) {
+      if (i == 1) { nr_pdsch_solver_feedback(v[i].token, false, false); continue; } // refused before decode
+      const bool ok = v[i].reading == 1 && v[i].S == c.S_true[tda] && v[i].add_pos == c.add_pos && v[i].table == c.table;
+      nr_pdsch_solver_feedback(v[i].token, ok, true);
+    }
+    if (nr_pdsch_solver_rep(0x4321) >= 0) solved_at = g + 1;
+  }
+  printf("[solver] second probe of every grant throttled: solved after %d grants\n", solved_at);
+  ASSERT_GT(solved_at, 0);
+  const int rep = nr_pdsch_solver_rep(0x4321);
+  EXPECT_TRUE(rep >= 10 && rep < 15);
+  EXPECT_LE(solved_at, 400);
+  nr_pdsch_solver_reset();
+}

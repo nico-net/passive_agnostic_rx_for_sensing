@@ -97,6 +97,7 @@ typedef struct {
   uint8_t comb;           /* T26d: combining mode of this variant (0 = receiver default) */
   uint8_t n_layers, mcs;
   bool crc24;             /* TIMSOLVE2: the probed code block carries a 24-bit CRC (TBS > 3824), else CRC16 */
+  uint8_t cov_v1;         /* SOLVERREFUND: plan_coverage() variant + 1 that this probe charged to the coverage table (0 = none) */
   uint16_t dmrs_ports;
   nr_dci_bits_t payload;
   int n_ids;
@@ -778,10 +779,32 @@ static bool coverage_room(solver_coverage_t *c, size_t extra)
 /* coverage_key: builds the 64-bit coverage key for one physical hypothesis: scrambling id, layout id, TDA index and variant.
  *   variant 63 means the aggregate count over all timing cases. Pure function. Callers: plan_coverage().
  */
-static uint64_t coverage_key(int id, int variant, nr_dci_bits_t payload)
+static uint64_t coverage_key_scr(int id, int variant, nr_dci_bits_t payload, int32_t scr)
 {
   const int tda = variant == 63 ? 0 : tda_of(id, payload); /* 63 = all timing cases' trial count */
-  return (((((uint64_t)(t_scr + 1) << 15) | (unsigned)id) << 4 | tda) << 6 | variant) + 1;
+  return (((((uint64_t)(scr + 1) << 15) | (unsigned)id) << 4 | tda) << 6 | variant) + 1;
+}
+static uint64_t coverage_key(int id, int variant, nr_dci_bits_t payload) { return coverage_key_scr(id, variant, payload, t_scr); }
+
+/* coverage_refund: SOLVERREFUND (2026-10-24). plan_coverage() charges a hypothesis to the coverage table when it PLANS the probe, but a
+ * planned probe can still be refused before any decode (probe token bucket / ring fill in pdsch_gate_admit, per-occasion cap, full
+ * queue, expired IQ): its feedback arrives with credit=false. Such a hypothesis was never tested, yet it stayed counted, so the
+ * least-tried-first search skipped it for a whole coverage round. [MEASURED, sens6 rfsim 273 PRB 4 RX @4a94af8c0b] 3933 of 7659
+ * planned probes were throttled (106 PRB: 0 of 591); the true (reading, S=1, add_pos=1, table 0) was planned, throttled and not
+ * planned again in 100 s, so the RNTI never solved. Undo the planning-time charge of an uncredited probe. Caller: feedback, g_mu held. */
+static void coverage_refund(solver_rnti_t *r, const pending_t *p)
+{
+  if (!p->cov_v1 || !r->coverage || !r->coverage->entries) return;
+  solver_coverage_t *c = r->coverage;
+  for (int j = 0; j < p->n_ids; j++) {
+    const int id = p->ids[j];
+    if (id >= NR_PDSCH_SOLVER_MAX_LAYOUTS) continue;
+    for (int q = 0; q < 2; q++) {
+      const uint64_t key = coverage_key_scr(id, q ? 63 : p->cov_v1 - 1, p->payload, p->scr);
+      coverage_entry_t *e = coverage_find(c, key);
+      if (e->key == key && e->count > 0) e->count--; /* absent: the table started a new round since the plan */
+    }
+  }
 }
 
 /* plan_coverage: planner: fills the grant's budget with the least-tried physical hypotheses across readings.
@@ -840,7 +863,9 @@ static void plan_coverage(solver_rnti_t *r, nr_pdsch_solver_var_t *out, int *n, 
     if (load[best] < UINT32_MAX - 1) load[best]++;
     score[best][variant] = UINT32_MAX; /* no duplicate physical decode in this DCI */
     const int S = starts[variant % 4], table = tables[(variant / 4) % 3], add = adds[variant / 12];
+    const int n_before = *n;
     emit(out, n, max, slot, 0, order[best], rd, l0, S, add, table, true, nt[best] > 1, false, false, -1, dci, payload);
+    if (*n > n_before) g_p[out[n_before].token & (SOLVER_PENDING - 1)].cov_v1 = (uint8_t)(variant + 1);
     for (int j = 0; j < rd[order[best]].n_ids; j++) {
       const int id = rd[order[best]].ids[j];
       if (id >= NR_PDSCH_SOLVER_MAX_LAYOUTS) continue;
@@ -1422,6 +1447,12 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
   if (p != NULL && p->phase == 0 && p->probe && g_r[p->slot].used && !g_r[p->slot].solved)
     g_r[p->slot].why[!credit ? W_PNOCRED : crc_ok ? W_POK : W_PFAIL]++;
   if (p == NULL || !credit) {
+    if (p && !credit && p->phase == 0 && p->probe && g_r[p->slot].used && !g_r[p->slot].solved) {
+      /* SOLVERREFUND: an untested probe neither consumes search coverage nor counts toward the search back-off */
+      solver_rnti_t *rr = &g_r[p->slot];
+      coverage_refund(rr, p);
+      if (rr->n_probe > 0) rr->n_probe--;
+    }
     if (p) p->used = false;
     pthread_mutex_unlock(&g_mu);
     return;
