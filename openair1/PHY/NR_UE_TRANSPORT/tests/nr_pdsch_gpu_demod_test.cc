@@ -57,34 +57,6 @@ static void fill(avec<nrd_c16> &v, int cls)
   for (auto &e : v) { e.r = rnd16(cls); e.i = rnd16(cls); }
 }
 
-/* simde_mm_average() (sse_intrin.h) on an AVX2 x86 host sums the first (len & ~7) REs in 8 int32 lanes and SIGN-extends them to int64; the SSE/NEON
- * tail and the GPU model (nrd_level_finish) zero-extend. The two agree unless a lane (or one of its terms) reaches 2^31, i.e. only for
- * channel levels far beyond any estimate (full-scale values: a lane or its term reaches 2^31, or the model's wrapped accumulators differ from the CPU's grouping): such inputs are not compared on an AVX2 host. */
-static bool avx2_level_diverges(const avec<nrd_c16> &a, uint32_t len)
-{
-#if defined(__x86_64__) || defined(__i386__)
-  if (!__builtin_cpu_supports("avx2")) return false;
-  const int x = __builtin_ctz(len);
-  int64_t lane[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-  for (uint32_t k = 0; k < (len & ~7u); k++) {
-    const int32_t m = (int32_t)((uint32_t)((int32_t)a[k].r * a[k].r) + (uint32_t)((int32_t)a[k].i * a[k].i));
-    if (m >> x < 0) return true;
-    lane[k & 7] += m >> x;
-  }
-  for (int64_t l : lane)
-    if (l >= (1ll << 31)) return true;
-  /* and the model's own 4 uint32 lanes (it wraps them, the CPU adds the SSE tail in int64) */
-  uint64_t lane4[4] = {0, 0, 0, 0};
-  for (uint32_t k = 0; k < (len >> 2) * 4; k++)
-    lane4[k & 3] += (uint32_t)(((int32_t)((uint32_t)((int32_t)a[k].r * a[k].r) + (uint32_t)((int32_t)a[k].i * a[k].i))) >> x);
-  for (uint64_t l : lane4)
-    if (l >= (1ull << 32)) return true;
-#else
-  (void)a; (void)len;
-#endif
-  return false;
-}
-
 int main()
 {
   logInit();
@@ -138,7 +110,7 @@ int main()
   printf("llr: cases=%ld mismatching_cases=%ld\n", llr_cases, llr_bad);
   total += llr_bad;
   /* ---- scale + channel level ---- */
-  long sc_bad = 0, lv_bad = 0, sc_cases = 0, lv_skipped = 0;
+  long sc_bad = 0, lv_bad = 0, sc_cases = 0;
   const uint32_t slen_l[] = {1, 3, 4, 5, 12, 48, 100, 3139, 3276};
   for (int sh : {0, 1, 3, 7, 15}) for (uint32_t len : slen_l) for (int cls = 0; cls < 4; cls++) {
     avec<nrd_c16> a(len + 16);
@@ -150,11 +122,10 @@ int main()
     sc_bad += memcmp(ref.data(), mod.data(), ref.size() * 4) != 0;
     int32_t avg = 0;
     nr_channel_level(0, (int)(len + 16), a.data(), 1, 1, &avg, len);
-    if (avx2_level_diverges(a, len)) { lv_skipped++; sc_cases++; continue; }
     lv_bad += avg != nrd_channel_level_row(a.data(), len);
     sc_cases++;
   }
-  printf("scale: cases=%ld mismatching=%ld ; channel_level: mismatching=%ld (skipped, x86 AVX2 sign-extension: %ld)\n", sc_cases, sc_bad, lv_bad, lv_skipped);
+  printf("scale: cases=%ld mismatching=%ld ; channel_level: mismatching=%ld (all cases compared)\n", sc_cases, sc_bad, lv_bad);
   total += sc_bad + lv_bad;
   printf("DEMOD_MODEL_MISMATCHES total=%ld\n", total);
   return total ? 1 : 0;
