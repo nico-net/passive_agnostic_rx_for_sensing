@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include "PHY/TOOLS/nr_gpu_membudget.h"
+#include "PHY/TOOLS/nr_gpu_elastic.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_disc_mem.h"
 namespace {
 constexpr size_t MB = (size_t)1 << 20;
@@ -91,5 +92,142 @@ TEST(MemBudget, StateCommitGraphRemainderAndFormat) {
   EXPECT_NE(nullptr, strstr(buf, "(CPU)"));
   EXPECT_NE(nullptr, strstr(buf, "ldpc_pool=n/a"));
   unsetenv("NR_GPU_MEM_BUDGET_MB");
+  nr_gpu_membudget_test_reset();
+}
+
+/* ---- on-demand sizing (nr_gpu_elastic.h + the budget headroom) ---- */
+TEST(Elastic, DisabledWhenTheShareCoversTheFullSize) {
+  nr_gpu_elastic_t e;
+  nr_gpu_elastic_init(&e, 640, 640, 64, 10, 5); /* GB10 / unlimited budget: base == full */
+  EXPECT_FALSE(nr_gpu_elastic_enabled(&e));
+  EXPECT_EQ(640, e.cur);
+  for (int d : {0, 100, 640, 5000}) EXPECT_EQ(640, nr_gpu_elastic_target(&e, d));
+  EXPECT_EQ(0u, e.grows + e.shrinks + e.denied);
+}
+TEST(Elastic, GrowsInStepsToTheDemandAndNeverBeyondFull) {
+  nr_gpu_elastic_t e;
+  nr_gpu_elastic_init(&e, 221, 640, 64, 10, 5);
+  EXPECT_TRUE(nr_gpu_elastic_enabled(&e));
+  EXPECT_EQ(221, nr_gpu_elastic_target(&e, 100));  /* demand below the base: nothing to do */
+  EXPECT_EQ(221, nr_gpu_elastic_target(&e, 221));
+  EXPECT_EQ(285, nr_gpu_elastic_target(&e, 222));  /* one step from the base */
+  EXPECT_EQ(413, nr_gpu_elastic_target(&e, 400));  /* 221 + 3 * 64 = 413 >= 400 */
+  EXPECT_EQ(640, nr_gpu_elastic_target(&e, 640));  /* clamped to full */
+  EXPECT_EQ(640, nr_gpu_elastic_target(&e, 9999));
+}
+TEST(Elastic, FitTakesAsManyWholeStepsAsTheHeadroomHolds) {
+  nr_gpu_elastic_t e;
+  nr_gpu_elastic_init(&e, 221, 640, 64, 10, 5);
+  const size_t per = 3 * MB;
+  EXPECT_EQ(640, nr_gpu_elastic_fit(&e, 640, per, SIZE_MAX));                 /* unlimited */
+  EXPECT_EQ(640, nr_gpu_elastic_fit(&e, 640, per, (640 - 221) * per));        /* exactly fits */
+  EXPECT_EQ(221 + 6 * 64, nr_gpu_elastic_fit(&e, 640, per, 400 * per));       /* 400 slots of headroom: 6 whole steps (384) */
+  EXPECT_EQ(221, nr_gpu_elastic_fit(&e, 640, per, 63 * per));                 /* not even one step */
+  EXPECT_EQ(221, nr_gpu_elastic_fit(&e, 640, per, 0));
+  e.cur = 413;
+  EXPECT_EQ(413, nr_gpu_elastic_fit(&e, 300, per, 0));                        /* target below cur: unchanged */
+  EXPECT_EQ(477, nr_gpu_elastic_fit(&e, 640, per, 100 * per));
+}
+TEST(Elastic, ShrinksToTheBaseOnlyAfterIdleTicksAndKeepsWhatIsStillNeeded) {
+  nr_gpu_elastic_t e;
+  nr_gpu_elastic_init(&e, 6, 10, 1, 4, 3);
+  e.cur = 9;
+  EXPECT_EQ(9, nr_gpu_elastic_target(&e, 6));
+  EXPECT_EQ(9, nr_gpu_elastic_target(&e, 6));
+  EXPECT_EQ(9, nr_gpu_elastic_target(&e, 8));      /* demand between base and cur resets the idle count and keeps the size */
+  for (int i = 0; i < 3; i++) EXPECT_EQ(9, nr_gpu_elastic_target(&e, 6));
+  EXPECT_EQ(6, nr_gpu_elastic_target(&e, 6));      /* 4th consecutive idle tick */
+  nr_gpu_elastic_done(&e, 6, 6, 1);                /* the module applied the shrink */
+  EXPECT_EQ(6, nr_gpu_elastic_target(&e, 6));      /* already at the base */
+  EXPECT_EQ(1u, e.shrinks);
+}
+TEST(Elastic, RefusedGrowthKeepsTheSizeCountsOnceLogsOnceAndBacksOff) {
+  nr_gpu_elastic_t e;
+  nr_gpu_elastic_init(&e, 221, 640, 64, 10, 3);
+  EXPECT_EQ(285, nr_gpu_elastic_target(&e, 285));
+  EXPECT_EQ(1, nr_gpu_elastic_done(&e, 285, 221, 1));    /* the budget had no headroom: first denial -> log */
+  EXPECT_EQ(221, e.cur);
+  EXPECT_EQ(1u, e.denied);
+  for (int i = 0; i < 3; i++) EXPECT_EQ(221, nr_gpu_elastic_target(&e, 285)); /* back-off: no new request */
+  EXPECT_EQ(285, nr_gpu_elastic_target(&e, 285));
+  EXPECT_EQ(0, nr_gpu_elastic_done(&e, 285, 285, 0));    /* allocation failed: counted, logged only the first time */
+  EXPECT_EQ(2u, e.denied);
+  EXPECT_EQ(221, e.cur);
+  for (int i = 0; i < 3; i++) nr_gpu_elastic_target(&e, 285);
+  EXPECT_EQ(413, nr_gpu_elastic_target(&e, 400));
+  EXPECT_EQ(0, nr_gpu_elastic_done(&e, 413, 285, 1));    /* partial: reached one of two steps, the rest refused */
+  EXPECT_EQ(285, e.cur);
+  EXPECT_EQ(1u, e.grows);
+  EXPECT_EQ(3u, e.denied);
+  EXPECT_EQ(285, nr_gpu_elastic_target(&e, 100)); /* demand below the base counts as idle: no immediate shrink (idle_limit 10) */
+}
+TEST(Elastic, GrowThenIdleThenShrinkCounters) {
+  nr_gpu_elastic_t e;
+  nr_gpu_elastic_init(&e, 5, 10, 1, 2, 0);
+  int t = nr_gpu_elastic_target(&e, 6);   /* demand rises one unit per tick: one grow each */
+  EXPECT_EQ(6, t);
+  nr_gpu_elastic_done(&e, t, t, 1);
+  t = nr_gpu_elastic_target(&e, 7);
+  nr_gpu_elastic_done(&e, t, t, 1);
+  EXPECT_EQ(7, e.cur);
+  EXPECT_EQ(5, (nr_gpu_elastic_target(&e, 0), nr_gpu_elastic_target(&e, 0)));
+  nr_gpu_elastic_done(&e, 5, 5, 1);
+  EXPECT_EQ(2u, e.grows);
+  EXPECT_EQ(1u, e.shrinks);
+  EXPECT_EQ(0u, e.denied);
+  EXPECT_EQ(5, e.cur);
+}
+TEST(Elastic, BudgetHeadroomGrantsDenialsAndTheHardCeiling) {
+  setenv("NR_GPU_MEM_BUDGET_MB", "7500", 1);
+  nr_gpu_membudget_test_reset();
+  const size_t B = nr_gpu_membudget_total();
+  /* nothing committed: every module at its share, the graph at its cap -> headroom is the not-yet-committed part only (0 here) */
+  EXPECT_LT(nr_gpu_membudget_headroom(), 1000u); /* (integer rounding of the shares only) */
+  EXPECT_EQ(0, nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_CSIRS, MB));
+  uint64_t g, s, d;
+  nr_gpu_membudget_dyn_counts(NR_GPU_MEM_CSIRS, &g, &s, &d);
+  EXPECT_EQ(0u, g); EXPECT_EQ(1u, d);
+  /* every module commits less than its share, the graph its actual bytes */
+  size_t committed = 0;
+  for (int m = 0; m < NR_GPU_MEM_N; m++) {
+    const size_t sh = nr_gpu_membudget_share((nr_gpu_mem_module_t)m);
+    const size_t use = m == NR_GPU_MEM_GRAPH ? 140 * MB : sh * 9 / 10;
+    nr_gpu_membudget_commit((nr_gpu_mem_module_t)m, use, 1.0);
+    committed += use;
+  }
+  const size_t hr = nr_gpu_membudget_headroom();
+  EXPECT_EQ(B - committed, hr);
+  EXPECT_GT(hr, 1000 * MB); /* the graph cap that was not used is real headroom */
+  EXPECT_EQ(1, nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_CSIRS, hr / 2));
+  EXPECT_EQ(hr - hr / 2, nr_gpu_membudget_headroom());
+  EXPECT_EQ(0, nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_PDCCH_NID, hr)); /* more than is left: refused, nothing taken */
+  EXPECT_EQ(hr - hr / 2, nr_gpu_membudget_headroom());
+  EXPECT_EQ(1, nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_PDCCH_NID, hr - hr / 2)); /* exactly the rest */
+  EXPECT_EQ(0u, nr_gpu_membudget_headroom());
+  EXPECT_EQ(0, nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_CSIRS, 1));        /* never exceeds the budget */
+  nr_gpu_membudget_dyn_release(NR_GPU_MEM_CSIRS, hr / 2);                 /* idle: memory returned, another module can take it */
+  EXPECT_EQ(hr / 2, nr_gpu_membudget_headroom());
+  nr_gpu_membudget_dyn_abort(NR_GPU_MEM_PDCCH_NID, hr - hr / 2);          /* a grant whose allocation failed is undone */
+  EXPECT_EQ(hr, nr_gpu_membudget_headroom());
+  nr_gpu_membudget_dyn_counts(NR_GPU_MEM_CSIRS, &g, &s, &d);
+  EXPECT_EQ(1u, g); EXPECT_EQ(1u, s); EXPECT_EQ(2u, d);
+  nr_gpu_membudget_dyn_counts(NR_GPU_MEM_PDCCH_NID, &g, &s, &d);
+  EXPECT_EQ(0u, g); EXPECT_EQ(0u, s); EXPECT_EQ(2u, d);                   /* the refusal and the aborted grant */
+  /* the census line carries the dynamic counters */
+  nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_CSIRS, 5 * MB);
+  char buf[1024];
+  nr_gpu_membudget_format(buf, sizeof buf);
+  EXPECT_NE(nullptr, strstr(buf, "csirs_dyn=5MB/grows=2/shrinks=1/denied=2")) << buf;
+  EXPECT_NE(nullptr, strstr(buf, "pdcch_nid_dyn=0MB/grows=0/shrinks=0/denied=2")) << buf;
+  unsetenv("NR_GPU_MEM_BUDGET_MB");
+  nr_gpu_membudget_test_reset();
+}
+TEST(Elastic, UnlimitedBudgetNeverDeniesAndGb10StaysAtFullSize) {
+  unsetenv("NR_GPU_MEM_BUDGET_MB");
+  nr_gpu_membudget_test_reset();
+  if (nr_gpu_membudget_total() == SIZE_MAX) {
+    EXPECT_EQ(SIZE_MAX, nr_gpu_membudget_headroom());
+    EXPECT_EQ(1, nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_CSIRS, (size_t)1 << 40));
+  }
   nr_gpu_membudget_test_reset();
 }

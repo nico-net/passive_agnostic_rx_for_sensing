@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_gpu_platform_internal.h"
 #include "nr_gpu_membudget.h"
+#include "nr_host_membudget.h"
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -341,6 +342,8 @@ finish:
          caps.model==NR_GPU_SHARED?"shared":caps.model==NR_GPU_DISCRETE?"discrete":"cpu",caps.reason,
          caps.probe==NR_GPU_PROBE_OK?"ok":caps.probe==NR_GPU_PROBE_FAIL?"fail":caps.probe==NR_GPU_PROBE_TIMEOUT?"timeout":caps.probe==NR_GPU_PROBE_FAULT?"fault":"skipped",
          caps.forced?" FORCED=":"",caps.forced?(caps.forced-1==NR_GPU_NONE?"cpu":"discrete"):"");
+  /* Unified memory: the device modules allocate from the RAM the host budget draws on (nr_host_membudget.h): their commitments come out of the host budget. */
+  nr_host_membudget_set_unified(caps.model==NR_GPU_SHARED?nr_gpu_membudget_committed_total:NULL);
   if (caps.model==NR_GPU_DISCRETE)
     report(0,"SENSING: GPU_PLATFORM DISCRETE: device buffers + pinned staging + explicit copies");
   else if (caps.model!=NR_GPU_SHARED)
@@ -521,7 +524,8 @@ void nr_gpu_test_set_probe(int (*probe)(void)) { probe_hook=probe; }
 #endif
 
 /* ---- shared device-memory budget (T6b), see nr_gpu_membudget.h ---- */
-static struct { size_t bytes[NR_GPU_MEM_N]; double scale[NR_GPU_MEM_N]; int committed[NR_GPU_MEM_N]; int logged; } mb;
+static struct { size_t bytes[NR_GPU_MEM_N]; double scale[NR_GPU_MEM_N]; int committed[NR_GPU_MEM_N]; int logged;
+               size_t dyn[NR_GPU_MEM_N]; uint64_t grows[NR_GPU_MEM_N], shrinks[NR_GPU_MEM_N], denied[NR_GPU_MEM_N]; } mb;
 size_t nr_gpu_membudget_total(void)
 {
   size_t freeb = nr_gpu_platform_free_at_probe();
@@ -536,6 +540,14 @@ size_t nr_gpu_membudget_total(void)
     }
   }
   return nr_gpu_membudget_calc(freeb);
+}
+size_t nr_gpu_membudget_committed_total(void)
+{
+  size_t t = 0;
+  pthread_mutex_lock(&mu);
+  for (int m = 0; m < NR_GPU_MEM_N; m++) t += mb.bytes[m] + mb.dyn[m];
+  pthread_mutex_unlock(&mu);
+  return t;
 }
 size_t nr_gpu_membudget_share(nr_gpu_mem_module_t m)
 {
@@ -561,6 +573,79 @@ size_t nr_gpu_membudget_graph_bytes(void)
   pthread_mutex_unlock(&mu);
   return g;
 }
+/* headroom_locked: B minus the committed bytes (a module that has not committed counts at its share; the graph at its actual bytes once committed, else at its cap) and the dynamic grants. */
+static size_t headroom_locked(size_t B)
+{
+  if (B == SIZE_MAX) return SIZE_MAX;
+  size_t used = 0;
+  for (int m = 0; m < NR_GPU_MEM_N; m++) {
+    size_t u;
+    if (mb.committed[m]) u = mb.bytes[m];
+    else if (m == NR_GPU_MEM_GRAPH) { /* graph cap = its share + the unused part of the other shares */
+      u = nr_gpu_membudget_share_of(B, NR_GPU_MEM_GRAPH);
+      for (int o = 0; o < NR_GPU_MEM_N - 1; o++) {
+        const size_t sh = nr_gpu_membudget_share_of(B, (nr_gpu_mem_module_t)o);
+        if (mb.committed[o] && mb.bytes[o] < sh) u += sh - mb.bytes[o];
+      }
+    } else
+      u = nr_gpu_membudget_share_of(B, (nr_gpu_mem_module_t)m);
+    used += u + mb.dyn[m];
+  }
+  return used >= B ? 0 : B - used;
+}
+size_t nr_gpu_membudget_headroom(void)
+{
+  const size_t B = nr_gpu_membudget_total();
+  pthread_mutex_lock(&mu);
+  const size_t h = headroom_locked(B);
+  pthread_mutex_unlock(&mu);
+  return h;
+}
+int nr_gpu_membudget_dyn_acquire(nr_gpu_mem_module_t m, size_t bytes)
+{
+  if (m >= NR_GPU_MEM_N) return 0;
+  const size_t B = nr_gpu_membudget_total();
+  pthread_mutex_lock(&mu);
+  const int ok = bytes <= headroom_locked(B);
+  if (ok) { mb.dyn[m] += bytes; mb.grows[m]++; }
+  else mb.denied[m]++;
+  pthread_mutex_unlock(&mu);
+  return ok;
+}
+void nr_gpu_membudget_dyn_release(nr_gpu_mem_module_t m, size_t bytes)
+{
+  if (m >= NR_GPU_MEM_N) return;
+  pthread_mutex_lock(&mu);
+  mb.dyn[m] -= bytes < mb.dyn[m] ? bytes : mb.dyn[m];
+  mb.shrinks[m]++;
+  pthread_mutex_unlock(&mu);
+}
+void nr_gpu_membudget_dyn_abort(nr_gpu_mem_module_t m, size_t bytes)
+{
+  if (m >= NR_GPU_MEM_N) return;
+  pthread_mutex_lock(&mu);
+  mb.dyn[m] -= bytes < mb.dyn[m] ? bytes : mb.dyn[m];
+  if (mb.grows[m]) mb.grows[m]--;
+  mb.denied[m]++;
+  pthread_mutex_unlock(&mu);
+}
+size_t nr_gpu_membudget_dyn_bytes(nr_gpu_mem_module_t m)
+{
+  if (m >= NR_GPU_MEM_N) return 0;
+  pthread_mutex_lock(&mu);
+  const size_t b = mb.dyn[m];
+  pthread_mutex_unlock(&mu);
+  return b;
+}
+void nr_gpu_membudget_dyn_counts(nr_gpu_mem_module_t m, uint64_t *grows, uint64_t *shrinks, uint64_t *denied)
+{
+  if (m >= NR_GPU_MEM_N) return;
+  pthread_mutex_lock(&mu);
+  if (grows) *grows = mb.grows[m];
+  if (shrinks) *shrinks = mb.shrinks[m];
+  if (denied) *denied = mb.denied[m];
+  pthread_mutex_unlock(&mu);
+}
 int nr_gpu_membudget_format(char *out, size_t n)
 {
   const size_t B = nr_gpu_membudget_total();
@@ -573,6 +658,9 @@ int nr_gpu_membudget_format(char *out, size_t n)
                     sh == SIZE_MAX ? -1LL : (long long)(sh >> 20), mb.scale[m], mb.bytes[m] ? "" : "(CPU)");
     else
       k += snprintf(out + k, n - k, " %s=n/a", nr_gpu_mem_name[m]);
+    if (k > 0 && (size_t)k < n && (mb.grows[m] || mb.shrinks[m] || mb.denied[m]))
+      k += snprintf(out + k, n - k, " %s_dyn=%lluMB/grows=%llu/shrinks=%llu/denied=%llu", nr_gpu_mem_name[m], (unsigned long long)(mb.dyn[m] >> 20),
+                    (unsigned long long)mb.grows[m], (unsigned long long)mb.shrinks[m], (unsigned long long)mb.denied[m]);
   }
   pthread_mutex_unlock(&mu);
   return k;

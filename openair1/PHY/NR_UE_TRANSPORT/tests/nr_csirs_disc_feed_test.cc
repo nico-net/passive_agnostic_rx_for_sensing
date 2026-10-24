@@ -161,3 +161,85 @@ TEST(Ring, DeviceBatchPublicationWrapAndCancel)
   nr_csirs_disc_ring_free(&ring);nr_csirs_disc_ring_free(&copy);
   nr_csirs_disc_alloc_unified=saved_alloc;nr_csirs_disc_free_unified=saved_free;
 }
+
+/* ---- on-demand ring: nr_csirs_disc_ring_resize ---- */
+namespace {
+std::atomic<int> g_unified_allocs{0}, g_unified_frees{0};
+std::atomic<bool> g_unified_fail{false};
+void *counting_alloc(size_t n) { if (g_unified_fail) return nullptr; ++g_unified_allocs; return aligned_alloc(64, (n + 63) & ~size_t(63)); }
+void counting_free(void *p) { ++g_unified_frees; free(p); }
+void push_slot(nr_csirs_disc_ring_t *r, int fft, int abs_slot, int16_t v)
+{
+  std::vector<int16_t> row(NR_CSIRS_DISC_NSYM * fft * 2, v);
+  const int16_t *rows[1] = {row.data()};
+  ASSERT_GE(nr_csirs_disc_ring_push(r, rows, fft, 0, abs_slot, 0, 0), 0);
+}
+}
+
+TEST(RingResize, GrowEmptiesTheRingBumpsTheEpochAndKeepsItWorking)
+{
+  constexpr int fft = 64, n_rb = 4;
+  nr_csirs_disc_ring_t ring{};
+  ASSERT_EQ(nr_csirs_disc_ring_init(&ring, 1, n_rb, 20, 4, false), 0);
+  for (int i = 0; i < 6; ++i) push_slot(&ring, fft, 100 + i, 7);
+  EXPECT_EQ(ring.written, 6u);
+  int16_t *old_grid = ring.grid_base;
+  ASSERT_EQ(nr_csirs_disc_ring_resize(&ring, 10), 0);
+  EXPECT_EQ(ring.capacity, 10);
+  EXPECT_EQ(ring.written, 0u);
+  EXPECT_NE(ring.grid_base, old_grid);
+  for (int i = 0; i < 10; ++i) EXPECT_EQ(ring.meta[i].valid, 0u);
+  for (int i = 0; i < 13; ++i) push_slot(&ring, fft, 200 + i, 9);   /* wraps at the new capacity */
+  EXPECT_EQ(ring.written, 13u);
+  EXPECT_EQ(ring.meta[2].abs_slot, 212u);                            /* 13th push (abs 212) -> index 2 */
+  EXPECT_EQ(nr_csirs_disc_ring_sym(&ring, 3, 0, 5)[0], 9);
+  ASSERT_EQ(nr_csirs_disc_ring_resize(&ring, 10), 0);                /* same size: no-op, content kept */
+  EXPECT_EQ(ring.written, 13u);
+  ASSERT_EQ(nr_csirs_disc_ring_resize(&ring, 3), 0);                 /* shrink */
+  EXPECT_EQ(ring.capacity, 3);
+  EXPECT_EQ(ring.written, 0u);
+  for (int i = 0; i < 4; ++i) push_slot(&ring, fft, 300 + i, 5);
+  EXPECT_EQ(ring.meta[0].abs_slot, 303u);
+  nr_csirs_disc_ring_reset(&ring);                                   /* the lock arrays follow the new capacity */
+  EXPECT_EQ(ring.written, 0u);
+  nr_csirs_disc_ring_free(&ring);
+}
+
+TEST(RingResize, FailedAllocationLeavesTheRingUntouched)
+{
+  constexpr int fft = 64, n_rb = 4;
+  nr_csirs_disc_alloc_unified = counting_alloc;
+  nr_csirs_disc_free_unified = counting_free;
+  g_unified_allocs = g_unified_frees = 0;
+  nr_csirs_disc_ring_t ring{};
+  ASSERT_EQ(nr_csirs_disc_ring_init(&ring, 1, n_rb, 20, 4, true), 0);
+  for (int i = 0; i < 3; ++i) push_slot(&ring, fft, 10 + i, 3);
+  int16_t *grid = ring.grid_base;
+  g_unified_fail = true;
+  EXPECT_EQ(nr_csirs_disc_ring_resize(&ring, 32), -1);
+  g_unified_fail = false;
+  EXPECT_EQ(ring.capacity, 4);
+  EXPECT_EQ(ring.grid_base, grid);
+  EXPECT_EQ(ring.written, 3u);
+  EXPECT_EQ(ring.meta[1].abs_slot, 11u);
+  push_slot(&ring, fft, 13, 3);                                      /* still a working ring */
+  EXPECT_EQ(ring.written, 4u);
+  ASSERT_EQ(nr_csirs_disc_ring_resize(&ring, 8), 0);                 /* and the allocator hook is used again for the growth */
+  EXPECT_EQ(g_unified_allocs.load(), 2);                             /* init + resize */
+  EXPECT_EQ(g_unified_frees.load(), 1);                              /* the old grid went back through the hook */
+  nr_csirs_disc_ring_free(&ring);
+  EXPECT_EQ(g_unified_frees.load(), 2);
+  nr_csirs_disc_alloc_unified = nullptr;
+  nr_csirs_disc_free_unified = nullptr;
+}
+
+TEST(RingResize, RejectsBadArguments)
+{
+  nr_csirs_disc_ring_t ring{};
+  EXPECT_EQ(nr_csirs_disc_ring_resize(nullptr, 4), -1);
+  EXPECT_EQ(nr_csirs_disc_ring_resize(&ring, 4), -1);
+  ASSERT_EQ(nr_csirs_disc_ring_init(&ring, 1, 4, 20, 4, false), 0);
+  EXPECT_EQ(nr_csirs_disc_ring_resize(&ring, 0), -1);
+  EXPECT_EQ(ring.capacity, 4);
+  nr_csirs_disc_ring_free(&ring);
+}
