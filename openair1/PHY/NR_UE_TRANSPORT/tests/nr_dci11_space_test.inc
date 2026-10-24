@@ -16,54 +16,62 @@
 namespace dci11space {
 
 // What a field is, for the reader: the read fields record their offsets; every other field only moves the position.
-enum Kind { PLAIN, ID, FDRA, TDA, TB1, TB2, ANT, CBGTI, CBGFI, DMRS_INIT };
+enum Kind { PLAIN, ID, FDRA, TDA, TB1, TB2, TB2X, ANT, CBGTI, CBGFI, DMRS_INIT, PAD };
 struct Field {
   const char *name;
   Kind kind;
   std::vector<int> widths;
 };
-// TS 38.212 7.3.1.2.2, DCI format 1_1, Rel-15/16/17, FR1. FR2-2-only options (multi-PDSCH TDRA 5-6 bits, per-PDSCH NDI/RV,
-// 1-bit DAI of the multi-PDSCH type-1 codebook) are not allowed in FR1 and not listed. Couplings: VRB-to-PRB is 0 bits under
-// RA type 0 only; CBGTI is N_TB x {0,2,4,6,8}; CBGFI exists only with CBG transmission.
+// TS 38.212 V17.13.0 (2025-12) clause 7.3.1.2.2, DCI format 1_1, FR1: one entry per field heading of the clause, in payload order,
+// with the SPEC'S OWN NAMES (Dci11Space.TableFollowsTheSpecText compares them with the generated nr_dci11_spec_fields.inc). Widths
+// the clause allows that are left out: TDRA 5-6 bits and NDI 2-8 bits exist only with pdsch-TimeDomainAllocationListForMultiPDSCH
+// (multi-PDSCH scheduling, FR2-2). Couplings: VRB-to-PRB is 0 bits under RA type 0 only; transport block 2 (MCS/NDI/RV) is present
+// only with maxNrofCodeWordsScheduledByDCI = 2; CBGTI is N_TB x {0,2,4,6,8}; CBGFI exists only with CBG transmission. The last
+// entry is not a field: the zero padding of 7.3.1.0 (1 bit) and of the multi-search-space alignment of 7.3.1.2.2 (<= 3 more).
 static const std::vector<Field> &table()
 {
   static const std::vector<Field> t = {
-      {"identifier", ID, {1}},
-      {"carrier indicator", PLAIN, {0, 3}},
-      {"BWP indicator", PLAIN, {0, 1, 2}},
-      {"FDRA", FDRA, {}},
-      {"TDRA", TDA, {0, 1, 2, 3, 4}},
+      {"Identifier for DCI formats", ID, {1}},
+      {"Carrier indicator", PLAIN, {0, 3}},
+      {"Bandwidth part indicator", PLAIN, {0, 1, 2}},
+      {"Frequency domain resource assignment", FDRA, {}},
+      {"Time domain resource assignment", TDA, {0, 1, 2, 3, 4}},
       {"VRB-to-PRB mapping", PLAIN, {0, 1}},
       {"PRB bundling size indicator", PLAIN, {0, 1}},
-      {"rate matching indicator", PLAIN, {0, 1, 2}},
+      {"Rate matching indicator", PLAIN, {0, 1, 2}},
       {"ZP CSI-RS trigger", PLAIN, {0, 1, 2}},
-      {"TB1 MCS/NDI/RV", TB1, {8}},
-      {"TB2 MCS/NDI/RV", TB2, {0, 8}},
+      {"Modulation and coding scheme", TB1, {5}},
+      {"New data indicator", PLAIN, {1}},
+      {"Redundancy version", PLAIN, {2}},
+      {"Modulation and coding scheme", TB2, {0, 5}},
+      {"New data indicator", TB2X, {0, 1}},
+      {"Redundancy version", TB2X, {0, 2}},
       {"HARQ process number", PLAIN, {4, 5}},
-      {"DAI", PLAIN, {0, 2, 4, 6}},
-      {"TPC for PUCCH", PLAIN, {2}},
-      {"second TPC (Rel-17)", PLAIN, {0, 2}},
+      {"Downlink assignment index", PLAIN, {0, 2, 4, 6}},
+      {"TPC command for scheduled PUCCH", PLAIN, {2}},
+      {"Second TPC command for scheduled PUCCH", PLAIN, {0, 2}},
       {"PUCCH resource indicator", PLAIN, {3}},
-      {"PDSCH-to-HARQ timing", PLAIN, {0, 1, 2, 3}},
-      {"one-shot HARQ-ACK request", PLAIN, {0, 1}},
+      {"PDSCH-to-HARQ_feedback timing indicator", PLAIN, {0, 1, 2, 3}},
+      {"One-shot HARQ-ACK request", PLAIN, {0, 1}},
+      {"Enhanced Type 3 codebook indicator", PLAIN, {0, 1, 2, 3}},
       {"PDSCH group index", PLAIN, {0, 1}},
-      {"new feedback indicator", PLAIN, {0, 1, 2}},
-      {"number of requested PDSCH groups", PLAIN, {0, 1}},
-      {"HARQ-ACK retransmission indicator (Rel-17)", PLAIN, {0, 1}},
-      {"PUCCH cell indicator (Rel-17)", PLAIN, {0, 1}},
-      {"antenna ports", ANT, {4, 5, 6}},
-      {"TCI", PLAIN, {0, 3}},
+      {"New feedback indicator", PLAIN, {0, 1, 2}},
+      {"Number of requested PDSCH group(s)", PLAIN, {0, 1}},
+      {"HARQ-ACK retransmission indicator", PLAIN, {0, 1}},
+      {"Antenna port(s)", ANT, {4, 5, 6}},
+      {"Transmission configuration indication", PLAIN, {0, 3}},
       {"SRS request", PLAIN, {2, 3}},
-      {"SRS offset indicator (Rel-17)", PLAIN, {0, 1, 2}},
-      {"CBGTI", CBGTI, {0, 2, 4, 6, 8}},
-      {"CBGFI", CBGFI, {0, 1}},
-      {"DM-RS sequence initialization", DMRS_INIT, {1}},
-      {"priority indicator", PLAIN, {0, 1}},
+      {"SRS offset indicator", PLAIN, {0, 1, 2}},
+      {"CBG transmission information (CBGTI)", CBGTI, {0, 2, 4, 6, 8}},
+      {"CBG flushing out information (CBGFI)", CBGFI, {0, 1}},
+      {"DMRS sequence initialization", DMRS_INIT, {1}},
+      {"Priority indicator", PLAIN, {0, 1}},
       {"ChannelAccess-CPext", PLAIN, {0, 1, 2, 3, 4}},
-      {"minimum applicable scheduling offset indicator", PLAIN, {0, 1}},
+      {"Minimum applicable scheduling offset indicator", PLAIN, {0, 1}},
       {"SCell dormancy indication", PLAIN, {0, 1, 2, 3, 4, 5}},
-      {"PDCCH monitoring adaptation indication (Rel-17)", PLAIN, {0, 1, 2}},
-      {"size-alignment padding (7.3.1.0)", PLAIN, {0, 1}},
+      {"PDCCH monitoring adaptation indication", PLAIN, {0, 1, 2}},
+      {"PUCCH Cell indicator", PLAIN, {0, 1}},
+      {"zero padding (7.3.1.0, 7.3.1.2.2 search-space alignment)", PAD, {0, 1, 2, 3, 4}},
   };
   return t;
 }
@@ -136,6 +144,7 @@ static std::map<Key, std::set<int>> space(int start, int N, int L)
           case TDA: t.tda = s.pos; t.tdab = wi; break;
           case TB1: t.mcs = s.pos; break;
           case TB2: t.tb2 = wi > 0; break;
+          case TB2X: if ((wi > 0) != (s.tb2 != 0)) continue; break;
           case CBGTI: width = wi * (s.tb2 ? 2 : 1); t.cbg = wi > 0; break;
           case CBGFI: if (wi && !s.cbg) continue; break;
           case DMRS_INIT: t.dmrs = s.pos; break;
@@ -238,6 +247,7 @@ TEST(Dci11Space, EveryWidthOfEveryFieldIsEnumerated) {
               case dci11space::TDA: tda = pos; tdab = width; break;
               case dci11space::TB1: mcs = pos; break;
               case dci11space::TB2: tb2 = width > 0; break;
+              case dci11space::TB2X: width = tb2 ? T[k].widths.back() : 0; break; /* present iff TB2 is */
               case dci11space::ANT: ant = pos; antb = width; break;
               case dci11space::CBGTI: cbg = width > 0; width *= tb2 ? 2 : 1; break;
               case dci11space::CBGFI: legal &= !(width && !cbg); break;
@@ -284,6 +294,7 @@ TEST(Dci11Space, RandomFieldCombinationsAreEnumerated) {
         case dci11space::TDA: tda = pos; tdab = width; break;
         case dci11space::TB1: mcs = pos; break;
         case dci11space::TB2: tb2 = width > 0; break;
+        case dci11space::TB2X: width = tb2 ? f.widths.back() : 0; break;
         case dci11space::ANT: ant = pos; antb = width; dt = width == 6 ? 1 : width == 4 ? 0 : (int)(rand_r(&seed) & 1); break;
         case dci11space::CBGTI: cbg = width > 0; width *= tb2 ? 2 : 1; break;
         case dci11space::CBGFI: if (!cbg) width = 0; break;
@@ -415,4 +426,54 @@ TEST(Dci11Space, EnumerationCount) {
     EXPECT_GT(sp, 0);
     std::cerr << "[ MEASURED ] " << g.who << " " << g.N << " PRB / " << g.L << " bits: " << sp << " layouts (" << t1 << " RA type 1)\n";
   }
+}
+
+#include "nr_dci11_spec_fields.inc"
+namespace dci11space {
+// Compare a switch table with the generated spec field list: same field names in the same order (the padding entry is not a field),
+// every width of the table stated by the spec (TB2's 0 = "only present if ..."), every width the spec states either in the table or
+// in the FR2-2 multi-PDSCH exclusions. Returns the mismatches, empty when the table follows the text.
+static std::string spec_mismatches(const std::vector<Field> &tab)
+{
+  std::string err;
+  size_t k = 0;
+  const size_t ns = sizeof(kSpec1_1) / sizeof(kSpec1_1[0]);
+  for (const Field &f : tab) {
+    if (f.kind == PAD) continue;
+    if (k >= ns) { err += std::string("extra field '") + f.name + "'; "; continue; }
+    if (strcmp(f.name, kSpec1_1[k].name) != 0)
+      err += std::string("field ") + std::to_string(k) + " is '" + f.name + "', spec says '" + kSpec1_1[k].name + "'; ";
+    std::set<int> spec(kSpec1_1[k].w, kSpec1_1[k].w + kSpec1_1[k].n), mine(f.widths.begin(), f.widths.end());
+    const bool tb2 = f.kind == TB2 || f.kind == TB2X;
+    for (int w : mine)
+      if (!spec.empty() && !spec.count(w) && !(tb2 && w == 0))
+        err += std::string("'") + f.name + "' width " + std::to_string(w) + " not in the spec; ";
+    for (int w : spec) {
+      const bool excluded = (f.kind == TDA && w >= 5) || (!strcmp(f.name, "New data indicator") && w >= 2); /* multi-PDSCH, FR2-2 */
+      if (!mine.count(w) && !excluded) err += std::string("'") + f.name + "' spec width " + std::to_string(w) + " missing; ";
+    }
+    k++;
+  }
+  if (k != ns) err += "spec has " + std::to_string(ns) + " field headings, the table " + std::to_string(k) + "; ";
+  return err;
+}
+} // namespace dci11space
+
+// The resolver's field list is the one of TS 38.212 V17.13.0 clause 7.3.1.2.2, read from the text itself
+// (tools/dci11/gen_dci11_spec_fields.py); FieldByFieldSpaceEqualsTheResolver proves the resolver enumerates exactly this table.
+TEST(Dci11Space, TableFollowsTheSpecText) {
+  const std::string err = dci11space::spec_mismatches(dci11space::table());
+  EXPECT_TRUE(err.empty()) << err;
+  /* negative controls: the check must catch a missing width, a moved field and a missing field */
+  std::vector<dci11space::Field> t = dci11space::table();
+  for (auto &f : t) if (!strcmp(f.name, "Enhanced Type 3 codebook indicator")) f.widths = {0, 1, 2};
+  EXPECT_FALSE(dci11space::spec_mismatches(t).empty()) << "a missing width (Enhanced Type 3 = 3 bits) went unnoticed";
+  t = dci11space::table();
+  for (size_t i = 1; i < t.size(); i++)
+    if (!strcmp(t[i].name, "PUCCH Cell indicator")) { std::swap(t[i], t[i - 1]); break; }
+  EXPECT_FALSE(dci11space::spec_mismatches(t).empty()) << "a moved field went unnoticed";
+  t = dci11space::table();
+  for (size_t i = 0; i < t.size(); i++)
+    if (!strcmp(t[i].name, "Second TPC command for scheduled PUCCH")) { t.erase(t.begin() + (long)i); break; }
+  EXPECT_FALSE(dci11space::spec_mismatches(t).empty()) << "a missing field went unnoticed";
 }
