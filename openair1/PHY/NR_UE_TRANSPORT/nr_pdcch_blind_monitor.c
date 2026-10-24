@@ -5536,6 +5536,11 @@ int nr_pdcch_blind_dl_layout_candidates(const nr_pdcch_blind_raw_result_t *raw,
   return count;
 }
 
+bool nr_pdcch_dl_solver_fallback_ok(bool dl_auto, int dci11_state, bool have_resolver, bool solver_enabled)
+{
+  return dl_auto && dci11_state == 1 && have_resolver && solver_enabled;
+}
+
 static pthread_mutex_t common_facts_lock=PTHREAD_MUTEX_INITIALIZER;
 static nr_pdcch_blind_common_config_t common_facts;
 static bool common_facts_valid;

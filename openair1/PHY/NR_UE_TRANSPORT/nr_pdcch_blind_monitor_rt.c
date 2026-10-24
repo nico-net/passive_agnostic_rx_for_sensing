@@ -1325,6 +1325,20 @@ static bool dci11_layout_parse(const nr_dci11_resolver_t *r, int i, const nr_pdc
   return nr_pdcch_blind_extract_11(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &o, parsed);
 }
 
+/* First live resolver layout (a solved RNTI's representative is parsed later by the solver itself) that parses this payload. */
+static bool dl_resolver_representative(const nr_dci11_resolver_t *r, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                                       const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *out)
+{
+  const int nh = __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE);
+  for (int i = 0; i < nh; i++)
+    if (r->alive[i] && dci11_layout_parse(r, i, raw, len, cfg, out)) {
+      out->rnti = raw->rnti;
+      out->rnti_class = NR_BLIND_RNTI_CLASS_C;
+      return true;
+    }
+  return false;
+}
+
 /* ---- DCI 0_1 layout, stage 1 (observe-only, mirrors the 1_1 observer below). The uplink grant's
  * field widths are set by RRC switches this receiver cannot read; every layout whose total equals
  * the observed 0_1 length is a hypothesis and each accepted payload prunes by plausibility. */
@@ -7912,7 +7926,20 @@ constdiag_done:;
           if ((int)layout_ids[q] == want) { layouts[w] = layouts[q]; layout_ids[w] = layout_ids[q]; w++; }
         n = w;
       }
-      if (!n) continue;
+      if (!n) {
+        /* WL-SOLVER: the three-candidate Technique-D profile above only knows the standard type-1 field set; a cell whose DCI 1_1
+         * length it cannot explain (Iliad 51 PRB len 48: needs bwp_ind+tda = 7 bits; ambiguous optional fields) yields n = 0
+         * and used to drop EVERY C-RNTI grant before the solver, which reads the resolver's own layouts, ever saw it. With the
+         * solver on, hand it a representative of the live resolver layouts instead (rv/mcs here only feed its admission gates). */
+        nr_pdcch_blind_result_t rp;
+        if (!nr_pdcch_dl_solver_fallback_ok(cand_task[ti].dl_auto, g_dci11_state, g_dci11_resolver != NULL, nr_pdsch_solver_enabled())
+            || !dl_resolver_representative(g_dci11_resolver, raw, cand_task[ti].dci_length, cfg, &rp))
+          continue;
+        cand_task[ti].out = rp;
+        cand_task[ti].dl_layout_configuration = 0;
+        cand_task[ti].dl_layout_index = 0xFFFF;
+        goto dl_layout_done;
+      }
       {
         static uint32_t s_cand_n;
         if ((s_cand_n++ % 2000) == 0) {
@@ -8040,6 +8067,7 @@ constdiag_done:;
       cand_task[ti].dl_layout_configuration=keys[selected];
       cand_task[ti].dl_layout_index=0xFFFF;
       if (per_length_pin) pthread_mutex_unlock(&g_dl_length_lock);
+      dl_layout_done:;
     }
     const nr_pdcch_blind_result_t out = cand_task[ti].out;
     if (!cand_task[ti].ok) {
