@@ -26,13 +26,13 @@ H=$(cd "$(dirname "$0")" && pwd); R=$(cd "$H/../../.." && pwd)
 MODE=${1:-check}; ARM=${2:-}
 ENVFILE=${ENVFILE:-$H/ota_lab273.s6.env}
 # environment wins over the env file: remember what the caller set
-for v in CARRIER PRB SSB NANT RXG INITIALFO DUR RXENV; do eval "_o_$v=\${$v:-}"; done
+for v in CARRIER PRB SSB NANT RXG INITIALFO DUR RXENV DATA MGMT USRPX; do eval "_o_$v=\${$v:-}"; done
 # shellcheck disable=SC1090
 [ -r "$ENVFILE" ] && . "$ENVFILE"
-for v in CARRIER PRB SSB NANT RXG INITIALFO DUR RXENV; do eval "[ -n \"\$_o_$v\" ] && $v=\$_o_$v"; done
+for v in CARRIER PRB SSB NANT RXG INITIALFO DUR RXENV DATA MGMT USRPX; do eval "[ -n \"\$_o_$v\" ] && $v=\$_o_$v"; done
 CARRIER=${CARRIER:-3450000000}; PRB=${PRB:-273}; SSB=${SSB:-150}; NANT=${NANT:-4}; RXG=${RXG:-49}; INITIALFO=${INITIALFO:--15000}; DUR=${DUR:-300}
 CFG=${CFG:-$H/ue.passive.ota.lab273.s6.cfg}; B=${B:-$R/build_ota}; BIN=$B/nr-uesoftmodem
-DATA=${DATA:-192.168.20.2}; NIC=${NIC:-enp2s0f1np1}; OUTBASE=${OUTBASE:-/home/sens/NICOLA/captures}
+DATA=${DATA:-192.168.20.2}; MGMT=${MGMT:-}; NIC=${NIC:-enp2s0f1np1}; OUTBASE=${OUTBASE:-/home/sens/NICOLA/captures}
 ISSUES=0; FATAL=0; SUDO_CMDS=()
 ok()   { echo "  ok    $*"; }
 warn() { echo "  WARN  $*"; ISSUES=$((ISSUES+1)); }
@@ -108,7 +108,7 @@ preflight() {
 
 launch_cmd() {
   local freq="--ssb $SSB"; [ "${SCAN:-0}" = 1 ] && freq="--ue-scan-carrier"
-  RXARGS="--usrp-args type=x4xx,addr=$DATA,mgmt_addr=$MGMT -O $CFG -r $PRB --numerology 1 --band 78 -C $CARRIER $freq --ue-rxgain $RXG"
+  RXARGS="--usrp-args type=x4xx,addr=$DATA,mgmt_addr=$MGMT${USRPX:-} -O $CFG -r $PRB --numerology 1 --band 78 -C $CARRIER $freq --ue-rxgain $RXG"
   RXARGS="$RXARGS --ue-nb-ant-rx $NANT --ue-nb-ant-tx $NANT --passive-rx --ue-fo-compensation --initial-fo $INITIALFO"
   RXARGS="$RXARGS --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90 ${EXTRA:-}"
 }
