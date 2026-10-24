@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#include <memory>
 #include <cuda_runtime.h>
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include <cstdio>
@@ -696,10 +697,12 @@ int resize(void *ptr,int want) {
   if(to>cur)nr_gpu_membudget_dyn_abort(NR_GPU_MEM_PDCCH_NID,window_bytes(c->rb,c->dur,to)-have);
   return -1;
  }
- Context::Win old=c->w;Device saved=c->host;
+ // The rollback copy of the device descriptor lives on the heap: Device holds the CHUNK/CELLS tables (MBs), and a stack copy made the prologue probe
+ // fault on the 8 MB main-thread stack at the first resize(ctx, 0) [MEASURED, sens6 rfsim 273 PRB, SIGSEGV in resize+0x1d at a stack address].
+ Context::Win old=c->w;std::unique_ptr<Device> saved(new Device(c->host));
  c->w=nw;c->window=to;
  if(!win_bind(c) || nr_gpu_wait_stream(c->stream)!=cudaSuccess) { // roll back to the old set
-  c->w=old;c->window=cur;c->host=saved;
+  c->w=old;c->window=cur;c->host=*saved;
   cudaMemcpyAsync(c->dev,&c->host,sizeof(c->host),cudaMemcpyHostToDevice,c->stream);nr_gpu_wait_stream(c->stream);
   win_free(c,nw,false);
   if(to>cur)nr_gpu_membudget_dyn_abort(NR_GPU_MEM_PDCCH_NID,window_bytes(c->rb,c->dur,to)-have);
