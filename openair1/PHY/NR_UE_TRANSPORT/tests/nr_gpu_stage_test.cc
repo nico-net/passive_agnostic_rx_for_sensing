@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <random>
+#include <chrono>
+#include <algorithm>
 #include <vector>
 extern "C" {
 #include "PHY/TOOLS/nr_gpu_mem.h"
@@ -202,4 +204,91 @@ TEST(GpuStage, CpuTierRefuses)
   if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
   EXPECT_FALSE(ok);
   EXPECT_FALSE(m.staged_ready());
+}
+
+/* Q4 micro-benchmark (STAGE_BENCH=1): per grant at 273 PRB, 4 RX, N = 4096: copy bytes and time of every staged entry, and the CPU time of the same work where the CPU
+ * reference is available here (FEP, delay). Report only, no thresholds. */
+static double med_us(std::vector<double> &t) { std::sort(t.begin(), t.end()); return t[t.size() / 2]; }
+TEST(GpuStage, Bench273Prb4Rx)
+{
+  GpuPassModule *mp;
+  if (!getenv("STAGE_BENCH")) GTEST_SKIP() << "STAGE_BENCH not set";
+  if (!non_direct(&mp)) GTEST_SKIP() << "needs a DISCRETE process";
+  ASSERT_EQ(0, load_dftslib());
+  const int N = 4096, NCP = 288, NCP0 = 352, NS = 14, NA = 4, NRB = 273, FCO = N - NRB * 6, SLOT = NCP0 + N + (NS - 1) * (N + NCP), REPS = 200;
+  std::mt19937 rng(1);
+  const uint32_t ring_len = 3 * SLOT;
+  std::vector<std::vector<c16_t>> ring(NA, std::vector<c16_t>(ring_len));
+  for (auto &a : ring) for (auto &x : a) { x.r = (int16_t)((int)(rng() % 2001) - 1000); x.i = (int16_t)((int)(rng() % 2001) - 1000); }
+  std::vector<c16_t> rot(2 * NS), ts(N);
+  for (auto &r : rot) { r.r = (int16_t)((int)(rng() % 60000) - 30000); r.i = (int16_t)((int)(rng() % 60000) - 30000); }
+  init_timeshift_rotation(N, NCP, 8, ts.data());
+  const int16_t *rp[4];
+  for (int a = 0; a < NA; a++) rp[a] = (const int16_t *)ring[a].data();
+  std::vector<c16_t> out((size_t)NA * NS * N);
+  auto stats = [&](int e, uint64_t *o) { mp->stage_stats(e, o); };
+  uint64_t a0[6], a1[6];
+  { /* exact FEP, whole slot */
+    std::vector<double> tg, tc;
+    stats(NR_GPU_STG_FEP, a0);
+    for (int r = 0; r < REPS; r++) {
+      auto t0 = std::chrono::steady_clock::now();
+      mp->fep_old(rp, ring_len, ring_len - 1000, 0.0, (const int16_t *)rot.data(), 0x3fff, (int16_t *)out.data(), (size_t)NS * N);
+      tg.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+      t0 = std::chrono::steady_clock::now();
+      const uint32_t origin = (ring_len - 1000 + ring_len - NCP / 8) % ring_len;
+      for (int a = 0; a < NA; a++)
+        for (int l = 0; l < NS; l++) {
+          c16_t in[N] __attribute__((aligned(32))), ref[N] __attribute__((aligned(32)));
+          const uint32_t first = origin + NCP0 + l * (N + NCP);
+          for (int n = 0; n < N; n++) in[n] = ring[a][(first + n) % ring_len];
+          dft(get_dft(N), (int16_t *)in, (int16_t *)ref, 1);
+          rot_rx(NS, 2, ts.data(), FCO, ref, rot.data(), NRB, 0, l);
+        }
+      tc.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+    }
+    stats(NR_GPU_STG_FEP, a1);
+    printf("BENCH exact FEP 14 sym x 4 RX: staged GPU p50 %.0f us, CPU (single thread dft+rotation incl. gather) p50 %.0f us; per run H2D %lu KB D2H %lu KB\n", med_us(tg), med_us(tc),
+           (unsigned long)((a1[1] - a0[1]) / REPS >> 10), (unsigned long)((a1[2] - a0[2]) / REPS >> 10));
+  }
+  { /* delay: the 8 LS rows of a rank-2 grant with 2 DM-RS symbols x 4 RX */
+    const int R = 8;
+    std::vector<std::vector<c16_t>> ls(R, std::vector<c16_t>(N, c16_t{0, 0}));
+    for (auto &r : ls) for (int k = 0; k < 12 * NRB; k++) { r[k].r = (int16_t)(500 * std::cos(0.01 * k) + (int)(rng() % 21)); r[k].i = (int16_t)(500 * std::sin(0.01 * k)); }
+    const int16_t *rows[R];
+    for (int r = 0; r < R; r++) rows[r] = (const int16_t *)ls[r].data();
+    std::vector<double> tg, tc;
+    int o[3 * R];
+    stats(NR_GPU_STG_DELAY, a0);
+    for (int r = 0; r < REPS; r++) {
+      auto t0 = std::chrono::steady_clock::now();
+      mp->delay_old(rows, R, o);
+      tg.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+      t0 = std::chrono::steady_clock::now();
+      for (int q = 0; q < R; q++) { int c[3]; nr_gpu_pass_ul_ref_delay(ls[q].data(), c); }
+      tc.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+    }
+    stats(NR_GPU_STG_DELAY, a1);
+    printf("BENCH delay %d rows: staged GPU p50 %.0f us, CPU p50 %.0f us; per run H2D %lu KB D2H %lu B\n", R, med_us(tg), med_us(tc), (unsigned long)((a1[1] - a0[1]) / REPS >> 10),
+           (unsigned long)((a1[2] - a0[2]) / REPS));
+  }
+  { /* chest + demod + LDPC of a 273 PRB grant (fixture; no CPU reference in this binary: the CPU chest / demod times are the runtime CHECK means, see the report) */
+    for (int nl : {1, 4}) {
+      const int qm = nl == 1 ? 6 : 4;
+      GpuPassFixture fx = GpuPassFixture::small_grant(NRB, nl, qm, 7);
+      std::vector<int16_t> llr;
+      GpuPassFixture::bench_reps = 50;
+      GpuPassFixture::stage_full = 0;
+      uint64_t c0[6], c1[6], d0[6], d1[6];
+      stats(NR_GPU_STG_CHEST, c0); stats(NR_GPU_STG_DEMOD, d0);
+      ASSERT_EQ(0, fx.run_stages(&llr, true));
+      stats(NR_GPU_STG_CHEST, c1); stats(NR_GPU_STG_DEMOD, d1);
+      const uint64_t cn = c1[0] - c0[0], dn = d1[0] - d0[0];
+      printf("BENCH 273 PRB nl=%d qm=%d: chest staged p50 %.0f us (per run H2D %lu KB D2H %lu KB), demod staged p50 %.0f us (per run H2D %lu KB D2H %lu KB, decoder copy-back)\n", nl, qm,
+             GpuPassFixture::bench_us[0], (unsigned long)((c1[1] - c0[1]) / cn >> 10), (unsigned long)((c1[2] - c0[2]) / cn >> 10), GpuPassFixture::bench_us[1],
+             (unsigned long)((d1[1] - d0[1]) / dn >> 10), (unsigned long)((d1[2] - d0[2]) / dn >> 10));
+      GpuPassFixture::bench_reps = 1;
+      GpuPassFixture::stage_full = 1;
+    }
+  }
 }

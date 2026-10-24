@@ -7,6 +7,8 @@
 #define NR_GPU_PASS_FIXTURE_H
 #include <dlfcn.h>
 #include <cuda_runtime.h>
+#include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -175,6 +177,8 @@ class GpuPassFixture {
   std::vector<int> chest_out;         /* delay[3] and nvar per row */
   std::vector<uint8_t> snap;          /* LDPC snapshot bytes of block 0 */
   std::vector<int16_t> comp_out;      /* Q4: the demod's comp / mag / magb / magr arrays of the grant ([4 arrays][symbol][4 layers][ext] c16, zeros where nothing was written) */
+  static inline int bench_reps = 1;   /* Q4 micro-benchmark: repeat the staged old-path chest / demod this many times, medians in bench_us[0] (chest) / [1] (demod) */
+  static inline double bench_us[2] = {0, 0};
   static inline int stage_full = 1;   /* Q4: nr_gpu_demod_job_t::stage_full of the old-path demod on a DISCRETE process */
   int ldpc_rc = 0, ldpc_nsnap = 0;
 
@@ -492,6 +496,16 @@ class GpuPassFixture {
     if (old_path) {
       if (m.fep_old(P.rp.data(), ring_len, ring_offset, 0.0, rot.data(), 0x3fff, (int16_t *)P.rxF.host, (size_t)NSYM * N)) return -1;
       rc = m.chest_old(cjp);
+      if (stg && bench_reps > 1) {
+        std::vector<double> t;
+        for (int r = 0; r < bench_reps; r++) {
+          const auto a = std::chrono::steady_clock::now();
+          rc |= m.chest_old(cjp);
+          t.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - a).count());
+        }
+        std::sort(t.begin(), t.end());
+        bench_us[0] = t[t.size() / 2];
+      }
     } else {
       if (P.stage(&fslot, &cslot) || m.fep(&P.fj, &P.rxF, fslot, s)) return -1;
       rc = m.chest(&cj, P.nrows, &P.est, &P.nvar, cslot, s);
@@ -536,6 +550,17 @@ class GpuPassFixture {
       djh.llr = (int16_t *)P.llrb.host;
       if (m.demod_old(&djh)) return -1;
       m.demod_rel(djh.ctx);
+      if (stg && bench_reps > 1) {
+        std::vector<double> t;
+        for (int r = 0; r < bench_reps; r++) {
+          const auto a = std::chrono::steady_clock::now();
+          if (m.demod_old(&djh)) return -1;
+          t.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - a).count());
+          m.demod_rel(djh.ctx);
+        }
+        std::sort(t.begin(), t.end());
+        bench_us[1] = t[t.size() / 2];
+      }
     } else if (m.demod(&dj, &P.llrb, s))
       return -1;
     if (!stg) nr_gpu_buf_d2h_async(&P.llrb, 0, P.llrb.bytes, s);
