@@ -1223,12 +1223,20 @@ static bool ev_map(const solver_rnti_t *r, int id, int8_t *m, int8_t *mL)
   return true;
 }
 /* ev_apply: the S map of the chosen layout, and the PDSCH length of every index whose evidence is shorter than 14 - S (TDD mixed
- * slot); indices without evidence keep what was learnt. */
-static void ev_apply(solver_rnti_t *r, const int8_t *m, const int8_t *mL)
+ * slot). Same layout as before: an index whose passes have left the 16-entry evidence ring keeps what was learnt (a rare mixed-slot
+ * index must not be forgotten behind full-slot passes); a new layout reads the indices differently, so it starts from its evidence. */
+static void ev_apply(solver_rnti_t *r, int id, const int8_t *m, const int8_t *mL)
 {
-  memcpy(r->S_by_tda, m, 16);
-  for (int t = 0; t < 16; t++)
-    if (m[t] >= 0) r->L_by_tda[t] = (mL[t] > 0 && mL[t] != 14 - m[t]) ? mL[t] : -1;
+  const bool same = id == r->rep;
+  for (int t = 0; t < 16; t++) {
+    if (m[t] >= 0) {
+      r->S_by_tda[t] = m[t];
+      r->L_by_tda[t] = (mL[t] > 0 && mL[t] != 14 - m[t]) ? mL[t] : -1;
+    } else if (!same) {
+      r->S_by_tda[t] = -1;
+      r->L_by_tda[t] = -1;
+    }
+  }
 }
 /* DCIRV: with hq, the candidates are scored by their HARQ/RV readings (refuted ones skipped, the
  * lowest violation rate wins, the current rep wins ties); without hq a solved RNTI keeps its rep while it stays consistent.
@@ -1241,7 +1249,7 @@ static int choose_rep(solver_rnti_t *r, bool hq, bool *all_refuted)
   double best_ratio = 2;
   if (all_refuted) *all_refuted = false;
   if (rvc && !hq && r->solved && r->rep >= 0 && bm_has(r->cand_bm, r->rep) && ev_map(r, r->rep, m, mL)) {
-    ev_apply(r, m, mL);
+    ev_apply(r, r->rep, m, mL);
     return r->rep;
   }
   for (int b = 0; b < BM_BYTES; b++) {
@@ -1254,7 +1262,7 @@ static int choose_rep(solver_rnti_t *r, bool hq, bool *all_refuted)
       if (!ev_map(r, id, m, mL))
         continue;
       if (!(rvc && hq)) {
-        ev_apply(r, m, mL);
+        ev_apply(r, id, m, mL);
         return id;
       }
       if (scored++ >= RVC_MAX_SCORED) goto done;
@@ -1271,7 +1279,7 @@ static int choose_rep(solver_rnti_t *r, bool hq, bool *all_refuted)
     }
   }
 done:
-  if (best >= 0) ev_apply(r, bm, bmL);
+  if (best >= 0) ev_apply(r, best, bm, bmL);
   else if (all_refuted) *all_refuted = refuted > 0;
   return best;
 }

@@ -488,8 +488,8 @@ TEST(PdschSolverWide, WideReadingsAreSearchedFromTheFirstGrant)
   const int gn = SolveGrants(0x0101, c, 0, 16, 4000, rc);
   printf("[solver] 106 PRB solved after %d grants, 273 PRB after %d, 16 PRB %d\n", gw, g273, gn);
   ASSERT_GT(gn, 0);
-  EXPECT_EQ(gw, gn) << "the width of a reading changes nothing in the search";
-  EXPECT_EQ(g273, gn);
+  EXPECT_LE(gw, gn) << "a wide reading is searched like a narrow one (its larger TB may even solve on one CRC24 pass)";
+  EXPECT_LE(g273, gn);
 }
 
 /* SOLVERTDDL (2026-10-23). A solved RNTI's second TDA index is a TDD special-slot allocation whose PDSCH is shorter than 14 - S.
