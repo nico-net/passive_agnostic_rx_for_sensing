@@ -90,15 +90,16 @@ extern int nr_ulsch_decoding(PHY_VARS_gNB *phy_vars_gNB,
  *    receiver has no business keeping, and which nothing in this path reads. This file keeps its
  *    own census instead (nr_pusch_passive_stats_dump).
  *
- * CONSTRAINT: these are global symbols, so this library must never be linked alongside PHY_NR.
+ * CONSTRAINT: these are global symbols, so this library must never be linked alongside PHY_NR
+ * (they are weak, so a real definition from PHY_NR wins, as in nr_pusch_ra0sim).
  * It is not -- nr-uesoftmodem links PHY_NR_COMMON, PHY_NR_UE and this, and that is the whole
  * reason this library exists. */
-uint16_t get_first_ant_idx(bool das, uint16_t num_ports_beams, uint16_t beam_id, uint16_t fapi_start_port)
+__attribute__((weak)) uint16_t get_first_ant_idx(bool das, uint16_t num_ports_beams, uint16_t beam_id, uint16_t fapi_start_port)
 {
   return ((das) ? (beam_id & 0x7fff) * num_ports_beams : fapi_start_port);
 }
 
-NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
+__attribute__((weak)) NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
 {
   (void)gNB;
   (void)rnti;
