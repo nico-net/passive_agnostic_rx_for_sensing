@@ -29,7 +29,7 @@ if (ENABLE_LDPC_AAL)
   endif()
 
   add_dependencies(nr-softmodem ldpc_aal)
-  add_dependencies(nr-uesoftmodem ldpc_aal)
+  add_dependencies(nr-uesoftmodem-optional-modules ldpc_aal)
   add_dependencies(nr_ulsim ldpc_aal)
   add_dependencies(nr_ulschsim ldpc_aal)
   add_dependencies(nr_dlsim ldpc_aal)

@@ -1,4 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 /* GPUPASS Task 4, host side of the DL graph pass: see nr_gpu_pass_dl.h and nr_gpu_pass.h. */
 #include "nr_gpu_pass_dl.h"
 #include "nr_gpu_pass_ul.h"

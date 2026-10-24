@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "PHY/TOOLS/nr_stage_split.h"
 #include <sched.h>
 #include "nr_pdsch_gpu_exact.h"
