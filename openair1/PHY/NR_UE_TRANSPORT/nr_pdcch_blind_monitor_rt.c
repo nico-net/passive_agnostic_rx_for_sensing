@@ -128,19 +128,18 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
  * carry no -- or another UE's -- DM-RS. When none passes (UE too weak, or k0 != 0) the readings are left untouched.
  * One FEP of the DM-RS symbol per antenna and slot (per-thread cache). Returns the new reading count; *n_kept = how many
  * readings carried an own identity (-1 = not scored). */
-static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdcch_blind_monitor_cfg_t *cfg,
-                                     uint16_t rnti, const int *ids, int n_ids, nr_pdcch_blind_result_t *rp,
-                                     nr_pdsch_solver_reading_t *rd, int nrd, int *n_kept)
+/* dmrs_sym_rx: the type-A DM-RS symbol of this slot in the frequency domain, per antenna: one FEP per antenna and slot (per-thread
+ * cache shared by the reading filter and the DM-RS fit). Returns the antenna count, 0 when the symbol cannot be read. */
+static int dmrs_sym_rx(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdcch_blind_monitor_cfg_t *cfg, const int16_t **rx)
 {
-  *n_kept = -1;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int sym = cfg->dmrs_typeA_position + 2, nant = fp->nb_antennas_rx;
-  if (nant > 8 || sym >= fp->symbols_per_slot || cfg->bwp_size == 0) return nrd;
+  if (nant > 8 || nant < 1 || sym >= fp->symbols_per_slot || cfg->bwp_size == 0) return 0;
   static __thread c16_t *buf;
   static __thread int64_t buf_key = -1;
   if (buf == NULL) {
     buf = aligned_alloc(64, ((sizeof(c16_t) * (size_t)nant * fp->samples_per_slot_wCP + 63) / 64) * 64);
-    if (buf == NULL) return nrd;
+    if (buf == NULL) return 0;
   }
   const int64_t key = (int64_t)proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx;
   if (buf_key != key) {
@@ -149,8 +148,73 @@ static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t
                       nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata));
     buf_key = key;
   }
-  const int16_t *rx[8];
   for (int a = 0; a < nant; a++) rx[a] = (const int16_t *)&buf[(size_t)a * fp->samples_per_slot_wCP + (size_t)sym * fp->ofdm_symbol_size];
+  return nant;
+}
+
+/* ---- DM-RS FIT (DCI11-RESOLVER 2026-10-24): the evidence that orders the solver's search. For one DM-RS identity and nSCID the
+ * PRBs of the BWP that carry that DM-RS on the type-A DM-RS symbol of this slot (same-k' coherence of the PRB >= a threshold
+ * above the noise level of 4 x n_ant pilot pairs); a reading's fit is the F1 of its PRB set against that set: 1 when the reading
+ * covers exactly the DM-RS-bearing PRBs, small when it reads PRBs without this DM-RS or misses most of them. The fit ranks
+ * readings and weights their probe share; it never removes one (other UEs' DM-RS share the identity, k0 > 0 puts the PDSCH in a
+ * later slot): only the CRC decides. ---- */
+#define DCI11_FCLASSES 64
+typedef struct {
+  uint16_t riv, w;          /* FDRA field offset and width */
+  uint8_t mode, n_rbg;
+  int n;                    /* PRBs it reads (0: impossible) */
+  float fit[2];             /* per nSCID; < 0 unknown */
+  uint16_t prb[NR_PRB_SET_MAX];
+} dci11_fclass_t;
+static void dmrs_fit_classes(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdcch_blind_monitor_cfg_t *cfg, const int *ids,
+                             int n_ids, dci11_fclass_t *fk, int nfk)
+{
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const int16_t *rx[8];
+  const int nant = dmrs_sym_rx(ue, proc, cfg, rx);
+  if (nant <= 0) return;
+  const int sym = cfg->dmrs_typeA_position + 2;
+  const float thr = nant >= 2 ? 0.6f : 0.8f;
+  enum { GOLD_BITS = 12 * 275 };
+  static __thread uint8_t *gold;
+  static __thread uint8_t *occ;
+  if (gold == NULL) gold = malloc(GOLD_BITS);
+  if (occ == NULL) occ = malloc(NR_PRB_SET_MAX);
+  if (gold == NULL || occ == NULL) return;
+  for (int k = 0; k < n_ids && k < 4; k++) {
+    if (ids[k] < 0 || ids[k] > 65535) continue;
+    for (int ns = 0; ns < 2; ns++) {
+      nr_dmrs_scan_prb_gold(proc->nr_slot_rx, sym, fp->symbols_per_slot, ids[k], ns, GOLD_BITS, gold);
+      int n_occ = 0;
+      for (int p = 0; p < cfg->bwp_size && p < NR_PRB_SET_MAX; p++) {
+        const uint16_t crb = (uint16_t)(cfg->bwp_start + p);
+        occ[p] = 0;
+        if (crb >= fp->N_RB_DL) continue;
+        occ[p] = nr_dmrs_scan_prb_score_gold(rx, nant, fp->ofdm_symbol_size, fp->first_carrier_offset, gold, &crb, 1) >= thr;
+        n_occ += occ[p];
+      }
+      if (n_occ == 0) continue;
+      for (int f = 0; f < nfk; f++) {
+        if (fk[f].n <= 0) continue;
+        int hit = 0;
+        for (int q = 0; q < fk[f].n; q++) hit += fk[f].prb[q] < cfg->bwp_size ? occ[fk[f].prb[q]] : 0;
+        const float f1 = 2.f * (float)hit / (float)(fk[f].n + n_occ);
+        if (f1 > fk[f].fit[ns]) fk[f].fit[ns] = f1;
+      }
+    }
+  }
+}
+
+static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdcch_blind_monitor_cfg_t *cfg,
+                                     uint16_t rnti, const int *ids, int n_ids, nr_pdcch_blind_result_t *rp,
+                                     nr_pdsch_solver_reading_t *rd, int nrd, int *n_kept)
+{
+  *n_kept = -1;
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const int sym = cfg->dmrs_typeA_position + 2;
+  const int16_t *rx[8];
+  const int nant = dmrs_sym_rx(ue, proc, cfg, rx);
+  if (nant <= 0) return nrd;
   float sc[128];
   int kept = 0;
   /* Gold bits once per (identity, nSCID) of this slot instead of once per reading x identity (the bit-serial
@@ -918,8 +982,8 @@ static nr_dci11_resolver_t *g_dci11_resolver;
 static int      g_dci11_state;   /* 0 = not tried, 1 = armed, -1 = unavailable */
 static uint64_t g_dci11_seen;
 
-/* g_dci11_resolver/g_dci01_resolver (below) are ~17.2 MB each (NR_DCI11_LAYOUT_MAX=32768, see the
- * sizing comment in nr_pdcch_dci11_layout_sweep.h) -- as plain static globals that is 34 MB of BSS
+/* g_dci11_resolver/g_dci01_resolver (below) are ~4 MB each (NR_DCI11_LAYOUT_MAX=65535, see the
+ * sizing comment in nr_pdcch_dci11_layout_sweep.h) -- as plain static globals that is 8 MB of BSS
  * that nr-uesoftmodem's mlockall(MCL_CURRENT) locks at startup whether or not either resolver is
  * ever armed. Heap-allocated on first arm instead, calloc'd once and kept for the process's life
  * (same pattern as Technique D's sweep_context_t.state). Fail closed on a calloc failure: the
@@ -1145,40 +1209,14 @@ static void grantdrop(const nr_pdcch_blind_result_t *out, int frame, int slot, c
 static __thread uint64_t g_pdsch_configuration; /* per thread, see g_pdsch_sweep_on */
 /* Live-layout count above which PDSCH trials are first-code-block probes (job.layout_probe). */
 #define NR_DCI11_STAGE2_MAX_ALIVE 8   
-/* R30 item 2: trials a pinned Technique-D layout candidate may accumulate at zero CRC passes before
- * it is judged wrong and abandoned. A 24-bit TB CRC's false-accept floor is ~6e-8/try, and even a
- * marginal true rate of 1% has P(0 passes in 1000 trials) ~= 4.3e-5 -- 1000 trials is comfortably
- * past "unlucky" for a right layout while still cheap enough to try several wrong ones inside a run. */
-#define DCI11_PIN_GIVEUP_TRIALS 1000
-/* R30 item 2: occasions (not real Technique-D trials, which arrive far slower and far less evenly --
- * measured live: the FIRST 200-occasion block on this bed carried 45 real trials, every block after
- * it in the same run carried ~0, because the deferred decode queue's backlog (scanq drop_full) grows
- * over a run's lifetime and starves later occasions of ever reaching a real trial at all) a pinned
- * candidate gets before rotating, when the trial-count giveup above hasn't fired first. Real trials
- * are therefore a scarce, front-loaded resource: a SMALL block that cycles through the handful of
- * fallback candidates repeatedly gives each of them several independent chances to land its window
- * on a still-healthy stretch of the queue, where a large block commits most of a run's healthy
- * window to whichever candidate happened to be offered first (measured: exactly this cost FIXED a
- * 0-crc_ok run when the first-offered candidate was not the true one). */
-#define DCI11_PIN_BLOCK_OCCASIONS 50
 static _Atomic int g_dl_layout_preferred; /* a DL layout family has >= 8 code-block CRC passes */
-/* DL LINK HEALTH for FDRA staging: a CRC pass on a PDSCH decoded OUTSIDE the stage-2 layout search
- * (format 1_0 -- SIB1/RA/paging/C-RNTI fallback -- or the manual/fallback layouts), stamped with the
- * stage-2 trial count at which it arrived. Staging arms only while such a pass is recent, so a dead link
- * (CFO mis-lock, Technique D still searching) cannot cascade-arm every mode on its 0-pass reads. */
-static _Atomic uint64_t g_dl_layout_trials;          /* stage-2 trials fed back so far */
-static _Atomic uint64_t g_dl_link_pass_at = UINT64_MAX; /* g_dl_layout_trials at the last link pass */
-static _Atomic int g_dl_type1_pass = -1;              /* a type-1 layout that passed: disarm (observer applies it) */
+/* (DCI11-RESOLVER: the DL FDRA staging -- type 1 first, the other modes armed on a TB-CRC refutation, disarmed by a type-1
+ * pass -- is gone with its link-health stamps: every mode is in the layout set from the start.) */
 void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok)
 {
   if (!nr_cfg_epoch_work_current()) return;
-  if (layout_index >= NR_DCI11_LAYOUT_MAX) {
-    if (cb0_ok) /* 0xFFFF: not a stage-2 trial -- a link-health pass */
-      atomic_store_explicit(&g_dl_link_pass_at, atomic_load_explicit(&g_dl_layout_trials, memory_order_relaxed),
-                            memory_order_relaxed);
+  if (layout_index >= NR_DCI11_LAYOUT_MAX) /* 0xFFFF: not a stage-2 trial */
     return;
-  }
-  atomic_fetch_add_explicit(&g_dl_layout_trials, 1, memory_order_relaxed);
   /* External entry point (called from the deferred consumer thread and the in-line decode path),
    * with no g_dci11_state gate of its own -- fail closed rather than assume a caller only ever
    * offers a real layout_index once armed. Pre-arm this is a no-op, matching the old all-zero
@@ -1188,10 +1226,8 @@ void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok)
   nr_dci11_resolver_t *r = g_dci11_resolver;
   if (r == NULL)
     return;
-  if (cb0_ok && layout_index < __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE)
-      && r->off[layout_index].fdra_mode == NR_FDRA_TYPE1 && r->fdra_next > 1
-      && r->fdra_next < NR_DCI11_FDRA_STAGES)
-    atomic_store_explicit(&g_dl_type1_pass, (int)layout_index, memory_order_relaxed);
+  if (layout_index >= __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE))
+    return;
   /* consumer thread vs the receive thread's reads: plain counters, a torn read costs one tally */
   __atomic_fetch_add(&r->probe_tr[layout_index], 1u, __ATOMIC_RELAXED);
   if (cb0_ok)
@@ -1320,16 +1356,25 @@ static bool dci11_layout_parse(const nr_dci11_resolver_t *r, int i, const nr_pdc
   for (int k = 0; k < o.tda_count && k < 16; ++k) {
     o.tda_start[k] = 1; o.tda_length[k] = 13; o.tda_mapping[k] = 0;
   }
-  if (nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o) != len)
+  /* the fields after the DM-RS init (f.tail_bits) are never read: the field list is that much shorter than the payload */
+  if (nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o) + f.tail_bits != len)
     return false;
   return nr_pdcch_blind_extract_11(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &o, parsed);
 }
 
-/* First live resolver layout (a solved RNTI's representative is parsed later by the solver itself) that parses this payload. */
+/* The grant-level reading of a DCI 1_1 for everything before the PDSCH planning (RNTI bookkeeping, gates, logs): a SOLVED RNTI's
+ * representative layout, else the first live resolver layout that parses the payload. The solver re-reads the payload under
+ * every candidate layout itself, so for an unsolved RNTI this reading carries no layout claim. */
 static bool dl_resolver_representative(const nr_dci11_resolver_t *r, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
                                        const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *out)
 {
   const int nh = __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE);
+  const int rep = nr_pdsch_solver_rep(raw->rnti);
+  if (rep >= 0 && rep < nh && dci11_layout_parse(r, rep, raw, len, cfg, out)) {
+    out->rnti = raw->rnti;
+    out->rnti_class = NR_BLIND_RNTI_CLASS_C;
+    return true;
+  }
   for (int i = 0; i < nh; i++)
     if (r->alive[i] && dci11_layout_parse(r, i, raw, len, cfg, out)) {
       out->rnti = raw->rnti;
@@ -1567,11 +1612,14 @@ static bool nr_pdcch_ss_registry_occasion(const nr_pdcch_blind_monitor_cfg_t *cf
   return retired;
 }
 
-/* nr_pdcch_dci11_layout_observe: stage 1 of the DCI 1_1 layout search: prunes the layout set by the plausibility of each accepted DCI payload, arming the FDRA mode after a full TB-CRC refutation.
- *   The first call builds the layout set from dci_length and BWP size (the TDA width is searched when no list is configured).
- *   Every 4000 observations it logs the live set, can disarm or arm RA type 0 / dynamicSwitch modes, and .
- *   Caller: run_occasion_one() after each accepted DCI 1_1 (stage 1).
+/* nr_pdcch_dci11_layout_observe: stage 1 of the DCI 1_1 layout search: prunes the layout set by the hard impossibility and the
+ * plausibility of each accepted DCI payload.
+ *   The first call builds the layout set from dci_length and BWP size: every layout TS 38.212 7.3.1.2.2 admits, every FDRA mode at
+ *   once (no staging). When the standard admits more layouts than one resolver holds, the first NR_DCI11_ARM_EV payloads are kept
+ *   and the set is built with their hard-refutation evidence (nr_dci11_resolver_init_ev), then they are observed as usual.
+ *   Every 4000 observations it logs the live set. Caller: run_occasion_one() after each accepted DCI 1_1 (stage 1).
  */
+#define NR_DCI11_ARM_EV 16
 static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cfg,
                                           uint16_t dci_length, nr_dci_bits_t payload, uint16_t rnti)
 {
@@ -1580,6 +1628,9 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
     return;
   }
   if (g_dci11_state == 0) {
+    static nr_dci_bits_t ev[NR_DCI11_ARM_EV];
+    static uint16_t ev_rnti[NR_DCI11_ARM_EV], ev_len;
+    static int n_ev;
     const double span = ((double)cfg->bwp_size * (double)(cfg->bwp_size + 1)) / 2.0;
     const uint16_t riv_bits = (uint16_t)ceil(log2(span));
     /* No configured TDRA list -> the field width is UNKNOWN and is searched (0..4 bits), not
@@ -1591,12 +1642,21 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
         tda_bits++;
       }
     }
+    if (n_ev > 0 && ev_len != dci_length)
+      return; /* collecting arming evidence for the first length seen */
+    const long space = nr_dci11_layout_space_count(cfg->bwp_start, cfg->bwp_size, riv_bits, tda_bits, dci_length);
+    if (space > NR_DCI11_LAYOUT_MAX && n_ev < NR_DCI11_ARM_EV) {
+      ev_len = dci_length;
+      ev_rnti[n_ev] = rnti;
+      ev[n_ev++] = payload;
+      return;
+    }
     if (dci11_resolver_ensure(&g_dci11_resolver, "DCI11_LAYOUT") == NULL) {
       g_dci11_state = -1;
       return;
     }
-    const int n = nr_dci11_resolver_init_fdra(g_dci11_resolver, cfg->bwp_start, cfg->bwp_size, riv_bits, tda_bits,
-                                              dci_length);
+    const int n = nr_dci11_resolver_init_ev(g_dci11_resolver, cfg->bwp_start, cfg->bwp_size, riv_bits, tda_bits, dci_length,
+                                            ev, n_ev);
     if (n <= 0) {
       /* NOT a resolver failure. It means no legal switch combination sums to the observed length,
        * so one of bwp_size / tda_count / dci_length disagrees with this cell -- which is itself
@@ -1609,45 +1669,27 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
     }
     if (cfg->extract.tda_count > 0 && cfg->extract.tda_count < 16)
       nr_dci11_resolver_set_tda_count(g_dci11_resolver, (uint8_t)cfg->extract.tda_count);
-    LOG_I(PHY, "SENSING: DCI11_LAYOUT armed: %d layouts (FDRA stages < %d) consistent with dci_length=%u "
-               "(riv=%u bits, tda=%s; later RA type 0 / dynamicSwitch modes armed only on TB-CRC refutation)\n", n,
-          g_dci11_resolver->fdra_next, dci_length,
-          riv_bits, tda_bits == NR_DCI11_TDA_UNKNOWN ? "0..4 bits (searched)" : "configured");
-    if (n >= NR_DCI11_LAYOUT_MAX)
-      LOG_W(PHY, "SENSING: DCI11_LAYOUT initial set truncated at NR_DCI11_LAYOUT_MAX=%d\n", NR_DCI11_LAYOUT_MAX);
+    int per_mode[5] = {0};
+    for (int i = 0; i < n; i++)
+      if (g_dci11_resolver->off[i].fdra_mode < 5) per_mode[g_dci11_resolver->off[i].fdra_mode]++;
+    LOG_I(PHY, "SENSING: DCI11_LAYOUT armed: %d layouts of the %u TS 38.212 7.3.1.2.2 admits at dci_length=%u bwp=%u+%u "
+               "(riv=%u bits, tda=%s; FDRA type1 %d, type0 cfg1 %d cfg2 %d, dynamicSwitch cfg1 %d cfg2 %d; evidence %d DCIs)\n",
+          n, g_dci11_resolver->n_space, dci_length, (unsigned)cfg->bwp_start, (unsigned)cfg->bwp_size, riv_bits,
+          tda_bits == NR_DCI11_TDA_UNKNOWN ? "0..4 bits (searched)" : "configured", per_mode[NR_FDRA_TYPE1],
+          per_mode[NR_FDRA_TYPE0_CFG1], per_mode[NR_FDRA_TYPE0_CFG2], per_mode[NR_FDRA_DYN_CFG1], per_mode[NR_FDRA_DYN_CFG2],
+          space > NR_DCI11_LAYOUT_MAX ? n_ev : 0);
+    if (g_dci11_resolver->n_truncated)
+      LOG_W(PHY, "SENSING: DCI11_LAYOUT %u admissible layouts NOT stored (capacity NR_DCI11_LAYOUT_MAX=%d after the evidence of %d "
+                 "DCIs): the set is INCOMPLETE\n", g_dci11_resolver->n_truncated, NR_DCI11_LAYOUT_MAX, n_ev);
     g_dci11_state = 1;
+    for (int e = 0; e < n_ev; e++)
+      nr_dci11_resolver_observe_rnti(g_dci11_resolver, ev[e], ev_rnti[e]);
+    g_dci11_seen += (uint64_t)n_ev;
+    n_ev = 0;
   }
   nr_dci11_resolver_observe_rnti(g_dci11_resolver, payload, rnti);
   if ((++g_dci11_seen % 4000) != 0) {
     return;
-  }
-  /* FDRA MODE STAGING (nr_dci11_resolver_init_fdra): stage 2 has refuted every live layout by TB CRC ->
-   * arm the next RA type 0 / dynamicSwitch mode. Never on stage-1 evidence, which cannot refute them. */
-  const int t1_pass = atomic_exchange_explicit(&g_dl_type1_pass, -1, memory_order_relaxed);
-  if (t1_pass >= 0) {
-    const int killed = nr_dci11_resolver_disarm(g_dci11_resolver, t1_pass);
-    LOG_A(PHY, "SENSING: DCI11_LAYOUT type-1 layout %d passed its CRC: FDRA staging DISARMED, %d RA type 0 / "
-               "dynamicSwitch layouts killed\n", t1_pass, killed);
-  }
-  const uint64_t dl_tr = atomic_load_explicit(&g_dl_layout_trials, memory_order_relaxed);
-  const uint64_t dl_link = atomic_load_explicit(&g_dl_link_pass_at, memory_order_relaxed);
-  /* "Link healthy" = a non-stage-2 PDSCH passed within the span a refutation needs (64 trials per live layout).
-   * NOTE (final review M7): that counts 1_0/SIB1 passes, so a 1_1-only failure cause (MCS, rank, LBRM,
-   * scrambling) also satisfies it -- which is why retirement is reversible (nr_dci11_resolver_arm_next_mode). */
-  const bool dl_link_ok = dl_link != UINT64_MAX
-                          && dl_tr - dl_link <= (uint64_t)NR_DCI11_FDRA_ARM_MIN_TRIALS * (uint64_t)(g_dci11_resolver->n_alive + 1);
-  if (dl_link_ok && nr_dci11_resolver_all_refuted(g_dci11_resolver, NR_DCI11_FDRA_ARM_MIN_TRIALS)) {
-    int added = 0;
-    const int m = nr_dci11_resolver_arm_next_mode(g_dci11_resolver, &added);
-    const int revived = g_dci11_resolver->last_revived;
-    if (m >= 0 || revived > 0)
-      LOG_A(PHY, "SENSING: DCI11_LAYOUT live set refuted by TB CRC (0 passes, >= %d trials per live layout in total, "
-                 "dl_link_ok = some 1_0/SIB1 or other non-stage-2 PDSCH passed): %s; armed FDRA mode %d (1/2 = RA type 0, "
-                 "3/4 = dynamicSwitch, -1 = none left): %d layouts, %d live of %d%s\n",
-            NR_DCI11_FDRA_ARM_MIN_TRIALS,
-            revived > 0 ? "a LATER stage refuted too -- not an FDRA cause: REVIVED the retired layouts" : "retired it", m,
-            added, g_dci11_resolver->n_alive, g_dci11_resolver->n_hyp,
-            g_dci11_resolver->n_hyp >= NR_DCI11_LAYOUT_MAX ? " -- TRUNCATED at NR_DCI11_LAYOUT_MAX" : "");
   }
   const nr_dci11_resolver_t *r = g_dci11_resolver;
   const int cfg_bwp = (cfg->extract.bwp_indicator_bits >= 0) ? cfg->extract.bwp_indicator_bits : 1;
@@ -1680,8 +1722,6 @@ static nr_pdcch_dci_length_store_t g_ul_length_store;
  * occurs only in the remove hook, after all dispatcher leases have drained. */
 static pthread_mutex_t g_dl_length_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t ul_length_lock = PTHREAD_MUTEX_INITIALIZER;
-static nr_dci11_pin_t g_reconf_dci11_pin[65536];
-static uint32_t g_reconf_dci11_pin_cursor[65536];
 
 static void length_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
 {
@@ -7912,162 +7952,26 @@ constdiag_done:;
       if (!bwp_entry_task)
         nr_pdcch_dci11_layout_observe(cfg, cand_task[ti].dci_length, raw->payload, raw->rnti);
       if (!g_pdsch_sweep_on && !(bwp_entry_task && cfg->dl_full_auto)) continue;
-      nr_pdcch_blind_result_t layouts[3];
-      uint16_t layout_ids[3];
-      uint8_t ids8[3];
-      int n = nr_pdcch_blind_dl_layout_candidates(raw, cand_task[ti].dci_length,
-          bwp_entry_task ? cand_task[ti].bwp_size : cfg->bwp_size, cfg->dmrs_typeA_position, layouts, ids8);
-      for (int i = 0; i < n && i < 3; i++) layout_ids[i] = ids8[i];
-      if (bwp_entry_task && n > 0) {
-        /* The tracker has already resolved this entry's indicator and TDA widths from the DM-RS: keep only that layout. */
-        const int want = (int)pbwp_snap[cand_task[ti].bwp_entry].ind * 5 + (4 - (int)pbwp_snap[cand_task[ti].bwp_entry].dk);
-        int w = 0;
-        for (int q = 0; q < n && q < 3; q++)
-          if ((int)layout_ids[q] == want) { layouts[w] = layouts[q]; layout_ids[w] = layout_ids[q]; w++; }
-        n = w;
-      }
-      if (!n) {
-        /* WL-SOLVER: the three-candidate Technique-D profile above only knows the standard type-1 field set; a cell whose DCI 1_1
-         * length it cannot explain (Iliad 51 PRB len 48: needs bwp_ind+tda = 7 bits; ambiguous optional fields) yields n = 0
-         * and used to drop EVERY C-RNTI grant before the solver, which reads the resolver's own layouts, ever saw it. With the
-         * solver on, hand it a representative of the live resolver layouts instead (rv/mcs here only feed its admission gates). */
+      {
+        /* DCI11-RESOLVER (2026-10-24): every DCI 1_1 goes through the ONE general resolver -- the layout set of every field
+         * combination TS 38.212 7.3.1.2.2 admits at this length (nr_pdcch_dci11_layout_sweep.c). The hand-written three-candidate
+         * profile (nr_pdcch_blind_dl_layout_candidates: type-1 RA, one codeword, 4-bit ports, no optional fields) and its
+         * fallback are gone: a cell whose field combination the profile did not know (Iliad 51 PRB, length 48) used to pass
+         * only through the fallback. Unarmed or no standard layout at this length (g_dci11_state -1): nothing can read it. */
         nr_pdcch_blind_result_t rp;
-        if (!nr_pdcch_dl_solver_fallback_ok(cand_task[ti].dl_auto, g_dci11_state, g_dci11_resolver != NULL, nr_pdsch_solver_enabled())
-            || !dl_resolver_representative(g_dci11_resolver, raw, cand_task[ti].dci_length, cfg, &rp))
+        if (g_dci11_state != 1 || g_dci11_resolver == NULL
+            || !dl_resolver_representative(g_dci11_resolver, raw, cand_task[ti].dci_length, cfg, &rp)) {
+          static _Atomic uint32_t s_unread;
+          const uint32_t q = atomic_fetch_add_explicit(&s_unread, 1, memory_order_relaxed);
+          if (q < 4 || (q % 20000) == 0)
+            LOG_A(PHY, "SENSING: DL DCI 1_1 rnti=0x%x len=%u read by no live layout (resolver state %d) n=%u\n", raw->rnti,
+                  cand_task[ti].dci_length, g_dci11_state, q + 1);
           continue;
+        }
         cand_task[ti].out = rp;
         cand_task[ti].dl_layout_configuration = 0;
         cand_task[ti].dl_layout_index = 0xFFFF;
-        goto dl_layout_done;
       }
-      {
-        static uint32_t s_cand_n;
-        if ((s_cand_n++ % 2000) == 0) {
-          char cb[160];
-          int u = 0;
-          for (int i = 0; i < n && u < (int)sizeof(cb) - 12; i++)
-            u += snprintf(cb + u, sizeof(cb) - u, "%u:%u/%u/%u ", layout_ids[i], __builtin_popcount(layouts[i].dmrs_ports), layouts[i].mcs, layouts[i].rv);
-          LOG_A(PHY, "SENSING: DL layout candidates n=%d %s ids(ports/mcs/rv)= %s\n", n, "fallback", cb);
-        }
-      }
-      uint64_t keys[3];
-      int settled=-1, n_settled=0;
-      for (int i=0;i<n;++i) {
-        keys[i]=(g_pdsch_configuration ^ (uint64_t)(layout_ids[i]+1)) * UINT64_C(1099511628211);
-        if (nr_cfg_reconf_enabled())
-          keys[i] = (keys[i] ^ (uint64_t)cand_task[ti].dci_length) * UINT64_C(1099511628211);
-        if (nr_pdsch_config_sweep_is_settled(keys[i],raw->rnti,layouts[i].tda_index,cfg->dmrs_typeA_position)) {
-          settled=i; ++n_settled;
-        }
-      }
-      if (n_settled>1) continue; // ambiguous layouts are not a unique operational solution
-      static uint32_t layout_cursor[65536]; // independent RR cursors, indexed by recovered RNTI
-      /* LAYOUT-FAMILY ELIMINATION (OTA 2026-09-12). With several candidate 1_1 field layouts at one
-       * DCI length, pure round-robin gave the family that actually decodes (8/9 CRC in its own
-       * context) a small, payload-dependent share of the grants -- ~1/14 measured -- so its
-       * Technique-D context never reached min_trials and nothing ever settled; overall DL CRC read
-       * 0.3 %, 15 % or 26 % depending only on that share. A family that has passed CRC is preferred
-       * over one that never has: reject-only, evidence-led, and it collapses to the old behaviour
-       * while no family has evidence. Ties (both decoding) still rotate. */
-      int preferred=-1; uint32_t preferred_ok=0;
-      for (int i=0;i<n;++i) {
-        uint32_t ok=0,tr=0;
-        nr_pdsch_config_sweep_context_stats(keys[i],raw->rnti,layouts[i].tda_index,cfg->dmrs_typeA_position,&ok,&tr);
-        if (ok>preferred_ok) { preferred_ok=ok; preferred=i; }
-        else if (ok==preferred_ok && preferred>=0 && ok>0) preferred=-1; // tie: no preference
-      }
-      if (preferred>=0 && preferred_ok>=8) {
-        static uint8_t s_pref_logged[65536];
-        atomic_store_explicit(&g_dl_layout_preferred, 1, memory_order_relaxed); /* probing is over: decode */
-        if (!s_pref_logged[raw->rnti]) {
-          s_pref_logged[raw->rnti]=1;
-          LOG_A(PHY,"SENSING: DL layout family PREFERRED by TB CRC: rnti=0x%x layout_id=%u (%d candidates) passes=%u\n",
-                raw->rnti,(unsigned)layout_ids[preferred],n,preferred_ok);
-        }
-      } else preferred=-1;
-      /* R30 item 2 (context churn, technique-d-regression.md) / R32 fix round 1: pin the
-       * Technique-D layout candidate per RNTI so its `configuration` key (keys[]) stops rotating
-       * across whichever of the n offered DCI-11 layout candidates Thompson/round-robin happens to
-       * pick THIS grant. Without this, no sweep context (nr_pdsch_config_sweep.c, keyed on
-       * configuration) ever accumulates enough trials to converge -- measured 20 context-table
-       * churn events and 0 crc_ok across 6+ independent runs on the phy-test bed even though the
-       * correct layout is among the candidates offered every grant. `configuration` genuinely
-       * depends on which field-width layout guess parsed the DCI (a different layout reads a
-       * different tda_index/mcs from the SAME bits), so evidence gathered under one layout cannot
-       * simply be merged into another's key -- pinning instead keeps SELECTING the same key
-       * occasion after occasion, so one context actually gets fed. Settled/preferred (already
-       * evidence-backed above) take priority over the pin outright.
-       *
-       * The pin/rotate/giveup DECISION itself lives in nr_dci11_pin.c (pure, unit-tested in
-       * tests/nr_dci11_pin_test.cc) -- rotates after DCI11_PIN_BLOCK_OCCASIONS occasions (real
-       * Technique-D trials arrive far slower and far less evenly than occasions on this bed, so a
-       * trial-count-only giveup essentially never fires in a practical run; see that define's own
-       * comment) or DCI11_PIN_GIVEUP_TRIALS zero-pass real trials, whichever comes first, and
-       * auto-invalidates on a real cell-geometry change. A pin merely absent from this occasion's
-       * offered list (transient resolver churn, not a verdict) is left alone rather than rotated
-       * -- see nr_dci11_pin_select()'s own contract for how the caller (here) tells the two apart.
-       *
-       * R32: the round-robin cursor used to seed/rotate a pin MUST advance only at the point of
-       * actually reseeding, never on every occasion -- advancing it every occasion while a pin
-       * survives ~block_occasions occasions before being re-read made successive picks land
-       * gcd(block_occasions, n) apart instead of 1 apart (e.g. n=8, block=50: only 2 of 8
-       * candidates ever pinned). nr_dci11_pin_round_robin() is therefore called ONLY inside the
-       * "must reseed" branch below, using a cursor dedicated to that purpose
-       * (dci11_pin_cursor[]) -- the pre-existing free-running layout_cursor[]/Thompson pick is
-       * still computed lazily, only when needed, for the separate "pin still valid but not offered
-       * this occasion" one-off substitute, which has no such successive-coverage requirement. */
-      if (!nr_cfg_epoch_work_current()) continue;
-      nr_dci11_pin_t *pin = &g_reconf_dci11_pin[raw->rnti];
-      uint32_t *pin_cursor = &g_reconf_dci11_pin_cursor[raw->rnti];
-      const bool per_length_pin = reconf_lengths_enabled() && dl_uss_auto;
-      if (per_length_pin) {
-        pthread_mutex_lock(&g_dl_length_lock);
-        nr_pdcch_dci_length_bank_t *bank = nr_pdcch_dci_length_store_get(&g_dl_length_store, dl_geom, NULL);
-        nr_pdcch_dci_length_context_t *c = nr_pdcch_dci_length_context(bank, dl_geom, raw->rnti);
-        nr_dci11_pin_t *length_pin = nr_pdcch_dci_length_context_pin(c, cand_task[ti].dci_length);
-        if (length_pin) {
-          pin = length_pin;
-          pin_cursor = nr_pdcch_dci_length_context_pin_cursor(c, cand_task[ti].dci_length);
-        }
-      }
-      uint32_t p_ok = 0, p_tr = 0;
-      bool has_stats = false;
-      if (nr_dci11_pin_is_valid(pin))
-        for (int i = 0; i < n; ++i)
-          if (layout_ids[i] == pin->layout) {
-            nr_pdsch_config_sweep_context_stats(keys[i], raw->rnti, 0xFF, cfg->dmrs_typeA_position, &p_ok, &p_tr);
-            has_stats = true;
-            break;
-          }
-      int selected = nr_dci11_pin_select(pin, g_pdsch_configuration, layout_ids, n, settled, preferred,
-                                         has_stats, p_ok, p_tr, DCI11_PIN_BLOCK_OCCASIONS, DCI11_PIN_GIVEUP_TRIALS);
-      if (selected < 0) {
-        int chosen;
-        if (nr_dci11_pin_is_valid(pin)) {
-          /* Pin still valid, just not offered this occasion: a one-off substitute, not a reseed --
-           * the free-running cursor's own cadence doesn't matter here (no successive-coverage
-           * requirement on a rare, transient path), so it is left untouched otherwise. */
-          chosen = layout_cursor[raw->rnti]++ % n;
-        } else {
-          /* Genuinely needs a new pin (rotated, gave up, cfg changed, or never seeded). */
-          chosen = nr_dci11_pin_round_robin(pin_cursor, n);
-        }
-        if (!nr_dci11_pin_is_valid(pin)) {
-          static uint32_t s_seed_left=200; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
-          if (s_seed_left) {
-            s_seed_left--;
-            LOG_W(PHY,"SENSING: DL layout pin SEED rnti=0x%x layout_id=%u%s\n",
-                  raw->rnti,(unsigned)layout_ids[chosen], has_stats ? " (previous pin dropped)" : "");
-          }
-          nr_dci11_pin_seed(pin, g_pdsch_configuration, layout_ids[chosen]);
-        }
-        selected = chosen;
-      }
-      cand_task[ti].out=layouts[selected];
-      cand_task[ti].dl_layout_configuration=keys[selected];
-      cand_task[ti].dl_layout_index=0xFFFF;
-      if (per_length_pin) pthread_mutex_unlock(&g_dl_length_lock);
-      dl_layout_done:;
     }
     const nr_pdcch_blind_result_t out = cand_task[ti].out;
     if (!cand_task[ti].ok) {
@@ -8569,21 +8473,28 @@ constdiag_done:;
         if (!atomic_exchange(&s_hq_set, 1)) nr_pdsch_solver_set_hq_fn(solver_hq_of, NULL);
         nr_pdsch_solver_note_dci(out.rnti, cand_task[ti].dl_raw.payload, source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot + 1 : 0);
       }
-      if (!defer || !want_decode || out.rv != 0 || decodes_this_occasion >= cfg->pdsch_max_per_slot) {
+      const int rep = nr_pdsch_solver_rep(out.rnti);
+      /* A solved RNTI's retransmission (rv != 0 under its representative, which `out` is) is not decoded on its own, as before.
+       * An unsolved RNTI is NOT gated on one layout's rv any more: `out` is only some live layout's reading, so its rv said
+       * nothing; each reading below is kept only if ITS OWN rv is 0 (a first-code-block probe needs a fresh TB). */
+      if (!defer || !want_decode || (rep >= 0 && out.rv != 0) || decodes_this_occasion >= cfg->pdsch_max_per_slot) {
         nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_GATE);
         continue;
       }
-      nr_pdsch_solver_set_bwp_rb((int)cfg->bwp_size);
       if (nr_a2e_trace()) nr_a2e_ts[7] = btim_now_ns(); /* solver reading pass starts */
       static _Atomic int s_tda_set;
       if (!atomic_exchange(&s_tda_set, 1))
         nr_pdsch_solver_set_tda_fn(solver_tda_of, (void *)cfg);
       static __thread uint8_t *s_gid;
-      static __thread uint16_t *s_ids;
+      static __thread uint16_t *s_ids, *s_visit, *s_sorted;
+      static __thread uint8_t *s_fk;
       if (s_gid == NULL) {
         s_gid = malloc(NR_DCI11_LAYOUT_MAX);
+        s_fk = malloc(NR_DCI11_LAYOUT_MAX);
         s_ids = malloc(NR_DCI11_LAYOUT_MAX * sizeof(uint16_t));
-        AssertFatal(s_gid && s_ids, "solver scratch\n");
+        s_visit = malloc(NR_DCI11_LAYOUT_MAX * sizeof(uint16_t));
+        s_sorted = malloc(NR_DCI11_LAYOUT_MAX * sizeof(uint16_t));
+        AssertFatal(s_gid && s_fk && s_ids && s_visit && s_sorted, "solver scratch\n");
       }
       enum { SOLVER_READINGS = 128 };
       nr_pdcch_blind_result_t rparsed[SOLVER_READINGS];
@@ -8591,93 +8502,165 @@ constdiag_done:;
       int rcount[SOLVER_READINGS] = {0}, nrd = 0;
       const nr_pdcch_blind_raw_result_t *rw = &cand_task[ti].dl_raw;
       const uint16_t dlen = cand_task[ti].dci_length;
-      const int rep = nr_pdsch_solver_rep(out.rnti);
       const bool reopen_layouts = nr_pdsch_solver_reopen_layouts(out.rnti);
       const nr_dci11_resolver_t *R = g_dci11_resolver;
-      /* Search only once stage 1 has narrowed the layouts (1024 live): before the
-       * HARQ-sequence test bites, 1500+ live layouts give > 96 readings per DCI and the true one is cut. */
-      if (rep < 0 && R->n_alive > 1024) {
-        nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_LIVE);
-        continue;
-      }
       const int nh = __atomic_load_n(&R->n_hyp, __ATOMIC_ACQUIRE);
-      unsigned live_fdra = 0;
-      if (reopen_layouts)
-        for (int i = 0; i < nh; i++)
-          if (R->alive[i] && R->off[i].fdra_mode < 8) live_fdra |= 1u << R->off[i].fdra_mode;
-      /* Layouts whose READ fields sit at the same offsets read the same: parse one per offset key, not one per layout
-       * (1534 live -> a few dozen parses; the per-layout parse was ~2 ms per C-RNTI DCI on the scan path). */
-      enum { KEYS = 256 };
-      uint64_t kkey[KEYS];
-      int kgrp[KEYS], nk = 0;
-      /* hashed key lookup (same groups as the linear search; that search was 16 % of the scan CPU, under the Phase-2 lock) */
-      nr_keyhash_t khash;
-      nr_keyhash_init(&khash);
+      /* ---- DCI11-RESOLVER READING PASS. Which layouts: a solved RNTI's own layout set (its CRC-consistent layouts, the
+       * representative among them); otherwise every live layout (plus, after the reopen trigger, the pruned ones). No live-count
+       * gate and no reading-order prior: the readings are built in DM-RS-fit order and the solver weights them by that fit.
+       * Cost bound: one cheap pass of field peeks per layout (FDRA class, MCS/NDI/RV, antenna-ports row, nSCID) and ONE full
+       * parse per distinct read value -- every layout of the same value reads the same (the extractor reads exactly these
+       * fields at exactly these offsets), so they join that reading without being parsed again. ---- */
+      int nvis = 0;
+      {
+        const int ns = rep >= 0 && !reopen_layouts ? nr_pdsch_solver_layouts(out.rnti, s_visit, NR_DCI11_LAYOUT_MAX) : -1;
+        if (ns >= 0) {
+          nvis = ns;
+          bool has_rep = false;
+          for (int q = 0; q < nvis && !has_rep; q++) has_rep = s_visit[q] == rep;
+          if (!has_rep && rep < nh) s_visit[nvis++] = (uint16_t)rep;
+          int w = 0;
+          for (int q = 0; q < nvis; q++) if (s_visit[q] < nh) s_visit[w++] = s_visit[q];
+          nvis = w;
+        } else {
+          for (int i = nr_alive_next(R->alive, 0, nh); i < nh; i = nr_alive_next(R->alive, i + 1, nh)) s_visit[nvis++] = (uint16_t)i;
+          if (rep >= 0 && rep < nh && !R->alive[rep]) s_visit[nvis++] = (uint16_t)rep;
+          if (reopen_layouts) /* every FDRA mode is live from the start: reopening means every pruned layout */
+            for (int i = 0; i < nh; i++) if (!R->alive[i] && i != rep) s_visit[nvis++] = (uint16_t)i;
+        }
+      }
+      /* FDRA classes of this DCI: (offset, width, mode, N_RBG) -> the PRB set it reads. A handful per DCI. */
+      static __thread dci11_fclass_t *fk;
+      if (fk == NULL) { fk = malloc(sizeof(*fk) * DCI11_FCLASSES); AssertFatal(fk, "fdra class scratch\n"); }
+      int nfk = 0;
+      const int bwp_riv_bits = (int)ceil(log2(((double)cfg->bwp_size * (double)(cfg->bwp_size + 1)) / 2.0));
+      for (int q = 0; q < nvis; q++) {
+        const int i = s_visit[q];
+        const nr_dci11_offsets_t *of = &R->off[i];
+        const uint16_t w = (uint16_t)(of->tda - of->riv);
+        int f = 0;
+        while (f < nfk && !(fk[f].riv == of->riv && fk[f].w == w && fk[f].mode == of->fdra_mode && fk[f].n_rbg == of->n_rbg)) f++;
+        if (f == nfk && nfk < DCI11_FCLASSES) {
+          fk[f].riv = of->riv; fk[f].w = w; fk[f].mode = of->fdra_mode; fk[f].n_rbg = of->n_rbg;
+          const uint32_t field = w <= 32 ? nr_dci_bits_field(&rw->payload, of->total, of->riv, (uint8_t)w) : 0;
+          int t0 = 0;
+          fk[f].n = w <= 32 ? nr_fdra_prbs(field, of->fdra_mode, of->n_rbg, bwp_riv_bits, cfg->bwp_start, cfg->bwp_size, fk[f].prb,
+                                           NR_PRB_SET_MAX, &t0) : 0;
+          fk[f].fit[0] = fk[f].fit[1] = -1.f;
+          nfk++;
+        }
+        s_fk[i] = (f < nfk && fk[f].n > 0) ? (uint8_t)f : 0xff;
+      }
+      /* DM-RS FIT of each FDRA class (unsolved RNTIs: the order of the search). Identities: the RNTI's own blind DM-RS
+       * identities when it has some, else the cell's and the CORESET's -- the scrambling hypotheses the solver tries. */
+      int fk_order[DCI11_FCLASSES], fk_rank[DCI11_FCLASSES];
+      for (int f = 0; f < nfk; f++) fk_order[f] = f;
+      if (rep < 0 && nfk > 0) {
+        int fid[4], nfid = nr_dmrs_scan_rnti_ids(out.rnti, fid, 2);
+        if (nfid <= 0) {
+          nfid = 0;
+          fid[nfid++] = fp->Nid_cell;
+          if (cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell)
+            fid[nfid++] = cfg->coreset_pdcch_dmrs_scrambling_id;
+          const int did = cfg->discovered_coreset ? nr_pdsch_passive_coreset_dmrs_id((int)cfg->coreset_pdcch_dmrs_scrambling_id) : -1;
+          if (did >= 0 && did != fid[0] && (nfid < 2 || did != fid[1])) fid[nfid++] = did;
+        }
+        dmrs_fit_classes(ue, proc, cfg, fid, nfid, fk, nfk);
+        for (int a = 1; a < nfk; a++) /* stable insertion sort, best fit (either nSCID) first */
+          for (int b = a; b > 0; b--) {
+            const float x = fmaxf(fk[fk_order[b]].fit[0], fk[fk_order[b]].fit[1]);
+            const float y = fmaxf(fk[fk_order[b - 1]].fit[0], fk[fk_order[b - 1]].fit[1]);
+            if (!(x > y)) break;
+            const int t = fk_order[b]; fk_order[b] = fk_order[b - 1]; fk_order[b - 1] = t;
+          }
+      }
+      { /* the visit list in FDRA-class fit order (counting sort; within a class, the visit order) */
+        int cnt[DCI11_FCLASSES] = {0}, pos[DCI11_FCLASSES];
+        for (int f = 0; f < nfk; f++) fk_rank[fk_order[f]] = f;
+        for (int q = 0; q < nvis; q++) if (s_fk[s_visit[q]] != 0xff) cnt[fk_rank[s_fk[s_visit[q]]]]++;
+        int tot = 0;
+        for (int f = 0; f < nfk; f++) { pos[f] = tot; tot += cnt[f]; }
+        for (int q = 0; q < nvis; q++) if (s_fk[s_visit[q]] != 0xff) s_sorted[pos[fk_rank[s_fk[s_visit[q]]]]++] = s_visit[q];
+        nvis = tot;
+      }
+      /* value groups: (FDRA class, MCS, antenna-ports width/type/row, nSCID) -> reading index (or -1: does not parse) */
+      enum { VKEYS = 1024 };
+      static __thread uint32_t *s_vkey;
+      static __thread int16_t *s_vgrp;
+      if (s_vkey == NULL) {
+        s_vkey = malloc(sizeof(uint32_t) * 2 * VKEYS);
+        s_vgrp = malloc(sizeof(int16_t) * 2 * VKEYS);
+        AssertFatal(s_vkey && s_vgrp, "value-key scratch\n");
+      }
+      for (int q = 0; q < 2 * VKEYS; q++) s_vkey[q] = UINT32_MAX;
+      enum { DCI11_PARSE_MAX = 512 };
+      int nvk = 0, nparse = 0, nskip = 0;
       nr_dci11_reading_idx_t ridx; /* hashed reading dedupe (bit-exact) */
       nr_dci11_reading_idx_init(&ridx);
-      bool alive_only;
-      /* The resolver holds up to NR_DCI11_LAYOUT_MAX hypotheses of which ~1000 are alive: the full pass visits only the alive ones (and the
-       * representative) instead of testing every flag, and clears the group ids in one memset. Same layouts in the same order. */
-      alive_only = !reopen_layouts;
       memset(s_gid, 0xff, (size_t)nh);
-      for (int ii = 0; ii < nh; ii++) {
-        if (alive_only) {
-          int nx = nr_alive_next(R->alive, ii, nh);
-          if (rep >= ii && rep < nx) nx = rep;
-          if (nx >= nh) break;
-          ii = nx;
-        }
-        const int i = ii;
-        s_gid[i] = 0xff;
-        if (!R->alive[i] && i != rep
-            && !(reopen_layouts && R->off[i].fdra_mode < 8 && (live_fdra & (1u << R->off[i].fdra_mode))))
-          continue;
+      for (int q = 0; q < nvis; q++) {
+        const int i = s_sorted[q];
         const nr_dci11_offsets_t *of = &R->off[i];
-        {
-          /* This solver emits single-symbol DM-RS masks only. The maxLength-2
-           * antenna-port tables also contain double-symbol rows; interpreting
-           * those with a single-symbol mask aliases ports (e.g. 1004 to 1000)
-           * on some grants and can seed a permanently wrong layout prior. */
-          const unsigned ap = nr_dci_bits_field(&rw->payload, of->total, of->ant_ports, of->ant_ports_bits);
-          if ((of->ant_ports_bits == 5 && !R->hyp[i].dmrs_type && ap >= 12)
-              || (of->ant_ports_bits == 6 && R->hyp[i].dmrs_type && ap >= 24))
-            continue;
-        }
-        const uint64_t key = (uint64_t)of->riv | (uint64_t)of->mcs << 8 | (uint64_t)of->ant_ports << 16
-                             | (uint64_t)of->ant_ports_bits << 24 | (uint64_t)of->fdra_mode << 28 | (uint64_t)of->n_rbg << 32
-                             | (uint64_t)R->hyp[i].dmrs_type << 40 | (uint64_t)of->tda << 44 | (uint64_t)of->tda_bits << 52;
-        int kpos = 0;
-        int kk = nr_keyhash_find(&khash, kkey, key, &kpos);
-        if (kk >= 0) {
-          if (kgrp[kk] >= 0) { s_gid[i] = (uint8_t)kgrp[kk]; rcount[kgrp[kk]]++; }
+        const uint32_t b8 = nr_dci_bits_field(&rw->payload, of->total, of->mcs, 8); /* MCS 5 | NDI | RV 2 */
+        const unsigned mcs = b8 >> 3, rv = b8 & 3;
+        if (rep < 0 && (rv != 0 || mcs > 27))
+          continue; /* unsolved: a probe needs a fresh TB (rv 0; MCS 28-31 only signal retransmissions) */
+        const unsigned ap = nr_dci_bits_field(&rw->payload, of->total, of->ant_ports, of->ant_ports_bits);
+        /* This solver emits single-symbol DM-RS masks only. The maxLength-2 antenna-port tables also contain double-symbol rows;
+         * interpreting those with a single-symbol mask aliases ports (e.g. 1004 to 1000) on some grants and can seed a
+         * permanently wrong layout prior. (A decoder capability, not a layout prior: the layouts stay in the set.) */
+        if ((of->ant_ports_bits == 5 && !R->hyp[i].dmrs_type && ap >= 12) || (of->ant_ports_bits == 6 && R->hyp[i].dmrs_type && ap >= 24))
           continue;
-        }
-        if (nk < KEYS) {
-          kkey[nk] = key; kgrp[nk] = -1;
-          nr_keyhash_put(&khash, kpos, nk);
-          kk = nk++;
-        }
-        nr_pdcch_blind_result_t pr;
-        if (!dci11_layout_parse(R, i, rw, dlen, cfg, &pr) || pr.vrb_to_prb)
+        if (of->ap_valid_rows && ap >= of->ap_valid_rows)
           continue;
-        int rpos = 0;
-        int g = nr_dci11_reading_idx_find(&ridx, rparsed, &pr, 0, &rpos);
-        if (g < 0 && nrd < SOLVER_READINGS) {
-          g = nrd++;
-          rparsed[g] = pr;
-          nr_dci11_reading_idx_put(&ridx, rpos, g);
+        if (cfg->extract.tda_count > 0 && of->tda_bits > 0
+            && nr_dci_bits_field(&rw->payload, of->total, of->tda, of->tda_bits) >= (uint32_t)cfg->extract.tda_count)
+          continue;
+        const unsigned nscid = nr_dci_bits_field(&rw->payload, of->total, of->dmrs_init, 1);
+        const uint32_t vkey = (uint32_t)s_fk[i] | mcs << 6 | (uint32_t)of->ant_ports_bits << 11 | (uint32_t)R->hyp[i].dmrs_type << 14
+                              | ap << 15 | nscid << 21;
+        unsigned h = (unsigned)((vkey * 2654435761u) >> 21) & (2 * VKEYS - 1);
+        while (s_vkey[h] != UINT32_MAX && s_vkey[h] != vkey) h = (h + 1) & (2 * VKEYS - 1);
+        int g;
+        if (s_vkey[h] == vkey) {
+          g = s_vgrp[h];
+        } else {
+          /* compute bound: at most DCI11_PARSE_MAX full parses per DCI; the layouts reached in fit order last (the least DM-RS
+           * support) wait for a later grant -- the visit order changes with every payload, so none is starved */
+          if (nvk >= VKEYS || nparse >= DCI11_PARSE_MAX) { nskip++; continue; }
+          nvk++;
+          g = -1;
+          nr_pdcch_blind_result_t pr;
+          nparse++;
+          if (dci11_layout_parse(R, i, rw, dlen, cfg, &pr) && !pr.vrb_to_prb && !(rep < 0 && pr.rv != 0)) {
+            int rpos = 0;
+            g = nr_dci11_reading_idx_find(&ridx, rparsed, &pr, 0, &rpos);
+            if (g < 0 && nrd < SOLVER_READINGS) {
+              g = nrd++;
+              rparsed[g] = pr;
+              rd[g].fit = fk[s_fk[i]].fit[pr.nscid & 1];
+              nr_dci11_reading_idx_put(&ridx, rpos, g);
+            }
+          }
+          s_vkey[h] = vkey;
+          s_vgrp[h] = (int16_t)g;
         }
         if (g >= 0) {
           s_gid[i] = (uint8_t)g;
           rcount[g]++;
         }
-        if (kk >= 0) kgrp[kk] = g;
+      }
+      { static _Atomic uint32_t s_rp; /* reading-pass census, first grants then 1 in 4000 */
+        const uint32_t q = atomic_fetch_add_explicit(&s_rp, 1, memory_order_relaxed);
+        if (q < 4 || q % 4000 == 0)
+          LOG_A(PHY, "SENSING: DCI11 reading pass rnti=0x%04x solved=%d layouts=%d fdra_classes=%d values=%d parses=%d readings=%d "
+                     "deferred=%d best_fit=%.2f\n", out.rnti, rep >= 0, nvis, nfk, nvk, nparse, nrd, nskip,
+                nfk > 0 ? (double)fmaxf(fk[fk_order[0]].fit[0], fk[fk_order[0]].fit[1]) : -1.0);
       }
       if (rep >= 0 && rep < nh && s_gid[rep] == 0xff && nrd < SOLVER_READINGS) {
-        /* CRC-BUGS 2026-10-19: the representative can be left without a reading when an earlier layout with the same offset key failed
-         * to parse this DCI (that key's group is then empty). The solver used to fall back to reading 0, i.e. another layout's fields
-         * (Vodafone PCI 415 OTA: 787 of 5282 DCIs of a solved RNTI decoded with MCS/NDI/rv read 4-5 bits early, 1 CRC pass). Parse
-         * the representative on its own, under the same admission rules as the grouping loop. */
+        /* CRC-BUGS 2026-10-19: the representative must have a reading of its own when it parses: a solved RNTI decodes only
+         * the representative's reading (Vodafone PCI 415 OTA: 787 of 5282 DCIs of a solved RNTI decoded with MCS/NDI/rv read
+         * 4-5 bits early when it fell back to another layout's reading). */
         const nr_dci11_offsets_t *of = &R->off[rep];
         const unsigned ap = nr_dci_bits_field(&rw->payload, of->total, of->ant_ports, of->ant_ports_bits);
         const bool dbl = ((of->ant_ports_bits == 5 && !R->hyp[rep].dmrs_type && ap >= 12)
@@ -8687,7 +8670,7 @@ constdiag_done:;
           int g = -1;
           for (int k = 0; k < nrd && g < 0; k++)
             if (nr_dci11_same_reading(&rparsed[k], &pr, false)) g = k;
-          if (g < 0) { g = nrd++; rparsed[g] = pr; }
+          if (g < 0) { g = nrd++; rparsed[g] = pr; rd[g].fit = -1.f; }
           s_gid[rep] = (uint8_t)g;
           rcount[g]++;
         }
@@ -8718,16 +8701,16 @@ constdiag_done:;
         rd[k].mcs = rparsed[k].mcs;
         off += rcount[k];
       }
-      for (int ii = 0; ii < nh; ii++) {
-        if (alive_only) { /* a group id is set only for alive layouts and the representative */
-          int nx = nr_alive_next(R->alive, ii, nh);
-          if (rep >= ii && rep < nx) nx = rep;
-          if (nx >= nh) break;
-          ii = nx;
-        }
-        const int i = ii;
-        if (i < nh && s_gid[i] != 0xff)
+      for (int q = 0; q < nvis; q++) { /* layout ids per reading, ascending within each class */
+        const int i = s_sorted[q];
+        if (s_gid[i] != 0xff)
           ((uint16_t *)rd[s_gid[i]].ids)[rd[s_gid[i]].n_ids++] = (uint16_t)i;
+      }
+      if (rep >= 0 && rep < nh && s_gid[rep] != 0xff) { /* the representative may sit outside the visit list (parsed above) */
+        const int g = s_gid[rep];
+        bool in = false;
+        for (int k = 0; k < rd[g].n_ids && !in; k++) in = rd[g].ids[k] == rep;
+        if (!in) ((uint16_t *)rd[g].ids)[rd[g].n_ids++] = (uint16_t)rep;
       }
       const int s_budget = 24;
       if (nr_a2e_trace()) nr_a2e_ts[8] = btim_now_ns(); /* readings done */
