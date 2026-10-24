@@ -659,6 +659,17 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   return -1;
 }
 
+/* The CHECK buffers (chk_tls_t) are the CPU loop's output arrays (nr_rx_pdsch writes them with aligned 256-bit stores on x86 AVX2:
+ * nr_channel_compensation) and the GPU copies: 64-byte aligned and zeroed. calloc's 16-byte alignment faulted on x86 (sens6, the async
+ * check worker, 2026-10-24); aarch64 NEON stores do not trap, so the DGX never showed it. */
+static void *chk_zalloc(size_t bytes)
+{
+  const size_t n = (bytes + 63) & ~(size_t)63;
+  void *p = aligned_alloc(64, n ? n : 64);
+  if (p)
+    memset(p, 0, n ? n : 64);
+  return p;
+}
 static int compare(const nr_pdsch_gpu_demod_call_t *c, const chk_tls_t *k, const uint32_t *dvr_g, int32_t l2_g, int used_g,
                    const nr_pdsch_evm_acc_t *acc_g, int used_c, const nr_pdsch_evm_acc_t *acc_c, char *why, size_t wn, int full)
 {
@@ -894,13 +905,13 @@ static void bg_demod_run(void *arg)
     chk_tls_t *k = ks[s];
     if (k->buf_n < bn) {
       free(k->comp); free(k->mag); free(k->magb); free(k->magr);
-      k->comp = calloc(bn, sizeof(c16_t)); k->mag = calloc(bn, sizeof(c16_t));
-      k->magb = calloc(bn, sizeof(c16_t)); k->magr = calloc(bn, sizeof(c16_t));
+      k->comp = chk_zalloc(bn * sizeof(c16_t)); k->mag = chk_zalloc(bn * sizeof(c16_t));
+      k->magb = chk_zalloc(bn * sizeof(c16_t)); k->magr = chk_zalloc(bn * sizeof(c16_t));
       k->buf_n = (k->comp && k->mag && k->magb && k->magr) ? bn : 0;
     }
     if (k->llr_cap < c->llr_cap) {
       free(k->llr);
-      k->llr = calloc(c->llr_cap, sizeof(int16_t));
+      k->llr = chk_zalloc(c->llr_cap * sizeof(int16_t));
       k->llr_cap = k->llr ? c->llr_cap : 0;
     }
   }
@@ -1016,8 +1027,8 @@ static void bg_demod_submit(const nr_pdsch_gpu_demod_call_t *c, const uint32_t *
     ncm += (size_t)c->dl_valid_re[m] * nl;
   }
   j->n_llr = tot < c->llr_cap ? tot : c->llr_cap;
-  j->est = malloc(sizeof(int32_t) * est_n);
-  j->rx = malloc(sizeof(c16_t) * rx_n);
+  j->est = chk_zalloc(sizeof(int32_t) * est_n); /* the CPU replay reads these with AVX2 loads: 64-byte aligned */
+  j->rx = chk_zalloc(sizeof(c16_t) * rx_n);
   j->llr_g = malloc(sizeof(int16_t) * (j->n_llr + 1));
   j->cm[0] = malloc(sizeof(c16_t) * (4 * ncm + 1));
   if (!j->est || !j->rx || !j->llr_g || !j->cm[0]) {
@@ -1129,15 +1140,15 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
       free(k.mag);
       free(k.magb);
       free(k.magr);
-      k.comp = calloc(bn, sizeof(c16_t));
-      k.mag = calloc(bn, sizeof(c16_t));
-      k.magb = calloc(bn, sizeof(c16_t));
-      k.magr = calloc(bn, sizeof(c16_t));
+      k.comp = chk_zalloc(bn * sizeof(c16_t));
+      k.mag = chk_zalloc(bn * sizeof(c16_t));
+      k.magb = chk_zalloc(bn * sizeof(c16_t));
+      k.magr = chk_zalloc(bn * sizeof(c16_t));
       k.buf_n = (k.comp && k.mag && k.magb && k.magr) ? bn : 0;
     }
     if (k.llr_cap < c->llr_cap) {
       free(k.llr);
-      k.llr = calloc(c->llr_cap, sizeof(int16_t));
+      k.llr = chk_zalloc(c->llr_cap * sizeof(int16_t));
       k.llr_cap = k.llr ? c->llr_cap : 0;
     }
     if (!k.buf_n || !k.llr_cap) {

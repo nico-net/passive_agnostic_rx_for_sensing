@@ -1137,7 +1137,12 @@ static int ul_acquire()
 
 extern "C" int nr_pusch_gpu_ldpc_init(int pct, int deadline_us)
 {
-  if (!nr_gpu_module_ready()) return -1; // CPU tier (no device, arch mismatch or NR_GPU_FORCE_MODEL=cpu): refuse, the host keeps the CPU path
+  /* every refusal below logs its reason once (the host then runs the CPU LDPC decoder) */
+  auto refuse = [](const char *why) {
+    fprintf(stderr, "SENSING: UL_GPU_LDPC init refused: %s -- CPU LDPC decoder\n", why);
+    return -1;
+  };
+  if (!nr_gpu_module_ready()) return refuse("module not ready"); // CPU tier (no device, arch mismatch or NR_GPU_FORCE_MODEL=cpu): refuse, the host keeps the CPU path
   static std::mutex m;
   std::lock_guard<std::mutex> lk(m);
   if (UL.ok)
@@ -1145,14 +1150,14 @@ extern "C" int nr_pusch_gpu_ldpc_init(int pct, int deadline_us)
   int dev = 0, cl = 0;
   const int nc = decide_nc();
   if (nc == 3 || (nc == 1 && (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&cl, cudaDevAttrClusterLaunch, dev) != cudaSuccess || !cl)))
-    return -1;
+    return refuse("no usable kernel variant (compute capability / cluster launch)");
   g_stg = nr_gpu_model() != NR_GPU_MODEL_DIRECT; /* Q4 */
   if (g_stg && nr_gpu_membudget_fit(nr_gpu_stage_share(), 0, stage_ctx_bytes(NJ, NJ), 1, UL_CTX) < UL_CTX)
-    return -1; /* the two UL contexts do not both fit the staging share: the CPU decoder */
+    return refuse("DISCRETE staging of the UL contexts does not fit the device-memory share"); /* the two UL contexts do not both fit the staging share */
   UL.pct = pct > 0 && pct <= 100 ? (unsigned)pct : 15u;
   UL.deadline_us = deadline_us > 0 ? (uint64_t)deadline_us : 4000u;
   if (!warm_common())
-    return -1;
+    return refuse("kernel warm-up failed");
   int lo = 0, hi = 0;
   cudaDeviceGetStreamPriorityRange(&lo, &hi);
   for (int attempt = 0; attempt < 2 && !UL.ok; attempt++) { /* 0: discovery partition, 1: plain lowest-priority stream */
@@ -1160,8 +1165,10 @@ extern "C" int nr_pusch_gpu_ldpc_init(int pct, int deadline_us)
     for (int i = 0; i < UL_CTX && good; i++) {
       Ctx &x = UL.c[i];
       good = ul_alloc_ctx(i);
-      if (!good)
+      if (!good) {
+        fprintf(stderr, "SENSING: UL_GPU_LDPC context %d allocation failed (attempt %d): %s\n", i, attempt, cudaGetErrorString(cudaGetLastError()));
         break;
+      }
       if (attempt == 0) {
         UL.kind = nr_pusch_gpu_ul_stream(&x.s, hi, lo, i);
         UL.part = UL.kind != 0;
@@ -1173,7 +1180,11 @@ extern "C" int nr_pusch_gpu_ldpc_init(int pct, int deadline_us)
         UL.part = false;
         good = cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, lo) == cudaSuccess;
       }
-      good = good && ul_selftest(i);
+      if (good && !ul_selftest(i)) {
+        good = false;
+        fprintf(stderr, "SENSING: UL_GPU_LDPC context %d self-test failed (attempt %d, %s): %s\n", i, attempt, g_stg ? "staged" : "mapped",
+                cudaGetErrorString(cudaGetLastError()));
+      }
       UL.busy.store(0);
     }
     if (good)

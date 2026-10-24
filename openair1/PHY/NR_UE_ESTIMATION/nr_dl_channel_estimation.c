@@ -2005,7 +2005,7 @@ static void gch_async_submit(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, 
   j->nrows = maxl * nrx;
   memcpy(j->nvar, nvar_out, sizeof(j->nvar));
   memcpy(j->nvar_ant, nvar_ant_out, sizeof(j->nvar_ant));
-  j->rx = malloc(sizeof(c16_t) * (size_t)nrx * rxdataFsize);
+  j->rx = aligned_alloc(64, ((sizeof(c16_t) * (size_t)nrx * rxdataFsize + 63) / 64) * 64); /* the CPU estimator replay reads it with AVX2 loads (x86) */
   j->gpu = malloc(sizeof(c16_t) * 4096 * (size_t)(np * nrx + 1));
   if (!j->rx || !j->gpu) {
     gch_job_free(j);
