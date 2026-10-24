@@ -9,7 +9,7 @@
 #         run_ota_s6.sh run ARM                    preflight (must be clean) + one run of DUR seconds, stopped with SIGINT
 # env:    ENVFILE (default ota_lab273.s6.env next to this script), CFG (default ue.passive.ota.lab273.s6.cfg), B (build dir,
 #         default <worktree>/build_ota), CARRIER PRB SSB SCAN=1 NANT RXG INITIALFO DUR (override the env file), DATA (X410 data
-#         address, 192.168.20.2), MGMT (default: what uhd_find_devices reports, else DATA), NIC (enp2s0f1np1), OUTBASE
+#         address, 192.168.20.2), RXENV (receiver KEY=VALUE list, from the env file), MGMT (default: what uhd_find_devices reports, else DATA), NIC (enp2s0f1np1), OUTBASE
 #         (/home/sens/NICOLA/captures), EXTRA (more receiver arguments), XENV (more KEY=VALUE for the receiver), FORCE=1 (start
 #         although the preflight found non-fatal items).
 #
@@ -26,10 +26,10 @@ H=$(cd "$(dirname "$0")" && pwd); R=$(cd "$H/../../.." && pwd)
 MODE=${1:-check}; ARM=${2:-}
 ENVFILE=${ENVFILE:-$H/ota_lab273.s6.env}
 # environment wins over the env file: remember what the caller set
-for v in CARRIER PRB SSB NANT RXG INITIALFO DUR; do eval "_o_$v=\${$v:-}"; done
+for v in CARRIER PRB SSB NANT RXG INITIALFO DUR RXENV; do eval "_o_$v=\${$v:-}"; done
 # shellcheck disable=SC1090
 [ -r "$ENVFILE" ] && . "$ENVFILE"
-for v in CARRIER PRB SSB NANT RXG INITIALFO DUR; do eval "[ -n \"\$_o_$v\" ] && $v=\$_o_$v"; done
+for v in CARRIER PRB SSB NANT RXG INITIALFO DUR RXENV; do eval "[ -n \"\$_o_$v\" ] && $v=\$_o_$v"; done
 CARRIER=${CARRIER:-3450000000}; PRB=${PRB:-273}; SSB=${SSB:-150}; NANT=${NANT:-4}; RXG=${RXG:-49}; INITIALFO=${INITIALFO:--15000}; DUR=${DUR:-300}
 CFG=${CFG:-$H/ue.passive.ota.lab273.s6.cfg}; B=${B:-$R/build_ota}; BIN=$B/nr-uesoftmodem
 DATA=${DATA:-192.168.20.2}; NIC=${NIC:-enp2s0f1np1}; OUTBASE=${OUTBASE:-/home/sens/NICOLA/captures}
@@ -48,7 +48,7 @@ preflight() {
   if pgrep -x nr-uesoftmodem >/dev/null; then bad "nr-uesoftmodem already running: $(pgrep -x nr-uesoftmodem | tr '\n' ' ')(stop it with SIGINT first)"; else ok "no nr-uesoftmodem running"; fi
   if pgrep -f '[u]hd_(usrp_probe|rx_|benchmark|find)|[b]enchmark_rate|[r]x_samples_to_file' >/dev/null; then bad "a UHD tool is running: $(pgrep -af '[u]hd_|[b]enchmark_rate|[r]x_samples_to_file' | head -2)"; else ok "no UHD tool running"; fi
   [ -n "${ISAC_RX_BRANCH_FO:-}" ] && bad "ISAC_RX_BRANCH_FO is set in the environment (hard rule: must stay unset)"
-  grep -q 'ISAC_RX_BRANCH_FO' <<< "${XENV:-}" && bad "XENV sets ISAC_RX_BRANCH_FO (hard rule: must stay unset)"
+  grep -q 'ISAC_RX_BRANCH_FO' <<< "${XENV:-} ${RXENV:-}" && bad "XENV/RXENV sets ISAC_RX_BRANCH_FO (hard rule: must stay unset)"
   # NIC
   local ip; ip=$(ip -4 -br addr show "$NIC" 2>/dev/null | awk '{print $3}')
   if [ -z "$ip" ]; then bad "$NIC has no IPv4 address"; need "sudo ip addr add 192.168.20.1/24 dev $NIC   # or restore the NM profile x410-data"
@@ -120,7 +120,7 @@ dry-run|run)
   launch_cmd
   ma=$(awk '/MemAvailable/{print $2}' /proc/meminfo); capk=$(( ma - 524288 )); [ $capk -gt 7340032 ] && capk=7340032
   OUT=$OUTBASE/${ARM:-s6ota}_$(date +%Y%m%d_%H%M%S)
-  CMD="systemd-run --user --scope --quiet -p MemoryMax=${capk}K -p MemorySwapMax=1G choom -n 1000 -- sudo -n env ${XENV:-} timeout -s INT $DUR $BIN $RXARGS"
+  CMD="systemd-run --user --scope --quiet -p MemoryMax=${capk}K -p MemorySwapMax=1G choom -n 1000 -- sudo -n env ${RXENV:-} ${XENV:-} timeout -s INT $DUR $BIN $RXARGS"
   echo "== launch (cwd $OUT, log $OUT/run.log):"; echo "   flock -x /tmp/td_measure.lock $CMD"
   [ "$MODE" = dry-run ] && exit 0
   [ -n "$ARM" ] || { echo "run needs an ARM name"; exit 2; }
