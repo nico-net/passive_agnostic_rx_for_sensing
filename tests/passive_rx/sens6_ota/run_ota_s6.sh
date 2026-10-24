@@ -103,6 +103,16 @@ preflight() {
     MGMT=${MGMT:-$mg}
   else bad "uhd_find_devices found no X410 at $DATA"; fi
   MGMT=${MGMT:-$DATA}
+  # host-RAM plan of the receiver itself (ISAC_HOST_MEM_PLAN_ONLY=1: real sizing incl. the USRP ring, exits before the radio is
+  # opened: no X410 claim), with the real arguments and environment, under the same cap as the run
+  if [ -x "$BIN" ] && [ -x "$R/tests/passive_rx/hostmem_preflight.sh" ]; then
+    launch_cmd; local mk capk hp rcp; mk=$(awk '/MemAvailable/{print $2}' /proc/meminfo); capk=$(( mk - 524288 )); [ $capk -gt 7340032 ] && capk=7340032
+    hp=$(cd /tmp && systemd-run --user --scope --quiet -p MemoryMax=${capk}K -p MemorySwapMax=1G choom -n 1000 -- env ${RXENV:-} ${XENV:-} \
+         "$R/tests/passive_rx/hostmem_preflight.sh" "$BIN" $RXARGS 2>&1); rcp=$?
+    case $rcp in 0) ok "host-RAM plan fits (cap ${capk}K): $(grep -a 'HOST_MEM PLAN' <<< "$hp" | sed 's/.*HOST_MEM PLAN //' | cut -c1-240)";;
+      7) bad "host-RAM plan REFUSED (cap ${capk}K): $(grep -a 'REFUSE\|HOST_MEM PLAN' <<< "$hp" | head -2 | cut -c1-240)";;
+      *) warn "host-RAM preflight gave no verdict (rc $rcp): $(tail -2 <<< "$hp" | cut -c1-200)";; esac
+  else warn "hostmem_preflight.sh or the binary missing: host-RAM plan not checked"; fi
   echo "== preflight: $FATAL fatal, $ISSUES warnings"
   if [ ${#SUDO_CMDS[@]} -gt 0 ]; then echo "== sudo commands for the operator (NOT run by this script):"; printf '   %s\n' "${SUDO_CMDS[@]}"; fi
 }
