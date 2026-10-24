@@ -954,7 +954,31 @@ static struct {
   nr_pdcch_blind_monitor_cfg_t cfg;
   struct { uint16_t rnti; int length; uint64_t slot; nr_dci_bits_t payload; } evidence[NR_PDCCH_BLIND_MAX_UE];
   uint64_t polls;
+  int rej_nid[32], n_rej; /* nIDs whose dwell was rejected this epoch (REJECTLAST) */
 } s_add_disc;
+
+/* REJECTLAST: an nID whose dwell was rejected ("no fresh CRC evidence in 4000 occasions") is tried again only after every queued
+ * nID that has not failed yet. Every list the GPU stage publishes re-queues the nIDs it has seen, and a wrong nID (a strong
+ * spurious ID) comes back as cover, interleaved cover and raw lines, each costing 4000 occasions: a real second CORESET
+ * (Vodafone 415 replay: nID 10163) published later in the same list waited behind five such dwells, ~20 s on the capture
+ * clock, and a run that reached it that late decoded half the DCIs. Pure ordering; the rejected nID is still retried last. */
+static bool disc_nid_rejected(int nid)
+{
+  for (int i = 0; i < s_add_disc.n_rej; ++i)
+    if (s_add_disc.rej_nid[i] == nid) return true;
+  return false;
+}
+static void disc_prefer_untried(void)
+{
+  if (s_add_disc.next >= s_add_disc.n || !disc_nid_rejected(s_add_disc.line[s_add_disc.next].nid)) return;
+  for (int j = s_add_disc.next + 1; j < s_add_disc.n; ++j)
+    if (!disc_nid_rejected(s_add_disc.line[j].nid)) {
+      const disc_coreset_t t = s_add_disc.line[j];
+      s_add_disc.line[j] = s_add_disc.line[s_add_disc.next];
+      s_add_disc.line[s_add_disc.next] = t;
+      return;
+    }
+}
 
 /* nr_pdcch_discovered_enabled: the discovered-CORESET bank is always enabled. Callers: the discovered-CORESET entry points in this file and nr_pdcch_blind_monitor_rt.c. */
 bool nr_pdcch_discovered_enabled(void) { return true; }
@@ -1169,6 +1193,7 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
   if (nr_cfg_reconf_enabled() && s_add_disc.epoch != nr_cfg_epoch_current())
     nr_pdcch_discovered_reset();
   while (!s_add_disc.active && s_add_disc.next < s_add_disc.n) {
+    disc_prefer_untried();
     disc_coreset_t dd = s_add_disc.line[s_add_disc.next];
     const disc_coreset_t *d = &dd;
     /* The cover starts at CRB 0 (Point A), not at grid RB 0. */
@@ -1280,6 +1305,9 @@ void nr_pdcch_discovered_step_ex(uint64_t token, uint64_t slot, bool prescreen_p
   if (++s_add_disc.occasions < NR_PDCCH_EXTENT_VERIFY_OCC) return;
   LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d rejected (no fresh CRC evidence in %d occasions)\n",
         s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, s_add_disc.occasions);
+  if (!disc_nid_rejected(s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id)
+      && s_add_disc.n_rej < (int)(sizeof(s_add_disc.rej_nid) / sizeof(s_add_disc.rej_nid[0])))
+    s_add_disc.rej_nid[s_add_disc.n_rej++] = s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id;
   s_add_disc.active = false;
   ++s_add_disc.next;
 }
@@ -5534,6 +5562,11 @@ int nr_pdcch_blind_dl_layout_candidates(const nr_pdcch_blind_raw_result_t *raw,
     }
   }
   return count;
+}
+
+bool nr_pdcch_dl_solver_fallback_ok(bool dl_auto, int dci11_state, bool have_resolver, bool solver_enabled)
+{
+  return dl_auto && dci11_state == 1 && have_resolver && solver_enabled;
 }
 
 static pthread_mutex_t common_facts_lock=PTHREAD_MUTEX_INITIALIZER;

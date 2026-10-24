@@ -5,6 +5,7 @@
 /*!
  * \brief Routines for initial UE synchronization procedure (PSS,SSS,PBCH and frame format detection)
  */
+#include "PHY/NR_UE_TRANSPORT/nr_pss_decim.h"
 #include "PHY/defs_nr_UE.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/MODULATION/nr_modulation.h" // init_symbol_rotation
@@ -243,21 +244,14 @@ static void do_time_to_freq(nr_ssb_search_params_t *params, uint32_t sample_offs
       if (aa == 0) {
         static int s_fepdiag_acq_left = 40;
         if (s_fepdiag_acq_left > 0) {
-          const c16_t *rxd = params->rxdata[0];
-          double s1_sum = 0.0, s1_sumsq = 0.0;
+          const int16_t *rxd = (const int16_t *)params->rxdata[0];
+          double s1_sum = 0.0, s1_sumsq = 0.0, s2_sum = 0.0, s2_sumsq = 0.0;
           const int s1_n = (int)(params->nb_prefix_samples + params->ofdm_symbol_size);
-          for (int i = 0; i < s1_n; i++) {
-            const double m = hypot((double)rxd[rx_offset - params->nb_prefix_samples + i].r,
-                                   (double)rxd[rx_offset - params->nb_prefix_samples + i].i);
-            s1_sum += m;
-            s1_sumsq += m * m;
-          }
-          double s2_sum = 0.0, s2_sumsq = 0.0;
-          for (int i = 0; i < params->ofdm_symbol_size; i++) {
-            const double m = hypot((double)rxd[rx_offset + i].r, (double)rxd[rx_offset + i].i);
-            s2_sum += m;
-            s2_sumsq += m * m;
-          }
+          /* the window starts nb_prefix_samples BEFORE rx_offset: with a PSS peak at pos == nb_prefix_samples (a weak or
+           * absent cell on a pinned target) rx_offset - nb_prefix_samples wrapped in uint32 and this read 16 GB away
+           * (SIGSEGV 2026-10-24, PCI 675). The helper clamps to [0, rxdata_size). */
+          nr_iq_mag_stats(rxd, params->rxdata_size, (int64_t)rx_offset - params->nb_prefix_samples, s1_n, &s1_sum, &s1_sumsq);
+          nr_iq_mag_stats(rxd, params->rxdata_size, (int64_t)rx_offset, params->ofdm_symbol_size, &s2_sum, &s2_sumsq);
           double s3_sum = 0.0, s3_sumsq = 0.0;
           for (int i = 0; i < params->ofdm_symbol_size; i++) {
             const double m = hypot((double)rxF[i].r, (double)rxF[i].i);
