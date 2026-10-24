@@ -13,6 +13,7 @@
 
 #define _GNU_SOURCE
 #include "nr_core_plan.h"
+#include "nr_core_layout.h"
 #include "system.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -261,6 +262,7 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
 {
   int ret;
   bool set_prio = has_cap_sys_nice();
+  affinity = nr_core_layout_filter_cpu(affinity, name); /* host core plan active: a CPU this host cannot use -> unpinned (logged) */
   if (nr_pool_site_filter_core) affinity = nr_pool_site_filter_core(affinity); /* a pool core belongs to the pool: no other thread is pinned there */
 
   pthread_attr_t attr;
@@ -288,7 +290,9 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
     AssertFatal(ret == 0, "Error in pthread_attr_setschedparam(): ret: %d errno: %d\n", ret, errno);
     LOG_I(UTIL, "%s() for %s: creating thread with affinity %x, priority %d\n", __func__, name, affinity, priority);
   } else {
-    if (!nr_core_plan_active()) affinity = -1;
+    /* No CAP_SYS_NICE: no RT priority. With the host core plan the affinity is still applied (sched_setaffinity needs no
+     * capability; nr_core_layout_init logged the warning once), else the thread floats as before. */
+    if (!nr_core_plan_active() && !nr_core_layout_pin_nocap()) affinity = -1;
     priority = -1;
     if (nr_core_plan_active()) {
       struct sched_param sp = {0};
@@ -297,7 +301,10 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
       ret |= pthread_attr_setschedparam(&attr, &sp);
       AssertFatal(ret == 0, "CORE_PLAN cannot apply SCHED_OTHER for %s: %d\n", name, ret);
       LOG_I(UTIL, "%s() for %s: planned affinity, default priority (no SYS_NICE)\n", __func__, name);
-    } else LOG_I(UTIL, "%s() for %s: creating thread (no affinity, default priority)\n", __func__, name);
+    } else if (affinity >= 0)
+      LOG_I(UTIL, "%s() for %s: creating thread with affinity %d, default priority (no SYS_NICE)\n", __func__, name, affinity);
+    else
+      LOG_I(UTIL, "%s() for %s: creating thread (no affinity, default priority)\n", __func__, name);
   }
 
   ret=pthread_create(t, &attr, func, param);
@@ -325,7 +332,10 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
     CPU_ZERO(&cpuset);
     CPU_SET(affinity, &cpuset);
     ret = pthread_setaffinity_np(*t, sizeof(cpu_set_t), &cpuset);
-    AssertFatal(ret == 0, "Error in pthread_getaffinity_np(): ret: %d, errno: %d", ret, errno);
+    if (ret != 0 && nr_core_layout_active()) /* plan active: an affinity failure (cpuset, thread already gone) is not fatal */
+      LOG_W(UTIL, "%s(): CORE_PLAN cannot pin %s to CPU %d (ret %d); left on its inherited mask\n", __func__, name, affinity, ret);
+    else
+      AssertFatal(ret == 0, "Error in pthread_getaffinity_np(): ret: %d, errno: %d", ret, errno);
   }
   pthread_attr_destroy(&attr);
 }

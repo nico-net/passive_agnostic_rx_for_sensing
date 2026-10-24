@@ -88,6 +88,7 @@ unsigned short config_frames[4] = {2,9,11,13};
 #include "nr_nas_msg.h"
 #include "actor.h"
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_core_layout.h"
 
 THREAD_STRUCT thread_struct;
 nrUE_params_t nrUE_params = {0};
@@ -286,14 +287,26 @@ static void gpu_platform_log(int warning, const char *text)
 int main(int argc, char **argv)
 {
   /* t26yE site defaults of the passive receiver (never for the phy-test UE): visible before logInit() and the float lane. --passive-rx is on the command line on air. */
-  for (int i = 1; i < argc; i++)
-    if (!strcmp(argv[i], "--passive-rx")) {
-      setenv("ISAC_LOG_ASYNC", "1", 0); setenv("ISAC_CSIRS_DISC", "1", 0); setenv("ISAC_GPU_BUDGET", "1", 0); setenv("ISAC_RECONF", "1", 0); /* read by shared code (LDPC pool, GPU budget) */
-      /* USRP driver (hardware radio shared with the gNB): site defaults of the receiver */
-      setenv("ISAC_UHD_CTRL_CORES", "15", 0); setenv("ISAC_RX_RECOVER", "1", 0); setenv("ISAC_USRP_START_TIMEOUT_MS", "2200", 0);
-      setenv("ISAC_USRP_RING_ZEROCOPY", "1", 0); setenv("ISAC_USRP_CATCHUP_X", "1.05", 0); setenv("ISAC_USRP_CHPOW_S", "1", 0); setenv("ISAC_USRP_NO_TX", "1", 0);
+  bool passive_rx = false, rfsim_arg = false;
+  for (int i = 1; i < argc; i++) {
+    passive_rx |= !strcmp(argv[i], "--passive-rx");
+    rfsim_arg |= !strcmp(argv[i], "--rfsim");
+  }
+  if (passive_rx) {
+    /* Core plan from the host topology (nr_core_layout.h): one CORE_PLAN line, then the planned RT / pool / lane / radio-IO /
+     * dashboard cores are exported for every unset ISAC_* core key. Must run before the float lane changes any affinity.
+     * The radio IO cores are planned only when a hardware radio is used (not --rfsim, not an offline replay). */
+    const bool radio = !rfsim_arg && !getenv("ISAC_PASSIVE_REPLAY_INPUT") && !getenv("ISAC_PASSIVE_REPLAY_CAPTURE");
+    nr_core_layout_init(true, radio);
+    setenv("ISAC_LOG_ASYNC", "1", 0); setenv("ISAC_CSIRS_DISC", "1", 0); setenv("ISAC_GPU_BUDGET", "1", 0); setenv("ISAC_RECONF", "1", 0); /* read by shared code (LDPC pool, GPU budget) */
+    /* USRP driver (hardware radio shared with the gNB): site defaults of the receiver */
+    setenv("ISAC_RX_RECOVER", "1", 0); setenv("ISAC_USRP_START_TIMEOUT_MS", "2200", 0);
+    setenv("ISAC_USRP_RING_ZEROCOPY", "1", 0); setenv("ISAC_USRP_CATCHUP_X", "1.05", 0); setenv("ISAC_USRP_CHPOW_S", "1", 0); setenv("ISAC_USRP_NO_TX", "1", 0);
+    if (!nr_core_layout_active()) { /* ISAC_CORE_PLAN=0: the legacy DGX site cores */
+      setenv("ISAC_UHD_CTRL_CORES", "15", 0);
       setenv("ISAC_FLOAT_CORES", "10-14", 0);
     }
+  }
   nr_core_float_apply(); /* ISAC_FLOAT_CORES: unpinned threads (and everything they start) stay in one lane */
   start_background_system();
   if (nr_shutdown_init(nrue_shutdown_notify, nrue_ru_shutdown_stop, nrue_ru_shutdown) != 0) {
