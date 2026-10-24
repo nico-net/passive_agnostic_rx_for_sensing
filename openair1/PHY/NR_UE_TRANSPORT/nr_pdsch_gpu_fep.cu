@@ -667,13 +667,16 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   CK(nr_gpu_allocate(NR_GPU_SHARED_RW, (void **)&g_h_llr, g_llr_cap * sizeof(int16_t)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_llr, g_llr_cap * sizeof(int16_t)));
   cudaFuncAttributes attr;
-  if (N == nr_exact::N && cfg->nant <= MAX_ANT && (g_isa = nr_exact::isa_profile()) != nr_isa::P_NONE) { /* no bit-identical twin: CPU FEP */
+  /* every FFT size the host's twin reproduces (nr_exact::fep_size_ok: NEON 4096; x86 powers of two 256..4096, each size self-tested here
+   * against the host CPU). The chest / delay / graph-pass users of this working set stay N = 4096 only (their own checks). */
+  if (cfg->nant <= MAX_ANT && (g_isa = nr_exact::isa_profile()) != nr_isa::P_NONE && nr_exact::fep_size_ok(g_isa, N)
+      && nr_exact::fep_size_selftest(N)) { /* no bit-identical twin: CPU FEP */
     /* Bit-exact FEP working set: allocated with the rest before the RX fence. The timeshift table is
      * computed exactly as init_timeshift_rotation() does (same libm, same formula). */
     const size_t exact = (size_t)cfg->nant * MAX_SYM * N * sizeof(short2);
     std::vector<uint16_t> perm;
     std::vector<short> tw1, tw4, ts(2 * N);
-    nr_exact::twin_tables(g_isa, perm, tw1, tw4); /* NEON: build_perm + init_rad4_host(1024 / 4096); x86: its permutation and twiddle blob */
+    nr_exact::twin_tables(g_isa, perm, tw1, tw4, N); /* NEON: build_perm + init_rad4_host(1024 / 4096); x86: its permutation and twiddle blob for N */
     CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_perm, N * sizeof(uint16_t)));
     CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_tw1024, tw1.size() * sizeof(short)));
     CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_tw4096, tw4.size() * sizeof(short)));
@@ -1033,7 +1036,7 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
     io.ant_stride = ant_stride;
     NR_EXACT_LAUNCH(g_isa, nr_exact::k_fep_exact, dim3(nsym, nant), nr_exact::THREADS, g_ctx_stream[c], 
         io, g_cfg.nb_prefix_samples, g_cfg.nb_prefix_samples0, g_d_perm, g_d_tw1024, g_d_tw4096, g_d_ts, g_cfg.n_rb_dl,
-        g_cfg.first_carrier_offset);
+        g_cfg.first_carrier_offset, N);
     cudaError_t e = cudaPeekAtLastError();
     if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0, NRSS_FEP);
     ctx_release(c);
@@ -1067,7 +1070,7 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
   io.ant_stride = (size_t)MAX_SYM * N;
   NR_EXACT_LAUNCH(g_isa, nr_exact::k_fep_exact, dim3(nsym, nant), nr_exact::THREADS, g_stream, 
       io, g_cfg.nb_prefix_samples, g_cfg.nb_prefix_samples0, g_d_perm, g_d_tw1024, g_d_tw4096, g_d_ts, g_cfg.n_rb_dl,
-      g_cfg.first_carrier_offset);
+      g_cfg.first_carrier_offset, N);
   CK(cudaPeekAtLastError());
   for (int a = 0; a < nant; a++) {
     const size_t off = ((size_t)a * MAX_SYM + lo) * N;
@@ -1165,7 +1168,7 @@ extern "C" int nr_pdsch_gpu_fep_dev(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF
     return -1;
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
   const uint16_t sym_mask = j->sym_mask & (uint16_t)((1u << ns) - 1u);
-  if (!sym_mask || rxF->bytes < (size_t)nant * MAX_SYM * N * sizeof(short2)) return -1;
+  if (N != nr_exact::N || !sym_mask || rxF->bytes < (size_t)nant * MAX_SYM * N * sizeof(short2)) return -1; /* the graph pass: N = 4096 only */
   nr_exact::ExactIO io = {};
   int nsym = 0;
   for (int l = 0; l < ns; l++)
@@ -1201,8 +1204,8 @@ extern "C" int nr_pdsch_gpu_exact_fep(const int16_t *const *rxdata, uint32_t rin
  * out[3 r] = {est_delay, delay_max_pos, delay_max_val} of the candidate. 0, or -1 (caller computes on the CPU). */
 extern "C" int nr_pdsch_gpu_exact_delay(const int16_t *const *rows, int nrows, int *out)
 {
-  if (g_init_state != 1 || !g_exact_ok || !g_exact_direct || nrows < 1 || nrows > nr_exact::DELAY_MAX_ROWS || !rows || !out)
-    return -1;
+  if (g_init_state != 1 || !g_exact_ok || !g_exact_direct || g_cfg.ofdm_symbol_size != nr_exact::N || nrows < 1 || nrows > nr_exact::DELAY_MAX_ROWS || !rows || !out)
+    return -1; /* the delay IDFT twin is idft4096 only */
   const int c = ctx_acquire(false);
   NrGpuRtScope rt;
   if (!rt.admitted) { ctx_release(c); return -1; }
@@ -1230,6 +1233,8 @@ extern "C" void nr_pdsch_gpu_exact_stats(int *direct, uint64_t *late, uint64_t *
   *busy = g_exact_busy;
 }
 extern "C" double nr_pdsch_gpu_exact_last_us(void) { return g_exact_us; }
+/* 1 when the bit-exact FEP working set exists for this cell's FFT size (init done, twin bit-identical at N), else 0: the host then keeps the CPU FEP */
+extern "C" int nr_pdsch_gpu_exact_ready(void) { return g_init_state == 1 && g_exact_ok; }
 /* DECODETIME: pins a pageable host buffer the kernels read or write (cudaHostRegister), so the GPU never page-faults on
  * its first touch of it (nsys: every new 4 KB page cost ~12 us of device-wide stall in k_fir). 0 or the CUDA error. */
 extern "C" int nr_pdsch_gpu_exact_pin(void *p, size_t bytes) { return (int)cudaHostRegister(p, bytes, cudaHostRegisterPortable); }
