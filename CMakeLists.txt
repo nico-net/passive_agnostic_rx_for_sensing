@@ -3521,7 +3521,7 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_gpu_budget)
   # per-path GPU/CPU choice (nr_gpu_path.h): policy, registry, environment, GB10 (SHARED) invariant on a mocked platform; no device
   add_executable(test_nr_gpu_path openair1/PHY/TOOLS/tests/nr_gpu_path_test.cc
-                 openair1/PHY/TOOLS/nr_gpu_path.c openair1/PHY/TOOLS/nr_gpu_platform.c openair1/PHY/TOOLS/nr_gpu_mem.c)
+                 openair1/PHY/TOOLS/nr_gpu_path.c openair1/PHY/TOOLS/nr_gpu_platform.c openair1/PHY/TOOLS/nr_gpu_mem.c openair1/PHY/TOOLS/nr_host_membudget.c)
   target_compile_definitions(test_nr_gpu_path PRIVATE NR_GPU_PLATFORM_TEST)
   target_include_directories(test_nr_gpu_path PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS)
   target_link_libraries(test_nr_gpu_path PRIVATE GTest::gtest_main ${CMAKE_DL_LIBS} pthread m)
