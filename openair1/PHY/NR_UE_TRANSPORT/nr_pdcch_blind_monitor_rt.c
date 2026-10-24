@@ -172,18 +172,12 @@ static void dmrs_fit_classes(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, 
                              int n_ids, dci11_fclass_t *fk, int nfk, long src_abs)
 {
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-  /* EARLY START scans a CORESET before the slot is in the ring: the type-A DM-RS symbol (l0 = 2/3) follows the CORESET by a symbol
-   * or two, so wait for it (bounded, ~2 symbols) instead of reading last frame's samples; on timeout there is no fit (-1). */
-  if (src_abs >= 0) {
-    const int need = cfg->dmrs_typeA_position + 3;
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    while (nr_es_progress_symbols(&nr_es_progress, src_abs, fp->symbols_per_slot) < need) {
-      clock_gettime(CLOCK_MONOTONIC, &t1);
-      if ((t1.tv_sec - t0.tv_sec) * 1000000000L + (t1.tv_nsec - t0.tv_nsec) > 150000L) return;
-      sched_yield();
-    }
-  }
+  /* EARLY START scans a CORESET before the slot is in the ring, and the RX thread publishes the rest of the slot in one piece at slot
+   * end: wait for the slot (the PDSCH consumer's slot gate, bounded at 20 ms: rfsim runs slower than real time) instead of reading
+   * last frame's samples; on timeout there is no fit (-1). Only unsolved RNTIs (the search) pay this wait. */
+  if (src_abs >= 0 && nr_es_progress_symbols(&nr_es_progress, src_abs, fp->symbols_per_slot) < cfg->dmrs_typeA_position + 3
+      && !nr_slot_gate_wait(&nr_slot_gate, src_abs, 20))
+    return;
   const int16_t *rx[8];
   const int nant = dmrs_sym_rx(ue, proc, cfg, rx);
   if (nant <= 0) return;
