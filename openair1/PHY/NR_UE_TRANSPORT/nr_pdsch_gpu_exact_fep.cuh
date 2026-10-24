@@ -259,12 +259,19 @@ __device__ __forceinline__ void fft4096(short2 *s, int t, const short *__restric
  * init_rad4_host, input permutation build_perm; x86 twin = (the twiddle blob, unused), permutation nr_isa::x86_tables. */
 __host__ __device__ constexpr int smem_c16(int P) { return nr_isa::dft_of(P) == nr_isa::DFT_X86 ? 2 * N : N; }
 template <int P, bool INV>
-__device__ __forceinline__ void fft_twin(short2 *s, int t, const short *__restrict__ ta, const short *__restrict__ tb)
+__device__ __forceinline__ void fft_twin(short2 *s, int t, const short *__restrict__ ta, const short *__restrict__ tb, int n = N)
 {
   if (nr_isa::dft_of(P) == nr_isa::DFT_X86)
-    nr_isa::fft_x86<INV, THREADS>(s, s + N, t, N, (const short2 *)ta);
+    nr_isa::fft_x86<INV, THREADS>(s, s + n, t, n, (const short2 *)ta);
   else
     fft4096<INV>(s, t, ta, tb);
+}
+/* FFT sizes of the bit-exact FEP: the NEON twin is dft4096 only; the x86 twin (split radix, nr_gpu_isa_twin.cuh) covers every power of two the
+ * CPU runs through dft_split_radix_pure_simd, i.e. 256..4096 (N_RB 21..341 at any SCS without 3/4 sampling: 512, 1024, 2048, 4096). The 3/4-sampling
+ * sizes (768, 1536, 3072: radix-3 over a strided split radix on the CPU) have no twin: CPU FEP. */
+__host__ __device__ constexpr bool fep_size_ok(int P, int n)
+{
+  return n == N || (nr_isa::dft_of(P) == nr_isa::DFT_X86 && n >= 256 && n <= N && (n & (n - 1)) == 0);
 }
 /* apply_nr_rotation_symbol_RX on one RE: rotate_cpx_vector(.., 15) by (ar, ai) = conj(symbol_rotation) with the twin of P,
  * then mult_cpx_vector(.., 15) by the timeshift w (madd_epi16 of (re, -im) / (im, re) with (c, d), srai 15, packs; SIMDe:
@@ -295,27 +302,30 @@ enum { PAR_WORDS = 32 };
 
 /* One block per (symbol, antenna). perm: input index of each in-place DIT position (the composed
  * transpose16_ooff permutations of dft4096/1024/256/64). Writes rxdataF exactly as the CPU does. */
+/* fft_n: the FFT size of this launch; only the x86 twin reads it (the NEON twin is dft4096: N, a compile-time constant there, so the GB10
+ * kernel is unchanged). The shared buffer is sized for N = 4096 and serves every smaller size. */
 template <int P>
 __global__ void __launch_bounds__(THREADS) k_fep_exact(const ExactIO io, int ncp, int ncp0, const uint16_t *__restrict__ perm,
                                                        const short *__restrict__ tw1024, const short *__restrict__ tw4096,
-                                                       const short2 *__restrict__ ts, int nb_rb, int fco)
+                                                       const short2 *__restrict__ ts, int nb_rb, int fco, int fft_n = N)
 {
   __shared__ short2 s[smem_c16(P)];
+  const int Nn = nr_isa::dft_of(P) == nr_isa::DFT_X86 ? fft_n : N;
   const int sym = io.sym_list[blockIdx.x], ant = blockIdx.y, t = threadIdx.x;
   if (io.par && !(io.par[21] >> sym & 1u)) return; /* GPUPASS: this grant's symbol set, read when the kernel runs (the graph keeps its full grid) */
   const short2 *in = io.par ? (const short2 *)*(const unsigned long long *)(io.par + 22 + 2 * ant) : io.rx[ant];
   const uint32_t ring_len = io.par ? io.par[16] : io.ring_len;
-  const uint32_t first = (io.par ? io.par[0] : io.origin) + (uint32_t)(ncp0 + sym * (N + ncp));
-  for (int n = t; n < N; n += THREADS) s[n] = in[(first + __ldg(&perm[n])) % ring_len];
+  const uint32_t first = (io.par ? io.par[0] : io.origin) + (uint32_t)(ncp0 + sym * (Nn + ncp));
+  for (int n = t; n < Nn; n += THREADS) s[n] = in[(first + __ldg(&perm[n])) % ring_len];
   __syncthreads();
-  fft_twin<P, false>(s, t, tw1024, tw4096);
+  fft_twin<P, false>(s, t, tw1024, tw4096, Nn);
   /* apply_nr_rotation_symbol_RX on the occupied subcarriers */
   const int len = (nb_rb & 1) ? (nb_rb + 1) * 6 : nb_rb * 6, start2 = (nb_rb & 1) ? fco - 6 : fco;
   const short2 r = io.par ? ((const short2 *)(io.par + 1))[sym] : io.rot[sym];
   const int ar = r.x, ai = nr_isa::xneg(r.y); /* rot2.i = -rot2.i (int16) */
   const bool redir = io.par && io.par[17];
-  short2 *o = (redir ? (short2 *)*(const unsigned long long *)(io.par + 18) : io.out) + (size_t)ant * (redir ? (size_t)io.par[20] : io.ant_stride) + (size_t)sym * N;
-  for (int k = t; k < N; k += THREADS) {
+  short2 *o = (redir ? (short2 *)*(const unsigned long long *)(io.par + 18) : io.out) + (size_t)ant * (redir ? (size_t)io.par[20] : io.ant_stride) + (size_t)sym * Nn;
+  for (int k = t; k < Nn; k += THREADS) {
     short2 v = s[k];
     if (k < len || (k >= start2 && k < start2 + len)) v = rot_ts<P>(v, ar, ai, __ldg(&ts[k]));
     o[k] = v;
@@ -428,10 +438,10 @@ static void init_rad4_host(int n, short *tw)
 }
 
 /* twin_tables: the input permutation and the two table arguments (ta, tb) of the twin of profile P, on the host. */
-static void twin_tables(int P, std::vector<uint16_t> &perm, std::vector<short> &ta, std::vector<short> &tb)
+static void twin_tables(int P, std::vector<uint16_t> &perm, std::vector<short> &ta, std::vector<short> &tb, int n = N)
 {
   if (nr_isa::dft_of(P) == nr_isa::DFT_X86) {
-    nr_isa::x86_tables(N, perm, ta);
+    nr_isa::x86_tables(n, perm, ta);
     tb.assign(2, 0);
   } else {
     perm.resize(N);
@@ -454,6 +464,18 @@ __global__ void __launch_bounds__(THREADS) k_twin_dft(const short2 *__restrict__
   __syncthreads();
   fft_twin<P, INV>(s, threadIdx.x, ta, tb);
   for (int n = threadIdx.x; n < N; n += THREADS) out[(size_t)blockIdx.x * N + n] = s[n];
+}
+/* the x86 twin at a runtime size n (power of two, 256..4096): the per-size self-test of the bit-exact FEP (fep_size_ok) */
+template <bool INV>
+__global__ void __launch_bounds__(THREADS) k_twin_dft_x86n(const short2 *__restrict__ in, short2 *__restrict__ out, const uint16_t *__restrict__ perm,
+                                                           const short *__restrict__ blob, int n)
+{
+  __shared__ short2 s[2 * N];
+  const short2 *x = in + (size_t)blockIdx.x * n;
+  for (int k = threadIdx.x; k < n; k += THREADS) s[k] = x[__ldg(&perm[k])];
+  __syncthreads();
+  nr_isa::fft_x86<INV, THREADS>(s, s + n, threadIdx.x, n, (const short2 *)blob);
+  for (int k = threadIdx.x; k < n; k += THREADS) out[(size_t)blockIdx.x * n + k] = s[k];
 }
 template <int R>
 __global__ void k_twin_rot(const short2 *__restrict__ x, short2 *__restrict__ y, const short2 *__restrict__ ts, int n, short2 rot)
@@ -578,6 +600,50 @@ static int isa_profile()
 {
   std::call_once(g_isa_once, isa_select);
   return g_isa_profile;
+}
+/* fep_size_selftest: the x86 twin at FFT size n (fep_size_ok, n != N) against the host CPU's dft(n), forward, on the vector set of
+ * isa_select (random at four amplitudes, full int16 range, a full-scale tone, an impulse pair, constant -32768). 1 = bit-identical on all of
+ * them; 0 = mismatch, no CPU dft(n) or a CUDA error (the caller then keeps the CPU FEP). N itself is covered by isa_select. */
+static int fep_size_selftest(int n)
+{
+  if (n == N) return 1;
+  if (!fep_size_ok(nr_isa::P_X86, n)) return 0;
+  const int NV = 8;
+  std::vector<short2> in((size_t)NV * n), ref((size_t)NV * n), g((size_t)NV * n);
+  uint32_t st = 0x2b1du + (uint32_t)n;
+  for (int v = 0; v < NV; v++)
+    for (int k = 0; k < n; k++) {
+      short2 &e = in[(size_t)v * n + k];
+      const int amp[4] = {300, 3000, 12000, 32768};
+      if (v < 4) e = make_short2((short)((int)(isa_rng(st) % (2u * amp[v])) - amp[v]), (short)((int)(isa_rng(st) % (2u * amp[v])) - amp[v]));
+      else if (v == 4) e = make_short2((short)(isa_rng(st) & 0xffff), (short)(isa_rng(st) & 0xffff));
+      else if (v == 5) {
+        const double a = 2 * M_PI * 37.0 * k / n;
+        e = make_short2((short)lrint(32767 * cos(a)), (short)lrint(32767 * sin(a)));
+      } else if (v == 6) e = make_short2(k == 0 ? 32767 : k == 1 ? -32768 : 0, k == 0 ? -32768 : k == 2 ? 32767 : 0);
+      else e = make_short2(-32768, -32768);
+    }
+  for (int v = 0; v < NV; v++)
+    if (nr_gpu_isa_cpu_dft(n, 0, (const int16_t *)&in[(size_t)v * n], (int16_t *)&ref[(size_t)v * n]) != 0) return 0;
+  std::vector<uint16_t> perm;
+  std::vector<short> ta, tb;
+  twin_tables(nr_isa::P_X86, perm, ta, tb, n);
+  uint16_t *d_perm = nullptr;
+  short *d_ta = nullptr;
+  short2 *d_in = nullptr, *d_out = nullptr;
+  const size_t nb = (size_t)NV * n * sizeof(short2);
+  int ok = 0;
+  if (cudaMalloc(&d_perm, perm.size() * 2) == cudaSuccess && cudaMalloc(&d_ta, ta.size() * 2) == cudaSuccess && cudaMalloc(&d_in, nb) == cudaSuccess
+      && cudaMalloc(&d_out, nb) == cudaSuccess && cudaMemcpy(d_perm, perm.data(), perm.size() * 2, cudaMemcpyHostToDevice) == cudaSuccess
+      && cudaMemcpy(d_ta, ta.data(), ta.size() * 2, cudaMemcpyHostToDevice) == cudaSuccess
+      && cudaMemcpy(d_in, in.data(), nb, cudaMemcpyHostToDevice) == cudaSuccess) {
+    k_twin_dft_x86n<false><<<NV, THREADS>>>(d_in, d_out, d_perm, d_ta, n);
+    if (cudaGetLastError() == cudaSuccess && cudaMemcpy(g.data(), d_out, nb, cudaMemcpyDeviceToHost) == cudaSuccess) ok = !memcmp(g.data(), ref.data(), nb);
+  }
+  cudaFree(d_perm); cudaFree(d_ta); cudaFree(d_in); cudaFree(d_out);
+  (void)cudaGetLastError();
+  fprintf(stderr, "SENSING: GPU_ISA_TWIN size self-test N=%d dft_twin=avx2: %s (%d vectors vs the host CPU dft%d)\n", n, ok ? "bit-identical" : "MISMATCH -- CPU FEP", NV, n);
+  return ok;
 }
 } // namespace nr_exact
 

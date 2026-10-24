@@ -136,7 +136,7 @@ void nr_gpu_pass_disable(const char *why)
 
 void nr_gpu_pass_gate(int g)
 {
-  static const char *const gname[] = {"seg", "probe", "share", "gw", "ptrs", "tinterp", "harq", "ldpc_off", "chest_only", "occ", "nomem", "retry", "gw_ready", "llr_ovr", "cap", "force_cpu"};
+  static const char *const gname[] = {"seg", "probe", "share", "gw", "ptrs", "tinterp", "harq", "ldpc_off", "chest_only", "occ", "nomem", "retry", "gw_ready", "llr_ovr", "cap", "force_cpu", "path"};
   if (g >= 0 && g < NR_GPU_PASS_GATE_N) {
     /* Fix A+D: a first pass that leaves the GPU pass says why (first time per reason here; the census prints every count) */
     if (atomic_fetch_add_explicit(&G.gate[g], 1, memory_order_relaxed) == 0 && g < (int)(sizeof(gname) / sizeof(gname[0])))

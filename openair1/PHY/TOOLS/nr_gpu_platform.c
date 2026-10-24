@@ -47,6 +47,8 @@ static void report(int warning, const char *fmt, ...)
   if (logger) logger(warning, text);
   else fprintf(stderr, "%s%s\n", warning ? "WARNING: " : "", text);
 }
+/* nr_gpu_platform_log: one preformatted message through the installed logger (nr_gpu_path.c's GPU_PATH lines). */
+void nr_gpu_platform_log(int warning, const char *text) { report(warning, "%s", text); }
 /* nr_gpu_set_logger: installs the logging callback used by the platform for its status and warning messages (NULL restores stderr).
  *   Takes the platform mutex. Called by executables/nr-uesoftmodem.c at start-up.
  */
