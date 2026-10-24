@@ -69,6 +69,12 @@ __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int
   __syncthreads();
   int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
   float total = 0;
+  /* Staged loads (block_re == 32, the production value): lane L owns block b0+L, i.e. REs 32 apart, so reading map.re[] and rx[] straight from global memory made every warp load touch 32 separate
+   * lines (L1-wavefront bound: 213 ms for 1024 IDs x 4 slots x 4 RX x 55552 REs on air / replay, 8% of the issue rate [MEASURED, DGX replay 2026-10-23]). The warp now loads a tile of 8 REs of each
+   * of its 32 blocks with coalesced reads into shared memory laid out [k][block] (stride 33: no bank conflicts) and each lane reads its own block from there. The per-lane arithmetic is the
+   * unchanged sequence k = 0..count-1, so the scores are bit-identical (tests/passive_rx/gpuspan/disc_sweep_test.cu). Other block_re values use the original loop. */
+  __shared__ nr_csirs_disc_re_t tre[4][8][33];
+  __shared__ short2 tsm[4][8][33];
   for (int task = warp; task < map.ports * ants; task += 4) {
     int p = task / ants, ant = task % ants;
     int begin = map.begin[p], n = map.begin[p+1] - begin;
@@ -76,6 +82,42 @@ __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int
     int nb = n ? 1 + (n - 1) / cfg.block_re : 0;
     float rho = 0, active = 0;
     const short2 *samples = rx + ((size_t)blockIdx.y * ants + ant) * map.n_re;
+    if (cfg.block_re == 32) {
+      for (int b0 = 0; b0 < nb; b0 += 32) {
+        const int b = b0 + lane, rows = min(32, nb - b0);
+        const int first = b * 32, count = b < nb ? min(32, n - first) : 0;
+        float ar = 0, ai = 0, energy = 0;
+        for (int k0 = 0; k0 < 32; k0 += 8) {
+          __syncwarp();
+          for (int row = lane / 8; row < rows; row += 4) {
+            const int idx = (b0 + row) * 32 + k0 + lane % 8;
+            if (idx < n) {
+              tre[warp][lane % 8][row] = map.re[begin + idx];
+              tsm[warp][lane % 8][row] = samples[begin + idx];
+            }
+          }
+          __syncwarp();
+          for (int j = 0; j < 8; ++j) {
+            if (k0 + j >= count) break;
+            nr_csirs_disc_re_t re = tre[warp][j][lane];
+            unsigned bits = (gold[re.symbol][re.m / 16] >> (2 * (re.m % 16))) & 3;
+            // OAI QPSK at amplitude 16384 is exactly (+/-8192,+/-8192).
+            // Unit amplitudes cancel from the normalized correlation.
+            float xr = (bits & 1 ? -1.f : 1.f) * re.sign;
+            float xi = (bits & 2 ? -1.f : 1.f) * re.sign;
+            short2 y = tsm[warp][j][lane];
+            float yr = y.x, yi = y.y;
+            ar += yr*xr + yi*xi;
+            ai += yi*xr - yr*xi;
+            energy += yr*yr + yi*yi;
+          }
+        }
+        if (b < nb && energy > 0) {
+          rho += fminf(1.f, sqrtf((ar*ar + ai*ai) / (energy * (2 * count))));
+          active += 1;
+        }
+      }
+    } else
     for (int b = lane; b < nb; b += 32) {
       int first = b * cfg.block_re, count = min(cfg.block_re, n - first);
       float ar = 0, ai = 0, energy = 0;
@@ -223,6 +265,7 @@ struct Workspace {
   std::vector<float> mean;
   nr_csirs_disc_evidence_t evidence={};
   Device<RefineAcc> acc;
+  Device<double> terms; /* refine: per-unit contributions of one chunk, [unit][NR_CSIRS_DISC_MAX_RB] (row 1: signal then weight arrays) */
   int rb=0,ant=0,capacity=0;
 } workspace;
 static std::mutex workspace_mutex;
@@ -254,7 +297,7 @@ static int prepare(int rb,int ant,int capacity)
   if(!w.dm.alloc(maps) || !w.dx.alloc(packed) || !w.grid.alloc((size_t)capacity*ant*14*12*rb)
      || !w.ds.alloc(capacity) || !w.di.alloc(capacity) || !w.dz.alloc((size_t)1024*160*capacity)
      || !w.dmean.alloc(1024*160) || !w.dw.alloc(1) || !w.meta.alloc(capacity)
-     || !w.acc.alloc(1) || !w.refined.alloc(1) || !w.result.alloc(1)) return -1;
+     || !w.acc.alloc(1) || !w.terms.alloc((size_t)capacity*ant*32*NR_CSIRS_DISC_MAX_RB) || !w.refined.alloc(1) || !w.result.alloc(1)) return -1;
   w.mapping.resize(maps);w.slots.reserve(capacity);w.indices.reserve(capacity);w.mean.resize(1024*160);
   w.rb=rb;w.ant=ant;w.capacity=capacity;return 0;
 }
@@ -495,6 +538,116 @@ __device__ static int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *r, nr
   return 0;
 }
 
+/* find_unit: device helper: the ring slot and the first unit of the slot that contains unit u of the refinement, or -1 when u is beyond the last matching slot.
+ *   Units are numbered in the order of refine_extent() / nr_csirs_disc_refine_cpu(): valid matching slots in ring order, then antenna (then port). per_slot = units per slot. */
+__device__ static int find_unit(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_hyp_t *h,long u,long per_slot,long *first)
+{
+  long unit=0;
+  for(int s=0;s<r->capacity;++s) if(r->meta[s].valid && r->meta[s].abs_slot%h->period==h->offset) {
+    if(u<unit+per_slot) {*first=unit;return s;}
+    unit+=per_slot;
+  }
+  return -1;
+}
+/* refine_extent_units: GPU kernel, one CTA per unit (valid slot, antenna, port) = unit u0+blockIdx.x: the parallel form of the unit body of refine_extent().
+ *   The per-RB correlations cr / ci / count are sums of integer-valued doubles (|y| < 2^16, at most a few thousand terms): exact in double, so the shared-memory atomic adds are
+ *   order-independent. The term added to the evidence of each RB is then computed with the same expression as refine_extent() and stored in terms[blockIdx.x][rb] (0 when the
+ *   original adds nothing); refine_accumulate() adds the terms to the evidence in unit order, so the evidence is bit-identical to the serial kernel (tested). Launched by refine_chunk(). */
+__global__ void refine_extent_units(nr_csirs_disc_ring_t ring,nr_csirs_disc_hyp_t h,nr_csirs_disc_win_t win,nr_csirs_disc_sweep_map_t map,double *terms,long u0)
+{
+  const nr_csirs_disc_ring_t *r=&ring;
+  __shared__ uint32_t gold[14][words_max];
+  __shared__ double cr[NR_CSIRS_DISC_MAX_RB],ci[NR_CSIRS_DISC_MAX_RB];
+  __shared__ int count[NR_CSIRS_DISC_MAX_RB];
+  __shared__ int sl,a_s,p_s;
+  double *out=terms+(size_t)blockIdx.x*NR_CSIRS_DISC_MAX_RB;
+  if(threadIdx.x==0) {
+    long first=0;const long u=u0+blockIdx.x;
+    sl=find_unit(r,&h,u,(long)r->n_ant*map.ports,&first);
+    a_s=(int)((u-first)/map.ports);p_s=(int)((u-first)%map.ports);
+  }
+  __syncthreads();
+  if(sl<0) {for(int rb=threadIdx.x;rb<NR_CSIRS_DISC_MAX_RB;rb+=blockDim.x) out[rb]=0;return;}
+  for(int i=threadIdx.x;i<NR_CSIRS_DISC_MAX_RB;i+=blockDim.x) {cr[i]=0;ci[i]=0;count[i]=0;}
+  if(threadIdx.x<14 && (map.sym_mask&(1u<<threadIdx.x))) {
+    const int l=threadIdx.x;
+    uint64_t t=14*((r->meta[sl].slot+win.slot_delta)%r->slots_per_frame)+l+1;
+    uint32_t init=((t*(2*win.scramb_id+1)<<10)+win.scramb_id)&0x7fffffff;
+    Gold generator;generator.reset(init);
+    for(int w=0;w<map.words;++w) gold[l][w]=generator.next();
+  }
+  __syncthreads();
+  const int16_t *rx=(r->grid_base+(size_t)sl*r->slot_stride+(size_t)a_s*14*24*r->n_rb);
+  for(int i=map.begin[p_s]+threadIdx.x;i<map.begin[p_s+1];i+=blockDim.x) {
+    const nr_csirs_disc_re_t *re=map.re+i;
+    int rb=(re->grid_index%(12*r->n_rb))/12;
+    unsigned bits=(gold[re->symbol][re->m/16]>>(2*(re->m%16)))&3;
+    double yr=rx[2*re->grid_index],yi=rx[2*re->grid_index+1];
+    int xr=(bits&1?-1:1)*re->sign,xi=(bits&2?-1:1)*re->sign;
+    atomicAdd(&cr[rb],yr*xr+yi*xi);atomicAdd(&ci[rb],yi*xr-yr*xi);atomicAdd(&count[rb],1);
+  }
+  __syncthreads();
+  const int step=h.density<2?2:1;
+  for(int rb=threadIdx.x;rb<r->n_rb;rb+=blockDim.x) {
+    double term=0;
+    if(count[rb]) {
+      double hr=0,hi=0;int n=0;
+      for(int k=rb-2*step;k<=rb+2*step;k+=step) if(k>=0 && k<r->n_rb && k!=rb) {
+        hr+=cr[k];hi+=ci[k];n+=count[k];
+      }
+      if(n) {
+        hr/=2*n;hi/=2*n;
+        term=2*(cr[rb]*hr+ci[rb]*hi)-2*count[rb]*(hr*hr+hi*hi);
+      }
+    }
+    out[rb]=term;
+  }
+}
+/* refine_trs_units: GPU kernel, one CTA per unit (valid slot, antenna) = unit u0+blockIdx.x: the parallel form of the unit body of the row-1 branch of nr_csirs_disc_refine_cpu().
+ *   One thread per RB; the signal and weight terms go to terms_s / terms_w[blockIdx.x][rb] and refine_accumulate() adds them in unit order (bit-identical to the serial kernel, tested). */
+__global__ void refine_trs_units(nr_csirs_disc_ring_t ring,nr_csirs_disc_hyp_t h,nr_csirs_disc_win_t win,nr_csirs_disc_sweep_map_t map,double *terms_s,double *terms_w,long u0)
+{
+  const nr_csirs_disc_ring_t *r=&ring;
+  __shared__ uint32_t gold[words_max];
+  __shared__ int sl,a_s;
+  double *os=terms_s+(size_t)blockIdx.x*NR_CSIRS_DISC_MAX_RB,*ow=terms_w+(size_t)blockIdx.x*NR_CSIRS_DISC_MAX_RB;
+  if(threadIdx.x==0) {
+    long first=0;const long u=u0+blockIdx.x;
+    sl=find_unit(r,&h,u,(long)r->n_ant,&first);
+    a_s=(int)(u-first);
+    if(sl>=0) {
+      uint64_t t=14*((r->meta[sl].slot+win.slot_delta)%r->slots_per_frame)+h.symb_l0+1;
+      uint32_t init=((t*(2*win.scramb_id+1)<<10)+win.scramb_id)&0x7fffffff;
+      Gold generator;generator.reset(init);
+      for(int w=0;w<map.words;++w) gold[w]=generator.next();
+    }
+  }
+  __syncthreads();
+  if(sl<0) {for(int rb=threadIdx.x;rb<NR_CSIRS_DISC_MAX_RB;rb+=blockDim.x) os[rb]=ow[rb]=0;return;}
+  const int16_t *rx=(r->grid_base+(size_t)sl*r->slot_stride+(size_t)a_s*14*24*r->n_rb);
+  for(int rb=threadIdx.x;rb<r->n_rb;rb+=blockDim.x) {
+    double ar=0,ai=0,energy=0;
+    for(int i=3*rb;i<3*rb+3;++i) {
+      const nr_csirs_disc_re_t *re=map.re+i;
+      unsigned bits=(gold[re->m/16]>>(2*(re->m%16)))&3;
+      double yr=rx[2*re->grid_index],yi=rx[2*re->grid_index+1];
+      int xr=bits&1?-1:1,xi=bits&2?-1:1;
+      ar+=yr*xr+yi*xi;ai+=yi*xr-yr*xi;energy+=yr*yr+yi*yi;
+    }
+    os[rb]=(ar*ar+ai*ai-2*energy)/4;
+    ow[rb]=energy;
+  }
+}
+/* refine_accumulate: GPU kernel, one thread per RB: acc.a[rb] += ta[i][rb] (and acc.b[rb] += tb[i][rb] when tb is set) for the n units of the chunk in unit order (the order of the serial
+ *   kernel); zero first accumulators when the chunk starts at unit 0. */
+__global__ void refine_accumulate(RefineAcc *acc,const double *ta,const double *tb,int n,int n_rb,bool zero)
+{
+  const int rb=blockIdx.x*blockDim.x+threadIdx.x;
+  if(rb>=NR_CSIRS_DISC_MAX_RB) return;
+  double a=zero?0:acc->a[rb],b=zero?0:acc->b[rb];
+  if(rb<n_rb) for(int i=0;i<n;++i) {a+=ta[(size_t)i*NR_CSIRS_DISC_MAX_RB+rb];if(tb) b+=tb[(size_t)i*NR_CSIRS_DISC_MAX_RB+rb];}
+  acc->a[rb]=a;if(tb || zero) acc->b[rb]=b;
+}
 /* refine_kernel: GPU kernel (one thread): runs the device refinement (nr_csirs_disc_refine_cpu) on the ring and stores the refined hypothesis and the result code. */
 __global__ void refine_kernel(nr_csirs_disc_ring_t ring,nr_csirs_disc_hyp_t h,nr_csirs_disc_win_t win,
                              nr_csirs_disc_sweep_map_t map,nr_csirs_disc_hyp_t *out,int *result,
@@ -503,19 +656,35 @@ __global__ void refine_kernel(nr_csirs_disc_ring_t ring,nr_csirs_disc_hyp_t h,nr
   const int rc=nr_csirs_disc_refine_cpu(&ring,&h,&win,map,acc,u0,u1,fin);
   if(fin) {*result=rc;*out=h;}
 }
+/* refine_chunk: host side: the refinement units [f,f+n) of total on stream s: one CTA per unit (refine_extent_units / refine_trs_units), the in-order accumulation, and for the last chunk the tail
+ *   (the serial kernel with an empty unit range: it runs only the span search on the accumulators). Test hook of tests/passive_rx/gpuspan/disc_refine_test.cu. */
+static cudaError_t refine_chunk(const nr_csirs_disc_ring_t &ring,const nr_csirs_disc_hyp_t &h,
+                                const nr_csirs_disc_win_t &win,const nr_csirs_disc_sweep_map_t &map,cudaStream_t s,long f,long n,bool last)
+{
+  auto &w=workspace;
+  const int threads=128;
+  if(h.row==1) {
+    double *ts=w.terms.p,*tw=w.terms.p+(size_t)(w.terms.capacity/NR_CSIRS_DISC_MAX_RB/2)*NR_CSIRS_DISC_MAX_RB;
+    refine_trs_units<<<(unsigned)n,threads,0,s>>>(ring,h,win,map,ts,tw,f);
+    refine_accumulate<<<(NR_CSIRS_DISC_MAX_RB+127)/128,128,0,s>>>(w.acc.p,ts,tw,(int)n,ring.n_rb,f==0);
+  } else {
+    refine_extent_units<<<(unsigned)n,threads,0,s>>>(ring,h,win,map,w.terms.p,f);
+    refine_accumulate<<<(NR_CSIRS_DISC_MAX_RB+127)/128,128,0,s>>>(w.acc.p,w.terms.p,nullptr,(int)n,ring.n_rb,f==0);
+  }
+  if(last) refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,LONG_MAX,LONG_MAX,true);
+  return cudaGetLastError();
+}
 /* refine_launch: host side: the refinement in launches of about 1 ms; total = number of units. */
 static cudaError_t refine_launch(const nr_csirs_disc_ring_t &ring,const nr_csirs_disc_hyp_t &h,
                                  const nr_csirs_disc_win_t &win,const nr_csirs_disc_sweep_map_t &map,cudaStream_t s,long total)
 {
-  /* The refinement was ONE single-thread kernel of 24 ms on average and up to 652 ms [MEASURED gsV2N]. It runs the units [f,f+n) of (valid slot, antenna[, port]) per launch,
-   * accumulators in w.acc, the last launch (u1 = LONG_MAX) also the tail: the same additions in the same order, so the result is bit-identical. */
+  /* The refinement was ONE single-thread kernel of 24 ms on average and up to 652 ms [MEASURED gsV2N]; chunked it was still serial (0.46 ms per unit idle, 1.3 ms on replay, 375 ms per call at
+   * 32 units per chunk). Each unit is now one CTA (refine_chunk): the units of a chunk run in parallel and the additions into the evidence keep the unit order, so the result is bit-identical. */
   auto &w=workspace;
   static NrGpuChunker c_refine{1,0,"c_refine"};
   if(total<=0) {refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,0,LONG_MAX,true);return cudaGetLastError();}
-  return chunks(c_refine,total,[&](long f,long n) {
-    const bool last=f+n>=total;
-    refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,f,last?LONG_MAX:f+n,last);
-  });
+  if(total>(long)(w.terms.capacity/NR_CSIRS_DISC_MAX_RB/(h.row==1?2:1))) {refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,0,LONG_MAX,true);return cudaGetLastError();} /* more units than the term buffer: serial */
+  return chunks(c_refine,total,[&](long f,long n) {refine_chunk(ring,h,win,map,s,f,n,f+n>=total);});
 }
 
 /* energy_score: device energy statistic of one symbol: returns the energy ratio of the occupied REs against the weakest or the mean of the unoccupied subcarrier classes (EPR when epr is set).
