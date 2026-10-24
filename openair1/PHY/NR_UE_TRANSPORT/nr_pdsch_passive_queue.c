@@ -76,6 +76,8 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_dci11_layout_feedback
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_prb_segments (probe span of a PRB-list grant)
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_alloc_normalise
+#include "PHY/TOOLS/nr_host_membudget.h"
+extern void nr_host_membudget_commit(nr_host_mem_module_t m, size_t bytes, double scale) __attribute__((weak));
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h" // per-grant observation API (Task A3)
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h" // CB0 elimination channel (ISAC_TD_CB0_ELIM, default ON, 0 disables)
@@ -2361,6 +2363,11 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   }
   LOG_I(PHY, "SENSING: passive PDSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1);
+  if (nr_host_membudget_commit) { /* host-RAM budget: the queue's fixed arenas (rxdataF per consumer, owned IQ per consumer and antenna, recovery snapshot holders) */
+    const size_t iq = 2u * (size_t)ue->frame_parms.samples_per_frame * sizeof(c16_t) * (size_t)ue->frame_parms.nb_antennas_rx;
+    nr_host_membudget_commit(NR_HOST_MEM_QUEUE, (size_t)n_consumers * ((size_t)ue->frame_parms.nb_antennas_rx * rxdataF_sz * sizeof(c16_t) + (nr_csirs_disc_enabled() ? iq : 0))
+                                                  + (size_t)g_rsnap_n * (g_recov_ok ? iq : 0), 1.0);
+  }
   return true;
 }
 

@@ -1059,7 +1059,7 @@ if (${SMBV})
 endif  (${SMBV})
 
 # Core singleton shared with dlopen GPU modules; deliberately no CUDA dependency.
-add_library(nr_gpu_platform SHARED ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_platform.c
+add_library(nr_gpu_platform SHARED ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_platform.c ${OPENAIR1_DIR}/PHY/TOOLS/nr_host_membudget.c
   ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_budget.c ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_mem.c)
 target_include_directories(nr_gpu_platform PUBLIC ${OPENAIR1_DIR}/PHY/TOOLS)
 target_link_libraries(nr_gpu_platform PRIVATE ${CMAKE_DL_LIBS} pthread)
@@ -2479,6 +2479,9 @@ if(ENABLE_TESTS)
   set_tests_properties(test_nr_pdcch_nid_worker PROPERTIES
     ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
 
+  add_test(NAME test_nr_pdcch_nid_worker_elastic COMMAND test_nr_pdcch_nid_worker --elastic)
+  set_tests_properties(test_nr_pdcch_nid_worker_elastic PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
   add_test(NAME test_nr_pdcch_nid_worker_duty COMMAND test_nr_pdcch_nid_worker --duty)
   set_tests_properties(test_nr_pdcch_nid_worker_duty PROPERTIES
     ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
@@ -3521,18 +3524,24 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_admit COMMAND test_nr_admit)
   add_dependencies(tests test_nr_admit)
   add_executable(test_nr_gpu_platform openair1/PHY/TOOLS/tests/nr_gpu_platform_test.cc
-                 openair1/PHY/TOOLS/nr_gpu_platform.c openair1/PHY/TOOLS/nr_gpu_mem.c)
+                 openair1/PHY/TOOLS/nr_gpu_platform.c openair1/PHY/TOOLS/nr_gpu_mem.c openair1/PHY/TOOLS/nr_host_membudget.c)
   target_compile_definitions(test_nr_gpu_platform PRIVATE NR_GPU_PLATFORM_TEST)
   target_include_directories(test_nr_gpu_platform PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS)
   target_link_libraries(test_nr_gpu_platform PRIVATE GTest::gtest_main ${CMAKE_DL_LIBS} pthread)
   add_test(NAME test_nr_gpu_platform COMMAND test_nr_gpu_platform)
   add_dependencies(tests test_nr_gpu_platform)
   # T6b: shared device-memory budget (pure functions + state through NR_GPU_MEM_BUDGET_MB; no device)
-  add_executable(test_nr_gpu_membudget_mem openair1/PHY/TOOLS/tests/nr_gpu_membudget_test.cc openair1/PHY/TOOLS/nr_gpu_platform.c)
+  add_executable(test_nr_gpu_membudget_mem openair1/PHY/TOOLS/tests/nr_gpu_membudget_test.cc openair1/PHY/TOOLS/nr_gpu_platform.c openair1/PHY/TOOLS/nr_host_membudget.c)
   target_compile_definitions(test_nr_gpu_membudget_mem PRIVATE NR_GPU_PLATFORM_TEST)
   target_include_directories(test_nr_gpu_membudget_mem PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS ${OPENAIR1_DIR})
   target_link_libraries(test_nr_gpu_membudget_mem PRIVATE GTest::gtest_main ${CMAKE_DL_LIBS} pthread)
   add_test(NAME test_nr_gpu_membudget_mem COMMAND test_nr_gpu_membudget_mem)
+  # host-RAM budget: parsers, cgroup probe on fixture trees, shares/fit, unified deduction
+  add_executable(test_nr_host_membudget openair1/PHY/TOOLS/tests/nr_host_membudget_test.cc openair1/PHY/TOOLS/nr_host_membudget.c)
+  target_include_directories(test_nr_host_membudget PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS)
+  target_link_libraries(test_nr_host_membudget PRIVATE GTest::gtest_main pthread)
+  add_test(NAME test_nr_host_membudget COMMAND test_nr_host_membudget)
+  add_dependencies(tests test_nr_host_membudget)
   add_dependencies(tests test_nr_gpu_membudget_mem)
 endif()
 

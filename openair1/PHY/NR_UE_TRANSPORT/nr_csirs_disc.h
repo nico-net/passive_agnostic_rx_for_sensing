@@ -104,6 +104,12 @@ bool nr_csirs_disc_enabled(void);                                  /* always tru
 extern int nr_csirs_disc_test_sweep_limit; /* hypotheses swept per batch (default 32); tests raise it */
 int nr_csirs_disc_ring_init(nr_csirs_disc_ring_t *r, int n_ant, int n_rb, int slots_per_frame, int capacity, bool unified);
 void nr_csirs_disc_ring_free(nr_csirs_disc_ring_t *r);
+/* On-demand sizing (PHY/TOOLS/nr_gpu_elastic.h): replaces the arrays of a ring (grid, metadata, locks, serials, device grid when it has one) by arrays of `capacity` slots.
+ * The new arrays are allocated first: on failure (-1) the ring is untouched. On success the ring is EMPTY (written = 0, epoch bumped, like a reset: the detector and
+ * the evidence caches see a new grid and start over). Called by the worker thread only (the only writer in time-domain mode), under the pipeline lock. */
+int nr_csirs_disc_ring_resize(nr_csirs_disc_ring_t *r, int capacity);
+/* true when the worker ring can be resized: running, time-domain mode (the snapshot ring is unused) */
+bool nr_csirs_disc_worker_resizable(void);
 /* Copy one FEP'd slot (rxdataF layout of the receiver: [ant][sym*ofdm_symbol_size]) into the ring.
  * Returns ring index written, or -1 when dropped. Never blocks. */
 int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r, const int16_t *const *rxdataF, int ofdm_symbol_size,
