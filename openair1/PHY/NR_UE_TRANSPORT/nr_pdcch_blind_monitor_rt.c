@@ -1262,42 +1262,50 @@ void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok)
 }
 /* T26b solver: the TDA index a layout reads (resolver offsets are immutable once published). */
 /* pdsch_gate_admit: producer-side admission for one planned PDSCH variant: a token bucket for blind-solver probes, and the SNR gate for full decodes.
- *   Probe bucket: 0.5 probes/slot, burst 16, only below 25 % ring fill; SNR gate margin 3 dB. v == NULL returns the number of probes available now (-1 = unlimited).
+ *   Probe bucket: 0.5 probes/slot, burst 16, only below 25 % ring fill; SNR gate margin 3 dB.
+ *   v == NULL (before planning) RESERVES the probes the bucket and the ring headroom allow now and returns that count (-1 = unlimited);
+ *   the planned probes are then admitted from this thread's reservation, and pdsch_gate_release() returns the unused part (SOLVERGATE,
+ *   nr_probe_gate_*: the grant's own enqueues and concurrent producers no longer refuse a plan the bucket allowed).
  *   A refused variant releases its solver entry with no credit. Caller: nr_pdcch_blind_monitor_run_occasion_one() (solver planning loop).
  */
 static double g_gate_rate, g_gate_burst; /* published copies of the bucket rate/burst (SOLVERCOVER fair share) */
-static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int mcs, long abs_slot)
+static pthread_mutex_t g_gate_mu = PTHREAD_MUTEX_INITIALIZER;
+static nr_probe_gate_t g_gate;
+static _Thread_local int t_gate_resv; /* probes this producer thread reserved for the grant it is planning */
+static const double kGateFill = 25.0;
+static void pdsch_gate_init_locked(void)
 {
   static int init;
-  const double rate = 0.5, burst = 16.0, fill = 25.0, margin = 3.0;
-  static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-  static double tokens;
-  static long last_abs = -1;
-  static uint64_t n_admit, n_throttle, n_full, n_skip_snr, n_explore;
   if (!init) {
-    tokens = burst;
-    g_gate_rate = rate;
-    g_gate_burst = burst;
+    nr_probe_gate_init(&g_gate, 0.5, 16.0);
+    g_gate_rate = g_gate.rate;
+    g_gate_burst = g_gate.burst;
     init = 1;
   }
+}
+/* pdsch_gate_release: returns this thread's unused probe reservation to the bucket. Called once a grant's variants are enqueued or dropped. */
+static void pdsch_gate_release(void)
+{
+  if (t_gate_resv <= 0) return;
+  pthread_mutex_lock(&g_gate_mu);
+  nr_probe_gate_release(&g_gate, &t_gate_resv);
+  pthread_mutex_unlock(&g_gate_mu);
+}
+static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int mcs, long abs_slot)
+{
+  const double margin = 3.0;
+  static uint64_t n_admit, n_throttle, n_full, n_skip_snr, n_explore;
   bool ok = true;
-  pthread_mutex_lock(&mu);
-  if (v == NULL) { /* budget query before planning: whole probes available now (no consumption); -1 = unlimited */
-    int avail = -1;
-    if (rate > 0.0) {
-      if (last_abs >= 0 && abs_slot > last_abs) tokens += rate * (double)(abs_slot - last_abs);
-      if (abs_slot > last_abs) last_abs = abs_slot;
-      if (tokens > burst) tokens = burst;
-      avail = nr_pdsch_passive_queue_fill_pct() < fill ? (int)tokens : 0;
-    }
-    pthread_mutex_unlock(&mu);
+  pthread_mutex_lock(&g_gate_mu);
+  pdsch_gate_init_locked();
+  if (v == NULL) { /* plan-time reservation: whole probes available now, bounded by the ring headroom below the fill bound */
+    if (t_gate_resv > 0) nr_probe_gate_release(&g_gate, &t_gate_resv); /* a previous grant's leftover (defensive) */
+    const int avail = nr_probe_gate_reserve(&g_gate, abs_slot, nr_pdsch_passive_queue_headroom((int)kGateFill), 1 << 20, &t_gate_resv);
+    pthread_mutex_unlock(&g_gate_mu);
     return avail;
   }
-  if (v->probe && rate > 0.0) {
-    if (last_abs >= 0 && abs_slot > last_abs) tokens += rate * (double)(abs_slot - last_abs);
-    if (abs_slot > last_abs) last_abs = abs_slot;
-    if (tokens > burst) tokens = burst;
-    if (tokens >= 1.0 && nr_pdsch_passive_queue_fill_pct() < fill) { tokens -= 1.0; n_admit++; }
+  if (v->probe) {
+    if (nr_probe_gate_take(&g_gate, abs_slot, nr_pdsch_passive_queue_fill_pct() < kGateFill, &t_gate_resv)) n_admit++;
     else { ok = false; n_throttle++; }
   } else if (!v->probe) {
     n_full++;
@@ -1314,7 +1322,7 @@ static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int m
     LOG_A(PHY, "SENSING: PDSCH_GATE probes admitted=%llu throttled=%llu fulls=%llu skipped_snr=%llu (ring fill %d%%)\n",
           (unsigned long long)n_admit, (unsigned long long)n_throttle, (unsigned long long)n_full,
           (unsigned long long)n_skip_snr, nr_pdsch_passive_queue_fill_pct());
-  pthread_mutex_unlock(&mu);
+  pthread_mutex_unlock(&g_gate_mu);
   if (!ok) nr_pdsch_solver_feedback(v->token, false, false);
   return ok;
 }
@@ -9006,6 +9014,7 @@ constdiag_done:;
         nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_CAP);
         nr_pdsch_solver_feedback(var[v].token, false, false);
       }
+      pdsch_gate_release(); /* SOLVERGATE: the reservation this grant did not use */
       continue;
     }
     if ((g_pdsch_sweep_on || (cand_task[ti].bwp_entry > 0 && cfg->dl_full_auto)) && !is_dci10) {

@@ -612,11 +612,15 @@ static int tda_of(int layout, nr_dci_bits_t p)
 /* pend_new: allocates the next pending-grant slot from a FIFO ring of SOLVER_PENDING entries, overwriting the oldest.
  *   Counts overwritten live entries in g_st.dropped (their CRC feedback will be lost). Caller: emit(), under g_mu.
  */
+static void refund_untested(const pending_t *p);
 static pending_t *pend_new(void)
 {
   static uint32_t cur;
   pending_t *p = &g_p[cur]; /* FIFO: the oldest entry is the one most likely lost in the queue */
-  if (p->used) g_st.dropped++;
+  if (p->used) {
+    g_st.dropped++;
+    refund_untested(p); /* SOLVERREFUND: its feedback can no longer arrive; the probe counts as untested */
+  }
   cur = (cur + 1) % SOLVER_PENDING;
   return p;
 }
@@ -796,6 +800,17 @@ static void coverage_refund(solver_rnti_t *r, const pending_t *p)
       if (e->key == key && e->count > 0) e->count--; /* absent: the table started a new round since the plan */
     }
   }
+}
+
+/* refund_untested: an unsolved RNTI's search probe that was never tested (uncredited feedback, or its pending entry overwritten
+ * before any feedback) neither consumes search coverage nor counts toward the search back-off. g_mu held. */
+static void refund_untested(const pending_t *p)
+{
+  if (!p->used || p->phase != 0 || !p->probe || p->slot < 0 || p->slot >= SOLVER_RNTIS) return;
+  solver_rnti_t *r = &g_r[p->slot];
+  if (!r->used || r->solved) return;
+  coverage_refund(r, p);
+  if (r->n_probe > 0) r->n_probe--;
 }
 
 /* plan_coverage: planner: fills the grant's budget with the least-tried physical hypotheses across readings.
@@ -1442,12 +1457,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
   if (p != NULL && p->phase == 0 && p->probe && g_r[p->slot].used && !g_r[p->slot].solved)
     g_r[p->slot].why[!credit ? W_PNOCRED : crc_ok ? W_POK : W_PFAIL]++;
   if (p == NULL || !credit) {
-    if (p && !credit && p->phase == 0 && p->probe && g_r[p->slot].used && !g_r[p->slot].solved) {
-      /* SOLVERREFUND: an untested probe neither consumes search coverage nor counts toward the search back-off */
-      solver_rnti_t *rr = &g_r[p->slot];
-      coverage_refund(rr, p);
-      if (rr->n_probe > 0) rr->n_probe--;
-    }
+    if (p && !credit) refund_untested(p); /* SOLVERREFUND */
     if (p) p->used = false;
     pthread_mutex_unlock(&g_mu);
     return;
@@ -1836,4 +1846,61 @@ int nr_tda_field_rows(int pos, nr_dci_bits_t p, int len, int last, int max, uint
 out:
   pthread_mutex_unlock(&g_tf_mu);
   return n;
+}
+
+/* ---- SOLVERGATE: probe admission as a reservation (see nr_pdsch_solver.h) ---- */
+void nr_probe_gate_init(nr_probe_gate_t *g, double rate, double burst)
+{
+  memset(g, 0, sizeof(*g));
+  g->rate = rate;
+  g->burst = burst;
+  g->tokens = burst;
+  g->last_abs = -1;
+}
+
+static void probe_gate_refill(nr_probe_gate_t *g, long abs_slot)
+{
+  if (g->last_abs >= 0 && abs_slot > g->last_abs) g->tokens += g->rate * (double)(abs_slot - g->last_abs);
+  if (abs_slot > g->last_abs) g->last_abs = abs_slot;
+  if (g->tokens > g->burst) g->tokens = g->burst;
+}
+
+int nr_probe_gate_reserve(nr_probe_gate_t *g, long abs_slot, int headroom, int max, int *resv)
+{
+  probe_gate_refill(g, abs_slot);
+  int n = (int)g->tokens;
+  if (headroom >= 0) {
+    const int room = headroom - g->resv_jobs;
+    if (room < n) n = room;
+  }
+  if (n > max) n = max;
+  if (n <= 0) return 0;
+  g->tokens -= n;
+  g->resv_jobs += n;
+  *resv += n;
+  return n;
+}
+
+bool nr_probe_gate_take(nr_probe_gate_t *g, long abs_slot, bool ring_ok, int *resv)
+{
+  if (*resv > 0) {
+    (*resv)--;
+    if (g->resv_jobs > 0) g->resv_jobs--;
+    return true;
+  }
+  probe_gate_refill(g, abs_slot);
+  if (g->tokens >= 1.0 && ring_ok) {
+    g->tokens -= 1.0;
+    return true;
+  }
+  return false;
+}
+
+void nr_probe_gate_release(nr_probe_gate_t *g, int *resv)
+{
+  if (*resv <= 0) return;
+  g->tokens += *resv;
+  if (g->tokens > g->burst) g->tokens = g->burst;
+  g->resv_jobs = g->resv_jobs > *resv ? g->resv_jobs - *resv : 0;
+  *resv = 0;
 }

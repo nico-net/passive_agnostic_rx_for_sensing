@@ -184,6 +184,26 @@ int nr_pdsch_solver_layout_cache(uint16_t rnti, uint64_t key, int max_fail, uint
 typedef struct { uint64_t hit, miss, stale, fail_resolve, bypass; } nr_pdsch_solver_lc_stats_t;
 void nr_pdsch_solver_layout_cache_stats(nr_pdsch_solver_lc_stats_t *s);
 
+/* SOLVERGATE (2026-10-24): the probe admission bucket as a reservation. A grant's planner used to read the bucket (whole tokens, ring
+ * fill below the bound) and then each planned probe was admitted again against the live bucket and ring: the grant's own enqueues raise
+ * the fill (a 20-deep ring moves 5 % per job) and concurrent producers spend the same tokens, so a plan the bucket allowed was then
+ * refused probe by probe (273 PRB: 540 of 1189 planned probes). reserve() takes min(tokens, ring headroom not yet reserved) at plan
+ * time, take() admits a probe from that reservation, release() returns what the grant did not use. Same rate, burst and fill bound.
+ * Pure state; the caller serialises (one mutex). */
+typedef struct {
+  double tokens, rate, burst;
+  long last_abs;
+  int resv_jobs; ///< reserved and not yet taken or released (ring slots promised to planners)
+} nr_probe_gate_t;
+void nr_probe_gate_init(nr_probe_gate_t *g, double rate, double burst);
+/** Refill to abs_slot, then reserve up to max whole tokens, bounded by headroom jobs (-1 = no ring bound) minus the reserved ones.
+ *  Adds the reservation to *resv and returns it. */
+int nr_probe_gate_reserve(nr_probe_gate_t *g, long abs_slot, int headroom, int max, int *resv);
+/** Admit one probe: from *resv when > 0, else from the live bucket (refill to abs_slot, ring_ok = fill below the bound). */
+bool nr_probe_gate_take(nr_probe_gate_t *g, long abs_slot, bool ring_ok, int *resv);
+/** Return the unused reservation *resv to the bucket (capped at the burst); *resv = 0. */
+void nr_probe_gate_release(nr_probe_gate_t *g, int *resv);
+
 typedef struct { uint64_t planned, probes, fulls, probe_ok, full_ok, candidates, solved, dropped; } nr_pdsch_solver_stats_t;
 void nr_pdsch_solver_stats(nr_pdsch_solver_stats_t *s);
 

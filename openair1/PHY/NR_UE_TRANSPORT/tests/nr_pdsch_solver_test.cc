@@ -992,3 +992,75 @@ TEST(PdschSolverRefund, ThrottledSecondProbeStillSolves)
   EXPECT_LE(solved_at, 400);
   nr_pdsch_solver_reset();
 }
+
+/* SOLVERREFUND, second gap: a probe whose pending entry the 4096-entry FIFO overwrites before any feedback can never report back;
+ * it is untested and must be refunded like an uncredited one. */
+TEST(PdschSolverRefund, OverwrittenPendingEntryIsRefunded)
+{
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(nullptr, nullptr);
+  nr_pdsch_solver_set_alt_scr(-1, nullptr, 0, false);
+  const uint16_t id = 100, other = 200;
+  nr_pdsch_solver_reading_t rd = {&id, 1, 16, 1, 1, 2}, ro = {&other, 1, 16, 1, 1, 2};
+  nr_dci_bits_t p = {{42, 0, 0}};
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR], w[NR_PDSCH_SOLVER_MAX_VAR];
+  ASSERT_EQ(nr_pdsch_solver_plan(0x7788, p, 49, 2, 2, &rd, 1, 2, v), 2); // planned, never reported back (lost in the queue)
+  int emitted = 0;
+  for (int g = 0; emitted < 4200 && g < 5000; g++) { // another RNTI's probes wrap the FIFO over 0x7788's entries
+    nr_dci_bits_t q = {{(uint64_t)(1000 + g), 0, 0}};
+    const int n = nr_pdsch_solver_plan(0x1111, q, 49, 2, 2, &ro, 1, 24, w);
+    for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(w[i].token, false, false); // uncredited: no search back-off
+    emitted += n;
+  }
+  ASSERT_GE(emitted, 4096);
+  nr_pdsch_solver_feedback(v[0].token, false, true); // stale tokens: their entries are gone, nothing is credited
+  nr_pdsch_solver_feedback(v[1].token, false, true);
+  ASSERT_EQ(nr_pdsch_solver_plan(0x7788, p, 49, 2, 2, &rd, 1, 2, w), 2);
+  for (int i = 0; i < 2; i++) {
+    EXPECT_EQ(w[i].S, v[i].S) << "variant " << i;
+    EXPECT_EQ(w[i].add_pos, v[i].add_pos) << "variant " << i;
+    EXPECT_EQ(w[i].table, v[i].table) << "variant " << i;
+    nr_pdsch_solver_feedback(w[i].token, false, true);
+  }
+  nr_pdsch_solver_reset();
+}
+
+/* SOLVERGATE: the probes the planner was granted are admitted even when the grant's own enqueues push the ring to the fill bound
+ * (20-deep ring, 25 % bound: the old per-probe re-check refused the 2nd probe of a 2-probe plan at 3 queued jobs). */
+TEST(ProbeGate, PlannedProbesAreAdmittedFromTheReservation)
+{
+  nr_probe_gate_t g;
+  nr_probe_gate_init(&g, 0.5, 16.0);
+  const int depth = 20, bound = 25;
+  int held = 3, resv = 0;
+  auto headroom = [&]() { const int n = (bound * depth - 100 * held + 99) / 100; return n > 0 ? n : 0; };
+  auto ring_ok = [&]() { return 100 * held / depth < bound; };
+  const int planned = nr_probe_gate_reserve(&g, 10, headroom(), 24, &resv);
+  EXPECT_EQ(planned, 2) << "16 tokens, but only 2 more jobs keep the ring below 25 %";
+  int admitted = 0;
+  for (int k = 0; k < planned; k++)
+    if (nr_probe_gate_take(&g, 10, ring_ok(), &resv)) { admitted++; held++; }
+  EXPECT_EQ(admitted, planned) << "every planned probe is admitted";
+  EXPECT_FALSE(nr_probe_gate_take(&g, 10, ring_ok(), &resv)) << "beyond the plan the live bound still holds (ring at 25 %)";
+  EXPECT_EQ(g.resv_jobs, 0);
+  EXPECT_NEAR(g.tokens, 14.0, 1e-9);
+}
+
+TEST(ProbeGate, ConcurrentPlannersShareTheBucketAndUnusedProbesReturn)
+{
+  nr_probe_gate_t g;
+  nr_probe_gate_init(&g, 0.5, 4.0);
+  int ra = 0, rb = 0;
+  EXPECT_EQ(nr_probe_gate_reserve(&g, 1, 3, 24, &ra), 3) << "A: 4 tokens, 3 jobs of ring headroom";
+  EXPECT_EQ(nr_probe_gate_reserve(&g, 1, 3, 24, &rb), 0) << "B: the headroom is promised to A";
+  EXPECT_TRUE(nr_probe_gate_take(&g, 1, false, &ra));
+  nr_probe_gate_release(&g, &ra); // A planned 1 of its 3
+  EXPECT_EQ(ra, 0);
+  EXPECT_EQ(g.resv_jobs, 0);
+  EXPECT_NEAR(g.tokens, 3.0, 1e-9);
+  EXPECT_EQ(nr_probe_gate_reserve(&g, 1, 2, 24, &rb), 2) << "B gets what A returned (ring headroom now 2)";
+  nr_probe_gate_release(&g, &rb);
+  EXPECT_EQ(nr_probe_gate_reserve(&g, 3, -1, 24, &rb), 4) << "no ring: tokens refill at 0.5/slot up to the burst";
+  nr_probe_gate_release(&g, &rb);
+  EXPECT_NEAR(g.tokens, 4.0, 1e-9);
+}
