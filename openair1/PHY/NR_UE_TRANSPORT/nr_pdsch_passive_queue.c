@@ -2427,6 +2427,15 @@ int nr_pdsch_passive_queue_fill_pct(void)
   return (int)(100 * (g_count + g_n_pending) / g_depth); /* racy read: admission hint only */
 }
 
+/* nr_pdsch_passive_queue_headroom: number of further jobs k such that fill_pct() of the ring after k more enqueues is still below
+ *   fill_pct, i.e. 100 * (held + k) < fill_pct * depth; -1 when the pool is not running. Caller: nr_pdcch_blind_monitor_rt.c (probe gate). */
+int nr_pdsch_passive_queue_headroom(int fill_pct)
+{
+  if (!atomic_load_explicit(&g_running, memory_order_acquire) || g_depth <= 0) return -1;
+  const int n = (fill_pct * g_depth - 100 * (g_count + g_n_pending) + 99) / 100; /* racy read: admission hint only */
+  return n > 0 ? n : 0;
+}
+
 /* nr_pdsch_passive_queue_enqueue: producer entry point: adds one passive PDSCH grant to the pending slot batch; the batch is flushed when the slot changes or the batch is full.
  *   Stamps the config epoch and sensing epoch, normalises the PRB allocation (refuses invalid PRB lists), and flushes at once when CSI-RS discovery is on.
  *   Returns false when the pool is not running or the grant is refused. Caller: nr_pdcch_blind_monitor_rt.c (per PDCCH grant).
