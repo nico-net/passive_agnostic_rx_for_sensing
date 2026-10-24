@@ -201,6 +201,9 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job);
 void nr_pdsch_passive_queue_flush(void);
 /** T26c: ring occupancy in percent (0 when not running), for producer-side admission of solver probes. */
 int nr_pdsch_passive_queue_fill_pct(void);
+/** SOLVERGATE: jobs that can still be enqueued while nr_pdsch_passive_queue_fill_pct() stays below fill_pct (-1 = pool not running:
+ *  no ring bound, the fill test always passes). Racy read, admission hint only. */
+int nr_pdsch_passive_queue_headroom(int fill_pct);
 /** T26c ISAC_PDSCH_DMRS_ID_PER_CORESET=1: PDSCH DM-RS identity decided blind (DM-RS correlation over 0..1023, then
  *  1024..65535) from the grants of ONE discovered CORESET's UEs (key = its PDCCH nID); -1 while undecided. */
 int nr_pdsch_passive_coreset_dmrs_id(int key);

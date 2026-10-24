@@ -27,7 +27,7 @@
 extern "C" {
 #endif
 
-#define NR_PDSCH_SOLVER_MAX_LAYOUTS 32768 /* = NR_DCI11_LAYOUT_MAX */
+#define NR_PDSCH_SOLVER_MAX_LAYOUTS 65536 /* >= NR_DCI11_LAYOUT_MAX (65535; id 0xFFFF is "none") */
 #define NR_PDSCH_SOLVER_MAX_VAR 24
 
 typedef struct {
@@ -37,11 +37,13 @@ typedef struct {
   uint16_t dmrs_ports; ///< parsed DCI 1_1 antenna-ports bitmap
   uint8_t n_layers;    ///< number of DM-RS ports / PDSCH layers in this reading
   uint8_t mcs;         ///< MCS parsed by this reading
+  float fit;           ///< DM-RS evidence for this reading's PRBs in this slot, 0..1 (F1 against the PRBs carrying the RNTI's
+                       ///< DM-RS); < 0 = not measured. Orders the search and weights its probe share; never a hard cut.
 } nr_pdsch_solver_reading_t;
 
-/* ISAC_PDSCH_SOLVER_NL_PREF=N (default off) probes one-layer QPSK readings first and waits up to N grants before
- * falling back when none is available. ISAC_PDSCH_SOLVER_THREAD_CTX=1 (default off) keeps each scan consumer's grant
- * scrambling/CORESET/slot context separate so concurrent plans cannot use another consumer's hypotheses. */
+/* Readings are ranked only by evidence: the DM-RS fit (reading.fit) orders and weights the search, the CRC decides. There is no
+ * width limit and no modulation preference (DCI11-RESOLVER 2026-10-24). Each scan consumer keeps its own grant
+ * scrambling/CORESET/slot context, so concurrent plans cannot use another consumer's hypotheses. */
 /* ISAC_PDSCH_SOLVER_COVERAGE=1 (default off) tracks search progress per stable layout, TDRA and scrambling identity,
  * so changes in the order/number of readings between grants cannot repeatedly skip a physical hypothesis. */
 
@@ -75,10 +77,9 @@ bool nr_pdsch_solver_owns(uint16_t rnti);
  * `budget` caps the probes; returns the number written to out[]. */
 int nr_pdsch_solver_plan(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uint8_t mcs, int l0,
                          const nr_pdsch_solver_reading_t *rd, int n_rd, int budget, nr_pdsch_solver_var_t *out);
-/** WL-SOLVER: BWP width in RB (0 = unknown); a BWP narrower than 2 x 48 RB is searched up to its full width. */
-void nr_pdsch_solver_set_bwp_rb(int rb);
-/** Widest reading searched for a BWP of bwp_rb RB (48 for wide or unknown BWPs). Pure. */
-uint16_t nr_pdsch_solver_search_max_rb(int bwp_rb);
+/** A SOLVED RNTI's layout set (the layouts consistent with its CRC passes, the representative among them), ascending, at most
+ * `max`: the caller then parses only these instead of every live layout. -1 when the RNTI is not solved or the set exceeds max. */
+int nr_pdsch_solver_layouts(uint16_t rnti, uint16_t *ids, int max);
 /** As nr_pdsch_solver_plan(), for a slot that carries run-time-discovered CSI-RS resources (csirs_slot): whether the
  * gNB rate-matches this RNTI's PDSCH around them (TS 38.214 5.1.4: only resources configured for THIS UE) is a per-RNTI
  * hypothesis chosen by TB CRC -- both are probed until one passes. The search never starts on such a slot, so a
@@ -87,6 +88,8 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
                               const nr_pdsch_solver_reading_t *rd, int n_rd, int budget, nr_pdsch_solver_var_t *out);
 /** T26c: absolute slot (signal time) of the grant about to be planned, for the per-RNTI solve-time report. */
 void nr_pdsch_solver_set_now(uint64_t abs_slot);
+/* SOLVERTDDEND: last DL symbol (0..13) of the planned grant's slot from the broadcast TDD pattern, -1 = unknown; set per grant */
+void nr_pdsch_solver_set_slot_last(int last);
 /** T26c: post-equalisation SNR (dB) of one full decode of `rnti` (EVMGRANT); kept as a per-RNTI EMA. */
 void nr_pdsch_solver_note_snr(uint16_t rnti, float snr_db, int comb, bool crc_ok); /* comb: the receiver of that decode (EVMGRANT comb=), 0 unknown; crc_ok: MRCBUG, mode 2 keeps only passing decodes */
 /** T26c: the RNTI's SNR EMA once >= 3 measurements exist; false otherwise. */
@@ -182,6 +185,26 @@ bool nr_rnti_layout_cache_on(void);
 int nr_pdsch_solver_layout_cache(uint16_t rnti, uint64_t key, int max_fail, uint16_t *ids, int max);
 typedef struct { uint64_t hit, miss, stale, fail_resolve, bypass; } nr_pdsch_solver_lc_stats_t;
 void nr_pdsch_solver_layout_cache_stats(nr_pdsch_solver_lc_stats_t *s);
+
+/* SOLVERGATE (2026-10-24): the probe admission bucket as a reservation. A grant's planner used to read the bucket (whole tokens, ring
+ * fill below the bound) and then each planned probe was admitted again against the live bucket and ring: the grant's own enqueues raise
+ * the fill (a 20-deep ring moves 5 % per job) and concurrent producers spend the same tokens, so a plan the bucket allowed was then
+ * refused probe by probe (273 PRB: 540 of 1189 planned probes). reserve() takes min(tokens, ring headroom not yet reserved) at plan
+ * time, take() admits a probe from that reservation, release() returns what the grant did not use. Same rate, burst and fill bound.
+ * Pure state; the caller serialises (one mutex). */
+typedef struct {
+  double tokens, rate, burst;
+  long last_abs;
+  int resv_jobs; ///< reserved and not yet taken or released (ring slots promised to planners)
+} nr_probe_gate_t;
+void nr_probe_gate_init(nr_probe_gate_t *g, double rate, double burst);
+/** Refill to abs_slot, then reserve up to max whole tokens, bounded by headroom jobs (-1 = no ring bound) minus the reserved ones.
+ *  Adds the reservation to *resv and returns it. */
+int nr_probe_gate_reserve(nr_probe_gate_t *g, long abs_slot, int headroom, int max, int *resv);
+/** Admit one probe: from *resv when > 0, else from the live bucket (refill to abs_slot, ring_ok = fill below the bound). */
+bool nr_probe_gate_take(nr_probe_gate_t *g, long abs_slot, bool ring_ok, int *resv);
+/** Return the unused reservation *resv to the bucket (capped at the burst); *resv = 0. */
+void nr_probe_gate_release(nr_probe_gate_t *g, int *resv);
 
 typedef struct { uint64_t planned, probes, fulls, probe_ok, full_ok, candidates, solved, dropped; } nr_pdsch_solver_stats_t;
 void nr_pdsch_solver_stats(nr_pdsch_solver_stats_t *s);
