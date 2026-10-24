@@ -55,14 +55,16 @@ Date: 2026-10-20. Status: protocol only. No experiment in this document has been
   DGX (aarch64), from `cmake_targets/ran_build/build`:
 
   ```
-  ninja nr-uesoftmodem oai_usrpdevif rfsimulator params_libconfig nr-softmodem tests && ctest -j4
+  ninja nr-uesoftmodem nr-uesoftmodem-optional-modules oai_usrpdevif rfsimulator params_libconfig nr-softmodem tests && ctest -j4
   ```
 
   Cloud x86, from the same build directory, with `-DOAI_USRP=OFF` set at configure time:
 
   ```
-  ninja nr-uesoftmodem rfsimulator params_libconfig nr-softmodem tests && ctest -j4
+  ninja nr-uesoftmodem nr-uesoftmodem-optional-modules rfsimulator params_libconfig nr-softmodem tests && ctest -j4
   ```
+
+  sens6 (x86 with a discrete GPU, CUDA 12.4, gcc 15), configured with `-DOAI_USRP=OFF -DENABLE_ISAC_SENSING=ON -DENABLE_LDPC_CUDA=ON`, then `ninja -j4 nr-uesoftmodem nr-uesoftmodem-optional-modules rfsimulator params_libconfig nr-softmodem tests` and `ctest -j1`. Label the build note with `sens6` and the GPU tier.
 
   Known intermittent ARM ctest failures: `dft_test`, `test_nr_modulation`, `test_nr_pusch_ra0_qam256`, `test_nr_pusch_ra0_qam64` (CLAUDE.md). Record them in the build note.
 - Same IQ input for A/B. Compare two builds on the same input only. The IQ replay inputs are `ISAC_PASSIVE_REPLAY_INPUT` and `ISAC_RAW_IQ_*` (`[CODE-READ, audit section 2.5]`).

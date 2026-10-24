@@ -8,6 +8,8 @@ Build note: the optional dlopen'd GPU/AAL modules (ldpc_cuda, pdsch_gpu, pdcch_g
 build dependencies of nr-uesoftmodem (a module failing on some CUDA toolchain must not block the receiver link). They hang off
 the aggregate target nr-uesoftmodem-optional-modules (part of ALL). With explicit targets build both:
   ninja nr-uesoftmodem nr-uesoftmodem-optional-modules ...   (plain `ninja` builds everything; `ninja -k 0` keeps going past a failed module)
+sens6 (x86 + discrete GPU, CUDA 12.4, gcc 15): cmake -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_TESTS=ON -DOAI_USRP=OFF -DENABLE_ISAC_SENSING=ON -DENABLE_LDPC_CUDA=ON <src>;
+  ninja -j4 nr-uesoftmodem nr-uesoftmodem-optional-modules rfsimulator params_libconfig nr-softmodem tests (host RAM 14.8 GB); ctest -j1.
 
 
 Postconv gate calibration (rfsim_regress.sh, GATE_MODE=postconv default; GATE_MODE=legacy = old criterion)

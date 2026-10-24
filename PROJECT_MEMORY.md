@@ -1169,10 +1169,22 @@ cmake ../../.. -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DENABLE_TESTS=ON -DOAI_USRP=ON -DOAI_SIMU=ON \
   -DENABLE_ISAC_SENSING=OFF \
   -DUHD_LIBRARIES=/usr/local/lib/libuhd.so -DUHD_INCLUDE_DIRS=/usr/local/include
-ninja nr-uesoftmodem oai_usrpdevif rfsimulator params_libconfig nr-softmodem
+ninja nr-uesoftmodem nr-uesoftmodem-optional-modules oai_usrpdevif rfsimulator params_libconfig nr-softmodem
 ninja tests            # offline suite
 ctest -j4 --output-on-failure
 ```
+
+Portable build, sens6 (x86_64 + discrete GPU, CUDA 12.4, gcc 15; `[MEASURED, sens6 build, 2026-10-24]`, branch `sens6/build-portable` @ `5931623290`, merged in `sens6/integ`):
+
+```bash
+cmake -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_TESTS=ON -DOAI_USRP=OFF -DENABLE_ISAC_SENSING=ON -DENABLE_LDPC_CUDA=ON <src>
+ninja -j4 nr-uesoftmodem nr-uesoftmodem-optional-modules rfsimulator params_libconfig nr-softmodem tests   # host RAM 14.8 GB
+ctest -j1
+```
+
+- `nr-uesoftmodem` no longer depends on the optional dlopen'd GPU/accelerator modules (commit `5931623290`): they hang off `nr-uesoftmodem-optional-modules`, so a failing module no longer blocks the receiver link. Build that target explicitly (plain `ninja` builds all).
+- The default CUDA arch list drops the archs the found nvcc cannot target, with a warning (`d89db002eb`). `-D_GNU_SOURCE` is no longer needed (`5931623290`).
+- Known sens6 ctest failures: `nr_td_sim_test`, `test_nr_ssb_rate_match_prod`, `test_vrtsim_cirdb` (§25, 2026-10-24 block).
 
 Equivalent via OAI's script (what sens6 used originally): `./build_oai --nrUE -w USRP -c` then enable tests/options
 with `cmake -D... .` in `ran_build/build`. The sens6 trees used `make -j12 <target>`; lane builds used
@@ -3116,7 +3128,7 @@ telnet support, including both CI targets required for the BWP action:
 ```bash
 R=$PWD; B=$R/cmake_targets/ran_build/build
 flock -s -w 7200 /tmp/td_measure.lock nice -n 19 cmake -S "$R" -B "$B" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_TESTS=ON -DENABLE_TELNETSRV=ON -DENABLE_ISAC_SENSING=ON -DOAI_SIMU=ON -DOAI_USRP=OFF -DENABLE_LDPC_CUDA=OFF
-flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ninja -C "$B" -j8 nr-uesoftmodem rfsimulator params_libconfig nr-softmodem telnetsrv telnetsrv_ci tests
+flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ninja -C "$B" -j8 nr-uesoftmodem nr-uesoftmodem-optional-modules rfsimulator params_libconfig nr-softmodem telnetsrv telnetsrv_ci tests
 flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ctest --test-dir "$B" -j4 --output-on-failure
 ```
 
@@ -3128,7 +3140,7 @@ sens6 (nvcc 12.4 cannot target it). Build separately, substituting the observed 
 nvidia-smi --query-gpu=name,memory.total,compute_cap,driver_version --format=csv,noheader; nvcc --version
 BG=$R/cmake_targets/ran_build/build_gpu
 flock -s -w 7200 /tmp/td_measure.lock nice -n 19 cmake -S "$R" -B "$BG" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_TESTS=ON -DENABLE_TELNETSRV=ON -DENABLE_ISAC_SENSING=ON -DOAI_SIMU=ON -DOAI_USRP=OFF -DENABLE_LDPC_CUDA=ON -DLDPC_CUDA_ARCH=89
-flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ninja -C "$BG" -j8 nr-uesoftmodem rfsimulator params_libconfig nr-softmodem telnetsrv telnetsrv_ci tests
+flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ninja -C "$BG" -j8 nr-uesoftmodem nr-uesoftmodem-optional-modules rfsimulator params_libconfig nr-softmodem telnetsrv telnetsrv_ci tests
 ```
 
 Set `BUILD=$BG R13_GPU=1` only for a GPU campaign. Require `libtelnetsrv.so` and `libtelnetsrv_ci.so`, then verify
@@ -4860,6 +4872,38 @@ Scope: DGX spark-74c3, X410 unit 34B2AF1, OTA at DEIB. Branch `csd/single-int` (
 - `capture_raw` needs its output directory to exist.
 
 **6. Open work (agents running).** WindTre/Iliad solver (`csd/wl-solver`); discovery GPU contention (`csd/disc-contention`); PCI 675 narrow-grid sync (`csd/narrow51`); solver CRC gap and gate re-base (`csd/solver-wide` round 2). Daytime interleaved A/B on all 4 operators scheduled 2026-10-24 09:00 (`rr-orchestration/ota/run_int_20261023.sh day`).
+
+### 2026-10-24 sens6 portability (`sens6/integ` @ `1d497f7b3a`; sens6 = x86_64, RTX 4060 Ti cc 8.9, CUDA 12.4, gcc 15; no OTA, no DGX run in this block)
+
+Scope: the same code on any NVIDIA GPU and host. Branches: `sens6/discrete-gpu` @ `e300e1e63e` (3-tier GPU platform, T0-T8, T6b, GPU ISA twins; merged `1d497f7b3a`), `sens6/build-portable` @ `5931623290` (merged `157fca8cfe`), `sens6/mixedslot` @ `9afc38e09c` (b2-fix). Plan: `docs/superpowers/plans/2026-10-23-discrete-gpu-backend.md` (§7 user decisions). Report: `docs/superpowers/reports/csd/SENS6-PORTABILITY-2026-10-24.md`. Cells and hosts are never pooled: the DGX GB10 (`[MEASURED, DGX GB10 …]`) and sens6 (`[MEASURED, sens6 …]`) numbers stay separate.
+
+**1. Code that exists now** (`[CODE-READ, git]`; no run is implied by this list).
+- DFT-alignment crash fix `9aef537ffb`: 64-B aligned DFT outputs in the DL traffic probe and SRS FEP, probe started once. Crash was `oai_dfts.c:3441` at 16-mod-32 buffers on AVX2 (`[MEASURED, sens6 rfsim, @e9c874c308]`, round 1; no crash after the fix, `[MEASURED, sens6 rfsim, @595c5dcf33]`, SENS6-SIM-2026-10-23 §Appendix).
+- CUDA compat and arch list: `d89db002eb` (CUDA 12.3..13.x shims in `nr_gpu_compat.h`; nvcc-aware arch list that drops archs nvcc cannot build, with a WARNING, FATAL only if none remain). CUDA 12.4 stays supported (Q2 in plan §7: no move to 13.x).
+- Three tiers, chosen per device at probe and logged in `SENSING: GPU_PLATFORM … tier=` (`c386fb8767`, `7aebf86bae`): SHARED iff pageable access and (integrated or host page tables), confirmed by a probe kernel; else DISCRETE (HMM over PCIe, device buffers, pinned staging, explicit async copies); else CPU. `NR_GPU_FORCE_MODEL=discrete|cpu` is a diagnostic override, logged as FORCED. Fault or timeout in the probe falls back to DISCRETE or CPU (`7aebf86bae`, M1/M2).
+- Tier tests `_discrete` / `_cpu` (`6fd421121b`, T8); green-context discovery SMs from the device, `max(1, SMs/6)` (`09bdf2d3f7`, T7); GPUPASS DISCRETE parity (`8de80ae9ef`, T5: rank>1 DM-RS SNR rows, LDPC counters and qm row on DISCRETE, ordered delay-table H2D).
+- GPUPASS graph cap from free memory at probe (`6797027096`, T6). Shared device-memory budget (`237e4d25d9`, T6b, merged `189d46c797`): one budget `0.85 * free_at_probe - 768 MB`, per-module shares (csirs 36, ldpc pool 8, cb0 11, td_cb0 7, pdcch_nid 10, pass 8, graphs 20); knobs scale down to floors; a module below its floor is not ready and falls back to CPU. The csirs module's `segment_scratch()` mode replaces the per-thread local-memory reservation (86 KB per thread) when it does not fit its share; the GB10 path keeps the full-size arithmetic.
+- x86 and NEON DFT and rotation GPU twins (`da99b7e89f`, `8d5a91f868`, merged `e300e1e63e`): `nr_exact::isa_profile()` runs every twin on the GPU against the host CPU at init (self-test, bit-identical pair kept, fail closed to P_NONE) and logs `SENSING: GPU_ISA_TWIN dft_twin=<neon|avx2|none> rot_twin=<…>`. GB10 keeps NEON+QRDMX.
+- nvcc 12.4 int16 bug (`[MEASURED, sens6 build, @da99b7e89f]`, commit text): ptxas folds `sext16(neg16(x))` into a 32-bit negation, giving +32768 for x = -32768 when the value stays in a register. Workaround: `nr_isa::xneg` in the NEON twin and int-domain selects in the wrap helpers.
+- simde fix `5b165facd3` (merged `d936f6e6a8`): `simde_mm_average` AVX2 path accumulates in the same 4 wrapping int32 lanes, zero-extended, as SSE/NEON; identical on full-scale inputs.
+- Portable build `5931623290` (merged `157fca8cfe`): `_GNU_SOURCE` guards, optional modules moved to `nr-uesoftmodem-optional-modules`, `nr_pusch_ra0sim` links the passive-UL sources, `<algorithm>` in two gtest sources (§9).
+
+**2. Measurements on sens6** (all `[MEASURED, sens6 rfsim, …]`, CPU decode unless a GPU tier is stated, unpinned threads, idle host under `flock -x /tmp/td_measure.lock`).
+- *Build and ctest* `[MEASURED, sens6 build+ctest, @e300e1e63e]`: `ninja -k 0` fails only `nr_pusch_ra0sim` (known link, fixed by `5931623290`). `ctest -j1`: 280 run, 268 pass, 12 fail = 9x `test_nr_pusch_ra0_*` (no target at that HEAD), `nr_td_sim_test`, `test_nr_ssb_rate_match_prod`, `test_vrtsim_cirdb`. 5 skipped (CPU variants), 15 disabled. Known sens6 set: `nr_td_sim_test`, `test_nr_ssb_rate_match_prod`, `test_vrtsim_cirdb`.
+- *Gate, 106 PRB 4 RX, 420 s x2, `@4a94af8c0b`* `[MEASURED, sens6 rfsim, 106 PRB 4 RX]`. Old scorer `score_rx.py`: `n_contexts` 0 FAIL (no `Technique D CONVERGED`, §25 2026-10-23/24 item 2). Solver scorer `score_rx_solver.py` (proposed): n_solved 1 PASS (both), solve_s 1.206 / 1.28 PASS (<=10), post_solve_crc 86.55 / 86.59 FAIL (>=99.8), post_solve_tr 44724 / 42733 PASS, crc_floor 85.39 / 85.44 FAIL (>=93.4), drop_full 0.0126 / 0.0057 PASS (<=2.5). Verdict FAIL both. Decoded 85 % of PDSCHQ for RNTI 0x1234.
+- *Mixed-slot b2-fix, 106 PRB 4 RX, 420 s x2, `sens6/mixedslot` @ `9afc38e09c`* (`ms_b2_r1`, `ms_b2_r2`; scored today with `score_rx_solver.py`): solver gate PASS both: n_solved 1, solve_s 1.046 / 0.886, post_solve_crc 99.96 / 99.96 (>=99.8), post_solve_tr 43775 / 43813, crc_floor 98.80 / 98.94 (>=93.4), drop_full 0.29 / 0.0087 (<=2.5). Old scorer still FAIL (no contexts). Single UE (0x1234), single arm: no comparison with a pre-fix baseline in this block.
+- *273 PRB 4 RX, 180 s, `@4a94af8c0b`* `[MEASURED, sens6 rfsim, 273 PRB]`. Rank 1 (auto conf): synced, 0 of 4221 PDSCH decoded; the wide-only rule fired at 76.5 s and never solved (`dci01 accepts 3201` = noise). Rank 4 (pinned conf, `ue.passive.pin49r4.100mhz.conf`): 3315/3315 decoded, CRC 100.0 %, goal p50 / p99 / p999 33097 / 34135 / 38132 us (n_real 3452). The auto rank-4 conf never synced (not a valid bed).
+- *T9, 273 PRB rank 4 4 RX, GPU vs CPU arms, `@e300e1e63e`* `[MEASURED, sens6 rfsim, 273 PRB 4 RX rank 4]`: **not completed.** Every arm (gpu_1, cpu_1, gpu_2, cpu_2, diagnostic gpu_3) was killed by the kernel OOM killer (rx_rc 137) after 14 s (GPU) / 24 s (CPU), before any grant was decoded. Receiver anon RSS 8.6 GB with ~6.4 GB swapped; host swap exhausted. The same bed at `4a94af8c0b` ran 180 s at RSS 7.2 GB. So this branch uses ~1.2-1.4 GB more RAM than the reference and sits over the host limit. The CPU arm also dies, so the growth is not GPU-specific; cause not isolated. Pass criteria: NOT EVALUABLE.
+- *GPU tier on sens6* `[MEASURED, sens6 rfsim, @e300e1e63e]`: `GPU_PLATFORM model=discrete tier=discrete reason=hmm_pcie` (RTX 4060 Ti cc 8.9, total 8182 MB); `GPU_ISA_TWIN dft_twin=avx2 rot_twin=madd` (self-test OK); `GPU_MEM tier=discrete total=7803 free_at_probe=7658 budget_mb=5741 allocated_mb=501 pinned_host_mb=82`; `GPUPASS enabled` with 704 shape classes (+2014 segmented) x 7 instances; census at kill launches=0 (no grant reached the GPU). nvidia-smi 0 % utilisation in the sampled runs. `[MEASURED, sens6 rfsim, @595c5dcf33 and @4a94af8c0b]` earlier, 106 and 273 PRB: `model=discrete`, DISCRETE backend not implemented (phase-2 warning), all DL decode on CPU. That state predates the T3-T8 merge.
+- *Host* `[MEASURED, sens6]`: 14.8 GB RAM (14812 MB total); `free -m` after r273r4c (`@4a94af8c0b`): 326 MB free, 976 MB swap used. Core pool 5 cores (`6 7 8 9 4`) by lease-token limit; threads not pinned (no CAP_SYS_NICE).
+
+**3. Not measured, not claimed.** Mixed-slot CRC before the fix on sens6 (no baseline run in this block). 1 RX 106 PRB under the new build. Any OTA run. Any DGX run of the `e300e1e63e` / `1d497f7b3a` builds. No GB10 number is quoted in this block.
+
+**4. Work in progress (not merged, no sens6 result yet).** DCI 1_1 general resolver; 273-PRB rank-1 solver; Q4 staged DISCRETE variants of the standalone chest, demod and UL FEP entries (plan §7 Q4: after T9); core plan from topology (item 6); on-demand buffers and a host-RAM budget (item 7, the response to the T9 OOM); then GPU/CPU per-path speed choice (item 3) and GPU FEP for all FFT sizes (item 4). T9 remains open until the host-RAM budget lands.
+
+**5. T10 (DGX regression of the GB10 path) must check** (plan §3 T10): same build before and after the merge; `ctest -j1` plus all `_discrete` and `_cpu` variants (forced-discrete regression on the integrated GPU); 106-PRB 4-RX gate with the CLAUDE.md thresholds (note: `score_rx.py` cannot pass on any build since `0fb22ecbd0`; scoring with the proposed `score_rx_solver.py` is a separate, labelled result); one 273-PRB rank-4 4-RX arm with `GPUPASS enabled … DIRECT`, census counts and CRC within the run-to-run spread of the pre-merge arm; `SENSING: GPU_PLATFORM … tier=shared reason=integrated probe=ok`; bit-identical outputs on GB10 (`DIRECT` branches only). Optional, user call: one OTA A/B night run.
+
+**6. Not in the sources of this block, so not recorded here.** The user-stated mixed-slot figures (CRC 0 % -> 99.7 %) and a 4.2 GB local-memory reserve for the csirs module were not found in the run logs, commits or reports read for this block. They are not quoted as numbers above.
 
 ---
 

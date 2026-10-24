@@ -29,7 +29,7 @@ R=$PWD
 B=$R/cmake_targets/ran_build/build
 mkdir -p "$B"
 flock -s -w 7200 /tmp/td_measure.lock nice -n 19 cmake -S "$R" -B "$B" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_TESTS=ON -DENABLE_TELNETSRV=ON -DENABLE_ISAC_SENSING=ON -DOAI_SIMU=ON -DOAI_USRP=OFF -DENABLE_LDPC_CUDA=OFF
-flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ninja -C "$B" -j8 nr-uesoftmodem rfsimulator params_libconfig nr-softmodem telnetsrv telnetsrv_ci tests
+flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ninja -C "$B" -j8 nr-uesoftmodem nr-uesoftmodem-optional-modules rfsimulator params_libconfig nr-softmodem telnetsrv telnetsrv_ci tests
 flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ctest --test-dir "$B" -j4 --output-on-failure
 ```
 
@@ -46,7 +46,7 @@ The old sens6 snapshot says RTX 4060 Ti 8 GB (compute capability 8.9); the opera
 BG=$R/cmake_targets/ran_build/build_gpu
 mkdir -p "$BG"
 flock -s -w 7200 /tmp/td_measure.lock nice -n 19 cmake -S "$R" -B "$BG" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_TESTS=ON -DENABLE_TELNETSRV=ON -DENABLE_ISAC_SENSING=ON -DOAI_SIMU=ON -DOAI_USRP=OFF -DENABLE_LDPC_CUDA=ON -DLDPC_CUDA_ARCH=89
-flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ninja -C "$BG" -j8 nr-uesoftmodem rfsimulator params_libconfig nr-softmodem telnetsrv telnetsrv_ci tests
+flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ninja -C "$BG" -j8 nr-uesoftmodem nr-uesoftmodem-optional-modules rfsimulator params_libconfig nr-softmodem telnetsrv telnetsrv_ci tests
 ```
 
 For a GPU arm set `BUILD=$BG R13_GPU=1`. The runner puts `$BUILD` on `LD_LIBRARY_PATH` and loads `_cuda`; check `TD_CB0 GPU backend registered` in the receiver log and `td_cb0_backend.gpu` in `metrics.jsonl`. If it reports CPU fallback, label the run as CPU and investigate the plugin path/driver. A GPU build is not a GPU-validated result by itself.
