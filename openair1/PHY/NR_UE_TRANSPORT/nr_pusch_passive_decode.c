@@ -2897,15 +2897,16 @@ void nr_pusch_passive_stats_dump(void)
           (unsigned long)atomic_load(&g_fep_req[1]), (unsigned long)atomic_load(&g_fep_req[2]));
   }
   if (g_ulg) {
-    uint64_t o[10];
+    uint64_t o[16] = {0};
     g_ulg->stats(o);
     LOG_I(PHY, "SENSING: UL_GPU_FEP on=%d calls=%lu items=%lu gpu_ms=%lu mean_us=%.0f max_us=%lu busy=%lu over_cap=%lu rt_defer=%lu "
-               "late=%lu err=%lu part=%lu | cpu_bounds=%lu cpu_rej=%lu check=%lu bad=%lu\n",
+               "late=%lu err=%lu part=%lu | cpu_bounds=%lu cpu_rej=%lu check=%lu bad=%lu | staged=%lu stage_runs=%lu h2d_kb=%lu d2h_kb=%lu\n",
           (int)atomic_load(&g_ulg_on), (unsigned long)o[0], (unsigned long)o[1], (unsigned long)(o[2] / 1000),
           o[0] ? (double)o[2] / (double)o[0] : 0.0, (unsigned long)o[3], (unsigned long)o[4], (unsigned long)o[5],
           (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[8], (unsigned long)o[9],
           (unsigned long)atomic_load(&g_ulg_cpu_bounds), (unsigned long)atomic_load(&g_ulg_cpu_rej),
-          (unsigned long)atomic_load(&g_ulg_chk), (unsigned long)atomic_load(&g_ulg_bad));
+          (unsigned long)atomic_load(&g_ulg_chk), (unsigned long)atomic_load(&g_ulg_bad), (unsigned long)o[13], (unsigned long)o[10],
+          (unsigned long)(o[11] >> 10), (unsigned long)(o[12] >> 10));
   }
   nr_gpu_pass_ul_census();
   if (nr_pusch_gpu_ldpc_enabled()) {

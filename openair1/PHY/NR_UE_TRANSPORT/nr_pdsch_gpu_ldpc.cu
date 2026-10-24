@@ -18,6 +18,8 @@
 #include "nr_gpu_green.h"
 #include "../TOOLS/nr_gpu_cuda.h" // nr_gpu_module_ready
 #include "nr_pusch_gpu_diag.h"
+#include "PHY/TOOLS/nr_gpu_mem.h"
+#include "nr_gpu_stage_census.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -69,6 +71,7 @@ struct Ctx {
   int8_t *llr, *llrRes, *c2v; /* device [NJ][MAXC*ZMAX], [NJ][MAXC*ZMAX], [NJ][MAXE*ZMAX] */
   int *unsat;          /* device [NJ][NIT] */
   unsigned long long *ts; /* graph-pass instance: the bits buffer's NR_GPU_PASS_LDPC_TS_OFF (set by dev_impl); null otherwise */
+  nr_gpu_buf_t sin, ssnap, sres, sdj; /* Q4, DISCRETE tier: device-only copies of in / snap / res / dj (the kernel reads and writes these; in / snap / res / dj above are then the pinned mirrors) */
 };
 static Ctx g_ctx[CTX + NR_GPU_PASS_RING + 1]; /* [CTX + i]: the GPUPASS context of graph-pass instance i (nr_pdsch_gpu_ldpc_dev: the extra context [CTX + RING]), never handed out by acquire() */
 static std::atomic<unsigned> g_busy{0};
@@ -551,18 +554,67 @@ static const Graph *graph_lookup(int BG, int Z, int R)
   return nullptr;
 }
 
-static int acquire()
+static int acquire(int limit = CTX) /* limit: Q4, the staged DISCRETE run only owns device staging on the first `limit` contexts */
 {
   const uint64_t ss0 = nr_ss_now();
   for (;;) {
     unsigned m = g_busy.load();
-    for (int i = 0; i < nr_gpu_ctx_limit(CTX); i++)
+    for (int i = 0; i < nr_gpu_ctx_limit(limit); i++)
       if (!(m >> i & 1u) && g_busy.compare_exchange_strong(m, m | 1u << i)) {
         nr_ss_add(NRSS_LK, ss0);
         return i;
       }
     std::this_thread::yield();
   }
+}
+
+/* ---- Q4: DISCRETE staging of the standalone LDPC runs (DL pool and UL pool) ------------------------------------------------------------------------
+ * On DIRECT the kernel reads the code blocks' LLRs from, and writes its snapshots / results to, mapped pinned host memory (zero-copy). On DISCRETE every PCIe access of the
+ * kernel would be a remote read or write, so the context's pinned buffers become mirrors of device buffers: the used LLR bytes of the jobs (packed, kc * Z each) and the job
+ * descriptors go over in one async copy each, the kernel runs on the device copies, the result words and the snapshots (width (K + 7) / 8, it_max - 1 rows per job: the most the
+ * kernel can write) come back in async copies on the same stream; the host then reads the mirrors exactly as it read the mapped buffers. */
+static bool g_stg;      /* the standalone pools are staged (DISCRETE tier at init) */
+static int g_stg_n;     /* DL contexts with staging buffers (the others are never handed out on DISCRETE) */
+static bool stage_alloc(Ctx &x, int cap, int cio)
+{
+  return nr_gpu_buf_alloc_dev(&x.sin, (size_t)cap * MAXC * ZMAX + 16) == 0 && nr_gpu_buf_alloc_dev(&x.ssnap, (size_t)cio * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX) == 0
+         && nr_gpu_buf_alloc_dev(&x.sres, sizeof(int) * 2 * (size_t)cio) == 0 && nr_gpu_buf_alloc_dev(&x.sdj, sizeof(DJob) * (size_t)cap) == 0;
+}
+static size_t stage_ctx_bytes(int cap, int cio)
+{
+  return (size_t)cap * MAXC * ZMAX + 16 + (size_t)cio * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX + sizeof(int) * 2 * (size_t)cio + sizeof(DJob) * (size_t)cap;
+}
+static cudaError_t ldpc_launch(int nc, int n, cudaStream_t st, bool z4, const DJob *ddj, Ctx &x, uint8_t *dsnap, int *dres);
+/* packs jobs[0..n) into the context's mirrors, enqueues H2D, kernel, D2H on x.s; *h2d / *d2h = bytes, *ncopy = copies */
+static cudaError_t stage_launch(int nc, Ctx &x, const nr_gpu_ldpc_job_t *jobs, int n, const Graph *const *gr, bool z4, uint64_t *h2d, uint64_t *d2h, int *ncopy)
+{
+  size_t off = 0;
+  int8_t *din = (int8_t *)x.sin.dev;
+  for (int k = 0; k < n; k++) {
+    const size_t bytes = (size_t)(jobs[k].BG == 1 ? 68 : 52) * jobs[k].Z;
+    memcpy(x.in + off, jobs[k].llr, bytes);
+    x.dj[k] = DJob{gr[k], din + off, jobs[k].K, jobs[k].it_max};
+    x.res[2 * k] = x.res[2 * k + 1] = -1;
+    off += (bytes + 15) & ~(size_t)15;
+  }
+  cudaError_t e = cudaMemcpyAsync(x.sin.dev, x.in, off, cudaMemcpyHostToDevice, x.s);
+  if (e == cudaSuccess) e = cudaMemcpyAsync(x.sdj.dev, x.dj, sizeof(DJob) * (size_t)n, cudaMemcpyHostToDevice, x.s);
+  if (e == cudaSuccess) e = cudaMemsetAsync(x.sres.dev, 0xff, sizeof(int) * 2 * (size_t)n, x.s); /* the host's -1 sentinels */
+  if (e != cudaSuccess) return e;
+  *h2d = off + sizeof(DJob) * (size_t)n;
+  e = ldpc_launch(nc, n, x.s, z4, (const DJob *)x.sdj.dev, x, (uint8_t *)x.ssnap.dev, (int *)x.sres.dev);
+  if (e != cudaSuccess) return e;
+  e = cudaMemcpyAsync(x.res, x.sres.dev, sizeof(int) * 2 * (size_t)n, cudaMemcpyDeviceToHost, x.s);
+  *d2h = sizeof(int) * 2 * (size_t)n;
+  *ncopy = 1;
+  for (int k = 0; k < n && e == cudaSuccess; k++) {
+    const size_t rows = (size_t)jobs[k].it_max - 1, wd = (size_t)(jobs[k].K + 7) >> 3, o = (size_t)k * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX;
+    if (!rows) continue;
+    e = cudaMemcpy2DAsync(x.snap + o, NR_GPU_LDPC_KB_MAX, (uint8_t *)x.ssnap.dev + o, NR_GPU_LDPC_KB_MAX, wd, rows, cudaMemcpyDeviceToHost, x.s);
+    *d2h += wd * rows;
+    ++*ncopy;
+  }
+  return e;
 }
 
 /* CB = blocks per code block: 1 = _nc, 2/4 = small clusters, 8 = the portable-max cluster. Explicit instantiation so lazy loading sees every one. */
@@ -716,6 +768,11 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
       return;
     int lo = 0, hi = 0;
     cudaDeviceGetStreamPriorityRange(&lo, &hi);
+    g_stg = nr_gpu_model() != NR_GPU_MODEL_DIRECT; /* Q4 */
+    if (g_stg) {
+      g_stg_n = (int)nr_gpu_membudget_fit(nr_gpu_stage_share(), 0, stage_ctx_bytes(NJ, NJ), 1, CTX);
+      if (g_stg_n < 1) return;
+    }
     for (int i = 0; i < CTX + NR_GPU_PASS_RING + 1; i++) {
       Ctx &x = g_ctx[i];
       const bool pass_ctx = i >= CTX && i < CTX + NR_GPU_PASS_RING;
@@ -729,6 +786,8 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
           || cudaHostAlloc(&x.res, sizeof(int) * 2 * cio, cudaHostAllocMapped) != cudaSuccess
           || cudaMalloc(&x.llr, (size_t)cap * MAXC * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.llrRes, (size_t)cap * MAXC * ZMAX + 16) != cudaSuccess
           || cudaMalloc(&x.c2v, (size_t)cap * MAXE * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.unsat, sizeof(int) * cap * NIT) != cudaSuccess)
+        return;
+      if (g_stg && i < g_stg_n && !stage_alloc(x, cap, cio))
         return;
     }
     if (!warm_common())
@@ -763,8 +822,17 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
     if (!(gr[k] = graph(j.BG, j.Z, j.R)))
       return NR_GPU_LDPC_E_GRAPH_MISS;
   }
-  const int c = acquire();
+  const int c = g_stg ? acquire(g_stg_n) : acquire();
   Ctx &x = g_ctx[c];
+  bool z4 = true; /* the 4-lane kernel when every block's Z is a multiple of 4 */
+  for (int k = 0; k < n; k++)
+    z4 = z4 && !(jobs[k].Z & 3);
+  uint64_t st_h2d = 0, st_d2h = 0;
+  int st_nd = 0;
+  cudaError_t e;
+  if (g_stg) { /* Q4: DISCRETE: staged copies (see stage_launch) */
+    e = stage_launch(g_nc_state.load(), x, jobs, n, gr, z4, &st_h2d, &st_d2h, &st_nd);
+  } else {
   int8_t *din = nullptr;
   cudaHostGetDevicePointer((void **)&din, x.in, 0);
   for (int k = 0; k < n; k++) {
@@ -779,10 +847,8 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   cudaHostGetDevicePointer((void **)&ddj, x.dj, 0);
   cudaHostGetDevicePointer((void **)&dsnap, x.snap, 0);
   cudaHostGetDevicePointer((void **)&dres, x.res, 0);
-  bool z4 = true; /* the 4-lane kernel when every block's Z is a multiple of 4 */
-  for (int k = 0; k < n; k++)
-    z4 = z4 && !(jobs[k].Z & 3);
-  cudaError_t e = ldpc_launch(g_nc_state.load(), n, x.s, z4, ddj, x, dsnap, dres);
+  e = ldpc_launch(g_nc_state.load(), n, x.s, z4, ddj, x, dsnap, dres);
+  }
   /* GPUSHARE: poll like the demod/FEP waits. cudaStreamSynchronize under cudaDeviceScheduleBlockingSync (set by
    * nr_gpu_platform) sleeps on the completion interrupt; the TB waited far longer than its kernel. */
   uint64_t pt = 0;
@@ -808,6 +874,7 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
     for (int s = 0; s < j.nsnap; s++)
       memcpy(j.snap[s], x.snap + ((size_t)k * NR_GPU_LDPC_MAX_SNAP + s) * NR_GPU_LDPC_KB_MAX, (j.K + 7) >> 3);
   }
+  if (g_stg) nr_stage::note(NR_GPU_STG_LDPC_DL, st_h2d, 2, st_d2h, st_nd);
   g_busy.fetch_and(~(1u << c));
   return rc;
 }
@@ -933,6 +1000,8 @@ static bool ul_alloc_ctx(int i)
   cudaMemset(x.llrRes, 0, (size_t)NJ * MAXC * ZMAX + 16);
   cudaMemset(x.c2v, 0, (size_t)NJ * MAXE * ZMAX + 16);
   cudaMemset(x.unsat, 0, sizeof(int) * NJ * NIT);
+  if (g_stg) /* Q4: DISCRETE: the kernel works on device copies (stage_launch), the mapped pinned buffers above are the mirrors */
+    return stage_alloc(x, NJ, NJ) && (!uldiag::on() || (cudaEventCreate(&UL.e0[i]) == cudaSuccess && cudaEventCreate(&UL.e1[i]) == cudaSuccess));
   if (cudaHostGetDevicePointer((void **)&UL.din[i], x.in, 0) != cudaSuccess || cudaHostGetDevicePointer((void **)&UL.ddj[i], x.dj, 0) != cudaSuccess
       || cudaHostGetDevicePointer((void **)&UL.dsnap[i], x.snap, 0) != cudaSuccess || cudaHostGetDevicePointer((void **)&UL.dres[i], x.res, 0) != cudaSuccess)
     return false;
@@ -948,18 +1017,27 @@ static int ul_exec(int i, nr_gpu_ldpc_job_t *jobs, int n, const Graph *const *gr
   Ctx &x = UL.c[i];
   const bool dg = uldiag::on();
   const uint64_t t0 = ul_now_us();
+  bool z4 = true;
+  for (int k = 0; k < n; k++)
+    z4 = z4 && !(jobs[k].Z & 3);
+  uint64_t st_h2d = 0, st_d2h = 0;
+  int st_nd = 0;
+  cudaError_t e;
+  if (g_stg) { /* Q4: DISCRETE: staged copies (see stage_launch); the abandoned-call rule is unchanged: the copies only touch this context's own buffers */
+    if (dg)
+      cudaEventRecord(UL.e0[i], x.s);
+    e = stage_launch(g_nc_state.load(), x, jobs, n, gr, z4, &st_h2d, &st_d2h, &st_nd);
+  } else {
   for (int k = 0; k < n; k++) {
     const int kc = jobs[k].BG == 1 ? 68 : 52;
     memcpy(x.in + (size_t)k * MAXC * ZMAX, jobs[k].llr, (size_t)kc * jobs[k].Z);
     x.dj[k] = DJob{gr[k], UL.din[i] + (size_t)k * MAXC * ZMAX, jobs[k].K, jobs[k].it_max};
     x.res[2 * k] = x.res[2 * k + 1] = -1;
   }
-  bool z4 = true;
-  for (int k = 0; k < n; k++)
-    z4 = z4 && !(jobs[k].Z & 3);
   if (dg)
     cudaEventRecord(UL.e0[i], x.s);
-  cudaError_t e = ldpc_launch(g_nc_state.load(), n, x.s, z4, UL.ddj[i], x, UL.dsnap[i], UL.dres[i]);
+  e = ldpc_launch(g_nc_state.load(), n, x.s, z4, UL.ddj[i], x, UL.dsnap[i], UL.dres[i]);
+  }
   if (dg)
     cudaEventRecord(UL.e1[i], x.s);
   *launch_us = ul_now_us() - t0;
@@ -993,6 +1071,7 @@ static int ul_exec(int i, nr_gpu_ldpc_job_t *jobs, int n, const Graph *const *gr
     for (int s = 0; s < j.nsnap; s++)
       memcpy(j.snap[s], x.snap + ((size_t)k * NR_GPU_LDPC_MAX_SNAP + s) * NR_GPU_LDPC_KB_MAX, (j.K + 7) >> 3);
   }
+  if (g_stg) nr_stage::note(NR_GPU_STG_LDPC_UL, st_h2d, 2, st_d2h, st_nd);
   return 0;
 }
 
@@ -1067,6 +1146,9 @@ extern "C" int nr_pusch_gpu_ldpc_init(int pct, int deadline_us)
   const int nc = decide_nc();
   if (nc == 3 || (nc == 1 && (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&cl, cudaDevAttrClusterLaunch, dev) != cudaSuccess || !cl)))
     return -1;
+  g_stg = nr_gpu_model() != NR_GPU_MODEL_DIRECT; /* Q4 */
+  if (g_stg && nr_gpu_membudget_fit(nr_gpu_stage_share(), 0, stage_ctx_bytes(NJ, NJ), 1, UL_CTX) < UL_CTX)
+    return -1; /* the two UL contexts do not both fit the staging share: the CPU decoder */
   UL.pct = pct > 0 && pct <= 100 ? (unsigned)pct : 15u;
   UL.deadline_us = deadline_us > 0 ? (uint64_t)deadline_us : 4000u;
   if (!warm_common())

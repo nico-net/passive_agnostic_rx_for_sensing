@@ -32,7 +32,8 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 #include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"
 #include "PHY/TOOLS/nr_gpu_bgq.h" /* FATTAILS */
-#include "PHY/TOOLS/nr_gpu_mem.h" /* nr_gpu_model(): standalone entries need the SHARED tier */
+#include "PHY/TOOLS/nr_gpu_mem.h" /* nr_gpu_model(): DIRECT runs in place, DISCRETE runs staged */
+#include "PHY/NR_UE_TRANSPORT/nr_gpu_stage_census.h"
 #include <pthread.h>
 #include <sched.h>
 #include <sys/resource.h>
@@ -66,6 +67,8 @@ static _Atomic int g_on;
 static int g_check;
 static _Atomic uint64_t g_calls, g_chk_ok, g_chk_bad, g_ns_sum, g_ns_max, g_ns_gpu, g_ns_geo; /* geo: host geometry (index-coded extractor) */
 static _Atomic uint64_t g_refuse[16];
+static nr_gpu_stage_stats_fn g_stage_stats; /* Q4: census of the staged DISCRETE runs (libpdsch_gpu.so) */
+static __thread int t_stage_full;           /* Q4: the grant being demodulated is compared with the CPU: copy every output back (DISCRETE tier) */
 static _Atomic uint64_t g_evm_close, g_evm_far, g_evm_maxrel; /* CHECK with the GPU EVM (rel. err of err x 1e18) */
 
 static uint64_t now_ns(void)
@@ -96,9 +99,14 @@ int nr_pdsch_gpu_demod_warmup(const NR_DL_FRAME_PARMS *fp)
     LOG_W(PHY, "SENSING: GPU_EXACT_DEMOD requested but libpdsch_gpu.so has no usable demod entry -- CPU demodulation\n");
     return 0;
   }
-  if (nr_gpu_model() != NR_GPU_MODEL_DIRECT) { /* the standalone kernels read caller memory in place; the pass demod (g_on) still runs */
-    LOG_W(PHY, "SENSING: GPU_EXACT_DEMOD standalone needs the SHARED tier -- pass/CPU demodulation\n");
-    g_run = NULL;
+  g_stage_stats = h ? (nr_gpu_stage_stats_fn)dlsym(h, "nr_gpu_stage_stats") : NULL;
+  if (nr_gpu_model() != NR_GPU_MODEL_DIRECT) { /* Q4: the standalone kernels read caller memory in place on DIRECT; on DISCRETE the run is staged (device buffers, explicit copies) */
+    nr_gpu_demod_stage_init_fn sinit = (nr_gpu_demod_stage_init_fn)dlsym(h, "nr_pdsch_gpu_demod_stage_init");
+    if (!sinit || sinit(fp->nb_antennas_rx, fp->ofdm_symbol_size, (uint32_t)((fp->N_RB_DL * 12 + 15) & ~15)) != 0) {
+      LOG_W(PHY, "SENSING: GPU_EXACT_DEMOD standalone staging unavailable (DISCRETE tier) -- pass/CPU demodulation\n");
+      g_run = NULL;
+    } else
+      LOG_A(PHY, "SENSING: GPU_EXACT_DEMOD standalone runs staged on the DISCRETE tier (explicit H2D/D2H)\n");
   }
   g_check = 64;
   atomic_store(&g_on, 1);
@@ -419,11 +427,15 @@ static void stats_log(uint64_t n)
   int u = 0;
   for (int k = 0; k < RF_N; k++)
     u += snprintf(rf + u, sizeof(rf) - u, "%s%lu", k ? "," : "", (unsigned long)atomic_load(&g_refuse[k]));
+  uint64_t st[6] = {0};
+  if (g_stage_stats)
+    g_stage_stats(NR_GPU_STG_DEMOD, st);
   LOG_A(PHY, "SENSING: GPU_EXACT_DEMOD calls=%lu check_ok=%lu check_bad=%lu evm_close=%lu evm_far=%lu evm_maxrel=%.2e mean=%.0f us (gpu %.0f geo %.0f) max=%.0f us refused[off,nl,qm,ptrs,"
-        "forced,env,override,mode,mask,geom,nre0,cap,busy,model]=[%s]\n",
+        "forced,env,override,mode,mask,geom,nre0,cap,busy,model]=[%s] staged[runs=%lu h2d_kb=%lu d2h_kb=%lu copies=%lu+%lu refused=%lu]\n",
         (unsigned long)n, (unsigned long)atomic_load(&g_chk_ok), (unsigned long)atomic_load(&g_chk_bad),
         (unsigned long)atomic_load(&g_evm_close), (unsigned long)atomic_load(&g_evm_far), atomic_load(&g_evm_maxrel) / 1e18,
-        atomic_load(&g_ns_sum) / 1e3 / n, atomic_load(&g_ns_gpu) / 1e3 / n, atomic_load(&g_ns_geo) / 1e3 / n, atomic_load(&g_ns_max) / 1e3, rf);
+        atomic_load(&g_ns_sum) / 1e3 / n, atomic_load(&g_ns_gpu) / 1e3 / n, atomic_load(&g_ns_geo) / 1e3 / n, atomic_load(&g_ns_max) / 1e3, rf,
+        (unsigned long)st[0], (unsigned long)(st[1] >> 10), (unsigned long)(st[2] >> 10), (unsigned long)st[3], (unsigned long)st[4], (unsigned long)st[5]);
 }
 
 /* Folds one symbol's GPU EVM partial sums into nr_pdsch_evm_acc, in the field order of nr_rx_pdsch()'s block. */
@@ -609,6 +621,7 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
     return rf;
   const int last = cfg->start_symbol + cfg->number_symbols - 1;
   j.evm_defer = t_defer_ok && j.want_evm && t_def;
+  j.stage_full = t_stage_full;
   if (!g_run) /* standalone entry needs the SHARED tier (warmup leaves g_run NULL on DISCRETE) */
     return RF_MODEL;
   const uint64_t t0 = now_ns();
@@ -1086,9 +1099,11 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
       used0 = nr_dlsch_used_branch;
     }
     t_defer_ok = g_defer && !bg_check;
+    t_stage_full = bg_check; /* a grant handed to the checking worker needs every output (it compares them with the CPU) */
     const int r = gpu_grant(c, mode, thr_coef, align, l2d, c->llr, c->llr_cap, c->dl_valid_re, c->log2_maxh, c->comp, c->mag, c->magb,
                             c->magr, &gns);
     t_defer_ok = 0;
+    t_stage_full = 0;
     if (r >= 0) {
       atomic_fetch_add_explicit(&g_refuse[r], 1, memory_order_relaxed);
       atomic_fetch_sub_explicit(&g_calls, 1, memory_order_relaxed);
@@ -1132,7 +1147,9 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
     uint32_t dvr_g[NR_SYMBOLS_PER_SLOT] = {0};
     int32_t l2_g = 0;
     memset(k.llr, 0, sizeof(int16_t) * c->llr_cap);
+    t_stage_full = 1;
     const int r = gpu_grant(c, mode, thr_coef, align, l2d, k.llr, c->llr_cap, dvr_g, &l2_g, k.comp, k.mag, k.magb, k.magr, &gns);
+    t_stage_full = 0;
     const nr_pdsch_evm_acc_t acc_g = nr_pdsch_evm_acc;
     const int used_g = nr_dlsch_used_branch;
     nr_pdsch_evm_acc = acc_c;

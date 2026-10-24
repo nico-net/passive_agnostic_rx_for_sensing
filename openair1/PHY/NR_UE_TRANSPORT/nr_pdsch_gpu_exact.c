@@ -9,6 +9,7 @@
 #include "PHY/MODULATION/modulation_UE.h"
 #include "common/utils/LOG/log.h"
 #include "PHY/TOOLS/nr_gpu_mem.h" /* nr_gpu_model() */
+#include "PHY/NR_UE_TRANSPORT/nr_gpu_stage_census.h"
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -22,6 +23,7 @@ static exact_fn_t g_fn;
 static void (*g_stats)(int *, uint64_t *, uint64_t *);
 static int (*g_delay_fn)(const int16_t *const *, int, int *);
 static nr_gpu_chest_fn g_chest_fn; /* GPU-DEMOD stage 2 */
+static nr_gpu_stage_stats_fn g_stage_stats; /* Q4: census of the staged DISCRETE runs of the module (NULL on a module without it) */
 static _Atomic uint64_t g_delay_rows, g_delay_calls, g_delay_cpu, g_delay_checked, g_delay_bad;
 static _Atomic int g_on;
 static _Atomic uint64_t g_calls, g_fallback, g_chk_ok, g_chk_bad, g_ns_sum, g_ns_max;
@@ -96,6 +98,15 @@ int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
   if (!api || !g_fn || api->init(&cfg) != 0) {
     LOG_W(PHY, "SENSING: GPU_EXACT_FEP requested but libpdsch_gpu.so is unavailable -- CPU FEP\n");
     return 0;
+  }
+  g_stage_stats = (nr_gpu_stage_stats_fn)dlsym(h, "nr_gpu_stage_stats");
+  if (nr_gpu_model() != NR_GPU_MODEL_DIRECT) { /* Q4: the chest / delay entries read host rows in place on DIRECT; on DISCRETE they are staged (the FEP always was) */
+    int (*sinit)(const int16_t *, size_t, int, int) = (int (*)(const int16_t *, size_t, int, int))dlsym(h, "nr_pdsch_gpu_exact_stage_init");
+    if (!sinit || sinit((const int16_t *)fp->delay_table[0], sizeof(fp->delay_table), NR_MAX_OFDM_SYMBOL_SIZE, MAX_DELAY_COMP) != 0) {
+      LOG_W(PHY, "SENSING: GPU_EXACT chest/delay staging unavailable (DISCRETE tier) -- CPU chest and delay\n");
+      g_chest_fn = NULL;
+      g_delay_fn = NULL;
+    }
   }
   atomic_store(&g_on, 1);
   const char *(*twin)(void) = (const char *(*)(void))dlsym(h, "nr_gpu_isa_twin"); /* the host CPU's DFT / rotation twins (self-test at init) */
@@ -222,18 +233,26 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
       if (acc * 100 >= tot * 99) { p99 = i; break; }
     }
     int direct = -1;
-    uint64_t late = 0, busy = 0;
+    uint64_t late = 0, busy = 0, sf[6] = {0}, sd[6] = {0}, sc[6] = {0};
     if (g_stats)
       g_stats(&direct, &late, &busy);
+    if (g_stage_stats) {
+      g_stage_stats(NR_GPU_STG_FEP, sf);
+      g_stage_stats(NR_GPU_STG_DELAY, sd);
+      g_stage_stats(NR_GPU_STG_CHEST, sc);
+    }
     LOG_A(PHY, "SENSING: GPU_EXACT_FEP calls=%lu fallback=%lu (late=%lu busy=%lu) check_ok=%lu check_bad=%lu direct=%d "
           "delay_calls=%lu delay_rows=%lu delay_cpu=%lu delay_checked=%lu delay_bad=%lu "
-          "mean=%.0f us p50<=%d us p99<=%d us max=%.0f us (wall)\n",
+          "mean=%.0f us p50<=%d us p99<=%d us max=%.0f us (wall) staged[fep runs=%lu h2d_kb=%lu d2h_kb=%lu | delay runs=%lu h2d_kb=%lu d2h_kb=%lu | "
+          "chest runs=%lu h2d_kb=%lu d2h_kb=%lu refused=%lu]\n",
           (unsigned long)n, (unsigned long)atomic_load(&g_fallback), (unsigned long)late, (unsigned long)busy,
           (unsigned long)atomic_load(&g_chk_ok), (unsigned long)atomic_load(&g_chk_bad), direct,
           (unsigned long)atomic_load(&g_delay_calls), (unsigned long)atomic_load(&g_delay_rows),
           (unsigned long)atomic_load(&g_delay_cpu), (unsigned long)atomic_load(&g_delay_checked),
           (unsigned long)atomic_load(&g_delay_bad),
-          atomic_load(&g_ns_sum) / 1e3 / n, 64 * (p50 + 1), 64 * (p99 + 1), atomic_load(&g_ns_max) / 1e3);
+          atomic_load(&g_ns_sum) / 1e3 / n, 64 * (p50 + 1), 64 * (p99 + 1), atomic_load(&g_ns_max) / 1e3,
+          (unsigned long)sf[0], (unsigned long)(sf[1] >> 10), (unsigned long)(sf[2] >> 10), (unsigned long)sd[0], (unsigned long)(sd[1] >> 10),
+          (unsigned long)(sd[2] >> 10), (unsigned long)sc[0], (unsigned long)(sc[1] >> 10), (unsigned long)(sc[2] >> 10), (unsigned long)sc[5]);
   }
   return 0;
 }
