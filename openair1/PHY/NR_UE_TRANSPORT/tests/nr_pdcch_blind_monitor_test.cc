@@ -2914,6 +2914,22 @@ TEST_F(BlindPdcchTest, DlLayoutCandidatesDoNotDeclareAUniqueConfiguration) {
   EXPECT_EQ(nr_pdcch_blind_dl_layout_candidates(nullptr,47,273,0,candidates,ids),0);
 }
 
+// WL-SOLVER: Iliad PCI 403 (OTA 2026-10-23): 51 PRB, DCI 1_1 length 48 needs bwp_ind+tda = 7 bits, which the standard
+// profile cannot explain; the layout-candidate helper then returns 0, and the grant must still be offered to the solver.
+TEST_F(BlindPdcchTest, DlLayoutCandidatesEmptyAtIliad51PrbLen48ButSolverFallbackAdmits) {
+  nr_pdcch_blind_raw_result_t raw{};
+  raw.rnti=0x85a;
+  raw.payload=nr_dci_bits_from_u64(UINT64_C(0xfffe150e2210));
+  nr_pdcch_blind_result_t candidates[3]{};
+  uint8_t ids[3]{};
+  EXPECT_EQ(nr_pdcch_blind_dl_layout_candidates(&raw,48,51,0,candidates,ids),0);
+  EXPECT_TRUE(nr_pdcch_dl_solver_fallback_ok(true,1,true,true));
+  EXPECT_FALSE(nr_pdcch_dl_solver_fallback_ok(false,1,true,true));
+  EXPECT_FALSE(nr_pdcch_dl_solver_fallback_ok(true,0,true,true));
+  EXPECT_FALSE(nr_pdcch_dl_solver_fallback_ok(true,1,false,true));
+  EXPECT_FALSE(nr_pdcch_dl_solver_fallback_ok(true,1,true,false));
+}
+
 TEST_F(BlindPdcchTest, PolarCleanupCannotFreeAnInFlightDecoderCacheEntry) {
   t_nrPolar_params *held=nr_polar_params(NR_POLAR_DCI_MESSAGE_TYPE,47,2);
   ASSERT_NE(held,nullptr);
@@ -4760,6 +4776,24 @@ TEST_F(DiscoveredCoresets, StartsBeforeWalkAndReadsBeyondEightLines) {
   nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
   EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 217));
   EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_done());
+}
+
+// Vodafone 415 replay bimodality: a spurious nID rejected once must not be re-dwelt (cover, interleaved cover, raw lines, and again
+// after every list refresh) before a queued nID that has not failed yet.
+TEST_F(DiscoveredCoresets, RejectedNidIsRetriedAfterUntriedOnes) {
+  lines("CORESET nid=9020 sym=0 dur=1 grid_rb=11 groups=34 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, 9020);
+  for (int slot = 0; slot < 4000; ++slot) nr_pdcch_discovered_step(token, slot); // rejected
+  // the GPU stage publishes a refreshed list: the failed nID first, the second real CORESET after it
+  lines("CORESET nid=9020 sym=0 dur=1 grid_rb=11 groups=34 L=0 R=0 shift=0\n"
+        "CORESET nid=10163 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, 10163); // untried first
+  for (int slot = 0; slot < 4000; ++slot) nr_pdcch_discovered_step(token, 100000 + slot);
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, 9020); // the failed nID is still retried, last
 }
 
 TEST_F(DiscoveredCoresets, NrntiRotationVisitsAllConfirmedOwnersPerId) {

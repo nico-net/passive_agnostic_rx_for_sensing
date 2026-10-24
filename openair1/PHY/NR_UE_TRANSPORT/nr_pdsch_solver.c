@@ -13,6 +13,8 @@
 #define SOLVER_MAX_IDS 1024
 #define SOLVER_SEARCH_MAX_RB 48   /* search probes only readings this narrow (cost; the small grants decode best) */
 #define SOLVER_WIDE_AFTER 16      /* SOLVERWIDE: grants with no reading <= SOLVER_SEARCH_MAX_RB (none narrow ever seen) after which the search takes wide readings */
+#define SOLVER_PHASES 20          /* slot phases: one 10 ms frame at 30 kHz; TDD patterns divide it */
+#define SOLVER_PHASE_FAIL 8       /* full decodes without one pass at a phase (the RNTI decodes elsewhere) before its (S, L) is searched */
 #define SOLVER_CAND_TRIES 96      /* confirmation probes before an unconfirmed candidate is dropped */
 #define BM_BYTES (NR_PDSCH_SOLVER_MAX_LAYOUTS / 8)
 #define HQ_RING 64
@@ -48,6 +50,10 @@ typedef struct {
   uint8_t add_pos;
   int8_t table;
   int8_t S_by_tda[16];
+  /* SOLVERPHASE: (S, L) of a solved RNTI per slot phase (abs slot mod SOLVER_PHASES) where its full decodes fail while it decodes
+   * elsewhere: a TDD special slot allocation the DCI's TDA index (tda_bits = 0 layouts: none) cannot tell from a full slot */
+  int8_t ov_S[SOLVER_PHASES], ov_L[SOLVER_PHASES];
+  uint32_t ph_tr[SOLVER_PHASES], ph_ok[SOLVER_PHASES], ov_cur[SOLVER_PHASES];
   int8_t L_by_tda[16];     /* SOLVERTDDL: PDSCH length per TDA index when it is not 14 - S (TDD special slot); -1 = 14 - S */
   int8_t rm;               /* CSI-RS rate matching for this RNTI: -1 unknown, 0 no, 1 yes (CRC-selected) */
   uint32_t full_tr, full_ok, cons_fail;
@@ -80,6 +86,7 @@ typedef struct {
   int slot;
   uint8_t phase;          /* 0 = search/candidate, 1 = solved */
   uint8_t S, L, add_pos, table, probe;
+  bool ov;                /* SOLVERPHASE variant: probe or full decode with the phase's own (S, L) */
   bool table_disc;        /* this MCS's (Qm, R) differ between the tables tried */
   bool learn_S, learn_table, learn_rm;
   uint8_t rm;
@@ -126,6 +133,7 @@ static int g_prior_rep;
 static uint8_t g_prior_add_pos;
 static int8_t g_prior_table, g_prior_S_by_tda[16], g_prior_L_by_tda[16];
 static uint32_t g_lcur[SOLVER_RNTIS][16]; /* SOLVERTDDL: rotation cursor of the length search per RNTI and TDA index */
+static bool t_ov; /* SOLVERPHASE: variants being emitted are phase-override ones */
 static int t_L; /* length of the variants being emitted (0 = 14 - S); set by plan_known under g_mu */
 
 /* nr_pdsch_solver_enabled: Callers: nr_pdsch_passive_decode.c (probe-c1 switch), nr_pdcch_blind_monitor_rt.c (RNTI routing). */
@@ -253,6 +261,8 @@ static solver_rnti_t *slot_of(uint16_t rnti, bool create, int *idx)
       g_r[i].scr = g_r[i].cand_scr = -1;
       memset(g_r[i].S_by_tda, -1, sizeof(g_r[i].S_by_tda));
       memset(g_r[i].L_by_tda, -1, sizeof(g_r[i].L_by_tda));
+      memset(g_r[i].ov_S, -1, sizeof(g_r[i].ov_S));
+      memset(g_r[i].ov_L, -1, sizeof(g_r[i].ov_L));
       memset(g_lcur[i], 0, sizeof(g_lcur[i]));
       if (idx) *idx = i;
       return &g_r[i];
@@ -640,6 +650,7 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   p->abs = plan_ctx()->now_abs;
   p->slot = slot;
   p->phase = phase;
+  p->ov = t_ov;
   p->S = (uint8_t)S; p->L = (uint8_t)L; p->add_pos = (uint8_t)add_pos; p->table = (uint8_t)table; p->probe = probe;
   p->table_disc = table_disc; p->learn_S = learn_S; p->learn_table = learn_table; p->tda = tda;
   p->dci = dci;
@@ -694,9 +705,25 @@ static bool search_backoff(const solver_rnti_t *r)
  * but an RNTI that never gets a narrow reading (a bulk transfer scheduled on the whole carrier: rfsim 106/273 PRB) would never be
  * planned at all (0fb22ecbd0 made the solver the only path). After SOLVER_WIDE_AFTER such grants, with no narrow one ever seen,
  * its wide readings are probed too, under the unchanged probe budget. One narrow reading ever seen restores the bound for good. */
+static uint16_t g_bwp_rb; /* WL-SOLVER: BWP width of the monitored CORESET's cell (0 = unknown) */
+
+/* nr_pdsch_solver_set_bwp_rb: tells the solver the BWP width. Caller: nr_pdcch_blind_monitor_rt.c before planning. */
+void nr_pdsch_solver_set_bwp_rb(int rb)
+{
+  __atomic_store_n(&g_bwp_rb, (uint16_t)(rb > 0 && rb < 65535 ? rb : 0), __ATOMIC_RELAXED);
+}
+
+/* search_max_rb: widest reading searched without the wide-only rule. A BWP narrower than 2 x SOLVER_SEARCH_MAX_RB is searched up to
+ * its full width (a 51-PRB BWP's full-band grant is as cheap as a 48-RB one); wider BWPs keep the cost bound. Pure of cell identity. */
+uint16_t nr_pdsch_solver_search_max_rb(int bwp_rb)
+{
+  return (bwp_rb > SOLVER_SEARCH_MAX_RB && bwp_rb < 2 * SOLVER_SEARCH_MAX_RB) ? (uint16_t)bwp_rb : SOLVER_SEARCH_MAX_RB;
+}
+
 static uint16_t rb_limit(const solver_rnti_t *r)
 {
-  return (r->n_narrow == 0 && r->n_wide >= SOLVER_WIDE_AFTER) ? UINT16_MAX : SOLVER_SEARCH_MAX_RB;
+  return (r->n_narrow == 0 && r->n_wide >= SOLVER_WIDE_AFTER) ? UINT16_MAX
+                                                              : nr_pdsch_solver_search_max_rb(__atomic_load_n(&g_bwp_rb, __ATOMIC_RELAXED));
 }
 
 static const uint8_t kS[4] = {1, 0, 2, 3};
@@ -884,6 +911,28 @@ static void plan_known(nr_pdsch_solver_var_t *out, int *n, int max, int slot, ui
   }
 }
 
+/* plan_ov_probes: SOLVERPHASE search of a failing slot phase: 4 (S, end symbol) hypotheses per grant, rotating over S in {1,0,2,3} and
+ * end symbols of a TDD special slot, as first-code-block probes with the RNTI's solved add_pos / table. A pass sets the phase's (S, L). */
+static void plan_ov_probes(solver_rnti_t *r, int ph, nr_pdsch_solver_var_t *out, int *n, int max, int slot, int ri,
+                           const nr_pdsch_solver_reading_t *rd, int l0, uint64_t dci, nr_dci_bits_t payload)
+{
+  static const uint8_t kE[10] = {5, 9, 10, 11, 8, 7, 6, 12, 4, 3};
+  uint8_t tl[3];
+  const int nt = tables_for(rd[ri].mcs, tl);
+  if (nt == 0) return;
+  const int table = r->table >= 0 ? r->table : tl[0];
+  t_ov = true;
+  for (int q = 0; q < 4; q++) {
+    const uint32_t j = (r->ov_cur[ph]++) % 40u;
+    const int s = kS[j % 4], e = kE[j / 4], Ls = e - s + 1;
+    if (e < l0 || Ls < 2) continue;
+    t_L = Ls;
+    emit(out, n, max, slot, 1, ri, rd, l0, s, r->add_pos, table, true, nt > 1, false, false, -1, dci, payload);
+  }
+  t_L = 0;
+  t_ov = false;
+}
+
 /* nr_pdsch_solver_plan: planning entry point for an ordinary (non-CSI-RS) slot; forwards to nr_pdsch_solver_plan_slot() with csirs_slot = false.
  *   Arguments and result as in nr_pdsch_solver_plan_slot(). Callers: tests/nr_pdsch_solver_test.cc.
  */
@@ -923,17 +972,17 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   r->key = ctx->key;
   r->grants++;
   { bool narrow = false; /* SOLVERWIDE */
-    for (int i = 0; i < n_rd && !narrow; i++) narrow = rd[i].num_rb > 0 && rd[i].num_rb <= SOLVER_SEARCH_MAX_RB;
+    for (int i = 0; i < n_rd && !narrow; i++) narrow = rd[i].num_rb > 0 && rd[i].num_rb <= nr_pdsch_solver_search_max_rb(__atomic_load_n(&g_bwp_rb, __ATOMIC_RELAXED));
     if (narrow) r->n_narrow++; else r->n_wide++;
     if (!r->solved && r->n_narrow == 0 && r->n_wide == SOLVER_WIDE_AFTER)
       LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x wide-only for %u grants: searching readings above %d RB\n", rnti, r->n_wide,
             SOLVER_SEARCH_MAX_RB);
   }
   const uint16_t rblim = rb_limit(r);
-  bool nl_preferred = false, nl_fallback = false;
+  bool nl_preferred = false, nl_fallback = false, rotate_all = false;
   if (!r->solved) { /* prefer one-layer QPSK readings; with none, the preference is dropped at once (frozen ISAC_PDSCH_SOLVER_NL_PREF=1) */
     for (int i = 0; i < n_rd; i++)
-      if (rd[i].num_rb > 0 && rd[i].num_rb <= SOLVER_SEARCH_MAX_RB && reading_nl_qpsk(&rd[i])) {
+      if (rd[i].num_rb > 0 && rd[i].num_rb <= nr_pdsch_solver_search_max_rb(__atomic_load_n(&g_bwp_rb, __ATOMIC_RELAXED)) && reading_nl_qpsk(&rd[i])) {
         if (r->has_cand) {
           bool overlaps = false;
           for (int k = 0; k < rd[i].n_ids && !overlaps; k++)
@@ -948,6 +997,14 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
         break;
       }
     if (!nl_preferred) nl_fallback = true;
+    /* WL-SOLVER: the QPSK preference must not starve a layout whose reading is another modulation (Iliad: wrong layouts always offer a
+     * garbage QPSK reading, the true 64QAM one was never probed). While the cell has no solved RNTI at all, an RNTI with >= 256 probes and no candidate searches every 4th
+     * grant over ALL readings, under the unchanged probe budget (and exempt from the 1-in-8 back-off, which this rotation replaces). */
+    if (nl_preferred && !r->has_cand && !g_have_prior && r->n_probe >= 256u && (r->grants % 4u) == 3u) {
+      nl_preferred = false;
+      nl_fallback = true;
+      rotate_all = true;
+    }
   }
   if ((g_st.planned % 1000) == 0) { /* T26c per-RNTI report: solve time in signal time (30 kHz: 0.5 ms per slot) */
     char b[3000];
@@ -983,12 +1040,24 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   t_comb = comb_pick(r);
   if (r->solved) {
     int ri = -1;
+    const int ph = (int)(ctx->now_abs % SOLVER_PHASES);
     for (int i = 0; i < n_rd; i++)
       if (has_id(&rd[i], r->rep)) { ri = i; break; }
     if (ri < 0) {
       /* no reading of this DCI comes from the solution's layout: decoding reading 0 would use another layout's MCS/NDI/rv (CRC-BUGS
        * 2026-10-19), so there is no full decode; the refinement probes below still run */
       r->why[W_NOREP]++;
+    } else if (r->ov_S[ph] >= 0 && !(csirs_slot && r->rm < 0)) { /* SOLVERPHASE: this phase's own allocation */
+      uint8_t tl0[3];
+      if (tables_for(rd[ri].mcs, tl0) > 0) {
+        t_rm = csirs_slot ? r->rm : 0;
+        t_ov = true;
+        t_L = r->ov_L[ph];
+        emit(out, &n, budget, slot, 1, ri, rd, l0, r->ov_S[ph], r->add_pos, r->table >= 0 ? r->table : tl0[0], false, false, false,
+             false, -1, dci, payload);
+        t_L = 0;
+        t_ov = false;
+      }
     } else if (csirs_slot && r->rm < 0) { /* unknown: probe with and without, learn by CRC */
       for (int k = 1; k >= 0; k--) {
         t_rm = k;
@@ -1002,6 +1071,8 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       t_rm = csirs_slot ? r->rm : 0;
       plan_known(out, &n, budget, slot, 1, ri, rd, l0, r->rep, r->add_pos, r->table, r->S_by_tda, r->L_by_tda, mcs, dci, payload);
     }
+    if (ri >= 0 && r->ov_S[ph] < 0 && r->ph_tr[ph] >= SOLVER_PHASE_FAIL && r->ph_ok[ph] == 0 && r->full_ok >= 20 && !csirs_slot)
+      plan_ov_probes(r, ph, out, &n, budget, slot, ri, rd, l0, dci, payload);
     /* REFINEMENT: the solution's layouts can still disagree on fields two passes did not separate (e.g. where the
      * antenna-ports field sits). Each other reading those layouts give for THIS DCI gets one probe with the same
      * physical parameters; a pass narrows the layout set to that reading (feedback), and the representative follows. */
@@ -1025,7 +1096,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   } else if (csirs_slot) {
     r->why[W_CSIRS]++;
     /* no search on a slot carrying discovered CSI-RS: its rate matching is unknown, a miss would be false evidence */
-  } else if (!nl_preferred && search_backoff(r)) {
+  } else if (!nl_preferred && !rotate_all && search_backoff(r)) {
     r->why[W_BACKOFF]++;
     /* T26c: an RNTI whose search has spent 200 probes without a single CRC pass is searched on 1 grant in 8 only --
      * the decode pool goes to RNTIs that decode */
@@ -1368,8 +1439,25 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
   if (crc_ok && p->mcs > 0) r->mcs_pos = true; /* DCIRV: the MCS offset is pinned by a nonzero reading */
   if (p->probe && crc_ok) g_st.probe_ok++;
   if (!p->probe && crc_ok) g_st.full_ok++;
-  if (r->used && p->phase == 1 && r->solved) {
+  if (r->used && p->phase == 1 && r->solved && p->ov) { /* SOLVERPHASE: bookkeeping only, never evidence for the S map */
+    const int ph = (int)(p->abs % SOLVER_PHASES);
+    if (p->probe) {
+      if (crc_ok && r->ov_S[ph] < 0) {
+        r->ov_S[ph] = (int8_t)p->S;
+        r->ov_L[ph] = (int8_t)p->L;
+        LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x slot phase %d learnt S=%u L=%u (its full decodes failed %u of %u)\n", r->rnti, ph,
+              p->S, p->L, r->ph_tr[ph] - r->ph_ok[ph], r->ph_tr[ph]);
+      }
+    } else {
+      r->full_tr++;
+      r->ph_tr[ph]++;
+      if (crc_ok) { r->full_ok++; r->ph_ok[ph]++; }
+    }
+  }
+  if (r->used && p->phase == 1 && r->solved && !p->ov) {
     if (!p->probe) {
+      r->ph_tr[p->abs % SOLVER_PHASES]++;
+      if (crc_ok) r->ph_ok[p->abs % SOLVER_PHASES]++;
       r->full_tr++;
       if (crc_ok) {
         r->full_ok++;

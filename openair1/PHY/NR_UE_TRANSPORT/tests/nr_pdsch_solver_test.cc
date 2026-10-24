@@ -129,6 +129,40 @@ TEST(PdschSolver, OneLayerQpskReadingsGetFirstProbesAndFallBackAtOnce)
   nr_pdsch_solver_reset();
 }
 
+// WL-SOLVER (a): a layout whose reading is 64QAM must still be probed although a garbage one-layer QPSK reading is always offered.
+TEST(PdschSolver, QpskPreferenceRotatesSoAnotherModulationIsProbed)
+{
+  nr_pdsch_solver_reset();
+  uint16_t qpsk_ids[] = {1, 2}, qam_ids[] = {3, 4};
+  nr_pdsch_solver_reading_t rd[] = {{qpsk_ids, 2, 20, 0x1, 1, 3}, {qam_ids, 2, 20, 0x1, 1, 21}};
+  nr_dci_bits_t p = {{42, 0, 0}};
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+  int qam_probes = 0, total = 0;
+  for (int g = 0; g < 400; g++) {
+    const int n = nr_pdsch_solver_plan(0x3333, p, 49, 2, 2, rd, 2, 8, v);
+    for (int i = 0; i < n; i++) {
+      total++;
+      if (v[i].reading == 1) qam_probes++;
+      nr_pdsch_solver_feedback(v[i].token, false, true);
+    }
+  }
+  EXPECT_GT(total, 256);
+  EXPECT_GT(qam_probes, 0);
+  EXPECT_LT(qam_probes, total / 2); // the preference still dominates
+  nr_pdsch_solver_reset();
+}
+
+// WL-SOLVER (b): a BWP narrower than 2 x 48 RB is searched up to its full width, wide or unknown BWPs keep 48.
+TEST(PdschSolver, SearchCapFollowsBwpWidth)
+{
+  EXPECT_EQ(nr_pdsch_solver_search_max_rb(51), 51);
+  EXPECT_EQ(nr_pdsch_solver_search_max_rb(95), 95);
+  EXPECT_EQ(nr_pdsch_solver_search_max_rb(106), 48);
+  EXPECT_EQ(nr_pdsch_solver_search_max_rb(217), 48);
+  EXPECT_EQ(nr_pdsch_solver_search_max_rb(0), 48);
+  EXPECT_EQ(nr_pdsch_solver_search_max_rb(40), 48);
+}
+
 TEST(PdschSolver, ConfirmationRejectsIncompatibleMcsTables)
 {
   nr_pdsch_solver_reset();
@@ -530,6 +564,40 @@ TEST(PdschSolverTddL, SpecialSlotLengthIsLearntAfterSolving)
   ASSERT_GT(first_ok, 0);
   EXPECT_LE(first_ok, 40);
   EXPECT_GE(full_ok_tda1, grants_tda1 - 40);
+  nr_pdsch_solver_reset();
+}
+
+/* SOLVERPHASE (2026-10-23). rfsim 106 PRB: slots 7 and 17 of 20 are TDD special slots whose PDSCH is shorter and starts elsewhere, but the DCI
+ * layout the solver settles on carries no TDA field, so S / L learnt on full slots were applied to them: 13 % of all grants decoded with
+ * wrong parameters (skip=1, CRC fail). A solved RNTI whose full decodes fail at one slot phase while it decodes elsewhere searches (S, L) there. */
+TEST(PdschSolverPhase, SpecialSlotPhaseIsLearntFromItsOwnFailures)
+{
+  Cell c;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(61);
+  nr_pdsch_solver_reading_t rd[2] = {{c.wrong.data(), (int)c.wrong.size(), 16, 1, 1, 2}, {c.truth.data(), (int)c.truth.size(), 16, 1, 1, 2}};
+  int special_ok = 0, special = 0, full_ok = 0, full = 0, first_ok = -1;
+  for (int g = 0; g < 4000; g++) {
+    const int ph = g % 20;
+    const bool sp = ph == 7 || ph == 17;
+    nr_pdsch_solver_set_now(1000 + g);
+    nr_dci_bits_t p = {{(uint64_t)rng() & ~1ull, 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(0x1234, p, 49, 2, 2, rd, 2, 8, v);
+    for (int i = 0; i < n; i++) {
+      const bool ok = v[i].reading == 1 && v[i].add_pos == c.add_pos && v[i].table == c.table &&
+                      (sp ? (v[i].S == 0 && v[i].L == 8) : (v[i].S == 1 && v[i].L == 13));
+      if (!v[i].probe) { (sp ? special : full)++; (sp ? special_ok : full_ok) += ok; if (sp && ok && first_ok < 0) first_ok = g; }
+      nr_pdsch_solver_feedback(v[i].token, ok, true);
+    }
+  }
+  printf("[solver] phase: special slots %d of %d full decodes ok (first at grant %d), full slots %d of %d\n", special_ok, special, first_ok,
+         full_ok, full);
+  ASSERT_GT(first_ok, 0);
+  EXPECT_GE(special_ok, special - 400) << "after the learning the special slots decode";
+  EXPECT_GE(full_ok, full - 5) << "full slots are unaffected";
   nr_pdsch_solver_reset();
 }
 

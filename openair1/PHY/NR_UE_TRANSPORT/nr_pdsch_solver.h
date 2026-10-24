@@ -75,6 +75,10 @@ bool nr_pdsch_solver_owns(uint16_t rnti);
  * `budget` caps the probes; returns the number written to out[]. */
 int nr_pdsch_solver_plan(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uint8_t mcs, int l0,
                          const nr_pdsch_solver_reading_t *rd, int n_rd, int budget, nr_pdsch_solver_var_t *out);
+/** WL-SOLVER: BWP width in RB (0 = unknown); a BWP narrower than 2 x 48 RB is searched up to its full width. */
+void nr_pdsch_solver_set_bwp_rb(int rb);
+/** Widest reading searched for a BWP of bwp_rb RB (48 for wide or unknown BWPs). Pure. */
+uint16_t nr_pdsch_solver_search_max_rb(int bwp_rb);
 /** As nr_pdsch_solver_plan(), for a slot that carries run-time-discovered CSI-RS resources (csirs_slot): whether the
  * gNB rate-matches this RNTI's PDSCH around them (TS 38.214 5.1.4: only resources configured for THIS UE) is a per-RNTI
  * hypothesis chosen by TB CRC -- both are probed until one passes. The search never starts on such a slot, so a

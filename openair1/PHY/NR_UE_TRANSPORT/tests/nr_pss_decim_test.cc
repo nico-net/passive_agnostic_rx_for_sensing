@@ -178,3 +178,36 @@ TEST(PssDecim, FoldResetsOnKeyChangeAndBackwardsTime)
   EXPECT_FLOAT_EQ(d[0], 1.0f);
   nr_pss_fold_reset(&f);
 }
+
+#include <sys/mman.h>
+#include <unistd.h>
+
+/* 2026-10-24 SIGSEGV (PCI 675 weak cell): the acquisition FEP diagnostic read from rx_offset - cp, and with a PSS peak at
+ * exactly pos == cp the uint32 index wrapped 16 GB away. The window must be clipped to the buffer on both sides. */
+TEST(PssDecim, IqMagStatsNeverReadsOutsideBuffer)
+{
+  const long pg = sysconf(_SC_PAGESIZE);
+  const int n = (int)(pg / 4); /* samples in one page */
+  char *m = (char *)mmap(NULL, 3 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(m, (char *)MAP_FAILED);
+  ASSERT_EQ(mprotect(m, pg, PROT_NONE), 0);
+  ASSERT_EQ(mprotect(m + 2 * pg, pg, PROT_NONE), 0);
+  int16_t *x = (int16_t *)(m + pg);
+  for (int k = 0; k < n; k++) {
+    x[2 * k] = 3;
+    x[2 * k + 1] = 4; /* |x| = 5 */
+  }
+  double s, q;
+  nr_iq_mag_stats(x, n, -9, 100, &s, &q); /* starts 9 samples before the buffer: 91 valid */
+  EXPECT_DOUBLE_EQ(s, 91 * 5.0);
+  EXPECT_DOUBLE_EQ(q, 91 * 25.0);
+  nr_iq_mag_stats(x, n, n - 10, 100, &s, &q); /* runs past the end: 10 valid */
+  EXPECT_DOUBLE_EQ(s, 10 * 5.0);
+  nr_iq_mag_stats(x, n, -500, 100, &s, &q); /* entirely before */
+  EXPECT_DOUBLE_EQ(s, 0.0);
+  /* the exact failing arithmetic: rx_offset (uint32) - cp for pos == cp, sample_offset 0 */
+  const uint32_t rx_offset = 0 + 72 - 72 / 8;
+  nr_iq_mag_stats(x, n, (int64_t)rx_offset - 72, 1096, &s, &q);
+  EXPECT_GT(s, 0.0);
+  munmap(m, 3 * pg);
+}
