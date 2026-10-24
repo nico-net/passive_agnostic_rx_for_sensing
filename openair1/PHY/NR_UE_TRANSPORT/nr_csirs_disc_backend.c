@@ -218,8 +218,12 @@ const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
  *   NULL when ISAC_CSIRS_DISC_BACKEND is "cpu" (test hook). Returns NULL while the breaker is open.
  *   Callers: nr_csirs_disc.c (pipeline init and batches), nr_csirs_disc_feed.c (ring allocation and worker), nr_csirs_disc_td.c and the confirmation internals.
  */
+static volatile int g_gpu_disabled;
+void nr_csirs_disc_gpu_disable(void) { g_gpu_disabled = 1; }
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void)
 {
+  if (g_gpu_disabled)
+    return NULL;
   const char *backend = getenv("ISAC_CSIRS_DISC_BACKEND"); /* test-only cpu/gpu selector; unset = auto */
   if (backend && !strcmp(backend, "cpu"))
     return NULL;

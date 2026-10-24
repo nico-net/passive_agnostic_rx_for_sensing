@@ -53,6 +53,7 @@ static disc_worker_t g_worker;
 extern const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void) __attribute__((weak));
 extern bool nr_csirs_disc_pipeline_ready(void) __attribute__((weak));
 extern void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp) __attribute__((weak));
+extern int nr_csirs_disc_ring_capacity(void) __attribute__((weak));
 
 extern int nr_csirs_disc_td_init(const NR_DL_FRAME_PARMS *, int, int) __attribute__((weak));
 extern void nr_csirs_disc_td_free(void) __attribute__((weak));
@@ -429,7 +430,7 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
     return -1;
   }
   g_worker.synchronization_ready = true;
-  const int capacity = NR_CSIRS_DISC_DEFAULT_CAPACITY;
+  const int capacity = nr_csirs_disc_ring_capacity ? nr_csirs_disc_ring_capacity() : NR_CSIRS_DISC_DEFAULT_CAPACITY; /* T6b: from the memory budget */
   if (nr_csirs_disc_ring_init(&g_worker.ring, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, true) != 0)
     goto fail;
   const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load?nr_csirs_disc_gpu_load():NULL;

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* GPUPASS Task 4, host side of the DL graph pass: see nr_gpu_pass_dl.h and nr_gpu_pass.h. */
+#include "PHY/TOOLS/nr_gpu_membudget.h"
 #include "nr_gpu_pass_dl.h"
 #include "nr_gpu_pass_ul.h"
 #include "nr_pdsch_gpu_demod_host.h"
@@ -377,9 +378,11 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   if (memf) { /* T6: the memory census of the pass (device MB; the receiver's other GPU modules are not in it) */
     uint64_t m[6] = {0};
     memf(m);
-    LOG_A(PHY, "SENSING: GPU_MEM tier=%s model=%s total=%lu free_at_probe=%lu pass_inst_mb=%lu graph_mb=%lu harq_mb=%lu allocated_mb=%lu graph_cap_mb=%lu pinned_host_mb=%lu\n", gpass_tier(),
+    char mb[512]; /* T6b: the shared budget: per module the bytes it chose, its share and scale (1.000 = full size) */
+    nr_gpu_membudget_format(mb, sizeof(mb));
+    LOG_A(PHY, "SENSING: GPU_MEM tier=%s model=%s total=%lu free_at_probe=%lu pass_inst_mb=%lu graph_mb=%lu harq_mb=%lu allocated_mb=%lu graph_cap_mb=%lu pinned_host_mb=%lu %s\n", gpass_tier(),
           nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE", (unsigned long)m[0], (unsigned long)(nr_gpu_platform_free_at_probe() >> 20), (unsigned long)m[1], (unsigned long)m[2],
-          (unsigned long)m[4], (unsigned long)(m[1] + m[2] + m[4]), (unsigned long)m[3], (unsigned long)m[5]);
+          (unsigned long)m[4], (unsigned long)(m[1] + m[2] + m[4]), (unsigned long)m[3], (unsigned long)m[5], mb);
   }
   if (G.stats) {
     char buf[1024];

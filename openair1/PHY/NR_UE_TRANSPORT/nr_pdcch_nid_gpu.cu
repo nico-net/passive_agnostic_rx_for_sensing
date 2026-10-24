@@ -11,6 +11,7 @@
 #include "nr_dl_gpu_memory.h"
 #include "nr_gpu_green.h"
 #include "PHY/TOOLS/nr_gpu_cuda.h"
+#include "PHY/TOOLS/nr_gpu_membudget.h"
 #define NID_FN __device__
 #include "nr_pdcch_nid_stage1.h"
 #include "nr_pdcch_nid_chunks.h"
@@ -525,9 +526,33 @@ template<typename T> bool allocate(Context *c,T **p,size_t n) {
  if(cudaMalloc(p,n*sizeof(T))!=cudaSuccess)return false;
  c->alloc[c->nalloc]=*p;c->bytes[c->nalloc++]=n*sizeof(T);return true;
 }
+// T6b: device bytes of create() for a window of `window` batches: fixed part + per-window part (mirrors the allocate() list of create()).
+size_t window_bytes(int rb,int dur,int window) {
+ const size_t n=(size_t)window*NR_PDCCH_NID_BATCH,sc=12*(size_t)rb;
+ return n*dur*sc*sizeof(c16_t)+2*n*sizeof(int)+n*sizeof(int)*2+(4*n+1)*sizeof(st2_snap_t)+((4*n+1)*6*276+2*n)*sizeof(double)
+   +(size_t)window*STAT*(sizeof(uint16_t)+sizeof(float))+n*0;
+}
+size_t fixed_bytes() {
+ return sizeof(Device)+(size_t)CHUNK*IDS*sizeof(int)+2*(size_t)CHUNK*IDS*sizeof(float)+4*(size_t)CHUNK*IDS*sizeof(float)+6*(size_t)CELLS*(sizeof(float)+sizeof(uint16_t))
+   +(size_t)STAT*(sizeof(uint16_t)+sizeof(double))+(size_t)STAT/256*sizeof(Summary)+(size_t)NID_HYP_CAP*sizeof(*Device{}.stage2.H);
+}
 void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  if(nr_dl_gpu_sealed)return nullptr; // one pre-RX context per module lifetime
  if(rb<6 || rb>275 || dur<1 || dur>3 || window<1 || window>NR_PDCCH_NID_MAX_WINDOW)return nullptr;
+ {
+  // T6b: the window (batches kept for the evidence integration) from the shared memory budget: the requested one when it fits (GB10: unchanged), down to 5.
+  // A smaller window shortens the evidence span of one sweep (sensitivity / time to detection); the sliding-window logic itself is size independent.
+  const size_t share=nr_gpu_membudget_share(NR_GPU_MEM_PDCCH_NID),fixed=fixed_bytes();
+  const int lo=window<5?window:5;
+  const long w=nr_gpu_membudget_fit(share,fixed,window_bytes(rb,dur,1),lo,window);
+  if(!w){
+   fprintf(stderr,"[GPU] pdcch_nid: memory budget share %zu MB < %zu MB for window %d; module not ready\n",share>>20,(fixed+window_bytes(rb,dur,lo))>>20,lo);
+   nr_gpu_membudget_commit(NR_GPU_MEM_PDCCH_NID,0,0.0);return nullptr;
+  }
+  if(w!=window)fprintf(stderr,"[GPU] pdcch_nid: window %d -> %ld (share %zu MB, %zu MB)\n",window,w,share>>20,(fixed+window_bytes(rb,dur,(int)w))>>20);
+  nr_gpu_membudget_commit(NR_GPU_MEM_PDCCH_NID,fixed+window_bytes(rb,dur,(int)w),(double)w/window);
+  window=(int)w;
+ }
  Context *c=new Context{};c->rb=rb;c->dur=dur;c->window=window;
  int n=window*NR_PDCCH_NID_BATCH,sc=12*rb;
  Device &p=c->host;
