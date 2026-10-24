@@ -125,11 +125,12 @@ TEST(GpuExactFepSizes, BitExactVsCpuOrRefused)
           uint32_t off = ts_slot;
           for (int l = 0; l <= sym; l++) off += l == 0 ? ncp0 : ncp;
           off += (uint32_t)(N * sym) - (uint32_t)early;
-          c16_t in[N] __attribute__((aligned(32)));
+          /* the DFT library asserts 64-byte aligned buffers (oai_dfts.c): aligned scratch, then the reference row */
+          alignas(64) static c16_t in[4096], o[4096];
           memcpy(in, &iq[a][off], sizeof(c16_t) * N);
-          c16_t *o = &ref[a * stride + (size_t)sym * N];
           dft(get_dft(N), (int16_t *)in, (int16_t *)o, 1);
           apply_nr_rotation_symbol_RX(nsym, spsf, ts.data(), fco, o, rot.data(), nb_rb, slot, sym);
+          memcpy(&ref[a * stride + (size_t)sym * N], o, sizeof(c16_t) * N);
           rows++;
           if (memcmp(o, &gpu[a * stride + (size_t)sym * N], sizeof(c16_t) * N)) {
             int nd = 0;
