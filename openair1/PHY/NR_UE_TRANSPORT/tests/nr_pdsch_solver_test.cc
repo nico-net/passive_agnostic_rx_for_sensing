@@ -134,6 +134,30 @@ TEST(PdschSolver, TheDmrsFitOrdersTheSearchNotTheModulation)
   nr_pdsch_solver_reset();
 }
 
+/* The 1-in-8 search back-off after 200 fruitless probes is a compute bound for a search the air does not support; a DCI whose
+ * reading is well supported by the DM-RS (fit >= 0.8) is still searched. */
+TEST(PdschSolver, BackoffAppliesOnlyWithoutDmrsSupport)
+{
+  for (float fit : {-1.f, 0.9f}) {
+    nr_pdsch_solver_reset();
+    nr_pdsch_solver_set_tda_fn(nullptr, nullptr);
+    nr_pdsch_solver_set_alt_scr(-1, nullptr, 0, false);
+    uint16_t ids[] = {1, 2};
+    nr_pdsch_solver_reading_t rd[] = {{ids, 2, 20, 0x1, 1, 3, fit}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    int planned = 0;
+    for (int g = 0; g < 400; g++) {
+      nr_dci_bits_t p = {{(uint64_t)(9 + g), 0, 0}};
+      const int n = nr_pdsch_solver_plan(0x3535, p, 49, 3, 2, rd, 1, 8, v);
+      if (g >= 200) planned += n > 0;
+      for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, false, true);
+    }
+    if (fit < 0) EXPECT_LT(planned, 40) << "no DM-RS evidence: backed off";
+    else EXPECT_EQ(planned, 200) << "DM-RS-supported grants keep being searched";
+  }
+  nr_pdsch_solver_reset();
+}
+
 TEST(PdschSolver, WithoutDmrsEvidenceEveryReadingIsProbedAlike)
 {
   nr_pdsch_solver_reset();

@@ -698,6 +698,16 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   return true;
 }
 
+/* dmrs_supported: some reading of this DCI is well supported by the DM-RS of this slot (fit >= 0.8): the RNTI's PDSCH is on air
+ * where a layout says, so its search is not backed off (DCI11-RESOLVER: the back-off is a compute bound for searches the air gives
+ * no support to, not a prior). */
+static bool dmrs_supported(const nr_pdsch_solver_reading_t *rd, int n)
+{
+  for (int i = 0; i < n; i++)
+    if (rd[i].fit >= 0.8f) return true;
+  return false;
+}
+
 /* search_backoff: an RNTI with no candidate and at least 200 probes spent is searched on 1 grant in 8 only (frozen ISAC_PDSCH_SOLVER_BACKOFF=200).
  *   Caller: nr_pdsch_solver_plan_slot().
  */
@@ -1058,7 +1068,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   } else if (csirs_slot) {
     r->why[W_CSIRS]++;
     /* no search on a slot carrying discovered CSI-RS: its rate matching is unknown, a miss would be false evidence */
-  } else if (search_backoff(r)) {
+  } else if (search_backoff(r) && !dmrs_supported(rd, n_rd)) {
     r->why[W_BACKOFF]++;
     /* T26c: an RNTI whose search has spent 200 probes without a single CRC pass is searched on 1 grant in 8 only --
      * the decode pool goes to RNTIs that decode */

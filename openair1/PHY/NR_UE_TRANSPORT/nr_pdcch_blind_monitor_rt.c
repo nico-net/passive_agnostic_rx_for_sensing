@@ -163,7 +163,8 @@ typedef struct {
   uint16_t riv, w;          /* FDRA field offset and width */
   uint8_t mode, n_rbg;
   int n;                    /* PRBs it reads (0: impossible) */
-  float fit[2];             /* per nSCID; < 0 unknown */
+  float fit[2];             /* per nSCID, best CDM group; < 0 unknown */
+  float fitg[2][2];         /* per nSCID and DM-RS type-1 CDM group (subcarrier offset 0 / 1) */
   uint16_t prb[NR_PRB_SET_MAX];
 } dci11_fclass_t;
 static void dmrs_fit_classes(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdcch_blind_monitor_cfg_t *cfg, const int *ids,
@@ -185,24 +186,39 @@ static void dmrs_fit_classes(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, 
     if (ids[k] < 0 || ids[k] > 65535) continue;
     for (int ns = 0; ns < 2; ns++) {
       nr_dmrs_scan_prb_gold(proc->nr_slot_rx, sym, fp->symbols_per_slot, ids[k], ns, GOLD_BITS, gold);
-      int n_occ = 0;
-      for (int p = 0; p < cfg->bwp_size && p < NR_PRB_SET_MAX; p++) {
-        const uint16_t crb = (uint16_t)(cfg->bwp_start + p);
-        occ[p] = 0;
-        if (crb >= fp->N_RB_DL) continue;
-        occ[p] = nr_dmrs_scan_prb_score_gold(rx, nant, fp->ofdm_symbol_size, fp->first_carrier_offset, gold, &crb, 1) >= thr;
-        n_occ += occ[p];
-      }
-      if (n_occ == 0) continue;
-      for (int f = 0; f < nfk; f++) {
-        if (fk[f].n <= 0) continue;
-        int hit = 0;
-        for (int q = 0; q < fk[f].n; q++) hit += fk[f].prb[q] < cfg->bwp_size ? occ[fk[f].prb[q]] : 0;
-        const float f1 = 2.f * (float)hit / (float)(fk[f].n + n_occ);
-        if (f1 > fk[f].fit[ns]) fk[f].fit[ns] = f1;
+      /* type-1 DM-RS CDM group g sits on subcarriers 2m + g with the same sequence: the group-1 test is the group-0 one shifted */
+      for (int g = 0; g < 2; g++) {
+        int n_occ = 0;
+        for (int p = 0; p < cfg->bwp_size && p < NR_PRB_SET_MAX; p++) {
+          const uint16_t crb = (uint16_t)(cfg->bwp_start + p);
+          occ[p] = 0;
+          if (crb >= fp->N_RB_DL) continue;
+          occ[p] = nr_dmrs_scan_prb_score_gold(rx, nant, fp->ofdm_symbol_size, fp->first_carrier_offset + g, gold, &crb, 1) >= thr;
+          n_occ += occ[p];
+        }
+        for (int f = 0; f < nfk; f++) {
+          if (fk[f].n <= 0) continue;
+          int hit = 0;
+          for (int q = 0; n_occ && q < fk[f].n; q++) hit += fk[f].prb[q] < cfg->bwp_size ? occ[fk[f].prb[q]] : 0;
+          const float f1 = n_occ ? 2.f * (float)hit / (float)(fk[f].n + n_occ) : 0.f;
+          if (f1 > fk[f].fitg[ns][g]) fk[f].fitg[ns][g] = f1;
+          if (n_occ && f1 > fk[f].fit[ns]) fk[f].fit[ns] = f1;
+        }
       }
     }
   }
+}
+
+/* A reading's fit: for DM-RS type 1, the mean over the CDM groups its ports use (ports 0,1,4,5 group 0; 2,3,6,7 group 1) of that
+ * group's F1 -- a reading claiming a group that carries no DM-RS of this identity here scores low; type 2: the best group-agnostic F1. */
+static float dmrs_fit_reading(const dci11_fclass_t *f, const nr_pdcch_blind_result_t *pr)
+{
+  const int ns = pr->nscid & 1;
+  if (f->fit[ns] < 0.f) return f->fit[ns ^ 1] < 0.f ? -1.f : 0.f; /* no DM-RS evidence at all / only under the other nSCID */
+  if (pr->dmrs_config_type) return f->fit[ns];
+  const bool g0 = (pr->dmrs_ports & 0x33) != 0, g1 = (pr->dmrs_ports & 0xcc) != 0;
+  if (!g0 && !g1) return f->fit[ns];
+  return ((g0 ? f->fitg[ns][0] : 0.f) + (g1 ? f->fitg[ns][1] : 0.f)) / (float)(g0 + g1);
 }
 
 static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdcch_blind_monitor_cfg_t *cfg,
@@ -8513,7 +8529,8 @@ constdiag_done:;
        * fields at exactly these offsets), so they join that reading without being parsed again. ---- */
       int nvis = 0;
       {
-        const int ns = rep >= 0 && !reopen_layouts ? nr_pdsch_solver_layouts(out.rnti, s_visit, NR_DCI11_LAYOUT_MAX) : -1;
+        /* a solved RNTI is read through its own layout set (refinement included); the reopen of pruned layouts is a search measure */
+        const int ns = rep >= 0 ? nr_pdsch_solver_layouts(out.rnti, s_visit, NR_DCI11_LAYOUT_MAX) : -1;
         if (ns >= 0) {
           nvis = ns;
           bool has_rep = false;
@@ -8547,6 +8564,7 @@ constdiag_done:;
           fk[f].n = w <= 32 ? nr_fdra_prbs(field, of->fdra_mode, of->n_rbg, bwp_riv_bits, cfg->bwp_start, cfg->bwp_size, fk[f].prb,
                                            NR_PRB_SET_MAX, &t0) : 0;
           fk[f].fit[0] = fk[f].fit[1] = -1.f;
+          fk[f].fitg[0][0] = fk[f].fitg[0][1] = fk[f].fitg[1][0] = fk[f].fitg[1][1] = -1.f;
           nfk++;
         }
         s_fk[i] = (f < nfk && fk[f].n > 0) ? (uint8_t)f : 0xff;
@@ -8556,14 +8574,15 @@ constdiag_done:;
       int fk_order[DCI11_FCLASSES], fk_rank[DCI11_FCLASSES];
       for (int f = 0; f < nfk; f++) fk_order[f] = f;
       if (rep < 0 && nfk > 0) {
-        int fid[4], nfid = nr_dmrs_scan_rnti_ids(out.rnti, fid, 2);
-        if (nfid <= 0) {
-          nfid = 0;
-          fid[nfid++] = fp->Nid_cell;
-          if (cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell)
-            fid[nfid++] = cfg->coreset_pdcch_dmrs_scrambling_id;
-          const int did = cfg->discovered_coreset ? nr_pdsch_passive_coreset_dmrs_id((int)cfg->coreset_pdcch_dmrs_scrambling_id) : -1;
-          if (did >= 0 && did != fid[0] && (nfid < 2 || did != fid[1])) fid[nfid++] = did;
+        /* the RNTI's own blind ids (they may still be wrong early on) AND the cell's / CORESET's ids: the fit takes the best */
+        int fid[5], nfid = nr_dmrs_scan_rnti_ids(out.rnti, fid, 2);
+        if (nfid < 0) nfid = 0;
+        int cand_id[3] = {fp->Nid_cell, cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1,
+                          cfg->discovered_coreset ? nr_pdsch_passive_coreset_dmrs_id((int)cfg->coreset_pdcch_dmrs_scrambling_id) : -1};
+        for (int q = 0; q < 3 && nfid < 4; q++) {
+          bool dup = cand_id[q] < 0;
+          for (int z = 0; z < nfid && !dup; z++) dup = fid[z] == cand_id[q];
+          if (!dup) fid[nfid++] = cand_id[q];
         }
         dmrs_fit_classes(ue, proc, cfg, fid, nfid, fk, nfk);
         for (int a = 1; a < nfk; a++) /* stable insertion sort, best fit (either nSCID) first */
@@ -8638,7 +8657,7 @@ constdiag_done:;
             if (g < 0 && nrd < SOLVER_READINGS) {
               g = nrd++;
               rparsed[g] = pr;
-              rd[g].fit = fk[s_fk[i]].fit[pr.nscid & 1];
+              rd[g].fit = dmrs_fit_reading(&fk[s_fk[i]], &pr);
               nr_dci11_reading_idx_put(&ridx, rpos, g);
             }
           }
