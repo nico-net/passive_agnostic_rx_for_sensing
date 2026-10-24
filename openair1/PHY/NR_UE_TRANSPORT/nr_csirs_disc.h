@@ -250,6 +250,8 @@ const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GP
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void);
 /* T6b: switches the GPU discovery off for the process (memory budget or an allocation failure): nr_csirs_disc_gpu_load() returns NULL from then on and the CPU path runs. */
 void nr_csirs_disc_gpu_disable(void);
+/* host-RAM budget: the ring got fewer slots than the GPU share chose (nr_csirs_disc_start); becomes the capacity and the elastic base */
+void nr_csirs_disc_ring_host_cap(int capacity);
 /* T6b: observation ring capacity (slots) chosen by nr_csirs_disc_pipeline_init() from the memory budget: NR_CSIRS_DISC_DEFAULT_CAPACITY (640) when it fits. */
 int nr_csirs_disc_ring_capacity(void);
 

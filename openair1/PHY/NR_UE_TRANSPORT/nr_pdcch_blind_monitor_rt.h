@@ -45,6 +45,8 @@
 #include "nr_pdcch_blind_monitor.h" // nr_pdcch_blind_extract_opts_t, carried in the cfg below
 
 void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue);
+/* GrantWork LLR pool, sized last from the host-RAM budget, plus the hard-limit check: 0, or -1 = refuse to start (nr_pdcch_blind_monitor_rt.c) */
+int nr_dl_gw_pool_warmup(PHY_VARS_NR_UE *ue);
 void nr_dl_gpu_get_stats(uint64_t *allocs, uint64_t *denied, uint64_t *bytes, uint64_t *refused);
 
 /// [sensing] pdcch_blind_monitor_* parsed config. Owned (static instance) by

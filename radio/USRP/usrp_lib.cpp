@@ -31,6 +31,7 @@
 #include "common/utils/LOG/log.h"
 #include "common_lib.h"
 #include <dlfcn.h>
+#include "openair1/PHY/TOOLS/nr_host_membudget.h"
 #include "assertions.h"
 #include "system.h"
 #include "common/utils/nr_core_plan.h"
@@ -993,6 +994,14 @@ static int usrp_ring_ms(void)
     ms = e ? atoi(e) : 0;
     if (ms < 0 || ms > 5000)
       ms = 0;
+    /* Host-RAM budget (nr_host_membudget.h): the receiver planned the ring from the budget before the radio started (shrunk to fit, or refused to start);
+     * the planned duration wins. Absent in other programs (dlsym NULL) or no plan (-1): ISAC_USRP_RING_MS as is. */
+    int (*plan)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "nr_host_membudget_usrp_ring_ms");
+    const int p = plan ? plan() : -1;
+    if (ms > 0 && p >= 0 && p != ms) {
+      LOG_W(HW, "SENSING: USRP_RING %d ms -> %d ms (host-RAM budget plan, SENSING: HOST_MEM)\n", ms, p);
+      ms = p;
+    }
   }
   return ms;
 }
@@ -1401,6 +1410,10 @@ static void usrp_ring_alloc(usrp_state_t *s)
   if (s->ring.size() != nch || s->ring_cap != cap) {
     s->ring.assign(nch, std::vector<int32_t>(cap));
     s->ring_cap = cap;
+    /* the reservation of the plan becomes the allocated bytes (nr_host_membudget.h, NR_HOST_MEM_USRP) */
+    void (*commit)(nr_host_mem_module_t, size_t, double) = (void (*)(nr_host_mem_module_t, size_t, double))dlsym(RTLD_DEFAULT, "nr_host_membudget_commit");
+    if (commit)
+      commit(NR_HOST_MEM_USRP, nch * cap * sizeof(int32_t), 1.0);
   }
 }
 

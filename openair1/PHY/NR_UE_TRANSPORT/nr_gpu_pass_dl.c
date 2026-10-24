@@ -36,6 +36,8 @@ int nr_get_E(uint32_t G, uint8_t C, uint8_t Qm, uint8_t Nl, uint8_t r);
 /* where a pass was not taken (counted; the first few are logged) */
 enum { FB_OFF, FB_CELL, FB_FO, FB_CHEST, FB_DEMOD, FB_TBPARAM, FB_MODULE, FB_SEG, FB_N };
 static const char *const fb_name[FB_N] = {"off", "cell", "fo", "chest", "demod", "tbparam", "module", "seg"};
+#include "PHY/TOOLS/nr_host_membudget.h"
+extern void nr_host_membudget_commit(nr_host_mem_module_t m, size_t bytes, double scale) __attribute__((weak));
 static __thread nr_gpu_pass_job_t *jobp_tls;
 enum { WHY_SEGFAIL, WHY_C32, WHY_Z, WHY_G, WHY_CLASS, WHY_N };
 static struct {
@@ -439,6 +441,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     memf(m);
     char mb[768];
     nr_gpu_membudget_commit(NR_GPU_MEM_GRAPH, (size_t)m[2] << 20, m[3] ? (double)m[2] / (double)m[3] : 1.0);
+    if (nr_host_membudget_commit) nr_host_membudget_commit(NR_HOST_MEM_PINNED, (size_t)m[5] << 20, 1.0); /* the pass's cudaHostAlloc mirrors: locked host RAM */
     nr_gpu_membudget_format(mb, sizeof(mb));
     const size_t hr = nr_gpu_membudget_headroom();
     LOG_A(PHY, "SENSING: GPU_MEM final graph_mb=%lu graph_cap_mb=%lu elastic_headroom_mb=%lld %s\n", (unsigned long)m[2], (unsigned long)m[3], hr == SIZE_MAX ? -1LL : (long long)(hr >> 20), mb);

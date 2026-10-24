@@ -42,6 +42,13 @@ static int pool_class(size_t bytes)
   return c >= bytes ? k : -1;
 }
 
+/* nr_td_gw_alloc_bytes: the bytes one nr_td_gw_alloc(bytes) really takes (its power-of-two class plus the header), 0 for an oversized request: what the host-RAM budget
+ *   and mlockall see. Caller: nr_dl_gw_pool_warmup(). */
+size_t nr_td_gw_alloc_bytes(size_t bytes)
+{
+  const int k = pool_class(bytes ? bytes : 1);
+  return k < 0 ? 0 : ((size_t)4096 << k) + GW_HDR;
+}
 /* nr_td_gw_alloc: returns a GrantWork LLR buffer of at least `bytes` bytes: a recycled one from the pool (of the same or a larger class) or a fresh aligned allocation.
  *   After warm-up the pool is sealed: a miss returns NULL and is counted as a refusal, so no allocation happens during reception. Returns NULL also for an oversized request. Callers: nr_td_grantwork_publish(), nr_pdsch_passive_decode.c and nr_pdsch_passive_queue.c.
  */

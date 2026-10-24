@@ -166,6 +166,7 @@ static inline int nr_td_gw_cb0_dlen(const nr_td_cb0_params_t *p) { return (p->BG
 
 /* ---- Bounded host-memory pool (warm-up before RX) ---- */
 int nr_td_gw_warmup(size_t bytes, size_t count);
+size_t nr_td_gw_alloc_bytes(size_t bytes); /* real bytes of one nr_td_gw_alloc(bytes): power-of-two class + header */
 uint64_t nr_td_gw_pool_refused(void);
 void *nr_td_gw_alloc(size_t bytes);
 void nr_td_gw_free(void *p);

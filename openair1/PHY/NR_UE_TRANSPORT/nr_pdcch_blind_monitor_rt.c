@@ -9772,6 +9772,22 @@ extern size_t nr_host_membudget_share(nr_host_mem_module_t m) __attribute__((wea
 extern void nr_host_membudget_commit(nr_host_mem_module_t m, size_t bytes, double scale) __attribute__((weak));
 extern void nr_host_membudget_note_failure(nr_host_mem_module_t m) __attribute__((weak));
 extern int nr_host_membudget_format(char *out, size_t n) __attribute__((weak));
+extern size_t nr_host_membudget_live_share(nr_host_mem_module_t m) __attribute__((weak));
+extern size_t nr_host_membudget_live_avail(void) __attribute__((weak));
+extern int nr_host_membudget_over_hard(char *why, size_t n) __attribute__((weak));
+/* dl_queue_shape: consumers and depth of the passive PDSCH queue (the config, clamped as the queue clamps them). */
+static void dl_queue_shape(int *consumers_out, int *depth_out)
+{
+  const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
+  int consumers = cfg->pdsch_thread;
+  if (consumers < 1) consumers = 1;
+  if (consumers > NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS) consumers = NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS;
+  int depth = cfg->pdsch_queue_depth > 0 ? cfg->pdsch_queue_depth : 8 * consumers;
+  if (depth < 2) depth = 2;
+  if (depth > NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH) depth = NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH;
+  *consumers_out = consumers;
+  *depth_out = depth;
+}
 /* nr_dl_gpu_warmup: one-time start-up of the DL GPU path before the RF stream starts: probes the platform, prepares the CB0, polar, PDCCH and PDSCH GPU front ends and the GrantWork pool.
  *   Starts the passive PDSCH queue when the monitor's PDSCH decode is on (nr_pdsch_passive_queue_start). Loads the GPU modules for stats and enables their radio mode.
  *   Failures are sticky CPU fallback, never retried. Runs once (static guard). Caller: executables/nr-uesoftmodem.c (before nrue_init_openair0).
@@ -9794,37 +9810,9 @@ void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue)
   }
   nr_pdsch_passive_gpu_warmup(ue);
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
-  int consumers = cfg->pdsch_thread;
-  if (consumers < 1) consumers = 1;
-  if (consumers > NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS) consumers = NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS;
-  int depth = cfg->pdsch_queue_depth > 0 ? cfg->pdsch_queue_depth : 8 * consumers;
-  if (depth < 2) depth = 2;
-  if (depth > NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH) depth = NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH;
-  const bool want_gw = cfg->pdsch_decode >= 1;
-  const size_t llr_bytes = (size_t)fp->N_RB_DL * 12 * 14 * 4 * 8 * sizeof(int16_t);
-  size_t gw_count = want_gw ? (size_t)consumers * depth * NR_TD_GW_MAX_SIG : 0;
-  /* Host-RAM budget (PHY/TOOLS/nr_host_membudget.h): the pool is pre-faulted (llr_bytes per buffer), 12 GB at 273 PRB / 4 RX / 4 consumers x depth 64 on a 14.8 GB host.
-   * Its size only decides how many LLR sets can be shared at once (a miss decodes on the CPU path without sharing), so it is scaled to its share of the budget;
-   * the full size is kept whenever the share covers it (a large host, DGX Spark: unchanged). */
-  if (gw_count && nr_host_membudget_share) {
-    const size_t share = nr_host_membudget_share(NR_HOST_MEM_GW_POOL);
-    const size_t floor_n = (size_t)consumers * 8 < gw_count ? (size_t)consumers * 8 : gw_count; /* a few sets per consumer */
-    const long fit = nr_host_membudget_fit(share, 0, llr_bytes, (long)floor_n, (long)gw_count);
-    if (fit == 0) {
-      LOG_W(PHY, "SENSING: HOST_MEM GrantWork pool: share %zu MB < %zu MB for the %zu-buffer floor; no pool, decode without LLR sharing (CPU)\n", share >> 20,
-            (floor_n * llr_bytes) >> 20, floor_n);
-      gw_count = 0;
-    } else if ((size_t)fit != gw_count) {
-      LOG_W(PHY, "SENSING: HOST_MEM GrantWork pool %zu -> %ld buffers of %zu KB (share %zu MB of the host budget); exhaustion decodes without LLR sharing\n", gw_count, fit,
-            llr_bytes >> 10, share >> 20);
-      gw_count = (size_t)fit;
-    }
-    if (nr_host_membudget_commit) nr_host_membudget_commit(NR_HOST_MEM_GW_POOL, gw_count * llr_bytes, want_gw ? (double)gw_count / ((double)consumers * depth * NR_TD_GW_MAX_SIG) : 1.0);
-  }
-  if (nr_td_gw_warmup(llr_bytes, gw_count)) {
-    if (nr_host_membudget_note_failure) nr_host_membudget_note_failure(NR_HOST_MEM_GW_POOL);
-    LOG_W(PHY, "SENSING: DL_GPU GrantWork pool partly reserved; exhaustion uses CPU without sharing\n");
-  }
+  int consumers, depth;
+  dl_queue_shape(&consumers, &depth);
+  /* The queue's fixed arenas are committed to the host budget before anything scalable is sized (the GrantWork pool is sized last, nr_dl_gw_pool_warmup). */
   if (cfg->pdsch_decode >= 1 && cfg->pdsch_thread)
     (void)nr_pdsch_passive_queue_start(ue, depth, consumers, cfg->pdsch_thread_core);
   static const char *modules[] = {"libtd_cb0_gpu.so", "libpolar_gpu.so", "libpdsch_gpu.so", "libpdcch_gpu.so", "libldpc_cuda.so"};
@@ -9838,13 +9826,62 @@ void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue)
       dl_gpu_transfers[i] = (void (*)(uint64_t *, uint64_t *))dlsym(h, "nr_dl_gpu_transfer_stats");
     }
   }
-  LOG_I(PHY, "SENSING: DL_GPU warm-up complete consumers=%d depth=%d gw_buffers=%zu llr_bytes=%zu (no late CUDA growth)\n",
-        consumers, depth, gw_count, llr_bytes);
-  if (nr_host_membudget_format) {
-    char hm[512];
-    nr_host_membudget_format(hm, sizeof(hm));
-    LOG_A(PHY, "SENSING: HOST_MEM %s\n", hm);
+  LOG_I(PHY, "SENSING: DL_GPU warm-up complete consumers=%d depth=%d (GrantWork pool sized last, nr_dl_gw_pool_warmup; no late CUDA growth)\n", consumers, depth);
+}
+
+/* nr_dl_gw_pool_warmup: sizes and pre-faults the GrantWork LLR pool, LAST of the receiver's big host allocations (after the PDSCH queue, the CSI-RS discovery rings,
+ *   the time-domain pool, the pinned mirrors and the USRP ring reservation have committed to the host budget), then checks the hard limit and prints SENSING: HOST_MEM.
+ *   The pool size only decides how many LLR sets can be shared at once (a miss decodes on the CPU path without sharing), so it takes its share of what is left:
+ *   min(accounted share, live share). The live share re-reads MemAvailable / the cgroup headroom now, so memory the accounting does not list (CUDA host
+ *   allocations, other processes) is seen too. A share that covers the full pool leaves it unchanged (DGX Spark). Returns 0, or -1 when the committed fixed
+ *   bytes exceed the hard limit (the caller refuses to start before the radio is touched). Caller: executables/nr-uesoftmodem.c (once, before nrue_init_openair0).
+ */
+int nr_dl_gw_pool_warmup(PHY_VARS_NR_UE *ue)
+{
+  static bool done;
+  if (done || !ue) return 0;
+  done = true;
+  const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
+  int consumers, depth;
+  dl_queue_shape(&consumers, &depth);
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const bool want_gw = cfg->pdsch_decode >= 1;
+  const size_t llr_bytes = (size_t)fp->N_RB_DL * 12 * 14 * 4 * 8 * sizeof(int16_t);
+  const size_t unit = nr_td_gw_alloc_bytes(llr_bytes); /* the pool's real allocation per buffer (power-of-two class + header): what mlockall faults in */
+  const size_t full = want_gw ? (size_t)consumers * depth * NR_TD_GW_MAX_SIG : 0;
+  size_t gw_count = full;
+  if (gw_count && nr_host_membudget_share) {
+    const size_t acc = nr_host_membudget_share(NR_HOST_MEM_GW_POOL), live = nr_host_membudget_live_share ? nr_host_membudget_live_share(NR_HOST_MEM_GW_POOL) : SIZE_MAX;
+    const size_t share = acc < live ? acc : live;
+    const size_t floor_n = (size_t)consumers * 8 < gw_count ? (size_t)consumers * 8 : gw_count; /* a few sets per consumer */
+    const long fit = nr_host_membudget_fit(share, 0, unit, (long)floor_n, (long)gw_count);
+    if (fit == 0) {
+      LOG_W(PHY, "SENSING: HOST_MEM GrantWork pool: share %zu MB (accounted %zu, live %zu) < %zu MB for the %zu-buffer floor; no pool, decode without LLR sharing (CPU)\n",
+            share >> 20, acc >> 20, live >> 20, (floor_n * unit) >> 20, floor_n);
+      gw_count = 0;
+    } else if ((size_t)fit != gw_count) {
+      LOG_W(PHY, "SENSING: HOST_MEM GrantWork pool %zu -> %ld buffers of %zu KB (share %zu MB: accounted %zu, live %zu); exhaustion decodes without LLR sharing\n", gw_count,
+            fit, unit >> 10, share >> 20, acc >> 20, live >> 20);
+      gw_count = (size_t)fit;
+    }
+    if (nr_host_membudget_commit) nr_host_membudget_commit(NR_HOST_MEM_GW_POOL, gw_count * unit, (double)gw_count / (double)full);
   }
+  if (nr_td_gw_warmup(llr_bytes, gw_count)) {
+    if (nr_host_membudget_note_failure) nr_host_membudget_note_failure(NR_HOST_MEM_GW_POOL);
+    LOG_W(PHY, "SENSING: DL_GPU GrantWork pool partly reserved; exhaustion uses CPU without sharing\n");
+  }
+  LOG_I(PHY, "SENSING: DL_GPU GrantWork pool consumers=%d depth=%d gw_buffers=%zu llr_bytes=%zu alloc_bytes=%zu\n", consumers, depth, gw_count, llr_bytes, unit);
+  if (!nr_host_membudget_format) return 0;
+  char hm[768];
+  nr_host_membudget_format(hm, sizeof(hm));
+  const size_t live = nr_host_membudget_live_avail ? nr_host_membudget_live_avail() : SIZE_MAX;
+  LOG_A(PHY, "SENSING: HOST_MEM %s live_avail_mb=%lld\n", hm, live == SIZE_MAX ? -1LL : (long long)(live >> 20));
+  char why[512];
+  if (nr_host_membudget_over_hard && nr_host_membudget_over_hard(why, sizeof(why))) {
+    LOG_E(PHY, "SENSING: HOST_MEM REFUSE: %s. Free host memory (stop other jobs) or lower the fixed modules (pdsch_thread / pdsch_queue_depth, --ue-nb-ant-rx, ISAC_USRP_RING_MS)\n", why);
+    return -1;
+  }
+  return 0;
 }
 
 /* T26c (diagnostic, always on): print the faulting thread's backtrace on SIGSEGV/SIGBUS (replay EOF-exit crash
