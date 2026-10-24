@@ -743,8 +743,10 @@ static void ulg_warmup(const NR_DL_FRAME_PARMS *fp, int nant)
     return;
   }
   const int rc = api->init(nant, fp->ofdm_symbol_size, fp->nb_prefix_samples, (int)fp->ofdm_offset_divisor, 30, 1000 / fp->slots_per_subframe);
-  /* per-path choice: the standalone UL FEP reads caller memory in place (SHARED only; no DISCRETE variant: direct_only -> CPU) */
-  if (nr_gpu_path_begin(NR_GPU_PATH_UL_FEP, rc == 0 || !nr_gpu_platform_shared_direct(), NR_GPU_PATH_MEASURE_NONE) != NR_GPU_PATH_GPU || rc != 0) {
+  /* per-path choice: the standalone UL FEP reads the snapshot in place on DIRECT (SHARED: GPU, unchanged); on DISCRETE its staged variant (Q4) is measured by a
+   * paired online trial in ulg_fep_symbols (the GPU batch and the CPU FEP of the same rows, both timed, every row compared) */
+  if (nr_gpu_path_begin(NR_GPU_PATH_UL_FEP, rc == 0, nr_gpu_platform_shared_direct() ? NR_GPU_PATH_MEASURE_NONE : NR_GPU_PATH_MEASURE_TRIAL) == NR_GPU_PATH_CPU
+      || rc != 0) {
     if (rc != 0)
       LOG_W(PHY, "SENSING: UL_GPU_FEP requested but unavailable -- CPU FEP\n");
     return;
@@ -757,7 +759,7 @@ static void ulg_warmup(const NR_DL_FRAME_PARMS *fp, int nant)
 static inline bool ulg_usable(int ctx, int nant, double fo_hz, const NR_DL_FRAME_PARMS *fp)
 {
   return !t_nid_cap && g_ulg && atomic_load_explicit(&g_ulg_on, memory_order_relaxed) && g_snapshot[ctx].valid && fo_hz == 0.0
-         && nant == g_ulg_nant && fp->ofdm_symbol_size == 4096;
+         && nant == g_ulg_nant && fp->ofdm_symbol_size == 4096 && nr_gpu_path_use_gpu(NR_GPU_PATH_UL_FEP);
 }
 
 /* One window of every antenna -> item. false = outside the bounded snapshot (the CPU path reports it). */
@@ -830,7 +832,33 @@ static bool ulg_fep_symbols(PHY_VARS_gNB *gnb, int ctx, int nant, unsigned char 
       return false;
     }
   }
-  return ulg_run(fp, ctx, nant, slot, it, sym, off, n, fp->N_RB_UL);
+  if (nr_gpu_path_state(NR_GPU_PATH_UL_FEP) != NR_GPU_PATH_TRIAL)
+    return ulg_run(fp, ctx, nant, slot, it, sym, off, n, fp->N_RB_UL);
+  /* Q4 per-path paired trial (DISCRETE only): the GPU batch, then the CPU FEP of every (symbol, antenna) row (what PASSIVE_UL_FEP_SYMBOL computes), both timed;
+   * every row is compared bit for bit (a mismatch ends the trial as gpu_error and switches the GPU path off). Samples per row. */
+  const uint64_t tg0 = utim_now();
+  if (!ulg_run(fp, ctx, nant, slot, it, sym, off, n, fp->N_RB_UL))
+    return false;
+  const uint64_t tg1 = utim_now();
+  bool same = true;
+  for (int i = 0; i < n; i++)
+    for (int a = 0; a < nant; a++) {
+      c16_t ref[fp->ofdm_symbol_size] __attribute__((aligned(32)));
+      passive_snapshot_fep(fp, ctx, a, ref, sym[i], slot, off[i], 0.0);
+      apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe, fp->timeshift_symbol_rotation, fp->first_carrier_offset, ref,
+                                  fp->symbol_rotation[link_type_ul], fp->N_RB_UL, slot, sym[i]);
+      same = same && memcmp(ref, it[i].dst[a], sizeof(ref)) == 0;
+    }
+  const uint64_t tc1 = utim_now();
+  if (!same) {
+    atomic_store(&g_ulg_on, false);
+    nr_gpu_path_fail(NR_GPU_PATH_UL_FEP, "ul fep mismatch");
+    LOG_E(PHY, "SENSING: UL_GPU_FEP MISMATCH in the per-path trial (slot %d) -- GPU path off, CPU FEP\n", slot);
+    return false;
+  }
+  nr_gpu_path_sample(NR_GPU_PATH_UL_FEP, 1, (double)(tg1 - tg0) / 1000.0 / (n * nant));
+  nr_gpu_path_sample(NR_GPU_PATH_UL_FEP, 0, (double)(tc1 - tg1) / 1000.0 / (n * nant));
+  return true;
 }
 
 /* ---- UL-LAYOUT probe. For one booked DCI 0_1 it correlates the CP-OFDM DM-RS (port 0,

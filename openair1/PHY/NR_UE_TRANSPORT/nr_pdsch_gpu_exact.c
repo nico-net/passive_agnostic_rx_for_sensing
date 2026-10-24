@@ -137,8 +137,10 @@ int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
   else
     LOG_A(PHY, "SENSING: GPU_EXACT_FEP ready but the per-path choice is CPU (GPU_PATH path=fep): CPU FEP, N=%d %s\n", fp->ofdm_symbol_size,
           twin ? twin() : "dft_twin=?");
-  /* the standalone chest / delay entries need the SHARED tier (kernels read caller memory in place): no DISCRETE variant, CPU there */
-  nr_gpu_path_begin(NR_GPU_PATH_CHEST, g_chest_fn != NULL || g_delay_fn != NULL, NR_GPU_PATH_MEASURE_NONE);
+  /* the standalone chest / delay entries: in place on DIRECT (SHARED: GPU, unchanged); on DISCRETE the staged variants (Q4) are measured by a paired online trial
+   * (nr_pdsch_gpu_chest_grant: the GPU chest and the CPU estimator on the same grant, both timed); without staging the entries are NULL (gpu_unavailable -> CPU) */
+  nr_gpu_path_begin(NR_GPU_PATH_CHEST, g_chest_fn != NULL || g_delay_fn != NULL,
+                    nr_gpu_model() == NR_GPU_MODEL_DIRECT ? NR_GPU_PATH_MEASURE_NONE : NR_GPU_PATH_MEASURE_TRIAL);
   return 1;
 }
 

@@ -109,8 +109,10 @@ int nr_pdsch_gpu_demod_warmup(const NR_DL_FRAME_PARMS *fp)
     } else
       LOG_A(PHY, "SENSING: GPU_EXACT_DEMOD standalone runs staged on the DISCRETE tier (explicit H2D/D2H)\n");
   }
-  /* per-path choice of the standalone entry (nr_gpu_path.h): SHARED -> GPU (unchanged); no DISCRETE variant -> CPU (direct_only) */
-  if (nr_gpu_path_begin(NR_GPU_PATH_DEMOD, 1, NR_GPU_PATH_MEASURE_NONE) == NR_GPU_PATH_CPU)
+  /* per-path choice of the standalone entry (nr_gpu_path.h): SHARED -> GPU (unchanged). DISCRETE (Q4): the staged run is measured by a paired online trial
+   * (nr_pdsch_gpu_demod_grant: the CPU loop and the GPU run on the same grant, both timed); no staging -> g_run NULL -> gpu_unavailable (CPU) */
+  if (nr_gpu_path_begin(NR_GPU_PATH_DEMOD, g_run != NULL, nr_gpu_model() == NR_GPU_MODEL_DIRECT ? NR_GPU_PATH_MEASURE_NONE : NR_GPU_PATH_MEASURE_TRIAL)
+      == NR_GPU_PATH_CPU)
     g_run = NULL;
   g_check = 64;
   atomic_store(&g_on, 1);
@@ -658,7 +660,7 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
 }
 
 static int compare(const nr_pdsch_gpu_demod_call_t *c, const chk_tls_t *k, const uint32_t *dvr_g, int32_t l2_g, int used_g,
-                   const nr_pdsch_evm_acc_t *acc_g, int used_c, const nr_pdsch_evm_acc_t *acc_c, char *why, size_t wn)
+                   const nr_pdsch_evm_acc_t *acc_g, int used_c, const nr_pdsch_evm_acc_t *acc_c, char *why, size_t wn, int full)
 {
   const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg = c->cfg;
   const int nl = c->dlsch->cw_info.Nl, qm = c->dlsch->cw_info.qamModOrder;
@@ -680,7 +682,7 @@ static int compare(const nr_pdsch_gpu_demod_call_t *c, const chk_tls_t *k, const
       snprintf(why, wn, "llr[%u] of %u gpu %d cpu %d", i, tot, k->llr[i], c->llr[i]);
       return 0;
     }
-  for (int m = cfg->start_symbol; m <= last; m++)
+  for (int m = cfg->start_symbol; full && m <= last; m++) /* full = 0: a DISCRETE run with the decoder copy-back (Q4 trial) has no comp / mag arrays to compare */
     for (int l = 0; l < nl; l++) {
       const size_t row = ((size_t)m * NR_MAX_NB_LAYERS + l) * c->buf;
       for (uint32_t i = 0; i < c->dl_valid_re[m]; i++) {
@@ -947,7 +949,7 @@ static void bg_demod_run(void *arg)
       cc.magb = cpu.magb;
       cc.magr = cpu.magr;
       char why[256] = "";
-      if (compare(&cc, &gpu, j->dvr_g, j->l2_g, j->used_g, &j->acc_g, used_c, &acc_c, why, sizeof(why))) {
+      if (compare(&cc, &gpu, j->dvr_g, j->l2_g, j->used_g, &j->acc_g, used_c, &acc_c, why, sizeof(why), 1)) {
         atomic_fetch_add_explicit(&g_chk_ok, 1, memory_order_relaxed);
       } else {
         atomic_fetch_add_explicit(&g_chk_bad, 1, memory_order_relaxed);
@@ -1081,6 +1083,8 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
   double thr_coef = 0.0;
   if (nr_pdsch_route_cpu()) /* BATCHCPU */
     return -1;
+  if (!nr_gpu_path_use_gpu(NR_GPU_PATH_DEMOD)) /* per-path choice: CPU (a DISCRETE trial that the CPU won) */
+    return -1;
   const int rf = refuse(c, &mode, &thr_coef, &align, &l2d);
   if (rf >= 0) {
     if (rf != RF_OFF)
@@ -1091,7 +1095,9 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
   uint64_t gns = 0;
   const uint64_t n = atomic_fetch_add_explicit(&g_calls, 1, memory_order_relaxed) + 1;
   const int bg = g_check > 0 ? nr_gpu_check_async_every() : 0; /* FATTAILS: the check runs off this thread */
-  const int check = !bg && (g_check == 1 || (g_check > 1 && n % (uint64_t)g_check == 0));
+  /* Q4 per-path paired trial (DISCRETE only; SHARED never enters TRIAL): every grant runs the check path, the CPU loop and the GPU run are both timed */
+  const int trial = nr_gpu_path_state(NR_GPU_PATH_DEMOD) == NR_GPU_PATH_TRIAL;
+  const int check = trial || (!bg && (g_check == 1 || (g_check > 1 && n % (uint64_t)g_check == 0)));
   const int bg_check = bg && n % (uint64_t)bg == 0;
   if (!check) {
     uint32_t dvr_in[NR_SYMBOLS_PER_SLOT];
@@ -1140,6 +1146,7 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
     }
     const nr_pdsch_evm_acc_t acc0 = nr_pdsch_evm_acc;
     const int used0 = nr_dlsch_used_branch;
+    const uint64_t tc0 = now_ns();
     if (cpu_loop(c, c->llr, c->dl_valid_re, c->log2_maxh, c->comp, c->mag, c->magb, c->magr) != 0) {
       atomic_fetch_sub_explicit(&g_calls, 1, memory_order_relaxed);
       return -1;
@@ -1151,9 +1158,11 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
     uint32_t dvr_g[NR_SYMBOLS_PER_SLOT] = {0};
     int32_t l2_g = 0;
     memset(k.llr, 0, sizeof(int16_t) * c->llr_cap);
-    t_stage_full = 1;
+    const uint64_t tc1 = now_ns();
+    t_stage_full = !trial; /* the trial times the GPU run as the decoder uses it (decoder copy-back) and compares the LLRs, valid REs, max-h and branch */
     const int r = gpu_grant(c, mode, thr_coef, align, l2d, k.llr, c->llr_cap, dvr_g, &l2_g, k.comp, k.mag, k.magb, k.magr, &gns);
     t_stage_full = 0;
+    const uint64_t tg1 = now_ns();
     const nr_pdsch_evm_acc_t acc_g = nr_pdsch_evm_acc;
     const int used_g = nr_dlsch_used_branch;
     nr_pdsch_evm_acc = acc_c;
@@ -1164,7 +1173,17 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
       return 0;
     }
     char why[256] = "";
-    if (compare(c, &k, dvr_g, l2_g, used_g, &acc_g, used_c, &acc_c, why, sizeof(why))) {
+    const int same = compare(c, &k, dvr_g, l2_g, used_g, &acc_g, used_c, &acc_c, why, sizeof(why), !trial || nr_gpu_model() == NR_GPU_MODEL_DIRECT);
+    if (trial) { /* per 1000 (RB x symbol x layer) units */
+      const double ku = (double)c->freq_alloc->num_rbs * c->cfg->number_symbols * c->dlsch->cw_info.Nl / 1000.0;
+      if (!same)
+        nr_gpu_path_fail(NR_GPU_PATH_DEMOD, "demod mismatch");
+      else if (ku > 0) {
+        nr_gpu_path_sample(NR_GPU_PATH_DEMOD, 1, (tg1 - tc1) / 1e3 / ku);
+        nr_gpu_path_sample(NR_GPU_PATH_DEMOD, 0, (tc1 - tc0) / 1e3 / ku);
+      }
+    }
+    if (same) {
       atomic_fetch_add_explicit(&g_chk_ok, 1, memory_order_relaxed);
     } else {
       atomic_fetch_add_explicit(&g_chk_bad, 1, memory_order_relaxed);
