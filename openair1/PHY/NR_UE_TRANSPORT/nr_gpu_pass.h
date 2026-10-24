@@ -225,6 +225,7 @@ static inline int nr_gpu_pass_seg_fill(nr_gpu_pass_job_t *j, const nr_prb_seg_t 
 typedef struct {
   uint8_t tb_ok;
   uint8_t seg_ok[NR_GPU_PASS_MAX_CB];
+  uint8_t iters[NR_GPU_PASS_MAX_CB]; /* RANK2-ITER: OAI LDPC numIter of every decoded code block (cap = failed; 0 = aborted / not decoded / skipped) */
   uint32_t tbs;
   float evm_db, snr_db, nvar_db;
   uint8_t *tb;       /* caller's buffer, >= (lenWithCrc(1, A) + 7) / 8 + 8 bytes: receives the reassembled TB (the CRC bytes of a single-CB TB included) */

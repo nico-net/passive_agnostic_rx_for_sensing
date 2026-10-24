@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "PHY/TOOLS/nr_stage_split.h"
 #include <sched.h>
 #include "nr_pdsch_gpu_exact.h"
@@ -80,6 +83,7 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "PHY/CODING/coding_defs.h"
 #include "PHY/NR_REFSIG/dmrs_nr.h" // get_num_dmrs_re_per_rb, nr_chest_time_domain_avg
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
+#include "PHY/TOOLS/nr_gpu_path.h" // per-path GPU/CPU choice (GPUPASS trial on DISCRETE)
 #include "PHY/MODULATION/modulation_UE.h" // nr_slot_fep, nr_slot_fep_ant
 #include "nr_pdsch_ptrs_unav.h"
 #include "nr_pdsch_prb_set.h" // nr_prb_segments, nr_prb_gather_index (non-contiguous PRB sets)
@@ -98,6 +102,7 @@ _Static_assert(sizeof(((freq_alloc_bitmap_t *)0)->prb_list) == NR_PRB_SET_MAX * 
 #include "PHY/TOOLS/tools_defs.h"
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_ldpc_cap.h" /* RANK2-ITER: the one LDPC iteration cap */
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h" /* WIDE-S0: nr_pdcch_dmrs_rank_grid() for the PDCCH occupancy diagnostic */
 
 /* ---- INNER COST BREAKDOWN (ISAC_PDCCH_TIMING=1, shares the blind monitor's switch) -------------
@@ -124,6 +129,11 @@ static uint64_t g_pdtim_max[PDTIM_N] = {0};
 static double g_pdtim_ss[PDTIM_N] = {0}; /* sum of squared stage times (us^2): per-decode std in PDTIM */
 static uint64_t g_pdtim_calls = 0;
 static uint64_t g_pdtim_cpu_ns[PDTIM_N] = {0}; /* T26c: thread CPU time per stage -- wall >> cpu means preempted/blocked */
+/* per-path trial of the graph pass (nr_gpu_path.h, DISCRETE): the side of the current queue decode call: 0 none, 1 GPU (pass tried),
+ * 2 CPU (kept off the pass by the trial), 3 GPU picked but the pass not reached. Reset and read by the queue around each decode call. */
+static __thread int t_gp_path_side;
+void nr_pdsch_passive_path_trial_reset(void) { t_gp_path_side = 0; }
+int nr_pdsch_passive_path_trial_side(void) { return t_gp_path_side == 1 ? 1 : t_gp_path_side == 2 ? 0 : -1; }
 static __thread uint64_t t_pdtim_cpu0;
 static _Atomic int g_pdtim_on = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
 
@@ -943,6 +953,10 @@ static _Atomic uint32_t g_rbmap[NR_RBMAP_MAX];
 static _Atomic uint32_t g_rbmap_ok[NR_RBMAP_MAX];
 static _Atomic uint64_t g_rbmap_grants;
 static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last TB on this thread
+/* RANK2-ITER: LDPC iterations of the last body on this thread (EVMGRANT it= itc= its=): max OAI numIter over the code blocks (a block that hit the cap reports the cap;
+ * 0 = no LDPC ran), the cap in force, and the sum over the code blocks that decoded. Reset at the start of every body. */
+static __thread uint8_t t_ldpc_it_max = 0, t_ldpc_it_cap = 0;
+static __thread uint16_t t_ldpc_it_sum = 0;
 /* Decoder that produced the last TB on this thread (NRLDPC_DECODER_*, K34/K36). Unit = the TB. Evidence is
  * stratified by this value: CPU plain min-sum and CUDA normalised min-sum (2x iterations) differ by about 1 dB (K36), so counts, CRC
  * passes and eliminations from different values are NEVER merged. */
@@ -1712,9 +1726,8 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
     return false;
   }
 
-  TB_parameters.max_ldpc_iterations = 8; /* the OAI int8 flooding min-sum default; only the full TB decode may raise it */
-  extern __thread int nr_pdsch_ldpc_iters_override;
-  if (nr_pdsch_ldpc_iters_override > 0) TB_parameters.max_ldpc_iterations = (uint8_t)nr_pdsch_ldpc_iters_override; /* ISAC_LDPC_ITERS_AB */
+  TB_parameters.max_ldpc_iterations = (uint8_t)nr_pdsch_ldpc_cap(); /* RANK2-ITER: the one cap (nr_pdsch_ldpc_cap.h) */
+  memset(TB_parameters.decodeIters, 0, sizeof(TB_parameters.decodeIters));
   TB_parameters.rv_index = cw->rv;
   TB_parameters.tbslbrm = dlsch_config->tbslbrm;
   TB_parameters.abort_decode = &h->abort_decode;
@@ -1786,6 +1799,10 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
     return false;
   }
   t_decoder_used_last = TB_parameters.decoder_used;
+  if (!t_probe_first_seg) {
+    nr_pdsch_ldpc_iters_summary(TB_parameters.decodeIters, TB_parameters.decodeSuccess, (int)C_dec, &t_ldpc_it_max, &t_ldpc_it_sum);
+    t_ldpc_it_cap = TB_parameters.max_ldpc_iterations;
+  }
   atomic_fetch_add(&g_ldpc_tb_dec[TB_parameters.decoder_used < 3 ? TB_parameters.decoder_used : 0], 1);
   LOG_D(NR_PHY, "SENSING: passive PDSCH decode decoder_used=%u (1=CPU min-sum, 2=CUDA normalised min-sum x2 iterations)\n", TB_parameters.decoder_used);
 
@@ -2194,8 +2211,7 @@ static uint64_t gp_llr_hash(const int16_t *p, uint32_t n)
 /* the facts of the body the graph pass needs, resolved as the body's own statics resolve them */
 static int gp_iters(void)
 {
-  extern __thread int nr_pdsch_ldpc_iters_override;
-  return nr_pdsch_ldpc_iters_override > 0 ? nr_pdsch_ldpc_iters_override : 8;
+  return nr_pdsch_ldpc_cap();
 }
 /* t_hq.armed is set for these decodes (soft combining across retransmissions) */
 static bool gp_hq_arms(void) { return !t_quiet && atomic_load(&g_ldpc_ok) >= 100; }
@@ -2208,6 +2224,13 @@ static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_
   for (int r = 0; r < C_dec; r++)
     seg_ok += g->r.seg_ok[r] != 0;
   g_harq.processedSegments = seg_ok;
+  if (!t_probe_first_seg) {
+    bool okv[NR_GPU_PASS_MAX_CB];
+    for (int r = 0; r < C_dec; r++)
+      okv[r] = g->r.seg_ok[r] != 0;
+    nr_pdsch_ldpc_iters_summary(g->r.iters, okv, C_dec, &t_ldpc_it_max, &t_ldpc_it_sum);
+    t_ldpc_it_cap = (uint8_t)gp_iters();
+  }
   t_seg_K = g->K; t_seg_F = g->F; t_seg_C = (uint32_t)g->C; t_seg_Z = g->Z;
   t_seg_E = g->E; t_seg_R = g->R; t_seg_lbrm = tbslbrm; t_seg_BG = (uint32_t)g->BG;
   t_decoder_used_last = NRLDPC_DECODER_CPU;
@@ -2257,6 +2280,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                             nr_pdsch_passive_decode_result_t *out)
 {
+  t_ldpc_it_max = 0; t_ldpc_it_cap = 0; t_ldpc_it_sum = 0;
   NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), NULL);
   t_fep_done_ns = 0;
   memset(out, 0, sizeof(*out));
@@ -2733,6 +2757,11 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     const bool gp_probe_cov = gp_cover;
     const bool gp_share_cov = gp_cover;
     /* v2 Task 4: with ISAC_PDSCH_GPU_GRAPH_RETRY the retry bodies stay on the pass (held instance), RETRY_OLD is not consulted */
+    { /* NR_TEST_FORCE_CPU_TB=1 (test seam, replay only): every grant takes the old path (host LLR normalisation, per-layer diagnostics) */
+      static int fct = -1;
+      if (fct < 0) fct = getenv("NR_TEST_FORCE_CPU_TB") ? 1 : 0;
+      if (fct) t_tb_force_cpu = true;
+    }
     gp_gate = (!nr_gpu_graph_flag("RETRY") && nr_gpu_pass_retry_to_old(gp_retry_old, t_pdtim_body, t_recov_mode == 2, t_quiet || t_decode_tdra_attempt != 0)) ? NR_GPU_PASS_GATE_RETRY
             : (seg_path && nseg > nr_gpu_pass_seg_max()) ? NR_GPU_PASS_GATE_SEG /* more segments than the largest class; fewer run the segmented classes */
             : ((t_probe_first_seg || probe_last_sym >= 0) && !gp_probe_cov) ? NR_GPU_PASS_GATE_PROBE
@@ -2747,6 +2776,15 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
             : nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) >= 0 ? NR_GPU_PASS_GATE_CHEST_ONLY
             : (!t_gpp && !nr_gpu_allocations_allowed() && (t_gp_claim_tried || !nr_gpu_graph_pool_has_free())) ? NR_GPU_PASS_GATE_NOMEM /* not prewarmed before the fence, no pool set */
             : -1;
+    if (gp_gate < 0) { /* per-path choice (nr_gpu_path.h): SHARED -> GPU (no change); DISCRETE -> alternating trial on the first grants, then GPU or CPU */
+      int pst = nr_gpu_path_state(NR_GPU_PATH_PASS_DL);
+      if (pst == NR_GPU_PATH_UNSET)
+        pst = nr_gpu_path_begin(NR_GPU_PATH_PASS_DL, 1, NR_GPU_PATH_MEASURE_TRIAL);
+      if (pst == NR_GPU_PATH_TRIAL && t_gp_path_side == 0)
+        t_gp_path_side = nr_gpu_path_pick(NR_GPU_PATH_PASS_DL) ? 3 : 2; /* once per decode call of the queue (retries keep the side) */
+      if (pst == NR_GPU_PATH_CPU || (pst == NR_GPU_PATH_TRIAL && t_gp_path_side == 2))
+        gp_gate = NR_GPU_PASS_GATE_PATH;
+    }
     if (gp_gate >= 0)
       nr_gpu_pass_gate(gp_gate);
   }
@@ -2821,6 +2859,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc)); /* the demod job reads whether the EVM is armed; the block below re-arms it for the old path */
       nr_pdsch_evm_acc.armed = 1;
       gp_tried = true;
+      if (t_gp_path_side == 3)
+        t_gp_path_side = 1; /* the GPU side of the trial ran the pass */
       if (seg_path)
         gp_seg_csi_map(seg, nseg, dlsch_config, freq_alloc); /* the demod geometry reads the CSI-FULL map of the virtual allocation */
       const int gp_rc = t_gpp ? nr_gpu_pass_dl_run(&gin, t_gpp) : 1;
@@ -3383,7 +3423,7 @@ gpu_llr_ready:;
   dlsch.rnti = grant->rnti;
   dlsch.rnti_type = TYPE_C_RNTI_;
   dlsch.active = true;
-  dlsch.max_ldpc_iterations = 8;
+  dlsch.max_ldpc_iterations = (uint8_t)nr_pdsch_ldpc_cap();
 
   NR_DL_UE_HARQ_t harq = {0};
   harq.status = NR_ACTIVE;
@@ -3699,7 +3739,13 @@ gpu_llr_ready:;
          * the probe a smaller shift than the whole-slot decode of the same hypothesis (rank 4: CB0
          * LLRs 2^dk times larger, clipped at the int8 rail). Every decode has demodulated that span. */
         const uint32_t span = nr_llr_norm_span(G, nr_llr_norm_num_cb(cw->TBS, cw->ldpcBaseGraph));
-        const int k = nr_llr_norm_shift(llr, span);
+        const int k = nr_llr_norm_shift_nl(llr, span, (int)cw->Nl, (int)cw->qamModOrder);
+        {
+          static int r2w_diag = -1; /* NR_TEST_RANK2W_DIAG=1: per-layer |LLR| statistics of 2-layer grants (test seam, replay only) */
+          if (r2w_diag < 0) r2w_diag = getenv("NR_TEST_RANK2W_DIAG") ? 1 : 0;
+          if (r2w_diag && cw->Nl == 2 && cw->qamModOrder >= 2)
+            nr_llr_layer_diag(llr, G, cw->qamModOrder, k, grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->mcs);
+        }
         if (k > 0) {
           for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)(llr[i] >> k);
           atomic_fetch_add(&g_llr_norm_shift[k], 1);
@@ -3908,6 +3954,9 @@ gpu_llr_ready:;
     out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
   }
 
+  out->ldpc_it_max = t_ldpc_it_max;
+  out->ldpc_it_cap = t_ldpc_it_cap;
+  out->ldpc_it_sum = t_ldpc_it_sum;
   /* GrantWork admissibility (fix round 1, I2): what the job's full decode did that CB0 from shared work does not. */
   if (t_gw != NULL && !t_quiet && !t_gw_capture) {
     uint32_t f = 0;
@@ -4697,7 +4746,7 @@ int nr_pdsch_passive_gw_cb0_item(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypot
     *flags |= hflags;
   int k = 0;
   if (v.G >= 64)
-    k = nr_llr_norm_shift(v.llr, nr_llr_norm_span(v.G, nr_llr_norm_num_cb(p.A, p.BG)));
+    k = nr_llr_norm_shift_nl(v.llr, nr_llr_norm_span(v.G, nr_llr_norm_num_cb(p.A, p.BG)), nl, qm);
   memset(it, 0, sizeof(*it));
   it->llr = v.llr;
   it->G = v.G;
@@ -4707,7 +4756,7 @@ int nr_pdsch_passive_gw_cb0_item(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypot
   it->tbs = p.A;
   it->mcs_table = h->mcs_table;
   it->tbslbrm = p.tbslbrm;
-  it->max_iter = 8; /* passive_ldpc_decode_core(): max_ldpc_iterations */
+  it->max_iter = (uint8_t)nr_pdsch_ldpc_cap(); /* passive_ldpc_decode_core(): max_ldpc_iterations */
   it->R = (uint16_t)R;
   it->bg = (uint8_t)p.BG; /* = get_BG(A, R), as the decode */
   it->llr_shift = (uint8_t)(k > 0 ? k : 0);
@@ -4775,7 +4824,7 @@ bool nr_pdsch_passive_gw_cb0_decode(const nr_pdsch_gw_cb0_t *cb, bool *ldpc_ok)
   t_nrLDPC_dec_params dp = {.check_crc = check_crc};
   dp.BG = (uint8_t)p->BG;
   dp.Z = (uint16_t)p->Z;
-  dp.numMaxIter = 8; /* passive_ldpc_decode_core(): max_ldpc_iterations */
+  dp.numMaxIter = (uint8_t)nr_pdsch_ldpc_cap(); /* passive_ldpc_decode_core(): max_ldpc_iterations */
   dp.outMode = nrLDPC_outMode_BIT;
   dp.R = (uint8_t)nr_get_R_ldpc_decoder(p->rv, (int)p->E, p->BG, p->Z, &llrLen, 0);
   dp.crc_type = crcType(p->C, p->A);

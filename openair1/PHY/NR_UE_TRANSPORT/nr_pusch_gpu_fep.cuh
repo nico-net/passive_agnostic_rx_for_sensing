@@ -406,7 +406,7 @@ extern "C" void nr_pusch_gpu_fep_stats(uint64_t *o)
  * ). 0 or -1. */
 extern "C" int nr_gpu_pass_ul_fep_dev(const void *items_dev, const int *par_dev, int nant, void *stream)
 {
-  if (g_init_state != 1 || !g_exact_ok || !g_d_perm || !items_dev || !par_dev || nant < 1 || nant > 4) return -1;
+  if (g_init_state != 1 || !g_exact_ok || !g_d_perm || g_cfg.ofdm_symbol_size != nr_exact::N || !items_dev || !par_dev || nant < 1 || nant > 4) return -1; /* the DL tables of N = 4096 only */
   NR_EXACT_LAUNCH(g_isa, ulfep::k_ul_fep_p, dim3(14, nant), nr_exact::THREADS, (cudaStream_t)stream, (const ulfep::Item *)items_dev, par_dev, g_d_perm, g_d_tw1024, g_d_tw4096, g_d_ts);
   return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
 }

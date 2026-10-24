@@ -87,6 +87,7 @@ struct PassBlk { /* written by the host before every replay */
   nr_gpu_chest_post_par_t post;
   uint32_t G, span, tbs;
   int norm, ncb, KB; /* ncb: the code blocks decoded (k_pick) */
+  int nl, qm, l2t, l2dk;   /* RANK2-WEAK: layers and modulation order of the DL grant (the 2-layer LLR normalisation, nr_llr_norm_shift_nl); 0 = the plain rule */
   const uint32_t *scr;
   nr_gpu_rdm_seg_t rdm[MAXCB];
   nr_gpu_crc_seg_t cand[MAXCB * NSNAP]; /* every snapshot of every code block */
@@ -113,6 +114,7 @@ struct ResBlk { /* written by the kernels, read by the host after the pass */
   uint8_t tb_crc, dummy_tb;
   uint8_t seg_ok[MAXCB];
   uint8_t seg_crc[MAXCB];
+  uint8_t it[MAXCB]; /* RANK2-ITER: OAI numIter of every code block (hit snapshot + 1; 255 = the block that hit the cap, the host reports it_max; 0 = aborted / not decoded) */
   uint8_t cand_ok[MAXCB * NSNAP];
   uint8_t c[MAXCB][KBMAX];
   nrul::UlOut ul; /* Task 7: after c[] so that offsetof(ResBlk, c) is unchanged */
@@ -264,23 +266,47 @@ __global__ void k_seg_compose(const short2 *sc, short2 *est, const PassBlk *pb, 
     dst[i] = v;
   }
 }
-/* nr_llr_norm_shift: the mean |LLR| of every 16th of llr[0, span), smallest k <= 8 with (mean >> k) <= 40 */
+/* nr_llr_norm_shift_nl (nr_llr_norm.h, keep identical): nl == 2 and Qm 2/4/6/8: every 16th RE block (2 Qm LLRs, Qm per layer) of llr[0, span), the per-layer
+ * means, k from the smaller; else nr_llr_norm_shift: the mean |LLR| of every 16th of llr[0, span), smallest k <= 8 with (mean >> k) <= 40 */
 __global__ void k_norm_sum(const int16_t *llr, const PassBlk *pb, ResBlk *rb)
 {
-  __shared__ unsigned long long red[1024 / 32];
-  unsigned long long acc = 0;
+  __shared__ unsigned long long red[1024 / 32][2];
+  unsigned long long acc = 0, acc1 = 0;
   const uint32_t span = pb->span;
-  if (pb->norm)
+  const bool l2 = pb->nl == 2 && pb->qm >= 4 && pb->qm <= 8 && !(pb->qm & 1);
+  const uint32_t qm = (uint32_t)pb->qm, blk = 2u * qm;
+  uint32_t nb = 0;
+  if (l2) {
+    nb = span >= blk ? (span / blk - 1u) / 16u + 1u : 0u; /* blocks b = 16 m with (b + 1) * blk <= span */
+    if (pb->norm)
+      for (uint32_t m = threadIdx.x; m < nb; m += blockDim.x) {
+        const int16_t *p = llr + (size_t)m * 16u * blk;
+        for (uint32_t q = 0; q < qm; q++) {
+          acc += (uint32_t)abs((int)p[q]);
+          acc1 += (uint32_t)abs((int)p[qm + q]);
+        }
+      }
+  } else if (pb->norm)
     for (uint32_t i = threadIdx.x * 16u; i < span; i += blockDim.x * 16u) acc += (uint32_t)abs((int)llr[i]);
-  for (int o = 16; o; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
-  if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = acc;
+  for (int o = 16; o; o >>= 1) {
+    acc += __shfl_down_sync(0xffffffffu, acc, o);
+    acc1 += __shfl_down_sync(0xffffffffu, acc1, o);
+  }
+  if ((threadIdx.x & 31) == 0) { red[threadIdx.x >> 5][0] = acc; red[threadIdx.x >> 5][1] = acc1; }
   __syncthreads();
   if (threadIdx.x == 0) {
-    unsigned long long a = 0;
-    for (unsigned w = 0; w < blockDim.x / 32; w++) a += red[w];
-    const uint32_t cnt = (span + 15) / 16;
+    unsigned long long a = 0, a1 = 0;
+    for (unsigned w = 0; w < blockDim.x / 32; w++) { a += red[w][0]; a1 += red[w][1]; }
     uint32_t k = 0;
-    if (pb->norm && cnt) {
+    if (pb->norm && l2 && nb) {
+      const unsigned long long wk = a < a1 ? a : a1, st = a < a1 ? a1 : a;
+      const uint32_t mean = (uint32_t)((wk + st) / (2ull * nb * qm));
+      while (k < 8 && (mean >> k) > (uint32_t)pb->l2t) k++;
+      int e = 0;
+      while (e < pb->l2dk && (wk << (e + 1)) <= st) e++;
+      k = (int)k > e ? k - (uint32_t)e : 0u;
+    } else if (pb->norm && (span + 15) / 16) {
+      const uint32_t cnt = (span + 15) / 16;
       const uint32_t mean = (uint32_t)(a / cnt);
       while (k < 8 && (mean >> k) > 40u) k++;
     }
@@ -304,6 +330,7 @@ __global__ void k_pick(const uint8_t *snaps, const int *res, const PassBlk *pb, 
   for (int r = 0; r < C; r++) {
     if (threadIdx.x == 0) {
       int h = -1;
+      const int was_aborted = aborted;
       const int ns = res[2 * r], syn0 = res[2 * r + 1];
       if (ns < 0 || ns > NSNAP) { err = 1; } /* the decoder did not write this block */
       else if (!aborted)
@@ -316,6 +343,7 @@ __global__ void k_pick(const uint8_t *snaps, const int *res, const PassBlk *pb, 
       }
       hit = h;
       rb->seg_ok[r] = h >= 0;
+      rb->it[r] = (uint8_t)(h >= 0 ? h + 1 : (was_aborted ? 0 : 255));
     }
     __syncthreads();
     for (int i = threadIdx.x; i < KB; i += blockDim.x) rb->c[r][i] = hit >= 0 ? snaps[((size_t)r * NSNAP + hit) * KBMAX + i] : 0;
@@ -581,6 +609,15 @@ static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
   /* v2 Task 2: a probe decodes the first n_decode blocks with the parameters (K', CRC type, E, offsets) of the whole TB */
   const uint32_t nd = j->n_decode && j->n_decode < j->C ? j->n_decode : j->C;
   pb.G = j->G; pb.span = j->norm_span; pb.norm = j->norm; pb.tbs = j->A;
+  {
+    static int old_rule = -1, target = 0, dk = 2; /* NR_TEST_L2NORM_OLD / _TARGET: the same test seams as nr_llr_norm_shift_nl (host) */
+    if (old_rule < 0) {
+      old_rule = getenv("NR_TEST_L2NORM_OLD") ? 1 : 0;
+      target = getenv("NR_TEST_L2NORM_TARGET") ? atoi(getenv("NR_TEST_L2NORM_TARGET")) : 40;
+      dk = getenv("NR_TEST_L2NORM_DK") ? atoi(getenv("NR_TEST_L2NORM_DK")) : 2;
+    }
+    pb.nl = old_rule ? 0 : j->dj.nl; pb.qm = j->Qm; pb.l2t = target; pb.l2dk = dk;
+  }
   pb.Gd = j->probe ? j->G_dem : j->G_dem && j->G_dem < j->G ? j->G_dem : j->G; /* a probe: the LLRs up to its horizon (> 0, checked in dl_try) */
   pb.ncb = (int)nd; pb.KB = (int)((j->K + 7) >> 3);
   if (nr_gpu_model() == NR_GPU_MODEL_DIRECT) {
@@ -980,7 +1017,7 @@ static int prepare_ul(Inst &I, const nr_gpu_pass_job_t *j)
   b.llr = (int16_t *)I.llr.dev;
   PassBlk &pb = *I.PB();
   memset(&pb.post, 0, sizeof(pb.post));
-  pb.span = 0; pb.norm = 0; /* the UL decoder takes the equaliser's LLRs as they are (no K38 normalisation) */
+  pb.span = 0; pb.norm = 0; pb.nl = pb.qm = 0; /* the UL decoder takes the equaliser's LLRs as they are (no K38 normalisation) */
   const int rc = prepare_tb(I, j);
   b.scr = pb.scr;
   return rc;
@@ -1752,6 +1789,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   }
   const ResBlk &rb = *I.RB();
   memset(r->seg_ok, 0, sizeof(r->seg_ok));
+  memset(r->iters, 0, sizeof(r->iters));
   r->tbs = j->A;
   r->gpu_us = (uint32_t)us;
   r->instance = (int8_t)id;
@@ -1774,6 +1812,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     return 0;
   }
   for (uint32_t s = 0; s < nd; s++) r->seg_ok[s] = rb.seg_ok[s];
+  for (uint32_t s = 0; s < nd; s++) r->iters[s] = rb.it[s] == 255 ? (uint8_t)j->it_max : rb.it[s];
   if (split) ldpc_info(I, (int)nd, (int)k.ncb, r);
   if (rb.need_cpu) ++g_need_cpu;
   if (!r->need_cpu) {

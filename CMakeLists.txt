@@ -1064,6 +1064,8 @@ add_library(nr_gpu_platform SHARED ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_platform.c
 target_include_directories(nr_gpu_platform PUBLIC ${OPENAIR1_DIR}/PHY/TOOLS)
 target_link_libraries(nr_gpu_platform PRIVATE ${CMAKE_DL_LIBS} pthread)
 set_target_properties(nr_gpu_platform PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+# per-path GPU/CPU choice (nr_gpu_path.h), one registry per process like the tier
+target_sources(nr_gpu_platform PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_path.c)
 
 add_library(PHY_COMMON ${PHY_SRC_COMMON})
 target_link_libraries(PHY_COMMON
@@ -2227,13 +2229,32 @@ target_link_libraries(nr_ulsim PRIVATE
   )
 target_link_libraries(nr_ulsim PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
 
+# nr_pusch_ra0sim links PHY_NR (it needs the gNB-side symbols), so it cannot take PHY_NR_PASSIVE_UL
+# whole: the gNB-side files below already live in PHY_NR (duplicate definitions), and the two gNB
+# stubs in nr_pusch_passive_decode.c are weak so PHY_NR's real ones win. libPHY_NR_UE.a calls the
+# passive-receiver entry points (PRACH RAR, SRS trigger, grant book, PUSCH counters, queue), so the
+# simulator links the rest of the passive-UL sources the way nr-uesoftmodem does.
+set(PHY_NR_PASSIVE_SIM_SRC ${PHY_NR_PASSIVE_UL_SRC})
+list(REMOVE_ITEM PHY_NR_PASSIVE_SIM_SRC
+  ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/srs_rx.c
+  ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c
+  ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_ulsch_decoding.c
+  ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_ulsch.c
+  ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_prach.c
+  ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_ul_channel_estimation.c
+  ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_freq_equalization.c)
+add_library(PHY_NR_PASSIVE_SIM ${PHY_NR_PASSIVE_SIM_SRC})
+target_compile_definitions(PHY_NR_PASSIVE_SIM PRIVATE NR_PASSIVE_PRACH_RX_ONLY NR_SRS_PASSIVE_EXTRACT_ONLY)
+target_link_libraries(PHY_NR_PASSIVE_SIM PUBLIC nr_sense_api nr_phy_common nr_common nr_fapi_p5 polar smallblock ds)
+target_link_libraries(PHY_NR_PASSIVE_SIM PRIVATE asn1_nr_rrc_hdrs UTIL)
+
 add_executable(nr_pusch_ra0sim
   ${OPENAIR1_DIR}/SIMULATION/NR_PHY/pusch_ra0sim.c
   ${NFAPI_USER_DIR}/nfapi.c
   ${NFAPI_USER_DIR}/gnb_ind_vars.c
   ${PHY_INTERFACE_DIR}/queue_t.c)
 target_link_libraries(nr_pusch_ra0sim PRIVATE
-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE NR_UE_ISAC SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR nr_pdcch_blind_monitor -Wl,--end-group
+  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE PHY_NR_PASSIVE_SIM NR_UE_ISAC SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR nr_pdcch_blind_monitor -Wl,--end-group
   m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common softmodem_common NR_L2_UE
   asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
 if (ENABLE_TESTS)
@@ -3495,6 +3516,14 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_gpu_budget PRIVATE GTest::gtest_main pthread)
   add_test(NAME test_nr_gpu_budget COMMAND test_nr_gpu_budget)
   add_dependencies(tests test_nr_gpu_budget)
+  # per-path GPU/CPU choice (nr_gpu_path.h): policy, registry, environment, GB10 (SHARED) invariant on a mocked platform; no device
+  add_executable(test_nr_gpu_path openair1/PHY/TOOLS/tests/nr_gpu_path_test.cc
+                 openair1/PHY/TOOLS/nr_gpu_path.c openair1/PHY/TOOLS/nr_gpu_platform.c openair1/PHY/TOOLS/nr_gpu_mem.c)
+  target_compile_definitions(test_nr_gpu_path PRIVATE NR_GPU_PLATFORM_TEST)
+  target_include_directories(test_nr_gpu_path PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS)
+  target_link_libraries(test_nr_gpu_path PRIVATE GTest::gtest_main ${CMAKE_DL_LIBS} pthread m)
+  add_test(NAME test_nr_gpu_path COMMAND test_nr_gpu_path)
+  add_dependencies(tests test_nr_gpu_path)
   add_executable(test_nr_admit openair1/PHY/TOOLS/tests/nr_admit_test.cc
                  openair1/PHY/TOOLS/nr_admit.c)
   target_include_directories(test_nr_admit PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS)

@@ -34,6 +34,7 @@
 #include "PHY/TOOLS/nr_gpu_bgq.h" /* FATTAILS */
 #include "PHY/TOOLS/nr_gpu_mem.h" /* nr_gpu_model(): DIRECT runs in place, DISCRETE runs staged */
 #include "PHY/NR_UE_TRANSPORT/nr_gpu_stage_census.h"
+#include "PHY/TOOLS/nr_gpu_path.h" /* per-path GPU/CPU choice */
 #include <pthread.h>
 #include <sched.h>
 #include <sys/resource.h>
@@ -108,6 +109,9 @@ int nr_pdsch_gpu_demod_warmup(const NR_DL_FRAME_PARMS *fp)
     } else
       LOG_A(PHY, "SENSING: GPU_EXACT_DEMOD standalone runs staged on the DISCRETE tier (explicit H2D/D2H)\n");
   }
+  /* per-path choice of the standalone entry (nr_gpu_path.h): SHARED -> GPU (unchanged); no DISCRETE variant -> CPU (direct_only) */
+  if (nr_gpu_path_begin(NR_GPU_PATH_DEMOD, 1, NR_GPU_PATH_MEASURE_NONE) == NR_GPU_PATH_CPU)
+    g_run = NULL;
   g_check = 64;
   atomic_store(&g_on, 1);
   LOG_A(PHY, "SENSING: GPU_EXACT_DEMOD enabled: %d RX, bit-exact nr_rx_pdsch() on the GPU; check=%d\n", fp->nb_antennas_rx, g_check);

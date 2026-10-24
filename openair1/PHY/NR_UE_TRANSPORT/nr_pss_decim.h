@@ -37,6 +37,10 @@ void nr_pss_corr_acc(const nr_cf_t *xd, int npos, const nr_cf_t *rd, int L, floa
 /* full-rate float correlation sum_k conj(ref[k]) x[k] (re, im) */
 void nr_pss_cdot(const int16_t *ref_iq, const int16_t *x_iq, int n, double *re, double *im);
 
+/* sum and sum of squares of |x[k]| over k in [start, start+n) CLIPPED to [0, xlen): a window that starts before the buffer (start < 0,
+ * e.g. a PSS peak at exactly one cyclic prefix from the capture start) or ends past it never reads outside it. */
+void nr_iq_mag_stats(const int16_t *x_iq, int64_t xlen, int64_t start, int n, double *sum, double *sumsq);
+
 /* Non-coherent fold of decimated PSS profiles over captures, modulo `period` decimated samples (the 20 ms SSB grid),
  * indexed by ABSOLUTE decimated sample time. acc = acc*(1-1/K) + new. Reset when the key (centre bin, N) changes. */
 typedef struct {

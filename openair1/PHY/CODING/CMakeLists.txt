@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: LicenseRef-CSSL-1.0
 
+# Optional dlopen'd modules of nr-uesoftmodem (GPU kernels, ldpc_aal). The receiver loads them at
+# run time and falls back to the CPU path when one is absent, so they must NOT be build-time
+# dependencies of nr-uesoftmodem: a module that fails to compile with some CUDA/DPDK toolchain
+# would otherwise stop the receiver from linking (even with `ninja -k 0`). They hang off this
+# aggregate target instead; it is part of ALL, so a plain `ninja` still builds everything. When
+# building explicit targets, name it as well:  ninja nr-uesoftmodem nr-uesoftmodem-optional-modules
+add_custom_target(nr-uesoftmodem-optional-modules)
+
 add_library(coding MODULE
             3gpplte_sse.c
             3gpplte.c
@@ -100,7 +108,7 @@ if(ENABLE_LDPC_CUDA)
     add_test(NAME test_ldpc_cb0_cuda_cpu COMMAND ./test_ldpc_cb0_cuda WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(test_ldpc_cb0_cuda_cpu PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=cpu SKIP_RETURN_CODE 77)
   endif()
-  add_dependencies(nr-uesoftmodem ldpc_cuda)
+  add_dependencies(nr-uesoftmodem-optional-modules ldpc_cuda)
   add_library(csirs_disc_gpu MODULE
     ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_csirs_disc_fp.c)
@@ -108,7 +116,7 @@ if(ENABLE_LDPC_CUDA)
     CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_compile_definitions(csirs_disc_gpu PRIVATE NR_CSIRS_DISC_GPU_MODULE)
   target_link_libraries(csirs_disc_gpu PRIVATE CUDA::cudart CUDA::cufft m pthread)
-  add_dependencies(nr-uesoftmodem csirs_disc_gpu)
+  add_dependencies(nr-uesoftmodem-optional-modules csirs_disc_gpu)
   # GPU FEP + chest + MMSE + LLR for the passive PDSCH decoder (libpdsch_gpu.so, dlopen'd when
   # NR_GPU_FEP=1). Lives in NR_UE_TRANSPORT; built here because this is where CUDA is enabled.
   add_library(pdsch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu
@@ -248,7 +256,7 @@ if(ENABLE_LDPC_CUDA)
   target_link_libraries(nr_gpu_slot_bench PRIVATE ${CMAKE_DL_LIBS})
   set_target_properties(nr_gpu_slot_bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   add_dependencies(nr_gpu_slot_bench pdsch_gpu)
-  add_dependencies(nr-uesoftmodem pdsch_gpu)
+  add_dependencies(nr-uesoftmodem-optional-modules pdsch_gpu)
   # GPU DM-RS chest + QPSK LLR for the blind PDCCH CORESET-extent search (libpdcch_gpu.so,
   # independent ISAC_PDCCH_GPU_FEP=1 loader knob -- see nr_pdcch_gpu_fep.h). No cuFFT: FFT stays on
   # the CPU (nr_slot_fep), already shared across every extent candidate -- see that file's top
@@ -263,7 +271,7 @@ if(ENABLE_LDPC_CUDA)
     CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" CUDA_STANDARD 14)
   target_compile_options(pdcch_nid_gpu PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>)
   target_link_libraries(pdcch_nid_gpu PRIVATE CUDA::cudart)
-  add_dependencies(nr-uesoftmodem pdcch_nid_gpu)
+  add_dependencies(nr-uesoftmodem-optional-modules pdcch_nid_gpu)
   add_library(pdcch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu)
   set_target_properties(pdcch_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
                         CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
@@ -279,7 +287,7 @@ if(ENABLE_LDPC_CUDA)
   target_link_libraries(nr_pdcch_slot_bench PRIVATE ${CMAKE_DL_LIBS})
   set_target_properties(nr_pdcch_slot_bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   add_dependencies(nr_pdcch_slot_bench pdcch_gpu)
-  add_dependencies(nr-uesoftmodem pdcch_gpu)
+  add_dependencies(nr-uesoftmodem-optional-modules pdcch_gpu)
   # U4 CSI-RS ID/slot sweep; separate from U2's footprint module until orchestration merge.
   # Host mapping/validation services come from nr_csirs_disc_sweep.c in the executable.
   add_library(nr_csirs_disc_gpu_sweep MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu)
@@ -292,7 +300,7 @@ if(ENABLE_LDPC_CUDA)
     target_link_libraries(test_nr_csirs_disc_sweep PRIVATE CUDA::cudart)
     add_dependencies(test_nr_csirs_disc_sweep nr_csirs_disc_gpu_sweep)
   endif()
-  add_dependencies(nr-uesoftmodem nr_csirs_disc_gpu_sweep)
+  add_dependencies(nr-uesoftmodem-optional-modules nr_csirs_disc_gpu_sweep)
   target_link_options(nr-uesoftmodem PRIVATE "LINKER:--undefined=nr_csirs_disc_sweep_cpu")
 
   # Batched polar SC decode for the blind PDCCH search.
@@ -322,7 +330,7 @@ if(ENABLE_LDPC_CUDA)
   target_include_directories(polar_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT
                              ${CMAKE_CURRENT_SOURCE_DIR}/nrPolar_tools/cuda ${CUDAToolkit_INCLUDE_DIRS})
   target_link_libraries(polar_gpu PRIVATE polar_sc_cuda polar crc_byte UTIL CUDA::cudart m)
-  add_dependencies(nr-uesoftmodem polar_gpu)
+  add_dependencies(nr-uesoftmodem-optional-modules polar_gpu)
 endif()
 
 add_dependencies(ldpctest ldpc ldpc_orig)
@@ -348,7 +356,7 @@ if(ENABLE_LDPC_CUDA)
                         CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_include_directories(td_cb0_gpu PRIVATE ${CUDAToolkit_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT)
   target_link_libraries(td_cb0_gpu PRIVATE CUDA::cudart)
-  add_dependencies(nr-uesoftmodem td_cb0_gpu)
+  add_dependencies(nr-uesoftmodem-optional-modules td_cb0_gpu)
   if(ENABLE_TESTS)
     add_dependencies(test_nr_td_cb0_batch td_cb0_gpu ldpc_cuda)
     add_dependencies(nr_td_cb0_bench td_cb0_gpu ldpc_cuda)

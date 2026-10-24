@@ -1012,8 +1012,14 @@ int nr_process_pbch_symbol(
    * own measured magnitude, and hand the estimator a copy at a fixed working point. The timing peak
    * search is scale invariant and the PBCH LLR path derives log2_maxh from the channel level it is
    * given, so both absorb a power-of-two gain; the shift is reported so saturation is measurable
-   * rather than assumed. Applied only where the deficit exists (ofdm_symbol_size > 1024, the width
-   * at which this chain is measured healthy), so the 20 MHz path stays bit-identical. */
+   * rather than assumed.
+   *
+   * 2026-10-23 (PCI 675, DGX OTA, 51 PRB / N=1024): the same deficit exists at 1024 on a WEAK cell. The
+   * 51-PRB restart of that cell (rf_pow 4.4, SSB REs rawmean 0.2 / rawmax 2, estimate |H| mean 8.7 / max 28 against
+   * ~280 on a healthy cell) synced, read the MIB, then lost PBCH tracking in 4-5 s and ended in RFSTALL exit 3
+   * (2629 polar failures, max_pos_acc ramping +20/s), while the 217-PRB run of the SAME cell, which takes this
+   * scaling, tracked cleanly. The scaling is therefore applied from 1024 up (it is a no-op on a strong cell:
+   * shift = 13 - log2(maxabs), clamped at 0). Below 1024 (<= 10 MHz at 30 kHz) it stays off, untouched. */
   const int Nsym = fp->ofdm_symbol_size;
   unsigned int ssb_off0 = fp->first_carrier_offset + ssb_start_subcarrier;
   if (ssb_off0 >= (unsigned)Nsym)
@@ -1022,7 +1028,7 @@ int nr_process_pbch_symbol(
     const c16_t *est_in = rxdataF[aarx];
     __attribute__((aligned(32))) c16_t rxf_scaled[Nsym];
     int ssb_shift = 0;
-    if (Nsym > 1024) {
+    if (Nsym >= 1024) {
       int maxabs = 0;
       for (int i = 0; i < 240; i++) {
         const unsigned int sc = (ssb_off0 + i) % (unsigned)Nsym;

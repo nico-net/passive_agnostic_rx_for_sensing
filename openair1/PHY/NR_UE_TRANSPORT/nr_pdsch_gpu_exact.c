@@ -10,12 +10,14 @@
 #include "common/utils/LOG/log.h"
 #include "PHY/TOOLS/nr_gpu_mem.h" /* nr_gpu_model() */
 #include "PHY/NR_UE_TRANSPORT/nr_gpu_stage_census.h"
+#include "PHY/TOOLS/nr_gpu_path.h" /* per-path GPU/CPU choice */
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 
 typedef int (*exact_fn_t)(const int16_t *const *, uint32_t, uint32_t, double, const int16_t *, uint16_t, int16_t *, size_t, int);
@@ -25,7 +27,8 @@ static int (*g_delay_fn)(const int16_t *const *, int, int *);
 static nr_gpu_chest_fn g_chest_fn; /* GPU-DEMOD stage 2 */
 static nr_gpu_stage_stats_fn g_stage_stats; /* Q4: census of the staged DISCRETE runs of the module (NULL on a module without it) */
 static _Atomic uint64_t g_delay_rows, g_delay_calls, g_delay_cpu, g_delay_checked, g_delay_bad;
-static _Atomic int g_on;
+static _Atomic int g_on;     /* the module's exact working set is up (also gates the chest / delay entries and the graph pass warm-up) */
+static _Atomic int g_fep_on; /* the FEP itself runs on the GPU: g_on and the per-path choice (nr_gpu_path.h, NR_GPU_PATH_FEP) */
 static _Atomic uint64_t g_calls, g_fallback, g_chk_ok, g_chk_bad, g_ns_sum, g_ns_max;
 static _Atomic uint64_t g_hist[16];
 
@@ -64,6 +67,7 @@ static void nr_ss_gpu_init(void)
     en(1);
 }
 
+static void nr_pdsch_gpu_exact_fep_bench(const NR_DL_FRAME_PARMS *fp);
 int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
 {
   nr_ss_gpu_init();
@@ -73,8 +77,9 @@ int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
   if (!ue)
     return 0;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-  if (fp->ofdm_symbol_size != 4096 || fp->nb_antennas_rx > 4 || fp->symbols_per_slot != 14) {
-    LOG_W(PHY, "SENSING: GPU_EXACT_FEP needs N=4096, <=4 RX, 14 symbols (N=%d) -- CPU FEP\n", fp->ofdm_symbol_size);
+  if (fp->ofdm_symbol_size > 4096 || fp->nb_antennas_rx > 4 || fp->symbols_per_slot != 14) {
+    LOG_W(PHY, "SENSING: GPU_EXACT_FEP needs N <= 4096, <=4 RX, 14 symbols (N=%d) -- CPU FEP\n", fp->ofdm_symbol_size);
+    nr_gpu_path_begin(NR_GPU_PATH_FEP, 0, NR_GPU_PATH_MEASURE_NONE);
     return 0;
   }
   void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
@@ -97,10 +102,22 @@ int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
                                 .ofdm_offset_divisor = (int)fp->ofdm_offset_divisor};
   if (!api || !g_fn || api->init(&cfg) != 0) {
     LOG_W(PHY, "SENSING: GPU_EXACT_FEP requested but libpdsch_gpu.so is unavailable -- CPU FEP\n");
+    nr_gpu_path_begin(NR_GPU_PATH_FEP, 0, NR_GPU_PATH_MEASURE_NONE);
     return 0;
   }
+  /* the bit-exact working set exists only for an FFT size the host's twin reproduces (N = 4096; x86: also 256..2048, self-tested at init) */
+  int (*ready)(void) = (int (*)(void))dlsym(h, "nr_pdsch_gpu_exact_ready");
+  if (ready ? !ready() : fp->ofdm_symbol_size != 4096) {
+    LOG_W(PHY, "SENSING: GPU_EXACT_FEP: no bit-identical GPU twin of the host DFT at N=%d -- CPU FEP\n", fp->ofdm_symbol_size);
+    nr_gpu_path_begin(NR_GPU_PATH_FEP, 0, NR_GPU_PATH_MEASURE_NONE);
+    return 0;
+  }
+  if (fp->ofdm_symbol_size != 4096) { /* the chest / delay twins (idft4096) and the graph pass are N = 4096 only */
+    g_delay_fn = NULL;
+    g_chest_fn = NULL;
+  }
   g_stage_stats = (nr_gpu_stage_stats_fn)dlsym(h, "nr_gpu_stage_stats");
-  if (nr_gpu_model() != NR_GPU_MODEL_DIRECT) { /* Q4: the chest / delay entries read host rows in place on DIRECT; on DISCRETE they are staged (the FEP always was) */
+  if (nr_gpu_model() != NR_GPU_MODEL_DIRECT && g_chest_fn) { /* Q4: the chest / delay entries read host rows in place on DIRECT; on DISCRETE they are staged (the FEP always was) */
     int (*sinit)(const int16_t *, size_t, int, int) = (int (*)(const int16_t *, size_t, int, int))dlsym(h, "nr_pdsch_gpu_exact_stage_init");
     if (!sinit || sinit((const int16_t *)fp->delay_table[0], sizeof(fp->delay_table), NR_MAX_OFDM_SYMBOL_SIZE, MAX_DELAY_COMP) != 0) {
       LOG_W(PHY, "SENSING: GPU_EXACT chest/delay staging unavailable (DISCRETE tier) -- CPU chest and delay\n");
@@ -110,9 +127,90 @@ int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
   }
   atomic_store(&g_on, 1);
   const char *(*twin)(void) = (const char *(*)(void))dlsym(h, "nr_gpu_isa_twin"); /* the host CPU's DFT / rotation twins (self-test at init) */
-  LOG_A(PHY, "SENSING: GPU_EXACT_FEP enabled: %d RX, N=%d, bit-exact FEP on the GPU, CPU chest/demod/decode; check=1 %s\n",
-        fp->nb_antennas_rx, fp->ofdm_symbol_size, twin ? twin() : "dft_twin=?");
+  /* per-path choice: SHARED (GB10) -> GPU at once, unchanged; DISCRETE -> the timed self-benchmark below decides (fail closed) */
+  if (nr_gpu_path_begin(NR_GPU_PATH_FEP, 1, NR_GPU_PATH_MEASURE_BENCH) == NR_GPU_PATH_TRIAL)
+    nr_pdsch_gpu_exact_fep_bench(fp);
+  atomic_store(&g_fep_on, nr_gpu_path_use_gpu(NR_GPU_PATH_FEP));
+  if (atomic_load(&g_fep_on))
+    LOG_A(PHY, "SENSING: GPU_EXACT_FEP enabled: %d RX, N=%d, bit-exact FEP on the GPU, CPU chest/demod/decode; check=1 %s\n",
+          fp->nb_antennas_rx, fp->ofdm_symbol_size, twin ? twin() : "dft_twin=?");
+  else
+    LOG_A(PHY, "SENSING: GPU_EXACT_FEP ready but the per-path choice is CPU (GPU_PATH path=fep): CPU FEP, N=%d %s\n", fp->ofdm_symbol_size,
+          twin ? twin() : "dft_twin=?");
+  /* the standalone chest / delay entries need the SHARED tier (kernels read caller memory in place): no DISCRETE variant, CPU there */
+  nr_gpu_path_begin(NR_GPU_PATH_CHEST, g_chest_fn != NULL || g_delay_fn != NULL, NR_GPU_PATH_MEASURE_NONE);
   return 1;
+}
+
+/* nr_pdsch_gpu_exact_fep_bench: the per-path self-benchmark of the FEP (DISCRETE tier, or NR_GPU_PATH_SELECT=bench).
+ *   One synthetic slot (random IQ, slot 1 of a private ring, every symbol and antenna) through the GPU entry (staged path: H2D window, kernels,
+ *   D2H, host copy) and through nr_slot_fep_ant() on the CPU, 2 warm-up + 8 timed runs each; medians. The CPU time is the per-antenna wall time
+ *   (total / nb_rx): the passive decode runs one FEP task per antenna on the thread pool, so its wall time is one antenna's work when nb_rx cores
+ *   are free (the CPU's best case). Every GPU output is compared bit for bit with the CPU's; a mismatch, a GPU refusal or an allocation failure
+ *   ends the benchmark as bench_fail (CPU). The UE handed to the CPU FEP is a zeroed copy flagged synchronized without FO compensation, so
+ *   both sides transform the same windows (the GPU path refuses FO slots at run time). */
+static void nr_pdsch_gpu_exact_fep_bench(const NR_DL_FRAME_PARMS *fp)
+{
+  enum { WARM = 2, RUNS = 8 };
+  const int nant = fp->nb_antennas_rx, N = fp->ofdm_symbol_size, slot = 1;
+  const size_t ring = 2u * (size_t)fp->samples_per_frame;
+  const size_t fsz = (size_t)nant * fp->samples_per_slot_wCP;
+  c16_t *rx[4] = {0};
+  c16_t *fg = aligned_alloc(64, ((fsz * sizeof(c16_t) + 63) / 64) * 64), *fc = aligned_alloc(64, ((fsz * sizeof(c16_t) + 63) / 64) * 64);
+  PHY_VARS_NR_UE *fake = calloc(1, sizeof(*fake));
+  double tg[RUNS], tc[RUNS];
+  int ok = fg && fc && fake, bad = 0, ng = 0, nc = 0;
+  uint32_t st = 0x5e5e6u;
+  for (int a = 0; a < nant && ok; a++) {
+    rx[a] = calloc(ring, sizeof(c16_t)); /* only the first slots are touched (zero pages elsewhere) */
+    ok = rx[a] != NULL;
+    const size_t used = 3u * (size_t)fp->samples_per_slot_wCP + 2u * (size_t)N;
+    for (size_t i = 0; ok && i < used && i < ring; i++) {
+      st = st * 1664525u + 1013904223u;
+      rx[a][i].r = (int16_t)((int)(st >> 20) - 2048);
+      st = st * 1664525u + 1013904223u;
+      rx[a][i].i = (int16_t)((int)(st >> 20) - 2048);
+    }
+  }
+  if (ok) {
+    memset(fg, 0, fsz * sizeof(c16_t));
+    memset(fc, 0, fsz * sizeof(c16_t));
+    fake->is_synchronized = 1;
+    fake->cont_fo_comp = 0;
+    const int16_t *rxp[4] = {0};
+    for (int a = 0; a < nant; a++) rxp[a] = (const int16_t *)rx[a];
+    const c16_t *rot = fp->symbol_rotation[link_type_dl] + (slot % fp->slots_per_subframe) * fp->symbols_per_slot;
+    const uint16_t mask = (uint16_t)((1u << fp->symbols_per_slot) - 1u);
+    for (int r = 0; r < WARM + RUNS && ok; r++) {
+      const uint64_t t0 = now_ns();
+      const int rc = g_fn(rxp, (uint32_t)ring, get_samples_slot_timestamp(fp, slot), 0.0, (const int16_t *)rot, mask, (int16_t *)fg, fp->samples_per_slot_wCP, 0);
+      const uint64_t t1 = now_ns();
+      if (rc && r < WARM) { /* first use (module load, a late warm-up call that drains): not timed, not compared */
+        for (int w = 0; w < 200 && g_fn(rxp, (uint32_t)ring, get_samples_slot_timestamp(fp, slot), 0.0, (const int16_t *)rot, mask, (int16_t *)fg,
+                                         fp->samples_per_slot_wCP, 0) != 0; w++)
+          usleep(1000);
+        continue;
+      }
+      if (rc) { ok = 0; break; } /* a timed call refused or late (2 ms deadline): the GPU is not usable at this rate */
+      for (int a = 0; a < nant; a++)
+        for (int l = 0; l < fp->symbols_per_slot; l++)
+          nr_slot_fep_ant(fake, fp, slot, l, a, (c16_t(*)[fp->samples_per_slot_wCP])fc, link_type_dl, 0, rx);
+      const uint64_t t2 = now_ns();
+      bad += memcmp(fg, fc, fsz * sizeof(c16_t)) != 0;
+      if (r >= WARM) {
+        tg[ng++] = (t1 - t0) / 1e3;
+        tc[nc++] = (t2 - t1) / 1e3 / nant;
+      }
+    }
+  }
+  const double mg = ok && !bad ? nr_gpu_path_median(tg, ng) : -1, mc = ok ? nr_gpu_path_median(tc, nc) : -1;
+  char detail[160];
+  snprintf(detail, sizeof(detail), "N=%d nb_rx=%d sym=%d cpu=per_antenna%s%s", N, nant, fp->symbols_per_slot, bad ? " MISMATCH" : "", ok ? "" : " gpu_refused_or_alloc");
+  nr_gpu_path_finish(NR_GPU_PATH_FEP, mg, mc, ok && !bad ? ng : 0, detail);
+  for (int a = 0; a < nant; a++) free(rx[a]);
+  free(fg);
+  free(fc);
+  free(fake);
 }
 
 /* CPU reference for the self-check: nr_slot_fep_ant() of (ant, sym) into a thread-local slot buffer. */
@@ -150,7 +248,7 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
 int nr_pdsch_gpu_exact_fep_ranges(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, const int (*rng)[2], int n_rng,
                                   c16_t *rxdataF, size_t stride, c16_t **rxdata)
 {
-  if (!atomic_load_explicit(&g_on, memory_order_relaxed) || nr_pdsch_route_cpu()) /* BATCHCPU */
+  if (!atomic_load_explicit(&g_fep_on, memory_order_relaxed) || nr_pdsch_route_cpu()) /* BATCHCPU; per-path choice */
     return -1;
   uint16_t mask = 0;
   for (int g = 0; g < n_rng; g++)
@@ -219,6 +317,7 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
     atomic_fetch_add_explicit(ok ? &g_chk_ok : &g_chk_bad, 1, memory_order_relaxed);
     if (!ok) {
       atomic_store(&g_on, 0);
+      atomic_store(&g_fep_on, 0);
       LOG_E(PHY, "SENSING: GPU_EXACT_FEP self-check MISMATCH at slot %d -- GPU FEP disabled, CPU FEP from now on\n", slot);
       return -1;
     }
@@ -266,7 +365,7 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
  */
 int nr_pdsch_gpu_exact_delay_rows(const c16_t *const *rows, int n, int *out)
 {
-  if (!atomic_load_explicit(&g_on, memory_order_relaxed) || !g_delay_fn)
+  if (!atomic_load_explicit(&g_on, memory_order_relaxed) || !g_delay_fn || !nr_gpu_path_use_gpu(NR_GPU_PATH_CHEST))
     return -1;
   const int rc = g_delay_fn((const int16_t *const *)rows, n, out);
   if (rc)
@@ -291,7 +390,7 @@ void nr_pdsch_gpu_exact_delay_note(int gpu_rows, int checked, int bad)
 /* GPU-DEMOD stage 2: the module's chest entry once the exact path is on (NULL otherwise). */
 nr_gpu_chest_fn nr_pdsch_gpu_exact_chest_entry(void)
 {
-  return atomic_load_explicit(&g_on, memory_order_relaxed) ? g_chest_fn : NULL;
+  return atomic_load_explicit(&g_on, memory_order_relaxed) && nr_gpu_path_use_gpu(NR_GPU_PATH_CHEST) ? g_chest_fn : NULL;
 }
 
 /* DECODETIME: the GPU kernels read and write pageable host buffers (chest scratch,

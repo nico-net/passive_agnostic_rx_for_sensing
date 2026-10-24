@@ -1,4 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 /* GPUPASS Task 4, host side of the DL graph pass: see nr_gpu_pass_dl.h and nr_gpu_pass.h. */
 #include "PHY/TOOLS/nr_gpu_membudget.h"
 #include "nr_gpu_pass_dl.h"
@@ -9,6 +12,7 @@
 #include "nr_pdsch_gpu_ldpc.h"
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pdsch_cpu_route.h"
+#include "nr_pdsch_ldpc_cap.h"
 #include "nr_llr_norm.h"
 #include "nr_pdsch_evm_acc.h"
 #include "PHY/CODING/coding_defs.h"
@@ -132,7 +136,7 @@ void nr_gpu_pass_disable(const char *why)
 
 void nr_gpu_pass_gate(int g)
 {
-  static const char *const gname[] = {"seg", "probe", "share", "gw", "ptrs", "tinterp", "harq", "ldpc_off", "chest_only", "occ", "nomem", "retry", "gw_ready", "llr_ovr", "cap", "force_cpu"};
+  static const char *const gname[] = {"seg", "probe", "share", "gw", "ptrs", "tinterp", "harq", "ldpc_off", "chest_only", "occ", "nomem", "retry", "gw_ready", "llr_ovr", "cap", "force_cpu", "path"};
   if (g >= 0 && g < NR_GPU_PASS_GATE_N) {
     /* Fix A+D: a first pass that leaves the GPU pass says why (first time per reason here; the census prints every count) */
     if (atomic_fetch_add_explicit(&G.gate[g], 1, memory_order_relaxed) == 0 && g < (int)(sizeof(gname) / sizeof(gname[0])))
@@ -509,7 +513,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   dlsch.rnti = in->rnti;
   dlsch.rnti_type = TYPE_C_RNTI_;
   dlsch.active = true;
-  dlsch.max_ldpc_iterations = 8;
+  dlsch.max_ldpc_iterations = (uint8_t)nr_pdsch_ldpc_cap();
   NR_DL_UE_HARQ_t harq = {0};
   harq.status = NR_ACTIVE;
   harq.first_rx = 1;

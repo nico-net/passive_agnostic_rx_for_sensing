@@ -54,7 +54,6 @@ __thread int nr_dlsch_mrc_mode_override = -1;
 __thread int nr_dlsch_irc_override = -1; /* T26d ISAC_RX_MRC_PER_RNTI: per-grant IRC mode (set by the passive decode), -1 = none */
 __thread nr_irc_cov_t nr_irc_dmrs_cov; /* IRC mode 4, nr_irc_cov.h */
 __thread int nr_pdsch_chest_occ_override = -1; /* T26d ISAC_CHEST_OCC_AB, nr_pdsch_passive_decode.c */
-__thread int nr_pdsch_ldpc_iters_override = -1; /* T26d ISAC_LDPC_ITERS_AB (set by the PDSCH queue, read by the passive decode) */
 __thread bool nr_pdsch_decode_wide_mrc; /* CRC-validated passive recovery only */
 __thread nr_mmse2_diag_t nr_mmse2_diag;
 __thread int nr_dlsch_eq_override = -1; /* T26d ISAC_RX_EQ_AB: multi-layer equaliser per grant, 0 fixed MMSE, 1 float MMSE, 2 ML (nl 2, Qm<=6) */
