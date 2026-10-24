@@ -16,12 +16,12 @@
 extern "C" {
 #include "PHY/TOOLS/nr_gpu_mem.h"
 #include "PHY/TOOLS/tools_defs.h"
-#include "PHY/nr_phy_common/inc/nr_passive_delay.h"
 void init_timeshift_rotation(const int ofdm_symbol_size, const int nb_prefix_samples, const uint ofdm_offset_divisor, c16_t *timeshift_symbol_rotation);
 int load_dftslib(void);
 }
 #include "nr_gpu_pass_fixture.h"
 #include "nr_gpu_stage_census.h"
+#include "nr_gpu_pass_ul_ref.h"
 
 namespace {
 /* copy of slot_fep_nr.c's apply_nr_rotation_symbol_RX (that file lives in the UE library); the vector routines are the real OAI ones */
@@ -121,13 +121,11 @@ TEST(GpuStage, DelayEqualsCpu)
       ASSERT_EQ(0, mp->delay_old(rows, n, out));
       EXPECT_EQ(stat(*mp, NR_GPU_STG_DELAY, 1) - b0, (uint64_t)n * N * 4);
       for (int r = 0; r < n; r++) {
-        c16_t tm[N] __attribute__((aligned(32))), lsa[N] __attribute__((aligned(32)));
-        memcpy(lsa, ls[r].data(), sizeof(lsa));
-        delay_t d = {0};
-        nr_passive_est_delay(N, lsa, tm, &d);
-        EXPECT_EQ(d.est_delay, out[3 * r]);
-        EXPECT_EQ(d.delay_max_pos, out[3 * r + 1]);
-        EXPECT_EQ(d.delay_max_val, out[3 * r + 2]);
+        int cpu[3];
+        nr_gpu_pass_ul_ref_delay(ls[r].data(), cpu);
+        EXPECT_EQ(cpu[0], out[3 * r]);
+        EXPECT_EQ(cpu[1], out[3 * r + 1]);
+        EXPECT_EQ(cpu[2], out[3 * r + 2]);
       }
     }
   }

@@ -136,7 +136,7 @@ TEST(UlGpuFep, OverlappingWindowsAreMerged)
     for (int a = 0; a < 4; a++) {
       c16_t ref[N] __attribute__((aligned(32)));
       dft(get_dft(N), (int16_t *)&iq[a][100 + 7 * i], (int16_t *)ref, 1);
-      apply_nr_rotation_symbol_RX(nsym, spsf, ts.data(), fco, ref, rot.data(), nb_rb, 1, 3);
+      apply_nr_rotation_symbol_RX(nsym, spsf, ts.data(), fco, ref, rot.data(), nb_rb, 0, 3);
       EXPECT_EQ(0, memcmp(ref, out[i * 4 + a].data(), sizeof(ref))) << "item " << i << " ant " << a;
     }
   if (s1[13]) {

@@ -200,3 +200,15 @@ int nr_gpu_pass_ul_ref_eq(int nbRx, int nb_rb, int qm, int keep, int delta, int 
   }
   return (int)off;
 }
+
+void nr_gpu_pass_ul_ref_delay(const c16_t *ls_in, int out[3])
+{
+  static __thread c16_t ls[N_FFT] __attribute__((aligned(32)));
+  static __thread c16_t tm[N_FFT] __attribute__((aligned(32)));
+  memcpy(ls, ls_in, sizeof(ls));
+  delay_t d = {0};
+  nr_passive_est_delay(N_FFT, ls, tm, &d);
+  out[0] = d.est_delay;
+  out[1] = d.delay_max_pos;
+  out[2] = d.delay_max_val;
+}
