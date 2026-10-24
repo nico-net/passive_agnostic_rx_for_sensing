@@ -18,12 +18,13 @@ H=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$H/../../.." && pwd)
 DRY=0; [ "${1:-}" = "--dry-run" ] && { DRY=1; shift; }
 ARM=${1:-}; [ -n "$ARM" ] || { sed -n 2,16p "$0"; exit 2; }
 CFG=${CFG:-$H/lab_sens4_run.cfg}
-KEYS="GNB_HOST GNB_CMD GNB_LOGDIR GNB_READY_RE GNB_READY_S TESTBED_LOCK TMUX_PREFIX IPERF_BIND PHONES PLMN UE_IP_RE ATTACH_S PHASE_S PHASE_BW RX_LAUNCHER RX_ENVFILE RX_START_DELAY_S DUR OUTBASE"
+KEYS="GNB_HOST GNB_CMD GNB_OVERRIDES GNB_PCI GNB_LOGDIR GNB_READY_RE GNB_READY_S TESTBED_LOCK TMUX_PREFIX IPERF_BIND PHONES PLMN UE_IP_RE ATTACH_S PHASE_S PHASE_BW RX_LAUNCHER RX_ENVFILE RX_START_DELAY_S DUR OUTBASE"
 for k in $KEYS; do eval "_o_$k=\${$k-__unset__}"; done
 # shellcheck disable=SC1090
 . "$CFG"
 for k in $KEYS; do eval "[ \"\$_o_$k\" != __unset__ ] && $k=\$_o_$k"; done
-TS=$(date +%Y%m%d_%H%M%S); RUN=$OUTBASE/${ARM}_lab_$TS; GNBLOG=$GNB_LOGDIR/gnb_s6lab_$TS.log
+TS=$(date +%Y%m%d_%H%M%S); RUN=$OUTBASE/${ARM}_lab_$TS; GNBLOG=$GNB_LOGDIR/gnb_s6lab_$TS.stdout.log; GNBSCHED=$GNB_LOGDIR/gnb_s6lab_$TS.log; GNBPCAP=$GNB_LOGDIR/gnb_s6lab_$TS.mac.pcap
+GNB_FULL="$GNB_CMD $(echo "${GNB_OVERRIDES:-}" | sed "s#@LOG@#$GNBSCHED#; s#@PCAP@#$GNBPCAP#")"
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=8"
 log() { echo "$(date +%T) $*"; }
 r()   { $SSH "$1" "$2"; }                                   # read-only remote command
@@ -55,6 +56,16 @@ done
 RXL=$ROOT/$RX_LAUNCHER
 ENVFILE=$ROOT/$RX_ENVFILE DUR=$DUR "$RXL" check || { [ $DRY = 1 ] && log "WARN receiver preflight not clean (see above)" || die "receiver preflight not clean (fix it, see the sudo commands above)"; }
 
+# ---------------------------------------------------------------- ground truth (lab, validation only; never receiver input)
+ground_truth() {
+  local X; X=$(ls -d "$RUN"/*/export 2>/dev/null | head -1); local G=$RUN/gnb/$(basename "$GNBSCHED") M="systemd-run --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=1G choom -n 1000 --"
+  [ -n "$X" ] && [ -s "$G" ] || { log "ground truth skipped (export '$X', gNB log '$G')"; return; }
+  $M python3 -I "$ROOT/tools/mobisys/ocudu_gt.py" --log "$G" --pci "$GNB_PCI" --out "$RUN/gnb/sched.csv" > "$RUN/gnb/ocudu_gt.log" 2>&1 || log "WARN ocudu_gt failed"
+  $M python3 -I "$ROOT/tools/mobisys/groundtruth.py" --rx "$X" --gnb-csv "$RUN/gnb/sched.csv" --out "$X/groundtruth" 2>&1 | tail -1
+  $M python3 -I "$ROOT/tools/mobisys/ul_groundtruth.py" --rx "$X" --gnb-csv "$RUN/gnb/sched.csv" --rx-log "$(dirname "$X")/run.log" --out "$X/groundtruth" 2>&1 | tail -1
+  $M python3 -I "$ROOT/tools/mobisys/plots.py" --lab "$X" --out "$RUN/plots" > "$RUN/plots.log" 2>&1 || log "WARN plots failed"
+}
+
 # ---------------------------------------------------------------- teardown (reverse order, SIGINT only)
 TRAFFIC_PIDS=(); RXPID=""; TOGGLED=""
 teardown() {
@@ -74,8 +85,9 @@ teardown() {
   for p in $PHONES; do IFS=: read -r name host adb ser ip3 port <<< "$p"
     if [ -n "${AIR0[$name]:-}" ]; then m "$host" "$adb -s $ser shell cmd connectivity airplane-mode $([ "${AIR0[$name]}" = 1 ] && echo enable || echo disable)"; fi; done
   m "$GNB_HOST" "tmux send-keys -t ${TMUX_PREFIX}_lock C-c 2>/dev/null; sleep 1; tmux kill-session -t ${TMUX_PREFIX}_lock 2>/dev/null; printf '%s\\n' '$note' > $TESTBED_LOCK"   # the idle note found at the start
-  if [ $DRY = 0 ]; then mkdir -p "$RUN"; scp -q -o BatchMode=yes "$GNB_HOST:$GNBLOG" "$RUN/" 2>/dev/null || log "WARN gNB log not copied ($GNBLOG)"
-    cp "$CFG" "$RUN/"; log "run directory $RUN"; fi
+  if [ $DRY = 0 ]; then mkdir -p "$RUN/gnb"; for f in $GNBLOG $GNBSCHED; do scp -q -o BatchMode=yes "$GNB_HOST:$f" "$RUN/gnb/" 2>/dev/null || log "WARN not copied: $f"; done
+    log "gNB MAC pcap left on $GNB_HOST: $GNBPCAP ($(r "$GNB_HOST" "du -h $GNBPCAP 2>/dev/null | cut -f1"))"
+    cp "$CFG" "$RUN/"; ground_truth; log "run directory $RUN"; fi
 }
 
 # ---------------------------------------------------------------- 2. testbed lock
@@ -91,11 +103,11 @@ tmux new-session -d -s ${TMUX_PREFIX}_lock bash /tmp/${TMUX_PREFIX}_lock.sh $TES
 [ $DRY = 0 ] && { sleep 2; r "$GNB_HOST" "tmux has-session -t ${TMUX_PREFIX}_lock 2>/dev/null && grep -q lab_sens4_run $TESTBED_LOCK" || { teardown; die "could not take the testbed lock"; }; log "testbed lock taken until ~$FREES"; }
 
 # ---------------------------------------------------------------- 3. gNB
-m "$GNB_HOST" "mkdir -p $GNB_LOGDIR && tmux new-session -d -s ${TMUX_PREFIX}_gnb \"$GNB_CMD 2>&1 | tee -i $GNBLOG\""
+m "$GNB_HOST" "mkdir -p $GNB_LOGDIR && tmux new-session -d -s ${TMUX_PREFIX}_gnb \"$GNB_FULL 2>&1 | tee -i $GNBLOG\""
 if [ $DRY = 0 ]; then
-  ok=0; for _ in $(seq 1 $(( GNB_READY_S / 3 ))); do r "$GNB_HOST" "grep -qE '$GNB_READY_RE' $GNBLOG 2>/dev/null" && { ok=1; break; }; sleep 3; done
+  ok=0; for _ in $(seq 1 $(( GNB_READY_S / 3 ))); do r "$GNB_HOST" "grep -qsE '$GNB_READY_RE' $GNBLOG $GNBSCHED" && { ok=1; break; }; sleep 3; done
   [ $ok = 1 ] || { log "gNB not ready in $GNB_READY_S s: $(r "$GNB_HOST" "tail -3 $GNBLOG")"; teardown; die "gNB not ready"; }
-  log "gNB ready: $(r "$GNB_HOST" "grep -m1 -E '$GNB_READY_RE' $GNBLOG")"
+  log "gNB ready: $(r "$GNB_HOST" "grep -hs -m1 -E '$GNB_READY_RE' $GNBLOG $GNBSCHED | head -1")"
 fi
 
 # ---------------------------------------------------------------- 4. phones + iperf servers
