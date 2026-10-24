@@ -98,8 +98,9 @@ int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
     return 0;
   }
   atomic_store(&g_on, 1);
-  LOG_A(PHY, "SENSING: GPU_EXACT_FEP enabled: %d RX, N=%d, bit-exact FEP on the GPU, CPU chest/demod/decode; check=1\n",
-        fp->nb_antennas_rx, fp->ofdm_symbol_size);
+  const char *(*twin)(void) = (const char *(*)(void))dlsym(h, "nr_gpu_isa_twin"); /* the host CPU's DFT / rotation twins (self-test at init) */
+  LOG_A(PHY, "SENSING: GPU_EXACT_FEP enabled: %d RX, N=%d, bit-exact FEP on the GPU, CPU chest/demod/decode; check=1 %s\n",
+        fp->nb_antennas_rx, fp->ofdm_symbol_size, twin ? twin() : "dft_twin=?");
   return 1;
 }
 
