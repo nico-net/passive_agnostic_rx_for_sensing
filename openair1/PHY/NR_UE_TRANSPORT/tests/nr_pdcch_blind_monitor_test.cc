@@ -4778,6 +4778,24 @@ TEST_F(DiscoveredCoresets, StartsBeforeWalkAndReadsBeyondEightLines) {
   EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_done());
 }
 
+// Vodafone 415 replay bimodality: a spurious nID rejected once must not be re-dwelt (cover, interleaved cover, raw lines, and again
+// after every list refresh) before a queued nID that has not failed yet.
+TEST_F(DiscoveredCoresets, RejectedNidIsRetriedAfterUntriedOnes) {
+  lines("CORESET nid=9020 sym=0 dur=1 grid_rb=11 groups=34 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, 9020);
+  for (int slot = 0; slot < 4000; ++slot) nr_pdcch_discovered_step(token, slot); // rejected
+  // the GPU stage publishes a refreshed list: the failed nID first, the second real CORESET after it
+  lines("CORESET nid=9020 sym=0 dur=1 grid_rb=11 groups=34 L=0 R=0 shift=0\n"
+        "CORESET nid=10163 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, 10163); // untried first
+  for (int slot = 0; slot < 4000; ++slot) nr_pdcch_discovered_step(token, 100000 + slot);
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, 9020); // the failed nID is still retried, last
+}
+
 TEST_F(DiscoveredCoresets, NrntiRotationVisitsAllConfirmedOwnersPerId) {
   nr_pdcch_blind_rnti_bootstrap_reset_for_test();
   // Seed only via independently CRC-recovered synthetic common-channel DCIs.
