@@ -75,6 +75,7 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_UE_TRANSPORT/nr_td_order.h" // BC12a SIB1 census
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_dci11_layout_feedback
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_prb_segments (probe span of a PRB-list grant)
+#include "PHY/TOOLS/nr_gpu_path.h" // per-path GPU/CPU choice (GPUPASS trial samples)
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_alloc_normalise
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h" // per-grant observation API (Task A3)
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
@@ -1578,6 +1579,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const int ds_cpu0 = sched_getcpu();
     getrusage(RUSAGE_THREAD, &ds_ru0);
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ds_c0);
+    void nr_pdsch_passive_path_trial_reset(void);
+    int nr_pdsch_passive_path_trial_side(void);
+    nr_pdsch_passive_path_trial_reset();
     const uint64_t dec_t0 = now_ns();
     nr_pdsch_passive_recov_mode(g_recov_ok && owned && !job.layout_probe ? 1 : 0); /* RECOVERY_ASYNC: arms go to pdschRecov (owned IQ only: the snapshot is handed off) */
     const nr_pdsch_passive_decode_status_t st_raw =
@@ -1609,6 +1613,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_chest_occ_override = -1;
     const uint64_t dec_t1 = now_ns();
     const double dec_us = (double)(dec_t1 - dec_t0) / 1000.0;
+    { /* per-path trial of the graph pass (DISCRETE): this grant's decode wall time per 1000 LLRs, GPU or CPU side; probes are not samples */
+      const int side = nr_pdsch_passive_path_trial_side();
+      const double kllr = (double)job.freq_alloc.num_rbs * 12.0 * job.dlsch_pdu.number_symbols * dec.cw.Nl * dec.cw.qamModOrder / 1000.0;
+      if (side >= 0 && !job.layout_probe && kllr > 0 && (st_raw == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st_raw == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
+        nr_gpu_path_sample(NR_GPU_PATH_PASS_DL, side, dec_us / kllr);
+    }
     if (owned) {
       const uint64_t done = now_ns();
       const uint64_t cpu_fep = nr_pdsch_passive_last_fep_ns();
