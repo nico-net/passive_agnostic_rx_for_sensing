@@ -1,0 +1,24 @@
+== t=0
+== t=15
+ 188818  12 97.3  TS      -   0 UEthread_0
+== t=30
+ 188818  10 97.2  TS      -   0 UEthread_0
+== t=45
+ 188818  10 97.3  TS      -   0 UEthread_0
+== t=60
+ 188818  10 97.2  TS      -   0 UEthread_0
+== t=75
+ 188818  10 97.2  TS      -   0 UEthread_0
+== t=90
+ 188818  10 97.2  TS      -   0 UEthread_0
+== t=105
+ 188818  10 97.2  TS      -   0 UEthread_0
+== t=120
+ 188818  10 97.2  TS      -   0 UEthread_0
+== t=135
+ 188818  12 97.2  TS      -   0 UEthread_0
+== t=150
+ 188818  12 97.2  TS      -   0 UEthread_0
+== t=165
+ 188818  10 97.2  TS      -   0 UEthread_0
+== t=180
