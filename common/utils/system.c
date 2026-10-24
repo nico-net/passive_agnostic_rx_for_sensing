@@ -402,6 +402,45 @@ void thread_top_init(char *thread_name)
   }
 }
 
+#include "openair1/PHY/TOOLS/nr_host_membudget.h"
+#ifndef MCL_ONFAULT
+#define MCL_ONFAULT 4
+#endif
+/* host-RAM budget (libnr_gpu_platform.so, receiver only): weak, absent in the gNB and the tools -> upstream behaviour */
+extern size_t nr_host_parse_smaps_unfaulted(const char *text) __attribute__((weak));
+extern size_t nr_host_membudget_live_avail(void) __attribute__((weak));
+/* status_kb: a "VmXxx:" field of /proc/self/status in kB, -1 when absent */
+static long status_kb(const char *key)
+{
+  FILE *f = fopen("/proc/self/status", "r");
+  char line[256];
+  long v = -1;
+  const size_t kl = strlen(key);
+  while (f && fgets(line, sizeof(line), f))
+    if (!strncmp(line, key, kl)) { v = strtol(line + kl, NULL, 10); break; }
+  if (f) fclose(f);
+  return v;
+}
+/* smaps_unfaulted: bytes mlockall(MCL_CURRENT) would fault in now (nr_host_parse_smaps_unfaulted on /proc/self/smaps); SIZE_MAX when unreadable */
+static size_t smaps_unfaulted(void)
+{
+  FILE *f = fopen("/proc/self/smaps", "r");
+  if (!f) return SIZE_MAX;
+  size_t cap = 1 << 20, n = 0;
+  char *b = malloc(cap);
+  while (b) {
+    if (n + 65536 + 1 > cap) { char *nb = realloc(b, cap * 2); if (!nb) { free(b); b = NULL; break; } b = nb; cap *= 2; }
+    const size_t k = fread(b + n, 1, 65536, f);
+    n += k;
+    if (k == 0) break;
+  }
+  fclose(f);
+  if (!b) return SIZE_MAX;
+  b[n] = 0;
+  const size_t u = nr_host_parse_smaps_unfaulted(b);
+  free(b);
+  return u;
+}
 /* \brief lock memory to RAM to avoid delays */
 void lock_memory_to_ram(void)
 {
@@ -413,7 +452,24 @@ void lock_memory_to_ram(void)
     LOG_I(UTIL, "SENSING: mlockall skipped (ISAC_MLOCK=0)\n");
     return;
   }
-  int rc = mlockall(MCL_CURRENT | MCL_FUTURE);
-  if (rc != 0)
+  /* Host-RAM budget (nr_host_membudget.h, receiver only): MCL_CURRENT faults in and locks every mapped page at once, including mappings the receiver never
+   * touches. When those do not fit the budget of the memory available now, lock on fault instead (the pools are pre-faulted by their owners, so they are
+   * resident and locked either way); upstream behaviour otherwise (a 128 GB unified host: always full). */
+  int flags = MCL_CURRENT | MCL_FUTURE;
+  if (nr_host_parse_smaps_unfaulted && nr_host_membudget_live_avail) {
+    const size_t unf = smaps_unfaulted(), live = nr_host_membudget_live_avail();
+    const int plan = unf == SIZE_MAX ? NR_HOST_MLOCK_ONFAULT : nr_host_mlock_plan(unf, live);
+    if (plan == NR_HOST_MLOCK_ONFAULT) flags |= MCL_ONFAULT;
+    LOG_A(UTIL, "SENSING: HOST_MEM mlock plan=%s unfaulted_mb=%lld live_avail_mb=%lld live_budget_mb=%lld vmrss_mb=%ld\n", plan == NR_HOST_MLOCK_FULL ? "full" : "onfault",
+          unf == SIZE_MAX ? -1LL : (long long)(unf >> 20), live == SIZE_MAX ? -1LL : (long long)(live >> 20),
+          live == SIZE_MAX ? -1LL : (long long)(nr_host_membudget_calc(live) >> 20), status_kb("VmRSS:") >> 10);
+  }
+  int rc = mlockall(flags);
+  if (rc != 0 && (flags & MCL_ONFAULT) && errno == EINVAL) /* kernel < 4.4: no on-fault locking; never fault everything in on a tight host */
+    LOG_W(UTIL, "SENSING: HOST_MEM mlockall(MCL_ONFAULT) unsupported: memory NOT locked (the host budget does not allow MCL_CURRENT)\n");
+  else if (rc != 0)
     LOG_W(UTIL, "mlockall() failed: %d, %s\n", errno, strerror(errno));
+  else if (nr_host_parse_smaps_unfaulted)
+    LOG_A(UTIL, "SENSING: HOST_MEM mlock done flags=%s vmlck_mb=%ld vmrss_mb=%ld\n", (flags & MCL_ONFAULT) ? "CURRENT|FUTURE|ONFAULT" : "CURRENT|FUTURE",
+          status_kb("VmLck:") >> 10, status_kb("VmRSS:") >> 10);
 }

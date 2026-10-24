@@ -79,6 +79,7 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_alloc_normalise
 #include "PHY/TOOLS/nr_host_membudget.h"
 extern void nr_host_membudget_commit(nr_host_mem_module_t m, size_t bytes, double scale) __attribute__((weak));
+extern long nr_host_membudget_size(nr_host_mem_module_t m, int pct, size_t fixed, size_t per_unit, long lo, long hi) __attribute__((weak));
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h" // per-grant observation API (Task A3)
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h" // CB0 elimination channel (ISAC_TD_CB0_ELIM, default ON, 0 disables)
@@ -2349,8 +2350,23 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     }
     threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name, nr_pool_site() ? -1 : core, nr_pool_site() ? 0 : 40);
   }
+  const size_t iq_set = 2u * (size_t)ue->frame_parms.samples_per_frame * sizeof(c16_t) * (size_t)ue->frame_parms.nb_antennas_rx;
+  if (nr_host_membudget_commit) /* host-RAM budget: the queue's fixed arenas (rxdataF per consumer, owned IQ per consumer and antenna), before the shrinkable holders */
+    nr_host_membudget_commit(NR_HOST_MEM_QUEUE, (size_t)n_consumers * ((size_t)ue->frame_parms.nb_antennas_rx * rxdataF_sz * sizeof(c16_t) + (nr_csirs_disc_enabled() ? iq_set : 0)), 1.0);
   if (nr_pdsch_recovery_enabled() && nr_csirs_disc_enabled()) { /* needs the owned IQ (snapshot hand-off) */
-    g_rsnap_n = 8; /* snapshot holders, one set of ring-sized IQ buffers each */
+    g_rsnap_n = 8; /* snapshot holders, one set of ring-sized IQ buffers each (39 MB at 273 PRB / 4 RX) */
+    if (nr_host_membudget_size) { /* shrinkable: fewer holders = fewer recoveries in flight (a recovery without a holder stays inline); floor 2, 10 % of the headroom */
+      const long k = nr_host_membudget_size(NR_HOST_MEM_SNAP, 10, 0, iq_set, 2, 8);
+      if (k == 0) {
+        LOG_E(PHY, "SENSING: HOST_MEM recovery snapshot holders: below the 2-holder floor (%zu MB); async recovery off, recovery stays inline\n", (2 * iq_set) >> 20);
+        g_rsnap_n = 0;
+      } else if (k != 8) {
+        LOG_W(PHY, "SENSING: HOST_MEM recovery snapshot holders 8 -> %ld (%zu MB each, host-RAM budget)\n", k, iq_set >> 20);
+        g_rsnap_n = (int)k;
+      }
+    }
+  }
+  if (g_rsnap_n > 0 && nr_pdsch_recovery_enabled() && nr_csirs_disc_enabled()) {
     bool ok = true;
     int n_pinned = 0;
     for (int i = 0; i < g_rsnap_n && ok; i++)
@@ -2373,11 +2389,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   }
   LOG_I(PHY, "SENSING: passive PDSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1);
-  if (nr_host_membudget_commit) { /* host-RAM budget: the queue's fixed arenas (rxdataF per consumer, owned IQ per consumer and antenna, recovery snapshot holders) */
-    const size_t iq = 2u * (size_t)ue->frame_parms.samples_per_frame * sizeof(c16_t) * (size_t)ue->frame_parms.nb_antennas_rx;
-    nr_host_membudget_commit(NR_HOST_MEM_QUEUE, (size_t)n_consumers * ((size_t)ue->frame_parms.nb_antennas_rx * rxdataF_sz * sizeof(c16_t) + (nr_csirs_disc_enabled() ? iq : 0))
-                                                  + (size_t)g_rsnap_n * (g_recov_ok ? iq : 0), 1.0);
-  }
+  if (!g_recov_ok && nr_host_membudget_commit && g_rsnap_n > 0) nr_host_membudget_commit(NR_HOST_MEM_SNAP, 0, 0.0); /* holders not used */
   return true;
 }
 
