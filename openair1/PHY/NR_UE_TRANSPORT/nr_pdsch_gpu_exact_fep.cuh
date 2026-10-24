@@ -17,7 +17,12 @@
 #ifndef NR_PDSCH_GPU_EXACT_FEP_CUH
 #define NR_PDSCH_GPU_EXACT_FEP_CUH
 #include "nr_pdsch_gpu_exact_tw.h"
+#include "nr_gpu_isa_twin.cuh"
+#include "nr_gpu_isa_ref.h"
 #include <climits>
+#include <mutex>
+#include <cstring>
+#include <cstdio>
 
 namespace nr_exact {
 static const int N = 4096, THREADS = 256;
@@ -58,7 +63,7 @@ __device__ __forceinline__ short2 shr(short2 a, int s) { return make_short2((sho
  *   ISAC_* flags read: none.
  *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:61.
  */
-__device__ __forceinline__ short2 flip(short2 a) { return make_short2(a.y, (short)(-(int)a.x)); }
+__device__ __forceinline__ short2 flip(short2 a) { return make_short2(a.y, nr_isa::xneg(a.x)); } /* xneg: see nr_isa::xwrap (ptxas) */
 /* vpadd_s32 of two vmull_s16 products: non-saturating int32 sum (wraps only for 2 x (-32768)^2) */
 __device__ __forceinline__ int padd(int p, int q) { return (int)((unsigned)p + (unsigned)q); }
 /* cpack: vqshrn_n_s32(x, 15) */
@@ -81,7 +86,7 @@ __device__ __forceinline__ short2 pcm2(short2 a, short2 b, short2 b2)
 /* cmult(a, b) of bfly4: bconj = b * {1,-1} (int16 wrap), bflip = (b.i, b.r) */
 __device__ __forceinline__ void cmult(short2 a, short2 b, int &re, int &im)
 {
-  const short bi = (short)(-(int)b.y);
+  const int bi = nr_isa::xneg(b.y);
   re = padd(a.x * b.x, a.y * bi);
   im = padd(a.x * b.y, a.y * b.x);
 }
@@ -120,7 +125,7 @@ __device__ __forceinline__ void r4_16(short2 x0, short2 x1t, short2 x2t, short2 
 /* cmultc(a, b) of ibfly4: a * conj(b) with bflip = (-b.i, b.r) */
 __device__ __forceinline__ void cmultc(short2 a, short2 b, int &re, int &im)
 {
-  const short bi = (short)(-(int)b.y);
+  const int bi = nr_isa::xneg(b.y);
   re = padd(a.x * b.x, a.y * b.y);
   im = padd(a.x * bi, a.y * b.x);
 }
@@ -249,6 +254,29 @@ __device__ __forceinline__ void fft4096(short2 *s, int t, const short *__restric
   }
 }
 
+/* ISA twin dispatch (nr_gpu_isa_twin.cuh). P = the profile chosen at init by isa_profile(); the shared buffer s holds
+ * smem_c16(P) short2 (the x86 twin uses s[N..2N) as scratch). Table arguments (ta, tb): NEON twin = (tw1024, tw4096) of
+ * init_rad4_host, input permutation build_perm; x86 twin = (the twiddle blob, unused), permutation nr_isa::x86_tables. */
+__host__ __device__ constexpr int smem_c16(int P) { return nr_isa::dft_of(P) == nr_isa::DFT_X86 ? 2 * N : N; }
+template <int P, bool INV>
+__device__ __forceinline__ void fft_twin(short2 *s, int t, const short *__restrict__ ta, const short *__restrict__ tb)
+{
+  if (nr_isa::dft_of(P) == nr_isa::DFT_X86)
+    nr_isa::fft_x86<INV, THREADS>(s, s + N, t, N, (const short2 *)ta);
+  else
+    fft4096<INV>(s, t, ta, tb);
+}
+/* apply_nr_rotation_symbol_RX on one RE: rotate_cpx_vector(.., 15) by (ar, ai) = conj(symbol_rotation) with the twin of P,
+ * then mult_cpx_vector(.., 15) by the timeshift w (madd_epi16 of (re, -im) / (im, re) with (c, d), srai 15, packs; SIMDe:
+ * the same on every ISA) */
+template <int P>
+__device__ __forceinline__ short2 rot_ts(short2 v, int ar, int ai, short2 w)
+{
+  const short2 r = nr_isa::rot_twin<P>(v, ar, ai);
+  const int re = r.x, im = r.y, nim = nr_isa::xneg(im);
+  return make_short2(sat16(padd(re * w.x, nim * w.y) >> 15), sat16(padd(im * w.x, re * w.y) >> 15));
+}
+
 /* Where the kernel reads the time-domain slot and writes rxdataF. Staged: the module's device copy of
  * the window (origin 0, no wrap) and its device output. Direct (shared-memory platforms, GB10): the
  * receiver's own host ring (modulo ring_len) and the caller's rxdataF -- no copies at all. */
@@ -267,11 +295,12 @@ enum { PAR_WORDS = 32 };
 
 /* One block per (symbol, antenna). perm: input index of each in-place DIT position (the composed
  * transpose16_ooff permutations of dft4096/1024/256/64). Writes rxdataF exactly as the CPU does. */
+template <int P>
 __global__ void __launch_bounds__(THREADS) k_fep_exact(const ExactIO io, int ncp, int ncp0, const uint16_t *__restrict__ perm,
                                                        const short *__restrict__ tw1024, const short *__restrict__ tw4096,
                                                        const short2 *__restrict__ ts, int nb_rb, int fco)
 {
-  __shared__ short2 s[N];
+  __shared__ short2 s[smem_c16(P)];
   const int sym = io.sym_list[blockIdx.x], ant = blockIdx.y, t = threadIdx.x;
   if (io.par && !(io.par[21] >> sym & 1u)) return; /* GPUPASS: this grant's symbol set, read when the kernel runs (the graph keeps its full grid) */
   const short2 *in = io.par ? (const short2 *)*(const unsigned long long *)(io.par + 22 + 2 * ant) : io.rx[ant];
@@ -279,26 +308,16 @@ __global__ void __launch_bounds__(THREADS) k_fep_exact(const ExactIO io, int ncp
   const uint32_t first = (io.par ? io.par[0] : io.origin) + (uint32_t)(ncp0 + sym * (N + ncp));
   for (int n = t; n < N; n += THREADS) s[n] = in[(first + __ldg(&perm[n])) % ring_len];
   __syncthreads();
-  fft4096<false>(s, t, tw1024, tw4096);
+  fft_twin<P, false>(s, t, tw1024, tw4096);
   /* apply_nr_rotation_symbol_RX on the occupied subcarriers */
   const int len = (nb_rb & 1) ? (nb_rb + 1) * 6 : nb_rb * 6, start2 = (nb_rb & 1) ? fco - 6 : fco;
   const short2 r = io.par ? ((const short2 *)(io.par + 1))[sym] : io.rot[sym];
-  const int ar = r.x, ai = (short)(-(int)r.y);
+  const int ar = r.x, ai = nr_isa::xneg(r.y); /* rot2.i = -rot2.i (int16) */
   const bool redir = io.par && io.par[17];
   short2 *o = (redir ? (short2 *)*(const unsigned long long *)(io.par + 18) : io.out) + (size_t)ant * (redir ? (size_t)io.par[20] : io.ant_stride) + (size_t)sym * N;
   for (int k = t; k < N; k += THREADS) {
     short2 v = s[k];
-    if (k < len || (k >= start2 && k < start2 + len)) {
-      /* rotate_cpx_vector, QRDMX: real = vqrdmlsh(vqdmulh(ar, br), ai, bi), imag = vqrdmlah(vqdmulh(ar, bi), ai, br) */
-      const int br = v.x, bi = v.y;
-      const int re0 = sat16((int)((2LL * ar * br) >> 16)), im0 = sat16((int)((2LL * ar * bi) >> 16));
-      const short re = sat16((int)((((long long)re0 << 16) - 2LL * ai * bi + 32768) >> 16));
-      const short im = sat16((int)((((long long)im0 << 16) + 2LL * ai * br + 32768) >> 16));
-      /* mult_cpx_vector(.., 15): madd_epi16 of (re, -im) / (im, re) with (c, d), srai 15, packs */
-      const short2 w = __ldg(&ts[k]);
-      const short nim = (short)(-(int)im);
-      v = make_short2(sat16(padd(re * w.x, nim * w.y) >> 15), sat16(padd(im * w.x, re * w.y) >> 15));
-    }
+    if (k < len || (k >= start2 && k < start2 + len)) v = rot_ts<P>(v, ar, ai, __ldg(&ts[k]));
     o[k] = v;
   }
 }
@@ -313,11 +332,12 @@ struct DelayIO {
   const short2 *ls[DELAY_MAX_ROWS];
   const short2 *base; /* GPU-DEMOD chest: non-null = row r at base + r * N (any number of rows, one launch) */
 };
+template <int P>
 __global__ void __launch_bounds__(THREADS) k_delay_exact(DelayIO io, const uint16_t *__restrict__ perm,
                                                          const short *__restrict__ tw1024, const short *__restrict__ tw4096,
                                                          int *__restrict__ out)
 {
-  __shared__ short2 s[N];
+  __shared__ short2 s[smem_c16(P)];
   __shared__ int peak_l1, shift;
   __shared__ unsigned long long sum, best;
   const int t = threadIdx.x;
@@ -344,7 +364,7 @@ __global__ void __launch_bounds__(THREADS) k_delay_exact(DelayIO io, const uint1
     s[n] = make_short2((short)(v.x / div), (short)(v.y / div));
   }
   __syncthreads();
-  fft4096<true>(s, t, tw1024, tw4096);
+  fft_twin<P, true>(s, t, tw1024, tw4096);
   unsigned long long my_sum = 0, my_best = 0;
   for (int k = t; k < N; k += THREADS) {
     const short2 v = s[k];
@@ -406,5 +426,176 @@ static void init_rad4_host(int n, short *tw)
     *twc_++ = -(short)round(32767.0 * sin(2 * M_PI * 3 * i / n));
   }
 }
+
+/* twin_tables: the input permutation and the two table arguments (ta, tb) of the twin of profile P, on the host. */
+static void twin_tables(int P, std::vector<uint16_t> &perm, std::vector<short> &ta, std::vector<short> &tb)
+{
+  if (nr_isa::dft_of(P) == nr_isa::DFT_X86) {
+    nr_isa::x86_tables(N, perm, ta);
+    tb.assign(2, 0);
+  } else {
+    perm.resize(N);
+    build_perm(perm.data());
+    ta.assign(3 * 512, 0);
+    tb.assign(3 * 2048, 0);
+    init_rad4_host(1024, ta.data());
+    init_rad4_host(4096, tb.data());
+  }
+}
+
+/* self-test kernels: one block per vector (DFT), one thread per RE (rotation) */
+template <int P, bool INV>
+__global__ void __launch_bounds__(THREADS) k_twin_dft(const short2 *__restrict__ in, short2 *__restrict__ out, const uint16_t *__restrict__ perm,
+                                                      const short *__restrict__ ta, const short *__restrict__ tb)
+{
+  __shared__ short2 s[smem_c16(P)];
+  const short2 *x = in + (size_t)blockIdx.x * N;
+  for (int n = threadIdx.x; n < N; n += THREADS) s[n] = x[__ldg(&perm[n])];
+  __syncthreads();
+  fft_twin<P, INV>(s, threadIdx.x, ta, tb);
+  for (int n = threadIdx.x; n < N; n += THREADS) out[(size_t)blockIdx.x * N + n] = s[n];
+}
+template <int R>
+__global__ void k_twin_rot(const short2 *__restrict__ x, short2 *__restrict__ y, const short2 *__restrict__ ts, int n, short2 rot)
+{
+  const int k = blockIdx.x * blockDim.x + threadIdx.x;
+  if (k < n) y[k] = rot_ts<R>(x[k], rot.x, nr_isa::xneg(rot.y), ts[k]);
+}
+
+/* ISA profile of this process, chosen once (thread-safe) by a self-test of every GPU twin against the host's CPU:
+ *   DFT twins (NEON, x86) on NV vectors (random at several amplitudes, full scale, a full-scale tone, an impulse pair,
+ *   a constant -32768), forward (dft4096) and inverse (idft4096), vs nr_gpu_isa_cpu_dft(); rotation twins (QRDMX, V80,
+ *   x86 madd) on full-scale data, extreme and random rotations, two lengths, vs nr_gpu_isa_cpu_rot().
+ * The profile is the pair a CPU build can have: (NEON, QRDMX), (NEON, V80) or (x86, madd). Anything else -- no CPU DFT
+ * reachable, no twin bit-identical, a CUDA error -- is P_NONE: the caller refuses the bit-exact GPU paths (CPU path). */
+static int g_isa_profile = nr_isa::P_NONE;
+static char g_isa_desc[160] = "dft_twin=none rot_twin=none";
+static std::once_flag g_isa_once;
+static uint32_t isa_rng(uint32_t &st) { st = st * 1664525u + 1013904223u; return st >> 8; }
+template <int P>
+static int twin_dft_ok(const std::vector<short2> &in, const std::vector<short2> &ref_f, const std::vector<short2> &ref_i, int nv)
+{
+  std::vector<uint16_t> perm;
+  std::vector<short> ta, tb;
+  twin_tables(P, perm, ta, tb);
+  uint16_t *d_perm = nullptr;
+  short *d_ta = nullptr, *d_tb = nullptr;
+  short2 *d_in = nullptr, *d_out = nullptr;
+  const size_t nb = (size_t)nv * N * sizeof(short2);
+  int ok = 0;
+  if (cudaMalloc(&d_perm, perm.size() * 2) == cudaSuccess && cudaMalloc(&d_ta, ta.size() * 2) == cudaSuccess
+      && cudaMalloc(&d_tb, tb.size() * 2) == cudaSuccess && cudaMalloc(&d_in, nb) == cudaSuccess && cudaMalloc(&d_out, 2 * nb) == cudaSuccess
+      && cudaMemcpy(d_perm, perm.data(), perm.size() * 2, cudaMemcpyHostToDevice) == cudaSuccess
+      && cudaMemcpy(d_ta, ta.data(), ta.size() * 2, cudaMemcpyHostToDevice) == cudaSuccess
+      && cudaMemcpy(d_tb, tb.data(), tb.size() * 2, cudaMemcpyHostToDevice) == cudaSuccess
+      && cudaMemcpy(d_in, in.data(), nb, cudaMemcpyHostToDevice) == cudaSuccess) {
+    k_twin_dft<P, false><<<nv, THREADS>>>(d_in, d_out, d_perm, d_ta, d_tb);
+    k_twin_dft<P, true><<<nv, THREADS>>>(d_in, d_out + (size_t)nv * N, d_perm, d_ta, d_tb);
+    std::vector<short2> g(2 * (size_t)nv * N);
+    if (cudaGetLastError() == cudaSuccess && cudaMemcpy(g.data(), d_out, 2 * nb, cudaMemcpyDeviceToHost) == cudaSuccess)
+      ok = !memcmp(g.data(), ref_f.data(), nb) && !memcmp(g.data() + (size_t)nv * N, ref_i.data(), nb);
+  }
+  cudaFree(d_perm); cudaFree(d_ta); cudaFree(d_tb); cudaFree(d_in); cudaFree(d_out);
+  (void)cudaGetLastError();
+  return ok;
+}
+template <int R>
+static int twin_rot_ok(const std::vector<short2> &x, const std::vector<short2> &ts, const short2 *rots, int nrot, const int *lens, int nlen,
+                       const std::vector<short2> &ref)
+{
+  short2 *d_x = nullptr, *d_y = nullptr, *d_ts = nullptr;
+  int ok = 0;
+  if (cudaMalloc(&d_x, N * sizeof(short2)) == cudaSuccess && cudaMalloc(&d_y, (size_t)nrot * nlen * N * sizeof(short2)) == cudaSuccess
+      && cudaMalloc(&d_ts, N * sizeof(short2)) == cudaSuccess && cudaMemcpy(d_x, x.data(), N * sizeof(short2), cudaMemcpyHostToDevice) == cudaSuccess
+      && cudaMemcpy(d_ts, ts.data(), N * sizeof(short2), cudaMemcpyHostToDevice) == cudaSuccess) {
+    for (int r = 0; r < nrot; r++)
+      for (int l = 0; l < nlen; l++) k_twin_rot<R><<<(lens[l] + 255) / 256, 256>>>(d_x, d_y + (size_t)(r * nlen + l) * N, d_ts, lens[l], rots[r]);
+    std::vector<short2> g((size_t)nrot * nlen * N);
+    if (cudaGetLastError() == cudaSuccess && cudaMemcpy(g.data(), d_y, g.size() * sizeof(short2), cudaMemcpyDeviceToHost) == cudaSuccess) {
+      ok = 1;
+      for (int r = 0; r < nrot && ok; r++)
+        for (int l = 0; l < nlen && ok; l++)
+          ok = !memcmp(&g[(size_t)(r * nlen + l) * N], &ref[(size_t)(r * nlen + l) * N], (size_t)lens[l] * sizeof(short2));
+    }
+  }
+  cudaFree(d_x); cudaFree(d_y); cudaFree(d_ts);
+  (void)cudaGetLastError();
+  return ok;
+}
+static void isa_select()
+{
+  const int NV = 8;
+  std::vector<short2> in((size_t)NV * N), ref_f(in.size()), ref_i(in.size());
+  uint32_t st = 0x15a7u;
+  for (int v = 0; v < NV; v++)
+    for (int n = 0; n < N; n++) {
+      short2 &e = in[(size_t)v * N + n];
+      const int amp[4] = {300, 3000, 12000, 32768};
+      if (v < 4) e = make_short2((short)((int)(isa_rng(st) % (2u * amp[v])) - amp[v]), (short)((int)(isa_rng(st) % (2u * amp[v])) - amp[v]));
+      else if (v == 4) e = make_short2((short)(isa_rng(st) & 0xffff), (short)(isa_rng(st) & 0xffff)); /* full int16 range */
+      else if (v == 5) {
+        const double a = 2 * M_PI * 37.0 * n / N;
+        e = make_short2((short)lrint(32767 * cos(a)), (short)lrint(32767 * sin(a)));
+      } else if (v == 6) e = make_short2(n == 0 ? 32767 : n == 1 ? -32768 : 0, n == 0 ? -32768 : n == 2 ? 32767 : 0);
+      else e = make_short2(-32768, -32768);
+    }
+  int cpu = 1;
+  for (int v = 0; v < NV && cpu; v++)
+    cpu = nr_gpu_isa_cpu_dft(N, 0, (const int16_t *)&in[(size_t)v * N], (int16_t *)&ref_f[(size_t)v * N]) == 0
+          && nr_gpu_isa_cpu_dft(N, 1, (const int16_t *)&in[(size_t)v * N], (int16_t *)&ref_i[(size_t)v * N]) == 0;
+  int dft = nr_isa::DFT_NONE, rot = nr_isa::P_NONE;
+  if (cpu) {
+    if (twin_dft_ok<nr_isa::P_NEON_QRDMX>(in, ref_f, ref_i, NV)) dft = nr_isa::DFT_NEON;
+    else if (twin_dft_ok<nr_isa::P_X86>(in, ref_f, ref_i, NV)) dft = nr_isa::DFT_X86;
+  }
+  /* rotation: full-range data, the timeshift-like table, extreme / random rotations, a full and an odd-PRB range length */
+  const short2 rots[6] = {make_short2(23170, -23170), make_short2(-32768, -32768), make_short2(32767, 1), make_short2(-12345, 30001),
+                          make_short2(1, -32768), make_short2((short)(isa_rng(st) & 0xffff), (short)(isa_rng(st) & 0xffff))};
+  const int lens[2] = {N, 1644};
+  std::vector<short2> x(N), ts(N), rref((size_t)6 * 2 * N);
+  for (int n = 0; n < N; n++) {
+    x[n] = make_short2((short)(isa_rng(st) & 0xffff), (short)(isa_rng(st) & 0xffff));
+    ts[n] = make_short2((short)(isa_rng(st) & 0xffff), (short)(isa_rng(st) & 0xffff));
+  }
+  x[0] = make_short2(-32768, -32768);
+  ts[0] = make_short2(-32768, -32768);
+  for (int r = 0; r < 6; r++)
+    for (int l = 0; l < 2; l++)
+      nr_gpu_isa_cpu_rot((const int16_t *)x.data(), rots[r].x, rots[r].y, (const int16_t *)ts.data(), (int16_t *)&rref[(size_t)(r * 2 + l) * N], lens[l]);
+  if (twin_rot_ok<nr_isa::P_NEON_QRDMX>(x, ts, rots, 6, lens, 2, rref)) rot = nr_isa::P_NEON_QRDMX;
+  else if (twin_rot_ok<nr_isa::P_X86>(x, ts, rots, 6, lens, 2, rref)) rot = nr_isa::P_X86;
+  else if (twin_rot_ok<nr_isa::P_NEON_V80>(x, ts, rots, 6, lens, 2, rref)) rot = nr_isa::P_NEON_V80;
+  int prof = nr_isa::P_NONE;
+  if (dft == nr_isa::DFT_NEON && (rot == nr_isa::P_NEON_QRDMX || rot == nr_isa::P_NEON_V80)) prof = rot;
+  if (dft == nr_isa::DFT_X86 && rot == nr_isa::P_X86) prof = nr_isa::P_X86;
+  g_isa_profile = prof;
+  snprintf(g_isa_desc, sizeof(g_isa_desc), "dft_twin=%s rot_twin=%s", nr_isa::dft_name(prof ? dft : nr_isa::DFT_NONE), nr_isa::rot_name(prof ? rot : nr_isa::P_NONE));
+  fprintf(stderr, "SENSING: GPU_ISA_TWIN %s (self-test vs the host CPU: dft=%s rot=%s; %d vectors x dft4096+idft4096, 6 rotations x 2 lengths; cpu_dft=%s)%s\n",
+          g_isa_desc, nr_isa::dft_name(dft), nr_isa::rot_name(rot), NV, nr_gpu_isa_cpu_dft_origin(),
+          prof ? "" : " -- no bit-identical GPU twin: bit-exact GPU FEP/delay/UL FEP refused, CPU path");
+}
+static int isa_profile()
+{
+  std::call_once(g_isa_once, isa_select);
+  return g_isa_profile;
+}
 } // namespace nr_exact
+
+/* Launch KERN<profile> (a template kernel of the bit-exact set) with the profile chosen at init; P_NONE launches nothing
+ * (callers never get there: the exact working set is not created without a profile). */
+#define NR_EXACT_LAUNCH(PROF, KERN, GRID, BLOCK, STREAM, ...)                                                   \
+  do {                                                                                                          \
+    switch (PROF) {                                                                                             \
+      case nr_isa::P_NEON_QRDMX: KERN<nr_isa::P_NEON_QRDMX><<<GRID, BLOCK, 0, STREAM>>>(__VA_ARGS__); break;    \
+      case nr_isa::P_NEON_V80: KERN<nr_isa::P_NEON_V80><<<GRID, BLOCK, 0, STREAM>>>(__VA_ARGS__); break;        \
+      case nr_isa::P_X86: KERN<nr_isa::P_X86><<<GRID, BLOCK, 0, STREAM>>>(__VA_ARGS__); break;                  \
+      default: break;                                                                                           \
+    }                                                                                                           \
+  } while (0)
+/* cudaFuncGetAttributes of KERN<profile> (first-use module load before the RX fence) */
+#define NR_EXACT_ATTR(PROF, ATTR, KERN)                                                                         \
+  ((PROF) == nr_isa::P_NEON_QRDMX ? cudaFuncGetAttributes(ATTR, KERN<nr_isa::P_NEON_QRDMX>)                    \
+   : (PROF) == nr_isa::P_NEON_V80 ? cudaFuncGetAttributes(ATTR, KERN<nr_isa::P_NEON_V80>)                      \
+   : (PROF) == nr_isa::P_X86      ? cudaFuncGetAttributes(ATTR, KERN<nr_isa::P_X86>)                           \
+                                  : cudaErrorInvalidValue)
 #endif

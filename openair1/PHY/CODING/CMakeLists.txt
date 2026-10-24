@@ -114,13 +114,16 @@ if(ENABLE_LDPC_CUDA)
   add_library(pdsch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu
               ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu
               ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu
-              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_pass_graph.cu)
+              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_pass_graph.cu
+              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_isa_ref.c)
+  # nr_gpu_isa_ref.c: the host CPU's DFT (libdfts.so) and rotate_cpx_vector, the references of the ISA twin self-test
+  add_dependencies(pdsch_gpu dfts)
   # GPU-DEMOD: no automatic FMA contraction; the kernels spell out the CPU's (GCC's) fused operations themselves
   set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
   set_target_properties(pdsch_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
                         CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_include_directories(pdsch_gpu PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
-  target_link_libraries(pdsch_gpu PRIVATE CUDA::cudart CUDA::cufft)
+  target_link_libraries(pdsch_gpu PRIVATE CUDA::cudart CUDA::cufft ${CMAKE_DL_LIBS} pthread)
   # DECGPU: GPU port of OAI's LDPC decoder vs ./libldpc.so LDPCdecoder, snapshot by snapshot (needs a CUDA device)
   add_executable(test_nr_pdsch_gpu_ldpc ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_pdsch_gpu_ldpc_test.c)
   target_include_directories(test_nr_pdsch_gpu_ldpc PRIVATE ${OPENAIR_DIR} ${OPENAIR1_DIR})
@@ -154,6 +157,18 @@ if(ENABLE_LDPC_CUDA)
   add_test(NAME test_nr_pusch_gpu_ldpc_cpu COMMAND ./test_nr_pdsch_gpu_ldpc 2 ul WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   set_tests_properties(test_nr_pdsch_gpu_ldpc_discrete test_nr_pusch_gpu_ldpc_discrete PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=discrete SKIP_RETURN_CODE 77)
   set_tests_properties(test_nr_pusch_gpu_ldpc_cpu PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=cpu SKIP_RETURN_CODE 77)
+  # ISA twins of the bit-exact GPU front end vs this host's CPU dft()/idft() (libdfts.so) and rotate_cpx_vector: every
+  # power-of-two size the x86 twin covers (64..4096), the NEON twin's 4096, random / full-scale / tone / impulse inputs,
+  # the rotation twins, k_fep_exact and k_delay_exact end to end, and the runtime selection. 77 = no CUDA device.
+  add_executable(test_nr_gpu_isa_twin ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_isa_twin_test.cu
+                 ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_isa_ref.c)
+  set_target_properties(test_nr_gpu_isa_twin PROPERTIES CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR} ENABLE_EXPORTS ON)
+  target_include_directories(test_nr_gpu_isa_twin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT ${OPENAIR1_DIR} ${OPENAIR_DIR})
+  target_link_libraries(test_nr_gpu_isa_twin PRIVATE CUDA::cudart ${CMAKE_DL_LIBS} pthread m)
+  add_dependencies(test_nr_gpu_isa_twin dfts)
+  add_dependencies(tests test_nr_gpu_isa_twin)
+  add_test(NAME test_nr_gpu_isa_twin COMMAND ./test_nr_gpu_isa_twin WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_gpu_isa_twin PROPERTIES SKIP_RETURN_CODE 77)
   # GPUSHARE: green-context SM partition helper (nr_gpu_green.h); exit 77 = skipped (no device / no green contexts)
   add_executable(test_nr_gpu_green ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_green_test.cu)
   set_target_properties(test_nr_gpu_green PROPERTIES CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
