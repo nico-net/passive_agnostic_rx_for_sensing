@@ -2621,6 +2621,19 @@ static int janon_take(uint64_t geom, janon_hit_t *out, int max)
 /* T26c LEN_HINT: DCI 1_1 lengths locked on ANY CORESET of this cell (most recent first) -- the hint for a CORESET that
  * has none locked yet (one gNB, one RRC template: the second CORESET's UEs very likely use the same size). */
 static _Atomic int g_cell_lens[4];
+/* UL DCI 0_1 length each RNTI locked on air, on any geometry of the cell (a UE's size does not depend on the CORESET carrying it). */
+static struct { _Atomic uint16_t rnti, len; } g_ul_cell_len[16];
+static void ul_cell_len_note(uint16_t rnti, int len)
+{
+  int slot = (int)(rnti % 16u);
+  atomic_store(&g_ul_cell_len[slot].len, (uint16_t)len);
+  atomic_store(&g_ul_cell_len[slot].rnti, rnti);
+}
+static int ul_cell_len(uint16_t rnti)
+{
+  const int slot = (int)(rnti % 16u);
+  return atomic_load(&g_ul_cell_len[slot].rnti) == rnti ? (int)atomic_load(&g_ul_cell_len[slot].len) : 0;
+}
 /* janon_note_cell_len: remembers a DCI 1_1 length locked on any CORESET of this cell (most recent first, 4 entries) as a length hint for other CORESETs.
  *   Only the LEN_HINT path reads the list. Caller: run_occasion_one() after a length lock.
  */
@@ -5312,7 +5325,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   rel15->dci_length_options[0] = dci_length;
   /* Passive BWP tracking: snapshot the resolved entries for this occasion and pick the probe. */
   bool pbwp_on = nr_pbwp_enabled() != 0;
-  struct { uint16_t len, size; int16_t start; uint8_t ind, dk; uint16_t rnti; } pbwp_snap[NR_PBWP_MAX];
+  struct { uint16_t len, size; int16_t start; uint8_t ind, dk; uint16_t rnti; bool shadow; } pbwp_snap[NR_PBWP_MAX];
   memset(pbwp_snap, 0, sizeof(pbwp_snap));
   /* Per-occasion copy (Task A7): a shared array rewritten here was read by another consumer's decode. */
   nr_pdcch_blind_extract_opts_t pbwp_opts[NR_PBWP_MAX];
@@ -5379,6 +5392,14 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       pbwp_snap[bi].ind = g_pbwp.e[bi].ind_bits;
       pbwp_snap[bi].dk = g_pbwp.e[bi].tda_dk;
       pbwp_snap[bi].rnti = bi > 0 && g_pbwp.e[bi].start >= 0 ? nr_pbwp_last_rnti(&g_pbwp, bi) : 0;
+      /* An extra BWP entry whose DCI 1_1 length the base BWP already decodes on air (a cell-locked length), with no TB-CRC-OK PDSCH of
+       * its own, is not evidence of another BWP: the base path's layout resolver explains that length on the base BWP. Its decode
+       * tasks would re-read the same DCIs under a guessed BWP size/indicator (sens4 lab cell 2026-10-25: len 47 resolved as a 137-RB
+       * BWP with a 2-bit indicator; the true BWP is the 273-RB initial one, no indicator) and drive switches. */
+      pbwp_snap[bi].shadow = false;
+      if (bi > 0 && g_pbwp.e[bi].crc_ok == 0)
+        for (int q = 0; q < 4; ++q)
+          pbwp_snap[bi].shadow |= atomic_load(&g_cell_lens[q]) == (int)g_pbwp.e[bi].dci_len;
       if (bi > 0 && g_pbwp.e[bi].start >= 0) {
         pbwp_opts[bi] = cfg->extract;
         pbwp_opts[bi].bwp_indicator_bits = g_pbwp.e[bi].ind_bits;
@@ -6278,6 +6299,16 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             dl_ready_rnti[n_dl_ready] = dl_known[i];
             dl_ready_len[n_dl_ready++] = (uint16_t)c->found[j];
           }
+      } else if (pci_uss && (!c || !c->found[0])) {
+        /* A UE's DCI 1_1 size follows from its BWP and dedicated configuration, not from the CORESET that carries it (TS 38.212
+         * 7.3.1.0 aligns only the fallback formats): on a PCI-nID USS geometry a known RNTI is decoded at the DCI 1_1 length the cell
+         * already locked on air, exact RNTI and CRC, until this geometry locks its own. A dwell otherwise had no exact-owner task and
+         * the true CORESET was rejected for "no fresh CRC evidence" (sens4 lab cell 2026-10-25 02:02). */
+        const int f = atomic_load(&g_cell_lens[0]);
+        if (f >= dci_len_min() && f <= dci_len_max()) {
+          dl_ready_rnti[n_dl_ready] = dl_known[i];
+          dl_ready_len[n_dl_ready++] = (uint16_t)f;
+        }
       }
     }
     if (cfg->autodiscover && n_dl_ready > 0)
@@ -6558,6 +6589,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             LOG_A(PHY,"UL automatic DCI length locked: %d rnti=0x%x (occasions=%d polar_decodes=%llu)\n",
                   found,boot_rnti,ulc->state.occasions_fed,(unsigned long long)ulc->state.decodes);
             nr_pdcch_ul_bank_note(geom, boot_rnti, found, abs_slot, true);
+            ul_cell_len_note(boot_rnti, found);
             /* Publish to the bank. On agreement between two distinct RNTIs this becomes the cell-wide
              * prior and every later RNTI skips its own 34-length sweep -- the discovery cost stops
              * scaling with the number of UEs, which is what breaks the consumer at high grant rates. */
@@ -6592,6 +6624,9 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             ul_ready_rnti[n_ul_ready] = known_ul[k];
             ul_ready_len[n_ul_ready++] = (uint16_t)cx->found[j];
           }
+      } else if (pci_uss && !cx->found[0] && ul_cell_len(known_ul[k]) > 0) { /* see the DL counterpart (dl_ready) */
+        ul_ready_rnti[n_ul_ready] = known_ul[k];
+        ul_ready_len[n_ul_ready++] = (uint16_t)ul_cell_len(known_ul[k]);
       }
     }
     ul_ready = n_ul_ready > 0;
@@ -6790,7 +6825,7 @@ constdiag_done:;
       /* Other resolved BWPs: their own length, RIV width and indicator width. ponytail: extracted with
        * the manual layout (cfg->extract); the V2 layout sweep is not run per BWP. */
       for (int bi = 1; scan_11 && pbwp_on && bi < pbwp_n; bi++) {
-        if (pbwp_snap[bi].start < 0 || nof_tasks >= cand_task_cap)
+        if (pbwp_snap[bi].start < 0 || pbwp_snap[bi].shadow || nof_tasks >= cand_task_cap)
           continue;
         cand_task[nof_tasks] = base_task;
         cand_task[nof_tasks].dci_length   = pbwp_snap[bi].len;
@@ -6972,7 +7007,7 @@ constdiag_done:;
           .p2h = (int8_t)(p2h + 1),
       };
       for (int bi = 1; bi < pbwp_n && nof_tasks < cap; bi++) {
-        if (pbwp_snap[bi].start < 0)
+        if (pbwp_snap[bi].start < 0 || pbwp_snap[bi].shadow)
           continue;
         cand_task[nof_tasks] = t2;
         cand_task[nof_tasks].dci_length = pbwp_snap[bi].len;
