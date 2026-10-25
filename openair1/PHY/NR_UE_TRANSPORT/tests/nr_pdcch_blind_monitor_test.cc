@@ -4757,6 +4757,158 @@ TEST_F(DiscoveredCoresets, DwellRejectsRepeatedEvidenceAndLateTokens) {
   EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 4002, b, 47), -1);
 }
 
+// A PDCCH transmission belongs to one CORESET: an overlapping wrong geometry that CRC-passes the very DCIs a banked pass decoded is no evidence; a disjoint genuine CORESET (other slots/payloads) still verifies.
+TEST_F(DiscoveredCoresets, EvidenceAlreadyDecodedByBankedPassIsNotEvidence) {
+  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n"
+        "CORESET nid=62922 sym=0 dur=1 grid_rb=42 groups=24 L=6 R=3 shift=7\n"
+        "CORESET nid=10163 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  const auto a = nr_dci_bits_from_u64(123), b = nr_dci_bits_from_u64(456), d = nr_dci_bits_from_u64(789);
+  uint64_t clock = 100;
+  auto next_dwell = [&](int rb, int nid) { // reject queued dwells until the wanted geometry starts
+    for (int guard = 0; guard < 8; ++guard) {
+      if (!nr_pdcch_discovered_snapshot(&c, &token, 217)) return false;
+      if (c.coreset_rb_offset == rb && c.coreset_pdcch_dmrs_scrambling_id == nid) return true;
+      for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, clock++);
+    }
+    return false;
+  };
+  // 1. no bank yet: the first geometry verifies exactly as before (single-CORESET path unchanged).
+  ASSERT_TRUE(next_dwell(0, 62922));
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 1, a, 47), -1);
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 2, b, 47), 0);
+  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 1);
+  // 2. a genuine disjoint second CORESET (other nID, RNTI, slots, payloads the bank never decoded) still verifies.
+  nr_pdcch_coreset_bank_note_decoded(3, 0x1234, nr_dci_bits_hash(&a, 47));
+  nr_pdcch_coreset_bank_note_decoded(4, 0x1234, nr_dci_bits_hash(&b, 47));
+  ASSERT_TRUE(next_dwell(0, 10163));
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x4567, 5, a, 47), -1);
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x4567, 6, d, 47), 1);
+  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 2);
+  // 3. the live case: bank 0 went STALE, so the same-nID overlap rule no longer shields it. An overlapping geometry CRC-passes the very
+  //    DCIs bank 0 decoded (cheap first check, the decoded-DCI ring): rejected, nothing recorded.
+  nr_pdcch_coreset_bank_tick(7, false, 5, 1000);
+  nr_pdcch_coreset_bank_tick(12, true, 5, 1000);
+  ASSERT_EQ(nr_pdcch_coreset_bank_state(0), NR_CORESET_STALE);
+  ASSERT_TRUE(next_dwell(42, 62922));
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 3, a, 47), -1);
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 4, b, 47), -1);
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 2);
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 4, d, 47), -1);
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 2);
+  nr_pdcch_coreset_bank_decoded_clear(); // control: without the ring entries (and without a candidate) the same pair verifies
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 5, a, 47), 2);
+}
+
+static nr_pdcch_blind_monitor_cfg_t mk_cfg(int nid, int rb, int groups, int L, int R, int sh) {
+  nr_pdcch_blind_monitor_cfg_t c{};
+  c.bwp_start = 0; c.coreset_rb_offset = rb; c.coreset_freq_domain = groups; c.coreset_duration = 1;
+  c.coreset_reg_bundle_size = L; c.coreset_interleaver_size = R; c.coreset_shift_index = sh;
+  c.coreset_pdcch_dmrs_scrambling_id = nid; c.ss_first_symbol = 0; c.dci_length_override = 47;
+  c.discovered_coreset = true;
+  return c;
+}
+
+// The re-expression arbiter: the alias's AL1 candidate sits on the same ordered REs as a banked CCE; its AL2 candidate does not.
+TEST_F(DiscoveredCoresets, CandidateReExpressionIsCodewordIdentity) {
+  auto real = mk_cfg(2, 0, 45, 0, 0, 0), alias = mk_cfg(2, 42, 24, 6, 3, 7);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&real, 0x1234), 0);
+  uint32_t u[96];
+  EXPECT_EQ(nr_pdcch_candidate_res(&alias, 0, 1, u, 96), 6);
+  EXPECT_EQ(u[0] >> 4, 84u); // f = shift 7 -> RB 42 + 6*7
+  for (int cce = 0; cce < 24; ++cce) EXPECT_TRUE(nr_pdcch_coreset_bank_explains(&alias, cce, 1, -1)) << cce; // every AL1 bundle is a banked CCE
+  EXPECT_FALSE(nr_pdcch_coreset_bank_explains(&alias, 0, 2, -1)); // two non-adjacent bundles: not a contiguous banked candidate
+  auto other_nid = mk_cfg(3, 42, 24, 6, 3, 7);
+  EXPECT_FALSE(nr_pdcch_coreset_bank_explains(&other_nid, 0, 1, -1)); // another scrambling ID is another codeword
+  auto shifted = mk_cfg(2, 3, 24, 0, 0, 0); // genuine overlapping CORESET on the same nID, RB phase 3: its CCEs straddle the banked grid
+  for (int cce = 0; cce < 24; ++cce) EXPECT_FALSE(nr_pdcch_coreset_bank_explains(&shifted, cce, 1, -1)) << cce;
+}
+
+// AL1 union: a candidate on an alternative-mapping family's REG set that the entry decodes is explained; the same candidate without the union entry is not.
+TEST_F(DiscoveredCoresets, ReExpressionCoversAl1UnionFamilies) {
+  auto real = mk_cfg(2, 0, 45, 0, 0, 0), alt = mk_cfg(2, 0, 45, 2, 3, 5);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&real, 0x1234), 0);
+  EXPECT_FALSE(nr_pdcch_coreset_bank_explains(&alt, 3, 1, -1)); // interleaved bundles of 2 RBs: not a banked contiguous CCE
+  nr_pdcch_discovered_coreset_t *e = nr_pdcch_coreset_bank_entry(0);
+  for (int cce = 0; cce < 45; ++cce) { nr_pdcch_al1_regset(270, 1, nr_pdcch_al1_map_t{2, 3, 5}, cce, e->al1_union[cce]); }
+  e->n_al1_union = 45;
+  for (int cce = 0; cce < 45; ++cce) EXPECT_TRUE(nr_pdcch_coreset_bank_explains(&alt, cce, 1, -1)) << cce;
+  EXPECT_FALSE(nr_pdcch_coreset_bank_explains(&alt, 3, 2, -1)); // AL2 never matches the AL1 union
+  auto same_family = mk_cfg(2, 0, 45, 2, 3, 4); // a shift only permutes the CCE order: the same family of sets
+  int hits = 0;
+  for (int cce = 0; cce < 45; ++cce) hits += nr_pdcch_coreset_bank_explains(&same_family, cce, 1, -1);
+  EXPECT_EQ(hits, 45);
+  auto other_nid = mk_cfg(3, 0, 45, 2, 3, 5);
+  EXPECT_FALSE(nr_pdcch_coreset_bank_explains(&other_nid, 3, 1, -1));
+  e->n_al1_union = 0;
+  EXPECT_FALSE(nr_pdcch_coreset_bank_explains(&alt, 3, 1, -1));
+}
+
+// Bank pass missed the DCI (empty ring): the alias dwell is still rejected via the candidate; a genuine overlapping CORESET still verifies.
+TEST_F(DiscoveredCoresets, AliasRejectedGenuineOverlapVerifiesWithoutRing) {
+  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n"
+        "CORESET nid=62922 sym=0 dur=1 grid_rb=42 groups=24 L=6 R=3 shift=7\n"
+        "CORESET nid=62922 sym=0 dur=1 grid_rb=3 groups=24 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  const auto a = nr_dci_bits_from_u64(123), b = nr_dci_bits_from_u64(456);
+  uint64_t clock = 100;
+  auto next_dwell = [&](int rb) {
+    for (int guard = 0; guard < 8; ++guard) {
+      if (!nr_pdcch_discovered_snapshot(&c, &token, 217)) return false;
+      if (c.coreset_rb_offset == rb) return true;
+      for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, clock++);
+    }
+    return false;
+  };
+  ASSERT_TRUE(next_dwell(0));
+  EXPECT_EQ(nr_pdcch_discovered_observe_cand(token, 0x1234, 1, a, 47, 3, 1), -1);
+  EXPECT_EQ(nr_pdcch_discovered_observe_cand(token, 0x1234, 2, b, 47, 5, 1), 0);
+  nr_pdcch_coreset_bank_tick(7, false, 5, 1000);
+  nr_pdcch_coreset_bank_tick(12, true, 5, 1000); // STALE: the overlap rule does not shield
+  nr_pdcch_coreset_bank_decoded_clear();         // the bank pass missed these DCIs
+  ASSERT_TRUE(next_dwell(42));
+  EXPECT_EQ(nr_pdcch_discovered_observe_cand(token, 0x1234, 10, a, 47, 2, 1), -1);
+  EXPECT_EQ(nr_pdcch_discovered_observe_cand(token, 0x1234, 11, b, 47, 9, 1), -1);
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 1);
+  for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, clock++); // alias never verifies
+  ASSERT_TRUE(next_dwell(3));
+  EXPECT_EQ(nr_pdcch_discovered_observe_cand(token, 0x1234, 20, a, 47, 2, 1), -1);
+  EXPECT_EQ(nr_pdcch_discovered_observe_cand(token, 0x1234, 21, b, 47, 9, 1), 1); // genuine: the bank cannot express it
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 2);
+}
+
+// Pruning: an entry whose accepts are all re-expressible by an older entry is evicted; one with an accept the older entry cannot express stays.
+TEST_F(DiscoveredCoresets, AliasEntriesAreEvictedGenuineKept) {
+  auto real = mk_cfg(2, 0, 45, 0, 0, 0), alias = mk_cfg(2, 42, 24, 6, 3, 7), genuine = mk_cfg(2, 3, 24, 0, 0, 0);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&real, 0x1234), 0);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&alias, 0x1234), 1);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&genuine, 0x1234), 2);
+  nr_pdcch_coreset_bank_note_alias(1, 10, 0, 1);
+  nr_pdcch_coreset_bank_note_alias(1, 10, 1, 1); // same slot: one distinct slot only
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 3);
+  nr_pdcch_coreset_bank_note_alias(2, 10, 0, 1); // genuine: own evidence
+  nr_pdcch_coreset_bank_note_alias(1, 11, 2, 1);
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 2);   // the alias is gone
+  EXPECT_EQ(nr_pdcch_coreset_bank_cfg(1)->coreset_rb_offset, 3);
+  nr_pdcch_coreset_bank_note_alias(1, 12, 0, 1);
+  nr_pdcch_coreset_bank_note_alias(1, 13, 1, 1);
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 2);   // it has own accepts: kept
+}
+
+TEST_F(DiscoveredCoresets, DecodedRingKeysOnSlotRntiPayload) {
+  const auto a = nr_dci_bits_from_u64(1), b = nr_dci_bits_from_u64(2);
+  nr_pdcch_coreset_bank_decoded_clear();
+  nr_pdcch_coreset_bank_note_decoded(10, 0x1234, nr_dci_bits_hash(&a, 47));
+  EXPECT_TRUE(nr_pdcch_coreset_bank_decoded_elsewhere(10, 0x1234, nr_dci_bits_hash(&a, 47)));
+  EXPECT_FALSE(nr_pdcch_coreset_bank_decoded_elsewhere(11, 0x1234, nr_dci_bits_hash(&a, 47)));
+  EXPECT_FALSE(nr_pdcch_coreset_bank_decoded_elsewhere(10, 0x1235, nr_dci_bits_hash(&a, 47)));
+  EXPECT_FALSE(nr_pdcch_coreset_bank_decoded_elsewhere(10, 0x1234, nr_dci_bits_hash(&b, 47)));
+  for (int i = 0; i < 1000; ++i) nr_pdcch_coreset_bank_note_decoded(100 + i, 0x1234, nr_dci_bits_hash(&b, 47)); // ring wraps, old entries age out
+  EXPECT_FALSE(nr_pdcch_coreset_bank_decoded_elsewhere(10, 0x1234, nr_dci_bits_hash(&a, 47)));
+  nr_pdcch_coreset_bank_decoded_clear();
+  EXPECT_FALSE(nr_pdcch_coreset_bank_decoded_elsewhere(1099, 0x1234, nr_dci_bits_hash(&b, 47)));
+}
+
 TEST_F(DiscoveredCoresets, BankAllowsSameOwnerAtDifferentIdsAndSymbols) {
   lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n"
         "CORESET nid=10163 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n"
@@ -6106,6 +6258,39 @@ TEST(UlLayoutLock, CrcFirstLocksAtOnceSib1RankedFirstAndRelocks)
   ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
   EXPECT_EQ(o.bwp_start, 1);
   EXPECT_EQ(o.bwp_size, 216);
+  nr_ul_layout_lock_reset();
+}
+
+// A lock from votes / a prior with no decisive CRC pass is falsifiable: competing hypotheses keep being CRC-tried (no failure run needed, a few
+// chance CRC16 passes of the wrong layout do not stop them); a CRC pass of a competitor replaces it; once the lock has a decisive pass it is stable.
+TEST(UlLayoutLock, UnconfirmedLockIsReplacedByCrcPassingHypothesisConfirmedLockIsStable)
+{
+  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                              .slots_per_frame = 20, .sib1_ul_start = 0, .sib1_ul_size = 217, .sib1_ul_dl = 1};
+  nr_pdcch_blind_ul_result_t t[NR_UL_LAYOUT_MAX_TRIALS], o;
+  UllGen g;
+  UllFit(g, cell);
+  nr_ul_layout_dci_t d = g.next();
+  ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  const int wrong_size = o.bwp_size, wrong_start = o.bwp_start;
+  // chance-level CRC16 passes of the wrong layout (not decisive): they reset the failure run but must not end the trials
+  for (int i = 0; i < 3; i++) { nr_ul_layout_crc_verdict(&o, true, 100, 1, 1, 300 + i); nr_ul_layout_crc_result(&o, false); }
+  const int n = UllTrials(g, cell, t, &d);
+  ASSERT_GE(n, 1);
+  int pick = -1;
+  for (int i = 0; i < n; i++) if (t[i].bwp_size != wrong_size || t[i].bwp_start != wrong_start) pick = i;
+  ASSERT_GE(pick, 0);
+  const uint16_t cs = t[pick].bwp_start, cn = t[pick].bwp_size;
+  nr_ul_layout_crc_verdict(&t[pick], true, 6000, 1, 1, 400); // decisive CRC pass of the competitor
+  d = g.next();
+  ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  EXPECT_EQ(o.bwp_start, cs);
+  EXPECT_EQ(o.bwp_size, cn);
+  for (int i = 0; i < 20; i++) { // confirmed by a decisive pass: stable, no more competing trials
+    d = g.next();
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o);
+    EXPECT_EQ(nr_ul_layout_crc_trials(d.rnti, 44, d.slot, d.p, &cell, t, NR_UL_LAYOUT_MAX_TRIALS), 0);
+  }
   nr_ul_layout_lock_reset();
 }
 

@@ -990,6 +990,7 @@ void nr_pdcch_discovered_reset(void)
   memset(&s_add_disc, 0, sizeof(s_add_disc));
   s_add_disc.generation = generation;
   s_add_disc.epoch = nr_cfg_epoch_current();
+  nr_pdcch_coreset_bank_decoded_clear();
 }
 
 static bool discovered_load_stream(FILE *f);
@@ -1331,8 +1332,36 @@ bool nr_pdcch_discovered_unverified_pending(void)
 int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
                                 nr_dci_bits_t payload, int length)
 {
+  return nr_pdcch_discovered_observe_cand(token, rnti, slot, payload, length, 0, 0);
+}
+
+/* nr_pdcch_discovered_observe_cand: nr_pdcch_discovered_observe() that also knows the decoding candidate (first CCE, aggregation level; al 0 = unknown), so the evidence can be tested against the banked geometries. Callers: the discovered pass, observe(). */
+int nr_pdcch_discovered_observe_cand(uint64_t token, uint16_t rnti, uint64_t slot,
+                                     nr_dci_bits_t payload, int length, int cce, int al)
+{
   if (!nr_cfg_epoch_work_current() || !s_add_disc.active || token != s_add_disc.generation
       || !rnti || length < 1 || length > NR_DCI_MAX_PAYLOAD) return -1;
+  /* One PDCCH transmission belongs to exactly one CORESET: a DCI an operational pass already decoded in this slot (same RNTI, same payload) is that transmission seen through an overlapping geometry whose candidate maps onto the same REs. It proves the traffic, not this geometry. */
+  if (nr_pdcch_coreset_bank_decoded_elsewhere(slot, rnti, nr_dci_bits_hash(&payload, length))) {
+    static _Atomic unsigned s_dup;
+    const unsigned k = atomic_fetch_add_explicit(&s_dup, 1, memory_order_relaxed);
+    if (k < 8 || (k & (k - 1)) == 0)
+      LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d evidence ignored: rnti=0x%04x len=%d slot=%llu already decoded by a banked pass (n=%u)\n",
+            s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, rnti, length,
+            (unsigned long long)slot, k + 1);
+    return -1;
+  }
+  /* Re-expression arbiter: if a banked CORESET of this nID has a candidate on the very same ordered REs (same aggregation level), that candidate decodes the same codeword,
+   * so this CRC-valid DCI is the transmission the bank already explains -- whether or not its pass happened to decode it. Overlap alone never blocks: a genuinely
+   * different CORESET has candidates the bank cannot express. */
+  if (al > 0 && nr_pdcch_coreset_bank_explains(&s_add_disc.cfg, cce, al, -1)) {
+    static _Atomic unsigned s_ovl;
+    const unsigned k = atomic_fetch_add_explicit(&s_ovl, 1, memory_order_relaxed);
+    if (k < 8 || (k & (k - 1)) == 0)
+      LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d evidence ignored: rnti=0x%04x cce=%d al=%d is re-expressible by a banked CORESET (n=%u)\n",
+            s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, rnti, cce, al, k + 1);
+    return -1;
+  }
   int victim = 0;
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; ++i) {
     if (s_add_disc.evidence[i].rnti == rnti && s_add_disc.evidence[i].length == length) {
