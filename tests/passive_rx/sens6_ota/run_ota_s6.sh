@@ -64,15 +64,18 @@ preflight() {
   [ "$rmax" -ge 33554432 ] && ok "rmem_max $rmax" || { warn "rmem_max $rmax (< 32 MB)"; need "sudo sysctl -w net.core.rmem_max=62500000"; }
   if [ "$bl" -ge 250000 ] && [ "$rdef" -ge 62500000 ]; then ok "netdev_max_backlog $bl rmem_default $rdef"
   else warn "netdev_max_backlog $bl rmem_default $rdef (run_arm.sh asserted 250000 / 62500000)"; need "sudo sysctl -w net.core.netdev_max_backlog=250000 net.core.rmem_default=62500000 net.core.rmem_max=62500000"; fi
-  # NIC IRQs: keep them off the radio IO (isolated 1-2), the RT reader (3) and the pool (4-9) -> housekeeping 0 + lane 10-13
-  local irqs="" badirq=0 i a c
+  # NIC IRQs: housekeeping only (IRQ_CPUS, default 0 = the core plan's hk on sens6). On the RT kernel the NIC IRQs are threads at FIFO 50,
+  # below the receiver's RR/FIFO 97 lane (10-13: GPU warm-up and check workers) and pool; 2026-10-24 with 12 of 15 IRQs on 10-13 the
+  # X410 start failed in 6 of 7 receiver starts (RFNoC "Control operation timed out waiting for ACK" / MPM rpc::timeout in
+  # multi_usrp::make), 5 of 5 opened with all IRQs on CPU 0.
+  local irqs="" badirq=0 i a c okc=" $(expand_cpus "${IRQ_CPUS:-0}" | tr '\n' ' ') "
   for i in $(ls /sys/class/net/$NIC/device/msi_irqs 2>/dev/null); do
     a=$(cat /proc/irq/$i/smp_affinity_list 2>/dev/null) || continue; irqs="$irqs $i:$a"
-    for c in $(expand_cpus "$a"); do case " 0 10 11 12 13 " in *" $c "*) ;; *) badirq=$((badirq+1)); break;; esac; done
+    for c in $(expand_cpus "$a"); do case "$okc" in *" $c "*) ;; *) badirq=$((badirq+1)); break;; esac; done
   done
-  if [ "$badirq" -eq 0 ]; then ok "NIC IRQs on 0,10-13:$irqs"
-  else warn "$badirq NIC IRQs reach radio-IO/RT/pool CPUs 1-9:$irqs"
-    need "n=0; for i in \$(ls /sys/class/net/$NIC/device/msi_irqs); do c=\$(echo 0 10 11 12 13 | cut -d' ' -f\$(( n % 5 + 1 ))); echo \$c | sudo tee /proc/irq/\$i/smp_affinity_list >/dev/null; n=\$((n+1)); done   # not reboot-persistent"; fi
+  if [ "$badirq" -eq 0 ]; then ok "NIC IRQs on housekeeping CPUs ${IRQ_CPUS:-0}:$irqs"
+  else warn "$badirq NIC IRQs outside the housekeeping CPUs ${IRQ_CPUS:-0} (receiver RT cores starve them):$irqs"
+    need "for i in \$(ls /sys/class/net/$NIC/device/msi_irqs); do echo ${IRQ_CPUS:-0} | sudo tee /proc/irq/\$i/smp_affinity_list >/dev/null; done   # not reboot-persistent"; fi
   # CPU
   local gov; gov=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ' ')
   [ "$gov" = "performance " ] && ok "governor performance (all CPUs)" || { warn "governor: $gov"; need "echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"; }
