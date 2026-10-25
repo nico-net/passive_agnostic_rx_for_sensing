@@ -90,7 +90,14 @@ teardown() {
     cp "$CFG" "$RUN/"; ground_truth; log "run directory $RUN"; fi
 }
 
-# ---------------------------------------------------------------- 2. testbed lock
+# ---------------------------------------------------------------- 2. host measurement lock, then the testbed lock
+# The receiver's td_measure lock is taken HERE, before the gNB and the traffic start: a build/ctest holding it
+# (shared) would otherwise leave the gNB and phones running while the receiver waits (2026-10-25, a GPU ctest).
+if [ $DRY = 0 ]; then
+  exec 8>/tmp/td_measure.lock
+  log "waiting for /tmp/td_measure.lock (exclusive)"; flock -x 8 || die "td_measure lock"; log "td_measure lock taken"
+  export TD_LOCK_HELD=1
+fi
 TOTAL=$(( DUR + RX_START_DELAY_S + 30 ))
 FREES=$(date -u -d "+$(( TOTAL + GNB_READY_S + 300 )) sec" +%Y-%m-%dT%H:%M:%S+00:00)
 [ $DRY = 0 ] && mkdir -p "$RUN" && trap 'teardown; exit 130' INT TERM

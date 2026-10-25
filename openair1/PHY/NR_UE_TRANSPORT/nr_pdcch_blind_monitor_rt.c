@@ -2378,6 +2378,8 @@ typedef struct {
   uint8_t cat; /* ANONLEN stats: 0 anonymous, 1 per-RNTI first lock, 2 scout, 3 second length, 4 lookahead lane */
   const uint8_t *skip; /* ANONLEN: per-candidate empty-CCE flag (not decoded, still a failed trial); NULL = off */
   bool audit; /* decode the skipped candidates too and count the misses */
+  bool has_retry_scrambling; /* second n_RNTI hypothesis tried on every candidate (see pci_uss in run_occasion_one) */
+  uint16_t retry_scrambling_rnti;
 } nr_pdcch_autodiscover_sweep_ctx_t;
 
 /* ---- JOINT_ANON ASYNC WORKER (T26b) ---------------------------------------------
@@ -2658,6 +2660,7 @@ static bool janon_hit_scorer(int len, int trial, uint16_t *rnti, uint32_t *hash,
 typedef struct {
   uint64_t geom;
   int n, fitted_at, nh;
+  int notes_since_fit; /* notes since the last fit; the table rotates once full, so n alone cannot pace the refit */
   uint16_t rnti[USSH_SAMPLES];
   uint8_t slot[USSH_SAMPLES], cce[USSH_SAMPLES], L[USSH_SAMPLES];
   struct { uint8_t N, a, M[5]; } h[4]; /* fitting hypotheses (union used) */
@@ -2722,6 +2725,7 @@ static void ussh_fit(ussh_t *u, int ncce_max)
       }
     }
   u->fitted_at = u->n;
+  u->notes_since_fit = 0;
   if (u->nh > 0)
     LOG_A(PHY, "SENSING: USS_HASH fitted geom=%llu on %d DCIs: %d hypotheses, first N_CCE=%u p%%3=%u M=[%u %u %u %u %u]\n",
           (unsigned long long)u->geom, u->n, u->nh, u->h[0].N, u->h[0].a, u->h[0].M[0], u->h[0].M[1], u->h[0].M[2],
@@ -2739,7 +2743,7 @@ static bool ussh_note_ex(uint64_t geom, uint16_t rnti, int slot, int cce, int L,
     if (g_ussh[i].geom == geom && g_ussh[i].n) u = &g_ussh[i];
   for (int i = 0; i < USSH_GEOMS && !u; i++)
     if (!g_ussh[i].n) { u = &g_ussh[i]; u->geom = geom; }
-  if (u && (u->n < USSH_SAMPLES || force)) {
+  if (u) {
     /* force (SCAN2 only): enter the sample and refit now; a full table overwrites a rotating entry. If the fit then has no
      * hypothesis left (the UL position does not belong to the DL search space) the sample is taken back and refitted, so a UL
      * DCI can never switch the DL hash filter off. */
@@ -2748,8 +2752,12 @@ static bool ussh_note_ex(uint64_t geom, uint16_t rnti, int slot, int cce, int L,
     const int i = full ? (s_rot++ % USSH_SAMPLES) : u->n;
     const ussh_t before = *u;
     if (!full) u->n++;
+    u->notes_since_fit++;
     u->rnti[i] = rnti; u->slot[i] = (uint8_t)slot; u->cce[i] = (uint8_t)cce; u->L[i] = (uint8_t)L;
-    if (force || (u->n >= 24 && (u->n - u->fitted_at >= 16 || (u->nh == 0 && u->n - u->fitted_at >= 8)))) {
+    /* The fit only lower-bounds M_L (the smallest M that places every sample): a full table keeps rotating and refitting, so
+     * audited DCIs at m > 0 (ussh_audit_slot) can still raise M. A frozen M_L = 1 fit pruned 3 of the 4 AL1 positions of
+     * every UE on the sens4 lab cell (2026-10-25, aggregationLevel1 n4 per the gNB RRCSetup used as validation truth). */
+    if (force || (u->n >= 24 && (u->notes_since_fit >= 16 || (u->nh == 0 && u->notes_since_fit >= 8)))) {
       ussh_fit(u, ncce_max);
       if (force && u->nh == 0 && before.nh > 0) {
         *u = before;
@@ -2781,6 +2789,12 @@ static void ulssh_mark_bad(uint64_t geom)
     uint64_t z = 0;
     if (atomic_compare_exchange_strong(&g_ulssh_bad[i], &z, geom) || z == geom) return;
   }
+}
+/* ussh_audit_slot: 1 occasion in 16 decodes known RNTIs at every candidate position, ignoring the fitted hash: the evidence that lets
+ *   ussh_fit() raise an under-fitted M_L (the fit can only grow M from DCIs it is allowed to decode). Pure function of the slot. */
+static bool ussh_audit_slot(uint32_t abs_slot)
+{
+  return ((((uint32_t)abs_slot * 0x9E3779B1u) >> 20) % 16u) == 3u;
 }
 static bool ussh_allows(uint64_t geom, uint16_t rnti, int slot, int cce, int L)
 {
@@ -3487,6 +3501,10 @@ static bool nr_pdcch_autodiscover_length_scorer_inner(int dci_length, int trial_
     ok=nr_pdcch_blind_decode_raw_11(tmp_e,c->L,(uint16_t)dci_length,ctx->rnti_min,ctx->rnti_max,&out);
     used_alt = ok;
   }
+  if (!ok && ctx->has_retry_scrambling && ctx->retry_scrambling_rnti != ctx->scrambling_rnti) {
+    nr_pdcch_unscrambling((c16_t *)c->e_rx, ctx->retry_scrambling_rnti, (uint32_t)(c->L * 108), ctx->dmrs_scrambling_id, tmp_e);
+    ok = nr_pdcch_blind_decode_raw_11(tmp_e, c->L, (uint16_t)dci_length, ctx->rnti_min, ctx->rnti_max, &out);
+  }
   if (!ok && ctx->joint_anon && dci_length <= 64) {
     /* Re-descramble with n_RNTI = 0 so the solver model key (length, AL, nID, pre = 0) is stable whatever
      * rotation hypothesis this occasion carried; the model then holds g(C-RNTI) ^ g(0) as unknowns. */
@@ -3583,13 +3601,14 @@ typedef struct {
   long long utc_ns;
   int rnti, frame, slot, cce, L;
   bool ul_scan, fmt10;
+  int bank, pass, rb, span, bundle; /* which geometry accepted it (bank -1 = not a bank pass) */
 } pa_rnti_seen_t;
 static void pa_rnti_seen(const void *a)
 {
   const pa_rnti_seen_t *s = (const pa_rnti_seen_t *)a;
   /* sfn/slot/cce make each accept matchable to the gNB scheduler log -- for grant-loss SCORING only */
-  LOG_I(PHY, "SENSING: blind PDCCH rnti_seen utc_ns=%lld rnti=0x%x sfn=%d slot=%d fmt=%s cce=%d al=%d\n", s->utc_ns, s->rnti,
-        s->frame, s->slot, s->ul_scan ? "0_x" : (s->fmt10 ? "1_0" : "1_1"), s->cce, s->L);
+  LOG_I(PHY, "SENSING: blind PDCCH rnti_seen utc_ns=%lld rnti=0x%x sfn=%d slot=%d fmt=%s cce=%d al=%d bank=%d pass=%d geom=%d+%d/%d\n", s->utc_ns, s->rnti,
+        s->frame, s->slot, s->ul_scan ? "0_x" : (s->fmt10 ? "1_0" : "1_1"), s->cce, s->L, s->bank, s->pass, s->rb, s->span, s->bundle);
 }
 typedef struct { uint16_t rnti; } pa_rnti_t;
 static void pa_windows_and_cell(const void *a) /* "which UE was on air while a CORESET window was lit", and the cell-state RNTI census */
@@ -5877,6 +5896,13 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   const uint64_t dl_geom = length_coreset_key(cfg);
   const bool dl_uss_auto = scan_11 && cfg->dl_full_auto
                            && cfg->dci10_ss_type != NR_BLIND_SS_COMMON;
+  /* TS 38.211 7.3.2.3: a USS on a PDCCH-Config CORESET scrambles with n_RNTI = C-RNTI only when pdcch-DMRS-ScramblingID is configured,
+   * else n_RNTI = 0 and n_ID = PCI. A CORESET whose DM-RS nID is the PCI is therefore (almost always) n_RNTI = 0: a plain polar decode
+   * recovers ANY C-RNTI from the CRC there, so the anonymous (RNTI, length) search is the discovery path for every UE, known elsewhere or
+   * not (a per-RNTI bootstrap sweep found no DCI in 385k feeds on the sens4 lab cell, 2026-10-25, and the second UE was never seen). The
+   * only two legal n_RNTI values for a UE's own DCI are {0, its C-RNTI}; both are tried (0 first). */
+  const bool pci_uss = cfg->coreset_type == 0 && cfg->dci10_ss_type == NR_BLIND_SS_UE_SPECIFIC
+                       && cfg->coreset_pdcch_dmrs_scrambling_id == fp->Nid_cell;
   const bool dl_geometry_ready = !cfg->autodiscover
                                  || nr_pdcch_blind_monitor_autodiscover_done();
 
@@ -5923,7 +5949,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
        * own C-RNTI here) blocked the anonymous search of every later CORESET until each had exhausted 500 occasions
        * (replay: the 2nd of two populated CORESETs never verified in 12 s). The async search locks any RNTI it finds
        * here, known elsewhere or not. */
-      const bool janon_all = cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell;
+      const bool janon_all = (cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell) || pci_uss;
       for (int k = 0; k < n_known_dl && !janon_all; ++k) {
         const uint16_t r = dl_known[(pick + (uint64_t)k) % (uint64_t)n_known_dl];
         nr_pdcch_dci_length_context_t *c = nr_pdcch_dci_length_context(dl_bank, dl_geom, r);
@@ -5965,7 +5991,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
      * CORESET bank. It jointly discovers (RNTI,length); it never promotes a hash alias. */
     /* JOINT_ANON: a discovered configured-nID CORESET is dwelt on repeatedly (one nID at a time); each new
      * dwell re-opens its anonymous search (evidence is kept, only the give-up counter restarts). */
-    const bool joint_anon_cfg = cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell;
+    const bool joint_anon_cfg = (cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell) || pci_uss;
     if (dlc == NULL && (n_known_dl == 0 || joint_anon_cfg) && dl_bank && t_discovered_token && cfg->discovered_coreset
         && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell
         && dl_bank->anonymous_dwell != t_discovered_token) {
@@ -6023,6 +6049,11 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         if (cfg->discovered_coreset && bootstrap_rnti
             && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell)
           sweep_ctx.scrambling_rnti = bootstrap_rnti;
+        if (pci_uss) { /* n_RNTI = 0 first on every candidate, the slot's rotation hypothesis (or the bootstrap C-RNTI) second */
+          sweep_ctx.has_retry_scrambling = true;
+          sweep_ctx.retry_scrambling_rnti = bootstrap_rnti ? bootstrap_rnti : sweep_ctx.scrambling_rnti;
+          sweep_ctx.scrambling_rnti = 0;
+        }
         const bool anon_cfg_nid = dl_anonymous && cfg->discovered_coreset
             && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell;
         sweep_ctx.joint_anon = anon_cfg_nid;
@@ -6046,6 +6077,20 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             ns += anonlen_skip[i];
           }
           sweep_ctx.skip = anonlen_skip;
+          { /* ISAC_DBG_PCIUSS=1 (diagnostic, default off): candidate list of the anonymous sweep on a PCI-nID USS dwell */
+            static int dbg = -1;
+            if (dbg < 0) { const char *e = getenv("ISAC_DBG_PCIUSS"); dbg = e && atoi(e) > 0; }
+            if (dbg && pci_uss && !dlc && (abs_slot % 97) == 0) {
+              char b[2048]; int o = 0;
+              for (int i = 0; i < disc_n_cand && o < (int)sizeof(b) - 40; ++i)
+                o += snprintf(b + o, sizeof(b) - o, " %u/%u:%.2f%s", disc_cand[i].cce, disc_cand[i].L,
+                              joint_anon_score((const int16_t *)disc_cand[i].e_rx, disc_cand[i].L * 108), anonlen_skip[i] ? "s" : "");
+              LOG_A(PHY, "SENSING: DBG_PCIUSS slot=%u geom=%llu rb=%d+%d map=%d/%d/%d n=%d thr1=%.3f pref=%d sc=0x%x rt=0x%x cands:%s\n",
+                    abs_slot, (unsigned long long)dl_geom, sweep_ctx.rb_offset, sweep_ctx.span_rb, sweep_ctx.bundle, sweep_ctx.interleaver,
+                    sweep_ctx.shift, disc_n_cand, nbs_cfar_score_min(108, s_az), dl_state->preferred_len, sweep_ctx.scrambling_rnti,
+                    sweep_ctx.retry_scrambling_rnti, b);
+            }
+          }
           sweep_ctx.audit = !sweep_ctx.joint_anon && s_aud > 0
                             && ((((uint32_t)abs_slot * 0x9E3779B1u) >> 20) % (uint32_t)s_aud) == 0;
           atomic_fetch_add_explicit(&g_anonlen.cand_total, disc_n_cand, memory_order_relaxed);
@@ -6085,6 +6130,10 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         if (dlc && dl_state->preferred_len == 0 && cfg->dci_length_override >= dci_len_min()
             && cfg->dci_length_override <= dci_len_max())
           dl_state->preferred_len = cfg->dci_length_override;
+        if (!dlc && pci_uss && dl_state->preferred_len == 0) { /* first hypothesis: a DCI 1_1 length this cell already locked on air */
+          const int f = atomic_load(&g_cell_lens[0]);
+          if (f >= dci_len_min() && f <= dci_len_max()) dl_state->preferred_len = f;
+        }
 
         /* T26b: the anonymous search of a configured-nID CORESET never runs here.
          * This path only copies the energetic candidates to the bounded janon worker and feeds back the hits the
@@ -6171,7 +6220,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
           } else {
             dl_bank->anonymous_found = found_len;
             dl_bank->anonymous_rnti = locked_rnti;
-            if (janon_async) { /* async: keep looking for the NEXT UE on this CORESET (was: one anonymous lock ever) */
+            if (janon_async || pci_uss) { /* keep looking for the NEXT UE on this CORESET (was: one anonymous lock ever) */
               dl_bank->anonymous_found = 0;
               nr_pdcch_dci_length_sweep_reset(&dl_bank->anonymous);
             }
@@ -6704,7 +6753,8 @@ constdiag_done:;
         for (int k = 0; k < n_dl_ready
              && nof_tasks < cand_task_cap; ++k) {
           const int ri = (first + k) % n_dl_ready;
-          if (cfg->discovered_coreset && !ussh_allows(dl_geom, dl_ready_rnti[ri], proc->nr_slot_rx, rel15->CCE[c], L))
+          if (cfg->discovered_coreset && !ussh_audit_slot(abs_slot)
+              && !ussh_allows(dl_geom, dl_ready_rnti[ri], proc->nr_slot_rx, rel15->CCE[c], L))
             continue; /* USS hash: not one of this RNTI's search-space positions */
           cand_task[nof_tasks] = base_task;
           cand_task[nof_tasks].dci_length = dl_ready_len[ri];
@@ -6714,6 +6764,9 @@ constdiag_done:;
           if (cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell) {
             cand_task[nof_tasks].scrambling_rnti = dl_ready_rnti[ri];
             cand_task[nof_tasks].alternate_scrambling_rnti = 0;
+          } else if (pci_uss) { /* this UE's own legal hypotheses only: n_RNTI = 0, then its C-RNTI */
+            cand_task[nof_tasks].scrambling_rnti = 0;
+            cand_task[nof_tasks].alternate_scrambling_rnti = dl_ready_rnti[ri];
           }
           nof_tasks++;
         }
@@ -6800,6 +6853,9 @@ constdiag_done:;
         if (cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell) {
           cand_task[nof_tasks].scrambling_rnti = ul_ready_rnti[ri];
           cand_task[nof_tasks].alternate_scrambling_rnti = 0;
+        } else if (pci_uss) {
+          cand_task[nof_tasks].scrambling_rnti = 0;
+          cand_task[nof_tasks].alternate_scrambling_rnti = ul_ready_rnti[ri];
         }
         nof_tasks++;
       }
@@ -8080,8 +8136,9 @@ constdiag_done:;
           const uint8_t ind = (uint8_t)nr_dci_bits_field(&out.payload, cand_task[ti].dci_length, 1, ind_bits);
           pthread_mutex_lock(&g_pbwp_lock);
           const int to = nr_pbwp_indicator(&g_pbwp, be, ind);
+          const bool identifiable = nr_pbwp_switch_identifiable(&g_pbwp, be, to);
           pthread_mutex_unlock(&g_pbwp_lock);
-          if (to != be) {
+          if (to != be && identifiable) {
             nr_reconf_bwp_switch_dci(out.rnti, to, (int64_t)source_absolute_slot, (int)fp->numerology_index);
             int64_t w0 = 0, w1 = 0;
             nr_reconf_bwp_expected_window(out.rnti, &w0, &w1);
@@ -8347,7 +8404,8 @@ constdiag_done:;
       const pa_rnti_seen_t sn = {.utc_ns = (long long)rnti_ts.tv_sec * 1000000000LL + (long long)rnti_ts.tv_nsec, .rnti = out.rnti,
                                  .frame = cand_task[ti].frame, .slot = cand_task[ti].slot, .cce = cand_task[ti].cce,
                                  .L = (int)cand_task[ti].L, .ul_scan = cand_task[ti].ul_scan,
-                                 .fmt10 = out.dci_format == NR_BLIND_DCI_FORMAT_1_0};
+                                 .fmt10 = out.dci_format == NR_BLIND_DCI_FORMAT_1_0, .bank = t_bank_index, .pass = (int)t_pass_kind,
+                                 .rb = cfg->coreset_rb_offset, .span = cfg->coreset_freq_domain * 6, .bundle = cfg->coreset_reg_bundle_size};
       nr_post_accept_defer(&pa, pa_rnti_seen, &sn, sizeof(sn));
     }
     /* Tie this accept to whichever CORESET windows are currently lit -- see COREMAPLT. */

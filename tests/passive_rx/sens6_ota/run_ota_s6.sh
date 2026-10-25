@@ -64,18 +64,20 @@ preflight() {
   [ "$rmax" -ge 33554432 ] && ok "rmem_max $rmax" || { warn "rmem_max $rmax (< 32 MB)"; need "sudo sysctl -w net.core.rmem_max=62500000"; }
   if [ "$bl" -ge 250000 ] && [ "$rdef" -ge 62500000 ]; then ok "netdev_max_backlog $bl rmem_default $rdef"
   else warn "netdev_max_backlog $bl rmem_default $rdef (run_arm.sh asserted 250000 / 62500000)"; need "sudo sysctl -w net.core.netdev_max_backlog=250000 net.core.rmem_default=62500000 net.core.rmem_max=62500000"; fi
-  # NIC IRQs: housekeeping only (IRQ_CPUS, default 0 = the core plan's hk on sens6). On the RT kernel the NIC IRQs are threads at FIFO 50,
-  # below the receiver's RR/FIFO 97 lane (10-13: GPU warm-up and check workers) and pool; 2026-10-24 with 12 of 15 IRQs on 10-13 the
-  # X410 start failed in 6 of 7 receiver starts (RFNoC "Control operation timed out waiting for ACK" / MPM rpc::timeout in
-  # multi_usrp::make), 5 of 5 opened with all IRQs on CPU 0.
-  local irqs="" badirq=0 i a c okc=" $(expand_cpus "${IRQ_CPUS:-0}" | tr '\n' ' ') "
+  # NIC IRQs: on the core plan's housekeeping core only (IRQ_CPUS, default 0 = hk on sens6). On the RT kernel the NIC IRQs are
+  # FIFO-50 threads. On the receiver's RR-97 lane (10-13: GPU warm-up and check workers) they starved and the X410 start failed in
+  # 6 of 7 starts (2026-10-24, RFNoC ctrl ACK / MPM rpc::timeout). Spread over 0-2 they competed with the UHD ctrl (1) and ring (2)
+  # threads and the stream faulted from 5 s (2026-10-25 01:33, 20 ring restarts in 60 s). On CPU 0 alone: rx_out_of_buffer delta 0
+  # over a 300 s 4 x 122.88 MS/s run with CPU 0 ~35 % busy (01:42). rx_out_of_buffer is the NIC-ring drop counter to watch.
+  local irqs="" badirq=0 i a c okc=" $(expand_cpus "${IRQ_CPUS:-0}" | tr '\n' ' ') " ncpu=0 cpus
+  cpus=$(expand_cpus "${IRQ_CPUS:-0}" | tr '\n' ' '); for c in $cpus; do ncpu=$((ncpu+1)); done
   for i in $(ls /sys/class/net/$NIC/device/msi_irqs 2>/dev/null); do
     a=$(cat /proc/irq/$i/smp_affinity_list 2>/dev/null) || continue; irqs="$irqs $i:$a"
     for c in $(expand_cpus "$a"); do case "$okc" in *" $c "*) ;; *) badirq=$((badirq+1)); break;; esac; done
   done
   if [ "$badirq" -eq 0 ]; then ok "NIC IRQs on housekeeping CPUs ${IRQ_CPUS:-0}:$irqs"
   else warn "$badirq NIC IRQs outside the housekeeping CPUs ${IRQ_CPUS:-0} (receiver RT cores starve them):$irqs"
-    need "for i in \$(ls /sys/class/net/$NIC/device/msi_irqs); do echo ${IRQ_CPUS:-0} | sudo tee /proc/irq/\$i/smp_affinity_list >/dev/null; done   # not reboot-persistent"; fi
+    need "n=0; for i in \$(ls /sys/class/net/$NIC/device/msi_irqs); do c=\$(echo $cpus | cut -d' ' -f\$(( n % $ncpu + 1 ))); echo \$c | sudo tee /proc/irq/\$i/smp_affinity_list >/dev/null; n=\$((n+1)); done   # not reboot-persistent"; fi
   # CPU
   local gov; gov=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ' ')
   [ "$gov" = "performance " ] && ok "governor performance (all CPUs)" || { warn "governor: $gov"; need "echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"; }
@@ -142,8 +144,8 @@ dry-run|run)
   [ "$ISSUES" -eq 0 ] || [ "${FORCE:-0}" = 1 ] || { echo "ABORT: $ISSUES warnings (fix with the sudo commands above, or FORCE=1)"; exit 3; }
   mkdir -p "$OUT"; cp "$CFG" "$OUT/"; [ -r "$ENVFILE" ] && cp "$ENVFILE" "$OUT/"
   { echo "CMD: $CMD"; echo "HEAD: $(git -C "$R" rev-parse HEAD 2>/dev/null)"; } > "$OUT/cmdline.txt"
-  miss0=$(cat /sys/class/net/$NIC/statistics/rx_missed_errors); oob0=$(ethtool -S "$NIC" 2>/dev/null | awk '/rx_out_of_buffer/{print $2}')
-  ( exec 9>/tmp/td_measure.lock; flock -x 9
+  miss0=$(cat /sys/class/net/$NIC/statistics/rx_missed_errors); oob0=$(sudo -n ethtool -S "$NIC" 2>/dev/null | awk '/rx_out_of_buffer/{print $2}')
+  ( if [ "${TD_LOCK_HELD:-0}" != 1 ]; then exec 9>/tmp/td_measure.lock; flock -x 9 || exit 3; fi  # TD_LOCK_HELD=1: the caller holds it (lab_sens4_run.sh)
     ma=$(awk '/MemAvailable/{print $2}' /proc/meminfo); [ "$ma" -ge 7000000 ] || { echo "MemAvailable $ma kB < 7 GB at lock time: not started"; exit 3; }
     cd "$OUT" || exit 1
     if [ "${EXPORT:-1}" = 1 ]; then  # MobiSys lab export, live (docs/MOBISYS_EXPERIMENT_PROTOCOL.md 3.3); tee -p: a dead exporter never breaks the receiver's stdout
@@ -162,7 +164,7 @@ dry-run|run)
   wait $LP; rc=$?
   pgrep -x nr-uesoftmodem >/dev/null && echo "note: an nr-uesoftmodem is still running (ours ended rc=$rc; never SIGKILL an X410 receiver)"
   L=$OUT/run.log
-  { echo "rc=$rc nic_miss_delta=$(( $(cat /sys/class/net/$NIC/statistics/rx_missed_errors) - miss0 )) out_of_buffer_delta=$(( $(ethtool -S "$NIC" 2>/dev/null | awk '/rx_out_of_buffer/{print $2}') - ${oob0:-0} ))"
+  { echo "rc=$rc nic_miss_delta=$(( $(cat /sys/class/net/$NIC/statistics/rx_missed_errors) - miss0 )) out_of_buffer_delta=$(( $(sudo -n ethtool -S "$NIC" 2>/dev/null | awk '/rx_out_of_buffer/{print $2}') - ${oob0:-0} ))"
     for p in 'CORE_PLAN' 'HOST_MEM' 'GPU_MEM' 'GPU_PATH' 'Cell Detected' 'Initial sync successful' 'SIB1 decoded' 'ACQ carrier' 'ACQ_STATE' 'PDSCHQ queued' 'SOLVER' 'RFSTALL' 'Out of memory|OOM|Killed'; do
       printf '%-24s %6d  %s\n' "$p" "$(grep -acE "$p" "$L")" "$(grep -aE "$p" "$L" | tail -1 | cut -c1-200)"; done; } | tee "$OUT/summary.txt"
   exit $rc ;;

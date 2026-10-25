@@ -317,7 +317,13 @@ static void UE_synch(void *arg) {
         + (openair0_timestamp_t)ret.frame_id * fp->samples_per_frame
         + ret.ssb_offset + fp->nb_prefix_samples;
     syncD->rx_offset = ret.rx_offset;
-    const int freq_offset = UE->common_vars.freq_offset; // frequency offset computed with pss in initial sync
+    /* The PSS/SSS estimate is the CFO relative to the radio's CURRENT tuning (seed + residual on the captured samples). A re-sync
+     * (RX_RECOVER, scan confirm) captures with the radio already moved by an earlier estimate, so the total offset is that tuning plus
+     * this estimate; retuning to the estimate alone threw the correction away (sens6 lab cell 2026-10-25: radio -13893 Hz, re-sync
+     * measured +60 Hz, radio set to +60 Hz, every PDCCH/PDSCH decode lost for the rest of the run). With continuous software
+     * compensation (cont_fo_comp) the radio never moves and the estimate is already the total. */
+    const int freq_offset = UE->common_vars.freq_offset + (get_nrUE_params()->cont_fo_comp ? 0 : nrue_ru_radio_fo());
+    UE->common_vars.freq_offset = freq_offset;
     const int hw_slot_offset =
         ((ret.rx_offset << 1) / fp->samples_per_subframe * fp->slots_per_subframe)
         + round((float)((ret.rx_offset << 1) % fp->samples_per_subframe) / fp->samples_per_slot0);

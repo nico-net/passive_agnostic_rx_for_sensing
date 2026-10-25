@@ -803,12 +803,19 @@ int nrue_ru_reinit(void)
 }
 
 /* nrue_ru_set_freq: public: retunes the UE's card under the shared gate (nr_shutdown_radio_enter(0)). Callers: phy_procedures_nr_ue.c, nr_pdsch_passive_decode.c, nr-ue.c and nrue_band_scan_next(). */
+static _Atomic int s_radio_fo; /* frequency offset (Hz) the radio is tuned by now, relative to the nominal carriers (0 at nrue_init_openair0) */
 void nrue_ru_set_freq(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint64_t dl_carrier, int freq_offset)
 {
   if (!nr_shutdown_radio_enter(0))
     return;
   nrue_ru_set_freq_impl(UE, ul_carrier, dl_carrier, freq_offset);
+  atomic_store(&s_radio_fo, freq_offset);
   nr_shutdown_radio_leave();
+}
+/* nrue_ru_radio_fo: public: the frequency offset the radio is currently tuned by (the last nrue_ru_set_freq() value). Caller: UE_synch() in nr-ue.c. */
+int nrue_ru_radio_fo(void)
+{
+  return atomic_load(&s_radio_fo);
 }
 
 /* nrue_ru_adjust_rx_gain: public: changes the RX gain under the shared gate; returns the applied gain change (or -1 during shutdown). Callers: nr-ue.c (AGC). */
