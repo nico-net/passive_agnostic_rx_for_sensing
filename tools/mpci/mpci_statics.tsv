@@ -2171,3 +2171,11 @@ openair1/SCHED_NR_UE/phy_procedures_nr_ue.c	973	nr_process_pbch_symbol::s_fftadd
 openair1/SCHED_NR_UE/phy_procedures_nr_ue.c	1071	nr_process_pbch_symbol::s_sat_left	func_static	int	UNCLASSIFIED	A8	
 openair1/SCHED_NR_UE/phy_procedures_nr_ue.c	1233	pbch_process::s_track_log_left	func_static	int	PROCESS	A8	log/dashboard state
 radio/COMMON/common_lib.c	26	devtype_names	global	const char *const[MAX_RF_DEV_TYPE]	CONST	G5	auto
+radio/COMMON/iq_chan.c	128	iq_chan_backend_cpu	global	const iq_chan_backend_t	CONST	G5	auto
+radio/COMMON/iq_chan.c	193	g_be_mu	file_static	pthread_mutex_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/iq_chan.c	194	g_be	file_static	const iq_chan_backend_t *[MAX_BACKENDS]	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/iq_chan.c	195	g_sel	file_static	iq_chan_select_fn	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/iq_chan.c	196	g_sel_user	file_static	void *	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/iq_ddc.c	18	g_force_scalar	file_static	int	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/shm_iq_ring.c	64	g_reg_mu	file_static	pthread_mutex_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/shm_iq_ring.c	65	g_reg	file_static	anon_t *[ANON_REG_MAX]	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
