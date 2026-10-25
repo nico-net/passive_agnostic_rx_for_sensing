@@ -525,3 +525,113 @@ R9. **Files under active decode work.** `nr_pdcch_blind_monitor_rt.c` (+931 line
 R10. **OTA gates.** WindTre/Iliad had 0 C-RNTIs solved on main before the blind DCI fixes (PROJECT_MEMORY 10-23/24 §3); whether `c9e8858e4b`/`5432bc95a1` fix that on the DGX is unknown: O1/O2 start with a solo check of each cell on the baseline.
 
 R11. **Hosts.** Group C runs locally on the DGX (Sonnet agents in worktrees `wt/rr-mpci-<task>`, own build dirs, `nice -n 19`, `flock -s`); labels name `DGX GB10`, not cloud. Commit trailer of agents: their own model.
+
+### A2 result (2026-10-25, branch mpci/c-a1a2, baseline mpci-main @9b2d7c3f6e) `[OFFLINE VERIFIED, DGX GB10 aarch64 unit; CODE-READ scanner]`
+
+`tools/mpci/static_audit.py` scans 97 files in < 1 s (limit 60 s) and `tools/mpci/mpci_statics.tsv` holds one row per static/global/thread-local object (file, line, symbol, kind, type, class, owner, note). These exact counts replace the regex estimates of B.2 (B.2 text unchanged). `--check` (new object => fail) is in ctest (`static_audit_check`); `--strict` (UNCLASSIFIED => fail) is implemented but NOT enabled in ctest yet, it becomes the gate once A3-A8 are done. A converted object (`NR_CELL_STATIC*`) stays in the table as `[converted]`.
+
+Totals: 2169 objects; by class: PER_CELL=0, PROCESS=80, CONST=343, TLS=181, UNCLASSIFIED=1565; by kind: file_static=1466, func_static=274, global=248, tls=181.
+
+**PER_CELL candidates = UNCLASSIFIED rows owned by A3-A8: 1259** (A3=130, A4=303, A5=272, A6=200, A7=74, A8=280); G-owned UNCLASSIFIED (read-only for group C, converted behind `nr_gpu_cell.h`): G1=58, G3=199, G4=49. Not every candidate is PER_CELL: the A3-A8 owners classify each row (PER_CELL / PROCESS / CONST) as they convert. Classes already assigned automatically: PROCESS=80 (core pool, core layout, host/GPU membudget, GPU platform/path registry, GPU pass instance pool/graph cache by name, log/dashboard by name), CONST=343 (truly const objects only; `static const char *p` stays mutable), TLS=181 (existing `__thread`). Owner is by file; A8 also takes the generic `openair1/PHY/TOOLS` DSP/scope files; `radio/COMMON` is G5.
+
+Exact count per file (total | PER_CELL PROCESS CONST TLS UNCLASSIFIED):
+
+```
+common/utils/nr_core_layout.c                                              13 | 0 11 2 0 0
+common/utils/nr_core_pool.c                                                12 | 0 6 1 5 0
+executables/nr-ue.c                                                        46 | 0 0 1 0 45
+executables/nr-uesoftmodem.c                                               16 | 0 0 1 0 15
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu                                41 | 0 0 12 0 29
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu                            41 | 0 0 12 4 25
+openair1/PHY/NR_UE_TRANSPORT/dci_nr.c                                      31 | 0 2 0 18 11
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c                               36 | 0 1 0 0 35
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c                        7 | 0 0 0 0 7
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c                           6 | 0 0 1 0 5
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c                             8 | 0 0 1 0 7
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu                          25 | 0 0 1 1 23
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh                  6 | 0 0 3 0 3
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu                     5 | 0 0 1 1 3
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c                            7 | 0 0 2 0 5
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c                          3 | 0 0 2 1 0
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c                            15 | 0 0 0 0 15
+openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe.c                         12 | 0 0 0 0 12
+openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe_rt.c                       3 | 0 0 0 0 3
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c                               4 | 0 0 0 0 4
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_twin.cuh                            1 | 0 0 1 0 0
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c                              21 | 0 3 11 3 4
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu                          54 | 0 4 20 5 25
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh                           4 | 0 0 0 0 4
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c                              15 | 0 0 3 0 12
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.cuh                             2 | 0 0 2 0 0
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c                        12 | 0 0 1 0 11
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c                        24 | 0 0 0 1 23
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c                           6 | 0 0 0 0 6
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c                      4 | 0 0 4 0 0
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c                              19 | 0 0 0 0 19
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_reconf_rules.c                      6 | 0 0 2 0 4
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c                   10 | 0 0 0 0 10
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c                           34 | 0 0 1 0 33
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c                             1 | 0 0 1 0 0
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c                      86 | 0 1 16 2 67
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c                  157 | 0 1 3 19 134
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c                        8 | 0 0 0 0 8
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c                3 | 0 0 0 0 3
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c                       12 | 0 0 0 0 12
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c                        15 | 0 0 2 0 13
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.c                 15 | 0 0 15 0 0
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c                 33 | 0 0 31 0 2
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c                    4 | 0 0 0 0 4
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu                           24 | 0 0 8 0 16
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_parity.cuh                        2 | 0 0 2 0 0
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c                          7 | 0 0 0 0 7
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c                             4 | 0 0 0 0 4
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu                            7 | 0 0 7 0 0
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c                      30 | 0 0 1 0 29
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c                          2 | 0 0 0 0 2
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c                     13 | 0 0 1 0 12
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c                        6 | 0 0 0 0 6
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c                      2 | 0 0 2 0 0
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c                     7 | 0 0 3 0 4
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c                     32 | 0 0 2 0 30
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c                        22 | 0 0 2 0 20
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu                         28 | 0 0 16 0 12
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c                     37 | 0 0 1 8 28
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c                          26 | 0 0 0 2 24
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh                     8 | 0 0 3 0 5
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu                           77 | 0 0 17 0 60
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu                          35 | 0 0 14 0 21
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c                       6 | 0 0 1 1 4
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c                    205 | 0 0 10 80 115
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c                     135 | 0 4 2 7 122
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c                             48 | 0 0 12 1 35
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh                           3 | 0 0 2 0 1
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c                     87 | 0 0 6 19 62
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c                 16 | 0 0 0 0 16
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c                      40 | 0 0 0 0 40
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c                     11 | 0 0 0 0 11
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c                          12 | 0 0 0 0 12
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c                             8 | 0 0 0 2 6
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu                             3 | 0 0 1 0 2
+openair1/PHY/TOOLS/calibration_scope.c                                      2 | 0 0 2 0 0
+openair1/PHY/TOOLS/dB_routines.c                                            6 | 0 0 6 0 0
+openair1/PHY/TOOLS/dfts_load.c                                              4 | 0 0 0 0 4
+openair1/PHY/TOOLS/get_sin_cos.c                                            1 | 0 0 0 0 1
+openair1/PHY/TOOLS/invSqrt.c                                                1 | 0 0 1 0 0
+openair1/PHY/TOOLS/lte_enb_scope.c                                          7 | 0 0 0 0 7
+openair1/PHY/TOOLS/lte_phy_scope.c                                          6 | 0 0 0 0 6
+openair1/PHY/TOOLS/lte_phy_scope_tm4.c                                      8 | 0 0 0 0 8
+openair1/PHY/TOOLS/lte_ue_scope.c                                           7 | 0 0 0 0 7
+openair1/PHY/TOOLS/nr_gpu_budget.c                                         20 | 0 19 0 1 0
+openair1/PHY/TOOLS/nr_gpu_mem.c                                             2 | 0 2 0 0 0
+openair1/PHY/TOOLS/nr_gpu_module.c                                          3 | 0 2 1 0 0
+openair1/PHY/TOOLS/nr_gpu_path.c                                            9 | 0 7 2 0 0
+openair1/PHY/TOOLS/nr_gpu_platform.c                                       14 | 0 13 1 0 0
+openair1/PHY/TOOLS/nr_host_membudget.c                                      4 | 0 3 1 0 0
+openair1/PHY/TOOLS/nr_phy_scope.c                                           5 | 0 0 3 0 2
+openair1/PHY/TOOLS/oai_dfts.c                                              43 | 0 0 38 0 5
+openair1/PHY/TOOLS/oai_dfts_neon.c                                        193 | 0 0 18 0 175
+openair1/PHY/TOOLS/phy_scope_interface.c                                    1 | 0 0 0 0 1
+openair1/SCHED_NR_UE/fapi_nr_ue_l1.c                                        2 | 0 0 2 0 0
+openair1/SCHED_NR_UE/phy_procedures_nr_ue.c                                 4 | 0 1 1 0 2
+radio/COMMON/common_lib.c                                                   1 | 0 0 1 0 0
+```
