@@ -19,6 +19,8 @@
 #include <cuda_runtime.h>
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include "nr_dl_gpu_memory.h"
+#include "PHY/TOOLS/nr_gpu_memstat_cuda.cuh"
+#include "nr_gpu_cell.h"
 #include "nr_dl_gpu_budget.h"
 #include "nr_gpu_green.h"
 #include <algorithm>
@@ -202,8 +204,11 @@ static int allocate_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
     CK(cudaDeviceGetStreamPriorityRange(&least,&greatest));
     if(!nr_gpu_green_stream(&g_stream,greatest,true)) CK(cudaStreamCreateWithPriority(&g_stream,cudaStreamNonBlocking,greatest));
   } else {CK(cudaStreamCreate(&g_stream));}
-  CK(nr_gpu_allocate(NR_GPU_DEVICE, &g_d_rxF, (size_t)nant * MAX_DUR * N * sizeof(float2)));
-  CK(nr_gpu_allocate(NR_GPU_STAGING, &g_h_rxF_stage, (size_t)nant * MAX_DUR * N * sizeof(float2)));
+  static_assert(MAX_DUR == NR_GPU_CELL_PDCCH_MAX_DUR, "nr_gpu_cell.h sizing constants");
+  NrMsScope ms_(NR_MS_PDCCH_FEP, NR_MS_PER_CELL); /* GPUMEM: the CORESET rxF buffers are sized from this cell's FFT size and antennas; the rest is constant-size (SHARED) */
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, &g_d_rxF, nr_gpu_cell_pdcch_rxf_bytes(nant, N)));
+  CK(nr_gpu_allocate(NR_GPU_STAGING, &g_h_rxF_stage, nr_gpu_cell_pdcch_rxf_bytes(nant, N)));
+  ms_.set(NR_MS_PDCCH_FEP, NR_MS_SHARED);
   CK(nr_gpu_allocate(NR_GPU_STAGING, &g_h_jobs, MAX_JOBS * sizeof(nr_gpu_pdcch_job_t)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, &g_d_jobs, MAX_JOBS * sizeof(nr_gpu_pdcch_job_t)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, &g_d_gold, (size_t)MAX_JOBS * MAX_DUR * GOLD_WORDS * sizeof(uint32_t)));

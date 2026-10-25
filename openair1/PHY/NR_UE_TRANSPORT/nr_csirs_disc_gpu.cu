@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc_fp_internal.h"
 #include <cuda_runtime.h>
+#include <mutex>
+#include "PHY/TOOLS/nr_gpu_memstat_cuda.cuh"
 #include "nr_gpu_green.h"
 #include "../TOOLS/nr_gpu_cuda.h"
 #include "../TOOLS/nr_gpu_chunk.h"
@@ -127,13 +129,14 @@ static int fold_gpu(void *opaque,int p,uint64_t *sum,uint64_t *sq)
 {
   Fold *f=(Fold *)opaque;uint64_t *ds=nullptr,*dq=nullptr;
   size_t bytes=(size_t)p*f->nr*sizeof(*sum);int ret=-1;
-  if(cudaMalloc(&ds,bytes)!=cudaSuccess || cudaMalloc(&dq,bytes)!=cudaSuccess) goto done;
+  NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: per-call scratch of the footprint search, freed below
+  if(nr_ms_malloc(&ds,bytes)!=cudaSuccess || nr_ms_malloc(&dq,bytes)!=cudaSuccess) goto done;
   if(disc_zero(ds,0,bytes)!=cudaSuccess || disc_zero(dq,0,bytes)!=cudaSuccess) goto done;
   fold_kernel<<<(f->nr+127)/128,128,0,disc_stream()>>>(f->x,f->meta,f->nt,f->nr,p,ds,dq);
   if(cudaGetLastError()!=cudaSuccess || disc_copy(sum,ds,bytes,cudaMemcpyDeviceToHost)!=cudaSuccess ||
       disc_copy(sq,dq,bytes,cudaMemcpyDeviceToHost)!=cudaSuccess) goto done;
   ret=0;
-done: cudaFree(ds);cudaFree(dq);return ret;
+done: nr_ms_free(ds,bytes);nr_ms_free(dq,bytes);return ret;
 }
 /* footprints: GPU footprint detector for one batch: uploads the ring grid and metadata, normalises and pools it on the device, then runs the CPU cluster search with fold_gpu() for the statistics.
  *   Returns the footprint count, or -1. Frees its device buffers. Installed in the ops table as the detect-footprints entry (nr_csirs_disc_backend.c calls it through load_module).
@@ -146,13 +149,14 @@ static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t
   int16_t *grid=nullptr;uint8_t *excl=nullptr;Fold f={nullptr,nullptr,r->capacity,14*12*r->n_rb+168*tiles};int ret=-1;
   size_t gb=(size_t)r->capacity*r->slot_stride*sizeof(int16_t), xb=(size_t)f.nt*f.nr*sizeof(uint32_t);
   /* Explicit-copy baseline accepts ordinary malloc or unified U1 rings. */
-  if(cudaMalloc(&grid,gb)!=cudaSuccess || cudaMalloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
-     cudaMalloc(&f.x,xb)!=cudaSuccess) goto done;
+  NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: per-call scratch, freed below
+  if(nr_ms_malloc(&grid,gb)!=cudaSuccess || nr_ms_malloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
+     nr_ms_malloc(&f.x,xb)!=cudaSuccess) goto done;
   if(disc_copy(grid,r->grid_base,gb,cudaMemcpyHostToDevice)!=cudaSuccess ||
      disc_copy(f.meta,r->meta,r->capacity*sizeof(*f.meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
      disc_zero(f.x,0,xb)!=cudaSuccess) goto done;
   if(cfg && cfg->excl_re) {
-    if(cudaMalloc(&excl,14*12*r->n_rb)!=cudaSuccess || disc_copy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
+    if(nr_ms_malloc(&excl,14*12*r->n_rb)!=cudaSuccess || disc_copy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
   }
   normalize<<<(r->capacity*r->n_rb*14+127)/128,128,0,disc_stream()>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
                                                 cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles,1);
@@ -160,7 +164,7 @@ static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t
   pool<<<(r->capacity*168*tiles+127)/128,128,0,disc_stream()>>>(f.x,r->capacity,r->n_rb,tiles);
   if(cudaGetLastError()!=cudaSuccess || disc_wait()!=cudaSuccess) goto done;
   ret=nr_disc_fp_cluster(r,cfg,out,max_out,fold_gpu,&f);
-done: cudaFree(grid);cudaFree(f.meta);cudaFree(f.x);cudaFree(excl);return ret;
+done: nr_ms_free(grid,gb);nr_ms_free(f.meta,r->capacity*sizeof(*f.meta));nr_ms_free(f.x,xb);nr_ms_free(excl,(size_t)14*12*r->n_rb);return ret;
 }
 /* normalize_host: GPU normalisation of a ring into the host output array (the ops table's normalise entry): upload, normalize and pool kernels, then a copy back.
  *   Returns 0, or -1 on failure. Keeps the output layout of nr_disc_fp_normalize().
@@ -172,13 +176,14 @@ static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_c
   int16_t *grid=nullptr;uint8_t *excl=nullptr;Fold f={nullptr,nullptr,r->capacity,14*12*r->n_rb+168};int ret=-1;
   size_t gb=(size_t)r->capacity*r->slot_stride*sizeof(int16_t), xb=(size_t)f.nt*f.nr*sizeof(uint32_t);
   /* Explicit-copy baseline accepts ordinary malloc or unified U1 rings. */
-  if(cudaMalloc(&grid,gb)!=cudaSuccess || cudaMalloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
-     cudaMalloc(&f.x,xb)!=cudaSuccess) goto done;
+  NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: per-call scratch, freed below
+  if(nr_ms_malloc(&grid,gb)!=cudaSuccess || nr_ms_malloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
+     nr_ms_malloc(&f.x,xb)!=cudaSuccess) goto done;
   if(disc_copy(grid,r->grid_base,gb,cudaMemcpyHostToDevice)!=cudaSuccess ||
      disc_copy(f.meta,r->meta,r->capacity*sizeof(*f.meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
      disc_zero(f.x,0,xb)!=cudaSuccess) goto done;
   if(cfg && cfg->excl_re) {
-    if(cudaMalloc(&excl,14*12*r->n_rb)!=cudaSuccess || disc_copy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
+    if(nr_ms_malloc(&excl,14*12*r->n_rb)!=cudaSuccess || disc_copy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
   }
   normalize<<<(r->capacity*r->n_rb*14+127)/128,128,0,disc_stream()>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
                                                 cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles,1);
@@ -186,7 +191,7 @@ static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_c
   pool<<<(r->capacity*168*tiles+127)/128,128,0,disc_stream()>>>(f.x,r->capacity,r->n_rb,tiles);
   if(cudaGetLastError()!=cudaSuccess || disc_wait()!=cudaSuccess) goto done;
   ret=disc_copy(out,f.x,xb,cudaMemcpyDeviceToHost)==cudaSuccess?0:-1;
-done: cudaFree(grid);cudaFree(f.meta);cudaFree(f.x);cudaFree(excl);return ret;
+done: nr_ms_free(grid,gb);nr_ms_free(f.meta,r->capacity*sizeof(*f.meta));nr_ms_free(f.x,xb);nr_ms_free(excl,(size_t)14*12*r->n_rb);return ret;
 }
 static int lattice_host(int,int,uint64_t,const uint64_t *,const uint64_t *,const uint64_t *,const uint64_t *,const uint64_t *,uint16_t *);
 static int fep_host(const nr_csirs_disc_fep_cfg_t *,const nr_csirs_disc_fep_slot_t *,int,nr_csirs_disc_ring_t *,int);
@@ -214,9 +219,24 @@ static int upload_symbols(nr_csirs_disc_ring_t *r,uint16_t symbols)
   r->device_valid=true;return 0;
 }
 /* device_alloc: allocates n bytes of device memory (cudaMalloc); returns NULL on failure. Installed as the device_alloc entry of the ops table. */
-static void *device_alloc(size_t n) {void *p=nullptr;return cudaMalloc(&p,n)==cudaSuccess?p:nullptr;}
+/* GPUMEM: address -> (bytes, ledger tag, kind) of the allocations whose free gets no size (device_free, free_unified). A full table only loses a release. */
+static struct LedgerEnt {void *p;size_t bytes;uint32_t tag;int kind;} g_led[1024];
+static std::mutex g_led_mu;
+static void led_add(void *p,size_t bytes,int kind)
+{
+  const uint32_t tag=nr_gpu_memstat_current();
+  nr_gpu_memstat_note_tag(tag,kind,bytes);
+  std::lock_guard<std::mutex> lk(g_led_mu);
+  for(auto &e:g_led) if(!e.p) {e={p,bytes,tag,kind};return;}
+}
+static void led_del(void *p)
+{
+  std::lock_guard<std::mutex> lk(g_led_mu);
+  for(auto &e:g_led) if(e.p==p) {nr_gpu_memstat_release_tag(e.tag,e.kind,e.bytes);e.p=nullptr;return;}
+}
+static void *device_alloc(size_t n) {NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL);void *p=nullptr;if(cudaMalloc(&p,n)!=cudaSuccess) return nullptr;led_add(p,n,NR_MS_DEV);return p;}
 /* device_free: frees device memory from device_alloc(). Installed as the device_free entry of the ops table. */
-static void device_free(void *p) {cudaFree(p);}
+static void device_free(void *p) {if(p) led_del(p);cudaFree(p);}
 /* T6b: segment() mode. 0: per-thread arrays on the stack (86 KB frame: the driver reserves frame x SMs x max threads/SM of local memory, 6.3 GB on GB10, 4.2 GB on a 34-SM card).
  * 1: segment_scratch() with the arrays in a global scratch of g_segment_blocks*32 thread slots. Decided by lmem_prereserve() from the memory budget share. */
 static int g_segment_scratch=0,g_segment_blocks=68;
@@ -240,7 +260,10 @@ extern "C" void *nr_csirs_disc_gpu_alloc_unified(size_t bytes)
 {
   void *ptr=nullptr;
   if(!bytes) return nullptr;
-  return cudaHostAlloc(&ptr,bytes,cudaHostAllocMapped|cudaHostAllocPortable)==cudaSuccess?ptr:nullptr;
+  NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: the observation ring / TD pool of the cell (pinned mapped host memory)
+  if(cudaHostAlloc(&ptr,bytes,cudaHostAllocMapped|cudaHostAllocPortable)!=cudaSuccess) return nullptr;
+  led_add(ptr,bytes,NR_MS_PIN);
+  return ptr;
 }
 /* nr_csirs_disc_gpu_free_unified: frees memory from nr_csirs_disc_gpu_alloc_unified(): host pinned memory (cudaFreeHost) or device memory (cudaFree), chosen by the pointer attributes.
  *   NULL-safe. Exported C entry.
@@ -248,6 +271,7 @@ extern "C" void *nr_csirs_disc_gpu_alloc_unified(size_t bytes)
 extern "C" void nr_csirs_disc_gpu_free_unified(void *ptr)
 {
   if(!ptr) return;
+  led_del(ptr);
   cudaPointerAttributes a{};
   if(cudaPointerGetAttributes(&a,ptr)==cudaSuccess && a.type==cudaMemoryTypeHost) cudaFreeHost(ptr);
   else cudaFree(ptr);
@@ -293,8 +317,12 @@ static int fft_host(int fft, int transforms, const int16_t *in, int16_t *out)
     last_fft=fft;last_transforms=transforms;
   }
   if (capacity<n) {
-    cudaFree(work);work=nullptr;capacity=0;
-    if (cudaMalloc(&work,n*sizeof(*work))!=cudaSuccess) return -1;
+    static uint32_t work_tag;
+    NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: the batched FFT scratch (grows, never shrinks)
+    if (work) {cudaFree(work);nr_gpu_memstat_release_tag(work_tag,NR_MS_DEV,capacity*sizeof(*work));}
+    work=nullptr;capacity=0;
+    if (nr_ms_malloc(&work,n*sizeof(*work))!=cudaSuccess) return -1;
+    work_tag=nr_gpu_memstat_current();
     capacity=n;
   }
   fft_unpack<<<(n+255)/256,256,0,disc_stream()>>>((const short2 *)in,work,n);
@@ -409,16 +437,17 @@ __global__ static void fep_extract(nr_csirs_disc_fep_cfg_t cfg,const nr_csirs_di
 }
 
 template<class T> struct Buffer {
-  T *p=nullptr;size_t capacity=0;
+  T *p=nullptr;size_t capacity=0;uint32_t tag=0; /* tag: ledger tag the bytes were booked under (nr_gpu_memstat.h) */
   ~Buffer() = default; /* static objects: no CUDA call after runtime teardown at exit() (T26, see nr_csirs_disc_gpu_sweep.cu) */
 /* reserve: Buffer<T>::reserve: grows the device buffer to at least n elements (freeing the old one); returns false on allocation failure.
  *   Member of the template Buffer used by the FEP and accumulation workspaces.
  */
   bool reserve(size_t n) {
     if(n<=capacity) return true;
-    cudaFree(p);p=nullptr;capacity=0;
-    if(cudaMalloc(&p,n*sizeof(T))!=cudaSuccess) return false;
-    capacity=n;return true;
+    if(p) {cudaFree(p);nr_gpu_memstat_release_tag(tag,NR_MS_DEV,capacity*sizeof(T));}
+    p=nullptr;capacity=0;
+    if(nr_ms_malloc(&p,n*sizeof(T))!=cudaSuccess) return false;
+    tag=nr_gpu_memstat_current();capacity=n;return true;
   }
 };
 struct FepWorkspace {
@@ -434,6 +463,7 @@ static FepWorkspace fep_workspace;
 static int fep_prepare(int fft,int ant,size_t stride)
 {
   auto &f=fep_workspace;
+  NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: FEP workspace (batch x antennas x FFT) of the preparing cell
   if(!f.lut_ready) {
     short host[129];for(int i=0;i<=128;++i) host[i]=(short)round(sin(3.14159265358979323846*i/256)*16384);
     if(cudaMemcpyToSymbol(sin_lut,host,sizeof(host))!=cudaSuccess) return -1;
@@ -513,6 +543,7 @@ static int accumulate_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_
   static Buffer<int16_t> grid;static Buffer<nr_csirs_disc_slot_meta_t> meta;
   static Buffer<uint32_t> x;static Buffer<uint8_t> excl;
   if(!nr_disc_fp_valid(r)) return -1;
+  NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: explicit-copy staging of the accumulator (grows)
   int tiles=(r->n_rb+15)/16,nr=14*12*r->n_rb+168*tiles;
   size_t gb=(size_t)r->capacity*r->slot_stride,xb=(size_t)r->capacity*nr;
   if(!grid.reserve(gb) || !meta.reserve(r->capacity) || !x.reserve(xb) || !excl.reserve(14*12*r->n_rb)) return -1;
@@ -610,6 +641,7 @@ static int lattice_host(int rb,int p,uint64_t nt,const uint64_t *counts,const ui
   static Buffer<uint16_t> dm;
   int tiles=(rb+15)/16,pooled=168*tiles,nr=14*12*rb+pooled;
   size_t count=(size_t)p*14*tiles*6;
+  NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: lattice screen scratch (grows)
   if(!ps.reserve((size_t)p*pooled) || !pq.reserve((size_t)p*pooled) || !dc.reserve(p) || !dm.reserve(count)) return -1;
   if(disc_copy(dc.p,counts,p*sizeof(uint64_t),cudaMemcpyHostToDevice)!=cudaSuccess ||
      disc_zero(dm.p,0,count*sizeof(uint16_t))!=cudaSuccess) return -1;
@@ -627,6 +659,7 @@ static int lattice_host(int rb,int p,uint64_t nt,const uint64_t *counts,const ui
  */
 static int prepare_host(int rb,int ant,int capacity,int fft,size_t stride)
 {
+  NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: the resident detector and FEP workspace of this cell (sized from rb, ant, capacity)
   if(!resident::prepare(rb,ant,capacity) || fep_prepare(fft,ant,stride)<0) return -1;
   auto &f=fep_workspace;
   // Exercise plans and kernel local storage before RX, including the large

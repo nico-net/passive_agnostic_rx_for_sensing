@@ -25,6 +25,7 @@
 #include "nr_td_cb0_batch.h"
 #include "nr_dl_gpu_memory.h"
 #include "PHY/TOOLS/nr_gpu_membudget.h"
+#include "PHY/TOOLS/nr_gpu_memstat.h"
 #include "nr_dl_gpu_budget.h"
 #include <stdlib.h>
 
@@ -102,6 +103,7 @@ int init()
     g.max_items = (int)items;
     nr_gpu_membudget_commit(NR_GPU_MEM_TD_CB0, llr_bytes + per_item * (size_t)items, (double)items / 2048);
   }
+  NrMsScope ms_(NR_MS_TD_CB0, NR_MS_SHARED); /* GPUMEM: items per batch from the budget, shared by all cells */
   g.cap[0] = (size_t)g.max_items * NR_TD_CB0_L_STRIDE;
   g.cap[1] = (size_t)g.max_items * NR_TD_CB0_D_STRIDE * sizeof(int16_t);
   g.cap[2] = (size_t)g.max_items * sizeof(nr_td_cb0_gpu_item_t);

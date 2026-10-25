@@ -265,6 +265,7 @@ struct State {
  */
 static bool prepare(int rb,int ant,int capacity)
 {
+  NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: the resident detector state of the preparing cell
   auto &s=state;int pooled=168*((rb+15)/16),nr=14*12*rb+pooled;
   return s.sum.reserve((size_t)640*nr) && s.sq.reserve((size_t)640*pooled)
     && s.s80.reserve((size_t)80*nr) && s.s64.reserve((size_t)64*nr)

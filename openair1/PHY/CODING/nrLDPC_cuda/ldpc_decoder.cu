@@ -5,6 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 #include <cuda_runtime.h>
 #include "PHY/TOOLS/nr_gpu_cuda.h"
 #include "PHY/TOOLS/nr_gpu_membudget.h"
+#include "PHY/TOOLS/nr_gpu_memstat.h"
 #include <vector>
 #include <map>
 #include <cstdio>
@@ -646,7 +647,7 @@ extern "C" uint32_t ldpc_decode(ThreadContext* context_, cudaStream_t stream, ui
         CHECK_CUDA(cudaGraphExecUpdate(context.graphCtx, graphUpdate, &errorNode, &updateResult));
     }
     else
-         CHECK_CUDA(cudaGraphInstantiate(&context.graphCtx, graphUpdate, 0));
+         { CHECK_CUDA(cudaGraphInstantiate(&context.graphCtx, graphUpdate, 0)); const uint32_t pv_ = nr_gpu_memstat_enter(NR_MS_LDPC_DEC, NR_MS_SHARED, 0); nr_gpu_memstat_note_graph(); nr_gpu_memstat_leave(pv_); }
     cudaGraphDestroy(graphUpdate);
     CHECK_CUDA(cudaGraphLaunch(context.graphCtx, stream));
 #endif
@@ -713,6 +714,7 @@ ThreadContext& ldpc_decoder_init_context(int make_stream) {
     auto& context = thread_context;
     if (context.llr_in_buffer) // lazy
         return context;
+    NrMsScope ms_(NR_MS_LDPC_DEC, NR_MS_SHARED); /* GPUMEM: per-thread decoder context, constant size */
 
     printf("Initializing LDPC context (TID %d)\n", (int) gettid());
 
@@ -780,6 +782,7 @@ extern "C" int ldpc_cuda_basegraph(uint32_t BG, uint32_t Z, ldpc_cuda_bg_t* out)
 }
 
 static void ldpc_tables_init_locked() {
+    NrMsScope ms_(NR_MS_LDPC_DEC, NR_MS_SHARED); /* GPUMEM: base-graph tables */
     printf("Initializing LDPC runtime %d\n", (int) gettid());
     /* The platform probe sets blocking synchronization and host mapping before context creation. */
 
@@ -835,6 +838,7 @@ static void ldpc_batch_free(ThreadContext& c) {
 static void ldpc_batch_reserve(ThreadContext& c, uint32_t n) {
     if (n <= c.b_cap || !nr_gpu_allocations_allowed())
         return;
+    NrMsScope ms_(NR_MS_LDPC_DEC, NR_MS_SHARED); /* GPUMEM: batch buffers of a decoder context / the pool */
     uint32_t cap = c.b_cap ? c.b_cap : 16;
     while (cap < n)
         cap *= 2;
@@ -1047,6 +1051,7 @@ extern "C" int ldpc_pool_init(uint32_t cap) {
         return 0;
     if (!ldpc_decoder_init(1)) /* global base-graph tables */
         return -1;
+    NrMsScope ms_(NR_MS_LDPC_DEC, NR_MS_SHARED); /* GPUMEM: the pool's host staging; its batch buffers are booked by ldpc_batch_reserve */
     int rc = 0;
     {
         /* T6b: device bytes per code block of a launch: LLR in + posterior + messages + bits + done/unsat flags */
@@ -1184,6 +1189,7 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
             cudaGraph_t g;
             POOL_CHECK(cudaStreamEndCapture(stream, &g));
             cudaError_t ei = cudaGraphInstantiate(&ge, g, 0);
+            if (ei == cudaSuccess) { const uint32_t pv_ = nr_gpu_memstat_enter(NR_MS_LDPC_DEC, NR_MS_SHARED, 0); nr_gpu_memstat_note_graph(); nr_gpu_memstat_leave(pv_); }
             cudaGraphDestroy(g);
             POOL_CHECK(ei);
             AST(g_pool_capturing, 0);

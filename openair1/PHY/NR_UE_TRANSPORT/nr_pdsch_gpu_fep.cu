@@ -3,6 +3,8 @@
 #include "../TOOLS/nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include "nr_pdsch_gpu_chest.h"
 #include "PHY/TOOLS/nr_gpu_mem.h"
+#include "PHY/TOOLS/nr_gpu_memstat_cuda.cuh"
+#include "nr_gpu_cell.h"
 #include "PHY/TOOLS/nr_gpu_membudget.h"
 #include "nr_gpu_stage_census.h"
 #include <cuda_runtime.h>
@@ -672,6 +674,8 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
     return -1;
   const int N = cfg->ofdm_symbol_size, ns = cfg->symbols_per_slot;
   g_samples_per_slot = cfg->nb_prefix_samples0 + N + (ns - 1) * (N + cfg->nb_prefix_samples);
+  static_assert(MAX_SYM == NR_GPU_CELL_MAX_SYM && PASS_SLOTS == NR_GPU_CELL_PASS_SLOTS, "nr_gpu_cell.h sizing constants");
+  NrMsScope ms_(NR_MS_PDSCH_FEP, NR_MS_PER_CELL); /* GPUMEM: the buffers sized from this cell's FFT size / antennas are PER_CELL, the rest SHARED (set() below) */
   /* PDSCH FEP always runs on the highest-priority stream: its IQ has a live deadline, other GPU users (CSI-RS/nID
    * discovery) do not. Buffers come from the platform memory-model API (T18). */
   {
@@ -679,13 +683,14 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
     CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
     if (!nr_gpu_green_stream(&g_stream, greatest, true)) CK(cudaStreamCreateWithPriority(&g_stream, cudaStreamNonBlocking, greatest));
   }
-  CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_h_rx, (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2)));
+  CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_h_rx, nr_gpu_cell_fep_rx_bytes(cfg->nant, g_samples_per_slot, N)));
   CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_h_rot, MAX_SYM * sizeof(short2)));
-  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_rx, (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2)));
-  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_fft_in, (size_t)cfg->nant * ns * N * sizeof(float2)));
-  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_rxF, (size_t)cfg->nant * ns * N * sizeof(float2)));
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_rx, nr_gpu_cell_fep_rx_bytes(cfg->nant, g_samples_per_slot, N)));
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_fft_in, nr_gpu_cell_fep_fft_bytes(cfg->nant, ns, N)));
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_rxF, nr_gpu_cell_fep_fft_bytes(cfg->nant, ns, N)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_rot, MAX_SYM * sizeof(short2)));
-  CK(nr_gpu_allocate(NR_GPU_SHARED_RW, &g_h_check, (size_t)ns * N * sizeof(float2)));
+  CK(nr_gpu_allocate(NR_GPU_SHARED_RW, &g_h_check, nr_gpu_cell_fep_check_bytes(ns, N)));
+  ms_.set(NR_MS_PDSCH_FEP, NR_MS_SHARED);
   if (cufftPlan1d(&g_plan, N, CUFFT_C2C, cfg->nant * ns) != CUFFT_SUCCESS)
     return -1;
   cufftSetStream(g_plan, g_stream);
@@ -704,7 +709,7 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
       && nr_exact::fep_size_selftest(N)) { /* no bit-identical twin: CPU FEP */
     /* Bit-exact FEP working set: allocated with the rest before the RX fence. The timeshift table is
      * computed exactly as init_timeshift_rotation() does (same libm, same formula). */
-    const size_t exact = (size_t)cfg->nant * MAX_SYM * N * sizeof(short2);
+    const size_t exact = nr_gpu_cell_fep_exact_bytes(cfg->nant, N);
     std::vector<uint16_t> perm;
     std::vector<short> tw1, tw4, ts(2 * N);
     nr_exact::twin_tables(g_isa, perm, tw1, tw4, N); /* NEON: build_perm + init_rad4_host(1024 / 4096); x86: its permutation and twiddle blob for N */
@@ -712,8 +717,10 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
     CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_tw1024, tw1.size() * sizeof(short)));
     CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_tw4096, tw4.size() * sizeof(short)));
     CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_ts, N * sizeof(short2)));
+    ms_.set(NR_MS_PDSCH_FEP, NR_MS_PER_CELL);
     CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_exact, exact));
     CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_h_exact, exact));
+    ms_.set(NR_MS_PDSCH_FEP, NR_MS_SHARED);
     const int so = cfg->nb_prefix_samples / cfg->ofdm_offset_divisor;
     for (int i = 0; i < N; i++) {
       const double poff = -i * 2.0 * M_PI * so / N;
@@ -736,10 +743,12 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_ctx_cout[c], 4 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)));
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_ctx_rows[c], NR_GPU_CHEST_MAX_ROWS * sizeof(nr_gpu_chest_row_t)));
       }
-      const size_t ring = (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2);
+      const size_t ring = nr_gpu_cell_fep_rx_bytes(cfg->nant, g_samples_per_slot, N);
       for (int k = 0; k < PASS_SLOTS; k++) {
+        ms_.set(NR_MS_PDSCH_FEP, NR_MS_PER_CELL);
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_pass_h[k], ring));
         CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_pass_d[k], ring));
+        ms_.set(NR_MS_PDSCH_FEP, NR_MS_SHARED);
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_pass_par[k], nr_exact::PAR_WORDS * sizeof(uint32_t)));
         CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_pass_ls[k], (size_t)PASS_LS_ROWS * 4096 * sizeof(short2)));
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_pass_rh[k], NR_GPU_CHEST_MAX_ROWS * sizeof(nr_gpu_chest_row_t)));
@@ -1543,6 +1552,7 @@ extern "C" int nr_pdsch_gpu_exact_stage_init(const int16_t *delay_table, size_t 
   const size_t per_row = (stg::in_bytes(1) + stg::out_bytes(1)) * nctx;
   const int rows = (int)nr_gpu_membudget_fit(nr_gpu_stage_share(), bytes, per_row, 16, 128);
   if (rows < 16) return -1;
+  NrMsScope ms_(NR_MS_PDSCH_FEP, NR_MS_PER_CELL); /* GPUMEM: DISCRETE staging of the chest / delay entries, sized from the budget share for this carrier */
   bool ok = nr_gpu_buf_alloc(&stg::dt, bytes) == 0;
   for (int c = 0; c < nctx && ok; c++)
     ok = nr_gpu_buf_alloc(&stg::c[c].in, stg::in_bytes(rows)) == 0 && nr_gpu_buf_alloc(&stg::c[c].out, stg::out_bytes(rows)) == 0;

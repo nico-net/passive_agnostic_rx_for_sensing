@@ -2,6 +2,7 @@
 #include "nr_gpu_platform_internal.h"
 #include "nr_gpu_membudget.h"
 #include "nr_host_membudget.h"
+#include "nr_gpu_memstat.h"
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -30,6 +31,7 @@ typedef struct allocation {
   size_t bytes;
   nr_gpu_storage_t storage;
   int registered;
+  uint32_t tag; /* ledger tag of the allocating scope (nr_gpu_memstat.h) */
   struct allocation *next;
 } allocation;
 static allocation *live;
@@ -379,9 +381,12 @@ int nr_gpu_module_check(const char *module, const char *archs)
 /* nr_gpu_rx_started: seals the allocation gate: after this, allocations, registrations and frees are denied (counted and warned once).
  *   Called once when the RX stream starts, so that no GPU memory is allocated during reception.
  */
+static void memstat_at_exit(void) { nr_gpu_memstat_log("exit"); }
 void nr_gpu_rx_started(void)
 {
+  static int logged;
   pthread_mutex_lock(&mu); __atomic_store_n(&sealed,1,__ATOMIC_RELEASE); pthread_mutex_unlock(&mu);
+  if (!__atomic_exchange_n(&logged,1,__ATOMIC_ACQ_REL)) { nr_gpu_memstat_log("fence"); atexit(memstat_at_exit); } /* GPUMEM: the ledger at the fence and at process exit (nr_gpu_memstat.h) */
 }
 /* nr_gpu_allocations_allowed: returns 1 while the allocation gate is open (before nr_gpu_rx_started()), else 0. Lock-free acquire read. */
 int nr_gpu_allocations_allowed(void) { return !__atomic_load_n(&sealed,__ATOMIC_ACQUIRE); }
@@ -435,6 +440,7 @@ void *nr_gpu_alloc(nr_gpu_kind_t kind,size_t bytes)
     rt.free_host(p); free(a); p=NULL; goto done;
   }
   a->host=p; a->bytes=bytes; a->storage=storage; a->next=live; live=a; ++allocations;
+  a->tag=nr_gpu_memstat_current(); nr_gpu_memstat_note_tag(a->tag, storage==NR_GPU_ALLOC_DEVICE ? NR_MS_DEV : NR_MS_PIN, bytes);
 done:
   pthread_mutex_unlock(&mu); return p;
 }
@@ -460,7 +466,7 @@ static int release(void *ptr,int registered)
   if (!*link || (*link)->registered!=registered) goto done;
   allocation *a=*link;
   rc=registered ? rt.unregister_host(ptr) : a->storage==NR_GPU_ALLOC_MAPPED ? rt.free_host(ptr) : rt.free_device(ptr);
-  if (!rc) { *link=a->next; free(a); }
+  if (!rc) { nr_gpu_memstat_release_tag(a->tag, registered ? NR_MS_MGD : a->storage==NR_GPU_ALLOC_DEVICE ? NR_MS_DEV : NR_MS_PIN, a->bytes); *link=a->next; free(a); }
 done:
   pthread_mutex_unlock(&mu); return rc;
 }
@@ -490,6 +496,7 @@ int nr_gpu_register_host(void *ptr,size_t bytes)
   }
   if (rc) { free(a); goto done; }
   a->host=ptr; a->bytes=bytes; a->registered=1; a->next=live; live=a; ++allocations;
+  a->tag=nr_gpu_memstat_current(); nr_gpu_memstat_note_tag(a->tag, NR_MS_MGD, bytes);
 done:
   pthread_mutex_unlock(&mu); return rc;
 }

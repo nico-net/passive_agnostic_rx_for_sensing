@@ -17,6 +17,8 @@
 #include "nr_gpu_pass_cap.h"
 #include "PHY/TOOLS/nr_gpu_membudget.h"
 #include "PHY/TOOLS/nr_gpu_platform.h"
+#include "PHY/TOOLS/nr_gpu_memstat_cuda.cuh"
+#include "nr_gpu_cell.h"
 #include "PHY/TOOLS/nr_gpu_compat.h"
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
 #include <cuda_runtime.h>
@@ -1264,6 +1266,7 @@ static int capture_gated(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, int
 
 static int build(const Key &k, int sub = SUB_FULL)
 {
+  NrMsScope ms_(NR_MS_PASS_GRAPH, NR_MS_SHARED); /* GPUMEM: graph executables are class-shaped, shared by all cells */
   if (!guard_alloc()) return -1;
   if (sub != SUB_FULL && split_cap_hit(0)) return -1; /* the memory cap: stop warming, the key stays unseen (stage path, counted) */
   const auto tb0 = std::chrono::steady_clock::now();
@@ -1320,6 +1323,8 @@ static int build(const Key &k, int sub = SUB_FULL)
     return -1;
   }
   g_cache[key_sub(k, sub).pack()] = e;
+  nr_gpu_memstat_note_graph();
+  if (sub != SUB_FULL && kb) nr_gpu_memstat_note(NR_MS_DEV, (size_t)kb << 10); /* the cudaMemGetInfo delta of the instantiate + first replay (a whole-pass graph is not measured) */
   if (k.nseg && (sub == SUB_FULL || sub == SUB_C)) ++g_seg_classes;
   {
     size_t fr = 0, tot_b = 0; /* build() runs before the fence only (guard_alloc) */
@@ -1437,10 +1442,15 @@ extern "C" int nr_gpu_pass_init(int max_classes)
     return -1;
   }
   if (!guard_alloc()) return -1;
+  NrMsScope ms_(NR_MS_PASS, NR_MS_SHARED); /* GPUMEM: pass instances, rings; the HARQ store below is PER_CELL */
   for (int a = 0; a < 4; a++)
     if (nr_gpu_buf_alloc(&g_ring[a], (size_t)RING_LEN * 4)) return -1;
   if (nr_gpu_buf_alloc(&g_rot, 64 * 4)) return -1;
-  if (cudaMalloc((void **)&g_hq, (size_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2) != cudaSuccess) return -1; /* 104 MB: the HARQ soft store counts against the pass's VRAM */
+  static_assert(NR_GPU_HQ_BLK == NR_GPU_CELL_HQ_BLK && NR_GPU_HQ_SEG == NR_GPU_CELL_HQ_SEG, "nr_gpu_cell.h HARQ sizing");
+  {
+    NrMsScope hq_(NR_MS_PASS, NR_MS_PER_CELL); /* the HARQ soft store holds the state of one cell (G3: one per cell) */
+    if (nr_ms_malloc(&g_hq, (size_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2) != cudaSuccess) return -1; /* 104 MB: the HARQ soft store counts against the pass's VRAM */
+  }
   cudaMemset(g_hq, 0, (size_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2);
   SEG_ROWS = g_cfg.split ? 1024 : 512; /* split: 32 segments x 2 DM-RS x 4 layers x 4 RX */
   uint64_t ib = 0; /* review S3: the explicit sum of the pass's own buffers (an estimate: the stage modules' per-instance contexts are not in it) */

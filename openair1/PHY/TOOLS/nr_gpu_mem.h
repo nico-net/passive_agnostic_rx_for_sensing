@@ -7,7 +7,7 @@ extern "C" {
 #endif
 /* One buffer type for both platforms: DIRECT (GB10 shared memory, dev == host) and DISCRETE (PCIe GPU, pinned host + cudaMalloc, explicit copies). */
 typedef enum { NR_GPU_MODEL_DIRECT = 0, NR_GPU_MODEL_DISCRETE = 1 } nr_gpu_model_t;
-typedef struct { void *dev; void *host; size_t bytes; nr_gpu_model_t model; } nr_gpu_buf_t;
+typedef struct { void *dev; void *host; size_t bytes; nr_gpu_model_t model; unsigned ms_tag; /* ledger tag of the allocating scope (nr_gpu_memstat.h), so the free books against it */ } nr_gpu_buf_t;
 /* DIRECT iff the platform tier is SHARED (proven direct host access) and not forced DISCRETE by a test. */
 nr_gpu_model_t nr_gpu_model(void);
 void nr_gpu_mem_test_force_discrete(int on); /* test hook: 1 = DISCRETE model on any device (buffers allocated from now on) */

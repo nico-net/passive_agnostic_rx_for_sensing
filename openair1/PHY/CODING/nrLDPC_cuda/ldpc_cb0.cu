@@ -36,6 +36,7 @@
 #include "ldpc_cuda_bg.h"
 #include "../../NR_UE_TRANSPORT/nr_dl_gpu_memory.h"
 #include "PHY/TOOLS/nr_gpu_membudget.h"
+#include "PHY/TOOLS/nr_gpu_memstat.h"
 
 namespace {
 
@@ -493,6 +494,7 @@ bool cb0_pick_sizes()
 /* (Re)allocate every slot's buffers for `mode`. Idle only (init, or the test switch). */
 int slots_alloc(int mode)
 {
+  NrMsScope ms_(NR_MS_LDPC_CB0, NR_MS_SHARED);
   for (int k = 0; k < g.nslots; k++)
     slot_free_buffers(g.slot[k]);
   g.mode = mode;
@@ -559,6 +561,7 @@ int init_locked()
     return 0;
   if (!cb0_pick_sizes())
     return 0;
+  NrMsScope ms_(NR_MS_LDPC_CB0, NR_MS_SHARED); /* GPUMEM: class-sized (chunk / slot counts from the budget), shared by all cells */
   g.msg_bytes = (size_t)g.chunk_max * MSG_MAX;
   if (nr_gpu_allocate(NR_GPU_DEVICE, &g.msg, g.msg_bytes) != cudaSuccess || nr_gpu_allocate(NR_GPU_DEVICE, &g.chan, (size_t)g.chunk_max * 8 * CH) != cudaSuccess
       || nr_gpu_allocate(NR_GPU_DEVICE, &g.total, (size_t)g.chunk_max * 8 * CH) != cudaSuccess
@@ -616,6 +619,7 @@ int modz_tables(const ldpc_cuda_bg_t& bg, uint32_t BG, uint32_t Z, ModZ* out)
   if (!m.cn) {
     const uint32_t ncn = bg.num_rows * bg.cn_stride, nvn = bg.num_cols * bg.vn_stride;
     uint32_t *cn = nullptr, *vn = nullptr;
+    NrMsScope ms_(NR_MS_LDPC_CB0, NR_MS_SHARED);
     cudaError_t e = nr_gpu_allocate(NR_GPU_DEVICE, &cn, ncn * sizeof(uint32_t));
     if (!e) e = nr_gpu_allocate(NR_GPU_DEVICE, &vn, nvn * sizeof(uint32_t));
     if (e) {
@@ -685,6 +689,7 @@ int launch_iterations(const ldpc_cuda_bg_t& bg, uint32_t BG, uint32_t Z, uint32_
   if (e)
     return (int)e;
   g.graphs[key] = ge;
+  { const uint32_t pv_ = nr_gpu_memstat_enter(NR_MS_LDPC_CB0, NR_MS_SHARED, 0); nr_gpu_memstat_note_graph(); nr_gpu_memstat_leave(pv_); }
   CADD(c_graphs, 1);
   return (int)cudaGraphLaunch(ge, g.s);
 }

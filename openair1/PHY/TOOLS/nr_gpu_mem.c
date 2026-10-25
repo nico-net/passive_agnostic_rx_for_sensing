@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_gpu_mem.h"
 #include "nr_gpu_platform_internal.h"
+#include "nr_gpu_memstat.h"
 #include <stdlib.h>
 #include <string.h>
 /* Uses the platform's dlopen'd runtime so libnr_gpu_platform keeps no CUDA link dependency. */
@@ -28,15 +29,19 @@ int nr_gpu_buf_alloc(nr_gpu_buf_t *b, size_t bytes)
   if (!rt || !bytes || !nr_gpu_allocations_allowed() || oom_injected()) return -1; /* allocation fence */
   b->bytes = bytes;
   b->model = nr_gpu_model();
+  b->ms_tag = nr_gpu_memstat_current();
   if (b->model == NR_GPU_MODEL_DIRECT) {
     if (rt->malloc_host(&b->host, bytes, HOST_MAPPED_PORTABLE)) goto fail;
+    nr_gpu_memstat_note_tag(b->ms_tag, NR_MS_PIN, bytes);
     memset(b->host, 0, bytes);
     if (rt->host_device_ptr(&b->dev, b->host, 0)) goto fail;
     return 0;
   }
   if (rt->malloc_host(&b->host, bytes, 0)) goto fail;
+  nr_gpu_memstat_note_tag(b->ms_tag, NR_MS_PIN, bytes);
   memset(b->host, 0, bytes);
   if (rt->malloc_device(&b->dev, bytes)) goto fail;
+  nr_gpu_memstat_note_tag(b->ms_tag, NR_MS_DEV, bytes);
   /* first touch of the device side: zero it from the zeroed host copy */
   if (rt->copy_async(b->dev, b->host, bytes, MEMCPY_H2D, NULL) || rt->stream_sync(NULL)) goto fail;
   return 0;
@@ -53,7 +58,9 @@ int nr_gpu_buf_alloc_dev(nr_gpu_buf_t *b, size_t bytes)
   if (!rt || !bytes || !nr_gpu_allocations_allowed() || oom_injected()) return -1; /* allocation fence */
   b->bytes = bytes;
   b->model = NR_GPU_MODEL_DISCRETE;
+  b->ms_tag = nr_gpu_memstat_current();
   if (rt->malloc_device(&b->dev, bytes)) goto fail;
+  nr_gpu_memstat_note_tag(b->ms_tag, NR_MS_DEV, bytes);
   if (rt->memset_device ? rt->memset_device(b->dev, 0, bytes) : 0) goto fail; /* same zeroed contents as the DIRECT variant */
   return 0;
 fail:
@@ -75,7 +82,7 @@ int nr_gpu_buf_d2h_async(nr_gpu_buf_t *b, size_t off, size_t n, void *s)
 void nr_gpu_buf_free(nr_gpu_buf_t *b)
 {
   const nr_gpu_runtime_t *rt = nr_gpu_platform_runtime();
-  if (rt && b->model == NR_GPU_MODEL_DISCRETE && b->dev) rt->free_device(b->dev);
-  if (rt && b->host) rt->free_host(b->host);
+  if (rt && b->model == NR_GPU_MODEL_DISCRETE && b->dev) { rt->free_device(b->dev); nr_gpu_memstat_release_tag(b->ms_tag, NR_MS_DEV, b->bytes); }
+  if (rt && b->host) { rt->free_host(b->host); nr_gpu_memstat_release_tag(b->ms_tag, NR_MS_PIN, b->bytes); }
   memset(b, 0, sizeof(*b));
 }

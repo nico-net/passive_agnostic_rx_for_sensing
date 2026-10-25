@@ -171,3 +171,36 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_csirs_disc_cell COMMAND test_nr_csirs_disc_cell)
 endif()
 # ---- end A7 ----
+
+# ---- G1 ----
+# GPU memory ledger (nr_gpu_memstat) on a mocked CUDA runtime, and nr_gpu_cell_bytes (pure arithmetic, no GPU: also built on the cloud host).
+if(ENABLE_TESTS)
+  add_executable(test_nr_gpu_memstat ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS/tests/nr_gpu_memstat_test.cc
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS/nr_gpu_memstat.c ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS/nr_gpu_platform.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS/nr_gpu_mem.c ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS/nr_host_membudget.c)
+  target_compile_definitions(test_nr_gpu_memstat PRIVATE NR_GPU_PLATFORM_TEST)
+  target_include_directories(test_nr_gpu_memstat PRIVATE ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS)
+  target_link_libraries(test_nr_gpu_memstat PRIVATE GTest::gtest_main ${CMAKE_DL_LIBS} pthread)
+  add_dependencies(tests test_nr_gpu_memstat)
+  add_test(NAME test_nr_gpu_memstat COMMAND test_nr_gpu_memstat)
+  add_executable(test_nr_gpu_cell ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_cell_test.cc
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/nr_gpu_cell.c)
+  target_include_directories(test_nr_gpu_cell PRIVATE ${CMAKE_SOURCE_DIR}/openair1 ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_gpu_cell PRIVATE GTest::gtest_main)
+  add_dependencies(tests test_nr_gpu_cell)
+  add_test(NAME test_nr_gpu_cell COMMAND test_nr_gpu_cell)
+  if(ENABLE_LDPC_CUDA)
+    # nr_gpu_cell_bytes vs what the GPU modules allocate: one child process per (kind, PRB, RX), ledger compared with the formula. Serial, on the GPU.
+    add_executable(test_nr_gpu_cell_bytes_gpu ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_cell_bytes_gpu_test.cc
+      ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/nr_gpu_cell.c)
+    target_include_directories(test_nr_gpu_cell_bytes_gpu PRIVATE ${CMAKE_SOURCE_DIR}/openair1 ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS)
+    target_link_libraries(test_nr_gpu_cell_bytes_gpu PRIVATE GTest::gtest ${CMAKE_DL_LIBS} pthread)
+    set_target_properties(test_nr_gpu_cell_bytes_gpu PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR} ENABLE_EXPORTS ON)
+    add_dependencies(test_nr_gpu_cell_bytes_gpu dfts)
+    add_dependencies(test_nr_gpu_cell_bytes_gpu nr_gpu_platform pdsch_gpu pdcch_gpu pdcch_nid_gpu csirs_disc_gpu nr_csirs_disc_gpu_sweep)
+    add_dependencies(tests test_nr_gpu_cell_bytes_gpu)
+    add_test(NAME test_nr_gpu_cell_bytes_gpu COMMAND ./test_nr_gpu_cell_bytes_gpu WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(test_nr_gpu_cell_bytes_gpu PROPERTIES RUN_SERIAL TRUE)
+  endif()
+endif()
+# ---- end G1 ----
