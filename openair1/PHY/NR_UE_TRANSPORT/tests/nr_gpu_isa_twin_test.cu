@@ -19,15 +19,18 @@
 #include "nr_pdsch_gpu_exact_fep.cuh"
 
 /* libdfts.so resolves its LOG / T hooks from the executable; this test has no LOG module (none is ever called on the
- * aligned path) */
+ * aligned path). g_log points at zeroed storage (all dump flags and levels off): the aarch64 library (oai_dfts_neon.c)
+ * reads LOG_DUMPFLAG(DEBUG_DFT) = g_log->dump_mask in dft128 and references write_file_matlab (LOG_M). */
+alignas(64) static unsigned char g_log_zero[1 << 16];
 extern "C" {
-void *g_log = nullptr;
+void *g_log = g_log_zero;
 int T_stdout = 1;
 volatile int *T_freelist_head = nullptr;
 void *T_cache = nullptr;
 int *T_active = nullptr;
 void exit_function(const char *file, const char *function, const int line, const char *s, const int assert) { (void)file; (void)function; (void)line; (void)s; (void)assert; abort(); }
 void logRecord_mt(const char *file, const char *func, int line, int comp, int level, const char *format, ...) { (void)file; (void)func; (void)line; (void)comp; (void)level; (void)format; }
+int32_t write_file_matlab(const char *fname, const char *vname, void *data, int length, int dec, unsigned int format, int multiVec) { (void)fname; (void)vname; (void)data; (void)length; (void)dec; (void)format; (void)multiVec; return 0; }
 }
 
 using namespace nr_exact;

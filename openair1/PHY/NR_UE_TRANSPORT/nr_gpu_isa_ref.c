@@ -41,6 +41,25 @@ static int idft_index(int n)
   }
 }
 
+/* dlopen libdfts.so the way load_module_shlib() does: a library this process had not loaded yet is initialised with its
+ * dfts_autoinit() when it has one. The aarch64 library (oai_dfts_neon.c) fills its twiddle tables (tw1024, tw4096, ...)
+ * only there -- without it every dft4096/idft4096 runs on zero twiddles; the x86 library (oai_dfts.c) has no
+ * dfts_autoinit (its constructor and lazy split-radix twiddles initialise it), so nothing is called there. A library the
+ * process already loaded (load_dftslib -> load_module_shlib, which ran dfts_autoinit) is not re-initialised. */
+static void *dlopen_dfts(const char *path)
+{
+  void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+  if (h)
+    return h;
+  h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+  if (h) {
+    int (*autoinit)(void) = (int (*)(void))dlsym(h, "dfts_autoinit");
+    if (autoinit)
+      autoinit();
+  }
+  return h;
+}
+
 static void *open_dfts(void)
 {
   Dl_info self;
@@ -48,7 +67,7 @@ static void *open_dfts(void)
     char tmp[512], path[600];
     snprintf(tmp, sizeof(tmp), "%s", self.dli_fname);
     snprintf(path, sizeof(path), "%s/libdfts.so", dirname(tmp));
-    void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    void *h = dlopen_dfts(path);
     if (h) {
       snprintf(g_origin, sizeof(g_origin), "%s", path);
       return h;
@@ -56,7 +75,7 @@ static void *open_dfts(void)
   }
   const char *names[] = {"libdfts.so", "./libdfts.so"};
   for (int i = 0; i < 2; i++) {
-    void *h = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
+    void *h = dlopen_dfts(names[i]);
     if (h) {
       snprintf(g_origin, sizeof(g_origin), "%s", names[i]);
       return h;

@@ -335,9 +335,13 @@ finish:
       caps.model=primary_context_works() ? NR_GPU_DISCRETE : NR_GPU_NONE; caps.reason="probe_fault";
     }
   }
-  report(0,"SENSING: GPU_PLATFORM device=%d name=\"%s\" cc=%d.%d integrated=%d pageableMemoryAccess=%d pageableMemoryAccessUsesHostPageTables=%d canMapHostMemory=%d concurrentManagedAccess=%d hostNativeAtomicSupported=%d total=%zu free=%zu model=%s tier=%s reason=%s probe=%s%s%s",
+  /* Unified memory (SHARED): the device's memory is the host RAM, so its headroom is what the host has available (cgroup-aware, nr_host_membudget), not the MemFree
+   * that cudaMemGetInfo reports (the reclaimable page cache is available, only not free). free_raw keeps the driver's number for the log line. */
+  caps.free_raw=caps.free_memory;
+  if (caps.model==NR_GPU_SHARED) caps.free_memory=nr_gpu_headroom_calc(caps.model,caps.free_raw,caps.total_memory,nr_host_membudget_live_avail());
+  report(0,"SENSING: GPU_PLATFORM device=%d name=\"%s\" cc=%d.%d integrated=%d pageableMemoryAccess=%d pageableMemoryAccessUsesHostPageTables=%d canMapHostMemory=%d concurrentManagedAccess=%d hostNativeAtomicSupported=%d total=%zu free_raw=%zu free=%zu model=%s tier=%s reason=%s probe=%s%s%s",
          caps.device,caps.name,caps.major,caps.minor,caps.integrated,caps.pageable_memory_access,caps.host_page_tables,
-         caps.can_map_host_memory,caps.concurrent_managed_access,caps.host_native_atomic_supported,caps.total_memory,caps.free_memory,
+         caps.can_map_host_memory,caps.concurrent_managed_access,caps.host_native_atomic_supported,caps.total_memory,caps.free_raw,caps.free_memory,
          caps.model==NR_GPU_SHARED?"shared":caps.model==NR_GPU_DISCRETE?"discrete":"unavailable",
          caps.model==NR_GPU_SHARED?"shared":caps.model==NR_GPU_DISCRETE?"discrete":"cpu",caps.reason,
          caps.probe==NR_GPU_PROBE_OK?"ok":caps.probe==NR_GPU_PROBE_FAIL?"fail":caps.probe==NR_GPU_PROBE_TIMEOUT?"timeout":caps.probe==NR_GPU_PROBE_FAULT?"fault":"skipped",

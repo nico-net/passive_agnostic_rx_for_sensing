@@ -63,7 +63,19 @@ __device__ __forceinline__ short2 shr(short2 a, int s) { return make_short2((sho
  *   ISAC_* flags read: none.
  *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:61.
  */
-__device__ __forceinline__ short2 flip(short2 a) { return make_short2(a.y, nr_isa::xneg(a.x)); } /* xneg: see nr_isa::xwrap (ptxas) */
+/* neg16: int16 wrapping negation (-(-32768) = -32768, as vmulq_s16 by -1) of a value that is STORED as int16. nr_isa::xneg (an
+ * int-domain select) is not enough here: the short store lets NVVM turn the select back into trunc16 -> neg.s16 -> sext16, and
+ * ptxas (CUDA 13.0, sm_121) folds that into a 32-bit negation when the operand comes from a [-32768, 32767] clamp (pcm2 / qsub):
+ * +32768 for -32768, i.e. flip() of a saturated twiddled sample was wrong on the GB10 (dft64 level, about 1 output in 8000 at
+ * amplitude 4000, most outputs at full scale). The sign extension is done with a byte permute (prmt sign-replicate) of the
+ * 32-bit negation, which neither compiler folds. */
+__device__ __forceinline__ short neg16(short a)
+{
+  int r;
+  asm("prmt.b32 %0, %1, 0, 0x9910;" : "=r"(r) : "r"(-(int)a)); /* bytes {b0, b1, sign(b1), sign(b1)} = sext16(low 16 bits) */
+  return (short)r;
+}
+__device__ __forceinline__ short2 flip(short2 a) { return make_short2(a.y, neg16(a.x)); }
 /* vpadd_s32 of two vmull_s16 products: non-saturating int32 sum (wraps only for 2 x (-32768)^2) */
 __device__ __forceinline__ int padd(int p, int q) { return (int)((unsigned)p + (unsigned)q); }
 /* cpack: vqshrn_n_s32(x, 15) */
