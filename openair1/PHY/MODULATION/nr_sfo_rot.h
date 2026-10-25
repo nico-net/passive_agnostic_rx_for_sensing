@@ -5,7 +5,8 @@
  * Physics and sign (see nr_sfo_state.h): with the receiver sample clock fast by eps (it takes (1 + eps) fs samples per second of the
  * transmitter), symbol l of a slot, whose FFT window starts n_l samples after the window of symbol 0, sees the signal delayed by
  * eps * n_l samples, i.e. subcarrier k (signed, DC = 0) rotated by exp(-j 2 pi k eps n_l / N). The correction multiplies subcarrier k
- * by exp(+j k dphi) with dphi = 2 pi eps n_l / N, carried as an unsigned 32-bit phase step (2^32 = one turn): nr_sfo_dphi().
+ * by exp(+j (k - k_ref) dphi) with dphi = 2 pi eps n_l / N, carried as an unsigned 32-bit phase step (2^32 = one turn): nr_sfo_dphi();
+ * k_ref = nr_sfo_kref() (the subcarrier where the receiver's frequency offset is measured).
  *
  * Bit-exactness: the phasor of subcarrier k is the Q15 product of two integer sin/cos values, exp(j 64 h dphi) * exp(j b dphi) with
  * k = 64 h + b (b = k & 63, h = floor(k / 64)); every operation is an integer add / multiply / shift / division by a constant, so the CPU
@@ -91,6 +92,16 @@ NR_SFO_HD nr_sfo_c16_t nr_sfo_re(nr_sfo_c16_t v, int k, uint32_t dphi)
 NR_SFO_HD int nr_sfo_bin_k(int n, int N)
 {
   return n < N / 2 ? n : n - N;
+}
+
+/* Reference subcarrier of the correction: the SSB centre (signed, DC = 0). The receiver's frequency offset is measured on the SSB
+ * (PSS/SSS at acquisition, PBCH afterwards), so the clock offset's phase drift at the SSB frequency, eps * f_ssb, is already inside the
+ * compensated "CFO"; what remains on subcarrier k is the drift of (k - k_ref). Correcting k against DC instead adds a common rotation of
+ * eps * f_ssb (165 Hz at 4 ppm with the SSB 43 MHz below DC), 0.07 rad two symbols away from a DM-RS [HYPOTHESIS, consistent with the 0.26 rad
+ * common DM-RS phase seen with a DC-referenced correction, sens6 OTA 2026-10-25 sfo1]. */
+NR_SFO_HD int nr_sfo_kref(int N, int first_carrier_offset, int ssb_start_subcarrier)
+{
+  return nr_sfo_bin_k((first_carrier_offset + ssb_start_subcarrier + 120) % N, N);
 }
 
 #endif

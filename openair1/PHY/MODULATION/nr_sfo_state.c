@@ -135,18 +135,18 @@ int nr_sfo_slot_dphi(int64_t eps_q, int N, int cp, int cp0, int numerology, int 
   return eps_q != 0;
 }
 
-void nr_sfo_rotate_symbol(int16_t *symb, int N, int fco, int nb_rb, uint32_t dphi)
+void nr_sfo_rotate_symbol(int16_t *symb, int N, int fco, int nb_rb, uint32_t dphi, int k_ref)
 {
   if (!dphi || !symb || N <= 0)
     return;
   /* the bins apply_nr_rotation_symbol_RX() touches */
   const int len = (nb_rb & 1) ? (nb_rb + 1) * 6 : nb_rb * 6, start2 = (nb_rb & 1) ? fco - 6 : fco;
-  /* per symbol: A[h] = exp(j 64 h dphi) for h in [-N/128, N/128), B[b] = exp(j b dphi) for b in [0, 64) -- the same integer values
+  /* per symbol: A[h] = exp(j 64 h dphi) for h in [-N/64, N/64), B[b] = exp(j b dphi) for b in [0, 64) -- the same integer values
    * nr_sfo_phasor() computes per RE, so this loop and a per-RE GPU kernel agree bit for bit */
   nr_sfo_c16_t B[64];
   for (int b = 0; b < 64; b++)
     B[b] = nr_sfo_sincos((uint32_t)b * dphi);
-  const int hmin = -(N / 128), hn = N / 64;
+  const int hmin = -(N / 64), hn = N / 32; /* k - k_ref in [-N, N) */
   nr_sfo_c16_t A[hn > 0 ? hn : 1];
   for (int i = 0; i < hn; i++)
     A[i] = nr_sfo_sincos((uint32_t)(64 * (hmin + i)) * dphi);
@@ -154,7 +154,7 @@ void nr_sfo_rotate_symbol(int16_t *symb, int N, int fco, int nb_rb, uint32_t dph
   for (int pass = 0; pass < 2; pass++) {
     const int a = pass ? start2 : 0, e = (pass ? start2 : 0) + len;
     for (int n = a; n < e && n < N; n++) {
-      const int k = nr_sfo_bin_k(n, N);
+      const int k = nr_sfo_bin_k(n, N) - k_ref;
       const int h = k >= 0 ? k / 64 : -((63 - k) / 64);
       v[n] = nr_sfo_cmul(v[n], nr_sfo_cmul(A[h - hmin], B[k - 64 * h]));
     }

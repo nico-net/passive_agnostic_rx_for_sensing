@@ -52,11 +52,12 @@ TEST(Sfo, TableLoopEqualsPerRe)
       for (auto &x : a) x = (int16_t)(rng() & 0xffff);
       b = a;
       const uint32_t dphi = (uint32_t)rng();
-      nr_sfo_rotate_symbol(a.data(), N, fco, nb_rb, dphi);
+      const int kref = (int)(rng() % (unsigned)N) - N / 2; /* any reference inside the band */
+      nr_sfo_rotate_symbol(a.data(), N, fco, nb_rb, dphi, kref);
       const int len = (nb_rb & 1) ? (nb_rb + 1) * 6 : nb_rb * 6, start2 = (nb_rb & 1) ? fco - 6 : fco;
       for (int n = 0; n < N; n++) {
         nr_sfo_c16_t v = {b[2 * n], b[2 * n + 1]};
-        if (n < len || (n >= start2 && n < start2 + len)) v = nr_sfo_re(v, nr_sfo_bin_k(n, N), dphi);
+        if (n < len || (n >= start2 && n < start2 + len)) v = nr_sfo_re(v, nr_sfo_bin_k(n, N) - kref, dphi);
         ASSERT_EQ(a[2 * n], v.r) << "N " << N << " rb " << nb_rb << " bin " << n;
         ASSERT_EQ(a[2 * n + 1], v.i) << "N " << N << " rb " << nb_rb << " bin " << n;
       }
@@ -72,6 +73,8 @@ TEST(Sfo, UndoesTheDriftOfAFastClock)
   const int n_l = nr_sfo_symbol_offset(N, 288, 352, 1, 14, 3, 11);
   EXPECT_EQ(n_l, 11 * (4096 + 288));
   const double delay = eps_q * 1e-12 * n_l;
+  const int kref = nr_sfo_kref(N, fco, 150); /* SSB at subcarrier 150 of the carrier */
+  EXPECT_EQ(kref, 150 + 120 - nb_rb * 6);
   std::vector<int16_t> s(2 * N, 0);
   std::vector<std::complex<double>> x(N);
   std::mt19937 rng(3);
@@ -80,12 +83,13 @@ TEST(Sfo, UndoesTheDriftOfAFastClock)
     const int k = nr_sfo_bin_k(n, N);
     if (!(n < nb_rb * 6 + 6 || n >= fco - 6)) continue;
     x[n] = std::complex<double>((int)(rng() % 2) ? 8000 : -8000, (int)(rng() % 2) ? 8000 : -8000);
-    const std::complex<double> y = x[n] * std::polar(1.0, -2 * M_PI * k * delay / N);
+    /* the frequency offset is measured on the SSB (k_ref): its drift there is already compensated */
+    const std::complex<double> y = x[n] * std::polar(1.0, -2 * M_PI * (k - kref) * delay / N);
     s[2 * n] = (int16_t)lround(y.real());
     s[2 * n + 1] = (int16_t)lround(y.imag());
     err_unc += std::norm(y - x[n]);
   }
-  nr_sfo_rotate_symbol(s.data(), N, fco, nb_rb, nr_sfo_dphi(eps_q, N, n_l));
+  nr_sfo_rotate_symbol(s.data(), N, fco, nb_rb, nr_sfo_dphi(eps_q, N, n_l), kref);
   for (int n = 0; n < N; n++) {
     if (x[n] == 0.0) continue;
     err += std::norm(std::complex<double>(s[2 * n], s[2 * n + 1]) - x[n]);
