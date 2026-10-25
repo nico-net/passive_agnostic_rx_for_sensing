@@ -59,8 +59,10 @@ extern "C" {
 bool nr_pusch_passive_ul_ue_state_enabled(void);
 void nr_pusch_passive_ul_ids_seed(const nr_ue_ul_ticket_t *ticket,
                                   const nr_ue_ctx_t *dl, uint16_t pci);
+/* A TB CRC pass of this grant (TBS tbs_bits, absolute slot abs_slot). Takes effect only when decisive: TBS > 3824 bits
+ * (CRC24), or a 16-bit-CRC pass confirmed by a second pass of the same id on another slot. */
 void nr_pusch_passive_ul_ids_confirm(const nr_ue_ul_ticket_t *ticket,
-                                     uint8_t nscid, uint16_t dmrs_id, uint16_t data_id);
+                                     uint8_t nscid, uint16_t dmrs_id, uint16_t data_id, uint32_t tbs_bits, int64_t abs_slot);
 bool nr_pusch_passive_ul_ids_get(const nr_ue_ul_ticket_t *ticket, uint8_t nscid,
                                  uint16_t *dmrs_id, uint16_t *data_id);
 void nr_pusch_passive_ul_ids_current(uint16_t rnti, uint8_t nscid, uint16_t pci,

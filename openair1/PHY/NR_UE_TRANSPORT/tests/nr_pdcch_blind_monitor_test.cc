@@ -5747,8 +5747,8 @@ TEST(UlUeIds, TwoUesAndRntiReuseKeepConfirmedIdsSeparate) {
   nr_pusch_passive_ul_ids_failed(&a);
   nr_pusch_passive_ul_ids_current(a.rnti,0,415,&dmrs,&data);
   EXPECT_EQ(dmrs,415); EXPECT_EQ(data,512);
-  nr_pusch_passive_ul_ids_confirm(&a,0,900,901);
-  nr_pusch_passive_ul_ids_confirm(&b,0,700,701);
+  nr_pusch_passive_ul_ids_confirm(&a,0,900,901,8000,1);
+  nr_pusch_passive_ul_ids_confirm(&b,0,700,701,8000,1);
   ASSERT_TRUE(nr_pusch_passive_ul_ids_get(&a,0,&dmrs,&data));
   EXPECT_EQ(dmrs,900); EXPECT_EQ(data,901);
   ASSERT_TRUE(nr_pusch_passive_ul_ids_get(&b,0,&dmrs,&data));
@@ -5758,10 +5758,42 @@ TEST(UlUeIds, TwoUesAndRntiReuseKeepConfirmedIdsSeparate) {
   nr_pusch_passive_ul_ids_seed(&reused,&dl,415);
   EXPECT_FALSE(nr_pusch_passive_ul_ids_get(&a,0,&dmrs,&data));
   EXPECT_FALSE(nr_pusch_passive_ul_ids_get(&reused,0,&dmrs,&data));
-  nr_pusch_passive_ul_ids_confirm(&a,0,900,901);
+  nr_pusch_passive_ul_ids_confirm(&a,0,900,901,8000,1);
   EXPECT_FALSE(nr_pusch_passive_ul_ids_get(&reused,0,&dmrs,&data));
   nr_pusch_passive_ul_ids_reset_all();
 }
+/* The per-RNTI data-id lock takes only decisive evidence: a CRC24 TB, or a CRC16 pass repeated on another slot; it does not
+ * leak to another RNTI, and it survives a new ticket of the same RNTI. */
+TEST(UlIds, DataIdLockNeedsDecisivePassAndStaysPerRnti) {
+  nr_pusch_passive_ul_ids_reset_all();
+  nr_ue_ul_ticket_t a{1,1,0,0x201}, b{1,1,0,0x202};
+  uint16_t id = 0;
+  nr_pusch_passive_ul_ids_confirm(&a,0,2,744,1000,10);   /* CRC16, once: not decisive */
+  EXPECT_FALSE(nr_pusch_passive_ul_data_id_locked(0x201,&id));
+  nr_pusch_passive_ul_ids_confirm(&a,0,2,744,1000,10);   /* the same slot again: still one observation */
+  EXPECT_FALSE(nr_pusch_passive_ul_data_id_locked(0x201,&id));
+  nr_pusch_passive_ul_ids_confirm(&a,0,2,500,1000,11);   /* another id replaces the pending one */
+  nr_pusch_passive_ul_ids_confirm(&a,0,2,744,1000,12);
+  EXPECT_FALSE(nr_pusch_passive_ul_data_id_locked(0x201,&id));
+  nr_pusch_passive_ul_ids_confirm(&a,0,2,744,1000,13);   /* the same id on another slot: decisive */
+  ASSERT_TRUE(nr_pusch_passive_ul_data_id_locked(0x201,&id));
+  EXPECT_EQ(id,744);
+  EXPECT_FALSE(nr_pusch_passive_ul_data_id_locked(0x202,&id)); /* per RNTI */
+  nr_pusch_passive_ul_ids_confirm(&b,0,2,2,8000,20);     /* CRC24: decisive at once */
+  ASSERT_TRUE(nr_pusch_passive_ul_data_id_locked(0x202,&id));
+  EXPECT_EQ(id,2);
+  nr_pusch_passive_ul_ids_confirm(&a,0,2,2,1000,30);     /* a single CRC16 pass of another id does not move a lock */
+  ASSERT_TRUE(nr_pusch_passive_ul_data_id_locked(0x201,&id));
+  EXPECT_EQ(id,744);
+  nr_pusch_passive_ul_ids_confirm(&a,0,2,2,8000,31);     /* a decisive pass does */
+  ASSERT_TRUE(nr_pusch_passive_ul_data_id_locked(0x201,&id));
+  EXPECT_EQ(id,2);
+  nr_pusch_passive_ul_ids_reset(0x201);
+  EXPECT_FALSE(nr_pusch_passive_ul_data_id_locked(0x201,&id));
+  EXPECT_TRUE(nr_pusch_passive_ul_data_id_locked(0x202,&id));
+  nr_pusch_passive_ul_ids_reset_all();
+}
+
 #include "nr_ul_first_pusch.h"
 
 TEST(UlFirstPusch, TracksLockedIdentityAndNonzeroCrcOnly)

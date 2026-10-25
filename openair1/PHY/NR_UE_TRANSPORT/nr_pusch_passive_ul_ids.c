@@ -62,10 +62,26 @@ uint64_t nr_pusch_passive_ul_ids_dropped(void)
  * 9 failures -- which wide grants produced for other reasons (SFO, UCI) -- 15 of 16 grants were sent with walked, wrong
  * ids ([MEASURED, sens6 OTA lab cell, dd14_lab_20261025_154832]: 2.2 k grants on ~400 wrong ids, none decoding).
  * Released only on CRC evidence: a TB pass with a different id for this RNTI (the background id search sweeps the failing
- * grants and hands its CB-CRC-confirmed id to the decoder) moves the lock; the RNTI's release clears it. No failure count. */
+ * grants and hands its CB-CRC-confirmed id to the decoder) moves the lock; the RNTI's release clears it. No failure count.
+ *
+ * Only a DECISIVE pass sets or moves it (the rule of the UL layout lock, lock_decisive): a TB with a 24-bit CRC
+ * (TBS > 3824 bits, TS 38.212 7.2.1 -- with C > 1 every code-block CRC24B passed as well), or a 16-bit-CRC TB confirmed by
+ * a second pass of the same id on another slot. A single CRC16 pass of a walked or swept id is a 1-in-65536 chance event,
+ * and the walk / background search try thousands of ids: on air one such pass locked n_id=744 instead of the PCI-default 2
+ * and every later grant of the RNTI failed ([MEASURED, sens6 OTA lab, ulint1_lab_20261025_211640]: 82 of 175537 decoded
+ * vs 40671 of 87815 without the lock). Until a decisive pass the cell default (n_ID = PCI, TS 38.211 6.3.1.1, when
+ * dataScramblingIdentityPUSCH is absent) stays the first hypothesis, as the walk and the priors already order it. */
 #define UL_DATA_LOCK_CAP 64
 /* entry: (1 << 32) | rnti << 16 | id, read lock-free (the DCI path must not block); written under g_ue_ids_lock */
 static _Atomic uint64_t g_data_lock[UL_DATA_LOCK_CAP];
+/* a non-decisive (CRC16) pass waiting for its confirmation on another slot, per RNTI: (rnti, id, slot) */
+typedef struct {
+  uint16_t rnti, id;
+  int64_t slot;
+  bool used;
+} ul_data_pending_t;
+static ul_data_pending_t g_data_pending[UL_DATA_LOCK_CAP];
+static uint32_t g_data_pending_next;
 static uint32_t g_data_lock_next;
 
 static int data_lock_slot(uint16_t rnti)
@@ -145,10 +161,37 @@ void nr_pusch_passive_ul_ids_seed(const nr_ue_ul_ticket_t *t,const nr_ue_ctx_t *
   } else atomic_fetch_add_explicit(&g_ue_ids_dropped,1,memory_order_relaxed);
   pthread_mutex_unlock(&g_ue_ids_lock);
 }
-void nr_pusch_passive_ul_ids_confirm(const nr_ue_ul_ticket_t *t,uint8_t nscid,uint16_t dmrs_id,uint16_t data_id)
+/* caller holds g_ue_ids_lock: is this pass decisive (see the lock's comment)? A CRC16 pass is recorded and becomes decisive
+ * when the same id passes again for the same RNTI on another slot. */
+static bool data_pass_decisive_locked(uint16_t rnti, uint16_t id, uint32_t tbs_bits, int64_t abs_slot)
+{
+  if (tbs_bits > 3824)
+    return true;
+  ul_data_pending_t *p = NULL;
+  for (int i = 0; i < UL_DATA_LOCK_CAP && !p; i++)
+    if (g_data_pending[i].used && g_data_pending[i].rnti == rnti)
+      p = &g_data_pending[i];
+  if (p && p->id == id && p->slot != abs_slot) {
+    memset(p, 0, sizeof(*p));
+    return true;
+  }
+  if (!p) {
+    for (int i = 0; i < UL_DATA_LOCK_CAP && !p; i++)
+      if (!g_data_pending[i].used)
+        p = &g_data_pending[i];
+    if (!p)
+      p = &g_data_pending[g_data_pending_next++ % UL_DATA_LOCK_CAP];
+  }
+  *p = (ul_data_pending_t){.rnti = rnti, .id = id, .slot = abs_slot, .used = true};
+  return false;
+}
+
+void nr_pusch_passive_ul_ids_confirm(const nr_ue_ul_ticket_t *t,uint8_t nscid,uint16_t dmrs_id,uint16_t data_id,
+                                     uint32_t tbs_bits,int64_t abs_slot)
 {
   if(!nr_pusch_passive_ul_ue_state_enabled() || !t) return;
   pthread_mutex_lock(&g_ue_ids_lock);
+  if(!data_pass_decisive_locked(t->rnti,data_id,tbs_bits,abs_slot)) { pthread_mutex_unlock(&g_ue_ids_lock); return; }
   for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && same_ticket(&g_ue_ids[i].ticket,t)) {
     g_ue_ids[i].dmrs_id[nscid&1]=dmrs_id;
     g_ue_ids[i].data_id=data_id;
@@ -222,6 +265,7 @@ void nr_pusch_passive_ul_ids_reset(uint16_t rnti)
   for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && g_ue_ids[i].ticket.rnti==rnti)
     memset(&g_ue_ids[i],0,sizeof(g_ue_ids[i]));
   data_lock_clear_locked(rnti);
+  for(int i=0;i<UL_DATA_LOCK_CAP;i++) if(g_data_pending[i].used && g_data_pending[i].rnti==rnti) memset(&g_data_pending[i],0,sizeof(g_data_pending[i]));
   pthread_mutex_unlock(&g_ue_ids_lock);
 }
 void nr_pusch_passive_ul_ids_reset_all(void)
@@ -229,6 +273,7 @@ void nr_pusch_passive_ul_ids_reset_all(void)
   pthread_mutex_lock(&g_ue_ids_lock);
   memset(g_ue_ids,0,sizeof(g_ue_ids));
   for(int i=0;i<UL_DATA_LOCK_CAP;i++) atomic_store_explicit(&g_data_lock[i],0,memory_order_release);
+  memset(g_data_pending,0,sizeof(g_data_pending));
   pthread_mutex_unlock(&g_ue_ids_lock);
 }
 

@@ -401,7 +401,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
               confirmed.nscid=probe_out.nscid;
               nr_ue_ctx_ul_feedback(&job.ul_ticket,&confirmed,true);
               nr_pusch_passive_ul_ids_confirm(&job.ul_ticket,probe_out.nscid,
-                                               probe_out.dmrs_id,probe_out.data_id);
+                                               probe_out.dmrs_id,probe_out.data_id,probe_out.tbs_bytes*8u,(int64_t)job.absolute_slot);
             }
           }
         }
@@ -444,7 +444,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       nr_ue_ctx_ul_feedback(&job.ul_ticket,&confirmed,true);
     }
     if (job.ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_OK)
-      nr_pusch_passive_ul_ids_confirm(&job.ul_ticket,out.nscid,out.dmrs_id,out.data_id);
+      nr_pusch_passive_ul_ids_confirm(&job.ul_ticket,out.nscid,out.dmrs_id,out.data_id,out.tbs_bytes*8u,(int64_t)job.absolute_slot);
     if (job.ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_CRC_FAIL)
       nr_pusch_passive_ul_ids_failed(&job.ul_ticket);
     if(!job.cfr_only && (out.status==NR_PUSCH_PASSIVE_OK ||
@@ -517,7 +517,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
           confirmed.data_id = out2.data_id;
           confirmed.nscid = out2.nscid;
           nr_ue_ctx_ul_feedback(&job.ul_ticket, &confirmed, true);
-          nr_pusch_passive_ul_ids_confirm(&job.ul_ticket, out2.nscid, out2.dmrs_id, out2.data_id);
+          nr_pusch_passive_ul_ids_confirm(&job.ul_ticket, out2.nscid, out2.dmrs_id, out2.data_id, out2.tbs_bytes * 8u, (int64_t)job.absolute_slot);
         }
         if (!nr_ul_layout_is_tagged(&job.grant)) nr_pdcch_ul_discovery_feedback(&job.grant, true);
         nr_pdcch_dci01_fdra_feedback(&job.grant, true);

@@ -1671,7 +1671,7 @@ static bool uci_tb_decode(void *opaque, const int16_t *llr, uint32_t g_ulsch)
   return c->rc == 0 && !hp_crc_failed(c->ulsch);
 }
 
-/* Exploration CPU allowance, from what the process reports at run time (no host constant):
+/* UCI search CPU allowance, from what the process reports at run time (no host constant):
  *  - only while the PUSCH queue has nothing waiting (nr_pusch_passive_rescue_allowed), so no real grant waits behind it;
  *  - per grant at most the queue's own lateness headroom minus one slot (NR_PUSCH_PASSIVE_QUEUE_MARGIN_SLOTS slots of this
  *    numerology): a grant arriving during the search still meets its deadline;
@@ -1711,14 +1711,16 @@ static uint64_t uci_wall_ns(void)
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
-static bool uci_explore_allowed(void)
+/* Any UCI search (the learned hypotheses as well) only within the per-second share, so a stretch of failing grants -- all
+ * of them searched -- cannot take CPU the DL needs; the exploration additionally only on an idle queue. */
+static bool uci_share_left(void)
 {
   const uint64_t now = uci_wall_ns(), w0 = atomic_load_explicit(&g_uci_win_start_ns, memory_order_relaxed);
   if (now - w0 > 1000000000ull) {
     atomic_store_explicit(&g_uci_win_start_ns, now, memory_order_relaxed);
     atomic_store_explicit(&g_uci_win_used_ns, 0, memory_order_relaxed);
   }
-  return atomic_load_explicit(&g_uci_win_used_ns, memory_order_relaxed) < uci_share_ns_per_s() && nr_pusch_passive_rescue_allowed();
+  return atomic_load_explicit(&g_uci_win_used_ns, memory_order_relaxed) < uci_share_ns_per_s();
 }
 static void uci_explore_charge(uint64_t ns)
 {
@@ -2610,10 +2612,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * follows from the spec formulas with O_ACK, the CSI report sizes, the beta offsets and alpha unknown: they are searched as
    * hypotheses decided by code-block and TB CRCs and learned per RNTI, then reused on every later grant of that UE (the
    * formula transfers across widths and MCS). The learned step runs on every failing grant (a few single-block screens); the
-   * exploration only while the PUSCH queue is idle and within a run-time CPU allowance (uci_explore_allowed), so real-time work is never
+   * exploration only while the PUSCH queue is idle and within a run-time CPU allowance (uci_share_left), so real-time work is never
    * displaced. A failed search restores the codeword and the plain decode's verdict. */
   if (rc == 0 && hp_crc_failed(ulsch) && out->G > 0 && !hq_retx && !ldpc_hopeless && out->G <= PASSIVE_UL_UCI_CAP
-      && g->rv == 0 && !g->transform_precoding) {
+      && g->rv == 0 && !g->transform_precoding && tbs > 3824 /* a CRC24 TB: see nr_pusch_uci_blind_search */ && uci_share_left()) {
     const uint32_t full_bits = out->G;
     int16_t *original = g_scratch[ctx].uci ? g_scratch[ctx].uci : NULL;
     if (original) {
@@ -2621,7 +2623,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       uci_tb_ctx_t tbc = {.gnb = gnb, .fp = fp, .ulsch = ulsch, .frame = frame, .slot = slot, .G = full_bits,
                           .nlqm = (uint32_t)pdu.qam_mod_order * g->nrOfLayers, .rc = 0};
       /* exploring: the grant's lateness headroom; otherwise (the learned hypotheses only) one slot */
-      const bool uci_explore = !t_solver_probe && uci_explore_allowed();
+      const bool uci_explore = !t_solver_probe && nr_pusch_passive_rescue_allowed();
       nr_uci_search_in_t si = {.rnti = g->rnti,
                                .geom = {.rb = g->num_rb, .start_sym = g->start_symbol, .nsym = g->num_symbols,
                                         .dmrs_pos = (uint16_t)(g->ul_dmrs_symb_pos & (((1u << g->num_symbols) - 1u) << g->start_symbol)),
@@ -2632,7 +2634,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       nr_uci_search_out_t so;
       const uint64_t t_uci = uci_cpu_ns();
       nr_pusch_uci_blind_search(&si, &so);
-      if (si.explore) uci_explore_charge(uci_cpu_ns() - t_uci);
+      uci_explore_charge(uci_cpu_ns() - t_uci);
       if (so.ok) {
         rc = tbc.rc;
         out->G = so.g_ulsch;
