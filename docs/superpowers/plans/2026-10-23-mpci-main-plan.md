@@ -497,3 +497,31 @@ DELIVERABLES per task: commits on its branch, unit tests, a short report docs/su
 evidence labels, the STOP-condition result, files changed, and the exact steps the DGX orchestrator must run next (commands,
 expected log lines). Keep a running "Task log" appended to the plan's end only for seam changes.
 ```
+
+---
+
+## R. Revision 2026-10-25 (baseline `adaptive-rx-UL-DL` @ `c300718765`, merged into `mpci-main` @ `2f752307f2`)
+
+Why: main received the sens6 lab-OTA work (`a383a08785`): topology core layout, host-RAM budget, GPU elastic sizing, per-path GPU/CPU choice, Q4 discrete-GPU entries, blind DCI 1_1 fixes. Operator rule (CLAUDE.md, PROJECT_MEMORY §26, 2026-10-25): **full agnosticity and full portability** — every size, core, path and transport is derived from the device at run time and exploits its peak; host values are configuration, never code; a fix on one host must not change the others. Facts below are `[CODE-READ, mpci-main @2f752307f2]` unless labelled.
+
+R1. **Branches.** `adaptive-rx-UL-DL` -> `mpci-main` by merge only; multi-PCI code never goes to `adaptive-rx-UL-DL`. Main @ `c300718765` is NOT validated on the DGX (PROJECT_MEMORY 15.00): any DGX N=1 reference is taken on main and mpci-main in the same session, interleaved.
+
+R2. **N=1 gate.** The postconv gate ("Technique D CONVERGED") is unreachable on the baseline on both hosts (PROJECT_MEMORY 10-23/24 §2; 15.00 `[MEASURED, sens6 rfsim]`). V2a becomes RELATIVE: same host, same bed (106 PRB, 4 RX, 420 s), arms main vs mpci-main interleaved, n >= 2, scored with `tests/passive_rx/dgx/score_rx_solver.py` (CRC, drops, DL p50/p99) plus the unit-level equivalence of A9. If a re-based gate is adopted on main, it replaces this.
+
+R3. **B2 rewritten: extend `nr_core_layout`, retire `nr_core_plan`.** `common/utils/nr_core_layout.{c,h}` (SEP / COMPACT / SMALL by W, topology, isolcpus, capacity, L3, GPU NUMA, DPDK lcores, `SENSING: CORE_PLAN` line, `nr_core_layout_init` in `main()`) already removes the hardcoded cores. `nr_core_plan.{c,h}` is called from no production code. B2 = (a) add the cell count to the pure builder: `nr_cl_build_n(topo, over, n_cells, layout)` with one RT reader per cell (Decision F2 (a)) taken from the RT/isolated set, then big CPUs; pool and lane shared; N=1 output byte-identical to `nr_cl_build`; (b) per-cell RT readers in the plan line; (c) `nr_core_plan.*` removed only after a grep shows no user (its tests move to `nr_core_layout` fixtures). The B.5 "removal list" is mostly done by the layout; B2 removes what remains (grep gate for literal cores in group-C files).
+
+R4. **B3 admission builds on the budgets on main.** RAM: `nr_host_membudget` (B = 0.8 x min(MemAvailable, cgroup) - reserve; fixed commits first, scalable shares, HOST_MEM REFUSE). GPU: `nr_gpu_membudget` + `nr_gpu_elastic`. Admission adds the CELL dimension: a cell is served iff its fixed commits + floors of its scalable modules fit what is left; the scalable share is split across served cells by weight; a refused cell is `unserved reason=ram|gpu_mem|...`, the process never exits because of cell k > 0. No constant of the DGX or sens6 in the model; fixtures inject both hosts.
+
+R5. **GPU tier and per-path choice are process-wide.** `nr_gpu_platform` (SHARED / DISCRETE / NONE) and `nr_gpu_path` (one choice per path per process, trial samples from any cell) are shared by all cells; no per-cell path choice. The channelizer GPU backend registers as one more path (`CHAN`) in `nr_gpu_path` (SHARED: GPU; DISCRETE: trial vs the CPU backend; NONE: CPU), replacing the "capacity table" of B.3.
+
+R6. **SM plan.** `nr_gpu_green.h` already derives discovery SMs = max(1, SMs/6); the literal `>= 32` split threshold and the probe group remain. B4 stays a pure function; G2 replaces the literal by the ratio rule. On DISCRETE without green contexts (CUDA < 12.5) the plan returns "no green".
+
+R7. **sens6 scope (F7 changed).** sens6 now has a DISCRETE GPU path (Q4, per-path trials) and the topology core plan. S1/S2 run whatever the per-path choice picks (not CPU-only). S3 is covered by `2026-10-23-discrete-gpu-backend.md` on main.
+
+R8. **Radio (G6).** Transport differs per host (DGX: DPDK; sens6: kernel sockets, NIC IRQs on housekeeping CPUs only, preflight `IRQ_CPUS`); the ring size comes from the host-RAM plan (`nr_host_membudget_usrp_ring_ms`); ADC full scale from the device (`32b9ad5e71`). The multi-cell wideband ring uses the same plan, never a fixed 2^27.
+
+R9. **Files under active decode work.** `nr_pdcch_blind_monitor_rt.c` (+931 lines), `nr_pdcch_dci11_layout_sweep.c` (new), `nr_pdsch_solver.c`, `nr_pusch_passive_decode.c` changed in the merge and the user is still working on decoding. Order: A1, A2, B1 (pool only), B2, B3, B4, C1, C2, D1 first (new files or pool/layout only); A3-A7, B1b, B5 after the decode work settles; the conversion stays declaration-only (`NR_CELL_STATIC` keeps names) to keep merges small.
+
+R10. **OTA gates.** WindTre/Iliad had 0 C-RNTIs solved on main before the blind DCI fixes (PROJECT_MEMORY 10-23/24 §3); whether `c9e8858e4b`/`5432bc95a1` fix that on the DGX is unknown: O1/O2 start with a solo check of each cell on the baseline.
+
+R11. **Hosts.** Group C runs locally on the DGX (Sonnet agents in worktrees `wt/rr-mpci-<task>`, own build dirs, `nice -n 19`, `flock -s`); labels name `DGX GB10`, not cloud. Commit trailer of agents: their own model.
