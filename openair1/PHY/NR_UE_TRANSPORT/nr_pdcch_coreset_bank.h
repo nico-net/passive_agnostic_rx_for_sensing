@@ -78,6 +78,10 @@ typedef struct {
   uint8_t state;
 } nr_pdcch_discovered_coreset_t;
 
+#include <pthread.h>
+/* Mutex guarding the AL1 UNION fields of the bank entries (see nr_pdcch_coreset_bank.c). */
+extern pthread_mutex_t nr_pdcch_al1_mu;
+
 typedef enum { NR_CORESET_VERIFIED = 0, NR_CORESET_STALE = 1, NR_CORESET_REMOVED = 2 } nr_coreset_state_t;
 
 /* Number of verified geometries currently banked (0..NR_PDCCH_DISCOVERED_CORESETS). */

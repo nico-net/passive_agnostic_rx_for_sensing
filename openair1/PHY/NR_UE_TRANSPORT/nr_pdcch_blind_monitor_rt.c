@@ -820,7 +820,7 @@ static _Atomic bool g_length_found  = false; /* _Atomic: N scan consumers (Task 
 
 /* Guards the AL1 UNION fields of the bank entries (nr_pdcch_coreset_bank.h): unlike cfg they change
  * after publication. */
-static pthread_mutex_t g_al1_mu = PTHREAD_MUTEX_INITIALIZER;
+#define g_al1_mu nr_pdcch_al1_mu /* defined with the bank, which also reads the union */
 
 /* ---- AL1 UNION DECODING ------------------------------------------------------------------------
  * An AL1 verification pins the CCE-to-REG mapping only up to the mappings whose AL1 family holds the

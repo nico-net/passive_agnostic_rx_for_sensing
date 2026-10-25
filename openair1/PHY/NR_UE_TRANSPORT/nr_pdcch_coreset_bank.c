@@ -40,6 +40,8 @@
 static nr_pdcch_discovered_coreset_t g_coreset_bank[NR_PDCCH_DISCOVERED_CORESETS];
 static _Atomic int g_coreset_bank_n;
 static pthread_mutex_t g_coreset_bank_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Guards the AL1 UNION fields of the entries (n_al1_fam, al1_fam, n_al1_union, al1_union). Lock order: bank lock, then this one; no holder of this mutex takes the bank lock. */
+pthread_mutex_t nr_pdcch_al1_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_coreset_bank_quiescent = PTHREAD_COND_INITIALIZER;
 static unsigned g_dispatch_readers;
 static bool g_compaction_pending;
@@ -483,8 +485,10 @@ static bool explains_locked(const nr_pdcch_blind_monitor_cfg_t *c, int cce, int 
       if (nr_pdcch_candidate_res(&e->cfg, x, al, b, 96) == 6 * al && !memcmp(a, b, sizeof(uint32_t) * 6 * al))
         return true;
     /* AL1 union: the entry also decodes AL1 candidates of alternative mapping families (REG sets, see nr_pdcch_al1_union). Same identity rule: same ordered REs.
-     * The union is written under the RT's own mutex, not this lock; a torn read can only flip this one verdict, never corrupt state. */
-    const int nu = al == 1 ? (int)e->n_al1_union : 0, dur = e->cfg.coreset_duration;
+     * The union is written under nr_pdcch_al1_mu, so it is read under it (briefly, AL1 candidates only). */
+    if (al != 1) continue;
+    pthread_mutex_lock(&nr_pdcch_al1_mu);
+    const int nu = (int)e->n_al1_union, dur = e->cfg.coreset_duration;
     for (int j = 0; j < nu && j < NR_PDCCH_AL1_UNION_MAX; ++j) {
       uint32_t u[6]; int k = 0, lastrb = -1;
       const int base = e->cfg.bwp_start + e->cfg.coreset_rb_offset;
@@ -498,8 +502,9 @@ static bool explains_locked(const nr_pdcch_blind_monitor_cfg_t *c, int cce, int 
           ++k;
         }
       }
-      if (k == 6 && !memcmp(a, u, sizeof(u))) return true;
+      if (k == 6 && !memcmp(a, u, sizeof(u))) { pthread_mutex_unlock(&nr_pdcch_al1_mu); return true; }
     }
+    pthread_mutex_unlock(&nr_pdcch_al1_mu);
   }
   return false;
 }
