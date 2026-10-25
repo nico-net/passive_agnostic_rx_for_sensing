@@ -70,3 +70,27 @@ if(ENABLE_TESTS)
   endif()
 endif()
 # ---- end D2 ----
+
+# ---- D1 ----
+# Cell inventory v1 (strict parser + atomic-file watcher) and the cell manager. nr_cell.c is compiled directly (these tests do not link LOG; as in A1).
+# nr_cell_admit (static lib, B3 block) + nr_host_membudget.c as in test_nr_cell_admit. MPCI_INV_DIR is the fixture directory (a path, not a behaviour switch).
+if(ENABLE_TESTS)
+  add_library(nr_cell_inventory STATIC ${CMAKE_SOURCE_DIR}/common/utils/nr_cell_inventory.c)
+  target_include_directories(nr_cell_inventory PUBLIC ${CMAKE_SOURCE_DIR}/common/utils ${CMAKE_SOURCE_DIR}/openair1)
+  add_executable(test_nr_cell_inventory ${CMAKE_SOURCE_DIR}/common/utils/tests/test_nr_cell_inventory.cpp)
+  target_link_libraries(test_nr_cell_inventory PRIVATE nr_cell_inventory GTest::gtest GTest::gtest_main)
+  target_compile_definitions(test_nr_cell_inventory PRIVATE MPCI_INV_DIR="${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci/inventory")
+  add_dependencies(tests test_nr_cell_inventory)
+  add_test(NAME test_nr_cell_inventory COMMAND test_nr_cell_inventory)
+  add_executable(test_nr_cell_mgr
+    ${CMAKE_SOURCE_DIR}/common/utils/tests/test_nr_cell_mgr.cpp
+    ${CMAKE_SOURCE_DIR}/common/utils/nr_cell_mgr.c
+    ${CMAKE_SOURCE_DIR}/common/utils/nr_cell.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS/nr_host_membudget.c)
+  target_include_directories(test_nr_cell_mgr PRIVATE ${CMAKE_SOURCE_DIR}/common/utils ${CMAKE_SOURCE_DIR}/openair1)
+  target_link_libraries(test_nr_cell_mgr PRIVATE nr_cell_inventory nr_cell_admit GTest::gtest GTest::gtest_main pthread)
+  target_compile_definitions(test_nr_cell_mgr PRIVATE MPCI_INV_DIR="${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci/inventory")
+  add_dependencies(tests test_nr_cell_mgr)
+  add_test(NAME test_nr_cell_mgr COMMAND test_nr_cell_mgr)
+endif()
+# ---- end D1 ----

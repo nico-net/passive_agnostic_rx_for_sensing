@@ -1,0 +1,2 @@
+[PHY]    Initial sync successful, PCI: 415
+[MAC]    SENSING: MIB fields sfn=212 k_ssb=14 scs_common=1 coreset0=12 ss0=0 dmrs_typeA=1 barred=1 intraFreqResel=0
