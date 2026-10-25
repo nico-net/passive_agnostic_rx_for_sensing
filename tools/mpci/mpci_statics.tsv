@@ -14,18 +14,19 @@ common/utils/nr_core_layout.c	692	nr_core_layout_env_default::lane	func_static	c
 common/utils/nr_core_layout.c	692	nr_core_layout_env_default::one	func_static	char[256][6][16]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 common/utils/nr_core_layout.c	692	nr_core_layout_env_default::pool	func_static	char[256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 common/utils/nr_core_layout.c	692	nr_core_layout_env_default::uhd	func_static	char[256][256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	50	tl	tls	struct {}	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	56	tl_cv	tls	pthread_cond_t	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	57	tl_last	tls	int	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	212	grant::n_wait	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	248	tl_tid::t	tls	pid_t	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	329	nr_pool_release::n_long	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	389	nr_pool_stats_line::nm	func_static	const char *const[NR_POOL_NPRIO]	CONST	B1	auto
-common/utils/nr_core_pool.c	460	g_site	file_static	nr_pool_t *	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	461	g_once	file_static	pthread_once_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	557	nr_pool_site_filter_core::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	564	tl_give	tls	int	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	633	nr_pool_site_enforce_tick::next	func_static	_Atomic uint64_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	65	tl	tls	struct {}	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	71	tl_cv	tls	pthread_cond_t	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	72	tl_last	tls	int	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	76	g_test_clock	file_static	uint64_t (*)(void)	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	316	grant::n_wait	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	353	tl_tid::t	tls	pid_t	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	439	nr_pool_release::n_long	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	502	nr_pool_stats_line::nm	func_static	const char *const[NR_POOL_NPRIO]	CONST	B1	auto
+common/utils/nr_core_pool.c	583	g_site	file_static	nr_pool_t *	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	584	g_once	file_static	pthread_once_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	680	nr_pool_site_filter_core::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	687	tl_give	tls	int	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	756	nr_pool_site_enforce_tick::next	func_static	_Atomic uint64_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 executables/nr-ue.c	6	nr_ue_rx_synced_g	global	int	UNCLASSIFIED	A8	
 executables/nr-ue.c	67	nr_ue_diag_producer_absolute_slot	global	_Atomic long	UNCLASSIFIED	A8	
 executables/nr-ue.c	68	nr_ue_diag_producer_wall_ns	global	_Atomic long	UNCLASSIFIED	A8	
