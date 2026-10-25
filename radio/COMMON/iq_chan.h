@@ -67,6 +67,8 @@ typedef struct iq_chan_backend {
   int (*run)(void *ctx, const int16_t *const *in, int n, int16_t *const *out);
   /* Sustainable input rate (samples/s per channel) for `load` on this host: measured, not assumed. 0 = unknown/cannot serve. */
   size_t (*capacity)(const iq_chan_load_t *load);
+  /* Optional: run() on k threads including the caller (worker i pinned to cpus[i % ncpus]); results must not depend on k. NULL = single thread only. */
+  int (*set_workers)(void *ctx, int k, const int *cpus, int ncpus);
 } iq_chan_backend_t;
 
 extern const iq_chan_backend_t iq_chan_backend_cpu;
@@ -83,6 +85,9 @@ typedef struct {
   double seconds, blocks, samples_per_s, rt_factor; /* samples/s per channel consumed; rt_factor = samples_per_s / in_rate */
   double cpu_s;                                      /* thread CPU time (CLOCK_THREAD_CPUTIME_ID) */
 } iq_chan_bench_t;
+/* Threads needed to keep real time for `load` given the measured per-thread rate (MS/s per channel, from iq_chan_cpu_bench) and a margin (>= 1): ceil(margin x in_rate / rate), clamped to [1, cells x channels]. Pure. */
+int iq_chan_threads_needed(const iq_chan_load_t *load, double per_thread_msps_measured, double margin);
+int iq_chan_cpu_bench_k(const iq_chan_load_t *load, int block, double seconds, int k, const int *cpus, int ncpus, iq_chan_bench_t *out); /* k threads (test/bench) */
 int iq_chan_cpu_bench(const iq_chan_load_t *load, int block, double seconds, iq_chan_bench_t *out);
 
 typedef struct {
@@ -102,10 +107,13 @@ typedef struct {
   uint64_t blocks, in_samples;       /* blocks processed, input samples per channel consumed */
   uint64_t overruns, discont, dropped_in, epochs;
   uint64_t work_ns, work_max_ns;     /* time spent in backend run() + ring writes */
+  uint64_t run_ns;                   /* part of work_ns spent in the backend run() (the rest is the narrow-ring writes) */
   uint64_t lag_max;                  /* largest backlog (ring head - read position, samples) seen when a block was taken */
   uint64_t step_gap_max_ns;          /* longest time between two iq_chan_step() calls that processed or polled */
   unsigned n_cells;
   const char *backend;
+  int threads, threads_needed;       /* running / needed to keep real time with margin; threads < threads_needed is a shortfall */
+  double capacity_sps;               /* measured capacity (samples/s per channel) of the load at start with `threads` threads: the admission input */
 } iq_chan_stats_t;
 
 iq_chan_t *iq_chan_create(const iq_chan_cfg_t *cfg);                 /* NULL (errno) on failure */
@@ -121,7 +129,9 @@ uint64_t iq_chan_pos(const iq_chan_t *c);
 /* Run. step() does one iteration on the calling thread: returns 1 when a block was processed, 0 when idle or after a skip, -1 on error. start() runs step() in a
  * thread, sleeping 20 us when idle; stop() joins it. Do not call step() while the thread runs. */
 int iq_chan_step(iq_chan_t *c);
-int iq_chan_start(iq_chan_t *c, const int *cpus, int ncpus);         /* optional affinity list (the core plan's channelizer CPU); NULL = unpinned */
+int iq_chan_start(iq_chan_t *c, const int *cpus, int ncpus);  /* derives k (see iq_chan.c); cpus[0] = channelizer thread, the rest = extra workers */
+int iq_chan_set_threads(iq_chan_t *c, int k, const int *cpus, int ncpus); /* k backend threads for iq_chan_step() callers; not while the thread runs */
+int iq_chan_start_k(iq_chan_t *c, const int *cpus, int ncpus, int k); /* explicit k (tests, benches) */         /* optional affinity list (the core plan's channelizer CPU); NULL = unpinned */
 void iq_chan_stop(iq_chan_t *c);
 void iq_chan_stats(const iq_chan_t *c, iq_chan_stats_t *st);
 #endif
