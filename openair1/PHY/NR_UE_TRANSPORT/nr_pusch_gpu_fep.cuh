@@ -22,6 +22,7 @@
 #include <thread>
 #include "nr_pusch_gpu_diag.h"
 #include "nr_gpu_stage_census.h"
+#include "PHY/MODULATION/nr_sfo_rot.h" /* nr_sfo_re / nr_sfo_bin_k: the per-RE SFO step, bit-identical to nr_sfo_rotate_symbol */
 
 namespace ulfep {
 struct Item {
@@ -29,6 +30,8 @@ struct Item {
   short2 *dst[4];       /* N-sample output row of each antenna */
   short2 rot;           /* fp->symbol_rotation[link_type_ul][symbol + (slot % slots_per_subframe) * symbols_per_slot] */
   int rotate;           /* 1 = apply_nr_rotation_symbol_RX, 0 = bare DFT (layout probe) */
+  uint32_t sfo_dphi;    /* SFO step after the rotation on the same bins (nr_sfo_rotate_symbol), 0 = none */
+  int sfo_kref;         /* its reference subcarrier (nr_sfo_kref) */
 };
 static const int MAX_ITEMS = 64, NCTX = 4;
 
@@ -51,8 +54,13 @@ __device__ __forceinline__ void ul_fep_blk(const Item &it, int ant, const uint16
   short2 *o = it.dst[ant];
   for (int k = t; k < N; k += THREADS) {
     short2 v = s[k];
-    if (it.rotate && (k < len || (k >= start2 && k < start2 + len)))
+    if (it.rotate && (k < len || (k >= start2 && k < start2 + len))) {
       v = rot_ts<P>(v, ar, ai, __ldg(&ts[k])); /* identical arithmetic to k_fep_exact (rotation twin of P, then mult_cpx_vector) */
+      if (it.sfo_dphi) {
+        const nr_sfo_c16_t r = nr_sfo_re(nr_sfo_c16_t{v.x, v.y}, nr_sfo_bin_k(k, N) - it.sfo_kref, it.sfo_dphi);
+        v = make_short2(r.r, r.i);
+      }
+    }
     o[k] = v;
   }
 }

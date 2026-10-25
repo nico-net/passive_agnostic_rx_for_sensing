@@ -356,6 +356,8 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
       return fb(FB_CELL);
     u->rot[m][0] = in->symbol_rot[2 * m];
     u->rot[m][1] = in->symbol_rot[2 * m + 1];
+    u->sfo_dphi[m] = in->sfo_dphi[m];
+    u->sfo_kref = in->sfo_kref;
     u->is_dmrs[m] = dm >> m & 1;
     u->nre[m] = (uint16_t)(u->is_dmrs[m] ? nrb * (12 - cdm * 6) : nrb * 12);
     u->est_sym[m] = (int8_t)get_valid_dmrs_idx_for_channel_est(in->ul_dmrs_symb_pos, (uint8_t)m);

@@ -130,6 +130,8 @@ typedef struct {
   uint32_t iq_len;              /* c16 readable from iq[a] (DISCRETE copies the span of the windows) */
   int32_t win[NR_GPU_PASS_UL_NSYM];
   int16_t rot[NR_GPU_PASS_UL_NSYM][2]; /* fp->symbol_rotation[link_type_ul][symbol + (slot % slots_per_subframe) * symbols_per_slot] */
+  uint32_t sfo_dphi[NR_GPU_PASS_UL_NSYM]; /* intra-slot SFO step per symbol (nr_sfo_slot_dphi), 0 = none */
+  int32_t sfo_kref;                       /* reference subcarrier of the SFO step (nr_sfo_kref) */
   int rot_nb_rb, rot_fco;       /* apply_nr_rotation_symbol_RX(fp->N_RB_UL, fp->first_carrier_offset) of the old FEP */
   int16_t *rx[4];               /* the caller's rxdataF row of symbol 0 of the slot per antenna (c16, OAI layout): DIRECT = written in place by the pass; DISCRETE = filled after it; NULL = pass-private */
   /* ---- grant */

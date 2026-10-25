@@ -973,6 +973,8 @@ static int prepare_ul(Inst &I, const nr_gpu_pass_job_t *j)
     it[m].rot[0] = u.rot[m][0];
     it[m].rot[1] = u.rot[m][1];
     it[m].rotate = 1;
+    it[m].sfo_dphi = u.sfo_dphi[m];
+    it[m].sfo_kref = u.sfo_kref;
   }
   par[0] = u.rot_nb_rb;
   par[1] = u.rot_fco;
