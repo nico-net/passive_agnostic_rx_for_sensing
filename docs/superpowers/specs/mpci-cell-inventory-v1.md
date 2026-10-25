@@ -59,7 +59,7 @@ The receiver never trusts a field it can verify: PCI and MIB are confirmed by it
 | two entries with equal `centre_hz` and `ssb_hz` | **co-channel cells** (WindTre 508 + PCI 4, Vodafone 415 + PCI 380): two ids, two slots, one SSB. The receiver verifies which PCI it syncs on. |
 
 Pass-2 refinement (`k_SSB` -> `--ssb`, `-C`) is applied by the receiver from its own log (`nr_cell_mgr_pass2_from_log`): the lines `MIB fields sfn=<n> k_ssb=<k>` and
-`Initial sync successful, PCI: <p>` (the lines `live_chain.sh pass2` reads); `--ssb = 1164 + k/2`, `-C = ssb_hz + (1182 - ssb) * 30 kHz`. A cell whose `n_rb_hint` is
+`Initial sync successful, PCI: <p>` (the lines `live_chain.sh pass2` reads); `--ssb = 12*(offsetToPointA>>mu)+(k>>mu)` (TS 38.211 7.4.3.1; pass-1 assumption when offsetToPointA is unknown), `-C = ssb_hz + (6*N_RB - 120 - ssb)*SCS`, grid N_RB and pass-1 --ssb as receiver inputs. A cell whose `n_rb_hint` is
 non-null is considered already refined by the front end and its `centre_hz` stays authoritative.
 
 ## 4. Mapping from today's front-end output `[CODE-READ]`

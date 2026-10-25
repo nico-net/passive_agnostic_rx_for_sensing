@@ -24,7 +24,6 @@
 extern "C" {
 #endif
 #define NR_MGR_RETIRE_HYST_DEFAULT_NS 10000000000LL /* policy default when cfg.retire_hysteresis_ns == 0: 10 s of "lost/absent" before a slot is freed */
-#define NR_MGR_SSB_FIRST 1171                        /* pass-1 --ssb when k_SSB is unknown (CARRIERS.md rule, as tests/passive_rx/autofront) */
 
 typedef enum { NR_MGR_EV_ADD = 0, NR_MGR_EV_RETUNE = 1, NR_MGR_EV_RETIRE = 2, NR_MGR_EV_REFUSE = 3 } nr_mgr_event_kind_t;
 typedef struct {
@@ -63,7 +62,19 @@ typedef struct {
   size_t slot_state_bytes;     /* size of the per-slot object allocated before the fence (0: none) */
   void (*log)(void *ctx, const char *line); /* NULL: printf to stdout */
   void *log_ctx;
+  /* The grid the receiver is STARTED with in pass 1 (inputs from its actual start configuration, not constants of the manager). All three required (> 0). */
+  int grid_n_rb;               /* -r: N_RB of the started grid (used for a cell whose n_rb_hint is null) */
+  int pass1_ssb;               /* --ssb the receiver is started with while k_SSB is unknown: SSB first subcarrier in the started grid */
+  int pass1_k_ssb;             /* k_SSB (15 kHz units, TS 38.211 7.4.3.1) the pass-1 --ssb assumes */
 } nr_cell_mgr_cfg_t;
+
+/* Pure numerology maths (FR1), TS 38.211 4.4.4.2 / 7.4.3.1 and nr_get_ssb_start_sc() of the receiver (nr_phy_common.c):
+ *   SSB first subcarrier in the grid whose lowest subcarrier is Point A:  ssb = 12 * (offsetToPointA >> mu) + (k_SSB >> mu),  mu = log2(scs_khz / 15)
+ *   (offsetToPointA in PRBs of 15 kHz, k_SSB in 15 kHz subcarriers; FR1).
+ *   Grid centre (-C) for a grid of n_rb PRB (12 n_rb subcarriers, lowest = grid origin) in which the 240-subcarrier SSB starts at subcarrier `ssb`:
+ *   centre = ssb_hz + (6 n_rb - 120 - ssb) * scs   (the SSB centre sits at subcarrier ssb + 120; the grid centre at 6 n_rb). */
+int nr_mgr_ssb_start_sc(int scs_khz, int offset_to_point_a, int k_ssb);
+double nr_mgr_grid_centre_hz(double ssb_hz, int scs_khz, int n_rb, int ssb_start_sc);
 
 typedef struct {
   nr_cell_mgr_cfg_t cfg;
@@ -85,7 +96,10 @@ int nr_cell_mgr_apply(nr_cell_mgr_t *m, const nr_cell_inventory_t *inv, int64_t 
 /* Retire cells whose lost/removed state outlived the hysteresis. Returns the number of RETIRE events. */
 int nr_cell_mgr_tick(nr_cell_mgr_t *m, int64_t now_ns);
 /* Pass 2 from a stored receiver log excerpt of cell `id`: needs "MIB fields sfn=<n> k_ssb=<k>" and, if present, "Initial sync successful, PCI: <p>"
- * (p must equal the cell's pci when both are known). --ssb = 1164 + k/2; -C = ssb_hz + (1182 - ssb) * 30 kHz (autofront.py tune()).
+ * (p must equal the cell's pci when both are known) and optionally "offsetToPointA=<o>" (SIB1). --ssb = nr_mgr_ssb_start_sc(scs, o, k); when o is unknown
+ * the pass-1 assumption is kept: o is whatever made pass1_ssb valid for pass1_k_ssb, i.e. ssb = (pass1_ssb - (pass1_k_ssb >> mu)) + (k >> mu).
+ * -C = nr_mgr_grid_centre_hz(ssb_hz, scs, grid n_rb, ssb) with grid n_rb = the cell's n_rb_hint if set, else cfg.grid_n_rb. A cell with n_rb_hint set and no
+ * offsetToPointA in the log is left as the front end tuned it (0).
  * Returns 1 and emits RETUNE (cause "pass2") if (-C, --ssb) changed, 0 if pass 2 equals what is in force, -1 unknown id / no k_SSB line /
  * PCI mismatch / cell has no ssb_hz or gscn. *ssb_out and *centre_out (may be NULL) receive the refined values whenever the result is >= 0. */
 int nr_cell_mgr_pass2_from_log(nr_cell_mgr_t *m, const char *id, const char *log, size_t len, int64_t now_ns, int *ssb_out, double *centre_out);

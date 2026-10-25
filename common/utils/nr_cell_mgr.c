@@ -40,6 +40,8 @@ int nr_cell_mgr_plan(nr_cell_mgr_t *m, const nr_cell_mgr_cfg_t *cfg, const nr_ho
     m->cfg = *cfg;
   if (m->cfg.retire_hysteresis_ns <= 0)
     m->cfg.retire_hysteresis_ns = NR_MGR_RETIRE_HYST_DEFAULT_NS;
+  if (m->cfg.grid_n_rb <= 0 || m->cfg.pass1_ssb <= 0 || m->cfg.pass1_k_ssb < 0)
+    return -1; /* the started grid is an input */
   if (nr_cell_alloc_fenced())
     return -1; /* planning allocates the slot objects: only legal before the RX fence */
   int served = nr_cell_admit_plan(caps, wanted, n_wanted, &m->plan);
@@ -163,7 +165,7 @@ int nr_cell_mgr_apply(nr_cell_mgr_t *m, const nr_cell_inventory_t *inv, int64_t 
           }
           if (ri >= 0)
             m->refused[ri].reason = m->full_reason;
-          emit(m, NR_MGR_EV_REFUSE, -1, ic->id, &ic->desc, 0, 0, NR_MGR_SSB_FIRST, 0, m->full_reason, nr_admit_reason_name(m->full_reason), NULL);
+          emit(m, NR_MGR_EV_REFUSE, -1, ic->id, &ic->desc, 0, 0, m->cfg.pass1_ssb, 0, m->full_reason, nr_admit_reason_name(m->full_reason), NULL);
           events++;
         }
         continue;
@@ -179,7 +181,7 @@ int nr_cell_mgr_apply(nr_cell_mgr_t *m, const nr_cell_inventory_t *inv, int64_t 
       sl->active = 1;
       snprintf(sl->id, sizeof sl->id, "%s", ic->id);
       sl->desc = sl->inv_desc = ic->desc;
-      sl->ssb = NR_MGR_SSB_FIRST;
+      sl->ssb = m->cfg.pass1_ssb;
       m->n_active++;
       emit(m, NR_MGR_EV_ADD, s, sl->id, &sl->desc, 0, 0, sl->ssb, 0, 0, "new", st);
       events++;
@@ -257,19 +259,34 @@ int nr_cell_mgr_pass2_from_log(nr_cell_mgr_t *m, const char *id, const char *log
   int pci;
   if (sy && read_int_after(sy + 30, end, &pci) == 0 && sl->desc.pci >= 0 && pci != sl->desc.pci)
     return -1; /* the log is another cell's */
+  int scs = sl->desc.scs_khz > 0 ? sl->desc.scs_khz : 30;
+  int mu = scs == 15 ? 0 : scs == 30 ? 1 : scs == 60 ? 2 : scs == 120 ? 3 : -1;
+  if (mu < 0)
+    return -1;
   double ssb_hz = sl->desc.ssb_hz;
   if (ssb_hz <= 0 && sl->desc.gscn > 0)
-    ssb_hz = 3000000000.0 + (sl->desc.gscn - 7499) * 1440000.0; /* n77/n78 raster, as autofront.gscn_hz */
+    ssb_hz = 3000000000.0 + (sl->desc.gscn - 7499) * 1440000.0; /* n77/n78 raster (TS 38.104 5.4.3.1), as autofront.gscn_hz */
   if (ssb_hz <= 0)
     return -1;
-  int ssb = 1164 + k / 2;
-  double centre = ssb_hz + (1182 - ssb) * 30000.0;
+  int offa = -1;
+  const char *op = find(log, len, "offsetToPointA=");
+  if (op && (read_int_after(op + 15, end, &offa) || offa < 0))
+    offa = -1;
+  int ssb;
+  if (offa >= 0)
+    ssb = nr_mgr_ssb_start_sc(scs, offa, k);
+  else {
+    if (sl->desc.n_rb != 0)
+      return 0; /* the front end already carries the grid and the log adds nothing */
+    ssb = (m->cfg.pass1_ssb - (m->cfg.pass1_k_ssb >> mu)) + (k >> mu);
+  }
+  int nrb = sl->desc.n_rb ? sl->desc.n_rb : m->cfg.grid_n_rb;
+  double centre = nr_mgr_grid_centre_hz(ssb_hz, scs, nrb, ssb);
   if (ssb_out)
     *ssb_out = ssb;
   if (centre_out)
     *centre_out = centre;
-  /* a cell whose inventory entry already carries the grid (n_rb_hint set: SIB1 / carrier edges known) was refined by the front end: its -C stays authoritative */
-  if (sl->desc.n_rb != 0 || (centre == sl->desc.centre_hz && ssb == sl->ssb))
+  if (centre == sl->desc.centre_hz && ssb == sl->ssb)
     return 0;
   double pc = sl->desc.centre_hz;
   int ps = sl->ssb;
@@ -277,4 +294,14 @@ int nr_cell_mgr_pass2_from_log(nr_cell_mgr_t *m, const char *id, const char *log
   sl->ssb = ssb;
   emit(m, NR_MGR_EV_RETUNE, s, sl->id, &sl->desc, pc, sl->desc.cfo_hz, ssb, ps, 0, "pass2", sl->state);
   return 1;
+}
+
+int nr_mgr_ssb_start_sc(int scs_khz, int offset_to_point_a, int k_ssb)
+{
+  int mu = scs_khz == 15 ? 0 : scs_khz == 30 ? 1 : scs_khz == 60 ? 2 : scs_khz == 120 ? 3 : 1;
+  return 12 * (offset_to_point_a >> mu) + (k_ssb >> mu);
+}
+double nr_mgr_grid_centre_hz(double ssb_hz, int scs_khz, int n_rb, int ssb_start_sc)
+{
+  return ssb_hz + (6.0 * n_rb - 120.0 - ssb_start_sc) * scs_khz * 1000.0;
 }

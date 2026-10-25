@@ -140,6 +140,9 @@ static nr_cell_mgr_cfg_t cfg(Rec *r, int64_t hyst = 0, size_t st = 4096)
   c.log_ctx = r;
   c.retire_hysteresis_ns = hyst;
   c.slot_state_bytes = st;
+  c.grid_n_rb = 217;   // receiver start config of the fixtures (-r 217 --ssb 1171, pass-1 k_SSB 14)
+  c.pass1_ssb = 1171;
+  c.pass1_k_ssb = 14;
   return c;
 }
 static std::vector<nr_cell_desc_t> descs(const nr_cell_inventory_t &inv)
@@ -375,6 +378,51 @@ TEST_F(Mgr, Pass2FromLogExcerpt)
   // ANSI colour in the excerpt does not matter (colour codes sit before the tag, not inside the key=value text)
   std::string col = "\x1b[0m\x1b[1;32m" + slurp(fx("pass2_pci923_excerpt.txt"));
   EXPECT_EQ(0, nr_cell_mgr_pass2_from_log(&m, "pci923", col.data(), col.size(), 4 * S, nullptr, nullptr));
+}
+// Numerology maths reproduces the live tunings (PROJECT_MEMORY 10-23/24 item 4) from (GSCN, SCS, N_RB, offsetToPointA, k_SSB).
+TEST(MgrMaths, LiveTuningsReproduced)
+{
+  struct { int gscn, nrb, offa, k, ssb; double C; } t[] = {
+    {7971, 217, 194, 14, 1171, 3680010000.0},   // 415 (offsetToPointA 194, k 14: "Vodafone rule")
+    {8007, 217, 38, 10, 233, 3759990000.0},     // 923 SIB1 offsetToPointA 38, k 10
+    {7895, 162, 32, 2, 193, 3590010000.0},      // 508 SIB1 offsetToPointA 32, k 2
+    {7795, 51, 36, 22, 227, 3425010000.0},      // 675 SIB1 offsetToPointA 36, k 22
+  };
+  for (auto &x : t) {
+    double ssbhz = 3000000000.0 + (x.gscn - 7499) * 1440000.0;
+    int ssb = nr_mgr_ssb_start_sc(30, x.offa, x.k);
+    EXPECT_EQ(x.ssb, ssb) << x.gscn;
+    EXPECT_DOUBLE_EQ(x.C, nr_mgr_grid_centre_hz(ssbhz, 30, x.nrb, ssb)) << x.gscn;
+  }
+  // 403: no SIB1 carrier info, grid from the carrier edges; --ssb 18 -r 51 -> -C 3630000000
+  EXPECT_DOUBLE_EQ(3630000000.0, nr_mgr_grid_centre_hz(3000000000.0 + (7933 - 7499) * 1440000.0, 30, 51, 18));
+  // synthetic SCS 15 kHz, N_RB 106 (hand check, TS 38.211 7.4.3.1): offsetToPointA 20, k_SSB 6 -> 12*20 + 6 = 246;
+  // centre = ssb_hz + (6*106 - 120 - 246) * 15 kHz = ssb_hz + 270 * 15 kHz = ssb_hz + 4.05 MHz
+  EXPECT_EQ(246, nr_mgr_ssb_start_sc(15, 20, 6));
+  EXPECT_DOUBLE_EQ(3504050000.0, nr_mgr_grid_centre_hz(3500000000.0, 15, 106, 246));
+  // synthetic SCS 60 kHz: offsetToPointA 40 -> 40>>2 = 10 PRB, k 8 -> 8>>2 = 2: 122; 273 PRB grid: (1638-120-122)*60k
+  EXPECT_EQ(122, nr_mgr_ssb_start_sc(60, 40, 8));
+  EXPECT_DOUBLE_EQ(3500000000.0 + 1396 * 60000.0, nr_mgr_grid_centre_hz(3500000000.0, 60, 273, 122));
+}
+TEST_F(Mgr, Pass2UsesSib1OffsetToPointA)
+{
+  Rec r;
+  nr_cell_inventory_t inv = load("live_tuned_20261023.json");
+  nr_host_caps_t c = caps(8, 102400);
+  nr_cell_mgr_cfg_t g = cfg(&r);
+  ASSERT_GE(nr_cell_mgr_plan(&m, &g, &c, descs(inv).data(), inv.n), 1);
+  nr_cell_mgr_apply(&m, &inv, 0);
+  // 923 live: n_rb_hint 217, log gives offsetToPointA=38 k_ssb=10 -> --ssb 233, -C 3759990000 = the inventory's -C; --ssb changes from the pass-1 value, so the --ssb retune is emitted
+  std::string l = slurp(fx("pass2_pci923_excerpt.txt")) + "SENSING: SIB1 offsetToPointA=38 x\n";
+  int ssb = 0; double cen = 0;
+  EXPECT_EQ(1, nr_cell_mgr_pass2_from_log(&m, "pci923", l.data(), l.size(), S, &ssb, &cen));
+  EXPECT_EQ(233, ssb);
+  EXPECT_DOUBLE_EQ(3759990000.0, cen);
+  // 508: from the pass-1 (217 grid) to the live tuning with SIB1 offsetToPointA 32, k 2, n_rb 162
+  std::string l5 = "Initial sync successful, PCI: 508\nMIB fields sfn=1 k_ssb=2 x\noffsetToPointA=32\n";
+  EXPECT_EQ(1, nr_cell_mgr_pass2_from_log(&m, "pci508", l5.data(), l5.size(), S, &ssb, &cen));
+  EXPECT_EQ(193, ssb);
+  EXPECT_DOUBLE_EQ(3590010000.0, cen);
 }
 TEST_F(Mgr, Pass2LeavesFrontEndRefinedCellAlone)
 {
