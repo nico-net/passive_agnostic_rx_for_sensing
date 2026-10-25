@@ -11,6 +11,8 @@ extern "C" {
  * delay_max_pos, delay_max_val} of nr_passive_est_delay; noise = nr_pusch_antenna_processing's noise_amp2 of the row */
 void nr_gpu_pass_ul_ref_chest(const c16_t *rx, const c16_t *pil, int k0, int nb_rb, int delta, const c16_t *delay_table, int dt_stride, int max_delay_comp, c16_t *ul_ch, int out_delay[3],
                               uint64_t *noise);
+/* Q4: nr_passive_est_delay of one N = 4096 LS row (the real library function): out = {est_delay, delay_max_pos, delay_max_val} */
+void nr_gpu_pass_ul_ref_delay(const c16_t *ls, int out[3]);
 /* the equaliser of one grant: returns the number of LLRs (not descrambled) or -1 */
 int nr_gpu_pass_ul_ref_eq(int nbRx, int nb_rb, int qm, int keep, int delta, int start_symbol, int nsym, uint32_t dmrs_mask, int cdm, int start_re, const c16_t *rxF, const c16_t *est, int16_t *llr,
                           int *log2_maxh_out, int *avg_out);

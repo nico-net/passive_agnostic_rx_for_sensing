@@ -7,6 +7,8 @@
 #define NR_GPU_PASS_FIXTURE_H
 #include <dlfcn.h>
 #include <cuda_runtime.h>
+#include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -59,6 +61,34 @@ struct GpuPassModule {
   void (*call_begin)(void) = nullptr, (*call_end)(void) = nullptr, (*call_dirty)(void) = nullptr; /* v2 Task 4: the held instance of a decode call */
   void (*retry_counters)(uint64_t *) = nullptr;                                                      /* entries C, D, held calls, dirty */
   int pass_state = 0; /* 0 not tried, 1 ready, -1 failed */
+  /* Q4: DISCRETE staging of the standalone chest / delay / demod entries; the fixture's one host delay table (identical for every Pass: it only depends on N and MDC) */
+  int (*exact_stage_init)(const int16_t *, size_t, int, int) = nullptr;
+  int (*demod_stage_init)(int, int, uint32_t) = nullptr;
+  void (*stage_stats)(int, uint64_t *) = nullptr;
+  int (*delay_old)(const int16_t *const *, int, int *) = nullptr;
+  static constexpr int DT_MDC = 20;
+  static constexpr size_t DT_BYTES = (size_t)(2 * DT_MDC + 1) * 4096 * 4;
+  static const int16_t *host_dt()
+  {
+    static std::vector<int16_t> t;
+    if (t.empty()) {
+      t.resize(DT_BYTES / 2);
+      for (int d = -DT_MDC; d <= DT_MDC; d++)
+        for (int i = 0; i < 4096; i++) {
+          const double ph = 2.0 * M_PI * i * d / 4096;
+          t[2 * ((size_t)(DT_MDC + d) * 4096 + i)] = (int16_t)std::lround(256 * std::cos(ph));
+          t[2 * ((size_t)(DT_MDC + d) * 4096 + i) + 1] = (int16_t)std::lround(256 * std::sin(ph));
+        }
+    }
+    return t.data();
+  }
+  /* true when the old entry points can run on this (non-DIRECT) process: their staging is set up (once) */
+  bool staged_ready()
+  {
+    static int state = -1;
+    if (state < 0) state = nr_gpu_model() != NR_GPU_MODEL_DIRECT && exact_stage_init && demod_stage_init && exact_stage_init(host_dt(), DT_BYTES, 4096, DT_MDC) == 0 && demod_stage_init(4, 4096, 3280) == 0;
+    return state == 1;
+  }
   /* loads ./libpdsch_gpu.so and inits FEP (N = 4096, 4 RX), demod and LDPC once; false = no module or no device */
   static GpuPassModule &get(bool *ok, bool *have_lib = nullptr)
   {
@@ -83,6 +113,10 @@ struct GpuPassModule {
         m.demod_old = (decltype(m.demod_old))dlsym(m.dl, "nr_pdsch_gpu_demod_run");
         m.demod_rel = (decltype(m.demod_rel))dlsym(m.dl, "nr_pdsch_gpu_demod_release");
         m.ldpc_old = (decltype(m.ldpc_old))dlsym(m.dl, "nr_pdsch_gpu_ldpc_run");
+        m.exact_stage_init = (decltype(m.exact_stage_init))dlsym(m.dl, "nr_pdsch_gpu_exact_stage_init");
+        m.demod_stage_init = (decltype(m.demod_stage_init))dlsym(m.dl, "nr_pdsch_gpu_demod_stage_init");
+        m.stage_stats = (decltype(m.stage_stats))dlsym(m.dl, "nr_gpu_stage_stats");
+        m.delay_old = (decltype(m.delay_old))dlsym(m.dl, "nr_pdsch_gpu_exact_delay");
         if (auto fp32 = (void (*)(int))dlsym(m.dl, "nr_gpu_pass_test_fp32")) fp32(0); /* the bit-exact double demod is the reference here (FP32 is the production default) */
         m.pass_config = (nr_gpu_pass_config_fn)dlsym(m.dl, "nr_gpu_pass_config");
         m.pass_init = (nr_gpu_pass_init_fn)dlsym(m.dl, "nr_gpu_pass_init");
@@ -142,6 +176,10 @@ class GpuPassFixture {
   std::vector<int16_t> rxF_head;      /* rxdataF of antenna 0, the grant's DM-RS symbol */
   std::vector<int> chest_out;         /* delay[3] and nvar per row */
   std::vector<uint8_t> snap;          /* LDPC snapshot bytes of block 0 */
+  std::vector<int16_t> comp_out;      /* Q4: the demod's comp / mag / magb / magr arrays of the grant ([4 arrays][symbol][4 layers][ext] c16, zeros where nothing was written) */
+  static inline int bench_reps = 1;   /* Q4 micro-benchmark: repeat the staged old-path chest / demod this many times, medians in bench_us[0] (chest) / [1] (demod) */
+  static inline double bench_us[2] = {0, 0};
+  static inline int stage_full = 1;   /* Q4: nr_gpu_demod_job_t::stage_full of the old-path demod on a DISCRETE process */
   int ldpc_rc = 0, ldpc_nsnap = 0;
 
   /* tx: the coded, scrambled bit stream of the grant in LLR order (symbol, RE, layer, bit); null = random bits */
@@ -427,6 +465,7 @@ class GpuPassFixture {
    * RE, layer, bit; positive = bit 0) go to *llr. Buffers use the model nr_gpu_model() gives now. old_path: the pre-GPUPASS entry points
    * with their own waits (DIRECT only). The nvar of the demod job is the chest mean (host sync between the stages), the LDPC input is the
    * LLR stream hard-limited to int8. */
+  static int nrows_of(const Pass &P) { return P.nrows; }
   int run_stages(std::vector<int16_t> *llr, bool old_path = false)
   {
     bool ok = false;
@@ -437,22 +476,51 @@ class GpuPassFixture {
     cudaStream_t s = P.s;
     nr_gpu_chest_job_t &cj = P.cjv[0];
     int fslot = 0, cslot = 0, rc;
+    /* Q4: on a DISCRETE process the old entry points take HOST pointers (their staged variants copy the spans the kernels read): the jobs below get the pinned mirrors of the
+     * buffers they point into (the same bytes the device-pointer jobs of the _dev entries see), the delay table is the one host table the chest staging uploaded at init */
+    const bool stg = old_path && nr_gpu_model() != NR_GPU_MODEL_DIRECT;
+    if (stg && (!segs.empty() || !m.staged_ready())) return -1;
+    auto host_of = [](const nr_gpu_buf_t &b, const void *p) -> const char * { return (const char *)b.host + ((const char *)p - (const char *)b.dev); };
+    std::unique_ptr<nr_gpu_chest_job_t> cjh;
+    nr_gpu_chest_job_t *cjp = &cj;
+    if (stg) {
+      cjh = std::make_unique<nr_gpu_chest_job_t>(cj);
+      for (int r = 0; r < nrows_of(P); r++) {
+        cjh->rows[r].rxF = (const int16_t *)host_of(P.rxF, cj.rows[r].rxF);
+        cjh->rows[r].pil = (const int16_t *)host_of(P.pil, cj.rows[r].pil);
+        cjh->rows[r].out = (int16_t *)host_of(P.est, cj.rows[r].out);
+      }
+      cjh->delay_table = GpuPassModule::host_dt();
+      cjp = cjh.get();
+    }
     if (old_path) {
       if (m.fep_old(P.rp.data(), ring_len, ring_offset, 0.0, rot.data(), 0x3fff, (int16_t *)P.rxF.host, (size_t)NSYM * N)) return -1;
-      rc = m.chest_old(&cj);
+      rc = m.chest_old(cjp);
+      if (stg && bench_reps > 1) {
+        std::vector<double> t;
+        for (int r = 0; r < bench_reps; r++) {
+          const auto a = std::chrono::steady_clock::now();
+          rc |= m.chest_old(cjp);
+          t.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - a).count());
+        }
+        std::sort(t.begin(), t.end());
+        bench_us[0] = t[t.size() / 2];
+      }
     } else {
       if (P.stage(&fslot, &cslot) || m.fep(&P.fj, &P.rxF, fslot, s)) return -1;
       rc = m.chest(&cj, P.nrows, &P.est, &P.nvar, cslot, s);
     }
     if (rc) return -1;
-    nr_gpu_buf_d2h_async(&P.nvar, 0, P.nvar.bytes, s);
-    nr_gpu_buf_d2h_async(&P.rxF, 0, P.rxsz, s);
+    if (!stg) { /* a staged old path already wrote the host mirrors */
+      nr_gpu_buf_d2h_async(&P.nvar, 0, P.nvar.bytes, s);
+      nr_gpu_buf_d2h_async(&P.rxF, 0, P.rxsz, s);
+    }
     if (cudaStreamSynchronize(s)) return -1;
     const int nrows = P.nrows;
     std::vector<int> cout_v(4 * NR_GPU_CHEST_MAX_ROWS, 0);
     if (old_path) { /* the old entry returns delay[][3] and nvar[] in the job */
-      memcpy(cout_v.data(), cj.delay, 3 * nrows * sizeof(int));
-      memcpy(cout_v.data() + 3 * NR_GPU_CHEST_MAX_ROWS, cj.nvar, nrows * sizeof(int));
+      memcpy(cout_v.data(), cjp->delay, 3 * nrows * sizeof(int));
+      memcpy(cout_v.data() + 3 * NR_GPU_CHEST_MAX_ROWS, cjp->nvar, nrows * sizeof(int));
     } else
       memcpy(cout_v.data(), P.nvar.host, cout_v.size() * sizeof(int));
     const int *cout = cout_v.data();
@@ -467,13 +535,47 @@ class GpuPassFixture {
     nr_gpu_demod_job_t &dj = P.dj;
     dj.nvar = (uint32_t)chest_out.back();
     if (old_path) {
-      dj.llr = (int16_t *)P.llrb.host;
-      if (m.demod_old(&dj)) return -1;
-      m.demod_rel(dj.ctx);
+      nr_gpu_demod_job_t djh = dj;
+      if (stg) {
+        djh.rxdataF = (const int16_t *)host_of(P.rxF, dj.rxdataF);
+        djh.est = (const int16_t *)host_of(P.est, dj.est);
+        djh.geo_y = (const int16_t *)host_of(P.geo, dj.geo_y);
+        djh.geo_h = (const int16_t *)host_of(P.geo, dj.geo_h);
+        djh.comp = (int16_t *)host_of(P.scratch, dj.comp);
+        djh.mag = (int16_t *)host_of(P.scratch, dj.mag);
+        djh.magb = (int16_t *)host_of(P.scratch, dj.magb);
+        djh.magr = (int16_t *)host_of(P.scratch, dj.magr);
+        djh.stage_full = stage_full;
+      }
+      djh.llr = (int16_t *)P.llrb.host;
+      if (m.demod_old(&djh)) return -1;
+      m.demod_rel(djh.ctx);
+      if (stg && bench_reps > 1) {
+        std::vector<double> t;
+        for (int r = 0; r < bench_reps; r++) {
+          const auto a = std::chrono::steady_clock::now();
+          if (m.demod_old(&djh)) return -1;
+          t.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - a).count());
+          m.demod_rel(djh.ctx);
+        }
+        std::sort(t.begin(), t.end());
+        bench_us[1] = t[t.size() / 2];
+      }
     } else if (m.demod(&dj, &P.llrb, s))
       return -1;
-    nr_gpu_buf_d2h_async(&P.llrb, 0, P.llrb.bytes, s);
+    if (!stg) nr_gpu_buf_d2h_async(&P.llrb, 0, P.llrb.bytes, s);
+    if (!old_path) nr_gpu_buf_d2h_async(&P.scratch, 0, P.scratch.bytes, s);
     if (cudaStreamSynchronize(s)) return -1;
+    { /* the comp / mag* arrays of the grant, rows (symbol, layer) of ext c16 each */
+      comp_out.clear();
+      const int ext = P.ext;
+      for (int k = 0; k < 4; k++)
+        for (int sy = 0; sy < NSYM; sy++)
+          for (int l = 0; l < NR_GPU_DEMOD_MAX_NL; l++) {
+            const int16_t *row = (const int16_t *)P.scratch.host + (size_t)k * P.bn + 2 * ((size_t)(sy * NR_GPU_DEMOD_MAX_NL + l) * ext);
+            comp_out.insert(comp_out.end(), row, row + 2 * (size_t)ext);
+          }
+    }
     llr->assign((int16_t *)P.llrb.host, (int16_t *)P.llrb.host + (size_t)P.nsym * P.len * qm * nl);
     /* LDPC on the first BG2 code block of the LLR stream (hard-limited to int8): bit parity only */
     nr_gpu_ldpc_job_t &lj = P.lj;

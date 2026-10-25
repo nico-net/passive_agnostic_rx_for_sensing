@@ -18,7 +18,7 @@ typedef struct {
 typedef struct {
   int (*init)(int nant, int N, int ncp, int offset_div, int pct, int slot_us);
   int (*run)(const void *items, int n, int nb_rb, int fco); /* 0 done; < 0: nothing written, run the CPU FEP */
-  void (*stats)(uint64_t *o); /* calls items gpu_us max_us busy over_cap rt_defer late errors partitioned deadline hold reclaimed */
+  void (*stats)(uint64_t *o); /* o[16]: calls items gpu_us max_us busy over_cap rt_defer late errors partitioned | staged runs, h2d bytes, d2h bytes, staged in use (Q4) */
 } nr_pusch_gpu_fep_api_t;
 
 static inline const nr_pusch_gpu_fep_api_t *nr_pusch_gpu_fep_load(void)

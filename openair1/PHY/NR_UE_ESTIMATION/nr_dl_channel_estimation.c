@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include "PHY/TOOLS/nr_gpu_path.h" /* Q4: per-path paired trial of the GPU chest */
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_stage.h" /* GPU parity stage snapshots (weak, default off) */
 #include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"
 __thread bool nr_passive_tpool_inline; /* ISAC_PDSCH_INLINE_POOL, nr_passive_tpool.h */
@@ -2004,7 +2005,7 @@ static void gch_async_submit(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, 
   j->nrows = maxl * nrx;
   memcpy(j->nvar, nvar_out, sizeof(j->nvar));
   memcpy(j->nvar_ant, nvar_ant_out, sizeof(j->nvar_ant));
-  j->rx = malloc(sizeof(c16_t) * (size_t)nrx * rxdataFsize);
+  j->rx = aligned_alloc(64, ((sizeof(c16_t) * (size_t)nrx * rxdataFsize + 63) / 64) * 64); /* the CPU estimator replay reads it with AVX2 loads (x86) */
   j->gpu = malloc(sizeof(c16_t) * 4096 * (size_t)(np * nrx + 1));
   if (!j->rx || !j->gpu) {
     gch_job_free(j);
@@ -2286,7 +2287,37 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
   }
   const uint64_t n = atomic_fetch_add_explicit(&g_gch_calls, 1, memory_order_relaxed) + 1;
   const int bg = g_gch_check > 0 ? nr_gpu_check_async_every() : 0; /* FATTAILS: the check runs off this thread */
-  if (bg && n % (uint64_t)bg == 0) {
+  if (nr_gpu_path_state(NR_GPU_PATH_CHEST) == NR_GPU_PATH_TRIAL) {
+    /* Q4 per-path paired trial (DISCRETE tier only: SHARED never enters TRIAL): the CPU estimator the caller would have run, on this grant, timed against the GPU
+     * call above; it also checks the GPU rows bit for bit (a mismatch ends the trial as gpu_error). The CPU's values stand (identical when the check passes).
+     * Samples are per estimate row. */
+    struct timespec tg, tc;
+    clock_gettime(CLOCK_MONOTONIC, &tg);
+    static __thread c16_t *gpu_rows_t;
+    if (!gpu_rows_t && !(gpu_rows_t = malloc(sizeof(c16_t) * 4096 * 16 * NR_MAX_NB_LAYERS)))
+      return 0;
+    for (int k = 0; k < np; k++)
+      for (int a = 0; a < nrx; a++)
+        memcpy(gpu_rows_t + (size_t)(k * nrx + a) * 4096, &dl_ch_estimates[nl_of[k] * nrx + a][fp->ofdm_symbol_size * sym_of[k]],
+               sizeof(c16_t) * 4096);
+    const uint64_t bad0 = atomic_load(&g_gch_bad);
+    const bool ref0 = nr_dl_chest_cpu_ref;
+    nr_dl_chest_cpu_ref = true; /* the CPU side is the CPU estimator alone (no GPU delay pre-pass) */
+    struct timespec tc0;
+    clock_gettime(CLOCK_MONOTONIC, &tc0);
+    gch_check_cpu(ue, proc, dlsch, freq_alloc, segs, ns, np, sym_of, nl_of, j->type, pdsch_est_size, dl_ch_estimates, rxdataFsize, rxdataF,
+                  gpu_rows_t, nvar_out, nvar_ant_out);
+    clock_gettime(CLOCK_MONOTONIC, &tc);
+    nr_dl_chest_cpu_ref = ref0;
+    const double rows_n = (double)(np * nrx * ns);
+    const double us_g = ((tg.tv_sec - t0.tv_sec) * 1e9 + (tg.tv_nsec - t0.tv_nsec)) / 1e3, us_c = ((tc.tv_sec - tc0.tv_sec) * 1e9 + (tc.tv_nsec - tc0.tv_nsec)) / 1e3;
+    if (atomic_load(&g_gch_bad) != bad0)
+      nr_gpu_path_fail(NR_GPU_PATH_CHEST, "chest mismatch");
+    else {
+      nr_gpu_path_sample(NR_GPU_PATH_CHEST, 1, us_g / rows_n);
+      nr_gpu_path_sample(NR_GPU_PATH_CHEST, 0, us_c / rows_n);
+    }
+  } else if (bg && n % (uint64_t)bg == 0) {
     gch_async_submit(ue, proc, dlsch, freq_alloc, segs, ns, np, sym_of, nl_of, j->type, pdsch_est_size, dl_ch_estimates, rxdataFsize, rxdataF,
                      nvar_out, nvar_ant_out);
   } else if (!bg && (g_gch_check == 1 || (g_gch_check > 1 && n % (uint64_t)g_gch_check == 0))) {

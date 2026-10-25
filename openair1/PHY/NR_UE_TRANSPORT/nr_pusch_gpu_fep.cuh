@@ -21,6 +21,7 @@
 #include <time.h>
 #include <thread>
 #include "nr_pusch_gpu_diag.h"
+#include "nr_gpu_stage_census.h"
 
 namespace ulfep {
 struct Item {
@@ -95,6 +96,9 @@ struct State {
   Item *h_items[NCTX] = {}, *d_items[NCTX] = {};
   std::atomic<unsigned> busy{0};
   unsigned long long *h_span[NCTX] = {}, *d_span[NCTX] = {}; /* MAX_ITEMS x 4 x {start, end} ns  */
+  bool staged = false;        /* Q4: DISCRETE tier: the kernels read device copies of the windows (below), not the caller's host IQ */
+  int nctx = NCTX;            /* contexts in use (staged: as many as the shared memory budget allows) */
+  nr_gpu_buf_t in[NCTX] = {}, out[NCTX] = {}, spn[NCTX] = {}; /* staged: [items][merged windows] / [output rows] / [kernel spans]: pinned mirror + device */
   unsigned pct = 20;
   std::atomic<uint64_t> win_start_us{0}, win_used_us{0};
   std::atomic<uint64_t> calls{0}, items{0}, gpu_us{0}, max_us{0}, n_busy{0}, n_budget{0}, n_rt{0}, n_late{0}, n_err{0};
@@ -118,6 +122,75 @@ static uint64_t now_us()
     }                                                                                          \
   } while (0)
 
+/* ---- Q4: the staged DISCRETE run of a batch --------------------------------------------------------------------------------------------------------
+ * Each item's windows are N-sample slices of the caller's UL snapshot. Per antenna the slices are sorted and merged where they overlap or touch (the timing search asks
+ * for windows a few samples apart), every merged span is copied once into the context's pinned block behind the items, and the items are rewritten to device addresses
+ * (source = merged span + offset, destination = a row of the output block). One async H2D of the used bytes, the kernel, one async D2H of the output rows and of the kernel
+ * spans; the rows are scattered to the callers' destinations once the stream has finished. */
+namespace ulfep {
+static size_t al256(size_t b) { return (b + 255) & ~(size_t)255; }
+static size_t in_bytes() { return al256(MAX_ITEMS * sizeof(Item)) + (size_t)MAX_ITEMS * 4 * nr_exact::N * sizeof(short2); }
+static size_t out_bytes(int nant) { return (size_t)MAX_ITEMS * nant * nr_exact::N * sizeof(short2); }
+static size_t spn_bytes(int nant) { return (size_t)MAX_ITEMS * nant * 2 * sizeof(unsigned long long); }
+/* fills the context's block for items it[0..n) and enqueues copy + kernel + copy back on its stream; *h2d / *d2h = bytes copied */
+static cudaError_t stage_enqueue(int c, const Item *it, int n, int nb_rb, int fco, uint64_t *h2d, uint64_t *d2h)
+{
+  const size_t W = (size_t)nr_exact::N * sizeof(short2);
+  const int nant = U.nant;
+  char *h = (char *)U.in[c].host;
+  Item *di = (Item *)h;
+  size_t off = al256((size_t)n * sizeof(Item));
+  memcpy(di, it, (size_t)n * sizeof(Item));
+  for (int a = 0; a < nant; a++) {
+    int ord[MAX_ITEMS], m = 0;
+    for (int i = 0; i < n; i++)
+      if (it[i].src[a]) ord[m++] = i;
+    for (int x = 1; x < m; x++) { /* insertion sort by address */
+      const int v = ord[x];
+      int y = x - 1;
+      while (y >= 0 && (uintptr_t)it[ord[y]].src[a] > (uintptr_t)it[v].src[a]) { ord[y + 1] = ord[y]; y--; }
+      ord[y + 1] = v;
+    }
+    for (int x = 0; x < m;) {
+      const char *s0 = (const char *)it[ord[x]].src[a];
+      const char *e0 = s0 + W;
+      int y = x + 1;
+      while (y < m && (const char *)it[ord[y]].src[a] <= e0) {
+        const char *e1 = (const char *)it[ord[y]].src[a] + W;
+        if (e1 > e0) e0 = e1;
+        y++;
+      }
+      memcpy(h + off, s0, (size_t)(e0 - s0));
+      for (int z = x; z < y; z++)
+        di[ord[z]].src[a] = (const short2 *)((char *)U.in[c].dev + off + ((const char *)it[ord[z]].src[a] - s0));
+      off += al256((size_t)(e0 - s0));
+      x = y;
+    }
+  }
+  for (int i = 0; i < n; i++)
+    for (int a = 0; a < nant; a++) di[i].dst[a] = (short2 *)((char *)U.out[c].dev + ((size_t)i * nant + a) * W);
+  const cudaStream_t st = U.st[c];
+  cudaError_t e = cudaMemcpyAsync(U.in[c].dev, U.in[c].host, off, cudaMemcpyHostToDevice, st);
+  *h2d = off;
+  if (e != cudaSuccess) return e;
+  NR_EXACT_LAUNCH(U.isa, k_ul_fep, dim3(n, nant), nr_exact::THREADS, st, (const Item *)U.in[c].dev, U.d_perm, U.d_tw1024, U.d_tw4096, U.d_ts, nb_rb, fco, U.d_span[c]);
+  e = cudaPeekAtLastError();
+  if (e != cudaSuccess) return e;
+  e = cudaMemcpyAsync(U.out[c].host, U.out[c].dev, (size_t)n * nant * W, cudaMemcpyDeviceToHost, st);
+  if (e == cudaSuccess) e = cudaMemcpyAsync(U.spn[c].host, U.spn[c].dev, (size_t)n * nant * 2 * sizeof(unsigned long long), cudaMemcpyDeviceToHost, st);
+  *d2h = (size_t)n * nant * (W + 2 * sizeof(unsigned long long));
+  return e;
+}
+/* after the stream finished: the output rows to the callers' destinations */
+static void stage_collect(int c, const Item *it, int n)
+{
+  const size_t W = (size_t)nr_exact::N * sizeof(short2);
+  for (int i = 0; i < n; i++)
+    for (int a = 0; a < U.nant; a++)
+      memcpy(it[i].dst[a], (const char *)U.out[c].host + ((size_t)i * U.nant + a) * W, W);
+}
+} // namespace ulfep
+
 /* Warm-up (before the RX allocation fence). 0 = ready, -1 = unavailable (callers keep the CPU FEP). */
 static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int slot_us)
 {
@@ -126,10 +199,7 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int s
   if (U.ok) return U.nant == nant ? 0 : -1;
   if (N != nr_exact::N || nant < 1 || nant > 4 || offset_div <= 0) return -1;
   if (!nr_gpu_module_ready()) return -1;
-  if (!nr_gpu_platform_shared_direct()) {
-    fprintf(stderr, "nr_pusch_gpu_fep: no coherent host memory access -- CPU FEP\n");
-    return -1;
-  }
+  U.staged = !nr_gpu_platform_shared_direct(); /* Q4: DISCRETE tier: staged copies instead of reading the host IQ in place */
   U.isa = nr_exact::isa_profile();
   if (U.isa == nr_isa::P_NONE) {
     fprintf(stderr, "nr_pusch_gpu_fep: no bit-identical GPU twin of the host CPU DFT/rotation (%s) -- CPU FEP\n", nr_exact::g_isa_desc);
@@ -163,11 +233,32 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int s
   short2 *buf = nullptr;
   if (posix_memalign((void **)&buf, 4096, row * 2)) return -1;
   memset(buf, 0, row * 2);
-  for (int c = 0; c < NCTX; c++) {
+  if (U.staged) {
+    const size_t per = in_bytes() + out_bytes(nant) + spn_bytes(nant);
+    U.nctx = (int)nr_gpu_membudget_fit(nr_gpu_stage_share(), 0, per, 1, NCTX);
+    if (U.nctx < 1) { free(buf); return -1; }
+  }
+  for (int c = 0; c < U.nctx; c++) {
     const int kind = nr_pusch_gpu_ul_stream(&U.st[c], greatest, least, c);
     if (!kind) UCK(cudaStreamCreateWithPriority(&U.st[c], cudaStreamNonBlocking, least));
     else { U.part = true; U.kind = kind; }
     if (uldiag::on()) { UCK(cudaEventCreate(&U.ev0[c])); UCK(cudaEventCreate(&U.ev1[c])); }
+    if (U.staged) {
+      if (nr_gpu_buf_alloc(&U.in[c], in_bytes()) != 0 || nr_gpu_buf_alloc(&U.out[c], out_bytes(nant)) != 0 || nr_gpu_buf_alloc(&U.spn[c], spn_bytes(nant)) != 0) {
+        fprintf(stderr, "nr_pusch_gpu_fep: staging buffers do not fit -- CPU FEP\n");
+        free(buf);
+        return -1;
+      }
+      U.h_span[c] = (unsigned long long *)U.spn[c].host;
+      U.d_span[c] = (unsigned long long *)U.spn[c].dev;
+      Item w = {};
+      for (int a = 0; a < 4; a++) { w.src[a] = buf; w.dst[a] = buf + N; }
+      w.rotate = 1;
+      uint64_t hb = 0, db = 0;
+      UCK(stage_enqueue(c, &w, 1, 106, N - 636, &hb, &db)); /* the first launch, before the RX fence */
+      UCK((cudaError_t)nr_gpu_sync(U.st[c]));
+      continue;
+    }
     UCK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&U.h_items[c], MAX_ITEMS * sizeof(Item)));
     memset(U.h_items[c], 0, MAX_ITEMS * sizeof(Item));
     U.d_items[c] = (Item *)nr_gpu_device_ptr(U.h_items[c]);
@@ -185,8 +276,11 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int s
   }
   free(buf);
   U.ok = true;
-  fprintf(stderr, "SENSING: UL_GPU_FEP ready: %d RX, N=%d, %s stream, cap %u%% of each 100 ms\n", nant, N,
-          U.kind == 2 ? "real-time-partition" : U.part ? "discovery-partition" : "lowest-priority", U.pct);
+  fprintf(stderr, "SENSING: UL_GPU_FEP ready: %d RX, N=%d, %s stream, cap %u%% of each 100 ms%s\n", nant, N,
+          U.kind == 2 ? "real-time-partition" : U.part ? "discovery-partition" : "lowest-priority", U.pct, U.staged ? " (DISCRETE: staged copies)" : "");
+  if (U.staged)
+    fprintf(stderr, "SENSING: UL_GPU_FEP staged: %d contexts x (%zu KB device + %zu KB pinned)\n", U.nctx, (in_bytes() + out_bytes(nant) + spn_bytes(nant)) >> 10,
+            (in_bytes() + out_bytes(nant) + spn_bytes(nant)) >> 10);
   return 0;
 }
 
@@ -223,7 +317,7 @@ extern "C" int nr_pusch_gpu_fep_run(const void *items, int n, int nb_rb, int fco
   using namespace ulfep;
   if (!U.ok || n < 1 || n > MAX_ITEMS || nb_rb < 1 || nb_rb > 275 || fco < 0 || fco >= nr_exact::N) return -3;
   int c = -1;
-  for (int i = 0; i < NCTX && c < 0; i++)
+  for (int i = 0; i < U.nctx && c < 0; i++)
     if (!(U.busy.fetch_or(1u << i) >> i & 1u)) c = i;
   if (c < 0) { ++U.n_busy; return -1; }
   const uint64_t t0 = now_us();
@@ -241,11 +335,18 @@ extern "C" int nr_pusch_gpu_fep_run(const void *items, int n, int nb_rb, int fco
   }
   const bool dg = uldiag::on();
   const uldiag::Snap r0 = dg ? uldiag::snap() : uldiag::Snap();
-  memcpy(U.h_items[c], items, (size_t)n * sizeof(Item));
-  if (dg) cudaEventRecord(U.ev0[c], U.st[c]);
-  NR_EXACT_LAUNCH(U.isa, k_ul_fep, dim3(n, U.nant), nr_exact::THREADS, U.st[c], U.d_items[c], U.d_perm, U.d_tw1024, U.d_tw4096, U.d_ts, nb_rb, fco,
-                                                                U.d_span[c]);
-  cudaError_t e = cudaPeekAtLastError();
+  uint64_t st_h2d = 0, st_d2h = 0;
+  cudaError_t e = cudaSuccess;
+  if (U.staged) { /* Q4: DISCRETE tier: copy, kernel and copy back are enqueued together (the event pair brackets all three) */
+    if (dg) cudaEventRecord(U.ev0[c], U.st[c]);
+    e = stage_enqueue(c, (const Item *)items, n, nb_rb, fco, &st_h2d, &st_d2h);
+  } else {
+    memcpy(U.h_items[c], items, (size_t)n * sizeof(Item));
+    if (dg) cudaEventRecord(U.ev0[c], U.st[c]);
+    NR_EXACT_LAUNCH(U.isa, k_ul_fep, dim3(n, U.nant), nr_exact::THREADS, U.st[c], U.d_items[c], U.d_perm, U.d_tw1024, U.d_tw4096, U.d_ts, nb_rb, fco,
+                                                                  U.d_span[c]);
+    e = cudaPeekAtLastError();
+  }
   if (dg) cudaEventRecord(U.ev1[c], U.st[c]);
   const uint64_t t_launched = now_us();
   while (e == cudaSuccess) { /* the kernel writes the caller's rows, so a late kernel is waited for, never abandoned */
@@ -274,6 +375,10 @@ extern "C" int nr_pusch_gpu_fep_run(const void *items, int n, int nb_rb, int fco
     return -3;
   }
   const uint64_t ks = span_us(c, n * U.nant);
+  if (U.staged) {
+    stage_collect(c, (const Item *)items, n);
+    nr_stage::note(NR_GPU_STG_ULFEP, st_h2d, 1, st_d2h, 2);
+  }
   U.busy.fetch_and(~(1u << c));
   ++U.calls;
   U.items += (uint64_t)n;
@@ -285,12 +390,15 @@ extern "C" int nr_pusch_gpu_fep_run(const void *items, int n, int nb_rb, int fco
   return 0;
 }
 
-/* calls, items, gpu_us, max_us, busy, over_cap, rt_defer, late(>2 ms), errors, partitioned */
+/* calls, items, gpu_us, max_us, busy, over_cap, rt_defer, late(>2 ms), errors, partitioned, staged runs, h2d bytes, d2h bytes, staged in use */
 extern "C" void nr_pusch_gpu_fep_stats(uint64_t *o)
 {
   using namespace ulfep;
   o[0] = U.calls; o[1] = U.items; o[2] = U.gpu_us; o[3] = U.max_us; o[4] = U.n_busy; o[5] = U.n_budget; o[6] = U.n_rt;
   o[7] = U.n_late; o[8] = U.n_err; o[9] = U.part;
+  uint64_t q[6];
+  for (int k = 0; k < 6; k++) q[k] = nr_stage::g_c[NR_GPU_STG_ULFEP][k].load(std::memory_order_relaxed);
+  o[10] = q[0]; o[11] = q[1]; o[12] = q[2]; o[13] = U.staged; /* Q4: staged runs, H2D bytes, D2H bytes, 1 = the staged (DISCRETE) variant is in use */
 }
 
 /* GPUPASS Task 7: launch-only FEP of the PUSCH pass (graph-capturable). items_dev: 14 ulfep::Item (nr_pusch_gpu_fep_item_t) readable by the kernel, par_dev: {nb_rb, fco}

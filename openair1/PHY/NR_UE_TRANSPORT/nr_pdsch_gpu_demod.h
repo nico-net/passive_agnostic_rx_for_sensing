@@ -68,6 +68,8 @@ typedef struct nr_gpu_demod_job_s {
   const uint32_t *nvar_dev;               /* GPUPASS: non-null = nvar is read from here when the kernels run (the chest post's output), `nvar` above is ignored */
   const struct nr_gpu_demod_job_s *jref;  /* GPUPASS: non-null = the kernels read the job from here instead of their by-value copy (graph replay: the job is rewritten
                                            * between replays; the by-value copy is that of the capture). Device-accessible, at least offsetof(evm) bytes. */
+  int stage_full;  /* Q4, DISCRETE tier only (ignored on DIRECT): 1 = copy every output back to the caller (comp / mag* of all layers: a checked grant is compared with the CPU);
+                    * 0 = only what the decoder reads (the LLRs and comp layer 0 of the symbol with the most REs: the Qm oracle) */
   int evm_defer;   /* DECGPU: return once the LLRs are done; the EVM chain completes later (nr_gpu_demod_evm_wait_fn) */
   int evm_pending; /* out: 1 = the EVM partial sums are not in evm[] yet, the context stays held until the wait */
   /* outputs */
@@ -86,6 +88,10 @@ typedef int (*nr_gpu_demod_init_fn)(int nant);
 /* 0: done, outputs written, context held (call release); < 0: nothing written, the caller runs the CPU path. */
 typedef int (*nr_gpu_demod_run_fn)(nr_gpu_demod_job_t *job);
 typedef void (*nr_gpu_demod_release_fn)(int ctx);
+/* Q4: DISCRETE staging of nr_pdsch_gpu_demod_run (module export nr_pdsch_gpu_demod_stage_init, called after the init, before RX starts): device buffers for
+ * the span of the slot the kernels read; sized from the shared memory budget. 0 = ready (also on DIRECT: nothing to stage), -1 = off (the run refuses, the CPU demodulates).
+ * N: ofdm_symbol_size, ext_max: (N_RB * 12 + 15) & ~15. */
+typedef int (*nr_gpu_demod_stage_init_fn)(int nbRx, int N, uint32_t ext_max);
 /* GPUPASS launch-only variant (nr_pdsch_gpu_demod.cu): enqueues the demod of one grant on `stream`, LLRs into llr_dev; no wait, no
  * host-side results, no EVM. 0 or -1. */
 typedef int (*nr_gpu_demod_dev_fn)(const nr_gpu_demod_job_t *job, nr_gpu_buf_t *llr_dev, void *stream);
