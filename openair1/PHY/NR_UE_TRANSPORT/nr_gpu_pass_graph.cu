@@ -615,10 +615,10 @@ static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
     static int old_rule = -1, target = 0, dk = 2; /* NR_TEST_L2NORM_OLD / _TARGET: the same test seams as nr_llr_norm_shift_nl (host) */
     if (old_rule < 0) {
       old_rule = getenv("NR_TEST_L2NORM_OLD") ? 1 : 0;
-      target = getenv("NR_TEST_L2NORM_TARGET") ? atoi(getenv("NR_TEST_L2NORM_TARGET")) : 40;
+      target = getenv("NR_TEST_L2NORM_TARGET") ? atoi(getenv("NR_TEST_L2NORM_TARGET")) : -1; /* -1: nr_llr_norm_l2_default(Qm) below */
       dk = getenv("NR_TEST_L2NORM_DK") ? atoi(getenv("NR_TEST_L2NORM_DK")) : 2;
     }
-    pb.nl = old_rule ? 0 : j->dj.nl; pb.qm = j->Qm; pb.l2t = target; pb.l2dk = dk;
+    pb.nl = old_rule ? 0 : j->dj.nl; pb.qm = j->Qm; pb.l2t = target >= 0 ? target : (int)nr_llr_norm_l2_default((int)j->Qm); pb.l2dk = dk;
     pb.plain_t = old_rule || j->dj.nl == 2 ? (int)LLR_NORM_TARGET : (int)nr_llr_norm_target((int)j->Qm); /* nr_llr_norm_shift_nl, plain branch (keep identical) */
   }
   pb.Gd = j->probe ? j->G_dem : j->G_dem && j->G_dem < j->G ? j->G_dem : j->G; /* a probe: the LLRs up to its horizon (> 0, checked in dl_try) */

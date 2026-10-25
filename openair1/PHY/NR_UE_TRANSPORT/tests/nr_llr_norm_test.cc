@@ -587,3 +587,23 @@ TEST(QamMode, PassiveRule)
   EXPECT_EQ(0, nr_l2maxh_delta(4, 3, 1));
   EXPECT_EQ(0, nr_l2maxh_delta(2, 0, 0));
 }
+
+/* HMCS: two layers, 256QAM. Balanced layers carrying a 256QAM lattice a_raw: the all-bits mean is 3.75 a, so the shifted a must land in (9, 20]
+ * (the old target 40 gave (5.3, 10.7]); other Qm keep the default 40. */
+TEST(LlrNorm, TwoLayerQam256TargetKeepsTheLattice)
+{
+  EXPECT_EQ(nr_llr_norm_l2_default(8), 71u);
+  EXPECT_EQ(nr_llr_norm_l2_default(6), LLR_NORM_TARGET);
+  EXPECT_EQ(nr_llr_norm_l2_default(4), LLR_NORM_TARGET);
+  for (double a_raw : {40.0, 80.0, 160.0, 320.0}) {
+    const auto l0 = qam256_llrs(a_raw, a_raw / 2.4, 10000, 5 + (unsigned)a_raw); /* per RE: 8 LLRs (I,Q interleaved) */
+    std::vector<int16_t> v(2 * l0.size());                                          /* [layer0 symbol: 8][layer1 symbol: 8] per RE block */
+    const auto l1 = qam256_llrs(a_raw, a_raw / 2.4, 10000, 99 + (unsigned)a_raw);
+    for (size_t re = 0; re < 10000; re++)
+      for (int i = 0; i < 8; i++) { v[re * 16 + i] = l0[re * 8 + i]; v[re * 16 + 8 + i] = l1[re * 8 + i]; }
+    const int k = nr_llr_norm_shift_nl(v.data(), (uint32_t)v.size(), 2, 8);
+    const double a_out = a_raw / (double)(1 << k);
+    EXPECT_GT(a_out, 9.0) << "a_raw " << a_raw;
+    EXPECT_LE(a_out, 20.5) << "a_raw " << a_raw;
+  }
+}

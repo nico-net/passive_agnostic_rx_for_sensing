@@ -94,12 +94,21 @@ static inline int nr_llr_norm_shift_t(const int16_t *llr, uint32_t span, uint32_
  * keeps resolution while the strong layer saturates only by 2x. Any other nl, QPSK: the function above, bit for bit. The GPU twin is
  * k_norm_sum (nr_gpu_pass_graph.cu); keep the two identical. */
 #define NR_LLR_NORM_L2_STRIDE 16u
+/* HMCS 2026-10-25: the two-layer statistic is the mean |LLR| over ALL Qm bits of both layers, 3.75 a for 256QAM (8a, 4a, 2a, a), so the target 40 left the strong
+ * layer at a in (5.3, 10.7] LSB before the weak-layer bonus. nr_dlsim 2 layers, 2 RX, 106 PRB MCS 27 table 2, 30.0 dB, 60 trials, BLER by a: 3 -> 1.00, 5 -> 0.82,
+ * 8 -> 0.43, 12 -> 0.22, 20 -> 0.22, 40 -> 0.23, 80 -> 0.33 [MEASURED, sens6 x86, dlsim stock equaliser]: the same dependence as one layer. Qm 8 target:
+ * 3.75 * 19 = 71 (a in (9.6, 19] for balanced layers; the weak-layer bonus of up to 2 bits keeps a strong layer under ~76 at a 12 dB gap). Qm 4/6: 40 as before. */
+static inline uint32_t nr_llr_norm_l2_default(int qm)
+{
+  return qm == 8 ? 71u : LLR_NORM_TARGET;
+}
 static inline int nr_llr_norm_shift_nl(const int16_t *llr, uint32_t span, int nl, int qm)
 {
-  static int old_rule = -1, target = 0, dk = 2; /* NR_TEST_L2NORM_OLD=1: the pre-2026-10-23 rule (A/B seam); NR_TEST_L2NORM_TARGET: weak-layer target (exploration) */
+  static int old_rule = -1, target = 0, dk = 2, target_env = 0; /* NR_TEST_L2NORM_OLD=1: the pre-2026-10-23 rule (A/B seam); NR_TEST_L2NORM_TARGET: weak-layer target (exploration) */
   if (old_rule < 0) {
     old_rule = getenv("NR_TEST_L2NORM_OLD") ? 1 : 0;
-    target = getenv("NR_TEST_L2NORM_TARGET") ? atoi(getenv("NR_TEST_L2NORM_TARGET")) : (int)LLR_NORM_TARGET;
+    target_env = getenv("NR_TEST_L2NORM_TARGET") != NULL;
+    target = target_env ? atoi(getenv("NR_TEST_L2NORM_TARGET")) : (int)LLR_NORM_TARGET;
     dk = getenv("NR_TEST_L2NORM_DK") ? atoi(getenv("NR_TEST_L2NORM_DK")) : 2;
   }
   if (old_rule || nl != 2 || qm < 4 || qm > 8 || (qm & 1))
@@ -121,7 +130,8 @@ static inline int nr_llr_norm_shift_nl(const int16_t *llr, uint32_t span, int nl
   const uint64_t wk = acc[0] < acc[1] ? acc[0] : acc[1], st = acc[0] < acc[1] ? acc[1] : acc[0];
   const uint32_t mean = (uint32_t)((wk + st) / (2u * (uint64_t)nb * (uint32_t)qm)); /* both layers: the stride-16 sample of the plain rule reads layer 0 only */
   int k = 0;
-  while (k < 8 && (mean >> k) > (uint32_t)target)
+  const uint32_t tgt = target_env ? (uint32_t)target : nr_llr_norm_l2_default(qm);
+  while (k < 8 && (mean >> k) > tgt)
     k++;
   int e = 0; /* extra bits for the weak layer: floor(log2(strong / weak)) of the mean |LLR|, at most `dk` */
   while (e < dk && (wk << (e + 1)) <= st)
