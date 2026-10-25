@@ -109,6 +109,7 @@ typedef struct {
 void nr_pbwp_init_ex(nr_pbwp_t *t, uint16_t carrier_rbs, uint16_t base_start, uint16_t base_size,
                      uint16_t base_len, uint8_t base_ind_bits, uint8_t k_slack);
 uint16_t nr_pbwp_last_rnti(const nr_pbwp_t *t, int idx); /* an RNTI bound to entry idx, 0 if none */
+bool nr_pbwp_switch_identifiable(const nr_pbwp_t *t, int from, int to); /* evidence tells entries from/to apart (lengths differ, or TB-CRC on to) */
 uint8_t nr_pbwp_riv_bits(uint16_t n);
 /** TS 38.214 5.1.2.2.2 Type-1 decode, same arithmetic as NRRIV2BW / NRRIV2PRBOFFSET. */
 bool nr_pbwp_riv_decode(uint32_t riv, uint16_t n, uint16_t *start, uint16_t *len);

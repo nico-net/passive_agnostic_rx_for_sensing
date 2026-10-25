@@ -9,11 +9,13 @@ extern "C" {
 }
 #include <map>
 #include "nr_gpu_pass_fixture.h"
+#include "nr_pdsch_dmrs_snr.h"
 #include "nr_gpu_pass_fp32_gate.h"
 #include "nr_gpu_pass_retry.h"
 #include "nr_gpu_pass_hq.h"
 #include "nr_gpu_platform.h"
 #include "nr_gpu_pass_post.h"
+#include "nr_gpu_pass_cap.h"
 #include <random>
 #include <dlfcn.h>
 #include <cmath>
@@ -24,6 +26,7 @@ extern "C" {
 #include <memory>
 #include <string>
 #include <array>
+#include <unistd.h>
 static bool have_gpu() { return nr_gpu_model() >= 0 && getenv("NR_GPU_TEST_SKIP") == nullptr; }
 
 TEST(GpuMem, RoundTripBothModels) {
@@ -275,7 +278,6 @@ TEST(GpuPassStamps, SplitSpansAndLdpcVerdicts) {
   GpuPassModule &m = GpuPassModule::get(&ok, &lib);
   if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
   ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
-  const bool direct = nr_gpu_model() == NR_GPU_MODEL_DIRECT;
   int n = 0, n_bad = 0;
   uint32_t last_seq = 0;
   m.pass_split(1);
@@ -303,7 +305,6 @@ TEST(GpuPassStamps, SplitSpansAndLdpcVerdicts) {
       EXPECT_GT(g.lspan_ns, 0u) << what;
       const double sum = ((double)g.cspan_ns + g.dspan_ns + g.lspan_ns) / 1e3, span = g.gspan_ns / 1e3;
       EXPECT_NEAR(sum, span, 3.0) << what << ": C + D + L tile the GPU span";
-      if (!direct) { EXPECT_EQ(0, g.li.valid) << what; continue; }
       ASSERT_EQ(1, g.li.valid) << what;
       EXPECT_EQ((int)fx.tb.C, (int)g.li.ncb) << what;
       EXPECT_EQ((int)g.li.ncb, g.li.nconv + g.li.nlast) << what;
@@ -332,6 +333,183 @@ TEST(GpuPassStamps, SplitSpansAndLdpcVerdicts) {
   m.pass_split(0);
   EXPECT_GE(n, 4);
   EXPECT_EQ(0, n_bad) << "a block that ran to the iteration limit took less time than a converged one";
+}
+/* ===================================================== T5: DISCRETE parity (the full nr_gpu_pass_result_t) ===================================================== */
+/* The same synthetic grants (rank 1..4; real, probe, segmented (nseg 2) and CRC-failing; single and split graphs) through the pass under DIRECT and under DISCRETE must leave the
+ * same result: the TB, the verdicts, nvar, the DM-RS SNR rows of layer nl-1, the LDPC verdict counters, the equaliser row, the brfo rows, the LLRs and the copied-back rxdataF.
+ * Roles (NR_GPU_DEQ_ROLE, NR_GPU_DEQ_FILE; the memory model is per process, so ctest runs the halves as two processes): "write" = a DIRECT process records the results;
+ * "compare" = a DISCRETE process (NR_GPU_PASS_DISCRETE=1) compares with the recording when it exists; "record" = like "write" under whatever model the process has
+ * (a check of the recording and compare code itself, e.g. DISCRETE against DISCRETE on a discrete GPU); no role = in-process checks only. In every role the result is also checked
+ * against the CPU stage path (Task 2 stages + CPU steps) and the DM-RS SNR against the host function on the whole stage-path estimate (every layer). A device without a DIRECT
+ * model (a discrete GPU) skips the "write" role. */
+struct DeqRec {
+  nr_gpu_pass_result_t r;
+  int32_t rc;
+  uint64_t h_tb, h_llr, h_brfo, h_qm, h_rxf;
+};
+static void deq_scrub(nr_gpu_pass_result_t *r)
+{
+  r->tb = nullptr; r->demod_out = nullptr; r->brfo_rows = nullptr; r->qm_row = nullptr;
+  r->gpu_us = 0; r->instance = 0; r->prep_ns = r->launch_ns = r->gstart_ns = r->gspan_ns = 0;
+  r->cspan_ns = r->dspan_ns = r->lspan_ns = 0; r->seq = 0;
+  const auto li = r->li; /* the verdict counters are deterministic, the %globaltimer spans are not */
+  memset(&r->li, 0, sizeof(r->li));
+  r->li.valid = li.valid; r->li.ncb = li.ncb; r->li.nconv = li.nconv; r->li.nlast = li.nlast; r->li.it_conv_max = li.it_conv_max; r->li.it_conv_sum = li.it_conv_sum;
+  r->li.npad = li.npad; r->li.npad_last = li.npad_last;
+}
+static bool deq_same(const DeqRec &a, const DeqRec &b, const std::string &what)
+{
+  bool ok = true;
+  auto chk = [&](bool c, const char *w) { if (!c) { ADD_FAILURE() << what << ": " << w; ok = false; } };
+  chk(a.rc == b.rc, "return code");
+  chk(a.h_tb == b.h_tb, "TB bytes");
+  chk(a.h_llr == b.h_llr, "llr_out");
+  chk(a.h_brfo == b.h_brfo, "brfo rows");
+  chk(a.h_qm == b.h_qm, "qm row");
+  chk(a.h_rxf == b.h_rxf, "rxdataF copy-back");
+  const nr_gpu_pass_result_t &x = a.r, &y = b.r;
+  chk(x.tb_ok == y.tb_ok && x.need_cpu == y.need_cpu && x.skip == y.skip && x.tbs == y.tbs, "verdicts");
+  chk(!memcmp(x.seg_ok, y.seg_ok, sizeof(x.seg_ok)), "segment verdicts");
+  chk(x.nvar == y.nvar && !memcmp(x.nvar_ant, y.nvar_ant, sizeof(x.nvar_ant)), "nvar / nvar_ant");
+  chk(x.log2_maxh == y.log2_maxh && x.qm_valid == y.qm_valid, "log2_maxh / qm_valid");
+  chk(!memcmp(&x.post, &y.post, sizeof(x.post)), "chest post");
+  chk(!memcmp(&x.dsnr, &y.dsnr, sizeof(x.dsnr)), "dsnr (DM-RS SNR rows of layer nl-1, power, reference)");
+  chk(!memcmp(&x.llr_stats, &y.llr_stats, sizeof(x.llr_stats)), "LLR statistics");
+  chk(!memcmp(&x.li, &y.li, sizeof(x.li)), "LDPC verdict counters (li)");
+  chk(x.evm_db == y.evm_db && x.snr_db == y.snr_db && x.nvar_db == y.nvar_db, "evm / snr / nvar dB");
+  chk(x.ul_log2_maxh == y.ul_log2_maxh && x.ul_nrows == y.ul_nrows && x.ul_tb_crc == y.ul_tb_crc, "UL fields");
+  return ok;
+}
+struct DeqCase { const char *name; int nl, qm, kind; /* 0 real, 1 probe, 2 segmented (13 PRB, 2 segments), 3 real with a CRC failure */ };
+TEST(GpuPassDl, DiscreteEqualsDirectFullResult) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  const char *role = getenv("NR_GPU_DEQ_ROLE"), *path = getenv("NR_GPU_DEQ_FILE");
+  const bool rec_only = role && !strcmp(role, "record"), wr = rec_only || (role && !strcmp(role, "write")), cmp = role && !strcmp(role, "compare");
+  if (wr && path) remove(path); /* never leave a stale recording for the compare half */
+  if ((wr || cmp) && !path) GTEST_SKIP() << "NR_GPU_DEQ_ROLE needs NR_GPU_DEQ_FILE";
+  if (wr && !rec_only && nr_gpu_model() != NR_GPU_MODEL_DIRECT) GTEST_SKIP() << "no DIRECT memory model on this device (tier " << (nr_gpu_platform_shared_direct() ? "shared" : "discrete/cpu")
+                                                              << "): the DIRECT half of DiscreteEqualsDirectFullResult is not run here";
+  if (cmp && nr_gpu_model() != NR_GPU_MODEL_DISCRETE) GTEST_SKIP() << "the compare half runs under NR_GPU_PASS_DISCRETE=1";
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m) && m.pass_warm && m.pass_split);
+  std::vector<DeqRec> rec; /* this process's results, in case order */
+  std::vector<DeqRec> ref; /* the recording of the DIRECT process (compare) */
+  if (cmp) {
+    FILE *f = fopen(path, "rb");
+    if (!f) printf("GpuPassDl.DiscreteEqualsDirectFullResult: no DIRECT recording at %s (the writing half was skipped or has not run): CPU-reference checks only\n", path);
+    else {
+      DeqRec r;
+      while (fread(&r, sizeof(r), 1, f) == 1) ref.push_back(r);
+      fclose(f);
+    }
+  }
+  static const DeqCase cases[] = {
+      {"real rank1", 1, 4, 0}, {"real rank2", 2, 4, 0}, {"real rank3", 3, 4, 0}, {"real rank4", 4, 2, 0},
+      {"probe rank1", 1, 4, 1}, {"probe rank2", 2, 4, 1}, {"probe rank3", 3, 4, 1}, {"probe rank4", 4, 2, 1},
+      {"seg2 rank1", 1, 4, 2}, {"seg2 rank2", 2, 4, 2}, {"seg2 rank3", 3, 4, 2}, {"seg2 rank4", 4, 2, 2},
+      {"crc-fail rank1", 1, 4, 3}, {"crc-fail rank2", 2, 4, 3}, {"crc-fail rank3", 3, 4, 3}, {"crc-fail rank4", 4, 2, 3},
+  };
+  int n = 0, n_cmp = 0, n_ok = 0, n_li = 0;
+  for (int split : {0, 1}) {
+    m.pass_split(split);
+    for (const DeqCase &c : cases) {
+      const std::string what = std::string(c.name) + (split ? " split" : " single") ;
+      GpuPassFixture fx = [&]() {
+        if (c.kind == 2) {
+          const auto sd = seg_layout(13, 3, 8, 0, 0);
+          const int nsegc = nr_gpu_pass_nseg_class((int)sd.size());
+          nr_gpu_pass_shape_t sh = {13, 13, (uint16_t)c.nl, (uint16_t)c.qm, 2, 1, 1, (uint16_t)nsegc};
+          GpuPassFixture f = GpuPassFixture::from_shape(sh, 23 + n, -1, &sd, 0, 0);
+          f.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(f.tb.C);
+          f.shape.nrb_class = (uint16_t)nr_gpu_pass_nrb_class(13);
+          return f;
+        }
+        const int nrb = c.nl >= 3 ? 24 : 48;
+        const nr_gpu_pass_shape_t sh = {(uint16_t)nrb, 13, (uint16_t)c.nl, (uint16_t)c.qm, 2, (uint16_t)nr_gpu_pass_ncb_class(std::max(1, nrb * c.nl / 12)), 1};
+        return GpuPassFixture::from_shape(sh, 29 + n, c.kind == 3 ? 0 : -1);
+      }();
+      ASSERT_TRUE(fx.tb_ok_built) << what;
+      if (c.kind == 1) fx.is_probe = true;
+      fx.bind(); /* the job points at this object's own vectors */
+      nr_gpu_pass_job_t &j = *fx.job;
+      j.qm_sym = fx.data_syms[fx.data_syms.size() / 2]; /* the equaliser row the host's modulation-order oracle reads */
+      j.qm_n = (uint32_t)std::min(12 * fx.nrb, 4096);
+      nr_gpu_pass_shape_t w = j.shape;
+      ASSERT_EQ(0, m.pass_warm(&w, c.nl >= 2 ? 3 : 0, 0, 0)) << what;
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
+      std::vector<int16_t> brfo((size_t)4 * 2 * 4096 * 2, 0x7e), qm((size_t)4096 * 2, 0x7e);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      g.brfo_rows = brfo.data(); g.qm_row = qm.data();
+      j.llr_out_all = c.kind == 1 ? 0 : 1; /* a probe's LLRs reach llr_out without it; the others: whatever the verdict, so the LLR path is compared on every grant */
+      const int rc = m.pass_try(&j, &g);
+      ASSERT_EQ(0, rc) << what;
+      ASSERT_EQ(0, fx.run_stage_path(&s)) << what;
+      n++;
+      /* ---- against the CPU stage path: the verdicts, nvar, the TB, the final LLRs and the DM-RS SNR of layer nl-1 on the stage path's own estimate */
+      EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+      EXPECT_EQ(s.nvar, g.nvar) << what;
+      EXPECT_EQ(s.seg_ok[0], g.seg_ok[0]) << what;
+      if (c.kind != 1) {
+        EXPECT_EQ(s.tb_ok, g.tb_ok) << what;
+        EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+        if (!g.need_cpu) EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+      }
+      if (!g.need_cpu && !g.skip && (!g.tb_ok || j.llr_out_all)) EXPECT_EQ(0, memcmp(fx.llr_ref.data(), fx.llr_pass.data(), (size_t)fx.tb.G * 2)) << what << ": final LLRs";
+      {
+        const int mm = j.dmrs_sym[j.ndmrs - 1], l = j.nl - 1;
+        const int16_t *rows[4] = {0, 0, 0, 0};
+        for (int a = 0; a < 4; a++) rows[a] = fx.est_all.data() + 2 * ((size_t)(l * 4 + a) * 14 * 4096 + (size_t)mm * 4096);
+        nr_dmrs_snr_t e;
+        nr_dmrs_snr_init(&e);
+        nr_dmrs_snr_fill(&e, rows, 4, 12 * j.nrb, g.nvar_ant, j.dmrs_type, 1.0);
+        e.ref_db = g.dsnr.ref_db; /* the reference power is read from the rxdataF of the carrier, compared across the two models below */
+        EXPECT_EQ(0, memcmp(&e, &g.dsnr, sizeof(e))) << what << ": dsnr of layer " << l << " (host function on the stage-path estimate) comb " << e.comb_db << " vs " << g.dsnr.comb_db;
+      }
+      if (c.kind == 2) EXPECT_EQ(0, memcmp(brfo.data(), fx.est_l0.data(), brfo.size() * 2)) << "layer-0 estimates in data order, " << what;
+      if (g.qm_valid == 0) ADD_FAILURE() << what << ": qm_row not delivered (qm_valid 0)";
+      if (split && !g.skip && c.kind != 1 && !g.need_cpu && fx.tb.C >= 2) {
+        n_li++;
+        EXPECT_EQ(1, g.li.valid) << what << ": the LDPC verdict counters are filled in both memory models";
+        EXPECT_EQ((int)fx.tb.C, (int)g.li.ncb) << what;
+      }
+      n_ok += g.tb_ok;
+      /* ---- this process's record */
+      DeqRec r{};
+      r.r = g;
+      deq_scrub(&r.r);
+      r.rc = rc;
+      r.h_tb = hash64(gb.data(), g.tbs / 8);
+      r.h_llr = hash64(fx.llr_pass.data(), (size_t)fx.tb.G * 2);
+      r.h_brfo = hash64(brfo.data(), (size_t)std::min(j.nbRx, 4) * 2 * 4096 * 4);
+      r.h_qm = hash64(qm.data(), (size_t)j.qm_n * 4);
+      uint64_t hx = 1469598103934665603ull;
+      for (int a = 0; a < 4; a++)
+        for (int sy = 0; sy < 14; sy++)
+          if (j.copy_mask >> sy & 1) hx = (hx ^ hash64(&fx.rxF_out[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], 4096 * 4)) * 1099511628211ull;
+      r.h_rxf = hx;
+      if (!cmp || ref.size() <= rec.size()) { /* nothing to compare with */ }
+      else {
+        n_cmp++;
+        EXPECT_TRUE(deq_same(ref[rec.size()], r, what)) << "DISCRETE differs from DIRECT";
+      }
+      rec.push_back(r);
+    }
+  }
+  m.pass_split(0);
+  if (wr) {
+    FILE *f = fopen(path, "wb");
+    ASSERT_NE(nullptr, f) << path;
+    ASSERT_EQ(rec.size(), fwrite(rec.data(), sizeof(DeqRec), rec.size(), f));
+    fclose(f);
+  }
+  if (cmp && !ref.empty()) EXPECT_EQ(rec.size(), ref.size()) << "the DIRECT recording has another case count";
+  printf("GpuPassDl.DiscreteEqualsDirectFullResult: %d grants (%d decoded, %d with LDPC counters), role %s, %s memory model, %d compared with the DIRECT recording\n", n, n_ok, n_li,
+         role ? role : "none", nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE", n_cmp);
+  EXPECT_GE(n_ok, n / 3);
 }
 /* Concurrency model: 4 instances; 8 threads each running their own grant 40 times. Every launch either decodes the TB it was given or is refused with 1 (counted busy); no
  * launch may return another thread's bytes (the instances' buffers, staging slots and contexts are private). */
@@ -1301,11 +1479,15 @@ static ChestRef chest_finalize(const nr_gpu_chest_post_par_t &p, const int64_t *
   const double re[2] = {(double)re_[0], (double)re_[1]}, im[2] = {(double)im_[0], (double)im_[1]}, ksum[2] = {(double)ks_[0], (double)ks_[1]};
   const double magsum[2] = {mag_[0], mag_[1]};
   const uint32_t kn[2] = {(uint32_t)kn0, (uint32_t)kn1};
-  const double coh_num = sqrt((re[0] + re[1]) * (re[0] + re[1]) + (im[0] + im[1]) * (im[0] + im[1]));
+  /* The FP64 contraction of x^2 + y^2 is pinned explicitly: the compiler's own choice differs between hosts (aarch64 GCC: fma(re, re, im * im) per half and
+   * fma(im, im, re * re) for coh_num, the pattern the device build is written to; x86 GCC with -march=native fuses the other product), so the reference is
+   * host independent and the device build is compared with one definition on every host. */
+  const double s_re = re[0] + re[1], s_im = im[0] + im[1];
+  const double coh_num = sqrt(fma(s_im, s_im, s_re * s_re));
   const double coh_den = magsum[0] + magsum[1];
   const double coherence = (coh_den > 0.0) ? (coh_num / coh_den) : 0.0;
-  const double coh_h[2] = {(magsum[0] > 0.0) ? sqrt(re[0] * re[0] + im[0] * im[0]) / magsum[0] : 0.0,
-                           (magsum[1] > 0.0) ? sqrt(re[1] * re[1] + im[1] * im[1]) / magsum[1] : 0.0};
+  const double coh_h[2] = {(magsum[0] > 0.0) ? sqrt(fma(re[0], re[0], im[0] * im[0])) / magsum[0] : 0.0,
+                           (magsum[1] > 0.0) ? sqrt(fma(re[1], re[1], im[1] * im[1])) / magsum[1] : 0.0};
   const double coh_min = (coh_h[0] < coh_h[1]) ? coh_h[0] : coh_h[1];
   const bool halves_usable = (kn[0] >= 8 && kn[1] >= 8);
   const double coh_gate = halves_usable ? coh_min : coherence;
@@ -3592,6 +3774,18 @@ TEST(GpuPassGate, UlSkipsNoChanceAndKeepsTheRest) {
   EXPECT_GT(n_run, 0);
 }
 
+/* T6: the graph memory cap is a pure function of the device memory and the memory free at the platform probe (1 GB = 1000 MiB in this table). */
+TEST(GpuPassCap, Table) {
+  const auto gb = [](double g) { return (size_t)(g * 1000.0) << 20; };
+  EXPECT_EQ(3072, nr_gpu_pass_cap_mb(gb(128), gb(120)));
+  EXPECT_EQ(2048, nr_gpu_pass_cap_mb(gb(8), gb(7.6)));
+  EXPECT_EQ(1050, nr_gpu_pass_cap_mb(gb(4), gb(3.5)));
+  EXPECT_EQ(360, nr_gpu_pass_cap_mb(gb(2), gb(1.2)));
+  EXPECT_EQ(256, nr_gpu_pass_cap_mb(gb(1), gb(0.3))); /* the floor */
+  EXPECT_EQ(2048, nr_gpu_pass_cap_mb(gb(8), 0));      /* free memory unknown: the quarter-of-total term alone */
+  EXPECT_EQ(2560, nr_gpu_pass_cap_mb((size_t)10240 << 20, (size_t)20000 << 20)); /* 10 GiB: a quarter, inside the clamp */
+}
+
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
  * allocated or built on the launch path. */
 extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);
@@ -3760,4 +3954,68 @@ TEST(GpuPassRetry, OnlyRetryBodiesGoOld)
   EXPECT_EQ(nr_gpu_pass_retry_to_old(0, 3, 1, 0), 0);
   EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 2, 0, 1), 0); /* quiet / predicted / A-B alternate body keeps the pass */
   EXPECT_EQ(nr_gpu_pass_retry_to_old(1, 1, 1, 1), 0);
+}
+
+/* ===================================================== CUDA compat: no conditional-node driver entry points ===================================================== */
+/* The pass needs the driver's conditional graph nodes (the in-graph no-chance gate). Without them nr_gpu_pass_init turns the pass off: it returns -1, with exactly one log line however often it
+ * is called, and the receiver keeps the non-pass GPU / CPU path. Own ctest process (test_nr_gpu_pass_compat): the init of a pass that is already running returns 0 before the check. */
+TEST(GpuPassCompat, NoGateDriverDisablesPassOnce) {
+  void *dl = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
+  if (!dl) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  auto cfg = (nr_gpu_pass_config_fn)dlsym(dl, "nr_gpu_pass_config");
+  auto init = (nr_gpu_pass_init_fn)dlsym(dl, "nr_gpu_pass_init");
+  auto no_gate = (void (*)(int))dlsym(dl, "nr_gpu_pass_test_no_gate_drv");
+  ASSERT_TRUE(cfg && init && no_gate) << "libpdsch_gpu.so lacks nr_gpu_pass_config / nr_gpu_pass_init / nr_gpu_pass_test_no_gate_drv";
+  static int16_t dt[4096 * 4]; /* never read: the init stops before it allocates anything */
+  nr_gpu_pass_cfg_t c = {4, 273, dt, 4096, 20, 1};
+  ASSERT_EQ(0, cfg(&c));
+  no_gate(1);
+  fflush(stderr);
+  const int saved = dup(2);
+  FILE *tmp = tmpfile();
+  ASSERT_TRUE(saved >= 0 && tmp);
+  dup2(fileno(tmp), 2);
+  const int r1 = init(16), r2 = init(16);
+  fflush(stderr);
+  dup2(saved, 2);
+  close(saved);
+  std::string log;
+  rewind(tmp);
+  for (int ch; (ch = fgetc(tmp)) != EOF;) log += (char)ch;
+  fclose(tmp);
+  EXPECT_EQ(-1, r1);
+  EXPECT_EQ(-1, r2);
+  /* the first init also probes the platform (GPU_PLATFORM lines): only the GPUPASS message must appear, once */
+  int n_gate = 0;
+  for (size_t p = log.find("GPUPASS: graph conditional nodes unavailable"); p != std::string::npos; p = log.find("GPUPASS: graph conditional nodes unavailable", p + 1)) n_gate++;
+  EXPECT_EQ(1, n_gate) << "log: " << log;
+  EXPECT_NE(std::string::npos, log.find("GPUPASS: graph conditional nodes unavailable")) << "log: " << log;
+}
+
+/* T6: an allocation failure (device OOM) during the pass init: nr_gpu_pass_init returns -1 (the host logs "GPUPASS: nr_gpu_pass_config/init failed: off"), the pass is never ready,
+ * and nr_gpu_pass_dl_try refuses every grant (return 1: the caller decodes on the CPU path). Own ctest process (test_nr_gpu_pass_oom): the init of a pass that is running returns 0 first. */
+TEST(GpuPassFence, OomFallsBackToCpu) {
+  if (!have_gpu()) GTEST_SKIP();
+  void *dl = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
+  if (!dl) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  auto cfg = (nr_gpu_pass_config_fn)dlsym(dl, "nr_gpu_pass_config");
+  auto init = (nr_gpu_pass_init_fn)dlsym(dl, "nr_gpu_pass_init");
+  auto try_ = (nr_gpu_pass_dl_try_fn)dlsym(dl, "nr_gpu_pass_dl_try");
+  ASSERT_TRUE(cfg && init && try_);
+  static int16_t dt[4096 * 4]; /* never read by the init */
+  nr_gpu_pass_cfg_t c = {4, 273, dt, 4096, 20, 1};
+  ASSERT_EQ(0, cfg(&c));
+  int r[2];
+  const int after[2] = {2, 40}; /* the ring buffers (4 allocations), then inside the instances */
+  for (int i = 0; i < 2; i++) {
+    nr_gpu_mem_test_fail_after(after[i]);
+    r[i] = init(16);
+    nr_gpu_mem_test_fail_after(-1);
+    EXPECT_EQ(-1, r[i]) << "fail after " << after[i];
+  }
+  static nr_gpu_pass_job_t job;
+  uint8_t tb[64] = {};
+  nr_gpu_pass_result_t res{};
+  res.tb = tb;
+  EXPECT_EQ(1, try_(&job, &res)) << "a pass whose init failed must refuse (the CPU path decodes)";
 }

@@ -271,6 +271,8 @@ Ctr tb_ctr()
   return c;
 }
 
+static bool g_tier_cpu; /* set by SetUpTestSuite when the CB0 module is off by design */
+
 class Cb0Test : public ::testing::Test {
  protected:
   static void SetUpTestSuite()
@@ -286,11 +288,20 @@ class Cb0Test : public ::testing::Test {
     A.reset = (void (*)(void))lcp_sym("ldpc_cb0_test_reset");
     A.set_mem = (int (*)(int))lcp_sym("ldpc_cb0_test_set_mem");
     ASSERT_TRUE(A.init && A.submit && A.collect && A.decode && A.mode && A.counters && A.hooks && A.reset && A.set_mem);
+    /* CPU tier (NR_GPU_FORCE_MODEL=cpu) or no CUDA device: the module refuses by design, the host keeps the CPU decoder -> skip, never fail */
+    int ndev = 0;
+    const char *fm = getenv("NR_GPU_FORCE_MODEL");
+    if ((fm && !strcmp(fm, "cpu")) || cudaGetDeviceCount(&ndev) != cudaSuccess || ndev < 1) {
+      EXPECT_NE(A.init(), 0) << "CB0 init must refuse on the CPU tier";
+      g_tier_cpu = true;
+      return;
+    }
     ASSERT_EQ(A.init(), 0);
     lcp_load_ref("./libldpc.so"); /* optional: the CPU TB decoder test skips without it */
   }
   void SetUp() override
   {
+    if (g_tier_cpu) GTEST_SKIP() << "CPU tier (forced or no device): CB0 init refused by design";
     A.hooks(0, 0, 2000, 4, 5000);
     A.reset();
     lcp_hooks(0, 0, 0, 256, 200, 4, 5000);
@@ -298,6 +309,7 @@ class Cb0Test : public ::testing::Test {
   }
   void TearDown() override
   {
+    if (g_tier_cpu) return;
     A.hooks(0, 0, 2000, 4, 5000);
     A.reset();
   }

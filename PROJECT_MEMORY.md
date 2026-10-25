@@ -1,5 +1,7 @@
 # PROJECT_MEMORY — Passive Agnostic 5G NR Receiver (OAI-UE based)
 
+> **Update 2026-10-23/24 (DGX spark-74c3, X410 34B2AF1, OTA night round and live blind front end, provisional): see §25, block 2026-10-23/24 status.** `csd/single-int` (rank-2 LLR and LDPC cap 16, solver wide-only RNTIs) is merged into `adaptive-rx-UL-DL` (fast-forward 2026-10-23 after the night OTA functional round; daytime interleaved A/B 2026-10-24 pending). Blind front end found and tuned 4 operators live (PCI 675 restart failed, open). The 4-RX gate cannot pass on builds since `0fb22ecbd0`; a re-based gate is not adopted.
+>
 > **Update 2026-10-22 (DGX spark-74c3, X410 34B2AF1, night A/B and final OTA, LOW LOAD, provisional): see §25, block 2026-10-22 status.** Merge `96a2097740` on `adaptive-rx-UL-DL` carries the floatpool code and the 32-unit discovery chunk minimum. Vodafone discovery throughput is about 60 % of main (n=1). Iliad/WindTre and the daytime Vodafone repeat are still open.
 >
 > **Update 2026-10-12 (csd/otatest, OTA at DEIB 10-12 and 22 offline reports): see §25, block 2026-10-12.** Recommended OTA env is now t26z (t26s superseded); four operators seen live (PCI 415, 923, 675, 403, 508; PCI 4 co-channel with 508); merge gate still NOT MET.
@@ -2293,6 +2295,71 @@ Same winners in every arm (tda0 S1 L13 mask 0x804 k0=0; tda2 S1 L5 mask 0x4), 0 
 
 
 ## 15. Current OTA status (latest campaign only)
+
+### 15.00 2026-10-24/25 — sens6 + X410 327B872 (UC_200) on the sens4 lab cell (OCUDU, 273 PRB, 4 RX) — newest, read first
+
+Setup: receiver branch `sens6/ota-20261024` (r1solver + ondemand + perpath + coreplan + dci-resolver merged; `sens6/dgpu-q4`
+NOT merged), binary `build_ota` (USRP ON, CUDA arch 89), launcher `tests/passive_rx/sens6_ota/run_ota_s6.sh`, lab orchestration
+`tests/passive_rx/ota/lab_sens4_run.sh lab273` (sens4 testbed lock, OCUDU gNB `gnb_ofh_ota_tdd30_100mhz_liteon` with per-run
+log/MAC-pcap CLI overrides, both phones OPPO ff1ecb98 + Samsung R5CX11CBYJP via adb with iperf3 DL/UL phases on 10.42.0.1:5204/5205,
+receiver 300 s, SIGINT teardown, ground truth `ocudu_gt.py` -> `groundtruth.py` / `ul_groundtruth.py` / `plots.py --lab`).
+Cell (gNB yml = validation ground truth only): n78, 3450 MHz, 100 MHz / 273 PRB, SCS 30, PCI 2, 4T4R, TDD 7D/2U, PLMN 00106.
+
+| Run | Verdict | What happened |
+|---|---|---|
+| `captures/lab273_lab_20261024_235548` | VOID (radio) | X410 start failed in `multi_usrp::make` (RFNoC `Control operation timed out waiting for ACK`). gNB + both phones fine. |
+| `captures/lab273_lab_20261025_001516` | **FAIL (DL/UL rate)** `[OTA MEASURED, sens6 X410, lab cell]` | X410 opened, nic_miss 0, out_of_buffer 0; PSS SC 150, PCI 2, SIB1 decoded, `ACQ carrier CONFIRMED` 273 PRB, `CELL_CONFIGURED` (one `LOST` on a stream discontinuity, re-acquired). SI-RNTI PDSCH decodes (EVMGRANT snr ~21 dB, 4 branches 23-25 dB). Only C-RNTI 0x4604 seen (gNB had 0x4601 and 0x4604). **DL DCI recall 0.27 % (159 / 59628 gNB grants), precision 0.29; PDSCHQ crc_ok 2 / 757 (0.3 %); UL recall 0.3 % (33 / 11002).** PDSCH solver: 367 probes on 0x4604, none CRC-OK (Nl 1-4, mcs 4-25). |
+
+Reading: the RF chain, sync, SIB1 and carrier derivation work over the air with the new X410; the failure is the same
+`VOID_DL_RATE` known issue as §15.2 (2026-09-25, 0-1 % DL TB rate on this cell): **C-RNTI DCI detection on the dedicated
+CORESET/USS of the OCUDU cell** (and then the PDSCH identity solve) does not lock. rfsim (OAI gNB) results do not transfer:
+106/273 PRB rank 1-4 rfsim gates PASS (`OTA-READY-20261024.md`). Next: debug DCI detection on this cell with the gNB SCHED log
+as truth (dedicated CORESET geometry/nID, DCI 1_1 size for this cell, AL distribution), then the PDSCH DMRS/scrambling identity.
+
+Fixes found on air:
+- **NIC IRQs must sit on housekeeping CPUs only.** On the RT kernel NIC IRQs are FIFO-50 threads; with 12 of 15 on CPUs 10-13
+  (the receiver's RR-97 float lane: GPU warm-up / check workers) the X410 start failed in 6 of 7 receiver starts (RFNoC ctrl ACK
+  timeout or MPM `rpc::timeout get_db_eeprom`); with all on CPU 0: 5 of 5 opened (3 default mlock plan, 2 with MCL_FUTURE).
+  `uhd_usrp_probe` alone never failed. mlockall was a red herring (MCL_CURRENT-only seemed to help in 2 samples; reverted).
+  `run_ota_s6.sh` preflight now checks `IRQ_CPUS` (default 0) — commit `5eb993c199`.
+- X410 327B872 runs UC_200 (MCR 245.76 MHz -> 122.88 MS/s), mgmt answers only on the data address 192.168.20.2.
+- Host tuning on sens6 is not persistent (sysctl rmem 250 MB, backlog 250000, NIC IRQs -> CPU 0, hugepages freed).
+- sens4 clock is ~1 min behind sens6; ground truth aligns by SFN (offset_slots -122880), not wall time.
+- The gNB MAC pcap at mac_level=info with both phones on iperf grows ~8.5 GB per 5 min run (`/home/sens/NICOLA/gnbLogs` on sens4).
+
+Implemented 2026-10-24 (all local, sens6 x86 + RTX 4060 Ti; Sparks unaffected unless noted):
+- `sens6/dci-resolver`: DCI 1_1 field table vs TS 38.212 V17.13.0 (Enhanced Type 3 field, PUCCH cell last, padding 0..4).
+- `sens6/r1solver`: rank-1..4 solver at 273 PRB; SOLVERTDDEND (special slot from the first grant when SIB1 TDD ends DL early;
+  only testable on a SIB1 cell).
+- `sens6/ondemand`: elastic GPU controller (`nr_gpu_elastic.h`) + host-RAM budget (`nr_host_membudget.{c,h}`: B = 0.8 x avail - 1.5 GiB,
+  cgroup-aware, USRP ring reserved first, GrantWork pool last, HOST_MEM REFUSE exit 7, mlockall MCL_ONFAULT when tight);
+  `tests/passive_rx/hostmem_preflight.sh`.
+- `sens6/perpath`: per-path GPU/CPU choice (`nr_gpu_path.{c,h}`; SHARED tier = GPU, DISCRETE = timed bench/online trials;
+  `NR_GPU_PATH_SELECT`, `NR_GPU_PATH_<PATH>`).
+- `sens6/coreplan`: core layout from topology (`nr_core_layout`, `SENSING: CORE_PLAN`), no hard-coded host cores.
+- `sens6/ota-20261024`: integration + lab orchestration + OCUDU ground truth (DL+UL) + sens6 launcher.
+- `sens6/dgpu-q4` (merged into `sens6/ota-20261024` at `8cc6623346` on 2026-10-25): staged DISCRETE variants of chest/delay/demod/UL FEP/LDPC.
+
+**2026-10-25 overnight + morning (merged into adaptive-rx-UL-DL at `a383a08785` at the user's request, to start multi-PCI;
+NOT validated on the DGX — run a DGX T10 / TIM+Vodafone A/B before trusting it there).** Report:
+`docs/superpowers/reports/csd/OTA-DCI-LAB273-20261025.md`. All [MEASURED, sens6 OTA, sens4 lab cell, 273 PRB, 4 RX] unless noted.
+- Blind DCI fixes (spec-based, no cell constants): `c9e8858e4b` (PCI-nID USS CORESET: anonymous RNTI/length search per UE,
+  n_RNTI hypotheses 0 then own C-RNTI only, USS-hash refit beyond M=1, re-sync keeps the CFO correction), `5432bc95a1`
+  (CORESET-independent DCI sizes on PCI-nID USS geometries; shadow BWP entries killed 39k phantom BWP_CHANGE epochs/run).
+- GPU: `e18da8416a` an old-path demod exactness mismatch no longer disables the GPU graph pass (it froze the pass -> CPU fallback,
+  PDSCH CRC 0.1 %). `60178049cd` lab env in auto GPU-path mode. GPU ctest -j1 66/66; rfsim 106 PRB 4 RX 420 s CRC 96.21 % vs 96.22 %
+  baseline [MEASURED, sens6 rfsim]. The postconv gate fails on baseline too ("Technique D CONVERGED" unreachable since the solver).
+- Scoring: `groundtruth.py match_clock()` (`4ec6fa9fbc`) per RNTI on wall clock; the single-offset matcher breaks at RX recoveries.
+- DCI result (05:33 run): DL recall 0.980 / 0.989, UL 0.696 / 0.991, precision 1.000 (start of night: DL 0.27 %, precision 0.29).
+- ADC census `32b9ad5e71`: clip/hot thresholds from the device's real int16 full scale (32767 >> rxshift; X4xx rxshift=2 -> 8191)
+  split DL/UL/special (`ADCCLASS`). The old counters could never fire on X4xx (ADCPEAK was pinned at -12.0 dBFS = full scale).
+  At `--ue-rxgain 49`: **DL slots clip** (mean -13..-15 dBFS of fs, clip 0.1-0.4 %, hot 0.3-1.2 %, all 4 ch); UL slots 0 %
+  (-25..-37 dBFS). Per-antenna power balanced within ~2 dB (ch0 sometimes -3..-7 dB); RF input ~-62..-64 dBm/ch.
+- PDSCH vs gNB rank (n=1 each, 300 s): gNB rank 4 / 256QAM MCS 24-25: crc_ok 2.7 % of decoded; **gNB DL rank 1 + UL 1 layer: 54.9 %**.
+  DMRS symbol-to-symbol correlation falls with grant width (0.93 at <=4 RB, 0.74 at >128 RB); PRG bundling and residual timing
+  ruled out. Open: SNR vs clipping (rx-gain steps), rank-2 and low-MCS arms, PUSCH CRC (0 so far).
+- NIC IRQs must stay on CPU 0 (spreading them over 0-2 broke the X410 stream in 5 s); watch `rx_out_of_buffer`.
+
 
 ### 15.0 Site change (2026-09-30) — read first
 
@@ -4809,8 +4876,65 @@ Scope: DGX spark-74c3, X410 unit 34B2AF1, OTA at DEIB. Every run in this block i
 
 ---
 
+### 2026-10-23/24 status (rank-2 fixes, solver wide-only, blind front end live on 4 operators)
+
+Scope: DGX spark-74c3, X410 unit 34B2AF1, OTA at DEIB. Branch `csd/single-int` (worktree `rr-int`, HEAD `89fe062d85` at this writing). Cells are never pooled. Commit facts are `[CODE-READ, git]`.
+
+**Merge state.** `csd/single-int` was fast-forwarded into `adaptive-rx-UL-DL` on 2026-10-23 at the user's request, after the night OTA functional round (item 3: LOW LOAD, n=1). The daytime interleaved A/B on 4 operators (2026-10-24 09:00, old main vs new main) is the adoption confirmation; a regression there reverts the offending fix.
+
+**1. Rank-2 and solver fixes on `csd/single-int`** (reports in `docs/superpowers/reports/csd/`: `RANK2-BIG-20261023.md`, `RANK2-ITER-20261023.md`, `RANK2-WEAK-20261023.md`, `SOLVER-WIDE-20261023.md`).
+- **a. PDSCH LDPC iteration cap 8 -> 16**, one value for all cells, no flag (`6591eeb471`).
+  - One accessor `nr_pdsch_ldpc_cap()` in `nr_pdsch_ldpc_cap.h`. Test-only override `NR_TEST_PDSCH_LDPC_ITERS`. The GPU LDPC supports caps up to 17.
+  - `EVMGRANT` logs `it=` (max iterations), `itc=` (cap) and `its=` (sum).
+  - [MEASURED, DGX replay] paired grants, cap 8 vs 16: TIM +309/-10 and +323/-14 (noise +3/-8); Vodafone +116/-11 and +120/-12 (noise +40/-39).
+  - [MEASURED, DGX replay] TIM rank-2 rb>=200 CRC 2.4/0 % -> 40.5/32.1 %.
+  - [MEASURED, DGX replay] DL p99 2.5-3.5 ms at every cap.
+- **b. Rank-2 weak-layer LLR normalisation** (`e7d36237e5`).
+  - The 2-layer LLR shift sampled only the strong layer, so the weak layer was starved: 22-35 % zero LLRs at layer gap >= 8 dB [MEASURED, DGX replay raw_pci415_12s_b].
+  - New `nr_llr_norm_shift_nl()` for `nl == 2` with Qm 4/6/8, on CPU and GPU. Test seam `NR_TEST_L2NORM_OLD=1`.
+  - Replay CRC change is within noise; the target bin is rare in that capture.
+- **c. Solver wide-only RNTIs** (`08d2906482`).
+  - After 16 grants with no reading <= 48 RB (`SOLVER_WIDE_AFTER`), the solver searches any width.
+  - [MEASURED, DGX rfsim] the wide-only RNTI goes from never solved to solved after 1354 ms, CRC 84.69 %.
+
+**2. 4-RX rfsim gate: cannot pass on any build since `0fb22ecbd0` (10-18)** [CODE-READ, git]. The gate counts `Technique D CONVERGED` contexts and `ttc`, which the always-on solver no longer emits (`tests/passive_rx/dgx/score_rx_solver.py`, header). Current CRC is 84.69 % against the 93.4 % floor [MEASURED, DGX rfsim]. A re-based gate on solver metrics is being prepared and is **NOT adopted**. The gate in §12 is unchanged.
+
+**3. OTA night functional round 2026-10-23 22:12-22:56** [MEASURED, DGX OTA, LOW LOAD, provisional, n=1 per arm, not interleaved].
+- Main `e9c874c308` (M) vs `csd/single-int` (I). Env `POOL_20261021`, 300 s per run, 4 RX. Logs `ota_runs/ab_n{V,T,W,L}{M,I}_1_*`.
+- All 8 runs synced and exited cleanly. Unit tests 30/30.
+- Vodafone: all-grant CRC 72.7 -> 83.5 %; rank-2 rb>=100 46.7 -> 62.0 %; DL tot p99 14.08 -> 8.75 ms.
+- TIM: queue CRC 17.0 -> 35.6 %; DL tot p99 8.10 -> 5.29 ms. Rank-2 rb>=100 34.4 -> 9.8 %, a different UE population. Daytime interleaved A/B pending.
+- Stale drops <= 0.2 %.
+- WindTre and Iliad: 0 C-RNTIs solved on **both** builds. Only SI is decoded. **OPEN**, under investigation on `csd/wl-solver`.
+
+**4. Blind front end live** [MEASURED, DGX OTA], branch `csd/blind-front`, `tests/passive_rx/autofront/live_chain.sh`, OTA 2026-10-23.
+- 21-centre scan, 3350-3750 MHz in 20 MHz steps, 1 s x 4 ch each, all PASS: `ota_runs/blind_20261023_2028`. Discovery found 9 PCIs.
+- Live pass1 -> pass2 -> restart, no hand input:
+  - Vodafone PCI 415: `-C 3680010000 --ssb 1171 -r 217`, Point A 3640.950 MHz, initial FO -4827 Hz. Confirmed from SIB1; no restart needed.
+  - TIM PCI 923: `-C 3759990000 --ssb 233 -r 217`, Point A 3720.930 MHz, FO -4832. Confirmed from SIB1 after restart.
+  - WindTre PCI 508: `-C 3590010000 --ssb 193 -r 162`, Point A 3560.850 MHz, FO -4868, SIB1 offsetToPointA 32. Confirmed from SIB1 after restart.
+  - Iliad PCI 403 (NSA): `-C 3630000000 --ssb 18 -r 51`, Point A 3620.820 MHz, FO +2178. PSD edges 3620.77-3639.25 MHz. Confirmed without SIB1 carrier info (CRB-indexed reference signal) after restart.
+  - PCI 675 (new cell, operator unknown): SIB1 says 51 PRB, offsetToPointA 36, k_ssb 22 -> `-C 3425010000 --ssb 227 -r 51`, Point A 3415.830 MHz, FO -4825. **Restart FAILED**: PBCH polar-decode failures x2629, 5 resyncs, exit 3. **OPEN**, under investigation on `csd/narrow51`.
+  - PCI 347 (~3515.85 MHz, FO +2200): no MIB in 150 s; too weak.
+  - PCI 380 (co-channel with 415 at 3680), and PCI 4 and 614 (co-channel with 508 at the WindTre SSB): the single-PCI receiver always syncs the strongest PCI on the SSB. Selecting a weaker co-channel PCI needs multi-PCI.
+- All hand-measured tunings were reproduced blind. FO seed about -4.8 kHz for Vodafone, TIM and WindTre (X410 LO offset); +2.2 kHz for Iliad.
+- Raw captures for replay (4 s x 4 ch, 122.88 MS/s, night): `ota_runs/raw_windtre508_4s_1023_2315` and `ota_runs/raw_iliad403_4s_1023_2315`.
+
+**5. Ops note** [MEASURED, DGX].
+- A DGX reboot drops the X410 mgmt alias 192.168.30.1/24 on `enP7s7`. `rr-orchestration/llm/guardian.sh enter-ota` now re-adds it.
+- `capture_raw` needs its output directory to exist.
+
+**6. Open work (agents running).** WindTre/Iliad solver (`csd/wl-solver`); discovery GPU contention (`csd/disc-contention`); PCI 675 narrow-grid sync (`csd/narrow51`); solver CRC gap and gate re-base (`csd/solver-wide` round 2). Daytime interleaved A/B on all 4 operators scheduled 2026-10-24 09:00 (`rr-orchestration/ota/run_int_20261023.sh day`).
+
+---
+
 ## 26. Working rules for any agent on this project (carried over from the old setup)
 
+- **Maximum portability and adaptiveness to the device (operator rule, 2026-10-25).** Every change must run unchanged on
+  every supported host (DGX Spark GB10 unified memory + DPDK X410, sens6 x86 + discrete GPU + kernel-socket X410, cloud x86,
+  rfsim): derive cores, memory, GPU/CPU paths, radio transport and buffer sizes from what the device reports at run time
+  (topology, cgroup/MemAvailable, GPU tier, UHD args), never from host constants; a host-specific value is configuration
+  (env/cfg), never code. A fix found on one host must be checked not to change behaviour on the others.
 - Evidence labels (§0.1) in every status statement; retract wrong claims explicitly; never quote inherited numbers.
 - **Never build or run tests that load the CPU heavily while a capture runs on the same host.** Check
   `pgrep -x nr-uesoftmodem` first.

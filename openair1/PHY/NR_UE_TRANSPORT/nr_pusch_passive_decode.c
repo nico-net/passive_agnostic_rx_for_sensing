@@ -20,6 +20,7 @@
 #include "PHY/MODULATION/nr_modulation.h" // nr_symbol_fep_ul: the gNB uplink FEP
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
 #include "nr_pdsch_gpu_ldpc_host.h" // GPU LDPC for the PUSCH TBs
+#include "PHY/TOOLS/nr_gpu_path.h" // per-path GPU/CPU choice (UL pass trial, UL FEP)
 #include "nr_pusch_gpu_fep.h" // GPU port of the UL FEP below
 #include "nr_gpu_pass_ul.h" // the whole PUSCH decode as one GPU graph (Fix A+D: the UL path)
 #include "PHY/NR_TRANSPORT/nr_ulsch_passive_branch.h"
@@ -90,15 +91,16 @@ extern int nr_ulsch_decoding(PHY_VARS_gNB *phy_vars_gNB,
  *    receiver has no business keeping, and which nothing in this path reads. This file keeps its
  *    own census instead (nr_pusch_passive_stats_dump).
  *
- * CONSTRAINT: these are global symbols, so this library must never be linked alongside PHY_NR.
+ * CONSTRAINT: these are global symbols, so this library must never be linked alongside PHY_NR
+ * (they are weak, so a real definition from PHY_NR wins, as in nr_pusch_ra0sim).
  * It is not -- nr-uesoftmodem links PHY_NR_COMMON, PHY_NR_UE and this, and that is the whole
  * reason this library exists. */
-uint16_t get_first_ant_idx(bool das, uint16_t num_ports_beams, uint16_t beam_id, uint16_t fapi_start_port)
+__attribute__((weak)) uint16_t get_first_ant_idx(bool das, uint16_t num_ports_beams, uint16_t beam_id, uint16_t fapi_start_port)
 {
   return ((das) ? (beam_id & 0x7fff) * num_ports_beams : fapi_start_port);
 }
 
-NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
+__attribute__((weak)) NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
 {
   (void)gNB;
   (void)rnti;
@@ -156,6 +158,9 @@ static __thread bool t_solver_probe;
 static __thread nr_ul_nid_cap_t *t_nid_cap;
 #define NID_CTX (NR_PUSCH_PASSIVE_MAX_CTX - 1) /* the worker's private decode context */
 static __thread int t_ul_kind; /* GPUPASS UL: what carried the grant being decoded (nr_gpu_pass_ul_grant_us) */
+/* per-path trial of the UL graph pass (nr_gpu_path.h, DISCRETE): side of the grant being decoded (-1 none, 0 CPU, 1 GPU) and its size in 1000 LLRs */
+static __thread int t_ul_path_side = -1;
+static __thread double t_ul_path_kllr;
 void nr_pusch_passive_counters(uint64_t *try_, uint64_t *crc_ok)
 {
   *try_ = atomic_load(&g_try);
@@ -733,10 +738,17 @@ static bool passive_snapshot_fep(const NR_DL_FRAME_PARMS *fp, int ctx, int ant, 
 static void ulg_warmup(const NR_DL_FRAME_PARMS *fp, int nant)
 {
   const nr_pusch_gpu_fep_api_t *api = nr_pusch_gpu_fep_load();
-  if (!api || fp->ofdm_symbol_size != 4096 || nant < 1 || nant > PASSIVE_UL_MAX_ANT) return;
-  if (api->init(nant, fp->ofdm_symbol_size, fp->nb_prefix_samples, (int)fp->ofdm_offset_divisor, 30,
-                1000 / fp->slots_per_subframe) != 0) {
-    LOG_W(PHY, "SENSING: UL_GPU_FEP requested but unavailable -- CPU FEP\n");
+  if (!api || fp->ofdm_symbol_size != 4096 || nant < 1 || nant > PASSIVE_UL_MAX_ANT) {
+    nr_gpu_path_begin(NR_GPU_PATH_UL_FEP, 0, NR_GPU_PATH_MEASURE_NONE);
+    return;
+  }
+  const int rc = api->init(nant, fp->ofdm_symbol_size, fp->nb_prefix_samples, (int)fp->ofdm_offset_divisor, 30, 1000 / fp->slots_per_subframe);
+  /* per-path choice: the standalone UL FEP reads the snapshot in place on DIRECT (SHARED: GPU, unchanged); on DISCRETE its staged variant (Q4) is measured by a
+   * paired online trial in ulg_fep_symbols (the GPU batch and the CPU FEP of the same rows, both timed, every row compared) */
+  if (nr_gpu_path_begin(NR_GPU_PATH_UL_FEP, rc == 0, nr_gpu_platform_shared_direct() ? NR_GPU_PATH_MEASURE_NONE : NR_GPU_PATH_MEASURE_TRIAL) == NR_GPU_PATH_CPU
+      || rc != 0) {
+    if (rc != 0)
+      LOG_W(PHY, "SENSING: UL_GPU_FEP requested but unavailable -- CPU FEP\n");
     return;
   }
   g_ulg_nant = nant;
@@ -747,7 +759,7 @@ static void ulg_warmup(const NR_DL_FRAME_PARMS *fp, int nant)
 static inline bool ulg_usable(int ctx, int nant, double fo_hz, const NR_DL_FRAME_PARMS *fp)
 {
   return !t_nid_cap && g_ulg && atomic_load_explicit(&g_ulg_on, memory_order_relaxed) && g_snapshot[ctx].valid && fo_hz == 0.0
-         && nant == g_ulg_nant && fp->ofdm_symbol_size == 4096;
+         && nant == g_ulg_nant && fp->ofdm_symbol_size == 4096 && nr_gpu_path_use_gpu(NR_GPU_PATH_UL_FEP);
 }
 
 /* One window of every antenna -> item. false = outside the bounded snapshot (the CPU path reports it). */
@@ -820,7 +832,33 @@ static bool ulg_fep_symbols(PHY_VARS_gNB *gnb, int ctx, int nant, unsigned char 
       return false;
     }
   }
-  return ulg_run(fp, ctx, nant, slot, it, sym, off, n, fp->N_RB_UL);
+  if (nr_gpu_path_state(NR_GPU_PATH_UL_FEP) != NR_GPU_PATH_TRIAL)
+    return ulg_run(fp, ctx, nant, slot, it, sym, off, n, fp->N_RB_UL);
+  /* Q4 per-path paired trial (DISCRETE only): the GPU batch, then the CPU FEP of every (symbol, antenna) row (what PASSIVE_UL_FEP_SYMBOL computes), both timed;
+   * every row is compared bit for bit (a mismatch ends the trial as gpu_error and switches the GPU path off). Samples per row. */
+  const uint64_t tg0 = utim_now();
+  if (!ulg_run(fp, ctx, nant, slot, it, sym, off, n, fp->N_RB_UL))
+    return false;
+  const uint64_t tg1 = utim_now();
+  bool same = true;
+  for (int i = 0; i < n; i++)
+    for (int a = 0; a < nant; a++) {
+      c16_t ref[fp->ofdm_symbol_size] __attribute__((aligned(32)));
+      passive_snapshot_fep(fp, ctx, a, ref, sym[i], slot, off[i], 0.0);
+      apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe, fp->timeshift_symbol_rotation, fp->first_carrier_offset, ref,
+                                  fp->symbol_rotation[link_type_ul], fp->N_RB_UL, slot, sym[i]);
+      same = same && memcmp(ref, it[i].dst[a], sizeof(ref)) == 0;
+    }
+  const uint64_t tc1 = utim_now();
+  if (!same) {
+    atomic_store(&g_ulg_on, false);
+    nr_gpu_path_fail(NR_GPU_PATH_UL_FEP, "ul fep mismatch");
+    LOG_E(PHY, "SENSING: UL_GPU_FEP MISMATCH in the per-path trial (slot %d) -- GPU path off, CPU FEP\n", slot);
+    return false;
+  }
+  nr_gpu_path_sample(NR_GPU_PATH_UL_FEP, 1, (double)(tg1 - tg0) / 1000.0 / (n * nant));
+  nr_gpu_path_sample(NR_GPU_PATH_UL_FEP, 0, (double)(tc1 - tg1) / 1000.0 / (n * nant));
+  return true;
 }
 
 /* ---- UL-LAYOUT probe. For one booked DCI 0_1 it correlates the CP-OFDM DM-RS (port 0,
@@ -1821,7 +1859,19 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           in.gate_thr_db = in.gate_on ? (float)(rq_ - NR_SNR_GATE_MARGIN_DB) : 0.f;
         }
         in.want_est = nr_srs_passive_enabled() || nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS);
-        const int ulrc_ = (in.tbs_bits && in.bg) ? nr_gpu_pass_ul_run(&in, &uout) : 1;
+        int ul_go_ = in.tbs_bits && in.bg;
+        if (ul_go_ && !ul_shadow) { /* per-path choice (nr_gpu_path.h): SHARED -> the pass (no change); DISCRETE -> alternating trial, then GPU or CPU */
+          int pst_ = nr_gpu_path_state(NR_GPU_PATH_PASS_UL);
+          if (pst_ == NR_GPU_PATH_UNSET)
+            pst_ = nr_gpu_path_begin(NR_GPU_PATH_PASS_UL, 1, NR_GPU_PATH_MEASURE_TRIAL);
+          if (pst_ == NR_GPU_PATH_TRIAL) { /* solver probes are never samples (below): they take no pick and run on the pass (as the DL trial, Q4 fix) */
+            t_ul_path_side = t_solver_probe ? -1 : nr_gpu_path_pick(NR_GPU_PATH_PASS_UL);
+            t_ul_path_kllr = (double)in.num_rb * 12.0 * in.num_symbols * qm_ / 1000.0;
+          }
+          if (pst_ == NR_GPU_PATH_CPU || (pst_ == NR_GPU_PATH_TRIAL && t_ul_path_side == 0))
+            ul_go_ = 0;
+        }
+        const int ulrc_ = ul_go_ ? nr_gpu_pass_ul_run(&in, &uout) : 1;
         if (ulrc_ == 0 && uout.r.skip && !ul_shadow) {
           /* the in-graph gate fired (DM-RS SNR far below the MCS requirement): CRC fail with skip = 1, no UCI search, no retry */
           out->skip = 1;
@@ -2788,10 +2838,14 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
     if (retry.attempts) g = &retry.last;
   } else {
     const uint64_t t_ul0 = nr_gpu_pass_ul_active() ? utim_now() : 0;
+    t_ul_path_side = -1;
     ok = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, g, ta_offset_samples, abs_slot,
                                       cfr_only, fo_hz, out);
     if (t_ul0 && !cfr_only && !t_solver_probe && out->status != NR_PUSCH_PASSIVE_UNSUPPORTED)
       nr_gpu_pass_ul_grant_us(t_ul_kind, (uint32_t)((utim_now() - t_ul0) / 1000));
+    if (t_ul0 && t_ul_path_side >= 0 && t_ul_path_kllr > 0 && !cfr_only && !t_solver_probe
+        && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL)) /* UL pass trial sample: wall us per 1000 LLRs */
+      nr_gpu_path_sample(NR_GPU_PATH_PASS_UL, t_ul_path_side, (double)(utim_now() - t_ul0) / 1000.0 / t_ul_path_kllr);
   }
 
   if (!t_solver_probe && (nr_passive_obs_enabled() || nr_ue_ctx_enabled() || nr_sense_enabled()) && g != NULL && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL ||
@@ -2897,15 +2951,16 @@ void nr_pusch_passive_stats_dump(void)
           (unsigned long)atomic_load(&g_fep_req[1]), (unsigned long)atomic_load(&g_fep_req[2]));
   }
   if (g_ulg) {
-    uint64_t o[10];
+    uint64_t o[16] = {0};
     g_ulg->stats(o);
     LOG_I(PHY, "SENSING: UL_GPU_FEP on=%d calls=%lu items=%lu gpu_ms=%lu mean_us=%.0f max_us=%lu busy=%lu over_cap=%lu rt_defer=%lu "
-               "late=%lu err=%lu part=%lu | cpu_bounds=%lu cpu_rej=%lu check=%lu bad=%lu\n",
+               "late=%lu err=%lu part=%lu | cpu_bounds=%lu cpu_rej=%lu check=%lu bad=%lu | staged=%lu stage_runs=%lu h2d_kb=%lu d2h_kb=%lu\n",
           (int)atomic_load(&g_ulg_on), (unsigned long)o[0], (unsigned long)o[1], (unsigned long)(o[2] / 1000),
           o[0] ? (double)o[2] / (double)o[0] : 0.0, (unsigned long)o[3], (unsigned long)o[4], (unsigned long)o[5],
           (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[8], (unsigned long)o[9],
           (unsigned long)atomic_load(&g_ulg_cpu_bounds), (unsigned long)atomic_load(&g_ulg_cpu_rej),
-          (unsigned long)atomic_load(&g_ulg_chk), (unsigned long)atomic_load(&g_ulg_bad));
+          (unsigned long)atomic_load(&g_ulg_chk), (unsigned long)atomic_load(&g_ulg_bad), (unsigned long)o[13], (unsigned long)o[10],
+          (unsigned long)(o[11] >> 10), (unsigned long)(o[12] >> 10));
   }
   nr_gpu_pass_ul_census();
   if (nr_pusch_gpu_ldpc_enabled()) {

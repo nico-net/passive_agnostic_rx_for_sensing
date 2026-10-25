@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#include <memory>
 #include <cuda_runtime.h>
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include <cstdio>
@@ -10,6 +11,8 @@
 #include <algorithm>
 #include "nr_dl_gpu_memory.h"
 #include "nr_gpu_green.h"
+#include "PHY/TOOLS/nr_gpu_cuda.h"
+#include "PHY/TOOLS/nr_gpu_membudget.h"
 #define NID_FN __device__
 #include "nr_pdcch_nid_stage1.h"
 #include "nr_pdcch_nid_chunks.h"
@@ -69,6 +72,9 @@ struct Context {
  nr_pdcch_nid_result_t bank;
  uint64_t last_seen[NR_PDCCH_NID_MAX_RECORDS];
  void *alloc[28]; size_t bytes[28]; int nalloc;
+ // On-demand window: the buffers whose size follows `window` (everything else in alloc[] is window independent).
+ struct Win {c16_t *iq=nullptr; int *slots=nullptr,*lit=nullptr,*active=nullptr; uint16_t *hh=nullptr; float *hz=nullptr; st2_snap_t *sn=nullptr; double *scratch=nullptr; bool async=false;} w;
+ bool pools=false; // stream-ordered allocator available (window buffers come from / go back to the device memory pool without a device-wide synchronisation)
 };
 __global__ void reset(Device *p, NidView v) {
  if(threadIdx.x || blockIdx.x) return;
@@ -507,11 +513,56 @@ __global__ void finish(Device *p) {
  for(int step=128;step;step/=2) {if(tid<step)removed[tid]+=removed[tid+step];__syncthreads();}
  if(tid==0)s.alive=removed[0]>0;
 }
+// ---- window buffers (on-demand sizing, see nr_gpu_elastic.h) ----
+// The buffers whose size follows the window. create() takes them with cudaMalloc before RX; resize() (called between passes, with RX running) takes the
+// new set from the stream-ordered allocator when the device has one (no device-wide synchronisation, the old set goes back to the pool at the next
+// synchronisation of the stream), else with cudaMalloc/cudaFree. Every failure leaves the caller's current set untouched.
+template<typename T> bool win_buf(Context *c,T **p,size_t n,bool async) {
+ const size_t b=n*sizeof(T);
+ *p=nullptr;
+ if(async){if(cudaMallocAsync((void**)p,b,c->stream)!=cudaSuccess){cudaGetLastError();*p=nullptr;return false;}}
+ else if(cudaMalloc((void**)p,b)!=cudaSuccess){cudaGetLastError();*p=nullptr;return false;}
+ return cudaMemsetAsync(*p,0,b,c->stream)==cudaSuccess;
+}
+void win_free(Context *c,Context::Win &w,bool) {
+ auto f=[&](auto *&p){if(p){if(w.async)cudaFreeAsync(p,c->stream);else cudaFree(p);p=nullptr;}};
+ f(w.iq);f(w.slots);f(w.lit);f(w.active);f(w.hh);f(w.hz);f(w.sn);f(w.scratch);
+ w.async=false;
+}
+bool win_alloc(Context *c,Context::Win &w,int window,bool async) {
+ const size_t n=(size_t)window*NR_PDCCH_NID_BATCH,sc=12*(size_t)c->rb;
+ w=Context::Win{};w.async=async&&c->pools;
+ if(win_buf(c,&w.iq,n*c->dur*sc,w.async) && win_buf(c,&w.slots,2*n,w.async) && win_buf(c,&w.hh,(size_t)window*STAT,w.async)
+    && win_buf(c,&w.hz,(size_t)window*STAT,w.async) && win_buf(c,&w.lit,n,w.async) && win_buf(c,&w.active,n,w.async)
+    && win_buf(c,&w.sn,4*n+1,w.async) && win_buf(c,&w.scratch,(4*n+1)*6*276+2*n,w.async))return true;
+ win_free(c,w,false);return false;
+}
+// Point the device context at c->w (c->window batches) and upload the stage-2 snapshot descriptors.
+bool win_bind(Context *c) {
+ Device &p=c->host;auto &w=c->w;
+ const int n=c->window*NR_PDCCH_NID_BATCH,sc=12*c->rb;
+ p.history_hits=w.hh;p.history_z=w.hz;p.lit=w.lit;p.active=w.active;
+ p.view={sc,0,0,0,14,0,c->dur,0,n,sc,w.slots,w.slots+n,w.iq};
+ p.stage2.sn=w.sn;for(int j=0;j<3;j++)p.stage2.dec[j]=w.sn+(j+1)*n;
+ auto desc=new st2_snap_t[4*n+1]{};
+ for(int j=0;j<4*n+1;j++) {
+  double *b=w.scratch+(size_t)j*6*276;
+  desc[j]={b,b+276,b+2*276,b+3*276,b+4*276,b+5*276,-1};
+ }
+ p.stage2.tmp=desc[4*n];
+ auto err=cudaMemcpyAsync(w.sn,desc,(4*n+1)*sizeof(*desc),cudaMemcpyHostToDevice,c->stream);
+ if(err==cudaSuccess)err=cudaStreamSynchronize(c->stream);
+ delete[] desc;if(err!=cudaSuccess)return false;
+ p.stage2.vr=w.scratch+(size_t)(4*n+1)*6*276;p.stage2.vd=p.stage2.vr+n;
+ return cudaMemcpyAsync(c->dev,&p,sizeof(p),cudaMemcpyHostToDevice,c->stream)==cudaSuccess;
+}
 void destroy(void *ptr) {
  Context *c=(Context*)ptr;if(!c)return;
  nr_dl_gpu_sealed=false; // destroy is called only after producer and worker stop
  if(c->stream)cudaStreamSynchronize(c->stream);
  for(int i=0;i<c->nalloc;i++)cudaFree(c->alloc[i]);
+ win_free(c,c->w,false);
+ if(c->stream)cudaStreamSynchronize(c->stream);
  if(c->staging)cudaFreeHost(c->staging);
  if(c->transfer)cudaFreeHost(c->transfer);
  for(auto e:c->event)if(e)cudaEventDestroy(e);
@@ -524,14 +575,39 @@ template<typename T> bool allocate(Context *c,T **p,size_t n) {
  if(cudaMalloc(p,n*sizeof(T))!=cudaSuccess)return false;
  c->alloc[c->nalloc]=*p;c->bytes[c->nalloc++]=n*sizeof(T);return true;
 }
+// T6b: device bytes of create() for a window of `window` batches: fixed part + per-window part (mirrors the allocate() list of create()).
+size_t window_bytes(int rb,int dur,int window) {
+ const size_t n=(size_t)window*NR_PDCCH_NID_BATCH,sc=12*(size_t)rb;
+ return n*dur*sc*sizeof(c16_t)+2*n*sizeof(int)+n*sizeof(int)*2+(4*n+1)*sizeof(st2_snap_t)+((4*n+1)*6*276+2*n)*sizeof(double)
+   +(size_t)window*STAT*(sizeof(uint16_t)+sizeof(float))+n*0;
+}
+size_t fixed_bytes() {
+ return sizeof(Device)+(size_t)CHUNK*IDS*sizeof(int)+2*(size_t)CHUNK*IDS*sizeof(float)+4*(size_t)CHUNK*IDS*sizeof(float)+6*(size_t)CELLS*(sizeof(float)+sizeof(uint16_t))
+   +(size_t)STAT*(sizeof(uint16_t)+sizeof(double))+(size_t)STAT/256*sizeof(Summary)+(size_t)NID_HYP_CAP*sizeof(*Device{}.stage2.H);
+}
 void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  if(nr_dl_gpu_sealed)return nullptr; // one pre-RX context per module lifetime
  if(rb<6 || rb>275 || dur<1 || dur>3 || window<1 || window>NR_PDCCH_NID_MAX_WINDOW)return nullptr;
+ {
+  // T6b: the window (batches kept for the evidence integration) from the shared memory budget: the requested one when it fits (GB10: unchanged), down to 5.
+  // A smaller window shortens the evidence span of one sweep (sensitivity / time to detection); the sliding-window logic itself is size independent.
+  const size_t share=nr_gpu_membudget_share(NR_GPU_MEM_PDCCH_NID),fixed=fixed_bytes();
+  const int lo=window<5?window:5;
+  const long w=nr_gpu_membudget_fit(share,fixed,window_bytes(rb,dur,1),lo,window);
+  if(!w){
+   fprintf(stderr,"[GPU] pdcch_nid: memory budget share %zu MB < %zu MB for window %d; module not ready\n",share>>20,(fixed+window_bytes(rb,dur,lo))>>20,lo);
+   nr_gpu_membudget_commit(NR_GPU_MEM_PDCCH_NID,0,0.0);return nullptr;
+  }
+  if(w!=window)fprintf(stderr,"[GPU] pdcch_nid: window %d -> %ld (share %zu MB, %zu MB)\n",window,w,share>>20,(fixed+window_bytes(rb,dur,(int)w))>>20);
+  nr_gpu_membudget_commit(NR_GPU_MEM_PDCCH_NID,fixed+window_bytes(rb,dur,(int)w),(double)w/window);
+  window=(int)w;
+ }
  Context *c=new Context{};c->rb=rb;c->dur=dur;c->window=window;
  int n=window*NR_PDCCH_NID_BATCH,sc=12*rb;
  Device &p=c->host;
- int *slots=nullptr; c16_t *iq=nullptr;double *scratch=nullptr;st2_snap_t *sn=nullptr;
+ c16_t *iq=nullptr;
  int least_priority=0,greatest_priority=0;
+ {int pools=0;int dev=0;cudaGetDevice(&dev);c->pools=cudaDeviceGetAttribute(&pools,cudaDevAttrMemoryPoolsSupported,dev)==cudaSuccess && pools;}
  if(cudaDeviceGetStreamPriorityRange(&least_priority,&greatest_priority)!=cudaSuccess
     || (!nr_gpu_green_stream(&c->stream,least_priority,false)
         && cudaStreamCreateWithPriority(&c->stream,cudaStreamNonBlocking,least_priority)!=cudaSuccess))goto fail;
@@ -543,32 +619,17 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  memset(c->staging,0,(size_t)3*NR_PDCCH_NID_BATCH*dur*sc*sizeof(c16_t));
  if(cudaHostAlloc(&c->transfer,sizeof(HostTransfer),cudaHostAllocDefault)!=cudaSuccess)goto fail;
  memset(c->transfer,0,sizeof(HostTransfer));
- if(!allocate(c,&c->dev,1) || !allocate(c,&iq,(size_t)n*dur*sc) || !allocate(c,&slots,2*n)
+ if(!allocate(c,&c->dev,1)
     || !allocate(c,&p.candidates,CHUNK*IDS) || !allocate(c,&p.multi,2*CHUNK*IDS)
     || !allocate(c,&p.values,4*CHUNK*IDS) || !allocate(c,&p.zsum,6*CELLS) || !allocate(c,&p.hits,6*CELLS)
-    || !allocate(c,&p.history_hits,(size_t)window*STAT) || !allocate(c,&p.history_z,(size_t)window*STAT)
     || !allocate(c,&p.total_hits,STAT) || !allocate(c,&p.total_z,STAT)
-    || !allocate(c,&p.summary,STAT/256) || !allocate(c,&p.lit,n) || !allocate(c,&p.active,n)
-    || !allocate(c,&p.stage2.H,NID_HYP_CAP) || !allocate(c,&sn,4*n+1)
-    || !allocate(c,&scratch,(size_t)(4*n+1)*6*276+2*n))goto fail;
+    || !allocate(c,&p.summary,STAT/256)
+    || !allocate(c,&p.stage2.H,NID_HYP_CAP)
+    || !win_alloc(c,c->w,window,false))goto fail;
  // Commit/touch every device workspace before RX, not at the first pass.
  for(int i=0;i<c->nalloc;i++)if(cudaMemsetAsync(c->alloc[i],0,c->bytes[i],c->stream)!=cudaSuccess)goto fail;
- p.view={sc,0,0,0,14,0,dur,0,n,sc,slots,slots+n,iq};
- p.stage2.sn=sn;for(int j=0;j<3;j++)p.stage2.dec[j]=sn+(j+1)*n;
- // Pointer descriptors initialized once on host, then resident on device.
- {
-  auto desc=new st2_snap_t[4*n+1]{};
-  for(int j=0;j<4*n+1;j++) {
-   double *b=scratch+(size_t)j*6*276;
-   desc[j]={b,b+276,b+2*276,b+3*276,b+4*276,b+5*276,-1};
-  }
-  p.stage2.tmp=desc[4*n];
-  auto err=cudaMemcpyAsync(sn,desc,(4*n+1)*sizeof(*desc),cudaMemcpyHostToDevice,c->stream);
-  if(err==cudaSuccess)err=cudaStreamSynchronize(c->stream);
-  delete[] desc;if(err!=cudaSuccess)goto fail;
- }
- p.stage2.vr=scratch+(size_t)(4*n+1)*6*276;p.stage2.vd=p.stage2.vr+n;
- if(cudaMemcpyAsync(c->dev,&p,sizeof(p),cudaMemcpyHostToDevice,c->stream)!=cudaSuccess)goto fail;
+ if(!win_bind(c))goto fail;
+ iq=c->w.iq;
  // Eager-load every kernel before RX (CUDA_MODULE_LOADING=LAZY included).
  for(const void *f : { (const void*)diagnostic_stats,(const void*)slide,(const void*)family_totals,(const void*)thresholds,(const void*)compact_list,(const void*)reset,(const void*)sweep,(const void*)standardize,
                       (const void*)calibrate,(const void*)screen,(const void*)combine,(const void*)collect,(const void*)accumulate,(const void*)prepare_init,(const void*)prepare_probe,
@@ -610,6 +671,47 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  nr_dl_gpu_sealed=true;
  *staging=c->staging;return c;
 fail: destroy(c);return nullptr;
+}
+// On-demand window (nr_gpu_elastic.h): resize(ctx, 0) -> the current window; resize(ctx, w) -> the window reached, between the current one and w.
+// Growing takes the extra bytes from the shared budget's headroom (as many batches as fit, none: the window stays and the denial is counted); an allocation failure
+// keeps the current window and returns -1. Shrinking gives the extra bytes back. The evidence integration restarts (the history of the old window is not
+// carried over); the bank of published records stays. Called by the worker between passes only (no unscored batch pending).
+int resize(void *ptr,int want) {
+ Context *c=(Context*)ptr;
+ if(!c)return -1;
+ if(want<=0 || want==c->window)return c->window;
+ if(want>NR_PDCCH_NID_MAX_WINDOW)want=NR_PDCCH_NID_MAX_WINDOW;
+ if(c->pending)return -1;
+ const int cur=c->window;
+ const size_t have=window_bytes(c->rb,c->dur,cur);
+ int to=want;
+ if(want>cur) {
+  const size_t hr=nr_gpu_membudget_headroom();
+  while(to>cur && hr!=SIZE_MAX && window_bytes(c->rb,c->dur,to)-have>hr)to--;
+  if(to==cur){nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_PDCCH_NID,window_bytes(c->rb,c->dur,cur+1)-have);return cur;} // refused: counted, nothing taken
+  if(!nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_PDCCH_NID,window_bytes(c->rb,c->dur,to)-have))return cur;
+ }
+ if(nr_gpu_wait_stream(c->stream)!=cudaSuccess){if(to>cur)nr_gpu_membudget_dyn_abort(NR_GPU_MEM_PDCCH_NID,window_bytes(c->rb,c->dur,to)-have);return -1;}
+ Context::Win nw;
+ if(!win_alloc(c,nw,to,true)){
+  if(to>cur)nr_gpu_membudget_dyn_abort(NR_GPU_MEM_PDCCH_NID,window_bytes(c->rb,c->dur,to)-have);
+  return -1;
+ }
+ // The rollback copy of the device descriptor lives on the heap: Device holds the CHUNK/CELLS tables (MBs), and a stack copy made the prologue probe
+ // fault on the 8 MB main-thread stack at the first resize(ctx, 0) [MEASURED, sens6 rfsim 273 PRB, SIGSEGV in resize+0x1d at a stack address].
+ Context::Win old=c->w;std::unique_ptr<Device> saved(new Device(c->host));
+ c->w=nw;c->window=to;
+ if(!win_bind(c) || nr_gpu_wait_stream(c->stream)!=cudaSuccess) { // roll back to the old set
+  c->w=old;c->window=cur;c->host=*saved;
+  cudaMemcpyAsync(c->dev,&c->host,sizeof(c->host),cudaMemcpyHostToDevice,c->stream);nr_gpu_wait_stream(c->stream);
+  win_free(c,nw,false);
+  if(to>cur)nr_gpu_membudget_dyn_abort(NR_GPU_MEM_PDCCH_NID,window_bytes(c->rb,c->dur,to)-have);
+  return -1;
+ }
+ win_free(c,old,false);
+ if(to<cur)nr_gpu_membudget_dyn_release(NR_GPU_MEM_PDCCH_NID,have-window_bytes(c->rb,c->dur,to));
+ c->batches=0;c->first_new=0; // the integration restarts on the new window
+ return to;
 }
 // Bound transfers and history clears as well as kernels. Metadata uses the
 // same accounting, so no work is queued behind the arbiter's back.
@@ -836,9 +938,9 @@ int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *s
 }
 #undef LAUNCH
 int run(void *ptr,nr_pdcch_nid_result_t *out) {return run_impl(ptr,out,nullptr);}
-const nr_pdcch_nid_ops_t ops={NR_PDCCH_NID_ABI,create,upload,run,destroy};
+const nr_pdcch_nid_ops_t ops={NR_PDCCH_NID_ABI,create,upload,run,destroy,resize};
 }
-extern "C" const nr_pdcch_nid_ops_t *nr_pdcch_nid_gpu_ops(void) {return &ops;}
+extern "C" const nr_pdcch_nid_ops_t *nr_pdcch_nid_gpu_ops(void) {return nr_gpu_module_ready() ? &ops : nullptr;} // CPU tier: no ops, the caller keeps the CPU path
 
 // Synthetic parity harness only; the receiver's ABI always calls the full pipeline.
 extern "C" int nr_pdcch_nid_gpu_stage2_check(void *ctx,const nr_pdcch_nid_result_t *seed,nr_pdcch_nid_result_t *out) {

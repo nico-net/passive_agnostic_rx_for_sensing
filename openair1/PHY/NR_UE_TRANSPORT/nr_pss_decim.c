@@ -145,6 +145,18 @@ void nr_pss_cdot(const int16_t *r, const int16_t *x, int n, double *re, double *
   *im = b;
 }
 
+void nr_iq_mag_stats(const int16_t *x_iq, int64_t xlen, int64_t start, int n, double *sum, double *sumsq)
+{
+  double a = 0, b = 0;
+  for (int64_t k = start < 0 ? 0 : start; k < start + n && k < xlen; k++) {
+    const double m = sqrt((double)x_iq[2 * k] * x_iq[2 * k] + (double)x_iq[2 * k + 1] * x_iq[2 * k + 1]);
+    a += m;
+    b += m * m;
+  }
+  *sum = a;
+  *sumsq = b;
+}
+
 void nr_pss_fold_reset(nr_pss_fold_t *f)
 {
   for (int s = 0; s < 3; s++) {

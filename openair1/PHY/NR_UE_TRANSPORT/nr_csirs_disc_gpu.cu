@@ -2,6 +2,7 @@
 #include "nr_csirs_disc_fp_internal.h"
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
+#include "../TOOLS/nr_gpu_cuda.h"
 #include "../TOOLS/nr_gpu_chunk.h"
 #include "../TOOLS/nr_gpu_wait.h"
 #include <cstdio>
@@ -216,6 +217,9 @@ static int upload_symbols(nr_csirs_disc_ring_t *r,uint16_t symbols)
 static void *device_alloc(size_t n) {void *p=nullptr;return cudaMalloc(&p,n)==cudaSuccess?p:nullptr;}
 /* device_free: frees device memory from device_alloc(). Installed as the device_free entry of the ops table. */
 static void device_free(void *p) {cudaFree(p);}
+/* T6b: segment() mode. 0: per-thread arrays on the stack (86 KB frame: the driver reserves frame x SMs x max threads/SM of local memory, 6.3 GB on GB10, 4.2 GB on a 34-SM card).
+ * 1: segment_scratch() with the arrays in a global scratch of g_segment_blocks*32 thread slots. Decided by lmem_prereserve() from the memory budget share. */
+static int g_segment_scratch=0,g_segment_blocks=68;
 namespace resident {static int detect(const nr_csirs_disc_ring_t *,const nr_csirs_disc_fp_cfg_t *,nr_csirs_disc_fp_t *,int,bool);static void reset();}
 /* nr_csirs_disc_gpu_ops: returns the GPU operations table of this module (footprints, normalise, FFT, FEP, accumulate, lattice, memory and prepare entries) when a CUDA device is present.
  *   Returns NULL when the discovery stream cannot be created or no device is found. Exported with C linkage; loaded by nr_csirs_disc_backend.c (load_module).
@@ -223,6 +227,7 @@ namespace resident {static int detect(const nr_csirs_disc_ring_t *,const nr_csir
 static void lmem_prereserve(void);
 extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
 {
+  if(!nr_gpu_module_ready()) return nullptr; // CPU tier: no device, module/arch mismatch or forced CPU (the caller keeps the CPU path)
   if(!discovery_stream.init()) return nullptr;
   lmem_prereserve();
   int devices=0;if(cudaGetDeviceCount(&devices)!=cudaSuccess || devices<1) return nullptr;
@@ -253,6 +258,7 @@ extern "C" void nr_csirs_disc_gpu_free_unified(void *ptr)
  * butterfly rounding is not reproduced by floating-point cuFFT. */
 #include <cufft.h>
 #include <mutex>
+#include "PHY/TOOLS/nr_gpu_membudget.h"
 /* fft_unpack: GPU kernel: converts one batch of 16-bit complex samples to float complex for the cuFFT input. */
 __global__ static void fft_unpack(const short2 *in, cufftComplex *out, size_t n)
 {
@@ -512,7 +518,9 @@ static int accumulate_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_
   if(!grid.reserve(gb) || !meta.reserve(r->capacity) || !x.reserve(xb) || !excl.reserve(14*12*r->n_rb)) return -1;
   // Reuse managed input directly, explicit-copy ordinary CPU fixture rings.
   cudaPointerAttributes attr={};
-  bool managed=cudaPointerGetAttributes(&attr,r->grid_base)==cudaSuccess && (attr.type==cudaMemoryTypeManaged || attr.type==cudaMemoryTypeHost);
+  // Host-mapped ring storage is read in place only on the SHARED tier; on DISCRETE it would cross PCIe on every batch.
+  bool managed=cudaPointerGetAttributes(&attr,r->grid_base)==cudaSuccess &&
+               (attr.type==cudaMemoryTypeManaged || (attr.type==cudaMemoryTypeHost && nr_gpu_platform_shared_direct()));
   cudaGetLastError();
   const int16_t *input=managed?r->grid_base:grid.p;
   if((!managed && disc_copy(grid.p,r->grid_base,gb*sizeof(int16_t),cudaMemcpyHostToDevice)!=cudaSuccess) ||
@@ -654,14 +662,31 @@ static int prepare_host(int rb,int ant,int capacity,int fft,size_t stride)
 /* GPUFUSE: always on. resident::segment needs ~21 KB of local memory per thread: its
  * first launch made the driver grow the device's local-memory reservation (~2 GB), a device-wide synchronisation that
  * blocked every kernel launch, PDSCH included, for 218 ms [nsys, replay b] -- the "one stall per run". Reserving
- * the largest frame of this module's kernels before RX moves that growth to start-up. */
+ * the largest frame of this module's kernels before RX moves that growth to start-up. [T6b: the frame is 86,080 B x SMs x 1536 threads = 4.2 GB on the 34-SM RTX 4060 Ti (6.3 GB on GB10); when that does not fit the memory budget share, segment_scratch() replaces segment() and nothing large is reserved.] */
 static void lmem_prereserve(void)
 {
   static bool done=false;
   if(done) return;
   done=true;
+  int sms=0,thr=0,dev=0;
+  cudaGetDevice(&dev);
+  cudaDeviceGetAttribute(&sms,cudaDevAttrMultiProcessorCount,dev);cudaDeviceGetAttribute(&thr,cudaDevAttrMaxThreadsPerMultiProcessor,dev);
+  // T6b: the driver reserves localSizeBytes x SMs x max threads per SM when a kernel with a local frame first launches (86,080 B x 34 x 1536 = 4.2 GB on the RTX 4060 Ti).
+  // Without the reservation the first launch would need the same memory, so skipping it is no option: when the reservation does not fit the budget share (or the
+  // diagnostic NR_CSIRS_DISC_SEGMENT_SCRATCH=1 asks), segment() is replaced by segment_scratch() (same arithmetic, arrays in a global scratch, small frame).
   size_t need=0,cur=0;cudaFuncAttributes fa;
-  if(cudaFuncGetAttributes(&fa,resident::segment)==cudaSuccess) need=std::max(need,fa.localSizeBytes);
+  const char *force=getenv("NR_CSIRS_DISC_SEGMENT_SCRATCH");
+  if(cudaFuncGetAttributes(&fa,resident::segment)==cudaSuccess) {
+    const size_t total=fa.localSizeBytes*(size_t)std::max(sms,1)*(size_t)std::max(thr,1);
+    const size_t share=nr_gpu_membudget_share(NR_GPU_MEM_CSIRS);
+    if((share!=SIZE_MAX && total>share/4) || (force && force[0]=='1')) {
+      g_segment_scratch=1;g_segment_blocks=2*std::max(sms,1);
+      fprintf(stderr,"[GPU] lmem prereserve skipped: segment() frame %zu B x %d SMs x %d threads = %zu MB (csirs share %zu MB); segment_scratch() with %d thread slots (%zu MB)\n",
+              (size_t)fa.localSizeBytes,sms,thr,total>>20,share==SIZE_MAX?(size_t)0:share>>20,g_segment_blocks*32,
+              (size_t)g_segment_blocks*32*resident::segment_scratch_doubles(275)*8>>20);
+      if(cudaFuncGetAttributes(&fa,resident::segment_scratch)==cudaSuccess) need=fa.localSizeBytes;
+    } else need=fa.localSizeBytes;
+  }
   if(cudaDeviceGetLimit(&cur,cudaLimitStackSize)!=cudaSuccess) return;
   const cudaError_t r=need>cur?cudaDeviceSetLimit(cudaLimitStackSize,need):cudaSuccess;
   fprintf(stderr,"[GPU] lmem prereserve: per-thread local memory %zu -> %zu bytes (%s)\n",cur,std::max(cur,need),cudaGetErrorString(r));

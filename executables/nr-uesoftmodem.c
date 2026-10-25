@@ -32,6 +32,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_disc.h"
+#include "PHY/TOOLS/nr_host_membudget.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h"
@@ -88,6 +89,7 @@ unsigned short config_frames[4] = {2,9,11,13};
 #include "nr_nas_msg.h"
 #include "actor.h"
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_core_layout.h"
 
 THREAD_STRUCT thread_struct;
 nrUE_params_t nrUE_params = {0};
@@ -283,17 +285,59 @@ static void gpu_platform_log(int warning, const char *text)
  *   Then starts the time manager, the GPU warm-up and the discovery pipelines, locks memory, starts the sensing and PRACH services and the radio thread, and waits for the ITTI end signal.
  *   Shutdown sequence: request, wait for the radio release, stop the passive queues and the discovery pipelines, close the outputs, join the ITTI tasks and services, then nr_shutdown_finish(). Offline replay (ISAC_PASSIVE_REPLAY_INPUT or CAPTURE) exits before any radio start-up.
  */
+/* plan_usrp_ring: host-RAM budget for the USRP decoupled RX ring (ISAC_USRP_RING_MS, ~1 GB at 500 ms x 4 ch x 122.88 MS/s). Reserved before every other module
+ *   (it is what keeps the X410 stream alive): up to 50 % of the headroom, floor 100 ms; the USRP driver reads the planned duration (nr_host_membudget_usrp_ring_ms).
+ *   Below the floor the receiver refuses to start (exit 7) instead of an OOM kill during RX. No-op without the ring, on rfsim and on replays. Caller: main(). */
+static void plan_usrp_ring(const NR_DL_FRAME_PARMS *fp)
+{
+  const char *e = getenv("ISAC_USRP_RING_MS");
+  const int ms = e ? atoi(e) : 0;
+  if (ms <= 0 || ms > 5000 || IS_SOFTMODEM_RFSIM || getenv("ISAC_PASSIVE_REPLAY_INPUT") || getenv("ISAC_PASSIVE_REPLAY_CAPTURE"))
+    return;
+  const size_t per_ms = (size_t)fp->samples_per_subframe * fp->nb_antennas_rx * sizeof(int32_t); /* one subframe = 1 ms */
+  const long lo = ms < 100 ? ms : 100;
+  const long got = nr_host_membudget_size(NR_HOST_MEM_USRP, 50, 0, per_ms, lo, ms);
+  if (!got) {
+    char hm[768];
+    nr_host_membudget_format(hm, sizeof(hm));
+    LOG_E(HW, "SENSING: HOST_MEM REFUSE: the USRP ring floor (%ld ms = %zu MB) does not fit the host budget (%s); free host memory or lower ISAC_USRP_RING_MS\n", lo,
+          ((size_t)lo * per_ms) >> 20, hm);
+    printf("SENSING: HOST_MEM PLAN verdict=REFUSE usrp_ring_floor_mb=%zu %s\n", ((size_t)lo * per_ms) >> 20, hm);
+    fflush(stdout);
+    logTerm();
+    _exit(7);
+  }
+  nr_host_membudget_reserve(NR_HOST_MEM_USRP, (size_t)got * per_ms);
+  nr_host_membudget_set_usrp_ring_ms((int)got);
+  if (got != ms)
+    LOG_W(HW, "SENSING: HOST_MEM USRP ring %d -> %ld ms (%zu MB, host-RAM budget)\n", ms, got, ((size_t)got * per_ms) >> 20);
+  else
+    LOG_I(HW, "SENSING: HOST_MEM USRP ring %d ms reserved (%zu MB)\n", ms, ((size_t)got * per_ms) >> 20);
+}
+
 int main(int argc, char **argv)
 {
   /* t26yE site defaults of the passive receiver (never for the phy-test UE): visible before logInit() and the float lane. --passive-rx is on the command line on air. */
-  for (int i = 1; i < argc; i++)
-    if (!strcmp(argv[i], "--passive-rx")) {
-      setenv("ISAC_LOG_ASYNC", "1", 0); setenv("ISAC_CSIRS_DISC", "1", 0); setenv("ISAC_GPU_BUDGET", "1", 0); setenv("ISAC_RECONF", "1", 0); /* read by shared code (LDPC pool, GPU budget) */
-      /* USRP driver (hardware radio shared with the gNB): site defaults of the receiver */
-      setenv("ISAC_UHD_CTRL_CORES", "15", 0); setenv("ISAC_RX_RECOVER", "1", 0); setenv("ISAC_USRP_START_TIMEOUT_MS", "2200", 0);
-      setenv("ISAC_USRP_RING_ZEROCOPY", "1", 0); setenv("ISAC_USRP_CATCHUP_X", "1.05", 0); setenv("ISAC_USRP_CHPOW_S", "1", 0); setenv("ISAC_USRP_NO_TX", "1", 0);
+  bool passive_rx = false, rfsim_arg = false;
+  for (int i = 1; i < argc; i++) {
+    passive_rx |= !strcmp(argv[i], "--passive-rx");
+    rfsim_arg |= !strcmp(argv[i], "--rfsim");
+  }
+  if (passive_rx) {
+    /* Core plan from the host topology (nr_core_layout.h): one CORE_PLAN line, then the planned RT / pool / lane / radio-IO /
+     * dashboard cores are exported for every unset ISAC_* core key. Must run before the float lane changes any affinity.
+     * The radio IO cores are planned only when a hardware radio is used (not --rfsim, not an offline replay). */
+    const bool radio = !rfsim_arg && !getenv("ISAC_PASSIVE_REPLAY_INPUT") && !getenv("ISAC_PASSIVE_REPLAY_CAPTURE");
+    nr_core_layout_init(true, radio);
+    setenv("ISAC_LOG_ASYNC", "1", 0); setenv("ISAC_CSIRS_DISC", "1", 0); setenv("ISAC_GPU_BUDGET", "1", 0); setenv("ISAC_RECONF", "1", 0); /* read by shared code (LDPC pool, GPU budget) */
+    /* USRP driver (hardware radio shared with the gNB): site defaults of the receiver */
+    setenv("ISAC_RX_RECOVER", "1", 0); setenv("ISAC_USRP_START_TIMEOUT_MS", "2200", 0);
+    setenv("ISAC_USRP_RING_ZEROCOPY", "1", 0); setenv("ISAC_USRP_CATCHUP_X", "1.05", 0); setenv("ISAC_USRP_CHPOW_S", "1", 0); setenv("ISAC_USRP_NO_TX", "1", 0);
+    if (!nr_core_layout_active()) { /* ISAC_CORE_PLAN=0: the legacy DGX site cores */
+      setenv("ISAC_UHD_CTRL_CORES", "15", 0);
       setenv("ISAC_FLOAT_CORES", "10-14", 0);
     }
+  }
   nr_core_float_apply(); /* ISAC_FLOAT_CORES: unpinned threads (and everything they start) stay in one lane */
   start_background_system();
   if (nr_shutdown_init(nrue_shutdown_notify, nrue_ru_shutdown_stop, nrue_ru_shutdown) != 0) {
@@ -532,6 +576,7 @@ int main(int argc, char **argv)
   PHY_VARS_NR_UE *disc_ue = nrPHY_vars_UE_g[0][0];
   /* Strong reference: the feed reaches the pipeline through a weak symbol, which alone does not
    * pull nr_csirs_disc.o out of the static PHY archive (the hook stayed NULL, zero batches). */
+  plan_usrp_ring(&disc_ue->frame_parms); /* host-RAM budget: the USRP ring is reserved first (the radio needs it), before any module sizes itself */
   nr_dl_gpu_warmup(disc_ue);
   nr_pdcch_nid_gpu_start(disc_ue->frame_parms.N_RB_DL);
   nr_csirs_disc_pipeline_init(&disc_ue->frame_parms);
@@ -548,6 +593,17 @@ int main(int argc, char **argv)
     }
   }
 
+  /* The GrantWork pool is sized last from what the host budget has left; a host that cannot hold the fixed modules refuses here, before the radio. */
+  const int hostmem_refused = nr_dl_gw_pool_warmup(disc_ue) != 0;
+  if (hostmem_refused || getenv("ISAC_HOST_MEM_PLAN_ONLY")) {
+    /* ISAC_HOST_MEM_PLAN_ONLY=1 (launcher preflight, tests/passive_rx/hostmem_preflight.sh): the receiver's own plan, then exit (0 = fits, 7 = refused); no radio */
+    char hm[768];
+    nr_host_membudget_format(hm, sizeof(hm));
+    printf("SENSING: HOST_MEM PLAN verdict=%s %s\n", hostmem_refused ? "REFUSE" : "OK", hm);
+    fflush(stdout);
+    logTerm();
+    _exit(hostmem_refused ? 7 : 0);
+  }
   /* Offline replay exits before any radio initialization. */
   const char *replay_input = getenv("ISAC_PASSIVE_REPLAY_INPUT");
   if (replay_input || getenv("ISAC_PASSIVE_REPLAY_CAPTURE")) {

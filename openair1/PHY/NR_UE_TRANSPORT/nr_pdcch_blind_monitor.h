@@ -426,11 +426,8 @@ bool nr_pdcch_blind_decode_10_mode(bool automatic,
                                   nr_pdcch_blind_result_t *out,
                                   nr_dci10_interpretation_report_t *report);
 
-/* Bounded initial layout family. Returned grants contain a legal S/L scaffold;
- * never decode them without a Technique D selection. No layout is declared correct here. */
-int nr_pdcch_blind_dl_layout_candidates(const nr_pdcch_blind_raw_result_t *raw,
-                                        uint16_t len, uint16_t bwp, uint8_t typeA,
-                                        nr_pdcch_blind_result_t out[3], uint8_t ids[3]);
+/* (DCI11-RESOLVER 2026-10-24: the hand-written three-candidate DCI 1_1 profile nr_pdcch_blind_dl_layout_candidates() and its
+ * solver fallback gate are gone; every DCI 1_1 is read through the general layout resolver, nr_pdcch_dci11_layout_sweep.h.) */
 
 /// Total DCI-1_1 payload width implied by `opts` at `bwp_size`. With `opts == NULL` this is
 /// identical to nr_pdcch_blind_dci_size(). Its real job is to CHECK a configuration: if this

@@ -317,7 +317,13 @@ static void UE_synch(void *arg) {
         + (openair0_timestamp_t)ret.frame_id * fp->samples_per_frame
         + ret.ssb_offset + fp->nb_prefix_samples;
     syncD->rx_offset = ret.rx_offset;
-    const int freq_offset = UE->common_vars.freq_offset; // frequency offset computed with pss in initial sync
+    /* The PSS/SSS estimate is the CFO relative to the radio's CURRENT tuning (seed + residual on the captured samples). A re-sync
+     * (RX_RECOVER, scan confirm) captures with the radio already moved by an earlier estimate, so the total offset is that tuning plus
+     * this estimate; retuning to the estimate alone threw the correction away (sens6 lab cell 2026-10-25: radio -13893 Hz, re-sync
+     * measured +60 Hz, radio set to +60 Hz, every PDCCH/PDSCH decode lost for the rest of the run). With continuous software
+     * compensation (cont_fo_comp) the radio never moves and the estimate is already the total. */
+    const int freq_offset = UE->common_vars.freq_offset + (get_nrUE_params()->cont_fo_comp ? 0 : nrue_ru_radio_fo());
+    UE->common_vars.freq_offset = freq_offset;
     const int hw_slot_offset =
         ((ret.rx_offset << 1) / fp->samples_per_subframe * fp->slots_per_subframe)
         + round((float)((ret.rx_offset << 1) % fp->samples_per_subframe) / fp->samples_per_slot0);
@@ -932,7 +938,13 @@ static double g_census_pow_ant[CENSUS_MAX_ANT];
 static double   g_census_pw2_ant[CENSUS_MAX_ANT];
 static uint64_t g_census_clip_ant[CENSUS_MAX_ANT];
 static int32_t  g_census_peak_ant[CENSUS_MAX_ANT]; /* max |I|,|Q| seen, int16 full scale */
-static uint64_t g_census_hot_ant[CENSUS_MAX_ANT];  /* samples with |I| or |Q| > 0.9 FS (29490) */
+static uint64_t g_census_hot_ant[CENSUS_MAX_ANT];  /* samples with |I| or |Q| > 0.9 FS (of the device full scale, nrue_ru_rx_fullscale) */
+/* ADCCLASS: per slot class (0 DL, 1 UL, 2 mixed/special per the receiver's own TDD table, nr_ue_slot_select) and antenna, over the census
+ * window and since start: sub-sampled count, |I| or |Q| at full scale (clip), above 0.9 full scale (hot), and sum of I^2+Q^2. */
+static uint64_t g_cls_n[3][CENSUS_MAX_ANT], g_cls_clip[3][CENSUS_MAX_ANT], g_cls_hot[3][CENSUS_MAX_ANT];
+static double g_cls_pw[3][CENSUS_MAX_ANT];
+static uint64_t g_cls_tn[3][CENSUS_MAX_ANT], g_cls_tclip[3][CENSUS_MAX_ANT], g_cls_thot[3][CENSUS_MAX_ANT];
+static int g_census_fs = 32767;
 static uint64_t g_census_smp_ant[CENSUS_MAX_ANT];  /* samples inspected, for the hot fraction */
 static uint64_t g_census_pw2_n;
 
@@ -1815,13 +1827,17 @@ void *UE_thread(void *arg)
            * so the two are directly comparable. Kept separate from acca rather than replacing it,
            * to avoid changing a metric other diagnostics are already calibrated against. */
           double accp = 0.0;
-          uint64_t clip = 0;
+          uint64_t clip = 0, hot = 0;
+          /* Full scale of THIS device's int16 samples (the driver's right shift: X4xx 8191, B2xx 2047, rfsim 32767). A fixed 32767 / 29490 could
+           * never fire on the X410 (its peak sits at exactly 8191 = -12.04 dBFS of int16). */
+          const int fs = g_census_fs = nrue_ru_rx_fullscale(UE), fs_hot = (int)(0.9 * fs);
+          const int sc = nr_ue_slot_select(&UE->nrUE_config, curMsg.proc.nr_slot_rx);
+          const int cls = sc == NR_DOWNLINK_SLOT ? 0 : sc == NR_UPLINK_SLOT ? 1 : 2;
           for (int i = 0; i < n; i += 64) {
             const double xr = (double)rxp[a2][i].r;
             const double xi = (double)rxp[a2][i].i;
             accp += xr * xr + xi * xi;
-            if (rxp[a2][i].r >= 32767 || rxp[a2][i].r <= -32768
-                || rxp[a2][i].i >= 32767 || rxp[a2][i].i <= -32768) {
+            if (rxp[a2][i].r >= fs || rxp[a2][i].r <= -fs - 1 || rxp[a2][i].i >= fs || rxp[a2][i].i <= -fs - 1) {
               clip++;
             }
             /* ADC headroom (2026-09-16): the X410 saturates well before an int16 full-scale hit
@@ -1829,8 +1845,14 @@ void *UE_thread(void *arg)
             const int32_t pk = (int32_t)(xr < 0 ? -xr : xr) > (int32_t)(xi < 0 ? -xi : xi)
                                    ? (int32_t)(xr < 0 ? -xr : xr) : (int32_t)(xi < 0 ? -xi : xi);
             if (pk > g_census_peak_ant[a2]) g_census_peak_ant[a2] = pk;
-            if (pk > 29490) g_census_hot_ant[a2]++;
+            if (pk > fs_hot) { g_census_hot_ant[a2]++; hot++; }
             g_census_smp_ant[a2]++;
+          }
+          if (cnta) {
+            g_cls_n[cls][a2] += (uint64_t)cnta;
+            g_cls_clip[cls][a2] += clip;
+            g_cls_hot[cls][a2] += hot;
+            g_cls_pw[cls][a2] += accp;
           }
           if (cnta) {
             g_census_pw2_ant[a2] += accp / (double)cnta;
@@ -2035,9 +2057,33 @@ void *UE_thread(void *arg)
             size_t v = 0;
             for (int a2 = 0; a2 < na && v < sizeof(pb) - 40; a2++)
               v += snprintf(pb + v, sizeof(pb) - v, "ch%d=%.1fdBFS(hot=%.4f%%) ", a2,
-                            g_census_peak_ant[a2] > 0 ? 20.0 * log10(g_census_peak_ant[a2] / 32767.0) : -199.0,
+                            g_census_peak_ant[a2] > 0 ? 20.0 * log10(g_census_peak_ant[a2] / (double)g_census_fs) : -199.0,
                             g_census_smp_ant[a2] ? 100.0 * (double)g_census_hot_ant[a2] / (double)g_census_smp_ant[a2] : 0.0);
             LOG_I(PHY, "SENSING: ADCPEAK max|I|,|Q| since start; hot = samples above 0.9 full scale: %s\n", pb);
+          }
+          {
+            /* ADCCLASS: per slot class, this window (w) and since start (t); dBFS of mean I^2+Q^2 against 2 fs^2, fs = the device full scale. */
+            static const char *const cn[3] = {"DL", "UL", "MIX"};
+            const double fs2 = 2.0 * (double)g_census_fs * (double)g_census_fs;
+            char cb[1400];
+            size_t w = 0;
+            for (int c = 0; c < 3; c++) {
+              w += snprintf(cb + w, sizeof(cb) - w, " %s[", cn[c]);
+              for (int a2 = 0; a2 < na && w < sizeof(cb) - 120; a2++) {
+                g_cls_tn[c][a2] += g_cls_n[c][a2]; g_cls_tclip[c][a2] += g_cls_clip[c][a2]; g_cls_thot[c][a2] += g_cls_hot[c][a2];
+                w += snprintf(cb + w, sizeof(cb) - w, "ch%d %.1fdBFS w:clip=%.4f%% hot=%.4f%% t:clip=%.4f%% hot=%.4f%%%s", a2,
+                              g_cls_n[c][a2] ? 10.0 * log10(g_cls_pw[c][a2] / g_cls_n[c][a2] / fs2 + 1e-30) : -199.0,
+                              g_cls_n[c][a2] ? 100.0 * g_cls_clip[c][a2] / g_cls_n[c][a2] : 0.0,
+                              g_cls_n[c][a2] ? 100.0 * g_cls_hot[c][a2] / g_cls_n[c][a2] : 0.0,
+                              g_cls_tn[c][a2] ? 100.0 * g_cls_tclip[c][a2] / g_cls_tn[c][a2] : 0.0,
+                              g_cls_tn[c][a2] ? 100.0 * g_cls_thot[c][a2] / g_cls_tn[c][a2] : 0.0, a2 + 1 < na ? "; " : "");
+                g_cls_n[c][a2] = g_cls_clip[c][a2] = g_cls_hot[c][a2] = 0;
+                g_cls_pw[c][a2] = 0.0;
+              }
+              w += snprintf(cb + w, sizeof(cb) - w, "]");
+            }
+            LOG_I(PHY, "SENSING: ADCCLASS fs=%d tdd=%s%s\n", g_census_fs,
+                  UE->nrUE_config.tdd_table.max_tdd_periodicity_list ? "known" : "unknown(all DL)", cb);
           }
 
         }

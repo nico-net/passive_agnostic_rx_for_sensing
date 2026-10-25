@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 /* GPUPASS Task 4, host side of the DL graph pass: see nr_gpu_pass_dl.h and nr_gpu_pass.h. */
+#include "PHY/TOOLS/nr_gpu_membudget.h"
 #include "nr_gpu_pass_dl.h"
 #include "nr_gpu_pass_ul.h"
 #include "nr_pdsch_gpu_demod_host.h"
@@ -8,6 +12,7 @@
 #include "nr_pdsch_gpu_ldpc.h"
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pdsch_cpu_route.h"
+#include "nr_pdsch_ldpc_cap.h"
 #include "nr_llr_norm.h"
 #include "nr_pdsch_evm_acc.h"
 #include "PHY/CODING/coding_defs.h"
@@ -15,6 +20,7 @@
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/TOOLS/nr_gpu_mem.h"
+#include "PHY/TOOLS/nr_gpu_platform.h"
 #include "common/utils/LOG/log.h"
 #include "nr_gpu_pass_fp32_gate.h"
 #include "nr_gpu_graph_pool.h"
@@ -30,6 +36,8 @@ int nr_get_E(uint32_t G, uint8_t C, uint8_t Qm, uint8_t Nl, uint8_t r);
 /* where a pass was not taken (counted; the first few are logged) */
 enum { FB_OFF, FB_CELL, FB_FO, FB_CHEST, FB_DEMOD, FB_TBPARAM, FB_MODULE, FB_SEG, FB_N };
 static const char *const fb_name[FB_N] = {"off", "cell", "fo", "chest", "demod", "tbparam", "module", "seg"};
+#include "PHY/TOOLS/nr_host_membudget.h"
+extern void nr_host_membudget_commit(nr_host_mem_module_t m, size_t bytes, double scale) __attribute__((weak));
 static __thread nr_gpu_pass_job_t *jobp_tls;
 enum { WHY_SEGFAIL, WHY_C32, WHY_Z, WHY_G, WHY_CLASS, WHY_N };
 static struct {
@@ -130,7 +138,7 @@ void nr_gpu_pass_disable(const char *why)
 
 void nr_gpu_pass_gate(int g)
 {
-  static const char *const gname[] = {"seg", "probe", "share", "gw", "ptrs", "tinterp", "harq", "ldpc_off", "chest_only", "occ", "nomem", "retry", "gw_ready", "llr_ovr", "cap", "force_cpu"};
+  static const char *const gname[] = {"seg", "probe", "share", "gw", "ptrs", "tinterp", "harq", "ldpc_off", "chest_only", "occ", "nomem", "retry", "gw_ready", "llr_ovr", "cap", "force_cpu", "path"};
   if (g >= 0 && g < NR_GPU_PASS_GATE_N) {
     /* Fix A+D: a first pass that leaves the GPU pass says why (first time per reason here; the census prints every count) */
     if (atomic_fetch_add_explicit(&G.gate[g], 1, memory_order_relaxed) == 0 && g < (int)(sizeof(gname) / sizeof(gname[0])))
@@ -243,6 +251,12 @@ static const int g_nrbs[] = {273, 217, 136, 96, 48, 24, 12, 6};
 static const int g_ncbc[9] = {1, 2, 4, 8, 16, 32, 64, 128, NR_GPU_PASS_MAX_CB}; /* the code-block count classes (nr_gpu_pass_ncb_class) */
 static const int g_nls[] = {1, 2, 4, 3};
 /* the contiguous classes of the DM-RS counts nds: PRB classes x layers x code-block count classes x demod variants */
+/* the platform tier word of the GPUPASS log line (shared|discrete|cpu); the memory model beside it is the pass's own (a test can force DISCRETE buffers on a SHARED tier) */
+static const char *gpass_tier(void)
+{
+  const nr_gpu_caps_t *c = nr_gpu_platform_probe();
+  return c && c->model == NR_GPU_SHARED ? "shared" : c && c->model == NR_GPU_DISCRETE ? "discrete" : "cpu";
+}
 static void warm_contiguous(nr_gpu_pass_warm_fn warmf, PHY_VARS_NR_UE *ue, int nbrx, const int *nds, int nnds, int budget, int evm, int *made, int *failed)
 {
   for (int di = 0; di < nnds; di++)
@@ -316,7 +330,11 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
       return;
     }
     memcpy(dt.host, fp->delay_table, bytes);
-    nr_gpu_buf_h2d_async(&dt, 0, bytes, NULL);
+    /* the copy runs on the legacy default stream and the pass streams are cudaStreamNonBlocking (no implicit ordering with it): wait for it before the graphs are captured and replayed */
+    if (nr_gpu_buf_h2d_async(&dt, 0, bytes, NULL) != 0 || nr_gpu_sync(NULL) != 0) {
+      LOG_W(PHY, "SENSING: GPUPASS: delay table copy to the device failed: off\n");
+      return;
+    }
     c.delay_table = (const int16_t *)dt.dev;
   }
   if (cfgf(&c) != 0 || initf(0) != 0) {
@@ -362,6 +380,16 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   int smade = 0;
   static const int segc[] = {1, 2, 4, 8, 16, 32, 64, 128}, segnl[] = {1, 2, 3, 4};
   const int nsegc = c.split ? (g_sub_on[4] ? 8 : 6) : 5, segrows = c.split ? 1024 : 512; /* split: the 32-segment class and the module's 1024 chest rows; SEG128: 64, 128 in C chunks */
+  void (*memf)(uint64_t *) = (void (*)(uint64_t *))dlsym(h, "nr_gpu_pass_mem");
+  if (memf) { /* T6: the memory census of the pass (device MB; the receiver's other GPU modules are not in it) */
+    uint64_t m[6] = {0};
+    memf(m);
+    char mb[512]; /* T6b: the shared budget: per module the bytes it chose, its share and scale (1.000 = full size) */
+    nr_gpu_membudget_format(mb, sizeof(mb));
+    LOG_A(PHY, "SENSING: GPU_MEM tier=%s model=%s total=%lu free_at_probe=%lu pass_inst_mb=%lu graph_mb=%lu harq_mb=%lu allocated_mb=%lu graph_cap_mb=%lu pinned_host_mb=%lu %s\n", gpass_tier(),
+          nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE", (unsigned long)m[0], (unsigned long)(nr_gpu_platform_free_at_probe() >> 20), (unsigned long)m[1], (unsigned long)m[2],
+          (unsigned long)m[4], (unsigned long)(m[1] + m[2] + m[4]), (unsigned long)m[3], (unsigned long)m[5], mb);
+  }
   if (G.stats) {
     char buf[1024];
     G.stats(buf, sizeof(buf));
@@ -401,12 +429,22 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     LOG_A(PHY, "SENSING: GPUGRAPH v2 mode: %d of %d prewarmed host buffer sets for late threads\n",
           nr_gpu_graph_pool_fill(&g_pool, NR_GPU_GRAPH_POOL, sizeof(nr_gpu_pass_dl_out_t), sizeof(nr_gpu_pass_job_t)), NR_GPU_GRAPH_POOL);
   atomic_store(&G.on, made > 0);
-  LOG_A(PHY, "SENSING: GPUPASS %s: %d shape classes (+ %d segmented) x %d instances captured (EVM branch %d, %d failed), shadow check every %d passes, %s memory model, demod %s\n",
-        made > 0 ? "enabled" : "NOT enabled", made, smade, NR_GPU_PASS_RING, evm, failed, G.check, nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE", G.fp32 ? "FP32 (sign/CRC shadow checks)" : "FP64 (bit-exact)");
+  LOG_A(PHY, "SENSING: GPUPASS %s: %d shape classes (+ %d segmented) x %d instances captured (EVM branch %d, %d failed), shadow check every %d passes, %s memory model (tier %s), demod %s\n",
+        made > 0 ? "enabled" : "NOT enabled", made, smade, NR_GPU_PASS_RING, evm, failed, G.check, nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE", gpass_tier(), G.fp32 ? "FP32 (sign/CRC shadow checks)" : "FP64 (bit-exact)");
   if (G.stats) {
     char buf[1024];
     G.stats(buf, sizeof(buf));
     LOG_A(PHY, "SENSING: %s\n", buf);
+  }
+  if (memf) { /* On-demand sizing: the capture is over (nothing is captured after the fence). The graphs hold what they allocated, not their cap: the rest is headroom for the elastic modules (csirs ring, nID window). */
+    uint64_t m[6] = {0};
+    memf(m);
+    char mb[768];
+    nr_gpu_membudget_commit(NR_GPU_MEM_GRAPH, (size_t)m[2] << 20, m[3] ? (double)m[2] / (double)m[3] : 1.0);
+    if (nr_host_membudget_commit) nr_host_membudget_commit(NR_HOST_MEM_PINNED, (size_t)m[5] << 20, 1.0); /* the pass's cudaHostAlloc mirrors: locked host RAM */
+    nr_gpu_membudget_format(mb, sizeof(mb));
+    const size_t hr = nr_gpu_membudget_headroom();
+    LOG_A(PHY, "SENSING: GPU_MEM final graph_mb=%lu graph_cap_mb=%lu elastic_headroom_mb=%lld %s\n", (unsigned long)m[2], (unsigned long)m[3], hr == SIZE_MAX ? -1LL : (long long)(hr >> 20), mb);
   }
   nr_gpu_pass_ul_warm(h, fp->nb_antennas_rx, G.fp32); /* the PUSCH pass (Fix A+D) is THE UL path, its own instance pool; grants outside its scope fall back, counted */
 }
@@ -487,7 +525,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   dlsch.rnti = in->rnti;
   dlsch.rnti_type = TYPE_C_RNTI_;
   dlsch.active = true;
-  dlsch.max_ldpc_iterations = 8;
+  dlsch.max_ldpc_iterations = (uint8_t)nr_pdsch_ldpc_cap();
   NR_DL_UE_HARQ_t harq = {0};
   harq.status = NR_ACTIVE;
   harq.first_rx = 1;

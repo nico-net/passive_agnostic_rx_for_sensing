@@ -1,5 +1,17 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc.h"
+#include "nr_csirs_disc_mem.h"
+/* T6b: weak, so fixtures that link this file without the platform library keep an unlimited budget */
+extern size_t nr_gpu_membudget_share(nr_gpu_mem_module_t m) __attribute__((weak));
+extern void nr_gpu_membudget_commit(nr_gpu_mem_module_t m, size_t bytes, double scale) __attribute__((weak));
+extern size_t nr_gpu_membudget_headroom(void) __attribute__((weak));
+extern int nr_gpu_membudget_dyn_acquire(nr_gpu_mem_module_t m, size_t bytes) __attribute__((weak));
+extern void nr_gpu_membudget_dyn_release(nr_gpu_mem_module_t m, size_t bytes) __attribute__((weak));
+extern void nr_gpu_membudget_dyn_abort(nr_gpu_mem_module_t m, size_t bytes) __attribute__((weak));
+#include "PHY/TOOLS/nr_host_membudget.h"
+extern size_t nr_host_membudget_headroom(void) __attribute__((weak));
+extern void nr_host_membudget_commit(nr_host_mem_module_t m, size_t bytes, double scale) __attribute__((weak));
+#include "PHY/TOOLS/nr_gpu_elastic.h"
 #include "PHY/defs_nr_common.h"
 #include "nr_csirs_disc_gate_internal.h"
 #include "nr_csirs_disc_evidence_internal.h"
@@ -36,6 +48,10 @@ extern uint64_t csirs_disc_rl_skipped __attribute__((weak));
 
 #define DISC_VIEWS 128
 static bool pipeline_ready=true;
+static int g_ring_capacity=NR_CSIRS_DISC_DEFAULT_CAPACITY; /* T6b */
+int nr_csirs_disc_ring_capacity(void) {return g_ring_capacity;}
+static bool g_el_on;
+static nr_gpu_elastic_t g_el;
 /* nr_csirs_disc_pipeline_ready: returns whether the CSI-RS discovery pipeline is usable (false after a failed GPU preallocation or discovery prepare).
  *   Read by nr_csirs_disc_start() in nr_csirs_disc_feed.c (refuses to start when the pipeline is down).
  */
@@ -155,6 +171,90 @@ static void epoch_listener(const nr_cfg_epoch_snapshot_t *snapshot)
   pthread_mutex_unlock(&pipeline_lock);
 }
 
+/* ---- on-demand ring (PHY/TOOLS/nr_gpu_elastic.h) ----
+ * T6b cut the observation ring to what the csirs share of the device budget holds (221 of 640 slots on an 8 GB card). The ring keeps that size (base) and grows in steps of
+ * 64 slots from the budget headroom when the hypotheses under test need a longer span: one period for an accumulating hypothesis (row 1: evidence adds up across batches),
+ * four periods for the others (the sweep averages up to max_slots = 4 occasions that must lie inside the ring). It gives the extra back after ELASTIC_IDLE_TICKS discovery
+ * batches without such a demand. A resize empties the ring (the detector and the evidence caches restart on the new grid) and runs on the worker thread under the pipeline
+ * lock. A refused or failed growth leaves the ring as it is (one log, counted in the GPU_MEM census as csirs_dyn=.../denied=...). A share that holds the full ring
+ * (GB10, unlimited budget) never enables it: the ring is 640 slots from the start, the code below does not run. */
+#define ELASTIC_STEP 64
+#define ELASTIC_IDLE_TICKS 600  /* ~30 s at one batch per 100 slots (50 ms at 30 kHz) */
+#define ELASTIC_BACKOFF_TICKS 200
+
+static int g_el_demand,g_el_rb,g_el_ant;
+static size_t g_el_per_slot, g_el_host_per_slot; /* device bytes per slot (GPU budget); host grid bytes per slot (host budget) */
+/* nr_csirs_disc_ring_host_cap: the host-RAM budget gave the ring fewer slots than the GPU share (nr_csirs_disc_start): that is the ring's real size, the elastic base. */
+void nr_csirs_disc_ring_host_cap(int capacity)
+{
+  if(capacity<1 || capacity>=g_ring_capacity) return;
+  g_ring_capacity=capacity;
+  if(g_el.full) { nr_gpu_elastic_init(&g_el,capacity,g_el.full,ELASTIC_STEP,ELASTIC_IDLE_TICKS,ELASTIC_BACKOFF_TICKS); g_el_on=nr_gpu_elastic_enabled(&g_el); }
+}
+/* elastic_demand: slots of ring the n hypotheses under test want (see above); capped at the full ring. */
+static int elastic_demand(const nr_csirs_disc_hyp_t *h,int n)
+{
+  int d=0;
+  for(int i=0;i<n;++i) {
+    const int need=h[i].period*(h[i].row==1?1:4);
+    if(need>d) d=need;
+  }
+  return d>NR_CSIRS_DISC_DEFAULT_CAPACITY?NR_CSIRS_DISC_DEFAULT_CAPACITY:d;
+}
+/* elastic_tick: one tick (called with pipeline_lock held, before a batch). Returns true when the ring was replaced by one of another size (it is empty: skip this batch). */
+static bool elastic_tick(nr_csirs_disc_ring_t *ring)
+{
+  if(!g_el_on || ring!=nr_csirs_disc_worker_ring() || !nr_csirs_disc_worker_resizable()) return false;
+  const int cur=g_el.cur,want=nr_gpu_elastic_target(&g_el,g_el_demand);
+  if(want==cur) return false;
+  int to=want;
+  size_t take=0;
+  if(want>cur) {
+    const size_t headroom=nr_gpu_membudget_headroom?nr_gpu_membudget_headroom():SIZE_MAX;
+    to=nr_gpu_elastic_fit(&g_el,want,g_el_per_slot,headroom);
+    if(to==cur) { /* no headroom for one step: counted by the budget, the ring keeps its size */
+      if(nr_gpu_membudget_dyn_acquire) nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_CSIRS,(size_t)ELASTIC_STEP*g_el_per_slot);
+      if(nr_gpu_elastic_done(&g_el,want,cur,1))
+        LOG_W(PHY,"SENSING: CSIRS_DISC ring growth %d -> %d slots refused (memory budget headroom %zu MB); keeping %d slots, further refusals are only counted\n",cur,want,headroom>>20,cur);
+      return false;
+    }
+    /* host-RAM budget: the new host grid is allocated (and touched) before the old one is freed, so the whole new grid must fit the host headroom */
+    const size_t hhr=nr_host_membudget_headroom?nr_host_membudget_headroom():SIZE_MAX;
+    while(to>cur && hhr!=SIZE_MAX && (size_t)to*g_el_host_per_slot>hhr) to-=ELASTIC_STEP;
+    if(to<=cur) {
+      if(nr_gpu_elastic_done(&g_el,want,cur,1))
+        LOG_W(PHY,"SENSING: CSIRS_DISC ring growth %d -> %d slots refused (host-RAM budget headroom %zu MB); keeping %d slots, further refusals are only counted\n",cur,want,hhr>>20,cur);
+      return false;
+    }
+    take=(size_t)(to-cur)*g_el_per_slot;
+    if(nr_gpu_membudget_dyn_acquire && !nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_CSIRS,take)) {
+      if(nr_gpu_elastic_done(&g_el,want,cur,0))
+        LOG_W(PHY,"SENSING: CSIRS_DISC ring growth %d -> %d slots refused (memory budget); keeping %d slots\n",cur,to,cur);
+      return false;
+    }
+  }
+  const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load();
+  const uint64_t t0=now_us();
+  int rc=nr_csirs_disc_ring_resize(ring,to);
+  if(rc==0 && gpu && gpu->sweep_prepare && gpu->sweep_prepare(g_el_rb,g_el_ant,to)<0) {
+    nr_csirs_disc_ring_resize(ring,cur); /* the sweep workspace did not fit: back to the old size (an empty ring either way) */
+    rc=-1;
+  }
+  if(rc!=0) {
+    if(take && nr_gpu_membudget_dyn_abort) nr_gpu_membudget_dyn_abort(NR_GPU_MEM_CSIRS,take);
+    if(nr_gpu_elastic_done(&g_el,want,cur,0))
+      LOG_W(PHY,"SENSING: CSIRS_DISC ring resize %d -> %d slots failed (allocation); keeping %d slots, further failures are only counted\n",cur,to,cur);
+    return false;
+  }
+  if(to<cur && nr_gpu_membudget_dyn_release) nr_gpu_membudget_dyn_release(NR_GPU_MEM_CSIRS,(size_t)(cur-to)*g_el_per_slot);
+  nr_gpu_elastic_done(&g_el,want,to,1);
+  g_ring_capacity=to;
+  if(nr_host_membudget_commit && g_el_host_per_slot) nr_host_membudget_commit(NR_HOST_MEM_CSIRS,(size_t)to*g_el_host_per_slot,(double)to/NR_CSIRS_DISC_DEFAULT_CAPACITY);
+  LOG_A(PHY,"SENSING: CSIRS_DISC ring %d -> %d slots (demand %d, base %d, full %d; grows=%llu shrinks=%llu denied=%llu; %llu us)\n",cur,to,g_el_demand,g_el.base,g_el.full,
+        (unsigned long long)g_el.grows,(unsigned long long)g_el.shrinks,(unsigned long long)g_el.denied,(unsigned long long)(now_us()-t0));
+  return true;
+}
+
 /* init_once: one-time setup run through pthread_once from nr_csirs_disc_pipeline_init(): initialises the search lock, loads the GPU ops, warms the hypothesis builder and installs the processing hook.
  *   Subscribes epoch_listener() to configuration epochs when the epoch service is present.
  */
@@ -178,11 +278,36 @@ void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp)
     pthread_once(&g_once, init_once);
     const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load();
     if(fp && gpu && gpu->prepare) {
-      const int capacity=NR_CSIRS_DISC_DEFAULT_CAPACITY;
       size_t stride=14*(fp->ofdm_symbol_size+fp->nb_prefix_samples0+fp->nb_prefix_samples);
+      /* T6b: ring capacity from the shared memory budget (640 when it fits: GB10 unchanged); the floor not fitting = GPU discovery not ready -> CPU discovery */
+      const size_t share=nr_gpu_membudget_share?nr_gpu_membudget_share(NR_GPU_MEM_CSIRS):SIZE_MAX;
+      const int capacity=nr_csirs_disc_mem_capacity(share,fp->N_RB_DL,fp->nb_antennas_rx,fp->ofdm_symbol_size,stride,NR_CSIRS_DISC_DEFAULT_BATCH,NR_CSIRS_DISC_DEFAULT_CAPACITY);
+      if(!capacity) {
+        LOG_W(PHY,"SENSING: CSIRS_DISC GPU memory budget share %zu MB < %zu MB for the smallest ring (%d slots); GPU discovery not ready, CPU discovery\n",share>>20,
+              (nr_csirs_disc_mem_fixed(fp->N_RB_DL,fp->nb_antennas_rx,fp->ofdm_symbol_size,stride,NR_CSIRS_DISC_DEFAULT_BATCH)+NR_CSIRS_DISC_CAPACITY_MIN*nr_csirs_disc_mem_per_slot(fp->N_RB_DL,fp->nb_antennas_rx))>>20,NR_CSIRS_DISC_CAPACITY_MIN);
+        if(nr_gpu_membudget_commit) nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS,0,0.0);
+        nr_csirs_disc_gpu_disable();
+        gpu=NULL;
+      } else {
+      g_ring_capacity=capacity;
+      const size_t bytes=nr_csirs_disc_mem_fixed(fp->N_RB_DL,fp->nb_antennas_rx,fp->ofdm_symbol_size,stride,NR_CSIRS_DISC_DEFAULT_BATCH)+(size_t)capacity*nr_csirs_disc_mem_per_slot(fp->N_RB_DL,fp->nb_antennas_rx);
+      const size_t full=nr_csirs_disc_mem_fixed(fp->N_RB_DL,fp->nb_antennas_rx,fp->ofdm_symbol_size,stride,NR_CSIRS_DISC_DEFAULT_BATCH)+(size_t)NR_CSIRS_DISC_DEFAULT_CAPACITY*nr_csirs_disc_mem_per_slot(fp->N_RB_DL,fp->nb_antennas_rx);
+      if(nr_gpu_membudget_commit) nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS,bytes,(double)bytes/(double)full);
+      g_el_per_slot=nr_csirs_disc_mem_per_slot(fp->N_RB_DL,fp->nb_antennas_rx);g_el_host_per_slot=(size_t)fp->nb_antennas_rx*NR_CSIRS_DISC_NSYM*24*fp->N_RB_DL*sizeof(int16_t);g_el_rb=fp->N_RB_DL;g_el_ant=fp->nb_antennas_rx;g_el_demand=0;
+      nr_gpu_elastic_init(&g_el,capacity,NR_CSIRS_DISC_DEFAULT_CAPACITY,ELASTIC_STEP,ELASTIC_IDLE_TICKS,ELASTIC_BACKOFF_TICKS);
+      g_el_on=nr_gpu_elastic_enabled(&g_el) && share!=SIZE_MAX; /* a ring cut by the budget share: grows on demand; the full ring (GB10, unlimited budget) never moves */
+      if(g_el_on) LOG_I(PHY,"SENSING: CSIRS_DISC on-demand ring: base %d of %d slots (the budget share holds %d), +%d slots per step from the budget headroom\n",capacity,NR_CSIRS_DISC_DEFAULT_CAPACITY,capacity,ELASTIC_STEP);
+      if(capacity!=NR_CSIRS_DISC_DEFAULT_CAPACITY)
+        LOG_W(PHY,"SENSING: CSIRS_DISC ring capacity %d -> %d slots (memory budget share %zu MB, need %zu MB)\n",NR_CSIRS_DISC_DEFAULT_CAPACITY,capacity,share>>20,bytes>>20);
       if(!gpu->sweep || !gpu->refine || !gpu->confirm || !gpu->sweep_prepare || gpu->prepare(fp->N_RB_DL,fp->nb_antennas_rx,capacity,fp->ofdm_symbol_size,stride)<0
          || (gpu->sweep_prepare && gpu->sweep_prepare(fp->N_RB_DL,fp->nb_antennas_rx,capacity)<0))
-        {pipeline_ready=false;LOG_E(PHY,"SENSING: CSIRS_DISC GPU preallocation failed; discovery disabled\n");}
+        {
+          /* T6b: an allocation failure makes the GPU discovery not ready (CPU discovery), not the discovery off */
+          LOG_E(PHY,"SENSING: CSIRS_DISC GPU preallocation failed; GPU discovery not ready, CPU discovery\n");
+          if(nr_gpu_membudget_commit) nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS,0,0.0);
+          nr_csirs_disc_gpu_disable();
+        }
+      }
     }
     if(fp && pipeline_ready && nr_csirs_blind_rt_discovery_prepare && nr_csirs_blind_rt_discovery_prepare(fp)<0) pipeline_ready=false;
     if(!pipeline_ready && nr_csirs_blind_rt_discovery_disable) nr_csirs_blind_rt_discovery_disable();
@@ -286,6 +411,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   if (!ring || !nr_csirs_disc_enabled())
     return;
   pthread_mutex_lock(&pipeline_lock);
+  if(elastic_tick(ring)) {pthread_mutex_unlock(&pipeline_lock);return;} /* the ring was replaced by an empty one of another size: the next batch starts on it */
   if(!nr_csirs_disc_ring_snapshot_current(ring)) {pthread_mutex_unlock(&pipeline_lock);return;}
   if(cache_grid!=ring->grid_base || ring->written<cache_written) {
     cache_count=qualified_count=evidence_retries=0; ++evidence_epoch;
@@ -401,6 +527,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   struct timespec hts; clock_gettime(CLOCK_MONOTONIC, &hts); /* OTATAIL: align batches with PDTIMSLOW t= */
   LOG_I(PHY, "SENSING: CSIRS_DISC HYPOTHESES n=%d sweep=%d t=%ld.%03ld\n", n_all, n_hyp, (long)hts.tv_sec, hts.tv_nsec / 1000000);
 
+  if(g_el_on) g_el_demand=elastic_demand(hyps,n_hyp);
   const uint64_t built = now_us(), cpu_built=cpu_us();
   int n_win = 0;
   bool gpu = false;

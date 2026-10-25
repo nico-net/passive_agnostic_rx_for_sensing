@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#include <algorithm>
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <new>
 #include <vector>
 #include <cmath>

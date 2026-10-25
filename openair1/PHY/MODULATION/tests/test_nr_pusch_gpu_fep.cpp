@@ -53,7 +53,7 @@ TEST(UlGpuFep, BitExactVsCpu)
   const nr_pusch_gpu_fep_api_t *api = nr_pusch_gpu_fep_load();
   if (!api) GTEST_SKIP() << "libpdsch_gpu.so not loadable";
   const int N = 4096, ncp = 288, div = 8, nsym = 14, spsf = 2;
-  if (api->init(4, N, ncp, div, 20, 500) != 0) GTEST_SKIP() << "no CUDA device / coherent host memory";
+  if (api->init(4, N, ncp, div, 20, 500) != 0) GTEST_SKIP() << "no CUDA device or CPU tier (NR_GPU_FORCE_MODEL=cpu)";
   std::vector<c16_t> ts(N);
   init_timeshift_rotation(N, ncp, div, ts.data());
   std::mt19937 rng(7);
@@ -93,9 +93,58 @@ TEST(UlGpuFep, BitExactVsCpu)
     }
   }
   EXPECT_EQ(0, bad) << bad << " of " << rows << " rows differ";
-  uint64_t st[13];
+  uint64_t st[16];
   api->stats(st);
   EXPECT_GT(st[0], 0u);
+  if (st[13]) { /* Q4: the DISCRETE staged variant ran: its copies are counted */
+    EXPECT_GT(st[10], 0u);
+    EXPECT_GT(st[11], 0u);
+    EXPECT_GT(st[12], 0u);
+    printf("UL_FEP staged: runs=%lu h2d=%lu KB d2h=%lu KB\n", (unsigned long)st[10], (unsigned long)(st[11] >> 10), (unsigned long)(st[12] >> 10));
+  }
+}
+
+// Q4: windows that overlap (the timing search asks for windows a few samples apart) are merged into one staged span; the rows must still be bit exact, and the H2D
+// bytes must be the merged span, not n x N.
+TEST(UlGpuFep, OverlappingWindowsAreMerged)
+{
+  ASSERT_EQ(0, load_dftslib());
+  const nr_pusch_gpu_fep_api_t *api = nr_pusch_gpu_fep_load();
+  if (!api) GTEST_SKIP() << "libpdsch_gpu.so not loadable";
+  const int N = 4096, ncp = 288, div = 8, nsym = 14, spsf = 2, nb_rb = 217, fco = N - nb_rb * 6;
+  if (api->init(4, N, ncp, div, 20, 500) != 0) GTEST_SKIP() << "no CUDA device or CPU tier (NR_GPU_FORCE_MODEL=cpu)";
+  std::vector<c16_t> ts(N);
+  init_timeshift_rotation(N, ncp, div, ts.data());
+  std::mt19937 rng(3);
+  std::vector<c16_t> rot(nsym * spsf);
+  for (auto &r : rot) { r.r = (int16_t)(rng() % 60000 - 30000); r.i = (int16_t)(rng() % 60000 - 30000); }
+  std::vector<std::vector<c16_t>> iq(4, std::vector<c16_t>(20000));
+  for (auto &a : iq) for (auto &x : a) { x.r = (int16_t)((int)(rng() % 1201) - 600); x.i = (int16_t)((int)(rng() % 1201) - 600); }
+  const int n = 33;
+  std::vector<nr_pusch_gpu_fep_item_t> it(n);
+  std::vector<std::vector<c16_t>> out(4 * n, std::vector<c16_t>(N));
+  for (int i = 0; i < n; i++) {
+    memset(&it[i], 0, sizeof(it[i]));
+    for (int a = 0; a < 4; a++) { it[i].src[a] = (const int16_t *)&iq[a][100 + 7 * i]; it[i].dst[a] = (int16_t *)out[i * 4 + a].data(); }
+    it[i].rot[0] = rot[3].r; it[i].rot[1] = rot[3].i; it[i].rotate = 1;
+  }
+  uint64_t s0[16], s1[16];
+  api->stats(s0);
+  ASSERT_EQ(0, api->run(it.data(), n, nb_rb, fco));
+  api->stats(s1);
+  for (int i = 0; i < n; i++)
+    for (int a = 0; a < 4; a++) {
+      c16_t ref[N] __attribute__((aligned(32)));
+      dft(get_dft(N), (int16_t *)&iq[a][100 + 7 * i], (int16_t *)ref, 1);
+      apply_nr_rotation_symbol_RX(nsym, spsf, ts.data(), fco, ref, rot.data(), nb_rb, 0, 3);
+      EXPECT_EQ(0, memcmp(ref, out[i * 4 + a].data(), sizeof(ref))) << "item " << i << " ant " << a;
+    }
+  if (s1[13]) {
+    const uint64_t span = (uint64_t)(7 * (n - 1) + N) * 4 /*B*/, h2d = s1[11] - s0[11];
+    const uint64_t items = ((uint64_t)n * 72 + 255) & ~255ull;
+    EXPECT_LE(h2d, items + 4 * ((span + 255) & ~255ull)) << "windows not merged";
+    EXPECT_GE(h2d, items + 4 * span);
+  }
 }
 
 // Latency of one batch (ULFEP_BENCH=1 to run): n items x 4 antennas, host-memory in/out, as the decoder calls it.

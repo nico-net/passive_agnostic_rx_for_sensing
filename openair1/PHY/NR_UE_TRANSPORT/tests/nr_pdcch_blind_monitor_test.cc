@@ -56,6 +56,7 @@ void crcTableInit(void);
 #include "common/utils/nr/nr_common.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // NR_tda_info_t, get_dl_tda_info(), TYPE_C_RNTI_
 #include "nr_pdcch_blind_monitor.h"
+#include "nr_pdcch_dci11_layout_sweep.h"
 #include "nr_passive_cfg_sources.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_pdsch_config_sweep.h"
@@ -2874,7 +2875,30 @@ TEST(RxContinuity, PrefixReadsAndExplicitRebasesHaveDifferentContracts) {
   EXPECT_FALSE(s.valid);
 }
 
-TEST_F(BlindPdcchTest, DlLayoutFamilyRecoversVaryingFrontWidthsWithoutManualHints) {
+/* DCI11-RESOLVER: the hand-written three-candidate profile (nr_pdcch_blind_dl_layout_candidates) is gone; its tests asked the
+ * same question of it that these ask of the general resolver -- the layout the gNB used is among the candidates and parses the
+ * payload to the ground truth -- plus the Iliad case the profile could not answer at all. (The profile-only behaviour, refusing
+ * an ambiguous length with > 3 candidates, has no counterpart: ambiguity is what the resolver keeps until CRC evidence.) */
+static int ResolverLayoutParse(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                               uint16_t bwp, nr_pdcch_blind_result_t *out)
+{
+  nr_dci11_field_bits_t f;
+  if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f)) return 0;
+  nr_pdcch_blind_extract_opts_t o = {};
+  o.bwp_indicator_bits = f.bwp_indicator_bits; o.vrb_to_prb_bits = f.vrb_to_prb_bits; o.prb_bundling_bits = f.prb_bundling_bits;
+  o.rate_matching_bits = f.rate_matching_bits; o.zp_csirs_bits = f.zp_csirs_bits; o.tb2_bits = f.tb2_bits;
+  o.harq_pid_bits = f.harq_pid_bits; o.dai_bits = f.dai_bits; o.pdsch_to_harq_bits = f.pdsch_to_harq_bits;
+  o.antenna_ports_bits = f.antenna_ports_bits; o.dmrs_config_type = f.dmrs_config_type; o.tci_bits = f.tci_bits;
+  o.srs_request_bits = f.srs_request_bits; o.cbg_bits = f.cbg_bits; o.fdra_mode = f.fdra_mode; o.fdra_bwp_start = 0;
+  o.tda_count = r->off[i].tda_bits ? (1 << r->off[i].tda_bits) : 1;
+  for (int k = 0; k < o.tda_count; ++k) { o.tda_start[k] = 1; o.tda_length[k] = 13; o.tda_mapping[k] = 0; }
+  o.dmrs_add_pos = 0; o.dmrs_max_length = 1;
+  if (nr_pdcch_blind_dci_size_ex(bwp, &o) + f.tail_bits != len) return 0;
+  return nr_pdcch_blind_extract_11(raw, len, bwp, 0, &o, out) ? 1 : 0;
+}
+
+TEST_F(BlindPdcchTest, DlResolverRecoversVaryingFrontWidthsWithoutManualHints) {
+  static nr_dci11_resolver_t r;
   for(int bw=0;bw<=2;++bw) for(int td=0;td<=4;++td) {
     auto opts=DefaultOpts();
     opts.bwp_indicator_bits=bw;
@@ -2888,30 +2912,43 @@ TEST_F(BlindPdcchTest, DlLayoutFamilyRecoversVaryingFrontWidthsWithoutManualHint
     auto llr=EncodeToLLR(payload,gt.rnti,len,2,40.0,rng_);
     nr_pdcch_blind_raw_result_t raw{};
     ASSERT_TRUE(nr_pdcch_blind_decode_raw_11(llr.data(),2,len,gt.rnti,gt.rnti,&raw));
-    nr_pdcch_blind_result_t candidates[3]{};
-    uint8_t ids[3]{};
-    const int n=nr_pdcch_blind_dl_layout_candidates(&raw,len,273,0,candidates,ids);
+    ASSERT_GT(nr_dci11_resolver_init_fdra(&r,0,273,16,NR_DCI11_TDA_UNKNOWN,len),0);
     bool found=false;
-    for(int i=0;i<n;++i) if(ids[i]==bw*5+td) {
-      found=true;
-      EXPECT_EQ(candidates[i].start_rb,7);
-      EXPECT_EQ(candidates[i].num_rb,21);
-      EXPECT_EQ(candidates[i].mcs,13);
-      EXPECT_EQ(candidates[i].harq_pid,9);
-      EXPECT_EQ(candidates[i].tda_index,opts.tda_count-1);
+    for(int i=0;i<r.n_hyp && !found;++i) {
+      const nr_dci11_offsets_t &o=r.off[i];
+      if(o.fdra_mode!=NR_FDRA_TYPE1 || o.riv!=1+bw || o.tda_bits!=td || o.mcs!=1+bw+16+td) continue;
+      nr_pdcch_blind_result_t c{};
+      if(!ResolverLayoutParse(&r,i,&raw,len,273,&c)) continue;
+      if(c.start_rb==7 && c.num_rb==21 && c.mcs==13 && c.harq_pid==9 && c.tda_index==opts.tda_count-1) found=true;
     }
     EXPECT_TRUE(found) << "widths " << bw << "/" << td;
   }
 }
-TEST_F(BlindPdcchTest, DlLayoutCandidatesDoNotDeclareAUniqueConfiguration) {
+
+// WL-SOLVER: Iliad PCI 403 (OTA 2026-10-23): 51 PRB, DCI 1_1 length 48 needs bwp_ind+tda = 7 bits, which the removed profile
+// could not explain (it returned 0 layouts and every C-RNTI grant went through a fallback). The general resolver holds the
+// hand-decoded layout (id 1 | BWP ind 1 | RA type 0 bitmap 13 RBGs (P=4) | TDA 4 | MCS at 19 | standard tail) and it parses
+// the real payload (field values checked bit by bit).
+TEST_F(BlindPdcchTest, DlResolverReadsIliad51PrbLen48) {
+  static nr_dci11_resolver_t r;
   nr_pdcch_blind_raw_result_t raw{};
-  raw.rnti=0x1234;
-  raw.payload=nr_dci_bits_from_u64(UINT64_C(1)<<46); // 47-bit payload with ambiguous all-zero fields
-  nr_pdcch_blind_result_t candidates[3]{};
-  uint8_t ids[3]{};
-  EXPECT_EQ(nr_pdcch_blind_dl_layout_candidates(&raw,47,273,0,candidates,ids),2);
-  EXPECT_EQ(nr_pdcch_blind_dl_layout_candidates(&raw,30,273,0,candidates,ids),0);
-  EXPECT_EQ(nr_pdcch_blind_dl_layout_candidates(nullptr,47,273,0,candidates,ids),0);
+  raw.rnti=0x85a;
+  raw.payload=nr_dci_bits_from_u64(UINT64_C(0xfffe150e2210));
+  ASSERT_GT(nr_dci11_resolver_init_fdra(&r,0,51,11,NR_DCI11_TDA_UNKNOWN,48),0);
+  int truth=-1;
+  for(int i=0;i<r.n_hyp && truth<0;++i) {
+    const nr_dci11_offsets_t &o=r.off[i];
+    if(o.fdra_mode==NR_FDRA_TYPE0_CFG1 && o.riv==2 && o.tda==15 && o.tda_bits==4 && o.mcs==19 && o.ant_ports==41
+       && o.ant_ports_bits==4 && o.dmrs_init==47) truth=i;
+  }
+  ASSERT_GE(truth,0) << "the hand-decoded Iliad layout must be enumerated";
+  nr_pdcch_blind_result_t c{};
+  ASSERT_TRUE(ResolverLayoutParse(&r,truth,&raw,48,51,&c)) << c.reject_reason;
+  EXPECT_EQ(c.ra_type0,1);
+  EXPECT_EQ(c.rbg_size,4);
+  EXPECT_EQ(c.rbg_bitmap,nr_dci_bits_field(&raw.payload,48,2,13));
+  EXPECT_EQ(c.mcs,nr_dci_bits_field(&raw.payload,48,19,5));
+  EXPECT_EQ(c.tda_index,nr_dci_bits_field(&raw.payload,48,15,4));
 }
 
 TEST_F(BlindPdcchTest, PolarCleanupCannotFreeAnInFlightDecoderCacheEntry) {
@@ -4760,6 +4797,24 @@ TEST_F(DiscoveredCoresets, StartsBeforeWalkAndReadsBeyondEightLines) {
   nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
   EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 217));
   EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_done());
+}
+
+// Vodafone 415 replay bimodality: a spurious nID rejected once must not be re-dwelt (cover, interleaved cover, raw lines, and again
+// after every list refresh) before a queued nID that has not failed yet.
+TEST_F(DiscoveredCoresets, RejectedNidIsRetriedAfterUntriedOnes) {
+  lines("CORESET nid=9020 sym=0 dur=1 grid_rb=11 groups=34 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, 9020);
+  for (int slot = 0; slot < 4000; ++slot) nr_pdcch_discovered_step(token, slot); // rejected
+  // the GPU stage publishes a refreshed list: the failed nID first, the second real CORESET after it
+  lines("CORESET nid=9020 sym=0 dur=1 grid_rb=11 groups=34 L=0 R=0 shift=0\n"
+        "CORESET nid=10163 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, 10163); // untried first
+  for (int slot = 0; slot < 4000; ++slot) nr_pdcch_discovered_step(token, 100000 + slot);
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, 9020); // the failed nID is still retried, last
 }
 
 TEST_F(DiscoveredCoresets, NrntiRotationVisitsAllConfirmedOwnersPerId) {

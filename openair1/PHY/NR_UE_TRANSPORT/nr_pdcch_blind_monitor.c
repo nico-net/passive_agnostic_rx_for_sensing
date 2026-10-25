@@ -954,7 +954,31 @@ static struct {
   nr_pdcch_blind_monitor_cfg_t cfg;
   struct { uint16_t rnti; int length; uint64_t slot; nr_dci_bits_t payload; } evidence[NR_PDCCH_BLIND_MAX_UE];
   uint64_t polls;
+  int rej_nid[32], n_rej; /* nIDs whose dwell was rejected this epoch (REJECTLAST) */
 } s_add_disc;
+
+/* REJECTLAST: an nID whose dwell was rejected ("no fresh CRC evidence in 4000 occasions") is tried again only after every queued
+ * nID that has not failed yet. Every list the GPU stage publishes re-queues the nIDs it has seen, and a wrong nID (a strong
+ * spurious ID) comes back as cover, interleaved cover and raw lines, each costing 4000 occasions: a real second CORESET
+ * (Vodafone 415 replay: nID 10163) published later in the same list waited behind five such dwells, ~20 s on the capture
+ * clock, and a run that reached it that late decoded half the DCIs. Pure ordering; the rejected nID is still retried last. */
+static bool disc_nid_rejected(int nid)
+{
+  for (int i = 0; i < s_add_disc.n_rej; ++i)
+    if (s_add_disc.rej_nid[i] == nid) return true;
+  return false;
+}
+static void disc_prefer_untried(void)
+{
+  if (s_add_disc.next >= s_add_disc.n || !disc_nid_rejected(s_add_disc.line[s_add_disc.next].nid)) return;
+  for (int j = s_add_disc.next + 1; j < s_add_disc.n; ++j)
+    if (!disc_nid_rejected(s_add_disc.line[j].nid)) {
+      const disc_coreset_t t = s_add_disc.line[j];
+      s_add_disc.line[j] = s_add_disc.line[s_add_disc.next];
+      s_add_disc.line[s_add_disc.next] = t;
+      return;
+    }
+}
 
 /* nr_pdcch_discovered_enabled: the discovered-CORESET bank is always enabled. Callers: the discovered-CORESET entry points in this file and nr_pdcch_blind_monitor_rt.c. */
 bool nr_pdcch_discovered_enabled(void) { return true; }
@@ -1169,6 +1193,7 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
   if (nr_cfg_reconf_enabled() && s_add_disc.epoch != nr_cfg_epoch_current())
     nr_pdcch_discovered_reset();
   while (!s_add_disc.active && s_add_disc.next < s_add_disc.n) {
+    disc_prefer_untried();
     disc_coreset_t dd = s_add_disc.line[s_add_disc.next];
     const disc_coreset_t *d = &dd;
     /* The cover starts at CRB 0 (Point A), not at grid RB 0. */
@@ -1280,6 +1305,9 @@ void nr_pdcch_discovered_step_ex(uint64_t token, uint64_t slot, bool prescreen_p
   if (++s_add_disc.occasions < NR_PDCCH_EXTENT_VERIFY_OCC) return;
   LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d rejected (no fresh CRC evidence in %d occasions)\n",
         s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, s_add_disc.occasions);
+  if (!disc_nid_rejected(s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id)
+      && s_add_disc.n_rej < (int)(sizeof(s_add_disc.rej_nid) / sizeof(s_add_disc.rej_nid[0])))
+    s_add_disc.rej_nid[s_add_disc.n_rej++] = s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id;
   s_add_disc.active = false;
   ++s_add_disc.next;
 }
@@ -5443,97 +5471,6 @@ bool nr_pdcch_blind_extract_00(nr_dci_bits_t       payload,
   out->nscid = 0; // TS 38.211 6.4.1.1.1: n_SCID = 0 for a DCI 0_0 scheduled PUSCH
   blind_ul_apply_scrambling_ids(opts, out);
   return true;
-}
-
-int nr_pdcch_blind_dl_layout_candidates(const nr_pdcch_blind_raw_result_t *raw,
-                                        uint16_t len, uint16_t bwp, uint8_t typeA,
-                                        nr_pdcch_blind_result_t out[3], uint8_t ids[3])
-{
-  if (!raw || !out || !ids || !bwp || bwp>275 || !len || len>NR_DCI_MAX_PAYLOAD) return 0;
-  int count=0;
-  /* Initial supported profile: type-1 RA, one codeword, type-1/len1 port table,
-   * no cross-carrier/optional rate-matching fields. These are hypotheses, NOT
-   * learned RRC facts. Unknown BWP-indicator and TDA-index widths are enumerated.
-   * TB CRC remains the authority; unsupported layouts stay unresolved. */
-  for (int bw=0; bw<=2; ++bw) {
-    for (int td=0; td<=4; ++td) {
-      nr_pdcch_blind_extract_opts_t o={0};
-      o.bwp_indicator_bits=bw;
-      o.harq_pid_bits=4;
-      o.dai_bits=2;
-      o.pdsch_to_harq_bits=3;
-      o.antenna_ports_bits=4;
-      o.srs_request_bits=2;
-      o.tda_count=1<<td;
-      o.dmrs_add_pos=0;
-      o.dmrs_max_length=1;
-      if (nr_pdcch_blind_dci_size_ex(bwp,&o)!=len) continue;
-      /* S/L is deliberately a legal parser scaffold, never an applied hypothesis:
-       * runtime MUST replace it through Technique D before decoding a transport block.
-       * The inferred index width is not a claim about the dedicated list's entry count. */
-      for (int i=0;i<o.tda_count;++i) {
-        o.tda_start[i]=1; o.tda_length[i]=13; o.tda_mapping[i]=0;
-      }
-      nr_pdcch_blind_result_t parsed;
-      if (!nr_pdcch_blind_extract_11(raw,len,bwp,typeA,&o,&parsed)) continue;
-      if (count==3) return 0; // at most one TDA width per BWP width at an exact length
-      out[count]=parsed;
-      ids[count++]=(uint8_t)(bw*5+td);
-    }
-  }
-  if (count) return count;
-
-  /* ---- OPTIONAL-FIELD FALLBACK  (agnosticity #6) ---------------------------------------------
-   * The profile above fixes every optional DCI-1_1 field at its "not configured" width. When that
-   * explains the observed payload length, it is the answer and we never get here -- so this pass
-   * cannot change the behaviour of a deployment that already works. It runs ONLY when NO standard
-   * layout reproduces the length, which is exactly the case the ledger called "general
-   * optional-field/BWP/type-0 support missing": a gNB that configures dynamic PRB bundling,
-   * rate-matching groups, ZP-CSI-RS or VRB-to-PRB interleaving carries extra bits the standard
-   * profile cannot account for, and today that DCI is simply unexplainable.
-   * Widths are the legal alternatives from TS 38.212 7.3.1.2.2, and the exact-length filter plus
-   * the TB-CRC authority downstream remain the arbiter -- these are hypotheses, not learned facts.
-   * Ambiguity is still refused (>3 surviving layouts return 0) rather than guessed. */
-  static const int kPrbBundling[2] = {0, 1};
-  static const int kRateMatch[3]   = {0, 1, 2};
-  static const int kZpCsi[3]       = {0, 1, 2};
-  static const int kVrbToPrb[2]    = {0, 1};
-  for (int bw=0; bw<=2; ++bw) {
-    for (int td=0; td<=4; ++td) {
-      for (unsigned pb=0; pb<2; ++pb) {
-        for (unsigned rm=0; rm<3; ++rm) {
-          for (unsigned zp=0; zp<3; ++zp) {
-            for (unsigned vp=0; vp<2; ++vp) {
-              if (!kPrbBundling[pb] && !kRateMatch[rm] && !kZpCsi[zp] && !kVrbToPrb[vp])
-                continue; // already covered by the standard pass above
-              nr_pdcch_blind_extract_opts_t o={0};
-              o.bwp_indicator_bits=bw;
-              o.harq_pid_bits=4;
-              o.dai_bits=2;
-              o.pdsch_to_harq_bits=3;
-              o.antenna_ports_bits=4;
-              o.srs_request_bits=2;
-              o.tda_count=1<<td;
-              o.dmrs_add_pos=0;
-              o.dmrs_max_length=1;
-              o.prb_bundling_bits=kPrbBundling[pb];
-              o.rate_matching_bits=kRateMatch[rm];
-              o.zp_csirs_bits=kZpCsi[zp];
-              o.vrb_to_prb_bits=kVrbToPrb[vp];
-              if (nr_pdcch_blind_dci_size_ex(bwp,&o)!=len) continue;
-              for (int i=0;i<o.tda_count;++i) { o.tda_start[i]=1; o.tda_length[i]=13; o.tda_mapping[i]=0; }
-              nr_pdcch_blind_result_t parsed;
-              if (!nr_pdcch_blind_extract_11(raw,len,bwp,typeA,&o,&parsed)) continue;
-              if (count==3) return 0; // ambiguous optional-field layouts are not a unique solution
-              out[count]=parsed;
-              ids[count++]=(uint8_t)(64 + ((bw*5+td)&0x1f));
-            }
-          }
-        }
-      }
-    }
-  }
-  return count;
 }
 
 static pthread_mutex_t common_facts_lock=PTHREAD_MUTEX_INITIALIZER;

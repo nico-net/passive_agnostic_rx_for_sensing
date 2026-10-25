@@ -53,7 +53,13 @@ static disc_worker_t g_worker;
 extern const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void) __attribute__((weak));
 extern bool nr_csirs_disc_pipeline_ready(void) __attribute__((weak));
 extern void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp) __attribute__((weak));
+extern int nr_csirs_disc_ring_capacity(void) __attribute__((weak));
+#include "PHY/TOOLS/nr_host_membudget.h"
+extern void nr_host_membudget_commit(nr_host_mem_module_t m, size_t bytes, double scale) __attribute__((weak));
 
+extern long nr_host_membudget_size(nr_host_mem_module_t m, int pct, size_t fixed, size_t per_unit, long lo, long hi) __attribute__((weak));
+extern size_t nr_csirs_disc_td_bytes(const NR_DL_FRAME_PARMS *, int, int) __attribute__((weak));
+extern void nr_csirs_disc_ring_host_cap(int capacity) __attribute__((weak));
 extern int nr_csirs_disc_td_init(const NR_DL_FRAME_PARMS *, int, int) __attribute__((weak));
 extern void nr_csirs_disc_td_free(void) __attribute__((weak));
 extern void nr_csirs_disc_td_reset(void) __attribute__((weak));
@@ -169,6 +175,69 @@ void nr_csirs_disc_ring_free(nr_csirs_disc_ring_t *r)
     free(state);
   }
   memset(r, 0, sizeof(*r));
+}
+
+/* nr_csirs_disc_ring_resize: see nr_csirs_disc.h. Allocation first (host grid by the ring's own allocator, metadata, entry locks, serials, device grid), then the swap under the
+ *   read lock and every entry lock of the old arrays (no producer or reader is inside), then the old arrays are released. */
+int nr_csirs_disc_ring_resize(nr_csirs_disc_ring_t *r, int capacity)
+{
+  ring_private_t *state = r != NULL ? r->private_state : NULL;
+  if (state == NULL || capacity < 1) return -1;
+  if (capacity == r->capacity) return 0;
+  const size_t grid_bytes = (size_t)capacity * r->slot_stride * sizeof(*r->grid_base);
+  const size_t aligned_bytes = (grid_bytes + 63u) & ~(size_t)63u;
+  int16_t *grid = state->unified_hook ? nr_csirs_disc_alloc_unified(aligned_bytes) : aligned_alloc(64, aligned_bytes);
+  nr_csirs_disc_slot_meta_t *meta = calloc((size_t)capacity, sizeof(*meta));
+  pthread_mutex_t *locks = calloc((size_t)capacity, sizeof(*locks));
+  uint64_t *serial = calloc((size_t)capacity, sizeof(*serial));
+  int16_t *device_grid = NULL;
+  const nr_csirs_disc_gpu_ops_t *gpu = r->device_grid && nr_csirs_disc_gpu_load ? nr_csirs_disc_gpu_load() : NULL;
+  if (r->device_grid) {
+    if (gpu && gpu->device_alloc) device_grid = gpu->device_alloc((size_t)capacity * r->slot_stride * 2);
+    if (!device_grid) goto fail;
+  }
+  if (!grid || !meta || !locks || !serial) goto fail;
+  memset(grid, 0, grid_bytes);
+  for (int i = 0; i < capacity; ++i) pthread_mutex_init(&locks[i], NULL);
+
+  pthread_mutex_lock(&state->read_lock);
+  const int old_capacity = r->capacity;
+  for (int i = 0; i < old_capacity; ++i) pthread_mutex_lock(&state->entry_lock[i]);
+  int16_t *old_grid = r->grid_base, *old_device = r->device_grid;
+  nr_csirs_disc_slot_meta_t *old_meta = r->meta;
+  pthread_mutex_t *old_locks = state->entry_lock;
+  uint64_t *old_serial = state->serial;
+  r->grid_base = grid; r->meta = meta; r->device_grid = device_grid; r->capacity = capacity; r->device_valid = false;
+  state->entry_lock = locks; state->serial = serial;
+  __atomic_store_n(&r->written, 0, __ATOMIC_RELEASE);
+  __atomic_add_fetch(&state->epoch, 1, __ATOMIC_RELEASE);
+  for (int i = 0; i < old_capacity; ++i) {
+    pthread_mutex_unlock(&old_locks[i]);
+    pthread_mutex_destroy(&old_locks[i]);
+  }
+  pthread_mutex_unlock(&state->read_lock);
+  if (state->unified_hook && nr_csirs_disc_free_unified) nr_csirs_disc_free_unified(old_grid);
+  else free(old_grid);
+  if (old_device) {
+    const nr_csirs_disc_gpu_ops_t *g = nr_csirs_disc_gpu_load ? nr_csirs_disc_gpu_load() : NULL;
+    if (g && g->device_free) g->device_free(old_device);
+  }
+  free(old_meta); free(old_locks); free(old_serial);
+  return 0;
+fail:
+  if (grid) {
+    if (state->unified_hook && nr_csirs_disc_free_unified) nr_csirs_disc_free_unified(grid);
+    else free(grid);
+  }
+  if (device_grid && gpu && gpu->device_free) gpu->device_free(device_grid);
+  free(meta); free(locks); free(serial);
+  return -1;
+}
+
+/* nr_csirs_disc_worker_resizable: the worker ring exists and the time-domain drain feeds it (the snapshot ring, which has to keep the capacity of its source, is then unused). */
+bool nr_csirs_disc_worker_resizable(void)
+{
+  return atomic_load_explicit(&g_worker.running, memory_order_acquire) && nr_csirs_disc_td_drain != NULL;
 }
 
 /* nr_csirs_disc_ring_read_lock: takes the ring's read lock (serialises readers against reset and push), returns true on success.
@@ -429,7 +498,24 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
     return -1;
   }
   g_worker.synchronization_ready = true;
-  const int capacity = NR_CSIRS_DISC_DEFAULT_CAPACITY;
+  int capacity = nr_csirs_disc_ring_capacity ? nr_csirs_disc_ring_capacity() : NR_CSIRS_DISC_DEFAULT_CAPACITY; /* T6b: from the memory budget */
+  const bool snapshot_used = nr_csirs_disc_td_init == NULL;
+  /* Host-RAM budget (nr_host_membudget.h): the host grid of the ring (plus the snapshot ring when used) takes at most 30 % of the headroom; floor 160 slots
+   * (a 160-slot CSI-RS period; longer periods then fold less evidence per batch). Below the floor discovery does not start (logged), the receiver runs on. */
+  if (nr_host_membudget_size) {
+    const size_t per_slot = (size_t)n_ant * NR_CSIRS_DISC_NSYM * (size_t)(24 * fp->N_RB_DL) * sizeof(int16_t) * (snapshot_used ? 2 : 1);
+    const int lo = capacity < 160 ? capacity : 160;
+    const long k = nr_host_membudget_size(NR_HOST_MEM_CSIRS, 30, 0, per_slot, lo, capacity);
+    if (k == 0) {
+      fprintf(stderr, "[PHY] SENSING: HOST_MEM CSIRS_DISC ring: below the %d-slot floor (%zu MB); slot discovery off\n", lo, ((size_t)lo * per_slot) >> 20);
+      goto fail;
+    }
+    if (k != capacity) {
+      fprintf(stderr, "[PHY] SENSING: HOST_MEM CSIRS_DISC ring %d -> %ld slots (%zu KB each, host-RAM budget)\n", capacity, k, per_slot >> 10);
+      if (nr_csirs_disc_ring_host_cap) nr_csirs_disc_ring_host_cap((int)k);
+    }
+    capacity = (int)k;
+  }
   if (nr_csirs_disc_ring_init(&g_worker.ring, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, true) != 0)
     goto fail;
   const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load?nr_csirs_disc_gpu_load():NULL;
@@ -437,10 +523,26 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
     g_worker.ring.device_grid=gpu->device_alloc((size_t)capacity*g_worker.ring.slot_stride*2);
     if(!g_worker.ring.device_grid) goto fail;
   }
-  if (nr_csirs_disc_ring_init(&g_worker.snapshot, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, false) != 0)
+  /* The snapshot ring only serves the frequency-domain feed (no time-domain drain): with the TD front end it would be capacity x slot_stride x 2 bytes of dead host RAM
+   * (470 MB at 273 PRB / 4 RX / 640 slots, 161 MB at 220), so it is not allocated then. */
+  if (snapshot_used && nr_csirs_disc_ring_init(&g_worker.snapshot, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, false) != 0)
     goto fail;
-  if (nr_csirs_disc_td_init && nr_csirs_disc_td_init(fp, n_ant,
-          1024) != 0)
+  int td_capacity = 1024; /* time-domain slot queue (512 ms at 30 kHz): 1138 MB at 273 PRB / 4 RX */
+  if (nr_csirs_disc_td_init && nr_host_membudget_size && nr_csirs_disc_td_bytes) {
+    /* shrinkable: a shorter queue overflows sooner under a discovery backlog (counted drops, the RT path never waits); floor 256 slots, 60 % of the headroom (discovery before the GrantWork pool) */
+    /* per slot averaged over the full queue (the pool is rounded to 2 MB, so a one-slot difference can be 0); f0 = the capacity-independent part (batch slots + FFT buffers) */
+    const size_t b1 = nr_csirs_disc_td_bytes(fp, n_ant, 1), per_slot = (nr_csirs_disc_td_bytes(fp, n_ant, td_capacity + 1) - b1) / (size_t)td_capacity;
+    const size_t f0 = b1 > per_slot ? b1 - per_slot : 0;
+    const long k = nr_host_membudget_size(NR_HOST_MEM_TD, 60, f0 + (2u << 20), per_slot, 256, td_capacity);
+    if (k == 0) {
+      fprintf(stderr, "[PHY] SENSING: HOST_MEM CSIRS_DISC time-domain queue: below the 256-slot floor (%zu MB); slot discovery off\n", (f0 + 256 * per_slot) >> 20);
+      goto fail;
+    }
+    if (k != td_capacity) fprintf(stderr, "[PHY] SENSING: HOST_MEM CSIRS_DISC time-domain queue %d -> %ld slots (%zu KB each, host-RAM budget)\n", td_capacity, k, per_slot >> 10);
+    td_capacity = (int)k;
+    nr_host_membudget_commit(NR_HOST_MEM_TD, nr_csirs_disc_td_bytes(fp, n_ant, td_capacity), (double)td_capacity / 1024.0);
+  }
+  if (nr_csirs_disc_td_init && nr_csirs_disc_td_init(fp, n_ant, td_capacity) != 0)
     goto fail;
   pthread_attr_t attr;
   if (pthread_attr_init(&attr) != 0)
@@ -458,6 +560,7 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
   return 0;
 
 fail:
+  if (nr_host_membudget_commit) { nr_host_membudget_commit(NR_HOST_MEM_CSIRS, 0, 0.0); nr_host_membudget_commit(NR_HOST_MEM_TD, 0, 0.0); }
   if (nr_csirs_disc_td_free) nr_csirs_disc_td_free();
   nr_csirs_disc_ring_free(&g_worker.snapshot);
   nr_csirs_disc_ring_free(&g_worker.ring);
