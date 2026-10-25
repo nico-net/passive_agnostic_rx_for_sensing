@@ -65,6 +65,11 @@ typedef struct {
 static __thread defer_t *t_def;
 static __thread int t_defer_ok;
 static _Atomic int g_on;
+/* Set by an exactness-check MISMATCH of THIS (old-path, bit-exact) GPU demod: only nr_pdsch_gpu_demod_grant() stops using the GPU. The graph
+ * pass (nr_pdsch_gpu_demod_pass_job) runs its own FP32 kernel under its own shadow validation (nr_gpu_pass_dl.c: LLR-sign and CRC-verdict checks
+ * against the old path). Before, one +-1 LLR rounding difference here (sens6 OTA 2026-10-25: "llr[341] of 2400 gpu 0 cpu -1") cleared g_on,
+ * which refused every later grant on the pass too: 3098 pass launches in 5 min instead of ~68000, the old path took every grant. */
+static _Atomic int g_oldpath_off;
 static int g_check;
 static _Atomic uint64_t g_calls, g_chk_ok, g_chk_bad, g_ns_sum, g_ns_max, g_ns_gpu, g_ns_geo; /* geo: host geometry (index-coded extractor) */
 static _Atomic uint64_t g_refuse[16];
@@ -964,8 +969,8 @@ static void bg_demod_run(void *arg)
         atomic_fetch_add_explicit(&g_chk_ok, 1, memory_order_relaxed);
       } else {
         atomic_fetch_add_explicit(&g_chk_bad, 1, memory_order_relaxed);
-        atomic_store(&g_on, 0);
-        LOG_E(PHY, "SENSING: GPU_EXACT_DEMOD MISMATCH (async) rnti 0x%x rb %d+%d sym %d+%d Qm %d Nl %d: %s -- GPU demodulation disabled\n",
+        atomic_store(&g_oldpath_off, 1);
+        LOG_E(PHY, "SENSING: GPU_EXACT_DEMOD MISMATCH (async) rnti 0x%x rb %d+%d sym %d+%d Qm %d Nl %d: %s -- old-path GPU demodulation disabled (the graph pass keeps its own checks)\n",
               j->dlsch.rnti, j->fa.first_rb, j->fa.num_rbs, j->cfg.start_symbol, j->cfg.number_symbols, qm, nl, why);
       }
     }
@@ -1096,6 +1101,8 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
     return -1;
   if (!nr_gpu_path_use_gpu(NR_GPU_PATH_DEMOD)) /* per-path choice: CPU (a DISCRETE trial that the CPU won) */
     return -1;
+  if (atomic_load_explicit(&g_oldpath_off, memory_order_relaxed)) /* this demod failed its exactness check: the CPU loop from now on */
+    return -1;
   const int rf = refuse(c, &mode, &thr_coef, &align, &l2d);
   if (rf >= 0) {
     if (rf != RF_OFF)
@@ -1198,8 +1205,8 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
       atomic_fetch_add_explicit(&g_chk_ok, 1, memory_order_relaxed);
     } else {
       atomic_fetch_add_explicit(&g_chk_bad, 1, memory_order_relaxed);
-      atomic_store(&g_on, 0);
-      LOG_E(PHY, "SENSING: GPU_EXACT_DEMOD MISMATCH rnti 0x%x rb %d+%d sym %d+%d Qm %d Nl %d: %s -- GPU demodulation disabled\n",
+      atomic_store(&g_oldpath_off, 1);
+      LOG_E(PHY, "SENSING: GPU_EXACT_DEMOD MISMATCH rnti 0x%x rb %d+%d sym %d+%d Qm %d Nl %d: %s -- old-path GPU demodulation disabled (the graph pass keeps its own checks)\n",
             c->dlsch->rnti, c->freq_alloc->first_rb, c->freq_alloc->num_rbs, c->cfg->start_symbol, c->cfg->number_symbols,
             c->dlsch->cw_info.qamModOrder, c->dlsch->cw_info.Nl, why);
     }
