@@ -2296,6 +2296,51 @@ Same winners in every arm (tda0 S1 L13 mask 0x804 k0=0; tda2 S1 L5 mask 0x4), 0 
 
 ## 15. Current OTA status (latest campaign only)
 
+### 15.00 2026-10-24/25 — sens6 + X410 327B872 (UC_200) on the sens4 lab cell (OCUDU, 273 PRB, 4 RX) — newest, read first
+
+Setup: receiver branch `sens6/ota-20261024` (r1solver + ondemand + perpath + coreplan + dci-resolver merged; `sens6/dgpu-q4`
+NOT merged), binary `build_ota` (USRP ON, CUDA arch 89), launcher `tests/passive_rx/sens6_ota/run_ota_s6.sh`, lab orchestration
+`tests/passive_rx/ota/lab_sens4_run.sh lab273` (sens4 testbed lock, OCUDU gNB `gnb_ofh_ota_tdd30_100mhz_liteon` with per-run
+log/MAC-pcap CLI overrides, both phones OPPO ff1ecb98 + Samsung R5CX11CBYJP via adb with iperf3 DL/UL phases on 10.42.0.1:5204/5205,
+receiver 300 s, SIGINT teardown, ground truth `ocudu_gt.py` -> `groundtruth.py` / `ul_groundtruth.py` / `plots.py --lab`).
+Cell (gNB yml = validation ground truth only): n78, 3450 MHz, 100 MHz / 273 PRB, SCS 30, PCI 2, 4T4R, TDD 7D/2U, PLMN 00106.
+
+| Run | Verdict | What happened |
+|---|---|---|
+| `captures/lab273_lab_20261024_235548` | VOID (radio) | X410 start failed in `multi_usrp::make` (RFNoC `Control operation timed out waiting for ACK`). gNB + both phones fine. |
+| `captures/lab273_lab_20261025_001516` | **FAIL (DL/UL rate)** `[OTA MEASURED, sens6 X410, lab cell]` | X410 opened, nic_miss 0, out_of_buffer 0; PSS SC 150, PCI 2, SIB1 decoded, `ACQ carrier CONFIRMED` 273 PRB, `CELL_CONFIGURED` (one `LOST` on a stream discontinuity, re-acquired). SI-RNTI PDSCH decodes (EVMGRANT snr ~21 dB, 4 branches 23-25 dB). Only C-RNTI 0x4604 seen (gNB had 0x4601 and 0x4604). **DL DCI recall 0.27 % (159 / 59628 gNB grants), precision 0.29; PDSCHQ crc_ok 2 / 757 (0.3 %); UL recall 0.3 % (33 / 11002).** PDSCH solver: 367 probes on 0x4604, none CRC-OK (Nl 1-4, mcs 4-25). |
+
+Reading: the RF chain, sync, SIB1 and carrier derivation work over the air with the new X410; the failure is the same
+`VOID_DL_RATE` known issue as §15.2 (2026-09-25, 0-1 % DL TB rate on this cell): **C-RNTI DCI detection on the dedicated
+CORESET/USS of the OCUDU cell** (and then the PDSCH identity solve) does not lock. rfsim (OAI gNB) results do not transfer:
+106/273 PRB rank 1-4 rfsim gates PASS (`OTA-READY-20261024.md`). Next: debug DCI detection on this cell with the gNB SCHED log
+as truth (dedicated CORESET geometry/nID, DCI 1_1 size for this cell, AL distribution), then the PDSCH DMRS/scrambling identity.
+
+Fixes found on air:
+- **NIC IRQs must sit on housekeeping CPUs only.** On the RT kernel NIC IRQs are FIFO-50 threads; with 12 of 15 on CPUs 10-13
+  (the receiver's RR-97 float lane: GPU warm-up / check workers) the X410 start failed in 6 of 7 receiver starts (RFNoC ctrl ACK
+  timeout or MPM `rpc::timeout get_db_eeprom`); with all on CPU 0: 5 of 5 opened (3 default mlock plan, 2 with MCL_FUTURE).
+  `uhd_usrp_probe` alone never failed. mlockall was a red herring (MCL_CURRENT-only seemed to help in 2 samples; reverted).
+  `run_ota_s6.sh` preflight now checks `IRQ_CPUS` (default 0) — commit `5eb993c199`.
+- X410 327B872 runs UC_200 (MCR 245.76 MHz -> 122.88 MS/s), mgmt answers only on the data address 192.168.20.2.
+- Host tuning on sens6 is not persistent (sysctl rmem 250 MB, backlog 250000, NIC IRQs -> CPU 0, hugepages freed).
+- sens4 clock is ~1 min behind sens6; ground truth aligns by SFN (offset_slots -122880), not wall time.
+- The gNB MAC pcap at mac_level=info with both phones on iperf grows ~8.5 GB per 5 min run (`/home/sens/NICOLA/gnbLogs` on sens4).
+
+Implemented 2026-10-24 (all local, sens6 x86 + RTX 4060 Ti; Sparks unaffected unless noted):
+- `sens6/dci-resolver`: DCI 1_1 field table vs TS 38.212 V17.13.0 (Enhanced Type 3 field, PUCCH cell last, padding 0..4).
+- `sens6/r1solver`: rank-1..4 solver at 273 PRB; SOLVERTDDEND (special slot from the first grant when SIB1 TDD ends DL early;
+  only testable on a SIB1 cell).
+- `sens6/ondemand`: elastic GPU controller (`nr_gpu_elastic.h`) + host-RAM budget (`nr_host_membudget.{c,h}`: B = 0.8 x avail - 1.5 GiB,
+  cgroup-aware, USRP ring reserved first, GrantWork pool last, HOST_MEM REFUSE exit 7, mlockall MCL_ONFAULT when tight);
+  `tests/passive_rx/hostmem_preflight.sh`.
+- `sens6/perpath`: per-path GPU/CPU choice (`nr_gpu_path.{c,h}`; SHARED tier = GPU, DISCRETE = timed bench/online trials;
+  `NR_GPU_PATH_SELECT`, `NR_GPU_PATH_<PATH>`).
+- `sens6/coreplan`: core layout from topology (`nr_core_layout`, `SENSING: CORE_PLAN`), no hard-coded host cores.
+- `sens6/ota-20261024`: integration + lab orchestration + OCUDU ground truth (DL+UL) + sens6 launcher.
+- `sens6/dgpu-q4` (NOT merged, agent stopped at its last arm): staged DISCRETE variants of chest/delay/demod/UL FEP/LDPC.
+
+
 ### 15.0 Site change (2026-09-30) — read first
 
 - **Update 2026-10-02:** an X410 OTA session is scheduled from **2026-10-03** (operator); it will be the first air
@@ -4865,6 +4910,11 @@ Scope: DGX spark-74c3, X410 unit 34B2AF1, OTA at DEIB. Branch `csd/single-int` (
 
 ## 26. Working rules for any agent on this project (carried over from the old setup)
 
+- **Maximum portability and adaptiveness to the device (operator rule, 2026-10-25).** Every change must run unchanged on
+  every supported host (DGX Spark GB10 unified memory + DPDK X410, sens6 x86 + discrete GPU + kernel-socket X410, cloud x86,
+  rfsim): derive cores, memory, GPU/CPU paths, radio transport and buffer sizes from what the device reports at run time
+  (topology, cgroup/MemAvailable, GPU tier, UHD args), never from host constants; a host-specific value is configuration
+  (env/cfg), never code. A fix found on one host must be checked not to change behaviour on the others.
 - Evidence labels (§0.1) in every status statement; retract wrong claims explicitly; never quote inherited numbers.
 - **Never build or run tests that load the CPU heavily while a capture runs on the same host.** Check
   `pgrep -x nr-uesoftmodem` first.

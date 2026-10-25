@@ -596,6 +596,9 @@ struct openair0_device {
   /* \brief timing statistics for TX fronthaul (ethernet)
    */
   re_order_t reOrder;
+  /*! \brief right shift the driver applies to the device's raw samples before handing out int16 (0 = none): the receiver's int16 full
+   *  scale is 32767 >> rx_fullscale_shift (X3xx/N3xx/X4xx: 2, B2xx: 4). Set by the driver; zero-initialised devices (rfsim, ...) keep 0. */
+  int rx_fullscale_shift;
 };
 
 typedef struct {

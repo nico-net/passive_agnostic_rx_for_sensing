@@ -1,0 +1,24 @@
+== t=0
+== t=15
+ 183609   3 98.1  TS      -   0 UEthread_0
+== t=30
+ 183609   3 98.3  TS      -   0 UEthread_0
+== t=45
+ 183609   3 98.4  TS      -   0 UEthread_0
+== t=60
+ 183609   3 98.4  TS      -   0 UEthread_0
+== t=76
+ 183609   3 98.4  TS      -   0 UEthread_0
+== t=91
+ 183609   3 98.4  TS      -   0 UEthread_0
+== t=106
+ 183609   3 98.4  TS      -   0 UEthread_0
+== t=121
+ 183609   3 98.4  TS      -   0 UEthread_0
+== t=136
+ 183609   3 98.4  TS      -   0 UEthread_0
+== t=151
+ 183609   3 98.4  TS      -   0 UEthread_0
+== t=166
+ 183609   3 98.4  TS      -   0 UEthread_0
+== t=181

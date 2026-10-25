@@ -32,6 +32,9 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 #include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"
 #include "PHY/TOOLS/nr_gpu_bgq.h" /* FATTAILS */
+#include "PHY/TOOLS/nr_gpu_mem.h" /* nr_gpu_model(): DIRECT runs in place, DISCRETE runs staged */
+#include "PHY/NR_UE_TRANSPORT/nr_gpu_stage_census.h"
+#include "PHY/TOOLS/nr_gpu_path.h" /* per-path GPU/CPU choice */
 #include <pthread.h>
 #include <sched.h>
 #include <sys/resource.h>
@@ -62,9 +65,16 @@ typedef struct {
 static __thread defer_t *t_def;
 static __thread int t_defer_ok;
 static _Atomic int g_on;
+/* Set by an exactness-check MISMATCH of THIS (old-path, bit-exact) GPU demod: only nr_pdsch_gpu_demod_grant() stops using the GPU. The graph
+ * pass (nr_pdsch_gpu_demod_pass_job) runs its own FP32 kernel under its own shadow validation (nr_gpu_pass_dl.c: LLR-sign and CRC-verdict checks
+ * against the old path). Before, one +-1 LLR rounding difference here (sens6 OTA 2026-10-25: "llr[341] of 2400 gpu 0 cpu -1") cleared g_on,
+ * which refused every later grant on the pass too: 3098 pass launches in 5 min instead of ~68000, the old path took every grant. */
+static _Atomic int g_oldpath_off;
 static int g_check;
 static _Atomic uint64_t g_calls, g_chk_ok, g_chk_bad, g_ns_sum, g_ns_max, g_ns_gpu, g_ns_geo; /* geo: host geometry (index-coded extractor) */
 static _Atomic uint64_t g_refuse[16];
+static nr_gpu_stage_stats_fn g_stage_stats; /* Q4: census of the staged DISCRETE runs (libpdsch_gpu.so) */
+static __thread int t_stage_full;           /* Q4: the grant being demodulated is compared with the CPU: copy every output back (DISCRETE tier) */
 static _Atomic uint64_t g_evm_close, g_evm_far, g_evm_maxrel; /* CHECK with the GPU EVM (rel. err of err x 1e18) */
 
 static uint64_t now_ns(void)
@@ -95,6 +105,20 @@ int nr_pdsch_gpu_demod_warmup(const NR_DL_FRAME_PARMS *fp)
     LOG_W(PHY, "SENSING: GPU_EXACT_DEMOD requested but libpdsch_gpu.so has no usable demod entry -- CPU demodulation\n");
     return 0;
   }
+  g_stage_stats = h ? (nr_gpu_stage_stats_fn)dlsym(h, "nr_gpu_stage_stats") : NULL;
+  if (nr_gpu_model() != NR_GPU_MODEL_DIRECT) { /* Q4: the standalone kernels read caller memory in place on DIRECT; on DISCRETE the run is staged (device buffers, explicit copies) */
+    nr_gpu_demod_stage_init_fn sinit = (nr_gpu_demod_stage_init_fn)dlsym(h, "nr_pdsch_gpu_demod_stage_init");
+    if (!sinit || sinit(fp->nb_antennas_rx, fp->ofdm_symbol_size, (uint32_t)((fp->N_RB_DL * 12 + 15) & ~15)) != 0) {
+      LOG_W(PHY, "SENSING: GPU_EXACT_DEMOD standalone staging unavailable (DISCRETE tier) -- pass/CPU demodulation\n");
+      g_run = NULL;
+    } else
+      LOG_A(PHY, "SENSING: GPU_EXACT_DEMOD standalone runs staged on the DISCRETE tier (explicit H2D/D2H)\n");
+  }
+  /* per-path choice of the standalone entry (nr_gpu_path.h): SHARED -> GPU (unchanged). DISCRETE (Q4): the staged run is measured by a paired online trial
+   * (nr_pdsch_gpu_demod_grant: the CPU loop and the GPU run on the same grant, both timed); no staging -> g_run NULL -> gpu_unavailable (CPU) */
+  if (nr_gpu_path_begin(NR_GPU_PATH_DEMOD, g_run != NULL, nr_gpu_model() == NR_GPU_MODEL_DIRECT ? NR_GPU_PATH_MEASURE_NONE : NR_GPU_PATH_MEASURE_TRIAL)
+      == NR_GPU_PATH_CPU)
+    g_run = NULL;
   g_check = 64;
   atomic_store(&g_on, 1);
   LOG_A(PHY, "SENSING: GPU_EXACT_DEMOD enabled: %d RX, bit-exact nr_rx_pdsch() on the GPU; check=%d\n", fp->nb_antennas_rx, g_check);
@@ -295,7 +319,7 @@ static int cpu_loop(const nr_pdsch_gpu_demod_call_t *c, int16_t *llr, uint32_t *
 }
 
 /* Reasons the GPU path is refused (index into g_refuse, logged with the stats). */
-enum { RF_OFF, RF_NL, RF_QM, RF_PTRS, RF_FORCED, RF_ENV, RF_OVERRIDE, RF_MODE, RF_MASK, RF_GEOM, RF_NRE0, RF_CAP, RF_BUSY, RF_N };
+enum { RF_OFF, RF_NL, RF_QM, RF_PTRS, RF_FORCED, RF_ENV, RF_OVERRIDE, RF_MODE, RF_MASK, RF_GEOM, RF_NRE0, RF_CAP, RF_BUSY, RF_MODEL, RF_N };
 
 static __thread int t_qmode; /* refuse() -> gpu_grant(): the resolved multi-layer qam_mode */
 static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coef, int *align, int *l2d)
@@ -414,11 +438,15 @@ static void stats_log(uint64_t n)
   int u = 0;
   for (int k = 0; k < RF_N; k++)
     u += snprintf(rf + u, sizeof(rf) - u, "%s%lu", k ? "," : "", (unsigned long)atomic_load(&g_refuse[k]));
+  uint64_t st[6] = {0};
+  if (g_stage_stats)
+    g_stage_stats(NR_GPU_STG_DEMOD, st);
   LOG_A(PHY, "SENSING: GPU_EXACT_DEMOD calls=%lu check_ok=%lu check_bad=%lu evm_close=%lu evm_far=%lu evm_maxrel=%.2e mean=%.0f us (gpu %.0f geo %.0f) max=%.0f us refused[off,nl,qm,ptrs,"
-        "forced,env,override,mode,mask,geom,nre0,cap,busy]=[%s]\n",
+        "forced,env,override,mode,mask,geom,nre0,cap,busy,model]=[%s] staged[runs=%lu h2d_kb=%lu d2h_kb=%lu copies=%lu+%lu refused=%lu]\n",
         (unsigned long)n, (unsigned long)atomic_load(&g_chk_ok), (unsigned long)atomic_load(&g_chk_bad),
         (unsigned long)atomic_load(&g_evm_close), (unsigned long)atomic_load(&g_evm_far), atomic_load(&g_evm_maxrel) / 1e18,
-        atomic_load(&g_ns_sum) / 1e3 / n, atomic_load(&g_ns_gpu) / 1e3 / n, atomic_load(&g_ns_geo) / 1e3 / n, atomic_load(&g_ns_max) / 1e3, rf);
+        atomic_load(&g_ns_sum) / 1e3 / n, atomic_load(&g_ns_gpu) / 1e3 / n, atomic_load(&g_ns_geo) / 1e3 / n, atomic_load(&g_ns_max) / 1e3, rf,
+        (unsigned long)st[0], (unsigned long)(st[1] >> 10), (unsigned long)(st[2] >> 10), (unsigned long)st[3], (unsigned long)st[4], (unsigned long)st[5]);
 }
 
 /* Folds one symbol's GPU EVM partial sums into nr_pdsch_evm_acc, in the field order of nr_rx_pdsch()'s block. */
@@ -604,6 +632,9 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
     return rf;
   const int last = cfg->start_symbol + cfg->number_symbols - 1;
   j.evm_defer = t_defer_ok && j.want_evm && t_def;
+  j.stage_full = t_stage_full;
+  if (!g_run) /* standalone entry needs the SHARED tier (warmup leaves g_run NULL on DISCRETE) */
+    return RF_MODEL;
   const uint64_t t0 = now_ns();
   if (g_run(&j) != 0)
     return RF_BUSY;
@@ -633,8 +664,19 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   return -1;
 }
 
+/* The CHECK buffers (chk_tls_t) are the CPU loop's output arrays (nr_rx_pdsch writes them with aligned 256-bit stores on x86 AVX2:
+ * nr_channel_compensation) and the GPU copies: 64-byte aligned and zeroed. calloc's 16-byte alignment faulted on x86 (sens6, the async
+ * check worker, 2026-10-24); aarch64 NEON stores do not trap, so the DGX never showed it. */
+static void *chk_zalloc(size_t bytes)
+{
+  const size_t n = (bytes + 63) & ~(size_t)63;
+  void *p = aligned_alloc(64, n ? n : 64);
+  if (p)
+    memset(p, 0, n ? n : 64);
+  return p;
+}
 static int compare(const nr_pdsch_gpu_demod_call_t *c, const chk_tls_t *k, const uint32_t *dvr_g, int32_t l2_g, int used_g,
-                   const nr_pdsch_evm_acc_t *acc_g, int used_c, const nr_pdsch_evm_acc_t *acc_c, char *why, size_t wn)
+                   const nr_pdsch_evm_acc_t *acc_g, int used_c, const nr_pdsch_evm_acc_t *acc_c, char *why, size_t wn, int full)
 {
   const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg = c->cfg;
   const int nl = c->dlsch->cw_info.Nl, qm = c->dlsch->cw_info.qamModOrder;
@@ -656,7 +698,7 @@ static int compare(const nr_pdsch_gpu_demod_call_t *c, const chk_tls_t *k, const
       snprintf(why, wn, "llr[%u] of %u gpu %d cpu %d", i, tot, k->llr[i], c->llr[i]);
       return 0;
     }
-  for (int m = cfg->start_symbol; m <= last; m++)
+  for (int m = cfg->start_symbol; full && m <= last; m++) /* full = 0: a DISCRETE run with the decoder copy-back (Q4 trial) has no comp / mag arrays to compare */
     for (int l = 0; l < nl; l++) {
       const size_t row = ((size_t)m * NR_MAX_NB_LAYERS + l) * c->buf;
       for (uint32_t i = 0; i < c->dl_valid_re[m]; i++) {
@@ -868,13 +910,13 @@ static void bg_demod_run(void *arg)
     chk_tls_t *k = ks[s];
     if (k->buf_n < bn) {
       free(k->comp); free(k->mag); free(k->magb); free(k->magr);
-      k->comp = calloc(bn, sizeof(c16_t)); k->mag = calloc(bn, sizeof(c16_t));
-      k->magb = calloc(bn, sizeof(c16_t)); k->magr = calloc(bn, sizeof(c16_t));
+      k->comp = chk_zalloc(bn * sizeof(c16_t)); k->mag = chk_zalloc(bn * sizeof(c16_t));
+      k->magb = chk_zalloc(bn * sizeof(c16_t)); k->magr = chk_zalloc(bn * sizeof(c16_t));
       k->buf_n = (k->comp && k->mag && k->magb && k->magr) ? bn : 0;
     }
     if (k->llr_cap < c->llr_cap) {
       free(k->llr);
-      k->llr = calloc(c->llr_cap, sizeof(int16_t));
+      k->llr = chk_zalloc(c->llr_cap * sizeof(int16_t));
       k->llr_cap = k->llr ? c->llr_cap : 0;
     }
   }
@@ -923,12 +965,12 @@ static void bg_demod_run(void *arg)
       cc.magb = cpu.magb;
       cc.magr = cpu.magr;
       char why[256] = "";
-      if (compare(&cc, &gpu, j->dvr_g, j->l2_g, j->used_g, &j->acc_g, used_c, &acc_c, why, sizeof(why))) {
+      if (compare(&cc, &gpu, j->dvr_g, j->l2_g, j->used_g, &j->acc_g, used_c, &acc_c, why, sizeof(why), 1)) {
         atomic_fetch_add_explicit(&g_chk_ok, 1, memory_order_relaxed);
       } else {
         atomic_fetch_add_explicit(&g_chk_bad, 1, memory_order_relaxed);
-        atomic_store(&g_on, 0);
-        LOG_E(PHY, "SENSING: GPU_EXACT_DEMOD MISMATCH (async) rnti 0x%x rb %d+%d sym %d+%d Qm %d Nl %d: %s -- GPU demodulation disabled\n",
+        atomic_store(&g_oldpath_off, 1);
+        LOG_E(PHY, "SENSING: GPU_EXACT_DEMOD MISMATCH (async) rnti 0x%x rb %d+%d sym %d+%d Qm %d Nl %d: %s -- old-path GPU demodulation disabled (the graph pass keeps its own checks)\n",
               j->dlsch.rnti, j->fa.first_rb, j->fa.num_rbs, j->cfg.start_symbol, j->cfg.number_symbols, qm, nl, why);
       }
     }
@@ -990,8 +1032,8 @@ static void bg_demod_submit(const nr_pdsch_gpu_demod_call_t *c, const uint32_t *
     ncm += (size_t)c->dl_valid_re[m] * nl;
   }
   j->n_llr = tot < c->llr_cap ? tot : c->llr_cap;
-  j->est = malloc(sizeof(int32_t) * est_n);
-  j->rx = malloc(sizeof(c16_t) * rx_n);
+  j->est = chk_zalloc(sizeof(int32_t) * est_n); /* the CPU replay reads these with AVX2 loads: 64-byte aligned */
+  j->rx = chk_zalloc(sizeof(c16_t) * rx_n);
   j->llr_g = malloc(sizeof(int16_t) * (j->n_llr + 1));
   j->cm[0] = malloc(sizeof(c16_t) * (4 * ncm + 1));
   if (!j->est || !j->rx || !j->llr_g || !j->cm[0]) {
@@ -1057,6 +1099,10 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
   double thr_coef = 0.0;
   if (nr_pdsch_route_cpu()) /* BATCHCPU */
     return -1;
+  if (!nr_gpu_path_use_gpu(NR_GPU_PATH_DEMOD)) /* per-path choice: CPU (a DISCRETE trial that the CPU won) */
+    return -1;
+  if (atomic_load_explicit(&g_oldpath_off, memory_order_relaxed)) /* this demod failed its exactness check: the CPU loop from now on */
+    return -1;
   const int rf = refuse(c, &mode, &thr_coef, &align, &l2d);
   if (rf >= 0) {
     if (rf != RF_OFF)
@@ -1067,7 +1113,9 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
   uint64_t gns = 0;
   const uint64_t n = atomic_fetch_add_explicit(&g_calls, 1, memory_order_relaxed) + 1;
   const int bg = g_check > 0 ? nr_gpu_check_async_every() : 0; /* FATTAILS: the check runs off this thread */
-  const int check = !bg && (g_check == 1 || (g_check > 1 && n % (uint64_t)g_check == 0));
+  /* Q4 per-path paired trial (DISCRETE only; SHARED never enters TRIAL): every grant runs the check path, the CPU loop and the GPU run are both timed */
+  const int trial = nr_gpu_path_state(NR_GPU_PATH_DEMOD) == NR_GPU_PATH_TRIAL;
+  const int check = trial || (!bg && (g_check == 1 || (g_check > 1 && n % (uint64_t)g_check == 0)));
   const int bg_check = bg && n % (uint64_t)bg == 0;
   if (!check) {
     uint32_t dvr_in[NR_SYMBOLS_PER_SLOT];
@@ -1079,9 +1127,11 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
       used0 = nr_dlsch_used_branch;
     }
     t_defer_ok = g_defer && !bg_check;
+    t_stage_full = bg_check; /* a grant handed to the checking worker needs every output (it compares them with the CPU) */
     const int r = gpu_grant(c, mode, thr_coef, align, l2d, c->llr, c->llr_cap, c->dl_valid_re, c->log2_maxh, c->comp, c->mag, c->magb,
                             c->magr, &gns);
     t_defer_ok = 0;
+    t_stage_full = 0;
     if (r >= 0) {
       atomic_fetch_add_explicit(&g_refuse[r], 1, memory_order_relaxed);
       atomic_fetch_sub_explicit(&g_calls, 1, memory_order_relaxed);
@@ -1097,15 +1147,15 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
       free(k.mag);
       free(k.magb);
       free(k.magr);
-      k.comp = calloc(bn, sizeof(c16_t));
-      k.mag = calloc(bn, sizeof(c16_t));
-      k.magb = calloc(bn, sizeof(c16_t));
-      k.magr = calloc(bn, sizeof(c16_t));
+      k.comp = chk_zalloc(bn * sizeof(c16_t));
+      k.mag = chk_zalloc(bn * sizeof(c16_t));
+      k.magb = chk_zalloc(bn * sizeof(c16_t));
+      k.magr = chk_zalloc(bn * sizeof(c16_t));
       k.buf_n = (k.comp && k.mag && k.magb && k.magr) ? bn : 0;
     }
     if (k.llr_cap < c->llr_cap) {
       free(k.llr);
-      k.llr = calloc(c->llr_cap, sizeof(int16_t));
+      k.llr = chk_zalloc(c->llr_cap * sizeof(int16_t));
       k.llr_cap = k.llr ? c->llr_cap : 0;
     }
     if (!k.buf_n || !k.llr_cap) {
@@ -1114,6 +1164,7 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
     }
     const nr_pdsch_evm_acc_t acc0 = nr_pdsch_evm_acc;
     const int used0 = nr_dlsch_used_branch;
+    const uint64_t tc0 = now_ns();
     if (cpu_loop(c, c->llr, c->dl_valid_re, c->log2_maxh, c->comp, c->mag, c->magb, c->magr) != 0) {
       atomic_fetch_sub_explicit(&g_calls, 1, memory_order_relaxed);
       return -1;
@@ -1125,7 +1176,11 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
     uint32_t dvr_g[NR_SYMBOLS_PER_SLOT] = {0};
     int32_t l2_g = 0;
     memset(k.llr, 0, sizeof(int16_t) * c->llr_cap);
+    const uint64_t tc1 = now_ns();
+    t_stage_full = !trial; /* the trial times the GPU run as the decoder uses it (decoder copy-back) and compares the LLRs, valid REs, max-h and branch */
     const int r = gpu_grant(c, mode, thr_coef, align, l2d, k.llr, c->llr_cap, dvr_g, &l2_g, k.comp, k.mag, k.magb, k.magr, &gns);
+    t_stage_full = 0;
+    const uint64_t tg1 = now_ns();
     const nr_pdsch_evm_acc_t acc_g = nr_pdsch_evm_acc;
     const int used_g = nr_dlsch_used_branch;
     nr_pdsch_evm_acc = acc_c;
@@ -1136,12 +1191,22 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
       return 0;
     }
     char why[256] = "";
-    if (compare(c, &k, dvr_g, l2_g, used_g, &acc_g, used_c, &acc_c, why, sizeof(why))) {
+    const int same = compare(c, &k, dvr_g, l2_g, used_g, &acc_g, used_c, &acc_c, why, sizeof(why), !trial || nr_gpu_model() == NR_GPU_MODEL_DIRECT);
+    if (trial) { /* per 1000 (RB x symbol x layer) units */
+      const double ku = (double)c->freq_alloc->num_rbs * c->cfg->number_symbols * c->dlsch->cw_info.Nl / 1000.0;
+      if (!same)
+        nr_gpu_path_fail(NR_GPU_PATH_DEMOD, "demod mismatch");
+      else if (ku > 0) {
+        nr_gpu_path_sample(NR_GPU_PATH_DEMOD, 1, (tg1 - tc1) / 1e3 / ku);
+        nr_gpu_path_sample(NR_GPU_PATH_DEMOD, 0, (tc1 - tc0) / 1e3 / ku);
+      }
+    }
+    if (same) {
       atomic_fetch_add_explicit(&g_chk_ok, 1, memory_order_relaxed);
     } else {
       atomic_fetch_add_explicit(&g_chk_bad, 1, memory_order_relaxed);
-      atomic_store(&g_on, 0);
-      LOG_E(PHY, "SENSING: GPU_EXACT_DEMOD MISMATCH rnti 0x%x rb %d+%d sym %d+%d Qm %d Nl %d: %s -- GPU demodulation disabled\n",
+      atomic_store(&g_oldpath_off, 1);
+      LOG_E(PHY, "SENSING: GPU_EXACT_DEMOD MISMATCH rnti 0x%x rb %d+%d sym %d+%d Qm %d Nl %d: %s -- old-path GPU demodulation disabled (the graph pass keeps its own checks)\n",
             c->dlsch->rnti, c->freq_alloc->first_rb, c->freq_alloc->num_rbs, c->cfg->start_symbol, c->cfg->number_symbols,
             c->dlsch->cw_info.qamModOrder, c->dlsch->cw_info.Nl, why);
     }

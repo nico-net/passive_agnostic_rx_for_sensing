@@ -9,8 +9,10 @@ Join key (frame, slot, rnti) on SFN-unwrapped slots; the two clocks differ by an
 (the receiver's hyperframe is process-local), estimated as the modal offset over key-equal pairs.
 """
 import argparse
+import bisect
 import collections
 import csv
+import datetime
 import json
 import math
 import os
@@ -45,8 +47,97 @@ def read_gnb_csv(path):
     with open(path, newline="") as f:
         for r in csv.DictReader(f):
             v = r["rnti"].strip()
-            out.append({"frame": int(r["frame"]), "slot": int(r["slot"]), "dir": (r.get("dir") or "dl").strip(),
-                        "rnti": int(v, 16) if v.lower().startswith("0x") else int(v)})
+            g = {"frame": int(r["frame"]), "slot": int(r["slot"]), "dir": (r.get("dir") or "dl").strip(),
+                 "rnti": int(v, 16) if v.lower().startswith("0x") else int(v)}
+            for k in ("kind", "t", "dci_frame", "dci_slot"):  # optional columns of the OCUDU SCHED export (match_clock)
+                if r.get(k):
+                    g[k] = r[k].strip()
+            out.append(g)
+    return out
+
+
+def _utc(s):
+    return datetime.datetime.fromisoformat(s).replace(tzinfo=datetime.timezone.utc).timestamp()
+
+
+def match_clock(rx_dci, rx_grants, gnb, spf=20, window_s=2.0):
+    """Per-RNTI DL/UL DCI recall/precision and PDSCH TB CRC, joined on (frame, slot, rnti) inside a wall-clock window.
+
+    match() assumes ONE slot offset between the clocks for the whole run; the receiver's slot counter jumps at every
+    RX recovery (stream restart + re-sync), after which match() scores every later DCI as a miss and a false alarm.
+    Here a receiver DCI matches a gNB row with the same (frame mod 1024, slot, rnti) whose time stamp lies within
+    window_s of the DCI's UTC once the modal receiver-gNB clock offset (5 ms bins) is removed: the 10.24 s SFN period
+    makes the key unique inside the window. A UL grant is keyed by its DCI slot (dci_frame/dci_slot columns).
+    Needs the gNB rows' "t" column (OCUDU SCHED export) and the receiver's utc_ns; returns None without them."""
+    rows = []
+    for x in gnb:
+        if "t" not in x or x.get("kind") not in (None, "pdsch", "pusch"):
+            continue
+        d = x.get("dir", "dl")
+        fr, sl = (int(x["dci_frame"]), int(x["dci_slot"])) if d == "ul" and "dci_frame" in x and "dci_slot" in x else (x["frame"], x["slot"])
+        rows.append(((d, fr % 1024, sl, x["rnti"]), _utc(x["t"])))
+    dci = [r for r in rx_dci if r.get("utc_ns") and r["rnti"] != 0xFFFF]
+    if not rows or not dci:
+        return None
+    by = collections.defaultdict(list)
+    for k, t in rows:
+        by[k].append(t)
+    for v in by.values():
+        v.sort()
+    key = lambda r: (r["dir"], r["frame"] % 1024, r["slot"], r["rnti"])
+    votes = collections.Counter()
+    for r in dci[:50000]:
+        for t in by.get(key(r), ()):
+            votes[round((r["utc_ns"] / 1e9 - t) * 200) / 200] += 1
+    if not votes:
+        return None
+    off = votes.most_common(1)[0][0]
+    t0 = max(min(r["utc_ns"] for r in dci) / 1e9 - off, min(t for _, t in rows))
+    t1 = min(max(r["utc_ns"] for r in dci) / 1e9 - off, max(t for _, t in rows))
+    used = collections.defaultdict(set)  # gNB row index (per key) already matched
+    per = collections.defaultdict(lambda: {"gnb": 0, "tp": 0, "fp": 0, "tb_ok": 0, "tb_fail": 0})
+    dci_of = {}  # (ext_slot, rnti, dir) of a receiver DCI -> matched gNB key, for the PDSCH outcome join
+    for r in sorted(dci, key=lambda r: r["utc_ns"]):
+        t = r["utc_ns"] / 1e9 - off
+        if not t0 <= t <= t1:
+            continue
+        k = key(r)
+        ts = by.get(k, [])
+        i = bisect.bisect_left(ts, t - window_s)
+        hit = None
+        while i < len(ts) and ts[i] <= t + window_s:
+            if i not in used[k]:
+                hit = i
+                break
+            i += 1
+        st = per[(r["dir"], r["rnti"])]
+        if hit is None:
+            st["fp"] += 1  # includes a duplicate accept of one scheduled grant
+        else:
+            used[k].add(hit)
+            st["tp"] += 1
+            dci_of[(r.get("ext_slot"), r["rnti"], r["dir"])] = k
+    for k, t in rows:
+        if t0 <= t <= t1:
+            per[(k[0], k[3])]["gnb"] += 1
+    for g in rx_grants:
+        if g.get("dir", "dl") != "dl" or g.get("probe") or g.get("outcome") not in ("crc_ok", "crc_fail"):
+            continue
+        if (g.get("ext_slot"), g["rnti"], "dl") in dci_of:
+            per[("dl", g["rnti"])]["tb_ok" if g["outcome"] == "crc_ok" else "tb_fail"] += 1
+    out = {"clock_offset_s": off, "offset_votes": votes.most_common(1)[0][1], "window_s": window_s, "per_rnti": {}}
+    for (d, rnti), st in sorted(per.items(), key=lambda kv: -kv[1]["gnb"]):
+        if not st["gnb"] and st["tp"] + st["fp"] < 20:
+            continue  # stray false alarms of unscheduled RNTIs are summed below, not listed
+        st = dict(st)
+        st["recall"] = st["tp"] / st["gnb"] if st["gnb"] else None
+        st["precision"] = st["tp"] / (st["tp"] + st["fp"]) if st["tp"] + st["fp"] else None
+        if d == "dl":
+            n = st["tb_ok"] + st["tb_fail"]
+            st["pdsch_crc"] = st["tb_ok"] / n if n else None
+            st["tb_success_over_gnb_grants"] = st["tb_ok"] / st["gnb"] if st["gnb"] else None
+        out["per_rnti"]["%s 0x%04x" % (d, rnti)] = st
+    out["stray_fp"] = {d: sum(st["fp"] for (dd, r), st in per.items() if dd == d and not st["gnb"]) for d in ("dl", "ul")}
     return out
 
 
@@ -139,6 +230,16 @@ def main(argv=None):
     out = a.out or os.path.join(a.rx, "groundtruth")
     os.makedirs(out, exist_ok=True)
     res["provenance"] = man.get("provenance")
+    clk = match_clock(store.read_dataset(a.rx, "dci_attempts"), store.read_dataset(a.rx, "rx_grants"), gnb,
+                      man.get("slots_per_frame", 20))
+    if clk is not None:
+        res["clock_matched"] = clk
+        for name, st in clk["per_rnti"].items():
+            print("groundtruth[clock]: %s gnb=%d tp=%d fp=%d recall=%s precision=%s%s" % (
+                name, st["gnb"], st["tp"], st["fp"], "%.3f" % st["recall"] if st["recall"] is not None else "-",
+                "%.4f" % st["precision"] if st["precision"] is not None else "-",
+                " pdsch_crc=%s (%d/%d)" % ("%.3f" % st["pdsch_crc"] if st.get("pdsch_crc") is not None else "-", st["tb_ok"],
+                                             st["tb_ok"] + st["tb_fail"]) if name.startswith("dl") else ""))
     for name, write in (("summary.json", lambda f: json.dump(res, f, indent=1, sort_keys=True)),
                         ("matches.csv", lambda f: _csv(f, cls))):
         tmp = os.path.join(out, "." + name + ".tmp")

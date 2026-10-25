@@ -4,6 +4,7 @@
 #include "nr_pdcch_nid_gpu.h"
 #include "PHY/TOOLS/nr_admit.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
+#include "PHY/TOOLS/nr_gpu_elastic.h"
 #include "common/utils/LOG/log.h"
 #include <dlfcn.h>
 #include <errno.h>
@@ -35,6 +36,8 @@ static struct {
  uint64_t runs; /* sweep GPU passes run */
  double kernel_ms;
  _Atomic bool running;
+ nr_gpu_elastic_t el; /* on-demand window: base = what the memory budget share holds (T6b), full = the requested window */
+ int win_passes;      /* passes since the window was (re)started: the window is full when this reaches el.cur */
 } g = {.mu=PTHREAD_MUTEX_INITIALIZER,.cv=PTHREAD_COND_INITIALIZER,.producer=-1};
 
 bool nr_pdcch_nid_gpu_enabled(void) {return true;}
@@ -49,6 +52,35 @@ static int env_int(const char *key,int def,int lo,int hi)
  const char *s=getenv(key);if(!s || !*s)return def;
  char *end;long n=strtol(s,&end,10);
  return *end || n<lo || n>hi?def:(int)n;
+}
+/* On-demand window (PHY/TOOLS/nr_gpu_elastic.h). The module holds the window its budget share allows (base); when the sweep is still ACQUIRING with a full window
+ * (more evidence span is what is missing) it asks for one more batch per pass, up to the requested window, as far as the shared budget has headroom; once records are
+ * published it gives the extra back after idle_limit ticks. A refusal or an allocation failure leaves the window as it is (one log, counted, back-off). Never runs with a
+ * pending batch: called from the worker between passes. GB10 / a share that holds the full window: base == full, nothing here ever acts. */
+static struct {int idle_limit, backoff;} elastic_policy={120,20};
+void nr_pdcch_nid_gpu_test_elastic(int idle_limit,int backoff) {elastic_policy.idle_limit=idle_limit;elastic_policy.backoff=backoff;}
+void nr_pdcch_nid_gpu_elastic_stats(int *window,int *base,uint64_t *grows,uint64_t *shrinks,uint64_t *denied)
+{
+ if(window)*window=g.el.cur;
+ if(base)*base=g.el.base;
+ if(grows)*grows=g.el.grows;
+ if(shrinks)*shrinks=g.el.shrinks;
+ if(denied)*denied=g.el.denied;
+}
+static void elastic_tick(int demand)
+{
+ if(!g.ops || !g.ops->resize || !nr_gpu_elastic_enabled(&g.el))return;
+ const int cur=g.el.cur,want=nr_gpu_elastic_target(&g.el,demand);
+ if(want==cur)return;
+ const int now=g.ops->resize(g.device,want);
+ const bool ok=now>0;
+ if(nr_gpu_elastic_done(&g.el,want,ok?now:cur,ok))
+  LOG_W(PHY,"SENSING: PDCCH_NID_GPU window %d -> %d refused (%s); keeping %d batches, further refusals are only counted\n",cur,want,ok?"memory budget headroom":"allocation failed",g.el.cur);
+ if(ok && now!=cur) {
+  g.win_passes=0;
+  LOG_A(PHY,"SENSING: PDCCH_NID_GPU window %d -> %d batches (base %d, full %d; grows=%llu shrinks=%llu denied=%llu)\n",cur,now,g.el.base,g.el.full,
+        (unsigned long long)g.el.grows,(unsigned long long)g.el.shrinks,(unsigned long long)g.el.denied);
+ }
 }
 /* worker: the PDCCH NID GPU worker thread: takes a filled batch and decides whether to run it.
  *   How it works: Waits on g.cv for a batch in state 2 (lowest sequence). With duty on it runs the ACQUIRE/MAINTAIN/PAUSED duty state machine (nr_gpu_discovery_due) and frees skipped batches. A geometry change resets the duty and the published result. TODO(doc): the device-run and publish tail (after line 308) was not reviewed.
@@ -90,7 +122,7 @@ static void *worker(void *unused)
           logged_mode<0?"START":names[logged_mode],names[duty.mode],epoch,g.result.count,g.all_verified,unexplained);
     logged_mode=duty.mode;
    }
-   if(!due) {g.state[b]=0;pthread_mutex_unlock(&g.mu);continue;}
+   if(!due) {g.state[b]=0;pthread_mutex_unlock(&g.mu);elastic_tick(g.el.base);continue;} /* paused / maintaining: no extra evidence span needed */
   }
   if(nr_admit_on()) { /* ISAC_BG_LANE: a skipped batch is freed; the next one carries newer samples */
    const uint64_t t=nr_admit_now_ns();
@@ -159,6 +191,8 @@ static void *worker(void *unused)
   }
   LOG_A(PHY,"SENSING: PDCCH_NID_GPU pass %llu: stage1 %.3f ms stage2 %.3f ms t=%ld.%03ld (kernels max %.3f ms) -> %d CORESETs:%s\n",
         (unsigned long long)pass,result.stage1_ms,result.stage2_ms,(long)pts.tv_sec,pts.tv_nsec/1000000,result.kernel_max_ms,result.count,records);
+  if(result.count>0)elastic_tick(g.el.base);                                  /* evidence found: the extra span is no longer needed */
+  else {g.win_passes++;elastic_tick(g.win_passes>=g.el.cur?g.el.cur+1:g.el.cur);} /* still nothing with a full window: ask for one more batch of evidence span */
   continue;
 failed:
   LOG_E(PHY,"SENSING: PDCCH_NID_GPU device failure; capture stopped (no CPU sweep fallback)\n");
@@ -196,6 +230,13 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  g.device=g.ops->create(max_rb,g.dur,g.window,&staging);
  if(!g.device)goto fail;
  for(int j=0;j<3;j++)g.batch[j].iq=staging+(size_t)j*NR_PDCCH_NID_BATCH*g.dur*12*max_rb;
+ {
+  const int base=g.ops->resize?g.ops->resize(g.device,0):g.window;
+  nr_gpu_elastic_init(&g.el,base>0?base:g.window,g.window,1,elastic_policy.idle_limit,elastic_policy.backoff);
+  g.win_passes=0;
+  if(nr_gpu_elastic_enabled(&g.el))
+   LOG_A(PHY,"SENSING: PDCCH_NID_GPU on-demand window: base %d of %d batches (the budget share holds %d); grows from the budget headroom while ACQUIRE has a full window and no record\n",g.el.base,g.el.full,g.el.base);
+ }
  // Explicit policy prevents inheriting FIFO from receiver initialization.
  pthread_attr_t attr;
  pthread_attr_init(&attr);
@@ -205,7 +246,8 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  rc|=pthread_attr_setschedparam(&attr,&sp);
  cpu_set_t allowed,pin;CPU_ZERO(&allowed);CPU_ZERO(&pin);
  if(sched_getaffinity(0,sizeof(allowed),&allowed)!=0)rc=-1;
- int core=env_int("ISAC_PDCCH_NID_GPU_CORE",13,0,CPU_SETSIZE-1);
+ // ISAC_PDCCH_NID_GPU_CORE: exported by the core plan (nr_core_layout.h); -1 = the highest CPU of this thread's mask; unset = legacy 13.
+ int core=env_int("ISAC_PDCCH_NID_GPU_CORE",13,-1,CPU_SETSIZE-1);
  if(core<0)for(int j=CPU_SETSIZE-1;j>=0;j--)if(CPU_ISSET(j,&allowed)){core=j;break;}
  if(core<0 || !CPU_ISSET(core,&allowed))rc=-1;
  else {CPU_SET(core,&pin);rc|=pthread_attr_setaffinity_np(&attr,sizeof(pin),&pin);}
@@ -214,7 +256,7 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  if(rc)goto fail;
  atomic_store_explicit(&g.running,true,memory_order_release);
  LOG_I(PHY,"SENSING: PDCCH_NID_GPU ready: core=%d SCHED_OTHER window=%d dur=%d batch=%d pinned staging=3 batches\n",
-       core,g.window,g.dur,g.batch_size);
+       core,g.el.cur,g.dur,g.batch_size);
  {struct timespec t0;clock_gettime(CLOCK_MONOTONIC,&t0);LOG_A(PHY,"SENSING: PDCCH_NID_GPU t0 t=%ld.%03ld\n",(long)t0.tv_sec,t0.tv_nsec/1000000);}
  return 0;
 fail:
@@ -233,8 +275,8 @@ void nr_pdcch_nid_gpu_stop(void)
 {
  if(!g.device)return;
  atomic_store_explicit(&g.running,false,memory_order_release);
- LOG_A(PHY,"SENSING: PDCCH_NID_GPU stop summary: sweep_runs=%llu kernel_ms=%.3f\n",
-   (unsigned long long)g.runs,g.kernel_ms);
+ LOG_A(PHY,"SENSING: PDCCH_NID_GPU stop summary: sweep_runs=%llu kernel_ms=%.3f window=%d base=%d full=%d grows=%llu shrinks=%llu denied=%llu\n",
+   (unsigned long long)g.runs,g.kernel_ms,g.el.cur,g.el.base,g.el.full,(unsigned long long)g.el.grows,(unsigned long long)g.el.shrinks,(unsigned long long)g.el.denied);
  pthread_mutex_lock(&g.mu);g.stop=true;pthread_cond_signal(&g.cv);pthread_mutex_unlock(&g.mu);
  pthread_join(g.thread,NULL);
  g.ops->destroy(g.device);dlclose(g.module);g.device=g.module=NULL;g.ops=NULL;

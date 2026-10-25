@@ -1,0 +1,5 @@
+0.012 SENSING: CORE_PLAN off (ISAC_CORE_PLAN=0): legacy site core defaults
+0.012 SENSING: FLOAT_CORES=10-14 (4 CPUs): 1 task(s) moved, 0 pinned task(s) kept
+0.021 [0m[32m[PHY]    SENSING: DASHBOARD http://127.0.0.1:8080 (run /home/sens/NICOLA/ota_runs/*)
+5.966 [0mSENSING: CORE_POOL: 6 cores: 6 7 8 9 3 4
+177.909 [0m[32m[PHY]    SENSING: CORE_POOL n=6 yields=0 gpu_gives=0 nested=18017 enforced=2 scan[n=426767 waited=0 promo=0 wait_us p50<=1 p99<=1 max=0] decode[n=261523 waited=0 promo=0 wait_us p50<=1 p99<=1 max=0] retry[n=18 waited=0 promo=0 wait_us p50<=1 p99<=1 max=0] disc[n=127323 waited=153 promo=0 wait_us p50<=1 p99<=1 max=5293] house[n=0 waited=0 promo=0 wait_us p50<=0 p99<=0 max=0]

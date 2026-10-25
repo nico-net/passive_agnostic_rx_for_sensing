@@ -49,6 +49,20 @@ bool have_gpu()
 #endif
 }
 
+/* CPU tier (NR_GPU_FORCE_MODEL=cpu): the GPU backends must refuse, the CPU backend stays; the GPU comparisons are skipped. */
+bool cpu_tier()
+{
+  const char *fm = getenv("NR_GPU_FORCE_MODEL");
+  return fm && !strcmp(fm, "cpu");
+}
+#define SKIP_ON_CPU_TIER(use) \
+  do { \
+    if (cpu_tier()) { \
+      EXPECT_EQ(use, 0) << "CPU tier: the GPU backend must refuse"; \
+      GTEST_SKIP() << "CPU tier (NR_GPU_FORCE_MODEL=cpu): GPU backend refused by design"; \
+    } \
+  } while (0)
+
 class Cb0 : public ::testing::Test {
  protected:
   void SetUp() override
@@ -115,6 +129,7 @@ TEST_F(Cb0, GpuDematchBitIdenticalSweep)
 {
   if (!have_gpu())
     GTEST_SKIP() << "built without CUDA";
+  SKIP_ON_CPU_TIER(nr_td_cb0_use_gpu(1));
   ASSERT_EQ(nr_td_cb0_use_gpu(1), 1) << "libtd_cb0_gpu.so not loadable / no device";
   struct Geo { uint16_t nrb, R; } geos[4] = {{8, 7700}, {106, 5000}, {4, 2000}, {106, 1500}};
   std::mt19937 rng(7);
@@ -205,6 +220,7 @@ TEST_F(Cb0, BatchResultsEqualCpu)
     items.push_back(w);
   }
   const auto cpu = run(items);
+  SKIP_ON_CPU_TIER(nr_td_cb0_use_gpu(1));
   ASSERT_EQ(nr_td_cb0_use_gpu(1), 1);
   for (int th : {1, 4}) {
     nr_td_cb0_set_threads(th);
@@ -288,7 +304,7 @@ TEST_F(Cb0, ShiftAppliedExactly)
   const auto ob = run({bad});
   EXPECT_EQ(ob[0].pass, -1);
   const int n = (int)a.size();
-  for (int g = 0; g < (have_gpu() ? 2 : 1); g++) {
+  for (int g = 0; g < (have_gpu() && !cpu_tier() ? 2 : 1); g++) {
     std::vector<int8_t> la((size_t)n * NR_TD_CB0_L_STRIDE), lb((size_t)n * NR_TD_CB0_L_STRIDE);
     std::vector<int16_t> da((size_t)n * NR_TD_CB0_D_STRIDE), db((size_t)n * NR_TD_CB0_D_STRIDE);
     std::vector<int8_t> st(n);
@@ -354,6 +370,25 @@ TEST_F(Cb0, CudaLdpcPoolPath)
 {
   if (!have_gpu())
     GTEST_SKIP() << "built without CUDA";
+  if (cpu_tier()) {
+    /* CPU tier: G1's pool may load, but it must not run a kernel: every verdict comes from its CPU fallback and says so, equal to the CPU oracle */
+    Fx *f = big();
+    std::vector<nr_td_cb0_item_t> few{f->item()};
+    nr_td_cb0_item_t w = few[0];
+    w.rv = (uint8_t)((w.rv + 1) % 4);
+    few.push_back(w);
+    nr_td_cb0_use_cuda_ldpc(0);
+    const auto cpu = run(few);
+    if (nr_td_cb0_use_cuda_ldpc(1) == 1) {
+      const auto out = run(few);
+      for (size_t i = 0; i < few.size(); i++) {
+        EXPECT_NE(out[i].decoder_used, NR_TD_CB0_DEC_CUDA_FLOODING) << "item " << i << ": CUDA label on the CPU tier";
+        EXPECT_EQ(out[i].pass, cpu[i].pass) << "item " << i;
+      }
+    }
+    delete f;
+    GTEST_SKIP() << "CPU tier (NR_GPU_FORCE_MODEL=cpu): CUDA LDPC decodes via the CPU fallback only";
+  }
   ASSERT_EQ(nr_td_cb0_use_cuda_ldpc(1), 1) << "libldpc_cuda.so not loadable";
   Fx *b = big(), *s = small(), *b2 = big(2);
   std::vector<nr_td_cb0_item_t> items;

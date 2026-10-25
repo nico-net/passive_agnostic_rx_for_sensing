@@ -77,6 +77,16 @@ void nr_csirs_disc_fft_cpu(int fft, int transforms, const int16_t *in, int16_t *
 /* nr_csirs_disc_td_init: allocates the time-domain front end for a carrier: the slot ring (CP-bearing sample spans per slot, huge-page pool, unified memory when the GPU allocator is loaded) and the FFT input and output buffers for one batch.
  *   Returns 0, or -1 for unsupported parameters or allocation failure (everything freed). Callers: nr_csirs_disc_start() in nr_csirs_disc_feed.c and tests/nr_csirs_disc_td_fixture.c.
  */
+/* nr_csirs_disc_td_bytes: host bytes nr_csirs_disc_td_init(fp, n_ant, capacity) allocates and touches (slot pool rounded to 2 MB + the two FFT batch buffers), 0 for
+ *   unsupported parameters. Pure. Caller: nr_csirs_disc_start() (host-RAM budget). */
+size_t nr_csirs_disc_td_bytes(const NR_DL_FRAME_PARMS *fp, int n_ant, int capacity)
+{
+  if (!fp || n_ant < 1 || n_ant > 4 || !fp->ofdm_symbol_size || capacity < 1) return 0;
+  const size_t stride = 14 * (size_t)(fp->ofdm_symbol_size + fp->nb_prefix_samples0 + fp->nb_prefix_samples);
+  const size_t slot_bytes = ((stride * n_ant * sizeof(c16_t) + 63) / 64) * 64, huge = 2 * 1024 * 1024;
+  const size_t pool_bytes = ((slot_bytes * (capacity + NR_CSIRS_DISC_DEFAULT_BATCH) + huge - 1) / huge) * huge;
+  return pool_bytes + 2 * (size_t)NR_CSIRS_DISC_DEFAULT_BATCH * n_ant * 14 * fp->ofdm_symbol_size * sizeof(c16_t);
+}
 int nr_csirs_disc_td_init(const NR_DL_FRAME_PARMS *fp, int n_ant, int capacity)
 {
   if (!fp || n_ant < 1 || n_ant > 4 || !fp->ofdm_symbol_size || !fp->ofdm_offset_divisor || capacity < 1)

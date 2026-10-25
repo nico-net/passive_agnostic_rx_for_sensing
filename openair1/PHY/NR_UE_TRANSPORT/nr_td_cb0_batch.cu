@@ -21,8 +21,10 @@
 #include "PHY/TOOLS/nr_gpu_cuda.h"
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 #include "nr_td_cb0_batch.h"
 #include "nr_dl_gpu_memory.h"
+#include "PHY/TOOLS/nr_gpu_membudget.h"
 #include "nr_dl_gpu_budget.h"
 #include <stdlib.h>
 
@@ -84,7 +86,22 @@ int init()
   if (!nr_gpu_module_ready()) return 0;
   if (g.ok >= 0) return g.ok;
   g.ok = 0;
-  g.max_items = 2048;
+  // T6b: items per dematch batch, 2048 down to 512 from the shared memory budget (GB10: 2048, unchanged). A batch above max_items is refused (dematch /
+  // scratch / dematch_device fail) and the caller dematches it on the CPU, so only throughput depends on the size.
+  {
+    const size_t llr_bytes = (size_t)16 * 275 * 12 * 14 * 4 * 8 * sizeof(int16_t);
+    const size_t per_item = (size_t)NR_TD_CB0_L_STRIDE * 8 + (size_t)NR_TD_CB0_D_STRIDE * sizeof(int16_t) + sizeof(nr_td_cb0_gpu_item_t);
+    const size_t share = nr_gpu_membudget_share(NR_GPU_MEM_TD_CB0);
+    const long items = nr_gpu_membudget_fit(share, llr_bytes, per_item, 512, 2048);
+    if (!items) {
+      fprintf(stderr, "[GPU] td_cb0 dematch: memory budget share %zu MB < %zu MB for 512 items; module not ready (CPU dematch)\n", share >> 20, (llr_bytes + 512 * per_item) >> 20);
+      nr_gpu_membudget_commit(NR_GPU_MEM_TD_CB0, 0, 0.0);
+      return 0;
+    }
+    if (items != 2048) fprintf(stderr, "[GPU] td_cb0 dematch: max_items 2048 -> %ld (share %zu MB)\n", items, share >> 20);
+    g.max_items = (int)items;
+    nr_gpu_membudget_commit(NR_GPU_MEM_TD_CB0, llr_bytes + per_item * (size_t)items, (double)items / 2048);
+  }
   g.cap[0] = (size_t)g.max_items * NR_TD_CB0_L_STRIDE;
   g.cap[1] = (size_t)g.max_items * NR_TD_CB0_D_STRIDE * sizeof(int16_t);
   g.cap[2] = (size_t)g.max_items * sizeof(nr_td_cb0_gpu_item_t);

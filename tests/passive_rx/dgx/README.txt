@@ -4,6 +4,11 @@ run_rx_dgx.sh     - DGX receiver launcher with the X925 core map (Task A6)
 coremap_dgx.env   - core map definition (Task A6)
 Evidence of 2026-09-30/10-01 lives in ../dgx_host_snapshot_2026-09-30/.
 
+Build note: the optional dlopen'd GPU/AAL modules (ldpc_cuda, pdsch_gpu, pdcch_gpu, polar_gpu, td_cb0_gpu, ...) are no longer
+build dependencies of nr-uesoftmodem (a module failing on some CUDA toolchain must not block the receiver link). They hang off
+the aggregate target nr-uesoftmodem-optional-modules (part of ALL). With explicit targets build both:
+  ninja nr-uesoftmodem nr-uesoftmodem-optional-modules ...   (plain `ninja` builds everything; `ninja -k 0` keeps going past a failed module)
+
 
 Postconv gate calibration (rfsim_regress.sh, GATE_MODE=postconv default; GATE_MODE=legacy = old criterion)
 -----------------------------------------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 Read `PROJECT_MEMORY.md` completely before doing anything; it is the single source of truth.
 
 Hard rules:
+- Maximum portability and adaptiveness to the device: derive cores, memory, GPU/CPU paths, radio transport and sizes from the device at run time; host values are configuration, never code; a fix on one host must not change the others (DGX Spark, sens6, cloud, rfsim). PROJECT_MEMORY §26.
 - sens6 is FROZEN: never edit tests/passive_rx/captures/*, tests/passive_rx/*.conf, tests/passive_rx/sens6_host_snapshot_2026-09-30/*.
   Check: git diff --quiet sens6-frozen-2026-09-30 -- tests/passive_rx/captures tests/passive_rx/*.conf tests/passive_rx/sens6_host_snapshot_2026-09-30
 - New config files under tests/passive_rx/ use the .cfg extension (the frozen gate pathspec tests/passive_rx/*.conf matches across /).

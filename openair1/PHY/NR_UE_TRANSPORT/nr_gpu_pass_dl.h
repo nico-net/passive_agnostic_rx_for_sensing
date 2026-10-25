@@ -48,7 +48,7 @@ typedef struct {
   nr_gpu_pass_result_t r;
   nr_gpu_demod_job_t demod;         /* decisions, kappa and EVM sums of the demod (r.demod_out) */
   int16_t brfo_rows[4 * 2 * 4096 * 2];
-  int16_t qm_row[4096 * 2];         /* the equalised layer-0 symbols of the symbol with the most data REs (the QM oracle's input), DIRECT only */
+  int16_t qm_row[4096 * 2];         /* the equalised layer-0 symbols of the symbol with the most data REs (the QM oracle's input), both memory models */
   uint32_t qm_n, dl_valid_re[14];
   int qm_sym, ndmrs, dmrs_first, dmrs_last, C;
   uint32_t nvar_ant[4];             /* the chest's per-antenna noise of the last DM-RS symbol and layer (nr_dl_chest_nvar_ant) */
@@ -88,7 +88,7 @@ enum { NR_GPU_PASS_EV_COMMIT, NR_GPU_PASS_EV_RETRY_OLD /* pass said CRC fail / C
 enum { NR_GPU_PASS_GATE_SEG /* more segments than the largest class (16; 32 in split mode) */, NR_GPU_PASS_GATE_PROBE, NR_GPU_PASS_GATE_SHARE, NR_GPU_PASS_GATE_GW, NR_GPU_PASS_GATE_PTRS, NR_GPU_PASS_GATE_TINTERP, NR_GPU_PASS_GATE_HARQ,
        NR_GPU_PASS_GATE_LDPC_OFF, NR_GPU_PASS_GATE_CHEST_ONLY, NR_GPU_PASS_GATE_OCC, NR_GPU_PASS_GATE_NOMEM, NR_GPU_PASS_GATE_RETRY /* ISAC_GPU_PASS_RETRY_OLD: a retry body runs the old path */,
        NR_GPU_PASS_GATE_GW_READY /* the grant's LLRs come from a GrantWork entry another hypothesis published: only the LDPC is left, nothing for the pass to do */, NR_GPU_PASS_GATE_LLR_OVR, NR_GPU_PASS_GATE_CAP,
-       NR_GPU_PASS_GATE_FORCE_CPU, NR_GPU_PASS_GATE_N };
+       NR_GPU_PASS_GATE_FORCE_CPU, NR_GPU_PASS_GATE_PATH /* per-path choice (nr_gpu_path.h): CPU, or the CPU side of the DISCRETE trial */, NR_GPU_PASS_GATE_N };
 void nr_gpu_pass_gate(int gate);
 /* every ISAC_GPU_PASS_CHECK-th CRC-failing pass: also run the old first body and compare */
 int nr_gpu_pass_shadow_due_fail(void);

@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "nr_pdsch_recovery.h"
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_core_layout.h"
+#pragma weak nr_core_layout /* unit tests link this file without the utils library: no plan */
 #include "common/utils/nr_core_pool.h"
 #include "nr_recov_yield.h"
 #include <pthread.h>
@@ -129,7 +131,7 @@ static void add_cores(cpu_set_t *set, const char *list)
     p = *end == ',' ? end + 1 : end;
   }
 }
-/* cores given (arg): exactly those. Otherwise the background little cores 10-14 minus every core the launcher
+/* cores given (arg): exactly those. Otherwise the core plan's recovery CPUs (legacy: little cores 10-14) minus every core the launcher
  * pins a critical thread to (same env keys); if none is left the worker is unpinned at nice 10. */
 static void pick_cores(cpu_set_t *set, const char *cores)
 {
@@ -145,8 +147,9 @@ static void pick_cores(cpu_set_t *set, const char *cores)
                                      "ISAC_GPU_WORKER_CORE", "ISAC_UHD_CTRL_CORES"};
   for (unsigned i = 0; i < sizeof keys / sizeof *keys; i++)
     if (nr_env_core(keys[i])) add_cores(&busy, nr_env_core(keys[i]));
-  for (int c = 10; c <= 14; c++)
-    if (!CPU_ISSET(c, &busy)) CPU_SET(c, set);
+  const nr_core_layout_t *L = nr_core_layout ? nr_core_layout() : NULL; /* host core plan: its recovery CPUs; else the legacy DGX little cores 10-14 */
+  for (int c = 0; c < CPU_SETSIZE && c < NR_CL_MAX_CPUS; c++)
+    if ((L ? L->recov[c] != 0 : (c >= 10 && c <= 14)) && !CPU_ISSET(c, &busy)) CPU_SET(c, set);
 }
 void nr_pdsch_recovery_stats(char *buf, int n)
 {

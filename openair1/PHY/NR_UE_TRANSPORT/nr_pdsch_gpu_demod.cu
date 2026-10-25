@@ -10,6 +10,7 @@
 #include "../TOOLS/nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include "nr_pdsch_gpu_demod.cuh"
 #include "PHY/TOOLS/nr_gpu_mem.h"
+#include "nr_gpu_stage_census.h"
 #include "nr_mmse_exact.h" /* MMSE3GPU: mode 3, the CPU's own source */
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
@@ -66,16 +67,139 @@ static inline const JobK &K(const nr_gpu_demod_job_t &j) { return *reinterpret_c
 static std::atomic<unsigned> g_busy{0};
 static int g_ok;
 
+/* ---- Q4: DISCRETE staging of nr_pdsch_gpu_demod_run ---------------------------------------------------------------------------------------------------
+ * The standalone demod reads the caller's rxdataF / estimates / geometry and writes its comp / mag* / LLR buffers in place (DIRECT tier). On DISCRETE each of the first
+ * g_stg_n contexts owns a pinned+device block pair: `in` = [rx span][estimate runs][geo_y rows][geo_h rows], one async H2D of exactly the bytes used; `out` = [LLRs][comp][mag]
+ * [magb][magr], D2H of exactly what the host consumes. The kernels are the same; only their pointers change, with the compact layouts reached through biased base pointers:
+ *   rx:  antenna a, symbols lo..hi only        (rxdataF' = base - lo N, rx_stride' = (hi - lo + 1) N)
+ *   est: the symbols the geometry refers to    (geo_h's symbol field remapped to the rank among them, est_stride' = used N)
+ *   geo: rows lo..hi, the first nre entries of each
+ *   out: [symbol - lo][4 layers][ext]          (comp' = base - lo 4 ext, buf' = ext)
+ * Default D2H (the decoder's needs): the LLRs, comp layer 0 of the first symbol with the most REs (the Qm oracle). stage_full (a grant that is compared with the CPU): every
+ * array the kernels wrote, all layers, first nre entries per symbol. */
+struct Stg {
+  nr_gpu_buf_t in, out;
+};
+static Stg g_stg[CTX];
+static int g_stg_n, g_stg_N, g_stg_nbrx;
+static uint32_t g_stg_ext;
+static size_t g_stg_llr_cap, g_stg_arr; /* LLR capacity (entries), bytes of one comp / mag array in `out` */
+static size_t al256(size_t b) { return (b + 255) & ~(size_t)255; }
+struct SPlan {
+  int lo, hi, ns, used_n, rank[NSYM], qm_m;
+  uint32_t used;
+  size_t in_n, llr_n;
+};
+static inline const int16_t *bias(const void *dev, size_t off, size_t sub) /* dev + off - sub, modulo 2^64 (the kernels only dereference inside the block) */
+{
+  return reinterpret_cast<const int16_t *>(reinterpret_cast<uintptr_t>(dev) + off - sub);
+}
+/* which of mag / magb / magr the kernels write for this grant (comp is always written): launch_tail + nrd_comp_re + the MMSE kernels */
+static unsigned mags_written(const nr_gpu_demod_job_t &j)
+{
+  const bool always = j.nl == 2 || (j.nl >= 3 && (j.qam_mode == 2 || j.qam_mode == 3));
+  const bool mmse0 = j.nl >= 3 && j.qam_mode != 2 && j.qam_mode != 3 && j.qm > 2;
+  return ((j.qm > 2 || always) ? 1u : 0u) | ((j.qm > 4 || always || mmse0) ? 2u : 0u) | ((j.qm > 6 || always || mmse0) ? 4u : 0u);
+}
+/* plans the grant and fills the context's input block; 0, or -1 when the grant does not fit (nothing is enqueued) */
+static int stage_fill(int c, const nr_gpu_demod_job_t &j, SPlan &P)
+{
+  Stg &g = g_stg[c];
+  const int N = j.N, nbRx = j.nbRx, nl = j.nl, ext = (int)j.ext;
+  if (N != g_stg_N || nbRx > g_stg_nbrx || (uint32_t)ext > g_stg_ext || (uint32_t)ext > j.buf) return -1;
+  P.lo = NSYM;
+  P.hi = -1;
+  for (int m = 0; m < NSYM; m++)
+    if (j.sym_mask >> m & 1) {
+      P.lo = P.lo < m ? P.lo : m;
+      P.hi = m;
+    }
+  if (P.hi < 0) return -1;
+  P.ns = P.hi - P.lo + 1;
+  P.llr_n = (size_t)j.llr_off[P.hi] + (size_t)j.nre[P.hi] * j.qm * nl;
+  if (P.llr_n > g_stg_llr_cap) return -1;
+  const int16_t *gh = (const int16_t *)j.geo_h, *gy = (const int16_t *)j.geo_y;
+  P.used = 0;
+  P.qm_m = -1;
+  int qn = -1;
+  for (int m = P.lo; m <= P.hi; m++)
+    if (j.sym_mask >> m & 1) {
+      if ((int)j.nre[m] > qn) { qn = j.nre[m]; P.qm_m = m; }
+      if ((int)j.nre[m] > ext) return -1;
+      const int16_t *row = gh + 2 * ((size_t)m * ext);
+      for (int i = 0; i < (int)j.nre[m]; i++) {
+        const unsigned sidx = (unsigned)(row[2 * i + 1] - 1);
+        if (sidx >= (unsigned)NSYM) return -1;
+        P.used |= 1u << sidx;
+      }
+    }
+  P.used_n = 0;
+  for (int s = 0; s < NSYM; s++) P.rank[s] = (P.used >> s & 1) ? P.used_n++ : -1;
+  if (!P.used_n) return -1;
+  const int rows = nl * nbRx;
+  const size_t rx_b = (size_t)nbRx * P.ns * N * 4, est_b = (size_t)rows * P.used_n * N * 4, geo_b = (size_t)P.ns * ext * 4;
+  const size_t est_off = al256(rx_b), gy_off = al256(est_off + est_b), gh_off = al256(gy_off + geo_b);
+  P.in_n = gh_off + geo_b;
+  if (P.in_n > g.in.bytes) return -1;
+  char *h = (char *)g.in.host;
+  for (int a = 0; a < nbRx; a++)
+    memcpy(h + (size_t)a * P.ns * N * 4, (const char *)j.rxdataF + ((size_t)a * j.rx_stride + (size_t)P.lo * N) * 4, (size_t)P.ns * N * 4);
+  for (int r = 0; r < rows; r++) {
+    char *dst = h + est_off + (size_t)r * P.used_n * N * 4;
+    const char *src = (const char *)j.est + (size_t)r * j.est_stride * 4;
+    for (int s = 0; s < NSYM;) {
+      if (!(P.used >> s & 1)) { s++; continue; }
+      int e = s;
+      while (e + 1 < NSYM && (P.used >> (e + 1) & 1)) e++;
+      memcpy(dst + (size_t)P.rank[s] * N * 4, src + (size_t)s * N * 4, (size_t)(e - s + 1) * N * 4);
+      s = e + 1;
+    }
+  }
+  for (int m = P.lo; m <= P.hi; m++)
+    if (j.sym_mask >> m & 1) {
+      const size_t n = j.nre[m];
+      memcpy(h + gy_off + (size_t)(m - P.lo) * ext * 4, gy + 2 * ((size_t)m * ext), n * 4);
+      int16_t *dh = (int16_t *)(h + gh_off + (size_t)(m - P.lo) * ext * 4);
+      const int16_t *sh = gh + 2 * ((size_t)m * ext);
+      for (size_t i = 0; i < n; i++) {
+        dh[2 * i] = sh[2 * i];
+        dh[2 * i + 1] = (int16_t)(P.rank[sh[2 * i + 1] - 1] + 1);
+      }
+    }
+  return 0;
+}
+/* the job as the kernels see it on the device (call after a successful stage_fill) */
+static void stage_point(int c, nr_gpu_demod_job_t &jj, const SPlan &P)
+{
+  const Stg &g = g_stg[c];
+  const size_t N = jj.N, ext = jj.ext, rows = (size_t)jj.nl * jj.nbRx;
+  const size_t rx_b = (size_t)jj.nbRx * P.ns * N * 4, est_b = rows * P.used_n * N * 4, geo_b = (size_t)P.ns * ext * 4;
+  const size_t est_off = al256(rx_b), gy_off = al256(est_off + est_b), gh_off = al256(gy_off + geo_b);
+  jj.rxdataF = bias(g.in.dev, 0, (size_t)P.lo * N * 4);
+  jj.rx_stride = (uint32_t)(P.ns * N);
+  jj.est = bias(g.in.dev, est_off, 0);
+  jj.est_stride = (uint32_t)(P.used_n * N);
+  jj.geo_y = bias(g.in.dev, gy_off, (size_t)P.lo * ext * 4);
+  jj.geo_h = bias(g.in.dev, gh_off, (size_t)P.lo * ext * 4);
+  const size_t sub = (size_t)P.lo * 4 * ext * 4;
+  jj.llr = (int16_t *)g.out.dev;
+  jj.comp = (int16_t *)bias(g.out.dev, al256(g_stg_llr_cap * 2), sub);
+  jj.mag = (int16_t *)bias(g.out.dev, al256(g_stg_llr_cap * 2) + g_stg_arr, sub);
+  jj.magb = (int16_t *)bias(g.out.dev, al256(g_stg_llr_cap * 2) + 2 * g_stg_arr, sub);
+  jj.magr = (int16_t *)bias(g.out.dev, al256(g_stg_llr_cap * 2) + 3 * g_stg_arr, sub);
+  jj.buf = (uint32_t)ext;
+}
+
 /* DECTAIL: pool exhaustion is counted (DEMOD_POOL_WAIT lines, first 30 waits above 1 ms, and the waits/total in the first line). */
 static std::atomic<unsigned> g_pool_waits{0}, g_pool_log{0};
-static int acquire()
+static int acquire(int limit = CTX) /* limit: only the first `limit` contexts (Q4: the staged DISCRETE run owns staging buffers on those) */
 {
   struct timespec t0 = {};
   bool waited = false;
   const uint64_t ss0 = nr_ss_now();
   for (;;) {
     unsigned m = g_busy.load();
-    for (int i = 0; i < nr_gpu_ctx_limit(CTX); i++)
+    for (int i = 0; i < nr_gpu_ctx_limit(limit); i++)
       if (!(m >> i & 1u) && g_busy.compare_exchange_strong(m, m | 1u << i)) {
         nr_ss_add(NRSS_LK, ss0);
         if (waited) {
@@ -93,6 +217,46 @@ static int acquire()
       clock_gettime(CLOCK_MONOTONIC, &t0);
     }
     std::this_thread::yield();
+  }
+}
+
+/* enqueues the D2H of the outputs the host consumes on `st` (counts the copies / bytes) */
+static cudaError_t stage_d2h(int c, const nr_gpu_demod_job_t &j, const SPlan &P, cudaStream_t st, uint64_t *bytes, int *n)
+{
+  const Stg &g = g_stg[c];
+  const size_t ext = j.ext, cbase = al256(g_stg_llr_cap * 2);
+  cudaError_t e = cudaMemcpyAsync(g.out.host, g.out.dev, P.llr_n * 2, cudaMemcpyDeviceToHost, st);
+  *bytes += P.llr_n * 2;
+  ++*n;
+  const unsigned w = mags_written(j);
+  for (int k = 0; k < 4 && e == cudaSuccess; k++) {
+    if (k && !(w >> (k - 1) & 1)) continue;
+    for (int m = P.lo; m <= P.hi && e == cudaSuccess; m++) {
+      if (!(j.sym_mask >> m & 1) || (!j.stage_full && (k || m != P.qm_m))) continue;
+      const size_t off = cbase + (size_t)k * g_stg_arr + (size_t)(m - P.lo) * 4 * ext * 4, wd = (size_t)j.nre[m] * 4, ht = j.stage_full ? j.nl : 1;
+      e = cudaMemcpy2DAsync((char *)g.out.host + off, ext * 4, (const char *)g.out.dev + off, ext * 4, wd, ht, cudaMemcpyDeviceToHost, st);
+      *bytes += wd * ht;
+      ++*n;
+    }
+  }
+  return e;
+}
+/* after the stream finished: the mirror to the caller's buffers (exactly the copied spans) */
+static void stage_scatter(int c, const nr_gpu_demod_job_t *j, const SPlan &P)
+{
+  const Stg &g = g_stg[c];
+  const size_t ext = j->ext, cbase = al256(g_stg_llr_cap * 2);
+  memcpy(j->llr, g.out.host, P.llr_n * 2);
+  int16_t *dst[4] = {j->comp, j->mag, j->magb, j->magr}; /* the caller's buffers: the job passed here is the caller's, not the device-pointer copy */
+  const unsigned w = mags_written(*j);
+  for (int k = 0; k < 4; k++) {
+    if (k && !(w >> (k - 1) & 1)) continue;
+    for (int m = P.lo; m <= P.hi; m++) {
+      if (!(j->sym_mask >> m & 1) || (!j->stage_full && (k || m != P.qm_m))) continue;
+      for (int l = 0; l < (j->stage_full ? j->nl : 1); l++)
+        memcpy(dst[k] + 2 * ((size_t)(m * NR_GPU_DEMOD_MAX_NL + l) * j->buf), (const char *)g.out.host + cbase + (size_t)k * g_stg_arr + ((size_t)(m - P.lo) * 4 + l) * ext * 4,
+               (size_t)j->nre[m] * 4);
+    }
   }
 }
 
@@ -1444,6 +1608,7 @@ using namespace nrdm;
 
 extern "C" int nr_pdsch_gpu_demod_init(int nant)
 {
+  if (!nr_gpu_module_ready()) return -1; // CPU tier (no device, arch mismatch or NR_GPU_FORCE_MODEL=cpu): refuse, the host keeps the CPU path
   if (g_ok)
     return 0;
   if (nant > NR_GPU_DEMOD_MAX_RX)
@@ -1520,6 +1685,35 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
   return 0;
 }
 
+/* Q4: sets up the DISCRETE staging of nr_pdsch_gpu_demod_run (see the Stg block): device + pinned blocks for the largest grant of this carrier, as many contexts as the shared
+ * memory budget allows (1 .. CTX). Call after nr_pdsch_gpu_demod_init, before RX starts. 0 = ready (also on a DIRECT platform: nothing to stage), -1 = off: the run refuses and
+ * the CPU demodulates. */
+extern "C" int nr_pdsch_gpu_demod_stage_init(int nbRx, int N, uint32_t ext_max)
+{
+  if (!g_ok) return -1;
+  if (nr_gpu_model() == NR_GPU_MODEL_DIRECT) return 0;
+  if (g_stg_n) return nbRx == g_stg_nbrx && N == g_stg_N ? 0 : -1;
+  if (nbRx < 1 || nbRx > NR_GPU_DEMOD_MAX_RX || N < 16 || N > 32768 || ext_max < 16 || ext_max > (uint32_t)EXT) return -1;
+  g_stg_N = N;
+  g_stg_nbrx = nbRx;
+  g_stg_ext = ext_max;
+  g_stg_llr_cap = (size_t)NSYM * ext_max * NR_GPU_DEMOD_MAX_NL * 8; /* 14 symbols x 4 layers x 256QAM */
+  g_stg_arr = al256((size_t)NSYM * 4 * ext_max * 4);
+  const size_t in_b = al256((size_t)nbRx * NSYM * N * 4) + al256((size_t)4 * nbRx * NSYM * N * 4) + 2 * al256((size_t)NSYM * ext_max * 4);
+  const size_t out_b = al256(g_stg_llr_cap * 2) + 4 * g_stg_arr;
+  const int n = (int)nr_gpu_membudget_fit(nr_gpu_stage_share(), 0, in_b + out_b, 1, CTX);
+  int ok = n;
+  for (int c = 0; c < n && ok; c++)
+    ok = nr_gpu_buf_alloc(&g_stg[c].in, in_b) == 0 && nr_gpu_buf_alloc(&g_stg[c].out, out_b) == 0;
+  if (!ok) {
+    for (int c = 0; c < CTX; c++) { nr_gpu_buf_free(&g_stg[c].in); nr_gpu_buf_free(&g_stg[c].out); }
+    return -1;
+  }
+  g_stg_n = n;
+  fprintf(stderr, "SENSING: GPU_EXACT_DEMOD staged (DISCRETE): %d contexts x (%zu KB device + %zu KB pinned)\n", n, (in_b + out_b) >> 10, (in_b + out_b) >> 10);
+  return 0;
+}
+
 /* GPUFUSE: compensation + MMSE + kappa + LLRs, one launch (shared by nr_pdsch_gpu_demod_run and nr_pdsch_gpu_demod_dev) */
 static void launch_tail(const nr_gpu_demod_job_t &jj, Ctx &x, cudaStream_t s, int gx)
 {
@@ -1587,15 +1781,34 @@ extern "C" int nr_pdsch_gpu_demod_evm_wait(nr_gpu_demod_job_t *j)
 
 extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
 {
+  /* The kernels read j->rxdataF/est/geo/comp/mag/llr (caller memory) in place on the DIRECT tier. On DISCRETE (Q4) the run is staged (see the Stg block above): the
+   * span the kernels read goes to the device, the outputs the host consumes come back; without staging (not set up, or the grant does not fit) it refuses before
+   * any CUDA call and the host runs the CPU. The pass demod (nr_pdsch_gpu_demod_dev) uses nr_gpu_buf_t. */
+  const bool staged = nr_gpu_model() != NR_GPU_MODEL_DIRECT;
+  if (staged && !g_stg_n)
+    return -1;
   if (!g_ok || j->nbRx > NR_GPU_DEMOD_MAX_RX || j->nl > NR_GPU_DEMOD_MAX_NL || j->ext > (uint32_t)EXT
       || j->nl * j->nbRx > 16)
     return -1;
   NrGpuRtScope rt;
   if (!rt.admitted)
     return -1;
-  const int c = acquire();
+  const int c = staged ? acquire(g_stg_n) : acquire();
   Ctx &x = g_ctx[c];
-  const nr_gpu_demod_job_t jj = *j;
+  nr_gpu_demod_job_t jj = *j;
+  SPlan P = {};
+  uint64_t h2d_b = 0, d2h_b = 0;
+  int d2h_n = 0;
+  if (staged) {
+    if (stage_fill(c, *j, P) != 0) {
+      nr_pdsch_gpu_demod_release(c);
+      nr_stage::refused(NR_GPU_STG_DEMOD);
+      return -1;
+    }
+    stage_point(c, jj, P);
+    cudaMemcpyAsync(g_stg[c].in.dev, g_stg[c].in.host, P.in_n, cudaMemcpyHostToDevice, x.s);
+    h2d_b = P.in_n;
+  }
   const int gx = (int)((jj.ext + 127) / 128);
   k_gather<<<dim3(gx, NSYM), 128, 0, x.s>>>(K(jj), x.y, x.h);
   k_level<<<jj.nl * jj.nbRx, 256, 0, x.s>>>(K(jj), x.h, x.dsh); /* + the decision (last block) */
@@ -1634,17 +1847,24 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
   if (jj.want_kappa && !jj.want_evm) { /* CPU EVM fallback reads the extraction buffers */
     cudaMemcpyAsync(x.hy, x.y, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT, cudaMemcpyDeviceToHost, x.s);
     cudaMemcpyAsync(x.hh, x.h, sizeof(nrd_c16) * NSYM * 16 * EXT, cudaMemcpyDeviceToHost, x.s);
+    d2h_b += sizeof(nrd_c16) * NSYM * (NR_GPU_DEMOD_MAX_RX + 16) * EXT;
+    d2h_n += 2;
   }
+  cudaError_t se = staged ? stage_d2h(c, *j, P, x.s, &d2h_b, &d2h_n) : cudaSuccess;
   const bool defer = jj.want_evm && jj.evm_defer;
   if (defer) { /* the LLRs need only the main stream; the EVM sums follow on s2 (nr_pdsch_gpu_demod_evm_wait) */
     cudaMemcpyAsync(x.sh, x.dsh, offsetof(Shared, evm), cudaMemcpyDeviceToHost, x.s);
     cudaMemcpyAsync(x.sh->evm, x.dsh->evm, sizeof(x.sh->evm), cudaMemcpyDeviceToHost, x.s2);
+    d2h_b += sizeof(Shared);
+    d2h_n += 2;
   } else {
     if (jj.want_evm)
       cudaStreamWaitEvent(x.s, x.join, 0);
     cudaMemcpyAsync(x.sh, x.dsh, sizeof(Shared), cudaMemcpyDeviceToHost, x.s);
+    d2h_b += sizeof(Shared);
+    ++d2h_n;
   }
-  cudaError_t e = cudaPeekAtLastError();
+  cudaError_t e = se != cudaSuccess ? se : cudaPeekAtLastError();
   uint64_t pt = 0;
   const uint64_t ss0 = nr_ss_now();
   while (e == cudaSuccess) {
@@ -1661,6 +1881,10 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
     g_ok = 0;
     nr_pdsch_gpu_demod_release(c);
     return -1;
+  }
+  if (staged) {
+    stage_scatter(c, j, P);
+    nr_stage::note(NR_GPU_STG_DEMOD, h2d_b, 1, d2h_b, d2h_n);
   }
   const nrd_decision d = x.sh->d;
   j->log2_maxh = d.log2_maxh;

@@ -13,6 +13,7 @@
  * Check mode (UL: every 64th TB): the TB is also decoded by the CPU, which gives the result used;
  * every code block's success flag and bytes are compared and the first difference disables the GPU path. */
 #include "nr_pdsch_gpu_ldpc_host.h"
+#include "nr_gpu_stage_census.h"
 #include "nr_pdsch_gpu_ldpc.h"
 #include "PHY/CODING/coding_defs.h"
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.h"
@@ -20,6 +21,7 @@
 #include "PHY/sse_intrin.h"
 #include "nr_pdsch_host_fast.h"
 #include "PHY/TOOLS/nr_stage_split.h"
+#include "PHY/TOOLS/nr_gpu_path.h" /* per-path GPU/CPU choice: online paired trial on DISCRETE */
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -36,12 +38,14 @@ typedef struct {
   int check;
   int ul;
   const char *tag;
-  _Atomic uint64_t calls, cbs, fb_refuse, fb_syn, fb_err, chk_ok, chk_bad, ns_sum, ns_gpu;
+  _Atomic uint64_t calls, cbs, fb_refuse, fb_syn, fb_err, chk_ok, chk_bad, ns_sum, ns_gpu, fb_path;
   _Atomic uint64_t fb_reason[NR_GPU_LDPC_NERR]; /* DL: fb_err by nr_gpu_ldpc_err (index -rc) */
   pthread_once_t once;
+  nr_gpu_stage_stats_fn stage_stats; /* Q4: census of this pool's staged DISCRETE runs (NULL: not in the module) */
+  int stage_entry;
 } gl_t;
-static gl_t DLG = {.on = -1, .once = PTHREAD_ONCE_INIT, .tag = "GPU_EXACT_LDPC"};
-static gl_t ULG = {.on = -1, .once = PTHREAD_ONCE_INIT, .ul = 1, .tag = "UL_GPU_LDPC"};
+static gl_t DLG = {.on = -1, .once = PTHREAD_ONCE_INIT, .tag = "GPU_EXACT_LDPC", .stage_entry = NR_GPU_STG_LDPC_DL};
+static gl_t ULG = {.on = -1, .once = PTHREAD_ONCE_INIT, .ul = 1, .tag = "UL_GPU_LDPC", .stage_entry = NR_GPU_STG_LDPC_UL};
 static nr_gpu_ldpc_ul_stats_fn ul_stats_fn;
 static nrLDPC_coding_decoder_t *ul_cpu_dec;
 
@@ -60,12 +64,16 @@ static void load(void)
     h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   nr_gpu_ldpc_init_fn init = h ? (nr_gpu_ldpc_init_fn)dlsym(h, "nr_pdsch_gpu_ldpc_init") : NULL;
   G->run = h ? (nr_gpu_ldpc_run_fn)dlsym(h, "nr_pdsch_gpu_ldpc_run") : NULL;
+  G->stage_stats = h ? (nr_gpu_stage_stats_fn)dlsym(h, "nr_gpu_stage_stats") : NULL;
   if (!init || !G->run || init() != 0) {
     LOG_W(PHY, "SENSING: GPU_EXACT_LDPC requested but libpdsch_gpu.so has no usable LDPC entry -- CPU decoder\n");
+    nr_gpu_path_begin(NR_GPU_PATH_LDPC_DL, 0, NR_GPU_PATH_MEASURE_NONE);
     atomic_store(&G->on, 0);
     return;
   }
   LOG_A(PHY, "SENSING: GPU_EXACT_LDPC enabled: OAI min-sum decoder on the GPU, bit-exact; check=%d\n", G->check);
+  /* per-path choice of the standalone decoder (the graph pass has its own LDPC): SHARED -> GPU; DISCRETE -> paired trial on the first TBs */
+  nr_gpu_path_begin(NR_GPU_PATH_LDPC_DL, 1, NR_GPU_PATH_MEASURE_TRIAL);
   atomic_store(&G->on, 1);
 }
 
@@ -248,17 +256,30 @@ static void stats(gl_t *G, uint64_t n)
 {
   if (!(n == 1 || n == 100 || n % 2000 == 0))
     return;
-  LOG_A(PHY, "SENSING: %s tbs=%lu cbs=%lu check_ok=%lu check_bad=%lu fallback[refused,syn0,err]=[%lu,%lu,%lu] fallback_err[init,range,param,graph,stream,sentinel,cap,rt,busy,deadline]=[%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu] other=%lu mean=%.0f us (gpu %.0f)\n",
+  uint64_t st[6] = {0};
+  if (G->stage_stats)
+    G->stage_stats(G->stage_entry, st);
+  const int pst = nr_gpu_path_state(G->ul ? NR_GPU_PATH_LDPC_UL : NR_GPU_PATH_LDPC_DL);
+  LOG_A(PHY, "SENSING: %s tbs=%lu cbs=%lu check_ok=%lu check_bad=%lu fallback[refused,syn0,err]=[%lu,%lu,%lu] fallback_err[init,range,param,graph,stream,sentinel,cap,rt,busy,deadline]=[%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu] other=%lu mean=%.0f us (gpu %.0f) path=%s path_cpu=%lu staged[runs=%lu h2d_kb=%lu d2h_kb=%lu copies=%lu+%lu]\n",
         G->tag, (unsigned long)n, (unsigned long)atomic_load(&G->cbs), (unsigned long)atomic_load(&G->chk_ok), (unsigned long)atomic_load(&G->chk_bad),
         (unsigned long)atomic_load(&G->fb_refuse), (unsigned long)atomic_load(&G->fb_syn), (unsigned long)atomic_load(&G->fb_err),
         FBR(1), FBR(2), FBR(3), FBR(4), FBR(5), FBR(6), FBR(7), FBR(8), FBR(9), FBR(10), FBR(0),
-        atomic_load(&G->ns_sum) / 1e3 / n, atomic_load(&G->ns_gpu) / 1e3 / n);
+        atomic_load(&G->ns_sum) / 1e3 / n, atomic_load(&G->ns_gpu) / 1e3 / n,
+        pst == NR_GPU_PATH_GPU ? "gpu" : pst == NR_GPU_PATH_CPU ? "cpu" : pst == NR_GPU_PATH_TRIAL ? "trial" : "unset", (unsigned long)atomic_load(&G->fb_path),
+        (unsigned long)st[0], (unsigned long)(st[1] >> 10), (unsigned long)(st[2] >> 10), (unsigned long)st[3], (unsigned long)st[4]);
 }
 
 static int32_t decode_impl(gl_t *G, nrLDPC_slot_decoding_parameters_t *p, nrLDPC_coding_decoder_t *cpu)
 {
   if (p->nb_TBs != 1 || (!G->ul && nr_pdsch_route_cpu())) /* BATCHCPU */
     return cpu(p);
+  /* per-path choice (nr_gpu_path.h): CPU -> the CPU decoder; TRIAL (DISCRETE, first TBs) -> check mode below, both decoders timed on the same TB */
+  const nr_gpu_path_t path = G->ul ? NR_GPU_PATH_LDPC_UL : NR_GPU_PATH_LDPC_DL;
+  const int pst = nr_gpu_path_state(path);
+  if (pst == NR_GPU_PATH_CPU) {
+    atomic_fetch_add_explicit(&G->fb_path, 1, memory_order_relaxed);
+    return cpu(p);
+  }
   nrLDPC_TB_decoding_parameters_t *tb = &p->TBs[0];
   if (!tb->d_to_be_cleared || tb->max_ldpc_iterations < 1 || tb->max_ldpc_iterations > NR_GPU_LDPC_MAX_SNAP + 1
       || tb->C > NR_LDPC_MAX_NUM_CB || tb->K > 8448) {
@@ -269,7 +290,8 @@ static int32_t decode_impl(gl_t *G, nrLDPC_slot_decoding_parameters_t *p, nrLDPC
   const uint64_t n = atomic_fetch_add_explicit(&G->calls, 1, memory_order_relaxed) + 1;
   const uint32_t n_dec = tb_ndec(tb);
   atomic_fetch_add_explicit(&G->cbs, n_dec, memory_order_relaxed);
-  const int check = G->check == 1 || (G->check > 1 && n % (uint64_t)G->check == 0);
+  const int trial = pst == NR_GPU_PATH_TRIAL;
+  const int check = trial || G->check == 1 || (G->check > 1 && n % (uint64_t)G->check == 0);
   uint64_t gns = 0;
   int32_t rc = 0;
   tb->decoder_used = NRLDPC_DECODER_CPU; /* bit-exact with it */
@@ -285,9 +307,27 @@ static int32_t decode_impl(gl_t *G, nrLDPC_slot_decoding_parameters_t *p, nrLDPC
     tls_t *t = tls(tb->G);
     bool okg[NR_LDPC_MAX_NUM_CB] = {0};
     const bool ab0 = check_abort(tb->abort_decode);
+    const uint64_t tg0 = now_ns();
+    /* hard GPU errors (init, stream, sentinel); range / param / graph miss / cap / rt / busy / deadline are refusals that only cost time */
+    const uint64_t err0 = atomic_load_explicit(&G->fb_reason[-NR_GPU_LDPC_E_INIT], memory_order_relaxed)
+                          + atomic_load_explicit(&G->fb_reason[-NR_GPU_LDPC_E_STREAM], memory_order_relaxed)
+                          + atomic_load_explicit(&G->fb_reason[-NR_GPU_LDPC_E_SENTINEL], memory_order_relaxed);
     const int r_g = t ? gpu_tb(G, tb, t->c_chk, okg, &gns) : 1;
+    const uint64_t tg1 = now_ns();
     set_abort(tb->abort_decode, ab0);
     rc = cpu(p);
+    if (trial) { /* paired sample: the GPU side is its own time, plus the CPU redo when it hands the TB back (syn0 / refusal): the real cost */
+      const double us_g = (tg1 - tg0) / 1e3, us_c = (now_ns() - tg1) / 1e3;
+      const uint64_t err1 = atomic_load_explicit(&G->fb_reason[-NR_GPU_LDPC_E_INIT], memory_order_relaxed)
+                            + atomic_load_explicit(&G->fb_reason[-NR_GPU_LDPC_E_STREAM], memory_order_relaxed)
+                            + atomic_load_explicit(&G->fb_reason[-NR_GPU_LDPC_E_SENTINEL], memory_order_relaxed);
+      if (r_g != 0 && err1 != err0) /* (another thread's error can land here too: either way the GPU path is not healthy) */
+        nr_gpu_path_fail(path, "gpu decoder error");
+      else {
+        nr_gpu_path_sample(path, 1, r_g == 0 ? us_g : us_g + us_c);
+        nr_gpu_path_sample(path, 0, us_c);
+      }
+    }
     if (r_g == 0 && rc == 0) {
       const int KB = tb->K >> 3;
       int bad = -1;
@@ -331,13 +371,16 @@ static void ul_load(void)
   nr_gpu_ldpc_ul_init_fn init = h ? (nr_gpu_ldpc_ul_init_fn)dlsym(h, "nr_pusch_gpu_ldpc_init") : NULL;
   G->run = h ? (nr_gpu_ldpc_run_fn)dlsym(h, "nr_pusch_gpu_ldpc_run") : NULL;
   ul_stats_fn = h ? (nr_gpu_ldpc_ul_stats_fn)dlsym(h, "nr_pusch_gpu_ldpc_stats") : NULL;
+  G->stage_stats = h ? (nr_gpu_stage_stats_fn)dlsym(h, "nr_gpu_stage_stats") : NULL;
   if (!init || !G->run || !ul_stats_fn || init(15, 4000) != 0) {
     LOG_W(PHY, "SENSING: UL_GPU_LDPC requested but unavailable -- CPU LDPC decoder\n");
+    nr_gpu_path_begin(NR_GPU_PATH_LDPC_UL, 0, NR_GPU_PATH_MEASURE_NONE);
     atomic_store(&G->on, 0);
     return;
   }
   G->check = 64;
   LOG_A(PHY, "SENSING: UL_GPU_LDPC enabled: bit-exact GPU decoder for PUSCH TBs, check=%d\n", G->check);
+  nr_gpu_path_begin(NR_GPU_PATH_LDPC_UL, 1, NR_GPU_PATH_MEASURE_TRIAL);
   atomic_store(&G->on, 1);
 }
 
@@ -365,16 +408,19 @@ nrLDPC_coding_decoder_t *nr_pusch_gpu_ldpc_wrap(nrLDPC_coding_decoder_t *cpu)
 
 void nr_pusch_gpu_ldpc_report(char *buf, size_t n)
 {
-  uint64_t o[12] = {0};
+  uint64_t o[12] = {0}, st[6] = {0};
   if (ul_stats_fn)
     ul_stats_fn(o);
   gl_t *G = &ULG;
+  if (G->stage_stats)
+    G->stage_stats(G->stage_entry, st);
   snprintf(buf, n,
            "on=%d tbs=%lu cbs=%lu gpu_calls=%lu gpu_ms=%lu max_us=%lu busy=%lu over_cap=%lu rt_defer=%lu late=%lu deadline=%lu err=%lu "
-           "reclaimed=%lu part=%lu | cpu_refused=%lu syn0=%lu run_fail=%lu check_ok=%lu check_bad=%lu",
+           "reclaimed=%lu part=%lu | cpu_refused=%lu syn0=%lu run_fail=%lu check_ok=%lu check_bad=%lu | staged[runs=%lu h2d_kb=%lu d2h_kb=%lu]",
            atomic_load(&G->on) == 1, (unsigned long)atomic_load(&G->calls), (unsigned long)atomic_load(&G->cbs), (unsigned long)o[0],
            (unsigned long)(o[2] / 1000), (unsigned long)o[3], (unsigned long)o[4], (unsigned long)o[5], (unsigned long)o[6],
            (unsigned long)o[7], (unsigned long)o[8], (unsigned long)o[9], (unsigned long)o[10], (unsigned long)o[11],
            (unsigned long)atomic_load(&G->fb_refuse), (unsigned long)atomic_load(&G->fb_syn),
-           (unsigned long)atomic_load(&G->fb_err), (unsigned long)atomic_load(&G->chk_ok), (unsigned long)atomic_load(&G->chk_bad));
+           (unsigned long)atomic_load(&G->fb_err), (unsigned long)atomic_load(&G->chk_ok), (unsigned long)atomic_load(&G->chk_bad), (unsigned long)st[0],
+           (unsigned long)(st[1] >> 10), (unsigned long)(st[2] >> 10));
 }

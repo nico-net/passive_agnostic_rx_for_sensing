@@ -159,6 +159,18 @@ int nr_pbwp_entry_for_len(const nr_pbwp_t *t, uint16_t rnti, uint16_t len)
   return -1;
 }
 
+/* nr_pbwp_switch_identifiable: true when moving a UE from entry `from` to entry `to` is supported by evidence that tells the two BWPs
+ *   apart. A DCI CRC only proves the payload length: on two entries with the same DCI 1_1 length every DCI decodes under both, so the
+ *   entry it was decoded on (or the indicator bits read under one layout) is no evidence of a switch. Such a switch needs a TB-CRC-OK
+ *   PDSCH on the target entry. (sens4 lab cell 2026-10-25: a DM-RS-resolved phantom entry with the real BWP's length 47 and a 2-bit
+ *   indicator gave 6964 BWP_CHANGE epochs in 5 min, resetting every length/discovery state.) */
+bool nr_pbwp_switch_identifiable(const nr_pbwp_t *t, int from, int to)
+{
+  if (from < 0 || to < 0 || from >= t->n || to >= t->n || from == to)
+    return true;
+  return t->e[to].dci_len != t->e[from].dci_len || t->e[to].crc_ok > 0;
+}
+
 bool nr_pbwp_on_accept(nr_pbwp_t *t, uint16_t rnti, int idx)
 {
   if (idx < 0 || idx >= t->n)
@@ -167,6 +179,8 @@ bool nr_pbwp_on_accept(nr_pbwp_t *t, uint16_t rnti, int idx)
   if (nr_pbwp_resolved(t, idx))
     nr_pbwp_mark_seen(t, rnti);
   const int prev = (int)t->rnti_bwp[rnti] - 1;
+  if (prev >= 0 && prev != idx && !nr_pbwp_switch_identifiable(t, prev, idx))
+    return false; /* not a switch: the UE stays on its entry */
   t->rnti_bwp[rnti] = (uint8_t)(idx + 1);
   if (prev >= 0 && prev != idx) {
     t->switches++;

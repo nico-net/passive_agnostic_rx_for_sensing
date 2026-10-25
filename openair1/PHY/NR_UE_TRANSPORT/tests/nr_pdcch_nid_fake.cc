@@ -7,6 +7,8 @@
 #include <chrono>
 #include <sched.h>
 static std::atomic<int> uploaded{0},runs{0},paused{0},errors{0};
+/* on-demand window double: the module starts at window 2 (what a small budget share holds), grants up to `limit` (the budget headroom), publishes records once `publish` is set */
+static std::atomic<int> win{2},limit{2},publish{0},resizes{0};
 struct Fake { nr_pdcch_nid_iq_t *memory;int rb,dur; };
 static void *create(int rb,int dur,int,nr_pdcch_nid_iq_t **staging) {
  auto *f=new Fake{(nr_pdcch_nid_iq_t*)calloc((size_t)3*336*dur*12*rb,sizeof(nr_pdcch_nid_iq_t)),rb,dur};
@@ -26,13 +28,24 @@ static int upload(void *p,const nr_pdcch_nid_batch_t *b) {
 }
 static int run(void *,nr_pdcch_nid_result_t *out) {
  runs++;*out={};out->count=1;
+ if(limit.load()>2 && !publish.load()){out->count=0;return 0;} /* elastic scenario: nothing found yet */
  out->records[0]={12000+uploaded.load(),3,1,12,2,0,0,0,1};return 0;
 }
+static int resize(void *,int w) {
+ if(w<=0)return win.load();
+ resizes++;
+ if(w>win.load())w=w<limit.load()?w:limit.load();
+ if(w!=win.load())win=w;
+ return win.load();
+}
 static void destroy(void *p) {auto *f=(Fake*)p;free(f->memory);delete f;}
+extern "C" void nid_fake_scenario(int lim,int pub) {limit=lim;publish=pub;}
+extern "C" int nid_fake_window() {return win.load();}
+extern "C" int nid_fake_resizes() {return resizes.load();}
 extern "C" void nid_fake_pause(int on) {paused=on;}
 extern "C" int nid_fake_uploaded() {return uploaded.load();}
 extern "C" int nid_fake_errors() {return errors.load();}
 extern "C" int nid_fake_runs() {return runs.load();}
 extern "C" const nr_pdcch_nid_ops_t *nr_pdcch_nid_gpu_ops() {
- static const nr_pdcch_nid_ops_t ops={NR_PDCCH_NID_ABI,create,upload,run,destroy};return &ops;
+ static const nr_pdcch_nid_ops_t ops={NR_PDCCH_NID_ABI,create,upload,run,destroy,resize};return &ops;
 }

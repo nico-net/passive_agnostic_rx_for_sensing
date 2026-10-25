@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: LicenseRef-CSSL-1.0
 
+# Optional dlopen'd modules of nr-uesoftmodem (GPU kernels, ldpc_aal). The receiver loads them at
+# run time and falls back to the CPU path when one is absent, so they must NOT be build-time
+# dependencies of nr-uesoftmodem: a module that fails to compile with some CUDA/DPDK toolchain
+# would otherwise stop the receiver from linking (even with `ninja -k 0`). They hang off this
+# aggregate target instead; it is part of ALL, so a plain `ninja` still builds everything. When
+# building explicit targets, name it as well:  ninja nr-uesoftmodem nr-uesoftmodem-optional-modules
+add_custom_target(nr-uesoftmodem-optional-modules)
+
 add_library(coding MODULE
             3gpplte_sse.c
             3gpplte.c
@@ -28,10 +36,10 @@ target_link_libraries(ldpc PRIVATE ldpc_segment)
 # GPU LDPC decoder (nrLDPC_cuda/README.md). Off by default; load with --loader.ldpc.shlibversion _cuda.
 option(ENABLE_LDPC_CUDA "Build libldpc_cuda.so (CUDA LDPC decoder)" OFF)
 if(ENABLE_LDPC_CUDA)
-  enable_language(CUDA)
+  include(${PROJECT_SOURCE_DIR}/cmake_targets/nr_gpu_arch.cmake)
+  nr_gpu_enable_cuda()
   find_package(CUDAToolkit REQUIRED)
   set(LDPC_CUDA_ARCH "${CMAKE_CUDA_ARCHITECTURES}" CACHE STRING "CUDA architecture list (default 89;121)")
-  include(${PROJECT_SOURCE_DIR}/cmake_targets/nr_gpu_arch.cmake)
   nr_gpu_architectures("${LDPC_CUDA_ARCH}" NR_GPU_MODULE_ARCHS)
   # Validate the independently supplied CMake list too.
   nr_gpu_architectures("${CMAKE_CUDA_ARCHITECTURES}" NR_GPU_CMAKE_ARCHS)
@@ -76,6 +84,11 @@ if(ENABLE_LDPC_CUDA)
     add_dependencies(ldpc_cuda_pool_bler ldpc_cuda ldpc)
     add_dependencies(tests test_ldpc_cuda_pool)
     add_test(NAME test_ldpc_cuda_pool COMMAND ./test_ldpc_cuda_pool WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    # tier variants (NR_GPU_FORCE_MODEL read by the platform probe): forced DISCRETE = the device-buffer model on any GPU; forced CPU = the module refuses, tests skip
+    add_test(NAME test_ldpc_cuda_pool_discrete COMMAND ./test_ldpc_cuda_pool WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(test_ldpc_cuda_pool_discrete PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=discrete SKIP_RETURN_CODE 77)
+    add_test(NAME test_ldpc_cuda_pool_cpu COMMAND ./test_ldpc_cuda_pool WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(test_ldpc_cuda_pool_cpu PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=cpu SKIP_RETURN_CODE 77)
     # CB0 batch entry (nrLDPC_cb0_cuda.h): bit-exact vs a CPU model and G1's pool, CRC vs check_crc, CPU TB decoder
     # verdicts (./libldpc.so), batch sizes, async API, fault injection, forced explicit-copy path. Needs a CUDA device.
     add_executable(test_ldpc_cb0_cuda nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc nrLDPC_cuda/tests/ldpc_cuda_pool_test_helper.c)
@@ -90,8 +103,12 @@ if(ENABLE_LDPC_CUDA)
     add_dependencies(test_ldpc_cb0_cuda ldpc_cuda ldpc)
     add_dependencies(tests test_ldpc_cb0_cuda)
     add_test(NAME test_ldpc_cb0_cuda COMMAND ./test_ldpc_cb0_cuda WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    add_test(NAME test_ldpc_cb0_cuda_discrete COMMAND ./test_ldpc_cb0_cuda WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(test_ldpc_cb0_cuda_discrete PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=discrete SKIP_RETURN_CODE 77)
+    add_test(NAME test_ldpc_cb0_cuda_cpu COMMAND ./test_ldpc_cb0_cuda WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(test_ldpc_cb0_cuda_cpu PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=cpu SKIP_RETURN_CODE 77)
   endif()
-  add_dependencies(nr-uesoftmodem ldpc_cuda)
+  add_dependencies(nr-uesoftmodem-optional-modules ldpc_cuda)
   add_library(csirs_disc_gpu MODULE
     ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_csirs_disc_fp.c)
@@ -99,19 +116,22 @@ if(ENABLE_LDPC_CUDA)
     CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_compile_definitions(csirs_disc_gpu PRIVATE NR_CSIRS_DISC_GPU_MODULE)
   target_link_libraries(csirs_disc_gpu PRIVATE CUDA::cudart CUDA::cufft m pthread)
-  add_dependencies(nr-uesoftmodem csirs_disc_gpu)
+  add_dependencies(nr-uesoftmodem-optional-modules csirs_disc_gpu)
   # GPU FEP + chest + MMSE + LLR for the passive PDSCH decoder (libpdsch_gpu.so, dlopen'd when
   # NR_GPU_FEP=1). Lives in NR_UE_TRANSPORT; built here because this is where CUDA is enabled.
   add_library(pdsch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu
               ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu
               ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu
-              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_pass_graph.cu)
+              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_pass_graph.cu
+              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_isa_ref.c)
+  # nr_gpu_isa_ref.c: the host CPU's DFT (libdfts.so) and rotate_cpx_vector, the references of the ISA twin self-test
+  add_dependencies(pdsch_gpu dfts)
   # GPU-DEMOD: no automatic FMA contraction; the kernels spell out the CPU's (GCC's) fused operations themselves
   set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
   set_target_properties(pdsch_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
                         CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_include_directories(pdsch_gpu PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
-  target_link_libraries(pdsch_gpu PRIVATE CUDA::cudart CUDA::cufft)
+  target_link_libraries(pdsch_gpu PRIVATE CUDA::cudart CUDA::cufft ${CMAKE_DL_LIBS} pthread)
   # DECGPU: GPU port of OAI's LDPC decoder vs ./libldpc.so LDPCdecoder, snapshot by snapshot (needs a CUDA device)
   add_executable(test_nr_pdsch_gpu_ldpc ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_pdsch_gpu_ldpc_test.c)
   target_include_directories(test_nr_pdsch_gpu_ldpc PRIVATE ${OPENAIR_DIR} ${OPENAIR1_DIR})
@@ -135,6 +155,28 @@ if(ENABLE_LDPC_CUDA)
   add_test(NAME test_nr_pdsch_gpu_ldpc_sm COMMAND ./test_nr_pdsch_gpu_ldpc 2 sm WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   # ULLDPC: the same comparison through the UL pool of libpdsch_gpu.so
   add_test(NAME test_nr_pusch_gpu_ldpc COMMAND ./test_nr_pdsch_gpu_ldpc 2 ul WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_pdsch_gpu_ldpc test_nr_pdsch_gpu_ldpc_nc test_nr_pdsch_gpu_ldpc_mix test_nr_pdsch_gpu_ldpc_cl2 test_nr_pdsch_gpu_ldpc_cl4
+                       test_nr_pdsch_gpu_ldpc_sm test_nr_pusch_gpu_ldpc PROPERTIES SKIP_RETURN_CODE 77)
+  # CPU tier: the standalone inits refuse (NR_GPU_FORCE_MODEL=cpu), nothing decodes on the GPU
+  add_test(NAME test_nr_pdsch_gpu_ldpc_cpu COMMAND ./test_nr_pdsch_gpu_ldpc 2 cpu WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_pdsch_gpu_ldpc_cpu PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=cpu)
+  add_test(NAME test_nr_pdsch_gpu_ldpc_discrete COMMAND ./test_nr_pdsch_gpu_ldpc 2 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_test(NAME test_nr_pusch_gpu_ldpc_discrete COMMAND ./test_nr_pdsch_gpu_ldpc 2 ul WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_test(NAME test_nr_pusch_gpu_ldpc_cpu COMMAND ./test_nr_pdsch_gpu_ldpc 2 ul WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_pdsch_gpu_ldpc_discrete test_nr_pusch_gpu_ldpc_discrete PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=discrete SKIP_RETURN_CODE 77)
+  set_tests_properties(test_nr_pusch_gpu_ldpc_cpu PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=cpu SKIP_RETURN_CODE 77)
+  # ISA twins of the bit-exact GPU front end vs this host's CPU dft()/idft() (libdfts.so) and rotate_cpx_vector: every
+  # power-of-two size the x86 twin covers (64..4096), the NEON twin's 4096, random / full-scale / tone / impulse inputs,
+  # the rotation twins, k_fep_exact and k_delay_exact end to end, and the runtime selection. 77 = no CUDA device.
+  add_executable(test_nr_gpu_isa_twin ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_isa_twin_test.cu
+                 ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_isa_ref.c)
+  set_target_properties(test_nr_gpu_isa_twin PROPERTIES CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR} ENABLE_EXPORTS ON)
+  target_include_directories(test_nr_gpu_isa_twin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT ${OPENAIR1_DIR} ${OPENAIR_DIR})
+  target_link_libraries(test_nr_gpu_isa_twin PRIVATE CUDA::cudart ${CMAKE_DL_LIBS} pthread m)
+  add_dependencies(test_nr_gpu_isa_twin dfts)
+  add_dependencies(tests test_nr_gpu_isa_twin)
+  add_test(NAME test_nr_gpu_isa_twin COMMAND ./test_nr_gpu_isa_twin WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_gpu_isa_twin PROPERTIES SKIP_RETURN_CODE 77)
   # GPUSHARE: green-context SM partition helper (nr_gpu_green.h); exit 77 = skipped (no device / no green contexts)
   add_executable(test_nr_gpu_green ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_green_test.cu)
   set_target_properties(test_nr_gpu_green PROPERTIES CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -142,6 +184,23 @@ if(ENABLE_LDPC_CUDA)
   add_dependencies(tests test_nr_gpu_green)
   add_test(NAME test_nr_gpu_green COMMAND ./test_nr_gpu_green WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   set_tests_properties(test_nr_gpu_green PROPERTIES SKIP_RETURN_CODE 77)
+  # tier guard of the standalone demod: forced DISCRETE / CPU tier must refuse (one tier per process: the platform probes once); skipped without libpdsch_gpu.so
+  add_executable(test_nr_pdsch_gpu_demod_model ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_pdsch_gpu_demod_model_test.cc)
+  target_include_directories(test_nr_pdsch_gpu_demod_model PRIVATE ${OPENAIR_DIR} ${OPENAIR1_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_gpu_demod_model PRIVATE GTest::gtest_main ${CMAKE_DL_LIBS})
+  set_target_properties(test_nr_pdsch_gpu_demod_model PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_dependencies(test_nr_pdsch_gpu_demod_model pdsch_gpu nr_gpu_platform)
+  add_dependencies(tests test_nr_pdsch_gpu_demod_model)
+  # Q4: without staging set up (the module is not initialised in this binary) a DISCRETE run still refuses before any CUDA call; the staged run itself is test_nr_pdsch_gpu_demod_discrete below
+  add_test(NAME test_nr_pdsch_gpu_demod_unstaged_discrete COMMAND ./test_nr_pdsch_gpu_demod_model --gtest_filter=DemodTier.ForcedDiscreteRefuses WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_test(NAME test_nr_pdsch_gpu_demod_cpu COMMAND ./test_nr_pdsch_gpu_demod_model --gtest_filter=DemodTier.ForcedCpuRefuses WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  # CPU tier of the graph pass: nr_gpu_pass_init refuses (-1) before any CUDA call, so the receiver keeps the non-pass path; skipped without libpdsch_gpu.so
+  add_executable(test_nr_gpu_pass_cpu ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_pass_cpu_test.cc)
+  target_link_libraries(test_nr_gpu_pass_cpu PRIVATE GTest::gtest_main ${CMAKE_DL_LIBS})
+  set_target_properties(test_nr_gpu_pass_cpu PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_dependencies(test_nr_gpu_pass_cpu pdsch_gpu nr_gpu_platform)
+  add_dependencies(tests test_nr_gpu_pass_cpu)
+  add_test(NAME test_nr_gpu_pass_cpu COMMAND ./test_nr_gpu_pass_cpu WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   add_executable(test_nr_gpu_pass ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_pass_test.cc)
   # the CPU references of the Task 3 kernels: OAI check_crc/crc24x and the RX rate matching, linked as the real functions
   target_sources(test_nr_gpu_pass PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
@@ -158,12 +217,32 @@ if(ENABLE_LDPC_CUDA)
   add_dependencies(tests test_nr_gpu_pass)
   target_include_directories(test_nr_gpu_pass PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT ${OPENAIR1_DIR} ${OPENAIR_DIR} ${CUDAToolkit_INCLUDE_DIRS})
   add_dependencies(test_nr_gpu_pass pdsch_gpu)
-  add_test(NAME test_nr_gpu_pass COMMAND test_nr_gpu_pass WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_test(NAME test_nr_gpu_pass COMMAND test_nr_gpu_pass --gtest_filter=-GpuPassCompat.*:GpuPassFence.OomFallsBackToCpu WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   set_tests_properties(test_nr_gpu_pass PROPERTIES ENVIRONMENT "CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_RETURN_CODE 77)
   add_dependencies(test_nr_gpu_pass ldpc)
+  # Q4: the staged DISCRETE variants of the standalone chest / delay / FEP / demod / LDPC entries (they skip on a DIRECT process)
+  target_sources(test_nr_gpu_pass PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_stage_test.cc)
+  add_test(NAME test_nr_gpu_stage_discrete COMMAND test_nr_gpu_pass --gtest_filter=GpuStage.*-GpuStage.CpuTierRefuses WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_gpu_stage_discrete PROPERTIES ENVIRONMENT "NR_GPU_FORCE_MODEL=discrete;CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_RETURN_CODE 77)
+  add_test(NAME test_nr_pdsch_gpu_demod_discrete COMMAND test_nr_gpu_pass --gtest_filter=GpuStage.Staged* WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_pdsch_gpu_demod_discrete PROPERTIES ENVIRONMENT "NR_GPU_FORCE_MODEL=discrete;CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_RETURN_CODE 77)
+  add_test(NAME test_nr_gpu_stage_cpu COMMAND test_nr_gpu_pass --gtest_filter=GpuStage.CpuTierRefuses WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_gpu_stage_cpu PROPERTIES ENVIRONMENT "NR_GPU_FORCE_MODEL=cpu" SKIP_RETURN_CODE 77)
   # the graph pass under the DISCRETE memory model (device buffers, explicit copies): its own process, the instances are allocated once per process
   add_test(NAME test_nr_gpu_pass_discrete COMMAND test_nr_gpu_pass --gtest_filter=GpuPassDl.*:GpuPassUl.*:GpuPassFence.NoAllocAfterFence:GpuPassFence.UlNoAllocAfterFence WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   set_tests_properties(test_nr_gpu_pass_discrete PROPERTIES ENVIRONMENT "NR_GPU_PASS_DISCRETE=1;CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_RETURN_CODE 77)
+  # T5: DISCRETE == DIRECT on the full nr_gpu_pass_result_t. Two processes (the memory model is per process): a DIRECT one records the results of the synthetic grants, a DISCRETE one
+  # compares with the recording and with the CPU stage path. Without a DIRECT model (a discrete GPU) the first half skips, the second one checks against the CPU path only.
+  add_test(NAME test_nr_gpu_pass_deq_direct COMMAND test_nr_gpu_pass --gtest_filter=GpuPassDl.DiscreteEqualsDirectFullResult WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_gpu_pass_deq_direct PROPERTIES ENVIRONMENT "NR_GPU_DEQ_ROLE=write;NR_GPU_DEQ_FILE=${CMAKE_BINARY_DIR}/gpupass_deq.bin;CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\]" SKIP_RETURN_CODE 77)
+  add_test(NAME test_nr_gpu_pass_deq_discrete COMMAND test_nr_gpu_pass --gtest_filter=GpuPassDl.DiscreteEqualsDirectFullResult WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_gpu_pass_deq_discrete PROPERTIES ENVIRONMENT "NR_GPU_PASS_DISCRETE=1;NR_GPU_DEQ_ROLE=compare;NR_GPU_DEQ_FILE=${CMAKE_BINARY_DIR}/gpupass_deq.bin;CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" DEPENDS test_nr_gpu_pass_deq_direct SKIP_RETURN_CODE 77)
+  # CUDA compat: a driver without conditional graph nodes turns the pass off once (its own process: the pass is initialised once per process)
+  # T6: OOM injection during the pass init, own process (the init of a running pass returns 0 first)
+  add_test(NAME test_nr_gpu_pass_oom COMMAND test_nr_gpu_pass --gtest_filter=GpuPassFence.OomFallsBackToCpu WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_gpu_pass_oom PROPERTIES ENVIRONMENT "CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_RETURN_CODE 77)
+  add_test(NAME test_nr_gpu_pass_compat COMMAND test_nr_gpu_pass --gtest_filter=GpuPassCompat.* WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_gpu_pass_compat PROPERTIES SKIP_RETURN_CODE 77)
   # GPUPASS Task 5: no FP64 instruction in the SASS of the float demod kernels (cuobjdump; exit 77 = skipped)
   add_test(NAME test_nr_gpu_fp32_sass COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/check_no_fp64_sass.sh ${CMAKE_BINARY_DIR}/libpdsch_gpu.so)
   set_tests_properties(test_nr_gpu_fp32_sass PROPERTIES SKIP_RETURN_CODE 77)
@@ -177,7 +256,7 @@ if(ENABLE_LDPC_CUDA)
   target_link_libraries(nr_gpu_slot_bench PRIVATE ${CMAKE_DL_LIBS})
   set_target_properties(nr_gpu_slot_bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   add_dependencies(nr_gpu_slot_bench pdsch_gpu)
-  add_dependencies(nr-uesoftmodem pdsch_gpu)
+  add_dependencies(nr-uesoftmodem-optional-modules pdsch_gpu)
   # GPU DM-RS chest + QPSK LLR for the blind PDCCH CORESET-extent search (libpdcch_gpu.so,
   # independent ISAC_PDCCH_GPU_FEP=1 loader knob -- see nr_pdcch_gpu_fep.h). No cuFFT: FFT stays on
   # the CPU (nr_slot_fep), already shared across every extent candidate -- see that file's top
@@ -189,10 +268,10 @@ if(ENABLE_LDPC_CUDA)
     CUDA_RUNTIME_LIBRARY Shared RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   add_library(pdcch_nid_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu)
   set_target_properties(pdcch_nid_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-    CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" CUDA_STANDARD 14)
+    CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" CUDA_STANDARD 14)
   target_compile_options(pdcch_nid_gpu PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>)
   target_link_libraries(pdcch_nid_gpu PRIVATE CUDA::cudart)
-  add_dependencies(nr-uesoftmodem pdcch_nid_gpu)
+  add_dependencies(nr-uesoftmodem-optional-modules pdcch_nid_gpu)
   add_library(pdcch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu)
   set_target_properties(pdcch_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
                         CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
@@ -208,7 +287,7 @@ if(ENABLE_LDPC_CUDA)
   target_link_libraries(nr_pdcch_slot_bench PRIVATE ${CMAKE_DL_LIBS})
   set_target_properties(nr_pdcch_slot_bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   add_dependencies(nr_pdcch_slot_bench pdcch_gpu)
-  add_dependencies(nr-uesoftmodem pdcch_gpu)
+  add_dependencies(nr-uesoftmodem-optional-modules pdcch_gpu)
   # U4 CSI-RS ID/slot sweep; separate from U2's footprint module until orchestration merge.
   # Host mapping/validation services come from nr_csirs_disc_sweep.c in the executable.
   add_library(nr_csirs_disc_gpu_sweep MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu)
@@ -221,7 +300,7 @@ if(ENABLE_LDPC_CUDA)
     target_link_libraries(test_nr_csirs_disc_sweep PRIVATE CUDA::cudart)
     add_dependencies(test_nr_csirs_disc_sweep nr_csirs_disc_gpu_sweep)
   endif()
-  add_dependencies(nr-uesoftmodem nr_csirs_disc_gpu_sweep)
+  add_dependencies(nr-uesoftmodem-optional-modules nr_csirs_disc_gpu_sweep)
   target_link_options(nr-uesoftmodem PRIVATE "LINKER:--undefined=nr_csirs_disc_sweep_cpu")
 
   # Batched polar SC decode for the blind PDCCH search.
@@ -235,6 +314,11 @@ if(ENABLE_LDPC_CUDA)
   set_target_properties(nr_polar_sc_cuda_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   if(ENABLE_TESTS)
     add_test(NAME nr_polar_sc_cuda_test COMMAND nr_polar_sc_cuda_test quick)
+    set_tests_properties(nr_polar_sc_cuda_test PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME nr_polar_sc_cuda_test_discrete COMMAND nr_polar_sc_cuda_test quick)
+    add_test(NAME nr_polar_sc_cuda_test_cpu COMMAND nr_polar_sc_cuda_test quick)
+    set_tests_properties(nr_polar_sc_cuda_test_discrete PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=discrete SKIP_RETURN_CODE 77)
+    set_tests_properties(nr_polar_sc_cuda_test_cpu PROPERTIES ENVIRONMENT NR_GPU_FORCE_MODEL=cpu SKIP_RETURN_CODE 77)
     add_dependencies(tests nr_polar_sc_cuda_test) # was 'Not Run': the target was not built by `ninja tests`
   endif()
   # ... wired into the live candidate scan through libpolar_gpu.so, dlopen'd when NR_GPU_POLAR=1
@@ -246,7 +330,7 @@ if(ENABLE_LDPC_CUDA)
   target_include_directories(polar_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT
                              ${CMAKE_CURRENT_SOURCE_DIR}/nrPolar_tools/cuda ${CUDAToolkit_INCLUDE_DIRS})
   target_link_libraries(polar_gpu PRIVATE polar_sc_cuda polar crc_byte UTIL CUDA::cudart m)
-  add_dependencies(nr-uesoftmodem polar_gpu)
+  add_dependencies(nr-uesoftmodem-optional-modules polar_gpu)
 endif()
 
 add_dependencies(ldpctest ldpc ldpc_orig)
@@ -272,7 +356,7 @@ if(ENABLE_LDPC_CUDA)
                         CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_include_directories(td_cb0_gpu PRIVATE ${CUDAToolkit_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT)
   target_link_libraries(td_cb0_gpu PRIVATE CUDA::cudart)
-  add_dependencies(nr-uesoftmodem td_cb0_gpu)
+  add_dependencies(nr-uesoftmodem-optional-modules td_cb0_gpu)
   if(ENABLE_TESTS)
     add_dependencies(test_nr_td_cb0_batch td_cb0_gpu ldpc_cuda)
     add_dependencies(nr_td_cb0_bench td_cb0_gpu ldpc_cuda)

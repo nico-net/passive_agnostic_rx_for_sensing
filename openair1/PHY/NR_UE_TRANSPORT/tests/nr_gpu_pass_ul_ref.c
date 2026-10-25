@@ -192,8 +192,23 @@ int nr_gpu_pass_ul_ref_eq(int nbRx, int nb_rb, int qm, int keep, int delta, int 
     }
     c16_t *rxComp[1] = {compbuf};
     nr_channel_compensation(buffer_length, buffer_length, nbRx, 1, rxFext, chFext, maga, magb, magc, rxComp, NULL, qm, 0, (uint32_t)l2);
-    nr_compute_llr(compbuf, maga[0], magb[0], magc[0], llr + off, (uint32_t)nre, (uint8_t)m, (uint8_t)qm);
+    /* x86: the AVX2 LLR kernels store 32-byte aligned (llr is the caller's vector); aligned scratch, then copy */
+    int16_t llrbuf[buffer_length * 8] __attribute__((aligned(64)));
+    nr_compute_llr(compbuf, maga[0], magb[0], magc[0], llrbuf, (uint32_t)nre, (uint8_t)m, (uint8_t)qm);
+    memcpy(llr + off, llrbuf, (size_t)nre * qm * sizeof(int16_t));
     off += (uint32_t)nre * qm;
   }
   return (int)off;
+}
+
+void nr_gpu_pass_ul_ref_delay(const c16_t *ls_in, int out[3])
+{
+  static __thread c16_t ls[N_FFT] __attribute__((aligned(32)));
+  static __thread c16_t tm[N_FFT] __attribute__((aligned(32)));
+  memcpy(ls, ls_in, sizeof(ls));
+  delay_t d = {0};
+  nr_passive_est_delay(N_FFT, ls, tm, &d);
+  out[0] = d.est_delay;
+  out[1] = d.delay_max_pos;
+  out[2] = d.delay_max_val;
 }

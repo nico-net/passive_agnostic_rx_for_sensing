@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "PHY/TOOLS/nr_stage_split.h"
 #include <sched.h>
 #include "nr_pdsch_gpu_exact.h"
@@ -80,6 +83,7 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "PHY/CODING/coding_defs.h"
 #include "PHY/NR_REFSIG/dmrs_nr.h" // get_num_dmrs_re_per_rb, nr_chest_time_domain_avg
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
+#include "PHY/TOOLS/nr_gpu_path.h" // per-path GPU/CPU choice (GPUPASS trial on DISCRETE)
 #include "PHY/MODULATION/modulation_UE.h" // nr_slot_fep, nr_slot_fep_ant
 #include "nr_pdsch_ptrs_unav.h"
 #include "nr_pdsch_prb_set.h" // nr_prb_segments, nr_prb_gather_index (non-contiguous PRB sets)
@@ -125,6 +129,11 @@ static uint64_t g_pdtim_max[PDTIM_N] = {0};
 static double g_pdtim_ss[PDTIM_N] = {0}; /* sum of squared stage times (us^2): per-decode std in PDTIM */
 static uint64_t g_pdtim_calls = 0;
 static uint64_t g_pdtim_cpu_ns[PDTIM_N] = {0}; /* T26c: thread CPU time per stage -- wall >> cpu means preempted/blocked */
+/* per-path trial of the graph pass (nr_gpu_path.h, DISCRETE): the side of the current queue decode call: 0 none, 1 GPU (pass tried),
+ * 2 CPU (kept off the pass by the trial), 3 GPU picked but the pass not reached. Reset and read by the queue around each decode call. */
+static __thread int t_gp_path_side;
+void nr_pdsch_passive_path_trial_reset(void) { t_gp_path_side = 0; }
+int nr_pdsch_passive_path_trial_side(void) { return t_gp_path_side == 1 ? 1 : t_gp_path_side == 2 ? 0 : -1; }
 static __thread uint64_t t_pdtim_cpu0;
 static _Atomic int g_pdtim_on = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
 
@@ -2767,6 +2776,18 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
             : nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) >= 0 ? NR_GPU_PASS_GATE_CHEST_ONLY
             : (!t_gpp && !nr_gpu_allocations_allowed() && (t_gp_claim_tried || !nr_gpu_graph_pool_has_free())) ? NR_GPU_PASS_GATE_NOMEM /* not prewarmed before the fence, no pool set */
             : -1;
+    if (gp_gate < 0) { /* per-path choice (nr_gpu_path.h): SHARED -> GPU (no change); DISCRETE -> alternating trial on the first grants, then GPU or CPU */
+      int pst = nr_gpu_path_state(NR_GPU_PATH_PASS_DL);
+      if (pst == NR_GPU_PATH_UNSET)
+        pst = nr_gpu_path_begin(NR_GPU_PATH_PASS_DL, 1, NR_GPU_PATH_MEASURE_TRIAL);
+      /* once per decode call of the queue (retries keep the side). Layout probes (the solver's searches, on the pass with COVER) are never samples
+       * (nr_pdsch_passive_queue.c), so they take no pick: they run on the pass unsampled. Before (sens6 rfsim 273 PRB rank 1, 2026-10-24) the probes
+       * of the solve used up the 32 x n picks and the trial ended trial_incomplete with n_gpu = n_cpu = 0. */
+      if (pst == NR_GPU_PATH_TRIAL && t_gp_path_side == 0 && !t_probe_first_seg && probe_last_sym < 0)
+        t_gp_path_side = nr_gpu_path_pick(NR_GPU_PATH_PASS_DL) ? 3 : 2;
+      if (pst == NR_GPU_PATH_CPU || (pst == NR_GPU_PATH_TRIAL && t_gp_path_side == 2))
+        gp_gate = NR_GPU_PASS_GATE_PATH;
+    }
     if (gp_gate >= 0)
       nr_gpu_pass_gate(gp_gate);
   }
@@ -2841,6 +2862,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc)); /* the demod job reads whether the EVM is armed; the block below re-arms it for the old path */
       nr_pdsch_evm_acc.armed = 1;
       gp_tried = true;
+      if (t_gp_path_side == 3)
+        t_gp_path_side = 1; /* the GPU side of the trial ran the pass */
       if (seg_path)
         gp_seg_csi_map(seg, nseg, dlsch_config, freq_alloc); /* the demod geometry reads the CSI-FULL map of the virtual allocation */
       const int gp_rc = t_gpp ? nr_gpu_pass_dl_run(&gin, t_gpp) : 1;
