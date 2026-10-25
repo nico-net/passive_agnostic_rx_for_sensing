@@ -216,7 +216,7 @@ static void passive_ul_deliver(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc
     nr_ue_ctx_ul_feedback(&ul_ticket,&confirmed,true);
   }
   if (ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_OK)
-    nr_pusch_passive_ul_ids_confirm(&ul_ticket,out.nscid,out.dmrs_id,out.data_id);
+    nr_pusch_passive_ul_ids_confirm(&ul_ticket,out.nscid,out.dmrs_id,out.data_id,out.tbs_bytes*8u,(int64_t)abs_slot);
   if (ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_CRC_FAIL)
     nr_pusch_passive_ul_ids_failed(&ul_ticket);
   if(!(cfg->ul_pusch_decode == 2) && (out.status==NR_PUSCH_PASSIVE_OK ||
