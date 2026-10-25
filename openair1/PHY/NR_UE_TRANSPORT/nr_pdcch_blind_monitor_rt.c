@@ -7983,17 +7983,19 @@ constdiag_done:;
       if (cfg->discovered_coreset && reconf_lengths_enabled() && t_bank_index >= 0)
         nr_pdcch_coreset_bank_note_dci(t_bank_index, t_bank_slot, raw->rnti,
                                        nr_dci_bits_hash(&raw->payload, cand_task[ti].dci_length));
-      if (!t_discovered_token && t_bank_index >= 0) /* banked passes only: the bank explains a transmission */
+      if (!t_discovered_token && t_bank_index >= 0) { /* banked passes only: the bank explains a transmission */
         nr_pdcch_coreset_bank_note_decoded(disc_slot_key(ue, proc, source_absolute_slot), raw->rnti,
                                            nr_dci_bits_hash(&raw->payload, cand_task[ti].dci_length));
+        nr_pdcch_coreset_bank_note_alias(t_bank_index, disc_slot_key(ue, proc, source_absolute_slot), cand_task[ti].cce, cand_task[ti].L);
+      }
       if (!t_discovered_token && accept_dup(abs_slot, raw->rnti, 0))
         continue;
       if (nr_a2e_trace()) nr_a2e_ts[5] = btim_now_ns();
       if (t_discovered_token) t_discovered_prescreen_passed = true; /* CRC-OK DCI = fresh evidence */
       if (t_discovered_token)
-        nr_pdcch_discovered_observe(t_discovered_token, raw->rnti,
+        nr_pdcch_discovered_observe_cand(t_discovered_token, raw->rnti,
             t_discovered_slot,
-            raw->payload, cand_task[ti].dci_length);
+            raw->payload, cand_task[ti].dci_length, cand_task[ti].cce, cand_task[ti].L);
       if (!cfg->discovered_coreset && reconf_lengths_enabled() && t_bank_index >= 0)
         nr_pdcch_coreset_bank_note_dci(t_bank_index, t_bank_slot, raw->rnti,
                                        nr_dci_bits_hash(&raw->payload, cand_task[ti].dci_length));
@@ -8468,14 +8470,16 @@ constdiag_done:;
     // own real DLSCH config. ----
     /* Accepted DCI may still be discovery evidence. Do not emit PDSCH/CFR from
      * unverified geometry or silently use manual interpretation while full-auto is waiting. */
-    if (!t_discovered_token && t_bank_index >= 0 && !cand_task[ti].ul_scan && out.rnti_class == NR_BLIND_RNTI_CLASS_C)
+    if (!t_discovered_token && t_bank_index >= 0 && !cand_task[ti].ul_scan && out.rnti_class == NR_BLIND_RNTI_CLASS_C) {
       nr_pdcch_coreset_bank_note_decoded(disc_slot_key(ue, proc, source_absolute_slot), out.rnti,
                                          nr_dci_bits_hash(&out.payload, cand_task[ti].dci_length));
+      nr_pdcch_coreset_bank_note_alias(t_bank_index, disc_slot_key(ue, proc, source_absolute_slot), cand_task[ti].cce, cand_task[ti].L);
+    }
     if (t_discovered_token && !cand_task[ti].ul_scan && out.rnti_class == NR_BLIND_RNTI_CLASS_C) t_discovered_prescreen_passed = true;
     if (t_discovered_token && !cand_task[ti].ul_scan && out.rnti_class == NR_BLIND_RNTI_CLASS_C)
-      nr_pdcch_discovered_observe(t_discovered_token, out.rnti,
+      nr_pdcch_discovered_observe_cand(t_discovered_token, out.rnti,
           t_discovered_slot,
-          out.payload, cand_task[ti].dci_length);
+          out.payload, cand_task[ti].dci_length, cand_task[ti].cce, cand_task[ti].L);
     if (t_discovered_token) continue;
     /* SI-RNTI DCI 1_0 sizes come from CORESET#0, not from the C-RNTI length discovery */
     if (cfg->autodiscover && out.rnti != 0xffff && !(cand_task[ti].bwp_entry > 0 && cfg->dl_full_auto) && (!g_length_found || !nr_pdcch_blind_monitor_autodiscover_extent_verified())) {

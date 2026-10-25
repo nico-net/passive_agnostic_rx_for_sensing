@@ -431,6 +431,92 @@ int nr_pdcch_coreset_bank_length_hint(void)
   return best;
 }
 
+int nr_pdcch_candidate_res(const nr_pdcch_blind_monitor_cfg_t *c, int cce, int al, uint32_t *out, int max)
+{
+  const int span = c->coreset_freq_domain * 6, dur = c->coreset_duration;
+  const int Lin = c->coreset_reg_bundle_size, R = c->coreset_interleaver_size;
+  if (span < 6 || dur < 1 || dur > 3 || al < 1 || cce < 0 || max < 6 * al) return -1;
+  const int N_regs = span * dur, Lb = Lin ? Lin : 6;
+  if (Lin && (R < 1 || N_regs % (R * Lin))) return -1;
+  if (Lb % dur) return -1;
+  const int B_rb = Lb / dur, nbpc = 6 / Lb, n_cce = N_regs / 6, nb_tot = n_cce * nbpc;
+  if (cce + al > n_cce) return -1;
+  const int C = Lin ? N_regs / (R * Lin) : 0;
+  int f[nb_tot > 0 ? nb_tot : 1];
+  int cc = 0, r = 0;
+  for (int nb = 0; nb < nb_tot; nb++) {
+    if (!Lin) f[nb] = nb;
+    else {
+      if (r == R) { r = 0; cc++; }
+      f[nb] = ((r * C) + cc + c->coreset_shift_index) % (N_regs / Lb);
+      r++;
+    }
+  }
+  const int first = cce * nbpc, n = al * nbpc;
+  int ord[96];
+  if (n > 96) return -1;
+  for (int i = 0; i < n; i++) {
+    int v = f[first + i], j = i;
+    while (j > 0 && ord[j - 1] > v) { ord[j] = ord[j - 1]; j--; }
+    ord[j] = v;
+  }
+  int k = 0;
+  for (int sy = 0; sy < dur; sy++)
+    for (int i = 0; i < n; i++)
+      for (int b = 0; b < B_rb; b++)
+        out[k++] = ((uint32_t)(c->bwp_start + c->coreset_rb_offset + ord[i] * B_rb + b) << 4) | (uint32_t)(c->ss_first_symbol + sy);
+  return k;
+}
+
+static bool explains_locked(const nr_pdcch_blind_monitor_cfg_t *c, int cce, int al, int below)
+{
+  uint32_t a[96], b[96];
+  if (nr_pdcch_candidate_res(c, cce, al, a, 96) < 0) return false;
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
+  for (int i = 0; i < n && (below < 0 || i < below); ++i) {
+    const nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[i];
+    if (e->state == NR_CORESET_REMOVED || e->cfg.coreset_pdcch_dmrs_scrambling_id != c->coreset_pdcch_dmrs_scrambling_id
+        || coreset_same_geometry(&e->cfg, c))
+      continue;
+    const int n_cce = e->cfg.coreset_freq_domain * e->cfg.coreset_duration;
+    for (int x = 0; x + al <= n_cce; ++x)
+      if (nr_pdcch_candidate_res(&e->cfg, x, al, b, 96) == 6 * al && !memcmp(a, b, sizeof(uint32_t) * 6 * al))
+        return true;
+  }
+  return false;
+}
+
+bool nr_pdcch_coreset_bank_explains(const nr_pdcch_blind_monitor_cfg_t *c, int cce, int al, int below)
+{
+  pthread_mutex_lock(&g_coreset_bank_lock);
+  const bool r = explains_locked(c, cce, al, below);
+  pthread_mutex_unlock(&g_coreset_bank_lock);
+  return r;
+}
+
+void nr_pdcch_coreset_bank_note_alias(int index, uint64_t slot, int cce, int al)
+{
+  if (index < 1 || al < 1) return;
+  pthread_mutex_lock(&g_coreset_bank_lock);
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
+  if (index < n && g_coreset_bank[index].state != NR_CORESET_REMOVED) {
+    nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[index];
+    if (explains_locked(&e->cfg, cce, al, index)) {
+      if (slot != e->alias_slot) { e->alias_slot = slot; ++e->alias_hits; }
+    } else
+      ++e->own_hits;
+    if (e->own_hits == 0 && e->alias_hits >= 2) {
+      LOG_A(PHY, "SENSING: multi-CORESET bank evict index=%d offset=%d span=%d mapping=%d/%d/%d: all %u accepts re-expressible by an older entry\n",
+            index, e->cfg.coreset_rb_offset, e->cfg.coreset_freq_domain * 6, e->cfg.coreset_reg_bundle_size,
+            e->cfg.coreset_interleaver_size, e->cfg.coreset_shift_index, e->alias_hits);
+      e->state = NR_CORESET_REMOVED;
+      g_compaction_pending = true;
+      compact_removed();
+    }
+  }
+  pthread_mutex_unlock(&g_coreset_bank_lock);
+}
+
 /* nr_pdcch_coreset_bank_add: adds a verified CORESET (monitor configuration cfg, with the owner RNTI) to the bank: reuses an existing entry with the same geometry (recording the owner), or appends a new entry while the bank has room.
  *   Refuses requests outside the current configuration epoch, an unset length override, or an alias of an existing owner; a full bank is logged and refused. Returns the entry index, or -1. Callers: nr_pdcch_discovered_observe() and the tests.
  */

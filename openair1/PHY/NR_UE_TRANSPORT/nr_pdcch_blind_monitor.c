@@ -1077,8 +1077,7 @@ bool nr_pdcch_discovered_cover_banked(int nid, int sym, int dur, int rb, int gro
 {
   const int n = nr_pdcch_coreset_bank_count();
   for (int i = 0; i < n; ++i) {
-    /* STALE counts too: a CORESET that is quiet at this instant still owns its REs (live 2026-10-25: the stale real CORESET let overlapping aliases verify on its own DCIs). Only a REMOVED entry frees the footprint. */
-    if (nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED)
+    if (nr_pdcch_coreset_bank_state(i) != NR_CORESET_VERIFIED)
       continue;
     const nr_pdcch_blind_monitor_cfg_t *c = nr_pdcch_coreset_bank_cfg(i);
     if (!c || c->coreset_pdcch_dmrs_scrambling_id != nid || c->ss_first_symbol != sym || c->coreset_duration != dur)
@@ -1333,6 +1332,13 @@ bool nr_pdcch_discovered_unverified_pending(void)
 int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
                                 nr_dci_bits_t payload, int length)
 {
+  return nr_pdcch_discovered_observe_cand(token, rnti, slot, payload, length, 0, 0);
+}
+
+/* nr_pdcch_discovered_observe_cand: nr_pdcch_discovered_observe() that also knows the decoding candidate (first CCE, aggregation level; al 0 = unknown), so the evidence can be tested against the banked geometries. Callers: the discovered pass, observe(). */
+int nr_pdcch_discovered_observe_cand(uint64_t token, uint16_t rnti, uint64_t slot,
+                                     nr_dci_bits_t payload, int length, int cce, int al)
+{
   if (!nr_cfg_epoch_work_current() || !s_add_disc.active || token != s_add_disc.generation
       || !rnti || length < 1 || length > NR_DCI_MAX_PAYLOAD) return -1;
   /* One PDCCH transmission belongs to exactly one CORESET: a DCI an operational pass already decoded in this slot (same RNTI, same payload) is that transmission seen through an overlapping geometry whose candidate maps onto the same REs. It proves the traffic, not this geometry. */
@@ -1345,18 +1351,16 @@ int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
             (unsigned long long)slot, k + 1);
     return -1;
   }
-  /* Geometric arbiter, independent of which pass happened to decode the DCI: one pdcch-DMRS-ScramblingID never names two overlapping CORESETs of one symbol, so a dwell overlapping a banked CORESET (any live state) of the same nID/symbol/duration is that CORESET seen through a wrong mapping. Covers a bank that missed the DCI, and a bank entry added after the dwell started. */
-  {
-    const nr_pdcch_blind_monitor_cfg_t *dc = &s_add_disc.cfg;
-    if (nr_pdcch_discovered_cover_banked(dc->coreset_pdcch_dmrs_scrambling_id, dc->ss_first_symbol, dc->coreset_duration,
-                                         dc->bwp_start + dc->coreset_rb_offset, dc->coreset_freq_domain)) {
-      static _Atomic unsigned s_ovl;
-      const unsigned k = atomic_fetch_add_explicit(&s_ovl, 1, memory_order_relaxed);
-      if (k < 8 || (k & (k - 1)) == 0)
-        LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d evidence ignored: geometry overlaps a banked CORESET of the same nID/symbol (n=%u)\n",
-              s_add_disc.next + 1, s_add_disc.n, dc->coreset_pdcch_dmrs_scrambling_id, k + 1);
-      return -1;
-    }
+  /* Re-expression arbiter: if a banked CORESET of this nID has a candidate on the very same ordered REs (same aggregation level), that candidate decodes the same codeword,
+   * so this CRC-valid DCI is the transmission the bank already explains -- whether or not its pass happened to decode it. Overlap alone never blocks: a genuinely
+   * different CORESET has candidates the bank cannot express. */
+  if (al > 0 && nr_pdcch_coreset_bank_explains(&s_add_disc.cfg, cce, al, -1)) {
+    static _Atomic unsigned s_ovl;
+    const unsigned k = atomic_fetch_add_explicit(&s_ovl, 1, memory_order_relaxed);
+    if (k < 8 || (k & (k - 1)) == 0)
+      LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d evidence ignored: rnti=0x%04x cce=%d al=%d is re-expressible by a banked CORESET (n=%u)\n",
+            s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, rnti, cce, al, k + 1);
+    return -1;
   }
   int victim = 0;
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; ++i) {
