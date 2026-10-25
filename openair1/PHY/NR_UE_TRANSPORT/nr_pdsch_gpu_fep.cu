@@ -1061,7 +1061,8 @@ extern "C" int nr_pdsch_gpu_debug_cpu_fep(const int16_t *rx)
  * otherwise overwrite the CPU fallback or the next slot); it only counts deadline misses. Staged mode
  * returns -1 on a miss and refuses the next calls until its stream has drained. */
 extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, double fo_hz,
-                                       const int16_t *symbol_rot, uint16_t sym_mask, int16_t *out, size_t ant_stride, int try_only)
+                                       const int16_t *symbol_rot, uint16_t sym_mask, int16_t *out, size_t ant_stride, int try_only,
+                                       const uint32_t *sfo_dphi, int sfo_kref)
 {
   if (g_init_state != 1 || !g_exact_ok || fo_hz != 0.0 || !rxdata || !symbol_rot || !out) return -1;
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
@@ -1069,6 +1070,9 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
   if (!sym_mask) return -1;
   nr_exact::ExactIO io = {};
   memcpy(io.rot, symbol_rot, (size_t)ns * sizeof(short2));
+  if (sfo_dphi)
+    memcpy(io.sfo, sfo_dphi, (size_t)ns * sizeof(uint32_t));
+  io.sfo_kref = sfo_kref;
   int nsym = 0, lo = ns, hi = -1;
   for (int l = 0; l < ns; l++)
     if (sym_mask >> l & 1) {
@@ -1164,6 +1168,9 @@ static int fep_stage_impl(const nr_gpu_fep_job_t *j, int k)
   uint32_t *par = g_pass_par[k];
   memset(par, 0, nr_exact::PAR_WORDS * sizeof(uint32_t));
   memcpy(par + 1, j->symbol_rot, (size_t)ns * sizeof(short2));
+  if (j->sfo_dphi)
+    memcpy(par + nr_exact::PAR_SFO, j->sfo_dphi, (size_t)ns * sizeof(uint32_t));
+  par[nr_exact::PAR_SFO_KREF] = (uint32_t)j->sfo_kref;
   par[21] = (uint32_t)((j->run_mask ? j->run_mask : j->sym_mask) & ((1u << ns) - 1u)); /* sized to the grant for the graph pass; fep_dev's grid is sym_mask */
   if (nr_gpu_model() == NR_GPU_MODEL_DISCRETE) {
     const size_t len = (size_t)g_samples_per_slot + N; /* the last symbol + slack, as upload_window */
@@ -1251,7 +1258,7 @@ extern "C" int nr_pdsch_gpu_fep_dev(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF
 extern "C" int nr_pdsch_gpu_exact_fep(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, double fo_hz,
                                       const int16_t *symbol_rot, uint16_t sym_mask, int16_t *out, size_t ant_stride)
 {
-  return nr_pdsch_gpu_exact_fep2(rxdata, ring_len, ring_offset, fo_hz, symbol_rot, sym_mask, out, ant_stride, 0);
+  return nr_pdsch_gpu_exact_fep2(rxdata, ring_len, ring_offset, fo_hz, symbol_rot, sym_mask, out, ant_stride, 0, NULL, 0);
 }
 
 /* GPU6: nr_passive_est_delay() of up to 16 LS rows (N c16 each, host memory; shared-memory platforms only).

@@ -719,6 +719,8 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
   for (int a = 0; a < 4; a++) I.rx[a] = j->rxdata[a];
   I.fj = {I.rx, j->ring_len, j->ring_offset, j->symbol_rot, 0x3fff, redirect ? (int16_t *)j->rxdataF : nullptr, redirect ? (uint32_t)j->rx_stride : 0u, 0};
   I.fj.run_mask = fep_need(j); /* grant-sized: the captured grid stays 14 symbols, the blocks of the other symbols return at once */
+  I.fj.sfo_dphi = j->sfo_on ? j->sfo_dphi : nullptr; /* staged into par[PAR_SFO..] per replay, like the rotation */
+  I.fj.sfo_kref = j->sfo_kref;
   if (nr_pdsch_gpu_fep_stage_at(&I.fj, I.id) != 0) return -1;
   /* chest rows: one per (DM-RS symbol, layer, segment, antenna), the order of nr_pdsch_gpu_chest_grant (ns == 1: one segment = the grant). A class with several
    * segments estimates into scratch rows (the estimator writes a whole row) and k_seg_compose lays them out in data order. */
