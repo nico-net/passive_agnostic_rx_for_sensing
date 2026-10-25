@@ -652,3 +652,10 @@ R12. **NO FLAGS (operator, 2026-10-25).** Supersedes Global Constraint 4's test-
   radio line types (RFCHAN, CHPOW, RFSTALL, RFTSDISC, RFCENSUS) by grammar, regardless of the prefix. Per-cell job lines printed from callbacks must name the cell
   explicitly (the job carries it).
 - Metrics JSON (`nr_passive_metrics_emit`): `"cell":<k>` is inserted as the first key only when `nr_cell_count() > 1` (adding `"cell":0` at N=1 would change bytes).
+
+### Cross-task sites found by A7 (2026-10-25, MPCI-A7-20261025.md) — must be closed by the named task
+- A8: call `nr_csirs_disc_cell_prealloc(cell, fp, n_ant)` per active cell before the RX fence (replaces `nr_csirs_disc_start`, nr-uesoftmodem.c:583; release replaces the stop calls at :615/:728); the slot thread that calls `nr_csirs_disc_td_push` (phy_procedures_nr_ue.c:1523) must be bound to its cell.
+- A3: the cfg-epoch authority must raise epoch listeners on the cell's own thread (A7's `epoch_listener` uses `nr_cell_idx()`).
+- A3/D2: `nr_passive_metrics.c:241` -> `nr_csirs_disc_get_metrics_cell(k)` per cell.
+- B-group (B1b/B5): `ISAC_CSIRS_DISC_CORE` / `nr_bg_lane_enter` are process-wide: N cell discovery workers would pin to one core; workers must lease from the pool (DISC class) per cell.
+- G3/G4: one GPU discovery workspace (`gpu->prepare`, `sweep_prepare`) re-prepared by a second cell with another N_RB -> per-cell workspaces; `nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS)` must sum the per-cell `gpu_bytes`; the GPU circuit breaker is process-wide (one cell's prealloc failure disables GPU discovery for all cells) — decide per-cell vs process; history arrays allocated lazily via CUDA unified memory possibly after the fence (pre-existing at N=1).
