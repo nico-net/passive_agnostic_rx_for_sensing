@@ -1077,7 +1077,8 @@ bool nr_pdcch_discovered_cover_banked(int nid, int sym, int dur, int rb, int gro
 {
   const int n = nr_pdcch_coreset_bank_count();
   for (int i = 0; i < n; ++i) {
-    if (nr_pdcch_coreset_bank_state(i) != NR_CORESET_VERIFIED)
+    /* STALE counts too: a CORESET that is quiet at this instant still owns its REs (live 2026-10-25: the stale real CORESET let overlapping aliases verify on its own DCIs). Only a REMOVED entry frees the footprint. */
+    if (nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED)
       continue;
     const nr_pdcch_blind_monitor_cfg_t *c = nr_pdcch_coreset_bank_cfg(i);
     if (!c || c->coreset_pdcch_dmrs_scrambling_id != nid || c->ss_first_symbol != sym || c->coreset_duration != dur)
@@ -1343,6 +1344,19 @@ int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
             s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, rnti, length,
             (unsigned long long)slot, k + 1);
     return -1;
+  }
+  /* Geometric arbiter, independent of which pass happened to decode the DCI: one pdcch-DMRS-ScramblingID never names two overlapping CORESETs of one symbol, so a dwell overlapping a banked CORESET (any live state) of the same nID/symbol/duration is that CORESET seen through a wrong mapping. Covers a bank that missed the DCI, and a bank entry added after the dwell started. */
+  {
+    const nr_pdcch_blind_monitor_cfg_t *dc = &s_add_disc.cfg;
+    if (nr_pdcch_discovered_cover_banked(dc->coreset_pdcch_dmrs_scrambling_id, dc->ss_first_symbol, dc->coreset_duration,
+                                         dc->bwp_start + dc->coreset_rb_offset, dc->coreset_freq_domain)) {
+      static _Atomic unsigned s_ovl;
+      const unsigned k = atomic_fetch_add_explicit(&s_ovl, 1, memory_order_relaxed);
+      if (k < 8 || (k & (k - 1)) == 0)
+        LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d evidence ignored: geometry overlaps a banked CORESET of the same nID/symbol (n=%u)\n",
+              s_add_disc.next + 1, s_add_disc.n, dc->coreset_pdcch_dmrs_scrambling_id, k + 1);
+      return -1;
+    }
   }
   int victim = 0;
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; ++i) {

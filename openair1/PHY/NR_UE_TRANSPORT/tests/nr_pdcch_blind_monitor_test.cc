@@ -4785,21 +4785,36 @@ TEST_F(DiscoveredCoresets, EvidenceAlreadyDecodedByBankedPassIsNotEvidence) {
   EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x4567, 5, a, 47), -1);
   EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x4567, 6, d, 47), 1);
   ASSERT_EQ(nr_pdcch_coreset_bank_count(), 2);
-  // 3. the live case: the banked CORESET went STALE (no accepts while traffic is elsewhere), so the same-nID overlap rule no
-  //    longer shields it; an overlapping geometry then CRC-passes the very DCIs bank 0 decoded: rejected, nothing recorded.
+  // 3. the live case: bank 0 went STALE. A STALE entry still owns its REs, so the overlapping same-nID alias never starts a dwell.
   nr_pdcch_coreset_bank_tick(7, false, 5, 1000);
   nr_pdcch_coreset_bank_tick(12, true, 5, 1000);
   ASSERT_EQ(nr_pdcch_coreset_bank_state(0), NR_CORESET_STALE);
-  ASSERT_TRUE(next_dwell(42, 62922));
-  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 3, a, 47), -1);
-  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 4, b, 47), -1);
+  EXPECT_FALSE(next_dwell(42, 62922));
   EXPECT_EQ(nr_pdcch_coreset_bank_count(), 2);
-  // same slot but another payload is not explained by the bank: fresh evidence, yet one DCI alone never verifies
-  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 4, d, 47), -1);
-  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 2);
-  // without the bank's record the same pair would have verified (control: the guard is what blocks it)
+}
+
+// The bank pass MISSED the DCIs (empty decoded ring), yet an overlapping same-nID alias that CRC-passes two of them must not verify:
+// the geometric arbiter does not depend on what the bank happened to decode. Disjoint nIDs still verify (test above).
+TEST_F(DiscoveredCoresets, OverlapAliasRejectedEvenWhenBankMissedTheDci) {
+  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=42 groups=24 L=6 R=3 shift=7\n");
+  nr_pdcch_blind_monitor_cfg_t c{}, cover{}; uint64_t token;
+  const auto a = nr_dci_bits_from_u64(123), b = nr_dci_bits_from_u64(456);
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&cover, &token, 217)); // the non-interleaved cover dwell comes first
+  for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, 1 + i);
+  bool alias = false;
+  for (int g = 0; g < 4 && !alias; ++g) {
+    ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+    alias = c.coreset_rb_offset == 42;
+    if (!alias) for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, 5000 * (g + 2) + i);
+  }
+  ASSERT_TRUE(alias);
+  // the real CORESET is banked after the alias dwell started (race); nothing was recorded in the decoded ring
   nr_pdcch_coreset_bank_decoded_clear();
-  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 5, a, 47), 2);
+  cover.dci_length_override = 47;
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&cover, 0x1234), 0);
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 90000, a, 47), -1);
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 90001, b, 47), -1);
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 1);
 }
 
 TEST_F(DiscoveredCoresets, DecodedRingKeysOnSlotRntiPayload) {
