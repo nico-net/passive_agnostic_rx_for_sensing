@@ -37,3 +37,11 @@ if(ENABLE_LDPC_CUDA)
       SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\] GpuExactFepSizes" TIMEOUT 120)
   endforeach()
 endif()
+
+# SFO: integer sin/cos and per-RE phasor accuracy, CPU table loop == per-RE (GPU) form bit for bit, correction undoes a fractional
+# delay, eps from the timing-loop frame reads with its sign and hysteresis
+add_executable(test_nr_sfo test_nr_sfo.cpp ${OPENAIR1_DIR}/PHY/MODULATION/nr_sfo_state.c)
+target_include_directories(test_nr_sfo PRIVATE ${OPENAIR1_DIR}/PHY/MODULATION ${OPENAIR_DIR})
+target_link_libraries(test_nr_sfo PRIVATE GTest::gtest minimal_lib m)
+add_dependencies(tests test_nr_sfo)
+add_test(NAME test_nr_sfo COMMAND ./test_nr_sfo)
