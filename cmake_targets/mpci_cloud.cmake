@@ -40,7 +40,7 @@ endif()
 # ---- B3 ----
 # Cell admission model (pure C; the host/GPU budgets are header-only, nr_host_membudget.c is linked for the N=1 replay test) + the fixture CLI the Python mirror is compared with.
 if(ENABLE_TESTS)
-  add_library(nr_cell_admit STATIC ${CMAKE_SOURCE_DIR}/common/utils/nr_cell_admit.c)
+  add_library(nr_cell_admit STATIC ${CMAKE_SOURCE_DIR}/common/utils/nr_cell_admit.c ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/nr_gpu_cell.c) # G1: + nr_gpu_cell.c (nr_cell_admit.c calls nr_gpu_cell_mem)
   target_include_directories(nr_cell_admit PUBLIC ${CMAKE_SOURCE_DIR}/common/utils ${CMAKE_SOURCE_DIR}/openair1)
   add_executable(test_nr_cell_admit ${CMAKE_SOURCE_DIR}/common/utils/tests/test_nr_cell_admit.cpp ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS/nr_host_membudget.c)
   target_include_directories(test_nr_cell_admit PRIVATE ${CMAKE_SOURCE_DIR}/common/utils ${CMAKE_SOURCE_DIR}/openair1)

@@ -10,6 +10,7 @@
 #include "PHY/TOOLS/nr_host_membudget.h"
 #include "PHY/TOOLS/nr_gpu_membudget.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_disc_mem.h"
+#include "PHY/NR_UE_TRANSPORT/nr_gpu_cell.h" /* G1: the per-cell GPU bytes, from the allocators' own sizing expressions */
 
 #define MIB ((size_t)1 << 20)
 /* ---- host coefficients ---- */
@@ -34,14 +35,10 @@
 #define G_LDPC_CB0_MIB 874      /* [same census: ldpc cb0 874] */
 #define G_TD_CB0_MIB 556        /* [same census: td_cb0 556] */
 #define G_PASS_CENSUS_MIB 361   /* [same census: pass 361 = instances + one HARQ store] */
-#define G_HARQ_BYTES ((size_t)2048 * 66 * 384 * 2) /* [CODE nr_gpu_pass.h:312-313: NR_GPU_HQ_BLK x NR_GPU_HQ_SEG x int16 = 99 MiB; SENS6-READINESS-20261021 s3] */
+#define G_HARQ_BYTES nr_gpu_cell_bytes(&(nr_gpu_cell_params_t){0}, NR_GPU_CELL_HARQ) /* [CODE G1: nr_gpu_cell.h NR_GPU_CELL_HARQ = nr_gpu_pass_graph.cu g_hq, 2048 x 66 x 384 x int16 = 99 MiB] */
 #define G_CSIRS_LOCAL_MIB 512   /* [CODE nr_csirs_disc_mem.h:30 local memory of refine_kernel, in nr_csirs_disc_mem_fixed()]: one set of kernels per process */
-#define G_NID_CENSUS_MIB 776    /* [MEASURED, same census: pdcch_nid 776 at 273 PRB, window 10] */
-#define G_NID_BATCH 336         /* [CODE nr_pdcch_nid_gpu.h:10 NR_PDCCH_NID_BATCH] */
 #define G_NID_WIN_FULL 10       /* [CODE nr_gpu_elastic.h comment "6 of 10"; census window] */
 #define G_NID_WIN_FLOOR 5       /* [CODE nr_pdcch_nid_gpu.cu:595 lo = min(window,5)] */
-#define G_NID_DUR 3             /* [HYPOTHESIS, G1: CORESET duration of the nID window = the maximum, 3 symbols (nr_pdcch_nid_gpu.cu:578 window_bytes dur)] */
-#define G_NID_STAT ((size_t)6 * 14 * 65536 * 6) /* [CODE nr_pdcch_nid_gpu.cu:21-23 STAT = 6 x CELLS, CELLS = 14 x IDS, IDS = 65536] x (2 + 4) B per window batch */
 #define G_GRAPH_FLOOR_MIB 512   /* [HYPOTHESIS, G1: graph executables floor; SENS6-READINESS s3 proposes "floor 1 GB" for pool+graph; the common classes warm first] */
 #define G_GRAPH_CAP_MIN_MIB 2048 /* [CODE nr_gpu_pass_graph.cu:1066-1071 split_cap_auto clamp [2048, 3072] MB, quarter of the device memory] */
 #define G_GRAPH_CAP_MAX_MIB 3072
@@ -124,15 +121,18 @@ static size_t g_csirs_fixed(const geom_t *g)           /* per-cell part of nr_cs
   return f > G_CSIRS_LOCAL_MIB * MIB ? f - G_CSIRS_LOCAL_MIB * MIB : 0;
 }
 static size_t g_csirs_slot(const geom_t *g) { return nr_csirs_disc_mem_per_slot(g->n_rb, g->rx); }
-static size_t g_nid_batch(int rb)                       /* window_bytes(rb, dur, 1) without the st2_snap_t term (type size not in a header) [CODE nr_pdcch_nid_gpu.cu:579-583] */
+/* nID context [CODE G1: nr_gpu_cell.h, the expressions of nr_pdcch_nid_gpu.cu window_bytes() / fixed_bytes(); dur = the policy default 3]. The window part is linear in the number of
+ * batches except for a constant term (the "+1" of 4n+1): per window = W(2) - W(1), the constant goes into the fixed part. */
+static size_t g_nid_win(int rb, int window)
 {
-  const size_t n = G_NID_BATCH, sc = 12 * (size_t)rb;
-  return n * G_NID_DUR * sc * 4 + 2 * n * sizeof(int) + n * sizeof(int) * 2 + ((4 * n + 1) * 6 * 276 + 2 * n) * sizeof(double) + G_NID_STAT;
+  nr_gpu_cell_params_t p = {.n_rb = rb, .n_rx = 4, .scs_khz = 30, .nid_window = window};
+  return nr_gpu_cell_bytes(&p, NR_GPU_CELL_NID_WINDOW);
 }
-static size_t g_nid_fixed(void)                         /* [census 776 MiB at 273 PRB, window 10] minus 10 model windows */
+static size_t g_nid_batch(int rb) { return g_nid_win(rb, 2) - g_nid_win(rb, 1); }
+static size_t g_nid_fixed(void)
 {
-  const size_t full = G_NID_CENSUS_MIB * MIB, w = G_NID_WIN_FULL * g_nid_batch(273);
-  return full > w ? full - w : 0;
+  const size_t one = g_nid_win(273, 1), per = g_nid_batch(273);
+  return nr_gpu_cell_bytes(&(nr_gpu_cell_params_t){0}, NR_GPU_SHARED_NID_FIXED) + (one > per ? one - per : 0);
 }
 static size_t g_graph_cap(size_t free_bytes)
 {

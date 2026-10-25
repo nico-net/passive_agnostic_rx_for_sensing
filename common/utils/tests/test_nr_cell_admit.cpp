@@ -206,7 +206,7 @@ TEST(NrCellAdmit, OneCellGpuEqualsMembudget)
   const nr_admit_plan_t p = plan_of(c, cells(1, 273));
   EXPECT_GE(p.cell[0].gpu_csirs_slots, 160);
   EXPECT_LT(p.cell[0].gpu_csirs_slots, 640);
-  EXPECT_EQ(6, p.nid_window);
+  EXPECT_EQ(7, p.nid_window); // G1: 7 of 10 with the exact nID bytes of nr_gpu_cell.h (was 6 with the census-derived fixed part: 776 MiB total at window 10 vs 767 MiB exact)
 }
 
 TEST(NrCellAdmit, UnifiedHostBudgetPaysTheGpu)
