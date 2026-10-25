@@ -66,9 +66,11 @@ static void compact_removed(void)
     return;
   int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
   if (g_identity_reset_pending) {
+    pthread_mutex_lock(&nr_pdcch_al1_mu); /* entries carry the AL1 union fields (bank lock, then al1 mutex) */
     g_dormant_bank.n = n;
     memcpy(g_dormant_bank.entry, g_coreset_bank, sizeof(g_coreset_bank));
     memset(g_coreset_bank, 0, sizeof(g_coreset_bank));
+    pthread_mutex_unlock(&nr_pdcch_al1_mu);
     atomic_store_explicit(&g_coreset_bank_n, 0, memory_order_release);
     g_identity_reset_pending = false;
     n = 0;
@@ -82,8 +84,10 @@ static void compact_removed(void)
       g_remove_hook(&g_coreset_bank[i].cfg, g_remove_hook_arg);
     LOG_A(PHY, "SENSING: CORESET bank REMOVED index=%d offset=%d\n", i,
           g_coreset_bank[i].cfg.coreset_rb_offset);
+    pthread_mutex_lock(&nr_pdcch_al1_mu);
     memmove(&g_coreset_bank[i], &g_coreset_bank[i + 1], (n - i - 1) * sizeof(g_coreset_bank[0]));
     memset(&g_coreset_bank[--n], 0, sizeof(g_coreset_bank[0]));
+    pthread_mutex_unlock(&nr_pdcch_al1_mu);
     atomic_store_explicit(&g_coreset_bank_n, n, memory_order_release);
   }
   g_compaction_pending = false;
@@ -576,7 +580,9 @@ int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t 
       return -1;
     }
     at = n;
+    pthread_mutex_lock(&nr_pdcch_al1_mu);
     memset(&g_coreset_bank[at], 0, sizeof(g_coreset_bank[at]));
+    pthread_mutex_unlock(&nr_pdcch_al1_mu);
     g_coreset_bank[at].cfg = *cfg;
     g_coreset_bank[at].verified_epoch = nr_cfg_reconf_enabled() ? nr_cfg_epoch_work_stamp() : 0;
     g_coreset_bank[at].cfg.autodiscover = 0;
