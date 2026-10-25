@@ -4824,6 +4824,26 @@ TEST_F(DiscoveredCoresets, CandidateReExpressionIsCodewordIdentity) {
   for (int cce = 0; cce < 24; ++cce) EXPECT_FALSE(nr_pdcch_coreset_bank_explains(&shifted, cce, 1, -1)) << cce;
 }
 
+// AL1 union: a candidate on an alternative-mapping family's REG set that the entry decodes is explained; the same candidate without the union entry is not.
+TEST_F(DiscoveredCoresets, ReExpressionCoversAl1UnionFamilies) {
+  auto real = mk_cfg(2, 0, 45, 0, 0, 0), alt = mk_cfg(2, 0, 45, 2, 3, 5);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&real, 0x1234), 0);
+  EXPECT_FALSE(nr_pdcch_coreset_bank_explains(&alt, 3, 1, -1)); // interleaved bundles of 2 RBs: not a banked contiguous CCE
+  nr_pdcch_discovered_coreset_t *e = nr_pdcch_coreset_bank_entry(0);
+  for (int cce = 0; cce < 45; ++cce) { nr_pdcch_al1_regset(270, 1, nr_pdcch_al1_map_t{2, 3, 5}, cce, e->al1_union[cce]); }
+  e->n_al1_union = 45;
+  for (int cce = 0; cce < 45; ++cce) EXPECT_TRUE(nr_pdcch_coreset_bank_explains(&alt, cce, 1, -1)) << cce;
+  EXPECT_FALSE(nr_pdcch_coreset_bank_explains(&alt, 3, 2, -1)); // AL2 never matches the AL1 union
+  auto same_family = mk_cfg(2, 0, 45, 2, 3, 4); // a shift only permutes the CCE order: the same family of sets
+  int hits = 0;
+  for (int cce = 0; cce < 45; ++cce) hits += nr_pdcch_coreset_bank_explains(&same_family, cce, 1, -1);
+  EXPECT_EQ(hits, 45);
+  auto other_nid = mk_cfg(3, 0, 45, 2, 3, 5);
+  EXPECT_FALSE(nr_pdcch_coreset_bank_explains(&other_nid, 3, 1, -1));
+  e->n_al1_union = 0;
+  EXPECT_FALSE(nr_pdcch_coreset_bank_explains(&alt, 3, 1, -1));
+}
+
 // Bank pass missed the DCI (empty ring): the alias dwell is still rejected via the candidate; a genuine overlapping CORESET still verifies.
 TEST_F(DiscoveredCoresets, AliasRejectedGenuineOverlapVerifiesWithoutRing) {
   lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n"

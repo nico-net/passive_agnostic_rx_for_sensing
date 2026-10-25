@@ -482,6 +482,24 @@ static bool explains_locked(const nr_pdcch_blind_monitor_cfg_t *c, int cce, int 
     for (int x = 0; x + al <= n_cce; ++x)
       if (nr_pdcch_candidate_res(&e->cfg, x, al, b, 96) == 6 * al && !memcmp(a, b, sizeof(uint32_t) * 6 * al))
         return true;
+    /* AL1 union: the entry also decodes AL1 candidates of alternative mapping families (REG sets, see nr_pdcch_al1_union). Same identity rule: same ordered REs.
+     * The union is written under the RT's own mutex, not this lock; a torn read can only flip this one verdict, never corrupt state. */
+    const int nu = al == 1 ? (int)e->n_al1_union : 0, dur = e->cfg.coreset_duration;
+    for (int j = 0; j < nu && j < NR_PDCCH_AL1_UNION_MAX; ++j) {
+      uint32_t u[6]; int k = 0, lastrb = -1;
+      const int base = e->cfg.bwp_start + e->cfg.coreset_rb_offset;
+      for (int sy = 0; sy < dur; ++sy) {
+        lastrb = -1;
+        for (int q = 0; q < 6; ++q) {
+          const int rb = e->al1_union[j][q] / dur;
+          if (rb == lastrb) continue;
+          lastrb = rb;
+          if (k < 6) u[k] = ((uint32_t)(base + rb) << 4) | (uint32_t)(e->cfg.ss_first_symbol + sy);
+          ++k;
+        }
+      }
+      if (k == 6 && !memcmp(a, u, sizeof(u))) return true;
+    }
   }
   return false;
 }
