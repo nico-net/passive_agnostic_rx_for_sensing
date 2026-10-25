@@ -209,32 +209,31 @@ class Scorers(unittest.TestCase):
                 f.writelines(lines)
             cls.arms[name] = d
 
-    def test_refuse_mixed_without_cell(self):
-        for cmd in ((os.path.join(PR, "goal_metrics.py"), self.mixed),
-                    (os.path.join(PR, "dgx", "score_rx.py"), "--json", self.arms["mixed"]),
-                    (os.path.join(PR, "dgx", "score_rx.py"), "--gate", self.arms["mixed"]),
-                    (os.path.join(PR, "dgx", "score_rx_solver.py"), self.arms["mixed"]),
-                    (os.path.join(PR, "mpci", "mpci_runsum.py"), self.mixed)):
-            r = run(*cmd)
-            self.assertNotEqual(r.returncode, 0, cmd)
-            self.assertIn("--cell", r.stderr, cmd)
-            self.assertIn("never mixed", r.stderr, cmd)
-            self.assertEqual(r.stdout, "", cmd)
+    def test_no_cell_option_anywhere(self):
+        for f in ("goal_metrics.py", "dgx/score_rx.py", "dgx/score_rx_solver.py", "mpci/mpci_runsum.py", "cellsel.py"):
+            with open(os.path.join(PR, f)) as fh:
+                src = fh.read()
+            self.assertNotIn("--cell", src, f)
+            self.assertNotIn("pop_cell_arg", src, f)
+        # the programmatic selector still refuses an unnamed cell on a mixed log
+        with self.assertRaises(SystemExit):
+            cellsel.prepare(mixed_lines(), None)
 
-    def test_cell_not_in_log_refused(self):
-        r = run(os.path.join(PR, "goal_metrics.py"), "--cell", "7", self.mixed)
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("cell 7 is not in this log", r.stderr)
-        r = run(os.path.join(PR, "goal_metrics.py"), "--cell", "1", os.path.join(FIX, "cell_a.log"))   # unprefixed log has only cell 0
-        self.assertEqual(r.returncode, 2)
-
-    def test_goal_metrics_cell_equals_single_cell_log(self):
+    def test_goal_metrics_mixed_scores_every_cell(self):
         gm = os.path.join(PR, "goal_metrics.py")
-        for k, g in ((0, "a"), (1, "b")):
-            for extra, gold in (((), "golden_goal_metrics_%s.txt"), (("--json",), "golden_goal_metrics_%s.json")):
-                r = run(gm, *extra, "--cell", str(k), self.mixed)
-                self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertEqual(r.stdout.replace(self.mixed, "mpci/fixtures/cell_%s.log" % g), golden(gold % g))
+        r = run(gm, self.mixed)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        want = "== cell 0\n" + golden("golden_goal_metrics_a.txt").replace("mpci/fixtures/cell_a.log", self.mixed) \
+            + "== cell 1\n" + golden("golden_goal_metrics_b.txt").replace("mpci/fixtures/cell_b.log", self.mixed)
+        self.assertEqual(r.stdout, want)
+        r = run(gm, "--json", self.mixed)
+        d = json.loads(r.stdout)
+        self.assertEqual(sorted(d["cells"]), ["0", "1"])
+        for k, g in (("0", "a"), ("1", "b")):
+            ref = json.loads(golden("golden_goal_metrics_%s.json" % g))
+            ref.pop("run")
+            self.assertEqual(d["cells"][k], ref)
+        self.assertNotEqual(d["cells"]["0"], d["cells"]["1"])
 
     def test_goal_metrics_unprefixed_byte_identical(self):
         for g in "ab":
@@ -242,22 +241,35 @@ class Scorers(unittest.TestCase):
             self.assertEqual(r.stdout, golden("golden_goal_metrics_%s.txt" % g))
             r = run(os.path.join(PR, "goal_metrics.py"), "--json", "mpci/fixtures/cell_%s.log" % g, cwd=PR)
             self.assertEqual(r.stdout, golden("golden_goal_metrics_%s.json" % g))
-        # --cell 0 on an unprefixed log is the same single cell
-        r = run(os.path.join(PR, "goal_metrics.py"), "--cell", "0", "mpci/fixtures/cell_a.log", cwd=PR)
-        self.assertEqual(r.stdout, golden("golden_goal_metrics_a.txt"))
 
-    def _arm_run(self, script, arm, *args, cell=None):
-        extra = ("--cell", str(cell)) if cell is not None else ()
-        return run(os.path.join(PR, "dgx", script), *args, *extra, os.path.basename(arm), cwd=os.path.dirname(arm))
+    def _arm_run(self, script, arm, *args):
+        return run(os.path.join(PR, "dgx", script), *args, os.path.basename(arm), cwd=os.path.dirname(arm))
 
-    def test_score_rx_and_solver_cell_equals_single_cell_log(self):
-        for script, args, gold in (("score_rx.py", ("--json",), "golden_score_rx_%s.json"), ("score_rx.py", ("--gate",), "golden_score_rx_gate_%s.txt"),
-                                   ("score_rx_solver.py", (), "golden_score_rx_solver_%s.json"),
+    def test_score_rx_and_solver_mixed_every_cell(self):
+        for script, args, gold in (("score_rx.py", ("--gate",), "golden_score_rx_gate_%s.txt"),
                                    ("score_rx_solver.py", ("--gate",), "golden_score_rx_solver_gate_%s.txt")):
-            for k, g in ((0, "a"), (1, "b")):
-                r = self._arm_run(script, self.arms["mixed"], *args, cell=k)
-                self.assertEqual(r.returncode in (0, 1), True, r.stderr)           # --gate exits 1 on FAIL, as before
-                self.assertEqual(r.stdout.replace("mixed", "arm_%s" % g), golden(gold % g), (script, args, k))
+            r = self._arm_run(script, self.arms["mixed"], *args)
+            want = "".join("== cell %d\n%s" % (k, golden(gold % g).replace("arm_%s" % g, "mixed")) for k, g in ((0, "a"), (1, "b")))
+            self.assertEqual(r.stdout, want, script)
+            self.assertEqual(r.returncode, 1)                       # worst cell: both FAIL on the fixtures
+        for script, gold in (("score_rx.py", "golden_score_rx_%s.json"), ("score_rx_solver.py", "golden_score_rx_solver_%s.json")):
+            args = ("--json",) if script == "score_rx.py" else ()
+            r = self._arm_run(script, self.arms["mixed"], *args)
+            d = json.loads(r.stdout)
+            self.assertEqual(d["arm"], "mixed")
+            for k, g in (("0", "a"), ("1", "b")):
+                ref = json.loads(golden(gold % g)); ref["arm"] = "mixed"
+                self.assertEqual(d["cells"][k], ref, (script, k))
+
+    def test_gate_exit_is_worst_cell(self):
+        # cell 0 passes the legacy gate (CRC >= 98 is not met by the fixture, so lower the bar by env of the scorer's own gate keys)
+        env = dict(os.environ, GATE_MODE="legacy", GATE_CRC_MIN="91.0", GATE_DROP_MAX="2.5")
+        r = subprocess.run([sys.executable, os.path.join(PR, "dgx", "score_rx.py"), "--gate", "mixed"], capture_output=True, text=True,
+                           cwd=self.tmp, env=env)
+        lines = r.stdout.splitlines()
+        self.assertEqual(lines[0], "== cell 0")
+        self.assertTrue(lines[1].startswith("FAIL") or lines[1].startswith("PASS"))
+        self.assertEqual(r.returncode, 0 if all(l.startswith("PASS") for l in lines if not l.startswith("==")) else 1)
 
     def test_score_rx_unprefixed_byte_identical(self):
         for script, args, gold in (("score_rx.py", ("--json",), "golden_score_rx_%s.json"), ("score_rx.py", ("--gate",), "golden_score_rx_gate_%s.txt"),
@@ -278,9 +290,10 @@ class Scorers(unittest.TestCase):
         for g in "ab":
             r = run(rs, "mpci/fixtures/cell_%s.log" % g, cwd=PR)
             self.assertEqual(r.stdout, golden("golden_runsum_%s.txt" % g))
-        for k, g in ((0, "a"), (1, "b")):
-            r = run(rs, "--cell", str(k), self.mixed)
-            self.assertEqual(r.stdout.replace(self.mixed, "mpci/fixtures/cell_%s.log" % g), golden("golden_runsum_%s.txt" % g))
+        r = run(rs, self.mixed)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        want = self.mixed + "\n== cell 0\n" + golden("golden_runsum_a.txt").split("\n", 1)[1] + "== cell 1\n" + golden("golden_runsum_b.txt").split("\n", 1)[1]
+        self.assertEqual(r.stdout, want)
 
 
 class Payload(unittest.TestCase):

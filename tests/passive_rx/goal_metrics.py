@@ -4,9 +4,9 @@ A grant is SNR-qualified when true_snr_db(min per-layer SNR, Qm) >= required_snr
 snr_l is a decision-directed EVM with a noise floor (3.9/9.1/12.5/14.4 dB for Qm 2/4/6/8); true_snr_db inverts that bias.
 required_snr_db = 10*log10(2**SE - 1) + IMPL_LOSS_DB, SE = Qm*R/1024 (TS 38.214 tables 5.1.3.1-1/2/3).
 shortcut: Shannon gap + fixed 1.5 dB loss, not a calibrated BLER curve; recalibrate from Task 2's CRC-vs-margin curve.
-usage: goal_metrics.py [--margin 2.0] [--json] [--cell K] run.log...
-A log of a multi-cell receiver (lines prefixed "[c<k>] ") is scored for one cell: --cell K; without it a log with more than one
-cell is refused (exit 2). Unprefixed (single-cell) logs: unchanged."""
+usage: goal_metrics.py [--margin 2.0] [--json] run.log...
+A log of a multi-cell receiver (lines prefixed "[c<k>] ") is scored per cell, automatically: one independent result block per cell
+("== cell <k>" header; JSON {"run":..., "cells": {"<k>": {...}}}), never a merged number. Unprefixed or one-cell logs: unchanged."""
 import json, math, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -145,16 +145,25 @@ def verdict(s):
 
 if __name__ == '__main__':
     args = sys.argv[1:]; margin = 2.0; as_json = False
-    cell = cellsel.pop_cell_arg(args)
     if '--margin' in args:
         i = args.index('--margin'); margin = float(args[i + 1]); del args[i:i + 2]
     if '--json' in args:
         args.remove('--json'); as_json = True
-    for p in args:
-        r = parse_run(p, margin, cell)
-        if as_json:
-            print(json.dumps({'run': p, **r}))
-            continue
+    def show(p, r):
         for d in ('dl', 'ul'):
             s = r[d]
             print(f"{p} {d.upper()} {verdict(s)} " + ' '.join(f"{k}={v:.1f}" if isinstance(v, float) else f"{k}={v}" for k, v in s.items()))
+    for p in args:
+        cs = cellsel.log_cells(p)
+        if cs is None:
+            r = parse_run(p, margin)
+            if as_json:
+                print(json.dumps({'run': p, **r}))
+            else:
+                show(p, r)
+        elif as_json:
+            print(json.dumps({'run': p, 'cells': {str(k): parse_run(p, margin, k) for k in cs}}))
+        else:
+            for k in cs:
+                print(f"== cell {k}")
+                show(p, parse_run(p, margin, k))

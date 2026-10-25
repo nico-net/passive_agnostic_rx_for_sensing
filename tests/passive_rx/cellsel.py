@@ -5,7 +5,8 @@ A receiver that runs more than one cell prefixes every line with "[c<k>] " (LOG 
 receiver prints no prefix. The scorers call prepare(lines, cell, name) right after reading a log:
   - no tag in the log                      -> lines returned UNCHANGED (same list object): output is byte-identical to before.
   - tags of one cell only                  -> tags stripped, all lines kept (== the unprefixed log of that cell).
-  - tags of several cells, cell is None    -> SystemExit(2) with a message: scores of different cells are never mixed.
+  - tags of several cells, cell is None    -> SystemExit(2): programmatic callers must name the cell. The command-line scorers have no
+                                              option for it: they call multi_cells()/log_cells() and score EVERY cell separately.
   - tags of several cells, cell == K       -> only lines tagged [cK], tag stripped. Untagged lines of a multi-cell log (threads
                                               bound to no cell: GPU callbacks) belong to no cell and are dropped.
   - cell K not present in the log          -> SystemExit(2).
@@ -34,11 +35,11 @@ def prepare(lines, cell, name="log"):
     present = cells_in(lines)
     if not present:
         if cell not in (None, 0):
-            sys.stderr.write("%s: no cell prefix in this log (single cell, index 0); --cell %s does not exist\n" % (name, cell))
+            sys.stderr.write("%s: no cell prefix in this log (single cell, index 0); cell %s does not exist\n" % (name, cell))
             raise SystemExit(2)
         return lines
     if len(present) > 1 and cell is None:
-        sys.stderr.write("%s: the log contains several cells (%s); scores of different cells are never mixed: pass --cell K\n"
+        sys.stderr.write("%s: the log contains several cells (%s); scores of different cells are never mixed: name one cell (score each separately)\n"
                          % (name, ", ".join("c%d" % c for c in present)))
         raise SystemExit(2)
     if cell is not None and cell not in present:
@@ -55,24 +56,16 @@ def prepare(lines, cell, name="log"):
     return out
 
 
-def pop_cell_arg(args):
-    """Remove '--cell K' / '--cell=K' from args (list, edited in place) -> int or None."""
-    cell = None
-    for i, a in enumerate(list(args)):
-        if a == "--cell" and i + 1 < len(args):
-            try:
-                cell = int(args[i + 1])
-            except ValueError:
-                sys.stderr.write("--cell takes an integer cell index\n")
-                raise SystemExit(2)
-            del args[i:i + 2]
-            return cell
-        if a.startswith("--cell="):
-            try:
-                cell = int(a[7:])
-            except ValueError:
-                sys.stderr.write("--cell takes an integer cell index\n")
-                raise SystemExit(2)
-            del args[i]
-            return cell
-    return cell
+def multi_cells(lines):
+    """Cell indices of a log that carries the tags of MORE than one cell, else None (unprefixed or one-cell logs: score as before)."""
+    present = cells_in(lines)
+    return present if len(present) > 1 else None
+
+
+def log_cells(path):
+    """multi_cells() of a file; None when the file is missing or unreadable."""
+    try:
+        with open(path, errors="replace") as f:
+            return multi_cells(f.readlines())
+    except OSError:
+        return None

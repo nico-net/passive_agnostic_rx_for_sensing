@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Summaries of receiver logs for the MPCI validation (fanout_replay.sh arms and plain replays/OTA run logs).
-   mpci_runsum.py [--cell K] LOG...         one block per log
-   mpci_runsum.py [--cell K] --arms DIR     every arm directory under DIR (ue_*.log + mem.tsv + gpu.tsv of fanout_replay.sh)
-One log of a single-process multi-cell receiver carries "[c<k>] " line prefixes (task D2): such a log needs --cell K and is then
-summarised for that cell only; a log with several cells and no --cell is refused (exit 2). Unprefixed logs: output unchanged.
+   mpci_runsum.py LOG...         one block per log
+   mpci_runsum.py --arms DIR     every arm directory under DIR (ue_*.log + mem.tsv + gpu.tsv of fanout_replay.sh)
+One log of a single-process multi-cell receiver carries "[c<k>] " line prefixes (task D2): it is summarised per cell, one block under
+a "== cell <k>" header each, automatically. Unprefixed logs: output unchanged.
 Fields: sync PCI, MIB/SIB1 counts, CORESET bank adds, CSI-RS confirmations, last PDSCHQ line, EVMGRANT CRC, GPU_EXACT check_bad,
 PDTIMPCT sum percentiles, SHMIQ_END counters; per arm: min MemAvailable, per process CPU s / peak RSS / anon, GPU MiB."""
 import os, re, sys
@@ -59,7 +59,20 @@ def line(name, r):
             f"shm(ovr,drop_in,disc)={end.groups() if end else '-'} eof={r['eof']}")
 
 
-def arms(root, cell=None):
+def summ_all(path):
+    """-> [(cell or None, line text)]: one entry per cell of a multi-cell log, one for an unprefixed log."""
+    cs = cellsel.log_cells(path)
+    return [(None, summ(path))] if cs is None else [(k, summ(path, k)) for k in cs]
+
+
+def show(name, path, indent=''):
+    for k, r in summ_all(path):
+        if k is not None:
+            print(indent + "== cell %d" % k)
+        print(line(name, r))
+
+
+def arms(root):
     for arm in sorted(os.listdir(root)):
         d = os.path.join(root, arm)
         if not os.path.isdir(d) or not os.path.exists(os.path.join(d, 'mem.tsv')): continue
@@ -76,7 +89,7 @@ def arms(root, cell=None):
         print(f"== {arm}  min MemAvailable {mina} GB; per process cpu s / peak RSS / peak anon MB: "
               + ', '.join(f"{p}:{cpu[p]:.1f}s/{hwm[p]}/{anon[p]}" for p in cpu) + f"; GPU MiB {sorted(gmax.values())}")
         for log in sorted(f for f in os.listdir(d) if f.startswith('ue_') and f.endswith('.log')):
-            print(line(log, summ(os.path.join(d, log), cell)))
+            show(log, os.path.join(d, log))
         cl = os.path.join(d, 'chan.log')
         if os.path.exists(cl):
             st = [l.strip() for l in open(cl) if 'SHMIQ_CHAN_STAT' in l or 'SHMIQ_CHAN_END' in l]
@@ -85,10 +98,8 @@ def arms(root, cell=None):
 
 if __name__ == '__main__':
     args = sys.argv[1:]
-    cell = cellsel.pop_cell_arg(args)
     if args[:1] == ['--arms']:
-        arms(args[1], cell)
+        arms(args[1])
     else:
         for p in args:
-            out = line('log', summ(p, cell))       # a refusal (mixed cells) must happen before anything is printed
-            print(p); print(out)
+            print(p); show('log', p)

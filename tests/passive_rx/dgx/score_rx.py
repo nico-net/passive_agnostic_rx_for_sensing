@@ -164,17 +164,32 @@ def gate_line(s, env=os.environ):
         return "%s=%s%s%s%s" % (n, vs, op if p else {">=": "<", "<=": ">"}[op], lim, "" if p else "(FAIL)")
     return ("PASS " if ok else "FAIL ") + s["arm"] + " [" + env.get("GATE_MODE", GATE_DEFAULTS["GATE_MODE"]) + "] " + " ".join(fmt(x) for x in c), ok
 
+def arm_cells(arm):
+    """Cells of a multi-cell rx.log (lines prefixed "[c<k>] "), else None."""
+    rxd = os.path.join(arm, "rx") if os.path.isdir(os.path.join(arm, "rx")) else arm
+    return cellsel.log_cells(os.path.join(rxd, "rx.log"))
+
+def per_cell(arm, fn):
+    """-> [(cell or None, fn(arm, cell))]: one entry for an unprefixed / one-cell log, one per cell otherwise (never merged)."""
+    cs = arm_cells(arm)
+    return [(None, fn(arm, None))] if cs is None else [(k, fn(arm, k)) for k in cs]
+
 if __name__ == "__main__":
     gate = "--gate" in sys.argv
-    argv = sys.argv[1:]
-    cell = cellsel.pop_cell_arg(argv)      # --cell K: score one cell of a multi-cell log (mixed log without it: refused, exit 2)
-    args = [a for a in argv if a not in ("--json", "--gate")]
+    args = [a for a in sys.argv[1:] if a not in ("--json", "--gate")]
     rc = 0
+    res = {}
     for a in args:
-        s = score(a, cell)
-        if gate:
-            line, ok = gate_line(s)
-            print(line); rc |= 0 if ok else 1
-        else:
-            print(json.dumps(s, sort_keys=True))
+        for k, s in per_cell(a, score):
+            if gate:
+                line, ok = gate_line(s)
+                if k is not None:
+                    print("== cell %d" % k)
+                print(line); rc |= 0 if ok else 1
+            elif k is None:
+                print(json.dumps(s, sort_keys=True))
+            else:
+                res.setdefault(a, {})[str(k)] = s
+        if a in res:
+            print(json.dumps({"arm": os.path.basename(os.path.normpath(a)), "cells": res[a]}, sort_keys=True))
     sys.exit(rc)
