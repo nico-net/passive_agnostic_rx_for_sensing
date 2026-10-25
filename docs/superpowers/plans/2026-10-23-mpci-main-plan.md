@@ -635,3 +635,18 @@ openair1/SCHED_NR_UE/fapi_nr_ue_l1.c                                        2 | 
 openair1/SCHED_NR_UE/phy_procedures_nr_ue.c                                 4 | 0 1 1 0 2
 radio/COMMON/common_lib.c                                                   1 | 0 0 1 0 0
 ```
+
+## Task log (seam changes only)
+
+### D2 (2026-10-25, branch mpci/c-d2): process-wide cell count, LOG tag, nr_cprintf shim
+- `common/utils/nr_cell.h/.c` (seam change, additive): `int nr_cell_count_` (default 1), `static inline int nr_cell_count(void)` (relaxed atomic load),
+  `void nr_cell_set_count(int n)` (n outside 1..NR_CELL_MAX is fatal). The cell manager calls `nr_cell_set_count(N)` once, before the cell threads start.
+- `common/utils/LOG/log.c` (one hunk in `log_output_memory`) and the new header `common/utils/nr_cprintf.h`: when `nr_cell_count() > 1`, every line of a
+  record is prefixed `[c<nr_cell_idx()>] ` (before the colour start sequence; the colour end sequence of the previous record may therefore precede the tag on a
+  line: parsers strip ANSI first). N=1: no code path changes, output byte-identical.
+- `common/utils/LOG/CMakeLists.txt`: `nr_cell.c` is now compiled INTO the `LOG` library (log.c needs the TLS index and the count). Other targets must link `LOG`
+  and must not list `nr_cell.c` again (duplicate symbols); `test_nr_cell` keeps compiling it itself (it does not link LOG).
+- Threads never bound to a cell (radio threads) read index 0 and are tagged `[c0]`; GPU callback/CUDA event threads likewise. The dashboard parses the receiver-wide
+  radio line types (RFCHAN, CHPOW, RFSTALL, RFTSDISC, RFCENSUS) by grammar, regardless of the prefix. Per-cell job lines printed from callbacks must name the cell
+  explicitly (the job carries it).
+- Metrics JSON (`nr_passive_metrics_emit`): `"cell":<k>` is inserted as the first key only when `nr_cell_count() > 1` (adding `"cell":0` at N=1 would change bytes).

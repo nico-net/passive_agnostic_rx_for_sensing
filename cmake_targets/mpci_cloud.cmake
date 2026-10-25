@@ -36,3 +36,20 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_gpu_sm_plan COMMAND test_nr_gpu_sm_plan)
 endif()
 # ---- end B2B4 ----
+
+# ---- D2 ----
+# Per-cell line attribution: LOG prefix + nr_cprintf shim (C test), monitor/scorer multi-cell tests (python).
+if(ENABLE_TESTS)
+  add_executable(test_nr_log_cell ${CMAKE_SOURCE_DIR}/common/utils/tests/test_nr_log_cell.c)
+  target_include_directories(test_nr_log_cell PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/common/utils)
+  target_link_libraries(test_nr_log_cell PRIVATE LOG CONFIG_LIB minimal_lib pthread)
+  add_dependencies(tests test_nr_log_cell)
+  add_test(NAME test_nr_log_cell COMMAND test_nr_log_cell)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME test_mpci_multicell_monitor
+      COMMAND ${Python3_EXECUTABLE} -m unittest -v test_multicell
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/passive_rx/monitor)
+  endif()
+endif()
+# ---- end D2 ----

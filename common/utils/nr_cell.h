@@ -50,6 +50,19 @@ static inline int nr_cell_idx(void)
   return nr_cell_tls_idx_;
 }
 
+/* Process-wide number of active cells (seam addition D2, plan Task log). 1 (the default) is the single-cell receiver:
+ * every N=1 output is byte-identical to the pre-multi-cell code. Only the LOG tag (log.c) and the nr_cprintf shim
+ * (nr_cprintf.h) read it: they prefix "[c<k>] " when it is > 1. The cell manager calls nr_cell_set_count(n) once,
+ * before the cell threads start. n outside 1..NR_CELL_MAX is fatal. */
+extern int nr_cell_count_; /* private: use nr_cell_count() */
+
+static inline int nr_cell_count(void)
+{
+  return __atomic_load_n(&nr_cell_count_, __ATOMIC_RELAXED);
+}
+
+void nr_cell_set_count(int n);
+
 /* Bind the calling thread to cell idx. idx outside 0..NR_CELL_MAX-1 is fatal (message on stderr, exit 2). */
 void nr_cell_bind(int idx);
 

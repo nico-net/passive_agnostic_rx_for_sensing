@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #define _GNU_SOURCE
+#include "common/utils/nr_cell.h"
+#include <string.h>
 #include "nr_passive_metrics.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
 #include <math.h>
@@ -262,6 +264,17 @@ void nr_passive_metrics_emit(void)
   if (nr_passive_metrics_to_json(&m, buf, sizeof(buf)) < 0) {
     LOG_W(PHY, "SENSING: ISAC_METRICS buffer too small\n");
     return;
+  }
+  /* multi-cell process (nr_cell_count() > 1): the record names its cell, so the metrics file can be split per cell.
+   * One cell: no "cell" key, the record is byte-identical to the pre-multi-cell receiver (N=1 equivalence). */
+  if (nr_cell_count() > 1 && buf[0] == '{') {
+    char tag[24];
+    const int tl = snprintf(tag, sizeof(tag), "\"cell\":%d,", nr_cell_idx());
+    const size_t bl = strlen(buf);
+    if (bl + (size_t)tl + 1 <= sizeof(buf)) {
+      memmove(buf + 1 + tl, buf + 1, bl - 1 + 1);
+      memcpy(buf + 1, tag, (size_t)tl);
+    }
   }
   LOG_A(PHY, "SENSING: ISAC_METRICS %s\n", buf);
   pthread_mutex_lock(&mu);
