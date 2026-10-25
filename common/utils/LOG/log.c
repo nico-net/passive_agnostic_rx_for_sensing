@@ -27,6 +27,7 @@
 #include <sys/time.h>
 #include <stdatomic.h>
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cprintf.h"
 
 #define LOG_MEM_SIZE 100*1024*1024
 
@@ -1002,6 +1003,10 @@ static void log_output_memory(log_component_t *c, const char *file, const char *
       len = sizeof(log_buffer);
     }
   }
+  /* multi-cell receiver (nr_cell_count() > 1): every line of the record starts with "[c<k>] ", k = cell of the calling thread
+   * (decision F5). One cell: nothing changes. The colour end sequence is appended after the tag insertion. */
+  if (nr_cell_count() > 1)
+    len = (int)nr_cell_tag_lines(log_buffer, (size_t)len, sizeof(log_buffer) - 32, nr_cell_idx());
   if (!((g_log->flag) & FLAG_NOCOLOR)) {
     int n = snprintf(log_buffer+len, sizeof(log_buffer)-len, "%s", log_level_highlight_end[level]);
     if (n > 0) {

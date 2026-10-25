@@ -1,0 +1,2 @@
+mpci/fixtures/cell_b.log DL FAIL(drops) n_real=180 tot_p50=775 tot_p99=1190 tot_p999=1195 crc_all=92.2 n_q=178 crc_q=92.7 unqualified_low_snr=2 unqualified_retx=0 unqualified_floor=0 drops_pct=1.1 skipped=0 recovered=0 recovered_tot_p99=None
+mpci/fixtures/cell_b.log UL PASS n_real=180 tot_p50=443 tot_p99=697 tot_p999=698 crc_all=92.2 n_q=180 crc_q=92.2 unqualified_low_snr=0 unqualified_retx=0 unqualified_floor=0 drops_pct=0.0 skipped=0 recovered=0 recovered_tot_p99=None

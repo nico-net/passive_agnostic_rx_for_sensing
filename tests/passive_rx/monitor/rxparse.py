@@ -295,6 +295,8 @@ RX = {
                            r" gt5ms=(\d+) gt20ms=(\d+)"),
     "evm": re.compile(r"EVMGRANT rnti=0x([0-9a-f]+) (\d+)\.(\d+) crc=(\d) mcs=(\d+) tbl=(\d+) Qm=(\d+) Nl=(\d+) "
                       r"rb=(\d+)\+(\d+) .*?snr=(-?[\d.]+)"),
+    "p99age": re.compile(r"P99AGE slots\(([^)]*)\) pdsch_enq_real=\[([\d,]*)\] pdsch_enq_probe=\[([\d,]*)\] scan_deq=\[([\d,]*)\] "
+                         r"scanq_fresh=(\d+) retry_chains=(\d+) retry_yields=(\d+) retry_gated=(\d+)"),
     "evm_tail": re.compile(r"dec_us=(\d+).*?tbs=(\d+)"),
     "evm_e2e": re.compile(r" e2e=(?:-?\d+,){6}(-?\d+),"),   # EVMGRANT e2e=arr2enq,qwait,pre,dec,first_body,bodies,tot,lag (us); stage2 build
     "ul_lock": re.compile(r"ULLAYOUT (?:LOCK|BWP_LOCK) (?:len=(\d+) )?bwp=(\d+)@(\d+)"),
@@ -317,10 +319,44 @@ def classify_ssname(name):
 
 # --------------------------------------------------------------------------- run state
 
+# --------------------------------------------------------------------------- multi-cell attribution (plan 2026-10-23-mpci-main-plan.md, B.8, decision F5)
+# A process that runs more than one cell prefixes every receiver line with "[c<k>] " (common/utils/nr_cprintf.h, LOG layer).
+# No prefix = cell 0 (single-cell receivers print no prefix at all). The tag may follow a run-harness timestamp and the
+# leftovers of a colour sequence (the previous record's ESC[0m, with or without its ESC byte).
+CELL_TAG = re.compile(r"^((?:\x1b?\[[0-9;]*m)*(?:\d+(?:\.\d+)? )?)\[c(\d+)\] ")
+# Receiver-wide line types: radio-level facts of the one X410 claim, shown once in receiver-wide cards and mirrored to
+# every cell's page whatever prefix the printing thread carried (radio threads are bound to no cell).
+WIDE_TOKENS = ("CHPOW", "RFSTALL", "RFCENSUS", "RFTSDISC")
+
+
+def split_cell(line):
+    """-> (cell, line without the tag). cell is None for an untagged line (cell 0 / single-cell receiver)."""
+    if line.find("[c", 0, 64) < 0:
+        return None, line
+    m = CELL_TAG.match(line)
+    if not m:
+        return None, line
+    return int(m.group(2)), m.group(1) + line[m.end():]
+
+
+def is_receiver_wide(line):
+    i = line.find("SENSING: ")
+    if i >= 0:
+        tok = line[i + 9:].split(" ", 1)[0].split("[", 1)[0]
+        return tok in WIDE_TOKENS or line.startswith("RFCHAN", i + 9)
+    return "RFCHAN ch" in line or "CMDLINE:" in line
+
+
 class RunState:
     """Everything learned from one run. Single-threaded: the caller serialises feed_* and snapshot()."""
 
-    def __init__(self):
+    def __init__(self, cell_idx=0, parent=None):
+        # multi-cell: this object is cell 0 (and the router); children[k] is the state of cell k >= 1 (see feed_line)
+        self.cell_idx = cell_idx
+        self._parent = parent
+        self.children = {}
+        self.attributed = False        # a "[c<k>] " prefix was seen: counters are per cell, not receiver-wide
+        self._wide_lines = deque(maxlen=400)
         self.lines = 0
         self.events = deque(maxlen=EVENT_CAP)
         self.events_dropped = 0
@@ -361,6 +397,7 @@ class RunState:
         self.pdtim = {}
         self.pdtimpct = {}
         self.pdtimcls = {}
+        self.p99age = {}
         self.lat_series = deque(maxlen=SERIES_CAP)
         # metrics
         self.metrics_last = None
@@ -420,6 +457,61 @@ class RunState:
 
     # ---------------- log lines
     def feed_line(self, line, t=None):
+        """Route one log line: the cell prefix picks the cell state, receiver-wide radio lines go to every cell."""
+        k, rest = split_cell(line)
+        if k is not None:
+            self.attributed = True
+        if is_receiver_wide(rest):
+            self._wide_lines.append((rest, t))
+            self._feed_own(rest, t)
+            for ch in self.children.values():
+                ch._feed_own(rest, t)
+            return
+        if k:
+            self._child(k)._feed_own(rest, t)
+        else:
+            self._feed_own(rest, t)
+
+    def _child(self, k):
+        ch = self.children.get(k)
+        if ch is None:
+            ch = self.children[k] = RunState(k, self)
+            ch.t0_ns = self.t0_ns
+            ch.cmdline, ch.cfg_path, ch.env = self.cmdline, self.cfg_path, self.env
+            for rest, t in self._wide_lines:     # radio facts printed before this cell existed
+                ch._feed_own(rest, t)
+        elif ch.t0_ns is None:
+            ch.t0_ns = self.t0_ns
+        return ch
+
+    def cell_states(self):
+        return [self] + [self.children[k] for k in sorted(self.children)]
+
+    def snapshot_for(self, cell=None):
+        """Snapshot of the state that owns cell key `cell` (a PCI string, as in snapshot()["cells"]); default cell 0.
+        With more than one cell state, snap["cells"] is the union over all of them (each entry carries cell_idx) and
+        snap["sel"] = {"key": union key, "local": key inside the owning state, "cell_idx": k}. Single cell: == snapshot()."""
+        if not self.children:
+            return self.snapshot()
+        union, owner = {}, {}
+        for st in self.cell_states():
+            for key, c in st.cells.items():
+                k2 = key if key not in union else "%s@c%d" % (key, st.cell_idx)
+                union[k2] = dict(c, cell_idx=st.cell_idx)
+                owner[k2] = (st, key)
+        pick, local = self, None
+        if cell in owner:
+            pick, local = owner[cell]
+        snap = pick.snapshot()
+        if local is None and pick.cur_pci is not None:
+            local = str(pick.cur_pci)
+        snap["cells"] = union
+        snap["sel"] = {"key": cell if cell in owner else local, "local": local, "cell_idx": pick.cell_idx}
+        snap["cell_idx"] = pick.cell_idx
+        snap["multi"] = {"cells": [{"cell_idx": st.cell_idx, "pci_keys": sorted(st.cells)} for st in self.cell_states()]}
+        return snap
+
+    def _feed_own(self, line, t=None):
         self.lines += 1
         if t is not None:
             self.t_last = t
@@ -684,6 +776,15 @@ class RunState:
             if d:
                 self.pdtim = d
 
+    def _h_p99age(self, rest, t):
+        """P99AGE (nr_pdsch_passive_queue.c nr_pdsch_passive_queue_p99_dump, ISAC_PDTIM_CLASS=1): cumulative job-age histograms in slots."""
+        m = RX["p99age"].search(rest)
+        if m:
+            bins = m.group(1).split("/")
+            h = {k: [int(x) for x in v.split(",") if x] for k, v in zip(("pdsch_enq_real", "pdsch_enq_probe", "scan_deq"), m.groups()[1:4])}
+            self.p99age = dict(bins=bins, hist=h, scanq_fresh=int(m.group(5)),
+                               retry_chains=int(m.group(6)), retry_yields=int(m.group(7)), retry_gated=int(m.group(8)), t=t)
+
     def _h_evm(self, rest, t):
         m = RX["evm"].search(rest)
         if not m:
@@ -847,6 +948,10 @@ class RunState:
                 self._event(t, "new_rnti", "New RNTI 0x%04x seen (%s)" % (rnti, src))
 
     def feed_metrics(self, obj):
+        k = obj.get("cell")
+        if self._parent is None and isinstance(k, int) and not isinstance(k, bool) and k > 0:
+            self.attributed = True
+            return self._child(k).feed_metrics(obj)       # metrics.jsonl line of cell k (key present only with > 1 cell)
         tm = _num(obj.get("t_mono_ns"))
         key = (tm, obj.get("abs_slot"))
         if tm is not None:
@@ -883,6 +988,11 @@ class RunState:
     def feed_obs(self, o, t=None):
         if not isinstance(o, dict):
             return
+        if self._parent is None and self.children:      # a record of a cell >= 1 (its PCI is learned by that cell's state)
+            p_ = _num(o.get("pci"))
+            for ch in self.children.values():
+                if p_ is not None and str(int(p_)) in ch.cells:
+                    return ch.feed_obs(o, t)
         if t is None:
             t = self._rel(_num(o.get("t_mono_ns")))
         d = "UL" if o.get("dir") == "UL" else "DL"
@@ -1002,7 +1112,7 @@ class RunState:
                                    "zero_tb": m.get("ldpc_zero_tb")} if m.get("ldpc_ok") is not None else {}),
             "pusch": pusch, "ul": self.ul, "td_conv": self.td_conv, "new_ctx": self.new_ctx,
             "grants": self.grants_view(), "rnti_seen": len(self.rnti_seen),
-            "timing": {"pdtim": self.pdtim, "pdtimpct": self.pdtimpct, "pdtimcls": self.pdtimcls,
+            "timing": {"pdtim": self.pdtim, "pdtimpct": self.pdtimpct, "pdtimcls": self.pdtimcls, "p99age": self.p99age,
                        "series": list(self.lat_series)[-400:]},
             "metrics": m, "metrics_n": self.metrics_n, "series": list(self.series)[-720:], "window": last,
             "sense": dict(self.sense, export={k: m.get(k) for k in ("sense_cfr_drop", "sense_rec_drop", "sense_io_errors",
@@ -1071,7 +1181,7 @@ _SENSING = {
     "CSIRS_BLIND": RunState._h_csirs, "CONFIG_EPOCH": RunState._h_epoch, "blind": RunState._h_blind,
     "PDSCHQ": RunState._h_pdschq, "PUSCHQ": RunState._h_puschq, "LDPCDIAG": RunState._h_ldpc,
     "pusch_passive": RunState._h_pusch, "PDTIM": RunState._h_pdtim, "PDTIMPCT": RunState._h_pdtim,
-    "PDTIMCLS": RunState._h_pdtim, "PDTIMCLSST": RunState._h_pdtim, "EVMGRANT": RunState._h_evm,
+    "PDTIMCLS": RunState._h_pdtim, "PDTIMCLSST": RunState._h_pdtim, "EVMGRANT": RunState._h_evm, "P99AGE": RunState._h_p99age,
     "ULLAYOUT": RunState._h_ul, "ULLAYOUT_CRC_LOCK": RunState._h_ul, "Technique": RunState._h_td,
 }
 _PLAIN = (

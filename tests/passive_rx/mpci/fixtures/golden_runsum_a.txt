@@ -1,0 +1,2 @@
+mpci/fixtures/cell_a.log
+  log: pci=421 sib1=0 bank=1 csirs=0 PDSCHQ ok/dec=109/120 (90.8%) stale=0 EVM ok/n=109/120 rnti_ok=1 check_bad_max=0 pdtim_sum p50/p90/p99=None shm(ovr,drop_in,disc)=- eof=0

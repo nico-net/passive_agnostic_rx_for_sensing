@@ -9,6 +9,7 @@
 _Static_assert(NR_CELL_MAX == NR_POOL_MAX_CELLS, "NR_CELL_MAX must equal the core pool cell cap");
 
 __thread int nr_cell_tls_idx_ = 0;
+int nr_cell_count_ = 1;
 static volatile int g_fence;
 
 static void nr_cell_fatal(const char *fmt, int v)
@@ -17,6 +18,13 @@ static void nr_cell_fatal(const char *fmt, int v)
   fprintf(stderr, fmt, v);
   fputc('\n', stderr);
   exit(2);
+}
+
+void nr_cell_set_count(int n)
+{
+  if (n < 1 || n > NR_CELL_MAX)
+    nr_cell_fatal("cell count %d out of range [1, NR_CELL_MAX]", n);
+  __atomic_store_n(&nr_cell_count_, n, __ATOMIC_RELEASE);
 }
 
 void nr_cell_bind(int idx)
