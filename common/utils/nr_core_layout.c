@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include "nr_core_layout.h"
 #include "nr_core_plan.h"
+#include "nr_core_pool.h"
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -17,6 +18,7 @@
 #include <unistd.h>
 
 _Static_assert(NR_CL_MAX_CPUS == NR_CP_MAX_CPUS, "CPU mask size mismatch");
+_Static_assert(NR_CL_MAX_CELLS == NR_POOL_MAX_CELLS, "cell count mismatch with the core pool");
 
 const char *nr_cl_mode_name(nr_cl_mode_t m)
 {
@@ -167,11 +169,13 @@ static void sort_pool(const ctx_t *x, int *v, int m)
   }
 }
 
-int nr_cl_build(const nr_cl_topo_t *t, const nr_cl_over_t *o, nr_core_layout_t *L)
+static void build_core(const nr_cl_topo_t *t, const nr_cl_over_t *o, int nc, nr_core_layout_t *L)
 {
   nr_cl_over_t none;
   if (!o) nr_cl_over_none(&none), o = &none;
   memset(L, 0, sizeof(*L));
+  L->n_cells = nc;
+  for (int i = 0; i < NR_CL_MAX_CELLS; i++) L->rt_cell[i] = -1;
   L->rt = L->ring = L->uhd = L->gpu = L->uss = L->nid = L->dashboard = L->anchor = -1;
   ctx_t x = {.t = t, .n = t->ncpu > NR_CL_MAX_CPUS ? NR_CL_MAX_CPUS : (t->ncpu < 0 ? 0 : t->ncpu), .rt = -1, .maxcap = 1};
   const int n = x.n;
@@ -225,7 +229,27 @@ int nr_cl_build(const nr_cl_topo_t *t, const nr_cl_over_t *o, nr_core_layout_t *
     *slot = best_io(&x, cand);
   }
   if (L->uhd >= 0 && !count(L->uhd_mask, n)) L->uhd_mask[L->uhd] = 1;
+  /* cells 1..nc-1: one more RT reader each, same candidate chain as the first one (isolated RT set, else general CPUs minus the anchor
+   * and the radio IO); with >= 8 general CPUs the SMT sibling of a reader is only taken when nothing else is left */
+  L->rt_cell[0] = L->rt;
+  for (int k = 1; k < nc && L->rt >= 0; k++) {
+    int got = -1;
+    for (int stage = 0; stage < 2 && got < 0; stage++)
+      for (int pass = count(C, n) >= 8 ? 0 : 1; pass < 2 && got < 0; pass++) {
+        unsigned char cand[NR_CL_MAX_CPUS] = {0};
+        for (int c = 0; c < n; c++) {
+          bool ok = stage == 0 ? (A[c] && t->isolated[c]) : (C[c] && c != anchor0);
+          ok = ok && c != L->uhd && c != L->ring && !L->uhd_mask[c];
+          for (int j = 0; j < k && ok; j++) ok = c != L->rt_cell[j] && (pass || t->core[c] != t->core[L->rt_cell[j]]);
+          cand[c] = ok;
+        }
+        if (count(cand, n)) got = best_rt(&x, cand);
+      }
+    L->rt_cell[k] = got;
+  }
   if (L->rt >= 0) R[L->rt] = 1;
+  for (int k = 1; k < nc; k++)
+    if (L->rt_cell[k] >= 0) R[L->rt_cell[k]] = 1;
   if (L->ring >= 0) R[L->ring] = 1;
   for (int c = 0; c < n; c++) R[c] |= L->uhd_mask[c];
   /* W = the general CPUs minus the RT set (and its SMT siblings on hosts with >= 8 CPUs) */
@@ -335,7 +359,7 @@ int nr_cl_build(const nr_cl_topo_t *t, const nr_cl_over_t *o, nr_core_layout_t *
   if (o->dash >= 0 && o->dash < n && L->usable[o->dash]) {
     L->dashboard = o->dash;
     note(L, "dashboard=env", -1);
-    return 0;
+    return;
   }
   if (o->dash >= 0) note(L, "dashboard_env_ignored", o->dash);
   L->dashboard = last(L->hk, n);
@@ -345,6 +369,37 @@ int nr_cl_build(const nr_cl_topo_t *t, const nr_cl_over_t *o, nr_core_layout_t *
     L->dashboard = last(m, n);
   }
   if (L->dashboard < 0) L->dashboard = L->rt;
+}
+
+static bool hostable(const nr_core_layout_t *L)
+{
+  for (int k = 0; k < L->n_cells; k++)
+    if (L->rt_cell[k] < 0) return false;
+  return L->npool >= NR_CL_MIN_POOL;
+}
+int nr_cl_max_cells(const nr_cl_topo_t *t, const nr_cl_over_t *o)
+{
+  nr_core_layout_t S;
+  int m = 0;
+  nr_cl_over_t none;
+  if (!o) nr_cl_over_none(&none), o = &none;
+  for (int k = 1; k <= NR_CL_MAX_CELLS; k++) {
+    build_core(t, o, k, &S);
+    if (!hostable(&S)) break;
+    m = k;
+  }
+  return m;
+}
+int nr_cl_build_n(const nr_cl_topo_t *t, const nr_cl_over_t *o, int nc, nr_core_layout_t *L)
+{
+  nc = nc < 1 ? 1 : nc > NR_CL_MAX_CELLS ? NR_CL_MAX_CELLS : nc;
+  build_core(t, o, nc, L);
+  L->max_cells = nr_cl_max_cells(t, o);
+  return hostable(L) ? 0 : 1;
+}
+int nr_cl_build(const nr_cl_topo_t *t, const nr_cl_over_t *o, nr_core_layout_t *L)
+{
+  nr_cl_build_n(t, o, 1, L);
   return 0;
 }
 
@@ -404,13 +459,19 @@ int nr_cl_format(const nr_cl_topo_t *t, const nr_core_layout_t *L, char *buf, si
   }
   for (int i = 0, o = 0; i < L->npool && o + 8 < (int)sizeof(pool); i++) o += snprintf(pool + o, sizeof(pool) - (size_t)o, "%s%d", i ? "," : "", L->pool[i]);
   if (!L->npool) snprintf(pool, sizeof(pool), "-");
+  char cells[160] = "";
+  if (L->n_cells > 1) { /* N=1: the line is unchanged */
+    int o = snprintf(cells, sizeof(cells), " cells=%d rt_cells=", L->n_cells);
+    for (int k = 0; k < L->n_cells && o + 8 < (int)sizeof(cells); k++) o += snprintf(cells + o, sizeof(cells) - (size_t)o, "%s%d", k ? "," : "", L->rt_cell[k]);
+    snprintf(cells + o, sizeof(cells) - (size_t)o, " max_cells=%d", L->max_cells);
+  }
   return snprintf(buf, len,
                   "SENSING: CORE_PLAN host=%s cpus=%d online=%s allowed=%s isolated=%s nohz_full=%s cap=%s smt=%d llc=%d numa=%d gpu_node=%d"
                   " rt_cap=%d radio=%d dpdk=%s -> mode=%s W=%d rt=%d uhd=%s ring=%d pool=%s n=%d lane=%s home=%s hk=%s dashboard=%d"
-                  " gpu=%d uss=%d nid=%d check=%s recov=%s src=%s",
+                  " gpu=%d uss=%d nid=%d check=%s recov=%s src=%s%s",
                   t->host[0] ? t->host : "?", count(t->online, n), on, al, is, nz, cap, smt, ndom, nnode, t->gpu_node, t->rt_capable, t->radio,
                   dp, nr_cl_mode_name(L->mode), L->W, L->rt, uhd, L->ring, pool, L->npool, lane, home, hk, L->dashboard, L->gpu, L->uss,
-                  L->nid, chk, rc, L->src[0] ? L->src : "auto");
+                  L->nid, chk, rc, L->src[0] ? L->src : "auto", cells);
 }
 
 /* ---------------------------------------------------------------- probe */
@@ -561,19 +622,20 @@ static nr_cl_topo_t g_topo;
 static nr_core_layout_t g_lay;
 static bool g_active;
 
-static void activate(const nr_cl_topo_t *t, const nr_cl_over_t *o)
+static void activate(const nr_cl_topo_t *t, const nr_cl_over_t *o, int n_cells)
 {
   if (t != &g_topo) g_topo = *t;
-  nr_cl_build(&g_topo, o, &g_lay);
+  nr_cl_build_n(&g_topo, o, n_cells, &g_lay);
   g_active = true;
 }
-void nr_core_layout_set_for_test(const nr_cl_topo_t *t, const nr_cl_over_t *o) { activate(t, o); }
+void nr_core_layout_set_for_test(const nr_cl_topo_t *t, const nr_cl_over_t *o) { activate(t, o, 1); }
 
 static const char *const g_keys[] = {"ISAC_UE_RT_CORE", "ISAC_PDSCH_CORES", "ISAC_PUSCH_CORES", "ISAC_FLOAT_CORES", "ISAC_GPU_CHECK_CORES",
                                      "ISAC_GPU_WORKER_CORE", "ISAC_PDCCH_USS_CORE", "ISAC_PDCCH_NID_GPU_CORE", "ISAC_DASHBOARD_CORE",
                                      "ISAC_UHD_CTRL_CORES", "ISAC_USRP_RING_CORE"};
 static bool g_pin_nocap;
-void nr_core_layout_init(bool passive, bool radio)
+void nr_core_layout_init(bool passive, bool radio) { nr_core_layout_init_n(passive, radio, 1); }
+void nr_core_layout_init_n(bool passive, bool radio, int n_cells)
 {
   if (!passive || g_active) return;
   const char *off = getenv("ISAC_CORE_PLAN");
@@ -584,7 +646,7 @@ void nr_core_layout_init(bool passive, bool radio)
   static nr_cl_over_t o;
   nr_cl_topo_read(&g_topo, radio);
   nr_cl_over_from_env(&o);
-  activate(&g_topo, &o);
+  activate(&g_topo, &o, n_cells);
   const char *pn = getenv("ISAC_CORE_PIN_NOCAP");
   g_pin_nocap = !(pn && !strcmp(pn, "0"));
   char line[4096];

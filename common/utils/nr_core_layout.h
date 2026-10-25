@@ -48,6 +48,8 @@ extern "C" {
 #define NR_CL_SMALL_MAX_W 5
 #define NR_CL_LANE 5
 #define NR_CL_SEP_HK 3
+#define NR_CL_MAX_CELLS 16 /* = NR_POOL_MAX_CELLS (nr_core_pool.h; asserted in nr_core_layout.c) */
+#define NR_CL_MIN_POOL 2   /* floor of a hostable plan: DL cap N-1 and the scan reserve token need >= 2 tokens (W >= 3) */
 
 typedef enum { NR_CL_SEP = 0, NR_CL_COMPACT, NR_CL_SMALL } nr_cl_mode_t;
 
@@ -72,6 +74,9 @@ typedef struct { /* explicit operator overrides; -1 / has_* false = none */
 typedef struct {
   nr_cl_mode_t mode;
   int W, anchor;
+  int n_cells;                 /* cells the plan was built for (1 = single cell, the historical layout) */
+  int rt_cell[NR_CL_MAX_CELLS]; /* RT reader (slot thread) of each cell, -1 = none found; rt_cell[0] == rt */
+  int max_cells;               /* most cells this host can host with every reader distinct and pool >= NR_CL_MIN_POOL (0: not even one) */
   int rt, ring, uhd, gpu, uss, nid, dashboard; /* -1 = none / unpinned */
   int npool, pool[NR_CL_MAX_POOL];             /* ordered tokens */
   unsigned char usable[NR_CL_MAX_CPUS];  /* CPUs an explicit pin may name: online & (allowed | isolated) */
@@ -88,6 +93,16 @@ typedef struct {
 void nr_cl_over_none(nr_cl_over_t *);
 /* Pure: no environment, filesystem or affinity access. Returns 0. */
 int nr_cl_build(const nr_cl_topo_t *, const nr_cl_over_t *, nr_core_layout_t *);
+/* Pure, N cells (1..NR_CL_MAX_CELLS, clamped): one RT reader per cell (Decision F2 (a)), each taken by the ranking of the single
+ * reader (isolated RT set first, else general CPUs minus the anchor and the radio IO; capacity buckets, GPU NUMA node, lowest
+ * number; with |C| >= 8 a CPU whose SMT sibling is already a reader is taken only when nothing else is left). Cell 0's reader and the
+ * radio IO are those of nr_cl_build; the pool, the float lane and the housekeeping are built on the reduced W with the same
+ * SEP / COMPACT / SMALL rules. nr_cl_build(t, o, L) == nr_cl_build_n(t, o, 1, L) (struct and CORE_PLAN line).
+ * Returns 0 when all n_cells readers exist and the pool has >= NR_CL_MIN_POOL tokens, else 1 (the layout is still filled best effort;
+ * cells without a reader have rt_cell = -1; n_cells > max_cells). */
+int nr_cl_build_n(const nr_cl_topo_t *, const nr_cl_over_t *, int n_cells, nr_core_layout_t *);
+/* Most cells the host can host (the value of nr_core_layout_t.max_cells), for the admission model. */
+int nr_cl_max_cells(const nr_cl_topo_t *, const nr_cl_over_t *);
 /* The CORE_PLAN line (without trailing newline). */
 int nr_cl_format(const nr_cl_topo_t *, const nr_core_layout_t *, char *buf, size_t n);
 const char *nr_cl_mode_name(nr_cl_mode_t);
@@ -101,6 +116,8 @@ void nr_cl_over_from_env(nr_cl_over_t *);
  * CORE_PLAN line to stderr and exports every planned key that is unset (nr_core_layout_env_default) so that all
  * existing readers (getenv / nr_env_core / the radio library) see the plan instead of the built-in site numbers. */
 void nr_core_layout_init(bool passive, bool radio);
+/* Same with the cell count the caller decided (the CORE_PLAN line then lists the extra readers when n_cells > 1). */
+void nr_core_layout_init_n(bool passive, bool radio, int n_cells);
 /* threadCreate: true when an explicit affinity is applied although the process has no CAP_SYS_NICE (layout active and
  * ISAC_CORE_PIN_NOCAP != 0). */
 bool nr_core_layout_pin_nocap(void);
