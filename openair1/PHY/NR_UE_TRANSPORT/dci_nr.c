@@ -30,6 +30,7 @@
 
 #include "assertions.h"
 #include "T.h"
+#include "common/utils/nr_cell.h"
 
 // #define NR_PDCCH_DCI_DEBUG // activates NR_PDCCH_DCI_DEBUG logs
 #ifdef NR_PDCCH_DCI_DEBUG
@@ -1125,7 +1126,10 @@ static void nr_dci_decoding_procedure(const UE_nr_rxtx_proc_t *proc,
        * they hit. Half of the 2026-09-15 X410 acquisitions never decoded SIB1 with PBCH at 50/50
        * and nothing said why. Every 500 SI candidates, plus the first hit. */
       if (is_SI) {
-        static uint32_t s_si_try, s_si_hit;
+        NR_CELL_STATIC(uint32_t, s_si_try);
+        #define s_si_try NR_CELL_REF(s_si_try)
+        NR_CELL_STATIC(uint32_t, s_si_hit);
+        #define s_si_hit NR_CELL_REF(s_si_hit)
         s_si_try++;
         if (crc == n_rnti)
           s_si_hit++;
