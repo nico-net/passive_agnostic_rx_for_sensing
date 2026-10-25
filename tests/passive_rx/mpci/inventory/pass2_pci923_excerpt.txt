@@ -1,0 +1,4 @@
+[PHY]    Initial sync: pbch decoded sucessfully, ssb index 0
+[PHY]    Initial sync successful, PCI: 923
+[PHY]    Got synch: hw_slot_offset 19, carrier off 369 Hz
+[MAC]    SENSING: MIB fields sfn=940 k_ssb=10 scs_common=1 coreset0=11 ss0=4 dmrs_typeA=1 barred=0 intraFreqResel=0

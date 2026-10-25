@@ -1,0 +1,101 @@
+{
+ "schema": 1,
+ "_comment": "Fixture. Measured pass-1 front-end output (-C = GSCN + (1182-1171)*30 kHz, --ssb 1171): AUTOFRONT-20261012 table (415,923,403,508,675 SSS/DMRS/CFO from the 1 s survey captures) and FRONTLIVE-20261013 table (PCI 4 co-channel with 508, CFO 403 +2225). Receiver-side detections only; no gNB log or config. window = fixture values. [MEASURED, DGX offline front end]",
+ "window": {
+  "centre_hz": 3600000000,
+  "rate_msps": 122.88,
+  "n_rx": 4
+ },
+ "cells": [
+  {
+   "id": "pci415",
+   "centre_hz": 3680010000,
+   "gscn": 7971,
+   "ssb_hz": 3679680000,
+   "ssb_index": 4,
+   "pci": 415,
+   "cfo_hz": -4849,
+   "n_rb_hint": null,
+   "scs_khz": 30,
+   "sss_gap": 4.47,
+   "dmrs_ratio": 3.74,
+   "first_seen_ns": 1000,
+   "state": "acquire"
+  },
+  {
+   "id": "pci923",
+   "centre_hz": 3731850000,
+   "gscn": 8007,
+   "ssb_hz": 3731520000,
+   "ssb_index": 0,
+   "pci": 923,
+   "cfo_hz": -4850,
+   "n_rb_hint": null,
+   "scs_khz": 30,
+   "sss_gap": 4.68,
+   "dmrs_ratio": 5.29,
+   "first_seen_ns": 1001,
+   "state": "acquire"
+  },
+  {
+   "id": "pci508",
+   "centre_hz": 3570570000,
+   "gscn": 7895,
+   "ssb_hz": 3570240000,
+   "ssb_index": 1,
+   "pci": 508,
+   "cfo_hz": -4761,
+   "n_rb_hint": null,
+   "scs_khz": 30,
+   "sss_gap": 3.89,
+   "dmrs_ratio": 4.18,
+   "first_seen_ns": 1002,
+   "state": "acquire"
+  },
+  {
+   "id": "pci4",
+   "centre_hz": 3570570000,
+   "gscn": 7895,
+   "ssb_hz": 3570240000,
+   "ssb_index": 0,
+   "pci": 4,
+   "cfo_hz": -5297,
+   "n_rb_hint": null,
+   "scs_khz": 30,
+   "sss_gap": 2.15,
+   "dmrs_ratio": 2.24,
+   "first_seen_ns": 1003,
+   "state": "acquire"
+  },
+  {
+   "id": "pci403",
+   "centre_hz": 3625290000,
+   "gscn": 7933,
+   "ssb_hz": 3624960000,
+   "ssb_index": 3,
+   "pci": 403,
+   "cfo_hz": 2225,
+   "n_rb_hint": null,
+   "scs_khz": 30,
+   "sss_gap": 4.07,
+   "dmrs_ratio": 4.91,
+   "first_seen_ns": 1004,
+   "state": "acquire"
+  },
+  {
+   "id": "pci675",
+   "centre_hz": 3426570000,
+   "gscn": 7795,
+   "ssb_hz": 3426240000,
+   "ssb_index": 0,
+   "pci": 675,
+   "cfo_hz": -4849,
+   "n_rb_hint": null,
+   "scs_khz": 30,
+   "sss_gap": 3.17,
+   "dmrs_ratio": 3.19,
+   "first_seen_ns": 1005,
+   "state": "acquire"
+  }
+ ]
+}
