@@ -6,6 +6,9 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <sys/stat.h>
+#include <cstdio>
+#include "nr_host_membudget.h"
 #include <vector>
 namespace {
 int attrs[128], count, calls, device_allocs, host_allocs, frees, registrations;
@@ -84,7 +87,7 @@ TEST_F(Platform, ProbeIsOnceAndCapturesCapabilities) {
   EXPECT_EQ(calls,1); EXPECT_EQ(c->major,12); EXPECT_EQ(c->minor,1);
   EXPECT_TRUE(c->pageable_memory_access); EXPECT_TRUE(c->host_page_tables);
   EXPECT_TRUE(c->concurrent_managed_access); EXPECT_TRUE(c->host_native_atomic_supported);
-  EXPECT_EQ(c->total_memory,2048u); EXPECT_EQ(c->free_memory,1024u);
+  EXPECT_EQ(c->total_memory,2048u); EXPECT_EQ(c->free_raw,1024u); EXPECT_EQ(c->free_memory,2048u); // SHARED: headroom = host available capped by total (live host >> 2 KiB)
 }
 TEST_F(Platform, NoDeviceFailsClosedAndDiscreteIsReady) {
   count=0;
@@ -321,4 +324,65 @@ TEST_F(Platform, CubinAndPtxCompatibility) {
   EXPECT_FALSE(nr_gpu_arch_compatible(12,1,"121a"));
   EXPECT_FALSE(nr_gpu_module_check("mock","89-real"));
 }
+}
+
+// ---- unified-memory headroom (fixtures: synthetic GB10-like host, 130.7 GB total, MemFree 8.7 GB, MemAvailable 113 GB [fixture]) ----
+namespace {
+const size_t GB = (size_t)1 << 30;
+void put(const std::string &path, const std::string &text) {
+  for (size_t i = 1; i < path.size(); i++) if (path[i] == '/') mkdir(path.substr(0, i).c_str(), 0755);
+  FILE *f = fopen(path.c_str(), "w"); ASSERT_NE(nullptr, f); fputs(text.c_str(), f); fclose(f);
+}
+struct HostFix {
+  std::string root;
+  HostFix() { char t[] = "/tmp/gpuhead_fixXXXXXX"; root = mkdtemp(t); }
+  ~HostFix() { std::string c = "rm -rf " + root; if (system(c.c_str())) {} }
+  void meminfo(size_t free_kb, size_t avail_kb) {
+    put(root + "/proc/meminfo", "MemTotal: 137000000 kB\nMemFree: " + std::to_string(free_kb) + " kB\nMemAvailable:   " + std::to_string(avail_kb) + " kB\nSwapTotal: 8388604 kB\nSwapFree: 8388604 kB\n");
+  }
+  size_t avail() { nr_host_probe_t p; nr_host_probe_at((root + "/proc").c_str(), (root + "/cg").c_str(), &p); return p.avail; }
+};
+}
+TEST(GpuHeadroom, UnifiedUsesAvailableNotMemFree) {
+  HostFix f; f.meminfo(9122000, 118000000);  // MemFree ~8.7 GB, MemAvailable ~112.5 GB
+  const size_t total = 140 * GB / 1, raw = 8700000000ull;
+  const size_t h = nr_gpu_headroom_calc(NR_GPU_SHARED, raw, total, f.avail());
+  EXPECT_EQ(h, (size_t)118000000 * 1024);
+  EXPECT_GT(h, 10 * raw);
+}
+TEST(GpuHeadroom, UnifiedIsCappedByDeviceTotal) {
+  EXPECT_EQ(nr_gpu_headroom_calc(NR_GPU_SHARED, 1 * GB, 64 * GB, 100 * GB), 64 * GB);
+}
+TEST(GpuHeadroom, UnifiedCgroupLimitBelowMemAvailableWins) {
+  HostFix f; f.meminfo(9122000, 118000000);
+  put(f.root + "/proc/self/cgroup", "0::/job\n");
+  put(f.root + "/cg/job/memory.max", "17179869184\n");   // 16 GiB
+  put(f.root + "/cg/job/memory.high", "max\n");
+  put(f.root + "/cg/job/memory.current", std::to_string(4 * GB) + "\n");
+  EXPECT_EQ(f.avail(), 12 * GB);
+  EXPECT_EQ(nr_gpu_headroom_calc(NR_GPU_SHARED, 8 * GB, 140 * GB, f.avail()), 12 * GB);
+}
+TEST(GpuHeadroom, UnknownHostKeepsRawFree) {
+  HostFix f;  // no /proc/meminfo at all
+  EXPECT_EQ(f.avail(), SIZE_MAX);
+  EXPECT_EQ(nr_gpu_headroom_calc(NR_GPU_SHARED, 5 * GB, 8 * GB, f.avail()), 5 * GB);
+}
+TEST(GpuHeadroom, DiscreteAndCpuTiersKeepCudaFreeWhateverTheHost) {
+  // sens6-like discrete card (RTX 4060 Ti, 8 GB [fixture]) on a 14.8 GB host with a large MemAvailable
+  EXPECT_EQ(nr_gpu_headroom_calc(NR_GPU_DISCRETE, 7 * GB, 8 * GB, 12 * GB), 7 * GB);
+  EXPECT_EQ(nr_gpu_headroom_calc(NR_GPU_DISCRETE, 7 * GB, 8 * GB, 2 * GB), 7 * GB);
+  EXPECT_EQ(nr_gpu_headroom_calc(NR_GPU_NONE, 0, 0, 12 * GB), 0u);
+}
+TEST_F(Platform, SharedProbeLogsRawAndHeadroomAndStoresHeadroom) {
+  attrs[88]=attrs[100]=1; // SHARED (mock: free_raw 1024, total 2048; the live host has far more than 2 KiB available)
+  const nr_gpu_caps_t *c = nr_gpu_platform_probe();
+  ASSERT_EQ(c->model, NR_GPU_SHARED);
+  EXPECT_EQ(c->free_raw, 1024u); EXPECT_EQ(c->free_memory, 2048u);
+  EXPECT_EQ(nr_gpu_platform_free_at_probe(), 2048u);
+  EXPECT_NE(last_platform_line.find("free_raw=1024 free=2048"), std::string::npos) << last_platform_line;
+}
+TEST_F(Platform, DiscreteProbeKeepsCudaFree) {
+  const nr_gpu_caps_t *c = nr_gpu_platform_probe();
+  ASSERT_EQ(c->model, NR_GPU_DISCRETE);
+  EXPECT_EQ(c->free_raw, 1024u); EXPECT_EQ(c->free_memory, 1024u);
 }
