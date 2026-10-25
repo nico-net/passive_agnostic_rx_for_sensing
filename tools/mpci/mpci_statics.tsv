@@ -1,19 +1,19 @@
 # mpci static audit table (tools/mpci/static_audit.py). Columns: file line symbol kind type class owner note
 # Regenerate with `static_audit.py --write`: class/owner/note of existing rows are preserved.
 file	line	symbol	kind	type	class	owner	note
-common/utils/nr_core_layout.c	23	nr_cl_mode_name::n	func_static	const char *const[]	CONST	B1	auto
-common/utils/nr_core_layout.c	560	g_topo	file_static	nr_cl_topo_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	561	g_lay	file_static	nr_core_layout_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	562	g_active	file_static	bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	572	g_keys	file_static	const char *const[]	CONST	B1	auto
-common/utils/nr_core_layout.c	575	g_pin_nocap	file_static	bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	584	nr_core_layout_init::o	func_static	nr_cl_over_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	621	nr_core_layout_filter_cpu::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	630	nr_core_layout_env_default::chk	func_static	char[256][256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	630	nr_core_layout_env_default::lane	func_static	char[256][256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	630	nr_core_layout_env_default::one	func_static	char[256][6][16]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	630	nr_core_layout_env_default::pool	func_static	char[256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	630	nr_core_layout_env_default::uhd	func_static	char[256][256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	25	nr_cl_mode_name::n	func_static	const char *const[]	CONST	B1	auto
+common/utils/nr_core_layout.c	621	g_topo	file_static	nr_cl_topo_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	622	g_lay	file_static	nr_core_layout_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	623	g_active	file_static	bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	633	g_keys	file_static	const char *const[]	CONST	B1	auto
+common/utils/nr_core_layout.c	636	g_pin_nocap	file_static	bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	646	nr_core_layout_init_n::o	func_static	nr_cl_over_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	683	nr_core_layout_filter_cpu::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	692	nr_core_layout_env_default::chk	func_static	char[256][256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	692	nr_core_layout_env_default::lane	func_static	char[256][256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	692	nr_core_layout_env_default::one	func_static	char[256][6][16]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	692	nr_core_layout_env_default::pool	func_static	char[256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	692	nr_core_layout_env_default::uhd	func_static	char[256][256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 common/utils/nr_core_pool.c	50	tl	tls	struct {}	TLS	B1	existing thread-local
 common/utils/nr_core_pool.c	56	tl_cv	tls	pthread_cond_t	TLS	B1	existing thread-local
 common/utils/nr_core_pool.c	57	tl_last	tls	int	TLS	B1	existing thread-local
@@ -471,12 +471,12 @@ openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c	58	draining	file_static	atom
 openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c	59	current_work	tls	nr_cfg_epoch_work_t *	TLS	A3	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c	60	enable_once	file_static	pthread_once_t	UNCLASSIFIED	A3	
 openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c	61	enabled	file_static	bool	UNCLASSIFIED	A3	
-openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c	43	nr_passive_metrics_pci	global	_Atomic int	UNCLASSIFIED	A3	
-openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c	200	nr_passive_metrics_collect::fn	func_static	cuda_ctr_t	UNCLASSIFIED	A3	
-openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c	207	nr_passive_metrics_collect::tf	func_static	trips_t	UNCLASSIFIED	A3	
-openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c	256	nr_passive_metrics_emit::mu	func_static	pthread_mutex_t	UNCLASSIFIED	A3	
-openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c	257	nr_passive_metrics_emit::f	func_static	FILE *	UNCLASSIFIED	A3	
-openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c	258	nr_passive_metrics_emit::tried	func_static	int	UNCLASSIFIED	A3	
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c	45	nr_passive_metrics_pci	global	_Atomic int	UNCLASSIFIED	A3	
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c	202	nr_passive_metrics_collect::fn	func_static	cuda_ctr_t	UNCLASSIFIED	A3	
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c	209	nr_passive_metrics_collect::tf	func_static	trips_t	UNCLASSIFIED	A3	
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c	258	nr_passive_metrics_emit::mu	func_static	pthread_mutex_t	UNCLASSIFIED	A3	
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c	259	nr_passive_metrics_emit::f	func_static	FILE *	UNCLASSIFIED	A3	
+openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c	260	nr_passive_metrics_emit::tried	func_static	int	UNCLASSIFIED	A3	
 openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c	8	kCb0Reason	file_static	const char *const[16]	CONST	A3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c	47	pdsch_schedule_json::stage	func_static	const char *const[]	CONST	A3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c	48	pdsch_schedule_json::reason	func_static	const char *const[]	CONST	A3	auto
