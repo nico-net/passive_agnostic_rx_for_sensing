@@ -13,7 +13,7 @@ target_link_libraries(shm_iq PRIVATE radio_common m pthread rt)
 set_target_properties(shm_iq PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
 # in-process transport + channelizer as one static library for the receiver (D1/G5 link it)
-add_library(mpci_iq STATIC ${MPCI_RC}/shm_iq_ring.c ${MPCI_RC}/iq_ddc.c)
+add_library(mpci_iq STATIC ${MPCI_RC}/shm_iq_ring.c ${MPCI_RC}/iq_ddc.c ${MPCI_RC}/iq_chan.c)
 target_include_directories(mpci_iq PUBLIC ${MPCI_RC})
 target_link_libraries(mpci_iq PUBLIC m pthread rt)
 set_target_properties(mpci_iq PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -35,5 +35,12 @@ if(ENABLE_TESTS)
   target_link_libraries(test_iq_ddc_equiv PRIVATE m)
   add_dependencies(tests test_iq_ddc_equiv)
   add_test(NAME test_iq_ddc_equiv COMMAND test_iq_ddc_equiv)
+  # channelizer: bit-exactness through the loop, live add/remove/retune, overrun recovery, backend registry, capacity bench; the 60 s soak is a separate test
+  add_executable(test_iq_chan ${MPCI_RC}/tests/test_iq_chan.c)
+  target_include_directories(test_iq_chan PRIVATE ${MPCI_RC}/tests)
+  target_link_libraries(test_iq_chan PRIVATE mpci_iq)
+  add_dependencies(tests test_iq_chan)
+  add_test(NAME test_iq_chan COMMAND test_iq_chan)
+  add_test(NAME test_iq_chan_soak5 COMMAND nice -n 19 test_iq_chan --soak 5) # the 60 s run is the STOP evidence, run by hand
 endif()
 # ---- end C1C2 ----
