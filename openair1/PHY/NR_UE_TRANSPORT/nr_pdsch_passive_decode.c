@@ -4796,6 +4796,11 @@ void *nr_pdsch_passive_cb0_cpu_ldpc(void)
 
 bool nr_pdsch_passive_gw_cb0_decode(const nr_pdsch_gw_cb0_t *cb, bool *ldpc_ok)
 {
+  return nr_pdsch_passive_gw_cb_decode_iter(cb, 0, ldpc_ok);
+}
+
+bool nr_pdsch_passive_gw_cb_decode_iter(const nr_pdsch_gw_cb0_t *cb, int max_iter, bool *ldpc_ok)
+{
   if (ldpc_ok)
     *ldpc_ok = false;
   pthread_once(&g_cb0_ldpc_once, cb0_ldpc_load);
@@ -4828,6 +4833,8 @@ bool nr_pdsch_passive_gw_cb0_decode(const nr_pdsch_gw_cb0_t *cb, bool *ldpc_ok)
   dp.BG = (uint8_t)p->BG;
   dp.Z = (uint16_t)p->Z;
   dp.numMaxIter = (uint8_t)nr_pdsch_ldpc_cap(); /* passive_ldpc_decode_core(): max_ldpc_iterations */
+  if (max_iter > 0 && max_iter < dp.numMaxIter)
+    dp.numMaxIter = (uint8_t)max_iter;
   dp.outMode = nrLDPC_outMode_BIT;
   dp.R = (uint8_t)nr_get_R_ldpc_decoder(p->rv, (int)p->E, p->BG, p->Z, &llrLen, 0);
   dp.crc_type = crcType(p->C, p->A);

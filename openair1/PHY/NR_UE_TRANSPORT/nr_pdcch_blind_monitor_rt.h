@@ -205,15 +205,9 @@ typedef struct {
   int   ul_thread_core;    // first core to pin consumers to; <0 = unpinned. Do not share with
                            // --thread-pool's cores.
 
-  // ---- UCI-on-PUSCH reservation search (2026-08-28). 0 = off, and off is the previous behaviour.
-  // O_ACK is not in the uplink DCI -- the DAI pins it only modulo 4 -- so the candidates consistent
-  // with the observed DAI are tried and the transport-block CRC decides. See the block comment on
-  // passive_ul_unav_res() in nr_pusch_passive_decode.c.
-  int   ul_uci_search;     // max UCI RE footprint to sweep when exploring; 0 = disabled
-  int   ul_uci_explore_every; // wide sweep on 1 CRC failure in N (0 = cache only). The
-                              // footprint repeats, so exploration is amortised, not per-grant.
-  int   ul_uci_beta;       // betaOffsets HARQ-ACK index (TS 38.213 Table 9.3-1)
-  int   ul_uci_alpha;      // alpha-scaling index: 0=0.5 1=0.65 2=0.8 3=1.0
+  // UCI-on-PUSCH: no configuration. The passive decoder searches it blind by default (nr_pusch_uci_blind.h); the former
+  // key pdcch_blind_monitor_ul_uci is no longer declared, so an older cfg that still sets it parses unchanged (undeclared
+  // keys are not read).
 
   // ---- DCI format 1_0 scanning (2026-08-21). All-zero = off, i.e. exactly the format-1_1-only
   // behaviour this module had before. See nr_pdcch_blind_monitor.h's nr_blind_dci_format_t block
