@@ -11,6 +11,12 @@
 #include <unistd.h>
 #include <sched.h>
 #include <sys/wait.h>
+#include <condition_variable>
+#include <deque>
+#include <memory>
+#include <queue>
+#include <regex>
+#include <string>
 extern "C" {
 #include "nr_core_pool.h"
 }
@@ -102,17 +108,11 @@ TEST(CorePool, OldestDeadlineFirstInAClass)
   nr_pool_destroy(p);
 }
 
-TEST(CorePool, CellsAlternateWithinAClass)
-{
-  nr_pool_t *p = mk(1);
-  // cell 0 has the four oldest deadlines; plain deadline order would serve it first, round-robin must interleave.
-  const auto o = grant_order(p, {{NR_POOL_DECODE, 0, 10, 0}, {NR_POOL_DECODE, 0, 20, 1}, {NR_POOL_DECODE, 0, 30, 2}, {NR_POOL_DECODE, 0, 40, 3},
-                                 {NR_POOL_DECODE, 1, 50, 4}, {NR_POOL_DECODE, 1, 60, 5}, {NR_POOL_DECODE, 1, 70, 6}, {NR_POOL_DECODE, 1, 80, 7}});
-  ASSERT_EQ(o.size(), 8u);
-  for (size_t i = 0; i + 1 < o.size(); i++) EXPECT_NE(o[i] / 4, o[i + 1] / 4) << "grants " << i << "," << i + 1 << " from the same cell";
-  EXPECT_LT(o[0], o[2]); // inside a cell still by deadline
-  nr_pool_destroy(p);
-}
+// B1: across cells the order inside a class is by decayed token-time usage (equal usage: round-robin). The original wall-clock version of this test held
+// the token with cell 0, which (by design) gave cell 1 the first four grants to even out the usage; it is now a virtual-time test (sim, defined
+// below) whose holder belongs to a third cell, so both cells start at equal usage and equal-length jobs must interleave.
+static void cells_alternate_body();
+TEST(CorePool, CellsAlternateWithinAClass) { cells_alternate_body(); }
 
 // (b): scans can never take the last token (the decode reserve), low classes leave a token for scan and one for decode.
 TEST(CorePool, CapsLeaveATokenForDecodeAndScan)
@@ -771,6 +771,436 @@ TEST(CorePool, HomeAttrOnlyForALessee)
   EXPECT_FALSE(nr_pool_site_home_attr(&a)); // no lease
   pthread_attr_destroy(&a);
 }
+
+// ===================================================================================================================================
+// B1 (mpci-main plan B.4): deterministic virtual-time scheduling tests. Real pool, real threads, but the pool clock is a virtual one
+// (nr_pool_set_clock_for_test) and a single driver advances it, so every grant order, wait and share below is exactly reproducible.
+// Each job is a thread that leases (prio, cell), records the virtual time of its grant, and releases when the driver says its duration is over.
+// ===================================================================================================================================
+namespace sim {
+static std::atomic<uint64_t> vt{0};
+static uint64_t clk() { return vt.load(); }
+
+struct Spec { uint64_t t; int prio, cell; uint64_t dur, dl; };
+struct Job {
+  int id = 0, prio = 0, cell = 0;
+  uint64_t arr = 0, dur = 0, dl = 0, granted_at = 0, released_at = 0;
+  std::atomic<bool> granted{false}, rel{false};
+  std::mutex m;
+  std::condition_variable cv;
+  bool go = false;
+  std::thread th;
+};
+struct Sim {
+  nr_pool_t *p;
+  std::deque<std::unique_ptr<Job>> jobs;
+  std::vector<Job *> live; // started, not released
+  struct Cmp { bool operator()(const std::pair<Spec, int> &a, const std::pair<Spec, int> &b) const { return a.first.t != b.first.t ? a.first.t > b.first.t : a.second > b.second; } };
+  std::priority_queue<std::pair<Spec, int>, std::vector<std::pair<Spec, int>>, Cmp> arrivals;
+  int aseq = 0, started = 0;
+  std::atomic<int> ngranted{0};
+  std::atomic<int> conc_cell[NR_POOL_MAX_CELLS];
+  std::atomic<int> conc_tot{0};
+  std::function<void(Job &)> on_done;
+  struct Sample { uint64_t t; int tot; int cell[4]; };
+  std::vector<Sample> samples; // after every settle
+  bool stuck = false;
+  explicit Sim(nr_pool_t *pool) : p(pool)
+  {
+    for (auto &c : conc_cell) c = 0;
+    vt = 0;
+    nr_pool_set_clock_for_test(clk);
+  }
+  ~Sim() { nr_pool_set_clock_for_test(nullptr); }
+  void add(const Spec &sp) { arrivals.push({sp, aseq++}); }
+  void settle()
+  {
+    for (int i = 0; i < 2000000; i++) {
+      const int w = nr_pool_total_waiting(p); // lock-free: read BEFORE the locked stats (a grant moves one from waiting to leased, never the reverse)
+      nr_pool_stats_t st;
+      nr_pool_stats(p, &st);
+      uint64_t l = 0;
+      for (int k = 0; k < NR_POOL_NPRIO; k++) l += st.leases[k];
+      if ((int)l == ngranted.load() && (int)l + w == started) return;
+      if (i < 200) sched_yield(); else usleep(50);
+    }
+    fprintf(stderr, "SIM: did not settle t=%lu started=%d granted=%d waiting=%d\n", (unsigned long)vt.load(), started, ngranted.load(), nr_pool_total_waiting(p));
+    ADD_FAILURE() << "sim did not settle (pool lost a waiter or a grant)";
+    stuck = true;
+  }
+  void start(const Spec &sp)
+  {
+    if (nr_pool_total_waiting(p) >= 240) { // the pool's wait queue holds 256 waiters (MAX_WAITERS); the real receiver has far fewer threads
+      ADD_FAILURE() << "test trace overloads the 256-entry wait queue";
+      _exit(3);
+    }
+    jobs.emplace_back(new Job);
+    Job *j = jobs.back().get();
+    j->id = (int)jobs.size() - 1, j->prio = sp.prio, j->cell = sp.cell, j->arr = sp.t, j->dur = sp.dur, j->dl = sp.dl;
+    started++;
+    live.push_back(j);
+    j->th = std::thread([this, j] {
+      nr_pool_acquire(p, j->prio, j->cell, j->dl);
+      j->granted_at = vt.load();
+      conc_cell[j->cell]++;
+      conc_tot++;
+      j->granted = true; // before ngranted: settle() returns on the count, run() then reads the flags
+      ngranted++;
+      { std::unique_lock<std::mutex> l(j->m); j->cv.wait(l, [j] { return j->go; }); }
+      conc_cell[j->cell]--;
+      conc_tot--;
+      nr_pool_release(p);
+      j->released_at = vt.load();
+      j->rel = true;
+    });
+    settle();
+  }
+  void sample()
+  {
+    Sample s{vt.load(), conc_tot.load(), {0, 0, 0, 0}};
+    for (int c = 0; c < 4; c++) s.cell[c] = conc_cell[c].load();
+    samples.push_back(s);
+  }
+  void run()
+  {
+    for (;;) {
+      Job *r = nullptr;
+      for (Job *j : live)
+        if (j->granted && (!r || j->granted_at + j->dur < r->granted_at + r->dur)) r = j;
+      const bool ha = !arrivals.empty();
+      if (!r && !ha) break;
+      if (ha && (!r || arrivals.top().first.t < r->granted_at + r->dur)) {
+        const Spec sp = arrivals.top().first;
+        arrivals.pop();
+        vt = sp.t;
+        start(sp);
+      } else {
+        vt = r->granted_at + r->dur;
+        { std::lock_guard<std::mutex> l(r->m); r->go = true; }
+        r->cv.notify_one();
+        while (!r->rel) sched_yield();
+        r->th.join();
+        live.erase(std::find(live.begin(), live.end(), r));
+        settle();
+        if (on_done) on_done(*r);
+      }
+      sample();
+      if (stuck) break;
+    }
+    if (!live.empty() && !stuck) { // nothing running, nothing arriving, yet jobs still waiting: the pool left a grantable waiter idle
+      ADD_FAILURE() << live.size() << " jobs never granted (deadlock)";
+      stuck = true;
+    }
+    if (stuck) { fprintf(stderr, "SIM: stuck, aborting\n"); _exit(3); } // threads blocked in the pool: cannot join
+    for (auto &j : jobs) if (j->th.joinable()) j->th.join();
+  }
+};
+static uint64_t pct(std::vector<uint64_t> v, double q)
+{
+  if (v.empty()) return 0;
+  std::sort(v.begin(), v.end());
+  return v[std::min(v.size() - 1, (size_t)(q * (double)v.size()))];
+}
+} // namespace sim
+static uint64_t vt_now() { return sim::vt.load(); }
+
+static void cells_alternate_body()
+{
+  nr_pool_t *p = mk(1);
+  sim::Sim S(p);
+  S.add({0, NR_POOL_HOUSE, 2, 500000, 0}); // holder (third cell)
+  // cell 0 has the four oldest deadlines; plain deadline order would serve it first, the cells must interleave.
+  const uint64_t dl[8] = {10, 20, 30, 40, 50, 60, 70, 80};
+  for (int i = 0; i < 8; i++) S.add({1000, NR_POOL_DECODE, i / 4, 500000, dl[i]});
+  S.run();
+  std::vector<const sim::Job *> o;
+  for (size_t i = 1; i < S.jobs.size(); i++) o.push_back(S.jobs[i].get());
+  std::sort(o.begin(), o.end(), [](const sim::Job *a, const sim::Job *b) { return a->granted_at < b->granted_at; });
+  ASSERT_EQ(o.size(), 8u);
+  for (size_t i = 0; i + 1 < o.size(); i++) EXPECT_NE(o[i]->cell, o[i + 1]->cell) << "grants " << i << "," << i + 1 << " from the same cell";
+  EXPECT_LT(o[0]->id, o[2]->id); // inside a cell still by deadline
+  nr_pool_destroy(p);
+}
+
+// A virtual-time, single-cell job trace (no randomness outside the seed): all classes, UL flag, deadlines, overload so queues build and aging fires.
+// The decisions (grant order with grant times) and the CORE_POOL stats line are folded into a string that is compared with a golden produced by the
+// pool as it was BEFORE B1 (regenerate: print a and b in this test, built against that pool with the same clock hook) (the commit this task branched from): N=1 equivalence.
+static const char *GOLDEN4 = R"G(order_hash=43ef75bd69447520 first=0,1,2,3,4,5,6,8,10,11,12,13,
+SENSING: CORE_POOL n=4 yields=0 gpu_gives=0 nested=0 enforced=0 scan[n=168 waited=32 promo=0 wait_us p50<=1 p99<=512 max=590] decode[n=154 waited=67 promo=0 wait_us p50<=1 p99<=1024 max=784] retry[n=66 waited=65 promo=0 wait_us p50<=8192 p99<=16384 max=15185] disc[n=69 waited=69 promo=0 wait_us p50<=65536 p99<=131072 max=77230] house[n=43 waited=43 promo=0 wait_us p50<=131072 p99<=131072 max=117588])G";
+static const char *GOLDEN6 = R"G(order_hash=f814af8c73a450b0 first=0,1,2,3,4,5,6,7,8,10,11,13,
+SENSING: CORE_POOL n=6 yields=0 gpu_gives=0 nested=0 enforced=0 scan[n=262 waited=162 promo=0 wait_us p50<=64 p99<=4096 max=2863] decode[n=260 waited=201 promo=0 wait_us p50<=4096 p99<=16384 max=13392] retry[n=95 waited=94 promo=59 wait_us p50<=4096 p99<=8192 max=4422] disc[n=115 waited=115 promo=89 wait_us p50<=32768 p99<=32768 max=20580] house[n=68 waited=68 promo=0 wait_us p50<=131072 p99<=131072 max=90054])G";
+static std::string single_cell_trace(int n, bool ages, int njobs, uint64_t gap_ns)
+{
+  nr_pool_t *p = mk(n, !ages);
+  sim::Sim S(p);
+  unsigned r = 4242u;
+  auto rnd = [&] { r = r * 1664525u + 1013904223u; return r >> 8; };
+  uint64_t t = 0;
+  for (int i = 0; i < njobs; i++) {
+    t += gap_ns / 2 + rnd() % (gap_ns + 1);
+    const unsigned k = rnd() % 100;
+    int prio = NR_POOL_SCAN;
+    uint64_t dur = 225000;
+    if (k < 30) prio = NR_POOL_SCAN, dur = 225000;
+    else if (k < 55) prio = NR_POOL_DECODE, dur = 600000;
+    else if (k < 65) prio = NR_POOL_DECODE | NR_POOL_F_UL, dur = 400000;
+    else if (k < 75) prio = NR_POOL_RETRY, dur = 1500000;
+    else if (k < 90) prio = NR_POOL_DISC, dur = 1000000;
+    else prio = NR_POOL_HOUSE, dur = 2000000;
+    S.add({t, prio, 0, dur + rnd() % 100000, t + rnd() % 3000000});
+  }
+  S.run();
+  uint64_t h = 1469598103934665603ull; // FNV-1a over (job id, grant time) in grant order
+  std::vector<const sim::Job *> o;
+  for (auto &j : S.jobs) o.push_back(j.get());
+  std::stable_sort(o.begin(), o.end(), [](const sim::Job *a, const sim::Job *b) { return a->granted_at < b->granted_at; });
+  std::string head;
+  int idx = 0;
+  for (const sim::Job *j : o) {
+    for (uint64_t v : {(uint64_t)j->id, j->granted_at}) for (int b = 0; b < 8; b++) h = (h ^ ((v >> (8 * b)) & 0xff)) * 1099511628211ull;
+    if (idx++ < 12) head += std::to_string(j->id) + ",";
+  }
+  char line[2048];
+  nr_pool_stats_line(p, line, sizeof(line));
+  char out[3072];
+  snprintf(out, sizeof(out), "order_hash=%016llx first=%s\n%s", (unsigned long long)h, head.c_str(), line);
+  nr_pool_destroy(p);
+  return out;
+}
+
+TEST(CorePoolB1, SingleCellTraceEqualsThePreB1Pool)
+{
+  // Golden values captured from the pre-B1 nr_core_pool.c (9b2d7c3f6e) with the same clock seam: N=4 no aging, N=6 with the default ages (promotion fires).
+  const std::string a = single_cell_trace(4, false, 500, 150000), b = single_cell_trace(6, true, 800, 100000);
+  EXPECT_EQ(a, GOLDEN4);
+  EXPECT_EQ(b, GOLDEN6);
+}
+
+#ifndef NR_OLD_POOL_BUILD // (the golden above is also regenerated against the pre-B1 pool, which has none of the per-cell API)
+// closed-loop helper: `k` submitters per cell in each class entry, a finished job is replaced at once until `horizon`
+struct Loop { int cell, prio; uint64_t dur; int k; uint64_t t0, t1; };
+static void closed_loop(sim::Sim &S, const std::vector<Loop> &ls)
+{
+  for (const Loop &l : ls)
+    for (int i = 0; i < l.k; i++) S.add({l.t0, l.prio, l.cell, l.dur, 0});
+  S.on_done = [&S, ls](sim::Job &j) {
+    for (const Loop &l : ls)
+      if (l.cell == j.cell && l.prio == j.prio && l.dur == j.dur && vt_now() < l.t1) { S.add({vt_now(), j.prio, j.cell, j.dur, 0}); break; }
+  };
+}
+
+// Two cells with equal demand but different job lengths (100 us vs 300 us), the pool saturated: each gets half of the token time (round-robin would give
+// the long-job cell 75 %). Three cells likewise.
+TEST(CorePoolB1, EqualDemandSharesTokenTimeNotGrantCount)
+{
+  for (int nc : {2, 3}) {
+    nr_pool_t *p = mk(4);
+    sim::Sim S(p);
+    std::vector<Loop> ls;
+    for (int c = 0; c < nc; c++) ls.push_back({c, NR_POOL_SCAN, 100000ull * (uint64_t)(c * 2 + 1) / (nc == 2 ? 1 : 1) * (nc == 2 ? 1 : 1), 4, 0, 100000000ull});
+    if (nc == 2) ls[1].dur = 300000;
+    closed_loop(S, ls);
+    S.run();
+    double tt[3] = {0, 0, 0}, all = 0;
+    for (auto &j : S.jobs) tt[j->cell] += (double)j->dur, all += (double)j->dur;
+    for (int c = 0; c < nc; c++) EXPECT_NEAR(tt[c] / all, 1.0 / nc, 0.1 / nc) << nc << " cells, cell " << c << " share";
+    nr_pool_destroy(p);
+  }
+}
+
+// Work conserving: a cell alone gets every token it may use, and a cell that went quiet 100 ms ago no longer limits it. While a second cell is
+// active the DL cap max(1, N-1-(A-1)) applies.
+TEST(CorePoolB1, AloneUsesAllTokensAndAnIdleCellReleasesItsShare)
+{
+  nr_pool_t *p = mk(4); // DL <= N-1 = 3 when alone
+  sim::Sim S(p);
+  closed_loop(S, {{0, NR_POOL_DECODE, 500000, 8, 0, 400000000ull}, {1, NR_POOL_DECODE, 500000, 1, 2000000ull, 30000000ull}});
+  S.run();
+  int m_alone_early = 0, m_two = 0, m_alone_late = 0, m1 = 0;
+  for (auto &s : S.samples) {
+    if (s.t < 2000000) m_alone_early = std::max(m_alone_early, s.cell[0]);
+    if (s.t >= 10000000 && s.t < 30000000) m_two = std::max(m_two, s.cell[0]), m1 = std::max(m1, s.cell[1]);
+    if (s.t >= 160000000) m_alone_late = std::max(m_alone_late, s.cell[0]);
+    EXPECT_LE(s.tot, 3);
+  }
+  EXPECT_EQ(m_alone_early, 3); // A = 1: N-1
+  EXPECT_EQ(m_two, 2);         // A = 2: max(1, 3-1)
+  EXPECT_EQ(m1, 1);
+  EXPECT_EQ(m_alone_late, 3);  // cell 1 idle for > 100 ms: not active any more
+  nr_pool_destroy(p);
+}
+
+// DL cap with A active cells at N = 6 (global N-1 = 5): a second cell appears while cell 0 holds five tokens; it gets one at the first release,
+// then cell 0 is held to 4. With three busy cells each is held to max(1, 5-2) = 3, the sum stays <= 5 and no cell is ever without a token.
+TEST(CorePoolB1, DlCapPerCellWithActiveCells)
+{
+  {
+    nr_pool_t *p = mk(6);
+    sim::Sim S(p);
+    closed_loop(S, {{0, NR_POOL_DECODE, 500000, 8, 0, 60000000ull}});
+    S.add({10000000, NR_POOL_DECODE, 1, 500000, 0});
+    S.run();
+    const sim::Job *bp = nullptr;
+    for (auto &j : S.jobs) if (j->cell == 1) bp = j.get();
+    ASSERT_NE(bp, nullptr);
+    const sim::Job &b = *bp;
+    EXPECT_LE(b.granted_at - b.arr, 500000u) << "cell 1 waited more than one DL job (one release)";
+    int m0 = 0;
+    for (auto &s : S.samples) {
+      EXPECT_LE(s.tot, 5);
+      if (s.t >= 11000000 && s.t < 50000000) m0 = std::max(m0, s.cell[0]);
+    }
+    EXPECT_EQ(m0, 5 - 1 + 0) << "after cell 1 became active cell 0 is held to N-1-(A-1)"; // cell 1's single job is over after 0.5 ms but it stays active 100 ms
+    nr_pool_destroy(p);
+  }
+  {
+    nr_pool_t *p = mk(6);
+    sim::Sim S(p);
+    closed_loop(S, {{0, NR_POOL_DECODE, 500000, 8, 0, 60000000ull}, {1, NR_POOL_DECODE, 500000, 8, 0, 60000000ull}, {2, NR_POOL_DECODE, 500000, 8, 0, 60000000ull}});
+    S.run();
+    int mx[3] = {0, 0, 0}, mn[3] = {9, 9, 9};
+    for (auto &s : S.samples) {
+      EXPECT_LE(s.tot, 5);
+      if (s.t < 2000000) continue;
+      for (int c = 0; c < 3; c++) mx[c] = std::max(mx[c], s.cell[c]), mn[c] = std::min(mn[c], s.cell[c]);
+    }
+    for (int c = 0; c < 3; c++) EXPECT_LE(mx[c], 3) << "cell " << c;
+    uint64_t wmax = 0;
+    for (auto &j : S.jobs) wmax = std::max(wmax, j->granted_at - j->arr);
+    EXPECT_LE(wmax, 3000000u); // closed loop with 8 submitters per cell: a job waits behind its own cell's queue, never starves
+    nr_pool_destroy(p);
+  }
+}
+
+// Burst cell A (3x its share of load, closed loop = saturating) against a quiet cell B whose jobs queue a little even alone (N = 2: one scan token).
+// B's wait p99 with A may not exceed 1.2x its solo p99. Virtual time: exact.
+static uint64_t BGAP = 800000, BDUR = 200000, ADUR = 100000;
+static std::vector<uint64_t> quiet_waits(bool with_a, unsigned seed, uint64_t *max_out = nullptr)
+{
+  nr_pool_t *p = mk(2);
+  sim::Sim S(p);
+  unsigned r = seed;
+  auto rnd = [&] { r = r * 1664525u + 1013904223u; return r >> 8; };
+  uint64_t t = 0;
+  for (int i = 0; i < 600; i++) { // B: BDUTY of one token, bursty arrivals (gap 0 .. 2*mean), job BDUR
+    t += (rnd() % 1000) * (2 * BGAP / 1000);
+    S.add({t, NR_POOL_SCAN, 1, BDUR, 0});
+  }
+  if (with_a) closed_loop(S, {{0, NR_POOL_SCAN, ADUR, 6, 0, t}});
+  S.run();
+  std::vector<uint64_t> w;
+  for (auto &j : S.jobs)
+    if (j->cell == 1) w.push_back(j->granted_at - j->arr);
+  if (max_out) *max_out = *std::max_element(w.begin(), w.end());
+  nr_pool_destroy(p);
+  return w;
+}
+TEST(CorePoolB1, BurstCellDoesNotInflateTheQuietCellsWait)
+{
+  // Not preemptive: B arriving at a busy token waits for the running job of A to end (at most one A job), whatever the policy. So the exact bound is
+  // with_a <= solo + A's job length; the plan's 1.2x holds when that residual is small against B's own queueing (A job 25 us here, the real scan job is
+  // 225 us against a B p99 of ~ms at N = 6; see the report).
+  for (uint64_t adur : {25000ull, 50000ull, 100000ull})
+    for (unsigned seed : {1u, 2u, 3u}) {
+      ADUR = adur;
+      const uint64_t solo = sim::pct(quiet_waits(false, seed), 0.99), with_a = sim::pct(quiet_waits(true, seed), 0.99);
+      printf("  A job %lu us seed %u: B wait p99 solo %lu us, with burst A %lu us (ratio %.2f)\n", (unsigned long)(adur / 1000), seed, (unsigned long)(solo / 1000),
+             (unsigned long)(with_a / 1000), solo ? (double)with_a / (double)solo : 0.0);
+      EXPECT_GT(solo, 0u);
+      EXPECT_LE(with_a, solo + adur) << "A job " << adur << " seed " << seed;
+      if (adur == 25000) EXPECT_LE((double)with_a, 1.2 * (double)solo) << "seed " << seed;
+    }
+  ADUR = 100000;
+}
+
+// No deadlock / starvation-to-death on tiny pools with several cells: every class and flag from every cell is queued at once and must drain. With and
+// without the default aging.
+TEST(CorePoolB1, NoDeadlockAtOneToThreeTokensWithOneToThreeCells)
+{
+  for (int n = 1; n <= 3; n++)
+    for (int nc = 1; nc <= 3; nc++)
+      for (int ages = 0; ages < 2; ages++) {
+        nr_pool_t *p = mk(n, !ages);
+        sim::Sim S(p);
+        static const int prios[6] = {NR_POOL_SCAN, NR_POOL_DECODE, NR_POOL_DECODE | NR_POOL_F_UL, NR_POOL_RETRY, NR_POOL_DISC, NR_POOL_HOUSE};
+        unsigned r = 99u + (unsigned)(n * 10 + nc);
+        for (int c = 0; c < nc; c++)
+          for (int k = 0; k < 6; k++)
+            for (int i = 0; i < 10; i++) {
+              r = r * 1664525u + 1013904223u;
+              S.add({(uint64_t)(r >> 16) % 300000, prios[k], c, 100000 + (r >> 8) % 200000, 0});
+            }
+        S.run(); // fails (and aborts) when a job is never granted
+        for (auto &j : S.jobs) EXPECT_TRUE(j->granted.load()) << "n=" << n << " cells=" << nc;
+        nr_pool_stats_t st;
+        nr_pool_stats(p, &st);
+        uint64_t tot = 0;
+        for (int c = 0; c < NR_POOL_MAX_CELLS; c++) tot += st.leases_cell[c];
+        EXPECT_EQ(tot, (uint64_t)(60 * nc));
+        EXPECT_EQ(nr_pool_free(p), n);
+        nr_pool_destroy(p);
+      }
+}
+
+// DISC/HOUSE promotion is off below 6 tokens in the default config (FLOAT-LANE-POOL section 3), on from 6; an explicit cfg is used as given.
+TEST(CorePoolB1, PromotionOffBelowSixTokens)
+{
+  for (int n = 1; n <= 8; n++) {
+    const nr_pool_cfg_t c = nr_pool_cfg_default_n(n), d = nr_pool_cfg_default();
+    EXPECT_EQ(c.age_ns[NR_POOL_RETRY], d.age_ns[NR_POOL_RETRY]);
+    EXPECT_EQ(c.age_ns[NR_POOL_SCAN], 0u);
+    EXPECT_EQ(c.age_ns[NR_POOL_DISC], n < 6 ? 0u : d.age_ns[NR_POOL_DISC]) << n;
+    EXPECT_EQ(c.age_ns[NR_POOL_HOUSE], n < 6 ? 0u : d.age_ns[NR_POOL_HOUSE]) << n;
+  }
+  auto run = [](bool explicit_cfg) {
+    nr_pool_cfg_t c = nr_pool_cfg_default();
+    c.pin = false;
+    int cores[2] = {0, 1};
+    nr_pool_t *p = explicit_cfg ? nr_pool_create(cores, nullptr, 2, &c) : nr_pool_create(cores, nullptr, 2, nullptr);
+    sim::Sim S(p);
+    // one scan token busy all the time (SCAN <= N-1 = 1), a HOUSE job behind it: only age promotion can lift it over the cap
+    closed_loop(S, {{0, NR_POOL_SCAN, 300000, 3, 0, 300000000ull}});
+    S.add({1000, NR_POOL_HOUSE, 0, 300000, 0});
+    S.run();
+    nr_pool_stats_t st;
+    nr_pool_stats(p, &st);
+    const uint64_t promoted = st.promoted[NR_POOL_HOUSE];
+    uint64_t at = 0;
+    for (auto &j : S.jobs) if (j->prio == NR_POOL_HOUSE) at = j->granted_at;
+    nr_pool_destroy(p);
+    return std::make_pair(promoted, at);
+  };
+  const auto off = run(false), on = run(true);
+  EXPECT_EQ(off.first, 0u);
+  EXPECT_GE(off.second, 300000000ull) << "default config at 2 tokens: HOUSE only runs once the scans stop";
+  EXPECT_EQ(on.first, 1u);
+  EXPECT_LT(on.second, 150000000ull) << "explicit default config: promoted at its 100 ms age";
+}
+
+// CORE_POOL line grammar: with cell 0 alone no per-cell block (byte-identical to the single-cell line, see the golden above); once another cell
+// has leased, one block per leased cell, in cell order.
+TEST(CorePoolB1, StatsLineGainsOneBlockPerActiveCellOnly)
+{
+  auto line = [](std::vector<int> cells) {
+    nr_pool_t *p = mk(2);
+    sim::Sim S(p);
+    for (size_t i = 0; i < cells.size(); i++) S.add({i * 1000000, NR_POOL_SCAN, cells[i], 250000, 0});
+    S.run();
+    char b[2048];
+    nr_pool_stats_line(p, b, sizeof(b));
+    nr_pool_destroy(p);
+    return std::string(b);
+  };
+  EXPECT_EQ(line({0, 0, 0}).find(" cell"), std::string::npos);
+  const std::string l2 = line({0, 1, 1, 0});
+  const std::regex re(R"( house\[[^\]]*\] cell0\[n=2 waited=0 hold_ms=0 wait_us p50<=\d+ p99<=\d+ max=\d+\] cell1\[n=2 waited=0 hold_ms=0 wait_us p50<=\d+ p99<=\d+ max=\d+\]$)");
+  EXPECT_TRUE(std::regex_search(l2, re)) << l2;
+  const std::string l3 = line({3, 0});
+  EXPECT_NE(l3.find(" cell0[n=1 "), std::string::npos) << l3;
+  EXPECT_NE(l3.find(" cell3[n=1 "), std::string::npos) << l3;
+  EXPECT_EQ(l3.find(" cell1["), std::string::npos);
+}
+#endif
 
 int main(int argc, char **argv)
 {
