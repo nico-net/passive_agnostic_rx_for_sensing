@@ -2338,7 +2338,27 @@ Implemented 2026-10-24 (all local, sens6 x86 + RTX 4060 Ti; Sparks unaffected un
   `NR_GPU_PATH_SELECT`, `NR_GPU_PATH_<PATH>`).
 - `sens6/coreplan`: core layout from topology (`nr_core_layout`, `SENSING: CORE_PLAN`), no hard-coded host cores.
 - `sens6/ota-20261024`: integration + lab orchestration + OCUDU ground truth (DL+UL) + sens6 launcher.
-- `sens6/dgpu-q4` (NOT merged, agent stopped at its last arm): staged DISCRETE variants of chest/delay/demod/UL FEP/LDPC.
+- `sens6/dgpu-q4` (merged into `sens6/ota-20261024` at `8cc6623346` on 2026-10-25): staged DISCRETE variants of chest/delay/demod/UL FEP/LDPC.
+
+**2026-10-25 overnight + morning (merged into adaptive-rx-UL-DL at `a383a08785` at the user's request, to start multi-PCI;
+NOT validated on the DGX — run a DGX T10 / TIM+Vodafone A/B before trusting it there).** Report:
+`docs/superpowers/reports/csd/OTA-DCI-LAB273-20261025.md`. All [MEASURED, sens6 OTA, sens4 lab cell, 273 PRB, 4 RX] unless noted.
+- Blind DCI fixes (spec-based, no cell constants): `c9e8858e4b` (PCI-nID USS CORESET: anonymous RNTI/length search per UE,
+  n_RNTI hypotheses 0 then own C-RNTI only, USS-hash refit beyond M=1, re-sync keeps the CFO correction), `5432bc95a1`
+  (CORESET-independent DCI sizes on PCI-nID USS geometries; shadow BWP entries killed 39k phantom BWP_CHANGE epochs/run).
+- GPU: `e18da8416a` an old-path demod exactness mismatch no longer disables the GPU graph pass (it froze the pass -> CPU fallback,
+  PDSCH CRC 0.1 %). `60178049cd` lab env in auto GPU-path mode. GPU ctest -j1 66/66; rfsim 106 PRB 4 RX 420 s CRC 96.21 % vs 96.22 %
+  baseline [MEASURED, sens6 rfsim]. The postconv gate fails on baseline too ("Technique D CONVERGED" unreachable since the solver).
+- Scoring: `groundtruth.py match_clock()` (`4ec6fa9fbc`) per RNTI on wall clock; the single-offset matcher breaks at RX recoveries.
+- DCI result (05:33 run): DL recall 0.980 / 0.989, UL 0.696 / 0.991, precision 1.000 (start of night: DL 0.27 %, precision 0.29).
+- ADC census `32b9ad5e71`: clip/hot thresholds from the device's real int16 full scale (32767 >> rxshift; X4xx rxshift=2 -> 8191)
+  split DL/UL/special (`ADCCLASS`). The old counters could never fire on X4xx (ADCPEAK was pinned at -12.0 dBFS = full scale).
+  At `--ue-rxgain 49`: **DL slots clip** (mean -13..-15 dBFS of fs, clip 0.1-0.4 %, hot 0.3-1.2 %, all 4 ch); UL slots 0 %
+  (-25..-37 dBFS). Per-antenna power balanced within ~2 dB (ch0 sometimes -3..-7 dB); RF input ~-62..-64 dBm/ch.
+- PDSCH vs gNB rank (n=1 each, 300 s): gNB rank 4 / 256QAM MCS 24-25: crc_ok 2.7 % of decoded; **gNB DL rank 1 + UL 1 layer: 54.9 %**.
+  DMRS symbol-to-symbol correlation falls with grant width (0.93 at <=4 RB, 0.74 at >128 RB); PRG bundling and residual timing
+  ruled out. Open: SNR vs clipping (rx-gain steps), rank-2 and low-MCS arms, PUSCH CRC (0 so far).
+- NIC IRQs must stay on CPU 0 (spreading them over 0-2 broke the X410 stream in 5 s); watch `rx_out_of_buffer`.
 
 
 ### 15.0 Site change (2026-09-30) — read first

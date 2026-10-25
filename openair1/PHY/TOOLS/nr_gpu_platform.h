@@ -14,7 +14,8 @@ typedef struct {
   int available, device, major, minor, integrated;
   int pageable_memory_access, host_page_tables, can_map_host_memory;
   int concurrent_managed_access, host_native_atomic_supported, unified_addressing;
-  size_t total_memory, free_memory;
+  size_t total_memory, free_memory; /* free_memory: the device-memory headroom (SHARED: the host's available memory capped by total; DISCRETE: cudaMemGetInfo free) */
+  size_t free_raw;                   /* cudaMemGetInfo free as reported (on a unified-memory device = MemFree, which excludes the reclaimable page cache) */
   char name[256];
   nr_gpu_platform_model_t model;
   int probe;              /* NR_GPU_PROBE_*: the SHARED-access proof (only run for a SHARED candidate) */
@@ -41,7 +42,15 @@ int nr_gpu_platform_ready(void);
 /* 1 iff the tier is SHARED: the device proved direct, fast host access (pageable access through the host page tables or an integrated
  * GPU, confirmed by a one-time probe kernel). DISCRETE and CPU tiers return 0. */
 int nr_gpu_platform_shared_direct(void);
-/* Free device memory seen at probe time (bytes; 0 without a device). */
+/* Device-memory headroom for the budgets (pure). SHARED = the device memory is the host RAM: the host's available memory (host_avail = min(MemAvailable, cgroup
+ * headroom) from nr_host_probe_at, swap never counted) capped by the device total; cudaMemGetInfo free there is MemFree and misses the reclaimable page cache.
+ * DISCRETE / CPU tier, or an unknown host_avail (SIZE_MAX): free_raw unchanged. */
+static inline size_t nr_gpu_headroom_calc(nr_gpu_platform_model_t model, size_t free_raw, size_t total, size_t host_avail)
+{
+  if (model != NR_GPU_SHARED || host_avail == SIZE_MAX) return free_raw;
+  return total && host_avail > total ? total : host_avail;
+}
+/* Free device memory seen at probe time (bytes; 0 without a device): the headroom above (caps.free_memory). */
 size_t nr_gpu_platform_free_at_probe(void);
 /* Diagnostic override of the tier, taking effect at (or before) the next probe: NR_GPU_DISCRETE or NR_GPU_NONE (CPU tier); -1 or NR_GPU_SHARED
  * restore automatic selection. Overrides the NR_GPU_FORCE_MODEL environment variable (read once by the probe, same values).
