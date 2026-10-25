@@ -90,7 +90,6 @@ typedef struct {
 typedef struct {
   bool ok;                /* the TB decoded at h; work holds its UL-SCH stream, g_ulsch bits */
   bool learned;           /* ok came from a hypothesis learned earlier for this RNTI */
-  bool unconfirmed;       /* an exploration win on a TB with a 16-bit CRC: recorded as learning only, ok stays false */
   nr_uci_hyp_t h;
   nr_uci_counts_t c;
   uint32_t g_ulsch;

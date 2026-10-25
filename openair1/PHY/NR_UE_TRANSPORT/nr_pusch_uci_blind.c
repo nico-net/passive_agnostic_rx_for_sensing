@@ -844,6 +844,12 @@ void nr_pusch_uci_blind_search(const nr_uci_search_in_t *in, nr_uci_search_out_t
   out->u_lo = out->u_hi = -1;
   if (!in || !in->llr || !in->work || !in->tb || in->G == 0 || in->tbs_bits == 0 || in->geom.rb == 0 || in->geom.qm == 0 || in->geom.nl == 0)
     return;
+  /* Only a TB with a 24-bit CRC (TBS > 3824 bits, TS 38.212 7.2.1) can decide among hypotheses: a 16-bit CRC passes 1 in
+   * 65536 wrong ones, and every failing grant tries several. On air, searching CRC16 TBs too reported footprints of up to
+   * 360 RE on 3-PRB grants -- chance passes -- after 1.1 M TB tests in 300 s ([MEASURED, sens6 OTA lab,
+   * ulint1_lab_20261025_211640]). Such grants keep the plain decode's verdict. */
+  if (in->tbs_bits <= 3824)
+    return;
   srch_t s;
   memset(&s, 0, sizeof(s));
   s.in = in;
@@ -905,11 +911,6 @@ void nr_pusch_uci_blind_search(const nr_uci_search_in_t *in, nr_uci_search_out_t
   s.budget_ns = keep;
   if (!search_explore(&s, have ? &snap : NULL, seq))
     return;
-  /* A TB with a 16-bit CRC passing after many hypotheses is no proof: learn, report only a later learned win. */
-  if (s.C == 1 && in->tbs_bits <= 3824 && out->tb_tests + out->cb_tests > 1) {
-    out->unconfirmed = true;
-    out->ok = false;
-  }
   atomic_fetch_add_explicit(&g_st[3], 1, memory_order_relaxed);
   learn(in->rnti, &g, &out->h, &out->c);
 }
