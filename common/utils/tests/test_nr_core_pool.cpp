@@ -976,6 +976,29 @@ TEST(CorePoolB1, SingleCellTraceEqualsThePreB1Pool)
   EXPECT_EQ(b, GOLDEN6);
 }
 
+// The wait queue has no capacity limit (intrusive nodes on the waiters' stacks): 300 threads wait at once on 2 tokens, all are served.
+TEST(CorePool, MoreThan256ConcurrentWaiters)
+{
+  nr_pool_t *p = mk(2);
+  nr_pool_acquire(p, NR_POOL_HOUSE, 0, 0); // hold a token so everybody queues
+  const int T = 300;
+  std::atomic<int> done{0};
+  std::vector<std::thread> th;
+  for (int i = 0; i < T; i++)
+    th.emplace_back([&, i] {
+      nr_pool_acquire(p, i % 3 ? NR_POOL_SCAN : NR_POOL_DISC, i % 4, 0);
+      nr_pool_release(p);
+      done++;
+    });
+  wait_until([&] { return nr_pool_total_waiting(p) >= T; }); // the held HOUSE lease keeps SCAN (cap N-1 with low counted) and DISC out: all 300 queue
+  EXPECT_EQ(nr_pool_total_waiting(p), T);
+  nr_pool_release(p);
+  for (auto &x : th) x.join();
+  EXPECT_EQ(done.load(), T);
+  EXPECT_EQ(nr_pool_free(p), 2);
+  nr_pool_destroy(p);
+}
+
 #ifndef NR_OLD_POOL_BUILD // (the golden above is also regenerated against the pre-B1 pool, which has none of the per-cell API)
 // closed-loop helper: `k` submitters per cell in each class entry, a finished job is replaced at once until `horizon`
 struct Loop { int cell, prio; uint64_t dur; int k; uint64_t t0, t1; };
