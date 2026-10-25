@@ -171,3 +171,34 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_csirs_disc_cell COMMAND test_nr_csirs_disc_cell)
 endif()
 # ---- end A7 ----
+
+# ---- A3 ----
+# Per-cell state of acquisition / config epoch / observation writer / UE context / reconf rules / CORESET map (nr_cell.h conversion).
+# The existing unit-test targets of these modules (root CMakeLists.txt) compile the converted sources; those that do not already link LOG
+# get it here (nr_cell.c lives in LOG, never list it a second time). The interleave test runs cell X and cell Y alternately (one thread
+# re-binding, two threads) and compares each cell with its solo run.
+if(ENABLE_TESTS)
+  foreach(t test_nr_passive_reconf_rules test_nr_passive_acq_state test_nr_passive_cfg_epoch test_nr_passive_obs test_nr_passive_ue_ctx test_nr_pdcch_coreset_map)
+    if(TARGET ${t})
+      target_link_libraries(${t} PRIVATE LOG)
+    endif()
+  endforeach()
+  set(A3_SRC ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
+  add_executable(test_mpci_a3_interleave
+    ${A3_SRC}/tests/nr_mpci_a3_interleave_test.cc
+    ${A3_SRC}/nr_passive_acq_state.c
+    ${A3_SRC}/nr_tdd_pattern.c
+    ${A3_SRC}/nr_passive_cfg_epoch.c
+    ${A3_SRC}/nr_passive_obs.c
+    ${A3_SRC}/nr_passive_ue_ctx.c
+    ${A3_SRC}/nr_passive_reconf_rules.c
+    ${A3_SRC}/nr_pdcch_coreset_map.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/refsig.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/nr_dmrs_rx.c
+    ${CMAKE_SOURCE_DIR}/common/utils/ds/hashtable.c)
+  target_include_directories(test_mpci_a3_interleave PRIVATE ${A3_SRC} ${CMAKE_SOURCE_DIR}/common/utils/ds)
+  target_link_libraries(test_mpci_a3_interleave PRIVATE nr_pdcch_nid_worker nr_common UTIL utils LOG GTest::gtest pthread m)
+  add_dependencies(tests test_mpci_a3_interleave)
+  add_test(NAME test_mpci_a3_interleave COMMAND test_mpci_a3_interleave)
+endif()
+# ---- end A3 ----

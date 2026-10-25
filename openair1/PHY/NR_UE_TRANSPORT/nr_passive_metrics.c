@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #define _GNU_SOURCE
 #include "common/utils/nr_cell.h"
+#include "nr_passive_cell_prealloc.h"
 #include <string.h>
 #include "nr_passive_metrics.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
@@ -42,7 +43,18 @@ __attribute__((weak)) bool nr_pdsch_recovery_enabled(void);
 __attribute__((weak)) void nr_pdsch_retry_yield_stats(uint64_t *chains, uint64_t *yields, uint64_t *gated);
 
 extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
+/* mpci A3: the PCI of the cell being reported. The exported global (extern in nr_passive_metrics.h, written by executables/nr-ue.c)
+ * is the cell-0 / single-cell slot, so N=1 is unchanged; cells k > 0 use the cell-indexed slot written by nr_passive_metrics_set_pci()
+ * (A8: nr-ue.c should call it, with the cell's thread bound, instead of storing the global). */
 _Atomic int nr_passive_metrics_pci = -1;
+NR_CELL_STATIC_INIT(_Atomic int, nr_passive_metrics_pci_slot, -1);
+void nr_passive_metrics_set_pci(int pci)
+{
+  const int c = nr_cell_idx();
+  atomic_store_explicit(&nr_passive_metrics_pci_slot_cells[c], pci, memory_order_relaxed);
+  if (c == 0)
+    atomic_store_explicit(&nr_passive_metrics_pci, pci, memory_order_relaxed);
+}
 /* Filled by Task A3; weak so this file links before A3 lands. */
 __attribute__((weak)) void nr_passive_obs_stats(uint64_t *pushed, uint64_t *written, uint64_t *dropped)
 {
@@ -101,7 +113,8 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->abs_slot = (int64_t)atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
   if(nr_srs_passive_metrics) nr_srs_passive_metrics(&m->srs_us,&m->srs_jobs_dropped,
       &m->srs_pregate_skip,&m->srs_backoff_skip,&m->srs_budget_skip,&m->srs_idle_resets);
-  m->pci = atomic_load_explicit(&nr_passive_metrics_pci, memory_order_relaxed);
+  m->pci = nr_cell_idx() == 0 ? atomic_load_explicit(&nr_passive_metrics_pci, memory_order_relaxed)
+                               : atomic_load_explicit(&nr_passive_metrics_pci_slot_cells[nr_cell_idx()], memory_order_relaxed);
   const nr_passive_acq_snapshot_t a = nr_passive_acq_snapshot();
   m->acq_state = nr_passive_acq_state_name(a.state);
   m->acq_transitions = a.transitions;

@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_cell.h"
+#include "nr_passive_cell_prealloc.h"
 #include "nr_passive_ue_ctx.h"
 #include "nr_passive_reconf_rules.h"
 #include <inttypes.h>
@@ -47,27 +49,76 @@ typedef struct {
   int64_t rrc_eff_slot;        /* -1 none */
   int rrc_kind;
 } entry_t;
-static int cur_mu=1; /* numerology of the observed cell, from the grants */
-static int64_t latest_slot; /* newest event slot: the clock of the RRC windows */
-static uint32_t rrc_pending;
-static ring_slot_t *ring;
-static entry_t *entries;
-static int16_t active_index[UINT16_MAX + 1];
-static uint32_t capacity;
-static uint64_t head;
-static _Atomic uint64_t tail, pushed, written, dropped;
-static _Atomic uint32_t producers;
-static _Atomic bool running;
+NR_CELL_STATIC_INIT(int, g_cur_mu, 1); /* numerology of the observed cell, from the grants */
+#define g_cur_mu NR_CELL_REF(g_cur_mu)
+NR_CELL_STATIC(int64_t, g_latest_slot); /* newest event slot: the clock of the RRC windows */
+#define g_latest_slot NR_CELL_REF(g_latest_slot)
+NR_CELL_STATIC(uint32_t, g_rrc_pending);
+#define g_rrc_pending NR_CELL_REF(g_rrc_pending)
+NR_CELL_STATIC(ring_slot_t *, g_ring);
+#define g_ring NR_CELL_REF(g_ring)
+NR_CELL_STATIC(entry_t *, g_entries);
+#define g_entries NR_CELL_REF(g_entries)
+typedef int16_t g_active_index_arr_t[UINT16_MAX + 1]; /* 128 KiB per cell: heap, pre-allocated per active cell before the RX fence */
+NR_CELL_STATIC_HEAP(g_active_index_arr_t, g_active_index);
+#define g_active_index NR_CELL_HEAP_REF(g_active_index_arr_t, g_active_index)
+NR_CELL_STATIC(uint32_t, g_capacity);
+#define g_capacity NR_CELL_REF(g_capacity)
+NR_CELL_STATIC(uint64_t, g_head);
+#define g_head NR_CELL_REF(g_head)
+NR_CELL_STATIC(_Atomic uint64_t, g_tail);
+#define g_tail NR_CELL_REF(g_tail)
+NR_CELL_STATIC(_Atomic uint64_t, g_pushed);
+#define g_pushed NR_CELL_REF(g_pushed)
+NR_CELL_STATIC(_Atomic uint64_t, g_written);
+#define g_written NR_CELL_REF(g_written)
+NR_CELL_STATIC(_Atomic uint64_t, g_dropped);
+#define g_dropped NR_CELL_REF(g_dropped)
+NR_CELL_STATIC(_Atomic uint32_t, g_producers);
+#define g_producers NR_CELL_REF(g_producers)
+NR_CELL_STATIC(_Atomic bool, g_running);
+#define g_running NR_CELL_REF(g_running)
+/* nr_ue_ctx_fast_open (header, read by nr_ue_ctx_enabled()) is the process-wide hint: true while ANY cell's session is open.
+ * The per-cell open flag below is what enqueue()/open()/close() use (PROCESS hint, PER_CELL session). */
 bool nr_ue_ctx_fast_open;
-static pthread_t worker;
-static pthread_mutex_t ctx_lock = PTHREAD_MUTEX_INITIALIZER;
-static FILE *output;
-static uint32_t epoch, identity;
-static int64_t sib1_values[3] = {-1,-1,-1};
-static uint64_t last_period_ns;
-static uint64_t last_age_ns;
-static double period_s;
-static bool real_time_session;
+NR_CELL_STATIC(_Atomic bool, g_cell_open);
+#define g_cell_open NR_CELL_REF(g_cell_open)
+/* In this file "enabled" means this cell's session is open (the header's inline reads the process-wide hint, which is true while any cell is open). */
+#define nr_ue_ctx_enabled() atomic_load_explicit(&g_cell_open, memory_order_seq_cst)
+NR_CELL_STATIC(pthread_t, g_worker);
+#define g_worker NR_CELL_REF(g_worker)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_ctx_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_ctx_lock NR_CELL_REF(g_ctx_lock)
+NR_CELL_STATIC(FILE *, g_output);
+#define g_output NR_CELL_REF(g_output)
+NR_CELL_STATIC(uint32_t, g_epoch);
+#define g_epoch NR_CELL_REF(g_epoch)
+NR_CELL_STATIC(uint32_t, g_identity);
+#define g_identity NR_CELL_REF(g_identity)
+typedef int64_t g_sib1_values_arr_t[3];
+NR_CELL_STATIC_INIT(g_sib1_values_arr_t, g_sib1_values, {-1,-1,-1});
+#define g_sib1_values NR_CELL_REF(g_sib1_values)
+NR_CELL_STATIC(uint64_t, g_last_period_ns);
+#define g_last_period_ns NR_CELL_REF(g_last_period_ns)
+NR_CELL_STATIC(uint64_t, g_last_age_ns);
+#define g_last_age_ns NR_CELL_REF(g_last_age_ns)
+NR_CELL_STATIC(double, g_period_s);
+#define g_period_s NR_CELL_REF(g_period_s)
+NR_CELL_STATIC(bool, g_real_time_session);
+#define g_real_time_session NR_CELL_REF(g_real_time_session)
+
+static void fast_open_refresh(void)
+{
+  bool any = false;
+  for (int c = 0; c < NR_CELL_MAX; c++)
+    any = any || atomic_load_explicit(&g_cell_open_cells[c], memory_order_seq_cst);
+  __atomic_store_n(&nr_ue_ctx_fast_open, any, __ATOMIC_SEQ_CST);
+}
+/* Allocate cell `cell`'s heap object (call for every active cell before nr_cell_alloc_fence(); cell 0 included). */
+void nr_passive_ue_ctx_cell_prealloc(int cell)
+{
+  NR_CELL_HEAP_PREALLOC(g_active_index_arr_t, g_active_index, cell);
+}
 extern void nr_cfg_epoch_note_rnti_reopened(uint16_t, bool, uint64_t) __attribute__((weak));
 extern void nr_pusch_passive_ul_ids_reset(uint16_t) __attribute__((weak));
 extern void nr_pusch_passive_ul_ids_reset_all(void) __attribute__((weak));
@@ -82,37 +133,37 @@ static uint64_t now_ns(void)
  * consumer frees a slot after copying it. No lock, allocation, sleep, or I/O in enqueue. */
 static bool enqueue(const event_t *e)
 {
-  atomic_fetch_add_explicit(&producers, 1, memory_order_seq_cst);
-  if (!__atomic_load_n(&nr_ue_ctx_fast_open, __ATOMIC_SEQ_CST)) {
-    atomic_fetch_sub_explicit(&producers, 1, memory_order_seq_cst);
+  atomic_fetch_add_explicit(&g_producers, 1, memory_order_seq_cst);
+  if (!atomic_load_explicit(&g_cell_open, memory_order_seq_cst)) {
+    atomic_fetch_sub_explicit(&g_producers, 1, memory_order_seq_cst);
     return false;
   }
-  uint64_t pos = atomic_load_explicit(&tail, memory_order_relaxed);
+  uint64_t pos = atomic_load_explicit(&g_tail, memory_order_relaxed);
   for (;;) {
-    ring_slot_t *s = &ring[pos % capacity];
+    ring_slot_t *s = &g_ring[pos % g_capacity];
     int64_t dif = (int64_t)(atomic_load_explicit(&s->seq, memory_order_acquire) - pos);
     if (dif == 0) {
-      if (atomic_compare_exchange_weak_explicit(&tail, &pos, pos + 1, memory_order_relaxed, memory_order_relaxed)) {
+      if (atomic_compare_exchange_weak_explicit(&g_tail, &pos, pos + 1, memory_order_relaxed, memory_order_relaxed)) {
         s->event = *e;
         atomic_store_explicit(&s->seq, pos + 1, memory_order_release);
-        atomic_fetch_add_explicit(&pushed, 1, memory_order_relaxed);
-        atomic_fetch_sub_explicit(&producers, 1, memory_order_seq_cst);
+        atomic_fetch_add_explicit(&g_pushed, 1, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&g_producers, 1, memory_order_seq_cst);
         return true;
       }
     } else if (dif < 0) {
-      atomic_fetch_add_explicit(&dropped, 1, memory_order_relaxed);
-      atomic_fetch_sub_explicit(&producers, 1, memory_order_seq_cst);
+      atomic_fetch_add_explicit(&g_dropped, 1, memory_order_relaxed);
+      atomic_fetch_sub_explicit(&g_producers, 1, memory_order_seq_cst);
       return false;
-    } else pos = atomic_load_explicit(&tail, memory_order_relaxed);
+    } else pos = atomic_load_explicit(&g_tail, memory_order_relaxed);
   }
 }
 static bool dequeue(event_t *e)
 {
-  ring_slot_t *s = &ring[head % capacity];
-  if (atomic_load_explicit(&s->seq, memory_order_acquire) != head + 1) return false;
+  ring_slot_t *s = &g_ring[g_head % g_capacity];
+  if (atomic_load_explicit(&s->seq, memory_order_acquire) != g_head + 1) return false;
   *e = s->event;
-  atomic_store_explicit(&s->seq, head + capacity, memory_order_release);
-  head++;
+  atomic_store_explicit(&s->seq, g_head + g_capacity, memory_order_release);
+  g_head++;
   return true;
 }
 static const char *param_name[NR_UEP_COUNT] = {
@@ -138,75 +189,76 @@ static uint8_t source_for_param(nr_ue_param_t p)
   if(p==NR_UEP_PDSCH_SCR_ID || p==NR_UEP_MAX_LAYERS) return NR_UES_OBSERVATION;
   return NR_UES_PDCCH;
 }
-static void json_int(int64_t v) { if (v < 0) fputs("null", output); else fprintf(output, "%" PRId64, v); }
-static void json_float(double v) { if (isfinite(v)) fprintf(output, "%.8g", v); else fputs("null", output); }
+static void json_int(int64_t v) { if (v < 0) fputs("null", g_output); else fprintf(g_output, "%" PRId64, v); }
+static void json_float(double v) { if (isfinite(v)) fprintf(g_output, "%.8g", v); else fputs("null", g_output); }
 /* The file is bounded: past nr_ue_ctx_test_file_cap bytes (512 MiB; settable by tests) the output moves to /dev/null and every later line is counted as dropped. */
 int64_t nr_ue_ctx_test_file_cap = 512ll << 20;
-static bool file_capped;
+NR_CELL_STATIC(bool, g_file_capped);
+#define g_file_capped NR_CELL_REF(g_file_capped)
 static void line_done(void)
 {
-  if (file_capped) atomic_fetch_add_explicit(&dropped, 1, memory_order_relaxed);
-  else if (!ferror(output)) atomic_fetch_add_explicit(&written, 1, memory_order_relaxed);
+  if (g_file_capped) atomic_fetch_add_explicit(&g_dropped, 1, memory_order_relaxed);
+  else if (!ferror(g_output)) atomic_fetch_add_explicit(&g_written, 1, memory_order_relaxed);
 }
 static void snapshot(entry_t *e, uint64_t ns)
 {
   nr_ue_ctx_t *c = &e->ctx;
-  fprintf(output, "{\"schema\":\"uectx/1\",\"type\":\"ue_snapshot\",\"t_mono_ns\":%" PRIu64
+  fprintf(g_output, "{\"schema\":\"uectx/1\",\"type\":\"ue_snapshot\",\"t_mono_ns\":%" PRIu64
                   ",\"identity_gen\":%u,\"rnti\":%u,\"incarnation\":%u,\"state\":\"%s\",\"cfg\":{",
           ns, c->identity_gen, c->rnti, c->incarnation, state_name[c->state]);
   for (int p = 0; p < NR_UEP_COUNT; p++) {
     nr_ue_cfg_value_t *v = &c->cfg[p];
-    fprintf(output, "%s\"%s\":", p ? "," : "", param_name[p]);
-    if (v->value < 0) fputs("null", output);
+    fprintf(g_output, "%s\"%s\":", p ? "," : "", param_name[p]);
+    if (v->value < 0) fputs("null", g_output);
     else {
-      fprintf(output, "{\"value\":%" PRId64 ",\"epoch_learned\":%u,\"verif\":\"%s\",\"first_abs_slot\":",
+      fprintf(g_output, "{\"value\":%" PRId64 ",\"epoch_learned\":%u,\"verif\":\"%s\",\"first_abs_slot\":",
               v->value, v->epoch_learned, verif_name[v->verif]);
       json_int(v->first_abs_slot);
-      fputs(",\"last_confirmed_abs_slot\":", output); json_int(v->last_confirmed_abs_slot);
-      fprintf(output, ",\"source\":%u}", v->source);
+      fputs(",\"last_confirmed_abs_slot\":", g_output); json_int(v->last_confirmed_abs_slot);
+      fprintf(g_output, ",\"source\":%u}", v->source);
     }
   }
   nr_ue_stats_t *s = &c->st;
-  fprintf(output, "},\"stats\":{\"grants_dl\":%" PRIu64 ",\"grants_ul\":%" PRIu64
+  fprintf(g_output, "},\"stats\":{\"grants_dl\":%" PRIu64 ",\"grants_ul\":%" PRIu64
                   ",\"crc_ok_dl\":%" PRIu64 ",\"crc_ok_ul\":%" PRIu64
                   ",\"bytes_dl\":%" PRIu64 ",\"bytes_ul\":%" PRIu64 ",\"retx_dl\":%" PRIu64,
           s->grants_dl,s->grants_ul,s->crc_ok_dl,s->crc_ok_ul,s->bytes_dl,s->bytes_ul,s->retx_dl);
-  fputs(",\"mcs_hist\":[",output);
-  for (int i=0;i<32;i++) fprintf(output,"%s%u",i?",":"",s->mcs_hist[i]);
-  fputs("],\"layers_hist\":[",output);
-  for (int i=0;i<5;i++) fprintf(output,"%s%u",i?",":"",s->layers_hist[i]);
-  fputs("],\"snr_ema_db\":",output); json_float(s->snr_ema_db);
-  fputs(",\"nvar_ema\":",output); json_float(s->nvar_ema);
-  fputs(",\"fo_ema_hz\":",output); json_float(s->fo_ema_hz);
-  fputs(",\"ta_ema_samples\":",output); json_float(s->ta_ema_samples);
-  fputs(",\"prb_start_min\":",output); json_int(s->prb_start_min);
-  fputs(",\"prb_start_max\":",output); json_int(s->prb_start_max);
-  fputs(",\"prb_size_min\":",output); json_int(s->prb_size_min);
-  fputs(",\"prb_size_max\":",output); json_int(s->prb_size_max);
-  fputs(",\"prb_size_mean\":",output); json_float(s->prb_size_mean);
-  fputs(",\"last_abs_slot\":",output); json_int(s->last_abs_slot);
+  fputs(",\"mcs_hist\":[",g_output);
+  for (int i=0;i<32;i++) fprintf(g_output,"%s%u",i?",":"",s->mcs_hist[i]);
+  fputs("],\"layers_hist\":[",g_output);
+  for (int i=0;i<5;i++) fprintf(g_output,"%s%u",i?",":"",s->layers_hist[i]);
+  fputs("],\"snr_ema_db\":",g_output); json_float(s->snr_ema_db);
+  fputs(",\"nvar_ema\":",g_output); json_float(s->nvar_ema);
+  fputs(",\"fo_ema_hz\":",g_output); json_float(s->fo_ema_hz);
+  fputs(",\"ta_ema_samples\":",g_output); json_float(s->ta_ema_samples);
+  fputs(",\"prb_start_min\":",g_output); json_int(s->prb_start_min);
+  fputs(",\"prb_start_max\":",g_output); json_int(s->prb_start_max);
+  fputs(",\"prb_size_min\":",g_output); json_int(s->prb_size_min);
+  fputs(",\"prb_size_max\":",g_output); json_int(s->prb_size_max);
+  fputs(",\"prb_size_mean\":",g_output); json_float(s->prb_size_mean);
+  fputs(",\"last_abs_slot\":",g_output); json_int(s->last_abs_slot);
   {
     static const char *names[NR_UL_F_COUNT] = {"dci_len","layout","bwp","tda","k2",
       "dmrs_id0","dmrs_id1","data_id","ta_samples","cfo_hz"};
-    fputs("},\"ul\":{", output);
+    fputs("},\"ul\":{", g_output);
     for (int i=0;i<NR_UL_F_COUNT;i++) {
       const nr_ue_ul_value_t *v=&c->ul.field[i];
-      fprintf(output,"%s\"%s\":",i?",":"",names[i]);
-      if(v->evidence==NR_UL_EVID_UNKNOWN) fputs("null",output);
-      else fprintf(output,"{\"value\":%" PRId64 ",\"evidence\":%u,\"epoch\":%u}",
+      fprintf(g_output,"%s\"%s\":",i?",":"",names[i]);
+      if(v->evidence==NR_UL_EVID_UNKNOWN) fputs("null",g_output);
+      else fprintf(g_output,"{\"value\":%" PRId64 ",\"evidence\":%u,\"epoch\":%u}",
                    v->value,v->evidence,v->epoch);
     }
-    fputs(",\"id_priors\":[",output);
-    for(int i=0;i<c->ul.n_id_priors;i++) fprintf(output,"%s%u",i?",":"",c->ul.id_priors[i]);
-    fputs("],\"dl_bwp_prior\":",output); json_int(c->ul.dl_bwp_prior);
-    fputs(",\"dl_cfo_prior_hz\":",output);
-    if(c->ul.dl_cfo_prior_valid) fprintf(output,"%d",c->ul.dl_cfo_prior_hz);
-    else fputs("null",output);
-    fputs(",\"ta_command_units\":",output);
-    if(c->ul.ta_command_valid) fprintf(output,"%d",c->ul.ta_command_units);
-    else fputs("null",output);
+    fputs(",\"id_priors\":[",g_output);
+    for(int i=0;i<c->ul.n_id_priors;i++) fprintf(g_output,"%s%u",i?",":"",c->ul.id_priors[i]);
+    fputs("],\"dl_bwp_prior\":",g_output); json_int(c->ul.dl_bwp_prior);
+    fputs(",\"dl_cfo_prior_hz\":",g_output);
+    if(c->ul.dl_cfo_prior_valid) fprintf(g_output,"%d",c->ul.dl_cfo_prior_hz);
+    else fputs("null",g_output);
+    fputs(",\"ta_command_units\":",g_output);
+    if(c->ul.ta_command_valid) fprintf(g_output,"%d",c->ul.ta_command_units);
+    else fputs("null",g_output);
   }
-  fprintf(output, "},\"n_changes\":%u,\"n_reconfigs\":%u}\n",c->n_changes,c->n_reconfigs);
+  fprintf(g_output, "},\"n_changes\":%u,\"n_reconfigs\":%u}\n",c->n_changes,c->n_reconfigs);
   line_done();
 }
 static const char *reconfig_class(uint64_t mask)
@@ -224,16 +276,16 @@ static void flush_reconfig(entry_t *e)
 {
   if (!e->pending_params) return;
   nr_ue_ctx_t *c=&e->ctx;
-  fprintf(output,"{\"schema\":\"uectx/1\",\"type\":\"ue_reconfig\",\"t_mono_ns\":%" PRIu64
+  fprintf(g_output,"{\"schema\":\"uectx/1\",\"type\":\"ue_reconfig\",\"t_mono_ns\":%" PRIu64
                  ",\"abs_slot\":",e->pending_ns);
   json_int(e->pending_slot);
-  fprintf(output,",\"epoch\":%u,\"identity_gen\":%u,\"rnti\":%u,\"incarnation\":%u,\"params\":[",
-          epoch,c->identity_gen,c->rnti,c->incarnation);
+  fprintf(g_output,",\"epoch\":%u,\"identity_gen\":%u,\"rnti\":%u,\"incarnation\":%u,\"params\":[",
+          g_epoch,c->identity_gen,c->rnti,c->incarnation);
   bool comma=false;
   for(int p=0;p<NR_UEP_COUNT;p++) if(e->pending_params & (1ull<<p)) {
-    fprintf(output,"%s\"%s\"",comma?",":"",param_name[p]); comma=true;
+    fprintf(g_output,"%s\"%s\"",comma?",":"",param_name[p]); comma=true;
   }
-  fprintf(output,"],\"class\":\"%s\"}\n",reconfig_class(e->pending_params));
+  fprintf(g_output,"],\"class\":\"%s\"}\n",reconfig_class(e->pending_params));
   line_done(); c->n_reconfigs++;
   /* DL length and TD reopen owners already notify the epoch authority directly. The UL 0_1 length is not epoch evidence: its owner
    * deliberately does not notify (nr_pdsch_config_sweep_relock_length), and OTA it flips between two decodable sizes on every UE of both
@@ -250,21 +302,21 @@ static void change(entry_t *e,nr_ue_param_t p,int64_t old,int64_t value,int caus
                    int64_t slot,uint64_t ns,int64_t evidence)
 {
   nr_ue_ctx_t *c=&e->ctx;
-  fprintf(output,"{\"schema\":\"uectx/1\",\"type\":\"ue_change\",\"t_mono_ns\":%" PRIu64
+  fprintf(g_output,"{\"schema\":\"uectx/1\",\"type\":\"ue_change\",\"t_mono_ns\":%" PRIu64
                  ",\"abs_slot\":",ns); json_int(slot);
-  fprintf(output,",\"epoch\":%u,\"identity_gen\":%u,\"rnti\":%u,\"incarnation\":%u,\"param\":\"%s\",\"old\":",
-          epoch,c->identity_gen,c->rnti,c->incarnation,param_name[p]);
-  json_int(old); fputs(",\"new\":",output); json_int(value);
-  fprintf(output,",\"cause\":\"%s\",\"evidence\":",
+  fprintf(g_output,",\"epoch\":%u,\"identity_gen\":%u,\"rnti\":%u,\"incarnation\":%u,\"param\":\"%s\",\"old\":",
+          g_epoch,c->identity_gen,c->rnti,c->incarnation,param_name[p]);
+  json_int(old); fputs(",\"new\":",g_output); json_int(value);
+  fprintf(g_output,",\"cause\":\"%s\",\"evidence\":",
           cause>=0 && cause<=NR_UEC_RRC_WINDOW?cause_name[cause]:"FIRST_LEARNED");
   if(p==NR_UEP_APERIODIC_CSI && evidence>=0) {
     const uint64_t bits=(uint64_t)evidence;
-    fprintf(output,"{\"row\":%u,\"freq_domain\":%u,\"start_rb\":%u,\"nr_of_rbs\":%u,\"symb_l0\":%u,\"scramb_id\":%u}",
+    fprintf(g_output,"{\"row\":%u,\"freq_domain\":%u,\"start_rb\":%u,\"nr_of_rbs\":%u,\"symb_l0\":%u,\"scramb_id\":%u}",
             (unsigned)(bits&63u),(unsigned)((bits>>6)&65535u),
             (unsigned)((bits>>22)&511u),(unsigned)((bits>>31)&511u),
             (unsigned)((bits>>40)&15u),(unsigned)((bits>>44)&65535u));
   } else json_int(evidence);
-  fputs("}\n",output); line_done(); c->n_changes++;
+  fputs("}\n",g_output); line_done(); c->n_changes++;
 }
 static void init_entry(entry_t *e,uint16_t rnti,uint16_t incarnation,uint64_t ns)
 {
@@ -272,7 +324,7 @@ static void init_entry(entry_t *e,uint16_t rnti,uint16_t incarnation,uint64_t ns
   memset(e,0,sizeof(*e));
   e->rrc_eff_slot=-1;
   e->used=true; e->ctx.rnti=rnti; e->ctx.incarnation=incarnation;
-  e->ctx.identity_gen=identity; e->ctx.state=NR_UE_FIRST_SEEN; e->last_activity_ns=ns;
+  e->ctx.identity_gen=g_identity; e->ctx.state=NR_UE_FIRST_SEEN; e->last_activity_ns=ns;
   e->ctx.ul.dl_bwp_prior=-1;
   for(int p=0;p<NR_UEP_COUNT;p++) {
     e->ctx.cfg[p].value=-1;
@@ -283,27 +335,27 @@ static void init_entry(entry_t *e,uint16_t rnti,uint16_t incarnation,uint64_t ns
   s->snr_ema_db=s->nvar_ema=s->fo_ema_hz=s->ta_ema_samples=NAN;
   s->prb_start_min=s->prb_start_max=s->prb_size_min=s->prb_size_max=-1;
   s->prb_size_mean=NAN; s->last_abs_slot=-1;
-  for(int i=0;i<3;i++) if(sib1_values[i]>=0) {
+  for(int i=0;i<3;i++) if(g_sib1_values[i]>=0) {
     const int p=NR_UEP_SIB1_HASH+i;
-    e->ctx.cfg[p].value=sib1_values[i];
+    e->ctx.cfg[p].value=g_sib1_values[i];
     e->ctx.cfg[p].verif=NR_UEV_TRUSTED;
-    e->ctx.cfg[p].epoch_learned=epoch;
+    e->ctx.cfg[p].epoch_learned=g_epoch;
   }
   snapshot(e,ns);
 }
 static entry_t *find_entry(uint16_t rnti,uint64_t ns,bool create)
 {
-  const int16_t active=active_index[rnti];
-  if(active>=0 && entries[active].used && entries[active].ctx.identity_gen==identity &&
-     entries[active].ctx.state!=NR_UE_GONE) return &entries[active];
+  const int16_t active=g_active_index[rnti];
+  if(active>=0 && g_entries[active].used && g_entries[active].ctx.identity_gen==g_identity &&
+     g_entries[active].ctx.state!=NR_UE_GONE) return &g_entries[active];
   entry_t *free_slot=NULL,*evict=NULL;
   uint16_t next_incarnation=0;
   for(int i=0;i<NR_UECTX_MAX_UE;i++) {
-    entry_t *e=&entries[i];
+    entry_t *e=&g_entries[i];
     if(e->used && e->ctx.rnti==rnti) {
-      if(e->ctx.identity_gen==identity && e->ctx.incarnation>=next_incarnation)
+      if(e->ctx.identity_gen==g_identity && e->ctx.incarnation>=next_incarnation)
         next_incarnation=e->ctx.incarnation+1;
-      if(e->ctx.identity_gen==identity && e->ctx.state!=NR_UE_GONE) return e;
+      if(e->ctx.identity_gen==g_identity && e->ctx.state!=NR_UE_GONE) return e;
     }
     if(!e->used && !free_slot) free_slot=e;
     if(e->used && e->ctx.state==NR_UE_GONE && (!evict || e->last_activity_ns<evict->last_activity_ns)) evict=e;
@@ -312,16 +364,16 @@ static entry_t *find_entry(uint16_t rnti,uint64_t ns,bool create)
   entry_t *e=free_slot?free_slot:evict;
   if(!e) return NULL;
   if(e->used) flush_reconfig(e);
-  if(e->used && active_index[e->ctx.rnti]==e-entries) active_index[e->ctx.rnti]=-1;
+  if(e->used && g_active_index[e->ctx.rnti]==e-g_entries) g_active_index[e->ctx.rnti]=-1;
   init_entry(e,rnti,next_incarnation,ns);
-  active_index[rnti]=(int16_t)(e-entries);
+  g_active_index[rnti]=(int16_t)(e-g_entries);
   return e;
 }
 static void ul_dl_prior(entry_t *e,nr_ue_ul_field_t field,int64_t value)
 {
   nr_ue_ul_value_t *v=&e->ctx.ul.field[field];
   if(v->evidence<=NR_UL_EVID_DL_PRIOR)
-    *v=(nr_ue_ul_value_t){.value=value,.evidence=NR_UL_EVID_DL_PRIOR,.epoch=epoch};
+    *v=(nr_ue_ul_value_t){.value=value,.evidence=NR_UL_EVID_DL_PRIOR,.epoch=g_epoch};
 }
 static const nr_ue_param_t rrc_params_inferred[]={NR_UEP_CORESET,NR_UEP_DCI_LEN_DL,NR_UEP_DCI_LEN_UL,NR_UEP_PDCCH_SCR_ID,NR_UEP_PDSCH_SCR_ID,NR_UEP_TD_WINNER,
                                                   NR_UEP_MCS_TABLE,NR_UEP_DMRS_CFG,NR_UEP_MAX_LAYERS,NR_UEP_BWP,NR_UEP_PUSCH_LAYOUT};
@@ -360,7 +412,7 @@ static void param(entry_t *e,nr_ue_param_t p,int64_t value,nr_ue_verif_t verif,
     change(e,p,old,value,cause,slot,ns,evidence);
   }
   if(verif==NR_UEV_TRUSTED) e->inferred_hint&=~(1ull<<p);
-  v->value=value; v->verif=verif; v->epoch_learned=epoch;
+  v->value=value; v->verif=verif; v->epoch_learned=g_epoch;
   if(verif==NR_UEV_TRUSTED) v->last_confirmed_abs_slot=slot;
   v->source=source_for_param(p);
   if(verif==NR_UEV_TRUSTED) {
@@ -414,7 +466,7 @@ static void observe(entry_t *e,const nr_passive_obs_t *o,uint64_t ns)
     s->prb_size_mean=isfinite(s->prb_size_mean)?s->prb_size_mean+((double)o->nb_rb-s->prb_size_mean)/n:o->nb_rb;
   }
   s->last_abs_slot=o->abs_slot;
-  if(o->scs_khz>=15) cur_mu=__builtin_ctz((unsigned)o->scs_khz/15u);
+  if(o->scs_khz>=15) g_cur_mu=__builtin_ctz((unsigned)o->scs_khz/15u);
   if(o->rnti_class>=0 && c->cfg[NR_UEP_RNTI_CLASS].value<0)
     param(e,NR_UEP_RNTI_CLASS,o->rnti_class,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,o->abs_slot,ns,-1);
   else if(o->rnti_class==0 && c->cfg[NR_UEP_RNTI_CLASS].value==1)
@@ -423,12 +475,12 @@ static void observe(entry_t *e,const nr_passive_obs_t *o,uint64_t ns)
 static void age(uint64_t ns)
 {
   for(int i=0;i<NR_UECTX_MAX_UE;i++) {
-    entry_t *e=&entries[i];
+    entry_t *e=&g_entries[i];
     if(e->used && e->pending_params && ns>=e->pending_ns &&
        ns-e->pending_ns>=2000000000ull) flush_reconfig(e);
     if(!e->used || e->ctx.state==NR_UE_GONE || ns<e->last_activity_ns) continue;
     uint64_t delta=ns-e->last_activity_ns;
-    if(delta>=NR_RECONF_GONE_NS) {flush_reconfig(e); e->ctx.state=NR_UE_GONE; active_index[e->ctx.rnti]=-1; snapshot(e,ns);}
+    if(delta>=NR_RECONF_GONE_NS) {flush_reconfig(e); e->ctx.state=NR_UE_GONE; g_active_index[e->ctx.rnti]=-1; snapshot(e,ns);}
     else if(delta>=NR_RECONF_INACTIVE_NS && e->ctx.state==NR_UE_ACTIVE) {
       /* a UE known by a resume identity has used RRC_INACTIVE before (TS 38.331 5.3.13); every other silent UE is IDLE or in DRX */
       e->ctx.state=(e->ctx.cfg[NR_UEP_UE_ID].value>>48)==NR_RECONF_ID_RESUME ? NR_UE_INACTIVE : NR_UE_IDLE;
@@ -444,7 +496,7 @@ static entry_t *reattach(entry_t *old,int cause,int64_t slot,uint64_t ns)
   const uint16_t rnti=old->ctx.rnti;
   const int64_t prev=((int64_t)rnti<<16)|old->ctx.incarnation;
   flush_reconfig(old);
-  old->ctx.state=NR_UE_GONE; active_index[rnti]=-1; snapshot(old,ns);
+  old->ctx.state=NR_UE_GONE; g_active_index[rnti]=-1; snapshot(old,ns);
   entry_t *n=find_entry(rnti,ns,true);
   if(!n) return NULL;
   n->attach_open=cause==NR_UEC_REATTACH_RAR || cause==NR_UEC_REATTACH_MSG4; n->attach_ns=ns;
@@ -479,8 +531,8 @@ static entry_t *find_by_id(int64_t packed,const entry_t *skip)
 {
   entry_t *best=NULL;
   for(int i=0;i<NR_UECTX_MAX_UE;i++) {
-    entry_t *x=&entries[i];
-    if(x!=skip && x->used && x->ctx.identity_gen==identity && x->ctx.cfg[NR_UEP_UE_ID].value==packed &&
+    entry_t *x=&g_entries[i];
+    if(x!=skip && x->used && x->ctx.identity_gen==g_identity && x->ctx.cfg[NR_UEP_UE_ID].value==packed &&
        (!best || x->last_activity_ns>best->last_activity_ns)) best=x;
   }
   return best;
@@ -489,20 +541,20 @@ static entry_t *find_by_id(int64_t packed,const entry_t *skip)
 static void on_msg3(const event_t *v,uint64_t ns)
 {
   entry_t *e=find_entry(v->rnti,ns,true);
-  if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); return;}
+  if(!e) {atomic_fetch_add_explicit(&g_dropped,1,memory_order_relaxed); return;}
   e->msg3=(uint64_t)v->value; e->msg3_valid=true; e->n_events++;
 }
 /* Msg4 with a UE Contention Resolution Identity: the TC-RNTI is now this UE's C-RNTI (TS 38.321 5.1.5). */
 static void on_msg4(const event_t *v,uint64_t ns)
 {
   entry_t *e=find_entry(v->rnti,ns,true);
-  if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); return;}
+  if(!e) {atomic_fetch_add_explicit(&g_dropped,1,memory_order_relaxed); return;}
   /* A Msg4 starts an attachment: when the incarnation was not opened by this attachment's RAR (or earlier Msg4) and already has history, the RNTI was
    * reused by a new UE. */
   if(!(e->attach_open && ns-e->attach_ns<2000000000ull) && e->n_events>0) {
     const bool msg3_kept=e->msg3_valid; const uint64_t m3=e->msg3;
     e=reattach(e,NR_UEC_REATTACH_MSG4,v->slot,ns);
-    if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); return;}
+    if(!e) {atomic_fetch_add_explicit(&g_dropped,1,memory_order_relaxed); return;}
     e->msg3_valid=msg3_kept; e->msg3=m3; /* a Msg3 heard after the RAR belongs to this attachment */
   }
   e->n_events++; e->last_activity_ns=ns;
@@ -527,8 +579,8 @@ static void on_msg4(const event_t *v,uint64_t ns)
 static void infer_reconfiguration(entry_t *e,nr_ue_param_t changed,int64_t slot)
 {
   if(slot<0) return;
-  const int d=nr_reconf_rrc_delay_slots(NR_RECONF_RRC_RECONF,cur_mu,false);
-  if(d>=0) nr_reconf_rrc_expect(e->ctx.rnti,slot-d,NR_RECONF_RRC_RECONF,cur_mu,false); /* effective slot = the observed change */
+  const int d=nr_reconf_rrc_delay_slots(NR_RECONF_RRC_RECONF,g_cur_mu,false);
+  if(d>=0) nr_reconf_rrc_expect(e->ctx.rnti,slot-d,NR_RECONF_RRC_RECONF,g_cur_mu,false); /* effective slot = the observed change */
   for(unsigned k=0;k<sizeof(rrc_params_inferred)/sizeof(rrc_params_inferred[0]);k++) {
     nr_ue_cfg_value_t *v=&e->ctx.cfg[rrc_params_inferred[k]];
     if(rrc_params_inferred[k]!=changed && v->value>=0 && v->verif==NR_UEV_TRUSTED) {v->verif=NR_UEV_HINT; e->inferred_hint|=1ull<<rrc_params_inferred[k];}
@@ -539,33 +591,33 @@ static void infer_reconfiguration(entry_t *e,nr_ue_param_t changed,int64_t slot)
 static void on_rrc(const event_t *v,uint64_t ns)
 {
   entry_t *e=find_entry(v->rnti,ns,true);
-  if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); return;}
+  if(!e) {atomic_fetch_add_explicit(&g_dropped,1,memory_order_relaxed); return;}
   const int d=nr_reconf_rrc_delay_slots((nr_reconf_rrc_kind_t)v->cause,v->p,false);
   if(d<0 || v->slot<0) return;
-  if(e->rrc_eff_slot<0) rrc_pending++;
+  if(e->rrc_eff_slot<0) g_rrc_pending++;
   e->rrc_eff_slot=v->slot+d; e->rrc_kind=v->cause; e->n_events++; e->last_activity_ns=ns;
 }
 static void rrc_fire(uint64_t ns)
 {
-  if(!rrc_pending) return;
+  if(!g_rrc_pending) return;
   for(int i=0;i<NR_UECTX_MAX_UE;i++) {
-    entry_t *e=&entries[i];
-    if(!e->used || e->rrc_eff_slot<0 || latest_slot<e->rrc_eff_slot) continue;
+    entry_t *e=&g_entries[i];
+    if(!e->used || e->rrc_eff_slot<0 || g_latest_slot<e->rrc_eff_slot) continue;
     nr_ue_ctx_t *c=&e->ctx; uint64_t mask=0;
     for(unsigned k=0;k<sizeof(rrc_params_inferred)/sizeof(rrc_params_inferred[0]);k++) {
       nr_ue_cfg_value_t *v=&c->cfg[rrc_params_inferred[k]];
       if(v->value>=0 && v->verif==NR_UEV_TRUSTED) {v->verif=NR_UEV_HINT; mask|=1ull<<rrc_params_inferred[k];}
     }
     const int64_t eff=e->rrc_eff_slot;
-    e->rrc_eff_slot=-1; rrc_pending--;
+    e->rrc_eff_slot=-1; g_rrc_pending--;
     if(c->state==NR_UE_GONE) continue;
     flush_reconfig(e);
-    fprintf(output,"{\"schema\":\"uectx/1\",\"type\":\"ue_reconfig\",\"t_mono_ns\":%" PRIu64 ",\"abs_slot\":%" PRId64
+    fprintf(g_output,"{\"schema\":\"uectx/1\",\"type\":\"ue_reconfig\",\"t_mono_ns\":%" PRIu64 ",\"abs_slot\":%" PRId64
                    ",\"epoch\":%u,\"identity_gen\":%u,\"rnti\":%u,\"incarnation\":%u,\"params\":[",
-            ns,eff,epoch,c->identity_gen,c->rnti,c->incarnation);
+            ns,eff,g_epoch,c->identity_gen,c->rnti,c->incarnation);
     bool comma=false;
-    for(int p=0;p<NR_UEP_COUNT;p++) if(mask & (1ull<<p)) {fprintf(output,"%s\"%s\"",comma?",":"",param_name[p]); comma=true;}
-    fputs("],\"class\":\"RRC_WINDOW_CLOSED\"}\n",output);
+    for(int p=0;p<NR_UEP_COUNT;p++) if(mask & (1ull<<p)) {fprintf(g_output,"%s\"%s\"",comma?",":"",param_name[p]); comma=true;}
+    fputs("],\"class\":\"RRC_WINDOW_CLOSED\"}\n",g_output);
     line_done(); c->n_reconfigs++;
     /* No epoch note here: a closed window is not a reopened UE (spec 4.4/4.7: only a TRUSTED value that changed counts). An inferred window was
      * already noted by flush_reconfig() for the change that opened it, and an RRC message seen without any change proves nothing. */
@@ -575,7 +627,7 @@ static void ul_put(nr_ue_ul_state_t *s, nr_ue_ul_field_t f, int64_t value, uint8
 {
   nr_ue_ul_value_t *v=&s->field[f];
   if (v->evidence==NR_UL_EVID_TB_CONFIRMED && evidence<NR_UL_EVID_TB_CONFIRMED) return;
-  v->value=value; v->evidence=evidence; v->epoch=epoch;
+  v->value=value; v->evidence=evidence; v->epoch=g_epoch;
 }
 static void ul_prior_id(nr_ue_ul_state_t *s, int64_t id)
 {
@@ -613,21 +665,21 @@ static void ul_update(entry_t *e,const nr_ue_ul_update_t *u,bool confirmed)
 }
 static void handle(const event_t *v)
 {
-  pthread_mutex_lock(&ctx_lock);
+  pthread_mutex_lock(&g_ctx_lock);
   uint64_t ns=v->ns?v->ns:now_ns();
-  if(v->kind!=EV_TICK && ns>now_ns()-5000000000ull) real_time_session=true;
-  if(!last_age_ns || (ns>=last_age_ns && ns-last_age_ns>=1000000000ull)) {
+  if(v->kind!=EV_TICK && ns>now_ns()-5000000000ull) g_real_time_session=true;
+  if(!g_last_age_ns || (ns>=g_last_age_ns && ns-g_last_age_ns>=1000000000ull)) {
     age(ns);
-    last_age_ns=ns;
+    g_last_age_ns=ns;
   }
   if(v->kind==EV_EPOCH) {
     if((v->epoch.last_class!=NR_EPOCH_SOFT ||
        v->epoch.last_cause==NR_CAUSE_DEDICATED_CHANGE_SUSPECTED) && nr_pusch_passive_ul_ids_reset_all)
       nr_pusch_passive_ul_ids_reset_all();
-    for(int i=0;i<NR_UECTX_MAX_UE;i++) if(entries[i].used && entries[i].ctx.state!=NR_UE_GONE) {
-      entry_t *e=&entries[i];
+    for(int i=0;i<NR_UECTX_MAX_UE;i++) if(g_entries[i].used && g_entries[i].ctx.state!=NR_UE_GONE) {
+      entry_t *e=&g_entries[i];
       flush_reconfig(e);
-      if(v->epoch.last_class==NR_EPOCH_HARD_RESET) {e->ctx.state=NR_UE_GONE; active_index[e->ctx.rnti]=-1; snapshot(e,ns);}
+      if(v->epoch.last_class==NR_EPOCH_HARD_RESET) {e->ctx.state=NR_UE_GONE; g_active_index[e->ctx.rnti]=-1; snapshot(e,ns);}
       else if(v->epoch.last_class!=NR_EPOCH_SOFT ||
               v->epoch.last_cause==NR_CAUSE_DEDICATED_CHANGE_SUSPECTED)
         for(int p=0;p<NR_UEP_COUNT;p++) if(e->ctx.cfg[p].value>=0) e->ctx.cfg[p].verif=NR_UEV_HINT;
@@ -642,27 +694,27 @@ static void handle(const event_t *v)
         e->ctx.ul.ta_command_valid=false;
       }
     }
-    epoch=v->epoch.epoch; identity=v->epoch.identity_gen;
+    g_epoch=v->epoch.epoch; g_identity=v->epoch.identity_gen;
     if(v->epoch.last_class==NR_EPOCH_HARD_RESET)
-      for(int i=0;i<3;i++) sib1_values[i]=-1;
+      for(int i=0;i<3;i++) g_sib1_values[i]=-1;
   } else if(v->kind==EV_SIB1) {
     if(v->p>=NR_UEP_SIB1_HASH && v->p<=NR_UEP_SIB1_TDRA_HASH && v->value>=0) {
-      sib1_values[v->p-NR_UEP_SIB1_HASH]=v->value;
-      for(int i=0;i<NR_UECTX_MAX_UE;i++) if(entries[i].used && entries[i].ctx.state!=NR_UE_GONE)
-        param(&entries[i],(nr_ue_param_t)v->p,v->value,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,v->slot,ns,-1);
+      g_sib1_values[v->p-NR_UEP_SIB1_HASH]=v->value;
+      for(int i=0;i<NR_UECTX_MAX_UE;i++) if(g_entries[i].used && g_entries[i].ctx.state!=NR_UE_GONE)
+        param(&g_entries[i],(nr_ue_param_t)v->p,v->value,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,v->slot,ns,-1);
     }
   } else if(v->kind==EV_UL_GRANT || v->kind==EV_UL_FEEDBACK) {
     const nr_ue_ul_ticket_t *t=&v->ul_ticket;
-    const int16_t idx=active_index[t->rnti];
+    const int16_t idx=g_active_index[t->rnti];
     if(idx>=0) {
-      entry_t *e=&entries[idx];
+      entry_t *e=&g_entries[idx];
       if(e->used && e->ctx.state!=NR_UE_GONE && e->ctx.identity_gen==t->identity_gen &&
-         e->ctx.incarnation==t->incarnation && t->epoch==epoch &&
+         e->ctx.incarnation==t->incarnation && t->epoch==g_epoch &&
          e->ctx.cfg[NR_UEP_DCI_LEN_DL].value>=0)
         ul_update(e,&v->ul_update,v->kind==EV_UL_FEEDBACK);
     }
   } else if(v->kind==EV_UL_TA) {
-    entry_t *e=v->ul_ticket.epoch==epoch ? find_entry(v->rnti,ns,v->cause!=0) : NULL;
+    entry_t *e=v->ul_ticket.epoch==g_epoch ? find_entry(v->rnti,ns,v->cause!=0) : NULL;
     if(e && v->p>=0 && v->p<=4) {
       if(v->cause) {e->ctx.ul.ta_command_units=(int32_t)v->value;e->ctx.ul.ta_command_valid=true;}
       else if(e->ctx.ul.ta_command_valid && e->ctx.ul.ta_mu==v->p) {
@@ -684,7 +736,7 @@ static void handle(const event_t *v)
          e->ctx.cfg[v->p].value>=0 && e->ctx.cfg[v->p].value!=v->value && e->ctx.cfg[v->p].verif==NR_UEV_TRUSTED &&
          ns>e->last_activity_ns && ns-e->last_activity_ns>=NR_RECONF_REATTACH_GAP_NS && ns-e->last_activity_ns<=NR_RECONF_REUSE_NS)
         e=reattach(e,NR_UEC_REATTACH_DCI_SIZE,v->slot,ns);
-      if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); goto done;}
+      if(!e) {atomic_fetch_add_explicit(&g_dropped,1,memory_order_relaxed); goto done;}
       const uint64_t silent_ns=ns>e->last_activity_ns?ns-e->last_activity_ns:0;
       if(v->kind==EV_PARAM || v->kind==EV_ANCHOR || v->kind==EV_CSI) e->last_activity_ns=ns;
       e->n_events++;
@@ -705,7 +757,7 @@ static void handle(const event_t *v)
         const bool same_ue=e->n_events>1 && e->ctx.state!=NR_UE_GONE && !repeat && silent_ns<NR_RECONF_INACTIVE_NS;
         if(e->n_events>1 && e->ctx.state!=NR_UE_GONE && !repeat && !same_ue) {
           e=reattach(e,NR_UEC_REATTACH_RAR,v->slot,ns);
-          if(!e) {atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed); goto done;}
+          if(!e) {atomic_fetch_add_explicit(&g_dropped,1,memory_order_relaxed); goto done;}
           e->n_events++;
         }
         if(!same_ue) {e->attach_open=true; e->attach_ns=ns;}
@@ -713,36 +765,36 @@ static void handle(const event_t *v)
         param(e,NR_UEP_ANCHOR,v->value,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,v->slot,ns,-1);
       } else if(v->kind==EV_CSI)
         change(e,NR_UEP_APERIODIC_CSI,-1,v->value,NR_UEC_FIRST_LEARNED,v->slot,ns,v->extra);
-    } else atomic_fetch_add_explicit(&dropped,1,memory_order_relaxed);
+    } else atomic_fetch_add_explicit(&g_dropped,1,memory_order_relaxed);
   }
 done:
-  if(v->slot>latest_slot && v->kind!=EV_UL_TA) latest_slot=v->slot;
+  if(v->slot>g_latest_slot && v->kind!=EV_UL_TA) g_latest_slot=v->slot;
   rrc_fire(ns);
-  if(period_s>0 && (!last_period_ns || (ns>=last_period_ns && ns-last_period_ns>=(uint64_t)(period_s*1e9)))) {
-    for(int i=0;i<NR_UECTX_MAX_UE;i++) if(entries[i].used && entries[i].ctx.state!=NR_UE_GONE) snapshot(&entries[i],ns);
-    last_period_ns=ns;
+  if(g_period_s>0 && (!g_last_period_ns || (ns>=g_last_period_ns && ns-g_last_period_ns>=(uint64_t)(g_period_s*1e9)))) {
+    for(int i=0;i<NR_UECTX_MAX_UE;i++) if(g_entries[i].used && g_entries[i].ctx.state!=NR_UE_GONE) snapshot(&g_entries[i],ns);
+    g_last_period_ns=ns;
   }
-  if(!file_capped && ftell(output)>nr_ue_ctx_test_file_cap) {
+  if(!g_file_capped && ftell(g_output)>nr_ue_ctx_test_file_cap) {
     FILE *nf=fopen("/dev/null","w");
-    if(nf) {fclose(output);output=nf;file_capped=true;}
+    if(nf) {fclose(g_output);g_output=nf;g_file_capped=true;}
   }
-  pthread_mutex_unlock(&ctx_lock);
+  pthread_mutex_unlock(&g_ctx_lock);
 }
 /* Test hook: the writer sleeps first so the ring fills (overflow tests). */
 int nr_ue_ctx_test_writer_pause_ms;
-static void *run(void *unused)
+static void *run(void *cell)
 {
-  (void)unused;
+  nr_cell_bind((int)(intptr_t)cell); /* the worker serves the cell that opened the session (nr_core_plan_create does not bind) */
   if(nr_ue_ctx_test_writer_pause_ms>0) {struct timespec t={nr_ue_ctx_test_writer_pause_ms/1000,(nr_ue_ctx_test_writer_pause_ms%1000)*1000000L}; nanosleep(&t,NULL);}
   event_t e;
   uint64_t last_idle_tick=now_ns();
-  while(atomic_load_explicit(&running,memory_order_seq_cst) ||
-        atomic_load_explicit(&producers,memory_order_seq_cst) ||
-        head<atomic_load_explicit(&tail,memory_order_acquire)) {
+  while(atomic_load_explicit(&g_running,memory_order_seq_cst) ||
+        atomic_load_explicit(&g_producers,memory_order_seq_cst) ||
+        g_head<atomic_load_explicit(&g_tail,memory_order_acquire)) {
     if(dequeue(&e)) handle(&e);
     else {
       uint64_t ns=now_ns();
-      if(real_time_session && ns-last_idle_tick>=100000000ull) {
+      if(g_real_time_session && ns-last_idle_tick>=100000000ull) {
         event_t tick={.kind=EV_TICK,.ns=ns};
         handle(&tick);
         last_idle_tick=ns;
@@ -750,13 +802,13 @@ static void *run(void *unused)
       struct timespec t={0,1000000}; nanosleep(&t,NULL);
     }
   }
-  pthread_mutex_lock(&ctx_lock);
-  for(int i=0;i<NR_UECTX_MAX_UE;i++) if(entries[i].used) {
-    flush_reconfig(&entries[i]);
-    snapshot(&entries[i],now_ns());
+  pthread_mutex_lock(&g_ctx_lock);
+  for(int i=0;i<NR_UECTX_MAX_UE;i++) if(g_entries[i].used) {
+    flush_reconfig(&g_entries[i]);
+    snapshot(&g_entries[i],now_ns());
   }
-  fflush(output);
-  pthread_mutex_unlock(&ctx_lock);
+  fflush(g_output);
+  pthread_mutex_unlock(&g_ctx_lock);
   return NULL;
 }
 /* nr_ue_ctx_open: opens the UE context output file (ISAC_UECTX_PATH) and starts its writer: allocates the slot ring (at least two slots) and the per-UE table, initialises the sequence and the SIB1 values, and starts the worker thread.
@@ -764,7 +816,7 @@ static void *run(void *unused)
  */
 bool nr_ue_ctx_open(const char *path,uint32_t ring_capacity,double snapshot_period_s)
 {
-  if(!ring_capacity || nr_ue_ctx_enabled()) return false;
+  if(!ring_capacity || atomic_load_explicit(&g_cell_open,memory_order_seq_cst)) return false;
   /* The sequence algorithm needs at least two physical slots; a requested one-slot ring keeps
    * the same bounded/drop behavior with two physical slots. */
   if(ring_capacity<2) ring_capacity=2;
@@ -774,32 +826,35 @@ bool nr_ue_ctx_open(const char *path,uint32_t ring_capacity,double snapshot_peri
   ring_slot_t *r=calloc(ring_capacity,sizeof(*r));
   entry_t *x=calloc(NR_UECTX_MAX_UE,sizeof(*x));
   if(!r || !x) {free(r);free(x);fclose(f);return false;}
-  free(entries);
-  output=f; ring=r; entries=x; capacity=ring_capacity; head=0;
-  period_s=snapshot_period_s; last_period_ns=last_age_ns=0; epoch=identity=0; file_capped=false; latest_slot=-1; rrc_pending=0;
-  for(int i=0;i<=UINT16_MAX;i++) active_index[i]=-1;
-  real_time_session=false;
-  for(int i=0;i<3;i++) sib1_values[i]=-1;
-  for(uint32_t i=0;i<capacity;i++) atomic_init(&ring[i].seq,i);
-  atomic_store(&tail,0);atomic_store(&pushed,0);atomic_store(&written,0);atomic_store(&dropped,0);
-  atomic_store_explicit(&producers,0,memory_order_seq_cst);
-  atomic_store_explicit(&running,true,memory_order_seq_cst);
-  __atomic_store_n(&nr_ue_ctx_fast_open,true,__ATOMIC_SEQ_CST);
-  if(nr_core_plan_create(&worker,NULL,run,NULL, -1)!=0) {
-    __atomic_store_n(&nr_ue_ctx_fast_open,false,__ATOMIC_SEQ_CST);
-    atomic_store_explicit(&running,false,memory_order_seq_cst);
-    free(ring);free(entries);fclose(output);ring=NULL;entries=NULL;output=NULL;
+  free(g_entries);
+  g_output=f; g_ring=r; g_entries=x; g_capacity=ring_capacity; g_head=0;
+  g_period_s=snapshot_period_s; g_last_period_ns=g_last_age_ns=0; g_epoch=g_identity=0; g_file_capped=false; g_latest_slot=-1; g_rrc_pending=0;
+  for(int i=0;i<=UINT16_MAX;i++) g_active_index[i]=-1;
+  g_real_time_session=false;
+  for(int i=0;i<3;i++) g_sib1_values[i]=-1;
+  for(uint32_t i=0;i<g_capacity;i++) atomic_init(&g_ring[i].seq,i);
+  atomic_store(&g_tail,0);atomic_store(&g_pushed,0);atomic_store(&g_written,0);atomic_store(&g_dropped,0);
+  atomic_store_explicit(&g_producers,0,memory_order_seq_cst);
+  atomic_store_explicit(&g_running,true,memory_order_seq_cst);
+  atomic_store_explicit(&g_cell_open,true,memory_order_seq_cst);
+  fast_open_refresh();
+  if(nr_core_plan_create(&g_worker,NULL,run,(void *)(intptr_t)nr_cell_idx(), -1)!=0) {
+    atomic_store_explicit(&g_cell_open,false,memory_order_seq_cst);
+    fast_open_refresh();
+    atomic_store_explicit(&g_running,false,memory_order_seq_cst);
+    free(g_ring);free(g_entries);fclose(g_output);g_ring=NULL;g_entries=NULL;g_output=NULL;
     return false;
   }
   return true;
 }
 void nr_ue_ctx_close(void)
 {
-  if(!nr_ue_ctx_enabled()) return;
-  __atomic_store_n(&nr_ue_ctx_fast_open,false,__ATOMIC_SEQ_CST);
-  atomic_store_explicit(&running,false,memory_order_seq_cst);
-  pthread_join(worker,NULL);
-  fclose(output);free(ring);output=NULL;ring=NULL;
+  if(!atomic_load_explicit(&g_cell_open,memory_order_seq_cst)) return;
+  atomic_store_explicit(&g_cell_open,false,memory_order_seq_cst);
+  fast_open_refresh();
+  atomic_store_explicit(&g_running,false,memory_order_seq_cst);
+  pthread_join(g_worker,NULL);
+  fclose(g_output);free(g_ring);g_output=NULL;g_ring=NULL;
 }
 void nr_ue_ctx_on_obs(const nr_passive_obs_t *o)
 { if(o && nr_ue_ctx_enabled()) {event_t e={.kind=EV_OBS,.ns=o->t_mono_ns,.slot=o->abs_slot,.rnti=o->rnti,.obs=*o};enqueue(&e);} }
@@ -847,38 +902,38 @@ void nr_ue_ctx_tick(int64_t slot,uint64_t ns)
 { if(nr_ue_ctx_enabled()) {event_t e={.kind=EV_TICK,.ns=ns,.slot=slot};enqueue(&e);} }
 bool nr_ue_ctx_get(uint16_t rnti,nr_ue_ctx_t *out)
 {
-  if(!out || !entries) return false;
-  pthread_mutex_lock(&ctx_lock);
+  if(!out || !g_entries) return false;
+  pthread_mutex_lock(&g_ctx_lock);
   bool found=false;
-  for(int i=0;i<NR_UECTX_MAX_UE;i++) if(entries[i].used && entries[i].ctx.rnti==rnti &&
-      (!found || entries[i].ctx.incarnation>=out->incarnation)) {*out=entries[i].ctx;found=true;}
-  pthread_mutex_unlock(&ctx_lock);
+  for(int i=0;i<NR_UECTX_MAX_UE;i++) if(g_entries[i].used && g_entries[i].ctx.rnti==rnti &&
+      (!found || g_entries[i].ctx.incarnation>=out->incarnation)) {*out=g_entries[i].ctx;found=true;}
+  pthread_mutex_unlock(&g_ctx_lock);
   return found;
 }
 bool nr_ue_ctx_try_get(uint16_t rnti,nr_ue_ctx_t *out)
 {
-  if (!out || !entries || pthread_mutex_trylock(&ctx_lock)) return false;
+  if (!out || !g_entries || pthread_mutex_trylock(&g_ctx_lock)) return false;
   bool found=false;
   {
-    const int16_t idx=active_index[rnti];
-    if(idx>=0 && entries[idx].used && entries[idx].ctx.state!=NR_UE_GONE) {*out=entries[idx].ctx;found=true;}
+    const int16_t idx=g_active_index[rnti];
+    if(idx>=0 && g_entries[idx].used && g_entries[idx].ctx.state!=NR_UE_GONE) {*out=g_entries[idx].ctx;found=true;}
   }
-  pthread_mutex_unlock(&ctx_lock);
+  pthread_mutex_unlock(&g_ctx_lock);
   return found;
 }
 bool nr_ue_ctx_ul_ticket(uint16_t rnti,nr_ue_ul_ticket_t *out)
 {
-  if(!out || !nr_ue_ctx_enabled() || pthread_mutex_trylock(&ctx_lock)) return false;
-  const int16_t idx=active_index[rnti];
+  if(!out || !nr_ue_ctx_enabled() || pthread_mutex_trylock(&g_ctx_lock)) return false;
+  const int16_t idx=g_active_index[rnti];
   bool ok=false;
   if(idx>=0) {
-    const nr_ue_ctx_t *c=&entries[idx].ctx;
+    const nr_ue_ctx_t *c=&g_entries[idx].ctx;
     const nr_ue_cfg_value_t *dl=&c->cfg[NR_UEP_DCI_LEN_DL];
     ok=c->state!=NR_UE_GONE && dl->value>=0 && dl->verif==NR_UEV_TRUSTED;
-    if(ok) *out=(nr_ue_ul_ticket_t){.identity_gen=c->identity_gen,.epoch=epoch,
+    if(ok) *out=(nr_ue_ul_ticket_t){.identity_gen=c->identity_gen,.epoch=g_epoch,
                                    .incarnation=c->incarnation,.rnti=rnti};
   }
-  pthread_mutex_unlock(&ctx_lock);
+  pthread_mutex_unlock(&g_ctx_lock);
   return ok;
 }
 void nr_ue_ctx_ul_grant(const nr_ue_ul_ticket_t *t,const nr_ue_ul_update_t *u)
@@ -913,4 +968,4 @@ void nr_ue_ctx_on_rrc(uint16_t rnti,int kind,int64_t rx_slot,int mu)
   if(nr_ue_ctx_enabled()) {event_t e={.kind=EV_RRC,.ns=now_ns(),.slot=rx_slot,.rnti=rnti,.cause=kind,.p=mu};enqueue(&e);}
 }
 void nr_ue_ctx_stats(uint64_t *events,uint64_t *lines,uint64_t *drops)
-{if(events)*events=atomic_load(&pushed);if(lines)*lines=atomic_load(&written);if(drops)*drops=atomic_load(&dropped);}
+{if(events)*events=atomic_load(&g_pushed);if(lines)*lines=atomic_load(&g_written);if(drops)*drops=atomic_load(&g_dropped);}

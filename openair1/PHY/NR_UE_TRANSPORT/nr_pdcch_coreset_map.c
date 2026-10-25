@@ -33,6 +33,7 @@ extern int nr_syncq_gate_closed(void) __attribute__((weak));
 #include <stdlib.h>
 #include <string.h>
 #include "nr_pdcch_coreset_map.h"
+#include "common/utils/nr_cell.h"
 #ifndef NR_PDCCH_MAX_CANDIDATE_WINDOWS
 #define NR_PDCCH_MAX_CANDIDATE_WINDOWS 46 /* 6-RB windows on a 275-PRB carrier */
 #endif
@@ -70,7 +71,8 @@ void nr_pdcch_coreset_map_accept_probe(const c16_t *rxdataF, int ofdm_symbol_siz
 
 /* Set by the caller that knows the cell's CORESET#0 start (autoconf derives it from the SSB
  * offset). The scan aligns its 6-RB window grid to `start % 6`. Defaults to 0 = CRB-0 aligned. */
-static int g_coreset_map_phase_hint;
+NR_CELL_STATIC(int, g_coreset_map_phase_hint);
+#define g_coreset_map_phase_hint NR_CELL_REF(g_coreset_map_phase_hint)
 void nr_pdcch_coreset_map_set_phase_hint(int start_rb)
 {
   g_coreset_map_phase_hint = (start_rb > 0) ? (start_rb % 6) : 0;
@@ -97,7 +99,10 @@ int nr_pdcch_coreset_map_get_phase(void)
 #include "openair1/PHY/gold.h"
 #include "nr_passive_acq_state.h"
 
-static int g_css0_first_rb = -1, g_css0_nrb = 0;
+NR_CELL_STATIC_INIT(int, g_css0_first_rb, -1);
+#define g_css0_first_rb NR_CELL_REF(g_css0_first_rb)
+NR_CELL_STATIC(int, g_css0_nrb);
+#define g_css0_nrb NR_CELL_REF(g_css0_nrb)
 void nr_pdcch_coreset_map_set_css0(int first_rb, int n_rb)
 {
   g_css0_first_rb = first_rb;
@@ -119,9 +124,16 @@ int nr_pdcch_coreset_map_idsweep_dur(void)
 }
 
 /* Capture metrics have one producer; readers use relaxed atomic snapshots. */
-static _Atomic uint64_t nid_capture_offered, nid_capture_taken, nid_capture_skipped_empty;
-static _Atomic float nid_capture_noise;
-static _Atomic int nid_gate_bypass; /* ACQMISS recovery: capture every offered symbol (occupancy gate off) */
+NR_CELL_STATIC(_Atomic uint64_t, nid_capture_offered);
+#define nid_capture_offered NR_CELL_REF(nid_capture_offered)
+NR_CELL_STATIC(_Atomic uint64_t, nid_capture_taken);
+#define nid_capture_taken NR_CELL_REF(nid_capture_taken)
+NR_CELL_STATIC(_Atomic uint64_t, nid_capture_skipped_empty);
+#define nid_capture_skipped_empty NR_CELL_REF(nid_capture_skipped_empty)
+NR_CELL_STATIC(_Atomic float, nid_capture_noise);
+#define nid_capture_noise NR_CELL_REF(nid_capture_noise)
+NR_CELL_STATIC(_Atomic int, nid_gate_bypass); /* ACQMISS recovery: capture every offered symbol (occupancy gate off) */
+#define nid_gate_bypass NR_CELL_REF(nid_gate_bypass)
 void nr_pdcch_coreset_map_idsweep_gate_bypass(int on) { atomic_store_explicit(&nid_gate_bypass, on, memory_order_relaxed); }
 /* nr_pdcch_nid_capture_metrics: returns the NID capture counters: slots offered to the capture, captures taken, captures skipped as empty, and the latest noise level of the occupancy gate. Reads atomics. Caller: nr_passive_metrics.c (metrics emission). */
 void nr_pdcch_nid_capture_metrics(uint64_t *offered, uint64_t *taken, uint64_t *empty, float *noise)
@@ -137,7 +149,10 @@ void nr_pdcch_nid_capture_metrics(uint64_t *offered, uint64_t *taken, uint64_t *
  */
 int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
 {
-  static uint32_t dl_calls, cap;
+  NR_CELL_STATIC(uint32_t, dl_calls);
+  #define dl_calls NR_CELL_REF(dl_calls)
+  NR_CELL_STATIC(uint32_t, cap);
+  #define cap NR_CELL_REF(cap)
   if (!nr_pdcch_nid_gpu_running() || sps <= 0) return -1;
   { uint64_t co = 0, ct = 0, ce = 0; float nz; nr_pdcch_nid_capture_metrics(&co, &ct, &ce, &nz);
     if (nr_cell_state_sweep_blocked(abs_slot, co, ct, ce)) return -1; } /* PCIS2: ISAC_CELL_STATE=2, barred/idle cell */
@@ -170,9 +185,12 @@ void nr_pdcch_coreset_map_idsweep_push(const c16_t *rxF_sym, int fft, int fco, i
                                     g_css0_nrb, pci, sps, dur};
   const float ratio = 3.981071706f; /* 6 dB: margin above 54-RE noise averages */
   const int floor_pct = 10;
-  static nr_nid_occupancy_t occupancy;
-  static nr_pdcch_nid_config_t previous;
-  static uint64_t previous_sync_losses;
+  NR_CELL_STATIC(nr_nid_occupancy_t, occupancy);
+  #define occupancy NR_CELL_REF(occupancy)
+  NR_CELL_STATIC(nr_pdcch_nid_config_t, previous);
+  #define previous NR_CELL_REF(previous)
+  NR_CELL_STATIC(uint64_t, previous_sync_losses);
+  #define previous_sync_losses NR_CELL_REF(previous_sync_losses)
   if (memcmp(&previous, &cfg, sizeof(cfg)) || previous_sync_losses != snap.sync_losses) {
     memset(&occupancy, 0, sizeof(occupancy)); previous = cfg; previous_sync_losses = snap.sync_losses;
   }

@@ -4,6 +4,7 @@
  * format. A live CRC and identical decoded bytes are the replay acceptance test.
  */
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_cell.h"
 #include "nr_passive_replay_capture.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "common/utils/LOG/log.h"
@@ -45,16 +46,26 @@ typedef struct {
   replay_dl_t dl[REPLAY_DL];
 } replay_header_t;
 #include "nr_passive_delay_contract.h"
-static replay_header_t *header;
-static unsigned char *iq;
-static char *output;
-static atomic_int state;
-static atomic_bool ul_seen;
-static pthread_mutex_t record_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t writer_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t writer_cv = PTHREAD_COND_INITIALIZER;
-static pthread_t writer;
-static long next_source;
+NR_CELL_STATIC(replay_header_t *, g_header);
+#define g_header NR_CELL_REF(g_header)
+NR_CELL_STATIC(unsigned char *, g_iq);
+#define g_iq NR_CELL_REF(g_iq)
+NR_CELL_STATIC(char *, g_output);
+#define g_output NR_CELL_REF(g_output)
+NR_CELL_STATIC(atomic_int, g_state);
+#define g_state NR_CELL_REF(g_state)
+NR_CELL_STATIC(atomic_bool, g_ul_seen);
+#define g_ul_seen NR_CELL_REF(g_ul_seen)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_record_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_record_lock NR_CELL_REF(g_record_lock)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_writer_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_writer_lock NR_CELL_REF(g_writer_lock)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_writer_cv, PTHREAD_COND_INITIALIZER);
+#define g_writer_cv NR_CELL_REF(g_writer_cv)
+NR_CELL_STATIC(pthread_t, g_writer);
+#define g_writer NR_CELL_REF(g_writer)
+NR_CELL_STATIC(long, g_next_source);
+#define g_next_source NR_CELL_REF(g_next_source)
 
 static uint64_t hash_tb(const uint8_t *p, size_t n)
 {
@@ -72,32 +83,32 @@ static bool write_all(int fd, const void *data, size_t bytes)
   }
   return true;
 }
-static void *write_capture(void *unused)
+static void *write_capture(void *cell)
 {
-  (void)unused;
+  nr_cell_bind((int)(intptr_t)cell); /* the writer serves the cell that armed the recorder (nr_core_plan_create does not bind) */
   for (;;) {
-    pthread_mutex_lock(&writer_lock);
-    while (atomic_load(&state)!=RP_WRITING) pthread_cond_wait(&writer_cv,&writer_lock);
-    pthread_mutex_unlock(&writer_lock);
-    pthread_mutex_lock(&record_lock);
+    pthread_mutex_lock(&g_writer_lock);
+    while (atomic_load(&g_state)!=RP_WRITING) pthread_cond_wait(&g_writer_cv,&g_writer_lock);
+    pthread_mutex_unlock(&g_writer_lock);
+    pthread_mutex_lock(&g_record_lock);
     unsigned controls=0;
-    for(unsigned i=0;i<header->n_dl;++i) controls+=header->dl[i].tb_bytes>0;
-    bool valid=header->n_ul>0 && controls>0;
+    for(unsigned i=0;i<g_header->n_dl;++i) controls+=g_header->dl[i].tb_bytes>0;
+    bool valid=g_header->n_ul>0 && controls>0;
     if (!valid) {
-      unsigned n_ul=header->n_ul,n_dl=header->n_dl;
-      header->n_ul=header->n_dl=0;
-      atomic_store(&state,RP_ARMED);
-      pthread_mutex_unlock(&record_lock);
+      unsigned n_ul=g_header->n_ul,n_dl=g_header->n_dl;
+      g_header->n_ul=g_header->n_dl=0;
+      atomic_store(&g_state,RP_ARMED);
+      pthread_mutex_unlock(&g_record_lock);
       LOG_W(PHY,"REPLAY window VOID: no coincident UL/DL control (%u/%u); re-armed\n",n_ul,n_dl);
       continue;
     }
-    pthread_mutex_unlock(&record_lock);
-    int fd=open(output,O_WRONLY|O_CREAT|O_EXCL,0600);
-    bool ok=fd>=0 && write_all(fd,header,sizeof(*header)) && write_all(fd,iq,header->iq_bytes);
+    pthread_mutex_unlock(&g_record_lock);
+    int fd=open(g_output,O_WRONLY|O_CREAT|O_EXCL,0600);
+    bool ok=fd>=0 && write_all(fd,g_header,sizeof(*g_header)) && write_all(fd,g_iq,g_header->iq_bytes);
     if (fd>=0) { if (fsync(fd)) ok=false; if (close(fd)) ok=false; }
     LOG_I(PHY,"REPLAY %s: %s slots=%u UL=%u DL-controls=%u IQ=%lu bytes\n",
-          ok?"READY":"VOID",output,header->slots,header->n_ul,header->n_dl,(unsigned long)header->iq_bytes);
-    atomic_store(&state,ok?RP_DONE:RP_VOID);
+          ok?"READY":"VOID",g_output,g_header->slots,g_header->n_ul,g_header->n_dl,(unsigned long)g_header->iq_bytes);
+    atomic_store(&g_state,ok?RP_DONE:RP_VOID);
     return NULL;
   }
 }
@@ -114,116 +125,121 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
       || !fp->slots_per_frame || fp->slots_per_frame>160) {
     LOG_E(PHY,"REPLAY VOID: geometry exceeds bounded recorder\n"); return;
   }
-  header=calloc(1,sizeof(*header)); iq=malloc(bytes); output=strdup(path);
-  if (!header || !iq || !output) {
-    LOG_E(PHY,"REPLAY VOID: allocation failed\n"); atomic_store(&state,RP_VOID); return;
+  g_header=calloc(1,sizeof(*g_header)); g_iq=malloc(bytes); {
+    /* cell 0: the path unchanged; cell k > 0: one capture file per cell (O_EXCL would otherwise make the second cell void). */
+    char cell_path[4096];
+    nr_cell_path(nr_cell_idx(), path, cell_path, sizeof(cell_path));
+    g_output=strdup(cell_path);
   }
-  memset(iq,0,bytes); /* Prefault before RF start, never page in 157 MB at capture time. */
-  header->magic=UINT64_C(0x314951525041534e);
-  header->version=3;
-  header->header_bytes=sizeof(*header);
-  header->job_bytes=sizeof(nr_pdsch_passive_job_t); header->fp_bytes=sizeof(*fp);
-  header->iq_bytes=bytes; header->slots=REPLAY_FRAMES*fp->slots_per_frame;
-  memcpy(&header->fp,fp,sizeof(*fp));
-  atomic_store(&state,RP_ARMED);
+  if (!g_header || !g_iq || !g_output) {
+    LOG_E(PHY,"REPLAY VOID: allocation failed\n"); atomic_store(&g_state,RP_VOID); return;
+  }
+  memset(g_iq,0,bytes); /* Prefault before RF start, never page in 157 MB at capture time. */
+  g_header->magic=UINT64_C(0x314951525041534e);
+  g_header->version=3;
+  g_header->header_bytes=sizeof(*g_header);
+  g_header->job_bytes=sizeof(nr_pdsch_passive_job_t); g_header->fp_bytes=sizeof(*fp);
+  g_header->iq_bytes=bytes; g_header->slots=REPLAY_FRAMES*fp->slots_per_frame;
+  memcpy(&g_header->fp,fp,sizeof(*fp));
+  atomic_store(&g_state,RP_ARMED);
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   pthread_attr_setinheritsched(&attr,PTHREAD_EXPLICIT_SCHED);
   pthread_attr_setschedpolicy(&attr,SCHED_OTHER);
   struct sched_param sp={.sched_priority=0};
   pthread_attr_setschedparam(&attr,&sp);
-  int err=nr_core_plan_create(&writer,&attr,write_capture,NULL, -1);
+  int err=nr_core_plan_create(&g_writer,&attr,write_capture,(void *)(intptr_t)nr_cell_idx(), -1);
   pthread_attr_destroy(&attr);
-  if (err) { atomic_store(&state,RP_VOID); LOG_E(PHY,"REPLAY VOID: writer creation failed %d\n",err); }
-  else pthread_detach(writer);
+  if (err) { atomic_store(&g_state,RP_VOID); LOG_E(PHY,"REPLAY VOID: writer creation failed %d\n",err); }
+  else pthread_detach(g_writer);
 }
 void nr_passive_replay_slot(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
-  int s=atomic_load_explicit(&state,memory_order_acquire);
+  int s=atomic_load_explicit(&g_state,memory_order_acquire);
   if (s!=RP_REQUESTED && s!=RP_CAPTURING && s!=RP_DRAINING) return;
   const NR_DL_FRAME_PARMS *fp=&ue->frame_parms;
   long source=((long)proc->hfn_rx*1024+proc->frame_rx)*fp->slots_per_frame+proc->nr_slot_rx;
   if (s==RP_REQUESTED) {
     if (proc->nr_slot_rx || !ue->is_synchronized) return;
     /* Rare fixed-size metadata snapshot. IQ allocation/prefault was before RF. */
-    memcpy(&header->fp,fp,sizeof(*fp));
-    header->start=source; next_source=source;
-    atomic_store_explicit(&state,RP_CAPTURING,memory_order_release); s=RP_CAPTURING;
+    memcpy(&g_header->fp,fp,sizeof(*fp));
+    g_header->start=source; g_next_source=source;
+    atomic_store_explicit(&g_state,RP_CAPTURING,memory_order_release); s=RP_CAPTURING;
   }
-  if (!ue->is_synchronized || source!=next_source) {
-    LOG_E(PHY,"REPLAY VOID: non-contiguous source expected=%ld got=%ld\n",next_source,source);
-    atomic_store(&state,RP_VOID); return;
+  if (!ue->is_synchronized || source!=g_next_source) {
+    LOG_E(PHY,"REPLAY VOID: non-contiguous source expected=%ld got=%ld\n",g_next_source,source);
+    atomic_store(&g_state,RP_VOID); return;
   }
-  ++next_source;
-  long index=source-header->start;
+  ++g_next_source;
+  long index=source-g_header->start;
   if (s==RP_DRAINING) {
-    if (index>=header->slots+fp->slots_per_frame) {
-      pthread_mutex_lock(&record_lock);
-      atomic_store(&state,RP_WRITING);
-      pthread_mutex_unlock(&record_lock);
-      pthread_mutex_lock(&writer_lock);
-      pthread_cond_signal(&writer_cv);
-      pthread_mutex_unlock(&writer_lock);
+    if (index>=g_header->slots+fp->slots_per_frame) {
+      pthread_mutex_lock(&g_record_lock);
+      atomic_store(&g_state,RP_WRITING);
+      pthread_mutex_unlock(&g_record_lock);
+      pthread_mutex_lock(&g_writer_lock);
+      pthread_cond_signal(&g_writer_cv);
+      pthread_mutex_unlock(&g_writer_lock);
     }
     return;
   }
   unsigned offset=get_samples_slot_timestamp(fp,proc->nr_slot_rx);
   unsigned count=get_samples_per_slot(proc->nr_slot_rx,fp);
-  if (offset+count>fp->samples_per_frame || index<0 || index>=header->slots) {
-    LOG_E(PHY,"REPLAY VOID: sample extent\n"); atomic_store(&state,RP_VOID); return;
+  if (offset+count>fp->samples_per_frame || index<0 || index>=g_header->slots) {
+    LOG_E(PHY,"REPLAY VOID: sample extent\n"); atomic_store(&g_state,RP_VOID); return;
   }
-  header->slot[index]=(replay_slot_t){source,ue->cont_fo_comp?ue->dl_Doppler_shift+ue->freq_offset:0};
+  g_header->slot[index]=(replay_slot_t){source,ue->cont_fo_comp?ue->dl_Doppler_shift+ue->freq_offset:0};
   size_t frame=index/fp->slots_per_frame;
   for (unsigned a=0;a<fp->nb_antennas_rx;++a) {
     size_t dst=((frame*fp->nb_antennas_rx+a)*fp->samples_per_frame+offset)*sizeof(c16_t);
-    memcpy(iq+dst,ue->common_vars.rxdata[a]+offset,count*sizeof(c16_t));
+    memcpy(g_iq+dst,ue->common_vars.rxdata[a]+offset,count*sizeof(c16_t));
   }
-  if (index+1==header->slots) atomic_store(&state,RP_DRAINING);
+  if (index+1==g_header->slots) atomic_store(&g_state,RP_DRAINING);
 }
 static bool recordable(long source)
 {
-  int s=atomic_load(&state);
+  int s=atomic_load(&g_state);
   if (s!=RP_CAPTURING && s!=RP_DRAINING) return false;
-  long relative=source-header->start;
+  long relative=source-g_header->start;
   /* One full preceding frame for negative UL TA; three following frames for k2. */
-  return relative>=header->fp.slots_per_frame && relative<(REPLAY_FRAMES-3)*header->fp.slots_per_frame;
+  return relative>=g_header->fp.slots_per_frame && relative<(REPLAY_FRAMES-3)*g_header->fp.slots_per_frame;
 }
 void nr_passive_replay_ul(long source, uint16_t rnti, unsigned length, nr_dci_bits_t payload)
 {
-  if (atomic_load(&state)==RP_DISABLED) return;
-  atomic_store(&ul_seen,true);
-  pthread_mutex_lock(&record_lock);
+  if (atomic_load(&g_state)==RP_DISABLED) return;
+  atomic_store(&g_ul_seen,true);
+  pthread_mutex_lock(&g_record_lock);
   if (recordable(source)) {
-    if (header->n_ul==REPLAY_UL) atomic_store(&state,RP_VOID);
-    else header->ul[header->n_ul++]=(replay_ul_t){source,payload,rnti,length};
+    if (g_header->n_ul==REPLAY_UL) atomic_store(&g_state,RP_VOID);
+    else g_header->ul[g_header->n_ul++]=(replay_ul_t){source,payload,rnti,length};
   }
-  pthread_mutex_unlock(&record_lock);
+  pthread_mutex_unlock(&g_record_lock);
 }
 void nr_passive_replay_dl(const nr_pdsch_passive_job_t *job,
                           const nr_pdsch_passive_decode_result_t *result)
 {
-  if (atomic_load(&state)==RP_DISABLED) return;
+  if (atomic_load(&g_state)==RP_DISABLED) return;
   const bool success=result->status==NR_PDSCH_PASSIVE_DECODE_CRC_OK && result->tb;
-  const bool failures=header->version==4;
+  const bool failures=g_header->version==4;
   if(!success && !(failures && job->sweep_ticket.settled &&
                   result->status==NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
     return;
   if (success && job->sweep_ticket.generation && (!failures || job->sweep_ticket.settled)
-      && atomic_load(&ul_seen)) {
+      && atomic_load(&g_ul_seen)) {
     int expected=RP_ARMED;
-    atomic_compare_exchange_strong(&state,&expected,RP_REQUESTED);
+    atomic_compare_exchange_strong(&g_state,&expected,RP_REQUESTED);
   }
-  pthread_mutex_lock(&record_lock);
-  if (recordable(job->absolute_slot) && header->n_dl<REPLAY_DL) {
+  pthread_mutex_lock(&g_record_lock);
+  if (recordable(job->absolute_slot) && g_header->n_dl<REPLAY_DL) {
     unsigned failed_records=0;
-    for(unsigned i=0;i<header->n_dl;++i) failed_records+=header->dl[i].tb_bytes==0;
-    if(!success && failed_records>=64) { pthread_mutex_unlock(&record_lock); return; }
-    replay_dl_t *r=&header->dl[header->n_dl++];
+    for(unsigned i=0;i<g_header->n_dl;++i) failed_records+=g_header->dl[i].tb_bytes==0;
+    if(!success && failed_records>=64) { pthread_mutex_unlock(&g_record_lock); return; }
+    replay_dl_t *r=&g_header->dl[g_header->n_dl++];
     r->job=*job;
     r->tb_bytes=success?(result->cw.TBS+7)/8:0;
     r->tb_hash=success?hash_tb(result->tb,r->tb_bytes):0;
   }
-  pthread_mutex_unlock(&record_lock);
+  pthread_mutex_unlock(&g_record_lock);
 }
 
 int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
