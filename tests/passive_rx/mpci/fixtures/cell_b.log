@@ -1,0 +1,583 @@
+5.000 [PHY]    Initial sync successful, PCI: 508
+5.100 [PHY]    SENSING: MIB fields: pci=508
+13.000 [PHY]    blind PDCCH rnti_seen x rnti=0x6ce sfn=1
+14.000 [PHY]    SENSING: multi-CORESET bank add index=0 offset=0 span=102 symbol=0 mapping=0/0/0 len=44
+15.000 [PHY]    SENSING: Technique D CONVERGED rnti=0x6ce tda=0 S=1 L=13 mask=0x804 table=0
+20.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 20.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1155,1 stg=fep:1/1/1 cb=1 dec_us=1105
+20.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=11.7 tbl=0 probe=0
+20.000 [PHY]    SENSING: UL_E2E tot=614 probe=0
+20.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 20.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,921,1 stg=fep:1/1/1 cb=1 dec_us=871
+20.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=10.4 tbl=0 probe=0
+20.500 [PHY]    SENSING: UL_E2E tot=548 probe=0
+21.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 21.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1040,1 stg=fep:1/1/1 cb=1 dec_us=990
+21.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=18.6 tbl=0 probe=0
+21.000 [PHY]    SENSING: UL_E2E tot=460 probe=0
+21.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 21.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,336,1 stg=fep:1/1/1 cb=1 dec_us=286
+21.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=18.7 tbl=0 probe=0
+21.500 [PHY]    SENSING: UL_E2E tot=386 probe=0
+22.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 22.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,838,1 stg=fep:1/1/1 cb=1 dec_us=788
+22.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=11.6 tbl=0 probe=0
+22.000 [PHY]    SENSING: UL_E2E tot=290 probe=0
+22.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 22.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,439,1 stg=fep:1/1/1 cb=1 dec_us=389
+22.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=15.1 tbl=0 probe=0
+22.500 [PHY]    SENSING: UL_E2E tot=384 probe=0
+23.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 23.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1052,1 stg=fep:1/1/1 cb=1 dec_us=1002
+23.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=15.3 tbl=0 probe=0
+23.000 [PHY]    SENSING: UL_E2E tot=665 probe=0
+23.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 23.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=17.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=17.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,756,1 stg=fep:1/1/1 cb=1 dec_us=706
+23.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=11.6 tbl=0 probe=0
+23.500 [PHY]    SENSING: UL_E2E tot=586 probe=0
+24.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 24.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.5 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.5,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,801,1 stg=fep:1/1/1 cb=1 dec_us=751
+24.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=12.8 tbl=0 probe=0
+24.000 [PHY]    SENSING: UL_E2E tot=455 probe=0
+24.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 24.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.9 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.9,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,772,1 stg=fep:1/1/1 cb=1 dec_us=722
+24.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=13.5 tbl=0 probe=0
+24.500 [PHY]    SENSING: UL_E2E tot=571 probe=0
+25.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 25.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,632,1 stg=fep:1/1/1 cb=1 dec_us=582
+25.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=18.1 tbl=0 probe=0
+25.000 [PHY]    SENSING: UL_E2E tot=627 probe=0
+25.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 25.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1118,1 stg=fep:1/1/1 cb=1 dec_us=1068
+25.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=17.1 tbl=0 probe=0
+25.500 [PHY]    SENSING: UL_E2E tot=458 probe=0
+26.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 26.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,800,1 stg=fep:1/1/1 cb=1 dec_us=750
+26.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=15.1 tbl=0 probe=0
+26.000 [PHY]    SENSING: UL_E2E tot=678 probe=0
+26.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 26.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1134,1 stg=fep:1/1/1 cb=1 dec_us=1084
+26.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=11.9 tbl=0 probe=0
+26.500 [PHY]    SENSING: UL_E2E tot=581 probe=0
+27.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 27.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,998,1 stg=fep:1/1/1 cb=1 dec_us=948
+27.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=18.8 tbl=0 probe=0
+27.000 [PHY]    SENSING: UL_E2E tot=254 probe=0
+27.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 27.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.2 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.2,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,515,1 stg=fep:1/1/1 cb=1 dec_us=465
+27.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=19.4 tbl=0 probe=0
+27.500 [PHY]    SENSING: UL_E2E tot=230 probe=0
+28.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 28.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,476,1 stg=fep:1/1/1 cb=1 dec_us=426
+28.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=12.5 tbl=0 probe=0
+28.000 [PHY]    SENSING: UL_E2E tot=212 probe=0
+28.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 28.5 crc=0 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,321,1 stg=fep:1/1/1 cb=1 dec_us=271
+28.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=2 snr_db=13.7 tbl=0 probe=0
+28.500 [PHY]    SENSING: UL_E2E tot=265 probe=0
+29.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 29.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.2 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.2,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1008,1 stg=fep:1/1/1 cb=1 dec_us=958
+29.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=10.0 tbl=0 probe=0
+29.000 [PHY]    SENSING: UL_E2E tot=501 probe=0
+29.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 29.5 crc=0 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=13.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=13.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,304,1 stg=fep:1/1/1 cb=1 dec_us=254
+29.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=5 snr_db=13.4 tbl=0 probe=0
+29.500 [PHY]    SENSING: UL_E2E tot=515 probe=0
+29.600 [PHY]    SENSING: PDSCHQ queued=30 decoded=20 crc_ok=18 (90.0%) dropped[full=1 stale=0] max_lag_slots=1/2 slot_groups=0/0 multi-grant slots dropped_narrow=1
+29.700 [PHY]    SENSING: LDPCDIAG ok=18 seg_fail=2 tb_fail=0 zero_tb=0 iface_err=0 segs_decoded=0/1 (0.0%)
+29.800 [PHY]    SENSING: blind PDCCH monitor summary: occasions=1000 scanq[queued=800 done=797 drop_full=3 drop_stale=0 maxlag=8] last_reject=x
+29.900 [PHY]    SENSING: P99AGE slots(<2/4/8/12/16/18/24/32/inf) pdsch_enq_real=[20,2,1,0,0,0,0,0,0] pdsch_enq_probe=[0,0,0,0,0,0,0,0,0] scan_deq=[60,4,0,0,0,0,0,0,0] scanq_fresh=20 retry_chains=3 retry_yields=1 retry_gated=0
+30.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 30.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,331,1 stg=fep:1/1/1 cb=1 dec_us=281
+30.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=13.1 tbl=0 probe=0
+30.000 [PHY]    SENSING: UL_E2E tot=482 probe=0
+30.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 30.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1183,1 stg=fep:1/1/1 cb=1 dec_us=1133
+30.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=16.2 tbl=0 probe=0
+30.500 [PHY]    SENSING: UL_E2E tot=278 probe=0
+31.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 31.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,623,1 stg=fep:1/1/1 cb=1 dec_us=573
+31.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=18.4 tbl=0 probe=0
+31.000 [PHY]    SENSING: UL_E2E tot=212 probe=0
+31.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 31.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,702,1 stg=fep:1/1/1 cb=1 dec_us=652
+31.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=14.9 tbl=0 probe=0
+31.500 [PHY]    SENSING: UL_E2E tot=367 probe=0
+32.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 32.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,729,1 stg=fep:1/1/1 cb=1 dec_us=679
+32.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=16.5 tbl=0 probe=0
+32.000 [PHY]    SENSING: UL_E2E tot=558 probe=0
+32.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 32.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,334,1 stg=fep:1/1/1 cb=1 dec_us=284
+32.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=11.3 tbl=0 probe=0
+32.500 [PHY]    SENSING: UL_E2E tot=287 probe=0
+33.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 33.0 crc=0 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.9 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.9,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1025,1 stg=fep:1/1/1 cb=1 dec_us=975
+33.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=5 snr_db=19.3 tbl=0 probe=0
+33.000 [PHY]    SENSING: UL_E2E tot=326 probe=0
+33.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 33.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,905,1 stg=fep:1/1/1 cb=1 dec_us=855
+33.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=12.3 tbl=0 probe=0
+33.500 [PHY]    SENSING: UL_E2E tot=605 probe=0
+34.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 34.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,585,1 stg=fep:1/1/1 cb=1 dec_us=535
+34.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=15.3 tbl=0 probe=0
+34.000 [PHY]    SENSING: UL_E2E tot=202 probe=0
+34.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 34.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.2 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.2,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,824,1 stg=fep:1/1/1 cb=1 dec_us=774
+34.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=17.2 tbl=0 probe=0
+34.500 [PHY]    SENSING: UL_E2E tot=323 probe=0
+35.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 35.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,407,1 stg=fep:1/1/1 cb=1 dec_us=357
+35.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=12.2 tbl=0 probe=0
+35.000 [PHY]    SENSING: UL_E2E tot=466 probe=0
+35.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 35.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.5 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.5,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,689,1 stg=fep:1/1/1 cb=1 dec_us=639
+35.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=12.1 tbl=0 probe=0
+35.500 [PHY]    SENSING: UL_E2E tot=664 probe=0
+36.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 36.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,735,1 stg=fep:1/1/1 cb=1 dec_us=685
+36.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=15.1 tbl=0 probe=0
+36.000 [PHY]    SENSING: UL_E2E tot=497 probe=0
+36.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 36.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,396,1 stg=fep:1/1/1 cb=1 dec_us=346
+36.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=16.6 tbl=0 probe=0
+36.500 [PHY]    SENSING: UL_E2E tot=445 probe=0
+37.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 37.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1006,1 stg=fep:1/1/1 cb=1 dec_us=956
+37.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=19.8 tbl=0 probe=0
+37.000 [PHY]    SENSING: UL_E2E tot=390 probe=0
+37.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 37.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,503,1 stg=fep:1/1/1 cb=1 dec_us=453
+37.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=18.4 tbl=0 probe=0
+37.500 [PHY]    SENSING: UL_E2E tot=544 probe=0
+38.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 38.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,797,1 stg=fep:1/1/1 cb=1 dec_us=747
+38.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=14.6 tbl=0 probe=0
+38.000 [PHY]    SENSING: UL_E2E tot=655 probe=0
+38.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 38.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,681,1 stg=fep:1/1/1 cb=1 dec_us=631
+38.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=13.1 tbl=0 probe=0
+38.500 [PHY]    SENSING: UL_E2E tot=570 probe=0
+39.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 39.0 crc=0 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,682,1 stg=fep:1/1/1 cb=1 dec_us=632
+39.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=16 snr_db=13.9 tbl=0 probe=0
+39.000 [PHY]    SENSING: UL_E2E tot=437 probe=0
+39.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 39.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.9 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.9,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,560,1 stg=fep:1/1/1 cb=1 dec_us=510
+39.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=11.2 tbl=0 probe=0
+39.500 [PHY]    SENSING: UL_E2E tot=241 probe=0
+39.600 [PHY]    SENSING: PDSCHQ queued=50 decoded=40 crc_ok=36 (90.0%) dropped[full=1 stale=0] max_lag_slots=1/2 slot_groups=0/0 multi-grant slots dropped_narrow=1
+39.700 [PHY]    SENSING: LDPCDIAG ok=36 seg_fail=4 tb_fail=0 zero_tb=0 iface_err=0 segs_decoded=0/1 (0.0%)
+39.800 [PHY]    SENSING: blind PDCCH monitor summary: occasions=2000 scanq[queued=1600 done=1597 drop_full=3 drop_stale=0 maxlag=8] last_reject=x
+39.900 [PHY]    SENSING: P99AGE slots(<2/4/8/12/16/18/24/32/inf) pdsch_enq_real=[40,2,1,0,0,0,0,0,0] pdsch_enq_probe=[0,0,0,0,0,0,0,0,0] scan_deq=[120,4,0,0,0,0,0,0,0] scanq_fresh=40 retry_chains=3 retry_yields=1 retry_gated=0
+40.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 40.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,517,1 stg=fep:1/1/1 cb=1 dec_us=467
+40.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=16.9 tbl=0 probe=0
+40.000 [PHY]    SENSING: UL_E2E tot=212 probe=0
+40.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 40.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,809,1 stg=fep:1/1/1 cb=1 dec_us=759
+40.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=12.9 tbl=0 probe=0
+40.500 [PHY]    SENSING: UL_E2E tot=691 probe=0
+41.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 41.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.5 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.5,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1186,1 stg=fep:1/1/1 cb=1 dec_us=1136
+41.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=14.8 tbl=0 probe=0
+41.000 [PHY]    SENSING: UL_E2E tot=688 probe=0
+41.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 41.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,603,1 stg=fep:1/1/1 cb=1 dec_us=553
+41.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=13.9 tbl=0 probe=0
+41.500 [PHY]    SENSING: UL_E2E tot=280 probe=0
+42.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 42.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,995,1 stg=fep:1/1/1 cb=1 dec_us=945
+42.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=17.0 tbl=0 probe=0
+42.000 [PHY]    SENSING: UL_E2E tot=243 probe=0
+42.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 42.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,858,1 stg=fep:1/1/1 cb=1 dec_us=808
+42.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=11.5 tbl=0 probe=0
+42.500 [PHY]    SENSING: UL_E2E tot=413 probe=0
+43.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 43.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=23.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=23.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,963,1 stg=fep:1/1/1 cb=1 dec_us=913
+43.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=10.4 tbl=0 probe=0
+43.000 [PHY]    SENSING: UL_E2E tot=698 probe=0
+43.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 43.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,997,1 stg=fep:1/1/1 cb=1 dec_us=947
+43.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=13.3 tbl=0 probe=0
+43.500 [PHY]    SENSING: UL_E2E tot=288 probe=0
+44.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 44.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.5 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.5,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1073,1 stg=fep:1/1/1 cb=1 dec_us=1023
+44.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=14.2 tbl=0 probe=0
+44.000 [PHY]    SENSING: UL_E2E tot=368 probe=0
+44.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 44.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.9 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.9,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,772,1 stg=fep:1/1/1 cb=1 dec_us=722
+44.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=19.5 tbl=0 probe=0
+44.500 [PHY]    SENSING: UL_E2E tot=320 probe=0
+45.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 45.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,777,1 stg=fep:1/1/1 cb=1 dec_us=727
+45.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=14.4 tbl=0 probe=0
+45.000 [PHY]    SENSING: UL_E2E tot=215 probe=0
+45.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 45.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.2 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.2,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,822,1 stg=fep:1/1/1 cb=1 dec_us=772
+45.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=10.5 tbl=0 probe=0
+45.500 [PHY]    SENSING: UL_E2E tot=340 probe=0
+46.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 46.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,668,1 stg=fep:1/1/1 cb=1 dec_us=618
+46.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=19.6 tbl=0 probe=0
+46.000 [PHY]    SENSING: UL_E2E tot=369 probe=0
+46.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 46.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.2 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.2,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,936,1 stg=fep:1/1/1 cb=1 dec_us=886
+46.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=11.9 tbl=0 probe=0
+46.500 [PHY]    SENSING: UL_E2E tot=617 probe=0
+47.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 47.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.5 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.5,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1028,1 stg=fep:1/1/1 cb=1 dec_us=978
+47.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=19.1 tbl=0 probe=0
+47.000 [PHY]    SENSING: UL_E2E tot=438 probe=0
+47.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 47.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,521,1 stg=fep:1/1/1 cb=1 dec_us=471
+47.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=17.3 tbl=0 probe=0
+47.500 [PHY]    SENSING: UL_E2E tot=510 probe=0
+48.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 48.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,871,1 stg=fep:1/1/1 cb=1 dec_us=821
+48.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=17.7 tbl=0 probe=0
+48.000 [PHY]    SENSING: UL_E2E tot=302 probe=0
+48.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 48.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,441,1 stg=fep:1/1/1 cb=1 dec_us=391
+48.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=10.1 tbl=0 probe=0
+48.500 [PHY]    SENSING: UL_E2E tot=547 probe=0
+49.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 49.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,778,1 stg=fep:1/1/1 cb=1 dec_us=728
+49.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=17.1 tbl=0 probe=0
+49.000 [PHY]    SENSING: UL_E2E tot=697 probe=0
+49.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 49.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,797,1 stg=fep:1/1/1 cb=1 dec_us=747
+49.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=15.3 tbl=0 probe=0
+49.500 [PHY]    SENSING: UL_E2E tot=542 probe=0
+49.600 [PHY]    SENSING: PDSCHQ queued=70 decoded=60 crc_ok=56 (93.3%) dropped[full=1 stale=0] max_lag_slots=1/2 slot_groups=0/0 multi-grant slots dropped_narrow=1
+49.700 [PHY]    SENSING: LDPCDIAG ok=56 seg_fail=4 tb_fail=0 zero_tb=0 iface_err=0 segs_decoded=0/1 (0.0%)
+49.800 [PHY]    SENSING: blind PDCCH monitor summary: occasions=3000 scanq[queued=2400 done=2397 drop_full=3 drop_stale=0 maxlag=8] last_reject=x
+49.900 [PHY]    SENSING: P99AGE slots(<2/4/8/12/16/18/24/32/inf) pdsch_enq_real=[60,2,1,0,0,0,0,0,0] pdsch_enq_probe=[0,0,0,0,0,0,0,0,0] scan_deq=[180,4,0,0,0,0,0,0,0] scanq_fresh=60 retry_chains=3 retry_yields=1 retry_gated=0
+50.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 50.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.9 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.9,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,770,1 stg=fep:1/1/1 cb=1 dec_us=720
+50.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=12.7 tbl=0 probe=0
+50.000 [PHY]    SENSING: UL_E2E tot=457 probe=0
+50.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 50.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,477,1 stg=fep:1/1/1 cb=1 dec_us=427
+50.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=17.6 tbl=0 probe=0
+50.500 [PHY]    SENSING: UL_E2E tot=680 probe=0
+51.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 51.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1106,1 stg=fep:1/1/1 cb=1 dec_us=1056
+51.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=18.3 tbl=0 probe=0
+51.000 [PHY]    SENSING: UL_E2E tot=568 probe=0
+51.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 51.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,775,1 stg=fep:1/1/1 cb=1 dec_us=725
+51.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=16.8 tbl=0 probe=0
+51.500 [PHY]    SENSING: UL_E2E tot=279 probe=0
+52.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 52.0 crc=0 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,850,1 stg=fep:1/1/1 cb=1 dec_us=800
+52.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=16 snr_db=18.5 tbl=0 probe=0
+52.000 [PHY]    SENSING: UL_E2E tot=488 probe=0
+52.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 52.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,795,1 stg=fep:1/1/1 cb=1 dec_us=745
+52.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=16.9 tbl=0 probe=0
+52.500 [PHY]    SENSING: UL_E2E tot=564 probe=0
+53.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 53.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,611,1 stg=fep:1/1/1 cb=1 dec_us=561
+53.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=13.3 tbl=0 probe=0
+53.000 [PHY]    SENSING: UL_E2E tot=685 probe=0
+53.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 53.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,395,1 stg=fep:1/1/1 cb=1 dec_us=345
+53.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=15.1 tbl=0 probe=0
+53.500 [PHY]    SENSING: UL_E2E tot=307 probe=0
+54.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 54.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,615,1 stg=fep:1/1/1 cb=1 dec_us=565
+54.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=10.4 tbl=0 probe=0
+54.000 [PHY]    SENSING: UL_E2E tot=686 probe=0
+54.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 54.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,414,1 stg=fep:1/1/1 cb=1 dec_us=364
+54.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=11.1 tbl=0 probe=0
+54.500 [PHY]    SENSING: UL_E2E tot=619 probe=0
+55.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 55.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,379,1 stg=fep:1/1/1 cb=1 dec_us=329
+55.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=13.3 tbl=0 probe=0
+55.000 [PHY]    SENSING: UL_E2E tot=385 probe=0
+55.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 55.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.5 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.5,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,437,1 stg=fep:1/1/1 cb=1 dec_us=387
+55.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=19.2 tbl=0 probe=0
+55.500 [PHY]    SENSING: UL_E2E tot=426 probe=0
+56.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 56.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,401,1 stg=fep:1/1/1 cb=1 dec_us=351
+56.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=18.9 tbl=0 probe=0
+56.000 [PHY]    SENSING: UL_E2E tot=440 probe=0
+56.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 56.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1114,1 stg=fep:1/1/1 cb=1 dec_us=1064
+56.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=11.4 tbl=0 probe=0
+56.500 [PHY]    SENSING: UL_E2E tot=337 probe=0
+57.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 57.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1067,1 stg=fep:1/1/1 cb=1 dec_us=1017
+57.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=13.4 tbl=0 probe=0
+57.000 [PHY]    SENSING: UL_E2E tot=649 probe=0
+57.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 57.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1030,1 stg=fep:1/1/1 cb=1 dec_us=980
+57.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=18.7 tbl=0 probe=0
+57.500 [PHY]    SENSING: UL_E2E tot=679 probe=0
+58.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 58.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,986,1 stg=fep:1/1/1 cb=1 dec_us=936
+58.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=10.7 tbl=0 probe=0
+58.000 [PHY]    SENSING: UL_E2E tot=357 probe=0
+58.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 58.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=17.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=17.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,662,1 stg=fep:1/1/1 cb=1 dec_us=612
+58.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=14.4 tbl=0 probe=0
+58.500 [PHY]    SENSING: UL_E2E tot=244 probe=0
+59.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 59.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=17.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=17.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,430,1 stg=fep:1/1/1 cb=1 dec_us=380
+59.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=19.7 tbl=0 probe=0
+59.000 [PHY]    SENSING: UL_E2E tot=253 probe=0
+59.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 59.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.9 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.9,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1049,1 stg=fep:1/1/1 cb=1 dec_us=999
+59.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=17.6 tbl=0 probe=0
+59.500 [PHY]    SENSING: UL_E2E tot=423 probe=0
+59.600 [PHY]    SENSING: PDSCHQ queued=90 decoded=80 crc_ok=75 (93.8%) dropped[full=1 stale=0] max_lag_slots=1/2 slot_groups=0/0 multi-grant slots dropped_narrow=1
+59.700 [PHY]    SENSING: LDPCDIAG ok=75 seg_fail=5 tb_fail=0 zero_tb=0 iface_err=0 segs_decoded=0/1 (0.0%)
+59.800 [PHY]    SENSING: blind PDCCH monitor summary: occasions=4000 scanq[queued=3200 done=3197 drop_full=3 drop_stale=0 maxlag=8] last_reject=x
+59.900 [PHY]    SENSING: P99AGE slots(<2/4/8/12/16/18/24/32/inf) pdsch_enq_real=[80,2,1,0,0,0,0,0,0] pdsch_enq_probe=[0,0,0,0,0,0,0,0,0] scan_deq=[240,4,0,0,0,0,0,0,0] scanq_fresh=80 retry_chains=3 retry_yields=1 retry_gated=0
+60.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 60.0 crc=0 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,908,1 stg=fep:1/1/1 cb=1 dec_us=858
+60.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=10 snr_db=13.9 tbl=0 probe=0
+60.000 [PHY]    SENSING: UL_E2E tot=345 probe=0
+60.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 60.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,810,1 stg=fep:1/1/1 cb=1 dec_us=760
+60.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=11.0 tbl=0 probe=0
+60.500 [PHY]    SENSING: UL_E2E tot=272 probe=0
+61.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 61.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,669,1 stg=fep:1/1/1 cb=1 dec_us=619
+61.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=12.5 tbl=0 probe=0
+61.000 [PHY]    SENSING: UL_E2E tot=375 probe=0
+61.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 61.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,644,1 stg=fep:1/1/1 cb=1 dec_us=594
+61.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=19.4 tbl=0 probe=0
+61.500 [PHY]    SENSING: UL_E2E tot=531 probe=0
+62.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 62.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.2 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.2,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,364,1 stg=fep:1/1/1 cb=1 dec_us=314
+62.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=14.3 tbl=0 probe=0
+62.000 [PHY]    SENSING: UL_E2E tot=598 probe=0
+62.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 62.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,419,1 stg=fep:1/1/1 cb=1 dec_us=369
+62.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=13.4 tbl=0 probe=0
+62.500 [PHY]    SENSING: UL_E2E tot=593 probe=0
+63.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 63.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=13.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=13.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,701,1 stg=fep:1/1/1 cb=1 dec_us=651
+63.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=17.7 tbl=0 probe=0
+63.000 [PHY]    SENSING: UL_E2E tot=450 probe=0
+63.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 63.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,911,1 stg=fep:1/1/1 cb=1 dec_us=861
+63.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=10.9 tbl=0 probe=0
+63.500 [PHY]    SENSING: UL_E2E tot=461 probe=0
+64.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 64.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,765,1 stg=fep:1/1/1 cb=1 dec_us=715
+64.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=11.7 tbl=0 probe=0
+64.000 [PHY]    SENSING: UL_E2E tot=397 probe=0
+64.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 64.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.5 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.5,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,905,1 stg=fep:1/1/1 cb=1 dec_us=855
+64.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=11.3 tbl=0 probe=0
+64.500 [PHY]    SENSING: UL_E2E tot=679 probe=0
+65.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 65.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,768,1 stg=fep:1/1/1 cb=1 dec_us=718
+65.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=18.0 tbl=0 probe=0
+65.000 [PHY]    SENSING: UL_E2E tot=204 probe=0
+65.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 65.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.2 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.2,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,450,1 stg=fep:1/1/1 cb=1 dec_us=400
+65.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=14.3 tbl=0 probe=0
+65.500 [PHY]    SENSING: UL_E2E tot=247 probe=0
+66.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 66.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.9 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.9,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,786,1 stg=fep:1/1/1 cb=1 dec_us=736
+66.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=12.4 tbl=0 probe=0
+66.000 [PHY]    SENSING: UL_E2E tot=446 probe=0
+66.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 66.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,855,1 stg=fep:1/1/1 cb=1 dec_us=805
+66.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=10.6 tbl=0 probe=0
+66.500 [PHY]    SENSING: UL_E2E tot=302 probe=0
+67.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 67.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,841,1 stg=fep:1/1/1 cb=1 dec_us=791
+67.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=18.8 tbl=0 probe=0
+67.000 [PHY]    SENSING: UL_E2E tot=271 probe=0
+67.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 67.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.5 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.5,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,552,1 stg=fep:1/1/1 cb=1 dec_us=502
+67.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=11.1 tbl=0 probe=0
+67.500 [PHY]    SENSING: UL_E2E tot=308 probe=0
+68.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 68.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,937,1 stg=fep:1/1/1 cb=1 dec_us=887
+68.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=16.5 tbl=0 probe=0
+68.000 [PHY]    SENSING: UL_E2E tot=401 probe=0
+68.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 68.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1137,1 stg=fep:1/1/1 cb=1 dec_us=1087
+68.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=11.5 tbl=0 probe=0
+68.500 [PHY]    SENSING: UL_E2E tot=690 probe=0
+69.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 69.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,741,1 stg=fep:1/1/1 cb=1 dec_us=691
+69.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=11.4 tbl=0 probe=0
+69.000 [PHY]    SENSING: UL_E2E tot=266 probe=0
+69.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 69.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,784,1 stg=fep:1/1/1 cb=1 dec_us=734
+69.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=12.7 tbl=0 probe=0
+69.500 [PHY]    SENSING: UL_E2E tot=470 probe=0
+69.600 [PHY]    SENSING: PDSCHQ queued=110 decoded=100 crc_ok=94 (94.0%) dropped[full=1 stale=0] max_lag_slots=1/2 slot_groups=0/0 multi-grant slots dropped_narrow=1
+69.700 [PHY]    SENSING: LDPCDIAG ok=94 seg_fail=6 tb_fail=0 zero_tb=0 iface_err=0 segs_decoded=0/1 (0.0%)
+69.800 [PHY]    SENSING: blind PDCCH monitor summary: occasions=5000 scanq[queued=4000 done=3997 drop_full=3 drop_stale=0 maxlag=8] last_reject=x
+69.900 [PHY]    SENSING: P99AGE slots(<2/4/8/12/16/18/24/32/inf) pdsch_enq_real=[100,2,1,0,0,0,0,0,0] pdsch_enq_probe=[0,0,0,0,0,0,0,0,0] scan_deq=[300,4,0,0,0,0,0,0,0] scanq_fresh=100 retry_chains=3 retry_yields=1 retry_gated=0
+70.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 70.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,440,1 stg=fep:1/1/1 cb=1 dec_us=390
+70.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=17.0 tbl=0 probe=0
+70.000 [PHY]    SENSING: UL_E2E tot=537 probe=0
+70.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 70.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.2 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.2,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,893,1 stg=fep:1/1/1 cb=1 dec_us=843
+70.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=10.4 tbl=0 probe=0
+70.500 [PHY]    SENSING: UL_E2E tot=270 probe=0
+71.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 71.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,852,1 stg=fep:1/1/1 cb=1 dec_us=802
+71.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=10.5 tbl=0 probe=0
+71.000 [PHY]    SENSING: UL_E2E tot=595 probe=0
+71.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 71.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,339,1 stg=fep:1/1/1 cb=1 dec_us=289
+71.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=16.9 tbl=0 probe=0
+71.500 [PHY]    SENSING: UL_E2E tot=255 probe=0
+72.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 72.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=13.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=13.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1189,1 stg=fep:1/1/1 cb=1 dec_us=1139
+72.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=14.6 tbl=0 probe=0
+72.000 [PHY]    SENSING: UL_E2E tot=349 probe=0
+72.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 72.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,583,1 stg=fep:1/1/1 cb=1 dec_us=533
+72.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=18.5 tbl=0 probe=0
+72.500 [PHY]    SENSING: UL_E2E tot=465 probe=0
+73.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 73.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,334,1 stg=fep:1/1/1 cb=1 dec_us=284
+73.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=14.6 tbl=0 probe=0
+73.000 [PHY]    SENSING: UL_E2E tot=537 probe=0
+73.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 73.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.2 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.2,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,641,1 stg=fep:1/1/1 cb=1 dec_us=591
+73.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=12.6 tbl=0 probe=0
+73.500 [PHY]    SENSING: UL_E2E tot=572 probe=0
+74.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 74.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1009,1 stg=fep:1/1/1 cb=1 dec_us=959
+74.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=11.7 tbl=0 probe=0
+74.000 [PHY]    SENSING: UL_E2E tot=647 probe=0
+74.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 74.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,927,1 stg=fep:1/1/1 cb=1 dec_us=877
+74.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=12.5 tbl=0 probe=0
+74.500 [PHY]    SENSING: UL_E2E tot=297 probe=0
+75.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 75.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1170,1 stg=fep:1/1/1 cb=1 dec_us=1120
+75.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=15.7 tbl=0 probe=0
+75.000 [PHY]    SENSING: UL_E2E tot=358 probe=0
+75.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 75.5 crc=0 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,782,1 stg=fep:1/1/1 cb=1 dec_us=732
+75.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=10 snr_db=12.2 tbl=0 probe=0
+75.500 [PHY]    SENSING: UL_E2E tot=515 probe=0
+76.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 76.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.9 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.9,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1190,1 stg=fep:1/1/1 cb=1 dec_us=1140
+76.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=12.1 tbl=0 probe=0
+76.000 [PHY]    SENSING: UL_E2E tot=628 probe=0
+76.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 76.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,329,1 stg=fep:1/1/1 cb=1 dec_us=279
+76.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=12.0 tbl=0 probe=0
+76.500 [PHY]    SENSING: UL_E2E tot=360 probe=0
+77.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 77.0 crc=0 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1142,1 stg=fep:1/1/1 cb=1 dec_us=1092
+77.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=10 snr_db=14.4 tbl=0 probe=0
+77.000 [PHY]    SENSING: UL_E2E tot=414 probe=0
+77.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 77.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,435,1 stg=fep:1/1/1 cb=1 dec_us=385
+77.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=12.1 tbl=0 probe=0
+77.500 [PHY]    SENSING: UL_E2E tot=283 probe=0
+78.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 78.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,902,1 stg=fep:1/1/1 cb=1 dec_us=852
+78.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=14.5 tbl=0 probe=0
+78.000 [PHY]    SENSING: UL_E2E tot=342 probe=0
+78.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 78.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,543,1 stg=fep:1/1/1 cb=1 dec_us=493
+78.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=11.5 tbl=0 probe=0
+78.500 [PHY]    SENSING: UL_E2E tot=353 probe=0
+79.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 79.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1195,1 stg=fep:1/1/1 cb=1 dec_us=1145
+79.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=13.3 tbl=0 probe=0
+79.000 [PHY]    SENSING: UL_E2E tot=515 probe=0
+79.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 79.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,874,1 stg=fep:1/1/1 cb=1 dec_us=824
+79.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=10.6 tbl=0 probe=0
+79.500 [PHY]    SENSING: UL_E2E tot=540 probe=0
+79.600 [PHY]    SENSING: PDSCHQ queued=130 decoded=120 crc_ok=112 (93.3%) dropped[full=1 stale=0] max_lag_slots=1/2 slot_groups=0/0 multi-grant slots dropped_narrow=1
+79.700 [PHY]    SENSING: LDPCDIAG ok=112 seg_fail=8 tb_fail=0 zero_tb=0 iface_err=0 segs_decoded=0/1 (0.0%)
+79.800 [PHY]    SENSING: blind PDCCH monitor summary: occasions=6000 scanq[queued=4800 done=4797 drop_full=3 drop_stale=0 maxlag=8] last_reject=x
+79.900 [PHY]    SENSING: P99AGE slots(<2/4/8/12/16/18/24/32/inf) pdsch_enq_real=[120,2,1,0,0,0,0,0,0] pdsch_enq_probe=[0,0,0,0,0,0,0,0,0] scan_deq=[360,4,0,0,0,0,0,0,0] scanq_fresh=120 retry_chains=3 retry_yields=1 retry_gated=0
+80.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 80.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,766,1 stg=fep:1/1/1 cb=1 dec_us=716
+80.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=13.9 tbl=0 probe=0
+80.000 [PHY]    SENSING: UL_E2E tot=443 probe=0
+80.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 80.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.2 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.2,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,356,1 stg=fep:1/1/1 cb=1 dec_us=306
+80.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=15.3 tbl=0 probe=0
+80.500 [PHY]    SENSING: UL_E2E tot=618 probe=0
+81.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 81.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,740,1 stg=fep:1/1/1 cb=1 dec_us=690
+81.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=14.0 tbl=0 probe=0
+81.000 [PHY]    SENSING: UL_E2E tot=463 probe=0
+81.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 81.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1101,1 stg=fep:1/1/1 cb=1 dec_us=1051
+81.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=14.9 tbl=0 probe=0
+81.500 [PHY]    SENSING: UL_E2E tot=235 probe=0
+82.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 82.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,790,1 stg=fep:1/1/1 cb=1 dec_us=740
+82.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=10.4 tbl=0 probe=0
+82.000 [PHY]    SENSING: UL_E2E tot=532 probe=0
+82.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 82.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.5 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.5,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,930,1 stg=fep:1/1/1 cb=1 dec_us=880
+82.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=11.4 tbl=0 probe=0
+82.500 [PHY]    SENSING: UL_E2E tot=351 probe=0
+83.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 83.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,388,1 stg=fep:1/1/1 cb=1 dec_us=338
+83.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=16.8 tbl=0 probe=0
+83.000 [PHY]    SENSING: UL_E2E tot=269 probe=0
+83.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 83.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,976,1 stg=fep:1/1/1 cb=1 dec_us=926
+83.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=12.7 tbl=0 probe=0
+83.500 [PHY]    SENSING: UL_E2E tot=224 probe=0
+84.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 84.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,399,1 stg=fep:1/1/1 cb=1 dec_us=349
+84.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=16.1 tbl=0 probe=0
+84.000 [PHY]    SENSING: UL_E2E tot=254 probe=0
+84.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 84.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,951,1 stg=fep:1/1/1 cb=1 dec_us=901
+84.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=12.8 tbl=0 probe=0
+84.500 [PHY]    SENSING: UL_E2E tot=444 probe=0
+85.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 85.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,744,1 stg=fep:1/1/1 cb=1 dec_us=694
+85.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=18.4 tbl=0 probe=0
+85.000 [PHY]    SENSING: UL_E2E tot=204 probe=0
+85.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 85.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,853,1 stg=fep:1/1/1 cb=1 dec_us=803
+85.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=15.1 tbl=0 probe=0
+85.500 [PHY]    SENSING: UL_E2E tot=594 probe=0
+86.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 86.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,466,1 stg=fep:1/1/1 cb=1 dec_us=416
+86.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=16.1 tbl=0 probe=0
+86.000 [PHY]    SENSING: UL_E2E tot=208 probe=0
+86.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 86.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.2 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.2,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,320,1 stg=fep:1/1/1 cb=1 dec_us=270
+86.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=19.0 tbl=0 probe=0
+86.500 [PHY]    SENSING: UL_E2E tot=220 probe=0
+87.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 87.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,668,1 stg=fep:1/1/1 cb=1 dec_us=618
+87.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=11.1 tbl=0 probe=0
+87.000 [PHY]    SENSING: UL_E2E tot=505 probe=0
+87.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 87.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,405,1 stg=fep:1/1/1 cb=1 dec_us=355
+87.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=10.1 tbl=0 probe=0
+87.500 [PHY]    SENSING: UL_E2E tot=407 probe=0
+88.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 88.0 crc=0 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,353,1 stg=fep:1/1/1 cb=1 dec_us=303
+88.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=10 snr_db=15.3 tbl=0 probe=0
+88.000 [PHY]    SENSING: UL_E2E tot=470 probe=0
+88.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 88.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.2 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.2,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,432,1 stg=fep:1/1/1 cb=1 dec_us=382
+88.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=14.6 tbl=0 probe=0
+88.500 [PHY]    SENSING: UL_E2E tot=390 probe=0
+89.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 89.0 crc=0 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,747,1 stg=fep:1/1/1 cb=1 dec_us=697
+89.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=5 snr_db=16.0 tbl=0 probe=0
+89.000 [PHY]    SENSING: UL_E2E tot=620 probe=0
+89.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 89.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.5 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.5,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,430,1 stg=fep:1/1/1 cb=1 dec_us=380
+89.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=18.5 tbl=0 probe=0
+89.500 [PHY]    SENSING: UL_E2E tot=274 probe=0
+89.600 [PHY]    SENSING: PDSCHQ queued=150 decoded=140 crc_ok=130 (92.9%) dropped[full=1 stale=0] max_lag_slots=1/2 slot_groups=0/0 multi-grant slots dropped_narrow=1
+89.700 [PHY]    SENSING: LDPCDIAG ok=130 seg_fail=10 tb_fail=0 zero_tb=0 iface_err=0 segs_decoded=0/1 (0.0%)
+89.800 [PHY]    SENSING: blind PDCCH monitor summary: occasions=7000 scanq[queued=5600 done=5597 drop_full=3 drop_stale=0 maxlag=8] last_reject=x
+89.900 [PHY]    SENSING: P99AGE slots(<2/4/8/12/16/18/24/32/inf) pdsch_enq_real=[140,2,1,0,0,0,0,0,0] pdsch_enq_probe=[0,0,0,0,0,0,0,0,0] scan_deq=[420,4,0,0,0,0,0,0,0] scanq_fresh=140 retry_chains=3 retry_yields=1 retry_gated=0
+90.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 90.0 crc=0 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,883,1 stg=fep:1/1/1 cb=1 dec_us=833
+90.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=5 snr_db=16.3 tbl=0 probe=0
+90.000 [PHY]    SENSING: UL_E2E tot=426 probe=0
+90.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 90.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1093,1 stg=fep:1/1/1 cb=1 dec_us=1043
+90.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=12.2 tbl=0 probe=0
+90.500 [PHY]    SENSING: UL_E2E tot=584 probe=0
+91.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 91.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,328,1 stg=fep:1/1/1 cb=1 dec_us=278
+91.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=14.3 tbl=0 probe=0
+91.000 [PHY]    SENSING: UL_E2E tot=676 probe=0
+91.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 91.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,577,1 stg=fep:1/1/1 cb=1 dec_us=527
+91.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=12.5 tbl=0 probe=0
+91.500 [PHY]    SENSING: UL_E2E tot=564 probe=0
+92.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 92.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.2 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.2,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1167,1 stg=fep:1/1/1 cb=1 dec_us=1117
+92.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=15.3 tbl=0 probe=0
+92.000 [PHY]    SENSING: UL_E2E tot=435 probe=0
+92.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 92.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1000,1 stg=fep:1/1/1 cb=1 dec_us=950
+92.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=19.0 tbl=0 probe=0
+92.500 [PHY]    SENSING: UL_E2E tot=582 probe=0
+93.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 93.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,772,1 stg=fep:1/1/1 cb=1 dec_us=722
+93.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=16.2 tbl=0 probe=0
+93.000 [PHY]    SENSING: UL_E2E tot=432 probe=0
+93.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 93.5 crc=0 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1084,1 stg=fep:1/1/1 cb=1 dec_us=1034
+93.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=16 snr_db=17.1 tbl=0 probe=0
+93.500 [PHY]    SENSING: UL_E2E tot=578 probe=0
+94.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 94.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,980,1 stg=fep:1/1/1 cb=1 dec_us=930
+94.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=19.0 tbl=0 probe=0
+94.000 [PHY]    SENSING: UL_E2E tot=289 probe=0
+94.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 94.5 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=23.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=23.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1127,1 stg=fep:1/1/1 cb=1 dec_us=1077
+94.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=11.7 tbl=0 probe=0
+94.500 [PHY]    SENSING: UL_E2E tot=335 probe=0
+95.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 95.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1102,1 stg=fep:1/1/1 cb=1 dec_us=1052
+95.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=19.7 tbl=0 probe=0
+95.000 [PHY]    SENSING: UL_E2E tot=335 probe=0
+95.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 95.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,511,1 stg=fep:1/1/1 cb=1 dec_us=461
+95.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=14.5 tbl=0 probe=0
+95.500 [PHY]    SENSING: UL_E2E tot=258 probe=0
+96.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 96.0 crc=0 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1050,1 stg=fep:1/1/1 cb=1 dec_us=1000
+96.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=10 snr_db=14.1 tbl=0 probe=0
+96.000 [PHY]    SENSING: UL_E2E tot=582 probe=0
+96.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 96.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.5 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.5,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,791,1 stg=fep:1/1/1 cb=1 dec_us=741
+96.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=14.0 tbl=0 probe=0
+96.500 [PHY]    SENSING: UL_E2E tot=670 probe=0
+97.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 97.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,331,1 stg=fep:1/1/1 cb=1 dec_us=281
+97.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=13.0 tbl=0 probe=0
+97.000 [PHY]    SENSING: UL_E2E tot=271 probe=0
+97.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 97.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,789,1 stg=fep:1/1/1 cb=1 dec_us=739
+97.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=16.5 tbl=0 probe=0
+97.500 [PHY]    SENSING: UL_E2E tot=514 probe=0
+98.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 98.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.9 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.9,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,508,1 stg=fep:1/1/1 cb=1 dec_us=458
+98.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=12.2 tbl=0 probe=0
+98.000 [PHY]    SENSING: UL_E2E tot=513 probe=0
+98.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 98.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,700,1 stg=fep:1/1/1 cb=1 dec_us=650
+98.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=15.7 tbl=0 probe=0
+98.500 [PHY]    SENSING: UL_E2E tot=571 probe=0
+99.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 99.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.5 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.5,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,886,1 stg=fep:1/1/1 cb=1 dec_us=836
+99.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=13.7 tbl=0 probe=0
+99.000 [PHY]    SENSING: UL_E2E tot=385 probe=0
+99.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 99.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.5 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.5,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,964,1 stg=fep:1/1/1 cb=1 dec_us=914
+99.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=17.2 tbl=0 probe=0
+99.500 [PHY]    SENSING: UL_E2E tot=315 probe=0
+99.600 [PHY]    SENSING: PDSCHQ queued=170 decoded=160 crc_ok=147 (91.9%) dropped[full=1 stale=0] max_lag_slots=1/2 slot_groups=0/0 multi-grant slots dropped_narrow=1
+99.700 [PHY]    SENSING: LDPCDIAG ok=147 seg_fail=13 tb_fail=0 zero_tb=0 iface_err=0 segs_decoded=0/1 (0.0%)
+99.800 [PHY]    SENSING: blind PDCCH monitor summary: occasions=8000 scanq[queued=6400 done=6397 drop_full=3 drop_stale=0 maxlag=8] last_reject=x
+99.900 [PHY]    SENSING: P99AGE slots(<2/4/8/12/16/18/24/32/inf) pdsch_enq_real=[160,2,1,0,0,0,0,0,0] pdsch_enq_probe=[0,0,0,0,0,0,0,0,0] scan_deq=[480,4,0,0,0,0,0,0,0] scanq_fresh=160 retry_chains=3 retry_yields=1 retry_gated=0
+100.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 100.0 crc=1 mcs=16 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,572,1 stg=fep:1/1/1 cb=1 dec_us=522
+100.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=16 snr_db=15.9 tbl=0 probe=0
+100.000 [PHY]    SENSING: UL_E2E tot=461 probe=0
+100.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 100.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.8 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.8,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1057,1 stg=fep:1/1/1 cb=1 dec_us=1007
+100.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=13.6 tbl=0 probe=0
+100.500 [PHY]    SENSING: UL_E2E tot=292 probe=0
+101.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 101.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1109,1 stg=fep:1/1/1 cb=1 dec_us=1059
+101.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=17.3 tbl=0 probe=0
+101.000 [PHY]    SENSING: UL_E2E tot=669 probe=0
+101.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 101.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,767,1 stg=fep:1/1/1 cb=1 dec_us=717
+101.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=17.8 tbl=0 probe=0
+101.500 [PHY]    SENSING: UL_E2E tot=300 probe=0
+102.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 102.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.6 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.6,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,322,1 stg=fep:1/1/1 cb=1 dec_us=272
+102.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=10.1 tbl=0 probe=0
+102.000 [PHY]    SENSING: UL_E2E tot=649 probe=0
+102.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 102.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,689,1 stg=fep:1/1/1 cb=1 dec_us=639
+102.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=11.2 tbl=0 probe=0
+102.500 [PHY]    SENSING: UL_E2E tot=690 probe=0
+103.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 103.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.9 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.9,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,956,1 stg=fep:1/1/1 cb=1 dec_us=906
+103.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=10.6 tbl=0 probe=0
+103.000 [PHY]    SENSING: UL_E2E tot=275 probe=0
+103.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 103.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,599,1 stg=fep:1/1/1 cb=1 dec_us=549
+103.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=12.9 tbl=0 probe=0
+103.500 [PHY]    SENSING: UL_E2E tot=213 probe=0
+104.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 104.0 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,428,1 stg=fep:1/1/1 cb=1 dec_us=378
+104.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=11.9 tbl=0 probe=0
+104.000 [PHY]    SENSING: UL_E2E tot=357 probe=0
+104.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 104.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.7 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.7,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,770,1 stg=fep:1/1/1 cb=1 dec_us=720
+104.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=17.8 tbl=0 probe=0
+104.500 [PHY]    SENSING: UL_E2E tot=278 probe=0
+105.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 105.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=22.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=22.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1016,1 stg=fep:1/1/1 cb=1 dec_us=966
+105.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=16.5 tbl=0 probe=0
+105.000 [PHY]    SENSING: UL_E2E tot=635 probe=0
+105.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 105.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,579,1 stg=fep:1/1/1 cb=1 dec_us=529
+105.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=11.0 tbl=0 probe=0
+105.500 [PHY]    SENSING: UL_E2E tot=596 probe=0
+106.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 106.0 crc=0 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,733,1 stg=fep:1/1/1 cb=1 dec_us=683
+106.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=0 mcs=5 snr_db=17.3 tbl=0 probe=0
+106.000 [PHY]    SENSING: UL_E2E tot=300 probe=0
+106.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 106.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.3 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.3,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,453,1 stg=fep:1/1/1 cb=1 dec_us=403
+106.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=17.2 tbl=0 probe=0
+106.500 [PHY]    SENSING: UL_E2E tot=640 probe=0
+107.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 107.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=13.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=13.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,805,1 stg=fep:1/1/1 cb=1 dec_us=755
+107.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=19.8 tbl=0 probe=0
+107.000 [PHY]    SENSING: UL_E2E tot=546 probe=0
+107.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 107.5 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.1 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.1,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,940,1 stg=fep:1/1/1 cb=1 dec_us=890
+107.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=11.5 tbl=0 probe=0
+107.500 [PHY]    SENSING: UL_E2E tot=578 probe=0
+108.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 108.0 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,1166,1 stg=fep:1/1/1 cb=1 dec_us=1116
+108.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=17.1 tbl=0 probe=0
+108.000 [PHY]    SENSING: UL_E2E tot=685 probe=0
+108.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 108.5 crc=1 mcs=5 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=13.0 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=13.0,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,534,1 stg=fep:1/1/1 cb=1 dec_us=484
+108.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=5 snr_db=15.7 tbl=0 probe=0
+108.500 [PHY]    SENSING: UL_E2E tot=598 probe=0
+109.000 [PHY]    SENSING: EVMGRANT rnti=0x1430 109.0 crc=1 mcs=10 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=12.9 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=12.9,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,983,1 stg=fep:1/1/1 cb=1 dec_us=933
+109.000 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=10 snr_db=14.4 tbl=0 probe=0
+109.000 [PHY]    SENSING: UL_E2E tot=410 probe=0
+109.500 [PHY]    SENSING: EVMGRANT rnti=0x1430 109.5 crc=1 mcs=2 tbl=0 Qm=2 Nl=1 rb=0+5 nsym=12 evm=1 snr=16.4 probe=0 rv=0 ndi=0 pid=0 tbs=96 snr_l=16.4,-99.0,-99.0,-99.0 l2=1 zabs=0 e2e=100,1,1,1,1,1,809,1 stg=fep:1/1/1 cb=1 dec_us=759
+109.500 [PHY]    SENSING: UL_PUSCH_CRC rnti=0x6ce ok=1 mcs=2 snr_db=16.5 tbl=0 probe=0
+109.500 [PHY]    SENSING: UL_E2E tot=376 probe=0
+109.600 [PHY]    SENSING: PDSCHQ queued=190 decoded=180 crc_ok=166 (92.2%) dropped[full=1 stale=0] max_lag_slots=1/2 slot_groups=0/0 multi-grant slots dropped_narrow=1
+109.700 [PHY]    SENSING: LDPCDIAG ok=166 seg_fail=14 tb_fail=0 zero_tb=0 iface_err=0 segs_decoded=0/1 (0.0%)
+109.800 [PHY]    SENSING: blind PDCCH monitor summary: occasions=9000 scanq[queued=7200 done=7197 drop_full=3 drop_stale=0 maxlag=8] last_reject=x
+109.900 [PHY]    SENSING: P99AGE slots(<2/4/8/12/16/18/24/32/inf) pdsch_enq_real=[180,2,1,0,0,0,0,0,0] pdsch_enq_probe=[0,0,0,0,0,0,0,0,0] scan_deq=[540,4,0,0,0,0,0,0,0] scanq_fresh=180 retry_chains=3 retry_yields=1 retry_gated=0
+110.500 [PHY]    SENSING: PUSCHQ2 real[queued=180 full=0] real_stale=0
+170.000 [PHY]    SENSING: PDSCH_SOLVER per-rnti 0x1b88:g300,solve=4321.0ms,full250/260

@@ -847,7 +847,7 @@ def state_payload(mgr, run, q):
     except (ValueError, AttributeError):
         thr = {}
     with run.lock:
-        snap = run.state.snapshot()
+        snap = run.state.snapshot_for(q.get("cell"))
     host = {}
     if run.live:
         host = dict(mgr.host.get(), live=True)
@@ -855,17 +855,26 @@ def state_payload(mgr, run, q):
         host["silent_s"] = (time.time() - mt) if mt else None
         host["proc_alive"] = bool(host["rx_pids"])
     keys = sorted(snap["cells"].keys(), key=lambda k: (k == "?", k))
-    cell = q.get("cell") or (str(snap["cur_pci"]) if snap["cur_pci"] is not None else (keys[0] if keys else None))
+    sel = snap.get("sel")      # several cell states (multi-cell process): the snapshot is the selected cell's, `cells` the union
+    cell = q.get("cell") or (sel["key"] if sel and sel["key"] else None) or (str(snap["cur_pci"]) if snap["cur_pci"] is not None else (keys[0] if keys else None))
     for k in keys:
-        snap["cells"][k]["label"] = "PCI %s @ %s MHz" % (k, ("%.2f" % snap["tuned_mhz"]) if snap["tuned_mhz"] else "?")
+        mhz = snap["tuned_mhz"]
+        if sel:
+            f = snap["cells"][k]["facts"].get("tuned_centre_mhz")
+            mhz = f["value"] if f and f.get("value") else (snap["tuned_mhz"] if snap["cells"][k]["cell_idx"] == sel["cell_idx"] else None)
+        snap["cells"][k]["label"] = "PCI %s @ %s MHz" % (k, ("%.2f" % mhz) if mhz else "?")
+        if sel:
+            snap["cells"][k]["label"] += " (c%d)" % snap["cells"][k]["cell_idx"]
+    local = sel["local"] if sel and sel["local"] and cell == sel["key"] else cell      # key inside the owning state
     return {
         "meta": {"run": run.id, "name": run.name, "live": run.live, "files": {k: v for k, v in run.files.items() if v},
                  "label": derive_label(run), "skipped_bytes": run.skipped(), "bad_records": run.bad(),
                  "replay_t": run.t_cursor, "duration": getattr(run, "full_duration", None) or run.duration(),
-                 "now": time.time(), "cell": cell, "cells": keys},
+                 "now": time.time(), "cell": cell, "cells": keys, "attributed": bool(run.state.attributed),
+                 "cell_idx": {k: snap["cells"][k].get("cell_idx", 0) for k in keys}},
         "snap": snap, "tiles": rxparse.tiles(snap, thr, host), "alerts": rxparse.alerts(snap, thr, host),
-        "cell_rows": rxparse.cell_rows(snap, cell) if cell else [], "ul_reason": rxparse.ul_reason(snap),
-        "latency": rxparse.latency_view(snap), "dl_totals": rxparse.dl_totals(snap, cell), "kpis": rxparse.kpis(snap, cell),
+        "cell_rows": rxparse.cell_rows(snap, local) if local else [], "ul_reason": rxparse.ul_reason(snap),
+        "latency": rxparse.latency_view(snap), "dl_totals": rxparse.dl_totals(snap, local), "kpis": rxparse.kpis(snap, local),
         "host": host, "config": config_view(run, mgr.flags),
     }
 
@@ -967,7 +976,7 @@ def make_handler(mgr):
                     if run is None:
                         continue
                     with run.lock:
-                        snap = run.state.snapshot()
+                        snap = run.state.snapshot_for(q.get("cell"))
                     out.append({"id": rid, "name": run.name, "label": derive_label(run), "kpis": rxparse.kpis(snap),
                                 "duration": run.duration()})
                 return self._json({"runs": out})
@@ -976,7 +985,7 @@ def make_handler(mgr):
                 if run is None:
                     return self._send(404, "no run", "text/plain")
                 with run.lock:
-                    snap = run.state.snapshot()
+                    snap = run.state.snapshot_for(q.get("cell"))
                 thr = {}
                 try:
                     thr = {k: float(v) for k, v in json.loads(q.get("thr", "{}")).items() if k in rxparse.DEFAULT_THRESHOLDS}

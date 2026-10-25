@@ -1,0 +1,1 @@
+FAIL arm_a [solver] n_solved=1>=1.0 solve_s=1.234<=10.0 post_solve_crc=90.91<99.8(FAIL) post_solve_tr=110<5000.0(FAIL) crc_floor=90.83<93.4(FAIL) drop_full=0.0208<=2.5

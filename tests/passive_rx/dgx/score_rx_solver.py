@@ -7,21 +7,23 @@ reopens, postconv window) no longer exist. This scorer takes them from the solve
   post_solve_crc  full TB CRC ok / full decodes of the solved RNTIs (solver counters)        >= GATE_POSTSOLVE_CRC_MIN (99.8)
   post_solve_tr   full decodes after the solve                                               >= GATE_POSTSOLVE_MIN (5000)
   crc_floor, drop_full  unchanged (overall PDSCHQ CRC >= 93.4, scan-queue drops <= 2.5 %)
-usage: score_rx_solver.py [--json] [--gate] <arm dir>..."""
+usage: score_rx_solver.py [--json] [--gate] [--cell K] <arm dir>...
+--cell K: score one cell of a multi-cell log (lines prefixed "[c<k>] "); a mixed log without it is refused (exit 2)."""
 import json, os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import score_rx
+import cellsel
 DEF = dict(GATE_NSOLVED_MIN="1", GATE_SOLVE_MAX="10", GATE_POSTSOLVE_CRC_MIN="99.8", GATE_POSTSOLVE_MIN="5000",
            GATE_CRC_FLOOR="93.4", GATE_DROP_MAX="2.5")
 ENT = re.compile(r"0x([0-9a-f]{4}):g(\d+),(solve|unsolved_age)=([\d.]+)ms,full(\d+)/(\d+)")
 
-def score(arm):
-    s = score_rx.score(arm)
+def score(arm, cell=None):
+    s = score_rx.score(arm, cell)
     rxd = os.path.join(arm, "rx") if os.path.isdir(os.path.join(arm, "rx")) else arm
     last = None
     try:
         with open(os.path.join(rxd, "rx.log"), errors="replace") as f:
-            for l in f:
+            for l in cellsel.prepare([score_rx.ANSI.sub("", x) for x in f], cell, os.path.join(rxd, "rx.log")):
                 if "PDSCH_SOLVER per-rnti" in l:
                     last = score_rx.ANSI.sub("", l)
     except FileNotFoundError:
@@ -53,8 +55,10 @@ def gate(s, env=os.environ):
 if __name__ == "__main__":
     do_gate = "--gate" in sys.argv
     rc = 0
-    for a in [a for a in sys.argv[1:] if a not in ("--json", "--gate")]:
-        s = score(a)
+    argv = sys.argv[1:]
+    cell = cellsel.pop_cell_arg(argv)
+    for a in [a for a in argv if a not in ("--json", "--gate")]:
+        s = score(a, cell)
         if do_gate:
             line, ok = gate(s); print(line); rc |= 0 if ok else 1
         else:

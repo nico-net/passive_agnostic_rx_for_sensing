@@ -20,6 +20,9 @@ Post-convergence keys (added for the postconv regression gate; legacy keys uncha
 """
 import json, os, re, sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import cellsel
+
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 def _t(line):
@@ -28,7 +31,7 @@ def _t(line):
     except ValueError:
         return None
 
-def score(arm):
+def score(arm, cell=None):
     rxd = os.path.join(arm, "rx") if os.path.isdir(os.path.join(arm, "rx")) else arm
     s = dict(arm=os.path.basename(os.path.normpath(arm)), sync_s=None, first_crnti_s=None, conv_s=None, ttc_s=None,
              n_converged=0, bank_len=None, ldpc_ok=None, ldpc_seg_fail=None, pdsch_decoded=None, pdsch_crc_ok=None,
@@ -37,7 +40,7 @@ def score(arm):
              postconv_crc_pct=None, search_crc_pct=None)
     try:
         with open(os.path.join(rxd, "rx.log"), errors="replace") as f:
-            lines = [ANSI.sub("", l) for l in f]
+            lines = cellsel.prepare([ANSI.sub("", l) for l in f], cell, os.path.join(rxd, "rx.log"))
     except FileNotFoundError:
         lines = []
     first_seen, convs, trials, samples = {}, [], {}, []
@@ -163,10 +166,12 @@ def gate_line(s, env=os.environ):
 
 if __name__ == "__main__":
     gate = "--gate" in sys.argv
-    args = [a for a in sys.argv[1:] if a not in ("--json", "--gate")]
+    argv = sys.argv[1:]
+    cell = cellsel.pop_cell_arg(argv)      # --cell K: score one cell of a multi-cell log (mixed log without it: refused, exit 2)
+    args = [a for a in argv if a not in ("--json", "--gate")]
     rc = 0
     for a in args:
-        s = score(a)
+        s = score(a, cell)
         if gate:
             line, ok = gate_line(s)
             print(line); rc |= 0 if ok else 1
