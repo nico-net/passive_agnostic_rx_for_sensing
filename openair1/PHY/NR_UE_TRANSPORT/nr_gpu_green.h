@@ -10,6 +10,7 @@
 #include <cuda_runtime.h>
 #include <cuda.h>
 #include "../TOOLS/nr_gpu_compat.h"
+#include "../TOOLS/nr_gpu_sm_plan.h"
 #include <cstdio>
 #include <cstdlib>
 
@@ -42,7 +43,7 @@ static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, i
 {
 #if CUDART_VERSION >= 12050
   static int state = -1; /* -1 not read, 0 off, 1 on */
-  static int sms = 8; /* discovery SMs requested: max(1, device SMs / 6), set at the first call; the driver rounds up and the result is read back */
+  static int sms = 8; /* discovery SMs requested: the plan's disc_sms (max(1, device SMs / 6) rounded up to the granularity), set at the first call; the result is read back */
   static CUgreenCtx green[2], rgreen[8];
   static bool made[2], rmade[8];
   static CUdevResource part[2], all;
@@ -62,11 +63,28 @@ static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, i
     int device = 0, nsm = 0;
     cudaGetDevice(&device);
     if (cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, device) == cudaSuccess && nsm > 0) sms = nsm / 6 > 1 ? nsm / 6 : 1;
+    typedef CUresult (*split_fn)(CUdevResource *, unsigned *, const CUdevResource *, CUdevResource *, unsigned, unsigned);
     bool ok = f[0] && f[1] && f[2] && f[3] && f[4] && f[5]
         && ((CUresult(*)(CUdevice *, int))f[0])(&dev, device) == CUDA_SUCCESS
-        && ((CUresult(*)(CUdevice, CUdevResource *, CUdevResourceType))f[1])(dev, &all, CU_DEV_RESOURCE_TYPE_SM) == CUDA_SUCCESS
-        && ((CUresult(*)(CUdevResource *, unsigned *, const CUdevResource *, CUdevResource *, unsigned, unsigned))f[2])(
-               &part[0], &groups, &all, &part[1], 0, (unsigned)sms) == CUDA_SUCCESS && groups == 1 && part[1].sm.smCount > 0;
+        && ((CUresult(*)(CUdevice, CUdevResource *, CUdevResourceType))f[1])(dev, &all, CU_DEV_RESOURCE_TYPE_SM) == CUDA_SUCCESS;
+    /* The SM plan (nr_gpu_sm_plan.h, pure) is derived from the device SM count and the co-scheduling granularity, read back as the group size the driver gives for a
+     * minCount of 1 (a query only: nothing is created from it). Green contexts exist here (the entry points resolved), the tier is the device's memory model. */
+    nr_gpu_sm_plan_t plan = {};
+    if (ok) {
+      CUdevResource gq[16], gr = {};
+      unsigned gn = 16;
+      const unsigned gran = ((split_fn)f[2])(gq, &gn, &all, &gr, 0, 1) == CUDA_SUCCESS && gn ? gq[0].sm.smCount : 0;
+      int integ = 0;
+      cudaDeviceGetAttribute(&integ, cudaDevAttrIntegrated, device);
+      const nr_gpu_sm_in_t in = {.sm_count = (int)all.sm.smCount, .granularity = (int)gran, .green = 1, .tier = integ ? NR_GPU_SHARED : NR_GPU_DISCRETE};
+      nr_gpu_sm_plan(&in, &plan);
+      if (plan.green) sms = plan.disc_sms; /* the request: already a multiple of the granularity, so the driver returns exactly this */
+      fprintf(stderr, "[GPU] SM plan: %d SMs, granularity %d, reason %s, discovery %d, real-time %d, split %s (DL %d, UL %d, probe %d SMs, group %d, DL share %d%%)\n", plan.sm, plan.gran,
+              plan.reason, plan.disc_sms, plan.rt_sms, plan.split2 ? "DL/UL/probe" : "one real-time context", plan.dl_sms, plan.ul_sms, plan.probe_sms, plan.group_sz, plan.dl_pct);
+      ok = ((split_fn)f[2])(&part[0], &groups, &all, &part[1], 0, (unsigned)sms) == CUDA_SUCCESS && groups == 1 && part[1].sm.smCount > 0;
+      if (ok && plan.green && (int)part[0].sm.smCount != plan.disc_sms)
+        fprintf(stderr, "[GPU] SM plan mismatch: the driver gave %u discovery SMs, the plan %d\n", part[0].sm.smCount, plan.disc_sms);
+    }
     cudaGetLastError();
     if (!ok) {
       fprintf(stderr, "[GPU] green contexts unavailable (discovery SMs %d), all streams use all SMs\n", sms);
@@ -76,16 +94,16 @@ static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, i
     ctx_create = (CUresult(*)(CUgreenCtx *, CUdevResourceDesc, CUdevice, unsigned))f[4];
     stream_create = (CUresult(*)(CUstream *, CUgreenCtx, unsigned, int))f[5];
     fprintf(stderr, "[GPU] discovery on %u SMs, real-time on the other SMs (%u of %u SMs)\n", part[0].sm.smCount, part[1].sm.smCount, all.sm.smCount);
-    if (part[1].sm.smCount >= 32) {
+    if (plan.split2) {
       /* Fix A+D, P99-UL Task 3: the real-time SMs are split in three green contexts: the DL real-grant context (stream idx < NR_GREEN_UL_IDX) on its own SMs, a UL context (idx >= NR_GREEN_UL_IDX) on
        * ALL real-time SMs, i.e. overlapping the DL ones, and a small probe context (idx >= NR_GREEN_PROBE_IDX) on one group. UL streams are the lowest priority (graph pool): UL borrows the DL SMs while no
        * DL block is waiting for one, and a DL launch finds its SMs free again after at most one UL block (bench, nr_gpu_pass_test.cc GpuPassBench.DlSmShare: UL span 376 -> 288 us at 106 PRB, 571 -> 353 at
        * 217 PRB; DL span unchanged when alone, no worse in tail under load). A probe never occupies an SM a DL grant needs (its group is the small one). All SMs are split once into groups of the driver's
        * granularity (8 SMs on the GB10: 4 groups + a remainder; a split part cannot be split again, rc 915): the first group(s) are the discovery SMs, the next group is the probe group and the first UL
-       * group, the rest (groups and remainder) is the DL context. A GPU with fewer than 32 real-time SMs keeps one real-time context (UL, DL and probes then yield by stream priority only). */
+       * group, the rest (groups and remainder) is the DL context. A GPU whose plan (nr_gpu_sm_plan.h) has no split2 keeps one real-time context (UL, DL and probes then yield by stream priority only). */
       CUdevResource rem = {};
       unsigned g = 16;
-      const CUresult rc = ((CUresult(*)(CUdevResource *, unsigned *, const CUdevResource *, CUdevResource *, unsigned, unsigned))f[2])(rgrp, &g, &all, &rem, 0, 4);
+      const CUresult rc = ((CUresult(*)(CUdevResource *, unsigned *, const CUdevResource *, CUdevResource *, unsigned, unsigned))f[2])(rgrp, &g, &all, &rem, 0, (unsigned)plan.group_req);
       const unsigned sz = g ? rgrp[0].sm.smCount : 0, disc_n = sz ? (part[0].sm.smCount + sz - 1) / sz : 0;
       if (rc == CUDA_SUCCESS && g < 16 && sz && g >= disc_n + 1) {
         unsigned tot = g;
@@ -99,7 +117,8 @@ static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, i
           unsigned dsm = 0;
           for (unsigned i = 0; i < dl_n; i++) dsm += rgrp[dl_first + i].sm.smCount;
           ngrp = 2;
-          { unsigned usm = 0; for (unsigned i = 0; i < ul_n; i++) usm += rgrp[ul_first + i].sm.smCount; fprintf(stderr, "[GPU] real-time SMs split: DL %u SMs, UL up to %u SMs (overlapping DL), probes %u SMs\n", dsm, usm, rgrp[ul_first].sm.smCount); }
+          { unsigned usm = 0; for (unsigned i = 0; i < ul_n; i++) usm += rgrp[ul_first + i].sm.smCount; fprintf(stderr, "[GPU] real-time SMs split: DL %u SMs, UL up to %u SMs (overlapping DL), probes %u SMs\n", dsm, usm, rgrp[ul_first].sm.smCount);
+            if ((int)dsm != plan.dl_sms || (int)usm != plan.ul_sms || (int)sz != plan.group_sz) fprintf(stderr, "[GPU] SM plan mismatch: driver DL %u UL %u group %u, plan DL %d UL %d group %d\n", dsm, usm, sz, plan.dl_sms, plan.ul_sms, plan.group_sz); }
         }
       } else fprintf(stderr, "[GPU] real-time split of %u SMs failed (rc=%d groups=%u): one real-time context\n", all.sm.smCount, (int)rc, g);
       cudaGetLastError();

@@ -16,6 +16,9 @@
  * every output (log2_maxh, dl_valid_re, LLRs, rxdataF_comp, mags, branch, the EVM accumulator) and disables the GPU
  * path on the first difference; the CPU results are the ones used. */
 #include "common/utils/nr_bg_lane.h"
+#include "common/utils/nr_core_layout.h"
+#pragma weak nr_core_layout_active /* unit tests link this file without the utils library: no plan */
+#pragma weak nr_core_layout_env_default
 #include "nr_pdsch_gpu_demod_host.h"
 #include "nr_pdsch_gpu_demod.h"
 #include "nr_pdsch_evm_acc.h"
@@ -765,7 +768,7 @@ static void *bg_main(void *a)
   return NULL;
 }
 
-/* One SCHED_OTHER nice-19 worker draining q, on the cores ISAC_GPU_CHECK_CORES (default the little cores 0-4,10-14).
+/* One SCHED_OTHER nice-19 worker draining q, on the cores ISAC_GPU_CHECK_CORES (default the plan's check lane; legacy without a plan: the little cores 10-14).
  * 0 = started. Also used by nr_pdsch_passive_queue.c (FATTAILS ISAC_PDSCH_DMRS_ID_ASYNC). */
 int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
 {
@@ -779,7 +782,9 @@ int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
   CPU_ZERO(&cs);
   const char *e = getenv("ISAC_GPU_CHECK_CORES");
   char buf[128], list[128];
-  snprintf(buf, sizeof(buf), "%s", e && *e ? e : "10-14");
+  /* unset: the plan's check-lane mask when a core plan is active (an empty mask = unpinned), else the legacy DGX little cores 10-14 (ISAC_CORE_PLAN=0) */
+  const char *pv = (!(e && *e) && nr_core_layout_active && nr_core_layout_env_default && nr_core_layout_active()) ? nr_core_layout_env_default("ISAC_GPU_CHECK_CORES") : NULL;
+  snprintf(buf, sizeof(buf), "%s", e && *e ? e : pv ? pv : "10-14");
   snprintf(list, sizeof(list), "%s", buf);
   char *sv = NULL;
   for (char *t = strtok_r(buf, ",", &sv); t; t = strtok_r(NULL, ",", &sv)) {

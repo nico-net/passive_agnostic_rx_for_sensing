@@ -22,6 +22,7 @@
 #include "assertions.h"
 #include "PHY/defs_nr_UE.h"
 #include "PHY/TOOLS/nr_gpu_platform.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.h" /* NR_GPU_PASS_RING */
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "common/utils/nr_dashboard.h"
 #include <limits.h>
@@ -333,6 +334,17 @@ int main(int argc, char **argv)
     /* USRP driver (hardware radio shared with the gNB): site defaults of the receiver */
     setenv("ISAC_RX_RECOVER", "1", 0); setenv("ISAC_USRP_START_TIMEOUT_MS", "2200", 0);
     setenv("ISAC_USRP_RING_ZEROCOPY", "1", 0); setenv("ISAC_USRP_CATCHUP_X", "1.05", 0); setenv("ISAC_USRP_CHPOW_S", "1", 0); setenv("ISAC_USRP_NO_TX", "1", 0);
+    /* CUDA driver setting, derived (not a receiver flag): hardware work queues per context. The GPU pass owns NR_GPU_PASS_RING instances of 3 streams each (real-time s, s2 and the
+     * low-priority probe twin s_lo; nr_gpu_pass_graph.cu alloc_inst), plus the discovery / PDCCH / LDPC streams. With fewer queues than streams, independent streams are serialised on
+     * a shared queue (false dependency, CUDA default 8); the queue count is the next power of two >= the pass streams, clamped to the CUDA maximum of 32 (21 pass streams -> 32).
+     * Set before the first CUDA call; an operator-set value is kept. */
+    {
+      int conn = 8;
+      while (conn < 3 * NR_GPU_PASS_RING && conn < 32) conn <<= 1;
+      char cs[8];
+      snprintf(cs, sizeof(cs), "%d", conn);
+      setenv("CUDA_DEVICE_MAX_CONNECTIONS", cs, 0);
+    }
     if (!nr_core_layout_active()) { /* ISAC_CORE_PLAN=0: the legacy DGX site cores */
       setenv("ISAC_UHD_CTRL_CORES", "15", 0);
       setenv("ISAC_FLOAT_CORES", "10-14", 0);

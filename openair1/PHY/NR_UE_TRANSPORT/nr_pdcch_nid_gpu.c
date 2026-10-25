@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #define _GNU_SOURCE
 #include "common/utils/nr_bg_lane.h"
+#include "common/utils/nr_core_layout.h"
+#pragma weak nr_core_layout_active /* unit tests link this file without the utils library: no plan */
+#pragma weak nr_core_layout_env_default
 #include "nr_pdcch_nid_gpu.h"
 #include "PHY/TOOLS/nr_admit.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
@@ -246,8 +249,15 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  rc|=pthread_attr_setschedparam(&attr,&sp);
  cpu_set_t allowed,pin;CPU_ZERO(&allowed);CPU_ZERO(&pin);
  if(sched_getaffinity(0,sizeof(allowed),&allowed)!=0)rc=-1;
- // ISAC_PDCCH_NID_GPU_CORE: exported by the core plan (nr_core_layout.h); -1 = the highest CPU of this thread's mask; unset = legacy 13.
- int core=env_int("ISAC_PDCCH_NID_GPU_CORE",13,-1,CPU_SETSIZE-1);
+ // ISAC_PDCCH_NID_GPU_CORE: exported by the core plan (nr_core_layout.h); -1 = the highest CPU of this thread's mask. Unset with an active plan: the plan's nID role
+ // (nr_core_layout_env_default, same value the export would have set); unset with ISAC_CORE_PLAN=0 (no plan): legacy 13.
+ int core_def=13;
+ if(nr_core_layout_active&&nr_core_layout_env_default&&nr_core_layout_active()){
+  const char*pv=nr_core_layout_env_default("ISAC_PDCCH_NID_GPU_CORE");
+  core_def=pv&&*pv?atoi(pv):-1;
+  if(core_def<-1||core_def>=CPU_SETSIZE)core_def=-1;
+ }
+ int core=env_int("ISAC_PDCCH_NID_GPU_CORE",core_def,-1,CPU_SETSIZE-1);
  if(core<0)for(int j=CPU_SETSIZE-1;j>=0;j--)if(CPU_ISSET(j,&allowed)){core=j;break;}
  if(core<0 || !CPU_ISSET(core,&allowed))rc=-1;
  else {CPU_SET(core,&pin);rc|=pthread_attr_setaffinity_np(&attr,sizeof(pin),&pin);}
