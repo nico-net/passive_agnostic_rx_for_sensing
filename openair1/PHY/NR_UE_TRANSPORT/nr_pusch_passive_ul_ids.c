@@ -55,6 +55,64 @@ static _Atomic uint64_t g_ue_ids_dropped;
 uint64_t nr_pusch_passive_ul_ids_dropped(void)
 { return atomic_load_explicit(&g_ue_ids_dropped,memory_order_relaxed); }
 
+/* dataScramblingIdentityPUSCH LOCK per RNTI. The id is RRC configuration (TS 38.331 PUSCH-Config; TS 38.211 6.3.1.1 c_init):
+ * it does not change with the receiver's own configuration epochs, DCI lengths or tickets. A TB CRC pass with a nonzero TB
+ * proves the id used for that grant; from then on every grant of the RNTI uses it, and neither the ticket-keyed priors nor
+ * the per-failure walk below may replace it. Before this lock a new ticket (epoch change) wiped the confirmation and, after
+ * 9 failures -- which wide grants produced for other reasons (SFO, UCI) -- 15 of 16 grants were sent with walked, wrong
+ * ids ([MEASURED, sens6 OTA lab cell, dd14_lab_20261025_154832]: 2.2 k grants on ~400 wrong ids, none decoding).
+ * Released only on CRC evidence: a TB pass with a different id for this RNTI (the background id search sweeps the failing
+ * grants and hands its CB-CRC-confirmed id to the decoder) moves the lock; the RNTI's release clears it. No failure count. */
+#define UL_DATA_LOCK_CAP 64
+/* entry: (1 << 32) | rnti << 16 | id, read lock-free (the DCI path must not block); written under g_ue_ids_lock */
+static _Atomic uint64_t g_data_lock[UL_DATA_LOCK_CAP];
+static uint32_t g_data_lock_next;
+
+static int data_lock_slot(uint16_t rnti)
+{
+  for (int i = 0; i < UL_DATA_LOCK_CAP; i++) {
+    const uint64_t v = atomic_load_explicit(&g_data_lock[i], memory_order_acquire);
+    if ((v >> 32) && (uint16_t)(v >> 16) == rnti)
+      return i;
+  }
+  return -1;
+}
+
+bool nr_pusch_passive_ul_data_id_locked(uint16_t rnti, uint16_t *data_id)
+{
+  const int i = data_lock_slot(rnti);
+  if (i < 0)
+    return false;
+  if (data_id)
+    *data_id = (uint16_t)atomic_load_explicit(&g_data_lock[i], memory_order_acquire);
+  return true;
+}
+
+static void data_lock_ok_locked(uint16_t rnti, uint16_t id)
+{
+  int i = data_lock_slot(rnti);
+  const uint64_t v = (1ull << 32) | ((uint64_t)rnti << 16) | id;
+  if (i < 0) {
+    for (int k = 0; k < UL_DATA_LOCK_CAP && i < 0; k++)
+      if (!(atomic_load_explicit(&g_data_lock[k], memory_order_relaxed) >> 32))
+        i = k;
+    if (i < 0)
+      i = (int)(g_data_lock_next++ % UL_DATA_LOCK_CAP);
+    LOG_A(PHY, "SENSING: UL DATA_ID LOCK rnti=0x%04x n_id=%u (TB CRC pass)\n", rnti, id);
+  } else if ((uint16_t)atomic_load_explicit(&g_data_lock[i], memory_order_relaxed) != id) {
+    LOG_A(PHY, "SENSING: UL DATA_ID LOCK rnti=0x%04x n_id %u -> %u (TB CRC pass)\n", rnti,
+          (unsigned)(uint16_t)atomic_load_explicit(&g_data_lock[i], memory_order_relaxed), id);
+  }
+  atomic_store_explicit(&g_data_lock[i], v, memory_order_release);
+}
+
+static void data_lock_clear_locked(uint16_t rnti)
+{
+  const int i = data_lock_slot(rnti);
+  if (i >= 0)
+    atomic_store_explicit(&g_data_lock[i], 0, memory_order_release);
+}
+
 void nr_pusch_passive_ul_ids_flags_reset_for_test(void) {} /* the UL chain is always on: nothing cached */
 bool nr_pusch_passive_ul_ue_state_enabled(void) { return true; }
 static bool same_ticket(const nr_ue_ul_ticket_t *a,const nr_ue_ul_ticket_t *b)
@@ -97,6 +155,7 @@ void nr_pusch_passive_ul_ids_confirm(const nr_ue_ul_ticket_t *t,uint8_t nscid,ui
     g_ue_ids[i].confirmed_mask|=1u<<(nscid&1);
     break;
   }
+  data_lock_ok_locked(t->rnti, data_id);
   pthread_mutex_unlock(&g_ue_ids_lock);
 }
 bool nr_pusch_passive_ul_ids_get(const nr_ue_ul_ticket_t *t,uint8_t nscid,uint16_t *dmrs_id,uint16_t *data_id)
@@ -118,14 +177,19 @@ void nr_pusch_passive_ul_ids_current(uint16_t rnti,uint8_t nscid,uint16_t pci,
 {
   if(dmrs_id) *dmrs_id=pci;
   if(data_id) *data_id=pci;
-  if(!nr_pusch_passive_ul_ue_state_enabled() || pthread_mutex_trylock(&g_ue_ids_lock)) return;
+  if(!nr_pusch_passive_ul_ue_state_enabled()) return;
+  uint16_t locked_id=0;
+  const bool locked=nr_pusch_passive_ul_data_id_locked(rnti,&locked_id); /* lock-free: holds even when the trylock below loses */
+  if(data_id && locked) *data_id=locked_id;
+  if(pthread_mutex_trylock(&g_ue_ids_lock)) return;
   for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && g_ue_ids[i].ticket.rnti==rnti) {
     ul_ids_ue_t *s=&g_ue_ids[i];
     if(s->n_priors) {
       const int ns=nscid&1;
       if(dmrs_id) *dmrs_id=(s->confirmed_mask&(1u<<ns))?s->dmrs_id[ns]:s->priors[(s->trial/s->n_priors)%s->n_priors];
       if(data_id) {
-        if (s->confirmed_mask) *data_id=s->data_id;
+        if (locked) *data_id=locked_id;
+    else if (s->confirmed_mask) *data_id=s->data_id;
         else if (s->failed_grants>=9 && (s->failed_grants%16)!=0)
           *data_id=(uint16_t)((s->failed_grants-9-(s->failed_grants-1)/16)%1024);
         else { /* a data id is 0..1023; DL scrambling priors may be larger (DM-RS ids go to 65535): skip those, fall back to the PCI */
@@ -157,12 +221,14 @@ void nr_pusch_passive_ul_ids_reset(uint16_t rnti)
   pthread_mutex_lock(&g_ue_ids_lock);
   for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && g_ue_ids[i].ticket.rnti==rnti)
     memset(&g_ue_ids[i],0,sizeof(g_ue_ids[i]));
+  data_lock_clear_locked(rnti);
   pthread_mutex_unlock(&g_ue_ids_lock);
 }
 void nr_pusch_passive_ul_ids_reset_all(void)
 {
   pthread_mutex_lock(&g_ue_ids_lock);
   memset(g_ue_ids,0,sizeof(g_ue_ids));
+  for(int i=0;i<UL_DATA_LOCK_CAP;i++) atomic_store_explicit(&g_data_lock[i],0,memory_order_release);
   pthread_mutex_unlock(&g_ue_ids_lock);
 }
 

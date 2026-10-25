@@ -66,6 +66,8 @@ bool nr_pusch_passive_ul_ids_get(const nr_ue_ul_ticket_t *ticket, uint8_t nscid,
 void nr_pusch_passive_ul_ids_current(uint16_t rnti, uint8_t nscid, uint16_t pci,
                                      uint16_t *dmrs_id, uint16_t *data_id);
 void nr_pusch_passive_ul_ids_failed(const nr_ue_ul_ticket_t *ticket);
+/* The data scrambling id a TB CRC pass locked for this RNTI (lock-free read); false = none locked. */
+bool nr_pusch_passive_ul_data_id_locked(uint16_t rnti, uint16_t *data_id);
 void nr_pusch_passive_ul_ids_reset(uint16_t rnti);
 void nr_pusch_passive_ul_ids_reset_all(void);
 /* Test hook: the ISAC_UL_UE_STATE/ISAC_UL_PUSCH_CHAIN flags are cached on first use; tests that setenv must re-read. */
