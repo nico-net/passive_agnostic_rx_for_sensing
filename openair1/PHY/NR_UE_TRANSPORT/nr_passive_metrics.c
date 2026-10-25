@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #define _GNU_SOURCE
 #include "common/utils/nr_cell.h"
+#include "nr_passive_cell_prealloc.h"
 #include <string.h>
 #include "nr_passive_metrics.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"

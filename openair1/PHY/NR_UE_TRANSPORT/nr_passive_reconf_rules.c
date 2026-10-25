@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 #include <string.h>
 #include "common/utils/nr_cell.h"
+#include "nr_passive_cell_prealloc.h"
 
 static unsigned bits(const uint8_t *b, unsigned pos, unsigned n) /* MSB-first bit field, n <= 32 */
 {

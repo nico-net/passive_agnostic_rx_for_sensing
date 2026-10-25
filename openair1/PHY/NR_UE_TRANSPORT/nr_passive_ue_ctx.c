@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "common/utils/nr_core_plan.h"
 #include "common/utils/nr_cell.h"
+#include "nr_passive_cell_prealloc.h"
 #include "nr_passive_ue_ctx.h"
 #include "nr_passive_reconf_rules.h"
 #include <inttypes.h>
