@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <string.h>
+#include "common/utils/nr_cell.h"
 
 static unsigned bits(const uint8_t *b, unsigned pos, unsigned n) /* MSB-first bit field, n <= 32 */
 {
@@ -99,7 +100,11 @@ bool nr_reconf_hq_discontinuity(bool prev_valid, uint8_t prev_ndi, int prev_tbs_
 }
 
 /* ---- RRC windows ---- */
-static _Atomic int64_t g_rrc_rx[65536], g_rrc_eff[65536]; /* slot + 1; 0 = none */
+typedef _Atomic int64_t g_rrc_arr_t[65536]; /* slot + 1; 0 = none; 512 KiB per cell: heap, pre-allocated per active cell before the RX fence */
+NR_CELL_STATIC_HEAP(g_rrc_arr_t, g_rrc_rx);
+#define g_rrc_rx NR_CELL_HEAP_REF(g_rrc_arr_t, g_rrc_rx)
+NR_CELL_STATIC_HEAP(g_rrc_arr_t, g_rrc_eff);
+#define g_rrc_eff NR_CELL_HEAP_REF(g_rrc_arr_t, g_rrc_eff)
 void nr_reconf_rrc_expect(uint16_t rnti, int64_t rx_slot, nr_reconf_rrc_kind_t kind, int mu, bool with_bwp_switch)
 {
   const int d = nr_reconf_rrc_delay_slots(kind, mu, with_bwp_switch);
@@ -130,8 +135,19 @@ uint32_t nr_reconf_rrc_n_suspect(uint16_t rnti, int64_t abs_slot, int mu, uint32
 
 /* ---- DCI-triggered BWP switches ---- */
 #define PENDING_MAX 16
-static struct { bool used; uint16_t rnti; int entry; int64_t first, last; } g_sw[PENDING_MAX];
-static pthread_mutex_t g_sw_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct { bool used; uint16_t rnti; int entry; int64_t first, last; } g_sw_ent_t;
+typedef g_sw_ent_t g_sw_arr_t[PENDING_MAX];
+NR_CELL_STATIC(g_sw_arr_t, g_sw);
+#define g_sw NR_CELL_REF(g_sw)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_sw_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_sw_lock NR_CELL_REF(g_sw_lock)
+
+/* Allocate cell `cell`'s heap objects (call for every active cell before nr_cell_alloc_fence(); cell 0 included). */
+void nr_passive_reconf_rules_cell_prealloc(int cell)
+{
+  NR_CELL_HEAP_PREALLOC(g_rrc_arr_t, g_rrc_rx, cell);
+  NR_CELL_HEAP_PREALLOC(g_rrc_arr_t, g_rrc_eff, cell);
+}
 void nr_reconf_bwp_switch_dci(uint16_t rnti, int to_entry, int64_t dci_slot, int mu)
 {
   const int d1 = nr_reconf_bwp_switch_delay_slots(mu, 1), d2 = nr_reconf_bwp_switch_delay_slots(mu, 2);

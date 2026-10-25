@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_cell.h"
 #include "nr_passive_ue_ctx.h"
 #include "nr_passive_reconf_rules.h"
 #include <inttypes.h>
@@ -47,27 +48,76 @@ typedef struct {
   int64_t rrc_eff_slot;        /* -1 none */
   int rrc_kind;
 } entry_t;
-static int g_cur_mu=1; /* numerology of the observed cell, from the grants */
-static int64_t g_latest_slot; /* newest event slot: the clock of the RRC windows */
-static uint32_t g_rrc_pending;
-static ring_slot_t *g_ring;
-static entry_t *g_entries;
-static int16_t g_active_index[UINT16_MAX + 1];
-static uint32_t g_capacity;
-static uint64_t g_head;
-static _Atomic uint64_t g_tail, g_pushed, g_written, g_dropped;
-static _Atomic uint32_t g_producers;
-static _Atomic bool g_running;
+NR_CELL_STATIC_INIT(int, g_cur_mu, 1); /* numerology of the observed cell, from the grants */
+#define g_cur_mu NR_CELL_REF(g_cur_mu)
+NR_CELL_STATIC(int64_t, g_latest_slot); /* newest event slot: the clock of the RRC windows */
+#define g_latest_slot NR_CELL_REF(g_latest_slot)
+NR_CELL_STATIC(uint32_t, g_rrc_pending);
+#define g_rrc_pending NR_CELL_REF(g_rrc_pending)
+NR_CELL_STATIC(ring_slot_t *, g_ring);
+#define g_ring NR_CELL_REF(g_ring)
+NR_CELL_STATIC(entry_t *, g_entries);
+#define g_entries NR_CELL_REF(g_entries)
+typedef int16_t g_active_index_arr_t[UINT16_MAX + 1]; /* 128 KiB per cell: heap, pre-allocated per active cell before the RX fence */
+NR_CELL_STATIC_HEAP(g_active_index_arr_t, g_active_index);
+#define g_active_index NR_CELL_HEAP_REF(g_active_index_arr_t, g_active_index)
+NR_CELL_STATIC(uint32_t, g_capacity);
+#define g_capacity NR_CELL_REF(g_capacity)
+NR_CELL_STATIC(uint64_t, g_head);
+#define g_head NR_CELL_REF(g_head)
+NR_CELL_STATIC(_Atomic uint64_t, g_tail);
+#define g_tail NR_CELL_REF(g_tail)
+NR_CELL_STATIC(_Atomic uint64_t, g_pushed);
+#define g_pushed NR_CELL_REF(g_pushed)
+NR_CELL_STATIC(_Atomic uint64_t, g_written);
+#define g_written NR_CELL_REF(g_written)
+NR_CELL_STATIC(_Atomic uint64_t, g_dropped);
+#define g_dropped NR_CELL_REF(g_dropped)
+NR_CELL_STATIC(_Atomic uint32_t, g_producers);
+#define g_producers NR_CELL_REF(g_producers)
+NR_CELL_STATIC(_Atomic bool, g_running);
+#define g_running NR_CELL_REF(g_running)
+/* nr_ue_ctx_fast_open (header, read by nr_ue_ctx_enabled()) is the process-wide hint: true while ANY cell's session is open.
+ * The per-cell open flag below is what enqueue()/open()/close() use (PROCESS hint, PER_CELL session). */
 bool nr_ue_ctx_fast_open;
-static pthread_t g_worker;
-static pthread_mutex_t g_ctx_lock = PTHREAD_MUTEX_INITIALIZER;
-static FILE *g_output;
-static uint32_t g_epoch, g_identity;
-static int64_t g_sib1_values[3] = {-1,-1,-1};
-static uint64_t g_last_period_ns;
-static uint64_t g_last_age_ns;
-static double g_period_s;
-static bool g_real_time_session;
+NR_CELL_STATIC(_Atomic bool, g_cell_open);
+#define g_cell_open NR_CELL_REF(g_cell_open)
+/* In this file "enabled" means this cell's session is open (the header's inline reads the process-wide hint, which is true while any cell is open). */
+#define nr_ue_ctx_enabled() atomic_load_explicit(&g_cell_open, memory_order_seq_cst)
+NR_CELL_STATIC(pthread_t, g_worker);
+#define g_worker NR_CELL_REF(g_worker)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_ctx_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_ctx_lock NR_CELL_REF(g_ctx_lock)
+NR_CELL_STATIC(FILE *, g_output);
+#define g_output NR_CELL_REF(g_output)
+NR_CELL_STATIC(uint32_t, g_epoch);
+#define g_epoch NR_CELL_REF(g_epoch)
+NR_CELL_STATIC(uint32_t, g_identity);
+#define g_identity NR_CELL_REF(g_identity)
+typedef int64_t g_sib1_values_arr_t[3];
+NR_CELL_STATIC_INIT(g_sib1_values_arr_t, g_sib1_values, {-1,-1,-1});
+#define g_sib1_values NR_CELL_REF(g_sib1_values)
+NR_CELL_STATIC(uint64_t, g_last_period_ns);
+#define g_last_period_ns NR_CELL_REF(g_last_period_ns)
+NR_CELL_STATIC(uint64_t, g_last_age_ns);
+#define g_last_age_ns NR_CELL_REF(g_last_age_ns)
+NR_CELL_STATIC(double, g_period_s);
+#define g_period_s NR_CELL_REF(g_period_s)
+NR_CELL_STATIC(bool, g_real_time_session);
+#define g_real_time_session NR_CELL_REF(g_real_time_session)
+
+static void fast_open_refresh(void)
+{
+  bool any = false;
+  for (int c = 0; c < NR_CELL_MAX; c++)
+    any = any || atomic_load_explicit(&g_cell_open_cells[c], memory_order_seq_cst);
+  __atomic_store_n(&nr_ue_ctx_fast_open, any, __ATOMIC_SEQ_CST);
+}
+/* Allocate cell `cell`'s heap object (call for every active cell before nr_cell_alloc_fence(); cell 0 included). */
+void nr_passive_ue_ctx_cell_prealloc(int cell)
+{
+  NR_CELL_HEAP_PREALLOC(g_active_index_arr_t, g_active_index, cell);
+}
 extern void nr_cfg_epoch_note_rnti_reopened(uint16_t, bool, uint64_t) __attribute__((weak));
 extern void nr_pusch_passive_ul_ids_reset(uint16_t) __attribute__((weak));
 extern void nr_pusch_passive_ul_ids_reset_all(void) __attribute__((weak));
@@ -83,7 +133,7 @@ static uint64_t now_ns(void)
 static bool enqueue(const event_t *e)
 {
   atomic_fetch_add_explicit(&g_producers, 1, memory_order_seq_cst);
-  if (!__atomic_load_n(&nr_ue_ctx_fast_open, __ATOMIC_SEQ_CST)) {
+  if (!atomic_load_explicit(&g_cell_open, memory_order_seq_cst)) {
     atomic_fetch_sub_explicit(&g_producers, 1, memory_order_seq_cst);
     return false;
   }
@@ -142,7 +192,8 @@ static void json_int(int64_t v) { if (v < 0) fputs("null", g_output); else fprin
 static void json_float(double v) { if (isfinite(v)) fprintf(g_output, "%.8g", v); else fputs("null", g_output); }
 /* The file is bounded: past nr_ue_ctx_test_file_cap bytes (512 MiB; settable by tests) the output moves to /dev/null and every later line is counted as dropped. */
 int64_t nr_ue_ctx_test_file_cap = 512ll << 20;
-static bool g_file_capped;
+NR_CELL_STATIC(bool, g_file_capped);
+#define g_file_capped NR_CELL_REF(g_file_capped)
 static void line_done(void)
 {
   if (g_file_capped) atomic_fetch_add_explicit(&g_dropped, 1, memory_order_relaxed);
@@ -730,9 +781,9 @@ done:
 }
 /* Test hook: the writer sleeps first so the ring fills (overflow tests). */
 int nr_ue_ctx_test_writer_pause_ms;
-static void *run(void *unused)
+static void *run(void *cell)
 {
-  (void)unused;
+  nr_cell_bind((int)(intptr_t)cell); /* the worker serves the cell that opened the session (nr_core_plan_create does not bind) */
   if(nr_ue_ctx_test_writer_pause_ms>0) {struct timespec t={nr_ue_ctx_test_writer_pause_ms/1000,(nr_ue_ctx_test_writer_pause_ms%1000)*1000000L}; nanosleep(&t,NULL);}
   event_t e;
   uint64_t last_idle_tick=now_ns();
@@ -764,7 +815,7 @@ static void *run(void *unused)
  */
 bool nr_ue_ctx_open(const char *path,uint32_t ring_capacity,double snapshot_period_s)
 {
-  if(!ring_capacity || nr_ue_ctx_enabled()) return false;
+  if(!ring_capacity || atomic_load_explicit(&g_cell_open,memory_order_seq_cst)) return false;
   /* The sequence algorithm needs at least two physical slots; a requested one-slot ring keeps
    * the same bounded/drop behavior with two physical slots. */
   if(ring_capacity<2) ring_capacity=2;
@@ -784,9 +835,11 @@ bool nr_ue_ctx_open(const char *path,uint32_t ring_capacity,double snapshot_peri
   atomic_store(&g_tail,0);atomic_store(&g_pushed,0);atomic_store(&g_written,0);atomic_store(&g_dropped,0);
   atomic_store_explicit(&g_producers,0,memory_order_seq_cst);
   atomic_store_explicit(&g_running,true,memory_order_seq_cst);
-  __atomic_store_n(&nr_ue_ctx_fast_open,true,__ATOMIC_SEQ_CST);
-  if(nr_core_plan_create(&g_worker,NULL,run,NULL, -1)!=0) {
-    __atomic_store_n(&nr_ue_ctx_fast_open,false,__ATOMIC_SEQ_CST);
+  atomic_store_explicit(&g_cell_open,true,memory_order_seq_cst);
+  fast_open_refresh();
+  if(nr_core_plan_create(&g_worker,NULL,run,(void *)(intptr_t)nr_cell_idx(), -1)!=0) {
+    atomic_store_explicit(&g_cell_open,false,memory_order_seq_cst);
+    fast_open_refresh();
     atomic_store_explicit(&g_running,false,memory_order_seq_cst);
     free(g_ring);free(g_entries);fclose(g_output);g_ring=NULL;g_entries=NULL;g_output=NULL;
     return false;
@@ -795,8 +848,9 @@ bool nr_ue_ctx_open(const char *path,uint32_t ring_capacity,double snapshot_peri
 }
 void nr_ue_ctx_close(void)
 {
-  if(!nr_ue_ctx_enabled()) return;
-  __atomic_store_n(&nr_ue_ctx_fast_open,false,__ATOMIC_SEQ_CST);
+  if(!atomic_load_explicit(&g_cell_open,memory_order_seq_cst)) return;
+  atomic_store_explicit(&g_cell_open,false,memory_order_seq_cst);
+  fast_open_refresh();
   atomic_store_explicit(&g_running,false,memory_order_seq_cst);
   pthread_join(g_worker,NULL);
   fclose(g_output);free(g_ring);g_output=NULL;g_ring=NULL;

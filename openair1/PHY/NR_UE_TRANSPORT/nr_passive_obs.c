@@ -2,6 +2,7 @@
 /* Per-grant observation records: JSON serialiser, ring buffer and writer thread (Task A3).
  * Deliberately free of OAI logging so the unit test links standalone. Schema: see nr_passive_obs.h. */
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_cell.h"
 #include "nr_passive_obs.h"
 #include "nr_sense_records.h"
 #include <inttypes.h>
@@ -17,16 +18,40 @@
 /* g_mu is re-initialised once (pthread_once, in open) as PTHREAD_PRIO_INHERIT so an RT decode thread that pushes
  * cannot be priority-inverted by the (normal-priority) writer holding it. The static initialiser keeps it valid
  * until then. */
-static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_once_t g_mu_once = PTHREAD_ONCE_INIT;
-static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
-static nr_passive_obs_t *g_ring = NULL;
-static uint32_t g_cap = 0, g_head = 0, g_count = 0;
-static bool g_open = false, g_stop = false;
-static FILE *g_f = NULL;
-static pthread_t g_thr;
-static _Atomic uint64_t g_pushed, g_written, g_dropped, g_io_errors, g_after_close;
-static _Atomic bool g_closed_seen; /* a session was closed (and not re-opened) */
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_mu NR_CELL_REF(g_mu)
+NR_CELL_STATIC_INIT(pthread_once_t, g_mu_once, PTHREAD_ONCE_INIT);
+#define g_mu_once NR_CELL_REF(g_mu_once)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_cv, PTHREAD_COND_INITIALIZER);
+#define g_cv NR_CELL_REF(g_cv)
+NR_CELL_STATIC(nr_passive_obs_t *, g_ring);
+#define g_ring NR_CELL_REF(g_ring)
+NR_CELL_STATIC(uint32_t, g_cap);
+#define g_cap NR_CELL_REF(g_cap)
+NR_CELL_STATIC(uint32_t, g_head);
+#define g_head NR_CELL_REF(g_head)
+NR_CELL_STATIC(uint32_t, g_count);
+#define g_count NR_CELL_REF(g_count)
+NR_CELL_STATIC(bool, g_open);
+#define g_open NR_CELL_REF(g_open)
+NR_CELL_STATIC(bool, g_stop);
+#define g_stop NR_CELL_REF(g_stop)
+NR_CELL_STATIC(FILE *, g_f);
+#define g_f NR_CELL_REF(g_f)
+NR_CELL_STATIC(pthread_t, g_thr);
+#define g_thr NR_CELL_REF(g_thr)
+NR_CELL_STATIC(_Atomic uint64_t, g_pushed);
+#define g_pushed NR_CELL_REF(g_pushed)
+NR_CELL_STATIC(_Atomic uint64_t, g_written);
+#define g_written NR_CELL_REF(g_written)
+NR_CELL_STATIC(_Atomic uint64_t, g_dropped);
+#define g_dropped NR_CELL_REF(g_dropped)
+NR_CELL_STATIC(_Atomic uint64_t, g_io_errors);
+#define g_io_errors NR_CELL_REF(g_io_errors)
+NR_CELL_STATIC(_Atomic uint64_t, g_after_close);
+#define g_after_close NR_CELL_REF(g_after_close)
+NR_CELL_STATIC(_Atomic bool, g_closed_seen); /* a session was closed (and not re-opened) */
+#define g_closed_seen NR_CELL_REF(g_closed_seen)
 
 static void mu_init(void)
 {
@@ -38,7 +63,9 @@ static void mu_init(void)
   }
 }
 
-/* Fast-path flag read by nr_passive_obs_enabled() (header); only touched through __atomic builtins. */
+/* Fast-path flag read by nr_passive_obs_enabled() (header); only touched through __atomic builtins.
+ * PROCESS (mpci A3): it is true while ANY cell's session is open (OR over g_open_cells[]); a cell that is not open
+ * still takes the locked slow path in push(), which re-checks that cell's own g_open. */
 bool nr_passive_obs_fast_open = false;
 
 typedef struct {
@@ -180,7 +207,7 @@ static uint64_t obs_flush(uint64_t pending)
 int nr_passive_obs_test_writer_pause_ms;
 static void *writer(void *arg)
 {
-  (void)arg;
+  nr_cell_bind((int)(intptr_t)arg); /* the writer serves the cell that opened the session (nr_core_plan_create does not bind) */
   if (nr_passive_obs_test_writer_pause_ms > 0)
     usleep((useconds_t)nr_passive_obs_test_writer_pause_ms * 1000);
   char line[1024];
@@ -213,6 +240,15 @@ static void *writer(void *arg)
   }
   obs_flush(pending);
   return NULL;
+}
+
+/* Recompute the process-wide fast-path hint from the per-cell sessions (g_open_cells[] read directly: any cell). */
+static void fast_open_refresh(void)
+{
+  bool any = false;
+  for (int c = 0; c < NR_CELL_MAX; c++)
+    any = any || __atomic_load_n(&g_open_cells[c], __ATOMIC_RELAXED);
+  __atomic_store_n(&nr_passive_obs_fast_open, any, __ATOMIC_RELAXED);
 }
 
 /* nr_passive_obs_open: opens the per-grant observation file once: allocates a ring of `capacity` records and starts the writer thread. Returns false when already open, when the path or the capacity is invalid, or when the file or the ring cannot be created.
@@ -249,12 +285,12 @@ bool nr_passive_obs_open(const char *path, uint32_t capacity)
   pthread_mutex_lock(&g_mu);
   g_open = true;
   pthread_mutex_unlock(&g_mu);
-  __atomic_store_n(&nr_passive_obs_fast_open, true, __ATOMIC_RELAXED);
-  if (nr_core_plan_create(&g_thr, NULL, writer, NULL, -1) != 0) {
-    __atomic_store_n(&nr_passive_obs_fast_open, false, __ATOMIC_RELAXED);
+  fast_open_refresh();
+  if (nr_core_plan_create(&g_thr, NULL, writer, (void *)(intptr_t)nr_cell_idx(), -1) != 0) {
     pthread_mutex_lock(&g_mu);
     g_open = false;
     pthread_mutex_unlock(&g_mu);
+    fast_open_refresh();
     fclose(g_f);
     free(g_ring);
     g_f = NULL;
@@ -274,7 +310,8 @@ bool nr_passive_obs_push(const nr_passive_obs_t *o)
   pthread_mutex_lock(&g_mu);
   if (!g_open) { /* re-check under the lock: close() may have won the race */
     pthread_mutex_unlock(&g_mu);
-    atomic_fetch_add(&g_after_close, 1);
+    if (atomic_load(&g_closed_seen)) /* a cell that never opened (the hint was set by another cell's session) is not an after-close push */
+      atomic_fetch_add(&g_after_close, 1);
     return false;
   }
   if (g_count == g_cap) {
@@ -298,7 +335,7 @@ void nr_passive_obs_close(void)
     return;
   }
   g_open = false;
-  __atomic_store_n(&nr_passive_obs_fast_open, false, __ATOMIC_RELAXED);
+  fast_open_refresh();
   atomic_store(&g_closed_seen, true);
   g_stop = true; /* no push is accepted after this; the writer drains every accepted record */
   pthread_cond_signal(&g_cv);

@@ -4,6 +4,7 @@
  * format. A live CRC and identical decoded bytes are the replay acceptance test.
  */
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_cell.h"
 #include "nr_passive_replay_capture.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "common/utils/LOG/log.h"
@@ -45,16 +46,26 @@ typedef struct {
   replay_dl_t dl[REPLAY_DL];
 } replay_header_t;
 #include "nr_passive_delay_contract.h"
-static replay_header_t *g_header;
-static unsigned char *g_iq;
-static char *g_output;
-static atomic_int g_state;
-static atomic_bool g_ul_seen;
-static pthread_mutex_t g_record_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t g_writer_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_writer_cv = PTHREAD_COND_INITIALIZER;
-static pthread_t g_writer;
-static long g_next_source;
+NR_CELL_STATIC(replay_header_t *, g_header);
+#define g_header NR_CELL_REF(g_header)
+NR_CELL_STATIC(unsigned char *, g_iq);
+#define g_iq NR_CELL_REF(g_iq)
+NR_CELL_STATIC(char *, g_output);
+#define g_output NR_CELL_REF(g_output)
+NR_CELL_STATIC(atomic_int, g_state);
+#define g_state NR_CELL_REF(g_state)
+NR_CELL_STATIC(atomic_bool, g_ul_seen);
+#define g_ul_seen NR_CELL_REF(g_ul_seen)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_record_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_record_lock NR_CELL_REF(g_record_lock)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_writer_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_writer_lock NR_CELL_REF(g_writer_lock)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_writer_cv, PTHREAD_COND_INITIALIZER);
+#define g_writer_cv NR_CELL_REF(g_writer_cv)
+NR_CELL_STATIC(pthread_t, g_writer);
+#define g_writer NR_CELL_REF(g_writer)
+NR_CELL_STATIC(long, g_next_source);
+#define g_next_source NR_CELL_REF(g_next_source)
 
 static uint64_t hash_tb(const uint8_t *p, size_t n)
 {
@@ -72,9 +83,9 @@ static bool write_all(int fd, const void *data, size_t bytes)
   }
   return true;
 }
-static void *write_capture(void *unused)
+static void *write_capture(void *cell)
 {
-  (void)unused;
+  nr_cell_bind((int)(intptr_t)cell); /* the writer serves the cell that armed the recorder (nr_core_plan_create does not bind) */
   for (;;) {
     pthread_mutex_lock(&g_writer_lock);
     while (atomic_load(&g_state)!=RP_WRITING) pthread_cond_wait(&g_writer_cv,&g_writer_lock);
@@ -114,7 +125,12 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
       || !fp->slots_per_frame || fp->slots_per_frame>160) {
     LOG_E(PHY,"REPLAY VOID: geometry exceeds bounded recorder\n"); return;
   }
-  g_header=calloc(1,sizeof(*g_header)); g_iq=malloc(bytes); g_output=strdup(path);
+  g_header=calloc(1,sizeof(*g_header)); g_iq=malloc(bytes); {
+    /* cell 0: the path unchanged; cell k > 0: one capture file per cell (O_EXCL would otherwise make the second cell void). */
+    char cell_path[4096];
+    nr_cell_path(nr_cell_idx(), path, cell_path, sizeof(cell_path));
+    g_output=strdup(cell_path);
+  }
   if (!g_header || !g_iq || !g_output) {
     LOG_E(PHY,"REPLAY VOID: allocation failed\n"); atomic_store(&g_state,RP_VOID); return;
   }
@@ -132,7 +148,7 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
   pthread_attr_setschedpolicy(&attr,SCHED_OTHER);
   struct sched_param sp={.sched_priority=0};
   pthread_attr_setschedparam(&attr,&sp);
-  int err=nr_core_plan_create(&g_writer,&attr,write_capture,NULL, -1);
+  int err=nr_core_plan_create(&g_writer,&attr,write_capture,(void *)(intptr_t)nr_cell_idx(), -1);
   pthread_attr_destroy(&attr);
   if (err) { atomic_store(&g_state,RP_VOID); LOG_E(PHY,"REPLAY VOID: writer creation failed %d\n",err); }
   else pthread_detach(g_writer);
