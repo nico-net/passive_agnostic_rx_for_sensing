@@ -635,3 +635,5 @@ openair1/SCHED_NR_UE/fapi_nr_ue_l1.c                                        2 | 
 openair1/SCHED_NR_UE/phy_procedures_nr_ue.c                                 4 | 0 1 1 0 2
 radio/COMMON/common_lib.c                                                   1 | 0 0 1 0 0
 ```
+
+R12. **NO FLAGS (operator, 2026-10-25).** Supersedes Global Constraint 4's test-seam clause: no new env var of any prefix (`ISAC_*`, `NR_TEST_*`), no new CLI option of the receiver or of run/scoring scripts, no behaviour-changing build switch. Tests use function hooks and injected inputs. Scorers on a multi-cell log score every cell automatically, one independent block per cell (no `--cell`). Existing env vars on main are untouched by this plan.
