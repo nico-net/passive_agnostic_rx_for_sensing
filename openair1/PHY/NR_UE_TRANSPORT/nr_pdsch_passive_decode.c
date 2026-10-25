@@ -3319,6 +3319,59 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     }
   }
   nr_dlsch_chest_per_symbol = 0;
+  /* SFO cross-check (PHY/MODULATION/nr_sfo_state.h). On a real grant (no probe, no trial) with two or more DM-RS symbols the channel and the
+   * precoder are static over the slot, so between the first and the last DM-RS estimate a common phase is residual CFO and a phase SLOPE across
+   * subcarriers is residual timing drift: the eps the FEP did not remove. Weighted LS fit of the per-4-RB phase against the signed subcarrier,
+   * fed back to the provider with the grant's coherence as weight (a hypothesis without DM-RS reads ~0 coherence and is ignored). */
+  if (dmrs_first >= 0 && dmrs_last > dmrs_first && !seg_path && !t_probe_first_seg && probe_last_sym < 0 && !t_quiet && cw->Nl > 0
+      && chest_alloc.num_rbs >= 24) {
+    const int N = fp->ofdm_symbol_size, nrx = fp->nb_antennas_rx < 4 ? fp->nb_antennas_rx : 4, nre = 12 * chest_alloc.num_rbs;
+    const int k0 = (fp->first_carrier_offset + (chest_cfg.BWPStart + chest_alloc.first_rb) * 12) % N;
+    double sw = 0, swx = 0, swy = 0, swxx = 0, swxy = 0, coh_n = 0, coh_d = 0;
+    for (int c0 = 0; c0 + 48 <= nre; c0 += 48) {
+      double cr = 0, ci = 0, am = 0;
+      for (int l = 0; l < (int)cw->Nl; l++)
+        for (int a = 0; a < nrx; a++) {
+          const int16_t *h1 = (const int16_t *)&pdsch_dl_ch_estimates[l * fp->nb_antennas_rx + a][N * dmrs_first];
+          const int16_t *h2 = (const int16_t *)&pdsch_dl_ch_estimates[l * fp->nb_antennas_rx + a][N * dmrs_last];
+          for (int i = c0; i < c0 + 48; i++) {
+            const double x1r = h1[2 * i], x1i = h1[2 * i + 1], x2r = h2[2 * i], x2i = h2[2 * i + 1];
+            cr += x2r * x1r + x2i * x1i;
+            ci += x2i * x1r - x2r * x1i;
+            am += sqrt((x1r * x1r + x1i * x1i) * (x2r * x2r + x2i * x2i));
+          }
+        }
+      const double mag = sqrt(cr * cr + ci * ci);
+      if (!(mag > 0))
+        continue;
+      const double x = nr_sfo_bin_k((k0 + c0 + 24) % N, N), y = atan2(ci, cr);
+      sw += mag; swx += mag * x; swy += mag * y; swxx += mag * x * x; swxy += mag * x * y;
+      coh_n += mag; coh_d += am;
+    }
+    const double den = sw * swxx - swx * swx, coh = coh_d > 0 ? coh_n / coh_d : 0;
+    const int dn = nr_sfo_symbol_offset(N, fp->nb_prefix_samples, fp->nb_prefix_samples0, fp->numerology_index, fp->symbols_per_slot, proc->nr_slot_rx,
+                                        dmrs_last)
+                   - nr_sfo_symbol_offset(N, fp->nb_prefix_samples, fp->nb_prefix_samples0, fp->numerology_index, fp->symbols_per_slot, proc->nr_slot_rx,
+                                          dmrs_first);
+    if (den > 0 && dn > 0 && coh > 0.5) {
+      const double slope = (sw * swxy - swx * swy) / den; /* rad per subcarrier */
+      /* a remaining drift d = eps_res * dn samples turns subcarrier k by -2 pi k d / N (nr_sfo_rot.h): eps_res = -slope N / (2 pi dn) */
+      const double eps_res = -slope * N / (2 * M_PI * dn);
+      nr_sfo_note_dmrs_residual(eps_res, coh);
+      /* the common term at DC as a frequency: what the FEP's frequency offset leaves (log only) */
+      const double hz0 = (swy - slope * swx) / sw / (2 * M_PI * dn / (1000.0 * fp->samples_per_subframe));
+      static _Atomic uint64_t s_n;
+      static double s_sum, s_hz; /* log only: a torn sum costs one line's mean */
+      s_sum += eps_res;
+      s_hz += hz0;
+      const uint64_t n = atomic_fetch_add_explicit(&s_n, 1, memory_order_relaxed) + 1;
+      if (n % 4000 == 0) {
+        LOG_I(PHY, "SENSING: SFO_DMRS n=%lu mean residual %+.3f ppm, common term at DC %+.1f Hz (last %+.3f ppm, coherence %.2f) applied eps %+.3f ppm\n",
+              (unsigned long)n, s_sum / 4000 * 1e6, s_hz / 4000, eps_res * 1e6, coh, nr_sfo_eps() * 1e6);
+        s_sum = s_hz = 0;
+      }
+    }
+  }
   /* EVMGRANT dmrs_snr / dmrs_pw / dmrs_ref (CPU chest, GPU exact chest, chest cache): last DM-RS symbol and layer, as nr_dl_chest_nvar_ant. The GPU graph pass fills
    * the same from its host copy of the estimate (nr_gpu_pass_graph.cu); a gpu_llr / gw_ready grant has no chest of its own and stays path 0 (-99). */
   {
