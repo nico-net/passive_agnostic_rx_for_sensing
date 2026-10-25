@@ -207,6 +207,8 @@ typedef struct {
   uint64_t touched;
 } nr_pdcch_dci_length_context_t;
 /* Caller serializes with its geometry bank lock. A zero n_suspect uses the default 200. */
+void nr_pdcch_dci_length_context_note_absence(nr_pdcch_dci_length_context_t *c, bool accepted_at_locked, bool rnti_active_elsewhere);
+bool nr_pdcch_dci_length_context_suspect_on_evidence(nr_pdcch_dci_length_context_t *c, int evidenced_length);
 void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c,
     bool accepted_at_locked, bool rnti_active_elsewhere, uint32_t n_suspect);
 /* First/same-length lock returns 0; a changed length returns the replaced length. */

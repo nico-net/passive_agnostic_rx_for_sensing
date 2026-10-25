@@ -1802,6 +1802,8 @@ static void reconf_length_reopened(uint16_t rnti, bool uplink, int old_len, int 
 {
   LOG_A(PHY, "SENSING: DCI length RELOCK rnti=0x%04x old=%d new=%d\n", rnti, old_len, new_len);
   nr_pdsch_config_sweep_relock_length(rnti, uplink, old_len, new_len);
+  /* A DL length that really changed is the positive evidence of a dedicated reconfiguration. UL 0_1 flips between decodable sizes are not. */
+  if (!uplink && nr_cfg_reconf_enabled()) nr_cfg_epoch_note_rnti_reopened(rnti, true, nr_cfg_epoch_current_slot());
   /* context_lock/add already invalidates the replaced per-length pin under the
    * length lock. The legacy global pin is not used by the RECONF auto path. */
 }
@@ -5951,16 +5953,10 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
               nr_pdcch_dci_length_context(dl_bank, dl_geom, dl_known[k]);
           if (c && c->len_state == NR_LEN_LOCKED && c->last_note_slot != abs_slot) {
             if (c->last_note_slot != 0) {
-              nr_pdcch_dci_length_context_note_occasion(c,
+              /* absence only: counts toward the scout gate, never SUSPECT and never an epoch (see note_absence) */
+              nr_pdcch_dci_length_context_note_absence(c,
                   c->last_accept_slot == c->last_note_slot,
-                  nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1),
-                  nr_reconf_rrc_n_suspect(c->rnti, (int64_t)source_absolute_slot, (int)ue->frame_parms.numerology_index, reconf_n_suspect()));
-              if (c->len_state == NR_LEN_SUSPECT && cfg_reconf_on) {
-                if (nr_ue_ctx_enabled())
-                  nr_ue_ctx_on_param(c->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
-                                     NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
-                nr_cfg_epoch_note_rnti_reopened(c->rnti, true, cfg_abs_slot);
-              }
+                  nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1));
             }
             c->last_note_slot = abs_slot;
           }
@@ -6214,14 +6210,11 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             found_len = -1;
         }
         if (found_len > 0 && dl_scout) {
-          nr_pdcch_dci_length_context_note_occasion(dlc, false, true,
-              nr_reconf_rrc_n_suspect(dlc->rnti, (int64_t)source_absolute_slot, (int)ue->frame_parms.numerology_index, reconf_n_suspect()));
-          if (dlc->len_state == NR_LEN_SUSPECT && cfg_reconf_on) {
-            if (nr_ue_ctx_enabled())
-              nr_ue_ctx_on_param(dlc->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
-                                 NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
-            nr_cfg_epoch_note_rnti_reopened(dlc->rnti, true, cfg_abs_slot);
-          }
+          /* the scout decoded this RNTI at found_len: only a length the context does not hold is evidence of a change; the epoch is
+           * notified by the relock (reconf_length_reopened) once the new length is locked. */
+          if (nr_pdcch_dci_length_context_suspect_on_evidence(dlc, found_len) && cfg_reconf_on && nr_ue_ctx_enabled())
+            nr_ue_ctx_on_param(dlc->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
+                               NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
         } else if (found_len > 0 && dl_second) {
           const int replaced = nr_pdcch_dci_length_context_add(dlc, found_len, abs_slot);
           nr_pdcch_dci_length_bank_converged(dl_bank, locked_rnti, found_len);
@@ -6409,16 +6402,10 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         nr_pdcch_dci_length_context_t *c = nr_pdcch_dci_length_context(ul_bank, geom, known_ul[k]);
         if (c && c->len_state == NR_LEN_LOCKED && c->last_note_slot != abs_slot) {
           if (c->last_note_slot != 0) {
-            nr_pdcch_dci_length_context_note_occasion(c,
+            /* UL 0_1 absence is neither SUSPECT nor epoch evidence (the grant simply may not be scheduled) */
+            nr_pdcch_dci_length_context_note_absence(c,
                 c->last_accept_slot == c->last_note_slot,
-                nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1),
-                  nr_reconf_rrc_n_suspect(c->rnti, (int64_t)source_absolute_slot, (int)ue->frame_parms.numerology_index, reconf_n_suspect()));
-            if (c->len_state == NR_LEN_SUSPECT && cfg_reconf_on) {
-              if (nr_ue_ctx_enabled())
-                nr_ue_ctx_on_param(c->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
-                                   NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
-              nr_cfg_epoch_note_rnti_reopened(c->rnti, true, cfg_abs_slot);
-            }
+                nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1));
           }
           c->last_note_slot = abs_slot;
         }
