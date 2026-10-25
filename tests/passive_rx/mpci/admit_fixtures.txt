@@ -1,0 +1,125 @@
+# Fixtures of the cell admission model (B3). Compared line by line between the C function (nr_cell_admit_cli) and tests/passive_rx/mpci/admit_model.py.
+# Host numbers are TEST FIXTURES of synthetic hosts, never inputs of the model:
+#   sens6   [MEASURED, sens6 snapshot SENS6-READINESS-20261021 s3: 9 GiB MemAvailable; RTX 4060 Ti 8188 MiB, 7800 MiB free at probe = fixture]
+#           shared = 82 MiB pinned mirrors [MEASURED, HOSTMEM-273-20261024 s4] + 937 MiB USRP ring reservation [MEASURED, same report s2 row 1]
+#   dgx     [fixture: DGX GB10 unified 128 GB, MemAvailable 100 GiB (MPCI-DASH-REVIEW O5: fell from 110 GB), max_cells 4 = illustrative value of nr_cl_max_cells]
+#   cloud4  [fixture: 4-cpu x86 cloud host, no GPU, 16 GiB, max_cells 1]
+# Expectations on which cell is unserved are [CODE-READ estimates] until G1 supplies measured per-cell bytes.
+case sens6_2x106
+caps mem_avail_mb=9216 shared_mb=1019 tier=2 gpu_free_mb=7800 csirs=1 recovery=1 gw=1
+cell rb=106
+cell rb=106
+end
+case sens6_2x273
+caps mem_avail_mb=9216 shared_mb=1019 tier=2 gpu_free_mb=7800 csirs=1 recovery=1 gw=1
+cell rb=273
+cell rb=273
+end
+case sens6_1x273
+caps mem_avail_mb=9216 shared_mb=1019 tier=2 gpu_free_mb=7800 csirs=1 recovery=1 gw=1
+cell rb=273
+end
+case sens6_4x51
+caps mem_avail_mb=9216 shared_mb=1019 tier=2 gpu_free_mb=7800 csirs=1 recovery=1 gw=1
+cell rb=51 scs=30
+cell rb=51 scs=30
+cell rb=51 scs=30
+cell rb=51 scs=30
+end
+case sens6_unknown_grid_rx2
+caps mem_avail_mb=9216 shared_mb=1019 tier=2 gpu_free_mb=7800 csirs=1 recovery=1 gw=1
+cell rb=0 rx=2
+cell rb=0 rx=2 scs=15
+end
+case sens6_ram_tight
+caps mem_avail_mb=4000 shared_mb=1019 tier=2 gpu_free_mb=7800 csirs=1 recovery=1 gw=1
+cell rb=106
+cell rb=106
+cell rb=106
+end
+case sens6_refuse
+caps mem_avail_mb=1200 shared_mb=1019 tier=2 gpu_free_mb=7800 csirs=1 recovery=1 gw=1
+cell rb=273
+cell rb=51
+end
+case dgx_3x217
+caps mem_avail_mb=102400 shared_mb=1100 tier=1 unified=1 gpu_free_mb=102400 max_cells=4 csirs=1 recovery=1 gw=1
+cell rb=217
+cell rb=217
+cell rb=217
+end
+case dgx_6x217_cores
+caps mem_avail_mb=102400 shared_mb=1100 tier=1 unified=1 gpu_free_mb=102400 max_cells=4 csirs=1 recovery=1 gw=1
+cell rb=217
+cell rb=217
+cell rb=217
+cell rb=217
+cell rb=217
+cell rb=217
+end
+case dgx_channelizer
+caps mem_avail_mb=102400 shared_mb=1100 tier=1 unified=1 gpu_free_mb=102400 csirs=1 recovery=1 gw=1 chan_msps=250
+cell rb=273 centre=3700000000 wcentre=3700000000
+cell rb=273 centre=3720000000 wcentre=3700000000
+cell rb=273 centre=3740000000 wcentre=3700000000
+cell rb=273 centre=3760000000 wcentre=3700000000
+end
+case dgx_states_weights
+caps mem_avail_mb=102400 shared_mb=1100 tier=1 unified=1 gpu_free_mb=102400 max_cells=3 csirs=1 recovery=1 gw=1
+cell rb=106 state=0
+cell rb=106 state=1 weight=3
+cell rb=106 state=2
+cell rb=106 state=3
+end
+case cloud4_3x106
+caps mem_avail_mb=16384 shared_mb=0 tier=0 max_cells=1 csirs=1 recovery=1 gw=1
+cell rb=106
+cell rb=106
+cell rb=106
+end
+case cloud4_gpu_off_disc_off
+caps mem_avail_mb=16384 shared_mb=0 tier=0 max_cells=2 csirs=0 recovery=0 gw=1
+cell rb=106
+cell rb=51
+cell rb=51
+end
+case zero_cells
+caps mem_avail_mb=16384 tier=0
+end
+case seventeen_cells
+caps mem_avail_mb=-1 tier=0 csirs=1 recovery=1 gw=1
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+cell rb=51
+end
+case gpu_unknown_memory
+caps mem_avail_mb=20000 shared_mb=0 tier=2 gpu_free_mb=0 csirs=1 recovery=1 gw=1
+cell rb=273
+cell rb=106 rx=2
+end
+case gpu_shared_override_g1
+caps mem_avail_mb=20000 shared_mb=100 tier=2 gpu_free_mb=12000 gpu_shared_mb=3000 csirs=1 recovery=0 gw=1 consumers=2 depth=16
+cell rb=162 scs=30
+cell rb=100 scs=15
+cell rb=0 scs=60
+end
+case gw_off_sens6
+caps mem_avail_mb=9216 shared_mb=1019 tier=2 gpu_free_mb=7800 csirs=1 recovery=1 gw=0
+cell rb=106
+cell rb=106
+cell rb=106
+end
