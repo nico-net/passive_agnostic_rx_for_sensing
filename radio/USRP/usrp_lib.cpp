@@ -2139,6 +2139,7 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
      default:
        AssertFatal(1==0,"Shouldn't be here\n");
   }
+  device->rx_fullscale_shift = rxshift; /* the receiver derives its int16 full scale from this (ADC census) */
 
   // Software RX decimation (see the usrp_halfband_decimate2x block comment near the top of this
   // file): when active, we must pull decim_ratio times as many RAW samples from UHD as the caller

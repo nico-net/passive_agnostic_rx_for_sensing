@@ -812,6 +812,13 @@ void nrue_ru_set_freq(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint64_t dl_carri
   atomic_store(&s_radio_fo, freq_offset);
   nr_shutdown_radio_leave();
 }
+/* nrue_ru_rx_fullscale: public: the int16 full scale of the samples the UE's card delivers (32767 >> rx_fullscale_shift; 32767 for a
+ * device that does not shift, e.g. rfsim). Caller: the ADC census in nr-ue.c. */
+int nrue_ru_rx_fullscale(const PHY_VARS_NR_UE *UE)
+{
+  const int sh = openair0_dev[UE->rf_map.card].rx_fullscale_shift;
+  return 32767 >> (sh > 0 && sh < 15 ? sh : 0);
+}
 /* nrue_ru_radio_fo: public: the frequency offset the radio is currently tuned by (the last nrue_ru_set_freq() value). Caller: UE_synch() in nr-ue.c. */
 int nrue_ru_radio_fo(void)
 {
