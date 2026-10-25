@@ -70,6 +70,23 @@ static void re_sort(nr_csirs_disc_re_t *a,int n)
   }
 }
 
+/* unit_sort: in-place shell sort of n whole CDM units of L REs by the grid index of each unit's first RE (the order inside a unit, the
+ * emission order kp then lp, is kept). A plain RE sort would split a time-domain CDM unit across the list. */
+static void unit_sort(nr_csirs_disc_re_t *a, int n, int L)
+{
+  nr_csirs_disc_re_t v[8];
+  for (int gap = n / 2; gap > 0; gap /= 2)
+    for (int i = gap; i < n; ++i) {
+      memcpy(v, a + (size_t)i * L, sizeof(*a) * L);
+      int j = i;
+      while (j >= gap && a[(size_t)(j - gap) * L].grid_index > v[0].grid_index) {
+        memcpy(a + (size_t)j * L, a + (size_t)(j - gap) * L, sizeof(*a) * L);
+        j -= gap;
+      }
+      memcpy(a + (size_t)j * L, v, sizeof(*a) * L);
+    }
+}
+
 /* nr_csirs_disc_sweep_map_into: builds the resource-element map of one hypothesis over n_rb RBs: for each port, the list of grid indices, scrambling-sequence indices and sign of the RE (per density and CDM weights).
  *   Writes into the caller's storage (or allocates when storage is NULL), with per-port begin offsets, the symbol mask and the number of 32-bit words of sequence. Returns 0, or -1 for an invalid hypothesis or a too small buffer.
  *   Callers: nr_csirs_disc_sweep_map() and the GPU sweep (nr_csirs_disc_gpu_sweep.cu).
@@ -114,9 +131,13 @@ int nr_csirs_disc_sweep_map_into(const nr_csirs_disc_hyp_t *h, int n_rb, nr_csir
           }
       }
     }
-    re_sort(out->re+out->begin[p],out->n_re-out->begin[p]);
+    if (gs > 1)
+      unit_sort(out->re + out->begin[p], (out->n_re - out->begin[p]) / gs, gs);
+    else
+      re_sort(out->re+out->begin[p],out->n_re-out->begin[p]);
   }
   out->begin[m.ports] = out->n_re;
+  out->cdm_len = gs;
   return 0;
 }
 
@@ -180,10 +201,33 @@ void nr_csirs_disc_sweep_winner(const float *z, const nr_csirs_disc_sweep_cfg_t 
  */
 __attribute__((optimize("O3")))
 #endif
-static double port_score(const int16_t *rx, const int8_t *ref, int n, int block, const double *inverse)
+static double port_score(const int16_t *rx, const int8_t *ref, int n, int block, const double *inverse, int L)
 {
   double sum = 0;
   int blocks = 0;
+  if (L > 1) { /* CDM-despread (nr_csirs_disc_sweep_internal.h): a block is `block` whole units, every port list is whole units */
+    block *= L;
+    for (int first = 0; first < n;) {
+      const int end = n - first < block ? n : first + block;
+      double ar = 0, ai = 0, zz = 0;
+      for (int u = first; u + L <= end; u += L) {
+        double zr = 0, zi = 0;
+        for (int i = u; i < u + L; ++i) {
+          const int yr = rx[2 * i], yi = rx[2 * i + 1], xr = ref[2 * i], xi = ref[2 * i + 1];
+          zr += yr * xr + yi * xi;
+          zi += yi * xr - yr * xi;
+        }
+        ar += zr; ai += zi; zz += zr * zr + zi * zi;
+      }
+      const int nu = (end - first) / L;
+      if (zz > 0 && nu > 0) {
+        sum += fmin(1, sqrt((ar * ar + ai * ai) / (nu * zz)));
+        ++blocks;
+      }
+      first = end;
+    }
+    return blocks ? sum / blocks * sqrt((double)n / blocks / L) / 0.886 : 0;
+  }
   for (int first = 0; first < n;) {
     int end = n - first < block ? n : first + block;
     /* Max legal per-port mapping is 2200 RE: 32-bit dot sums cannot overflow. */
@@ -297,7 +341,8 @@ int nr_csirs_disc_sweep_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_h
         }
         for(int p=0;p<map.ports;++p) for(int a=0;a<r->n_ant;++a)
           total+=port_score(rx+(((size_t)s*r->n_ant+a)*map.n_re+map.begin[p])*2,
-                            reference+map.begin[p]*2,map.begin[p+1]-map.begin[p],c.block_re,inverse+((size_t)s*r->n_ant+a)*map.n_re+map.begin[p]);
+                            reference+map.begin[p]*2,map.begin[p+1]-map.begin[p],c.block_re,inverse+((size_t)s*r->n_ant+a)*map.n_re+map.begin[p],
+                            map.cdm_len);
       }
       scores[id*c.delta_max+d]=slots?total/(slots*map.ports*r->n_ant):0;
     }

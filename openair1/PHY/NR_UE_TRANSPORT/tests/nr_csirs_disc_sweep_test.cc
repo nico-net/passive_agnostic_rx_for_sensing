@@ -126,6 +126,64 @@ void recovery(Sweep sweep)
 }
 TEST(CsirsDiscSweep, Recovery) { recovery(nr_csirs_disc_sweep_cpu); }
 
+/* CDM rows score on the per-port scale of a single-port row (TS 38.211 7.4.1.5.3, Table 7.4.1.5.3-1): each CDM group is despread with its
+ * OCC (noCDM L = 1, fd-CDM2 L = 2, cdm4-FD2-TD2 L = 4, cdm8-FD2-TD4 L = 8) and a block is block_re whole units, so the other ports of
+ * the group no longer count as noise. A port of an L > 1 row then reads z ~ 5-6 at 0 dB, noise reads ~1, like a row-1 port; the plain
+ * per-port correlation is bounded by 1 / sqrt(L) (z <= 4.5 at L = 2, 3.2 at L = 4, 2.3 at L = 8: below the confirmation bar of 4). */
+struct CdmRow { int row; int cdm; const char *name; };
+const CdmRow cdm_rows[] = {{2, 0, "noCDM"}, {3, 1, "fd-CDM2 (2 ports)"}, {4, 1, "fd-CDM2 (4 ports)"}, {8, 2, "cdm4-FD2-TD2"}, {15, 3, "cdm8-FD2-TD4"}, {18, 3, "cdm8-FD2-TD4 (32 ports)"}};
+TEST(CsirsDiscSweep, CdmRowsMapGroupSize)
+{
+  for (const auto &c : cdm_rows) {
+    auto h = hyp(c.row, 8, 96);
+    ASSERT_EQ(h.cdm_type, c.cdm) << c.row;
+    nr_csirs_disc_sweep_map_t map;
+    ASSERT_EQ(nr_csirs_disc_sweep_map(&h, 128, &map), 0) << c.row;
+    EXPECT_EQ(map.cdm_len, 1 << c.cdm) << c.name;
+    for (int p = 0; p < map.ports; ++p)
+      EXPECT_EQ((map.begin[p + 1] - map.begin[p]) % map.cdm_len, 0) << c.name << " port " << p; /* whole units */
+    free(map.re);
+  }
+}
+TEST(CsirsDiscSweep, CdmRowsScoreOnThePerPortScale)
+{
+  nr_csirs_disc_sweep_cfg_t cfg = {0,64,1,32};
+  auto run = [&](int row, float port_snr_db, bool signal, nr_csirs_disc_win_t *w) {
+    auto h = hyp(row, 8, 96);
+    Grid grid(128, 8);
+    const int gs = 1 << h.cdm_type;
+    if (signal)
+      grid.add(h, 37, 0, port_snr_db + 10 * std::log10(float(gs))); /* add() splits the power over the gs ports of a group */
+    EXPECT_EQ(nr_csirs_disc_sweep_cpu(&grid.r, &h, 1, &cfg, w), 1);
+    if (signal) EXPECT_EQ(w->scramb_id, 37) << row;
+  };
+  nr_csirs_disc_win_t w1;
+  run(1, 0, true, &w1);
+  for (const auto &c : cdm_rows) {
+    nr_csirs_disc_win_t w, n;
+    run(c.row, 0, true, &w);
+    run(c.row, 0, false, &n);
+    printf("%s row=%d z=%.3f (row 1: %.3f) null mean=%.3f sigma=%.3f\n", c.name, c.row, w.z, w1.z, n.noise_mu, n.noise_sigma);
+    EXPECT_GT(w.z, 0.8 * w1.z) << c.name;
+    EXPECT_GE(w.z, 4.0) << c.name;                    /* the confirmation bar of nr_csirs_blind_rt.c */
+    EXPECT_GT(n.noise_mu, 0.8) << c.name;             /* the null is ~1 for every CDM type: one bar serves all */
+    EXPECT_LT(n.noise_mu, 1.25) << c.name;
+    EXPECT_GT(w.z, 3.5 * n.noise_mu) << c.name;
+  }
+}
+/* The other ports of a group are removed by the OCC whatever their power: a weak port beside strong ones scores like a lone weak port. */
+TEST(CsirsDiscSweep, CdmDespreadRejectsTheOtherPortsOfTheGroup)
+{
+  nr_csirs_disc_sweep_cfg_t cfg = {0,64,1,32};
+  auto h = hyp(4, 8, 96);
+  Grid grid(128, 8);
+  grid.add(h, 37, 0, 3);
+  nr_csirs_disc_win_t w;
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r, &h, 1, &cfg, &w), 1);
+  EXPECT_EQ(w.scramb_id, 37);
+  EXPECT_GE(w.z, 4.0);
+}
+
 TEST(CsirsDiscSweep, AllRowsMappingAndHalfDensity)
 {
   for (int row = 1; row <= 18; ++row)
@@ -188,7 +246,7 @@ TEST(CsirsDiscSweep, NoiseCalibration200Trials)
 
 TEST(CsirsDiscSweep, CorrelatorParityAndRunnerUp)
 {
-  auto h = hyp(4,7,53); // partial last coherent block
+  auto h = hyp(2,7,53); // partial last coherent block (noCDM: a plain per-port correlation)
   Grid grid(64,3);
   grid.add(h,13,3);
   nr_csirs_disc_sweep_cfg_t cfg = {10,7,5,31};

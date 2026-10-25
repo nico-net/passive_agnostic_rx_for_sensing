@@ -606,9 +606,12 @@ static double discovery_score(const NR_DL_FRAME_PARMS *fp,
       double sum = 0;
       int blocks = 0;
       const int first = map.begin[p], last = map.begin[p + 1];
+      /* CDM rows: despread each unit with its OCC (nr_csirs_disc_sweep_internal.h); blocks of whole units */
+      const int L = map.cdm_len > 1 ? map.cdm_len : 1;
       for (int begin = first; begin < last;) {
-        const int end = last - begin < block ? last : begin + block;
-        double ar = 0, ai = 0, er = 0, ex = 0;
+        const int end = last - begin < block * L ? last : begin + block * L;
+        double ar = 0, ai = 0, er = 0, ex = 0, ur = 0, ui = 0, zz = 0;
+        int uk = 0;
         for (int i = begin; i < end; ++i) {
           const int crb = map.re[i].grid_index % (12 * fp->N_RB_DL);
           const int symbol = map.re[i].symbol;
@@ -620,15 +623,26 @@ static double discovery_score(const NR_DL_FRAME_PARMS *fp,
           ai += yi * xr - yr * xi;
           er += yr * yr + yi * yi;
           ex += xr * xr + xi * xi;
+          if (L > 1) {
+            ur += yr * xr + yi * xi;
+            ui += yi * xr - yr * xi;
+            if (++uk == L) { zz += ur * ur + ui * ui; ur = ui = 0; uk = 0; }
+          }
         }
-        if (er > 0 && ex > 0) {
+        if (L > 1) {
+          const int nu = (end - begin) / L;
+          if (zz > 0 && nu > 0) {
+            sum += fmin(1, sqrt((ar * ar + ai * ai) / (nu * zz)));
+            blocks++;
+          }
+        } else if (er > 0 && ex > 0) {
           sum += fmin(1, sqrt((ar * ar + ai * ai) / (er * ex)));
           blocks++;
         }
         begin = end;
       }
       const int count = last - first;
-      const double score = blocks ? sum / blocks * sqrt((double)count / blocks) / 0.886 : 0;
+      const double score = blocks ? sum / blocks * sqrt((double)count / blocks / L) / 0.886 : 0;
       total += score;
       used += count;
     }

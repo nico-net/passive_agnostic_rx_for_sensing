@@ -70,6 +70,9 @@ __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int
   __syncthreads();
   int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
   float total = 0;
+  /* CDM-despread scoring (nr_csirs_disc_sweep_internal.h): a block is block_re whole CDM units (blk = block_re * L REs), so z has the null (1) and the ceiling of a single-port row */
+  const int L = map.cdm_len > 1 ? map.cdm_len : 1;
+  const int blk = cfg.block_re * L;
   /* Staged loads (block_re == 32, the production value): lane L owns block b0+L, i.e. REs 32 apart, so reading map.re[] and rx[] straight from global memory made every warp load touch 32 separate
    * lines (L1-wavefront bound: 213 ms for 1024 IDs x 4 slots x 4 RX x 55552 REs on air / replay, 8% of the issue rate [MEASURED, DGX replay 2026-10-23]). The warp now loads a tile of 8 REs of each
    * of its 32 blocks with coalesced reads into shared memory laid out [k][block] (stride 33: no bank conflicts) and each lane reads its own block from there. The per-lane arithmetic is the
@@ -80,18 +83,19 @@ __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int
     int p = task / ants, ant = task % ants;
     int begin = map.begin[p], n = map.begin[p+1] - begin;
     // This form also supports block_re greater than n without integer overflow.
-    int nb = n ? 1 + (n - 1) / cfg.block_re : 0;
+    int nb = n ? 1 + (n - 1) / blk : 0;
     float rho = 0, active = 0;
     const short2 *samples = rx + ((size_t)blockIdx.y * ants + ant) * map.n_re;
     if (cfg.block_re == 32) {
       for (int b0 = 0; b0 < nb; b0 += 32) {
         const int b = b0 + lane, rows = min(32, nb - b0);
-        const int first = b * 32, count = b < nb ? min(32, n - first) : 0;
-        float ar = 0, ai = 0, energy = 0;
-        for (int k0 = 0; k0 < 32; k0 += 8) {
+        const int first = b * blk, count = b < nb ? min(blk, n - first) : 0;
+        float ar = 0, ai = 0, energy = 0, ur = 0, ui = 0, zz = 0; /* ur/ui/zz: CDM unit despreading (map.cdm_len > 1) */
+        int uk = 0;
+        for (int k0 = 0; k0 < blk; k0 += 8) {
           __syncwarp();
           for (int row = lane / 8; row < rows; row += 4) {
-            const int idx = (b0 + row) * 32 + k0 + lane % 8;
+            const int idx = (b0 + row) * blk + k0 + lane % 8;
             if (idx < n) {
               tre[warp][lane % 8][row] = map.re[begin + idx];
               tsm[warp][lane % 8][row] = samples[begin + idx];
@@ -111,17 +115,28 @@ __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int
             ar += yr*xr + yi*xi;
             ai += yi*xr - yr*xi;
             energy += yr*yr + yi*yi;
+            if (L > 1) {
+              ur += yr*xr + yi*xi;
+              ui += yi*xr - yr*xi;
+              if (++uk == L) { zz += ur*ur + ui*ui; ur = ui = 0; uk = 0; }
+            }
           }
         }
-        if (b < nb && energy > 0) {
+        if (L > 1) {
+          if (b < nb && zz > 0) {
+            rho += fminf(1.f, sqrtf((ar*ar + ai*ai) / ((count / L) * zz)));
+            active += 1;
+          }
+        } else if (b < nb && energy > 0) {
           rho += fminf(1.f, sqrtf((ar*ar + ai*ai) / (energy * (2 * count))));
           active += 1;
         }
       }
     } else
     for (int b = lane; b < nb; b += 32) {
-      int first = b * cfg.block_re, count = min(cfg.block_re, n - first);
-      float ar = 0, ai = 0, energy = 0;
+      int first = b * blk, count = min(blk, n - first);
+      float ar = 0, ai = 0, energy = 0, ur = 0, ui = 0, zz = 0;
+      int uk = 0;
       for (int k = 0; k < count; ++k) {
         int i = begin + first + k;
         nr_csirs_disc_re_t re = map.re[i];
@@ -135,8 +150,18 @@ __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int
         ar += yr*xr + yi*xi;
         ai += yi*xr - yr*xi;
         energy += yr*yr + yi*yi;
+        if (L > 1) {
+          ur += yr*xr + yi*xi;
+          ui += yi*xr - yr*xi;
+          if (++uk == L) { zz += ur*ur + ui*ui; ur = ui = 0; uk = 0; }
+        }
       }
-      if (energy > 0) {
+      if (L > 1) {
+        if (zz > 0) {
+          rho += fminf(1.f, sqrtf((ar*ar + ai*ai) / ((count / L) * zz)));
+          active += 1;
+        }
+      } else if (energy > 0) {
         rho += fminf(1.f, sqrtf((ar*ar + ai*ai) / (energy * (2 * count))));
         active += 1;
       }
@@ -144,7 +169,7 @@ __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int
     rho = warp_sum(rho);
     active = warp_sum(active);
     if (lane == 0 && active > 0)
-      total += rho / active * sqrtf(n / active) / .886f;
+      total += rho / active * sqrtf(n / active / L) / .886f; /* L = 1: sqrt(REs per block); CDM: sqrt(units per block) */
   }
   if (lane == 0)
     sums[warp] = total;

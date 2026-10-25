@@ -18,7 +18,15 @@ typedef struct {
   unsigned sym_mask;
   int begin[33];
   nr_csirs_disc_re_t *re;
+  /* CDM group size L of the row (TS 38.211 Table 7.4.1.5.3-1: 1 no CDM, 2 fd-CDM2, 4 cdm4-FD2-TD2, 8 cdm8-FD2-TD4). With L > 1 each
+   * port's list is made of whole CDM units (the L REs of one CDM group in one RB, consecutive, ordered by the unit's first RE), so a
+   * scorer can despread a unit with its OCC (the sign of each RE) before correlating. */
+  int cdm_len;
 } nr_csirs_disc_sweep_map_t;
+/* Per-port block correlation of a CDM-despread port: units of L REs, z_u = sum y conj(x) over a unit (x carries the OCC sign), and
+ * |sum z_u|^2 / (n_u sum |z_u|^2). With L = 1 this is the plain normalised correlation (|x| constant). A match reads 1 whatever the
+ * power split among the ports of the group: the other ports' energy, which plain correlation counts as noise, is removed by the OCC
+ * (TS 38.211 7.4.1.5.3), so a CDM row scores on the per-port scale of a single-port row. */
 int nr_csirs_disc_sweep_validate(const nr_csirs_disc_ring_t *, const nr_csirs_disc_hyp_t *, int,
                                 const nr_csirs_disc_sweep_cfg_t *, nr_csirs_disc_sweep_cfg_t *);
 int nr_csirs_disc_sweep_map(const nr_csirs_disc_hyp_t *, int, nr_csirs_disc_sweep_map_t *);
