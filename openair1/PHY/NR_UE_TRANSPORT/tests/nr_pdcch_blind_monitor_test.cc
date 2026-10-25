@@ -6241,6 +6241,39 @@ TEST(UlLayoutLock, CrcFirstLocksAtOnceSib1RankedFirstAndRelocks)
   nr_ul_layout_lock_reset();
 }
 
+// A lock from votes / a prior with no decisive CRC pass is falsifiable: competing hypotheses keep being CRC-tried (no failure run needed, a few
+// chance CRC16 passes of the wrong layout do not stop them); a CRC pass of a competitor replaces it; once the lock has a decisive pass it is stable.
+TEST(UlLayoutLock, UnconfirmedLockIsReplacedByCrcPassingHypothesisConfirmedLockIsStable)
+{
+  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                              .slots_per_frame = 20, .sib1_ul_start = 0, .sib1_ul_size = 217, .sib1_ul_dl = 1};
+  nr_pdcch_blind_ul_result_t t[NR_UL_LAYOUT_MAX_TRIALS], o;
+  UllGen g;
+  UllFit(g, cell);
+  nr_ul_layout_dci_t d = g.next();
+  ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  const int wrong_size = o.bwp_size, wrong_start = o.bwp_start;
+  // chance-level CRC16 passes of the wrong layout (not decisive): they reset the failure run but must not end the trials
+  for (int i = 0; i < 3; i++) { nr_ul_layout_crc_verdict(&o, true, 100, 1, 1, 300 + i); nr_ul_layout_crc_result(&o, false); }
+  const int n = UllTrials(g, cell, t, &d);
+  ASSERT_GE(n, 1);
+  int pick = -1;
+  for (int i = 0; i < n; i++) if (t[i].bwp_size != wrong_size || t[i].bwp_start != wrong_start) pick = i;
+  ASSERT_GE(pick, 0);
+  const uint16_t cs = t[pick].bwp_start, cn = t[pick].bwp_size;
+  nr_ul_layout_crc_verdict(&t[pick], true, 6000, 1, 1, 400); // decisive CRC pass of the competitor
+  d = g.next();
+  ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  EXPECT_EQ(o.bwp_start, cs);
+  EXPECT_EQ(o.bwp_size, cn);
+  for (int i = 0; i < 20; i++) { // confirmed by a decisive pass: stable, no more competing trials
+    d = g.next();
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o);
+    EXPECT_EQ(nr_ul_layout_crc_trials(d.rnti, 44, d.slot, d.p, &cell, t, NR_UL_LAYOUT_MAX_TRIALS), 0);
+  }
+  nr_ul_layout_lock_reset();
+}
+
 TEST(UlLayoutLock, DlBwpPriorSeedsAnUncertainLockOnlyWhenTheFitAdmitsItsSize)
 {
   nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
