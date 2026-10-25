@@ -72,7 +72,8 @@ teardown() {
   trap - INT TERM
   log "== teardown"
   [ -n "$RXPID" ] && kill -0 "$RXPID" 2>/dev/null && { log "waiting for the receiver launcher (it stops the receiver with SIGINT)"; wait "$RXPID"; }
-  for t in "${TRAFFIC_PIDS[@]}"; do kill -INT "$t" 2>/dev/null; done
+  # TERM, not INT: a non-interactive bash starts background jobs with SIGINT ignored, so INT never stopped the loops (2026-10-25)
+  for t in "${TRAFFIC_PIDS[@]}"; do kill -TERM "$t" 2>/dev/null; done
   for p in $PHONES; do IFS=: read -r name host adb ser ip3 port <<< "$p"; m "$host" "$adb -s $ser shell 'pkill -INT iperf3; pkill -INT ping' 2>/dev/null || true"; done
   m "$GNB_HOST" "tmux send-keys -t ${TMUX_PREFIX}_iperf C-c 2>/dev/null; sleep 1; tmux kill-session -t ${TMUX_PREFIX}_iperf 2>/dev/null; true"
   m "$GNB_HOST" "tmux send-keys -t ${TMUX_PREFIX}_gnb C-c"
@@ -149,7 +150,7 @@ if [ $DRY = 1 ]; then
   ENVFILE=$ROOT/$RX_ENVFILE DUR=$DUR "$RXL" dry-run "$ARM" | sed -n '/== launch/,$p'
   teardown; log "dry run done (nothing was changed)"; exit 0
 fi
-for p in $PHONES; do IFS=: read -r name host adb ser ip3 port <<< "$p"; traffic "$name" "$host" "$adb" "$ser" "$ip3" "$port" & TRAFFIC_PIDS+=($!); done
+for p in $PHONES; do IFS=: read -r name host adb ser ip3 port <<< "$p"; traffic "$name" "$host" "$adb" "$ser" "$ip3" "$port" 8>&- & TRAFFIC_PIDS+=($!); done   # 8>&-: loops must not hold the td_measure lock
 sleep "$RX_START_DELAY_S"
 ( OUTBASE=$RUN ENVFILE=$ROOT/$RX_ENVFILE DUR=$DUR "$RXL" run "$ARM" > "$RUN/receiver_launcher.log" 2>&1 ) & RXPID=$!
 log "receiver started (launcher pid $RXPID, log $RUN/receiver_launcher.log)"
