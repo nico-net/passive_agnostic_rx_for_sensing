@@ -9,6 +9,7 @@
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -33,10 +34,95 @@ typedef struct {
   unsigned nch;
 } cpu_cell_t;
 
+/* Parallel execution. A job = one (cell, channel) iq_ddc; its filter history and mixer phase live in that iq_ddc only, the input block is read-only and every job
+ * writes its own output buffer, so jobs are independent and the result does not depend on which thread runs which job (bit-identical to k = 1). The caller of
+ * run() is worker 0; k - 1 extra threads wait for a new block. Per block the caller writes the job list, sets `pending`, and publishes one 64-bit word
+ *   W = generation << 20 | njobs << 10 | next_index
+ * with a release store; every worker claims jobs with fetch_add(W, 1) and a claim is valid only if its index < the njobs carried IN THE SAME WORD, so a worker that wakes
+ * late (or is still leaving the previous block) can never run a job of the wrong block, and the caller waits only for jobs that were really claimed (`pending`), never for a
+ * worker that is not scheduled. The job list is double-buffered by generation parity; the caller rewrites a buffer only after pending reached 0. Nothing is
+ * allocated per block. Idle workers spin briefly (yield), then sleep 50 us. install/retire/set_shift/reset run on the caller between blocks, when no job is claimed. */
+#define CPU_MAX_WORKERS 64
+#define W_GEN(v) ((v) >> 20)
+#define W_N(v) (((v) >> 10) & 1023u)
+#define W_IDX(v) ((v) & 1023u)
 typedef struct {
   iq_chan_geom_t g;
   cpu_cell_t *slot[IQ_CHAN_MAX_CELLS];
+  int k; /* threads including the caller */
+  pthread_t th[CPU_MAX_WORKERS];
+  _Atomic uint64_t w;
+  _Atomic int quit, pending, err;
+  uint8_t job_slot[2][IQ_CHAN_MAX_CELLS * SHM_IQ_MAX_CH], job_ch[2][IQ_CHAN_MAX_CELLS * SHM_IQ_MAX_CH];
+  const int16_t *const *in;
+  int16_t *const *outp;
+  int n;
 } cpu_ctx_t;
+
+static void run_job(cpu_ctx_t *x, int par, int j)
+{
+  cpu_cell_t *c = x->slot[x->job_slot[par][j]];
+  const unsigned a = x->job_ch[par][j];
+  if (iq_ddc_process(&c->d[a], x->in[a], x->n, x->outp[x->job_slot[par][j] * x->g.nch + a]) != x->n / c->d[a].decim) atomic_store(&x->err, 1);
+}
+
+static void drain_jobs(cpu_ctx_t *x)
+{
+  for (;;) {
+    const uint64_t v = atomic_fetch_add_explicit(&x->w, 1, memory_order_acq_rel);
+    if (W_IDX(v) >= W_N(v)) return;
+    run_job(x, (int)(W_GEN(v) & 1), (int)W_IDX(v));
+    atomic_fetch_sub_explicit(&x->pending, 1, memory_order_acq_rel);
+  }
+}
+
+static void *worker_main(void *arg)
+{
+  cpu_ctx_t *x = arg;
+  uint64_t seen = W_GEN(atomic_load(&x->w));
+  int spins = 0;
+  for (;;) {
+    const uint64_t g = W_GEN(atomic_load_explicit(&x->w, memory_order_acquire));
+    if (g != seen) { seen = g; spins = 0; drain_jobs(x); continue; }
+    if (atomic_load(&x->quit)) return NULL;
+    if (++spins < 4000) sched_yield();
+    else { struct timespec w = {0, 50000}; nanosleep(&w, NULL); }
+  }
+}
+
+static void stop_workers(cpu_ctx_t *x)
+{
+  if (x->k > 1) {
+    atomic_store(&x->quit, 1);
+    for (int i = 1; i < x->k; ++i) pthread_join(x->th[i], NULL);
+  }
+  x->k = 1;
+  atomic_store(&x->quit, 0);
+}
+
+/* k threads including the caller; cpus (ncpus entries, may be NULL) pin worker i to cpus[i % ncpus] (the caller is pinned by iq_chan_start). 0 on success. */
+static int cpu_set_workers(void *ctx, int k, const int *cpus, int ncpus)
+{
+  cpu_ctx_t *x = ctx;
+  if (k < 1) k = 1;
+  if (k > CPU_MAX_WORKERS) k = CPU_MAX_WORKERS;
+  stop_workers(x);
+  for (int i = 1; i < k; ++i) {
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    if (cpus && ncpus > 0) {
+      cpu_set_t cs;
+      CPU_ZERO(&cs);
+      CPU_SET(cpus[i % ncpus] >= 0 && cpus[i % ncpus] < CPU_SETSIZE ? cpus[i % ncpus] : 0, &cs);
+      pthread_attr_setaffinity_np(&at, sizeof(cs), &cs);
+    }
+    const int rc = pthread_create(&x->th[i], &at, worker_main, x);
+    pthread_attr_destroy(&at);
+    if (rc) { x->k = i; stop_workers(x); return -1; }
+  }
+  x->k = k;
+  return 0;
+}
 
 static void *cpu_create(const iq_chan_geom_t *g)
 {
@@ -58,6 +144,7 @@ static void cpu_destroy(void *ctx)
 {
   cpu_ctx_t *x = ctx;
   if (!x) return;
+  stop_workers(x);
   for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s) cpu_release(x, x->slot[s]);
   free(x);
 }
@@ -109,13 +196,21 @@ static void cpu_reset(void *ctx, int slot)
 static int cpu_run(void *ctx, const int16_t *const *in, int n, int16_t *const *out)
 {
   cpu_ctx_t *x = ctx;
+  const uint64_t gen = W_GEN(atomic_load_explicit(&x->w, memory_order_relaxed)) + 1;
+  const int par = (int)(gen & 1);
+  int nj = 0;
   for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s) {
     cpu_cell_t *c = x->slot[s];
     if (!c || !out[s * x->g.nch]) continue;
-    for (unsigned a = 0; a < c->nch; ++a)
-      if (iq_ddc_process(&c->d[a], in[a], n, out[s * x->g.nch + a]) != n / c->d[a].decim) return -1;
+    for (unsigned a = 0; a < c->nch; ++a) { x->job_slot[par][nj] = (uint8_t)s; x->job_ch[par][nj] = (uint8_t)a; ++nj; }
   }
-  return 0;
+  x->in = in; x->outp = out; x->n = n;
+  atomic_store(&x->err, 0);
+  atomic_store_explicit(&x->pending, nj, memory_order_relaxed);
+  atomic_store_explicit(&x->w, gen << 20 | (uint64_t)nj << 10, memory_order_release); /* publishes the job list, in/out/n, pending, err */
+  drain_jobs(x);
+  while (atomic_load_explicit(&x->pending, memory_order_acquire) > 0) __asm__ __volatile__("" ::: "memory"); /* only jobs that were claimed */
+  return atomic_load(&x->err) ? -1 : 0;
 }
 
 static size_t cpu_capacity(const iq_chan_load_t *load)
@@ -127,17 +222,20 @@ static size_t cpu_capacity(const iq_chan_load_t *load)
 
 const iq_chan_backend_t iq_chan_backend_cpu = {
   .name = "cpu", .create = cpu_create, .destroy = cpu_destroy, .prepare = cpu_prepare, .release = cpu_release, .install = cpu_install,
-  .retire = cpu_retire, .set_shift = cpu_set_shift, .reset = cpu_reset, .run = cpu_run, .capacity = cpu_capacity,
+  .retire = cpu_retire, .set_shift = cpu_set_shift, .reset = cpu_reset, .run = cpu_run, .capacity = cpu_capacity, .set_workers = cpu_set_workers,
 };
 
 /* ---------------------------------------------------------------- bench */
-int iq_chan_cpu_bench(const iq_chan_load_t *load, int block, double seconds, iq_chan_bench_t *out)
+int iq_chan_cpu_bench(const iq_chan_load_t *load, int block, double seconds, iq_chan_bench_t *out) { return iq_chan_cpu_bench_k(load, block, seconds, 1, NULL, 0, out); }
+
+int iq_chan_cpu_bench_k(const iq_chan_load_t *load, int block, double seconds, int k, const int *cpus, int ncpus, iq_chan_bench_t *out)
 {
   if (!load || !load->n_cells || load->n_cells > IQ_CHAN_MAX_CELLS || !load->nch || load->nch > SHM_IQ_MAX_CH || !(load->in_rate > 0) || !(seconds > 0)) return -1;
   if (block <= 0) block = IQ_CHAN_DEFAULT_BLOCK;
   const iq_chan_geom_t g = {.in_rate = load->in_rate, .nch = load->nch, .block = block};
   void *ctx = iq_chan_backend_cpu.create(&g);
   if (!ctx) return -1;
+  if (k > 1 && iq_chan_backend_cpu.set_workers(ctx, k, cpus, ncpus)) { iq_chan_backend_cpu.destroy(ctx); return -1; }
   int rc = -1;
   int16_t *in[SHM_IQ_MAX_CH] = {0}, *outb[IQ_CHAN_MAX_CELLS * SHM_IQ_MAX_CH] = {0};
   void *cells[IQ_CHAN_MAX_CELLS] = {0};
@@ -162,7 +260,7 @@ int iq_chan_cpu_bench(const iq_chan_load_t *load, int block, double seconds, iq_
   }
   {
     struct timespec c0, c1;
-    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c0);
+    clock_gettime(k > 1 ? CLOCK_PROCESS_CPUTIME_ID : CLOCK_THREAD_CPUTIME_ID, &c0);
     const uint64_t t0 = now_ns();
     uint64_t blocks = 0, t1 = t0;
     do {
@@ -170,7 +268,7 @@ int iq_chan_cpu_bench(const iq_chan_load_t *load, int block, double seconds, iq_
       ++blocks;
       t1 = now_ns();
     } while ((double)(t1 - t0) * 1e-9 < seconds);
-    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c1);
+    clock_gettime(k > 1 ? CLOCK_PROCESS_CPUTIME_ID : CLOCK_THREAD_CPUTIME_ID, &c1);
     out->seconds = (double)(t1 - t0) * 1e-9;
     out->blocks = (double)blocks;
     out->samples_per_s = (double)blocks * block / out->seconds;
@@ -186,6 +284,16 @@ done:
   for (unsigned a = 0; a < load->nch; ++a) free(in[a]);
   iq_chan_backend_cpu.destroy(ctx);
   return rc;
+}
+
+int iq_chan_threads_needed(const iq_chan_load_t *load, double per_thread_msps_measured, double margin)
+{
+  if (!load || !load->n_cells || !load->nch || !(load->in_rate > 0) || !(per_thread_msps_measured > 0) || !(margin > 0)) return 1;
+  const double need = margin * load->in_rate / (per_thread_msps_measured * 1e6);
+  int k = (int)ceil(need - 1e-9);
+  const int units = (int)(load->n_cells * load->nch);
+  if (k > units) k = units; /* more threads than (cell, channel) jobs cannot help */
+  return k < 1 ? 1 : k;
 }
 
 /* ================================================================ backend registry */
@@ -267,7 +375,8 @@ struct iq_chan {
   int16_t *outp[IQ_CHAN_MAX_CELLS * SHM_IQ_MAX_CH];
   cell_t cell[IQ_CHAN_MAX_CELLS];
   unsigned nused;
-  uint64_t pos, epoch;
+  _Atomic uint64_t pos; /* read by iq_chan_pos() from other threads */
+  uint64_t epoch;
   int pos_valid, seek_pending, base_valid;
   int64_t base_tick;
   double ring_centre;
@@ -281,8 +390,10 @@ struct iq_chan {
   op_t *op;
   atomic_int op_pending;
   /* stats */
-  _Atomic uint64_t blocks, in_samples, overruns, discont, dropped_in, epochs, work_ns, work_max_ns, lag_max, step_gap_max_ns;
+  _Atomic uint64_t blocks, in_samples, overruns, discont, dropped_in, epochs, work_ns, work_max_ns, lag_max, step_gap_max_ns, run_ns;
   uint64_t last_step_ns;
+  int threads, threads_needed;
+  double capacity_sps;
 };
 
 iq_chan_t *iq_chan_create(const iq_chan_cfg_t *cfg)
@@ -435,6 +546,7 @@ int iq_chan_cell_add(iq_chan_t *c, const iq_chan_entry_t *e)
   const double ctr = e->centre_hz > 0 ? e->centre_hz : shm_iq_ring_center(&c->in) + e->shift_hz;
   if (shm_iq_ring_create(&x->out, SHM_IQ_BACKING_ANON, name[0] ? name : NULL, c->nch, cap, rate_out, ctr, x->e.consumers)) { rc = -errno; free(op); goto out; }
   if (c->in.hdr->version >= 2) shm_iq_ring_set_meta(&x->out, c->in.hdr->radio_id, c->in.hdr->time_source);
+  shm_iq_ring_prefault(&x->out); /* page faults belong to start-up, not to the block loop */
   x->ring_bytes = shm_iq_ring_bytes(c->nch, x->out.hdr->capacity);
   for (unsigned a = 0; a < c->nch; ++a) {
     x->obuf[a] = alloc_samples((size_t)(c->block / e->decim));
@@ -559,6 +671,8 @@ int iq_chan_step(iq_chan_t *c)
     for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s)
       for (unsigned a = 0; a < c->nch; ++a) c->outp[s * (int)c->nch + (int)a] = c->cell[s].used && !c->cell[s].passthrough ? c->cell[s].obuf[a] : NULL;
     if (c->be->run(c->ctx, (const int16_t *const *)c->raw, c->block, c->outp)) { fprintf(stderr, "IQ_CHAN_ERR backend %s run failed\n", c->be->name); return -1; }
+    const uint64_t t1 = now_ns();
+    atomic_fetch_add(&c->run_ns, t1 - t0);
     for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s) {
       cell_t *x = &c->cell[s];
       if (!x->used) continue;
@@ -607,16 +721,27 @@ static void *thread_main(void *arg)
   return NULL;
 }
 
-int iq_chan_start(iq_chan_t *c, const int *cpus, int ncpus)
+int iq_chan_set_threads(iq_chan_t *c, int k, const int *cpus, int ncpus)
 {
   if (c->running) return -EBUSY;
+  if (k < 1) k = 1;
+  if (c->be->set_workers && c->be->set_workers(c->ctx, k, cpus && ncpus > 1 ? cpus + 1 : NULL, ncpus > 1 ? ncpus - 1 : 0)) return -ENOMEM;
+  c->threads = c->be->set_workers ? k : 1;
+  return 0;
+}
+
+int iq_chan_start_k(iq_chan_t *c, const int *cpus, int ncpus, int k)
+{
+  if (c->running) return -EBUSY;
+  if (k < 1) k = 1;
+  if (iq_chan_set_threads(c, k, cpus, ncpus)) return -ENOMEM;
   atomic_store(&c->stop, 0);
   pthread_attr_t at;
   pthread_attr_init(&at);
   if (cpus && ncpus > 0) {
     cpu_set_t s;
     CPU_ZERO(&s);
-    for (int i = 0; i < ncpus; ++i) if (cpus[i] >= 0 && cpus[i] < CPU_SETSIZE) CPU_SET(cpus[i], &s);
+    CPU_SET(cpus[0] >= 0 && cpus[0] < CPU_SETSIZE ? cpus[0] : 0, &s); /* the channelizer thread is worker 0; the others are pinned to the following cpus */
     pthread_attr_setaffinity_np(&at, sizeof(s), &s);
   }
   pthread_mutex_lock(&c->mu);
@@ -626,6 +751,49 @@ int iq_chan_start(iq_chan_t *c, const int *cpus, int ncpus)
   pthread_attr_destroy(&at);
   if (rc) { pthread_mutex_lock(&c->mu); c->running = 0; pthread_mutex_unlock(&c->mu); return -rc; }
   return 0;
+}
+
+/* k is derived: the per-thread capacity of THIS load is measured on this host (a short iq_chan_cpu_bench), iq_chan_threads_needed() turns it into a thread count,
+ * and the cpus the core plan gave are the ceiling. Fewer cpus than needed: run with what is given and publish the shortfall (stats.threads_needed > threads,
+ * stats.capacity_sps = measured capacity with the threads that run) for the admission model. The load is load_hint of the config, else the current entries. */
+#define IQ_CHAN_MARGIN 1.25
+int iq_chan_start(iq_chan_t *c, const int *cpus, int ncpus)
+{
+  iq_chan_load_t l;
+  if (c->cfg.load_hint) l = *c->cfg.load_hint;
+  else {
+    memset(&l, 0, sizeof(l));
+    l.in_rate = c->in_rate; l.nch = c->nch;
+    for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s)
+      if (c->cell[s].used) {
+        l.cell[l.n_cells].decim = c->cell[s].e.decim; l.cell[l.n_cells].passband_hz = c->cell[s].e.passband_hz;
+        l.cell[l.n_cells].shifted = c->cell[s].e.shift_hz != 0 || c->cell[s].e.centre_hz > 0; l.n_cells++;
+      }
+  }
+  int k = 1;
+  c->threads_needed = 1; c->capacity_sps = 0;
+  iq_chan_bench_t b;
+  if (l.n_cells && c->be == &iq_chan_backend_cpu && iq_chan_cpu_bench(&l, c->block, 0.2, &b) == 0) {
+    const int have = ncpus > 0 && cpus ? ncpus : 1, units = (int)(l.n_cells * l.nch), ceil_k = have < units ? have : units;
+    const int need0 = iq_chan_threads_needed(&l, b.samples_per_s * 1e-6, IQ_CHAN_MARGIN);
+    k = need0 < ceil_k ? need0 : ceil_k;
+    c->capacity_sps = b.samples_per_s;
+    /* Scaling is not linear (jobs are cell x channel and cells differ in cost): measure the capacity with k threads and add threads while it is below the margin,
+     * up to the cpus given and the number of jobs. */
+    for (;;) {
+      if (k > 1) {
+        iq_chan_bench_t bk;
+        if (iq_chan_cpu_bench_k(&l, c->block, 0.2, k, cpus && ncpus > 1 ? cpus + 1 : NULL, ncpus > 1 ? ncpus - 1 : 0, &bk)) break;
+        c->capacity_sps = bk.samples_per_s;
+      }
+      if (c->capacity_sps >= IQ_CHAN_MARGIN * c->in_rate || k >= ceil_k) break;
+      ++k;
+    }
+    c->threads_needed = c->capacity_sps >= IQ_CHAN_MARGIN * c->in_rate ? k : (k < units ? k + 1 : k); /* margin not met: at least one more thread would be asked for */
+    if (k < c->threads_needed)
+      fprintf(stderr, "IQ_CHAN_SHORTFALL threads_needed=%d threads=%d capacity=%.1f MS/s in_rate=%.2f MS/s\n", c->threads_needed, k, c->capacity_sps * 1e-6, c->in_rate * 1e-6);
+  }
+  return iq_chan_start_k(c, cpus, ncpus, k);
 }
 
 void iq_chan_stop(iq_chan_t *c)
@@ -643,7 +811,8 @@ void iq_chan_stats(const iq_chan_t *c, iq_chan_stats_t *st)
 {
   st->blocks = atomic_load(&c->blocks); st->in_samples = atomic_load(&c->in_samples);
   st->overruns = atomic_load(&c->overruns); st->discont = atomic_load(&c->discont); st->dropped_in = atomic_load(&c->dropped_in);
-  st->lag_max = atomic_load(&c->lag_max); st->step_gap_max_ns = atomic_load(&c->step_gap_max_ns); st->epochs = atomic_load(&c->epochs); st->work_ns = atomic_load(&c->work_ns); st->work_max_ns = atomic_load(&c->work_max_ns);
+  st->run_ns = atomic_load(&c->run_ns); st->lag_max = atomic_load(&c->lag_max); st->step_gap_max_ns = atomic_load(&c->step_gap_max_ns); st->epochs = atomic_load(&c->epochs); st->work_ns = atomic_load(&c->work_ns); st->work_max_ns = atomic_load(&c->work_max_ns);
+  st->threads = c->threads ? c->threads : 1; st->threads_needed = c->threads_needed ? c->threads_needed : 1; st->capacity_sps = c->capacity_sps;
   st->n_cells = __atomic_load_n(&c->nused, __ATOMIC_RELAXED); st->backend = c->be->name;
 }
 
