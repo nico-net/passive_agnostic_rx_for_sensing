@@ -14,7 +14,8 @@
  * SIGN. eps > 0: the receiver clock is FAST (it takes (1 + eps) fs samples per transmitter second). The timing loop then reads MORE than
  * samples_per_frame samples per frame on average: nr_sfo_note_frame_read(extra) receives extra = samples read beyond nominal in the
  * frame (= -iq_shift_to_apply in nr-ue.c), and eps = mean(extra) / samples_per_frame. The FEP multiplies subcarrier k of symbol l by
- * exp(+j 2 pi k eps n_l / N), n_l = nr_sfo_symbol_offset() (samples from the start of symbol 0's window to symbol l's, CP included).
+ * exp(+j 2 pi (k - k_ref) eps n_l / N), n_l = nr_sfo_symbol_offset() (samples from the start of symbol 0's window to symbol l's, CP
+ * included), k_ref = nr_sfo_kref() = the SSB centre, where the receiver's frequency offset (which absorbs eps * f_ssb) is measured.
  *
  * SOURCES (device measurements only, nothing from the command line or the host): (1) the timing loop's own per-frame read length, a
  * windowed mean (NR_SFO_WINDOW frames); (2) a cross-check from the DM-RS: the per-grant phase slope across subcarriers between the first
@@ -56,7 +57,7 @@ int nr_sfo_slot_dphi(int64_t eps_q, int ofdm_symbol_size, int nb_prefix_samples,
                      int slot, uint32_t out[14]);
 /* correct one frequency-domain symbol (N bins, OAI layout: positive frequencies from bin 0, negative from first_carrier_offset) on the
  * occupied bins of nb_rb PRBs, exactly as the rotation step addresses them; dphi 0 = no-op */
-void nr_sfo_rotate_symbol(int16_t *symb, int N, int first_carrier_offset, int nb_rb, uint32_t dphi);
+void nr_sfo_rotate_symbol(int16_t *symb, int N, int first_carrier_offset, int nb_rb, uint32_t dphi, int k_ref);
 
 #ifdef __cplusplus
 }
