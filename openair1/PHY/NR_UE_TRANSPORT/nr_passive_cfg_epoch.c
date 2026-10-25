@@ -37,25 +37,25 @@ typedef struct epoch_event {
   unsigned n_listeners;
 } epoch_event_t;
 
-static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-static _Atomic uint32_t epoch;
-static _Atomic uint64_t cfr_stamp;
-static _Atomic uint32_t identity_gen;
-static _Atomic uint32_t dedicated_epoch;
-static _Atomic uint64_t current_slot;
-static nr_cfg_epoch_snapshot_t state;
-static cell_identity_t identity;
-static hash_state_t mib, sib1;
-static si_pending_t pending;
-static reopened_t reopened;
-static uint32_t slots_per_second = 1000;
-static _Atomic uint32_t si_period_slots;
-static uint64_t last_abs_frame;
-static bool have_sfn;
-static nr_cfg_epoch_listener_t listeners[NR_CFG_LISTENERS_MAX];
-static unsigned n_listeners;
-static epoch_event_t *event_head, *event_tail;
-static atomic_flag draining = ATOMIC_FLAG_INIT;
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint32_t g_epoch;
+static _Atomic uint64_t g_cfr_stamp;
+static _Atomic uint32_t g_identity_gen;
+static _Atomic uint32_t g_dedicated_epoch;
+static _Atomic uint64_t g_current_slot;
+static nr_cfg_epoch_snapshot_t g_state;
+static cell_identity_t g_identity;
+static hash_state_t g_mib, g_sib1;
+static si_pending_t g_pending;
+static reopened_t g_reopened;
+static uint32_t g_slots_per_second = 1000;
+static _Atomic uint32_t g_si_period_slots;
+static uint64_t g_last_abs_frame;
+static bool g_have_sfn;
+static nr_cfg_epoch_listener_t g_listeners[NR_CFG_LISTENERS_MAX];
+static unsigned g_n_listeners;
+static epoch_event_t *g_event_head, *g_event_tail;
+static atomic_flag g_draining = ATOMIC_FLAG_INIT;
 static _Thread_local nr_cfg_epoch_work_t *current_work;
 static pthread_once_t enable_once = PTHREAD_ONCE_INIT;
 static bool enabled;
@@ -103,27 +103,27 @@ static const char *cause_name(nr_epoch_cause_t c)
 }
 static void bump_locked(epoch_event_t *event, nr_epoch_class_t cls, nr_epoch_cause_t cause)
 {
-  state.epoch++;
-  if (cls == NR_EPOCH_HARD_RESET) state.identity_gen++;
-  state.last_class = cls;
-  state.last_cause = cause;
+  g_state.epoch++;
+  if (cls == NR_EPOCH_HARD_RESET) g_state.identity_gen++;
+  g_state.last_class = cls;
+  g_state.last_cause = cause;
   if (cls != NR_EPOCH_SOFT || cause == NR_CAUSE_DEDICATED_CHANGE_SUSPECTED)
-    state.dedicated_epoch = state.epoch;
-  atomic_store_explicit(&dedicated_epoch, state.dedicated_epoch, memory_order_release);
-  atomic_store_explicit(&epoch, state.epoch, memory_order_release);
-  atomic_store_explicit(&identity_gen, state.identity_gen, memory_order_release);
-  atomic_store_explicit(&cfr_stamp, ((uint64_t)state.epoch << 32) | state.identity_gen, memory_order_release);
+    g_state.dedicated_epoch = g_state.epoch;
+  atomic_store_explicit(&g_dedicated_epoch, g_state.dedicated_epoch, memory_order_release);
+  atomic_store_explicit(&g_epoch, g_state.epoch, memory_order_release);
+  atomic_store_explicit(&g_identity_gen, g_state.identity_gen, memory_order_release);
+  atomic_store_explicit(&g_cfr_stamp, ((uint64_t)g_state.epoch << 32) | g_state.identity_gen, memory_order_release);
   event->bumped = true;
-  event->snapshot = state;
-  event->n_listeners = n_listeners;
-  memcpy(event->listeners, listeners, n_listeners * sizeof(listeners[0]));
+  event->snapshot = g_state;
+  event->n_listeners = g_n_listeners;
+  memcpy(event->listeners, g_listeners, g_n_listeners * sizeof(g_listeners[0]));
   epoch_event_t *queued = malloc(sizeof(*queued));
   AssertFatal(queued, "epoch event allocation failed\n");
   *queued = *event;
   queued->next = NULL;
-  if (event_tail) event_tail->next = queued;
-  else event_head = queued;
-  event_tail = queued;
+  if (g_event_tail) g_event_tail->next = queued;
+  else g_event_head = queued;
+  g_event_tail = queued;
 }
 static void dispatch(const epoch_event_t *event)
 {
@@ -142,15 +142,15 @@ static void dispatch(const epoch_event_t *event)
  * callbacks may themselves enqueue bumps or attempt a recursive drain. */
 void nr_cfg_epoch_drain(void)
 {
-  if (atomic_flag_test_and_set_explicit(&draining, memory_order_acquire)) return;
+  if (atomic_flag_test_and_set_explicit(&g_draining, memory_order_acquire)) return;
   for (;;) {
-    pthread_mutex_lock(&lock);
-    epoch_event_t *event = event_head;
+    pthread_mutex_lock(&g_lock);
+    epoch_event_t *event = g_event_head;
     if (event) {
-      event_head = event->next;
-      if (!event_head) event_tail = NULL;
+      g_event_head = event->next;
+      if (!g_event_head) g_event_tail = NULL;
     }
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&g_lock);
     if (!event) break;
     nr_cfg_epoch_work_t *saved_work = current_work;
     current_work = NULL;
@@ -158,7 +158,7 @@ void nr_cfg_epoch_drain(void)
     current_work = saved_work;
     free(event);
   }
-  atomic_flag_clear_explicit(&draining, memory_order_release);
+  atomic_flag_clear_explicit(&g_draining, memory_order_release);
 }
 
 void nr_cfg_epoch_work_begin(nr_cfg_epoch_work_t *work, uint32_t stamp, void *counter)
@@ -184,209 +184,209 @@ bool nr_cfg_epoch_work_current(void)
   return false;
 }
 
-uint32_t nr_cfg_epoch_current(void) { return atomic_load_explicit(&epoch, memory_order_acquire); }
-uint32_t nr_cfg_epoch_identity_gen(void) { return atomic_load_explicit(&identity_gen, memory_order_acquire); }
-uint32_t nr_cfg_epoch_dedicated_current(void) { return atomic_load_explicit(&dedicated_epoch, memory_order_acquire); }
-uint64_t nr_cfg_epoch_current_slot(void) { return atomic_load_explicit(&current_slot, memory_order_acquire); }
-uint64_t nr_cfg_epoch_cfr_stamp(void) { return atomic_load_explicit(&cfr_stamp, memory_order_acquire); }
+uint32_t nr_cfg_epoch_current(void) { return atomic_load_explicit(&g_epoch, memory_order_acquire); }
+uint32_t nr_cfg_epoch_identity_gen(void) { return atomic_load_explicit(&g_identity_gen, memory_order_acquire); }
+uint32_t nr_cfg_epoch_dedicated_current(void) { return atomic_load_explicit(&g_dedicated_epoch, memory_order_acquire); }
+uint64_t nr_cfg_epoch_current_slot(void) { return atomic_load_explicit(&g_current_slot, memory_order_acquire); }
+uint64_t nr_cfg_epoch_cfr_stamp(void) { return atomic_load_explicit(&g_cfr_stamp, memory_order_acquire); }
 nr_cfg_epoch_snapshot_t nr_cfg_epoch_snapshot(void)
 {
-  pthread_mutex_lock(&lock);
-  nr_cfg_epoch_snapshot_t result = state;
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_lock(&g_lock);
+  nr_cfg_epoch_snapshot_t result = g_state;
+  pthread_mutex_unlock(&g_lock);
   return result;
 }
 void nr_cfg_epoch_reset(void)
 {
-  pthread_mutex_lock(&lock);
-  while (event_head) {
-    epoch_event_t *next = event_head->next;
-    free(event_head);
-    event_head = next;
+  pthread_mutex_lock(&g_lock);
+  while (g_event_head) {
+    epoch_event_t *next = g_event_head->next;
+    free(g_event_head);
+    g_event_head = next;
   }
-  event_tail = NULL;
-  memset(&state, 0, sizeof(state));
-  atomic_store_explicit(&cfr_stamp, 0, memory_order_release);
-  memset(&identity, 0, sizeof(identity));
-  memset(&mib, 0, sizeof(mib));
-  memset(&sib1, 0, sizeof(sib1));
-  memset(&pending, 0, sizeof(pending));
-  memset(&reopened, 0, sizeof(reopened));
-  memset(listeners, 0, sizeof(listeners));
-  n_listeners = 0;
-  slots_per_second = 1000;
-  atomic_store_explicit(&si_period_slots, 0, memory_order_release);
-  last_abs_frame = 0;
-  have_sfn = false;
-  atomic_store_explicit(&dedicated_epoch, 0, memory_order_release);
-  atomic_store_explicit(&current_slot, 0, memory_order_release);
-  atomic_store_explicit(&epoch, 0, memory_order_release);
-  atomic_store_explicit(&identity_gen, 0, memory_order_release);
-  pthread_mutex_unlock(&lock);
+  g_event_tail = NULL;
+  memset(&g_state, 0, sizeof(g_state));
+  atomic_store_explicit(&g_cfr_stamp, 0, memory_order_release);
+  memset(&g_identity, 0, sizeof(g_identity));
+  memset(&g_mib, 0, sizeof(g_mib));
+  memset(&g_sib1, 0, sizeof(g_sib1));
+  memset(&g_pending, 0, sizeof(g_pending));
+  memset(&g_reopened, 0, sizeof(g_reopened));
+  memset(g_listeners, 0, sizeof(g_listeners));
+  g_n_listeners = 0;
+  g_slots_per_second = 1000;
+  atomic_store_explicit(&g_si_period_slots, 0, memory_order_release);
+  g_last_abs_frame = 0;
+  g_have_sfn = false;
+  atomic_store_explicit(&g_dedicated_epoch, 0, memory_order_release);
+  atomic_store_explicit(&g_current_slot, 0, memory_order_release);
+  atomic_store_explicit(&g_epoch, 0, memory_order_release);
+  atomic_store_explicit(&g_identity_gen, 0, memory_order_release);
+  pthread_mutex_unlock(&g_lock);
 }
 void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn)
 {
   if (!fn) return;
-  pthread_mutex_lock(&lock);
-  for (unsigned i = 0; i < n_listeners; ++i)
-    if (listeners[i] == fn) { pthread_mutex_unlock(&lock); return; }
-  if (n_listeners < NR_CFG_LISTENERS_MAX) listeners[n_listeners++] = fn;
+  pthread_mutex_lock(&g_lock);
+  for (unsigned i = 0; i < g_n_listeners; ++i)
+    if (g_listeners[i] == fn) { pthread_mutex_unlock(&g_lock); return; }
+  if (g_n_listeners < NR_CFG_LISTENERS_MAX) g_listeners[g_n_listeners++] = fn;
   else LOG_W(PHY, "SENSING: CONFIG_EPOCH listener capacity exhausted\n");
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&g_lock);
 }
 void nr_cfg_epoch_set_slots_per_second(uint32_t value)
 {
   if (!value) return;
-  pthread_mutex_lock(&lock);
-  slots_per_second = value;
-  reopened.valid = false;
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_lock(&g_lock);
+  g_slots_per_second = value;
+  g_reopened.valid = false;
+  pthread_mutex_unlock(&g_lock);
 }
 void nr_cfg_epoch_set_si_period(uint32_t value)
 {
-  if (is_enabled()) atomic_store_explicit(&si_period_slots, value, memory_order_release);
+  if (is_enabled()) atomic_store_explicit(&g_si_period_slots, value, memory_order_release);
 }
 uint32_t nr_cfg_epoch_si_period(void)
 {
-  return atomic_load_explicit(&si_period_slots, memory_order_acquire);
+  return atomic_load_explicit(&g_si_period_slots, memory_order_acquire);
 }
 uint64_t nr_cfg_epoch_si_boundary(void)
 {
-  pthread_mutex_lock(&lock);
-  const uint64_t boundary = pending.active ? pending.boundary : 0;
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_lock(&g_lock);
+  const uint64_t boundary = g_pending.active ? g_pending.boundary : 0;
+  pthread_mutex_unlock(&g_lock);
   return boundary;
 }
 bool nr_cfg_epoch_sib1_request_allowed(uint64_t abs_slot)
 {
-  pthread_mutex_lock(&lock);
-  const bool allowed = !pending.active || abs_slot >= pending.boundary;
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_lock(&g_lock);
+  const bool allowed = !g_pending.active || abs_slot >= g_pending.boundary;
+  pthread_mutex_unlock(&g_lock);
   return allowed;
 }
 bool nr_cfg_epoch_si_redecode_pending(uint64_t abs_slot)
 {
   if (!is_enabled()) return false;
-  pthread_mutex_lock(&lock);
-  const bool needed = pending.active && abs_slot >= pending.boundary;
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_lock(&g_lock);
+  const bool needed = g_pending.active && abs_slot >= g_pending.boundary;
+  pthread_mutex_unlock(&g_lock);
   return needed;
 }
 uint64_t nr_cfg_epoch_observe_slot(uint16_t sfn, uint8_t slot, uint8_t slots_per_frame)
 {
   if (!slots_per_frame || sfn >= 1024 || slot >= slots_per_frame) return 0;
-  pthread_mutex_lock(&lock);
-  uint64_t frame = have_sfn ? (last_abs_frame / 1024u) * 1024u + sfn : sfn;
-  if (have_sfn && frame + 512u < last_abs_frame) frame += 1024u;
-  else if (have_sfn && frame > last_abs_frame + 512u && frame >= 1024u) frame -= 1024u;
-  if (!have_sfn || frame > last_abs_frame) last_abs_frame = frame;
-  have_sfn = true;
+  pthread_mutex_lock(&g_lock);
+  uint64_t frame = g_have_sfn ? (g_last_abs_frame / 1024u) * 1024u + sfn : sfn;
+  if (g_have_sfn && frame + 512u < g_last_abs_frame) frame += 1024u;
+  else if (g_have_sfn && frame > g_last_abs_frame + 512u && frame >= 1024u) frame -= 1024u;
+  if (!g_have_sfn || frame > g_last_abs_frame) g_last_abs_frame = frame;
+  g_have_sfn = true;
   const uint64_t absolute = frame * slots_per_frame + slot;
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&g_lock);
   return absolute;
 }
 void nr_cfg_epoch_note_identity(uint16_t pci, uint64_t ssb_arfcn, uint64_t point_a)
 {
   if (!is_enabled()) return;
   epoch_event_t event = {0};
-  pthread_mutex_lock(&lock);
-  const bool changed = identity.valid && (identity.pci != pci || identity.ssb_arfcn != ssb_arfcn
-      || (point_a && identity.point_a && identity.point_a != point_a));
+  pthread_mutex_lock(&g_lock);
+  const bool changed = g_identity.valid && (g_identity.pci != pci || g_identity.ssb_arfcn != ssb_arfcn
+      || (point_a && g_identity.point_a && g_identity.point_a != point_a));
   if (changed) {
-    memset(&mib, 0, sizeof(mib));
-    memset(&sib1, 0, sizeof(sib1));
-    memset(&pending, 0, sizeof(pending));
-    reopened.valid = false;
-    atomic_store_explicit(&si_period_slots, 0, memory_order_release);
+    memset(&g_mib, 0, sizeof(g_mib));
+    memset(&g_sib1, 0, sizeof(g_sib1));
+    memset(&g_pending, 0, sizeof(g_pending));
+    g_reopened.valid = false;
+    atomic_store_explicit(&g_si_period_slots, 0, memory_order_release);
     bump_locked(&event, NR_EPOCH_HARD_RESET, NR_CAUSE_CELL_IDENTITY_CHANGE);
   }
-  identity = (cell_identity_t){true, pci, ssb_arfcn, point_a ? point_a : (changed ? 0 : identity.point_a)};
-  pthread_mutex_unlock(&lock);
+  g_identity = (cell_identity_t){true, pci, ssb_arfcn, point_a ? point_a : (changed ? 0 : g_identity.point_a)};
+  pthread_mutex_unlock(&g_lock);
 
 }
 void nr_cfg_epoch_refine_point_a(uint64_t point_a)
 {
   if (!is_enabled() || !point_a) return;
   epoch_event_t event = {0};
-  pthread_mutex_lock(&lock);
-  if (identity.valid && identity.point_a && identity.point_a != point_a) {
-    memset(&mib, 0, sizeof(mib));
-    memset(&sib1, 0, sizeof(sib1));
-    memset(&pending, 0, sizeof(pending));
-    reopened.valid = false;
-    atomic_store_explicit(&si_period_slots, 0, memory_order_release);
+  pthread_mutex_lock(&g_lock);
+  if (g_identity.valid && g_identity.point_a && g_identity.point_a != point_a) {
+    memset(&g_mib, 0, sizeof(g_mib));
+    memset(&g_sib1, 0, sizeof(g_sib1));
+    memset(&g_pending, 0, sizeof(g_pending));
+    g_reopened.valid = false;
+    atomic_store_explicit(&g_si_period_slots, 0, memory_order_release);
     bump_locked(&event, NR_EPOCH_HARD_RESET, NR_CAUSE_CELL_IDENTITY_CHANGE);
   }
-  if (identity.valid) identity.point_a = point_a;
-  pthread_mutex_unlock(&lock);
+  if (g_identity.valid) g_identity.point_a = point_a;
+  pthread_mutex_unlock(&g_lock);
 
 }
 void nr_cfg_epoch_note_mib(uint32_t hash)
 {
   if (!is_enabled()) return;
   epoch_event_t event = {0};
-  pthread_mutex_lock(&lock);
-  if (mib.valid && mib.hash != hash) bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_MIB_CHANGE);
-  mib = (hash_state_t){true, hash};
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_lock(&g_lock);
+  if (g_mib.valid && g_mib.hash != hash) bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_MIB_CHANGE);
+  g_mib = (hash_state_t){true, hash};
+  pthread_mutex_unlock(&g_lock);
 
 }
 bool nr_cfg_epoch_note_sib1(uint32_t hash, uint64_t abs_slot)
 {
   if (!is_enabled()) return true;
   epoch_event_t event = {0};
-  pthread_mutex_lock(&lock);
-  if (pending.active && abs_slot < pending.boundary) {
-    pthread_mutex_unlock(&lock);
+  pthread_mutex_lock(&g_lock);
+  if (g_pending.active && abs_slot < g_pending.boundary) {
+    pthread_mutex_unlock(&g_lock);
     return false; /* old-period SI cannot complete the requested comparison */
   }
-  if (sib1.valid && sib1.hash != hash) bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_SIB1_CHANGE);
-  sib1 = (hash_state_t){true, hash};
-  pending.active = false;
-  pthread_mutex_unlock(&lock);
+  if (g_sib1.valid && g_sib1.hash != hash) bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_SIB1_CHANGE);
+  g_sib1 = (hash_state_t){true, hash};
+  g_pending.active = false;
+  pthread_mutex_unlock(&g_lock);
   return true;
 }
 void nr_cfg_epoch_note_si_modification(uint64_t abs_slot, uint32_t period)
 {
   if (!is_enabled() || !period) return;
-  pthread_mutex_lock(&lock);
+  pthread_mutex_lock(&g_lock);
   /* TS 38.331 5.2.2.2.2 defines SFN mod m = 0, not an arbitrary unwrapped
    * frame origin. For m > 1024 the only representable boundary SFN is zero. */
-  const uint32_t sfn_cycle = 1024u * (slots_per_second / 100u);
+  const uint32_t sfn_cycle = 1024u * (g_slots_per_second / 100u);
   if (sfn_cycle && period > sfn_cycle) period = sfn_cycle;
   const uint64_t next_boundary = (abs_slot / period + 1) * (uint64_t)period;
-  if (pending.active && pending.boundary == next_boundary) {
-    pthread_mutex_unlock(&lock);
+  if (g_pending.active && g_pending.boundary == next_boundary) {
+    pthread_mutex_unlock(&g_lock);
     return;
   }
-  pending.active = true;
-  pending.boundary = next_boundary;
-  const uint64_t boundary = pending.boundary;
-  pthread_mutex_unlock(&lock);
+  g_pending.active = true;
+  g_pending.boundary = next_boundary;
+  const uint64_t boundary = g_pending.boundary;
+  pthread_mutex_unlock(&g_lock);
   LOG_I(PHY, "SENSING: CONFIG_EPOCH pending cause=SI_MODIFICATION_ANNOUNCED boundary=%lu\n",
         (unsigned long)boundary);
 }
 void nr_cfg_epoch_tick(uint64_t abs_slot)
 {
   if (!is_enabled()) return;
-  atomic_store_explicit(&current_slot, abs_slot, memory_order_release);
+  atomic_store_explicit(&g_current_slot, abs_slot, memory_order_release);
   epoch_event_t event = {0};
-  pthread_mutex_lock(&lock);
-  if (pending.active && abs_slot >= pending.boundary
-      && abs_slot - pending.boundary >= (uint64_t)si_grace_ms * slots_per_second / 1000) {
+  pthread_mutex_lock(&g_lock);
+  if (g_pending.active && abs_slot >= g_pending.boundary
+      && abs_slot - g_pending.boundary >= (uint64_t)si_grace_ms * g_slots_per_second / 1000) {
     bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_SI_MODIFICATION_ANNOUNCED);
-    pending.active = false;
+    g_pending.active = false;
   }
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&g_lock);
 
 }
 static void simple_bump(nr_epoch_class_t cls, nr_epoch_cause_t cause)
 {
   if (!is_enabled()) return;
   epoch_event_t event = {0};
-  pthread_mutex_lock(&lock);
+  pthread_mutex_lock(&g_lock);
   bump_locked(&event, cls, cause);
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&g_lock);
 
 }
 void nr_cfg_epoch_note_continuity_loss(void) { simple_bump(NR_EPOCH_HARD_REVERIFY, NR_CAUSE_CONTINUITY_LOSS); }
@@ -400,9 +400,9 @@ void nr_cfg_epoch_note_continuity_loss_samples(int64_t gap_samples, uint64_t sam
       (threshold_ms <= UINT64_MAX / samples_per_ms && (uint64_t)gap_samples >= threshold_ms * samples_per_ms);
   epoch_event_t event = {.has_gap = true, .gap_samples = gap_samples,
                          .samples_per_ms = samples_per_ms ? samples_per_ms : 1};
-  pthread_mutex_lock(&lock);
+  pthread_mutex_lock(&g_lock);
   bump_locked(&event, hard ? NR_EPOCH_HARD_REVERIFY : NR_EPOCH_SOFT, NR_CAUSE_CONTINUITY_LOSS);
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&g_lock);
 }
 void nr_cfg_epoch_note_bwp_change(void) { simple_bump(NR_EPOCH_SOFT, NR_CAUSE_BWP_CHANGE); }
 void nr_cfg_epoch_note_csirs_map_change(void) { simple_bump(NR_EPOCH_SOFT, NR_CAUSE_CSIRS_MAP_CHANGE); }
@@ -410,14 +410,14 @@ void nr_cfg_epoch_note_rnti_reopened(uint16_t rnti, bool was_converged, uint64_t
 {
   if (!is_enabled() || !was_converged) return;
   epoch_event_t event = {0};
-  pthread_mutex_lock(&lock);
-  const uint64_t window = 2u * (uint64_t)slots_per_second;
-  if (reopened.valid && reopened.rnti != rnti && abs_slot >= reopened.slot && abs_slot - reopened.slot <= window) {
+  pthread_mutex_lock(&g_lock);
+  const uint64_t window = 2u * (uint64_t)g_slots_per_second;
+  if (g_reopened.valid && g_reopened.rnti != rnti && abs_slot >= g_reopened.slot && abs_slot - g_reopened.slot <= window) {
     bump_locked(&event, NR_EPOCH_SOFT, NR_CAUSE_DEDICATED_CHANGE_SUSPECTED);
-    reopened.valid = false;
-  } else if (!reopened.valid || reopened.rnti != rnti || abs_slot < reopened.slot || abs_slot - reopened.slot > window) {
-    reopened = (reopened_t){true, rnti, abs_slot};
+    g_reopened.valid = false;
+  } else if (!g_reopened.valid || g_reopened.rnti != rnti || abs_slot < g_reopened.slot || abs_slot - g_reopened.slot > window) {
+    g_reopened = (reopened_t){true, rnti, abs_slot};
   }
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&g_lock);
 
 }
