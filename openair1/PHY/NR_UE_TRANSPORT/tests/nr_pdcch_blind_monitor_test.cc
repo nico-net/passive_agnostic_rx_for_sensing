@@ -4757,6 +4757,65 @@ TEST_F(DiscoveredCoresets, DwellRejectsRepeatedEvidenceAndLateTokens) {
   EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 4002, b, 47), -1);
 }
 
+// A PDCCH transmission belongs to one CORESET: an overlapping wrong geometry that CRC-passes the very DCIs a banked pass decoded is no evidence; a disjoint genuine CORESET (other slots/payloads) still verifies.
+TEST_F(DiscoveredCoresets, EvidenceAlreadyDecodedByBankedPassIsNotEvidence) {
+  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n"
+        "CORESET nid=62922 sym=0 dur=1 grid_rb=42 groups=24 L=6 R=3 shift=7\n"
+        "CORESET nid=10163 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  const auto a = nr_dci_bits_from_u64(123), b = nr_dci_bits_from_u64(456), d = nr_dci_bits_from_u64(789);
+  uint64_t clock = 100;
+  auto next_dwell = [&](int rb, int nid) { // reject queued dwells until the wanted geometry starts
+    for (int guard = 0; guard < 8; ++guard) {
+      if (!nr_pdcch_discovered_snapshot(&c, &token, 217)) return false;
+      if (c.coreset_rb_offset == rb && c.coreset_pdcch_dmrs_scrambling_id == nid) return true;
+      for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, clock++);
+    }
+    return false;
+  };
+  // 1. no bank yet: the first geometry verifies exactly as before (single-CORESET path unchanged).
+  ASSERT_TRUE(next_dwell(0, 62922));
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 1, a, 47), -1);
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 2, b, 47), 0);
+  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 1);
+  // 2. a genuine disjoint second CORESET (other nID, RNTI, slots, payloads the bank never decoded) still verifies.
+  nr_pdcch_coreset_bank_note_decoded(3, 0x1234, nr_dci_bits_hash(&a, 47));
+  nr_pdcch_coreset_bank_note_decoded(4, 0x1234, nr_dci_bits_hash(&b, 47));
+  ASSERT_TRUE(next_dwell(0, 10163));
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x4567, 5, a, 47), -1);
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x4567, 6, d, 47), 1);
+  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 2);
+  // 3. the live case: the banked CORESET went STALE (no accepts while traffic is elsewhere), so the same-nID overlap rule no
+  //    longer shields it; an overlapping geometry then CRC-passes the very DCIs bank 0 decoded: rejected, nothing recorded.
+  nr_pdcch_coreset_bank_tick(7, false, 5, 1000);
+  nr_pdcch_coreset_bank_tick(12, true, 5, 1000);
+  ASSERT_EQ(nr_pdcch_coreset_bank_state(0), NR_CORESET_STALE);
+  ASSERT_TRUE(next_dwell(42, 62922));
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 3, a, 47), -1);
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 4, b, 47), -1);
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 2);
+  // same slot but another payload is not explained by the bank: fresh evidence, yet one DCI alone never verifies
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 4, d, 47), -1);
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 2);
+  // without the bank's record the same pair would have verified (control: the guard is what blocks it)
+  nr_pdcch_coreset_bank_decoded_clear();
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 5, a, 47), 2);
+}
+
+TEST_F(DiscoveredCoresets, DecodedRingKeysOnSlotRntiPayload) {
+  const auto a = nr_dci_bits_from_u64(1), b = nr_dci_bits_from_u64(2);
+  nr_pdcch_coreset_bank_decoded_clear();
+  nr_pdcch_coreset_bank_note_decoded(10, 0x1234, nr_dci_bits_hash(&a, 47));
+  EXPECT_TRUE(nr_pdcch_coreset_bank_decoded_elsewhere(10, 0x1234, nr_dci_bits_hash(&a, 47)));
+  EXPECT_FALSE(nr_pdcch_coreset_bank_decoded_elsewhere(11, 0x1234, nr_dci_bits_hash(&a, 47)));
+  EXPECT_FALSE(nr_pdcch_coreset_bank_decoded_elsewhere(10, 0x1235, nr_dci_bits_hash(&a, 47)));
+  EXPECT_FALSE(nr_pdcch_coreset_bank_decoded_elsewhere(10, 0x1234, nr_dci_bits_hash(&b, 47)));
+  for (int i = 0; i < 1000; ++i) nr_pdcch_coreset_bank_note_decoded(100 + i, 0x1234, nr_dci_bits_hash(&b, 47)); // ring wraps, old entries age out
+  EXPECT_FALSE(nr_pdcch_coreset_bank_decoded_elsewhere(10, 0x1234, nr_dci_bits_hash(&a, 47)));
+  nr_pdcch_coreset_bank_decoded_clear();
+  EXPECT_FALSE(nr_pdcch_coreset_bank_decoded_elsewhere(1099, 0x1234, nr_dci_bits_hash(&b, 47)));
+}
+
 TEST_F(DiscoveredCoresets, BankAllowsSameOwnerAtDifferentIdsAndSymbols) {
   lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n"
         "CORESET nid=10163 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n"

@@ -114,6 +114,10 @@ int nr_pdcch_coreset_bank_remove(int index);
 void nr_pdcch_coreset_bank_note_accept(int index, uint64_t slot);
 void nr_pdcch_coreset_bank_note_confirm(int index, uint64_t slot);
 void nr_pdcch_coreset_bank_note_dci(int index, uint64_t slot, uint16_t rnti, uint32_t payload_hash);
+/* Operational passes record every CRC-valid DCI (slot key, RNTI, payload hash); a discovery dwell asks whether a DCI was already decoded elsewhere (same transmission => no new evidence for the dwell geometry). */
+void nr_pdcch_coreset_bank_note_decoded(uint64_t slot, uint16_t rnti, uint32_t payload_hash);
+bool nr_pdcch_coreset_bank_decoded_elsewhere(uint64_t slot, uint16_t rnti, uint32_t payload_hash);
+void nr_pdcch_coreset_bank_decoded_clear(void);
 void nr_pdcch_coreset_bank_tick(uint64_t slot, bool traffic_elsewhere,
                                 uint32_t t_stale_slots, uint32_t t_remove_slots);
 void nr_pdcch_coreset_bank_dispatch_enter(void);

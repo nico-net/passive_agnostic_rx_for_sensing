@@ -160,6 +160,47 @@ void nr_pdcch_coreset_bank_note_confirm(int index, uint64_t slot)
   pthread_mutex_unlock(&g_coreset_bank_lock);
 }
 
+/* Ring of recent DCIs decoded by operational (non-dwell) passes, keyed by (slot, RNTI, payload hash). A PDCCH transmission belongs to exactly one CORESET/search-space candidate, so a dwell geometry whose CRC-valid DCI is one of these
+ * is decoding a transmission the bank already explains (an overlapping geometry can CRC-pass on the same REs) and gives no evidence of its own. */
+#define NR_DECODED_RING 256
+static struct { uint64_t slot; uint32_t hash; uint16_t rnti; } g_decoded[NR_DECODED_RING];
+static unsigned g_decoded_next;
+static pthread_mutex_t g_decoded_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void nr_pdcch_coreset_bank_note_decoded(uint64_t slot, uint16_t rnti, uint32_t payload_hash)
+{
+  if (!rnti) return;
+  pthread_mutex_lock(&g_decoded_lock);
+  for (int i = 0; i < NR_DECODED_RING; ++i)
+    if (g_decoded[i].rnti == rnti && g_decoded[i].slot == slot && g_decoded[i].hash == payload_hash) {
+      pthread_mutex_unlock(&g_decoded_lock);
+      return;
+    }
+  g_decoded[g_decoded_next % NR_DECODED_RING].slot = slot;
+  g_decoded[g_decoded_next % NR_DECODED_RING].rnti = rnti;
+  g_decoded[g_decoded_next % NR_DECODED_RING].hash = payload_hash;
+  ++g_decoded_next;
+  pthread_mutex_unlock(&g_decoded_lock);
+}
+
+bool nr_pdcch_coreset_bank_decoded_elsewhere(uint64_t slot, uint16_t rnti, uint32_t payload_hash)
+{
+  bool found = false;
+  pthread_mutex_lock(&g_decoded_lock);
+  for (int i = 0; i < NR_DECODED_RING && !found; ++i)
+    found = g_decoded[i].rnti == rnti && g_decoded[i].slot == slot && g_decoded[i].hash == payload_hash;
+  pthread_mutex_unlock(&g_decoded_lock);
+  return found;
+}
+
+void nr_pdcch_coreset_bank_decoded_clear(void)
+{
+  pthread_mutex_lock(&g_decoded_lock);
+  memset(g_decoded, 0, sizeof(g_decoded));
+  g_decoded_next = 0;
+  pthread_mutex_unlock(&g_decoded_lock);
+}
+
 void nr_pdcch_coreset_bank_note_dci(int index, uint64_t slot, uint16_t rnti, uint32_t payload_hash)
 {
   if (!nr_cfg_epoch_work_current()) return;

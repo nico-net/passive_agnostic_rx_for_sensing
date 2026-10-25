@@ -983,6 +983,12 @@ static void pass_note(int k, uint64_t ns, uint32_t acc)
 }
 static _Thread_local uint64_t t_discovered_token;
 static _Thread_local uint64_t t_discovered_slot;
+/* disc_slot_key: the slot key shared by the dwell evidence and the operational-decode ring (identical derivation on both sides). */
+static inline uint64_t disc_slot_key(const PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, long slot)
+{
+  return slot >= 0 ? (uint64_t)slot
+      : nr_cfg_epoch_observe_slot(proc->frame_rx, proc->nr_slot_rx, ue->frame_parms.slots_per_frame);
+}
 static _Thread_local bool t_discovered_attempted;
 static _Thread_local bool t_discovered_prescreen_passed; /* a candidate of this dwell pass cleared the prescreen */
 static _Thread_local int t_candidate_share; /* zero = legacy per-pass budget */
@@ -4477,8 +4483,7 @@ static void run_discovered_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
                                     uint64_t token, int share)
 {
   t_discovered_token = token;
-  t_discovered_slot = slot >= 0 ? (uint64_t)slot
-      : nr_cfg_epoch_observe_slot(proc->frame_rx, proc->nr_slot_rx, ue->frame_parms.slots_per_frame);
+  t_discovered_slot = disc_slot_key(ue, proc, slot);
   t_discovered_attempted = false;
   t_discovered_prescreen_passed = false;
   t_candidate_share = share;
@@ -7991,6 +7996,9 @@ constdiag_done:;
       if (cfg->discovered_coreset && reconf_lengths_enabled() && t_bank_index >= 0)
         nr_pdcch_coreset_bank_note_dci(t_bank_index, t_bank_slot, raw->rnti,
                                        nr_dci_bits_hash(&raw->payload, cand_task[ti].dci_length));
+      if (!t_discovered_token && t_bank_index >= 0) /* banked passes only: the bank explains a transmission */
+        nr_pdcch_coreset_bank_note_decoded(disc_slot_key(ue, proc, source_absolute_slot), raw->rnti,
+                                           nr_dci_bits_hash(&raw->payload, cand_task[ti].dci_length));
       if (!t_discovered_token && accept_dup(abs_slot, raw->rnti, 0))
         continue;
       if (nr_a2e_trace()) nr_a2e_ts[5] = btim_now_ns();
@@ -8473,6 +8481,9 @@ constdiag_done:;
     // own real DLSCH config. ----
     /* Accepted DCI may still be discovery evidence. Do not emit PDSCH/CFR from
      * unverified geometry or silently use manual interpretation while full-auto is waiting. */
+    if (!t_discovered_token && t_bank_index >= 0 && !cand_task[ti].ul_scan && out.rnti_class == NR_BLIND_RNTI_CLASS_C)
+      nr_pdcch_coreset_bank_note_decoded(disc_slot_key(ue, proc, source_absolute_slot), out.rnti,
+                                         nr_dci_bits_hash(&out.payload, cand_task[ti].dci_length));
     if (t_discovered_token && !cand_task[ti].ul_scan && out.rnti_class == NR_BLIND_RNTI_CLASS_C) t_discovered_prescreen_passed = true;
     if (t_discovered_token && !cand_task[ti].ul_scan && out.rnti_class == NR_BLIND_RNTI_CLASS_C)
       nr_pdcch_discovered_observe(t_discovered_token, out.rnti,
