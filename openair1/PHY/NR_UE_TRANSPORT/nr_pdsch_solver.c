@@ -19,7 +19,7 @@
 #define BM_BYTES (NR_PDSCH_SOLVER_MAX_LAYOUTS / 8)
 #define HQ_RING 64
 
-typedef struct { uint64_t key; uint32_t count; } coverage_entry_t;
+typedef struct { uint64_t key; uint32_t count; uint32_t snr_n; float snr_sum; } coverage_entry_t; /* snr_*: EVIDENCE RANK (plan_coverage) */
 /* internal diagnostic reasons, after the caller-side NR_PDSCH_SOLVER_WHY_* ones */
 enum { W_PLAN = NR_PDSCH_SOLVER_WHY_CALLER_N, W_CSIRS, W_BACKOFF, W_WIDE, W_PROBES, W_POK, W_PFAIL,
        W_PNOCRED, W_NOREP, W_N };
@@ -98,6 +98,7 @@ typedef struct {
   bool crc24;             /* TIMSOLVE2: the probed code block carries a 24-bit CRC (TBS > 3824), else CRC16 */
   uint8_t cov_v1;         /* SOLVERREFUND: plan_coverage() variant + 1 that this probe charged to the coverage table (0 = none) */
   uint16_t dmrs_ports;
+  float snr;              /* EVIDENCE RANK: post-equalisation SNR (dB) the probe measured, NAN until nr_pdsch_solver_note_probe_snr() */
   nr_dci_bits_t payload;
   int n_ids;
   uint16_t ids[SOLVER_MAX_IDS];
@@ -690,6 +691,7 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   p->rm = (uint8_t)t_rm;
   p->scr = t_scr;
   p->comb = t_comb;
+  p->snr = NAN;
   p->n_layers = rd[reading].n_layers;
   p->mcs = rd[reading].mcs;
   p->crc24 = tb_crc24(table, rd[reading].mcs, rd[reading].num_rb, S, L, l0, add_pos, rd[reading].n_layers);
@@ -812,6 +814,39 @@ static void coverage_refund(solver_rnti_t *r, const pending_t *p)
   }
 }
 
+/* coverage_note_snr: EVIDENCE RANK. Adds a credited search probe's measured post-equalisation SNR to the coverage entries it was charged
+ *   to (its layouts x variant, and the layouts' aggregate). The SNR is a CRC-free likelihood of the PHYSICAL hypothesis: a wrong start
+ *   symbol, DM-RS position set, port / CDM-group set, layer count or modulation order leaves a large equalisation error whatever the code
+ *   rate, so the true (reading, S, add_pos, table) sits at the top of its RNTI's measured ranking long before a CRC passes (sens6 OTA
+ *   lab cell 2026-10-25: true-shape probes ~21-24 dB, wrong ones ~5-11 dB). g_mu held. */
+static void coverage_note_snr(const pending_t *p)
+{
+  if (!p->cov_v1 || p->phase != 0 || !p->probe || !isfinite(p->snr) || p->slot < 0 || p->slot >= SOLVER_RNTIS) return;
+  solver_rnti_t *r = &g_r[p->slot];
+  if (!r->used || r->solved || !r->coverage || !r->coverage->entries) return;
+  const int nc = p->n_ids < COVERAGE_IDS ? p->n_ids : COVERAGE_IDS;
+  for (int j = 0; j < nc; j++) {
+    const int id = p->ids[j];
+    if (id >= NR_PDSCH_SOLVER_MAX_LAYOUTS) continue;
+    for (int q = 0; q < 2; q++) {
+      const uint64_t key = coverage_key_scr(id, q ? 63 : p->cov_v1 - 1, p->payload, p->scr);
+      coverage_entry_t *e = coverage_find(r->coverage, key);
+      if (e->key != key) continue; /* the table started a new round since the plan */
+      e->snr_n++;
+      e->snr_sum += p->snr;
+    }
+  }
+}
+
+void nr_pdsch_solver_note_probe_snr(uint32_t token, float snr_db)
+{
+  if (token == 0 || !isfinite(snr_db)) return;
+  pthread_mutex_lock(&g_mu);
+  pending_t *q = &g_p[token & (SOLVER_PENDING - 1)];
+  if (q->used && q->token == token) q->snr = snr_db;
+  pthread_mutex_unlock(&g_mu);
+}
+
 /* refund_untested: an unsolved RNTI's search probe that was never tested (uncredited feedback, or its pending entry overwritten
  * before any feedback) neither consumes search coverage nor counts toward the search back-off. g_mu held. */
 static void refund_untested(const pending_t *p)
@@ -838,6 +873,8 @@ static void plan_coverage(solver_rnti_t *r, nr_pdsch_solver_var_t *out, int *n, 
   uint32_t score[128][48];
   uint32_t load[128];
   int nt[128];
+  float vsnr[128][48]; /* EVIDENCE RANK: best measured mean probe SNR of the variant over the reading's layouts (NAN = never measured) */
+  float rsnr[128];     /* ... and of the reading (its layouts' aggregate) */
   /* EVIDENCE WEIGHT (DCI11-RESOLVER): a reading's share of the probes is proportional to its DM-RS fit (rd.fit, the monitor's
    * F1 of the reading's PRBs against the PRBs that carry this RNTI's DM-RS in this slot), so the readings the air supports are
    * probed first and most, and a reading with no DM-RS support still gets a small share (never zero: a wrong identity or a weak
@@ -855,10 +892,18 @@ static void plan_coverage(solver_rnti_t *r, nr_pdsch_solver_var_t *out, int *n, 
       const uint32_t count = coverage_find(c, coverage_key(id, 63, payload))->count;
       if (count < load[k]) load[k] = count;
     }
+    rsnr[k] = NAN;
+    for (int j = 0; j < nc; j++) {
+      const int id = rd[order[k]].ids[j];
+      if (id >= NR_PDSCH_SOLVER_MAX_LAYOUTS) continue;
+      const coverage_entry_t *e = coverage_find(c, coverage_key(id, 63, payload));
+      if (e->snr_n && !(e->snr_sum / e->snr_n <= rsnr[k])) rsnr[k] = e->snr_sum / e->snr_n;
+    }
     uint8_t available[3];
     nt[k] = tables_for(rd[order[k]].mcs, available);
     for (int v = 0; v < 48; v++) {
       score[k][v] = UINT32_MAX;
+      vsnr[k][v] = NAN;
       const int table = tables[(v / 4) % 3];
       bool valid = false;
       for (int t = 0; t < nt[k]; t++) valid |= available[t] == table;
@@ -866,9 +911,26 @@ static void plan_coverage(solver_rnti_t *r, nr_pdsch_solver_var_t *out, int *n, 
       for (int j = 0; j < nc; j++) {
         const int id = rd[order[k]].ids[j];
         if (id >= NR_PDSCH_SOLVER_MAX_LAYOUTS) continue;
-        const uint32_t count = coverage_find(c, coverage_key(id, v, payload))->count;
-        if (count < score[k][v]) score[k][v] = count;
+        const coverage_entry_t *e = coverage_find(c, coverage_key(id, v, payload));
+        if (e->count < score[k][v]) score[k][v] = e->count;
+        if (e->snr_n && !(e->snr_sum / e->snr_n <= vsnr[k][v])) vsnr[k][v] = e->snr_sum / e->snr_n;
       }
+    }
+  }
+  /* EVIDENCE RANK. Each hypothesis's share of the probes falls with its rank in the measured SNR ordering (share ~ 1/rank: Zipf), for
+   * the readings of this grant and for the variants within a reading; a never-measured hypothesis ranks first, so every hypothesis is
+   * still tried and the order only decides how the rest of the budget is spent. Ranks, not SNR values: no threshold, no cell scale.
+   * Before (uniform least-tried): 270 of 100634 probes tested the true (S, add_pos, table, layout) before its 2 solving CRC passes,
+   * 56 of them at the true rank (sens6 OTA lab cell 2026-10-25 03:53). */
+  int rrank[128], vrank[128][48];
+  for (int k = 0; k < no; k++) {
+    rrank[k] = 1;
+    for (int q = 0; q < no; q++)
+      if (isfinite(rsnr[k]) && isfinite(rsnr[q]) && rsnr[q] > rsnr[k]) rrank[k]++;
+    for (int v = 0; v < 48; v++) {
+      vrank[k][v] = 1;
+      for (int u = 0; u < 48; u++)
+        if (score[k][u] != UINT32_MAX && isfinite(vsnr[k][v]) && isfinite(vsnr[k][u]) && vsnr[k][u] > vsnr[k][v]) vrank[k][v]++;
     }
   }
   for (int step = 0; step < no * 48 && *n < max; step++) {
@@ -881,9 +943,10 @@ static void plan_coverage(solver_rnti_t *r, nr_pdsch_solver_var_t *out, int *n, 
     for (int v = 0; v < 48; v++)
       for (int k = 0; k < no; k++) {
         if (score[k][v] == UINT32_MAX) continue;
-        const double pk = ((double)load[k] + 1.0) / w[k];
-        if (pk < total || (pk == total && score[k][v] < count)) {
-          best = k; variant = v; count = score[k][v]; total = pk;
+        const double pk = ((double)load[k] + 1.0) * rrank[k] / w[k];
+        const uint32_t ev = (score[k][v] + 1u) * (uint32_t)vrank[k][v];
+        if (pk < total || (pk == total && ev < count)) {
+          best = k; variant = v; count = ev; total = pk;
         }
       }
     if (best < 0 || !coverage_room(c, 2 * rd[order[best]].n_ids)) break;
@@ -1486,6 +1549,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     pthread_mutex_unlock(&g_mu);
     return;
   }
+  coverage_note_snr(p);
   solver_rnti_t *r = &g_r[p->slot];
   if (r->used && p->phase == 0 && !r->solved && !crc_ok && r->layout_failures < UINT32_MAX)
     r->layout_failures++;

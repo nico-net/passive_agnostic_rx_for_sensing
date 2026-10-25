@@ -1708,6 +1708,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       memset(nr_gp_tt, 0, sizeof(nr_gp_tt));
       if (dec.evm_pct > 0.f && !job.layout_probe)
         nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)), (int)job.mrc_mode, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+      if (dec.evm_pct > 0.f && job.layout_probe && job.solver_token)
+        nr_pdsch_solver_note_probe_snr(job.solver_token, (float)(-20.0 * log10(dec.evm_pct / 100.0)));
     }
     if (job.solver_token && !recov_hold) {
       const bool sv_credit = owned || nr_passive_credit_allowed(

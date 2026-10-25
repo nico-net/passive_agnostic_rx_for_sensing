@@ -107,6 +107,7 @@ void nr_pdsch_solver_set_alt_scr(int coreset_key, const uint16_t *ids, int n, bo
 void nr_pdsch_solver_set_alt_scr32(int coreset_key, const int32_t *ids, int n, bool first_is_decided, bool own);
 /** Outcome of a variant: CRC of code block 0 (probe) or of the TB (full decode). credit=false: IQ expired, ignored. */
 void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit);
+void nr_pdsch_solver_note_probe_snr(uint32_t token, float snr_db); /* a search probe's post-equalisation SNR, before its feedback (EVIDENCE RANK) */
 
 /** DM-RS symbol mask, type A, single-symbol DM-RS, PDSCH S..S+L-1 (TS 38.211 Table 7.4.1.1.2-3). */
 uint16_t nr_pdsch_solver_dmrs_mask(int l0, int S, int L, int add_pos);
