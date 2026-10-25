@@ -139,3 +139,35 @@ if(ENABLE_TESTS)
   add_test(NAME test_iq_chan_soak5 COMMAND nice -n 19 test_iq_chan --soak 5) # the 60 s run is the STOP evidence, run by hand
 endif()
 # ---- end C1C2 ----
+
+# ---- A7 ----
+# Per-cell CSI-RS discovery host side: interleave test (detector history, TD front end, prealloc/ledger/bound workers). Same sources and libraries as test_nr_csirs_disc_td
+# (nr_cell.c comes with LOG); nr_host_membudget.c is compiled in so the per-cell host ledger is exercised against the real budget.
+if(ENABLE_TESTS)
+  set(A7_TR ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
+  add_executable(test_nr_csirs_disc_cell
+    ${A7_TR}/tests/nr_csirs_disc_cell_test.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/INIT/nr_parms.c
+    ${A7_TR}/nr_csirs_disc_td.c
+    ${A7_TR}/nr_csirs_disc_feed.c
+    ${A7_TR}/nr_csirs_disc_backend.c
+    ${A7_TR}/nr_csirs_disc.c
+    ${A7_TR}/nr_csirs_disc_fp.c
+    ${A7_TR}/nr_csirs_disc_hyp.c
+    ${A7_TR}/nr_csirs_disc_sweep.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/MODULATION/slot_fep_nr.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS/nr_host_membudget.c)
+  target_include_directories(test_nr_csirs_disc_cell PRIVATE ${A7_TR} ${A7_TR}/tests)
+  target_link_libraries(test_nr_csirs_disc_cell PRIVATE nr_csirs_disc_synth nr_phy_common PHY_COMMON nr_common nr_fapi_p5
+    asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs UTIL ${CMAKE_DL_LIBS} pthread m)
+  target_compile_options(test_nr_csirs_disc_cell PRIVATE -ffunction-sections -fdata-sections)
+  target_link_options(test_nr_csirs_disc_cell PRIVATE -Wl,--gc-sections -Wl,--no-export-dynamic
+    "-Wl,--export-dynamic-symbol=T_*" -Wl,--export-dynamic-symbol=g_log
+    -Wl,--export-dynamic-symbol=logRecord_mt -Wl,--export-dynamic-symbol=exit_function
+    -Wl,--export-dynamic-symbol=write_file_matlab
+    "-Wl,--export-dynamic-symbol=nr_csirs_disc_sweep_*")
+  add_dependencies(test_nr_csirs_disc_cell dfts)
+  add_dependencies(tests test_nr_csirs_disc_cell)
+  add_test(NAME test_nr_csirs_disc_cell COMMAND test_nr_csirs_disc_cell)
+endif()
+# ---- end A7 ----

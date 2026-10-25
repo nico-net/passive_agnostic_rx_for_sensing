@@ -202,63 +202,90 @@ openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	877	nr_rx_pdcch_symbol::s_dq_left	func_sta
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	949	nr_rx_pdcch_symbol::s_shift_log_left	func_static	_Atomic int	PROCESS	A3	log/dashboard state
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	1128	nr_dci_decoding_procedure::s_si_hit	func_static	uint32_t	UNCLASSIFIED	A3	
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	1128	nr_dci_decoding_procedure::s_si_try	func_static	uint32_t	UNCLASSIFIED	A3	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	50	pipeline_ready	file_static	bool	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	51	g_ring_capacity	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	53	g_el_on	file_static	bool	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	54	g_el	file_static	nr_gpu_elastic_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	59	g_once	file_static	pthread_once_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	60	g_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	61	g_metrics	file_static	nr_csirs_disc_metrics_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	62	pipeline_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	64	cache	file_static	sweep_cache_t[256]	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	65	cache_count	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	66	evidence_epoch	file_static	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	69	evidence_retry	file_static	struct {}[16]	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	70	evidence_retries	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	81	qualified	file_static	struct {}[256]	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	82	qualified_count	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	84	q_strength	file_static	float[256]	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	85	q_was	file_static	bool[256]	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	85	rl_epoch	file_static	bool[256]	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	86	rl_known	file_static	nr_csirs_disc_fp_t[128]	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	86	rl_pending	file_static	nr_csirs_disc_fp_t[128][8]	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	87	rl_known_n	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	87	rl_pending_n	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	88	cache_grid	file_static	const int16_t *	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	89	cache_written	file_static	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	185	g_el_ant	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	185	g_el_demand	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	185	g_el_rb	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	186	g_el_host_per_slot	file_static	size_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	186	g_el_per_slot	file_static	size_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	331	rl_update::st	func_static	nr_csirs_rl_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	332	rl_update::cfg	func_static	nr_csirs_rl_cfg_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	333	rl_update::init	func_static	bool	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	386	rl_update::wait_log	func_static	uint64_t	PROCESS	A7	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	402	nr_csirs_disc_test_sweep_limit	global	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	585	nr_csirs_disc_process::gate_logged	func_static	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	586	nr_csirs_disc_process::gate_has_logged	func_static	bool	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	10	once	file_static	pthread_once_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	11	raw_ops	file_static	nr_csirs_disc_gpu_ops_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	12	public_ops	file_static	nr_csirs_disc_gpu_ops_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	13	breaker_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	14	retry_after_ms	file_static	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	15	failures	file_static	unsigned	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	221	g_gpu_disabled	file_static	volatile int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	19	nr_csirs_disc_periods	global	const uint16_t[NR_CSIRS_DISC_NUM_PERIODS]	CONST	A7	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	21	nr_csirs_disc_alloc_unified	global	void * (*)(size_t bytes)	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	22	nr_csirs_disc_free_unified	global	void (*)(void *ptr)	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	23	nr_csirs_disc_process_hook	global	void (*)(nr_csirs_disc_ring_t *ring)	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	24	csirs_disc_feed_drops	global	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	50	g_worker	file_static	disc_worker_t	UNCLASSIFIED	A7	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	61	pipeline_ready	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	63	g_ring_capacity	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	66	g_el_on	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	68	g_el	file_static	nr_gpu_elastic_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	74	g_once	file_static	pthread_once_t	PROCESS	A7	one-time init (GPU ops, process hook, epoch subscription, hypothesis-table warm-up) via pthread_once; touches no cell state
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	75	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	77	g_metrics	file_static	nr_csirs_disc_metrics_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	79	pipeline_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	83	cache	file_static	sweep_cache_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	85	cache_count	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	87	g_evidence_epoch	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	93	evidence_retry	file_static	evidence_retry_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	95	evidence_retries	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	109	qualified	file_static	qualified_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	111	qualified_count	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	115	q_strength	file_static	q_strength_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	118	q_was	file_static	q_was_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	120	rl_epoch	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	123	rl_known	file_static	rl_known_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	126	rl_pending	file_static	rl_pending_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	128	rl_known_n	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	130	rl_pending_n	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	132	cache_grid	file_static	const int16_t * [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	134	cache_written	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	231	g_el_demand	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	233	g_el_rb	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	235	g_el_ant	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	237	g_el_per_slot	file_static	size_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	239	g_el_host_per_slot	file_static	size_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	385	rl_st	file_static	nr_csirs_rl_t [converted]	PER_CELL	A7	rate-limit state machine follows the cell stream clock
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	387	rl_cfg	file_static	nr_csirs_rl_cfg_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	389	rl_init	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	391	rl_wait_log	file_static	uint64_t [converted]	PER_CELL	A7	log timer on the cell stream clock (was auto-PROCESS)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	465	gate_logged	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	467	gate_has_logged	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	469	nr_csirs_disc_test_sweep_limit	global	int	PROCESS	A7	test knob (hypotheses swept per batch), set by tests before a run, read-only in production
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	10	once	file_static	pthread_once_t	PROCESS	A7	GPU module loader (dlopen once per process)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	11	raw_ops	file_static	nr_csirs_disc_gpu_ops_t	PROCESS	A7	GPU module entry points, filled once by load_module (one CUDA context)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	12	public_ops	file_static	nr_csirs_disc_gpu_ops_t	PROCESS	A7	guarded GPU ops table, filled once with raw_ops
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	13	breaker_lock	file_static	pthread_mutex_t	PROCESS	A7	GPU device circuit breaker: one device/context, a failing GPU affects every cell; G owns per-cell GPU health
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	14	retry_after_ms	file_static	uint64_t	PROCESS	A7	GPU circuit breaker (shared device)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	15	failures	file_static	unsigned	PROCESS	A7	GPU circuit breaker (shared device)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	221	g_gpu_disabled	file_static	volatile int	PROCESS	A7	process-wide GPU-off switch set by pipeline_init on a GPU preallocation failure; the GPU module (G) holds ONE workspace, so per-cell disable needs G per-cell GPU state (site listed in MPCI-A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	22	nr_csirs_disc_periods	global	const uint16_t[NR_CSIRS_DISC_NUM_PERIODS]	CONST	A7	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	24	nr_csirs_disc_alloc_unified	global	void * (*)(size_t bytes)	PROCESS	A7	GPU allocator hook, set once by load_module
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	25	nr_csirs_disc_free_unified	global	void (*)(void *ptr)	PROCESS	A7	GPU allocator hook, set once by load_module
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	26	nr_csirs_disc_process_hook	global	void (*)(nr_csirs_disc_ring_t *ring)	PROCESS	A7	function pointer set once by init_once; the hook is called with the cell worker ring
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	27	csirs_disc_feed_drops	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics), declared in nr_csirs_disc.h and read by files outside A7; per-cell split is a metrics-owner follow-up
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	56	g_worker	file_static	disc_worker_t [converted]	PER_CELL	A7	worker ring + TD binding + wake state + thread of the cell; the worker thread is created bound (nr_cell_thread_create)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	70	cell_mem_lock	file_static	pthread_mutex_t	PROCESS	A7	guards cell_ledger
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	71	cell_ledger	file_static	struct {}[NR_CELL_MAX]	PROCESS	A7	host-RAM ledger indexed explicitly by cell (one nr_host_membudget commit per module = sum over cells); G1 reads it via nr_csirs_disc_cell_mem
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	10	periods	file_static	const int[]	CONST	A7	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	179	history	file_static	history_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	180	csirs_disc_cpu_detect_batches	global	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	180	csirs_disc_gpu_detect_batches	global	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	181	csirs_disc_cpu_lattice_calls	global	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	181	csirs_disc_gpu_lattice_calls	global	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	182	history_unified	file_static	bool	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	683	detect::warned	func_static	bool	UNCLASSIFIED	A7	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	183	history	file_static	history_t [converted]	PER_CELL	A7	cumulative footprint history of the cell ring (arrays heap, sized from the cell ring geometry)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	185	csirs_disc_cpu_detect_batches	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	185	csirs_disc_gpu_detect_batches	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	186	csirs_disc_cpu_lattice_calls	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	186	csirs_disc_gpu_lattice_calls	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	187	history_unified	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	517	warned	file_static	bool [converted]	PER_CELL	A7	log-once flag of the CPU fallback, per cell (moved to file scope for the audit)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	21	row_rules	file_static	const row_rule_t[18]	CONST	A7	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	50	table	file_static	table_entry_t *	PROCESS	A7	legal-hypothesis table, built once under pthread_once (rows 1-18 of 38.211 Table 7.4.1.5.3-1), read-only afterwards, identical for every cell
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	51	table_n	file_static	int	PROCESS	A7	legal table (build once, read-only)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	52	table_cap	file_static	int	PROCESS	A7	legal table (build once)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	53	hash_head	file_static	int[HYP_HASH_SIZE]	PROCESS	A7	legal table hash (build once, read-only)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	54	table_once	file_static	pthread_once_t	PROCESS	A7	one-time table build
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	174	valid_period::legal	func_static	const uint16_t[NR_CSIRS_DISC_NUM_PERIODS]	CONST	A7	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c	15	valid_hyp::bits	func_static	const uint8_t[]	CONST	A7	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c	16	valid_hyp::cdm	func_static	const uint8_t[]	CONST	A7	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c	220	nr_csirs_disc_sweep_cpu::evidence	tls	cpu_evidence_t *	TLS	A7	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	39	td	file_static	td_t [converted]	PER_CELL	A7	TD front end of the cell; NR_CELL_STATIC_HEAP (frame-parameter copy ~1.4 MB), allocated by nr_csirs_disc_td_init before the RX fence; pool/FFT buffers separate heap blocks sized from the cell fp
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	44	csirs_disc_fep_cpu_chunks	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	44	csirs_disc_fep_gpu_chunks	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	45	csirs_disc_fep_max_us	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	45	csirs_disc_fep_us	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	46	csirs_disc_fft_batches	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	46	csirs_disc_fft_us	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	46	csirs_disc_td_overflows	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	50	rl_div	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	52	rl_G	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	54	rl_rearm	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	56	csirs_disc_rl_skipped	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	58	burst_end	file_static	long [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	203	feed_origin	file_static	long [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	283	warned	file_static	bool [converted]	PER_CELL	A7	log-once flag of the CPU fallback, per cell (moved to file scope for the audit)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	26	discovery_stream	file_static	DiscoveryStream	UNCLASSIFIED	G4	
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	50	disc_chunks::span	tls	NrGpuSpan	TLS	G4	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	222	g_segment_blocks	file_static	int	UNCLASSIFIED	G4	
@@ -295,31 +322,6 @@ openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	261	workspace	global	str
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	279	workspace_mutex	file_static	std::mutex	UNCLASSIFIED	G4	
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	330	chunks::span	tls	NrGpuSpan	TLS	G4	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	840	nr_csirs_disc_gpu_confirm_entry::stage	func_static	std::vector<short2>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	21	row_rules	file_static	const row_rule_t[18]	CONST	A7	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	50	table	file_static	table_entry_t *	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	51	table_n	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	52	table_cap	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	53	hash_head	file_static	int[HYP_HASH_SIZE]	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	54	table_once	file_static	pthread_once_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	174	valid_period::legal	func_static	const uint16_t[NR_CSIRS_DISC_NUM_PERIODS]	CONST	A7	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c	15	valid_hyp::bits	func_static	const uint8_t[]	CONST	A7	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c	16	valid_hyp::cdm	func_static	const uint8_t[]	CONST	A7	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c	220	nr_csirs_disc_sweep_cpu::evidence	tls	cpu_evidence_t *	TLS	A7	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	21	td	file_static	struct {}	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	34	csirs_disc_fep_cpu_chunks	global	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	34	csirs_disc_fep_gpu_chunks	global	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	35	csirs_disc_fep_max_us	global	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	35	csirs_disc_fep_us	global	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	36	csirs_disc_fft_batches	global	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	36	csirs_disc_fft_us	global	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	36	csirs_disc_td_overflows	global	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	40	rl_G	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	40	rl_div	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	40	rl_rearm	file_static	int	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	41	csirs_disc_rl_skipped	global	uint64_t	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	43	burst_end	file_static	long	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	199	nr_csirs_disc_td_push::feed_origin	func_static	long	UNCLASSIFIED	A7	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	328	nr_csirs_disc_td_drain::warned	func_static	bool	UNCLASSIFIED	A7	
 openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe.c	115	g_gmu	file_static	pthread_mutex_t	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe.c	116	g_grants	file_static	nr_dltp_grant_t[NR_DLTP_GRANTS]	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe.c	117	g_gn	file_static	unsigned	UNCLASSIFIED	A4	

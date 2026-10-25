@@ -2,7 +2,9 @@
 
 #define _GNU_SOURCE
 #include "common/utils/nr_bg_lane.h"
+#include "common/utils/nr_cell.h"
 #include "nr_csirs_disc.h"
+#include "nr_csirs_disc_cell.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -14,6 +16,7 @@
 #include <time.h>
 
 #include "PHY/TOOLS/nr_admit.h"
+#include "PHY/TOOLS/nr_host_membudget.h"
 #include "PHY/defs_nr_common.h"
 
 const uint16_t nr_csirs_disc_periods[NR_CSIRS_DISC_NUM_PERIODS] = {4, 5, 8, 10, 16, 20, 32, 40, 64, 80, 160, 320, 640};
@@ -47,27 +50,84 @@ typedef struct {
   bool thread_started;
 } disc_worker_t;
 
-static disc_worker_t g_worker;
+/* PER_CELL (mpci A7): one worker (rings, TD queue binding, wake state, thread) per cell. disc_worker_main runs bound to its cell (nr_cell_thread_create in start), so every
+ * g_worker use inside the thread, in start/stop and in the TD drain/push resolves to the cell's slot. The struct is small: the grids are heap blocks (nr_csirs_disc_ring_init),
+ * sized from the cell's N_RB / n_ant / host-RAM budget. Code that can run on a thread of ANOTHER cell (ring_push/ring_reset on a given ring) finds the owner from the ring. */
+NR_CELL_STATIC(disc_worker_t, g_worker);
+#define g_worker NR_CELL_REF(g_worker)
+
+/* worker_cell_of: the cell whose worker ring is r, or -1 (a ring that is not a worker ring: snapshot, test rings). */
+static int worker_cell_of(const nr_csirs_disc_ring_t *r)
+{
+  for (int c = 0; c < NR_CELL_MAX; ++c)
+    if (r == &g_worker_cells[c].ring)
+      return c;
+  return -1;
+}
+
+/* Host-RAM ledger of the discovery instances. nr_host_membudget keeps ONE committed figure per module (commit replaces it): with several cells every cell records its
+ * own bytes here and the module is committed with the sum, so the headroom seen by the next cell (and by the GrantWork pool) is real. PROCESS state, cell-indexed explicitly. */
+static pthread_mutex_t cell_mem_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+  size_t host[NR_HOST_MEM_N];
+  nr_csirs_disc_cell_mem_t mem;
+} cell_ledger[NR_CELL_MAX];
 
 /* U1's standalone test deliberately links no U5 object. */
 extern const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void) __attribute__((weak));
 extern bool nr_csirs_disc_pipeline_ready(void) __attribute__((weak));
 extern void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp) __attribute__((weak));
 extern int nr_csirs_disc_ring_capacity(void) __attribute__((weak));
-#include "PHY/TOOLS/nr_host_membudget.h"
 extern void nr_host_membudget_commit(nr_host_mem_module_t m, size_t bytes, double scale) __attribute__((weak));
 
+extern size_t nr_host_membudget_headroom(void) __attribute__((weak));
 extern long nr_host_membudget_size(nr_host_mem_module_t m, int pct, size_t fixed, size_t per_unit, long lo, long hi) __attribute__((weak));
 extern size_t nr_csirs_disc_td_bytes(const NR_DL_FRAME_PARMS *, int, int) __attribute__((weak));
 extern void nr_csirs_disc_ring_host_cap(int capacity) __attribute__((weak));
 extern int nr_csirs_disc_td_init(const NR_DL_FRAME_PARMS *, int, int) __attribute__((weak));
 extern void nr_csirs_disc_td_free(void) __attribute__((weak));
 extern void nr_csirs_disc_td_reset(void) __attribute__((weak));
+extern void nr_csirs_disc_td_reset_cell(int cell) __attribute__((weak));
 extern int nr_csirs_disc_td_pending(void) __attribute__((weak));
 extern int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *) __attribute__((weak));
 
 extern int nr_csirs_blind_rt_discovery_drain(void) __attribute__((weak));
-static void worker_note_slot(void);
+static void worker_note_slot(int cell);
+
+/* nr_csirs_disc_cell_host_commit: records `bytes` as the cell's holding in module m and commits the sum over all cells (N=1: exactly nr_host_membudget_commit(m, bytes, scale)).
+ *   Callers: start/stop below and the elastic ring in nr_csirs_disc.c (cell = the calling thread's). */
+void nr_csirs_disc_cell_host_commit(nr_host_mem_module_t m, size_t bytes, double scale)
+{
+  if (!nr_host_membudget_commit || m >= NR_HOST_MEM_N) return;
+  const int cell = nr_cell_idx();
+  pthread_mutex_lock(&cell_mem_lock);
+  cell_ledger[cell].host[m] = bytes;
+  size_t sum = 0;
+  for (int c = 0; c < NR_CELL_MAX; ++c) sum += cell_ledger[c].host[m];
+  nr_host_membudget_commit(m, sum, scale);
+  pthread_mutex_unlock(&cell_mem_lock);
+}
+
+/* host_size: nr_host_membudget_size() for one cell: the largest k in [lo, hi] with fixed + per_unit * k within pct % of the headroom plus what THIS cell already holds
+ *   (the budget's own `own` is the module sum, which would credit the other cells' bytes); commits the sum. 0 = below the floor (this cell holds nothing then). */
+static long host_size(nr_host_mem_module_t m, int pct, size_t fixed, size_t per_unit, long lo, long hi)
+{
+  if (hi < 1) return 0;
+  pthread_mutex_lock(&cell_mem_lock);
+  const size_t own = cell_ledger[nr_cell_idx()].host[m];
+  pthread_mutex_unlock(&cell_mem_lock);
+  const long k = nr_host_membudget_fit_pct(nr_host_membudget_headroom(), own, pct, fixed, per_unit, lo, hi);
+  nr_csirs_disc_cell_host_commit(m, k ? fixed + per_unit * (size_t)k : 0, (double)k / (double)hi);
+  return k;
+}
+
+/* nr_csirs_disc_cell_note_gpu: the device bytes the cell's ring commits (pipeline_init in nr_csirs_disc.c; the G1 ledger reads them through nr_csirs_disc_cell_mem). */
+void nr_csirs_disc_cell_note_gpu(size_t bytes)
+{
+  pthread_mutex_lock(&cell_mem_lock);
+  cell_ledger[nr_cell_idx()].mem.gpu_bytes = bytes;
+  pthread_mutex_unlock(&cell_mem_lock);
+}
 
 /* nr_csirs_disc_enabled: true; CSI-RS blind discovery is always on (kept for the callers in the PHY receive path, the PDSCH queue and the blind monitor). */
 bool nr_csirs_disc_enabled(void)
@@ -266,7 +326,8 @@ void nr_csirs_disc_ring_reset(nr_csirs_disc_ring_t *r)
 {
   ring_private_t *state=r?r->private_state:NULL;
   if(!state) return;
-  if (r == &g_worker.ring && nr_csirs_disc_td_reset) nr_csirs_disc_td_reset();
+  const int wc = worker_cell_of(r);
+  if (wc >= 0 && nr_csirs_disc_td_reset_cell) nr_csirs_disc_td_reset_cell(wc);
   pthread_mutex_lock(&state->read_lock);
   for(int i=0;i<r->capacity;++i) pthread_mutex_lock(&state->entry_lock[i]);
   memset(r->meta,0,r->capacity*sizeof(*r->meta));
@@ -405,8 +466,9 @@ int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r,
   __atomic_add_fetch(&r->written, 1, __ATOMIC_RELEASE);
   pthread_mutex_unlock(&state->entry_lock[index]);
   pthread_mutex_unlock(&state->read_lock);
-  if (r == &g_worker.ring)
-    worker_note_slot();
+  const int wc = worker_cell_of(r);
+  if (wc >= 0)
+    worker_note_slot(wc);
   return index;
 }
 
@@ -502,10 +564,10 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
   const bool snapshot_used = nr_csirs_disc_td_init == NULL;
   /* Host-RAM budget (nr_host_membudget.h): the host grid of the ring (plus the snapshot ring when used) takes at most 30 % of the headroom; floor 160 slots
    * (a 160-slot CSI-RS period; longer periods then fold less evidence per batch). Below the floor discovery does not start (logged), the receiver runs on. */
-  if (nr_host_membudget_size) {
+  if (nr_host_membudget_headroom && nr_host_membudget_commit) {
     const size_t per_slot = (size_t)n_ant * NR_CSIRS_DISC_NSYM * (size_t)(24 * fp->N_RB_DL) * sizeof(int16_t) * (snapshot_used ? 2 : 1);
     const int lo = capacity < 160 ? capacity : 160;
-    const long k = nr_host_membudget_size(NR_HOST_MEM_CSIRS, 30, 0, per_slot, lo, capacity);
+    const long k = host_size(NR_HOST_MEM_CSIRS, 30, 0, per_slot, lo, capacity);
     if (k == 0) {
       fprintf(stderr, "[PHY] SENSING: HOST_MEM CSIRS_DISC ring: below the %d-slot floor (%zu MB); slot discovery off\n", lo, ((size_t)lo * per_slot) >> 20);
       goto fail;
@@ -528,19 +590,19 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
   if (snapshot_used && nr_csirs_disc_ring_init(&g_worker.snapshot, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, false) != 0)
     goto fail;
   int td_capacity = 1024; /* time-domain slot queue (512 ms at 30 kHz): 1138 MB at 273 PRB / 4 RX */
-  if (nr_csirs_disc_td_init && nr_host_membudget_size && nr_csirs_disc_td_bytes) {
+  if (nr_csirs_disc_td_init && nr_host_membudget_headroom && nr_host_membudget_commit && nr_csirs_disc_td_bytes) {
     /* shrinkable: a shorter queue overflows sooner under a discovery backlog (counted drops, the RT path never waits); floor 256 slots, 60 % of the headroom (discovery before the GrantWork pool) */
     /* per slot averaged over the full queue (the pool is rounded to 2 MB, so a one-slot difference can be 0); f0 = the capacity-independent part (batch slots + FFT buffers) */
     const size_t b1 = nr_csirs_disc_td_bytes(fp, n_ant, 1), per_slot = (nr_csirs_disc_td_bytes(fp, n_ant, td_capacity + 1) - b1) / (size_t)td_capacity;
     const size_t f0 = b1 > per_slot ? b1 - per_slot : 0;
-    const long k = nr_host_membudget_size(NR_HOST_MEM_TD, 60, f0 + (2u << 20), per_slot, 256, td_capacity);
+    const long k = host_size(NR_HOST_MEM_TD, 60, f0 + (2u << 20), per_slot, 256, td_capacity);
     if (k == 0) {
       fprintf(stderr, "[PHY] SENSING: HOST_MEM CSIRS_DISC time-domain queue: below the 256-slot floor (%zu MB); slot discovery off\n", (f0 + 256 * per_slot) >> 20);
       goto fail;
     }
     if (k != td_capacity) fprintf(stderr, "[PHY] SENSING: HOST_MEM CSIRS_DISC time-domain queue %d -> %ld slots (%zu KB each, host-RAM budget)\n", td_capacity, k, per_slot >> 10);
     td_capacity = (int)k;
-    nr_host_membudget_commit(NR_HOST_MEM_TD, nr_csirs_disc_td_bytes(fp, n_ant, td_capacity), (double)td_capacity / 1024.0);
+    nr_csirs_disc_cell_host_commit(NR_HOST_MEM_TD, nr_csirs_disc_td_bytes(fp, n_ant, td_capacity), (double)td_capacity / 1024.0);
   }
   if (nr_csirs_disc_td_init && nr_csirs_disc_td_init(fp, n_ant, td_capacity) != 0)
     goto fail;
@@ -551,22 +613,38 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
   const bool attr_ready = pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED) == 0
                           && pthread_attr_setschedpolicy(&attr, SCHED_OTHER) == 0
                           && pthread_attr_setschedparam(&attr, &sched_param) == 0;
-  const int thread_result = attr_ready ? pthread_create(&g_worker.thread, &attr, disc_worker_main, NULL) : -1;
+  /* the worker serves this cell only: it is created bound to it (nr_cell_idx() inside the thread = this cell) */
+  const int thread_result = attr_ready ? nr_cell_thread_create(&g_worker.thread, &attr, disc_worker_main, NULL, nr_cell_idx()) : -1;
   pthread_attr_destroy(&attr);
   if (thread_result != 0)
     goto fail;
   g_worker.thread_started = true;
   atomic_store_explicit(&g_worker.running, true, memory_order_release);
+  {
+    nr_csirs_disc_cell_mem_t *m = &cell_ledger[nr_cell_idx()].mem;
+    pthread_mutex_lock(&cell_mem_lock);
+    m->active = true;
+    m->n_rb = fp->N_RB_DL;
+    m->n_ant = n_ant;
+    m->ring_slots = capacity;
+    m->td_slots = nr_csirs_disc_td_init ? td_capacity : 0;
+    m->ring_host_bytes = (size_t)capacity * g_worker.ring.slot_stride * sizeof(int16_t) * (snapshot_used ? 2 : 1);
+    m->td_host_bytes = nr_csirs_disc_td_init && nr_csirs_disc_td_bytes ? nr_csirs_disc_td_bytes(fp, n_ant, td_capacity) : 0;
+    pthread_mutex_unlock(&cell_mem_lock);
+  }
   return 0;
 
 fail:
-  if (nr_host_membudget_commit) { nr_host_membudget_commit(NR_HOST_MEM_CSIRS, 0, 0.0); nr_host_membudget_commit(NR_HOST_MEM_TD, 0, 0.0); }
+  if (nr_host_membudget_commit) { nr_csirs_disc_cell_host_commit(NR_HOST_MEM_CSIRS, 0, 0.0); nr_csirs_disc_cell_host_commit(NR_HOST_MEM_TD, 0, 0.0); }
   if (nr_csirs_disc_td_free) nr_csirs_disc_td_free();
   nr_csirs_disc_ring_free(&g_worker.snapshot);
   nr_csirs_disc_ring_free(&g_worker.ring);
   pthread_cond_destroy(&g_worker.wake_cv);
   pthread_mutex_destroy(&g_worker.wake_lock);
   memset(&g_worker, 0, sizeof(g_worker));
+  pthread_mutex_lock(&cell_mem_lock);
+  memset(&cell_ledger[nr_cell_idx()].mem, 0, sizeof(cell_ledger[0].mem));
+  pthread_mutex_unlock(&cell_mem_lock);
   return -1;
 }
 
@@ -592,6 +670,23 @@ void nr_csirs_disc_stop(void)
     pthread_mutex_destroy(&g_worker.wake_lock);
   }
   memset(&g_worker, 0, sizeof(g_worker));
+  /* the cell's bytes go back to the ledger; with other cells running the module stays committed with their sum (the last cell leaves the commitment as today) */
+  {
+    const int cell = nr_cell_idx();
+    pthread_mutex_lock(&cell_mem_lock);
+    memset(&cell_ledger[cell].mem, 0, sizeof(cell_ledger[cell].mem));
+    size_t other[NR_HOST_MEM_N] = {0};
+    bool any = false;
+    for (int m = 0; m < NR_HOST_MEM_N; ++m) {
+      cell_ledger[cell].host[m] = 0;
+      for (int c = 0; c < NR_CELL_MAX; ++c) other[m] += cell_ledger[c].host[m];
+      any |= other[m] != 0;
+    }
+    if (any && nr_host_membudget_commit)
+      for (int m = NR_HOST_MEM_CSIRS; m <= NR_HOST_MEM_TD; ++m)
+        nr_host_membudget_commit((nr_host_mem_module_t)m, other[m], 1.0);
+    pthread_mutex_unlock(&cell_mem_lock);
+  }
 }
 
 /* nr_csirs_disc_running: true while the discovery worker is running (started and not stopped).
@@ -613,12 +708,55 @@ nr_csirs_disc_ring_t *nr_csirs_disc_worker_ring(void)
 /* worker_note_slot: called after each pushed worker-ring slot: when the write counter hits a multiple of the batch size, bumps the wake generation and signals the worker.
  *   Does nothing when the worker is not running. Caller: nr_csirs_disc_ring_push() on the worker ring.
  */
-static void worker_note_slot(void)
+static void worker_note_slot(int cell)
 {
-  if (!nr_csirs_disc_running())
+  disc_worker_t *w = &g_worker_cells[cell];
+  if (!atomic_load_explicit(&w->running, memory_order_acquire))
     return;
-  if ((g_worker.ring.written % (uint64_t)g_worker.batch) == 0) {
-    __atomic_add_fetch(&g_worker.wake_generation, 1, __ATOMIC_RELEASE);
-    pthread_cond_signal(&g_worker.wake_cv);
+  if ((w->ring.written % (uint64_t)w->batch) == 0) {
+    __atomic_add_fetch(&w->wake_generation, 1, __ATOMIC_RELEASE);
+    pthread_cond_signal(&w->wake_cv);
   }
+}
+
+/* nr_csirs_disc_cell_prealloc: see nr_csirs_disc_cell.h. The calling thread is bound to `cell` for the call and restored afterwards, so the allocation (rings, TD queue, GPU
+ *   ring) and the worker thread belong to the cell. Called once per active cell before the RX fence by the cell activation (A8). */
+int nr_csirs_disc_cell_prealloc(int cell, const NR_DL_FRAME_PARMS *fp, int n_ant)
+{
+  if (cell < 0 || cell >= NR_CELL_MAX) return -1;
+  const int prev = nr_cell_idx();
+  nr_cell_bind(cell);
+  const int rc = nr_csirs_disc_start(fp, n_ant);
+  nr_cell_bind(prev);
+  return rc;
+}
+
+/* nr_csirs_disc_cell_release: stops the discovery instance of `cell` (see nr_csirs_disc_cell.h). */
+void nr_csirs_disc_cell_release(int cell)
+{
+  if (cell < 0 || cell >= NR_CELL_MAX) return;
+  const int prev = nr_cell_idx();
+  nr_cell_bind(cell);
+  nr_csirs_disc_stop();
+  nr_cell_bind(prev);
+}
+
+bool nr_csirs_disc_cell_mem(int cell, nr_csirs_disc_cell_mem_t *out)
+{
+  if (cell < 0 || cell >= NR_CELL_MAX || !out) return false;
+  pthread_mutex_lock(&cell_mem_lock);
+  *out = cell_ledger[cell].mem;
+  pthread_mutex_unlock(&cell_mem_lock);
+  out->active = atomic_load_explicit(&g_worker_cells[cell].running, memory_order_acquire);
+  return out->active;
+}
+
+/* nr_csirs_disc_cell_host_need: host bytes at full size for the carrier (default ring, default TD queue); pure. */
+size_t nr_csirs_disc_cell_host_need(const NR_DL_FRAME_PARMS *fp, int n_ant)
+{
+  if (!fp || n_ant < 1 || n_ant > NR_CSIRS_DISC_MAX_ANT) return 0;
+  const bool snapshot_used = nr_csirs_disc_td_init == NULL;
+  const size_t ring = (size_t)NR_CSIRS_DISC_DEFAULT_CAPACITY * n_ant * NR_CSIRS_DISC_NSYM * (size_t)(24 * fp->N_RB_DL) * sizeof(int16_t) * (snapshot_used ? 2 : 1);
+  const size_t td = nr_csirs_disc_td_bytes ? nr_csirs_disc_td_bytes(fp, n_ant, 1024) : 0;
+  return ring + td;
 }

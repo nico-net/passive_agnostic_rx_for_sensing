@@ -19,6 +19,8 @@ extern void nr_host_membudget_commit(nr_host_mem_module_t m, size_t bytes, doubl
 #include "nr_pdsch_passive_queue.h"
 
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
+#include "nr_csirs_disc_cell.h"
 #include "nr_passive_cfg_epoch.h"
 
 #include <pthread.h>
@@ -44,30 +46,54 @@ extern void nr_csirs_monitor_remove_dynamic_all(void) __attribute__((weak));
 extern void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *) __attribute__((weak));
 extern void nr_csirs_disc_td_feed_params(uint32_t *, uint32_t *) __attribute__((weak));
 extern void nr_csirs_disc_td_set_duty(bool, uint32_t, uint32_t, bool) __attribute__((weak));
+/* nr_csirs_disc_feed.c (A7): per-cell host-RAM ledger. The host membudget keeps ONE committed figure per module; with several cells each cell records its own bytes there
+ * and the module is committed with the sum. Weak: fixtures without the feed commit directly. */
+extern void nr_csirs_disc_cell_host_commit(nr_host_mem_module_t m, size_t bytes, double scale) __attribute__((weak));
+extern void nr_csirs_disc_cell_note_gpu(size_t bytes) __attribute__((weak));
 extern uint64_t csirs_disc_rl_skipped __attribute__((weak));
 
+/* ---- per-cell state (mpci A7, common/utils/nr_cell.h) ----
+ * Everything below up to the sweep cache is the discovery pipeline state of ONE cell: the worker thread of a cell is created bound to it (nr_csirs_disc_start ->
+ * nr_cell_thread_create), so nr_cell_idx() selects the cell's slot in the worker, in nr_csirs_disc_start/pipeline_init (run bound by nr_csirs_disc_cell_prealloc) and in the
+ * configuration-epoch listener (runs on the thread that raises the epoch, which is the cell's own thread). Process-wide: g_once (one-time init), nr_csirs_disc_test_sweep_limit
+ * (test knob), the extern telemetry counters. Every object is small (the big buffers are heap blocks sized from the cell's N_RB in nr_csirs_disc_feed.c / _td.c). */
 #define DISC_VIEWS 128
-static bool pipeline_ready=true;
-static int g_ring_capacity=NR_CSIRS_DISC_DEFAULT_CAPACITY; /* T6b */
+NR_CELL_STATIC_INIT(bool, pipeline_ready, true);
+#define pipeline_ready NR_CELL_REF(pipeline_ready)
+NR_CELL_STATIC_INIT(int, g_ring_capacity, NR_CSIRS_DISC_DEFAULT_CAPACITY); /* T6b */
+#define g_ring_capacity NR_CELL_REF(g_ring_capacity)
 int nr_csirs_disc_ring_capacity(void) {return g_ring_capacity;}
-static bool g_el_on;
-static nr_gpu_elastic_t g_el;
+NR_CELL_STATIC(bool, g_el_on);
+#define g_el_on NR_CELL_REF(g_el_on)
+NR_CELL_STATIC(nr_gpu_elastic_t, g_el);
+#define g_el NR_CELL_REF(g_el)
 /* nr_csirs_disc_pipeline_ready: returns whether the CSI-RS discovery pipeline is usable (false after a failed GPU preallocation or discovery prepare).
  *   Read by nr_csirs_disc_start() in nr_csirs_disc_feed.c (refuses to start when the pipeline is down).
  */
 bool nr_csirs_disc_pipeline_ready(void) {return pipeline_ready;}
-static pthread_once_t g_once = PTHREAD_ONCE_INIT;
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static nr_csirs_disc_metrics_t g_metrics;
-static pthread_mutex_t pipeline_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t g_once = PTHREAD_ONCE_INIT; /* PROCESS: one-time init (GPU ops, process hook, epoch subscription, hypothesis-table warm-up) */
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_lock NR_CELL_REF(g_lock)
+NR_CELL_STATIC(nr_csirs_disc_metrics_t, g_metrics);
+#define g_metrics NR_CELL_REF(g_metrics)
+NR_CELL_STATIC_INIT(pthread_mutex_t, pipeline_lock, PTHREAD_MUTEX_INITIALIZER);
+#define pipeline_lock NR_CELL_REF(pipeline_lock)
 typedef struct {nr_csirs_disc_hyp_t h; uint64_t written; bool accepted;} sweep_cache_t;
-static sweep_cache_t cache[256];
-static int cache_count;
-static uint64_t evidence_epoch=1;
+typedef sweep_cache_t sweep_cache_arr_t[256];
+NR_CELL_STATIC(sweep_cache_arr_t, cache);
+#define cache NR_CELL_REF(cache)
+NR_CELL_STATIC(int, cache_count);
+#define cache_count NR_CELL_REF(cache_count)
+NR_CELL_STATIC_INIT(uint64_t, g_evidence_epoch, 1);
+#define g_evidence_epoch NR_CELL_REF(g_evidence_epoch)
 /* Refinement changes the score population. Retry that exact geometry in place
  * of ordinary hypotheses; never transfer credit from the coarse extent. */
-static struct {nr_csirs_disc_hyp_t h; uint64_t written;} evidence_retry[16];
-static int evidence_retries;
+typedef struct {nr_csirs_disc_hyp_t h; uint64_t written;} evidence_retry_t;
+typedef evidence_retry_t evidence_retry_arr_t[16];
+NR_CELL_STATIC(evidence_retry_arr_t, evidence_retry);
+#define evidence_retry NR_CELL_REF(evidence_retry)
+NR_CELL_STATIC(int, evidence_retries);
+#define evidence_retries NR_CELL_REF(evidence_retries)
 /* retry_refined: remembers a refined (extent-refined) hypothesis whose verification failed, so that the next batch re-verifies that exact geometry.
  *   Keeps up to 16 entries (oldest overwritten); a duplicate of an entry already stored is ignored. Caller: nr_csirs_disc_process() (CUMULATIVE).
  */
@@ -78,15 +104,35 @@ static void retry_refined(const nr_csirs_disc_hyp_t *h, uint64_t written)
   int at=evidence_retries<16?evidence_retries++:(int)(written%16);
   evidence_retry[at].h=*h; evidence_retry[at].written=written;
 }
-static struct {nr_csirs_disc_hyp_t h;uint16_t id;} qualified[256];
-static int qualified_count;
+typedef struct {nr_csirs_disc_hyp_t h;uint16_t id;} qualified_t;
+typedef qualified_t qualified_arr_t[256];
+NR_CELL_STATIC(qualified_arr_t, qualified);
+#define qualified NR_CELL_REF(qualified)
+NR_CELL_STATIC(int, qualified_count);
+#define qualified_count NR_CELL_REF(qualified_count)
 /* Rate-limit bookkeeping (nr_csirs_disc_rate_internal.h); all under pipeline_lock. */
-static float q_strength[256];
-static bool q_was[256], rl_epoch;
-static nr_csirs_disc_fp_t rl_known[128], rl_pending[8];
-static int rl_known_n, rl_pending_n;
-static const int16_t *cache_grid;
-static uint64_t cache_written;
+typedef float q_strength_arr_t[256];
+NR_CELL_STATIC(q_strength_arr_t, q_strength);
+#define q_strength NR_CELL_REF(q_strength)
+typedef bool q_was_arr_t[256];
+NR_CELL_STATIC(q_was_arr_t, q_was);
+#define q_was NR_CELL_REF(q_was)
+NR_CELL_STATIC(bool, rl_epoch);
+#define rl_epoch NR_CELL_REF(rl_epoch)
+typedef nr_csirs_disc_fp_t rl_known_arr_t[128];
+NR_CELL_STATIC(rl_known_arr_t, rl_known);
+#define rl_known NR_CELL_REF(rl_known)
+typedef nr_csirs_disc_fp_t rl_pending_arr_t[8];
+NR_CELL_STATIC(rl_pending_arr_t, rl_pending);
+#define rl_pending NR_CELL_REF(rl_pending)
+NR_CELL_STATIC(int, rl_known_n);
+#define rl_known_n NR_CELL_REF(rl_known_n)
+NR_CELL_STATIC(int, rl_pending_n);
+#define rl_pending_n NR_CELL_REF(rl_pending_n)
+NR_CELL_STATIC(const int16_t *, cache_grid);
+#define cache_grid NR_CELL_REF(cache_grid)
+NR_CELL_STATIC(uint64_t, cache_written);
+#define cache_written NR_CELL_REF(cache_written)
 /* same_seed: true when two hypotheses describe the same CSI-RS seed: same row, symbols, CDM, density, period and offset, with at least 80 % overlap of their RB extents.
  *   Used for the sweep cache and for matching cumulative evidence. Pure function. Callers: cached(), cache_result(), nr_csirs_disc_process().
  */
@@ -155,7 +201,7 @@ static void epoch_listener(const nr_cfg_epoch_snapshot_t *snapshot)
   pthread_mutex_lock(&pipeline_lock);
   cache_count=qualified_count=evidence_retries=0;cache_grid=NULL;cache_written=0;
   rl_epoch=true;rl_known_n=0;
-  ++evidence_epoch;
+  ++g_evidence_epoch;
   nr_csirs_disc_detect_reset();
   /* The IQ feed and partial hypotheses belong to the old sample epoch, but
    * confirmed CSI-RS resources are cell configuration. Keep their monitor
@@ -182,8 +228,16 @@ static void epoch_listener(const nr_cfg_epoch_snapshot_t *snapshot)
 #define ELASTIC_IDLE_TICKS 600  /* ~30 s at one batch per 100 slots (50 ms at 30 kHz) */
 #define ELASTIC_BACKOFF_TICKS 200
 
-static int g_el_demand,g_el_rb,g_el_ant;
-static size_t g_el_per_slot, g_el_host_per_slot; /* device bytes per slot (GPU budget); host grid bytes per slot (host budget) */
+NR_CELL_STATIC(int, g_el_demand);
+#define g_el_demand NR_CELL_REF(g_el_demand)
+NR_CELL_STATIC(int, g_el_rb);
+#define g_el_rb NR_CELL_REF(g_el_rb)
+NR_CELL_STATIC(int, g_el_ant);
+#define g_el_ant NR_CELL_REF(g_el_ant)
+NR_CELL_STATIC(size_t, g_el_per_slot); /* device bytes per slot (GPU budget) */
+#define g_el_per_slot NR_CELL_REF(g_el_per_slot)
+NR_CELL_STATIC(size_t, g_el_host_per_slot); /* host grid bytes per slot (host budget) */
+#define g_el_host_per_slot NR_CELL_REF(g_el_host_per_slot)
 /* nr_csirs_disc_ring_host_cap: the host-RAM budget gave the ring fewer slots than the GPU share (nr_csirs_disc_start): that is the ring's real size, the elastic base. */
 void nr_csirs_disc_ring_host_cap(int capacity)
 {
@@ -249,7 +303,10 @@ static bool elastic_tick(nr_csirs_disc_ring_t *ring)
   if(to<cur && nr_gpu_membudget_dyn_release) nr_gpu_membudget_dyn_release(NR_GPU_MEM_CSIRS,(size_t)(cur-to)*g_el_per_slot);
   nr_gpu_elastic_done(&g_el,want,to,1);
   g_ring_capacity=to;
-  if(nr_host_membudget_commit && g_el_host_per_slot) nr_host_membudget_commit(NR_HOST_MEM_CSIRS,(size_t)to*g_el_host_per_slot,(double)to/NR_CSIRS_DISC_DEFAULT_CAPACITY);
+  if(g_el_host_per_slot) {
+    if(nr_csirs_disc_cell_host_commit) nr_csirs_disc_cell_host_commit(NR_HOST_MEM_CSIRS,(size_t)to*g_el_host_per_slot,(double)to/NR_CSIRS_DISC_DEFAULT_CAPACITY);
+    else if(nr_host_membudget_commit) nr_host_membudget_commit(NR_HOST_MEM_CSIRS,(size_t)to*g_el_host_per_slot,(double)to/NR_CSIRS_DISC_DEFAULT_CAPACITY);
+  }
   LOG_A(PHY,"SENSING: CSIRS_DISC ring %d -> %d slots (demand %d, base %d, full %d; grows=%llu shrinks=%llu denied=%llu; %llu us)\n",cur,to,g_el_demand,g_el.base,g_el.full,
         (unsigned long long)g_el.grows,(unsigned long long)g_el.shrinks,(unsigned long long)g_el.denied,(unsigned long long)(now_us()-t0));
   return true;
@@ -292,7 +349,8 @@ void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp)
       g_ring_capacity=capacity;
       const size_t bytes=nr_csirs_disc_mem_fixed(fp->N_RB_DL,fp->nb_antennas_rx,fp->ofdm_symbol_size,stride,NR_CSIRS_DISC_DEFAULT_BATCH)+(size_t)capacity*nr_csirs_disc_mem_per_slot(fp->N_RB_DL,fp->nb_antennas_rx);
       const size_t full=nr_csirs_disc_mem_fixed(fp->N_RB_DL,fp->nb_antennas_rx,fp->ofdm_symbol_size,stride,NR_CSIRS_DISC_DEFAULT_BATCH)+(size_t)NR_CSIRS_DISC_DEFAULT_CAPACITY*nr_csirs_disc_mem_per_slot(fp->N_RB_DL,fp->nb_antennas_rx);
-      if(nr_gpu_membudget_commit) nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS,bytes,(double)bytes/(double)full);
+      if(nr_gpu_membudget_commit) nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS,bytes,(double)bytes/(double)full); /* G-side: one GPU ledger figure per module, see MPCI-A7 */
+      if(nr_csirs_disc_cell_note_gpu) nr_csirs_disc_cell_note_gpu(bytes);
       g_el_per_slot=nr_csirs_disc_mem_per_slot(fp->N_RB_DL,fp->nb_antennas_rx);g_el_host_per_slot=(size_t)fp->nb_antennas_rx*NR_CSIRS_DISC_NSYM*24*fp->N_RB_DL*sizeof(int16_t);g_el_rb=fp->N_RB_DL;g_el_ant=fp->nb_antennas_rx;g_el_demand=0;
       nr_gpu_elastic_init(&g_el,capacity,NR_CSIRS_DISC_DEFAULT_CAPACITY,ELASTIC_STEP,ELASTIC_IDLE_TICKS,ELASTIC_BACKOFF_TICKS);
       g_el_on=nr_gpu_elastic_enabled(&g_el) && share!=SIZE_MAX; /* a ring cut by the budget share: grows on demand; the full ring (GB10, unlimited budget) never moves */
@@ -323,21 +381,27 @@ static bool off_near(unsigned a, unsigned b, unsigned p)
   return d <= 1 || d == p - 1;
 }
 
+/* rate-limit state machine of the cell (rl_update): per cell, it follows the cell's own stream clock */
+NR_CELL_STATIC(nr_csirs_rl_t, rl_st);
+#define rl_st NR_CELL_REF(rl_st)
+NR_CELL_STATIC(nr_csirs_rl_cfg_t, rl_cfg);
+#define rl_cfg NR_CELL_REF(rl_cfg)
+NR_CELL_STATIC(bool, rl_init);
+#define rl_init NR_CELL_REF(rl_init)
+NR_CELL_STATIC(uint64_t, rl_wait_log); /* why STABLE is not reached, every 30 s of stream time */
+#define rl_wait_log NR_CELL_REF(rl_wait_log)
 /* rl_update: Builds the observation (confirmed set of this module's winners, footprint novelty, CRC counters),
  *   steps the state machine and applies the ingest duty to the TD front end. Caller: nr_csirs_disc_process() under pipeline_lock.
  */
 static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t *fps, int n_fp)
 {
-  static nr_csirs_rl_t st;
-  static nr_csirs_rl_cfg_t cfg;
-  static bool init;
-  if (!init) {
+  if (!rl_init) {
     uint32_t win = 640, div = 7;
     if (nr_csirs_disc_td_feed_params) nr_csirs_disc_td_feed_params(&win, &div);
-    cfg = (nr_csirs_rl_cfg_t){win, div, (uint64_t)(60.0 * ring->slots_per_frame * 100), 0.01, 0.5, 2};
-    init = true;
-    LOG_I(PHY, "SENSING: CSIRS_DISC RATELIMIT cfg win=%u div=%u notice_slots=%llu checks=%u cycles=%d\n", win, div,
-          (unsigned long long)cfg.notice_slots, nr_csirs_rl_checks(&cfg), cfg.stable_cycles);
+    rl_cfg = (nr_csirs_rl_cfg_t){win, div, (uint64_t)(60.0 * ring->slots_per_frame * 100), 0.01, 0.5, 2};
+    rl_init = true;
+    LOG_I(PHY, "SENSING: CSIRS_DISC RATELIMIT rl_cfg win=%u div=%u notice_slots=%llu checks=%u cycles=%d\n", win, div,
+          (unsigned long long)rl_cfg.notice_slots, nr_csirs_rl_checks(&rl_cfg), rl_cfg.stable_cycles);
   }
   nr_csirs_rl_obs_t o = {.epoch = rl_epoch};
   rl_epoch = false;
@@ -349,7 +413,7 @@ static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t
     const bool c = k >= 0;
     o.lost += q_was[i] && !c;
     if (c) { q_was[i] = true; seen |= 1ull << k; }
-    else if (!st.stable) q_was[i] = false; /* in SEARCH a loss is an edge; in STABLE it persists and is debounced by the state machine */
+    else if (!rl_st.stable) q_was[i] = false; /* in SEARCH a loss is an edge; in STABLE it persists and is debounced by the state machine */
     if (!c) continue;
     if (qualified[i].h.period > o.max_period) o.max_period = qualified[i].h.period;
     if (q_strength[i] < min_strength) min_strength = q_strength[i];
@@ -365,7 +429,7 @@ static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t
            && rl_known[k].density == fps[i].density && (rl_known[k].sym_mask & fps[i].sym_mask)
            && same_extent(&rl_known[k], &fps[i]);
     if (known) continue;
-    if (!st.stable) { if (rl_known_n < 128) rl_known[rl_known_n++] = fps[i]; }
+    if (!rl_st.stable) { if (rl_known_n < 128) rl_known[rl_known_n++] = fps[i]; }
     else if (o.n_conf && fps[i].strength >= min_strength) {
       bool again = false;
       for (int k = 0; k < rl_pending_n && !again; ++k)
@@ -381,24 +445,27 @@ static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t
     nr_pdsch_passive_queue_get_stats(&pq);
     o.crc_ok = pq.crc_ok; o.crc_dec = pq.decoded;
   }
-  const bool was = st.stable;
-  const bool changed = nr_csirs_rl_step(&st, &cfg, &o);
-  static uint64_t wait_log; /* why STABLE is not reached, every 30 s of stream time */
-  if (!st.stable && o.slot >= wait_log + (uint64_t)ring->slots_per_frame * 100 * 30) {
-    wait_log = o.slot;
+  const bool was = rl_st.stable;
+  const bool changed = nr_csirs_rl_step(&rl_st, &rl_cfg, &o);
+  if (!rl_st.stable && o.slot >= rl_wait_log + (uint64_t)ring->slots_per_frame * 100 * 30) {
+    rl_wait_log = o.slot;
     LOG_I(PHY, "SENSING: CSIRS_DISC RATELIMIT WAIT n_conf=%d lost=%d slot=%llu since_change=%llu need=%llu\n", o.n_conf, o.lost,
-          (unsigned long long)o.slot, (unsigned long long)(o.slot - st.last_change), (unsigned long long)st.need);
+          (unsigned long long)o.slot, (unsigned long long)(o.slot - rl_st.last_change), (unsigned long long)rl_st.need);
   }
-  if (changed || was != st.stable) {
-    if (nr_csirs_disc_td_set_duty) nr_csirs_disc_td_set_duty(st.stable, st.G, st.div_s, st.rearm);
+  if (changed || was != rl_st.stable) {
+    if (nr_csirs_disc_td_set_duty) nr_csirs_disc_td_set_duty(rl_st.stable, rl_st.G, rl_st.div_s, rl_st.rearm);
     struct timespec rts; clock_gettime(CLOCK_MONOTONIC, &rts);
     LOG_I(PHY, "SENSING: CSIRS_DISC RATELIMIT %s reason=%s n_conf=%d slot=%llu G=%u div_s=%u p0=%.3f skipped=%llu t=%ld.%03ld\n",
-          st.stable ? "STABLE" : "SEARCH", st.reason, o.n_conf, (unsigned long long)o.slot, st.G, st.div_s, st.p0,
+          rl_st.stable ? "STABLE" : "SEARCH", rl_st.reason, o.n_conf, (unsigned long long)o.slot, rl_st.G, rl_st.div_s, rl_st.p0,
           &csirs_disc_rl_skipped ? (unsigned long long)csirs_disc_rl_skipped : 0ull, (long)rts.tv_sec, rts.tv_nsec / 1000000);
-    st.rearm = false;
+    rl_st.rearm = false;
   }
 }
 
+NR_CELL_STATIC(uint64_t, gate_logged);
+#define gate_logged NR_CELL_REF(gate_logged)
+NR_CELL_STATIC(bool, gate_has_logged);
+#define gate_has_logged NR_CELL_REF(gate_has_logged)
 int nr_csirs_disc_test_sweep_limit = 32; /* hypotheses swept per batch; tests raise it */
 
 /* nr_csirs_disc_process: one discovery batch on a snapshot of the IQ ring: detects footprints, builds hypotheses, sweeps them (GPU or CPU), gates the winners, refines and verifies them, and admits the survivors to the CSI-RS search.
@@ -414,7 +481,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   if(elastic_tick(ring)) {pthread_mutex_unlock(&pipeline_lock);return;} /* the ring was replaced by an empty one of another size: the next batch starts on it */
   if(!nr_csirs_disc_ring_snapshot_current(ring)) {pthread_mutex_unlock(&pipeline_lock);return;}
   if(cache_grid!=ring->grid_base || ring->written<cache_written) {
-    cache_count=qualified_count=evidence_retries=0; ++evidence_epoch;
+    cache_count=qualified_count=evidence_retries=0; ++g_evidence_epoch;
     rl_epoch=true;rl_known_n=0;
   }
   cache_grid=ring->grid_base;cache_written=ring->written;
@@ -533,7 +600,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   bool gpu = false;
   const nr_csirs_disc_sweep_cfg_t sweep_cfg = {
       .id_first = 0, .id_count = 1024, .delta_max = 1, .block_re = 32, .max_slots = 4,
-      .evidence_epoch = evidence_epoch};
+      .evidence_epoch = g_evidence_epoch};
   if (n_hyp > 0 && ops && ops->sweep) {
     n_win = ops->sweep(ring, hyps, n_hyp, &sweep_cfg, wins);
     gpu = n_win >= 0;
@@ -582,8 +649,6 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
     }
 
     const nr_csirs_disc_gate_t gate = nr_csirs_disc_gate_config();
-    static uint64_t gate_logged;
-    static bool gate_has_logged;
     if (!gate_has_logged || g_metrics.batches - gate_logged >= 50) {
       gate_logged = g_metrics.batches;
       gate_has_logged = true;
@@ -731,10 +796,16 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
  */
 void nr_csirs_disc_get_metrics(nr_csirs_disc_metrics_t *out)
 {
-  if (!out)
+  nr_csirs_disc_get_metrics_cell(nr_cell_idx(), out);
+}
+
+/* nr_csirs_disc_get_metrics_cell: the metrics of cell `cell` (explicit, for the emitter that is not bound to the cell). cell outside 0..NR_CELL_MAX-1: *out is left untouched. */
+void nr_csirs_disc_get_metrics_cell(int cell, nr_csirs_disc_metrics_t *out)
+{
+  if (!out || cell < 0 || cell >= NR_CELL_MAX)
     return;
-  pthread_mutex_lock(&g_lock);
-  *out = g_metrics;
+  pthread_mutex_lock(&g_lock_cells[cell]);
+  *out = g_metrics_cells[cell];
   out->feed_drops = __atomic_load_n(&csirs_disc_feed_drops, __ATOMIC_RELAXED);
-  pthread_mutex_unlock(&g_lock);
+  pthread_mutex_unlock(&g_lock_cells[cell]);
 }

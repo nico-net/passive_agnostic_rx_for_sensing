@@ -176,10 +176,16 @@ typedef struct {
   const nr_csirs_disc_gpu_ops_t *ops;
 } history_t;
 #ifndef NR_CSIRS_DISC_GPU_MODULE
-static history_t history;
-uint64_t csirs_disc_gpu_detect_batches, csirs_disc_cpu_detect_batches;
+#include "common/utils/nr_cell.h"
+/* PER_CELL (mpci A7): the cumulative footprint history of the cell's ring (single serialized worker per cell: the cell's discovery worker, bound). The struct holds
+ * pointers and the 640-residue counters (~ 6 KB); the sum/sq/total arrays are heap (unified when the GPU history is used) sized from the cell's ring geometry
+ * (640 x (14 x 12 x n_rb + pool) x 8 B) at the first detect() of the cell. */
+NR_CELL_STATIC(history_t, history);
+#define history NR_CELL_REF(history)
+uint64_t csirs_disc_gpu_detect_batches, csirs_disc_cpu_detect_batches; /* PROCESS: extern aggregate telemetry (atomics) */
 uint64_t csirs_disc_gpu_lattice_calls, csirs_disc_cpu_lattice_calls;
-static bool history_unified;
+NR_CELL_STATIC(bool, history_unified);
+#define history_unified NR_CELL_REF(history_unified)
 /* history_alloc: allocates a zeroed uint64 array of count entries for the cumulative history, in unified memory when the GPU history is used.
  *   Caller: detect() (bootstrap of the history).
  */
@@ -508,6 +514,8 @@ void nr_csirs_disc_detect_reset(void)
   memset(&history,0,sizeof(history));
 }
 
+NR_CELL_STATIC(bool, warned); /* CPU detector fallback logged once per cell */
+#define warned NR_CELL_REF(warned)
 /* Four scheduling groups, executed serially on the single discovery worker. */
 enum { FP_GROUPS=4 };
 typedef struct {
@@ -680,7 +688,6 @@ static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c
   if(gpu) __atomic_fetch_add(&csirs_disc_gpu_detect_batches,1,__ATOMIC_RELAXED);
   else {
     __atomic_fetch_add(&csirs_disc_cpu_detect_batches,1,__ATOMIC_RELAXED);
-    static bool warned;
     if(!warned) {fprintf(stderr,"SENSING: CSIRS_DISC CPU detector fallback (not real-time)\n");warned=true;}
   }
   if(max_out>128) max_out=128;

@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc_td.h"
+#include "common/utils/nr_cell.h"
+#include "nr_csirs_disc_cell.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/MODULATION/nr_modulation.h"
 #include "PHY/nr_phy_common/inc/nr_phy_common.h"
@@ -18,7 +20,12 @@ typedef struct {
   double fo;
   bool compensate;
 } td_slot;
-static struct {
+/* PER_CELL (mpci A7): the TD front end of one cell. td_push runs on the cell's RX thread and td_drain/reset on the cell's discovery worker (both bound), so `td` is the
+ * cell's object. The struct holds the cell's frame-parameter copy (NR_DL_FRAME_PARMS, ~ 1.4 MB: far above the 64 KiB static limit, so NR_CELL_STATIC_HEAP, allocated zeroed
+ * by nr_csirs_disc_td_init -> first access of the cell, before the RX fence, from nr_csirs_disc_cell_prealloc) and pointers/counters; the sample pool / FFT buffers are
+ * separate heap blocks sized by nr_csirs_disc_td_init from the cell's frame parameters and n_ant (nr_csirs_disc_td_bytes) under the host-RAM budget.
+ * td_ready() never allocates: an inactive cell (no instance) answers "not ready" without touching the heap slot (a first access after the RX fence is fatal). */
+typedef struct {
   NR_DL_FRAME_PARMS fp;
   pthread_mutex_t lock, commit;
   void *sample_pool;
@@ -28,7 +35,10 @@ static struct {
   size_t stride;
   int16_t *input, *output;
   bool unified, ready;
-} td;
+} td_t;
+NR_CELL_STATIC_HEAP(td_t, td);
+#define td NR_CELL_HEAP_REF(td_t, td)
+#define td_ready() (td_cellp[nr_cell_idx()] && td_cellp[nr_cell_idx()]->ready)
 extern uint64_t csirs_disc_confirm_drops __attribute__((weak));
 extern uint64_t csirs_disc_confirm_wait_max_us __attribute__((weak));
 uint64_t csirs_disc_fep_gpu_chunks, csirs_disc_fep_cpu_chunks;
@@ -37,10 +47,16 @@ uint64_t csirs_disc_fft_us, csirs_disc_fft_batches, csirs_disc_td_overflows;
 
 
 /* Rate-limit shared state (written by nr_csirs_disc_process, read by td_push). rl_div == 0: baseline duty. */
-static int rl_div, rl_G, rl_rearm;
-uint64_t csirs_disc_rl_skipped;
+NR_CELL_STATIC(int, rl_div);
+#define rl_div NR_CELL_REF(rl_div)
+NR_CELL_STATIC(int, rl_G);
+#define rl_G NR_CELL_REF(rl_G)
+NR_CELL_STATIC(int, rl_rearm);
+#define rl_rearm NR_CELL_REF(rl_rearm)
+uint64_t csirs_disc_rl_skipped; /* PROCESS: extern aggregate telemetry (declared by nr_csirs_disc.c), atomics */
 enum { feed_div = 7, feed_win = 640, burst_len = 5120, acq_div = 2 }; /* ingest duty: 1 window of feed_win slots per feed_div; acquisition burst at acq_div */
-static long burst_end = -1;
+NR_CELL_STATIC_INIT(long, burst_end, -1);
+#define burst_end NR_CELL_REF(burst_end)
 
 /* nr_csirs_disc_td_feed_params: the SEARCH ingest duty (window slots, windows per period). */
 void nr_csirs_disc_td_feed_params(uint32_t *win, uint32_t *div)
@@ -136,7 +152,7 @@ fail:
  */
 void nr_csirs_disc_td_free(void)
 {
-  if (!td.ready) return;
+  if (!td_ready()) return;
   if (td.unified && td.sample_pool) nr_csirs_disc_free_unified(td.sample_pool);
   else free(td.sample_pool);
   free(td.slots);
@@ -155,13 +171,21 @@ void nr_csirs_disc_td_free(void)
  */
 void nr_csirs_disc_td_reset(void)
 {
-  if (!td.ready) return;
-  pthread_mutex_lock(&td.commit);
-  pthread_mutex_lock(&td.lock);
-  td.count = td.head = td.tail = 0;
-  ++td.epoch;
-  pthread_mutex_unlock(&td.lock);
-  pthread_mutex_unlock(&td.commit);
+  nr_csirs_disc_td_reset_cell(nr_cell_idx());
+}
+
+/* nr_csirs_disc_td_reset_cell: nr_csirs_disc_td_reset for an explicit cell (the epoch reset may run on a thread of another cell: nr_csirs_disc_ring_reset). */
+void nr_csirs_disc_td_reset_cell(int cell)
+{
+  if (cell < 0 || cell >= NR_CELL_MAX) return;
+  td_t *t = td_cellp[cell];
+  if (!t || !t->ready) return;
+  pthread_mutex_lock(&t->commit);
+  pthread_mutex_lock(&t->lock);
+  t->count = t->head = t->tail = 0;
+  ++t->epoch;
+  pthread_mutex_unlock(&t->lock);
+  pthread_mutex_unlock(&t->commit);
 }
 
 /* nr_csirs_disc_td_pending: returns the number of time-domain slots queued and not yet drained (0 when the front end is not initialised).
@@ -169,12 +193,15 @@ void nr_csirs_disc_td_reset(void)
  */
 int nr_csirs_disc_td_pending(void)
 {
-  if (!td.ready) return 0;
+  if (!td_ready()) return 0;
   pthread_mutex_lock(&td.lock);
   int n = td.count;
   pthread_mutex_unlock(&td.lock);
   return n;
 }
+
+NR_CELL_STATIC_INIT(long, feed_origin, -1); /* steady-window origin of the cell (first fed slot) */
+#define feed_origin NR_CELL_REF(feed_origin)
 
 /* nr_csirs_disc_td_push: producer side of the front end, called from the PHY receive path for each DL slot: copies the slot's CP-bearing sample window of all antennas into the queue.
  *   Duty-cycled ingest for real-time safety: a 640-slot window every 7 (feed_win, feed_div) skips windows; an acquisition burst of 5120 slots runs at acq_div.
@@ -182,7 +209,7 @@ int nr_csirs_disc_td_pending(void)
  */
 int nr_csirs_disc_td_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t frame, uint8_t slot)
 {
-  if (!td.ready || !ue) return -1;
+  if (!td_ready() || !ue) return -1;
   /* Bounded, contiguous ingest duty cycle. OTA 2026-10-07 (DGX + X410, 4 x 122.88 Msps DPDK): any
    * ~2 GB/s of CPU-coherent memory traffic (CPU memcpy or GPU access to host memory) kills the radio
    * stream, and full-rate ingest is exactly that (re-reading 1 MB/slot). Feed feed_win
@@ -196,7 +223,6 @@ int nr_csirs_disc_td_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t frame,
   const bool in_burst = (long)abs_slot < burst_end;
   if (in_burst && acq_div > 1 && ((long)abs_slot - (burst_end - burst_len)) / 320 % acq_div != 0) return 1;
   /* Steady windows are aligned to the first fed slot. */
-  static long feed_origin = -1;
   if (feed_origin < 0) feed_origin = (long)abs_slot;
   const long rel = (long)abs_slot - feed_origin;
   /* Rate-limit steady state: G windows every div_s (nr_csirs_disc_rate_internal.h). */
@@ -254,13 +280,16 @@ drop:
   return -1;
 }
 
+NR_CELL_STATIC(bool, warned); /* CPU FEP fallback logged once per cell */
+#define warned NR_CELL_REF(warned)
+
 /* nr_csirs_disc_td_drain: converts the queued time-domain slots into frequency-domain symbols in the ring, in batches: GPU FEP when the GPU chain is loaded, otherwise CPU FFT (with fo compensation and the symbol rotation).
  *   Each batch is written under the commit lock, dropped when the epoch changed, and pushed (ring write begin/end or nr_csirs_disc_ring_push). A device-resident ring never mixes failed GPU batches with CPU FEP.
  *   Returns the number of slots written. Logs an FEP summary when slots were written. Callers: disc_worker_main() (nr_csirs_disc_feed.c) and tests/nr_csirs_disc_td_fixture.c.
  */
 int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *ring)
 {
-  if (!td.ready || !ring) return 0;
+  if (!td_ready() || !ring) return 0;
   int remaining = nr_csirs_disc_td_pending(), done = 0;
   /* Never overwrite entries before the detector can fold them. */
   if (remaining > ring->capacity) remaining = ring->capacity;
@@ -325,7 +354,6 @@ int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *ring)
        * device batch with CPU FEP; retry discovery on later bounded windows. */
       __atomic_fetch_add(&csirs_disc_feed_drops,n,__ATOMIC_RELAXED);remaining-=n;continue;
     }
-    static bool warned;
     if(!warned) {
       LOG_W(PHY,"SENSING: CSIRS_DISC CPU FEP fallback (not real-time); GPU chain unavailable or failed\n");
       warned=true;
