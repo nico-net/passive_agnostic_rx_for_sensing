@@ -1,5 +1,6 @@
 #include "nr_passive_cfg_epoch.h"
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
 #include <pthread.h>
 #include <inttypes.h>
 #include <stdatomic.h>
@@ -37,25 +38,49 @@ typedef struct epoch_event {
   unsigned n_listeners;
 } epoch_event_t;
 
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static _Atomic uint32_t g_epoch;
-static _Atomic uint64_t g_cfr_stamp;
-static _Atomic uint32_t g_identity_gen;
-static _Atomic uint32_t g_dedicated_epoch;
-static _Atomic uint64_t g_current_slot;
-static nr_cfg_epoch_snapshot_t g_state;
-static cell_identity_t g_identity;
-static hash_state_t g_mib, g_sib1;
-static si_pending_t g_pending;
-static reopened_t g_reopened;
-static uint32_t g_slots_per_second = 1000;
-static _Atomic uint32_t g_si_period_slots;
-static uint64_t g_last_abs_frame;
-static bool g_have_sfn;
-static nr_cfg_epoch_listener_t g_listeners[NR_CFG_LISTENERS_MAX];
-static unsigned g_n_listeners;
-static epoch_event_t *g_event_head, *g_event_tail;
-static atomic_flag g_draining = ATOMIC_FLAG_INIT;
+typedef nr_cfg_epoch_listener_t g_listeners_arr_t[NR_CFG_LISTENERS_MAX];
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_lock NR_CELL_REF(g_lock)
+NR_CELL_STATIC(_Atomic uint32_t, g_epoch);
+#define g_epoch NR_CELL_REF(g_epoch)
+NR_CELL_STATIC(_Atomic uint64_t, g_cfr_stamp);
+#define g_cfr_stamp NR_CELL_REF(g_cfr_stamp)
+NR_CELL_STATIC(_Atomic uint32_t, g_identity_gen);
+#define g_identity_gen NR_CELL_REF(g_identity_gen)
+NR_CELL_STATIC(_Atomic uint32_t, g_dedicated_epoch);
+#define g_dedicated_epoch NR_CELL_REF(g_dedicated_epoch)
+NR_CELL_STATIC(_Atomic uint64_t, g_current_slot);
+#define g_current_slot NR_CELL_REF(g_current_slot)
+NR_CELL_STATIC(nr_cfg_epoch_snapshot_t, g_state);
+#define g_state NR_CELL_REF(g_state)
+NR_CELL_STATIC(cell_identity_t, g_identity);
+#define g_identity NR_CELL_REF(g_identity)
+NR_CELL_STATIC(hash_state_t, g_mib);
+#define g_mib NR_CELL_REF(g_mib)
+NR_CELL_STATIC(hash_state_t, g_sib1);
+#define g_sib1 NR_CELL_REF(g_sib1)
+NR_CELL_STATIC(si_pending_t, g_pending);
+#define g_pending NR_CELL_REF(g_pending)
+NR_CELL_STATIC(reopened_t, g_reopened);
+#define g_reopened NR_CELL_REF(g_reopened)
+NR_CELL_STATIC_INIT(uint32_t, g_slots_per_second, 1000);
+#define g_slots_per_second NR_CELL_REF(g_slots_per_second)
+NR_CELL_STATIC(_Atomic uint32_t, g_si_period_slots);
+#define g_si_period_slots NR_CELL_REF(g_si_period_slots)
+NR_CELL_STATIC(uint64_t, g_last_abs_frame);
+#define g_last_abs_frame NR_CELL_REF(g_last_abs_frame)
+NR_CELL_STATIC(bool, g_have_sfn);
+#define g_have_sfn NR_CELL_REF(g_have_sfn)
+NR_CELL_STATIC(g_listeners_arr_t, g_listeners);
+#define g_listeners NR_CELL_REF(g_listeners)
+NR_CELL_STATIC(unsigned, g_n_listeners);
+#define g_n_listeners NR_CELL_REF(g_n_listeners)
+NR_CELL_STATIC(epoch_event_t *, g_event_head);
+#define g_event_head NR_CELL_REF(g_event_head)
+NR_CELL_STATIC(epoch_event_t *, g_event_tail);
+#define g_event_tail NR_CELL_REF(g_event_tail)
+NR_CELL_STATIC_INIT(atomic_flag, g_draining, ATOMIC_FLAG_INIT);
+#define g_draining NR_CELL_REF(g_draining)
 static _Thread_local nr_cfg_epoch_work_t *current_work;
 static pthread_once_t enable_once = PTHREAD_ONCE_INIT;
 static bool enabled;

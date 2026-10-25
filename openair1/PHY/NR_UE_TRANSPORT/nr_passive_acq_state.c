@@ -26,6 +26,7 @@
  * NR_ACQ_SEARCHING as proof of SSB/PBCH failure specifically. */
 #include "nr_passive_acq_state.h"
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
 #include <string.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -41,12 +42,21 @@ const char *nr_passive_acq_state_name(nr_passive_acq_state_t s)
   return (s >= 0 && s < NR_ACQ_NUM_STATES) ? state_names[s] : "INVALID";
 }
 
-static nr_passive_acq_snapshot_t g_snap = { .state = NR_ACQ_SEARCHING };
+NR_CELL_STATIC_INIT(nr_passive_acq_snapshot_t, g_snap, { .state = NR_ACQ_SEARCHING });
+#define g_snap NR_CELL_REF(g_snap)
 /* Event-latched evidence and the last polled inputs, so an event can re-evaluate immediately. */
-static bool g_pbch_locked, g_sib1_decoded;
-static nr_passive_acq_inputs_t g_last_in;
-static nr_passive_acq_carrier_t g_carrier; static bool g_phy_geom_set;
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+NR_CELL_STATIC(bool, g_pbch_locked);
+#define g_pbch_locked NR_CELL_REF(g_pbch_locked)
+NR_CELL_STATIC(bool, g_sib1_decoded);
+#define g_sib1_decoded NR_CELL_REF(g_sib1_decoded)
+NR_CELL_STATIC(nr_passive_acq_inputs_t, g_last_in);
+#define g_last_in NR_CELL_REF(g_last_in)
+NR_CELL_STATIC(nr_passive_acq_carrier_t, g_carrier);
+#define g_carrier NR_CELL_REF(g_carrier)
+NR_CELL_STATIC(bool, g_phy_geom_set);
+#define g_phy_geom_set NR_CELL_REF(g_phy_geom_set)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_lock NR_CELL_REF(g_lock)
 
 /* Ordinal progress order. LOST is intentionally excluded (sentinel, ordinal -1): re-acquisition
  * from LOST is immediate once evidence supports it, only the SEARCHING->...->TRACKING direction
@@ -203,7 +213,8 @@ void nr_passive_acq_set_phy_geometry(int n_rb, int mu, int ssb_start_subcarrier,
   g_phy_geom_set = true;
   pthread_mutex_unlock(&g_lock);
 }
-static nr_tdd_config_t g_tdd;
+NR_CELL_STATIC(nr_tdd_config_t, g_tdd);
+#define g_tdd NR_CELL_REF(g_tdd)
 void nr_passive_acq_note_sib1_tdd(const nr_tdd_pattern_t *p1, const nr_tdd_pattern_t *p2)
 {
   nr_tdd_config_t t;
@@ -219,7 +230,8 @@ void nr_passive_acq_note_sib1_tdd(const nr_tdd_pattern_t *p1, const nr_tdd_patte
           p2 ? p2->period_slots : 0, p2 ? p2->dl_slots : 0, p2 ? p2->dl_symbols : 0, p2 ? p2->ul_slots : 0, p2 ? p2->ul_symbols : 0);
 }
 bool nr_passive_acq_tdd_known(void) { return g_tdd.valid; }
-static int g_tdd_ref_mu = -1; /* BC9: SIB1 referenceSubcarrierSpacing; -1 = unknown */
+NR_CELL_STATIC_INIT(int, g_tdd_ref_mu, -1); /* BC9: SIB1 referenceSubcarrierSpacing; -1 = unknown */
+#define g_tdd_ref_mu NR_CELL_REF(g_tdd_ref_mu)
 void nr_passive_acq_note_sib1_tdd_ref_mu(int mu)
 {
   pthread_mutex_lock(&g_lock);
@@ -343,7 +355,8 @@ void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, i
      * stop at broadcast facts and let the supervisor restart with the broadcast geometry. Emitted
      * once per verdict change, machine-readable, carrying everything a relaunch needs. The values
      * are SIB1's, i.e. measured off the air -- not the ones the receiver was started with. */
-    static int s_retune_logged;
+    NR_CELL_STATIC(int, s_retune_logged);
+#define s_retune_logged NR_CELL_REF(s_retune_logged)
     if (!s_retune_logged) {
       s_retune_logged = 1;
       LOG_A(PHY, "SENSING: ISAC_ACQ_RETUNE {\"reason\":\"carrier_mismatch\",\"n_rb\":%d,\"mu\":%d,"
