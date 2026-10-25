@@ -444,3 +444,261 @@ TEST(CoreLayout, ProbeOfThisHostIsConsistent)
   EXPECT_TRUE(t.allowed[L.rt]);
   for (int i = 0; i < L.npool; i++) EXPECT_TRUE(t.allowed[L.pool[i]] && t.online[L.pool[i]]);
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// B2 (mpci-main plan R3): N cells, one RT reader per cell. Fixtures are SYNTHETIC hosts (labelled in each name):
+//  dgx = DGX Spark GB10 (above), sens6 = x86 14 cpus 6P+8E isolcpus 1-2 (above), cloud4 = 4-cpu x86, big64 = 64 cpus,
+//  2 NUMA nodes (0-31 / 32-63), one L3 per 16 cpus, GPU on node 1, 2 capacity classes (ASSUMED; scaling proof only).
+namespace {
+Topo big64()
+{
+  Topo T(64);
+  T.node(0, 31, 0).node(32, 63, 1).llc(0, 15, 0).llc(16, 31, 16).llc(32, 47, 32).llc(48, 63, 48).cap(0, 15, 800).cap(32, 47, 800);
+  T.t.gpu_node = 1;
+  return T;
+}
+Topo big64_smt()
+{ /* the same with 2-way SMT: siblings c and c+32 */
+  Topo T = big64();
+  for (int c = 32; c < 64; c++) T.t.core[c] = c - 32;
+  return T;
+}
+struct Fix { const char *name; Topo T; };
+std::vector<Fix> fixtures()
+{
+  std::vector<Fix> v;
+  v.push_back({"dgx_onair", dgx(true)});
+  v.push_back({"dgx_rfsim", dgx(false)});
+  v.push_back({"sens6_rfsim", sens6()});
+  v.push_back({"sens6_onair", sens6().radio(true)});
+  v.push_back({"sens6_iso23", sens6_iso23()});
+  v.push_back({"cloud4", Topo(4)});
+  v.push_back({"cpus2", Topo(2)});
+  v.push_back({"cpus1", Topo(1)});
+  v.push_back({"big64", big64()});
+  v.push_back({"big64_onair", big64().radio(true)});
+  v.push_back({"big64_smt", big64_smt()});
+  { Topo T(16); for (int c = 8; c < 16; c++) T.t.core[c] = c - 8; v.push_back({"smt16", T}); }
+  { Topo T(16); T.node(0, 7, 0).node(8, 15, 1).llc(0, 7, 0).llc(8, 15, 8); T.t.gpu_node = 1; v.push_back({"numa16", T}); }
+  return v;
+}
+nr_core_layout_t buildn(const Topo &T, int n, const nr_cl_over_t *o = nullptr)
+{
+  nr_core_layout_t L;
+  nr_cl_build_n(&T.t, o, n, &L);
+  return L;
+}
+bool role_cpu(const nr_core_layout_t &L, int c)
+{
+  return L.lane[c] || L.home[c] || L.hk[c] || L.check[c] || L.recov[c];
+}
+void expect_invariants(const nr_core_layout_t &L, const Topo &T, const char *name, int n)
+{
+  const nr_cl_topo_t &t = T.t;
+  std::string w = std::string(name) + " n=" + std::to_string(n);
+  // readers: distinct, usable, never DPDK, never the anchor, not the radio IO
+  EXPECT_EQ(L.n_cells, n) << w;
+  EXPECT_EQ(L.rt_cell[0], L.rt) << w;
+  for (int i = 0; i < n; i++) {
+    const int r = L.rt_cell[i];
+    if (r < 0) continue;
+    EXPECT_TRUE(L.usable[r]) << w << " reader " << i;
+    EXPECT_FALSE(t.dpdk[r]) << w;
+    if (L.anchor >= 0) { EXPECT_NE(r, L.anchor) << w << " reader on the housekeeping anchor"; }
+    EXPECT_NE(r, L.uhd) << w;
+    EXPECT_NE(r, L.ring) << w;
+    for (int j = i + 1; j < n; j++) { if (L.rt_cell[j] >= 0) { EXPECT_NE(r, L.rt_cell[j]) << w; } }
+    for (int k = 0; k < L.npool; k++) EXPECT_NE(L.pool[k], r) << w << " pool token on a reader";
+    if (L.W > 0) { EXPECT_FALSE(role_cpu(L, r)) << w << " reader " << r << " carries a non-RT role"; } /* W == 0: the reader is also the only home (existing rule) */
+  }
+  for (int i = n; i < NR_CL_MAX_CELLS; i++) EXPECT_EQ(L.rt_cell[i], -1) << w;
+  // pool: disjoint from the radio IO and from every non-pool role; on non-isolated allowed CPUs
+  for (int k = 0; k < L.npool; k++) {
+    const int p = L.pool[k];
+    EXPECT_TRUE(t.allowed[p] && !t.isolated[p] && !t.dpdk[p]) << w << " pool " << p;
+    EXPECT_NE(p, L.uhd) << w;
+    EXPECT_NE(p, L.ring) << w;
+    EXPECT_FALSE(L.uhd_mask[p]) << w;
+    EXPECT_FALSE(role_cpu(L, p)) << w << " pool " << p << " also in a mask";
+    for (int j = k + 1; j < L.npool; j++) EXPECT_NE(p, L.pool[j]) << w;
+  }
+  // no non-RT role on an isolated cpu; every role on a usable cpu
+  for (int c = 0; c < t.ncpu; c++) {
+    if (role_cpu(L, c)) {
+      EXPECT_FALSE(t.isolated[c]) << w << " cpu " << c;
+      EXPECT_TRUE(L.usable[c]) << w << " cpu " << c;
+    }
+    if (c == L.uhd || c == L.ring) { EXPECT_TRUE(L.usable[c]) << w; }
+  }
+  for (int r : {L.gpu, L.uss, L.nid, L.dashboard}) {
+    if (r >= 0) { EXPECT_TRUE(L.usable[r]) << w << " role cpu " << r; }
+  }
+  // SMT siblings of readers stay out of every general mask when the host has >= 8 general cpus
+  int general = 0;
+  for (int c = 0; c < t.ncpu; c++) general += t.online[c] && t.allowed[c] && !t.isolated[c] && !t.dpdk[c];
+  if (general >= 8)
+    for (int i = 0; i < n; i++)
+      for (int c = 0; c < t.ncpu && L.rt_cell[i] >= 0; c++) {
+        if (c == L.rt_cell[i] || t.core[c] != t.core[L.rt_cell[i]]) continue;
+        bool sibling_is_reader = false;
+        for (int j = 0; j < n; j++) sibling_is_reader |= L.rt_cell[j] == c;
+        if (!sibling_is_reader) { EXPECT_FALSE(role_cpu(L, c)) << w << " sibling " << c << " of reader " << L.rt_cell[i]; }
+        for (int k = 0; k < L.npool; k++) { if (!sibling_is_reader) { EXPECT_NE(L.pool[k], c) << w; } }
+      }
+  // the floor: the plan reports hostable exactly when every cell has a reader and the pool has >= NR_CL_MIN_POOL tokens
+  bool all = true;
+  for (int i = 0; i < n; i++) all &= L.rt_cell[i] >= 0;
+  nr_core_layout_t again;
+  EXPECT_EQ(nr_cl_build_n(&t, nullptr, n, &again) == 0, all && L.npool >= NR_CL_MIN_POOL) << w;
+  if (all && L.npool >= NR_CL_MIN_POOL) { EXPECT_LE(n, L.max_cells) << w; }
+}
+} // namespace
+
+TEST(CoreLayoutN, OneCellEqualsTheHistoricalBuilderByteForByte)
+{
+  for (auto &f : fixtures()) {
+    nr_core_layout_t a, b;
+    memset(&a, 0x5a, sizeof(a));
+    memset(&b, 0xa5, sizeof(b));
+    nr_cl_build(&f.T.t, nullptr, &a);
+    nr_cl_build_n(&f.T.t, nullptr, 1, &b);
+    EXPECT_EQ(0, memcmp(&a, &b, sizeof(a))) << f.name;
+    char la[4096], lb[4096];
+    nr_cl_format(&f.T.t, &a, la, sizeof(la));
+    nr_cl_format(&f.T.t, &b, lb, sizeof(lb));
+    EXPECT_STREQ(la, lb) << f.name;
+    EXPECT_EQ(std::string(la).find(" cells="), std::string::npos) << f.name << ": the N=1 line must not change";
+    EXPECT_EQ(b.rt_cell[0], b.rt) << f.name;
+    EXPECT_EQ(b.n_cells, 1) << f.name;
+    nr_core_layout_t c;
+    nr_cl_build_n(&f.T.t, nullptr, 0, &c); /* clamped to 1 */
+    EXPECT_EQ(0, memcmp(&c, &b, sizeof(c))) << f.name;
+  }
+}
+
+TEST(CoreLayoutN, OneCellEqualsWithOverrides)
+{
+  Topo T = dgx(true);
+  nr_cl_over_t o;
+  nr_cl_over_none(&o);
+  o.rt = 5, o.ring = 16, o.gpu = 10, o.uss = 12, o.nid = 13;
+  nr_core_layout_t a, b;
+  nr_cl_build(&T.t, &o, &a);
+  nr_cl_build_n(&T.t, &o, 1, &b);
+  EXPECT_EQ(0, memcmp(&a, &b, sizeof(a)));
+}
+
+TEST(CoreLayoutN, InvariantsAndDeterminismOnEveryFixture)
+{
+  for (auto &f : fixtures())
+    for (int n = 1; n <= 4; n++) {
+      nr_core_layout_t L = buildn(f.T, n), L2 = buildn(f.T, n);
+      EXPECT_EQ(0, memcmp(&L, &L2, sizeof(L))) << f.name << " n=" << n << " not deterministic";
+      expect_invariants(L, f.T, f.name, n);
+      char la[4096], lb[4096];
+      nr_cl_format(&f.T.t, &L, la, sizeof(la));
+      nr_cl_format(&f.T.t, &L2, lb, sizeof(lb));
+      EXPECT_STREQ(la, lb);
+      if (n > 1) { EXPECT_NE(std::string(la).find(" cells=" + std::to_string(n) + " rt_cells="), std::string::npos) << la; }
+    }
+}
+
+TEST(CoreLayoutN, ReaderZeroAndRadioIoDoNotDependOnTheCellCount)
+{
+  for (auto &f : fixtures()) {
+    const nr_core_layout_t one = buildn(f.T, 1);
+    for (int n = 2; n <= 4; n++) {
+      const nr_core_layout_t L = buildn(f.T, n);
+      EXPECT_EQ(L.rt, one.rt) << f.name;
+      EXPECT_EQ(L.uhd, one.uhd) << f.name;
+      EXPECT_EQ(L.ring, one.ring) << f.name;
+      EXPECT_EQ(0, memcmp(L.uhd_mask, one.uhd_mask, sizeof(L.uhd_mask))) << f.name;
+      EXPECT_EQ(L.anchor, one.anchor) << f.name;
+    }
+  }
+}
+
+TEST(CoreLayoutN, ReadersFollowTheSingleReaderRanking)
+{
+  { /* DGX: the four X925 cores below the radio cluster, lowest number first; the pool shrinks with W by the existing rules */
+    Topo T = dgx(true);
+    nr_core_layout_t L = buildn(T, 4);
+    EXPECT_EQ(L.rt_cell[0], 5);
+    EXPECT_EQ(L.rt_cell[1], 6);
+    EXPECT_EQ(L.rt_cell[2], 7);
+    EXPECT_EQ(L.rt_cell[3], 8);
+    EXPECT_EQ(L.W, 11);
+    EXPECT_EQ(L.mode, NR_CL_COMPACT);
+    EXPECT_EQ(L.uhd, 15);
+    EXPECT_EQ(L.ring, 16);
+    EXPECT_EQ(L.npool, 6);
+    char line[4096];
+    nr_cl_format(&T.t, &L, line, sizeof(line));
+    EXPECT_NE(std::string(line).find(" cells=4 rt_cells=5,6,7,8 max_cells=12"), std::string::npos) << line;
+  }
+  { /* sens6: reader 0 on the first P core outside the isolated set, then the next P cores, then the E cores; 0 stays the anchor */
+    Topo T = sens6();
+    nr_core_layout_t L = buildn(T, 4);
+    EXPECT_EQ(L.rt_cell[0], 3);
+    EXPECT_EQ(L.rt_cell[1], 4);
+    EXPECT_EQ(L.rt_cell[2], 5);
+    EXPECT_EQ(L.rt_cell[3], 6);
+    EXPECT_EQ(L.anchor, 0);
+  }
+  { /* big host with the GPU on node 1: every reader on node 1 until it is used up */
+    Topo T = big64();
+    nr_core_layout_t L = buildn(T, 4);
+    for (int i = 0; i < 4; i++) EXPECT_GE(L.rt_cell[i], 32) << i;
+    for (int k = 0; k < L.npool; k++) EXPECT_NE(L.pool[k], 0);
+  }
+  { /* SMT: the second reader takes another physical core, not the sibling of the first */
+    Topo T = big64_smt();
+    nr_core_layout_t L = buildn(T, 2);
+    EXPECT_NE(T.t.core[L.rt_cell[0]], T.t.core[L.rt_cell[1]]);
+  }
+}
+
+TEST(CoreLayoutN, MaxCellsPerFixture)
+{
+  // max_cells = most cells with a distinct reader each (never the anchor) and a pool of >= NR_CL_MIN_POOL (=2) tokens.
+  // General CPUs C minus the anchor are the candidates; W = |C| - cells >= 3 gives pool = W - 1 >= 2 in SMALL mode.
+  struct { const char *name; int expect; } e[] = {
+      {"dgx_onair", 12}, {"dgx_rfsim", 12}, {"sens6_rfsim", 9}, {"sens6_onair", 9}, {"sens6_iso23", 9}, {"cloud4", 1},
+      {"cpus2", 0},      {"cpus1", 0},      {"big64", 16},      {"big64_onair", 16}, {"big64_smt", 16}, {"smt16", 6}, {"numa16", 13},
+  };
+  for (auto &f : fixtures()) {
+    int want = -99;
+    for (auto &k : e) if (!strcmp(k.name, f.name)) want = k.expect;
+    EXPECT_EQ(nr_cl_max_cells(&f.T.t, nullptr), want) << f.name;
+    EXPECT_EQ(buildn(f.T, 1).max_cells, want) << f.name;
+    EXPECT_EQ(buildn(f.T, 3).max_cells, want) << f.name;
+    if (want >= 1 && want < NR_CL_MAX_CELLS) {
+      nr_core_layout_t X;
+      EXPECT_EQ(nr_cl_build_n(&f.T.t, nullptr, want, &X), 0) << f.name;
+      EXPECT_EQ(nr_cl_build_n(&f.T.t, nullptr, want + 1, &X), 1) << f.name;
+    }
+  }
+}
+
+TEST(CoreLayoutN, CellCountIsClampedAndTheLineListsReadersOnlyAboveOne)
+{
+  Topo T = big64();
+  nr_core_layout_t L = buildn(T, 99);
+  EXPECT_EQ(L.n_cells, NR_CL_MAX_CELLS);
+  for (int i = 0; i < NR_CL_MAX_CELLS; i++) EXPECT_GE(L.rt_cell[i], 0);
+  expect_invariants(L, T, "big64", NR_CL_MAX_CELLS);
+  Topo c4(4);
+  nr_core_layout_t M = buildn(c4, 2); /* beyond max_cells: best effort, reported */
+  EXPECT_EQ(nr_cl_build_n(&c4.t, nullptr, 2, &M), 1);
+  EXPECT_EQ(M.max_cells, 1);
+  EXPECT_LT(M.npool, NR_CL_MIN_POOL);
+}
+
+TEST(CoreLayoutN, ProcessPlanWithCellCount)
+{
+  Topo T = dgx(true);
+  nr_core_layout_set_for_test(&T.t, nullptr);
+  ASSERT_NE(nr_core_layout(), nullptr);
+  EXPECT_EQ(nr_core_layout()->n_cells, 1);
+  EXPECT_STREQ(nr_core_layout_env_default("ISAC_UE_RT_CORE"), "5");
+}
