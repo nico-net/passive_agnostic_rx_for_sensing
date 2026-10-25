@@ -870,6 +870,7 @@ set(PHY_SRC_RU
 set(NR_PHY_SRC_RU
   ${OPENAIR1_DIR}/PHY/MODULATION/nr_beamforming.c
   ${OPENAIR1_DIR}/PHY/MODULATION/slot_fep_nr.c
+  ${OPENAIR1_DIR}/PHY/MODULATION/nr_sfo_state.c
   ${OPENAIR1_DIR}/PHY/INIT/nr_init_ru.c
   )
 
@@ -964,6 +965,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/INIT/nr_parms.c
   ${OPENAIR1_DIR}/PHY/MODULATION/nr_modulation.c
   ${OPENAIR1_DIR}/PHY/MODULATION/slot_fep_nr.c
+  ${OPENAIR1_DIR}/PHY/MODULATION/nr_sfo_state.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/pss_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pss_decim.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/sss_nr.c
@@ -2837,6 +2839,7 @@ if(ENABLE_TESTS)
   add_executable(test_nr_srs_blind
     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c
     ${OPENAIR1_DIR}/PHY/MODULATION/slot_fep_nr.c
+    ${OPENAIR1_DIR}/PHY/MODULATION/nr_sfo_state.c
     ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_dmrs_rx.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_attribution.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_estimate.c
@@ -3230,7 +3233,8 @@ if(ENABLE_TESTS)
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c
-    ${OPENAIR1_DIR}/PHY/MODULATION/slot_fep_nr.c)
+    ${OPENAIR1_DIR}/PHY/MODULATION/slot_fep_nr.c
+    ${OPENAIR1_DIR}/PHY/MODULATION/nr_sfo_state.c)
   target_include_directories(test_nr_csirs_disc_td PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_csirs_disc_td PRIVATE nr_csirs_disc_synth nr_phy_common PHY_COMMON nr_common nr_fapi_p5
     asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs UTIL GTest::gtest_main ${CMAKE_DL_LIBS} pthread)
