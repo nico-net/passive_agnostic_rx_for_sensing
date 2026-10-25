@@ -481,6 +481,7 @@ TEST(LlrNorm, OtherModulationsKeepTheTarget40)
   const auto w = two_layer(8, 3000.0, 3000.0, 20000, 11);
   EXPECT_LE(nr_llr_norm_shift_nl(w.data(), (uint32_t)w.size(), 2, 8), nr_llr_norm_shift(w.data(), (uint32_t)w.size()));
   EXPECT_EQ(nr_llr_norm_target(8), 8u * NR_LLR_NORM_A256);
+}
 
 
 /* RANK2-LEVEL 2026-10-25: two layers, 4 RX, 256QAM at growing receive level. Mode 2's front end rounds G = sum_a conj(h) h >> shift
