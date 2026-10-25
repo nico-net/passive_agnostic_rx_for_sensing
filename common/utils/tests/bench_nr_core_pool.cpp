@@ -6,6 +6,9 @@
 //   discovery/background threads of the receiver's float lane (duty cycles from SYSAN-20261015 / CORE-PLAN-20261018, see FLOAT-LANE-POOL-20261021.md).
 //   sep = status quo: unleased threads on the lane cpus (CFS). merged = they lease class DISC/HOUSE of the same pool (lane cpus = the home core(s)
 //   of the unleasable threads only). "ulBgDisc" is one 150 ms job; BENCH_ULBG_CHUNK_MS=0 keeps it unchunked (one lease), else yields every N ms.
+// Cell dimension (B1, mpci-main plan B.4): the compile-time macro BENCH_NCELLS=<k> (default 1 = the single-cell bench, output unchanged) runs k cells, each with the
+//   full mix above and its own consumer and discovery threads, leasing with its cell index; BENCH_CELL_SCALE_LIST={s0,s1,...} (integers) multiplies the offered load of
+//   each cell (default all 1; {3,1} = cell 0 bursts at 3x while cell 1 stays quiet). Build-time constants, no runtime flag. The per-cell rows are named "c<k> scan" etc. and the CORE_POOL line carries one block per cell.
 // usage: bench_nr_core_pool <first_core> <n_cores> <load_scale> <seconds> [cfs]
 //   default: the pool with n_cores tokens. cfs: no pool, every consumer thread pinned round-robin to the n_cores cores (time-sharing, SCHED_OTHER).
 #include <algorithm>
@@ -19,6 +22,7 @@
 #include <mutex>
 #include <random>
 #include <thread>
+#include <memory>
 #include <vector>
 #include <time.h>
 #include <sys/resource.h>
@@ -28,12 +32,19 @@ extern "C" {
 #include "nr_core_pool.h"
 }
 
+#ifndef BENCH_NCELLS
+#define BENCH_NCELLS 1
+#endif
+#ifndef BENCH_CELL_SCALE_LIST
+#define BENCH_CELL_SCALE_LIST {}
+#endif
 struct Job { uint64_t arr, svc; };
 struct Q {
   std::mutex m;
   std::condition_variable cv;
   std::deque<Job> d;
-  int prio;
+  int prio, cell = 0;
+  double cscale = 1.0; // per-cell load multiplier
   const char *name;
   std::vector<uint64_t> lat, svc, wt;
   uint64_t dl_ns; // deadline: latency above it counts as a miss
@@ -67,7 +78,7 @@ static void consumer(nr_pool_t *p, Q *q)
       j = q->d.front();
       q->d.pop_front();
     }
-    if (!g_cfs) nr_pool_acquire(p, q->prio, 0, j.arr);
+    if (!g_cfs) nr_pool_acquire(p, q->prio, q->cell, j.arr);
     const uint64_t t0 = nr_pool_now_ns();
     spin_for(j.svc);
     if (!g_cfs) nr_pool_release(p);
@@ -83,12 +94,12 @@ static void consumer(nr_pool_t *p, Q *q)
   q->wt.insert(q->wt.end(), wt.begin(), wt.end());
 }
 
-static void disc(nr_pool_t *p, double scale, unsigned seed, std::atomic<uint64_t> *chunks)
+static void disc(nr_pool_t *p, double scale, unsigned seed, std::atomic<uint64_t> *chunks, int cell)
 {
   std::mt19937 rng(seed);
   if (g_cfs) pin_rr();
   while (!g_stop) {
-    if (!g_cfs) nr_pool_acquire(p, NR_POOL_DISC, 0, 0);
+    if (!g_cfs) nr_pool_acquire(p, NR_POOL_DISC, cell, 0);
     for (int k = 0; k < 5; k++) { // one 1 ms job = 5 chunks of 200 us
       spin_for(200000);
       (*chunks)++;
@@ -200,19 +211,36 @@ int main(int argc, char **argv)
   g_n = n;
   nr_pool_t *p = nr_pool_create(cores, nullptr, n, &cfg);
 
-  Q scan, dl, ul, rt;
-  scan.prio = NR_POOL_SCAN; scan.name = "scan"; scan.dl_ns = 500000;
-  dl.prio = NR_POOL_DECODE; dl.name = "dl"; dl.dl_ns = 2000000;
-  ul.prio = NR_POOL_DECODE | NR_POOL_F_UL; ul.name = "ul"; ul.dl_ns = 2000000;
-  rt.prio = NR_POOL_RETRY; rt.name = "retry"; rt.dl_ns = 10000000;
+  int ncell = BENCH_NCELLS;
+  if (ncell < 1 || ncell > NR_POOL_MAX_CELLS) ncell = 1;
+  const std::vector<int> cs_l = BENCH_CELL_SCALE_LIST; // integer multipliers
+  struct CQ { Q scan, dl, ul, rt; char nm[4][16]; };
+  std::vector<std::unique_ptr<CQ>> cq;
   std::vector<std::thread> th;
-  for (int i = 0; i < 2; i++) th.emplace_back(consumer, p, &scan);
-  for (int i = 0; i < 5; i++) th.emplace_back(consumer, p, &dl);
-  for (int i = 0; i < 2; i++) th.emplace_back(consumer, p, &ul);
-  th.emplace_back(consumer, p, &rt);
   std::atomic<uint64_t> chunks{0};
   std::vector<std::thread> dt;
-  for (int i = 0; i < 2; i++) dt.emplace_back(disc, p, scale, 7u + (unsigned)i, &chunks);
+  for (int c = 0; c < ncell; c++) {
+    cq.emplace_back(new CQ);
+    CQ &x = *cq.back();
+    const char *pre = ncell > 1 ? "c%d " : "";
+    const double cs = (size_t)c < cs_l.size() ? cs_l[(size_t)c] : 1.0;
+    Q *qs[4] = {&x.scan, &x.dl, &x.ul, &x.rt};
+    const char *nn[4] = {"scan", "dl", "ul", "retry"};
+    const int pr[4] = {NR_POOL_SCAN, NR_POOL_DECODE, NR_POOL_DECODE | NR_POOL_F_UL, NR_POOL_RETRY};
+    const uint64_t dls[4] = {500000, 2000000, 2000000, 10000000};
+    for (int i = 0; i < 4; i++) {
+      char f[16];
+      snprintf(f, sizeof(f), pre, c);
+      snprintf(x.nm[i], sizeof(x.nm[i]), "%s%s", f, nn[i]);
+      qs[i]->prio = pr[i], qs[i]->name = x.nm[i], qs[i]->dl_ns = dls[i], qs[i]->cell = c, qs[i]->cscale = cs;
+    }
+    for (int i = 0; i < 2; i++) th.emplace_back(consumer, p, &x.scan);
+    for (int i = 0; i < 5; i++) th.emplace_back(consumer, p, &x.dl);
+    for (int i = 0; i < 2; i++) th.emplace_back(consumer, p, &x.ul);
+    th.emplace_back(consumer, p, &x.rt);
+    for (int i = 0; i < 2; i++) dt.emplace_back(disc, p, scale * cs, 7u + (unsigned)i + 16u * (unsigned)c, &chunks, c);
+  }
+  auto all_q = [&] { std::vector<Q *> v; for (auto &x : cq) for (Q *q : {&x->scan, &x->dl, &x->ul, &x->rt}) v.push_back(q); return v; };
 
   const size_t nf = sizeof(kF) / sizeof(kF[0]);
   FStat fst[sizeof(kF) / sizeof(kF[0])];
@@ -241,13 +269,16 @@ int main(int argc, char **argv)
     next += 500000;
     timespec ts{(time_t)(next / 1000000000ull), (long)(next % 1000000000ull)};
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
-    push(scan, 225000);
-    for (int k = poisson(1.2 * scale); k > 0; k--) push(dl, 600000);
-    for (int k = poisson(0.4 * scale); k > 0; k--) push(ul, 400000);
-    for (int k = poisson(0.1 * scale); k > 0; k--) push(rt, 1500000);
+    for (auto &x : cq) {
+      const double sc = scale * x->scan.cscale;
+      if (x->scan.cscale >= 1.0) for (int k = 0; k < (int)x->scan.cscale; k++) push(x->scan, 225000); else push(x->scan, 225000);
+      for (int k = poisson(1.2 * sc); k > 0; k--) push(x->dl, 600000);
+      for (int k = poisson(0.4 * sc); k > 0; k--) push(x->ul, 400000);
+      for (int k = poisson(0.1 * sc); k > 0; k--) push(x->rt, 1500000);
+    }
   }
   g_stop = true;
-  for (Q *q : {&scan, &dl, &ul, &rt}) { std::lock_guard<std::mutex> l(q->m); q->cv.notify_all(); }
+  for (Q *q : all_q()) { std::lock_guard<std::mutex> l(q->m); q->cv.notify_all(); }
   for (auto &t : th) t.join();
   for (auto &t : dt) t.join();
   for (auto &t : ft) t.join();
@@ -256,7 +287,7 @@ int main(int argc, char **argv)
   nr_pool_stats(p, &st);
   printf("%s%s N=%d first_core=%d scale=%.2f  busy_cores=%.2f disc_chunks/s=%.0f yields=%lu nested=%lu\n", g_cfs ? "CFS" : "POOL", f_sep ? "+FLOAT-SEP" : f_merged ? "+FLOAT-MERGED" : "", n, first, scale,
          (double)st.busy_ns / (double)(nr_pool_now_ns() - t_begin), (double)chunks / secs, (unsigned long)st.yields, (unsigned long)st.nested);
-  for (Q *q : {&scan, &dl, &ul, &rt}) report(q);
+  for (Q *q : all_q()) report(q);
   for (size_t i = 0; (f_sep || f_merged) && i < nf; i++) {
     auto &w = fst[i].wait, &x = fst[i].str;
     if (w.empty()) { printf("  F %-9s no jobs\n", kF[i].name); continue; }

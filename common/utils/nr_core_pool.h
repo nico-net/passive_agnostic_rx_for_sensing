@@ -5,8 +5,9 @@
  * MODEL. The pool owns N cores. A thread leases ONE token (nr_pool_acquire), pins itself to that core while it holds it and, on release,
  * returns to the home mask (the float lane, never a pool core: no wake-up on a core somebody else now owns). At most N threads hold a
  * lease, so no two pool threads time-share a core. Consumers keep their stacks and thread-local state: the pool decides who runs, never
- * moves a job. Waiters are granted in strict priority (SCAN, DECODE, RETRY, DISC, HOUSE); inside a priority round-robin across cells,
- * inside a cell oldest deadline first. No preemption (no RT class). Guarantees:
+ * moves a job. Waiters are granted in strict priority (SCAN, DECODE, RETRY, DISC, HOUSE); inside a priority the waiting cell with the lowest
+ * decayed token-time usage U_c first (half-life NR_POOL_USAGE_HALFLIFE_NS in nr_core_pool.c, equal weights, ties by round-robin across cells),
+ * inside a cell oldest deadline first. Work conserving: an idle cell's share goes to the others at once. No preemption (no RT class). Guarantees:
  *  (a) EXCLUSIVITY. nr_pool_enforce() removes the pool cores from the mask of every task that is not a registered pool member (at start-up,
  *      then about once a second from the scan consumers), threadCreate() refuses an explicit pool core for a non-member, and the site pool
  *      never contains the RT receive / radio-ring / UHD-control cores. Members sit on the home mask unless they hold a lease.
@@ -17,7 +18,11 @@
  *      N=6 with 5 DL consumers all five run at once and a scan still gets the sixth. UL shares what DL leaves: with D >= N-1 DL consumers UL
  *      waits for a DL release (one DL job). While a UL decode waits DL gives up its last core: DL is capped at N-2 (scan reserve unchanged),
  *      so a new DL is refused and the next DL release goes to UL, never to the next DL.
- *      Waiters older than age_ns[prio] are promoted (starvation bound; they still never exceed busy < N).
+ *      With A active cells (a lease or waiter within the last 100 ms) DL is also capped per cell at max(1, N-1-(A-1)), and a cell that holds
+ *      a DL token leaves one for each other cell that waits for its first: every active cell reaches a DL token within one release (the UL rule
+ *      above stays global; the global DL sum stays <= N-1). With A = 1 this is exactly the single-cell rule.
+ *      Waiters older than age_ns[prio] are promoted (starvation bound; they still never exceed busy < N). With fewer than 6 tokens the default
+ *      config switches DISC and HOUSE promotion off (nr_pool_cfg_default_n).
  *  (c) NO DISCOVERY/SOLVER UNDER A SCAN LEASE. Discovery work leases class DISC on its own thread; a thread asking for a different class
  *      while it holds a lease is counted in stats.nested. nested also counts the grid-reading discovery passes still run inline under a SCAN
  *      lease (nr_pool_site_note_scan_extra: discovery occasion, autodiscover pass, blind CSI-RS). Decode-gating steps (DCI length sweeps, UL
@@ -54,12 +59,20 @@ typedef struct {
   uint64_t wait_max_ns[NR_POOL_NPRIO], hold_ns[NR_POOL_NPRIO];
   uint64_t wait_hist[NR_POOL_NPRIO][NR_POOL_WAIT_BINS];
   uint64_t busy_ns; /* sum of lease hold time over all tokens */
+  /* per cell (B1): all classes together */
+  uint64_t leases_cell[NR_POOL_MAX_CELLS], waited_cell[NR_POOL_MAX_CELLS], wait_max_ns_cell[NR_POOL_MAX_CELLS], hold_ns_cell[NR_POOL_MAX_CELLS];
+  uint64_t wait_hist_cell[NR_POOL_MAX_CELLS][NR_POOL_WAIT_BINS];
 } nr_pool_stats_t;
 
 typedef struct nr_pool nr_pool_t;
 nr_pool_t *nr_pool_create(const int *cores, const int *capacity /* NULL = equal */, int n, const nr_pool_cfg_t *cfg /* NULL = defaults */);
 void nr_pool_destroy(nr_pool_t *);
 nr_pool_cfg_t nr_pool_cfg_default(void);
+/* Default config for a pool of n tokens (what nr_pool_create(.., NULL) uses): as nr_pool_cfg_default(), but DISC/HOUSE age promotion off when n < 6
+ * (FLOAT-LANE-POOL-20261021 section 3). An explicit cfg passed to nr_pool_create is used as given. */
+nr_pool_cfg_t nr_pool_cfg_default_n(int n);
+/* Test hook for unit tests only: replace the pool clock (CLOCK_MONOTONIC ns) by a virtual one; NULL restores it. Set only while no thread uses a pool. */
+void nr_pool_set_clock_for_test(uint64_t (*fn)(void));
 
 /* Lease a token for the calling thread; blocks until granted. Returns the core. Idempotent: a thread that already holds a lease keeps
  * it (and its original priority) and gets its core back. deadline_ns: CLOCK_MONOTONIC time the work is due or arrived (smaller = more
