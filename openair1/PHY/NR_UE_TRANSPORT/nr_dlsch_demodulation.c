@@ -26,6 +26,7 @@
 #include "nr_pdsch_evm_acc.h"
 #include "nr_irc_cov.h"
 #include "nr_mmse_exact.h"
+#include "nr_qam_mode.h"
 #include <time.h>
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_nr_interface.h"
@@ -1230,15 +1231,13 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   {
     static int s_qm = -1;
     if (s_qm < 0) s_qm = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 2 : 0; /* frozen ISAC_PDSCH_MMSE_MODE=2 */
-    qam_mode = nr_dlsch_qam_mode_override >= 0 ? nr_dlsch_qam_mode_override : s_qm;
-    if (qam_mode < 0 || qam_mode > 3) qam_mode = 0;
-    /* TIMRANK34 (passive RX): mode 3 (exact unbiased MMSE, see nr_dlsch_mmse) for every Qm at 3-4 layers. An explicit per-decode
-     * override (QAMAB arm) still wins. */
-    if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nl >= 3 && nr_dlsch_qam_mode_override < 0) qam_mode = 3;
-    /* Measured (QAMFIX.md): at 3-4 layers ZF noise enhancement costs low-SNR QPSK (16 -> 9 of 227 paired) and
-     * the fixed-point ZF determinant underflows (kappa 0); keep the stock MMSE there. QAM at any rank and 2-layer
-     * QPSK (1046 -> 1079 of 2110 paired) use the selected mode. */
-    if (nl >= 3 && (qam_mode == 1 || (dlsch->cw_info.qamModOrder == 2 && qam_mode != 3))) qam_mode = 0;
+    /* TIMRANK34 (passive RX): mode 3 (exact unbiased MMSE, see nr_dlsch_mmse) for every Qm at 3-4 layers, and (RANK2-LEVEL) at 2 layers
+     * when a receive branch is left over (nbRx > nl). An explicit per-decode override (QAMAB arm) still wins.
+     * Measured (QAMFIX.md): at 3-4 layers ZF noise enhancement costs low-SNR QPSK (16 -> 9 of 227 paired) and the fixed-point ZF
+     * determinant underflows (kappa 0); keep the stock MMSE there. QAM at any rank and 2-layer QPSK use the selected mode.
+     * The rule is shared with the GPU demod (nr_qam_mode.h). */
+    qam_mode = nr_multilayer_qam_mode(nl, nbRx, dlsch->cw_info.qamModOrder, nr_dlsch_qam_mode_override, s_qm,
+                                      IS_PASSIVE_RX_MODE(get_softmodem_params()));
   }
 
   // Reinterpret flat dl_ch_estimates_ext as [nl][nbRx][rx_size_symbol]
@@ -1538,7 +1537,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
       *log2_maxh = (log2_approx(avgs) >> 1) + log2_approx(nbRx >> 1);
     /* NL2SPEED: nl == 2 only (weak layer of MMSE mode 2 rounds to 0); Nl 3/4 GPU CHECK mismatched (pivot ties) and disabled the GPU demod.
      * frozen ISAC_L2MAXH_DELTA_NL2=-3 in passive RX. */
-    const int l2dd = (nl == 2 && IS_PASSIVE_RX_MODE(get_softmodem_params())) ? -3 : 0;
+    const int l2dd = nr_l2maxh_delta(nl, qam_mode, IS_PASSIVE_RX_MODE(get_softmodem_params())); /* mode 2 only: mode 3 has no int16 G to give headroom to */
     if (l2dd != 0) {
       *log2_maxh += l2dd;
       if (*log2_maxh < 0)

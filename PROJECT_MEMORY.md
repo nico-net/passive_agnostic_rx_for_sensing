@@ -4246,6 +4246,13 @@ G403:t26z+ISAC_CARRIER_FROM_SIB1=1:<cfg>:<C from retune_restart.sh on the first 
   over-states the weak layer. The new EVMGRANT field `snr_l=a,b,c,d` gives per-layer DD SNR (-99 = n/a), log only.
 - `[ORCH]` `ISAC_L2MAXH_DELTA_NL2=-3` (item 2) is the only 2-layer-specific fix found; not a cure for MCS 17+.
 
+- **2026-10-25 RANK2-LEVEL (`sens6/mimo2`): 2-layer mode 2 + NL2 delta clips at high receive level; two layers now use mode 3 with a spare RX branch.**
+  - `[MEASURED, sens6 OTA, lab cell sens4, valD2 vs g36/valD1, rb <= 32, MCS >= 24, nsym >= 9]` CRC by receiver-estimated min-layer `snr_l`: rank 1 0.84-0.98 and rank 4 0.35-0.98 reach ~1.0 by 28 dB, rank 2 plateaus at 0.23-0.38 (28 dB). The phones decode the same MCS 26-27 rank-2 grants at 0 % NACK (gNB stdout `ok/nok`), so the link is fine and the loss is in our receiver.
+  - `[MEASURED, sens6 x86 nr_dlsim, 4x4, TDLA, 256QAM, passive flag set in a local seam]` before/after at SNR 38, MCS 27, 2 layers, gain `-Q` 24/27/30/36 (lower = stronger): BLER1 0.96/0.69/0.20/0.035 -> 0.013/0.017/0.014/0.037; MCS 22 SNR 34: 0.87/0.48/0.056/0 -> 0/0/0/0. 4 layers (mode 3 before and after): unchanged 0.71/0.76/0.83.
+  - `[CODE-READ + MEASURED]` Mechanism: mode 2 rounds G = sum_a conj(h)h >> shift and b = H^H y >> shift to int16; shift follows log2|h|/2 only, and the NL2 delta (-3) multiplies both by 8. At |h| rms >= ~2^10 they hit the rail (dlsim -Q24: 132 of 2544 G diagonal entries and 71 b entries saturated). The OTA rank-2 grants run at l2 = 8-9 (after the delta), the dlsim regime where it fails. Mode 3 (exact double solve) is level independent. Rank 3-4 were already on mode 3, which is why rank 2 alone was worse than rank 1 and rank 4.
+  - `[OFFLINE VERIFIED]` `test_nr_llr_norm` `MmseExact.Rank2LevelHeadroom` (stock int16 front end 0 / 0.62 / 0.90 / 1.00 RE error rate at |h| 300/1000/2500/5000, exact solve 0) and `QamMode.PassiveRule`.
+  - Fix: `nr_qam_mode.h` is the one rule for CPU and GPU: passive, no override: mode 3 for nl >= 3 and for nl == 2 when nbRx > nl; the NL2 delta applies only to mode 2 (nbRx == nl). The upstream OAI 2026.w42 fix `3776425a4a` (2-layer ML LLR tail) is not the cause: the ML LLR runs only for Qm <= 6 with `ue->do_ml` (dlsim -E); passive is 256QAM mode 2/3. `[NOT MEASURED ON AIR]`.
+
 **32. Nl=3/4: Vodafone is SNR-limited; TIM 3-layer MCS 0 is a suspected fixed-point rank-3/4 QPSK equaliser defect (`[HYPOTHESIS, measured support]`)**
 
 - `[OTA VERIFIED, Vodafone PCI 415, 2026-10-12]` 4-layer: 36 of 2077 pass, every grant at `snr` < 9 dB. 3-layer MCS 0-4 at >= 10 dB: 43 of 43 pass.
