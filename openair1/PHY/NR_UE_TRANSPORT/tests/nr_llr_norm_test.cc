@@ -3,6 +3,7 @@
  * same hypothesis. The probe's buffer holds the same LLRs up to its horizon and zeros after it; the
  * LLR-norm shift must not see the difference. */
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -412,7 +413,7 @@ TEST(LlrNorm, TwoLayerWeakLayerSizesTheShift)
     if (qm != 6) EXPECT_LT(knew, kold) << "qm " << qm; /* Qm 6: the stride-16 sample already reads both layers */
     EXPECT_GE(weak_mean(v, qm, knew), 1.9 * weak_mean(v, qm, kold) - 1.0) << "qm " << qm << " weak layer gains >= 1 bit";
     EXPECT_LE(knew, 8);
-    EXPECT_EQ(nr_llr_norm_shift_nl(v.data(), span, 1, qm), nr_llr_norm_shift(v.data(), span)); /* rank 1: unchanged */
+    EXPECT_EQ(nr_llr_norm_shift_nl(v.data(), span, 1, qm), qm == 8 ? nr_llr_norm_shift_t(v.data(), span, nr_llr_norm_target(8)) : nr_llr_norm_shift(v.data(), span)); /* rank 1: unchanged except the 256QAM target */
   }
   /* Qm 4: the old stride-16 sample reads layer 0 only, the weak layer is left small */
   const auto v = two_layer(4, 3000.0, 3000.0 / std::pow(10.0, 14.0 / 20.0), 20000, 9);
@@ -421,4 +422,62 @@ TEST(LlrNorm, TwoLayerWeakLayerSizesTheShift)
   EXPECT_EQ(nr_llr_norm_shift_nl(q.data(), (uint32_t)q.size(), 2, 2), nr_llr_norm_shift(q.data(), (uint32_t)q.size()));
   const auto w = two_layer(4, 3000.0, 3000.0, 20000, 11);
   EXPECT_LE(std::abs(nr_llr_norm_shift_nl(w.data(), (uint32_t)w.size(), 2, 4) - nr_llr_norm_shift(w.data(), (uint32_t)w.size())), 1);
+}
+
+/* HMCS 2026-10-25: rank-1 256QAM. nr_llr_norm_shift_nl samples every 16th LLR, which for Qm 8 is the outermost bit of the I rail: |Re y|, mean 8a for the lattice half-spacing a.
+ * The 40 target left a in (2.5, 5] LSB -- a noise sigma of 1-2 LSB at the MCS 27 waterfall (a / sigma ~ 2.4) -- and nr_dlsim measured 1.4 to > 2 dB of BLER-50 % loss for it.
+ * The synthetic buffer is the per-RE layout of nr_256qam_llr: [Ar Ai Br Bi Cr Ci Dr Di], A = y, B = 8a - |A|, C = 4a - |B|, D = 2a - |C| (ch_mag, ch_magb, ch_magr = 8a, 4a, 2a). */
+static std::vector<int16_t> qam256_llrs(double a, double sigma, size_t nre, unsigned seed)
+{
+  std::mt19937 rng(seed);
+  std::normal_distribution<double> g(0.0, sigma);
+  auto sat = [](double x) { return (int16_t)std::lround(std::max(-32768.0, std::min(32767.0, x))); };
+  std::vector<int16_t> v(nre * 8);
+  for (size_t re = 0; re < nre; re++)
+    for (int r = 0; r < 2; r++) {
+      const int l = (int)(rng() % 16) * 2 - 15; /* -15, -13, .., 15 */
+      const double yy = l * a + g(rng);
+      const double A = yy, B = 8 * a - std::abs(A), C = 4 * a - std::abs(B), D = 2 * a - std::abs(C);
+      v[re * 8 + 0 + r] = sat(A);
+      v[re * 8 + 2 + r] = sat(B);
+      v[re * 8 + 4 + r] = sat(C);
+      v[re * 8 + 6 + r] = sat(D);
+    }
+  return v;
+}
+TEST(LlrNorm, Qam256RankOneKeepsTheLatticeAbove12)
+{
+  for (double a_raw : {6.0, 12.0, 20.0, 40.0, 80.0, 160.0, 320.0}) {
+    const auto v = qam256_llrs(a_raw, a_raw / 2.4, 20000, 1 + (unsigned)a_raw); /* a / sigma = 2.4: the MCS 27 waterfall */
+    const uint32_t span = (uint32_t)v.size();
+    const int k = nr_llr_norm_shift_nl(v.data(), span, 1, 8);
+    const double a_out = a_raw / (double)(1 << k);
+    if (a_raw <= 20.0)
+      EXPECT_EQ(k, 0) << "a_raw " << a_raw << ": nothing to remove";
+    else {
+      EXPECT_GT(a_out, 12.0 - 1.0) << "a_raw " << a_raw << " k " << k;
+      EXPECT_LE(a_out, 24.0 + 1.0) << "a_raw " << a_raw << " k " << k;
+    }
+    /* the old rule (target 40 on the same sample) took a to (2.5, 5] LSB for every a_raw >= 5 */
+    const int kold = nr_llr_norm_shift(v.data(), span);
+    if (a_raw >= 40.0) {
+      EXPECT_LE(a_raw / (double)(1 << kold), 5.5) << "a_raw " << a_raw;
+    }
+    EXPECT_LE(k, kold);
+  }
+}
+TEST(LlrNorm, OtherModulationsKeepTheTarget40)
+{
+  std::vector<int16_t> v(8192);
+  std::mt19937 rng(77);
+  std::normal_distribution<double> d(0.0, 700.0);
+  for (auto &x : v) x = (int16_t)std::lround(d(rng));
+  for (int qm : {2, 4, 6}) {
+    EXPECT_EQ(nr_llr_norm_target(qm), LLR_NORM_TARGET);
+    for (int nl : {1, 3, 4}) EXPECT_EQ(nr_llr_norm_shift_nl(v.data(), (uint32_t)v.size(), nl, qm), nr_llr_norm_shift(v.data(), (uint32_t)v.size()));
+  }
+  /* two layers: the RANK2 rule, 256QAM included, is untouched */
+  const auto w = two_layer(8, 3000.0, 3000.0, 20000, 11);
+  EXPECT_LE(nr_llr_norm_shift_nl(w.data(), (uint32_t)w.size(), 2, 8), nr_llr_norm_shift(w.data(), (uint32_t)w.size()));
+  EXPECT_EQ(nr_llr_norm_target(8), 8u * NR_LLR_NORM_A256);
 }
