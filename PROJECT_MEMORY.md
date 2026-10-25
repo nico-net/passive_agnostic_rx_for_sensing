@@ -4928,6 +4928,12 @@ Scope: DGX spark-74c3, X410 unit 34B2AF1, OTA at DEIB. Branch `csd/single-int` (
 
 ---
 
+### 2026-10-25 -- false CORESET discoveries (overlapping interleaved aliases) [sens6 OTA, offline log analysis; fix UNTESTED OTA]
+
+- Symptom [MEASURED, sens6 OTA, sens4 lab cell, 273 PRB, PCI 2, 17 runs]: the bank gains 3-7 interleaved aliases (6/3/x, offsets 30/42/96) of the real offset-0 / 270 RB non-interleaved CORESET; SCANTIME p50 4 -> 524 us, scanq_drop_full ~0 -> 45-55 %, UL layout fit never locks.
+- Root cause [MEASURED, abuci_lab_20261025_115736 run.log]: 2415/2415 USS_BOOT_HITs of the extra geometries coincide in (frame, slot, RNTI) with a bank-0 accept. The dwell verified on "two DCIs, same RNTI, different payload", which an overlapping geometry satisfies on the same REs. The same-nID overlap rule (`nr_pdcch_discovered_cover_banked`) only shields VERIFIED entries and bank 0 is STALE when the dwell starts (it logs STALE->VERIFIED right after each dwell start).
+- Fix (branch sens6/disc-dedup): banked passes record (slot, RNTI, payload hash) in a 256-entry ring (`nr_pdcch_coreset_bank_note_decoded`); `nr_pdcch_discovered_observe` ignores evidence already decoded by a banked pass ("evidence ignored" log line). No thresholds; empty bank or disjoint CORESETs unchanged.
+
 ## 26. Working rules for any agent on this project (carried over from the old setup)
 
 - **Maximum portability and adaptiveness to the device (operator rule, 2026-10-25).** Every change must run unchanged on

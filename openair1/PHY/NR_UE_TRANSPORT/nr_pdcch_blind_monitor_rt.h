@@ -305,6 +305,7 @@ bool nr_pdcch_no_fake_footprint_enabled(void);
 bool nr_pdcch_discovered_unverified_pending(void);
 int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
                                 nr_dci_bits_t payload, int length);
+int nr_pdcch_discovered_observe_cand(uint64_t token, uint16_t rnti, uint64_t slot, nr_dci_bits_t payload, int length, int cce, int al);
 void nr_pdcch_discovered_reset(void);
 void nr_pdcch_blind_monitor_rt_final_stats(void);
 /* ISAC_PDCCH_DISC_COVER=1 (ACQ-FIX, default off): every discovered nID/symbol/duration is first verified on the

@@ -309,6 +309,7 @@ typedef struct {
   uint8_t k2row[16];
   uint32_t gold, gctl, cdm1, cdm2, probes;
   uint32_t crc_ok, crc_fail_run, trials, crc_locks;
+  uint32_t lock_decisive; /* decisive PUSCH CRC passes (CRC24 / all CB CRCs) of the CURRENT lock: 0 = the lock rests on votes or chance-level CRC16 passes only */
   bool locked;
   nr_pdcch_blind_ul_opts_t opts;
   int chosen_tail;
@@ -564,6 +565,7 @@ static void lock_length_locked(len_state_t *ls, long now_slot)
   ls->chosen_tail = best;
   ls->chosen_var = g_lat_var;
   ls->locked = true;
+  ls->lock_decisive = 0;
   ls->lock_slot = now_slot;
   char a[160], b[160] = "-";
   tail_str(&ls->tail[best], a, sizeof(a));
@@ -1127,7 +1129,7 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
   len_state_t *ls = li >= 0 ? &g_len[li] : NULL;
   /* one DCI per slot (<= K jobs), small MCS only; locked layouts are re-tried only after a run of CRC failures */
   if (!g_have_cell || !ls || !ls->fitted || g_nhyp == 0 || g_trial_slot == abs_slot
-      || (ls->locked && ls->crc_fail_run < RELOCK_FAILS) || fld(&payload, len, ls->mcs_off, 5) > TRIAL_MCS_MAX) {
+      || (ls->locked && ls->crc_fail_run < RELOCK_FAILS && ls->lock_decisive) || fld(&payload, len, ls->mcs_off, 5) > TRIAL_MCS_MAX) {
     pthread_mutex_unlock(&mu);
     return 0;
   }
@@ -1295,6 +1297,7 @@ static void crc_lock_locked(int li, int h, int k, int t, int var, long slot)
   ls->opts = o;
   ls->chosen_tail = t;
   ls->locked = true;
+  ls->lock_decisive = 0;
   ls->lock_slot = slot;
   ls->crc_fail_run = 0;
   ls->crc_locks++;
@@ -1358,13 +1361,15 @@ void nr_ul_layout_crc_verdict(const nr_pdcch_blind_ul_result_t *g, bool ok, uint
       const unsigned e = (unsigned)((g->hyp_generation >> 40) & 0x7ffff);
       const int h = e & 255, k = (e >> 8) & 7, t = (e >> 11) & 3, var = (e >> 13) & 63;
       if (ok) {
-        if (ls->locked && g_locked_hyp == h && ls->chosen_tail == t && ls->chosen_var == var) { ls->crc_ok++; ls->crc_fail_run = 0; }
+        const bool decisive = tbs_bits > 3824 || (nseg > 1 && seg_ok == nseg);
+        if (ls->locked && g_locked_hyp == h && ls->chosen_tail == t && ls->chosen_var == var) { ls->crc_ok++; ls->crc_fail_run = 0; ls->lock_decisive += decisive; }
         /* a non-default table / k2 latches only on two independent CRC passes (distinct slots), guard or not */
         else if (crc_guard_accept_locked(ls, h, k, t, var, g->rnti, slot, tbs_bits, nseg, seg_ok))
-          crc_lock_locked(li, h, k, t, var, ls->bank[(ls->count - 1) % NR_UL_LAYOUT_BANK].slot);
+        { crc_lock_locked(li, h, k, t, var, ls->bank[(ls->count - 1) % NR_UL_LAYOUT_BANK].slot);
+          ls->lock_decisive += decisive; }
       }
     } else if (ls->locked) {
-      if (ok) { ls->crc_ok++; ls->crc_fail_run = 0; }
+      if (ok) { ls->crc_ok++; ls->crc_fail_run = 0; ls->lock_decisive += tbs_bits > 3824 || (nseg > 1 && seg_ok == nseg); }
       else if (ls->crc_fail_run < 1000000) ls->crc_fail_run++;
     }
   }
