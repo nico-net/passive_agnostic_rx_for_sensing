@@ -153,6 +153,10 @@ typedef struct {
   const int16_t *rxdata[4];
   uint32_t ring_len, ring_offset;
   const int16_t *symbol_rot;   /* symbols_per_slot OAI c16, fp->symbol_rotation[DL] + slot offset */
+  uint32_t sfo_dphi[14];       /* SFO step per symbol (PHY/MODULATION/nr_sfo_state.h), the CPU FEP's of this slot */
+  int sfo_on;                  /* 0: no SFO correction (every step 0) */
+  int sfo_kref;                /* SFO reference subcarrier (nr_sfo_kref) */
+  int64_t sfo_q;               /* the eps the steps were made from (shadow checks: a change of eps meanwhile is not a mismatch) */
   int16_t *rxdataF;            /* the caller's rxdataF[nbRx][rx_stride] (c16, OAI layout) or NULL; DIRECT: filled in place by the GPU; DISCRETE: filled after the pass */
   uint32_t rx_stride;          /* c16 between two antennas of rxdataF */
   uint16_t copy_mask;          /* symbols of rxdataF the caller needs (DISCRETE copy-back) */

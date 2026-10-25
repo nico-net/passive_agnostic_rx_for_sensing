@@ -7,6 +7,7 @@
 // Expected: the sizes the host's GPU twin reproduces (aarch64 NEON: 4096; x86: powers of two 256..4096) are bit-identical; the others (the 3/4
 // sampling sizes 768, 1536, 3072) are refused: nr_pdsch_gpu_exact_ready() = 0 and the FEP call returns -1 (the receiver keeps the CPU FEP).
 // Skipped without libpdsch_gpu.so or a CUDA device (GTEST_SKIP, reported as Skipped by ctest).
+#include "PHY/MODULATION/nr_sfo_rot.h"
 #include "gtest/gtest.h"
 #include <dlfcn.h>
 #include <cstdint>
@@ -42,7 +43,7 @@ static void apply_nr_rotation_symbol_RX(const int symbols_per_slot, const int sl
 #include "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.h"
 }
 
-typedef int (*exact_fn_t)(const int16_t *const *, uint32_t, uint32_t, double, const int16_t *, uint16_t, int16_t *, size_t, int);
+typedef int (*exact_fn_t)(const int16_t *const *, uint32_t, uint32_t, double, const int16_t *, uint16_t, int16_t *, size_t, int, const uint32_t *, int);
 
 /* the N_RB of each FFT size (30 kHz, the receiver's cells: 24 / 51 / 106 / 273 PRB; 3/4 sampling: 51 / 106 / 217 PRB) */
 static int nb_rb_of(int N)
@@ -110,7 +111,16 @@ TEST(GpuExactFepSizes, BitExactVsCpuOrRefused)
       const uint32_t ts_slot = (uint32_t)(slot * slot_len);
       const c16_t *rot_slot = rot.data() + (slot % spsf) * nsym;
       memset(gpu.data(), 0, gpu.size() * sizeof(c16_t));
-      const int rc = fep(rx, ring, ts_slot, 0.0, (const int16_t *)rot_slot, (uint16_t)0x3fff, (int16_t *)gpu.data(), stride, 0);
+      /* odd slots: an SFO of +4.25 ppm (nr_sfo_state.h), the same steps on the CPU reference below; k_ref: an SSB 1368 subcarriers below DC */
+      const int kref = -1368 * N / 4096;
+      uint32_t sfo[14] = {0};
+      for (int l = 1; l < nsym && (slot & 1); l++) {
+        int n_l = 0;
+        for (int i = 1; i <= l; i++) n_l += N + ncp; /* mu = 1: only symbol 0 of the slot has the long CP */
+        sfo[l] = (uint32_t)(int64_t)llround(4.25e-6 * n_l / N * 4294967296.0);
+      }
+      const int rc = fep(rx, ring, ts_slot, 0.0, (const int16_t *)rot_slot, (uint16_t)0x3fff, (int16_t *)gpu.data(), stride, 0,
+                         (slot & 1) ? sfo : NULL, kref);
       calls++;
       if (!pow2_x86) {
         EXPECT_EQ(0, ready()) << "a size without a GPU twin must be refused";
@@ -130,6 +140,16 @@ TEST(GpuExactFepSizes, BitExactVsCpuOrRefused)
           memcpy(in, &iq[a][off], sizeof(c16_t) * N);
           dft(get_dft(N), (int16_t *)in, (int16_t *)o, 1);
           apply_nr_rotation_symbol_RX(nsym, spsf, ts.data(), fco, o, rot.data(), nb_rb, slot, sym);
+          if (sfo[sym]) {
+            const int len = (nb_rb & 1) ? (nb_rb + 1) * 6 : nb_rb * 6, start2 = (nb_rb & 1) ? fco - 6 : fco;
+            for (int k = 0; k < N; k++)
+              if (k < len || (k >= start2 && k < start2 + len)) {
+                nr_sfo_c16_t c = {o[k].r, o[k].i};
+                c = nr_sfo_re(c, nr_sfo_bin_k(k, N) - kref, sfo[sym]);
+                o[k].r = c.r;
+                o[k].i = c.i;
+              }
+          }
           memcpy(&ref[a * stride + (size_t)sym * N], o, sizeof(c16_t) * N);
           rows++;
           if (memcmp(o, &gpu[a * stride + (size_t)sym * N], sizeof(c16_t) * N)) {

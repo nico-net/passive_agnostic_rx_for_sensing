@@ -93,6 +93,7 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "nr_csirs_blind_search.h" // nr_csirs_blind_re_energy / nr_csirs_blind_zp_grant_score
 #include "nr_csirs_blind_rt.h" // nr_csirs_blind_rt_zp_grant_evidence
 #include "PHY/NR_REFSIG/nr_refsig.h" // nr_gold_pdsch, nr_pdsch_dmrs_rx (ZP grant evidence: own-DM-RS presence)
+#include "PHY/MODULATION/nr_sfo_state.h" // SFO eps of the GPU pass vs the old path
 #include "PHY/NR_TRANSPORT/nr_sch_dmrs.h" // get_delta
 _Static_assert(sizeof(((freq_alloc_bitmap_t *)0)->prb_list) == NR_PRB_SET_MAX * sizeof(uint16_t),
                "freq_alloc_bitmap_t.prb_list (common/utils/bits.h) must hold NR_PRB_SET_MAX PRBs");
@@ -2161,6 +2162,10 @@ static void share_chest_band(const freq_alloc_bitmap_t *fa, const fapi_nr_dl_con
  */
 /* GPUPASS: per-consumer host buffers, allocated and prefaulted at consumer start (before the RX fence), never on the pass path */
 static __thread nr_gpu_pass_dl_out_t *t_gpp = NULL; /* ~150 KB */
+/* SFO (PHY/MODULATION/nr_sfo_state.h): the eps the pass of this decode used. The old path's FEP of the same slot reads the published eps
+ * when it runs; if it changed in between (rare: hysteresis), pass and old path legitimately differ and the shadow check must not count it. */
+static __thread int64_t t_gp_sfo_q;
+static inline bool gp_sfo_same(void) { return nr_sfo_eps_q() == t_gp_sfo_q; }
 static __thread uint8_t *t_gp_shadow = NULL;        /* the TB of a shadow-checked pass: sized to the largest TB up front */
 #define GP_SHADOW_CAP NR_GPU_GRAPH_SHADOW_CAP /* nr_gpu_graph_pool.h: the v2 pool's shadow buffers have the same size */
 static __thread uint64_t t_gp_fhash = 0;           /* shadow of a CRC-failing pass: hash of its final LLRs and its count of decoded blocks */
@@ -2866,6 +2871,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
         t_gp_path_side = 1; /* the GPU side of the trial ran the pass */
       if (seg_path)
         gp_seg_csi_map(seg, nseg, dlsch_config, freq_alloc); /* the demod geometry reads the CSI-FULL map of the virtual allocation */
+      t_gp_sfo_q = nr_sfo_eps_q(); /* the pass builds its SFO steps from this eps (nr_gpu_pass_dl.c) */
       const int gp_rc = t_gpp ? nr_gpu_pass_dl_run(&gin, t_gpp) : 1;
       nr_dlsch_csi_prb_map = NULL; /* the old path sets and clears its own */
       nr_dlsch_csi_prb_map_n = 0;
@@ -3771,8 +3777,8 @@ gpu_llr_ready:;
     if (gp_fcmp && !gp_ok) { /* shadow of a CRC-failing pass: the old first body's verdicts and its post-normalisation LLRs (what the retry arms get) */
       const bool f32 = nr_gpu_pass_fp32_on();
       if (f32) /* verdict flips are rate-gated, the signs are not tolerated */
-        nr_gpu_pass_fp32_shadow(ldpc_ok || t_seg_ok_last != t_gp_fok, gp_sign_bad(t_gpp->llr, llr, G));
-      else if (ldpc_ok || t_seg_ok_last != t_gp_fok || gp_llr_hash(llr, G) != t_gp_fhash) {
+        (void)(gp_sfo_same() && nr_gpu_pass_fp32_shadow(ldpc_ok || t_seg_ok_last != t_gp_fok, gp_sign_bad(t_gpp->llr, llr, G)));
+      else if (gp_sfo_same() && (ldpc_ok || t_seg_ok_last != t_gp_fok || gp_llr_hash(llr, G) != t_gp_fhash)) {
         nr_gpu_pass_note(NR_GPU_PASS_EV_SHADOW_FAIL_BAD);
         LOG_E(PHY, "SENSING: GPUPASS MISMATCH (CRC-fail shadow) rnti 0x%x nl %u mcs %u rb %d+%d tbs %u: pass blocks ok %u, old %u (old crc %d), llr hash %s (probe %d horizon %d share %d G %u)\n", grant->rnti, cw->Nl,
               grant->mcs, freq_alloc->first_rb, freq_alloc->num_rbs, cw->TBS, t_gp_fok, t_seg_ok_last, (int)ldpc_ok, gp_llr_hash(llr, G) == t_gp_fhash ? "equal" : "DIFFERENT",
@@ -3982,7 +3988,7 @@ gpu_llr_ready:;
     const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
     if (n_ == 1 || (n_ % 200) == 0)
       LOG_A(PHY, "SENSING: PDSCH UNSUP@3234 n=%lu\n", n_); }
-  if (gp_cmp) { /* shadow check: the old path decoded a grant the pass took; the verdict and the bytes must agree */
+  if (gp_cmp && gp_sfo_same()) { /* shadow check: the old path decoded a grant the pass took; the verdict and the bytes must agree */
     const bool old_ok = out->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
     if (nr_gpu_pass_fp32_on()) { /* FP32: a pass-OK / old-no-CRC flip is rate-gated; bytes of two CRC-OK decodes must still agree */
       if (nr_gpu_pass_fp32_shadow(!old_ok, t_gp_sbad) == 0 && old_ok && memcmp(out->tb, t_gp_shadow, cw->TBS / 8) != 0) {
