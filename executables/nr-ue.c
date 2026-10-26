@@ -1594,7 +1594,6 @@ void *UE_thread(void *arg)
         UE->max_pos_acc = 0;
         UE->max_pos_iir = 0;
         shiftForNextFrame = 0;
-        nr_sfo_resync("timing rebase");
         atomic_fetch_add_explicit(&nr_ue_rebase_epoch, 1, memory_order_relaxed);
         LOG_W(PHY, "SENSING: REBASE done; fine-timing state reset (epoch %d)\n",
               atomic_load_explicit(&nr_ue_rebase_epoch, memory_order_relaxed));

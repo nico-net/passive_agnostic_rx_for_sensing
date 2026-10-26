@@ -12,7 +12,7 @@ eps (window of 256 frames + DM-RS fine term), so the window mixed frames from be
 - executables/nr-ue.c, reset points (every point where timing is lost or re-acquired):
   1. UE_synch() success, just before `is_synchronized = 1` ("initial sync"): every (re)acquisition, including cell change, scan confirm
      passes and auto-anchor re-syncs, goes through here. Frame reads are only noted while is_synchronized, so no race with the reset.
-  2. applied coarse timing rebase ("timing rebase").
+  2. (removed in a follow-up commit) applied coarse timing rebase: same cell, same gNB clock, eps stays valid; resetting would only cost 0.64 s of uncorrected grants.
   3. RXDISCONT invalidation ("stream discontinuity").
   4. RFSTALL reacquisition ("RF stall / PBCH lock lost").
   5. handle_sync_req_from_mac (MAC-requested cell/frequency change, "MAC sync request").
@@ -60,3 +60,6 @@ Each cell's gNB has its own clock, so eps and its window are per cell.
   reset; DM-RS term cleared; a pinned value survives the reset. Function hooks only, no env.
 - Not tested: the receiver itself (no runs allowed). The rfsim gate should check that the log shows exactly one "SFO reset (initial sync)"
   per acquisition and no "SFO reset" in steady state. rfsim has eps 0, so it is unaffected by construction.
+
+## Follow-up
+Reset at the timing rebase dropped on coordinator request; four call sites remain (initial sync, stream discontinuity, RF stall, MAC sync request).
