@@ -1240,9 +1240,9 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	493	g_lock_slot	file_stat
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	495	g_trial_slot	file_static	long [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	558	cand_list::std_n	func_static	const uint16_t[]	CONST	A6	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	913	g_eval_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	937	fit_chain::fit_chain_hist	func_static	fit_chain_hist_cell_t [converted]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1051	nr_ul_layout_eval_once::eval_snap	func_static	eval_snap_cell_t [converted]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1214	nr_ul_layout_on_dci::layout_once	func_static	pthread_once_t [converted]	UNCLASSIFIED	A6	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	937	fit_chain::fit_chain_hist	func_static	fit_chain_hist_cell_t [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1051	nr_ul_layout_eval_once::eval_snap	func_static	eval_snap_cell_t [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1214	nr_ul_layout_on_dci::layout_once	func_static	pthread_once_t [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	64	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	66	g_cond	file_static	pthread_cond_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	68	g_once	file_static	pthread_once_t [converted]	PER_CELL	A4	converted: once-flag of a per-cell start (worker thread / hook of this cell); each cell starts its own
@@ -1660,7 +1660,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1709	t_quiet	tls	bool	TLS
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1710	t_last_hq_retx	tls	bool	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1820	t_hq_clear	tls	bool	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1821	t_hq_A	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2091	harq_retx_decide::s_rv0_retx_seen	func_static	_Atomic uint32_t [converted]	UNCLASSIFIED	A5	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2091	harq_retx_decide::s_rv0_retx_seen	func_static	_Atomic uint32_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2244	t_share	tls	nr_pdsch_slot_share_t	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2245	t_fep_cache	tls	struct {}	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2255	t_chest_cache	tls	struct {}	TLS	A5	existing thread-local
@@ -1677,9 +1677,9 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3002	passive_decode_body_
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3036	passive_decode_body_core::gp_no_ssb	func_static	const nr_ssb_rm_mask_t	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3431	passive_decode_body_core::seg_h	tls	c16_t *	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3432	passive_decode_body_core::seg_h_cap	tls	size_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3599	passive_decode_body_core::s_n	func_static	_Atomic uint64_t [converted]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3601	passive_decode_body_core::s_sum	func_static	double [converted]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3603	passive_decode_body_core::s_hz	func_static	double [converted]	UNCLASSIFIED	A5	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3599	passive_decode_body_core::s_n	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3601	passive_decode_body_core::s_sum	func_static	double [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3603	passive_decode_body_core::s_hz	func_static	double [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3800	passive_decode_body_core::no_ssb	func_static	const nr_ssb_rm_mask_t	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4049	passive_decode_body_core::r2w_diag	func_static	int	PROCESS	A5	getenv result cached on first use (test seam, replay only), identical for every cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4104	passive_decode_body_core::alts	func_static	const int[3]	CONST	A5	auto
@@ -1800,7 +1800,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1068	g_bc9_tdd_cache_lock	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1127	nr_pdsch_passive_bc9_confirm::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1164	nr_pdsch_passive_oracle_inline::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1237	g_cdmrs_q	file_static	nr_bgq_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1241	cdmrs_async_on::on	func_static	int [converted]	UNCLASSIFIED	A5	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1241	cdmrs_async_on::on	func_static	int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1305	g_rsnap	file_static	g_rsnap_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1308	g_rsnap_free	file_static	g_rsnap_free_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1310	g_rsnap_nfree	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
@@ -1810,14 +1810,14 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1316	g_recov_ok	file_stati
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1318	g_recov_nosnap	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1626	nr_pdsch_passive_queue_thread::s_gate_n	func_static	_Atomic uint32_t	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1644	nr_pdsch_passive_queue_thread::s_oracle_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1669	nr_pdsch_passive_queue_thread::s_probe_tick	func_static	_Atomic uint32_t [converted]	UNCLASSIFIED	A5	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1669	nr_pdsch_passive_queue_thread::s_probe_tick	func_static	_Atomic uint32_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1671	nr_pdsch_passive_queue_thread::t_probe	tls	c16_t *	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1716	nr_pdsch_passive_queue_thread::s_k0_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1777	nr_pdsch_passive_queue_thread::s_left	func_static	_Atomic int	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1916	nr_pdsch_passive_queue_thread::s_probe_n	func_static	_Atomic uint64_t [converted]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1918	nr_pdsch_passive_queue_thread::s_probe_ok	func_static	_Atomic uint64_t [converted]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2001	nr_pdsch_passive_queue_thread::s_dl_scr_confirmed	func_static	bool [converted]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2103	nr_pdsch_passive_queue_thread::s_dl_dmrs_nid	func_static	_Atomic int [converted]	UNCLASSIFIED	A5	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1916	nr_pdsch_passive_queue_thread::s_probe_n	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1918	nr_pdsch_passive_queue_thread::s_probe_ok	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2001	nr_pdsch_passive_queue_thread::s_dl_scr_confirmed	func_static	bool [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2103	nr_pdsch_passive_queue_thread::s_dl_dmrs_nid	func_static	_Atomic int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2274	t_recov_dec	tls	const nr_pdsch_passive_decode_result_t *	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2276	g_recov_fb	file_static	g_recov_fb_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2358	recov_run::rxF	tls	c16_t *	TLS	A5	existing thread-local
@@ -1897,7 +1897,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	219	kQRn	file_static	const int[3]
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	244	nr_pdsch_solver_dmrs_mask::pos	func_static	const int8_t[3][3][4]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	260	tables_for::prio	func_static	const uint8_t[3]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	408	rv_next_ok::pos	func_static	const int[4]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	660	pend_new::cur	func_static	uint32_t [converted]	UNCLASSIFIED	A5	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	660	pend_new::cur	func_static	uint32_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	672	t_rm	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	674	t_learn_rm	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	676	t_scr	file_static	int32_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
@@ -1908,7 +1908,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	876	plan_coverage::starts	func_st
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	876	plan_coverage::tables	func_static	const uint8_t[4][3]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	975	plan_known::kE	func_static	const uint8_t[10]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1011	plan_ov_probes::kE	func_static	const uint8_t[10]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1494	nr_pdsch_solver_feedback::s_lost	func_static	s_lost_arr_t [converted]	UNCLASSIFIED	A5	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1494	nr_pdsch_solver_feedback::s_lost	func_static	s_lost_arr_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1749	g_tf_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1752	g_tf	file_static	g_tf_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1755	g_tf_S	file_static	g_tf_S_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
@@ -1929,7 +1929,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	183	nr_isac_pusch_data_aided_
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	188	nr_isac_pusch_data_aided_submit::h_buf	tls	float *	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	190	nr_isac_pusch_data_aided_submit::k_buf	tls	uint32_t[UL_DA_MAX_RE]	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	191	nr_isac_pusch_data_aided_submit::l_buf	tls	uint32_t[UL_DA_MAX_RE]	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	260	nr_isac_pusch_data_aided_submit::da_submit_once	func_static	_Atomic int [converted]	UNCLASSIFIED	A6	
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	260	nr_isac_pusch_data_aided_submit::da_submit_once	func_static	_Atomic int [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	37	MAX_ITEMS	file_static	const int	CONST	A6	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	37	NCTX	file_static	const int	CONST	A6	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	115	U	file_static	State	PROCESS	A6	one UL FEP GPU context pool for the process (G-owned, read-only for A6): init(nant) returns -1 for a second cell with a different nant (-> CPU FEP, graceful); pct window is a process GPU budget
@@ -2000,25 +2000,25 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1353	nr_pusch_passive_lay
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1354	nr_pusch_passive_layout_probe::set_n	func_static	const int[3]	CONST	A6	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1366	nr_pusch_passive_layout_probe::row_mask	func_static	const int[3]	CONST	A6	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1366	nr_pusch_passive_layout_probe::set_mask	func_static	const int[3][3]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1537	ul_bg_run::ul_bg_run_gbuf	func_static	c16_t * [converted]	UNCLASSIFIED	A6	
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1537	ul_bg_run::ul_bg_run_gbuf	func_static	c16_t * [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1635	g_ul_energy_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1638	g_ul_energy_profile	file_static	g_ul_energy_profile_cell_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1640	g_ul_energy_seen_mask	file_static	uint16_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1679	nid_hyp_run::nid_hyp_ready	func_static	bool [converted]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1681	nid_hyp_run::nid_hyp_failed	func_static	bool [converted]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1704	nid_submit::nid_submit_started	func_static	atomic_bool [converted]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1856	nr_pusch_passive_decode_inner::dec_skipped_aux	func_static	_Atomic unsigned long [converted]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1900	nr_pusch_passive_decode_inner::dec_s_stage	func_static	int [converted]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2192	nr_pusch_passive_decode_inner::dec_tp_scope_logged	func_static	atomic_bool [converted]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2239	nr_pusch_passive_decode_inner::dec_retx_c	func_static	_Atomic unsigned long [converted]	UNCLASSIFIED	A6	
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1679	nid_hyp_run::nid_hyp_ready	func_static	bool [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1681	nid_hyp_run::nid_hyp_failed	func_static	bool [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1704	nid_submit::nid_submit_started	func_static	atomic_bool [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1856	nr_pusch_passive_decode_inner::dec_skipped_aux	func_static	_Atomic unsigned long [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1900	nr_pusch_passive_decode_inner::dec_s_stage	func_static	int [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2192	nr_pusch_passive_decode_inner::dec_tp_scope_logged	func_static	atomic_bool [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2239	nr_pusch_passive_decode_inner::dec_retx_c	func_static	_Atomic unsigned long [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2382	nr_pusch_passive_decode_inner::ul_h	tls	float *	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2383	nr_pusch_passive_decode_inner::ul_k	tls	uint32_t *	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2383	nr_pusch_passive_decode_inner::ul_l	tls	uint32_t *	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2384	nr_pusch_passive_decode_inner::ul_cap	tls	uint32_t	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2402	nr_pusch_passive_decode_inner::s_audit	tls	int	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2710	nr_pusch_passive_decode_inner::dec_uci_logged	func_static	_Atomic uint64_t [converted]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2858	nr_pusch_passive_decode_inner::dec_s_ul_scr_confirmed	func_static	_Atomic int [converted]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2952	nr_pusch_passive_decode::dec_fdra_resolved	func_static	_Atomic unsigned long [converted]	UNCLASSIFIED	A6	
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2710	nr_pusch_passive_decode_inner::dec_uci_logged	func_static	_Atomic uint64_t [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2858	nr_pusch_passive_decode_inner::dec_s_ul_scr_confirmed	func_static	_Atomic int [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2952	nr_pusch_passive_decode::dec_fdra_resolved	func_static	_Atomic unsigned long [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	27	g_book	file_static	nr_passive_ul_book_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	29	g_book_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	31	g_parked	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
@@ -2032,9 +2032,9 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	45	g_chain_skip_rv	fi
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	47	g_first_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	49	g_first	file_static	nr_ul_first_state_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	54	g_history	file_static	g_history_cell_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	180	passive_ul_deliver::deliver_s_first	func_static	int [converted]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	195	passive_ul_deliver::deliver_s_ul_tried	func_static	int [converted]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	267	nr_pusch_passive_monitor_process::monitor_previous	func_static	long [converted]	UNCLASSIFIED	A6	
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	180	passive_ul_deliver::deliver_s_first	func_static	int [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	195	passive_ul_deliver::deliver_s_ul_tried	func_static	int [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	267	nr_pusch_passive_monitor_process::monitor_previous	func_static	long [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	76	g_ring	file_static	g_ring_cell_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	78	g_cursor	file_static	nr_pusch_queue_cursor_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	89	g_pring	file_static	g_pring_cell_t [converted]	PER_CELL	A6	converted (A6)
@@ -2075,7 +2075,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	172	g_threads	file_static	
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	174	g_ue	file_static	PHY_VARS_NR_UE * [converted]	PER_CELL	A6	converted (A6); HEAP, prealloc before the RX fence
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	182	g_args	file_static	g_args_cell_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	184	g_cap_arg	file_static	consumer_arg_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	380	nr_pusch_passive_queue_thread::ulq_solver_gen	func_static	_Atomic uint64_t [converted]	UNCLASSIFIED	A6	
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	380	nr_pusch_passive_queue_thread::ulq_solver_gen	func_static	_Atomic uint64_t [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	917	g_opt_win_start_ns	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	919	g_opt_win_used_ns	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	930	opt_share_ns_per_s::share	func_static	_Atomic uint64_t	PROCESS	A6	cache of a host constant (1 s / online cpus), idempotent; the per-cell division is applied at the use
