@@ -13,7 +13,7 @@ name=${1:-two_cell}
 B=${B:-$ROOT/cmake_targets/ran_build/build}; CFG=${CFG:-$O/ota/sd_t26ul.cfg}; ENVFILE=${ENVFILE:-$O/ota/FROZEN_20261018.env}
 SPEED=${SPEED:-0.25}; DUR=${DUR:-240}
 CAP415=${CAP415:-/home/nicola/NICOLA/ota_runs/raw_pci415_12s_b}; CAP403=${CAP403:-/home/nicola/NICOLA/ota_runs/raw_iliad403_4s_1023_2315}
-if pgrep -x nr-uesoftmodem >/dev/null; then echo "a receiver is running: not starting" >&2; exit 3; fi
+if pgrep -u "$(id -un)" -x nr-uesoftmodem >/dev/null; then echo "a receiver is running: not starting" >&2; exit 3; fi # our receivers only (another user runs a docker UE)
 if ! flock -n "$O/locks/heavy.lock" true; then echo "heavy.lock is held: not starting" >&2; exit 3; fi
 src() { # <ring> <capture dir> -> publisher source argument (geometry from the capture's own capture_info.json)
   python3 -I -c "import json,sys;d=json.load(open(sys.argv[2]+'/capture_info.json'));print('%s=%s,%d,%d,%d,%d,%d,2'%(sys.argv[1],sys.argv[2],d['samples_per_channel'],d['first_sample_tick'],d['channels'],d['sample_rate_hz'],d['rf_channels'][0]['frequency_hz']))" "$1" "$2"
