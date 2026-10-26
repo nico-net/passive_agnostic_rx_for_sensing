@@ -1789,7 +1789,7 @@ void *UE_thread(void *arg)
           trashed_frames = 0;
           nr_rx_continuity_reset(&rx_continuity);
           LOG_W(PHY, "SENSING: RXDISCONT sync invalidated, timing state cleared, reacquiring\n");
-          nr_sfo_resync_all("stream discontinuity");
+          nr_sfo_resync_cell(UE->Mod_id, "stream discontinuity");
           /* The state tracker's other inputs are all latched discovery state and cannot regress
            * on a stream loss; this edge is the only thing that can tell it the mapping is gone. */
           nr_passive_acq_note_sync_loss();
@@ -2246,7 +2246,7 @@ void *UE_thread(void *arg)
           decoded_frame_rx = MAX_FRAME_NUMBER - 1;
           trashed_frames = 0;
           s_bad = 0;
-          nr_sfo_resync_all("RF stall / PBCH lock lost");
+          nr_sfo_resync_cell(UE->Mod_id, "RF stall / PBCH lock lost");
         }
       }
     }
