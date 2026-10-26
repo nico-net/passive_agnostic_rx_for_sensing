@@ -1,6 +1,8 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE /* FATTAILS DECSLOW: RUSAGE_THREAD, sched_getcpu */
 #endif
+#include "common/utils/nr_cell.h" /* mpci A5: per-cell state (NR_CELL_STATIC) */
+#include "nr_pdsch_cell_prealloc.h"
 #include "nr_pdsch_slot_spread.h"
 #include "PHY/TOOLS/nr_stage_split.h"
 #include "PHY/TOOLS/nr_admit.h"
@@ -117,9 +119,15 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
 
 /* T21: fixed-size consumer-owned IQ arenas, allocated before threads start. No
  * CUDA registration or allocation. Only a slot window is copied per group. */
-static c16_t *g_owned_iq[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS][NB_ANTENNAS_RX];
-static _Atomic uint64_t g_latency[NR_PDSCH_LAT_STAGES][NR_PDSCH_LAT_BINS];
-static _Atomic uint64_t g_drop_reason[NR_PDSCH_DROP_REASONS];
+typedef c16_t * g_owned_iq_arr_t[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS][NB_ANTENNAS_RX];
+NR_CELL_STATIC(g_owned_iq_arr_t, g_owned_iq);
+#define g_owned_iq NR_CELL_REF(g_owned_iq)
+typedef _Atomic uint64_t g_latency_arr_t[NR_PDSCH_LAT_STAGES][NR_PDSCH_LAT_BINS];
+NR_CELL_STATIC(g_latency_arr_t, g_latency);
+#define g_latency NR_CELL_REF(g_latency)
+typedef _Atomic uint64_t g_drop_reason_arr_t[NR_PDSCH_DROP_REASONS];
+NR_CELL_STATIC(g_drop_reason_arr_t, g_drop_reason);
+#define g_drop_reason NR_CELL_REF(g_drop_reason)
 /* latency_note: adds one sample (end - start, ns) to the queue-latency histogram of a pipeline stage; ignored when start is 0 or end < start.
  *   Lock-free atomic increment into g_latency[stage][bin]. Caller: nr_pdsch_passive_queue_thread() (queue wait, FEP).
  */
@@ -132,8 +140,12 @@ static void latency_note(int stage, uint64_t start, uint64_t end)
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
 /* SYSAN e2e trace: monotonic arrival time of each producer slot (the nrue_ru_read() return),
  * ring of 128 slots, so a grant's latency can be measured from its slot's samples to its CRC (EVMGRANT e2e=, UL_E2E). */
-static _Atomic uint64_t g_slot_arr_ns[128];
-static _Atomic long g_slot_arr_tag[128];
+typedef _Atomic uint64_t g_slot_arr_ns_arr_t[128];
+NR_CELL_STATIC(g_slot_arr_ns_arr_t, g_slot_arr_ns);
+#define g_slot_arr_ns NR_CELL_REF(g_slot_arr_ns)
+typedef _Atomic long g_slot_arr_tag_arr_t[128];
+NR_CELL_STATIC(g_slot_arr_tag_arr_t, g_slot_arr_tag);
+#define g_slot_arr_tag NR_CELL_REF(g_slot_arr_tag)
 void nr_passive_note_slot_arrival(long abs_slot)
 {
   const int k = (int)(abs_slot & 127);
@@ -171,24 +183,39 @@ static long queue_producer_slot(void *ctx)
 /* The RF producer's completed position, published in executables/nr-ue.c after a
  * successful nrue_ru_read(). The two-slot lifetime margin also covers prefetched IQ. */
 
-static nr_pdsch_passive_job_t g_ring[NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH];
-static uint64_t g_ring_ns[NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH];
-static int  g_depth = 0;
-static int  g_head  = 0; // next write slot
-static int  g_tail  = 0; // next read slot
-static int  g_count = 0; // entries currently held
-static _Atomic int g_real_n; // full-decode (non-probe) entries in the ring; written under g_lock, read lock-free (ISAC_BG_LANE gate)
+typedef nr_pdsch_passive_job_t g_ring_arr_t[NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH];
+NR_CELL_STATIC_HEAP(g_ring_arr_t, g_ring);
+#define g_ring NR_CELL_HEAP_REF(g_ring_arr_t, g_ring)
+typedef uint64_t g_ring_ns_arr_t[NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH];
+NR_CELL_STATIC(g_ring_ns_arr_t, g_ring_ns);
+#define g_ring_ns NR_CELL_REF(g_ring_ns)
+NR_CELL_STATIC(int, g_depth);
+#define g_depth NR_CELL_REF(g_depth)
+NR_CELL_STATIC(int, g_head);
+#define g_head NR_CELL_REF(g_head) /* next write slot */
+NR_CELL_STATIC(int, g_tail);
+#define g_tail NR_CELL_REF(g_tail) /* next read slot */
+NR_CELL_STATIC(int, g_count);
+#define g_count NR_CELL_REF(g_count) /* entries currently held */
+NR_CELL_STATIC(_Atomic int, g_real_n);
+#define g_real_n NR_CELL_REF(g_real_n) /* full-decode (non-probe) entries in the ring; written under g_lock, read lock-free (ISAC_BG_LANE gate) */
 #define REAL_ADD(j, d) do { if ((j).layout_probe == 0) atomic_fetch_add_explicit(&g_real_n, (d), memory_order_relaxed); } while (0)
 
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
-static int             g_idle;   /* consumers blocked on g_cv, under g_lock */
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_lock NR_CELL_REF(g_lock)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_cv, PTHREAD_COND_INITIALIZER);
+#define g_cv NR_CELL_REF(g_cv)
+NR_CELL_STATIC(int, g_idle);
+#define g_idle NR_CELL_REF(g_idle) /* consumers blocked on g_cv, under g_lock */
 /* Timer-then-spin hand-off scan -> PDSCH consumer (nr_spin_handoff.h): grants show up a scan-latency after the slot arrival. */
-static nr_spin_pred_t  g_spin_pred;
+NR_CELL_STATIC(nr_spin_pred_t, g_spin_pred);
+#define g_spin_pred NR_CELL_REF(g_spin_pred)
 extern _Atomic long nr_ue_diag_producer_wall_ns;
 
-static _Atomic uint64_t g_queued        = 0;
-static _Atomic uint64_t g_slot_groups   = 0; ///< dequeues that took >1 grant of one slot
+NR_CELL_STATIC(_Atomic uint64_t, g_queued);
+#define g_queued NR_CELL_REF(g_queued)
+NR_CELL_STATIC(_Atomic uint64_t, g_slot_groups);
+#define g_slot_groups NR_CELL_REF(g_slot_groups) /* /< dequeues that took >1 grant of one slot */
 #define NR_PDSCH_PASSIVE_SLOT_GROUP_MAX 64
 void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n);
 void nr_pdcch_bwp_probe_result(int entry, nr_dci_bits_t payload, const float *prb_coh); /* nr_pdcch_blind_monitor_rt.c */
@@ -205,10 +232,23 @@ static int dmrs_scan_rate(void)
 }
 /* wait[]: RNTIs of this slot that arrived while its scan was in progress (DM-RS id contrast): voted when it ends */
 typedef struct { int64_t abs; int n; nr_dmrs_scan_hit_t h[NR_DMRS_SCAN_MAX_HITS]; int nwait; uint16_t wait[8]; } dmrs_scan_slot_t;
-static dmrs_scan_slot_t g_scan_cache[32];
-static int64_t g_scan_last_abs = -1000000;
-static uint64_t g_scan_n, g_scan_hits, g_scan_us, g_pool_n, g_pool_us;
-static pthread_mutex_t g_scan_mu = PTHREAD_MUTEX_INITIALIZER;
+typedef dmrs_scan_slot_t g_scan_cache_arr_t[32];
+NR_CELL_STATIC(g_scan_cache_arr_t, g_scan_cache);
+#define g_scan_cache NR_CELL_REF(g_scan_cache)
+NR_CELL_STATIC_INIT(int64_t, g_scan_last_abs, -1000000);
+#define g_scan_last_abs NR_CELL_REF(g_scan_last_abs)
+NR_CELL_STATIC(uint64_t, g_scan_n);
+#define g_scan_n NR_CELL_REF(g_scan_n)
+NR_CELL_STATIC(uint64_t, g_scan_hits);
+#define g_scan_hits NR_CELL_REF(g_scan_hits)
+NR_CELL_STATIC(uint64_t, g_scan_us);
+#define g_scan_us NR_CELL_REF(g_scan_us)
+NR_CELL_STATIC(uint64_t, g_pool_n);
+#define g_pool_n NR_CELL_REF(g_pool_n)
+NR_CELL_STATIC(uint64_t, g_pool_us);
+#define g_pool_us NR_CELL_REF(g_pool_us)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_scan_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_scan_mu NR_CELL_REF(g_scan_mu)
 /* vote, and log the RNTI's ranked identities whenever they change (the per-scan lines are rate limited) */
 static void dmrs_scan_vote_log(uint16_t rnti, int64_t abs_slot, const nr_dmrs_scan_hit_t *h, int n)
 {
@@ -229,13 +269,23 @@ typedef struct {
   uint16_t rnti; int64_t abs_slot; int nr_slot, sym, nant, N, fco, n_rb, sps; bool full;
   int16_t *buf; /* nant * N * 2 */
 } dscan_job_t;
-static dscan_job_t g_dq[DSCAN_Q];
-static int g_dq_head, g_dq_n;
-static bool g_dq_started;
-static pthread_mutex_t g_dq_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_dq_cv = PTHREAD_COND_INITIALIZER;
-static pthread_t g_dq_thr;
-static _Atomic uint64_t g_dscan_dropped;
+typedef dscan_job_t g_dq_arr_t[DSCAN_Q];
+NR_CELL_STATIC(g_dq_arr_t, g_dq);
+#define g_dq NR_CELL_REF(g_dq)
+NR_CELL_STATIC(int, g_dq_head);
+#define g_dq_head NR_CELL_REF(g_dq_head)
+NR_CELL_STATIC(int, g_dq_n);
+#define g_dq_n NR_CELL_REF(g_dq_n)
+NR_CELL_STATIC(bool, g_dq_started);
+#define g_dq_started NR_CELL_REF(g_dq_started)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_dq_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_dq_mu NR_CELL_REF(g_dq_mu)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_dq_cv, PTHREAD_COND_INITIALIZER);
+#define g_dq_cv NR_CELL_REF(g_dq_cv)
+NR_CELL_STATIC(pthread_t, g_dq_thr);
+#define g_dq_thr NR_CELL_REF(g_dq_thr)
+NR_CELL_STATIC(_Atomic uint64_t, g_dscan_dropped);
+#define g_dscan_dropped NR_CELL_REF(g_dscan_dropped)
 /* dmrs_scan_run: the scan itself (cache fill, votes, log); rx = the DM-RS symbol per antenna. */
 static void dmrs_scan_run(dmrs_scan_slot_t *c, uint16_t rnti, int64_t abs_slot, int nr_slot, int sym, bool full, int nant, int N, int fco,
                           int n_rb, int sps, const int16_t *const *rx)
@@ -275,7 +325,7 @@ static void dmrs_scan_run(dmrs_scan_slot_t *c, uint16_t rnti, int64_t abs_slot, 
 }
 static void *dmrs_scan_worker(void *arg)
 {
-  (void)arg;
+  nr_cell_bind((int)(intptr_t)arg); /* mpci A5: the worker serves the cell that started it (threadCreate does not inherit the cell) */
   nr_bg_lane_enter("ISAC_DMRS_SCAN_CORE");
   for (;;) {
     pthread_mutex_lock(&g_dq_mu);
@@ -308,7 +358,7 @@ static bool dmrs_scan_submit(uint16_t rnti, int64_t abs_slot, int nr_slot, int s
   if (!g_dq_started) {
     for (int i = 0; i < DSCAN_Q; i++) g_dq[i].buf = malloc((size_t)8 * DSCAN_MAXN * 2 * sizeof(int16_t));
     for (int i = 0; i < DSCAN_Q; i++) if (!g_dq[i].buf) { pthread_mutex_unlock(&g_dq_mu); return false; }
-    threadCreate(&g_dq_thr, dmrs_scan_worker, NULL, "dmrsScan", nr_env_list_nth("ISAC_DMRS_SCAN_CORE", 0, -1), 0);
+    threadCreate(&g_dq_thr, dmrs_scan_worker, (void *)(intptr_t)nr_cell_idx(), "dmrsScan", nr_env_list_nth("ISAC_DMRS_SCAN_CORE", 0, -1), 0);
     g_dq_started = true;
   }
   if (g_dq_n >= DSCAN_Q) { pthread_mutex_unlock(&g_dq_mu); atomic_fetch_add(&g_dscan_dropped, 1); return true; }
@@ -358,9 +408,16 @@ static void dmrs_scan_job(const NR_DL_FRAME_PARMS *fp, uint16_t rnti, int64_t ab
                 fp->symbols_per_slot, rx);
 }
 #include "PHY/MODULATION/modulation_UE.h" /* nr_slot_fep */
-static _Atomic uint64_t g_decoded       = 0;
-static _Atomic uint64_t g_cb_ok = 0, g_cb_tried = 0, g_cb_total = 0; /* PDSCHQ cb_crc: per-code-block CRC over the decoded full TBs (not probes) */
-static _Atomic uint64_t g_crc_ok        = 0;
+NR_CELL_STATIC(_Atomic uint64_t, g_decoded);
+#define g_decoded NR_CELL_REF(g_decoded)
+NR_CELL_STATIC(_Atomic uint64_t, g_cb_ok);
+#define g_cb_ok NR_CELL_REF(g_cb_ok)
+NR_CELL_STATIC(_Atomic uint64_t, g_cb_tried);
+#define g_cb_tried NR_CELL_REF(g_cb_tried)
+NR_CELL_STATIC(_Atomic uint64_t, g_cb_total);
+#define g_cb_total NR_CELL_REF(g_cb_total) /* PDSCHQ cb_crc: per-code-block CRC over the decoded full TBs (not probes) */
+NR_CELL_STATIC(_Atomic uint64_t, g_crc_ok);
+#define g_crc_ok NR_CELL_REF(g_crc_ok)
 /* DL DM-RS identity estimate: one process-wide accumulator shared by every consumer, so evidence
  * from all of them adds. The 1024-candidate sweep runs under this lock on the consumer that
  * happens to hold it -- off the RT thread by construction, since this file IS the consumer. */
@@ -379,8 +436,11 @@ typedef struct {
   uint64_t last_slot;
   uint32_t failed_slots;
 } coreset_dmrs_t;
-static coreset_dmrs_t g_cs_dmrs[8];
-static pthread_mutex_t g_cs_dmrs_mu = PTHREAD_MUTEX_INITIALIZER;
+typedef coreset_dmrs_t g_cs_dmrs_arr_t[8];
+NR_CELL_STATIC(g_cs_dmrs_arr_t, g_cs_dmrs);
+#define g_cs_dmrs NR_CELL_REF(g_cs_dmrs)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_cs_dmrs_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_cs_dmrs_mu NR_CELL_REF(g_cs_dmrs_mu)
 /* coreset_dmrs_refresh: how often the per-CORESET DM-RS identity is re-estimated (frozen ISAC_PDSCH_DMRS_ID_REFRESH=64); nonzero also makes
  *   the coreset_dmrs table readers take its mutex. Callers: nr_pdsch_passive_coreset_dmrs_top(), queue_thread().
  */
@@ -434,13 +494,35 @@ int nr_pdsch_passive_coreset_dmrs_id(int key)
     if (g_cs_dmrs[i].used && g_cs_dmrs[i].key == key) return __atomic_load_n(&g_cs_dmrs[i].decided, __ATOMIC_ACQUIRE);
   return -1;
 }
-static nr_dmrs_id_2stage_t g_dl_dmrs_id[NR_DL_DMRS_NSCID];
-static bool g_dl_dmrs_id_init[NR_DL_DMRS_NSCID];
-static pthread_mutex_t g_dl_dmrs_id_lock[NR_DL_DMRS_NSCID] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
+typedef nr_dmrs_id_2stage_t g_dl_dmrs_id_arr_t[NR_DL_DMRS_NSCID];
+NR_CELL_STATIC(g_dl_dmrs_id_arr_t, g_dl_dmrs_id);
+#define g_dl_dmrs_id NR_CELL_REF(g_dl_dmrs_id)
+typedef bool g_dl_dmrs_id_init_arr_t[NR_DL_DMRS_NSCID];
+NR_CELL_STATIC(g_dl_dmrs_id_init_arr_t, g_dl_dmrs_id_init);
+#define g_dl_dmrs_id_init NR_CELL_REF(g_dl_dmrs_id_init)
+typedef pthread_mutex_t g_dl_dmrs_id_lock_arr_t[NR_DL_DMRS_NSCID];
+NR_CELL_STATIC_INIT(g_dl_dmrs_id_lock_arr_t, g_dl_dmrs_id_lock, {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER});
+#define g_dl_dmrs_id_lock NR_CELL_REF(g_dl_dmrs_id_lock)
 const nr_dmrs_id_2stage_t *nr_pdsch_passive_dl_dmrs_id(int nscid) { return &g_dl_dmrs_id[nscid & 1]; }
-static pthread_mutex_t g_dl_rank_lock = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t g_rank_n[4], g_rank_low[4], g_rank_total; static double g_rank_sum[4];
-static uint64_t g_cdm_empty[4]; static double g_cdm_sum[4];
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_dl_rank_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_dl_rank_lock NR_CELL_REF(g_dl_rank_lock)
+typedef uint64_t g_rank_n_arr_t[4];
+NR_CELL_STATIC(g_rank_n_arr_t, g_rank_n);
+#define g_rank_n NR_CELL_REF(g_rank_n)
+typedef uint64_t g_rank_low_arr_t[4];
+NR_CELL_STATIC(g_rank_low_arr_t, g_rank_low);
+#define g_rank_low NR_CELL_REF(g_rank_low)
+NR_CELL_STATIC(uint64_t, g_rank_total);
+#define g_rank_total NR_CELL_REF(g_rank_total)
+typedef double g_rank_sum_arr_t[4];
+NR_CELL_STATIC(g_rank_sum_arr_t, g_rank_sum);
+#define g_rank_sum NR_CELL_REF(g_rank_sum)
+typedef uint64_t g_cdm_empty_arr_t[4];
+NR_CELL_STATIC(g_cdm_empty_arr_t, g_cdm_empty);
+#define g_cdm_empty NR_CELL_REF(g_cdm_empty)
+typedef double g_cdm_sum_arr_t[4];
+NR_CELL_STATIC(g_cdm_sum_arr_t, g_cdm_sum);
+#define g_cdm_sum NR_CELL_REF(g_cdm_sum)
 
 /* ---- RANK / CDM-GROUP VERDICT  (agnosticity #4) ------------------------------------------------
  * Rank is NOT assumed here: cw->Nl comes from the DM-RS port count carried in the blindly decoded
@@ -455,8 +537,11 @@ static uint64_t g_cdm_empty[4]; static double g_cdm_sum[4];
  * RNTI-masked CRC is what proves the grant belongs to this cell -- the TB CRC says nothing about how
  * many layers the scheduler declared. Gating this on TB CRC made the verdict unable to speak in
  * exactly the case it is most needed (rank high, decode failing), which is a defect, not caution. */
-static _Atomic uint64_t g_nl_ok[8];
-static _Atomic int      g_rank_verdict_logged;
+typedef _Atomic uint64_t g_nl_ok_arr_t[8];
+NR_CELL_STATIC(g_nl_ok_arr_t, g_nl_ok);
+#define g_nl_ok NR_CELL_REF(g_nl_ok)
+NR_CELL_STATIC(_Atomic int, g_rank_verdict_logged);
+#define g_rank_verdict_logged NR_CELL_REF(g_rank_verdict_logged)
 #define RANK_VERDICT_MIN_OK 200
 void nr_pdsch_passive_rank_verdict(void)
 {
@@ -502,7 +587,12 @@ void nr_pdsch_passive_rank_verdict(void)
 }
 /* Per-RNTI DL decode census: "DL converged" is a per-UE statement, and a cell-wide CRC rate can hide
  * one UE decoding at 80 % and the other at 0 %. Indexed by C-RNTI; printed with the PDSCHQ census. */
-static _Atomic uint32_t g_rnti_dec[65536], g_rnti_ok[65536];
+typedef _Atomic uint32_t g_rnti_dec_arr_t[65536];
+NR_CELL_STATIC_HEAP(g_rnti_dec_arr_t, g_rnti_dec);
+#define g_rnti_dec NR_CELL_HEAP_REF(g_rnti_dec_arr_t, g_rnti_dec)
+typedef _Atomic uint32_t g_rnti_ok_arr_t[65536];
+NR_CELL_STATIC_HEAP(g_rnti_ok_arr_t, g_rnti_ok);
+#define g_rnti_ok NR_CELL_HEAP_REF(g_rnti_ok_arr_t, g_rnti_ok)
 void nr_pdsch_passive_queue_rnti_census(char *buf, size_t n)
 {
   size_t off = 0; int shown = 0;
@@ -515,38 +605,58 @@ void nr_pdsch_passive_queue_rnti_census(char *buf, size_t n)
   }
   if (!shown) snprintf(buf, n, " (none>=50)");
 }
-static _Atomic uint64_t g_dropped_full  = 0; // evicted oldest to admit a newer job
-static _Atomic uint64_t g_dropped_narrow = 0; // budget: narrow grant refused while the ring was nearly full
-static _Atomic uint64_t g_dropped_stale = 0;
-static _Atomic uint64_t g_stale_after_decode = 0; // K33
+NR_CELL_STATIC(_Atomic uint64_t, g_dropped_full);
+#define g_dropped_full NR_CELL_REF(g_dropped_full) /* evicted oldest to admit a newer job */
+NR_CELL_STATIC(_Atomic uint64_t, g_dropped_narrow);
+#define g_dropped_narrow NR_CELL_REF(g_dropped_narrow) /* budget: narrow grant refused while the ring was nearly full */
+NR_CELL_STATIC(_Atomic uint64_t, g_dropped_stale);
+#define g_dropped_stale NR_CELL_REF(g_dropped_stale)
+NR_CELL_STATIC(_Atomic uint64_t, g_stale_after_decode);
+#define g_stale_after_decode NR_CELL_REF(g_stale_after_decode) /* K33 */
 void nr_pdsch_passive_note_stale_after_decode(void)
 {
   atomic_fetch_add_explicit(&g_stale_after_decode, 1, memory_order_relaxed);
 }
-static _Atomic uint64_t g_dropped_epoch = 0;
-static _Atomic uint64_t g_max_lag       = 0;
+NR_CELL_STATIC(_Atomic uint64_t, g_dropped_epoch);
+#define g_dropped_epoch NR_CELL_REF(g_dropped_epoch)
+NR_CELL_STATIC(_Atomic uint64_t, g_max_lag);
+#define g_max_lag NR_CELL_REF(g_max_lag)
 
-static _Atomic int g_running   = 0;
-static _Atomic int g_stop      = 0;
-static int         g_nthreads  = 0;
-static pthread_t   g_threads[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
-static PHY_VARS_NR_UE *g_ue = NULL;
+NR_CELL_STATIC(_Atomic int, g_running);
+#define g_running NR_CELL_REF(g_running)
+NR_CELL_STATIC(_Atomic int, g_stop);
+#define g_stop NR_CELL_REF(g_stop)
+NR_CELL_STATIC(int, g_nthreads);
+#define g_nthreads NR_CELL_REF(g_nthreads)
+typedef pthread_t g_threads_arr_t[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+NR_CELL_STATIC(g_threads_arr_t, g_threads);
+#define g_threads NR_CELL_REF(g_threads)
+NR_CELL_STATIC(PHY_VARS_NR_UE *, g_ue);
+#define g_ue NR_CELL_REF(g_ue)
 
 /* One frequency-domain slot buffer PER CONSUMER: they decode concurrently, and
  * nr_pdsch_passive_decode() both fills this and hands the same samples to the data-aided submit.
  * ~917 kB each at 273 PRB x 4 antennas. Heap, not thread-local storage -- the AoA work in
  * PASSIVE_RX_ONLY_HANDOVER.md records a shifted __thread layout producing an AVX alignment fault,
  * and this is far larger than the buffer that did it. */
-static c16_t *g_rxdataF[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+typedef c16_t * g_rxdataF_arr_t[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+NR_CELL_STATIC(g_rxdataF_arr_t, g_rxdataF);
+#define g_rxdataF NR_CELL_REF(g_rxdataF)
 /* GrantWork-lite (ISAC_TD_GRANTWORK=1): g_rxdataF[i] is the FEP buffer the grant's GrantWork borrows; its
  * generation moves on every slot group, so a gw that outlives its group can no longer compute on it. */
-static uint64_t g_fep_gen[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
-static bool g_rxdataF_gw; /* g_rxdataF[] came from nr_td_gw_alloc (ISAC_TD_GRANTWORK=1 only: flag off = unchanged) */
+typedef uint64_t g_fep_gen_arr_t[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+NR_CELL_STATIC(g_fep_gen_arr_t, g_fep_gen);
+#define g_fep_gen NR_CELL_REF(g_fep_gen)
+NR_CELL_STATIC(bool, g_rxdataF_gw);
+#define g_rxdataF_gw NR_CELL_REF(g_rxdataF_gw) /* g_rxdataF[] came from nr_td_gw_alloc (ISAC_TD_GRANTWORK=1 only: flag off = unchanged) */
 
 typedef struct {
   int idx;
+  int cell; /* mpci A5: the cell whose queue this consumer serves (bound at thread start) */
 } consumer_arg_t;
-static consumer_arg_t g_args[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+typedef consumer_arg_t g_args_arr_t[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+NR_CELL_STATIC(g_args_arr_t, g_args);
+#define g_args NR_CELL_REF(g_args)
 
 
 /* Timing advance out of an overheard, CRC-verified MAC PDU. The parsing itself is pure and lives in
@@ -561,10 +671,16 @@ static consumer_arg_t g_args[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
  * Small ring, no eviction policy: a TC-RNTI is live for one RA procedure (~tens of ms), 32 entries
  * cover minutes at this cell's RAR rate. */
 #define RAR_TC_RING 32
-static struct { uint16_t rnti; uint32_t abs_slot; } g_rar_tc[RAR_TC_RING];
-static unsigned g_rar_tc_head;
-static uint32_t g_rar_tc_wrap;   /* slots per SFN cycle = 1024 * slots_per_frame, set on first RAR */
-static pthread_mutex_t g_rar_tc_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct { uint16_t rnti; uint32_t abs_slot; } rar_tc_t;
+typedef rar_tc_t g_rar_tc_arr_t[RAR_TC_RING];
+NR_CELL_STATIC(g_rar_tc_arr_t, g_rar_tc);
+#define g_rar_tc NR_CELL_REF(g_rar_tc)
+NR_CELL_STATIC(unsigned, g_rar_tc_head);
+#define g_rar_tc_head NR_CELL_REF(g_rar_tc_head)
+NR_CELL_STATIC(uint32_t, g_rar_tc_wrap);
+#define g_rar_tc_wrap NR_CELL_REF(g_rar_tc_wrap) /* slots per SFN cycle = 1024 * slots_per_frame, set on first RAR */
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_rar_tc_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_rar_tc_lock NR_CELL_REF(g_rar_tc_lock)
 /* CLOCK BUG, found before it produced a conclusion (2026-09-21): the ring used to be stamped with
  * job.absolute_slot -- the PRODUCER'S MONOTONIC counter -- while the PDCCH accept path asks with
  * frame_rx * slots_per_frame + nr_slot_rx. Two clocks with different origins, so the window test
@@ -720,7 +836,14 @@ static uint16_t dmrs_oracle_measure(PHY_VARS_NR_UE *ue, NR_DL_FRAME_PARMS *fp, u
   return mask;
 }
 
-static _Atomic uint64_t g_k0_probes, g_k0_probe_retained, g_k0_probe_retained_max, g_k0_probe_hits;
+NR_CELL_STATIC(_Atomic uint64_t, g_k0_probes);
+#define g_k0_probes NR_CELL_REF(g_k0_probes)
+NR_CELL_STATIC(_Atomic uint64_t, g_k0_probe_retained);
+#define g_k0_probe_retained NR_CELL_REF(g_k0_probe_retained)
+NR_CELL_STATIC(_Atomic uint64_t, g_k0_probe_retained_max);
+#define g_k0_probe_retained_max NR_CELL_REF(g_k0_probe_retained_max)
+NR_CELL_STATIC(_Atomic uint64_t, g_k0_probe_hits);
+#define g_k0_probe_hits NR_CELL_REF(g_k0_probe_hits)
 
 /* The DM-RS probes below (oracle gate, rank, CDM, DM-RS identity) read one CONTIGUOUS stretch of
  * subcarriers from first_rb. A PRB-list or PRG grant is not contiguous (and may change precoder at a
@@ -762,13 +885,33 @@ static uint64_t bc9_row_k0(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda)
   (void)arg;
   return nr_pdsch_config_sweep_row_k0_allowed(cfg, rnti, tda);
 }
-static _Atomic uint64_t g_bc9_jobs, g_bc9_cert, g_bc9_cert_ok, g_bc9_nosib, g_bc9_nodci, g_bc9_ok, g_bc9_alarm;
-static _Atomic uint64_t g_bc9_cert_ok_k0[5]; /* certified passes by the hypothesis' k0: 0, 1, 2, 3, >= 4 */
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9_jobs);
+#define g_bc9_jobs NR_CELL_REF(g_bc9_jobs)
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9_cert);
+#define g_bc9_cert NR_CELL_REF(g_bc9_cert)
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9_cert_ok);
+#define g_bc9_cert_ok NR_CELL_REF(g_bc9_cert_ok)
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9_nosib);
+#define g_bc9_nosib NR_CELL_REF(g_bc9_nosib)
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9_nodci);
+#define g_bc9_nodci NR_CELL_REF(g_bc9_nodci)
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9_ok);
+#define g_bc9_ok NR_CELL_REF(g_bc9_ok)
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9_alarm);
+#define g_bc9_alarm NR_CELL_REF(g_bc9_alarm)
+typedef _Atomic uint64_t g_bc9_cert_ok_k0_arr_t[5];
+NR_CELL_STATIC(g_bc9_cert_ok_k0_arr_t, g_bc9_cert_ok_k0);
+#define g_bc9_cert_ok_k0 NR_CELL_REF(g_bc9_cert_ok_k0) /* certified passes by the hypothesis' k0: 0, 1, 2, 3, >= 4 */
 /* k0 values with a certified pass per (RNTI, configuration, TDA), checked against the winner on convergence (M3). */
 #define BC9_CPK 64
-static struct { uint64_t cfg, mask, touched; uint16_t rnti; uint8_t tda; } g_bc9_cpk[BC9_CPK];
-static uint64_t g_bc9_cpk_clock;
-static pthread_mutex_t g_bc9_cpk_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct { uint64_t cfg, mask, touched; uint16_t rnti; uint8_t tda; } bc9_cpk_t;
+typedef bc9_cpk_t g_bc9_cpk_arr_t[BC9_CPK];
+NR_CELL_STATIC(g_bc9_cpk_arr_t, g_bc9_cpk);
+#define g_bc9_cpk NR_CELL_REF(g_bc9_cpk)
+NR_CELL_STATIC(uint64_t, g_bc9_cpk_clock);
+#define g_bc9_cpk_clock NR_CELL_REF(g_bc9_cpk_clock)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_bc9_cpk_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_bc9_cpk_lock NR_CELL_REF(g_bc9_cpk_lock)
 static int bc9_cpk_find(uint16_t rnti, uint64_t cfg, uint8_t tda, bool create)
 {
   int lru = 0;
@@ -898,14 +1041,32 @@ static bool bc9d_constrained(void *arg, uint64_t cfg, uint16_t rnti)
   (void)arg;
   return nr_pdsch_config_sweep_rnti_constrained(rnti, cfg);
 }
-static _Atomic uint64_t g_bc9d_confirms, g_bc9d_missed, g_bc9d_repeat, g_bc9d_tdd, g_bc9d_tdd_applied, g_bc9d_adj_rows,
-    g_bc9d_adj_removed, g_bc9d_adj_refused;
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9d_confirms);
+#define g_bc9d_confirms NR_CELL_REF(g_bc9d_confirms)
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9d_missed);
+#define g_bc9d_missed NR_CELL_REF(g_bc9d_missed)
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9d_repeat);
+#define g_bc9d_repeat NR_CELL_REF(g_bc9d_repeat)
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9d_tdd);
+#define g_bc9d_tdd NR_CELL_REF(g_bc9d_tdd)
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9d_tdd_applied);
+#define g_bc9d_tdd_applied NR_CELL_REF(g_bc9d_tdd_applied)
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9d_adj_rows);
+#define g_bc9d_adj_rows NR_CELL_REF(g_bc9d_adj_rows)
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9d_adj_removed);
+#define g_bc9d_adj_removed NR_CELL_REF(g_bc9d_adj_removed)
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9d_adj_refused);
+#define g_bc9d_adj_refused NR_CELL_REF(g_bc9d_adj_refused)
 /* Review M5 cache (moved from the accept hook): true when this exact TDD constraint is known applied (no g_lock); else applies
  * it and caches it when it persisted (the RNTI is tracked by the sweep). Valid while the sweep's constraint epoch is unchanged.
  * Direct-mapped, own small lock. */
 #define BC9_TDD_CACHE 256
-static struct { uint64_t cfg, epoch; uint16_t rnti; uint8_t tda; bool valid; nr_td_excl_t ex; } g_bc9_tdd_cache[BC9_TDD_CACHE];
-static pthread_mutex_t g_bc9_tdd_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct { uint64_t cfg, epoch; uint16_t rnti; uint8_t tda; bool valid; nr_td_excl_t ex; } bc9_tdd_cache_t;
+typedef bc9_tdd_cache_t g_bc9_tdd_cache_arr_t[BC9_TDD_CACHE];
+NR_CELL_STATIC(g_bc9_tdd_cache_arr_t, g_bc9_tdd_cache);
+#define g_bc9_tdd_cache NR_CELL_REF(g_bc9_tdd_cache)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_bc9_tdd_cache_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_bc9_tdd_cache_lock NR_CELL_REF(g_bc9_tdd_cache_lock)
 static int bc9d_exclude(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda, const int8_t *last, bool tdd)
 {
   if (!nr_cfg_epoch_work_current()) return 0;
@@ -1020,6 +1181,7 @@ typedef struct {
   int key, nid_cell, crc, ofdm, start_sc, rb_offset, nrb, n_rb_dl, nsym, slot, sym, nscid, ncp_normal, cfg_type;
   long abs_slot;
   c16_t *row; /* deferred copy of the DM-RS symbol of antenna 0 (ofdm entries) */
+  int cell;   /* mpci A5: the deferred job runs on the unbound dmrsIdBg worker (nr_pdsch_gpu_demod_host.c bg_main): the cell travels in the job */
 } cdmrs_obs_t;
 static void coreset_dmrs_observe(const cdmrs_obs_t *o, const c16_t *row, int blocking)
 {
@@ -1072,10 +1234,12 @@ static void coreset_dmrs_observe(const cdmrs_obs_t *o, const c16_t *row, int blo
  * (queue 8, dropped and counted when full) instead of the FIFO-40 consumer. [MEASURED, DGX replay tim, bpftrace profile]
  * nr_dmrs_id_2stage_accumulate (1024 candidates per observation, every fresh slot with the DM-RS id refresh) was
  * ~65 % of the PDSCH consumers' CPU time. */
-static nr_bgq_t g_cdmrs_q;
+NR_CELL_STATIC(nr_bgq_t, g_cdmrs_q);
+#define g_cdmrs_q NR_CELL_REF(g_cdmrs_q)
 static int cdmrs_async_on(void)
 {
-  static int on = -1;
+  NR_CELL_STATIC_INIT(int, on, -1);
+#define on NR_CELL_REF(on)
   if (on < 0) {
     on = 1; /* published before the start: concurrent consumers must not start the worker again (as at HEAD) */
     if (nr_bgq_start(&g_cdmrs_q, 8, "dmrsIdBg") != 0)
@@ -1083,9 +1247,11 @@ static int cdmrs_async_on(void)
   }
   return on;
 }
+#undef on
 static void cdmrs_run(void *arg)
 {
   cdmrs_obs_t *o = arg;
+  nr_cell_bind(o->cell); /* the worker serves one cell's queue (g_cdmrs_q is per cell), the job names it */
   const uint64_t t_adm = nr_admit_now_ns();
   if (!nr_admit_try(NR_ADMIT_DMRS_ID, t_adm, 0, 0)) { /* ISAC_BG_LANE: critical lane busy, the observation is dropped */
     free(o->row);
@@ -1120,6 +1286,7 @@ static void coreset_dmrs_observe_or_defer(const cdmrs_obs_t *o, const c16_t *row
     return;
   }
   *j = *o;
+  j->cell = nr_cell_idx();
   memcpy(r, row, sizeof(c16_t) * (size_t)o->ofdm);
   j->row = r;
   if (nr_bgq_push(&g_cdmrs_q, cdmrs_run, j) != 0) {
@@ -1134,11 +1301,22 @@ static void coreset_dmrs_observe_or_defer(const cdmrs_obs_t *o, const c16_t *row
 typedef struct { c16_t *iq[NB_ANTENNAS_RX]; _Atomic int refs; } recov_snap_t;
 typedef struct { nr_pdsch_passive_job_t job; recov_snap_t *snap; } recov_wjob_t;
 #define RECOV_SNAP_MAX 32
-static recov_snap_t g_rsnap[RECOV_SNAP_MAX];
-static int g_rsnap_free[RECOV_SNAP_MAX], g_rsnap_nfree, g_rsnap_n;
-static pthread_mutex_t g_rsnap_mu = PTHREAD_MUTEX_INITIALIZER;
-static bool g_recov_ok; /* snapshot pool allocated and the worker running */
-static _Atomic uint64_t g_recov_nosnap;
+typedef recov_snap_t g_rsnap_arr_t[RECOV_SNAP_MAX];
+NR_CELL_STATIC(g_rsnap_arr_t, g_rsnap);
+#define g_rsnap NR_CELL_REF(g_rsnap)
+typedef int g_rsnap_free_arr_t[RECOV_SNAP_MAX];
+NR_CELL_STATIC(g_rsnap_free_arr_t, g_rsnap_free);
+#define g_rsnap_free NR_CELL_REF(g_rsnap_free)
+NR_CELL_STATIC(int, g_rsnap_nfree);
+#define g_rsnap_nfree NR_CELL_REF(g_rsnap_nfree)
+NR_CELL_STATIC(int, g_rsnap_n);
+#define g_rsnap_n NR_CELL_REF(g_rsnap_n)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_rsnap_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_rsnap_mu NR_CELL_REF(g_rsnap_mu)
+NR_CELL_STATIC(bool, g_recov_ok);
+#define g_recov_ok NR_CELL_REF(g_recov_ok) /* snapshot pool allocated and the worker running */
+NR_CELL_STATIC(_Atomic uint64_t, g_recov_nosnap);
+#define g_recov_nosnap NR_CELL_REF(g_recov_nosnap)
 static void recov_group_handoff(int idx, recov_wjob_t *const slots[], const nr_recov_key_t keys[], int n);
 bool nr_pdsch_passive_first_pass_waiting(void); /* TAIL-FIX, defined below */
 
@@ -1152,6 +1330,7 @@ void nr_pdsch_recovery_thread_prewarm(void)
 extern __thread uint32_t nr_gp_tt[26]; /* nr_gpu_pass_dl.c */
 static void *nr_pdsch_passive_queue_thread(void *arg)
 {
+  nr_cell_bind(((consumer_arg_t *)arg)->cell); /* mpci A5: threadCreate does not inherit the cell */
   const int idx = ((consumer_arg_t *)arg)->idx;
   PHY_VARS_NR_UE *ue        = g_ue;
   NR_DL_FRAME_PARMS *fp     = &ue->frame_parms;
@@ -1487,7 +1666,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * buffer: rxdataF carries this job's own slot, which the decode's per-thread FEP cache may reuse for
          * the rest of the slot group.
          * ponytail: 1 in 8 eligible jobs probes (up to K x 14 FFTs + up to K slots of waiting each). */
-        static _Atomic uint32_t s_probe_tick;
+        NR_CELL_STATIC(_Atomic uint32_t, s_probe_tick);
+#define s_probe_tick NR_CELL_REF(s_probe_tick)
         static __thread c16_t *t_probe;
         if (!t_probe)
           t_probe = (c16_t *)malloc16_clear((size_t)rxdataF_sz * sizeof(c16_t));
@@ -1543,6 +1723,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                   (unsigned long)atomic_load(&g_k0_probe_retained_max));
         }
       }
+#undef s_probe_tick
     }
     nr_pdsch_passive_decode_result_t dec = {0};
     /* GRANTWORK-LITE (levers plan R1): this grant's shared per-geometry work
@@ -1732,13 +1913,18 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       continue;
     }
     if (job.layout_probe) {
-      static _Atomic uint64_t s_probe_n, s_probe_ok;
+      NR_CELL_STATIC(_Atomic uint64_t, s_probe_n);
+#define s_probe_n NR_CELL_REF(s_probe_n)
+      NR_CELL_STATIC(_Atomic uint64_t, s_probe_ok);
+#define s_probe_ok NR_CELL_REF(s_probe_ok)
       atomic_fetch_add_explicit(&s_probe_n, 1, memory_order_relaxed);
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) atomic_fetch_add_explicit(&s_probe_ok, 1, memory_order_relaxed);
       const uint64_t pn = atomic_load_explicit(&s_probe_n, memory_order_relaxed);
       if (pn == 100 || pn == 400 || (pn % 2000) == 0)
         LOG_A(PHY, "SENSING: LAYOUT_PROBE n=%lu cb0_ok=%lu\n", (unsigned long)atomic_load(&s_probe_n), (unsigned long)atomic_load(&s_probe_ok));
     } else
+#undef s_probe_n
+#undef s_probe_ok
       nr_passive_replay_dl(&job, &dec);
     nr_slot_fep_fo_override_hz = saved_fo;
     /* Owned IQ passed both copy guards and cannot expire during LDPC. Epoch
@@ -1812,7 +1998,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         /* dataScramblingIdentityPDSCH is dedicated and assumed = PCI. A CRC-OK transport block IS the
          * proof: c_init = RNTI*2^15 + n_ID, so any other n_ID descrambles wrongly and LDPC fails.
          * State the verdict once instead of leaving it an assumption. */
-        static bool s_dl_scr_confirmed;
+        NR_CELL_STATIC(bool, s_dl_scr_confirmed);
+#define s_dl_scr_confirmed NR_CELL_REF(s_dl_scr_confirmed)
         if (crc && !s_dl_scr_confirmed) {
           s_dl_scr_confirmed = true;
           LOG_A(PHY, "SENSING: DATA_SCRAMBLING_ID PDSCH CONFIRMED n_id=%u (assumed %u) by TB CRC, rnti=0x%x\n",
@@ -1913,7 +2100,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * the restart), the channel estimate was built from the wrong pilot sequence, every TB CRC failed and Technique D never converged.
          * Re-initialise it from the new Nid_cell when the PCI this state was built for changes. */
         if (credit_ok) {
-          static _Atomic int s_dl_dmrs_nid = -1;
+          NR_CELL_STATIC_INIT(_Atomic int, s_dl_dmrs_nid, -1);
+#define s_dl_dmrs_nid NR_CELL_REF(s_dl_dmrs_nid)
           const int nid_now = (int)ue->frame_parms.Nid_cell;
           const int nid_was = atomic_exchange_explicit(&s_dl_dmrs_nid, nid_now, memory_order_relaxed);
           if (nid_was >= 0 && nid_was != nid_now) {
@@ -1926,6 +2114,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
             LOG_A(PHY, "SENSING: DL DM-RS id state RESET: PCI %d -> %d (the decided id belonged to the old cell)\n", nid_was, nid_now);
           }
         }
+#undef s_dl_dmrs_nid
         if (credit_ok && job.grant.scr_dedicated && pr_nrb > 0 && pdu->dlDmrsSymbPos
             && nr_dmrs_id_2stage_decided(&g_dl_dmrs_id[dl_ns]) < 0 && pthread_mutex_trylock(&g_dl_dmrs_id_lock[dl_ns]) == 0) {
           nr_dmrs_id_2stage_t *dst = &g_dl_dmrs_id[dl_ns];
@@ -1947,6 +2136,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         if (job.data_id_advance && credit_ok && !recov_hold)
           nr_pdsch_passive_data_id_feed(job.rnti, crc);
       }
+#undef s_dl_scr_confirmed
       /* Technique D scoring: the TB CRC is the only oracle that can tell a right payload
        * interpretation from a wrong one, and this is the one place it is known. */
       nr_pdsch_cfg_hypothesis_t winner;
@@ -2082,7 +2272,9 @@ void nr_pdsch_passive_queue_recov_fb_stats(uint64_t out[3]);
 /* Held-back outcome feedback of a deferred job, the same calls the consumer makes for a decoded grant (credit_ok true: the worker's IQ is a private snapshot,
  * except FAIL_NOCREDIT = IQ expired, where only the solver token is released). The hooks are the ones N consumers already call concurrently. */
 static __thread const nr_pdsch_passive_decode_result_t *t_recov_dec; /* the rescue's decode result, set by recov_run before publish */
-static _Atomic uint64_t g_recov_fb[3];
+typedef _Atomic uint64_t g_recov_fb_arr_t[3];
+NR_CELL_STATIC(g_recov_fb_arr_t, g_recov_fb);
+#define g_recov_fb NR_CELL_REF(g_recov_fb)
 static void recov_feedback(void *p, const nr_recov_key_t *k, int outcome)
 {
   (void)k;
@@ -2337,6 +2529,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
 
   for (int i = 0; i < n_consumers; i++) {
     g_args[i].idx = i;
+    g_args[i].cell = nr_cell_idx();
     char name[32];
     snprintf(name, sizeof(name), "passivePdsch%d", i);
     /* Priority deliberately BELOW the RT receive thread's 97: if a consumer ever competes with the
@@ -2413,14 +2606,23 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns);
  * changes (or the occasion ends), then pushed contiguously under ONE lock and ONE wake-up, so the
  * consumer that takes the first grant of a slot finds its siblings right behind it. Costs one
  * slot of latency against a one-frame sample lifetime. */
-static nr_pdsch_passive_job_t g_pending[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
-static uint64_t g_pending_ns[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
-static int g_n_pending = 0;
+typedef nr_pdsch_passive_job_t g_pending_arr_t[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
+NR_CELL_STATIC_HEAP(g_pending_arr_t, g_pending);
+#define g_pending NR_CELL_HEAP_REF(g_pending_arr_t, g_pending)
+typedef uint64_t g_pending_ns_arr_t[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
+NR_CELL_STATIC(g_pending_ns_arr_t, g_pending_ns);
+#define g_pending_ns NR_CELL_REF(g_pending_ns)
+NR_CELL_STATIC(int, g_n_pending);
+#define g_n_pending NR_CELL_REF(g_n_pending)
 /* The producer side is several blind-PDCCH scan consumers since Task A7 (one flushes at its occasion
  * start while another enqueues from its Phase 2), so the pending batch has its own lock, taken before
  * g_lock and never the other way round. */
-static pthread_mutex_t g_pending_mu = PTHREAD_MUTEX_INITIALIZER;
-static _Atomic uint64_t g_batches = 0, g_batches_multi = 0; ///< producer flushes, and those with >1 grant
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_pending_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_pending_mu NR_CELL_REF(g_pending_mu)
+NR_CELL_STATIC(_Atomic uint64_t, g_batches);
+#define g_batches NR_CELL_REF(g_batches)
+NR_CELL_STATIC(_Atomic uint64_t, g_batches_multi);
+#define g_batches_multi NR_CELL_REF(g_batches_multi) /* /< producer flushes, and those with >1 grant */
 
 /* nr_pdsch_passive_queue_flush_locked: pushes the producer's pending slot batch into the ring under one lock, so that the consumers see the whole slot at once.
  *   Updates batch counters (logged every 5000 batches). Requires g_pending_mu held; takes g_lock inside. Called by flush(), enqueue() and enqueue-time flushes.
@@ -2530,8 +2732,11 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   return true;
 }
 
-static _Atomic uint64_t g_age_hist[2][NR_PASSIVE_LAG_BINS]; /* P99: job age at enqueue in slots, [probe] x bin */
-static _Atomic uint64_t g_dropped_probe; /* probes refused/evicted (also in dropped_full) */
+typedef _Atomic uint64_t g_age_hist_arr_t[2][NR_PASSIVE_LAG_BINS];
+NR_CELL_STATIC(g_age_hist_arr_t, g_age_hist);
+#define g_age_hist NR_CELL_REF(g_age_hist) /* P99: job age at enqueue in slots, [probe] x bin */
+NR_CELL_STATIC(_Atomic uint64_t, g_dropped_probe);
+#define g_dropped_probe NR_CELL_REF(g_dropped_probe) /* probes refused/evicted (also in dropped_full) */
 /* enqueue_one: inserts one job into the consumer ring (g_lock held by the caller), applying the overload rules when the ring is full.
  *   Narrow grants (< 1/8 of the band) are refused at >= 90 % fill; a probe may be evicted or refused first.
  *   Otherwise the oldest job of the RNTI with most entries is dropped (per-RNTI fairness). Counters: dropped_narrow, dropped_full. Caller: nr_pdsch_passive_queue_flush_locked().
@@ -2745,4 +2950,21 @@ void nr_pdsch_passive_queue_stop(void)
     for (int a = 0; a < NB_ANTENNAS_RX; a++) { nr_pdsch_gpu_host_unpin(g_rsnap[i].iq[a]); free(g_rsnap[i].iq[a]); g_rsnap[i].iq[a] = NULL; }
   g_rsnap_n = 0;
   atomic_store_explicit(&g_running, 0, memory_order_release);
+}
+
+/* mpci A5: allocates cell `cell`'s heap objects (zeroed) before the RX fence; see nr_pdsch_cell_prealloc.h */
+void nr_pdsch_passive_queue_cell_prealloc(int cell)
+{
+  NR_CELL_HEAP_PREALLOC(g_rnti_dec_arr_t, g_rnti_dec, cell);
+  NR_CELL_HEAP_PREALLOC(g_rnti_ok_arr_t, g_rnti_ok, cell);
+  NR_CELL_HEAP_PREALLOC(g_ring_arr_t, g_ring, cell);
+  NR_CELL_HEAP_PREALLOC(g_pending_arr_t, g_pending, cell);
+}
+
+void nr_pdsch_cell_prealloc(int cell)
+{
+  nr_pdsch_passive_queue_cell_prealloc(cell);
+  nr_pdsch_passive_decode_cell_prealloc(cell);
+  nr_pdsch_solver_cell_prealloc(cell);
+  nr_pdsch_recovery_cell_prealloc(cell);
 }

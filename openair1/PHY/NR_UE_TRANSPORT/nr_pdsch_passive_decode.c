@@ -1,6 +1,8 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "common/utils/nr_cell.h" /* mpci A5: per-cell state (NR_CELL_STATIC) */
+#include "nr_pdsch_cell_prealloc.h"
 #include "PHY/TOOLS/nr_stage_split.h"
 #include <sched.h>
 #include "nr_pdsch_gpu_exact.h"
@@ -124,12 +126,23 @@ _Static_assert(sizeof(((freq_alloc_bitmap_t *)0)->prb_list) == NR_PRB_SET_MAX * 
 #define PDTIM_LDPC  4
 #define PDTIM_N     5
 static const char *const kPdtimName[PDTIM_N] = {"fep", "chest", "alloc", "demod", "ldpc"};
-static uint64_t g_pdtim_ns[PDTIM_N] = {0};
-static uint64_t g_pdtim_n[PDTIM_N]  = {0};
-static uint64_t g_pdtim_max[PDTIM_N] = {0};
-static double g_pdtim_ss[PDTIM_N] = {0}; /* sum of squared stage times (us^2): per-decode std in PDTIM */
-static uint64_t g_pdtim_calls = 0;
-static uint64_t g_pdtim_cpu_ns[PDTIM_N] = {0}; /* T26c: thread CPU time per stage -- wall >> cpu means preempted/blocked */
+typedef uint64_t g_pdtim_ns_arr_t[PDTIM_N];
+NR_CELL_STATIC(g_pdtim_ns_arr_t, g_pdtim_ns);
+#define g_pdtim_ns NR_CELL_REF(g_pdtim_ns)
+typedef uint64_t g_pdtim_n_arr_t[PDTIM_N];
+NR_CELL_STATIC(g_pdtim_n_arr_t, g_pdtim_n);
+#define g_pdtim_n NR_CELL_REF(g_pdtim_n)
+typedef uint64_t g_pdtim_max_arr_t[PDTIM_N];
+NR_CELL_STATIC(g_pdtim_max_arr_t, g_pdtim_max);
+#define g_pdtim_max NR_CELL_REF(g_pdtim_max)
+typedef double g_pdtim_ss_arr_t[PDTIM_N];
+NR_CELL_STATIC(g_pdtim_ss_arr_t, g_pdtim_ss);
+#define g_pdtim_ss NR_CELL_REF(g_pdtim_ss) /* sum of squared stage times (us^2): per-decode std in PDTIM */
+NR_CELL_STATIC(uint64_t, g_pdtim_calls);
+#define g_pdtim_calls NR_CELL_REF(g_pdtim_calls)
+typedef uint64_t g_pdtim_cpu_ns_arr_t[PDTIM_N];
+NR_CELL_STATIC(g_pdtim_cpu_ns_arr_t, g_pdtim_cpu_ns);
+#define g_pdtim_cpu_ns NR_CELL_REF(g_pdtim_cpu_ns) /* T26c: thread CPU time per stage -- wall >> cpu means preempted/blocked */
 /* per-path trial of the graph pass (nr_gpu_path.h, DISCRETE): the side of the current queue decode call: 0 none, 1 GPU (pass tried),
  * 2 CPU (kept off the pass by the trial), 3 GPU picked but the pass not reached. Reset and read by the queue around each decode call. */
 static __thread int t_gp_path_side;
@@ -165,8 +178,13 @@ static inline uint64_t pdtim_now(void)
 /* DECGPU: 10-us histograms per stage and of the per-decode
  * sum fep+chest+demod+ldpc, printed as PDTIMPCT p50/p90/p99 next to every PDTIM line. */
 #define PDTIM_HB 2000 /* 10 us bins, last bin = >= 19.99 ms */
-static _Atomic uint32_t g_pdtim_hist[PDTIM_N + 1][PDTIM_HB];
-static _Atomic uint64_t g_pdtim_ldpc_tb, g_pdtim_ldpc_cb; /* passive_ldpc_decode_core() calls and code blocks decoded */
+typedef _Atomic uint32_t g_pdtim_hist_arr_t[PDTIM_N + 1][PDTIM_HB];
+NR_CELL_STATIC(g_pdtim_hist_arr_t, g_pdtim_hist);
+#define g_pdtim_hist NR_CELL_REF(g_pdtim_hist)
+NR_CELL_STATIC(_Atomic uint64_t, g_pdtim_ldpc_tb);
+#define g_pdtim_ldpc_tb NR_CELL_REF(g_pdtim_ldpc_tb)
+NR_CELL_STATIC(_Atomic uint64_t, g_pdtim_ldpc_cb);
+#define g_pdtim_ldpc_cb NR_CELL_REF(g_pdtim_ldpc_cb) /* passive_ldpc_decode_core() calls and code blocks decoded */
 static __thread uint64_t t_pdtim_sum, t_pdtim_sum_n;
 static inline void pdtim_hist(int k, uint64_t d)
 {
@@ -178,9 +196,30 @@ static inline void pdtim_hist(int k, uint64_t d)
  * solver probe -- with exact mean, p50/p90/p99, max and the bodies above 5 / 20 ms, printed as PDTIMCLS after PDTIMPCT. */
 #define PDTIM_NCLS 3
 static const char *const kPdtimCls[PDTIM_NCLS] = {"real", "retry", "probe"};
-static _Atomic uint32_t g_cls_hist[PDTIM_NCLS][PDTIM_HB];
-static _Atomic uint64_t g_cls_ns[PDTIM_NCLS], g_cls_max[PDTIM_NCLS], g_cls_gt5[PDTIM_NCLS], g_cls_gt20[PDTIM_NCLS];
-static _Atomic uint64_t g_cls_ns1[PDTIM_NCLS], g_cls_ns5[PDTIM_NCLS], g_cls_ns20[PDTIM_NCLS]; /* DECTAIL: time spent in bodies > 1 / 5 / 20 ms */
+typedef _Atomic uint32_t g_cls_hist_arr_t[PDTIM_NCLS][PDTIM_HB];
+NR_CELL_STATIC(g_cls_hist_arr_t, g_cls_hist);
+#define g_cls_hist NR_CELL_REF(g_cls_hist)
+typedef _Atomic uint64_t g_cls_ns_arr_t[PDTIM_NCLS];
+NR_CELL_STATIC(g_cls_ns_arr_t, g_cls_ns);
+#define g_cls_ns NR_CELL_REF(g_cls_ns)
+typedef _Atomic uint64_t g_cls_max_arr_t[PDTIM_NCLS];
+NR_CELL_STATIC(g_cls_max_arr_t, g_cls_max);
+#define g_cls_max NR_CELL_REF(g_cls_max)
+typedef _Atomic uint64_t g_cls_gt5_arr_t[PDTIM_NCLS];
+NR_CELL_STATIC(g_cls_gt5_arr_t, g_cls_gt5);
+#define g_cls_gt5 NR_CELL_REF(g_cls_gt5)
+typedef _Atomic uint64_t g_cls_gt20_arr_t[PDTIM_NCLS];
+NR_CELL_STATIC(g_cls_gt20_arr_t, g_cls_gt20);
+#define g_cls_gt20 NR_CELL_REF(g_cls_gt20)
+typedef _Atomic uint64_t g_cls_ns1_arr_t[PDTIM_NCLS];
+NR_CELL_STATIC(g_cls_ns1_arr_t, g_cls_ns1);
+#define g_cls_ns1 NR_CELL_REF(g_cls_ns1)
+typedef _Atomic uint64_t g_cls_ns5_arr_t[PDTIM_NCLS];
+NR_CELL_STATIC(g_cls_ns5_arr_t, g_cls_ns5);
+#define g_cls_ns5 NR_CELL_REF(g_cls_ns5)
+typedef _Atomic uint64_t g_cls_ns20_arr_t[PDTIM_NCLS];
+NR_CELL_STATIC(g_cls_ns20_arr_t, g_cls_ns20);
+#define g_cls_ns20 NR_CELL_REF(g_cls_ns20) /* DECTAIL: time spent in bodies > 1 / 5 / 20 ms */
 static __thread unsigned t_pdtim_body; /* bodies of the current nr_pdsch_passive_decode() call (passive_decode_body) */
 #define RETRY_BUDGET_NS 1000000ull /* FATTAILS: a decode call that has run this long skips its long-shot recovery arms */
 static uint64_t dec_now_ns(void);
@@ -195,9 +234,12 @@ void nr_pdsch_passive_decode_slow_stats(unsigned *bodies, uint64_t *body_ns, uin
 }
 uint64_t nr_pdsch_passive_decode_first_body_ns(void) { return t_dec_first_ns; }
 static __thread uint32_t t_pdtim_stage_us[PDTIM_N], t_pdtim_stage_cpu_us[PDTIM_N]; /* this body's stage wall / thread-CPU times (PDTIMSLOW) */
-static _Atomic int g_pdtim_slow_left = 200;
+NR_CELL_STATIC_INIT(_Atomic int, g_pdtim_slow_left, 200);
+#define g_pdtim_slow_left NR_CELL_REF(g_pdtim_slow_left)
 /* DECODETIME: per class x stage, the stage wall time (us) held by bodies of duration band <1 / 1-5 / 5-20 / >20 ms (PDTIMCLSST) */
-static _Atomic uint64_t g_cls_stg[PDTIM_NCLS][PDTIM_N][4];
+typedef _Atomic uint64_t g_cls_stg_arr_t[PDTIM_NCLS][PDTIM_N][4];
+NR_CELL_STATIC(g_cls_stg_arr_t, g_cls_stg);
+#define g_cls_stg NR_CELL_REF(g_cls_stg)
 static bool pdtim_is_probe(void);
 
 /* ---- DECODETIME: per-thread persistent decode buffers that the GPU kernels touch -----------------------------------
@@ -483,10 +525,15 @@ typedef struct {
   uint32_t tbs, dmrsmask;
   uint64_t count;
 } parmset_t;
-static parmset_t g_parmset[PARMSET_MAX];
-static int       g_parmset_n = 0;
-static uint64_t  g_parmset_other = 0;
-static pthread_mutex_t g_parmset_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef parmset_t g_parmset_arr_t[PARMSET_MAX];
+NR_CELL_STATIC(g_parmset_arr_t, g_parmset);
+#define g_parmset NR_CELL_REF(g_parmset)
+NR_CELL_STATIC(int, g_parmset_n);
+#define g_parmset_n NR_CELL_REF(g_parmset_n)
+NR_CELL_STATIC(uint64_t, g_parmset_other);
+#define g_parmset_other NR_CELL_REF(g_parmset_other)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_parmset_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_parmset_lock NR_CELL_REF(g_parmset_lock)
 
 static void parmset_record(const parmset_t *k)
 {
@@ -551,6 +598,10 @@ typedef struct {
   decode_abort_t abort_decode;
 } passive_harq_t;
 
+/* mpci A5: the data-id latch candidate per RNTI (65536 x 4 B per cell: heap, allocated before the RX fence by nr_pdsch_passive_decode_cell_prealloc) */
+typedef uint32_t s_pend_cand_arr_t[65536];
+NR_CELL_STATIC_HEAP(s_pend_cand_arr_t, s_pend_cand);
+#define s_pend_cand NR_CELL_HEAP_REF(s_pend_cand_arr_t, s_pend_cand) /* guarded by g_ptrs_lock; 0 = none, else candidate+1 */
 /* ---- LDPC failure-mode census (always on; printed with the periodic summary) -----------------
  * The passive receiver decodes either ~40-65 % of transport blocks or ~0 %, deterministic for a
  * whole run, and PASSIVE_RX_ONLY_HANDOVER.md §29 has now refuted every upstream cause: the channel
@@ -579,17 +630,27 @@ typedef struct {
 /* Four receive streams are estimated independently, then exactly one demodulation/LDPC
  * pipeline runs. Per-antenna CFR extraction remains downstream of the decoded X and uses every
  * raw Y branch; CRC failure never triggers another antenna decode. */
-static _Atomic uint64_t g_llr_n[2]    = {0, 0}; // [0] = TB failed, [1] = TB decoded
-static _Atomic uint64_t g_llr_absum[2] = {0, 0};
-static _Atomic uint64_t g_llr_zero[2]  = {0, 0};
-static _Atomic uint64_t g_llr_sat[2]   = {0, 0};
+typedef _Atomic uint64_t g_llr_n_arr_t[2];
+NR_CELL_STATIC(g_llr_n_arr_t, g_llr_n);
+#define g_llr_n NR_CELL_REF(g_llr_n) /* [0] = TB failed, [1] = TB decoded */
+typedef _Atomic uint64_t g_llr_absum_arr_t[2];
+NR_CELL_STATIC(g_llr_absum_arr_t, g_llr_absum);
+#define g_llr_absum NR_CELL_REF(g_llr_absum)
+typedef _Atomic uint64_t g_llr_zero_arr_t[2];
+NR_CELL_STATIC(g_llr_zero_arr_t, g_llr_zero);
+#define g_llr_zero NR_CELL_REF(g_llr_zero)
+typedef _Atomic uint64_t g_llr_sat_arr_t[2];
+NR_CELL_STATIC(g_llr_sat_arr_t, g_llr_sat);
+#define g_llr_sat NR_CELL_REF(g_llr_sat)
 /* Clipping at the INT8 rail, which is the one that actually applies. g_llr_sat above counts
  * |llr| >= 32767, but nothing ever reaches the int16 rail -- and it is not the limit anyway:
  * nrLDPC_coding_segment_decoder.c packs the int16 LLRs down to int8 with simde_mm_packs_epi16(),
  * a SATURATING pack, so every |llr| > 127 is flattened to +-127 before the decoder sees it. A
  * clipped LLR is a hard decision, and belief propagation on hard decisions cannot correct
  * anything. Measured mean |llr| on this receiver is 232-498, i.e. 2-4x that rail. */
-static _Atomic uint64_t g_llr_clip8[2] = {0, 0};
+typedef _Atomic uint64_t g_llr_clip8_arr_t[2];
+NR_CELL_STATIC(g_llr_clip8_arr_t, g_llr_clip8);
+#define g_llr_clip8 NR_CELL_REF(g_llr_clip8)
 /* SIGNED sum, and the count of positive LLRs. mean|LLR| (above) is BLIND to a sign bias, and a bias
  * is exactly what would explain the dominant failure mode: all-zeros is a valid codeword for any
  * linear code, so LDPC settles on it whenever the LLRs systematically favour 0-bits. With one UE on
@@ -603,9 +664,15 @@ static _Atomic uint64_t g_llr_clip8[2] = {0, 0};
  * particular TBS, PRB count or RV, that is a structural clue; if its shape distribution is identical
  * to the decoding population's, the cause is not in the grant at all. Indexed [0]=zero_tb,
  * [1]=decoded-with-data, [2]=seg_fail. */
-static _Atomic uint64_t g_shape_n[3]   = {0, 0, 0};
-static _Atomic uint64_t g_shape_tbs[3] = {0, 0, 0};
-static _Atomic uint64_t g_shape_rb[3]  = {0, 0, 0};
+typedef _Atomic uint64_t g_shape_n_arr_t[3];
+NR_CELL_STATIC(g_shape_n_arr_t, g_shape_n);
+#define g_shape_n NR_CELL_REF(g_shape_n)
+typedef _Atomic uint64_t g_shape_tbs_arr_t[3];
+NR_CELL_STATIC(g_shape_tbs_arr_t, g_shape_tbs);
+#define g_shape_tbs NR_CELL_REF(g_shape_tbs)
+typedef _Atomic uint64_t g_shape_rb_arr_t[3];
+NR_CELL_STATIC(g_shape_rb_arr_t, g_shape_rb);
+#define g_shape_rb NR_CELL_REF(g_shape_rb)
 /* Per-TB outcome histogram over ALLOCATION SIZE (2026-09-07). The SHAPE means above already show
  * that failing TBs are the SMALLER allocations in every run measured, which REFUTES the `q^n`
  * code-block-count explanation (failures have FEWER blocks, not more). What a mean cannot answer is
@@ -616,24 +683,55 @@ static _Atomic uint64_t g_shape_rb[3]  = {0, 0, 0};
  * barely moved (mean_prb 21.2/21.5/18.4/20.8) while the FAILED one grew (11.9 -> 17.0). 16 buckets
  * of 18 RB spans the 273 PRB carrier. */
 #define NR_PDSCH_RBHIST_BINS 16
-static _Atomic uint64_t g_rbhist[3][NR_PDSCH_RBHIST_BINS];
+typedef _Atomic uint64_t g_rbhist_arr_t[3][NR_PDSCH_RBHIST_BINS];
+NR_CELL_STATIC(g_rbhist_arr_t, g_rbhist);
+#define g_rbhist NR_CELL_REF(g_rbhist)
 /* MCSHIST: CRC by MCS index, split narrow (<128 PRB) / wide (>=128 PRB). Separates link margin
  * (wide fails only at high MCS) from a width bug (wide fails at every MCS). */
-static _Atomic uint64_t g_mcshist[2][3][32];
-static _Atomic uint64_t g_mcs_segs[32], g_mcs_segs_ok[32], g_mcs_tbs[32], g_mcs_rb[32];
+typedef _Atomic uint64_t g_mcshist_arr_t[2][3][32];
+NR_CELL_STATIC(g_mcshist_arr_t, g_mcshist);
+#define g_mcshist NR_CELL_REF(g_mcshist)
+typedef _Atomic uint64_t g_mcs_segs_arr_t[32];
+NR_CELL_STATIC(g_mcs_segs_arr_t, g_mcs_segs);
+#define g_mcs_segs NR_CELL_REF(g_mcs_segs)
+typedef _Atomic uint64_t g_mcs_segs_ok_arr_t[32];
+NR_CELL_STATIC(g_mcs_segs_ok_arr_t, g_mcs_segs_ok);
+#define g_mcs_segs_ok NR_CELL_REF(g_mcs_segs_ok)
+typedef _Atomic uint64_t g_mcs_tbs_arr_t[32];
+NR_CELL_STATIC(g_mcs_tbs_arr_t, g_mcs_tbs);
+#define g_mcs_tbs NR_CELL_REF(g_mcs_tbs)
+typedef _Atomic uint64_t g_mcs_rb_arr_t[32];
+NR_CELL_STATIC(g_mcs_rb_arr_t, g_mcs_rb);
+#define g_mcs_rb NR_CELL_REF(g_mcs_rb)
 /* V2 HARQ soft-combining and PT-RS sweep state, declared here so the periodic report can read it. */
-static _Atomic uint64_t g_hq_retx_try, g_hq_retx_ok, g_hq_tbs_override, g_hq_busy_skip, g_hq_first;
-static _Atomic uint64_t g_hqb_evict, g_hqb_nospace; /* device HARQ blocks (GPU pass): sums dropped to make room, grants decoded without keeping theirs */
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_retx_try);
+#define g_hq_retx_try NR_CELL_REF(g_hq_retx_try)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_retx_ok);
+#define g_hq_retx_ok NR_CELL_REF(g_hq_retx_ok)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_tbs_override);
+#define g_hq_tbs_override NR_CELL_REF(g_hq_tbs_override)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_busy_skip);
+#define g_hq_busy_skip NR_CELL_REF(g_hq_busy_skip)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_first);
+#define g_hq_first NR_CELL_REF(g_hq_first)
+NR_CELL_STATIC(_Atomic uint64_t, g_hqb_evict);
+#define g_hqb_evict NR_CELL_REF(g_hqb_evict)
+NR_CELL_STATIC(_Atomic uint64_t, g_hqb_nospace);
+#define g_hqb_nospace NR_CELL_REF(g_hqb_nospace) /* device HARQ blocks (GPU pass): sums dropped to make room, grants decoded without keeping theirs */
 /* g_harqc's own lock (harqc_entry_t/g_harqc are declared further down, next to their only other
  * users) and the reserved-MCS retransmission record (gap-harq lane) that shares it -- both declared
  * this early, alongside the harqc counters above, for the SAME reason: nr_pdsch_passive_ldpc_stats_
  * dump() (right below) is defined before harqc_entry_t and must be able to read g_dl_harq_init's
  * hit/evict counts under the same lock. See nr_harq_init_tx.h for why TBS/base-graph (not
  * modulation order) is the field a reserved MCS cannot supply on its own. */
-static pthread_mutex_t g_harqc_lock = PTHREAD_MUTEX_INITIALIZER;
-static nr_harq_init_tx_table_t g_dl_harq_init;
-static pthread_mutex_t g_ptrs_lock = PTHREAD_MUTEX_INITIALIZER;
-static _Atomic int g_lbrm_nl = 4;        // TBS_LBRM layer term n_L, CELL-WIDE seed (4 = spec ceiling), see rnti_dec()
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_harqc_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_harqc_lock NR_CELL_REF(g_harqc_lock)
+NR_CELL_STATIC(nr_harq_init_tx_table_t, g_dl_harq_init);
+#define g_dl_harq_init NR_CELL_REF(g_dl_harq_init)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_ptrs_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_ptrs_lock NR_CELL_REF(g_ptrs_lock)
+NR_CELL_STATIC_INIT(_Atomic int, g_lbrm_nl, 4);
+#define g_lbrm_nl NR_CELL_REF(g_lbrm_nl) /* TBS_LBRM layer term n_L, CELL-WIDE seed (4 = spec ceiling), see rnti_dec() */
 /* PER-RNTI n_L AND PT-RS ARM. Both are dedicated-RRC properties of the UE (maxMIMO-layers
  * capability, phaseTrackingRS) and only cell-common in practice, so each RNTI latches its own,
  * SEEDED from the cell-wide value, and the cell-wide value is promoted only once two distinct
@@ -673,13 +771,18 @@ static uint8_t nr_prg_arm_value(int arm) { return arm == 2 ? 4 : (arm == 1 ? 2 :
  * are not UEs and carry no dedicated RRC configuration. ~2.1 KB/slot, 135 KB of BSS. */
 #define RNTI_DEC_MAX 64
 typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_vrbl_sweep_t vrbl; nr_prg_sweep_t prg; nr_scrambling_id_sweep_t data_id; } rnti_dec_t;
-static rnti_dec_t g_rnti_dec[RNTI_DEC_MAX];
-static uint64_t g_rnti_dec_clock;
+typedef rnti_dec_t g_rnti_dec_arr_t[RNTI_DEC_MAX];
+NR_CELL_STATIC_HEAP(g_rnti_dec_arr_t, g_rnti_dec);
+#define g_rnti_dec NR_CELL_HEAP_REF(g_rnti_dec_arr_t, g_rnti_dec)
+NR_CELL_STATIC(uint64_t, g_rnti_dec_clock);
+#define g_rnti_dec_clock NR_CELL_REF(g_rnti_dec_clock)
 /* rnti_class is nr_blind_rnti_class_t: 2 = SI, 3 = RA, 4 = P. */
 /* BLINDFIX F7: the MCS table of the cell from TB-CRC evidence instead of the config value.
  * A full-TB CRC pass under a DCI 1_1 grant supports every table that reads this MCS to the same (Qm, R) as the table the
  * decode used, and only counts when at least one table reads it differently (nbs_table_ev_*, sign test at alpha 1e-3). */
-static _Atomic uint32_t g_mcs_tbl_pass[3];
+typedef _Atomic uint32_t g_mcs_tbl_pass_arr_t[3];
+NR_CELL_STATIC(g_mcs_tbl_pass_arr_t, g_mcs_tbl_pass);
+#define g_mcs_tbl_pass NR_CELL_REF(g_mcs_tbl_pass)
 static void mcs_table_evidence_feed(uint8_t mcs, uint8_t used)
 {
   if (used > 2)
@@ -795,7 +898,8 @@ static int rnti_nl_latch(uint16_t rnti, bool sweepable, int nl)
  * may START or MOVE; a LATCHED result is always returned (review fix round 1, finding 1: gating the
  * latch on a stall measure threw the just-found identity away on the next grant). Every start, step,
  * wrap and latch is logged: a silent walk is indistinguishable from a broken link. */
-static _Atomic int g_data_id_walks; /* RNTIs whose walk has started (or latched): the lock-free fast path below */
+NR_CELL_STATIC(_Atomic int, g_data_id_walks);
+#define g_data_id_walks NR_CELL_REF(g_data_id_walks) /* RNTIs whose walk has started (or latched): the lock-free fast path below */
 uint16_t nr_pdsch_passive_data_id_current(uint16_t rnti, uint16_t pci, int dmrs_id, bool advance_ok)
 {
   /* Final review I8: this runs on the scan thread for every dedicated DL grant. On a cell where no walk
@@ -833,7 +937,6 @@ void nr_pdsch_passive_data_id_feed(uint16_t rnti, bool tb_crc_ok)
      * that really uses the PCI; the latch then pinned 121 and every later decode of that UE failed).
      * The true id passes again within a few grants (92 % of its real-layout grants); a coincidence does
      * not. So hold the candidate after its first pass and latch on the second; a fail clears the hold. */
-    static uint32_t s_pend_cand[65536]; /* guarded by g_ptrs_lock; 0 = none, else candidate+1 */
     int fed = tb_crc_ok ? 1 : 0;
     if (tb_crc_ok && s_pend_cand[rnti] != (uint32_t)tried + 1) {
       s_pend_cand[rnti] = (uint32_t)tried + 1; /* first pass at this candidate: stay on it, do not latch */
@@ -908,11 +1011,14 @@ static void prg_arm_unsupported(uint16_t rnti, int prg_arm)
  * Every decode path -- the deferred consumer AND the in-line decode in nr_pdcch_blind_monitor_rt.c --
  * reports each TB outcome here once (layout probes excluded: a code-block-0 probe is a layout
  * hypothesis, not evidence about the scrambling identity). */
-static nr_scr_link_t g_dl_scr_link;
+NR_CELL_STATIC(nr_scr_link_t, g_dl_scr_link);
+#define g_dl_scr_link NR_CELL_REF(g_dl_scr_link)
 /* WINDOWED, resettable: DEDICATED-class (nr_scrambling_dedicated()) CRC fails since this RNTI's last
  * dedicated pass. Grants that use N_ID^cell (SIB1, RAR, CSS fallback) neither count nor reset it: they
  * pass under a wrong dedicated identity and would otherwise keep the walk from ever opening. */
-static _Atomic uint32_t g_ded_fails_since_ok[65536];
+typedef _Atomic uint32_t g_ded_fails_since_ok_arr_t[65536];
+NR_CELL_STATIC_HEAP(g_ded_fails_since_ok_arr_t, g_ded_fails_since_ok);
+#define g_ded_fails_since_ok NR_CELL_HEAP_REF(g_ded_fails_since_ok_arr_t, g_ded_fails_since_ok)
 /* A dedicated CRC pass PROVES the data identity in use (c_init = RNTI*2^15 + n_ID: any other n_ID fails
  * LDPC). So an RNTI that has ever passed has nothing left for the walk to find. Without this, the
  * "20 consecutive fails" trigger fires on failures that have nothing to do with the identity: the
@@ -921,7 +1027,9 @@ static _Atomic uint32_t g_ded_fails_since_ok[65536];
  * right id after ONE failed look (that grant was a wrong-layout trial) and needs 1024 further failing
  * grants to come back: measured on the SA bed as a UE that decodes for ~10 s, then sweeps ids for
  * minutes with perfect EVM (0 % TB CRC) or recovers after a random time. */
-static _Atomic uint8_t g_ded_ever_ok[65536];
+typedef _Atomic uint8_t g_ded_ever_ok_arr_t[65536];
+NR_CELL_STATIC(g_ded_ever_ok_arr_t, g_ded_ever_ok);
+#define g_ded_ever_ok NR_CELL_REF(g_ded_ever_ok)
 void nr_pdsch_passive_crc_note(uint16_t rnti, bool dedicated, bool crc_ok)
 {
   if (!nr_cfg_epoch_work_current()) return;
@@ -950,9 +1058,14 @@ bool nr_pdsch_passive_link_healthy(uint16_t rnti)
  * RB, incremented per accepted grant over its allocation, printed as 273 density digits and reset --
  * so the strip shows the LAST window, not the run average. */
 #define NR_RBMAP_MAX 275
-static _Atomic uint32_t g_rbmap[NR_RBMAP_MAX];
-static _Atomic uint32_t g_rbmap_ok[NR_RBMAP_MAX];
-static _Atomic uint64_t g_rbmap_grants;
+typedef _Atomic uint32_t g_rbmap_arr_t[NR_RBMAP_MAX];
+NR_CELL_STATIC(g_rbmap_arr_t, g_rbmap);
+#define g_rbmap NR_CELL_REF(g_rbmap)
+typedef _Atomic uint32_t g_rbmap_ok_arr_t[NR_RBMAP_MAX];
+NR_CELL_STATIC(g_rbmap_ok_arr_t, g_rbmap_ok);
+#define g_rbmap_ok NR_CELL_REF(g_rbmap_ok)
+NR_CELL_STATIC(_Atomic uint64_t, g_rbmap_grants);
+#define g_rbmap_grants NR_CELL_REF(g_rbmap_grants)
 static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last TB on this thread
 /* Per-code-block CRC metric of the last body on this thread (EVMGRANT cb_ok= cb_tried= cb_total=): blocks that passed their CRC, blocks the LDPC decoder was
  * started on (decoding stops after NR_CB_FAIL_LIMIT failed blocks, so tried is biased toward the early blocks of a failing TB), blocks in the TB. Reset at the start of
@@ -987,7 +1100,9 @@ static nrLDPC_coding_decoder_t *tb_cpu_decoder(void)
 }
 void nr_pdsch_passive_force_cpu_tb(bool on) { t_tb_force_cpu = on; }
 uint8_t nr_pdsch_passive_last_decoder_used(void) { return t_decoder_used_last; }
-static _Atomic uint64_t g_ldpc_tb_dec[3]; // [decoder_used]: TBs handed to the decoder (all outcomes), 0 = not reported
+typedef _Atomic uint64_t g_ldpc_tb_dec_arr_t[3];
+NR_CELL_STATIC(g_ldpc_tb_dec_arr_t, g_ldpc_tb_dec);
+#define g_ldpc_tb_dec NR_CELL_REF(g_ldpc_tb_dec) /* [decoder_used]: TBs handed to the decoder (all outcomes), 0 = not reported */
 void nr_pdsch_passive_ldpc_tb_decoders(uint64_t *cpu, uint64_t *cuda)
 {
   *cpu = atomic_load(&g_ldpc_tb_dec[1]);
@@ -995,24 +1110,38 @@ void nr_pdsch_passive_ldpc_tb_decoders(uint64_t *cpu, uint64_t *cuda)
 }
 static __thread int t_last_sk = -1;        // last TB outcome for TBRESULT: 1 decoded, 0 zero_tb, 2 seg_fail
 static __thread uint32_t t_last_llr_have, t_last_data_bits;
-static _Atomic uint64_t g_shape_rv[3]  = {0, 0, 0};
-static _Atomic uint64_t g_shape_G[3]   = {0, 0, 0};
+typedef _Atomic uint64_t g_shape_rv_arr_t[3];
+NR_CELL_STATIC(g_shape_rv_arr_t, g_shape_rv);
+#define g_shape_rv NR_CELL_REF(g_shape_rv)
+typedef _Atomic uint64_t g_shape_G_arr_t[3];
+NR_CELL_STATIC(g_shape_G_arr_t, g_shape_G);
+#define g_shape_G NR_CELL_REF(g_shape_G)
 /* Segmentation parameters, binned by outcome. §34.4's hypothesis: filler bits F are ZEROS by
  * definition, and the reassembly copies `(K>>3) - (F>>3) - (C>1?3:0)` bytes per segment. If K/F/C
  * are computed for a different TBS than was transmitted, the copied bytes come from the FILLER
  * region -- giving an all-zero transport block while every segment CRC still passes, because the
  * LDPC decoded its codeword correctly and only the extraction window is wrong. That fits confident
  * zeros + valid segment CRCs + tb_fail=0 + a dependence on TBS. */
-static _Atomic uint64_t g_shape_K[3] = {0, 0, 0};
-static _Atomic uint64_t g_shape_F[3] = {0, 0, 0};
-static _Atomic uint64_t g_shape_C[3] = {0, 0, 0};
-static _Atomic uint64_t g_shape_Z[3] = {0, 0, 0};
+typedef _Atomic uint64_t g_shape_K_arr_t[3];
+NR_CELL_STATIC(g_shape_K_arr_t, g_shape_K);
+#define g_shape_K NR_CELL_REF(g_shape_K)
+typedef _Atomic uint64_t g_shape_F_arr_t[3];
+NR_CELL_STATIC(g_shape_F_arr_t, g_shape_F);
+#define g_shape_F NR_CELL_REF(g_shape_F)
+typedef _Atomic uint64_t g_shape_C_arr_t[3];
+NR_CELL_STATIC(g_shape_C_arr_t, g_shape_C);
+#define g_shape_C NR_CELL_REF(g_shape_C)
+typedef _Atomic uint64_t g_shape_Z_arr_t[3];
+NR_CELL_STATIC(g_shape_Z_arr_t, g_shape_Z);
+#define g_shape_Z NR_CELL_REF(g_shape_Z)
 /* Outcome binned DIRECTLY by symbol count, replacing §35's inference from a mean-TBS difference.
  * This cell uses two TDA entries, sym=1+13 (dmrs_len=3, mask 0x884) and sym=1+7 (dmrs_len=2, mask
  * 0x84). A short grant has a different DM-RS pattern, hence different nb_re_dmrs and G, so an error
  * confined to the 7-symbol variant would produce confidently wrong soft bits on exactly that subset
  * and leave 13-symbol grants untouched. [outcome][0]=short(<=9 sym), [1]=long. */
-static _Atomic uint64_t g_nsym[3][2] = {{0, 0}, {0, 0}, {0, 0}};
+typedef _Atomic uint64_t g_nsym_arr_t[3][2];
+NR_CELL_STATIC(g_nsym_arr_t, g_nsym);
+#define g_nsym NR_CELL_REF(g_nsym)
 /* Set by passive_ldpc_decode() for the TB it just processed; read by the caller once the outcome is
  * known. Thread-local because several consumers decode concurrently. */
 static __thread uint32_t t_seg_K = 0, t_seg_F = 0, t_seg_C = 0, t_seg_Z = 0;
@@ -1024,8 +1153,12 @@ static __thread uint32_t t_seg_E = 0, t_seg_R = 0, t_seg_lbrm = 0, t_seg_BG = 0;
 static __thread int t_decode_tdra_attempt;
 
 extern __thread bool nr_pdsch_decode_wide_mrc;
-static _Atomic int64_t  g_llr_sgnsum[2] = {0, 0};
-static _Atomic uint64_t g_llr_pos[2]    = {0, 0};
+typedef _Atomic int64_t g_llr_sgnsum_arr_t[2];
+NR_CELL_STATIC(g_llr_sgnsum_arr_t, g_llr_sgnsum);
+#define g_llr_sgnsum NR_CELL_REF(g_llr_sgnsum)
+typedef _Atomic uint64_t g_llr_pos_arr_t[2];
+NR_CELL_STATIC(g_llr_pos_arr_t, g_llr_pos);
+#define g_llr_pos NR_CELL_REF(g_llr_pos)
 /* Positive-rate split by BIT POSITION within each 16QAM symbol. nr_16qam_llr() emits 4 LLRs per
  * symbol: b0,b1 are the SIGN bits (llr = y) and b2,b3 the MAGNITUDE bits (llr = ch_mag - |y|).
  * If the equalised symbols are systematically SMALL relative to ch_mag -- which is what a
@@ -1036,14 +1169,24 @@ static _Atomic uint64_t g_llr_pos[2]    = {0, 0};
  *   sign ~50 % and magnitude ~100 %  -> amplitude/scaling mismatch, NOT a data or sequence problem
  *   both ~equally biased             -> the payload really is zeros
  * [outcome][0]=sign bits (i%4<2), [1]=magnitude bits (i%4>=2). */
-static _Atomic uint64_t g_llr_posbit[2][2] = {{0, 0}, {0, 0}};
-static _Atomic uint64_t g_llr_nbit[2][2]   = {{0, 0}, {0, 0}};
-static _Atomic uint64_t g_llr_tb[2]    = {0, 0};
+typedef _Atomic uint64_t g_llr_posbit_arr_t[2][2];
+NR_CELL_STATIC(g_llr_posbit_arr_t, g_llr_posbit);
+#define g_llr_posbit NR_CELL_REF(g_llr_posbit)
+typedef _Atomic uint64_t g_llr_nbit_arr_t[2][2];
+NR_CELL_STATIC(g_llr_nbit_arr_t, g_llr_nbit);
+#define g_llr_nbit NR_CELL_REF(g_llr_nbit)
+typedef _Atomic uint64_t g_llr_tb_arr_t[2];
+NR_CELL_STATIC(g_llr_tb_arr_t, g_llr_tb);
+#define g_llr_tb NR_CELL_REF(g_llr_tb)
 
-static _Atomic uint64_t g_ldpc_seg_fail = 0;
-static _Atomic uint64_t g_ldpc_tb_fail  = 0;
-static _Atomic uint64_t g_ldpc_zero_tb  = 0;
-static _Atomic uint64_t g_ldpc_ok       = 0;
+NR_CELL_STATIC(_Atomic uint64_t, g_ldpc_seg_fail);
+#define g_ldpc_seg_fail NR_CELL_REF(g_ldpc_seg_fail)
+NR_CELL_STATIC(_Atomic uint64_t, g_ldpc_tb_fail);
+#define g_ldpc_tb_fail NR_CELL_REF(g_ldpc_tb_fail)
+NR_CELL_STATIC(_Atomic uint64_t, g_ldpc_zero_tb);
+#define g_ldpc_zero_tb NR_CELL_REF(g_ldpc_zero_tb)
+NR_CELL_STATIC(_Atomic uint64_t, g_ldpc_ok);
+#define g_ldpc_ok NR_CELL_REF(g_ldpc_ok)
 void nr_pdsch_passive_ldpc_counters(uint64_t *ok, uint64_t *seg_fail, uint64_t *tb_fail, uint64_t *zero_tb)
 {
   *ok = atomic_load(&g_ldpc_ok);
@@ -1051,14 +1194,36 @@ void nr_pdsch_passive_ldpc_counters(uint64_t *ok, uint64_t *seg_fail, uint64_t *
   *tb_fail = atomic_load(&g_ldpc_tb_fail);
   *zero_tb = atomic_load(&g_ldpc_zero_tb);
 }
-static _Atomic uint64_t g_fep_hit = 0, g_fep_miss = 0, g_chest_hit = 0, g_chest_miss = 0; // per-slot sharing
-static _Atomic uint64_t g_gpu_llr_jobs = 0, g_gpu_cpu_jobs = 0; // decodes fed by the GPU front end vs the CPU chain
-static _Atomic uint64_t g_lbrm_try[5], g_lbrm_ok[5]; // per hypothesised n_L
-static _Atomic uint64_t g_llr_norm_shift[9]; /* TBs by applied right shift */
-static _Atomic uint64_t g_rv_census[2][4]; // [mcs>=24][rv]: does this cell retransmit at rv 0? (HARQ gate)
-static _Atomic uint64_t g_ldpc_iface_err = 0;
-static _Atomic uint64_t g_seg_ok_sum    = 0; // segments that decoded, summed over failing TBs
-static _Atomic uint64_t g_seg_tot_sum   = 0; // C, summed over the same TBs
+NR_CELL_STATIC(_Atomic uint64_t, g_fep_hit);
+#define g_fep_hit NR_CELL_REF(g_fep_hit)
+NR_CELL_STATIC(_Atomic uint64_t, g_fep_miss);
+#define g_fep_miss NR_CELL_REF(g_fep_miss)
+NR_CELL_STATIC(_Atomic uint64_t, g_chest_hit);
+#define g_chest_hit NR_CELL_REF(g_chest_hit)
+NR_CELL_STATIC(_Atomic uint64_t, g_chest_miss);
+#define g_chest_miss NR_CELL_REF(g_chest_miss) /* per-slot sharing */
+NR_CELL_STATIC(_Atomic uint64_t, g_gpu_llr_jobs);
+#define g_gpu_llr_jobs NR_CELL_REF(g_gpu_llr_jobs)
+NR_CELL_STATIC(_Atomic uint64_t, g_gpu_cpu_jobs);
+#define g_gpu_cpu_jobs NR_CELL_REF(g_gpu_cpu_jobs) /* decodes fed by the GPU front end vs the CPU chain */
+typedef _Atomic uint64_t g_lbrm_try_arr_t[5];
+NR_CELL_STATIC(g_lbrm_try_arr_t, g_lbrm_try);
+#define g_lbrm_try NR_CELL_REF(g_lbrm_try)
+typedef _Atomic uint64_t g_lbrm_ok_arr_t[5];
+NR_CELL_STATIC(g_lbrm_ok_arr_t, g_lbrm_ok);
+#define g_lbrm_ok NR_CELL_REF(g_lbrm_ok) /* per hypothesised n_L */
+typedef _Atomic uint64_t g_llr_norm_shift_arr_t[9];
+NR_CELL_STATIC(g_llr_norm_shift_arr_t, g_llr_norm_shift);
+#define g_llr_norm_shift NR_CELL_REF(g_llr_norm_shift) /* TBs by applied right shift */
+typedef _Atomic uint64_t g_rv_census_arr_t[2][4];
+NR_CELL_STATIC(g_rv_census_arr_t, g_rv_census);
+#define g_rv_census NR_CELL_REF(g_rv_census) /* [mcs>=24][rv]: does this cell retransmit at rv 0? (HARQ gate) */
+NR_CELL_STATIC(_Atomic uint64_t, g_ldpc_iface_err);
+#define g_ldpc_iface_err NR_CELL_REF(g_ldpc_iface_err)
+NR_CELL_STATIC(_Atomic uint64_t, g_seg_ok_sum);
+#define g_seg_ok_sum NR_CELL_REF(g_seg_ok_sum) /* segments that decoded, summed over failing TBs */
+NR_CELL_STATIC(_Atomic uint64_t, g_seg_tot_sum);
+#define g_seg_tot_sum NR_CELL_REF(g_seg_tot_sum) /* C, summed over the same TBs */
 /* Per-SEGMENT-INDEX outcome, over every multi-segment TB. The aggregate says only that 18.5 % of
  * segments converge on a failing TB; it cannot distinguish the two explanations, which point at
  * completely different code:
@@ -1069,14 +1234,22 @@ static _Atomic uint64_t g_seg_tot_sum   = 0; // C, summed over the same TBs
  * Recorded for every decoded TB, not just failing ones, so the rate is per-index and not a
  * histogram of where failures happen to be dense. */
 #define NR_PDSCH_SEGIDX_MAX 32
-static _Atomic uint64_t g_segidx_tot[NR_PDSCH_SEGIDX_MAX];
-static _Atomic uint64_t g_segidx_fail[NR_PDSCH_SEGIDX_MAX];
+typedef _Atomic uint64_t g_segidx_tot_arr_t[NR_PDSCH_SEGIDX_MAX];
+NR_CELL_STATIC(g_segidx_tot_arr_t, g_segidx_tot);
+#define g_segidx_tot NR_CELL_REF(g_segidx_tot)
+typedef _Atomic uint64_t g_segidx_fail_arr_t[NR_PDSCH_SEGIDX_MAX];
+NR_CELL_STATIC(g_segidx_fail_arr_t, g_segidx_fail);
+#define g_segidx_fail NR_CELL_REF(g_segidx_fail)
 /* Same histogram CONDITIONED ON C. Unconditioned, index and TB size are confounded: r0 is counted
  * over every TB while r>=3 exists only in C>=4 TBs, so the apparent "r3-r5 fail at 80 % whatever
  * the run does" could equally be "large TBs fail". Three buckets: C<=2, C in 3..4, C>=5. */
 #define NR_PDSCH_CBUCKETS 3
-static _Atomic uint64_t g_segidxc_tot[NR_PDSCH_CBUCKETS][NR_PDSCH_SEGIDX_MAX];
-static _Atomic uint64_t g_segidxc_fail[NR_PDSCH_CBUCKETS][NR_PDSCH_SEGIDX_MAX];
+typedef _Atomic uint64_t g_segidxc_tot_arr_t[NR_PDSCH_CBUCKETS][NR_PDSCH_SEGIDX_MAX];
+NR_CELL_STATIC(g_segidxc_tot_arr_t, g_segidxc_tot);
+#define g_segidxc_tot NR_CELL_REF(g_segidxc_tot)
+typedef _Atomic uint64_t g_segidxc_fail_arr_t[NR_PDSCH_CBUCKETS][NR_PDSCH_SEGIDX_MAX];
+NR_CELL_STATIC(g_segidxc_fail_arr_t, g_segidxc_fail);
+#define g_segidxc_fail NR_CELL_REF(g_segidxc_fail)
 static inline int nr_pdsch_cbucket(uint32_t C) { return (C <= 2) ? 0 : ((C <= 4) ? 1 : 2); }
 
 /* ---- PIPEDIAG: outcome-attributed census of the WHOLE downstream chain -----------------------
@@ -1089,8 +1262,12 @@ static inline int nr_pdsch_cbucket(uint32_t C) { return (C <= 2) ? 0 : ((C <= 4)
  * every segment after the shortfall is fed stale or zero soft input -- which is exactly the
  * signature seen (healthy magnitudes, catastrophic non-convergence, tb_fail = 0). */
 #define PIPE_N_FIELDS 14
-static _Atomic uint64_t g_pipe_n[2];
-static _Atomic uint64_t g_pipe_sum[2][PIPE_N_FIELDS];
+typedef _Atomic uint64_t g_pipe_n_arr_t[2];
+NR_CELL_STATIC(g_pipe_n_arr_t, g_pipe_n);
+#define g_pipe_n NR_CELL_REF(g_pipe_n)
+typedef _Atomic uint64_t g_pipe_sum_arr_t[2][PIPE_N_FIELDS];
+NR_CELL_STATIC(g_pipe_sum_arr_t, g_pipe_sum);
+#define g_pipe_sum NR_CELL_REF(g_pipe_sum)
 static const char *const kPipeName[PIPE_N_FIELDS] = {
     "G", "llr_have", "valid_re", "re_x_Qm_Nl", "C", "K", "Z", "F", "E", "R", "lbrm", "Qm", "Nl", "nsym"};
 
@@ -1399,13 +1576,17 @@ typedef struct {
   uint32_t gN, gKcz;
   nr_hq_blocks_t hb;
 } harqc_entry_t;
-static harqc_entry_t g_harqc[NR_HARQC_N];
+typedef harqc_entry_t g_harqc_arr_t[NR_HARQC_N];
+NR_CELL_STATIC(g_harqc_arr_t, g_harqc);
+#define g_harqc NR_CELL_REF(g_harqc)
 /* g_harqc_lock and g_dl_harq_init (the reserved-MCS retransmission record that shares this lock)
  * are declared much earlier in this file, alongside g_hq_first and friends -- see the comment
  * there for why. */
-static uint64_t g_harqc_clock;
+NR_CELL_STATIC(uint64_t, g_harqc_clock);
+#define g_harqc_clock NR_CELL_REF(g_harqc_clock)
 /* ---- the device HARQ blocks (NR_GPU_HQ_BLK of NR_GPU_HQ_SEG int16, one code block each), handed to the entries that keep a failed TB's soft sum on the device. Under g_harqc_lock. ---- */
-static nr_hq_pool_t g_hqb_pool;
+NR_CELL_STATIC(nr_hq_pool_t, g_hqb_pool);
+#define g_hqb_pool NR_CELL_REF(g_hqb_pool)
 static void hqb_release(harqc_entry_t *e) /* lock held */
 {
   nr_hq_pool_put(&g_hqb_pool, &e->hb);
@@ -1907,7 +2088,8 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
  * transmission's TBS, the rule requires it equal). */
 static int harq_retx_decide(const harqc_entry_t *e, const fapi_nr_dl_cw_info_t *cw, uint8_t ndi, uint32_t *A)
 {
-  static _Atomic uint32_t s_rv0_retx_seen;
+  NR_CELL_STATIC(_Atomic uint32_t, s_rv0_retx_seen);
+#define s_rv0_retx_seen NR_CELL_REF(s_rv0_retx_seen)
   const bool same_ndi = e->soft_valid && e->ndi == ndi;
   /* Evidence needs the TBS to match the stored first transmission too: a junk-layout NDI matches by chance half the time, a junk TBS does not, so the count cannot be filled by mis-parsed grants. */
   if (same_ndi && cw->rv == 0 && e->tbs != 0 && e->tbs == cw->TBS)
@@ -1918,6 +2100,41 @@ static int harq_retx_decide(const harqc_entry_t *e, const fapi_nr_dl_cw_info_t *
   if (d < 0)
     atomic_fetch_add(&g_hq_tbs_override, 1); /* HARQC "tbs_from_first": now the count of same-NDI grants with another TBS, decoded alone */
   return d;
+}
+#undef s_rv0_retx_seen
+
+/* mpci A5 test hook (declared in nr_pdsch_cell_prealloc.h): the DL HARQ soft store as seen from the calling thread's cell, keyed (rnti, pid).
+ * op 0: store a failed first transmission (soft_valid, ndi, tbs); op 1: the combine decision of a grant (rv, ndi, tbs): 1 combine / 0 first / -1 decode alone,
+ * the stored entry is not touched; op 2: number of used entries. -2: the entry is busy. Production code never calls it. */
+int nr_pdsch_passive_harqc_test(int op, uint16_t rnti, uint8_t pid, uint8_t ndi, uint8_t rv, uint32_t tbs)
+{
+  if (op == 2) {
+    int n = 0;
+    pthread_mutex_lock(&g_harqc_lock);
+    for (int i = 0; i < NR_HARQC_N; i++)
+      n += g_harqc[i].used ? 1 : 0;
+    pthread_mutex_unlock(&g_harqc_lock);
+    return n;
+  }
+  harqc_entry_t *e = harqc_acquire(rnti, pid);
+  if (e == NULL)
+    return -2;
+  int r = 0;
+  if (op == 0) {
+    e->soft_valid = true;
+    e->ndi = ndi;
+    e->tbs = tbs;
+    e->first_slot = 1000;
+  } else {
+    fapi_nr_dl_cw_info_t cw;
+    memset(&cw, 0, sizeof(cw));
+    cw.rv = rv;
+    cw.TBS = tbs;
+    uint32_t A;
+    r = harq_retx_decide(e, &cw, ndi, &A);
+  }
+  atomic_store(&e->busy, 0);
+  return r;
 }
 
 static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
@@ -3379,8 +3596,12 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       nr_sfo_note_dmrs_residual(eps_res, coh);
       /* the common term at DC as a frequency: what the FEP's frequency offset leaves (log only) */
       const double hz0 = (swy - slope * swx) / sw / (2 * M_PI * dn / (1000.0 * fp->samples_per_subframe));
-      static _Atomic uint64_t s_n;
-      static double s_sum, s_hz; /* log only: a torn sum costs one line's mean */
+      NR_CELL_STATIC(_Atomic uint64_t, s_n);
+#define s_n NR_CELL_REF(s_n)
+      NR_CELL_STATIC(double, s_sum);
+#define s_sum NR_CELL_REF(s_sum)
+      NR_CELL_STATIC(double, s_hz);
+#define s_hz NR_CELL_REF(s_hz) /* log only: a torn sum costs one line's mean */
       s_sum += eps_res;
       s_hz += hz0;
       const uint64_t n = atomic_fetch_add_explicit(&s_n, 1, memory_order_relaxed) + 1;
@@ -3390,6 +3611,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
         s_sum = s_hz = 0;
       }
     }
+#undef s_n
+#undef s_sum
+#undef s_hz
   }
   /* EVMGRANT dmrs_snr / dmrs_pw / dmrs_ref (CPU chest, GPU exact chest, chest cache): last DM-RS symbol and layer, as nr_dl_chest_nvar_ant. The GPU graph pass fills
    * the same from its host copy of the estimate (nr_gpu_pass_graph.cu); a gpu_llr / gw_ready grant has no chest of its own and stays path 0 (-99). */
@@ -4269,7 +4493,21 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
 /* weak: test binaries that link this file without the consumer pool (nr_pdsch_passive_queue.c) must not pull it in */
 int nr_pdsch_passive_queue_backlog_real(void) __attribute__((weak));
 static int ry_backlog(void) { return nr_pdsch_passive_queue_backlog_real ? nr_pdsch_passive_queue_backlog_real() : 0; }
-static _Atomic uint64_t g_ry_chains, g_ry_yields, g_ry_gated, g_ry_try[RY_ARMS], g_ry_ok[RY_ARMS], g_ry_seen[RY_ARMS];
+NR_CELL_STATIC(_Atomic uint64_t, g_ry_chains);
+#define g_ry_chains NR_CELL_REF(g_ry_chains)
+NR_CELL_STATIC(_Atomic uint64_t, g_ry_yields);
+#define g_ry_yields NR_CELL_REF(g_ry_yields)
+NR_CELL_STATIC(_Atomic uint64_t, g_ry_gated);
+#define g_ry_gated NR_CELL_REF(g_ry_gated)
+typedef _Atomic uint64_t g_ry_try_arr_t[RY_ARMS];
+NR_CELL_STATIC(g_ry_try_arr_t, g_ry_try);
+#define g_ry_try NR_CELL_REF(g_ry_try)
+typedef _Atomic uint64_t g_ry_ok_arr_t[RY_ARMS];
+NR_CELL_STATIC(g_ry_ok_arr_t, g_ry_ok);
+#define g_ry_ok NR_CELL_REF(g_ry_ok)
+typedef _Atomic uint64_t g_ry_seen_arr_t[RY_ARMS];
+NR_CELL_STATIC(g_ry_seen_arr_t, g_ry_seen);
+#define g_ry_seen NR_CELL_REF(g_ry_seen)
 /* FATTAILS: the arms after the S toggle are skipped once this decode call has run RETRY_BUDGET_NS (counted as yields): a failed grant's long-shot arms
  * no longer hold its consumer for several bodies. */
 static uint64_t dec_now_ns(void)
@@ -4954,4 +5192,12 @@ void nr_pdsch_passive_probe_equiv_check(PHY_VARS_NR_UE *ue,
                                         c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
 {
   (void)ue; (void)proc; (void)dlsch_config; (void)freq_alloc; (void)grant; (void)rxdataF;
+}
+
+/* mpci A5: allocates cell `cell`'s heap objects (zeroed) before the RX fence; see nr_pdsch_cell_prealloc.h */
+void nr_pdsch_passive_decode_cell_prealloc(int cell)
+{
+  NR_CELL_HEAP_PREALLOC(g_ded_fails_since_ok_arr_t, g_ded_fails_since_ok, cell);
+  NR_CELL_HEAP_PREALLOC(g_rnti_dec_arr_t, g_rnti_dec, cell);
+  NR_CELL_HEAP_PREALLOC(s_pend_cand_arr_t, s_pend_cand, cell);
 }

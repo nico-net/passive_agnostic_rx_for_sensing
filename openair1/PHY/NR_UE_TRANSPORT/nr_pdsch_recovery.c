@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include "nr_pdsch_recovery.h"
+#include "common/utils/nr_cell.h" /* mpci A5: per-cell state */
+#include "nr_pdsch_cell_prealloc.h"
 #include "common/utils/nr_core_plan.h"
 #include "common/utils/nr_core_layout.h"
 #pragma weak nr_core_layout /* unit tests link this file without the utils library: no plan */
@@ -22,31 +24,80 @@
 typedef struct { nr_recov_key_t k; void *job; uint64_t t_ns; } entry_t;
 /* Priority-inheritance mutex: the SCHED_FIFO consumers and the SCHED_OTHER worker share it, so a preempted worker must not hold a consumer up.
  * Critical sections are a few array operations (never a decode, an allocation or a callback). */
-static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
-static entry_t *g_q;
-static char *g_slots;      /* depth job slots of g_slot_bytes, allocated once at start: nothing is allocated on submit */
-static int *g_free;        /* stack of free slot indices */
-static int g_nfree;
-static size_t g_slot_bytes = 64;
-static _Atomic uint64_t g_allocs;
-static int g_depth, g_head, g_n;
-static bool g_run, g_stop;
-static pthread_t g_th;
-static int (*g_run_fn)(void *, const nr_recov_key_t *);
-static bool (*g_exp_fn)(const nr_recov_key_t *);
-static void (*g_fb_fn)(void *, const nr_recov_key_t *, int);
-static void (*g_done_fn)(void *);
-static bool (*g_busy_fn)(void);
-static uint64_t g_idle_wait_ns = 2000000ull;
-static _Atomic uint64_t g_yielded, g_sub, g_resc, g_stale, g_expd, g_full, g_dropped_old, g_late[LATE_BINS];
-static bool g_nice, g_mu_init;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_mu NR_CELL_REF(g_mu)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_cv, PTHREAD_COND_INITIALIZER);
+#define g_cv NR_CELL_REF(g_cv)
+NR_CELL_STATIC(entry_t *, g_q);
+#define g_q NR_CELL_REF(g_q)
+NR_CELL_STATIC(char *, g_slots);
+#define g_slots NR_CELL_REF(g_slots) /* depth job slots of g_slot_bytes, allocated once at start: nothing is allocated on submit */
+NR_CELL_STATIC(int *, g_free);
+#define g_free NR_CELL_REF(g_free) /* stack of free slot indices */
+NR_CELL_STATIC(int, g_nfree);
+#define g_nfree NR_CELL_REF(g_nfree)
+NR_CELL_STATIC_INIT(size_t, g_slot_bytes, 64);
+#define g_slot_bytes NR_CELL_REF(g_slot_bytes)
+NR_CELL_STATIC(_Atomic uint64_t, g_allocs);
+#define g_allocs NR_CELL_REF(g_allocs)
+NR_CELL_STATIC(int, g_depth);
+#define g_depth NR_CELL_REF(g_depth)
+NR_CELL_STATIC(int, g_head);
+#define g_head NR_CELL_REF(g_head)
+NR_CELL_STATIC(int, g_n);
+#define g_n NR_CELL_REF(g_n)
+NR_CELL_STATIC(bool, g_run);
+#define g_run NR_CELL_REF(g_run)
+NR_CELL_STATIC(bool, g_stop);
+#define g_stop NR_CELL_REF(g_stop)
+NR_CELL_STATIC(pthread_t, g_th);
+#define g_th NR_CELL_REF(g_th)
+typedef int (*recov_run_fn_t)(void *, const nr_recov_key_t *);
+typedef bool (*recov_exp_fn_t)(const nr_recov_key_t *);
+typedef void (*recov_fb_fn_t)(void *, const nr_recov_key_t *, int);
+typedef void (*recov_done_fn_t)(void *);
+typedef bool (*recov_busy_fn_t)(void);
+NR_CELL_STATIC(recov_run_fn_t, g_run_fn);
+#define g_run_fn NR_CELL_REF(g_run_fn)
+NR_CELL_STATIC(recov_exp_fn_t, g_exp_fn);
+#define g_exp_fn NR_CELL_REF(g_exp_fn)
+NR_CELL_STATIC(recov_fb_fn_t, g_fb_fn);
+#define g_fb_fn NR_CELL_REF(g_fb_fn)
+NR_CELL_STATIC(recov_done_fn_t, g_done_fn);
+#define g_done_fn NR_CELL_REF(g_done_fn)
+NR_CELL_STATIC(recov_busy_fn_t, g_busy_fn);
+#define g_busy_fn NR_CELL_REF(g_busy_fn)
+NR_CELL_STATIC_INIT(uint64_t, g_idle_wait_ns, 2000000ull);
+#define g_idle_wait_ns NR_CELL_REF(g_idle_wait_ns)
+NR_CELL_STATIC(_Atomic uint64_t, g_yielded);
+#define g_yielded NR_CELL_REF(g_yielded)
+NR_CELL_STATIC(_Atomic uint64_t, g_sub);
+#define g_sub NR_CELL_REF(g_sub)
+NR_CELL_STATIC(_Atomic uint64_t, g_resc);
+#define g_resc NR_CELL_REF(g_resc)
+NR_CELL_STATIC(_Atomic uint64_t, g_stale);
+#define g_stale NR_CELL_REF(g_stale)
+NR_CELL_STATIC(_Atomic uint64_t, g_expd);
+#define g_expd NR_CELL_REF(g_expd)
+NR_CELL_STATIC(_Atomic uint64_t, g_full);
+#define g_full NR_CELL_REF(g_full)
+NR_CELL_STATIC(_Atomic uint64_t, g_dropped_old);
+#define g_dropped_old NR_CELL_REF(g_dropped_old)
+typedef _Atomic uint64_t g_late_arr_t[LATE_BINS];
+NR_CELL_STATIC(g_late_arr_t, g_late);
+#define g_late NR_CELL_REF(g_late)
+NR_CELL_STATIC(bool, g_nice);
+#define g_nice NR_CELL_REF(g_nice)
+NR_CELL_STATIC(bool, g_mu_init);
+#define g_mu_init NR_CELL_REF(g_mu_init)
 static __thread uint64_t t_cur_ns; /* submit time of the job the worker is running */
 static __thread void *t_cur_job; /* job the worker is on */
 static __thread bool t_fb_done;
 
 /* newest (rnti, harq_pid) slot seen: 65536 hashed cells; a collision only ever discards a rescue (never delivers a wrong one) */
-static _Atomic uint64_t g_seen[65536]; /* (abs_slot + 1) << 8 | ndi; 0 = none */
+typedef _Atomic uint64_t g_seen_arr_t[65536];
+NR_CELL_STATIC_HEAP(g_seen_arr_t, g_seen);
+#define g_seen NR_CELL_HEAP_REF(g_seen_arr_t, g_seen) /* (abs_slot + 1) << 8 | ndi; 0 = none */
 static unsigned seen_ix(uint16_t rnti, uint8_t pid) { return ((unsigned)rnti * 16u + (pid & 15u)) & 0xFFFFu; }
 void nr_pdsch_recovery_note_newer(uint16_t rnti, uint8_t pid, uint8_t ndi, uint32_t slot)
 {
@@ -177,7 +228,7 @@ void nr_pdsch_recovery_test_lock(int on)
 
 static void *worker(void *arg)
 {
-  (void)arg;
+  nr_cell_bind((int)(intptr_t)arg); /* mpci A5: one worker per cell, bound to the cell that started it: run/expired/feedback hooks see that cell's queue state */
   if (g_nice) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
   extern void nr_pdsch_recovery_thread_prewarm(void) __attribute__((weak)); /* nr_pdsch_passive_queue.c */
   if (nr_pdsch_recovery_thread_prewarm) nr_pdsch_recovery_thread_prewarm();
@@ -266,7 +317,7 @@ int nr_pdsch_recovery_start(int depth, const char *cores)
   pthread_attr_init(&at);
   pthread_attr_setinheritsched(&at, PTHREAD_EXPLICIT_SCHED);
   pthread_attr_setschedpolicy(&at, SCHED_OTHER);
-  const int prc = pthread_create(&g_th, &at, worker, NULL);
+  const int prc = pthread_create(&g_th, &at, worker, (void *)(intptr_t)nr_cell_idx());
   pthread_attr_destroy(&at);
   if (prc) {
     free(g_q); free(g_free); free(g_slots);
@@ -350,4 +401,10 @@ int nr_pdsch_recovery_submit(const nr_recov_key_t *k, void *slot)
   pthread_cond_signal(&g_cv);
   pthread_mutex_unlock(&g_mu);
   return 0;
+}
+
+/* mpci A5: allocates cell `cell`'s heap object (zeroed) before the RX fence; see nr_pdsch_cell_prealloc.h */
+void nr_pdsch_recovery_cell_prealloc(int cell)
+{
+  NR_CELL_HEAP_PREALLOC(g_seen_arr_t, g_seen, cell);
 }
