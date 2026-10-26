@@ -136,7 +136,7 @@ if(ENABLE_TESTS)
   target_link_libraries(test_iq_chan PRIVATE mpci_iq)
   add_dependencies(tests test_iq_chan)
   add_test(NAME test_iq_chan COMMAND test_iq_chan)
-  add_test(NAME test_iq_chan_soak5 COMMAND nice -n 19 test_iq_chan --soak 5) # the 60 s run is the STOP evidence, run by hand
+  add_test(NAME test_iq_chan_soak5 COMMAND nice -n 19 $<TARGET_FILE:test_iq_chan> --soak 5) # the 60 s run is the STOP evidence, run by hand
 endif()
 # ---- end C1C2 ----
 
