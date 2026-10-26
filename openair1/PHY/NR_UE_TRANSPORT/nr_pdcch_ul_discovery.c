@@ -30,6 +30,8 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include "common/utils/nr_cell.h"
+#include "nr_ul_cell_prealloc.h"
 
 #define UL_DISCOVERY_SAMPLES 8
 typedef struct {
@@ -38,7 +40,8 @@ typedef struct {
   int n_raw;
   bool initialized, refused;
 } search_t;
-static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_lock NR_CELL_REF(g_lock)
 #define UL_DISCOVERY_CONTEXTS NR_PDCCH_BLIND_MAX_UE
 typedef struct {
   search_t widths, interp;
@@ -52,15 +55,27 @@ typedef struct {
   /* Evidence belongs to one identity and one baseline, never to competing UEs. */
   bool logged_width, logged_interp;
 } ul_context_t;
-static ul_context_t contexts[UL_DISCOVERY_CONTEXTS];
-static uint64_t generation_counter = 1, context_clock;
-static uint64_t rejected_feedback;
+typedef ul_context_t g_contexts_cell_t[UL_DISCOVERY_CONTEXTS];
+NR_CELL_STATIC_HEAP(g_contexts_cell_t, g_contexts);
+#define g_contexts NR_CELL_HEAP_REF(g_contexts_cell_t, g_contexts)
+/* Allocate cell `cell`'s heap objects (call for every active cell before nr_cell_alloc_fence(); cell 0 included). */
+void nr_ul_discovery_cell_prealloc(int cell)
+{
+  NR_CELL_HEAP_PREALLOC(g_contexts_cell_t, g_contexts, cell);
+}
+NR_CELL_STATIC_INIT(uint64_t, generation_counter, 1);
+#define generation_counter NR_CELL_REF(generation_counter)
+NR_CELL_STATIC(uint64_t, context_clock);
+#define context_clock NR_CELL_REF(context_clock)
+NR_CELL_STATIC(uint64_t, g_rejected_feedback);
+#define g_rejected_feedback NR_CELL_REF(g_rejected_feedback)
 /* MEASURED 2026-09-21 (Swisscom macro, cons6_css0_auto): nr_pdcch_ul_discovery_reset() was 1370 us
  * of a 1399 us occasion, on EVERY occasion, in a conf whose UL sweep never ran. The RT caller
  * resets whenever full_auto or scan_01 is off, and each ul_context_t holds two
  * nr_hyp_sweep_state_t of 1,163,280 bytes -- 16 contexts is a ~37 MB memset per slot. State that
  * nobody has written does not need clearing: reset() is a no-op until a mutator has run. */
-static bool s_discovery_dirty = true;   /* true at start so the FIRST reset initialises winners */
+NR_CELL_STATIC_INIT(bool, s_discovery_dirty, true);   /* true at start so the FIRST reset initialises winners */
+#define s_discovery_dirty NR_CELL_REF(s_discovery_dirty)
 /* Struct padding is not a network configuration value. Compare only declared
  * members, retaining the existing conservative identity of every option. */
 static bool same_options(const nr_pdcch_blind_ul_opts_t *a, const nr_pdcch_blind_ul_opts_t *b)
@@ -102,13 +117,13 @@ static void reset_locked(ul_context_t *c)
 void nr_pdcch_ul_discovery_reset(void)
 {
   nr_pdcch_ul_config_disc_reset();
-  pthread_mutex_lock(&lock);
+  pthread_mutex_lock(&g_lock);
   if (s_discovery_dirty) {
-    for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) reset_locked(&contexts[i]);
-    rejected_feedback=0;
+    for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) reset_locked(&g_contexts[i]);
+    g_rejected_feedback=0;
     s_discovery_dirty=false;
   }
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&g_lock);
 }
 typedef struct { nr_pdcch_blind_ul_opts_t opts; bool interpretation; ul_context_t *owner; } apply_ctx_t;
 /* Keep RAW width identity: equivalence under a CP baseline says nothing about
@@ -389,18 +404,18 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
                                  uint16_t rnti, nr_dci_bits_t payload, nr_pdcch_blind_ul_result_t *out)
 {
   if (!fixed || !out || !rnti || !len || len>NR_DCI_MAX_PAYLOAD) return false;
-  pthread_mutex_lock(&lock);
+  pthread_mutex_lock(&g_lock);
   s_discovery_dirty=true;
   /* Equal DCI lengths do not prove equal dedicated configurations. Keep
    * each identity's CRC evidence independent; no pooled-probe winner veto. */
-  ul_context_t *c = NULL, *oldest = &contexts[0];
+  ul_context_t *c = NULL, *oldest = &g_contexts[0];
   for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) {
-    if (contexts[i].target_rnti == rnti && contexts[i].target_length == len && contexts[i].nsamples > 0
-        && same_options(&contexts[i].baseline, fixed)) {
-      c=&contexts[i];
+    if (g_contexts[i].target_rnti == rnti && g_contexts[i].target_length == len && g_contexts[i].nsamples > 0
+        && same_options(&g_contexts[i].baseline, fixed)) {
+      c=&g_contexts[i];
       break;
     }
-    if (contexts[i].touched < oldest->touched) oldest=&contexts[i];
+    if (g_contexts[i].touched < oldest->touched) oldest=&g_contexts[i];
   }
   bool ok=false;
   if (!c) {
@@ -526,7 +541,7 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
     if(ii>=0) { out->hyp_width_raw=joint.width+1; out->hyp_interp_raw=joint.interpretation+1; }
   }
 done:
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&g_lock);
   return ok;
 }
 /* Convergence needs EVERY class at NR_HYP_SWEEP_MIN_TRIALS before a winner can be declared, so
@@ -573,20 +588,20 @@ void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok
   if (nr_pdcch_ul_config_disc_feedback(g, ok)) return;
   if (!nr_cfg_epoch_work_current()) return;
   if (!g || !g->hyp_generation) return;
-  pthread_mutex_lock(&lock);
-  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&lock); return; }
+  pthread_mutex_lock(&g_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_lock); return; }
   s_discovery_dirty=true;
   const bool width_owner=g->width_hyp_class>=0, interp_owner=g->interp_hyp_class>=0;
   if (width_owner==interp_owner || g->width_hyp_class < -1 || g->interp_hyp_class < -1) {
-    ++rejected_feedback;
+    ++g_rejected_feedback;
     LOG_W(PHY,"UL_FEEDBACK_REJECT reason=OWNER_NOT_UNIQUE generation=%lu rnti=0x%x\n",
           (unsigned long)g->hyp_generation,g->rnti);
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&g_lock);
     return;
   }
   bool matched_context=false;
   for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) {
-    ul_context_t *c=&contexts[i];
+    ul_context_t *c=&g_contexts[i];
     /* Generation, identity, stage and class all belong to the decoded grant. */
     if (g->hyp_generation != c->generation) continue;
     matched_context=true;
@@ -594,7 +609,7 @@ void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok
     const int cls=width_owner?g->width_hyp_class:g->interp_hyp_class;
     if (g->rnti!=c->target_rnti || g->dci_length!=c->target_length
         || !owner->initialized || cls>=owner->engine.n_classes) {
-      ++rejected_feedback;
+      ++g_rejected_feedback;
       LOG_W(PHY,"UL_FEEDBACK_REJECT reason=IDENTITY_OR_CLASS_MISMATCH generation=%lu rnti=0x%x\n",
             (unsigned long)g->hyp_generation,g->rnti);
       break;
@@ -610,7 +625,7 @@ void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok
                              && g->tda_index==j.tda;
     } else identity_ok=identity_ok && !g->hyp_width_raw && !g->hyp_interp_raw;
     if(!identity_ok) {
-      ++rejected_feedback;
+      ++g_rejected_feedback;
       LOG_W(PHY,"UL_FEEDBACK_REJECT reason=JOINT_IDENTITY_MISMATCH generation=%lu rnti=0x%x\n",
             (unsigned long)g->hyp_generation,g->rnti);
       break;
@@ -623,16 +638,16 @@ void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok
     }
     break;
   }
-  if(!matched_context) ++rejected_feedback;
-  pthread_mutex_unlock(&lock);
+  if(!matched_context) ++g_rejected_feedback;
+  pthread_mutex_unlock(&g_lock);
 }
 
 nr_pdcch_ul_discovery_snapshot_t nr_pdcch_ul_discovery_snapshot(void)
 {
-  pthread_mutex_lock(&lock);
-  nr_pdcch_ul_discovery_snapshot_t s={.generation=generation_counter,.rejected_feedback=rejected_feedback};
+  pthread_mutex_lock(&g_lock);
+  nr_pdcch_ul_discovery_snapshot_t s={.generation=generation_counter,.rejected_feedback=g_rejected_feedback};
   for (int k=0; k<UL_DISCOVERY_CONTEXTS; ++k) {
-    const ul_context_t *c=&contexts[k];
+    const ul_context_t *c=&g_contexts[k];
     s.raw_samples+=c->nsamples;
     s.width_winners+=c->widths.initialized && nr_hyp_sweep_winner(&c->widths.engine)>=0;
     for(int t=0;t<16;++t) s.interp_winners+=c->interp.initialized && c->joint_winner[t]>=0;
@@ -642,6 +657,6 @@ nr_pdcch_ul_discovery_snapshot_t nr_pdcch_ul_discovery_snapshot(void)
     for(int i=0;i<c->widths.engine.n_classes;++i) s.width_trials+=c->widths.engine.classes[i].trials;
     for(int i=0;i<c->interp.engine.n_classes;++i) s.interp_trials+=c->interp.engine.classes[i].trials;
   }
-  pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&g_lock);
   return s;
 }

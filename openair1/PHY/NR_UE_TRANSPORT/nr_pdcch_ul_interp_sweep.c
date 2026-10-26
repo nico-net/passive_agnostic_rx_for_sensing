@@ -24,6 +24,7 @@
 #include "common/utils/LOG/log.h"
 #include <stdatomic.h>
 #include <string.h>
+#include "common/utils/nr_cell.h"
 bool nr_pusch_tda_legal(int mapping_type, int S, int L)
 {
   if (S < 0 || L < 1 || S + L > 14)
@@ -148,8 +149,14 @@ bool nr_pusch_ul_energy_span(const double energy[14], double rel_thresh, int *S,
  * load-then-store was a plain check-then-act with no ordering against a concurrent writer, so a
  * reader could observe VALID with fields from two different callers half-written. */
 enum { UL_PIN_EMPTY = 0, UL_PIN_VALID = 1, UL_PIN_WRITING = 2 };
-static _Atomic int g_ul_dmrs_pin_valid;
-static int g_ul_dmrs_pin_S, g_ul_dmrs_pin_L, g_ul_dmrs_pin_mapping;
+NR_CELL_STATIC(_Atomic int, g_ul_dmrs_pin_valid);
+#define g_ul_dmrs_pin_valid NR_CELL_REF(g_ul_dmrs_pin_valid)
+NR_CELL_STATIC(int, g_ul_dmrs_pin_S);
+#define g_ul_dmrs_pin_S NR_CELL_REF(g_ul_dmrs_pin_S)
+NR_CELL_STATIC(int, g_ul_dmrs_pin_L);
+#define g_ul_dmrs_pin_L NR_CELL_REF(g_ul_dmrs_pin_L)
+NR_CELL_STATIC(int, g_ul_dmrs_pin_mapping);
+#define g_ul_dmrs_pin_mapping NR_CELL_REF(g_ul_dmrs_pin_mapping)
 
 void nr_pusch_ul_dmrs_pin_set(int S, int L)
 {
