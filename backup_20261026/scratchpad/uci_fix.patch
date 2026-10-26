@@ -1,0 +1,34 @@
+commit 44190828ccac3bbc0c6f4fe1e1cb69f0ddfd69b1
+Author: Francesco Mani <email@francescomani.it>
+Date:   Tue Aug 4 09:54:59 2026 +0200
+
+    fix UCI mapping on PUSCH at UE
+    
+    as per standard in case of ACK (>2) and CSI we need to decrease the pool of available resources for following allocations
+    
+    Signed-off-by: Francesco Mani <email@francescomani.it>
+    Assisted-by: Claude:claude-sonnet-5
+
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c b/openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c
+index 25a77ace8b..36b5b87d42 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c
+@@ -826,12 +826,14 @@ static void map_uci_common(struct map_uci_common_arg p)
+         }
+         total_placed++;
+       }
+-      if (p.uci_type_to_map == BIT_TYPE_CSI1 && p.resv_ack_pos_symb) {
++      if (p.uci_type_to_map != BIT_TYPE_ACK_RESERVED)
++        p.m_uci_current[sym]--;
++      if (p.uci_type_to_map == BIT_TYPE_CSI1 || p.uci_type_to_map == BIT_TYPE_CSI2) {
+         uint32_t prev_re_offset = re_offset;
+         re_offset += d_factor_re;
+-        for (uint32_t i = 0; i < p.resv_ack_count_symb[sym] / p.nlqm; i++) {
+-          uint32_t resv_re = (p.resv_ack_pos_symb[sym][i * p.nlqm] - symbol_start_bit_idx[sym]) / p.nlqm;
+-          if (resv_re > prev_re_offset && resv_re <= re_offset)
++        for (uint32_t re = prev_re_offset + 1; re <= re_offset && re < uci_re_on_sym; re++) {
++          uci_on_pusch_bit_type_t t = p.template[symbol_start_bit_idx[sym] + (re * p.nlqm)];
++          if (skip_mapping_current_uci(t, p.uci_type_to_map))
+             re_offset++;
+         }
+       } else {

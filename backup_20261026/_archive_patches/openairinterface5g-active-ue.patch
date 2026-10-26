@@ -1,0 +1,421 @@
+diff --git a/executables/nr-ue-ru.c b/executables/nr-ue-ru.c
+index 386c75215e..8edce3a12d 100644
+--- a/executables/nr-ue-ru.c
++++ b/executables/nr-ue-ru.c
+@@ -437,6 +437,32 @@ int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **bu
+   openair0_device_t *dev0 = &openair0_dev[UE->rf_map.card];
+   openair0_timestamp_t tmp_timestamp;
+   int ret = dev0->trx_read_func(dev0, &tmp_timestamp, buff, nsamps, num_antennas);
++  // Centralised short-read tolerance: trx_read_func() (trx_usrp_read() on USRP) can legitimately
++  // return fewer samples than requested on a transient overflow/timeout -- that is its own by-design
++  // recovery path (see its error_code check), not corruption. Every caller in nr-ue.c used to
++  // AssertFatal(ret==nsamps) and abort the whole process on any hiccup; this had at least five
++  // separate call sites with the identical assertion, each found one at a time via a live crash
++  // under sustained RX load (--ue-scan-carrier at 273 PRB: dozens of parallel GSCN-correlation
++  // threads compete with the RX thread for CPU, making a transient overflow far more likely).
++  // Fixed once, centrally, here, instead of duplicating a retry loop at every call site.
++  if (ret >= 0 && ret != nsamps) {
++    LOG_W(HW, "nrue_ru_read: short read (got %d of %d samples) -- retrying remainder instead of aborting\n", ret, nsamps);
++    int retries = 0;
++    const int max_retries = 20;
++    while (ret < nsamps && retries < max_retries) {
++      void *retry_buf[num_antennas];
++      for (int ant = 0; ant < num_antennas; ant++)
++        retry_buf[ant] = (char *)buff[ant] + (size_t)ret * 4; // c16_t is 4 bytes (int16 I + int16 Q)
++      int got = dev0->trx_read_func(dev0, &tmp_timestamp, retry_buf, nsamps - ret, num_antennas);
++      if (got <= 0)
++        retries++;
++      else
++        ret += got;
++    }
++    if (ret != nsamps)
++      LOG_W(HW, "nrue_ru_read: gave up after %d retries, still short by %d samples -- continuing anyway\n", retries,
++            nsamps - ret);
++  }
+   if (!dev0->firstTS_initialized) {
+     dev0->firstTS = tmp_timestamp;
+     dev0->firstTS_initialized = true;
+diff --git a/executables/nr-ue.c b/executables/nr-ue.c
+index 7fb5ad555f..b1f1979aa6 100644
+--- a/executables/nr-ue.c
++++ b/executables/nr-ue.c
+@@ -470,7 +470,17 @@ static int handle_sync_req_from_mac(PHY_VARS_NR_UE *UE)
+     const fapi_nr_ue_carrier_config_t *cfg = &config->carrier_config;
+     uint64_t dl_CarrierFreq = get_carrier_frequency(fp->N_RB_DL, fp->numerology_index, cfg->dl_frequency);
+     uint64_t ul_CarrierFreq = get_carrier_frequency(fp->N_RB_UL, fp->numerology_index, cfg->uplink_frequency);
+-    if (dl_CarrierFreq != fp->dl_CarrierFreq || ul_CarrierFreq != fp->ul_CarrierFreq) {
++    // cfg->dl_frequency is point A in kHz and is only populated once SIB1 has been decoded. Before
++    // that it is 0, and get_carrier_frequency() then returns just half the carrier bandwidth --
++    // e.g. 49.14 MHz at 273 PRB / 30 kHz -- which is not a frequency at all. Acting on it retunes
++    // the radio away from the band and makes every subsequent sync attempt impossible, silently
++    // discarding the -C given on the command line. MEASURED on a live 100 MHz srsRAN cell: the
++    // first attempt correctly searched 3414990000, every retry searched 49140000 and never
++    // recovered, so only one real attempt ever happened. Keep whatever frequency we were told to
++    // use until upper layers actually know point A.
++    if (cfg->dl_frequency == 0) {
++      LOG_D(NR_PHY, "SYNC REQ: point A not known yet (dl_frequency=0), keeping current RF frequency\n");
++    } else if (dl_CarrierFreq != fp->dl_CarrierFreq || ul_CarrierFreq != fp->ul_CarrierFreq) {
+       LOG_I(NR_PHY,
+             "[UE %d] SYNC REQ: RF frequency change: dl %lu->%lu Hz, ul %lu->%lu Hz (from dl_frequency=%u kHz, target_Nid_cell=%d)\n",
+             UE->Mod_id,
+@@ -486,14 +496,21 @@ static int handle_sync_req_from_mac(PHY_VARS_NR_UE *UE)
+       init_symbol_rotation(fp);
+     }
+ 
+-    int ssb_start_subcarrier = nr_get_ssb_start_sc(fp->numerology_index,
+-                                                   config->ssb_table.ssb_offset_point_a,
+-                                                   config->ssb_table.ssb_subcarrier_offset,
+-                                                   fp->freq_range);
+-    // SSB location can change during for ex: handover on the target cell
+-    if (ssb_start_subcarrier != fp->ssb_start_subcarrier) {
+-      fp->ssb_start_subcarrier = ssb_start_subcarrier;
+-      LOG_I(NR_PHY, "SYNC REQ: SSB location changed:%d\n", fp->ssb_start_subcarrier);
++    // Same pre-SIB1 caveat as the carrier frequency above: ssb_table is only populated once upper
++    // layers know the cell, so recomputing from it before that yields 0 and wipes the SSB position
++    // supplied on the command line (--ssb). MEASURED: after a FIRST successful sync the next sync
++    // request re-derived offset 0 and every following attempt searched the wrong place. Gate both
++    // updates on the same "do upper layers actually know the cell yet" test.
++    if (cfg->dl_frequency != 0) {
++      int ssb_start_subcarrier = nr_get_ssb_start_sc(fp->numerology_index,
++                                                     config->ssb_table.ssb_offset_point_a,
++                                                     config->ssb_table.ssb_subcarrier_offset,
++                                                     fp->freq_range);
++      // SSB location can change during for ex: handover on the target cell
++      if (ssb_start_subcarrier != fp->ssb_start_subcarrier) {
++        fp->ssb_start_subcarrier = ssb_start_subcarrier;
++        LOG_I(NR_PHY, "SYNC REQ: SSB location changed:%d\n", fp->ssb_start_subcarrier);
++      }
+     }
+ 
+     // Apply Doppler based on NTN-Config for target cell
+@@ -656,7 +673,35 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
+       int readBlockSize = get_samples_per_slot(slot_rx, fp);
+       int tmp = nrue_ru_read(UE, timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
+       UEscopeCopy(UE, ueTimeDomainSamplesBeforeSync, rxp[0], sizeof(c16_t), 1, readBlockSize, 0);
+-      AssertFatal(readBlockSize == tmp, "");
++      // A short read here is a legitimate, by-design outcome of trx_usrp_read()'s own overflow/
++      // timeout handling (it deliberately returns a partial block rather than blocking forever --
++      // see its own error_code check), not corruption. Treating it as fatal turns any transient RF
++      // hiccup into a full process abort. MEASURED: this fires reliably under --ue-scan-carrier at
++      // 273 PRB, where dozens of parallel GSCN-correlation threads compete for CPU with the
++      // real-time RX thread and make a transient overflow far more likely -- confirmed via gdb that
++      // the abort is exactly this assertion, not memory corruption from the scan buffers themselves.
++      // This loop's own job (see the "toTrash" branch above) is just to advance the stream position
++      // past samples nobody reads the content of, so a short read only needs to be topped up, not
++      // treated as an error.
++      if (readBlockSize != tmp) {
++        LOG_W(PHY, "readFrame: short read (got %d of %d samples) -- retrying remainder instead of aborting\n", tmp,
++              readBlockSize);
++        int remaining = readBlockSize - tmp;
++        int retries = 0;
++        const int max_retries = 20;
++        while (remaining > 0 && retries < max_retries) {
++          c16_t *retry_rxp[fp->nb_antennas_rx];
++          for (int i = 0; i < fp->nb_antennas_rx; i++)
++            retry_rxp[i] = rxp[i] + tmp;
++          int got = nrue_ru_read(UE, timestamp, (void **)retry_rxp, remaining, fp->nb_antennas_rx);
++          tmp += got;
++          remaining -= got;
++          retries++;
++        }
++        if (remaining > 0)
++          LOG_W(PHY, "readFrame: gave up after %d retries, still short by %d samples -- continuing anyway\n", retries,
++                remaining);
++      }
+ 
+       if (IS_SOFTMODEM_RFSIM) {
+         int slot_tx = (slot_rx + duration_rx_to_tx) % fp->slots_per_frame;
+@@ -685,8 +730,33 @@ static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int
+   while (size > 0) {
+     // Set a maximum transfer size. As we usually read/write single slots, we use the size of slot 0 as maximum here.
+     const int unitTransfer = min(get_samples_per_slot(0, fp), size);
+-    const int res = nrue_ru_read(UE, timestamp, (void **)UE->common_vars.rxdata, unitTransfer, fp->nb_antennas_rx);
+-    DevAssert(unitTransfer == res);
++    int res = nrue_ru_read(UE, timestamp, (void **)UE->common_vars.rxdata, unitTransfer, fp->nb_antennas_rx);
++    // Same fix as readFrame()/UE_thread()'s equivalent checks: a short (including zero-sample,
++    // ERROR_CODE_TIMEOUT) read is trx_usrp_read()'s own by-design recovery path, not corruption.
++    // CONFIRMED as the actual root cause of the original silent-stall/overflow crashes this fix set
++    // out to explain: caught live via gdb -- "Resynchronizing RX by N samples" -> "[recv] received 0
++    // samples out of 61440" / ERROR_CODE_TIMEOUT -> this exact assertion. This loop only discards
++    // samples to advance stream position (see the IS_SOFTMODEM_RFSIM branch below, which doesn't
++    // touch content), so a short read only needs topping up, not treating as fatal.
++    if (unitTransfer != res) {
++      LOG_W(PHY, "syncInFrame: short read (got %d of %d samples) -- retrying remainder instead of aborting\n", res,
++            unitTransfer);
++      int remaining = unitTransfer - res;
++      int retries = 0;
++      const int max_retries = 20;
++      while (remaining > 0 && retries < max_retries) {
++        void *retry_rxp[fp->nb_antennas_rx];
++        for (int i = 0; i < fp->nb_antennas_rx; i++)
++          retry_rxp[i] = (c16_t *)UE->common_vars.rxdata[i] + res;
++        int got = nrue_ru_read(UE, timestamp, retry_rxp, remaining, fp->nb_antennas_rx);
++        res += got;
++        remaining -= got;
++        retries++;
++      }
++      if (remaining > 0)
++        LOG_W(PHY, "syncInFrame: gave up after %d retries, still short by %d samples -- continuing anyway\n", retries,
++              remaining);
++    }
+     if (IS_SOFTMODEM_RFSIM) {
+       int ta = UE->timing_advance + UE->timing_advance_ntn;
+       const openair0_timestamp_t writeTimestamp =
+@@ -852,13 +922,32 @@ void *UE_thread(void *arg)
+       shiftForNextFrame = -(UE->init_sync_frame + trashed_frames + 2) * UE->max_pos_acc * get_nrUE_params()->time_sync_I; // compensate for the time drift that happened during initial sync
+       LOG_I(PHY, "max_pos_acc = %d, shiftForNextFrame = %d\n", UE->max_pos_acc, shiftForNextFrame);
+       // read in first symbol
+-      AssertFatal(fp->ofdm_symbol_size + fp->nb_prefix_samples0
+-                      == nrue_ru_read(UE,
+-                                      &sync_timestamp,
+-                                      (void **)UE->common_vars.rxdata,
+-                                      fp->ofdm_symbol_size + fp->nb_prefix_samples0,
+-                                      fp->nb_antennas_rx),
+-                  "");
++      // Same fix and rationale as this file's other nrue_ru_read() assertion sites: a short read is
++      // trx_usrp_read()'s own by-design overflow/timeout recovery, not corruption -- retry the
++      // shortfall instead of aborting the whole process.
++      {
++        const int firstSymBlockSize = fp->ofdm_symbol_size + fp->nb_prefix_samples0;
++        int firstSymRes = nrue_ru_read(UE, &sync_timestamp, (void **)UE->common_vars.rxdata, firstSymBlockSize, fp->nb_antennas_rx);
++        if (firstSymBlockSize != firstSymRes) {
++          LOG_W(PHY, "UE_thread (first symbol): short read (got %d of %d samples) -- retrying remainder instead of aborting\n",
++                firstSymRes, firstSymBlockSize);
++          int remaining = firstSymBlockSize - firstSymRes;
++          int retries = 0;
++          const int max_retries = 20;
++          while (remaining > 0 && retries < max_retries) {
++            void *retry_rxp[fp->nb_antennas_rx];
++            for (int i = 0; i < fp->nb_antennas_rx; i++)
++              retry_rxp[i] = UE->common_vars.rxdata[i] + firstSymRes;
++            int got = nrue_ru_read(UE, &sync_timestamp, retry_rxp, remaining, fp->nb_antennas_rx);
++            firstSymRes += got;
++            remaining -= got;
++            retries++;
++          }
++          if (remaining > 0)
++            LOG_W(PHY, "UE_thread (first symbol): gave up after %d retries, still short by %d samples -- continuing anyway\n",
++                  retries, remaining);
++        }
++      }
+       // we have the decoded frame index in the return of the synch process
+       // and we shifted above to the first slot of next frame
+       decoded_frame_rx = (decoded_frame_rx + 1) % MAX_FRAME_NUMBER;
+@@ -961,7 +1050,29 @@ void *UE_thread(void *arg)
+     int tmp = nrue_ru_read(UE, &rx_timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
+     metadata meta = {.slot =  curMsg.proc.nr_slot_rx, .frame =  curMsg.proc.frame_rx};
+     UEscopeCopyWithMetadata(UE, ueTimeDomainSamples, rxp[0] - firstSymSamp, sizeof(c16_t), 1, readBlockSize, 0, &meta);
+-    AssertFatal(readBlockSize == tmp, "");
++    // Same fix and rationale as readFrame()'s equivalent check above: a short read is
++    // trx_usrp_read()'s own by-design overflow/timeout recovery path, not corruption, and doesn't
++    // warrant killing the whole process. Retry the shortfall; if retries are also exhausted, this
++    // one slot's demod may be degraded, which HARQ/CRC already has to tolerate anyway.
++    if (readBlockSize != tmp) {
++      LOG_W(PHY, "UE_thread: short read (got %d of %d samples) -- retrying remainder instead of aborting\n", tmp,
++            readBlockSize);
++      int remaining = readBlockSize - tmp;
++      int retries = 0;
++      const int max_retries = 20;
++      while (remaining > 0 && retries < max_retries) {
++        c16_t *retry_rxp[fp->nb_antennas_rx];
++        for (int i = 0; i < fp->nb_antennas_rx; i++)
++          retry_rxp[i] = rxp[i] + tmp;
++        int got = nrue_ru_read(UE, &rx_timestamp, (void **)retry_rxp, remaining, fp->nb_antennas_rx);
++        tmp += got;
++        remaining -= got;
++        retries++;
++      }
++      if (remaining > 0)
++        LOG_W(PHY, "UE_thread: gave up after %d retries, still short by %d samples -- continuing anyway\n", retries,
++              remaining);
++    }
+     struct timespec current_time;
+     if (clock_gettime(CLOCK_REALTIME, &current_time)) {
+       LOG_E(PHY, "clock_gettime failed\n");
+@@ -974,7 +1085,12 @@ void *UE_thread(void *arg)
+       if (first_symbols > 0) {
+         openair0_timestamp_t ignore_timestamp;
+         int tmp = nrue_ru_read(UE, &ignore_timestamp, (void **)UE->common_vars.rxdata, first_symbols, fp->nb_antennas_rx);
+-        AssertFatal(first_symbols == tmp, "");
++        // nrue_ru_read() already retries short reads internally (see its own comment); this only
++        // fires if that internal retry budget was truly exhausted. Warn and continue rather than
++        // abort the whole process -- same rationale as this file's other read-assertion fixes.
++        if (first_symbols != tmp)
++          LOG_W(PHY, "UE_thread (next-frame first symbol): still short by %d samples after internal retries -- continuing anyway\n",
++                first_symbols - tmp);
+ 
+       } else
+         LOG_E(PHY,"can't compensate: diff =%d\n", first_symbols);
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c b/openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c
+index a6d0ae4fce..9ac6d4af87 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c
+@@ -307,16 +307,33 @@ void nr_generate_pbch_llr(const PHY_VARS_NR_UE *ue,
+   LOG_I(PHY, "[PHY] PBCH starting channel_level\n");
+ #endif
+ 
+-  double log2_maxh = 0;
+-  uint32_t max_h = 0;
+-  if (symbolSSB == 1) {
+-    int avg[frame_parms->nb_antennas_rx];
+-    nr_channel_level(0, PBCH_MAX_RE_PER_SYMBOL, dl_ch_estimates_ext, frame_parms->nb_antennas_rx, 1, avg, nb_re);
+-    max_h = avg[0];
+-    for (int i = 1; i < frame_parms->nb_antennas_rx; i++)
+-      max_h = cmax(avg[i], max_h);
+-    log2_maxh = 3 + (log2_approx(max_h) / 2);
+-  }
++  // Channel-compensation output shift, computed for EVERY PBCH symbol.
++  //
++  // This used to be guarded by `if (symbolSSB == 1)`. That was correct only while this code was a
++  // loop over symbols 1..3 with `log2_maxh` declared OUTSIDE it (see this file before commit
++  // e4b2125f1e "Refactor PBCH & PSBCH UE procedures"): the value was computed once on symbol 1 and
++  // deliberately REUSED for symbols 2 and 3. When the loop body became this per-symbol function,
++  // log2_maxh became a local initialised to 0 while the guard was carried over verbatim -- so
++  // symbols 2 and 3 silently started compensating with a shift of 0, i.e. no downscaling at all.
++  //
++  // MEASURED consequence (X410, 273 PRB, live cell): symbol 2 and symbol 3 LLRs came out 100%
++  // saturated at nr_pbch_quantize()'s +-32 clamp (144/144 and 360/360), so two thirds of the polar
++  // codeword carried only hard decisions and no soft information, while symbol 1 was properly scaled
++  // (|LLR| mean ~9-15, ~15% saturated). Fixing it takes those to ~10% and ~55% saturated. That is a
++  // large amount of coding gain recovered on EVERY PBCH decode, in both the initial-sync and the
++  // steady-state tracking paths.
++  //
++  // Computing it per symbol -- rather than restoring the old "reuse symbol 1's value" behaviour -- is
++  // both simpler and more correct here: each symbol already carries its own dl_ch_estimates_ext, and
++  // symbol 2 spans a different number of REs (72 vs 180) than symbols 1 and 3. nr_channel_level() is
++  // safe at both lengths (it indexes from 0 since symbol==0 is passed, and 72 and 180 are both
++  // multiples of the 4-wide SIMD stride, well within the 240-element array).
++  int avg[frame_parms->nb_antennas_rx];
++  nr_channel_level(0, PBCH_MAX_RE_PER_SYMBOL, dl_ch_estimates_ext, frame_parms->nb_antennas_rx, 1, avg, nb_re);
++  uint32_t max_h = avg[0];
++  for (int i = 1; i < frame_parms->nb_antennas_rx; i++)
++    max_h = cmax(avg[i], max_h);
++  const double log2_maxh = 3 + (log2_approx(max_h) / 2);
+ 
+ #ifdef DEBUG_PBCH
+   LOG_I(PHY, "[PHY] PBCH log2_maxh = %f (%d)\n", log2_maxh, max_h);
+diff --git a/radio/USRP/usrp_lib.cpp b/radio/USRP/usrp_lib.cpp
+index 552fed6890..93032408c0 100644
+--- a/radio/USRP/usrp_lib.cpp
++++ b/radio/USRP/usrp_lib.cpp
+@@ -349,14 +349,32 @@ static void trx_usrp_finish_rx(usrp_state_t *s)
+   uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+   s->rx_stream->issue_stream_cmd(cmd);
+ 
+-  /* collect all remaining samples (not sure if needed) */
++  /* Collect the samples still in flight, so the next start_rx begins on a clean stream.
++   *
++   * BOUNDED, and that is load-bearing: this loop used to be an unbounded
++   * "do { recv } while (samples > 0)". On an X410 (RFNoC) the stream does not reliably run dry
++   * after STOP_CONTINUOUS, so recv keeps returning samples and the loop never exits. MEASURED:
++   * the UE completed initial sync against a live 100 MHz cell, then hit this during its first
++   * resync and froze permanently -- UEthread_0 parked in recv(), every other thread idle, not one
++   * further line of log output, and no error anywhere. It looks exactly like a protocol/decode
++   * problem and is not one. Stop on the first timeout/error, and cap the iteration count so a
++   * device that keeps producing can never wedge the UE. */
+   size_t samples;
+   uint8_t buf[1024];
+   std::vector<void *> buff_ptrs;
+   for (size_t i = 0; i < s->usrp->get_rx_num_channels(); i++) buff_ptrs.push_back(buf);
++  const int max_drain_iterations = 10000;
++  int iterations = 0;
+   do {
+-    samples = s->rx_stream->recv(buff_ptrs, sizeof(buf)/4, s->rx_md);
+-  } while (samples > 0);
++    samples = s->rx_stream->recv(buff_ptrs, sizeof(buf) / 4, s->rx_md, 0.01);
++    if (s->rx_md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
++      break; // timeout (stream is dry) or a real error -- either way, stop draining
++    }
++  } while (samples > 0 && ++iterations < max_drain_iterations);
++
++  if (iterations >= max_drain_iterations) {
++    LOG_W(HW, "RX stream still delivering after %d drain iterations, continuing anyway\n", max_drain_iterations);
++  }
+ }
+ 
+ static void trx_usrp_write_reset(openair0_thread_t *wt);
+@@ -1199,8 +1217,14 @@ extern "C" {
+         // from usrp_time_offset
+         //openair0_cfg[0].samples_per_packet    = 2048;
+         openair0_cfg[0].tx_sample_advance     = 15; //to be checked
+-        openair0_cfg[0].tx_bw                 = 80e6;
+-        openair0_cfg[0].rx_bw                 = 80e6;
++        // 100e6, not the former 80e6: 122.88 Msps carries a 273-PRB/100 MHz carrier, which spans
++        // 273*12*30kHz = 98.28 MHz. An 80 MHz analog filter centred on the carrier truncates ~9 MHz
++        // at EACH edge, and an SSB placed low in the carrier then falls outside the passband
++        // entirely -- measured on a live srsRAN cell whose SSB sat 40 MHz below carrier centre
++        // (3374.4 MHz vs 3414.99 MHz): the filter's lower edge landed at 3374.99 MHz, 0.6 MHz above
++        // the SSB, and initial sync could never see it. Widening to 100e6 covers the whole carrier.
++        openair0_cfg[0].tx_bw                 = 100e6;
++        openair0_cfg[0].rx_bw                 = 100e6;
+         break;
+ 
+       case 92160000:
+@@ -1370,13 +1394,31 @@ extern "C" {
+             cfg->rx_gain_offset[i],
+             cfg->rx_gain[i] - cfg->rx_gain_offset[i],
+             gain_range.stop());
+-      // Bistatic sensing UE: force RX onto the RX2 connector so the receive
+-      // antenna is physically separate from the TX/RX transmit antenna,
+-      // improving TX->RX isolation. OAI otherwise leaves the antenna at the
+-      // UHD default, which on a B2x0 shares the TX/RX port for both directions.
+-      s->usrp->set_rx_antenna("RX2", i + choffset);
+-      LOG_I(HW, "RX antenna forced to %s on channel %d\n",
+-            s->usrp->get_rx_antenna(i + choffset).c_str(), i);
++      // Bistatic sensing UE: force RX onto a connector physically separate from the one TX uses,
++      // improving TX->RX isolation. OAI otherwise leaves the antenna at the UHD default, which
++      // shares one port for both directions on a B2x0.
++      //
++      // PORT NAMES ARE DEVICE-SPECIFIC and an invalid name is not a soft failure -- it segfaults
++      // inside libuhd (null deref). Measured on an X410 (UHD 4.10): its ports are
++      // {TX/RX0, RX1, CAL_LOOPBACK, TERMINATION} for RX and {TX/RX0, CAL_LOOPBACK} for TX, so the
++      // B2x0 names "RX2"/"TX/RX" -- which this block previously applied UNCONDITIONALLY to every
++      // device type -- crash the X410 before it ever streams. Hence the explicit per-type switch,
++      // and no forcing at all on device types whose port naming hasn't been verified here.
++      const char *rx_ant = NULL;
++      if (device->type == USRP_B200_DEV) {
++        rx_ant = "RX2";
++      } else if (device->type == USRP_X400_DEV) {
++        rx_ant = "RX1"; // X410: TX stays on TX/RX0, so RX1 is the separate-connector choice
++      }
++      if (rx_ant != NULL) {
++        s->usrp->set_rx_antenna(rx_ant, i + choffset);
++        LOG_I(HW, "RX antenna forced to %s on channel %d\n",
++              s->usrp->get_rx_antenna(i + choffset).c_str(), i);
++      } else {
++        LOG_I(HW, "RX antenna left at UHD default (%s) on channel %d -- port naming not verified "
++                  "for this device type\n",
++              s->usrp->get_rx_antenna(i + choffset).c_str(), i);
++      }
+     }
+   }
+ 
+@@ -1393,11 +1435,23 @@ extern "C" {
+       s->usrp->set_tx_freq(tx_tune_req, i+choffset);
+       s->usrp->set_tx_gain(gain_range_tx.stop()-openair0_cfg[0].tx_gain[i],i+choffset);
+       LOG_I(HW,"USRP TX_GAIN:%3.2lf gain_range:%3.2lf tx_gain:%3.2lf\n", gain_range_tx.stop()-openair0_cfg[0].tx_gain[i], gain_range_tx.stop(), openair0_cfg[0].tx_gain[i]);
+-      // Keep TX on the TX/RX connector (the only TX-capable port on a B2x0),
+-      // paired with the separate RX antenna on RX2 set above.
+-      s->usrp->set_tx_antenna("TX/RX", i + choffset);
+-      LOG_I(HW, "TX antenna forced to %s on channel %d\n",
+-            s->usrp->get_tx_antenna(i + choffset).c_str(), i);
++      // Pair of the RX-antenna forcing above: keep TX on the transmit-capable connector, leaving
++      // RX on its own. Same device-specific naming caveat -- see that block's comment.
++      const char *tx_ant = NULL;
++      if (device->type == USRP_B200_DEV) {
++        tx_ant = "TX/RX"; // the only TX-capable port on a B2x0
++      } else if (device->type == USRP_X400_DEV) {
++        tx_ant = "TX/RX0"; // X410's TX-capable port (the bare "TX/RX" name does not exist there)
++      }
++      if (tx_ant != NULL) {
++        s->usrp->set_tx_antenna(tx_ant, i + choffset);
++        LOG_I(HW, "TX antenna forced to %s on channel %d\n",
++              s->usrp->get_tx_antenna(i + choffset).c_str(), i);
++      } else {
++        LOG_I(HW, "TX antenna left at UHD default (%s) on channel %d -- port naming not verified "
++                  "for this device type\n",
++              s->usrp->get_tx_antenna(i + choffset).c_str(), i);
++      }
+     }
+   }
+ 

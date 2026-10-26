@@ -1,0 +1,26 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 64fe51d283..dd2ba09d72 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1114,6 +1114,7 @@ set(PHY_NR_PASSIVE_UL_SRC
+   ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_ul_channel_estimation.c
+   ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_freq_equalization.c
+   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c
++  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_sfo.c
+   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c
+   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ul_nid_rule.c
+   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c
+@@ -3443,6 +3444,13 @@ if(ENABLE_TESTS)
+   add_dependencies(tests test_nr_pdsch_dmrs_snr)
+   add_test(NAME test_nr_pdsch_dmrs_snr COMMAND ./test_nr_pdsch_dmrs_snr)
+ 
++  add_executable(test_nr_pusch_passive_sfo ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pusch_passive_sfo_test.cc
++                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_sfo.c)
++  target_include_directories(test_nr_pusch_passive_sfo PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
++  target_link_libraries(test_nr_pusch_passive_sfo PRIVATE GTest::gtest GTest::gtest_main m)
++  add_dependencies(tests test_nr_pusch_passive_sfo)
++  add_test(NAME test_nr_pusch_passive_sfo COMMAND ./test_nr_pusch_passive_sfo)
++
+   add_executable(test_nr_harq_init_tx ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_harq_init_tx_test.cc)
+   target_include_directories(test_nr_harq_init_tx PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+   target_link_libraries(test_nr_harq_init_tx PRIVATE GTest::gtest)

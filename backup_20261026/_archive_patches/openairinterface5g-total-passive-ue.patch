@@ -1,0 +1,73 @@
+diff --git a/tests/passive_rx/monitor/monitor.py b/tests/passive_rx/monitor/monitor.py
+index 53e73ff7f7..24fcff8725 100755
+--- a/tests/passive_rx/monitor/monitor.py
++++ b/tests/passive_rx/monitor/monitor.py
+@@ -14,6 +14,7 @@ endpoints are shown side by side, never fused.
+ 
+ import argparse
+ import json
++import os
+ import re
+ import threading
+ import time
+@@ -110,7 +111,10 @@ class LogTail:
+         # DL TRANSPORT-BLOCK rate. NOT segs_decoded: those counters are summed only over FAILING
+         # TBs (nr_pdsch_passive_decode.c:302-303), so that ratio FALLS as decoding improves.
+         ("ldpc", re.compile(r"LDPCDIAG ok=(\d+) seg_fail=(\d+) tb_fail=(\d+) zero_tb=(\d+)")),
++        # adaptive-rx-UL-DL decodes DL on a deferred queue; pdsch_decode[try=] stays 0 there.
++        ("pdschq", re.compile(r"PDSCHQ queued=(\d+) decoded=(\d+) crc_ok=(\d+)")),
+         ("pusch", re.compile(r"pusch_passive\[try=(\d+) crc_ok=(\d+)")),
++        ("ul_health", re.compile(r"pusch_passive\[.*?health=([0-9.]+)%")),
+         ("dci", re.compile(r"dci01\[accepts=(\d+) rejects=(\d+)")),
+         ("blind", re.compile(r"accepts=(\d+)\s+cfr_submits=(\d+)")),
+         ("occ", re.compile(r"occ\[([^\]]*)\]")),
+@@ -130,14 +134,24 @@ class LogTail:
+     def run(self):
+         while not self.path.exists():
+             time.sleep(1.0)
+-        with self.path.open("r", errors="replace") as f:
+-            f.seek(0, 2)
+-            while True:
+-                line = f.readline()
+-                if not line:
+-                    time.sleep(0.25)
+-                    continue
+-                self._ingest(line.rstrip())
++        f = self.path.open("r", errors="replace")
++        f.seek(0, 2)
++        while True:
++            line = f.readline()
++            if not line:
++                time.sleep(0.25)
++                # Reopen on truncation or rotation (watch_log.sh rotates with mv; an operator
++                # truncates with `: >`). Without this the reader sits past EOF forever and every
++                # decode counter on the page freezes while the log pane looks merely quiet.
++                try:
++                    st = os.stat(self.path)
++                    if st.st_ino != os.fstat(f.fileno()).st_ino or st.st_size < f.tell():
++                        f.close()
++                        f = self.path.open("r", errors="replace")
++                except OSError:
++                    pass
++                continue
++            self._ingest(line.rstrip())
+ 
+     def _ingest(self, line):
+         with self._lock:
+@@ -147,6 +161,16 @@ class LogTail:
+                     continue
+                 if name in self.counters:
+                     self.counters[name] += 1
++                elif name == "pdschq":
++                    dec, ok = int(m.group(2)), int(m.group(3))
++                    if dec:
++                        self._pdschq = True
++                        self.stats.update(pdsch_try=dec, pdsch_ok=ok, pdsch_rate=100.0 * ok / dec,
++                                          dl_ok=ok, dl_fail=dec - ok, dl_tb_rate=100.0 * ok / dec)
++                elif name == "ul_health":
++                    self.stats["ul_health"] = float(m.group(1))
++                elif name in ("pdsch_crc", "ldpc") and getattr(self, "_pdschq", False):
++                    pass  # queue counter is authoritative once it moves; these read 0 and would blank it
+                 elif name == "pdsch_crc":
+                     try_n, ok_n = int(m.group(1)), int(m.group(2))
+                     self.stats["pdsch_try"] = try_n

@@ -1,0 +1,131 @@
+diff --git a/radio/BLADERF/bladerf_lib.c b/radio/BLADERF/bladerf_lib.c
+index 341ce8eb53..ac7136da35 100644
+--- a/radio/BLADERF/bladerf_lib.c
++++ b/radio/BLADERF/bladerf_lib.c
+@@ -188,30 +188,40 @@ static int brf_start_stream(openair0_device_t *device)
+  */
+ static int brf_probe_stream(brf_state_t *brf)
+ {
+-  const unsigned int nsamps = brf->conversion_buffer_size / 2; /* 0.5 ms */
++  const unsigned int nsamps = brf->sample_rate / 2000; /* 0.5 ms */
++  void *samples = malloc((size_t)nsamps * (brf->use_sc8 ? 2 : 4));
++  if (samples == NULL) {
++    LOG_E(HW, "RX stream probe: allocation failed\n");
++    return -1;
++  }
+   int bad = 0, considered = 0;
+-
++  uint64_t expected = 0;
+   for (int i = 0; i < BRF_PROBE_READS; i++) {
+     struct bladerf_metadata meta = {0};
+     meta.flags = BLADERF_META_FLAG_RX_NOW;
+-    int status = bladerf_sync_rx(brf->dev, brf->rx_conversion_buffer, nsamps, &meta, 2 * brf->rx_timeout_ms);
++    int status = bladerf_sync_rx(brf->dev, samples, nsamps, &meta, 2 * brf->rx_timeout_ms);
+     if (status != 0) {
+       LOG_W(HW, "RX stream probe: read failed: %s\n", bladerf_strerror(status));
++      free(samples);
+       return -1;
+     }
++    const bool invalid = (meta.status & BLADERF_META_STATUS_OVERRUN)
++                         || meta.actual_count != nsamps
++                         || (i > 0 && meta.timestamp != expected);
++    expected = meta.timestamp + meta.actual_count;
+     if (i < BRF_PROBE_SKIP)
+       continue;
+     considered++;
+-    if (meta.status & BLADERF_META_STATUS_OVERRUN)
+-      bad++;
++    bad += invalid;
+   }
+-
++  free(samples);
+   const int bad_pct = considered ? (100 * bad) / considered : 100;
+   if (bad_pct > BRF_PROBE_MAX_BAD_PCT) {
+-    LOG_W(HW, "RX stream probe: %d%% of reads overran (%d/%d), stream is stuck\n", bad_pct, bad, considered);
++    LOG_W(HW, "RX stream probe: %d%% invalid reads (%d/%d), stream is stuck\n", bad_pct, bad, considered);
+     return -1;
+   }
+-  LOG_I(HW, "RX stream probe: healthy (%d/%d reads overran)\n", bad, considered);
++  LOG_I(HW, "RX stream probe: healthy (%d/%d invalid reads), rate=%u format=%s\n",
++        bad, considered, brf->sample_rate, brf->use_sc8 ? "SC8" : "SC16");
+   return 0;
+ }
+ 
+@@ -237,11 +247,7 @@ static int trx_brf_start(openair0_device_t *device)
+     if (brf_start_stream(device) != 0)
+       return -1;
+ 
+-    /* Only the 122.88 Msps oversample path shows the stuck-stream failure, and
+-     * it is the only one with the conversion buffer the probe reads into. */
+-    if (!brf->use_sc8)
+-      return 0;
+-
++    /* Prime and check metadata continuity for both SC16 and SC8 RX. */
+     if (brf_probe_stream(brf) == 0)
+       return 0;
+   }
+@@ -331,8 +337,13 @@ static int trx_brf_read(openair0_device_t *device, openair0_timestamp_t *ptimest
+   brf->meta_rx.flags = BLADERF_META_FLAG_RX_NOW;
+   int status = bladerf_sync_rx(brf->dev, wire_samples, (unsigned int)nsamps, &brf->meta_rx, 2 * brf->rx_timeout_ms);
+ 
++  if (status == 0 && brf->meta_rx.actual_count > (unsigned int)nsamps) {
++    LOG_E(HW, "RX invalid metadata: actual_count=%u requested=%d\n", brf->meta_rx.actual_count, nsamps);
++    brf->num_rx_errors++;
++    return 0;
++  }
+   if (brf->use_sc8 && status == 0) {
+-    for (int i = 0; i < 2 * nsamps; ++i)
++    for (unsigned int i = 0; i < 2 * brf->meta_rx.actual_count; ++i)
+       samples[i] = (int16_t)brf->rx_conversion_buffer[i] * 16;
+   }
+ 
+@@ -360,7 +371,7 @@ static int trx_brf_read(openair0_device_t *device, openair0_timestamp_t *ptimest
+ 
+   *ptimestamp = brf->meta_rx.timestamp;
+ 
+-  return nsamps; // brf->meta_rx.actual_count;
++  return status == 0 ? (int)brf->meta_rx.actual_count : 0;
+ }
+ 
+ /*! \brief Terminate operation of the BladeRF transceiver -- free all associated resources
+@@ -534,7 +545,8 @@ static int brf_open_and_configure(brf_state_t *brf, openair0_config_t *openair0_
+      * sample-rate calls, then applies its extended-bandwidth register setup.
+      * Leaving this at zero retains the device's previous/default calibration
+      * and can suppress an SSB near the edge of a 100 MHz NR carrier. */
+-    .bandwidth = brf->use_sc8 ? 56000000 : openair0_cfg->rx_bw,
++    .bandwidth = brf->use_sc8 ? 56000000
++                             : brf->sample_rate == 61440000 ? 50000000 : openair0_cfg->rx_bw,
+     .gain = openair0_cfg->rx_gain[0],
+   };
+   configure_channel(brf->dev, &rx_chan);
+@@ -584,6 +596,14 @@ int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
+       brf.use_sc8 = true;
+       break;
+ 
++    case 61440000:
++      openair0_cfg->samples_per_packet = 16384;
++      openair0_cfg->tx_sample_advance = 0;
++      brf.num_buffers = 128;
++      brf.num_transfers = 32;
++      brf.rx_timeout_ms = 2000;
++      break;
++
+     case 46080000:
+       openair0_cfg->samples_per_packet = 8192;
+       openair0_cfg->tx_sample_advance = 0;
+diff --git a/tests/passive_rx/monitor/monitor.py b/tests/passive_rx/monitor/monitor.py
+index 0303248224..b4823cff52 100755
+--- a/tests/passive_rx/monitor/monitor.py
++++ b/tests/passive_rx/monitor/monitor.py
+@@ -114,9 +114,9 @@ class LogTail:
+         ("dci", re.compile(r"dci01\[accepts=(\d+) rejects=(\d+)")),
+         ("blind", re.compile(r"accepts=(\d+)\s+cfr_submits=(\d+)")),
+         ("occ", re.compile(r"occ\[([^\]]*)\]")),
+-        ("overflow", re.compile(r"[Oo]verflow|OOOO|\bO\b")),
++        ("overflow", re.compile(r"RX overrun is detected|ERROR_CODE_OVERFLOW|OOOO|\bO\b")),
+         ("sync_lost", re.compile(r"out.of.sync|sync lost|LOST SYNC", re.I)),
+-        ("pbch_ok", re.compile(r"PBCH.*(?:decoded|CRC OK)|MIB decoded", re.I)),
++        ("pbch_ok", re.compile(r"\bPBCH\s+(?:successfully\s+)?decoded\b|\bPBCH\b.*\bCRC OK\b|\bMIB decoded\b", re.I)),
+     ]
+ 
+     def __init__(self, path, maxlines=4000):
