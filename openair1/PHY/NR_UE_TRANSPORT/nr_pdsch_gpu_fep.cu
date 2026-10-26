@@ -116,6 +116,13 @@ static const int g_force_ant = -1; /* no antenna forced */
 static uint16_t *g_d_perm;
 static short *g_d_tw1024, *g_d_tw4096;
 static short2 *g_d_ts, *g_d_exact, *g_h_exact;
+/* MPCI G3b: the FEP geometry of the graph pass, ONE ENTRY PER DISTINCT GEOMETRY (entry 0 = the cfg of nr_gpu_fep_api.init). The pass kernels carry n_rb_dl, first_carrier_offset, the CP lengths, the antenna count
+ * and the time-shift table by value, so a graph is captured for one entry; nr_gpu_fep_job_t.geo selects it. N, the symbol count and the offset divisor are those of entry 0 (the rings and cuFFT
+ * plans are sized by them). */
+struct FepGeo { int nant, ncp, ncp0, n_rb_dl, fco; size_t sps; short2 *d_ts; };
+static const int FEP_GEO_MAX = 16;
+static FepGeo g_geo[FEP_GEO_MAX];
+static int g_ngeo;
 static bool g_exact_ok, g_exact_direct, g_exact_pending;
 static int g_isa; /* nr_isa profile of the bit-exact kernels (nr_exact::isa_profile(), chosen at init); P_NONE = exact set off */
 static double g_exact_us;
@@ -772,6 +779,8 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   CK(cudaMemsetAsync(g_d_fft_in, 0, (size_t)cfg->nant * ns * N * sizeof(float2), g_stream));
   if (cufftExecC2C(g_plan, (cufftComplex *)g_d_fft_in, (cufftComplex *)g_d_rxF, CUFFT_FORWARD) != CUFFT_SUCCESS) return -1;
   CK((cudaError_t)nr_gpu_sync(g_stream));
+  g_geo[0] = {cfg->nant, cfg->nb_prefix_samples, cfg->nb_prefix_samples0, cfg->n_rb_dl, cfg->first_carrier_offset, (size_t)g_samples_per_slot, g_d_ts};
+  g_ngeo = 1;
   return 0;
 }
 
@@ -1170,9 +1179,11 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
  * and (DISCRETE model only) copy the IQ window into the slot's pinned ring. Host only: no CUDA work is enqueued. See nr_pdsch_gpu_fep.h. */
 static int fep_stage_impl(const nr_gpu_fep_job_t *j, int k)
 {
-  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
+  if (j->geo < 0 || j->geo >= g_ngeo) return -1;
+  const FepGeo &G = g_geo[j->geo];
+  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = G.nant;
   pass_slot_wait(g_pass_fev[k]);
-  const int early = g_cfg.nb_prefix_samples / g_cfg.ofdm_offset_divisor;
+  const int early = G.ncp / g_cfg.ofdm_offset_divisor;
   const uint32_t origin = (j->ring_offset + j->ring_len - early) % j->ring_len;
   uint32_t *par = g_pass_par[k];
   memset(par, 0, nr_exact::PAR_WORDS * sizeof(uint32_t));
@@ -1182,7 +1193,7 @@ static int fep_stage_impl(const nr_gpu_fep_job_t *j, int k)
   par[nr_exact::PAR_SFO_KREF] = (uint32_t)j->sfo_kref;
   par[21] = (uint32_t)((j->run_mask ? j->run_mask : j->sym_mask) & ((1u << ns) - 1u)); /* sized to the grant for the graph pass; fep_dev's grid is sym_mask */
   if (nr_gpu_model() == NR_GPU_MODEL_DISCRETE) {
-    const size_t len = (size_t)g_samples_per_slot + N; /* the last symbol + slack, as upload_window */
+    const size_t len = G.sps + N; /* the last symbol + slack, as upload_window */
     for (int a = 0; a < nant; a++) {
       short2 *dst = g_pass_h[k] + (size_t)a * len;
       const short2 *src = (const short2 *)j->rxdata[a];
@@ -1214,7 +1225,7 @@ extern "C" int nr_pdsch_gpu_fep_stage(const nr_gpu_fep_job_t *j, int *slot_out)
 {
   if (g_init_state != 1 || !g_exact_ok || !j || !j->rxdata || !j->symbol_rot || !slot_out || !j->ring_len) return -1;
   const int k = PASS_RING; /* the helper's own slot: one test pass in flight, no sharing with live instances */
-  fep_stage_impl(j, k);
+  if (fep_stage_impl(j, k) != 0) return -1;
   *slot_out = k;
   return 0;
 }
@@ -1236,7 +1247,9 @@ extern "C" int nr_pdsch_gpu_fep_dev(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF
   if (g_init_state != 1 || !g_exact_ok || !j || !j->rxdata || !rxF || !rxF->dev || slot < 0 || slot >= PASS_SLOTS
       || rxF->model != nr_gpu_model())
     return -1;
-  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
+  if (j->geo < 0 || j->geo >= g_ngeo) return -1;
+  const FepGeo &G = g_geo[j->geo];
+  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = G.nant;
   const uint16_t sym_mask = j->sym_mask & (uint16_t)((1u << ns) - 1u);
   if (N != nr_exact::N || !sym_mask || rxF->bytes < (size_t)nant * MAX_SYM * N * sizeof(short2)) return -1; /* the graph pass: N = 4096 only */
   nr_exact::ExactIO io = {};
@@ -1250,7 +1263,7 @@ extern "C" int nr_pdsch_gpu_fep_dev(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF
     for (int a = 0; a < nant; a++) io.rx[a] = (const short2 *)j->rxdata[a];
     io.ring_len = j->ring_len;
   } else {
-    const size_t len = (size_t)g_samples_per_slot + N;
+    const size_t len = G.sps + N;
     for (int a = 0; a < nant; a++) io.rx[a] = g_pass_d[slot] + (size_t)a * len;
     if (cudaMemcpyAsync(g_pass_d[slot], g_pass_h[slot], (size_t)nant * len * sizeof(short2), cudaMemcpyHostToDevice, s) != cudaSuccess)
       return -1;
@@ -1258,12 +1271,45 @@ extern "C" int nr_pdsch_gpu_fep_dev(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF
   }
   io.out = (short2 *)rxF->dev;
   io.ant_stride = (size_t)MAX_SYM * N;
-  NR_EXACT_LAUNCH(g_isa, nr_exact::k_fep_exact, dim3(nsym, nant), nr_exact::THREADS, s, io, g_cfg.nb_prefix_samples, g_cfg.nb_prefix_samples0, g_d_perm,
-                                                                      g_d_tw1024, g_d_tw4096, g_d_ts, g_cfg.n_rb_dl,
-                                                                      g_cfg.first_carrier_offset);
+  NR_EXACT_LAUNCH(g_isa, nr_exact::k_fep_exact, dim3(nsym, nant), nr_exact::THREADS, s, io, G.ncp, G.ncp0, g_d_perm,
+                                                                      g_d_tw1024, g_d_tw4096, G.d_ts, G.n_rb_dl,
+                                                                      G.fco);
   if (cudaPeekAtLastError() != cudaSuccess) return -1;
   return pass_slot_done(g_pass_fev[slot], s) == cudaSuccess ? 0 : -1;
 }
+/* MPCI G3b: register the FEP geometry of a further cell for the graph pass (pre-fence). Returns the geometry id for nr_gpu_fep_job_t.geo (an equal geometry returns the existing id: cells of one
+ * geometry share it and every graph captured for it), or -1: the exact set is down, N / symbol count / offset divisor differ from entry 0, the cell needs more antennas or a longer slot than the
+ * rings of entry 0 hold, or the table does not fit. The only allocation is the time-shift table (N short2), and only when the window offset (CP / divisor) differs from entry 0's. */
+extern "C" int nr_pdsch_gpu_fep_geo_add(const nr_gpu_fep_cfg_t *c)
+{
+  if (g_init_state != 1 || !g_exact_ok || !c) return -1;
+  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot;
+  if (c->ofdm_symbol_size != N || c->symbols_per_slot != ns || c->ofdm_offset_divisor != g_cfg.ofdm_offset_divisor || c->nant < 1 || c->nant > g_cfg.nant || c->n_rb_dl < 1 || c->n_rb_dl > 275
+      || c->first_carrier_offset < 0 || c->nb_prefix_samples < 0 || c->nb_prefix_samples0 < 0)
+    return -1;
+  const size_t sps = (size_t)c->nb_prefix_samples0 + N + (size_t)(ns - 1) * (N + c->nb_prefix_samples);
+  if (sps > g_geo[0].sps) return -1;
+  for (int g = 0; g < g_ngeo; g++)
+    if (g_geo[g].nant == c->nant && g_geo[g].ncp == c->nb_prefix_samples && g_geo[g].ncp0 == c->nb_prefix_samples0 && g_geo[g].n_rb_dl == c->n_rb_dl && g_geo[g].fco == c->first_carrier_offset) return g;
+  if (g_ngeo >= FEP_GEO_MAX) return -1;
+  short2 *ts = g_geo[0].d_ts;
+  if (c->nb_prefix_samples / c->ofdm_offset_divisor != g_cfg.nb_prefix_samples / g_cfg.ofdm_offset_divisor) {
+    NrMsScope ms_(NR_MS_PDSCH_FEP, NR_MS_SHARED);
+    std::vector<short> t(2 * (size_t)N);
+    const int so = c->nb_prefix_samples / c->ofdm_offset_divisor;
+    for (int i = 0; i < N; i++) {
+      const double poff = -i * 2.0 * M_PI * so / N;
+      t[2 * i] = (int16_t)round(cos(poff) * 32767);
+      t[2 * i + 1] = (int16_t)round(sin(-poff) * 32767);
+    }
+    ts = (short2 *)nr_gpu_alloc(NR_GPU_DEVICE, N * sizeof(short2)); /* the platform's own fence (before the RX allocation fence); this unit's nr_dl_gpu_sealed closed at api_init */
+    if (!ts) return -1;
+    if (cudaMemcpy(ts, t.data(), t.size() * sizeof(short), cudaMemcpyHostToDevice) != cudaSuccess) return -1;
+  }
+  g_geo[g_ngeo] = {c->nant, c->nb_prefix_samples, c->nb_prefix_samples0, c->n_rb_dl, c->first_carrier_offset, sps, ts};
+  return g_ngeo++;
+}
+extern "C" int nr_pdsch_gpu_fep_geo_count(void) { return g_ngeo; }
 extern "C" int nr_pdsch_gpu_exact_fep(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, double fo_hz,
                                       const int16_t *symbol_rot, uint16_t sym_mask, int16_t *out, size_t ant_stride)
 {

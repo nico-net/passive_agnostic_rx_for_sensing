@@ -10,6 +10,7 @@
 #include "nr_pdsch_gpu_demod_host.h"
 #include "nr_pdsch_gpu_exact.h"
 #include "nr_pdsch_gpu_demod.h"
+#include "nr_pdsch_gpu_fep.h"
 #include "nr_pdsch_gpu_ldpc.h"
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pdsch_cpu_route.h"
@@ -50,6 +51,11 @@ static struct {
   nr_gpu_pass_hq_cell_copy_fn hq_copy_cell[2]; /* MPCI G3: the same for the slab of a cell (NULL: a module without per-cell slabs: cell 0 only) */
   int (*cell_init)(int cell, int n_rb_dl);     /* MPCI G3: nr_gpu_pass_cell_init of the module */
   _Atomic int cell_on[NR_CELL_MAX];            /* cells registered with the module (cell 0 is up with the module itself) */
+  int (*cell_init_geo)(int cell, int n_rb_dl, int gid);                                     /* MPCI G3b: nr_gpu_pass_cell_init_geo */
+  int (*geo_add)(int cell, const nr_gpu_fep_cfg_t *fc, int max_nrb_class, uint64_t *reserved); /* nr_gpu_pass_geo_add: FEP geometry + graph memory reservation */
+  uint64_t (*geo_commit)(int gid);                                                          /* nr_gpu_pass_geo_commit: true-up (bytes), 0 = nothing captured */
+  int (*warm_geo)(const nr_gpu_pass_shape_t *sh, int qmode, int align, int evm, int gid);   /* nr_gpu_pass_warm_geo */
+  int cell_nbrx[NR_CELL_MAX], cell_gid[NR_CELL_MAX]; /* RX antennas / geometry id of each registered cell (cell 0: G.nbrx / 0) */
   struct { int N, ncp, ncp0, nsym, div, spm, nrb, fco, nbrx; const int16_t *dt; size_t dt_bytes; } geo; /* the FEP geometry the graphs were captured with (cell 0): a later cell shares the pass only if equal */
   void (*call_begin)(void), (*call_end)(void), (*call_dirty)(void); /* v2 Task 4: the module's held-instance calls (ISAC_PDSCH_GPU_GRAPH_RETRY) */
   _Atomic int on;
@@ -264,11 +270,14 @@ static const char *gpass_tier(void)
   const nr_gpu_caps_t *c = nr_gpu_platform_probe();
   return c && c->model == NR_GPU_SHARED ? "shared" : c && c->model == NR_GPU_DISCRETE ? "discrete" : "cpu";
 }
+static int g_warm_maxnrb = 1 << 30; /* MPCI G3b: the largest PRB class the classes being warmed may have (a further geometry: the classes its carrier can use); unlimited for the first cell */
 static void warm_contiguous(nr_gpu_pass_warm_fn warmf, PHY_VARS_NR_UE *ue, int nbrx, const int *nds, int nnds, int budget, int evm, int *made, int *failed)
 {
   for (int di = 0; di < nnds; di++)
     for (int ni = 0; ni < 8 && *made < budget; ni++)
       for (int li = 0; li < 4 && *made < budget; li++) {
+        if (g_nrbs[ni] > g_warm_maxnrb)
+          break;
         const int nl = g_nls[li];
         if (nl > nbrx)
           continue;
@@ -291,10 +300,77 @@ static void warm_contiguous(nr_gpu_pass_warm_fn warmf, PHY_VARS_NR_UE *ue, int n
       }
 }
 
-/* MPCI G3: a further cell joins the pass module that the first cell warmed (called by nr_gpu_pass_warmup on the thread of cell `cell` > 0). The instances, streams, graph executables and
- * every warmed shape class are SHARED by all cells (a class one cell warmed serves the others), so nothing is captured here: the cell gets its HARQ slab, its n_rb_dl and its floor in the
- * instance quota (nr_gpu_pass_cell_init). A cell whose FEP geometry, antenna count or delay table differs from the one the graphs were captured with keeps the old path: the
- * captured FEP kernels carry n_rb_dl, first_carrier_offset, the CP lengths and the time-shift table by value (nr_pdsch_gpu_fep.cu). */
+/* MPCI G3b: the class list of nr_gpu_pass_warmup for a further cell's FEP geometry g_wgid: the same loops restricted to the PRB classes the carrier can reach (grants never exceed N_RB_DL) and
+ * to nl <= the cell's antennas; captured through the module's warm bound to the geometry. Its graph memory is bounded by the budget the module reserved at registration (a refused class is counted
+ * failed and the loops go on: the smaller classes may still fit). Returns the classes made. */
+static int g_wgid;
+static pthread_mutex_t g_geo_mu = PTHREAD_MUTEX_INITIALIZER;
+static int warm_bound(const nr_gpu_pass_shape_t *sh, int qmode, int align, int evm) { return G.warm_geo(sh, qmode, align, evm, g_wgid); }
+static int warm_geometry(PHY_VARS_NR_UE *ue, int max_nrb_class)
+{
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const int nbrx = fp->nb_antennas_rx, split = G.v2 && g_sub_on[1], evm = 1;
+  const int budget = split ? 1 << 20 : 512;
+  int made = 0, failed = 0, smade = 0;
+  static const int nd[] = {3, 2};
+  static const int ndc[] = {3, 2, 1};
+  g_warm_maxnrb = max_nrb_class;
+  warm_contiguous(warm_bound, ue, nbrx, ndc, split ? 3 : 2, budget, evm, &made, &failed);
+  if (split)
+    for (int ni = 0; ni < 8; ni++)
+      for (int li = 0; li < 4; li++) {
+        const int nl = g_nls[li];
+        int variants[16][2];
+        const int nvar = g_nrbs[ni] <= max_nrb_class && nl <= nbrx ? demod_variants(ue, nl, variants) : 0;
+        for (int v = 0; v < nvar; v++) {
+          nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(g_nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)ndc[0], 1, (uint8_t)(1 | (G.fp32 ? NR_GPU_PASS_FP32_DEMOD : 0))};
+          sh.nz4 = 1;
+          if (warm_bound(&sh, variants[v][0], variants[v][1], evm) == 0)
+            made++;
+          else
+            failed++;
+        }
+      }
+  const int sbudget = split ? 1 << 20 : 1400;
+  static const int segc[] = {1, 2, 4, 8, 16, 32, 64, 128}, segnl[] = {1, 2, 3, 4};
+  const int nsegc = split ? (g_sub_on[4] ? 8 : 6) : 5, segrows = split ? 1024 : 512;
+  for (int li = 0; li < 4; li++)
+    for (int di = 0; di < 2; di++)
+      for (int ni = 0; ni < 8 && smade < sbudget; ni++)
+        for (int sc = 0; sc < nsegc && smade < sbudget; sc++) {
+          const int nl = segnl[li], ns = segc[sc];
+          const int rows = nd[di] * nl * nbrx * ns;
+          if (g_nrbs[ni] > max_nrb_class || nl > nbrx || ns > g_nrbs[ni] || (ns <= 32 ? rows > segrows : rows > 2048 || ns * nbrx > segrows))
+            continue;
+          int variants[16][2];
+          const int nvar = demod_variants(ue, nl, variants);
+          const int cmax = g_nrbs[ni] * nl * 132 * 8 * 93 / 100 / 8400 + 1;
+          for (int ci = 0; ci < 9 && smade < sbudget; ci++) {
+            const int ncb = g_ncbc[ci];
+            if (ci > 0 && g_ncbc[ci - 1] >= cmax)
+              break;
+            for (int v = 0; v < nvar && smade < sbudget; v++) {
+              nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(g_nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)nd[di], (uint16_t)ncb, (uint8_t)(1 | (G.fp32 ? NR_GPU_PASS_FP32_DEMOD : 0)), (uint16_t)ns};
+              if (warm_bound(&sh, variants[v][0], variants[v][1], evm) == 0)
+                smade++;
+              else
+                failed++;
+            }
+          }
+        }
+  if (split) {
+    const int nd4[1] = {4};
+    warm_contiguous(warm_bound, ue, nbrx, nd4, 1, budget, evm, &made, &failed);
+  }
+  g_warm_maxnrb = 1 << 30;
+  return made + smade;
+}
+
+/* MPCI G3: a further cell joins the pass module that the first cell warmed (called by nr_gpu_pass_warmup on the thread of cell `cell` > 0). The instances, streams, graph executables of the L stage and
+ * every warmed shape class are SHARED by all cells (a class one cell warmed serves the others), so for a cell of the same FEP geometry nothing is captured here: the cell gets its HARQ slab, its n_rb_dl and
+ * its floor in the instance quota (nr_gpu_pass_cell_init).
+ * MPCI G3b: a cell whose FEP geometry (n_rb_dl, first carrier offset, CP lengths) or antenna count differs gets its own geometry in the module (nr_gpu_pass_geo_add): the C and D graphs of its classes are
+ * captured for it, the graph memory is reserved from the elastic GPU headroom, and a refusal (budget, ring sizes, N / symbol count / delay table of another family) leaves the cell on the old path. */
 static void cell_warmup(PHY_VARS_NR_UE *ue, int cell)
 {
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
@@ -304,20 +380,64 @@ static void cell_warmup(PHY_VARS_NR_UE *ue, int cell)
   }
   if (atomic_load(&G.cell_on[cell]))
     return;
-  if (fp->ofdm_symbol_size != G.geo.N || fp->nb_prefix_samples != G.geo.ncp || fp->nb_prefix_samples0 != G.geo.ncp0 || fp->symbols_per_slot != G.geo.nsym ||
-      (int)fp->ofdm_offset_divisor != G.geo.div || fp->samples_per_subframe != G.geo.spm || fp->N_RB_DL != G.geo.nrb || fp->first_carrier_offset != G.geo.fco ||
-      fp->nb_antennas_rx != G.geo.nbrx || memcmp(fp->delay_table, G.geo.dt, G.geo.dt_bytes) != 0) {
-    LOG_W(PHY, "SENSING: GPUPASS cell %d: FEP geometry / antennas / delay table differ from the cell that captured the graphs (N=%d vs %d, N_RB %d vs %d, fco %d vs %d, rx %d vs %d): old path\n", cell,
-          fp->ofdm_symbol_size, G.geo.N, fp->N_RB_DL, G.geo.nrb, fp->first_carrier_offset, G.geo.fco, fp->nb_antennas_rx, G.geo.nbrx);
-    return;
+  const int same = !(fp->ofdm_symbol_size != G.geo.N || fp->nb_prefix_samples != G.geo.ncp || fp->nb_prefix_samples0 != G.geo.ncp0 || fp->symbols_per_slot != G.geo.nsym ||
+                     (int)fp->ofdm_offset_divisor != G.geo.div || fp->samples_per_subframe != G.geo.spm || fp->N_RB_DL != G.geo.nrb || fp->first_carrier_offset != G.geo.fco ||
+                     fp->nb_antennas_rx != G.geo.nbrx || memcmp(fp->delay_table, G.geo.dt, G.geo.dt_bytes) != 0);
+  int gid = 0;
+  if (!same) {
+    const int family = fp->ofdm_symbol_size == G.geo.N && fp->symbols_per_slot == G.geo.nsym && (int)fp->ofdm_offset_divisor == G.geo.div && fp->samples_per_subframe == G.geo.spm &&
+                       memcmp(fp->delay_table, G.geo.dt, G.geo.dt_bytes) == 0 && fp->nb_antennas_rx >= 1 && fp->nb_antennas_rx <= G.geo.nbrx;
+    if (!family || !G.geo_add || !G.geo_commit || !G.warm_geo || !G.cell_init_geo) {
+      LOG_W(PHY, "SENSING: GPUPASS cell %d: FEP geometry / antennas / delay table are not served by the module (N=%d vs %d, N_RB %d vs %d, fco %d vs %d, rx %d vs %d): old path\n", cell,
+            fp->ofdm_symbol_size, G.geo.N, fp->N_RB_DL, G.geo.nrb, fp->first_carrier_offset, G.geo.fco, fp->nb_antennas_rx, G.geo.nbrx);
+      return;
+    }
+    const nr_gpu_fep_cfg_t fc = {.nant = fp->nb_antennas_rx, .ofdm_symbol_size = fp->ofdm_symbol_size, .nb_prefix_samples = fp->nb_prefix_samples, .nb_prefix_samples0 = fp->nb_prefix_samples0,
+                                 .symbols_per_slot = fp->symbols_per_slot, .first_carrier_offset = fp->first_carrier_offset, .n_rb_dl = fp->N_RB_DL, .samples_per_ms = fp->samples_per_subframe,
+                                 .ofdm_offset_divisor = (int)fp->ofdm_offset_divisor};
+    const int maxc = nr_gpu_pass_nrb_class(fp->N_RB_DL);
+    pthread_mutex_lock(&g_geo_mu);
+    uint64_t reserved = 0;
+    gid = G.geo_add(cell, &fc, maxc, &reserved);
+    if (gid < 0) {
+      pthread_mutex_unlock(&g_geo_mu);
+      LOG_W(PHY, "SENSING: GPUPASS cell %d: own FEP geometry refused (%s; RX %d, N_RB %d): old path\n", cell, gid == -2 ? "GPU memory budget has no room for its graphs" : "FEP module", fp->nb_antennas_rx, fp->N_RB_DL);
+      return;
+    }
+    int fresh = 1; /* a geometry another cell registered is shared with its graphs (the module returns its id) */
+    for (int c = 1; c < NR_CELL_MAX; c++)
+      if (atomic_load(&G.cell_on[c]) && G.cell_gid[c] == gid)
+        fresh = 0;
+    if (fresh) {
+      g_wgid = gid;
+      const int made = warm_geometry(ue, maxc);
+      const int ul_made = nr_gpu_pass_ul_warm_geo(warm_bound, maxc);
+      const uint64_t used = G.geo_commit(gid);
+      if (!made || !used) {
+        pthread_mutex_unlock(&g_geo_mu);
+        LOG_W(PHY, "SENSING: GPUPASS cell %d: no graph could be captured for its FEP geometry (GPU budget): old path\n", cell);
+        return;
+      }
+      LOG_A(PHY, "SENSING: GPUPASS cell %d: own FEP geometry %d (RX %d, N_RB %d, fco %d): %d DL + %d UL shape classes captured, %lu MB of graphs (reserved from the GPU budget)\n", cell, gid, fp->nb_antennas_rx,
+            fp->N_RB_DL, fp->first_carrier_offset, made, ul_made, (unsigned long)(used >> 20));
+    }
+    pthread_mutex_unlock(&g_geo_mu);
   }
-  if (G.cell_init(cell, fp->N_RB_DL) != 0) {
+  if ((gid ? G.cell_init_geo(cell, fp->N_RB_DL, gid) : G.cell_init(cell, fp->N_RB_DL)) != 0) {
     LOG_W(PHY, "SENSING: GPUPASS cell %d: registration with the pass module refused: old path\n", cell);
     return;
   }
+  G.cell_nbrx[cell] = fp->nb_antennas_rx;
+  G.cell_gid[cell] = gid;
   atomic_store(&G.cell_on[cell], 1);
-  nr_gpu_pass_ul_cell_enable(cell);
-  LOG_A(PHY, "SENSING: GPUPASS cell %d registered: shared instances, graphs and shape classes of the first cell, own HARQ slab, floor of one DL and one UL instance\n", cell);
+  if (gid)
+    nr_gpu_pass_ul_cell_enable_nb(cell, fp->nb_antennas_rx);
+  else
+    nr_gpu_pass_ul_cell_enable(cell);
+  if (gid)
+    LOG_A(PHY, "SENSING: GPUPASS cell %d registered: shared instances and L graphs, own FEP geometry %d, own HARQ slab, floor of one DL and one UL instance\n", cell, gid);
+  else
+    LOG_A(PHY, "SENSING: GPUPASS cell %d registered: shared instances, graphs and shape classes of the first cell, own HARQ slab, floor of one DL and one UL instance\n", cell);
 }
 
 /* 1 = the calling thread's cell may use the pass (cell 0 with the module up; a further cell once nr_gpu_pass_warmup registered it) */
@@ -361,6 +481,10 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   G.hq_copy_cell[0] = h ? (nr_gpu_pass_hq_cell_copy_fn)dlsym(h, "nr_gpu_pass_hq_up_cell") : NULL;
   G.hq_copy_cell[1] = h ? (nr_gpu_pass_hq_cell_copy_fn)dlsym(h, "nr_gpu_pass_hq_down_cell") : NULL;
   G.cell_init = h ? (int (*)(int, int))dlsym(h, "nr_gpu_pass_cell_init") : NULL;
+  G.cell_init_geo = h ? (int (*)(int, int, int))dlsym(h, "nr_gpu_pass_cell_init_geo") : NULL;
+  G.geo_add = h ? (int (*)(int, const nr_gpu_fep_cfg_t *, int, uint64_t *))dlsym(h, "nr_gpu_pass_geo_add") : NULL;
+  G.geo_commit = h ? (uint64_t (*)(int))dlsym(h, "nr_gpu_pass_geo_commit") : NULL;
+  G.warm_geo = h ? (int (*)(const nr_gpu_pass_shape_t *, int, int, int, int))dlsym(h, "nr_gpu_pass_warm_geo") : NULL;
   G.call_begin = h ? (void (*)(void))dlsym(h, "nr_gpu_pass_call_begin") : NULL;
   G.call_end = h ? (void (*)(void))dlsym(h, "nr_gpu_pass_call_end") : NULL;
   G.call_dirty = h ? (void (*)(void))dlsym(h, "nr_gpu_pass_call_dirty") : NULL;
@@ -535,7 +659,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   PHY_VARS_NR_UE *ue = in->ue;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const fapi_nr_dl_cw_info_t *cw = in->cw;
-  if (fp->nb_antennas_rx != G.nbrx || fp->ofdm_symbol_size != 4096 || fp->symbols_per_slot != 14 || cw->Nl > fp->nb_antennas_rx)
+  if (fp->nb_antennas_rx != (cell != 0 ? G.cell_nbrx[cell] : G.nbrx) || fp->ofdm_symbol_size != 4096 || fp->symbols_per_slot != 14 || cw->Nl > fp->nb_antennas_rx)
     return fb(FB_CELL);
   /* the exact FEP's own refusals: a frequency offset in the FEP, an unsynchronised UE, a per-branch offset */
   bool fo = ue->cont_fo_comp != 0 || !ue->is_synchronized || in->fep_fo != 0.0;

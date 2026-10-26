@@ -107,6 +107,9 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
 /* MPCI G3: the UL pass accepts grants of `cell` > 0 once the DL side registered the cell with the module (nr_gpu_pass_cell_init; nr_gpu_pass_warmup on that cell's thread does both). The
  * hypothesis cache and the per-context buffers are per cell (the thread's nr_cell_idx()); nr_gpu_pass_ul_run stamps job.cell with it. */
 void nr_gpu_pass_ul_cell_enable(int cell);
+/* MPCI G3b: the same for a cell whose FEP geometry has `nbrx` antennas (its grants must carry that nb_rx), and the PUSCH classes of such a geometry (warmf = the module's warm bound to its id) */
+void nr_gpu_pass_ul_cell_enable_nb(int cell, int nbrx);
+int nr_gpu_pass_ul_warm_geo(nr_gpu_pass_warm_fn warmf, int max_nrb_class);
 /* the old path decoded the same grant too (shadow): counts it and, on a mismatch (CRC verdict, TB bytes or LLRs differ), switches the pass off process-wide. 1 = the pass was disabled. */
 int nr_gpu_pass_ul_shadow(int mismatch);
 int nr_gpu_pass_ul_shadow_due(void);
