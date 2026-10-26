@@ -238,11 +238,15 @@ static int zp_features(const nr_csirs_disc_ring_t *r,int first,int count,float *
   if(!r || !r->device_valid || !r->device_grid || !out || count<1 || count>r->capacity) return -1;
   const int tiles=(r->n_rb+3)/4;
   const size_t bytes=(size_t)count*14*2*tiles*12*sizeof(float);
-  float *dev=nullptr;int ret=-1;
-  if(cudaMalloc(&dev,bytes)!=cudaSuccess) return -1;
+  /* one scratch buffer, grown on demand and kept (a cudaMalloc per batch would stall the stream); the caller (nr_csirs_disc_process) holds pipeline_lock, so there is one user at a time */
+  static float *dev=nullptr;static size_t dev_bytes=0;
+  if(bytes>dev_bytes) {
+    if(dev) {cudaFree(dev);dev=nullptr;dev_bytes=0;}
+    if(cudaMalloc(&dev,bytes)!=cudaSuccess) {dev=nullptr;return -1;}
+    dev_bytes=bytes;
+  }
   zp_feat_kernel<<<dim3(count,14),128,0,disc_stream()>>>(r->device_grid,r->slot_stride,first,r->capacity,r->n_ant,r->n_rb,tiles,dev);
-  if(cudaGetLastError()==cudaSuccess && disc_copy(out,dev,bytes,cudaMemcpyDeviceToHost)==cudaSuccess) ret=0;
-  cudaFree(dev);return ret;
+  return cudaGetLastError()==cudaSuccess && disc_copy(out,dev,bytes,cudaMemcpyDeviceToHost)==cudaSuccess ? 0 : -1;
 }
 /* device_alloc: allocates n bytes of device memory (cudaMalloc); returns NULL on failure. Installed as the device_alloc entry of the ops table. */
 static void *device_alloc(size_t n) {void *p=nullptr;return cudaMalloc(&p,n)==cudaSuccess?p:nullptr;}

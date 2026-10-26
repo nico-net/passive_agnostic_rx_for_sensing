@@ -401,5 +401,34 @@ TEST(CsirsDiscE2E, BlindZpHolesProposedConfirmedAndExported)
   nr_csirs_blind_rt_test_discovery_reset();
 }
 
+/* The lab-cell resource that was never confirmed (sens4 OCUDU, PCI 2): 4-port NZP-CSI-RS row 4, fd-CDM2, l0 = 4, id 2, period 40 offset 4, carried 3 dB above the PDSCH level (below that the energy-comb footprint detector does not see it, whatever the scoring).
+ * Plain per-port correlation counts the other port of each CDM pair as noise (z <= 4.5 / sqrt(2) bound at L = 2); despread with its OCC it confirms. */
+TEST(CsirsDiscE2E, FourPortFdCdm2IsConfirmed)
+{
+  setenv("ISAC_CSIRS_DISC_BACKEND", "cpu", 1);
+  nr_csirs_disc_test_sweep_limit = 64;
+  nr_csirs_disc_synth_init();
+  nr_csirs_disc_synth_resource_t resources[] = {
+      {.row = 4, .l0 = 4, .l1 = 0, .cdm = 1, .density = 2, .fd_bitmap = 4, .rb_start = 0,
+       .n_rb = 216, .scramb_id = 2, .period = 40, .offset = 4, .power = 2.0},
+  };
+  Ring r;
+  auto cfg = config(resources, 1);
+  cfg.n_slots = 1280;
+  cfg.first_slot = 4;
+  ASSERT_EQ(nr_csirs_disc_synth(&r.ring, &cfg), 0);
+  nr_csirs_disc_process(&r.ring);
+  fapi_nr_dl_config_csirs_pdu_rel15_t pdu[8] = {};
+  uint16_t period[8] = {}, offset[8] = {};
+  int16_t delta[8] = {};
+  const int n = nr_csirs_blind_rt_test_confirm_ring(&r.ring, pdu, period, offset, delta, 8, nullptr);
+  ASSERT_GE(n, 1);
+  bool found = false;
+  for (int k = 0; k < n; ++k)
+    found |= exact(pdu[k], period[k], offset[k], resources[0]);
+  EXPECT_TRUE(found);
+  nr_csirs_blind_rt_test_discovery_reset();
+}
+
 /* link stub: nr_dl_traffic_probe.c / nr_csirs_monitor.c read the passive-mode flag (zeroed params = not passive) */
 softmodem_params_t *get_softmodem_params(void) { static softmodem_params_t p; return &p; }

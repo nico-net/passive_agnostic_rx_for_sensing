@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc_synth.h"
 #include "nr_csirs_disc_fp_internal.h"
+#include "nr_csirs_disc_zp.h"
 #include <gtest/gtest.h>
 #include <cstdio>
 #include <cstdlib>
@@ -8,6 +9,7 @@
 #include <vector>
 #include <random>
 #include <algorithm>
+#include <cmath>
 extern "C" {
 void *uniqCfg=nullptr;
 void exit_function(const char *,const char *,int,const char *s,int) {fprintf(stderr,"%s\n",s?s:"");abort();}
@@ -252,6 +254,35 @@ TEST(CsirsDisc, GpuMatchesCpu)
       release(managed);
     }
   }
+}
+/* The blind-ZP feature op on a device-resident ring equals the CPU reference (float summation order only). */
+TEST(CsirsDisc, ZpFeaturesGpuMatchesCpu)
+{
+  setenv("ISAC_CSIRS_DISC_BACKEND","gpu",1);
+  const auto *ops=nr_csirs_disc_gpu_load();
+  if(!ops || !ops->zp_features || !ops->device_alloc || !ops->upload_symbols) GTEST_SKIP()<<"CUDA module/device unavailable";
+  for(int nrb:{17,64,273}) {
+    auto c=resource(4);c.rb_start=0;c.n_rb=nrb<24?nrb:24;auto cfg=config(&c);cfg.n_rb=nrb;cfg.n_slots=6;
+    Ring r;ASSERT_EQ(nr_csirs_disc_synth(&r.r,&cfg),0);
+    auto dev=r.r;dev.device_grid=static_cast<int16_t *>(ops->device_alloc((size_t)dev.capacity*dev.slot_stride*sizeof(int16_t)));
+    ASSERT_NE(dev.device_grid,nullptr);
+    for(int t=0;t<dev.capacity;++t) { // upload_symbols copies the first slot of the ring it is given: hand it a one-slot view of each entry
+      auto view=dev;view.capacity=1;view.grid_base=r.r.grid_base+(size_t)t*dev.slot_stride;view.device_grid=dev.device_grid+(size_t)t*dev.slot_stride;
+      ASSERT_EQ(ops->upload_symbols(&view,0x3fff),0);
+    }
+    dev.device_valid=true;
+    const size_t fl=nr_csirs_zp_feat_len(nrb);
+    std::vector<float> gpu(fl*4),cpu(fl);
+    ASSERT_EQ(ops->zp_features(&dev,r.r.capacity-2,4,gpu.data()),0) << "wraps the ring";
+    for(int i=0;i<4;++i) {
+      nr_csirs_zp_features_cpu(&r.r,(r.r.capacity-2+i)%r.r.capacity,cpu.data());
+      double worst=0;
+      for(size_t k=0;k<fl;++k) worst=std::max(worst,std::fabs((double)gpu[i*fl+k]-cpu[k])/(1.0+std::fabs((double)cpu[k])));
+      EXPECT_LT(worst,1e-5) << "n_rb " << nrb << " entry " << i;
+    }
+    if(ops->device_free) ops->device_free(dev.device_grid);
+  }
+  unsetenv("ISAC_CSIRS_DISC_BACKEND");
 }
 // Uses the production U1 push path: only 640 raw slots remain after each wrap.
 struct Stream {

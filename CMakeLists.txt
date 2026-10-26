@@ -3174,6 +3174,7 @@ if(ENABLE_TESTS)
   add_executable(test_nr_csirs_disc_fp
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_fp_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_zp.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c)
   target_link_libraries(test_nr_csirs_disc_fp PRIVATE nr_csirs_disc_synth GTest::gtest ${CMAKE_DL_LIBS} pthread)
