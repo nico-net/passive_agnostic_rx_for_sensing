@@ -70,7 +70,7 @@
 /* The producer's un-wrapped slot counter. This is the SAME clock nr_pdsch_passive_queue.c stamps
  * onto pdsch_data rows via nr_isac_abs_slot_override, and the slow-time grid only makes sense if
  * every source shares one origin. */
-extern _Atomic long nr_ue_diag_producer_absolute_slot;
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
 
 extern int nr_ulsch_decoding(PHY_VARS_gNB *phy_vars_gNB,
                              NR_DL_FRAME_PARMS *frame_parms,

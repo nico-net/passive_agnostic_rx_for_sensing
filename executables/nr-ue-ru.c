@@ -16,6 +16,8 @@
 #include "openair1/PHY/phy_extern_nr_ue.h"
 #include "PHY/MODULATION/nr_modulation.h" // init_symbol_rotation
 #include "common/utils/nr/nr_common.h"     // nr_band_scan_windows
+#include "common/utils/nr_cell.h"
+#include "common/utils/load_module_shlib.h"
 #define NRUE_BAND_SCAN_MAX 64
 static uint64_t s_band_scan_c[NRUE_BAND_SCAN_MAX];
 static int s_band_scan_n = 0, s_band_scan_i = -1;
@@ -101,6 +103,47 @@ static nrUE_RU_params_t *nrue_rus;
 
 openair0_config_t openair0_cfg_g[MAX_CARDS] = {};
 static openair0_device_t openair0_dev[MAX_CARDS] = {};
+/* multi-PCI (A8): an RU added by nrue_add_cell_ru() reads its cell's IQ ring through the "shm_iq" consumer device, loaded directly whatever
+ * device the configuration names (that device is the radio, shared by the cells). Never set at N = 1. */
+static bool s_ru_ring[MAX_CARDS];
+
+/* nrue_add_cell_ru: multi-PCI (A8): appends one cell and its own RU (before nrue_init_openair0 / the RX fence). The RU is a ring consumer:
+ * its sdr_addrs is the cell's ring name. Returns the new cell id (= ru id), or -1 when MAX_CARDS RUs exist. Caller: main() for cells k > 0. */
+int nrue_add_cell_ru(const nrUE_cell_params_t *cell, const nrUE_RU_params_t *ru)
+{
+  if (nrue_ru_count >= MAX_CARDS || nrue_cell_count != nrue_ru_count)
+    return -1;
+  const int k = nrue_cell_count;
+  nrue_cells = realloc(nrue_cells, (size_t)(k + 1) * sizeof(*nrue_cells));
+  nrue_cell_fp = realloc(nrue_cell_fp, (size_t)(k + 1) * sizeof(*nrue_cell_fp));
+  nrue_rus = realloc(nrue_rus, (size_t)(k + 1) * sizeof(*nrue_rus));
+  AssertFatal(nrue_cells && nrue_cell_fp && nrue_rus, "nrue_add_cell_ru: out of memory\n");
+  memset(&nrue_cell_fp[k], 0, sizeof(nrue_cell_fp[k]));
+  nrue_cells[k] = *cell;
+  nrue_cells[k].ru_id = k;
+  nrue_cells[k].used_by_ue = -1;
+  nrue_rus[k] = *ru;
+  nrue_rus[k].used_by_cell = -1;
+  s_ru_ring[k] = true;
+  nrue_cell_count = nrue_ru_count = k + 1;
+  return k;
+}
+
+/* load the shm_iq consumer device for a ring RU (load_lib() would load the configured device) */
+static int nrue_ru_load_ring_device(openair0_device_t *dev, openair0_config_t *cfg)
+{
+  loader_shlibfunc_t f = {.fname = "device_init"};
+  if (load_module_shlib("shm_iq", &f, 1, NULL) < 0 || !f.fptr) {
+    LOG_E(HW, "SENSING: MPCI ring device shm_iq could not be loaded\n");
+    return -1;
+  }
+  int (*init)(openair0_device_t *, openair0_config_t *) = (int (*)(openair0_device_t *, openair0_config_t *))f.fptr;
+  if (init(dev, cfg) < 0)
+    return -1;
+  pthread_mutex_init(&dev->reOrder.mutex_store, NULL);
+  pthread_mutex_init(&dev->reOrder.mutex_write, NULL);
+  return 0;
+}
 #ifdef NRUE_RU_SHUTDOWN_TEST
 static unsigned long rf_fail_after_reads;
 static atomic_ulong rf_read_count;
@@ -371,7 +414,7 @@ static int nrue_ru_start_impl(void)
     openair0_device_t *dev = &openair0_dev[ru_id];
 
     dev->host_type = RAU_HOST;
-    int tmp = openair0_device_load(dev, cfg);
+    int tmp = s_ru_ring[ru_id] ? nrue_ru_load_ring_device(dev, cfg) : openair0_device_load(dev, cfg);
     if (tmp != 0) {
       LOG_E(HW, "SENSING: radio device %d initialization failed\n", ru_id); return -1;
     }
@@ -451,7 +494,7 @@ static int nrue_ru_reinit_impl(void)
           usleep(100000);
       if (nr_shutdown_requested())
         return -1;
-      loaded = openair0_device_load(dev, &openair0_cfg_g[ru_id]);
+      loaded = s_ru_ring[ru_id] ? nrue_ru_load_ring_device(dev, &openair0_cfg_g[ru_id]) : openair0_device_load(dev, &openair0_cfg_g[ru_id]);
       if (loaded == 0)
         break;
       LOG_W(HW, "nrue_ru_reinit: device %d still unavailable (attempt %d/%d)\n",
@@ -803,7 +846,10 @@ int nrue_ru_reinit(void)
 }
 
 /* nrue_ru_set_freq: public: retunes the UE's card under the shared gate (nr_shutdown_radio_enter(0)). Callers: phy_procedures_nr_ue.c, nr_pdsch_passive_decode.c, nr-ue.c and nrue_band_scan_next(). */
-static _Atomic int s_radio_fo; /* frequency offset (Hz) the radio is tuned by now, relative to the nominal carriers (0 at nrue_init_openair0) */
+/* frequency offset (Hz) the cell's RU is tuned by now, relative to the nominal carriers (0 at nrue_init_openair0). Per cell (A8): every caller
+ * (UE_synch, the PBCH/PDSCH paths) runs bound to the cell whose UE retunes; N = 1: cell 0. */
+NR_CELL_STATIC(_Atomic int, s_radio_fo);
+#define s_radio_fo NR_CELL_REF(s_radio_fo)
 void nrue_ru_set_freq(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint64_t dl_carrier, int freq_offset)
 {
   if (!nr_shutdown_radio_enter(0))

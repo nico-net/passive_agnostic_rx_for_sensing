@@ -141,6 +141,7 @@ extern nrUE_params_t *get_nrUE_params(void);
 extern void fill_ue_band_info(void);
 extern void init_NR_UE(int, char *, char *, char *, int);
 extern void init_NR_UE_threads(PHY_VARS_NR_UE *ue);
+extern void nr_ue_bind_actor(Actor_t *actor, int cell); /* multi-PCI A8: bind an actor thread to its cell (first job) */
 void *UE_thread(void *arg);
 void init_nr_ue_vars(PHY_VARS_NR_UE *ue, uint8_t UE_id);
 #endif

@@ -42,6 +42,7 @@ using std::memory_order_release;
 #endif
 #include <stdbool.h>
 #include <stdint.h>
+#include "common/utils/nr_cell.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -120,11 +121,17 @@ static inline bool nr_slot_gate_is_complete(const nr_slot_gate_t *g, long slot)
 extern __thread int nr_es_tls_early;
 extern __thread int nr_es_tls_symbols_per_slot;
 
-/* process-wide instances (nr_early_start.c) */
-extern nr_es_banks_t nr_es_banks;
-extern nr_es_progress_t nr_es_progress;
-extern nr_es_done_t nr_es_done;
-extern nr_slot_gate_t nr_slot_gate;
+/* One instance per cell (nr_early_start.c; multi-PCI A8): the bank geometry, symbol progress, early-done set and slot gate all describe the
+ * slot stream of ONE cell (its RX thread publishes, its scan / PDSCH consumers read). The names select the calling thread's cell (nr_cell_idx();
+ * every user is bound to its cell), so `&nr_slot_gate` etc. are unchanged at the call sites. N = 1: cell 0's instance. */
+extern nr_es_banks_t nr_es_banks_cells[NR_CELL_MAX];
+extern nr_es_progress_t nr_es_progress_cells[NR_CELL_MAX];
+extern nr_es_done_t nr_es_done_cells[NR_CELL_MAX];
+extern nr_slot_gate_t nr_slot_gate_cells[NR_CELL_MAX];
+#define nr_es_banks (nr_es_banks_cells[nr_cell_idx()])
+#define nr_es_progress (nr_es_progress_cells[nr_cell_idx()])
+#define nr_es_done (nr_es_done_cells[nr_cell_idx()])
+#define nr_slot_gate (nr_slot_gate_cells[nr_cell_idx()])
 
 #ifdef __cplusplus
 }

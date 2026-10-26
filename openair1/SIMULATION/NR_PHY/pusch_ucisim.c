@@ -25,10 +25,9 @@ extern int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *, int, int, NR_UL_IND_t *)
 extern void phy_procedures_nrUE_TX(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_data_tx_t *phy_data, c16_t **txp);
 
 /* The live UE executable owns these; the simulator has no capture producer. */
-_Atomic long nr_ue_diag_producer_absolute_slot = -1;
-_Atomic long nr_ue_diag_producer_wall_ns = 0;
-_Atomic long nr_ue_pending_rebase_delta = 0;
-_Atomic int nr_ue_pending_rebase_valid = 0;
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
+NR_UE_CELL_CLOCK_DEFINE_PRODUCER();
+NR_UE_CELL_CLOCK_DEFINE_REBASE();
 
 static nfapi_nr_ue_pusch_uci_t g_uci;
 static bool g_uci_on;

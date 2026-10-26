@@ -172,7 +172,7 @@ static void release_solver(const nr_pdsch_passive_job_t *j)
   if (j->solver_token) nr_pdsch_solver_feedback(j->solver_token, false, false);
 }
 
-extern _Atomic long nr_ue_diag_producer_absolute_slot;
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
 /* queue_producer_slot: the RF producer's completed absolute slot (the sample-lifetime guard of the owned-IQ copy reads it). */
 static long queue_producer_slot(void *ctx)
 {
@@ -210,7 +210,6 @@ NR_CELL_STATIC(int, g_idle);
 /* Timer-then-spin hand-off scan -> PDSCH consumer (nr_spin_handoff.h): grants show up a scan-latency after the slot arrival. */
 NR_CELL_STATIC(nr_spin_pred_t, g_spin_pred);
 #define g_spin_pred NR_CELL_REF(g_spin_pred)
-extern _Atomic long nr_ue_diag_producer_wall_ns;
 
 NR_CELL_STATIC(_Atomic uint64_t, g_queued);
 #define g_queued NR_CELL_REF(g_queued)

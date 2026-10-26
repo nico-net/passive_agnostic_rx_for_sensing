@@ -48,7 +48,7 @@ NR_CELL_STATIC_INIT(pthread_mutex_t, g_first_lock, PTHREAD_MUTEX_INITIALIZER);
 #define g_first_lock NR_CELL_REF(g_first_lock)
 NR_CELL_STATIC(nr_ul_first_state_t, g_first);
 #define g_first NR_CELL_REF(g_first)
-extern _Atomic long nr_ue_diag_producer_absolute_slot;
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
 typedef struct {long source;double fo_hz;bool valid;} ul_sample_history_t;
 typedef ul_sample_history_t g_history_cell_t[HISTORY_SLOTS];
 NR_CELL_STATIC(g_history_cell_t, g_history);

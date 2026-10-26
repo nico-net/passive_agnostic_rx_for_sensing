@@ -53,8 +53,7 @@
 
 /* Monotonic slot counter published by the RF producer; the same source nr_pdsch_passive_queue uses,
  * so the two staleness checks are on one clock. */
-extern _Atomic long nr_ue_diag_producer_absolute_slot;
-extern _Atomic long nr_ue_diag_producer_wall_ns;
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
 
 /* Margin, in slots, held back from the full rxdata wrap. Same value and same reasoning as the PDSCH
  * queue: a job must be finished comfortably before the producer laps it, not on the last slot. */

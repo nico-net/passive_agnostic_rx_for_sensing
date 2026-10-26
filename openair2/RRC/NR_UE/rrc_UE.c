@@ -9,6 +9,7 @@
 #define RRC_UE
 #define RRC_UE_C
 
+#include "common/utils/nr_cell.h" /* multi-PCI A8: per-instance cell binding of the RRC task */
 #include "LTE_MeasObjectToAddMod.h"
 #include "NR_DL-DCCH-Message.h"        //asn_DEF_NR_DL_DCCH_Message
 #include "NR_DL-CCCH-Message.h"        //asn_DEF_NR_DL_CCCH_Message
@@ -3376,6 +3377,10 @@ void *rrc_nrue(void *notUsed)
   MessageDef *msg_p = NULL;
   itti_receive_msg(TASK_RRC_NRUE, &msg_p);
   instance_t instance = ITTI_MSG_DESTINATION_INSTANCE(msg_p);
+  /* multi-PCI (A8): one RRC task serves every UE instance; UE instance k is cell k, so the MAC configuration it applies (blind PDCCH TDA,
+   * SIB1 prior, RRC harvest: per-cell state) lands in the cell of the message. N = 1: instance 0 = cell 0, as before. */
+  if (instance >= 0 && instance < NR_CELL_MAX)
+    nr_cell_bind((int)instance);
   LOG_D(NR_RRC, "[UE %ld] Received %s\n", instance, ITTI_MSG_NAME(msg_p));
 
   NR_UE_RRC_INST_t *rrc = get_NR_UE_rrc_inst(instance);

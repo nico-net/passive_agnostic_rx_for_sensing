@@ -10,7 +10,7 @@
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_sample_lifetime.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
-extern _Atomic long nr_ue_diag_producer_absolute_slot;
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with

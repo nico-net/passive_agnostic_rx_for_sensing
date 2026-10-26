@@ -5,10 +5,10 @@
 
 __thread int nr_es_tls_early;
 __thread int nr_es_tls_symbols_per_slot = 14;
-nr_es_banks_t nr_es_banks;
-nr_es_progress_t nr_es_progress;
-nr_es_done_t nr_es_done;
-nr_slot_gate_t nr_slot_gate = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .complete = -1};
+nr_es_banks_t nr_es_banks_cells[NR_CELL_MAX];
+nr_es_progress_t nr_es_progress_cells[NR_CELL_MAX];
+nr_es_done_t nr_es_done_cells[NR_CELL_MAX];
+nr_slot_gate_t nr_slot_gate_cells[NR_CELL_MAX] = {[0 ... NR_CELL_MAX - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .complete = -1}};
 
 bool nr_es_banks_publish(nr_es_banks_t *b, const nr_es_cs_t *cs, int n)
 {

@@ -1,3 +1,6 @@
+/* A8: the cell manager headers come first: OAI's nr_polar_defs.h defines the macro `nmax`, a field name of nr_cell_mgr_t */
+#include "common/utils/nr_cell_life.h"
+#include "common/utils/nr_cell_inventory.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.h"
@@ -91,6 +94,13 @@ unsigned short config_frames[4] = {2,9,11,13};
 #include "actor.h"
 #include "common/utils/nr_core_plan.h"
 #include "common/utils/nr_core_layout.h"
+#include "common/utils/nr_cell.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cell_prealloc.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_cell.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_cell_prealloc.h"
+#include "PHY/NR_UE_TRANSPORT/nr_ul_cell_prealloc.h"
+#include "PHY/NR_UE_TRANSPORT/nr_csirs_disc_cell.h"
+#include <math.h>
 
 THREAD_STRUCT thread_struct;
 nrUE_params_t nrUE_params = {0};
@@ -224,13 +234,297 @@ static void set_fp_options(int cell_id, int ru_id)
   LOG_I(PHY, "Set UE nb_rx_antenna %d, nb_tx_antenna %d, threequarter_fs %d, ofdm_offset_divisor %d\n", fp->nb_antennas_rx, fp->nb_antennas_tx, fp->threequarter_fs, fp->ofdm_offset_divisor);
 }
 
+/* ================================================================ multi-PCI cell slots (plan task A8) ==========================================
+ * Cells come ONLY from the blind front end's inventory <run dir>/cells.json (D1; run dir = the directory of stdout when it is a regular file,
+ * the same rule as uectx.jsonl) and the admission plan (B3, through the cell manager and nr_cell_life). Cell 0 is always the cell the process
+ * is started on (its command-line tuning); inventory cells 1..N-1 are added as UE instances 1..N-1, each with its own RU reading its cell's
+ * IQ ring "nrcell_<inventory id>" through the shm_iq consumer device, its own RT slot thread (decision F2 (a), core = the core plan's
+ * rt_cell[k]) and all its threads bound to its cell. No option, no environment variable: no inventory, or an inventory that adds no served
+ * cell, is the single-cell receiver, byte for byte (only the MPCI_ADMIT / CORE_PLAN lines are added when an inventory exists).
+ * Input: the cells' rings must already be published (configured device "shm_iq": an out-of-process publisher, e.g. the file publisher
+ * tests/passive_rx/mpci/mpci_file_pub). The in-process channelizer feed from a radio (C2 iq_chan) is NOT wired here (open item): with a
+ * radio device the receiver logs MPCI_INPUT and serves the started cell only. N = 1 keeps the direct radio path (no channelizer hop). */
+static nr_cell_life_t g_cells;
+static int g_ncells = 1; /* 1: the single-cell receiver; every N = 1 path below is the code of before */
+static nr_cell_inventory_watch_t g_inv_watch;
+static char g_uectx_path[PATH_MAX + 32]; /* cell 0's uectx path: cells k > 0 use nr_cell_path(k, ...) */
+
+static const char *mpci_argv_val(int argc, char **argv, const char *opt)
+{
+  for (int i = 1; i + 1 < argc; i++)
+    if (!strcmp(argv[i], opt))
+      return argv[i + 1];
+  return NULL;
+}
+static int64_t mpci_now_ns(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+/* the run directory: the directory of stdout when it is a regular file (uectx.jsonl rule); -1 otherwise */
+static int mpci_run_dir(char *out, size_t n)
+{
+  char l[PATH_MAX];
+  const ssize_t k = readlink("/proc/self/fd/1", l, sizeof(l) - 1);
+  struct stat st;
+  l[k > 0 ? k : 0] = 0;
+  if (l[0] != '/' || stat(l, &st) || !S_ISREG(st.st_mode))
+    return -1;
+  snprintf(out, n, "%s", dirname(l));
+  return 0;
+}
+
+static int mpci_cell_prealloc(void *ctx, int k, const nr_mgr_slot_t *slot);
+static int mpci_cell_start(void *ctx, int k, const nr_mgr_slot_t *slot, int reactivation);
+static void mpci_cell_retire(void *ctx, int k, const nr_mgr_slot_t *slot);
+static void mpci_cell_retune(void *ctx, int k, const nr_cell_mgr_event_t *ev);
+static void mpci_log(void *ctx, const char *line)
+{
+  (void)ctx;
+  if (!g_log) /* before logInit (the plan) the line goes to stdout; later through LOG (tagged when N > 1) */
+    printf("%s\n", line);
+  else
+    LOG_I(PHY, "SENSING: %s\n", line);
+}
+
+/* Called once at the very start of main(), before the core plan: inventory -> admission -> slots. Returns the number of cells to serve. */
+static int mpci_plan_cells(int argc, char **argv, bool radio)
+{
+  char rd[PATH_MAX], path[PATH_MAX + 16];
+  if (mpci_run_dir(rd, sizeof(rd)) || nr_cell_inventory_default_path(rd, path, sizeof(path)) || nr_cell_inventory_watch_init(&g_inv_watch, path))
+    return 1;
+  char err[200] = "";
+  const int r = nr_cell_inventory_poll(&g_inv_watch, err, sizeof(err));
+  if (r == 0)
+    return 1; /* no inventory: the single-cell receiver, nothing printed */
+  if (r < 0) {
+    printf("MPCI_INVENTORY rejected path=%s reason=%s: single cell\n", path, err);
+    return 1;
+  }
+  nr_cell_desc_t p;
+  nr_cell_desc_init(&p);
+  const char *v;
+  p.centre_hz = (v = mpci_argv_val(argc, argv, "-C")) ? strtod(v, NULL) : 0;
+  p.n_rb = (v = mpci_argv_val(argc, argv, "-r")) ? atoi(v) : 0;
+  const int mu = (v = mpci_argv_val(argc, argv, "--numerology")) ? atoi(v) : 1;
+  p.scs_khz = 15 << (mu >= 0 && mu < 4 ? mu : 1);
+  p.n_rx = (v = mpci_argv_val(argc, argv, "--ue-nb-ant-rx")) ? atoi(v) : 1;
+  p.cfo_hz = (v = mpci_argv_val(argc, argv, "--initial-fo")) ? strtod(v, NULL) : 0;
+  const int ssb = (v = mpci_argv_val(argc, argv, "--ssb")) ? atoi(v) : 0;
+  if (p.centre_hz <= 0) {
+    printf("MPCI_ADMIT skipped: the started cell has no -C (band search): single cell\n");
+    return 1;
+  }
+  /* host caps from the device: RAM probe, core topology (the layout's own cell limit); GPU not probed before the CUDA configuration
+   * (tier NONE here: the GPU side of the admission is G1/G3 work); the cells' streams come as published rings (no channelizer budget) */
+  nr_cl_topo_t topo;
+  nr_cl_over_t over;
+  nr_cl_topo_read(&topo, radio);
+  nr_cl_over_from_env(&over);
+  nr_core_layout_t lay;
+  nr_cl_build_n(&topo, &over, 1, &lay);
+  nr_host_probe_t hp;
+  nr_host_probe_at("/proc", "/sys/fs/cgroup", &hp);
+  nr_host_caps_t caps;
+  memset(&caps, 0, sizeof(caps));
+  caps.mem_avail = hp.avail;
+  caps.max_cells = nr_cl_max_cells(&topo, &over);
+  if (caps.max_cells < 1)
+    caps.max_cells = 1;
+  caps.chan_budget_msps = -1;
+  caps.consumers = lay.npool < 1 ? 1 : lay.npool > 6 ? 6 : lay.npool;
+  caps.depth = 8 * caps.consumers;
+  caps.csirs_enabled = caps.recovery_enabled = caps.gw_enabled = 1;
+  nr_cell_mgr_cfg_t mc;
+  memset(&mc, 0, sizeof(mc));
+  mc.grid_n_rb = p.n_rb > 0 ? p.n_rb : 106; /* OAI default -r */
+  mc.pass1_ssb = ssb > 0 ? ssb : 516;      /* OAI default --ssb */
+  mc.pass1_k_ssb = 0;                      /* pass 2 from the log is not wired in A8 */
+  const nr_cell_life_ops_t ops = {.prealloc = mpci_cell_prealloc, .start = mpci_cell_start, .retire = mpci_cell_retire, .retune = mpci_cell_retune,
+                                  .log = mpci_log};
+  const int n = nr_cell_life_plan(&g_cells, &mc, &caps, &ops, &p, &g_inv_watch.inv, 1000.0);
+  if (n <= 1)
+    return 1;
+  const int added = nr_cell_life_admit(&g_cells, &g_inv_watch.inv, mpci_now_ns());
+  return added > 1 ? added : 1;
+}
+
+/* After the configuration is loaded: the published-ring input is the only multi-cell input A8 wires. */
+static void mpci_check_input(void)
+{
+  if (g_ncells <= 1)
+    return;
+  char *devname = NULL;
+  paramdef_t dp = {"name", NULL, 0, .strptr = &devname, .defstrval = "", TYPE_STRING, 0};
+  config_get(config_get_if(), &dp, 1, "device");
+  const bool rings = devname && !strcmp(devname, "shm_iq");
+  if (!rings || IS_SOFTMODEM_RFSIM || getenv("ISAC_PASSIVE_REPLAY_INPUT") || getenv("ISAC_PASSIVE_REPLAY_CAPTURE")) {
+    LOG_W(PHY, "SENSING: MPCI_INPUT device=%s: cells beyond the started one need published rings (device shm_iq); the in-process channelizer feed "
+          "from a radio is not wired (A8 open item): serving the started cell only (%d admitted)\n", devname && *devname ? devname : "default", g_ncells);
+    g_ncells = 1;
+  }
+}
+
+/* cell k > 0: its cell parameters and its ring-consumer RU (before the cell/frame-parameter loop of main) */
+static void mpci_add_cell(int k)
+{
+  const nr_mgr_slot_t *s = nr_cell_mgr_slot(&g_cells.mgr, k);
+  AssertFatal(s && s->active, "MPCI cell %d has no admitted slot\n", k);
+  nrUE_cell_params_t c = *nrue_get_cell(0);
+  c.rf_frequency = (uint64_t)llround(s->desc.centre_hz);
+  if (s->desc.n_rb > 0)
+    c.N_RB_DL = s->desc.n_rb;
+  if (s->desc.scs_khz >= 15)
+    c.numerology = (int)lround(log2(s->desc.scs_khz / 15.0));
+  c.ssb_start = s->ssb;
+  /* the cell's own SSB position in its grid, from the inventory geometry (inverse of nr_mgr_grid_centre_hz: centre = ssb_hz + (6 n_rb - 120 - ssb) scs);
+   * the manager's value (the started --ssb) is kept when the inventory does not give the SSB frequency */
+  if (s->desc.ssb_hz > 0 && c.N_RB_DL > 0) {
+    const double scs = 15e3 * (double)(1 << c.numerology);
+    const long ssb = lround(6.0 * c.N_RB_DL - 120.0 - (s->desc.centre_hz - s->desc.ssb_hz) / scs);
+    if (ssb >= 0 && ssb + 240 <= 12L * c.N_RB_DL)
+      c.ssb_start = (int)ssb;
+  }
+  nrUE_RU_params_t ru = *nrue_get_ru(0);
+  char ring[NR_INV_ID_MAX + 8];
+  snprintf(ring, sizeof(ring), "nrcell_%s", s->id);
+  ru.sdr_addrs = strdup(ring);
+  if (s->desc.n_rx > 0 && (unsigned)s->desc.n_rx < ru.nb_rx)
+    ru.nb_rx = (unsigned)s->desc.n_rx;
+  const int id = nrue_add_cell_ru(&c, &ru);
+  AssertFatal(id == k, "MPCI cell %d: RU slot %d\n", k, id);
+  LOG_I(PHY, "SENSING: MPCI_CELL_SLOT cell=%d id=%s pci=%d centre_hz=%.0f n_rb=%d ssb=%d cfo_hz=%.0f nb_rx=%u ring=/%s\n", k, s->id, s->desc.pci,
+        s->desc.centre_hz, c.N_RB_DL, c.ssb_start, s->desc.cfo_hz, ru.nb_rx, ring);
+}
+
+/* per-cell uectx/1 writer of cell k > 0 (cell 0 opens its own in main, unchanged), opened on cell k's bound thread */
+static void mpci_open_uectx(int k)
+{
+  if (!g_uectx_path[0])
+    return;
+  char p[PATH_MAX + 48];
+  nr_cell_path(k, g_uectx_path, p, sizeof(p));
+  if (nr_ue_ctx_open(p, 16384, 5.0))
+    nr_cfg_epoch_subscribe(nr_ue_ctx_on_epoch);
+  else
+    LOG_W(PHY, "SENSING: UE context writer/state could not be opened (cell %d)\n", k);
+}
+
+/* prealloc hook (bound to cell k, before the RX fence): every per-cell heap object, the per-cell module starts that allocate */
+static int mpci_cell_prealloc(void *ctx, int k, const nr_mgr_slot_t *slot)
+{
+  (void)ctx;
+  (void)slot;
+  PHY_VARS_NR_UE *ue = nrPHY_vars_UE_g[k][0];
+  nr_passive_reconf_rules_cell_prealloc(k);
+  nr_passive_ue_ctx_cell_prealloc(k);
+  nr_pdcch_cell_prealloc(k);
+  nr_pdsch_cell_prealloc(k);
+  nr_ul_cell_prealloc_all(k);
+  if (k > 0) {
+    nr_pdcch_blind_monitor_init(); /* cell 0 ran it at start-up (unchanged) */
+    if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+      mpci_open_uectx(k);
+  }
+  nr_csirs_disc_pipeline_init(&ue->frame_parms);
+  if (nr_csirs_disc_cell_prealloc(k, &ue->frame_parms, ue->frame_parms.nb_antennas_rx) != 0)
+    LOG_W(PHY, "SENSING: CSIRS_DISC worker could not start; slot discovery feed disabled\n");
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_pusch_passive_pipeline_enabled()) {
+    const nr_pdcch_blind_monitor_cfg_t *ul_cfg = nr_pdcch_blind_monitor_get_cfg();
+    if (ul_cfg && ul_cfg->ul_pusch_decode) {
+      if (!nr_pusch_passive_queue_start(ue, ul_cfg->ul_queue_depth > 0 ? ul_cfg->ul_queue_depth : 8, 1, ul_cfg->ul_thread_core))
+        LOG_W(PHY, "SENSING: UL pipeline prewarm failed; grants will be dropped and counted\n");
+    }
+  }
+  return 0;
+}
+
+/* start hook (bound to cell k): the cell's RT slot thread and stats thread */
+static int mpci_cell_start(void *ctx, int k, const nr_mgr_slot_t *slot, int reactivation)
+{
+  (void)ctx;
+  if (reactivation) {
+    LOG_W(PHY, "SENSING: MPCI_LIFE cell=%d id=%s back in the inventory: its slot thread was kept running (no run-time teardown, A8 open item)\n", k,
+          slot ? slot->id : "-");
+    return 0;
+  }
+  LOG_I(PHY, "Intializing UE Threads for instance %d ...\n", k);
+  init_NR_UE_threads(nrPHY_vars_UE_g[k][0]);
+  return 0;
+}
+static void mpci_cell_retire(void *ctx, int k, const nr_mgr_slot_t *slot)
+{
+  (void)ctx;
+  LOG_W(PHY, "SENSING: MPCI_LIFE cell=%d id=%s retired by the inventory: its slot thread keeps running (run-time teardown is an A8 open item)\n", k,
+        slot ? slot->id : "-");
+}
+static void mpci_cell_retune(void *ctx, int k, const nr_cell_mgr_event_t *ev)
+{
+  (void)ctx;
+  LOG_W(PHY, "SENSING: MPCI_LIFE cell=%d id=%s retune requested centre_hz %.0f -> %.0f cfo_hz %.0f -> %.0f: not applied at run time (A8 open item)\n", k,
+        ev->id, ev->prev_centre_hz, ev->desc.centre_hz, ev->prev_cfo_hz, ev->desc.cfo_hz);
+}
+/* the inventory control thread (one owner of the manager): re-reads cells.json once a second, hysteresis tick */
+static void *mpci_control_thread(void *arg)
+{
+  (void)arg;
+  while (!oai_exit && !nr_shutdown_requested()) {
+    char err[200] = "";
+    const int r = nr_cell_inventory_poll(&g_inv_watch, err, sizeof(err));
+    if (r < 0)
+      LOG_W(PHY, "SENSING: MPCI_INVENTORY rejected update: %s (previous inventory kept)\n", err);
+    nr_cell_life_poll(&g_cells, r == 1 ? &g_inv_watch.inv : NULL, mpci_now_ns());
+    for (int i = 0; i < 10 && !oai_exit; i++)
+      usleep(100000);
+  }
+  return NULL;
+}
+/* run `fn` once per served cell with the calling thread bound to it (highest cell first), the binding restored; N = 1: once, cell 0 */
+static void mpci_for_each_cell(void (*fn)(int cell))
+{
+  const int prev = nr_cell_idx();
+  for (int k = g_ncells - 1; k >= 0; k--) {
+    nr_cell_bind(k);
+    fn(k);
+  }
+  nr_cell_bind(prev);
+}
+static void mpci_stop_pusch(int k) { (void)k; if (nr_pusch_passive_pipeline_enabled()) nr_pusch_passive_queue_stop(); }
+/* shutdown of one cell's consumers (bound to it): the single-cell sequence of before */
+static void mpci_stop_cell_queues(int k)
+{
+  (void)k;
+  nr_shutdown_step("passive_pdcch_stop_begin");
+  nr_pdcch_blind_monitor_rt_final_stats();
+  nr_pdcch_passive_queue_stop();
+  nr_shutdown_step("passive_pdsch_gpu_fep_stop_begin");
+  nr_pdsch_passive_queue_stop();
+  nr_shutdown_step("passive_pusch_stop_begin");
+  nr_pusch_passive_queue_stop();
+  nr_pdcch_uss_tracker_stop();
+}
+static void mpci_close_cell_outputs(int k)
+{
+  (void)k;
+  nr_passive_obs_close(); // drain + flush the per-grant observation file (no-op when not open)
+  const bool uectx_was_open = nr_ue_ctx_enabled();
+  nr_ue_ctx_close();
+  if (uectx_was_open) {
+    uint64_t events = 0, lines = 0, dropped = 0;
+    nr_ue_ctx_stats(&events, &lines, &dropped);
+    LOG_I(PHY, "SENSING: UECTX_STATS events=%llu written=%llu dropped=%llu\n",
+          (unsigned long long)events, (unsigned long long)lines, (unsigned long long)dropped);
+  }
+}
+
 /* nrue_shutdown_notify: notify callback of the shutdown subsystem: sets oai_exit and unblocks the ITTI tasks waiting on the message queue. Registered in main() through nr_shutdown_init(). */
 static void nrue_shutdown_notify(void)
 {
   oai_exit = 1;
   /* raw-IQ EOF takes nr_shutdown_finish()'s _exit path, so main's normal
-   * consumer teardown is not reached. Join the prewarmed UL worker here. */
-  if (nr_pusch_passive_pipeline_enabled()) nr_pusch_passive_queue_stop();
+   * consumer teardown is not reached. Join the prewarmed UL worker here (every cell's: A8). */
+  mpci_for_each_cell(mpci_stop_pusch);
   itti_wait_tasks_unblock();
 }
 
@@ -329,7 +623,10 @@ int main(int argc, char **argv)
      * dashboard cores are exported for every unset ISAC_* core key. Must run before the float lane changes any affinity.
      * The radio IO cores are planned only when a hardware radio is used (not --rfsim, not an offline replay). */
     const bool radio = !rfsim_arg && !getenv("ISAC_PASSIVE_REPLAY_INPUT") && !getenv("ISAC_PASSIVE_REPLAY_CAPTURE");
-    nr_core_layout_init(true, radio);
+    /* multi-PCI (A8): the cells to serve (inventory + admission) before the core plan, which gives each one its RT reader. No inventory: 1, and
+     * nr_core_layout_init_n(.., 1) is nr_core_layout_init (byte-identical CORE_PLAN line). */
+    g_ncells = mpci_plan_cells(argc, argv, radio);
+    nr_core_layout_init_n(true, radio, g_ncells);
     setenv("ISAC_LOG_ASYNC", "1", 0); setenv("ISAC_CSIRS_DISC", "1", 0); setenv("ISAC_GPU_BUDGET", "1", 0); setenv("ISAC_RECONF", "1", 0); /* read by shared code (LDPC pool, GPU budget) */
     /* USRP driver (hardware radio shared with the gNB): site defaults of the receiver */
     setenv("ISAC_RX_RECOVER", "1", 0); setenv("ISAC_USRP_START_TIMEOUT_MS", "2200", 0);
@@ -372,6 +669,7 @@ int main(int argc, char **argv)
   get_common_options(uniqCfg);
   nr_auto_acquire_on = nr_auto_acquire_trigger(IS_PASSIVE_RX_MODE(get_softmodem_params()), ssb_given, fo_given);
   CONFIG_CLEARRTFLAG(CONFIG_NOEXITONHELP);
+  mpci_check_input(); /* A8: N > 1 needs published cell rings; otherwise the started cell only */
 
   // ISAC / passive-radar sensing pipeline: parse the [sensing] config section (no-op if disabled).
   nr_isac_init();
@@ -404,6 +702,7 @@ int main(int argc, char **argv)
       if (!stat(root, &ust) && S_ISDIR(ust.st_mode))
         snprintf(upath, sizeof(upath), "%s/uectx_%d.jsonl", root, (int)getpid());
     }
+    snprintf(g_uectx_path, sizeof(g_uectx_path), "%s", upath); /* A8: cells k > 0 derive theirs with nr_cell_path */
     if (nr_ue_ctx_open(upath, 16384, 5.0))
       nr_cfg_epoch_subscribe(nr_ue_ctx_on_epoch);
     else
@@ -434,6 +733,7 @@ int main(int argc, char **argv)
   char *pckg = strdup(OAI_PACKAGE_VERSION);
   LOG_I(HW, "Version: %s\n", pckg);
 
+  NB_UE_INST = g_ncells; /* A8: one UE instance per served cell (instance k = cell k); 1 = the single-cell receiver */
   nrPHY_vars_UE_g = calloc_or_fail(NB_UE_INST, sizeof(*nrPHY_vars_UE_g));
   for (int inst = 0; inst < NB_UE_INST; inst++) {
     nrPHY_vars_UE_g[inst] = calloc_or_fail(MAX_NUM_CCs, sizeof(*nrPHY_vars_UE_g[inst]));
@@ -454,6 +754,8 @@ int main(int argc, char **argv)
 
   nrue_set_ru_params(uniqCfg);
   nrue_set_cell_params(uniqCfg);
+  for (int k = 1; k < g_ncells; k++)
+    mpci_add_cell(k); /* A8: cell k and its ring-consumer RU */
 
   init_NR_UE(NB_UE_INST,
              get_nrUE_params()->uecap_file,
@@ -519,6 +821,8 @@ int main(int argc, char **argv)
       cell.used_by_ue = inst;
 
       set_UE_options(CC_id, UE_CC, cell.ru_id);
+      if (inst > 0) /* A8: cell k's carrier offset seed comes from the inventory (cell 0 keeps --initial-fo) */
+        UE_CC->initial_fo = nr_cell_mgr_slot(&g_cells.mgr, inst)->desc.cfo_hz;
       init_nr_ue_phy_cpu_stats(&UE_CC->phy_cpu_stats);
 
       NR_DL_FRAME_PARMS *fp = nrue_get_cell_fp(cell_id);
@@ -564,6 +868,13 @@ int main(int argc, char **argv)
           init_actor(&UE_CC->ul_actors[i], "UL_", nr_core_plan_cpu(NR_CP_UL, i, first_core < 0 ? -1 : first_core + i));
         }
       }
+      if (g_ncells > 1) { /* A8: the actors of UE instance k run cell k's PBCH / PDSCH / MAC work */
+        nr_ue_bind_actor(&UE_CC->sync_actor, inst);
+        for (int i = 0; i < get_nrUE_params()->num_dl_actors; i++)
+          nr_ue_bind_actor(&UE_CC->dl_actors[i], inst);
+        for (int i = 0; i < get_nrUE_params()->num_ul_actors; i++)
+          nr_ue_bind_actor(&UE_CC->ul_actors[i], inst);
+      }
       init_nr_ue_vars(UE_CC, inst);
 
       if (UE_CC->sl_mode) {
@@ -591,12 +902,17 @@ int main(int argc, char **argv)
   plan_usrp_ring(&disc_ue->frame_parms); /* host-RAM budget: the USRP ring is reserved first (the radio needs it), before any module sizes itself */
   nr_dl_gpu_warmup(disc_ue);
   nr_pdcch_nid_gpu_start(disc_ue->frame_parms.N_RB_DL);
+  if (g_ncells > 1) {
+    /* A8: per cell, bound to it: heap objects, CSI-RS discovery, PDCCH monitor / uectx (k > 0), PUSCH queue; then the cell count (LOG tag) */
+    nr_cell_life_prepare(&g_cells);
+  } else {
   nr_csirs_disc_pipeline_init(&disc_ue->frame_parms);
   if (nr_csirs_disc_start(&disc_ue->frame_parms, disc_ue->frame_parms.nb_antennas_rx) != 0)
     LOG_W(PHY, "SENSING: CSIRS_DISC worker could not start; slot discovery feed disabled\n");
+  }
   /* U1 owns exactly one bounded consumer/context, warmed before the RX seal.
    * A failed start leaves admission closed; the RT path only counts drops. */
-  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_pusch_passive_pipeline_enabled()) {
+  if (g_ncells == 1 && IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_pusch_passive_pipeline_enabled()) {
     const nr_pdcch_blind_monitor_cfg_t *ul_cfg = nr_pdcch_blind_monitor_get_cfg();
     if (ul_cfg && ul_cfg->ul_pusch_decode) {
       if (!nr_pusch_passive_queue_start(disc_ue, ul_cfg->ul_queue_depth > 0 ? ul_cfg->ul_queue_depth : 8,
@@ -631,6 +947,8 @@ int main(int argc, char **argv)
   }
 
   nr_gpu_rx_started(); /* All migrated CUDA allocation/registration ends before RX. */
+  if (g_ncells > 1)
+    nr_cell_alloc_fence(); /* A8: no cell object is allocated after this (nr_cell.h); N = 1 keeps the lazy first-touch of before */
   nrue_init_openair0();
 
 
@@ -676,6 +994,12 @@ int main(int argc, char **argv)
   nr_prach_passive_start();
   if (IS_PASSIVE_RX_MODE(get_softmodem_params())) nr_srs_passive_start(nrPHY_vars_UE_g[0][0]);
 
+  if (g_ncells > 1) {
+    nr_cell_life_start(&g_cells); /* A8: each cell's RT slot thread, created bound to its cell */
+    pthread_t mpci_ctl;
+    if (pthread_create(&mpci_ctl, NULL, mpci_control_thread, NULL) == 0)
+      pthread_detach(mpci_ctl);
+  } else
   for (int inst = 0; inst < NB_UE_INST; inst++) {
     LOG_I(PHY,"Intializing UE Threads for instance %d ...\n", inst);
     init_NR_UE_threads(nrPHY_vars_UE_g[inst][0]);
@@ -727,16 +1051,13 @@ int main(int argc, char **argv)
   /* Scan consumers can enqueue PDSCH/PUSCH work. Stop them first; the PDSCH
    * stop API also wakes and joins gpuFepWorker. Keep Tpool alive until all
    * consumers and discovery workers have returned. */
-  nr_shutdown_step("passive_pdcch_stop_begin");
-  nr_pdcch_blind_monitor_rt_final_stats();
-  nr_pdcch_passive_queue_stop();
-  nr_shutdown_step("passive_pdsch_gpu_fep_stop_begin");
-  nr_pdsch_passive_queue_stop();
-  nr_shutdown_step("passive_pusch_stop_begin");
-  nr_pusch_passive_queue_stop();
-  nr_pdcch_uss_tracker_stop();
+  mpci_for_each_cell(mpci_stop_cell_queues); /* A8: every cell's consumers, bound to the cell; N = 1: cell 0, the sequence of before */
   nr_shutdown_step("discovery_stop_begin");
   nr_pdcch_nid_gpu_stop();
+  if (g_ncells > 1)
+    for (int k = g_ncells - 1; k >= 0; k--)
+      nr_csirs_disc_cell_release(k);
+  else
   nr_csirs_disc_stop();
   nr_shutdown_step("discovery_stopped");
   abortTpool(&nrUE_params.Tpool);
@@ -748,15 +1069,7 @@ int main(int argc, char **argv)
   nr_isac_stop();
   nr_shutdown_step("sensing_stopped");
 
-  nr_passive_obs_close(); // drain + flush the per-grant observation file (no-op when not open)
-  const bool uectx_was_open = nr_ue_ctx_enabled();
-  nr_ue_ctx_close();
-  if (uectx_was_open) {
-    uint64_t events = 0, lines = 0, dropped = 0;
-    nr_ue_ctx_stats(&events, &lines, &dropped);
-    LOG_I(PHY, "SENSING: UECTX_STATS events=%llu written=%llu dropped=%llu\n",
-          (unsigned long long)events, (unsigned long long)lines, (unsigned long long)dropped);
-  }
+  mpci_for_each_cell(mpci_close_cell_outputs); /* A8: per cell; N = 1: cell 0, the sequence of before */
 
   nr_shutdown_step("outputs_closed");
 

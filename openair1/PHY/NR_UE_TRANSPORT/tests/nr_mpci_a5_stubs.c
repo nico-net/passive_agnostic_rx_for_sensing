@@ -8,8 +8,8 @@ nrUE_params_t *get_nrUE_params(void)
 {
   return &nrUE_params;
 }
-_Atomic long nr_ue_diag_producer_absolute_slot = -1;
-_Atomic long nr_ue_diag_producer_wall_ns = 0;
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
+NR_UE_CELL_CLOCK_DEFINE_PRODUCER();
 
 double cpuf;
 openair0_config_t openair0_cfg_g[MAX_CARDS];
