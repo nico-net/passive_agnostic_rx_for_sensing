@@ -13,6 +13,7 @@
 #include "nr_srs_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.h"
 #include "nr_passive_cfg_epoch.h"
+#include "nr_pdcch_cell_len_hint.h"
 #include "nr_passive_reconf_rules.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_passive_sample_lifetime.h"
@@ -2649,10 +2650,13 @@ static int ul_cell_len(uint16_t rnti)
 static void janon_note_cell_len(int len)
 {
   if (len <= 0) return;
-  for (int i = 0; i < 4; i++)
-    if (atomic_load(&g_cell_lens[i]) == len) return;
-  for (int i = 3; i > 0; i--) atomic_store(&g_cell_lens[i], atomic_load(&g_cell_lens[i - 1]));
-  atomic_store(&g_cell_lens[0], len);
+  /* ranked by corroborating locks (nr_pdcch_cell_len_hint.h), not by recency: one contradicting lock must not replace the hint of every CORESET without a lock */
+  static nr_cell_len_hint_t hint;
+  static pthread_mutex_t hint_mu = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&hint_mu);
+  nr_cell_len_hint_note(&hint, len);
+  for (int i = 0; i < NR_CELL_LEN_HINT_N; i++) atomic_store(&g_cell_lens[i], hint.len[i]);
+  pthread_mutex_unlock(&hint_mu);
 }
 /* janon_hit_scorer: scorer of the anonymous length sweep for joint-anon hits: accepts trial i only when it is a hit of the requested length and its RNTI is not already known.
  *   Returns the RNTI and payload hash of the hit. Passed to nr_pdcch_dci_length_sweep_feed_budget() by run_occasion_one() (joint-anon sweep).
