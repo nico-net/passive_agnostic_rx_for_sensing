@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "common/utils/nr_cell.h"
 
 void nr_dltp_energy(const int16_t *rxF, int fft, int fco, int n_rb, float *e)
 {
@@ -112,9 +113,13 @@ int nr_dltp_verdict(const nr_dltp_stats_t *st, char *buf, size_t n)
   return v;
 }
 
-static pthread_mutex_t g_gmu = PTHREAD_MUTEX_INITIALIZER;
-static nr_dltp_grant_t g_grants[NR_DLTP_GRANTS];
-static unsigned g_gn;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_gmu, PTHREAD_MUTEX_INITIALIZER);
+#define g_gmu NR_CELL_REF(g_gmu)
+typedef nr_dltp_grant_t g_grants_cell_t[NR_DLTP_GRANTS];
+NR_CELL_STATIC(g_grants_cell_t, g_grants);
+#define g_grants NR_CELL_REF(g_grants)
+NR_CELL_STATIC(unsigned, g_gn);
+#define g_gn NR_CELL_REF(g_gn)
 
 void nr_dltp_note_grant(uint16_t frame, uint8_t slot, int rb0, int n_rb, int s, int l)
 {
@@ -193,9 +198,23 @@ int nr_syncq_classify(const unsigned *mag, int n, int prev_poor, int *med, int *
   if (prev_poor && (m > NR_SYNCQ_MED_GOOD || p > NR_SYNCQ_P90_GOOD)) return 2;
   return m > NR_SYNCQ_MED_DEGRADED ? 1 : 0;
 }
-static _Atomic unsigned g_sq_ring[NR_SYNCQ_WIN];
-static _Atomic unsigned g_sq_count, g_sq_poor, g_sq_level, g_sq_reacq, g_sq_clamp;
-static _Atomic int g_sq_med, g_sq_p90;
+typedef _Atomic unsigned g_sq_ring_cell_t[NR_SYNCQ_WIN];
+NR_CELL_STATIC(g_sq_ring_cell_t, g_sq_ring);
+#define g_sq_ring NR_CELL_REF(g_sq_ring)
+NR_CELL_STATIC(_Atomic unsigned, g_sq_count);
+#define g_sq_count NR_CELL_REF(g_sq_count)
+NR_CELL_STATIC(_Atomic unsigned, g_sq_poor);
+#define g_sq_poor NR_CELL_REF(g_sq_poor)
+NR_CELL_STATIC(_Atomic unsigned, g_sq_level);
+#define g_sq_level NR_CELL_REF(g_sq_level)
+NR_CELL_STATIC(_Atomic unsigned, g_sq_reacq);
+#define g_sq_reacq NR_CELL_REF(g_sq_reacq)
+NR_CELL_STATIC(_Atomic unsigned, g_sq_clamp);
+#define g_sq_clamp NR_CELL_REF(g_sq_clamp)
+NR_CELL_STATIC(_Atomic int, g_sq_med);
+#define g_sq_med NR_CELL_REF(g_sq_med)
+NR_CELL_STATIC(_Atomic int, g_sq_p90);
+#define g_sq_p90 NR_CELL_REF(g_sq_p90)
 int nr_syncq_enabled(void)
 {
   static int e = -1;

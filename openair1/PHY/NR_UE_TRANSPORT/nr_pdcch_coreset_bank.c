@@ -33,30 +33,47 @@
 #include <pthread.h>
 
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
+#include "nr_pdcch_cell.h"
 
 /* Verified dedicated geometries remain operational while discovery continues for another UE's
  * CORESET. Entries are immutable after the release-store publishes them, so the receive producer
  * may test the count while the single scan consumer appends without a lock. */
-static nr_pdcch_discovered_coreset_t g_coreset_bank[NR_PDCCH_DISCOVERED_CORESETS];
-static _Atomic int g_coreset_bank_n;
-static pthread_mutex_t g_coreset_bank_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef nr_pdcch_discovered_coreset_t g_coreset_bank_cell_t[NR_PDCCH_DISCOVERED_CORESETS];
+NR_CELL_STATIC_HEAP(g_coreset_bank_cell_t, g_coreset_bank);
+#define g_coreset_bank NR_CELL_HEAP_REF(g_coreset_bank_cell_t, g_coreset_bank)
+NR_CELL_STATIC(_Atomic int, g_coreset_bank_n);
+#define g_coreset_bank_n NR_CELL_REF(g_coreset_bank_n)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_coreset_bank_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_coreset_bank_lock NR_CELL_REF(g_coreset_bank_lock)
 /* Guards the AL1 UNION fields of the entries (n_al1_fam, al1_fam, n_al1_union, al1_union). Lock order: bank lock, then this one; no holder of this mutex takes the bank lock. */
 pthread_mutex_t nr_pdcch_al1_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_coreset_bank_quiescent = PTHREAD_COND_INITIALIZER;
-static unsigned g_dispatch_readers;
-static bool g_compaction_pending;
-static _Atomic bool g_identity_reset_pending;
-static uint32_t g_bank_epoch;
-static _Atomic uint32_t g_bank_identity;
-static struct {
+NR_CELL_STATIC_INIT(pthread_cond_t, g_coreset_bank_quiescent, PTHREAD_COND_INITIALIZER);
+#define g_coreset_bank_quiescent NR_CELL_REF(g_coreset_bank_quiescent)
+NR_CELL_STATIC(unsigned, g_dispatch_readers);
+#define g_dispatch_readers NR_CELL_REF(g_dispatch_readers)
+NR_CELL_STATIC(bool, g_compaction_pending);
+#define g_compaction_pending NR_CELL_REF(g_compaction_pending)
+NR_CELL_STATIC(_Atomic bool, g_identity_reset_pending);
+#define g_identity_reset_pending NR_CELL_REF(g_identity_reset_pending)
+NR_CELL_STATIC(uint32_t, g_bank_epoch);
+#define g_bank_epoch NR_CELL_REF(g_bank_epoch)
+NR_CELL_STATIC(_Atomic uint32_t, g_bank_identity);
+#define g_bank_identity NR_CELL_REF(g_bank_identity)
+typedef struct {
   uint32_t identity_gen;
   int n;
   nr_pdcch_discovered_coreset_t entry[NR_PDCCH_DISCOVERED_CORESETS];
-} g_dormant_bank;
+} g_dormant_bank_cell_t;
+NR_CELL_STATIC_HEAP(g_dormant_bank_cell_t, g_dormant_bank);
+#define g_dormant_bank NR_CELL_HEAP_REF(g_dormant_bank_cell_t, g_dormant_bank)
 static void bank_epoch_listener(const nr_cfg_epoch_snapshot_t *s);
 static void bank_epoch_locked(const nr_cfg_epoch_snapshot_t *s);
-static void (*g_remove_hook)(const nr_pdcch_blind_monitor_cfg_t *, void *);
-static void *g_remove_hook_arg;
+typedef void (*g_remove_hook_cell_t)(const nr_pdcch_blind_monitor_cfg_t *, void *);
+NR_CELL_STATIC(g_remove_hook_cell_t, g_remove_hook);
+#define g_remove_hook NR_CELL_REF(g_remove_hook)
+NR_CELL_STATIC(void *, g_remove_hook_arg);
+#define g_remove_hook_arg NR_CELL_REF(g_remove_hook_arg)
 
 /* Caller holds the bank lock. Physical compaction waits for all RT dispatchers to leave: their
  * cfg and AL1 pointers are borrowed for an entire pass, including its unlocked decode phase. */
@@ -169,9 +186,13 @@ void nr_pdcch_coreset_bank_note_confirm(int index, uint64_t slot)
 /* Ring of recent DCIs decoded by operational (non-dwell) passes, keyed by (slot, RNTI, payload hash). A PDCCH transmission belongs to exactly one CORESET/search-space candidate, so a dwell geometry whose CRC-valid DCI is one of these
  * is decoding a transmission the bank already explains (an overlapping geometry can CRC-pass on the same REs) and gives no evidence of its own. */
 #define NR_DECODED_RING 256
-static struct { uint64_t slot; uint32_t hash; uint16_t rnti; } g_decoded[NR_DECODED_RING];
-static unsigned g_decoded_next;
-static pthread_mutex_t g_decoded_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct { uint64_t slot; uint32_t hash; uint16_t rnti; } g_decoded_cell_t[NR_DECODED_RING];
+NR_CELL_STATIC(g_decoded_cell_t, g_decoded);
+#define g_decoded NR_CELL_REF(g_decoded)
+NR_CELL_STATIC(unsigned, g_decoded_next);
+#define g_decoded_next NR_CELL_REF(g_decoded_next)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_decoded_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_decoded_lock NR_CELL_REF(g_decoded_lock)
 
 void nr_pdcch_coreset_bank_note_decoded(uint64_t slot, uint16_t rnti, uint32_t payload_hash)
 {
@@ -642,4 +663,11 @@ static void bank_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
   pthread_mutex_lock(&g_coreset_bank_lock);
   bank_epoch_locked(s);
   pthread_mutex_unlock(&g_coreset_bank_lock);
+}
+
+/* nr_pdcch_coreset_bank_cell_prealloc: allocates this file's heap objects of `cell` (call before nr_cell_alloc_fence()). */
+void nr_pdcch_coreset_bank_cell_prealloc(int cell)
+{
+  NR_CELL_HEAP_PREALLOC(g_coreset_bank_cell_t, g_coreset_bank, cell);
+  NR_CELL_HEAP_PREALLOC(g_dormant_bank_cell_t, g_dormant_bank, cell);
 }

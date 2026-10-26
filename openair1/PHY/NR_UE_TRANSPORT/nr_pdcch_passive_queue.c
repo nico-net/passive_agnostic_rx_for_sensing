@@ -49,6 +49,7 @@
 #include "nr_pdcch_blind_monitor_rt.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_job_epoch.h"
+#include "common/utils/nr_cell.h"
 
 /* Monotonic slot counter published by the RF producer; the same source nr_pdsch_passive_queue uses,
  * so the two staleness checks are on one clock. */
@@ -68,14 +69,22 @@ static uint64_t scanq_now_ns(void)
   return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 
-static nr_pdcch_passive_job_t g_ring[NR_PDCCH_PASSIVE_QUEUE_MAX_DEPTH];
-static int g_depth = 0;
-static int g_head  = 0; // next write slot
-static int g_tail  = 0; // next read slot
-static int g_count = 0;
+typedef nr_pdcch_passive_job_t g_ring_cell_t[NR_PDCCH_PASSIVE_QUEUE_MAX_DEPTH];
+NR_CELL_STATIC(g_ring_cell_t, g_ring);
+#define g_ring NR_CELL_REF(g_ring)
+NR_CELL_STATIC(int, g_depth);
+#define g_depth NR_CELL_REF(g_depth)
+NR_CELL_STATIC(int, g_head);
+#define g_head NR_CELL_REF(g_head) // next write slot
+NR_CELL_STATIC(int, g_tail);
+#define g_tail NR_CELL_REF(g_tail) // next read slot
+NR_CELL_STATIC(int, g_count);
+#define g_count NR_CELL_REF(g_count)
 
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_lock NR_CELL_REF(g_lock)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_cv, PTHREAD_COND_INITIALIZER);
+#define g_cv NR_CELL_REF(g_cv)
 
 /* SIDE WORK (ISAC_PDCCH_BANK_HANDOFF, nr_pdcch_blind_monitor_rt.c): a consumer running an occasion posts part of it (the later banked
  * CORESET passes); an IDLE consumer of this same pool takes it, so no thread or core is added. The poster reclaims it and runs it
@@ -85,24 +94,43 @@ typedef struct {
   void *arg;
   int state; /* 0 free, 1 posted, 2 taken, 3 done */
 } side_work_t;
-static side_work_t g_side[NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS];
-static int g_side_posted;
-static pthread_cond_t g_side_done = PTHREAD_COND_INITIALIZER;
-static _Atomic uint64_t g_side_n, g_side_taken;
-static int g_nthreads;
+typedef side_work_t g_side_cell_t[NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+NR_CELL_STATIC(g_side_cell_t, g_side);
+#define g_side NR_CELL_REF(g_side)
+NR_CELL_STATIC(int, g_side_posted);
+#define g_side_posted NR_CELL_REF(g_side_posted)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_side_done, PTHREAD_COND_INITIALIZER);
+#define g_side_done NR_CELL_REF(g_side_done)
+NR_CELL_STATIC(_Atomic uint64_t, g_side_n);
+#define g_side_n NR_CELL_REF(g_side_n)
+NR_CELL_STATIC(_Atomic uint64_t, g_side_taken);
+#define g_side_taken NR_CELL_REF(g_side_taken)
+NR_CELL_STATIC(int, g_nthreads);
+#define g_nthreads NR_CELL_REF(g_nthreads)
 
-static _Atomic int      g_running = 0;
-static _Atomic int      g_stop    = 0;
-static _Atomic uint64_t g_queued        = 0;
-static _Atomic uint64_t g_processed     = 0;
-static _Atomic uint64_t g_dropped_full  = 0;
-static _Atomic uint64_t g_dropped_stale = 0;
-static _Atomic uint64_t g_dropped_epoch = 0;
-static _Atomic uint64_t g_max_lag       = 0;
+NR_CELL_STATIC(_Atomic int, g_running);
+#define g_running NR_CELL_REF(g_running)
+NR_CELL_STATIC(_Atomic int, g_stop);
+#define g_stop NR_CELL_REF(g_stop)
+NR_CELL_STATIC(_Atomic uint64_t, g_queued);
+#define g_queued NR_CELL_REF(g_queued)
+NR_CELL_STATIC(_Atomic uint64_t, g_processed);
+#define g_processed NR_CELL_REF(g_processed)
+NR_CELL_STATIC(_Atomic uint64_t, g_dropped_full);
+#define g_dropped_full NR_CELL_REF(g_dropped_full)
+NR_CELL_STATIC(_Atomic uint64_t, g_dropped_stale);
+#define g_dropped_stale NR_CELL_REF(g_dropped_stale)
+NR_CELL_STATIC(_Atomic uint64_t, g_dropped_epoch);
+#define g_dropped_epoch NR_CELL_REF(g_dropped_epoch)
+NR_CELL_STATIC(_Atomic uint64_t, g_max_lag);
+#define g_max_lag NR_CELL_REF(g_max_lag)
 
 /* P99: lag (producer slot - occasion slot) at dequeue, bins < 2/4/8/12/16/18/24/32/inf slots (nr_pdcch_passive_queue_lag_hist) */
-static _Atomic uint64_t g_lag_hist[NR_PASSIVE_LAG_BINS];
-static _Atomic uint64_t g_fresh_picks = 0;
+typedef _Atomic uint64_t g_lag_hist_cell_t[NR_PASSIVE_LAG_BINS];
+NR_CELL_STATIC(g_lag_hist_cell_t, g_lag_hist);
+#define g_lag_hist NR_CELL_REF(g_lag_hist)
+NR_CELL_STATIC(_Atomic uint64_t, g_fresh_picks);
+#define g_fresh_picks NR_CELL_REF(g_fresh_picks)
 int nr_passive_lag_bin(long lag)
 {
   static const long edge[NR_PASSIVE_LAG_BINS - 1] = {2, 4, 8, 12, 16, 18, 24, 32};
@@ -118,19 +146,27 @@ int nr_passive_lag_bin(long lag)
 static int scanq_fresh(void) { return 6; }
 
 /* Timer-then-spin hand-off RX -> scan consumer (nr_spin_handoff.h): the work of this queue is one occasion per slot, ~0 after the slot arrival. */
-static nr_spin_pred_t g_spin_pred;
+NR_CELL_STATIC(nr_spin_pred_t, g_spin_pred);
+#define g_spin_pred NR_CELL_REF(g_spin_pred)
 
-static pthread_t g_threads[NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS];
-static PHY_VARS_NR_UE *g_ue = NULL;
+typedef pthread_t g_threads_cell_t[NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+NR_CELL_STATIC(g_threads_cell_t, g_threads);
+#define g_threads NR_CELL_REF(g_threads)
+NR_CELL_STATIC(PHY_VARS_NR_UE *, g_ue);
+#define g_ue NR_CELL_REF(g_ue)
 
 typedef struct {
   int idx;
+  int cell; /* the cell this consumer serves: threadCreate() has no cell argument, the thread binds itself first thing */
 } consumer_arg_t;
-static consumer_arg_t g_args[NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+typedef consumer_arg_t g_args_cell_t[NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+NR_CELL_STATIC(g_args_cell_t, g_args);
+#define g_args NR_CELL_REF(g_args)
 
 static void *nr_pdcch_passive_queue_thread(void *arg)
 {
   const int idx = ((consumer_arg_t *)arg)->idx;
+  nr_cell_bind(((consumer_arg_t *)arg)->cell);
   PHY_VARS_NR_UE *ue = g_ue;
   const long slots_per_frame = ue->frame_parms.slots_per_frame;
 
@@ -152,7 +188,7 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
           g_side_posted--;
           pthread_mutex_unlock(&g_lock);
           atomic_fetch_add_explicit(&g_side_taken, 1, memory_order_relaxed);
-          nr_pool_site_acquire(NR_POOL_SCAN, 0, 0);
+          nr_pool_site_acquire(NR_POOL_SCAN, nr_cell_idx(), 0);
           g_side[k].fn(g_side[k].arg);
           pthread_mutex_lock(&g_lock);
           g_side[k].state = 3;
@@ -170,7 +206,7 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
       if (act == NR_SPIN_SPIN) { /* bounded busy-wait for the predicted occasion, then back to the ordinary wait */
         pthread_mutex_unlock(&g_lock);
         /* the spin burns a core: with the pool it must be a core this thread owns, and only if one is free */
-        const bool leased = !nr_pool_site() || nr_pool_site_try_acquire(NR_POOL_SCAN, 0, 0) >= 0;
+        const bool leased = !nr_pool_site() || nr_pool_site_try_acquire(NR_POOL_SCAN, nr_cell_idx(), 0) >= 0;
         if (leased) {
           if (!nr_spin_run(&g_spin_pred, &spin_acct, &g_count, until)) nr_pool_site_release();
         } else {
@@ -217,7 +253,7 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
     g_count--;
     pthread_mutex_unlock(&g_lock);
     const uint64_t take_ns = job.enq_ns ? scanq_now_ns() : 0;
-    nr_pool_site_acquire(NR_POOL_SCAN, (int)job.gNB_id, nr_passive_slot_arrival_ns(job.absolute_slot)); /* oldest slot first, one cell per gNB id */
+    nr_pool_site_acquire(NR_POOL_SCAN, nr_cell_idx(), nr_passive_slot_arrival_ns(job.absolute_slot)); /* oldest slot first; the consumer is bound to its cell, which is the pool cell (job.gNB_id is only carried to the occasion) */
 
     NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
     if (!nr_cfg_epoch_work_current()) {
@@ -260,8 +296,11 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
       nr_pdcch_blind_monitor_run_occasion(ue, &proc, true /* already off the RT thread */, job.absolute_slot);
     if (nr_passive_e2e_trace()) {
       /* SYSAN SCAN_E2E: slot read -> scan start (wait), scan occasion wall (run); 50-us bins, p50/p90/p99 every 4000 occasions */
-      static _Atomic uint32_t h[4][101]; /* wait, run, pre (arrival -> enqueue), q (enqueue -> taken: queue sit + wake-up) */
-      static _Atomic uint64_t n_occ;
+      typedef _Atomic uint32_t h_cell_t[4][101];
+NR_CELL_STATIC(h_cell_t, h);
+#define h NR_CELL_REF(h) /* wait, run, pre (arrival -> enqueue), q (enqueue -> taken: queue sit + wake-up) */
+      NR_CELL_STATIC(_Atomic uint64_t, n_occ);
+#define n_occ NR_CELL_REF(n_occ)
       struct timespec e1;
       clock_gettime(CLOCK_MONOTONIC, &e1);
       const uint64_t t0 = (uint64_t)e0.tv_sec * 1000000000ull + e0.tv_nsec, t1 = (uint64_t)e1.tv_sec * 1000000000ull + e1.tv_nsec;
@@ -299,6 +338,8 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
         }
       }
     }
+#undef n_occ
+#undef h
     nr_slot_fep_fo_override_hz = saved_fo;
     atomic_fetch_add_explicit(&g_processed, 1, memory_order_relaxed);
   }
@@ -346,6 +387,7 @@ bool nr_pdcch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
 
   for (int i = 0; i < n_consumers; i++) {
     g_args[i].idx = i;
+    g_args[i].cell = nr_cell_idx();
     char name[32];
     snprintf(name, sizeof(name), "passivePdcch%d", i);
     /* Priority below the RT receive thread's 97, same rationale as the PDSCH pool: if a consumer

@@ -31,7 +31,7 @@ endif()
 if(ENABLE_TESTS)
   add_executable(test_nr_gpu_sm_plan ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS/tests/test_nr_gpu_sm_plan.cpp)
   target_include_directories(test_nr_gpu_sm_plan PRIVATE ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS)
-  target_link_libraries(test_nr_gpu_sm_plan PRIVATE GTest::gtest)
+  target_link_libraries(test_nr_gpu_sm_plan PRIVATE GTest::gtest GTest::gtest_main)
   add_dependencies(tests test_nr_gpu_sm_plan)
   add_test(NAME test_nr_gpu_sm_plan COMMAND test_nr_gpu_sm_plan)
 endif()
@@ -78,7 +78,7 @@ if(ENABLE_TESTS)
   add_library(nr_cell_inventory STATIC ${CMAKE_SOURCE_DIR}/common/utils/nr_cell_inventory.c)
   target_include_directories(nr_cell_inventory PUBLIC ${CMAKE_SOURCE_DIR}/common/utils ${CMAKE_SOURCE_DIR}/openair1)
   add_executable(test_nr_cell_inventory ${CMAKE_SOURCE_DIR}/common/utils/tests/test_nr_cell_inventory.cpp)
-  target_link_libraries(test_nr_cell_inventory PRIVATE nr_cell_inventory GTest::gtest)
+  target_link_libraries(test_nr_cell_inventory PRIVATE nr_cell_inventory GTest::gtest GTest::gtest_main)
   target_compile_definitions(test_nr_cell_inventory PRIVATE MPCI_INV_DIR="${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci/inventory")
   add_dependencies(tests test_nr_cell_inventory)
   add_test(NAME test_nr_cell_inventory COMMAND test_nr_cell_inventory)
@@ -283,3 +283,28 @@ if(ENABLE_TESTS)
   add_test(NAME test_mpci_a5_interleave COMMAND test_mpci_a5_interleave)
 endif()
 # ---- end A5 ----
+
+# ---- A4 ----
+# Per-cell state of the blind PDCCH monitor modules (nr_cell.h conversion). The existing unit-test targets compile the converted sources;
+# the one that does not already link LOG gets it here (nr_cell.c lives in LOG, never list it a second time).
+if(ENABLE_TESTS)
+  foreach(t test_nr_dl_traffic_probe test_nr_pdcch_dci_length_sweep test_nr_pdcch_coreset_bank test_nr_pdcch_joint_live test_nr_pdcch_dci11_layout_sweep test_nr_pdcch_dci01_layout_sweep)
+    if(TARGET ${t})
+      target_link_libraries(${t} PRIVATE LOG)
+    endif()
+  endforeach()
+  # Two-cell interleave test (cells X and Y alternately, one re-binding thread and two bound threads, each equal to its solo run):
+  # persistence/accept gate/bootstrap (accept sets), CORESET bank, length sweep, SIB1 prior, traffic probe grants, cell DCI length hint.
+  set(A4_SRC ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
+  add_executable(test_mpci_a4_interleave
+    ${A4_SRC}/tests/nr_mpci_a4_interleave_test.cc
+    ${A4_SRC}/tests/nr_mpci_a4_cell_len_shim.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/refsig.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/nr_dmrs_rx.c
+    ${CMAKE_SOURCE_DIR}/common/utils/ds/hashtable.c)
+  target_include_directories(test_mpci_a4_interleave PRIVATE ${A4_SRC} ${CMAKE_SOURCE_DIR}/common/utils/ds)
+  target_link_libraries(test_mpci_a4_interleave PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs LOG GTest::gtest pthread m)
+  add_dependencies(tests test_mpci_a4_interleave)
+  add_test(NAME test_mpci_a4_interleave COMMAND test_mpci_a4_interleave)
+endif()
+# ---- end A4 ----

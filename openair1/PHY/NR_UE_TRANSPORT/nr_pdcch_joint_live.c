@@ -6,6 +6,7 @@
 #include "common/utils/LOG/log.h"
 #include "nr_pdcch_joint_live.h"
 #include "nr_pdcch_joint_solve.h"
+#include "common/utils/nr_cell.h"
 
 typedef struct { uint16_t A; uint8_t L; } joint_enc_ctx_t;
 static int joint_encode_cb(void *vctx, nr_dci_bits_t payload, uint16_t crc_mask, uint8_t *coded, int E)
@@ -24,7 +25,12 @@ static int joint_encode_cb(void *vctx, nr_dci_bits_t payload, uint16_t crc_mask,
 static struct { uint16_t A, nid; uint8_t L; int pre; nr_pdcch_joint_model_t *m; } s_cache[JOINT_CACHE_N];
 static int s_cache_n;
 static pthread_mutex_t s_mu = PTHREAD_MUTEX_INITIALIZER;
-static _Atomic unsigned long long s_attempts, s_screen_pass, s_accepted;
+NR_CELL_STATIC(_Atomic unsigned long long, s_attempts);
+#define s_attempts NR_CELL_REF(s_attempts)
+NR_CELL_STATIC(_Atomic unsigned long long, s_screen_pass);
+#define s_screen_pass NR_CELL_REF(s_screen_pass)
+NR_CELL_STATIC(_Atomic unsigned long long, s_accepted);
+#define s_accepted NR_CELL_REF(s_accepted)
 
 bool nr_pdcch_joint_live_enabled(void)
 {

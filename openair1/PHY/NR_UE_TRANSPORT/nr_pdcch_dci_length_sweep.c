@@ -49,6 +49,7 @@
 #include <time.h>
 #include <stdatomic.h>
 #include <pthread.h>
+#include "common/utils/nr_cell.h"
 
 /* nr_pdcch_dci_length_bank_peer_hint: returns the DCI payload length most common among the other RNTIs of a bank (excluding exclude_rnti), or 0 when none is inside [min_len, max_len].
  *   Counts the two found lengths of every active context in the bank; ties go to the shorter length. Used as a length prior for a new RNTI.
@@ -88,8 +89,12 @@ int nr_pdcch_dci_length_bank_peer_hint(const nr_pdcch_dci_length_bank_t *bank,
 // observation window runs (unlike the fixed floor it replaces -- see this file's header).
 #define Z_SIGMA 6.0
 
-static _Atomic uint64_t wide_probes;
-static _Atomic uint64_t learn_restricted, learn_full;
+NR_CELL_STATIC(_Atomic uint64_t, wide_probes);
+#define wide_probes NR_CELL_REF(wide_probes)
+NR_CELL_STATIC(_Atomic uint64_t, learn_restricted);
+#define learn_restricted NR_CELL_REF(learn_restricted)
+NR_CELL_STATIC(_Atomic uint64_t, learn_full);
+#define learn_full NR_CELL_REF(learn_full)
 uint64_t nr_pdcch_dci_length_learn_rounds(bool restricted)
 {
   return atomic_load_explicit(restricted ? &learn_restricted : &learn_full, memory_order_relaxed);
@@ -100,7 +105,9 @@ bool nr_pdcch_reconf_enabled(void)
   return true;
 }
 
-static _Atomic bool cell_seen[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
+typedef _Atomic bool cell_seen_cell_t[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
+NR_CELL_STATIC(cell_seen_cell_t, cell_seen);
+#define cell_seen NR_CELL_REF(cell_seen)
 void nr_pdcch_dci_length_seen_reset(void)
 {
   for (int len = 0; len <= NR_DCI_MAX_PAYLOAD; ++len)

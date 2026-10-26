@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include "common/utils/nr_cell.h"
 
 // ---- Phase 3 Technique B: C-RNTI bootstrap, MULTI-UE ----------------------------------------
 // A cell carries many UEs and a passive receiver hears all of them, so tracking ONE C-RNTI threw
@@ -47,7 +48,8 @@
 // the weakest-evidenced entry rather than the oldest arrival.
 #define RNTI_BOOTSTRAP_STALE_SLOTS 20000u  // ~10 s at this deployment's ~2000 slots/s (mu=1); other mu: see set_mu
 /* The window is ~10 s at ANY numerology (10000 << mu slots; mu=1 gives the constant above). */
-static _Atomic uint32_t g_stale_slots = RNTI_BOOTSTRAP_STALE_SLOTS;
+NR_CELL_STATIC_INIT(_Atomic uint32_t, g_stale_slots, RNTI_BOOTSTRAP_STALE_SLOTS);
+#define g_stale_slots NR_CELL_REF(g_stale_slots)
 void nr_pdcch_blind_rnti_bootstrap_set_mu(int mu)
 {
   if (mu >= 0 && mu <= 4)
@@ -63,11 +65,14 @@ typedef struct {
   uint8_t  verified;  ///< the RAR chain proved the RNTI itself; live at n=1  ///< 0 = free slot; 1 = pending; >=2 = confirmed
 } nr_boot_entry_t;
 
-static nr_boot_entry_t g_boot[NR_PDCCH_BLIND_MAX_UE];
+typedef nr_boot_entry_t g_boot_cell_t[NR_PDCCH_BLIND_MAX_UE];
+NR_CELL_STATIC(g_boot_cell_t, g_boot);
+#define g_boot NR_CELL_REF(g_boot)
 /* Every public entry point below takes this leaf lock: accepts are recorded in Phase 2 while other blind
  * PDCCH scan consumers read the confirmed set in their Phase 1 (Task A7, found by TSAN). The static
  * helpers are called with it held. */
-static pthread_mutex_t g_boot_mu = PTHREAD_MUTEX_INITIALIZER;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_boot_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_boot_mu NR_CELL_REF(g_boot_mu)
 
 static int boot_find(uint16_t rnti, uint8_t cls)
 {

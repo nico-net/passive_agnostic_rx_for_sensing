@@ -13,6 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
 
 #define USS_TRACK_GEOMETRIES 16
 #define USS_TRACK_HISTORY 64
@@ -60,16 +61,34 @@ typedef struct {
   uint32_t generation;
 } uss_job_t;
 
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_cond = PTHREAD_COND_INITIALIZER;
-static pthread_once_t g_once = PTHREAD_ONCE_INIT;
-static pthread_t g_thread;
-static bool g_stop, g_thread_started;
-static uss_geometry_state_t g_state[USS_TRACK_GEOMETRIES];
-static uss_job_t g_queue[USS_TRACK_QUEUE];
-static int g_q_head, g_q_tail, g_q_count;
-static uint64_t g_touch;
-static bool g_enabled = true;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_lock NR_CELL_REF(g_lock)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_cond, PTHREAD_COND_INITIALIZER);
+#define g_cond NR_CELL_REF(g_cond)
+NR_CELL_STATIC_INIT(pthread_once_t, g_once, PTHREAD_ONCE_INIT);
+#define g_once NR_CELL_REF(g_once)
+NR_CELL_STATIC(pthread_t, g_thread);
+#define g_thread NR_CELL_REF(g_thread)
+NR_CELL_STATIC(bool, g_stop);
+#define g_stop NR_CELL_REF(g_stop)
+NR_CELL_STATIC(bool, g_thread_started);
+#define g_thread_started NR_CELL_REF(g_thread_started)
+typedef uss_geometry_state_t g_state_cell_t[USS_TRACK_GEOMETRIES];
+NR_CELL_STATIC(g_state_cell_t, g_state);
+#define g_state NR_CELL_REF(g_state)
+typedef uss_job_t g_queue_cell_t[USS_TRACK_QUEUE];
+NR_CELL_STATIC(g_queue_cell_t, g_queue);
+#define g_queue NR_CELL_REF(g_queue)
+NR_CELL_STATIC(int, g_q_head);
+#define g_q_head NR_CELL_REF(g_q_head)
+NR_CELL_STATIC(int, g_q_tail);
+#define g_q_tail NR_CELL_REF(g_q_tail)
+NR_CELL_STATIC(int, g_q_count);
+#define g_q_count NR_CELL_REF(g_q_count)
+NR_CELL_STATIC(uint64_t, g_touch);
+#define g_touch NR_CELL_REF(g_touch)
+NR_CELL_STATIC_INIT(bool, g_enabled, true);
+#define g_enabled NR_CELL_REF(g_enabled)
 
 static const uint8_t k_m[7] = {1, 2, 3, 4, 5, 6, 8};
 static const uint32_t k_a[3] = {39827, 39829, 39839};
@@ -350,9 +369,9 @@ static void score_snapshot(int state_index, uint32_t generation,
 /* tracker_worker: worker thread of the USS hash tracker: takes a geometry job from the bounded queue, copies its sample history under the lock, scores the candidate RNTIs with the USS hash and publishes the result.
  *   Runs as SCHED_OTHER on ISAC_PDCCH_USS_CORE, or on the process's own affinity by default (not the scan consumer's core). Exits when stopped. Started by tracker_init() through the core plan.
  */
-static void *tracker_worker(void *unused)
+static void *tracker_worker(void *cell_arg)
 {
-  (void)unused;
+  nr_cell_bind((int)(intptr_t)cell_arg); /* the cell whose tracker this is (nr_core_plan_create has no cell argument) */
   struct sched_param sp = {0};
   const int sched_rc = pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
   int affinity_rc = 0;
@@ -455,7 +474,7 @@ static void tracker_init(void)
 {
   g_enabled = true;
   tables_init();
-  if (g_enabled && nr_core_plan_create(&g_thread, NULL, tracker_worker, NULL, nr_core_plan_cpu(NR_CP_USS, 0, -1)) == 0) {
+  if (g_enabled && nr_core_plan_create(&g_thread, NULL, tracker_worker, (void *)(intptr_t)nr_cell_idx(), nr_core_plan_cpu(NR_CP_USS, 0, -1)) == 0) {
     g_thread_started = true;
     LOG_A(PHY, "SENSING: USS_TRACK enabled: bounded producer, asynchronous 65535-RNTI hash scorer\n");
   } else {

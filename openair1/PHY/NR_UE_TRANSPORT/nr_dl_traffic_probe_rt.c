@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "common/utils/nr_cell.h"
 
 #define DLTP_PA_H 275                /* Point-A hypotheses below the grid: CRB index of grid RB 0 (a carrier is at most 275 RB) */
 #define DLTP_PA_N (DLTP_PA_H + NR_DLTP_MAX_RB) /* ... plus CRB 0 inside the grid (grid wider than the carrier): ref_rb = i - DLTP_PA_H + 1 */
@@ -29,7 +30,7 @@
 #define DLTP_RING 16                 /* slots held back so the scan threads have decoded the slot's DCIs first */
 #define DLTP_DELAY_SLOTS 400         /* 200 ms at mu=1: beyond the scan queue's measured max lag (STALLS: PDSCH stale drops < 8 ms, scan lag tens of ms) */
 
-static struct {
+typedef struct {
   pthread_mutex_t mu;
   pthread_cond_t cv;
   int every, sweep, watch;           /* env, -1 unread; watch = ISAC_CORESET_DISC_WATCH (ACQMISS) */
@@ -57,7 +58,9 @@ static struct {
   nr_dltp_stats_t st;
   uint32_t probed, pa_hits[DLTP_PA_N], pa_sym_hits[3], pa_syms, pci_windows, pci_sym_windows[3];
   bool pa_done;
-} g = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .every = -1, .sweep = -1, .watch = -1};
+} g_cell_t;
+NR_CELL_STATIC_INIT(g_cell_t, g, {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .every = -1, .sweep = -1, .watch = -1});
+#define g NR_CELL_REF(g)
 
 /* pdcch_pci_windows: lit 6-RB windows of the PDCCH DM-RS of nID = PCI in `sym`, groups aligned to CRB 0 = grid RB ref_rb
  *   (negative when CRB 0 is below the grid), CORESET#0 and SSB RBs skipped. Caller: worker(). */
@@ -77,7 +80,7 @@ static int pdcch_pci_windows(const c16_t *symF, int ref_rb, int css0_rb0, int cs
 
 static void *worker(void *arg)
 {
-  (void)arg;
+  nr_cell_bind((int)(intptr_t)arg); /* the cell that started this worker (nr_core_plan_create has no cell argument) */
   const NR_DL_FRAME_PARMS *fp = g.fp;
   const int fft = fp->ofdm_symbol_size, n_rb = fp->N_RB_DL;
   nr_dltp_grant_t grants[DLTP_MAX_GRANTS];
@@ -224,7 +227,7 @@ static bool start(const NR_DL_FRAME_PARMS *fp)
   g.scratch = malloc(sizeof(float) * NR_DLTP_NSYM * (size_t)fp->N_RB_DL);
   if (!g.in || !g.out || !g.pilot || !g.e || !g.scratch) return false;
   pthread_t th;
-  if (nr_core_plan_create(&th, NULL, worker, NULL, -1) != 0) return false;
+  if (nr_core_plan_create(&th, NULL, worker, (void *)(intptr_t)nr_cell_idx(), -1) != 0) return false;
   pthread_detach(th);
   LOG_A(PHY, "SENSING: DL_TRAFFIC_PROBE on: one DL slot in %d, antenna 0, SCHED_OTHER worker; POINTA_SWEEP=%d\n", g.every, g.sweep);
   return true;
@@ -242,7 +245,8 @@ void nr_dl_traffic_probe_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t fr
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   if (!__atomic_load_n(&g.running, __ATOMIC_ACQUIRE)) {
     /* concurrent DL actors call this: start() exactly once (one worker on g.in/g.out) */
-    static pthread_mutex_t start_mu = PTHREAD_MUTEX_INITIALIZER;
+    NR_CELL_STATIC_INIT(pthread_mutex_t, start_mu, PTHREAD_MUTEX_INITIALIZER);
+#define start_mu NR_CELL_REF(start_mu)
     pthread_mutex_lock(&start_mu);
     if (!g.running && g.every) {
       if (fp->N_RB_DL > NR_DLTP_MAX_RB || !start(fp)) g.every = 0;
@@ -251,6 +255,7 @@ void nr_dl_traffic_probe_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t fr
     pthread_mutex_unlock(&start_mu);
     if (!g.running) return;
   }
+#undef start_mu
   if (pthread_mutex_trylock(&g.mu)) return;
   g.now_slot = abs_slot; /* the worker's delay clock */
   const bool take = nr_passive_acq_tdd_slot_has_downlink(abs_slot) && (g.dl_calls++ % (uint32_t)g.every) == 0
