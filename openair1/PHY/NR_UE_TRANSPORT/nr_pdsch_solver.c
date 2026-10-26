@@ -1,4 +1,6 @@
 /* Blind dedicated-PDSCH grant solver (T26b). See nr_pdsch_solver.h. */
+#include "common/utils/nr_cell.h" /* mpci A5: per-cell state (NR_CELL_STATIC) */
+#include "nr_pdsch_cell_prealloc.h"
 #include "nr_pdsch_solver.h"
 #include <math.h>
 #include <pthread.h>
@@ -103,10 +105,16 @@ typedef struct {
   uint16_t ids[SOLVER_MAX_IDS];
 } pending_t;
 
-static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
-static solver_rnti_t g_r[SOLVER_RNTIS];
-static pending_t g_p[SOLVER_PENDING];
-static uint32_t g_token = 1; /* sequence part of a token; the low 12 bits are the pending index (O(1) feedback) */
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_mu NR_CELL_REF(g_mu)
+typedef solver_rnti_t g_r_arr_t[SOLVER_RNTIS];
+NR_CELL_STATIC_HEAP(g_r_arr_t, g_r);
+#define g_r NR_CELL_HEAP_REF(g_r_arr_t, g_r)
+typedef pending_t g_p_arr_t[SOLVER_PENDING];
+NR_CELL_STATIC_HEAP(g_p_arr_t, g_p);
+#define g_p NR_CELL_HEAP_REF(g_p_arr_t, g_p)
+NR_CELL_STATIC_INIT(uint32_t, g_token, 1);
+#define g_token NR_CELL_REF(g_token) /* sequence part of a token; the low 12 bits are the pending index (O(1) feedback) */
 typedef struct {
   int32_t ids[16], key;
   int n;
@@ -119,23 +127,47 @@ typedef struct {
 static _Thread_local solver_plan_ctx_t t_plan_ctx = {.key = -1, .last_dl = -1}; /* per scan consumer */
 /* plan_ctx: the plan context (per scan consumer thread) that the grant planner reads its key, hash and slot time from. */
 static solver_plan_ctx_t *plan_ctx(void) { return &t_plan_ctx; }
-static struct { int32_t key, scr; } g_key_scr[16]; /* first solved scrambling per CORESET: its other RNTIs try it only */
-static int g_n_key_scr;
-static uint64_t g_dci_seq;
-static nr_pdsch_solver_tda_fn g_tda_fn;
-static void *g_tda_ctx;
-static nr_pdsch_solver_stats_t g_st;
+typedef struct { int32_t key, scr; } key_scr_t;
+typedef key_scr_t g_key_scr_arr_t[16];
+NR_CELL_STATIC(g_key_scr_arr_t, g_key_scr);
+#define g_key_scr NR_CELL_REF(g_key_scr) /* first solved scrambling per CORESET: its other RNTIs try it only */
+NR_CELL_STATIC(int, g_n_key_scr);
+#define g_n_key_scr NR_CELL_REF(g_n_key_scr)
+NR_CELL_STATIC(uint64_t, g_dci_seq);
+#define g_dci_seq NR_CELL_REF(g_dci_seq)
+NR_CELL_STATIC(nr_pdsch_solver_tda_fn, g_tda_fn);
+#define g_tda_fn NR_CELL_REF(g_tda_fn)
+NR_CELL_STATIC(void *, g_tda_ctx);
+#define g_tda_ctx NR_CELL_REF(g_tda_ctx)
+NR_CELL_STATIC(nr_pdsch_solver_stats_t, g_st);
+#define g_st NR_CELL_REF(g_st)
 #define LAYOUT_RECOVER 32 /* failed CRC probes after which a pruned layout set is reopened once */
-static nr_pdsch_solver_hq_fn g_hq_fn; /* DCIRV */
-static void *g_hq_ctx;
+NR_CELL_STATIC(nr_pdsch_solver_hq_fn, g_hq_fn);
+#define g_hq_fn NR_CELL_REF(g_hq_fn) /* DCIRV */
+NR_CELL_STATIC(void *, g_hq_ctx);
+#define g_hq_ctx NR_CELL_REF(g_hq_ctx)
 /* cell prior: the first solution, offered first to other RNTIs */
-static bool g_have_prior;
-static int g_prior_rep;
-static uint8_t g_prior_add_pos;
-static int8_t g_prior_table, g_prior_S_by_tda[16], g_prior_L_by_tda[16];
-static uint32_t g_lcur[SOLVER_RNTIS][16]; /* SOLVERTDDL: rotation cursor of the length search per RNTI and TDA index */
-static bool t_ov; /* SOLVERPHASE: variants being emitted are phase-override ones */
-static int t_L; /* length of the variants being emitted (0 = 14 - S); set by plan_known under g_mu */
+NR_CELL_STATIC(bool, g_have_prior);
+#define g_have_prior NR_CELL_REF(g_have_prior)
+NR_CELL_STATIC(int, g_prior_rep);
+#define g_prior_rep NR_CELL_REF(g_prior_rep)
+NR_CELL_STATIC(uint8_t, g_prior_add_pos);
+#define g_prior_add_pos NR_CELL_REF(g_prior_add_pos)
+NR_CELL_STATIC(int8_t, g_prior_table);
+#define g_prior_table NR_CELL_REF(g_prior_table)
+typedef int8_t g_prior_S_by_tda_arr_t[16];
+NR_CELL_STATIC(g_prior_S_by_tda_arr_t, g_prior_S_by_tda);
+#define g_prior_S_by_tda NR_CELL_REF(g_prior_S_by_tda)
+typedef int8_t g_prior_L_by_tda_arr_t[16];
+NR_CELL_STATIC(g_prior_L_by_tda_arr_t, g_prior_L_by_tda);
+#define g_prior_L_by_tda NR_CELL_REF(g_prior_L_by_tda)
+typedef uint32_t g_lcur_arr_t[SOLVER_RNTIS][16];
+NR_CELL_STATIC(g_lcur_arr_t, g_lcur);
+#define g_lcur NR_CELL_REF(g_lcur) /* SOLVERTDDL: rotation cursor of the length search per RNTI and TDA index */
+NR_CELL_STATIC(bool, t_ov);
+#define t_ov NR_CELL_REF(t_ov) /* SOLVERPHASE: variants being emitted are phase-override ones */
+NR_CELL_STATIC(int, t_L);
+#define t_L NR_CELL_REF(t_L) /* length of the variants being emitted (0 = 14 - S); set by plan_known under g_mu */
 
 /* nr_pdsch_solver_enabled: Callers: nr_pdsch_passive_decode.c (probe-c1 switch), nr_pdcch_blind_monitor_rt.c (RNTI routing). */
 bool nr_pdsch_solver_enabled(void)
@@ -625,7 +657,8 @@ static int tda_of(int layout, nr_dci_bits_t p)
 static void refund_untested(const pending_t *p);
 static pending_t *pend_new(void)
 {
-  static uint32_t cur;
+  NR_CELL_STATIC(uint32_t, cur);
+#define cur NR_CELL_REF(cur)
   pending_t *p = &g_p[cur]; /* FIFO: the oldest entry is the one most likely lost in the queue */
   if (p->used) {
     g_st.dropped++;
@@ -634,10 +667,16 @@ static pending_t *pend_new(void)
   cur = (cur + 1) % SOLVER_PENDING;
   return p;
 }
+#undef cur
 
-static int t_rm = 0; static bool t_learn_rm = false; /* set by plan for this grant (under g_mu) */
-static int32_t t_scr = -1; /* T26c scrambling hypothesis for this grant (-1 default) */
-static uint8_t t_comb; /* T26d combining mode for this grant's variants (0 = default) */
+NR_CELL_STATIC(int, t_rm);
+#define t_rm NR_CELL_REF(t_rm)
+NR_CELL_STATIC(bool, t_learn_rm);
+#define t_learn_rm NR_CELL_REF(t_learn_rm) /* set by plan for this grant (under g_mu) */
+NR_CELL_STATIC_INIT(int32_t, t_scr, -1);
+#define t_scr NR_CELL_REF(t_scr) /* T26c scrambling hypothesis for this grant (-1 default) */
+NR_CELL_STATIC(uint8_t, t_comb);
+#define t_comb NR_CELL_REF(t_comb) /* T26d combining mode for this grant's variants (0 = default) */
 /* Receivers in play per RNTI (frozen ISAC_RX_MRC_PER_RNTI=1): 1 best branch, 3 MRC. comb_k maps a receiver index to the id stored in the pending entry. */
 static uint8_t comb_k(int k) { return k ? 3 : 1; }
 static int comb_ci(uint8_t comb) { return comb == 3 ? 1 : comb == 4 ? 2 : comb >= 5 ? 3 : 0; }
@@ -1451,12 +1490,15 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     if (q->used && q->token == token) p = q;
   }
   if (crc_ok && (p == NULL || !credit)) { /* T26d diagnostic: a CRC pass the solver could not use */
-    static _Atomic uint64_t s_lost[2];
+    typedef _Atomic uint64_t s_lost_arr_t[2];
+    NR_CELL_STATIC(s_lost_arr_t, s_lost);
+#define s_lost NR_CELL_REF(s_lost)
     const uint64_t k = atomic_fetch_add(&s_lost[p == NULL ? 0 : 1], 1) + 1;
     if (k <= 5 || (k % 100) == 0)
       LOG_A(PHY, "SENSING: PDSCH_SOLVER lost CRC pass #%llu (%s) token=0x%08x\n", (unsigned long long)k,
             p == NULL ? "pending entry gone" : "no credit", token);
   }
+#undef s_lost
   { /* one line per credited search probe -- which hypothesis was tried */
     if (p != NULL && credit && p->phase == 0) {
       int lo = 65535, hi = -1;
@@ -1704,10 +1746,21 @@ typedef struct {
   tf_row_t row[2][4][2][3];   /* [w-1][value][mixed] (S,L) of CRC-passing decodes */
   uint8_t det_w;              /* 0 undetected, else the accepted width */
 } tf_pos_t;
-static pthread_mutex_t g_tf_mu = PTHREAD_MUTEX_INITIALIZER;
-static tf_pos_t g_tf[TF_NPOS];
-static uint8_t g_tf_S[16], g_tf_L[16];
-static int g_tf_n, g_tf_init;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_tf_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_tf_mu NR_CELL_REF(g_tf_mu)
+typedef tf_pos_t g_tf_arr_t[TF_NPOS];
+NR_CELL_STATIC(g_tf_arr_t, g_tf);
+#define g_tf NR_CELL_REF(g_tf)
+typedef uint8_t g_tf_S_arr_t[16];
+NR_CELL_STATIC(g_tf_S_arr_t, g_tf_S);
+#define g_tf_S NR_CELL_REF(g_tf_S)
+typedef uint8_t g_tf_L_arr_t[16];
+NR_CELL_STATIC(g_tf_L_arr_t, g_tf_L);
+#define g_tf_L NR_CELL_REF(g_tf_L)
+NR_CELL_STATIC(int, g_tf_n);
+#define g_tf_n NR_CELL_REF(g_tf_n)
+NR_CELL_STATIC(int, g_tf_init);
+#define g_tf_init NR_CELL_REF(g_tf_init)
 
 bool nr_tda_field_on(void)
 {
@@ -1927,4 +1980,11 @@ void nr_probe_gate_release(nr_probe_gate_t *g, int *resv)
   if (g->tokens > g->burst) g->tokens = g->burst;
   g->resv_jobs = g->resv_jobs > *resv ? g->resv_jobs - *resv : 0;
   *resv = 0;
+}
+
+/* mpci A5: allocates cell `cell`'s heap objects (zeroed) before the RX fence; see nr_pdsch_cell_prealloc.h */
+void nr_pdsch_solver_cell_prealloc(int cell)
+{
+  NR_CELL_HEAP_PREALLOC(g_p_arr_t, g_p, cell);
+  NR_CELL_HEAP_PREALLOC(g_r_arr_t, g_r, cell);
 }
