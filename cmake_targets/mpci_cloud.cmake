@@ -308,3 +308,48 @@ if(ENABLE_TESTS)
   add_test(NAME test_mpci_a4_interleave COMMAND test_mpci_a4_interleave)
 endif()
 # ---- end A4 ----
+
+# ---- A8 ----
+# Cell slots in the receiver main: the lifecycle (inventory -> admission -> prealloc -> fence -> bound starts) and the D1/B3 objects it drives are
+# linked into nr-uesoftmodem (always, not only with tests: the receiver reads cells.json from its run directory). nr_cell.c is in LOG (D2).
+add_library(nr_cell_rx STATIC
+  ${CMAKE_SOURCE_DIR}/common/utils/nr_cell_life.c
+  ${CMAKE_SOURCE_DIR}/common/utils/nr_cell_mgr.c
+  ${CMAKE_SOURCE_DIR}/common/utils/nr_cell_inventory.c
+  ${CMAKE_SOURCE_DIR}/common/utils/nr_cell_admit.c
+  ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/nr_gpu_cell.c)
+target_include_directories(nr_cell_rx PUBLIC ${CMAKE_SOURCE_DIR}/common/utils ${CMAKE_SOURCE_DIR}/openair1)
+target_link_libraries(nr-uesoftmodem PRIVATE nr_cell_rx)
+if(ENABLE_TESTS)
+  add_executable(test_nr_cell_life
+    ${CMAKE_SOURCE_DIR}/common/utils/tests/test_nr_cell_life.cpp
+    ${CMAKE_SOURCE_DIR}/common/utils/nr_cell_life.c
+    ${CMAKE_SOURCE_DIR}/common/utils/nr_cell_mgr.c
+    ${CMAKE_SOURCE_DIR}/common/utils/nr_cell.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS/nr_host_membudget.c)
+  target_include_directories(test_nr_cell_life PRIVATE ${CMAKE_SOURCE_DIR}/common/utils ${CMAKE_SOURCE_DIR}/openair1)
+  target_link_libraries(test_nr_cell_life PRIVATE nr_cell_inventory nr_cell_admit GTest::gtest GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_cell_life)
+  add_test(NAME test_nr_cell_life COMMAND test_nr_cell_life)
+  # nr_early_start.c holds one instance per cell now (nr_cell_idx()): the test binary gets the TLS index from LOG
+  target_link_libraries(test_nr_early_start PRIVATE LOG)
+  # per-cell slot clock / early-start instances: two bound threads and one re-binding thread see only their cell's values
+  add_executable(test_nr_ue_cell_clock ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/tests/nr_ue_cell_clock_test.c
+                 ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/nr_early_start.c)
+  target_include_directories(test_nr_ue_cell_clock PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/openair1)
+  target_link_libraries(test_nr_ue_cell_clock PRIVATE LOG pthread)
+  add_dependencies(tests test_nr_ue_cell_clock)
+  add_test(NAME test_nr_ue_cell_clock COMMAND test_nr_ue_cell_clock)
+endif()
+# ---- end A8 ----
+
+# ---- A8 tools ----
+# Test tool of the 2-cell replay fixture (tests/passive_rx/mpci/run_two_cell_replay.sh): stored raw captures -> POSIX IQ rings, one per cell.
+if(ENABLE_TESTS)
+  add_executable(mpci_file_pub ${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci/mpci_file_pub.c ${CMAKE_SOURCE_DIR}/radio/COMMON/raw_iq_source.c
+                 ${CMAKE_SOURCE_DIR}/radio/COMMON/shm_iq_ring.c)
+  target_include_directories(mpci_file_pub PRIVATE ${CMAKE_SOURCE_DIR}/radio/COMMON)
+  target_link_libraries(mpci_file_pub PRIVATE m pthread rt)
+  add_dependencies(tests mpci_file_pub)
+endif()
+# ---- end A8 tools ----
