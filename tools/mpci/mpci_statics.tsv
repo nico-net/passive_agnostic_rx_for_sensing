@@ -24,9 +24,10 @@ common/utils/nr_core_pool.c	439	nr_pool_release::n_long	func_static	_Atomic int	
 common/utils/nr_core_pool.c	502	nr_pool_stats_line::nm	func_static	const char *const[NR_POOL_NPRIO]	CONST	B1	auto
 common/utils/nr_core_pool.c	583	g_site	file_static	nr_pool_t *	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 common/utils/nr_core_pool.c	584	g_once	file_static	pthread_once_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	680	nr_pool_site_filter_core::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	687	tl_give	tls	int	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	756	nr_pool_site_enforce_tick::next	func_static	_Atomic uint64_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	667	g_site_test	file_static	_Atomic bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	701	nr_pool_site_filter_core::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	708	tl_give	tls	int	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	777	nr_pool_site_enforce_tick::next	func_static	_Atomic uint64_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 executables/nr-ue-ru.c	22	s_band_scan_c	file_static	uint64_t[NRUE_BAND_SCAN_MAX]	PROCESS	A8	band-wide search of the started cell (no -C): process mode, cell 0 only
 executables/nr-ue-ru.c	23	s_band_scan_i	file_static	int	PROCESS	A8	band-wide search of the started cell (no -C): process mode, cell 0 only
 executables/nr-ue-ru.c	23	s_band_scan_n	file_static	int	PROCESS	A8	band-wide search of the started cell (no -C): process mode, cell 0 only
@@ -44,67 +45,67 @@ executables/nr-ue-ru.c	851	s_radio_fo	file_static	_Atomic int [converted]	PER_CE
 executables/nr-ue-ru.c	928	nrue_ru_test_device::ru	func_static	nrUE_RU_params_t	PROCESS	A8	test fixture (NRUE_RU_SHUTDOWN_TEST)
 executables/nr-ue-ru.c	929	nrue_ru_test_device::cell	func_static	nrUE_cell_params_t	PROCESS	A8	test fixture (NRUE_RU_SHUTDOWN_TEST)
 executables/nr-ue.c	6	nr_ue_rx_synced_g	global	int	PROCESS	A8	read by the USRP driver (dlsym) to bound pre-sync radio restarts: radio-wide, set when any cell syncs
-executables/nr-ue.c	454	RU_write::deadline_warning_rate_limit	func_static	unsigned int	PROCESS	A8	log rate limit (log text only)
-executables/nr-ue.c	817	readFrame::ring_epoch_get	func_static	uint64_t (*)(void)	PROCESS	A8	dlsym cache of the radio ring epoch function (same symbol for all cells)
-executables/nr-ue.c	818	readFrame::ring_epoch_checked	func_static	bool	PROCESS	A8	dlsym cache of the radio ring epoch function (same symbol for all cells)
-executables/nr-ue.c	890	nr_ue_rebase_epoch	file_static	_Atomic int [converted]	PER_CELL	A8	converted A8: timing rebase epoch of the cell
-executables/nr-ue.c	896	nr_ue_diag_rf_timestamp	file_static	_Atomic long [converted]	PER_CELL	A8	converted A8: stream position / consumed samples of the cell
-executables/nr-ue.c	898	nr_ue_diag_samples_consumed	file_static	_Atomic long [converted]	PER_CELL	A8	converted A8: stream position / consumed samples of the cell
-executables/nr-ue.c	904	nr_ue_timing_mutation_log::left	func_static	int	PROCESS	A8	log budget (log text only)
-executables/nr-ue.c	926	g_census_pow	file_static	double [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	928	g_census_pow_n	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	942	g_census_pow_ant	file_static	g_census_dant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	953	g_census_pw2_ant	file_static	g_census_dant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	955	g_census_clip_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	958	g_census_peak_ant	file_static	g_census_iant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	960	g_census_hot_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	964	g_cls_n	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	966	g_cls_clip	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	968	g_cls_hot	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	970	g_cls_pw	file_static	g_cls_d_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	972	g_cls_tn	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	974	g_cls_tclip	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	976	g_cls_thot	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	978	g_census_fs	file_static	int [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	980	g_census_smp_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	982	g_census_pw2_n	file_static	uint64_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	988	g_pwr_ref_fn	file_static	double (*)(int)	PROCESS	A8	dlsym cache of the radio power reference (radio-wide)
-executables/nr-ue.c	989	g_pwr_ref_looked_up	file_static	int	PROCESS	A8	dlsym cache of the radio power reference (radio-wide)
-executables/nr-ue.c	998	g_census_pow_ant_n	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1000	g_census_ssb_slots	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1002	g_census_slots	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1428	UE_thread::s_band_scan_attempts	func_static	int	PROCESS	A8	band-wide search of the started cell (process mode, cell 0 only)
-executables/nr-ue.c	1723	UE_thread::s_rxts_prev_consumed	func_static	long [converted]	PER_CELL	A8	converted A8: stream continuity of the cell
-executables/nr-ue.c	1725	UE_thread::s_rxts_discont_total	func_static	long [converted]	PER_CELL	A8	converted A8: stream continuity of the cell
-executables/nr-ue.c	1727	UE_thread::ring_epoch_get	func_static	uint64_t (*)(void)	PROCESS	A8	dlsym cache (same symbol for all cells)
-executables/nr-ue.c	1728	UE_thread::ring_epoch_checked	func_static	int	PROCESS	A8	dlsym cache flag
-executables/nr-ue.c	1729	UE_thread::ring_epoch_seen	func_static	uint64_t [converted]	PER_CELL	A8	converted A8: last ring epoch seen by this cell slot thread
-executables/nr-ue.c	1731	UE_thread::ring_epoch_seen_valid	func_static	bool [converted]	PER_CELL	A8	converted A8: last ring epoch seen by this cell slot thread
-executables/nr-ue.c	2004	UE_thread::s_ref	func_static	double [converted]	PER_CELL	A8	converted A8: signal reference of the cell stream
-executables/nr-ue.c	2006	UE_thread::s_bad	func_static	int [converted]	PER_CELL	A8	converted A8
-executables/nr-ue.c	2008	UE_thread::s_fires	func_static	long [converted]	PER_CELL	A8	converted A8
-executables/nr-ue.c	2117	UE_thread::cn	func_static	const char *const[3]	CONST	A8	auto
-executables/nr-ue.c	2219	UE_thread::s_reinits	func_static	int	PROCESS	A8	full device re-init budget: nrue_ru_reinit re-opens every RU (radio-wide)
-executables/nr-uesoftmodem.c	61	config_frames	global	unsigned short[4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	104	thread_struct	global	THREAD_STRUCT	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	105	nrUE_params	global	nrUE_params_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	109	RC	global	RAN_CONTEXT_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	110	oai_exit	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	112	downlink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	113	uplink_frequency_offset	global	int64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	114	sidelink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	117	cpuf	global	double	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	175	fo_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	175	ssb_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	246	g_cells	file_static	nr_cell_life_t	PROCESS	A8	A8: cell lifecycle (owner of the cell manager; one control thread)
-executables/nr-uesoftmodem.c	247	g_ncells	file_static	int	PROCESS	A8	A8: number of served cells
-executables/nr-uesoftmodem.c	248	g_inv_watch	file_static	nr_cell_inventory_watch_t	PROCESS	A8	A8: cells.json watcher (one control thread)
-executables/nr-uesoftmodem.c	249	g_uectx_path	file_static	char[PATH_MAX + 32]	PROCESS	A8	A8: cell 0 uectx path; cells k>0 derive theirs with nr_cell_path
-executables/nr-uesoftmodem.c	535	trigger_deregistration::deregistration_sent	func_static	bool	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	546	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
-executables/nr-uesoftmodem.c	559	NB_UE_INST	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	560	uniqCfg	global	configmodule_interface_t *	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	561	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-ue.c	457	RU_write::deadline_warning_rate_limit	func_static	unsigned int	PROCESS	A8	log rate limit (log text only)
+executables/nr-ue.c	821	readFrame::ring_epoch_get	func_static	uint64_t (*)(void)	PROCESS	A8	dlsym cache of the radio ring epoch function (same symbol for all cells)
+executables/nr-ue.c	822	readFrame::ring_epoch_checked	func_static	bool	PROCESS	A8	dlsym cache of the radio ring epoch function (same symbol for all cells)
+executables/nr-ue.c	894	nr_ue_rebase_epoch	file_static	_Atomic int [converted]	PER_CELL	A8	converted A8: timing rebase epoch of the cell
+executables/nr-ue.c	900	nr_ue_diag_rf_timestamp	file_static	_Atomic long [converted]	PER_CELL	A8	converted A8: stream position / consumed samples of the cell
+executables/nr-ue.c	902	nr_ue_diag_samples_consumed	file_static	_Atomic long [converted]	PER_CELL	A8	converted A8: stream position / consumed samples of the cell
+executables/nr-ue.c	908	nr_ue_timing_mutation_log::left	func_static	int	PROCESS	A8	log budget (log text only)
+executables/nr-ue.c	930	g_census_pow	file_static	double [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	932	g_census_pow_n	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	946	g_census_pow_ant	file_static	g_census_dant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	957	g_census_pw2_ant	file_static	g_census_dant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	959	g_census_clip_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	962	g_census_peak_ant	file_static	g_census_iant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	964	g_census_hot_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	968	g_cls_n	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	970	g_cls_clip	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	972	g_cls_hot	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	974	g_cls_pw	file_static	g_cls_d_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	976	g_cls_tn	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	978	g_cls_tclip	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	980	g_cls_thot	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	982	g_census_fs	file_static	int [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	984	g_census_smp_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	986	g_census_pw2_n	file_static	uint64_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	992	g_pwr_ref_fn	file_static	double (*)(int)	PROCESS	A8	dlsym cache of the radio power reference (radio-wide)
+executables/nr-ue.c	993	g_pwr_ref_looked_up	file_static	int	PROCESS	A8	dlsym cache of the radio power reference (radio-wide)
+executables/nr-ue.c	1002	g_census_pow_ant_n	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1004	g_census_ssb_slots	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1006	g_census_slots	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1432	UE_thread::s_band_scan_attempts	func_static	int	PROCESS	A8	band-wide search of the started cell (process mode, cell 0 only)
+executables/nr-ue.c	1727	UE_thread::s_rxts_prev_consumed	func_static	long [converted]	PER_CELL	A8	converted A8: stream continuity of the cell
+executables/nr-ue.c	1729	UE_thread::s_rxts_discont_total	func_static	long [converted]	PER_CELL	A8	converted A8: stream continuity of the cell
+executables/nr-ue.c	1731	UE_thread::ring_epoch_get	func_static	uint64_t (*)(void)	PROCESS	A8	dlsym cache (same symbol for all cells)
+executables/nr-ue.c	1732	UE_thread::ring_epoch_checked	func_static	int	PROCESS	A8	dlsym cache flag
+executables/nr-ue.c	1733	UE_thread::ring_epoch_seen	func_static	uint64_t [converted]	PER_CELL	A8	converted A8: last ring epoch seen by this cell slot thread
+executables/nr-ue.c	1735	UE_thread::ring_epoch_seen_valid	func_static	bool [converted]	PER_CELL	A8	converted A8: last ring epoch seen by this cell slot thread
+executables/nr-ue.c	2009	UE_thread::s_ref	func_static	double [converted]	PER_CELL	A8	converted A8: signal reference of the cell stream
+executables/nr-ue.c	2011	UE_thread::s_bad	func_static	int [converted]	PER_CELL	A8	converted A8
+executables/nr-ue.c	2013	UE_thread::s_fires	func_static	long [converted]	PER_CELL	A8	converted A8
+executables/nr-ue.c	2122	UE_thread::cn	func_static	const char *const[3]	CONST	A8	auto
+executables/nr-ue.c	2224	UE_thread::s_reinits	func_static	int	PROCESS	A8	full device re-init budget: nrue_ru_reinit re-opens every RU (radio-wide)
+executables/nr-uesoftmodem.c	64	config_frames	global	unsigned short[4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	105	thread_struct	global	THREAD_STRUCT	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	106	nrUE_params	global	nrUE_params_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	110	RC	global	RAN_CONTEXT_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	111	oai_exit	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	113	downlink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	114	uplink_frequency_offset	global	int64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	115	sidelink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	118	cpuf	global	double	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	176	fo_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	176	ssb_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	247	g_cells	file_static	nr_cell_life_t	PROCESS	A8	A8: cell lifecycle (owner of the cell manager; one control thread)
+executables/nr-uesoftmodem.c	248	g_ncells	file_static	int	PROCESS	A8	A8: number of served cells
+executables/nr-uesoftmodem.c	249	g_inv_watch	file_static	nr_cell_inventory_watch_t	PROCESS	A8	A8: cells.json watcher (one control thread)
+executables/nr-uesoftmodem.c	250	g_uectx_path	file_static	char[PATH_MAX + 32]	PROCESS	A8	A8: cell 0 uectx path; cells k>0 derive theirs with nr_cell_path
+executables/nr-uesoftmodem.c	544	trigger_deregistration::deregistration_sent	func_static	bool	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	555	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
+executables/nr-uesoftmodem.c	568	NB_UE_INST	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	569	uniqCfg	global	configmodule_interface_t *	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	570	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_COLS	global	constexpr uint32_t	CONST	G1	auto
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_ROWS	global	constexpr uint32_t	CONST	G1	auto
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_Z	global	constexpr uint32_t	CONST	G1	auto
@@ -265,14 +266,14 @@ openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	13	breaker_lock	file_static
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	14	retry_after_ms	file_static	uint64_t	PROCESS	A7	GPU circuit breaker (shared device)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	15	failures	file_static	unsigned	PROCESS	A7	GPU circuit breaker (shared device)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	221	g_gpu_disabled	file_static	volatile int	PROCESS	A7	process-wide GPU-off switch set by pipeline_init on a GPU preallocation failure; the GPU module (G) holds ONE workspace, so per-cell disable needs G per-cell GPU state (site listed in MPCI-A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	22	nr_csirs_disc_periods	global	const uint16_t[NR_CSIRS_DISC_NUM_PERIODS]	CONST	A7	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	24	nr_csirs_disc_alloc_unified	global	void * (*)(size_t bytes)	PROCESS	A7	GPU allocator hook, set once by load_module
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	25	nr_csirs_disc_free_unified	global	void (*)(void *ptr)	PROCESS	A7	GPU allocator hook, set once by load_module
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	26	nr_csirs_disc_process_hook	global	void (*)(nr_csirs_disc_ring_t *ring)	PROCESS	A7	function pointer set once by init_once; the hook is called with the cell worker ring
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	27	csirs_disc_feed_drops	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics), declared in nr_csirs_disc.h and read by files outside A7; per-cell split is a metrics-owner follow-up
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	56	g_worker	file_static	disc_worker_t [converted]	PER_CELL	A7	worker ring + TD binding + wake state + thread of the cell; the worker thread is created bound (nr_cell_thread_create)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	70	cell_mem_lock	file_static	pthread_mutex_t	PROCESS	A7	guards cell_ledger
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	71	cell_ledger	file_static	struct {}[NR_CELL_MAX]	PROCESS	A7	host-RAM ledger indexed explicitly by cell (one nr_host_membudget commit per module = sum over cells); G1 reads it via nr_csirs_disc_cell_mem
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	23	nr_csirs_disc_periods	global	const uint16_t[NR_CSIRS_DISC_NUM_PERIODS]	CONST	A7	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	25	nr_csirs_disc_alloc_unified	global	void * (*)(size_t bytes)	PROCESS	A7	GPU allocator hook, set once by load_module
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	26	nr_csirs_disc_free_unified	global	void (*)(void *ptr)	PROCESS	A7	GPU allocator hook, set once by load_module
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	27	nr_csirs_disc_process_hook	global	void (*)(nr_csirs_disc_ring_t *ring)	PROCESS	A7	function pointer set once by init_once; the hook is called with the cell worker ring
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	28	csirs_disc_feed_drops	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics), declared in nr_csirs_disc.h and read by files outside A7; per-cell split is a metrics-owner follow-up
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	57	g_worker	file_static	disc_worker_t [converted]	PER_CELL	A7	worker ring + TD binding + wake state + thread of the cell; the worker thread is created bound (nr_cell_thread_create)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	71	cell_mem_lock	file_static	pthread_mutex_t	PROCESS	A7	guards cell_ledger
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	72	cell_ledger	file_static	struct {}[NR_CELL_MAX]	PROCESS	A7	host-RAM ledger indexed explicitly by cell (one nr_host_membudget commit per module = sum over cells); G1 reads it via nr_csirs_disc_cell_mem
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	10	periods	file_static	const int[]	CONST	A7	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	183	history	file_static	history_t [converted]	PER_CELL	A7	cumulative footprint history of the cell ring (arrays heap, sized from the cell ring geometry)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	185	csirs_disc_cpu_detect_batches	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
@@ -868,175 +869,176 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2690	g_janon_done	file_
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2692	g_janon_found	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2694	g_janon_busy_ns	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2724	janon_worker::it	tls	janon_item_t	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2779	janon_worker::s_n	func_static	_Atomic unsigned [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2797	janon_worker::s_hit_overflow	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2827	janon_submit::once	func_static	pthread_once_t [converted]	PER_CELL	A4	converted: once-flag of a per-cell start (worker thread / hook of this cell); each cell starts its own
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2945	g_ussh	file_static	g_ussh_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2947	g_ussh_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2949	kUsshA	file_static	const uint32_t[3]	CONST	A4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3029	ussh_note_ex::s_rot	func_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3061	g_ulssh_bad	file_static	g_ulssh_bad_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3139	sweep_evidence_rnti::hits	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3227	blind_dmrs_rank_candidates::calls	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3229	blind_dmrs_rank_candidates::offered	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3231	blind_dmrs_rank_candidates::selected	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3233	blind_dmrs_rank_candidates::audits	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3235	blind_dmrs_rank_candidates::known_calls	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3279	g_lb_n_items	tls	int	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3279	g_lb_n_vec	tls	int	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3280	g_lb_vstride	tls	int	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3304	g_lb_vec	tls	int16_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3307	g_lb_vidx	tls	uint16_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3308	g_lb_len	tls	uint16_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3309	g_lb_al	tls	uint8_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3310	g_lb_crc	tls	uint32_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3311	g_lb_pl	tls	nr_dci_bits_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3312	g_lb_ok	tls	uint8_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3313	g_lb_pool	tls	void *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3351	g_lb_slot	tls	lane_batch_slot_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3352	g_lb_flushed	tls	int	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3418	lane_batch_flush::s_why	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3439	lane_batch_flush::s_calls	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3441	lane_batch_flush::s_items	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3455	g_lane_sweep_ctx	tls	nr_pdcch_autodiscover_sweep_ctx_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3456	g_lane_disc_cand	tls	nr_pdcch_autodiscover_cand_t[NR_PDCCH_LOOKAHEAD_MAX][45]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3457	g_lane_disc_n	tls	int[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3458	g_lane_needs_sweep	tls	uint8_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3459	g_lane_geom_snap	tls	nr_pdcch_lookahead_geom_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3521	g_sweep_cache	tls	sweep_batch_cache_t	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3541	sweep_gpu_prefill::vec	tls	int16_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_VSTRIDE]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3542	sweep_gpu_prefill::vidx	tls	uint16_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3543	sweep_gpu_prefill::lens	tls	uint16_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3544	sweep_gpu_prefill::als	tls	uint8_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3545	sweep_gpu_prefill::crcs	tls	uint32_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3546	sweep_gpu_prefill::pls	tls	nr_dci_bits_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3547	sweep_gpu_prefill::oks	tls	uint8_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3588	sweep_gpu_prefill::s_batches	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3590	sweep_gpu_prefill::s_items	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3741	nr_pdcch_autodiscover_length_scorer_inner::s_bh	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3762	nr_pdcch_autodiscover_length_scorer_inner::s_hit	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3764	nr_pdcch_autodiscover_length_scorer_inner::s_miss	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3838	nr_pdcch_autodiscover_length_scorer_inner::s_janon	func_static	_Atomic unsigned [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3983	g_pa_ns	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3985	g_pa_n	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3987	g_pa_max	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4012	g_pbwp	file_static	nr_pbwp_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4014	g_pbwp_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4021	pbwp_corr_run::s_cs_logged	func_static	_Atomic bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4024	pbwp_corr_run::y	func_static	y_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4185	nr_pdcch_polar_batch_stage::arena	tls	int16_t[CAP][MAXE]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4302	nr_pdcch_blind_monitor_process_body::s_queue_tried	func_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4329	nr_pdcch_blind_monitor_process_body::s_cache_pci	func_static	uint16_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4359	nr_pdcch_blind_monitor_process_body::s_idsw_buf	func_static	c16_t * [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4375	nr_pdcch_blind_monitor_process_body::discovery_duty_tick	func_static	uint32_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4466	nr_pdcch_blind_monitor_process_body::s_ra_occ	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4503	nr_pdcch_blind_monitor_process_body::s_scan_tried	func_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4555	s_dedupe_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4558	s_dedupe	file_static	s_dedupe_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4560	s_dedupe_w	file_static	unsigned [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4562	g_c0uss_unique	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4564	g_bank_accepts	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4566	g_dup_dropped	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4568	t_bank_index	tls	int	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4570	t_bank_slot	tls	uint64_t	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4664	g_inline_drop_epoch	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4734	occasion_reconf_prologue::hook_once	func_static	pthread_once_t [converted]	PER_CELL	A4	converted: once-flag of a per-cell start (worker thread / hook of this cell); each cell starts its own
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4736	occasion_reconf_prologue::last_tick_slot	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4738	occasion_reconf_prologue::last_c0_unique	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4767	g_disc_q	file_static	nr_dq_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4769	g_disc_pub_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4772	g_disc_pub	file_static	g_disc_pub_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4774	g_disc_drop_epoch	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4776	g_disc_jobs	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4778	g_disc_pending_poll	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4780	g_disc_once	file_static	pthread_once_t [converted]	PER_CELL	A4	converted: once-flag of a per-cell start (worker thread / hook of this cell); each cell starts its own
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4787	disc_worker::cfg	tls	nr_pdcch_blind_monitor_cfg_t	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4980	nr_pdcch_blind_monitor_run_occasion::s_dbud_skip	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4985	nr_pdcch_blind_monitor_run_occasion::s_streak	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5071	nr_pdcch_blind_monitor_run_occasion::s_occ	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5073	nr_pdcch_blind_monitor_run_occasion::s_u0	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5075	nr_pdcch_blind_monitor_run_occasion::s_b0	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5077	nr_pdcch_blind_monitor_run_occasion::s_closed	func_static	bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5115	nr_pdcch_blind_monitor_run_occasion::s_disc_skipped	func_static	uint32_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5117	nr_pdcch_blind_monitor_run_occasion::s_disc_run	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5119	nr_pdcch_blind_monitor_run_occasion::s_disc_yield	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5139	nr_pdcch_blind_monitor_run_occasion::css_tick	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5179	g_sp_t0	file_static	g_sp_t0_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5182	g_sp_hits	file_static	g_sp_hits_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5185	g_sp_tid	file_static	g_sp_tid_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5187	g_sp_n	file_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5189	t_sp_slot	tls	int	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5190	g_sp_ms	file_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5202	slowpass_handler::m	func_static	const char[]	CONST	A4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5240	slowpass_enter::started	func_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5272	occ1_walk_tog	file_static	occ1_walk_tog_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5378	nr_pdcch_blind_monitor_run_occasion_one::s_occ	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5384	nr_pdcch_blind_monitor_run_occasion_one::s_css0_runs	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5436	nr_pdcch_blind_monitor_run_occasion_one::ul_seed_logged	func_static	_Atomic bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5461	nr_pdcch_blind_monitor_run_occasion_one::previous_geometry	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5590	nr_pdcch_blind_monitor_run_occasion_one::al_order	func_static	const int[4]	CONST	A4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5696	nr_pdcch_blind_monitor_run_occasion_one::s_ladder_n	func_static	_Atomic unsigned long [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5747	nr_pdcch_blind_monitor_run_occasion_one::s_pbwp_own_len	func_static	uint16_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5749	nr_pdcch_blind_monitor_run_occasion_one::s_pbwp_own_size	func_static	uint16_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5751	nr_pdcch_blind_monitor_run_occasion_one::s_pbwp_own_ms	func_static	int64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5798	nr_pdcch_blind_monitor_run_occasion_one::s_unres_tick	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5852	nr_pdcch_blind_monitor_run_occasion_one::s_probe_tick	func_static	uint32_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5890	nr_pdcch_blind_monitor_run_occasion_one::s_occ10	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5939	nr_pdcch_blind_monitor_run_occasion_one::s_fmt_logged	func_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6015	nr_pdcch_blind_monitor_run_occasion_one::t_fc	tls	c16_t *[NB_ANTENNAS_RX]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6016	nr_pdcch_blind_monitor_run_occasion_one::t_fk	tls	struct {}	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6070	nr_pdcch_blind_monitor_run_occasion_one::gpu_llr	tls	int16_t[2 * NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6101	nr_pdcch_blind_monitor_run_occasion_one::s_nid_next_ns	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6109	nr_pdcch_blind_monitor_run_occasion_one::t_cj	tls	pbwp_corr_job_t	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6110	nr_pdcch_blind_monitor_run_occasion_one::fep1	tls	c16_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6190	nr_pdcch_blind_monitor_run_occasion_one::rank_visit	tls	uint64_t	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6191	nr_pdcch_blind_monitor_run_occasion_one::rank_lane_visit	tls	uint64_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6259	nr_pdcch_blind_monitor_run_occasion_one::s_idx_left	func_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6520	nr_pdcch_blind_monitor_run_occasion_one::dbg	func_static	int	PROCESS	A4	diagnostic env switch resolved once, identical for all cells
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7077	nr_pdcch_blind_monitor_run_occasion_one::s_cfar_z	func_static	const double	CONST	A4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7315	nr_pdcch_blind_monitor_run_occasion_one::s_pdcch_e_rx2	tls	c16_t[NR_MAX_PDCCH_SIZE]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7334	nr_pdcch_blind_monitor_run_occasion_one::s_p2_hyp	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7340	nr_pdcch_blind_monitor_run_occasion_one::s_p2_geom	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7373	nr_pdcch_blind_monitor_run_occasion_one::al_b	func_static	const int[4]	CONST	A4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7463	nr_pdcch_blind_monitor_run_occasion_one::s_lane_re	tls	c16_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7471	nr_pdcch_blind_monitor_run_occasion_one::pdcch_llr_lane	tls	c16_t[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7498	nr_pdcch_blind_monitor_run_occasion_one::pdcch_llr_union	tls	c16_t[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8332	nr_pdcch_blind_monitor_run_occasion_one::s_ul_type0_booked	func_static	_Atomic unsigned long [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8376	nr_pdcch_blind_monitor_run_occasion_one::logged00	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8487	nr_pdcch_blind_monitor_run_occasion_one::raw_dl_count	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8514	nr_pdcch_blind_monitor_run_occasion_one::s_unread	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8713	nr_pdcch_blind_monitor_run_occasion_one::s_dq	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8788	nr_pdcch_blind_monitor_run_occasion_one::s_scr_logged	func_static	s_scr_logged_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9036	nr_pdcch_blind_monitor_run_occasion_one::s_hq_set	func_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9051	nr_pdcch_blind_monitor_run_occasion_one::s_tda_set	func_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9055	nr_pdcch_blind_monitor_run_occasion_one::s_gid	tls	uint8_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9056	nr_pdcch_blind_monitor_run_occasion_one::s_ids	tls	uint16_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9056	nr_pdcch_blind_monitor_run_occasion_one::s_sorted	tls	uint16_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9056	nr_pdcch_blind_monitor_run_occasion_one::s_visit	tls	uint16_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9057	nr_pdcch_blind_monitor_run_occasion_one::s_fk	tls	uint8_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9101	nr_pdcch_blind_monitor_run_occasion_one::fk	tls	dci11_fclass_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9158	nr_pdcch_blind_monitor_run_occasion_one::s_vkey	tls	uint32_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9159	nr_pdcch_blind_monitor_run_occasion_one::s_vgrp	tls	int16_t *	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9223	nr_pdcch_blind_monitor_run_occasion_one::s_rp	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9324	nr_pdcch_blind_monitor_run_occasion_one::s_ids	func_static	s_ids_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9326	nr_pdcch_blind_monitor_run_occasion_one::s_n	func_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9344	nr_pdcch_blind_monitor_run_occasion_one::s_last_key	func_static	s_last_key_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9347	nr_pdcch_blind_monitor_run_occasion_one::s_last_cnt	func_static	s_last_cnt_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9405	nr_pdcch_blind_monitor_run_occasion_one::s_weak	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9458	nr_pdcch_blind_monitor_run_occasion_one::s_tfd	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9493	nr_pdcch_blind_monitor_run_occasion_one::num_l0	func_static	const uint8_t[18]	CONST	A4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9622	nr_pdcch_blind_monitor_run_occasion_one::s_clash_n	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9819	nr_pdcch_blind_monitor_run_occasion_one::isac_h	tls	float[NR_PDCCH_BLIND_MAX_ANT * 2 * 273 * NR_NB_SC_PER_RB]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9820	nr_pdcch_blind_monitor_run_occasion_one::isac_k	tls	uint32_t[273 * NR_NB_SC_PER_RB]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9821	nr_pdcch_blind_monitor_run_occasion_one::isac_l	tls	uint32_t[273 * NR_NB_SC_PER_RB]	TLS	A4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10249	nr_pdcch_blind_monitor_run_occasion_one::acq_first_logged	func_static	bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10258	nr_pdcch_blind_monitor_run_occasion_one::acq_last_sig	func_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10341	dl_gpu_memory	file_static	void (*)(uint64_t *, uint64_t *)	PROCESS	A4	GPU memory/transfer query hook registered once by the GPU plugin (process-wide GPU)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10342	dl_gpu_transfers	file_static	void (*)(uint64_t *, uint64_t *)	PROCESS	A4	GPU transfer query hook registered once by the GPU plugin (process-wide GPU)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10384	nr_dl_gpu_warmup::prepared	func_static	bool	PROCESS	A4	one-time process-wide GPU warm-up flag
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10405	nr_dl_gpu_warmup::modules	func_static	const char *[]	CONST	A4	module name table, never written
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10428	nr_dl_gw_pool_warmup::done	func_static	bool	PROCESS	A4	one-time process-wide pool warm-up flag
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10503	isac_segv_bt_install::alt	func_static	char[65536]	PROCESS	A4	sigaltstack buffer of the process-wide SIGSEGV backtrace handler
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2783	janon_worker::s_n	func_static	_Atomic unsigned [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2801	janon_worker::s_hit_overflow	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2832	janon_submit::once	func_static	pthread_once_t [converted]	PER_CELL	A4	converted: once-flag of a per-cell start (worker thread / hook of this cell); each cell starts its own
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2950	g_ussh	file_static	g_ussh_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2952	g_ussh_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2954	kUsshA	file_static	const uint32_t[3]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3034	ussh_note_ex::s_rot	func_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3066	g_ulssh_bad	file_static	g_ulssh_bad_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3144	sweep_evidence_rnti::hits	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3232	blind_dmrs_rank_candidates::calls	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3234	blind_dmrs_rank_candidates::offered	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3236	blind_dmrs_rank_candidates::selected	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3238	blind_dmrs_rank_candidates::audits	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3240	blind_dmrs_rank_candidates::known_calls	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3284	g_lb_n_items	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3284	g_lb_n_vec	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3285	g_lb_vstride	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3309	g_lb_vec	tls	int16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3312	g_lb_vidx	tls	uint16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3313	g_lb_len	tls	uint16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3314	g_lb_al	tls	uint8_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3315	g_lb_crc	tls	uint32_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3316	g_lb_pl	tls	nr_dci_bits_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3317	g_lb_ok	tls	uint8_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3318	g_lb_pool	tls	void *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3356	g_lb_slot	tls	lane_batch_slot_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3357	g_lb_flushed	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3423	lane_batch_flush::s_why	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3444	lane_batch_flush::s_calls	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3446	lane_batch_flush::s_items	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3460	g_lane_sweep_ctx	tls	nr_pdcch_autodiscover_sweep_ctx_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3461	g_lane_disc_cand	tls	nr_pdcch_autodiscover_cand_t[NR_PDCCH_LOOKAHEAD_MAX][45]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3462	g_lane_disc_n	tls	int[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3463	g_lane_needs_sweep	tls	uint8_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3464	g_lane_geom_snap	tls	nr_pdcch_lookahead_geom_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3526	g_sweep_cache	tls	sweep_batch_cache_t	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3546	sweep_gpu_prefill::vec	tls	int16_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_VSTRIDE]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3547	sweep_gpu_prefill::vidx	tls	uint16_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3548	sweep_gpu_prefill::lens	tls	uint16_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3549	sweep_gpu_prefill::als	tls	uint8_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3550	sweep_gpu_prefill::crcs	tls	uint32_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3551	sweep_gpu_prefill::pls	tls	nr_dci_bits_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3552	sweep_gpu_prefill::oks	tls	uint8_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3593	sweep_gpu_prefill::s_batches	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3595	sweep_gpu_prefill::s_items	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3746	nr_pdcch_autodiscover_length_scorer_inner::s_bh	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3767	nr_pdcch_autodiscover_length_scorer_inner::s_hit	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3769	nr_pdcch_autodiscover_length_scorer_inner::s_miss	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3843	nr_pdcch_autodiscover_length_scorer_inner::s_janon	func_static	_Atomic unsigned [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3988	g_pa_ns	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3990	g_pa_n	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3992	g_pa_max	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4017	g_pbwp	file_static	nr_pbwp_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4019	g_pbwp_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4026	pbwp_corr_run::s_cs_logged	func_static	_Atomic bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4029	pbwp_corr_run::y	func_static	y_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4190	nr_pdcch_polar_batch_stage::arena	tls	int16_t[CAP][MAXE]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4307	nr_pdcch_blind_monitor_process_body::s_queue_tried	func_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4334	nr_pdcch_blind_monitor_process_body::s_cache_pci	func_static	uint16_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4364	nr_pdcch_blind_monitor_process_body::s_idsw_buf	func_static	c16_t * [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4380	nr_pdcch_blind_monitor_process_body::discovery_duty_tick	func_static	uint32_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4471	nr_pdcch_blind_monitor_process_body::s_ra_occ	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4508	nr_pdcch_blind_monitor_process_body::s_scan_tried	func_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4560	s_dedupe_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4563	s_dedupe	file_static	s_dedupe_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4565	s_dedupe_w	file_static	unsigned [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4567	g_c0uss_unique	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4569	g_bank_accepts	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4571	g_dup_dropped	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4573	t_bank_index	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4575	t_bank_slot	tls	uint64_t	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4669	g_inline_drop_epoch	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4739	occasion_reconf_prologue::hook_once	func_static	pthread_once_t [converted]	PER_CELL	A4	converted: once-flag of a per-cell start (worker thread / hook of this cell); each cell starts its own
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4741	occasion_reconf_prologue::last_tick_slot	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4743	occasion_reconf_prologue::last_c0_unique	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4772	g_disc_q	file_static	nr_dq_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4774	g_disc_pub_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4777	g_disc_pub	file_static	g_disc_pub_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4779	g_disc_drop_epoch	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4781	g_disc_jobs	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4783	g_disc_pending_poll	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4785	g_disc_once	file_static	pthread_once_t [converted]	PER_CELL	A4	converted: once-flag of a per-cell start (worker thread / hook of this cell); each cell starts its own
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4792	disc_worker::cfg	tls	nr_pdcch_blind_monitor_cfg_t	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4985	nr_pdcch_blind_monitor_run_occasion::s_dbud_skip	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4990	nr_pdcch_blind_monitor_run_occasion::s_streak	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5076	nr_pdcch_blind_monitor_run_occasion::s_occ	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5078	nr_pdcch_blind_monitor_run_occasion::s_u0	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5080	nr_pdcch_blind_monitor_run_occasion::s_b0	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5082	nr_pdcch_blind_monitor_run_occasion::s_closed	func_static	bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5120	nr_pdcch_blind_monitor_run_occasion::s_disc_skipped	func_static	uint32_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5122	nr_pdcch_blind_monitor_run_occasion::s_disc_run	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5124	nr_pdcch_blind_monitor_run_occasion::s_disc_yield	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5144	nr_pdcch_blind_monitor_run_occasion::css_tick	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5184	g_sp_t0	file_static	g_sp_t0_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5187	g_sp_hits	file_static	g_sp_hits_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5190	g_sp_tid	file_static	g_sp_tid_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5192	g_sp_n	file_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5194	t_sp_slot	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5195	g_sp_ms	file_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5207	slowpass_handler::m	func_static	const char[]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5245	slowpass_enter::started	func_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5277	occ1_walk_tog	file_static	occ1_walk_tog_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5383	nr_pdcch_blind_monitor_run_occasion_one::s_occ	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5389	nr_pdcch_blind_monitor_run_occasion_one::s_css0_runs	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5441	nr_pdcch_blind_monitor_run_occasion_one::ul_seed_logged	func_static	_Atomic bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5466	nr_pdcch_blind_monitor_run_occasion_one::previous_geometry	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5595	nr_pdcch_blind_monitor_run_occasion_one::al_order	func_static	const int[4]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5701	nr_pdcch_blind_monitor_run_occasion_one::s_ladder_n	func_static	_Atomic unsigned long [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5752	nr_pdcch_blind_monitor_run_occasion_one::s_pbwp_own_len	func_static	uint16_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5754	nr_pdcch_blind_monitor_run_occasion_one::s_pbwp_own_size	func_static	uint16_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5756	nr_pdcch_blind_monitor_run_occasion_one::s_pbwp_own_ms	func_static	int64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5803	nr_pdcch_blind_monitor_run_occasion_one::s_unres_tick	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5857	nr_pdcch_blind_monitor_run_occasion_one::s_probe_tick	func_static	uint32_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5895	nr_pdcch_blind_monitor_run_occasion_one::s_occ10	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5944	nr_pdcch_blind_monitor_run_occasion_one::s_fmt_logged	func_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6020	nr_pdcch_blind_monitor_run_occasion_one::t_fc	tls	c16_t *[NB_ANTENNAS_RX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6021	nr_pdcch_blind_monitor_run_occasion_one::t_fk	tls	struct {}	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6075	nr_pdcch_blind_monitor_run_occasion_one::gpu_llr	tls	int16_t[2 * NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6106	nr_pdcch_blind_monitor_run_occasion_one::s_nid_next_ns	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6114	nr_pdcch_blind_monitor_run_occasion_one::t_cj	tls	pbwp_corr_job_t	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6115	nr_pdcch_blind_monitor_run_occasion_one::fep1	tls	c16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6195	nr_pdcch_blind_monitor_run_occasion_one::rank_visit	tls	uint64_t	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6196	nr_pdcch_blind_monitor_run_occasion_one::rank_lane_visit	tls	uint64_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6264	nr_pdcch_blind_monitor_run_occasion_one::s_idx_left	func_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6525	nr_pdcch_blind_monitor_run_occasion_one::dbg	func_static	int	PROCESS	A4	diagnostic env switch resolved once, identical for all cells
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6705	nr_pdcch_blind_monitor_run_occasion_one::n_empty_geom	func_static	_Atomic uint32_t	PROCESS	A4	log-only running count of empty CORESET-walk candidates (all cells)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7086	nr_pdcch_blind_monitor_run_occasion_one::s_cfar_z	func_static	const double	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7324	nr_pdcch_blind_monitor_run_occasion_one::s_pdcch_e_rx2	tls	c16_t[NR_MAX_PDCCH_SIZE]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7343	nr_pdcch_blind_monitor_run_occasion_one::s_p2_hyp	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7349	nr_pdcch_blind_monitor_run_occasion_one::s_p2_geom	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7382	nr_pdcch_blind_monitor_run_occasion_one::al_b	func_static	const int[4]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7472	nr_pdcch_blind_monitor_run_occasion_one::s_lane_re	tls	c16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7480	nr_pdcch_blind_monitor_run_occasion_one::pdcch_llr_lane	tls	c16_t[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7507	nr_pdcch_blind_monitor_run_occasion_one::pdcch_llr_union	tls	c16_t[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8341	nr_pdcch_blind_monitor_run_occasion_one::s_ul_type0_booked	func_static	_Atomic unsigned long [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8385	nr_pdcch_blind_monitor_run_occasion_one::logged00	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8496	nr_pdcch_blind_monitor_run_occasion_one::raw_dl_count	func_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8523	nr_pdcch_blind_monitor_run_occasion_one::s_unread	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8722	nr_pdcch_blind_monitor_run_occasion_one::s_dq	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8797	nr_pdcch_blind_monitor_run_occasion_one::s_scr_logged	func_static	s_scr_logged_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9045	nr_pdcch_blind_monitor_run_occasion_one::s_hq_set	func_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9060	nr_pdcch_blind_monitor_run_occasion_one::s_tda_set	func_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9064	nr_pdcch_blind_monitor_run_occasion_one::s_gid	tls	uint8_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9065	nr_pdcch_blind_monitor_run_occasion_one::s_ids	tls	uint16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9065	nr_pdcch_blind_monitor_run_occasion_one::s_sorted	tls	uint16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9065	nr_pdcch_blind_monitor_run_occasion_one::s_visit	tls	uint16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9066	nr_pdcch_blind_monitor_run_occasion_one::s_fk	tls	uint8_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9110	nr_pdcch_blind_monitor_run_occasion_one::fk	tls	dci11_fclass_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9167	nr_pdcch_blind_monitor_run_occasion_one::s_vkey	tls	uint32_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9168	nr_pdcch_blind_monitor_run_occasion_one::s_vgrp	tls	int16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9232	nr_pdcch_blind_monitor_run_occasion_one::s_rp	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9333	nr_pdcch_blind_monitor_run_occasion_one::s_ids	func_static	s_ids_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9335	nr_pdcch_blind_monitor_run_occasion_one::s_n	func_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9353	nr_pdcch_blind_monitor_run_occasion_one::s_last_key	func_static	s_last_key_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9356	nr_pdcch_blind_monitor_run_occasion_one::s_last_cnt	func_static	s_last_cnt_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9414	nr_pdcch_blind_monitor_run_occasion_one::s_weak	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9467	nr_pdcch_blind_monitor_run_occasion_one::s_tfd	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9502	nr_pdcch_blind_monitor_run_occasion_one::num_l0	func_static	const uint8_t[18]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9631	nr_pdcch_blind_monitor_run_occasion_one::s_clash_n	func_static	_Atomic uint32_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9828	nr_pdcch_blind_monitor_run_occasion_one::isac_h	tls	float[NR_PDCCH_BLIND_MAX_ANT * 2 * 273 * NR_NB_SC_PER_RB]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9829	nr_pdcch_blind_monitor_run_occasion_one::isac_k	tls	uint32_t[273 * NR_NB_SC_PER_RB]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9830	nr_pdcch_blind_monitor_run_occasion_one::isac_l	tls	uint32_t[273 * NR_NB_SC_PER_RB]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10258	nr_pdcch_blind_monitor_run_occasion_one::acq_first_logged	func_static	bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10267	nr_pdcch_blind_monitor_run_occasion_one::acq_last_sig	func_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10350	dl_gpu_memory	file_static	void (*)(uint64_t *, uint64_t *)	PROCESS	A4	GPU memory/transfer query hook registered once by the GPU plugin (process-wide GPU)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10351	dl_gpu_transfers	file_static	void (*)(uint64_t *, uint64_t *)	PROCESS	A4	GPU transfer query hook registered once by the GPU plugin (process-wide GPU)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10393	nr_dl_gpu_warmup::prepared	func_static	bool	PROCESS	A4	one-time process-wide GPU warm-up flag
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10414	nr_dl_gpu_warmup::modules	func_static	const char *[]	CONST	A4	module name table, never written
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10437	nr_dl_gw_pool_warmup::done	func_static	bool	PROCESS	A4	one-time process-wide pool warm-up flag
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10512	isac_segv_bt_install::alt	func_static	char[65536]	PROCESS	A4	sigaltstack buffer of the process-wide SIGSEGV backtrace handler
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c	34	g_phase2_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c	57	g_recent	file_static	g_recent_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c	59	g_recent_head	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
@@ -1267,28 +1269,28 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	913	g_eval_mu	file_static
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	937	fit_chain::fit_chain_hist	func_static	fit_chain_hist_cell_t [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1051	nr_ul_layout_eval_once::eval_snap	func_static	eval_snap_cell_t [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1214	nr_ul_layout_on_dci::layout_once	func_static	pthread_once_t [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	64	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	66	g_cond	file_static	pthread_cond_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	68	g_once	file_static	pthread_once_t [converted]	PER_CELL	A4	converted: once-flag of a per-cell start (worker thread / hook of this cell); each cell starts its own
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	70	g_thread	file_static	pthread_t [converted]	PER_CELL	A4	converted: handle of this cell's worker thread(s)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	72	g_stop	file_static	bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	74	g_thread_started	file_static	bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	77	g_state	file_static	g_state_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	80	g_queue	file_static	g_queue_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	82	g_q_head	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	84	g_q_tail	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	86	g_q_count	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	88	g_touch	file_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	90	g_enabled	file_static	bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	93	k_m	file_static	const uint8_t[7]	CONST	A4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	94	k_a	file_static	const uint32_t[3]	CONST	A4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	96	g_allowed	file_static	uint8_t[136][7][136]	PROCESS	A4	lookup table of USS hash positions, built once by pthread_once, cell independent
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	97	g_count	file_static	uint8_t[136][7]	PROCESS	A4	lookup table, built once, cell independent
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	99	g_hitmask	file_static	uint8_t[136][136]	PROCESS	A4	lookup table, built once, cell independent
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	100	g_vh	file_static	float[136][7]	PROCESS	A4	lookup table, built once, cell independent
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	100	g_vm	file_static	float[136][7][136][7]	PROCESS	A4	lookup table, built once, cell independent
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	101	g_magic	file_static	uint32_t[136]	PROCESS	A4	lookup table, built once, cell independent
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	103	g_tables_once	file_static	pthread_once_t	PROCESS	A4	pthread_once guarding the one-time const table build
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	65	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	67	g_cond	file_static	pthread_cond_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	69	g_once	file_static	pthread_once_t [converted]	PER_CELL	A4	converted: once-flag of a per-cell start (worker thread / hook of this cell); each cell starts its own
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	71	g_thread	file_static	pthread_t [converted]	PER_CELL	A4	converted: handle of this cell's worker thread(s)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	73	g_stop	file_static	bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	75	g_thread_started	file_static	bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	78	g_state	file_static	g_state_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	81	g_queue	file_static	g_queue_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	83	g_q_head	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	85	g_q_tail	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	87	g_q_count	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	89	g_touch	file_static	uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	91	g_enabled	file_static	bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	94	k_m	file_static	const uint8_t[7]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	95	k_a	file_static	const uint32_t[3]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	97	g_allowed	file_static	uint8_t[136][7][136]	PROCESS	A4	lookup table of USS hash positions, built once by pthread_once, cell independent
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	98	g_count	file_static	uint8_t[136][7]	PROCESS	A4	lookup table, built once, cell independent
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	100	g_hitmask	file_static	uint8_t[136][136]	PROCESS	A4	lookup table, built once, cell independent
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	101	g_vh	file_static	float[136][7]	PROCESS	A4	lookup table, built once, cell independent
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	101	g_vm	file_static	float[136][7][136][7]	PROCESS	A4	lookup table, built once, cell independent
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	102	g_magic	file_static	uint32_t[136]	PROCESS	A4	lookup table, built once, cell independent
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	104	g_tables_once	file_static	pthread_once_t	PROCESS	A4	pthread_once guarding the one-time const table build
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	29	CTX	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	30	NSYM	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	31	EXT	global	constexpr int	CONST	G3	auto
@@ -1317,43 +1319,43 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_P2	global	constexpr 
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_P3	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1050	A	global	template <class	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1055	V2	global	template <class A> struct	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	59	g_init	file_static	nr_gpu_demod_init_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	60	g_run	file_static	nr_gpu_demod_run_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	61	g_release	file_static	nr_gpu_demod_release_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	62	g_evm_wait	file_static	nr_gpu_demod_evm_wait_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	63	g_defer	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	69	t_def	tls	defer_t *	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	70	t_defer_ok	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	71	g_on	file_static	_Atomic int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	76	g_oldpath_off	file_static	_Atomic int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	77	g_check	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_calls	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_chk_bad	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_chk_ok	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_ns_geo	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_ns_gpu	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_ns_max	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_ns_sum	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	79	g_refuse	file_static	_Atomic uint64_t[16]	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_stage_stats	file_static	nr_gpu_stage_stats_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	81	t_stage_full	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	82	g_evm_close	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	82	g_evm_far	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	82	g_evm_maxrel	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	328	t_qmode	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	334	refuse::s_env	func_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	386	geo_tls::g	tls	geo_tls_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	605	build_job::s_nvfac	func_static	double	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	744	g_bgq	file_static	nr_bgq_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	745	g_bg_once	file_static	pthread_once_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	746	g_bg_every	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	747	g_bg_n	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	747	g_bg_ns	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	747	g_bg_ns_max	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	906	bg_demod_run::cpu	tls	chk_tls_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	906	bg_demod_run::gpu	tls	chk_tls_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1143	nr_pdsch_gpu_demod_grant::k	tls	chk_tls_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1263	nr_pdsch_gpu_demod_pass_variant::none	func_static	const nr_ssb_rm_mask_t	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	61	g_init	file_static	nr_gpu_demod_init_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	62	g_run	file_static	nr_gpu_demod_run_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	63	g_release	file_static	nr_gpu_demod_release_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	64	g_evm_wait	file_static	nr_gpu_demod_evm_wait_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	65	g_defer	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	71	t_def	tls	defer_t *	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	72	t_defer_ok	tls	int	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	73	g_on	file_static	_Atomic int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_oldpath_off	file_static	_Atomic int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	79	g_check	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_calls	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_chk_bad	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_chk_ok	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_ns_geo	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_ns_gpu	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_ns_max	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_ns_sum	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	81	g_refuse	file_static	_Atomic uint64_t[16]	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	82	g_stage_stats	file_static	nr_gpu_stage_stats_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	83	t_stage_full	tls	int	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	84	g_evm_close	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	84	g_evm_far	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	84	g_evm_maxrel	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	330	t_qmode	tls	int	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	336	refuse::s_env	func_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	388	geo_tls::g	tls	geo_tls_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	607	build_job::s_nvfac	func_static	double	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	746	g_bgq	file_static	nr_bgq_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	747	g_bg_once	file_static	pthread_once_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	748	g_bg_every	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	749	g_bg_n	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	749	g_bg_ns	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	749	g_bg_ns_max	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	914	bg_demod_run::cpu	tls	chk_tls_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	914	bg_demod_run::gpu	tls	chk_tls_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1151	nr_pdsch_gpu_demod_grant::k	tls	chk_tls_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1271	nr_pdsch_gpu_demod_pass_variant::none	func_static	const nr_ssb_rm_mask_t	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	26	g_fn	file_static	exact_fn_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	27	g_stats	file_static	void (*)(int *, uint64_t *, uint64_t *)	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	28	g_delay_fn	file_static	int (*)(const int16_t *const *, int, int *)	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
@@ -1699,27 +1701,27 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2600	passive_decode_body_
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2703	passive_decode_body_core::count	func_static	_Atomic unsigned long	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3002	passive_decode_body_core::fct	func_static	int	PROCESS	A5	getenv result cached on first use (test seam, replay only), identical for every cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3036	passive_decode_body_core::gp_no_ssb	func_static	const nr_ssb_rm_mask_t	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3431	passive_decode_body_core::seg_h	tls	c16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3432	passive_decode_body_core::seg_h_cap	tls	size_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3599	passive_decode_body_core::s_n	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3601	passive_decode_body_core::s_sum	func_static	double [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3603	passive_decode_body_core::s_hz	func_static	double [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3800	passive_decode_body_core::no_ssb	func_static	const nr_ssb_rm_mask_t	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4049	passive_decode_body_core::r2w_diag	func_static	int	PROCESS	A5	getenv result cached on first use (test seam, replay only), identical for every cell
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4104	passive_decode_body_core::alts	func_static	const int[3]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4366	t_pdcch_rm_crb	tls	uint8_t[275]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4417	t_stg	tls	struct {}	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4424	stg_snapshot::map	func_static	const int[4]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4496	g_ry_chains	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4498	g_ry_yields	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4500	g_ry_gated	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4503	g_ry_try	file_static	g_ry_try_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4506	g_ry_ok	file_static	g_ry_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4509	g_ry_seen	file_static	g_ry_seen_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4959	gw_cb0_params::alts	func_static	const int[3]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5101	g_cb0_ldpc	file_static	LDPC_decoderfunc_t *	PROCESS	A5	CB0 CPU LDPC function pointer loaded once by pthread_once (stateless)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5102	g_cb0_ldpc_once	file_static	pthread_once_t	PROCESS	A5	pthread_once guarding the process-wide libldpc.so load
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5132	nr_pdsch_passive_gw_cb_decode_iter::blk	tls	uint8_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3435	passive_decode_body_core::seg_h	tls	c16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3436	passive_decode_body_core::seg_h_cap	tls	size_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3603	passive_decode_body_core::s_n	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3605	passive_decode_body_core::s_sum	func_static	double [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3607	passive_decode_body_core::s_hz	func_static	double [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3804	passive_decode_body_core::no_ssb	func_static	const nr_ssb_rm_mask_t	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4053	passive_decode_body_core::r2w_diag	func_static	int	PROCESS	A5	getenv result cached on first use (test seam, replay only), identical for every cell
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4108	passive_decode_body_core::alts	func_static	const int[3]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4370	t_pdcch_rm_crb	tls	uint8_t[275]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4421	t_stg	tls	struct {}	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4428	stg_snapshot::map	func_static	const int[4]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4500	g_ry_chains	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4502	g_ry_yields	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4504	g_ry_gated	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4507	g_ry_try	file_static	g_ry_try_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4510	g_ry_ok	file_static	g_ry_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4513	g_ry_seen	file_static	g_ry_seen_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4963	gw_cb0_params::alts	func_static	const int[3]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5105	g_cb0_ldpc	file_static	LDPC_decoderfunc_t *	PROCESS	A5	CB0 CPU LDPC function pointer loaded once by pthread_once (stateless)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5106	g_cb0_ldpc_once	file_static	pthread_once_t	PROCESS	A5	pthread_once guarding the process-wide libldpc.so load
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5136	nr_pdsch_passive_gw_cb_decode_iter::blk	tls	uint8_t *	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	123	g_owned_iq	file_static	g_owned_iq_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	126	g_latency	file_static	g_latency_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	129	g_drop_reason	file_static	g_drop_reason_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
@@ -1754,110 +1756,110 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	280	g_dq_mu	file_static	pt
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	282	g_dq_cv	file_static	pthread_cond_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	284	g_dq_thr	file_static	pthread_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	286	g_dscan_dropped	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	410	g_decoded	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	412	g_cb_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	414	g_cb_tried	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	416	g_cb_total	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	418	g_crc_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	439	g_cs_dmrs	file_static	g_cs_dmrs_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	441	g_cs_dmrs_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	497	g_dl_dmrs_id	file_static	g_dl_dmrs_id_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	500	g_dl_dmrs_id_init	file_static	g_dl_dmrs_id_init_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	503	g_dl_dmrs_id_lock	file_static	g_dl_dmrs_id_lock_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	506	g_dl_rank_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	509	g_rank_n	file_static	g_rank_n_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	512	g_rank_low	file_static	g_rank_low_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	514	g_rank_total	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	517	g_rank_sum	file_static	g_rank_sum_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	520	g_cdm_empty	file_static	g_cdm_empty_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	523	g_cdm_sum	file_static	g_cdm_sum_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	540	g_nl_ok	file_static	g_nl_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	542	g_rank_verdict_logged	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	590	g_rnti_dec	file_static	g_rnti_dec_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	593	g_rnti_ok	file_static	g_rnti_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	607	g_dropped_full	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	609	g_dropped_narrow	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	611	g_dropped_stale	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	613	g_stale_after_decode	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	619	g_dropped_epoch	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	621	g_max_lag	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	624	g_running	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	626	g_stop	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	628	g_nthreads	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	631	g_threads	file_static	g_threads_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	633	g_ue	file_static	PHY_VARS_NR_UE * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	642	g_rxdataF	file_static	g_rxdataF_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	647	g_fep_gen	file_static	g_fep_gen_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	649	g_rxdataF_gw	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	657	g_args	file_static	g_args_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	675	g_rar_tc	file_static	g_rar_tc_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	677	g_rar_tc_head	file_static	unsigned [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	679	g_rar_tc_wrap	file_static	uint32_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	681	g_rar_tc_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	838	g_k0_probes	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	840	g_k0_probe_retained	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	842	g_k0_probe_retained_max	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	844	g_k0_probe_hits	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	887	g_bc9_jobs	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	889	g_bc9_cert	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	891	g_bc9_cert_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	893	g_bc9_nosib	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	895	g_bc9_nodci	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	897	g_bc9_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	899	g_bc9_alarm	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	902	g_bc9_cert_ok_k0	file_static	g_bc9_cert_ok_k0_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	908	g_bc9_cpk	file_static	g_bc9_cpk_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	910	g_bc9_cpk_clock	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	912	g_bc9_cpk_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	939	nr_pdsch_passive_bc12_census::sn	func_static	const char *const[]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	940	nr_pdsch_passive_bc12_census::dn	func_static	const char *const[]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1043	g_bc9d_confirms	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1045	g_bc9d_missed	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1047	g_bc9d_repeat	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1049	g_bc9d_tdd	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1051	g_bc9d_tdd_applied	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1053	g_bc9d_adj_rows	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1055	g_bc9d_adj_removed	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1057	g_bc9d_adj_refused	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1065	g_bc9_tdd_cache	file_static	g_bc9_tdd_cache_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1067	g_bc9_tdd_cache_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1126	nr_pdsch_passive_bc9_confirm::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1163	nr_pdsch_passive_oracle_inline::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1236	g_cdmrs_q	file_static	nr_bgq_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1240	cdmrs_async_on::on	func_static	int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1304	g_rsnap	file_static	g_rsnap_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1307	g_rsnap_free	file_static	g_rsnap_free_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1309	g_rsnap_nfree	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1311	g_rsnap_n	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1313	g_rsnap_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1315	g_recov_ok	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1317	g_recov_nosnap	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1625	nr_pdsch_passive_queue_thread::s_gate_n	func_static	_Atomic uint32_t	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1643	nr_pdsch_passive_queue_thread::s_oracle_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1668	nr_pdsch_passive_queue_thread::s_probe_tick	func_static	_Atomic uint32_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1670	nr_pdsch_passive_queue_thread::t_probe	tls	c16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1715	nr_pdsch_passive_queue_thread::s_k0_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1776	nr_pdsch_passive_queue_thread::s_left	func_static	_Atomic int	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1915	nr_pdsch_passive_queue_thread::s_probe_n	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1917	nr_pdsch_passive_queue_thread::s_probe_ok	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2000	nr_pdsch_passive_queue_thread::s_dl_scr_confirmed	func_static	bool [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2102	nr_pdsch_passive_queue_thread::s_dl_dmrs_nid	func_static	_Atomic int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2273	t_recov_dec	tls	const nr_pdsch_passive_decode_result_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2275	g_recov_fb	file_static	g_recov_fb_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2357	recov_run::rxF	tls	c16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2609	g_pending	file_static	g_pending_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2612	g_pending_ns	file_static	g_pending_ns_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2614	g_n_pending	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2619	g_pending_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2621	g_batches	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2623	g_batches_multi	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2680	nr_a2e_ts	tls	uint64_t[9]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2681	nr_a2e_bank	tls	int8_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2681	nr_a2e_kind	tls	int8_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2682	nr_a2e_stg	tls	uint32_t[NR_A2E_STG]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2718	nr_pdsch_passive_queue_enqueue::c_	func_static	_Atomic unsigned long	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2735	g_age_hist	file_static	g_age_hist_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2737	g_dropped_probe	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	412	g_decoded	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	414	g_cb_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	416	g_cb_tried	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	418	g_cb_total	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	420	g_crc_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	441	g_cs_dmrs	file_static	g_cs_dmrs_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	443	g_cs_dmrs_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	499	g_dl_dmrs_id	file_static	g_dl_dmrs_id_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	502	g_dl_dmrs_id_init	file_static	g_dl_dmrs_id_init_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	505	g_dl_dmrs_id_lock	file_static	g_dl_dmrs_id_lock_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	508	g_dl_rank_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	511	g_rank_n	file_static	g_rank_n_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	514	g_rank_low	file_static	g_rank_low_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	516	g_rank_total	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	519	g_rank_sum	file_static	g_rank_sum_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	522	g_cdm_empty	file_static	g_cdm_empty_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	525	g_cdm_sum	file_static	g_cdm_sum_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	542	g_nl_ok	file_static	g_nl_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	544	g_rank_verdict_logged	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	592	g_rnti_dec	file_static	g_rnti_dec_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	595	g_rnti_ok	file_static	g_rnti_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	609	g_dropped_full	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	611	g_dropped_narrow	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	613	g_dropped_stale	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	615	g_stale_after_decode	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	621	g_dropped_epoch	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	623	g_max_lag	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	626	g_running	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	628	g_stop	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	630	g_nthreads	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	633	g_threads	file_static	g_threads_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	635	g_ue	file_static	PHY_VARS_NR_UE * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	644	g_rxdataF	file_static	g_rxdataF_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	649	g_fep_gen	file_static	g_fep_gen_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	651	g_rxdataF_gw	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	659	g_args	file_static	g_args_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	677	g_rar_tc	file_static	g_rar_tc_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	679	g_rar_tc_head	file_static	unsigned [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	681	g_rar_tc_wrap	file_static	uint32_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	683	g_rar_tc_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	840	g_k0_probes	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	842	g_k0_probe_retained	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	844	g_k0_probe_retained_max	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	846	g_k0_probe_hits	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	889	g_bc9_jobs	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	891	g_bc9_cert	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	893	g_bc9_cert_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	895	g_bc9_nosib	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	897	g_bc9_nodci	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	899	g_bc9_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	901	g_bc9_alarm	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	904	g_bc9_cert_ok_k0	file_static	g_bc9_cert_ok_k0_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	910	g_bc9_cpk	file_static	g_bc9_cpk_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	912	g_bc9_cpk_clock	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	914	g_bc9_cpk_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	941	nr_pdsch_passive_bc12_census::sn	func_static	const char *const[]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	942	nr_pdsch_passive_bc12_census::dn	func_static	const char *const[]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1045	g_bc9d_confirms	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1047	g_bc9d_missed	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1049	g_bc9d_repeat	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1051	g_bc9d_tdd	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1053	g_bc9d_tdd_applied	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1055	g_bc9d_adj_rows	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1057	g_bc9d_adj_removed	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1059	g_bc9d_adj_refused	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1067	g_bc9_tdd_cache	file_static	g_bc9_tdd_cache_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1069	g_bc9_tdd_cache_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1128	nr_pdsch_passive_bc9_confirm::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1165	nr_pdsch_passive_oracle_inline::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1238	g_cdmrs_q	file_static	nr_bgq_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1242	cdmrs_async_on::on	func_static	int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1306	g_rsnap	file_static	g_rsnap_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1309	g_rsnap_free	file_static	g_rsnap_free_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1311	g_rsnap_nfree	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1313	g_rsnap_n	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1315	g_rsnap_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1317	g_recov_ok	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1319	g_recov_nosnap	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1627	nr_pdsch_passive_queue_thread::s_gate_n	func_static	_Atomic uint32_t	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1645	nr_pdsch_passive_queue_thread::s_oracle_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1670	nr_pdsch_passive_queue_thread::s_probe_tick	func_static	_Atomic uint32_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1672	nr_pdsch_passive_queue_thread::t_probe	tls	c16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1717	nr_pdsch_passive_queue_thread::s_k0_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1778	nr_pdsch_passive_queue_thread::s_left	func_static	_Atomic int	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1917	nr_pdsch_passive_queue_thread::s_probe_n	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1919	nr_pdsch_passive_queue_thread::s_probe_ok	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2002	nr_pdsch_passive_queue_thread::s_dl_scr_confirmed	func_static	bool [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2104	nr_pdsch_passive_queue_thread::s_dl_dmrs_nid	func_static	_Atomic int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2275	t_recov_dec	tls	const nr_pdsch_passive_decode_result_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2277	g_recov_fb	file_static	g_recov_fb_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2359	recov_run::rxF	tls	c16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2611	g_pending	file_static	g_pending_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2614	g_pending_ns	file_static	g_pending_ns_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2616	g_n_pending	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2621	g_pending_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2623	g_batches	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2625	g_batches_multi	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2682	nr_a2e_ts	tls	uint64_t[9]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2683	nr_a2e_bank	tls	int8_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2683	nr_a2e_kind	tls	int8_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2684	nr_a2e_stg	tls	uint32_t[NR_A2E_STG]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2720	nr_pdsch_passive_queue_enqueue::c_	func_static	_Atomic unsigned long	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2737	g_age_hist	file_static	g_age_hist_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2739	g_dropped_probe	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	27	g_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	29	g_cv	file_static	pthread_cond_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	31	g_q	file_static	entry_t * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
@@ -2028,24 +2030,24 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1354	nr_pusch_passive_lay
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1366	nr_pusch_passive_layout_probe::row_mask	func_static	const int[3]	CONST	A6	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1366	nr_pusch_passive_layout_probe::set_mask	func_static	const int[3][3]	CONST	A6	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1537	ul_bg_run::ul_bg_run_gbuf	func_static	c16_t * [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1635	g_ul_energy_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1638	g_ul_energy_profile	file_static	g_ul_energy_profile_cell_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1640	g_ul_energy_seen_mask	file_static	uint16_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1679	nid_hyp_run::nid_hyp_ready	func_static	bool [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1681	nid_hyp_run::nid_hyp_failed	func_static	bool [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1704	nid_submit::nid_submit_started	func_static	atomic_bool [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1856	nr_pusch_passive_decode_inner::dec_skipped_aux	func_static	_Atomic unsigned long [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1900	nr_pusch_passive_decode_inner::dec_s_stage	func_static	int [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2192	nr_pusch_passive_decode_inner::dec_tp_scope_logged	func_static	atomic_bool [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2239	nr_pusch_passive_decode_inner::dec_retx_c	func_static	_Atomic unsigned long [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2382	nr_pusch_passive_decode_inner::ul_h	tls	float *	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2383	nr_pusch_passive_decode_inner::ul_k	tls	uint32_t *	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2383	nr_pusch_passive_decode_inner::ul_l	tls	uint32_t *	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2384	nr_pusch_passive_decode_inner::ul_cap	tls	uint32_t	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2402	nr_pusch_passive_decode_inner::s_audit	tls	int	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2710	nr_pusch_passive_decode_inner::dec_uci_logged	func_static	_Atomic uint64_t [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2858	nr_pusch_passive_decode_inner::dec_s_ul_scr_confirmed	func_static	_Atomic int [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2952	nr_pusch_passive_decode::dec_fdra_resolved	func_static	_Atomic unsigned long [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1639	g_ul_energy_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1642	g_ul_energy_profile	file_static	g_ul_energy_profile_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1644	g_ul_energy_seen_mask	file_static	uint16_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1683	nid_hyp_run::nid_hyp_ready	func_static	bool [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1685	nid_hyp_run::nid_hyp_failed	func_static	bool [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1708	nid_submit::nid_submit_started	func_static	atomic_bool [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1860	nr_pusch_passive_decode_inner::dec_skipped_aux	func_static	_Atomic unsigned long [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1904	nr_pusch_passive_decode_inner::dec_s_stage	func_static	int [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2196	nr_pusch_passive_decode_inner::dec_tp_scope_logged	func_static	atomic_bool [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2243	nr_pusch_passive_decode_inner::dec_retx_c	func_static	_Atomic unsigned long [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2386	nr_pusch_passive_decode_inner::ul_h	tls	float *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2387	nr_pusch_passive_decode_inner::ul_k	tls	uint32_t *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2387	nr_pusch_passive_decode_inner::ul_l	tls	uint32_t *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2388	nr_pusch_passive_decode_inner::ul_cap	tls	uint32_t	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2406	nr_pusch_passive_decode_inner::s_audit	tls	int	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2714	nr_pusch_passive_decode_inner::dec_uci_logged	func_static	_Atomic uint64_t [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2862	nr_pusch_passive_decode_inner::dec_s_ul_scr_confirmed	func_static	_Atomic int [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2956	nr_pusch_passive_decode::dec_fdra_resolved	func_static	_Atomic unsigned long [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	27	g_book	file_static	nr_passive_ul_book_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	29	g_book_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	31	g_parked	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
@@ -2168,18 +2170,18 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	778	search_explore::q2c	tls	qc
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	876	nr_pusch_uci_blind_search::dbuf	tls	int16_t *	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	876	nr_pusch_uci_blind_search::wbuf	tls	int16_t *	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	877	nr_pusch_uci_blind_search::wcap	tls	uint32_t	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	26	g_slot	file_static	g_slot_cell_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	28	g_depth	file_static	int [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	30	g_run_active	file_static	int [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	32	g_stop	file_static	int [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	34	g_run	file_static	nr_ul_bgdisc_run_fn [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	36	g_max_age_ns	file_static	uint64_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	38	g_thr	file_static	pthread_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	40	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	42	g_cv	file_static	pthread_cond_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	44	g_st	file_static	nr_ul_bgdisc_stats_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	195	g_pend	file_static	g_pend_cell_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	197	g_pend_next	file_static	unsigned [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	27	g_slot	file_static	g_slot_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	29	g_depth	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	31	g_run_active	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	33	g_stop	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	35	g_run	file_static	nr_ul_bgdisc_run_fn [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	37	g_max_age_ns	file_static	uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	39	g_thr	file_static	pthread_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	41	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	43	g_cv	file_static	pthread_cond_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	45	g_st	file_static	nr_ul_bgdisc_stats_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	203	g_pend	file_static	g_pend_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	205	g_pend_next	file_static	unsigned [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	26	tracks	file_static	tracks_cell_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	28	track_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	30	evict_next	file_static	unsigned [converted]	PER_CELL	A6	converted (A6)
@@ -2191,20 +2193,20 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	266	t_sweep_n	tls	int	TLS	A6	exi
 openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	82	g	global	Ctx	PROCESS	A8	one GPU CB0 batch context and budget per process (G3: jobs must carry the cell)
 openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	83	budget	global	nr_dl_gpu_budget_t	PROCESS	A8	one GPU CB0 batch context and budget per process (G3: jobs must carry the cell)
 openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	206	api	global	const nr_td_cb0_gpu_api_t	CONST	A8	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	63	g_job	file_static	g_job_cell_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	66	g_rnti	file_static	g_rnti_cell_t [converted]	PER_CELL	A6	converted (A6); HEAP, prealloc before the RX fence
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	73	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	75	g_st	file_static	nr_ul_nid_stats_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	77	g_stop	file_static	_Atomic int [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	79	g_core	file_static	int	PROCESS	A6	ISAC_UL_NID_BG_CORE read once by load_env (process env), read-only afterwards
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	82	g_snr	file_static	const float	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	83	g_fn	file_static	nr_ul_nid_hyp_fn [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	85	g_prep	file_static	nr_ul_nid_prep_fn [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	87	g_thr	file_static	pthread_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	89	g_started	file_static	bool [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	93	g_learned	file_static	g_learned_cell_t [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	95	g_nlearned	file_static	int [converted]	PER_CELL	A6	converted (A6)
-openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	100	load_env::done	func_static	_Atomic int	PROCESS	A6	one-time env load guard (process env, prints the banner once)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	64	g_job	file_static	g_job_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	67	g_rnti	file_static	g_rnti_cell_t [converted]	PER_CELL	A6	converted (A6); HEAP, prealloc before the RX fence
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	74	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	76	g_st	file_static	nr_ul_nid_stats_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	78	g_stop	file_static	_Atomic int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	80	g_core	file_static	int	PROCESS	A6	ISAC_UL_NID_BG_CORE read once by load_env (process env), read-only afterwards
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	83	g_snr	file_static	const float	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	84	g_fn	file_static	nr_ul_nid_hyp_fn [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	86	g_prep	file_static	nr_ul_nid_prep_fn [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	88	g_thr	file_static	pthread_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	90	g_started	file_static	bool [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	94	g_learned	file_static	g_learned_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	96	g_nlearned	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	101	load_env::done	func_static	_Atomic int	PROCESS	A6	one-time env load guard (process env, prints the banner once)
 openair1/PHY/TOOLS/calibration_scope.c	17	rx_antenna_colors	global	const FL_COLOR[4]	CONST	A8	auto
 openair1/PHY/TOOLS/calibration_scope.c	18	water_colors	global	const FL_COLOR[4]	CONST	A8	auto
 openair1/PHY/TOOLS/dB_routines.c	9	dB_table	file_static	const int8_t[256]	CONST	A8	auto
