@@ -11,6 +11,7 @@
 #include <sched.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#include "common/utils/nr_cell.h"
 
 #define BG_MAX_DEPTH 16
 enum { FREE, FILLING, READY };
@@ -21,14 +22,27 @@ typedef struct {
   size_t cap; /* samples per antenna */
 } bgslot_t;
 
-static bgslot_t g_slot[BG_MAX_DEPTH];
-static int g_depth, g_run_active, g_stop;
-static nr_ul_bgdisc_run_fn g_run;
-static uint64_t g_max_age_ns;
-static pthread_t g_thr;
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
-static nr_ul_bgdisc_stats_t g_st;
+typedef bgslot_t g_slot_cell_t[BG_MAX_DEPTH];
+NR_CELL_STATIC(g_slot_cell_t, g_slot);
+#define g_slot NR_CELL_REF(g_slot)
+NR_CELL_STATIC(int, g_depth);
+#define g_depth NR_CELL_REF(g_depth)
+NR_CELL_STATIC(int, g_run_active);
+#define g_run_active NR_CELL_REF(g_run_active)
+NR_CELL_STATIC(int, g_stop);
+#define g_stop NR_CELL_REF(g_stop)
+NR_CELL_STATIC(nr_ul_bgdisc_run_fn, g_run);
+#define g_run NR_CELL_REF(g_run)
+NR_CELL_STATIC(uint64_t, g_max_age_ns);
+#define g_max_age_ns NR_CELL_REF(g_max_age_ns)
+NR_CELL_STATIC(pthread_t, g_thr);
+#define g_thr NR_CELL_REF(g_thr)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_lock NR_CELL_REF(g_lock)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_cv, PTHREAD_COND_INITIALIZER);
+#define g_cv NR_CELL_REF(g_cv)
+NR_CELL_STATIC(nr_ul_bgdisc_stats_t, g_st);
+#define g_st NR_CELL_REF(g_st)
 
 static uint64_t now_ns(void)
 {
@@ -102,7 +116,7 @@ int nr_ul_bgdisc_start(int depth, nr_ul_bgdisc_run_fn run)
   pthread_mutex_unlock(&g_lock);
   if (!go) return 0;
   g_run = run;
-  if (pthread_create(&g_thr, NULL, worker, NULL)) return -1;
+  if (nr_cell_thread_create(&g_thr, NULL, worker, NULL, -1)) return -1; /* the worker serves the cell of the caller */
   pthread_setname_np(g_thr, "ulBgDisc");
   g_run_active = 1;
   return 0;
@@ -176,8 +190,12 @@ void nr_ul_bgdisc_stats(nr_ul_bgdisc_stats_t *s)
 }
 
 #define PEND_N 16
-static struct { uint16_t rnti; uint32_t key; int64_t slot; int used; } g_pend[PEND_N];
-static unsigned g_pend_next;
+typedef struct { uint16_t rnti; uint32_t key; int64_t slot; int used; } bg_pend_t;
+typedef bg_pend_t g_pend_cell_t[PEND_N];
+NR_CELL_STATIC(g_pend_cell_t, g_pend);
+#define g_pend NR_CELL_REF(g_pend)
+NR_CELL_STATIC(unsigned, g_pend_next);
+#define g_pend_next NR_CELL_REF(g_pend_next)
 
 int nr_ul_bgdisc_latch(uint16_t rnti, uint32_t key, int64_t abs_slot, uint32_t cur_key)
 {

@@ -43,6 +43,9 @@ GLOBS = [
     "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_*.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_*.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_*.c",
+    "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_*.c",       # A6: solver, uci_blind, data_aided (per-cell UL state the first glob missed)
+    "openair1/PHY/NR_UE_TRANSPORT/nr_ul_*.c",          # A6: nr_ul_nid_bg (n_ID worker), nr_ul_nid_rule
+    "openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c",  # A6: UL branch-selection table
     "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_*.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_passive_*.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc*.c",
@@ -572,6 +575,8 @@ OWNER_RULES = [
     ("*/nr_csirs_disc_td.c", "A7"),
     ("*/nr_csirs_disc*", "A7"),
     ("*/nr_pusch_*", "A6"),
+    ("*/nr_ul_*", "A6"),
+    ("*/nr_ulsch_demodulation.c", "A6"),
     ("*/nr_pdcch_ul_*", "A6"),
     ("*/nr_pdsch_*", "A5"),
     ("*/nr_pdcch_coreset_map.c", "A3"),

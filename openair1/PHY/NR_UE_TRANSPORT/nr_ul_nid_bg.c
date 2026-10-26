@@ -35,6 +35,8 @@
 #include "nr_pusch_ul_disc.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" /* nr_get_Qm_ul, nr_get_code_rate_ul */
 #include "nr_pdsch_passive_decode.h" /* nr_pdsch_gw_cb0_t, nr_pdsch_passive_gw_cb0_decode (the CPU CB0 LDPC + all-zero guard) */
+#include "common/utils/nr_cell.h"
+#include "nr_ul_cell_prealloc.h"
 
 #define NJOB 4
 #define RNTI_CAP 64
@@ -57,22 +59,41 @@ typedef struct {
   int dmrs_best; /* DM-RS id with the best SNR of an earlier job, -1 none */
 } nid_rnti_t;
 
-static nr_ul_nid_job_t g_job[NJOB];
-static nid_rnti_t g_rnti[RNTI_CAP];
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static nr_ul_nid_stats_t g_st;
-static _Atomic int g_stop;
+typedef nr_ul_nid_job_t g_job_cell_t[NJOB];
+NR_CELL_STATIC(g_job_cell_t, g_job);
+#define g_job NR_CELL_REF(g_job)
+typedef nid_rnti_t g_rnti_cell_t[RNTI_CAP];
+NR_CELL_STATIC_HEAP(g_rnti_cell_t, g_rnti); /* 132 KiB per cell */
+#define g_rnti NR_CELL_HEAP_REF(g_rnti_cell_t, g_rnti)
+/* Allocate cell `cell`'s heap objects (call for every active cell before nr_cell_alloc_fence(); cell 0 included). */
+void nr_ul_nid_bg_cell_prealloc(int cell)
+{
+  NR_CELL_HEAP_PREALLOC(g_rnti_cell_t, g_rnti, cell);
+}
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_lock NR_CELL_REF(g_lock)
+NR_CELL_STATIC(nr_ul_nid_stats_t, g_st);
+#define g_st NR_CELL_REF(g_st)
+NR_CELL_STATIC(_Atomic int, g_stop);
+#define g_stop NR_CELL_REF(g_stop)
 static int g_core = -1;
 enum { g_topm = 12, g_addpos_n = 3, g_gap_ms = 500, g_nbwp = 4, g_mcs_max = 4, g_qm = 2, g_min_rb = 16, g_repeat = 4, g_cpu_pct = 10,
        g_job_ms = 15000, g_hyp_per_job = 1000, g_drop = 100 };
 static const float g_snr = 6.f;
-static nr_ul_nid_hyp_fn g_fn;
-static nr_ul_nid_prep_fn g_prep;
-static pthread_t g_thr;
-static bool g_started;
+NR_CELL_STATIC(nr_ul_nid_hyp_fn, g_fn);
+#define g_fn NR_CELL_REF(g_fn)
+NR_CELL_STATIC(nr_ul_nid_prep_fn, g_prep);
+#define g_prep NR_CELL_REF(g_prep)
+NR_CELL_STATIC(pthread_t, g_thr);
+#define g_thr NR_CELL_REF(g_thr)
+NR_CELL_STATIC(bool, g_started);
+#define g_started NR_CELL_REF(g_started)
 /* ids confirmed for other RNTIs: tried first for a new one (learned at run time, never a constant) */
-static uint16_t g_learned[8];
-static int g_nlearned;
+typedef uint16_t g_learned_cell_t[8];
+NR_CELL_STATIC(g_learned_cell_t, g_learned);
+#define g_learned NR_CELL_REF(g_learned)
+NR_CELL_STATIC(int, g_nlearned);
+#define g_nlearned NR_CELL_REF(g_nlearned)
 
 static void load_env(void)
 {
@@ -622,7 +643,7 @@ void nr_ul_nid_bg_start(nr_ul_nid_hyp_fn fn, nr_ul_nid_prep_fn prep)
   struct sched_param sp = {0};
   pthread_attr_setschedpolicy(&at, SCHED_OTHER);
   pthread_attr_setschedparam(&at, &sp);
-  if (pthread_create(&g_thr, &at, worker, NULL)) LOG_E(PHY, "SENSING: UL_NID_BG worker not started\n");
+  if (nr_cell_thread_create(&g_thr, &at, worker, NULL, -1)) /* the worker serves the cell of the caller */ LOG_E(PHY, "SENSING: UL_NID_BG worker not started\n");
   pthread_attr_destroy(&at);
 }
 void nr_ul_nid_bg_stop(void)

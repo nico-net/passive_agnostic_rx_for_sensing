@@ -31,11 +31,23 @@
 #include "nr_sense_api.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
 #include "executables/nr-uesoftmodem.h"
 
 #define UL_DA_MAX_RE (273 * 12 * 14)
 
-static _Atomic uint64_t g_da_try, g_da_ok, g_da_rej_seg, g_da_rej_enc, g_da_rej_modidx, g_da_re;
+NR_CELL_STATIC(_Atomic uint64_t, g_da_try);
+#define g_da_try NR_CELL_REF(g_da_try)
+NR_CELL_STATIC(_Atomic uint64_t, g_da_ok);
+#define g_da_ok NR_CELL_REF(g_da_ok)
+NR_CELL_STATIC(_Atomic uint64_t, g_da_rej_seg);
+#define g_da_rej_seg NR_CELL_REF(g_da_rej_seg)
+NR_CELL_STATIC(_Atomic uint64_t, g_da_rej_enc);
+#define g_da_rej_enc NR_CELL_REF(g_da_rej_enc)
+NR_CELL_STATIC(_Atomic uint64_t, g_da_rej_modidx);
+#define g_da_rej_modidx NR_CELL_REF(g_da_rej_modidx)
+NR_CELL_STATIC(_Atomic uint64_t, g_da_re);
+#define g_da_re NR_CELL_REF(g_da_re)
 
 /* Large per-thread scratch lives on the heap, not in static TLS: every thread's static TLS is carved out of its
  * 8 MB stack, and 5.6 MB of it left the SYNC actor too little stack for the fast re-sync (OTA SIGSEGV in
@@ -245,8 +257,9 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
    * WRONG H rather than a noisy one. Submit nothing. */
   if (mod_idx != expected) {
     atomic_fetch_add_explicit(&g_da_rej_modidx, 1, memory_order_relaxed);
-    static _Atomic int once = 0;
-    if (atomic_exchange(&once, 1) == 0) {
+    NR_CELL_STATIC_INIT(_Atomic int, da_submit_once, 0);
+    #define da_submit_once NR_CELL_REF(da_submit_once)
+    if (atomic_exchange(&da_submit_once, 1) == 0) {
       LOG_W(PHY,
             "SENSING: pusch data-aided RE enumeration disagrees with nr_get_G: mod_idx=%u expected=%u "
             "(rb=%u sym=%u+%u dmrs_pos=0x%x cdm_grps=%u type=%u) -- submitting nothing\n",

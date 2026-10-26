@@ -22,7 +22,8 @@
 #include "nr_pdsch_gpu_ldpc_host.h" // GPU LDPC for the PUSCH TBs
 #include "PHY/TOOLS/nr_gpu_path.h" // per-path GPU/CPU choice (UL pass trial, UL FEP)
 #include "nr_pusch_gpu_fep.h" // GPU port of the UL FEP below
-#include "nr_gpu_pass_ul.h" // the whole PUSCH decode as one GPU graph (Fix A+D: the UL path)
+#include "nr_gpu_pass_ul.h"
+#include "common/utils/nr_cell.h" // the whole PUSCH decode as one GPU graph (Fix A+D: the UL path)
 #include "PHY/NR_TRANSPORT/nr_ulsch_passive_branch.h"
 #include "PHY/NR_TRANSPORT/nr_ul_branch_select.h"
 #include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
@@ -120,8 +121,11 @@ __attribute__((weak)) NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint1
  * across threads would interleave two grants' intermediate state silently. Indexed rather than
  * thread-local: the queue already numbers its consumers, and __thread storage of this size is what
  * produced an AVX alignment fault in the AoA work. */
-static PHY_VARS_gNB *g_gnb[NR_PUSCH_PASSIVE_MAX_CTX];
-static int           g_gnb_nant;
+typedef PHY_VARS_gNB * g_gnb_cell_t[NR_PUSCH_PASSIVE_MAX_CTX];
+NR_CELL_STATIC(g_gnb_cell_t, g_gnb);
+#define g_gnb NR_CELL_REF(g_gnb)
+NR_CELL_STATIC(int, g_gnb_nant);
+#define g_gnb_nant NR_CELL_REF(g_gnb_nant)
 /* One consumer in pipeline mode. The window includes the preceding tail and a
  * signed timing/refinement margin. It is copied once, before any decoder work. */
 #define PASSIVE_UL_SNAPSHOT_MARGIN 8192
@@ -131,17 +135,35 @@ typedef struct {
   uint32_t origin, length, cap;
   bool valid;
 } passive_ul_snapshot_t;
-static passive_ul_snapshot_t g_snapshot[NR_PUSCH_PASSIVE_MAX_CTX];
-static bool g_pipeline_ready[NR_PUSCH_PASSIVE_MAX_CTX];
+typedef passive_ul_snapshot_t g_snapshot_cell_t[NR_PUSCH_PASSIVE_MAX_CTX];
+NR_CELL_STATIC(g_snapshot_cell_t, g_snapshot);
+#define g_snapshot NR_CELL_REF(g_snapshot)
+typedef bool g_pipeline_ready_cell_t[NR_PUSCH_PASSIVE_MAX_CTX];
+NR_CELL_STATIC(g_pipeline_ready_cell_t, g_pipeline_ready);
+#define g_pipeline_ready NR_CELL_REF(g_pipeline_ready)
 
 /* ULFEP globals (helpers further down, next to passive_snapshot_fep) */
-static const nr_pusch_gpu_fep_api_t *g_ulg;
-static _Atomic bool g_ulg_on;
-static int g_ulg_nant;
+NR_CELL_STATIC(const nr_pusch_gpu_fep_api_t *, g_ulg);
+#define g_ulg NR_CELL_REF(g_ulg)
+NR_CELL_STATIC(_Atomic bool, g_ulg_on);
+#define g_ulg_on NR_CELL_REF(g_ulg_on)
+NR_CELL_STATIC(int, g_ulg_nant);
+#define g_ulg_nant NR_CELL_REF(g_ulg_nant)
 #define ULG_CHECK_EVERY 16 /* every n-th GPU FEP call one row is verified on the CPU */
-static _Atomic uint64_t g_ulg_seq, g_ulg_chk, g_ulg_bad, g_ulg_cpu_bounds, g_ulg_cpu_rej;
+NR_CELL_STATIC(_Atomic uint64_t, g_ulg_seq);
+#define g_ulg_seq NR_CELL_REF(g_ulg_seq)
+NR_CELL_STATIC(_Atomic uint64_t, g_ulg_chk);
+#define g_ulg_chk NR_CELL_REF(g_ulg_chk)
+NR_CELL_STATIC(_Atomic uint64_t, g_ulg_bad);
+#define g_ulg_bad NR_CELL_REF(g_ulg_bad)
+NR_CELL_STATIC(_Atomic uint64_t, g_ulg_cpu_bounds);
+#define g_ulg_cpu_bounds NR_CELL_REF(g_ulg_cpu_bounds)
+NR_CELL_STATIC(_Atomic uint64_t, g_ulg_cpu_rej);
+#define g_ulg_cpu_rej NR_CELL_REF(g_ulg_cpu_rej)
 /* FFTs asked of the FEP, by caller: grant symbols, timing-search candidates, delay-refinement re-run (each x nant) */
-static _Atomic uint64_t g_fep_req[3];
+typedef _Atomic uint64_t g_fep_req_cell_t[3];
+NR_CELL_STATIC(g_fep_req_cell_t, g_fep_req);
+#define g_fep_req NR_CELL_REF(g_fep_req)
 
 static void ulg_warmup(const NR_DL_FRAME_PARMS *fp, int nant);
 #define PASSIVE_UL_CFR_CAP (273 * NR_NB_SC_PER_RB)
@@ -153,8 +175,17 @@ typedef struct {
   int16_t *shadow_llr; /* GPUPASS UL shadow check: the pass's LLRs and TB while the old path decodes the same grant */
   uint8_t *shadow_tb;
 } passive_ul_scratch_t;
-static passive_ul_scratch_t g_scratch[NR_PUSCH_PASSIVE_MAX_CTX];
-static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
+typedef passive_ul_scratch_t g_scratch_cell_t[NR_PUSCH_PASSIVE_MAX_CTX];
+NR_CELL_STATIC(g_scratch_cell_t, g_scratch);
+#define g_scratch NR_CELL_REF(g_scratch)
+NR_CELL_STATIC(_Atomic uint64_t, g_try);
+#define g_try NR_CELL_REF(g_try)
+NR_CELL_STATIC(_Atomic uint64_t, g_crc_ok);
+#define g_crc_ok NR_CELL_REF(g_crc_ok)
+NR_CELL_STATIC(_Atomic uint64_t, g_rej_unsup);
+#define g_rej_unsup NR_CELL_REF(g_rej_unsup)
+NR_CELL_STATIC(_Atomic uint64_t, g_rej_setup);
+#define g_rej_setup NR_CELL_REF(g_rej_setup)
 static __thread bool t_solver_probe;
 /* n_ID search stage B: set only on the background worker while it decodes a layout hypothesis (CPU only, hands the LLRs back) */
 static __thread nr_ul_nid_cap_t *t_nid_cap;
@@ -171,8 +202,10 @@ void nr_pusch_passive_counters(uint64_t *try_, uint64_t *crc_ok)
 /* Reserved-UL-MCS retransmission record (gap-harq lane): the UL twin of
  * nr_pdsch_passive_decode.c's g_dl_harq_init, own instance so a UL HARQ pid can never collide with
  * a DL one that happens to share the same number. See nr_harq_init_tx.h. */
-static nr_harq_init_tx_table_t g_ul_harq_init;
-static pthread_mutex_t g_ul_harq_init_lock = PTHREAD_MUTEX_INITIALIZER;
+NR_CELL_STATIC(nr_harq_init_tx_table_t, g_ul_harq_init);
+#define g_ul_harq_init NR_CELL_REF(g_ul_harq_init)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_ul_harq_init_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_ul_harq_init_lock NR_CELL_REF(g_ul_harq_init_lock)
 /* ---- UL HARQ SOFT COMBINING (ULQ) ---------------------------
  * The UL twin of the DL harqc cache (nr_pdsch_passive_decode.c): without it every rv != 0 PUSCH was
  * refused ("no HARQ history") and the chain mode never even booked it, although 10-30 % of the UL
@@ -196,13 +229,33 @@ typedef struct {
   uint64_t last;
   int16_t *d;
 } ul_harqc_t;
-static ul_harqc_t g_ul_harqc[UL_HARQC_N];
-static pthread_mutex_t g_ul_harqc_lock = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t g_ul_harqc_clock;
-static _Atomic uint64_t g_hq_stored, g_hq_retx_try, g_hq_retx_ok, g_hq_rv_refused, g_hq_busy;
+typedef ul_harqc_t g_ul_harqc_cell_t[UL_HARQC_N];
+NR_CELL_STATIC(g_ul_harqc_cell_t, g_ul_harqc);
+#define g_ul_harqc NR_CELL_REF(g_ul_harqc)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_ul_harqc_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_ul_harqc_lock NR_CELL_REF(g_ul_harqc_lock)
+NR_CELL_STATIC(uint64_t, g_ul_harqc_clock);
+#define g_ul_harqc_clock NR_CELL_REF(g_ul_harqc_clock)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_stored);
+#define g_hq_stored NR_CELL_REF(g_hq_stored)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_retx_try);
+#define g_hq_retx_try NR_CELL_REF(g_hq_retx_try)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_retx_ok);
+#define g_hq_retx_ok NR_CELL_REF(g_hq_retx_ok)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_rv_refused);
+#define g_hq_rv_refused NR_CELL_REF(g_hq_rv_refused)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_busy);
+#define g_hq_busy NR_CELL_REF(g_hq_busy)
 /* why an rv != 0 grant found nothing to combine: no entry for (rnti,pid) / entry already decoded or never stored /
  * NDI toggled / TBS of the retransmission differs from the stored one */
-static _Atomic uint64_t g_hq_why_none, g_hq_why_empty, g_hq_why_ndi, g_hq_why_tbs;
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_why_none);
+#define g_hq_why_none NR_CELL_REF(g_hq_why_none)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_why_empty);
+#define g_hq_why_empty NR_CELL_REF(g_hq_why_empty)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_why_ndi);
+#define g_hq_why_ndi NR_CELL_REF(g_hq_why_ndi)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_why_tbs);
+#define g_hq_why_tbs NR_CELL_REF(g_hq_why_tbs)
 static __thread bool t_hq_armed;
 bool nr_pusch_passive_harq_combine_enabled(void) { return true; }
 void nr_pusch_passive_harq_arm(bool on) { t_hq_armed = on; }
@@ -259,13 +312,23 @@ static ul_harqc_t *ul_harqc_acquire(uint16_t rnti, uint8_t pid)
  * test_nr_pdcch_blind_monitor gtest binary; see that file's header comment and fix2-report.md. This
  * file still owns and calls the actual estimation (nr_dmrs_id_accumulate()/_decide(), which need live
  * IQ) through the accessors it exposes. */
-static _Atomic uint64_t g_seg_fail, g_zero_tb;
-static _Atomic uint64_t g_cb_ok, g_cb_tried, g_cb_total; /* pusch_passive cb_crc: per-code-block CRC over the full UL decodes (probes excluded) */
+NR_CELL_STATIC(_Atomic uint64_t, g_seg_fail);
+#define g_seg_fail NR_CELL_REF(g_seg_fail)
+NR_CELL_STATIC(_Atomic uint64_t, g_zero_tb);
+#define g_zero_tb NR_CELL_REF(g_zero_tb)
+NR_CELL_STATIC(_Atomic uint64_t, g_cb_ok); /* pusch_passive cb_crc: per-code-block CRC over the full UL decodes (probes excluded) */
+#define g_cb_ok NR_CELL_REF(g_cb_ok)
+NR_CELL_STATIC(_Atomic uint64_t, g_cb_tried);
+#define g_cb_tried NR_CELL_REF(g_cb_tried)
+NR_CELL_STATIC(_Atomic uint64_t, g_cb_total);
+#define g_cb_total NR_CELL_REF(g_cb_total)
 /* Residual the channel estimator can absorb on its own: MAX_DELAY_COMP is 20 samples, so anything
  * beyond a comfortable fraction of that is worth re-placing the window for rather than hoping. */
 #define PASSIVE_UL_DELAY_TOL 6
-static _Atomic uint64_t g_ta_refined;
-static _Atomic uint64_t g_sfo_grants; /* grants whose FEP rows got the intra-slot SFO correction */
+NR_CELL_STATIC(_Atomic uint64_t, g_ta_refined);
+#define g_ta_refined NR_CELL_REF(g_ta_refined)
+NR_CELL_STATIC(_Atomic uint64_t, g_sfo_grants); /* grants whose FEP rows got the intra-slot SFO correction */
+#define g_sfo_grants NR_CELL_REF(g_sfo_grants)
 /* ULLDPC: the UCI reservation search of ONE decode call is bounded to 8 LDPC trials (4-51 per call OTA). A cut search keeps the learned footprints
  * (tried first) and the smallest swept ones; a call that ran no trial skips the restoring re-decode. */
 
@@ -325,7 +388,8 @@ static void ul_hyp_store(const nr_pdcch_blind_ul_result_t *g, int32_t ta, uint32
   else ul_hyp_cache_put(g->rnti, &h);
 }
 
-static _Atomic uint64_t g_ldpc_capped; /* TBs decoded with one LDPC iteration */
+NR_CELL_STATIC(_Atomic uint64_t, g_ldpc_capped); /* TBs decoded with one LDPC iteration */
+#define g_ldpc_capped NR_CELL_REF(g_ldpc_capped)
 float nr_pusch_passive_shannon_db(uint8_t mcs, uint8_t mcs_table)
 {
   const double se = nr_get_Qm_ul(mcs, mcs_table) * nr_get_code_rate_ul(mcs, mcs_table) / 10240.0;
@@ -339,14 +403,20 @@ static inline uint64_t utim_now(void)
   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-static _Atomic uint64_t g_cfr_submits, g_cfr_re;
+NR_CELL_STATIC(_Atomic uint64_t, g_cfr_submits);
+#define g_cfr_submits NR_CELL_REF(g_cfr_submits)
+NR_CELL_STATIC(_Atomic uint64_t, g_cfr_re);
+#define g_cfr_re NR_CELL_REF(g_cfr_re)
 /* Per-antenna UL channel power, the uplink analogue of the DL RXBRANCH probe. Accumulated from the
  * PUSCH DM-RS channel ESTIMATE (|H|^2), not from raw time-domain power: raw power cannot separate
  * signal from interference, and the DL side has already been misled once by reading ANTPOW as an
  * antenna measure when ~70 % of its energy was uplink. Summed over whole transport blocks and
  * thousands of grants, so it does not carry the 10 dB per-TB swing the DL pw[] does. */
-static _Atomic uint64_t g_ant_pw[PASSIVE_UL_MAX_ANT];
-static _Atomic uint64_t g_ant_n;
+typedef _Atomic uint64_t g_ant_pw_cell_t[PASSIVE_UL_MAX_ANT];
+NR_CELL_STATIC(g_ant_pw_cell_t, g_ant_pw);
+#define g_ant_pw NR_CELL_REF(g_ant_pw)
+NR_CELL_STATIC(_Atomic uint64_t, g_ant_n);
+#define g_ant_n NR_CELL_REF(g_ant_n)
 
 /* ------------------------------------------------------------------------------------------
  * Minimal gNB context. Deliberately NOT phy_init_nr_gNB(): that allocates PRACH, SRS, PUCCH, the
@@ -876,7 +946,9 @@ static bool ulg_fep_symbols(PHY_VARS_gNB *gnb, int ctx, int nant, unsigned char 
  * DM-RS), so the second comb of the DM-RS symbols can be compared with the data symbols (CDM groups without data). */
 #define LP_NSYM 5
 #define LP_NTAU 33 /* -256..256 samples in steps of 16: <= 0.25 rad phase slope error across one PRB */
-static c16_t *g_lp_f[NR_PUSCH_PASSIVE_MAX_CTX][LP_NSYM][PASSIVE_UL_MAX_ANT];
+typedef c16_t * g_lp_f_cell_t[NR_PUSCH_PASSIVE_MAX_CTX][LP_NSYM][PASSIVE_UL_MAX_ANT];
+NR_CELL_STATIC(g_lp_f_cell_t, g_lp_f);
+#define g_lp_f NR_CELL_REF(g_lp_f)
 
 static inline float lp_c(const uint32_t *gold, int i) { return (gold[i >> 5] >> (i & 31)) & 1 ? -1.f : 1.f; }
 
@@ -961,11 +1033,15 @@ static float lp_snr(const float *zr, const float *zi, int nr, int nant, int L, i
  * delay t, its noise (S2 - C/6)/5 and its signal (C/36) are then differences of prefix sums, so a probe costs one table build
  * (3 rows x nant x PRBs x 33 delays) plus O(33 x 12) per hypothesis, instead of O(L x 33 x 12 x 6) per hypothesis and set. */
 typedef struct { double P[2][3][PASSIVE_UL_MAX_ANT][LP_NTAU + 1][276]; } lp_tab_t; /* [v][row][ant][t | S2][prb prefix] */
-static lp_tab_t *g_lp_tab[NR_PUSCH_PASSIVE_MAX_CTX];
+typedef lp_tab_t * g_lp_tab_cell_t[NR_PUSCH_PASSIVE_MAX_CTX];
+NR_CELL_STATIC(g_lp_tab_cell_t, g_lp_tab);
+#define g_lp_tab NR_CELL_REF(g_lp_tab)
 /* ULTWINS: complex prefix sums over PRBs of c_q(t) e^{j theta_t q}, i.e. the coherent DM-RS sum over a PRB
  * range at delay tau_t (theta_t = 2 pi 12 tau_t / N), for the true and the control sequence. Heap, only when the flag is on. */
 typedef struct { double Pr[2][3][PASSIVE_UL_MAX_ANT][LP_NTAU][276], Pi[2][3][PASSIVE_UL_MAX_ANT][LP_NTAU][276]; } lp_ctab_t;
-static lp_ctab_t *g_lp_ctab[NR_PUSCH_PASSIVE_MAX_CTX];
+typedef lp_ctab_t * g_lp_ctab_cell_t[NR_PUSCH_PASSIVE_MAX_CTX];
+NR_CELL_STATIC(g_lp_ctab_cell_t, g_lp_ctab);
+#define g_lp_ctab NR_CELL_REF(g_lp_ctab)
 
 static void lp_tab_build(lp_tab_t *T, lp_ctab_t *CT, int v, c16_t *const F[LP_NSYM][PASSIVE_UL_MAX_ANT], int nant, const uint32_t *const *gold,
                          int fco, int N, int qlo, int nq)
@@ -1458,9 +1534,10 @@ static int ul_bg_run(const nr_ul_bgdisc_job_t *j)
   if (!gnb || j->epoch != nr_cfg_epoch_dedicated_current()) return 1;
   const NR_DL_FRAME_PARMS *fp = &gnb->frame_parms;
   const int symsz = fp->ofdm_symbol_size, sps = fp->symbols_per_slot, nant = j->nant, slot = j->slot;
-  static c16_t *gbuf; /* the worker is one thread */
-  if (!gbuf) gbuf = malloc16_clear((size_t)4 * 14 * 4096 * sizeof(c16_t));
-  if (!gbuf || nant > 4 || nant < 1 || sps > 14 || symsz > 4096) return 1;
+  NR_CELL_STATIC(c16_t *, ul_bg_run_gbuf); /* the worker is one thread */
+  #define ul_bg_run_gbuf NR_CELL_REF(ul_bg_run_gbuf)
+  if (!ul_bg_run_gbuf) ul_bg_run_gbuf = malloc16_clear((size_t)4 * 14 * 4096 * sizeof(c16_t));
+  if (!ul_bg_run_gbuf || nant > 4 || nant < 1 || sps > 14 || symsz > 4096) return 1;
   passive_ul_snapshot_t sn;
   memset(&sn, 0, sizeof(sn));
   sn.origin = j->origin; sn.length = j->length; sn.valid = true;
@@ -1483,7 +1560,7 @@ static int ul_bg_run(const nr_ul_bgdisc_job_t *j)
   nr_pusch_ul_disc_grid_t grid = {.fft = symsz, .n_rb_carrier = fp->N_RB_UL, .first_carrier = fp->first_carrier_offset,
                                   .rb_start = g.bwp_start + g.start_rb, .rb_count = g.num_rb, .symbols_per_slot = sps, .slot = slot,
                                   .start_symbol = g.start_symbol, .num_symbols = g.num_symbols, .normal_cp = fp->Ncp == NR_NORMAL, .n_rx = nant};
-  for (int a = 0; a < nant; ++a) grid.rx[a] = &gbuf[(size_t)a * sps * symsz];
+  for (int a = 0; a < nant; ++a) grid.rx[a] = &ul_bg_run_gbuf[(size_t)a * sps * symsz];
   int prior[16];
   const int nprior = ul_disc_priors(&g, fp, cfg, &cached, prior, 16);
   int ta = j->ta_offset;
@@ -1501,7 +1578,7 @@ static int ul_bg_run(const nr_ul_bgdisc_job_t *j)
         for (int delta = -span; delta <= span; delta += step) {
           const int advance = center + delta;
           if (advance - j->ta_offset < -2048 || advance - j->ta_offset > 2048) continue;
-          if (!bg_fep(fp, &sn, nant, gbuf, slot, first_sym, advance, j->fo_hz)) continue; /* outside the window: not a candidate */
+          if (!bg_fep(fp, &sn, nant, ul_bg_run_gbuf, slot, first_sym, advance, j->fo_hz)) continue; /* outside the window: not a candidate */
           for (int i = 0; i < nprior; ++i) {
             int pairs = 0;
             const double score = nr_pusch_ul_disc_delay_score(&grid, (uint16_t)(1u << first_sym), timing_type, timing_nscid, prior[i], &pairs);
@@ -1522,7 +1599,7 @@ static int ul_bg_run(const nr_ul_bgdisc_job_t *j)
   }
   const int s1 = g.start_symbol + g.num_symbols < sps ? g.start_symbol + g.num_symbols : sps;
   for (int sym = g.start_symbol; sym < s1; sym++)
-    if (!bg_fep(fp, &sn, nant, gbuf, slot, sym, ta, j->fo_hz)) return 1;
+    if (!bg_fep(fp, &sn, nant, ul_bg_run_gbuf, slot, sym, ta, j->fo_hz)) return 1;
   if (dmrs_disc) {
     const nr_pusch_ul_disc_result_t result = nr_pusch_ul_disc_search_sweep(&grid, g.rnti, type_a, prior, nprior, g.dmrs_config_type, g.nscid, g.antenna_ports_field, 0, 1024);
     if (result.accepted && passive_ul_apply_dmrs_disc(&g, &result)) found = true;
@@ -1555,9 +1632,13 @@ static int ul_bg_run(const nr_ul_bgdisc_job_t *j)
  * cheap (a handful of int/double stores) so lock contention is not a concern. Energy for the
  * symbols THIS call measured is computed OUTSIDE the lock (pure read of this grant's own rxdataF,
  * no shared state touched) to keep the held section as short as possible. */
-static pthread_mutex_t g_ul_energy_lock = PTHREAD_MUTEX_INITIALIZER;
-static double          g_ul_energy_profile[14];
-static uint16_t        g_ul_energy_seen_mask;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_ul_energy_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_ul_energy_lock NR_CELL_REF(g_ul_energy_lock)
+typedef double g_ul_energy_profile_cell_t[14];
+NR_CELL_STATIC(g_ul_energy_profile_cell_t, g_ul_energy_profile);
+#define g_ul_energy_profile NR_CELL_REF(g_ul_energy_profile)
+NR_CELL_STATIC(uint16_t, g_ul_energy_seen_mask);
+#define g_ul_energy_seen_mask NR_CELL_REF(g_ul_energy_seen_mask)
 
 static void ul_dmrs_energy_oracle_observe(const nr_pdcch_blind_ul_result_t *g, const NR_DL_FRAME_PARMS *fp,
                                           PHY_VARS_gNB *gnb, int slot_off, int symsz)
@@ -1595,12 +1676,15 @@ static void ul_dmrs_energy_oracle_observe(const nr_pdcch_blind_ul_result_t *g, c
 /* ---- n_ID background search glue ----------------------------------------------------------------------------------------------------------------- */
 static bool nid_hyp_run(const nr_ul_nid_job_t *j, const nr_pdcch_blind_ul_result_t *hg, int32_t ta, int slot_delta, nr_ul_nid_cap_t *cap)
 {
-  static bool ready, failed;
+  NR_CELL_STATIC(bool, nid_hyp_ready);
+  #define nid_hyp_ready NR_CELL_REF(nid_hyp_ready)
+  NR_CELL_STATIC(bool, nid_hyp_failed);
+  #define nid_hyp_failed NR_CELL_REF(nid_hyp_failed)
   PHY_VARS_NR_UE *ue = j->ue;
-  if (failed || !ue || !j->have_iq || (slot_delta && !j->have_iq2)) return false;
-  if (!ready) { /* worker thread only */
-    if (!nr_pusch_passive_decode_prewarminit(ue, NID_CTX)) { failed = true; return false; }
-    ready = true;
+  if (nid_hyp_failed || !ue || !j->have_iq || (slot_delta && !j->have_iq2)) return false;
+  if (!nid_hyp_ready) { /* worker thread only */
+    if (!nr_pusch_passive_decode_prewarminit(ue, NID_CTX)) { nid_hyp_failed = true; return false; }
+    nid_hyp_ready = true;
   }
   c16_t *iq[PASSIVE_UL_MAX_ANT] = {0};
   for (int a = 0; a < j->nant && a < PASSIVE_UL_MAX_ANT; a++) iq[a] = slot_delta ? j->iq2[a] : j->iq[a];
@@ -1617,8 +1701,9 @@ static bool nid_hyp_run(const nr_ul_nid_job_t *j, const nr_pdcch_blind_ul_result
 static void nid_submit(PHY_VARS_NR_UE *ue, int ctx, const nr_ul_nid_rec_t *r, const nr_pdcch_blind_ul_result_t *g, const int16_t *llr, int nant,
                        uint8_t slot, uint32_t frame, double fo_hz)
 {
-  static atomic_bool started;
-  if (!atomic_exchange_explicit(&started, true, memory_order_relaxed)) nr_ul_nid_bg_start(nid_hyp_run, NULL);
+  NR_CELL_STATIC(atomic_bool, nid_submit_started);
+  #define nid_submit_started NR_CELL_REF(nid_submit_started)
+  if (!atomic_exchange_explicit(&nid_submit_started, true, memory_order_relaxed)) nr_ul_nid_bg_start(nid_hyp_run, NULL);
   const bool iq = nr_ul_nid_bg_iq_enabled() && ctx != NID_CTX && g_snapshot[ctx].valid && nant >= 1 && nant <= 4;
   const int idx = nr_ul_nid_bg_admit(r);
   if (idx < 0) return;
@@ -1768,8 +1853,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     for (int i = 0; i < n; ++i) gapped |= prb[i] != g->start_rb + i;
   }
   if (gapped || fdra_unresolved) {
-    static _Atomic unsigned long skipped_aux;
-    const unsigned long count = atomic_fetch_add_explicit(&skipped_aux, 1, memory_order_relaxed) + 1;
+    NR_CELL_STATIC(_Atomic unsigned long, dec_skipped_aux);
+    #define dec_skipped_aux NR_CELL_REF(dec_skipped_aux)
+    const unsigned long count = atomic_fetch_add_explicit(&dec_skipped_aux, 1, memory_order_relaxed) + 1;
     if (count == 1 || count % 1000 == 0)
       LOG_I(PHY, "SENSING: UL_FDRA_AUX_SKIPPED n=%lu rnti=0x%x energy_pin,dmrs_id,cfr require resolved PRB geometry\n",
             count, g->rnti);
@@ -1811,8 +1897,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   /* One-shot STAGE markers. The first live run entered the decode and never returned, and with no
    * gdb on this host and every thread sleeping rather than spinning, the log is the only instrument
    * that can say WHERE. Each prints once; the last one printed is the stage that blocked. */
-  static int s_stage = 1;
-#define PUSCH_STAGE(n, what) do { if (s_stage) { LOG_I(PHY, "SENSING: PUSCHSTAGE %d %s\n", (n), (what)); } } while (0)
+  NR_CELL_STATIC_INIT(int, dec_s_stage, 1);
+  #define dec_s_stage NR_CELL_REF(dec_s_stage)
+#define PUSCH_STAGE(n, what) do { if (dec_s_stage) { LOG_I(PHY, "SENSING: PUSCHSTAGE %d %s\n", (n), (what)); } } while (0)
   PUSCH_STAGE(1, "guards passed");
   PHY_VARS_gNB *gnb = g_gnb[ctx];
   if (g_snapshot[ctx].valid) {
@@ -2102,8 +2189,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
   nfapi_nr_pusch_pdu_t pdu;
   fill_pusch_pdu(g, nant, fp, &pdu);
-  static atomic_bool tp_scope_logged = false;
-  if (g->transform_precoding && !atomic_exchange_explicit(&tp_scope_logged, true, memory_order_relaxed)) {
+  NR_CELL_STATIC_INIT(atomic_bool, dec_tp_scope_logged, false);
+  #define dec_tp_scope_logged NR_CELL_REF(dec_tp_scope_logged)
+  if (g->transform_precoding && !atomic_exchange_explicit(&dec_tp_scope_logged, true, memory_order_relaxed)) {
     LOG_A(PHY, "PUSCH TP scope: PCI-default nPUSCH-Identity=%u, no group/sequence hopping; "
                "explicit nPUSCH-Identity/hopping discovery unsupported, hypothesis needs CRC validation\n",
           pdu.pusch_identity);
@@ -2148,8 +2236,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     if (ul_init_tx.nl != g->nrOfLayers) {
       // See the DL twin's identical comment: this grant's OWN layer count governs how THIS
       // occasion's REs map, so it is kept rather than replayed from the record; only logged.
-      static _Atomic unsigned long c_ = 0;
-      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      NR_CELL_STATIC_INIT(_Atomic unsigned long, dec_retx_c, 0);
+      #define dec_retx_c NR_CELL_REF(dec_retx_c)
+      const unsigned long n_ = atomic_fetch_add_explicit(&dec_retx_c, 1, memory_order_relaxed) + 1;
       if (n_ == 1 || (n_ % 200) == 0)
         LOG_W(PHY, "SENSING: PUSCH reserved-MCS retx rnti=0x%04x pid=%u layer count changed %u->%u\n",
               g->rnti, g->harq_pid, ul_init_tx.nl, g->nrOfLayers);
@@ -2618,8 +2707,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
          * the TB as if the PUSCH carried data only */
         out->uci_ack_re = (uint16_t)(so.c.u_re + (so.h.o_ack <= 2 ? so.c.q_ack : 0));
         out->o_ack = so.h.o_ack;
-        static _Atomic uint64_t logged;
-        const uint64_t n_ = atomic_fetch_add_explicit(&logged, 1, memory_order_relaxed) + 1;
+        NR_CELL_STATIC(_Atomic uint64_t, dec_uci_logged);
+        #define dec_uci_logged NR_CELL_REF(dec_uci_logged)
+        const uint64_t n_ = atomic_fetch_add_explicit(&dec_uci_logged, 1, memory_order_relaxed) + 1;
         if (n_ <= 12 || n_ % 500 == 0)
           LOG_I(PHY, "SENSING: UL_UCI recovered rnti=0x%04x %s o_ack=%u b_ack=%u o_csi1=%u b_csi1=%u o_csi2=%u b_csi2=%u alpha=%u "
                      "csi2_map=%u re[ack=%u rvd=%u csi1=%u csi2=%u] prb=%u cb_tests=%u tb_tests=%u\n",
@@ -2668,10 +2758,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   if (!nr_cfg_epoch_work_current()) {
     out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
     out->reject_reason = "old configuration epoch";
-    s_stage = 0;
+    dec_s_stage = 0;
     return false;
   }
-  s_stage = 0;
+  dec_s_stage = 0;
 #undef PUSCH_STAGE
 
   out->qam_mod_order = pdu.qam_mod_order;
@@ -2765,9 +2855,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     nr_pusch_passive_data_id_feed(true);
   {
     /* dataScramblingIdentityPUSCH, same argument as the DL: a CRC-OK TB under this n_ID is proof. */
-    static _Atomic int s_ul_scr_confirmed;
+    NR_CELL_STATIC(_Atomic int, dec_s_ul_scr_confirmed);
+    #define dec_s_ul_scr_confirmed NR_CELL_REF(dec_s_ul_scr_confirmed)
     int expected = 0;
-    if (atomic_compare_exchange_strong(&s_ul_scr_confirmed, &expected, 1))
+    if (atomic_compare_exchange_strong(&dec_s_ul_scr_confirmed, &expected, 1))
       LOG_A(PHY, "SENSING: DATA_SCRAMBLING_ID PUSCH CONFIRMED n_id=%d (assumed PCI %u) by TB CRC, rnti=0x%x\n",
             g->data_scrambling_id, (unsigned)fp->Nid_cell, g->rnti);
   }
@@ -2858,8 +2949,9 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
       if (!t_solver_probe && g->data_id_advance) nr_pusch_passive_data_id_feed(ok);
     }
     if (ok) {
-      static _Atomic unsigned long resolved;
-      const unsigned long count = atomic_fetch_add_explicit(&resolved, 1, memory_order_relaxed) + 1;
+      NR_CELL_STATIC(_Atomic unsigned long, dec_fdra_resolved);
+      #define dec_fdra_resolved NR_CELL_REF(dec_fdra_resolved)
+      const unsigned long count = atomic_fetch_add_explicit(&dec_fdra_resolved, 1, memory_order_relaxed) + 1;
       if (count == 1 || count % 1000 == 0)
         LOG_I(PHY, "SENSING: UL_FDRA_CRC_RESOLVED n=%lu rnti=0x%x candidate=%d/%u mode=%u rb=%u+%u bitmap=0x%x\n",
               count, g->rnti, winner + 1, g->fdra_candidate_count, g->fdra_candidates[winner].mode,

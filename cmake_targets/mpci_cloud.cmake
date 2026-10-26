@@ -235,3 +235,27 @@ if(ENABLE_TESTS)
   endif()
 endif()
 # ---- end G1 ----
+
+# ---- A6 ----
+# Per-cell UL state: UL layout lock, UL data-id lock table, UL background discovery (nr_cell.h conversion). The existing unit-test targets that compile
+# converted sources get LOG (nr_cell.c lives there). The interleave test runs two cells with different UL BWP alternately (one thread re-binding, two
+# threads) and compares each cell with its solo run on other cell slots.
+if(ENABLE_TESTS)
+  foreach(t test_nr_pusch_ul_disc test_nr_pusch_solver test_nr_pdcch_blind_monitor)
+    if(TARGET ${t})
+      target_link_libraries(${t} PRIVATE LOG)
+    endif()
+  endforeach()
+  set(A6_SRC ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
+  add_executable(test_mpci_a6_ul_cells
+    ${A6_SRC}/tests/nr_mpci_a6_ul_cells_test.cc
+    ${A6_SRC}/nr_pusch_ul_bgdisc.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/refsig.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/nr_dmrs_rx.c
+    ${CMAKE_SOURCE_DIR}/common/utils/ds/hashtable.c)
+  target_include_directories(test_mpci_a6_ul_cells PRIVATE ${A6_SRC} ${CMAKE_SOURCE_DIR}/common/utils)
+  target_link_libraries(test_mpci_a6_ul_cells PRIVATE nr_pdcch_blind_monitor MAC_NR_COMMON asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs crc_byte UTIL LOG GTest::gtest pthread m)
+  add_dependencies(tests test_mpci_a6_ul_cells)
+  add_test(NAME test_mpci_a6_ul_cells COMMAND test_mpci_a6_ul_cells)
+endif()
+# ---- end A6 ----

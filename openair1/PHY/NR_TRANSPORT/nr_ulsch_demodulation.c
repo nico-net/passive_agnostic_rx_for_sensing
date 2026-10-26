@@ -21,12 +21,15 @@
 #include "executables/softmodem-common.h" // IS_PASSIVE_RX_MODE, for the passive-only branch restriction below
 #include "nr_ulsch_passive_branch.h" // nr_ulsch_dmrs_snr_db
 #include "nr_ul_branch_select.h"
+#include "common/utils/nr_cell.h" /* mpci A6: the branch table is per cell */
 #include <pthread.h>
 
 /* Passive UL receive branches: every branch whose DM-RS is detectable against its own measured noise (nr_ul_branch_select.h), per grant;
  * a dead branch is excluded by that test, a weak live one is weighted by the combiner. The table feeds the GPU pass. */
-static nr_ul_branch_tab_t g_ul_branch_tab;
-static pthread_mutex_t g_ul_branch_lock = PTHREAD_MUTEX_INITIALIZER;
+NR_CELL_STATIC(nr_ul_branch_tab_t, g_ul_branch_tab);
+#define g_ul_branch_tab NR_CELL_REF(g_ul_branch_tab)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_ul_branch_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_ul_branch_lock NR_CELL_REF(g_ul_branch_lock)
 int nr_ulsch_passive_branch_keep(int nb_rx_ant)
 {
   if (nb_rx_ant <= 1) return -1;

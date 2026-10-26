@@ -32,11 +32,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
 
 /* ---- UL DM-RS scrambling identity, one two-window state per nSCID (final review I5) -------- */
-static nr_dmrs_id_2stage_t g_ul_dmrs_id[NR_UL_DMRS_NSCID];
-static bool                g_ul_dmrs_id_init[NR_UL_DMRS_NSCID];
-static pthread_mutex_t     g_ul_dmrs_id_lock[NR_UL_DMRS_NSCID] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
+typedef nr_dmrs_id_2stage_t g_ul_dmrs_id_cell_t[NR_UL_DMRS_NSCID];
+NR_CELL_STATIC(g_ul_dmrs_id_cell_t, g_ul_dmrs_id);
+#define g_ul_dmrs_id NR_CELL_REF(g_ul_dmrs_id)
+typedef bool g_ul_dmrs_id_init_cell_t[NR_UL_DMRS_NSCID];
+NR_CELL_STATIC(g_ul_dmrs_id_init_cell_t, g_ul_dmrs_id_init);
+#define g_ul_dmrs_id_init NR_CELL_REF(g_ul_dmrs_id_init)
+typedef pthread_mutex_t g_ul_dmrs_id_lock_cell_t[NR_UL_DMRS_NSCID];
+NR_CELL_STATIC_INIT(g_ul_dmrs_id_lock_cell_t, g_ul_dmrs_id_lock, {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER});
+#define g_ul_dmrs_id_lock NR_CELL_REF(g_ul_dmrs_id_lock)
 
 /* U4: fixed admission table. Tickets make stale CRC feedback from an earlier
  * incarnation or configuration epoch harmless. ID priors are ranking hints;
@@ -50,9 +57,13 @@ typedef struct {
   uint32_t failed_grants; /* U7: one bounded data-ID candidate per failed grant */
   bool used;
 } ul_ids_ue_t;
-static ul_ids_ue_t g_ue_ids[UL_IDS_UE_CAP];
-static pthread_mutex_t g_ue_ids_lock = PTHREAD_MUTEX_INITIALIZER;
-static _Atomic uint64_t g_ue_ids_dropped;
+typedef ul_ids_ue_t g_ue_ids_cell_t[UL_IDS_UE_CAP];
+NR_CELL_STATIC(g_ue_ids_cell_t, g_ue_ids);
+#define g_ue_ids NR_CELL_REF(g_ue_ids)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_ue_ids_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_ue_ids_lock NR_CELL_REF(g_ue_ids_lock)
+NR_CELL_STATIC(_Atomic uint64_t, g_ue_ids_dropped);
+#define g_ue_ids_dropped NR_CELL_REF(g_ue_ids_dropped)
 uint64_t nr_pusch_passive_ul_ids_dropped(void)
 { return atomic_load_explicit(&g_ue_ids_dropped,memory_order_relaxed); }
 
@@ -74,16 +85,22 @@ uint64_t nr_pusch_passive_ul_ids_dropped(void)
  * dataScramblingIdentityPUSCH is absent) stays the first hypothesis, as the walk and the priors already order it. */
 #define UL_DATA_LOCK_CAP 64
 /* entry: (1 << 32) | rnti << 16 | id, read lock-free (the DCI path must not block); written under g_ue_ids_lock */
-static _Atomic uint64_t g_data_lock[UL_DATA_LOCK_CAP];
+typedef _Atomic uint64_t g_data_lock_cell_t[UL_DATA_LOCK_CAP];
+NR_CELL_STATIC(g_data_lock_cell_t, g_data_lock);
+#define g_data_lock NR_CELL_REF(g_data_lock)
 /* a non-decisive (CRC16) pass waiting for its confirmation on another slot, per RNTI: (rnti, id, slot) */
 typedef struct {
   uint16_t rnti, id;
   int64_t slot;
   bool used;
 } ul_data_pending_t;
-static ul_data_pending_t g_data_pending[UL_DATA_LOCK_CAP];
-static uint32_t g_data_pending_next;
-static uint32_t g_data_lock_next;
+typedef ul_data_pending_t g_data_pending_cell_t[UL_DATA_LOCK_CAP];
+NR_CELL_STATIC(g_data_pending_cell_t, g_data_pending);
+#define g_data_pending NR_CELL_REF(g_data_pending)
+NR_CELL_STATIC(uint32_t, g_data_pending_next);
+#define g_data_pending_next NR_CELL_REF(g_data_pending_next)
+NR_CELL_STATIC(uint32_t, g_data_lock_next);
+#define g_data_lock_next NR_CELL_REF(g_data_lock_next)
 
 static int data_lock_slot(uint16_t rnti)
 {
@@ -314,12 +331,17 @@ void nr_pusch_passive_ul_dmrs_unlock(int nscid)
 }
 
 /* ---- dataScramblingIdentityPUSCH walk + its eligibility window (Task 13, final review I1) --------- */
-static nr_scrambling_id_sweep_t g_ul_data_id;
-static bool                     g_ul_data_id_init;
-static pthread_mutex_t          g_ul_data_id_lock = PTHREAD_MUTEX_INITIALIZER;
-static nr_scr_link_t            g_ul_link;
+NR_CELL_STATIC(nr_scrambling_id_sweep_t, g_ul_data_id);
+#define g_ul_data_id NR_CELL_REF(g_ul_data_id)
+NR_CELL_STATIC(bool, g_ul_data_id_init);
+#define g_ul_data_id_init NR_CELL_REF(g_ul_data_id_init)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_ul_data_id_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_ul_data_id_lock NR_CELL_REF(g_ul_data_id_lock)
+NR_CELL_STATIC(nr_scr_link_t, g_ul_link);
+#define g_ul_link NR_CELL_REF(g_ul_link)
 /* Windowed/resettable (review fix round 1, finding 1): 0_1 CRC fails since the last 0_1 pass. */
-static _Atomic uint32_t g_ul_fails_since_ok;
+NR_CELL_STATIC(_Atomic uint32_t, g_ul_fails_since_ok);
+#define g_ul_fails_since_ok NR_CELL_REF(g_ul_fails_since_ok)
 
 bool nr_pusch_passive_ul_walk_eligible(uint16_t rnti, int dmrs_decided_id)
 {
