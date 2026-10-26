@@ -42,7 +42,7 @@ __attribute__((weak)) void nr_pdsch_recovery_stats(char *buf, int n);
 __attribute__((weak)) bool nr_pdsch_recovery_enabled(void);
 __attribute__((weak)) void nr_pdsch_retry_yield_stats(uint64_t *chains, uint64_t *yields, uint64_t *gated);
 
-extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
 /* mpci A3: the PCI of the cell being reported. The exported global (extern in nr_passive_metrics.h, written by executables/nr-ue.c)
  * is the cell-0 / single-cell slot, so N=1 is unchanged; cells k > 0 use the cell-indexed slot written by nr_passive_metrics_set_pci()
  * (A8: nr-ue.c should call it, with the cell's thread bound, instead of storing the global). */

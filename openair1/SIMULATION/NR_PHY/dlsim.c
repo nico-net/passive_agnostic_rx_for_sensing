@@ -312,10 +312,9 @@ void nr_dlsim_preprocessor(gNB_MAC_INST *nr_mac, post_process_pdsch_t *pp_pdsch)
 #include "hidden_waveform.h"
 
 /* Standalone simulator has no device timing producer. */
-_Atomic int nr_ue_pending_rebase_valid = 0;
-_Atomic long nr_ue_pending_rebase_delta = 0;
-_Atomic long nr_ue_diag_producer_absolute_slot = -1;
-_Atomic long nr_ue_diag_producer_wall_ns = 0;
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
+NR_UE_CELL_CLOCK_DEFINE_PRODUCER();
+NR_UE_CELL_CLOCK_DEFINE_REBASE();
 
 nrUE_params_t nrUE_params;
 

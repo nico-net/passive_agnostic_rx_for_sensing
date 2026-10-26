@@ -14,10 +14,9 @@ extern int nr_ulsch_decoding(PHY_VARS_gNB *, NR_DL_FRAME_PARMS *, uint32_t, uint
 extern int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *, int, int, NR_UL_IND_t *);
 static unsigned ra0_failures, ra0_trials;
 /* The live UE executable owns these; the simulator has no capture producer. */
-_Atomic long nr_ue_diag_producer_absolute_slot = -1;
-_Atomic long nr_ue_diag_producer_wall_ns = 0;
-_Atomic long nr_ue_pending_rebase_delta = 0;
-_Atomic int nr_ue_pending_rebase_valid = 0;
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
+NR_UE_CELL_CLOCK_DEFINE_PRODUCER();
+NR_UE_CELL_CLOCK_DEFINE_REBASE();
 
 typedef struct {
   PHY_VARS_gNB *gnb;

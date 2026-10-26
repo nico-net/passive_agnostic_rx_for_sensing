@@ -8,13 +8,14 @@
 #include <stdlib.h>
 #include <time.h>
 #include <stdatomic.h>
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell rebase hand-off and signal-absent flag (A8) */
 
 /* Anti-windup bound on the timing PI loop's integral term (a healthy receiver holds max_pos_acc ~450). */
 #define NR_MAX_POS_ACC_LIMIT 1024
 
 /* Set by the RF census in nr-ue.c while the receive stream is delivering noise floor on every
- * branch. Read here to FREEZE the integral term: see where it is used. */
-_Atomic int nr_ue_rf_signal_absent = 0;
+ * branch. Read here to FREEZE the integral term: see where it is used. One flag per cell (its own stream). */
+NR_UE_CELL_CLOCK_DEFINE_SIGNAL();
 
 void nr_ue_reset_time_sync_loop(PHY_VARS_NR_UE *ue)
 {
@@ -106,14 +107,13 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
    * the same frame-boundary path the ANCHOR uses (positive = channel later than the window, discard
    * that many samples). Never fires on a healthy lock (peak in window). */
   {
-    extern _Atomic long nr_ue_pending_rebase_delta;
-    extern _Atomic int nr_ue_pending_rebase_valid;
     /* LATE WINDOW TOO (2026-09-19). Macro PCI 64 at 217 PRB: global_pos -341 (window LATE, the mirror
      * of the 4-ch +342 case), global/in-window ratio only 4.8-6.5x, e_win_frac 0.14-0.17 on every
      * observation, SIB1 0. Both `g_pos > 0` and the hard 8x blocked it. Negative deltas are now
      * applied by the consumer as a one-frame-minus-|d| discard. */
     const int s_gr_ratio = 8;
-    static int s_gr_cnt = 0;
+    NR_CELL_STATIC(int, s_gr_cnt); /* per cell: consecutive dominant out-of-window observations of THIS cell's timing loop */
+#define s_gr_cnt NR_CELL_REF(s_gr_cnt)
     const bool dominant = peak_out_of_window && g_pos != 0 && g_val > s_gr_ratio * (int64_t)(max_val > 0 ? max_val : 1);
     s_gr_cnt = dominant ? s_gr_cnt + 1 : 0;
     if (s_gr_cnt >= 4 && !atomic_load_explicit(&nr_ue_pending_rebase_valid, memory_order_relaxed)) {
@@ -124,6 +124,7 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
       s_gr_cnt = 0;
     }
   }
+#undef s_gr_cnt
 
   // filter position to reduce jitter
   const int ncoef = 32767 - coef;

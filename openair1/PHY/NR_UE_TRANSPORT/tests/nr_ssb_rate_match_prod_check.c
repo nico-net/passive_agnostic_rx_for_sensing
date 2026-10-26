@@ -37,10 +37,9 @@ nrUE_params_t *get_nrUE_params(void)
 {
   return &nrUE_params;
 }
-_Atomic long nr_ue_diag_producer_absolute_slot = -1; // no device timing producer (as in the physims)
-_Atomic long nr_ue_diag_producer_wall_ns = 0;
-_Atomic int nr_ue_pending_rebase_valid = 0;
-_Atomic long nr_ue_pending_rebase_delta = 0;
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
+NR_UE_CELL_CLOCK_DEFINE_PRODUCER();
+NR_UE_CELL_CLOCK_DEFINE_REBASE();
 void trs_freq_correction(PHY_VARS_NR_UE *ue, int cfo)
 {
 }

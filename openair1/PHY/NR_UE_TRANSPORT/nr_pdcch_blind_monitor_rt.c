@@ -106,7 +106,7 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 /* Published by the RF producer thread (executables/nr-ue.c:43/1148) immediately before it reads
  * each slot. The deferred-decode staleness check differences against it, so the enqueue side must
  * read the SAME counter rather than rebuild one from the wrapping frame number. */
-extern _Atomic long nr_ue_diag_producer_absolute_slot;
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"      // shared re-encode + Ĥ=Y/X submit
 #include "nr_pdcch_ul_discovery.h"
 #include "nr_passive_acq_state.h" // explicit acquisition-state tracker (period-guarded)

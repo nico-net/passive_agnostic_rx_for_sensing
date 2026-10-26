@@ -70,7 +70,7 @@ extern uint64_t nr_passive_slot_arrival_ns(long abs_slot);
 
 /* The RF producer's own position, published in executables/nr-ue.c immediately BEFORE nrue_ru_read()
  * fills that slot's region of rxdata. */
-extern _Atomic long nr_ue_diag_producer_absolute_slot;
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
 
 typedef nr_pusch_passive_job_t g_ring_cell_t[NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH];
 NR_CELL_STATIC(g_ring_cell_t, g_ring);
