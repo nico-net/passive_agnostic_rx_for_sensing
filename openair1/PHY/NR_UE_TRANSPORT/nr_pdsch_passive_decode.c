@@ -1635,6 +1635,62 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       return out->status; // the density did not describe any PT-RS -- do not guess G
     }
   }
+  /* ---- SSB rate matching (TS 38.214 5.1.4): the CURRENT slot's SSB, observed blind (PSS x SSS of
+   * the acquired PCI) -- no configured bitmap, no projected period, no SIB1. PSS/SSS need their FFT
+   * before G. On a slot-cache hit the whole slot is already transformed; otherwise FEP exactly as the
+   * main FEP below does, so a cached slot never holds a differently compensated symbol. */
+  const double fep_fo = isnan(nr_slot_fep_fo_override_hz)
+      ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
+      : nr_slot_fep_fo_override_hz;
+  const long share_slot = grant->source_absolute_slot;
+  const int fep_hit = t_share.on && t_fep_cache.valid && t_fep_cache.slot == share_slot && t_fep_cache.fo == fep_fo;
+  const uint16_t ssb_cand = nr_ssb_rm_candidates(fp, proc->nr_slot_rx, dlsch_config->start_symbol,
+                                                 dlsch_config->number_symbols);
+  if (ssb_cand && !fep_hit) {
+    if (grant->check_sample_lifetime && !nr_passive_samples_valid(
+            atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
+            grant->source_absolute_slot, fp->slots_per_frame))
+      return out->status;
+    const uint16_t fep_syms = ssb_cand | (ssb_cand << 2); // PSS at s, SSS at s+2
+    for (int sym = 0; sym < 14; ++sym) {
+      if (!((fep_syms >> sym) & 1))
+        continue;
+      if (fp->nb_antennas_rx > 1) {
+        for (int ant = 0; ant < fp->nb_antennas_rx; ++ant)
+          nr_slot_fep_ant_snapshot(ue, fp, proc->nr_slot_rx, sym, ant, rxdataF, link_type_dl, 0, ue->common_vars.rxdata, fep_fo);
+      } else {
+        nr_slot_fep(ue, fp, proc->nr_slot_rx, sym, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+      }
+    }
+    if (grant->check_sample_lifetime && !nr_passive_samples_valid(
+            atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
+            grant->source_absolute_slot, fp->slots_per_frame))
+      return out->status;
+  }
+  const nr_ssb_rm_event_t ssb_event = nr_ssb_rm_observe(fp, proc->frame_rx, proc->nr_slot_rx, ssb_cand, rxdataF);
+  nr_ssb_rm_plan_t ssb;
+  const bool ssb_ok = nr_ssb_rm_plan(&ssb_event, proc->frame_rx, proc->nr_slot_rx, fp->Nid_cell, grant->rnti, dlsch_config,
+                                     freq_alloc, seg_path ? seg : NULL, seg_path ? nseg : 0, &ssb);
+  const uint32_t ssb_unav = ssb.unav;
+  if (ssb_event.symbols) {
+    static _Atomic unsigned long count = 0;
+    const unsigned long n = atomic_fetch_add_explicit(&count, 1, memory_order_relaxed) + 1;
+    if (n <= 100 || n % 100 == 0)
+      LOG_I(PHY, "PDSCH SSB-OBS n=%lu frame=%d slot=%d pci=%d symbols=0x%x crb=%u..%u overlap_re=%u refused=%d rnti=0x%x\n",
+            n, ssb_event.frame, ssb_event.slot, ssb_event.pci, ssb_event.symbols, ssb_event.first_crb,
+            ssb_event.last_crb, ssb_unav, !ssb_ok, grant->rnti);
+  }
+  if (!ssb_ok)
+    return out->status;
+  if (ssb_unav) {
+    static _Atomic unsigned long count = 0;
+    const unsigned long n = atomic_fetch_add_explicit(&count, 1, memory_order_relaxed) + 1;
+    if (n == 1 || n % 200 == 0)
+      LOG_I(PHY, "PDSCH SSB-RM n=%lu frame=%d slot=%d pci=%d symbols=0x%x crb=%u..%u extra_re=%u rnti=0x%x\n",
+            n, ssb_event.frame, ssb_event.slot, ssb_event.pci, ssb_event.symbols,
+            ssb_event.first_crb, ssb_event.last_crb, ssb_unav, grant->rnti);
+  }
+
   /* ---- CSI-RS rate matching: from the blind CSI-RS search's confirmed resource (the monitor fills
    * csiRsForRateMatching on the slots it occurs). The demodulator's own overlap bitmap skips the
    * REs; here only G needs the unavailable-RE count, from the same routine the attached UE uses. */
@@ -1778,7 +1834,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   dlsch_config->tbslbrm = nr_compute_tbslbrm(tbl_lbrm, bw_lbrm, (uint8_t)nl_tbslbrm);
 
   const uint32_t G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
-                              ptrs_unav + csi_unav /* PT-RS from the density sweep; CSI-RS from the blind search */,
+                              ptrs_unav + csi_unav + ssb_unav,
                               cw->qamModOrder, cw->Nl);
   if (G == 0) {
     { static _Atomic unsigned long c_ = 0;
@@ -1851,7 +1907,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   int probe_last_sym = -1;
   static int s_probe_horizon = -1; /* ISAC_PROBE_HORIZON=0: probe with the whole slot processed (A/B of the horizon) */
   if (s_probe_horizon < 0) { const char *e = getenv("ISAC_PROBE_HORIZON"); s_probe_horizon = (e && atoi(e) == 0) ? 0 : 1; }
-  if (t_probe_first_seg && s_probe_horizon) {
+  if (t_probe_first_seg && s_probe_horizon && !ssb_unav) {
     const uint32_t Kcb = (cw->ldpcBaseGraph == 2) ? 3840u : 8448u;
     const uint32_t B = cw->TBS + 24u;
     const uint32_t C_est = (B <= Kcb) ? 1u : (B + (Kcb - 24u) - 1u) / (Kcb - 24u);
@@ -1877,7 +1933,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   /* GPU LLRs in hand: everything from here to the LLR buffer (FEP, channel estimation, equaliser,
    * demodulator) is what the GPU already did for this slot. A PT-RS arm or CSI-RS rate matching
    * armed above changes the RE budget the GPU did not model, so that job stays on the CPU path. */
-  const int16_t *gpu_llr = ((dlsch_config->pduBitmap & 0x1) || csi_unav) ? NULL : t_llr_ovr;
+  const int16_t *gpu_llr = ((dlsch_config->pduBitmap & 0x1) || csi_unav || ssb_unav) ? NULL : t_llr_ovr;
   const uint32_t gpu_llr_n = gpu_llr ? t_llr_ovr_n : 0;
   atomic_fetch_add(gpu_llr ? &g_gpu_llr_jobs : &g_gpu_cpu_jobs, 1);
 
@@ -1893,11 +1949,6 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * slot_fep_nr.c. Each antenna's FEP is independent, so dispatch one per antenna across the
    * thread pool instead of looping them serially. nb_antennas_rx==1 skips the pool and matches
    * the previous behaviour exactly. */
-  const double fep_fo = isnan(nr_slot_fep_fo_override_hz)
-      ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
-      : nr_slot_fep_fo_override_hz;
-  const long share_slot = grant->source_absolute_slot;
-  const int fep_hit = t_share.on && t_fep_cache.valid && t_fep_cache.slot == share_slot && t_fep_cache.fo == fep_fo;
   const int fep_s0 = t_share.on ? 0 : dlsch_config->start_symbol;
   const int fep_n  = t_share.on ? fp->symbols_per_slot
                      : (probe_last_sym >= 0 ? probe_end - dlsch_config->start_symbol : dlsch_config->number_symbols);
@@ -2886,13 +2937,7 @@ gpu_llr_ready:;
                                  .scope_rxdataF_offset = 0};
 
   // Same "first symbol carrying data" rule as nr_ue_pdsch_procedures().
-  uint32_t dmrs_data_re = (dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1)
-                              ? 12 - 6 * dlsch_config->n_dmrs_cdm_groups
-                              : 12 - 4 * dlsch_config->n_dmrs_cdm_groups;
-  int first_symbol_with_data = dlsch_config->start_symbol;
-  while (dmrs_data_re == 0 && (dlsch_config->dlDmrsSymbPos & (1 << first_symbol_with_data))) {
-    first_symbol_with_data++;
-  }
+  const int first_symbol_with_data = nr_ssb_rm_first_data_symbol(dlsch_config, freq_alloc, &ssb);
 
   /* ---- PDSCH BRANCH-QUALITY GATE (ISAC_PDSCH_ANT_GATE=1, default OFF) --------------------------
    * 2026-09-23, ADDED BUT NOT LIVE-VALIDATED (no hardware available overnight to A/B it). Mirrors
@@ -3069,7 +3114,8 @@ gpu_llr_ready:;
                     m == first_symbol_with_data, (unsigned char)dlsch_config->harq_process_nbr, pdsch_est_size,
                     pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF_dem, &log2_maxh, rx_size_symbol,
                     fp->nb_antennas_rx, rxdataF_comp, dl_ch_mag, dl_ch_magb, dl_ch_magr, ptrs_phase_per_slot,
-                    ptrs_re_per_slot, nvar, &scope_req, NULL /* rho_dl: single layer */)
+                    ptrs_re_per_slot, nvar, &scope_req, NULL /* rho_dl: single layer */,
+                    ssb_unav ? &ssb.dem : NULL)
         < 0) {
       demod_ok = false;
       break;
