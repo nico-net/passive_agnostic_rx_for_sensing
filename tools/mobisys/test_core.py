@@ -156,6 +156,14 @@ class AggTest(unittest.TestCase):
         self.assertIsNone(row["serial_us"])
         self.assertIsNone(row["arr2enq_us"])
 
+    def test_code_block_crc_columns(self):
+        a, rows = collect()
+        a.feed_line(evm().replace("probe=0", "probe=0 cb_ok=3 cb_tried=5 cb_total=30"), 1000.0, 0.0)
+        a.feed_line(evm(), 1000.1, 0.1)  # a log from before 2026-10-26: no cb fields
+        r = [x for d, x in rows if d == "rx_grants"]
+        self.assertEqual((r[0]["cb_ok"], r[0]["cb_tried"], r[0]["cb_total"]), (3, 5, 30))
+        self.assertEqual((r[1]["cb_ok"], r[1]["cb_tried"], r[1]["cb_total"]), (None, None, None))
+
     def test_legacy_names_kept(self):
         a, _ = collect()
         a.feed_line(evm(e2e=(100, 50, 60, 300)), 1000.0, 0.0)
