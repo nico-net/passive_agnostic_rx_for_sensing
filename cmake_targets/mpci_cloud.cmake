@@ -242,14 +242,6 @@ endif()
 # threads) and compares each cell with its solo run on other cell slots.
 if(ENABLE_TESTS)
   foreach(t test_nr_pusch_ul_disc test_nr_pusch_solver test_nr_pdcch_blind_monitor)
-
-# ---- A5 ----
-# Per-cell state of the PDSCH solver / async-recovery lane / decode evidence + DL HARQ store / PDSCH queue (nr_cell.h conversion).
-# The existing solver and recovery tests compile the converted sources and now need LOG (nr_cell.c lives there). The interleave test runs
-# workload X on one cell and a different Y on another (one re-binding thread, two bound threads) and compares each with its solo run; it links
-# the receiver libraries (like nr_dlsim) because the decode evidence and the HARQ store live in nr_pdsch_passive_decode.c.
-if(ENABLE_TESTS)
-  foreach(t test_nr_pdsch_solver test_nr_pdsch_recovery)
     if(TARGET ${t})
       target_link_libraries(${t} PRIVATE LOG)
     endif()
@@ -268,6 +260,17 @@ if(ENABLE_TESTS)
 endif()
 # ---- end A6 ----
 
+# ---- A5 ----
+# Per-cell state of the PDSCH solver / async-recovery lane / decode evidence + DL HARQ store / PDSCH queue (nr_cell.h conversion).
+# The existing solver and recovery tests compile the converted sources and now need LOG (nr_cell.c lives there). The interleave test runs
+# workload X on one cell and a different Y on another (one re-binding thread, two bound threads) and compares each with its solo run; it links
+# the receiver libraries (like nr_dlsim) because the decode evidence and the HARQ store live in nr_pdsch_passive_decode.c.
+if(ENABLE_TESTS)
+  foreach(t test_nr_pdsch_solver test_nr_pdsch_recovery)
+    if(TARGET ${t})
+      target_link_libraries(${t} PRIVATE LOG)
+    endif()
+  endforeach()
   add_executable(test_mpci_a5_interleave ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/tests/nr_mpci_a5_interleave_test.cc
                                        ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/tests/nr_mpci_a5_stubs.c)
   target_include_directories(test_mpci_a5_interleave PRIVATE ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
