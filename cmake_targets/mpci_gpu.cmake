@@ -10,3 +10,16 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_gpu_green_g2 COMMAND test_nr_gpu_green_g2)
 endif()
 # ---- end G2 ----
+
+# ---- G3 ----
+# Per-cell instance quota of the GPU pass pools (pure logic, no CUDA). The GPU two-cell cases live in test_nr_gpu_pass (openair1/PHY/CODING/CMakeLists.txt).
+if(ENABLE_TESTS)
+  add_executable(test_nr_gpu_pass_quota ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_pass_quota_test.cc)
+  target_include_directories(test_nr_gpu_pass_quota PRIVATE ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT ${CMAKE_SOURCE_DIR})
+  target_link_libraries(test_nr_gpu_pass_quota PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_gpu_pass_quota)
+  add_test(NAME test_nr_gpu_pass_quota COMMAND test_nr_gpu_pass_quota)
+  # the two-cell GPU cases register cells with the pass module before the allocation fence: their own process (the fence tests of test_nr_gpu_pass seal it)
+  add_test(NAME test_nr_gpu_pass_cells COMMAND test_nr_gpu_pass --gtest_filter=GpuPassCells.* WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+endif()
+# ---- end G3 ----

@@ -60,6 +60,8 @@ typedef struct {
 
 /* 1 = the module is up (set by nr_gpu_pass_warmup) */
 int nr_gpu_pass_active(void);
+/* MPCI G3: 1 = `cell` may use the pass (cell 0: the module is up; cell > 0: registered by nr_gpu_pass_warmup run on that cell's thread, which shares the first cell's instances, graphs and classes) */
+int nr_gpu_pass_dl_cell_ready(int cell);
 int nr_gpu_pass_fp32_shadow(int flip, int sign_bad); /* FP32 shadow outcome of one grant; 1 = the pass was disabled */
 int nr_gpu_pass_fp32_on(void); /* Task 5: the graphs run the FP32 demod; the shadow checks then compare LLR signs and CRC verdicts, not hashes */
 /* before the RX fence, after nr_pdsch_gpu_exact_warmup returned 1 */

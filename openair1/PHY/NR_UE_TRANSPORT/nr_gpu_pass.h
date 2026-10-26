@@ -164,6 +164,8 @@ typedef struct {
   uint16_t copy_mask;          /* symbols of rxdataF the caller needs (DISCRETE copy-back) */
   /* ---- channel estimate, DM-RS type 1 (one row per DM-RS symbol x layer x antenna) */
   int nbRx, nl, ndmrs;
+  uint8_t cell;                /* MPCI G3: the cell the grant belongs to (nr_cell_idx() of the bound decode thread, set by nr_gpu_pass_{dl,ul}_run, never read from the thread by the GPU module):
+                                * selects the HARQ slab, the instance quota and the cell's n_rb_dl. Cleared by the memset of the host builders, set after it; 0 = cell 0 (N = 1) */
   int dmrs_sym[NR_GPU_PASS_MAX_DMRS];
   int delta[NR_GPU_PASS_MAX_NL];                                 /* get_delta(port) of each layer */
   const int16_t *pil[NR_GPU_PASS_MAX_DMRS][NR_GPU_PASS_MAX_NL];  /* c16 pilots of (DM-RS symbol, layer): 6 * nrb values from the grant's first RB */
@@ -320,6 +322,19 @@ void nr_gpu_pass_ul_counters(uint64_t o[16]);
 typedef int (*nr_gpu_pass_hq_copy_fn)(const uint16_t *blk, int16_t *host_d, int C, int kcz, int n);
 int nr_gpu_pass_hq_up(const uint16_t *blk, const int16_t *host_d, int C, int kcz, int n);
 int nr_gpu_pass_hq_down(const uint16_t *blk, int16_t *host_d, int C, int kcz, int n);
+/* MPCI G3: the soft store is ONE SLAB PER CELL (NR_GPU_HQ_BLK blocks each, allocated by nr_gpu_pass_init for cell 0 and by nr_gpu_pass_cell_init for the others, before the RX fence).
+ * A block id is an index into the slab of job.cell, so the entry (rnti, pid) of a cell can never combine with the sum of another cell, whatever the ids: the host store of a cell hands out
+ * the ids of its own slab and is keyed by (rnti, pid) inside the cell. The two functions above are the cell 0 slab. */
+typedef int (*nr_gpu_pass_hq_cell_copy_fn)(int cell, const uint16_t *blk, int16_t *host_d, int C, int kcz, int n);
+int nr_gpu_pass_hq_up_cell(int cell, const uint16_t *blk, const int16_t *host_d, int C, int kcz, int n);
+int nr_gpu_pass_hq_down_cell(int cell, const uint16_t *blk, int16_t *host_d, int C, int kcz, int n);
+/* MPCI G3: registers `cell` with the pass module (pre-fence, after nr_gpu_pass_init; cell 0 is registered by nr_gpu_pass_init itself): allocates the cell's HARQ slab (booked PER_CELL
+ * to `cell`, taken from the PASS share of nr_gpu_membudget; refused when the share is gone: the cell's grants then run without device HARQ), stores the cell's n_rb_dl (the DM-RS FO
+ * measurement) and puts the cell under the instance quota (nr_gpu_pass_quota.h: a floor of one DL and one UL instance per registered cell). 0 = ready, -1 = refused (the cell's
+ * passes return 1: the host decodes on the old path). Idempotent. nr_gpu_pass_cell_ready: 1 = registered and its slab exists. */
+int nr_gpu_pass_cell_init(int cell, int n_rb_dl);
+int nr_gpu_pass_cell_ready(int cell);
+void nr_gpu_pass_cell_retire(int cell); /* leaves the quota (the slab is kept: nothing is freed after the fence) */
 int nr_gpu_pass_config(const nr_gpu_pass_cfg_t *cfg);
 int nr_gpu_pass_init(int max_classes);
 int nr_gpu_pass_warm(const nr_gpu_pass_shape_t *shape, int qmode, int align, int evm);

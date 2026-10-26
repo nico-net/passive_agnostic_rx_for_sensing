@@ -372,100 +372,101 @@ openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	16	g_idft	file_static	nr_isa_dftfn
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	17	g_origin	file_static	char[600]	UNCLASSIFIED	G1	
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	18	g_once	file_static	pthread_once_t	UNCLASSIFIED	G1	
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_twin.cuh	70	X_INV_SQRT2	file_static	const short	CONST	G1	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	40	fb_name	file_static	const char *const[FB_N]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	43	jobp_tls	tls	nr_gpu_pass_job_t *	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	45	G	file_static	struct {}	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	78	g_sub_name	file_static	const char *const[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	87	g_pool	file_static	nr_gpu_graph_pool_t	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	88	g_pool_key	file_static	pthread_key_t	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	96	nr_gpu_graph_pool_claim::empty_logged	func_static	_Atomic int	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	117	nr_gpu_pass_fp32_shadow::gate	func_static	nr_fp32_gate_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	143	nr_gpu_pass_gate::gname	func_static	const char *const[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	161	nr_gpu_pass_dl_prewarm::done	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	228	demod_variants::ov	func_static	const int[7][2]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	252	g_nrbs	file_static	const int[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	253	g_ncbc	file_static	const int[9]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	254	g_nls	file_static	const int[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	328	nr_gpu_pass_warmup::dt	func_static	nr_gpu_buf_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	356	nr_gpu_pass_warmup::nd	func_static	const int[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	363	nr_gpu_pass_warmup::ndc	func_static	const int[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	386	nr_gpu_pass_warmup::segc	func_static	const int[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	386	nr_gpu_pass_warmup::segnl	func_static	const int[][]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	461	nr_gp_tt	tls	uint32_t[26]	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	473	nr_gpu_pass_dl_run::calls	func_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	67	NI	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	74	M_DL	global	constexpr unsigned	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	74	M_PROBE	global	constexpr unsigned	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	74	M_UL	global	constexpr unsigned	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	76	MAXCB	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	78	NSYM	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	79	N	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	80	NSNAP	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	81	KBMAX	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	82	EXTMAX	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	83	LLR_CAP	global	constexpr uint32_t	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	84	PIL_STRIDE	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	85	ULW_LEN	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	86	SEG_ROWS	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	421	g_inst	file_static	Inst[NI]	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	422	g_hq	file_static	int16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	423	g_ring	file_static	nr_gpu_buf_t[4]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	423	g_rot	file_static	nr_gpu_buf_t[4]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	424	g_cache	file_static	std::map< Entry>	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	424	uint64_t	file_static	std::map<	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	425	g_mu	file_static	std::mutex	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	426	g_cfg	file_static	nr_gpu_pass_cfg_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	427	g_cfg_set	file_static	bool	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	435	g_wait_hist	file_static	std::atomic<uint64_t>[32]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	437	g_stamp_hist	file_static	std::atomic<uint64_t>[2][5][32]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	524	t_held	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	524	t_hold	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	525	t_hold_ns	tls	uint64_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	526	g_entry	file_static	std::atomic<uint64_t>[2]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	526	g_hold_hist	file_static	std::atomic<uint64_t>[2][32]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	527	SIG_CAP	global	constexpr size_t	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	528	RING_LEN	global	constexpr uint32_t	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	529	g_zero_pil	file_static	int16_t[6 * 273 * 2]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	530	g_zero_scr	file_static	uint32_t[LLR_CAP / 32 + 2]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	545	synth_job::sy	func_static	const int[4]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	619	prepare_tb::dk	func_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	619	prepare_tb::old_rule	func_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	619	prepare_tb::target	func_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	899	g_ul_wait_hist	file_static	std::atomic<uint64_t>[32]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	916	synth_job_ul::sy	func_static	const int[4]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1086	g_pred_ns	file_static	std::atomic<uint32_t>[2][256]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1105	wait_done::slack	tls	bool	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1166	g_split_n	file_static	std::atomic<uint64_t>[4]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1166	g_split_unseen	file_static	std::atomic<uint64_t>[4][4]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1167	g_sub_kb_max	file_static	uint64_t[4]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1169	g_pinned_b	file_static	size_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1205	gate_drv::d	func_static	const GateDrv	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1222	g_gate_step	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1397	g_fp32	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1407	default_class::nrb	func_static	const int[4]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1581	g_pool_mu	file_static	std::mutex	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1582	g_pool_cv	file_static	std::condition_variable	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1584	OVF_WAIT_US	file_static	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1640	t_hold_guard	tls	HoldGuard	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	31	c_crc	global	CrcTab [device]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	32	c_crc_poly	global	uint32_t[3] [device]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	141	c_index_k0	global	uint8_t[2][4] [device]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	201	PostOut	global	template <class R> struct	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	32	g_hyp	file_static	hyp_entry_t[UL_HYP_N]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	33	g_hyp_lock	file_static	pthread_mutex_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	34	g_hyp_clock	file_static	uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	35	g_hyp_hit	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	35	g_hyp_miss	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	35	g_hyp_put	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	35	g_hyp_stale	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	153	fb_name	file_static	const char *const[NR_GPU_PASS_UL_FB_N]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	156	U	file_static	struct {}	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	168	g_samp	file_static	uint32_t[5][UL_SAMP]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	169	g_samp_n	file_static	_Atomic uint32_t[5]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	213	nr_gpu_pass_ul_snr_note::gate	func_static	nr_fp32_gate_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	502	g_warm_budget	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	518	nr_gpu_pass_ul_warm::nd	func_static	const int[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	521	nr_gpu_pass_ul_warm::nrbs	func_static	const int[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	41	fb_name	file_static	const char *const[FB_N]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	44	jobp_tls	tls	nr_gpu_pass_job_t *	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	46	G	file_static	struct {}	PROCESS	G3	DL pass host state: module entry points, flags, census counters; per-cell readiness is G.cell_on[] indexed by cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	83	g_sub_name	file_static	const char *const[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	92	g_pool	file_static	nr_gpu_graph_pool_t	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	93	g_pool_key	file_static	pthread_key_t	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	101	nr_gpu_graph_pool_claim::empty_logged	func_static	_Atomic int	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	122	nr_gpu_pass_fp32_shadow::gate	func_static	nr_fp32_gate_t	PROCESS	G3	the gate disables the DL pass for the whole process
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	148	nr_gpu_pass_gate::gname	func_static	const char *const[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	166	nr_gpu_pass_dl_prewarm::done	tls	int	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	233	demod_variants::ov	func_static	const int[7][2]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	257	g_nrbs	file_static	const int[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	258	g_ncbc	file_static	const int[9]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	259	g_nls	file_static	const int[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	375	nr_gpu_pass_warmup::dt	func_static	nr_gpu_buf_t	PROCESS	G3	DISCRETE device copy of the delay table: identical for all cells (checked by cell_warmup)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	403	nr_gpu_pass_warmup::nd	func_static	const int[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	410	nr_gpu_pass_warmup::ndc	func_static	const int[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	433	nr_gpu_pass_warmup::segc	func_static	const int[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	433	nr_gpu_pass_warmup::segnl	func_static	const int[][]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	511	nr_gp_tt	tls	uint32_t[26]	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	529	nr_gpu_pass_dl_run::calls	func_static	_Atomic uint64_t	PROCESS	G3	census cadence counter
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	68	NI	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	75	M_DL	global	constexpr unsigned	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	75	M_PROBE	global	constexpr unsigned	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	75	M_UL	global	constexpr unsigned	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	77	MAXCB	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	79	NSYM	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	80	N	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	81	NSNAP	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	82	KBMAX	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	83	EXTMAX	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	84	LLR_CAP	global	constexpr uint32_t	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	85	PIL_STRIDE	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	86	ULW_LEN	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	87	SEG_ROWS	file_static	int	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	422	g_inst	file_static	Inst[NI]	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	423	g_hq_cells	file_static	int16_t *[NR_PQ_CELLS]	PER_CELL	G3	one HARQ slab per cell, indexed EXPLICITLY by job.cell (the module cannot link nr_cell.c): allocated in nr_gpu_pass_init (cell 0) / nr_gpu_pass_cell_init
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	424	g_cell_nrb	file_static	int[NR_PQ_CELLS]	PER_CELL	G3	n_rb_dl of each cell, indexed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	425	g_cell_on	file_static	std::atomic<int>[NR_PQ_CELLS]	PER_CELL	G3	cell registered with the module, indexed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	428	g_pq	file_static	nr_pass_quota_t	PER_CELL	G3	per-cell instance quota table (held counts per cell), explicit cell index from job.cell, under g_pq_mu
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	429	g_pq_mu	file_static	std::mutex	PROCESS	G3	guards g_pq
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	431	g_inst_cell	file_static	int[NI]	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	432	g_inst_cls1	file_static	int[NI]	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	433	g_ring	file_static	nr_gpu_buf_t[4]	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	433	g_rot	file_static	nr_gpu_buf_t[4]	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	434	g_cache	file_static	std::map< Entry>	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	434	uint64_t	file_static	std::map<	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	435	g_mu	file_static	std::mutex	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	436	g_cfg	file_static	nr_gpu_pass_cfg_t	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	437	g_cfg_set	file_static	bool	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	445	g_wait_hist	file_static	std::atomic<uint64_t>[32]	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	447	g_stamp_hist	file_static	std::atomic<uint64_t>[2][5][32]	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	534	t_held	tls	int	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	534	t_hold	tls	int	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	535	t_hold_ns	tls	uint64_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	536	g_entry	file_static	std::atomic<uint64_t>[2]	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	536	g_hold_hist	file_static	std::atomic<uint64_t>[2][32]	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	537	SIG_CAP	global	constexpr size_t	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	538	RING_LEN	global	constexpr uint32_t	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	539	g_zero_pil	file_static	int16_t[6 * 273 * 2]	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	540	g_zero_scr	file_static	uint32_t[LLR_CAP / 32 + 2]	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	555	synth_job::sy	func_static	const int[4]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	629	prepare_tb::dk	func_static	int	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	629	prepare_tb::old_rule	func_static	int	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	629	prepare_tb::target	func_static	int	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	909	g_ul_wait_hist	file_static	std::atomic<uint64_t>[32]	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	926	synth_job_ul::sy	func_static	const int[4]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1096	g_pred_ns	file_static	std::atomic<uint32_t>[2][256]	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1115	wait_done::slack	tls	bool	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1176	g_split_n	file_static	std::atomic<uint64_t>[4]	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1176	g_split_unseen	file_static	std::atomic<uint64_t>[4][4]	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1177	g_sub_kb_max	file_static	uint64_t[4]	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1179	g_pinned_b	file_static	size_t	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1215	gate_drv::d	func_static	const GateDrv	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1232	g_gate_step	file_static	int	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1407	g_fp32	file_static	int	PROCESS	G3	libpdsch_gpu.so pass module: shared by all cells by design (graph cache keyed by shape, instances, counters, histograms, config of the first cell); the per-cell parts are g_hq_cells / g_cell_* / g_pq keyed by job.cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1417	default_class::nrb	func_static	const int[4]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1640	g_pool_mu	file_static	std::mutex	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1641	g_pool_cv	file_static	std::condition_variable	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1643	OVF_WAIT_US	file_static	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1739	t_hold_guard	tls	HoldGuard	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	31	c_crc	global	CrcTab [device]	CONST	G3	device constant tables / templates of the post kernels (const after module load)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	32	c_crc_poly	global	uint32_t[3] [device]	CONST	G3	device constant tables / templates of the post kernels (const after module load)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	141	c_index_k0	global	uint8_t[2][4] [device]	CONST	G3	device constant tables / templates of the post kernels (const after module load)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	201	PostOut	global	template <class R> struct	CONST	G3	device constant tables / templates of the post kernels (const after module load)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	167	fb_name	file_static	const char *const[NR_GPU_PASS_UL_FB_N]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	170	U	file_static	struct {}	PROCESS	G3	UL pass module handle, enable flag, process counters (U.ctx moved to g_ulctx per cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	180	g_ul_cell_on	file_static	_Atomic int[NR_CELL_MAX]	PROCESS	G3	cells registered for the UL pass, indexed by cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	180	g_ulctx	file_static	ul_ctx_arr_t [converted]	PER_CELL	G3	converted: per-cell decode-context buffers
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	193	g_samp	file_static	uint32_t[5][UL_SAMP]	PROCESS	G3	census percentile samples of the whole UL pass (one GPUPASS_UL_TIME line)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	194	g_samp_n	file_static	_Atomic uint32_t[5]	PROCESS	G3	census sample counters
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	238	nr_gpu_pass_ul_snr_note::gate	func_static	nr_fp32_gate_t	PROCESS	G3	the gate disables the UL pass for the whole process
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	531	g_warm_budget	file_static	int	PROCESS	G3	warm-up budget (test hook), process
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	547	nr_gpu_pass_ul_warm::nd	func_static	const int[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c	550	nr_gpu_pass_ul_warm::nrbs	func_static	const int[]	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.cuh	37	NN	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.cuh	37	NS	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c	36	state_names	file_static	const char *[NR_ACQ_NUM_STATES]	CONST	A3	state name table, never written (pointer array of string literals)
@@ -1293,16 +1294,16 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	30	NSYM	global	constexpr int	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	31	EXT	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	32	MAXCH	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	56	PASS_INST	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	57	g_ctx	file_static	Ctx[CTX + PASS_INST + 1]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	58	g_jb	file_static	nr_gpu_buf_t[PASS_INST]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	69	g_ok	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	84	g_stg	file_static	Stg[CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	85	g_stg_N	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	85	g_stg_n	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	85	g_stg_nbrx	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	86	g_stg_ext	file_static	uint32_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	87	g_stg_arr	file_static	size_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	87	g_stg_llr_cap	file_static	size_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	57	g_ctx	file_static	Ctx[CTX + PASS_INST + 1]	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	58	g_jb	file_static	nr_gpu_buf_t[PASS_INST]	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	69	g_ok	file_static	int	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	84	g_stg	file_static	Stg[CTX]	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	85	g_stg_N	file_static	int	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	85	g_stg_n	file_static	int	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	85	g_stg_nbrx	file_static	int	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	86	g_stg_ext	file_static	uint32_t	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	87	g_stg_arr	file_static	size_t	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	87	g_stg_llr_cap	file_static	size_t	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	438	ALC	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	930	M3_NRES	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1045	EVM_CH	global	constexpr int	CONST	G3	auto
@@ -1314,82 +1315,82 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_P	global	constexpr i
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_P1	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_P2	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_P3	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1050	A	global	template <class	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1055	V2	global	template <class A> struct	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	59	g_init	file_static	nr_gpu_demod_init_fn	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	60	g_run	file_static	nr_gpu_demod_run_fn	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	61	g_release	file_static	nr_gpu_demod_release_fn	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	62	g_evm_wait	file_static	nr_gpu_demod_evm_wait_fn	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	63	g_defer	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1050	A	global	template <class	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1055	V2	global	template <class A> struct	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	59	g_init	file_static	nr_gpu_demod_init_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	60	g_run	file_static	nr_gpu_demod_run_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	61	g_release	file_static	nr_gpu_demod_release_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	62	g_evm_wait	file_static	nr_gpu_demod_evm_wait_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	63	g_defer	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	69	t_def	tls	defer_t *	TLS	G3	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	70	t_defer_ok	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	71	g_on	file_static	_Atomic int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	76	g_oldpath_off	file_static	_Atomic int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	77	g_check	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_calls	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_chk_bad	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_chk_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_ns_geo	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_ns_gpu	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_ns_max	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_ns_sum	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	79	g_refuse	file_static	_Atomic uint64_t[16]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_stage_stats	file_static	nr_gpu_stage_stats_fn	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	71	g_on	file_static	_Atomic int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	76	g_oldpath_off	file_static	_Atomic int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	77	g_check	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_calls	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_chk_bad	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_chk_ok	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_ns_geo	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_ns_gpu	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_ns_max	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_ns_sum	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	79	g_refuse	file_static	_Atomic uint64_t[16]	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_stage_stats	file_static	nr_gpu_stage_stats_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	81	t_stage_full	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	82	g_evm_close	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	82	g_evm_far	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	82	g_evm_maxrel	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	82	g_evm_close	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	82	g_evm_far	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	82	g_evm_maxrel	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	328	t_qmode	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	334	refuse::s_env	func_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	334	refuse::s_env	func_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	386	geo_tls::g	tls	geo_tls_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	605	build_job::s_nvfac	func_static	double	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	744	g_bgq	file_static	nr_bgq_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	745	g_bg_once	file_static	pthread_once_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	746	g_bg_every	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	747	g_bg_n	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	747	g_bg_ns	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	747	g_bg_ns_max	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	605	build_job::s_nvfac	func_static	double	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	744	g_bgq	file_static	nr_bgq_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	745	g_bg_once	file_static	pthread_once_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	746	g_bg_every	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	747	g_bg_n	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	747	g_bg_ns	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	747	g_bg_ns_max	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	906	bg_demod_run::cpu	tls	chk_tls_t	TLS	G3	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	906	bg_demod_run::gpu	tls	chk_tls_t	TLS	G3	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1143	nr_pdsch_gpu_demod_grant::k	tls	chk_tls_t	TLS	G3	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1263	nr_pdsch_gpu_demod_pass_variant::none	func_static	const nr_ssb_rm_mask_t	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	26	g_fn	file_static	exact_fn_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	27	g_stats	file_static	void (*)(int *, uint64_t *, uint64_t *)	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	28	g_delay_fn	file_static	int (*)(const int16_t *const *, int, int *)	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	29	g_chest_fn	file_static	nr_gpu_chest_fn	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	30	g_stage_stats	file_static	nr_gpu_stage_stats_fn	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_bad	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_calls	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_checked	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_cpu	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_rows	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	32	g_on	file_static	_Atomic int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	33	g_fep_on	file_static	_Atomic int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_calls	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_chk_bad	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_chk_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_fallback	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_ns_max	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_ns_sum	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	35	g_hist	file_static	_Atomic uint64_t[16]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	55	g_ss_ptr_fn	file_static	uint64_t * (*)(void)	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	26	g_fn	file_static	exact_fn_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	27	g_stats	file_static	void (*)(int *, uint64_t *, uint64_t *)	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	28	g_delay_fn	file_static	int (*)(const int16_t *const *, int, int *)	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	29	g_chest_fn	file_static	nr_gpu_chest_fn	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	30	g_stage_stats	file_static	nr_gpu_stage_stats_fn	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_bad	file_static	_Atomic uint64_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_calls	file_static	_Atomic uint64_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_checked	file_static	_Atomic uint64_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_cpu	file_static	_Atomic uint64_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_rows	file_static	_Atomic uint64_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	32	g_on	file_static	_Atomic int	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	33	g_fep_on	file_static	_Atomic int	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_calls	file_static	_Atomic uint64_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_chk_bad	file_static	_Atomic uint64_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_chk_ok	file_static	_Atomic uint64_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_fallback	file_static	_Atomic uint64_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_ns_max	file_static	_Atomic uint64_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_ns_sum	file_static	_Atomic uint64_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	35	g_hist	file_static	_Atomic uint64_t[16]	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	55	g_ss_ptr_fn	file_static	uint64_t * (*)(void)	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	231	check_symbol::ref	tls	c16_t *	TLS	G3	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	232	check_symbol::ref_n	tls	size_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	414	g_pin_fn	file_static	int (*)(void *, size_t)	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	415	g_unpin_fn	file_static	int (*)(void *)	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	416	g_pin_once	file_static	pthread_once_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	434	g_pin_led	file_static	struct {}[PIN_LEDGER_MAX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	435	g_pin_led_mu	file_static	pthread_mutex_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	465	nr_pdsch_gpu_host_pin::logged	func_static	_Atomic int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	414	g_pin_fn	file_static	int (*)(void *, size_t)	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	415	g_unpin_fn	file_static	int (*)(void *)	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	416	g_pin_once	file_static	pthread_once_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	434	g_pin_led	file_static	struct {}[PIN_LEDGER_MAX]	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	435	g_pin_led_mu	file_static	pthread_mutex_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	465	nr_pdsch_gpu_host_pin::logged	func_static	_Atomic int	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	30	N	file_static	const int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	30	THREADS	file_static	const int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	365	DELAY_MAX_ROWS	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	437	build_perm::a	func_static	uint16_t[N]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	437	build_perm::b	func_static	uint16_t[N][N]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	518	g_isa_profile	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	519	g_isa_desc	file_static	char[160]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	520	g_isa_once	file_static	std::once_flag	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	25	g_init_state	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	437	build_perm::a	func_static	uint16_t[N]	CONST	G3	one-time ISA twin selection / table builders of the exact FEP (const after init)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	437	build_perm::b	func_static	uint16_t[N][N]	CONST	G3	one-time ISA twin selection / table builders of the exact FEP (const after init)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	518	g_isa_profile	file_static	int	CONST	G3	one-time ISA twin selection / table builders of the exact FEP (const after init)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	519	g_isa_desc	file_static	char[160]	CONST	G3	one-time ISA twin selection / table builders of the exact FEP (const after init)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	520	g_isa_once	file_static	std::once_flag	CONST	G3	one-time ISA twin selection / table builders of the exact FEP (const after init)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	25	g_init_state	file_static	int	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	36	MAX_ANT	file_static	const int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	36	MAX_DMRS_SYM	file_static	const int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	36	MAX_PORTS	file_static	const int	CONST	G3	auto
@@ -1397,76 +1398,76 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	36	MAX_SYM	file_static	const in
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	37	GOLD_WORDS	file_static	const int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	38	MAX_PILOTS	file_static	const int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	39	MAX_JOBS	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	43	g_gold_x1_word	global	uint32_t[GOLD_WORDS] [device]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	44	g_gold_x2_jump	global	uint32_t[14][31] [device]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	93	g_cfg	file_static	nr_gpu_fep_cfg_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	94	g_samples_per_slot	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	95	g_h_rx	file_static	int16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	96	g_h_rot	file_static	int16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	97	g_d_rx	file_static	short2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	98	g_d_fft_in	file_static	float2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	99	g_d_rxF	file_static	float2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	100	g_d_rot	file_static	short2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	101	g_plan	file_static	cufftHandle	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	102	g_stream	file_static	cudaStream_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	103	g_h_check	file_static	float2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	105	g_d_jobs	file_static	nr_gpu_pdsch_job_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	105	g_h_jobs	file_static	nr_gpu_pdsch_job_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	106	g_d_gold	file_static	uint32_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	107	g_d_ls	file_static	float2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	108	g_d_sigma	file_static	float *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	109	g_d_llr	file_static	int16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	109	g_h_llr	file_static	int16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	110	g_llr_cap	file_static	size_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	111	g_fep_us	file_static	double	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	111	g_llr_us	file_static	double	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	112	g_last_chunks	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	43	g_gold_x1_word	global	uint32_t[GOLD_WORDS] [device]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	44	g_gold_x2_jump	global	uint32_t[14][31] [device]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	93	g_cfg	file_static	nr_gpu_fep_cfg_t	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	94	g_samples_per_slot	file_static	int	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	95	g_h_rx	file_static	int16_t *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	96	g_h_rot	file_static	int16_t *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	97	g_d_rx	file_static	short2 *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	98	g_d_fft_in	file_static	float2 *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	99	g_d_rxF	file_static	float2 *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	100	g_d_rot	file_static	short2 *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	101	g_plan	file_static	cufftHandle	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	102	g_stream	file_static	cudaStream_t	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	103	g_h_check	file_static	float2 *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	105	g_d_jobs	file_static	nr_gpu_pdsch_job_t *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	105	g_h_jobs	file_static	nr_gpu_pdsch_job_t *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	106	g_d_gold	file_static	uint32_t *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	107	g_d_ls	file_static	float2 *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	108	g_d_sigma	file_static	float *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	109	g_d_llr	file_static	int16_t *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	109	g_h_llr	file_static	int16_t *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	110	g_llr_cap	file_static	size_t	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	111	g_fep_us	file_static	double	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	111	g_llr_us	file_static	double	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	112	g_last_chunks	file_static	int	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	113	g_llr_scale	file_static	const float	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	114	g_force_ant	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	116	g_d_perm	file_static	uint16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	117	g_d_tw1024	file_static	short *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	117	g_d_tw4096	file_static	short *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	118	g_d_exact	file_static	short2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	118	g_d_ts	file_static	short2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	118	g_h_exact	file_static	short2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	119	g_exact_direct	file_static	bool	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	119	g_exact_ok	file_static	bool	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	119	g_exact_pending	file_static	bool	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	120	g_isa	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	121	g_exact_us	file_static	double	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	116	g_d_perm	file_static	uint16_t *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	117	g_d_tw1024	file_static	short *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	117	g_d_tw4096	file_static	short *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	118	g_d_exact	file_static	short2 *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	118	g_d_ts	file_static	short2 *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	118	g_h_exact	file_static	short2 *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	119	g_exact_direct	file_static	bool	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	119	g_exact_ok	file_static	bool	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	119	g_exact_pending	file_static	bool	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	120	g_isa	file_static	int	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	121	g_exact_us	file_static	double	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	122	g_exact_deadline_us	file_static	const double	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	123	g_exact_busy	file_static	std::atomic<uint64_t>	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	123	g_exact_late	file_static	std::atomic<uint64_t>	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	123	g_exact_busy	file_static	std::atomic<uint64_t>	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	123	g_exact_late	file_static	std::atomic<uint64_t>	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	128	EXACT_CTX	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	129	g_ctx_stream	file_static	cudaStream_t[EXACT_CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	133	g_ctx_delay	file_static	int *[EXACT_CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	134	g_ctx_ls	file_static	short2 *[EXACT_CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	135	g_ctx_cout	file_static	int *[EXACT_CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	136	g_ctx_rows	file_static	nr_gpu_chest_row_t *[EXACT_CTX]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	129	g_ctx_stream	file_static	cudaStream_t[EXACT_CTX]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	133	g_ctx_delay	file_static	int *[EXACT_CTX]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	134	g_ctx_ls	file_static	short2 *[EXACT_CTX]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	135	g_ctx_cout	file_static	int *[EXACT_CTX]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	136	g_ctx_rows	file_static	nr_gpu_chest_row_t *[EXACT_CTX]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	140	PASS_RING	file_static	const int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	141	PASS_SLOTS	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	142	g_pass_d	file_static	short2 *[PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	142	g_pass_h	file_static	short2 *[PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	142	g_pass_ls	file_static	short2 *[PASS_SLOTS]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	142	g_pass_d	file_static	short2 *[PASS_SLOTS]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	142	g_pass_h	file_static	short2 *[PASS_SLOTS]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	142	g_pass_ls	file_static	short2 *[PASS_SLOTS]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	143	PASS_LS_ROWS	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	144	g_pass_par	file_static	uint32_t *[PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	145	g_pass_rd	file_static	nr_gpu_chest_row_t *[PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	145	g_pass_rh	file_static	nr_gpu_chest_row_t *[PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	146	g_pass_cev	file_static	cudaEvent_t[PASS_SLOTS][PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	146	g_pass_fev	file_static	cudaEvent_t[PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	161	g_exact_staged_lock	file_static	std::mutex	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	167	rows	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	144	g_pass_par	file_static	uint32_t *[PASS_SLOTS]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	145	g_pass_rd	file_static	nr_gpu_chest_row_t *[PASS_SLOTS]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	145	g_pass_rh	file_static	nr_gpu_chest_row_t *[PASS_SLOTS]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	146	g_pass_cev	file_static	cudaEvent_t[PASS_SLOTS][PASS_SLOTS]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	146	g_pass_fev	file_static	cudaEvent_t[PASS_SLOTS]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	161	g_exact_staged_lock	file_static	std::mutex	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	167	rows	file_static	int	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	168	PILE	file_static	const size_t	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	168	RXE	file_static	const size_t	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	170	c	file_static	Ctx[EXACT_CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	171	dt	file_static	nr_gpu_buf_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	172	dt_host	file_static	const int16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	173	dt_mdc	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	173	dt_stride	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	174	dt_fp	file_static	uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	655	g_budget	file_static	nr_dl_gpu_budget_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	170	c	file_static	Ctx[EXACT_CTX]	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	171	dt	file_static	nr_gpu_buf_t	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	172	dt_host	file_static	const int16_t *	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	173	dt_mdc	file_static	int	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	173	dt_stride	file_static	int	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	174	dt_fp	file_static	uint64_t	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	655	g_budget	file_static	nr_dl_gpu_budget_t	PROCESS	G3	libpdsch_gpu.so exact FEP / chest module: ONE geometry per process (g_cfg is the first cell init; nr_pdsch_gpu_fep_init returns -1 for a different cfg, so such a cell runs the CPU path -- G3 open item R1); per-instance pass slots shared by cells; DISCRETE staging serialised by its own locks
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	1038	g_api	file_static	const nr_gpu_fep_api_t	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	35	cg	global	namespace	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	35	cg	global	namespace	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	MAXC	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	MAXE	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	MAXR	global	constexpr int	CONST	G3	auto
@@ -1477,34 +1478,34 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	ZMAX	global	constexpr int	C
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	39	CLB	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	39	CTX	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	39	THREADS	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	77	g_ctx	file_static	Ctx[CTX + NR_GPU_PASS_RING + 1]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	79	g_ok	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	80	g_gm	file_static	std::mutex	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	81	g_graphs	file_static	std::map< Graph*>	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	81	int	file_static	std::map<	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	77	g_ctx	file_static	Ctx[CTX + NR_GPU_PASS_RING + 1]	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	79	g_ok	file_static	int	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	80	g_gm	file_static	std::mutex	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	81	g_graphs	file_static	std::map< Graph*>	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	81	int	file_static	std::map<	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	458	ils_of::a	func_static	const int[8]	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	489	graph::d1	func_static	const uint32_t *const[8]	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	491	graph::d2	func_static	const uint32_t *const[8]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	578	g_stg	file_static	bool	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	579	g_stg_n	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	651	g_sm_level	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	653	g_cl_min_cb	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	653	g_rt_sms	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	654	g_cb_launches	file_static	std::atomic<uint64_t>[4]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	655	g_nc_min_cb	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	743	warm_common::m	func_static	std::mutex	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	744	warm_common::done	func_static	bool	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	779	nr_pdsch_gpu_ldpc_init::once	func_static	std::once_flag	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	578	g_stg	file_static	bool	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	579	g_stg_n	file_static	int	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	651	g_sm_level	file_static	int	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	653	g_cl_min_cb	file_static	int	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	653	g_rt_sms	file_static	int	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	654	g_cb_launches	file_static	std::atomic<uint64_t>[4]	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	655	g_nc_min_cb	file_static	int	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	743	warm_common::m	func_static	std::mutex	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	744	warm_common::done	func_static	bool	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	779	nr_pdsch_gpu_ldpc_init::once	func_static	std::once_flag	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	976	UL_CTX	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	992	UL	file_static	UlState	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1099	ul_selftest::in	func_static	int8_t[52 * 64 + 16]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1103	ul_selftest::job	func_static	nr_gpu_ldpc_job_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1120	ul_lost_t0	file_static	uint64_t[UL_CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1164	nr_pusch_gpu_ldpc_init::m	func_static	std::mutex	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	48	DLG	file_static	gl_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	49	ULG	file_static	gl_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	50	ul_stats_fn	file_static	nr_gpu_ldpc_ul_stats_fn	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	51	ul_cpu_dec	file_static	nrLDPC_coding_decoder_t *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	992	UL	file_static	UlState	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1099	ul_selftest::in	func_static	int8_t[52 * 64 + 16]	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1103	ul_selftest::job	func_static	nr_gpu_ldpc_job_t	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1120	ul_lost_t0	file_static	uint64_t[UL_CTX]	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1164	nr_pusch_gpu_ldpc_init::m	func_static	std::mutex	PROCESS	G3	libpdsch_gpu.so DL/UL LDPC module state: per decode CONTEXT (pass instance / consumer slot), not per cell; shared by all cells, the cell never selects it (jobs carry no cell state). Instances are quota-ed per cell in nr_gpu_pass_graph.cu
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	48	DLG	file_static	gl_t	PROCESS	G3	host binding of the LDPC module (function pointers + the CPU decoder handle), process-wide
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	49	ULG	file_static	gl_t	PROCESS	G3	host binding of the LDPC module (function pointers + the CPU decoder handle), process-wide
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	50	ul_stats_fn	file_static	nr_gpu_ldpc_ul_stats_fn	PROCESS	G3	host binding of the LDPC module (function pointers + the CPU decoder handle), process-wide
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	51	ul_cpu_dec	file_static	nrLDPC_coding_decoder_t *	PROCESS	G3	host binding of the LDPC module (function pointers + the CPU decoder handle), process-wide
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	100	tls::t	tls	tls_t	TLS	G3	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	164	prep_segment_fast::k0	func_static	const uint8_t[2][4]	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	128	kPdtimName	file_static	const char *const[PDTIM_N]	CONST	A5	auto
@@ -1953,9 +1954,12 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	188	nr_isac_pusch_data_aided_
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	190	nr_isac_pusch_data_aided_submit::k_buf	tls	uint32_t[UL_DA_MAX_RE]	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	191	nr_isac_pusch_data_aided_submit::l_buf	tls	uint32_t[UL_DA_MAX_RE]	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	260	nr_isac_pusch_data_aided_submit::da_submit_once	func_static	_Atomic int [converted]	PER_CELL	A6	 block-scope, converted by A6; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	37	MAX_ITEMS	file_static	const int	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	37	NCTX	file_static	const int	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	115	U	file_static	State	PROCESS	A6	one UL FEP GPU context pool for the process (G-owned, read-only for A6): init(nant) returns -1 for a second cell with a different nant (-> CPU FEP, graceful); pct window is a process GPU budget
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	38	MAX_ITEMS	file_static	const int	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	38	NCTX	file_static	const int	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	118	NCELL	global	constexpr int	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	119	g_st	file_static	State[NCELL]	PER_CELL	A6	G3: one UL FEP pool per cell, selected by cur_cell() (host nr_cell_tls_idx_ looked up once per thread)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	121	g_pct	file_static	int	PROCESS	A6	G3: process-wide UL FEP duty cap (pct of every 100 ms) and its window
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	124	cur_cell::p	tls	const int *	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	125	g_gnb	file_static	g_gnb_cell_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	127	g_gnb_nant	file_static	int [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	139	g_snapshot	file_static	g_snapshot_cell_t [converted]	PER_CELL	A6	converted (A6)
