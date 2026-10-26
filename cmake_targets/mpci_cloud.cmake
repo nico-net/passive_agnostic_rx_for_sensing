@@ -353,3 +353,16 @@ if(ENABLE_TESTS)
   add_dependencies(tests mpci_file_pub)
 endif()
 # ---- end A8 tools ----
+
+# ---- B5 ----
+# Float lane (discovery / background workers) leases from the site pool: lease rules, one test binary (it injects the site pool).
+if(ENABLE_TESTS)
+  add_executable(test_nr_core_pool_float
+    ${CMAKE_SOURCE_DIR}/common/utils/tests/test_nr_core_pool_float.cpp
+    ${CMAKE_SOURCE_DIR}/common/utils/nr_core_pool.c)
+  target_include_directories(test_nr_core_pool_float PRIVATE ${CMAKE_SOURCE_DIR}/common/utils)
+  target_link_libraries(test_nr_core_pool_float PRIVATE GTest::gtest GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_core_pool_float)
+  add_test(NAME test_nr_core_pool_float COMMAND test_nr_core_pool_float)
+endif()
+# ---- end B5 ----

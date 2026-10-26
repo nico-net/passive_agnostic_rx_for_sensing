@@ -35,6 +35,8 @@
 #include <time.h>
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 #include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"
+#include "common/utils/nr_cell.h"      /* mpci B5: nr_cell_idx() for the float-lane lease */
+#include "common/utils/nr_core_pool.h"  /* mpci B5: float-lane lease */
 #include "PHY/TOOLS/nr_gpu_bgq.h" /* FATTAILS */
 #include "PHY/TOOLS/nr_gpu_mem.h" /* nr_gpu_model(): DIRECT runs in place, DISCRETE runs staged */
 #include "PHY/NR_UE_TRANSPORT/nr_gpu_stage_census.h"
@@ -750,6 +752,9 @@ typedef struct {
   nr_bgq_t *q;
   char name[16];
 } bg_arg_t;
+/* mpci B5: float-lane lease of one background item (DISC class, the cell that started the queue); no-ops when the float lane is not merged */
+static void bg_lease_in(int cell) { nr_pool_site_float_acquire(NR_POOL_DISC, cell, 0); }
+static void bg_lease_out(void) { nr_pool_site_float_release(); }
 static void *bg_main(void *a)
 {
   bg_arg_t *arg = a;
@@ -772,6 +777,9 @@ int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
   if (!arg)
     return -1;
   arg->q = q;
+  q->cell = nr_cell_idx();
+  q->lease_in = bg_lease_in;
+  q->lease_out = bg_lease_out;
   snprintf(arg->name, sizeof(arg->name), "%s", name);
   cpu_set_t cs;
   CPU_ZERO(&cs);
@@ -795,7 +803,7 @@ int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
   pthread_attr_setschedpolicy(&at, SCHED_OTHER);
   struct sched_param sp = {.sched_priority = 0};
   pthread_attr_setschedparam(&at, &sp);
-  if (CPU_COUNT(&cs))
+  if (CPU_COUNT(&cs) && !nr_pool_site_float_merged()) /* merged float lane: leases pin, the thread starts on the inherited (home) mask */
     pthread_attr_setaffinity_np(&at, sizeof(cs), &cs);
   pthread_t th;
   const int rc = pthread_create(&th, &at, bg_main, arg);

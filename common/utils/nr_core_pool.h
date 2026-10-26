@@ -128,6 +128,21 @@ int nr_pool_site_try_acquire(int prio, int cell, uint64_t deadline_ns);
 void nr_pool_site_release(void);
 bool nr_pool_site_yield(void);
 uint64_t nr_pool_now_ns(void);
+
+/* FLOAT LANE (mpci B5, FLOAT-LANE-POOL-20261021 sections 3 and 5). The discovery / background workers (janon, nID, USS hash, dmrsScan, dmrsId,
+ * csirsDisc: class DISC; ulBgDisc, UL NID bg: class HOUSE) lease a token per job instead of living on a dedicated lane, so N cells' workers
+ * share the pool and none pins to one core. A host with fewer than NR_POOL_FLOAT_MERGE_MIN_TOKENS tokens (W <= 5 cpus, tokens = W - home)
+ * keeps the dedicated lane (nr_pool_site_float_merged() == false): then every float call below is a no-op and the workers behave as before.
+ * The rule is a function of the pool size only; there is no switch. A lease is per job and never spans a cond wait; no FIFO/RR. */
+#define NR_POOL_FLOAT_MERGE_MIN_TOKENS 5
+void nr_pool_site_set_for_test(nr_pool_t *p); /* unit tests only: use p as the site pool (NULL = back to the lazily built one); set while no thread uses the site pool */
+bool nr_pool_float_merged_n(int tokens);   /* pure: floats lease from a pool of `tokens` tokens */
+bool nr_pool_site_float_merged(void);      /* the site pool exists and is large enough (builds the site pool on first use) */
+/* Lease for one float job (prio NR_POOL_DISC or NR_POOL_HOUSE) on behalf of `cell` (the worker's bound cell, nr_cell_idx()); enq_ns = arrival
+ * time of the job (0 = now). Returns the core, or -1 when not merged (no lease taken). Pair with nr_pool_site_float_release(). */
+int nr_pool_site_float_acquire(int prio, int cell, uint64_t enq_ns);
+void nr_pool_site_float_release(void);     /* no-op when the caller holds no lease */
+bool nr_pool_site_float_yield(void);       /* chunk boundary of a long job: give the token to a more urgent waiter, re-acquire; false when not merged / nothing waits */
 #ifdef __cplusplus
 }
 #endif

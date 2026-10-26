@@ -14,6 +14,10 @@ typedef struct {
   void *arg[NR_BGQ_MAX];
   unsigned head, n, run, cap; /* n queued + run (0/1) in progress <= cap <= NR_BGQ_MAX */
   uint64_t queued, dropped, done; /* __atomic builtins (the header is also compiled as C++ by its test) */
+  /* mpci B5: optional core-pool lease around each item (never across the cond wait); both NULL = unleased, as before */
+  int cell;
+  void (*lease_in)(int cell);
+  void (*lease_out)(void);
 } nr_bgq_t;
 
 static inline void nr_bgq_init(nr_bgq_t *q, unsigned cap)
@@ -23,6 +27,9 @@ static inline void nr_bgq_init(nr_bgq_t *q, unsigned cap)
   q->head = q->n = q->run = 0;
   q->cap = cap < 1 ? 1 : cap > NR_BGQ_MAX ? NR_BGQ_MAX : cap;
   q->queued = q->dropped = q->done = 0;
+  q->cell = 0;
+  q->lease_in = NULL;
+  q->lease_out = NULL;
 }
 
 /* cheap pre-test before the producer snapshots its inputs (racy by design; nr_bgq_push decides) */
@@ -65,7 +72,9 @@ static inline void nr_bgq_run_one(nr_bgq_t *q)
   __atomic_store_n(&q->n, q->n - 1, __ATOMIC_RELAXED);
   __atomic_store_n(&q->run, 1, __ATOMIC_RELAXED); /* "busy" includes the item in progress */
   pthread_mutex_unlock(&q->mu);
+  if (q->lease_in) q->lease_in(q->cell);
   fn(arg);
+  if (q->lease_out) q->lease_out();
   pthread_mutex_lock(&q->mu);
   __atomic_store_n(&q->run, 0, __ATOMIC_RELAXED);
   pthread_mutex_unlock(&q->mu);

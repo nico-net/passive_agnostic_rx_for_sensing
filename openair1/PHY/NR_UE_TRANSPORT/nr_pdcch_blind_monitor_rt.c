@@ -2734,7 +2734,8 @@ static void *janon_worker(void *arg)
       CPU_SET(atoi(ce), &set);
     else if (sched_getaffinity(getpid(), sizeof(set), &set) != 0)
       CPU_ZERO(&set);
-    if (CPU_COUNT(&set) > 0)
+    /* mpci B5: with the float lane merged into the pool the worker leases a DISC token per item (below) and is not pinned to one core */
+    if (CPU_COUNT(&set) > 0 && !nr_pool_site_float_merged())
       pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
     pthread_setname_np(pthread_self(), "pdcchJanon");
     nr_bg_lane_enter("ISAC_PDCCH_JOINT_ANON_CORE"); /* ISAC_BG_LANE: shared background core list, nice 10 */
@@ -2754,6 +2755,9 @@ static void *janon_worker(void *arg)
       atomic_fetch_add_explicit(&g_janon_drop, 1, memory_order_relaxed); /* critical lane busy or item stale: the next occasion offers fresh bits */
       continue;
     }
+    /* mpci B5: one DISC lease per item (cell = the bound cell), never across the cond wait above; not merged: no lease. The item queue is the
+     * bound (drop-newest when full), the decision per item is unchanged. */
+    nr_pool_site_float_acquire(NR_POOL_DISC, nr_cell_idx(), 0);
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     for (int c = 0; c < it.n; c++) {
@@ -2805,6 +2809,7 @@ static void *janon_worker(void *arg)
       }
     }
     clock_gettime(CLOCK_MONOTONIC, &t1);
+    nr_pool_site_float_release();
     const uint64_t dt_ns = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ull + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
     atomic_fetch_add_explicit(&g_janon_busy_ns, dt_ns, memory_order_relaxed);
     nr_admit_done(NR_ADMIT_JANON, dt_ns);

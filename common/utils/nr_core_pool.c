@@ -664,8 +664,15 @@ static void site_init(void)
   }
 }
 
+static _Atomic bool g_site_test; /* unit tests only: g_site was injected */
+void nr_pool_site_set_for_test(nr_pool_t *p)
+{
+  g_site = p;
+  atomic_store(&g_site_test, p != NULL);
+}
 nr_pool_t *nr_pool_site(void)
 {
+  if (atomic_load(&g_site_test)) return g_site;
   pthread_once(&g_once, site_init);
   return g_site;
 }
@@ -674,6 +681,20 @@ int nr_pool_site_try_acquire(int prio, int cell, uint64_t dl) { return nr_pool_t
 void nr_pool_site_release(void) { if (g_site) nr_pool_release(g_site); }
 bool nr_pool_site_yield(void) { return g_site && nr_pool_yield(g_site); }
 void nr_pool_site_member_enter(void) { nr_pool_member_enter(nr_pool_site()); }
+bool nr_pool_float_merged_n(int tokens) { return tokens >= NR_POOL_FLOAT_MERGE_MIN_TOKENS; }
+bool nr_pool_site_float_merged(void)
+{
+  nr_pool_t *p = nr_pool_site();
+  return p && nr_pool_float_merged_n(nr_pool_size(p));
+}
+int nr_pool_site_float_acquire(int prio, int cell, uint64_t enq_ns)
+{
+  if (!nr_pool_site_float_merged()) return -1;
+  if (prio != NR_POOL_DISC && prio != NR_POOL_HOUSE) prio = NR_POOL_HOUSE; /* floats are never above DISC */
+  return nr_pool_acquire(g_site, prio, cell, enq_ns);
+}
+void nr_pool_site_float_release(void) { nr_pool_site_release(); }
+bool nr_pool_site_float_yield(void) { return nr_pool_site_float_merged() && nr_pool_yield(g_site); }
 int nr_pool_site_filter_core(int core)
 {
   if (core >= 0 && g_site && nr_pool_core_in_pool(g_site, core)) {
