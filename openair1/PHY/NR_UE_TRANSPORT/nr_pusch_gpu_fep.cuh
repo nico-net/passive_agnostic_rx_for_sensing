@@ -21,6 +21,7 @@
 #include <time.h>
 #include <thread>
 #include "nr_pusch_gpu_diag.h"
+#include "PHY/TOOLS/nr_gpu_memstat.h"
 #include "nr_gpu_stage_census.h"
 #include "PHY/MODULATION/nr_sfo_rot.h" /* nr_sfo_re / nr_sfo_bin_k: the per-RE SFO step, bit-identical to nr_sfo_rotate_symbol */
 
@@ -214,6 +215,7 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int s
     return -1;
   }
   U.nant = nant;
+  NrMsScope ms_(NR_MS_PUSCH_FEP, NR_MS_SHARED); /* GPUMEM: FFT tables and item blocks are shared; the staged IQ buffers below are sized from this cell's N / antennas */
   U.pct = pct > 0 && pct <= 100 ? (unsigned)pct : 20u;
   std::vector<uint16_t> perm;
   std::vector<short> tw1, tw4, ts(2 * N);
@@ -252,11 +254,13 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct, int s
     else { U.part = true; U.kind = kind; }
     if (uldiag::on()) { UCK(cudaEventCreate(&U.ev0[c])); UCK(cudaEventCreate(&U.ev1[c])); }
     if (U.staged) {
+      ms_.set(NR_MS_PUSCH_FEP, NR_MS_PER_CELL);
       if (nr_gpu_buf_alloc(&U.in[c], in_bytes()) != 0 || nr_gpu_buf_alloc(&U.out[c], out_bytes(nant)) != 0 || nr_gpu_buf_alloc(&U.spn[c], spn_bytes(nant)) != 0) {
         fprintf(stderr, "nr_pusch_gpu_fep: staging buffers do not fit -- CPU FEP\n");
         free(buf);
         return -1;
       }
+      ms_.set(NR_MS_PUSCH_FEP, NR_MS_SHARED);
       U.h_span[c] = (unsigned long long *)U.spn[c].host;
       U.d_span[c] = (unsigned long long *)U.spn[c].dev;
       Item w = {};

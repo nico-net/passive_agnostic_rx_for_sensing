@@ -19,6 +19,7 @@
 #include "../TOOLS/nr_gpu_cuda.h" // nr_gpu_module_ready
 #include "nr_pusch_gpu_diag.h"
 #include "PHY/TOOLS/nr_gpu_mem.h"
+#include "PHY/TOOLS/nr_gpu_memstat_cuda.cuh"
 #include "nr_gpu_stage_census.h"
 #include <atomic>
 #include <cstdio>
@@ -536,7 +537,8 @@ static const Graph *graph(int BG, int Z, int R)
   }
   h.cs[ncol] = (int16_t)n;
   Graph *d = nullptr;
-  if (cudaMalloc(&d, sizeof(Graph)) != cudaSuccess || cudaMemcpy(d, &h, sizeof(Graph), cudaMemcpyHostToDevice) != cudaSuccess)
+  NrMsScope ms_(NR_MS_PDSCH_LDPC, NR_MS_SHARED); /* GPUMEM: the (BG, Z, R) edge-graph tables */
+  if (nr_ms_malloc(&d, sizeof(Graph)) != cudaSuccess || cudaMemcpy(d, &h, sizeof(Graph), cudaMemcpyHostToDevice) != cudaSuccess)
     return nullptr;
   g_graphs[key] = d;
   return d;
@@ -580,8 +582,8 @@ static int g_stg_n;     /* DL contexts with staging buffers (the others are neve
 static bool dev_zalloc(nr_gpu_buf_t *b, size_t bytes)
 {
   memset(b, 0, sizeof(*b));
-  if (cudaMalloc(&b->dev, bytes) != cudaSuccess || cudaMemset(b->dev, 0, bytes) != cudaSuccess) {
-    if (b->dev) cudaFree(b->dev);
+  if (nr_ms_malloc(&b->dev, bytes) != cudaSuccess || cudaMemset(b->dev, 0, bytes) != cudaSuccess) {
+    if (b->dev) nr_ms_free(b->dev, bytes);
     b->dev = nullptr;
     return false;
   }
@@ -777,6 +779,7 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
   static std::once_flag once;
   std::call_once(once, [] {
     int dev = 0, cl = 0;
+    NrMsScope ms_(NR_MS_PDSCH_LDPC, NR_MS_SHARED); /* GPUMEM: the DL pool + pass-instance contexts: constant size, shared by all cells */
     const int nc = decide_nc();
     if (nc == 3 || (nc == 1 && (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&cl, cudaDevAttrClusterLaunch, dev) != cudaSuccess || !cl)))
       return;
@@ -794,12 +797,12 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
       const int cio = pass_ctx ? 1 : NJ;       /* ... from and into their own buffers (nr_gpu_pass_graph.cu): the pinned staging of the standalone run() is not used */
       x.cap = cap;
       if ((!nr_gpu_green_stream(&x.s, hi, true, i) && cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess)
-          || cudaHostAlloc(&x.dj, sizeof(DJob) * cap, cudaHostAllocMapped) != cudaSuccess
-          || cudaHostAlloc(&x.in, (size_t)cio * MAXC * ZMAX, cudaHostAllocMapped) != cudaSuccess
-          || cudaHostAlloc(&x.snap, (size_t)cio * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX, cudaHostAllocMapped) != cudaSuccess
-          || cudaHostAlloc(&x.res, sizeof(int) * 2 * cio, cudaHostAllocMapped) != cudaSuccess
-          || cudaMalloc(&x.llr, (size_t)cap * MAXC * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.llrRes, (size_t)cap * MAXC * ZMAX + 16) != cudaSuccess
-          || cudaMalloc(&x.c2v, (size_t)cap * MAXE * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.unsat, sizeof(int) * cap * NIT) != cudaSuccess)
+          || nr_ms_host_alloc(&x.dj, sizeof(DJob) * cap, cudaHostAllocMapped) != cudaSuccess
+          || nr_ms_host_alloc(&x.in, (size_t)cio * MAXC * ZMAX, cudaHostAllocMapped) != cudaSuccess
+          || nr_ms_host_alloc(&x.snap, (size_t)cio * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX, cudaHostAllocMapped) != cudaSuccess
+          || nr_ms_host_alloc(&x.res, sizeof(int) * 2 * cio, cudaHostAllocMapped) != cudaSuccess
+          || nr_ms_malloc(&x.llr, (size_t)cap * MAXC * ZMAX + 16) != cudaSuccess || nr_ms_malloc(&x.llrRes, (size_t)cap * MAXC * ZMAX + 16) != cudaSuccess
+          || nr_ms_malloc(&x.c2v, (size_t)cap * MAXE * ZMAX + 16) != cudaSuccess || nr_ms_malloc(&x.unsat, sizeof(int) * cap * NIT) != cudaSuccess)
         return;
       if (g_stg && i < g_stg_n && !stage_alloc(x, cap, cio))
         return;
@@ -998,12 +1001,13 @@ static uint64_t ul_now_us()
 static bool ul_alloc_ctx(int i)
 {
   Ctx &x = UL.c[i];
-  if (cudaHostAlloc(&x.dj, sizeof(DJob) * NJ, cudaHostAllocMapped) != cudaSuccess
-      || cudaHostAlloc(&x.in, (size_t)NJ * MAXC * ZMAX, cudaHostAllocMapped) != cudaSuccess
-      || cudaHostAlloc(&x.snap, (size_t)NJ * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX, cudaHostAllocMapped) != cudaSuccess
-      || cudaHostAlloc(&x.res, sizeof(int) * 2 * NJ, cudaHostAllocMapped) != cudaSuccess
-      || cudaMalloc(&x.llr, (size_t)NJ * MAXC * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.llrRes, (size_t)NJ * MAXC * ZMAX + 16) != cudaSuccess
-      || cudaMalloc(&x.c2v, (size_t)NJ * MAXE * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.unsat, sizeof(int) * NJ * NIT) != cudaSuccess)
+  NrMsScope ms_(NR_MS_PDSCH_LDPC, NR_MS_SHARED); /* GPUMEM: the UL pool contexts (lazy: first PUSCH TB) */
+  if (nr_ms_host_alloc(&x.dj, sizeof(DJob) * NJ, cudaHostAllocMapped) != cudaSuccess
+      || nr_ms_host_alloc(&x.in, (size_t)NJ * MAXC * ZMAX, cudaHostAllocMapped) != cudaSuccess
+      || nr_ms_host_alloc(&x.snap, (size_t)NJ * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX, cudaHostAllocMapped) != cudaSuccess
+      || nr_ms_host_alloc(&x.res, sizeof(int) * 2 * NJ, cudaHostAllocMapped) != cudaSuccess
+      || nr_ms_malloc(&x.llr, (size_t)NJ * MAXC * ZMAX + 16) != cudaSuccess || nr_ms_malloc(&x.llrRes, (size_t)NJ * MAXC * ZMAX + 16) != cudaSuccess
+      || nr_ms_malloc(&x.c2v, (size_t)NJ * MAXE * ZMAX + 16) != cudaSuccess || nr_ms_malloc(&x.unsat, sizeof(int) * NJ * NIT) != cudaSuccess)
     return false;
   /* write every pinned byte now: the kernel then only ever touches resident pages */
   memset(x.dj, 0, sizeof(DJob) * NJ);

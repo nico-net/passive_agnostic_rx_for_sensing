@@ -22,6 +22,7 @@
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/TOOLS/nr_gpu_mem.h"
 #include "PHY/TOOLS/nr_gpu_platform.h"
+#include "PHY/TOOLS/nr_gpu_memstat.h"
 #include "common/utils/LOG/log.h"
 #include "nr_gpu_pass_fp32_gate.h"
 #include "nr_gpu_graph_pool.h"
@@ -326,7 +327,10 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   if (nr_gpu_model() == NR_GPU_MODEL_DISCRETE) { /* the graphs read the delay table on the device */
     static nr_gpu_buf_t dt;
     const size_t bytes = sizeof(fp->delay_table);
-    if (nr_gpu_buf_alloc(&dt, bytes) != 0) {
+    const uint32_t ms_prev = nr_gpu_memstat_enter(NR_MS_PASS, NR_MS_SHARED, 0); /* GPUMEM: the device copy of the delay table (DISCRETE) */
+    const int ms_rc = nr_gpu_buf_alloc(&dt, bytes);
+    nr_gpu_memstat_leave(ms_prev);
+    if (ms_rc != 0) {
       LOG_W(PHY, "SENSING: GPUPASS: no device copy of the delay table: off\n");
       return;
     }

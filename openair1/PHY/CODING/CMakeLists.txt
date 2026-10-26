@@ -172,7 +172,7 @@ if(ENABLE_LDPC_CUDA)
                  ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_isa_ref.c)
   set_target_properties(test_nr_gpu_isa_twin PROPERTIES CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR} ENABLE_EXPORTS ON)
   target_include_directories(test_nr_gpu_isa_twin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT ${OPENAIR1_DIR} ${OPENAIR_DIR})
-  target_link_libraries(test_nr_gpu_isa_twin PRIVATE CUDA::cudart ${CMAKE_DL_LIBS} pthread m)
+  target_link_libraries(test_nr_gpu_isa_twin PRIVATE nr_gpu_platform CUDA::cudart ${CMAKE_DL_LIBS} pthread m) # G1: exact_fep.cuh books its self-test scratch in the ledger
   add_dependencies(test_nr_gpu_isa_twin dfts)
   add_dependencies(tests test_nr_gpu_isa_twin)
   add_test(NAME test_nr_gpu_isa_twin COMMAND ./test_nr_gpu_isa_twin WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

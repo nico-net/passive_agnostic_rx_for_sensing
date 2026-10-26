@@ -10,6 +10,7 @@
 #include "PHY/MODULATION/modulation_UE.h"
 #include "common/utils/LOG/log.h"
 #include "PHY/TOOLS/nr_gpu_mem.h" /* nr_gpu_model() */
+#include "PHY/TOOLS/nr_gpu_memstat.h"
 #include "PHY/NR_UE_TRANSPORT/nr_gpu_stage_census.h"
 #include "PHY/TOOLS/nr_gpu_path.h" /* per-path GPU/CPU choice */
 #include <dlfcn.h>
@@ -428,6 +429,32 @@ static void pin_init(void)
     g_pin_fn = NULL;
   LOG_A(PHY, "SENSING: GPU host pin: GPU-touched host buffers pinned at allocation (%s)\n", g_pin_fn ? "ok" : "module unavailable, off");
 }
+/* GPUMEM ledger of the host-registered buffers (kind mgd, PER_CELL of the registering thread's cell): address -> bytes + tag, so an unpin books the release. */
+#define PIN_LEDGER_MAX 512
+static struct { void *p; size_t bytes; uint32_t tag; } g_pin_led[PIN_LEDGER_MAX];
+static pthread_mutex_t g_pin_led_mu = PTHREAD_MUTEX_INITIALIZER;
+static void pin_ledger_add(void *p, size_t bytes)
+{
+  const uint32_t prev = nr_gpu_memstat_enter(NR_MS_PDSCH_FEP, NR_MS_PER_CELL, -1), tag = nr_gpu_memstat_current();
+  nr_gpu_memstat_leave(prev);
+  pthread_mutex_lock(&g_pin_led_mu);
+  int i = 0;
+  while (i < PIN_LEDGER_MAX && g_pin_led[i].p) i++;
+  if (i < PIN_LEDGER_MAX) { g_pin_led[i].p = p; g_pin_led[i].bytes = bytes; g_pin_led[i].tag = tag; }
+  pthread_mutex_unlock(&g_pin_led_mu);
+  nr_gpu_memstat_note_tag(tag, NR_MS_MGD, bytes); /* a full table only loses the release of a later unpin */
+}
+static void pin_ledger_del(void *p)
+{
+  pthread_mutex_lock(&g_pin_led_mu);
+  for (int i = 0; i < PIN_LEDGER_MAX; i++)
+    if (g_pin_led[i].p == p) {
+      nr_gpu_memstat_release_tag(g_pin_led[i].tag, NR_MS_MGD, g_pin_led[i].bytes);
+      g_pin_led[i].p = NULL;
+      break;
+    }
+  pthread_mutex_unlock(&g_pin_led_mu);
+}
 int nr_pdsch_gpu_host_pin(void *p, size_t bytes)
 {
   pthread_once(&g_pin_once, pin_init);
@@ -440,6 +467,7 @@ int nr_pdsch_gpu_host_pin(void *p, size_t bytes)
       LOG_W(PHY, "SENSING: GPU_HOST_PIN: cudaHostRegister(%zu bytes) failed rc=%d (buffer left pageable)\n", bytes, rc);
     return -1;
   }
+  pin_ledger_add(p, bytes);
   return 0;
 }
 int nr_pdsch_gpu_host_pin_enabled(void)
@@ -449,6 +477,8 @@ int nr_pdsch_gpu_host_pin_enabled(void)
 }
 void nr_pdsch_gpu_host_unpin(void *p)
 {
-  if (g_pin_fn && p)
+  if (g_pin_fn && p) {
     g_unpin_fn(p);
+    pin_ledger_del(p);
+  }
 }

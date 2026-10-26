@@ -8,6 +8,7 @@
  * reindexes the op list, so do it only with the bit-exactness test in the loop.
  */
 #include <cuda_runtime.h>
+#include "PHY/TOOLS/nr_gpu_memstat.h"
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include <string.h>
 #include <stdlib.h>
@@ -29,6 +30,7 @@ static int g_ln[NPC_MAX_PARAMS], g_nn[NPC_MAX_PARAMS];
 extern "C" int npc_gpu_upload_params(int slot, const npc_dev_params_t *p)
 {
   if (!nr_gpu_module_ready()) return -1;
+  NrMsScope ms_(NR_MS_POLAR, NR_MS_SHARED); /* GPUMEM: polar decoder tables / buffers are constant size, shared by all cells */
   if (!g_dp && nr_gpu_allocate(NR_GPU_DEVICE, &g_dp, sizeof(npc_dev_params_t) * NPC_MAX_PARAMS) != cudaSuccess) return -1;
   g_ln[slot] = (p->n + 1) * p->N; g_nn[slot] = p->N;
   return nr_gpu_copy(&g_dp[slot], p, sizeof(*p)) == cudaSuccess ? 0 : -1;
@@ -204,6 +206,7 @@ static double now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
 extern "C" int npc_gpu_dbg_device_params(int *out10)
 {
   int *d = NULL;
+  NrMsScope ms_(NR_MS_POLAR, NR_MS_SHARED);
   if (nr_gpu_allocate(NR_GPU_DEVICE, &d, sizeof(int) * 10) != cudaSuccess) return -1;
   cudaMemcpyToSymbol(npc_dbg_params_out, &d, sizeof(d));
   int16_t *a = NULL;
@@ -246,7 +249,7 @@ extern "C" int npc_gpu_dbg_fetch(int *out10)
   return nr_gpu_copy(out10, d, sizeof(int) * 10) == cudaSuccess ? 0 : -1;
 }
 extern "C" void *npc_gpu_host_alloc(size_t bytes, nr_gpu_kind_t kind)
-{ void *p = NULL; return nr_gpu_allocate(kind, &p, bytes) == cudaSuccess ? p : NULL; }
+{ NrMsScope ms_(NR_MS_POLAR, NR_MS_SHARED); void *p = NULL; return nr_gpu_allocate(kind, &p, bytes) == cudaSuccess ? p : NULL; }
 extern "C" void npc_gpu_host_free(void *p) { if (p) nr_gpu_free(p); }
 
 static int cap;
@@ -258,6 +261,7 @@ extern "C" int npc_gpu_reserve(int n)
 {
   if (cap) return n <= cap ? 0 : -1;
   if (!nr_gpu_module_ready() || nr_dl_gpu_sealed || n <= 0) return -1;
+  NrMsScope ms_(NR_MS_POLAR, NR_MS_SHARED);
   if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking)
       || nr_gpu_allocate(NR_GPU_DEVICE, &d_pid, sizeof(int) * n) || nr_gpu_allocate(NR_GPU_DEVICE, &d_vidx, sizeof(int) * n)
       || nr_gpu_allocate(NR_GPU_STAGING, &h_pid_stage, sizeof(int) * n)

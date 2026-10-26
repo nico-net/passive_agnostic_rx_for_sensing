@@ -2,6 +2,7 @@
 #include "nr_csirs_disc_sweep_internal.h"
 #include "nr_csirs_disc_evidence_internal.h"
 #include <cuda_runtime.h>
+#include "PHY/TOOLS/nr_gpu_memstat_cuda.cuh"
 #include "nr_gpu_green.h"
 #include "../TOOLS/nr_gpu_cuda.h"
 #include "../TOOLS/nr_gpu_chunk.h"
@@ -230,6 +231,7 @@ __global__ void reduce_scores(const float *mean, nr_csirs_disc_sweep_cfg_t c, in
 template<typename T> struct Device {
   T *p = nullptr;
   size_t capacity = 0;
+  uint32_t tag = 0; /* ledger tag the bytes were booked under (nr_gpu_memstat.h) */
   /* No cudaFree here (T26): `workspace` is a static object, so this ran from exit() after the CUDA runtime's own
    * atexit teardown and while other threads still held CUDA work -- libcuda then freed already-released host state
    * ("free(): corrupted unsorted chunks" / "malloc(): unsorted double linked list corrupted" at RAW_IQ_EOF in every
@@ -243,16 +245,18 @@ template<typename T> struct Device {
     n = std::max(n, size_t(1));
     if (n <= capacity) return true;
     if (p && cudaFree(p) != cudaSuccess) return false;
+    if (p) nr_gpu_memstat_release_tag(tag, NR_MS_DEV, capacity * sizeof(T));
     p = nullptr;
     capacity = 0;
-    if (cudaMalloc(&p, n * sizeof(T)) != cudaSuccess) return false;
+    if (nr_ms_malloc(&p, n * sizeof(T)) != cudaSuccess) return false;
+    tag = nr_gpu_memstat_current();
     capacity = n;
     return true;
   }
   /* release: gives the buffer back (on-demand ring shrink); the next alloc() takes a new one. */
   void release()
   {
-    if (p) cudaFree(p);
+    if (p) {cudaFree(p); nr_gpu_memstat_release_tag(tag, NR_MS_DEV, capacity * sizeof(T));}
     p = nullptr;
     capacity = 0;
   }
@@ -293,6 +297,7 @@ static int prepare(int rb,int ant,int capacity)
 {
   auto &w=workspace;
   if(w.rb>=rb && w.ant>=ant && w.capacity>=capacity) return 0;
+  NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: the sweep workspace (one process-wide, grow-only: booked to the cell that grew it; G3/G4 make it per cell)
   if(!w.stream_hi){
     if(!nr_gpu_green_stream(&w.stream_hi,0,false) && cudaStreamCreateWithFlags(&w.stream_hi,cudaStreamNonBlocking)!=cudaSuccess) return -1;
     if(!nr_gpu_green_stream(&w.stream_lo,0,false,-1)) w.stream_lo=nullptr;

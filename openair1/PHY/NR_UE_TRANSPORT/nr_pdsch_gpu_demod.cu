@@ -10,6 +10,7 @@
 #include "../TOOLS/nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include "nr_pdsch_gpu_demod.cuh"
 #include "PHY/TOOLS/nr_gpu_mem.h"
+#include "PHY/TOOLS/nr_gpu_memstat_cuda.cuh"
 #include "nr_gpu_stage_census.h"
 #include "nr_mmse_exact.h" /* MMSE3GPU: mode 3, the CPU's own source */
 #include <cuda_runtime.h>
@@ -1616,19 +1617,20 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
   int lo = 0, hi = 0;
   if (cudaDeviceGetStreamPriorityRange(&lo, &hi) != cudaSuccess)
     return -1;
+  NrMsScope ms_(NR_MS_PDSCH_DEMOD, NR_MS_SHARED); /* GPUMEM: the demod contexts are constant size (EXT, 4 layers), shared by all cells */
   for (int c = 0; c < CTX + PASS_INST + 1; c++) {
     Ctx &x = g_ctx[c];
     if ((!nr_gpu_green_stream(&x.s, hi, true, c) && cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess)
-        || cudaMalloc((void **)&x.y, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT) != cudaSuccess
-        || cudaMalloc((void **)&x.h, sizeof(nrd_c16) * NSYM * 16 * EXT) != cudaSuccess
-        || cudaMallocHost((void **)&x.hy, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT) != cudaSuccess
-        || cudaMallocHost((void **)&x.hh, sizeof(nrd_c16) * NSYM * 16 * EXT) != cudaSuccess
-        || cudaMalloc((void **)&x.sd, sizeof(double2) * NSYM * 4 * EXT) != cudaSuccess
-        || cudaMalloc((void **)&x.part, sizeof(double) * NSYM * EVM_NCH * EVM_P) != cudaSuccess
-        || cudaMalloc((void **)&x.sum, sizeof(double) * NSYM * EVM_P) != cudaSuccess
-        || cudaMalloc((void **)&x.xs, sizeof(double2) * NSYM * 4 * EXT) != cudaSuccess
-        || cudaMalloc((void **)&x.dsh, sizeof(Shared)) != cudaSuccess
-        || cudaMallocHost((void **)&x.sh, sizeof(Shared)) != cudaSuccess
+        || nr_ms_malloc((void **)&x.y, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT) != cudaSuccess
+        || nr_ms_malloc((void **)&x.h, sizeof(nrd_c16) * NSYM * 16 * EXT) != cudaSuccess
+        || nr_ms_malloc_host((void **)&x.hy, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT) != cudaSuccess
+        || nr_ms_malloc_host((void **)&x.hh, sizeof(nrd_c16) * NSYM * 16 * EXT) != cudaSuccess
+        || nr_ms_malloc((void **)&x.sd, sizeof(double2) * NSYM * 4 * EXT) != cudaSuccess
+        || nr_ms_malloc((void **)&x.part, sizeof(double) * NSYM * EVM_NCH * EVM_P) != cudaSuccess
+        || nr_ms_malloc((void **)&x.sum, sizeof(double) * NSYM * EVM_P) != cudaSuccess
+        || nr_ms_malloc((void **)&x.xs, sizeof(double2) * NSYM * 4 * EXT) != cudaSuccess
+        || nr_ms_malloc((void **)&x.dsh, sizeof(Shared)) != cudaSuccess
+        || nr_ms_malloc_host((void **)&x.sh, sizeof(Shared)) != cudaSuccess
 ) {
       fprintf(stderr, "nr_pdsch_gpu_demod_init: %s\n", cudaGetErrorString(cudaGetLastError()));
       return -1;
@@ -1694,6 +1696,7 @@ extern "C" int nr_pdsch_gpu_demod_stage_init(int nbRx, int N, uint32_t ext_max)
   if (nr_gpu_model() == NR_GPU_MODEL_DIRECT) return 0;
   if (g_stg_n) return nbRx == g_stg_nbrx && N == g_stg_N ? 0 : -1;
   if (nbRx < 1 || nbRx > NR_GPU_DEMOD_MAX_RX || N < 16 || N > 32768 || ext_max < 16 || ext_max > (uint32_t)EXT) return -1;
+  NrMsScope ms_(NR_MS_PDSCH_DEMOD, NR_MS_PER_CELL); /* GPUMEM: DISCRETE staging sized for this carrier's largest grant (budgeted number of contexts) */
   g_stg_N = N;
   g_stg_nbrx = nbRx;
   g_stg_ext = ext_max;

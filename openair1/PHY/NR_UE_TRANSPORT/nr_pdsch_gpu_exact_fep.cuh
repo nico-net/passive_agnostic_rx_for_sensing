@@ -24,6 +24,7 @@
 #include <mutex>
 #include <cstring>
 #include <cstdio>
+#include "PHY/TOOLS/nr_gpu_memstat_cuda.cuh"
 
 namespace nr_exact {
 static const int N = 4096, THREADS = 256;
@@ -529,8 +530,9 @@ static int twin_dft_ok(const std::vector<short2> &in, const std::vector<short2> 
   short2 *d_in = nullptr, *d_out = nullptr;
   const size_t nb = (size_t)nv * N * sizeof(short2);
   int ok = 0;
-  if (cudaMalloc(&d_perm, perm.size() * 2) == cudaSuccess && cudaMalloc(&d_ta, ta.size() * 2) == cudaSuccess
-      && cudaMalloc(&d_tb, tb.size() * 2) == cudaSuccess && cudaMalloc(&d_in, nb) == cudaSuccess && cudaMalloc(&d_out, 2 * nb) == cudaSuccess
+  NrMsScope ms_(NR_MS_EXACT, NR_MS_SHARED); /* GPUMEM: self-test scratch, freed below */
+  if (nr_ms_malloc(&d_perm, perm.size() * 2) == cudaSuccess && nr_ms_malloc(&d_ta, ta.size() * 2) == cudaSuccess
+      && nr_ms_malloc(&d_tb, tb.size() * 2) == cudaSuccess && nr_ms_malloc(&d_in, nb) == cudaSuccess && nr_ms_malloc(&d_out, 2 * nb) == cudaSuccess
       && cudaMemcpy(d_perm, perm.data(), perm.size() * 2, cudaMemcpyHostToDevice) == cudaSuccess
       && cudaMemcpy(d_ta, ta.data(), ta.size() * 2, cudaMemcpyHostToDevice) == cudaSuccess
       && cudaMemcpy(d_tb, tb.data(), tb.size() * 2, cudaMemcpyHostToDevice) == cudaSuccess
@@ -541,7 +543,7 @@ static int twin_dft_ok(const std::vector<short2> &in, const std::vector<short2> 
     if (cudaGetLastError() == cudaSuccess && cudaMemcpy(g.data(), d_out, 2 * nb, cudaMemcpyDeviceToHost) == cudaSuccess)
       ok = !memcmp(g.data(), ref_f.data(), nb) && !memcmp(g.data() + (size_t)nv * N, ref_i.data(), nb);
   }
-  cudaFree(d_perm); cudaFree(d_ta); cudaFree(d_tb); cudaFree(d_in); cudaFree(d_out);
+  nr_ms_free(d_perm, perm.size() * 2); nr_ms_free(d_ta, ta.size() * 2); nr_ms_free(d_tb, tb.size() * 2); nr_ms_free(d_in, nb); nr_ms_free(d_out, 2 * nb);
   (void)cudaGetLastError();
   return ok;
 }
@@ -551,8 +553,9 @@ static int twin_rot_ok(const std::vector<short2> &x, const std::vector<short2> &
 {
   short2 *d_x = nullptr, *d_y = nullptr, *d_ts = nullptr;
   int ok = 0;
-  if (cudaMalloc(&d_x, N * sizeof(short2)) == cudaSuccess && cudaMalloc(&d_y, (size_t)nrot * nlen * N * sizeof(short2)) == cudaSuccess
-      && cudaMalloc(&d_ts, N * sizeof(short2)) == cudaSuccess && cudaMemcpy(d_x, x.data(), N * sizeof(short2), cudaMemcpyHostToDevice) == cudaSuccess
+  NrMsScope ms_(NR_MS_EXACT, NR_MS_SHARED); /* GPUMEM: self-test scratch, freed below */
+  if (nr_ms_malloc(&d_x, N * sizeof(short2)) == cudaSuccess && nr_ms_malloc(&d_y, (size_t)nrot * nlen * N * sizeof(short2)) == cudaSuccess
+      && nr_ms_malloc(&d_ts, N * sizeof(short2)) == cudaSuccess && cudaMemcpy(d_x, x.data(), N * sizeof(short2), cudaMemcpyHostToDevice) == cudaSuccess
       && cudaMemcpy(d_ts, ts.data(), N * sizeof(short2), cudaMemcpyHostToDevice) == cudaSuccess) {
     for (int r = 0; r < nrot; r++)
       for (int l = 0; l < nlen; l++) k_twin_rot<R><<<(lens[l] + 255) / 256, 256>>>(d_x, d_y + (size_t)(r * nlen + l) * N, d_ts, lens[l], rots[r]);
@@ -564,7 +567,7 @@ static int twin_rot_ok(const std::vector<short2> &x, const std::vector<short2> &
           ok = !memcmp(&g[(size_t)(r * nlen + l) * N], &ref[(size_t)(r * nlen + l) * N], (size_t)lens[l] * sizeof(short2));
     }
   }
-  cudaFree(d_x); cudaFree(d_y); cudaFree(d_ts);
+  nr_ms_free(d_x, N * sizeof(short2)); nr_ms_free(d_y, (size_t)nrot * nlen * N * sizeof(short2)); nr_ms_free(d_ts, N * sizeof(short2));
   (void)cudaGetLastError();
   return ok;
 }
@@ -657,14 +660,15 @@ static int fep_size_selftest(int n)
   short2 *d_in = nullptr, *d_out = nullptr;
   const size_t nb = (size_t)NV * n * sizeof(short2);
   int ok = 0;
-  if (cudaMalloc(&d_perm, perm.size() * 2) == cudaSuccess && cudaMalloc(&d_ta, ta.size() * 2) == cudaSuccess && cudaMalloc(&d_in, nb) == cudaSuccess
-      && cudaMalloc(&d_out, nb) == cudaSuccess && cudaMemcpy(d_perm, perm.data(), perm.size() * 2, cudaMemcpyHostToDevice) == cudaSuccess
+  NrMsScope ms_(NR_MS_EXACT, NR_MS_SHARED); /* GPUMEM: self-test scratch, freed below */
+  if (nr_ms_malloc(&d_perm, perm.size() * 2) == cudaSuccess && nr_ms_malloc(&d_ta, ta.size() * 2) == cudaSuccess && nr_ms_malloc(&d_in, nb) == cudaSuccess
+      && nr_ms_malloc(&d_out, nb) == cudaSuccess && cudaMemcpy(d_perm, perm.data(), perm.size() * 2, cudaMemcpyHostToDevice) == cudaSuccess
       && cudaMemcpy(d_ta, ta.data(), ta.size() * 2, cudaMemcpyHostToDevice) == cudaSuccess
       && cudaMemcpy(d_in, in.data(), nb, cudaMemcpyHostToDevice) == cudaSuccess) {
     k_twin_dft_x86n<false><<<NV, THREADS>>>(d_in, d_out, d_perm, d_ta, n);
     if (cudaGetLastError() == cudaSuccess && cudaMemcpy(g.data(), d_out, nb, cudaMemcpyDeviceToHost) == cudaSuccess) ok = !memcmp(g.data(), ref.data(), nb);
   }
-  cudaFree(d_perm); cudaFree(d_ta); cudaFree(d_in); cudaFree(d_out);
+  nr_ms_free(d_perm, perm.size() * 2); nr_ms_free(d_ta, ta.size() * 2); nr_ms_free(d_in, nb); nr_ms_free(d_out, nb);
   (void)cudaGetLastError();
   fprintf(stderr, "SENSING: GPU_ISA_TWIN size self-test N=%d dft_twin=avx2: %s (%d vectors vs the host CPU dft%d)\n", n, ok ? "bit-identical" : "MISMATCH -- CPU FEP", NV, n);
   return ok;

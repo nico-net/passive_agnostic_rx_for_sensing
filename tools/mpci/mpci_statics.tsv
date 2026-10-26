@@ -89,88 +89,88 @@ executables/nr-uesoftmodem.c	261	trigger_deregistration::m	func_static	const cha
 executables/nr-uesoftmodem.c	274	NB_UE_INST	global	int	UNCLASSIFIED	A8	
 executables/nr-uesoftmodem.c	275	uniqCfg	global	configmodule_interface_t *	UNCLASSIFIED	A8	
 executables/nr-uesoftmodem.c	276	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	UNCLASSIFIED	A8	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	42	MAX_COLS	global	constexpr uint32_t	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	42	MAX_ROWS	global	constexpr uint32_t	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	42	MAX_Z	global	constexpr uint32_t	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	CH	global	constexpr uint32_t	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	44	MSG_MAX	global	constexpr size_t	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	45	UNROLL	global	constexpr int	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	46	CRC_MAX_BITS	global	constexpr uint32_t	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	47	FIN_THREADS	global	constexpr int	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	48	MAX_SLOTS	global	constexpr int	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	49	MAX_LLR	global	constexpr int	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	406	g	global	Ctx	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	407	g_init_mu	global	pthread_mutex_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	408	g_submit_mu	global	pthread_mutex_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	409	g_state_mu	global	pthread_mutex_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	410	g_state_cv	global	pthread_cond_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	413	g_breaker_ms	global	volatile int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	413	g_breaker_n	global	volatile int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	413	g_timeout_ms	global	volatile int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	413	g_timeout_us_item	global	volatile int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	414	g_inject	global	volatile int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	414	g_stall_ms	global	volatile int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	415	g_consec	global	int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	415	g_perm_off	global	int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	415	g_sticky	global	int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	416	g_bypass_until_ns	global	long long	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	417	c_busy	global	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	417	c_byp	global	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	417	c_err	global	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	417	c_graphs	global	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	417	c_h2d	global	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	417	c_items	global	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	417	c_ok	global	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	417	c_sticky	global	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	417	c_submits	global	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	417	c_tmo	global	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	417	c_trips	global	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	463	CB0_WARMUP_EXTRA	global	constexpr size_t	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	475	cb0_pick_sizes::steps	func_static	const struct {}[]	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	610	g_modz	global	std::map< ModZ>	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	610	uint32_t	global	std::map<	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	793	g_tickets	file_static	ldpc_cb0_ticket[MAX_SLOTS]	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	33	bg_cn_degree	file_static	uint32_t const *[2][8]	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	34	bg_vn_degree	file_static	uint32_t const *[2][8]	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	35	bg_cn	file_static	uint32_t const *[2][8]	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	36	bg_vn	file_static	uint32_t const *[2][8]	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	37	bg_cn_size	file_static	uint32_t[2][8]	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	38	bg_vn_size	file_static	uint32_t[2][8]	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	40	MAX_BG_ROWS	file_static	uint32_t const	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	41	MAX_BG_COLS	file_static	uint32_t const	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	42	MAX_Z	file_static	uint32_t const	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	43	MAX_BLOCK_LENGTH	file_static	uint32_t const	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	46	MAX_LLR_ACCUMULATOR_VALUE	file_static	const int	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	48	MAX_LLR_MSG_VALUE	file_static	const int	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	88	thread_context	tls	ThreadContext	TLS	G1	existing thread-local
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	91	initialized_thread_contexts	file_static	ThreadContext *	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	99	input_copy_time	tls	struct TimeMeasurements	TLS	G1	existing thread-local
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	100	output_copy_time	tls	struct TimeMeasurements	TLS	G1	existing thread-local
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	101	decoding_time	tls	struct TimeMeasurements	TLS	G1	existing thread-local
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	158	get_basegraph::s_val	func_static	uint32_t const[8][8]	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	505	PACK_BITS_KERNEL_THREADS	file_static	const uint32_t	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	748	g_tables_mu	file_static	pthread_mutex_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	768	ldpc_cuda_basegraph::zs	func_static	const uint16_t[]	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	817	BATCH_LLR_STRIDE	file_static	const uint32_t	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	818	BATCH_BITS_STRIDE	file_static	const uint32_t	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	819	BATCH_MSG_STRIDE	file_static	const uint32_t	CONST	G1	auto
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	914	g_pool_ctx	file_static	ThreadContext	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	915	g_pool_llr_host	file_static	int8_t *	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	916	g_pool_bits_host	file_static	uint8_t *	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	917	g_pool_cap	file_static	uint32_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	975	nb	global	namespace	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1012	POOL_MAX_LAUNCH	file_static	uint32_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1013	g_pool_errors	file_static	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1013	g_pool_poisoned	file_static	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1017	g_hook_inject	file_static	volatile int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1017	g_hook_skip	file_static	volatile int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1017	g_hook_stall_ms	file_static	volatile int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1018	g_pool_sticky	file_static	int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1019	g_pool_capturing	file_static	int	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1020	g_pool_capture_epoch	file_static	uint32_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1039	pool_log_error::logged	func_static	uint64_t	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1150	pool_launch::graphs	func_static	std::map< cudaGraphExec_t>	UNCLASSIFIED	G1	
-openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1150	pool_launch::uint64_t	func_static	std::map<	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_COLS	global	constexpr uint32_t	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_ROWS	global	constexpr uint32_t	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_Z	global	constexpr uint32_t	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	44	CH	global	constexpr uint32_t	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	45	MSG_MAX	global	constexpr size_t	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	46	UNROLL	global	constexpr int	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	47	CRC_MAX_BITS	global	constexpr uint32_t	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	48	FIN_THREADS	global	constexpr int	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	49	MAX_SLOTS	global	constexpr int	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	50	MAX_LLR	global	constexpr int	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	407	g	global	Ctx	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	408	g_init_mu	global	pthread_mutex_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	409	g_submit_mu	global	pthread_mutex_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	410	g_state_mu	global	pthread_mutex_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	411	g_state_cv	global	pthread_cond_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	414	g_breaker_ms	global	volatile int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	414	g_breaker_n	global	volatile int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	414	g_timeout_ms	global	volatile int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	414	g_timeout_us_item	global	volatile int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	415	g_inject	global	volatile int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	415	g_stall_ms	global	volatile int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	416	g_consec	global	int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	416	g_perm_off	global	int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	416	g_sticky	global	int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	417	g_bypass_until_ns	global	long long	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	418	c_busy	global	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	418	c_byp	global	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	418	c_err	global	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	418	c_graphs	global	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	418	c_h2d	global	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	418	c_items	global	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	418	c_ok	global	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	418	c_sticky	global	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	418	c_submits	global	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	418	c_tmo	global	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	418	c_trips	global	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	464	CB0_WARMUP_EXTRA	global	constexpr size_t	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	476	cb0_pick_sizes::steps	func_static	const struct {}[]	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	613	g_modz	global	std::map< ModZ>	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	613	uint32_t	global	std::map<	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	798	g_tickets	file_static	ldpc_cb0_ticket[MAX_SLOTS]	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	34	bg_cn_degree	file_static	uint32_t const *[2][8]	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	35	bg_vn_degree	file_static	uint32_t const *[2][8]	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	36	bg_cn	file_static	uint32_t const *[2][8]	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	37	bg_vn	file_static	uint32_t const *[2][8]	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	38	bg_cn_size	file_static	uint32_t[2][8]	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	39	bg_vn_size	file_static	uint32_t[2][8]	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	41	MAX_BG_ROWS	file_static	uint32_t const	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	42	MAX_BG_COLS	file_static	uint32_t const	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	43	MAX_Z	file_static	uint32_t const	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	44	MAX_BLOCK_LENGTH	file_static	uint32_t const	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	47	MAX_LLR_ACCUMULATOR_VALUE	file_static	const int	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	49	MAX_LLR_MSG_VALUE	file_static	const int	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	89	thread_context	tls	ThreadContext	TLS	G1	existing thread-local
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	92	initialized_thread_contexts	file_static	ThreadContext *	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	100	input_copy_time	tls	struct TimeMeasurements	TLS	G1	existing thread-local
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	101	output_copy_time	tls	struct TimeMeasurements	TLS	G1	existing thread-local
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	102	decoding_time	tls	struct TimeMeasurements	TLS	G1	existing thread-local
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	159	get_basegraph::s_val	func_static	uint32_t const[8][8]	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	506	PACK_BITS_KERNEL_THREADS	file_static	const uint32_t	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	750	g_tables_mu	file_static	pthread_mutex_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	770	ldpc_cuda_basegraph::zs	func_static	const uint16_t[]	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	820	BATCH_LLR_STRIDE	file_static	const uint32_t	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	821	BATCH_BITS_STRIDE	file_static	const uint32_t	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	822	BATCH_MSG_STRIDE	file_static	const uint32_t	CONST	G1	auto
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	918	g_pool_ctx	file_static	ThreadContext	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	919	g_pool_llr_host	file_static	int8_t *	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	920	g_pool_bits_host	file_static	uint8_t *	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	921	g_pool_cap	file_static	uint32_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	979	nb	global	namespace	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1016	POOL_MAX_LAUNCH	file_static	uint32_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1017	g_pool_errors	file_static	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1017	g_pool_poisoned	file_static	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1021	g_hook_inject	file_static	volatile int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1021	g_hook_skip	file_static	volatile int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1021	g_hook_stall_ms	file_static	volatile int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1022	g_pool_sticky	file_static	int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1023	g_pool_capturing	file_static	int	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1024	g_pool_capture_epoch	file_static	uint32_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1043	pool_log_error::logged	func_static	uint64_t	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1155	pool_launch::graphs	func_static	std::map< cudaGraphExec_t>	UNCLASSIFIED	G1	
+openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1155	pool_launch::uint64_t	func_static	std::map<	UNCLASSIFIED	G1	
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	192	nr_pdcch_blind_llr_autoscale	global	_Atomic int	PROCESS	A3	mode flag set once at start by the blind monitor (identical for every cell); extern in nr_pdcch_blind_monitor_rt.c
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	193	nr_pdcch_blind_dmrs_probe	global	_Atomic int	PROCESS	A3	mode flag set once at start by the blind monitor (identical for every cell); extern in nr_pdcch_blind_monitor_rt.c
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	194	g_dmrs_hot_cce	tls	int	TLS	A3	existing thread-local
@@ -259,42 +259,45 @@ openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	186	csirs_disc_cpu_lattice_calls
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	186	csirs_disc_gpu_lattice_calls	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	187	history_unified	file_static	bool [converted]	PER_CELL	A7	converted (A7)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	517	warned	file_static	bool [converted]	PER_CELL	A7	log-once flag of the CPU fallback, per cell (moved to file scope for the audit)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	26	discovery_stream	file_static	DiscoveryStream	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	50	disc_chunks::span	tls	NrGpuSpan	TLS	G4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	222	g_segment_blocks	file_static	int	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	222	g_segment_scratch	file_static	int	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	234	nr_csirs_disc_gpu_ops::ops	func_static	const nr_csirs_disc_gpu_ops_t	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	280	fft_host::mutex	func_static	std::mutex	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	282	fft_host::plan	func_static	cufftHandle	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	283	fft_host::last_fft	func_static	int	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	283	fft_host::last_transforms	func_static	int	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	284	fft_host::work	func_static	cufftComplex *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	285	fft_host::capacity	func_static	size_t	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	313	sin_lut	global	short[129] [device]	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	430	fep_workspace	file_static	FepWorkspace	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	460	fep_host::mutex	func_static	std::mutex	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	512	accumulate_host::mutex	func_static	std::mutex	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	513	accumulate_host::grid	func_static	Buffer<int16_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	513	accumulate_host::meta	func_static	Buffer<nr_csirs_disc_slot_meta_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	514	accumulate_host::excl	func_static	Buffer<uint8_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	514	accumulate_host::x	func_static	Buffer<uint32_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	608	lattice_host::mutex	func_static	std::mutex	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	609	lattice_host::dc	func_static	Buffer<uint64_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	609	lattice_host::pq	func_static	Buffer<uint64_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	609	lattice_host::ps	func_static	Buffer<uint64_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	610	lattice_host::dm	func_static	Buffer<uint16_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	668	lmem_prereserve::done	func_static	bool	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	28	discovery_stream	file_static	DiscoveryStream	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	52	disc_chunks::span	tls	NrGpuSpan	TLS	G4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	223	g_led	file_static	struct LedgerEnt {}[1024]	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	224	g_led_mu	file_static	std::mutex	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	242	g_segment_blocks	file_static	int	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	242	g_segment_scratch	file_static	int	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	254	nr_csirs_disc_gpu_ops::ops	func_static	const nr_csirs_disc_gpu_ops_t	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	304	fft_host::mutex	func_static	std::mutex	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	306	fft_host::plan	func_static	cufftHandle	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	307	fft_host::last_fft	func_static	int	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	307	fft_host::last_transforms	func_static	int	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	308	fft_host::work	func_static	cufftComplex *	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	309	fft_host::capacity	func_static	size_t	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	320	fft_host::work_tag	func_static	uint32_t	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	341	sin_lut	global	short[129] [device]	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	459	fep_workspace	file_static	FepWorkspace	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	490	fep_host::mutex	func_static	std::mutex	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	542	accumulate_host::mutex	func_static	std::mutex	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	543	accumulate_host::grid	func_static	Buffer<int16_t>	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	543	accumulate_host::meta	func_static	Buffer<nr_csirs_disc_slot_meta_t>	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	544	accumulate_host::excl	func_static	Buffer<uint8_t>	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	544	accumulate_host::x	func_static	Buffer<uint32_t>	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	639	lattice_host::mutex	func_static	std::mutex	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	640	lattice_host::dc	func_static	Buffer<uint64_t>	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	640	lattice_host::pq	func_static	Buffer<uint64_t>	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	640	lattice_host::ps	func_static	Buffer<uint64_t>	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	641	lattice_host::dm	func_static	Buffer<uint16_t>	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	701	lmem_prereserve::done	func_static	bool	UNCLASSIFIED	G4	
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	5	CAND_CAP	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	5	GPU_CAND_CAP	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	243	finish_host::all	func_static	candidate_t[CAND_CAP]	UNCLASSIFIED	G4	
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	247	state	global	struct State {}	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	322	detect::periods	func_static	const int[]	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	344	detect::groups_h	func_static	candidate_t[4*CAND_CAP]	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	40	words_max	global	constexpr int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	261	workspace	global	struct Workspace {}	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	279	workspace_mutex	file_static	std::mutex	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	330	chunks::span	tls	NrGpuSpan	TLS	G4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	840	nr_csirs_disc_gpu_confirm_entry::stage	func_static	std::vector<short2>	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	323	detect::periods	func_static	const int[]	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	345	detect::groups_h	func_static	candidate_t[4*CAND_CAP]	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	41	words_max	global	constexpr int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	265	workspace	global	struct Workspace {}	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	283	workspace_mutex	file_static	std::mutex	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	335	chunks::span	tls	NrGpuSpan	TLS	G4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	845	nr_csirs_disc_gpu_confirm_entry::stage	func_static	std::vector<short2>	UNCLASSIFIED	G4	
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	21	row_rules	file_static	const row_rule_t[18]	CONST	A7	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	50	table	file_static	table_entry_t *	PROCESS	A7	legal-hypothesis table, built once under pthread_once (rows 1-18 of 38.211 Table 7.4.1.5.3-1), read-only afterwards, identical for every cell
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	51	table_n	file_static	int	PROCESS	A7	legal table (build once, read-only)
@@ -335,86 +338,87 @@ openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe.c	201	nr_syncq_enabled::e	func_
 openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe_rt.c	32	g	file_static	struct {}	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe_rt.c	182	worker::names	func_static	const char *[]	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe_rt.c	245	nr_dl_traffic_probe_push::start_mu	func_static	pthread_mutex_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_cell.c	57	nr_gpu_cell_kind_name::n	func_static	const char *const[NR_GPU_CELL_KIND_N]	CONST	G1	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	16	g_dft	file_static	nr_isa_dftfn_t	UNCLASSIFIED	G1	
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	16	g_idft	file_static	nr_isa_dftfn_t	UNCLASSIFIED	G1	
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	17	g_origin	file_static	char[600]	UNCLASSIFIED	G1	
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	18	g_once	file_static	pthread_once_t	UNCLASSIFIED	G1	
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_twin.cuh	70	X_INV_SQRT2	file_static	const short	CONST	G1	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	39	fb_name	file_static	const char *const[FB_N]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	42	jobp_tls	tls	nr_gpu_pass_job_t *	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	44	G	file_static	struct {}	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	77	g_sub_name	file_static	const char *const[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	86	g_pool	file_static	nr_gpu_graph_pool_t	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	87	g_pool_key	file_static	pthread_key_t	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	95	nr_gpu_graph_pool_claim::empty_logged	func_static	_Atomic int	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	116	nr_gpu_pass_fp32_shadow::gate	func_static	nr_fp32_gate_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	142	nr_gpu_pass_gate::gname	func_static	const char *const[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	160	nr_gpu_pass_dl_prewarm::done	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	227	demod_variants::ov	func_static	const int[7][2]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	251	g_nrbs	file_static	const int[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	252	g_ncbc	file_static	const int[9]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	253	g_nls	file_static	const int[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	327	nr_gpu_pass_warmup::dt	func_static	nr_gpu_buf_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	352	nr_gpu_pass_warmup::nd	func_static	const int[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	359	nr_gpu_pass_warmup::ndc	func_static	const int[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	382	nr_gpu_pass_warmup::segc	func_static	const int[]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	382	nr_gpu_pass_warmup::segnl	func_static	const int[][]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	457	nr_gp_tt	tls	uint32_t[26]	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	469	nr_gpu_pass_dl_run::calls	func_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	65	NI	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	72	M_DL	global	constexpr unsigned	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	72	M_PROBE	global	constexpr unsigned	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	72	M_UL	global	constexpr unsigned	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	74	MAXCB	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	76	NSYM	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	77	N	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	78	NSNAP	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	79	KBMAX	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	80	EXTMAX	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	81	LLR_CAP	global	constexpr uint32_t	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	82	PIL_STRIDE	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	83	ULW_LEN	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	84	SEG_ROWS	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	419	g_inst	file_static	Inst[NI]	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	420	g_hq	file_static	int16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	421	g_ring	file_static	nr_gpu_buf_t[4]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	421	g_rot	file_static	nr_gpu_buf_t[4]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	422	g_cache	file_static	std::map< Entry>	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	422	uint64_t	file_static	std::map<	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	423	g_mu	file_static	std::mutex	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	424	g_cfg	file_static	nr_gpu_pass_cfg_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	425	g_cfg_set	file_static	bool	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	433	g_wait_hist	file_static	std::atomic<uint64_t>[32]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	435	g_stamp_hist	file_static	std::atomic<uint64_t>[2][5][32]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	522	t_held	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	522	t_hold	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	523	t_hold_ns	tls	uint64_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	524	g_entry	file_static	std::atomic<uint64_t>[2]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	524	g_hold_hist	file_static	std::atomic<uint64_t>[2][32]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	525	SIG_CAP	global	constexpr size_t	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	526	RING_LEN	global	constexpr uint32_t	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	527	g_zero_pil	file_static	int16_t[6 * 273 * 2]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	528	g_zero_scr	file_static	uint32_t[LLR_CAP / 32 + 2]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	543	synth_job::sy	func_static	const int[4]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	617	prepare_tb::dk	func_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	617	prepare_tb::old_rule	func_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	617	prepare_tb::target	func_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	897	g_ul_wait_hist	file_static	std::atomic<uint64_t>[32]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	914	synth_job_ul::sy	func_static	const int[4]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1084	g_pred_ns	file_static	std::atomic<uint32_t>[2][256]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1103	wait_done::slack	tls	bool	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1164	g_split_n	file_static	std::atomic<uint64_t>[4]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1164	g_split_unseen	file_static	std::atomic<uint64_t>[4][4]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1165	g_sub_kb_max	file_static	uint64_t[4]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1167	g_pinned_b	file_static	size_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1203	gate_drv::d	func_static	const GateDrv	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1220	g_gate_step	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1392	g_fp32	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1402	default_class::nrb	func_static	const int[4]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1571	g_pool_mu	file_static	std::mutex	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1572	g_pool_cv	file_static	std::condition_variable	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1574	OVF_WAIT_US	file_static	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1630	t_hold_guard	tls	HoldGuard	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	40	fb_name	file_static	const char *const[FB_N]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	43	jobp_tls	tls	nr_gpu_pass_job_t *	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	45	G	file_static	struct {}	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	78	g_sub_name	file_static	const char *const[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	87	g_pool	file_static	nr_gpu_graph_pool_t	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	88	g_pool_key	file_static	pthread_key_t	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	96	nr_gpu_graph_pool_claim::empty_logged	func_static	_Atomic int	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	117	nr_gpu_pass_fp32_shadow::gate	func_static	nr_fp32_gate_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	143	nr_gpu_pass_gate::gname	func_static	const char *const[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	161	nr_gpu_pass_dl_prewarm::done	tls	int	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	228	demod_variants::ov	func_static	const int[7][2]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	252	g_nrbs	file_static	const int[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	253	g_ncbc	file_static	const int[9]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	254	g_nls	file_static	const int[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	328	nr_gpu_pass_warmup::dt	func_static	nr_gpu_buf_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	356	nr_gpu_pass_warmup::nd	func_static	const int[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	363	nr_gpu_pass_warmup::ndc	func_static	const int[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	386	nr_gpu_pass_warmup::segc	func_static	const int[]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	386	nr_gpu_pass_warmup::segnl	func_static	const int[][]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	461	nr_gp_tt	tls	uint32_t[26]	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	473	nr_gpu_pass_dl_run::calls	func_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	67	NI	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	74	M_DL	global	constexpr unsigned	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	74	M_PROBE	global	constexpr unsigned	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	74	M_UL	global	constexpr unsigned	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	76	MAXCB	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	78	NSYM	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	79	N	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	80	NSNAP	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	81	KBMAX	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	82	EXTMAX	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	83	LLR_CAP	global	constexpr uint32_t	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	84	PIL_STRIDE	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	85	ULW_LEN	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	86	SEG_ROWS	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	421	g_inst	file_static	Inst[NI]	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	422	g_hq	file_static	int16_t *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	423	g_ring	file_static	nr_gpu_buf_t[4]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	423	g_rot	file_static	nr_gpu_buf_t[4]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	424	g_cache	file_static	std::map< Entry>	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	424	uint64_t	file_static	std::map<	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	425	g_mu	file_static	std::mutex	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	426	g_cfg	file_static	nr_gpu_pass_cfg_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	427	g_cfg_set	file_static	bool	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	435	g_wait_hist	file_static	std::atomic<uint64_t>[32]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	437	g_stamp_hist	file_static	std::atomic<uint64_t>[2][5][32]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	524	t_held	tls	int	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	524	t_hold	tls	int	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	525	t_hold_ns	tls	uint64_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	526	g_entry	file_static	std::atomic<uint64_t>[2]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	526	g_hold_hist	file_static	std::atomic<uint64_t>[2][32]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	527	SIG_CAP	global	constexpr size_t	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	528	RING_LEN	global	constexpr uint32_t	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	529	g_zero_pil	file_static	int16_t[6 * 273 * 2]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	530	g_zero_scr	file_static	uint32_t[LLR_CAP / 32 + 2]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	545	synth_job::sy	func_static	const int[4]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	619	prepare_tb::dk	func_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	619	prepare_tb::old_rule	func_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	619	prepare_tb::target	func_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	899	g_ul_wait_hist	file_static	std::atomic<uint64_t>[32]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	916	synth_job_ul::sy	func_static	const int[4]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1086	g_pred_ns	file_static	std::atomic<uint32_t>[2][256]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1105	wait_done::slack	tls	bool	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1166	g_split_n	file_static	std::atomic<uint64_t>[4]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1166	g_split_unseen	file_static	std::atomic<uint64_t>[4][4]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1167	g_sub_kb_max	file_static	uint64_t[4]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1169	g_pinned_b	file_static	size_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1205	gate_drv::d	func_static	const GateDrv	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1222	g_gate_step	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1397	g_fp32	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1407	default_class::nrb	func_static	const int[4]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1581	g_pool_mu	file_static	std::mutex	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1582	g_pool_cv	file_static	std::condition_variable	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1584	OVF_WAIT_US	file_static	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1640	t_hold_guard	tls	HoldGuard	TLS	G3	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	31	c_crc	global	CrcTab [device]	UNCLASSIFIED	G3	
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	32	c_crc_poly	global	uint32_t[3] [device]	UNCLASSIFIED	G3	
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	141	c_index_k0	global	uint8_t[2][4] [device]	UNCLASSIFIED	G3	
@@ -886,30 +890,30 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c	91	wide_probes	file_sta
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c	92	learn_full	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c	92	learn_restricted	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c	103	cell_seen	file_static	_Atomic bool[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN]	UNCLASSIFIED	A4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	30	g_init_state	file_static	int	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	41	MAX_ANT	file_static	const int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	42	MAX_DUR	file_static	const int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	43	MAX_PILOTS_PER_JOB	file_static	const int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	44	GOLD_WORDS	file_static	const int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	45	MAX_JOBS	file_static	const int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	46	RE_PER_RB_OUT_DMRS	file_static	const int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	48	g_cfg	file_static	nr_gpu_pdcch_fep_cfg_t	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	49	g_d_rxF	file_static	float2 *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	50	g_h_rxF_stage	file_static	float2 *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	51	g_d_jobs	file_static	nr_gpu_pdcch_job_t *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	51	g_h_jobs	file_static	nr_gpu_pdcch_job_t *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	52	g_d_gold	file_static	uint32_t *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	53	g_d_ls	file_static	float2 *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	54	g_d_llr	file_static	int16_t *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	54	g_h_llr	file_static	int16_t *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	55	g_llr_cap	file_static	size_t	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	56	g_stream	file_static	cudaStream_t	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	57	g_llr_us	file_static	double	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	57	g_upload_us	file_static	double	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	58	g_llr_scale	file_static	float	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	155	k_llr_pdcch::DATA_KR	func_static	const int[9]	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	186	g_budget	file_static	nr_dl_gpu_budget_t	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	345	g_api	file_static	const nr_gpu_pdcch_fep_api_t	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	32	g_init_state	file_static	int	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	43	MAX_ANT	file_static	const int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	44	MAX_DUR	file_static	const int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	45	MAX_PILOTS_PER_JOB	file_static	const int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	46	GOLD_WORDS	file_static	const int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	47	MAX_JOBS	file_static	const int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	48	RE_PER_RB_OUT_DMRS	file_static	const int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	50	g_cfg	file_static	nr_gpu_pdcch_fep_cfg_t	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	51	g_d_rxF	file_static	float2 *	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	52	g_h_rxF_stage	file_static	float2 *	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	53	g_d_jobs	file_static	nr_gpu_pdcch_job_t *	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	53	g_h_jobs	file_static	nr_gpu_pdcch_job_t *	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	54	g_d_gold	file_static	uint32_t *	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	55	g_d_ls	file_static	float2 *	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	56	g_d_llr	file_static	int16_t *	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	56	g_h_llr	file_static	int16_t *	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	57	g_llr_cap	file_static	size_t	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	58	g_stream	file_static	cudaStream_t	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	59	g_llr_us	file_static	double	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	59	g_upload_us	file_static	double	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	60	g_llr_scale	file_static	float	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	157	k_llr_pdcch::DATA_KR	func_static	const int[9]	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	188	g_budget	file_static	nr_dl_gpu_budget_t	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	350	g_api	file_static	const nr_gpu_pdcch_fep_api_t	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_parity.cuh	98	PDCCH_PAR_MAX_RB	file_static	const int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_parity.cuh	98	PDCCH_PAR_THREADS	file_static	const int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c	24	s_cache	file_static	struct {}[JOINT_CACHE_N]	UNCLASSIFIED	A4	
@@ -923,13 +927,13 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	23	g	file_static	struct {}	UNCLA
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	63	elastic_policy	file_static	struct {}	UNCLASSIFIED	G4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	123	worker::names	func_static	const char *[]	UNCLASSIFIED	G4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	209	policy	file_static	struct {}	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	21	CELLS	global	constexpr int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	21	CHUNK	global	constexpr int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	21	IDS	global	constexpr int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	21	TIMERS	global	constexpr int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	CAND_CAP	global	constexpr int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	STAT	global	constexpr int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	941	ops	global	const nr_pdcch_nid_ops_t	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	CELLS	global	constexpr int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	CHUNK	global	constexpr int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	IDS	global	constexpr int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	TIMERS	global	constexpr int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	25	CAND_CAP	global	constexpr int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	25	STAT	global	constexpr int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	947	ops	global	const nr_pdcch_nid_ops_t	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	71	g_ring	file_static	nr_pdcch_passive_job_t[NR_PDCCH_PASSIVE_QUEUE_MAX_DEPTH]	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	72	g_depth	file_static	int	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	73	g_head	file_static	int	UNCLASSIFIED	A4	
@@ -1044,34 +1048,34 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	81	g_vh	file_static	float[13
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	81	g_vm	file_static	float[136][7][136][7]	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	82	g_magic	file_static	uint32_t[136]	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	84	g_tables_once	file_static	pthread_once_t	UNCLASSIFIED	A4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	28	CTX	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	29	NSYM	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	30	EXT	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	31	MAXCH	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	55	PASS_INST	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	56	g_ctx	file_static	Ctx[CTX + PASS_INST + 1]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	57	g_jb	file_static	nr_gpu_buf_t[PASS_INST]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	68	g_ok	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	83	g_stg	file_static	Stg[CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	84	g_stg_N	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	84	g_stg_n	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	84	g_stg_nbrx	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	85	g_stg_ext	file_static	uint32_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	86	g_stg_arr	file_static	size_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	86	g_stg_llr_cap	file_static	size_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	437	ALC	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	929	M3_NRES	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1044	EVM_CH	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1045	EVM_NCH	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1048	EVM_K	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1048	EVM_NP2	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1048	EVM_NV	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1048	EVM_P	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1048	EVM_P1	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1048	EVM_P2	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1048	EVM_P3	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	A	global	template <class	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1054	V2	global	template <class A> struct	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	29	CTX	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	30	NSYM	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	31	EXT	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	32	MAXCH	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	56	PASS_INST	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	57	g_ctx	file_static	Ctx[CTX + PASS_INST + 1]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	58	g_jb	file_static	nr_gpu_buf_t[PASS_INST]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	69	g_ok	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	84	g_stg	file_static	Stg[CTX]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	85	g_stg_N	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	85	g_stg_n	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	85	g_stg_nbrx	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	86	g_stg_ext	file_static	uint32_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	87	g_stg_arr	file_static	size_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	87	g_stg_llr_cap	file_static	size_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	438	ALC	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	930	M3_NRES	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1045	EVM_CH	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1046	EVM_NCH	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_K	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_NP2	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_NV	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_P	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_P1	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_P2	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_P3	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1050	A	global	template <class	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1055	V2	global	template <class A> struct	UNCLASSIFIED	G3	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	59	g_init	file_static	nr_gpu_demod_init_fn	UNCLASSIFIED	G3	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	60	g_run	file_static	nr_gpu_demod_run_fn	UNCLASSIFIED	G3	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	61	g_release	file_static	nr_gpu_demod_release_fn	UNCLASSIFIED	G3	
@@ -1109,152 +1113,154 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	906	bg_demod_run::cpu	tls
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	906	bg_demod_run::gpu	tls	chk_tls_t	TLS	G3	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1143	nr_pdsch_gpu_demod_grant::k	tls	chk_tls_t	TLS	G3	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1263	nr_pdsch_gpu_demod_pass_variant::none	func_static	const nr_ssb_rm_mask_t	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	25	g_fn	file_static	exact_fn_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	26	g_stats	file_static	void (*)(int *, uint64_t *, uint64_t *)	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	27	g_delay_fn	file_static	int (*)(const int16_t *const *, int, int *)	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	28	g_chest_fn	file_static	nr_gpu_chest_fn	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	29	g_stage_stats	file_static	nr_gpu_stage_stats_fn	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	30	g_delay_bad	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	30	g_delay_calls	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	30	g_delay_checked	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	30	g_delay_cpu	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	30	g_delay_rows	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_on	file_static	_Atomic int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	32	g_fep_on	file_static	_Atomic int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	33	g_calls	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	33	g_chk_bad	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	33	g_chk_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	33	g_fallback	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	33	g_ns_max	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	33	g_ns_sum	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_hist	file_static	_Atomic uint64_t[16]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	54	g_ss_ptr_fn	file_static	uint64_t * (*)(void)	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	230	check_symbol::ref	tls	c16_t *	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	231	check_symbol::ref_n	tls	size_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	413	g_pin_fn	file_static	int (*)(void *, size_t)	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	414	g_unpin_fn	file_static	int (*)(void *)	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	415	g_pin_once	file_static	pthread_once_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	438	nr_pdsch_gpu_host_pin::logged	func_static	_Atomic int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	29	N	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	29	THREADS	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	364	DELAY_MAX_ROWS	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	436	build_perm::a	func_static	uint16_t[N]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	436	build_perm::b	func_static	uint16_t[N][N]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	517	g_isa_profile	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	518	g_isa_desc	file_static	char[160]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	519	g_isa_once	file_static	std::once_flag	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	23	g_init_state	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	34	MAX_ANT	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	34	MAX_DMRS_SYM	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	34	MAX_PORTS	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	34	MAX_SYM	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	35	GOLD_WORDS	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	36	MAX_PILOTS	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	37	MAX_JOBS	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	41	g_gold_x1_word	global	uint32_t[GOLD_WORDS] [device]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	42	g_gold_x2_jump	global	uint32_t[14][31] [device]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	91	g_cfg	file_static	nr_gpu_fep_cfg_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	92	g_samples_per_slot	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	93	g_h_rx	file_static	int16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	94	g_h_rot	file_static	int16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	95	g_d_rx	file_static	short2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	96	g_d_fft_in	file_static	float2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	97	g_d_rxF	file_static	float2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	98	g_d_rot	file_static	short2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	99	g_plan	file_static	cufftHandle	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	100	g_stream	file_static	cudaStream_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	101	g_h_check	file_static	float2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	103	g_d_jobs	file_static	nr_gpu_pdsch_job_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	103	g_h_jobs	file_static	nr_gpu_pdsch_job_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	104	g_d_gold	file_static	uint32_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	105	g_d_ls	file_static	float2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	106	g_d_sigma	file_static	float *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	107	g_d_llr	file_static	int16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	107	g_h_llr	file_static	int16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	108	g_llr_cap	file_static	size_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	109	g_fep_us	file_static	double	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	109	g_llr_us	file_static	double	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	110	g_last_chunks	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	111	g_llr_scale	file_static	const float	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	112	g_force_ant	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	114	g_d_perm	file_static	uint16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	115	g_d_tw1024	file_static	short *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	115	g_d_tw4096	file_static	short *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	116	g_d_exact	file_static	short2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	116	g_d_ts	file_static	short2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	116	g_h_exact	file_static	short2 *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	117	g_exact_direct	file_static	bool	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	117	g_exact_ok	file_static	bool	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	117	g_exact_pending	file_static	bool	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	118	g_isa	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	119	g_exact_us	file_static	double	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	120	g_exact_deadline_us	file_static	const double	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	121	g_exact_busy	file_static	std::atomic<uint64_t>	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	121	g_exact_late	file_static	std::atomic<uint64_t>	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	126	EXACT_CTX	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	127	g_ctx_stream	file_static	cudaStream_t[EXACT_CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	131	g_ctx_delay	file_static	int *[EXACT_CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	132	g_ctx_ls	file_static	short2 *[EXACT_CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	133	g_ctx_cout	file_static	int *[EXACT_CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	134	g_ctx_rows	file_static	nr_gpu_chest_row_t *[EXACT_CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	138	PASS_RING	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	139	PASS_SLOTS	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	140	g_pass_d	file_static	short2 *[PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	140	g_pass_h	file_static	short2 *[PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	140	g_pass_ls	file_static	short2 *[PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	141	PASS_LS_ROWS	file_static	const int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	142	g_pass_par	file_static	uint32_t *[PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	143	g_pass_rd	file_static	nr_gpu_chest_row_t *[PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	143	g_pass_rh	file_static	nr_gpu_chest_row_t *[PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	144	g_pass_cev	file_static	cudaEvent_t[PASS_SLOTS][PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	144	g_pass_fev	file_static	cudaEvent_t[PASS_SLOTS]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	159	g_exact_staged_lock	file_static	std::mutex	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	165	rows	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	166	PILE	file_static	const size_t	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	166	RXE	file_static	const size_t	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	168	c	file_static	Ctx[EXACT_CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	169	dt	file_static	nr_gpu_buf_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	170	dt_host	file_static	const int16_t *	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	171	dt_mdc	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	171	dt_stride	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	172	dt_fp	file_static	uint64_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	653	g_budget	file_static	nr_dl_gpu_budget_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	1029	g_api	file_static	const nr_gpu_fep_api_t	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	34	cg	global	namespace	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	37	MAXC	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	37	MAXE	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	37	MAXR	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	37	NIT	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	37	NJ	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	37	NJP	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	37	ZMAX	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	CLB	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	CTX	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	THREADS	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	76	g_ctx	file_static	Ctx[CTX + NR_GPU_PASS_RING + 1]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	78	g_ok	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	79	g_gm	file_static	std::mutex	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	80	g_graphs	file_static	std::map< Graph*>	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	80	int	file_static	std::map<	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	457	ils_of::a	func_static	const int[8]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	488	graph::d1	func_static	const uint32_t *const[8]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	490	graph::d2	func_static	const uint32_t *const[8]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	576	g_stg	file_static	bool	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	577	g_stg_n	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	649	g_sm_level	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	651	g_cl_min_cb	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	651	g_rt_sms	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	652	g_cb_launches	file_static	std::atomic<uint64_t>[4]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	653	g_nc_min_cb	file_static	int	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	741	warm_common::m	func_static	std::mutex	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	742	warm_common::done	func_static	bool	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	777	nr_pdsch_gpu_ldpc_init::once	func_static	std::once_flag	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	973	UL_CTX	global	constexpr int	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	989	UL	file_static	UlState	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1095	ul_selftest::in	func_static	int8_t[52 * 64 + 16]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1099	ul_selftest::job	func_static	nr_gpu_ldpc_job_t	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1116	ul_lost_t0	file_static	uint64_t[UL_CTX]	UNCLASSIFIED	G3	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1160	nr_pusch_gpu_ldpc_init::m	func_static	std::mutex	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	26	g_fn	file_static	exact_fn_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	27	g_stats	file_static	void (*)(int *, uint64_t *, uint64_t *)	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	28	g_delay_fn	file_static	int (*)(const int16_t *const *, int, int *)	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	29	g_chest_fn	file_static	nr_gpu_chest_fn	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	30	g_stage_stats	file_static	nr_gpu_stage_stats_fn	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_bad	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_calls	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_checked	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_cpu	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	31	g_delay_rows	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	32	g_on	file_static	_Atomic int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	33	g_fep_on	file_static	_Atomic int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_calls	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_chk_bad	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_chk_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_fallback	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_ns_max	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	34	g_ns_sum	file_static	_Atomic uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	35	g_hist	file_static	_Atomic uint64_t[16]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	55	g_ss_ptr_fn	file_static	uint64_t * (*)(void)	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	231	check_symbol::ref	tls	c16_t *	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	232	check_symbol::ref_n	tls	size_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	414	g_pin_fn	file_static	int (*)(void *, size_t)	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	415	g_unpin_fn	file_static	int (*)(void *)	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	416	g_pin_once	file_static	pthread_once_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	434	g_pin_led	file_static	struct {}[PIN_LEDGER_MAX]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	435	g_pin_led_mu	file_static	pthread_mutex_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	465	nr_pdsch_gpu_host_pin::logged	func_static	_Atomic int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	30	N	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	30	THREADS	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	365	DELAY_MAX_ROWS	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	437	build_perm::a	func_static	uint16_t[N]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	437	build_perm::b	func_static	uint16_t[N][N]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	518	g_isa_profile	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	519	g_isa_desc	file_static	char[160]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh	520	g_isa_once	file_static	std::once_flag	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	25	g_init_state	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	36	MAX_ANT	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	36	MAX_DMRS_SYM	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	36	MAX_PORTS	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	36	MAX_SYM	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	37	GOLD_WORDS	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	38	MAX_PILOTS	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	39	MAX_JOBS	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	43	g_gold_x1_word	global	uint32_t[GOLD_WORDS] [device]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	44	g_gold_x2_jump	global	uint32_t[14][31] [device]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	93	g_cfg	file_static	nr_gpu_fep_cfg_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	94	g_samples_per_slot	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	95	g_h_rx	file_static	int16_t *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	96	g_h_rot	file_static	int16_t *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	97	g_d_rx	file_static	short2 *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	98	g_d_fft_in	file_static	float2 *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	99	g_d_rxF	file_static	float2 *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	100	g_d_rot	file_static	short2 *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	101	g_plan	file_static	cufftHandle	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	102	g_stream	file_static	cudaStream_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	103	g_h_check	file_static	float2 *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	105	g_d_jobs	file_static	nr_gpu_pdsch_job_t *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	105	g_h_jobs	file_static	nr_gpu_pdsch_job_t *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	106	g_d_gold	file_static	uint32_t *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	107	g_d_ls	file_static	float2 *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	108	g_d_sigma	file_static	float *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	109	g_d_llr	file_static	int16_t *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	109	g_h_llr	file_static	int16_t *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	110	g_llr_cap	file_static	size_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	111	g_fep_us	file_static	double	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	111	g_llr_us	file_static	double	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	112	g_last_chunks	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	113	g_llr_scale	file_static	const float	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	114	g_force_ant	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	116	g_d_perm	file_static	uint16_t *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	117	g_d_tw1024	file_static	short *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	117	g_d_tw4096	file_static	short *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	118	g_d_exact	file_static	short2 *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	118	g_d_ts	file_static	short2 *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	118	g_h_exact	file_static	short2 *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	119	g_exact_direct	file_static	bool	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	119	g_exact_ok	file_static	bool	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	119	g_exact_pending	file_static	bool	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	120	g_isa	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	121	g_exact_us	file_static	double	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	122	g_exact_deadline_us	file_static	const double	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	123	g_exact_busy	file_static	std::atomic<uint64_t>	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	123	g_exact_late	file_static	std::atomic<uint64_t>	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	128	EXACT_CTX	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	129	g_ctx_stream	file_static	cudaStream_t[EXACT_CTX]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	133	g_ctx_delay	file_static	int *[EXACT_CTX]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	134	g_ctx_ls	file_static	short2 *[EXACT_CTX]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	135	g_ctx_cout	file_static	int *[EXACT_CTX]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	136	g_ctx_rows	file_static	nr_gpu_chest_row_t *[EXACT_CTX]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	140	PASS_RING	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	141	PASS_SLOTS	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	142	g_pass_d	file_static	short2 *[PASS_SLOTS]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	142	g_pass_h	file_static	short2 *[PASS_SLOTS]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	142	g_pass_ls	file_static	short2 *[PASS_SLOTS]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	143	PASS_LS_ROWS	file_static	const int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	144	g_pass_par	file_static	uint32_t *[PASS_SLOTS]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	145	g_pass_rd	file_static	nr_gpu_chest_row_t *[PASS_SLOTS]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	145	g_pass_rh	file_static	nr_gpu_chest_row_t *[PASS_SLOTS]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	146	g_pass_cev	file_static	cudaEvent_t[PASS_SLOTS][PASS_SLOTS]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	146	g_pass_fev	file_static	cudaEvent_t[PASS_SLOTS]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	161	g_exact_staged_lock	file_static	std::mutex	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	167	rows	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	168	PILE	file_static	const size_t	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	168	RXE	file_static	const size_t	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	170	c	file_static	Ctx[EXACT_CTX]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	171	dt	file_static	nr_gpu_buf_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	172	dt_host	file_static	const int16_t *	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	173	dt_mdc	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	173	dt_stride	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	174	dt_fp	file_static	uint64_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	655	g_budget	file_static	nr_dl_gpu_budget_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu	1038	g_api	file_static	const nr_gpu_fep_api_t	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	35	cg	global	namespace	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	MAXC	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	MAXE	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	MAXR	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	NIT	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	NJ	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	NJP	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	38	ZMAX	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	39	CLB	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	39	CTX	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	39	THREADS	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	77	g_ctx	file_static	Ctx[CTX + NR_GPU_PASS_RING + 1]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	79	g_ok	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	80	g_gm	file_static	std::mutex	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	81	g_graphs	file_static	std::map< Graph*>	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	81	int	file_static	std::map<	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	458	ils_of::a	func_static	const int[8]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	489	graph::d1	func_static	const uint32_t *const[8]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	491	graph::d2	func_static	const uint32_t *const[8]	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	578	g_stg	file_static	bool	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	579	g_stg_n	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	651	g_sm_level	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	653	g_cl_min_cb	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	653	g_rt_sms	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	654	g_cb_launches	file_static	std::atomic<uint64_t>[4]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	655	g_nc_min_cb	file_static	int	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	743	warm_common::m	func_static	std::mutex	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	744	warm_common::done	func_static	bool	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	779	nr_pdsch_gpu_ldpc_init::once	func_static	std::once_flag	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	976	UL_CTX	global	constexpr int	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	992	UL	file_static	UlState	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1099	ul_selftest::in	func_static	int8_t[52 * 64 + 16]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1103	ul_selftest::job	func_static	nr_gpu_ldpc_job_t	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1120	ul_lost_t0	file_static	uint64_t[UL_CTX]	UNCLASSIFIED	G3	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu	1164	nr_pusch_gpu_ldpc_init::m	func_static	std::mutex	UNCLASSIFIED	G3	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	48	DLG	file_static	gl_t	UNCLASSIFIED	G3	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	49	ULG	file_static	gl_t	UNCLASSIFIED	G3	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	50	ul_stats_fn	file_static	nr_gpu_ldpc_ul_stats_fn	UNCLASSIFIED	G3	
@@ -1659,9 +1665,9 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1709	g_tf_L	file_static	uint8_t[1
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1709	g_tf_S	file_static	uint8_t[16]	UNCLASSIFIED	A5	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1710	g_tf_init	file_static	int	UNCLASSIFIED	A5	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1710	g_tf_n	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	36	MAX_ITEMS	file_static	const int	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	36	NCTX	file_static	const int	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	114	U	file_static	State	UNCLASSIFIED	A6	
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	37	MAX_ITEMS	file_static	const int	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	37	NCTX	file_static	const int	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	115	U	file_static	State	UNCLASSIFIED	A6	
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	123	g_gnb	file_static	PHY_VARS_gNB *[NR_PUSCH_PASSIVE_MAX_CTX]	UNCLASSIFIED	A6	
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	124	g_gnb_nant	file_static	int	UNCLASSIFIED	A6	
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	134	g_snapshot	file_static	passive_ul_snapshot_t[NR_PUSCH_PASSIVE_MAX_CTX]	UNCLASSIFIED	A6	
@@ -1842,9 +1848,9 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	29	cell_n	file_static	int[UL_DIS
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	29	cell_res	file_static	int[UL_DISC_CELL_N]	UNCLASSIFIED	A6	
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	256	t_sweep_lo	tls	int	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	256	t_sweep_n	tls	int	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	81	g	global	Ctx	UNCLASSIFIED	A8	
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	82	budget	global	nr_dl_gpu_budget_t	UNCLASSIFIED	A8	
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	204	api	global	const nr_td_cb0_gpu_api_t	CONST	A8	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	82	g	global	Ctx	UNCLASSIFIED	A8	
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	83	budget	global	nr_dl_gpu_budget_t	UNCLASSIFIED	A8	
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	206	api	global	const nr_td_cb0_gpu_api_t	CONST	A8	auto
 openair1/PHY/TOOLS/calibration_scope.c	17	rx_antenna_colors	global	const FL_COLOR[4]	CONST	A8	auto
 openair1/PHY/TOOLS/calibration_scope.c	18	water_colors	global	const FL_COLOR[4]	CONST	A8	auto
 openair1/PHY/TOOLS/dB_routines.c	9	dB_table	file_static	const int8_t[256]	CONST	A8	auto
@@ -1907,8 +1913,15 @@ openair1/PHY/TOOLS/nr_gpu_budget.c	29	window_tick	file_static	uint64_t[1001]	PRO
 openair1/PHY/TOOLS/nr_gpu_budget.c	29	window_used	file_static	uint64_t[1001]	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_gpu_budget.c	76	large_active	file_static	_Atomic int	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_gpu_budget.c	147	prefer	file_static	_Atomic int	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_mem.c	8	g_force_discrete	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_mem.c	11	g_fail_after	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_mem.c	9	g_force_discrete	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_mem.c	12	g_fail_after	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_memstat.c	14	g_slot	file_static	slot_t[NR_MS_MOD_N][1 + NR_GPU_MEMSTAT_CELLS]	UNCLASSIFIED	G1	
+openair1/PHY/TOOLS/nr_gpu_memstat.c	15	g_tot_cur	file_static	uint64_t[NR_MS_KIND_N]	UNCLASSIFIED	G1	
+openair1/PHY/TOOLS/nr_gpu_memstat.c	15	g_tot_n	file_static	uint64_t[NR_MS_KIND_N]	UNCLASSIFIED	G1	
+openair1/PHY/TOOLS/nr_gpu_memstat.c	15	g_tot_peak	file_static	uint64_t[NR_MS_KIND_N][NR_MS_KIND_N]	UNCLASSIFIED	G1	
+openair1/PHY/TOOLS/nr_gpu_memstat.c	16	t_tag	tls	uint32_t	TLS	G1	existing thread-local
+openair1/PHY/TOOLS/nr_gpu_memstat.c	18	g_names	file_static	const char *const[NR_MS_MOD_N]	CONST	G1	auto
+openair1/PHY/TOOLS/nr_gpu_memstat.c	41	g_cell_fn	file_static	int (*)(void)	UNCLASSIFIED	G1	
 openair1/PHY/TOOLS/nr_gpu_module.c	5	nr_gpu_built_archs	global	const char[]	CONST	G1	auto
 openair1/PHY/TOOLS/nr_gpu_module.c	6	once	file_static	pthread_once_t	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_gpu_module.c	7	ready	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
@@ -1921,20 +1934,21 @@ openair1/PHY/TOOLS/nr_gpu_path.c	98	g_select	file_static	int	PROCESS	G1	process-
 openair1/PHY/TOOLS/nr_gpu_path.c	98	g_trial_n	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_gpu_path.c	99	g_margin	file_static	double	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_gpu_path.c	100	g_last	file_static	char[512]	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	18	mu	file_static	pthread_mutex_t	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	19	rt	file_static	nr_gpu_runtime_t	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	20	caps	file_static	nr_gpu_caps_t	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	21	probed	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	21	sealed	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	21	warned_late	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	22	force_hook	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	24	probe_hook	file_static	int (*)(void)	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	26	allocations	file_static	uint64_t	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	26	denied	file_static	uint64_t	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	27	logger	file_static	void (*)(int, const char *)	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	35	live	file_static	allocation *	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	186	probe_ptx	file_static	const char[]	CONST	G1	auto
-openair1/PHY/TOOLS/nr_gpu_platform.c	531	mb	file_static	struct {}	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	19	mu	file_static	pthread_mutex_t	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	20	rt	file_static	nr_gpu_runtime_t	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	21	caps	file_static	nr_gpu_caps_t	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	22	probed	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	22	sealed	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	22	warned_late	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	23	force_hook	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	25	probe_hook	file_static	int (*)(void)	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	27	allocations	file_static	uint64_t	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	27	denied	file_static	uint64_t	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	28	logger	file_static	void (*)(int, const char *)	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	37	live	file_static	allocation *	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	188	probe_ptx	file_static	const char[]	CONST	G1	auto
+openair1/PHY/TOOLS/nr_gpu_platform.c	387	nr_gpu_rx_started::logged	func_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	538	mb	file_static	struct {}	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_host_membudget.c	13	host_weight	file_static	const int[NR_HOST_MEM_N]	CONST	B3	auto
 openair1/PHY/TOOLS/nr_host_membudget.c	195	mu	file_static	pthread_mutex_t	PROCESS	B3	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_host_membudget.c	196	st	file_static	struct {}	PROCESS	B3	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)

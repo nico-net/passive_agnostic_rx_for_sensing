@@ -168,7 +168,9 @@ def csirs_mem_per_slot(rb, ant):
 CSIRS_LOCAL = 512 * MIB
 HARQ = 2048 * 66 * 384 * 2
 NID_BATCH, NID_FULL, NID_FLOOR, NID_DUR = 336, 10, 5, 3
-NID_STAT = 6 * 14 * 65536 * 6
+NID_STAT = 6 * 14 * 65536
+# G1: the nID context bytes are the expressions of openair1/PHY/NR_UE_TRANSPORT/nr_gpu_cell.h (nr_pdcch_nid_gpu.cu window_bytes / fixed_bytes)
+NID_SNAP, NID_HYP, NID_SUMMARY, NID_DEVICE, NID_IDS, NID_CHUNK, NID_HYP_CAP = 56, 56, 12, 8425776, 65536, 4, 1 << 20
 GRAPH_FLOOR = 512 * MIB
 
 
@@ -177,14 +179,24 @@ def g_csirs_fixed(g):
     return f - CSIRS_LOCAL if f > CSIRS_LOCAL else 0
 
 
+def g_nid_win(rb, window):
+    n, sc = window * NID_BATCH, 12 * rb
+    return n * NID_DUR * sc * 4 + 2 * n * 4 + n * 4 * 2 + (4 * n + 1) * NID_SNAP + ((4 * n + 1) * 6 * 276 + 2 * n) * 8 + window * NID_STAT * (2 + 4)
+
+
+def nid_fixed_bytes():
+    cells, chunk_ids = 14 * NID_IDS, NID_CHUNK * NID_IDS
+    return (NID_DEVICE + chunk_ids * 4 + 2 * chunk_ids * 4 + 4 * chunk_ids * 4 + 6 * cells * (4 + 2) + NID_STAT * (2 + 8)
+            + NID_STAT // 256 * NID_SUMMARY + NID_HYP_CAP * NID_HYP)
+
+
 def g_nid_batch(rb):
-    n, sc = NID_BATCH, 12 * rb
-    return n * NID_DUR * sc * 4 + 2 * n * 4 + n * 4 * 2 + ((4 * n + 1) * 6 * 276 + 2 * n) * 8 + NID_STAT
+    return g_nid_win(rb, 2) - g_nid_win(rb, 1)
 
 
 def g_nid_fixed():
-    full, w = 776 * MIB, NID_FULL * g_nid_batch(273)
-    return full - w if full > w else 0
+    one, per = g_nid_win(273, 1), g_nid_batch(273)
+    return nid_fixed_bytes() + (one - per if one > per else 0)
 
 
 def g_graph_cap(free):
