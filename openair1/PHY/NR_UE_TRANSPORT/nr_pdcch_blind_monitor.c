@@ -92,6 +92,8 @@
 #include "nr_dmrs_id_estimate.h"         // blind UL DM-RS scrambling-identity estimate (Task 13)
 #include "nr_pusch_passive_decode.h"     // nr_pusch_passive_ul_dmrs_id / data-ID sweep (Task 13)
 #include "nr_pdsch_prb_set.h"            // FDRA width / RA type 0 PRB sets
+#include "common/utils/nr_cell.h"
+#include "nr_pdcch_cell.h"
 
 // ---------------------------------------------------------------------------------------------
 // [sensing] pdcch_blind_monitor_* config surface. Parsed but NOT consumed by
@@ -99,7 +101,8 @@
 // directly by their arguments -- see the offline test); consumed by the RT tap in
 // nr_pdcch_blind_monitor_rt.c via nr_pdcch_blind_monitor_get_cfg() below.
 // ---------------------------------------------------------------------------------------------
-static nr_pdcch_blind_monitor_cfg_t g_cfg;
+NR_CELL_STATIC(nr_pdcch_blind_monitor_cfg_t, g_cfg);
+#define g_cfg NR_CELL_REF(g_cfg)
 /* The LAST CSS0/CORESET#0 config this cell derived, kept after autodiscover overwrites g_cfg with
  * the dedicated one. Its only consumer is the CSS0/SI-RNTI interleave in nr_pdcch_blind_monitor_rt.c
  * (ISAC_CSS0_INTERLEAVE_K), which time-division-swaps it back in for one occasion at a time so a
@@ -108,16 +111,24 @@ static nr_pdcch_blind_monitor_cfg_t g_cfg;
  * differ is deliberate: the two config sets diverge in ~20 fields (coreset geometry+mapping, bwp,
  * ss_*, ss_al_candidates[], dci10_*, rnti range, energy gate), and any field added to one block and
  * forgotten in the other would leak silently across the swap. */
-static nr_pdcch_blind_monitor_cfg_t g_css0_cfg;
-static bool                         g_css0_cfg_valid;
+NR_CELL_STATIC(nr_pdcch_blind_monitor_cfg_t, g_css0_cfg);
+#define g_css0_cfg NR_CELL_REF(g_css0_cfg)
+NR_CELL_STATIC(bool, g_css0_cfg_valid);
+#define g_css0_cfg_valid NR_CELL_REF(g_css0_cfg_valid)
 /* CORESET#0's window range, excluded from the DEDICATED footprint decision so the search stops
  * rediscovering a CORESET whose geometry MIB/SIB1 already gave us -- measured, it dominates at
  * ~22 sigma because SIB1/RAR are transmitted there constantly. -1 = not known. Declared here
  * because autoconf_css0() sets it long before the observation code reads it. */
-static int s_css0_excl_first_w = -1, s_css0_excl_last_w = -1;
-static int                          g_parsed  = 0;
-static bool s_css0_applied; /* CSS0 autoconf idempotency; an autodiscover reset re-arms it (a reset IS a state change) */
-static int                          g_enabled = 0;
+NR_CELL_STATIC_INIT(int, s_css0_excl_first_w, -1);
+#define s_css0_excl_first_w NR_CELL_REF(s_css0_excl_first_w)
+NR_CELL_STATIC_INIT(int, s_css0_excl_last_w, -1);
+#define s_css0_excl_last_w NR_CELL_REF(s_css0_excl_last_w)
+NR_CELL_STATIC(int, g_parsed);
+#define g_parsed NR_CELL_REF(g_parsed)
+NR_CELL_STATIC(bool, s_css0_applied);
+#define s_css0_applied NR_CELL_REF(s_css0_applied) /* CSS0 autoconf idempotency; an autodiscover reset re-arms it (a reset IS a state change) */
+NR_CELL_STATIC(int, g_enabled);
+#define g_enabled NR_CELL_REF(g_enabled)
 
 /* Set for the duration of ONE occasion by the CSS0/SI-RNTI interleave, and THREAD-LOCAL on purpose:
  * the interleaved occasion runs on the PHY receive thread while a scan consumer may be inside an
@@ -136,7 +147,8 @@ const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_get_cfg(void)
  * publishes the triple here, packed in one atomic word, so the gate never reads a half-written config.
  * Fields: offset (int32 bits) [0,32), period [32,51), duration [51,63); a period <= 0 is stored as 0
  * (= no occasion, as the gate already treats it), a duration <= 0 as 0 (the gate reads it as 1). */
-static _Atomic uint64_t s_gate_word; /* 0 until the first publish: no occasion */
+NR_CELL_STATIC(_Atomic uint64_t, s_gate_word);
+#define s_gate_word NR_CELL_REF(s_gate_word) /* 0 until the first publish: no occasion */
 static void gate_publish(void)
 {
   const int p = g_cfg.ss_monitoring_slot_periodicity, d = g_cfg.ss_duration;
@@ -254,7 +266,8 @@ void nr_pdcch_blind_monitor_set_tda_common(const uint8_t *start, const uint8_t *
   g_cfg.extract.tda_common_count      = n;
   g_css0_cfg.extract.tda_common_count = n;
   nr_tda_field_set_rows(start, len, n); /* Fix A (ISAC_PDSCH_TDA_FIELD): the same list gives the DCI 1_1 TDRA field width and rows */
-  static bool tda_logged = false;
+  NR_CELL_STATIC(bool, tda_logged);
+#define tda_logged NR_CELL_REF(tda_logged)
   if (!tda_logged) {
     tda_logged = true;
     char b[256];
@@ -266,6 +279,7 @@ void nr_pdcch_blind_monitor_set_tda_common(const uint8_t *start, const uint8_t *
                "own list instead of the spec default table\n", n, b);
   }
 }
+#undef tda_logged
 
 bool nr_pdcch_blind_monitor_set_mib_dmrs_typeA_position(int dmrs_typea_position)
 {
@@ -320,7 +334,9 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
    * Apply on the FIRST call and on a genuine config CHANGE; otherwise leave the running config
    * alone. Comparing the inputs (not a "done" flag) keeps a real cell reconfiguration working. */
   {
-    static int  s_prev[12];
+    typedef int s_prev_cell_t[12];
+NR_CELL_STATIC(s_prev_cell_t, s_prev);
+#define s_prev NR_CELL_REF(s_prev)
     const int now[12] = {num_rbs, num_symbols, cset_start_rb, ssb_offset_point_a, ss_period_slots,
                          ss_slot, ss_duration, ss_first_symbol, mux_pattern, pci, rb_offset,
                          dmrs_typea_position};
@@ -330,6 +346,7 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
     memcpy(s_prev, now, sizeof(now));
     s_css0_applied = true;
   }
+#undef s_prev
 
   g_cfg.coreset_type                     = 1; // MIB/SIB1 CORESET#0
   g_cfg.coreset_freq_domain              = num_rbs / 6; // the monitor counts 6-RB groups
@@ -524,7 +541,8 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
  * g_cfg.bwp_size to CORESET#0's span, so that field can no longer distinguish "dedicated geometry
  * still unknown" from "CSS0 already populated the common one". Tracked with its own state instead
  * (s_dedicated_found below), separate from anything CSS0 writes. */
-static _Atomic bool s_dedicated_found = false; /* _Atomic: read by every blind-PDCCH scan consumer (Task A7) */
+NR_CELL_STATIC(_Atomic bool, s_dedicated_found);
+#define s_dedicated_found NR_CELL_REF(s_dedicated_found) /* _Atomic: read by every blind-PDCCH scan consumer (Task A7) */
 
 /* No offset blacklist: lack of evidence for (offset,width) says nothing about
  * other widths at that offset, and a quiet interval proves no geometry wrong. */
@@ -546,19 +564,31 @@ bool nr_pdcch_blind_monitor_autodiscover_done(void)
 }
 
 #define NR_PDCCH_MAX_CANDIDATE_WINDOWS (273 / 6)
-static uint16_t s_hit_count[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
-static uint16_t s_hit_count1[NR_PDCCH_MAX_CANDIDATE_WINDOWS]; /* same, CORESET symbol 1: decides the duration */
+typedef uint16_t s_hit_count_cell_t[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+NR_CELL_STATIC(s_hit_count_cell_t, s_hit_count);
+#define s_hit_count NR_CELL_REF(s_hit_count)
+typedef uint16_t s_hit_count1_cell_t[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+NR_CELL_STATIC(s_hit_count1_cell_t, s_hit_count1);
+#define s_hit_count1 NR_CELL_REF(s_hit_count1) /* same, CORESET symbol 1: decides the duration */
 
 /* LONG-TERM evidence, never reset by a single dwell (only by
  * nr_pdcch_blind_monitor_autodiscover_reset() -- a full re-discovery, e.g. after a BWP switch).
  * STALE COMMENT CORRECTED (R31 fix round 1): this used to say "diagnostic only, nothing consumes
  * these" -- that predates MIN_ORACLE_DWELLS' seed selection, which reads s_lt_dwells/s_lt_hits
  * directly to rank candidate windows by cross-dwell recurrence. They are load-bearing. */
-static unsigned long s_lt_hits[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
-static unsigned      s_lt_dwells[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
-static uint16_t      s_lt_rnti[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
-static unsigned      s_lt_ndwell;
-static int s_obs_calls;
+typedef unsigned long s_lt_hits_cell_t[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+NR_CELL_STATIC(s_lt_hits_cell_t, s_lt_hits);
+#define s_lt_hits NR_CELL_REF(s_lt_hits)
+typedef unsigned s_lt_dwells_cell_t[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+NR_CELL_STATIC(s_lt_dwells_cell_t, s_lt_dwells);
+#define s_lt_dwells NR_CELL_REF(s_lt_dwells)
+typedef uint16_t s_lt_rnti_cell_t[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+NR_CELL_STATIC(s_lt_rnti_cell_t, s_lt_rnti);
+#define s_lt_rnti NR_CELL_REF(s_lt_rnti)
+NR_CELL_STATIC(unsigned, s_lt_ndwell);
+#define s_lt_ndwell NR_CELL_REF(s_lt_ndwell)
+NR_CELL_STATIC(int, s_obs_calls);
+#define s_obs_calls NR_CELL_REF(s_obs_calls)
 /* TECHNIQUE A LEAF LOCK (Task A7 follow-up). The arrays above and s_obs_calls are written by the PHY
  * receive thread (observe_symbol1()/autodiscover_step(), every DL slot before discovery) and touched by
  * the scan consumers (note_rnti_for_windows() on every C/TC accept, autodiscover_next()/reset() when a
@@ -566,7 +596,8 @@ static int s_obs_calls;
  * too. The receive thread must never wait on a consumer's occasion, so this is NOT g_phase2_mu: it is a
  * leaf lock held only around the array touches (copy in/out, no I/O, no other lock taken inside). The
  * receive thread evaluates its dwell on a snapshot taken under it. */
-static pthread_mutex_t s_techA_mu = PTHREAD_MUTEX_INITIALIZER;
+NR_CELL_STATIC_INIT(pthread_mutex_t, s_techA_mu, PTHREAD_MUTEX_INITIALIZER);
+#define s_techA_mu NR_CELL_REF(s_techA_mu)
 void nr_pdcch_blind_monitor_note_rnti_for_windows(uint16_t rnti)
 {
   if (!nr_cfg_epoch_work_current()) return;
@@ -613,10 +644,14 @@ typedef struct {
   int symbol;
   uint32_t abs_slot;
 } techA_commit_t;
-static techA_commit_t s_commit_rx;     /* receive-thread scratch */
-static techA_commit_t s_commit;        /* the posted decision, under s_techA_mu */
-static _Atomic bool s_commit_pending;  /* written under s_techA_mu; read lock-free as a fast check */
-static _Atomic bool s_commit_defer;
+NR_CELL_STATIC(techA_commit_t, s_commit_rx);
+#define s_commit_rx NR_CELL_REF(s_commit_rx)     /* receive-thread scratch */
+NR_CELL_STATIC(techA_commit_t, s_commit);
+#define s_commit NR_CELL_REF(s_commit)        /* the posted decision, under s_techA_mu */
+NR_CELL_STATIC(_Atomic bool, s_commit_pending);
+#define s_commit_pending NR_CELL_REF(s_commit_pending)  /* written under s_techA_mu; read lock-free as a fast check */
+NR_CELL_STATIC(_Atomic bool, s_commit_defer);
+#define s_commit_defer NR_CELL_REF(s_commit_defer)
 static void techA_commit_apply(const techA_commit_t *c);
 void nr_pdcch_blind_monitor_autodiscover_defer_commit(bool on)
 {
@@ -630,7 +665,8 @@ bool nr_pdcch_blind_monitor_autodiscover_commit_pending(void)
  * commit is complete, so the receive thread does not start a new dwell on a half-applied geometry. */
 bool nr_pdcch_blind_monitor_autodiscover_apply_pending(void)
 {
-  static techA_commit_t s_commit_apply; /* consumer side, serialised by g_phase2_mu */
+  NR_CELL_STATIC(techA_commit_t, s_commit_apply);
+#define s_commit_apply NR_CELL_REF(s_commit_apply) /* consumer side, serialised by g_phase2_mu */
   if (!s_commit_pending)
     return false;
   pthread_mutex_lock(&s_techA_mu);
@@ -646,6 +682,7 @@ bool nr_pdcch_blind_monitor_autodiscover_apply_pending(void)
   pthread_mutex_unlock(&s_techA_mu);
   return true;
 }
+#undef s_commit_apply
 
 /* CONVERGENCE CRITERION (rewritten 2026-09-06 -- see the handover doc's reversal section for the
  * live measurement that forced this). The original design required the SAME rb_offset to win
@@ -668,10 +705,15 @@ bool nr_pdcch_blind_monitor_autodiscover_apply_pending(void)
  * confirmation needs two sightings of the same RNTI), with a wide margin for a quieter cell. */
 #define NR_PDCCH_EXTENT_VERIFY_OCC 4000
 
-static nr_pdcch_extent_cand_t s_ext_cand[NR_PDCCH_EXTENT_MAX_CAND];
-static int  s_ext_n        = 0;
-static int  s_ext_idx      = 0;
-static int  s_ext_phase_idx = 0;
+typedef nr_pdcch_extent_cand_t s_ext_cand_cell_t[NR_PDCCH_EXTENT_MAX_CAND];
+NR_CELL_STATIC(s_ext_cand_cell_t, s_ext_cand);
+#define s_ext_cand NR_CELL_REF(s_ext_cand)
+NR_CELL_STATIC(int, s_ext_n);
+#define s_ext_n NR_CELL_REF(s_ext_n)
+NR_CELL_STATIC(int, s_ext_idx);
+#define s_ext_idx NR_CELL_REF(s_ext_idx)
+NR_CELL_STATIC(int, s_ext_phase_idx);
+#define s_ext_phase_idx NR_CELL_REF(s_ext_phase_idx)
 
 /* The occupancy oracle samples one 6-RB grid phase, chosen from CORESET#0. A dedicated BWP may
  * start at any CRB, so that phase is only a search-order prior, never the physical phase of a
@@ -691,13 +733,20 @@ static int extent_phase(int idx)
 /* CCE-to-REG mapping hypotheses of the extent under test (nr_pdcch_map_candidates). Each
  * (extent, mapping) pair gets the same NR_PDCCH_EXTENT_VERIFY_OCC dwell. */
 #define NR_PDCCH_MAP_MAX_CAND 1024 /* 865 legal at 216 RB x 2 symbols; 512 truncated them */
-static nr_pdcch_map_cand_t s_map_cand[NR_PDCCH_MAP_MAX_CAND];
-static int s_map_stage = 0;          /* 0 = pass-0 mappings only; 1 = full list (see nr_pdcch_map_candidates) */
-static bool s_map_exhaustive_for_test = false; /* TEST ONLY (was ISAC_MAP_PASS0_ONLY=0): every mapping of an extent before the next extent */
-static int s_map_pass0_n = 0;        /* pass-0 prefix length of the last nr_pdcch_map_candidates() call */
+typedef nr_pdcch_map_cand_t s_map_cand_cell_t[NR_PDCCH_MAP_MAX_CAND];
+NR_CELL_STATIC(s_map_cand_cell_t, s_map_cand);
+#define s_map_cand NR_CELL_REF(s_map_cand)
+NR_CELL_STATIC(int, s_map_stage);
+#define s_map_stage NR_CELL_REF(s_map_stage)          /* 0 = pass-0 mappings only; 1 = full list (see nr_pdcch_map_candidates) */
+NR_CELL_STATIC(bool, s_map_exhaustive_for_test);
+#define s_map_exhaustive_for_test NR_CELL_REF(s_map_exhaustive_for_test) /* TEST ONLY (was ISAC_MAP_PASS0_ONLY=0): every mapping of an extent before the next extent */
+NR_CELL_STATIC(int, s_map_pass0_n);
+#define s_map_pass0_n NR_CELL_REF(s_map_pass0_n)        /* pass-0 prefix length of the last nr_pdcch_map_candidates() call */
 static int map_stage_truncate(int n);
-static int  s_map_n        = 0;
-static int  s_map_idx      = 0;
+NR_CELL_STATIC(int, s_map_n);
+#define s_map_n NR_CELL_REF(s_map_n)
+NR_CELL_STATIC(int, s_map_idx);
+#define s_map_idx NR_CELL_REF(s_map_idx)
 static void map_apply(void)
 {
   const nr_pdcch_map_cand_t *m = &s_map_cand[s_map_idx];
@@ -713,15 +762,24 @@ static void map_restart(int span_rb, int duration, int pci)
   map_apply();
 }
 /* early (unseeded) oracle commit (sa-bed 2026-10-07): baked OFF, not validated on the DGX OTA pipeline (was ISAC_PDCCH_EARLY_COMMIT); tests enable it */
-static int s_early_commit_enabled = 0;
-static bool s_early_applied = false;       /* the unseeded commit has been posted/applied */
-static bool s_reseeded = false;            /* the oracle has since re-ordered the catalogue (once) */
-static bool s_early_commit_used = false; /* the unseeded first commit of this discovery epoch has been taken */
-static uint8_t s_dur_tried = 0;  /* bit d set: CORESET duration d has had a full catalogue lap this discovery */
-static _Atomic bool s_ext_verified = false; /* _Atomic: read by every blind-PDCCH scan consumer (Task A7) */
+NR_CELL_STATIC(int, s_early_commit_enabled);
+#define s_early_commit_enabled NR_CELL_REF(s_early_commit_enabled)
+NR_CELL_STATIC(bool, s_early_applied);
+#define s_early_applied NR_CELL_REF(s_early_applied)       /* the unseeded commit has been posted/applied */
+NR_CELL_STATIC(bool, s_reseeded);
+#define s_reseeded NR_CELL_REF(s_reseeded)            /* the oracle has since re-ordered the catalogue (once) */
+NR_CELL_STATIC(bool, s_early_commit_used);
+#define s_early_commit_used NR_CELL_REF(s_early_commit_used) /* the unseeded first commit of this discovery epoch has been taken */
+NR_CELL_STATIC(uint8_t, s_dur_tried);
+#define s_dur_tried NR_CELL_REF(s_dur_tried)  /* bit d set: CORESET duration d has had a full catalogue lap this discovery */
+NR_CELL_STATIC(_Atomic bool, s_ext_verified);
+#define s_ext_verified NR_CELL_REF(s_ext_verified) /* _Atomic: read by every blind-PDCCH scan consumer (Task A7) */
 /* The walk began unseeded and nothing has verified yet: the oracle keeps observing and re-orders the catalogue once its evidence matures
  * (the SA bed's seeds are noise, the OCUDU bed's put the right extent first: an unseeded walk verified offset 3 there instead of 0). */
-static _Atomic int s_hint_first_w = -1, s_hint_last_w = -1;
+NR_CELL_STATIC_INIT(_Atomic int, s_hint_first_w, -1);
+#define s_hint_first_w NR_CELL_REF(s_hint_first_w)
+NR_CELL_STATIC_INIT(_Atomic int, s_hint_last_w, -1);
+#define s_hint_last_w NR_CELL_REF(s_hint_last_w)
 void nr_pdcch_blind_monitor_map_exhaustive_for_test(bool on)
 {
   s_map_exhaustive_for_test = on;
@@ -736,14 +794,18 @@ bool nr_pdcch_blind_monitor_autodiscover_reseed_pending(void)
   return s_early_applied && !s_reseeded && s_dedicated_found && !s_ext_verified;
 }
 
-static int  s_ext_occ      = 0;
-static _Atomic uint64_t s_ext_generation; /* _Atomic: read by every blind-PDCCH scan consumer (Task A7) */
+NR_CELL_STATIC(int, s_ext_occ);
+#define s_ext_occ NR_CELL_REF(s_ext_occ)
+NR_CELL_STATIC(_Atomic uint64_t, s_ext_generation);
+#define s_ext_generation NR_CELL_REF(s_ext_generation) /* _Atomic: read by every blind-PDCCH scan consumer (Task A7) */
 typedef struct {
   uint16_t rnti;
   uint32_t slot;
   nr_dci_bits_t payload;
 } extent_evidence_t;
-static extent_evidence_t s_ext_evidence[NR_PDCCH_BLIND_MAX_UE];
+typedef extent_evidence_t s_ext_evidence_cell_t[NR_PDCCH_BLIND_MAX_UE];
+NR_CELL_STATIC(s_ext_evidence_cell_t, s_ext_evidence);
+#define s_ext_evidence NR_CELL_REF(s_ext_evidence)
 
 static void extent_clear_evidence(void)
 {
@@ -896,7 +958,8 @@ static bool extent_advance(void)
 
 /* Discovered CORESET queue entry (the in-process GPU stage-1/2 records, see s_add_disc below). */
 typedef struct { int nid, sym, dur, rb, ng, L, R, sh; } disc_coreset_t;
-static _Atomic bool s_outside_occupancy;
+NR_CELL_STATIC(_Atomic bool, s_outside_occupancy);
+#define s_outside_occupancy NR_CELL_REF(s_outside_occupancy)
 
 bool nr_pdcch_blind_monitor_discovery_paused(void)
 {
@@ -945,7 +1008,7 @@ bool nr_pdcch_blind_monitor_discovery_pass_due(int backlog, uint32_t *skipped)
 }
 
 /* Stage-1/2 queue fed by the in-process GPU records; a new list waits for the current dwell, it never erases its evidence. */
-static struct {
+typedef struct {
   disc_coreset_t line[256]; /* candidate queue may exceed the eight verified bank slots */
   int n, next, occasions;
   uint64_t generation, last_slot;
@@ -955,7 +1018,9 @@ static struct {
   struct { uint16_t rnti; int length; uint64_t slot; nr_dci_bits_t payload; } evidence[NR_PDCCH_BLIND_MAX_UE];
   uint64_t polls;
   int rej_nid[32], n_rej; /* nIDs whose dwell was rejected this epoch (REJECTLAST) */
-} s_add_disc;
+} s_add_disc_cell_t;
+NR_CELL_STATIC(s_add_disc_cell_t, s_add_disc);
+#define s_add_disc NR_CELL_REF(s_add_disc)
 
 /* REJECTLAST: an nID whose dwell was rejected ("no fresh CRC evidence in 4000 occasions") is tried again only after every queued
  * nID that has not failed yet. Every list the GPU stage publishes re-queues the nIDs it has seen, and a wrong nID (a strong
@@ -1018,8 +1083,10 @@ bool nr_pdcch_pointa_ref_enabled(void) { return true; }
  *   nr_pdcch_blind_monitor_rt.c (DM-RS reference of the PDCCH-Config decode). */
 int nr_pdcch_crb0_grid_rb(void)
 {
-  static _Atomic int cached = 0;
-  static _Atomic unsigned calls = 0;
+  NR_CELL_STATIC(_Atomic int, cached);
+#define cached NR_CELL_REF(cached)
+  NR_CELL_STATIC(_Atomic unsigned, calls);
+#define calls NR_CELL_REF(calls)
   if ((atomic_fetch_add_explicit(&calls, 1, memory_order_relaxed) & 255u) == 0) {
     const nr_passive_acq_snapshot_t s = nr_passive_acq_snapshot();
     const int pa = s.carrier_verified ? s.carrier.point_a_subcarrier : 0;
@@ -1027,6 +1094,8 @@ int nr_pdcch_crb0_grid_rb(void)
   }
   return atomic_load_explicit(&cached, memory_order_relaxed);
 }
+#undef calls
+#undef cached
 
 /* nr_pdcch_cover_start_rb: first grid RB of the cover dwell. TS 38.213 10.1: a PDCCH-Config CORESET's 6-RB groups are
  *   aligned to CRB 0, and the commonest CORESET starts at the BWP start = CRB 0. Anchoring the cover there also keeps
@@ -1039,7 +1108,8 @@ int nr_pdcch_cover_start_rb(int crb0_grid_rb, int carrier_rb)
   return start + 6 <= carrier_rb ? start : 0;
 }
 
-static int s_disc_pci = -1; /* PHY cell ID, for the default shiftIndex of the interleaved cover */
+NR_CELL_STATIC_INIT(int, s_disc_pci, -1);
+#define s_disc_pci NR_CELL_REF(s_disc_pci) /* PHY cell ID, for the default shiftIndex of the interleaved cover */
 void nr_pdcch_discovered_note_pci(int pci) { s_disc_pci = pci; }
 
 /* nr_carrier_from_sib1_enabled: the SIB1 carrier replaces the grid as the discovery BWP (CARRIERGEOM). */
@@ -1168,7 +1238,8 @@ static bool discovered_additional_poll(void)
   if (s_add_disc.active || s_add_disc.next < s_add_disc.n || (++s_add_disc.polls & 1023) != 1)
     return false;
   /* In-process GPU stage-1/2 (T17): bank its records too, not only the walk's catalogue hand-off. */
-  static uint64_t generation;
+  NR_CELL_STATIC(uint64_t, generation);
+#define generation NR_CELL_REF(generation)
   nr_pdcch_nid_record_t records[NR_PDCCH_NID_MAX_RECORDS];
   const int n = nr_pdcch_nid_gpu_records(records, NR_PDCCH_NID_MAX_RECORDS, &generation);
   if (n <= 0)
@@ -1184,6 +1255,7 @@ static bool discovered_additional_poll(void)
   FILE *m = fmemopen(text, used, "r");
   return m && !s_add_disc.active ? discovered_load_stream(m) : (m && fclose(m), false);
 }
+#undef generation
 
 /* nr_pdcch_discovered_snapshot: starts the next queued discovered CORESET as a dwell: skips the entries outside the carrier or already banked, builds a monitor configuration for the CORESET, and returns it with a token (the dwell generation).
  *   Returns false when no dwell is active, when the bank is full, or when the bank is disabled. Caller: nr_pdcch_blind_monitor_run_occasion() (discovered pass).
@@ -1343,7 +1415,8 @@ int nr_pdcch_discovered_observe_cand(uint64_t token, uint16_t rnti, uint64_t slo
       || !rnti || length < 1 || length > NR_DCI_MAX_PAYLOAD) return -1;
   /* One PDCCH transmission belongs to exactly one CORESET: a DCI an operational pass already decoded in this slot (same RNTI, same payload) is that transmission seen through an overlapping geometry whose candidate maps onto the same REs. It proves the traffic, not this geometry. */
   if (nr_pdcch_coreset_bank_decoded_elsewhere(slot, rnti, nr_dci_bits_hash(&payload, length))) {
-    static _Atomic unsigned s_dup;
+    NR_CELL_STATIC(_Atomic unsigned, s_dup);
+#define s_dup NR_CELL_REF(s_dup)
     const unsigned k = atomic_fetch_add_explicit(&s_dup, 1, memory_order_relaxed);
     if (k < 8 || (k & (k - 1)) == 0)
       LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d evidence ignored: rnti=0x%04x len=%d slot=%llu already decoded by a banked pass (n=%u)\n",
@@ -1351,17 +1424,20 @@ int nr_pdcch_discovered_observe_cand(uint64_t token, uint16_t rnti, uint64_t slo
             (unsigned long long)slot, k + 1);
     return -1;
   }
+#undef s_dup
   /* Re-expression arbiter: if a banked CORESET of this nID has a candidate on the very same ordered REs (same aggregation level), that candidate decodes the same codeword,
    * so this CRC-valid DCI is the transmission the bank already explains -- whether or not its pass happened to decode it. Overlap alone never blocks: a genuinely
    * different CORESET has candidates the bank cannot express. */
   if (al > 0 && nr_pdcch_coreset_bank_explains(&s_add_disc.cfg, cce, al, -1)) {
-    static _Atomic unsigned s_ovl;
+    NR_CELL_STATIC(_Atomic unsigned, s_ovl);
+#define s_ovl NR_CELL_REF(s_ovl)
     const unsigned k = atomic_fetch_add_explicit(&s_ovl, 1, memory_order_relaxed);
     if (k < 8 || (k & (k - 1)) == 0)
       LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d evidence ignored: rnti=0x%04x cce=%d al=%d is re-expressible by a banked CORESET (n=%u)\n",
             s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, rnti, cce, al, k + 1);
     return -1;
   }
+#undef s_ovl
   int victim = 0;
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; ++i) {
     if (s_add_disc.evidence[i].rnti == rnti && s_add_disc.evidence[i].length == length) {
@@ -1439,10 +1515,12 @@ static void nid_budget_feedback(void)
  */
 bool nr_pdcch_blind_monitor_discovered_poll(void)
 {
-  static unsigned budget_polls;
+  NR_CELL_STATIC(unsigned, budget_polls);
+#define budget_polls NR_CELL_REF(budget_polls)
   if((++budget_polls & 255)==1)nid_budget_feedback();
   return discovered_additional_poll();
 }
+#undef budget_polls
 
 /* ---- Lookahead lanes: see nr_pdcch_blind_monitor.h's own comment for the design. Lanes draw
  * unique (extent,mapping) tasks from a shared producer-thread catalogue. */
@@ -1462,12 +1540,19 @@ typedef struct {
   int  occ;
   extent_evidence_t evidence[NR_PDCCH_BLIND_MAX_UE];
 } nr_pdcch_lookahead_lane_t;
-static nr_pdcch_lookahead_lane_t s_lane[NR_PDCCH_LOOKAHEAD_MAX];
-static int s_lane_dispatch_ext;
-static int s_lane_dispatch_map;
-static int s_lane_dispatch_phase;
-static int s_lane_dispatch_stage;
-static int s_lane_dispatch_map_max;
+typedef nr_pdcch_lookahead_lane_t s_lane_cell_t[NR_PDCCH_LOOKAHEAD_MAX];
+NR_CELL_STATIC_HEAP(s_lane_cell_t, s_lane);
+#define s_lane NR_CELL_HEAP_REF(s_lane_cell_t, s_lane)
+NR_CELL_STATIC(int, s_lane_dispatch_ext);
+#define s_lane_dispatch_ext NR_CELL_REF(s_lane_dispatch_ext)
+NR_CELL_STATIC(int, s_lane_dispatch_map);
+#define s_lane_dispatch_map NR_CELL_REF(s_lane_dispatch_map)
+NR_CELL_STATIC(int, s_lane_dispatch_phase);
+#define s_lane_dispatch_phase NR_CELL_REF(s_lane_dispatch_phase)
+NR_CELL_STATIC(int, s_lane_dispatch_stage);
+#define s_lane_dispatch_stage NR_CELL_REF(s_lane_dispatch_stage)
+NR_CELL_STATIC(int, s_lane_dispatch_map_max);
+#define s_lane_dispatch_map_max NR_CELL_REF(s_lane_dispatch_map_max)
 
 int nr_pdcch_blind_lookahead_count(void)
 {
@@ -2097,7 +2182,8 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
                                           first_carrier_offset, pci, slot, symbol, candidates,
                                           NR_PDCCH_MAX_CANDIDATE_WINDOWS);
   {
-    static uint8_t outside_history; /* receive thread, one bit per discovery sample */
+    NR_CELL_STATIC(uint8_t, outside_history);
+#define outside_history NR_CELL_REF(outside_history) /* receive thread, one bit per discovery sample */
     bool hit = false;
     for (int c = 0; c < n; ++c)
       if ((s_css0_excl_first_w < 0 || candidates[c].rb_offset / 6 < s_css0_excl_first_w
@@ -2109,6 +2195,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
     if (nr_pdcch_coreset_bank_occupancy_sample(&outside_history, hit))
       atomic_store_explicit(&s_outside_occupancy, true, memory_order_relaxed);
   }
+#undef outside_history
   // Accumulate hits toward the observation window regardless of n==0 -- a genuinely idle call is
   // itself informative (real windows stay at 0 too on an idle call), and returning early here would
   // under-count elapsed dwell against AUTODISCOVER_OBS_CALLS.
@@ -4282,12 +4369,14 @@ static bool blind_decode_and_interpret_10(const int16_t*                       l
       const bool ra_ok = ra_exact ? nr_pdcch_sib1_prior_ra_rnti_valid((uint16_t)crc)
                                   : (crc <= NR_PDCCH_BLIND_RA_RNTI_MAX);
       if (ra_ok && ra_exact) {
-        static _Atomic uint64_t s_rav = 0;
+        NR_CELL_STATIC(_Atomic uint64_t, s_rav);
+#define s_rav NR_CELL_REF(s_rav)
         const uint64_t v = atomic_fetch_add_explicit(&s_rav, 1, memory_order_relaxed) + 1;
         if (v == 1 || (v % 100) == 0)
           LOG_A(PHY, "SENSING: RA-RNTI VERIFIED 0x%x -- %llu passed the exact PRACH decomposition\n",
                 (unsigned)crc, (unsigned long long)v);
       }
+#undef s_rav
       if (ra_ok) {
         attempts[n_attempts++] = NR_BLIND_RNTI_CLASS_RA;
       }
@@ -5472,9 +5561,12 @@ bool nr_pdcch_blind_extract_00(nr_dci_bits_t       payload,
   return true;
 }
 
-static pthread_mutex_t common_facts_lock=PTHREAD_MUTEX_INITIALIZER;
-static nr_pdcch_blind_common_config_t common_facts;
-static bool common_facts_valid;
+NR_CELL_STATIC_INIT(pthread_mutex_t, common_facts_lock, PTHREAD_MUTEX_INITIALIZER);
+#define common_facts_lock NR_CELL_REF(common_facts_lock)
+NR_CELL_STATIC(nr_pdcch_blind_common_config_t, common_facts);
+#define common_facts NR_CELL_REF(common_facts)
+NR_CELL_STATIC(bool, common_facts_valid);
+#define common_facts_valid NR_CELL_REF(common_facts_valid)
 static bool common_tda_valid(int count, const uint8_t *start, const uint8_t *length,
                              const uint8_t *mapping)
 {
@@ -5483,9 +5575,12 @@ static bool common_tda_valid(int count, const uint8_t *start, const uint8_t *len
     if (!length[i] || start[i]+length[i]>14 || mapping[i]>1) return false;
   return true;
 }
-static bool sib1_cache_suppressed;
-static uint16_t sib1_cache_tried_pci = 0xFFFF;
-static _Atomic uint32_t sib1_semantic_hash;
+NR_CELL_STATIC(bool, sib1_cache_suppressed);
+#define sib1_cache_suppressed NR_CELL_REF(sib1_cache_suppressed)
+NR_CELL_STATIC_INIT(uint16_t, sib1_cache_tried_pci, 0xFFFF);
+#define sib1_cache_tried_pci NR_CELL_REF(sib1_cache_tried_pci)
+NR_CELL_STATIC(_Atomic uint32_t, sib1_semantic_hash);
+#define sib1_semantic_hash NR_CELL_REF(sib1_semantic_hash)
 uint32_t nr_pdcch_blind_sib1_semantic_hash(void)
 {
   if (nr_cfg_ignore_sib1()) return 0;
@@ -5641,4 +5736,10 @@ int nr_pdcch_blind_parse_lane_als(const char *e, uint8_t v[5])
 int nr_pdcch_blind_lane_re_budget(void)
 {
   return LANE_RE_PER_LANE;
+}
+
+/* nr_pdcch_blind_monitor_cell_prealloc: allocates this file's heap objects of `cell` (call before nr_cell_alloc_fence()). */
+void nr_pdcch_blind_monitor_cell_prealloc(int cell)
+{
+  NR_CELL_HEAP_PREALLOC(s_lane_cell_t, s_lane, cell);
 }

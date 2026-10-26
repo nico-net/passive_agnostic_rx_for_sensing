@@ -101,6 +101,7 @@ def clean(src):
             while j < n and src[j] in " \t":
                 j += 1
             if j < n and src[j] == "#":
+                out.append(" " * (j - i))  # keep the indentation: offsets in the cleaned text must equal offsets in the source
                 # preprocessor line with continuations
                 while j < n:
                     if src[j] == "/" and j + 1 < n and src[j + 1] == "*":
@@ -433,7 +434,7 @@ def scan_text(rel, src):
                 i += 1
                 continue
             if stmt_start and paren == 0:
-                m = re.match(r"(?:case\b[^:;{}]*:|default\s*:|\w+\s*:(?!:))?\s*(static|__thread|_Thread_local|thread_local)\b", cs[i : i + 200])
+                m = re.match(r"(?:case\b[^:;{}]*:|default\s*:|\w+\s*:(?!:))?\s*(static|__thread|_Thread_local|thread_local|NR_CELL_STATIC(?:_INIT|_HEAP)?)\b", cs[i : i + 200])
                 if m:
                     st = i + m.start(1) if m.start(1) > 0 else i
                     j, depth, pd = st, 0, 0

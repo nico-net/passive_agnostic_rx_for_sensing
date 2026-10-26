@@ -202,3 +202,15 @@ if(ENABLE_TESTS)
   add_test(NAME test_mpci_a3_interleave COMMAND test_mpci_a3_interleave)
 endif()
 # ---- end A3 ----
+
+# ---- A4 ----
+# Per-cell state of the blind PDCCH monitor modules (nr_cell.h conversion). The existing unit-test targets compile the converted sources;
+# the one that does not already link LOG gets it here (nr_cell.c lives in LOG, never list it a second time).
+if(ENABLE_TESTS)
+  foreach(t test_nr_dl_traffic_probe test_nr_pdcch_dci_length_sweep test_nr_pdcch_coreset_bank test_nr_pdcch_joint_live test_nr_pdcch_dci11_layout_sweep test_nr_pdcch_dci01_layout_sweep)
+    if(TARGET ${t})
+      target_link_libraries(${t} PRIVATE LOG)
+    endif()
+  endforeach()
+endif()
+# ---- end A4 ----

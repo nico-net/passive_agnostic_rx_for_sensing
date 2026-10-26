@@ -5,6 +5,7 @@
 #include "nr_pdcch_blind_phase2.h"
 #include <pthread.h>
 #include <stdatomic.h>
+#include "common/utils/nr_cell.h"
 
 /* ---- Phase-2 lock (Task A7 design point 2) -------------------------------------------------------
  * One occasion = Phase 1 (FEP, LLR, demap, pre-pass, candidate decode: the ~80 % of the cost) and
@@ -30,7 +31,8 @@
  * speed-up assumes deferred PDSCH (nr_pdcch_blind_monitor_rt.c warns at scan-pool start).
  * Lock order: this lock is taken by the occasion body only, never while holding another blind-PDCCH
  * lock, and the body takes its leaf locks (dedupe, length sweep, bank, ...) inside it. */
-static pthread_mutex_t g_phase2_mu = PTHREAD_MUTEX_INITIALIZER;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_phase2_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_phase2_mu NR_CELL_REF(g_phase2_mu)
 
 void nr_pdcch_blind_phase2_lock(void)
 {
@@ -48,13 +50,18 @@ void nr_pdcch_blind_phase2_unlock(void)
 // seconds of history regardless of window size. See nr_pdcch_blind_monitor_rt.h's rnti_persist_k/
 // rnti_persist_window_ms field comments. Guarded by g_phase2_mu (held by the caller). ----
 #define NR_PDCCH_BLIND_PERSIST_MAX 64
-static struct {
+typedef struct {
   uint16_t rnti;
   uint32_t abs_slot;
-} g_recent[NR_PDCCH_BLIND_PERSIST_MAX];
-static int g_recent_head = 0;
-static int g_recent_count = 0;
-static uint64_t g_recent_sightings = 0; /* sightings ever recorded; same lock */
+} g_recent_cell_t[NR_PDCCH_BLIND_PERSIST_MAX];
+NR_CELL_STATIC(g_recent_cell_t, g_recent);
+#define g_recent NR_CELL_REF(g_recent)
+NR_CELL_STATIC(int, g_recent_head);
+#define g_recent_head NR_CELL_REF(g_recent_head)
+NR_CELL_STATIC(int, g_recent_count);
+#define g_recent_count NR_CELL_REF(g_recent_count)
+NR_CELL_STATIC(uint64_t, g_recent_sightings);
+#define g_recent_sightings NR_CELL_REF(g_recent_sightings) /* sightings ever recorded; same lock */
 
 // Always records the current sighting regardless of the outcome, so a candidate that fails today can
 // contribute toward tomorrow's threshold.
@@ -101,9 +108,12 @@ uint64_t nr_pdcch_blind_persistence_sightings(void)
 // lock/unlock (tens of ns, ~100 candidates per occasion) keeps the exact per-sample update sequence. ----
 #define ENERGY_FLOOR_STEP 0.01f // fractional step per candidate toward the running median
 #define ENERGY_FLOOR_MIN 1e-6f  // keep strictly positive: the threshold is multiplicative
-static pthread_mutex_t g_energy_mu = PTHREAD_MUTEX_INITIALIZER;
-static float g_energy_floor = 0.0f;
-static uint64_t g_energy_nseen = 0;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_energy_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_energy_mu NR_CELL_REF(g_energy_mu)
+NR_CELL_STATIC(float, g_energy_floor);
+#define g_energy_floor NR_CELL_REF(g_energy_floor)
+NR_CELL_STATIC(uint64_t, g_energy_nseen);
+#define g_energy_nseen NR_CELL_REF(g_energy_nseen)
 
 float nr_pdcch_blind_energy_floor_update(float x, uint64_t *nseen_out)
 {

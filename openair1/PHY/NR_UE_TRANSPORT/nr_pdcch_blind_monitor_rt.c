@@ -14,6 +14,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_pdcch_cell_len_hint.h"
+#include "nr_pdcch_cell_len_state.h"
 #include "nr_passive_reconf_rules.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_passive_sample_lifetime.h"
@@ -323,17 +324,26 @@ static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t
 #include "PHY/CODING/nrPolar_tools/nr_polar_fssc.h"       // CPU batch stage
 
 #include "nr_dmrs_nid_solve.h"
+#include "common/utils/nr_cell.h"
+#include "nr_pdcch_cell.h"
 /* ---- Blind PDCCH DM-RS identity discovery (nr_dmrs_nid_solve.h). On 1 occasion in 32, every 6-RB window of the CORESET symbols is
  * solved for N_ID under each candidate DM-RS reference (CRB 0 per 38.211, or the window start minus 0..5 RB as OAI references a
  * dedicated BWP). A valid solution is confirmed by its own structure (a wrong one is valid with probability 2^-15), so each hit is a
  * near-certain "a PDCCH with this scrambling identity and reference occupies this window", with no per-slot SNR threshold. Votes are
  * kept per (N_ID, reference); the leader is logged when it changes. Always on. */
 typedef struct { int nid; int ref; uint32_t votes; uint64_t win_mask; } nid_vote_t;
-static nid_vote_t g_nid_votes[64];
-static pthread_mutex_t g_nid_lock = PTHREAD_MUTEX_INITIALIZER;
-static int g_nid_leader = -1;
-static float g_nid_win[2][NR_PBWP_CS_MAXWIN]; /* decayed hit score per (CORESET symbol, 6-RB window) for the LEADER (N_ID, reference) */
-static int g_nid_pci = -1;
+typedef nid_vote_t g_nid_votes_cell_t[64];
+NR_CELL_STATIC(g_nid_votes_cell_t, g_nid_votes);
+#define g_nid_votes NR_CELL_REF(g_nid_votes)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_nid_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_nid_lock NR_CELL_REF(g_nid_lock)
+NR_CELL_STATIC_INIT(int, g_nid_leader, -1);
+#define g_nid_leader NR_CELL_REF(g_nid_leader)
+typedef float g_nid_win_cell_t[2][NR_PBWP_CS_MAXWIN];
+NR_CELL_STATIC(g_nid_win_cell_t, g_nid_win);
+#define g_nid_win NR_CELL_REF(g_nid_win) /* decayed hit score per (CORESET symbol, 6-RB window) for the LEADER (N_ID, reference) */
+NR_CELL_STATIC_INIT(int, g_nid_pci, -1);
+#define g_nid_pci NR_CELL_REF(g_nid_pci)
 static bool nid_solve_enabled(void)
 {
   return true; /* always on (the former ISAC_NID_SOLVE kill switch is gone) */
@@ -513,11 +523,19 @@ static void nid_solve_scan(const nid_job_t *jb)
  * to stall the receive thread with. The receive thread only copies the pilots (a few KB) into a small ring and drops the job when the
  * ring is full. Normal scheduling priority: a late or dropped job costs a little discovery time, never a slot. */
 #define NID_RING 4
-static nid_job_t g_nid_ring[NID_RING];
-static int g_nid_head, g_nid_count;
-static pthread_mutex_t g_nid_q_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_nid_q_cond = PTHREAD_COND_INITIALIZER;
-static pthread_once_t g_nid_thr_once = PTHREAD_ONCE_INIT;
+typedef nid_job_t g_nid_ring_cell_t[NID_RING];
+NR_CELL_STATIC(g_nid_ring_cell_t, g_nid_ring);
+#define g_nid_ring NR_CELL_REF(g_nid_ring)
+NR_CELL_STATIC(int, g_nid_head);
+#define g_nid_head NR_CELL_REF(g_nid_head)
+NR_CELL_STATIC(int, g_nid_count);
+#define g_nid_count NR_CELL_REF(g_nid_count)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_nid_q_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_nid_q_lock NR_CELL_REF(g_nid_q_lock)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_nid_q_cond, PTHREAD_COND_INITIALIZER);
+#define g_nid_q_cond NR_CELL_REF(g_nid_q_cond)
+NR_CELL_STATIC_INIT(pthread_once_t, g_nid_thr_once, PTHREAD_ONCE_INIT);
+#define g_nid_thr_once NR_CELL_REF(g_nid_thr_once)
 /* Passive-BWP CORESET discovery correlation, off the scan thread (OTA Vodafone 2026-10-20: 52 us per scan pass in the RT scan consumer, the
  * largest item of the restore; its RR 50 bursts pre-empted PDSCH consumer 0 on the shared core 7 -> 300 DECSLOW). The scan copies the 3
  * DM-RS REs per RB of antenna 0 for both CORESET symbols; this worker correlates them and feeds the tracker. A full ring drops the
@@ -528,12 +546,17 @@ typedef struct {
   c16_t re[2][3 * 276];
 } pbwp_corr_job_t;
 #define PBWP_CORR_RING 16
-static pbwp_corr_job_t g_cj_ring[PBWP_CORR_RING];
-static int g_cj_head, g_cj_count;
+typedef pbwp_corr_job_t g_cj_ring_cell_t[PBWP_CORR_RING];
+NR_CELL_STATIC_HEAP(g_cj_ring_cell_t, g_cj_ring);
+#define g_cj_ring NR_CELL_HEAP_REF(g_cj_ring_cell_t, g_cj_ring)
+NR_CELL_STATIC(int, g_cj_head);
+#define g_cj_head NR_CELL_REF(g_cj_head)
+NR_CELL_STATIC(int, g_cj_count);
+#define g_cj_count NR_CELL_REF(g_cj_count)
 static void pbwp_corr_run(const pbwp_corr_job_t *j); /* after g_pbwp */
 static void *nid_worker(void *arg)
 {
-  (void)arg;
+  (void)arg; /* created with nr_cell_thread_create: already bound to its cell */
   /* The first nid_submit() runs on a scan consumer (SCHED_RR 50, pinned), and a thread inherits both: the solver ran at scan priority on a
    * scan core and took RR quanta from it (replay 2026-10-20: 2 s CPU of 12 s on core 6). Leave the critical lane: SCHED_OTHER, nice 10, the
    * process (main thread) affinity, as pdcchJanon does. */
@@ -543,8 +566,10 @@ static void *nid_worker(void *arg)
   if (sched_getaffinity(getpid(), sizeof(set), &set) == 0 && CPU_COUNT(&set) > 0)
     pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
   setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
-  static nid_job_t job;
-  static pbwp_corr_job_t cj;
+  NR_CELL_STATIC(nid_job_t, job);
+#define job NR_CELL_REF(job)
+  NR_CELL_STATIC(pbwp_corr_job_t, cj);
+#define cj NR_CELL_REF(cj)
   for (;;) {
     pthread_mutex_lock(&g_nid_q_lock);
     while (g_nid_count == 0 && g_cj_count == 0)
@@ -566,10 +591,12 @@ static void *nid_worker(void *arg)
   }
   return NULL;
 }
+#undef cj
+#undef job
 static void nid_start_thread(void)
 {
   pthread_t th;
-  if (pthread_create(&th, NULL, nid_worker, NULL) == 0) {
+  if (nr_cell_thread_create(&th, NULL, nid_worker, NULL, -1) == 0) {
     pthread_setname_np(th, "nid_solver");
     pthread_detach(th);
   }
@@ -595,7 +622,9 @@ static void nid_submit(const c16_t *y, int fft, int fco, int n_rb, int slot, int
 }
 
 /* Second-pass mapping hypotheses that produced a CRC-accepted DCI 1_1, for the CURRENT proposed geometry (reset when it changes). */
-static _Atomic uint32_t g_p2_votes[32];
+typedef _Atomic uint32_t g_p2_votes_cell_t[32];
+NR_CELL_STATIC(g_p2_votes_cell_t, g_p2_votes);
+#define g_p2_votes NR_CELL_REF(g_p2_votes)
 
 // Spec maxima for a CORESET: the frequency-domain bitmap addresses 6-PRB groups over the BWP, so at
 // most floor(275/6) = 45 groups = 270 PRB; duration is 1..3 symbols (38.331 ControlResourceSet).
@@ -642,7 +671,10 @@ static bool nr_pdcch_ss0_occasion(uint32_t gate_slot)
 }
 
 static uint64_t btim_now_ns(void);
-static _Atomic uint64_t g_c0_occ_checks, g_c0_occ_hits;
+NR_CELL_STATIC(_Atomic uint64_t, g_c0_occ_checks);
+#define g_c0_occ_checks NR_CELL_REF(g_c0_occ_checks)
+NR_CELL_STATIC(_Atomic uint64_t, g_c0_occ_hits);
+#define g_c0_occ_hits NR_CELL_REF(g_c0_occ_hits)
 /* nr_pdcch_c0_occ_hit: CORESET#0 occupancy test: true when the strongest 6-RB group of CORESET#0 exceeds the tracked noise floor by 6 dB.
  *   Runs one antenna-0 FEP per CORESET#0 symbol (thread-local buffer); the floor is an EMA of the quietest group (racy by design).
  *   Updates g_c0_occ_checks and g_c0_occ_hits. Caller: nr_pdcch_blind_monitor_run_occasion() slot gate.
@@ -650,7 +682,8 @@ static _Atomic uint64_t g_c0_occ_checks, g_c0_occ_hits;
 static bool nr_pdcch_c0_occ_hit(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
   static const float ratio = 3.98107171f; /* 10^(6/10) */
-  static float floor_e; /* racy across consumers by design: a running estimate */
+  NR_CELL_STATIC(float, floor_e);
+#define floor_e NR_CELL_REF(floor_e) /* racy across consumers by design: a running estimate */
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   int first = 0, nrb = 0;
   nr_pdcch_coreset_map_get_css0(&first, &nrb);
@@ -685,29 +718,61 @@ static bool nr_pdcch_c0_occ_hit(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *pro
   if (hit) atomic_fetch_add_explicit(&g_c0_occ_hits, 1, memory_order_relaxed);
   return hit;
 }
+#undef floor_e
 
 /* T26d per-pass-kind accounting (see pass_note) */
 enum { PK_BANK = 0, PK_DWELL = 1, PK_C0USS = 2, PK_CSS0 = 3, PK_N = 4 };
 static const char *const kPkName[PK_N] = {"bank", "dwell", "c0uss", "css0"};
-static _Atomic uint64_t g_pk_ns[PK_N], g_pk_runs[PK_N], g_pk_acc[PK_N];
-static _Atomic uint64_t g_fepc_hit, g_fepc_miss;
-static _Atomic uint64_t g_pdcch_gpu_equal, g_pdcch_gpu_mismatch, g_pdcch_gpu_error;
-static pthread_mutex_t g_pdcch_gpu_fep_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef _Atomic uint64_t g_pk_ns_cell_t[PK_N];
+NR_CELL_STATIC(g_pk_ns_cell_t, g_pk_ns);
+#define g_pk_ns NR_CELL_REF(g_pk_ns)
+typedef _Atomic uint64_t g_pk_runs_cell_t[PK_N];
+NR_CELL_STATIC(g_pk_runs_cell_t, g_pk_runs);
+#define g_pk_runs NR_CELL_REF(g_pk_runs)
+typedef _Atomic uint64_t g_pk_acc_cell_t[PK_N];
+NR_CELL_STATIC(g_pk_acc_cell_t, g_pk_acc);
+#define g_pk_acc NR_CELL_REF(g_pk_acc)
+NR_CELL_STATIC(_Atomic uint64_t, g_fepc_hit);
+#define g_fepc_hit NR_CELL_REF(g_fepc_hit)
+NR_CELL_STATIC(_Atomic uint64_t, g_fepc_miss);
+#define g_fepc_miss NR_CELL_REF(g_fepc_miss)
+NR_CELL_STATIC(_Atomic uint64_t, g_pdcch_gpu_equal);
+#define g_pdcch_gpu_equal NR_CELL_REF(g_pdcch_gpu_equal)
+NR_CELL_STATIC(_Atomic uint64_t, g_pdcch_gpu_mismatch);
+#define g_pdcch_gpu_mismatch NR_CELL_REF(g_pdcch_gpu_mismatch)
+NR_CELL_STATIC(_Atomic uint64_t, g_pdcch_gpu_error);
+#define g_pdcch_gpu_error NR_CELL_REF(g_pdcch_gpu_error)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_pdcch_gpu_fep_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_pdcch_gpu_fep_lock NR_CELL_REF(g_pdcch_gpu_fep_lock)
+typedef uint32_t scan_fine_us_cell_t[2][10002];
+NR_CELL_STATIC_HEAP(scan_fine_us_cell_t, scan_fine_us);
+#define scan_fine_us NR_CELL_HEAP_REF(scan_fine_us_cell_t, scan_fine_us) /* 1-us buckets through 10 ms; last is overflow */
 /* scan_timing_note: records the wall time of one PDCCH scan occasion (ISAC_PDCCH_SCAN_TIMING) in log2 and 1-us histograms, and logs p50/p99/max every 4000 occasions.
  *   Two streams: full occasions and dedicated-only slots (ded_only). The dedicated stream also prints per-pass-kind yields.
  *   Callers: nr_pdcch_blind_monitor_run_occasion() (end of occasion and dedicated-only slots). Takes a static mutex.
  */
 static void scan_timing_note(uint64_t ns, bool ded_only)
 {
-  static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-  static uint64_t hist[2][64], n[2], mx[2], over500[2];
-  static uint32_t fine_us[2][10002]; /* 1-us buckets through 10 ms; last is overflow */
+  NR_CELL_STATIC_INIT(pthread_mutex_t, mu, PTHREAD_MUTEX_INITIALIZER);
+#define mu NR_CELL_REF(mu)
+  typedef uint64_t hist_cell_t[2][64];
+NR_CELL_STATIC(hist_cell_t, hist);
+#define hist NR_CELL_REF(hist)
+typedef uint64_t n_cell_t[2];
+NR_CELL_STATIC(n_cell_t, n);
+#define n NR_CELL_REF(n)
+typedef uint64_t mx_cell_t[2];
+NR_CELL_STATIC(mx_cell_t, mx);
+#define mx NR_CELL_REF(mx)
+typedef uint64_t over500_cell_t[2];
+NR_CELL_STATIC(over500_cell_t, over500);
+#define over500 NR_CELL_REF(over500)
   pthread_mutex_lock(&mu);
   const int k = ded_only ? 1 : 0;
   const int b = ns ? 63 - __builtin_clzll(ns) : 0;
   hist[k][b]++;
   const uint64_t us = (ns + 999) / 1000;
-  fine_us[k][us <= 10000 ? us : 10001]++;
+  scan_fine_us[k][us <= 10000 ? us : 10001]++;
   over500[k] += ns >= 500000;
   if (ns > mx[k]) mx[k] = ns;
   if ((++n[k] % 4000) == 0) {
@@ -720,7 +785,7 @@ static void scan_timing_note(uint64_t ns, bool ded_only)
     uint64_t fine_acc = 0;
     int fine_p50 = 0, fine_p99 = 0;
     for (int i = 0; i <= 10001; i++) {
-      fine_acc += fine_us[k][i];
+      fine_acc += scan_fine_us[k][i];
       if (!fine_p50 && fine_acc * 2 >= n[k]) fine_p50 = i;
       if (!fine_p99 && fine_acc * 100 >= n[k] * 99) fine_p99 = i;
     }
@@ -746,6 +811,11 @@ static void scan_timing_note(uint64_t ns, bool ded_only)
   }
   pthread_mutex_unlock(&mu);
 }
+#undef hist
+#undef n
+#undef mx
+#undef over500
+#undef mu
 
 static uint32_t blind_harq_tag(uint32_t abs_slot, uint16_t rnti, uint8_t harq_pid)
 {
@@ -787,7 +857,8 @@ static void build_coreset_bitmap(int num_groups, uint8_t bitmap[6])
  */
 static bool summary_due_now(void)
 {
-  static _Atomic uint64_t s_last_ns = 0;
+  NR_CELL_STATIC(_Atomic uint64_t, s_last_ns);
+#define s_last_ns NR_CELL_REF(s_last_ns)
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
@@ -796,17 +867,21 @@ static bool summary_due_now(void)
     return false;
   return atomic_compare_exchange_strong_explicit(&s_last_ns, &last, now, memory_order_acq_rel, memory_order_relaxed);
 }
+#undef s_last_ns
 /* Occasion-path counters are relaxed atomics (Task A7): several scan consumers run occasions at once. */
 #define NR_BLIND_CTR_INC(c) atomic_fetch_add_explicit(&(c), 1, memory_order_relaxed)
 #define NR_BLIND_CTR_ADD(c, n) atomic_fetch_add_explicit(&(c), (n), memory_order_relaxed)
 #define NR_BLIND_CTR_GET(c) atomic_load_explicit(&(c), memory_order_relaxed)
-static _Atomic uint64_t g_occasions_run  = 0;
-static _Atomic uint64_t g_candidates_run = 0;
+NR_CELL_STATIC(_Atomic uint64_t, g_occasions_run);
+#define g_occasions_run NR_CELL_REF(g_occasions_run)
+NR_CELL_STATIC(_Atomic uint64_t, g_candidates_run);
+#define g_candidates_run NR_CELL_REF(g_candidates_run)
 // Phase 3 autodiscover (2026-09-04): Technique C's dci_length sweep has succeeded, OR given up
 // (see AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS). Guards nr_pdcch_dci_length_sweep_feed() from
 // running every occasion forever -- see the autodiscover branch in
 // nr_pdcch_blind_monitor_run_occasion() below.
-static _Atomic bool g_length_swept  = false; /* _Atomic: N scan consumers (Task A7) */
+NR_CELL_STATIC(_Atomic bool, g_length_swept);
+#define g_length_swept NR_CELL_REF(g_length_swept) /* _Atomic: N scan consumers (Task A7) */
 /* DISTINCT from g_length_swept, which is set by BOTH the success and the give-up branch and so
  * cannot tell them apart. Everything downstream of the DCI length is meaningless while the length
  * is wrong, because nothing genuine decodes.
@@ -817,7 +892,8 @@ static _Atomic bool g_length_swept  = false; /* _Atomic: N scan consumers (Task 
  * NOT verified", blaming geometry for a signal outage, and Technique B confirmed a succession of
  * NOISE RNTIs (0xbaa8, then 0xa1bd / 0xf35e / 0xe2a6) which the acceptance-narrowing consumer
  * pinned to in turn. A deaf run must degrade to "no conclusion", never to a confident wrong one. */
-static _Atomic bool g_length_found  = false; /* _Atomic: N scan consumers (Task A7) */
+NR_CELL_STATIC(_Atomic bool, g_length_found);
+#define g_length_found NR_CELL_REF(g_length_found) /* _Atomic: N scan consumers (Task A7) */
 
 
 /* Guards the AL1 UNION fields of the bank entries (nr_pdcch_coreset_bank.h): unlike cfg they change
@@ -849,7 +925,8 @@ static void al1_union_refresh(int bi, const char *why)
               ? nr_pdcch_al1_union(span, dur, list, 1 + e->n_al1_fam, e->al1_union, NR_PDCCH_AL1_UNION_MAX)
               : 0;
   if (n > NR_PDCCH_AL1_UNION_MAX) {
-    static bool s_capped;
+    NR_CELL_STATIC(bool, s_capped);
+#define s_capped NR_CELL_REF(s_capped)
     if (!s_capped) {
       s_capped = true;
       LOG_W(PHY, "SENSING: AL1_UNION capped: %d distinct AL1 REG sets > %d; the rest are not scanned\n", n,
@@ -857,6 +934,7 @@ static void al1_union_refresh(int bi, const char *why)
     }
     n = NR_PDCCH_AL1_UNION_MAX;
   }
+#undef s_capped
   e->n_al1_union = (uint16_t)n;
   const int ncce = span * dur / 6;
   LOG_A(PHY, "SENSING: AL1_UNION bank=%d fam=%d sets=%d beyond_banked=%d (%s)\n", bi, e->n_al1_fam, n,
@@ -872,7 +950,8 @@ static void al1_union_store(int bi, int span, int duration, const nr_pdcch_al1_m
   if (c->coreset_freq_domain * 6 != span || c->coreset_duration != duration)
     return; /* the bank archived a different shape than the verified lane: families do not apply */
   if (n > NR_PDCCH_AL1_MAX_FAM) { /* guard only: 90 is the measured maximum over every legal shape */
-    static bool s_capped;
+    NR_CELL_STATIC(bool, s_capped);
+#define s_capped NR_CELL_REF(s_capped)
     if (!s_capped) {
       s_capped = true;
       LOG_W(PHY, "SENSING: AL1_UNION family cap: %d consistent AL1 families > %d; keeping the first %d\n", n,
@@ -880,6 +959,7 @@ static void al1_union_store(int bi, int span, int duration, const nr_pdcch_al1_m
     }
     n = NR_PDCCH_AL1_MAX_FAM;
   }
+#undef s_capped
   pthread_mutex_lock(&g_al1_mu);
   if (nr_pdcch_coreset_bank_entry(bi)->n_al1_fam > 0) {
     /* Re-verifying an entry that already holds families: those have been narrowed (or collapsed) by
@@ -935,13 +1015,15 @@ static void al1_union_accept(int bi, int L, int cce, int num_cces, const uint16_
       if (e->al1_bank_out) {
         /* Contradiction: AL1 evidence excluded the banked family, yet an AL2+ decode under it passed.
          * Keep the union (it still holds the banked family's sets) rather than collapse onto it. */
-        static bool s_warned;
+        NR_CELL_STATIC(bool, s_warned);
+#define s_warned NR_CELL_REF(s_warned)
         if (!s_warned) {
           s_warned = true;
           LOG_W(PHY, "SENSING: AL1_UNION bank=%d: AL2+ decode under mapping %d/%d/%d that AL1 evidence excluded; "
                      "not collapsing (fam=%d kept)\n", bi, b.bundle, b.interleaver, b.shift, e->n_al1_fam);
         }
       } else if (e->n_al1_fam != 1 || memcmp(&e->al1_fam[0], &b, sizeof(b)) != 0) {
+#undef s_warned
         e->al1_fam[0] = b;
         e->n_al1_fam = 1;
         al1_union_refresh(bi, "AL2+ decode proves the banked mapping");
@@ -1009,9 +1091,12 @@ static _Thread_local int t_candidate_share; /* zero = legacy per-pass budget */
  * a silent wrong assumption into a loud one, which is the expensive half of that failure.
  *
  * Lazily armed: bwp_size and the DCI length are not known until the monitor is configured. */
-static nr_dci11_resolver_t *g_dci11_resolver;
-static int      g_dci11_state;   /* 0 = not tried, 1 = armed, -1 = unavailable */
-static uint64_t g_dci11_seen;
+NR_CELL_STATIC(nr_dci11_resolver_t *, g_dci11_resolver);
+#define g_dci11_resolver NR_CELL_REF(g_dci11_resolver)
+NR_CELL_STATIC(int, g_dci11_state);
+#define g_dci11_state NR_CELL_REF(g_dci11_state)   /* 0 = not tried, 1 = armed, -1 = unavailable */
+NR_CELL_STATIC(uint64_t, g_dci11_seen);
+#define g_dci11_seen NR_CELL_REF(g_dci11_seen)
 
 /* g_dci11_resolver/g_dci01_resolver (below) are ~4 MB each (NR_DCI11_LAYOUT_MAX=65535, see the
  * sizing comment in nr_pdcch_dci11_layout_sweep.h) -- as plain static globals that is 8 MB of BSS
@@ -1046,15 +1131,20 @@ static inline int nr_pdcch_ss_bucket(const nr_pdcch_blind_monitor_cfg_t *cfg);
  * ponytail: uniform rotation, i.e. pure exploration; weight toward the winning hypothesis once the
  * evidence has been validated on a cell where n_RNTI != 0. */
 #define STAGE0_MAXH 17
-static struct {
+typedef struct {
   uint32_t slot;
   uint16_t nrnti;
-} s_stage0_ring[1024];
-static struct {
+} s_stage0_ring_cell_t[1024];
+NR_CELL_STATIC(s_stage0_ring_cell_t, s_stage0_ring);
+#define s_stage0_ring NR_CELL_REF(s_stage0_ring)
+typedef struct {
   uint16_t nrnti;
   uint64_t occ, acc, match;
-} s_stage0_h[STAGE0_MAXH];
-static pthread_mutex_t s_stage0_mu = PTHREAD_MUTEX_INITIALIZER;
+} s_stage0_h_cell_t[STAGE0_MAXH];
+NR_CELL_STATIC(s_stage0_h_cell_t, s_stage0_h);
+#define s_stage0_h NR_CELL_REF(s_stage0_h)
+NR_CELL_STATIC_INIT(pthread_mutex_t, s_stage0_mu, PTHREAD_MUTEX_INITIALIZER);
+#define s_stage0_mu NR_CELL_REF(s_stage0_mu)
 
 static int stage0_slot_of(uint16_t nrnti) /* caller holds s_stage0_mu */
 {
@@ -1081,7 +1171,8 @@ static uint16_t nr_pdcch_nrnti_override(uint32_t abs_slot, const nr_pdcch_blind_
    * self-matches at < 1/50 of that rate, n_RNTI=0 is the answer for this cell (a per-CORESET property, so
    * later UEs inherit it). Rotating on would descramble 1/(1+k) of all USS occasions with a wrong n_RNTI and
    * lose every grant in them (2 UEs: 2/3 of the occasions). */
-  static int s_decided = -1;
+  NR_CELL_STATIC_INIT(int, s_decided, -1);
+#define s_decided NR_CELL_REF(s_decided)
   if (s_decided == 0)
     return 0;
   uint16_t h[STAGE0_MAXH];
@@ -1096,7 +1187,8 @@ static uint16_t nr_pdcch_nrnti_override(uint32_t abs_slot, const nr_pdcch_blind_
     const int i = stage0_slot_of(pick);
     if (i >= 0)
       s_stage0_h[i].occ++;
-    static uint64_t s_n;
+    NR_CELL_STATIC(uint64_t, s_n);
+#define s_n NR_CELL_REF(s_n)
     if ((s_n % 1000) == 999 && s_decided < 0) {
       int z = -1;
       for (int k = 0; k < STAGE0_MAXH; k++)
@@ -1127,10 +1219,12 @@ static uint16_t nr_pdcch_nrnti_override(uint32_t abs_slot, const nr_pdcch_blind_
       LOG_A(PHY, "SENSING: STAGE0 %s\n", b);
     }
   }
+#undef s_n
   const uint16_t used = s_stage0_ring[r].nrnti; /* all three call sites of one slot agree */
   pthread_mutex_unlock(&s_stage0_mu);
   return used;
 }
+#undef s_decided
 
 /* Credit an accept to the n_RNTI hypothesis its slot was descrambled with. */
 static void stage0_note_accept(uint32_t abs_slot, uint16_t rnti, bool confirmed)
@@ -1159,7 +1253,8 @@ static void ragrant_dump(const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu,
   if (out->rnti_class != NR_BLIND_RNTI_CLASS_RA) {
     return;
   }
-  static _Atomic unsigned long s_n = 0;
+  NR_CELL_STATIC(_Atomic unsigned long, s_n);
+#define s_n NR_CELL_REF(s_n)
   if (atomic_fetch_add_explicit(&s_n, 1, memory_order_relaxed) >= 8) {
     return;
   }
@@ -1174,6 +1269,7 @@ static void ragrant_dump(const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu,
         (unsigned)pdu->dmrs_ports, (unsigned)out->mcs, mcs_table, (unsigned)out->rv,
         (unsigned)out->tb_scaling);
 }
+#undef s_n
 
 
 /* See the header note on GRANTDROP. Rate-limited per reason so a persistent gate logs once and then
@@ -1186,13 +1282,15 @@ static void ragrant_dump(const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu,
  * feedback time from CONFIRMED DCIs only (TB CRC pass of the grant: nr_pdsch_passive_bc9_confirm, deferred consumer and the
  * in-line path below). ISAC_TD_DCI_ADJ=0 disables all of it (A/B; read once, nr_dci_hist_enabled): no history (so no
  * certified-flag census), no confirmation, no SIB1 TDD per-hypothesis exclusion, no DCI-adjacency exclusion. */
-static _Atomic uint64_t g_bc9_dcis;
+NR_CELL_STATIC(_Atomic uint64_t, g_bc9_dcis);
+#define g_bc9_dcis NR_CELL_REF(g_bc9_dcis)
 static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint32_t abs_slot, const NR_DL_FRAME_PARMS *fp)
 {
   if (!nr_cfg_epoch_work_current()) return;
   if (!nr_dci_hist_enabled())
     return; /* full kill switch (A/B): no history, no census input, no exclusion */
-  static _Atomic int s_period_set;
+  NR_CELL_STATIC(_Atomic int, s_period_set);
+#define s_period_set NR_CELL_REF(s_period_set)
   nr_dci_hist_t *h = nr_dci_hist_global();
   if (!atomic_exchange(&s_period_set, 1))
     nr_dci_hist_global_init(1024u * (uint32_t)fp->slots_per_frame);
@@ -1213,6 +1311,7 @@ static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint3
           (unsigned long long)refused);
   }
 }
+#undef s_period_set
 
 /* rv0-only drop rule. SI-RNTI (SIB1) grants are exempt -- SIB1 is repeated with the RV
  * cycle 0,2,3,1 and a passive receiver that sees the rv!=0 occasions first would never decode it (WEAKSYNC 2026-10-12:
@@ -1229,18 +1328,21 @@ static void grantdrop(const nr_pdcch_blind_result_t *out, int frame, int slot, c
       && out->rnti_class != NR_BLIND_RNTI_CLASS_TC) {
     return;
   }
-  static _Atomic unsigned long s_n = 0;
+  NR_CELL_STATIC(_Atomic unsigned long, s_n);
+#define s_n NR_CELL_REF(s_n)
   const unsigned long n = atomic_fetch_add_explicit(&s_n, 1, memory_order_relaxed) + 1;
   if (n <= 20 || (n % 500) == 0) {
     LOG_A(PHY, "SENSING: GRANTDROP (%d.%d) rnti=0x%x class=%d why=%s (n=%lu)\n",
           frame, slot, (unsigned)out->rnti, (int)out->rnti_class, why, n);
   }
 }
+#undef s_n
 
 static __thread uint64_t g_pdsch_configuration; /* per thread, see g_pdsch_sweep_on */
 /* Live-layout count above which PDSCH trials are first-code-block probes (job.layout_probe). */
 #define NR_DCI11_STAGE2_MAX_ALIVE 8   
-static _Atomic int g_dl_layout_preferred; /* a DL layout family has >= 8 code-block CRC passes */
+NR_CELL_STATIC(_Atomic int, g_dl_layout_preferred);
+#define g_dl_layout_preferred NR_CELL_REF(g_dl_layout_preferred) /* a DL layout family has >= 8 code-block CRC passes */
 /* (DCI11-RESOLVER: the DL FDRA staging -- type 1 first, the other modes armed on a TB-CRC refutation, disarmed by a type-1
  * pass -- is gone with its link-health stamps: every mode is in the layout set from the start.) */
 void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok)
@@ -1276,14 +1378,20 @@ void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok)
  *   nr_probe_gate_*: the grant's own enqueues and concurrent producers no longer refuse a plan the bucket allowed).
  *   A refused variant releases its solver entry with no credit. Caller: nr_pdcch_blind_monitor_run_occasion_one() (solver planning loop).
  */
-static double g_gate_rate, g_gate_burst; /* published copies of the bucket rate/burst (SOLVERCOVER fair share) */
-static pthread_mutex_t g_gate_mu = PTHREAD_MUTEX_INITIALIZER;
-static nr_probe_gate_t g_gate;
+NR_CELL_STATIC(double, g_gate_rate);
+#define g_gate_rate NR_CELL_REF(g_gate_rate)
+NR_CELL_STATIC(double, g_gate_burst);
+#define g_gate_burst NR_CELL_REF(g_gate_burst) /* published copies of the bucket rate/burst (SOLVERCOVER fair share) */
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_gate_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_gate_mu NR_CELL_REF(g_gate_mu)
+NR_CELL_STATIC(nr_probe_gate_t, g_gate);
+#define g_gate NR_CELL_REF(g_gate)
 static _Thread_local int t_gate_resv; /* probes this producer thread reserved for the grant it is planning */
 static const double kGateFill = 25.0;
 static void pdsch_gate_init_locked(void)
 {
-  static int init;
+  NR_CELL_STATIC(int, init);
+#define init NR_CELL_REF(init)
   if (!init) {
     nr_probe_gate_init(&g_gate, 0.5, 16.0);
     g_gate_rate = g_gate.rate;
@@ -1291,6 +1399,7 @@ static void pdsch_gate_init_locked(void)
     init = 1;
   }
 }
+#undef init
 /* pdsch_gate_release: returns this thread's unused probe reservation to the bucket. Called once a grant's variants are enqueued or dropped. */
 static void pdsch_gate_release(void)
 {
@@ -1302,7 +1411,16 @@ static void pdsch_gate_release(void)
 static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int mcs, long abs_slot)
 {
   const double margin = 3.0;
-  static uint64_t n_admit, n_throttle, n_full, n_skip_snr, n_explore;
+  NR_CELL_STATIC(uint64_t, n_admit);
+#define n_admit NR_CELL_REF(n_admit)
+NR_CELL_STATIC(uint64_t, n_throttle);
+#define n_throttle NR_CELL_REF(n_throttle)
+NR_CELL_STATIC(uint64_t, n_full);
+#define n_full NR_CELL_REF(n_full)
+NR_CELL_STATIC(uint64_t, n_skip_snr);
+#define n_skip_snr NR_CELL_REF(n_skip_snr)
+NR_CELL_STATIC(uint64_t, n_explore);
+#define n_explore NR_CELL_REF(n_explore)
   bool ok = true;
   pthread_mutex_lock(&g_gate_mu);
   pdsch_gate_init_locked();
@@ -1334,6 +1452,11 @@ static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int m
   if (!ok) nr_pdsch_solver_feedback(v->token, false, false);
   return ok;
 }
+#undef n_admit
+#undef n_throttle
+#undef n_full
+#undef n_skip_snr
+#undef n_explore
 
 /* solver_tda_of: solver callback: the TDRA index a DCI payload reads under one live DCI 1_1 layout (0 when unknown).
  *   Reads the layout's TDA field from the payload. Registered by run_occasion_one() with nr_pdsch_solver_set_tda_fn(). Thread-safe on the resolver's published count.
@@ -1426,9 +1549,12 @@ static bool dl_resolver_representative(const nr_dci11_resolver_t *r, const nr_pd
 /* ---- DCI 0_1 layout, stage 1 (observe-only, mirrors the 1_1 observer below). The uplink grant's
  * field widths are set by RRC switches this receiver cannot read; every layout whose total equals
  * the observed 0_1 length is a hypothesis and each accepted payload prunes by plausibility. */
-static nr_dci11_resolver_t *g_dci01_resolver;
-static int g_dci01_state = 0;   /* 0 = not armed, 1 = armed, -1 = no legal layout at this length */
-static uint64_t g_dci01_seen = 0;
+NR_CELL_STATIC(nr_dci11_resolver_t *, g_dci01_resolver);
+#define g_dci01_resolver NR_CELL_REF(g_dci01_resolver)
+NR_CELL_STATIC(int, g_dci01_state);
+#define g_dci01_state NR_CELL_REF(g_dci01_state)   /* 0 = not armed, 1 = armed, -1 = no legal layout at this length */
+NR_CELL_STATIC(uint64_t, g_dci01_seen);
+#define g_dci01_seen NR_CELL_REF(g_dci01_seen)
 /* ---- DCI 0_1 FDRA MODE STAGING. Only type 1 is searched at first. Stage 1 cannot tell a type-0 cell
  * from a type-1 one on the uplink: a type-1 window that starts on the constant-zero identifier / UL-SUL /
  * BWP bits always reads a RIV inside the BWP, so type-1 layouts SURVIVE on a type-0 truth (measured by
@@ -1445,15 +1571,30 @@ static uint64_t g_dci01_seen = 0;
  * data-scrambling-ID mismatch) while 0_0 decodes satisfies the same evidence. That is why the REFUSAL is
  * opt-in (ISAC_UL_FDRA_REFUSE=1, final review I3): by default a refuse verdict is only counted and logged as
  * UL_FDRA_WOULD_REFUSE and every grant stays booked. ---- */
-static pthread_mutex_t g_dci01_fdra_lock = PTHREAD_MUTEX_INITIALIZER;
-static nr_dci01_fdra_evidence_t g_dci01_fdra_ev;  /* under g_dci01_fdra_lock */
-static _Atomic int g_dci01_fdra_refuse;          /* 1 = refuse oracle-class 0_1 booking */
-static _Atomic unsigned long g_ul_fdra_refused;
-static int g_dci01_fdra_armed;
-static uint16_t g_dci01_riv_bits, g_dci01_bwp_start, g_dci01_bwp_size;
-static uint8_t g_dci01_tda_bits;
-static nr_dci01_layout_t g_dci01_hyp[NR_DCI01_LAYOUT_MAX];
-static nr_dci11_offsets_t g_dci01_off[NR_DCI01_LAYOUT_MAX];
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_dci01_fdra_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_dci01_fdra_lock NR_CELL_REF(g_dci01_fdra_lock)
+NR_CELL_STATIC(nr_dci01_fdra_evidence_t, g_dci01_fdra_ev);
+#define g_dci01_fdra_ev NR_CELL_REF(g_dci01_fdra_ev)  /* under g_dci01_fdra_lock */
+NR_CELL_STATIC(_Atomic int, g_dci01_fdra_refuse);
+#define g_dci01_fdra_refuse NR_CELL_REF(g_dci01_fdra_refuse)          /* 1 = refuse oracle-class 0_1 booking */
+NR_CELL_STATIC(_Atomic unsigned long, g_ul_fdra_refused);
+#define g_ul_fdra_refused NR_CELL_REF(g_ul_fdra_refused)
+NR_CELL_STATIC(int, g_dci01_fdra_armed);
+#define g_dci01_fdra_armed NR_CELL_REF(g_dci01_fdra_armed)
+NR_CELL_STATIC(uint16_t, g_dci01_riv_bits);
+#define g_dci01_riv_bits NR_CELL_REF(g_dci01_riv_bits)
+NR_CELL_STATIC(uint16_t, g_dci01_bwp_start);
+#define g_dci01_bwp_start NR_CELL_REF(g_dci01_bwp_start)
+NR_CELL_STATIC(uint16_t, g_dci01_bwp_size);
+#define g_dci01_bwp_size NR_CELL_REF(g_dci01_bwp_size)
+NR_CELL_STATIC(uint8_t, g_dci01_tda_bits);
+#define g_dci01_tda_bits NR_CELL_REF(g_dci01_tda_bits)
+typedef nr_dci01_layout_t g_dci01_hyp_cell_t[NR_DCI01_LAYOUT_MAX];
+NR_CELL_STATIC(g_dci01_hyp_cell_t, g_dci01_hyp);
+#define g_dci01_hyp NR_CELL_REF(g_dci01_hyp)
+typedef nr_dci11_offsets_t g_dci01_off_cell_t[NR_DCI01_LAYOUT_MAX];
+NR_CELL_STATIC_HEAP(g_dci01_off_cell_t, g_dci01_off);
+#define g_dci01_off NR_CELL_HEAP_REF(g_dci01_off_cell_t, g_dci01_off)
 static inline bool dci01_oracle_grant(const nr_pdcch_blind_ul_result_t *g)
 {
   return nr_dci01_fdra_oracle_grant(g->ul_dci_format, g->width_hyp_class, g->interp_hyp_class);
@@ -1576,13 +1717,20 @@ static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_start, uint16_t ul_bwp
 /* ---- CORESET / search-space registry, observe-only. Each configuration the monitor scans is
  * registered on first sight; every occasion and accept is attributed to it; a CONFIRMED accept is
  * one whose RNTI repeated (noise does not repeat). The retire verdict is LOGGED, not acted on. */
-static nr_pdcch_ss_registry_t g_ss_reg;
-static int g_ss_reg_idx[2] = {-1, -1};
-static uint16_t g_ss_recent_rnti[64];
-static unsigned g_ss_recent_w = 0;
+NR_CELL_STATIC(nr_pdcch_ss_registry_t, g_ss_reg);
+#define g_ss_reg NR_CELL_REF(g_ss_reg)
+typedef int g_ss_reg_idx_cell_t[2];
+NR_CELL_STATIC_INIT(g_ss_reg_idx_cell_t, g_ss_reg_idx, {-1, -1});
+#define g_ss_reg_idx NR_CELL_REF(g_ss_reg_idx)
+typedef uint16_t g_ss_recent_rnti_cell_t[64];
+NR_CELL_STATIC(g_ss_recent_rnti_cell_t, g_ss_recent_rnti);
+#define g_ss_recent_rnti NR_CELL_REF(g_ss_recent_rnti)
+NR_CELL_STATIC(unsigned, g_ss_recent_w);
+#define g_ss_recent_w NR_CELL_REF(g_ss_recent_w)
 /* Guards every g_ss_* above: occasions are attributed in Phase 1, accepts in Phase 2, and N scan
  * consumers run both at once (Task A7). Leaf lock. */
-static pthread_mutex_t g_ss_reg_mu = PTHREAD_MUTEX_INITIALIZER;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_ss_reg_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_ss_reg_mu NR_CELL_REF(g_ss_reg_mu)
 static int nr_pdcch_ss_registry_index(const nr_pdcch_blind_monitor_cfg_t *cfg) /* caller holds g_ss_reg_mu */
 {
   if (cfg == NULL || cfg->bwp_size == 0)
@@ -1623,8 +1771,9 @@ static void nr_pdcch_ss_registry_occasion_locked(const nr_pdcch_blind_monitor_cf
   if (idx < 0)
     return;
   g_ss_reg.occasions[idx]++;
-  static uint64_t n;
-  if ((++n % 200000) == 0) {
+  NR_CELL_STATIC(uint64_t, occ_n);
+#define occ_n NR_CELL_REF(occ_n)
+  if ((++occ_n % 200000) == 0) {
     char b[400];
     int u = 0;
     for (int i = 0; i < g_ss_reg.n && u < (int)sizeof(b) - 60; i++)
@@ -1640,6 +1789,7 @@ static void nr_pdcch_ss_registry_occasion_locked(const nr_pdcch_blind_monitor_cf
     LOG_A(PHY, "SENSING: SS_REGISTRY live=%d/%d would_retire=%d %s\n", nr_pdcch_ss_live(&g_ss_reg), g_ss_reg.n, would, b);
   }
 }
+#undef occ_n
 /* Attributes one occasion to cfg's entry; returns whether that entry is retired (V2 pruning). */
 static bool nr_pdcch_ss_registry_occasion(const nr_pdcch_blind_monitor_cfg_t *cfg)
 {
@@ -1667,9 +1817,16 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
     return;
   }
   if (g_dci11_state == 0) {
-    static nr_dci_bits_t ev[NR_DCI11_ARM_EV];
-    static uint16_t ev_rnti[NR_DCI11_ARM_EV], ev_len;
-    static int n_ev;
+    typedef nr_dci_bits_t ev_cell_t[NR_DCI11_ARM_EV];
+NR_CELL_STATIC(ev_cell_t, ev);
+#define ev NR_CELL_REF(ev)
+    typedef uint16_t ev_rnti_cell_t[NR_DCI11_ARM_EV];
+NR_CELL_STATIC(ev_rnti_cell_t, ev_rnti);
+#define ev_rnti NR_CELL_REF(ev_rnti)
+NR_CELL_STATIC(uint16_t, ev_len);
+#define ev_len NR_CELL_REF(ev_len)
+    NR_CELL_STATIC(int, n_ev);
+#define n_ev NR_CELL_REF(n_ev)
     const double span = ((double)cfg->bwp_size * (double)(cfg->bwp_size + 1)) / 2.0;
     const uint16_t riv_bits = (uint16_t)ceil(log2(span));
     /* No configured TDRA list -> the field width is UNKNOWN and is searched (0..4 bits), not
@@ -1726,6 +1883,10 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
     g_dci11_seen += (uint64_t)n_ev;
     n_ev = 0;
   }
+#undef n_ev
+#undef ev_rnti
+#undef ev_len
+#undef ev
   nr_dci11_resolver_observe_rnti(g_dci11_resolver, payload, rnti);
   if ((++g_dci11_seen % 4000) != 0) {
     return;
@@ -1755,12 +1916,16 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
 /* Length evidence has two identities: physical CORESET geometry and addressed RNTI. The inner
  * bank owns per-RNTI state; the outer LRU keeps interleaved CORESET#0, discovered and archived
  * CORESETs independent. */
-static nr_pdcch_dci_length_store_t g_dl_length_store;
-static nr_pdcch_dci_length_store_t g_ul_length_store;
+NR_CELL_STATIC(nr_pdcch_dci_length_store_t, g_dl_length_store);
+#define g_dl_length_store NR_CELL_REF(g_dl_length_store)
+NR_CELL_STATIC(nr_pdcch_dci_length_store_t, g_ul_length_store);
+#define g_ul_length_store NR_CELL_REF(g_ul_length_store)
 /* Lock order: dl -> bank, dl -> bootstrap (also ul -> bootstrap). Bank -> dl/ul
  * occurs only in the remove hook, after all dispatcher leases have drained. */
-static pthread_mutex_t g_dl_length_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t ul_length_lock = PTHREAD_MUTEX_INITIALIZER;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_dl_length_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_dl_length_lock NR_CELL_REF(g_dl_length_lock)
+NR_CELL_STATIC_INIT(pthread_mutex_t, ul_length_lock, PTHREAD_MUTEX_INITIALIZER);
+#define ul_length_lock NR_CELL_REF(ul_length_lock)
 
 static void length_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
 {
@@ -1775,13 +1940,18 @@ static void length_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
   if (nr_ul_layout_lock_enabled()) {
     /* UL-LAYOUT: the lock is a property of the cell's dedicated configuration. Keep it across SOFT epochs (RX
      * recovery, CSI-RS map), drop it on a new identity or a suspected dedicated change. */
-    static uint32_t last_id = UINT32_MAX, last_ded = UINT32_MAX;
+    NR_CELL_STATIC_INIT(uint32_t, last_id, UINT32_MAX);
+#define last_id NR_CELL_REF(last_id)
+NR_CELL_STATIC_INIT(uint32_t, last_ded, UINT32_MAX);
+#define last_ded NR_CELL_REF(last_ded)
     if (s->identity_gen != last_id || s->dedicated_epoch != last_ded) {
       if (last_id != UINT32_MAX) nr_ul_layout_lock_reset();
       last_id = s->identity_gen;
       last_ded = s->dedicated_epoch;
     }
   }
+#undef last_id
+#undef last_ded
 }
 
 static bool reconf_lengths_enabled(void)
@@ -1791,7 +1961,8 @@ static bool reconf_lengths_enabled(void)
 
 static uint32_t reconf_n_suspect(void)
 {
-  static _Atomic uint32_t threshold = 0;
+  NR_CELL_STATIC(_Atomic uint32_t, threshold);
+#define threshold NR_CELL_REF(threshold)
   uint32_t v = atomic_load_explicit(&threshold, memory_order_relaxed);
   if (!v) {
     v = nr_pdcch_dci_length_n_suspect_from_env();
@@ -1799,6 +1970,7 @@ static uint32_t reconf_n_suspect(void)
   }
   return v;
 }
+#undef threshold
 
 static void reconf_length_reopened(uint16_t rnti, bool uplink, int old_len, int new_len)
 {
@@ -1885,7 +2057,8 @@ static uint64_t length_lookahead_key(const nr_pdcch_blind_monitor_cfg_t *cfg,
 
 /* Unanchored discovery cannot own a per-RNTI context yet. It remains isolated from the persistent
  * banks and is discarded when the geometry advances. */
-static nr_pdcch_dci_length_sweep_state_t g_dl_length_state;
+NR_CELL_STATIC(nr_pdcch_dci_length_sweep_state_t, g_dl_length_state);
+#define g_dl_length_state NR_CELL_REF(g_dl_length_state)
 
 /* Lookahead lanes (nr_pdcch_blind_monitor.h). DCI length is a property of the payload width, not
  * the CORESET geometry, but a WRONG geometry's "candidates" are pure noise, so each lane needs its
@@ -1893,12 +2066,24 @@ static nr_pdcch_dci_length_sweep_state_t g_dl_length_state;
  * from a right one with noise from a wrong one in the same significance test. Reset whenever a
  * lane's geometry changes (detected by comparing against g_lane_last_geom each occasion, since
  * nr_pdcch_blind_monitor.c owns lane advancement and has no reason to know this file's state). */
-static nr_pdcch_dci_length_sweep_state_t g_lane_length_state[NR_PDCCH_LOOKAHEAD_MAX];
-static _Atomic bool         g_lane_length_swept[NR_PDCCH_LOOKAHEAD_MAX];
-static _Atomic bool         g_lane_length_found[NR_PDCCH_LOOKAHEAD_MAX];
-static _Atomic uint16_t     g_lane_dci_length[NR_PDCCH_LOOKAHEAD_MAX];
-static _Atomic uint16_t     g_lane_length_rnti[NR_PDCCH_LOOKAHEAD_MAX]; /* lane flags: _Atomic, read outside g_dl_length_lock by N scan consumers (Task A7) */
-static nr_pdcch_lookahead_geom_t g_lane_last_geom[NR_PDCCH_LOOKAHEAD_MAX];
+typedef nr_pdcch_dci_length_sweep_state_t g_lane_length_state_cell_t[NR_PDCCH_LOOKAHEAD_MAX];
+NR_CELL_STATIC_HEAP(g_lane_length_state_cell_t, g_lane_length_state);
+#define g_lane_length_state NR_CELL_HEAP_REF(g_lane_length_state_cell_t, g_lane_length_state)
+typedef _Atomic bool g_lane_length_swept_cell_t[NR_PDCCH_LOOKAHEAD_MAX];
+NR_CELL_STATIC(g_lane_length_swept_cell_t, g_lane_length_swept);
+#define g_lane_length_swept NR_CELL_REF(g_lane_length_swept)
+typedef _Atomic bool g_lane_length_found_cell_t[NR_PDCCH_LOOKAHEAD_MAX];
+NR_CELL_STATIC(g_lane_length_found_cell_t, g_lane_length_found);
+#define g_lane_length_found NR_CELL_REF(g_lane_length_found)
+typedef _Atomic uint16_t g_lane_dci_length_cell_t[NR_PDCCH_LOOKAHEAD_MAX];
+NR_CELL_STATIC(g_lane_dci_length_cell_t, g_lane_dci_length);
+#define g_lane_dci_length NR_CELL_REF(g_lane_dci_length)
+typedef _Atomic uint16_t g_lane_length_rnti_cell_t[NR_PDCCH_LOOKAHEAD_MAX];
+NR_CELL_STATIC(g_lane_length_rnti_cell_t, g_lane_length_rnti);
+#define g_lane_length_rnti NR_CELL_REF(g_lane_length_rnti) /* lane flags: _Atomic, read outside g_dl_length_lock by N scan consumers (Task A7) */
+typedef nr_pdcch_lookahead_geom_t g_lane_last_geom_cell_t[NR_PDCCH_LOOKAHEAD_MAX];
+NR_CELL_STATIC(g_lane_last_geom_cell_t, g_lane_last_geom);
+#define g_lane_last_geom NR_CELL_REF(g_lane_last_geom)
 
 /* Caller holds g_dl_length_lock (the DL length sweep state is shared by N scan consumers, Task A7). */
 static void dl_discovery_invalidate_locked(void)
@@ -1948,8 +2133,10 @@ static void pdsch_sweep_maybe_enable(const nr_pdcch_blind_monitor_cfg_t *cfg)
    * resetting on every switch wiped the bank's contexts once per occasion (see dl_discovery_invalidate).
    * Contexts are keyed by `identity`, so each geometry keeps its own evidence; an abandoned identity's
    * contexts are simply never selected again and age out of the LRU. */
-  static _Atomic uint64_t s_armed_identity; /* log budget only; _Atomic for N scan consumers (Task A7) */
-  static _Atomic int s_armed_left = 20;
+  NR_CELL_STATIC(_Atomic uint64_t, s_armed_identity);
+#define s_armed_identity NR_CELL_REF(s_armed_identity) /* log budget only; _Atomic for N scan consumers (Task A7) */
+  NR_CELL_STATIC_INIT(_Atomic int, s_armed_left, 20);
+#define s_armed_left NR_CELL_REF(s_armed_left)
   if (ready && identity != s_armed_identity && s_armed_left > 0) {
     s_armed_left--;
     s_armed_identity = identity;
@@ -1959,6 +2146,8 @@ static void pdsch_sweep_maybe_enable(const nr_pdcch_blind_monitor_cfg_t *cfg)
   g_pdsch_configuration = identity;
   g_pdsch_sweep_on = ready;
 }
+#undef s_armed_left
+#undef s_armed_identity
 // Bounded give-up cap (2026-09-06) on accumulated sweep occasions -- see that branch's own comment
 // for why this must accumulate across many occasions rather than fire once. Not derived from a
 // rate (Technique A's own AUTODISCOVER_OBS_CALLS=1000 counts raw per-symbol scan calls, a
@@ -1992,8 +2181,11 @@ static inline int dci_len_max(void) { return NR_DCI_MAX_PAYLOAD; }
  * offline-linked library), so the test links the real parser rather than a stub. */
 static int lane_als(const uint8_t **out)
 {
-  static uint8_t v[5];
-  static int n = -1;
+  typedef uint8_t v_cell_t[5];
+NR_CELL_STATIC(v_cell_t, v);
+#define v NR_CELL_REF(v)
+  NR_CELL_STATIC_INIT(int, n, -1);
+#define n NR_CELL_REF(n)
   if (n < 0) {
     n = 0;
     {
@@ -2016,6 +2208,8 @@ static int lane_als(const uint8_t **out)
   *out = v;
   return n;
 }
+#undef n
+#undef v
 
 static int lane_al_count(void)
 {
@@ -2032,34 +2226,48 @@ static bool lane_has_bootstrap_hit(const nr_pdcch_dci_length_sweep_state_t *stat
 }
 
 #define AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS autodiscover_sweep_budget()
-static _Atomic int  g_constdiag_left = 20; // TEMPORARY, see CONSTDIAG below
+NR_CELL_STATIC_INIT(_Atomic int, g_constdiag_left, 20);
+#define g_constdiag_left NR_CELL_REF(g_constdiag_left) // TEMPORARY, see CONSTDIAG below
 /* Why these three exist (2026-09-09): the gNB's own log shows 746 format-1_1 and 147 format-0_1
  * DCIs in the same CORESET, same search space, same al=2, same rnti -- and this receiver converges
  * Technique D off the 1_1 stream while reporting dci01 accepts=0. "accepts" is measured AFTER the
  * discovery controller, so it cannot distinguish "the polar decode never recovered the RNTI" from
  * "it did, and the width search has not converged yet". These split that. */
-static _Atomic uint64_t    g_ul_sched       = 0; // DCI 0_1 candidates actually scheduled for decode
-static _Atomic uint64_t    g_ul_crc_hit     = 0; // ... whose polar CRC recovered the targeted RNTI
-static _Atomic uint64_t    g_ul_disc_call   = 0; // ... that reached the discovery controller
-static _Atomic uint64_t    g_ul00_accepts   = 0; // DCI 0_0 accepts (UL grants recovered off the 1_0 scan)
-static _Atomic uint64_t    g_ul00_rejects   = 0; // confirmed-RNTI 1_0 rejects that were not a valid 0_0
-static _Atomic uint64_t    g_ul_accepts     = 0; // DCI 0_1 accepts (UL grants recovered)
-static _Atomic uint64_t    g_ul_rejects     = 0; // DCI 0_1 candidates whose CRC was in range but whose
+NR_CELL_STATIC(_Atomic uint64_t, g_ul_sched);
+#define g_ul_sched NR_CELL_REF(g_ul_sched) // DCI 0_1 candidates actually scheduled for decode
+NR_CELL_STATIC(_Atomic uint64_t, g_ul_crc_hit);
+#define g_ul_crc_hit NR_CELL_REF(g_ul_crc_hit) // ... whose polar CRC recovered the targeted RNTI
+NR_CELL_STATIC(_Atomic uint64_t, g_ul_disc_call);
+#define g_ul_disc_call NR_CELL_REF(g_ul_disc_call) // ... that reached the discovery controller
+NR_CELL_STATIC(_Atomic uint64_t, g_ul00_accepts);
+#define g_ul00_accepts NR_CELL_REF(g_ul00_accepts) // DCI 0_0 accepts (UL grants recovered off the 1_0 scan)
+NR_CELL_STATIC(_Atomic uint64_t, g_ul00_rejects);
+#define g_ul00_rejects NR_CELL_REF(g_ul00_rejects) // confirmed-RNTI 1_0 rejects that were not a valid 0_0
+NR_CELL_STATIC(_Atomic uint64_t, g_ul_accepts);
+#define g_ul_accepts NR_CELL_REF(g_ul_accepts) // DCI 0_1 accepts (UL grants recovered)
+NR_CELL_STATIC(_Atomic uint64_t, g_ul_rejects);
+#define g_ul_rejects NR_CELL_REF(g_ul_rejects) // DCI 0_1 candidates whose CRC was in range but whose
                                          // fields failed a plausibility check. Reported next to the
                                          // accepts because on an UNPINNED field layout a high
                                          // reject count is the FIRST symptom of wrong widths, and a
                                          // bare accept count cannot show it.
-static _Atomic uint64_t    g_accepts        = 0; // raw plausibility accepts (Step 1-4 of decode_and_extract),
+NR_CELL_STATIC(_Atomic uint64_t, g_accepts);
+#define g_accepts NR_CELL_REF(g_accepts) // raw plausibility accepts (Step 1-4 of decode_and_extract),
                                          // BEFORE the noise-floor gates below -- unchanged meaning
                                          // from before 2026-07-28's gates, so old logs stay comparable
-static const char *g_last_reject_reason = NULL; // TEMPORARY diagnostic, 2026-07-28 root-cause pass
-static uint16_t     g_last_reject_rnti  = 0;
+NR_CELL_STATIC(const char *, g_last_reject_reason);
+#define g_last_reject_reason NR_CELL_REF(g_last_reject_reason) // TEMPORARY diagnostic, 2026-07-28 root-cause pass
+NR_CELL_STATIC(uint16_t, g_last_reject_rnti);
+#define g_last_reject_rnti NR_CELL_REF(g_last_reject_rnti)
 /* Per-DCI-format / per-RNTI-class accept census. Format 1_0 exists to reach SIB1, RAR and Msg4, so
  * "how many accepts, and of what" is the primary thing to look at when judging whether the 1_0 scan
  * is doing anything -- a single aggregate accept count cannot distinguish "found the RRCSetup" from
  * "found more C-RNTI fallback grants". Indexed by nr_blind_rnti_class_t. */
-static _Atomic uint64_t g_accepts_10     = 0;
-static _Atomic uint64_t g_accepts_class[NR_BLIND_RNTI_CLASS_COUNT] = {0};
+NR_CELL_STATIC(_Atomic uint64_t, g_accepts_10);
+#define g_accepts_10 NR_CELL_REF(g_accepts_10)
+typedef _Atomic uint64_t g_accepts_class_cell_t[NR_BLIND_RNTI_CLASS_COUNT];
+NR_CELL_STATIC(g_accepts_class_cell_t, g_accepts_class);
+#define g_accepts_class NR_CELL_REF(g_accepts_class)
 void nr_pdcch_blind_monitor_counters(uint64_t *occasions, uint64_t *candidates, uint64_t *accepts, uint64_t *accepts_c)
 {
   /* Relaxed atomics since Task A7 (N scan consumers increment them); the four loads are not one snapshot. */
@@ -2068,13 +2276,16 @@ void nr_pdcch_blind_monitor_counters(uint64_t *occasions, uint64_t *candidates, 
   *accepts = NR_BLIND_CTR_GET(g_accepts);
   *accepts_c = NR_BLIND_CTR_GET(g_accepts_class[NR_BLIND_RNTI_CLASS_C]);
 }
-static _Atomic uint64_t g_cfr_submits    = 0; // final count that actually reached the ISAC engine, i.e. after
+NR_CELL_STATIC(_Atomic uint64_t, g_cfr_submits);
+#define g_cfr_submits NR_CELL_REF(g_cfr_submits) // final count that actually reached the ISAC engine, i.e. after
                                       // ALL gates (raw accept + energy + persistence + SNR)
 
 // ---- Noise-floor gate counters (2026-07-28) -- how many raw accepts each gate held back, so the
 // periodic summary shows where candidates are actually being lost, not just the final count. ----
-static _Atomic uint64_t g_held_energy   = 0; // skipped decode entirely, raw LLR energy below energy_min
-static _Atomic uint64_t g_held_dmrs     = 0; // skipped decode entirely, DM-RS coherence below this occasion's own per-AL median+MAD floor (5GSniffer-style gate, 2026-09-23)
+NR_CELL_STATIC(_Atomic uint64_t, g_held_energy);
+#define g_held_energy NR_CELL_REF(g_held_energy) // skipped decode entirely, raw LLR energy below energy_min
+NR_CELL_STATIC(_Atomic uint64_t, g_held_dmrs);
+#define g_held_dmrs NR_CELL_REF(g_held_dmrs) // skipped decode entirely, DM-RS coherence below this occasion's own per-AL median+MAD floor (5GSniffer-style gate, 2026-09-23)
 
 // ---- Adaptive energy floor (cfg->energy_adapt_factor) ------------------------------------------
 // Tracks the NOISE-FLOOR candidate energy so the gate threshold can be expressed as a dimensionless
@@ -2099,26 +2310,41 @@ static _Atomic uint64_t g_held_dmrs     = 0; // skipped decode entirely, DM-RS c
 // The estimator itself (ENERGY_FLOOR_STEP 0.01, ENERGY_FLOOR_MIN 1e-6) lives in nr_pdcch_blind_phase2.c since
 // Task A7: it is fed from the pre-pass, which several scan consumers now run at once, so it is locked.
 #define ENERGY_FLOOR_WARMUP      200    // candidates observed before the gate is allowed to reject
-static _Atomic uint64_t g_held_persist  = 0;
-static _Atomic uint64_t    g_held_rnti_set = 0;  // rejected: RNTI not among the confirmed UEs // decoded+accepted but RNTI not yet seen rnti_persist_k times
-static _Atomic uint64_t g_held_snr      = 0; // decoded+accepted+persisted but post-estimation SNR too low
-static _Atomic uint64_t g_held_mismatch = 0;
+NR_CELL_STATIC(_Atomic uint64_t, g_held_persist);
+#define g_held_persist NR_CELL_REF(g_held_persist)
+NR_CELL_STATIC(_Atomic uint64_t, g_held_rnti_set);
+#define g_held_rnti_set NR_CELL_REF(g_held_rnti_set)  // rejected: RNTI not among the confirmed UEs // decoded+accepted but RNTI not yet seen rnti_persist_k times
+NR_CELL_STATIC(_Atomic uint64_t, g_held_snr);
+#define g_held_snr NR_CELL_REF(g_held_snr) // decoded+accepted+persisted but post-estimation SNR too low
+NR_CELL_STATIC(_Atomic uint64_t, g_held_mismatch);
+#define g_held_mismatch NR_CELL_REF(g_held_mismatch)
 /* SCAN2 shared state */
-static struct {
+typedef struct {
   nr_tdd_learn_t tdd;
   _Atomic uint64_t tdd_skip_total, tdd_skip_sib1;
   _Atomic uint64_t ul_audit_hit_scr_in, ul_decodes, ul_trials_screened, ul_trials_audit, ul_audit_miss, ul_cand_screened, ul_cand_total, ul_sweeps;
   _Atomic uint64_t ulssh_gated, ulssh_audit_tasks, ulssh_audit_hits, ulssh_viol;
-} g_scan2;
+} g_scan2_cell_t;
+NR_CELL_STATIC(g_scan2_cell_t, g_scan2);
+#define g_scan2 NR_CELL_REF(g_scan2)
 /* ANONLEN shared state: DL length sweep cost census (always counted, relaxed atomics) */
-static struct {
+typedef struct {
   _Atomic uint64_t calls[5], polar[5], hits[5], skipped[5], prescreen[5], audit_trials, audit_miss, cand_total, cand_skipped;
   _Atomic uint64_t restricted_rounds, full_rounds, feeds[5];
   _Atomic uint32_t hit_len[NR_DCI_MAX_PAYLOAD + 1];
-} g_anonlen;
-static _Atomic unsigned long g_acc_slot[2][20], g_occ_slot[20]; // ACCSLOT census, see the accept path
+} g_anonlen_cell_t;
+NR_CELL_STATIC(g_anonlen_cell_t, g_anonlen);
+#define g_anonlen NR_CELL_REF(g_anonlen)
+typedef _Atomic unsigned long g_acc_slot_cell_t[2][20];
+NR_CELL_STATIC(g_acc_slot_cell_t, g_acc_slot);
+#define g_acc_slot NR_CELL_REF(g_acc_slot)
+typedef _Atomic unsigned long g_occ_slot_cell_t[20];
+NR_CELL_STATIC(g_occ_slot_cell_t, g_occ_slot);
+#define g_occ_slot NR_CELL_REF(g_occ_slot) // ACCSLOT census, see the accept path
 /* [0]=deferred enqueue, [1]=normal enqueue, indexed by nr_blind_rnti_class_t. */
-static _Atomic unsigned long g_enq_class[2][NR_BLIND_RNTI_CLASS_COUNT]; // migrated from NRSniffer: rejected by the adaptive mismatched-bits gate
+typedef _Atomic unsigned long g_enq_class_cell_t[2][NR_BLIND_RNTI_CLASS_COUNT];
+NR_CELL_STATIC(g_enq_class_cell_t, g_enq_class);
+#define g_enq_class NR_CELL_REF(g_enq_class) // migrated from NRSniffer: rejected by the adaptive mismatched-bits gate
 
 // ---- Passive PDSCH decode counters (2026-07-30). g_dec_ok/g_dec_try IS the go/no-go measurement
 // PASSIVE_PDSCH_DATA_AIDED_HANDOVER.md §B.5 asks for: a passive receiver sits somewhere the grant
@@ -2171,14 +2397,23 @@ static const char *const kBtimName[BTIM_N] = {"fep_llr", "demap", "prepass", "de
                                               "chest",   "pdsch", "submit",  "TOTAL",
                                               "pre",     "pbwp",  "csirs",   "post", "rt",
                                               "dlsweep", "ulsweep", "p2wait", "ulwait"};
-static _Atomic uint64_t g_btim_ns[BTIM_N]  = {0};
-static _Atomic uint64_t g_btim_n[BTIM_N]   = {0};
-static _Atomic uint64_t g_btim_max[BTIM_N] = {0};
+typedef _Atomic uint64_t g_btim_ns_cell_t[BTIM_N];
+NR_CELL_STATIC(g_btim_ns_cell_t, g_btim_ns);
+#define g_btim_ns NR_CELL_REF(g_btim_ns)
+typedef _Atomic uint64_t g_btim_n_cell_t[BTIM_N];
+NR_CELL_STATIC(g_btim_n_cell_t, g_btim_n);
+#define g_btim_n NR_CELL_REF(g_btim_n)
+typedef _Atomic uint64_t g_btim_max_cell_t[BTIM_N];
+NR_CELL_STATIC(g_btim_max_cell_t, g_btim_max);
+#define g_btim_max NR_CELL_REF(g_btim_max)
 /* Per-occasion TOTAL, bucketed. The mean is not the interesting statistic here: the receive thread
  * is starved by the TAIL, so what matters is how often one occasion eats a large fraction of the
  * slot. Buckets are microseconds: <50 <100 <200 <400 <800 <1600 <3200 >=3200. */
-static _Atomic uint64_t g_btim_hist[8] = {0};
-static _Atomic uint64_t g_btim_over_slot = 0; // occasions whose total exceeded the slot duration
+typedef _Atomic uint64_t g_btim_hist_cell_t[8];
+NR_CELL_STATIC(g_btim_hist_cell_t, g_btim_hist);
+#define g_btim_hist NR_CELL_REF(g_btim_hist)
+NR_CELL_STATIC(_Atomic uint64_t, g_btim_over_slot);
+#define g_btim_over_slot NR_CELL_REF(g_btim_over_slot) // occasions whose total exceeded the slot duration
 static _Atomic int g_btim_on      = -1; /* lazily resolved; racing first callers agree */
 
 static inline int btim_enabled(void)
@@ -2238,15 +2473,20 @@ static void btim_occasion_total(uint64_t d_ns, uint64_t slot_ns)
   }
 }
 
-static _Atomic uint64_t g_dec_try   = 0; // decodes actually attempted (i.e. reached the LDPC decoder)
-static _Atomic uint64_t g_dec_ok    = 0; // ... of which the transport-block CRC passed
-static _Atomic uint64_t g_dec_skip_rv = 0;
+NR_CELL_STATIC(_Atomic uint64_t, g_dec_try);
+#define g_dec_try NR_CELL_REF(g_dec_try) // decodes actually attempted (i.e. reached the LDPC decoder)
+NR_CELL_STATIC(_Atomic uint64_t, g_dec_ok);
+#define g_dec_ok NR_CELL_REF(g_dec_ok) // ... of which the transport-block CRC passed
+NR_CELL_STATIC(_Atomic uint64_t, g_dec_skip_rv);
+#define g_dec_skip_rv NR_CELL_REF(g_dec_skip_rv)
 /* Accepted candidates abandoned BEFORE the FEP/channel-estimation because the occasion had already
  * queued pdsch_max_per_slot decodes. Counted rather than silent: a large value means the cap is
  * throwing away real grants and should be raised (or more consumers added), which is a capacity
  * decision, not a defect. */
-static _Atomic uint64_t g_dec_over_cap = 0;
-static _Atomic uint64_t g_dec_k0_wait = 0; // in-line: the hypothesis' k0 slot was not yet written, not decoded/scored
+NR_CELL_STATIC(_Atomic uint64_t, g_dec_over_cap);
+#define g_dec_over_cap NR_CELL_REF(g_dec_over_cap)
+NR_CELL_STATIC(_Atomic uint64_t, g_dec_k0_wait);
+#define g_dec_k0_wait NR_CELL_REF(g_dec_k0_wait) // in-line: the hypothesis' k0 slot was not yet written, not decoded/scored
 
 /* ---- ADAPTIVE AGGREGATION-LEVEL ALLOCATION --------------------------------------------------
  * The candidate budget (64 candidates / NR_MAX_PDCCH_SIZE REs) cannot cover a full sweep of every
@@ -2269,10 +2509,18 @@ static _Atomic uint64_t g_dec_k0_wait = 0; // in-line: the hypothesis' k0 slot w
  * its whole CCE space over time instead of probing the same spot forever. */
 #define AL_MIN_PROBE 2
 #define AL_PRIOR     1.0
-static _Atomic uint64_t g_al_accepts[4]; // indexed as ss_al_candidates[]: AL 1, 2, 4, 8
-static _Atomic uint64_t g_al_cand[2][4];    // [0]=CSS0 [1]=dedicated USS; candidates EXAMINED per AL
-static _Atomic uint64_t g_al_confirmed[2][4]; // same split; accepts that PASSED the RNTI-persistence gate
-static _Atomic uint32_t g_al_rotate[4]; /* _Atomic: N scan consumers (Task A7); a lost advance only repeats a CCE start */
+typedef _Atomic uint64_t g_al_accepts_cell_t[4];
+NR_CELL_STATIC(g_al_accepts_cell_t, g_al_accepts);
+#define g_al_accepts NR_CELL_REF(g_al_accepts) // indexed as ss_al_candidates[]: AL 1, 2, 4, 8
+typedef _Atomic uint64_t g_al_cand_cell_t[2][4];
+NR_CELL_STATIC(g_al_cand_cell_t, g_al_cand);
+#define g_al_cand NR_CELL_REF(g_al_cand)    // [0]=CSS0 [1]=dedicated USS; candidates EXAMINED per AL
+typedef _Atomic uint64_t g_al_confirmed_cell_t[2][4];
+NR_CELL_STATIC(g_al_confirmed_cell_t, g_al_confirmed);
+#define g_al_confirmed NR_CELL_REF(g_al_confirmed) // same split; accepts that PASSED the RNTI-persistence gate
+typedef _Atomic uint32_t g_al_rotate_cell_t[4];
+NR_CELL_STATIC(g_al_rotate_cell_t, g_al_rotate);
+#define g_al_rotate NR_CELL_REF(g_al_rotate) /* _Atomic: N scan consumers (Task A7); a lost advance only repeats a CCE start */
 /* ---- SEARCH-SPACE (aggregation-level) INFERENCE  (agnosticity gap #1) ---------------------------
  * The set of monitored CCE aggregation levels is a dedicated-search-space property that the air
  * does not carry, but it IS inferable: every accept counted in g_al_accepts[] above already passed
@@ -2281,7 +2529,9 @@ static _Atomic uint32_t g_al_rotate[4]; /* _Atomic: N scan consumers (Task A7); 
  * confirmed grants have accumulated to name it. Honestly bounded and reject-only: a level with no
  * confirmed grants is reported absent, never assumed; and this is the OBSERVED monitored set with
  * its per-level share, NOT nrofCandidates or exact CCE positions (which need the SS config itself).*/
-static _Atomic int g_ss_inferred_logged_ss[2]; // one verdict per search space (CSS0, USS)
+typedef _Atomic int g_ss_inferred_logged_ss_cell_t[2];
+NR_CELL_STATIC(g_ss_inferred_logged_ss_cell_t, g_ss_inferred_logged_ss);
+#define g_ss_inferred_logged_ss NR_CELL_REF(g_ss_inferred_logged_ss) // one verdict per search space (CSS0, USS)
 #define SS_INFER_MIN_GRANTS 32   /* enough CRC-recovered grants before naming the set */
 #define SS_INFER_SHARE_NUM  1    /* a level carrying >= 20% (1/5) of confirmed grants is "monitored" */
 #define SS_INFER_SHARE_DEN  5
@@ -2343,8 +2593,10 @@ static void nr_pdcch_blind_infer_search_space(void)
   }
 }
   // per-level rotating CCE start, advanced each occasion // skipped: rv != 0 and rv0_only set (not self-decodable, see cfg)
-static _Atomic uint64_t g_dec_unsup = 0; // skipped: grant outside the decode/reconstruction scope
-static _Atomic uint64_t g_data_submits = 0; // reconstructed CFRs submitted as NR_ISAC_SRC_PDSCH_DATA
+NR_CELL_STATIC(_Atomic uint64_t, g_dec_unsup);
+#define g_dec_unsup NR_CELL_REF(g_dec_unsup) // skipped: grant outside the decode/reconstruction scope
+NR_CELL_STATIC(_Atomic uint64_t, g_data_submits);
+#define g_data_submits NR_CELL_REF(g_data_submits) // reconstructed CFRs submitted as NR_ISAC_SRC_PDSCH_DATA
 
 // ---- RNTI persistence tracking (2026-07-28): moved to nr_pdcch_blind_phase2.c (Task A7) together with
 // the Phase-2 lock that guards it -- nr_pdcch_blind_rnti_persistence_check(). ----
@@ -2414,13 +2666,33 @@ typedef struct {
 } janon_item_t;
 typedef struct { uint64_t geom; int len; uint16_t rnti; uint32_t hash; nr_dci_bits_t payload; uint8_t L; uint16_t cce; int frame, slot; } janon_hit_t;
 typedef struct { const janon_hit_t *h; int n; const uint16_t *known; int n_known; } janon_feed_ctx_t;
-static pthread_mutex_t g_janon_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_janon_cv = PTHREAD_COND_INITIALIZER;
-static janon_item_t *g_janon_q;
-static int g_janon_cap, g_janon_head, g_janon_n;
-static janon_hit_t g_janon_hits[4096];
-static int g_janon_nhits;
-static _Atomic uint64_t g_janon_sub, g_janon_drop, g_janon_done, g_janon_found, g_janon_busy_ns;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_janon_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_janon_mu NR_CELL_REF(g_janon_mu)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_janon_cv, PTHREAD_COND_INITIALIZER);
+#define g_janon_cv NR_CELL_REF(g_janon_cv)
+NR_CELL_STATIC(janon_item_t *, g_janon_q);
+#define g_janon_q NR_CELL_REF(g_janon_q)
+NR_CELL_STATIC(int, g_janon_cap);
+#define g_janon_cap NR_CELL_REF(g_janon_cap)
+NR_CELL_STATIC(int, g_janon_head);
+#define g_janon_head NR_CELL_REF(g_janon_head)
+NR_CELL_STATIC(int, g_janon_n);
+#define g_janon_n NR_CELL_REF(g_janon_n)
+typedef janon_hit_t g_janon_hits_cell_t[4096];
+NR_CELL_STATIC_HEAP(g_janon_hits_cell_t, g_janon_hits);
+#define g_janon_hits NR_CELL_HEAP_REF(g_janon_hits_cell_t, g_janon_hits)
+NR_CELL_STATIC(int, g_janon_nhits);
+#define g_janon_nhits NR_CELL_REF(g_janon_nhits)
+NR_CELL_STATIC(_Atomic uint64_t, g_janon_sub);
+#define g_janon_sub NR_CELL_REF(g_janon_sub)
+NR_CELL_STATIC(_Atomic uint64_t, g_janon_drop);
+#define g_janon_drop NR_CELL_REF(g_janon_drop)
+NR_CELL_STATIC(_Atomic uint64_t, g_janon_done);
+#define g_janon_done NR_CELL_REF(g_janon_done)
+NR_CELL_STATIC(_Atomic uint64_t, g_janon_found);
+#define g_janon_found NR_CELL_REF(g_janon_found)
+NR_CELL_STATIC(_Atomic uint64_t, g_janon_busy_ns);
+#define g_janon_busy_ns NR_CELL_REF(g_janon_busy_ns)
 static uint32_t sweep_payload_hash(const nr_dci_bits_t *payload, int len);
 /* janon_slot_hash: 64-bit mixing hash of (nID, frame, slot): the deterministic key for the joint-anon LEN_HINT choice.
  *   Pure function. Caller: janon_submit().
@@ -2448,7 +2720,7 @@ static int janon_should_run(uint64_t now_ns, uint64_t deadline_ns, int suspect)
 }
 static void *janon_worker(void *arg)
 {
-  (void)arg;
+  nr_cell_bind((int)(intptr_t)arg); /* the cell that started this worker (nr_core_plan_create has no cell argument) */
   static __thread janon_item_t it;
   { /* T26c: created from the scan consumer it inherited that thread's core and RT priority, so the background
      * search time-shared the scan core (live/replay: scan 70 % + janon 25 % on one core). Run it SCHED_OTHER on
@@ -2504,12 +2776,14 @@ static void *janon_worker(void *arg)
           if (ok) {
             h.rnti = jr.rnti;
             h.payload = jr.payload;
-            static _Atomic unsigned s_n;
+            NR_CELL_STATIC(_Atomic unsigned, s_n);
+#define s_n NR_CELL_REF(s_n)
             const unsigned q = atomic_fetch_add_explicit(&s_n, 1, memory_order_relaxed) + 1;
             if (q <= 50 || (q % 500) == 0)
               LOG_A(PHY, "SENSING: JOINT_ANON_HIT #%u (async) nid=%u rnti=0x%04x len=%d AL=%u CCE=%u mismatched_bits=%u frame=%d slot=%d\n",
                     q, it.nid, jr.rnti, len, k->L, k->cce, jr.mismatched_bits, it.frame, it.slot);
           }
+#undef s_n
         }
         if (!ok)
           continue;
@@ -2520,11 +2794,13 @@ static void *janon_worker(void *arg)
         if (g_janon_nhits < hit_cap)
           g_janon_hits[g_janon_nhits++] = h;
         else {
-          static _Atomic uint64_t s_hit_overflow;
+          NR_CELL_STATIC(_Atomic uint64_t, s_hit_overflow);
+#define s_hit_overflow NR_CELL_REF(s_hit_overflow)
           const uint64_t lost = atomic_fetch_add(&s_hit_overflow, 1) + 1;
           if (lost == 1 || lost % 1000 == 0)
             LOG_W(PHY, "SENSING: JOINT_ANON_ASYNC hit buffer overflow lost=%llu\n", (unsigned long long)lost);
         }
+#undef s_hit_overflow
         pthread_mutex_unlock(&g_janon_mu);
       }
     }
@@ -2548,7 +2824,8 @@ static void janon_start(void);
 static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int slots_per_frame, uint16_t rmin, uint16_t rmax,
                          const nr_pdcch_autodiscover_cand_t *cand, int n_cand, const int *lens, int nlen, int suspect)
 {
-  static pthread_once_t once = PTHREAD_ONCE_INIT;
+  NR_CELL_STATIC_INIT(pthread_once_t, once, PTHREAD_ONCE_INIT);
+#define once NR_CELL_REF(once)
   const int topk = 8; /* JANON_MAX_CAND */
 
   pthread_once(&once, janon_start);
@@ -2596,6 +2873,7 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
   pthread_cond_signal(&g_janon_cv);
   pthread_mutex_unlock(&g_janon_mu);
 }
+#undef once
 /* janon_start: one-time setup of the joint-anon queue (256 items) and start of the detached worker thread.
  *   Called only through pthread_once from janon_submit(); does nothing if the allocation fails.
  */
@@ -2606,7 +2884,7 @@ static void janon_start(void)
   if (g_janon_q == NULL)
     return;
   pthread_t th;
-  nr_core_plan_create(&th, NULL, janon_worker, NULL, -1);
+  nr_core_plan_create(&th, NULL, janon_worker, (void *)(intptr_t)nr_cell_idx(), -1);
   pthread_detach(th);
   LOG_A(PHY, "SENSING: JOINT_ANON_ASYNC worker started (queue %d items)\n", g_janon_cap);
 }
@@ -2628,36 +2906,8 @@ static int janon_take(uint64_t geom, janon_hit_t *out, int max)
   pthread_mutex_unlock(&g_janon_mu);
   return n;
 }
-/* T26c LEN_HINT: DCI 1_1 lengths locked on ANY CORESET of this cell (most recent first) -- the hint for a CORESET that
- * has none locked yet (one gNB, one RRC template: the second CORESET's UEs very likely use the same size). */
-static _Atomic int g_cell_lens[4];
-/* UL DCI 0_1 length each RNTI locked on air, on any geometry of the cell (a UE's size does not depend on the CORESET carrying it). */
-static struct { _Atomic uint16_t rnti, len; } g_ul_cell_len[16];
-static void ul_cell_len_note(uint16_t rnti, int len)
-{
-  int slot = (int)(rnti % 16u);
-  atomic_store(&g_ul_cell_len[slot].len, (uint16_t)len);
-  atomic_store(&g_ul_cell_len[slot].rnti, rnti);
-}
-static int ul_cell_len(uint16_t rnti)
-{
-  const int slot = (int)(rnti % 16u);
-  return atomic_load(&g_ul_cell_len[slot].rnti) == rnti ? (int)atomic_load(&g_ul_cell_len[slot].len) : 0;
-}
-/* janon_note_cell_len: remembers a DCI 1_1 length locked on any CORESET of this cell (most recent first, 4 entries) as a length hint for other CORESETs.
- *   Only the LEN_HINT path reads the list. Caller: run_occasion_one() after a length lock.
- */
-static void janon_note_cell_len(int len)
-{
-  if (len <= 0) return;
-  /* ranked by corroborating locks (nr_pdcch_cell_len_hint.h), not by recency: one contradicting lock must not replace the hint of every CORESET without a lock */
-  static nr_cell_len_hint_t hint;
-  static pthread_mutex_t hint_mu = PTHREAD_MUTEX_INITIALIZER;
-  pthread_mutex_lock(&hint_mu);
-  nr_cell_len_hint_note(&hint, len);
-  for (int i = 0; i < NR_CELL_LEN_HINT_N; i++) atomic_store(&g_cell_lens[i], hint.len[i]);
-  pthread_mutex_unlock(&hint_mu);
-}
+/* T26c LEN_HINT, UL cell lengths, janon_note_cell_len: per-cell DCI length state, see nr_pdcch_cell_len_state.h */
+#define g_cell_lens NR_CELL_REF(g_cell_lens)
 /* janon_hit_scorer: scorer of the anonymous length sweep for joint-anon hits: accepts trial i only when it is a hit of the requested length and its RNTI is not already known.
  *   Returns the RNTI and payload hash of the hit. Passed to nr_pdcch_dci_length_sweep_feed_budget() by run_occasion_one() (joint-anon sweep).
  */
@@ -2691,8 +2941,11 @@ typedef struct {
   uint8_t slot[USSH_SAMPLES], cce[USSH_SAMPLES], L[USSH_SAMPLES];
   struct { uint8_t N, a, M[5]; } h[4]; /* fitting hypotheses (union used) */
 } ussh_t;
-static ussh_t g_ussh[USSH_GEOMS];
-static pthread_mutex_t g_ussh_mu = PTHREAD_MUTEX_INITIALIZER;
+typedef ussh_t g_ussh_cell_t[USSH_GEOMS];
+NR_CELL_STATIC(g_ussh_cell_t, g_ussh);
+#define g_ussh NR_CELL_REF(g_ussh)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_ussh_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_ussh_mu NR_CELL_REF(g_ussh_mu)
 static const uint32_t kUsshA[3] = {39827, 39829, 39839};
 /* ussh_Y: the USS hash state Y_p,n for an RNTI at a slot, for one multiplier A (TS 38.213 10.1, iterated modulo 65537).
  *   Pure function. Caller: ussh_in().
@@ -2773,7 +3026,8 @@ static bool ussh_note_ex(uint64_t geom, uint16_t rnti, int slot, int cce, int L,
     /* force (SCAN2 only): enter the sample and refit now; a full table overwrites a rotating entry. If the fit then has no
      * hypothesis left (the UL position does not belong to the DL search space) the sample is taken back and refitted, so a UL
      * DCI can never switch the DL hash filter off. */
-    static int s_rot;
+    NR_CELL_STATIC(int, s_rot);
+#define s_rot NR_CELL_REF(s_rot)
     const bool full = u->n >= USSH_SAMPLES;
     const int i = full ? (s_rot++ % USSH_SAMPLES) : u->n;
     const ussh_t before = *u;
@@ -2791,6 +3045,7 @@ static bool ussh_note_ex(uint64_t geom, uint16_t rnti, int slot, int cce, int L,
       }
     }
   }
+#undef s_rot
   pthread_mutex_unlock(&g_ussh_mu);
   return kept;
 }
@@ -2802,7 +3057,9 @@ static void ussh_note(uint64_t geom, uint16_t rnti, int slot, int cce, int L, in
  *   An aggregation level never seen in the fit stays admitted at m = 0. Callers: run_occasion_one() (USS candidate pruning, two sites).
  */
 /* SCAN2: CORESET geometries where an audited UL task outside the USS hash produced a CRC-valid DCI: the UL gate stays off there. */
-static _Atomic uint64_t g_ulssh_bad[8];
+typedef _Atomic uint64_t g_ulssh_bad_cell_t[8];
+NR_CELL_STATIC(g_ulssh_bad_cell_t, g_ulssh_bad);
+#define g_ulssh_bad NR_CELL_REF(g_ulssh_bad)
 static bool ulssh_geom_bad(uint64_t geom)
 {
   for (int i = 0; i < 8; i++)
@@ -2879,7 +3136,8 @@ static uint16_t sweep_evidence_rnti(const nr_pdcch_autodiscover_sweep_ctx_t *ctx
 {
   for (int i = 0; i < ctx->n_known; ++i)
     if (ctx->known_rnti[i] == rnti) {
-      static _Atomic uint64_t hits = 0;
+      NR_CELL_STATIC(_Atomic uint64_t, hits);
+#define hits NR_CELL_REF(hits)
       const uint64_t h = atomic_fetch_add_explicit(&hits, 1, memory_order_relaxed) + 1;
       if (h == 1 || h % 16 == 0)
         LOG_A(PHY, "SENSING: USS_BOOT_HIT count=%lu frame=%d slot=%d rnti=0x%04x len=%d "
@@ -2890,6 +3148,7 @@ static uint16_t sweep_evidence_rnti(const nr_pdcch_autodiscover_sweep_ctx_t *ctx
               ctx->bundle, ctx->interleaver, ctx->shift, ctx->n_known);
       return ctx->bootstrap_alias;
     }
+#undef hits
   return rnti;
 }
 
@@ -2965,7 +3224,16 @@ static void blind_dmrs_rank_candidates(const nr_pdcch_dmrs_rank_grid_t *grid,
   memcpy(pdu->CCE, cce, used * sizeof(cce[0]));
   memcpy(pdu->L, al, used * sizeof(al[0]));
   pdu->number_of_candidates = used;
-  static _Atomic uint64_t calls = 0, offered = 0, selected = 0, audits = 0, known_calls = 0;
+  NR_CELL_STATIC(_Atomic uint64_t, calls);
+#define calls NR_CELL_REF(calls)
+NR_CELL_STATIC(_Atomic uint64_t, offered);
+#define offered NR_CELL_REF(offered)
+NR_CELL_STATIC(_Atomic uint64_t, selected);
+#define selected NR_CELL_REF(selected)
+NR_CELL_STATIC(_Atomic uint64_t, audits);
+#define audits NR_CELL_REF(audits)
+NR_CELL_STATIC(_Atomic uint64_t, known_calls);
+#define known_calls NR_CELL_REF(known_calls)
   const uint64_t t = atomic_fetch_add(&calls, 1) + 1;
   atomic_fetch_add(&offered, n);
   atomic_fetch_add(&selected, used);
@@ -2979,6 +3247,11 @@ static void blind_dmrs_rank_candidates(const nr_pdcch_dmrs_rank_grid_t *grid,
           (unsigned long)atomic_load(&known_calls), n_known, offset, span, score[best], dmrs[best],
           support[best], used, n);
 }
+#undef calls
+#undef offered
+#undef selected
+#undef audits
+#undef known_calls
 
 /* ---- LANE BATCH ---------------------------------------------------------------------------------
  * ONE GPU call per OCCASION instead of one per LANE.
@@ -3142,7 +3415,8 @@ static void lane_batch_flush(void)
     return;                                  /* nothing was ever added on this thread */
   { /* WHY-NOT diagnostic: a silent early return here costs double work (batch built, CPU still
      * decodes), so report the reason once per 5000 occasions rather than guessing. */
-    static _Atomic uint64_t s_why = 0;
+    NR_CELL_STATIC(_Atomic uint64_t, s_why);
+#define s_why NR_CELL_REF(s_why)
     const uint64_t w = atomic_fetch_add_explicit(&s_why, 1, memory_order_relaxed) + 1;
     if (w == 1 || (w % 5000) == 0) {
       const nr_gpu_polar_api_t *a = nr_gpu_polar_load();
@@ -3150,6 +3424,7 @@ static void lane_batch_flush(void)
             g_lb_n_items, g_lb_n_vec, (a && a->decode_vec) ? "yes" : "NO");
     }
   }
+#undef s_why
   if (g_lb_n_items <= 0 || g_lb_n_vec <= 0)
     return;
   const nr_gpu_polar_api_t *api = nr_gpu_polar_load();
@@ -3161,7 +3436,10 @@ static void lane_batch_flush(void)
   if (m < 0)
     return;
   g_lb_flushed = 1;
-  static _Atomic uint64_t s_calls = 0, s_items = 0;
+  NR_CELL_STATIC(_Atomic uint64_t, s_calls);
+#define s_calls NR_CELL_REF(s_calls)
+NR_CELL_STATIC(_Atomic uint64_t, s_items);
+#define s_items NR_CELL_REF(s_items)
   const uint64_t n = atomic_fetch_add_explicit(&s_calls, 1, memory_order_relaxed) + 1;
   atomic_fetch_add_explicit(&s_items, (uint64_t)g_lb_n_items, memory_order_relaxed);
   if (n == 1 || (n % 2000) == 0)
@@ -3169,6 +3447,8 @@ static void lane_batch_flush(void)
           (unsigned long long)n, g_lb_n_items, g_lb_n_vec,
           (unsigned long long)atomic_load_explicit(&s_items, memory_order_relaxed));
 }
+#undef s_calls
+#undef s_items
 
 /* Per-lane sweep contexts live in an array so the scorer can recover its lane index by pointer
  * arithmetic -- O(1), and it keeps nr_pdcch_autodiscover_sweep_ctx_t unchanged. */
@@ -3305,7 +3585,10 @@ static bool sweep_gpu_prefill(const nr_pdcch_autodiscover_sweep_ctx_t *ctx,
   g_sweep_cache.max_len = max_len;
   g_sweep_cache.valid   = 1;
 
-  static _Atomic uint64_t s_batches = 0, s_items = 0;
+  NR_CELL_STATIC(_Atomic uint64_t, s_batches);
+#define s_batches NR_CELL_REF(s_batches)
+NR_CELL_STATIC(_Atomic uint64_t, s_items);
+#define s_items NR_CELL_REF(s_items)
   const uint64_t b = atomic_fetch_add_explicit(&s_batches, 1, memory_order_relaxed) + 1;
   atomic_fetch_add_explicit(&s_items, (uint64_t)m, memory_order_relaxed);
   if (b == 1 || (b % 5000) == 0)
@@ -3314,6 +3597,8 @@ static bool sweep_gpu_prefill(const nr_pdcch_autodiscover_sweep_ctx_t *ctx,
           (unsigned long long)atomic_load_explicit(&s_items, memory_order_relaxed));
   return true;
 }
+#undef s_batches
+#undef s_items
 
 /* UL length evidence is independent of both the DL sweep and field interpretation. */
 typedef struct {
@@ -3453,7 +3738,8 @@ static bool nr_pdcch_autodiscover_length_scorer_inner(int dci_length, int trial_
     uint32_t bcrc = 0;
     nr_dci_bits_t bpl  = {{0}};
     if (lane_batch_get(ctx, cand_idx, dci_length, &bcrc, &bpl)) {
-      static _Atomic uint64_t s_bh = 0;
+      NR_CELL_STATIC(_Atomic uint64_t, s_bh);
+#define s_bh NR_CELL_REF(s_bh)
       const uint64_t bh = atomic_fetch_add_explicit(&s_bh, 1, memory_order_relaxed) + 1;
       if ((bh % 20000000) == 0)
         LOG_A(PHY, "SENSING: LANEBATCH hit=%llu\n", (unsigned long long)bh);
@@ -3468,11 +3754,15 @@ static bool nr_pdcch_autodiscover_length_scorer_inner(int dci_length, int trial_
         return true;
       }
     }
+#undef s_bh
   }
   /* SWEEPCACHE: is the GPU result actually being USED? A miss means we paid for the batch AND
    * still decode on CPU -- which would explain why prepass did not move. Counted, not assumed. */
   {
-    static _Atomic uint64_t s_hit = 0, s_miss = 0;
+    NR_CELL_STATIC(_Atomic uint64_t, s_hit);
+#define s_hit NR_CELL_REF(s_hit)
+NR_CELL_STATIC(_Atomic uint64_t, s_miss);
+#define s_miss NR_CELL_REF(s_miss)
     const bool usable = g_sweep_cache.valid && g_sweep_cache.ctx == ctx
                         && cand_idx < g_sweep_cache.n_cand
                         && dci_length >= g_sweep_cache.min_len && dci_length <= g_sweep_cache.max_len
@@ -3485,6 +3775,8 @@ static bool nr_pdcch_autodiscover_length_scorer_inner(int dci_length, int trial_
       LOG_A(PHY, "SENSING: SWEEPCACHE hit=%llu miss=%llu (%.1f%% hit)\n",
             (unsigned long long)h, (unsigned long long)m, 100.0 * (double)h / (double)(h + m));
   }
+#undef s_hit
+#undef s_miss
   /* SWEEP GPU BATCH: prefilled by sweep_gpu_prefill() for this exact ctx. A miss (GPU absent, item
    * rejected, length outside the batched range) falls through to the CPU path below unchanged. */
   if (g_sweep_cache.valid && g_sweep_cache.ctx == ctx && cand_idx < g_sweep_cache.n_cand
@@ -3543,13 +3835,15 @@ static bool nr_pdcch_autodiscover_length_scorer_inner(int dci_length, int trial_
       out.rnti = jr.rnti;
       out.mismatched_bits = jr.mismatched_bits;
       ok = true;
-      static _Atomic unsigned s_janon;
+      NR_CELL_STATIC(_Atomic unsigned, s_janon);
+#define s_janon NR_CELL_REF(s_janon)
       const unsigned h = atomic_fetch_add_explicit(&s_janon, 1, memory_order_relaxed) + 1;
       if (h <= 50 || (h % 500) == 0)
         LOG_A(PHY, "SENSING: JOINT_ANON_HIT #%u nid=%u rnti=0x%04x len=%d AL=%u CCE=%u mismatched_bits=%u frame=%d slot=%d\n",
               h, ctx->dmrs_scrambling_id, jr.rnti, dci_length, c->L, c->cce, jr.mismatched_bits,
               discovery_evidence_frame, discovery_evidence_slot);
     }
+#undef s_janon
   }
   if(!ok) return false;
   if (used_alt)
@@ -3620,6 +3914,7 @@ typedef struct {
   uint32_t     pre_crc;
   nr_dci_bits_t pre_payload;
   task_ans_t  *ans;
+  int          cell;           // cell of the pushing scan thread: a tpool worker serves every cell and is not bound to one (MPCI A4)
 } nr_pdcch_blind_cand_task_t;
 
 /* ---- post-accept ops (nr_pdcch_post_accept.h): bookkeeping of an accepted DCI that the PDSCH job does not read ---- */
@@ -3685,7 +3980,12 @@ static void pa_ussh(const void *a)
   const pa_ussh_t *p = (const pa_ussh_t *)a;
   ussh_note(p->geom, p->rnti, p->slot, p->cce, p->L, p->ncce);
 }
-static _Atomic uint64_t g_pa_ns, g_pa_n, g_pa_max;
+NR_CELL_STATIC(_Atomic uint64_t, g_pa_ns);
+#define g_pa_ns NR_CELL_REF(g_pa_ns)
+NR_CELL_STATIC(_Atomic uint64_t, g_pa_n);
+#define g_pa_n NR_CELL_REF(g_pa_n)
+NR_CELL_STATIC(_Atomic uint64_t, g_pa_max);
+#define g_pa_max NR_CELL_REF(g_pa_max)
 /* End of a candidate task's iteration (GCC cleanup): run what the accept queued, after the job went out. With ISAC_A2E_TRACE the cost is counted. */
 static void pa_cleanup(nr_post_accept_t *p)
 {
@@ -3709,15 +4009,20 @@ static void pa_cleanup(nr_post_accept_t *p)
 
 /* ---- Passive DL BWP tracking (nr_passive_bwp.h), always on. The RT thread registers entries and tracks RNTIs; decode consumers
  * resolve (size, start) from the DM-RS, so every access is under g_pbwp_lock and the scan works from a per-occasion snapshot. ---- */
-static nr_pbwp_t g_pbwp;
-static pthread_mutex_t g_pbwp_lock = PTHREAD_MUTEX_INITIALIZER;
+NR_CELL_STATIC_HEAP(nr_pbwp_t, g_pbwp);
+#define g_pbwp NR_CELL_HEAP_REF(nr_pbwp_t, g_pbwp)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_pbwp_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_pbwp_lock NR_CELL_REF(g_pbwp_lock)
 static int nr_pbwp_enabled(void) { return 1; }
 /* The CORESET discovery correlation of one occasion (moved from the scan thread unchanged, see pbwp_corr_job_t): each 6-RB window of the two
  * CORESET symbols against the PDCCH DM-RS under the spec reference (CRB 0) and the OAI one (the BWP start, within 5 RB below the window). */
 static void pbwp_corr_run(const pbwp_corr_job_t *j)
 {
-  static _Atomic bool s_cs_logged;
-  static c16_t y[12 * 276]; /* the compact REs laid back on a virtual symbol: first_carrier_offset 0, size 12 n_rb */
+  NR_CELL_STATIC(_Atomic bool, s_cs_logged);
+#define s_cs_logged NR_CELL_REF(s_cs_logged)
+  typedef c16_t y_cell_t[12 * 276];
+NR_CELL_STATIC(y_cell_t, y);
+#define y NR_CELL_REF(y) /* the compact REs laid back on a virtual symbol: first_carrier_offset 0, size 12 n_rb */
   c16_t pilot[3 * 276];
   float corr[NR_PBWP_CS_MAXWIN];
   int16_t ref[NR_PBWP_CS_MAXWIN];
@@ -3754,6 +4059,8 @@ static void pbwp_corr_run(const pbwp_corr_job_t *j)
     LOG_A(PHY, "SENSING: BWP CORESET found: RB %d..%d (%d RB), %d symbol(s), DM-RS reference RB %d (%s)\n",
           cs_start, cs_start + cs_n - 1, cs_n, cs_dur, cs_ref, cs_ref ? "BWP start, OAI-style" : "CRB 0, 38.211");
 }
+#undef y
+#undef s_cs_logged
 /* TB-CRC outcome of a grant decoded against a DISCOVERED BWP: 32 failures with no pass un-resolve it. */
 void nr_pdcch_bwp_crc_result(int entry, bool crc_ok)
 {
@@ -3918,7 +4225,10 @@ static void nr_pdcch_blind_cand_worker_serial(nr_pdcch_blind_cand_task_t *t)
 static void nr_pdcch_blind_cand_worker(void *arg)
 {
   nr_pdcch_blind_cand_task_t *t = (nr_pdcch_blind_cand_task_t *)arg;
+  const int prev_cell = nr_cell_idx(); /* tpool workers are shared by all cells: serve the task as its own cell, then restore */
+  nr_cell_bind(t->cell);
   nr_pdcch_blind_cand_worker_body(t);
+  nr_cell_bind(prev_cell);
   completed_task_ans(t->ans);
 }
 
@@ -3989,7 +4299,8 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
    * REFUSED -- e.g. --cont-fo-comp makes a deferred FEP unsound, see nr_pdsch_passive_queue_start()
    * -- `defer` stays false and every decode runs in-line exactly as before. */
   if (want_decode && cfg->pdsch_thread) {
-    static int s_queue_tried = 0;
+    NR_CELL_STATIC(int, s_queue_tried);
+#define s_queue_tried NR_CELL_REF(s_queue_tried)
     if (!s_queue_tried) {
       s_queue_tried = 1;
       /* pdsch_thread is the CONSUMER COUNT (1 = one thread). One consumer sustains ~1290
@@ -4006,6 +4317,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
       }
     }
   }
+#undef s_queue_tried
   /* DCI discovery is itself a monitor consumer. PDSCH decode and ISAC DM-RS extraction are
    * optional work after an accepted grant, so disabling both must not disable PDCCH discovery. */
 
@@ -4014,13 +4326,15 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
    * is what seeds the DL TDRA list (and the UL seed below) on a cell decoded before. One call per
    * PCI; the loader itself is idempotent. */
   {
-    static uint16_t s_cache_pci = 0xFFFF;
+    NR_CELL_STATIC_INIT(uint16_t, s_cache_pci, 0xFFFF);
+#define s_cache_pci NR_CELL_REF(s_cache_pci)
     if (s_cache_pci != fp->Nid_cell) {
       s_cache_pci = (uint16_t)fp->Nid_cell;
       nr_pdcch_blind_common_config_t c;
       (void)nr_pdcch_blind_get_common((uint16_t)fp->Nid_cell, &c);
     }
   }
+#undef s_cache_pci
 
   /* ---- PHASE 3 (2026-09-04): recover the DEDICATED CORESET by search, Technique A -------------
    * Runs BEFORE the dedicated-SS occasion gate below, which is keyed on ss_monitoring_slot_* --
@@ -4042,7 +4356,8 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
   {
     const int idsw_sym = nr_pdcch_coreset_map_idsweep_want(
         (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx, fp->symbols_per_slot);
-    static c16_t *s_idsw_buf;
+    NR_CELL_STATIC(c16_t *, s_idsw_buf);
+#define s_idsw_buf NR_CELL_REF(s_idsw_buf)
     if (idsw_sym >= 0 && s_idsw_buf == NULL)
       s_idsw_buf = malloc16(sizeof(c16_t) * fp->samples_per_slot_wCP);
     if (idsw_sym >= 0 && s_idsw_buf != NULL) {
@@ -4056,7 +4371,9 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
                                         (uint16_t)fp->Nid_cell, fp->symbols_per_slot);
     }
   }
-  static uint32_t discovery_duty_tick; /* receive thread only */
+#undef s_idsw_buf
+  NR_CELL_STATIC(uint32_t, discovery_duty_tick);
+#define discovery_duty_tick NR_CELL_REF(discovery_duty_tick) /* receive thread only */
   const uint32_t discovery_duty = 20;
   if (cfg->autodiscover && (!nr_pdcch_blind_monitor_autodiscover_done() || nr_pdcch_blind_monitor_autodiscover_reseed_pending())
       && !nr_pdcch_blind_monitor_autodiscover_commit_pending() /* decided; a consumer applies it */
@@ -4146,12 +4463,14 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
       const uint32_t rrem = gate_slot % (uint32_t)rp->ra_ss_period;
       if (rrem >= (uint32_t)rp->ra_ss_offset && rrem < (uint32_t)rp->ra_ss_offset + rdur) {
         on_occasion = true;
-        static _Atomic uint64_t s_ra_occ = 0;
+        NR_CELL_STATIC(_Atomic uint64_t, s_ra_occ);
+#define s_ra_occ NR_CELL_REF(s_ra_occ)
         const uint64_t n = atomic_fetch_add_explicit(&s_ra_occ, 1, memory_order_relaxed) + 1;
         if (n == 1 || (n % 20000) == 0)
           LOG_A(PHY, "SENSING: RA-SS occasion %llu (period=%u offset=%u dur=%u) -- slots SS#0 never covered\n",
                 (unsigned long long)n, rp->ra_ss_period, rp->ra_ss_offset, (unsigned)rdur);
       }
+#undef s_ra_occ
     }
   }
   /* T26b: every slot reaches the scan consumer once a dedicated CORESET is
@@ -4181,7 +4500,8 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
    * is parsed. One-shot, and RT-side so the guard itself stays single-threaded. If the start is
    * REFUSED (--cont-fo-comp makes a deferred FEP unsound) the scan runs in-line exactly as before. */
   if (cfg->scan_thread) {
-    static int s_scan_tried = 0;
+    NR_CELL_STATIC(int, s_scan_tried);
+#define s_scan_tried NR_CELL_REF(s_scan_tried)
     if (!s_scan_tried) {
       s_scan_tried = 1;
       const int n_cons = cfg->scan_thread;
@@ -4199,6 +4519,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
         nr_pdcch_blind_monitor_autodiscover_defer_commit(true);
     }
   }
+#undef s_scan_tried
 
   /* The producer's MONOTONIC slot counter, used ONLY as the job's staleness reference -- the
    * consumer compares it against the producer's current value to decide whether this occasion's raw
@@ -4219,6 +4540,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
 
   nr_pdcch_blind_monitor_run_occasion(ue, proc, false /* on the RT thread: fan out as before */, mono_slot);
 }
+#undef discovery_duty_tick
 
 /* The occasion body. Runs on a scan consumer when the pool is up, and on the PHY receive thread
  * otherwise -- identical code either way, which is what makes the deferral A/B-able with one config
@@ -4230,10 +4552,19 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
  * discovery). A DCI whose REs lie in CORESET#0's RBs decodes in BOTH the bank pass and the CORESET#0-USS
  * pass under different CCE numbering -- run s3live4: 1962 DL DCIs accepted twice (CCE 4 and CCE 6), i.e.
  * duplicate grants and duplicate PDSCH decodes. One accept per (slot, RNTI, direction). */
-static pthread_mutex_t s_dedupe_mu = PTHREAD_MUTEX_INITIALIZER;
-static struct { uint32_t slot; uint16_t rnti; uint8_t dir; } s_dedupe[256];
-static unsigned s_dedupe_w;
-static _Atomic uint64_t g_c0uss_unique, g_bank_accepts, g_dup_dropped;
+NR_CELL_STATIC_INIT(pthread_mutex_t, s_dedupe_mu, PTHREAD_MUTEX_INITIALIZER);
+#define s_dedupe_mu NR_CELL_REF(s_dedupe_mu)
+typedef struct { uint32_t slot; uint16_t rnti; uint8_t dir; } s_dedupe_cell_t[256];
+NR_CELL_STATIC(s_dedupe_cell_t, s_dedupe);
+#define s_dedupe NR_CELL_REF(s_dedupe)
+NR_CELL_STATIC(unsigned, s_dedupe_w);
+#define s_dedupe_w NR_CELL_REF(s_dedupe_w)
+NR_CELL_STATIC(_Atomic uint64_t, g_c0uss_unique);
+#define g_c0uss_unique NR_CELL_REF(g_c0uss_unique)
+NR_CELL_STATIC(_Atomic uint64_t, g_bank_accepts);
+#define g_bank_accepts NR_CELL_REF(g_bank_accepts)
+NR_CELL_STATIC(_Atomic uint64_t, g_dup_dropped);
+#define g_dup_dropped NR_CELL_REF(g_dup_dropped)
 static _Thread_local int t_bank_index = -1;
 /* All health calls for an occasion use the producer clock, never wrapped SFN. */
 static _Thread_local uint64_t t_bank_slot;
@@ -4330,7 +4661,8 @@ static void par_bank_side(void *arg)
   par_bank_run(j);
   nr_slot_fep_fo_override_hz = fo;
 }
-static _Atomic uint64_t g_inline_drop_epoch;
+NR_CELL_STATIC(_Atomic uint64_t, g_inline_drop_epoch);
+#define g_inline_drop_epoch NR_CELL_REF(g_inline_drop_epoch)
 uint64_t nr_pdcch_blind_inline_drop_epoch(void)
 {
   return atomic_load_explicit(&g_inline_drop_epoch, memory_order_relaxed);
@@ -4399,9 +4731,12 @@ static void occasion_reconf_prologue(PHY_VARS_NR_UE *ue, long source_absolute_sl
 {
   const bool reconf = reconf_lengths_enabled();
   if (reconf) {
-    static pthread_once_t hook_once = PTHREAD_ONCE_INIT;
-    static _Atomic uint64_t last_tick_slot = UINT64_MAX;
-    static _Atomic uint64_t last_c0_unique;
+    NR_CELL_STATIC_INIT(pthread_once_t, hook_once, PTHREAD_ONCE_INIT);
+#define hook_once NR_CELL_REF(hook_once)
+    NR_CELL_STATIC_INIT(_Atomic uint64_t, last_tick_slot, UINT64_MAX);
+#define last_tick_slot NR_CELL_REF(last_tick_slot)
+    NR_CELL_STATIC(_Atomic uint64_t, last_c0_unique);
+#define last_c0_unique NR_CELL_REF(last_c0_unique)
     pthread_once(&hook_once, bank_register_reopen_hook);
     t_bank_slot = source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot : 0;
     const uint64_t slot = t_bank_slot;
@@ -4418,6 +4753,9 @@ static void occasion_reconf_prologue(PHY_VARS_NR_UE *ue, long source_absolute_sl
     }
     nr_pdcch_coreset_bank_dispatch_enter();
   }
+#undef last_c0_unique
+#undef last_tick_slot
+#undef hook_once
 }
 
 /* DISC worker: the discovered-CORESET bookkeeping (nr_pdcch_discovered_step_ex, discovered_poll, discovered_snapshot) is state-only work on
@@ -4426,14 +4764,24 @@ static void occasion_reconf_prologue(PHY_VARS_NR_UE *ue, long source_absolute_sl
  * drop-oldest queue (never blocks, drops counted) and reads the dwell the worker last published, so a new/rejected dwell takes effect one job
  * later (discovery latency only; the bank decode of discovered config is untouched). */
 typedef struct { uint64_t token, slot, enq_ns; uint32_t stamp; int pci, carrier_rb; uint8_t step, prescreen; } disc_job_t;
-static nr_dq_t g_disc_q = NR_DQ_INIT;
-static pthread_mutex_t g_disc_pub_mu = PTHREAD_MUTEX_INITIALIZER; /* leaf lock: never held with the Phase-2 lock or a pool token request */
-static struct { bool valid; uint64_t token; nr_pdcch_blind_monitor_cfg_t cfg; } g_disc_pub;
-static _Atomic uint64_t g_disc_drop_epoch, g_disc_jobs, g_disc_pending_poll;
-static pthread_once_t g_disc_once = PTHREAD_ONCE_INIT;
+NR_CELL_STATIC_INIT(nr_dq_t, g_disc_q, NR_DQ_INIT);
+#define g_disc_q NR_CELL_REF(g_disc_q)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_disc_pub_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_disc_pub_mu NR_CELL_REF(g_disc_pub_mu) /* leaf lock: never held with the Phase-2 lock or a pool token request */
+typedef struct { bool valid; uint64_t token; nr_pdcch_blind_monitor_cfg_t cfg; } g_disc_pub_cell_t;
+NR_CELL_STATIC(g_disc_pub_cell_t, g_disc_pub);
+#define g_disc_pub NR_CELL_REF(g_disc_pub)
+NR_CELL_STATIC(_Atomic uint64_t, g_disc_drop_epoch);
+#define g_disc_drop_epoch NR_CELL_REF(g_disc_drop_epoch)
+NR_CELL_STATIC(_Atomic uint64_t, g_disc_jobs);
+#define g_disc_jobs NR_CELL_REF(g_disc_jobs)
+NR_CELL_STATIC(_Atomic uint64_t, g_disc_pending_poll);
+#define g_disc_pending_poll NR_CELL_REF(g_disc_pending_poll)
+NR_CELL_STATIC_INIT(pthread_once_t, g_disc_once, PTHREAD_ONCE_INIT);
+#define g_disc_once NR_CELL_REF(g_disc_once)
 static void *disc_worker(void *arg)
 {
-  (void)arg;
+  nr_cell_bind((int)(intptr_t)arg); /* the cell that started this worker (nr_core_plan_create has no cell argument) */
   pthread_setname_np(pthread_self(), "pdcchDisc");
   setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
   static __thread nr_pdcch_blind_monitor_cfg_t cfg;
@@ -4441,7 +4789,7 @@ static void *disc_worker(void *arg)
     disc_job_t j;
     nr_dq_pop(&g_disc_q, &j, sizeof(j));
     atomic_store_explicit(&g_disc_pending_poll, 0, memory_order_relaxed); /* every job polls */
-    nr_pool_site_acquire(NR_POOL_DISC, 0, j.enq_ns);
+    nr_pool_site_acquire(NR_POOL_DISC, nr_cell_idx(), j.enq_ns); /* the worker is bound to its cell */
     NR_CFG_EPOCH_WORK(j.stamp, &g_disc_drop_epoch);
     uint64_t token = 0;
     nr_pdcch_blind_phase2_lock();
@@ -4462,7 +4810,7 @@ static void *disc_worker(void *arg)
 static void disc_start(void)
 {
   pthread_t th;
-  if (nr_core_plan_create(&th, NULL, disc_worker, NULL, -1) == 0) pthread_detach(th);
+  if (nr_core_plan_create(&th, NULL, disc_worker, (void *)(intptr_t)nr_cell_idx(), -1) == 0) pthread_detach(th);
 }
 /* Scan side. A poll job is coalesced while one is still queued (idempotent); a step job is always queued. */
 static void disc_submit(const PHY_VARS_NR_UE *ue, bool step, uint64_t token, uint64_t slot, bool prescreen)
@@ -4629,14 +4977,17 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     nr_pdcch_blind_monitor_cfg_override(NULL);
     /* T26b: once the banked passes of a dedicated-only slot have used 300 us, the discovered dwell and the CORESET#0 occupancy pass
      * are skipped for this slot (counted in SCANTIME). */
-    static _Atomic uint64_t s_dbud_skip;
+    NR_CELL_STATIC(_Atomic uint64_t, s_dbud_skip);
+#define s_dbud_skip NR_CELL_REF(s_dbud_skip)
     bool over = btim_now_ns() - t_scan0 > 300ull * 1000ull;
     { /* T26c: the budget must not starve discovery -- replay: 12001 of 12001 dedicated-only slots skipped the dwell, so
        * the second populated CORESET never verified. Over budget, every 2nd slot still runs the dwell + CORESET#0 passes. */
-      static _Atomic uint32_t s_streak;
+      NR_CELL_STATIC(_Atomic uint32_t, s_streak);
+#define s_streak NR_CELL_REF(s_streak)
       if (over && (atomic_fetch_add_explicit(&s_streak, 1, memory_order_relaxed) + 1) % 2u == 0)
         over = false;
     }
+#undef s_streak
     if (over && (atomic_fetch_add_explicit(&s_dbud_skip, 1, memory_order_relaxed) % 4000) == 0)
       LOG_A(PHY, "SENSING: DED_BUDGET skipped dwell/CORESET#0 passes on %llu dedicated-only slots\n",
             (unsigned long long)atomic_load(&s_dbud_skip));
@@ -4673,6 +5024,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     scan_timing_note(btim_now_ns() - t_scan0, true);
     return;
   }
+#undef s_dbud_skip
 
   /* A USS may legally reference CORESET#0. It is the cheapest exact geometry available OTA, so
    * search it before spending the occasion on unknown footprints. */
@@ -4716,8 +5068,14 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   {
     /* Gate bookkeeping shared by every scan consumer (Task A7): decided under the Phase-2 lock, the
      * pass itself runs after it is released. */
-    static uint64_t s_occ, s_u0, s_b0;
-    static bool s_closed;
+    NR_CELL_STATIC(uint64_t, s_occ);
+#define s_occ NR_CELL_REF(s_occ)
+NR_CELL_STATIC(uint64_t, s_u0);
+#define s_u0 NR_CELL_REF(s_u0)
+NR_CELL_STATIC(uint64_t, s_b0);
+#define s_b0 NR_CELL_REF(s_b0)
+    NR_CELL_STATIC(bool, s_closed);
+#define s_closed NR_CELL_REF(s_closed)
     nr_pdcch_blind_phase2_lock();
     const uint64_t u = atomic_load_explicit(&g_c0uss_unique, memory_order_relaxed);
     const uint64_t b = atomic_load_explicit(&g_bank_accepts, memory_order_relaxed);
@@ -4744,14 +5102,22 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     }
     t_pass_kind = PASS_OTHER;
   }
+#undef s_closed
+#undef s_occ
+#undef s_u0
+#undef s_b0
   nr_pdcch_blind_monitor_cfg_override(NULL);
 
   if (nr_pdcch_blind_monitor_autodiscover_done()) {
     /* Background once a bank exists (lane perf 2026-09-27): the further-CORESET discovery pass yields
      * to a waiting occasion (nr_pdcch_blind_monitor_discovery_pass_due()). Measured on the phy-test bed:
      * its DL length sweep was 77 % of the scan consumer's time and made it drop 41 % of occasions. */
-    static uint32_t s_disc_skipped; /* under the Phase-2 lock (Task A7: N scan consumers) */
-    static uint64_t s_disc_run, s_disc_yield;
+    NR_CELL_STATIC(uint32_t, s_disc_skipped);
+#define s_disc_skipped NR_CELL_REF(s_disc_skipped) /* under the Phase-2 lock (Task A7: N scan consumers) */
+    NR_CELL_STATIC(uint64_t, s_disc_run);
+#define s_disc_run NR_CELL_REF(s_disc_run)
+NR_CELL_STATIC(uint64_t, s_disc_yield);
+#define s_disc_yield NR_CELL_REF(s_disc_yield)
     const int backlog = nr_pdcch_passive_queue_backlog();
     nr_pdcch_blind_phase2_lock();
     const bool disc_due = nr_pdcch_blind_monitor_discovery_pass_due(backlog, &s_disc_skipped);
@@ -4766,8 +5132,12 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
             (unsigned long long)disc_yield, (unsigned long long)disc_run);
     }
   } else {
+#undef s_disc_run
+#undef s_disc_yield
+#undef s_disc_skipped
     /* CSS0 remains alive while the discovery-only path has no candidate geometry to scan. */
-    static _Atomic uint64_t css_tick;
+    NR_CELL_STATIC(_Atomic uint64_t, css_tick);
+#define css_tick NR_CELL_REF(css_tick)
     const nr_pdcch_blind_monitor_cfg_t *css0 = nr_pdcch_blind_monitor_css0_cfg();
     if (css0 != NULL && ((atomic_fetch_add_explicit(&css_tick, 1, memory_order_relaxed) & 7u) == 0)) {
       nr_pdcch_blind_monitor_cfg_override(css0);
@@ -4775,6 +5145,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       nr_pdcch_blind_monitor_cfg_override(NULL);
     }
   }
+#undef css_tick
   if (reconf) nr_pdcch_coreset_bank_dispatch_leave();
   scan_timing_note(btim_now_ns() - t_scan0, false);
 }
@@ -4804,12 +5175,20 @@ static void phase2_guard_release(phase2_guard_t *g)
 #include <signal.h>
 #include "nr_safe_backtrace.h"
 #define SLOWPASS_SLOTS 16
-static _Atomic uint64_t g_sp_t0[SLOWPASS_SLOTS];
-static _Atomic uint32_t g_sp_hits[SLOWPASS_SLOTS];
-static pthread_t g_sp_tid[SLOWPASS_SLOTS];
-static _Atomic int g_sp_n;
+typedef _Atomic uint64_t g_sp_t0_cell_t[SLOWPASS_SLOTS];
+NR_CELL_STATIC(g_sp_t0_cell_t, g_sp_t0);
+#define g_sp_t0 NR_CELL_REF(g_sp_t0)
+typedef _Atomic uint32_t g_sp_hits_cell_t[SLOWPASS_SLOTS];
+NR_CELL_STATIC(g_sp_hits_cell_t, g_sp_hits);
+#define g_sp_hits NR_CELL_REF(g_sp_hits)
+typedef pthread_t g_sp_tid_cell_t[SLOWPASS_SLOTS];
+NR_CELL_STATIC(g_sp_tid_cell_t, g_sp_tid);
+#define g_sp_tid NR_CELL_REF(g_sp_tid)
+NR_CELL_STATIC(_Atomic int, g_sp_n);
+#define g_sp_n NR_CELL_REF(g_sp_n)
 static __thread int t_sp_slot = -1;
-static _Atomic int g_sp_ms = -1;
+NR_CELL_STATIC_INIT(_Atomic int, g_sp_ms, -1);
+#define g_sp_ms NR_CELL_REF(g_sp_ms)
 static void slowpass_handler(int sig)
 {
   (void)sig;
@@ -4858,15 +5237,17 @@ static slowpass_guard_t slowpass_enter(void)
     ms = 8; /* watchdog threshold: a scan pass slower than this dumps its backtrace */
     atomic_store(&g_sp_ms, ms);
     if (ms > 0) {
-      static _Atomic int started;
+      NR_CELL_STATIC(_Atomic int, started);
+#define started NR_CELL_REF(started)
       if (atomic_exchange(&started, 1) == 0) {
         void *fr[2];
         (void)backtrace(fr, 2);
         signal(SIGUSR2, slowpass_handler);
         pthread_t th;
-        if (pthread_create(&th, NULL, slowpass_watchdog, (void *)(intptr_t)ms) == 0) pthread_detach(th);
+        if (nr_cell_thread_create(&th, NULL, slowpass_watchdog, (void *)(intptr_t)ms, -1) == 0) pthread_detach(th);
       }
     }
+#undef started
   }
   if (ms <= 0) return g;
   if (t_sp_slot < 0) {
@@ -4887,6 +5268,9 @@ static void crb0_guard_release(crb0_guard_t *g)
   nr_pdcch_set_crb0_grid_rb(g->prev);
 }
 
+typedef _Atomic uint8_t occ1_walk_tog_cell_t[65536];
+NR_CELL_STATIC_HEAP(occ1_walk_tog_cell_t, occ1_walk_tog);
+#define occ1_walk_tog NR_CELL_HEAP_REF(occ1_walk_tog_cell_t, occ1_walk_tog)
 static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                                      bool serial_candidates, long source_absolute_slot)
 {
@@ -4991,18 +5375,22 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
     if (cfg->autodiscover) {
       const nr_pdcch_blind_monitor_cfg_t *css0 = nr_pdcch_blind_monitor_css0_cfg();
       if (css0 != NULL) {
-        static _Atomic uint64_t s_occ = 0;
+        NR_CELL_STATIC(_Atomic uint64_t, s_occ);
+#define s_occ NR_CELL_REF(s_occ)
         const uint64_t n = atomic_fetch_add_explicit(&s_occ, 1, memory_order_relaxed);
         if ((n % (uint64_t)s_css0_every) == 0) {
           cfg = css0;
           css0_occasion = true;
-          static _Atomic uint64_t s_css0_runs = 0;
+          NR_CELL_STATIC(_Atomic uint64_t, s_css0_runs);
+#define s_css0_runs NR_CELL_REF(s_css0_runs)
           const uint64_t r = atomic_fetch_add_explicit(&s_css0_runs, 1, memory_order_relaxed) + 1;
           if (r == 1 || (r % 20000) == 0)
             LOG_A(PHY, "SENSING: CSS0 interleave: %llu occasions on CORESET#0 (1 in %d)\n",
                   (unsigned long long)r, s_css0_every);
         }
+#undef s_css0_runs
       }
+#undef s_occ
     }
   }
 
@@ -5045,7 +5433,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
           ul_opts.tda_k2[i]      = common.ul_k2[i];
         }
       }
-      static _Atomic bool ul_seed_logged; /* exchange: one logger across N scan consumers (Task A7) */
+      NR_CELL_STATIC(_Atomic bool, ul_seed_logged);
+#define ul_seed_logged NR_CELL_REF(ul_seed_logged) /* exchange: one logger across N scan consumers (Task A7) */
       if (!atomic_exchange_explicit(&ul_seed_logged, true, memory_order_relaxed)) {
         /* Print the ENTRIES, not just the count. The TDA list sets the TDA field width and hence the
          * whole DCI layout, so reproducing this seed in a manual configuration requires the actual
@@ -5064,11 +5453,13 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
               ul_opts.bwp_start, ul_opts.bwp_size, tda);
       }
     }
+#undef ul_seed_logged
   }
   if (cfg->autodiscover && !nr_pdcch_discovered_enabled())
     nr_pdcch_blind_monitor_discovered_poll(); /* stage 1-2 hand-off; bumps the generation when applied */
   /* CAS: exactly one of N scan consumers performs the generation hand-off (Task A7). */
-  static _Atomic uint64_t previous_geometry;
+  NR_CELL_STATIC(_Atomic uint64_t, previous_geometry);
+#define previous_geometry NR_CELL_REF(previous_geometry)
   const uint64_t geometry = nr_pdcch_blind_monitor_autodiscover_generation();
   uint64_t seen_geometry = atomic_load_explicit(&previous_geometry, memory_order_relaxed);
   if (cfg->autodiscover && geometry != seen_geometry
@@ -5302,7 +5693,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
      * even split for the rest of the run and hides the very thing worth watching -- whether the
      * split actually converged on where the accepts are. Printed on the same cadence as the monitor
      * summary so the two can be read together. */
-    static _Atomic unsigned long s_ladder_n = 0; /* _Atomic: N scan consumers (Task A7) */
+    NR_CELL_STATIC(_Atomic unsigned long, s_ladder_n);
+#define s_ladder_n NR_CELL_REF(s_ladder_n) /* _Atomic: N scan consumers (Task A7) */
     if ((s_ladder_n++ % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
       int n_per_al[4] = {0, 0, 0, 0};
       for (int c = 0; c < nc; c++) {
@@ -5318,6 +5710,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             (unsigned long)atomic_load_explicit(&g_al_accepts[3], memory_order_relaxed));
     }
   }
+#undef s_ladder_n
 
   if (nc < 1) {
     /* A geometry with no supported AL must advance even though no polar decode can run. */
@@ -5351,8 +5744,12 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
      * could reach NR_PBWP_CS_MIN_OCC. The first pass to arm owns the tracker; a pass with another base skips
      * it. The ownership is a lease (refreshed by every owner occasion) so a real reconfiguration -- the owner
      * going quiet for >5 s, e.g. after a cell restart -- hands the tracker to whoever runs next. */
-    static uint16_t s_pbwp_own_len, s_pbwp_own_size;
-    static int64_t s_pbwp_own_ms = INT64_MIN / 2;
+    NR_CELL_STATIC(uint16_t, s_pbwp_own_len);
+#define s_pbwp_own_len NR_CELL_REF(s_pbwp_own_len)
+NR_CELL_STATIC(uint16_t, s_pbwp_own_size);
+#define s_pbwp_own_size NR_CELL_REF(s_pbwp_own_size)
+    NR_CELL_STATIC_INIT(int64_t, s_pbwp_own_ms, INT64_MIN / 2);
+#define s_pbwp_own_ms NR_CELL_REF(s_pbwp_own_ms)
     struct timespec ts_own;
     clock_gettime(CLOCK_MONOTONIC, &ts_own);
     const int64_t now_ms = (int64_t)ts_own.tv_sec * 1000 + ts_own.tv_nsec / 1000000;
@@ -5374,6 +5771,9 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
     if (!own)
       pbwp_on = false;
   }
+#undef s_pbwp_own_ms
+#undef s_pbwp_own_len
+#undef s_pbwp_own_size
   if (pbwp_on) {
     pthread_mutex_lock(&g_pbwp_lock);
     const uint8_t base_ind = cfg->extract.bwp_indicator_bits >= 0 ? (uint8_t)cfg->extract.bwp_indicator_bits : 1;
@@ -5395,7 +5795,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             dci_length, cfg->bwp_size, cfg->bwp_start, base_ind, g_pbwp.n_cand);
     }
     pbwp_n = g_pbwp.n;
-    static _Atomic uint32_t s_unres_tick;
+    NR_CELL_STATIC(_Atomic uint32_t, s_unres_tick);
+#define s_unres_tick NR_CELL_REF(s_unres_tick)
     const uint32_t s_unres_pick = atomic_fetch_add_explicit(&s_unres_tick, 1, memory_order_relaxed); /* one draw per occasion */
     for (int bi = 0; bi < g_pbwp.n; bi++) {
       pbwp_snap[bi].len = g_pbwp.e[bi].dci_len;
@@ -5448,7 +5849,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         nr_pdcch_blind_monitor_autodiscover_extent_hint(ss / 6, (ss + sn) / 6 - 1);
       }
     }
-    static uint32_t s_probe_tick;
+    NR_CELL_STATIC(uint32_t, s_probe_tick);
+#define s_probe_tick NR_CELL_REF(s_probe_tick)
     if (!pbwp_probe_len && (++s_probe_tick & 3) == 0) /* discovery: 1 occasion in 4 */
       pbwp_probe_len = nr_pbwp_next_probe_len(&g_pbwp);
     pthread_mutex_unlock(&g_pbwp_lock);
@@ -5467,6 +5869,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       LOG_A(PHY, "SENSING: BWP SWITCH APPLIED rnti=0x%x entry %d after the switch delay\n", sw_rnti, sw_entry);
     }
   }
+#undef s_probe_tick
+#undef s_unres_tick
 
   /* ---- DCI format 1_0 context (TS 38.212 7.3.1.0 / TS 38.214 5.1.2.2.2). Three things change with
    * the search-space kind and NONE of them is cosmetic: the frequency-domain field is sized from
@@ -5483,9 +5887,11 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * to notice a change (fallback grants, a new UE in its common search space), not enough to cost
    * the 1_1 decode budget. Evidence-led and self-reversing: the share is re-evaluated every call. */
   if (scan_10 && scan_11 && nr_agnostic_v2() && g_accepts > 10000 && g_accepts_10 * 200 < g_accepts) {
-    static _Atomic uint64_t s_occ10 = 0;
+    NR_CELL_STATIC(_Atomic uint64_t, s_occ10);
+#define s_occ10 NR_CELL_REF(s_occ10)
     scan_10 = (atomic_fetch_add_explicit(&s_occ10, 1, memory_order_relaxed) & 7) == 0;
   }
+#undef s_occ10
   const bool scan_01 = nr_pdcch_blind_monitor_ul_scan_enabled(cfg);
   uint16_t   dci01_length = 0;
   if (scan_01) {
@@ -5530,7 +5936,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
      * Both fields were then read as evidence that format 1_1 was disabled and that the dedicated
      * sweep was sized against a 48 RB BWP. Neither was true (2026-09-20). The whole point of this
      * line is to make a wrong ladder visible at startup, so printing the wrong config defeats it. */
-    static _Atomic int s_fmt_logged = 0; /* exchange: one logger across N scan consumers (Task A7) */
+    NR_CELL_STATIC(_Atomic int, s_fmt_logged);
+#define s_fmt_logged NR_CELL_REF(s_fmt_logged) /* exchange: one logger across N scan consumers (Task A7) */
     if (!css0_occasion && !atomic_exchange_explicit(&s_fmt_logged, 1, memory_order_relaxed)) {
       LOG_I(PHY,
             "SENSING: blind PDCCH formats: 1_1=%s (len=%u bwp=%u) 1_0=%s (len=%u n_rb_riv=%u rb_offset=%d "
@@ -5565,6 +5972,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       }
     }
   }
+#undef s_fmt_logged
   if (scan_10 && dci10_length == 0) {
     return; // misconfigured n_rb_riv -- nothing to scan rather than a wrong-width sweep
   }
@@ -5690,7 +6098,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       /* One decision per OCCASION (the solves run on a worker thread), applied to BOTH CORESET symbols: a per-symbol counter always landed on the same symbol.
        * Bounded in TIME, at the ~3 scans/s the window decay (0.97 per scan, ~13 s memory) is designed for: 1 occasion in 32 was ~60/s at 2000
        * occasions/s, a full core of solver work (replay 2026-10-20: 10 s CPU in 12 s once off the scan core) taken from the background lane. */
-      static _Atomic uint64_t s_nid_next_ns;
+      NR_CELL_STATIC(_Atomic uint64_t, s_nid_next_ns);
+#define s_nid_next_ns NR_CELL_REF(s_nid_next_ns)
       uint64_t nid_due = atomic_load_explicit(&s_nid_next_ns, memory_order_relaxed);
       const uint64_t nid_now = btim_now_ns();
       const bool nid_trig = nid_solve_enabled() && nid_now >= nid_due
@@ -5732,6 +6141,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         pthread_mutex_unlock(&g_nid_q_lock);
       }
     }
+#undef s_nid_next_ns
   }
   btim_add(BTIM_PBWP, btim_t_pbwp);
   if (!nr_passive_samples_valid(
@@ -5846,7 +6256,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * On mismatch it also SEARCHES the input for where the slice actually came from, which names the
    * offending offset directly instead of leaving it to be guessed. ---------------------------- */
   {
-    static _Atomic int s_idx_left = 6; /* _Atomic: N scan consumers (Task A7) */
+    NR_CELL_STATIC_INIT(_Atomic int, s_idx_left, 6);
+#define s_idx_left NR_CELL_REF(s_idx_left) /* _Atomic: N scan consumers (Task A7) */
     if (s_idx_left > 0 && rel15->number_of_candidates > 0) {
       const c16_t *in = pdcch_llr[0][0];
       int probe_off = 0;
@@ -5893,6 +6304,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       s_idx_left--;
     }
   }
+#undef s_idx_left
 
   /* ---- PHASE 3 (2026-09-04, REWRITTEN 2026-09-06): Technique C, dci_length histogram sweep -----
    * ACCUMULATES across occasions (guarded by g_length_swept once it succeeds, and by a bounded
@@ -6919,12 +7331,14 @@ constdiag_done:;
     /* The tracker fixes the extent and duration from DM-RS occupancy, which does not depend on the CCE-to-REG mapping; only the mapping is
      * left to hypothesise, and its likely set is small (nr_pdcch_map_candidates pass 0: SIB1 prior, non-interleaved, PCI residue / 0 of
      * every legal (L, R)). One per occasion, so a wrong one costs an occasion, not a dwell. The inherited mapping closes the rotation. */
-    static _Atomic uint32_t s_p2_hyp;
+    NR_CELL_STATIC(_Atomic uint32_t, s_p2_hyp);
+#define s_p2_hyp NR_CELL_REF(s_p2_hyp)
     nr_pdcch_map_cand_t p2m[24];
     const int p2n = nr_pdcch_map_candidates_pass0(cs_n, cs_dur, (int)ue->frame_parms.Nid_cell, p2m, 24);
     /* Rotating over every hypothesis divides the second pass's detection rate by p2n + 1; once one has produced CRC-accepted DCIs for this
      * geometry, spend 15 of 16 occasions on it and keep exploring with the rest. */
-    static _Atomic uint64_t s_p2_geom;
+    NR_CELL_STATIC(_Atomic uint64_t, s_p2_geom);
+#define s_p2_geom NR_CELL_REF(s_p2_geom)
     const uint64_t p2_geom = ((uint64_t)cs_start << 32) | ((uint64_t)cs_n << 8) | (uint64_t)cs_dur;
     if (atomic_exchange_explicit(&s_p2_geom, p2_geom, memory_order_relaxed) != p2_geom)
       for (int i = 0; i < 32; i++)
@@ -7024,6 +7438,8 @@ constdiag_done:;
       idx2 += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * rb->L[c] * 6;
     }
   }
+#undef s_p2_geom
+#undef s_p2_hyp
 
   /* ---- Lookahead lanes (nr_pdcch_blind_monitor.h): K-1 ADDITIONAL (extent, mapping) hypotheses
    * tested this same occasion, reusing the rxdataF this occasion already FEP'd above (every lane
@@ -7602,6 +8018,7 @@ constdiag_done:;
       init_task_ans(&ans, fl_r1 - fl_r0);
       for (int k = fl_r0; k < fl_r1; k++) {
         cand_task[fl_ord[k]].ans = &ans;
+        cand_task[fl_ord[k]].cell = nr_cell_idx();
         task_t t = {.func = nr_pdcch_blind_cand_worker, .args = &cand_task[fl_ord[k]]};
         pushTpool(&get_nrUE_params()->Tpool, t);
       }
@@ -7912,7 +8329,8 @@ constdiag_done:;
           const int n_cand = nr_pdcch_blind_ul_fdra_bundle(&ul_opts, u->raw_payload, u->dci_length,
                                                          u->rnti, &alternatives);
           if (n_cand > 0) {
-            static _Atomic unsigned long s_ul_type0_booked;
+            NR_CELL_STATIC(_Atomic unsigned long, s_ul_type0_booked);
+#define s_ul_type0_booked NR_CELL_REF(s_ul_type0_booked)
             const unsigned long nb = atomic_fetch_add_explicit(&s_ul_type0_booked, 1, memory_order_relaxed) + 1;
             if (nb == 1 || (nb % 1000) == 0)
               LOG_A(PHY, "SENSING: UL_FDRA_ALTERNATIVES_BOOKED n=%lu rnti=0x%x candidates=%d\n",
@@ -7921,6 +8339,7 @@ constdiag_done:;
              * Only the consumer's TB CRC may stop the bounded (at most four) search. */
             if (nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(&alternatives, source_absolute_slot);
           }
+#undef s_ul_type0_booked
         }
       } else {
         NR_BLIND_CTR_INC(g_ul_rejects);
@@ -7954,7 +8373,8 @@ constdiag_done:;
         if (nr_pdcch_blind_extract_00(cand_task[ti].out.payload, cand_task[ti].dci_length,
                                       cand_task[ti].out.rnti, &ul_opts, &ul00)) {
           NR_BLIND_CTR_INC(g_ul00_accepts);
-          static uint64_t logged00;
+          NR_CELL_STATIC(uint64_t, logged00);
+#define logged00 NR_CELL_REF(logged00)
           if (++logged00 <= 8)
             LOG_A(PHY, "SENSING: DCI 0_0 UL grant rnti=0x%x prb=%u+%u sym=%u+%u k2=%u mcs=%u\n",
                   ul00.rnti, (unsigned)ul00.start_rb, (unsigned)ul00.num_rb,
@@ -7962,6 +8382,7 @@ constdiag_done:;
                   (unsigned)ul00.k2, (unsigned)ul00.mcs);
           if (nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(&ul00, source_absolute_slot);
         } else {
+#undef logged00
           NR_BLIND_CTR_INC(g_ul00_rejects);
         }
       }
@@ -8063,7 +8484,8 @@ constdiag_done:;
                               .L = cand_task[ti].L, .ncce = num_cces};
         nr_post_accept_defer(&pa, pa_ussh, &pu, sizeof(pu));
       }
-      static uint64_t raw_dl_count;
+      NR_CELL_STATIC(uint64_t, raw_dl_count);
+#define raw_dl_count NR_CELL_REF(raw_dl_count)
       char payload_hex[49];
       if (++raw_dl_count <= 12 || raw_dl_count % 2000 == 0)
         LOG_I(PHY, "SENSING: DL raw evidence n=%lu len=%u rnti=0x%x payload=0x%s mm=%u; "
@@ -8089,18 +8511,21 @@ constdiag_done:;
         nr_pdcch_blind_result_t rp;
         if (g_dci11_state != 1 || g_dci11_resolver == NULL
             || !dl_resolver_representative(g_dci11_resolver, raw, cand_task[ti].dci_length, cfg, &rp)) {
-          static _Atomic uint32_t s_unread;
+          NR_CELL_STATIC(_Atomic uint32_t, s_unread);
+#define s_unread NR_CELL_REF(s_unread)
           const uint32_t q = atomic_fetch_add_explicit(&s_unread, 1, memory_order_relaxed);
           if (q < 4 || (q % 20000) == 0)
             LOG_A(PHY, "SENSING: DL DCI 1_1 rnti=0x%x len=%u read by no live layout (resolver state %d) n=%u\n", raw->rnti,
                   cand_task[ti].dci_length, g_dci11_state, q + 1);
           continue;
         }
+#undef s_unread
         cand_task[ti].out = rp;
         cand_task[ti].dl_layout_configuration = 0;
         cand_task[ti].dl_layout_index = 0xFFFF;
       }
     }
+#undef raw_dl_count
     const nr_pdcch_blind_result_t out = cand_task[ti].out;
     if (!cand_task[ti].ok) {
       if (cfg_reconf_on && out.rnti_class == NR_BLIND_RNTI_CLASS_P
@@ -8285,7 +8710,8 @@ constdiag_done:;
        * and a marginal one well above it. Printed against dci_thres because the gate is adaptive:
        * the absolute number means nothing without the running mean it is judged against. */
       if (out.rnti_class != NR_BLIND_RNTI_CLASS_SI) {
-        static _Atomic uint64_t s_dq = 0;
+        NR_CELL_STATIC(_Atomic uint64_t, s_dq);
+#define s_dq NR_CELL_REF(s_dq)
         const uint64_t dq = atomic_fetch_add_explicit(&s_dq, 1, memory_order_relaxed) + 1;
         if (dq <= 40 || (dq % 50) == 0)
           LOG_A(PHY, "SENSING: DCIQUAL rnti=0x%x class=%u mismatched_bits=%u dci_thres=%u %s\n",
@@ -8293,6 +8719,7 @@ constdiag_done:;
                 (unsigned)ue->dci_thres,
                 (out.mismatched_bits > (ue->dci_thres + 30)) ? "HELD" : "pass");
       }
+#undef s_dq
       /* MSG4 BY EXACT RNTI (2026-09-21). A TC-class accept whose RNTI was issued by a RAR we decoded
        * in the last 400 ms (fallback window only: once the Msg4 TB decodes, its UE Contention Resolution Identity CE settles TC -> C, TS 38.321 5.1.5,
        * nr_passive_mac_report_ta) is Msg4 (or its retransmission) -- an exact 16-bit match against a known
@@ -8357,7 +8784,9 @@ constdiag_done:;
        * search space instead of leaving it an unexamined assumption -- and say plainly that this
        * confirms the value IN USE, it does not search the 1024-value domain for an override. */
       const int ssb_ = nr_pdcch_ss_bucket(cfg);
-      static _Atomic int s_scr_logged[2];
+      typedef _Atomic int s_scr_logged_cell_t[2];
+NR_CELL_STATIC(s_scr_logged_cell_t, s_scr_logged);
+#define s_scr_logged NR_CELL_REF(s_scr_logged)
       int expect_ = 0;
       if (atomic_compare_exchange_strong_explicit(&s_scr_logged[ssb_], &expect_, 1,
                                                   memory_order_relaxed, memory_order_relaxed)) {
@@ -8369,6 +8798,7 @@ constdiag_done:;
               (unsigned)ue->frame_parms.Nid_cell, out.rnti);
       }
     }
+#undef s_scr_logged
 
     /* Record new-UE evidence before membership gating, otherwise a confirmed UE prevents
      * every later UE from ever acquiring a context. Only resolved-length accepts may seed it. */
@@ -8575,12 +9005,11 @@ constdiag_done:;
      * failure, ~0.3 s after an RNTI appeared, before any layout could be tested under the right id
      * (measured: second attached UE decoded 1 of 46761). Keeping the PCI in rotation lets Technique D
      * converge under it; the first CRC pass then closes the walk (nr_pdsch_passive_rnti_ded_fails). */
-    static _Atomic uint8_t s_walk_tog[65536];
     bool dl_data_advance = dl_dedicated
                            && nr_scrambling_walk_eligible(dl_dmrs_decided, nr_pdsch_passive_link_healthy(out.rnti),
                                                           nr_pdsch_passive_rnti_ded_fails(out.rnti));
     if (dl_data_advance)
-      dl_data_advance = (atomic_fetch_add_explicit(&s_walk_tog[out.rnti], 1, memory_order_relaxed) & 1) != 0;
+      dl_data_advance = (atomic_fetch_add_explicit(&occ1_walk_tog[out.rnti], 1, memory_order_relaxed) & 1) != 0;
     dlsch_pdu.dlDataScramblingId = dl_dedicated ? nr_pdsch_passive_data_id_current(out.rnti, (uint16_t)fp->Nid_cell,
                                                                                    dl_dmrs_decided, dl_data_advance)
                                                 : (uint16_t)fp->Nid_cell;
@@ -8604,10 +9033,12 @@ constdiag_done:;
     if (nr_pdsch_solver_enabled() && !is_dci10 && out.rnti_class == NR_BLIND_RNTI_CLASS_C && cand_task[ti].dl_auto
         && g_dci11_state == 1 && g_dci11_resolver != NULL) {
       if (nr_pdsch_solver_rvc_on()) { /* DCIRV: every DCI of the RNTI, before the rv/defer gates drop retransmissions */
-        static _Atomic int s_hq_set;
+        NR_CELL_STATIC(_Atomic int, s_hq_set);
+#define s_hq_set NR_CELL_REF(s_hq_set)
         if (!atomic_exchange(&s_hq_set, 1)) nr_pdsch_solver_set_hq_fn(solver_hq_of, NULL);
         nr_pdsch_solver_note_dci(out.rnti, cand_task[ti].dl_raw.payload, source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot + 1 : 0);
       }
+#undef s_hq_set
       const int rep = nr_pdsch_solver_rep(out.rnti);
       /* A solved RNTI's retransmission (rv != 0 under its representative, which `out` is) is not decoded on its own, as before.
        * An unsolved RNTI is NOT gated on one layout's rv any more: `out` is only some live layout's reading, so its rv said
@@ -8617,7 +9048,8 @@ constdiag_done:;
         continue;
       }
       if (nr_a2e_trace()) nr_a2e_ts[7] = btim_now_ns(); /* solver reading pass starts */
-      static _Atomic int s_tda_set;
+      NR_CELL_STATIC(_Atomic int, s_tda_set);
+#define s_tda_set NR_CELL_REF(s_tda_set)
       if (!atomic_exchange(&s_tda_set, 1))
         nr_pdsch_solver_set_tda_fn(solver_tda_of, (void *)cfg);
       static __thread uint8_t *s_gid;
@@ -8788,13 +9220,15 @@ constdiag_done:;
           rcount[g]++;
         }
       }
-      { static _Atomic uint32_t s_rp; /* reading-pass census, first grants then 1 in 4000 */
+      { NR_CELL_STATIC(_Atomic uint32_t, s_rp);
+#define s_rp NR_CELL_REF(s_rp) /* reading-pass census, first grants then 1 in 4000 */
         const uint32_t q = atomic_fetch_add_explicit(&s_rp, 1, memory_order_relaxed);
         if (q < 4 || q % 4000 == 0)
           LOG_A(PHY, "SENSING: DCI11 reading pass rnti=0x%04x solved=%d layouts=%d fdra_classes=%d values=%d parses=%d readings=%d "
                      "deferred=%d best_fit=%.2f\n", out.rnti, rep >= 0, nvis, nfk, nvk, nparse, nrd, nskip,
                 nfk > 0 ? (double)fmaxf(fk[fk_order[0]].fit[0], fk[fk_order[0]].fit[1]) : -1.0);
       }
+#undef s_rp
       if (rep >= 0 && rep < nh && s_gid[rep] == 0xff && nrd < SOLVER_READINGS) {
         /* CRC-BUGS 2026-10-19: the representative must have a reading of its own when it parses: a solved RNTI decodes only
          * the representative's reading (Vodafone PCI 415 OTA: 787 of 5282 DCIs of a solved RNTI decoded with MCS/NDI/rv read
@@ -8886,8 +9320,11 @@ constdiag_done:;
       }
       { /* T26c: scrambling ids of the run-time discovered NZP CSI-RS (a TRS/CSI-RS
          * scramblingID is typically the transmitting cell's PCI -- neighbour-cell candidates), as seen so far */
-        static uint16_t s_ids[8];
-        static int s_n;
+        typedef uint16_t s_ids_cell_t[8];
+NR_CELL_STATIC(s_ids_cell_t, s_ids);
+#define s_ids NR_CELL_REF(s_ids)
+        NR_CELL_STATIC(int, s_n);
+#define s_n NR_CELL_REF(s_n)
         for (int k = 0; k < sv_nrm; k++) {
           if (sv_rm[k].csi_type == 2 || sv_rm[k].scramb_id == fp->Nid_cell) continue;
           bool dup = false;
@@ -8900,8 +9337,15 @@ constdiag_done:;
           if (!dup) sv_alt[sv_nalt++] = s_ids[q];
         }
       }
+#undef s_n
+#undef s_ids
       {
-        static int s_last_key[8] = {-2, -2, -2, -2, -2, -2, -2, -2}, s_last_cnt[8];
+        typedef int s_last_key_cell_t[8];
+NR_CELL_STATIC_INIT(s_last_key_cell_t, s_last_key, {-2, -2, -2, -2, -2, -2, -2, -2});
+#define s_last_key NR_CELL_REF(s_last_key)
+typedef int s_last_cnt_cell_t[8];
+NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
+#define s_last_cnt NR_CELL_REF(s_last_cnt)
         const int lk = cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1;
         int slot_i = -1;
         for (int q = 0; q < 8 && slot_i < 0; q++) if (s_last_key[q] == lk) slot_i = q;
@@ -8918,6 +9362,8 @@ constdiag_done:;
           *s_last_n_p = sv_nalt;
         }
       }
+#undef s_last_key
+#undef s_last_cnt
       /* TIM-PDSCH: this RNTI's own blind DM-RS identities (nr_pdsch_dmrs_scan.h, voted over its
        * slots) replace the CORESET's: each as (DM-RS = id, data = PCI) first -- dataScramblingIdentityPDSCH is often
        * absent while scramblingID0 is per UE (PCI 923) -- then (id, id). Pairs are encoded id | (data + 1) << 16. */
@@ -8956,13 +9402,15 @@ constdiag_done:;
       if (rep < 0 && sv_kept == 0 && p_avail >= 0 && p_avail < (int)g_gate_burst && sv_budget > 0) {
         /* TIMSOLVE2: under contention the probes go to grants whose PRBs carry the RNTI's own
          * DM-RS (a strong-enough link with a right identity); a grant where no reading does is probed 1 time in 8 */
-        static _Atomic uint32_t s_weak;
+        NR_CELL_STATIC(_Atomic uint32_t, s_weak);
+#define s_weak NR_CELL_REF(s_weak)
         if ((atomic_fetch_add(&s_weak, 1) % 8u) != 0u) {
           sv_budget = 0;
           sv_weak = true;
           nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_WEAK);
         }
       }
+#undef s_weak
       if (nrd <= 0) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_NOREAD);
       else if (sv_budget <= 0 && !sv_weak) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_BUDGET0);
       const int nv = nrd > 0 && sv_budget > 0 ? nr_pdsch_solver_plan_slot(out.rnti, rw->payload, dlen, out.mcs,
@@ -9007,13 +9455,15 @@ constdiag_done:;
           bool tdet;
           const int nc = nr_tda_field_rows(tpos, rw->payload, dlen, lastv, 2, tf_S, tf_L, &tdet);
           { /* TDAFIELD diagnostic: the first hooks, then 1 in 500 */
-            static _Atomic uint32_t s_tfd;
+            NR_CELL_STATIC(_Atomic uint32_t, s_tfd);
+#define s_tfd NR_CELL_REF(s_tfd)
             const uint32_t q = atomic_fetch_add(&s_tfd, 1);
             if (q < 6 || q % 500 == 0)
               LOG_A(PHY, "SENSING: TDAFIELD hook #%u rnti=0x%04x fs=%d.%d pos=%d last=%d rows=%d det=%d val=%u S=%u,%u L=%u,%u\n", q, out.rnti,
                     proc->frame_rx, proc->nr_slot_rx, tpos, (int)lastv, nc, (int)tdet, (unsigned)nr_dci_bits_field(&rw->payload, dlen, tpos, 2),
                     nc > 0 ? tf_S[0] : 0, nc > 1 ? tf_S[1] : 0, nc > 0 ? tf_L[0] : 0, nc > 1 ? tf_L[1] : 0);
           }
+#undef s_tfd
           tf_pos1 = (uint8_t)(tpos + 1);
           tf_last = lastv;
           tf_n = (uint8_t)nc;
@@ -9126,6 +9576,7 @@ constdiag_done:;
       pdsch_gate_release(); /* SOLVERGATE: the reservation this grant did not use */
       continue;
     }
+#undef s_tda_set
     if ((g_pdsch_sweep_on || (cand_task[ti].bwp_entry > 0 && cfg->dl_full_auto)) && !is_dci10) {
       /* Rotate only grants eligible for a CRC attempt, not deterministic RV/cap drops. */
       if (!want_decode || (rv0_drop(cfg, &out))
@@ -9168,7 +9619,8 @@ constdiag_done:;
       if (!clash && (c->row == 13 || c->row == 14 || c->row == 16 || c->row == 17))
         for (int k = 0; !clash && k < 2; k++)
           if ((dlsch_pdu.dlDmrsSymbPos >> (c->symb_l1 + k)) & 1) clash = true;
-      static _Atomic uint32_t s_clash_n;
+      NR_CELL_STATIC(_Atomic uint32_t, s_clash_n);
+#define s_clash_n NR_CELL_REF(s_clash_n)
       if (clash) {
         if ((atomic_fetch_add(&s_clash_n, 1) % 500) == 0)
           LOG_W(PHY, "SENSING: %s CSI-RS hypothesis (row %u l0=%u) overlaps this grant's DM-RS symbols (mask 0x%x): not applied\n",
@@ -9178,6 +9630,7 @@ constdiag_done:;
         dlsch_pdu.numCsiRsForRateMatching++;
       }
     }
+#undef s_clash_n
 
     freq_alloc_bitmap_t freq_alloc = set_bitmap_from_start_size(out.start_rb, out.num_rb);
     /* L this grant's interleaved PRB list used, fed back to the per-RNTI DCI 1_1 bundle-size sweep
@@ -9793,7 +10246,8 @@ constdiag_done:;
      * negligible. Convergence winners are still sampled at the period: they take tens of seconds
      * to form, so ~0.6 s resolution loses nothing. Unsynchronised statics follow this function's
      * existing single-caller assumption (g_occasions_run, raw_dl_count). */
-    static bool acq_first_logged = false;
+    NR_CELL_STATIC(bool, acq_first_logged);
+#define acq_first_logged NR_CELL_REF(acq_first_logged)
     if (!acq_first_logged) {
       acq_first_logged = true;
       LOG_I(PHY, "SENSING: ACQ first monitored occasion (occasions_run=%lu)\n", (unsigned long)g_occasions_run);
@@ -9801,7 +10255,8 @@ constdiag_done:;
     const bool acq_len = g_length_found;
     const bool acq_cs  = !cfg->autodiscover || nr_pdcch_blind_monitor_autodiscover_extent_verified();
     const bool acq_bwp = ul_opts.bwp_size > 0;
-    static int acq_last_sig = -1;
+    NR_CELL_STATIC_INIT(int, acq_last_sig, -1);
+#define acq_last_sig NR_CELL_REF(acq_last_sig)
     const int acq_sig = (int)acq_len | ((int)acq_cs << 1) | ((int)acq_bwp << 2);
     const bool acq_period = sum_due;
     if (acq_period || acq_sig != acq_last_sig) {
@@ -9878,6 +10333,9 @@ constdiag_done:;
   if (sum_due)
     nr_passive_metrics_emit(); /* machine-readable twin of the text summaries (Task A2) */
 }
+#undef acq_last_sig
+#undef acq_first_logged
+#undef previous_geometry
 
 
 static void (*dl_gpu_memory[5])(uint64_t *, uint64_t *);
@@ -10059,4 +10517,19 @@ void nr_pdcch_blind_monitor_rt_final_stats(void)
   LOG_A(PHY, "SENSING: JOINT_ANON_ASYNC FINAL submitted=%llu done=%llu dropped=%llu hits=%llu\n", (unsigned long long)atomic_load(&g_janon_sub),
         (unsigned long long)atomic_load(&g_janon_done), (unsigned long long)atomic_load(&g_janon_drop), (unsigned long long)atomic_load(&g_janon_found));
   if (nr_admit_on()) { char as[640]; nr_admit_stats(as, sizeof as); LOG_A(PHY, "SENSING: %s (final)\n", as); }
+}
+
+/* nr_pdcch_cell_prealloc: allocates the heap objects of the PDCCH monitor modules of `cell` (this file, nr_pdcch_blind_monitor.c,
+ * nr_pdcch_coreset_bank.c). The receiver main calls it once per active cell, incl. cell 0, before nr_cell_alloc_fence(). */
+void nr_pdcch_cell_prealloc(int cell)
+{
+  NR_CELL_HEAP_PREALLOC(g_cj_ring_cell_t, g_cj_ring, cell);
+  NR_CELL_HEAP_PREALLOC(scan_fine_us_cell_t, scan_fine_us, cell);
+  NR_CELL_HEAP_PREALLOC(g_dci01_off_cell_t, g_dci01_off, cell);
+  NR_CELL_HEAP_PREALLOC(g_lane_length_state_cell_t, g_lane_length_state, cell);
+  NR_CELL_HEAP_PREALLOC(g_janon_hits_cell_t, g_janon_hits, cell);
+  NR_CELL_HEAP_PREALLOC(nr_pbwp_t, g_pbwp, cell);
+  NR_CELL_HEAP_PREALLOC(occ1_walk_tog_cell_t, occ1_walk_tog, cell);
+  nr_pdcch_blind_monitor_cell_prealloc(cell);
+  nr_pdcch_coreset_bank_cell_prealloc(cell);
 }

@@ -6,8 +6,10 @@
 #include <string.h>
 
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
 
-static nr_pdcch_sib1_prior_t g_prior; /* .valid == false until MAC publishes one */
+NR_CELL_STATIC(nr_pdcch_sib1_prior_t, g_prior);
+#define g_prior NR_CELL_REF(g_prior) /* .valid == false until MAC publishes one */
 
 void nr_pdcch_sib1_prior_set(const nr_pdcch_sib1_prior_t *p)
 {
@@ -21,7 +23,8 @@ void nr_pdcch_sib1_prior_set(const nr_pdcch_sib1_prior_t *p)
    * scan that silently covers the wrong geometry finds nothing and reports no error. If this line
    * disagrees with what the search is testing, that is the bug, and it should be visible at
    * start-up rather than as an empty accept census an hour later. */
-  static bool logged = false;
+  NR_CELL_STATIC(bool, logged);
+#define logged NR_CELL_REF(logged)
   if (!logged) {
     logged = true;
     int first_w = -1, last_w = -1;
@@ -62,6 +65,7 @@ void nr_pdcch_sib1_prior_set(const nr_pdcch_sib1_prior_t *p)
           g_prior.sul_present ? 1 : 0);
   }
 }
+#undef logged
 
 const nr_pdcch_sib1_prior_t *nr_pdcch_sib1_prior_get(void)
 {
