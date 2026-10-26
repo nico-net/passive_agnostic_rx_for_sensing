@@ -7,10 +7,12 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
 
-/* ALL the provider state in one struct: one instance now (single cell); a per-cell array indexed by nr_cell_idx() later (see the
- * multi-PCI design note in docs/superpowers/reports/csd/FIX-SFO-RESYNC-20261026.md). The eps is relative to the clock of the gNB being
- * tracked, so it is meaningless across a cell change or a timing epoch. */
+/* ALL the provider state in one struct, one instance per cell (NR_CELL_STATIC; multi-PCI design note in
+ * docs/superpowers/reports/csd/FIX-SFO-RESYNC-20261026.md). The eps is relative to the clock of the gNB being tracked, so it is
+ * meaningless across a cell change or a timing epoch. Threads that serve a cell are bound to it (nr_cell_idx()): the timing loop
+ * (UE_thread), the FEP and the decode workers. N = 1: cell 0, as before. */
 typedef struct {
   _Atomic int64_t eps_q;   /* published eps, 1e-12 */
   pthread_mutex_t mu;
@@ -21,53 +23,76 @@ typedef struct {
   double dmrs_corr;        /* fine correction from the DM-RS residual, eps units */
   uint64_t frames, dmrs_n;
 } nr_sfo_state_t;
-static nr_sfo_state_t g_st = {.mu = PTHREAD_MUTEX_INITIALIZER};
-#define g_eps_q (g_st.eps_q)
-#define g_mu (g_st.mu)
-#define g_win (g_st.win)
-#define g_n (g_st.n)
-#define g_w (g_st.w)
-#define g_sum (g_st.sum)
-#define g_spf (g_st.spf)
-#define g_dmrs_corr (g_st.dmrs_corr)
-#define g_frames (g_st.frames)
-#define g_dmrs_n (g_st.dmrs_n)
+NR_CELL_STATIC_INIT(nr_sfo_state_t, g_st, {.mu = PTHREAD_MUTEX_INITIALIZER})
+#define g_st NR_CELL_REF(g_st)
+/* thread-local pin: a value (what this job's FEP uses), not cell state */
 static __thread int64_t t_pin = INT64_MIN;
+
+static void reset_cell(nr_sfo_state_t *s)
+{
+  pthread_mutex_lock(&s->mu);
+  s->n = s->w = 0;
+  s->sum = 0;
+  s->spf = 0;
+  s->dmrs_corr = 0;
+  s->frames = s->dmrs_n = 0;
+  atomic_store(&s->eps_q, 0);
+  pthread_mutex_unlock(&s->mu);
+}
 
 void nr_sfo_reset(void)
 {
-  pthread_mutex_lock(&g_mu);
-  g_n = g_w = 0;
-  g_sum = 0;
-  g_spf = 0;
-  g_dmrs_corr = 0;
-  g_frames = g_dmrs_n = 0;
-  atomic_store(&g_eps_q, 0);
-  pthread_mutex_unlock(&g_mu);
+  reset_cell(&g_st);
+}
+
+/* tag: the cell is named in the line only when the caller is not that cell's own thread (otherwise the D2 [c<k>] prefix says it) */
+static void resync_cell(int cell, const char *reason)
+{
+  nr_sfo_state_t *s = &g_st_cells[cell];
+  const int64_t old = atomic_load_explicit(&s->eps_q, memory_order_relaxed);
+  reset_cell(s);
+  if (cell == nr_cell_idx())
+    LOG_I(PHY, "SENSING: SFO reset (%s); previous eps %+.3f ppm\n", reason ? reason : "?", (double)old * 1e-6);
+  else
+    LOG_I(PHY, "SENSING: SFO reset (%s) of cell %d; previous eps %+.3f ppm\n", reason ? reason : "?", cell, (double)old * 1e-6);
 }
 
 void nr_sfo_resync(const char *reason)
 {
-  const int64_t old = atomic_load_explicit(&g_eps_q, memory_order_relaxed);
-  nr_sfo_reset();
-  LOG_I(PHY, "SENSING: SFO reset (%s); previous eps %+.3f ppm\n", reason ? reason : "?", (double)old * 1e-6);
+  resync_cell(nr_cell_idx(), reason);
 }
 
-/* caller holds g_mu: publish the window mean plus the DM-RS fine term when it moved by more than the hysteresis */
-static void publish_locked(void)
+void nr_sfo_resync_cell(int cell, const char *reason)
 {
-  if (g_n < NR_SFO_WINDOW / 4 || g_spf <= 0)
+  if (cell >= 0 && cell < NR_CELL_MAX)
+    resync_cell(cell, reason);
+}
+
+void nr_sfo_resync_all(const char *reason)
+{
+  const int own = nr_cell_idx();
+  const int n = nr_cell_count();
+  resync_cell(own, reason);
+  for (int c = 0; c < n && c < NR_CELL_MAX; c++)
+    if (c != own)
+      resync_cell(c, reason);
+}
+
+/* caller holds s->mu: publish the window mean plus the DM-RS fine term when it moved by more than the hysteresis */
+static void publish_locked(nr_sfo_state_t *s)
+{
+  if (s->n < NR_SFO_WINDOW / 4 || s->spf <= 0)
     return;
-  const double eps = (double)g_sum / ((double)g_n * g_spf) + g_dmrs_corr;
+  const double eps = (double)s->sum / ((double)s->n * s->spf) + s->dmrs_corr;
   if (!isfinite(eps) || fabs(eps) > NR_SFO_MAX_PPM * 1e-6)
     return;
   const int64_t q = (int64_t)llround(eps * 1e12);
-  const int64_t old = atomic_load_explicit(&g_eps_q, memory_order_relaxed);
+  const int64_t old = atomic_load_explicit(&s->eps_q, memory_order_relaxed);
   if (llabs(q - old) <= NR_SFO_HYST_Q)
     return;
-  atomic_store_explicit(&g_eps_q, q, memory_order_release);
+  atomic_store_explicit(&s->eps_q, q, memory_order_release);
   LOG_I(PHY, "SENSING: SFO eps=%+.3f ppm (timing loop %+.3f ppm over %d frames, DM-RS residual term %+.3f ppm, %lu DM-RS samples)\n", (double)q * 1e-6,
-        (double)g_sum / ((double)g_n * g_spf) * 1e6, g_n, g_dmrs_corr * 1e6, (unsigned long)g_dmrs_n);
+        (double)s->sum / ((double)s->n * s->spf) * 1e6, s->n, s->dmrs_corr * 1e6, (unsigned long)s->dmrs_n);
 }
 
 void nr_sfo_note_frame_read(int extra_samples, int samples_per_frame)
@@ -77,22 +102,23 @@ void nr_sfo_note_frame_read(int extra_samples, int samples_per_frame)
   /* a read longer or shorter than any oscillator can explain is a timing jump (rebase, resync), not drift */
   if (fabs((double)extra_samples) > NR_SFO_MAX_PPM * 1e-6 * samples_per_frame)
     return;
-  pthread_mutex_lock(&g_mu);
-  if (samples_per_frame != g_spf) { /* new numerology / bandwidth: start over */
-    g_n = g_w = 0;
-    g_sum = 0;
-    g_spf = samples_per_frame;
+  nr_sfo_state_t *s = &g_st;
+  pthread_mutex_lock(&s->mu);
+  if (samples_per_frame != s->spf) { /* new numerology / bandwidth: start over */
+    s->n = s->w = 0;
+    s->sum = 0;
+    s->spf = samples_per_frame;
   }
-  if (g_n == NR_SFO_WINDOW)
-    g_sum -= g_win[g_w];
+  if (s->n == NR_SFO_WINDOW)
+    s->sum -= s->win[s->w];
   else
-    g_n++;
-  g_win[g_w] = extra_samples;
-  g_sum += extra_samples;
-  g_w = (g_w + 1) % NR_SFO_WINDOW;
-  if ((++g_frames % 64) == 0)
-    publish_locked();
-  pthread_mutex_unlock(&g_mu);
+    s->n++;
+  s->win[s->w] = extra_samples;
+  s->sum += extra_samples;
+  s->w = (s->w + 1) % NR_SFO_WINDOW;
+  if ((++s->frames % 64) == 0)
+    publish_locked(s);
+  pthread_mutex_unlock(&s->mu);
 }
 
 void nr_sfo_note_dmrs_residual(double eps_residual, double weight)
@@ -101,19 +127,20 @@ void nr_sfo_note_dmrs_residual(double eps_residual, double weight)
     return;
   if (weight > 1)
     weight = 1;
-  pthread_mutex_lock(&g_mu);
+  nr_sfo_state_t *s = &g_st;
+  pthread_mutex_lock(&s->mu);
   /* slow integrator: one grant moves the correction by at most 1 % of its residual */
-  g_dmrs_corr += 0.01 * weight * eps_residual;
-  if (g_dmrs_corr > 1e-6) g_dmrs_corr = 1e-6;
-  if (g_dmrs_corr < -1e-6) g_dmrs_corr = -1e-6;
-  if ((++g_dmrs_n % 256) == 0)
-    publish_locked();
-  pthread_mutex_unlock(&g_mu);
+  s->dmrs_corr += 0.01 * weight * eps_residual;
+  if (s->dmrs_corr > 1e-6) s->dmrs_corr = 1e-6;
+  if (s->dmrs_corr < -1e-6) s->dmrs_corr = -1e-6;
+  if ((++s->dmrs_n % 256) == 0)
+    publish_locked(s);
+  pthread_mutex_unlock(&s->mu);
 }
 
 int64_t nr_sfo_eps_q(void)
 {
-  return atomic_load_explicit(&g_eps_q, memory_order_acquire);
+  return atomic_load_explicit(&g_st.eps_q, memory_order_acquire);
 }
 
 double nr_sfo_eps(void)
