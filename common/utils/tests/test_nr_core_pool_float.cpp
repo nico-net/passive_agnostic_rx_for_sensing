@@ -132,32 +132,41 @@ TEST(FloatLane, NCellsOfWorkersLeasePerJobNeverAcrossTheWait)
 TEST(FloatLane, ChunkedHouseJobYieldsToAnUrgentWaiter)
 {
   SiteGuard g(5);
-  // fill the pool: 4 DISC holders + this thread (HOUSE)
-  std::atomic<bool> release_disc{false};
-  std::atomic<int> disc_in{0};
+  // 5 tokens; the last free token is the scan reserve and low classes need busy < N-2, so: a HOUSE job thread, then 3 DL decodes; a fourth DECODE has to wait
+  std::atomic<bool> release_dl{false}, job_has_token{false}, yielded{false}, reacquired{false}, urgent_done{false};
+  std::atomic<int> dl_in{0};
+  std::thread job([&] {
+    ASSERT_GE(nr_pool_site_float_acquire(NR_POOL_HOUSE, 0, 0), 0);
+    job_has_token = true;
+    EXPECT_FALSE(nr_pool_site_float_yield()); // nobody waits: no yield
+    wait_until([&] { return nr_pool_total_waiting(g.p) >= 1; });
+    yielded = nr_pool_site_float_yield(); // step boundary: the token goes to the decode waiter, then the job re-acquires (blocks until a DL ends)
+    reacquired = nr_pool_holds(g.p);
+    nr_pool_site_float_release();
+  });
+  wait_until([&] { return job_has_token.load(); });
   std::vector<std::thread> holders;
-  for (int i = 0; i < 4; i++)
+  for (int i = 0; i < 3; i++)
     holders.emplace_back([&] {
-      nr_pool_site_float_acquire(NR_POOL_DISC, 0, 0);
-      disc_in++;
-      while (!release_disc) usleep(200);
-      nr_pool_site_float_release();
+      nr_pool_acquire(g.p, NR_POOL_DECODE, 0, 0);
+      dl_in++;
+      while (!release_dl) usleep(200);
+      nr_pool_release(g.p);
     });
-  wait_until([&] { return disc_in == 4; });
-  ASSERT_GE(nr_pool_site_float_acquire(NR_POOL_HOUSE, 0, 0), 0);
-  EXPECT_FALSE(nr_pool_site_float_yield()); // nobody waits
-  std::atomic<bool> urgent_done{false};
+  wait_until([&] { return dl_in == 3; });
   std::thread urgent([&] {
     nr_pool_acquire(g.p, NR_POOL_DECODE, 0, 0);
     urgent_done = true;
     nr_pool_release(g.p);
   });
-  wait_until([&] { return nr_pool_total_waiting(g.p) >= 1; });
-  EXPECT_TRUE(nr_pool_site_float_yield()); // step boundary: the token goes to the decode waiter, the job re-acquires
-  wait_until([&] { return urgent_done.load(); });
-  EXPECT_TRUE(nr_pool_holds(g.p)); // re-acquired after the yield
-  nr_pool_site_float_release();
-  release_disc = true;
+  wait_until([&] { return urgent_done.load(); }); // got the job's token at its step boundary
+  release_dl = true;
+  job.join();
   urgent.join();
   for (auto &t : holders) t.join();
+  EXPECT_TRUE(yielded.load());
+  EXPECT_TRUE(reacquired.load());
+  nr_pool_stats_t st;
+  nr_pool_stats(g.p, &st);
+  EXPECT_EQ(st.yields, 1u);
 }

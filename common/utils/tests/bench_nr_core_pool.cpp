@@ -306,8 +306,8 @@ int main(int argc, char **argv)
     auto &w = fst[i].wait, &x = fst[i].str;
     const FSpec &sp = kF[i % nf0];
     char fn[24];
-    snprintf(fn, sizeof(fn), ncell > 1 ? "c%zu %s" : "%.0s%s", i / nf0, sp.name);
-    if (ncell == 1) snprintf(fn, sizeof(fn), "%s", sp.name);
+    if (ncell > 1) snprintf(fn, sizeof(fn), "c%zu %s", i / nf0, sp.name);
+    else snprintf(fn, sizeof(fn), "%s", sp.name);
     if (w.empty()) { printf("  F %-9s no jobs\n", fn); continue; }
     std::sort(w.begin(), w.end()); std::sort(x.begin(), x.end());
     auto q = [](std::vector<uint64_t> &v, double f) { return v[std::min(v.size() - 1, (size_t)(f * (double)v.size()))] / 1000.0; };
