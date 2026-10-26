@@ -27,68 +27,84 @@ common/utils/nr_core_pool.c	584	g_once	file_static	pthread_once_t	PROCESS	B1	pro
 common/utils/nr_core_pool.c	680	nr_pool_site_filter_core::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 common/utils/nr_core_pool.c	687	tl_give	tls	int	TLS	B1	existing thread-local
 common/utils/nr_core_pool.c	756	nr_pool_site_enforce_tick::next	func_static	_Atomic uint64_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-executables/nr-ue.c	6	nr_ue_rx_synced_g	global	int	UNCLASSIFIED	A8	
-executables/nr-ue.c	68	nr_ue_diag_producer_absolute_slot	global	_Atomic long	UNCLASSIFIED	A8	
-executables/nr-ue.c	69	nr_ue_diag_producer_wall_ns	global	_Atomic long	UNCLASSIFIED	A8	
-executables/nr-ue.c	450	RU_write::deadline_warning_rate_limit	func_static	unsigned int	UNCLASSIFIED	A8	
-executables/nr-ue.c	813	readFrame::ring_epoch_get	func_static	uint64_t (*)(void)	UNCLASSIFIED	A8	
-executables/nr-ue.c	814	readFrame::ring_epoch_checked	func_static	bool	UNCLASSIFIED	A8	
-executables/nr-ue.c	883	nr_ue_pending_rebase_delta	global	_Atomic long	UNCLASSIFIED	A8	
-executables/nr-ue.c	884	nr_ue_pending_rebase_valid	global	_Atomic int	UNCLASSIFIED	A8	
-executables/nr-ue.c	887	nr_ue_rebase_epoch	global	_Atomic int	UNCLASSIFIED	A8	
-executables/nr-ue.c	892	nr_ue_diag_rf_timestamp	global	_Atomic long	UNCLASSIFIED	A8	
-executables/nr-ue.c	893	nr_ue_diag_samples_consumed	global	_Atomic long	UNCLASSIFIED	A8	
-executables/nr-ue.c	898	nr_ue_timing_mutation_log::left	func_static	int	UNCLASSIFIED	A8	
-executables/nr-ue.c	919	g_census_pow	file_static	double	UNCLASSIFIED	A8	
-executables/nr-ue.c	920	g_census_pow_n	file_static	long	UNCLASSIFIED	A8	
-executables/nr-ue.c	929	g_census_pow_ant	file_static	double[CENSUS_MAX_ANT]	UNCLASSIFIED	A8	
-executables/nr-ue.c	939	g_census_pw2_ant	file_static	double[CENSUS_MAX_ANT]	UNCLASSIFIED	A8	
-executables/nr-ue.c	940	g_census_clip_ant	file_static	uint64_t[CENSUS_MAX_ANT]	UNCLASSIFIED	A8	
-executables/nr-ue.c	941	g_census_peak_ant	file_static	int32_t[CENSUS_MAX_ANT]	UNCLASSIFIED	A8	
-executables/nr-ue.c	942	g_census_hot_ant	file_static	uint64_t[CENSUS_MAX_ANT]	UNCLASSIFIED	A8	
-executables/nr-ue.c	945	g_cls_clip	file_static	uint64_t[3][CENSUS_MAX_ANT][3][CENSUS_MAX_ANT]	UNCLASSIFIED	A8	
-executables/nr-ue.c	945	g_cls_hot	file_static	uint64_t[3][CENSUS_MAX_ANT][3][CENSUS_MAX_ANT]	UNCLASSIFIED	A8	
-executables/nr-ue.c	945	g_cls_n	file_static	uint64_t[3][CENSUS_MAX_ANT]	UNCLASSIFIED	A8	
-executables/nr-ue.c	946	g_cls_pw	file_static	double[3][CENSUS_MAX_ANT]	UNCLASSIFIED	A8	
-executables/nr-ue.c	947	g_cls_tclip	file_static	uint64_t[3][CENSUS_MAX_ANT][3][CENSUS_MAX_ANT]	UNCLASSIFIED	A8	
-executables/nr-ue.c	947	g_cls_thot	file_static	uint64_t[3][CENSUS_MAX_ANT][3][CENSUS_MAX_ANT]	UNCLASSIFIED	A8	
-executables/nr-ue.c	947	g_cls_tn	file_static	uint64_t[3][CENSUS_MAX_ANT]	UNCLASSIFIED	A8	
-executables/nr-ue.c	948	g_census_fs	file_static	int	UNCLASSIFIED	A8	
-executables/nr-ue.c	949	g_census_smp_ant	file_static	uint64_t[CENSUS_MAX_ANT]	UNCLASSIFIED	A8	
-executables/nr-ue.c	950	g_census_pw2_n	file_static	uint64_t	UNCLASSIFIED	A8	
-executables/nr-ue.c	955	g_pwr_ref_fn	file_static	double (*)(int)	UNCLASSIFIED	A8	
-executables/nr-ue.c	956	g_pwr_ref_looked_up	file_static	int	UNCLASSIFIED	A8	
-executables/nr-ue.c	965	g_census_pow_ant_n	file_static	long	UNCLASSIFIED	A8	
-executables/nr-ue.c	966	g_census_ssb_slots	file_static	long	UNCLASSIFIED	A8	
-executables/nr-ue.c	967	g_census_slots	file_static	long	UNCLASSIFIED	A8	
-executables/nr-ue.c	1390	UE_thread::s_band_scan_attempts	func_static	int	UNCLASSIFIED	A8	
-executables/nr-ue.c	1684	UE_thread::s_rxts_prev_consumed	func_static	long	UNCLASSIFIED	A8	
-executables/nr-ue.c	1685	UE_thread::s_rxts_discont_total	func_static	long	UNCLASSIFIED	A8	
-executables/nr-ue.c	1686	UE_thread::ring_epoch_get	func_static	uint64_t (*)(void)	UNCLASSIFIED	A8	
-executables/nr-ue.c	1687	UE_thread::ring_epoch_checked	func_static	int	UNCLASSIFIED	A8	
-executables/nr-ue.c	1688	UE_thread::ring_epoch_seen	func_static	uint64_t	UNCLASSIFIED	A8	
-executables/nr-ue.c	1689	UE_thread::ring_epoch_seen_valid	func_static	bool	UNCLASSIFIED	A8	
-executables/nr-ue.c	1960	UE_thread::s_ref	func_static	double	UNCLASSIFIED	A8	
-executables/nr-ue.c	1961	UE_thread::s_bad	func_static	int	UNCLASSIFIED	A8	
-executables/nr-ue.c	1962	UE_thread::s_fires	func_static	long	UNCLASSIFIED	A8	
-executables/nr-ue.c	2070	UE_thread::cn	func_static	const char *const[3]	CONST	A8	auto
-executables/nr-ue.c	2172	UE_thread::s_reinits	func_static	int	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	61	config_frames	global	unsigned short[4]	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	95	thread_struct	global	THREAD_STRUCT	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	96	nrUE_params	global	nrUE_params_t	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	100	RC	global	RAN_CONTEXT_t	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	101	oai_exit	global	int	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	103	downlink_frequency	global	uint64_t[MAX_NUM_CCs][4]	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	104	uplink_frequency_offset	global	int64_t[MAX_NUM_CCs][4]	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	105	sidelink_frequency	global	uint64_t[MAX_NUM_CCs][4]	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	108	cpuf	global	double	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	166	fo_given	file_static	int	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	166	ssb_given	file_static	int	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	250	trigger_deregistration::deregistration_sent	func_static	bool	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	261	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
-executables/nr-uesoftmodem.c	274	NB_UE_INST	global	int	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	275	uniqCfg	global	configmodule_interface_t *	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	276	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	UNCLASSIFIED	A8	
+executables/nr-ue-ru.c	22	s_band_scan_c	file_static	uint64_t[NRUE_BAND_SCAN_MAX]	PROCESS	A8	band-wide search of the started cell (no -C): process mode, cell 0 only
+executables/nr-ue-ru.c	23	s_band_scan_i	file_static	int	PROCESS	A8	band-wide search of the started cell (no -C): process mode, cell 0 only
+executables/nr-ue-ru.c	23	s_band_scan_n	file_static	int	PROCESS	A8	band-wide search of the started cell (no -C): process mode, cell 0 only
+executables/nr-ue-ru.c	97	nrue_cell_count	file_static	int	PROCESS	A8	cell/RU table of all UE instances (indexed by cell id; A8 appends cells before RX)
+executables/nr-ue-ru.c	98	nrue_cells	file_static	nrUE_cell_params_t *	PROCESS	A8	cell/RU table of all UE instances (indexed by cell id; A8 appends cells before RX)
+executables/nr-ue-ru.c	99	nrue_cell_fp	file_static	NR_DL_FRAME_PARMS *	PROCESS	A8	cell/RU table of all UE instances (indexed by cell id; A8 appends cells before RX)
+executables/nr-ue-ru.c	101	nrue_ru_count	file_static	int	PROCESS	A8	RU table size (indexed by ru id)
+executables/nr-ue-ru.c	102	nrue_rus	file_static	nrUE_RU_params_t *	PROCESS	A8	RU table (indexed by ru id)
+executables/nr-ue-ru.c	104	openair0_cfg_g	global	openair0_config_t[MAX_CARDS]	PROCESS	A8	device table indexed by RU (= cell) id
+executables/nr-ue-ru.c	105	openair0_dev	file_static	openair0_device_t[MAX_CARDS]	PROCESS	A8	device table indexed by RU (= cell) id
+executables/nr-ue-ru.c	108	s_ru_ring	file_static	bool[MAX_CARDS]	PROCESS	A8	A8: per-RU flag table (ring consumer), indexed by RU id
+executables/nr-ue-ru.c	148	rf_fail_after_reads	file_static	unsigned long	PROCESS	A8	shutdown test fault injection (test build only)
+executables/nr-ue-ru.c	149	rf_read_count	file_static	atomic_ulong	PROCESS	A8	shutdown test fault injection (test build only)
+executables/nr-ue-ru.c	851	s_radio_fo	file_static	_Atomic int [converted]	PER_CELL	A8	converted A8: frequency offset the cell RU is tuned by
+executables/nr-ue-ru.c	928	nrue_ru_test_device::ru	func_static	nrUE_RU_params_t	PROCESS	A8	test fixture (NRUE_RU_SHUTDOWN_TEST)
+executables/nr-ue-ru.c	929	nrue_ru_test_device::cell	func_static	nrUE_cell_params_t	PROCESS	A8	test fixture (NRUE_RU_SHUTDOWN_TEST)
+executables/nr-ue.c	6	nr_ue_rx_synced_g	global	int	PROCESS	A8	read by the USRP driver (dlsym) to bound pre-sync radio restarts: radio-wide, set when any cell syncs
+executables/nr-ue.c	454	RU_write::deadline_warning_rate_limit	func_static	unsigned int	PROCESS	A8	log rate limit (log text only)
+executables/nr-ue.c	817	readFrame::ring_epoch_get	func_static	uint64_t (*)(void)	PROCESS	A8	dlsym cache of the radio ring epoch function (same symbol for all cells)
+executables/nr-ue.c	818	readFrame::ring_epoch_checked	func_static	bool	PROCESS	A8	dlsym cache of the radio ring epoch function (same symbol for all cells)
+executables/nr-ue.c	890	nr_ue_rebase_epoch	file_static	_Atomic int [converted]	PER_CELL	A8	converted A8: timing rebase epoch of the cell
+executables/nr-ue.c	896	nr_ue_diag_rf_timestamp	file_static	_Atomic long [converted]	PER_CELL	A8	converted A8: stream position / consumed samples of the cell
+executables/nr-ue.c	898	nr_ue_diag_samples_consumed	file_static	_Atomic long [converted]	PER_CELL	A8	converted A8: stream position / consumed samples of the cell
+executables/nr-ue.c	904	nr_ue_timing_mutation_log::left	func_static	int	PROCESS	A8	log budget (log text only)
+executables/nr-ue.c	926	g_census_pow	file_static	double [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	928	g_census_pow_n	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	942	g_census_pow_ant	file_static	g_census_dant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	953	g_census_pw2_ant	file_static	g_census_dant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	955	g_census_clip_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	958	g_census_peak_ant	file_static	g_census_iant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	960	g_census_hot_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	964	g_cls_n	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	966	g_cls_clip	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	968	g_cls_hot	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	970	g_cls_pw	file_static	g_cls_d_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	972	g_cls_tn	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	974	g_cls_tclip	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	976	g_cls_thot	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	978	g_census_fs	file_static	int [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	980	g_census_smp_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	982	g_census_pw2_n	file_static	uint64_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	988	g_pwr_ref_fn	file_static	double (*)(int)	PROCESS	A8	dlsym cache of the radio power reference (radio-wide)
+executables/nr-ue.c	989	g_pwr_ref_looked_up	file_static	int	PROCESS	A8	dlsym cache of the radio power reference (radio-wide)
+executables/nr-ue.c	998	g_census_pow_ant_n	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1000	g_census_ssb_slots	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1002	g_census_slots	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1428	UE_thread::s_band_scan_attempts	func_static	int	PROCESS	A8	band-wide search of the started cell (process mode, cell 0 only)
+executables/nr-ue.c	1723	UE_thread::s_rxts_prev_consumed	func_static	long [converted]	PER_CELL	A8	converted A8: stream continuity of the cell
+executables/nr-ue.c	1725	UE_thread::s_rxts_discont_total	func_static	long [converted]	PER_CELL	A8	converted A8: stream continuity of the cell
+executables/nr-ue.c	1727	UE_thread::ring_epoch_get	func_static	uint64_t (*)(void)	PROCESS	A8	dlsym cache (same symbol for all cells)
+executables/nr-ue.c	1728	UE_thread::ring_epoch_checked	func_static	int	PROCESS	A8	dlsym cache flag
+executables/nr-ue.c	1729	UE_thread::ring_epoch_seen	func_static	uint64_t [converted]	PER_CELL	A8	converted A8: last ring epoch seen by this cell slot thread
+executables/nr-ue.c	1731	UE_thread::ring_epoch_seen_valid	func_static	bool [converted]	PER_CELL	A8	converted A8: last ring epoch seen by this cell slot thread
+executables/nr-ue.c	2004	UE_thread::s_ref	func_static	double [converted]	PER_CELL	A8	converted A8: signal reference of the cell stream
+executables/nr-ue.c	2006	UE_thread::s_bad	func_static	int [converted]	PER_CELL	A8	converted A8
+executables/nr-ue.c	2008	UE_thread::s_fires	func_static	long [converted]	PER_CELL	A8	converted A8
+executables/nr-ue.c	2117	UE_thread::cn	func_static	const char *const[3]	CONST	A8	auto
+executables/nr-ue.c	2219	UE_thread::s_reinits	func_static	int	PROCESS	A8	full device re-init budget: nrue_ru_reinit re-opens every RU (radio-wide)
+executables/nr-uesoftmodem.c	61	config_frames	global	unsigned short[4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	104	thread_struct	global	THREAD_STRUCT	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	105	nrUE_params	global	nrUE_params_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	109	RC	global	RAN_CONTEXT_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	110	oai_exit	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	112	downlink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	113	uplink_frequency_offset	global	int64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	114	sidelink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	117	cpuf	global	double	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	175	fo_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	175	ssb_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	246	g_cells	file_static	nr_cell_life_t	PROCESS	A8	A8: cell lifecycle (owner of the cell manager; one control thread)
+executables/nr-uesoftmodem.c	247	g_ncells	file_static	int	PROCESS	A8	A8: number of served cells
+executables/nr-uesoftmodem.c	248	g_inv_watch	file_static	nr_cell_inventory_watch_t	PROCESS	A8	A8: cells.json watcher (one control thread)
+executables/nr-uesoftmodem.c	249	g_uectx_path	file_static	char[PATH_MAX + 32]	PROCESS	A8	A8: cell 0 uectx path; cells k>0 derive theirs with nr_cell_path
+executables/nr-uesoftmodem.c	535	trigger_deregistration::deregistration_sent	func_static	bool	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	546	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
+executables/nr-uesoftmodem.c	559	NB_UE_INST	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	560	uniqCfg	global	configmodule_interface_t *	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	561	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_COLS	global	constexpr uint32_t	CONST	G1	auto
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_ROWS	global	constexpr uint32_t	CONST	G1	auto
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_Z	global	constexpr uint32_t	CONST	G1	auto
@@ -174,6 +190,7 @@ openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1155	pool_launch::uint64_t	func_
 openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c	29	g_ul_branch_tab	file_static	nr_ul_branch_tab_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c	31	g_ul_branch_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c	270	nr_pusch_mmse_mode::mode	func_static	int	PROCESS	A6	cache of the softmodem mode (IS_PASSIVE_RX_MODE), identical for all cells
+openair1/PHY/NR_UE_ESTIMATION/nr_adjust_synch_ue.c	115	nr_adjust_synch_ue::s_gr_cnt	func_static	int [converted]	PER_CELL	A8	converted A8: timing loop of the cell
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	192	nr_pdcch_blind_llr_autoscale	global	_Atomic int	PROCESS	A3	mode flag set once at start by the blind monitor (identical for every cell); extern in nr_pdcch_blind_monitor_rt.c
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	193	nr_pdcch_blind_dmrs_probe	global	_Atomic int	PROCESS	A3	mode flag set once at start by the blind monitor (identical for every cell); extern in nr_pdcch_blind_monitor_rt.c
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	194	g_dmrs_hot_cce	tls	int	TLS	A3	existing thread-local
@@ -343,6 +360,12 @@ openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe.c	220	nr_syncq_enabled::e	func_
 openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe_rt.c	62	g	file_static	g_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe_rt.c	185	worker::names	func_static	const char *[]	CONST	A4	name table, never written
 openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe_rt.c	248	nr_dl_traffic_probe_push::start_mu	func_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
+openair1/PHY/NR_UE_TRANSPORT/nr_early_start.c	6	nr_es_tls_early	tls	int	TLS	A8	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_early_start.c	7	nr_es_tls_symbols_per_slot	tls	int	TLS	A8	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_early_start.c	8	nr_es_banks_cells	global	nr_es_banks_t[NR_CELL_MAX]	PER_CELL	A8	converted A8: one instance per cell (array indexed by nr_cell_idx() through the header macro)
+openair1/PHY/NR_UE_TRANSPORT/nr_early_start.c	9	nr_es_progress_cells	global	nr_es_progress_t[NR_CELL_MAX]	PER_CELL	A8	converted A8: one instance per cell (array indexed by nr_cell_idx() through the header macro)
+openair1/PHY/NR_UE_TRANSPORT/nr_early_start.c	10	nr_es_done_cells	global	nr_es_done_t[NR_CELL_MAX]	PER_CELL	A8	converted A8: one instance per cell (array indexed by nr_cell_idx() through the header macro)
+openair1/PHY/NR_UE_TRANSPORT/nr_early_start.c	11	nr_slot_gate_cells	global	nr_slot_gate_t[NR_CELL_MAX]	PER_CELL	A8	converted A8: one instance per cell (array indexed by nr_cell_idx() through the header macro)
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_cell.c	57	nr_gpu_cell_kind_name::n	func_static	const char *const[NR_GPU_CELL_KIND_N]	CONST	G1	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	16	g_dft	file_static	nr_isa_dftfn_t	UNCLASSIFIED	G1	
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	16	g_idft	file_static	nr_isa_dftfn_t	UNCLASSIFIED	G1	
@@ -1151,36 +1174,36 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	TIMERS	global	constexpr int	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	25	CAND_CAP	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	25	STAT	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	947	ops	global	const nr_pdcch_nid_ops_t	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	73	g_ring	file_static	g_ring_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	75	g_depth	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	77	g_head	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	79	g_tail	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	81	g_count	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	84	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	86	g_cv	file_static	pthread_cond_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	98	g_side	file_static	g_side_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	100	g_side_posted	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	102	g_side_done	file_static	pthread_cond_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	104	g_side_n	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	106	g_side_taken	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	108	g_nthreads	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	111	g_running	file_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	113	g_stop	file_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	115	g_queued	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	117	g_processed	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	119	g_dropped_full	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	121	g_dropped_stale	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	123	g_dropped_epoch	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	125	g_max_lag	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	130	g_lag_hist	file_static	g_lag_hist_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	132	g_fresh_picks	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	136	nr_passive_lag_bin::edge	func_static	const long[NR_PASSIVE_LAG_BINS - 1]	CONST	A4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	149	g_spin_pred	file_static	nr_spin_pred_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	153	g_threads	file_static	g_threads_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	155	g_ue	file_static	PHY_VARS_NR_UE * [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	163	g_args	file_static	g_args_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	300	nr_pdcch_passive_queue_thread::h	func_static	h_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	302	nr_pdcch_passive_queue_thread::n_occ	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	72	g_ring	file_static	g_ring_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	74	g_depth	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	76	g_head	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	78	g_tail	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	80	g_count	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	83	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	85	g_cv	file_static	pthread_cond_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	97	g_side	file_static	g_side_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	99	g_side_posted	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	101	g_side_done	file_static	pthread_cond_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	103	g_side_n	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	105	g_side_taken	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	107	g_nthreads	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	110	g_running	file_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	112	g_stop	file_static	_Atomic int [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	114	g_queued	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	116	g_processed	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	118	g_dropped_full	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	120	g_dropped_stale	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	122	g_dropped_epoch	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	124	g_max_lag	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	129	g_lag_hist	file_static	g_lag_hist_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	131	g_fresh_picks	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	135	nr_passive_lag_bin::edge	func_static	const long[NR_PASSIVE_LAG_BINS - 1]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	148	g_spin_pred	file_static	nr_spin_pred_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	152	g_threads	file_static	g_threads_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	154	g_ue	file_static	PHY_VARS_NR_UE * [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	162	g_args	file_static	g_args_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	299	nr_pdcch_passive_queue_thread::h	func_static	h_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	301	nr_pdcch_passive_queue_thread::n_occ	func_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: counter/telemetry or throttle of this cell's scan (cell A's logs and rates stay independent of cell B)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c	11	g_prior	file_static	nr_pdcch_sib1_prior_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c	26	nr_pdcch_sib1_prior_set::logged	func_static	bool [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	50	g_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
@@ -1712,128 +1735,128 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	204	g_lock	file_static	pth
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	206	g_cv	file_static	pthread_cond_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	208	g_idle	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	211	g_spin_pred	file_static	nr_spin_pred_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	215	g_queued	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	217	g_slot_groups	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	236	g_scan_cache	file_static	g_scan_cache_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	238	g_scan_last_abs	file_static	int64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	240	g_scan_n	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	242	g_scan_hits	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	244	g_scan_us	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	246	g_pool_n	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	248	g_pool_us	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	250	g_scan_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	273	g_dq	file_static	g_dq_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	275	g_dq_head	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	277	g_dq_n	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	279	g_dq_started	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	281	g_dq_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	283	g_dq_cv	file_static	pthread_cond_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	285	g_dq_thr	file_static	pthread_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	287	g_dscan_dropped	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	411	g_decoded	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	413	g_cb_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	415	g_cb_tried	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	417	g_cb_total	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	419	g_crc_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	440	g_cs_dmrs	file_static	g_cs_dmrs_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	442	g_cs_dmrs_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	498	g_dl_dmrs_id	file_static	g_dl_dmrs_id_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	501	g_dl_dmrs_id_init	file_static	g_dl_dmrs_id_init_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	504	g_dl_dmrs_id_lock	file_static	g_dl_dmrs_id_lock_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	507	g_dl_rank_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	510	g_rank_n	file_static	g_rank_n_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	513	g_rank_low	file_static	g_rank_low_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	515	g_rank_total	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	518	g_rank_sum	file_static	g_rank_sum_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	521	g_cdm_empty	file_static	g_cdm_empty_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	524	g_cdm_sum	file_static	g_cdm_sum_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	541	g_nl_ok	file_static	g_nl_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	543	g_rank_verdict_logged	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	591	g_rnti_dec	file_static	g_rnti_dec_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	594	g_rnti_ok	file_static	g_rnti_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	608	g_dropped_full	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	610	g_dropped_narrow	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	612	g_dropped_stale	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	614	g_stale_after_decode	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	620	g_dropped_epoch	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	622	g_max_lag	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	625	g_running	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	627	g_stop	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	629	g_nthreads	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	632	g_threads	file_static	g_threads_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	634	g_ue	file_static	PHY_VARS_NR_UE * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	643	g_rxdataF	file_static	g_rxdataF_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	648	g_fep_gen	file_static	g_fep_gen_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	650	g_rxdataF_gw	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	658	g_args	file_static	g_args_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	676	g_rar_tc	file_static	g_rar_tc_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	678	g_rar_tc_head	file_static	unsigned [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	680	g_rar_tc_wrap	file_static	uint32_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	682	g_rar_tc_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	839	g_k0_probes	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	841	g_k0_probe_retained	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	843	g_k0_probe_retained_max	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	845	g_k0_probe_hits	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	888	g_bc9_jobs	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	890	g_bc9_cert	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	892	g_bc9_cert_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	894	g_bc9_nosib	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	896	g_bc9_nodci	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	898	g_bc9_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	900	g_bc9_alarm	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	903	g_bc9_cert_ok_k0	file_static	g_bc9_cert_ok_k0_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	909	g_bc9_cpk	file_static	g_bc9_cpk_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	911	g_bc9_cpk_clock	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	913	g_bc9_cpk_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	940	nr_pdsch_passive_bc12_census::sn	func_static	const char *const[]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	941	nr_pdsch_passive_bc12_census::dn	func_static	const char *const[]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1044	g_bc9d_confirms	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1046	g_bc9d_missed	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1048	g_bc9d_repeat	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1050	g_bc9d_tdd	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1052	g_bc9d_tdd_applied	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1054	g_bc9d_adj_rows	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1056	g_bc9d_adj_removed	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1058	g_bc9d_adj_refused	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1066	g_bc9_tdd_cache	file_static	g_bc9_tdd_cache_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1068	g_bc9_tdd_cache_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1127	nr_pdsch_passive_bc9_confirm::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1164	nr_pdsch_passive_oracle_inline::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1237	g_cdmrs_q	file_static	nr_bgq_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1241	cdmrs_async_on::on	func_static	int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1305	g_rsnap	file_static	g_rsnap_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1308	g_rsnap_free	file_static	g_rsnap_free_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1310	g_rsnap_nfree	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1312	g_rsnap_n	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1314	g_rsnap_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1316	g_recov_ok	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1318	g_recov_nosnap	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1626	nr_pdsch_passive_queue_thread::s_gate_n	func_static	_Atomic uint32_t	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1644	nr_pdsch_passive_queue_thread::s_oracle_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1669	nr_pdsch_passive_queue_thread::s_probe_tick	func_static	_Atomic uint32_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1671	nr_pdsch_passive_queue_thread::t_probe	tls	c16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1716	nr_pdsch_passive_queue_thread::s_k0_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1777	nr_pdsch_passive_queue_thread::s_left	func_static	_Atomic int	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1916	nr_pdsch_passive_queue_thread::s_probe_n	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1918	nr_pdsch_passive_queue_thread::s_probe_ok	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2001	nr_pdsch_passive_queue_thread::s_dl_scr_confirmed	func_static	bool [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2103	nr_pdsch_passive_queue_thread::s_dl_dmrs_nid	func_static	_Atomic int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2274	t_recov_dec	tls	const nr_pdsch_passive_decode_result_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2276	g_recov_fb	file_static	g_recov_fb_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2358	recov_run::rxF	tls	c16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2610	g_pending	file_static	g_pending_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2613	g_pending_ns	file_static	g_pending_ns_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2615	g_n_pending	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2620	g_pending_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2622	g_batches	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2624	g_batches_multi	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2681	nr_a2e_ts	tls	uint64_t[9]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2682	nr_a2e_bank	tls	int8_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2682	nr_a2e_kind	tls	int8_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2683	nr_a2e_stg	tls	uint32_t[NR_A2E_STG]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2719	nr_pdsch_passive_queue_enqueue::c_	func_static	_Atomic unsigned long	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2736	g_age_hist	file_static	g_age_hist_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2738	g_dropped_probe	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	214	g_queued	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	216	g_slot_groups	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	235	g_scan_cache	file_static	g_scan_cache_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	237	g_scan_last_abs	file_static	int64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	239	g_scan_n	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	241	g_scan_hits	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	243	g_scan_us	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	245	g_pool_n	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	247	g_pool_us	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	249	g_scan_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	272	g_dq	file_static	g_dq_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	274	g_dq_head	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	276	g_dq_n	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	278	g_dq_started	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	280	g_dq_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	282	g_dq_cv	file_static	pthread_cond_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	284	g_dq_thr	file_static	pthread_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	286	g_dscan_dropped	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	410	g_decoded	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	412	g_cb_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	414	g_cb_tried	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	416	g_cb_total	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	418	g_crc_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	439	g_cs_dmrs	file_static	g_cs_dmrs_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	441	g_cs_dmrs_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	497	g_dl_dmrs_id	file_static	g_dl_dmrs_id_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	500	g_dl_dmrs_id_init	file_static	g_dl_dmrs_id_init_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	503	g_dl_dmrs_id_lock	file_static	g_dl_dmrs_id_lock_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	506	g_dl_rank_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	509	g_rank_n	file_static	g_rank_n_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	512	g_rank_low	file_static	g_rank_low_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	514	g_rank_total	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	517	g_rank_sum	file_static	g_rank_sum_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	520	g_cdm_empty	file_static	g_cdm_empty_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	523	g_cdm_sum	file_static	g_cdm_sum_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	540	g_nl_ok	file_static	g_nl_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	542	g_rank_verdict_logged	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	590	g_rnti_dec	file_static	g_rnti_dec_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	593	g_rnti_ok	file_static	g_rnti_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	607	g_dropped_full	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	609	g_dropped_narrow	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	611	g_dropped_stale	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	613	g_stale_after_decode	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	619	g_dropped_epoch	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	621	g_max_lag	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	624	g_running	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	626	g_stop	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	628	g_nthreads	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	631	g_threads	file_static	g_threads_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	633	g_ue	file_static	PHY_VARS_NR_UE * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	642	g_rxdataF	file_static	g_rxdataF_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	647	g_fep_gen	file_static	g_fep_gen_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	649	g_rxdataF_gw	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	657	g_args	file_static	g_args_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	675	g_rar_tc	file_static	g_rar_tc_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	677	g_rar_tc_head	file_static	unsigned [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	679	g_rar_tc_wrap	file_static	uint32_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	681	g_rar_tc_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	838	g_k0_probes	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	840	g_k0_probe_retained	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	842	g_k0_probe_retained_max	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	844	g_k0_probe_hits	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	887	g_bc9_jobs	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	889	g_bc9_cert	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	891	g_bc9_cert_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	893	g_bc9_nosib	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	895	g_bc9_nodci	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	897	g_bc9_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	899	g_bc9_alarm	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	902	g_bc9_cert_ok_k0	file_static	g_bc9_cert_ok_k0_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	908	g_bc9_cpk	file_static	g_bc9_cpk_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	910	g_bc9_cpk_clock	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	912	g_bc9_cpk_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	939	nr_pdsch_passive_bc12_census::sn	func_static	const char *const[]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	940	nr_pdsch_passive_bc12_census::dn	func_static	const char *const[]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1043	g_bc9d_confirms	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1045	g_bc9d_missed	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1047	g_bc9d_repeat	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1049	g_bc9d_tdd	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1051	g_bc9d_tdd_applied	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1053	g_bc9d_adj_rows	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1055	g_bc9d_adj_removed	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1057	g_bc9d_adj_refused	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1065	g_bc9_tdd_cache	file_static	g_bc9_tdd_cache_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1067	g_bc9_tdd_cache_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1126	nr_pdsch_passive_bc9_confirm::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1163	nr_pdsch_passive_oracle_inline::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1236	g_cdmrs_q	file_static	nr_bgq_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1240	cdmrs_async_on::on	func_static	int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1304	g_rsnap	file_static	g_rsnap_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1307	g_rsnap_free	file_static	g_rsnap_free_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1309	g_rsnap_nfree	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1311	g_rsnap_n	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1313	g_rsnap_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1315	g_recov_ok	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1317	g_recov_nosnap	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1625	nr_pdsch_passive_queue_thread::s_gate_n	func_static	_Atomic uint32_t	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1643	nr_pdsch_passive_queue_thread::s_oracle_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1668	nr_pdsch_passive_queue_thread::s_probe_tick	func_static	_Atomic uint32_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1670	nr_pdsch_passive_queue_thread::t_probe	tls	c16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1715	nr_pdsch_passive_queue_thread::s_k0_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1776	nr_pdsch_passive_queue_thread::s_left	func_static	_Atomic int	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1915	nr_pdsch_passive_queue_thread::s_probe_n	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1917	nr_pdsch_passive_queue_thread::s_probe_ok	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2000	nr_pdsch_passive_queue_thread::s_dl_scr_confirmed	func_static	bool [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2102	nr_pdsch_passive_queue_thread::s_dl_dmrs_nid	func_static	_Atomic int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2273	t_recov_dec	tls	const nr_pdsch_passive_decode_result_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2275	g_recov_fb	file_static	g_recov_fb_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2357	recov_run::rxF	tls	c16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2609	g_pending	file_static	g_pending_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2612	g_pending_ns	file_static	g_pending_ns_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2614	g_n_pending	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2619	g_pending_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2621	g_batches	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2623	g_batches_multi	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2680	nr_a2e_ts	tls	uint64_t[9]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2681	nr_a2e_bank	tls	int8_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2681	nr_a2e_kind	tls	int8_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2682	nr_a2e_stg	tls	uint32_t[NR_A2E_STG]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2718	nr_pdsch_passive_queue_enqueue::c_	func_static	_Atomic unsigned long	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2735	g_age_hist	file_static	g_age_hist_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2737	g_dropped_probe	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	27	g_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	29	g_cv	file_static	pthread_cond_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	31	g_q	file_static	entry_t * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
@@ -2161,8 +2184,8 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	36	cell_res	file_static	cell_res
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	38	cell_n	file_static	int [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	266	t_sweep_lo	tls	int	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	266	t_sweep_n	tls	int	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	82	g	global	Ctx	UNCLASSIFIED	A8	
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	83	budget	global	nr_dl_gpu_budget_t	UNCLASSIFIED	A8	
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	82	g	global	Ctx	PROCESS	A8	one GPU CB0 batch context and budget per process (G3: jobs must carry the cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	83	budget	global	nr_dl_gpu_budget_t	PROCESS	A8	one GPU CB0 batch context and budget per process (G3: jobs must carry the cell)
 openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	206	api	global	const nr_td_cb0_gpu_api_t	CONST	A8	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	63	g_job	file_static	g_job_cell_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	66	g_rnti	file_static	g_rnti_cell_t [converted]	PER_CELL	A6	converted (A6); HEAP, prealloc before the RX fence
@@ -2186,40 +2209,40 @@ openair1/PHY/TOOLS/dB_routines.c	32	bit_seach_mask	file_static	const uint32_t[32
 openair1/PHY/TOOLS/dB_routines.c	37	bit_seach_res	file_static	const uint32_t[32]	CONST	A8	auto
 openair1/PHY/TOOLS/dB_routines.c	39	dB_fix_x10_tbl	file_static	const uint32_t[128]	CONST	A8	auto
 openair1/PHY/TOOLS/dB_routines.c	44	dB_fix_x10_tbl_low	file_static	const uint32_t[128]	CONST	A8	auto
-openair1/PHY/TOOLS/dfts_load.c	20	shlib_fdesc	file_static	loader_shlibfunc_t[2]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/dfts_load.c	21	arg	file_static	char *[64]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/dfts_load.c	22	dft	global	dftfunc_t	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/dfts_load.c	23	idft	global	idftfunc_t	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/get_sin_cos.c	11	LUTSin	file_static	uint16_t[LUT_SIN_RESOL + 1]	UNCLASSIFIED	A8	
+openair1/PHY/TOOLS/dfts_load.c	20	shlib_fdesc	file_static	loader_shlibfunc_t[2]	PROCESS	A8	DFT library loader (one per process)
+openair1/PHY/TOOLS/dfts_load.c	21	arg	file_static	char *[64]	PROCESS	A8	DFT library loader (one per process)
+openair1/PHY/TOOLS/dfts_load.c	22	dft	global	dftfunc_t	PROCESS	A8	DFT library loader (one per process)
+openair1/PHY/TOOLS/dfts_load.c	23	idft	global	idftfunc_t	PROCESS	A8	DFT library loader (one per process)
+openair1/PHY/TOOLS/get_sin_cos.c	11	LUTSin	file_static	uint16_t[LUT_SIN_RESOL + 1]	PROCESS	A8	sine LUT filled once (InitSinLUT), identical for every cell
 openair1/PHY/TOOLS/invSqrt.c	5	lookup_table	file_static	const short[1025]	CONST	A8	auto
-openair1/PHY/TOOLS/lte_enb_scope.c	17	form_ue	global	FD_lte_phy_scope_ue *[NUMBER_OF_UE_MAX]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_enb_scope.c	18	form_enb	global	FD_lte_phy_scope_enb *[MAX_NUM_CCs][NUMBER_OF_UE_MAX]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_enb_scope.c	19	form_stats	global	FD_stats_form *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_enb_scope.c	19	form_stats_l2	global	FD_stats_form *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_enb_scope.c	20	title	global	char[255]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_enb_scope.c	21	scope_enb_num_ue	global	unsigned char	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_enb_scope.c	22	forms_thread	file_static	pthread_t	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope.c	14	rx_antenna_colors	global	FL_COLOR[4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope.c	16	tput_time_enb	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope.c	17	tput_enb	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope.c	18	tput_time_ue	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope.c	19	tput_ue	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope.c	20	tput_ue_max	global	float[NUMBER_OF_UE_MAX]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope_tm4.c	9	otg_enabled	global	int	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope_tm4.c	10	use_sic_receiver	global	int	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope_tm4.c	11	rx_antenna_colors	global	FL_COLOR[4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope_tm4.c	12	tput_time_enb	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope_tm4.c	13	tput_enb	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope_tm4.c	14	tput_time_ue	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope_tm4.c	15	tput_ue	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_phy_scope_tm4.c	16	tput_ue_max	global	float[NUMBER_OF_UE_MAX]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_ue_scope.c	18	form_ue	global	FD_lte_phy_scope_ue *[NUMBER_OF_UE_MAX]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_ue_scope.c	19	form_enb	global	FD_lte_phy_scope_enb *[MAX_NUM_CCs][NUMBER_OF_UE_MAX]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_ue_scope.c	20	form_stats	global	FD_stats_form *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_ue_scope.c	20	form_stats_l2	global	FD_stats_form *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_ue_scope.c	21	title	global	char[255]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_ue_scope.c	22	scope_enb_num_ue	global	unsigned char	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/lte_ue_scope.c	23	forms_thread	file_static	pthread_t	UNCLASSIFIED	A8	
+openair1/PHY/TOOLS/lte_enb_scope.c	17	form_ue	global	FD_lte_phy_scope_ue *[NUMBER_OF_UE_MAX]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_enb_scope.c	18	form_enb	global	FD_lte_phy_scope_enb *[MAX_NUM_CCs][NUMBER_OF_UE_MAX]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_enb_scope.c	19	form_stats	global	FD_stats_form *	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_enb_scope.c	19	form_stats_l2	global	FD_stats_form *	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_enb_scope.c	20	title	global	char[255]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_enb_scope.c	21	scope_enb_num_ue	global	unsigned char	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_enb_scope.c	22	forms_thread	file_static	pthread_t	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope.c	14	rx_antenna_colors	global	FL_COLOR[4]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope.c	16	tput_time_enb	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope.c	17	tput_enb	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope.c	18	tput_time_ue	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope.c	19	tput_ue	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope.c	20	tput_ue_max	global	float[NUMBER_OF_UE_MAX]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope_tm4.c	9	otg_enabled	global	int	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope_tm4.c	10	use_sic_receiver	global	int	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope_tm4.c	11	rx_antenna_colors	global	FL_COLOR[4]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope_tm4.c	12	tput_time_enb	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope_tm4.c	13	tput_enb	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope_tm4.c	14	tput_time_ue	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope_tm4.c	15	tput_ue	global	float[NUMBER_OF_UE_MAX][TPUT_WINDOW_LENGTH]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_phy_scope_tm4.c	16	tput_ue_max	global	float[NUMBER_OF_UE_MAX]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_ue_scope.c	18	form_ue	global	FD_lte_phy_scope_ue *[NUMBER_OF_UE_MAX]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_ue_scope.c	19	form_enb	global	FD_lte_phy_scope_enb *[MAX_NUM_CCs][NUMBER_OF_UE_MAX]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_ue_scope.c	20	form_stats	global	FD_stats_form *	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_ue_scope.c	20	form_stats_l2	global	FD_stats_form *	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_ue_scope.c	21	title	global	char[255]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_ue_scope.c	22	scope_enb_num_ue	global	unsigned char	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/lte_ue_scope.c	23	forms_thread	file_static	pthread_t	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
 openair1/PHY/TOOLS/nr_gpu_budget.c	10	once	file_static	pthread_once_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_gpu_budget.c	11	enabled	file_static	int	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_gpu_budget.c	12	deadline	file_static	unsigned	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
@@ -2283,13 +2306,13 @@ openair1/PHY/TOOLS/nr_host_membudget.c	390	g_usrp_ring_ms	file_static	_Atomic in
 openair1/PHY/TOOLS/nr_phy_scope.c	24	scope_enb_num_ue	file_static	const int	CONST	A8	auto
 openair1/PHY/TOOLS/nr_phy_scope.c	29	rx_antenna_colors	global	const FL_COLOR[4]	CONST	A8	auto
 openair1/PHY/TOOLS/nr_phy_scope.c	30	water_colors	global	const FL_COLOR[4]	CONST	A8	auto
-openair1/PHY/TOOLS/nr_phy_scope.c	661	phy_scope_gNB::rememberForm	func_static	OAI_phy_scope_t *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/nr_phy_scope.c	1073	phy_scope_nrUE::remeberForm	func_static	OAI_phy_scope_t *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts.c	22	sr_twiddle_mutex	file_static	pthread_mutex_t	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts.c	465	g_tables	file_static	TwiddleTable[MAX_N + 1]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts.c	727	twiddle_table_mutex	file_static	pthread_mutex_t	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts.c	766	sr_twiddles_fwd	file_static	sr_twiddle_simd_t[SR_MAX_LOG2 + 1]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts.c	767	sr_twiddles_bwd	file_static	sr_twiddle_simd_t[SR_MAX_LOG2 + 1]	UNCLASSIFIED	A8	
+openair1/PHY/TOOLS/nr_phy_scope.c	661	phy_scope_gNB::rememberForm	func_static	OAI_phy_scope_t *	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/nr_phy_scope.c	1073	phy_scope_nrUE::remeberForm	func_static	OAI_phy_scope_t *	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
+openair1/PHY/TOOLS/oai_dfts.c	22	sr_twiddle_mutex	file_static	pthread_mutex_t	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts.c	465	g_tables	file_static	TwiddleTable[MAX_N + 1]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts.c	727	twiddle_table_mutex	file_static	pthread_mutex_t	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts.c	766	sr_twiddles_fwd	file_static	sr_twiddle_simd_t[SR_MAX_LOG2 + 1]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts.c	767	sr_twiddles_bwd	file_static	sr_twiddle_simd_t[SR_MAX_LOG2 + 1]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
 openair1/PHY/TOOLS/oai_dfts.c	1614	W16_1_RE_RE	file_static	const int16_t[8]	CONST	A8	auto
 openair1/PHY/TOOLS/oai_dfts.c	1617	W16_1_IM_SIGNED	file_static	const int16_t[8]	CONST	A8	auto
 openair1/PHY/TOOLS/oai_dfts.c	1621	W16_2_RE_RE	file_static	const int16_t[8]	CONST	A8	auto
@@ -2337,13 +2360,13 @@ openair1/PHY/TOOLS/oai_dfts_neon.c	208	W15s	file_static	const int16_t[16]	CONST	
 openair1/PHY/TOOLS/oai_dfts_neon.c	209	W25s	file_static	const int16_t[16]	CONST	A8	auto
 openair1/PHY/TOOLS/oai_dfts_neon.c	210	W35s	file_static	const int16_t[16]	CONST	A8	auto
 openair1/PHY/TOOLS/oai_dfts_neon.c	211	W45s	file_static	const int16_t[16]	CONST	A8	auto
-openair1/PHY/TOOLS/oai_dfts_neon.c	213	W0	global	int16x8_t *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	214	W13	global	int16x8_t *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	215	W23	global	int16x8_t *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	216	W15	global	int16x8_t *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	217	W25	global	int16x8_t *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	218	W35	global	int16x8_t *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	219	W45	global	int16x8_t *	UNCLASSIFIED	A8	
+openair1/PHY/TOOLS/oai_dfts_neon.c	213	W0	global	int16x8_t *	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	214	W13	global	int16x8_t *	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	215	W23	global	int16x8_t *	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	216	W15	global	int16x8_t *	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	217	W25	global	int16x8_t *	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	218	W35	global	int16x8_t *	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	219	W45	global	int16x8_t *	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
 openair1/PHY/TOOLS/oai_dfts_neon.c	220	dft_norm_table	file_static	const int16_t[16]	CONST	A8	auto
 openair1/PHY/TOOLS/oai_dfts_neon.c	668	tw16	file_static	const int16_t[24]	CONST	A8	auto
 openair1/PHY/TOOLS/oai_dfts_neon.c	673	tw16a	file_static	const int16_t[24]	CONST	A8	auto
@@ -2353,180 +2376,180 @@ openair1/PHY/TOOLS/oai_dfts_neon.c	836	tw64	file_static	const int16_t[96]	CONST	
 openair1/PHY/TOOLS/oai_dfts_neon.c	850	tw64a	file_static	const int16_t[96]	CONST	A8	auto
 openair1/PHY/TOOLS/oai_dfts_neon.c	864	tw64b	file_static	const int16_t[96]	CONST	A8	auto
 openair1/PHY/TOOLS/oai_dfts_neon.c	878	tw64c	file_static	const int16_t[96]	CONST	A8	auto
-openair1/PHY/TOOLS/oai_dfts_neon.c	1120	tw128	global	int16_t[128]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	1122	tw128a	global	int16_t[128]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	1124	tw128b	global	int16_t[128]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	1126	tw128c	global	int16_t[128]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	1330	tw256	global	int16_t[384]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	1335	tw256a	global	int16_t[384]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	1340	tw256b	global	int16_t[384]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	1507	tw512	global	int16_t[512]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	1511	tw512a	global	int16_t[512]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	1517	tw512b	global	int16_t[512]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	1521	tw512c	global	int16_t[512]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	1727	tw1024	global	int16_t[1536]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	1831	tw2048	global	int16_t[2048]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	2005	tw4096	global	int16_t[3*2*1024]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	2111	tw8192	global	int16_t[2*4096]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	2285	tw16384	global	int16_t[3*2*4096]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	2397	tw32768	global	int16_t[2*16384]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	2571	twa768	global	int16_t[512]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	2571	twb768	global	int16_t[512][512]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	2681	twa1536	global	int16_t[1024]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	2681	twb1536	global	int16_t[1024][1024]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	2792	twa3072	global	int16_t[2048]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	2793	twb3072	global	int16_t[2048]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	2890	twa6144	global	int16_t[4096]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	2891	twb6144	global	int16_t[4096]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3009	twa12288	global	int16_t[8192]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3010	twb12288	global	int16_t[8192]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3134	twa18432	global	int16_t[12288]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3135	twb18432	global	int16_t[12288]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3230	twa24576	global	int16_t[16384]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3231	twb24576	global	int16_t[16384]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3356	twa36864	global	int16_t[24576]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3357	twb36864	global	int16_t[24576]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3464	twa49152	global	int16_t[32768]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3465	twb49152	global	int16_t[32768]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3560	tw65536	global	int16_t[3*2*16384]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3615	twa98304	global	int16_t[65536]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3616	twb98304	global	int16_t[65536]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3714	W1_12s	file_static	int16_t[8]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3715	W2_12s	file_static	int16_t[8]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3716	W3_12s	file_static	int16_t[8]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3717	W4_12s	file_static	int16_t[8]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3718	W6_12s	file_static	int16_t[8]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3720	W1_12	global	simd_q15_t *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3721	W2_12	global	simd_q15_t *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3722	W3_12	global	simd_q15_t *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3723	W4_12	global	simd_q15_t *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3724	W6_12	global	simd_q15_t *	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3727	norm128	file_static	simd_q15_t	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3891	tw24	file_static	int16_t[88]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3986	twa36	file_static	int16_t[88]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	3987	twb36	file_static	int16_t[88]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4105	twa48	file_static	int16_t[88]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4106	twb48	file_static	int16_t[88]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4107	twc48	file_static	int16_t[88]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4262	twa60	file_static	int16_t[88]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4263	twb60	file_static	int16_t[88]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4264	twc60	file_static	int16_t[88]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4265	twd60	file_static	int16_t[88]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4443	tw72	file_static	int16_t[280]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4483	tw96	file_static	int16_t[376]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4525	twa108	file_static	int16_t[280]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4526	twb108	file_static	int16_t[280]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4572	tw120	file_static	int16_t[472]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4610	twa144	file_static	int16_t[376]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4611	twb144	file_static	int16_t[376]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4657	twa180	file_static	int16_t[472]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4658	twb180	file_static	int16_t[472]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4705	twa192	file_static	int16_t[376]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4706	twb192	file_static	int16_t[376]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4707	twc192	file_static	int16_t[376]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4760	twa216	file_static	int16_t[568]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4761	twb216	file_static	int16_t[568]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4808	twa240	file_static	int16_t[472]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4809	twb240	file_static	int16_t[472]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4810	twc240	file_static	int16_t[472]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4863	twa288	file_static	int16_t[760]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4864	twb288	file_static	int16_t[760]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4911	twa300	file_static	int16_t[472]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4912	twb300	file_static	int16_t[472]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4913	twc300	file_static	int16_t[472]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4914	twd300	file_static	int16_t[472]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4973	twa324	file_static	int16_t[107*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	4974	twb324	file_static	int16_t[107*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5020	twa360	file_static	int16_t[119*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5021	twb360	file_static	int16_t[119*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5067	twa384	file_static	int16_t[95*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5068	twb384	file_static	int16_t[95*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5069	twc384	file_static	int16_t[95*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5121	twa432	file_static	int16_t[107*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5122	twb432	file_static	int16_t[107*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5123	twc432	file_static	int16_t[107*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5173	twa480	file_static	int16_t[119*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5174	twb480	file_static	int16_t[119*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5175	twc480	file_static	int16_t[119*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5228	twa540	file_static	int16_t[179*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5229	twb540	file_static	int16_t[179*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5275	twa576	file_static	int16_t[191*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5276	twb576	file_static	int16_t[191*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5324	twa600	file_static	int16_t[299*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5365	twa648	file_static	int16_t[215*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5366	twb648	file_static	int16_t[215*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5417	twa720	file_static	int16_t[179*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5418	twb720	file_static	int16_t[179*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5419	twc720	file_static	int16_t[179*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5476	twa768p	file_static	int16_t[191*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5477	twb768p	file_static	int16_t[191*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5478	twc768p	file_static	int16_t[191*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5536	twa384i	file_static	int16_t[256]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5537	twb384i	file_static	int16_t[256]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5586	twa864	file_static	int16_t[287*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5587	twb864	file_static	int16_t[287*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5637	twa900	file_static	int16_t[299*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5638	twb900	file_static	int16_t[299*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5689	twa960	file_static	int16_t[239*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5690	twb960	file_static	int16_t[239*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5691	twc960	file_static	int16_t[239*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5749	twa972	file_static	int16_t[323*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5750	twb972	file_static	int16_t[323*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5800	twa1080	file_static	int16_t[359*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5801	twb1080	file_static	int16_t[359*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5851	twa1152	file_static	int16_t[287*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5852	twb1152	file_static	int16_t[287*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5853	twc1152	file_static	int16_t[287*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5909	twa1200	global	int16_t[4784]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5910	twb1200	global	int16_t[4784]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5911	twc1200	global	int16_t[4784]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5968	twa1296	file_static	int16_t[431*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	5969	twb1296	file_static	int16_t[431*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6021	twa1440	file_static	int16_t[479*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6022	twb1440	file_static	int16_t[479*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6072	twa1500	file_static	int16_t[2392]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6073	twb1500	file_static	int16_t[2392]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6074	twc1500	file_static	int16_t[2392]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6075	twd1500	file_static	int16_t[2392]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6138	twa1620	file_static	int16_t[539*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6139	twb1620	file_static	int16_t[539*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6189	twa1728	file_static	int16_t[575*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6190	twb1728	file_static	int16_t[575*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6240	twa1800	file_static	int16_t[599*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6241	twb1800	file_static	int16_t[599*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6291	twa1920	file_static	int16_t[479*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6292	twb1920	file_static	int16_t[479*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6293	twc1920	file_static	int16_t[479*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6348	twa1944	file_static	int16_t[647*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6349	twb1944	file_static	int16_t[647*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6399	twa2160	file_static	int16_t[719*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6400	twb2160	file_static	int16_t[719*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6450	twa2304	file_static	int16_t[767*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6451	twb2304	file_static	int16_t[767*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6501	twa2400	file_static	int16_t[599*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6502	twb2400	file_static	int16_t[599*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6503	twc2400	file_static	int16_t[599*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6559	twa2592	file_static	int16_t[863*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6560	twb2592	file_static	int16_t[863*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6610	twa2700	file_static	int16_t[899*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6611	twb2700	file_static	int16_t[899*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6661	twa2880	file_static	int16_t[959*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6662	twb2880	file_static	int16_t[959*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6712	twa2916	file_static	int16_t[971*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6713	twb2916	file_static	int16_t[971*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6763	twa3000	file_static	int16_t[599*8]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6764	twb3000	file_static	int16_t[599*8]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6765	twc3000	file_static	int16_t[599*8]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6766	twd3000	file_static	int16_t[599*8]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6829	twa3240	file_static	int16_t[1079*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	6830	twb3240	file_static	int16_t[1079*2*4]	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/oai_dfts_neon.c	7275	oai_exit	global	int	UNCLASSIFIED	A8	
-openair1/PHY/TOOLS/phy_scope_interface.c	15	scope_fdesc	file_static	loader_shlibfunc_t[]	UNCLASSIFIED	A8	
+openair1/PHY/TOOLS/oai_dfts_neon.c	1120	tw128	global	int16_t[128]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	1122	tw128a	global	int16_t[128]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	1124	tw128b	global	int16_t[128]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	1126	tw128c	global	int16_t[128]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	1330	tw256	global	int16_t[384]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	1335	tw256a	global	int16_t[384]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	1340	tw256b	global	int16_t[384]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	1507	tw512	global	int16_t[512]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	1511	tw512a	global	int16_t[512]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	1517	tw512b	global	int16_t[512]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	1521	tw512c	global	int16_t[512]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	1727	tw1024	global	int16_t[1536]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	1831	tw2048	global	int16_t[2048]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	2005	tw4096	global	int16_t[3*2*1024]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	2111	tw8192	global	int16_t[2*4096]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	2285	tw16384	global	int16_t[3*2*4096]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	2397	tw32768	global	int16_t[2*16384]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	2571	twa768	global	int16_t[512]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	2571	twb768	global	int16_t[512][512]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	2681	twa1536	global	int16_t[1024]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	2681	twb1536	global	int16_t[1024][1024]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	2792	twa3072	global	int16_t[2048]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	2793	twb3072	global	int16_t[2048]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	2890	twa6144	global	int16_t[4096]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	2891	twb6144	global	int16_t[4096]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3009	twa12288	global	int16_t[8192]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3010	twb12288	global	int16_t[8192]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3134	twa18432	global	int16_t[12288]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3135	twb18432	global	int16_t[12288]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3230	twa24576	global	int16_t[16384]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3231	twb24576	global	int16_t[16384]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3356	twa36864	global	int16_t[24576]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3357	twb36864	global	int16_t[24576]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3464	twa49152	global	int16_t[32768]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3465	twb49152	global	int16_t[32768]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3560	tw65536	global	int16_t[3*2*16384]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3615	twa98304	global	int16_t[65536]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3616	twb98304	global	int16_t[65536]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3714	W1_12s	file_static	int16_t[8]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3715	W2_12s	file_static	int16_t[8]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3716	W3_12s	file_static	int16_t[8]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3717	W4_12s	file_static	int16_t[8]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3718	W6_12s	file_static	int16_t[8]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3720	W1_12	global	simd_q15_t *	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3721	W2_12	global	simd_q15_t *	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3722	W3_12	global	simd_q15_t *	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3723	W4_12	global	simd_q15_t *	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3724	W6_12	global	simd_q15_t *	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3727	norm128	file_static	simd_q15_t	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3891	tw24	file_static	int16_t[88]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3986	twa36	file_static	int16_t[88]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	3987	twb36	file_static	int16_t[88]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4105	twa48	file_static	int16_t[88]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4106	twb48	file_static	int16_t[88]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4107	twc48	file_static	int16_t[88]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4262	twa60	file_static	int16_t[88]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4263	twb60	file_static	int16_t[88]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4264	twc60	file_static	int16_t[88]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4265	twd60	file_static	int16_t[88]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4443	tw72	file_static	int16_t[280]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4483	tw96	file_static	int16_t[376]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4525	twa108	file_static	int16_t[280]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4526	twb108	file_static	int16_t[280]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4572	tw120	file_static	int16_t[472]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4610	twa144	file_static	int16_t[376]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4611	twb144	file_static	int16_t[376]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4657	twa180	file_static	int16_t[472]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4658	twb180	file_static	int16_t[472]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4705	twa192	file_static	int16_t[376]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4706	twb192	file_static	int16_t[376]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4707	twc192	file_static	int16_t[376]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4760	twa216	file_static	int16_t[568]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4761	twb216	file_static	int16_t[568]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4808	twa240	file_static	int16_t[472]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4809	twb240	file_static	int16_t[472]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4810	twc240	file_static	int16_t[472]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4863	twa288	file_static	int16_t[760]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4864	twb288	file_static	int16_t[760]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4911	twa300	file_static	int16_t[472]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4912	twb300	file_static	int16_t[472]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4913	twc300	file_static	int16_t[472]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4914	twd300	file_static	int16_t[472]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4973	twa324	file_static	int16_t[107*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	4974	twb324	file_static	int16_t[107*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5020	twa360	file_static	int16_t[119*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5021	twb360	file_static	int16_t[119*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5067	twa384	file_static	int16_t[95*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5068	twb384	file_static	int16_t[95*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5069	twc384	file_static	int16_t[95*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5121	twa432	file_static	int16_t[107*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5122	twb432	file_static	int16_t[107*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5123	twc432	file_static	int16_t[107*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5173	twa480	file_static	int16_t[119*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5174	twb480	file_static	int16_t[119*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5175	twc480	file_static	int16_t[119*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5228	twa540	file_static	int16_t[179*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5229	twb540	file_static	int16_t[179*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5275	twa576	file_static	int16_t[191*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5276	twb576	file_static	int16_t[191*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5324	twa600	file_static	int16_t[299*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5365	twa648	file_static	int16_t[215*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5366	twb648	file_static	int16_t[215*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5417	twa720	file_static	int16_t[179*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5418	twb720	file_static	int16_t[179*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5419	twc720	file_static	int16_t[179*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5476	twa768p	file_static	int16_t[191*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5477	twb768p	file_static	int16_t[191*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5478	twc768p	file_static	int16_t[191*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5536	twa384i	file_static	int16_t[256]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5537	twb384i	file_static	int16_t[256]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5586	twa864	file_static	int16_t[287*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5587	twb864	file_static	int16_t[287*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5637	twa900	file_static	int16_t[299*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5638	twb900	file_static	int16_t[299*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5689	twa960	file_static	int16_t[239*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5690	twb960	file_static	int16_t[239*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5691	twc960	file_static	int16_t[239*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5749	twa972	file_static	int16_t[323*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5750	twb972	file_static	int16_t[323*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5800	twa1080	file_static	int16_t[359*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5801	twb1080	file_static	int16_t[359*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5851	twa1152	file_static	int16_t[287*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5852	twb1152	file_static	int16_t[287*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5853	twc1152	file_static	int16_t[287*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5909	twa1200	global	int16_t[4784]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5910	twb1200	global	int16_t[4784]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5911	twc1200	global	int16_t[4784]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5968	twa1296	file_static	int16_t[431*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	5969	twb1296	file_static	int16_t[431*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6021	twa1440	file_static	int16_t[479*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6022	twb1440	file_static	int16_t[479*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6072	twa1500	file_static	int16_t[2392]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6073	twb1500	file_static	int16_t[2392]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6074	twc1500	file_static	int16_t[2392]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6075	twd1500	file_static	int16_t[2392]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6138	twa1620	file_static	int16_t[539*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6139	twb1620	file_static	int16_t[539*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6189	twa1728	file_static	int16_t[575*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6190	twb1728	file_static	int16_t[575*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6240	twa1800	file_static	int16_t[599*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6241	twb1800	file_static	int16_t[599*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6291	twa1920	file_static	int16_t[479*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6292	twb1920	file_static	int16_t[479*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6293	twc1920	file_static	int16_t[479*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6348	twa1944	file_static	int16_t[647*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6349	twb1944	file_static	int16_t[647*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6399	twa2160	file_static	int16_t[719*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6400	twb2160	file_static	int16_t[719*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6450	twa2304	file_static	int16_t[767*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6451	twb2304	file_static	int16_t[767*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6501	twa2400	file_static	int16_t[599*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6502	twb2400	file_static	int16_t[599*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6503	twc2400	file_static	int16_t[599*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6559	twa2592	file_static	int16_t[863*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6560	twb2592	file_static	int16_t[863*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6610	twa2700	file_static	int16_t[899*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6611	twb2700	file_static	int16_t[899*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6661	twa2880	file_static	int16_t[959*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6662	twb2880	file_static	int16_t[959*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6712	twa2916	file_static	int16_t[971*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6713	twb2916	file_static	int16_t[971*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6763	twa3000	file_static	int16_t[599*8]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6764	twb3000	file_static	int16_t[599*8]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6765	twc3000	file_static	int16_t[599*8]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6766	twd3000	file_static	int16_t[599*8]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6829	twa3240	file_static	int16_t[1079*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	6830	twb3240	file_static	int16_t[1079*2*4]	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/oai_dfts_neon.c	7275	oai_exit	global	int	PROCESS	A8	DFT twiddle tables / mutexes built once at init, cell independent
+openair1/PHY/TOOLS/phy_scope_interface.c	15	scope_fdesc	file_static	loader_shlibfunc_t[]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
 openair1/SCHED_NR_UE/fapi_nr_ue_l1.c	20	dl_pdu_type	global	const char *const[]	CONST	A8	auto
 openair1/SCHED_NR_UE/fapi_nr_ue_l1.c	21	ul_pdu_type	global	const char *const[]	CONST	A8	auto
 openair1/SCHED_NR_UE/phy_procedures_nr_ue.c	66	gain_table	file_static	const unsigned int[31]	CONST	A8	auto
-openair1/SCHED_NR_UE/phy_procedures_nr_ue.c	973	nr_process_pbch_symbol::s_fftaddr_left	func_static	int	UNCLASSIFIED	A8	
-openair1/SCHED_NR_UE/phy_procedures_nr_ue.c	1071	nr_process_pbch_symbol::s_sat_left	func_static	int	UNCLASSIFIED	A8	
+openair1/SCHED_NR_UE/phy_procedures_nr_ue.c	973	nr_process_pbch_symbol::s_fftaddr_left	func_static	int	PROCESS	A8	log budget (log text only)
+openair1/SCHED_NR_UE/phy_procedures_nr_ue.c	1071	nr_process_pbch_symbol::s_sat_left	func_static	int	PROCESS	A8	log budget (log text only)
 openair1/SCHED_NR_UE/phy_procedures_nr_ue.c	1233	pbch_process::s_track_log_left	func_static	int	PROCESS	A8	log/dashboard state
 radio/COMMON/common_lib.c	26	devtype_names	global	const char *const[MAX_RF_DEV_TYPE]	CONST	G5	auto
 radio/COMMON/iq_chan.c	223	iq_chan_backend_cpu	global	const iq_chan_backend_t	CONST	G5	auto

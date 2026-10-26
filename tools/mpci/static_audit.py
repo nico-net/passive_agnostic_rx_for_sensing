@@ -60,6 +60,9 @@ GLOBS = [
     "openair1/PHY/CODING/nrLDPC_cuda/*.cu",
     "openair1/SCHED_NR_UE/*.c",
     "executables/nr-ue.c",
+    "executables/nr-ue-ru.c",                          # A8: per-cell RU table, radio FO
+    "openair1/PHY/NR_UE_TRANSPORT/nr_early_start.c",   # A8: early-start progress / slot gate (per cell)
+    "openair1/PHY/NR_UE_ESTIMATION/nr_adjust_synch_ue.c",  # A8: timing-loop rebase hand-off (per cell)
     "executables/nr-uesoftmodem.c",
     "openair1/PHY/TOOLS/*.c",
     "openair1/PHY/TOOLS/*.cu",
