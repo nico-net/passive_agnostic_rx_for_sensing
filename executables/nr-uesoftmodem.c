@@ -283,16 +283,16 @@ static void gpu_platform_log(int warning, const char *text)
 
 /* main: softmodem entry point for the NR UE and the passive receiver: starts the shutdown subsystem, loads the configuration, parses the options, and initialises the sensing, monitor, CPU plan, ITTI tasks, PDCP/NAS and cell parameters.
  *   Then starts the time manager, the GPU warm-up and the discovery pipelines, locks memory, starts the sensing and PRACH services and the radio thread, and waits for the ITTI end signal.
- *   Shutdown sequence: request, wait for the radio release, stop the passive queues and the discovery pipelines, close the outputs, join the ITTI tasks and services, then nr_shutdown_finish(). Offline replay (ISAC_PASSIVE_REPLAY_INPUT or CAPTURE) exits before any radio start-up.
+ *   Shutdown sequence: request, wait for the radio release, stop the passive queues and the discovery pipelines, close the outputs, join the ITTI tasks and services, then nr_shutdown_finish(). Offline replay (ISAC_PASSIVE_REPLAY_INPUT) exits before any radio start-up; a capture (ISAC_PASSIVE_REPLAY_CAPTURE) runs the radio and records.
  */
 /* plan_usrp_ring: host-RAM budget for the USRP decoupled RX ring (ISAC_USRP_RING_MS, ~1 GB at 500 ms x 4 ch x 122.88 MS/s). Reserved before every other module
  *   (it is what keeps the X410 stream alive): up to 50 % of the headroom, floor 100 ms; the USRP driver reads the planned duration (nr_host_membudget_usrp_ring_ms).
- *   Below the floor the receiver refuses to start (exit 7) instead of an OOM kill during RX. No-op without the ring, on rfsim and on replays. Caller: main(). */
+ *   Below the floor the receiver refuses to start (exit 7) instead of an OOM kill during RX. No-op without the ring, on rfsim and on offline replays (ISAC_PASSIVE_REPLAY_INPUT); a capture (ISAC_PASSIVE_REPLAY_CAPTURE) is a live radio run and keeps the ring. Caller: main(). */
 static void plan_usrp_ring(const NR_DL_FRAME_PARMS *fp)
 {
   const char *e = getenv("ISAC_USRP_RING_MS");
   const int ms = e ? atoi(e) : 0;
-  if (ms <= 0 || ms > 5000 || IS_SOFTMODEM_RFSIM || getenv("ISAC_PASSIVE_REPLAY_INPUT") || getenv("ISAC_PASSIVE_REPLAY_CAPTURE"))
+  if (ms <= 0 || ms > 5000 || IS_SOFTMODEM_RFSIM || getenv("ISAC_PASSIVE_REPLAY_INPUT"))
     return;
   const size_t per_ms = (size_t)fp->samples_per_subframe * fp->nb_antennas_rx * sizeof(int32_t); /* one subframe = 1 ms */
   const long lo = ms < 100 ? ms : 100;
@@ -327,7 +327,7 @@ int main(int argc, char **argv)
     /* Core plan from the host topology (nr_core_layout.h): one CORE_PLAN line, then the planned RT / pool / lane / radio-IO /
      * dashboard cores are exported for every unset ISAC_* core key. Must run before the float lane changes any affinity.
      * The radio IO cores are planned only when a hardware radio is used (not --rfsim, not an offline replay). */
-    const bool radio = !rfsim_arg && !getenv("ISAC_PASSIVE_REPLAY_INPUT") && !getenv("ISAC_PASSIVE_REPLAY_CAPTURE");
+    const bool radio = !rfsim_arg && !getenv("ISAC_PASSIVE_REPLAY_INPUT");
     nr_core_layout_init(true, radio);
     setenv("ISAC_LOG_ASYNC", "1", 0); setenv("ISAC_CSIRS_DISC", "1", 0); setenv("ISAC_GPU_BUDGET", "1", 0); setenv("ISAC_RECONF", "1", 0); /* read by shared code (LDPC pool, GPU budget) */
     /* USRP driver (hardware radio shared with the gNB): site defaults of the receiver */
