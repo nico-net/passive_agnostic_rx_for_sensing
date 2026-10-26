@@ -135,6 +135,58 @@ TEST(Sfo, ProviderSignAndHysteresis)
   EXPECT_EQ(nr_sfo_dphi(nr_sfo_eps_q(), 4096, 40000), 0u);
 }
 
+/* feed n frames at a constant relative clock offset eps (integer reads, error carried) */
+static void feed_drift(double eps, int n, int spf)
+{
+  static double acc = 0;
+  for (int f = 0; f < n; f++) {
+    acc += eps * spf;
+    const int extra = (int)lround(acc);
+    acc -= extra;
+    nr_sfo_note_frame_read(extra, spf);
+  }
+}
+
+TEST(Sfo, ResyncStartsFromZero)
+{
+  const int spf = 1228800;
+  nr_sfo_reset();
+  feed_drift(4.0e-6, 1024, spf);
+  EXPECT_NEAR(nr_sfo_eps(), 4.0e-6, 0.01e-6);
+  /* a normal per-frame timing correction (a few samples, even one-off tens of samples) is not an epoch change */
+  nr_sfo_note_frame_read(-3, spf);
+  nr_sfo_note_frame_read(40, spf);
+  EXPECT_NEAR(nr_sfo_eps(), 4.0e-6, 0.02e-6);
+  /* DM-RS fine term accumulated under cell A */
+  for (int i = 0; i < 2000; i++) nr_sfo_note_dmrs_residual(1.0e-6, 1.0);
+  EXPECT_GT(nr_sfo_eps(), 4.5e-6);
+  /* resync to another cell: published eps and the DM-RS term are gone at once */
+  nr_sfo_resync("test resync");
+  EXPECT_EQ(nr_sfo_eps_q(), 0);
+  /* cell B at -2 ppm: no contribution from A (window, nor the DM-RS term which would add up to +1 ppm) */
+  feed_drift(-2.0e-6, 300, spf);
+  EXPECT_NEAR(nr_sfo_eps(), -2.0e-6, 0.03e-6);
+  /* and the DM-RS term restarts from zero: with no new residual it contributes nothing */
+  nr_sfo_resync("test resync 2");
+  feed_drift(0.0, 300, spf);
+  EXPECT_EQ(nr_sfo_eps_q(), 0);
+}
+
+TEST(Sfo, PinSurvivesResync)
+{
+  const int spf = 1228800;
+  nr_sfo_reset();
+  feed_drift(3.0e-6, 600, spf);
+  const int64_t old = nr_sfo_eps_q();
+  ASSERT_NE(old, 0);
+  nr_sfo_pin(old); /* a job whose FEP ran before the reset keeps its value */
+  nr_sfo_resync("test pin");
+  EXPECT_EQ(nr_sfo_eps_q_for_fep(), old);
+  EXPECT_EQ(nr_sfo_eps_q(), 0);
+  nr_sfo_pin(INT64_MIN);
+  EXPECT_EQ(nr_sfo_eps_q_for_fep(), 0);
+}
+
 int main(int argc, char **argv)
 {
   ::testing::InitGoogleTest(&argc, argv);
