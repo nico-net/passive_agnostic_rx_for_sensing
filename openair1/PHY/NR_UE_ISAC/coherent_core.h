@@ -87,9 +87,11 @@ std::vector<Detection> detect(const std::vector<float>& E, const RdResult& R, co
                               const Geometry& geo, const DetectParams& p);
 /** Declared survey accuracy (1-sigma, m) of each antenna and of the illuminator. */
 struct SurveySigma { std::array<double, kCh> rx_m{}; double tx_m = 0; };
-/** Coherent refinement, hierarchical down to half a fringe within +-one envelope step, phases referred
- * to the CPI's weighted mid-time. pos = rho_eff blend with rho_eff = cal.rho * survey coherence *
- * P_lobe; pos_cov = rho_eff Cov_coh + (1-rho_eff) Cov_env + rho_eff(1-rho_eff) dd^T (mixture). */
+/** Coherent refinement: MAP position over the lattice of phase-difference lobes (each channel's fitted
+ * amplitude at the CPI's weighted mid-time), with the envelope position and pos_cov as prior; lobes
+ * enumerated with a Cauchy-Schwarz bound. pos = rho_eff blend, rho_eff = cal.rho * pairwise survey
+ * coherence (rx and tx terms) * P_lobe; pos_cov = rho_eff Cov_post + (1-rho_eff) Cov_env +
+ * rho_eff(1-rho_eff) dd^T. detect()'s pos_cov is carried forward as Cov_env. */
 void refine(Detection& det, const RdResult& R, const Grid& g, const Geometry& geo, const Calibration& cal,
             const SurveySigma& survey);
 /** x with P(S > x) = p, S = sum of n iid Y, Y = max of m iid Exp(1) (CDF (1-e^-y)^m): the envelope's

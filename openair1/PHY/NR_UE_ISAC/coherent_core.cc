@@ -788,13 +788,16 @@ struct Response {
   // sequence couples the migration's per-row phase 2pi fc_r dp_r into the delay estimate: measured).
   struct Ph { std::vector<cd> pp; std::vector<double> pr; };
   double tbar = 0;
-  Ph phasors(double p, double fb) const
+  // fdot: the path's Doppler rate (Hz/s), known from geometry once the position and velocity are
+  // (see detect): f(t) = f + fdot (t - tbar), f the Doppler AT tbar.
+  Ph phasors(double p, double fb, double fdot = 0) const
   {
     Ph h; h.pp.resize(rows.size()); h.pr.resize(rows.size());
     const double f = a.dopp0_hz + fb * a.dopp_step_hz;
     for (size_t j = 0; j < rows.size(); ++j) {
-      h.pr[j] = p - (f / a.fc_hz) * (a.row_t_s[rows[j]] - tbar) / a.delay_step_s;
-      h.pp[j] = std::polar(1.0, 2 * M_PI * (f * a.row_t_s[rows[j]] - R.wf.fc[rows[j]] * h.pr[j] * a.delay_step_s));
+      const double dt = a.row_t_s[rows[j]] - tbar;
+      h.pr[j] = p - ((f + 0.5 * fdot * dt) / a.fc_hz) * dt / a.delay_step_s;
+      h.pp[j] = std::polar(1.0, 2 * M_PI * (f * a.row_t_s[rows[j]] + 0.5 * fdot * dt * dt - R.wf.fc[rows[j]] * h.pr[j] * a.delay_step_s));
     }
     return h;
   }
@@ -811,7 +814,7 @@ struct Response {
 // One channel of an accepted detection: the path fitted to its RD neighbourhood, and the fit's own
 // error (sandwich covariance of the least-squares fit under the RD noise correlation).
 struct ChanFit {
-  double p = 0, fb = 0, sp = 0, sf = 0, sA = 0, snr = 0; cd A = 0; bool ok = false;
+  double p = 0, fb = 0, sp = 0, sf = 0, sA = 0, snr = 0, fdot = 0; cd A = 0; bool ok = false;
   std::vector<Response::Ph> grid;                                     // tolerance grid (p, fb) phasors; [0] nominal
   std::vector<cd> M;                                                  // M_k(f) for the static term
   std::vector<std::vector<cd>> stat;                                  // [d] -> static term per range bin (lazy)
@@ -839,7 +842,7 @@ cd path_value(const Response& rs, const ChanFit& f, uint32_t m, uint32_t d)
 // detections are refitted jointly, one at a time: two targets unresolved on a channel and 1-2
 // Doppler bins apart otherwise bias each other's fit by 0.1 bin -- measured, t1 vs the drone).
 ChanFit fit_channel(const Response& rs, uint32_t ch, double p0, double fb0, long hm_r, long hm_d, double z,
-                    const std::vector<ChanFit*>& others)
+                    const std::vector<ChanFit*>& others, double fdot = 0)
 {
   const RdResult& R = rs.R; const Axes& a = rs.a;
   ChanFit f;
@@ -851,7 +854,7 @@ ChanFit fit_channel(const Response& rs, uint32_t ch, double p0, double fb0, long
         cells.push_back({(uint32_t)m, (uint32_t)d, cd(R.rd.v[R.rd.idx(ch, (uint32_t)m, (uint32_t)d)])});
   if (cells.size() < 4) return f;
   auto model = [&](double p, double fb, std::vector<cd>* ac) {
-    const Response::Ph h = rs.phasors(p, fb); ac->resize(cells.size());
+    const Response::Ph h = rs.phasors(p, fb, fdot); ac->resize(cells.size());
     for (size_t c = 0; c < cells.size(); ++c) (*ac)[c] = rs.at(cells[c].m, cells[c].d, h);
   };
   for (Cell& c : cells) for (ChanFit* o : others) c.y -= path_value(rs, *o, c.m, c.d);
@@ -923,7 +926,7 @@ ChanFit fit_channel(const Response& rs, uint32_t ch, double p0, double fb0, long
     }
     search(0.0);
   }
-  f.p = p; f.fb = fb; J(p, fb, &f.A);
+  f.p = p; f.fb = fb; f.fdot = fdot; J(p, fb, &f.A);
   // Sandwich covariance of theta = (p, fb, ReA, ImA): (D^T D)^-1 D^T C D (D^T D)^-1, D the real
   // Jacobian of the model on the cells, C the RD noise covariance (cells are correlated: zero-padded
   // range axis and Hann windows) -- the actual error of this (white least-squares) fit.
@@ -965,7 +968,7 @@ ChanFit fit_channel(const Response& rs, uint32_t ch, double p0, double fb0, long
   std::vector<double> ps{p}, fs{fb};
   if (z * f.sp > 1e-6) { ps.push_back(p - z * f.sp); ps.push_back(p + z * f.sp); }
   if (z * f.sf > 1e-6) { fs.push_back(fb - z * f.sf); fs.push_back(fb + z * f.sf); }
-  for (double pv : ps) for (double fv : fs) f.grid.push_back(rs.phasors(pv, fv));
+  for (double pv : ps) for (double fv : fs) f.grid.push_back(rs.phasors(pv, fv, fdot));
   set_M(fb);
   f.stat.resize(a.n_dopp);
   f.ok = true;
@@ -1290,7 +1293,7 @@ std::vector<Detection> detect(const std::vector<float>& E, const RdResult& R, co
           std::vector<ChanFit*> oth;
           for (size_t o = 0; o < acc.size(); ++o) if (o != j && acc[o].fit[i].ok) oth.push_back(&acc[o].fit[i]);
           ChanFit& f = acc[j].fit[i];
-          ChanFit nf = fit_channel(rs, i, f.p, f.fb, hm_r, hm_d, z, oth);
+          ChanFit nf = fit_channel(rs, i, f.p, f.fb, hm_r, hm_d, z, oth, f.fdot);
           // Converged when nothing moves by more than its own actual uncertainty: the noise-only
           // sigma scaled by the fit's residual (thermal SNR / effective SNR).
           const double sc = nf.ok ? std::sqrt(std::max(1.0, std::norm(nf.A) / R.noise[i] / std::max(nf.snr, 1e-300))) : 1.0;
@@ -1299,6 +1302,41 @@ std::vector<Detection> detect(const std::vector<float>& E, const RdResult& R, co
         }
       if (!moved) break;
     }
+  };
+  // Envelope position of an accepted detection: weighted least squares of its channels' FITTED delays
+  // (Gauss-Newton from the walk's maximum), weights as Cov_env. The E maximum is the envelope's own
+  // estimate of this, but its magnitude interpolation reads per-channel peaks 0.1-0.5 bin off, and along
+  // this geometry's weak axis that put t1 1.4 m (alone) to 4 m (among the other targets) off.
+  // Consistency: with 4 channels the fit has one redundant delay, its weighted residual chi^2_1 when
+  // every fit is right; beyond z^2 (the leakage tolerance's z) a fit is contaminated by an unresolved
+  // neighbour (measured: t1 and the drone 6-9 m off on 2/20 seeds), and the walk's position is kept.
+  struct Pos { Vec3 x, xw; double chi2 = 0; uint32_t nf = 0; bool fallback = true; std::array<double, kCh> w{}; };
+  auto solve = [&](Accepted& k) {
+    Pos r; const Acc& s = k.s; r.x = r.xw = s.x;
+    // A channel whose fitted path left the candidate's own RD mainlobe locked onto another path.
+    for (uint32_t i = 0; i < kCh; ++i)
+      if (R.los_found[i] && k.fit[i].ok && std::abs(k.fit[i].p - s.bin[i]) <= hm_r) { r.w[i] = 2 * k.fit[i].snr * std::pow(a.b_eff_hz / kC, 2); ++r.nf; }
+    if (r.nf < 3) return r;
+    Vec3 xe = s.x;
+    auto resid = [&](uint32_t i, const Vec3& x) {
+      return k.fit[i].p * a.delay_step_s * kC - (dist(x, geo.tx) + dist(x, geo.rx[i]) - dist(geo.tx, geo.rx[i]));
+    };
+    for (int it = 0; it < 20; ++it) {
+      Matrix F(3, 3); std::vector<double> gr(3, 0.0);
+      for (uint32_t i = 0; i < kCh; ++i) if (r.w[i] > 0) {
+        const std::vector<double> gv = v3(grad(geo, i, xe)); const double rr = resid(i, xe);
+        for (int u = 0; u < 3; ++u) { gr[u] += r.w[i] * gv[u] * rr; for (int v = 0; v < 3; ++v) F(u, v) += r.w[i] * gv[u] * gv[v]; }
+      }
+      const std::vector<double> dx = inverse(F) * gr;
+      xe = xe + Vec3{dx[0], dx[1], dx[2]};
+      if (std::sqrt(dx[0] * dx[0] + dx[1] * dx[1] + dx[2] * dx[2]) < 1e-9) break;
+    }
+    for (uint32_t i = 0; i < kCh; ++i) if (r.w[i] > 0) r.chi2 += r.w[i] * resid(i, xe) * resid(i, xe);
+    if (!std::isfinite(xe.x + xe.y + xe.z)) return r;
+    r.xw = xe;
+    if ((r.nf == 4 && r.chi2 > z * z) || !(xe.z >= 0)) return r;
+    r.x = xe; r.fallback = false;
+    return r;
   };
   for (;;) {
     long pick = -1; double best = 0;
@@ -1329,6 +1367,42 @@ std::vector<Detection> detect(const std::vector<float>& E, const RdResult& R, co
       std::vector<ChanFit*> oth; for (Accepted& p : acc) if (p.fit[i].ok) oth.push_back(&p.fit[i]);
       na.fit[i] = fit_channel(rs, i, pb, k.me.d[i], hm_r, hm_d, z, oth);
     }
+    // Velocity consistency on the FITTED sub-bin Dopplers: S(x) = sum nu_i(x) f_i = 0 for one velocity
+    // (nu the left null vector of the 4 gradients at the position x), tested at z^2 against its own
+    // variance: each f_i's sandwich sigma (scaled by its fit residual) plus the position's (the fitted
+    // delays' least squares, Cov_env) propagated through nu(x). The +-1 integer bin test of choose()
+    // passes cross-target combinations (measured: seed 14, t1's energy on ch0 with the drone's on
+    // ch2/ch3).
+    if (n == kCh && std::all_of(na.fit.begin(), na.fit.end(), [](const ChanFit& f) { return f.ok; })) {
+      const Pos ps = solve(na);
+      if (ps.nf == 4 && std::isfinite(ps.xw.x + ps.xw.y + ps.xw.z)) {
+        auto S = [&](const Vec3& x) {
+          Vec3 gv[kCh]; for (uint32_t i = 0; i < kCh; ++i) gv[i] = grad(geo, i, x);
+          double num = 0;
+          for (uint32_t i = 0; i < kCh; ++i) {
+            Vec3 r3[3]; uint32_t qq = 0; for (uint32_t j = 0; j < kCh; ++j) if (j != i) r3[qq++] = gv[j];
+            num += ((i & 1) ? -1.0 : 1.0) * dot(r3[0], cross(r3[1], r3[2])) * (a.dopp0_hz + na.fit[i].fb * a.dopp_step_hz);
+          }
+          return num;
+        };
+        const Vec3 x = ps.xw; const double s0 = S(x), h = 1e-3;
+        const std::vector<double> gS{(S(x + Vec3{h, 0, 0}) - S(x - Vec3{h, 0, 0})) / (2 * h),
+                                     (S(x + Vec3{0, h, 0}) - S(x - Vec3{0, h, 0})) / (2 * h),
+                                     (S(x + Vec3{0, 0, h}) - S(x - Vec3{0, 0, h})) / (2 * h)};
+        Vec3 gv[kCh]; for (uint32_t i = 0; i < kCh; ++i) gv[i] = grad(geo, i, x);
+        double var = 0;
+        for (uint32_t i = 0; i < kCh; ++i) {
+          Vec3 r3[3]; uint32_t qq = 0; for (uint32_t j = 0; j < kCh; ++j) if (j != i) r3[qq++] = gv[j];
+          const double nu = ((i & 1) ? -1.0 : 1.0) * dot(r3[0], cross(r3[1], r3[2]));
+          const ChanFit& f = na.fit[i];
+          const double sc = std::sqrt(std::max(1.0, std::norm(f.A) / R.noise[i] / std::max(f.snr, 1e-300)));
+          var += std::pow(nu * sc * f.sf * a.dopp_step_hz, 2);
+        }
+        std::array<double, kCh> snr{}; for (uint32_t i = 0; i < kCh; ++i) snr[i] = na.fit[i].snr;
+        Matrix cov; if (env_cov(a, geo, R.los_found, x, snr, &cov)) var += quadratic(gS, cov * std::max(1.0, ps.chi2));
+        if (var > 0 && s0 * s0 > z * z * var) continue;
+      }
+    }
     acc.push_back(std::move(na));
     refit_all();
     rebuild_residual();
@@ -1350,42 +1424,43 @@ std::vector<Detection> detect(const std::vector<float>& E, const RdResult& R, co
       for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i]) it.leak[i] = leak_of(it.me, i);   // refits moved every parent
     }
   }
+  // Doppler rate. A straight-line mover's bistatic path is curved in time: d2|x-a|/dt2 = (|v|^2 -
+  // (u.v)^2)/|x-a|, so each channel's Doppler drifts by fdot_i = -(1/lambda)(that at tx + at rx_i)
+  // across the CPI and its phase is quadratic. A fit with constant Doppler reads the phase at tbar off
+  // by ~pi fdot <(t-tbar)^2>, differently per channel (measured: 0.002-0.013 rad at 2-8 m/s, putting
+  // the coherent position 5-10 mm off along the mean gradient against a 0.3 mm sigma). The velocity
+  // comes from the fitted Dopplers (f_i = -g_i.v/lambda, least squares), the position from above; the
+  // accepted paths are then refitted jointly with their fdot.
+  bool any_rate = false;
+  for (Accepted& k : acc) {
+    const Pos ps = solve(k);
+    if (ps.fallback) continue;
+    Matrix F(3, 3); std::vector<double> b(3, 0.0); uint32_t nv = 0;
+    for (uint32_t i = 0; i < kCh; ++i) if (ps.w[i] > 0) {
+      // weighted by each fitted Doppler's own variance (sandwich sigma scaled by the fit residual): a
+      // channel in or next to the zero-Doppler notch fits poorly and must not steer the velocity
+      // (measured: v = (-4, 3) m/s, ch2 at SNR 8 gave fdot -154 Hz/s on ch0)
+      const ChanFit& f = k.fit[i];
+      const double sc = std::sqrt(std::max(1.0, std::norm(f.A) / R.noise[i] / std::max(f.snr, 1e-300)));
+      const double wv = 1 / std::pow(std::max(sc * f.sf * a.dopp_step_hz * a.lambda_m, 1e-12), 2);
+      const std::vector<double> gv = v3(grad(geo, i, ps.x));
+      const double y = -a.lambda_m * (a.dopp0_hz + f.fb * a.dopp_step_hz);
+      for (int u = 0; u < 3; ++u) { b[u] += wv * gv[u] * y; for (int v = 0; v < 3; ++v) F(u, v) += wv * gv[u] * gv[v]; }
+      ++nv;
+    }
+    if (nv < 3) continue;
+    const std::vector<double> vv = inverse(F) * b; const Vec3 vel{vv[0], vv[1], vv[2]};
+    auto curv = [&](const Vec3& from) { const Vec3 u = unit(ps.x - from); return (norm2(vel) - std::pow(dot(u, vel), 2)) / dist(ps.x, from); };
+    for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i] && k.fit[i].ok) {
+      k.fit[i].fdot = -(curv(geo.tx) + curv(geo.rx[i])) / a.lambda_m;
+      any_rate = true;
+    }
+  }
+  if (any_rate) refit_all();
   for (Accepted& k : acc) {
     const Acc& s = k.s; std::array<ChanFit, kCh>& fit = k.fit;
-    // Envelope position: weighted least squares of the channels' FITTED delays (Gauss-Newton from the
-    // walk's maximum), with the same weights as Cov_env. The E maximum is the envelope's own estimate
-    // of this, but its magnitude interpolation reads per-channel peaks 0.1-0.5 bin off, and along
-    // this geometry's weak axis that put t1 1.4 m (alone) to 4 m (among the other targets) off.
-    std::array<double, kCh> wls{};
-    // A channel whose fitted path left the candidate's own RD mainlobe locked onto another path.
-    for (uint32_t i = 0; i < kCh; ++i)
-      if (R.los_found[i] && fit[i].ok && std::abs(fit[i].p - s.bin[i]) <= hm_r) wls[i] = 2 * fit[i].snr * std::pow(a.b_eff_hz / kC, 2);
-    Vec3 xe = s.x;
-    {
-      uint32_t nf = 0; for (double wv : wls) nf += wv > 0;
-      for (int it = 0; it < 20 && nf >= 3; ++it) {
-        Matrix F(3, 3); std::vector<double> gr(3, 0.0);
-        for (uint32_t i = 0; i < kCh; ++i) if (wls[i] > 0) {
-          const Vec3 gi = grad(geo, i, xe);
-          const double r = fit[i].p * a.delay_step_s * kC - (dist(xe, geo.tx) + dist(xe, geo.rx[i]) - dist(geo.tx, geo.rx[i]));
-          const double gv[3] = {gi.x, gi.y, gi.z};
-          for (int u = 0; u < 3; ++u) { gr[u] += wls[i] * gv[u] * r; for (int v = 0; v < 3; ++v) F(u, v) += wls[i] * gv[u] * gv[v]; }
-        }
-        const std::vector<double> dx = inverse(F) * gr;
-        xe = xe + Vec3{dx[0], dx[1], dx[2]};
-        if (std::sqrt(dx[0] * dx[0] + dx[1] * dx[1] + dx[2] * dx[2]) < 1e-9) break;
-      }
-      // Consistency: with 4 channels the fit has one redundant delay; its weighted residual is chi^2_1
-      // when every fit is right. Beyond the z^2 quantile (the same z as the leakage tolerance) a fit
-      // is contaminated by an unresolved neighbour (measured: t1 and the drone 6-9 m off on 2/20
-      // seeds): keep the envelope walk's position.
-      double chi2 = 0;
-      for (uint32_t i = 0; i < kCh; ++i) if (wls[i] > 0) {
-        const double r = fit[i].p * a.delay_step_s * kC - (dist(xe, geo.tx) + dist(xe, geo.rx[i]) - dist(geo.tx, geo.rx[i]));
-        chi2 += wls[i] * r * r;
-      }
-      if (nf < 3 || (nf == 4 && chi2 > z * z) || !(xe.z >= 0) || !std::isfinite(xe.x + xe.y + xe.z)) { xe = s.x; wls = {}; }
-    }
+    const Pos ps = solve(k);
+    const Vec3 xe = ps.x;
     Detection det; det.pos = det.pos_env = xe; det.dopp_bin = (uint32_t)k.d;
     for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i]) {
       det.chan_dopp_bin[i] = (int32_t)s.d[i];
@@ -1404,6 +1479,14 @@ std::vector<Detection> detect(const std::vector<float>& E, const RdResult& R, co
     Matrix cov;
     if (!env_cov(a, geo, R.los_found, xe, snr, &cov))
       cov = iso_cov(std::max(res / std::sqrt(2 * det.snr), g.step / std::sqrt(12.0)));
+    if (ps.fallback && ps.nf >= 3) {
+      // The walk position was kept because the fitted delays disagree: their SNRs overstate this
+      // position's accuracy. Scale by the observed chi^2 (nf = 4: one redundant delay) and add the
+      // spread to the rejected least-squares position, the same mixture form as refine().
+      const Vec3 dd = ps.xw - xe; const double dv[3] = {dd.x, dd.y, dd.z};
+      cov = cov * (ps.nf == 4 ? std::max(1.0, ps.chi2) : 1.0);
+      for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) cov(r, c) += dv[r] * dv[c];
+    }
     set_cov(det, cov);
     const double rr = a.lambda_m * a.dopp_step_hz;
     det.range_rate_sigma = std::max(rr / std::sqrt(2 * det.snr), rr / std::sqrt(12.0));
@@ -1428,28 +1511,25 @@ void refine(Detection& det, const RdResult& R, const Grid& g, const Geometry& ge
     cd s; snr[i] = det.chan_snr[i] > 0 ? det.chan_snr[i]
                  : (sample_rd(R, i, bin, db[i], &s) ? std::max(std::norm(s) / R.noise[i] - 1, 1e-6) : 1e-6);
   }
-  const double res = kC / (2 * a.b_eff_hz);
-  Matrix cov_env;
-  if (!env_cov(a, geo, R.los_found, det.pos_env, snr, &cov_env))
+  // Envelope covariance: detect()'s (it knows when the fitted delays were inconsistent and the walk's
+  // position was kept); rebuilt from the channel SNRs only for a detection that carries none.
+  Matrix cov_env(3, 3);
+  bool have = false; for (double v : det.pos_cov) have = have || v != 0;
+  if (have) { for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) cov_env(r, c) = det.pos_cov[r * 3 + c]; }
+  else if (!env_cov(a, geo, R.los_found, det.pos_env, snr, &cov_env)) {
+    const double res = kC / (2 * a.b_eff_hz);
     cov_env = iso_cov(std::max(res / std::sqrt(2 * det.snr), g.step / std::sqrt(12.0)));
+  }
   det.pos = det.pos_env; set_cov(det, cov_env); det.refined = true;
   // Coherent refinement needs 3 independent phase differences (4 channels) to resolve a 3-D fringe.
   uint32_t ref = kCh; for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i]) { ref = i; break; }
-  if (n < 4 || !(g.step > 0)) return;
-  Vec3 centroid{}; for (const Vec3& r : geo.rx) centroid = centroid + r * (1.0 / kCh);
-  double D = 0;
-  for (uint32_t i = 0; i < kCh; ++i) for (uint32_t j = i + 1; j < kCh; ++j) D = std::max(D, dist(geo.rx[i], geo.rx[j]));
-  const double Rng = std::max(dist(det.pos_env, centroid), g.step);
-  const double fringe = a.lambda_m * Rng / (2 * D), fs = fringe / 2;
-  // Phases at the CPI's weighted mid-time: the Doppler DFT's time origin is row 0, so bin f_d carries
-  // 2pi (f_i - f_d) tbar of the path's own phase progression; e^{+j2pi f_d tbar} leaves the phase at tbar.
+  if (n < 4) return;
+  // Each channel's path phase at the CPI's weighted mid-time tbar: detect()'s fitted complex amplitude
+  // (phase at row 0) advanced by its fitted Doppler; without a fit, the RD read at the candidate delay
+  // and the channel's bin, advanced by the bin frequency (the DFT at bin f_d carries 2pi (f_i - f_d) tbar).
   double tw = 0, ws = 0;
   for (size_t r = 0; r < R.wf.grp.size(); ++r) if (R.wf.grp[r] >= 0) { tw += R.wf.w[r] * a.row_t_s[r]; ws += R.wf.w[r]; }
   const double tbar = ws > 0 ? tw / ws : 0.0;
-  // Each channel's path phase: detect()'s fitted complex amplitude (the exact RD peak value, phase at
-  // row 0) advanced by its fitted Doppler to tbar; without a fit, the RD read at the candidate delay
-  // and the channel's bin, advanced by the bin frequency (the DFT at bin f_d carries 2pi (f_i - f_d) tbar).
-  // The RD phase read at a fractional bin is only linearly interpolated (measured ~1 mm of bias).
   std::array<cd, kCh> amp{};
   for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i]) {
     if (std::abs(det.chan_amp[i]) > 0) amp[i] = det.chan_amp[i] * std::polar(1.0, 2 * M_PI * det.chan_fd_hz[i] * tbar);
@@ -1459,17 +1539,17 @@ void refine(Detection& det, const RdResult& R, const Grid& g, const Geometry& ge
     }
     amp[i] *= cal.coh_factor[i] * std::polar(1.0, -cal.phase_rad[i]) / std::sqrt(R.noise[i]);
   }
-  auto coh = [&](const Vec3& x, std::array<cd, kCh>* terms) {
-    cd sum = 0;
-    for (uint32_t i = 0; i < kCh; ++i) {
-      (*terms)[i] = R.los_found[i] ? amp[i] * std::polar(1.0, 2 * M_PI * a.fc_hz * excess_delay_s(x, geo.tx, geo.rx[i])) : cd(0);
-      sum += (*terms)[i];
-    }
-    return std::norm(sum);
+  auto terms_at = [&](const Vec3& x) {
+    std::array<cd, kCh> t{};
+    for (uint32_t i = 0; i < kCh; ++i)
+      if (R.los_found[i]) t[i] = amp[i] * std::polar(1.0, 2 * M_PI * a.fc_hz * excess_delay_s(x, geo.tx, geo.rx[i]));
+    return t;
   };
-  // Phase-difference model against the reference channel: G_d rows g_i - g_ref, W the inverse
-  // covariance of the phase differences (per-channel 1/(2 snr) + the calibration's PREDICTIVE phase
-  // variance -2 ln coh_factor; the reference's term is shared by all three).
+  // Phase-difference model against the reference channel: G_d rows g_i - g_ref (Delta phi_i(x) moves by
+  // k0 G_d dx, k0 = 2pi/lambda), W the inverse covariance of the phase differences (per-channel
+  // 1/(2 snr) + the calibration's PREDICTIVE phase variance -2 ln coh_factor; the reference's term is
+  // shared by all three).
+  const double k0 = 2 * M_PI / a.lambda_m;
   Matrix Gd(3, 3), Cph(3, 3);
   std::array<uint32_t, 3> oth{}; uint32_t no = 0;
   for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i] && i != ref) oth[no++] = i;
@@ -1480,69 +1560,91 @@ void refine(Detection& det, const RdResult& R, const Grid& g, const Geometry& ge
     Gd(r, 0) = gd.x; Gd(r, 1) = gd.y; Gd(r, 2) = gd.z;
     for (uint32_t c = 0; c < 3; ++c) Cph(r, c) = pvar(ref) + (r == c ? pvar(oth[r]) : 0.0);
   }
-  const Matrix W = inverse(Cph), Ei = inverse(cov_env);
-  // MAP position: phase differences (wrapped) under W, plus the envelope as prior under Cov_env. The
-  // plain |sum of terms|^2 is invariant to a COMMON phase, so along the mean bistatic gradient (where
-  // every channel's phase moves together) its maximum is set by the terms' amplitude slopes alone
-  // (measured: a lobe 2.4 cm off with every phase shifted by pi, |C| 0.2 % higher than at the truth).
-  auto Q = [&](const Vec3& x, std::array<cd, kCh>* terms) {
-    coh(x, terms);
-    std::vector<double> dph(3), dx = v3(x - det.pos_env);
-    for (uint32_t r = 0; r < 3; ++r) dph[r] = std::remainder(std::arg((*terms)[oth[r]]) - std::arg((*terms)[ref]), 2 * M_PI);
-    return -0.5 * quadratic(dph, W) - 0.5 * quadratic(dx, Ei);
-  };
-  // Coherent covariance: (lambda/2pi)^2 (G_d^T W G_d)^-1 fused with the envelope prior the position is
-  // maximised under (information adds).
-  const double k2 = 2 * M_PI / a.lambda_m;
-  Matrix info = Gd.transposed() * W * Gd * (k2 * k2);
+  const Matrix W = inverse(Cph), Ei = inverse(cov_env), Gt = Gd.transposed();
+  // Posterior information: phases plus the envelope as prior.
+  Matrix info = Gt * W * Gd * (k0 * k0);
   for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) info(r, c) += Ei(r, c);
-  Matrix cov_coh = inverse(info);
-  const double smin = std::sqrt(std::max(0.0, symmetric_eigen_3x3(symmetrized(cov_coh)).values[0]));
-  // Hierarchical search: 5^3 points at step/2, recentre, halve, until the step is below the coherent
-  // CRB along its best axis (the spec's half-fringe stop left a 1.1 cm grid on a statistic that is
-  // sharp to 0.1 mm at 70 dB: measured 2.4 cm off). Each level costs 125 evaluations. The phase
-  // statistic has grating lobes on the lattice lambda G_d^-1 k across the envelope blob; the prior
-  // picks the one nearest the envelope, and P_lobe below carries the residual ambiguity.
-  // Extent per axis: +-one envelope step (spec C5.2), narrowed to the envelope's own 3-sigma interval
-  // when that is smaller (never below half a fringe).
-  const Vec3 ext{std::min(g.step, std::max(fs, 3 * det.pos_sigma.x)), std::min(g.step, std::max(fs, 3 * det.pos_sigma.y)),
-                 std::min(g.step, std::max(fs, 3 * det.pos_sigma.z))};
-  Vec3 bx = det.pos_env; std::array<cd, kCh> bt{}, t{};
-  double best = Q(bx, &bt), st_last = 0;
-  for (double st = std::max({ext.x, ext.y, ext.z}) / 2; ; st /= 2) {
-    st_last = st;
-    const Vec3 c0 = bx;
-    for (int iz = -2; iz <= 2; ++iz) for (int iy = -2; iy <= 2; ++iy) for (int ix = -2; ix <= 2; ++ix) {
-      const Vec3 x = c0 + Vec3{ix * st, iy * st, iz * st};
-      const Vec3 o = x - det.pos_env;
-      if (x.z < 0 || std::abs(o.x) > ext.x || std::abs(o.y) > ext.y || std::abs(o.z) > ext.z) continue;
-      const double v = Q(x, &t);
-      if (v > best) { best = v; bx = x; bt = t; }
+  const Matrix cov_coh = inverse(info);
+  auto dphi = [&](const Vec3& x) {
+    const std::array<cd, kCh> t = terms_at(x); std::vector<double> d(3);
+    for (uint32_t r = 0; r < 3; ++r) d[r] = std::remainder(std::arg(t[oth[r]]) - std::arg(t[ref]), 2 * M_PI);
+    return d;
+  };
+  // MAP over the phase lattice. Phase differences are zero (mod 2pi) at the lobes x_e + dx_k, where
+  // G_d dx_k = lambda (k - dphi(x_e)/2pi) for integer k (linearised); each lobe's MAP is the quadratic
+  // optimum of 1/2 r^T W r + 1/2 dx^T Cov_env^-1 dx, refined by Gauss-Newton on the exact wrapped phases.
+  // Enumerated in shells |k|_inf = 0, 1, ...; a lobe can beat the best cost c* only if its prior
+  // Mahalanobis length d <= sqrt(2 c*), and by Cauchy-Schwarz |g_d,j . dx| <= d sqrt(g_d,j Cov_env g_d,j^T),
+  // which bounds |k_j - dphi_j/2pi| (the stop). A hierarchical grid search could not do this: the
+  // statistic is sharp to the coherent CRB (0.1 mm) and its lobes along the mean gradient differ only by a
+  // common phase (measured: 9-13 mm off at 2 m/s, at a point with 20x the phase residual of the truth).
+  const std::vector<double> d0 = dphi(det.pos_env);
+  std::array<double, 3> proj{};
+  for (int j = 0; j < 3; ++j) { const std::vector<double> gj{Gd(j, 0), Gd(j, 1), Gd(j, 2)}; proj[j] = std::sqrt(std::max(0.0, quadratic(gj, cov_env))); }
+  auto solve_lobe = [&](const std::array<int, 3>& kv, Vec3* x, double* cost) {
+    std::vector<double> r0(3); for (int j = 0; j < 3; ++j) r0[j] = d0[j] - 2 * M_PI * kv[j];
+    // linearised optimum: dx = -info^-1 k0 G^T W r0
+    std::vector<double> grad3 = Gt * (W * r0); for (double& v : grad3) v *= k0;
+    std::vector<double> dx = cov_coh * grad3; for (double& v : dx) v = -v;
+    Vec3 xx = det.pos_env + Vec3{dx[0], dx[1], dx[2]};
+    for (int it = 0; it < 3; ++it) {                                   // Gauss-Newton on exact phases
+      const std::vector<double> r = dphi(xx), e = v3(xx - det.pos_env);
+      std::vector<double> gg = Gt * (W * r); for (double& v : gg) v *= k0;
+      const std::vector<double> pe = Ei * e; for (int j = 0; j < 3; ++j) gg[j] += pe[j];
+      const std::vector<double> st = cov_coh * gg;
+      xx = xx - Vec3{st[0], st[1], st[2]};
     }
-    if (st * std::sqrt(3.0) < smin || st < 1e-6) break;
+    const std::vector<double> r = dphi(xx), e = v3(xx - det.pos_env);
+    *x = xx; *cost = 0.5 * quadratic(r, W) + 0.5 * quadratic(e, Ei);
+  };
+  Vec3 bx = det.pos_env; double best = INFINITY;
+  const int kmax_hard = 64;                                   // numerical guard only (never reached here)
+  for (int shell = 0; shell <= kmax_hard; ++shell) {
+    const double dstar = std::isfinite(best) ? std::sqrt(2 * best) : INFINITY;
+    bool any = false;
+    for (int a0 = -shell; a0 <= shell; ++a0) for (int a1 = -shell; a1 <= shell; ++a1) for (int a2 = -shell; a2 <= shell; ++a2) {
+      if (std::max({std::abs(a0), std::abs(a1), std::abs(a2)}) != shell) continue;
+      const std::array<int, 3> kv{a0, a1, a2};
+      bool in = true;
+      for (int j = 0; j < 3; ++j) if (std::abs(kv[j] - d0[j] / (2 * M_PI)) * a.lambda_m > dstar * proj[j] + a.lambda_m) in = false;
+      if (!in) continue;
+      any = true;
+      Vec3 x; double c; solve_lobe(kv, &x, &c);
+      if (c < best && x.z >= 0) { best = c; bx = x; }
+    }
+    if (!any && shell > 0) break;
   }
-  det.terms = bt;
+  det.terms = terms_at(bx);
   // Survey coherence, the form consistent with rho = (G-1)/(n-1) (a mean over channel pairs): the LOS
   // calibration is survey-independent, the target phase is not. Channel i's phase moves with rx_i by
   // k|u(rx_i->tx) - u(rx_i->x)| sigma_rx,i; a pair's difference moves with tx by k|u(rx_i->tx) - u(rx_j->tx)| sigma_tx.
   auto sphi2 = [&](uint32_t i) {
-    const double s = k2 * norm(unit(geo.tx - geo.rx[i]) - unit(det.pos_env - geo.rx[i])) * survey.rx_m[i]; return s * s;
+    const double s = k0 * norm(unit(geo.tx - geo.rx[i]) - unit(det.pos_env - geo.rx[i])) * survey.rx_m[i]; return s * s;
   };
   double keep = 0; uint32_t np = 0;
   for (uint32_t i = 0; i < kCh; ++i) for (uint32_t j = i + 1; j < kCh; ++j) if (R.los_found[i] && R.los_found[j]) {
-    const double stx = k2 * norm(unit(geo.tx - geo.rx[i]) - unit(geo.tx - geo.rx[j])) * survey.tx_m;
+    const double stx = k0 * norm(unit(geo.tx - geo.rx[i]) - unit(geo.tx - geo.rx[j])) * survey.tx_m;
     keep += std::exp(-0.5 * (sphi2(i) + sphi2(j) + stx * stx)); ++np;
   }
-  for (int r = 0; r < 3; ++r) cov_coh(r, r) += st_last * st_last / 12;      // the search's own grid
-  // Lobe ambiguity: other lobes sit at lambda G_d^-1 k, k integer. P_lobe = probability that the
+  // Lobe ambiguity: other lobes sit at lambda G_d^-1 k from any lobe. P_lobe = probability that the
   // envelope error is closer to the true lobe than to the nearest other one, 1 - 2Q(d_M/2), d_M the
-  // smallest Mahalanobis length of a lobe offset under Cov_env.
+  // smallest Mahalanobis length of a lobe offset under Cov_env: enumerated in shells with the same
+  // Cauchy-Schwarz bound |k_j| <= d* sqrt(g_d,j Cov_env g_d,j^T) / lambda.
   const Matrix Gi = inverse(Gd);
   double dM = INFINITY;
-  for (int k0 = -1; k0 <= 1; ++k0) for (int k1 = -1; k1 <= 1; ++k1) for (int k2i = -1; k2i <= 1; ++k2i) {
-    if (!k0 && !k1 && !k2i) continue;
-    const std::vector<double> dx = Gi * std::vector<double>{a.lambda_m * k0, a.lambda_m * k1, a.lambda_m * k2i};
-    dM = std::min(dM, std::sqrt(std::max(0.0, quadratic(dx, Ei))));
+  for (int shell = 1; shell <= kmax_hard; ++shell) {
+    bool any = false;
+    for (int a0 = -shell; a0 <= shell; ++a0) for (int a1 = -shell; a1 <= shell; ++a1) for (int a2 = -shell; a2 <= shell; ++a2) {
+      if (std::max({std::abs(a0), std::abs(a1), std::abs(a2)}) != shell) continue;
+      const int kv[3] = {a0, a1, a2};
+      bool in = true;
+      for (int j = 0; j < 3; ++j) if (std::isfinite(dM) && std::abs(kv[j]) * a.lambda_m > dM * proj[j]) in = false;
+      if (!in) continue;
+      any = true;
+      const std::vector<double> dx = Gi * std::vector<double>{a.lambda_m * a0, a.lambda_m * a1, a.lambda_m * a2};
+      dM = std::min(dM, std::sqrt(std::max(0.0, quadratic(dx, Ei))));
+    }
+    if (!any) break;
   }
   const double p_lobe = std::max(0.0, 1 - 2 * qfunc(dM / 2));
   const double rho = cal.rho * (np ? keep / np : 0.0) * p_lobe;

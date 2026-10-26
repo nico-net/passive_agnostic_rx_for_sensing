@@ -16,7 +16,13 @@ using nr_isac::CfrWindow; using nr_isac::slot_duration_s;
 // + per-channel Doppler; migrate: the delay follows the Doppler (tau(t) = tau - f_D t / fc), as a truly
 // moving path does. Off by default: the scene targets carry ONE Doppler on all four channels, which
 // no velocity produces, and migrating them would make their delays geometrically inconsistent.
-struct Path { std::array<double, kCh> tau; double amp; double doppler_hz; std::array<double, kCh> dopp_ch{}; bool migrate = false; };
+struct Path {
+  std::array<double, kCh> tau; double amp; double doppler_hz; std::array<double, kCh> dopp_ch{}; bool migrate = false;
+  // Exact straight-line trajectory (overrides tau/Doppler): delay per row from the geometry at x0 + vel*t,
+  // plus the same +30 m common offset as taus(). The linear-delay `migrate` model is off by the path
+  // curvature, (v^2/R) t^2 / 2 -- 2 mm of path (0.15 rad) at 8 m/s over half a CPI.
+  bool traj = false; Vec3 x0{}, vel{}; Vec3 tx{}; std::array<Vec3, kCh> rx{};
+};
 static CfrWindow make_window(uint32_t rows, const std::vector<Path>& paths, std::array<double, kCh> ph,
                              double cfo_hz, uint32_t nprb_row, uint32_t seed, uint32_t comb = 1,
                              bool regular_hop = false, const std::vector<double>* slots = nullptr, double noise = 0.01)
@@ -41,6 +47,12 @@ static CfrWindow make_window(uint32_t rows, const std::vector<Path>& paths, std:
       for (uint32_t a = 0; a < 4; ++a) {
         std::complex<double> acc = 0;
         for (const Path& p : paths) {
+          if (p.traj) {
+            const Vec3 xt = p.x0 + p.vel * t;
+            const double tau = (dist(xt, p.tx) + dist(xt, p.rx[a]) + 30) / kC;
+            acc += p.amp * std::exp(std::complex<double>(0, -2 * M_PI * (w.fc_hz + f) * tau));
+            continue;
+          }
           const double fd = p.doppler_hz + p.dopp_ch[a];
           acc += p.migrate ? p.amp * std::exp(std::complex<double>(0, -2 * M_PI * (w.fc_hz + f) * (p.tau[a] - fd * t / w.fc_hz)))
                            : p.amp * std::exp(std::complex<double>(0, -2 * M_PI * ((w.fc_hz + f) * p.tau[a] - fd * t)));
