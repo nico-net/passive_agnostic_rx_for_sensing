@@ -351,7 +351,7 @@ static void UE_synch(void *arg) {
 
     /* new cell or new timing epoch: the SFO estimate is relative to the clock of the gNB tracked before (frame reads are only
      * noted while is_synchronized, so nothing races this reset) */
-    nr_sfo_resync("initial sync");
+    nr_sfo_resync_cell(UE->Mod_id, "initial sync");
     UE->is_synchronized = 1;
     __atomic_store_n(&nr_ue_rx_synced_g, 1, __ATOMIC_RELEASE);
   } else {
@@ -662,7 +662,7 @@ static int handle_sync_req_from_mac(PHY_VARS_NR_UE *UE)
 
     clean_UE_harq(UE);
     UE->is_synchronized = 0;
-    nr_sfo_resync("MAC sync request");
+    nr_sfo_resync_cell(UE->Mod_id, "MAC sync request");
     UE->synch_request.received_synch_request = 0;
     return 0;
   }
@@ -1789,7 +1789,7 @@ void *UE_thread(void *arg)
           trashed_frames = 0;
           nr_rx_continuity_reset(&rx_continuity);
           LOG_W(PHY, "SENSING: RXDISCONT sync invalidated, timing state cleared, reacquiring\n");
-          nr_sfo_resync("stream discontinuity");
+          nr_sfo_resync_cell(UE->Mod_id, "stream discontinuity");
           /* The state tracker's other inputs are all latched discovery state and cannot regress
            * on a stream loss; this edge is the only thing that can tell it the mapping is gone. */
           nr_passive_acq_note_sync_loss();
@@ -2246,7 +2246,7 @@ void *UE_thread(void *arg)
           decoded_frame_rx = MAX_FRAME_NUMBER - 1;
           trashed_frames = 0;
           s_bad = 0;
-          nr_sfo_resync("RF stall / PBCH lock lost");
+          nr_sfo_resync_cell(UE->Mod_id, "RF stall / PBCH lock lost");
         }
       }
     }

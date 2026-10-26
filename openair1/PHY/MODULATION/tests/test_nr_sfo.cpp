@@ -5,6 +5,8 @@
 #include <complex>
 #include <vector>
 #include <random>
+#include <thread>
+#include "common/utils/nr_cell.h"
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 extern "C" {
@@ -138,7 +140,7 @@ TEST(Sfo, ProviderSignAndHysteresis)
 /* feed n frames at a constant relative clock offset eps (integer reads, error carried) */
 static void feed_drift(double eps, int n, int spf)
 {
-  static double acc = 0;
+  static thread_local double acc = 0;
   for (int f = 0; f < n; f++) {
     acc += eps * spf;
     const int extra = (int)lround(acc);
@@ -185,6 +187,107 @@ TEST(Sfo, PinSurvivesResync)
   EXPECT_EQ(nr_sfo_eps_q(), 0);
   nr_sfo_pin(INT64_MIN);
   EXPECT_EQ(nr_sfo_eps_q_for_fep(), 0);
+}
+
+/* ---- multi-PCI: one provider state per cell (bound threads) ---- */
+static void cell_feed(int cell, double drift, int frames)
+{
+  nr_cell_bind(cell);
+  feed_drift(drift, frames, 1228800);
+}
+
+TEST(SfoCells, TwoBoundThreadsConvergeToOwnEps)
+{
+  nr_cell_bind(0);
+  nr_sfo_resync_all("test");
+  std::thread a(cell_feed, 0, 4.0e-6, 1024), b(cell_feed, 1, -2.5e-6, 1024);
+  a.join();
+  b.join();
+  nr_cell_bind(0);
+  EXPECT_NEAR(nr_sfo_eps(), 4.0e-6, 0.02e-6);
+  nr_cell_bind(1);
+  EXPECT_NEAR(nr_sfo_eps(), -2.5e-6, 0.02e-6);
+  nr_cell_bind(0);
+}
+
+TEST(SfoCells, AlternatingOnOneRebindingThread)
+{
+  const int spf = 1228800;
+  nr_cell_bind(0);
+  nr_sfo_resync_all("test");
+  nr_cell_bind(0);
+  nr_sfo_resync_cell(1, "test");
+  for (int round = 0; round < 8; round++)
+    for (int c = 0; c < 2; c++) {
+      nr_cell_bind(c);
+      feed_drift(c ? -3.0e-6 : 1.5e-6, 128, spf);
+    }
+  nr_cell_bind(0);
+  EXPECT_NEAR(nr_sfo_eps(), 1.5e-6, 0.02e-6);
+  nr_cell_bind(1);
+  EXPECT_NEAR(nr_sfo_eps(), -3.0e-6, 0.02e-6);
+  nr_cell_bind(0);
+}
+
+TEST(SfoCells, ResyncOfOneCellLeavesTheOther)
+{
+  nr_cell_bind(0);
+  nr_sfo_resync_all("test");
+  cell_feed(0, 4.0e-6, 600);
+  cell_feed(1, 2.0e-6, 600);
+  nr_cell_bind(0);
+  const int64_t e0 = nr_sfo_eps_q();
+  ASSERT_NE(e0, 0);
+  nr_cell_bind(1);
+  nr_sfo_resync("cell 1 only");
+  EXPECT_EQ(nr_sfo_eps_q(), 0);
+  nr_cell_bind(0);
+  EXPECT_EQ(nr_sfo_eps_q(), e0);
+  /* by explicit cell from a thread bound elsewhere */
+  cell_feed(1, 2.0e-6, 600);
+  nr_cell_bind(0);
+  nr_sfo_resync_cell(1, "explicit");
+  EXPECT_EQ(nr_sfo_eps_q(), e0);
+  nr_cell_bind(1);
+  EXPECT_EQ(nr_sfo_eps_q(), 0);
+  /* DM-RS term of cell 1 does not leak into cell 0 */
+  for (int i = 0; i < 2000; i++) nr_sfo_note_dmrs_residual(1.0e-6, 1.0);
+  nr_cell_bind(0);
+  EXPECT_EQ(nr_sfo_eps_q(), e0);
+}
+
+TEST(SfoCells, ProcessWideLossResetsAllActiveCells)
+{
+  nr_cell_set_count(2);
+  nr_cell_bind(0);
+  cell_feed(0, 4.0e-6, 600);
+  cell_feed(1, 2.0e-6, 600);
+  nr_cell_bind(0);
+  nr_sfo_resync_all("stream loss");
+  EXPECT_EQ(nr_sfo_eps_q(), 0);
+  nr_cell_bind(1);
+  EXPECT_EQ(nr_sfo_eps_q(), 0);
+  nr_cell_bind(0);
+  nr_cell_set_count(1);
+}
+
+TEST(SfoCells, PinIsPerThreadNotPerCell)
+{
+  nr_cell_bind(0);
+  cell_feed(0, 4.0e-6, 600);
+  cell_feed(1, 2.0e-6, 600);
+  nr_cell_bind(0);
+  const int64_t e0 = nr_sfo_eps_q();
+  nr_sfo_pin(12345);
+  std::thread t([] {
+    nr_cell_bind(1);
+    EXPECT_EQ(nr_sfo_eps_q_for_fep(), nr_sfo_eps_q()); /* the other thread's pin is invisible */
+    EXPECT_NE(nr_sfo_eps_q(), 12345);
+  });
+  t.join();
+  EXPECT_EQ(nr_sfo_eps_q_for_fep(), 12345);
+  EXPECT_EQ(nr_sfo_eps_q(), e0);
+  nr_sfo_pin(INT64_MIN);
 }
 
 int main(int argc, char **argv)
