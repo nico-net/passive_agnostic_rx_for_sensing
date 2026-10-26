@@ -171,6 +171,9 @@ openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1020	g_pool_capture_epoch	file_s
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1039	pool_log_error::logged	func_static	uint64_t	UNCLASSIFIED	G1	
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1150	pool_launch::graphs	func_static	std::map< cudaGraphExec_t>	UNCLASSIFIED	G1	
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu	1150	pool_launch::uint64_t	func_static	std::map<	UNCLASSIFIED	G1	
+openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c	29	g_ul_branch_tab	file_static	nr_ul_branch_tab_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c	31	g_ul_branch_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c	270	nr_pusch_mmse_mode::mode	func_static	int	PROCESS	A6	cache of the softmodem mode (IS_PASSIVE_RX_MODE), identical for all cells
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	192	nr_pdcch_blind_llr_autoscale	global	_Atomic int	PROCESS	A3	mode flag set once at start by the blind monitor (identical for every cell); extern in nr_pdcch_blind_monitor_rt.c
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	193	nr_pdcch_blind_dmrs_probe	global	_Atomic int	PROCESS	A3	mode flag set once at start by the blind monitor (identical for every cell); extern in nr_pdcch_blind_monitor_rt.c
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	194	g_dmrs_hot_cce	tls	int	TLS	A3	existing thread-local
@@ -962,66 +965,63 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	263	nr_pdcch_passive_queue
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	264	nr_pdcch_passive_queue_thread::n_occ	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c	10	g_prior	file_static	nr_pdcch_sib1_prior_t	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c	24	nr_pdcch_sib1_prior_set::logged	func_static	bool	UNCLASSIFIED	A4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	48	mu	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	49	ue	file_static	ue_t[UL_CFG_UE]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	50	tickets	file_static	ticket_t[UL_CFG_TICKET]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	51	serial	file_static	uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	52	stats	file_static	nr_pdcch_ul_config_stats_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	53	bank_busy_drops	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	53	proposal_busy_drops	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	54	config_dirty	file_static	bool	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	55	dl_hits	file_static	uint8_t[20]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	56	dl_total	file_static	uint16_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	75	bank_note	file_static	bank_note_t[64]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	76	bank_note_clock	file_static	uint32_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	165	geometry::width_pairs	func_static	const uint8_t[][2]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c	41	lock	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c	55	contexts	file_static	ul_context_t[UL_DISCOVERY_CONTEXTS]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c	56	context_clock	file_static	uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c	56	generation_counter	file_static	uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c	57	rejected_feedback	file_static	uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c	63	s_discovery_dirty	file_static	bool	UNCLASSIFIED	A6	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	50	g_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	53	g_ue	file_static	g_ue_cell_t [converted]	PER_CELL	A6	converted (A6); HEAP, prealloc before the RX fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	56	g_tickets	file_static	g_tickets_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	58	g_serial	file_static	uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	60	g_stats	file_static	nr_pdcch_ul_config_stats_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	62	proposal_busy_drops	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	64	bank_busy_drops	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	66	config_dirty	file_static	bool [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	69	dl_hits	file_static	dl_hits_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	71	dl_total	file_static	uint16_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	92	bank_note	file_static	bank_note_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	94	bank_note_clock	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c	190	geometry::width_pairs	func_static	const uint8_t[][2]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c	43	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c	59	g_contexts	file_static	g_contexts_cell_t [converted]	PER_CELL	A6	converted (A6); HEAP, prealloc before the RX fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c	66	generation_counter	file_static	uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c	68	context_clock	file_static	uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c	70	g_rejected_feedback	file_static	uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c	77	s_discovery_dirty	file_static	bool [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c	26	axes	file_static	const int[16][7]	CONST	A6	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c	30	sizes	file_static	const int[16]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	43	nr_pdcch_ul_interp_sweep_generate::tda	func_static	const uint8_t[][4]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	56	nr_pdcch_ul_interp_sweep_generate::mcs_no_tp	func_static	const uint8_t[3]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	57	nr_pdcch_ul_interp_sweep_generate::mcs_tp	func_static	const uint8_t[2]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	151	g_ul_dmrs_pin_valid	file_static	_Atomic int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	152	g_ul_dmrs_pin_L	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	152	g_ul_dmrs_pin_S	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	152	g_ul_dmrs_pin_mapping	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	330	nr_ul_layout_fit_tail::k2s	func_static	const uint8_t[16]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	426	g_only	file_static	uint16_t[NR_UL_LAYOUT_MAX_HYP][NR_UL_LAYOUT_MAX_HYP]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	438	mu	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	439	g_len	file_static	len_state_t[NR_UL_LAYOUT_MAX_LEN]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	440	g_nlen	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	441	g_cell	file_static	nr_ul_layout_cell_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	442	g_have_cell	file_static	bool	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	443	g_occ	file_static	uint32_t[160]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	444	g_gen	file_static	uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	445	g_hyp	file_static	hyp_state_t[NR_UL_LAYOUT_MAX_HYP]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	446	g_nhyp	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	447	g_locked_hyp	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	448	g_lat_var	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	449	g_var_ctr	file_static	uint32_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	450	g_addpos	file_static	uint32_t[3]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	450	g_ctl_votes	file_static	uint32_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	450	g_discarded	file_static	uint32_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	450	g_probes_booked	file_static	uint32_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	450	g_probes_fed	file_static	uint32_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	450	g_probes_skipped	file_static	uint32_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	450	g_tied	file_static	uint32_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	450	g_votes_total	file_static	uint32_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	451	g_pend	file_static	pending_t[PENDING_MAX]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	452	g_npend	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	453	g_first_slot	file_static	long	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	453	g_lock_slot	file_static	long	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	453	g_trial_slot	file_static	long	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	508	cand_list::std_n	func_static	const uint16_t[]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	863	eval_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	885	fit_chain::hist	func_static	uint32_t[16][160]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	997	nr_ul_layout_eval_once::snap	func_static	nr_ul_layout_dci_t[NR_UL_LAYOUT_BANK]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1159	nr_ul_layout_on_dci::once	func_static	pthread_once_t	UNCLASSIFIED	A6	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	44	nr_pdcch_ul_interp_sweep_generate::tda	func_static	const uint8_t[][4]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	57	nr_pdcch_ul_interp_sweep_generate::mcs_no_tp	func_static	const uint8_t[3]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	58	nr_pdcch_ul_interp_sweep_generate::mcs_tp	func_static	const uint8_t[2]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	152	g_ul_dmrs_pin_valid	file_static	_Atomic int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	154	g_ul_dmrs_pin_S	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	156	g_ul_dmrs_pin_L	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	158	g_ul_dmrs_pin_mapping	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	332	nr_ul_layout_fit_tail::k2s	func_static	const uint8_t[16]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	429	g_only	file_static	g_only_cell_t [converted]	PER_CELL	A6	converted (A6); HEAP, prealloc before the RX fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	442	g_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	445	g_len	file_static	g_len_cell_t [converted]	PER_CELL	A6	converted (A6); HEAP, prealloc before the RX fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	447	g_nlen	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	449	g_cell	file_static	nr_ul_layout_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	451	g_have_cell	file_static	bool [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	454	g_occ	file_static	g_occ_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	456	g_gen	file_static	uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	459	g_hyp	file_static	g_hyp_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	461	g_nhyp	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	463	g_locked_hyp	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	465	g_lat_var	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	467	g_var_ctr	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	469	g_probes_skipped	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	472	g_addpos	file_static	g_addpos_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	474	g_ctl_votes	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	476	g_discarded	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	478	g_tied	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	480	g_votes_total	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	482	g_probes_fed	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	484	g_probes_booked	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	487	g_pend	file_static	g_pend_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	489	g_npend	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	491	g_first_slot	file_static	long [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	493	g_lock_slot	file_static	long [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	495	g_trial_slot	file_static	long [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	558	cand_list::std_n	func_static	const uint16_t[]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	913	g_eval_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	63	g_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	64	g_cond	file_static	pthread_cond_t	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	65	g_once	file_static	pthread_once_t	UNCLASSIFIED	A4	
@@ -1659,192 +1659,253 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1709	g_tf_L	file_static	uint8_t[1
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1709	g_tf_S	file_static	uint8_t[16]	UNCLASSIFIED	A5	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1710	g_tf_init	file_static	int	UNCLASSIFIED	A5	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1710	g_tf_n	file_static	int	UNCLASSIFIED	A5	
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	39	g_da_try	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	41	g_da_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	43	g_da_rej_seg	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	45	g_da_rej_enc	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	47	g_da_rej_modidx	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	49	g_da_re	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	111	nr_isac_pusch_data_aided_submit::c_segs	tls	uint8_t *[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER]	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	147	nr_isac_pusch_data_aided_submit::coded_bits	tls	uint8_t *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	153	nr_isac_pusch_data_aided_submit::segs	tls	nrLDPC_segment_encoding_parameters_t[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER]	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	180	nr_isac_pusch_data_aided_submit::scrambled	tls	uint32_t[(UL_DA_MAX_RE * 8 + 31) / 32 + 1]	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	183	nr_isac_pusch_data_aided_submit::mod_syms	tls	c16_t *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	188	nr_isac_pusch_data_aided_submit::h_buf	tls	float *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	190	nr_isac_pusch_data_aided_submit::k_buf	tls	uint32_t[UL_DA_MAX_RE]	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	191	nr_isac_pusch_data_aided_submit::l_buf	tls	uint32_t[UL_DA_MAX_RE]	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	36	MAX_ITEMS	file_static	const int	CONST	A6	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	36	NCTX	file_static	const int	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	114	U	file_static	State	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	123	g_gnb	file_static	PHY_VARS_gNB *[NR_PUSCH_PASSIVE_MAX_CTX]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	124	g_gnb_nant	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	134	g_snapshot	file_static	passive_ul_snapshot_t[NR_PUSCH_PASSIVE_MAX_CTX]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	135	g_pipeline_ready	file_static	bool[NR_PUSCH_PASSIVE_MAX_CTX]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	138	g_ulg	file_static	const nr_pusch_gpu_fep_api_t *	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	139	g_ulg_on	file_static	_Atomic bool	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	140	g_ulg_nant	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	142	g_ulg_bad	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	142	g_ulg_chk	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	142	g_ulg_cpu_bounds	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	142	g_ulg_cpu_rej	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	142	g_ulg_seq	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	144	g_fep_req	file_static	_Atomic uint64_t[3]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	156	g_scratch	file_static	passive_ul_scratch_t[NR_PUSCH_PASSIVE_MAX_CTX]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	157	g_crc_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	157	g_rej_setup	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	157	g_rej_unsup	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	157	g_try	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	158	t_solver_probe	tls	bool	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	160	t_nid_cap	tls	nr_ul_nid_cap_t *	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	162	t_ul_kind	tls	int	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	164	t_ul_path_side	tls	int	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	165	t_ul_path_kllr	tls	double	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	174	g_ul_harq_init	file_static	nr_harq_init_tx_table_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	175	g_ul_harq_init_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	199	g_ul_harqc	file_static	ul_harqc_t[UL_HARQC_N]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	200	g_ul_harqc_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	201	g_ul_harqc_clock	file_static	uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	202	g_hq_busy	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	202	g_hq_retx_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	202	g_hq_retx_try	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	202	g_hq_rv_refused	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	202	g_hq_stored	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	205	g_hq_why_empty	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	205	g_hq_why_ndi	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	205	g_hq_why_none	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	205	g_hq_why_tbs	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	206	t_hq_armed	tls	bool	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	262	g_seg_fail	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	262	g_zero_tb	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	263	g_cb_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	263	g_cb_total	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	263	g_cb_tried	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	267	g_ta_refined	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	268	g_sfo_grants	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	328	g_ldpc_capped	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	342	g_cfr_re	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	342	g_cfr_submits	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	348	g_ant_pw	file_static	_Atomic uint64_t[PASSIVE_UL_MAX_ANT]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	349	g_ant_n	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	879	g_lp_f	file_static	c16_t *[NR_PUSCH_PASSIVE_MAX_CTX][LP_NSYM][PASSIVE_UL_MAX_ANT]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	903	lp_snr::pc	tls	float[LP_NTAU][6]	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	903	lp_snr::ps	tls	float[LP_NTAU][6][LP_NTAU][6]	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	904	lp_snr::pn	tls	int	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	964	g_lp_tab	file_static	lp_tab_t *[NR_PUSCH_PASSIVE_MAX_CTX]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	968	g_lp_ctab	file_static	lp_ctab_t *[NR_PUSCH_PASSIVE_MAX_CTX]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	973	lp_tab_build::pc	tls	float[LP_NTAU][6]	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	973	lp_tab_build::ps	tls	float[LP_NTAU][6][LP_NTAU][6]	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	973	lp_tab_build::rc	tls	float[LP_NTAU][6][LP_NTAU][276]	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	973	lp_tab_build::rs	tls	float[LP_NTAU][6][LP_NTAU][276]	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	974	lp_tab_build::pn	tls	int	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1174	lp_sprt_eval::set_mask	func_static	const int[3]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1175	lp_sprt_eval::ns_of	func_static	const int[3]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1277	nr_pusch_passive_layout_probe::set_rows	func_static	const int[3][3]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1278	nr_pusch_passive_layout_probe::set_n	func_static	const int[3]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1290	nr_pusch_passive_layout_probe::row_mask	func_static	const int[3]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1290	nr_pusch_passive_layout_probe::set_mask	func_static	const int[3][3]	CONST	A6	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1461	ul_bg_run::gbuf	func_static	c16_t *	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1558	g_ul_energy_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1559	g_ul_energy_profile	file_static	double[14]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1560	g_ul_energy_seen_mask	file_static	uint16_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1598	nid_hyp_run::failed	func_static	bool	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1598	nid_hyp_run::ready	func_static	bool	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1620	nid_submit::started	func_static	atomic_bool	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1771	nr_pusch_passive_decode_inner::skipped_aux	func_static	_Atomic unsigned long	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1814	nr_pusch_passive_decode_inner::s_stage	func_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2105	nr_pusch_passive_decode_inner::tp_scope_logged	func_static	atomic_bool	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2151	nr_pusch_passive_decode_inner::c_	func_static	_Atomic unsigned long	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2293	nr_pusch_passive_decode_inner::ul_h	tls	float *	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2294	nr_pusch_passive_decode_inner::ul_k	tls	uint32_t *	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2294	nr_pusch_passive_decode_inner::ul_l	tls	uint32_t *	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2295	nr_pusch_passive_decode_inner::ul_cap	tls	uint32_t	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2313	nr_pusch_passive_decode_inner::s_audit	tls	int	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2621	nr_pusch_passive_decode_inner::logged	func_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2768	nr_pusch_passive_decode_inner::s_ul_scr_confirmed	func_static	_Atomic int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2861	nr_pusch_passive_decode::resolved	func_static	_Atomic unsigned long	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	26	g_book	file_static	nr_passive_ul_book_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	27	g_book_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	28	g_claimed	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	28	g_expired	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	28	g_overwritten	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	28	g_parked	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	29	g_chain_no_dci01	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	29	g_chain_no_dl_lock	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	29	g_chain_no_hyp	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	29	g_chain_skip_rv	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	30	g_first_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	31	g_first	file_static	nr_ul_first_state_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	34	g_history	file_static	ul_sample_history_t[HISTORY_SLOTS]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	159	passive_ul_deliver::s_first	func_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	173	passive_ul_deliver::s_ul_tried	func_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	244	nr_pusch_passive_monitor_process::previous	func_static	long	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	73	g_ring	file_static	nr_pusch_passive_job_t[NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	74	g_cursor	file_static	nr_pusch_queue_cursor_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	83	g_pring	file_static	nr_pusch_passive_job_t[NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	84	g_pcursor	file_static	nr_pusch_queue_cursor_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	91	g_pool	file_static	ulq_snap_t[ULQ_POOL_MAX]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	93	g_pool2	file_static	ulq_snap_t[ULQ_POOL_MAX]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	94	g_snap_next	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	95	g_pool_refs	file_static	int[ULQ_POOL_MAX]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	96	g_pool_n	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	97	g_cap_thread	file_static	pthread_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	98	g_cap_cv	file_static	pthread_cond_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	99	g_dec_probe	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	99	g_full_probe	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	99	g_q_probe	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	99	g_q_real	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	99	g_rescue_skipped	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	99	g_snap_fail	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	99	g_snap_nobuf	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	99	g_snap_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	99	g_snap_used	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	99	g_stale_real	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	102	g_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	104	g_lifecycle_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	105	g_cv	file_static	pthread_cond_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	107	g_queued	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	108	g_decoded	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	109	g_crc_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	110	g_dropped_full	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	111	g_dropped_stale	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	112	g_dropped_epoch	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	113	g_dropped_unready	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	114	g_dropped_snapshot	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	115	g_max_lag	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	117	g_running	file_static	_Atomic int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	118	g_stop	file_static	_Atomic int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	119	g_nthreads	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	120	g_threads	file_static	pthread_t[NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	121	g_ue	file_static	PHY_VARS_NR_UE *	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	126	g_args	file_static	consumer_arg_t[NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	320	nr_pusch_passive_queue_thread::solver_gen	func_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	853	g_opt_win_start_ns	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	853	g_opt_win_used_ns	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	856	opt_share_ns_per_s::share	func_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	37	g_ul_dmrs_id	file_static	nr_dmrs_id_2stage_t[NR_UL_DMRS_NSCID]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	38	g_ul_dmrs_id_init	file_static	bool[NR_UL_DMRS_NSCID]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	39	g_ul_dmrs_id_lock	file_static	pthread_mutex_t[NR_UL_DMRS_NSCID]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	53	g_ue_ids	file_static	ul_ids_ue_t[UL_IDS_UE_CAP]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	54	g_ue_ids_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	55	g_ue_ids_dropped	file_static	_Atomic uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	77	g_data_lock	file_static	_Atomic uint64_t[UL_DATA_LOCK_CAP]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	84	g_data_pending	file_static	ul_data_pending_t[UL_DATA_LOCK_CAP]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	85	g_data_pending_next	file_static	uint32_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	86	g_data_lock_next	file_static	uint32_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	317	g_ul_data_id	file_static	nr_scrambling_id_sweep_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	318	g_ul_data_id_init	file_static	bool	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	319	g_ul_data_id_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	320	g_ul_link	file_static	nr_scr_link_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	322	g_ul_fails_since_ok	file_static	_Atomic uint32_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	24	g_slot	file_static	bgslot_t[BG_MAX_DEPTH]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	25	g_depth	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	25	g_run_active	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	25	g_stop	file_static	int	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	26	g_run	file_static	nr_ul_bgdisc_run_fn	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	27	g_max_age_ns	file_static	uint64_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	28	g_thr	file_static	pthread_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	29	g_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	30	g_cv	file_static	pthread_cond_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	31	g_st	file_static	nr_ul_bgdisc_stats_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	179	g_pend	file_static	struct {}[PEND_N]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	180	g_pend_next	file_static	unsigned	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	24	tracks	file_static	ul_disc_track_t[UL_DISC_TRACKS]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	25	track_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	26	evict_next	file_static	unsigned	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	27	current_epoch	file_static	uint32_t	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	29	cell_n	file_static	int[UL_DISC_CELL_N]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	29	cell_res	file_static	int[UL_DISC_CELL_N]	UNCLASSIFIED	A6	
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	256	t_sweep_lo	tls	int	TLS	A6	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	256	t_sweep_n	tls	int	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	114	U	file_static	State	PROCESS	A6	one UL FEP GPU context pool for the process (G-owned, read-only for A6): init(nant) returns -1 for a second cell with a different nant (-> CPU FEP, graceful); pct window is a process GPU budget
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	125	g_gnb	file_static	g_gnb_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	127	g_gnb_nant	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	139	g_snapshot	file_static	g_snapshot_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	142	g_pipeline_ready	file_static	g_pipeline_ready_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	146	g_ulg	file_static	const nr_pusch_gpu_fep_api_t * [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	148	g_ulg_on	file_static	_Atomic bool [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	150	g_ulg_nant	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	153	g_ulg_seq	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	155	g_ulg_chk	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	157	g_ulg_bad	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	159	g_ulg_cpu_bounds	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	161	g_ulg_cpu_rej	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	165	g_fep_req	file_static	g_fep_req_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	179	g_scratch	file_static	g_scratch_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	181	g_try	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	183	g_crc_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	185	g_rej_unsup	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	187	g_rej_setup	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	189	t_solver_probe	tls	bool	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	191	t_nid_cap	tls	nr_ul_nid_cap_t *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	193	t_ul_kind	tls	int	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	195	t_ul_path_side	tls	int	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	196	t_ul_path_kllr	tls	double	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	205	g_ul_harq_init	file_static	nr_harq_init_tx_table_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	207	g_ul_harq_init_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	233	g_ul_harqc	file_static	g_ul_harqc_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	235	g_ul_harqc_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	237	g_ul_harqc_clock	file_static	uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	239	g_hq_stored	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	241	g_hq_retx_try	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	243	g_hq_retx_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	245	g_hq_rv_refused	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	247	g_hq_busy	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	251	g_hq_why_none	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	253	g_hq_why_empty	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	255	g_hq_why_ndi	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	257	g_hq_why_tbs	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	259	t_hq_armed	tls	bool	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	315	g_seg_fail	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	317	g_zero_tb	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	319	g_cb_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	321	g_cb_tried	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	323	g_cb_total	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	328	g_ta_refined	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	330	g_sfo_grants	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	391	g_ldpc_capped	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	406	g_cfr_submits	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	408	g_cfr_re	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	416	g_ant_pw	file_static	g_ant_pw_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	418	g_ant_n	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	950	g_lp_f	file_static	g_lp_f_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	975	lp_snr::pc	tls	float[LP_NTAU][6]	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	975	lp_snr::ps	tls	float[LP_NTAU][6][LP_NTAU][6]	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	976	lp_snr::pn	tls	int	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1037	g_lp_tab	file_static	g_lp_tab_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1043	g_lp_ctab	file_static	g_lp_ctab_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1049	lp_tab_build::pc	tls	float[LP_NTAU][6]	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1049	lp_tab_build::ps	tls	float[LP_NTAU][6][LP_NTAU][6]	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1049	lp_tab_build::rc	tls	float[LP_NTAU][6][LP_NTAU][276]	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1049	lp_tab_build::rs	tls	float[LP_NTAU][6][LP_NTAU][276]	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1050	lp_tab_build::pn	tls	int	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1250	lp_sprt_eval::set_mask	func_static	const int[3]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1251	lp_sprt_eval::ns_of	func_static	const int[3]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1353	nr_pusch_passive_layout_probe::set_rows	func_static	const int[3][3]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1354	nr_pusch_passive_layout_probe::set_n	func_static	const int[3]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1366	nr_pusch_passive_layout_probe::row_mask	func_static	const int[3]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1366	nr_pusch_passive_layout_probe::set_mask	func_static	const int[3][3]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1635	g_ul_energy_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1638	g_ul_energy_profile	file_static	g_ul_energy_profile_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1640	g_ul_energy_seen_mask	file_static	uint16_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2382	nr_pusch_passive_decode_inner::ul_h	tls	float *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2383	nr_pusch_passive_decode_inner::ul_k	tls	uint32_t *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2383	nr_pusch_passive_decode_inner::ul_l	tls	uint32_t *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2384	nr_pusch_passive_decode_inner::ul_cap	tls	uint32_t	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	2402	nr_pusch_passive_decode_inner::s_audit	tls	int	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	27	g_book	file_static	nr_passive_ul_book_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	29	g_book_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	31	g_parked	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	33	g_claimed	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	35	g_expired	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	37	g_overwritten	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	39	g_chain_no_dl_lock	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	41	g_chain_no_hyp	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	43	g_chain_no_dci01	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	45	g_chain_skip_rv	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	47	g_first_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	49	g_first	file_static	nr_ul_first_state_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	54	g_history	file_static	g_history_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	76	g_ring	file_static	g_ring_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	78	g_cursor	file_static	nr_pusch_queue_cursor_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	89	g_pring	file_static	g_pring_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	91	g_pcursor	file_static	nr_pusch_queue_cursor_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	100	g_pool	file_static	g_pool_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	104	g_pool2	file_static	g_pool2_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	106	g_snap_next	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	109	g_pool_refs	file_static	g_pool_refs_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	111	g_pool_n	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	113	g_cap_thread	file_static	pthread_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	115	g_cap_cv	file_static	pthread_cond_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	117	g_q_real	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	119	g_q_probe	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	121	g_dec_probe	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	123	g_full_probe	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	125	g_snap_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	127	g_snap_fail	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	129	g_snap_nobuf	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	131	g_snap_used	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	133	g_rescue_skipped	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	135	g_stale_real	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	138	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	141	g_lifecycle_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	143	g_cv	file_static	pthread_cond_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	146	g_queued	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	148	g_decoded	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	150	g_crc_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	152	g_dropped_full	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	154	g_dropped_stale	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	156	g_dropped_epoch	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	158	g_dropped_unready	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	160	g_dropped_snapshot	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	162	g_max_lag	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	165	g_running	file_static	_Atomic int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	167	g_stop	file_static	_Atomic int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	169	g_nthreads	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	172	g_threads	file_static	g_threads_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	174	g_ue	file_static	PHY_VARS_NR_UE * [converted]	PER_CELL	A6	converted (A6); HEAP, prealloc before the RX fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	182	g_args	file_static	g_args_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	184	g_cap_arg	file_static	consumer_arg_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	917	g_opt_win_start_ns	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	919	g_opt_win_used_ns	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	930	opt_share_ns_per_s::share	func_static	_Atomic uint64_t	PROCESS	A6	cache of a host constant (1 s / online cpus), idempotent; the per-cell division is applied at the use
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c	931	opt_share_ns_per_s::dedicated	func_static	_Atomic int	PROCESS	A6	cache of the ISAC_PUSCH_CORES presence, idempotent
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	39	g_ul_dmrs_id	file_static	g_ul_dmrs_id_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	42	g_ul_dmrs_id_init	file_static	g_ul_dmrs_id_init_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	45	g_ul_dmrs_id_lock	file_static	g_ul_dmrs_id_lock_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	61	g_ue_ids	file_static	g_ue_ids_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	63	g_ue_ids_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	65	g_ue_ids_dropped	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	89	g_data_lock	file_static	g_data_lock_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	98	g_data_pending	file_static	g_data_pending_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	100	g_data_pending_next	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	102	g_data_lock_next	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	334	g_ul_data_id	file_static	nr_scrambling_id_sweep_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	336	g_ul_data_id_init	file_static	bool [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	338	g_ul_data_id_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	340	g_ul_link	file_static	nr_scr_link_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	343	g_ul_fails_since_ok	file_static	_Atomic uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	16	refill_slots	file_static	_Atomic uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	42	g_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	45	ues	file_static	ues_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	47	totals	file_static	nr_pusch_solver_stats_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	49	global_tokens	file_static	uint8_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	51	global_refill_slot	file_static	uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	53	global_cpu_slot	file_static	uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	55	global_cpu_tokens_us	file_static	int64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	57	probe_cpu_ema_us	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	59	full_cpu_ema_us	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	61	prior_valid	file_static	bool [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	63	prior_S	file_static	uint8_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	65	prior_L	file_static	uint8_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	67	prior_add	file_static	uint8_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	69	prior_table	file_static	uint8_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	71	prior_type	file_static	uint8_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	73	prior_max_len	file_static	uint8_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	75	prior_tp	file_static	uint8_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	77	prior_cdm	file_static	uint8_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	79	prior_mapping	file_static	uint8_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	81	prior_data_id	file_static	uint16_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	83	prior_dmrs_id	file_static	uint16_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	85	prior_ports	file_static	uint16_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	87	prior_layouts	file_static	uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	156	apply_physical::time_rank	func_static	const struct {}[]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	160	apply_physical::add_rank	func_static	const uint8_t[]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c	161	apply_physical::table_rank	func_static	const uint8_t[]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	29	k_beta_ack	file_static	const double[16]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	31	k_beta_csi	file_static	const double[19]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	33	k_alpha	file_static	const double[4]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	150	t_mapbuf	tls	uint8_t *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	151	t_mapcap	tls	uint32_t	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	152	t_phi	tls	uint16_t *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	348	g_lrn	file_static	g_lrn_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	350	g_lrn_clock	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	352	g_lrn_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	355	g_st	file_static	g_st_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	605	k_ack_order	file_static	const uint8_t[16]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	606	k_csi_order	file_static	const uint8_t[19]	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	756	search_explore::seen	tls	uint8_t *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	757	search_explore::seen_cap	tls	uint32_t	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	778	search_explore::q1c	tls	qcand_t[QMAX]	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	778	search_explore::q2c	tls	qcand_t[QMAX][QMAX]	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	876	nr_pusch_uci_blind_search::dbuf	tls	int16_t *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	876	nr_pusch_uci_blind_search::wbuf	tls	int16_t *	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c	877	nr_pusch_uci_blind_search::wcap	tls	uint32_t	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	26	g_slot	file_static	g_slot_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	28	g_depth	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	30	g_run_active	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	32	g_stop	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	34	g_run	file_static	nr_ul_bgdisc_run_fn [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	36	g_max_age_ns	file_static	uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	38	g_thr	file_static	pthread_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	40	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	42	g_cv	file_static	pthread_cond_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	44	g_st	file_static	nr_ul_bgdisc_stats_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	195	g_pend	file_static	g_pend_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_bgdisc.c	197	g_pend_next	file_static	unsigned [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	26	tracks	file_static	tracks_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	28	track_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	30	evict_next	file_static	unsigned [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	32	current_epoch	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	36	cell_res	file_static	cell_res_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	38	cell_n	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	266	t_sweep_lo	tls	int	TLS	A6	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c	266	t_sweep_n	tls	int	TLS	A6	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	81	g	global	Ctx	UNCLASSIFIED	A8	
 openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	82	budget	global	nr_dl_gpu_budget_t	UNCLASSIFIED	A8	
 openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	204	api	global	const nr_td_cb0_gpu_api_t	CONST	A8	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	63	g_job	file_static	g_job_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	66	g_rnti	file_static	g_rnti_cell_t [converted]	PER_CELL	A6	converted (A6); HEAP, prealloc before the RX fence
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	73	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	75	g_st	file_static	nr_ul_nid_stats_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	77	g_stop	file_static	_Atomic int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	79	g_core	file_static	int	PROCESS	A6	ISAC_UL_NID_BG_CORE read once by load_env (process env), read-only afterwards
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	82	g_snr	file_static	const float	CONST	A6	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	83	g_fn	file_static	nr_ul_nid_hyp_fn [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	85	g_prep	file_static	nr_ul_nid_prep_fn [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	87	g_thr	file_static	pthread_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	89	g_started	file_static	bool [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	93	g_learned	file_static	g_learned_cell_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	95	g_nlearned	file_static	int [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	100	load_env::done	func_static	_Atomic int	PROCESS	A6	one-time env load guard (process env, prints the banner once)
 openair1/PHY/TOOLS/calibration_scope.c	17	rx_antenna_colors	global	const FL_COLOR[4]	CONST	A8	auto
 openair1/PHY/TOOLS/calibration_scope.c	18	water_colors	global	const FL_COLOR[4]	CONST	A8	auto
 openair1/PHY/TOOLS/dB_routines.c	9	dB_table	file_static	const int8_t[256]	CONST	A8	auto
