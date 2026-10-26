@@ -103,6 +103,13 @@ def clean(src):
             if j < n and src[j] == "#":
                 # preprocessor line with continuations
                 while j < n:
+                    if src[j] == "/" and j + 1 < n and src[j + 1] == "*":
+                        # a block comment inside a preprocessor line may span lines (A4: apostrophes in it must not open a char literal)
+                        k = src.find("*/", j + 2)
+                        k = n if k < 0 else k + 2
+                        out.append("".join("\n" if ch == "\n" else " " for ch in src[j:k]))
+                        j = k
+                        continue
                     if src[j] == "\n" and not (j > 0 and src[j - 1] == "\\"):
                         break
                     out.append("\n" if src[j] == "\n" else " ")

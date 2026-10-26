@@ -797,6 +797,216 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2114	g_anonlen	file_sta
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2119	g_acc_slot	file_static	_Atomic unsigned long[2][20]	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2119	g_occ_slot	file_static	_Atomic unsigned long[2][20][20]	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2121	g_enq_class	file_static	_Atomic unsigned long[2][NR_BLIND_RNTI_CLASS_COUNT]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2170	kBtimName	file_static	const char *const[BTIM_N]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2174	g_btim_ns	file_static	_Atomic uint64_t[BTIM_N]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2175	g_btim_n	file_static	_Atomic uint64_t[BTIM_N]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2176	g_btim_max	file_static	_Atomic uint64_t[BTIM_N]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2180	g_btim_hist	file_static	_Atomic uint64_t[8]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2181	g_btim_over_slot	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2182	g_btim_on	file_static	_Atomic int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2216	btim_add::stg	func_static	const int8_t[BTIM_N]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2241	g_dec_try	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2242	g_dec_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2243	g_dec_skip_rv	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2248	g_dec_over_cap	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2249	g_dec_k0_wait	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2272	g_al_accepts	file_static	_Atomic uint64_t[4]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2273	g_al_cand	file_static	_Atomic uint64_t[2][4]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2274	g_al_confirmed	file_static	_Atomic uint64_t[2][4]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2275	g_al_rotate	file_static	_Atomic uint32_t[4]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2284	g_ss_inferred_logged_ss	file_static	_Atomic int[2]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2304	nr_pdcch_blind_infer_search_space::kSsName	func_static	const char *[2]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2346	g_dec_unsup	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2347	g_data_submits	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2365	discovery_evidence_frame	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2365	discovery_evidence_slot	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2417	g_janon_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2418	g_janon_cv	file_static	pthread_cond_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2419	g_janon_q	file_static	janon_item_t *	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2420	g_janon_cap	file_static	int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2420	g_janon_head	file_static	int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2420	g_janon_n	file_static	int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2421	g_janon_hits	file_static	janon_hit_t[4096]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2422	g_janon_nhits	file_static	int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2423	g_janon_busy_ns	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2423	g_janon_done	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2423	g_janon_drop	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2423	g_janon_found	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2423	g_janon_sub	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2452	janon_worker::it	tls	janon_item_t	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2507	janon_worker::s_n	func_static	_Atomic unsigned	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2523	janon_worker::s_hit_overflow	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2551	janon_submit::once	func_static	pthread_once_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2633	g_cell_lens	file_static	_Atomic int[4]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2635	g_ul_cell_len	file_static	struct {}[16]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2654	janon_note_cell_len::hint	func_static	nr_cell_len_hint_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2655	janon_note_cell_len::hint_mu	func_static	pthread_mutex_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2694	g_ussh	file_static	ussh_t[USSH_GEOMS]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2695	g_ussh_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2696	kUsshA	file_static	const uint32_t[3]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2776	ussh_note_ex::s_rot	func_static	int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2805	g_ulssh_bad	file_static	_Atomic uint64_t[8]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2882	sweep_evidence_rnti::hits	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2968	blind_dmrs_rank_candidates::audits	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2968	blind_dmrs_rank_candidates::calls	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2968	blind_dmrs_rank_candidates::known_calls	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2968	blind_dmrs_rank_candidates::offered	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2968	blind_dmrs_rank_candidates::selected	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3006	g_lb_n_items	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3006	g_lb_n_vec	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3007	g_lb_vstride	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3031	g_lb_vec	tls	int16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3034	g_lb_vidx	tls	uint16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3035	g_lb_len	tls	uint16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3036	g_lb_al	tls	uint8_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3037	g_lb_crc	tls	uint32_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3038	g_lb_pl	tls	nr_dci_bits_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3039	g_lb_ok	tls	uint8_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3040	g_lb_pool	tls	void *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3078	g_lb_slot	tls	lane_batch_slot_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3079	g_lb_flushed	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3145	lane_batch_flush::s_why	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3164	lane_batch_flush::s_calls	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3164	lane_batch_flush::s_items	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3175	g_lane_sweep_ctx	tls	nr_pdcch_autodiscover_sweep_ctx_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3176	g_lane_disc_cand	tls	nr_pdcch_autodiscover_cand_t[NR_PDCCH_LOOKAHEAD_MAX][45]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3177	g_lane_disc_n	tls	int[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3178	g_lane_needs_sweep	tls	uint8_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3179	g_lane_geom_snap	tls	nr_pdcch_lookahead_geom_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3241	g_sweep_cache	tls	sweep_batch_cache_t	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3261	sweep_gpu_prefill::vec	tls	int16_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_VSTRIDE]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3262	sweep_gpu_prefill::vidx	tls	uint16_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3263	sweep_gpu_prefill::lens	tls	uint16_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3264	sweep_gpu_prefill::als	tls	uint8_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3265	sweep_gpu_prefill::crcs	tls	uint32_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3266	sweep_gpu_prefill::pls	tls	nr_dci_bits_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3267	sweep_gpu_prefill::oks	tls	uint8_t[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3308	sweep_gpu_prefill::s_batches	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3308	sweep_gpu_prefill::s_items	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3456	nr_pdcch_autodiscover_length_scorer_inner::s_bh	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3475	nr_pdcch_autodiscover_length_scorer_inner::s_hit	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3475	nr_pdcch_autodiscover_length_scorer_inner::s_miss	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3546	nr_pdcch_autodiscover_length_scorer_inner::s_janon	func_static	_Atomic unsigned	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3688	g_pa_max	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3688	g_pa_n	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3688	g_pa_ns	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3712	g_pbwp	file_static	nr_pbwp_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3713	g_pbwp_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3719	pbwp_corr_run::s_cs_logged	func_static	_Atomic bool	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3720	pbwp_corr_run::y	func_static	c16_t[12 * 276]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3878	nr_pdcch_polar_batch_stage::arena	tls	int16_t[CAP][MAXE]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	3992	nr_pdcch_blind_monitor_process_body::s_queue_tried	func_static	int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4017	nr_pdcch_blind_monitor_process_body::s_cache_pci	func_static	uint16_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4045	nr_pdcch_blind_monitor_process_body::s_idsw_buf	func_static	c16_t *	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4059	nr_pdcch_blind_monitor_process_body::discovery_duty_tick	func_static	uint32_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4149	nr_pdcch_blind_monitor_process_body::s_ra_occ	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4184	nr_pdcch_blind_monitor_process_body::s_scan_tried	func_static	int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4233	s_dedupe_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4234	s_dedupe	file_static	struct {}[256]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4235	s_dedupe_w	file_static	unsigned	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4236	g_bank_accepts	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4236	g_c0uss_unique	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4236	g_dup_dropped	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4237	t_bank_index	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4239	t_bank_slot	tls	uint64_t	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4333	g_inline_drop_epoch	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4402	occasion_reconf_prologue::hook_once	func_static	pthread_once_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4403	occasion_reconf_prologue::last_tick_slot	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4404	occasion_reconf_prologue::last_c0_unique	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4429	g_disc_q	file_static	nr_dq_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4430	g_disc_pub_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4431	g_disc_pub	file_static	struct {}	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4432	g_disc_drop_epoch	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4432	g_disc_jobs	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4432	g_disc_pending_poll	file_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4433	g_disc_once	file_static	pthread_once_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4439	disc_worker::cfg	tls	nr_pdcch_blind_monitor_cfg_t	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4632	nr_pdcch_blind_monitor_run_occasion::s_dbud_skip	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4636	nr_pdcch_blind_monitor_run_occasion::s_streak	func_static	_Atomic uint32_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4719	nr_pdcch_blind_monitor_run_occasion::s_b0	func_static	uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4719	nr_pdcch_blind_monitor_run_occasion::s_occ	func_static	uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4719	nr_pdcch_blind_monitor_run_occasion::s_u0	func_static	uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4720	nr_pdcch_blind_monitor_run_occasion::s_closed	func_static	bool	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4753	nr_pdcch_blind_monitor_run_occasion::s_disc_skipped	func_static	uint32_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4754	nr_pdcch_blind_monitor_run_occasion::s_disc_run	func_static	uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4754	nr_pdcch_blind_monitor_run_occasion::s_disc_yield	func_static	uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4770	nr_pdcch_blind_monitor_run_occasion::css_tick	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4807	g_sp_t0	file_static	_Atomic uint64_t[SLOWPASS_SLOTS]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4808	g_sp_hits	file_static	_Atomic uint32_t[SLOWPASS_SLOTS]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4809	g_sp_tid	file_static	pthread_t[SLOWPASS_SLOTS]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4810	g_sp_n	file_static	_Atomic int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4811	t_sp_slot	tls	int	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4812	g_sp_ms	file_static	_Atomic int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4823	slowpass_handler::m	func_static	const char[]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4861	slowpass_enter::started	func_static	_Atomic int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4994	nr_pdcch_blind_monitor_run_occasion_one::s_occ	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4999	nr_pdcch_blind_monitor_run_occasion_one::s_css0_runs	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5048	nr_pdcch_blind_monitor_run_occasion_one::ul_seed_logged	func_static	_Atomic bool	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5071	nr_pdcch_blind_monitor_run_occasion_one::previous_geometry	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5199	nr_pdcch_blind_monitor_run_occasion_one::al_order	func_static	const int[4]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5305	nr_pdcch_blind_monitor_run_occasion_one::s_ladder_n	func_static	_Atomic unsigned long	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5354	nr_pdcch_blind_monitor_run_occasion_one::s_pbwp_own_len	func_static	uint16_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5354	nr_pdcch_blind_monitor_run_occasion_one::s_pbwp_own_size	func_static	uint16_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5355	nr_pdcch_blind_monitor_run_occasion_one::s_pbwp_own_ms	func_static	int64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5398	nr_pdcch_blind_monitor_run_occasion_one::s_unres_tick	func_static	_Atomic uint32_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5451	nr_pdcch_blind_monitor_run_occasion_one::s_probe_tick	func_static	uint32_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5486	nr_pdcch_blind_monitor_run_occasion_one::s_occ10	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5533	nr_pdcch_blind_monitor_run_occasion_one::s_fmt_logged	func_static	_Atomic int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5607	nr_pdcch_blind_monitor_run_occasion_one::t_fc	tls	c16_t *[NB_ANTENNAS_RX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5608	nr_pdcch_blind_monitor_run_occasion_one::t_fk	tls	struct {}	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5662	nr_pdcch_blind_monitor_run_occasion_one::gpu_llr	tls	int16_t[2 * NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5693	nr_pdcch_blind_monitor_run_occasion_one::s_nid_next_ns	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5700	nr_pdcch_blind_monitor_run_occasion_one::t_cj	tls	pbwp_corr_job_t	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5701	nr_pdcch_blind_monitor_run_occasion_one::fep1	tls	c16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5780	nr_pdcch_blind_monitor_run_occasion_one::rank_visit	tls	uint64_t	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5781	nr_pdcch_blind_monitor_run_occasion_one::rank_lane_visit	tls	uint64_t[NR_PDCCH_LOOKAHEAD_MAX]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5849	nr_pdcch_blind_monitor_run_occasion_one::s_idx_left	func_static	_Atomic int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6108	nr_pdcch_blind_monitor_run_occasion_one::dbg	func_static	int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6665	nr_pdcch_blind_monitor_run_occasion_one::s_cfar_z	func_static	const double	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6903	nr_pdcch_blind_monitor_run_occasion_one::s_pdcch_e_rx2	tls	c16_t[NR_MAX_PDCCH_SIZE]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6922	nr_pdcch_blind_monitor_run_occasion_one::s_p2_hyp	func_static	_Atomic uint32_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6927	nr_pdcch_blind_monitor_run_occasion_one::s_p2_geom	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	6959	nr_pdcch_blind_monitor_run_occasion_one::al_b	func_static	const int[4]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7047	nr_pdcch_blind_monitor_run_occasion_one::s_lane_re	tls	c16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7055	nr_pdcch_blind_monitor_run_occasion_one::pdcch_llr_lane	tls	c16_t[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7082	nr_pdcch_blind_monitor_run_occasion_one::pdcch_llr_union	tls	c16_t[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7915	nr_pdcch_blind_monitor_run_occasion_one::s_ul_type0_booked	func_static	_Atomic unsigned long	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	7957	nr_pdcch_blind_monitor_run_occasion_one::logged00	func_static	uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8066	nr_pdcch_blind_monitor_run_occasion_one::raw_dl_count	func_static	uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8092	nr_pdcch_blind_monitor_run_occasion_one::s_unread	func_static	_Atomic uint32_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8288	nr_pdcch_blind_monitor_run_occasion_one::s_dq	func_static	_Atomic uint64_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8360	nr_pdcch_blind_monitor_run_occasion_one::s_scr_logged	func_static	_Atomic int[2]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8578	nr_pdcch_blind_monitor_run_occasion_one::s_walk_tog	func_static	_Atomic uint8_t[65536]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8607	nr_pdcch_blind_monitor_run_occasion_one::s_hq_set	func_static	_Atomic int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8620	nr_pdcch_blind_monitor_run_occasion_one::s_tda_set	func_static	_Atomic int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8623	nr_pdcch_blind_monitor_run_occasion_one::s_gid	tls	uint8_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8624	nr_pdcch_blind_monitor_run_occasion_one::s_ids	tls	uint16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8624	nr_pdcch_blind_monitor_run_occasion_one::s_sorted	tls	uint16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8624	nr_pdcch_blind_monitor_run_occasion_one::s_visit	tls	uint16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8625	nr_pdcch_blind_monitor_run_occasion_one::s_fk	tls	uint8_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8669	nr_pdcch_blind_monitor_run_occasion_one::fk	tls	dci11_fclass_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8726	nr_pdcch_blind_monitor_run_occasion_one::s_vkey	tls	uint32_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8727	nr_pdcch_blind_monitor_run_occasion_one::s_vgrp	tls	int16_t *	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8791	nr_pdcch_blind_monitor_run_occasion_one::s_rp	func_static	_Atomic uint32_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8889	nr_pdcch_blind_monitor_run_occasion_one::s_ids	func_static	uint16_t[8]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8890	nr_pdcch_blind_monitor_run_occasion_one::s_n	func_static	int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8904	nr_pdcch_blind_monitor_run_occasion_one::s_last_cnt	func_static	int[8][8]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8904	nr_pdcch_blind_monitor_run_occasion_one::s_last_key	func_static	int[8]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	8959	nr_pdcch_blind_monitor_run_occasion_one::s_weak	func_static	_Atomic uint32_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9010	nr_pdcch_blind_monitor_run_occasion_one::s_tfd	func_static	_Atomic uint32_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9043	nr_pdcch_blind_monitor_run_occasion_one::num_l0	func_static	const uint8_t[18]	CONST	A4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9171	nr_pdcch_blind_monitor_run_occasion_one::s_clash_n	func_static	_Atomic uint32_t	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9366	nr_pdcch_blind_monitor_run_occasion_one::isac_h	tls	float[NR_PDCCH_BLIND_MAX_ANT * 2 * 273 * NR_NB_SC_PER_RB]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9367	nr_pdcch_blind_monitor_run_occasion_one::isac_k	tls	uint32_t[273 * NR_NB_SC_PER_RB]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9368	nr_pdcch_blind_monitor_run_occasion_one::isac_l	tls	uint32_t[273 * NR_NB_SC_PER_RB]	TLS	A4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9796	nr_pdcch_blind_monitor_run_occasion_one::acq_first_logged	func_static	bool	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9804	nr_pdcch_blind_monitor_run_occasion_one::acq_last_sig	func_static	int	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9883	dl_gpu_memory	file_static	void (*)(uint64_t *, uint64_t *)	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9884	dl_gpu_transfers	file_static	void (*)(uint64_t *, uint64_t *)	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9926	nr_dl_gpu_warmup::prepared	func_static	bool	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9947	nr_dl_gpu_warmup::modules	func_static	const char *[]	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	9970	nr_dl_gw_pool_warmup::done	func_static	bool	UNCLASSIFIED	A4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10045	isac_segv_bt_install::alt	func_static	char[65536]	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c	33	g_phase2_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c	51	g_recent	file_static	struct {}[NR_PDCCH_BLIND_PERSIST_MAX]	UNCLASSIFIED	A4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c	55	g_recent_head	file_static	int	UNCLASSIFIED	A4	
@@ -1611,8 +1821,6 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2481	nr_a2e_stg	tls	uint32
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2517	nr_pdsch_passive_queue_enqueue::c_	func_static	_Atomic unsigned long	UNCLASSIFIED	A5	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2533	g_age_hist	file_static	_Atomic uint64_t[2][NR_PASSIVE_LAG_BINS]	UNCLASSIFIED	A5	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2534	g_dropped_probe	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	15	coverage_entry_t	global	andareadingofthefullstandardspacecanholdthousands)*/typedefstruct{}	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	15	id	global	*countsarekeptperlayout	UNCLASSIFIED	A5	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	26	kWhy	file_static	const char *const[W_N]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	106	g_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	107	g_r	file_static	solver_rnti_t[SOLVER_RNTIS]	UNCLASSIFIED	A5	
