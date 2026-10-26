@@ -11,6 +11,7 @@
 #include "PHY/NR_TRANSPORT/nr_ulsch_passive_timing.h"
 #include "common/utils/nr/nr_common.h"
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -29,10 +30,23 @@ typedef struct {
   uint64_t stamp;
   ul_hyp_t h;
 } hyp_entry_t;
-static hyp_entry_t g_hyp[UL_HYP_N];
-static pthread_mutex_t g_hyp_lock = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t g_hyp_clock;
-static _Atomic uint64_t g_hyp_hit, g_hyp_miss, g_hyp_stale, g_hyp_put;
+/* MPCI G3: the cache of one cell. Callers are the cell's bound threads (decode consumers, the bound bg-discovery worker), so every function below reads and writes the cache of
+ * nr_cell_idx(): two cells that reuse a C-RNTI never see each other's hypothesis. Cell 0 only (N = 1): exactly the former process-wide cache. */
+typedef hyp_entry_t hyp_arr_t[UL_HYP_N];
+NR_CELL_STATIC(hyp_arr_t, g_hyp)
+#define g_hyp NR_CELL_REF(g_hyp)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_hyp_lock, PTHREAD_MUTEX_INITIALIZER)
+#define g_hyp_lock NR_CELL_REF(g_hyp_lock)
+NR_CELL_STATIC(uint64_t, g_hyp_clock)
+#define g_hyp_clock NR_CELL_REF(g_hyp_clock)
+NR_CELL_STATIC(_Atomic uint64_t, g_hyp_hit)
+#define g_hyp_hit NR_CELL_REF(g_hyp_hit)
+NR_CELL_STATIC(_Atomic uint64_t, g_hyp_miss)
+#define g_hyp_miss NR_CELL_REF(g_hyp_miss)
+NR_CELL_STATIC(_Atomic uint64_t, g_hyp_stale)
+#define g_hyp_stale NR_CELL_REF(g_hyp_stale)
+NR_CELL_STATIC(_Atomic uint64_t, g_hyp_put)
+#define g_hyp_put NR_CELL_REF(g_hyp_put)
 
 int ul_hyp_cache_get(uint16_t rnti, ul_hyp_t *h)
 {
@@ -159,8 +173,19 @@ static struct {
   _Atomic int on;
   int nbrx, check;
   _Atomic uint64_t fb[NR_GPU_PASS_UL_FB_N], ev[NR_GPU_PASS_UL_EV_N], runs, shadow_n;
-  struct { nr_gpu_pass_job_t *job; int16_t *pil; int16_t *est; } ctx[UL_CTX];
 } U;
+/* MPCI G3: the job, pilot and estimate buffers of the decode contexts of THIS cell (the contexts are numbered per cell: cell 1 ctx 0 is not cell 0 ctx 0). Heap pointers, 8 per cell. */
+typedef struct { nr_gpu_pass_job_t *job; int16_t *pil; int16_t *est; } ul_ctx_t;
+typedef ul_ctx_t ul_ctx_arr_t[UL_CTX];
+NR_CELL_STATIC(ul_ctx_arr_t, g_ulctx)
+#define g_ulctx NR_CELL_REF(g_ulctx)
+/* cells registered with the pass module for the UL (cell 0 is up with the module: U.on) */
+static _Atomic int g_ul_cell_on[NR_CELL_MAX];
+void nr_gpu_pass_ul_cell_enable(int cell)
+{
+  if (cell > 0 && cell < NR_CELL_MAX)
+    atomic_store(&g_ul_cell_on[cell], 1);
+}
 
 int nr_gpu_pass_ul_active(void) { return atomic_load_explicit(&U.on, memory_order_relaxed); }
 
@@ -285,7 +310,7 @@ int nr_gpu_pass_ul_requested(void)
 
 void nr_gpu_pass_ul_prewarm(int ctx)
 {
-  if (!nr_gpu_pass_ul_requested() || ctx < 0 || ctx >= UL_CTX || U.ctx[ctx].job)
+  if (!nr_gpu_pass_ul_requested() || ctx < 0 || ctx >= UL_CTX || g_ulctx[ctx].job)
     return;
   nr_gpu_pass_job_t *jp = (nr_gpu_pass_job_t *)aligned_alloc(64, (sizeof(*jp) + 63) & ~(size_t)63);
   int16_t *pil = (int16_t *)aligned_alloc(64, (size_t)NR_GPU_PASS_MAX_DMRS * 6 * 273 * 4 + 64);
@@ -299,9 +324,9 @@ void nr_gpu_pass_ul_prewarm(int ctx)
   memset(jp, 0, sizeof(*jp));
   memset(pil, 0, (size_t)NR_GPU_PASS_MAX_DMRS * 6 * 273 * 4 + 64);
   memset(est, 0, (size_t)16 * 4096 * 4);
-  U.ctx[ctx].job = jp;
-  U.ctx[ctx].pil = pil;
-  U.ctx[ctx].est = est;
+  g_ulctx[ctx].job = jp;
+  g_ulctx[ctx].pil = pil;
+  g_ulctx[ctx].est = est;
 }
 
 int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
@@ -309,6 +334,7 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
   if (!nr_gpu_pass_ul_active())
     return fb(FB_OFF);
   const uint64_t t_entry = nr_gpu_pass_now_ns();
+  const int cell = nr_cell_idx(); /* MPCI G3: the consumer thread is bound to its cell; the job carries it to the GPU module */
   atomic_fetch_add_explicit(&U.runs, 1, memory_order_relaxed);
   if (in->transform_precoding)
     return fb(FB_TP);
@@ -318,18 +344,21 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
     return fb(FB_PTRS);
   if (in->nr_of_layers != 1 || in->dmrs_config_type != 0 || !in->ncp_normal || in->rv != 0 || in->n_dmrs_cdm_groups_no_data < 1 || in->n_dmrs_cdm_groups_no_data > 2)
     return fb(in->rv != 0 ? FB_RV : FB_SCOPE);
+  if (cell != 0 && !atomic_load_explicit(&g_ul_cell_on[cell], memory_order_relaxed))
+    return fb(FB_CELL); /* a further cell uses the pass only after nr_gpu_pass_cell_init + nr_gpu_pass_ul_cell_enable */
   if (in->nb_rx != U.nbrx || in->N != 4096 || in->symbols_per_slot != 14 || in->num_rb < 1 || in->num_rb > 273 || in->start_symbol < 0 || in->num_symbols < 1 ||
       in->start_symbol + in->num_symbols > 14 || !in->symbol_rot || in->ctx < 0 || in->ctx >= UL_CTX || in->keep >= in->nb_rx)
     return fb(FB_CELL);
   if (in->qam_mod_order != 2 && in->qam_mod_order != 4 && in->qam_mod_order != 6 && in->qam_mod_order != 8)
     return fb(FB_SCOPE);
-  nr_gpu_pass_job_t *j = U.ctx[in->ctx].job;
-  int16_t *pilbuf = U.ctx[in->ctx].pil;
+  nr_gpu_pass_job_t *j = g_ulctx[in->ctx].job;
+  int16_t *pilbuf = g_ulctx[in->ctx].pil;
   if (!j || !pilbuf)
     return fb(FB_NOMEM);
   memset(j, 0, offsetof(nr_gpu_pass_job_t, dj));
   memset(&j->ul, 0, sizeof(j->ul));
   j->t_entry_ns = t_entry;
+  j->cell = (uint8_t)cell;
   nr_gpu_pass_ul_t *u = &j->ul;
   const int qm = in->qam_mod_order, nrb = in->num_rb, end = in->start_symbol + in->num_symbols;
   const uint16_t range = (uint16_t)(((1u << in->num_symbols) - 1u) << in->start_symbol);
@@ -433,7 +462,7 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
     u->pil[d] = (const int16_t *)pil;
   }
   if (in->want_est)
-    u->est_out = U.ctx[in->ctx].est;
+    u->est_out = g_ulctx[in->ctx].est;
   /* ---- the job proper */
   j->shape = (nr_gpu_pass_shape_t){(uint16_t)nrbc, (uint16_t)in->num_symbols, 1, (uint16_t)qm, (uint16_t)nd, (uint16_t)ncb, 0, 0, 1};
   j->nbRx = in->nb_rx;
@@ -494,7 +523,7 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
     out->est_delay = est[best];
     out->est_delay_max_val = peak[best];
   }
-  out->est = in->want_est ? U.ctx[in->ctx].est : NULL;
+  out->est = in->want_est ? g_ulctx[in->ctx].est : NULL;
   return 0;
 }
 

@@ -21,6 +21,7 @@
 #include "PHY/TOOLS/nr_gpu_platform.h"
 #include "PHY/TOOLS/nr_gpu_memstat_cuda.cuh"
 #include "nr_gpu_cell.h"
+#include "nr_gpu_pass_quota.h"
 #include "PHY/TOOLS/nr_gpu_compat.h"
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
 #include <cuda_runtime.h>
@@ -419,7 +420,16 @@ struct Inst {
 struct Entry { cudaGraphExec_t exec[NI] = {}; };
 
 static Inst g_inst[NI];
-static int16_t *g_hq = nullptr;             /* DL HARQ soft store: NR_GPU_HQ_BLK blocks x NR_GPU_HQ_SEG int16 (device memory, allocated in nr_gpu_pass_init) */
+static int16_t *g_hq_cells[NR_PQ_CELLS];    /* DL HARQ soft store, ONE SLAB PER CELL (MPCI G3): NR_GPU_HQ_BLK blocks x NR_GPU_HQ_SEG int16 (device memory; cell 0 in nr_gpu_pass_init, the others in nr_gpu_pass_cell_init) */
+static int g_cell_nrb[NR_PQ_CELLS];         /* n_rb_dl of each cell (the DM-RS FO measurement); 0 = the process cfg's */
+static std::atomic<int> g_cell_on[NR_PQ_CELLS]; /* 1 = the cell is registered (cell 0 by nr_gpu_pass_init) */
+static inline int16_t *hq_of(unsigned cell) { return cell < (unsigned)NR_PQ_CELLS ? g_hq_cells[cell] : nullptr; }
+static inline bool cell_ok(unsigned cell) { return cell < (unsigned)NR_PQ_CELLS && g_cell_on[cell].load(std::memory_order_relaxed) != 0; }
+static nr_pass_quota_t g_pq;                /* per-cell instance quota of the DL / UL pools (nr_gpu_pass_quota.h), under g_pq_mu */
+static std::mutex g_pq_mu;
+static std::atomic<int> g_pq_active{0};     /* 1 while two or more cells are registered: only then the acquisition takes the lock */
+static int g_inst_cell[NI];                 /* the cell that holds instance i (valid while busy) */
+static int g_inst_cls1[NI];                 /* 1 + the quota class instance i was counted under at take, 0 = not counted */
 static nr_gpu_buf_t g_ring[4], g_rot;       /* the warm replay's dummy IQ ring and rotation */
 static std::map<uint64_t, Entry> g_cache;
 static std::mutex g_mu;
@@ -645,9 +655,9 @@ static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
       g.E = first ? j->E : j->E2;
       g.llr_off = first ? (uint32_t)s * j->E : j->first_rE2 * j->E + ((uint32_t)s - j->first_rE2) * j->E2;
       g.Qm = j->Qm; g.BG = j->BG; g.Z = j->Z; g.K = j->K; g.F = j->F; g.Kprime = (uint32_t)Kprime; g.Tbslbrm = j->tbslbrm; g.C = j->C; g.rv = j->rv;
-      if (j->hq_mode && g_hq && j->hq_blk[s] < NR_GPU_HQ_BLK && !j->probe) {
+      if (j->hq_mode && hq_of(j->cell) && j->hq_blk[s] < NR_GPU_HQ_BLK && !j->probe) {
         g.hq_mode = j->hq_mode;
-        g.hq = g_hq + (size_t)j->hq_blk[s] * NR_GPU_HQ_SEG;
+        g.hq = hq_of(j->cell) + (size_t)j->hq_blk[s] * NR_GPU_HQ_SEG;
       }
     } /* padding blocks: C == 0 is "refused" -> zeros */
     for (int q = 0; q < NSNAP; q++) {
@@ -791,7 +801,7 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
     pb.post.h0 = (const int16_t *)I.est.dev + 2 * (size_t)N * j->dmrs_sym[j->fo_first];
     pb.post.h1 = (const int16_t *)I.est.dev + 2 * (size_t)N * j->dmrs_sym[j->fo_last];
   }
-  pb.post.N = N; pb.post.n_rb_dl = g_cfg.n_rb_dl;
+  pb.post.N = N; pb.post.n_rb_dl = g_cell_nrb[j->cell < NR_PQ_CELLS ? j->cell : 0] > 0 ? g_cell_nrb[j->cell < NR_PQ_CELLS ? j->cell : 0] : g_cfg.n_rb_dl;
   pb.post.dt_d = j->dt_d; pb.post.df_d = j->df_d; pb.post.dt_f = (float)j->dt_d; pb.post.df_f = (float)j->df_d;
   for (int sg = 0; sg < NR_GPU_PASS_MAX_SEG; sg++) {
     const bool real = sg < j->nseg;
@@ -1425,18 +1435,21 @@ extern "C" int nr_gpu_pass_config(const nr_gpu_pass_cfg_t *c)
 }
 
 /* HARQ blocks <-> the host layout of the CPU store (block r at d + r * kcz, n = N entries): rare fallbacks between the GPU and the CPU decoder; the blocks are owned by the caller (its entry is busy) */
-static int hq_copy(const uint16_t *blk, int16_t *d, int C, int kcz, int n, bool up)
+static int hq_copy(int cell, const uint16_t *blk, int16_t *d, int C, int kcz, int n, bool up)
 {
-  if (!g_hq || !blk || !d || C < 1 || C > MAXCB || n < 1 || n > NR_GPU_HQ_SEG) return -1;
+  int16_t *const hq = hq_of(cell);
+  if (!hq || !blk || !d || C < 1 || C > MAXCB || n < 1 || n > NR_GPU_HQ_SEG) return -1;
   for (int r = 0; r < C; r++) {
     if (blk[r] >= NR_GPU_HQ_BLK) return -1;
-    int16_t *dev = g_hq + (size_t)blk[r] * NR_GPU_HQ_SEG;
+    int16_t *dev = hq + (size_t)blk[r] * NR_GPU_HQ_SEG;
     if ((up ? cudaMemcpy(dev, d + (size_t)r * kcz, (size_t)n * 2, cudaMemcpyHostToDevice) : cudaMemcpy(d + (size_t)r * kcz, dev, (size_t)n * 2, cudaMemcpyDeviceToHost)) != cudaSuccess) return -1;
   }
   return 0;
 }
-extern "C" int nr_gpu_pass_hq_up(const uint16_t *blk, const int16_t *d, int C, int kcz, int n) { return hq_copy(blk, const_cast<int16_t *>(d), C, kcz, n, true); }
-extern "C" int nr_gpu_pass_hq_down(const uint16_t *blk, int16_t *d, int C, int kcz, int n) { return hq_copy(blk, d, C, kcz, n, false); }
+extern "C" int nr_gpu_pass_hq_up(const uint16_t *blk, const int16_t *d, int C, int kcz, int n) { return hq_copy(0, blk, const_cast<int16_t *>(d), C, kcz, n, true); }
+extern "C" int nr_gpu_pass_hq_down(const uint16_t *blk, int16_t *d, int C, int kcz, int n) { return hq_copy(0, blk, d, C, kcz, n, false); }
+extern "C" int nr_gpu_pass_hq_up_cell(int cell, const uint16_t *blk, const int16_t *d, int C, int kcz, int n) { return hq_copy(cell, blk, const_cast<int16_t *>(d), C, kcz, n, true); }
+extern "C" int nr_gpu_pass_hq_down_cell(int cell, const uint16_t *blk, int16_t *d, int C, int kcz, int n) { return hq_copy(cell, blk, d, C, kcz, n, false); }
 
 extern "C" int nr_gpu_pass_init(int max_classes)
 {
@@ -1457,10 +1470,13 @@ extern "C" int nr_gpu_pass_init(int max_classes)
   if (nr_gpu_buf_alloc(&g_rot, 64 * 4)) return -1;
   static_assert(NR_GPU_HQ_BLK == NR_GPU_CELL_HQ_BLK && NR_GPU_HQ_SEG == NR_GPU_CELL_HQ_SEG, "nr_gpu_cell.h HARQ sizing");
   {
-    NrMsScope hq_(NR_MS_PASS, NR_MS_PER_CELL); /* the HARQ soft store holds the state of one cell (G3: one per cell) */
-    if (nr_ms_malloc(&g_hq, (size_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2) != cudaSuccess) return -1; /* 104 MB: the HARQ soft store counts against the pass's VRAM */
+    NrMsScope hq_(NR_MS_PASS, NR_MS_PER_CELL); /* the HARQ soft store holds the state of one cell (cell 0 here, the others in nr_gpu_pass_cell_init) */
+    if (nr_ms_malloc(&g_hq_cells[0], (size_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2) != cudaSuccess) return -1; /* 104 MB: the HARQ soft store counts against the pass's VRAM */
   }
-  cudaMemset(g_hq, 0, (size_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2);
+  cudaMemset(g_hq_cells[0], 0, (size_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2);
+  g_cell_nrb[0] = g_cfg.n_rb_dl;
+  { std::lock_guard<std::mutex> pq(g_pq_mu); nr_pq_register(&g_pq, 0); }
+  g_cell_on[0] = 1;
   SEG_ROWS = g_cfg.split ? 1024 : 512; /* split: 32 segments x 2 DM-RS x 4 layers x 4 RX */
   uint64_t ib = 0; /* review S3: the explicit sum of the pass's own buffers (an estimate: the stage modules' per-instance contexts are not in it) */
   for (int i = 0; i < NI; i++) {
@@ -1488,6 +1504,49 @@ extern "C" int nr_gpu_pass_init(int max_classes)
   return 0;
 }
 
+/* MPCI G3: register a further cell (pre-fence, after nr_gpu_pass_init). Its HARQ slab is booked PER_CELL to `cell` and taken from the PASS share of the GPU memory budget
+ * (a refusal leaves the cell without device HARQ: its hq jobs return 1 and the host keeps the soft sums on the CPU, as for a failed single-cell allocation); the graphs, the
+ * instances and their streams are SHARED -- a shape class one cell warmed serves the others. The cell then holds a floor of one DL and one UL instance (nr_gpu_pass_quota.h). */
+extern "C" int nr_gpu_pass_cell_init(int cell, int n_rb_dl)
+{
+  if (cell < 0 || cell >= NR_PQ_CELLS) return -1;
+  std::lock_guard<std::mutex> lk(g_mu);
+  if (!g_ready) return -1;
+  if (g_cell_on[cell]) return 0;
+  const size_t hb = (size_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2;
+  if (!g_hq_cells[cell]) {
+    if (!guard_alloc()) return -1;
+    if (!nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_PASS, hb)) {
+      fprintf(stderr, "GPUPASS cell %d: no room for the HARQ slab (%zu MB) in the GPU budget -- device HARQ off for this cell\n", cell, hb >> 20);
+    } else {
+      NrMsScope hq_(NR_MS_PASS, NR_MS_PER_CELL, cell);
+      if (nr_ms_malloc(&g_hq_cells[cell], hb) != cudaSuccess) {
+        g_hq_cells[cell] = nullptr;
+        nr_gpu_membudget_dyn_abort(NR_GPU_MEM_PASS, hb);
+        fprintf(stderr, "GPUPASS cell %d: HARQ slab allocation failed -- device HARQ off for this cell\n", cell);
+      } else {
+        cudaMemset(g_hq_cells[cell], 0, hb);
+      }
+    }
+  }
+  g_cell_nrb[cell] = n_rb_dl > 0 ? n_rb_dl : g_cfg.n_rb_dl;
+  {
+    std::lock_guard<std::mutex> pq(g_pq_mu);
+    nr_pq_register(&g_pq, cell);
+    g_pq_active.store(nr_pq_active(&g_pq), std::memory_order_relaxed);
+  }
+  g_cell_on[cell] = 1;
+  return 0;
+}
+extern "C" int nr_gpu_pass_cell_ready(int cell) { return cell_ok(cell) ? 1 : 0; }
+extern "C" void nr_gpu_pass_cell_retire(int cell)
+{
+  if (cell < 0 || cell >= NR_PQ_CELLS) return;
+  std::lock_guard<std::mutex> pq(g_pq_mu);
+  nr_pq_unregister(&g_pq, cell);
+  g_pq_active.store(nr_pq_active(&g_pq), std::memory_order_relaxed);
+  g_cell_on[cell] = 0;
+}
 extern "C" int nr_gpu_pass_warm(const nr_gpu_pass_shape_t *sh, int qmode, int align, int evm)
 {
   std::lock_guard<std::mutex> lk(g_mu);
@@ -1582,7 +1641,10 @@ static std::mutex g_pool_mu;
 static std::condition_variable g_pool_cv;
 static std::atomic<int> g_real_waiting{0};
 static constexpr int OVF_WAIT_US = 400;
-static int try_acquire(unsigned pool)
+/* MPCI G3: the DL / UL pools are shared by all cells; while two or more cells are registered the acquisition of a pool's own instances goes through the per-cell quota
+ * (nr_gpu_pass_quota.h: a free instance is kept for every registered cell that holds none, so a burst cell cannot take the last instance of a quiet cell). The overflow
+ * (probe-pool) instance is outside the quota. One cell: the quota is not consulted and the CAS below is today's. */
+static int take_raw(unsigned pool)
 {
   for (unsigned m = g_busy.load();;) {
     const unsigned fr = ~m & pool;
@@ -1591,8 +1653,39 @@ static int try_acquire(unsigned pool)
     if (g_busy.compare_exchange_weak(m, m | 1u << i)) return i;
   }
 }
+static int try_acquire(unsigned pool, int cell)
+{
+  const unsigned own = pool & ~M_PROBE;
+  int id = -1;
+  if (own) {
+    const int cls = own == M_DL ? 0 : own == M_UL ? 1 : -1;
+    if (cls >= 0 && g_pq_active.load(std::memory_order_relaxed)) {
+      std::lock_guard<std::mutex> lk(g_pq_mu);
+      if (nr_pq_may_take(&g_pq, cls, cell, __builtin_popcount(~g_busy.load() & own))) {
+        id = take_raw(own);
+        if (id >= 0) { nr_pq_take(&g_pq, cls, cell); g_inst_cls1[id] = cls + 1; g_inst_cell[id] = cell; }
+      }
+    } else {
+      id = take_raw(own);
+      if (id >= 0) { g_inst_cls1[id] = 0; g_inst_cell[id] = cell; }
+    }
+  }
+  if (id < 0 && (pool & M_PROBE)) {
+    id = take_raw(M_PROBE);
+    if (id >= 0) { g_inst_cls1[id] = 0; g_inst_cell[id] = cell; }
+  }
+  return id;
+}
 static void release_mask(unsigned mask)
 {
+  for (unsigned m = mask; m; m &= m - 1) {
+    const int i = __builtin_ctz(m);
+    if (g_inst_cls1[i]) { /* give the quota slot back before the instance is visible as free */
+      std::lock_guard<std::mutex> lk(g_pq_mu);
+      nr_pq_release(&g_pq, g_inst_cls1[i] - 1, g_inst_cell[i]);
+      g_inst_cls1[i] = 0;
+    }
+  }
   g_busy.fetch_and(~mask);
   if (g_real_waiting.load() > 0) {
     std::lock_guard<std::mutex> lk(g_pool_mu);
@@ -1600,29 +1693,35 @@ static void release_mask(unsigned mask)
   }
 }
 static void release(int id) { release_mask(1u << id); }
-static int acquire_real(unsigned pool)
+static int acquire_real(unsigned pool, int cell)
 {
-  int id = try_acquire(pool);
+  int id = try_acquire(pool, cell);
   if (id >= 0) return id;
-  id = try_acquire(M_PROBE);
+  id = try_acquire(M_PROBE, cell);
   if (id >= 0) { ++g_ovf_takes; return id; }
   ++g_real_waiting; /* the overflow instance runs a probe (short): wait for it, not for a real grant */
   ++g_ovf_waits;
   const auto dl = std::chrono::steady_clock::now() + std::chrono::microseconds(OVF_WAIT_US);
   {
     std::unique_lock<std::mutex> lk(g_pool_mu);
-    while ((id = try_acquire(pool | M_PROBE)) < 0 && g_pool_cv.wait_until(lk, dl) != std::cv_status::timeout) {}
-    if (id < 0) id = try_acquire(pool | M_PROBE);
+    while ((id = try_acquire(pool | M_PROBE, cell)) < 0 && g_pool_cv.wait_until(lk, dl) != std::cv_status::timeout) {}
+    if (id < 0) id = try_acquire(pool | M_PROBE, cell);
   }
   --g_real_waiting;
   if (id >= 0 && (M_PROBE >> id & 1u)) ++g_ovf_takes;
   return id;
 }
-static int acquire_probe()
+static int acquire_probe(int cell)
 {
   if (g_real_waiting.load() > 0 || __builtin_popcount(~g_busy.load() & M_DL) < 2) return -1;
-  return try_acquire(M_PROBE);
+  return try_acquire(M_PROBE, cell);
 }
+/* test hooks: take / give back an instance of the DL (cls 0) or UL (cls 1) pool for `cell` through the quota only (no overflow instance, no wait); -1 = refused. */
+extern "C" int nr_gpu_pass_test_acquire(int cell, int cls) { return try_acquire(cls == 0 ? M_DL : M_UL, cell); }
+extern "C" void nr_gpu_pass_test_release(int id) { if (id >= 0 && id < NI) release(id); }
+extern "C" int nr_gpu_pass_test_inst_cell(int id) { return id >= 0 && id < NI ? g_inst_cell[id] : -1; }
+extern "C" int nr_gpu_pass_test_hq_slab(int cell) { return hq_of(cell) != nullptr; }
+
 
 /* v2 Task 4 (ISAC_PDSCH_GPU_GRAPH_RETRY): a decode call (nr_pdsch_passive_decode: first body, retry arms, worker arms) holds the instance its first pass takes until
  * nr_gpu_pass_call_end, so that est stays on the device across its bodies. Nested calls keep the outer hold. */
@@ -1692,7 +1791,7 @@ extern "C" void nr_gpu_pass_mem(uint64_t out[6])
   out[1] = g_inst_mb;
   out[2] = g_split_mb;
   out[3] = (uint64_t)split_cap_mb();
-  out[4] = g_hq ? ((uint64_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2) >> 20 : 0;
+  { uint64_t slabs = 0; for (int c = 0; c < NR_PQ_CELLS; c++) slabs += g_hq_cells[c] ? 1 : 0; out[4] = (slabs * NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2) >> 20; } /* all cells' slabs */
   out[5] = g_pinned_b >> 20;
 }
 extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result_t *r)
@@ -1703,7 +1802,8 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   const nr_gpu_demod_job_t &d = j->dj;
   const uint32_t ext = d.ext;
   const uint32_t nd = j->n_decode && j->n_decode < j->C ? j->n_decode : j->C; /* v2 Task 2: blocks decoded (a probe: block 0) */
-  if (j->hq_mode && (j->hq_mode > 2 || j->probe || !g_hq)) { ++g_fb_unsup; return 1; } /* the host would count a combine that never happened */
+  if (!cell_ok(j->cell)) { ++g_fb_unsup; return 1; } /* a cell that was never registered has no slab, quota or n_rb_dl */
+  if (j->hq_mode && (j->hq_mode > 2 || j->probe || !hq_of(j->cell))) { ++g_fb_unsup; return 1; } /* the host would count a combine that never happened */
   if (!key_ok(k) || (int)k.nl != j->nl || (int)k.ndmrs != j->ndmrs || j->nbRx != g_cfg.nbRx || (int)j->nrb > (int)k.nrb || j->C < 1 || nd > k.ncb || j->G_dem > j->G || (j->probe && !j->G_dem) ||
       (j->Z & 3 && j->C != 1) || ((j->K + 7) >> 3) > (uint32_t)KBMAX || ((j->K - j->F) & 7) || j->G > LLR_CAP || j->G == 0 || ext > (uint32_t)EXTMAX || (d.want_evm && (k.fp32 & 1) == (uint8_t)d.evm_fp64) || ((k.fp32 >> 1) != (uint8_t)(d.demod_fp32 != 0)) ||
       j->dmrs_type > 2 || j->nseg < 0 || j->nseg > (int)k.nseg || (j->nseg == 0) != (k.nseg == 0) || !seg_ok(j) ||
@@ -1736,7 +1836,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   /* the instance: the one this thread's decode call holds (Task 4), else a free one. A probe never takes one of the last probe_reserve() free instances: real grants that
    * find none free fall back to the slow stage path. In a held call the first acquisition keeps the instance until nr_gpu_pass_call_end. */
   const bool held = t_held >= 0;
-  const int id = held ? t_held : j->probe ? acquire_probe() : acquire_real(M_DL);
+  const int id = held ? t_held : j->probe ? acquire_probe(j->cell) : acquire_real(M_DL, j->cell);
   if (id < 0) {
     static std::atomic<int> once{0};
     if (!j->probe && !once.exchange(1)) fprintf(stderr, "GPUPASS first busy fallback: no DL instance and the overflow instance stayed on a probe for %d us (the old path decodes this grant)\n", OVF_WAIT_US);
@@ -1927,7 +2027,7 @@ extern "C" void nr_gpu_pass_ul_counters(uint64_t o[16])
 extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result_t *r)
 {
   const uint64_t ts_e = nr_gpu_pass_now_ns();
-  if (!g_ready || g_dead || !j || !r || !r->tb || !j->ul.on) { ++g_ul_fb_unsup; return 1; }
+  if (!g_ready || g_dead || !j || !r || !r->tb || !j->ul.on || !cell_ok(j->cell)) { ++g_ul_fb_unsup; return 1; }
   const nr_gpu_pass_ul_t &u = j->ul;
   const Key k{j->shape.nrb_class, 1, j->shape.ndmrs, j->shape.ncb_class, 0, 0, 0, 0, 0, 1};
   uint32_t gsum = 0;
@@ -1948,7 +2048,7 @@ extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     ++g_ul_fb_unseen;
     return 1;
   }
-  const int id = j->probe ? acquire_probe() : acquire_real(M_UL);
+  const int id = j->probe ? acquire_probe(j->cell) : acquire_real(M_UL, j->cell);
   if (id < 0) { ++g_ul_fb_busy; return 1; }
   Inst &I = g_inst[id];
   struct Rel { int id; ~Rel() { release(id); } } rel{id};

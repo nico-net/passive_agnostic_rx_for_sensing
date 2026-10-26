@@ -4100,3 +4100,222 @@ TEST(GpuPassFence, OomFallsBackToCpu) {
   res.tb = tb;
   EXPECT_EQ(1, try_(&job, &res)) << "a pass whose init failed must refuse (the CPU path decodes)";
 }
+
+/* ===================================================== MPCI G3: per-cell GPU state ===================================================== */
+#include "common/utils/nr_cell.h"
+namespace g3 {
+struct Cells {
+  int (*init)(int, int) = nullptr;
+  void (*retire)(int) = nullptr;
+  int (*ready)(int) = nullptr;
+  nr_gpu_pass_hq_cell_copy_fn up = nullptr, down = nullptr;
+  int (*acq)(int, int) = nullptr;
+  void (*rel)(int) = nullptr;
+  int (*inst_cell)(int) = nullptr;
+  int (*slab)(int) = nullptr;
+};
+static bool load(GpuPassModule &m, Cells &c)
+{
+  c.init = (int (*)(int, int))dlsym(m.dl, "nr_gpu_pass_cell_init");
+  c.retire = (void (*)(int))dlsym(m.dl, "nr_gpu_pass_cell_retire");
+  c.ready = (int (*)(int))dlsym(m.dl, "nr_gpu_pass_cell_ready");
+  c.up = (nr_gpu_pass_hq_cell_copy_fn)dlsym(m.dl, "nr_gpu_pass_hq_up_cell");
+  c.down = (nr_gpu_pass_hq_cell_copy_fn)dlsym(m.dl, "nr_gpu_pass_hq_down_cell");
+  c.acq = (int (*)(int, int))dlsym(m.dl, "nr_gpu_pass_test_acquire");
+  c.rel = (void (*)(int))dlsym(m.dl, "nr_gpu_pass_test_release");
+  c.inst_cell = (int (*)(int))dlsym(m.dl, "nr_gpu_pass_test_inst_cell");
+  c.slab = (int (*)(int))dlsym(m.dl, "nr_gpu_pass_test_hq_slab");
+  return c.init && c.retire && c.ready && c.up && c.down && c.acq && c.rel && c.inst_cell && c.slab;
+}
+struct Out {
+  int rc = -1;
+  std::vector<uint8_t> tb;
+  std::vector<int16_t> llr;
+  nr_gpu_pass_result_t r{};
+};
+static Out run_cell(GpuPassModule &m, GpuPassFixture &f, int cell)
+{
+  Out o;
+  f.job->cell = (uint8_t)cell;
+  f.job->llr_out_all = 1;
+  std::fill(f.llr_pass.begin(), f.llr_pass.end(), (int16_t)0);
+  o.tb.assign(f.tb_info_bytes() + 64, 0);
+  o.r.tb = o.tb.data();
+  o.rc = m.pass_try(f.job, &o.r);
+  o.llr.assign(f.llr_pass.begin(), f.llr_pass.begin() + f.job->G);
+  return o;
+}
+static bool same(const Out &a, const Out &b, size_t tbb)
+{
+  return a.rc == b.rc && a.r.tb_ok == b.r.tb_ok && a.r.need_cpu == b.r.need_cpu && a.r.nvar == b.r.nvar && a.r.log2_maxh == b.r.log2_maxh &&
+         !memcmp(a.r.seg_ok, b.r.seg_ok, sizeof(a.r.seg_ok)) && !memcmp(a.tb.data(), b.tb.data(), tbb) && a.llr == b.llr;
+}
+} // namespace g3
+
+/* Two cells in one module: the shape classes warmed once serve both (graph hits, no new class, no unseen), and each cell's TB and final-LLR bytes equal its solo run,
+ * whether the two cells run back to back or alternately. */
+TEST(GpuPassCells, TwoCellsShareGraphsAndMatchSoloBytes) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && m.pass_try && pass_ready(m));
+  g3::Cells c;
+  ASSERT_TRUE(g3::load(m, c)) << "libpdsch_gpu.so has no per-cell pass entries";
+  const auto shapes = GpuPassFixture::warm_shapes();
+  GpuPassFixture fa = GpuPassFixture::from_shape(shapes[3], 11), fb = GpuPassFixture::from_shape(shapes[9 % shapes.size()], 12);
+  ASSERT_TRUE(fa.tb_ok_built && fb.tb_ok_built);
+  fa.bind();
+  fb.bind();
+  EXPECT_EQ(0, c.init(5, 273)) << "a cell outside the warmed ones registers";
+  EXPECT_EQ(1, c.ready(5));
+  EXPECT_EQ(0, c.ready(6)) << "an unregistered cell is not ready";
+  const g3::Out solo_a = g3::run_cell(m, fa, 0), solo_b = g3::run_cell(m, fb, 0);
+  ASSERT_EQ(0, solo_a.rc);
+  ASSERT_EQ(0, solo_b.rc);
+  uint64_t o0[16], o1[16];
+  m.pass_counters(o0);
+  for (int rep = 0; rep < 3; rep++) { /* alternate the two cells */
+    const g3::Out a1 = g3::run_cell(m, fa, 5), b0 = g3::run_cell(m, fb, 0), a0 = g3::run_cell(m, fa, 0), b1 = g3::run_cell(m, fb, 5);
+    EXPECT_TRUE(g3::same(a1, solo_a, fa.tb_info_bytes())) << "cell 5, grant A, rep " << rep;
+    EXPECT_TRUE(g3::same(a0, solo_a, fa.tb_info_bytes())) << "cell 0, grant A, rep " << rep;
+    EXPECT_TRUE(g3::same(b1, solo_b, fb.tb_info_bytes())) << "cell 5, grant B, rep " << rep;
+    EXPECT_TRUE(g3::same(b0, solo_b, fb.tb_info_bytes())) << "cell 0, grant B, rep " << rep;
+  }
+  m.pass_counters(o1);
+  EXPECT_EQ(12u, o1[1] - o0[1]) << "every run of both cells was a graph hit";
+  EXPECT_EQ(0u, (o1[2] - o0[2]) + (o1[3] - o0[3]) + (o1[4] - o0[4]) + (o1[5] - o0[5])) << "no unseen class, busy, unsupported or error";
+  EXPECT_EQ(o0[9], o1[9]) << "no class was added for the second cell (graphs are keyed by shape, not by cell)";
+  const g3::Out bad = g3::run_cell(m, fa, 6); /* never registered */
+  EXPECT_EQ(1, bad.rc) << "a cell that was not registered is refused (the host decodes on the old path)";
+  c.retire(5);
+  EXPECT_EQ(0, c.ready(5));
+}
+
+/* The device HARQ slab is per cell: the same block ids in two cells are different memory, and a retransmission of cell B never combines with the stored sum of cell A. */
+TEST(GpuPassCells, HarqSlabsAreSeparate) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m));
+  g3::Cells c;
+  ASSERT_TRUE(g3::load(m, c));
+  ASSERT_EQ(0, c.init(2, 273));
+  ASSERT_EQ(1, c.slab(0));
+  ASSERT_EQ(1, c.slab(2));
+  const uint16_t blk[3] = {5, 77, 2047};
+  std::vector<int16_t> pa(3 * 4096), pb(3 * 4096), ra(3 * 4096, 0), rb(3 * 4096, 0);
+  std::mt19937 g(9);
+  for (auto &v : pa) v = (int16_t)g();
+  for (auto &v : pb) v = (int16_t)g();
+  ASSERT_EQ(0, c.up(0, blk, pa.data(), 3, 4096, 4000));
+  ASSERT_EQ(0, c.up(2, blk, pb.data(), 3, 4096, 4000));
+  ASSERT_EQ(0, c.down(0, blk, ra.data(), 3, 4096, 4000));
+  ASSERT_EQ(0, c.down(2, blk, rb.data(), 3, 4096, 4000));
+  for (int r = 0; r < 3; r++) {
+    EXPECT_EQ(0, memcmp(&pa[r * 4096], &ra[r * 4096], 8000)) << "cell 0 block " << r;
+    EXPECT_EQ(0, memcmp(&pb[r * 4096], &rb[r * 4096], 8000)) << "cell 2 block " << r;
+  }
+  EXPECT_NE(0, c.down(9, blk, ra.data(), 3, 4096, 4000)) << "a cell without a slab";
+  /* decode level: first transmission fails in cell 0 (sum stored in blocks 1000+3r); the retransmission with the SAME ids in cell 2 has nothing stored there: it must give the
+   * verdict of the retransmission alone, while cell 0 combines */
+  const nr_gpu_pass_shape_t sh = GpuPassFixture::warm_shapes()[16 + 6 + 0];
+  int tried = 0, cell0_comb_only = 0;
+  for (double snr : {3.0, 1.0, -1.0}) {
+    GpuPassFixture::noise_db = snr;
+    for (int seed = 1; seed <= 8; seed++) {
+      GpuPassFixture f0 = GpuPassFixture::from_shape(sh, seed, -1, nullptr, 0, 0, 0, seed);
+      GpuPassFixture f2 = GpuPassFixture::from_shape(sh, seed + 100, -1, nullptr, 0, 0, 2, seed);
+      GpuPassFixture f2a = GpuPassFixture::from_shape(sh, seed + 100, -1, nullptr, 0, 0, 2, seed);
+      if (!f0.tb_ok_built || !f2.tb_ok_built) continue;
+      f0.bind(); f2.bind(); f2a.bind();
+      for (int r = 0; r < f0.tb.C; r++) f0.job->hq_blk[r] = f2.job->hq_blk[r] = (uint16_t)(1000 + 3 * r);
+      f0.job->hq_mode = 1; f2.job->hq_mode = 2;
+      const g3::Out first = g3::run_cell(m, f0, 0);
+      if (first.rc != 0 || first.r.tb_ok || first.r.need_cpu || first.r.skip) continue;
+      const g3::Out alone = g3::run_cell(m, f2a, 0);
+      const g3::Out comb0 = g3::run_cell(m, f2, 0);
+      const g3::Out other = g3::run_cell(m, f2, 2);
+      ASSERT_EQ(0, comb0.rc);
+      ASSERT_EQ(0, other.rc);
+      tried++;
+      EXPECT_EQ(alone.r.tb_ok, other.r.tb_ok) << "cell 2 must not see the sum stored by cell 0 (snr " << snr << " seed " << seed << ")";
+      cell0_comb_only += comb0.r.tb_ok && !alone.r.tb_ok;
+    }
+  }
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuPassCells.HarqSlabsAreSeparate: %d failed first transmissions, cell 0 combined-only rescues %d\n", tried, cell0_comb_only);
+  EXPECT_GE(tried, 1);
+  c.retire(2);
+}
+
+/* The instance quota: with two cells registered a burst cell takes all but one instance of the DL pool and all but one of the UL pool, the quiet cell keeps its floor of one; one cell
+ * alone (N = 1) sees the whole pool. */
+TEST(GpuPassCells, QuotaFloorAndBurst) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok && pass_ready(m));
+  g3::Cells c;
+  ASSERT_TRUE(g3::load(m, c));
+  for (int cls = 0; cls < 2; cls++) {
+    const int P = cls == 0 ? NR_GPU_PASS_DL : NR_GPU_PASS_UL;
+    std::vector<int> a;
+    for (;;) { const int id = c.acq(0, cls); if (id < 0) break; a.push_back(id); }
+    EXPECT_EQ(P, (int)a.size()) << "N = 1: a single registered cell sees the whole pool (class " << cls << ")";
+    for (int id : a) c.rel(id);
+    ASSERT_EQ(0, c.init(1, 273));
+    a.clear();
+    for (;;) { const int id = c.acq(0, cls); if (id < 0) break; a.push_back(id); }
+    EXPECT_EQ(P - 1, (int)a.size()) << "burst cell leaves the last instance of the quiet cell (class " << cls << ")";
+    const int b = c.acq(1, cls);
+    EXPECT_GE(b, 0) << "the quiet cell still gets its floor instance";
+    if (b >= 0) EXPECT_EQ(1, c.inst_cell(b));
+    EXPECT_LT(c.acq(1, cls), 0) << "the quiet cell cannot take more once the burst cell holds the rest? (it holds one, none free)";
+    c.rel(b);
+    for (int id : a) c.rel(id);
+    /* work conserving: the quiet cell leaves, the burst cell gets the whole pool again */
+    c.retire(1);
+    a.clear();
+    for (;;) { const int id = c.acq(0, cls); if (id < 0) break; a.push_back(id); }
+    EXPECT_EQ(P, (int)a.size()) << "after the other cell retired (class " << cls << ")";
+    for (int id : a) c.rel(id);
+  }
+}
+
+/* The UL hypothesis cache is per cell: the same C-RNTI in two cells never collides (alternating on one thread that re-binds, and from two threads). */
+TEST(GpuPassCells, UlHypothesisCacheKeyedByCell) {
+  ul_hyp_cache_clear();
+  ul_hyp_t a{}, b{}, g{};
+  a.ta = 11; a.abs_slot = 100; a.n_ok = 1;
+  b.ta = -7; b.abs_slot = 200; b.n_ok = 2;
+  nr_cell_bind(0);
+  ul_hyp_cache_put(0x4242, &a);
+  nr_cell_bind(1);
+  EXPECT_EQ(0, ul_hyp_cache_get(0x4242, &g)) << "cell 1 does not see the entry of cell 0";
+  ul_hyp_cache_put(0x4242, &b);
+  EXPECT_EQ(1, ul_hyp_cache_get(0x4242, &g));
+  EXPECT_EQ(-7, g.ta);
+  nr_cell_bind(0);
+  EXPECT_EQ(1, ul_hyp_cache_get(0x4242, &g));
+  EXPECT_EQ(11, g.ta);
+  nr_cell_bind(1);
+  ul_hyp_cache_drop(0x4242);
+  nr_cell_bind(0);
+  EXPECT_EQ(1, ul_hyp_cache_get(0x4242, &g)) << "dropping in cell 1 leaves cell 0";
+  std::atomic<int> bad{0};
+  std::thread t1([&] { nr_cell_bind(1); ul_hyp_t x{}; x.ta = 5; for (int i = 0; i < 500; i++) { ul_hyp_cache_put(0x1111, &x); ul_hyp_t y{}; if (!ul_hyp_cache_get(0x1111, &y) || y.ta != 5) bad++; } });
+  std::thread t2([&] { nr_cell_bind(2); ul_hyp_t x{}; x.ta = 6; for (int i = 0; i < 500; i++) { ul_hyp_cache_put(0x1111, &x); ul_hyp_t y{}; if (!ul_hyp_cache_get(0x1111, &y) || y.ta != 6) bad++; } });
+  t1.join(); t2.join();
+  EXPECT_EQ(0, bad.load());
+  nr_cell_bind(0);
+  ul_hyp_cache_clear();
+  nr_cell_bind(1);
+  ul_hyp_cache_clear();
+  nr_cell_bind(0);
+}
