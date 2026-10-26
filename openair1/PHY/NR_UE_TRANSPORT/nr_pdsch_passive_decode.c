@@ -954,6 +954,10 @@ static _Atomic uint32_t g_rbmap[NR_RBMAP_MAX];
 static _Atomic uint32_t g_rbmap_ok[NR_RBMAP_MAX];
 static _Atomic uint64_t g_rbmap_grants;
 static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last TB on this thread
+/* Per-code-block CRC metric of the last body on this thread (EVMGRANT cb_ok= cb_tried= cb_total=): blocks that passed their CRC, blocks the LDPC decoder was
+ * started on (decoding stops after NR_CB_FAIL_LIMIT failed blocks, so tried is biased toward the early blocks of a failing TB), blocks in the TB. Reset at the start of
+ * every body; a layout probe leaves them 0. */
+static __thread uint16_t t_cb_ok = 0, t_cb_tried = 0, t_cb_total = 0;
 /* RANK2-ITER: LDPC iterations of the last body on this thread (EVMGRANT it= itc= its=): max OAI numIter over the code blocks (a block that hit the cap reports the cap;
  * 0 = no LDPC ran), the cap in force, and the sum over the code blocks that decoded. Reset at the start of every body. */
 static __thread uint8_t t_ldpc_it_max = 0, t_ldpc_it_cap = 0;
@@ -1781,6 +1785,7 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
   atomic_fetch_add_explicit(&g_pdtim_ldpc_cb, C_dec, memory_order_relaxed);
   for (uint32_t r = 0; r < TB_parameters.C; r++) {
     TB_parameters.decodeSuccess[r] = false;
+    TB_parameters.decodeTried[r] = false;
   }
   reset_meas(&TB_parameters.ts_deinterleave);
   reset_meas(&TB_parameters.ts_rate_unmatch);
@@ -1808,8 +1813,9 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
   LOG_D(NR_PHY, "SENSING: passive PDSCH decode decoder_used=%u (1=CPU min-sum, 2=CUDA normalised min-sum x2 iterations)\n", TB_parameters.decoder_used);
 
   {
-    uint32_t seg_ok = 0;
+    uint32_t seg_ok = 0, seg_tried = 0;
     for (uint32_t r = 0; r < C_dec; r++) {
+      seg_tried += TB_parameters.decodeTried[r];
       if (TB_parameters.decodeSuccess[r]) {
         seg_ok++;
       }
@@ -1824,6 +1830,11 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
       }
     }
     t_seg_ok_last = seg_ok;
+    if (!t_probe_first_seg) {
+      t_cb_ok = (uint16_t)seg_ok;
+      t_cb_tried = (uint16_t)seg_tried;
+      t_cb_total = (uint16_t)TB_parameters.C;
+    }
     /* T26b: a probe of a ONE-code-block TB decodes that block with the TB CRC (CRC16/24A), but its outcome was never
      * recorded (only C > 1 set t_probe_seg_ok), so every single-CB probe read "failed" -- measured on the PCI 415
      * replay: probes whose dumped LLRs decode offline at LDPC iteration 1 reported CRC fail. ISAC_PDSCH_PROBE_C1=1
@@ -2225,10 +2236,17 @@ static bool gp_hq_arms(void) { return !t_quiet && atomic_load(&g_ldpc_ok) >= 100
 static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_info_t *cw, uint32_t G, uint32_t tbslbrm, bool tb_ok)
 {
   const int C_dec = t_probe_first_seg && g->C > 1 ? 1 : g->C; /* v2 Task 2: a probe decoded code block 0 (passive_ldpc_decode_core's C_dec) */
-  uint32_t seg_ok = 0;
-  for (int r = 0; r < C_dec; r++)
+  uint32_t seg_ok = 0, seg_tried = 0;
+  for (int r = 0; r < C_dec; r++) {
     seg_ok += g->r.seg_ok[r] != 0;
+    seg_tried += g->r.iters[r] != 0; /* 0 = not decoded: aborted after NR_CB_FAIL_LIMIT failed blocks (nr_gpu_pass_graph.cu k_pick) */
+  }
   g_harq.processedSegments = seg_ok;
+  if (!t_probe_first_seg) {
+    t_cb_ok = (uint16_t)seg_ok;
+    t_cb_tried = (uint16_t)seg_tried;
+    t_cb_total = (uint16_t)g->C;
+  }
   if (!t_probe_first_seg) {
     bool okv[NR_GPU_PASS_MAX_CB];
     for (int r = 0; r < C_dec; r++)
@@ -2286,6 +2304,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
                                                             nr_pdsch_passive_decode_result_t *out)
 {
   t_ldpc_it_max = 0; t_ldpc_it_cap = 0; t_ldpc_it_sum = 0;
+  t_cb_ok = t_cb_tried = t_cb_total = 0;
   NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), NULL);
   t_fep_done_ns = 0;
   memset(out, 0, sizeof(*out));
@@ -4019,6 +4038,9 @@ gpu_llr_ready:;
   out->ldpc_it_max = t_ldpc_it_max;
   out->ldpc_it_cap = t_ldpc_it_cap;
   out->ldpc_it_sum = t_ldpc_it_sum;
+  out->cb_ok = t_cb_ok;
+  out->cb_tried = t_cb_tried;
+  out->cb_total = t_cb_total;
   /* GrantWork admissibility (fix round 1, I2): what the job's full decode did that CB0 from shared work does not. */
   if (t_gw != NULL && !t_quiet && !t_gw_capture) {
     uint32_t f = 0;
