@@ -1,0 +1,32 @@
+Files moved from /home/sens/NICOLA (top level) to this directory on 2026-10-24 because they were unused.
+Criteria: basename not referenced in *.sh, *.md, .sdd-scripts/, PROJECT_MEMORY.md, CLAUDE.md, tests/passive_rx, docs, tools; mtime older than 14 days; no running process referencing it.
+
+FILE                                     MTIME             SIZE_BYTES  WHY_UNUSED
+nrue.active_blind.conf                   2026-08-20 10:18      3201  not referenced in any scanned location; mtime 2026-08-20 10:18 is older than 14 days; no running process references it
+nrue.attached_blind.conf                 2026-08-20 11:45      1834  not referenced in any scanned location; mtime 2026-08-20 11:45 is older than 14 days; no running process references it
+nrue.cell2.conf                          2026-08-13 09:19       498  not referenced in any scanned location; mtime 2026-08-13 09:19 is older than 14 days; no running process references it
+nrue.nodecode.conf                       2026-08-23 14:58      4544  not referenced in any scanned location; mtime 2026-08-23 14:58 is older than 14 days; no running process references it
+nrue.ota.blindonly.conf                  2026-08-19 10:43      2502  not referenced in any scanned location; mtime 2026-08-19 10:43 is older than 14 days; no running process references it
+nrue.ota.ctrl.conf                       2026-08-13 09:19      2512  not referenced in any scanned location; mtime 2026-08-13 09:19 is older than 14 days; no running process references it
+nrue.ota.sib1ctl.conf                    2026-08-20 08:58      2620  not referenced in any scanned location; mtime 2026-08-20 08:58 is older than 14 days; no running process references it
+nrue.ota.sib1test.conf                   2026-08-19 11:31      2515  not referenced in any scanned location; mtime 2026-08-19 11:31 is older than 14 days; no running process references it
+nrue.passive_rx.autoconf.conf            2026-09-04 10:09     10220  not referenced in any scanned location; mtime 2026-09-04 10:09 is older than 14 days; no running process references it
+nrue.passive_rx.autodiscover.conf        2026-09-07 10:16     10865  not referenced in any scanned location; mtime 2026-09-07 10:16 is older than 14 days; no running process references it
+nrue.passive_rx.coreset0.sensing.conf    2026-08-21 13:09      5355  not referenced in any scanned location; mtime 2026-08-21 13:09 is older than 14 days; no running process references it
+nrue.passive_rx.nomon.conf               2026-08-23 16:19      4500  not referenced in any scanned location; mtime 2026-08-23 16:19 is older than 14 days; no running process references it
+nrue.passive_rx.nopdsch.conf             2026-08-23 16:19      4500  not referenced in any scanned location; mtime 2026-08-23 16:19 is older than 14 days; no running process references it
+nrue.passive_rx.partialconf.conf         2026-09-04 10:49      9916  not referenced in any scanned location; mtime 2026-09-04 10:49 is older than 14 days; no running process references it
+nrue.passive_rx.ratc.conf                2026-08-21 13:35      5301  not referenced in any scanned location; mtime 2026-08-21 13:35 is older than 14 days; no running process references it
+nrue.passive_rx.selfconf.conf            2026-09-04 10:27      9784  not referenced in any scanned location; mtime 2026-09-04 10:27 is older than 14 days; no running process references it
+nrue.passive_rx.sense5.conf              2026-08-24 13:49      5064  not referenced in any scanned location; mtime 2026-08-24 13:49 is older than 14 days; no running process references it
+nrue.passive_rx.sense5.scanthread.conf   2026-08-26 09:55      5490  not referenced in any scanned location; mtime 2026-08-26 09:55 is older than 14 days; no running process references it
+nrue.passive_rx.ssbonly.conf             2026-09-04 14:35      9727  not referenced in any scanned location; mtime 2026-09-04 14:35 is older than 14 days; no running process references it
+nrue.passive_rx.thread3.conf             2026-08-24 07:34      4507  not referenced in any scanned location; mtime 2026-08-24 07:34 is older than 14 days; no running process references it
+nrue.passive_rx.thread.conf              2026-08-24 07:28      4506  not referenced in any scanned location; mtime 2026-08-24 07:28 is older than 14 days; no running process references it
+nrue.passive_rx.thread_d2.conf           2026-08-24 13:06      4506  not referenced in any scanned location; mtime 2026-08-24 13:06 is older than 14 days; no running process references it
+nrue.passive_rx.ul.q.longcpi.conf        2026-09-01 07:33      9748  not referenced in any scanned location; mtime 2026-09-01 07:33 is older than 14 days; no running process references it
+ota_longdwell.conf.template              2026-09-25 01:49      9540  not referenced in any scanned location; mtime 2026-09-25 01:49 is older than 14 days; no running process references it
+ue.active.sensing.100mhz.conf            2026-08-13 09:15      3380  not referenced in any scanned location; mtime 2026-08-13 09:15 is older than 14 days; no running process references it
+ue.active.sensing.20mhz.conf             2026-08-13 09:14      3537  not referenced in any scanned location; mtime 2026-08-13 09:14 is older than 14 days; no running process references it
+ue_r.conf                                2026-08-13 09:21       198  not referenced in any scanned location; mtime 2026-08-13 09:21 is older than 14 days; no running process references it
+ue_x410_n78_siso.conf                    2026-08-13 09:19      2758  not referenced in any scanned location; mtime 2026-08-13 09:19 is older than 14 days; no running process references it
