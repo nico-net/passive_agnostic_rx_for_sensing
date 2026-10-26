@@ -213,6 +213,37 @@ static int upload_symbols(nr_csirs_disc_ring_t *r,uint16_t symbols)
   if(disc_wait()!=cudaSuccess) return -1;
   r->device_valid=true;return 0;
 }
+/* zp_feat_kernel: GPU kernel of the blind-ZP features: one block per (ring entry, symbol); a thread owns (parity, tile, subcarrier) and sums |y|^2 over the RBs of
+ *   its 4-RB tile that have that parity and over the antennas. Layout of nr_csirs_zp_features_cpu(): [symbol][parity][tile][subcarrier]. Launched by zp_features(). */
+__global__ static void zp_feat_kernel(const int16_t *grid,size_t stride,int first,int capacity,int na,int nb,int tiles,float *out)
+{
+  const int j=blockIdx.x,l=blockIdx.y,nk=12*nb;
+  const size_t idx=(size_t)((first+j)%capacity),per=(size_t)14*2*tiles*12;
+  for(int e=threadIdx.x;e<2*tiles*12;e+=blockDim.x) {
+    const int sc=e%12,tl=(e/12)%tiles,par=e/(12*tiles);
+    float s=0;
+    for(int rb=tl*4;rb<min(nb,tl*4+4);++rb) if((rb&1)==par)
+      for(int a=0;a<na;++a) {
+        const int16_t *v=grid+idx*stride+((size_t)a*14+l)*2*nk+2*(12*rb+sc);
+        const float yr=v[0],yi=v[1];
+        s+=yr*yr+yi*yi;
+      }
+    out[(size_t)j*per+((size_t)(l*2+par)*tiles+tl)*12+sc]=s;
+  }
+}
+/* zp_features: GPU blind-ZP features of `count` consecutive ring entries of a device-resident ring (the host grid of such a ring is stale); 0 on success.
+ *   Installed as the zp_features entry; called by nr_csirs_disc_process() (nr_csirs_disc.c). */
+static int zp_features(const nr_csirs_disc_ring_t *r,int first,int count,float *out)
+{
+  if(!r || !r->device_valid || !r->device_grid || !out || count<1 || count>r->capacity) return -1;
+  const int tiles=(r->n_rb+3)/4;
+  const size_t bytes=(size_t)count*14*2*tiles*12*sizeof(float);
+  float *dev=nullptr;int ret=-1;
+  if(cudaMalloc(&dev,bytes)!=cudaSuccess) return -1;
+  zp_feat_kernel<<<dim3(count,14),128,0,disc_stream()>>>(r->device_grid,r->slot_stride,first,r->capacity,r->n_ant,r->n_rb,tiles,dev);
+  if(cudaGetLastError()==cudaSuccess && disc_copy(out,dev,bytes,cudaMemcpyDeviceToHost)==cudaSuccess) ret=0;
+  cudaFree(dev);return ret;
+}
 /* device_alloc: allocates n bytes of device memory (cudaMalloc); returns NULL on failure. Installed as the device_alloc entry of the ops table. */
 static void *device_alloc(size_t n) {void *p=nullptr;return cudaMalloc(&p,n)==cudaSuccess?p:nullptr;}
 /* device_free: frees device memory from device_alloc(). Installed as the device_free entry of the ops table. */
@@ -231,7 +262,7 @@ extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
   if(!discovery_stream.init()) return nullptr;
   lmem_prereserve();
   int devices=0;if(cudaGetDeviceCount(&devices)!=cudaSuccess || devices<1) return nullptr;
-  static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host,fft_host,fep_host,accumulate_host,lattice_host,device_alloc,device_free,prepare_host,resident::detect,resident::reset,nullptr,nullptr,nullptr,readback,upload_symbols};return &ops;
+  static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host,fft_host,fep_host,accumulate_host,lattice_host,device_alloc,device_free,prepare_host,resident::detect,resident::reset,nullptr,nullptr,nullptr,readback,upload_symbols,zp_features};return &ops;
 }
 /* nr_csirs_disc_gpu_alloc_unified: allocates bytes of unified memory for the discovery buffers: mapped, portable pinned host memory.
  *   Returns NULL for zero bytes or on failure. Exported C entry; used through the unified-memory hook of the ring and the TD front end.

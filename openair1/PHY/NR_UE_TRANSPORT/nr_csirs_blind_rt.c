@@ -118,6 +118,9 @@ static float g_disc_strength[NR_CSIRS_BLIND_MAX_CAND];
 static uint8_t g_disc_probe[NR_CSIRS_BLIND_MAX_CAND][2];
 static uint32_t g_disc_visits[NR_CSIRS_BLIND_MAX_CAND][2];
 static uint32_t g_disc_scored_slot[NR_CSIRS_BLIND_MAX_CAND];
+/* Candidates proposed by the blind ZP detector (nr_csirs_disc_zp.c): a pattern of holes, no sequence. They are scored for zero power only, never as NZP. */
+static bool g_disc_zp_only[NR_CSIRS_BLIND_MAX_CAND];
+#define NR_CSIRS_BLIND_ZP_ONLY_MAX 16
 static struct {
   nr_csirs_candidate_t candidate;
   uint16_t period, off[2];
@@ -394,6 +397,85 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csir
   return at;
 }
 
+/* nr_csirs_blind_rt_add_discovered_zp: admits a ZERO-POWER hypothesis proposed by the blind hole detector (nr_csirs_disc_zp.c) into the search population and returns its candidate index (-1 when refused).
+ *   The candidate carries no scrambling identity: it is scored for zero power only (the ZP bank confirms it, infers its period and revokes it on contradiction) and never as NZP. The detector's lattice
+ *   (h->period, h->offset) seeds the first scoring visits. A pattern that is already a candidate (NZP or ZP, same row, symbols, subcarriers and density on overlapping RBs) is kept; a ZP-only one is widened
+ *   when the new extent is wider. At most NR_CSIRS_BLIND_ZP_ONLY_MAX such candidates. Caller: nr_csirs_disc.c (zp_step).
+ */
+int nr_csirs_blind_rt_add_discovered_zp(const nr_csirs_disc_hyp_t *h)
+{
+  if (!h)
+    return -1;
+  pthread_mutex_lock(&g_csirs_state_lock);
+  if (g_disc < 0)
+    g_disc = nr_csirs_disc_enabled && nr_csirs_disc_enabled();
+  if (g_disc <= 0) {
+    pthread_mutex_unlock(&g_csirs_state_lock);
+    return -1;
+  }
+  g_st.discovery_bank = true;
+  if (!g_armed) {
+    discovery_empty_state(&g_st);
+    g_st.discovery_bank = true;
+    discovery_empty_state(&g_zp);
+    g_armed = 1;
+  }
+  nr_csirs_candidate_t c = {.row = h->row,
+                            .freq_domain = h->freq_domain,
+                            .symb_l0 = h->symb_l0,
+                            .symb_l1 = h->symb_l1,
+                            .cdm_type = h->cdm_type,
+                            .freq_density = h->density,
+                            .scramb_id = 0,
+                            .start_rb = h->rb_start,
+                            .nr_of_rbs = h->n_rb,
+                            .slot_delta = 0};
+  int at = -1, n_zp_only = 0;
+  if (!h->period || h->offset >= h->period || !nr_csirs_blind_candidate_safe(&c)) {
+    pthread_mutex_unlock(&g_csirs_state_lock);
+    return -1;
+  }
+  for (int i = 0; i < g_st.n; ++i) {
+    const nr_csirs_candidate_t *o = &g_st.cand[i];
+    n_zp_only += g_disc_zp_only[i];
+    const int oe = o->start_rb + o->nr_of_rbs, ce = c.start_rb + c.nr_of_rbs;
+    if (o->row == c.row && o->freq_domain == c.freq_domain && o->symb_l0 == c.symb_l0 && o->symb_l1 == c.symb_l1
+        && o->cdm_type == c.cdm_type && o->freq_density == c.freq_density && o->start_rb < ce && c.start_rb < oe) {
+      at = i;
+      if (g_disc_zp_only[i] && (c.start_rb < o->start_rb || ce > oe)) {
+        const int lo = c.start_rb < o->start_rb ? c.start_rb : o->start_rb, hi = ce > oe ? ce : oe;
+        g_st.cand[i].start_rb = g_zp.cand[i].start_rb = (uint16_t)lo;
+        g_st.cand[i].nr_of_rbs = g_zp.cand[i].nr_of_rbs = (uint16_t)(hi - lo);
+        discovery_publish();
+      }
+      break;
+    }
+  }
+  if (at < 0 && n_zp_only < NR_CSIRS_BLIND_ZP_ONLY_MAX && g_st.n < NR_CSIRS_BLIND_MAX_CAND && g_st.n == g_zp.n) {
+    at = g_st.n++;
+    g_zp.n++;
+    g_st.cand[at] = g_zp.cand[at] = c;
+    g_disc_zp_only[at] = true;
+    g_disc_scored_slot[at] = UINT32_MAX;
+    discovery_mark_admitted(at);
+    g_disc_probe[at][0] = g_disc_probe[at][1] = 3;
+    g_disc_visits[at][0] = g_disc_visits[at][1] = 0;
+    g_disc_strength[at] = 0;
+    nr_csirs_blind_state_t *states[] = {&g_st, &g_zp};
+    for (int j = 0; j < 2; ++j) {
+      states[j]->seed_period[at] = h->period;
+      states[j]->seed_offset[at] = h->offset;
+      states[j]->seed_offset2[at] = 0;
+      states[j]->seed_n_off[at] = 1;
+    }
+    LOG_A(PHY, "SENSING: CSIRS_BLIND ZP_HOLES proposed idx=%d row=%u fd=%u l0=%u l1=%u density=%u rb=%u:%u P/O=%u/%u (blind hole detector; ZP bank decides)\n",
+          at, h->row, h->freq_domain, h->symb_l0, h->symb_l1, h->density, h->rb_start, h->n_rb, h->period, h->offset);
+    discovery_publish();
+  }
+  pthread_mutex_unlock(&g_csirs_state_lock);
+  return at;
+}
+
 /* nr_csirs_blind_rt_discovery_confirmed: true when a discovered hypothesis matches a confirmed NZP resource of the search (same geometry, period and an offset phase).
  *   Read-only under g_csirs_state_lock. Caller: nr_csirs_disc.c (skips discovery hypotheses that are already confirmed).
  */
@@ -459,6 +541,7 @@ void nr_csirs_blind_rt_discovery_reset(void)
     memset(g_disc_probe, 0, sizeof(g_disc_probe));
     memset(g_disc_strength, 0, sizeof(g_disc_strength));
     memset(g_disc_scored_slot, 0xff, sizeof(g_disc_scored_slot));
+    memset(g_disc_zp_only, 0, sizeof(g_disc_zp_only));
     discovery_empty_state(&g_st);
     g_st.discovery_bank=true;
     discovery_empty_state(&g_zp);
@@ -826,7 +909,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
         if (!p || g_disc_scored_slot[i] == absolute_slot) continue;
         int ph = absolute_slot % p == g_st.seed_offset[i] ? 0
             : g_st.seed_n_off[i] == 2 && absolute_slot % p == g_st.seed_offset2[i] ? 1 : -1;
-        bool unsettled = true;
+        bool unsettled = !(g_disc_zp_only[i] && nr_csirs_blind_is_confirmed(&g_zp, i)); /* a hole pattern is settled once its ZP is exported */
         for (int k = 0; k < g_st.n_conf; ++k)
           if (g_st.conf_idx[k] == i) {
             /* A fade during the first three probes must not strand a late
@@ -1071,6 +1154,8 @@ have_rho:
    * 0.19-0.22 = the expected max of ~950 noise draws at n_used=273; every confirmation this module
    * produced OTA was that artefact. z = rho*sqrt(n_used) is ~0.89 for noise at any size and
    * sqrt(n_used) (>16 here) for a true match, so the bar below is absolute, not relative. */
+  if (g_disc_zp_only[idx])
+    goto score_zero_power; /* a pattern of holes has no sequence: never scored or confirmed as NZP */
   const double z = rho; /* already normalised: ~1.0 noise, ~6.4 perfect, at any candidate size */
   /* Legacy confirmation retains z >= 4. A discovery-qualified row-1 burst
    * has two independently swept adjacent phases: require three fresh z >= 3
@@ -1113,7 +1198,12 @@ score_zero_power:
                                                        fp->ofdm_symbol_size, fp->first_carrier_offset);
       }
     }
-    const double znull = median_of(g_zp_null, g_zp_null_n);
+    double znull = median_of(g_zp_null, g_zp_null_n);
+    /* A hole-pattern candidate (blind ZP detector) contributes no sample to the population (it is scored where holes were already found, so it would
+     * bias the null upwards) and, when no other candidate has populated it (a cell with no NZP resource to compare with), is judged against 0: the raw-hole
+     * bar and the lattice contrast of the detector stand, and the ZP bank still demands a stable period, a non-structural hole fraction and no contradiction. */
+    if (g_disc_zp_only[idx] && !(znull >= 0.0))
+      znull = 0.0;
     if (maintenance) {
       const double joint = fmin(zs, zs_other);
       const enum zp_maint_outcome outcome = !isfinite(zs) || !isfinite(zs_other) || zs < 0.0 || zs_other < 0.0
@@ -1212,7 +1302,7 @@ score_zero_power:
                 k, (unsigned long long)g_slots, line, phase, idx, absolute_slot, g_zp.zp_epoch[idx],
                 hit_history, g_zp.zp_revocations[idx]);
       }
-      if (!maintenance) {
+      if (!maintenance && !g_disc_zp_only[idx]) {
         g_zp_null[g_zp_null_w] = zs < zs_other ? zs : zs_other;
         g_zp_null_w = (g_zp_null_w + 1) % NULLWIN;
         if (g_zp_null_n < NULLWIN)

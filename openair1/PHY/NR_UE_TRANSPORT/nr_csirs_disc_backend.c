@@ -176,7 +176,7 @@ static void load_module(void)
       raw_ops.accumulate = module_ops->accumulate;
       raw_ops.lattice = module_ops->lattice;
       raw_ops.device_alloc=module_ops->device_alloc;raw_ops.device_free=module_ops->device_free;
-      raw_ops.prepare=module_ops->prepare;raw_ops.detect=module_ops->detect;raw_ops.reset=module_ops->reset;raw_ops.readback=module_ops->readback;raw_ops.upload_symbols=module_ops->upload_symbols;
+      raw_ops.prepare=module_ops->prepare;raw_ops.detect=module_ops->detect;raw_ops.reset=module_ops->reset;raw_ops.readback=module_ops->readback;raw_ops.upload_symbols=module_ops->upload_symbols;raw_ops.zp_features=module_ops->zp_features;
     }
     void *(*alloc)(size_t) = (void *(*)(size_t))dlsym(fp_handle, "nr_csirs_disc_gpu_alloc_unified");
     void (*free_fn)(void *) = (void (*)(void *))dlsym(fp_handle, "nr_csirs_disc_gpu_free_unified");

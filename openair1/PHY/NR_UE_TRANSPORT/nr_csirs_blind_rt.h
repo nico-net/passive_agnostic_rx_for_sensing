@@ -47,6 +47,8 @@ extern uint64_t csirs_disc_readmit_skipped;
 #include "nr_csirs_disc.h"
 /** Append a U5 winner to both confirmation banks and seed its known lattice. */
 int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *hyp, const nr_csirs_disc_win_t *win);
+/** Zero-power hypothesis from the blind hole detector (nr_csirs_disc_zp.h): a candidate scored for zero power only. Returns its index or -1. */
+int nr_csirs_blind_rt_add_discovered_zp(const nr_csirs_disc_hyp_t *hyp);
 /** True when this exact U5 geometry is already in the confirmed NZP bank. */
 bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *hyp);
 /** Index of the confirmed NZP resource that is the same physical resource as hyp (tolerant to widening/merging), or -1. */

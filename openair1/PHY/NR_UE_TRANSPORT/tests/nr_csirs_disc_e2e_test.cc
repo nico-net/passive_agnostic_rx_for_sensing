@@ -326,5 +326,45 @@ TEST(CsirsDiscE2E, CumulativeLowMarginRequiresFreshSequenceConfirmation)
   nr_csirs_blind_rt_test_discovery_reset();
 }
 
+extern "C" {
+int nr_csirs_blind_rt_test_zp_confirmed(fapi_nr_dl_config_csirs_pdu_rel15_t *, uint16_t *, uint16_t *, int);
+int nr_csirs_blind_rt_test_zp_only_count(void);
+}
+/* A ZP-CSI-RS in a cell that sends no NZP-CSI-RS at all: the blind hole detector proposes its pattern from the ring, the ZP bank confirms it on the
+ * replay and exports it (csi_type 2) for PDSCH rate matching, with the lattice and the extent of the cell. TS 38.211 Table 7.4.1.5.3-1 row 4, symbol 8. */
+TEST(CsirsDiscE2E, BlindZpHolesProposedConfirmedAndExported)
+{
+  setenv("ISAC_CSIRS_DISC_BACKEND", "cpu", 1);
+  nr_csirs_disc_synth_init();
+  nr_csirs_blind_rt_test_discovery_reset();
+  nr_csirs_disc_synth_resource_t zp = {.row = 4, .l0 = 8, .l1 = 0, .cdm = 1, .density = 2, .fd_bitmap = 4, .rb_start = 0,
+                                       .n_rb = 64, .scramb_id = 0, .period = 40, .offset = 4, .power = 1, .zp = true};
+  auto cfg = config(&zp, 1);
+  cfg.n_slots = 1280;
+  cfg.n_rb = 64;
+  cfg.n_ant = 2;
+  cfg.first_slot = 4;
+  Ring r;
+  ASSERT_EQ(nr_csirs_disc_synth(&r.ring, &cfg), 0);
+  nr_csirs_disc_process(&r.ring);
+  EXPECT_EQ(nr_csirs_blind_rt_test_zp_only_count(), 1);
+  fapi_nr_dl_config_csirs_pdu_rel15_t pdu[8] = {};
+  uint16_t period[8] = {}, offset[8] = {};
+  int16_t delta[8] = {};
+  nr_csirs_blind_rt_test_confirm_ring(&r.ring, pdu, period, offset, delta, 8, nullptr);
+  const int n = nr_csirs_blind_rt_test_zp_confirmed(pdu, period, offset, 8);
+  ASSERT_EQ(n, 1);
+  printf("ZP exported: row=%u fd=%u l0=%u rb=%u:%u dens=%u P/O=%u/%u csi_type=%u\n", pdu[0].row, pdu[0].freq_domain, pdu[0].symb_l0, pdu[0].start_rb,
+         pdu[0].nr_of_rbs, pdu[0].freq_density, period[0], offset[0], pdu[0].csi_type);
+  EXPECT_EQ(pdu[0].csi_type, 2);
+  EXPECT_EQ(pdu[0].symb_l0, 8);
+  EXPECT_EQ(pdu[0].start_rb, 0);
+  EXPECT_EQ(pdu[0].nr_of_rbs, 64);
+  EXPECT_EQ(period[0] % 40, 0);
+  EXPECT_EQ(offset[0], 4);
+  EXPECT_EQ(nr_csirs_blind_rt_test_candidate_count() - nr_csirs_blind_rt_test_zp_only_count(), 0) << "no NZP candidate";
+  nr_csirs_blind_rt_test_discovery_reset();
+}
+
 /* link stub: nr_dl_traffic_probe.c / nr_csirs_monitor.c read the passive-mode flag (zeroed params = not passive) */
 softmodem_params_t *get_softmodem_params(void) { static softmodem_params_t p; return &p; }

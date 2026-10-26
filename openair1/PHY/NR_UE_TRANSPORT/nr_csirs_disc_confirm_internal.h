@@ -124,7 +124,7 @@ static void discovery_publish(void)
     unsigned p=g_st.seed_period[i];
     if(!p || 640%p) continue;
     uint16_t mask=discovery_symbols(&g_st.cand[i]);
-    bool unsettled=true;
+    bool unsettled=!(g_disc_zp_only[i] && nr_csirs_blind_is_confirmed(&g_zp,i));
     for(int k=0;k<g_st.n_conf;++k) if(g_st.conf_idx[k]==i) {
       unsettled=g_st.conf_n_off[k]<g_st.seed_n_off[i] || g_st.conf_period[k]>p;break;
     }

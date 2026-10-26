@@ -98,6 +98,15 @@ int nr_csirs_disc_synth(nr_csirs_disc_ring_t *r,const nr_csirs_disc_synth_cfg_t 
       const nr_csirs_disc_synth_resource_t *c=cfg->resources+ci;
       if(abs%c->period!=c->offset) continue;
       memset(ports,0,(size_t)32*nre*sizeof(*ports));
+      if(c->zp) { /* the generator marks the pattern's REs; they stay empty (occupied, no signal) */
+        c16_t *zplanes[32];for(int p=0;p<32;++p) zplanes[p]=ports+(size_t)p*nre;
+        csi_mapping_parms_t zm=get_csi_mapping_parms(c->row,c->fd_bitmap,c->l0,c->l1);
+        int zgen=c->n_rb+(c->density==0 && ((c->rb_start+c->n_rb)&1));
+        nr_generate_csi_rs(&fp,&zm,2048,abs%cfg->slots_per_frame,c->density,c->rb_start,zgen,
+                           c->l0,c->l1,c->row,c->scramb_id,2,c->cdm,zplanes);
+        for(int j=0;j<nre;++j) for(int p=0;p<zm.ports;++p) if(zplanes[p][j].r || zplanes[p][j].i) occupied[j]=1;
+        continue;
+      }
       c16_t *planes[32];for(int p=0;p<32;++p) planes[p]=ports+(size_t)p*nre;
       csi_mapping_parms_t m=get_csi_mapping_parms(c->row,c->fd_bitmap,c->l0,c->l1);
       /* OAI's even-dot5 modulation-length helper floors end/2. With an

@@ -9,6 +9,7 @@ typedef struct {
   uint8_t row, l0, l1, cdm, density;
   uint16_t fd_bitmap, rb_start, n_rb, scramb_id, period, offset;
   float power; /* received pilot/data power ratio before channel and AWGN */
+  bool zp;     /* zero-power resource: the pattern is empty (no PDSCH, no sequence) on its occasions */
 } nr_csirs_disc_synth_resource_t;
 typedef struct {
   int n_slots, n_rb, n_ant, slots_per_frame;

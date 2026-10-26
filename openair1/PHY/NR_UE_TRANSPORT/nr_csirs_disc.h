@@ -241,6 +241,9 @@ typedef struct {
   /* Explicit diagnostic/snapshot readback; production never calls this. */
   int (*readback)(const nr_csirs_disc_ring_t *);
   int (*upload_symbols)(nr_csirs_disc_ring_t *, uint16_t symbols);
+  /* Blind-ZP features (nr_csirs_disc_zp.h) of `count` consecutive ring entries starting at `first` (modulo the capacity) of a device-resident
+   * ring, into out[count][nr_csirs_zp_feat_len]. 0 on success. Same values as nr_csirs_zp_features_cpu() up to float summation order. */
+  int (*zp_features)(const nr_csirs_disc_ring_t *, int first, int count, float *out);
 } nr_csirs_disc_gpu_ops_t;
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GPU module */
 /* CPU-side loader, gated by the test-only ISAC_CSIRS_DISC_BACKEND=auto|cpu|gpu.

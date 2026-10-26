@@ -16,6 +16,7 @@ extern void nr_host_membudget_commit(nr_host_mem_module_t m, size_t bytes, doubl
 #include "nr_csirs_disc_gate_internal.h"
 #include "nr_csirs_disc_evidence_internal.h"
 #include "nr_csirs_disc_rate_internal.h"
+#include "nr_csirs_disc_zp.h"
 #include "nr_pdsch_passive_queue.h"
 
 #include "common/utils/LOG/log.h"
@@ -34,6 +35,7 @@ extern void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn) __attribute__((we
 /* Kept weak so the detector remains usable in focused U2/U3/U4 fixtures. */
 extern int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *, const nr_csirs_disc_win_t *)
     __attribute__((weak));
+extern int nr_csirs_blind_rt_add_discovered_zp(const nr_csirs_disc_hyp_t *) __attribute__((weak));
 extern bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *) __attribute__((weak));
 extern int nr_csirs_blind_rt_discovery_match(const nr_csirs_disc_hyp_t *) __attribute__((weak));
 extern void nr_csirs_blind_rt_discovery_disable(void) __attribute__((weak));
@@ -399,6 +401,93 @@ static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t
   }
 }
 
+
+/* ---- blind ZP-CSI-RS proposer (nr_csirs_disc_zp.h) ------------------------------------------------------------------------------------------
+ * Folds the new ring slots into the hole statistics (CPU features of a host ring, GPU op of a device-resident one) and, every ZP_EVAL_SLOTS new slots,
+ * turns the significant hole patterns into legal rows (nr_csirs_disc_hypotheses) and admits them as zero-power candidates; the ZP bank confirms them. */
+#define ZP_EVAL_SLOTS 320
+#define ZP_CHUNK 16
+static struct {
+  nr_csirs_zp_det_t *det;
+  int n_rb;
+  uint64_t fed, eval_at;
+  float *buf;
+  size_t buf_len;
+  bool off;
+} zp;
+
+/* zp_step: one batch of the blind ZP proposer on the pipeline ring: feeds the slots written since the previous batch and, when enough have accumulated, proposes.
+ *   reset restarts the statistics (new ring epoch or configuration). Allocation failure or a device ring without the GPU op disables it for the process (the rest of the discovery is unaffected).
+ *   Caller: nr_csirs_disc_process() under pipeline_lock. */
+static void zp_step(nr_csirs_disc_ring_t *ring, const nr_csirs_disc_gpu_ops_t *ops, bool reset)
+{
+  if (zp.off || !nr_csirs_blind_rt_add_discovered_zp || !ring->grid_base || ring->capacity < 1)
+    return;
+  if (ring->device_valid && !(ops && ops->zp_features))
+    return;
+  if (!zp.det || zp.n_rb != ring->n_rb) {
+    nr_csirs_zp_free(zp.det);
+    free(zp.buf);
+    zp.buf = NULL;
+    zp.det = nr_csirs_zp_new(ring->n_rb);
+    zp.n_rb = ring->n_rb;
+    zp.fed = zp.eval_at = 0;
+    zp.buf_len = nr_csirs_zp_feat_len(ring->n_rb) * ZP_CHUNK;
+    zp.buf = malloc(zp.buf_len * sizeof(float));
+    if (!zp.det || !zp.buf) {
+      zp.off = true;
+      LOG_W(PHY, "SENSING: CSIRS_DISC blind ZP detector disabled (allocation)\n");
+      return;
+    }
+    reset = true;
+  }
+  if (reset || ring->written < zp.fed) {
+    nr_csirs_zp_reset(zp.det);
+    zp.fed = ring->written > (uint64_t)ring->capacity ? ring->written - ring->capacity : 0;
+    zp.eval_at = 0;
+  }
+  const size_t fl = nr_csirs_zp_feat_len(ring->n_rb);
+  uint64_t w = zp.fed < ring->written && ring->written - zp.fed > (uint64_t)ring->capacity ? ring->written - ring->capacity : zp.fed;
+  while (w < ring->written) {
+    const int n = ring->written - w < ZP_CHUNK ? (int)(ring->written - w) : ZP_CHUNK;
+    const int first = (int)(w % (uint64_t)ring->capacity);
+    if (ring->device_valid) {
+      if (ops->zp_features(ring, first, n, zp.buf) != 0) {
+        zp.off = true;
+        LOG_W(PHY, "SENSING: CSIRS_DISC blind ZP detector disabled (GPU features failed)\n");
+        return;
+      }
+    } else {
+      for (int i = 0; i < n; ++i)
+        nr_csirs_zp_features_cpu(ring, (first + i) % ring->capacity, zp.buf + i * fl);
+    }
+    for (int i = 0; i < n; ++i) {
+      const int idx = (first + i) % ring->capacity;
+      if (ring->meta[idx].valid)
+        nr_csirs_zp_feed(zp.det, ring->meta[idx].abs_slot, zp.buf + i * fl);
+    }
+    w += n;
+  }
+  zp.fed = ring->written;
+  if (nr_csirs_zp_slots(zp.det) < zp.eval_at + ZP_EVAL_SLOTS)
+    return;
+  zp.eval_at = nr_csirs_zp_slots(zp.det);
+  nr_csirs_disc_fp_t fps[8];
+  const int nf = nr_csirs_zp_propose(zp.det, fps, 8);
+  if (nf <= 0)
+    return;
+  nr_csirs_disc_hyp_t hy[NR_CSIRS_DISC_MAX_HYP];
+  const int nh = nr_csirs_disc_hypotheses(fps, nf, hy, NR_CSIRS_DISC_MAX_HYP);
+  for (int f = 0; f < nf; ++f)
+    for (int i = 0; i < nh; ++i)
+      if (hy[i].fp_index == f && hy[i].fit == 1.0f) { /* ranked by row: the lowest row with this exact pattern; rows share the RE pattern, which is all rate matching needs */
+        LOG_I(PHY, "SENSING: CSIRS_DISC ZP_HOLES row=%u fd=%u l0=%u l1=%u dens=%u rb=%u:%u P/O=%u/%u z=%.1f\n", hy[i].row, hy[i].freq_domain,
+              hy[i].symb_l0, hy[i].symb_l1, hy[i].density, hy[i].rb_start, hy[i].n_rb, hy[i].period, hy[i].offset, fps[f].strength);
+        nr_csirs_blind_rt_add_discovered_zp(&hy[i]);
+        break;
+      }
+}
+
 int nr_csirs_disc_test_sweep_limit = 32; /* hypotheses swept per batch; tests raise it */
 
 /* nr_csirs_disc_process: one discovery batch on a snapshot of the IQ ring: detects footprints, builds hypotheses, sweeps them (GPU or CPU), gates the winners, refines and verifies them, and admits the survivors to the CSI-RS search.
@@ -410,15 +499,18 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
 {
   if (!ring || !nr_csirs_disc_enabled())
     return;
+  bool zp_reset=false;
   pthread_mutex_lock(&pipeline_lock);
   if(elastic_tick(ring)) {pthread_mutex_unlock(&pipeline_lock);return;} /* the ring was replaced by an empty one of another size: the next batch starts on it */
   if(!nr_csirs_disc_ring_snapshot_current(ring)) {pthread_mutex_unlock(&pipeline_lock);return;}
   if(cache_grid!=ring->grid_base || ring->written<cache_written) {
     cache_count=qualified_count=evidence_retries=0; ++evidence_epoch;
     rl_epoch=true;rl_known_n=0;
+    zp_reset=true;
   }
   cache_grid=ring->grid_base;cache_written=ring->written;
   const uint64_t begin = now_us(), cpu_begin=cpu_us();
+  zp_step(ring, nr_csirs_disc_gpu_load(), zp_reset);
   nr_csirs_disc_fp_t fps[DISC_VIEWS];
   nr_csirs_disc_hyp_t all_hyps[NR_CSIRS_DISC_MAX_HYP];
   nr_csirs_disc_hyp_t hyps[NR_CSIRS_DISC_MAX_HYP];

@@ -331,6 +331,26 @@ int nr_csirs_blind_rt_test_confirm_ring(const nr_csirs_disc_ring_t *ring,
   return n >= initial ? n : -1;
 }
 
+/* confirmed (exported) zero-power resources after a replay: fills out[], period[], offset[]; returns their number */
+int nr_csirs_blind_rt_test_zp_confirmed(fapi_nr_dl_config_csirs_pdu_rel15_t *out, uint16_t *period, uint16_t *offset, int max)
+{
+  const int n = g_zp.n_conf < max ? g_zp.n_conf : max;
+  for (int i = 0; i < g_zp.n; ++i) fprintf(stderr, "DBG zp cand %d tried=%u holes=%u hits=%u best=%.3f epoch=%u fail=%llu seed=%u/%u\n", i, g_zp.tried[i], g_zp.zp_holes[i], g_zp.hits[i], g_zp.best_rho[i], g_zp.zp_epoch[i], (unsigned long long)g_zp.zp_failed_run[i], g_zp.seed_period[i], g_zp.seed_offset[i]);
+  for (int k = 0; k < NR_CSIRS_BLIND_MAX_CONF; ++k) if (g_zp.zp_bank[k].owner) fprintf(stderr, "DBG bank %d owner=%d period=%u n_off=%u off=%u votes=%llu\n", k, g_zp.zp_bank[k].owner, g_zp.zp_bank[k].period, g_zp.zp_bank[k].n_off, g_zp.zp_bank[k].off[0], (unsigned long long)g_zp.zp_bank[k].votes[0]);
+  for (int k = 0; k < n; ++k) {
+    fill_pdu(&g_zp.cand[g_zp.conf_idx[k]], 2, &out[k]);
+    if (period) period[k] = g_zp.conf_period[k];
+    if (offset) offset[k] = g_zp.conf_off[k][0];
+  }
+  return n;
+}
+int nr_csirs_blind_rt_test_zp_only_count(void)
+{
+  int n = 0;
+  for (int i = 0; i < g_st.n; ++i) n += g_disc_zp_only[i];
+  return n;
+}
+
 int nr_csirs_blind_rt_test_candidate_count(void)
 {
   return g_st.n;
