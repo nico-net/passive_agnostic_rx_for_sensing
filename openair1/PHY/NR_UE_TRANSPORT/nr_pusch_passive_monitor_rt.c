@@ -18,20 +18,41 @@
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
+#include "common/utils/nr_cell.h"
 
 
 #include <stdio.h>
 #include "nr_passive_ul_grant_book.h"
 #define HISTORY_SLOTS 160 /* maximum supported slots/frame at mu=4 */
-static nr_passive_ul_book_t g_book;
-static pthread_mutex_t g_book_lock=PTHREAD_MUTEX_INITIALIZER;
-static _Atomic uint64_t g_parked,g_claimed,g_expired,g_overwritten;
-static _Atomic uint64_t g_chain_no_dl_lock,g_chain_no_hyp,g_chain_no_dci01,g_chain_skip_rv;
-static pthread_mutex_t g_first_lock=PTHREAD_MUTEX_INITIALIZER;
-static nr_ul_first_state_t g_first;
+NR_CELL_STATIC(nr_passive_ul_book_t, g_book);
+#define g_book NR_CELL_REF(g_book)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_book_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_book_lock NR_CELL_REF(g_book_lock)
+NR_CELL_STATIC(_Atomic uint64_t, g_parked);
+#define g_parked NR_CELL_REF(g_parked)
+NR_CELL_STATIC(_Atomic uint64_t, g_claimed);
+#define g_claimed NR_CELL_REF(g_claimed)
+NR_CELL_STATIC(_Atomic uint64_t, g_expired);
+#define g_expired NR_CELL_REF(g_expired)
+NR_CELL_STATIC(_Atomic uint64_t, g_overwritten);
+#define g_overwritten NR_CELL_REF(g_overwritten)
+NR_CELL_STATIC(_Atomic uint64_t, g_chain_no_dl_lock);
+#define g_chain_no_dl_lock NR_CELL_REF(g_chain_no_dl_lock)
+NR_CELL_STATIC(_Atomic uint64_t, g_chain_no_hyp);
+#define g_chain_no_hyp NR_CELL_REF(g_chain_no_hyp)
+NR_CELL_STATIC(_Atomic uint64_t, g_chain_no_dci01);
+#define g_chain_no_dci01 NR_CELL_REF(g_chain_no_dci01)
+NR_CELL_STATIC(_Atomic uint64_t, g_chain_skip_rv);
+#define g_chain_skip_rv NR_CELL_REF(g_chain_skip_rv)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_first_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_first_lock NR_CELL_REF(g_first_lock)
+NR_CELL_STATIC(nr_ul_first_state_t, g_first);
+#define g_first NR_CELL_REF(g_first)
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
 typedef struct {long source;double fo_hz;bool valid;} ul_sample_history_t;
-static ul_sample_history_t g_history[HISTORY_SLOTS];
+typedef ul_sample_history_t g_history_cell_t[HISTORY_SLOTS];
+NR_CELL_STATIC(g_history_cell_t, g_history);
+#define g_history NR_CELL_REF(g_history)
 void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, long source_absolute_slot)
 {
   const bool layout_probe = nr_ul_layout_is_probe(g); /* UL-LAYOUT DM-RS probe: no decode, no UE state */
@@ -156,9 +177,10 @@ static void passive_ul_deliver(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc
   /* A one-shot marker on ENTRY, so that "the decode hung" and "the decode was never called" are
    * distinguishable from the log alone. Without it, a blocked receive thread and a hook that never
    * fires look identical: both simply stop producing output. */
-  static int s_first = 1;
-  if (s_first) {
-    s_first = 0;
+  NR_CELL_STATIC_INIT(int, deliver_s_first, 1);
+  #define deliver_s_first NR_CELL_REF(deliver_s_first)
+  if (deliver_s_first) {
+    deliver_s_first = 0;
     LOG_I(PHY, "SENSING: PUSCHDIAG entering first decode %d.%d rnti=0x%x\n",
           proc->frame_rx, proc->nr_slot_rx, g.rnti);
   }
@@ -170,9 +192,10 @@ static void passive_ul_deliver(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc
    * A refused start (--cont-fo-comp) degrades to the previous in-line behaviour rather than
    * dropping every grant. ---- */
   if (cfg->ul_thread && !nr_pusch_passive_pipeline_enabled()) {
-    static int s_ul_tried = 0;
-    if (!s_ul_tried) {
-      s_ul_tried = 1;
+    NR_CELL_STATIC_INIT(int, deliver_s_ul_tried, 0);
+    #define deliver_s_ul_tried NR_CELL_REF(deliver_s_ul_tried)
+    if (!deliver_s_ul_tried) {
+      deliver_s_ul_tried = 1;
       const int depth = (cfg->ul_queue_depth > 0) ? cfg->ul_queue_depth : 8;
       nr_pusch_passive_queue_start(ue, depth, cfg->ul_thread, cfg->ul_thread_core);
     }
@@ -241,14 +264,15 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
   if(!cfg || !cfg->ul_pusch_decode) return;
   const long spf=ue->frame_parms.slots_per_frame;
   const long now=((long)proc->hfn_rx*1024+proc->frame_rx)*spf+proc->nr_slot_rx;
-  static long previous=-1;
-  if(previous>=0 && (now<=previous || now-previous>1)) {
+  NR_CELL_STATIC_INIT(long, monitor_previous, -1);
+  #define monitor_previous NR_CELL_REF(monitor_previous)
+  if(monitor_previous>=0 && (now<=monitor_previous || now-monitor_previous>1)) {
     pthread_mutex_lock(&g_book_lock);
     memset(&g_book,0,sizeof(g_book));
     memset(g_history,0,sizeof(g_history));
     pthread_mutex_unlock(&g_book_lock);
   }
-  previous=now;
+  monitor_previous=now;
   g_history[now%HISTORY_SLOTS]=(ul_sample_history_t){.source=now,
     .fo_hz=ue->cont_fo_comp?ue->dl_Doppler_shift+ue->freq_offset:0.0,.valid=true};
   for(int n=0;n<NR_PASSIVE_UL_BOOK_CAPACITY;n++) {

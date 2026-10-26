@@ -23,6 +23,7 @@
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include "nr_pdsch_passive_decode.h" /* nr_pdsch_gw_cb0_t, nr_pdsch_passive_gw_cb_decode_iter */
 #include "nr_td_grantwork.h"         /* nr_td_gw_cb0_extract */
+#include "common/utils/nr_cell.h"
 
 /* TS 38.213 Table 9.3-1 (HARQ-ACK) and 9.3-2 (CSI) beta offsets; TS 38.331 alpha (scaling). */
 static const double k_beta_ack[16] = {1.000, 2.000, 2.500, 3.125, 4.000, 5.000, 6.250, 8.000,
@@ -343,10 +344,16 @@ typedef struct {
   uint32_t wins;
 } lrn_t;
 
-static lrn_t g_lrn[LRN_RNTI];
-static uint32_t g_lrn_clock;
-static pthread_mutex_t g_lrn_lock = PTHREAD_MUTEX_INITIALIZER;
-static _Atomic uint64_t g_st[6];
+typedef lrn_t g_lrn_cell_t[LRN_RNTI];
+NR_CELL_STATIC(g_lrn_cell_t, g_lrn);
+#define g_lrn NR_CELL_REF(g_lrn)
+NR_CELL_STATIC(uint32_t, g_lrn_clock);
+#define g_lrn_clock NR_CELL_REF(g_lrn_clock)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_lrn_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_lrn_lock NR_CELL_REF(g_lrn_lock)
+typedef _Atomic uint64_t g_st_cell_t[6];
+NR_CELL_STATIC(g_st_cell_t, g_st);
+#define g_st NR_CELL_REF(g_st)
 
 static lrn_t *lrn_get_locked(uint16_t rnti, bool create)
 {

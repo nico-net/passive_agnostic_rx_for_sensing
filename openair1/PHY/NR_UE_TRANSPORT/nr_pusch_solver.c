@@ -7,12 +7,14 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include "common/utils/nr_cell.h"
 
 #define UL_SOLVER_UES 64
 #define UL_SOLVER_BUCKET 4
 #define UL_SOLVER_REFILL_SLOTS 40 /* 50 probes/s at 30 kHz SCS */
 /* 20 ms per probe at any numerology (20 << mu slots; mu=1 gives 40). */
-static _Atomic uint32_t refill_slots = UL_SOLVER_REFILL_SLOTS;
+NR_CELL_STATIC_INIT(_Atomic uint32_t, refill_slots, UL_SOLVER_REFILL_SLOTS);
+#define refill_slots NR_CELL_REF(refill_slots)
 void nr_pusch_solver_set_mu(int mu)
 {
   if (mu >= 0 && mu <= 4)
@@ -37,26 +39,60 @@ typedef struct {
   nr_pusch_solver_stats_t stats;
 } ul_solver_ue_t;
 
-static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-static ul_solver_ue_t ues[UL_SOLVER_UES];
-static nr_pusch_solver_stats_t totals;
-static uint8_t global_tokens = UL_SOLVER_BUCKET;
-static uint64_t global_refill_slot;
-static uint64_t global_cpu_slot;
-static int64_t global_cpu_tokens_us = UL_SOLVER_CPU_CAP_US;
-static uint32_t probe_cpu_ema_us = 20000, full_cpu_ema_us = 30000;
-static bool prior_valid;
-static uint8_t prior_S, prior_L, prior_add, prior_table, prior_type, prior_max_len;
-static uint8_t prior_tp, prior_cdm, prior_mapping;
-static uint16_t prior_data_id, prior_dmrs_id, prior_ports;
-static uint64_t prior_layouts;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_mu NR_CELL_REF(g_mu)
+typedef ul_solver_ue_t ues_cell_t[UL_SOLVER_UES];
+NR_CELL_STATIC(ues_cell_t, ues);
+#define ues NR_CELL_REF(ues)
+NR_CELL_STATIC(nr_pusch_solver_stats_t, totals);
+#define totals NR_CELL_REF(totals)
+NR_CELL_STATIC_INIT(uint8_t, global_tokens, UL_SOLVER_BUCKET);
+#define global_tokens NR_CELL_REF(global_tokens)
+NR_CELL_STATIC(uint64_t, global_refill_slot);
+#define global_refill_slot NR_CELL_REF(global_refill_slot)
+NR_CELL_STATIC(uint64_t, global_cpu_slot);
+#define global_cpu_slot NR_CELL_REF(global_cpu_slot)
+NR_CELL_STATIC_INIT(int64_t, global_cpu_tokens_us, UL_SOLVER_CPU_CAP_US);
+#define global_cpu_tokens_us NR_CELL_REF(global_cpu_tokens_us)
+NR_CELL_STATIC_INIT(uint32_t, probe_cpu_ema_us, 20000);
+#define probe_cpu_ema_us NR_CELL_REF(probe_cpu_ema_us)
+NR_CELL_STATIC_INIT(uint32_t, full_cpu_ema_us, 30000);
+#define full_cpu_ema_us NR_CELL_REF(full_cpu_ema_us)
+NR_CELL_STATIC(bool, prior_valid);
+#define prior_valid NR_CELL_REF(prior_valid)
+NR_CELL_STATIC(uint8_t, prior_S);
+#define prior_S NR_CELL_REF(prior_S)
+NR_CELL_STATIC(uint8_t, prior_L);
+#define prior_L NR_CELL_REF(prior_L)
+NR_CELL_STATIC(uint8_t, prior_add);
+#define prior_add NR_CELL_REF(prior_add)
+NR_CELL_STATIC(uint8_t, prior_table);
+#define prior_table NR_CELL_REF(prior_table)
+NR_CELL_STATIC(uint8_t, prior_type);
+#define prior_type NR_CELL_REF(prior_type)
+NR_CELL_STATIC(uint8_t, prior_max_len);
+#define prior_max_len NR_CELL_REF(prior_max_len)
+NR_CELL_STATIC(uint8_t, prior_tp);
+#define prior_tp NR_CELL_REF(prior_tp)
+NR_CELL_STATIC(uint8_t, prior_cdm);
+#define prior_cdm NR_CELL_REF(prior_cdm)
+NR_CELL_STATIC(uint8_t, prior_mapping);
+#define prior_mapping NR_CELL_REF(prior_mapping)
+NR_CELL_STATIC(uint16_t, prior_data_id);
+#define prior_data_id NR_CELL_REF(prior_data_id)
+NR_CELL_STATIC(uint16_t, prior_dmrs_id);
+#define prior_dmrs_id NR_CELL_REF(prior_dmrs_id)
+NR_CELL_STATIC(uint16_t, prior_ports);
+#define prior_ports NR_CELL_REF(prior_ports)
+NR_CELL_STATIC(uint64_t, prior_layouts);
+#define prior_layouts NR_CELL_REF(prior_layouts)
 
 bool nr_pusch_solver_enabled(void) { return true; }
 
 void nr_pusch_solver_reset(void)
 {
   atomic_store_explicit(&refill_slots, UL_SOLVER_REFILL_SLOTS, memory_order_relaxed);
-  pthread_mutex_lock(&mu);
+  pthread_mutex_lock(&g_mu);
   memset(ues, 0, sizeof(ues));
   memset(&totals, 0, sizeof(totals));
   global_tokens = UL_SOLVER_BUCKET;
@@ -66,7 +102,7 @@ void nr_pusch_solver_reset(void)
   probe_cpu_ema_us = 20000;
   full_cpu_ema_us = 30000;
   prior_valid = false;
-  pthread_mutex_unlock(&mu);
+  pthread_mutex_unlock(&g_mu);
 }
 
 static bool same_ticket(const nr_ue_ul_ticket_t *a, const nr_ue_ul_ticket_t *b)
@@ -224,7 +260,7 @@ int nr_pusch_solver_plan(const nr_ue_ul_ticket_t *ticket,
   if (max_out > UL_SOLVER_BUCKET) max_out = UL_SOLVER_BUCKET;
   if (nids < 0) nids = 0;
   if (nids > 4) nids = 4;
-  pthread_mutex_lock(&mu);
+  pthread_mutex_lock(&g_mu);
   ul_solver_ue_t *u = ue_for(ticket, true);
   uint16_t ranked_ids[5];
   for (int i=0;i<nids;++i) ranked_ids[i]=ids[i];
@@ -383,7 +419,7 @@ int nr_pusch_solver_plan(const nr_ue_ul_ticket_t *ticket,
       }
     }
   }
-  pthread_mutex_unlock(&mu);
+  pthread_mutex_unlock(&g_mu);
   return n;
 }
 
@@ -392,9 +428,9 @@ void nr_pusch_solver_feedback(const nr_ue_ul_ticket_t *ticket,
                               bool credit, uint64_t cpu_us)
 {
   if (!ticket || !v) return;
-  pthread_mutex_lock(&mu);
+  pthread_mutex_lock(&g_mu);
   ul_solver_ue_t *u = ue_for(ticket, false);
-  if (!u) { pthread_mutex_unlock(&mu); return; }
+  if (!u) { pthread_mutex_unlock(&g_mu); return; }
   global_cpu_tokens_us += (int64_t)v->reserved_cpu_us - (int64_t)cpu_us;
   if (global_cpu_tokens_us > UL_SOLVER_CPU_CAP_US) global_cpu_tokens_us=UL_SOLVER_CPU_CAP_US;
   uint32_t *ema=v->probe ? &probe_cpu_ema_us : &full_cpu_ema_us;
@@ -405,7 +441,7 @@ void nr_pusch_solver_feedback(const nr_ue_ul_ticket_t *ticket,
     u->stats.probe_cpu_us += cpu_us;
     totals.probe_cpu_us += cpu_us;
   }
-  if (!credit) { pthread_mutex_unlock(&mu); return; }
+  if (!credit) { pthread_mutex_unlock(&g_mu); return; }
   if (v->probe) {
     if (u->candidate && v->confirmation && !crc_ok && v->dci_slot != u->cand_slot) {
       if (++u->cand_tries >= 96) {
@@ -473,23 +509,23 @@ found_mask:
   } else if (!v->probe && u->full_fail_streak < 63) {
     ++u->full_fail_streak;
   }
-  pthread_mutex_unlock(&mu);
+  pthread_mutex_unlock(&g_mu);
 }
 
 void nr_pusch_solver_stats(nr_pusch_solver_stats_t *out)
 {
   if (!out) return;
-  pthread_mutex_lock(&mu);
+  pthread_mutex_lock(&g_mu);
   *out = totals;
-  pthread_mutex_unlock(&mu);
+  pthread_mutex_unlock(&g_mu);
 }
 
 bool nr_pusch_solver_is_solved(const nr_ue_ul_ticket_t *ticket)
 {
   if (!ticket) return false;
-  pthread_mutex_lock(&mu);
+  pthread_mutex_lock(&g_mu);
   const ul_solver_ue_t *u=ue_for(ticket,false);
   const bool solved=u && u->solved;
-  pthread_mutex_unlock(&mu);
+  pthread_mutex_unlock(&g_mu);
   return solved;
 }

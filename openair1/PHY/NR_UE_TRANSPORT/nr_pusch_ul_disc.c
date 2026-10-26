@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include "common/utils/nr_cell.h"
 
 #define UL_DISC_TRACKS 128
 #define UL_DISC_SCAN_PER_GRANT 64
@@ -21,12 +22,21 @@ typedef struct {
   uint32_t scan_cursor;
   nr_pusch_ul_disc_result_t found;
 } ul_disc_track_t;
-static ul_disc_track_t tracks[UL_DISC_TRACKS];
-static pthread_mutex_t track_lock = PTHREAD_MUTEX_INITIALIZER;
-static unsigned evict_next;
-static uint32_t current_epoch;
+typedef ul_disc_track_t tracks_cell_t[UL_DISC_TRACKS];
+NR_CELL_STATIC(tracks_cell_t, tracks);
+#define tracks NR_CELL_REF(tracks)
+NR_CELL_STATIC_INIT(pthread_mutex_t, track_lock, PTHREAD_MUTEX_INITIALIZER);
+#define track_lock NR_CELL_REF(track_lock)
+NR_CELL_STATIC(unsigned, evict_next);
+#define evict_next NR_CELL_REF(evict_next)
+NR_CELL_STATIC(uint32_t, current_epoch);
+#define current_epoch NR_CELL_REF(current_epoch)
 #define UL_DISC_CELL_N 16
-static int cell_res[UL_DISC_CELL_N], cell_n; /* cell prior of the timing tracker; kept across epochs (timing is physical) */
+typedef int cell_res_cell_t[UL_DISC_CELL_N];
+NR_CELL_STATIC(cell_res_cell_t, cell_res); /* cell prior of the timing tracker; kept across epochs (timing is physical) */
+#define cell_res NR_CELL_REF(cell_res)
+NR_CELL_STATIC(int, cell_n);
+#define cell_n NR_CELL_REF(cell_n)
 
 static ul_disc_track_t *track(uint16_t rnti)
 {
