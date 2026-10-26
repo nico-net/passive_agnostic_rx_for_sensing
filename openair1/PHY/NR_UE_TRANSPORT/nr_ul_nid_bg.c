@@ -36,6 +36,7 @@
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" /* nr_get_Qm_ul, nr_get_code_rate_ul */
 #include "nr_pdsch_passive_decode.h" /* nr_pdsch_gw_cb0_t, nr_pdsch_passive_gw_cb0_decode (the CPU CB0 LDPC + all-zero guard) */
 #include "common/utils/nr_cell.h"
+#include "common/utils/nr_core_pool.h"
 #include "nr_ul_cell_prealloc.h"
 
 #define NJOB 4
@@ -566,6 +567,7 @@ static void run_job(nr_ul_nid_job_t *j)
   g_st.jobs_done++;
   g_st.cpu_us += used / 1000;
   pthread_mutex_unlock(&g_lock);
+  nr_pool_site_float_release(); /* mpci B5: the duty-cycle sleep holds no token */
   /* duty cycle: pct% of one core at most */
   const uint64_t sleep_ns = used * (uint64_t)(100 - g_cpu_pct) / (uint64_t)g_cpu_pct;
   for (uint64_t s = 0; s < sleep_ns && !atomic_load(&g_stop); s += 20000000ull) usleep(20000);
@@ -591,7 +593,7 @@ static void *worker(void *a)
     const struct sched_param sp0 = {0};
     if (sched_setscheduler(0, SCHED_IDLE, &sp0)) LOG_W(PHY, "SENSING: UL_NID_BG cannot use SCHED_IDLE\n");
   }
-  if (g_core >= 0) { /* keep the search off the downlink cores */
+  if (g_core >= 0 && !nr_pool_site_float_merged()) { /* keep the search off the downlink cores; merged float lane (mpci B5): a HOUSE lease per job, no pin */
     cpu_set_t cs;
     CPU_ZERO(&cs);
     CPU_SET(g_core, &cs);
@@ -617,7 +619,9 @@ static void *worker(void *a)
       usleep(10000);
       continue;
     }
+    nr_pool_site_float_acquire(NR_POOL_HOUSE, nr_cell_idx(), 0); /* mpci B5: one HOUSE lease per job (bound cell); run_job releases it before its duty-cycle sleep */
     run_job(j);
+    nr_pool_site_float_release();
     pthread_mutex_lock(&g_lock);
     j->st = 0;
     pthread_mutex_unlock(&g_lock);

@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include "common/utils/nr_bg_lane.h"
 #include "common/utils/nr_cell.h"
+#include "common/utils/nr_core_pool.h"
 #include "nr_csirs_disc.h"
 #include "nr_csirs_disc_cell.h"
 
@@ -487,7 +488,9 @@ static void *disc_worker_main(void *unused)
 {
   (void)unused;
   pthread_setname_np(pthread_self(), "csirsDisc");
-  if (g_worker.core >= 0 && g_worker.core < CPU_SETSIZE) {
+  /* mpci B5: with the float lane merged into the core pool the worker leases a DISC token per batch (below) and does not pin to ISAC_CSIRS_DISC_CORE
+   * (the key stays readable; N cells' workers must not share one core) */
+  if (g_worker.core >= 0 && g_worker.core < CPU_SETSIZE && !nr_pool_site_float_merged()) {
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(g_worker.core, &set);
@@ -511,6 +514,11 @@ static void *disc_worker_main(void *unused)
       break;
     seen = __atomic_load_n(&g_worker.wake_generation, __ATOMIC_ACQUIRE);
     pthread_mutex_unlock(&g_worker.wake_lock);
+    /* mpci B5: one DISC lease per batch around the CPU parts (drain, hook), never across the timed wait; an idle 5 ms wake-up takes none. The hook's GPU
+     * waits keep the token (worst case of the FLOAT-LANE-POOL bench); a G3 give scope can lift that. */
+    const bool lease_now = (nr_csirs_disc_td_pending && nr_csirs_disc_td_pending() > 0) || deferred
+                           || (!nr_csirs_disc_td_drain && g_worker.ring.written != g_worker.snapshot.written);
+    if (lease_now) nr_pool_site_float_acquire(NR_POOL_DISC, nr_cell_idx(), 0);
     if(nr_csirs_blind_rt_discovery_drain) nr_csirs_blind_rt_discovery_drain();
     int drained=nr_csirs_disc_td_drain?nr_csirs_disc_td_drain(&g_worker.ring):0;
     seen = __atomic_load_n(&g_worker.wake_generation, __ATOMIC_ACQUIRE);
@@ -527,6 +535,7 @@ static void *disc_worker_main(void *unused)
       if(hook) hook(&g_worker.snapshot);
       nr_admit_done(NR_ADMIT_CSIRS, nr_admit_now_ns() - t_adm);
     }
+    nr_pool_site_float_release();
     pthread_mutex_lock(&g_worker.wake_lock);
   }
   pthread_mutex_unlock(&g_worker.wake_lock);

@@ -1578,6 +1578,7 @@ static int ul_bg_run(const nr_ul_bgdisc_job_t *j)
         for (int delta = -span; delta <= span; delta += step) {
           const int advance = center + delta;
           if (advance - j->ta_offset < -2048 || advance - j->ta_offset > 2048) continue;
+          nr_ul_bgdisc_step(); /* mpci B5: chunk boundary of the float-lane lease */
           if (!bg_fep(fp, &sn, nant, ul_bg_run_gbuf, slot, first_sym, advance, j->fo_hz)) continue; /* outside the window: not a candidate */
           for (int i = 0; i < nprior; ++i) {
             int pairs = 0;
@@ -1598,8 +1599,11 @@ static int ul_bg_run(const nr_ul_bgdisc_job_t *j)
     }
   }
   const int s1 = g.start_symbol + g.num_symbols < sps ? g.start_symbol + g.num_symbols : sps;
-  for (int sym = g.start_symbol; sym < s1; sym++)
+  for (int sym = g.start_symbol; sym < s1; sym++) {
+    nr_ul_bgdisc_step(); /* mpci B5 */
     if (!bg_fep(fp, &sn, nant, ul_bg_run_gbuf, slot, sym, ta, j->fo_hz)) return 1;
+  }
+  nr_ul_bgdisc_step(); /* mpci B5: before the DM-RS id sweep */
   if (dmrs_disc) {
     const nr_pusch_ul_disc_result_t result = nr_pusch_ul_disc_search_sweep(&grid, g.rnti, type_a, prior, nprior, g.dmrs_config_type, g.nscid, g.antenna_ports_field, 0, 1024);
     if (result.accepted && passive_ul_apply_dmrs_disc(&g, &result)) found = true;

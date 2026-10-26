@@ -12,6 +12,7 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include "common/utils/nr_cell.h"
+#include "common/utils/nr_core_pool.h"
 
 #define BG_MAX_DEPTH 16
 enum { FREE, FILLING, READY };
@@ -63,7 +64,7 @@ static void *worker(void *arg)
   (void)arg;
   setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10); /* the discovery lane never competes with the grant consumers */
   const char *ce = getenv("ISAC_UL_BGDISC_CORE");
-  if (ce && atoi(ce) >= 0) {
+  if (ce && atoi(ce) >= 0 && !nr_pool_site_float_merged()) { /* mpci B5: merged float lane = a HOUSE lease per job, no pin (the key stays readable) */
     cpu_set_t cs;
     CPU_ZERO(&cs);
     CPU_SET(atoi(ce), &cs);
@@ -93,8 +94,13 @@ static void *worker(void *arg)
     pthread_mutex_unlock(&g_lock);
     const int expired = now_ns() - s->j.submit_ns > g_max_age_ns;
     int rc = 0;
-    /* core pool: NOT leased. One run holds a core 113-287 ms [MEASURED, replay tim] and is not chunked: it stays in the float lane until it yields between steps */
-    if (!expired && !g_stop) rc = g_run(&s->j);
+    /* mpci B5: one HOUSE lease per job (the worker is bound to its cell). One run is 113-287 ms [MEASURED, replay tim]: the runner calls
+     * nr_ul_bgdisc_step() between its steps, which hands the token to a more urgent waiter. Not merged: no lease, step() is a no-op. */
+    if (!expired && !g_stop) {
+      nr_pool_site_float_acquire(NR_POOL_HOUSE, nr_cell_idx(), 0);
+      rc = g_run(&s->j);
+      nr_pool_site_float_release();
+    }
     pthread_mutex_lock(&g_lock);
     if (expired || rc) g_st.expired++;
     else g_st.done++;
@@ -103,6 +109,8 @@ static void *worker(void *arg)
   pthread_mutex_unlock(&g_lock);
   return NULL;
 }
+
+void nr_ul_bgdisc_step(void) { nr_pool_site_float_yield(); }
 
 int nr_ul_bgdisc_start(int depth, nr_ul_bgdisc_run_fn run)
 {

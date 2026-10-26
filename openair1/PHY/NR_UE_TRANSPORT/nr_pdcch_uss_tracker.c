@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr_cell.h"
+#include "common/utils/nr_core_pool.h"
 
 #define USS_TRACK_GEOMETRIES 16
 #define USS_TRACK_HISTORY 64
@@ -377,7 +378,9 @@ static void *tracker_worker(void *cell_arg)
   int affinity_rc = 0;
   int core = -1;
   const char *core_env = nr_env_core("ISAC_PDCCH_USS_CORE");
-  if (core_env && *core_env) {
+  if (nr_pool_site_float_merged()) {
+    /* mpci B5: the float lane is merged into the core pool: one DISC lease per job (below), no self-pin to one core (the env key stays readable, unused) */
+  } else if (core_env && *core_env) {
     core = atoi(core_env);
     if (core >= 0 && core < CPU_SETSIZE) {
       cpu_set_t set;
@@ -429,7 +432,9 @@ static void *tracker_worker(void *cell_arg)
       /* ISAC_BG_LANE: the history stays in the tracker, so a skipped round loses nothing (the next job rescans it) */
       const uint64_t t0 = nr_admit_now_ns();
       if (nr_admit_try(NR_ADMIT_USS, t0, 0, 0)) {
+        nr_pool_site_float_acquire(NR_POOL_DISC, nr_cell_idx(), 0); /* mpci B5: one DISC lease per job, none across the cond wait; no-op when not merged */
         score_snapshot(job.state, generation, &geometry, sample, n);
+        nr_pool_site_float_release();
         nr_admit_done(NR_ADMIT_USS, nr_admit_now_ns() - t0);
       }
     }

@@ -9,7 +9,11 @@
 // Cell dimension (B1, mpci-main plan B.4): the compile-time macro BENCH_NCELLS=<k> (default 1 = the single-cell bench, output unchanged) runs k cells, each with the
 //   full mix above and its own consumer and discovery threads, leasing with its cell index; BENCH_CELL_SCALE_LIST={s0,s1,...} (integers) multiplies the offered load of
 //   each cell (default all 1; {3,1} = cell 0 bursts at 3x while cell 1 stays quiet). Build-time constants, no runtime flag. The per-cell rows are named "c<k> scan" etc. and the CORE_POOL line carries one block per cell.
-// usage: bench_nr_core_pool <first_core> <n_cores> <load_scale> <seconds> [cfs]
+// B5 (float lane per cell, mpci-main plan B5): every cell runs its own copy of the 8 float threads (class DISC / HOUSE, leasing with its cell index).
+//   NO FLAGS: the float mode and the layout are bench COMMAND-LINE arguments after the four positional ones (a bench may take arguments; the receiver may not):
+//     float=none|sep|merged   lane=<cpu list>  prod=<cpu>  pool=<cpu list>  noage  ulbg_chunk_ms=<ms>  cells=<k>  cellscale=<a,b,..>  cfs
+//   The old BENCH_FLOAT / BENCH_LANE / BENCH_PROD / BENCH_POOL / BENCH_NOAGE / BENCH_ULBG_CHUNK_MS environment variables are still read when the argument is absent.
+// usage: bench_nr_core_pool <first_core> <n_cores> <load_scale> <seconds> [cfs] [float=..] [lane=..] [prod=..] [pool=..] [noage] [ulbg_chunk_ms=..] [cells=..] [cellscale=..]
 //   default: the pool with n_cores tokens. cfs: no pool, every consumer thread pinned round-robin to the n_cores cores (time-sharing, SCHED_OTHER).
 #include <algorithm>
 #include <atomic>
@@ -142,7 +146,7 @@ static const FSpec kF[] = {
   {"ulBgDisc", NR_POOL_HOUSE, 0.45, 150.0, 10}, {"ulNidBg", NR_POOL_HOUSE, 0.03, 2.0, 19},
 };
 struct FStat { std::vector<uint64_t> wait, str; double cpu_ns = 0; uint64_t jobs = 0; std::mutex m; };
-static void float_thread(nr_pool_t *p, const FSpec *f, FStat *st, bool merged, const std::vector<int> *lane, double chunk_ms, unsigned seed)
+static void float_thread(nr_pool_t *p, const FSpec *f, FStat *st, bool merged, const std::vector<int> *lane, double chunk_ms, unsigned seed, int cell)
 {
   std::mt19937 rng(seed);
   if (!merged) { pin_list(*lane); }
@@ -158,7 +162,7 @@ static void float_thread(nr_pool_t *p, const FSpec *f, FStat *st, bool merged, c
     const uint64_t arr = nr_pool_now_ns();
     uint64_t left = job, first_start = 0;
     const bool lease_whole = !(chunk_ms > 0) && f->prio == NR_POOL_HOUSE;
-    if (merged) nr_pool_acquire(p, f->prio, 0, arr);
+    if (merged) nr_pool_acquire(p, f->prio, cell, arr);
     first_start = nr_pool_now_ns();
     while (left) {
       const uint64_t c = std::min(left, lease_whole ? left : chunk);
@@ -194,26 +198,36 @@ int main(int argc, char **argv)
 {
   if (argc < 5) { fprintf(stderr, "usage: %s first_core n_tokens load_scale seconds [reserve]\n", argv[0]); return 2; }
   int first = atoi(argv[1]), n = atoi(argv[2]);
-  std::vector<int> pool_l = parse_list(getenv("BENCH_POOL")), lane_l = parse_list(getenv("BENCH_LANE"));
-  const char *fm = getenv("BENCH_FLOAT");
+  // optional arguments after the four positional ones (key=value or a bare word); the legacy BENCH_* environment variables are the fallback
+  auto arg_of = [&](const char *key) -> const char * {
+    const size_t kl = strlen(key);
+    for (int i = 5; i < argc; i++)
+      if (!strncmp(argv[i], key, kl) && argv[i][kl] == '=') return argv[i] + kl + 1;
+    return nullptr;
+  };
+  auto has_word = [&](const char *w) { for (int i = 5; i < argc; i++) if (!strcmp(argv[i], w)) return true; return false; };
+  auto opt = [&](const char *key, const char *envname) -> const char * { const char *a = arg_of(key); return a ? a : getenv(envname); };
+  std::vector<int> pool_l = parse_list(opt("pool", "BENCH_POOL")), lane_l = parse_list(opt("lane", "BENCH_LANE"));
+  const char *fm = opt("float", "BENCH_FLOAT");
   const bool f_sep = fm && !strcmp(fm, "sep"), f_merged = fm && !strcmp(fm, "merged");
-  const double ulbg_chunk = getenv("BENCH_ULBG_CHUNK_MS") ? atof(getenv("BENCH_ULBG_CHUNK_MS")) : 5.0;
+  const char *uc = opt("ulbg_chunk_ms", "BENCH_ULBG_CHUNK_MS");
+  const double ulbg_chunk = uc ? atof(uc) : 5.0;
   if (!pool_l.empty()) n = (int)pool_l.size();
-  if (getenv("BENCH_PROD")) pin_list(parse_list(getenv("BENCH_PROD")));
+  if (opt("prod", "BENCH_PROD")) pin_list(parse_list(opt("prod", "BENCH_PROD")));
   const double scale = atof(argv[3]);
   const int secs = atoi(argv[4]);
   int cores[NR_POOL_MAX_TOKENS];
   for (int i = 0; i < n; i++) cores[i] = pool_l.empty() ? first + i : pool_l[(size_t)i];
   nr_pool_cfg_t cfg = nr_pool_cfg_default();
-  if (getenv("BENCH_NOAGE")) cfg.age_ns[NR_POOL_DISC] = cfg.age_ns[NR_POOL_HOUSE] = 0; // small-host policy: low classes are never promoted into the reserve
-  g_cfs = argc > 5 && !strcmp(argv[5], "cfs");
+  if (has_word("noage") || getenv("BENCH_NOAGE")) cfg.age_ns[NR_POOL_DISC] = cfg.age_ns[NR_POOL_HOUSE] = 0; // small-host policy: low classes are never promoted into the reserve
+  g_cfs = has_word("cfs");
   g_first = first;
   g_n = n;
   nr_pool_t *p = nr_pool_create(cores, nullptr, n, &cfg);
 
-  int ncell = BENCH_NCELLS;
+  int ncell = arg_of("cells") ? atoi(arg_of("cells")) : BENCH_NCELLS;
   if (ncell < 1 || ncell > NR_POOL_MAX_CELLS) ncell = 1;
-  const std::vector<int> cs_l = BENCH_CELL_SCALE_LIST; // integer multipliers
+  const std::vector<int> cs_l = arg_of("cellscale") ? parse_list(arg_of("cellscale")) : std::vector<int>(BENCH_CELL_SCALE_LIST); // integer multipliers
   struct CQ { Q scan, dl, ul, rt; char nm[4][16]; };
   std::vector<std::unique_ptr<CQ>> cq;
   std::vector<std::thread> th;
@@ -242,11 +256,11 @@ int main(int argc, char **argv)
   }
   auto all_q = [&] { std::vector<Q *> v; for (auto &x : cq) for (Q *q : {&x->scan, &x->dl, &x->ul, &x->rt}) v.push_back(q); return v; };
 
-  const size_t nf = sizeof(kF) / sizeof(kF[0]);
-  FStat fst[sizeof(kF) / sizeof(kF[0])];
+  const size_t nf0 = sizeof(kF) / sizeof(kF[0]), nf = nf0 * (size_t)ncell; // float thread k = cell k / nf0, spec k % nf0
+  std::vector<FStat> fst(nf);
   std::vector<std::thread> ft;
   if (f_sep || f_merged)
-    for (size_t i = 0; i < nf; i++) ft.emplace_back(float_thread, p, &kF[i], &fst[i], f_merged, &lane_l, ulbg_chunk, 100u + (unsigned)i);
+    for (size_t i = 0; i < nf; i++) ft.emplace_back(float_thread, p, &kF[i % nf0], &fst[i], f_merged, &lane_l, ulbg_chunk, 100u + (unsigned)i, (int)(i / nf0));
   std::atomic<uint64_t> hbusy{0}; // unleasable threads (actors, CUDA helpers, log, ITTI): 0.25 core in 200 us bursts on the lane / home cpus, both modes
   std::thread home;
   if (f_sep || f_merged) home = std::thread([&] {
@@ -290,11 +304,20 @@ int main(int argc, char **argv)
   for (Q *q : all_q()) report(q);
   for (size_t i = 0; (f_sep || f_merged) && i < nf; i++) {
     auto &w = fst[i].wait, &x = fst[i].str;
-    if (w.empty()) { printf("  F %-9s no jobs\n", kF[i].name); continue; }
+    const FSpec &sp = kF[i % nf0];
+    char fn[24];
+    snprintf(fn, sizeof(fn), ncell > 1 ? "c%zu %s" : "%.0s%s", i / nf0, sp.name);
+    if (ncell == 1) snprintf(fn, sizeof(fn), "%s", sp.name);
+    if (w.empty()) { printf("  F %-9s no jobs\n", fn); continue; }
     std::sort(w.begin(), w.end()); std::sort(x.begin(), x.end());
     auto q = [](std::vector<uint64_t> &v, double f) { return v[std::min(v.size() - 1, (size_t)(f * (double)v.size()))] / 1000.0; };
-    printf("  F %-9s duty_target=%.2f duty_got=%.2f jobs=%zu start_wait_us p50=%.0f p99=%.0f max=%.0f | done_us p50=%.0f p99=%.0f max=%.0f (job %.1f ms)\n", kF[i].name,
-           kF[i].duty, fst[i].cpu_ns / 1e9 / secs, w.size(), q(w, .5), q(w, .99), w.back() / 1000.0, q(x, .5), q(x, .99), x.back() / 1000.0, kF[i].job_ms);
+    printf("  F %-9s duty_target=%.2f duty_got=%.2f jobs=%zu start_wait_us p50=%.0f p99=%.0f max=%.0f | done_us p50=%.0f p99=%.0f max=%.0f (job %.1f ms)\n", fn,
+           sp.duty, fst[i].cpu_ns / 1e9 / secs, w.size(), q(w, .5), q(w, .99), w.back() / 1000.0, q(x, .5), q(x, .99), x.back() / 1000.0, sp.job_ms);
+  }
+  if (f_sep || f_merged) { // float CPU got / offered, all cells
+    double got = 0, off = 0;
+    for (size_t i = 0; i < nf; i++) got += fst[i].cpu_ns / 1e9 / secs, off += kF[i % nf0].duty;
+    printf("  FLOAT cells=%d cpu_got=%.2f cpu_offered=%.2f ratio=%.2f\n", ncell, got, off, off > 0 ? got / off : 0.0);
   }
   char line[1024];
   nr_pool_stats_line(p, line, sizeof(line));

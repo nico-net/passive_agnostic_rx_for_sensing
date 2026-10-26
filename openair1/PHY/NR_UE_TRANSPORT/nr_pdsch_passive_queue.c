@@ -339,7 +339,9 @@ static void *dmrs_scan_worker(void *arg)
     pthread_mutex_unlock(&g_scan_mu);
     const uint64_t t_adm = nr_admit_now_ns();
     if (nr_admit_try(NR_ADMIT_DMRS_SCAN, t_adm, 0, 0)) { /* ISAC_BG_LANE: else the slot is dropped, the next one is fresher */
+      nr_pool_site_float_acquire(NR_POOL_DISC, nr_cell_idx(), 0); /* mpci B5: one DISC lease per scan job (the worker is bound to its cell), none across the cond wait */
       dmrs_scan_run(c, j.rnti, j.abs_slot, j.nr_slot, j.sym, j.full, j.nant, j.N, j.fco, j.n_rb, j.sps, rx);
+      nr_pool_site_float_release();
       nr_admit_done(NR_ADMIT_DMRS_SCAN, nr_admit_now_ns() - t_adm);
     }
     pthread_mutex_lock(&g_dq_mu); /* the slot stays ours until the scan is done: the producer cannot overwrite the copy */
@@ -358,7 +360,7 @@ static bool dmrs_scan_submit(uint16_t rnti, int64_t abs_slot, int nr_slot, int s
   if (!g_dq_started) {
     for (int i = 0; i < DSCAN_Q; i++) g_dq[i].buf = malloc((size_t)8 * DSCAN_MAXN * 2 * sizeof(int16_t));
     for (int i = 0; i < DSCAN_Q; i++) if (!g_dq[i].buf) { pthread_mutex_unlock(&g_dq_mu); return false; }
-    threadCreate(&g_dq_thr, dmrs_scan_worker, (void *)(intptr_t)nr_cell_idx(), "dmrsScan", nr_env_list_nth("ISAC_DMRS_SCAN_CORE", 0, -1), 0);
+    threadCreate(&g_dq_thr, dmrs_scan_worker, (void *)(intptr_t)nr_cell_idx(), "dmrsScan", nr_pool_site_float_merged() ? -1 : nr_env_list_nth("ISAC_DMRS_SCAN_CORE", 0, -1), 0); /* mpci B5: merged float lane = leases, no pin */
     g_dq_started = true;
   }
   if (g_dq_n >= DSCAN_Q) { pthread_mutex_unlock(&g_dq_mu); atomic_fetch_add(&g_dscan_dropped, 1); return true; }
@@ -1365,7 +1367,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         g_idle--; /* spinning is not idle for the slot-spread accounting */
         pthread_mutex_unlock(&g_lock);
         /* the spin burns a core: with the pool it must be one this thread owns, and only if one is free */
-        if (!nr_pool_site() || nr_pool_site_try_acquire(NR_POOL_DECODE, 0, 0) >= 0) {
+        if (!nr_pool_site() || nr_pool_site_try_acquire(NR_POOL_DECODE, nr_cell_idx(), 0) >= 0) {
           if (!nr_spin_run(&g_spin_pred, &spin_acct, &g_count, until)) nr_pool_site_release();
         } else {
           atomic_store_explicit(&g_spin_pred.claim, 0, memory_order_release);
@@ -1456,7 +1458,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
     }
     /* core pool: first-pass decode class, oldest slot first; after the slot gate so a wait for the slot to complete holds no core */
-    nr_pool_site_acquire(NR_POOL_DECODE, 0, nr_passive_slot_arrival_ns(job.absolute_slot));
+    nr_pool_site_acquire(NR_POOL_DECODE, nr_cell_idx(), nr_passive_slot_arrival_ns(job.absolute_slot));
     const uint64_t taken_ns = nr_passive_e2e_trace() ? now_ns() : 0; /* SYSAN e2e: dequeue time */
     nr_ss_ns[NRSS_WQ] = 0;
     if (owned) {
@@ -1536,7 +1538,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       nanosleep(&ts, NULL);
       prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
     }
-    if (producer_wait) nr_pool_site_acquire(NR_POOL_DECODE, 0, nr_passive_slot_arrival_ns(job.absolute_slot));
+    if (producer_wait) nr_pool_site_acquire(NR_POOL_DECODE, nr_cell_idx(), nr_passive_slot_arrival_ns(job.absolute_slot));
     if (!nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame)) {
       const int count = owned ? n_more + 1 : 1;
       atomic_fetch_add_explicit(&g_dropped_stale, count, memory_order_relaxed);

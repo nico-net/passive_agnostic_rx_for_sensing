@@ -28,6 +28,8 @@ typedef int (*nr_ul_bgdisc_run_fn)(const nr_ul_bgdisc_job_t *j);
 
 typedef struct { uint64_t nohyp, submitted, dup, full, expired, done; } nr_ul_bgdisc_stats_t;
 
+/* Chunk boundary for the runner (mpci B5): returns the core-pool token to a more urgent waiter and re-acquires it; a no-op without a lease. Hold no lock. */
+void nr_ul_bgdisc_step(void);
 int nr_ul_bgdisc_enabled(void); /* ISAC_UL_BGDISC=1 */
 /* depth jobs; the worker thread is started only when run != NULL (tests start it later to hold jobs back). 0 / -1 */
 int nr_ul_bgdisc_start(int depth, nr_ul_bgdisc_run_fn run);
