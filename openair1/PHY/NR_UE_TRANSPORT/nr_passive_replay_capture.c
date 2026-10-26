@@ -20,7 +20,8 @@
 
 /* v3 = wide DCI records, v4 = same layout with failed DL controls included.
  * v1/v2 used scalar payloads and must never be replayed as this layout. */
-#define REPLAY_FRAMES 16
+/* 24 frames = 240 ms: 4 RX x 122.88 MS/s x c16 is 19.7 MB per frame, 472 MB < REPLAY_MAX_BYTES; 12 slots of a 40-slot CSI-RS period. */
+#define REPLAY_FRAMES 24
 #define REPLAY_SLOTS (REPLAY_FRAMES * 160)
 #define REPLAY_UL 2048
 #define REPLAY_DL 512
@@ -118,7 +119,7 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
   if (!header || !iq || !output) {
     LOG_E(PHY,"REPLAY VOID: allocation failed\n"); atomic_store(&state,RP_VOID); return;
   }
-  memset(iq,0,bytes); /* Prefault before RF start, never page in 157 MB at capture time. */
+  memset(iq,0,bytes); /* Prefault before RF start, never page in the IQ buffer (up to REPLAY_MAX_BYTES) at capture time. */
   header->magic=UINT64_C(0x314951525041534e);
   header->version=3;
   header->header_bytes=sizeof(*header);
@@ -140,6 +141,12 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
 void nr_passive_replay_slot(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
   int s=atomic_load_explicit(&state,memory_order_acquire);
+  /* Start as soon as the cell is synchronised and the blind monitor delivers DCIs (ul_seen): a capture is data for offline work on
+   * the receiver itself (e.g. CSI-RS slots), so it must not wait for a settled successful DL decode, which may never come. */
+  if (s==RP_ARMED && ue->is_synchronized && atomic_load(&ul_seen)) {
+    int expected=RP_ARMED;
+    if (atomic_compare_exchange_strong(&state,&expected,RP_REQUESTED)) s=RP_REQUESTED;
+  }
   if (s!=RP_REQUESTED && s!=RP_CAPTURING && s!=RP_DRAINING) return;
   const NR_DL_FRAME_PARMS *fp=&ue->frame_parms;
   long source=((long)proc->hfn_rx*1024+proc->frame_rx)*fp->slots_per_frame+proc->nr_slot_rx;
