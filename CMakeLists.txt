@@ -1013,6 +1013,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_zp.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arbiter.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c
@@ -3129,6 +3130,7 @@ if(ENABLE_TESTS)
   # sources and libraries as test_nr_csirs_blind_synth below.
   add_executable(test_nr_csirs_blind_search ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_search_test.cc
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_rt_test_bridge.c
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arbiter.c
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c
@@ -3184,6 +3186,7 @@ if(ENABLE_TESTS)
   add_executable(test_nr_csirs_disc_e2e
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_e2e_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_rt_test_bridge.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arbiter.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
@@ -3204,6 +3207,7 @@ if(ENABLE_TESTS)
   add_executable(test_nr_csirs_disc_dump
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_dump_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_rt_test_bridge.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arbiter.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
@@ -3314,6 +3318,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_csirs_disc_zp PRIVATE nr_phy_common nr_common UTIL GTest::gtest GTest::gtest_main pthread m)
   add_dependencies(tests test_nr_csirs_disc_zp)
   add_test(NAME test_nr_csirs_disc_zp COMMAND ./test_nr_csirs_disc_zp)
+
+  add_executable(test_nr_csirs_rm_arbiter ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_rm_arbiter_test.cc
+                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arbiter.c)
+  target_include_directories(test_nr_csirs_rm_arbiter PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_csirs_rm_arbiter PRIVATE nr_common UTIL GTest::gtest pthread m)
+  add_dependencies(tests test_nr_csirs_rm_arbiter)
+  add_test(NAME test_nr_csirs_rm_arbiter COMMAND ./test_nr_csirs_rm_arbiter)
 
   add_executable(test_nr_passive_reconf_rules ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_reconf_rules_test.cc
                                               ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_reconf_rules.c

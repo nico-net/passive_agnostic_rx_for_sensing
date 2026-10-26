@@ -92,6 +92,7 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the UL decoder
 #include "nr_csirs_blind_search.h" // nr_csirs_blind_re_energy / nr_csirs_blind_zp_grant_score
 #include "nr_csirs_blind_rt.h" // nr_csirs_blind_rt_zp_grant_evidence
+#include "nr_csirs_rm_arbiter.h" // CRC arbiter of the blind CSI-RS patterns (decode trials with / without a pattern)
 #include "PHY/NR_REFSIG/nr_refsig.h" // nr_gold_pdsch, nr_pdsch_dmrs_rx (ZP grant evidence: own-DM-RS presence)
 #include "PHY/MODULATION/nr_sfo_state.h" // SFO eps of the GPU pass vs the old path
 #include "PHY/NR_TRANSPORT/nr_sch_dmrs.h" // get_delta
@@ -4400,6 +4401,66 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   if (t_recov_mode == 1) { /* RECOVERY_ASYNC: every arm below runs on the worker; the failed first pass stands */
     t_recov_deferred = true;
     return st;
+  }
+  /* CRC arbiter of the blind CSI-RS patterns (nr_csirs_rm_arbiter.h): the first body failed, so decode once more WITH each pattern the arbiter holds out
+   * (a ZP found only as holes), and once WITHOUT each applied pattern that is not yet proven. A pass is the evidence the arbiter learns from. */
+  {
+    const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
+    const uint32_t arb_slot = (uint32_t)proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx;
+    fapi_nr_dl_config_csirs_pdu_rel15_t held[8];
+    const int n_held = nr_csirs_full_arbiter_held(&original, arb_slot, held, 8);
+    bool arb_recovered = false, arb_ran = false;
+    const bool saved_quiet = t_quiet;
+    const double saved_fo_override = nr_slot_fep_fo_override_hz;
+    for (int k = 0; k < n_held + original.numCsiRsForRateMatching && !arb_recovered; k++) {
+      const bool add = k < n_held;
+      const fapi_nr_dl_config_csirs_pdu_rel15_t *pat = add ? &held[k] : &original.csiRsForRateMatching[k - n_held];
+      if (add ? original.numCsiRsForRateMatching >= NFAPI_MAX_NUM_CSI_RATEMATCH : !nr_csi_arb_trial_remove(pat))
+        continue;
+      fapi_nr_dl_config_dlsch_pdu_rel15_t probe = original;
+      probe.numCsiRsForRateMatching = 1;
+      probe.csiRsForRateMatching[0] = *pat;
+      if (nr_dlsch_csi_unav_res(&probe, freq_alloc) == 0) /* the pattern does not touch this grant: it cannot decide anything */
+        continue;
+      if (t_recov_mode == 2 && !ry_wait_idle())
+        break;
+      if (t_recov_mode != 2 && (ry_backlog() > 0 || dec_now_ns() - t_dec_t0_ns > RETRY_BUDGET_NS))
+        break;
+      fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = original;
+      if (add) {
+        cfg.csiRsForRateMatching[cfg.numCsiRsForRateMatching++] = *pat;
+      } else {
+        for (int j = k - n_held; j + 1 < cfg.numCsiRsForRateMatching; j++)
+          cfg.csiRsForRateMatching[j] = cfg.csiRsForRateMatching[j + 1];
+        cfg.numCsiRsForRateMatching--;
+      }
+      if (!arb_ran) {
+        arb_ran = true;
+        nr_slot_fep_fo_override_hz = t_last_fep_fo; /* the same frequency compensation as the first body */
+        t_quiet = true;                             /* a trial must not teach the shared per-RNTI / layout state */
+      }
+      t_decode_tdra_attempt = 9 + 64 * (110 + k);
+      st = passive_decode_body(ue, proc, &cfg, freq_alloc, grant, rxdataF, out);
+      if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
+      arb_recovered = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+      if (arb_recovered) {
+        nr_csi_arb_note(pat, add ? NR_CSI_ARB_WITH_WINS : NR_CSI_ARB_WITHOUT_WINS);
+        *dlsch_config = cfg;
+        out->config_recovered = true;
+      } else if (add) {
+        nr_csi_arb_note(pat, NR_CSI_ARB_NO_EVIDENCE);
+      }
+    }
+    if (arb_ran) {
+      nr_slot_fep_fo_override_hz = saved_fo_override;
+      t_quiet = saved_quiet;
+      t_decode_tdra_attempt = 0;
+      if (arb_recovered)
+        return st;
+      *dlsch_config = original;
+      *out = out_plain;
+      st = st_plain;
+    }
   }
   const bool try_start = dlsch_config->start_symbol <= 1
                          && dlsch_config->start_symbol + dlsch_config->number_symbols == 14;

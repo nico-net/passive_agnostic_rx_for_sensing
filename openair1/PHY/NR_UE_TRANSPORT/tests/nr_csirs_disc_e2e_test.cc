@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc_synth.h"
 #include "nr_csirs_disc_gate_internal.h"
+#include "nr_csirs_rm_arbiter.h"
 #include <random>
 #include <complex>
 #include <cstring>
@@ -34,6 +35,9 @@ int nr_csirs_blind_rt_test_confirm_ring(const nr_csirs_disc_ring_t *,
                                         uint32_t *);
 int nr_csirs_blind_rt_test_candidate_count(void);
 int nr_csirs_blind_rt_test_zp_only_count(void);
+int nr_csirs_blind_rt_rate_match_all(uint32_t, fapi_nr_dl_config_csirs_pdu_rel15_t *, int);
+int nr_csirs_full_rate_match(uint32_t, uint16_t, uint16_t, fapi_nr_dl_config_csirs_pdu_rel15_t *, int);
+int nr_csirs_full_arbiter_held(const fapi_nr_dl_config_dlsch_pdu_rel15_t *, uint32_t, fapi_nr_dl_config_csirs_pdu_rel15_t *, int);
 }
 
 namespace {
@@ -365,6 +369,35 @@ TEST(CsirsDiscE2E, BlindZpHolesProposedConfirmedAndExported)
   EXPECT_EQ(period[0] % 40, 0);
   EXPECT_EQ(offset[0], 4);
   EXPECT_EQ(nr_csirs_blind_rt_test_candidate_count() - nr_csirs_blind_rt_test_zp_only_count(), 0) << "no NZP candidate";
+  /* CRC arbiter: the hole-only ZP is exported (rate_match_all) and flagged, but held out of the PDSCH rate matching of every population until decodes prove it */
+  const uint32_t slot = 4 + 40 * 31;
+  fapi_nr_dl_config_csirs_pdu_rel15_t rm[8] = {};
+  ASSERT_EQ(nr_csirs_blind_rt_rate_match_all(slot, rm, 8), 1);
+  EXPECT_EQ(rm[0].csi_type, 2);
+  EXPECT_NE(rm[0].measurement_bitmap & NR_CSIRS_PDU_HOLE_ONLY, 0);
+  EXPECT_EQ(nr_csirs_blind_rt_rate_match_all(slot + 1, rm, 8), 0) << "not on its lattice";
+  nr_csi_arb_reset();
+  for (uint16_t pop : {2, 415}) {
+    fapi_nr_dl_config_csirs_pdu_rel15_t sel[8] = {}, held[8] = {};
+    fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = {};
+    cfg.dlDmrsScramblingId = pop;
+    cfg.dlDmrsSymbPos = (1u << 2) | (1u << 11);
+    EXPECT_EQ(nr_csirs_full_rate_match(slot, pop, cfg.dlDmrsSymbPos, sel, 8), 0) << "undecided: not applied, pop " << pop;
+    ASSERT_EQ(nr_csirs_full_arbiter_held(&cfg, slot, held, 8), 1) << "undecided: offered as a decode trial, pop " << pop;
+    EXPECT_EQ(held[0].symb_l0, 8);
+  }
+  nr_csi_arb_note(&rm[0], NR_CSI_ARB_WITH_WINS);
+  nr_csi_arb_note(&rm[0], NR_CSI_ARB_WITH_WINS);
+  {
+    fapi_nr_dl_config_csirs_pdu_rel15_t sel[8] = {}, held[8] = {};
+    fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = {};
+    cfg.dlDmrsScramblingId = 415;
+    cfg.dlDmrsSymbPos = (1u << 2) | (1u << 11);
+    ASSERT_EQ(nr_csirs_full_rate_match(slot, 415, cfg.dlDmrsSymbPos, sel, 8), 1) << "KEEP: applied, whatever the population";
+    EXPECT_EQ(sel[0].symb_l0, 8);
+    EXPECT_EQ(nr_csirs_full_arbiter_held(&cfg, slot, held, 8), 0);
+  }
+  nr_csi_arb_reset();
   nr_csirs_blind_rt_test_discovery_reset();
 }
 

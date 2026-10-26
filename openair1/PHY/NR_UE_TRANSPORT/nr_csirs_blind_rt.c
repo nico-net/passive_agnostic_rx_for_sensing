@@ -13,6 +13,7 @@
 /*! \file openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c */
 
 #include "nr_csirs_blind_rt.h"
+#include "nr_csirs_rm_arbiter.h"
 #include "nr_pdsch_passive_decode.h" /* CSIFULLAB */
 /* Weak: unit-test targets link this file without the acquisition state. */
 extern void nr_passive_acq_note_carrier_from_rs(const char *evidence) __attribute__((weak));
@@ -559,6 +560,7 @@ void nr_csirs_blind_rt_discovery_reset(void)
     memset(g_disc_strength, 0, sizeof(g_disc_strength));
     memset(g_disc_scored_slot, 0xff, sizeof(g_disc_scored_slot));
     memset(g_disc_zp_only, 0, sizeof(g_disc_zp_only));
+    nr_csi_arb_reset();
     discovery_empty_state(&g_st);
     g_st.discovery_bank=true;
     discovery_empty_state(&g_zp);
@@ -1353,6 +1355,11 @@ static void fill_pdu(const nr_csirs_candidate_t *c, uint8_t csi_type, fapi_nr_dl
   out->cdm_type = c->cdm_type;
   out->freq_density = c->freq_density;
   out->scramb_id = c->scramb_id;
+  /* A ZP found only as holes (no sequence, no NZP partner) is marked for the CRC arbiter (nr_csirs_rm_arbiter.h); the candidate arrays are parallel, so the index is the pointer offset. */
+  if (csi_type == 2 && c >= g_st.cand && c < g_st.cand + g_st.n && g_disc_zp_only[c - g_st.cand])
+    out->measurement_bitmap |= NR_CSIRS_PDU_HOLE_ONLY;
+  else if (csi_type == 2 && c >= g_zp.cand && c < g_zp.cand + g_zp.n && g_disc_zp_only[c - g_zp.cand])
+    out->measurement_bitmap |= NR_CSIRS_PDU_HOLE_ONLY;
 }
 /* nr_csirs_blind_rt_observed_nzp: returns, in *out, one confirmed NZP CSI-RS resource occurring on this slot (for the observer and the rate matcher), if any.
  *   Discovery mode reads the exported set; otherwise it uses the search state under a trylock (no wait).
@@ -1548,7 +1555,8 @@ static int full_add_block(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, int n
  * theirs) is removed. I.e. each cell rate-matches its own TRS and the co-channel neighbour's TRS in its RB block
  * (ZP protection), and transmits data on the other blocks' TRS REs. Everything else in the slot -> erase list. */
 static void full_select(uint32_t slot, uint16_t pop, uint16_t dmrs_mask, fapi_nr_dl_config_csirs_pdu_rel15_t *sel, int *nsel,
-                        int max_sel, fapi_nr_dl_config_csirs_pdu_rel15_t *er, int *ner, int max_er)
+                        int max_sel, fapi_nr_dl_config_csirs_pdu_rel15_t *er, int *ner, int max_er,
+                        fapi_nr_dl_config_csirs_pdu_rel15_t *held, int *nheld, int max_held)
 {
   fapi_nr_dl_config_csirs_pdu_rel15_t conf[2 * NR_CSIRS_BLIND_DISC_MAX_CONF], all[2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
   const int n_conf = full_all_confirmed(conf, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
@@ -1557,10 +1565,22 @@ static void full_select(uint32_t slot, uint16_t pop, uint16_t dmrs_mask, fapi_nr
   n_all = full_add_block(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
   *nsel = 0;
   if (ner) *ner = 0;
+  if (nheld) *nheld = 0;
   for (int i = 0; i < n_all; i++) {
     if (csirs_full_dmrs_clash(&all[i], dmrs_mask))
       continue;
-    bool in = all[i].scramb_id == pop;
+    /* A hole-only ZP has no scrambling identity to associate with a population (the pattern is the evidence): the CRC arbiter decides per pattern, for every population.
+     * Whatever the arbiter does not (yet) apply is offered to the decode retry as a held-out trial, never as an erasure. */
+    const bool hole_only = all[i].csi_type == 2 && (all[i].measurement_bitmap & NR_CSIRS_PDU_HOLE_ONLY);
+    if (!nr_csi_arb_applies(&all[i])) {
+      bool dup = false;
+      for (int j = 0; held && nheld && j < *nheld && !dup; j++)
+        dup = csirs_full_same_geometry(&held[j], &all[i]);
+      if (held && nheld && !dup && *nheld < max_held && nr_csi_arb_trial_add(&all[i]))
+        held[(*nheld)++] = all[i];
+      continue;
+    }
+    bool in = hole_only || all[i].scramb_id == pop;
     for (int j = 0; j < n_conf && !in; j++)
       in = conf[j].scramb_id == pop && conf[j].csi_type != 2 && full_rb_overlap_half(&conf[j], &all[i]);
     fapi_nr_dl_config_csirs_pdu_rel15_t *list = in ? sel : er;
@@ -1579,7 +1599,7 @@ int nr_csirs_full_rate_match(uint32_t pdsch_absolute_slot, uint16_t population_i
                              fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
 {
   int n = 0;
-  full_select(pdsch_absolute_slot, population_id, dmrs_mask, out, &n, max, NULL, NULL, 0);
+  full_select(pdsch_absolute_slot, population_id, dmrs_mask, out, &n, max, NULL, NULL, 0, NULL, NULL, 0);
   return n;
 }
 /* The CRC-validated rate-match phases (ISAC_CSIRS_FULL_VALID) were off and are gone; the hook stays for its caller. */
@@ -1588,6 +1608,19 @@ void nr_csirs_full_validate(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, c
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
 {
   (void)ue; (void)proc; (void)cfg; (void)fa; (void)grant; (void)rxdataF;
+}
+
+/* nr_csirs_full_arbiter_held: the patterns of this slot that nr_csirs_full_apply() left out of cfg because the CRC arbiter has no proof for them yet (hole-only ZP, verdict undecided).
+ *   Pure recomputation (thread-safe, the retry may run on another thread than the apply). Caller: the PDSCH decode retry (trial "with the pattern"). */
+int nr_csirs_full_arbiter_held(const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, uint32_t pdsch_absolute_slot,
+                               fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
+{
+  fapi_nr_dl_config_csirs_pdu_rel15_t sel[NFAPI_MAX_NUM_CSI_RATEMATCH];
+  int n_sel = 0, n_held = 0;
+  if (!cfg || !out || max <= 0)
+    return 0;
+  full_select(pdsch_absolute_slot, cfg->dlDmrsScramblingId, cfg->dlDmrsSymbPos, sel, &n_sel, NFAPI_MAX_NUM_CSI_RATEMATCH, NULL, NULL, 0, out, &n_held, max);
+  return n_held;
 }
 
 void nr_csirs_full_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, uint32_t pdsch_absolute_slot)
@@ -1599,7 +1632,7 @@ void nr_csirs_full_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, uint32_t pdsc
   fapi_nr_dl_config_csirs_pdu_rel15_t erase[NFAPI_MAX_NUM_CSI_RATEMATCH];
   int n_sel = 0, n_erase = 0;
   full_select(pdsch_absolute_slot, cfg->dlDmrsScramblingId, cfg->dlDmrsSymbPos, cfg->csiRsForRateMatching, &n_sel,
-              NFAPI_MAX_NUM_CSI_RATEMATCH, erase, &n_erase, NFAPI_MAX_NUM_CSI_RATEMATCH);
+              NFAPI_MAX_NUM_CSI_RATEMATCH, erase, &n_erase, NFAPI_MAX_NUM_CSI_RATEMATCH, NULL, NULL, 0);
   cfg->numCsiRsForRateMatching = (uint8_t)n_sel;
   if (nr_dlsch_csi_erase_set) /* weak: fixtures link this file without the demodulator */
     nr_dlsch_csi_erase_set(erase, n_erase);

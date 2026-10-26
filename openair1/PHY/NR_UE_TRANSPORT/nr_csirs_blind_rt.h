@@ -74,6 +74,9 @@ void nr_csirs_blind_rt_zp_grant_evidence(uint32_t pdsch_absolute_slot, const fap
  *  @p pdsch_absolute_slot, deduplicated, without DM-RS-symbol clashes. Returns the count written (<= max). */
 int nr_csirs_full_rate_match(uint32_t pdsch_absolute_slot, uint16_t population_id, uint16_t dmrs_mask,
                              fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max);
+/** Patterns of this slot kept out of nr_csirs_full_apply() until the CRC arbiter has proof for them (nr_csirs_rm_arbiter.h): candidates for a decode "with the pattern" trial. */
+int nr_csirs_full_arbiter_held(const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, uint32_t pdsch_absolute_slot,
+                               fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max);
 /** CSI-FULL: replace @p cfg's CSI-RS rate-matching list with nr_csirs_full_rate_match() for its own DM-RS
  *  scrambling ID. */
 void nr_csirs_full_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, uint32_t pdsch_absolute_slot);
