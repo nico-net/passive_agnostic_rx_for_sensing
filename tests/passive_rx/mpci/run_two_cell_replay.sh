@@ -8,7 +8,7 @@
 # Host rules (CLAUDE.md, A8 brief): never while a receiver runs or the heavy lock is held; shared td_measure lock; nice 10; SIGINT only.
 # NOT RUN in A8 (operator stop 2026-10-26): this script is the procedure for the orchestrator.
 set -euo pipefail
-ROOT=$(cd "$(dirname "$0")/../.." && pwd); O=/home/nicola/NICOLA/wt/rr-orchestration
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd); O=/home/nicola/NICOLA/wt/rr-orchestration
 name=${1:-two_cell}
 B=${B:-$ROOT/cmake_targets/ran_build/build}; CFG=${CFG:-$O/ota/sd_t26ul.cfg}; ENVFILE=${ENVFILE:-$O/ota/FROZEN_20261018.env}
 SPEED=${SPEED:-0.25}; DUR=${DUR:-240}
