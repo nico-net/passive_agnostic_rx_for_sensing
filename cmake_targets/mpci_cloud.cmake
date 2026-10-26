@@ -212,5 +212,18 @@ if(ENABLE_TESTS)
       target_link_libraries(${t} PRIVATE LOG)
     endif()
   endforeach()
+  # Two-cell interleave test (cells X and Y alternately, one re-binding thread and two bound threads, each equal to its solo run):
+  # persistence/accept gate/bootstrap (accept sets), CORESET bank, length sweep, SIB1 prior, traffic probe grants, cell DCI length hint.
+  set(A4_SRC ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
+  add_executable(test_mpci_a4_interleave
+    ${A4_SRC}/tests/nr_mpci_a4_interleave_test.cc
+    ${A4_SRC}/tests/nr_mpci_a4_cell_len_shim.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/refsig.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/nr_dmrs_rx.c
+    ${CMAKE_SOURCE_DIR}/common/utils/ds/hashtable.c)
+  target_include_directories(test_mpci_a4_interleave PRIVATE ${A4_SRC} ${CMAKE_SOURCE_DIR}/common/utils/ds)
+  target_link_libraries(test_mpci_a4_interleave PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs LOG GTest::gtest pthread m)
+  add_dependencies(tests test_mpci_a4_interleave)
+  add_test(NAME test_mpci_a4_interleave COMMAND test_mpci_a4_interleave)
 endif()
 # ---- end A4 ----
