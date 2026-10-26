@@ -398,21 +398,13 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csir
   return at;
 }
 
+static bool zp_variant_lattice(unsigned period, unsigned offset, int k, unsigned *per, unsigned *ph);
+
 /* nr_csirs_blind_rt_add_discovered_zp: admits a ZERO-POWER hypothesis proposed by the blind hole detector (nr_csirs_disc_zp.c) into the search population and returns its candidate index (-1 when refused).
  *   The candidate carries no scrambling identity: it is scored for zero power only (the ZP bank confirms it, infers its period and revokes it on contradiction) and never as NZP. The detector's lattice
  *   (h->period, h->offset) seeds the first scoring visits. A pattern that is already a candidate (NZP or ZP, same row, symbols, subcarriers and density on overlapping RBs) is kept; a ZP-only one is widened
  *   when the new extent is wider. At most NR_CSIRS_BLIND_ZP_ONLY_MAX such candidates. Caller: nr_csirs_disc.c (zp_step).
  */
-static uint16_t discovery_symbols(const nr_csirs_candidate_t *c); /* nr_csirs_disc_confirm_internal.h, included below */
-static bool zp_variant_lattice(unsigned period, unsigned offset, int k, unsigned *per, unsigned *ph);
-/* lattices_meet: true when the slot lattices (p1,o1) and (p2,o2) share a slot (offsets agree modulo gcd(p1,p2)). */
-static bool nr_csirs_blind_lattices_meet(unsigned p1, unsigned o1, unsigned p2, unsigned o2)
-{
-  unsigned a = p1, b = p2;
-  while (b) { const unsigned t = a % b; a = b; b = t; }
-  return a && (o1 % a) == (o2 % a);
-}
-
 int nr_csirs_blind_rt_add_discovered_zp(const nr_csirs_disc_hyp_t *h)
 {
   if (!h)
@@ -449,14 +441,6 @@ int nr_csirs_blind_rt_add_discovered_zp(const nr_csirs_disc_hyp_t *h)
   for (int i = 0; i < g_st.n; ++i) {
     const nr_csirs_candidate_t *o = &g_st.cand[i];
     n_zp_only += g_disc_zp_only[i];
-    /* The data REs beside a boosted NZP-CSI-RS pilot read dark against it; a hole pattern that lies on an NZP candidate's symbols, RBs and slots is that
-     * artefact (or a ZP the NZP candidate's own bank already covers), not a resource. */
-    if (!g_disc_zp_only[i] && (discovery_symbols(o) & discovery_symbols(&c)) && o->start_rb < c.start_rb + c.nr_of_rbs
-        && c.start_rb < o->start_rb + o->nr_of_rbs && (!g_st.seed_period[i] || nr_csirs_blind_lattices_meet(g_st.seed_period[i], g_st.seed_offset[i], h->period, h->offset)
-            || (g_st.seed_n_off[i] == 2 && nr_csirs_blind_lattices_meet(g_st.seed_period[i], g_st.seed_offset2[i], h->period, h->offset)))) {
-      pthread_mutex_unlock(&g_csirs_state_lock);
-      return -1;
-    }
     const int oe = o->start_rb + o->nr_of_rbs, ce = c.start_rb + c.nr_of_rbs;
     if (o->row == c.row && o->freq_domain == c.freq_domain && o->symb_l0 == c.symb_l0 && o->symb_l1 == c.symb_l1
         && o->cdm_type == c.cdm_type && o->freq_density == c.freq_density && o->start_rb < ce && c.start_rb < oe) {

@@ -3320,6 +3320,13 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_csirs_disc_zp)
   add_test(NAME test_nr_csirs_disc_zp COMMAND ./test_nr_csirs_disc_zp)
 
+  add_executable(test_nr_csirs_zp_replay ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_zp_replay_test.cc
+                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_zp.c)
+  target_include_directories(test_nr_csirs_zp_replay PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_csirs_zp_replay PRIVATE nr_phy_common nr_common UTIL GTest::gtest GTest::gtest_main pthread m)
+  add_dependencies(tests test_nr_csirs_zp_replay)
+  add_test(NAME test_nr_csirs_zp_replay COMMAND ./test_nr_csirs_zp_replay)
+
   add_executable(test_nr_csirs_rm_arbiter ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_rm_arbiter_test.cc
                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arbiter.c)
   target_include_directories(test_nr_csirs_rm_arbiter PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)

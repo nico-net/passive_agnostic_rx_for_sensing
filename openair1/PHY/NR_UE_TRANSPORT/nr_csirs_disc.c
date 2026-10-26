@@ -25,6 +25,7 @@ extern void nr_host_membudget_commit(nr_host_mem_module_t m, size_t bytes, doubl
 #include <pthread.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
@@ -419,6 +420,34 @@ static struct {
   bool off;
 } zp;
 
+/* zp_dump: diagnostic recorder of the blind-ZP feature stream, armed only when ISAC_CSIRS_ZP_DUMP names an output file (nothing is written otherwise; the receiver never reads it back). One record
+ *   per folded slot: u32 abs_slot then the nr_csirs_zp_feat_len() floats of the slot, after a 16-byte header "ZPF1", n_rb, feat_len, reserved. Stops at ZP_DUMP_MAX_BYTES. The offline reader is
+ *   tests/nr_csirs_zp_replay_test.cc, which feeds the same detector, so the detector can be developed on the exact data it saw. */
+#define ZP_DUMP_MAX_BYTES (1536ull << 20)
+static void zp_dump(uint32_t abs_slot, const float *feat, size_t fl, int n_rb)
+{
+  static FILE *f;
+  static bool tried;
+  static uint64_t bytes;
+  if (!tried) {
+    tried = true;
+    const char *path = getenv("ISAC_CSIRS_ZP_DUMP");
+    if (path && path[0] && (f = fopen(path, "wb"))) {
+      const uint32_t hdr[4] = {0x31465a50u /* "PZF1" little endian */, (uint32_t)n_rb, (uint32_t)fl, 0};
+      fwrite(hdr, sizeof(hdr), 1, f);
+      LOG_I(PHY, "SENSING: CSIRS_DISC ZP feature recorder armed: %s\n", path);
+    }
+  }
+  if (!f || bytes + 4 + fl * sizeof(float) > ZP_DUMP_MAX_BYTES)
+    return;
+  fwrite(&abs_slot, 4, 1, f);
+  fwrite(feat, sizeof(float), fl, f);
+  bytes += 4 + fl * sizeof(float);
+  static unsigned cnt;
+  if ((++cnt & 7) == 0)
+    fflush(f);
+}
+
 /* zp_step: one batch of the blind ZP proposer on the pipeline ring: feeds the slots written since the previous batch and, when enough have accumulated, proposes.
  *   reset restarts the statistics (new ring epoch or configuration). Allocation failure or a device ring without the GPU op disables it for the process (the rest of the discovery is unaffected).
  *   Caller: nr_csirs_disc_process() under pipeline_lock. */
@@ -466,8 +495,10 @@ static void zp_step(nr_csirs_disc_ring_t *ring, const nr_csirs_disc_gpu_ops_t *o
     }
     for (int i = 0; i < n; ++i) {
       const int idx = (first + i) % ring->capacity;
-      if (ring->meta[idx].valid)
+      if (ring->meta[idx].valid) {
         nr_csirs_zp_feed(zp.det, ring->meta[idx].abs_slot, zp.buf + i * fl);
+        zp_dump(ring->meta[idx].abs_slot, zp.buf + i * fl, fl, ring->n_rb);
+      }
     }
     w += n;
   }
@@ -505,12 +536,16 @@ static void zp_propose(void)
       } else {
         h = &cover[i];
       }
-      if (!h)
+      if (!h) {
+        if (i < 0)
+          LOG_I(PHY, "SENSING: CSIRS_DISC ZP_HOLES NOROW sym=0x%x sc=0x%x dens=%u rb=%u:%u P/O=%u/%u z=%.1f (no legal row has exactly this pattern) cells[%s]\n", fps[f].sym_mask, fps[f].sc_mask,
+                fps[f].density, fps[f].rb_start, fps[f].n_rb, fps[f].period, fps[f].offset, fps[f].strength, cells);
         continue;
+      }
       const int at = nr_csirs_blind_rt_add_discovered_zp(h);
-      if (at >= 0)
-        LOG_I(PHY, "SENSING: CSIRS_DISC ZP_HOLES %s row=%u fd=%u l0=%u l1=%u dens=%u rb=%u:%u P/O=%u/%u z=%.1f iou=%.2f cells[%s]\n", i < 0 ? "EXACT" : "COVER", h->row, h->freq_domain,
-              h->symb_l0, h->symb_l1, h->density, h->rb_start, h->n_rb, h->period, h->offset, fps[f].strength, h->fit, cells);
+      if (at >= 0 || i < 0)
+        LOG_I(PHY, "SENSING: CSIRS_DISC ZP_HOLES %s row=%u fd=%u l0=%u l1=%u dens=%u rb=%u:%u P/O=%u/%u z=%.1f iou=%.2f admitted=%d cells[%s]\n", i < 0 ? "EXACT" : "COVER", h->row, h->freq_domain,
+              h->symb_l0, h->symb_l1, h->density, h->rb_start, h->n_rb, h->period, h->offset, fps[f].strength, h->fit, at >= 0, cells);
     }
   }
 }
