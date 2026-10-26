@@ -31,7 +31,7 @@ endif()
 if(ENABLE_TESTS)
   add_executable(test_nr_gpu_sm_plan ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS/tests/test_nr_gpu_sm_plan.cpp)
   target_include_directories(test_nr_gpu_sm_plan PRIVATE ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS)
-  target_link_libraries(test_nr_gpu_sm_plan PRIVATE GTest::gtest GTest::gtest_main)
+  target_link_libraries(test_nr_gpu_sm_plan PRIVATE GTest::gtest)
   add_dependencies(tests test_nr_gpu_sm_plan)
   add_test(NAME test_nr_gpu_sm_plan COMMAND test_nr_gpu_sm_plan)
 endif()
@@ -78,7 +78,7 @@ if(ENABLE_TESTS)
   add_library(nr_cell_inventory STATIC ${CMAKE_SOURCE_DIR}/common/utils/nr_cell_inventory.c)
   target_include_directories(nr_cell_inventory PUBLIC ${CMAKE_SOURCE_DIR}/common/utils ${CMAKE_SOURCE_DIR}/openair1)
   add_executable(test_nr_cell_inventory ${CMAKE_SOURCE_DIR}/common/utils/tests/test_nr_cell_inventory.cpp)
-  target_link_libraries(test_nr_cell_inventory PRIVATE nr_cell_inventory GTest::gtest GTest::gtest_main)
+  target_link_libraries(test_nr_cell_inventory PRIVATE nr_cell_inventory GTest::gtest)
   target_compile_definitions(test_nr_cell_inventory PRIVATE MPCI_INV_DIR="${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci/inventory")
   add_dependencies(tests test_nr_cell_inventory)
   add_test(NAME test_nr_cell_inventory COMMAND test_nr_cell_inventory)
@@ -202,3 +202,27 @@ if(ENABLE_TESTS)
   add_test(NAME test_mpci_a3_interleave COMMAND test_mpci_a3_interleave)
 endif()
 # ---- end A3 ----
+
+# ---- A5 ----
+# Per-cell state of the PDSCH solver / async-recovery lane / decode evidence + DL HARQ store / PDSCH queue (nr_cell.h conversion).
+# The existing solver and recovery tests compile the converted sources and now need LOG (nr_cell.c lives there). The interleave test runs
+# workload X on one cell and a different Y on another (one re-binding thread, two bound threads) and compares each with its solo run; it links
+# the receiver libraries (like nr_dlsim) because the decode evidence and the HARQ store live in nr_pdsch_passive_decode.c.
+if(ENABLE_TESTS)
+  foreach(t test_nr_pdsch_solver test_nr_pdsch_recovery)
+    if(TARGET ${t})
+      target_link_libraries(${t} PRIVATE LOG)
+    endif()
+  endforeach()
+  add_executable(test_mpci_a5_interleave ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/tests/nr_mpci_a5_interleave_test.cc
+                                       ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/tests/nr_mpci_a5_stubs.c)
+  target_include_directories(test_mpci_a5_interleave PRIVATE ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_mpci_a5_interleave PRIVATE
+    -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE PHY_NR_PASSIVE_UL NR_UE_ISAC nr_pdcch_blind_monitor SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
+    m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common NR_L2_UE GTest::gtest)
+  target_include_directories(test_mpci_a5_interleave PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/openair1 ${CMAKE_SOURCE_DIR}/executables)
+  target_link_libraries(test_mpci_a5_interleave PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  add_dependencies(tests test_mpci_a5_interleave)
+  add_test(NAME test_mpci_a5_interleave COMMAND test_mpci_a5_interleave)
+endif()
+# ---- end A5 ----

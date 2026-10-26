@@ -49,6 +49,7 @@ GLOBS = [
     "openair1/PHY/NR_UE_TRANSPORT/dci_nr.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe*.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c",
+    "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_*.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_gpu_*.c",
     "openair1/PHY/NR_UE_TRANSPORT/*.cu",

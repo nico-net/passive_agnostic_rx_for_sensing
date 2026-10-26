@@ -1261,404 +1261,427 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	50	ul_stats_fn	file_static
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	51	ul_cpu_dec	file_static	nrLDPC_coding_decoder_t *	UNCLASSIFIED	G3	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	100	tls::t	tls	tls_t	TLS	G3	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c	164	prep_segment_fast::k0	func_static	const uint8_t[2][4]	CONST	G3	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	126	kPdtimName	file_static	const char *const[PDTIM_N]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	127	g_pdtim_ns	file_static	uint64_t[PDTIM_N]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	128	g_pdtim_n	file_static	uint64_t[PDTIM_N]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	129	g_pdtim_max	file_static	uint64_t[PDTIM_N]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	130	g_pdtim_ss	file_static	double[PDTIM_N]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	131	g_pdtim_calls	file_static	uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	132	g_pdtim_cpu_ns	file_static	uint64_t[PDTIM_N]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	135	t_gp_path_side	tls	int	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	138	t_pdtim_cpu0	tls	uint64_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	139	g_pdtim_on	file_static	_Atomic int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	168	g_pdtim_hist	file_static	_Atomic uint32_t[PDTIM_N + 1][PDTIM_HB]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	169	g_pdtim_ldpc_cb	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	169	g_pdtim_ldpc_tb	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	170	t_pdtim_sum	tls	uint64_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	170	t_pdtim_sum_n	tls	uint64_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	180	kPdtimCls	file_static	const char *const[PDTIM_NCLS]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	181	g_cls_hist	file_static	_Atomic uint32_t[PDTIM_NCLS][PDTIM_HB]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	182	g_cls_gt20	file_static	_Atomic uint64_t[PDTIM_NCLS][PDTIM_NCLS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	182	g_cls_gt5	file_static	_Atomic uint64_t[PDTIM_NCLS][PDTIM_NCLS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	182	g_cls_max	file_static	_Atomic uint64_t[PDTIM_NCLS][PDTIM_NCLS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	182	g_cls_ns	file_static	_Atomic uint64_t[PDTIM_NCLS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	183	g_cls_ns1	file_static	_Atomic uint64_t[PDTIM_NCLS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	183	g_cls_ns20	file_static	_Atomic uint64_t[PDTIM_NCLS][PDTIM_NCLS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	183	g_cls_ns5	file_static	_Atomic uint64_t[PDTIM_NCLS][PDTIM_NCLS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	184	t_pdtim_body	tls	unsigned	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	187	t_dec_first_ns	tls	uint64_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	188	t_dec_body_ns	tls	uint64_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	188	t_dec_stage_ns	tls	uint64_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	188	t_dec_t0_ns	tls	uint64_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	197	t_pdtim_stage_cpu_us	tls	uint32_t[PDTIM_N][PDTIM_N]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	197	t_pdtim_stage_us	tls	uint32_t[PDTIM_N]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	198	g_pdtim_slow_left	file_static	_Atomic int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	200	g_cls_stg	file_static	_Atomic uint64_t[PDTIM_NCLS][PDTIM_N][4]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	206	toFree	tls	fourDimArray_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	206	toFree2	tls	fourDimArray_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	206	toFree3	tls	fourDimArray_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	206	toFree4	tls	fourDimArray_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	206	toFree5	tls	fourDimArray_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	207	llr_tls	tls	int16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	208	llr_cap_tls	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	209	bufs_pinned	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	255	t_seg_virt	tls	c16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	256	t_seg_virt_cap	tls	size_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	486	g_parmset	file_static	parmset_t[PARMSET_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	487	g_parmset_n	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	488	g_parmset_other	file_static	uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	489	g_parmset_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	582	g_llr_n	file_static	_Atomic uint64_t[2]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	583	g_llr_absum	file_static	_Atomic uint64_t[2]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	584	g_llr_zero	file_static	_Atomic uint64_t[2]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	585	g_llr_sat	file_static	_Atomic uint64_t[2]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	592	g_llr_clip8	file_static	_Atomic uint64_t[2]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	606	g_shape_n	file_static	_Atomic uint64_t[3]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	607	g_shape_tbs	file_static	_Atomic uint64_t[3]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	608	g_shape_rb	file_static	_Atomic uint64_t[3]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	619	g_rbhist	file_static	_Atomic uint64_t[3][NR_PDSCH_RBHIST_BINS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	622	g_mcshist	file_static	_Atomic uint64_t[2][3][32]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	623	g_mcs_rb	file_static	_Atomic uint64_t[32][32]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	623	g_mcs_segs	file_static	_Atomic uint64_t[32]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	623	g_mcs_segs_ok	file_static	_Atomic uint64_t[32][32]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	623	g_mcs_tbs	file_static	_Atomic uint64_t[32][32]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	625	g_hq_busy_skip	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	625	g_hq_first	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	625	g_hq_retx_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	625	g_hq_retx_try	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	625	g_hq_tbs_override	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	626	g_hqb_evict	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	626	g_hqb_nospace	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	633	g_harqc_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	634	g_dl_harq_init	file_static	nr_harq_init_tx_table_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	635	g_ptrs_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	636	g_lbrm_nl	file_static	_Atomic int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	676	g_rnti_dec	file_static	rnti_dec_t[RNTI_DEC_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	677	g_rnti_dec_clock	file_static	uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	682	g_mcs_tbl_pass	file_static	_Atomic uint32_t[3]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	738	rnti_dec_find::s_evict_logs	func_static	_Atomic int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	798	g_data_id_walks	file_static	_Atomic int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	836	nr_pdsch_passive_data_id_feed::s_pend_cand	func_static	uint32_t[65536]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	911	g_dl_scr_link	file_static	nr_scr_link_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	915	g_ded_fails_since_ok	file_static	_Atomic uint32_t[65536]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	924	g_ded_ever_ok	file_static	_Atomic uint8_t[65536]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	953	g_rbmap	file_static	_Atomic uint32_t[NR_RBMAP_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	954	g_rbmap_ok	file_static	_Atomic uint32_t[NR_RBMAP_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	955	g_rbmap_grants	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	956	t_seg_ok_last	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	960	t_cb_ok	tls	uint16_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	960	t_cb_total	tls	uint16_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	960	t_cb_tried	tls	uint16_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	963	t_ldpc_it_cap	tls	uint8_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	963	t_ldpc_it_max	tls	uint8_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	964	t_ldpc_it_sum	tls	uint16_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	968	t_decoder_used_last	tls	uint8_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	971	t_tb_force_cpu	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	972	g_tb_cpu_dec	file_static	nrLDPC_coding_decoder_t *	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	973	g_tb_cpu_once	file_static	pthread_once_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	990	g_ldpc_tb_dec	file_static	_Atomic uint64_t[3]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	996	t_last_sk	tls	int	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	997	t_last_data_bits	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	997	t_last_llr_have	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	998	g_shape_rv	file_static	_Atomic uint64_t[3]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	999	g_shape_G	file_static	_Atomic uint64_t[3]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1006	g_shape_K	file_static	_Atomic uint64_t[3]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1007	g_shape_F	file_static	_Atomic uint64_t[3]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1008	g_shape_C	file_static	_Atomic uint64_t[3]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1009	g_shape_Z	file_static	_Atomic uint64_t[3]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1015	g_nsym	file_static	_Atomic uint64_t[3][2]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1018	t_seg_C	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1018	t_seg_F	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1018	t_seg_K	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1018	t_seg_Z	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1023	t_seg_BG	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1023	t_seg_E	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1023	t_seg_R	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1023	t_seg_lbrm	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1024	t_decode_tdra_attempt	tls	int	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1027	g_llr_sgnsum	file_static	_Atomic int64_t[2]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1028	g_llr_pos	file_static	_Atomic uint64_t[2]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1039	g_llr_posbit	file_static	_Atomic uint64_t[2][2]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1040	g_llr_nbit	file_static	_Atomic uint64_t[2][2]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1041	g_llr_tb	file_static	_Atomic uint64_t[2]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1043	g_ldpc_seg_fail	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1044	g_ldpc_tb_fail	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1045	g_ldpc_zero_tb	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1046	g_ldpc_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1054	g_chest_hit	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1054	g_chest_miss	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1054	g_fep_hit	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1054	g_fep_miss	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1055	g_gpu_cpu_jobs	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1055	g_gpu_llr_jobs	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1056	g_lbrm_ok	file_static	_Atomic uint64_t[5][5]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1056	g_lbrm_try	file_static	_Atomic uint64_t[5]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1057	g_llr_norm_shift	file_static	_Atomic uint64_t[9]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1058	g_rv_census	file_static	_Atomic uint64_t[2][4]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1059	g_ldpc_iface_err	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1060	g_seg_ok_sum	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1061	g_seg_tot_sum	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1072	g_segidx_tot	file_static	_Atomic uint64_t[NR_PDSCH_SEGIDX_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1073	g_segidx_fail	file_static	_Atomic uint64_t[NR_PDSCH_SEGIDX_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1078	g_segidxc_tot	file_static	_Atomic uint64_t[NR_PDSCH_CBUCKETS][NR_PDSCH_SEGIDX_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1079	g_segidxc_fail	file_static	_Atomic uint64_t[NR_PDSCH_CBUCKETS][NR_PDSCH_SEGIDX_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1092	g_pipe_n	file_static	_Atomic uint64_t[2]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1093	g_pipe_sum	file_static	_Atomic uint64_t[2][PIPE_N_FIELDS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1094	kPipeName	file_static	const char *const[PIPE_N_FIELDS]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1148	nr_pdsch_passive_ldpc_stats_dump::kNm	func_static	const char *const[3]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1300	nr_pdsch_passive_ldpc_stats_dump::kCB	func_static	const char *const[NR_PDSCH_CBUCKETS]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1328	g_harq	tls	passive_harq_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1402	g_harqc	file_static	harqc_entry_t[NR_HARQC_N]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1406	g_harqc_clock	file_static	uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1408	g_hqb_pool	file_static	nr_hq_pool_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1450	t_hq	tls	struct {}	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1451	t_hq_d	tls	int16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1452	t_csi_prb_map	tls	uint16_t[NR_PRB_SET_MAX]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1464	t_probe_first_seg	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1465	t_probe_seg_ok	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1471	t_last_llr	tls	const int16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1472	t_last_G	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1473	t_last_fep_fo	tls	double	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1477	t_recov_mode	tls	int	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1478	t_recov_deferred	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1483	t_owned_iq	tls	c16_t **	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1484	t_owned_slot	tls	int	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1485	t_fep_done_ns	tls	uint64_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1507	t_llr_ovr	tls	const int16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1508	t_llr_ovr_n	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1520	t_gw	tls	nr_td_grantwork_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1521	t_gw_capture	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1522	t_gw_probe_ok	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1523	t_gw_owner	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1524	t_gw_sig	tls	uint64_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1525	t_gw_ready	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1525	t_gw_used	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1528	t_quiet	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1529	t_last_hq_retx	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1639	t_hq_clear	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1640	t_hq_A	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1910	harq_retx_decide::s_rv0_retx_seen	func_static	_Atomic uint32_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2027	t_share	tls	nr_pdsch_slot_share_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2028	t_fep_cache	tls	struct {}	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2038	t_chest_cache	tls	struct {}	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2175	t_gpp	tls	nr_gpu_pass_dl_out_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2178	t_gp_sfo_q	tls	int64_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2180	t_gp_shadow	tls	uint8_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2182	t_gp_fhash	tls	uint64_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2183	t_gp_fok	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2184	t_gp_sbad	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2185	t_gp_claim_tried	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2383	passive_decode_body_core::c_	func_static	_Atomic unsigned long	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2486	passive_decode_body_core::count	func_static	_Atomic unsigned long	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2785	passive_decode_body_core::fct	func_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2819	passive_decode_body_core::gp_no_ssb	func_static	const nr_ssb_rm_mask_t	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3214	passive_decode_body_core::seg_h	tls	c16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3215	passive_decode_body_core::seg_h_cap	tls	size_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3382	passive_decode_body_core::s_n	func_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3383	passive_decode_body_core::s_hz	func_static	double	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3383	passive_decode_body_core::s_sum	func_static	double	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3576	passive_decode_body_core::no_ssb	func_static	const nr_ssb_rm_mask_t	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3825	passive_decode_body_core::r2w_diag	func_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3880	passive_decode_body_core::alts	func_static	const int[3]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4142	t_pdcch_rm_crb	tls	uint8_t[275]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4193	t_stg	tls	struct {}	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4200	stg_snapshot::map	func_static	const int[4]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4272	g_ry_chains	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4272	g_ry_gated	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4272	g_ry_ok	file_static	_Atomic uint64_t[RY_ARMS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4272	g_ry_seen	file_static	_Atomic uint64_t[RY_ARMS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4272	g_ry_try	file_static	_Atomic uint64_t[RY_ARMS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4272	g_ry_yields	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4721	gw_cb0_params::alts	func_static	const int[3]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4863	g_cb0_ldpc	file_static	LDPC_decoderfunc_t *	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4864	g_cb0_ldpc_once	file_static	pthread_once_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4894	nr_pdsch_passive_gw_cb_decode_iter::blk	tls	uint8_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	120	g_owned_iq	file_static	c16_t *[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS][NB_ANTENNAS_RX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	121	g_latency	file_static	_Atomic uint64_t[NR_PDSCH_LAT_STAGES][NR_PDSCH_LAT_BINS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	122	g_drop_reason	file_static	_Atomic uint64_t[NR_PDSCH_DROP_REASONS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	135	g_slot_arr_ns	file_static	_Atomic uint64_t[128]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	136	g_slot_arr_tag	file_static	_Atomic long[128]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	174	g_ring	file_static	nr_pdsch_passive_job_t[NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	175	g_ring_ns	file_static	uint64_t[NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	176	g_depth	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	177	g_head	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	178	g_tail	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	179	g_count	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	180	g_real_n	file_static	_Atomic int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	183	g_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	184	g_cv	file_static	pthread_cond_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	185	g_idle	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	187	g_spin_pred	file_static	nr_spin_pred_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	190	g_queued	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	191	g_slot_groups	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	208	g_scan_cache	file_static	dmrs_scan_slot_t[32]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	209	g_scan_last_abs	file_static	int64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	210	g_pool_n	file_static	uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	210	g_pool_us	file_static	uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	210	g_scan_hits	file_static	uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	210	g_scan_n	file_static	uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	210	g_scan_us	file_static	uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	211	g_scan_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	232	g_dq	file_static	dscan_job_t[DSCAN_Q]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	233	g_dq_head	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	233	g_dq_n	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	234	g_dq_started	file_static	bool	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	235	g_dq_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	236	g_dq_cv	file_static	pthread_cond_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	237	g_dq_thr	file_static	pthread_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	238	g_dscan_dropped	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	361	g_decoded	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	362	g_cb_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	362	g_cb_total	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	362	g_cb_tried	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	363	g_crc_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	382	g_cs_dmrs	file_static	coreset_dmrs_t[8]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	383	g_cs_dmrs_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	437	g_dl_dmrs_id	file_static	nr_dmrs_id_2stage_t[NR_DL_DMRS_NSCID]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	438	g_dl_dmrs_id_init	file_static	bool[NR_DL_DMRS_NSCID]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	439	g_dl_dmrs_id_lock	file_static	pthread_mutex_t[NR_DL_DMRS_NSCID]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	441	g_dl_rank_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	442	g_rank_low	file_static	uint64_t[4][4]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	442	g_rank_n	file_static	uint64_t[4]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	442	g_rank_sum	file_static	double[4]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	442	g_rank_total	file_static	uint64_t[4]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	443	g_cdm_empty	file_static	uint64_t[4]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	443	g_cdm_sum	file_static	double[4]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	458	g_nl_ok	file_static	_Atomic uint64_t[8]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	459	g_rank_verdict_logged	file_static	_Atomic int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	505	g_rnti_dec	file_static	_Atomic uint32_t[65536]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	505	g_rnti_ok	file_static	_Atomic uint32_t[65536][65536]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	518	g_dropped_full	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	519	g_dropped_narrow	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	520	g_dropped_stale	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	521	g_stale_after_decode	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	526	g_dropped_epoch	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	527	g_max_lag	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	529	g_running	file_static	_Atomic int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	530	g_stop	file_static	_Atomic int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	531	g_nthreads	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	532	g_threads	file_static	pthread_t[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	533	g_ue	file_static	PHY_VARS_NR_UE *	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	540	g_rxdataF	file_static	c16_t *[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	543	g_fep_gen	file_static	uint64_t[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	544	g_rxdataF_gw	file_static	bool	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	549	g_args	file_static	consumer_arg_t[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	564	g_rar_tc	file_static	struct {}[RAR_TC_RING]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	565	g_rar_tc_head	file_static	unsigned	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	566	g_rar_tc_wrap	file_static	uint32_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	567	g_rar_tc_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	723	g_k0_probe_hits	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	723	g_k0_probe_retained	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	723	g_k0_probe_retained_max	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	723	g_k0_probes	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	765	g_bc9_alarm	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	765	g_bc9_cert	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	765	g_bc9_cert_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	765	g_bc9_jobs	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	765	g_bc9_nodci	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	765	g_bc9_nosib	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	765	g_bc9_ok	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	766	g_bc9_cert_ok_k0	file_static	_Atomic uint64_t[5]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	769	g_bc9_cpk	file_static	struct {}[BC9_CPK]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	770	g_bc9_cpk_clock	file_static	uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	771	g_bc9_cpk_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	797	nr_pdsch_passive_bc12_census::sn	func_static	const char *const[]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	798	nr_pdsch_passive_bc12_census::dn	func_static	const char *const[]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	901	g_bc9d_adj_refused	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	901	g_bc9d_adj_removed	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	901	g_bc9d_adj_rows	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	901	g_bc9d_confirms	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	901	g_bc9d_missed	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	901	g_bc9d_repeat	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	901	g_bc9d_tdd	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	901	g_bc9d_tdd_applied	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	907	g_bc9_tdd_cache	file_static	struct {}[BC9_TDD_CACHE]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	908	g_bc9_tdd_cache_lock	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	966	nr_pdsch_passive_bc9_confirm::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1003	nr_pdsch_passive_oracle_inline::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1075	g_cdmrs_q	file_static	nr_bgq_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1078	cdmrs_async_on::on	func_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1137	g_rsnap	file_static	recov_snap_t[RECOV_SNAP_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1138	g_rsnap_free	file_static	int[RECOV_SNAP_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1138	g_rsnap_n	file_static	int[RECOV_SNAP_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1138	g_rsnap_nfree	file_static	int[RECOV_SNAP_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1139	g_rsnap_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1140	g_recov_ok	file_static	bool	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1141	g_recov_nosnap	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1447	nr_pdsch_passive_queue_thread::s_gate_n	func_static	_Atomic uint32_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1465	nr_pdsch_passive_queue_thread::s_oracle_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1490	nr_pdsch_passive_queue_thread::s_probe_tick	func_static	_Atomic uint32_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1491	nr_pdsch_passive_queue_thread::t_probe	tls	c16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1536	nr_pdsch_passive_queue_thread::s_k0_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1596	nr_pdsch_passive_queue_thread::s_left	func_static	_Atomic int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1735	nr_pdsch_passive_queue_thread::s_probe_n	func_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1735	nr_pdsch_passive_queue_thread::s_probe_ok	func_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1815	nr_pdsch_passive_queue_thread::s_dl_scr_confirmed	func_static	bool	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1916	nr_pdsch_passive_queue_thread::s_dl_dmrs_nid	func_static	_Atomic int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2084	t_recov_dec	tls	const nr_pdsch_passive_decode_result_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2085	g_recov_fb	file_static	_Atomic uint64_t[3]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2166	recov_run::rxF	tls	c16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2416	g_pending	file_static	nr_pdsch_passive_job_t[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2417	g_pending_ns	file_static	uint64_t[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2418	g_n_pending	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2422	g_pending_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2423	g_batches	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2423	g_batches_multi	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2479	nr_a2e_ts	tls	uint64_t[9]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2480	nr_a2e_bank	tls	int8_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2480	nr_a2e_kind	tls	int8_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2481	nr_a2e_stg	tls	uint32_t[NR_A2E_STG]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2517	nr_pdsch_passive_queue_enqueue::c_	func_static	_Atomic unsigned long	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2533	g_age_hist	file_static	_Atomic uint64_t[2][NR_PASSIVE_LAG_BINS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2534	g_dropped_probe	file_static	_Atomic uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	15	coverage_entry_t	global	andareadingofthefullstandardspacecanholdthousands)*/typedefstruct{}	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	15	id	global	*countsarekeptperlayout	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	26	kWhy	file_static	const char *const[W_N]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	106	g_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	107	g_r	file_static	solver_rnti_t[SOLVER_RNTIS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	108	g_p	file_static	pending_t[SOLVER_PENDING]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	109	g_token	file_static	uint32_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	119	t_plan_ctx	tls	solver_plan_ctx_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	122	g_key_scr	file_static	struct {}[16]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	123	g_n_key_scr	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	124	g_dci_seq	file_static	uint64_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	125	g_tda_fn	file_static	nr_pdsch_solver_tda_fn	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	126	g_tda_ctx	file_static	void *	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	127	g_st	file_static	nr_pdsch_solver_stats_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	129	g_hq_fn	file_static	nr_pdsch_solver_hq_fn	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	130	g_hq_ctx	file_static	void *	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	132	g_have_prior	file_static	bool	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	133	g_prior_rep	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	134	g_prior_add_pos	file_static	uint8_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	135	g_prior_L_by_tda	file_static	int8_t[16]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	135	g_prior_S_by_tda	file_static	int8_t[16]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	135	g_prior_table	file_static	int8_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	136	g_lcur	file_static	uint32_t[SOLVER_RNTIS][16]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	137	t_ov	file_static	bool	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	138	t_L	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	177	kQR	file_static	const uint16_t[3][32][2]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	187	kQRn	file_static	const int[3]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	212	nr_pdsch_solver_dmrs_mask::pos	func_static	const int8_t[3][3][4]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	228	tables_for::prio	func_static	const uint8_t[3]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	376	rv_next_ok::pos	func_static	const int[4]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	628	pend_new::cur	func_static	uint32_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	638	t_learn_rm	file_static	bool	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	638	t_rm	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	639	t_scr	file_static	int32_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	640	t_comb	file_static	uint8_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	734	kS	file_static	const uint8_t[4]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	837	plan_coverage::adds	func_static	const uint8_t[4][4]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	837	plan_coverage::starts	func_static	const uint8_t[4]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	837	plan_coverage::tables	func_static	const uint8_t[4][3]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	936	plan_known::kE	func_static	const uint8_t[10]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	972	plan_ov_probes::kE	func_static	const uint8_t[10]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1454	nr_pdsch_solver_feedback::s_lost	func_static	_Atomic uint64_t[2]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1707	g_tf_mu	file_static	pthread_mutex_t	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1708	g_tf	file_static	tf_pos_t[TF_NPOS]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1709	g_tf_L	file_static	uint8_t[16][16]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1709	g_tf_S	file_static	uint8_t[16]	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1710	g_tf_init	file_static	int	UNCLASSIFIED	A5	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1710	g_tf_n	file_static	int	UNCLASSIFIED	A5	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	128	kPdtimName	file_static	const char *const[PDTIM_N]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	130	g_pdtim_ns	file_static	g_pdtim_ns_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	133	g_pdtim_n	file_static	g_pdtim_n_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	136	g_pdtim_max	file_static	g_pdtim_max_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	139	g_pdtim_ss	file_static	g_pdtim_ss_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	141	g_pdtim_calls	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	144	g_pdtim_cpu_ns	file_static	g_pdtim_cpu_ns_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	148	t_gp_path_side	tls	int	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	151	t_pdtim_cpu0	tls	uint64_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	152	g_pdtim_on	file_static	_Atomic int	PROCESS	A5	lazily resolved to 1, identical for every cell (profiling switch, no per-cell meaning)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	182	g_pdtim_hist	file_static	g_pdtim_hist_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	184	g_pdtim_ldpc_tb	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	186	g_pdtim_ldpc_cb	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	188	t_pdtim_sum	tls	uint64_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	188	t_pdtim_sum_n	tls	uint64_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	198	kPdtimCls	file_static	const char *const[PDTIM_NCLS]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	200	g_cls_hist	file_static	g_cls_hist_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	203	g_cls_ns	file_static	g_cls_ns_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	206	g_cls_max	file_static	g_cls_max_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	209	g_cls_gt5	file_static	g_cls_gt5_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	212	g_cls_gt20	file_static	g_cls_gt20_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	215	g_cls_ns1	file_static	g_cls_ns1_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	218	g_cls_ns5	file_static	g_cls_ns5_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	221	g_cls_ns20	file_static	g_cls_ns20_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	223	t_pdtim_body	tls	unsigned	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	226	t_dec_first_ns	tls	uint64_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	227	t_dec_body_ns	tls	uint64_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	227	t_dec_stage_ns	tls	uint64_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	227	t_dec_t0_ns	tls	uint64_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	236	t_pdtim_stage_cpu_us	tls	uint32_t[PDTIM_N][PDTIM_N]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	236	t_pdtim_stage_us	tls	uint32_t[PDTIM_N]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	237	g_pdtim_slow_left	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	241	g_cls_stg	file_static	g_cls_stg_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	248	toFree	tls	fourDimArray_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	248	toFree2	tls	fourDimArray_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	248	toFree3	tls	fourDimArray_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	248	toFree4	tls	fourDimArray_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	248	toFree5	tls	fourDimArray_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	249	llr_tls	tls	int16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	250	llr_cap_tls	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	251	bufs_pinned	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	297	t_seg_virt	tls	c16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	298	t_seg_virt_cap	tls	size_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	529	g_parmset	file_static	g_parmset_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	531	g_parmset_n	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	533	g_parmset_other	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	535	g_parmset_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	603	s_pend_cand	file_static	s_pend_cand_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	634	g_llr_n	file_static	g_llr_n_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	637	g_llr_absum	file_static	g_llr_absum_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	640	g_llr_zero	file_static	g_llr_zero_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	643	g_llr_sat	file_static	g_llr_sat_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	652	g_llr_clip8	file_static	g_llr_clip8_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	668	g_shape_n	file_static	g_shape_n_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	671	g_shape_tbs	file_static	g_shape_tbs_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	674	g_shape_rb	file_static	g_shape_rb_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	687	g_rbhist	file_static	g_rbhist_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	692	g_mcshist	file_static	g_mcshist_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	695	g_mcs_segs	file_static	g_mcs_segs_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	698	g_mcs_segs_ok	file_static	g_mcs_segs_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	701	g_mcs_tbs	file_static	g_mcs_tbs_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	704	g_mcs_rb	file_static	g_mcs_rb_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	707	g_hq_retx_try	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	709	g_hq_retx_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	711	g_hq_tbs_override	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	713	g_hq_busy_skip	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	715	g_hq_first	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	717	g_hqb_evict	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	719	g_hqb_nospace	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	727	g_harqc_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	729	g_dl_harq_init	file_static	nr_harq_init_tx_table_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	731	g_ptrs_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	733	g_lbrm_nl	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	775	g_rnti_dec	file_static	g_rnti_dec_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	777	g_rnti_dec_clock	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	784	g_mcs_tbl_pass	file_static	g_mcs_tbl_pass_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	841	rnti_dec_find::s_evict_logs	func_static	_Atomic int	PROCESS	A5	log rate-limit budget (20 lines), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	901	g_data_id_walks	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1014	g_dl_scr_link	file_static	nr_scr_link_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1020	g_ded_fails_since_ok	file_static	g_ded_fails_since_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1031	g_ded_ever_ok	file_static	g_ded_ever_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1062	g_rbmap	file_static	g_rbmap_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1065	g_rbmap_ok	file_static	g_rbmap_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1067	g_rbmap_grants	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1069	t_seg_ok_last	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1073	t_cb_ok	tls	uint16_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1073	t_cb_total	tls	uint16_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1073	t_cb_tried	tls	uint16_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1076	t_ldpc_it_cap	tls	uint8_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1076	t_ldpc_it_max	tls	uint8_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1077	t_ldpc_it_sum	tls	uint16_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1081	t_decoder_used_last	tls	uint8_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1084	t_tb_force_cpu	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1085	g_tb_cpu_dec	file_static	nrLDPC_coding_decoder_t *	PROCESS	A5	CPU TB decoder function pointer loaded once by pthread_once (libldpc.so entry, stateless)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1086	g_tb_cpu_once	file_static	pthread_once_t	PROCESS	A5	pthread_once guarding the process-wide libldpc.so load
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1104	g_ldpc_tb_dec	file_static	g_ldpc_tb_dec_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1111	t_last_sk	tls	int	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1112	t_last_data_bits	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1112	t_last_llr_have	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1114	g_shape_rv	file_static	g_shape_rv_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1117	g_shape_G	file_static	g_shape_G_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1126	g_shape_K	file_static	g_shape_K_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1129	g_shape_F	file_static	g_shape_F_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1132	g_shape_C	file_static	g_shape_C_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1135	g_shape_Z	file_static	g_shape_Z_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1143	g_nsym	file_static	g_nsym_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1147	t_seg_C	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1147	t_seg_F	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1147	t_seg_K	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1147	t_seg_Z	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1152	t_seg_BG	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1152	t_seg_E	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1152	t_seg_R	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1152	t_seg_lbrm	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1153	t_decode_tdra_attempt	tls	int	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1157	g_llr_sgnsum	file_static	g_llr_sgnsum_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1160	g_llr_pos	file_static	g_llr_pos_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1173	g_llr_posbit	file_static	g_llr_posbit_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1176	g_llr_nbit	file_static	g_llr_nbit_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1179	g_llr_tb	file_static	g_llr_tb_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1182	g_ldpc_seg_fail	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1184	g_ldpc_tb_fail	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1186	g_ldpc_zero_tb	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1188	g_ldpc_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1197	g_fep_hit	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1199	g_fep_miss	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1201	g_chest_hit	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1203	g_chest_miss	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1205	g_gpu_llr_jobs	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1207	g_gpu_cpu_jobs	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1210	g_lbrm_try	file_static	g_lbrm_try_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1213	g_lbrm_ok	file_static	g_lbrm_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1216	g_llr_norm_shift	file_static	g_llr_norm_shift_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1219	g_rv_census	file_static	g_rv_census_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1221	g_ldpc_iface_err	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1223	g_seg_ok_sum	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1225	g_seg_tot_sum	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1238	g_segidx_tot	file_static	g_segidx_tot_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1241	g_segidx_fail	file_static	g_segidx_fail_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1248	g_segidxc_tot	file_static	g_segidxc_tot_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1251	g_segidxc_fail	file_static	g_segidxc_fail_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1266	g_pipe_n	file_static	g_pipe_n_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1269	g_pipe_sum	file_static	g_pipe_sum_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1271	kPipeName	file_static	const char *const[PIPE_N_FIELDS]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1325	nr_pdsch_passive_ldpc_stats_dump::kNm	func_static	const char *const[3]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1477	nr_pdsch_passive_ldpc_stats_dump::kCB	func_static	const char *const[NR_PDSCH_CBUCKETS]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1505	g_harq	tls	passive_harq_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1580	g_harqc	file_static	g_harqc_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1585	g_harqc_clock	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1588	g_hqb_pool	file_static	nr_hq_pool_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1631	t_hq	tls	struct {}	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1632	t_hq_d	tls	int16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1633	t_csi_prb_map	tls	uint16_t[NR_PRB_SET_MAX]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1645	t_probe_first_seg	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1646	t_probe_seg_ok	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1652	t_last_llr	tls	const int16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1653	t_last_G	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1654	t_last_fep_fo	tls	double	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1658	t_recov_mode	tls	int	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1659	t_recov_deferred	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1664	t_owned_iq	tls	c16_t **	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1665	t_owned_slot	tls	int	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1666	t_fep_done_ns	tls	uint64_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1688	t_llr_ovr	tls	const int16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1689	t_llr_ovr_n	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1701	t_gw	tls	nr_td_grantwork_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1702	t_gw_capture	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1703	t_gw_probe_ok	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1704	t_gw_owner	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1705	t_gw_sig	tls	uint64_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1706	t_gw_ready	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1706	t_gw_used	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1709	t_quiet	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1710	t_last_hq_retx	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1820	t_hq_clear	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1821	t_hq_A	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2244	t_share	tls	nr_pdsch_slot_share_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2245	t_fep_cache	tls	struct {}	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2255	t_chest_cache	tls	struct {}	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2392	t_gpp	tls	nr_gpu_pass_dl_out_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2395	t_gp_sfo_q	tls	int64_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2397	t_gp_shadow	tls	uint8_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2399	t_gp_fhash	tls	uint64_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2400	t_gp_fok	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2401	t_gp_sbad	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2402	t_gp_claim_tried	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2600	passive_decode_body_core::c_	func_static	_Atomic unsigned long	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	2703	passive_decode_body_core::count	func_static	_Atomic unsigned long	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3002	passive_decode_body_core::fct	func_static	int	PROCESS	A5	getenv result cached on first use (test seam, replay only), identical for every cell
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3036	passive_decode_body_core::gp_no_ssb	func_static	const nr_ssb_rm_mask_t	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3431	passive_decode_body_core::seg_h	tls	c16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3432	passive_decode_body_core::seg_h_cap	tls	size_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	3800	passive_decode_body_core::no_ssb	func_static	const nr_ssb_rm_mask_t	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4049	passive_decode_body_core::r2w_diag	func_static	int	PROCESS	A5	getenv result cached on first use (test seam, replay only), identical for every cell
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4104	passive_decode_body_core::alts	func_static	const int[3]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4366	t_pdcch_rm_crb	tls	uint8_t[275]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4417	t_stg	tls	struct {}	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4424	stg_snapshot::map	func_static	const int[4]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4496	g_ry_chains	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4498	g_ry_yields	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4500	g_ry_gated	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4503	g_ry_try	file_static	g_ry_try_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4506	g_ry_ok	file_static	g_ry_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4509	g_ry_seen	file_static	g_ry_seen_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4959	gw_cb0_params::alts	func_static	const int[3]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5101	g_cb0_ldpc	file_static	LDPC_decoderfunc_t *	PROCESS	A5	CB0 CPU LDPC function pointer loaded once by pthread_once (stateless)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5102	g_cb0_ldpc_once	file_static	pthread_once_t	PROCESS	A5	pthread_once guarding the process-wide libldpc.so load
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5132	nr_pdsch_passive_gw_cb_decode_iter::blk	tls	uint8_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	123	g_owned_iq	file_static	g_owned_iq_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	126	g_latency	file_static	g_latency_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	129	g_drop_reason	file_static	g_drop_reason_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	144	g_slot_arr_ns	file_static	g_slot_arr_ns_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	147	g_slot_arr_tag	file_static	g_slot_arr_tag_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	187	g_ring	file_static	g_ring_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	190	g_ring_ns	file_static	g_ring_ns_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	192	g_depth	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	194	g_head	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	196	g_tail	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	198	g_count	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	200	g_real_n	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	204	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	206	g_cv	file_static	pthread_cond_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	208	g_idle	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	211	g_spin_pred	file_static	nr_spin_pred_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	215	g_queued	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	217	g_slot_groups	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	236	g_scan_cache	file_static	g_scan_cache_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	238	g_scan_last_abs	file_static	int64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	240	g_scan_n	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	242	g_scan_hits	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	244	g_scan_us	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	246	g_pool_n	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	248	g_pool_us	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	250	g_scan_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	273	g_dq	file_static	g_dq_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	275	g_dq_head	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	277	g_dq_n	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	279	g_dq_started	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	281	g_dq_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	283	g_dq_cv	file_static	pthread_cond_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	285	g_dq_thr	file_static	pthread_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	287	g_dscan_dropped	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	411	g_decoded	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	413	g_cb_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	415	g_cb_tried	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	417	g_cb_total	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	419	g_crc_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	440	g_cs_dmrs	file_static	g_cs_dmrs_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	442	g_cs_dmrs_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	498	g_dl_dmrs_id	file_static	g_dl_dmrs_id_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	501	g_dl_dmrs_id_init	file_static	g_dl_dmrs_id_init_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	504	g_dl_dmrs_id_lock	file_static	g_dl_dmrs_id_lock_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	507	g_dl_rank_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	510	g_rank_n	file_static	g_rank_n_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	513	g_rank_low	file_static	g_rank_low_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	515	g_rank_total	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	518	g_rank_sum	file_static	g_rank_sum_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	521	g_cdm_empty	file_static	g_cdm_empty_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	524	g_cdm_sum	file_static	g_cdm_sum_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	541	g_nl_ok	file_static	g_nl_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	543	g_rank_verdict_logged	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	591	g_rnti_dec	file_static	g_rnti_dec_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	594	g_rnti_ok	file_static	g_rnti_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	608	g_dropped_full	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	610	g_dropped_narrow	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	612	g_dropped_stale	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	614	g_stale_after_decode	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	620	g_dropped_epoch	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	622	g_max_lag	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	625	g_running	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	627	g_stop	file_static	_Atomic int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	629	g_nthreads	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	632	g_threads	file_static	g_threads_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	634	g_ue	file_static	PHY_VARS_NR_UE * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	643	g_rxdataF	file_static	g_rxdataF_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	648	g_fep_gen	file_static	g_fep_gen_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	650	g_rxdataF_gw	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	658	g_args	file_static	g_args_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	676	g_rar_tc	file_static	g_rar_tc_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	678	g_rar_tc_head	file_static	unsigned [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	680	g_rar_tc_wrap	file_static	uint32_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	682	g_rar_tc_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	839	g_k0_probes	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	841	g_k0_probe_retained	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	843	g_k0_probe_retained_max	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	845	g_k0_probe_hits	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	888	g_bc9_jobs	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	890	g_bc9_cert	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	892	g_bc9_cert_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	894	g_bc9_nosib	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	896	g_bc9_nodci	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	898	g_bc9_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	900	g_bc9_alarm	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	903	g_bc9_cert_ok_k0	file_static	g_bc9_cert_ok_k0_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	909	g_bc9_cpk	file_static	g_bc9_cpk_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	911	g_bc9_cpk_clock	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	913	g_bc9_cpk_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	940	nr_pdsch_passive_bc12_census::sn	func_static	const char *const[]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	941	nr_pdsch_passive_bc12_census::dn	func_static	const char *const[]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1044	g_bc9d_confirms	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1046	g_bc9d_missed	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1048	g_bc9d_repeat	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1050	g_bc9d_tdd	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1052	g_bc9d_tdd_applied	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1054	g_bc9d_adj_rows	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1056	g_bc9d_adj_removed	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1058	g_bc9d_adj_refused	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1066	g_bc9_tdd_cache	file_static	g_bc9_tdd_cache_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1068	g_bc9_tdd_cache_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1127	nr_pdsch_passive_bc9_confirm::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1164	nr_pdsch_passive_oracle_inline::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1237	g_cdmrs_q	file_static	nr_bgq_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1305	g_rsnap	file_static	g_rsnap_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1308	g_rsnap_free	file_static	g_rsnap_free_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1310	g_rsnap_nfree	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1312	g_rsnap_n	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1314	g_rsnap_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1316	g_recov_ok	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1318	g_recov_nosnap	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1626	nr_pdsch_passive_queue_thread::s_gate_n	func_static	_Atomic uint32_t	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1644	nr_pdsch_passive_queue_thread::s_oracle_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1671	nr_pdsch_passive_queue_thread::t_probe	tls	c16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1716	nr_pdsch_passive_queue_thread::s_k0_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1777	nr_pdsch_passive_queue_thread::s_left	func_static	_Atomic int	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2274	t_recov_dec	tls	const nr_pdsch_passive_decode_result_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2276	g_recov_fb	file_static	g_recov_fb_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2358	recov_run::rxF	tls	c16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2610	g_pending	file_static	g_pending_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2613	g_pending_ns	file_static	g_pending_ns_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2615	g_n_pending	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2620	g_pending_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2622	g_batches	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2624	g_batches_multi	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2681	nr_a2e_ts	tls	uint64_t[9]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2682	nr_a2e_bank	tls	int8_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2682	nr_a2e_kind	tls	int8_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2683	nr_a2e_stg	tls	uint32_t[NR_A2E_STG]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2719	nr_pdsch_passive_queue_enqueue::c_	func_static	_Atomic unsigned long	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2736	g_age_hist	file_static	g_age_hist_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2738	g_dropped_probe	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	27	g_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	29	g_cv	file_static	pthread_cond_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	31	g_q	file_static	entry_t * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	33	g_slots	file_static	char * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	35	g_free	file_static	int * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	37	g_nfree	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	39	g_slot_bytes	file_static	size_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	41	g_allocs	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	43	g_depth	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	45	g_head	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	47	g_n	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	49	g_run	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	51	g_stop	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	53	g_th	file_static	pthread_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	60	g_run_fn	file_static	recov_run_fn_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	62	g_exp_fn	file_static	recov_exp_fn_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	64	g_fb_fn	file_static	recov_fb_fn_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	66	g_done_fn	file_static	recov_done_fn_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	68	g_busy_fn	file_static	recov_busy_fn_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	70	g_idle_wait_ns	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	72	g_yielded	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	74	g_sub	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	76	g_resc	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	78	g_stale	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	80	g_expd	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	82	g_full	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	84	g_dropped_old	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	87	g_late	file_static	g_late_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	89	g_nice	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	91	g_mu_init	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	93	t_cur_ns	tls	uint64_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	94	t_cur_job	tls	void *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	95	t_fb_done	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	99	g_seen	file_static	g_seen_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c	196	pick_cores::keys	func_static	const char *const[]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	17	coverage_entry_t	global	andareadingofthefullstandardspacecanholdthousands)*/typedefstruct{}	CONST	A5	scanner artifact: comment text of the SOLVER_* defines, no object
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	17	id	global	*countsarekeptperlayout	CONST	A5	scanner artifact: comment text, no object
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	28	kWhy	file_static	const char *const[W_N]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	108	g_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	111	g_r	file_static	g_r_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	114	g_p	file_static	g_p_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	116	g_token	file_static	uint32_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	127	t_plan_ctx	tls	solver_plan_ctx_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	132	g_key_scr	file_static	g_key_scr_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	134	g_n_key_scr	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	136	g_dci_seq	file_static	uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	138	g_tda_fn	file_static	nr_pdsch_solver_tda_fn [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	140	g_tda_ctx	file_static	void * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	142	g_st	file_static	nr_pdsch_solver_stats_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	145	g_hq_fn	file_static	nr_pdsch_solver_hq_fn [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	147	g_hq_ctx	file_static	void * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	150	g_have_prior	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	152	g_prior_rep	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	154	g_prior_add_pos	file_static	uint8_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	156	g_prior_table	file_static	int8_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	159	g_prior_S_by_tda	file_static	g_prior_S_by_tda_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	162	g_prior_L_by_tda	file_static	g_prior_L_by_tda_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	165	g_lcur	file_static	g_lcur_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	167	t_ov	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	169	t_L	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	209	kQR	file_static	const uint16_t[3][32][2]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	219	kQRn	file_static	const int[3]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	244	nr_pdsch_solver_dmrs_mask::pos	func_static	const int8_t[3][3][4]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	260	tables_for::prio	func_static	const uint8_t[3]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	408	rv_next_ok::pos	func_static	const int[4]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	672	t_rm	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	674	t_learn_rm	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	676	t_scr	file_static	int32_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	678	t_comb	file_static	uint8_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	773	kS	file_static	const uint8_t[4]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	876	plan_coverage::adds	func_static	const uint8_t[4][4]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	876	plan_coverage::starts	func_static	const uint8_t[4]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	876	plan_coverage::tables	func_static	const uint8_t[4][3]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	975	plan_known::kE	func_static	const uint8_t[10]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1011	plan_ov_probes::kE	func_static	const uint8_t[10]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1749	g_tf_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1752	g_tf	file_static	g_tf_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1755	g_tf_S	file_static	g_tf_S_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1758	g_tf_L	file_static	g_tf_L_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1760	g_tf_n	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c	1762	g_tf_init	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	36	MAX_ITEMS	file_static	const int	CONST	A6	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	36	NCTX	file_static	const int	CONST	A6	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_gpu_fep.cuh	114	U	file_static	State	UNCLASSIFIED	A6	
