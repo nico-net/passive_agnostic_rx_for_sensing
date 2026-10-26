@@ -1804,6 +1804,7 @@ TEST(GpuPassFp32, ShadowGateLogic) {
 extern "C" {
 #include "nr_gpu_pass_ul.h"
 #include "nr_gpu_pass_ul_ref.h"
+#include "PHY/MODULATION/nr_sfo_state.h"
 int load_dftslib(void);
 }
 /* The UL slot of the fixture: its IQ ring as the linear snapshot of the passive UL decoder (PRE samples of margin in front), the FFT windows at a timing advance `ta`
@@ -2050,6 +2051,47 @@ TEST(GpuPassUl, MatchesCpuDecode) {
          nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE");
   EXPECT_GE(n, cases * 2 / 3);
   EXPECT_GE(dec_ok, n / 2);
+}
+
+/* Intra-slot SFO (nr_sfo_state.h): the pass's FEP applies the per-symbol step after the OAI RX rotation, bit for bit what the CPU FEP
+ * does with nr_sfo_rotate_symbol() on the same bins (the passive UL decoder runs both and compares them). eps = +3.8 ppm. */
+TEST(GpuPassUl, SfoStepMatchesCpu) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(ul_ready(m)) << "UL pass setup failed";
+  const int64_t eps_q = 3800000; /* 3.8 ppm in 1e-12 */
+  int compared = 0;
+  for (int seed = 0; seed < 6; seed++) {
+    const int nrb = seed % 2 ? 217 : 48, qm = 4 + 2 * (seed % 2);
+    const nr_gpu_pass_shape_t sh = {(uint16_t)nrb, 13, 1, (uint16_t)qm, 2, 1, 1};
+    GpuPassFixture fx = GpuPassFixture::from_shape(sh, seed);
+    if (!fx.tb_ok_built) continue;
+    ul_warm_class(m, nrb, 2, fx.tb.C);
+    UlSlot sl;
+    sl.build(fx, 0, -1, 0, 0);
+    uint32_t dphi[14];
+    ASSERT_EQ(1, nr_sfo_slot_dphi(eps_q, 4096, GpuPassFixture::NCP, GpuPassFixture::NCP0, 1, 14, 0, dphi));
+    memcpy(sl.in.sfo_dphi, dphi, sizeof(dphi));
+    const int kref = nr_sfo_kref(4096, GpuPassFixture::FCO, 150 + 12 * (seed % 3)); /* an SSB position of the carrier */
+    sl.in.sfo_kref = kref;
+    ASSERT_EQ(0, nr_gpu_pass_ul_run(&sl.in, &sl.out)) << "seed " << seed;
+    UlRef ref = ul_reference(m, fx, 0, -1);
+    ASSERT_TRUE(ref.ok);
+    int diff = 0;
+    for (int a = 0; a < 4; a++)
+      for (int s = fx.data_syms.front(); s < 14; s++) {
+        int16_t *rr = &ref.rxF[2 * ((size_t)a * 14 + s) * 4096];
+        nr_sfo_rotate_symbol(rr, 4096, GpuPassFixture::FCO, 273, dphi[s], kref);
+        diff += memcmp(&sl.rxF[2 * (size_t)a * sl.rx_stride + 2 * (size_t)s * 4096], rr, 4096 * 4) != 0;
+      }
+    EXPECT_EQ(0, diff) << "seed " << seed << ": rows of the pass differ from FEP + rotation + nr_sfo_rotate_symbol";
+    compared++;
+  }
+  EXPECT_GE(compared, 3);
 }
 
 /* the comparison is not vacuous: a reference with another timing advance, or another receive branch, is flagged on every slot */

@@ -327,6 +327,37 @@ TEST(DciLengthBank, LockedToSuspectAfterNMisses) {
   EXPECT_EQ(c.state.preferred_len,47);
 }
 
+// Absence alone (RNTI active elsewhere, not accepted here) is never evidence of a changed configuration: no SUSPECT, however long.
+TEST(DciLengthBank, AbsenceOnlyNeverSuspect) {
+  nr_pdcch_dci_length_context_t c{};
+  c.rnti=0x1234;
+  nr_pdcch_dci_length_context_lock(&c,47);
+  for(unsigned i=0;i<5000;++i)
+    nr_pdcch_dci_length_context_note_absence(&c,false,true);
+  EXPECT_EQ(c.len_state,NR_LEN_LOCKED);
+  EXPECT_EQ(c.found[0],47);
+  EXPECT_GE(c.miss_occasions,200u); // still feeds the scout gate
+  nr_pdcch_dci_length_context_note_absence(&c,true,true);
+  EXPECT_EQ(c.miss_occasions,0u);
+}
+
+// Positive evidence: a decode at a length the context does not hold turns it SUSPECT; a held length (primary or secondary) does not.
+TEST(DciLengthBank, SuspectOnlyOnEvidenceOfAnotherLength) {
+  nr_pdcch_dci_length_context_t c{};
+  c.rnti=0x1234;
+  nr_pdcch_dci_length_context_lock(&c,47);
+  for(unsigned i=0;i<300;++i) nr_pdcch_dci_length_context_note_absence(&c,false,true);
+  EXPECT_FALSE(nr_pdcch_dci_length_context_suspect_on_evidence(&c,47));
+  EXPECT_EQ(c.len_state,NR_LEN_LOCKED);
+  EXPECT_EQ(c.miss_occasions,0u);
+  EXPECT_FALSE(nr_pdcch_dci_length_context_suspect_on_evidence(&c,0));
+  EXPECT_TRUE(nr_pdcch_dci_length_context_suspect_on_evidence(&c,45));
+  EXPECT_EQ(c.len_state,NR_LEN_SUSPECT);
+  EXPECT_EQ(c.found[0],47);
+  EXPECT_EQ(c.state.preferred_len,47);
+  EXPECT_EQ(nr_pdcch_dci_length_context_lock(&c,45),47); // the relock reports the old length: the caller notifies the epoch
+}
+
 TEST(DciLengthBank, InactiveRntiNeverSuspect) {
   nr_pdcch_dci_length_context_t c{};
   nr_pdcch_dci_length_context_lock(&c,47);

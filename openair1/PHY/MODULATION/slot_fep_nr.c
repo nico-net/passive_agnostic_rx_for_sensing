@@ -10,6 +10,20 @@
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/nr_phy_common/inc/nr_phy_common.h"
 #include <common/utils/LOG/log.h>
+#include "nr_sfo_state.h"
+
+/* SFO correction of one DL symbol after the rotation step (nr_sfo_state.h): eps of this thread's FEP (pinned or published), applied on
+ * the bins the rotation step touches. eps 0 = no-op, the FEP output is unchanged bit for bit. */
+static void nr_sfo_correct_dl_symbol(const NR_DL_FRAME_PARMS *fp, int slot, int symbol, int nb_rb, c16_t *symb)
+{
+  const int64_t e = nr_sfo_eps_q_for_fep();
+  if (!e)
+    return;
+  const int n_l = nr_sfo_symbol_offset(fp->ofdm_symbol_size, fp->nb_prefix_samples, fp->nb_prefix_samples0, fp->numerology_index,
+                                       fp->symbols_per_slot, slot, symbol);
+  nr_sfo_rotate_symbol((int16_t *)symb, fp->ofdm_symbol_size, fp->first_carrier_offset, nb_rb, nr_sfo_dphi(e, fp->ofdm_symbol_size, n_l),
+                       nr_sfo_kref(fp->ofdm_symbol_size, fp->first_carrier_offset, fp->ssb_start_subcarrier));
+}
 
 /* rxdataF should be 16 bytes aligned */
 void nr_symbol_fep(const NR_DL_FRAME_PARMS *frame_parms,
@@ -41,6 +55,8 @@ void nr_symbol_fep(const NR_DL_FRAME_PARMS *frame_parms,
                                 is_sl ? frame_parms->N_RB_SL : frame_parms->N_RB_DL,
                                 slot,
                                 symbol);
+    if (link_type == link_type_dl)
+      nr_sfo_correct_dl_symbol(frame_parms, slot, symbol, frame_parms->N_RB_DL, rxdataF[aa]);
   }
 }
 
@@ -289,6 +305,8 @@ int nr_slot_fep_ant(PHY_VARS_NR_UE *ue,
                               is_sl2 ? frame_parms->N_RB_SL : frame_parms->N_RB_DL,
                               slot,
                               symbol);
+  if (linktype == link_type_dl)
+    nr_sfo_correct_dl_symbol(frame_parms, slot, symbol, frame_parms->N_RB_DL, rxdataF_symb_ptr);
   return 0;
 }
 

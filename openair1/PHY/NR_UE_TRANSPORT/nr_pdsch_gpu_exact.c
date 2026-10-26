@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* GPU6: bit-exact GPU FEP for the passive PDSCH decoder -- see nr_pdsch_gpu_exact.h. */
+#include "PHY/MODULATION/nr_sfo_state.h"
 #include "PHY/TOOLS/nr_stage_split.h"
 #include "nr_pdsch_gpu_exact.h"
 #include "nr_pdsch_gpu_fep.h"
@@ -20,7 +21,7 @@
 #include <unistd.h>
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 
-typedef int (*exact_fn_t)(const int16_t *const *, uint32_t, uint32_t, double, const int16_t *, uint16_t, int16_t *, size_t, int);
+typedef int (*exact_fn_t)(const int16_t *const *, uint32_t, uint32_t, double, const int16_t *, uint16_t, int16_t *, size_t, int, const uint32_t *, int);
 static exact_fn_t g_fn;
 static void (*g_stats)(int *, uint64_t *, uint64_t *);
 static int (*g_delay_fn)(const int16_t *const *, int, int *);
@@ -183,13 +184,14 @@ static void nr_pdsch_gpu_exact_fep_bench(const NR_DL_FRAME_PARMS *fp)
     for (int a = 0; a < nant; a++) rxp[a] = (const int16_t *)rx[a];
     const c16_t *rot = fp->symbol_rotation[link_type_dl] + (slot % fp->slots_per_subframe) * fp->symbols_per_slot;
     const uint16_t mask = (uint16_t)((1u << fp->symbols_per_slot) - 1u);
+    nr_sfo_pin(0); /* the bench compares against the CPU FEP without SFO (the GPU call passes no SFO steps) */
     for (int r = 0; r < WARM + RUNS && ok; r++) {
       const uint64_t t0 = now_ns();
-      const int rc = g_fn(rxp, (uint32_t)ring, get_samples_slot_timestamp(fp, slot), 0.0, (const int16_t *)rot, mask, (int16_t *)fg, fp->samples_per_slot_wCP, 0);
+      const int rc = g_fn(rxp, (uint32_t)ring, get_samples_slot_timestamp(fp, slot), 0.0, (const int16_t *)rot, mask, (int16_t *)fg, fp->samples_per_slot_wCP, 0, NULL, 0);
       const uint64_t t1 = now_ns();
       if (rc && r < WARM) { /* first use (module load, a late warm-up call that drains): not timed, not compared */
         for (int w = 0; w < 200 && g_fn(rxp, (uint32_t)ring, get_samples_slot_timestamp(fp, slot), 0.0, (const int16_t *)rot, mask, (int16_t *)fg,
-                                         fp->samples_per_slot_wCP, 0) != 0; w++)
+                                         fp->samples_per_slot_wCP, 0, NULL, 0) != 0; w++)
           usleep(1000);
         continue;
       }
@@ -205,6 +207,7 @@ static void nr_pdsch_gpu_exact_fep_bench(const NR_DL_FRAME_PARMS *fp)
       }
     }
   }
+  nr_sfo_pin(INT64_MIN);
   const double mg = ok && !bad ? nr_gpu_path_median(tg, ng) : -1, mc = ok ? nr_gpu_path_median(tc, nc) : -1;
   char detail[160];
   snprintf(detail, sizeof(detail), "N=%d nb_rx=%d sym=%d cpu=per_antenna%s%s", N, nant, fp->symbols_per_slot, bad ? " MISMATCH" : "", ok ? "" : " gpu_refused_or_alloc");
@@ -290,10 +293,16 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
   for (int a = 0; a < fp->nb_antennas_rx; a++)
     rx[a] = (const int16_t *)rxdata[a];
   const c16_t *rot = fp->symbol_rotation[link_type_dl] + (slot % fp->slots_per_subframe) * fp->symbols_per_slot;
+  /* SFO (nr_sfo_state.h): one eps for the GPU job and the CPU spot check of this slot */
+  const int64_t sfo_q = nr_sfo_eps_q();
+  uint32_t sfo_dphi[14];
+  const int sfo_on = nr_sfo_slot_dphi(sfo_q, fp->ofdm_symbol_size, fp->nb_prefix_samples, fp->nb_prefix_samples0, fp->numerology_index,
+                                      fp->symbols_per_slot, slot, sfo_dphi);
   const uint64_t t0 = now_ns();
   /* no lock here: the module gives each concurrent call its own stream (direct mode) */
   const int rc = g_fn(rx, 2u * fp->samples_per_frame, get_samples_slot_timestamp(fp, slot), 0.0, (const int16_t *)rot, mask,
-                      (int16_t *)rxdataF, stride, try_only);
+                      (int16_t *)rxdataF, stride, try_only, sfo_on ? sfo_dphi : NULL,
+                      nr_sfo_kref(fp->ofdm_symbol_size, fp->first_carrier_offset, fp->ssb_start_subcarrier));
   const uint64_t dt = now_ns() - t0;
   if (rc) {
     if (atomic_fetch_add_explicit(&g_fallback, 1, memory_order_relaxed) == 0)
@@ -315,7 +324,9 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
           pairs[np++][1] = m;
         }
     const int k = (int)(n % np);
+    nr_sfo_pin(sfo_q);
     ok = check_symbol(ue, fp, slot, pairs[k][0], pairs[k][1], rxdataF, rxdata);
+    nr_sfo_pin(INT64_MIN);
     atomic_fetch_add_explicit(ok ? &g_chk_ok : &g_chk_bad, 1, memory_order_relaxed);
     if (!ok) {
       atomic_store(&g_on, 0);

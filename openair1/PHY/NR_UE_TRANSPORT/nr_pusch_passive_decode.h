@@ -67,7 +67,7 @@ typedef struct {
   uint8_t  nscid; ///< DM-RS sequence index actually used
   /// HARQ-ACK bit count that made the transport block decode, when the UCI reservation search
   /// found one. 0 = decoded with no reservation (no UCI, or O_ACK <= 2, which punctures instead).
-  uint16_t uci_ack_re; ///< inferred ACK RE footprint; does not imply a known O_ACK/beta/alpha
+  uint16_t uci_ack_re; ///< REs the blindly recovered UCI took from the UL-SCH (rate-matched + punctured), 0 = no UCI
   uint8_t  o_ack;
   int      n_segments;    ///< transport-block segments (C)
   int      segments_ok;   ///< of which the CRC passed. 0 vs C-1 are different failures.

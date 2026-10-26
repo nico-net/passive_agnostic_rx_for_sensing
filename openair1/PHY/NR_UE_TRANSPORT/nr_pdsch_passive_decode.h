@@ -378,6 +378,9 @@ void nr_pdsch_passive_gw_cb0_free(nr_pdsch_gw_cb0_t *cb);
  *  filler, int8 saturation, LDPCdecoder, CRC24B -- CRC24A when C == 1 -- and the all-zero guard). Returns the
  *  CB0 verdict; *ldpc_ok = the decoder's own CRC verdict before the all-zero guard. */
 bool nr_pdsch_passive_gw_cb0_decode(const nr_pdsch_gw_cb0_t *cb, bool *ldpc_ok);
+/** The same for any code block of the TB (cb->p.E = that block's E, cb->d its extracted input; every block of a TB has the
+ *  same K/F/Z/rv and, for C > 1, a CRC24B), with at most max_iter LDPC iterations (<= 0: the receiver's cap). */
+bool nr_pdsch_passive_gw_cb_decode_iter(const nr_pdsch_gw_cb0_t *cb, int max_iter, bool *ldpc_ok);
 /** CB0 elimination wiring: nr_pdsch_passive_gw_cb0_item() (the nr_td_cb0_batch item of a hypothesis from shared work:
  *  the entry's un-normalised LLRs in place, its TBS / R / BG / TBS_LBRM / rv / 8 iterations and its own K38 shift k_h;
  *  returns NR_TD_GW_OK, NR_TD_GW_E_K0 / NR_TD_GW_E_ARG (parameter-determined: not testable on this grant) or another

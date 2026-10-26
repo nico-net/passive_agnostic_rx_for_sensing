@@ -130,6 +130,8 @@ typedef struct {
   uint32_t iq_len;              /* c16 readable from iq[a] (DISCRETE copies the span of the windows) */
   int32_t win[NR_GPU_PASS_UL_NSYM];
   int16_t rot[NR_GPU_PASS_UL_NSYM][2]; /* fp->symbol_rotation[link_type_ul][symbol + (slot % slots_per_subframe) * symbols_per_slot] */
+  uint32_t sfo_dphi[NR_GPU_PASS_UL_NSYM]; /* intra-slot SFO step per symbol (nr_sfo_slot_dphi), 0 = none */
+  int32_t sfo_kref;                       /* reference subcarrier of the SFO step (nr_sfo_kref) */
   int rot_nb_rb, rot_fco;       /* apply_nr_rotation_symbol_RX(fp->N_RB_UL, fp->first_carrier_offset) of the old FEP */
   int16_t *rx[4];               /* the caller's rxdataF row of symbol 0 of the slot per antenna (c16, OAI layout): DIRECT = written in place by the pass; DISCRETE = filled after it; NULL = pass-private */
   /* ---- grant */
@@ -153,6 +155,10 @@ typedef struct {
   const int16_t *rxdata[4];
   uint32_t ring_len, ring_offset;
   const int16_t *symbol_rot;   /* symbols_per_slot OAI c16, fp->symbol_rotation[DL] + slot offset */
+  uint32_t sfo_dphi[14];       /* SFO step per symbol (PHY/MODULATION/nr_sfo_state.h), the CPU FEP's of this slot */
+  int sfo_on;                  /* 0: no SFO correction (every step 0) */
+  int sfo_kref;                /* SFO reference subcarrier (nr_sfo_kref) */
+  int64_t sfo_q;               /* the eps the steps were made from (shadow checks: a change of eps meanwhile is not a mismatch) */
   int16_t *rxdataF;            /* the caller's rxdataF[nbRx][rx_stride] (c16, OAI layout) or NULL; DIRECT: filled in place by the GPU; DISCRETE: filled after the pass */
   uint32_t rx_stride;          /* c16 between two antennas of rxdataF */
   uint16_t copy_mask;          /* symbols of rxdataF the caller needs (DISCRETE copy-back) */

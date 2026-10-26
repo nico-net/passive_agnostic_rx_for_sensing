@@ -25,6 +25,7 @@
 #include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
 #include <openair2/UTIL/OPT/opt.h>
 #include "PHY/NR_UE_TRANSPORT/pucch_nr.h"
+#include "PHY/NR_UE_TRANSPORT/nr_uci_on_pusch.h"
 #include <math.h>
 
 #define MAX_RE_PER_SYMBOL_IN_ALLOC (275 * 12)
@@ -977,21 +978,15 @@ static void apply_template_to_codeword(uint8_t *codeword,
   }
 }
 
-/*
- * This function implements the UCI multiplexing on PUSCH according to TS 38.212 section 6.2.7.
- */
-static uci_on_pusch_bit_type_t *nr_data_control_mapping(const NR_UE_ULSCH_t *ulsch_ue,
-                                                        uci_on_pusch_bit_type_t *template,
-                                                        unsigned int G_ulsch,
-                                                        rate_match_info_uci_t *rm_info,
-                                                        uint8_t *codeword,
-                                                        uint32_t codeword_len,
-                                                        const uint8_t *ulsch_bits,
-                                                        const uint64_t *cack,
-                                                        const uint64_t *csi1,
-                                                        const uint64_t *csi2)
+/* The data/control template of TS 38.212 6.2.7 (steps 1-6) for a codeword of codeword_len bits: per bit, what the UE
+ * places there. Shared by the transmitter below and by the passive receiver (nr_uci_on_pusch_ulsch_map), so both use the
+ * one implementation that is checked against the MATLAB vectors of ulsim -o. */
+static uci_on_pusch_bit_type_t *nr_data_control_template(const NR_UE_ULSCH_t *ulsch_ue,
+                                                         uci_on_pusch_bit_type_t *template,
+                                                         const rate_match_info_uci_t *rm_info,
+                                                         uint32_t codeword_len)
 {
-  if (!codeword || codeword_len == 0 || !template)
+  if (codeword_len == 0 || !template)
     return NULL;
   const nfapi_nr_ue_pusch_pdu_t *pusch_pdu = &ulsch_ue->pusch_pdu;
   const uint8_t n_symbols = pusch_pdu->nr_of_symbols;
@@ -1054,10 +1049,110 @@ static uci_on_pusch_bit_type_t *nr_data_control_mapping(const NR_UE_ULSCH_t *uls
   if (rm_info->O_ack == 2) {
     map_overlapped_ack(template, rm_info->E_uci_ACK_actual, first_symb_after_dmrs, pusch_pdu, positions_by_sym, count_by_sym);
   }
-
-  apply_template_to_codeword(codeword, template, rm_info, codeword_len, ulsch_bits, cack, csi1, csi2, G_ulsch);
-
   return template;
+}
+
+/*
+ * This function implements the UCI multiplexing on PUSCH according to TS 38.212 section 6.2.7.
+ */
+static uci_on_pusch_bit_type_t *nr_data_control_mapping(const NR_UE_ULSCH_t *ulsch_ue,
+                                                        uci_on_pusch_bit_type_t *template,
+                                                        unsigned int G_ulsch,
+                                                        rate_match_info_uci_t *rm_info,
+                                                        uint8_t *codeword,
+                                                        uint32_t codeword_len,
+                                                        const uint8_t *ulsch_bits,
+                                                        const uint64_t *cack,
+                                                        const uint64_t *csi1,
+                                                        const uint64_t *csi2)
+{
+  if (!codeword || !nr_data_control_template(ulsch_ue, template, rm_info, codeword_len))
+    return NULL;
+  apply_template_to_codeword(codeword, template, rm_info, codeword_len, ulsch_bits, cack, csi1, csi2, G_ulsch);
+  return template;
+}
+
+uint32_t nr_uci_on_pusch_ulsch_map(const nfapi_nr_ue_pusch_pdu_t *pdu,
+                                   uint16_t ptrs_symbols,
+                                   int n_ptrs,
+                                   uint32_t K,
+                                   uint32_t C,
+                                   uint32_t G_total,
+                                   int8_t *map,
+                                   rate_match_info_uci_t *rm_out)
+{
+  if (!pdu || !map || G_total == 0 || K == 0 || C == 0)
+    return 0;
+  if (pdu->pusch_uci.harq_ack_bit_length == 0 && pdu->pusch_uci.csi_payload.p1_bits == 0) {
+    memset(map, 1, G_total);
+    if (rm_out)
+      *rm_out = (rate_match_info_uci_t){.G_ulsch = G_total};
+    return G_total;
+  }
+  /* The OAI UE bounds every coded UCI part to MAX_UCI_CODED_BITS (b_ack / b_csi1 / b_csi2 above); a hypothesis past it is
+   * out of this implementation's scope rather than silently truncated. */
+  NR_UE_ULSCH_t u;
+  memset(&u, 0, sizeof(u));
+  u.pusch_pdu = *pdu;
+  u.ptrs_symbols = ptrs_symbols;
+  u.n_ptrs = n_ptrs;
+  NR_UL_UE_HARQ_t h;
+  memset(&h, 0, sizeof(h));
+  h.K = K;
+  h.C = C;
+  unsigned int G = G_total;
+  rate_match_info_uci_t rm = calc_rate_match_info_uci(&u, &h, &G);
+  if (rm.E_uci_ACK > MAX_UCI_CODED_BITS || rm.E_uci_CSI1 > MAX_UCI_CODED_BITS || rm.E_uci_CSI2 > MAX_UCI_CODED_BITS || rm.G_ulsch == 0
+      || rm.G_ulsch > G_total)
+    return 0;
+  static __thread uci_on_pusch_bit_type_t *tmpl = NULL;
+  static __thread uint32_t tmpl_cap = 0;
+  if (tmpl_cap < G_total) {
+    free(tmpl);
+    tmpl = malloc((size_t)G_total * sizeof(*tmpl));
+    tmpl_cap = tmpl ? G_total : 0;
+    if (!tmpl)
+      return 0;
+  }
+  if (!nr_data_control_template(&u, tmpl, &rm, G_total))
+    return 0;
+  /* What each codeword bit is to the UL-SCH, consumed exactly as apply_template_to_codeword() fills the codeword:
+   * 1 = an UL-SCH bit, 0 = an UL-SCH bit punctured by HARQ-ACK (its position in the UL-SCH stream is kept), -1 = UCI. */
+  uint32_t ulsch_idx = 0, ack_idx = 0;
+  for (uint32_t i = 0; i < G_total; i++) {
+    int8_t m = -1;
+    switch (tmpl[i]) {
+      case BIT_TYPE_ACK_RESERVED:
+      case BIT_TYPE_ACK_PLACEHOLDER:
+        if (rm.E_uci_ACK > 0 && ack_idx < rm.E_uci_ACK) {
+          ack_idx++;
+          if (ulsch_idx < rm.G_ulsch) {
+            ulsch_idx++;
+            m = 0;
+          }
+        }
+        break;
+      case BIT_TYPE_ACK:
+      case BIT_TYPE_ACK_RESERVED_CSI2:
+      case BIT_TYPE_ACK_PLACEHOLDER_CSI2:
+      case BIT_TYPE_CSI1:
+      case BIT_TYPE_CSI2:
+        break;
+      case BIT_TYPE_ULSCH:
+      default:
+        if (ulsch_idx < rm.G_ulsch) {
+          ulsch_idx++;
+          m = 1;
+        }
+        break;
+    }
+    map[i] = m;
+  }
+  if (ulsch_idx != rm.G_ulsch)
+    return 0;
+  if (rm_out)
+    *rm_out = rm;
+  return rm.G_ulsch;
 }
 
 void nr_ue_ulsch_procedures(PHY_VARS_NR_UE *UE,

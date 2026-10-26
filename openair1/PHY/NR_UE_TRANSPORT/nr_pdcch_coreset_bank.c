@@ -40,6 +40,8 @@
 static nr_pdcch_discovered_coreset_t g_coreset_bank[NR_PDCCH_DISCOVERED_CORESETS];
 static _Atomic int g_coreset_bank_n;
 static pthread_mutex_t g_coreset_bank_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Guards the AL1 UNION fields of the entries (n_al1_fam, al1_fam, n_al1_union, al1_union). Lock order: bank lock, then this one; no holder of this mutex takes the bank lock. */
+pthread_mutex_t nr_pdcch_al1_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_coreset_bank_quiescent = PTHREAD_COND_INITIALIZER;
 static unsigned g_dispatch_readers;
 static bool g_compaction_pending;
@@ -64,9 +66,11 @@ static void compact_removed(void)
     return;
   int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
   if (g_identity_reset_pending) {
+    pthread_mutex_lock(&nr_pdcch_al1_mu); /* entries carry the AL1 union fields (bank lock, then al1 mutex) */
     g_dormant_bank.n = n;
     memcpy(g_dormant_bank.entry, g_coreset_bank, sizeof(g_coreset_bank));
     memset(g_coreset_bank, 0, sizeof(g_coreset_bank));
+    pthread_mutex_unlock(&nr_pdcch_al1_mu);
     atomic_store_explicit(&g_coreset_bank_n, 0, memory_order_release);
     g_identity_reset_pending = false;
     n = 0;
@@ -80,8 +84,10 @@ static void compact_removed(void)
       g_remove_hook(&g_coreset_bank[i].cfg, g_remove_hook_arg);
     LOG_A(PHY, "SENSING: CORESET bank REMOVED index=%d offset=%d\n", i,
           g_coreset_bank[i].cfg.coreset_rb_offset);
+    pthread_mutex_lock(&nr_pdcch_al1_mu);
     memmove(&g_coreset_bank[i], &g_coreset_bank[i + 1], (n - i - 1) * sizeof(g_coreset_bank[0]));
     memset(&g_coreset_bank[--n], 0, sizeof(g_coreset_bank[0]));
+    pthread_mutex_unlock(&nr_pdcch_al1_mu);
     atomic_store_explicit(&g_coreset_bank_n, n, memory_order_release);
   }
   g_compaction_pending = false;
@@ -158,6 +164,47 @@ void nr_pdcch_coreset_bank_note_confirm(int index, uint64_t slot)
     __atomic_store_n(&g_coreset_bank[index].accepts_total, g_coreset_bank[index].accepts_total + 1, __ATOMIC_RELAXED);
   }
   pthread_mutex_unlock(&g_coreset_bank_lock);
+}
+
+/* Ring of recent DCIs decoded by operational (non-dwell) passes, keyed by (slot, RNTI, payload hash). A PDCCH transmission belongs to exactly one CORESET/search-space candidate, so a dwell geometry whose CRC-valid DCI is one of these
+ * is decoding a transmission the bank already explains (an overlapping geometry can CRC-pass on the same REs) and gives no evidence of its own. */
+#define NR_DECODED_RING 256
+static struct { uint64_t slot; uint32_t hash; uint16_t rnti; } g_decoded[NR_DECODED_RING];
+static unsigned g_decoded_next;
+static pthread_mutex_t g_decoded_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void nr_pdcch_coreset_bank_note_decoded(uint64_t slot, uint16_t rnti, uint32_t payload_hash)
+{
+  if (!rnti) return;
+  pthread_mutex_lock(&g_decoded_lock);
+  for (int i = 0; i < NR_DECODED_RING; ++i)
+    if (g_decoded[i].rnti == rnti && g_decoded[i].slot == slot && g_decoded[i].hash == payload_hash) {
+      pthread_mutex_unlock(&g_decoded_lock);
+      return;
+    }
+  g_decoded[g_decoded_next % NR_DECODED_RING].slot = slot;
+  g_decoded[g_decoded_next % NR_DECODED_RING].rnti = rnti;
+  g_decoded[g_decoded_next % NR_DECODED_RING].hash = payload_hash;
+  ++g_decoded_next;
+  pthread_mutex_unlock(&g_decoded_lock);
+}
+
+bool nr_pdcch_coreset_bank_decoded_elsewhere(uint64_t slot, uint16_t rnti, uint32_t payload_hash)
+{
+  bool found = false;
+  pthread_mutex_lock(&g_decoded_lock);
+  for (int i = 0; i < NR_DECODED_RING && !found; ++i)
+    found = g_decoded[i].rnti == rnti && g_decoded[i].slot == slot && g_decoded[i].hash == payload_hash;
+  pthread_mutex_unlock(&g_decoded_lock);
+  return found;
+}
+
+void nr_pdcch_coreset_bank_decoded_clear(void)
+{
+  pthread_mutex_lock(&g_decoded_lock);
+  memset(g_decoded, 0, sizeof(g_decoded));
+  g_decoded_next = 0;
+  pthread_mutex_unlock(&g_decoded_lock);
 }
 
 void nr_pdcch_coreset_bank_note_dci(int index, uint64_t slot, uint16_t rnti, uint32_t payload_hash)
@@ -390,6 +437,113 @@ int nr_pdcch_coreset_bank_length_hint(void)
   return best;
 }
 
+int nr_pdcch_candidate_res(const nr_pdcch_blind_monitor_cfg_t *c, int cce, int al, uint32_t *out, int max)
+{
+  const int span = c->coreset_freq_domain * 6, dur = c->coreset_duration;
+  const int Lin = c->coreset_reg_bundle_size, R = c->coreset_interleaver_size;
+  if (span < 6 || dur < 1 || dur > 3 || al < 1 || cce < 0 || max < 6 * al) return -1;
+  const int N_regs = span * dur, Lb = Lin ? Lin : 6;
+  if (Lin && (R < 1 || N_regs % (R * Lin))) return -1;
+  if (Lb % dur) return -1;
+  const int B_rb = Lb / dur, nbpc = 6 / Lb, n_cce = N_regs / 6, nb_tot = n_cce * nbpc;
+  if (cce + al > n_cce) return -1;
+  const int C = Lin ? N_regs / (R * Lin) : 0;
+  int f[nb_tot > 0 ? nb_tot : 1];
+  int cc = 0, r = 0;
+  for (int nb = 0; nb < nb_tot; nb++) {
+    if (!Lin) f[nb] = nb;
+    else {
+      if (r == R) { r = 0; cc++; }
+      f[nb] = ((r * C) + cc + c->coreset_shift_index) % (N_regs / Lb);
+      r++;
+    }
+  }
+  const int first = cce * nbpc, n = al * nbpc;
+  int ord[96];
+  if (n > 96) return -1;
+  for (int i = 0; i < n; i++) {
+    int v = f[first + i], j = i;
+    while (j > 0 && ord[j - 1] > v) { ord[j] = ord[j - 1]; j--; }
+    ord[j] = v;
+  }
+  int k = 0;
+  for (int sy = 0; sy < dur; sy++)
+    for (int i = 0; i < n; i++)
+      for (int b = 0; b < B_rb; b++)
+        out[k++] = ((uint32_t)(c->bwp_start + c->coreset_rb_offset + ord[i] * B_rb + b) << 4) | (uint32_t)(c->ss_first_symbol + sy);
+  return k;
+}
+
+static bool explains_locked(const nr_pdcch_blind_monitor_cfg_t *c, int cce, int al, int below)
+{
+  uint32_t a[96], b[96];
+  if (nr_pdcch_candidate_res(c, cce, al, a, 96) < 0) return false;
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
+  for (int i = 0; i < n && (below < 0 || i < below); ++i) {
+    const nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[i];
+    if (e->state == NR_CORESET_REMOVED || e->cfg.coreset_pdcch_dmrs_scrambling_id != c->coreset_pdcch_dmrs_scrambling_id
+        || coreset_same_geometry(&e->cfg, c))
+      continue;
+    const int n_cce = e->cfg.coreset_freq_domain * e->cfg.coreset_duration;
+    for (int x = 0; x + al <= n_cce; ++x)
+      if (nr_pdcch_candidate_res(&e->cfg, x, al, b, 96) == 6 * al && !memcmp(a, b, sizeof(uint32_t) * 6 * al))
+        return true;
+    /* AL1 union: the entry also decodes AL1 candidates of alternative mapping families (REG sets, see nr_pdcch_al1_union). Same identity rule: same ordered REs.
+     * The union is written under nr_pdcch_al1_mu, so it is read under it (briefly, AL1 candidates only). */
+    if (al != 1) continue;
+    pthread_mutex_lock(&nr_pdcch_al1_mu);
+    const int nu = (int)e->n_al1_union, dur = e->cfg.coreset_duration;
+    for (int j = 0; j < nu && j < NR_PDCCH_AL1_UNION_MAX; ++j) {
+      uint32_t u[6]; int k = 0, lastrb = -1;
+      const int base = e->cfg.bwp_start + e->cfg.coreset_rb_offset;
+      for (int sy = 0; sy < dur; ++sy) {
+        lastrb = -1;
+        for (int q = 0; q < 6; ++q) {
+          const int rb = e->al1_union[j][q] / dur;
+          if (rb == lastrb) continue;
+          lastrb = rb;
+          if (k < 6) u[k] = ((uint32_t)(base + rb) << 4) | (uint32_t)(e->cfg.ss_first_symbol + sy);
+          ++k;
+        }
+      }
+      if (k == 6 && !memcmp(a, u, sizeof(u))) { pthread_mutex_unlock(&nr_pdcch_al1_mu); return true; }
+    }
+    pthread_mutex_unlock(&nr_pdcch_al1_mu);
+  }
+  return false;
+}
+
+bool nr_pdcch_coreset_bank_explains(const nr_pdcch_blind_monitor_cfg_t *c, int cce, int al, int below)
+{
+  pthread_mutex_lock(&g_coreset_bank_lock);
+  const bool r = explains_locked(c, cce, al, below);
+  pthread_mutex_unlock(&g_coreset_bank_lock);
+  return r;
+}
+
+void nr_pdcch_coreset_bank_note_alias(int index, uint64_t slot, int cce, int al)
+{
+  if (index < 1 || al < 1) return;
+  pthread_mutex_lock(&g_coreset_bank_lock);
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
+  if (index < n && g_coreset_bank[index].state != NR_CORESET_REMOVED) {
+    nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[index];
+    if (explains_locked(&e->cfg, cce, al, index)) {
+      if (slot != e->alias_slot) { e->alias_slot = slot; ++e->alias_hits; }
+    } else
+      ++e->own_hits;
+    if (e->own_hits == 0 && e->alias_hits >= 2) {
+      LOG_A(PHY, "SENSING: multi-CORESET bank evict index=%d offset=%d span=%d mapping=%d/%d/%d: all %u accepts re-expressible by an older entry\n",
+            index, e->cfg.coreset_rb_offset, e->cfg.coreset_freq_domain * 6, e->cfg.coreset_reg_bundle_size,
+            e->cfg.coreset_interleaver_size, e->cfg.coreset_shift_index, e->alias_hits);
+      e->state = NR_CORESET_REMOVED;
+      g_compaction_pending = true;
+      compact_removed();
+    }
+  }
+  pthread_mutex_unlock(&g_coreset_bank_lock);
+}
+
 /* nr_pdcch_coreset_bank_add: adds a verified CORESET (monitor configuration cfg, with the owner RNTI) to the bank: reuses an existing entry with the same geometry (recording the owner), or appends a new entry while the bank has room.
  *   Refuses requests outside the current configuration epoch, an unset length override, or an alias of an existing owner; a full bank is logged and refused. Returns the entry index, or -1. Callers: nr_pdcch_discovered_observe() and the tests.
  */
@@ -426,7 +580,9 @@ int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t 
       return -1;
     }
     at = n;
+    pthread_mutex_lock(&nr_pdcch_al1_mu);
     memset(&g_coreset_bank[at], 0, sizeof(g_coreset_bank[at]));
+    pthread_mutex_unlock(&nr_pdcch_al1_mu);
     g_coreset_bank[at].cfg = *cfg;
     g_coreset_bank[at].verified_epoch = nr_cfg_reconf_enabled() ? nr_cfg_epoch_work_stamp() : 0;
     g_coreset_bank[at].cfg.autodiscover = 0;

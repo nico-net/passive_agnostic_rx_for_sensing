@@ -14,6 +14,7 @@
 #include "nr_pdsch_gpu_demod.h"
 #include "nr_pdsch_gpu_ldpc.h"
 #include "nr_gpu_pass_post.h"
+#include "nr_llr_norm.h" /* nr_llr_norm_target: the host rule k_norm_sum mirrors */
 #include "nr_gpu_pass_cap.h"
 #include "PHY/TOOLS/nr_gpu_membudget.h"
 #include "PHY/TOOLS/nr_gpu_platform.h"
@@ -87,6 +88,7 @@ struct PassBlk { /* written by the host before every replay */
   nr_gpu_chest_post_par_t post;
   uint32_t G, span, tbs;
   int norm, ncb, KB; /* ncb: the code blocks decoded (k_pick) */
+  int plain_t;             /* HMCS: target of the plain (non 2-layer) LLR normalisation = nr_llr_norm_target(Qm), LLR_NORM_TARGET under the NR_TEST_L2NORM_OLD seam */
   int nl, qm, l2t, l2dk;   /* RANK2-WEAK: layers and modulation order of the DL grant (the 2-layer LLR normalisation, nr_llr_norm_shift_nl); 0 = the plain rule */
   const uint32_t *scr;
   nr_gpu_rdm_seg_t rdm[MAXCB];
@@ -267,7 +269,7 @@ __global__ void k_seg_compose(const short2 *sc, short2 *est, const PassBlk *pb, 
   }
 }
 /* nr_llr_norm_shift_nl (nr_llr_norm.h, keep identical): nl == 2 and Qm 2/4/6/8: every 16th RE block (2 Qm LLRs, Qm per layer) of llr[0, span), the per-layer
- * means, k from the smaller; else nr_llr_norm_shift: the mean |LLR| of every 16th of llr[0, span), smallest k <= 8 with (mean >> k) <= 40 */
+ * means, k from the smaller; else nr_llr_norm_shift_t: the mean |LLR| of every 16th of llr[0, span), smallest k <= 8 with (mean >> k) <= pb->plain_t (40; 8 * 24 for 256QAM, HMCS) */
 __global__ void k_norm_sum(const int16_t *llr, const PassBlk *pb, ResBlk *rb)
 {
   __shared__ unsigned long long red[1024 / 32][2];
@@ -308,7 +310,7 @@ __global__ void k_norm_sum(const int16_t *llr, const PassBlk *pb, ResBlk *rb)
     } else if (pb->norm && (span + 15) / 16) {
       const uint32_t cnt = (span + 15) / 16;
       const uint32_t mean = (uint32_t)(a / cnt);
-      while (k < 8 && (mean >> k) > 40u) k++;
+      while (k < 8 && (mean >> k) > (uint32_t)pb->plain_t) k++;
     }
     rb->shift = k;
   }
@@ -617,6 +619,7 @@ static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
       dk = getenv("NR_TEST_L2NORM_DK") ? atoi(getenv("NR_TEST_L2NORM_DK")) : 2;
     }
     pb.nl = old_rule ? 0 : j->dj.nl; pb.qm = j->Qm; pb.l2t = target; pb.l2dk = dk;
+    pb.plain_t = old_rule || j->dj.nl == 2 ? (int)LLR_NORM_TARGET : (int)nr_llr_norm_target((int)j->Qm); /* nr_llr_norm_shift_nl, plain branch (keep identical) */
   }
   pb.Gd = j->probe ? j->G_dem : j->G_dem && j->G_dem < j->G ? j->G_dem : j->G; /* a probe: the LLRs up to its horizon (> 0, checked in dl_try) */
   pb.ncb = (int)nd; pb.KB = (int)((j->K + 7) >> 3);
@@ -719,6 +722,8 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
   for (int a = 0; a < 4; a++) I.rx[a] = j->rxdata[a];
   I.fj = {I.rx, j->ring_len, j->ring_offset, j->symbol_rot, 0x3fff, redirect ? (int16_t *)j->rxdataF : nullptr, redirect ? (uint32_t)j->rx_stride : 0u, 0};
   I.fj.run_mask = fep_need(j); /* grant-sized: the captured grid stays 14 symbols, the blocks of the other symbols return at once */
+  I.fj.sfo_dphi = j->sfo_on ? j->sfo_dphi : nullptr; /* staged into par[PAR_SFO..] per replay, like the rotation */
+  I.fj.sfo_kref = j->sfo_kref;
   if (nr_pdsch_gpu_fep_stage_at(&I.fj, I.id) != 0) return -1;
   /* chest rows: one per (DM-RS symbol, layer, segment, antenna), the order of nr_pdsch_gpu_chest_grant (ns == 1: one segment = the grant). A class with several
    * segments estimates into scratch rows (the estimator writes a whole row) and k_seg_compose lays them out in data order. */
@@ -973,6 +978,8 @@ static int prepare_ul(Inst &I, const nr_gpu_pass_job_t *j)
     it[m].rot[0] = u.rot[m][0];
     it[m].rot[1] = u.rot[m][1];
     it[m].rotate = 1;
+    it[m].sfo_dphi = u.sfo_dphi[m];
+    it[m].sfo_kref = u.sfo_kref;
   }
   par[0] = u.rot_nb_rb;
   par[1] = u.rot_fco;
@@ -1017,7 +1024,7 @@ static int prepare_ul(Inst &I, const nr_gpu_pass_job_t *j)
   b.llr = (int16_t *)I.llr.dev;
   PassBlk &pb = *I.PB();
   memset(&pb.post, 0, sizeof(pb.post));
-  pb.span = 0; pb.norm = 0; pb.nl = pb.qm = 0; /* the UL decoder takes the equaliser's LLRs as they are (no K38 normalisation) */
+  pb.span = 0; pb.norm = 0; pb.plain_t = (int)LLR_NORM_TARGET; pb.nl = pb.qm = 0; /* the UL decoder takes the equaliser's LLRs as they are (no K38 normalisation) */
   const int rc = prepare_tb(I, j);
   b.scr = pb.scr;
   return rc;

@@ -1117,6 +1117,7 @@ set(PHY_NR_PASSIVE_UL_SRC
   ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_ul_channel_estimation.c
   ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_freq_equalization.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ul_nid_rule.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c
@@ -2198,7 +2199,7 @@ add_executable(nr_dlsim
   ${PHY_INTERFACE_DIR}/queue_t.c
   )
 target_link_libraries(nr_dlsim PRIVATE
-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE NR_UE_ISAC nr_pdcch_blind_monitor SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
+  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE PHY_NR_PASSIVE_SIM NR_UE_ISAC nr_pdcch_blind_monitor SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
   m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common NR_L2_UE
   softmodem_common
   )
@@ -2260,7 +2261,22 @@ target_link_libraries(nr_pusch_ra0sim PRIVATE
   -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE PHY_NR_PASSIVE_SIM NR_UE_ISAC SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR nr_pdcch_blind_monitor -Wl,--end-group
   m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common softmodem_common NR_L2_UE
   asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+add_executable(nr_pusch_ucisim
+  ${OPENAIR1_DIR}/SIMULATION/NR_PHY/pusch_ucisim.c
+  ${NFAPI_USER_DIR}/nfapi.c
+  ${NFAPI_USER_DIR}/gnb_ind_vars.c
+  ${PHY_INTERFACE_DIR}/queue_t.c)
+target_link_libraries(nr_pusch_ucisim PRIVATE
+  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE PHY_NR_PASSIVE_SIM NR_UE_ISAC SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR nr_pdcch_blind_monitor -Wl,--end-group
+  m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common softmodem_common NR_L2_UE
+  asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
 if (ENABLE_TESTS)
+  add_test(NAME test_nr_pusch_uci_mapcheck COMMAND nr_pusch_ucisim --mapcheck)
+  add_test(NAME test_nr_pusch_uci_ack_rm COMMAND nr_pusch_ucisim -n 3 -s 40 -S 40.1 -r 273 -R 273 -m 20 -v 1 --uci 5,9,0,0,0,0,3)
+  add_test(NAME test_nr_pusch_uci_csi COMMAND nr_pusch_ucisim -n 3 -s 40 -S 40.1 -a 0 -b 14 -U 0,1,1,2 -r 273 -R 273 -m 16 -v 1 --uci 2,9,7,9,0,0,3)
+  add_test(NAME test_nr_pusch_uci_ack_csi COMMAND nr_pusch_ucisim -n 3 -s 40 -S 40.1 -a 0 -b 14 -U 0,1,1,2 -r 106 -R 106 -m 24 -v 1 --uci 4,11,7,13,0,0,3)
+  add_test(NAME test_nr_pusch_uci_csi2_oai COMMAND nr_pusch_ucisim -n 3 -s 40 -S 40.1 -a 0 -b 14 -U 0,1,1,2 -r 273 -R 273 -m 16 -v 1 --uci 2,9,7,9,6,9,3)
+  add_test(NAME test_nr_pusch_uci_narrow COMMAND nr_pusch_ucisim -n 3 -s 40 -S 40.1 -r 106 -R 106 -m 9 -v 1 --uci 6,9,0,0,0,0,3)
   add_test(NAME test_nr_pusch_ra0_qpsk COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 2 -R 106 -m 9 -v 1)
   add_test(NAME test_nr_pusch_ra0_qam16 COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 2 -R 106 -m 16 -v 1)
   add_test(NAME test_nr_pusch_ra0_qam64 COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 46 -R 106 -m 24 -v 1)
@@ -3083,6 +3099,18 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdsch_chest_key PRIVATE GTest::gtest GTest::gtest_main)
   add_dependencies(tests test_nr_pdsch_chest_key)
   add_test(NAME test_nr_pdsch_chest_key COMMAND ./test_nr_pdsch_chest_key)
+
+  add_executable(test_nr_ul_branch_select ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ul_branch_select_test.cc)
+  target_include_directories(test_nr_ul_branch_select PRIVATE ${OPENAIR1_DIR} ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_ul_branch_select PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_ul_branch_select)
+  add_test(NAME test_nr_ul_branch_select COMMAND ./test_nr_ul_branch_select)
+
+  add_executable(test_nr_pdcch_cell_len_hint ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_cell_len_hint_test.cc)
+  target_include_directories(test_nr_pdcch_cell_len_hint PRIVATE ${OPENAIR1_DIR} ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdcch_cell_len_hint PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_pdcch_cell_len_hint)
+  add_test(NAME test_nr_pdcch_cell_len_hint COMMAND ./test_nr_pdcch_cell_len_hint)
 
   add_executable(test_nr_llr_norm ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_llr_norm_test.cc)
   target_include_directories(test_nr_llr_norm PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)

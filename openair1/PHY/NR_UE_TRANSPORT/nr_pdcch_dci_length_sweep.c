@@ -216,6 +216,30 @@ uint32_t nr_pdcch_dci_length_n_suspect_from_env(void)
   return 200; /* active-elsewhere misses before a LOCKED per-RNTI DCI length turns SUSPECT */
 }
 
+/* note_absence: counts the occasions a LOCKED context was not accepted while its RNTI was active elsewhere. Absence alone is never evidence of a changed
+ * configuration (a passive receiver cannot tell "not scheduled" from "missed"): this only feeds the scout gate (miss_occasions), it never changes len_state.
+ * A SUSPECT verdict needs positive evidence (nr_pdcch_dci_length_context_suspect_on_evidence). Live 2026-10-25: ~1 absence-driven DEDICATED_CHANGE_SUSPECTED epoch per second on 3 of 5 runs. */
+void nr_pdcch_dci_length_context_note_absence(nr_pdcch_dci_length_context_t *c, bool accepted_at_locked, bool rnti_active_elsewhere)
+{
+  if (!c || c->len_state != NR_LEN_LOCKED || c->found[0] <= 0) return;
+  if (accepted_at_locked) { c->miss_occasions = 0; return; }
+  if (rnti_active_elsewhere && c->miss_occasions < UINT32_MAX) ++c->miss_occasions;
+}
+
+/* suspect_on_evidence: a LOCKED context goes SUSPECT because positive evidence names a length the context does not hold (a sweep decoded this RNTI at a
+ * different length). Returns true on the LOCKED -> SUSPECT transition. Equal to a held length: no change (the miss counter restarts). */
+bool nr_pdcch_dci_length_context_suspect_on_evidence(nr_pdcch_dci_length_context_t *c, int evidenced_length)
+{
+  if (!c || c->len_state != NR_LEN_LOCKED || c->found[0] <= 0 || evidenced_length <= 0) return false;
+  if (evidenced_length == c->found[0] || evidenced_length == c->found[1]) {
+    c->miss_occasions = 0;
+    c->scout_initialized = false;
+    return false;
+  }
+  nr_pdcch_dci_length_context_note_occasion(c, false, true, 1);
+  return c->len_state == NR_LEN_SUSPECT;
+}
+
 void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c,
     bool accepted_at_locked, bool rnti_active_elsewhere, uint32_t n_suspect)
 {

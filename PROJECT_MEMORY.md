@@ -2361,6 +2361,34 @@ NOT validated on the DGX — run a DGX T10 / TIM+Vodafone A/B before trusting it
 - NIC IRQs must stay on CPU 0 (spreading them over 0-2 broke the X410 stream in 5 s); watch `rx_out_of_buffer`.
 
 
+**2026-10-25/26 lab decode work (merged into adaptive-rx-UL-DL by fast-forward to `c0736a228e`, 2026-10-26).**
+All `[MEASURED, sens6 OTA, sens4 lab cell, 273 PRB, 4 RX, gain 36]` unless noted; per-RNTI DCI recall with
+`groundtruth.py match_clock` (the old single-offset `groundtruth:` line is wrong after RX slot jumps). Runbook:
+`docs/superpowers/experiments/LAB-ESPERIMENTI-IT.md` + `scripts/`. Run-to-run variance is large: ≥ 2 alternated runs per arm.
+- RX gain 36 (config): 49 clips DL slots (ADC at the X4xx full scale 8191 after rxshift=2; `ADCCLASS`, `32b9ad5e71`); 42→36 signal
+  and noise drop together (DM-RS SNR ~30 dB, signal-proportional floor ~-30 dB); 30 is thermal-limited.
+- Discovery: false CORESET aliases (same nID, overlapping geometry) → re-expression arbiter + alias eviction (`0443cdc466`,
+  `d22ba5e1af`, races `1e4ade914e`/`0c282f5a11`); bank = 1 in every run since. Reconfiguration storm (absence ≠ evidence,
+  `8590209d86`); CRC-falsifiable UL lock (`45c0a1838f`); cell DCI 1_1 length hint by corroborating locks (`0e4028574c`: one spurious
+  length lock had stopped the bank pass, DL recall 0.20-0.45 → 0.97-0.99).
+- DL: in-slot SFO correction, eps from the timing loop + DM-RS slope, referenced to the SSB centre (`6859f63e2e`, `4a1e19f8ac`,
+  `176afaf312`, `84d2a1f46a`, `333701f996`; eps ≈ +3.8 ppm). Rank-2 equaliser clipped in int16 mode 2 → exact mode 3 when nbRx > nl
+  (`cac200ad51`; rank 2 MCS 24-27 0.14/0.03/0.005 → 0.59/0.57/0.36). 256QAM LLR normaliser squeezed the lattice to 2.5-5 LSB for the
+  int8 LDPC → Qm-aware target (`2bb691c386`; rank-1 wide 0.27 → 0.61; rank-4 A/B 2 v 2: better at every width). The 2-layer target
+  change `fb32f74de7` HURT on air (0.63 → 0.33) and is NOT merged. After the fixes, MCS 24-27: rank 1 0.66-0.79 / 0.76-0.78 / 0.61
+  (≤32 / 33-128 / >128 RB), rank 2 0.30-0.63 / 0.30-0.65 / 0.10-0.47, rank 4 ~0.1 narrow and ~0 wide (MCS 20-23: 0.52-0.57 narrow).
+  Wide rank 4 is consistent with 4x4 conditioning at the RX position (WIDE-RANK4-20261025.md), not proven.
+- UL: data-id order DL-confirmed PDSCH id → PCI → PDCCH id, lock only on a decisive pass (`77db2342cd`, `4a2aa5a144`, `26fd85e7dc`);
+  UL SFO in every UL FEP + blind UCI-on-PUSCH by default (`7abb385049`, `82ba091f5c`, `aa4bc71549`); run-time UL branch selection
+  instead of the fixed branch 0 (`55502ec544`); CRC-decided layout fit (`cd9407e795`, `c0736a228e`: strict fit retried while
+  provisional, the cell-BWP RIV split always a hypothesis, trial budget per verdict). Layout locked in 4/4 runs after `c0736a228e`
+  (3 of the 6 runs before failed). UL CRC ≤8 RB 0.81-0.97, >64 RB 0.36-0.96 by run.
+- OPEN: (1) run-to-run variance at equal SNR (rank-2 DL 0.08-0.61, UL wide 0.09-0.96; one run collapsed in both directions);
+  hypothesis: X410 LMX2572 LO synthesiser (init failed 3 times overnight) — check the PLL lock sensors per run. (2) CSI-RS slot fix
+  (CDM-aware scoring + blind ZP-CSI-RS + CRC arbiter) unfinished, uncommitted in worktree s6-csirs. (3) DGX validation of all of
+  the above not done; rfsim gate not run on the merged tree. (4) OAI UE CSI-part-2 placement fixed upstream in 2026.w33 (`44190828cc`),
+  not applied (UE/fixture only; the receiver tries both placements).
+
 ### 15.0 Site change (2026-09-30) — read first
 
 - **Update 2026-10-02:** an X410 OTA session is scheduled from **2026-10-03** (operator); it will be the first air
@@ -4246,6 +4274,13 @@ G403:t26z+ISAC_CARRIER_FROM_SIB1=1:<cfg>:<C from retune_restart.sh on the first 
   over-states the weak layer. The new EVMGRANT field `snr_l=a,b,c,d` gives per-layer DD SNR (-99 = n/a), log only.
 - `[ORCH]` `ISAC_L2MAXH_DELTA_NL2=-3` (item 2) is the only 2-layer-specific fix found; not a cure for MCS 17+.
 
+- **2026-10-25 RANK2-LEVEL (`sens6/mimo2`): 2-layer mode 2 + NL2 delta clips at high receive level; two layers now use mode 3 with a spare RX branch.**
+  - `[MEASURED, sens6 OTA, lab cell sens4, valD2 vs g36/valD1, rb <= 32, MCS >= 24, nsym >= 9]` CRC by receiver-estimated min-layer `snr_l`: rank 1 0.84-0.98 and rank 4 0.35-0.98 reach ~1.0 by 28 dB, rank 2 plateaus at 0.23-0.38 (28 dB). The phones decode the same MCS 26-27 rank-2 grants at 0 % NACK (gNB stdout `ok/nok`), so the link is fine and the loss is in our receiver.
+  - `[MEASURED, sens6 x86 nr_dlsim, 4x4, TDLA, 256QAM, passive flag set in a local seam]` before/after at SNR 38, MCS 27, 2 layers, gain `-Q` 24/27/30/36 (lower = stronger): BLER1 0.96/0.69/0.20/0.035 -> 0.013/0.017/0.014/0.037; MCS 22 SNR 34: 0.87/0.48/0.056/0 -> 0/0/0/0. 4 layers (mode 3 before and after): unchanged 0.71/0.76/0.83.
+  - `[CODE-READ + MEASURED]` Mechanism: mode 2 rounds G = sum_a conj(h)h >> shift and b = H^H y >> shift to int16; shift follows log2|h|/2 only, and the NL2 delta (-3) multiplies both by 8. At |h| rms >= ~2^10 they hit the rail (dlsim -Q24: 132 of 2544 G diagonal entries and 71 b entries saturated). The OTA rank-2 grants run at l2 = 8-9 (after the delta), the dlsim regime where it fails. Mode 3 (exact double solve) is level independent. Rank 3-4 were already on mode 3, which is why rank 2 alone was worse than rank 1 and rank 4.
+  - `[OFFLINE VERIFIED]` `test_nr_llr_norm` `MmseExact.Rank2LevelHeadroom` (stock int16 front end 0 / 0.62 / 0.90 / 1.00 RE error rate at |h| 300/1000/2500/5000, exact solve 0) and `QamMode.PassiveRule`.
+  - Fix: `nr_qam_mode.h` is the one rule for CPU and GPU: passive, no override: mode 3 for nl >= 3 and for nl == 2 when nbRx > nl; the NL2 delta applies only to mode 2 (nbRx == nl). The upstream OAI 2026.w42 fix `3776425a4a` (2-layer ML LLR tail) is not the cause: the ML LLR runs only for Qm <= 6 with `ue->do_ml` (dlsim -E); passive is 256QAM mode 2/3. `[NOT MEASURED ON AIR]`.
+
 **32. Nl=3/4: Vodafone is SNR-limited; TIM 3-layer MCS 0 is a suspected fixed-point rank-3/4 QPSK equaliser defect (`[HYPOTHESIS, measured support]`)**
 
 - `[OTA VERIFIED, Vodafone PCI 415, 2026-10-12]` 4-layer: 36 of 2077 pass, every grant at `snr` < 9 dB. 3-layer MCS 0-4 at >= 10 dB: 43 of 43 pass.
@@ -4927,6 +4962,12 @@ Scope: DGX spark-74c3, X410 unit 34B2AF1, OTA at DEIB. Branch `csd/single-int` (
 **6. Open work (agents running).** WindTre/Iliad solver (`csd/wl-solver`); discovery GPU contention (`csd/disc-contention`); PCI 675 narrow-grid sync (`csd/narrow51`); solver CRC gap and gate re-base (`csd/solver-wide` round 2). Daytime interleaved A/B on all 4 operators scheduled 2026-10-24 09:00 (`rr-orchestration/ota/run_int_20261023.sh day`).
 
 ---
+
+### 2026-10-25 -- false CORESET discoveries (overlapping interleaved aliases) [sens6 OTA, offline log analysis; fix UNTESTED OTA]
+
+- Symptom [MEASURED, sens6 OTA, sens4 lab cell, 273 PRB, PCI 2, 17 runs]: the bank gains 3-7 interleaved aliases (6/3/x, offsets 30/42/96) of the real offset-0 / 270 RB non-interleaved CORESET; SCANTIME p50 4 -> 524 us, scanq_drop_full ~0 -> 45-55 %, UL layout fit never locks.
+- Root cause [MEASURED, abuci_lab_20261025_115736 run.log]: 2415/2415 USS_BOOT_HITs of the extra geometries coincide in (frame, slot, RNTI) with a bank-0 accept. The dwell verified on "two DCIs, same RNTI, different payload", which an overlapping geometry satisfies on the same REs. The same-nID overlap rule (`nr_pdcch_discovered_cover_banked`) only shields VERIFIED entries and bank 0 is STALE when the dwell starts (it logs STALE->VERIFIED right after each dwell start).
+- Fix (branch sens6/disc-dedup): banked passes record (slot, RNTI, payload hash) in a 256-entry ring (`nr_pdcch_coreset_bank_note_decoded`); `nr_pdcch_discovered_observe` ignores evidence already decoded by a banked pass ("evidence ignored" log line). No thresholds; empty bank or disjoint CORESETs unchanged.
 
 ## 26. Working rules for any agent on this project (carried over from the old setup)
 

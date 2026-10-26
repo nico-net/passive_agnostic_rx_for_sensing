@@ -990,6 +990,7 @@ void nr_pdcch_discovered_reset(void)
   memset(&s_add_disc, 0, sizeof(s_add_disc));
   s_add_disc.generation = generation;
   s_add_disc.epoch = nr_cfg_epoch_current();
+  nr_pdcch_coreset_bank_decoded_clear();
 }
 
 static bool discovered_load_stream(FILE *f);
@@ -1331,8 +1332,36 @@ bool nr_pdcch_discovered_unverified_pending(void)
 int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
                                 nr_dci_bits_t payload, int length)
 {
+  return nr_pdcch_discovered_observe_cand(token, rnti, slot, payload, length, 0, 0);
+}
+
+/* nr_pdcch_discovered_observe_cand: nr_pdcch_discovered_observe() that also knows the decoding candidate (first CCE, aggregation level; al 0 = unknown), so the evidence can be tested against the banked geometries. Callers: the discovered pass, observe(). */
+int nr_pdcch_discovered_observe_cand(uint64_t token, uint16_t rnti, uint64_t slot,
+                                     nr_dci_bits_t payload, int length, int cce, int al)
+{
   if (!nr_cfg_epoch_work_current() || !s_add_disc.active || token != s_add_disc.generation
       || !rnti || length < 1 || length > NR_DCI_MAX_PAYLOAD) return -1;
+  /* One PDCCH transmission belongs to exactly one CORESET: a DCI an operational pass already decoded in this slot (same RNTI, same payload) is that transmission seen through an overlapping geometry whose candidate maps onto the same REs. It proves the traffic, not this geometry. */
+  if (nr_pdcch_coreset_bank_decoded_elsewhere(slot, rnti, nr_dci_bits_hash(&payload, length))) {
+    static _Atomic unsigned s_dup;
+    const unsigned k = atomic_fetch_add_explicit(&s_dup, 1, memory_order_relaxed);
+    if (k < 8 || (k & (k - 1)) == 0)
+      LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d evidence ignored: rnti=0x%04x len=%d slot=%llu already decoded by a banked pass (n=%u)\n",
+            s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, rnti, length,
+            (unsigned long long)slot, k + 1);
+    return -1;
+  }
+  /* Re-expression arbiter: if a banked CORESET of this nID has a candidate on the very same ordered REs (same aggregation level), that candidate decodes the same codeword,
+   * so this CRC-valid DCI is the transmission the bank already explains -- whether or not its pass happened to decode it. Overlap alone never blocks: a genuinely
+   * different CORESET has candidates the bank cannot express. */
+  if (al > 0 && nr_pdcch_coreset_bank_explains(&s_add_disc.cfg, cce, al, -1)) {
+    static _Atomic unsigned s_ovl;
+    const unsigned k = atomic_fetch_add_explicit(&s_ovl, 1, memory_order_relaxed);
+    if (k < 8 || (k & (k - 1)) == 0)
+      LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d evidence ignored: rnti=0x%04x cce=%d al=%d is re-expressible by a banked CORESET (n=%u)\n",
+            s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, rnti, cce, al, k + 1);
+    return -1;
+  }
   int victim = 0;
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; ++i) {
     if (s_add_disc.evidence[i].rnti == rnti && s_add_disc.evidence[i].length == length) {
@@ -2775,24 +2804,6 @@ static int parse_pdsch(const char* s)
 /* Its own config line rather than more fields on pdcch_blind_monitor_ul_pusch, for the same reason
  * parse_scan_thread gives: it defers a stage, which is independent of whether that stage runs at
  * all. Absent/0 = in-line, the previous behaviour. */
-// "max_trials[:beta_idx[:alpha_idx]]" -- UCI-on-PUSCH reservation search. Absent/0 = off.
-static int parse_ul_uci(const char* s)
-{
-  g_cfg.ul_uci_beta  = 11;  // ~20, a mid-table default; override from the gNB's own betaOffsets
-  g_cfg.ul_uci_alpha = 0;   // 0.5, what this deployment logs
-  /* 32: a failed grant costs at most a couple of cached attempts, and only one failure in 32 pays
-   * for the wide sweep. The footprint is a property of the UE's report config, so once learned it
-   * serves every later grant -- that is what makes online recovery affordable at all. */
-  g_cfg.ul_uci_explore_every = 32;
-  const int n = sscanf(s, "%d:%d:%d:%d", &g_cfg.ul_uci_search, &g_cfg.ul_uci_beta,
-                       &g_cfg.ul_uci_alpha, &g_cfg.ul_uci_explore_every);
-  if (n < 1 || g_cfg.ul_uci_search < 0 || g_cfg.ul_uci_explore_every < 0) {
-    g_cfg.ul_uci_search = 0;
-    return 0;
-  }
-  return 1;
-}
-
 static int parse_ul_thread(const char* s)
 {
   g_cfg.ul_queue_depth = 0;
@@ -3114,9 +3125,6 @@ void nr_pdcch_blind_monitor_init(void)
   g_cfg.scan_thread            = 0;  // in-line on the PHY receive thread, as before
   g_cfg.scan_queue_depth       = 0;
   g_cfg.scan_thread_core       = -1;
-  g_cfg.ul_uci_search          = 0;  // off = previous behaviour
-  g_cfg.ul_uci_beta            = 11;
-  g_cfg.ul_uci_alpha           = 0;
   g_cfg.ul_thread              = 0;  // in-line on the PHY receive thread, as before
   g_cfg.ul_queue_depth         = 0;
   g_cfg.ul_thread_core         = -1;
@@ -3153,7 +3161,6 @@ void nr_pdcch_blind_monitor_init(void)
   char*     p_noise_gates = NULL;
   char*     p_scan_thread = NULL;
   char*     p_ul_thread   = NULL;
-  char*     p_ul_uci      = NULL;
   char*     p_tda        = NULL;
   char*     p_dmrs       = NULL;
   char*     p_pdsch      = NULL;
@@ -3269,10 +3276,6 @@ void nr_pdcch_blind_monitor_init(void)
         "Passive PUSCH receive; decode[:max_per_slot[:ta_offset_samples]] (decode 0=off default, "
         "1=on; ta_offset 0 = derive N_TA_offset from the sample rate -- the per-UE N_TA is in no DCI)",
         0, .strptr = &p_ul_pusch, .defstrval = "", TYPE_STRING, 0},
-      {"pdcch_blind_monitor_ul_uci",
-        "UCI-on-PUSCH reservation search: max_trials[:beta_idx[:alpha_idx]]. 0/absent = off. O_ACK is "
-        "not in the UL DCI (the DAI pins it only mod 4), so candidates are tried and the TB CRC decides",
-        0, .strptr = &p_ul_uci, .defstrval = "", TYPE_STRING, 0},
       {"pdcch_blind_monitor_ul_thread",
         "Defer the passive PUSCH decode off the PHY receive thread; n_consumers[:queue_depth[:core]]. "
         "0/absent = in-line. Measured: the UL decode is 1065us per grant against a 500us slot, "
@@ -3336,10 +3339,6 @@ void nr_pdcch_blind_monitor_init(void)
   if (p_rnti_range != NULL && p_rnti_range[0] != '\0' && !parse_rnti_range(p_rnti_range)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_rnti_range '%s'; using default %u-%u\n", p_rnti_range,
           NR_PDCCH_BLIND_RNTI_MIN_DEFAULT, NR_PDCCH_BLIND_RNTI_MAX_DEFAULT);
-  }
-  if (p_ul_uci != NULL && p_ul_uci[0] != '\0' && !parse_ul_uci(p_ul_uci)) {
-    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_uci '%s'; UCI reservation search off\n",
-          p_ul_uci);
   }
   if (p_ul_thread != NULL && p_ul_thread[0] != '\0' && !parse_ul_thread(p_ul_thread)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_thread '%s'; UL decode stays in-line\n",

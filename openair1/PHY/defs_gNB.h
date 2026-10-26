@@ -238,6 +238,11 @@ typedef struct {
   c16_t **rxdataF_comp;
   /// \f$\log_2(\max|H_i|^2)\f$
   int16_t log2_maxh;
+  /// passive RX: bit mask of the receive branches the grant's DM-RS measurement kept for the combiner (0 = all), nr_ul_branch_select.h
+  uint32_t ul_branch_mask;
+  /// passive RX: per receive branch, the noise of the DM-RS channel estimates (sum of |LS - smoothed|^2) and the sample count, over the grant's DM-RS symbols
+  uint64_t ul_noise_amp2[8];
+  uint32_t ul_noise_cnt[8];
   /// measured RX power based on DRS
   uint32_t ulsch_power[8];
   /// total signal over antennas

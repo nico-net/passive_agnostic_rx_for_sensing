@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #endif
 /* GPUPASS Task 4, host side of the DL graph pass: see nr_gpu_pass_dl.h and nr_gpu_pass.h. */
+#include "PHY/MODULATION/nr_sfo_state.h"
 #include "PHY/TOOLS/nr_gpu_membudget.h"
 #include "nr_gpu_pass_dl.h"
 #include "nr_gpu_pass_ul.h"
@@ -613,6 +614,10 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   j->ring_len = 2u * fp->samples_per_frame;
   j->ring_offset = get_samples_slot_timestamp(fp, in->proc->nr_slot_rx);
   j->symbol_rot = (const int16_t *)(fp->symbol_rotation[link_type_dl] + (in->proc->nr_slot_rx % fp->slots_per_subframe) * fp->symbols_per_slot);
+  j->sfo_q = nr_sfo_eps_q();
+  j->sfo_on = nr_sfo_slot_dphi(j->sfo_q, fp->ofdm_symbol_size, fp->nb_prefix_samples, fp->nb_prefix_samples0, fp->numerology_index, fp->symbols_per_slot,
+                               in->proc->nr_slot_rx, j->sfo_dphi);
+  j->sfo_kref = nr_sfo_kref(fp->ofdm_symbol_size, fp->first_carrier_offset, fp->ssb_start_subcarrier);
   j->rxdataF = (int16_t *)in->rxdataF;
   j->rx_stride = in->rx_stride;
   /* the pass transforms (and in DISCRETE copies back) only the symbols this grant reads: its PDSCH window, every DM-RS symbol of the grant (the chest key), the demod's symbols. This is the
