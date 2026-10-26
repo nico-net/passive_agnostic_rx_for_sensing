@@ -83,6 +83,9 @@ typedef struct nrLDPC_TB_decoding_parameters_s{
   /// Output, per segment: OAI's LDPCdecoder iteration count (numIter; success needs numIter < max_ldpc_iterations, a failure reports
   /// max_ldpc_iterations). 0 = not reported (a decoder that does not say, or a segment that was not decoded).
   uint8_t decodeIters[NR_LDPC_MAX_NUM_CB];
+  /// Output, per segment: the decoder was started on it (false = skipped because the TB's decode was already aborted after
+  /// NR_CB_FAIL_LIMIT failed blocks, or never reached). The per-code-block CRC metric is sum(decodeSuccess) / sum(decodeTried).
+  bool decodeTried[NR_LDPC_MAX_NUM_CB];
   /// Output: which decoder produced the result of this TB (NRLDPC_DECODER_*), 0 if the implementation does not say.
   /// NOT interchangeable (K34/K36): NRLDPC_DECODER_CPU is OAI's plain min-sum; NRLDPC_DECODER_CUDA_FLOODING is a
   /// normalised (x3/4) min-sum run for 2x the iterations, measured about 1 dB more sensitive on BG1 R1/3. A CRC pass or

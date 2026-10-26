@@ -73,8 +73,14 @@ typedef struct {
   uint32_t accepts_total; /* independent (non-duplicate, distinct-slot) CRC-valid DCIs on this entry, never reset; relaxed-atomic access */
   uint64_t confirm_slot;
   uint32_t verified_epoch;
+  uint32_t alias_hits, own_hits; /* accepts re-expressible by an older entry / not (eviction evidence) */
+  uint64_t alias_slot;
   uint8_t state;
 } nr_pdcch_discovered_coreset_t;
+
+#include <pthread.h>
+/* Mutex guarding the AL1 UNION fields of the bank entries (see nr_pdcch_coreset_bank.c). */
+extern pthread_mutex_t nr_pdcch_al1_mu;
 
 typedef enum { NR_CORESET_VERIFIED = 0, NR_CORESET_STALE = 1, NR_CORESET_REMOVED = 2 } nr_coreset_state_t;
 
@@ -114,6 +120,19 @@ int nr_pdcch_coreset_bank_remove(int index);
 void nr_pdcch_coreset_bank_note_accept(int index, uint64_t slot);
 void nr_pdcch_coreset_bank_note_confirm(int index, uint64_t slot);
 void nr_pdcch_coreset_bank_note_dci(int index, uint64_t slot, uint16_t rnti, uint32_t payload_hash);
+/* Operational passes record every CRC-valid DCI (slot key, RNTI, payload hash); a discovery dwell asks whether a DCI was already decoded elsewhere (same transmission => no new evidence for the dwell geometry). */
+void nr_pdcch_coreset_bank_note_decoded(uint64_t slot, uint16_t rnti, uint32_t payload_hash);
+bool nr_pdcch_coreset_bank_decoded_elsewhere(uint64_t slot, uint16_t rnti, uint32_t payload_hash);
+void nr_pdcch_coreset_bank_decoded_clear(void);
+/* The ordered (RB<<4 | symbol) resource elements units a PDCCH candidate (first CCE, aggregation level) of geometry `c` carries, exactly in the
+ * order nr_pdcch_demapping_deinterleaving() fills e_rx. Returns the unit count (6 * al), or -1 for an impossible candidate. out needs 6 * al entries. */
+int nr_pdcch_candidate_res(const nr_pdcch_blind_monitor_cfg_t *c, int cce, int al, uint32_t *out, int max);
+/* True when a live banked CORESET with the same scrambling ID (only entries with index < below, or all when below < 0) has a candidate of the same aggregation
+ * level on the same ordered REs: that candidate decodes the SAME codeword, so a CRC-valid DCI of `c`'s candidate is that transmission, not evidence for `c`. */
+bool nr_pdcch_coreset_bank_explains(const nr_pdcch_blind_monitor_cfg_t *c, int cce, int al, int below);
+/* An accept of bank entry `index` at candidate (cce, al): counts it as re-expressible by an older entry or not; an entry whose accepts (at least two, distinct
+ * slots) are all re-expressible by older entries is an alias and is evicted. */
+void nr_pdcch_coreset_bank_note_alias(int index, uint64_t slot, int cce, int al);
 void nr_pdcch_coreset_bank_tick(uint64_t slot, bool traffic_elsewhere,
                                 uint32_t t_stale_slots, uint32_t t_remove_slots);
 void nr_pdcch_coreset_bank_dispatch_enter(void);

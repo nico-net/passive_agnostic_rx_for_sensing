@@ -11,7 +11,9 @@
 #include <unistd.h>
 #include "PHY/TOOLS/nr_gpu_platform.h"
 #include "nr_srs_passive.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.h"
 #include "nr_passive_cfg_epoch.h"
+#include "nr_pdcch_cell_len_hint.h"
 #include "nr_passive_reconf_rules.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_passive_sample_lifetime.h"
@@ -820,7 +822,7 @@ static _Atomic bool g_length_found  = false; /* _Atomic: N scan consumers (Task 
 
 /* Guards the AL1 UNION fields of the bank entries (nr_pdcch_coreset_bank.h): unlike cfg they change
  * after publication. */
-static pthread_mutex_t g_al1_mu = PTHREAD_MUTEX_INITIALIZER;
+#define g_al1_mu nr_pdcch_al1_mu /* defined with the bank, which also reads the union */
 
 /* ---- AL1 UNION DECODING ------------------------------------------------------------------------
  * An AL1 verification pins the CCE-to-REG mapping only up to the mappings whose AL1 family holds the
@@ -983,6 +985,12 @@ static void pass_note(int k, uint64_t ns, uint32_t acc)
 }
 static _Thread_local uint64_t t_discovered_token;
 static _Thread_local uint64_t t_discovered_slot;
+/* disc_slot_key: the slot key shared by the dwell evidence and the operational-decode ring (identical derivation on both sides). */
+static inline uint64_t disc_slot_key(const PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, long slot)
+{
+  return slot >= 0 ? (uint64_t)slot
+      : nr_cfg_epoch_observe_slot(proc->frame_rx, proc->nr_slot_rx, ue->frame_parms.slots_per_frame);
+}
 static _Thread_local bool t_discovered_attempted;
 static _Thread_local bool t_discovered_prescreen_passed; /* a candidate of this dwell pass cleared the prescreen */
 static _Thread_local int t_candidate_share; /* zero = legacy per-pass budget */
@@ -1796,6 +1804,8 @@ static void reconf_length_reopened(uint16_t rnti, bool uplink, int old_len, int 
 {
   LOG_A(PHY, "SENSING: DCI length RELOCK rnti=0x%04x old=%d new=%d\n", rnti, old_len, new_len);
   nr_pdsch_config_sweep_relock_length(rnti, uplink, old_len, new_len);
+  /* A DL length that really changed is the positive evidence of a dedicated reconfiguration. UL 0_1 flips between decodable sizes are not. */
+  if (!uplink && nr_cfg_reconf_enabled()) nr_cfg_epoch_note_rnti_reopened(rnti, true, nr_cfg_epoch_current_slot());
   /* context_lock/add already invalidates the replaced per-length pin under the
    * length lock. The legacy global pin is not used by the RECONF auto path. */
 }
@@ -2640,10 +2650,13 @@ static int ul_cell_len(uint16_t rnti)
 static void janon_note_cell_len(int len)
 {
   if (len <= 0) return;
-  for (int i = 0; i < 4; i++)
-    if (atomic_load(&g_cell_lens[i]) == len) return;
-  for (int i = 3; i > 0; i--) atomic_store(&g_cell_lens[i], atomic_load(&g_cell_lens[i - 1]));
-  atomic_store(&g_cell_lens[0], len);
+  /* ranked by corroborating locks (nr_pdcch_cell_len_hint.h), not by recency: one contradicting lock must not replace the hint of every CORESET without a lock */
+  static nr_cell_len_hint_t hint;
+  static pthread_mutex_t hint_mu = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&hint_mu);
+  nr_cell_len_hint_note(&hint, len);
+  for (int i = 0; i < NR_CELL_LEN_HINT_N; i++) atomic_store(&g_cell_lens[i], hint.len[i]);
+  pthread_mutex_unlock(&hint_mu);
 }
 /* janon_hit_scorer: scorer of the anonymous length sweep for joint-anon hits: accepts trial i only when it is a hit of the requested length and its RNTI is not already known.
  *   Returns the RNTI and payload hash of the hit. Passed to nr_pdcch_dci_length_sweep_feed_budget() by run_occasion_one() (joint-anon sweep).
@@ -4477,8 +4490,7 @@ static void run_discovered_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
                                     uint64_t token, int share)
 {
   t_discovered_token = token;
-  t_discovered_slot = slot >= 0 ? (uint64_t)slot
-      : nr_cfg_epoch_observe_slot(proc->frame_rx, proc->nr_slot_rx, ue->frame_parms.slots_per_frame);
+  t_discovered_slot = disc_slot_key(ue, proc, slot);
   t_discovered_attempted = false;
   t_discovered_prescreen_passed = false;
   t_candidate_share = share;
@@ -5946,16 +5958,10 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
               nr_pdcch_dci_length_context(dl_bank, dl_geom, dl_known[k]);
           if (c && c->len_state == NR_LEN_LOCKED && c->last_note_slot != abs_slot) {
             if (c->last_note_slot != 0) {
-              nr_pdcch_dci_length_context_note_occasion(c,
+              /* absence only: counts toward the scout gate, never SUSPECT and never an epoch (see note_absence) */
+              nr_pdcch_dci_length_context_note_absence(c,
                   c->last_accept_slot == c->last_note_slot,
-                  nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1),
-                  nr_reconf_rrc_n_suspect(c->rnti, (int64_t)source_absolute_slot, (int)ue->frame_parms.numerology_index, reconf_n_suspect()));
-              if (c->len_state == NR_LEN_SUSPECT && cfg_reconf_on) {
-                if (nr_ue_ctx_enabled())
-                  nr_ue_ctx_on_param(c->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
-                                     NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
-                nr_cfg_epoch_note_rnti_reopened(c->rnti, true, cfg_abs_slot);
-              }
+                  nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1));
             }
             c->last_note_slot = abs_slot;
           }
@@ -6209,14 +6215,11 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             found_len = -1;
         }
         if (found_len > 0 && dl_scout) {
-          nr_pdcch_dci_length_context_note_occasion(dlc, false, true,
-              nr_reconf_rrc_n_suspect(dlc->rnti, (int64_t)source_absolute_slot, (int)ue->frame_parms.numerology_index, reconf_n_suspect()));
-          if (dlc->len_state == NR_LEN_SUSPECT && cfg_reconf_on) {
-            if (nr_ue_ctx_enabled())
-              nr_ue_ctx_on_param(dlc->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
-                                 NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
-            nr_cfg_epoch_note_rnti_reopened(dlc->rnti, true, cfg_abs_slot);
-          }
+          /* the scout decoded this RNTI at found_len: only a length the context does not hold is evidence of a change; the epoch is
+           * notified by the relock (reconf_length_reopened) once the new length is locked. */
+          if (nr_pdcch_dci_length_context_suspect_on_evidence(dlc, found_len) && cfg_reconf_on && nr_ue_ctx_enabled())
+            nr_ue_ctx_on_param(dlc->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
+                               NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
         } else if (found_len > 0 && dl_second) {
           const int replaced = nr_pdcch_dci_length_context_add(dlc, found_len, abs_slot);
           nr_pdcch_dci_length_bank_converged(dl_bank, locked_rnti, found_len);
@@ -6404,16 +6407,10 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         nr_pdcch_dci_length_context_t *c = nr_pdcch_dci_length_context(ul_bank, geom, known_ul[k]);
         if (c && c->len_state == NR_LEN_LOCKED && c->last_note_slot != abs_slot) {
           if (c->last_note_slot != 0) {
-            nr_pdcch_dci_length_context_note_occasion(c,
+            /* UL 0_1 absence is neither SUSPECT nor epoch evidence (the grant simply may not be scheduled) */
+            nr_pdcch_dci_length_context_note_absence(c,
                 c->last_accept_slot == c->last_note_slot,
-                nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1),
-                  nr_reconf_rrc_n_suspect(c->rnti, (int64_t)source_absolute_slot, (int)ue->frame_parms.numerology_index, reconf_n_suspect()));
-            if (c->len_state == NR_LEN_SUSPECT && cfg_reconf_on) {
-              if (nr_ue_ctx_enabled())
-                nr_ue_ctx_on_param(c->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
-                                   NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
-              nr_cfg_epoch_note_rnti_reopened(c->rnti, true, cfg_abs_slot);
-            }
+                nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1));
           }
           c->last_note_slot = abs_slot;
         }
@@ -7773,9 +7770,13 @@ constdiag_done:;
           if (ull == 2 && nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(&ull_g, source_absolute_slot);
           /* ISAC_UL_LOCK_CRC_FIRST=1: real PUSCH decode jobs under the top-K layout hypotheses (CRC pass = lock) */
           nr_pdcch_blind_ul_result_t ull_t[NR_UL_LAYOUT_MAX_TRIALS];
-          const int nt = nr_ul_layout_crc_trials(cand_task[ti].rnti_min, cand_task[ti].dci_length, source_absolute_slot,
-                                                 cand_task[ti].ul_out.raw_payload, &ull_cell2, ull_t,
-                                                 NR_UL_LAYOUT_MAX_TRIALS);
+          /* trials of a ranked (not yet significant) MCS offset are optional work: booked only while no real grant waits in the PUSCH queue and
+           * the run-time per-second CPU share (core plan) is not spent */
+          const int nt = (nr_ul_layout_provisional(cand_task[ti].dci_length) && !(nr_pusch_passive_rescue_allowed() && nr_pusch_passive_optional_share_left()))
+                             ? 0
+                             : nr_ul_layout_crc_trials(cand_task[ti].rnti_min, cand_task[ti].dci_length, source_absolute_slot,
+                                                       cand_task[ti].ul_out.raw_payload, &ull_cell2, ull_t,
+                                                       NR_UL_LAYOUT_MAX_TRIALS);
           for (int q = 0; q < nt && nr_cfg_epoch_work_current(); q++) nr_pusch_grant_book_add(&ull_t[q], source_absolute_slot);
         }
         nr_pdcch_blind_ul_result_t ull_fit;
@@ -7991,14 +7992,19 @@ constdiag_done:;
       if (cfg->discovered_coreset && reconf_lengths_enabled() && t_bank_index >= 0)
         nr_pdcch_coreset_bank_note_dci(t_bank_index, t_bank_slot, raw->rnti,
                                        nr_dci_bits_hash(&raw->payload, cand_task[ti].dci_length));
+      if (!t_discovered_token && t_bank_index >= 0) { /* banked passes only: the bank explains a transmission */
+        nr_pdcch_coreset_bank_note_decoded(disc_slot_key(ue, proc, source_absolute_slot), raw->rnti,
+                                           nr_dci_bits_hash(&raw->payload, cand_task[ti].dci_length));
+        nr_pdcch_coreset_bank_note_alias(t_bank_index, disc_slot_key(ue, proc, source_absolute_slot), cand_task[ti].cce, cand_task[ti].L);
+      }
       if (!t_discovered_token && accept_dup(abs_slot, raw->rnti, 0))
         continue;
       if (nr_a2e_trace()) nr_a2e_ts[5] = btim_now_ns();
       if (t_discovered_token) t_discovered_prescreen_passed = true; /* CRC-OK DCI = fresh evidence */
       if (t_discovered_token)
-        nr_pdcch_discovered_observe(t_discovered_token, raw->rnti,
+        nr_pdcch_discovered_observe_cand(t_discovered_token, raw->rnti,
             t_discovered_slot,
-            raw->payload, cand_task[ti].dci_length);
+            raw->payload, cand_task[ti].dci_length, cand_task[ti].cce, cand_task[ti].L);
       if (!cfg->discovered_coreset && reconf_lengths_enabled() && t_bank_index >= 0)
         nr_pdcch_coreset_bank_note_dci(t_bank_index, t_bank_slot, raw->rnti,
                                        nr_dci_bits_hash(&raw->payload, cand_task[ti].dci_length));
@@ -8473,11 +8479,16 @@ constdiag_done:;
     // own real DLSCH config. ----
     /* Accepted DCI may still be discovery evidence. Do not emit PDSCH/CFR from
      * unverified geometry or silently use manual interpretation while full-auto is waiting. */
+    if (!t_discovered_token && t_bank_index >= 0 && !cand_task[ti].ul_scan && out.rnti_class == NR_BLIND_RNTI_CLASS_C) {
+      nr_pdcch_coreset_bank_note_decoded(disc_slot_key(ue, proc, source_absolute_slot), out.rnti,
+                                         nr_dci_bits_hash(&out.payload, cand_task[ti].dci_length));
+      nr_pdcch_coreset_bank_note_alias(t_bank_index, disc_slot_key(ue, proc, source_absolute_slot), cand_task[ti].cce, cand_task[ti].L);
+    }
     if (t_discovered_token && !cand_task[ti].ul_scan && out.rnti_class == NR_BLIND_RNTI_CLASS_C) t_discovered_prescreen_passed = true;
     if (t_discovered_token && !cand_task[ti].ul_scan && out.rnti_class == NR_BLIND_RNTI_CLASS_C)
-      nr_pdcch_discovered_observe(t_discovered_token, out.rnti,
+      nr_pdcch_discovered_observe_cand(t_discovered_token, out.rnti,
           t_discovered_slot,
-          out.payload, cand_task[ti].dci_length);
+          out.payload, cand_task[ti].dci_length, cand_task[ti].cce, cand_task[ti].L);
     if (t_discovered_token) continue;
     /* SI-RNTI DCI 1_0 sizes come from CORESET#0, not from the C-RNTI length discovery */
     if (cfg->autodiscover && out.rnti != 0xffff && !(cand_task[ti].bwp_entry > 0 && cfg->dl_full_auto) && (!g_length_found || !nr_pdcch_blind_monitor_autodiscover_extent_verified())) {
@@ -9754,10 +9765,12 @@ constdiag_done:;
        * `decoded` is attributable rather than merely visible. max_lag is the number that says
        * whether the configured depth was right: it must stay well under slots_per_frame. */
       LOG_I(PHY,
-            "SENSING: PDSCHQ queued=%lu decoded=%lu crc_ok=%lu (%.1f%%) dropped[full=%lu stale=%lu] "
+            "SENSING: PDSCHQ queued=%lu decoded=%lu crc_ok=%lu (%.1f%%) cb_ok=%lu cb_tried=%lu cb_total=%lu (cb_crc %.1f%%) dropped[full=%lu stale=%lu] "
             "max_lag_slots=%lu/%d slot_groups=%lu/%lu multi-grant slots dropped_narrow=%lu\n",
             (unsigned long)qs.queued, (unsigned long)qs.decoded, (unsigned long)qs.crc_ok,
             qs.decoded ? (100.0 * (double)qs.crc_ok / (double)qs.decoded) : 0.0,
+            (unsigned long)qs.cb_ok, (unsigned long)qs.cb_tried, (unsigned long)qs.cb_total,
+            qs.cb_tried ? (100.0 * (double)qs.cb_ok / (double)qs.cb_tried) : 0.0,
             (unsigned long)qs.dropped_full, (unsigned long)qs.dropped_stale,
             (unsigned long)qs.max_lag_slots, fp->slots_per_frame, (unsigned long)qs.slot_groups,
             (unsigned long)qs.batches_multi, (unsigned long)qs.dropped_narrow);

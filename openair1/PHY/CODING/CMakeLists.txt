@@ -206,7 +206,8 @@ if(ENABLE_LDPC_CUDA)
   target_sources(test_nr_gpu_pass PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
   # Task 7 (PUSCH pass): the host builder and its hypothesis cache, the CPU reference of the chest / equaliser (real nr_channel_* / nr_compute_llr / nr_passive_est_delay) and the DFT library loader
   target_sources(test_nr_gpu_pass PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_pass_ul.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_pass_ul_ref.c ${OPENAIR1_DIR}/PHY/TOOLS/dfts_load.c ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_pass_ul_ref.c ${OPENAIR1_DIR}/PHY/TOOLS/dfts_load.c ${OPENAIR_DIR}/common/utils/ds/hashtable.c
+    ${OPENAIR1_DIR}/PHY/MODULATION/nr_sfo_state.c)
   target_link_libraries(test_nr_gpu_pass PRIVATE GTest::gtest_main nr_gpu_platform CUDA::cudart thread-pool LOG minimal_lib crc_byte UTIL PHY_NR PHY_NR_COMMON shlib_loader ${CMAKE_DL_LIBS} pthread m)
   add_dependencies(test_nr_gpu_pass dfts)
   # ./libldpc.so (the OAI LDPC encoder of the pass fixture) resolves these from the executable, as in test_nr_pdsch_gpu_ldpc

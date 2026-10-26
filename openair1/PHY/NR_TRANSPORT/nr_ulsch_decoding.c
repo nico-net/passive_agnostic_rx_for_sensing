@@ -241,8 +241,10 @@ int nr_ulsch_decoding(PHY_VARS_gNB *phy_vars_gNB,
                                              TB_parameters->Z,
                                              &harq_process->llrLen,
                                              harq_process->round);
-    for (int r = 0; r < TB_parameters->C; r++)
+    for (int r = 0; r < TB_parameters->C; r++) {
       TB_parameters->decodeSuccess[r] = false;
+      TB_parameters->decodeTried[r] = false;
+    }
     TB_parameters->d_to_be_cleared = harq_process->harq_to_be_cleared;
     reset_meas(&TB_parameters->ts_deinterleave);
     reset_meas(&TB_parameters->ts_rate_unmatch);
@@ -275,7 +277,9 @@ int nr_ulsch_decoding(PHY_VARS_gNB *phy_vars_gNB,
 
     uint32_t offset = 0, r_offset = 0;
     LOG_D(PHY, "C = %d\n", TB_parameters->C);
+    harq_process->triedSegments = 0;
     for (int r = 0; r < TB_parameters->C; r++) {
+      harq_process->triedSegments += TB_parameters->decodeTried[r];
       LOG_D(PHY, "Segment %d %d\n", r, TB_parameters->decodeSuccess[r]);
       uint32_t seg_len = (harq_process->K >> 3) - (harq_process->F >> 3) - ((harq_process->C > 1) ? 3 : 0);
       if (TB_parameters->decodeSuccess[r]) {

@@ -97,12 +97,12 @@ void nr_pusch_first_crc_result(const nr_pdcch_blind_ul_result_t *g,
     for (unsigned i=0;i<n;++i) snprintf(tbhex+2*i,3,"%02x",out->tb[i]);
   }
   LOG_A(PHY,"SENSING: UL_PUSCH_CRC rnti=0x%04x ok=%d mcs=%u prb=%u+%u ta=%d t=%ld cpu_us=%lu status=%u reason=%s uci_hint=%d uci_re=%u dmrs_id=%u data_id=%u"
-            " snr_db=%.1f delay=%d seg=%d/%d tbs=%u cdm=%u tb=%s probe=%d tbl=%u hyp=%u@%u nid=%d skip=%d\n",
+            " snr_db=%.1f delay=%d seg=%d/%d cb_tried=%d tbs=%u cdm=%u tb=%s probe=%d tbl=%u hyp=%u@%u nid=%d skip=%d\n",
         g->rnti,ok,g->mcs,g->bwp_start+g->start_rb,g->num_rb,
         out->ta_applied_samples,(long)target_slot,(unsigned long)cpu_us,out->status,
         out->reject_reason ? out->reject_reason : "-",
         g->csi_request!=0 || g->dai!=0,out->uci_ack_re,out->dmrs_id,out->data_id,
-        (double)out->snr_db,out->est_delay,out->segments_ok,out->n_segments,out->tbs_bytes,
+        (double)out->snr_db,out->est_delay,out->segments_ok,out->n_segments,out->segments_tried,out->tbs_bytes,
         (unsigned)g->n_dmrs_cdm_groups,tbhex,
         (int)(nr_ul_layout_is_probe(g) || nr_ul_layout_is_trial(g)),(unsigned)(out->hyp_n ? out->tbl : g->mcs_table),(unsigned)out->hyp_n,(unsigned)out->hyp_s,(int)out->nid_conf,(int)out->skip); /* probe= same rule as the PUSCHQ2 probe counters */
   if (first_ok && slots_per_frame>0)
@@ -216,7 +216,7 @@ static void passive_ul_deliver(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc
     nr_ue_ctx_ul_feedback(&ul_ticket,&confirmed,true);
   }
   if (ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_OK)
-    nr_pusch_passive_ul_ids_confirm(&ul_ticket,out.nscid,out.dmrs_id,out.data_id);
+    nr_pusch_passive_ul_ids_confirm(&ul_ticket,out.nscid,out.dmrs_id,out.data_id,out.tbs_bytes*8u,(int64_t)abs_slot);
   if (ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_CRC_FAIL)
     nr_pusch_passive_ul_ids_failed(&ul_ticket);
   if(!(cfg->ul_pusch_decode == 2) && (out.status==NR_PUSCH_PASSIVE_OK ||

@@ -67,10 +67,11 @@ typedef struct {
   uint8_t  nscid; ///< DM-RS sequence index actually used
   /// HARQ-ACK bit count that made the transport block decode, when the UCI reservation search
   /// found one. 0 = decoded with no reservation (no UCI, or O_ACK <= 2, which punctures instead).
-  uint16_t uci_ack_re; ///< inferred ACK RE footprint; does not imply a known O_ACK/beta/alpha
+  uint16_t uci_ack_re; ///< REs the blindly recovered UCI took from the UL-SCH (rate-matched + punctured), 0 = no UCI
   uint8_t  o_ack;
   int      n_segments;    ///< transport-block segments (C)
   int      segments_ok;   ///< of which the CRC passed. 0 vs C-1 are different failures.
+  int      segments_tried; ///< of which the LDPC decoder was started (decoding stops after NR_CB_FAIL_LIMIT failed blocks): CB CRC = segments_ok / segments_tried
   const char *reject_reason; ///< non-NULL when status != OK
   uint16_t hyp_n, hyp_s; ///< UL BWP size@start the attempt decoded under (0 on an early reject)
   uint8_t tbl;            ///< MCS table used

@@ -7,12 +7,14 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-/* Same layout as ulfep::Item (72 bytes on LP64). */
+/* Same layout as ulfep::Item (80 bytes on LP64). */
 typedef struct {
   const int16_t *src[4]; /* window start per antenna */
   int16_t *dst[4];       /* N c16 output row per antenna */
   int16_t rot[2];        /* symbol_rotation c16 {r, i} */
   int rotate;            /* 1 = OAI RX symbol rotation after the DFT, 0 = bare DFT */
+  uint32_t sfo_dphi;     /* intra-slot SFO phase step of this symbol (nr_sfo_state.h), applied after the rotation; 0 = none */
+  int32_t sfo_kref;      /* its reference subcarrier (nr_sfo_kref: the SSB centre, signed) */
 } nr_pusch_gpu_fep_item_t;
 
 typedef struct {

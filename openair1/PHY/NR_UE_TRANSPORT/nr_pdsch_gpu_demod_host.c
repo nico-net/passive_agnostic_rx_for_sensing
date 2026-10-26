@@ -22,6 +22,7 @@
 #include "nr_pdsch_gpu_demod_host.h"
 #include "nr_pdsch_gpu_demod.h"
 #include "nr_pdsch_evm_acc.h"
+#include "nr_qam_mode.h"
 #include "nr_agnostic_v2.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
 #include "common/utils/LOG/log.h"
@@ -327,7 +328,7 @@ enum { RF_OFF, RF_NL, RF_QM, RF_PTRS, RF_FORCED, RF_ENV, RF_OVERRIDE, RF_MODE, R
 static __thread int t_qmode; /* refuse() -> gpu_grant(): the resolved multi-layer qam_mode */
 static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coef, int *align, int *l2d)
 {
-  const int s_mode = 1, s_align = 2, s_l2d = 0, s_l2d2 = -3; /* frozen ISAC_RX_MRC_MODE / _ALIGN / L2MAXH_DELTA_NL2 (nl == 2 only, as the CPU path) */
+  const int s_mode = 1, s_align = 2, s_l2d = 0; /* frozen ISAC_RX_MRC_MODE / _ALIGN; L2MAXH_DELTA_NL2 is nr_l2maxh_delta() */
   const double s_min_db = 12.0;
   /* the CPU path's v2 agnostic receiver is not reproduced by the GPU */
   static int s_env = -1;
@@ -338,21 +339,15 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
   if (s_env)
     return RF_ENV;
   const int nl = c->dlsch->cw_info.Nl, qm = c->dlsch->cw_info.qamModOrder;
-  if (nl >= 2) { /* nr_rx_pdsch()'s qam_mode resolution */
-    /* frozen ISAC_PDSCH_MMSE_MODE=2, _GPU_EXACT_DEMOD_NL34=1, _MMSE_EXACT_NL34=1 (mode 3 from 3 layers), _GPU_EXACT_DEMOD_MMSE3=1 */
-    int qam_mode = nr_dlsch_qam_mode_override >= 0 ? nr_dlsch_qam_mode_override : 2;
-    if (qam_mode < 0 || qam_mode > 3)
-      qam_mode = 0;
-    if (nl >= 3 && nr_dlsch_qam_mode_override < 0)
-      qam_mode = 3;
+  if (nl >= 2) { /* nr_rx_pdsch()'s qam_mode resolution (nr_qam_mode.h: one rule for both paths) */
+    /* frozen ISAC_PDSCH_MMSE_MODE=2, _GPU_EXACT_DEMOD_NL34=1, _MMSE_EXACT_NL34=1 (mode 3 from 3 layers, and from 2 layers with a spare branch:
+     * RANK2-LEVEL), _GPU_EXACT_DEMOD_MMSE3=1 */
+    const int qam_mode = nr_multilayer_qam_mode(nl, c->ue->frame_parms.nb_antennas_rx, qm, nr_dlsch_qam_mode_override, 2, 1);
     if (qam_mode == 3) {
       if (nl > 4)
         return RF_NL;
-    } else {
-      if (nl >= 3 && (qam_mode == 1 || qm == 2))
-        qam_mode = 0;
-      if (nl == 2 ? qam_mode != 2 : (nl > 4 || qam_mode == 1))
-        return RF_NL;
+    } else if (nl == 2 ? qam_mode != 2 : (nl > 4 || qam_mode == 1)) {
+      return RF_NL;
     }
     t_qmode = qam_mode;
   }
@@ -373,7 +368,7 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
     return RF_MODE;
   *thr_coef = pow(10.0, -s_min_db / 10.0);
   *align = s_align;
-  *l2d = s_l2d + (nl == 2 ? s_l2d2 : 0);
+  *l2d = s_l2d + (nl == 2 ? nr_l2maxh_delta(nl, t_qmode, 1) : 0); /* NL2 delta: mode 2 only, as the CPU path */
   return -1;
 }
 

@@ -268,6 +268,45 @@ TEST(GpuPassDl, CrcFailAgreesWithStagePath) {
   printf("GpuPassDl.CrcFailAgreesWithStagePath: %d shapes, CB0 ok and CB1 failed in %d, CPU hand-over in %d\n", n, partial, cpu);
   EXPECT_GE(n, 4);
 }
+/* The TB abort rule (nr_cb_fail_limit.h): the graph keeps decoding past 4 failed blocks and stops after the 5th. Blocks 1..k are corrupted, the others clean: k = 1 and 4
+ * leave every clean block decoded (seg_ok, tried), k = NR_CB_FAIL_LIMIT leaves the blocks after the k-th failure untried (seg_ok 0, iters 0) although clean. The TB fails in
+ * every case. The stage path (the CPU-twin rule of gpu_tb) must give the same verdicts. */
+TEST(GpuPassDl, AbortRuleContinuesPastFourFailuresStopsAtFive) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try) << "libpdsch_gpu.so has no nr_gpu_pass_dl_try";
+  ASSERT_TRUE(pass_ready(m));
+  int n = 0;
+  for (auto shape : GpuPassFixture::warm_shapes()) {
+    if (shape.qm != 4 || shape.nl > 2) continue;
+    for (int k : {1, 4, NR_CB_FAIL_LIMIT}) {
+      GpuPassFixture fx = GpuPassFixture::from_shape(shape, 31, /*corrupt_from_cb=*/1, nullptr, 0, 0, 0, -1, /*corrupt_cb_count=*/k);
+      ASSERT_TRUE(fx.tb_ok_built);
+      if ((int)fx.tb.C < NR_CB_FAIL_LIMIT + 3) continue; // needs clean blocks after the failures
+      fx.bind();
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0xAA);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      ASSERT_EQ(0, m.pass_try(fx.job, &g));
+      ASSERT_EQ(0, fx.run_stage_path(&s));
+      const std::string what = "nrb " + std::to_string(shape.nrb_class) + " nl " + std::to_string(shape.nl) + " C " + std::to_string(fx.tb.C) + " failing blocks " + std::to_string(k);
+      EXPECT_EQ(0, g.tb_ok) << what;
+      EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+      if (g.need_cpu) continue; // a zero-syndrome stop hands the TB to the CPU decoder: no per-block verdicts to compare
+      n++;
+      for (int r = 0; r < (int)fx.tb.C; r++) {
+        const bool bad = r >= 1 && r <= k, untried = r > k && k >= NR_CB_FAIL_LIMIT;
+        EXPECT_EQ(!bad && !untried ? 1 : 0, g.seg_ok[r] ? 1 : 0) << what << " block " << r;
+        EXPECT_EQ(untried, g.iters[r] == 0) << what << " block " << r << " (iters 0 = not tried)";
+      }
+    }
+  }
+  EXPECT_GE(n, 3) << "shapes with at least " << NR_CB_FAIL_LIMIT + 3 << " blocks";
+}
 /* GPU-span root cause (2026-10-19), measurement only: the split pass reports its sub-graph spans (cspan + dspan + lspan = gspan, event-timed), a pass seq (the NVTX payload), and per
  * launch the LDPC verdicts and %globaltimer stamps of every code block (li). A clean TB: every block converges, none runs to the limit. A TB corrupted from block 1: blocks 1..C-1 run
  * to the iteration limit (the GPU decodes every block; no abort after the first failure) and take at least as long as the converged block 0. */
@@ -1804,6 +1843,7 @@ TEST(GpuPassFp32, ShadowGateLogic) {
 extern "C" {
 #include "nr_gpu_pass_ul.h"
 #include "nr_gpu_pass_ul_ref.h"
+#include "PHY/MODULATION/nr_sfo_state.h"
 int load_dftslib(void);
 }
 /* The UL slot of the fixture: its IQ ring as the linear snapshot of the passive UL decoder (PRE samples of margin in front), the FFT windows at a timing advance `ta`
@@ -2050,6 +2090,47 @@ TEST(GpuPassUl, MatchesCpuDecode) {
          nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE");
   EXPECT_GE(n, cases * 2 / 3);
   EXPECT_GE(dec_ok, n / 2);
+}
+
+/* Intra-slot SFO (nr_sfo_state.h): the pass's FEP applies the per-symbol step after the OAI RX rotation, bit for bit what the CPU FEP
+ * does with nr_sfo_rotate_symbol() on the same bins (the passive UL decoder runs both and compares them). eps = +3.8 ppm. */
+TEST(GpuPassUl, SfoStepMatchesCpu) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(ul_ready(m)) << "UL pass setup failed";
+  const int64_t eps_q = 3800000; /* 3.8 ppm in 1e-12 */
+  int compared = 0;
+  for (int seed = 0; seed < 6; seed++) {
+    const int nrb = seed % 2 ? 217 : 48, qm = 4 + 2 * (seed % 2);
+    const nr_gpu_pass_shape_t sh = {(uint16_t)nrb, 13, 1, (uint16_t)qm, 2, 1, 1};
+    GpuPassFixture fx = GpuPassFixture::from_shape(sh, seed);
+    if (!fx.tb_ok_built) continue;
+    ul_warm_class(m, nrb, 2, fx.tb.C);
+    UlSlot sl;
+    sl.build(fx, 0, -1, 0, 0);
+    uint32_t dphi[14];
+    ASSERT_EQ(1, nr_sfo_slot_dphi(eps_q, 4096, GpuPassFixture::NCP, GpuPassFixture::NCP0, 1, 14, 0, dphi));
+    memcpy(sl.in.sfo_dphi, dphi, sizeof(dphi));
+    const int kref = nr_sfo_kref(4096, GpuPassFixture::FCO, 150 + 12 * (seed % 3)); /* an SSB position of the carrier */
+    sl.in.sfo_kref = kref;
+    ASSERT_EQ(0, nr_gpu_pass_ul_run(&sl.in, &sl.out)) << "seed " << seed;
+    UlRef ref = ul_reference(m, fx, 0, -1);
+    ASSERT_TRUE(ref.ok);
+    int diff = 0;
+    for (int a = 0; a < 4; a++)
+      for (int s = fx.data_syms.front(); s < 14; s++) {
+        int16_t *rr = &ref.rxF[2 * ((size_t)a * 14 + s) * 4096];
+        nr_sfo_rotate_symbol(rr, 4096, GpuPassFixture::FCO, 273, dphi[s], kref);
+        diff += memcmp(&sl.rxF[2 * (size_t)a * sl.rx_stride + 2 * (size_t)s * 4096], rr, 4096 * 4) != 0;
+      }
+    EXPECT_EQ(0, diff) << "seed " << seed << ": rows of the pass differ from FEP + rotation + nr_sfo_rotate_symbol";
+    compared++;
+  }
+  EXPECT_GE(compared, 3);
 }
 
 /* the comparison is not vacuous: a reference with another timing advance, or another receive branch, is flagged on every slot */

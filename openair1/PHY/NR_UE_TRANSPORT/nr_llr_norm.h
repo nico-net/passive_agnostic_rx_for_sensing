@@ -54,6 +54,38 @@ static inline int nr_llr_norm_shift(const int16_t *llr, uint32_t span)
   return k;
 }
 
+/* HMCS 2026-10-25: 256QAM target. The plain rule below samples every 16th LLR; with Qm = 8 that is always the same bit of the RE (8 LLRs per RE, the
+ * layer-1 stride 16 = every second RE, index 0 of 8 = the OUTERMOST bit of the I rail, |LLR| = |Re y|, mean 8a where a is the lattice half-spacing).
+ * Capping that mean at LLR_NORM_TARGET = 40 leaves a in (2.5, 5] LSB, i.e. a noise sigma of 1-2 LSB at the SNR a 256QAM grant needs (a/sigma ~ 2.4 at
+ * the MCS 27 waterfall): the int8 decoder then works on a 5-11 level alphabet for its inner bits. nr_dlsim, 1 RX AWGN, 273 PRB, MCS 27 table 2, 16
+ * iterations, 40-100 trials per point: the 50 % BLER point sits at 27.0 dB for a >= 10 LSB, 27.3 dB for a = 5, 27.7 dB for a = 3.5 and above 28.8 dB for
+ * a = 2.5 [MEASURED, sens6 x86, HMCS-20261025]. For 256QAM the statistic is therefore capped at 8 * NR_LLR_NORM_A256 with the lattice half-spacing
+ * ceiling NR_LLR_NORM_A256 = 24 LSB: after the power-of-two shift a is in (12, 24] (or the raw value when that is already lower), sigma 5-10 LSB at the
+ * waterfall, outer bits clip at 127 (flat region of the same sweep, a = 10..80 at MCS 27, 5..20 at MCS 20). QPSK/16QAM/64QAM keep the target 40. */
+#define NR_LLR_NORM_A256 24u
+static inline uint32_t nr_llr_norm_target(int qm)
+{
+  return qm == 8 ? 8u * NR_LLR_NORM_A256 : LLR_NORM_TARGET;
+}
+
+/* Right shift for llr[0, span) with the target of modulation order qm: nr_llr_norm_shift with `target` in place of LLR_NORM_TARGET. */
+static inline int nr_llr_norm_shift_t(const int16_t *llr, uint32_t span, uint32_t target)
+{
+  uint64_t acc = 0;
+  uint32_t cnt = 0;
+  for (uint32_t i = 0; i < span; i += 16) {
+    acc += (uint32_t)abs(llr[i]);
+    cnt++;
+  }
+  if (cnt == 0)
+    return 0;
+  const uint32_t mean = (uint32_t)(acc / cnt);
+  int k = 0;
+  while (k < 8 && (mean >> k) > target)
+    k++;
+  return k;
+}
+
 /* RANK2-WEAK 2026-10-23: rank-2 (two layers) normalisation for Qm 4, 6, 8. The shift above samples every 16th LLR; with 2 layers the buffer
  * alternates one modulation symbol (Qm bits) per layer, so for Qm 4 and 8 that sample lands on layer 0 ONLY, and for every Qm the mean is
  * dominated by the stronger layer. At a layer gap >= 8 dB (the weak layer is layer 1) the weak layer is left with mean |LLR| of 2-5 LSB and
@@ -71,7 +103,8 @@ static inline int nr_llr_norm_shift_nl(const int16_t *llr, uint32_t span, int nl
     dk = getenv("NR_TEST_L2NORM_DK") ? atoi(getenv("NR_TEST_L2NORM_DK")) : 2;
   }
   if (old_rule || nl != 2 || qm < 4 || qm > 8 || (qm & 1))
-    return nr_llr_norm_shift(llr, span);
+    return old_rule ? nr_llr_norm_shift(llr, span) /* NR_TEST_L2NORM_OLD: the whole pre-HMCS rule, 256QAM included */
+                    : nr_llr_norm_shift_t(llr, span, nl == 2 ? LLR_NORM_TARGET /* two layers: unchanged, owned by the RANK2 work */ : nr_llr_norm_target(qm));
   const uint32_t blk = 2u * (uint32_t)qm;
   uint64_t acc[2] = {0, 0};
   uint32_t nb = 0;

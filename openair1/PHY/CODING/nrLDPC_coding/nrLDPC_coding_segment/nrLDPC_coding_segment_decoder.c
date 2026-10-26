@@ -89,6 +89,7 @@ typedef struct nrLDPC_decoding_parameters_s {
   bool d_to_be_cleared;
   uint8_t *c;
   bool *decodeSuccess;
+  bool *decodeTried; /* the decoder was started (the TB was not yet aborted when this block began) */
   uint8_t *decodeIters; /* OAI numIter of the segment (LDPCdecoder return value): < numMaxIter on success, = numMaxIter on a failure or abort */
 
   task_ans_t *ans;
@@ -203,6 +204,7 @@ static void nr_process_decode_segment(void *arg)
 
   ////////////////////////////////// pl =====> llrProcBuf //////////////////////////////////
   start_meas(&rdata->ts_ldpc_decode);
+  *rdata->decodeTried = !check_abort(rdata->abort_decode);
   int decodeIterations = LDPCdecoder(p_decoderParms, l, (uint8_t *)llrProcBuf, p_procTime, rdata->abort_decode);
   AssertFatal(rdata->c, "rdata->c is null, A %d, K %d\n", rdata->A, rdata->K);
   *rdata->decodeIters = (uint8_t)(decodeIterations > 255 ? 255 : decodeIterations);
@@ -282,6 +284,8 @@ int nrLDPC_prepare_TB_decoding(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_de
     rdata->llr = nrLDPC_TB_decoding_parameters->llr + llr_offset; // rdata->Kc*rdata->Z;
     rdata->decodeSuccess = &nrLDPC_TB_decoding_parameters->decodeSuccess[r];
     rdata->decodeIters = &nrLDPC_TB_decoding_parameters->decodeIters[r];
+    rdata->decodeTried = &nrLDPC_TB_decoding_parameters->decodeTried[r];
+    *rdata->decodeTried = false;
     memset(&rdata->ts_deinterleave, 0, sizeof(rdata->ts_deinterleave));
     memset(&rdata->ts_rate_unmatch, 0, sizeof(rdata->ts_rate_unmatch));
     memset(&rdata->ts_seg_prep, 0, sizeof(rdata->ts_seg_prep));

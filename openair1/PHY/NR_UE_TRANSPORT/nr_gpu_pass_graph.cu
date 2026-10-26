@@ -9,11 +9,13 @@
  * count (the grid sizes), the demod variant (tail template from qam_mode and nl, align, EVM chain), the EVM math (float / double) and the grid bound of the
  * PRB class. A grant outside the cached keys, with no free instance, or outside what the graph reproduces, returns 1 and is counted. */
 #include "nr_gpu_pass.h"
+#include "PHY/CODING/nr_cb_fail_limit.h" /* NR_CB_FAIL_LIMIT: the TB abort rule k_pick mirrors */
 #include "nr_pdsch_gpu_fep.h"
 #include "nr_pdsch_gpu_chest.h"
 #include "nr_pdsch_gpu_demod.h"
 #include "nr_pdsch_gpu_ldpc.h"
 #include "nr_gpu_pass_post.h"
+#include "nr_llr_norm.h" /* nr_llr_norm_target: the host rule k_norm_sum mirrors */
 #include "nr_gpu_pass_cap.h"
 #include "PHY/TOOLS/nr_gpu_membudget.h"
 #include "PHY/TOOLS/nr_gpu_platform.h"
@@ -87,6 +89,7 @@ struct PassBlk { /* written by the host before every replay */
   nr_gpu_chest_post_par_t post;
   uint32_t G, span, tbs;
   int norm, ncb, KB; /* ncb: the code blocks decoded (k_pick) */
+  int plain_t;             /* HMCS: target of the plain (non 2-layer) LLR normalisation = nr_llr_norm_target(Qm), LLR_NORM_TARGET under the NR_TEST_L2NORM_OLD seam */
   int nl, qm, l2t, l2dk;   /* RANK2-WEAK: layers and modulation order of the DL grant (the 2-layer LLR normalisation, nr_llr_norm_shift_nl); 0 = the plain rule */
   const uint32_t *scr;
   nr_gpu_rdm_seg_t rdm[MAXCB];
@@ -267,7 +270,7 @@ __global__ void k_seg_compose(const short2 *sc, short2 *est, const PassBlk *pb, 
   }
 }
 /* nr_llr_norm_shift_nl (nr_llr_norm.h, keep identical): nl == 2 and Qm 2/4/6/8: every 16th RE block (2 Qm LLRs, Qm per layer) of llr[0, span), the per-layer
- * means, k from the smaller; else nr_llr_norm_shift: the mean |LLR| of every 16th of llr[0, span), smallest k <= 8 with (mean >> k) <= 40 */
+ * means, k from the smaller; else nr_llr_norm_shift_t: the mean |LLR| of every 16th of llr[0, span), smallest k <= 8 with (mean >> k) <= pb->plain_t (40; 8 * 24 for 256QAM, HMCS) */
 __global__ void k_norm_sum(const int16_t *llr, const PassBlk *pb, ResBlk *rb)
 {
   __shared__ unsigned long long red[1024 / 32][2];
@@ -308,7 +311,7 @@ __global__ void k_norm_sum(const int16_t *llr, const PassBlk *pb, ResBlk *rb)
     } else if (pb->norm && (span + 15) / 16) {
       const uint32_t cnt = (span + 15) / 16;
       const uint32_t mean = (uint32_t)(a / cnt);
-      while (k < 8 && (mean >> k) > 40u) k++;
+      while (k < 8 && (mean >> k) > (uint32_t)pb->plain_t) k++;
     }
     rb->shift = k;
   }
@@ -320,12 +323,13 @@ __global__ void k_norm_apply(int16_t *llr, const PassBlk *pb, const ResBlk *rb)
   for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < G; i += gridDim.x * blockDim.x) llr[i] = (int16_t)(llr[i] >> k);
 }
 /* OAI's stop rule per code block, in order (gpu_tb of nr_pdsch_gpu_ldpc_host.c): the first snapshot whose CRC passes is the decoded block; none = failure, c zeroed,
- * every later block fails (abort); a failing block the GPU stopped on at a zero syndrome (and not already aborted) needs the CPU decoder. */
+ * the failure counts; once NR_CB_FAIL_LIMIT blocks have failed every later block fails untried (abort; it = 0); a failing block the GPU stopped on at a zero syndrome
+ * (and not already aborted) needs the CPU decoder. */
 __global__ void k_pick(const uint8_t *snaps, const int *res, const PassBlk *pb, ResBlk *rb)
 {
-  __shared__ int aborted, need_cpu, err, hit, all_ok;
+  __shared__ int aborted, need_cpu, err, hit, all_ok, nfail;
   const int C = pb->ncb, KB = pb->KB;
-  if (threadIdx.x == 0) { aborted = need_cpu = err = 0; all_ok = 1; }
+  if (threadIdx.x == 0) { aborted = need_cpu = err = nfail = 0; all_ok = 1; }
   __syncthreads();
   for (int r = 0; r < C; r++) {
     if (threadIdx.x == 0) {
@@ -338,7 +342,7 @@ __global__ void k_pick(const uint8_t *snaps, const int *res, const PassBlk *pb, 
           if (rb->cand_ok[r * NSNAP + s]) h = s;
       if (h < 0) {
         if (!aborted && syn0 != 0 && !err) need_cpu = 1;
-        aborted = 1;
+        if (!aborted && ++nfail >= NR_CB_FAIL_LIMIT) aborted = 1;
         all_ok = 0;
       }
       hit = h;
@@ -617,6 +621,7 @@ static int prepare_tb(Inst &I, const nr_gpu_pass_job_t *j)
       dk = getenv("NR_TEST_L2NORM_DK") ? atoi(getenv("NR_TEST_L2NORM_DK")) : 2;
     }
     pb.nl = old_rule ? 0 : j->dj.nl; pb.qm = j->Qm; pb.l2t = target; pb.l2dk = dk;
+    pb.plain_t = old_rule || j->dj.nl == 2 ? (int)LLR_NORM_TARGET : (int)nr_llr_norm_target((int)j->Qm); /* nr_llr_norm_shift_nl, plain branch (keep identical) */
   }
   pb.Gd = j->probe ? j->G_dem : j->G_dem && j->G_dem < j->G ? j->G_dem : j->G; /* a probe: the LLRs up to its horizon (> 0, checked in dl_try) */
   pb.ncb = (int)nd; pb.KB = (int)((j->K + 7) >> 3);
@@ -719,6 +724,8 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
   for (int a = 0; a < 4; a++) I.rx[a] = j->rxdata[a];
   I.fj = {I.rx, j->ring_len, j->ring_offset, j->symbol_rot, 0x3fff, redirect ? (int16_t *)j->rxdataF : nullptr, redirect ? (uint32_t)j->rx_stride : 0u, 0};
   I.fj.run_mask = fep_need(j); /* grant-sized: the captured grid stays 14 symbols, the blocks of the other symbols return at once */
+  I.fj.sfo_dphi = j->sfo_on ? j->sfo_dphi : nullptr; /* staged into par[PAR_SFO..] per replay, like the rotation */
+  I.fj.sfo_kref = j->sfo_kref;
   if (nr_pdsch_gpu_fep_stage_at(&I.fj, I.id) != 0) return -1;
   /* chest rows: one per (DM-RS symbol, layer, segment, antenna), the order of nr_pdsch_gpu_chest_grant (ns == 1: one segment = the grant). A class with several
    * segments estimates into scratch rows (the estimator writes a whole row) and k_seg_compose lays them out in data order. */
@@ -973,6 +980,8 @@ static int prepare_ul(Inst &I, const nr_gpu_pass_job_t *j)
     it[m].rot[0] = u.rot[m][0];
     it[m].rot[1] = u.rot[m][1];
     it[m].rotate = 1;
+    it[m].sfo_dphi = u.sfo_dphi[m];
+    it[m].sfo_kref = u.sfo_kref;
   }
   par[0] = u.rot_nb_rb;
   par[1] = u.rot_fco;
@@ -1017,7 +1026,7 @@ static int prepare_ul(Inst &I, const nr_gpu_pass_job_t *j)
   b.llr = (int16_t *)I.llr.dev;
   PassBlk &pb = *I.PB();
   memset(&pb.post, 0, sizeof(pb.post));
-  pb.span = 0; pb.norm = 0; pb.nl = pb.qm = 0; /* the UL decoder takes the equaliser's LLRs as they are (no K38 normalisation) */
+  pb.span = 0; pb.norm = 0; pb.plain_t = (int)LLR_NORM_TARGET; pb.nl = pb.qm = 0; /* the UL decoder takes the equaliser's LLRs as they are (no K38 normalisation) */
   const int rc = prepare_tb(I, j);
   b.scr = pb.scr;
   return rc;
@@ -1969,6 +1978,8 @@ extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   r->gate_db = rb.gate_db;
   if (r->skip) { r->need_cpu = 0; ++g_gate_skips; }
   for (uint32_t s = 0; s < j->C; s++) r->seg_ok[s] = r->skip ? 0 : rb.seg_ok[s];
+  memset(r->iters, 0, sizeof(r->iters));
+  for (uint32_t s = 0; s < j->C && !r->skip; s++) r->iters[s] = rb.it[s] == 255 ? (uint8_t)j->it_max : rb.it[s]; /* 0 = not decoded (aborted): the UL cb_tried */
   if (rb.need_cpu) ++g_ul_need_cpu;
   if (!r->need_cpu && !r->skip) {
     const bool crc_ok = j->C > 1 ? rb.tb_crc != 0 : rb.seg_crc[0] != 0;

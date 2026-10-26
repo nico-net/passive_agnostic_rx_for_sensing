@@ -359,6 +359,7 @@ static void dmrs_scan_job(const NR_DL_FRAME_PARMS *fp, uint16_t rnti, int64_t ab
 }
 #include "PHY/MODULATION/modulation_UE.h" /* nr_slot_fep */
 static _Atomic uint64_t g_decoded       = 0;
+static _Atomic uint64_t g_cb_ok = 0, g_cb_tried = 0, g_cb_total = 0; /* PDSCHQ cb_crc: per-code-block CRC over the decoded full TBs (not probes) */
 static _Atomic uint64_t g_crc_ok        = 0;
 /* DL DM-RS identity estimate: one process-wide accumulator shared by every consumer, so evidence
  * from all of them adds. The 1024-candidate sweep runs under this lock on the consumer that
@@ -1693,7 +1694,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
                  "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f probe=%d kappa=%.2f alpha=%.2f,%.2f,%.2f,%.2f "
-                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d itc=%d its=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f dmrs_snr=%.1f,%.1f,%.1f,%.1f,%.1f dmrs_pw=%.1f dmrs_ref=%.1f dsp=%u skip=%d gp=%u,%u,%u,%u,%u,%u,%u%s%s%s\n",
+                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d itc=%d its=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f dmrs_snr=%.1f,%.1f,%.1f,%.1f,%.1f dmrs_pw=%.1f dmrs_ref=%.1f dsp=%u skip=%d gp=%u,%u,%u,%u,%u,%u,%u cb_ok=%u cb_tried=%u cb_total=%u%s%s%s\n",
             job.rnti, job.frame_rx, job.nr_slot_rx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.grant.mcs, job.grant.mcs_table,
             dec.cw.qamModOrder, dec.cw.Nl, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, dec.evm_nsym, dec.evm_pct,
             dec.evm_pct > 0.f ? -20.0 * log10(dec.evm_pct / 100.0) : 99.0, dec.br_snr_db[0], dec.br_snr_db[1], dec.br_snr_db[2],
@@ -1704,7 +1705,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
             job.grant.rv, job.grant.ndi, job.grant.harq_pid, (unsigned)dec.cw.TBS, dec.layer_snr_db[0], dec.layer_snr_db[1],
             dec.layer_snr_db[2], dec.layer_snr_db[3], (int)dec.l2maxh, dec.zabs,
             dec.dmrs_snr.snr_db[0], dec.dmrs_snr.snr_db[1], dec.dmrs_snr.snr_db[2], dec.dmrs_snr.snr_db[3], dec.dmrs_snr.comb_db, dec.dmrs_snr.pw_db,
-            dec.dmrs_snr.ref_db, (unsigned)dec.dmrs_path, (int)dec.skip, nr_gp_tt[0], nr_gp_tt[1], nr_gp_tt[2], nr_gp_tt[3], nr_gp_tt[4], nr_gp_tt[5], nr_gp_tt[6], gq, e2e, stg);
+            dec.dmrs_snr.ref_db, (unsigned)dec.dmrs_path, (int)dec.skip, nr_gp_tt[0], nr_gp_tt[1], nr_gp_tt[2], nr_gp_tt[3], nr_gp_tt[4], nr_gp_tt[5], nr_gp_tt[6],
+            (unsigned)dec.cb_ok, (unsigned)dec.cb_tried, (unsigned)dec.cb_total, gq, e2e, stg);
       memset(nr_gp_tt, 0, sizeof(nr_gp_tt));
       if (dec.evm_pct > 0.f && !job.layout_probe)
         nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)), (int)job.mrc_mode, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
@@ -1770,6 +1772,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
     if (st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
       atomic_fetch_add_explicit(&g_decoded, 1, memory_order_relaxed);
+      if (!job.layout_probe) {
+        atomic_fetch_add_explicit(&g_cb_ok, dec.cb_ok, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_cb_tried, dec.cb_tried, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_cb_total, dec.cb_total, memory_order_relaxed);
+      }
       atomic_fetch_add_explicit(&g_rnti_dec[job.rnti], 1, memory_order_relaxed);
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
         atomic_fetch_add_explicit(&g_rnti_ok[job.rnti], 1, memory_order_relaxed);
@@ -2685,6 +2692,9 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)
   out->queued        = atomic_load_explicit(&g_queued, memory_order_relaxed);
   out->decoded       = atomic_load_explicit(&g_decoded, memory_order_relaxed);
   out->crc_ok        = atomic_load_explicit(&g_crc_ok, memory_order_relaxed);
+  out->cb_ok         = atomic_load_explicit(&g_cb_ok, memory_order_relaxed);
+  out->cb_tried      = atomic_load_explicit(&g_cb_tried, memory_order_relaxed);
+  out->cb_total      = atomic_load_explicit(&g_cb_total, memory_order_relaxed);
   out->dropped_full  = atomic_load_explicit(&g_dropped_full, memory_order_relaxed);
   out->dropped_narrow = atomic_load_explicit(&g_dropped_narrow, memory_order_relaxed);
   out->dropped_stale = atomic_load_explicit(&g_dropped_stale, memory_order_relaxed);

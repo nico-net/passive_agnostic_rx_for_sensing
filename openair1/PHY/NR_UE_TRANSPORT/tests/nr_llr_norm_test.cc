@@ -3,6 +3,7 @@
  * same hypothesis. The probe's buffer holds the same LLRs up to its horizon and zeros after it; the
  * LLR-norm shift must not see the difference. */
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -11,6 +12,7 @@
 extern "C" {
 #include "nr_llr_norm.h"
 #include "nr_mmse_exact.h"
+#include "nr_qam_mode.h"
 }
 
 namespace {
@@ -412,7 +414,7 @@ TEST(LlrNorm, TwoLayerWeakLayerSizesTheShift)
     if (qm != 6) EXPECT_LT(knew, kold) << "qm " << qm; /* Qm 6: the stride-16 sample already reads both layers */
     EXPECT_GE(weak_mean(v, qm, knew), 1.9 * weak_mean(v, qm, kold) - 1.0) << "qm " << qm << " weak layer gains >= 1 bit";
     EXPECT_LE(knew, 8);
-    EXPECT_EQ(nr_llr_norm_shift_nl(v.data(), span, 1, qm), nr_llr_norm_shift(v.data(), span)); /* rank 1: unchanged */
+    EXPECT_EQ(nr_llr_norm_shift_nl(v.data(), span, 1, qm), qm == 8 ? nr_llr_norm_shift_t(v.data(), span, nr_llr_norm_target(8)) : nr_llr_norm_shift(v.data(), span)); /* rank 1: unchanged except the 256QAM target */
   }
   /* Qm 4: the old stride-16 sample reads layer 0 only, the weak layer is left small */
   const auto v = two_layer(4, 3000.0, 3000.0 / std::pow(10.0, 14.0 / 20.0), 20000, 9);
@@ -421,4 +423,167 @@ TEST(LlrNorm, TwoLayerWeakLayerSizesTheShift)
   EXPECT_EQ(nr_llr_norm_shift_nl(q.data(), (uint32_t)q.size(), 2, 2), nr_llr_norm_shift(q.data(), (uint32_t)q.size()));
   const auto w = two_layer(4, 3000.0, 3000.0, 20000, 11);
   EXPECT_LE(std::abs(nr_llr_norm_shift_nl(w.data(), (uint32_t)w.size(), 2, 4) - nr_llr_norm_shift(w.data(), (uint32_t)w.size())), 1);
+}
+
+/* HMCS 2026-10-25: rank-1 256QAM. nr_llr_norm_shift_nl samples every 16th LLR, which for Qm 8 is the outermost bit of the I rail: |Re y|, mean 8a for the lattice half-spacing a.
+ * The 40 target left a in (2.5, 5] LSB -- a noise sigma of 1-2 LSB at the MCS 27 waterfall (a / sigma ~ 2.4) -- and nr_dlsim measured 1.4 to > 2 dB of BLER-50 % loss for it.
+ * The synthetic buffer is the per-RE layout of nr_256qam_llr: [Ar Ai Br Bi Cr Ci Dr Di], A = y, B = 8a - |A|, C = 4a - |B|, D = 2a - |C| (ch_mag, ch_magb, ch_magr = 8a, 4a, 2a). */
+static std::vector<int16_t> qam256_llrs(double a, double sigma, size_t nre, unsigned seed)
+{
+  std::mt19937 rng(seed);
+  std::normal_distribution<double> g(0.0, sigma);
+  auto sat = [](double x) { return (int16_t)std::lround(std::max(-32768.0, std::min(32767.0, x))); };
+  std::vector<int16_t> v(nre * 8);
+  for (size_t re = 0; re < nre; re++)
+    for (int r = 0; r < 2; r++) {
+      const int l = (int)(rng() % 16) * 2 - 15; /* -15, -13, .., 15 */
+      const double yy = l * a + g(rng);
+      const double A = yy, B = 8 * a - std::abs(A), C = 4 * a - std::abs(B), D = 2 * a - std::abs(C);
+      v[re * 8 + 0 + r] = sat(A);
+      v[re * 8 + 2 + r] = sat(B);
+      v[re * 8 + 4 + r] = sat(C);
+      v[re * 8 + 6 + r] = sat(D);
+    }
+  return v;
+}
+TEST(LlrNorm, Qam256RankOneKeepsTheLatticeAbove12)
+{
+  for (double a_raw : {6.0, 12.0, 20.0, 40.0, 80.0, 160.0, 320.0}) {
+    const auto v = qam256_llrs(a_raw, a_raw / 2.4, 20000, 1 + (unsigned)a_raw); /* a / sigma = 2.4: the MCS 27 waterfall */
+    const uint32_t span = (uint32_t)v.size();
+    const int k = nr_llr_norm_shift_nl(v.data(), span, 1, 8);
+    const double a_out = a_raw / (double)(1 << k);
+    if (a_raw <= 20.0)
+      EXPECT_EQ(k, 0) << "a_raw " << a_raw << ": nothing to remove";
+    else {
+      EXPECT_GT(a_out, 12.0 - 1.0) << "a_raw " << a_raw << " k " << k;
+      EXPECT_LE(a_out, 24.0 + 1.0) << "a_raw " << a_raw << " k " << k;
+    }
+    /* the old rule (target 40 on the same sample) took a to (2.5, 5] LSB for every a_raw >= 5 */
+    const int kold = nr_llr_norm_shift(v.data(), span);
+    if (a_raw >= 40.0) {
+      EXPECT_LE(a_raw / (double)(1 << kold), 5.5) << "a_raw " << a_raw;
+    }
+    EXPECT_LE(k, kold);
+  }
+}
+TEST(LlrNorm, OtherModulationsKeepTheTarget40)
+{
+  std::vector<int16_t> v(8192);
+  std::mt19937 rng(77);
+  std::normal_distribution<double> d(0.0, 700.0);
+  for (auto &x : v) x = (int16_t)std::lround(d(rng));
+  for (int qm : {2, 4, 6}) {
+    EXPECT_EQ(nr_llr_norm_target(qm), LLR_NORM_TARGET);
+    for (int nl : {1, 3, 4}) EXPECT_EQ(nr_llr_norm_shift_nl(v.data(), (uint32_t)v.size(), nl, qm), nr_llr_norm_shift(v.data(), (uint32_t)v.size()));
+  }
+  /* two layers: the RANK2 rule, 256QAM included, is untouched */
+  const auto w = two_layer(8, 3000.0, 3000.0, 20000, 11);
+  EXPECT_LE(nr_llr_norm_shift_nl(w.data(), (uint32_t)w.size(), 2, 8), nr_llr_norm_shift(w.data(), (uint32_t)w.size()));
+  EXPECT_EQ(nr_llr_norm_target(8), 8u * NR_LLR_NORM_A256);
+}
+
+
+/* RANK2-LEVEL 2026-10-25: two layers, 4 RX, 256QAM at growing receive level. Mode 2's front end rounds G = sum_a conj(h) h >> shift
+ * and b = H^H y >> shift to int16 (saturating), shift = log2(|h|^2)/2 + log2(nbRx/2) + the NL2 delta (-3, nr_l2maxh_delta); both
+ * grow with |h| (shift only follows its square root), so past |h| ~ 2^11 they hit the rail. The exact solve (mode 3) reads the int16
+ * h and y directly and is level independent. Noise free, ZF (s2 = 0): symbol-error rate of the nearest 256QAM point per REs. */
+TEST(MmseExact, Rank2LevelHeadroom)
+{
+  std::mt19937 rng(11);
+  std::normal_distribution<double> g(0.0, 1.0);
+  const int nl = 2, nrx = 4;
+  const double amp[4] = {300.0, 1000.0, 2500.0, 5000.0};
+  const double lv[16] = {-15, -13, -11, -9, -7, -5, -3, -1, 1, 3, 5, 7, 9, 11, 13, 15};
+  const double norm = 1.0 / std::sqrt(170.0); /* unit mean power 256QAM */
+  auto sat16 = [](double v) { return std::fmax(-32768.0, std::fmin(32767.0, std::nearbyint(v))); };
+  auto nearest = [&](double v) { int best = 0; for (int i = 1; i < 16; i++) if (std::fabs(v - lv[i] * norm) < std::fabs(v - lv[best] * norm)) best = i; return best; };
+  double err_exact[4] = {}, err_stock[4] = {};
+  const int N = 3000;
+  for (int k = 0; k < 4; k++) {
+    for (int t = 0; t < N; t++) {
+      double hr[2][4], hi[2][4];
+      int16_t hre[4][4] = {}, him[4][4] = {}, yre[4] = {}, yim[4] = {};
+      for (int l = 0; l < nl; l++)
+        for (int a = 0; a < nrx; a++) {
+          hr[l][a] = amp[k] * g(rng) / 1.41; hi[l][a] = amp[k] * g(rng) / 1.41;
+          hre[l][a] = (int16_t)lround(hr[l][a]); him[l][a] = (int16_t)lround(hi[l][a]);
+        }
+      int sr_i[2], si_i[2];
+      double sr[2], si[2];
+      for (int l = 0; l < nl; l++) { sr_i[l] = rng() % 16; si_i[l] = rng() % 16; sr[l] = lv[sr_i[l]] * norm; si[l] = lv[si_i[l]] * norm; }
+      for (int a = 0; a < nrx; a++) {
+        double ar = 0, ai = 0;
+        for (int l = 0; l < nl; l++) { ar += hre[l][a] * sr[l] - him[l][a] * si[l]; ai += hre[l][a] * si[l] + him[l][a] * sr[l]; }
+        yre[a] = (int16_t)lround(ar); yim[a] = (int16_t)lround(ai);
+      }
+      /* shift as nr_rx_pdsch(): avgs = median |h|^2 ~ amp^2, floor(log2)/2 + log2(nbRx / 2) + nr_l2maxh_delta */
+      const int shift = (int)(std::log2(amp[k] * amp[k])) / 2 + 1 + nr_l2maxh_delta(nl, 2, 1);
+      const double sc = 1.0 / (1 << shift);
+      double xre[4], xim[4], ainv[4];
+      const int ok = nr_mmse_exact_re(nl, nrx, hre, him, yre, yim, sc, 0.0, xre, xim, ainv, nullptr);
+      /* stock front end: saturating int16 G and b, then the same ZF in double */
+      double Mr[2][3], Mi[2][3];
+      for (int r = 0; r < nl; r++) {
+        for (int c = 0; c < nl; c++) {
+          double vr = 0, vi = 0;
+          for (int a = 0; a < nrx; a++) { vr += hre[r][a] * hre[c][a] + him[r][a] * him[c][a]; vi += hre[r][a] * him[c][a] - him[r][a] * hre[c][a]; }
+          Mr[r][c] = sat16(vr * sc); Mi[r][c] = sat16(vi * sc);
+        }
+        double ur = 0, ui = 0;
+        for (int a = 0; a < nrx; a++) { ur += hre[r][a] * yre[a] + him[r][a] * yim[a]; ui += hre[r][a] * yim[a] - him[r][a] * yre[a]; }
+        Mr[r][2] = sat16(ur * sc); Mi[r][2] = sat16(ui * sc);
+      }
+      /* 2x2 complex Cramer */
+      auto cm = [](double ar, double ai, double br, double bi, double &o_r, double &o_i) { o_r = ar * br - ai * bi; o_i = ar * bi + ai * br; };
+      double d1r, d1i, d2r, d2i;
+      cm(Mr[0][0], Mi[0][0], Mr[1][1], Mi[1][1], d1r, d1i);
+      cm(Mr[0][1], Mi[0][1], Mr[1][0], Mi[1][0], d2r, d2i);
+      const double dr = d1r - d2r, di = d1i - d2i;
+      double n0r, n0i, n1r, n1i, t1r, t1i, t2r, t2i;
+      cm(Mr[0][2], Mi[0][2], Mr[1][1], Mi[1][1], t1r, t1i); cm(Mr[0][1], Mi[0][1], Mr[1][2], Mi[1][2], t2r, t2i); n0r = t1r - t2r; n0i = t1i - t2i;
+      cm(Mr[0][0], Mi[0][0], Mr[1][2], Mi[1][2], t1r, t1i); cm(Mr[0][2], Mi[0][2], Mr[1][0], Mi[1][0], t2r, t2i); n1r = t1r - t2r; n1i = t1i - t2i;
+      const double dd = dr * dr + di * di;
+      double zr[2] = {0, 0}, zi[2] = {0, 0};
+      if (dd > 0) {
+        zr[0] = (n0r * dr + n0i * di) / dd; zi[0] = (n0i * dr - n0r * di) / dd;
+        zr[1] = (n1r * dr + n1i * di) / dd; zi[1] = (n1i * dr - n1r * di) / dd;
+      }
+      int be = !ok, bs = 0;
+      for (int l = 0; l < nl && ok; l++) {
+        be |= nearest(xre[l]) != sr_i[l] || nearest(xim[l]) != si_i[l];
+        bs |= nearest(zr[l]) != sr_i[l] || nearest(zi[l]) != si_i[l];
+      }
+      if (!ok) bs = 1;
+      err_exact[k] += be; err_stock[k] += bs;
+    }
+    err_exact[k] /= N; err_stock[k] /= N;
+    std::printf("Rank2LevelHeadroom |h| %5.0f: RE error rate exact %.4f  stock-int16 (shift - 3) %.4f\n", amp[k], err_exact[k], err_stock[k]);
+  }
+  for (int k = 0; k < 4; k++) EXPECT_LT(err_exact[k], 0.01) << "exact solve at |h| " << amp[k];
+  EXPECT_GT(err_stock[3], 0.2) << "stock int16 front end past |h| 2^11 must clip (the bug this test documents)";
+}
+
+/* RANK2-LEVEL: the mode the passive receiver picks, CPU and GPU through the one helper. */
+TEST(QamMode, PassiveRule)
+{
+  /* passive, no override: 1 layer irrelevant, 2 layers mode 3 only with a spare RX branch, 3-4 layers mode 3 */
+  EXPECT_EQ(3, nr_multilayer_qam_mode(2, 4, 8, -1, 2, 1));
+  EXPECT_EQ(3, nr_multilayer_qam_mode(2, 3, 2, -1, 2, 1));
+  EXPECT_EQ(2, nr_multilayer_qam_mode(2, 2, 8, -1, 2, 1)); /* nbRx == nl: no noise-only dimension, keep mode 2 */
+  EXPECT_EQ(3, nr_multilayer_qam_mode(3, 4, 2, -1, 2, 1));
+  EXPECT_EQ(3, nr_multilayer_qam_mode(4, 4, 8, -1, 2, 1));
+  /* an explicit override wins, mode 1 and QPSK mode 2 fall back to stock at 3-4 layers only */
+  EXPECT_EQ(2, nr_multilayer_qam_mode(2, 4, 8, 2, 2, 1));
+  EXPECT_EQ(0, nr_multilayer_qam_mode(4, 4, 8, 1, 2, 1));
+  EXPECT_EQ(0, nr_multilayer_qam_mode(3, 4, 2, 2, 2, 1));
+  EXPECT_EQ(1, nr_multilayer_qam_mode(2, 4, 8, 1, 2, 1));
+  /* not passive (nr_dlsim): unchanged stock behaviour */
+  EXPECT_EQ(0, nr_multilayer_qam_mode(2, 4, 8, -1, 0, 0));
+  EXPECT_EQ(0, nr_multilayer_qam_mode(4, 4, 8, -1, 0, 0));
+  /* NL2 headroom delta only on the int16 mode 2 path */
+  EXPECT_EQ(-3, nr_l2maxh_delta(2, 2, 1));
+  EXPECT_EQ(0, nr_l2maxh_delta(2, 3, 1));
+  EXPECT_EQ(0, nr_l2maxh_delta(4, 3, 1));
+  EXPECT_EQ(0, nr_l2maxh_delta(2, 0, 0));
 }

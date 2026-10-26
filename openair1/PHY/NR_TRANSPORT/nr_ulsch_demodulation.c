@@ -20,32 +20,26 @@
 #include "openair1/SCHED_NR/sched_nr.h"
 #include "executables/softmodem-common.h" // IS_PASSIVE_RX_MODE, for the passive-only branch restriction below
 #include "nr_ulsch_passive_branch.h" // nr_ulsch_dmrs_snr_db
+#include "nr_ul_branch_select.h"
+#include <pthread.h>
 
-/* PASSIVE-RX UL RECEIVE-BRANCH RESTRICTION (2026-09-03).
- *
- * Returns the single receive branch the UL path should use, or -1 for the legacy all-branch
- * behaviour. Two call sites must agree on the answer -- the equaliser's combining (chFext) and the
- * fixed-point scale (avgs) -- because the DL four-RX work established that fixing one without the
- * other does not help: the LLR shift has to match the branch the decoder actually reads.
- *
- * Why UL needs this at all, measured on this rig: branches 1-3 are undecodable (selection diversity
- * rescued 0 of 15411 transport blocks) while branch 0 alone decodes. UL scored 93.5 % CRC at
- * --ue-nb-ant-rx 1 and 0-22 % at 4, because the UL joint receiver combines every branch
- * unconditionally and has no equivalent of the DL path's ISAC_RX_MRC_MODE=0 escape hatch.
- *
- * GATED ON PASSIVE MODE: a real gNB wants all of its branches. four-rx-mrc-skip-blocks-passive-pdcch
- * records what it costs to fix one use case by breaking the other. */
-static int nr_ulsch_passive_keep_branch(int nb_rx_ant)
+/* Passive UL receive branches: every branch whose DM-RS is detectable against its own measured noise (nr_ul_branch_select.h), per grant;
+ * a dead branch is excluded by that test, a weak live one is weighted by the combiner. The table feeds the GPU pass. */
+static nr_ul_branch_tab_t g_ul_branch_tab;
+static pthread_mutex_t g_ul_branch_lock = PTHREAD_MUTEX_INITIALIZER;
+int nr_ulsch_passive_branch_keep(int nb_rx_ant)
 {
-  if (nb_rx_ant <= 1 || !IS_PASSIVE_RX_MODE(get_softmodem_params())) {
-    return -1;
-  }
-  static __thread bool s_logged;
-  if (!s_logged) {
-    s_logged = true;
-    LOG_W(PHY, "SENSING: UL restricted to receive branch 0\n");
-  }
-  return 0; // ISAC_RX_MRC_MODE=1: branch 0 only (mode 2 would combine all)
+  if (nb_rx_ant <= 1) return -1;
+  pthread_mutex_lock(&g_ul_branch_lock);
+  const int k = nr_ul_branch_tab_keep(&g_ul_branch_tab, nb_rx_ant);
+  pthread_mutex_unlock(&g_ul_branch_lock);
+  return k;
+}
+void nr_ulsch_passive_branch_note(uint32_t mask, int nb_rx_ant)
+{
+  pthread_mutex_lock(&g_ul_branch_lock);
+  nr_ul_branch_tab_note(&g_ul_branch_tab, mask, nb_rx_ant);
+  pthread_mutex_unlock(&g_ul_branch_lock);
 }
 
 #define NR_MAX_PUSCH_SCRAMBLING_STACK_BYTES (2 * 1024 * 1024) // 2MB
@@ -339,22 +333,15 @@ static void inner_rx(PHY_VARS_gNB *gNB,
 #endif
     }
   }
-  /* Silence the branches this receiver cannot decode, BEFORE they reach the combiner. chFext is a
-   * local, freshly-memset buffer, so this touches no shared state: zeroing a branch's channel
-   * estimate makes nr_channel_compensation() weight it by h* == 0, contributing exactly zero
-   * signal AND zero noise. Same technique the DL path uses for its excluded branches, and cheaper
-   * than permuting rows. -1 (a real gNB) skips this entirely. */
-  {
-    const int ul_keep = nr_ulsch_passive_keep_branch(nb_rx_ant);
-    if (ul_keep >= 0) {
-      for (int aarx = 0; aarx < nb_rx_ant; aarx++) {
-        if (aarx == ul_keep) {
-          continue;
-        }
-        for (int aatx = 0; aatx < nb_layer; aatx++) {
-          memset(chFext[aatx][aarx], 0, sizeof(chFext[0][0]));
-        }
-      }
+  /* Silence the branches the grant's DM-RS measurement found dead (pusch_vars->ul_branch_mask, set once per grant from the channel power of every
+   * branch), BEFORE they reach the combiner. chFext is a local, freshly-memset buffer, so this touches no shared state: a zeroed channel
+   * estimate makes nr_channel_compensation() weight the branch by h* == 0, contributing exactly zero signal AND zero noise. 0 = all. */
+  if (pusch_vars->ul_branch_mask) {
+    for (int aarx = 0; aarx < nb_rx_ant; aarx++) {
+      if (pusch_vars->ul_branch_mask & (1u << aarx))
+        continue;
+      for (int aatx = 0; aatx < nb_layer; aatx++)
+        memset(chFext[aatx][aarx], 0, sizeof(chFext[0][0]));
     }
   }
 
@@ -783,6 +770,8 @@ static int nr_rx_pusch_group_internal(PHY_VARS_gNB *gNB,
   start_meas(&gNB->ulsch_channel_estimation_stats);
   int max_ch = 0;
   uint32_t nvar = 0;
+  memset(joint_pv->ul_noise_amp2, 0, sizeof(joint_pv->ul_noise_amp2));
+  memset(joint_pv->ul_noise_cnt, 0, sizeof(joint_pv->ul_noise_cnt));
   int end_symbol = rel15_ul_ref->start_symbol_index + rel15_ul_ref->nr_of_symbols;
   uint8_t dmrs_symb_idx = 0;
   for (uint8_t symbol = rel15_ul_ref->start_symbol_index; symbol < end_symbol; symbol++) {
@@ -1042,11 +1031,39 @@ static int nr_rx_pusch_group_internal(PHY_VARS_gNB *gNB,
    *
    * This is the SCALE half; the COMBINING half is the chFext zeroing in nr_rx_pusch_symbol(), and
    * both read nr_ulsch_passive_keep_branch() so they cannot disagree about which branch is live. */
-  const int ul_keep = nr_ulsch_passive_keep_branch(num_sp_streams);
+  joint_pv->ul_branch_mask = 0;
+  if (num_sp_streams > 1 && IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+    /* per branch: mean smoothed |H|^2 over the DM-RS symbols (max over layers) against that branch's own LS-vs-smoothed noise */
+    const int nbr = num_sp_streams < NR_UL_BRANCH_MAX ? num_sp_streams : NR_UL_BRANCH_MAX;
+    double sig2[NR_UL_BRANCH_MAX] = {0}, res2[NR_UL_BRANCH_MAX] = {0};
+    uint32_t cnt[NR_UL_BRANCH_MAX] = {0};
+    const int nsc = rel15_ul_ref->rb_size * NR_NB_SC_PER_RB;
+    for (int a = 0; a < nbr; a++) {
+      for (int nl = 0; nl < total_layers; nl++) {
+        double acc = 0;
+        int c = 0;
+        for (int symbol = rel15_ul_ref->start_symbol_index; symbol < end_symbol; symbol++) {
+          if (!((rel15_ul_ref->ul_dmrs_symb_pos >> symbol) & 1)) continue;
+          const c16_t *h = (const c16_t *)&joint_pv->ul_ch_estimates[nl * num_sp_streams + a][symbol * frame_parms->ofdm_symbol_size];
+          for (int k = 0; k < nsc; k++) acc += c16amp2(h[k]);
+          c += nsc;
+        }
+        if (c > 0 && acc / c > sig2[a]) sig2[a] = acc / c;
+      }
+      if (joint_pv->ul_noise_cnt[a] > 0) {
+        cnt[a] = joint_pv->ul_noise_cnt[a];
+        res2[a] = (double)joint_pv->ul_noise_amp2[a] / (double)joint_pv->ul_noise_cnt[a];
+      }
+    }
+    joint_pv->ul_branch_mask = nr_ul_branch_select(sig2, res2, cnt, nbr);
+    nr_ulsch_passive_branch_note(joint_pv->ul_branch_mask, nbr);
+    if (joint_pv->ul_branch_mask == (1u << nbr) - 1u)
+      joint_pv->ul_branch_mask = 0; /* all branches: the stock path */
+  }
   int avgs = 0;
   for (int nl = 0; nl < total_layers; nl++)
     for (int aarx = 0; aarx < num_sp_streams; aarx++)
-      if (ul_keep < 0 || aarx == ul_keep)
+      if (!joint_pv->ul_branch_mask || (joint_pv->ul_branch_mask & (1u << aarx)))
         avgs = cmax(avgs, avg[nl * num_sp_streams + aarx]);
 
   if (total_layers == 2 && rel15_ul_ref->qam_mod_order > 6)

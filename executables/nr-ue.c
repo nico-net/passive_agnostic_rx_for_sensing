@@ -47,6 +47,7 @@ int nr_ue_rx_synced_g = 0;
 #include "common/utils/time_manager/time_manager.h"
 #include "log.h"
 #include <stdatomic.h>
+#include "PHY/MODULATION/nr_sfo_state.h"
 
 /// Defined in nr_adjust_synch_ue.c -- freezes the timing integrator during a stream outage.
 extern _Atomic int nr_ue_rf_signal_absent;
@@ -1629,6 +1630,9 @@ void *UE_thread(void *arg)
     if (slot_nr == nb_slot_frame - 1) {
       // we shift of half of measured drift, at each beginning of frame for both rx and tx
       iq_shift_to_apply = shiftForNextFrame;
+      /* the receiver's own clock offset: samples read beyond the nominal frame, windowed mean (nr_sfo_state.h) */
+      if (UE->is_synchronized)
+        nr_sfo_note_frame_read(-iq_shift_to_apply, fp->samples_per_frame);
       // autonomous timing advance calculation, which does not use SIB19 information
       if (ntn_koffset && get_nrUE_params()->autonomous_ta)
         UE->timing_advance_ntn -= 2 * shiftForNextFrame;

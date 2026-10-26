@@ -141,7 +141,7 @@ TEST(UlGpuFep, OverlappingWindowsAreMerged)
     }
   if (s1[13]) {
     const uint64_t span = (uint64_t)(7 * (n - 1) + N) * 4 /*B*/, h2d = s1[11] - s0[11];
-    const uint64_t items = ((uint64_t)n * 72 + 255) & ~255ull;
+    const uint64_t items = ((uint64_t)n * sizeof(nr_pusch_gpu_fep_item_t) + 255) & ~255ull; /* the item table is staged too (80 B since the SFO fields, 72 before) */
     EXPECT_LE(h2d, items + 4 * ((span + 255) & ~255ull)) << "windows not merged";
     EXPECT_GE(h2d, items + 4 * span);
   }

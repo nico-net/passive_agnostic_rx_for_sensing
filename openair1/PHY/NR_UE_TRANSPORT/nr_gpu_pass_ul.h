@@ -69,6 +69,8 @@ typedef struct {
   uint32_t iq_len;
   int32_t win[NR_GPU_PASS_UL_NSYM];
   const int16_t *symbol_rot;             /* c16 [symbols_per_slot] */
+  uint32_t sfo_dphi[14];                 /* intra-slot SFO step per symbol (nr_sfo_slot_dphi of the eps the CPU path uses), 0 = none */
+  int32_t sfo_kref;                      /* its reference subcarrier (nr_sfo_kref) */
   int16_t *rx[4];                        /* the caller's rxdataF row of symbol 0 of the slot per antenna (c16), or NULL */
   int ctx;                               /* decode context (buffers are per context, allocated by nr_gpu_pass_ul_prewarm) */
   /* ---- outputs the caller wants */

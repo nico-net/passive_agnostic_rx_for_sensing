@@ -155,6 +155,11 @@ void nr_pusch_passive_queue_get_stats(nr_pusch_passive_queue_stats_t *out);
 int nr_pusch_passive_queue_real_pending(void);
 /// ULQ: true when optional rescue decodes (UCI explore, UL_RETRY) may run now (ISAC_UL_SPARE_RESCUE).
 bool nr_pusch_passive_rescue_allowed(void);
+/// Optional PUSCH work (UCI search, layout CRC trials of a provisional fit): CPU share per second, from the run-time core plan. A worker with
+/// its own cores (ISAC_PUSCH_CORES, exported by the core plan) may use all of its idle time; one without shares the machine and takes
+/// one CPU among the online CPUs. _left(): the second's share is not spent; _charge(): book CPU ns spent.
+bool nr_pusch_passive_optional_share_left(void);
+void nr_pusch_passive_optional_charge(uint64_t ns);
 /// ULQ census line (PUSCHQ2), printed by the UL summary.
 void nr_pusch_passive_queue_ulq_dump(void);
 
