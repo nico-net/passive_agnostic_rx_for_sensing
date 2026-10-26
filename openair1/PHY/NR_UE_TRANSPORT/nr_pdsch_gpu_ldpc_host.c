@@ -321,7 +321,8 @@ static int32_t decode_impl(gl_t *G, nrLDPC_slot_decoding_parameters_t *p, nrLDPC
                           + atomic_load_explicit(&G->fb_reason[-NR_GPU_LDPC_E_SENTINEL], memory_order_relaxed);
     const int r_g = t ? gpu_tb(G, tb, t->c_chk, okg, &gns) : 1;
     const uint64_t tg1 = now_ns();
-    const bool gab = check_abort(tb->abort_decode); /* the GPU verdicts reached NR_CB_FAIL_LIMIT failed blocks */
+    bool tried_g[NR_LDPC_MAX_NUM_CB]; /* the GPU's per-block "tried" (cpu() below overwrites tb->decodeTried) */
+    memcpy(tried_g, tb->decodeTried, sizeof(tried_g));
     set_abort(tb->abort_decode, ab0);
     rc = cpu(p);
     if (trial) { /* paired sample: the GPU side is its own time, plus the CPU redo when it hands the TB back (syn0 / refusal): the real cost */
@@ -339,18 +340,11 @@ static int32_t decode_impl(gl_t *G, nrLDPC_slot_decoding_parameters_t *p, nrLDPC
     if (r_g == 0 && rc == 0) {
       const int KB = tb->K >> 3;
       int bad = -1;
-      /* A TB that hit the failure limit: which blocks the parallel CPU decode still started before its own abort fired is a race, only the
-       * TB verdict (it fails) is comparable. Below the limit every block is decoded and compared bit for bit. */
-      if (gab) {
-        bad = 0;
-        for (uint32_t r = 0; r < n_dec; r++)
-          if (!tb->decodeSuccess[r]) {
-            bad = -1;
-            break;
-          }
-      }
-      for (uint32_t r = 0; r < n_dec && bad < 0 && !gab; r++)
-        if (okg[r] != tb->decodeSuccess[r] || (okg[r] && memcmp(t->c_chk + (size_t)r * KB, tb->c + (size_t)r * KB, KB) != 0))
+      /* Both sides define the per-block result in block order (nr_cb_order_result; the abort point is the NR_CB_FAIL_LIMIT-th failed block),
+       * so tried / ok are compared block by block up to and past it (past it both are untried and failed), and the bits of every ok block. */
+      for (uint32_t r = 0; r < n_dec && bad < 0; r++)
+        if (okg[r] != tb->decodeSuccess[r] || tried_g[r] != tb->decodeTried[r]
+            || (okg[r] && memcmp(t->c_chk + (size_t)r * KB, tb->c + (size_t)r * KB, KB) != 0))
           bad = (int)r;
       if (bad < 0) {
         atomic_fetch_add_explicit(&G->chk_ok, 1, memory_order_relaxed);

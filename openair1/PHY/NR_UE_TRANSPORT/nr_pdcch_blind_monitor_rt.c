@@ -6700,8 +6700,12 @@ NR_CELL_STATIC(uint16_t, s_pbwp_own_size);
             nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start + cfg->coreset_rb_offset);
             dl_discovery_invalidate_locked();
             pthread_mutex_unlock(&g_dl_length_lock);
-            LOG_W(PHY, "SENSING: DCI length unresolved after %d occasions for coreset=%llu rnti=0x%x; "
-                       "next geometry\n", occasions, (unsigned long long)dl_geom, bootstrap_rnti);
+            /* an empty candidate geometry of the CORESET walk, not a decode fault: info level, with the running count of empty
+             * candidates (OTA 2026-10-26: 3-169 per 300 s, none of them a geometry that locked later) */
+            static _Atomic uint32_t n_empty_geom;
+            LOG_I(PHY, "SENSING: DCI length unresolved after %d occasions for coreset=%llu rnti=0x%x; "
+                       "next geometry (empty candidates %u)\n", occasions, (unsigned long long)dl_geom, bootstrap_rnti,
+                  (unsigned)atomic_fetch_add(&n_empty_geom, 1) + 1);
             return;
           }
         }

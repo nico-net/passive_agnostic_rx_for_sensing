@@ -89,7 +89,8 @@ typedef struct nrLDPC_decoding_parameters_s {
   bool d_to_be_cleared;
   uint8_t *c;
   bool *decodeSuccess;
-  bool *decodeTried; /* the decoder was started (the TB was not yet aborted when this block began) */
+  bool *decodeTried; /* the decoder ran to completion (was not cut short by the TB's abort); made exact in block order after the pool joins */
+  decode_abort_t blk_abort; /* this block's view of the TB's abort state (init_abort_block) */
   uint8_t *decodeIters; /* OAI numIter of the segment (LDPCdecoder return value): < numMaxIter on success, = numMaxIter on a failure or abort */
 
   task_ans_t *ans;
@@ -204,9 +205,11 @@ static void nr_process_decode_segment(void *arg)
 
   ////////////////////////////////// pl =====> llrProcBuf //////////////////////////////////
   start_meas(&rdata->ts_ldpc_decode);
-  *rdata->decodeTried = !check_abort(rdata->abort_decode);
-  int decodeIterations = LDPCdecoder(p_decoderParms, l, (uint8_t *)llrProcBuf, p_procTime, rdata->abort_decode);
+  int decodeIterations = LDPCdecoder(p_decoderParms, l, (uint8_t *)llrProcBuf, p_procTime, &rdata->blk_abort);
+  *rdata->decodeTried = decodeIterations != (int)NR_LDPC_ITER_CUT;
   AssertFatal(rdata->c, "rdata->c is null, A %d, K %d\n", rdata->A, rdata->K);
+  if (decodeIterations == (int)NR_LDPC_ITER_CUT)
+    decodeIterations = p_decoderParms->numMaxIter;
   *rdata->decodeIters = (uint8_t)(decodeIterations > 255 ? 255 : decodeIterations);
   if (decodeIterations < p_decoderParms->numMaxIter) {
     memcpy(rdata->c, llrProcBuf, K >> 3);
@@ -243,6 +246,7 @@ int nrLDPC_prepare_TB_decoding(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_de
   decParams.outMode = nrLDPC_outMode_BIT;
 
   const uint32_t n_dec = tb_ndec(nrLDPC_TB_decoding_parameters);
+  const bool entry_aborted = begin_block_decode(nrLDPC_TB_decoding_parameters->abort_decode);
   for (int r = 0; r < (int)n_dec; r++) {
     nrLDPC_decoding_parameters_t *rdata = &((nrLDPC_decoding_parameters_t *)t_info->buf)[t_info->len];
     DevAssert(t_info->len < t_info->cap);
@@ -271,6 +275,7 @@ int nrLDPC_prepare_TB_decoding(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_de
     rdata->rv_index = nrLDPC_TB_decoding_parameters->rv_index;
     rdata->tbslbrm = nrLDPC_TB_decoding_parameters->tbslbrm;
     rdata->abort_decode = nrLDPC_TB_decoding_parameters->abort_decode;
+    init_abort_block(&rdata->blk_abort, rdata->abort_decode, r, entry_aborted);
     rdata->d = nrLDPC_TB_decoding_parameters->d + r * rdata->Kc * rdata->Z;
     rdata->d_to_be_cleared = nrLDPC_TB_decoding_parameters->d_to_be_cleared;
     rdata->c = nrLDPC_TB_decoding_parameters->c + r * (rdata->K >> 3);
@@ -300,6 +305,25 @@ int nrLDPC_prepare_TB_decoding(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_de
     LOG_D(PHY, "Added a block to decode, in pipe: %d, rdata->c %p\n", r, rdata->c);
   }
   return (int)n_dec;
+}
+
+/* The pool finished a TB: which blocks count as tried / ok, and the TB's abort count, are defined in block order (nr_cb_order_result), exactly
+ * as the GPU paths define them, not by which workers happened to finish first. The early abort only saved CPU time. A block after the abort
+ * point that a worker did finish is reported untried and failed (its bits zeroed). TB CRC semantics are unchanged: the TB passes only if every
+ * block does. entry_aborted: the TB was already aborted when its decode began (nothing to recount). */
+void nrLDPC_finalize_TB_order(nrLDPC_TB_decoding_parameters_t *tb, bool entry_aborted)
+{
+  const uint32_t n = tb_ndec(tb);
+  bool ok[NR_LDPC_MAX_NUM_CB], tried[NR_LDPC_MAX_NUM_CB];
+  const unsigned nfail = nr_cb_order_result(tb->decodeTried, tb->decodeSuccess, n, entry_aborted, tried, ok);
+  for (uint32_t r = 0; r < n; r++) {
+    if (tb->decodeSuccess[r] && !ok[r])
+      memset(tb->c + (size_t)r * (tb->K >> 3), 0, tb->K >> 3);
+    tb->decodeTried[r] = tried[r];
+    tb->decodeSuccess[r] = ok[r];
+  }
+  if (!entry_aborted)
+    end_block_decode(tb->abort_decode, nfail);
 }
 
 int32_t nrLDPC_coding_init(void)
@@ -335,6 +359,7 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_dec
   for (int pusch_id = 0; pusch_id < nrLDPC_slot_decoding_parameters->nb_TBs; pusch_id++) {
     nrLDPC_TB_decoding_parameters_t *nrLDPC_TB_decoding_parameters = &nrLDPC_slot_decoding_parameters->TBs[pusch_id];
     *nrLDPC_TB_decoding_parameters->processedSegments = 0;
+    nrLDPC_finalize_TB_order(nrLDPC_TB_decoding_parameters, ((nrLDPC_decoding_parameters_t *)t_info.buf)[r_t_info].blk_abort.entry_aborted);
     for (int r = 0; r < (int)tb_ndec(nrLDPC_TB_decoding_parameters); r++) {
       if (nrLDPC_TB_decoding_parameters->decodeSuccess[r])
         *nrLDPC_TB_decoding_parameters->processedSegments = *nrLDPC_TB_decoding_parameters->processedSegments + 1;

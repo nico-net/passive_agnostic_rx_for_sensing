@@ -4,7 +4,11 @@
  *   - a TB with fewer than NR_CB_FAIL_LIMIT failed blocks is decoded to the end (every good block passes), and the TB still fails;
  *   - the NR_CB_FAIL_LIMIT-th failed block aborts the rest (not tried, failed), and the TB fails;
  *   - no failed block: every block passes (the TB passes);
- *   - set_abort(false) re-arms the counter.
+ *   - set_abort(false) re-arms the counter;
+ *   - a block CUT SHORT mid-decode by the TB abort is reported distinctly (NR_LDPC_ITER_CUT): no failure is noted, it is not "tried";
+ *   - the parallel CPU pool: blocks decoded in ANY completion order (the order is injected by the test) through per-block abort views give,
+ *     after nrLDPC_finalize_TB_order, the same tried / ok / abort count as the in-order sequential rule (the GPU rule, k_pick); the TB CRC
+ *     verdict (every block ok) is unchanged.
  * The good blocks are the all-zero codeword (its CRC24B is zero) with a clean positive LLR, the bad ones pure noise.
  * "bench" [reps]: serial CPU time of the decode of a 30-block TB, old rule (abort at the first failed block) vs new, for TBs with 30, 5, 1 and 0
  * hopeless blocks among noisy-but-decodable ones. Prints NR_CB_ABORT_TEST failures=0 on success. */
@@ -16,6 +20,7 @@
 #include <time.h>
 #include "PHY/CODING/coding_defs.h"
 #include "PHY/CODING/nrLDPC_defs.h"
+#include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 
@@ -29,6 +34,7 @@ void exit_function(const char *file, const char *function, const int line, const
 
 enum { C = 30, Z = 384, K = 22 * 384, KPRIME = K - 24, KC = 68, NITER = 16 };
 static LDPC_decoderfunc_t *g_dec;
+static void (*g_finalize)(nrLDPC_TB_decoding_parameters_t *, bool); /* nrLDPC_finalize_TB_order of libldpc.so */
 static int g_fail;
 #define CHECK(c, ...) do { if (!(c)) { g_fail++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
@@ -145,6 +151,160 @@ static void unit(void)
   CHECK(r.tried == C && r.ok == C, "E: tried %d ok %d", r.tried, r.ok);
 }
 
+/* decode the blocks in the given completion order (order[0..C-1], injected) through per-block views of one TB abort object (the segment
+ * decoder's mechanism), then make the result exact in block order with the library's own nrLDPC_finalize_TB_order. */
+static tb_res_t decode_tb_parallel(const char *kind, const int *order, unsigned *nfail_after, bool *aborted_after, int *n_cut)
+{
+  static int8_t l[C][KC * Z + 64] __attribute__((aligned(32)));
+  static uint8_t out[27000] __attribute__((aligned(32)));
+  static nrLDPC_TB_decoding_parameters_t tb;
+  static uint8_t cbuf[C * (K >> 3)];
+  memset(&tb, 0, sizeof(tb));
+  memset(cbuf, 0xA5, sizeof(cbuf));
+  for (int r = 0; r < C; r++)
+    make_llr(l[r], kind[r] ? 0 : 30, kind[r] ? 40 : 8);
+  t_nrLDPC_dec_params dp = {.check_crc = check_crc};
+  dp.BG = 1; dp.Z = Z; dp.R = 13; dp.numMaxIter = NITER; dp.outMode = nrLDPC_outMode_BIT; dp.crc_type = CRC24_B; dp.Kprime = KPRIME;
+  decode_abort_t ab;
+  init_abort(&ab);
+  const bool entry = begin_block_decode(&ab);
+  int cuts = 0;
+  for (int i = 0; i < C; i++) {
+    const int r = order[i];
+    decode_abort_t blk;
+    init_abort_block(&blk, &ab, r, entry);
+    t_nrLDPC_time_stats ts;
+    memset(&ts, 0, sizeof(ts));
+    const int it = g_dec(&dp, l[r], out, &ts, &blk);
+    tb.decodeTried[r] = it != (int)NR_LDPC_ITER_CUT;
+    tb.decodeSuccess[r] = it < dp.numMaxIter;
+    cuts += it == (int)NR_LDPC_ITER_CUT;
+  }
+  tb.K = K; tb.C = C; tb.abort_decode = &ab; tb.c = cbuf;
+  bool rawok[C];
+  memcpy(rawok, tb.decodeSuccess, sizeof(rawok));
+  g_finalize(&tb, entry);
+  tb_res_t res = {0};
+  for (int r = 0; r < C; r++)
+    if (rawok[r] && !tb.decodeSuccess[r]) /* finished by a worker after the abort point: reported failed, its bits zeroed */
+      for (int b = 0; b < K >> 3; b++)
+        if (cbuf[r * (K >> 3) + b] != 0) {
+          CHECK(0, "block %d after the abort point not zeroed", r);
+          break;
+        }
+  for (int r = 0; r < C; r++) {
+    res.tried += tb.decodeTried[r];
+    res.ok += tb.decodeSuccess[r];
+    res.tried_at[r] = tb.decodeTried[r];
+    res.ok_at[r] = tb.decodeSuccess[r];
+  }
+  if (nfail_after) *nfail_after = ab.nfail;
+  if (aborted_after) *aborted_after = check_abort(&ab);
+  if (n_cut) *n_cut = cuts;
+  pthread_mutex_destroy(&ab.mutex_failure);
+  return res;
+}
+
+static void same(const tb_res_t *a, const tb_res_t *b, const char *what)
+{
+  CHECK(a->tried == b->tried && a->ok == b->ok, "%s: tried %d/%d ok %d/%d", what, a->tried, b->tried, a->ok, b->ok);
+  for (int i = 0; i < C; i++)
+    CHECK(a->tried_at[i] == b->tried_at[i] && a->ok_at[i] == b->ok_at[i], "%s: block %d tried %d/%d ok %d/%d", what, i, a->tried_at[i],
+          b->tried_at[i], a->ok_at[i], b->ok_at[i]);
+}
+
+static void order_tests(void)
+{
+  char k[C];
+  int fwd[C], rev[C], shuf[C];
+  for (int i = 0; i < C; i++) { fwd[i] = i; rev[i] = C - 1 - i; shuf[i] = (i * 11 + 3) % C; } /* 11 coprime to 30 */
+
+  /* a block cut short by the abort is not a failed block and not tried: 5 failures are recorded at blocks 0..4, block 20 starts afterwards */
+  {
+    static int8_t l[KC * Z + 64] __attribute__((aligned(32)));
+    static uint8_t out[27000] __attribute__((aligned(32)));
+    t_nrLDPC_dec_params dp = {.check_crc = check_crc};
+    dp.BG = 1; dp.Z = Z; dp.R = 13; dp.numMaxIter = NITER; dp.outMode = nrLDPC_outMode_BIT; dp.crc_type = CRC24_B; dp.Kprime = KPRIME;
+    decode_abort_t ab, blk;
+    init_abort(&ab);
+    for (int i = 0; i < NR_CB_FAIL_LIMIT; i++) {
+      init_abort_block(&blk, &ab, i, false);
+      (void)note_cb_failure(&blk);
+    }
+    CHECK(ab.nfail == NR_CB_FAIL_LIMIT && check_abort(&ab), "5 block failures: nfail %d", ab.nfail);
+    t_nrLDPC_time_stats ts;
+    memset(&ts, 0, sizeof(ts));
+    make_llr(l, 30, 8);
+    init_abort_block(&blk, &ab, 20, false);
+    int it = g_dec(&dp, l, out, &ts, &blk);
+    CHECK(it == (int)NR_LDPC_ITER_CUT, "block after the abort point: it %d", it);
+    CHECK(ab.nfail == NR_CB_FAIL_LIMIT, "a cut block must not count as a failure: nfail %d", ab.nfail);
+    make_llr(l, 0, 40);
+    it = g_dec(&dp, l, out, &ts, &blk);
+    CHECK(it == (int)NR_LDPC_ITER_CUT && ab.nfail == NR_CB_FAIL_LIMIT, "cut hopeless block: it %d nfail %d", it, ab.nfail);
+    /* block 2 sees only the failures BEFORE it (none): it decodes although 5 other blocks failed */
+    make_llr(l, 30, 8);
+    init_abort_block(&blk, &ab, 0, false);
+    ab.failbits[0] = 0x3E0; /* blocks 5..9 failed */
+    ab.nfail = 5;
+    init_abort_block(&blk, &ab, 2, false);
+    it = g_dec(&dp, l, out, &ts, &blk);
+    CHECK(it < NITER, "block 2 with failures only after it must decode: it %d", it);
+    init_abort_block(&blk, &ab, 12, false);
+    it = g_dec(&dp, l, out, &ts, &blk);
+    CHECK(it == (int)NR_LDPC_ITER_CUT, "block 12 after 5 failures: it %d", it);
+    /* a TB aborted before it began: every block is cut at once */
+    init_abort_block(&blk, &ab, 0, true);
+    it = g_dec(&dp, l, out, &ts, &blk);
+    CHECK(it == (int)NR_LDPC_ITER_CUT, "entry-aborted TB: it %d", it);
+    pthread_mutex_destroy(&ab.mutex_failure);
+  }
+
+  /* pure rule: raw completion data -> block-order result */
+  {
+    bool rt[8] = {1, 1, 1, 1, 1, 1, 1, 1}, ro[8] = {0, 1, 0, 0, 0, 0, 1, 1}, t[8], o[8];
+    unsigned nf = nr_cb_order_result(rt, ro, 8, false, t, o); /* failures at 0,2,3,4,5 -> abort after 5; blocks 6,7 finished by a worker: untried */
+    CHECK(nf == 5, "order nfail %u", nf);
+    for (int i = 0; i < 8; i++)
+      CHECK(t[i] == (i <= 5) && o[i] == (i == 1), "order block %d tried %d ok %d", i, t[i], o[i]);
+    rt[3] = false; /* rate-matching error: not tried, not a failure */
+    nf = nr_cb_order_result(rt, ro, 8, false, t, o);
+    CHECK(nf == 4 && !t[3] && t[6] && o[6] && t[7] && o[7], "rate-matching error block 3: nfail %u", nf);
+    nf = nr_cb_order_result(rt, ro, 8, true, t, o);
+    CHECK(nf == 0 && !t[0] && !o[1] && !o[6], "entry aborted: everything untried and failed");
+  }
+
+  /* the real pool mechanism, completion order injected: forward, reverse, shuffled */
+  const struct { const char *name; int bad[8]; int nbad; } sc[] = {
+    {"fewer than the limit", {0, 7, 13, 29}, 4},
+    {"limit reached at 10, later bad blocks 12,14", {2, 4, 6, 8, 10, 12, 14}, 7},
+    {"limit at the first five", {0, 1, 2, 3, 4}, 5},
+    {"failures spread to the end", {3, 9, 15, 21, 27, 28, 29}, 7},
+    {"no failure", {0}, 0},
+  };
+  for (unsigned s = 0; s < sizeof(sc) / sizeof(sc[0]); s++) {
+    kinds(k, sc[s].bad, sc[s].nbad);
+    tb_res_t ref = decode_tb(k, false, 30, 8, NULL);
+    const int *orders[] = {fwd, rev, shuf};
+    const char *on[] = {"forward", "reverse", "shuffled"};
+    for (int o = 0; o < 3; o++) {
+      unsigned nf;
+      bool ab;
+      int cuts;
+      tb_res_t p = decode_tb_parallel(k, orders[o], &nf, &ab, &cuts);
+      char what[96];
+      snprintf(what, sizeof(what), "%s / %s", sc[s].name, on[o]);
+      same(&ref, &p, what);
+      CHECK(ab == (sc[s].nbad >= NR_CB_FAIL_LIMIT) && nf == (unsigned)(sc[s].nbad >= NR_CB_FAIL_LIMIT ? NR_CB_FAIL_LIMIT : sc[s].nbad),
+            "%s: abort state nfail %u aborted %d", what, nf, ab);
+      /* TB verdict: passes only if every block does */
+      CHECK((p.ok == C) == (sc[s].nbad == 0), "%s: TB verdict", what);
+      if (o == 0)
+        CHECK(cuts == (sc[s].nbad >= NR_CB_FAIL_LIMIT ? C - 1 - sc[s].bad[NR_CB_FAIL_LIMIT - 1] : 0), "%s: forward order cuts %d", what, cuts);
+    }
+  }
+}
+
 static void bench(int reps)
 {
   const int nbad[] = {30, 5, 1, 0};
@@ -193,7 +353,13 @@ int main(int argc, char **argv)
     bench(argc > 2 ? atoi(argv[2]) : 50);
     return 0;
   }
+  g_finalize = (void (*)(nrLDPC_TB_decoding_parameters_t *, bool))dlsym(h, "nrLDPC_finalize_TB_order");
+  if (!g_finalize) {
+    fprintf(stderr, "no nrLDPC_finalize_TB_order in %s\n", lib);
+    return 2;
+  }
   unit();
+  order_tests();
   printf("NR_CB_ABORT_TEST failures=%d\n", g_fail);
   return g_fail != 0;
 }

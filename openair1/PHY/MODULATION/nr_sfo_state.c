@@ -8,14 +8,30 @@
 #include <pthread.h>
 #include "common/utils/LOG/log.h"
 
-static _Atomic int64_t g_eps_q;        /* published eps, 1e-12 */
-static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
-static int g_win[NR_SFO_WINDOW];       /* per-frame extra samples, ring */
-static int g_n, g_w;                   /* frames in the window, write index */
-static long g_sum;                     /* sum of the window */
-static int g_spf;                      /* samples per frame of the window */
-static double g_dmrs_corr;             /* fine correction from the DM-RS residual, eps units */
-static uint64_t g_frames, g_dmrs_n;
+/* ALL the provider state in one struct: one instance now (single cell); a per-cell array indexed by nr_cell_idx() later (see the
+ * multi-PCI design note in docs/superpowers/reports/csd/FIX-SFO-RESYNC-20261026.md). The eps is relative to the clock of the gNB being
+ * tracked, so it is meaningless across a cell change or a timing epoch. */
+typedef struct {
+  _Atomic int64_t eps_q;   /* published eps, 1e-12 */
+  pthread_mutex_t mu;
+  int win[NR_SFO_WINDOW];  /* per-frame extra samples, ring */
+  int n, w;                /* frames in the window, write index */
+  long sum;                /* sum of the window */
+  int spf;                 /* samples per frame of the window */
+  double dmrs_corr;        /* fine correction from the DM-RS residual, eps units */
+  uint64_t frames, dmrs_n;
+} nr_sfo_state_t;
+static nr_sfo_state_t g_st = {.mu = PTHREAD_MUTEX_INITIALIZER};
+#define g_eps_q (g_st.eps_q)
+#define g_mu (g_st.mu)
+#define g_win (g_st.win)
+#define g_n (g_st.n)
+#define g_w (g_st.w)
+#define g_sum (g_st.sum)
+#define g_spf (g_st.spf)
+#define g_dmrs_corr (g_st.dmrs_corr)
+#define g_frames (g_st.frames)
+#define g_dmrs_n (g_st.dmrs_n)
 static __thread int64_t t_pin = INT64_MIN;
 
 void nr_sfo_reset(void)
@@ -28,6 +44,13 @@ void nr_sfo_reset(void)
   g_frames = g_dmrs_n = 0;
   atomic_store(&g_eps_q, 0);
   pthread_mutex_unlock(&g_mu);
+}
+
+void nr_sfo_resync(const char *reason)
+{
+  const int64_t old = atomic_load_explicit(&g_eps_q, memory_order_relaxed);
+  nr_sfo_reset();
+  LOG_I(PHY, "SENSING: SFO reset (%s); previous eps %+.3f ppm\n", reason ? reason : "?", (double)old * 1e-6);
 }
 
 /* caller holds g_mu: publish the window mean plus the DM-RS fine term when it moved by more than the hysteresis */

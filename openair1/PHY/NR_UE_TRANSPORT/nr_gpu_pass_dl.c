@@ -675,7 +675,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   j->ring_len = 2u * fp->samples_per_frame;
   j->ring_offset = get_samples_slot_timestamp(fp, in->proc->nr_slot_rx);
   j->symbol_rot = (const int16_t *)(fp->symbol_rotation[link_type_dl] + (in->proc->nr_slot_rx % fp->slots_per_subframe) * fp->symbols_per_slot);
-  j->sfo_q = nr_sfo_eps_q();
+  j->sfo_q = nr_sfo_eps_q_for_fep(); /* the caller pins the eps it recorded (nr_pdsch_passive_decode.c); unpinned = published */
   j->sfo_on = nr_sfo_slot_dphi(j->sfo_q, fp->ofdm_symbol_size, fp->nb_prefix_samples, fp->nb_prefix_samples0, fp->numerology_index, fp->symbols_per_slot,
                                in->proc->nr_slot_rx, j->sfo_dphi);
   j->sfo_kref = nr_sfo_kref(fp->ofdm_symbol_size, fp->first_carrier_offset, fp->ssb_start_subcarrier);

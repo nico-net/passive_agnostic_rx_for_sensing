@@ -70,7 +70,7 @@ int32_t LDPCdecoder(t_nrLDPC_dec_params* p_decParams,
 
   // Launch LDPC decoder core for one segment
   int numIter = nrLDPC_decoder_core(p_llr, p_out, numLLR, p_lut, p_decParams, p_profiler, ab);
-  if (numIter >= p_decParams->numMaxIter) {
+  if (numIter != NR_LDPC_ITER_CUT && numIter >= p_decParams->numMaxIter) { /* ran to the iteration cap: one failed block */
     LOG_D(PHY, "set abort: %d, %d\n", numIter, p_decParams->numMaxIter);
     (void)note_cb_failure(ab);
   }
@@ -202,7 +202,7 @@ static inline uint32_t nrLDPC_decoder_core(int8_t* p_llr,
     int32_t pcRes = 1; // pcRes is 0 if the ldpc decoder is succesful
     while ((numIter < numMaxIter) && (pcRes != 0)) {
       if (check_abort(ab)) {
-        numIter = numMaxIter;
+        numIter = NR_LDPC_ITER_CUT; /* cut short by the TB's abort: not a failed block of its own */
         break;
       }
       // CN processing

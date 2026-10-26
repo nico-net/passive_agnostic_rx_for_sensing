@@ -295,7 +295,7 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
     rx[a] = (const int16_t *)rxdata[a];
   const c16_t *rot = fp->symbol_rotation[link_type_dl] + (slot % fp->slots_per_subframe) * fp->symbols_per_slot;
   /* SFO (nr_sfo_state.h): one eps for the GPU job and the CPU spot check of this slot */
-  const int64_t sfo_q = nr_sfo_eps_q();
+  const int64_t sfo_q = nr_sfo_eps_q_for_fep();
   uint32_t sfo_dphi[14];
   const int sfo_on = nr_sfo_slot_dphi(sfo_q, fp->ofdm_symbol_size, fp->nb_prefix_samples, fp->nb_prefix_samples0, fp->numerology_index,
                                       fp->symbols_per_slot, slot, sfo_dphi);
