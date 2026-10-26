@@ -12,6 +12,10 @@
 #define DARK_RATIO 0.25f                     /* a class is dark below this fraction of the tile's 75th percentile class */
 #define LOAD_RATIO 12.0f                     /* a tile carries data when its 75th percentile class is this far above the slot's noise floor */
 #define FLOOR_PCT 0.05                       /* the noise floor is this quantile of the slot's tile minima (idle tiles and hole classes sit at the noise) */
+#ifndef BRIGHT_RATIO
+#define BRIGHT_RATIO 4.0f
+#endif
+#define BRIGHT_RATIO_DOC                    /* a class this far above the tile's median is a pilot, not data */
 #define HALVE_AT 250                         /* slots of a residue at which its statistics are halved (forgetting) */
 #define MIN_ON_SLOTS 8                       /* on-lattice slots observed before a lattice is tested */
 #define MIN_ON_TILES 24                      /* loaded tile instances on the lattice before a cell is tested */
@@ -114,10 +118,9 @@ void nr_csirs_zp_reset(nr_csirs_zp_det_t *d)
 
 uint64_t nr_csirs_zp_slots(const nr_csirs_zp_det_t *d) { return d ? d->slots : 0; }
 
-/* p75: the 75th percentile (10th smallest of 12) of a tile's subcarrier-class energies. */
-static float p75(const float *e)
+/* sort12: insertion sort of a tile's subcarrier-class energies. */
+static void sort12(const float *e, float *s)
 {
-  float s[NSC];
   for (int i = 0; i < NSC; ++i) {
     float v = e[i];
     int j = i;
@@ -127,7 +130,21 @@ static float p75(const float *e)
     }
     s[j] = v;
   }
-  return s[9];
+}
+
+/* ref_level: the data level of a tile: the 75th percentile (10th smallest of 12) of its subcarrier-class energies, after the classes that are BRIGHT outliers (more than BRIGHT_RATIO times the
+ *   tile's median) are set aside. Boosted pilots (an NZP-CSI-RS or TRS in the symbol, three or more classes at several times the data level) would otherwise lift the 75th percentile to
+ *   their own level and make every data class look dark. With the median itself inside a hole (more than half of the classes quiet) nothing is set aside and the tile cannot show a dark class. */
+static float ref_level(const float *e)
+{
+  float s[NSC];
+  sort12(e, s);
+  const float med = 0.5f * (s[5] + s[6]);
+  int n = NSC;
+  if (med > 0.f)
+    while (n > NSC / 2 && s[n - 1] > BRIGHT_RATIO * med)
+      --n;
+  return s[(3 * n) / 4];
 }
 
 static int cmp_float(const void *a, const void *b)
@@ -174,7 +191,7 @@ void nr_csirs_zp_feed(nr_csirs_zp_det_t *d, uint32_t abs_slot, const float *feat
     for (int sc = 1; sc < NSC; ++sc)
       if (e[sc] < mn)
         mn = e[sc];
-    p75v[i] = p75(e);
+    p75v[i] = ref_level(e);
     if (mn > 0.f)
       mins[nmin++] = mn;
   }

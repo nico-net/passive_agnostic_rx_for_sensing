@@ -407,6 +407,8 @@ static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t
  * turns the significant hole patterns into legal rows (nr_csirs_disc_hypotheses) and admits them as zero-power candidates; the ZP bank confirms them. */
 #define ZP_EVAL_SLOTS 320
 #define ZP_CHUNK 16
+#define ZP_MAX_FP 24     /* footprints taken per evaluation: patterns the NZP candidates explain are refused at admission and must not starve the others */
+#define ZP_COVER_FPS 6   /* footprints (strongest first) that also get their containing rows */
 #define ZP_NEAR_ROWS 8   /* closest non-exact rows offered per proposal */
 static struct {
   nr_csirs_zp_det_t *det;
@@ -481,8 +483,8 @@ static void zp_propose(void)
   if (nr_csirs_zp_slots(zp.det) < zp.eval_at + ZP_EVAL_SLOTS)
     return;
   zp.eval_at = nr_csirs_zp_slots(zp.det);
-  nr_csirs_disc_fp_t fps[8];
-  const int nf = nr_csirs_zp_propose(zp.det, fps, 8);
+  nr_csirs_disc_fp_t fps[ZP_MAX_FP];
+  const int nf = nr_csirs_zp_propose(zp.det, fps, ZP_MAX_FP);
   if (nf <= 0)
     return;
   nr_csirs_disc_hyp_t hy[NR_CSIRS_DISC_MAX_HYP];
@@ -493,7 +495,7 @@ static void zp_propose(void)
     /* The row with the exact pattern first; then the closest rows that CONTAIN it (a detector that saw only part of the quiet REs still points at the right row). The ZP bank
      * confirms only complete patterns; every row is offered to the CRC arbiter (nr_csirs_rm_arbiter.h), which decides from the PDSCH decodes which of them, if any, is rate-matched. */
     nr_csirs_disc_hyp_t cover[ZP_NEAR_ROWS];
-    int nc = nr_csirs_disc_rows_covering(&fps[f], cover, ZP_NEAR_ROWS);
+    int nc = f < ZP_COVER_FPS ? nr_csirs_disc_rows_covering(&fps[f], cover, ZP_NEAR_ROWS) : 0;
     for (int i = -1; i < nc; ++i) {
       const nr_csirs_disc_hyp_t *h = NULL;
       if (i < 0) {

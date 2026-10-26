@@ -398,6 +398,21 @@ TEST(CsirsDiscE2E, BlindZpHolesProposedConfirmedAndExported)
     EXPECT_TRUE(found) << "the exact pattern is among the trials";
   }
   EXPECT_EQ(nr_csirs_blind_rt_rate_match_all(slot + 1, rm, 8), 0) << "not on its lattice";
+  /* lattice variants: the same pattern on the phases a halved period would add (40/4 -> 20/4: slots 24 mod 40) is offered there as its own trial */
+  {
+    const uint32_t slot_v = 24 + 40 * 31;
+    fapi_nr_dl_config_csirs_pdu_rel15_t held[12] = {};
+    fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = {};
+    cfg.dlDmrsScramblingId = 2;
+    cfg.dlDmrsSymbPos = (1u << 2) | (1u << 11);
+    const int nh = nr_csirs_full_arbiter_held(&cfg, slot_v, held, 12);
+    bool found = false;
+    for (int k = 0; k < nh; ++k)
+      found |= held[k].row == 4 && held[k].freq_domain == 4 && held[k].symb_l0 == 8 && held[k].last_trs_slot == 1;
+    EXPECT_TRUE(found) << "variant 1 on slot 24 mod 40";
+    fapi_nr_dl_config_csirs_pdu_rel15_t sel[8] = {};
+    EXPECT_EQ(nr_csirs_full_rate_match(slot_v, 2, cfg.dlDmrsSymbPos, sel, 8), 0);
+  }
   nr_csi_arb_note(&exact_row, NR_CSI_ARB_WITH_WINS);
   nr_csi_arb_note(&exact_row, NR_CSI_ARB_WITH_WINS);
   EXPECT_EQ(nr_csirs_blind_rt_rate_match_all(slot, rm, 8), 1) << "proven: applied";

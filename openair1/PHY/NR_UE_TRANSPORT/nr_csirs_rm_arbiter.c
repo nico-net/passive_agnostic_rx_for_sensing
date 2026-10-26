@@ -8,7 +8,7 @@
 
 typedef struct {
   bool used;
-  uint8_t csi_type, row, cdm_type, freq_density, symb_l0, symb_l1, hole_only;
+  uint8_t csi_type, row, cdm_type, freq_density, symb_l0, symb_l1, hole_only, variant;
   uint16_t freq_domain, start_rb, nr_of_rbs, scramb_id;
   uint32_t with_wins, without_wins, trials;
   nr_csi_arb_verdict_t verdict;
@@ -19,7 +19,7 @@ static pthread_mutex_t g_arb_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static bool same(const arb_t *a, const fapi_nr_dl_config_csirs_pdu_rel15_t *p)
 {
-  return a->used && a->csi_type == p->csi_type && a->row == p->row && a->cdm_type == p->cdm_type && a->freq_density == p->freq_density
+  return a->used && a->csi_type == p->csi_type && a->variant == p->last_trs_slot && a->row == p->row && a->cdm_type == p->cdm_type && a->freq_density == p->freq_density
          && a->symb_l0 == p->symb_l0 && a->symb_l1 == p->symb_l1 && a->freq_domain == p->freq_domain && a->start_rb == p->start_rb
          && a->nr_of_rbs == p->nr_of_rbs && a->scramb_id == p->scramb_id;
 }
@@ -53,6 +53,7 @@ static arb_t *find(const fapi_nr_dl_config_csirs_pdu_rel15_t *p, bool create)
   a->start_rb = p->start_rb;
   a->nr_of_rbs = p->nr_of_rbs;
   a->scramb_id = p->scramb_id;
+  a->variant = p->last_trs_slot;
   a->hole_only = (p->measurement_bitmap & NR_CSIRS_PDU_HOLE_ONLY) != 0;
   return a;
 }
@@ -115,8 +116,8 @@ nr_csi_arb_verdict_t nr_csi_arb_note(const fapi_nr_dl_config_csirs_pdu_rel15_t *
     a->verdict = decide(a);
     v = a->verdict;
     if (o != NR_CSI_ARB_NO_EVIDENCE || v != before || (a->trials & (a->trials - 1)) == 0)
-      LOG_A(PHY, "SENSING: CSIRS_ARBITER %s row=%u fd=%u l0=%u l1=%u cdm=%u dens=%u rb=%u:%u id=%u type=%s outcome=%s with_wins=%u without_wins=%u trials=%u verdict=%s%s\n",
-            a->hole_only ? "HOLES" : "SEQ", a->row, a->freq_domain, a->symb_l0, a->symb_l1, a->cdm_type, a->freq_density, a->start_rb, a->nr_of_rbs,
+      LOG_A(PHY, "SENSING: CSIRS_ARBITER %s lattice_variant=%u row=%u fd=%u l0=%u l1=%u cdm=%u dens=%u rb=%u:%u id=%u type=%s outcome=%s with_wins=%u without_wins=%u trials=%u verdict=%s%s\n",
+            a->hole_only ? "HOLES" : "SEQ", a->variant, a->row, a->freq_domain, a->symb_l0, a->symb_l1, a->cdm_type, a->freq_density, a->start_rb, a->nr_of_rbs,
             a->scramb_id, a->csi_type == 2 ? "ZP" : "NZP",
             o == NR_CSI_ARB_WITH_WINS ? "with-passes-without-fails" : o == NR_CSI_ARB_WITHOUT_WINS ? "without-passes-with-fails" : "both-fail",
             a->with_wins, a->without_wins, a->trials, v == NR_CSI_ARB_KEEP ? "KEEP" : v == NR_CSI_ARB_DROP ? "DROP" : "UNDECIDED",

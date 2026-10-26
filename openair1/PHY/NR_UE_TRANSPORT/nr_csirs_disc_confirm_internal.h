@@ -55,7 +55,7 @@ static uint16_t discovery_symbols(const nr_csirs_candidate_t *c)
 static struct {
   unsigned users;
   int n;
-  struct { fapi_nr_dl_config_csirs_pdu_rel15_t p; uint16_t period, phase[2]; int nphase; } resource[2*NR_CSIRS_BLIND_DISC_MAX_CONF];
+  struct { fapi_nr_dl_config_csirs_pdu_rel15_t p; uint16_t period, phase[2]; int nphase; } resource[4*NR_CSIRS_BLIND_DISC_MAX_CONF];
 } discovery_exports[3];
 static unsigned discovery_active;
 /* discovery_export: copies the exported CSI-RS resources that occur on `slot` (up to max) from the active immutable export snapshot.
@@ -111,6 +111,23 @@ static int discovery_cooccur(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, const
   const int j=(ra && rc) ? nbs_joint_slots(ra->period,ra->phase,ra->nphase,rc->period,rc->phase,rc->nphase) : 0;
   __atomic_fetch_sub(&discovery_exports[b].users,1,__ATOMIC_RELEASE);
   return j;
+}
+/* zp_variant_lattice: lattice variant k (1..3) of a hole pattern whose detector lattice is (period, offset): the slots of the lattice with the period halved k times that are NOT in the lattice
+ *   with it halved k-1 times (k = 1 for 80/4: slots 44 mod 80). Returns false when the halved period is not a legal CSI-RS periodicity (TS 38.331 CSI-ResourcePeriodicityAndOffset). The export
+ *   entry is (*per, *ph): slots with slot % per == ph. Callers: discovery_publish() and rate_match_all_raw(). */
+static bool zp_variant_lattice(unsigned period, unsigned offset, int k, unsigned *per, unsigned *ph)
+{
+  if (!period || k < 1 || k > 3 || (period % (1u << k)))
+    return false;
+  const unsigned pk = period >> k, pk1 = period >> (k - 1);
+  bool legal = false;
+  for (int i = 0; i < NR_CSIRS_BLIND_N_PERIODS; ++i)
+    legal |= nr_csirs_blind_periods[i] == pk;
+  if (!legal)
+    return false;
+  *per = pk1;
+  *ph = (offset + pk) % pk1;
+  return true;
 }
 /* discovery_publish: recomputes the due and pending slot tables (per absolute slot mod 640) from the search state and publishes a new export snapshot into an idle buffer.
  *   Due = occasions that must be scored (seeds not yet settled, confirmed resources when reconfiguration detection is on, ZP probation and divisor probes); pending = unsettled ones.
@@ -175,11 +192,22 @@ static void discovery_publish(void)
       }
     }
     /* hole patterns not (yet) confirmed by the ZP bank: trials for the CRC arbiter (flagged NR_CSIRS_PDU_HOLE_ONLY by fill_pdu) */
-    if(g_on>0 && g_armed) for(int i=0;i<g_st.n && discovery_exports[b].n<(int)(sizeof(discovery_exports[b].resource)/sizeof(discovery_exports[b].resource[0]));++i)
-      if(g_disc_zp_only[i] && !nr_csirs_blind_is_confirmed(&g_zp,i) && g_st.seed_period[i]) {
-        __typeof__(discovery_exports[b].resource[0]) *r=&discovery_exports[b].resource[discovery_exports[b].n++];
-        fill_pdu(&g_st.cand[i],2,&r->p);
-        r->period=g_st.seed_period[i];r->nphase=1;r->phase[0]=g_st.seed_offset[i];r->phase[1]=0;
+    const int res_cap=(int)(sizeof(discovery_exports[b].resource)/sizeof(discovery_exports[b].resource[0]));
+    if(g_on>0 && g_armed) for(int i=0;i<g_st.n;++i)
+      if(g_disc_zp_only[i] && g_st.seed_period[i]) {
+        if(!nr_csirs_blind_is_confirmed(&g_zp,i) && discovery_exports[b].n<res_cap) {
+          __typeof__(discovery_exports[b].resource[0]) *r=&discovery_exports[b].resource[discovery_exports[b].n++];
+          fill_pdu(&g_st.cand[i],2,&r->p);
+          r->period=g_st.seed_period[i];r->nphase=1;r->phase[0]=g_st.seed_offset[i];r->phase[1]=0;
+        }
+        /* the same pattern on the phases a finer period would add: the decodes decide which lattice is real (nr_csirs_rm_arbiter.h, lattice variants) */
+        for(int k=1;k<=3;++k) {
+          unsigned per,ph;
+          if(discovery_exports[b].n>=res_cap || !zp_variant_lattice(g_st.seed_period[i],g_st.seed_offset[i],k,&per,&ph)) continue;
+          __typeof__(discovery_exports[b].resource[0]) *r=&discovery_exports[b].resource[discovery_exports[b].n++];
+          fill_pdu(&g_st.cand[i],2,&r->p);r->p.last_trs_slot=(uint8_t)k;
+          r->period=per;r->nphase=1;r->phase[0]=ph;r->phase[1]=0;
+        }
       }
     __atomic_store_n(&discovery_exports[b].users,0,__ATOMIC_RELEASE);
     __atomic_store_n(&discovery_active,b,__ATOMIC_RELEASE);

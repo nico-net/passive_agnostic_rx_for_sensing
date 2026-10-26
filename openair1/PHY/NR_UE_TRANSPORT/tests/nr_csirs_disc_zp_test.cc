@@ -4,6 +4,7 @@
 #include "nr_csirs_disc_zp.h"
 #include <gtest/gtest.h>
 #include <cmath>
+#include <functional>
 #include <cstdio>
 #include <random>
 #include <vector>
@@ -61,7 +62,8 @@ struct Cell {
   }
   /* PDSCH of several narrow allocations (the carrier is mostly idle), Rayleigh fading per RB and antenna, and a hole that is not perfectly empty: it keeps leak_db of the data level
    * (inter-carrier leakage of its loaded neighbours, residual frequency offset). `ranges` are (first RB, RBs). */
-  template <class Hole> void slot_multi(uint32_t abs, bool dl, const std::vector<std::pair<int, int>> &ranges, Hole hole, double leak_db, double snr_db = 20)
+  template <class Hole> void slot_multi(uint32_t abs, bool dl, const std::vector<std::pair<int, int>> &ranges, Hole hole, double leak_db, double snr_db = 20,
+                  const std::function<double(uint32_t, int, int, int)> &boost = nullptr)
   {
     std::normal_distribution<double> n(0, 100), g(0, 1);
     const double a = 100 * std::pow(10.0, snr_db / 20) / std::sqrt(2.0), leak = std::pow(10.0, leak_db / 20);
@@ -78,7 +80,7 @@ struct Cell {
           for (auto &r : ranges)
             in |= rb >= r.first && rb < r.first + r.second;
           if (dl && l >= 2 && in) {
-            const double amp = a * fade[rb] * (hole(abs, l, rb, sc) ? leak : 1.0);
+            const double amp = a * fade[rb] * (hole(abs, l, rb, sc) ? leak : 1.0) * (boost ? boost(abs, l, rb, sc) : 1.0);
             re += amp * ((rng() & 1) ? 1 : -1);
             im += amp * ((rng() & 1) ? 1 : -1);
           }
@@ -341,6 +343,39 @@ TEST(CsirsDiscZp, FullBandPdschStillShowsTheHoles)
   nr_csirs_disc_fp_t fp[8];
   const int n = nr_csirs_zp_propose(det, fp, 8);
   ASSERT_GE(n, 1);
+  EXPECT_EQ(fp[0].sym_mask, 1u << 8);
+  EXPECT_EQ(fp[0].sc_mask, 0x0f00u);
+  EXPECT_EQ(fp[0].period, 40);
+  EXPECT_EQ(fp[0].offset, 4);
+  nr_csirs_zp_free(det);
+}
+
+/* Boosted pilots (the 4-port NZP-CSI-RS at symbol 4, subcarriers 8-11 of every RB, 14 dB over the data, period 40 offset 4) lift a tile's 75th percentile to their own level; the data classes
+ * beside them must not read as holes. The ZP at symbol 8 on the same lattice is still found, alone. */
+TEST(CsirsDiscZp, BoostedPilotsAreNotHolesButTheZpIs)
+{
+  const int nrb = 96;
+  Cell cell(55, 4, nrb);
+  auto *det = nr_csirs_zp_new(nrb);
+  auto zp = [](uint32_t abs, int l, int, int sc) { return abs % 40 == 4 && l == 8 && sc >= 8 && sc < 12; };
+  auto boost = [](uint32_t abs, int l, int, int sc) { return (abs % 40 == 4 && l == 4 && sc >= 8 && sc < 12) ? 5.0 : 1.0; };
+  uint32_t abs = 3000;
+  for (int w = 0; w < 5; ++w)
+    for (int s = 0; s < 640; ++s, ++abs) {
+      const bool dl = abs % 10 < 7;
+      std::vector<std::pair<int, int>> ranges;
+      for (int u = 0; u < 2; ++u) {
+        const int n = 5 + (int)(cell.rng() % 28);
+        ranges.push_back({(int)(cell.rng() % (nrb - n + 1)), n});
+      }
+      cell.slot_multi(abs, dl, ranges, zp, -22, 20, boost);
+      nr_csirs_zp_feed(det, abs, cell.feat.data());
+    }
+  nr_csirs_disc_fp_t fp[8];
+  const int n = nr_csirs_zp_propose(det, fp, 8);
+  for (int i = 0; i < n; ++i)
+    printf("  sym=0x%x sc=0x%x dens=%u rb=%u:%u P/O=%u/%u z=%.1f\n", fp[i].sym_mask, fp[i].sc_mask, fp[i].density, fp[i].rb_start, fp[i].n_rb, fp[i].period, fp[i].offset, fp[i].strength);
+  ASSERT_EQ(n, 1) << "only the ZP";
   EXPECT_EQ(fp[0].sym_mask, 1u << 8);
   EXPECT_EQ(fp[0].sc_mask, 0x0f00u);
   EXPECT_EQ(fp[0].period, 40);

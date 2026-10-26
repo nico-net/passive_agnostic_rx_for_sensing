@@ -144,3 +144,17 @@ TEST_F(Arb, KeyIsTheGeometry)
 }
 
 int main(int argc, char **argv) { logInit(); testing::InitGoogleTest(&argc, argv); return RUN_ALL_TESTS(); }
+
+/* the lattice variant is part of the key: a pattern proven on one phase is not proven on the other */
+TEST_F(Arb, LatticeVariantsAreSeparatePatterns)
+{
+  auto base = pat(4, 8, 0, true, true);
+  auto v1 = base;
+  v1.last_trs_slot = 1;
+  nr_csi_arb_note(&v1, NR_CSI_ARB_WITH_WINS);
+  nr_csi_arb_note(&v1, NR_CSI_ARB_WITH_WINS);
+  EXPECT_EQ(nr_csi_arb_verdict(&v1), NR_CSI_ARB_KEEP);
+  EXPECT_EQ(nr_csi_arb_verdict(&base), NR_CSI_ARB_UNDECIDED);
+  EXPECT_FALSE(nr_csi_arb_applies(&base));
+  EXPECT_TRUE(nr_csi_arb_applies(&v1));
+}

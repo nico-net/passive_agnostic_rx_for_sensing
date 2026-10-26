@@ -404,6 +404,7 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csir
  *   when the new extent is wider. At most NR_CSIRS_BLIND_ZP_ONLY_MAX such candidates. Caller: nr_csirs_disc.c (zp_step).
  */
 static uint16_t discovery_symbols(const nr_csirs_candidate_t *c); /* nr_csirs_disc_confirm_internal.h, included below */
+static bool zp_variant_lattice(unsigned period, unsigned offset, int k, unsigned *per, unsigned *ph);
 /* lattices_meet: true when the slot lattices (p1,o1) and (p2,o2) share a slot (offsets agree modulo gcd(p1,p2)). */
 static bool nr_csirs_blind_lattices_meet(unsigned p1, unsigned o1, unsigned p2, unsigned o2)
 {
@@ -1434,9 +1435,19 @@ static int rate_match_all_raw(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pd
   }
   /* Hole patterns the ZP bank has not confirmed (it needs the complete pattern) are offered as trials: PDU flagged NR_CSIRS_PDU_HOLE_ONLY, which the CRC arbiter keeps out of
    * the rate matching until decodes prove it. */
-  for (int i = 0; i < g_st.n && n < max; i++)
-    if (g_disc_zp_only[i] && !nr_csirs_blind_is_confirmed(&g_zp, i) && g_st.seed_period[i] && absolute_slot % g_st.seed_period[i] == g_st.seed_offset[i])
+  for (int i = 0; i < g_st.n && n < max; i++) {
+    if (!g_disc_zp_only[i] || !g_st.seed_period[i])
+      continue;
+    if (!nr_csirs_blind_is_confirmed(&g_zp, i) && absolute_slot % g_st.seed_period[i] == g_st.seed_offset[i])
       fill_pdu(&g_st.cand[i], 2, &out[n++]);
+    for (int k = 1; k <= 3 && n < max; k++) { /* lattice variants: the phases a finer period would add */
+      unsigned per, ph;
+      if (zp_variant_lattice(g_st.seed_period[i], g_st.seed_offset[i], k, &per, &ph) && absolute_slot % per == ph) {
+        fill_pdu(&g_st.cand[i], 2, &out[n]);
+        out[n++].last_trs_slot = (uint8_t)k;
+      }
+    }
+  }
   return n;
 }
 

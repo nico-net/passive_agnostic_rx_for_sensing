@@ -6,8 +6,9 @@
  * or the reverse (it is not). Evidence comes only from grants whose two decodes differ, so a grant that passes (or fails) both ways teaches nothing,
  * exactly as the LBRM layer-term hypotheses n_L of nr_pdsch_passive_decode.c latch only on a CRC pass.
  *
- * A pattern is identified by its geometry and type (TS 38.211 Table 7.4.1.5.3-1 row, frequency domain, symbols, CDM, density, RB extent, scrambling ID), not by
- * its period or offset: the verdict follows the pattern across every slot it occurs in.
+ * A pattern is identified by its geometry and type (TS 38.211 Table 7.4.1.5.3-1 row, frequency domain, symbols, CDM, density, RB extent, scrambling ID) and by its LATTICE VARIANT
+ * (fapi last_trs_slot, unused by rate-matching PDUs): 0 is the slot lattice the detector proposed; variant k > 0 is the extra phase the lattice would have with a period halved k times
+ * (period 80 offset 4 -> variant 1 = slots 44 mod 80). A detector that settled on a too-coarse period is then corrected by the decodes, phase by phase.
  *   - A pattern that has no sequence evidence (NR_CSIRS_PDU_HOLE_ONLY: a ZP found only as persistent holes) needs PROOF: it enters rate matching only
  *     after NR_CSI_ARB_MIN_WINS decodes with it passed where decoding without it failed (verdict KEEP).
  *   - Every other pattern is in by default (its sequence or its ZP bank is the evidence) and leaves after NR_CSI_ARB_MIN_WINS decodes without it passed
