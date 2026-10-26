@@ -155,6 +155,7 @@ class Aggregator:
                    "qm": d["qm"], "nl": d["nl"], "rb_start": d["rb_start"], "rb_n": d["rb_n"], "nsym": d["nsym"],
                    "snr_db": d["snr"], "evm_pct": d["evm"], "rv": d["rv"], "ndi": d["ndi"], "harq_pid": d["pid"],
                    "tbs": d["tbs"], "nbrx": d["nbrx"], "early": es is not None,
+                   "cb_ok": d.get("cb_ok"), "cb_tried": d.get("cb_tried"), "cb_total": d.get("cb_total"),
                    "legacy_dec_us": int(d["legacy_dec_us"]), "e2e_tot_us": tot, "arr2enq_us": e2e.get("arr2enq"),
                    "qwait_us": e2e.get("qwait"), "pre_us": e2e.get("pre"), "dec_span_us": e2e.get("dec"),
                    "serial_us": serial, "first_body_us": e2e.get("first_body"), "bodies": e2e.get("bodies"),

@@ -89,7 +89,7 @@ Dataset list and modes (policy.py `DATASETS`):
 
 | Dataset | Modes | Columns | Row meaning |
 |---|---|---|---|
-| rx_grants | lab | 40 | one EVMGRANT line (DL, probes included and flagged) |
+| rx_grants | lab | 43 | one EVMGRANT line (DL, probes included and flagged) |
 | dci_attempts | lab | 11 | one DCI accept line (DL and UL) |
 | discovery_events | lab | 9 | one lifecycle line |
 | configuration_events | lab | 9 | one CONFIG_EPOCH line |
@@ -131,6 +131,9 @@ One row per EVMGRANT line. DL only. UL grants write no row here (`agg._on_ul_crc
 | harq_pid | EVMGRANT `pid=` | HARQ process id | per grant | none | agg |
 | tbs | EVMGRANT `tbs=` | as printed. The unit is not stated in parse.py. | per grant | none | agg |
 | nbrx | EVMGRANT `nbrx=` | RX antennas | per grant | none | agg |
+| cb_ok | EVMGRANT `cb_ok=`: code blocks that passed their CRC (empty in logs older than 2026-10-26, and 0 when no LDPC ran or on a probe) | count | per grant | none | agg |
+| cb_tried | EVMGRANT `cb_tried=`: code blocks the LDPC decoder was started on. Decoding stops after 5 failed blocks (NR_CB_FAIL_LIMIT), so a failing TB is biased toward its early blocks. CB CRC = sum(cb_ok) / sum(cb_tried) | count | per grant | none | agg |
+| cb_total | EVMGRANT `cb_total=`: code blocks in the TB (C) | count | per grant | none | agg |
 | early | True when EVMGRANT `es=` is present (early-start grant) | bool | per grant | none | agg |
 | bodies | e2e `bodies` (decode bodies in the call) | count | per grant | none | agg |
 | lag_slots | e2e `lag` (producer slots ahead at completion) | slot | per grant | R-SFN difference | agg |
