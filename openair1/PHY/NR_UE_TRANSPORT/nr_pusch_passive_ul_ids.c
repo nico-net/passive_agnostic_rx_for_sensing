@@ -45,7 +45,8 @@ static pthread_mutex_t     g_ul_dmrs_id_lock[NR_UL_DMRS_NSCID] = {PTHREAD_MUTEX_
 typedef struct {
   nr_ue_ul_ticket_t ticket;
   uint16_t priors[3], dmrs_id[2], data_id;
-  uint8_t n_priors, confirmed_mask, trial;
+  uint16_t data_priors[3]; /* dataScramblingIdentityPUSCH hypotheses, best first (see nr_pusch_passive_ul_ids_seed) */
+  uint8_t n_priors, n_data_priors, confirmed_mask, trial;
   uint32_t failed_grants; /* U7: one bounded data-ID candidate per failed grant */
   bool used;
 } ul_ids_ue_t;
@@ -136,6 +137,12 @@ static bool same_ticket(const nr_ue_ul_ticket_t *a,const nr_ue_ul_ticket_t *b)
   return a->rnti==b->rnti && a->identity_gen==b->identity_gen &&
          a->incarnation==b->incarnation && a->epoch==b->epoch;
 }
+static void data_prior_add(ul_ids_ue_t *s,int64_t value)
+{
+  if(value<0 || value>1023) return; /* a data scrambling id is 0..1023 (TS 38.211 6.3.1.1) */
+  for(int i=0;i<s->n_data_priors;i++) if(s->data_priors[i]==value) return;
+  if(s->n_data_priors<3) s->data_priors[s->n_data_priors++]=(uint16_t)value;
+}
 static void prior_add(ul_ids_ue_t *s,int64_t value)
 {
   if(value<0 || value>65535) return;
@@ -158,6 +165,14 @@ void nr_pusch_passive_ul_ids_seed(const nr_ue_ul_ticket_t *t,const nr_ue_ctx_t *
     prior_add(s,pci);
     prior_add(s,dl->cfg[NR_UEP_PDSCH_SCR_ID].value);
     prior_add(s,dl->cfg[NR_UEP_PDCCH_SCR_ID].value);
+    /* UL data scrambling id hypotheses (TS 38.331: dataScramblingIdentityPUSCH and dataScramblingIdentityPDSCH are separate
+     * fields and may differ, so none of these is assumed -- only a decisive UL CRC pass locks an id). Order: the id a DL
+     * PDSCH CRC pass of this RNTI confirmed (a gNB that configures one id per UE very often uses it for both directions),
+     * then the cell default (n_ID = PCI, used when the field is absent), then the PDCCH id; the walk follows. */
+    if(dl->cfg[NR_UEP_PDSCH_SCR_ID].source!=NR_UES_UNKNOWN && dl->cfg[NR_UEP_PDSCH_SCR_ID].verif==NR_UEV_TRUSTED)
+      data_prior_add(s,dl->cfg[NR_UEP_PDSCH_SCR_ID].value);
+    data_prior_add(s,pci);
+    data_prior_add(s,dl->cfg[NR_UEP_PDCCH_SCR_ID].value);
   } else atomic_fetch_add_explicit(&g_ue_ids_dropped,1,memory_order_relaxed);
   pthread_mutex_unlock(&g_ue_ids_lock);
 }
@@ -237,7 +252,7 @@ void nr_pusch_passive_ul_ids_current(uint16_t rnti,uint8_t nscid,uint16_t pci,
           *data_id=(uint16_t)((s->failed_grants-9-(s->failed_grants-1)/16)%1024);
         else { /* a data id is 0..1023; DL scrambling priors may be larger (DM-RS ids go to 65535): skip those, fall back to the PCI */
           uint16_t d=pci;
-          for(int k=0;k<s->n_priors;k++) { const uint16_t c=s->priors[(s->trial+k)%s->n_priors]; if(c<=1023) {d=c;break;} }
+          if(s->n_data_priors) d=s->data_priors[s->trial%s->n_data_priors];
           *data_id=d;
         }
       }
