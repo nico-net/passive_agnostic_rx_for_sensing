@@ -51,6 +51,7 @@
 /* entry points of the other translation units of libpdsch_gpu.so */
 extern "C" {
 int nr_pdsch_gpu_fep_stage_at(const nr_gpu_fep_job_t *j, int slot);
+int nr_pdsch_gpu_fep_geo_add(const nr_gpu_fep_cfg_t *cfg);
 int nr_pdsch_gpu_fep_dev(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF, int slot, void *stream);
 int nr_pdsch_gpu_chest_stage_at(const nr_gpu_chest_job_t *j, int n, int slot);
 int nr_pdsch_gpu_pass_ls_rows(void);
@@ -367,11 +368,12 @@ struct Key {
   uint8_t ul = 0; /* Task 7: a PUSCH pass class (nl = 1; nrb, ndmrs and ncb are its whole structure) */
   uint8_t sub = 0; /* v2 Task 3: 0 = the whole pass in one graph; SUB_C / SUB_D / SUB_L = a sub-graph, keyed by the fields it depends on only (key_sub) */
   uint8_t nz4 = 0; /* the LDPC kernel family baked into the graph: 1 = the generic kernel (a lifting size Z that is not a multiple of 4: Z in 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15, 18, 22, 26, 30, hence one code block only), 0 = the 4-lane kernel */
+  uint8_t gid = 0; /* MPCI G3b: the FEP geometry (nbRx, n_rb_dl, first carrier offset, CP lengths, time-shift table) the C and D graphs were captured for; 0 = the first cell's. The L sub-graph (rate dematch + LDPC + CRC) has none. */
   static_assert(NR_GPU_PASS_MAX_SEG <= 128, "pack(): the segment class takes 4 bits (1 + log2 128 = 8)");
   uint64_t pack() const
   {
     return (uint64_t)nrb | (uint64_t)nl << 9 | (uint64_t)ndmrs << 12 | (uint64_t)ncb << 15 | (uint64_t)(fp32 & 1) << 48 | (uint64_t)(fp32 >> 1) << 32 | (uint64_t)evm << 49 | (uint64_t)qmode << 24 |
-           (uint64_t)align << 28 | (uint64_t)(nseg ? 1 + __builtin_ctz((unsigned)nseg) : 0) << 44 | (uint64_t)ul << 40 | (uint64_t)sub << 41 | (uint64_t)nz4 << 47; /* ncb takes bits 15..23 (up to 160) */
+           (uint64_t)align << 28 | (uint64_t)(nseg ? 1 + __builtin_ctz((unsigned)nseg) : 0) << 44 | (uint64_t)ul << 40 | (uint64_t)sub << 41 | (uint64_t)nz4 << 47 | (uint64_t)gid << 52; /* ncb takes bits 15..23 (up to 160) */
   }
 };
 /* v2 Task 3 (split): C = FEP + chest + [seg compose] + [nvar D2H]: depends on (nrb, nl, ndmrs, nseg); the parameter-block H2D precedes the first sub-graph of a launch
@@ -381,8 +383,8 @@ enum { SUB_FULL = 0, SUB_C = 1, SUB_D = 2, SUB_L = 3 };
 static Key key_sub(const Key &k, int sub)
 {
   Key r{};
-  if (sub == SUB_C) r = Key{k.nrb, k.nl, k.ndmrs, 0, 0, 0, 0, 0, k.nseg};
-  else if (sub == SUB_D) r = Key{k.nrb, k.nl, 0, 0, k.fp32, k.evm, k.qmode, k.align, 0};
+  if (sub == SUB_C) { r = Key{k.nrb, k.nl, k.ndmrs, 0, 0, 0, 0, 0, k.nseg}; r.gid = k.gid; }
+  else if (sub == SUB_D) { r = Key{k.nrb, k.nl, 0, 0, k.fp32, k.evm, k.qmode, k.align, 0}; r.gid = k.gid; }
   else if (sub == SUB_L) { r = Key{0, 0, 0, k.ncb, 0, 0, 0, 0, 0}; r.nz4 = k.nz4; }
   else return k;
   r.sub = (uint8_t)sub;
@@ -417,7 +419,7 @@ struct Inst {
   const nrul::UlBlk *UBd() const { return (const nrul::UlBlk *)ulb.dev; }
 };
 
-struct Entry { cudaGraphExec_t exec[NI] = {}; };
+struct Entry { cudaGraphExec_t exec[NI] = {}; uint64_t kb = 0; /* G3b: measured device cost of the executables (cudaMemGetInfo deltas; sub-graphs, and whole passes of a further geometry) */ };
 
 static Inst g_inst[NI];
 static int16_t *g_hq_cells[NR_PQ_CELLS];    /* DL HARQ soft store, ONE SLAB PER CELL (MPCI G3): NR_GPU_HQ_BLK blocks x NR_GPU_HQ_SEG int16 (device memory; cell 0 in nr_gpu_pass_init, the others in nr_gpu_pass_cell_init) */
@@ -435,6 +437,14 @@ static std::map<uint64_t, Entry> g_cache;
 static std::mutex g_mu;
 static nr_gpu_pass_cfg_t g_cfg = {};
 static bool g_cfg_set = false;
+/* MPCI G3b: FEP geometries of the pass. Entry 0 = the process cfg (the first cell); a further cell with another geometry gets its own entry (nr_gpu_pass_geo_add), whose C and D graphs
+ * are captured separately (Key.gid); L graphs, instances, streams and the delay table are shared. fep = the id in nr_pdsch_gpu_fep.cu's table (nr_gpu_fep_job_t.geo). */
+struct GeoP { int nbRx = 0, n_rb_dl = 0, fep = 0, cell = 0; uint64_t budget_kb = 0, used_kb = 0, reserved_b = 0; bool ok = false; };
+static GeoP g_geo[NR_PQ_CELLS];
+static int g_ngeo = 0;
+static uint8_t g_cell_gid[NR_PQ_CELLS];
+static inline int nrx_of(int gid) { return gid >= 0 && gid < g_ngeo ? g_geo[gid].nbRx : g_cfg.nbRx; }
+static inline int job_gid(const nr_gpu_pass_job_t *j) { return j->geo1 ? (int)j->geo1 - 1 : (j->cell < NR_PQ_CELLS ? (int)g_cell_gid[j->cell] : 0); }
 static std::atomic<int> g_ready{0}, g_dead{0};
 static std::atomic<unsigned> g_busy{0};
 static std::atomic<uint64_t> g_gate_skips{0}; /* passes the in-graph no-chance gate skipped */
@@ -549,7 +559,8 @@ static void synth_job(const Key &k, nr_gpu_pass_job_t *j, std::vector<int16_t> &
   for (int a = 0; a < 4; a++) j->rxdata[a] = (const int16_t *)g_ring[a].host;
   j->ring_len = RING_LEN;
   j->symbol_rot = (const int16_t *)g_rot.host;
-  j->nbRx = g_cfg.nbRx;
+  j->geo1 = (uint8_t)(k.gid + 1);
+  j->nbRx = nrx_of(k.gid);
   j->nl = k.nl;
   j->ndmrs = k.ndmrs;
   static const int sy[4] = {2, 6, 9, 12};
@@ -573,7 +584,7 @@ static void synth_job(const Key &k, nr_gpu_pass_job_t *j, std::vector<int16_t> &
   j->df_d = 30000.0;
   nr_gpu_demod_job_t &d = j->dj;
   const int ext = (12 * k.nrb + 15) & ~15;
-  d.nbRx = g_cfg.nbRx; d.nl = k.nl; d.qm = 2; d.N = N;
+  d.nbRx = nrx_of(k.gid); d.nl = k.nl; d.qm = 2; d.N = N;
   d.start_symbol = 1; d.nb_symbols = 13;
   uint32_t off = 0;
   bool first = true;
@@ -725,7 +736,7 @@ static Key key_of(const nr_gpu_pass_job_t *j);
 static int c_groups_per_chunk(const Key &k);
 static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
 {
-  const int nbRx = g_cfg.nbRx, nl = j->nl, nd = j->ndmrs, ext = (int)j->dj.ext;
+  const int gid = job_gid(j), nbRx = nrx_of(gid), nl = j->nl, nd = j->ndmrs, ext = (int)j->dj.ext;
   const bool segd = j->shape.nseg_class >= 1;                     /* segmented class: scratch rows + compose */
   const int ns = segd ? j->shape.nseg_class : 1;                   /* chest row sets per (DM-RS symbol, layer): the class's segment count */
   if (j->nseg > ns || j->nseg < 0 || (j->nseg == 0) == segd) return -1;
@@ -735,6 +746,7 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
   /* FEP block */
   for (int a = 0; a < 4; a++) I.rx[a] = j->rxdata[a];
   I.fj = {I.rx, j->ring_len, j->ring_offset, j->symbol_rot, 0x3fff, redirect ? (int16_t *)j->rxdataF : nullptr, redirect ? (uint32_t)j->rx_stride : 0u, 0};
+  I.fj.geo = gid < g_ngeo ? g_geo[gid].fep : 0; /* G3b: the geometry the graph of this key was captured for */
   I.fj.run_mask = fep_need(j); /* grant-sized: the captured grid stays 14 symbols, the blocks of the other symbols return at once */
   I.fj.sfo_dphi = j->sfo_on ? j->sfo_dphi : nullptr; /* staged into par[PAR_SFO..] per replay, like the rotation */
   I.fj.sfo_kref = j->sfo_kref;
@@ -801,7 +813,7 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
     pb.post.h0 = (const int16_t *)I.est.dev + 2 * (size_t)N * j->dmrs_sym[j->fo_first];
     pb.post.h1 = (const int16_t *)I.est.dev + 2 * (size_t)N * j->dmrs_sym[j->fo_last];
   }
-  pb.post.N = N; pb.post.n_rb_dl = g_cell_nrb[j->cell < NR_PQ_CELLS ? j->cell : 0] > 0 ? g_cell_nrb[j->cell < NR_PQ_CELLS ? j->cell : 0] : g_cfg.n_rb_dl;
+  pb.post.N = N; pb.post.n_rb_dl = j->geo1 ? g_geo[gid].n_rb_dl : g_cell_nrb[j->cell < NR_PQ_CELLS ? j->cell : 0] > 0 ? g_cell_nrb[j->cell < NR_PQ_CELLS ? j->cell : 0] : g_cfg.n_rb_dl;
   pb.post.dt_d = j->dt_d; pb.post.df_d = j->df_d; pb.post.dt_f = (float)j->dt_d; pb.post.df_f = (float)j->df_d;
   for (int sg = 0; sg < NR_GPU_PASS_MAX_SEG; sg++) {
     const bool real = sg < j->nseg;
@@ -851,7 +863,7 @@ static int h2d_params(Inst &I, const Key &k, cudaStream_t s, bool pil)
  * set re-enters at D on a held instance (Task 4). The post only writes ResBlk.post, so re-running it on the same estimate is idempotent. */
 static int enqueue(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, cudaStream_t s, int sub = SUB_FULL, int part = 0)
 {
-  const int ncb = k.ncb, nbRx = g_cfg.nbRx;
+  const int ncb = k.ncb, nbRx = nrx_of(k.gid);
   const bool full = sub == SUB_FULL;
   if ((full || sub == SUB_C) && cudaEventRecordWithFlags(I.evh, s, cudaEventRecordExternal) != cudaSuccess) return -1; /* the head of the graph: GPU-side start stamp */
   const size_t llr_bytes = std::min<size_t>((size_t)LLR_CAP, (size_t)12 * k.nrb * 13 * 8 * k.nl) * 2;
@@ -913,7 +925,8 @@ static void synth_job_ul(const Key &k, nr_gpu_pass_job_t *j)
 {
   memset(j, 0, sizeof(*j));
   j->shape = {k.nrb, 13, 1, 2, k.ndmrs, k.ncb, 0, 0, 1};
-  j->nbRx = g_cfg.nbRx;
+  j->geo1 = (uint8_t)(k.gid + 1);
+  j->nbRx = nrx_of(k.gid);
   j->nl = 1;
   j->ndmrs = k.ndmrs;
   j->nrb = k.nrb;
@@ -959,7 +972,7 @@ static void synth_job_ul(const Key &k, nr_gpu_pass_job_t *j)
 static int prepare_ul(Inst &I, const nr_gpu_pass_job_t *j)
 {
   const nr_gpu_pass_ul_t &u = j->ul;
-  const int nbRx = g_cfg.nbRx, nd = j->ndmrs;
+  const int nbRx = nrx_of(job_gid(j)), nd = j->ndmrs;
   const int ext = (12 * (int)j->shape.nrb_class + 15) & ~15;
   if (!u.on || j->nl != 1 || nd < 1 || nd > NR_GPU_PASS_MAX_DMRS || u.nrb < 1 || u.nrb > (int)j->shape.nrb_class || u.meas_sym < 0 || u.meas_sym >= NSYM || !u.nre[u.meas_sym]) return -1;
   const bool direct = nr_gpu_model() == NR_GPU_MODEL_DIRECT;
@@ -1046,7 +1059,7 @@ static int prepare_ul(Inst &I, const nr_gpu_pass_job_t *j)
 
 static int enqueue_ul(Inst &I, const Key &k, cudaStream_t s, int part = 0)
 {
-  const int nbRx = g_cfg.nbRx, nd = k.ndmrs, ncb = k.ncb, rows = nd * nbRx;
+  const int nbRx = nrx_of(k.gid), nd = k.ndmrs, ncb = k.ncb, rows = nd * nbRx;
   const int ext = (12 * k.nrb + 15) & ~15;
   const size_t nllr = std::min<size_t>((size_t)LLR_CAP, (size_t)12 * k.nrb * 13 * 8);
   const size_t accoff = ((size_t)3 * NR_GPU_CHEST_MAX_ROWS + 1024) * sizeof(int);
@@ -1086,7 +1099,7 @@ static int enqueue_ul(Inst &I, const Key &k, cudaStream_t s, int part = 0)
 static bool key_ok_ul(const Key &k)
 {
   return g_cfg_set && k.ul && nr_gpu_pass_nrb_class(k.nrb) == k.nrb && nr_gpu_pass_ncb_class(k.ncb) == k.ncb && k.nl == 1 && k.ndmrs >= 1 && k.ndmrs <= NR_GPU_PASS_MAX_DMRS &&
-         (int)k.ndmrs * g_cfg.nbRx <= std::min(SEG_ROWS, nr_pdsch_gpu_pass_ls_rows());
+         k.gid < g_ngeo && (int)k.ndmrs * nrx_of(k.gid) <= std::min(SEG_ROWS, nr_pdsch_gpu_pass_ls_rows());
 }
 
 /* Completion (no polling loop, no busy-spin for the whole pass): the thread sleeps ONCE until shortly before the pass's predicted end (an EMA of the GPU-measured launch->done of this class),
@@ -1135,7 +1148,7 @@ static Key key_of(const nr_gpu_pass_job_t *j)
   const nr_gpu_demod_job_t &d = j->dj;
   return Key{j->shape.nrb_class, j->shape.nl, j->shape.ndmrs, j->shape.ncb_class, j->shape.fp32, (uint8_t)(d.want_evm != 0),
              (uint8_t)(j->shape.nl >= 2 ? d.qam_mode : 0), (uint8_t)(j->shape.nl == 1 && d.align != 0),
-             (uint8_t)j->shape.nseg_class, 0, 0, (uint8_t)((j->Z & 3) != 0)};
+             (uint8_t)j->shape.nseg_class, 0, 0, (uint8_t)((j->Z & 3) != 0), (uint8_t)job_gid(j)};
 }
 
 /* the segment geometry of a job: segments tile [0, nrb) in data order, their pilots and first subcarriers lie inside the buffers */
@@ -1156,14 +1169,14 @@ static bool seg_ok(const nr_gpu_pass_job_t *j)
  * Chunks > 1 only in split mode. Returns the groups per chunk, 0 = the class does not fit. */
 static int c_groups_per_chunk(const Key &k)
 {
-  const int grp = (k.nseg ? k.nseg : 1) * g_cfg.nbRx, ng = (int)k.ndmrs * k.nl, cap = std::min(SEG_ROWS, nr_pdsch_gpu_pass_ls_rows());
+  const int grp = (k.nseg ? k.nseg : 1) * nrx_of(k.gid), ng = (int)k.ndmrs * k.nl, cap = std::min(SEG_ROWS, nr_pdsch_gpu_pass_ls_rows());
   if (ng * grp <= cap) return ng;
   if (!g_cfg.split || grp > cap || ng * grp > NR_GPU_CHEST_MAX_ROWS) return 0;
   return cap / grp;
 }
 static bool key_ok(const Key &k)
 {
-  return g_cfg_set && nr_gpu_pass_nrb_class(k.nrb) == k.nrb && nr_gpu_pass_ncb_class(k.ncb) == k.ncb && k.nl >= 1 && k.nl <= 4 && k.nl <= g_cfg.nbRx &&
+  return g_cfg_set && nr_gpu_pass_nrb_class(k.nrb) == k.nrb && nr_gpu_pass_ncb_class(k.ncb) == k.ncb && k.gid < g_ngeo && k.nl >= 1 && k.nl <= 4 && k.nl <= nrx_of(k.gid) &&
          k.ndmrs >= 1 && k.ndmrs <= NR_GPU_PASS_MAX_DMRS && k.qmode <= 3 && (k.nseg == 0 || (nr_gpu_pass_nseg_class(k.nseg) == k.nseg && k.nseg <= (g_cfg.split ? NR_GPU_PASS_MAX_SEG : NR_GPU_PASS_MAX_SEG_FULL))) &&
          c_groups_per_chunk(k) > 0;
 }
@@ -1322,7 +1335,7 @@ static int build(const Key &k, int sub = SUB_FULL)
     }
     ++g_allocs;
     size_t f0 = 0, f1 = 0, tb_ = 0;
-    if (sub != SUB_FULL) cudaMemGetInfo(&f0, &tb_);
+    cudaMemGetInfo(&f0, &tb_); /* G3b: every build is measured (the estimate of a further geometry is the measured cost of the first cell's graphs) */
     if (cudaGraphInstantiate(&e.exec[i], g, 0) != cudaSuccess) rc = -1;
     cudaGraphDestroy(g);
     if (rc) break;
@@ -1333,7 +1346,7 @@ static int build(const Key &k, int sub = SUB_FULL)
       rc = -1;
     }
     { float ms; cudaEventElapsedTime(&ms, I.ev0, I.done); cudaGetLastError(); }
-    if (sub != SUB_FULL && cudaMemGetInfo(&f1, &tb_) == cudaSuccess && f0 > f1) kb += (uint64_t)(f0 - f1) >> 10;
+    if (cudaMemGetInfo(&f1, &tb_) == cudaSuccess && f0 > f1) kb += (uint64_t)(f0 - f1) >> 10;
   }
   free(sj);
   if (rc) {
@@ -1341,9 +1354,11 @@ static int build(const Key &k, int sub = SUB_FULL)
       if (e.exec[i]) cudaGraphExecDestroy(e.exec[i]);
     return -1;
   }
+  e.kb = kb;
   g_cache[key_sub(k, sub).pack()] = e;
+  if (k.gid < g_ngeo) g_geo[k.gid].used_kb += (sub == SUB_L ? 0 : kb);
   nr_gpu_memstat_note_graph();
-  if (sub != SUB_FULL && kb) nr_gpu_memstat_note(NR_MS_DEV, (size_t)kb << 10); /* the cudaMemGetInfo delta of the instantiate + first replay (a whole-pass graph is not measured) */
+  if ((sub != SUB_FULL || k.gid) && kb) nr_gpu_memstat_note(NR_MS_DEV, (size_t)kb << 10); /* the cudaMemGetInfo delta of the instantiate + first replay (a whole-pass graph is not measured) */
   if (k.nseg && (sub == SUB_FULL || sub == SUB_C)) ++g_seg_classes;
   {
     size_t fr = 0, tot_b = 0; /* build() runs before the fence only (guard_alloc) */
@@ -1431,6 +1446,8 @@ extern "C" int nr_gpu_pass_config(const nr_gpu_pass_cfg_t *c)
   if (g_ready) return 0;
   g_cfg = *c;
   g_cfg_set = true;
+  g_geo[0] = GeoP{c->nbRx, c->n_rb_dl, 0, 0, 0, 0, 0, true};
+  g_ngeo = 1;
   return 0;
 }
 
@@ -1507,12 +1524,17 @@ extern "C" int nr_gpu_pass_init(int max_classes)
 /* MPCI G3: register a further cell (pre-fence, after nr_gpu_pass_init). Its HARQ slab is booked PER_CELL to `cell` and taken from the PASS share of the GPU memory budget
  * (a refusal leaves the cell without device HARQ: its hq jobs return 1 and the host keeps the soft sums on the CPU, as for a failed single-cell allocation); the graphs, the
  * instances and their streams are SHARED -- a shape class one cell warmed serves the others. The cell then holds a floor of one DL and one UL instance (nr_gpu_pass_quota.h). */
-extern "C" int nr_gpu_pass_cell_init(int cell, int n_rb_dl)
+static int cell_init_geo(int cell, int n_rb_dl, int gid);
+extern "C" int nr_gpu_pass_cell_init(int cell, int n_rb_dl) { return cell_init_geo(cell, n_rb_dl, 0); }
+/* MPCI G3b: the same for a cell whose FEP geometry is entry `gid` (nr_gpu_pass_geo_add); its jobs then run the C / D graphs captured for it */
+extern "C" int nr_gpu_pass_cell_init_geo(int cell, int n_rb_dl, int gid) { return cell_init_geo(cell, n_rb_dl, gid); }
+static int cell_init_geo(int cell, int n_rb_dl, int gid)
 {
   if (cell < 0 || cell >= NR_PQ_CELLS) return -1;
   std::lock_guard<std::mutex> lk(g_mu);
   if (!g_ready) return -1;
   if (g_cell_on[cell]) return 0;
+  if (gid < 0 || gid >= g_ngeo || !g_geo[gid].ok) return -1;
   const size_t hb = (size_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2;
   if (!g_hq_cells[cell]) {
     if (!guard_alloc()) return -1;
@@ -1530,6 +1552,7 @@ extern "C" int nr_gpu_pass_cell_init(int cell, int n_rb_dl)
     }
   }
   g_cell_nrb[cell] = n_rb_dl > 0 ? n_rb_dl : g_cfg.n_rb_dl;
+  g_cell_gid[cell] = (uint8_t)gid;
   {
     std::lock_guard<std::mutex> pq(g_pq_mu);
     nr_pq_register(&g_pq, cell);
@@ -1538,6 +1561,77 @@ extern "C" int nr_gpu_pass_cell_init(int cell, int n_rb_dl)
   g_cell_on[cell] = 1;
   return 0;
 }
+/* ---- MPCI G3b: a further cell's FEP geometry ------------------------------------------------------------------------------------------------------------------------------------------------
+ * Pre-fence, on the thread of the cell, after cell 0 warmed the module. Registers the geometry with the FEP module (kernel arguments: n_rb_dl, first carrier offset, CP lengths, antennas, time-shift
+ * table), and RESERVES its graph memory from the shared GPU budget (nr_gpu_membudget_dyn_acquire on the PASS module = the elastic headroom): the estimate is the measured cost of the first cell's C / D
+ * (and whole-pass) graphs of the PRB classes the new carrier can use (nrb <= max_nrb_class), because the new geometry warms the same class list restricted to those. A refused reservation returns -2
+ * and nothing is registered: the cell keeps the CPU path. Cells with an equal geometry share the entry (and every graph captured for it). Returns the geometry id (>= 0), or < 0. */
+extern "C" int nr_gpu_pass_geo_add(int cell, const nr_gpu_fep_cfg_t *fc, int max_nrb_class, uint64_t *reserved_bytes)
+{
+  if (reserved_bytes) *reserved_bytes = 0;
+  if (cell < 0 || cell >= NR_PQ_CELLS || !fc || fc->nant < 1 || fc->nant > 4) return -1;
+  std::lock_guard<std::mutex> lk(g_mu);
+  if (!g_ready || g_dead || !g_ngeo || !guard_alloc()) return -1;
+  const int fid = nr_pdsch_gpu_fep_geo_add(fc);
+  if (fid < 0) return -1;
+  for (int g = 0; g < g_ngeo; g++)
+    if (g_geo[g].ok && g_geo[g].fep == fid && g_geo[g].nbRx == fc->nant) return g; /* equal geometry: shared, no new cost */
+  if (g_ngeo >= NR_PQ_CELLS) return -1;
+  uint64_t est_kb = 0, max_kb = 0;
+  for (const auto &e : g_cache) {
+    const uint64_t key = e.first;
+    if (((key >> 52) & 0xff) != 0 || ((key >> 41) & 3) == SUB_L) continue; /* the first cell's C / D / whole-pass graphs; L is shared */
+    if (max_nrb_class > 0 && (int)(key & 0x1ff) > max_nrb_class) continue;
+    est_kb += e.second.kb;
+    max_kb = std::max<uint64_t>(max_kb, e.second.kb);
+  }
+  const uint64_t est_b = est_kb << 10;
+  if (est_b && !nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_PASS, (size_t)est_b)) {
+    fprintf(stderr, "GPUPASS cell %d: FEP geometry (RX %d, N_RB %d) needs %lu MB of graphs, the GPU budget headroom has no room: CPU path for this cell\n", cell, fc->nant, fc->n_rb_dl, (unsigned long)(est_b >> 20));
+    return -2;
+  }
+  GeoP &gp = g_geo[g_ngeo];
+  /* the geometry builds the same classes as the first cell's, nbRx or the carrier smaller: the measured cost (cudaMemGetInfo deltas, noisy on a shared host) with 50 % tolerance and one graph of slack; nothing measured = no bound */
+  gp = GeoP{fc->nant, fc->n_rb_dl, fid, cell, est_kb ? est_kb + est_kb / 2 + max_kb : UINT64_MAX / 4, 0, est_b, true};
+  if (reserved_bytes) *reserved_bytes = est_b;
+  return g_ngeo++;
+}
+/* After the geometry's classes were warmed: true up the reservation to the measured cost. Returns the bytes the geometry's graphs hold; 0 = nothing was captured: the geometry is dropped and its
+ * reservation returned (the cell keeps the CPU path). */
+extern "C" uint64_t nr_gpu_pass_geo_commit(int gid)
+{
+  std::lock_guard<std::mutex> lk(g_mu);
+  if (gid <= 0 || gid >= g_ngeo || !g_geo[gid].ok) return 0;
+  GeoP &gp = g_geo[gid];
+  const uint64_t used = gp.used_kb << 10;
+  if (!used) {
+    if (gp.reserved_b) nr_gpu_membudget_dyn_release(NR_GPU_MEM_PASS, (size_t)gp.reserved_b);
+    gp.ok = false;
+    gp.reserved_b = 0;
+    return 0;
+  }
+  if (used > gp.reserved_b) {
+    if (!nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_PASS, (size_t)(used - gp.reserved_b)))
+      fprintf(stderr, "GPUPASS geometry %d: %lu MB over its reservation, outside the elastic GPU headroom (already allocated)\n", gid, (unsigned long)((used - gp.reserved_b) >> 20));
+  } else if (used < gp.reserved_b)
+    nr_gpu_membudget_dyn_release(NR_GPU_MEM_PASS, (size_t)(gp.reserved_b - used));
+  gp.reserved_b = used;
+  return used;
+}
+/* test / report hook */
+extern "C" int nr_gpu_pass_geo_info(int gid, int *nbRx, int *n_rb_dl, uint64_t *used_kb, uint64_t *budget_kb)
+{
+  std::lock_guard<std::mutex> lk(g_mu);
+  if (gid < 0 || gid >= g_ngeo) return -1;
+  if (nbRx) *nbRx = g_geo[gid].nbRx;
+  if (n_rb_dl) *n_rb_dl = g_geo[gid].n_rb_dl;
+  if (used_kb) *used_kb = g_geo[gid].used_kb;
+  if (budget_kb) *budget_kb = g_geo[gid].budget_kb;
+  return g_geo[gid].ok ? 0 : 1;
+}
+extern "C" int nr_gpu_pass_geo_count(void) { return g_ngeo; }
+extern "C" int nr_gpu_pass_geo_fep(int gid) { return gid >= 0 && gid < g_ngeo ? g_geo[gid].fep : -1; } /* the FEP module's id of a geometry (nr_gpu_fep_job_t.geo) */
+extern "C" int nr_gpu_pass_cell_geo(int cell) { return cell >= 0 && cell < NR_PQ_CELLS ? (int)g_cell_gid[cell] : 0; }
 extern "C" int nr_gpu_pass_cell_ready(int cell) { return cell_ok(cell) ? 1 : 0; }
 extern "C" void nr_gpu_pass_cell_retire(int cell)
 {
@@ -1547,18 +1641,35 @@ extern "C" void nr_gpu_pass_cell_retire(int cell)
   g_pq_active.store(nr_pq_active(&g_pq), std::memory_order_relaxed);
   g_cell_on[cell] = 0;
 }
-extern "C" int nr_gpu_pass_warm(const nr_gpu_pass_shape_t *sh, int qmode, int align, int evm)
+static int warm_geo(const nr_gpu_pass_shape_t *sh, int qmode, int align, int evm, int gid);
+extern "C" int nr_gpu_pass_warm(const nr_gpu_pass_shape_t *sh, int qmode, int align, int evm) { return warm_geo(sh, qmode, align, evm, 0); }
+/* MPCI G3b: warm one class for the FEP geometry `gid` (a further cell's; pre-fence). The C and D graphs are captured for that geometry, the L graph is the shared one. The geometry's own memory
+ * budget (nr_gpu_pass_geo_add) bounds it: the process graph cap is not applied to it, the shared GPU budget was asked once at registration. */
+extern "C" int nr_gpu_pass_warm_geo(const nr_gpu_pass_shape_t *sh, int qmode, int align, int evm, int gid) { return warm_geo(sh, qmode, align, evm, gid); }
+struct GeoScope { /* the ledger scope of a further geometry's builds; geometry 0 keeps the caller's scope (N = 1 unchanged) */
+  uint32_t prev = 0;
+  bool on;
+  GeoScope(int gid, int cell) : on(gid > 0) { if (on) prev = nr_gpu_memstat_enter(NR_MS_PASS, NR_MS_PER_CELL, cell); }
+  ~GeoScope() { if (on) nr_gpu_memstat_leave(prev); }
+};
+static bool geo_budget_hit(int gid, uint64_t need_kb)
+{
+  return gid > 0 && g_geo[gid].used_kb + need_kb > g_geo[gid].budget_kb;
+}
+static int warm_geo(const nr_gpu_pass_shape_t *sh, int qmode, int align, int evm, int gid)
 {
   std::lock_guard<std::mutex> lk(g_mu);
-  if (!g_ready || !sh) return -1;
+  if (!g_ready || !sh || gid < 0 || gid >= g_ngeo || !g_geo[gid].ok) return -1;
+  GeoScope gms_(gid, g_geo[gid].cell); /* GPUMEM: a further geometry's graphs are booked to the cell that registered it */
   if (sh->ul) { /* Task 7: a PUSCH class */
-    const Key ku{sh->nrb_class, 1, sh->ndmrs, sh->ncb_class, 0, 0, 0, 0, 0, 1};
+    const Key ku{sh->nrb_class, 1, sh->ndmrs, sh->ncb_class, 0, 0, 0, 0, 0, 1, 0, 0, (uint8_t)gid};
     if (!key_ok_ul(ku)) return -1;
     if (g_cache.count(ku.pack())) return 0;
+    if (geo_budget_hit(gid, 0)) return -1;
     return build(ku);
   }
   const Key k{sh->nrb_class, sh->nl, sh->ndmrs, sh->ncb_class, sh->fp32, (uint8_t)(evm != 0), (uint8_t)(sh->nl >= 2 ? qmode : 0), (uint8_t)(sh->nl == 1 && align),
-                (uint8_t)sh->nseg_class, 0, 0, (uint8_t)(sh->nz4 != 0)};
+                (uint8_t)sh->nseg_class, 0, 0, (uint8_t)(sh->nz4 != 0), (uint8_t)gid};
   if (k.nz4 && k.ncb != 1) return -1; /* a lifting size that is not a multiple of 4 only occurs below 700 bits: one code block */
   if (!key_ok(k) || (int)k.nseg > (int)k.nrb) return -1;
   if (g_cfg.split) { /* the three sub-graphs of the class; the ones another class already built are shared */
@@ -1569,12 +1680,13 @@ extern "C" int nr_gpu_pass_warm(const nr_gpu_pass_shape_t *sh, int qmode, int al
         missing = true;
         need += g_sub_kb_max[sub];
       }
-    if (missing && split_cap_hit(need)) return -1;
+    if (missing && (gid > 0 ? geo_budget_hit(gid, need) : split_cap_hit(need))) return -1;
     for (int sub = SUB_C; sub <= SUB_L; sub++)
       if (!g_cache.count(key_sub(k, sub).pack()) && build(k, sub) != 0) return -1;
     return 0;
   }
   if (g_cache.count(k.pack())) return 0;
+  if (geo_budget_hit(gid, 0)) return -1;
   return build(k);
 }
 
@@ -1804,7 +1916,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   const uint32_t nd = j->n_decode && j->n_decode < j->C ? j->n_decode : j->C; /* v2 Task 2: blocks decoded (a probe: block 0) */
   if (!cell_ok(j->cell)) { ++g_fb_unsup; return 1; } /* a cell that was never registered has no slab, quota or n_rb_dl */
   if (j->hq_mode && (j->hq_mode > 2 || j->probe || !hq_of(j->cell))) { ++g_fb_unsup; return 1; } /* the host would count a combine that never happened */
-  if (!key_ok(k) || (int)k.nl != j->nl || (int)k.ndmrs != j->ndmrs || j->nbRx != g_cfg.nbRx || (int)j->nrb > (int)k.nrb || j->C < 1 || nd > k.ncb || j->G_dem > j->G || (j->probe && !j->G_dem) ||
+  if (!key_ok(k) || (int)k.nl != j->nl || (int)k.ndmrs != j->ndmrs || j->nbRx != nrx_of(job_gid(j)) || (int)j->nrb > (int)k.nrb || j->C < 1 || nd > k.ncb || j->G_dem > j->G || (j->probe && !j->G_dem) ||
       (j->Z & 3 && j->C != 1) || ((j->K + 7) >> 3) > (uint32_t)KBMAX || ((j->K - j->F) & 7) || j->G > LLR_CAP || j->G == 0 || ext > (uint32_t)EXTMAX || (d.want_evm && (k.fp32 & 1) == (uint8_t)d.evm_fp64) || ((k.fp32 >> 1) != (uint8_t)(d.demod_fp32 != 0)) ||
       j->dmrs_type > 2 || j->nseg < 0 || j->nseg > (int)k.nseg || (j->nseg == 0) != (k.nseg == 0) || !seg_ok(j) ||
       j->it_max < 1 || j->it_max > NSNAP + 1 || !j->scr || !j->geo_y || !j->geo_h || !j->symbol_rot || !j->rxdata[0]) {
@@ -1949,19 +2061,20 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   r->log2_maxh = dj->log2_maxh;
   r->nvar_db = r->nvar ? 10.0f * log10f((float)r->nvar) : -99.0f;
   r->evm_db = r->snr_db = 0.0f;
+  const int nbRxJ = nrx_of(job_gid(j));
   {
-    const uint32_t *q = (const uint32_t *)((const char *)I.nvar.host + 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)) + (size_t)(j->ndmrs * j->nl - 1) * g_cfg.nbRx;
-    for (int a = 0; a < 4; a++) r->nvar_ant[a] = k.nseg > 1 ? rb.post.nvar_ant[a] : (a < g_cfg.nbRx ? q[a] : 0); /* segmented: the width-weighted mean the post kernel computed */
+    const uint32_t *q = (const uint32_t *)((const char *)I.nvar.host + 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)) + (size_t)(j->ndmrs * j->nl - 1) * nbRxJ;
+    for (int a = 0; a < 4; a++) r->nvar_ant[a] = k.nseg > 1 ? rb.post.nvar_ant[a] : (a < nbRxJ ? q[a] : 0); /* segmented: the width-weighted mean the post kernel computed */
   }
   nr_dmrs_snr_init(&r->dsnr);
   if (j->ndmrs > 0 && j->nl > 0) { /* last DM-RS symbol and layer, as nvar_ant; a segmented estimate is composed in data order, so [0, 12 nrb) is the grant's */
     const int m = j->dmrs_sym[j->ndmrs - 1], l = j->nl - 1;
     const int16_t *rows[4] = {0, 0, 0, 0};
     const bool gd = nr_gpu_model() == NR_GPU_MODEL_DISCRETE; /* DISCRETE: the compact rows k_gather copied (block 2 * nbRx + a); DIRECT: the mapped estimate */
-    for (int a = 0; a < g_cfg.nbRx && a < 4; a++)
-      rows[a] = gd ? (const int16_t *)I.gath.host + 2 * ((size_t)(2 * g_cfg.nbRx + a) * N)
-                   : (const int16_t *)I.est.host + 2 * ((size_t)(l * g_cfg.nbRx + a) * NSYM * N + (size_t)m * N);
-    nr_dmrs_snr_fill(&r->dsnr, rows, g_cfg.nbRx, 12 * j->nrb, r->nvar_ant, j->dmrs_type, 1.0);
+    for (int a = 0; a < nbRxJ && a < 4; a++)
+      rows[a] = gd ? (const int16_t *)I.gath.host + 2 * ((size_t)(2 * nbRxJ + a) * N)
+                   : (const int16_t *)I.est.host + 2 * ((size_t)(l * nbRxJ + a) * NSYM * N + (size_t)m * N);
+    nr_dmrs_snr_fill(&r->dsnr, rows, nbRxJ, 12 * j->nrb, r->nvar_ant, j->dmrs_type, 1.0);
     if (!j->nseg) r->dsnr.ref_db = nr_dmrs_ref_db(nr_gpu_model() == NR_GPU_MODEL_DISCRETE || !j->rxdataF ? (const int16_t *)I.rxF.host + 2 * (size_t)m * N : j->rxdataF + 2 * (size_t)m * N, N, j->car_k0, j->car_n, j->k0, 12 * j->nrb);
   }
   if (!r->need_cpu && (!r->tb_ok || j->llr_out_all) && j->llr_out)
@@ -1970,7 +2083,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   if (r->qm_row && j->qm_sym >= 0 && j->qm_sym < NSYM && j->qm_n > 0 && j->qm_n <= (uint32_t)N) {
     /* comp[(m * NR_GPU_DEMOD_MAX_NL + layer) * buf + i], c16; DISCRETE: the row k_gather copied (block 3 * nbRx) */
     memcpy(r->qm_row,
-           nr_gpu_model() == NR_GPU_MODEL_DISCRETE ? (const int16_t *)I.gath.host + 2 * (size_t)3 * g_cfg.nbRx * N
+           nr_gpu_model() == NR_GPU_MODEL_DISCRETE ? (const int16_t *)I.gath.host + 2 * (size_t)3 * nbRxJ * N
                                                    : (const int16_t *)I.scratch.host + 2 * (size_t)((size_t)j->qm_sym * NR_GPU_DEMOD_MAX_NL * ext),
            (size_t)j->qm_n * 4);
     r->qm_valid = 1;
@@ -1978,15 +2091,15 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   if (r->brfo_rows && j->fo_first >= 0 && j->fo_last > j->fo_first) {
     const int16_t *e0 = (const int16_t *)I.est.host;
     const bool gd = nr_gpu_model() == NR_GPU_MODEL_DISCRETE; /* DISCRETE: blocks a and nbRx + a of k_gather */
-    for (int a = 0; a < g_cfg.nbRx; a++) {
+    for (int a = 0; a < nbRxJ; a++) {
       memcpy(r->brfo_rows + ((size_t)a * 2) * N * 2,
-             gd ? (const int16_t *)I.gath.host + 2 * ((size_t)a * N) : e0 + 2 * ((size_t)(0 * g_cfg.nbRx + a) * NSYM * N + (size_t)j->dmrs_sym[j->fo_first] * N), (size_t)N * 4);
+             gd ? (const int16_t *)I.gath.host + 2 * ((size_t)a * N) : e0 + 2 * ((size_t)(0 * nbRxJ + a) * NSYM * N + (size_t)j->dmrs_sym[j->fo_first] * N), (size_t)N * 4);
       memcpy(r->brfo_rows + ((size_t)a * 2 + 1) * N * 2,
-             gd ? (const int16_t *)I.gath.host + 2 * ((size_t)(g_cfg.nbRx + a) * N) : e0 + 2 * ((size_t)(0 * g_cfg.nbRx + a) * NSYM * N + (size_t)j->dmrs_sym[j->fo_last] * N), (size_t)N * 4);
+             gd ? (const int16_t *)I.gath.host + 2 * ((size_t)(nbRxJ + a) * N) : e0 + 2 * ((size_t)(0 * nbRxJ + a) * NSYM * N + (size_t)j->dmrs_sym[j->fo_last] * N), (size_t)N * 4);
     }
   }
   if (nr_gpu_model() == NR_GPU_MODEL_DISCRETE && j->rxdataF) { /* the symbols the caller needs, from the pinned copy of the instance's rxdataF */
-    for (int a = 0; a < g_cfg.nbRx; a++)
+    for (int a = 0; a < nbRxJ; a++)
       for (int m = 0; m < NSYM; m++)
         if (j->copy_mask >> m & 1) memcpy(j->rxdataF + 2 * ((size_t)a * j->rx_stride + (size_t)m * N), (const int16_t *)I.rxF.host + 2 * ((size_t)a * NSYM * N + (size_t)m * N), (size_t)N * 4);
   }
@@ -2029,12 +2142,13 @@ extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   const uint64_t ts_e = nr_gpu_pass_now_ns();
   if (!g_ready || g_dead || !j || !r || !r->tb || !j->ul.on || !cell_ok(j->cell)) { ++g_ul_fb_unsup; return 1; }
   const nr_gpu_pass_ul_t &u = j->ul;
-  const Key k{j->shape.nrb_class, 1, j->shape.ndmrs, j->shape.ncb_class, 0, 0, 0, 0, 0, 1};
+  const int nbRxJ = nrx_of(job_gid(j));
+  const Key k{j->shape.nrb_class, 1, j->shape.ndmrs, j->shape.ncb_class, 0, 0, 0, 0, 0, 1, 0, 0, (uint8_t)job_gid(j)};
   uint32_t gsum = 0;
   for (int m = 0; m < NSYM; m++) gsum += (uint32_t)u.nre[m] * j->Qm;
-  if (!j->shape.ul || !key_ok_ul(k) || j->nl != 1 || j->ndmrs != (int)k.ndmrs || j->nbRx != g_cfg.nbRx || u.ndmrs != j->ndmrs || u.nrb < 1 || u.nrb > (int)k.nrb ||
+  if (!j->shape.ul || !key_ok_ul(k) || j->nl != 1 || j->ndmrs != (int)k.ndmrs || j->nbRx != nbRxJ || u.ndmrs != j->ndmrs || u.nrb < 1 || u.nrb > (int)k.nrb ||
       12 * u.nrb > EXTMAX || j->C < 1 || j->C > k.ncb || (j->Z & 3) || (j->K & 7) || (j->K >> 3) > (uint32_t)KBMAX || j->G > LLR_CAP || j->G == 0 || gsum != j->G ||
-      (j->Qm != 2 && j->Qm != 4 && j->Qm != 6 && j->Qm != 8) || u.delta < 0 || u.delta > 1 || u.keep >= g_cfg.nbRx || !j->scr || j->it_max < 1 || j->it_max > NSNAP + 1) {
+      (j->Qm != 2 && j->Qm != 4 && j->Qm != 6 && j->Qm != 8) || u.delta < 0 || u.delta > 1 || u.keep >= nbRxJ || !j->scr || j->it_max < 1 || j->it_max > NSNAP + 1) {
     ++g_ul_fb_unsup;
     return 1;
   }
@@ -2099,7 +2213,7 @@ extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     for (uint32_t s = 0; s < j->C; s++, off += seg_bytes) memcpy(r->tb + off, rb.c[s], seg_bytes);
     if (!r->tb_ok) ++g_ul_tb_fail;
   }
-  const int rows = j->ndmrs * g_cfg.nbRx;
+  const int rows = j->ndmrs * nbRxJ;
   r->ul_nrows = (uint32_t)rows;
   r->ul_log2_maxh = rb.ul.log2_maxh;
   for (int a = 0; a < 4; a++) r->ul_avg[a] = rb.ul.avg[a];
@@ -2115,9 +2229,9 @@ extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   if (!r->need_cpu && (!r->tb_ok || j->llr_out_all) && j->llr_out) memcpy(j->llr_out, I.llr.host, (size_t)j->G * 2);
   if (u.est_out)
     for (int q = 0; q < rows; q++)
-      memcpy(u.est_out + (size_t)q * N * 2, (const int16_t *)I.est.host + 2 * ((size_t)(q % g_cfg.nbRx) * NSYM * N + (size_t)u.dmrs_sym[q / g_cfg.nbRx] * N), (size_t)N * 4);
+      memcpy(u.est_out + (size_t)q * N * 2, (const int16_t *)I.est.host + 2 * ((size_t)(q % nbRxJ) * NSYM * N + (size_t)u.dmrs_sym[q / nbRxJ] * N), (size_t)N * 4);
   if (nr_gpu_model() == NR_GPU_MODEL_DISCRETE) { /* the transformed symbols the host consumers read */
-    for (int a = 0; a < g_cfg.nbRx; a++)
+    for (int a = 0; a < nbRxJ; a++)
       if (u.rx[a])
         for (int m = 0; m < NSYM; m++)
           if (u.win[m] >= 0) memcpy(u.rx[a] + 2 * (size_t)m * N, (const int16_t *)I.rxF.host + 2 * ((size_t)a * NSYM + m) * N, (size_t)N * 4);

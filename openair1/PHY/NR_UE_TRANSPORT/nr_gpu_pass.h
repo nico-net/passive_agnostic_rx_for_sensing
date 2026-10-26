@@ -166,6 +166,7 @@ typedef struct {
   int nbRx, nl, ndmrs;
   uint8_t cell;                /* MPCI G3: the cell the grant belongs to (nr_cell_idx() of the bound decode thread, set by nr_gpu_pass_{dl,ul}_run, never read from the thread by the GPU module):
                                 * selects the HARQ slab, the instance quota and the cell's n_rb_dl. Cleared by the memset of the host builders, set after it; 0 = cell 0 (N = 1) */
+  uint8_t geo1;                /* MPCI G3b: 0 = the FEP geometry of `cell` (every real job); 1 + id = that geometry (the synthetic jobs of the graph capture) */
   int dmrs_sym[NR_GPU_PASS_MAX_DMRS];
   int delta[NR_GPU_PASS_MAX_NL];                                 /* get_delta(port) of each layer */
   const int16_t *pil[NR_GPU_PASS_MAX_DMRS][NR_GPU_PASS_MAX_NL];  /* c16 pilots of (DM-RS symbol, layer): 6 * nrb values from the grant's first RB */
