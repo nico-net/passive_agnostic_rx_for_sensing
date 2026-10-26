@@ -18,6 +18,8 @@ int nrue_get_ru_count(void);
 const nrUE_RU_params_t *nrue_get_ru(int ru_id);
 void nrue_set_ru_cell_id(int ru_id, int cell_id);
 void nrue_set_ru_params(configmodule_interface_t *cfg);
+/* multi-PCI A8: append a cell with its own ring-consumer RU (shm_iq device on ru->sdr_addrs); returns the cell id or -1 */
+int nrue_add_cell_ru(const nrUE_cell_params_t *cell, const nrUE_RU_params_t *ru);
 
 void nrue_init_openair0(void);
 

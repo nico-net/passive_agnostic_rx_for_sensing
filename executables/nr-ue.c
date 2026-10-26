@@ -12,6 +12,8 @@ int nr_ue_rx_synced_g = 0;
 #include "PHY/NR_UE_TRANSPORT/nr_early_start.h" // per-CORESET early start: split slot read, symbol progress, slot gate
 #include "PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe.h" // ACQMISS-2 sync-quality metric
 #include "PHY/NR_UE_TRANSPORT/nr_passive_metrics.h" // ISAC_METRICS pci
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cell_prealloc.h" // nr_passive_metrics_set_pci (A3/A8)
+#include "common/utils/nr_core_layout.h" // per-cell RT reader core (A8)
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include <dlfcn.h>
 /*
@@ -49,8 +51,9 @@ int nr_ue_rx_synced_g = 0;
 #include <stdatomic.h>
 #include "PHY/MODULATION/nr_sfo_state.h"
 
-/// Defined in nr_adjust_synch_ue.c -- freezes the timing integrator during a stream outage.
-extern _Atomic int nr_ue_rf_signal_absent;
+/// Defined in nr_adjust_synch_ue.c -- freezes the timing integrator during a stream outage. Per cell (A8): nr_ue_cell_clock.h.
+#include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h"
+#include "common/utils/nr_cell.h"
 
 // TEMPORARY DIAGNOSTIC (2026-08-05): receive-buffer producer/consumer lag measurement. See
 // PBCH_TRACKING_BUFFER_HANDOVER.md -- PHY-domain diagnostics have exhausted what they can show
@@ -65,8 +68,8 @@ extern _Atomic int nr_ue_rf_signal_absent;
 // "when tracking is now reading it". Genuinely cross-thread (producer and the dl_actors workers are
 // different threads), hence _Atomic rather than __thread; relaxed ordering is sufficient for a
 // diagnostic counter that isn't gating any correctness-relevant control flow.
-_Atomic long nr_ue_diag_producer_absolute_slot = -1;
-_Atomic long nr_ue_diag_producer_wall_ns = 0;
+/* One slot per cell (A8, nr_ue_cell_clock.h): the absolute slot is THIS cell's SFN-based counter. */
+NR_UE_CELL_CLOCK_DEFINE_PRODUCER();
 
 /*
  *  NR SLOT PROCESSING SEQUENCE
@@ -154,6 +157,7 @@ static size_t dump_L1_UE_meas_stats(PHY_VARS_NR_UE *ue, char *output, size_t max
 static void *nrL1_UE_stats_thread(void *param)
 {
   PHY_VARS_NR_UE *ue = (PHY_VARS_NR_UE *) param;
+  nr_cell_bind(ue->Mod_id); /* A8: the stats of cell k */
   const int max_len = 16384;
   char output[max_len];
   char filename[30];
@@ -880,17 +884,19 @@ bool readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
  * on the first firing). So the anchor only REQUESTS a rebase here; it is applied atomically at a
  * frame boundary, through the same discard path acquisition uses to move the stream origin.
  */
-_Atomic long nr_ue_pending_rebase_delta = 0;
-_Atomic int nr_ue_pending_rebase_valid = 0;
+NR_UE_CELL_CLOCK_DEFINE_REBASE(); /* per cell (A8): the cell's timing loop hands the rebase to the cell's slot thread */
 /* Incremented on every applied rebase so consumers can tell which timing epoch a
  * measurement belongs to, and count occasions since the last one. */
-_Atomic int nr_ue_rebase_epoch = 0;
+NR_CELL_STATIC(_Atomic int, nr_ue_rebase_epoch); /* per cell (A8); was a global with no user outside this file */
+#define nr_ue_rebase_epoch NR_CELL_REF(nr_ue_rebase_epoch)
 /* Absolute RF timestamp of the most recent read, and total samples consumed since start.
  * Between two SSB occasions (20 ms) these must advance by exactly samples_per_frame*2 unless a
  * timing correction was explicitly applied -- so comparing them against that constant separates
  * "samples were physically discarded/duplicated" from "only the logical origin moved". */
-_Atomic long nr_ue_diag_rf_timestamp = 0;
-_Atomic long nr_ue_diag_samples_consumed = 0;
+NR_CELL_STATIC(_Atomic long, nr_ue_diag_rf_timestamp); /* per cell (A8): the cell's stream position */
+#define nr_ue_diag_rf_timestamp NR_CELL_REF(nr_ue_diag_rf_timestamp)
+NR_CELL_STATIC(_Atomic long, nr_ue_diag_samples_consumed);
+#define nr_ue_diag_samples_consumed NR_CELL_REF(nr_ue_diag_samples_consumed)
 /* Every mutation of the global timing state, with its call site, so the one that coincides with
  * the coherence collapse is identifiable rather than inferred. */
 void nr_ue_timing_mutation_log(const char *what, long before, long after, const char *file, int line)
@@ -916,8 +922,11 @@ void nr_ue_timing_mutation_log(const char *what, long before, long after, const 
  * Reports absolute RF power straight off the just-read time-domain slot buffer, which is
  * independent of frame/symbol alignment: it therefore separates "the signal went away" from "the
  * receiver is looking in the wrong place", which no other instrument here can do. */
-static double g_census_pow;
-static long g_census_pow_n;
+/* Census state is per cell (A8): each cell censuses its own stream. Declaration-only conversion (nr_cell.h). */
+NR_CELL_STATIC(double, g_census_pow);
+#define g_census_pow NR_CELL_REF(g_census_pow)
+NR_CELL_STATIC(long, g_census_pow_n);
+#define g_census_pow_n NR_CELL_REF(g_census_pow_n)
 /* RAW per-antenna receive power, measured on the TIME-DOMAIN slot buffer before any alignment,
  * demodulation or channel estimation. This exists to answer one question that nothing else here
  * can: RXBRANCH's `pw[]` is the DM-RS CHANNEL-ESTIMATE magnitude, so a branch that receives a
@@ -926,7 +935,12 @@ static long g_census_pow_n;
  * we are estimating it badly" (software) -- and on this rig the four branches span ~20 dB, which is
  * not a shape four elements at lambda/2 looking at the same gNB should produce. */
 #define CENSUS_MAX_ANT 4
-static double g_census_pow_ant[CENSUS_MAX_ANT];
+typedef double g_census_dant_t[CENSUS_MAX_ANT];
+typedef uint64_t g_census_uant_t[CENSUS_MAX_ANT];
+typedef uint64_t g_cls_u_t[3][CENSUS_MAX_ANT];
+typedef double g_cls_d_t[3][CENSUS_MAX_ANT];
+NR_CELL_STATIC(g_census_dant_t, g_census_pow_ant);
+#define g_census_pow_ant NR_CELL_REF(g_census_pow_ant)
 /* TRUE per-antenna POWER, mean(I^2 + Q^2), unnormalised and in float before squaring.
  * ANTPOW above accumulates mean(|I|+|Q|) -- an AMPLITUDE -- and prints it normalised to the
  * strongest branch, so it yields a RATIO and never an absolute level. That is enough to see that
@@ -936,18 +950,37 @@ static double g_census_pow_ant[CENSUS_MAX_ANT];
  * so the number is comparable across runs and against the ADC ceiling -- NOT an RF-input power and
  * NOT an SNR. Clipping is counted separately, because a clipped branch reads HIGH while being the
  * most damaged. */
-static double   g_census_pw2_ant[CENSUS_MAX_ANT];
-static uint64_t g_census_clip_ant[CENSUS_MAX_ANT];
-static int32_t  g_census_peak_ant[CENSUS_MAX_ANT]; /* max |I|,|Q| seen, int16 full scale */
-static uint64_t g_census_hot_ant[CENSUS_MAX_ANT];  /* samples with |I| or |Q| > 0.9 FS (of the device full scale, nrue_ru_rx_fullscale) */
+NR_CELL_STATIC(g_census_dant_t, g_census_pw2_ant);
+#define g_census_pw2_ant NR_CELL_REF(g_census_pw2_ant)
+NR_CELL_STATIC(g_census_uant_t, g_census_clip_ant);
+#define g_census_clip_ant NR_CELL_REF(g_census_clip_ant)
+typedef int32_t g_census_iant_t[CENSUS_MAX_ANT];
+NR_CELL_STATIC(g_census_iant_t, g_census_peak_ant); /* max |I|,|Q| seen, int16 full scale */
+#define g_census_peak_ant NR_CELL_REF(g_census_peak_ant)
+NR_CELL_STATIC(g_census_uant_t, g_census_hot_ant); /* samples with |I| or |Q| > 0.9 FS (of the device full scale, nrue_ru_rx_fullscale) */
+#define g_census_hot_ant NR_CELL_REF(g_census_hot_ant)
 /* ADCCLASS: per slot class (0 DL, 1 UL, 2 mixed/special per the receiver's own TDD table, nr_ue_slot_select) and antenna, over the census
  * window and since start: sub-sampled count, |I| or |Q| at full scale (clip), above 0.9 full scale (hot), and sum of I^2+Q^2. */
-static uint64_t g_cls_n[3][CENSUS_MAX_ANT], g_cls_clip[3][CENSUS_MAX_ANT], g_cls_hot[3][CENSUS_MAX_ANT];
-static double g_cls_pw[3][CENSUS_MAX_ANT];
-static uint64_t g_cls_tn[3][CENSUS_MAX_ANT], g_cls_tclip[3][CENSUS_MAX_ANT], g_cls_thot[3][CENSUS_MAX_ANT];
-static int g_census_fs = 32767;
-static uint64_t g_census_smp_ant[CENSUS_MAX_ANT];  /* samples inspected, for the hot fraction */
-static uint64_t g_census_pw2_n;
+NR_CELL_STATIC(g_cls_u_t, g_cls_n);
+#define g_cls_n NR_CELL_REF(g_cls_n)
+NR_CELL_STATIC(g_cls_u_t, g_cls_clip);
+#define g_cls_clip NR_CELL_REF(g_cls_clip)
+NR_CELL_STATIC(g_cls_u_t, g_cls_hot);
+#define g_cls_hot NR_CELL_REF(g_cls_hot)
+NR_CELL_STATIC(g_cls_d_t, g_cls_pw);
+#define g_cls_pw NR_CELL_REF(g_cls_pw)
+NR_CELL_STATIC(g_cls_u_t, g_cls_tn);
+#define g_cls_tn NR_CELL_REF(g_cls_tn)
+NR_CELL_STATIC(g_cls_u_t, g_cls_tclip);
+#define g_cls_tclip NR_CELL_REF(g_cls_tclip)
+NR_CELL_STATIC(g_cls_u_t, g_cls_thot);
+#define g_cls_thot NR_CELL_REF(g_cls_thot)
+NR_CELL_STATIC_INIT(int, g_census_fs, 32767);
+#define g_census_fs NR_CELL_REF(g_census_fs)
+NR_CELL_STATIC(g_census_uant_t, g_census_smp_ant); /* samples inspected, for the hot fraction */
+#define g_census_smp_ant NR_CELL_REF(g_census_smp_ant)
+NR_CELL_STATIC(uint64_t, g_census_pw2_n);
+#define g_census_pw2_n NR_CELL_REF(g_census_pw2_n)
 
 /* RX power reference, resolved from the USRP driver at runtime. The driver is a dlopen'd plugin,
  * so the executable cannot link against it -- dlsym is the only way to reach it, and a NULL result
@@ -962,9 +995,12 @@ static double nr_ue_rx_power_reference_dbm(int ch)
   }
   return g_pwr_ref_fn ? g_pwr_ref_fn(ch) : NAN;
 }
-static long g_census_pow_ant_n;
-static long g_census_ssb_slots;
-static long g_census_slots;
+NR_CELL_STATIC(long, g_census_pow_ant_n);
+#define g_census_pow_ant_n NR_CELL_REF(g_census_pow_ant_n)
+NR_CELL_STATIC(long, g_census_ssb_slots);
+#define g_census_ssb_slots NR_CELL_REF(g_census_ssb_slots)
+NR_CELL_STATIC(long, g_census_slots);
+#define g_census_slots NR_CELL_REF(g_census_slots)
 
 static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration_rx_to_tx, openair0_timestamp_t rx_offset)
 {
@@ -1080,6 +1116,8 @@ void *UE_thread(void *arg)
 {
   //this thread should be over the processing thread to keep in real time
   PHY_VARS_NR_UE *UE = (PHY_VARS_NR_UE *)arg;
+  /* multi-PCI (A8): UE instance k serves cell k; every per-cell object this slot thread touches resolves to its cell. N = 1: cell 0 (as before). */
+  nr_cell_bind(UE->Mod_id);
   const NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
   //  int tx_enabled = 0;
   enum stream_status_e stream_status = STREAM_STATUS_UNSYNC;
@@ -1208,7 +1246,7 @@ void *UE_thread(void *arg)
                 nr_cfg_identity_frequency(ssb_hz, 15000u << UE->frame_parms.numerology_index), 0);
             nr_cfg_epoch_set_slots_per_second(1000u << UE->frame_parms.numerology_index);
           }
-          atomic_store_explicit(&nr_passive_metrics_pci, UE->frame_parms.Nid_cell, memory_order_relaxed); // for the ISAC_METRICS JSON (Task A2)
+          nr_passive_metrics_set_pci(UE->frame_parms.Nid_cell); // ISAC_METRICS JSON (Task A2): this cell's PCI slot (cell 0 also the legacy global; A3/A8)
           if (nr_sense_enabled()) {
             const openair0_config_t *sense_cfg=&openair0_cfg_g[UE->rf_map.card];
             nr_sense_emit_session(&UE->frame_parms,
@@ -1681,12 +1719,17 @@ void *UE_thread(void *arg)
     // Accounting note: this iteration may consume MORE than readBlockSize -- the short-read retries
     // just below, and the extra first_symbols read at end-of-frame -- so the expected next
     // timestamp is accumulated in rx_samples_consumed and only committed at the end of the reads.
-    static long s_rxts_prev_consumed = 0;
-    static long s_rxts_discont_total = 0;
+    /* per cell (A8): this cell's stream continuity; the dlsym cache of the radio's ring epoch stays process-wide */
+    NR_CELL_STATIC(long, s_rxts_prev_consumed);
+#define s_rxts_prev_consumed NR_CELL_REF(s_rxts_prev_consumed)
+    NR_CELL_STATIC(long, s_rxts_discont_total);
+#define s_rxts_discont_total NR_CELL_REF(s_rxts_discont_total)
     static uint64_t (*ring_epoch_get)(void) = NULL;
     static int ring_epoch_checked = 0;
-    static uint64_t ring_epoch_seen = 0;
-    static bool ring_epoch_seen_valid = false;
+    NR_CELL_STATIC(uint64_t, ring_epoch_seen);
+#define ring_epoch_seen NR_CELL_REF(ring_epoch_seen)
+    NR_CELL_STATIC(bool, ring_epoch_seen_valid);
+#define ring_epoch_seen_valid NR_CELL_REF(ring_epoch_seen_valid)
     if (rx_recover_on && !ring_epoch_checked) {
       ring_epoch_get = dlsym(RTLD_DEFAULT, "isac_usrp_ring_epoch");
       ring_epoch_checked = 1;
@@ -1957,9 +2000,13 @@ void *UE_thread(void *arg)
      * is correct.
      */
     {
-      static double s_ref;      /* healthy reference power; never follows the signal downward */
-      static int s_bad;         /* consecutive collapsed census windows */
-      static long s_fires;
+      /* per cell (A8): the signal reference of THIS cell's stream */
+      NR_CELL_STATIC(double, s_ref); /* healthy reference power; never follows the signal downward */
+#define s_ref NR_CELL_REF(s_ref)
+      NR_CELL_STATIC(int, s_bad); /* consecutive collapsed census windows */
+#define s_bad NR_CELL_REF(s_bad)
+      NR_CELL_STATIC(long, s_fires);
+#define s_fires NR_CELL_REF(s_fires)
       if (ret != INT_MAX)
         g_census_ssb_slots++;
       if (++g_census_slots >= 2000) { /* 2000 slots = 100 frames = 1 s at mu=1 */
@@ -2271,6 +2318,19 @@ void init_NR_UE(int nb_inst, char *uecap_file, char *reconfig_file, char *rbconf
 /* init_NR_UE_threads: creates the PHY receive thread (UE_thread) at the highest real-time priority, pinned to ISAC_UE_RT_CORE when set (default: unpinned), and the L1 statistics thread when statistics are enabled.
  *   Caller: executables/nr-uesoftmodem.c (per UE instance, after the radio is up).
  */
+/* nr_ue_bind_actor: multi-PCI (A8): the first job of an actor binds its thread to `cell` (actors are per UE instance = per cell; they run
+ * the cell's PBCH/PDSCH/MAC work). Called by main() after init_actor() only when more than one cell is served. */
+static void nr_ue_actor_bind_job(void *arg)
+{
+  nr_cell_bind(*(int *)arg);
+}
+void nr_ue_bind_actor(Actor_t *actor, int cell)
+{
+  notifiedFIFO_elt_t *e = newNotifiedFIFO_elt(sizeof(int), 0, NULL, nr_ue_actor_bind_job);
+  *(int *)NotifiedFifoData(e) = cell;
+  pushNotifiedFIFO(&actor->fifo, e);
+}
+
 void init_NR_UE_threads(PHY_VARS_NR_UE *UE) {
   char thread_name[16];
   sprintf(thread_name, "UEthread_%d", UE->Mod_id);
@@ -2299,6 +2359,13 @@ void init_NR_UE_threads(PHY_VARS_NR_UE *UE) {
       rt_core = atoi(e);
       LOG_I(PHY, "SENSING: pinning the PHY receive thread to core %d (ISAC_UE_RT_CORE)\n", rt_core);
     }
+  }
+  /* multi-PCI (A8, decision F2 (a)): one RT slot thread per cell. ISAC_UE_RT_CORE (exported by the core plan as rt_cell[0]) is cell 0's;
+   * cell k > 0 takes the plan's own RT reader rt_cell[k] (nr_core_layout_init_n with the admitted cell count). N = 1: this block never runs. */
+  if (UE->Mod_id > 0) {
+    const nr_core_layout_t *L = nr_core_layout();
+    rt_core = (L && UE->Mod_id < NR_CL_MAX_CELLS) ? L->rt_cell[UE->Mod_id] : -1;
+    LOG_I(PHY, "SENSING: MPCI_RT cell=%d slot thread core=%d (core plan rt_cell)\n", UE->Mod_id, rt_core);
   }
   threadCreate(&UE->main_thread, UE_thread, (void *)UE, thread_name, rt_core, OAI_PRIORITY_RT_MAX);
   if (!IS_SOFTMODEM_NOSTATS) {
