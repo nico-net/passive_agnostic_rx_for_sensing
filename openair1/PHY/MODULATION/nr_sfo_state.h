@@ -36,6 +36,11 @@ extern "C" {
 #define NR_SFO_MAX_PPM 100.0       /* beyond any real oscillator: a larger measurement is a timing jump, not an offset */
 
 void nr_sfo_reset(void);
+/* A new timing epoch: the receiver (re)acquired timing on a cell, rebased its timing, or lost the stream. The window and the DM-RS term
+ * belong to the clock of the gNB tracked so far, so they are cleared and the published eps goes to 0 (no correction) until a new window
+ * of NR_SFO_WINDOW/4 frames has been read. A normal per-frame timing correction is NOT such an event. Logs one line. Jobs that pinned
+ * their eps (nr_sfo_pin) keep it. */
+void nr_sfo_resync(const char *reason);
 /* timing loop, once per frame: samples read beyond samples_per_frame (negative = fewer) */
 void nr_sfo_note_frame_read(int extra_samples, int samples_per_frame);
 /* DM-RS cross-check: the residual eps measured on an already corrected slot (weight in [0,1], e.g. grant coherence) */

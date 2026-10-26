@@ -2890,8 +2890,12 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
         t_gp_path_side = 1; /* the GPU side of the trial ran the pass */
       if (seg_path)
         gp_seg_csi_map(seg, nseg, dlsch_config, freq_alloc); /* the demod geometry reads the CSI-FULL map of the virtual allocation */
-      t_gp_sfo_q = nr_sfo_eps_q(); /* the pass builds its SFO steps from this eps (nr_gpu_pass_dl.c) */
+      /* the pass builds its SFO steps from this eps (nr_gpu_pass_dl.c reads the pin): ONE read, so that a publish or a resync (eps -> 0)
+       * between this line and the pass cannot make gp_sfo_same() lie about which eps the pass used */
+      t_gp_sfo_q = nr_sfo_eps_q();
+      nr_sfo_pin(t_gp_sfo_q);
       const int gp_rc = t_gpp ? nr_gpu_pass_dl_run(&gin, t_gpp) : 1;
+      nr_sfo_pin(INT64_MIN);
       nr_dlsch_csi_prb_map = NULL; /* the old path sets and clears its own */
       nr_dlsch_csi_prb_map_n = 0;
       if (gp_he != NULL && gp_hq_mode != 0 && gp_rc == 0 && !t_gpp->r.skip) { /* the pass ran its rate dematching: the store entry follows what passive_ldpc_decode would leave */
