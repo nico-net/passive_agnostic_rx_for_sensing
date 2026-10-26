@@ -402,6 +402,15 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csir
  *   (h->period, h->offset) seeds the first scoring visits. A pattern that is already a candidate (NZP or ZP, same row, symbols, subcarriers and density on overlapping RBs) is kept; a ZP-only one is widened
  *   when the new extent is wider. At most NR_CSIRS_BLIND_ZP_ONLY_MAX such candidates. Caller: nr_csirs_disc.c (zp_step).
  */
+static uint16_t discovery_symbols(const nr_csirs_candidate_t *c); /* nr_csirs_disc_confirm_internal.h, included below */
+/* lattices_meet: true when the slot lattices (p1,o1) and (p2,o2) share a slot (offsets agree modulo gcd(p1,p2)). */
+static bool nr_csirs_blind_lattices_meet(unsigned p1, unsigned o1, unsigned p2, unsigned o2)
+{
+  unsigned a = p1, b = p2;
+  while (b) { const unsigned t = a % b; a = b; b = t; }
+  return a && (o1 % a) == (o2 % a);
+}
+
 int nr_csirs_blind_rt_add_discovered_zp(const nr_csirs_disc_hyp_t *h)
 {
   if (!h)
@@ -438,6 +447,14 @@ int nr_csirs_blind_rt_add_discovered_zp(const nr_csirs_disc_hyp_t *h)
   for (int i = 0; i < g_st.n; ++i) {
     const nr_csirs_candidate_t *o = &g_st.cand[i];
     n_zp_only += g_disc_zp_only[i];
+    /* The data REs beside a boosted NZP-CSI-RS pilot read dark against it; a hole pattern that lies on an NZP candidate's symbols, RBs and slots is that
+     * artefact (or a ZP the NZP candidate's own bank already covers), not a resource. */
+    if (!g_disc_zp_only[i] && (discovery_symbols(o) & discovery_symbols(&c)) && o->start_rb < c.start_rb + c.nr_of_rbs
+        && c.start_rb < o->start_rb + o->nr_of_rbs && (!g_st.seed_period[i] || nr_csirs_blind_lattices_meet(g_st.seed_period[i], g_st.seed_offset[i], h->period, h->offset)
+            || (g_st.seed_n_off[i] == 2 && nr_csirs_blind_lattices_meet(g_st.seed_period[i], g_st.seed_offset2[i], h->period, h->offset)))) {
+      pthread_mutex_unlock(&g_csirs_state_lock);
+      return -1;
+    }
     const int oe = o->start_rb + o->nr_of_rbs, ce = c.start_rb + c.nr_of_rbs;
     if (o->row == c.row && o->freq_domain == c.freq_domain && o->symb_l0 == c.symb_l0 && o->symb_l1 == c.symb_l1
         && o->cdm_type == c.cdm_type && o->freq_density == c.freq_density && o->start_rb < ce && c.start_rb < oe) {
@@ -910,6 +927,11 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
         int ph = absolute_slot % p == g_st.seed_offset[i] ? 0
             : g_st.seed_n_off[i] == 2 && absolute_slot % p == g_st.seed_offset2[i] ? 1 : -1;
         bool unsettled = !(g_disc_zp_only[i] && nr_csirs_blind_is_confirmed(&g_zp, i)); /* a hole pattern is settled once its ZP is exported */
+        /* A hole pattern has one lattice phase, so slot-phase 1 is free: it counts its OFF-lattice samples. The ZP bank's structural veto (a hole in more than half of
+         * the scored slots is a fixed feature of the cell, not a ZP) and its period inference need slots where the pattern must NOT be empty; the detector's
+         * lattice contrast is the proposal, this measures it on the receiver's own scoring. Sampled at least one-to-one with the on-lattice visits (two ahead), so that the hole fraction of the on-lattice hits stays below one half. */
+        if (g_disc_zp_only[i] && ph < 0 && g_disc_visits[i][1] < g_disc_visits[i][0] + 2)
+          ph = 1;
         for (int k = 0; k < g_st.n_conf; ++k)
           if (g_st.conf_idx[k] == i) {
             /* A fade during the first three probes must not strand a late

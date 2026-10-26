@@ -33,6 +33,7 @@ int nr_csirs_blind_rt_test_confirm_ring(const nr_csirs_disc_ring_t *,
                                         int,
                                         uint32_t *);
 int nr_csirs_blind_rt_test_candidate_count(void);
+int nr_csirs_blind_rt_test_zp_only_count(void);
 }
 
 namespace {
@@ -118,6 +119,7 @@ TEST(CsirsDiscE2E, MixedRowsDiscoverConfirmAndExportExact)
               (unsigned long long)metrics.hyps,
               (unsigned long long)metrics.winners,
               (unsigned long long)metrics.ambiguous);
+  EXPECT_EQ(nr_csirs_blind_rt_test_zp_only_count(), 0) << "no hole pattern proposed beside boosted NZP pilots";
   ASSERT_EQ(nr_csirs_blind_rt_test_candidate_count(), 6);
 
   fapi_nr_dl_config_csirs_pdu_rel15_t pdu[8] = {};

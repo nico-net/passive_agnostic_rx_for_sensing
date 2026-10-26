@@ -469,6 +469,14 @@ static void zp_step(nr_csirs_disc_ring_t *ring, const nr_csirs_disc_gpu_ops_t *o
     w += n;
   }
   zp.fed = ring->written;
+}
+
+/* zp_propose: when ZP_EVAL_SLOTS new slots have been folded, turns the significant hole patterns into legal rows and admits them as zero-power candidates. Runs at the END of a batch,
+ *   after the NZP stages, so that a pattern that is only the data beside a boosted NZP pilot is recognised against the NZP candidates already admitted. Caller: nr_csirs_disc_process(). */
+static void zp_propose(void)
+{
+  if (zp.off || !zp.det || !nr_csirs_blind_rt_add_discovered_zp)
+    return;
   if (nr_csirs_zp_slots(zp.det) < zp.eval_at + ZP_EVAL_SLOTS)
     return;
   zp.eval_at = nr_csirs_zp_slots(zp.det);
@@ -495,7 +503,7 @@ int nr_csirs_disc_test_sweep_limit = 32; /* hypotheses swept per batch; tests ra
  *   Logs WINNER, AMBIGUOUS and BATCH lines.
  *   Takes pipeline_lock for the batch and g_lock for the metrics. Caller: the discovery worker through nr_csirs_disc_process_hook (nr_csirs_disc_feed.c); tests.
  */
-void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
+static void disc_process_batch(nr_csirs_disc_ring_t *ring)
 {
   if (!ring || !nr_csirs_disc_enabled())
     return;
@@ -815,6 +823,17 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       (unsigned long long)__atomic_load_n(&csirs_disc_gpu_lattice_calls,__ATOMIC_RELAXED),
       (unsigned long long)__atomic_load_n(&csirs_disc_cpu_lattice_calls,__ATOMIC_RELAXED),gpu?"gpu":"cpu/idle");
   pthread_mutex_unlock(&g_lock);
+  pthread_mutex_unlock(&pipeline_lock);
+}
+
+/* nr_csirs_disc_process: one discovery batch (disc_process_batch) followed by the blind ZP proposals of the slots folded so far. */
+void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
+{
+  if (!ring || !nr_csirs_disc_enabled())
+    return;
+  disc_process_batch(ring);
+  pthread_mutex_lock(&pipeline_lock);
+  zp_propose();
   pthread_mutex_unlock(&pipeline_lock);
 }
 
