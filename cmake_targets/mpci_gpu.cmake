@@ -19,5 +19,7 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_gpu_pass_quota PRIVATE GTest::gtest GTest::gtest_main)
   add_dependencies(tests test_nr_gpu_pass_quota)
   add_test(NAME test_nr_gpu_pass_quota COMMAND test_nr_gpu_pass_quota)
+  # the two-cell GPU cases register cells with the pass module before the allocation fence: their own process (the fence tests of test_nr_gpu_pass seal it)
+  add_test(NAME test_nr_gpu_pass_cells COMMAND test_nr_gpu_pass --gtest_filter=GpuPassCells.* WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 endif()
 # ---- end G3 ----

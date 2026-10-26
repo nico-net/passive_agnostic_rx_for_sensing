@@ -1516,17 +1516,17 @@ extern "C" int nr_gpu_pass_cell_init(int cell, int n_rb_dl)
   const size_t hb = (size_t)NR_GPU_HQ_BLK * NR_GPU_HQ_SEG * 2;
   if (!g_hq_cells[cell]) {
     if (!guard_alloc()) return -1;
-    if (!nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_PASS, hb)) {
-      fprintf(stderr, "GPUPASS cell %d: no room for the HARQ slab (%zu MB) in the GPU budget -- device HARQ off for this cell\n", cell, hb >> 20);
+    /* The slab is a planned per-cell cost (admission counted it: nr_gpu_cell_bytes, kind harq), so it is not re-gated on the elastic headroom: it is booked as a dynamic grant of the
+     * PASS module when the budget has room (reporting), and the real refusal is the allocation itself. */
+    const bool granted = nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_PASS, hb) != 0;
+    NrMsScope hq_(NR_MS_PASS, NR_MS_PER_CELL, cell);
+    if (nr_ms_malloc(&g_hq_cells[cell], hb) != cudaSuccess) {
+      g_hq_cells[cell] = nullptr;
+      if (granted) nr_gpu_membudget_dyn_abort(NR_GPU_MEM_PASS, hb);
+      fprintf(stderr, "GPUPASS cell %d: HARQ slab allocation failed -- device HARQ off for this cell\n", cell);
     } else {
-      NrMsScope hq_(NR_MS_PASS, NR_MS_PER_CELL, cell);
-      if (nr_ms_malloc(&g_hq_cells[cell], hb) != cudaSuccess) {
-        g_hq_cells[cell] = nullptr;
-        nr_gpu_membudget_dyn_abort(NR_GPU_MEM_PASS, hb);
-        fprintf(stderr, "GPUPASS cell %d: HARQ slab allocation failed -- device HARQ off for this cell\n", cell);
-      } else {
-        cudaMemset(g_hq_cells[cell], 0, hb);
-      }
+      cudaMemset(g_hq_cells[cell], 0, hb);
+      if (!granted) fprintf(stderr, "GPUPASS cell %d: HARQ slab (%zu MB) is outside the elastic GPU headroom (planned by admission)\n", cell, hb >> 20);
     }
   }
   g_cell_nrb[cell] = n_rb_dl > 0 ? n_rb_dl : g_cfg.n_rb_dl;

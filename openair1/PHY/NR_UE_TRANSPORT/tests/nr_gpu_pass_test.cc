@@ -4127,6 +4127,7 @@ static bool load(GpuPassModule &m, Cells &c)
   c.slab = (int (*)(int))dlsym(m.dl, "nr_gpu_pass_test_hq_slab");
   return c.init && c.retire && c.ready && c.up && c.down && c.acq && c.rel && c.inst_cell && c.slab;
 }
+struct Guard { Cells &c; int cell; ~Guard() { c.retire(cell); } }; /* the cell leaves the quota whatever the test does */
 struct Out {
   int rc = -1;
   std::vector<uint8_t> tb;
@@ -4169,6 +4170,7 @@ TEST(GpuPassCells, TwoCellsShareGraphsAndMatchSoloBytes) {
   fa.bind();
   fb.bind();
   EXPECT_EQ(0, c.init(5, 273)) << "a cell outside the warmed ones registers";
+  g3::Guard gd5{c, 5};
   EXPECT_EQ(1, c.ready(5));
   EXPECT_EQ(0, c.ready(6)) << "an unregistered cell is not ready";
   const g3::Out solo_a = g3::run_cell(m, fa, 0), solo_b = g3::run_cell(m, fb, 0);
@@ -4204,6 +4206,7 @@ TEST(GpuPassCells, HarqSlabsAreSeparate) {
   g3::Cells c;
   ASSERT_TRUE(g3::load(m, c));
   ASSERT_EQ(0, c.init(2, 273));
+  g3::Guard gd2{c, 2};
   ASSERT_EQ(1, c.slab(0));
   ASSERT_EQ(1, c.slab(2));
   const uint16_t blk[3] = {5, 77, 2047};
@@ -4270,12 +4273,13 @@ TEST(GpuPassCells, QuotaFloorAndBurst) {
     EXPECT_EQ(P, (int)a.size()) << "N = 1: a single registered cell sees the whole pool (class " << cls << ")";
     for (int id : a) c.rel(id);
     ASSERT_EQ(0, c.init(1, 273));
+    g3::Guard gd1{c, 1};
     a.clear();
     for (;;) { const int id = c.acq(0, cls); if (id < 0) break; a.push_back(id); }
     EXPECT_EQ(P - 1, (int)a.size()) << "burst cell leaves the last instance of the quiet cell (class " << cls << ")";
     const int b = c.acq(1, cls);
     EXPECT_GE(b, 0) << "the quiet cell still gets its floor instance";
-    if (b >= 0) EXPECT_EQ(1, c.inst_cell(b));
+    if (b >= 0) { EXPECT_EQ(1, c.inst_cell(b)); }
     EXPECT_LT(c.acq(1, cls), 0) << "the quiet cell cannot take more once the burst cell holds the rest? (it holds one, none free)";
     c.rel(b);
     for (int id : a) c.rel(id);
