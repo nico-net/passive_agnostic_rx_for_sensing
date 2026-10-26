@@ -821,8 +821,9 @@ class GpuPassFixture {
     return v;
   }
   /* shape.nrb_class is the grant's PRB count here (24/48/96/217 are classes themselves) */
-  /* corrupt_from_cb >= 0: the coded bits of code blocks >= corrupt_from_cb are flipped with probability 0.3 (those blocks cannot decode) */
-  static GpuPassFixture from_shape(const nr_gpu_pass_shape_t &sh, int seed, int corrupt_from_cb = -1, const std::vector<SegDef> *sd = nullptr, int bwp_start = 0, int ref_point = 0, int rv = 0, int payload_seed = -1)
+  /* corrupt_from_cb >= 0: the coded bits of code blocks >= corrupt_from_cb are flipped with probability 0.3 (those blocks cannot decode); corrupt_cb_count >= 0 limits
+   * that to that many blocks (the blocks after them stay clean) */
+  static GpuPassFixture from_shape(const nr_gpu_pass_shape_t &sh, int seed, int corrupt_from_cb = -1, const std::vector<SegDef> *sd = nullptr, int bwp_start = 0, int ref_point = 0, int rv = 0, int payload_seed = -1, int corrupt_cb_count = -1)
   {
     TbInfo t;
     t.rv = rv; /* a retransmission: the same transport block (payload_seed) with another redundancy version and its own channel / noise (seed) */
@@ -831,8 +832,10 @@ class GpuPassFixture {
     if (ok && corrupt_from_cb >= 0) {
       std::mt19937 rng(seed + 99);
       std::uniform_real_distribution<double> U(0, 1);
-      const uint32_t from = (uint32_t)corrupt_from_cb < t.first_rE2 ? (uint32_t)corrupt_from_cb * t.E : t.first_rE2 * t.E + ((uint32_t)corrupt_from_cb - t.first_rE2) * t.E2;
-      for (uint32_t i = from; i < t.G; i++) if (U(rng) < 0.3) bits[i] ^= 1;
+      auto off = [&](uint32_t cb) { return cb < t.first_rE2 ? cb * t.E : t.first_rE2 * t.E + (cb - t.first_rE2) * t.E2; };
+      const uint32_t from = off((uint32_t)corrupt_from_cb);
+      const uint32_t to = corrupt_cb_count >= 0 && (uint32_t)(corrupt_from_cb + corrupt_cb_count) < t.C ? off((uint32_t)(corrupt_from_cb + corrupt_cb_count)) : t.G;
+      for (uint32_t i = from; i < to; i++) if (U(rng) < 0.3) bits[i] ^= 1;
     }
     GpuPassFixture f = small_grant(sh.nrb_class, sh.nl, sh.qm, seed, ok ? &bits : nullptr, sd, bwp_start, ref_point);
     f.tb = t;

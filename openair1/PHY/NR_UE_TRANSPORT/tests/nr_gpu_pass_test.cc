@@ -268,6 +268,45 @@ TEST(GpuPassDl, CrcFailAgreesWithStagePath) {
   printf("GpuPassDl.CrcFailAgreesWithStagePath: %d shapes, CB0 ok and CB1 failed in %d, CPU hand-over in %d\n", n, partial, cpu);
   EXPECT_GE(n, 4);
 }
+/* The TB abort rule (nr_cb_fail_limit.h): the graph keeps decoding past 4 failed blocks and stops after the 5th. Blocks 1..k are corrupted, the others clean: k = 1 and 4
+ * leave every clean block decoded (seg_ok, tried), k = NR_CB_FAIL_LIMIT leaves the blocks after the k-th failure untried (seg_ok 0, iters 0) although clean. The TB fails in
+ * every case. The stage path (the CPU-twin rule of gpu_tb) must give the same verdicts. */
+TEST(GpuPassDl, AbortRuleContinuesPastFourFailuresStopsAtFive) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try) << "libpdsch_gpu.so has no nr_gpu_pass_dl_try";
+  ASSERT_TRUE(pass_ready(m));
+  int n = 0;
+  for (auto shape : GpuPassFixture::warm_shapes()) {
+    if (shape.qm != 4 || shape.nl > 2) continue;
+    for (int k : {1, 4, NR_CB_FAIL_LIMIT}) {
+      GpuPassFixture fx = GpuPassFixture::from_shape(shape, 31, /*corrupt_from_cb=*/1, nullptr, 0, 0, 0, -1, /*corrupt_cb_count=*/k);
+      ASSERT_TRUE(fx.tb_ok_built);
+      if ((int)fx.tb.C < NR_CB_FAIL_LIMIT + 3) continue; // needs clean blocks after the failures
+      fx.bind();
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0xAA);
+      nr_gpu_pass_result_t g{}, s{};
+      g.tb = gb.data(); s.tb = sb.data();
+      ASSERT_EQ(0, m.pass_try(fx.job, &g));
+      ASSERT_EQ(0, fx.run_stage_path(&s));
+      const std::string what = "nrb " + std::to_string(shape.nrb_class) + " nl " + std::to_string(shape.nl) + " C " + std::to_string(fx.tb.C) + " failing blocks " + std::to_string(k);
+      EXPECT_EQ(0, g.tb_ok) << what;
+      EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+      if (g.need_cpu) continue; // a zero-syndrome stop hands the TB to the CPU decoder: no per-block verdicts to compare
+      n++;
+      for (int r = 0; r < (int)fx.tb.C; r++) {
+        const bool bad = r >= 1 && r <= k, untried = r > k && k >= NR_CB_FAIL_LIMIT;
+        EXPECT_EQ(!bad && !untried ? 1 : 0, g.seg_ok[r] ? 1 : 0) << what << " block " << r;
+        EXPECT_EQ(untried, g.iters[r] == 0) << what << " block " << r << " (iters 0 = not tried)";
+      }
+    }
+  }
+  EXPECT_GE(n, 3) << "shapes with at least " << NR_CB_FAIL_LIMIT + 3 << " blocks";
+}
 /* GPU-span root cause (2026-10-19), measurement only: the split pass reports its sub-graph spans (cspan + dspan + lspan = gspan, event-timed), a pass seq (the NVTX payload), and per
  * launch the LDPC verdicts and %globaltimer stamps of every code block (li). A clean TB: every block converges, none runs to the limit. A TB corrupted from block 1: blocks 1..C-1 run
  * to the iteration limit (the GPU decodes every block; no abort after the first failure) and take at least as long as the converged block 0. */
