@@ -64,14 +64,19 @@ extern uint64_t nr_passive_slot_arrival_ns(long abs_slot);
 #include "nr_pusch_passive_decode.h"
 #include "nr_ul_nid_bg.h" // nr_ul_nid_bg_wants_next
 #include <math.h>
+#include "common/utils/nr_cell.h"
+#include "nr_ul_cell_prealloc.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // nr_get_Qm_ul
 
 /* The RF producer's own position, published in executables/nr-ue.c immediately BEFORE nrue_ru_read()
  * fills that slot's region of rxdata. */
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
 
-static nr_pusch_passive_job_t g_ring[NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH];
-static nr_pusch_queue_cursor_t g_cursor;
+typedef nr_pusch_passive_job_t g_ring_cell_t[NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH];
+NR_CELL_STATIC(g_ring_cell_t, g_ring);
+#define g_ring NR_CELL_REF(g_ring)
+NR_CELL_STATIC(nr_pusch_queue_cursor_t, g_cursor);
+#define g_cursor NR_CELL_REF(g_cursor)
 /* ULQ: layout probes and CRC-first trials go to their own ring (depth 8) and are dequeued only when no real grant waits; a probe can
  * no longer evict a real grant. Pipeline mode: 2 consumers / decode contexts on ISAC_PUSCH_CORES, real-grant ring depth 32. One shared
  * IQ snapshot per UL slot, copied by a capture thread right after booking (ISAC_UL_SNAP_CORE), so a real grant stays decodable while it
@@ -80,50 +85,104 @@ static nr_pusch_queue_cursor_t g_cursor;
  * the grants older than that instead of draining tens of ms of backlog (VL2: 60 ms). The age is also taken in wall time (the same
  * number of slot durations since the slot's samples arrived), since the producer's slot counter itself lags when the host stalls.
  * Real-grant stale drops are printed as PUSCHQ2 real_stale= and scored as UL drops. */
-static nr_pusch_passive_job_t g_pring[NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH];
-static nr_pusch_queue_cursor_t g_pcursor;
+typedef nr_pusch_passive_job_t g_pring_cell_t[NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH];
+NR_CELL_STATIC(g_pring_cell_t, g_pring);
+#define g_pring NR_CELL_REF(g_pring)
+NR_CELL_STATIC(nr_pusch_queue_cursor_t, g_pcursor);
+#define g_pcursor NR_CELL_REF(g_pcursor)
 #define ULQ_POOL_MAX (NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH + NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS + 2)
 typedef struct {
   c16_t *iq[4];
   long abs;
   uint32_t origin, len;
 } ulq_snap_t;
-static ulq_snap_t g_pool[ULQ_POOL_MAX];
+typedef ulq_snap_t g_pool_cell_t[ULQ_POOL_MAX];
+NR_CELL_STATIC(g_pool_cell_t, g_pool);
+#define g_pool NR_CELL_REF(g_pool)
 /* stage B of the n_ID search: the capture thread also copies the slot AFTER each booked slot (hypotheses with k2 + 1 read it); same index as g_pool */
-static ulq_snap_t g_pool2[ULQ_POOL_MAX];
-static int g_snap_next;
-static int g_pool_refs[ULQ_POOL_MAX]; /* under g_lock */
-static int g_pool_n;
-static pthread_t g_cap_thread;
-static pthread_cond_t g_cap_cv = PTHREAD_COND_INITIALIZER;
-static _Atomic uint64_t g_q_real, g_q_probe, g_dec_probe, g_full_probe, g_snap_ok, g_snap_fail, g_snap_nobuf,
-    g_snap_used, g_rescue_skipped, g_stale_real;
+typedef ulq_snap_t g_pool2_cell_t[ULQ_POOL_MAX];
+NR_CELL_STATIC(g_pool2_cell_t, g_pool2);
+#define g_pool2 NR_CELL_REF(g_pool2)
+NR_CELL_STATIC(int, g_snap_next);
+#define g_snap_next NR_CELL_REF(g_snap_next)
+typedef int g_pool_refs_cell_t[ULQ_POOL_MAX];
+NR_CELL_STATIC(g_pool_refs_cell_t, g_pool_refs); /* under g_lock */
+#define g_pool_refs NR_CELL_REF(g_pool_refs)
+NR_CELL_STATIC(int, g_pool_n);
+#define g_pool_n NR_CELL_REF(g_pool_n)
+NR_CELL_STATIC(pthread_t, g_cap_thread);
+#define g_cap_thread NR_CELL_REF(g_cap_thread)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_cap_cv, PTHREAD_COND_INITIALIZER);
+#define g_cap_cv NR_CELL_REF(g_cap_cv)
+NR_CELL_STATIC(_Atomic uint64_t, g_q_real);
+#define g_q_real NR_CELL_REF(g_q_real)
+NR_CELL_STATIC(_Atomic uint64_t, g_q_probe);
+#define g_q_probe NR_CELL_REF(g_q_probe)
+NR_CELL_STATIC(_Atomic uint64_t, g_dec_probe);
+#define g_dec_probe NR_CELL_REF(g_dec_probe)
+NR_CELL_STATIC(_Atomic uint64_t, g_full_probe);
+#define g_full_probe NR_CELL_REF(g_full_probe)
+NR_CELL_STATIC(_Atomic uint64_t, g_snap_ok);
+#define g_snap_ok NR_CELL_REF(g_snap_ok)
+NR_CELL_STATIC(_Atomic uint64_t, g_snap_fail);
+#define g_snap_fail NR_CELL_REF(g_snap_fail)
+NR_CELL_STATIC(_Atomic uint64_t, g_snap_nobuf);
+#define g_snap_nobuf NR_CELL_REF(g_snap_nobuf)
+NR_CELL_STATIC(_Atomic uint64_t, g_snap_used);
+#define g_snap_used NR_CELL_REF(g_snap_used)
+NR_CELL_STATIC(_Atomic uint64_t, g_rescue_skipped);
+#define g_rescue_skipped NR_CELL_REF(g_rescue_skipped)
+NR_CELL_STATIC(_Atomic uint64_t, g_stale_real);
+#define g_stale_real NR_CELL_REF(g_stale_real)
 
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_lock NR_CELL_REF(g_lock)
 static bool ulq_is_probe(const nr_pdcch_blind_ul_result_t *g);
-static pthread_mutex_t g_lifecycle_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_lifecycle_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_lifecycle_lock NR_CELL_REF(g_lifecycle_lock)
+NR_CELL_STATIC_INIT(pthread_cond_t, g_cv, PTHREAD_COND_INITIALIZER);
+#define g_cv NR_CELL_REF(g_cv)
 
-static _Atomic uint64_t g_queued        = 0;
-static _Atomic uint64_t g_decoded       = 0;
-static _Atomic uint64_t g_crc_ok        = 0;
-static _Atomic uint64_t g_dropped_full  = 0;
-static _Atomic uint64_t g_dropped_stale = 0;
-static _Atomic uint64_t g_dropped_epoch = 0;
-static _Atomic uint64_t g_dropped_unready = 0;
-static _Atomic uint64_t g_dropped_snapshot = 0;
-static _Atomic uint64_t g_max_lag       = 0;
+NR_CELL_STATIC_INIT(_Atomic uint64_t, g_queued, 0);
+#define g_queued NR_CELL_REF(g_queued)
+NR_CELL_STATIC_INIT(_Atomic uint64_t, g_decoded, 0);
+#define g_decoded NR_CELL_REF(g_decoded)
+NR_CELL_STATIC_INIT(_Atomic uint64_t, g_crc_ok, 0);
+#define g_crc_ok NR_CELL_REF(g_crc_ok)
+NR_CELL_STATIC_INIT(_Atomic uint64_t, g_dropped_full, 0);
+#define g_dropped_full NR_CELL_REF(g_dropped_full)
+NR_CELL_STATIC_INIT(_Atomic uint64_t, g_dropped_stale, 0);
+#define g_dropped_stale NR_CELL_REF(g_dropped_stale)
+NR_CELL_STATIC_INIT(_Atomic uint64_t, g_dropped_epoch, 0);
+#define g_dropped_epoch NR_CELL_REF(g_dropped_epoch)
+NR_CELL_STATIC_INIT(_Atomic uint64_t, g_dropped_unready, 0);
+#define g_dropped_unready NR_CELL_REF(g_dropped_unready)
+NR_CELL_STATIC_INIT(_Atomic uint64_t, g_dropped_snapshot, 0);
+#define g_dropped_snapshot NR_CELL_REF(g_dropped_snapshot)
+NR_CELL_STATIC_INIT(_Atomic uint64_t, g_max_lag, 0);
+#define g_max_lag NR_CELL_REF(g_max_lag)
 
-static _Atomic int g_running  = 0;
-static _Atomic int g_stop     = 0;
-static int         g_nthreads = 0;
-static pthread_t   g_threads[NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
-static PHY_VARS_NR_UE *g_ue = NULL;
+NR_CELL_STATIC_INIT(_Atomic int, g_running, 0);
+#define g_running NR_CELL_REF(g_running)
+NR_CELL_STATIC_INIT(_Atomic int, g_stop, 0);
+#define g_stop NR_CELL_REF(g_stop)
+NR_CELL_STATIC_INIT(int, g_nthreads, 0);
+#define g_nthreads NR_CELL_REF(g_nthreads)
+typedef pthread_t g_threads_cell_t[NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+NR_CELL_STATIC(g_threads_cell_t, g_threads);
+#define g_threads NR_CELL_REF(g_threads)
+NR_CELL_STATIC_INIT(PHY_VARS_NR_UE *, g_ue, NULL);
+#define g_ue NR_CELL_REF(g_ue)
 
 typedef struct {
   int idx;
+  int cell; /* the consumer / capture thread binds itself to this cell (A6: the queue is per cell) */
 } consumer_arg_t;
-static consumer_arg_t g_args[NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+typedef consumer_arg_t g_args_cell_t[NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+NR_CELL_STATIC(g_args_cell_t, g_args);
+#define g_args NR_CELL_REF(g_args)
+NR_CELL_STATIC(consumer_arg_t, g_cap_arg);
+#define g_cap_arg NR_CELL_REF(g_cap_arg)
 
 static bool same_reading(const nr_pdcch_blind_ul_result_t *a, const nr_pdcch_blind_ul_result_t *b)
 {
@@ -214,6 +273,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
    * one PHY_VARS_gNB, so it is not an incidental convenience -- do not renumber one without the
    * other. */
   const int idx = ((consumer_arg_t *)arg)->idx;
+  nr_cell_bind(((consumer_arg_t *)arg)->cell);
   PHY_VARS_NR_UE *ue = g_ue;
   const long slots_per_frame = ue->frame_parms.slots_per_frame;
   struct timespec wall_start={0},cpu_start={0};
@@ -317,11 +377,12 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       /* Review fix (REVIEW1 s2 defects 1+2): reset the solver once per broad invalidation
        * (HARD epoch / identity change / dedicated-change-suspected), not on every SOFT epoch
        * such as an RX-recovery restart, and only from the one consumer that wins the CAS. */
-      static _Atomic uint64_t solver_gen;
+      NR_CELL_STATIC(_Atomic uint64_t, ulq_solver_gen);
+      #define ulq_solver_gen NR_CELL_REF(ulq_solver_gen)
       const uint64_t gen = ((uint64_t)nr_cfg_epoch_identity_gen() << 32) | nr_cfg_epoch_dedicated_current();
-      uint64_t prev_gen = atomic_load_explicit(&solver_gen, memory_order_acquire);
+      uint64_t prev_gen = atomic_load_explicit(&ulq_solver_gen, memory_order_acquire);
       if (prev_gen != gen &&
-          atomic_compare_exchange_strong_explicit(&solver_gen, &prev_gen, gen, memory_order_acq_rel,
+          atomic_compare_exchange_strong_explicit(&ulq_solver_gen, &prev_gen, gen, memory_order_acq_rel,
                                                   memory_order_acquire))
         nr_pusch_solver_reset();
       nr_pusch_solver_reading_t rd[64];
@@ -576,7 +637,7 @@ static void ulq_assign(long abs, int b)
 
 static void *ulq_capture_thread(void *arg)
 {
-  (void)arg;
+  nr_cell_bind(((consumer_arg_t *)arg)->cell);
   PHY_VARS_NR_UE *ue = g_ue;
   const uint32_t cap = nr_pusch_passive_snapshot_len(&ue->frame_parms);
   pthread_mutex_lock(&g_lock);
@@ -735,6 +796,7 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
 
   for (int i = 0; i < n_consumers; i++) {
     g_args[i].idx = i;
+    g_args[i].cell = nr_cell_idx();
     char name[32];
     snprintf(name, sizeof(name), "passivePusch%d", i);
     /* Priority BELOW the RT receive thread's 97: if a consumer ever competes with the receive path
@@ -752,7 +814,9 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     const int core = ce && *ce ? atoi(ce) : 8;
     const int prio = 0;
     (void)core; /* the snapshot copy leases a pool token per copy (DECODE class); the thread itself sits on the home lane */
-    threadCreate(&g_cap_thread, ulq_capture_thread, NULL, "passivePuschCap", nr_pool_site() ? -1 : core, prio);
+    g_cap_arg.idx = 0;
+    g_cap_arg.cell = nr_cell_idx();
+    threadCreate(&g_cap_thread, ulq_capture_thread, &g_cap_arg, "passivePuschCap", nr_pool_site() ? -1 : core, prio);
   }
   LOG_I(PHY, "SENSING: passive PUSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest; ULQ probe_depth=%d snap_pool=%d\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1, g_pcursor.depth, g_pool_n);
@@ -850,16 +914,32 @@ int nr_pusch_passive_queue_real_pending(void)
   return n;
 }
 
-static _Atomic uint64_t g_opt_win_start_ns, g_opt_win_used_ns;
+NR_CELL_STATIC(_Atomic uint64_t, g_opt_win_start_ns);
+#define g_opt_win_start_ns NR_CELL_REF(g_opt_win_start_ns)
+NR_CELL_STATIC(_Atomic uint64_t, g_opt_win_used_ns);
+#define g_opt_win_used_ns NR_CELL_REF(g_opt_win_used_ns)
+/* mpci A6: the optional-work window (g_opt_win_*) is PER CELL, the budget it is compared with is the cell's fair share.
+ * The core pool (common/utils/nr_core_pool.h) serves the cells with equal weights (decayed token-time usage per cell) and is
+ * work conserving; a process-wide window would let one cell's UCI explore / rescue work use up the share of another cell
+ * (starving its optional work while the pool still grants it equal tokens), and the N=1 result of a cell would depend on its
+ * neighbours. Per cell window + per cell share keeps each cell's optional work independent. The process total stays at the
+ * single-cell value: without a dedicated core list the share is (1 s / online cpus) / active cells, so N cells together spend
+ * what one cell spent. A dedicated list (ISAC_PUSCH_CORES, existing variable) keeps its full-second meaning per cell. N=1: unchanged. */
 static uint64_t opt_share_ns_per_s(void)
 {
-  static _Atomic uint64_t share;
-  uint64_t v = atomic_load_explicit(&share, memory_order_relaxed);
+  static _Atomic uint64_t share; /* PROCESS: cache of a host constant (online cpus), idempotent */
+  static _Atomic int dedicated;
+  uint64_t v = atomic_load_explicit(&share, memory_order_acquire);
   if (!v) {
     const char *c = getenv("ISAC_PUSCH_CORES");
     const long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
     v = (c && *c) ? 1000000000ull : 1000000000ull / (uint64_t)(ncpu > 0 ? ncpu : 1);
-    atomic_store_explicit(&share, v, memory_order_relaxed);
+    atomic_store_explicit(&dedicated, (c && *c) ? 1 : 0, memory_order_relaxed);
+    atomic_store_explicit(&share, v, memory_order_release);
+  }
+  if (!atomic_load_explicit(&dedicated, memory_order_relaxed)) {
+    const int cells = nr_cell_count();
+    if (cells > 1) v /= (uint64_t)cells;
   }
   return v;
 }
