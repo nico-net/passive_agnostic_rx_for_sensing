@@ -2384,10 +2384,30 @@ All `[MEASURED, sens6 OTA, sens4 lab cell, 273 PRB, 4 RX, gain 36]` unless noted
   provisional, the cell-BWP RIV split always a hypothesis, trial budget per verdict). Layout locked in 4/4 runs after `c0736a228e`
   (3 of the 6 runs before failed). UL CRC ≤8 RB 0.81-0.97, >64 RB 0.36-0.96 by run.
 - OPEN: (1) run-to-run variance at equal SNR (rank-2 DL 0.08-0.61, UL wide 0.09-0.96; one run collapsed in both directions);
-  hypothesis: X410 LMX2572 LO synthesiser (init failed 3 times overnight) — check the PLL lock sensors per run. (2) CSI-RS slot fix
-  (CDM-aware scoring + blind ZP-CSI-RS + CRC arbiter) unfinished, uncommitted in worktree s6-csirs. (3) DGX validation of all of
+  hypothesis: X410 LMX2572 LO synthesiser (init failed 3 times overnight) — check the PLL lock sensors per run. (2) CSI-RS slot fix NOT
+  merged (PARKED 2026-10-26, see the CSI-RS caveat below). (3) DGX validation of all of
   the above not done; rfsim gate not run on the merged tree. (4) OAI UE CSI-part-2 placement fixed upstream in 2026.w33 (`44190828cc`),
   not applied (UE/fixture only; the receiver tries both placements).
+
+**2026-10-26 CSI-RS caveat (PARKED, not merged).** PDSCH in the cell's CSI-RS slot (abs_slot % 40 == 4 on the lab cell) still
+decodes ~0 on the merged tree [MEASURED, sens6 OTA lab, many runs]. Ground truth (validation only, OCUDU csi_helper defaults):
+4-port NZP row 4 fd-CDM2 at symbol 4 P/O 40/4, plus ZP-CSI-RS row 4 fd-CDM2 at symbol 8, subcarriers k0..k0+3 with k0 = 4*(PCI%3)
+(= 8 for PCI 2), every RB, same period/offset. Branch `sens6/csirs-cdm` (worktree agn-wt/s6-csirs, HEAD 5e5e495370) holds:
+CDM-aware NZP scoring (8bc46bc195; OTA: the 4-port row 4 is now CONFIRMED), a blind ZP hole detector and a CRC rate-match arbiter
+(nr_csirs_rm_arbiter). OTA history: the arbiter WORKS when the right ZP is offered (cs3R2b_lab_20261026_102349: KEEP row 4 sym 8,
+slot-4 rank-2 CRC 0 → 0.62), but the hole-statistics detector is fragile on a busy cell — four heuristic rounds alternately missed
+the pattern, found a fragment, or proposed artefacts (boosted-pilot "holes" on symbol 4; symbols 12-13 in cs4a_lab_20261026_104821).
+Lesson: do not iterate detector heuristics on air without real data. Next (operator plan): record real IQ captures
+(ISAC_PASSIVE_REPLAY_CAPTURE) and test, offline on them, a detector-free approach: in a slot with a confirmed NZP, try the
+spec-legal ZP patterns (TS 38.211 Table 7.4.1.5.3-1 rows × symbols × fd) on failing grants and let the CRC arbiter keep what turns
+failures into passes. Arbiter constants (2 wins, 2:1, 64 trials) and detector constants (4x median outlier, 12x floor, 24 footprints)
+are fixed numbers, not cell-tuned, but must be re-examined.
+
+**2026-10-26 also merged:** default lab gNB arm capped at DL rank 2 (`34484d5443`; gnb_R2.yml on sens4 = base yml with
+pdsch max_rank 2); TB decoding stops after NR_CB_FAIL_LIMIT=5 failed CBs (was 1) and per-CB CRC metric cb_ok/cb_tried/cb_total in
+EVMGRANT/UL_PUSCH_CRC/PDSCHQ/pusch_passive/export (`sens6/cb-metric`; OTA cbR4a/cbD1: wide grants show CB CRC 0.25-0.91 where TB CRC
+is 0-0.56; cb_tried is biased to early CBs; the gNB-side nr_ulsch_decoding shares the rule); UlGpuFep test bound fixed for the
+80-byte FEP item (`d7b3656b3b`).
 
 ### 15.0 Site change (2026-09-30) — read first
 
