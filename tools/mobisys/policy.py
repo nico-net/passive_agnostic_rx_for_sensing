@@ -64,7 +64,8 @@ DATASETS = {
         "seq": _I, "t_s": _F, "ext_slot": _I, "frame": _I, "slot": _I, "rnti": _RNTI, "dir": _E("dir"),
         "outcome": _E("outcome"), "probe": _B, "mcs": _I, "tbl": _I, "qm": _I, "nl": _I, "rb_start": _I, "rb_n": _I,
         "nsym": _I, "snr_db": _F, "evm_pct": _F, "rv": _I, "ndi": _I, "harq_pid": _I, "tbs": _I, "nbrx": _I,
-        "early": _B, "bodies": _I, "lag_slots": _I, "span_inconsistent": _B, **_GRANT_US}},
+        "early": _B, "bodies": _I, "lag_slots": _I, "span_inconsistent": _B,
+        "cb_ok": _I, "cb_tried": _I, "cb_total": _I, **_GRANT_US}},
     "dci_attempts": {"modes": ("lab",), "cols": {
         "seq": _I, "t_s": _F, "ext_slot": _I, "frame": _I, "slot": _I, "rnti": _RNTI, "dir": _E("dir"),
         "fmt": _E("fmt"), "cce": _I, "al": _I, "utc_ns": _I}},

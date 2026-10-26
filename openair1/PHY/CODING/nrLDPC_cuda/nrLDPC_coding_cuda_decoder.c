@@ -596,15 +596,28 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *slot)
     if (!use_gpu)
       atomic_fetch_add(&g_fallbacks, 1);
     tb->decoder_used = use_gpu ? NRLDPC_DECODER_CUDA_FLOODING : NRLDPC_DECODER_CPU;
+    /* the TB's abort rule (NR_CB_FAIL_LIMIT failed blocks) in block order, on the GPU bits as on the CPU decode */
+    decode_abort_t own_ab;
+    const bool have_own_ab = tb->abort_decode == NULL;
+    if (have_own_ab) {
+      init_abort(&own_ab);
+      tb->abort_decode = &own_ab;
+    }
     for (int r = 0; r < tb_ndec(tb); r++, k++) {
       uint8_t *c = tb->c + r * (tb->K >> 3);
       bool ok;
+      tb->decodeTried[r] = false;
       if (use_gpu) {
         const uint8_t *b = pool_bits + (size_t)(firsts[t] + r) * bits_stride;
-        ok = seg[k].prep_ok && check_crc((uint8_t *)b, Kprime, crc_type);
+        const bool tried = seg[k].prep_ok && !check_abort(tb->abort_decode);
+        tb->decodeTried[r] = tried;
+        ok = tried && check_crc((uint8_t *)b, Kprime, crc_type);
         if (ok)
           memcpy(c, b, tb->K >> 3);
+        else if (tried)
+          (void)note_cb_failure(tb->abort_decode);
       } else {
+        tb->decodeTried[r] = seg[k].prep_ok && !check_abort(tb->abort_decode);
         const int8_t *l = in_scratch[t] ? scratch + (size_t)k * in_stride : pool_llr + (size_t)(firsts[t] + r) * in_stride;
         ok = seg[k].prep_ok && cpu_decode_segment(tb, r, l, c);
       }
@@ -612,6 +625,10 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *slot)
         memset(c, 0, tb->K >> 3);
       tb->decodeSuccess[r] = ok;
       *tb->processedSegments += ok;
+    }
+    if (have_own_ab) {
+      pthread_mutex_destroy(&own_ab.mutex_failure);
+      tb->abort_decode = NULL;
     }
   }
   pthread_mutex_lock(&g_mu);

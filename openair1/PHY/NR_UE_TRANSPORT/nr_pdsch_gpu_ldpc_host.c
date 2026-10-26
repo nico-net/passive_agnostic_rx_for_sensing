@@ -6,7 +6,8 @@
  *   - the iterations: the GPU, all code blocks of the TB in one launch; it returns the hard decision after every
  *     iteration at which OAI checks the CRC;
  *   - the stop rule: OAI's -- the first snapshot whose check_crc() passes is the decoded block, none = failure (c
- *     zeroed, decodeSuccess false, abort set, so the later blocks of the TB fail as with the inline thread pool).
+ *     zeroed, decodeSuccess false; the NR_CB_FAIL_LIMIT-th failed block sets the abort, so the later blocks of the TB fail
+ *     untried (decodeTried false) as with the inline thread pool).
  *     The GPU stops a block early only at a zero syndrome; if that snapshot's CRC fails (a codeword with a wrong
  *     CRC: later iterations unknown) the whole TB is redone by the CPU decoder.
  * Refused (CPU decoder): HARQ combining into a kept buffer (d not cleared), more than one TB per call, > 17 iterations.
@@ -198,6 +199,7 @@ static int gpu_tb(gl_t *G, nrLDPC_TB_decoding_parameters_t *tb, uint8_t *c, bool
   const int Kprime = lenWithCrc(tb->C, tb->A);
   const int crc_type = crcType(tb->C, tb->A);
   bool aborted = check_abort(tb->abort_decode);
+  unsigned nfail = 0; /* failed blocks of this TB (NR_CB_FAIL_LIMIT aborts the rest); committed to the TB's abort state only when the GPU result is final */
   for (uint32_t r0 = 0; r0 < n_dec; r0 += NR_GPU_LDPC_MAX_JOBS) {
     const int n = (int)(n_dec - r0 < NR_GPU_LDPC_MAX_JOBS ? n_dec - r0 : NR_GPU_LDPC_MAX_JOBS);
     int rm_bad[NR_GPU_LDPC_MAX_JOBS] = {0};
@@ -223,8 +225,10 @@ static int gpu_tb(gl_t *G, nrLDPC_TB_decoding_parameters_t *tb, uint8_t *c, bool
       const uint32_t r = r0 + k;
       uint8_t *cr = c + (size_t)r * KB;
       ok[r] = false;
+      tb->decodeTried[r] = false;
       if (rm_bad[k])
         continue; /* nr_process_decode_segment() returns before the decoder: nothing written, no abort */
+      tb->decodeTried[r] = !aborted;
       const nr_gpu_ldpc_job_t *j = &t->jobs[k];
       int hit = -1;
       if (!aborted)
@@ -243,11 +247,14 @@ static int gpu_tb(gl_t *G, nrLDPC_TB_decoding_parameters_t *tb, uint8_t *c, bool
         return 1;
       }
       memset(cr, 0, KB);
-      aborted = true; /* LDPCdecoder: numIter >= numMaxIter -> set_abort */
+      if (!aborted) { /* LDPCdecoder: numIter >= numMaxIter -> note_cb_failure */
+        nfail++;
+        aborted = nfail >= NR_CB_FAIL_LIMIT;
+      }
     }
   }
-  if (aborted)
-    set_abort(tb->abort_decode, true);
+  if (nfail)
+    (void)note_cb_failures(tb->abort_decode, nfail);
   return 0;
 }
 
@@ -314,6 +321,7 @@ static int32_t decode_impl(gl_t *G, nrLDPC_slot_decoding_parameters_t *p, nrLDPC
                           + atomic_load_explicit(&G->fb_reason[-NR_GPU_LDPC_E_SENTINEL], memory_order_relaxed);
     const int r_g = t ? gpu_tb(G, tb, t->c_chk, okg, &gns) : 1;
     const uint64_t tg1 = now_ns();
+    const bool gab = check_abort(tb->abort_decode); /* the GPU verdicts reached NR_CB_FAIL_LIMIT failed blocks */
     set_abort(tb->abort_decode, ab0);
     rc = cpu(p);
     if (trial) { /* paired sample: the GPU side is its own time, plus the CPU redo when it hands the TB back (syn0 / refusal): the real cost */
@@ -331,7 +339,17 @@ static int32_t decode_impl(gl_t *G, nrLDPC_slot_decoding_parameters_t *p, nrLDPC
     if (r_g == 0 && rc == 0) {
       const int KB = tb->K >> 3;
       int bad = -1;
-      for (uint32_t r = 0; r < n_dec && bad < 0; r++)
+      /* A TB that hit the failure limit: which blocks the parallel CPU decode still started before its own abort fired is a race, only the
+       * TB verdict (it fails) is comparable. Below the limit every block is decoded and compared bit for bit. */
+      if (gab) {
+        bad = 0;
+        for (uint32_t r = 0; r < n_dec; r++)
+          if (!tb->decodeSuccess[r]) {
+            bad = -1;
+            break;
+          }
+      }
+      for (uint32_t r = 0; r < n_dec && bad < 0 && !gab; r++)
         if (okg[r] != tb->decodeSuccess[r] || (okg[r] && memcmp(t->c_chk + (size_t)r * KB, tb->c + (size_t)r * KB, KB) != 0))
           bad = (int)r;
       if (bad < 0) {

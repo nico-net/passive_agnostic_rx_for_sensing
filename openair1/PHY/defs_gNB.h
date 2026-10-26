@@ -149,6 +149,8 @@ typedef struct {
   uint32_t E;
   /// Number of segments processed so far
   uint32_t processedSegments;
+  /// Segments the LDPC decoder was started on (the rest were skipped after NR_CB_FAIL_LIMIT failed blocks); processedSegments / triedSegments is the code-block CRC pass rate
+  uint32_t triedSegments;
   decode_abort_t abort_decode;
   /// Last index of LLR buffer that contains information.
   /// Used for computing LDPC decoder R

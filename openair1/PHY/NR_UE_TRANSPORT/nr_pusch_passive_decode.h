@@ -71,6 +71,7 @@ typedef struct {
   uint8_t  o_ack;
   int      n_segments;    ///< transport-block segments (C)
   int      segments_ok;   ///< of which the CRC passed. 0 vs C-1 are different failures.
+  int      segments_tried; ///< of which the LDPC decoder was started (decoding stops after NR_CB_FAIL_LIMIT failed blocks): CB CRC = segments_ok / segments_tried
   const char *reject_reason; ///< non-NULL when status != OK
   uint16_t hyp_n, hyp_s; ///< UL BWP size@start the attempt decoded under (0 on an early reject)
   uint8_t tbl;            ///< MCS table used

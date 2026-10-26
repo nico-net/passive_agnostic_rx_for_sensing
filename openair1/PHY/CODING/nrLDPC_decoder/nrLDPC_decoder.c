@@ -72,7 +72,7 @@ int32_t LDPCdecoder(t_nrLDPC_dec_params* p_decParams,
   int numIter = nrLDPC_decoder_core(p_llr, p_out, numLLR, p_lut, p_decParams, p_profiler, ab);
   if (numIter >= p_decParams->numMaxIter) {
     LOG_D(PHY, "set abort: %d, %d\n", numIter, p_decParams->numMaxIter);
-    set_abort(ab, true);
+    (void)note_cb_failure(ab);
   }
     return numIter;
 }

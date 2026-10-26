@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <pthread.h>
 #include "common/utils/nr/nr_common.h"
+#include "nr_cb_fail_limit.h"
 
 #define CRC24_A 0
 #define CRC24_B 1
@@ -23,7 +24,8 @@
 
 typedef struct {
   pthread_mutex_t mutex_failure;
-  bool failed;
+  bool failed; /* the TB's decode is aborted: the blocks not yet started are not decoded */
+  uint8_t nfail; /* code blocks that failed so far in this TB (note_cb_failure) */
 } decode_abort_t;
 
 static inline void init_abort(decode_abort_t *ab)
@@ -31,6 +33,7 @@ static inline void init_abort(decode_abort_t *ab)
   int ret = pthread_mutex_init(&ab->mutex_failure, NULL);
   AssertFatal(ret == 0, "mutex failed with %d\n", ret);
   ab->failed = false;
+  ab->nfail = 0;
 }
 
 static inline bool check_abort(decode_abort_t *ab)
@@ -43,13 +46,35 @@ static inline bool check_abort(decode_abort_t *ab)
   return failed;
 }
 
+/* v = false re-arms the flag and zeroes the failure count; v = true aborts at once (turbo/LTE users, GPU check-mode restore). */
 static inline void set_abort(decode_abort_t *ab, bool v)
 {
   int ret = pthread_mutex_lock(&ab->mutex_failure);
   AssertFatal(ret == 0, "mutex failed with %d\n", ret);
   ab->failed = v;
+  if (!v)
+    ab->nfail = 0;
   ret = pthread_mutex_unlock(&ab->mutex_failure);
   AssertFatal(ret == 0, "mutex failed with %d\n", ret);
+}
+
+/* n more code blocks of the TB failed: aborts the rest once NR_CB_FAIL_LIMIT blocks have failed. Returns the abort flag. */
+static inline bool note_cb_failures(decode_abort_t *ab, unsigned n)
+{
+  int ret = pthread_mutex_lock(&ab->mutex_failure);
+  AssertFatal(ret == 0, "mutex failed with %d\n", ret);
+  ab->nfail = (uint8_t)(n > 255u - ab->nfail ? 255u : ab->nfail + n);
+  if (ab->nfail >= NR_CB_FAIL_LIMIT)
+    ab->failed = true;
+  bool failed = ab->failed;
+  ret = pthread_mutex_unlock(&ab->mutex_failure);
+  AssertFatal(ret == 0, "mutex failed with %d\n", ret);
+  return failed;
+}
+
+static inline bool note_cb_failure(decode_abort_t *ab)
+{
+  return note_cb_failures(ab, 1);
 }
 
 static inline int lenWithCrc(int nbSeg, int len)

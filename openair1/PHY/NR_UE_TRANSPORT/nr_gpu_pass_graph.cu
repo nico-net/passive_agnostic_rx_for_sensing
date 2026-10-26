@@ -9,6 +9,7 @@
  * count (the grid sizes), the demod variant (tail template from qam_mode and nl, align, EVM chain), the EVM math (float / double) and the grid bound of the
  * PRB class. A grant outside the cached keys, with no free instance, or outside what the graph reproduces, returns 1 and is counted. */
 #include "nr_gpu_pass.h"
+#include "PHY/CODING/nr_cb_fail_limit.h" /* NR_CB_FAIL_LIMIT: the TB abort rule k_pick mirrors */
 #include "nr_pdsch_gpu_fep.h"
 #include "nr_pdsch_gpu_chest.h"
 #include "nr_pdsch_gpu_demod.h"
@@ -322,12 +323,13 @@ __global__ void k_norm_apply(int16_t *llr, const PassBlk *pb, const ResBlk *rb)
   for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < G; i += gridDim.x * blockDim.x) llr[i] = (int16_t)(llr[i] >> k);
 }
 /* OAI's stop rule per code block, in order (gpu_tb of nr_pdsch_gpu_ldpc_host.c): the first snapshot whose CRC passes is the decoded block; none = failure, c zeroed,
- * every later block fails (abort); a failing block the GPU stopped on at a zero syndrome (and not already aborted) needs the CPU decoder. */
+ * the failure counts; once NR_CB_FAIL_LIMIT blocks have failed every later block fails untried (abort; it = 0); a failing block the GPU stopped on at a zero syndrome
+ * (and not already aborted) needs the CPU decoder. */
 __global__ void k_pick(const uint8_t *snaps, const int *res, const PassBlk *pb, ResBlk *rb)
 {
-  __shared__ int aborted, need_cpu, err, hit, all_ok;
+  __shared__ int aborted, need_cpu, err, hit, all_ok, nfail;
   const int C = pb->ncb, KB = pb->KB;
-  if (threadIdx.x == 0) { aborted = need_cpu = err = 0; all_ok = 1; }
+  if (threadIdx.x == 0) { aborted = need_cpu = err = nfail = 0; all_ok = 1; }
   __syncthreads();
   for (int r = 0; r < C; r++) {
     if (threadIdx.x == 0) {
@@ -340,7 +342,7 @@ __global__ void k_pick(const uint8_t *snaps, const int *res, const PassBlk *pb, 
           if (rb->cand_ok[r * NSNAP + s]) h = s;
       if (h < 0) {
         if (!aborted && syn0 != 0 && !err) need_cpu = 1;
-        aborted = 1;
+        if (!aborted && ++nfail >= NR_CB_FAIL_LIMIT) aborted = 1;
         all_ok = 0;
       }
       hit = h;
@@ -1976,6 +1978,8 @@ extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   r->gate_db = rb.gate_db;
   if (r->skip) { r->need_cpu = 0; ++g_gate_skips; }
   for (uint32_t s = 0; s < j->C; s++) r->seg_ok[s] = r->skip ? 0 : rb.seg_ok[s];
+  memset(r->iters, 0, sizeof(r->iters));
+  for (uint32_t s = 0; s < j->C && !r->skip; s++) r->iters[s] = rb.it[s] == 255 ? (uint8_t)j->it_max : rb.it[s]; /* 0 = not decoded (aborted): the UL cb_tried */
   if (rb.need_cpu) ++g_ul_need_cpu;
   if (!r->need_cpu && !r->skip) {
     const bool crc_ok = j->C > 1 ? rb.tb_crc != 0 : rb.seg_crc[0] != 0;

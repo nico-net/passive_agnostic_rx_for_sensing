@@ -158,6 +158,9 @@ typedef struct {
   uint64_t queued;
   uint64_t decoded;
   uint64_t crc_ok;
+  uint64_t cb_ok;          ///< code blocks that passed their CRC24B/CRC over the decoded full TBs (probes excluded)
+  uint64_t cb_tried;       ///< code blocks the LDPC decoder was started on (decoding stops after NR_CB_FAIL_LIMIT failed blocks of a TB: biased toward early blocks)
+  uint64_t cb_total;       ///< code blocks in those TBs
   uint64_t dropped_full;   ///< producer found the ring full: the consumers are not keeping up
   uint64_t dropped_narrow; ///< budget: narrow grant refused while the ring was >= 90 % full
   uint64_t dropped_stale;  ///< IQ unavailable at admission/copy (legacy also checks after decode)

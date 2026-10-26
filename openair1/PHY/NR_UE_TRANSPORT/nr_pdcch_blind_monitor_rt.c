@@ -9765,10 +9765,12 @@ constdiag_done:;
        * `decoded` is attributable rather than merely visible. max_lag is the number that says
        * whether the configured depth was right: it must stay well under slots_per_frame. */
       LOG_I(PHY,
-            "SENSING: PDSCHQ queued=%lu decoded=%lu crc_ok=%lu (%.1f%%) dropped[full=%lu stale=%lu] "
+            "SENSING: PDSCHQ queued=%lu decoded=%lu crc_ok=%lu (%.1f%%) cb_ok=%lu cb_tried=%lu cb_total=%lu (cb_crc %.1f%%) dropped[full=%lu stale=%lu] "
             "max_lag_slots=%lu/%d slot_groups=%lu/%lu multi-grant slots dropped_narrow=%lu\n",
             (unsigned long)qs.queued, (unsigned long)qs.decoded, (unsigned long)qs.crc_ok,
             qs.decoded ? (100.0 * (double)qs.crc_ok / (double)qs.decoded) : 0.0,
+            (unsigned long)qs.cb_ok, (unsigned long)qs.cb_tried, (unsigned long)qs.cb_total,
+            qs.cb_tried ? (100.0 * (double)qs.cb_ok / (double)qs.cb_tried) : 0.0,
             (unsigned long)qs.dropped_full, (unsigned long)qs.dropped_stale,
             (unsigned long)qs.max_lag_slots, fp->slots_per_frame, (unsigned long)qs.slot_groups,
             (unsigned long)qs.batches_multi, (unsigned long)qs.dropped_narrow);

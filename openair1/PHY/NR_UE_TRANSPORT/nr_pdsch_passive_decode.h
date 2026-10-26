@@ -170,6 +170,7 @@ typedef struct {
   uint8_t              ldpc_it_cap;  ///< RANK2-ITER: the LDPC iteration cap in force (EVMGRANT itc=)
   uint16_t             ldpc_it_sum;  ///< RANK2-ITER: sum of numIter over the code blocks that decoded (EVMGRANT its=)
   uint8_t              skip;         ///< TAIL-FIX no-chance gate (nr_snr_gate.h): 1 = DM-RS SNR far below the MCS requirement, not demodulated / decoded / retried (EVMGRANT skip=)
+  uint16_t             cb_ok, cb_tried, cb_total; ///< per-code-block CRC: blocks that passed / blocks the LDPC was started on (stops after NR_CB_FAIL_LIMIT failures) / blocks in the TB; 0 = no LDPC ran or a layout probe (EVMGRANT cb_ok= cb_tried= cb_total=)
 } nr_pdsch_passive_decode_result_t;
 
 /**

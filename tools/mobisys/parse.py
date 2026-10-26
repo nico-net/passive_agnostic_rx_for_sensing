@@ -62,6 +62,11 @@ def parse_evmgrant(line):
              "skip": int(kv["skip"])}
     except (KeyError, ValueError, IndexError):
         return None
+    for k in ("cb_ok", "cb_tried", "cb_total"):  # per-code-block CRC (absent in older logs)
+        try:
+            r[k] = int(kv[k])
+        except (KeyError, ValueError):
+            r[k] = None
     e = kv.get("e2e")
     r["e2e"] = None
     if e:

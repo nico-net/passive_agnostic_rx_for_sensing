@@ -260,6 +260,7 @@ static ul_harqc_t *ul_harqc_acquire(uint16_t rnti, uint8_t pid)
  * file still owns and calls the actual estimation (nr_dmrs_id_accumulate()/_decide(), which need live
  * IQ) through the accessors it exposes. */
 static _Atomic uint64_t g_seg_fail, g_zero_tb;
+static _Atomic uint64_t g_cb_ok, g_cb_tried, g_cb_total; /* pusch_passive cb_crc: per-code-block CRC over the full UL decodes (probes excluded) */
 /* Residual the channel estimator can absorb on its own: MAX_DELAY_COMP is 20 samples, so anything
  * beyond a comfortable fraction of that is worth re-placing the window for rather than hoping. */
 #define PASSIVE_UL_DELAY_TOL 6
@@ -2516,8 +2517,12 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   if (ul_pass == 1 || (ul_pass == 2 && !uout.r.need_cpu && !hqe)) {
     /* the pass decided: leave behind what nr_ulsch_decoding would (a failed TB without a HARQ entry to store needs no soft buffer, the UCI search below decodes on its own) */
     NR_UL_gNB_HARQ_t *hp0 = ulsch->harq_process;
-    uint32_t ok_ = 0;
-    for (uint32_t r_ = 0; r_ < uout.C; r_++) ok_ += uout.r.seg_ok[r_];
+    uint32_t ok_ = 0, tried_ = 0;
+    for (uint32_t r_ = 0; r_ < uout.C; r_++) {
+      ok_ += uout.r.seg_ok[r_];
+      tried_ += ul_pass == 1 || uout.r.iters[r_] != 0; /* iters 0 = not decoded (aborted after the failure limit) */
+    }
+    hp0->triedSegments = tried_;
     hp0->C = uout.C; hp0->K = uout.K; hp0->Z = uout.Z; hp0->F = uout.F;
     hp0->processedSegments = ul_pass == 1 ? uout.C : ok_;
     hp0->harq_to_be_cleared = false;
@@ -2689,6 +2694,12 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   NR_UL_gNB_HARQ_t *hp = ulsch->harq_process;
   out->n_segments  = (int)hp->C;
   out->segments_ok = (int)hp->processedSegments;
+  out->segments_tried = (int)hp->triedSegments;
+  if (!t_solver_probe) {
+    atomic_fetch_add_explicit(&g_cb_ok, hp->processedSegments, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_cb_tried, hp->triedSegments, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_cb_total, hp->C, memory_order_relaxed);
+  }
   if (rc != 0 || hp->b == NULL) {
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
     out->reject_reason = "LDPC decoder interface error";
@@ -2941,10 +2952,14 @@ void nr_pusch_passive_stats_dump(void)
   nr_pusch_uci_blind_stats(ust);
   LOG_I(PHY,
         "SENSING: pusch_passive[try=%lu crc_ok=%lu (%.1f%%) seg_fail=%lu zero_tb=%lu (%.1f%%) "
-        "ta_refined=%lu uci[searches=%lu explored=%lu learned_ok=%lu explored_ok=%lu cb_tests=%lu tb_tests=%lu] "
+        "cb_ok=%lu cb_tried=%lu cb_total=%lu (cb_crc %.1f%%) ta_refined=%lu uci[searches=%lu explored=%lu learned_ok=%lu explored_ok=%lu cb_tests=%lu tb_tests=%lu] "
         "health=%.1f%% unsup=%lu setup_fail=%lu] init_tx[hit=%lu evict=%lu] ul_cfr[submits=%lu re=%lu]\n",
         (unsigned long)t, (unsigned long)k, t ? (100.0 * (double)k / (double)t) : 0.0,
         (unsigned long)sf, (unsigned long)zt, t ? (100.0 * (double)zt / (double)t) : 0.0,
+        (unsigned long)atomic_load_explicit(&g_cb_ok, memory_order_relaxed), (unsigned long)atomic_load_explicit(&g_cb_tried, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_cb_total, memory_order_relaxed),
+        atomic_load_explicit(&g_cb_tried, memory_order_relaxed)
+            ? 100.0 * (double)atomic_load_explicit(&g_cb_ok, memory_order_relaxed) / (double)atomic_load_explicit(&g_cb_tried, memory_order_relaxed) : 0.0,
         (unsigned long)atomic_load_explicit(&g_ta_refined, memory_order_relaxed),
         (unsigned long)ust[0], (unsigned long)ust[1], (unsigned long)ust[2], (unsigned long)ust[3], (unsigned long)ust[4],
         (unsigned long)ust[5],
