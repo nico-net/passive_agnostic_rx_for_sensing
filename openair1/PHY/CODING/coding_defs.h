@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include <string.h>
 #include "common/utils/nr/nr_common.h"
 #include "nr_cb_fail_limit.h"
 
@@ -22,10 +23,25 @@
 #define MAX_TURBO_ITERATIONS_MBSFN 8
 #define MAX_TURBO_ITERATIONS max_turbo_iterations
 
-typedef struct {
+/* Sentinel LDPCdecoder() returns (instead of numMaxIter) for a block that was CUT SHORT mid-decode because the TB's abort fired while it ran:
+ * it is not a failed block (no note_cb_failure), and the caller reports it untried. Any value >= numMaxIter is still "not decoded" to callers
+ * that only test numIter < numMaxIter. */
+#define NR_LDPC_ITER_CUT 0xFFFFu
+#define NR_CB_ORDER_WORDS 5 /* 160 >= NR_LDPC_MAX_NUM_CB (144) code blocks of a TB */
+
+/* The TB's shared abort state (one per TB), plus per-block views of it ("proxies", init_abort_block) used by the parallel CPU segment decoder.
+ * Rule (nr_cb_fail_limit.h): the code blocks of a TB are judged IN BLOCK ORDER: the NR_CB_FAIL_LIMIT-th failed block, in block order, aborts all
+ * later blocks (untried, failed). A proxy for block r reports "abort" only when >= NR_CB_FAIL_LIMIT blocks BEFORE r have already failed, so a
+ * block is only ever cut short if it is after the abort point in block order, whatever the completion order of the pool; the final result is
+ * then made exact by nr_cb_order_result(). A plain (non-proxy) object keeps the sequential semantics (count of failures, any order). */
+typedef struct decode_abort_s {
   pthread_mutex_t mutex_failure;
   bool failed; /* the TB's decode is aborted: the blocks not yet started are not decoded */
   uint8_t nfail; /* code blocks that failed so far in this TB (note_cb_failure) */
+  uint32_t failbits[NR_CB_ORDER_WORDS]; /* failed blocks recorded by proxies (by block index); counted in nfail */
+  struct decode_abort_s *parent; /* proxy only: the TB's object (no mutex of its own) */
+  int idx; /* proxy only: the block index */
+  bool entry_aborted; /* proxy only: the TB was already aborted when its decode began: every block is untried */
 } decode_abort_t;
 
 static inline void init_abort(decode_abort_t *ab)
@@ -34,14 +50,64 @@ static inline void init_abort(decode_abort_t *ab)
   AssertFatal(ret == 0, "mutex failed with %d\n", ret);
   ab->failed = false;
   ab->nfail = 0;
+  memset(ab->failbits, 0, sizeof(ab->failbits));
+  ab->parent = NULL;
+  ab->idx = 0;
+  ab->entry_aborted = false;
+}
+
+static inline unsigned cb_bits_below(const uint32_t *bits, int idx)
+{
+  unsigned n = 0;
+  for (int w = 0; w < NR_CB_ORDER_WORDS && w * 32 < idx; w++) {
+    const int nb = idx - w * 32;
+    const uint32_t m = nb >= 32 ? 0xFFFFFFFFu : ((1u << nb) - 1u);
+    n += (unsigned)__builtin_popcount(bits[w] & m);
+  }
+  return n;
+}
+
+static inline unsigned cb_bits_all(const uint32_t *bits)
+{
+  unsigned n = 0;
+  for (int w = 0; w < NR_CB_ORDER_WORDS; w++)
+    n += (unsigned)__builtin_popcount(bits[w]);
+  return n;
+}
+
+/* Start of a TB's parallel decode: forget the failures recorded by block proxies (not the plain count); returns whether the TB was already
+ * aborted (then every block of it is untried). */
+static inline bool begin_block_decode(decode_abort_t *ab)
+{
+  int ret = pthread_mutex_lock(&ab->mutex_failure);
+  AssertFatal(ret == 0, "mutex failed with %d\n", ret);
+  const unsigned nb = cb_bits_all(ab->failbits);
+  ab->nfail = (uint8_t)(ab->nfail > nb ? ab->nfail - nb : 0);
+  memset(ab->failbits, 0, sizeof(ab->failbits));
+  const bool entry = ab->failed;
+  ret = pthread_mutex_unlock(&ab->mutex_failure);
+  AssertFatal(ret == 0, "mutex failed with %d\n", ret);
+  return entry;
+}
+
+/* A per-block view of the TB's abort state for block idx (no mutex: only reads / writes the parent under the parent's). */
+static inline void init_abort_block(decode_abort_t *blk, decode_abort_t *tb, int idx, bool entry_aborted)
+{
+  blk->failed = false;
+  blk->nfail = 0;
+  memset(blk->failbits, 0, sizeof(blk->failbits));
+  blk->parent = idx >= 0 && idx < 32 * NR_CB_ORDER_WORDS ? tb : NULL; /* beyond the bitmap: no order, the plain object */
+  blk->idx = idx;
+  blk->entry_aborted = entry_aborted;
 }
 
 static inline bool check_abort(decode_abort_t *ab)
 {
-  int ret = pthread_mutex_lock(&ab->mutex_failure);
+  decode_abort_t *m = ab->parent ? ab->parent : ab;
+  int ret = pthread_mutex_lock(&m->mutex_failure);
   AssertFatal(ret == 0, "mutex failed with %d\n", ret);
-  bool failed = ab->failed;
-  ret = pthread_mutex_unlock(&ab->mutex_failure);
+  bool failed = ab->parent ? (ab->entry_aborted || cb_bits_below(m->failbits, ab->idx) >= NR_CB_FAIL_LIMIT) : ab->failed;
+  ret = pthread_mutex_unlock(&m->mutex_failure);
   AssertFatal(ret == 0, "mutex failed with %d\n", ret);
   return failed;
 }
@@ -52,22 +118,32 @@ static inline void set_abort(decode_abort_t *ab, bool v)
   int ret = pthread_mutex_lock(&ab->mutex_failure);
   AssertFatal(ret == 0, "mutex failed with %d\n", ret);
   ab->failed = v;
-  if (!v)
+  if (!v) {
     ab->nfail = 0;
+    memset(ab->failbits, 0, sizeof(ab->failbits));
+  }
   ret = pthread_mutex_unlock(&ab->mutex_failure);
   AssertFatal(ret == 0, "mutex failed with %d\n", ret);
 }
 
-/* n more code blocks of the TB failed: aborts the rest once NR_CB_FAIL_LIMIT blocks have failed. Returns the abort flag. */
+/* n more code blocks of the TB failed: aborts the rest once NR_CB_FAIL_LIMIT blocks have failed. Returns the abort flag. On a block proxy
+ * (n = 1) the failure is recorded at the block's index in the TB's object. */
 static inline bool note_cb_failures(decode_abort_t *ab, unsigned n)
 {
-  int ret = pthread_mutex_lock(&ab->mutex_failure);
+  decode_abort_t *m = ab->parent ? ab->parent : ab;
+  int ret = pthread_mutex_lock(&m->mutex_failure);
   AssertFatal(ret == 0, "mutex failed with %d\n", ret);
-  ab->nfail = (uint8_t)(n > 255u - ab->nfail ? 255u : ab->nfail + n);
-  if (ab->nfail >= NR_CB_FAIL_LIMIT)
-    ab->failed = true;
-  bool failed = ab->failed;
-  ret = pthread_mutex_unlock(&ab->mutex_failure);
+  if (ab->parent && !(m->failbits[ab->idx >> 5] & (1u << (ab->idx & 31)))) {
+    m->failbits[ab->idx >> 5] |= 1u << (ab->idx & 31);
+    n = 1;
+  } else if (ab->parent) {
+    n = 0;
+  }
+  m->nfail = (uint8_t)(n > 255u - m->nfail ? 255u : m->nfail + n);
+  if (m->nfail >= NR_CB_FAIL_LIMIT)
+    m->failed = true;
+  bool failed = ab->parent ? (ab->entry_aborted || cb_bits_below(m->failbits, ab->idx) >= NR_CB_FAIL_LIMIT) : m->failed;
+  ret = pthread_mutex_unlock(&m->mutex_failure);
   AssertFatal(ret == 0, "mutex failed with %d\n", ret);
   return failed;
 }
@@ -75,6 +151,42 @@ static inline bool note_cb_failures(decode_abort_t *ab, unsigned n)
 static inline bool note_cb_failure(decode_abort_t *ab)
 {
   return note_cb_failures(ab, 1);
+}
+
+/* The block-order result of a TB, the one definition for the CPU pool and the GPU (cf. nr_gpu_pass_graph.cu k_pick):
+ * raw_tried[r] / raw_ok[r] = what the decode of block r reported (raw_tried = it ran to completion; raw_ok implies raw_tried). Block r is tried
+ * iff the TB was not aborted before it (entry_aborted, or NR_CB_FAIL_LIMIT failed blocks among the tried blocks before r) and its decode ran;
+ * its verdict is then its own. Every block after the abort point is untried and failed even if a worker happened to finish it. Blocks that
+ * did not run and were not aborted (a rate-matching error) stay untried without counting as failures. Returns the failed blocks counted. */
+static inline unsigned nr_cb_order_result(const bool *raw_tried, const bool *raw_ok, unsigned n, bool entry_aborted, bool *tried, bool *ok)
+{
+  bool aborted = entry_aborted;
+  unsigned nfail = 0;
+  for (unsigned r = 0; r < n; r++) {
+    tried[r] = false;
+    ok[r] = false;
+    if (aborted || !raw_tried[r])
+      continue;
+    tried[r] = true;
+    ok[r] = raw_ok[r];
+    if (!ok[r] && ++nfail >= NR_CB_FAIL_LIMIT)
+      aborted = true;
+  }
+  return nfail;
+}
+
+/* After the parallel decode: the TB's object holds exactly the failures of the block-order result (nfail_order, from nr_cb_order_result). */
+static inline void end_block_decode(decode_abort_t *ab, unsigned nfail_order)
+{
+  int ret = pthread_mutex_lock(&ab->mutex_failure);
+  AssertFatal(ret == 0, "mutex failed with %d\n", ret);
+  const unsigned nb = cb_bits_all(ab->failbits);
+  const unsigned base = ab->nfail > nb ? ab->nfail - nb : 0;
+  memset(ab->failbits, 0, sizeof(ab->failbits));
+  ab->nfail = (uint8_t)(base + nfail_order > 255 ? 255 : base + nfail_order);
+  ab->failed = ab->nfail >= NR_CB_FAIL_LIMIT;
+  ret = pthread_mutex_unlock(&ab->mutex_failure);
+  AssertFatal(ret == 0, "mutex failed with %d\n", ret);
 }
 
 static inline int lenWithCrc(int nbSeg, int len)
