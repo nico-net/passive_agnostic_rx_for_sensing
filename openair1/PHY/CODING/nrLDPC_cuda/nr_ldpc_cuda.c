@@ -112,13 +112,13 @@ int32_t LDPCdecoder(t_nrLDPC_dec_params *p_decParams,
     if (p_decParams->check_crc && num_iter < p_decParams->numMaxIter // note: now index of successful iteration
      && !p_decParams->check_crc((uint8_t*)p_out, p_decParams->Kprime, p_decParams->crc_type)) {
       LOG_D(PHY, "set abort: CRC after %d\n", num_iter);
-      set_abort(ab, true);
+      (void)note_cb_failure(ab);
       return p_decParams->numMaxIter+1;
     }
     // otherwise communicate failed reconstructions detected using syndrome
     else if (!p_decParams->check_crc && num_iter >= p_decParams->numMaxIter) {
       LOG_D(PHY, "set abort: syndrome after %d\n", num_iter);
-      set_abort(ab, true);
+      (void)note_cb_failure(ab);
       return p_decParams->numMaxIter+1;
     }
 

@@ -1186,6 +1186,7 @@ class GpuPassFixture {
       }
     std::vector<uint8_t> c((size_t)C * KB, 0);
     bool aborted = false, all = true;
+    unsigned nfail = 0;
     s->need_cpu = 0;
     memset(s->seg_ok, 0, sizeof(s->seg_ok));
     for (int r = 0; r < C; r++) {
@@ -1200,7 +1201,7 @@ class GpuPassFixture {
       }
       if (!aborted && res[2 * r + 1]) { s->need_cpu = 1; }
       all = false;
-      aborted = true;
+      if (!aborted && ++nfail >= NR_CB_FAIL_LIMIT) aborted = true;
     }
     s->tbs = (uint32_t)tb.A;
     s->tb_ok = 0;
