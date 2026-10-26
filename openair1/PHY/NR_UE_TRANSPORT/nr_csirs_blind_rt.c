@@ -121,7 +121,7 @@ static uint32_t g_disc_visits[NR_CSIRS_BLIND_MAX_CAND][2];
 static uint32_t g_disc_scored_slot[NR_CSIRS_BLIND_MAX_CAND];
 /* Candidates proposed by the blind ZP detector (nr_csirs_disc_zp.c): a pattern of holes, no sequence. They are scored for zero power only, never as NZP. */
 static bool g_disc_zp_only[NR_CSIRS_BLIND_MAX_CAND];
-#define NR_CSIRS_BLIND_ZP_ONLY_MAX 16
+#define NR_CSIRS_BLIND_ZP_ONLY_MAX 48
 static struct {
   nr_csirs_candidate_t candidate;
   uint16_t period, off[2];
@@ -1387,6 +1387,7 @@ bool nr_csirs_blind_rt_observed_nzp(uint32_t absolute_slot, fapi_nr_dl_config_cs
   pthread_mutex_unlock(&g_csirs_state_lock);
   return found;
 }
+static int rate_match_all_raw(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max);
 static int rate_match_all_n(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max);
 /* nr_csirs_blind_rt_rate_match_all: fills out[] with every CSI-RS resource that occurs on this slot for PDSCH rate matching: confirmed NZP (csi_type 1) first, then retained ZP (csi_type 2).
  *   Returns the count (at most max). Returns 0 when the search is off or not armed.
@@ -1399,7 +1400,17 @@ int nr_csirs_blind_rt_rate_match_all(uint32_t absolute_slot, fapi_nr_dl_config_c
    * per-population set is nr_csirs_full_rate_match(), applied at decode time only. */
   return rate_match_all_n(absolute_slot, out, max);
 }
+/* rate_match_all_n: the patterns of the slot that the CRC arbiter applies (what the solver and the legacy retry arms may assume); rate_match_all_raw() has them all, trials included. */
 static int rate_match_all_n(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
+{
+  const int n = rate_match_all_raw(absolute_slot, out, max);
+  int k = 0;
+  for (int i = 0; i < n; i++)
+    if (nr_csi_arb_applies(&out[i]))
+      out[k++] = out[i];
+  return k;
+}
+static int rate_match_all_raw(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
 {
   if(discovery_queue_ready && !discovery_consuming) {
     int n=discovery_export(absolute_slot,out,max);
@@ -1421,6 +1432,11 @@ static int rate_match_all_n(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_
     fill_pdu(&g_zp.cand[idx[i]], 2 /* ZP: rate matching only, no estimation */, &out[n++]);
     nr_csirs_observer_export_zp(&g_csirs_obs);
   }
+  /* Hole patterns the ZP bank has not confirmed (it needs the complete pattern) are offered as trials: PDU flagged NR_CSIRS_PDU_HOLE_ONLY, which the CRC arbiter keeps out of
+   * the rate matching until decodes prove it. */
+  for (int i = 0; i < g_st.n && n < max; i++)
+    if (g_disc_zp_only[i] && !nr_csirs_blind_is_confirmed(&g_zp, i) && g_st.seed_period[i] && absolute_slot % g_st.seed_period[i] == g_st.seed_offset[i])
+      fill_pdu(&g_st.cand[i], 2, &out[n++]);
   return n;
 }
 
@@ -1560,7 +1576,7 @@ static void full_select(uint32_t slot, uint16_t pop, uint16_t dmrs_mask, fapi_nr
 {
   fapi_nr_dl_config_csirs_pdu_rel15_t conf[2 * NR_CSIRS_BLIND_DISC_MAX_CONF], all[2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
   const int n_conf = full_all_confirmed(conf, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
-  int n_all = rate_match_all_n(slot, all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  int n_all = rate_match_all_raw(slot, all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
   n_all = full_add_trs_pairs(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
   n_all = full_add_block(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
   *nsel = 0;

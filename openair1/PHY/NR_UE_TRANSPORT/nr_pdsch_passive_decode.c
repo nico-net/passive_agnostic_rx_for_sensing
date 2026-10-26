@@ -4407,8 +4407,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   {
     const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
     const uint32_t arb_slot = (uint32_t)proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx;
-    fapi_nr_dl_config_csirs_pdu_rel15_t held[8];
-    const int n_held = nr_csirs_full_arbiter_held(&original, arb_slot, held, 8);
+    fapi_nr_dl_config_csirs_pdu_rel15_t held[12];
+    const int n_held = nr_csirs_full_arbiter_held(&original, arb_slot, held, 12);
     bool arb_recovered = false, arb_ran = false;
     const bool saved_quiet = t_quiet;
     const double saved_fo_override = nr_slot_fep_fo_override_hz;

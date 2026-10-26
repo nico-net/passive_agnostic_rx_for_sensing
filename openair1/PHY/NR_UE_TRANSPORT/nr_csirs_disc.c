@@ -407,6 +407,7 @@ static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t
  * turns the significant hole patterns into legal rows (nr_csirs_disc_hypotheses) and admits them as zero-power candidates; the ZP bank confirms them. */
 #define ZP_EVAL_SLOTS 320
 #define ZP_CHUNK 16
+#define ZP_NEAR_ROWS 8   /* closest non-exact rows offered per proposal */
 static struct {
   nr_csirs_zp_det_t *det;
   int n_rb;
@@ -486,14 +487,30 @@ static void zp_propose(void)
     return;
   nr_csirs_disc_hyp_t hy[NR_CSIRS_DISC_MAX_HYP];
   const int nh = nr_csirs_disc_hypotheses(fps, nf, hy, NR_CSIRS_DISC_MAX_HYP);
-  for (int f = 0; f < nf; ++f)
-    for (int i = 0; i < nh; ++i)
-      if (hy[i].fp_index == f && hy[i].fit == 1.0f) { /* ranked by row: the lowest row with this exact pattern; rows share the RE pattern, which is all rate matching needs */
-        LOG_I(PHY, "SENSING: CSIRS_DISC ZP_HOLES row=%u fd=%u l0=%u l1=%u dens=%u rb=%u:%u P/O=%u/%u z=%.1f\n", hy[i].row, hy[i].freq_domain,
-              hy[i].symb_l0, hy[i].symb_l1, hy[i].density, hy[i].rb_start, hy[i].n_rb, hy[i].period, hy[i].offset, fps[f].strength);
-        nr_csirs_blind_rt_add_discovered_zp(&hy[i]);
-        break;
+  for (int f = 0; f < nf; ++f) {
+    char cells[256];
+    nr_csirs_zp_cells(zp.det, fps[f].period, fps[f].offset, cells, sizeof(cells));
+    /* The row with the exact pattern first; then the closest rows that CONTAIN it (a detector that saw only part of the quiet REs still points at the right row). The ZP bank
+     * confirms only complete patterns; every row is offered to the CRC arbiter (nr_csirs_rm_arbiter.h), which decides from the PDSCH decodes which of them, if any, is rate-matched. */
+    nr_csirs_disc_hyp_t cover[ZP_NEAR_ROWS];
+    int nc = nr_csirs_disc_rows_covering(&fps[f], cover, ZP_NEAR_ROWS);
+    for (int i = -1; i < nc; ++i) {
+      const nr_csirs_disc_hyp_t *h = NULL;
+      if (i < 0) {
+        for (int k = 0; k < nh && !h; ++k)
+          if (hy[k].fp_index == f && hy[k].fit == 1.0f)
+            h = &hy[k];
+      } else {
+        h = &cover[i];
       }
+      if (!h)
+        continue;
+      const int at = nr_csirs_blind_rt_add_discovered_zp(h);
+      if (at >= 0)
+        LOG_I(PHY, "SENSING: CSIRS_DISC ZP_HOLES %s row=%u fd=%u l0=%u l1=%u dens=%u rb=%u:%u P/O=%u/%u z=%.1f iou=%.2f cells[%s]\n", i < 0 ? "EXACT" : "COVER", h->row, h->freq_domain,
+              h->symb_l0, h->symb_l1, h->density, h->rb_start, h->n_rb, h->period, h->offset, fps[f].strength, h->fit, cells);
+    }
+  }
 }
 
 int nr_csirs_disc_test_sweep_limit = 32; /* hypotheses swept per batch; tests raise it */

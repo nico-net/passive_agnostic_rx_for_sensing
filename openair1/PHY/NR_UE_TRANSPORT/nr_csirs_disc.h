@@ -163,6 +163,8 @@ void nr_csirs_disc_detect_reset(void);
 
 /* U3 (nr_csirs_disc_hyp.c) */
 int nr_csirs_disc_hypotheses(const nr_csirs_disc_fp_t *fps, int n_fp, nr_csirs_disc_hyp_t *out, int max_out);
+/* Legal rows whose pattern contains the footprint (exact pattern excluded), closest first. */
+int nr_csirs_disc_rows_covering(const nr_csirs_disc_fp_t *fp, nr_csirs_disc_hyp_t *out, int max_out);
 
 /* U4 (nr_csirs_disc_sweep.c CPU reference; GPU in nr_csirs_disc_gpu.cu) */
 typedef struct {

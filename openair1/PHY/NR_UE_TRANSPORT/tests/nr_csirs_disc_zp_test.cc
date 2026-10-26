@@ -219,3 +219,27 @@ TEST(CsirsDiscZp, ResetAndForgetting)
   EXPECT_EQ(nr_csirs_zp_propose(det, fp, 8), 0);
   nr_csirs_zp_free(det);
 }
+
+/* a footprint found from part of a pattern (one subcarrier of the 4-port row 4, even RBs only) points at the legal rows that contain it, the row itself among them */
+TEST(CsirsDiscZp, PartialFootprintPointsAtContainingRows)
+{
+  nr_csirs_disc_fp_t fp = {};
+  fp.sym_mask = 1u << 8;
+  fp.sc_mask = 1u << 10;
+  fp.density = 0;
+  fp.rb_start = 0;
+  fp.n_rb = 64;
+  fp.period = 40;
+  fp.offset = 4;
+  nr_csirs_disc_hyp_t rows[8];
+  const int n = nr_csirs_disc_rows_covering(&fp, rows, 8);
+  ASSERT_GE(n, 1);
+  bool row4 = false;
+  for (int i = 0; i < n; ++i) {
+    EXPECT_EQ(rows[i].period, 40);
+    EXPECT_EQ(rows[i].offset, 4);
+    row4 |= rows[i].row == 4 && rows[i].freq_domain == 4 && rows[i].symb_l0 == 8;
+    if (i) EXPECT_LE(rows[i].fit, rows[i - 1].fit) << "closest first";
+  }
+  EXPECT_TRUE(row4);
+}

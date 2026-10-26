@@ -174,6 +174,13 @@ static void discovery_publish(void)
         r->phase[0]=st->conf_off[k][0];r->phase[1]=st->conf_off[k][1];
       }
     }
+    /* hole patterns not (yet) confirmed by the ZP bank: trials for the CRC arbiter (flagged NR_CSIRS_PDU_HOLE_ONLY by fill_pdu) */
+    if(g_on>0 && g_armed) for(int i=0;i<g_st.n && discovery_exports[b].n<(int)(sizeof(discovery_exports[b].resource)/sizeof(discovery_exports[b].resource[0]));++i)
+      if(g_disc_zp_only[i] && !nr_csirs_blind_is_confirmed(&g_zp,i) && g_st.seed_period[i]) {
+        __typeof__(discovery_exports[b].resource[0]) *r=&discovery_exports[b].resource[discovery_exports[b].n++];
+        fill_pdu(&g_st.cand[i],2,&r->p);
+        r->period=g_st.seed_period[i];r->nphase=1;r->phase[0]=g_st.seed_offset[i];r->phase[1]=0;
+      }
     __atomic_store_n(&discovery_exports[b].users,0,__ATOMIC_RELEASE);
     __atomic_store_n(&discovery_active,b,__ATOMIC_RELEASE);
     break;

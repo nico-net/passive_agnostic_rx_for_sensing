@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc_zp.h"
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -407,4 +408,34 @@ int nr_csirs_zp_propose(nr_csirs_zp_det_t *d, nr_csirs_disc_fp_t *out, int max_o
   const int n = nf < max_out ? nf : max_out;
   memcpy(out, fps, sizeof(*out) * n);
   return n;
+}
+
+int nr_csirs_zp_cells(const nr_csirs_zp_det_t *d, int period, int offset, char *buf, size_t len)
+{
+  size_t w = 0;
+  if (!d || !buf || len < 2 || period < 1 || offset < 0 || offset >= period)
+    return 0;
+  buf[0] = 0;
+  uint64_t n_on = 0, n_tot = 0;
+  for (int r = 0; r < NR_CSIRS_ZP_FOLD; ++r) {
+    n_tot += d->obs[r];
+    if (r % period == offset)
+      n_on += d->obs[r];
+  }
+  const uint64_t n_off = n_tot - n_on;
+  if (!n_on || !n_off)
+    return 0;
+  for (int c = 0; c < CELLS && w + 24 < len; ++c) {
+    uint64_t on = 0, all = 0;
+    for (int r = 0; r < NR_CSIRS_ZP_FOLD; ++r) {
+      const uint16_t h = d->hit[(size_t)r * CELLS + c];
+      all += h;
+      if (r % period == offset)
+        on += h;
+    }
+    const double ron = (double)on / (double)n_on, roff = (double)(all - on) / (double)n_off;
+    if (ron >= 0.2)
+      w += snprintf(buf + w, len - w, "%sl%d%c%d=%.2f/%.2f", w ? " " : "", c / (NPAR * NSC), (c / NSC) % NPAR ? 'o' : 'e', c % NSC, ron, roff);
+  }
+  return (int)w;
 }

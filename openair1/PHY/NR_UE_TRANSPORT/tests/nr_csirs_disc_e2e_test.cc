@@ -353,49 +353,64 @@ TEST(CsirsDiscE2E, BlindZpHolesProposedConfirmedAndExported)
   Ring r;
   ASSERT_EQ(nr_csirs_disc_synth(&r.ring, &cfg), 0);
   nr_csirs_disc_process(&r.ring);
-  EXPECT_EQ(nr_csirs_blind_rt_test_zp_only_count(), 1);
+  EXPECT_GE(nr_csirs_blind_rt_test_zp_only_count(), 1) << "the exact row and the rows around it";
+  EXPECT_LE(nr_csirs_blind_rt_test_zp_only_count(), 9);
   fapi_nr_dl_config_csirs_pdu_rel15_t pdu[8] = {};
   uint16_t period[8] = {}, offset[8] = {};
   int16_t delta[8] = {};
   nr_csirs_blind_rt_test_confirm_ring(&r.ring, pdu, period, offset, delta, 8, nullptr);
   const int n = nr_csirs_blind_rt_test_zp_confirmed(pdu, period, offset, 8);
-  ASSERT_EQ(n, 1);
-  printf("ZP exported: row=%u fd=%u l0=%u rb=%u:%u dens=%u P/O=%u/%u csi_type=%u\n", pdu[0].row, pdu[0].freq_domain, pdu[0].symb_l0, pdu[0].start_rb,
-         pdu[0].nr_of_rbs, pdu[0].freq_density, period[0], offset[0], pdu[0].csi_type);
-  EXPECT_EQ(pdu[0].csi_type, 2);
-  EXPECT_EQ(pdu[0].symb_l0, 8);
-  EXPECT_EQ(pdu[0].start_rb, 0);
-  EXPECT_EQ(pdu[0].nr_of_rbs, 64);
-  EXPECT_EQ(period[0] % 40, 0);
-  EXPECT_EQ(offset[0], 4);
+  ASSERT_GE(n, 1);
+  int k0 = -1;
+  for (int k = 0; k < n; ++k) {
+    printf("ZP exported: row=%u fd=%u l0=%u rb=%u:%u dens=%u P/O=%u/%u csi_type=%u\n", pdu[k].row, pdu[k].freq_domain, pdu[k].symb_l0, pdu[k].start_rb,
+           pdu[k].nr_of_rbs, pdu[k].freq_density, period[k], offset[k], pdu[k].csi_type);
+    if (pdu[k].row == 4 && pdu[k].freq_domain == 4 && pdu[k].symb_l0 == 8)
+      k0 = k;
+  }
+  ASSERT_GE(k0, 0) << "the exact row is exported";
+  EXPECT_EQ(pdu[k0].csi_type, 2);
+  EXPECT_EQ(pdu[k0].start_rb, 0);
+  EXPECT_EQ(pdu[k0].nr_of_rbs, 64);
+  EXPECT_EQ(period[k0] % 40, 0);
+  EXPECT_EQ(offset[k0], 4);
   EXPECT_EQ(nr_csirs_blind_rt_test_candidate_count() - nr_csirs_blind_rt_test_zp_only_count(), 0) << "no NZP candidate";
-  /* CRC arbiter: the hole-only ZP is exported (rate_match_all) and flagged, but held out of the PDSCH rate matching of every population until decodes prove it */
+  /* CRC arbiter: the hole-only ZP (the bank-confirmed exact row and the rows around it) is flagged and held out of the PDSCH rate matching of every population until decodes prove it */
   const uint32_t slot = 4 + 40 * 31;
-  fapi_nr_dl_config_csirs_pdu_rel15_t rm[8] = {};
-  ASSERT_EQ(nr_csirs_blind_rt_rate_match_all(slot, rm, 8), 1);
-  EXPECT_EQ(rm[0].csi_type, 2);
-  EXPECT_NE(rm[0].measurement_bitmap & NR_CSIRS_PDU_HOLE_ONLY, 0);
-  EXPECT_EQ(nr_csirs_blind_rt_rate_match_all(slot + 1, rm, 8), 0) << "not on its lattice";
   nr_csi_arb_reset();
+  fapi_nr_dl_config_csirs_pdu_rel15_t rm[8] = {};
+  EXPECT_EQ(nr_csirs_blind_rt_rate_match_all(slot, rm, 8), 0) << "what the solver and the legacy arms see is what the arbiter applies";
+  fapi_nr_dl_config_csirs_pdu_rel15_t exact_row = {};
   for (uint16_t pop : {2, 415}) {
-    fapi_nr_dl_config_csirs_pdu_rel15_t sel[8] = {}, held[8] = {};
+    fapi_nr_dl_config_csirs_pdu_rel15_t sel[8] = {}, held[12] = {};
     fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = {};
     cfg.dlDmrsScramblingId = pop;
     cfg.dlDmrsSymbPos = (1u << 2) | (1u << 11);
     EXPECT_EQ(nr_csirs_full_rate_match(slot, pop, cfg.dlDmrsSymbPos, sel, 8), 0) << "undecided: not applied, pop " << pop;
-    ASSERT_EQ(nr_csirs_full_arbiter_held(&cfg, slot, held, 8), 1) << "undecided: offered as a decode trial, pop " << pop;
-    EXPECT_EQ(held[0].symb_l0, 8);
+    const int nh = nr_csirs_full_arbiter_held(&cfg, slot, held, 12);
+    ASSERT_GE(nh, 1) << "undecided: offered as decode trials, pop " << pop;
+    bool found = false;
+    for (int k = 0; k < nh; ++k) {
+      EXPECT_NE(held[k].measurement_bitmap & NR_CSIRS_PDU_HOLE_ONLY, 0);
+      EXPECT_EQ(held[k].csi_type, 2);
+      if (held[k].row == 4 && held[k].freq_domain == 4 && held[k].symb_l0 == 8) { exact_row = held[k]; found = true; }
+    }
+    EXPECT_TRUE(found) << "the exact pattern is among the trials";
   }
-  nr_csi_arb_note(&rm[0], NR_CSI_ARB_WITH_WINS);
-  nr_csi_arb_note(&rm[0], NR_CSI_ARB_WITH_WINS);
+  EXPECT_EQ(nr_csirs_blind_rt_rate_match_all(slot + 1, rm, 8), 0) << "not on its lattice";
+  nr_csi_arb_note(&exact_row, NR_CSI_ARB_WITH_WINS);
+  nr_csi_arb_note(&exact_row, NR_CSI_ARB_WITH_WINS);
+  EXPECT_EQ(nr_csirs_blind_rt_rate_match_all(slot, rm, 8), 1) << "proven: applied";
   {
-    fapi_nr_dl_config_csirs_pdu_rel15_t sel[8] = {}, held[8] = {};
+    fapi_nr_dl_config_csirs_pdu_rel15_t sel[8] = {}, held[12] = {};
     fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = {};
     cfg.dlDmrsScramblingId = 415;
     cfg.dlDmrsSymbPos = (1u << 2) | (1u << 11);
     ASSERT_EQ(nr_csirs_full_rate_match(slot, 415, cfg.dlDmrsSymbPos, sel, 8), 1) << "KEEP: applied, whatever the population";
     EXPECT_EQ(sel[0].symb_l0, 8);
-    EXPECT_EQ(nr_csirs_full_arbiter_held(&cfg, slot, held, 8), 0);
+    const int nh = nr_csirs_full_arbiter_held(&cfg, slot, held, 12);
+    for (int k = 0; k < nh; ++k)
+      EXPECT_FALSE(held[k].row == 4 && held[k].freq_domain == 4) << "the proven pattern is no longer a trial";
   }
   nr_csi_arb_reset();
   nr_csirs_blind_rt_test_discovery_reset();

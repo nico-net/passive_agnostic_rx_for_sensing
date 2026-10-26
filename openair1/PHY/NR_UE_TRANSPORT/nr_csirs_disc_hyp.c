@@ -294,3 +294,38 @@ int nr_csirs_disc_hypotheses(const nr_csirs_disc_fp_t *fps, int n_fp, nr_csirs_d
   }
   return n;
 }
+
+/* density_covers: true when a resource of row density `row_d` (0 dot5 even RB, 1 dot5 odd RB, 2 one, 3 three) transmits on every RB class that a footprint of density `fp_d` (0 even, 1 odd, 2 every RB) uses. */
+static bool density_covers(int row_d, int fp_d)
+{
+  return row_d == fp_d || row_d == 2 || row_d == 3;
+}
+
+/* nr_csirs_disc_rows_covering: the legal rows whose RE pattern CONTAINS the footprint (every symbol and subcarrier class of it, on every RB class it uses), closest first (IoU of the pattern masks).
+ *   A footprint found from part of a pattern (some of its REs masked by leakage or by a partly empty allocation) points at these rows; nothing here claims that one of them is right. The footprint's
+ *   RB extent, period and offset are copied. fit is the IoU; the exact pattern (fit 1) is excluded. Returns the count (<= max_out). Caller: nr_csirs_disc.c (blind ZP proposals).
+ */
+int nr_csirs_disc_rows_covering(const nr_csirs_disc_fp_t *fp, nr_csirs_disc_hyp_t *out, int max_out)
+{
+  if (!fp || !out || max_out <= 0 || !valid_fp(fp))
+    return 0;
+  pthread_once(&table_once, build_table);
+  int n = 0;
+  for (int i = 0; table && i < table_n; i++) {
+    const table_entry_t *e = &table[i];
+    if ((e->sym_mask & fp->sym_mask) != fp->sym_mask || (e->sc_mask & fp->sc_mask) != fp->sc_mask || !density_covers(e->hyp.density, fp->density))
+      continue;
+    const float fit = footprint_iou(e->sym_mask, e->sc_mask, fp->sym_mask, fp->sc_mask);
+    if (fit >= 1.0f && e->hyp.density == fp->density)
+      continue;
+    nr_csirs_disc_hyp_t h = e->hyp;
+    h.rb_start = fp->rb_start;
+    h.n_rb = fp->n_rb;
+    h.period = fp->period;
+    h.offset = fp->offset;
+    h.fp_index = 0;
+    h.fit = fit;
+    insert_ranked(out, &n, max_out, &h);
+  }
+  return n;
+}

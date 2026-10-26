@@ -46,6 +46,10 @@ uint64_t nr_csirs_zp_slots(const nr_csirs_zp_det_t *);
  * footprint, so that nr_csirs_disc_hypotheses() can match the two-symbol rows. */
 int nr_csirs_zp_propose(nr_csirs_zp_det_t *, nr_csirs_disc_fp_t *out, int max_out);
 
+/* Text table of the dark cells on the lattice (period, offset): every (symbol, RB parity, subcarrier) whose dark rate on the lattice slots is >= 0.2, as
+ * "l<symbol><e|o><subcarrier>=<on-lattice rate>/<off-lattice rate>". Diagnostic of what the proposer saw behind a proposal. Returns the length written. */
+int nr_csirs_zp_cells(const nr_csirs_zp_det_t *, int period, int offset, char *buf, size_t len);
+
 #ifdef __cplusplus
 }
 #endif
