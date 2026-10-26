@@ -43,6 +43,7 @@ __thread bool nr_dl_chest_cpu_ref; /* FATTAILS: the GPU-check worker's reference
 /* Consumer-only diagnostics (BRDELAY/PDP). The passive decode consumer sets the request flag on its
  * thread; the per-antenna pool task inherits it through the task struct. Never set on the RT thread. */
 static __thread int nr_dl_chest_cur_ant = 0; // set by the per-antenna task before the interp call
+static __thread int nr_dl_chest_cur_nl = 0, nr_dl_chest_cur_sym = 0; /* prg_diag only */
 /* nr_dl_chest_delay_epoch: bumped per passive decode; GPU stage-record context key (the shared-delay mode itself is gone). */
 __thread uint32_t nr_dl_chest_delay_epoch;
 extern __thread int nr_dl_chest_diag_request;
@@ -1023,6 +1024,144 @@ static int chest_ls_type2(const NR_DL_FRAME_PARMS *frame_parms, const c16_t *rxF
   return idx;
 }
 
+/* prg_diag (ISAC_DBG_PRGSNR=1, diagnostic, default off): on a wide type-1 grant (>= 32 contiguous PRBs, antenna 0), measures from the
+ * delay-compensated LS pair estimates (3 per PRB, 4 subcarriers apart, also across PRB boundaries) whether the channel jumps at PRB-group
+ * boundaries (precoding per PRG, TS 38.214 5.1.2.3): mean |delta|^2 of neighbours inside a PRB vs across the boundary after PRB r, by
+ * (r + 1) mod 4 of the BWP-relative index; the residual phase step per 4 subcarriers left after the delay compensation; and the SNR of
+ * windowed means over 1, 2, 4 PRB and the whole allocation. Logs 1 call in 64. */
+static void prg_diag(const NR_DL_FRAME_PARMS *fp, const c16_t *ls, const c16_t *dtab, int idx, const freq_alloc_bitmap_t *fa,
+                     const delay_t *delay)
+{
+  static int on = -1;
+  if (on < 0) { const char *e = getenv("ISAC_DBG_PRGSNR"); on = e && atoi(e) > 0; }
+  if (!on || nr_dl_chest_cur_ant != 0 || idx != fa->num_rbs * 12 || fa->num_rbs < 1) return;
+  const int np = idx / 4; /* pair estimates: entries 0, 4, 8, ... */
+  double x[3 * 275][2];
+  if (np > 3 * 275) return;
+  for (int i = 0; i < np; i++) {
+    const c16_t c = c16mulShift(ls[4 * i], dtab[4 * i], 8);
+    x[i][0] = c.r; x[i][1] = c.i;
+  }
+  { /* TIME noise: the same subcarrier on the next DM-RS symbol of the same (antenna 0, layer, allocation). The channel is quasi-static over
+     * half a slot, so |x2 - x1|^2 / 2 is the noise (+ inter-port leakage) of one pair estimate; split by grant width. */
+    static pthread_mutex_t tmu = PTHREAD_MUTEX_INITIALIZER;
+    static struct { int nl, sym, rb0, nrb; uint32_t epoch; double x[3 * 275][2]; } last[4];
+    static double tp[4], tn[4], fd[4], cr[4], ci[4], p1[4], p2[4], ang2[4];
+    static uint64_t na[4];
+    static uint64_t tc[4], tcalls;
+    const int wb = fa->num_rbs <= 4 ? 0 : fa->num_rbs <= 32 ? 1 : fa->num_rbs <= 128 ? 2 : 3;
+    const int sl = nr_dl_chest_cur_nl & 3;
+    pthread_mutex_lock(&tmu);
+    if (last[sl].nl == nr_dl_chest_cur_nl && last[sl].epoch == nr_dl_chest_delay_epoch && last[sl].rb0 == fa->first_rb
+        && last[sl].nrb == fa->num_rbs && last[sl].sym != nr_dl_chest_cur_sym) {
+      double p = 0, d = 0, f = 0, ccr = 0, cci = 0, q1 = 0;
+      for (int i = 0; i < np; i++) {
+        const double dr = x[i][0] - last[sl].x[i][0], di = x[i][1] - last[sl].x[i][1];
+        ccr += x[i][0] * last[sl].x[i][0] + x[i][1] * last[sl].x[i][1];
+        cci += x[i][1] * last[sl].x[i][0] - x[i][0] * last[sl].x[i][1];
+        q1 += last[sl].x[i][0] * last[sl].x[i][0] + last[sl].x[i][1] * last[sl].x[i][1];
+        p += x[i][0] * x[i][0] + x[i][1] * x[i][1];
+        d += dr * dr + di * di;
+        if (i + 1 < np) { const double er = x[i + 1][0] - x[i][0], ei = x[i + 1][1] - x[i][1]; f += er * er + ei * ei; }
+      }
+      if (d < p) { /* coherent: the hypothesis carries DM-RS */
+        tp[wb] += p; tn[wb] += d / 2; fd[wb] += f; tc[wb] += np;
+        cr[wb] += ccr; ci[wb] += cci; p1[wb] += q1; p2[wb] += p;
+        const double a = atan2(cci, ccr);
+        ang2[wb] += a * a; na[wb]++;
+      }
+      if ((++tcalls % 2000) == 0)
+        LOG_A(PHY, "SENSING: PRGTIME calls=%llu per-pair SNR from the DM-RS-symbol difference (noise) and the 4-subcarrier difference (noise + "
+                   "selectivity): nrb<=4 %.1f/%.1f dB (n=%llu) 5-32 %.1f/%.1f (n=%llu) 33-128 %.1f/%.1f (n=%llu) >128 %.1f/%.1f (n=%llu)\n",
+              (unsigned long long)tcalls, tn[0] > 0 ? 10 * log10(tp[0] / tn[0]) : -99, fd[0] > 0 ? 10 * log10(2 * tp[0] / fd[0]) : -99,
+              (unsigned long long)tc[0], tn[1] > 0 ? 10 * log10(tp[1] / tn[1]) : -99, fd[1] > 0 ? 10 * log10(2 * tp[1] / fd[1]) : -99,
+              (unsigned long long)tc[1], tn[2] > 0 ? 10 * log10(tp[2] / tn[2]) : -99, fd[2] > 0 ? 10 * log10(2 * tp[2] / fd[2]) : -99,
+              (unsigned long long)tc[2], tn[3] > 0 ? 10 * log10(tp[3] / tn[3]) : -99, fd[3] > 0 ? 10 * log10(2 * tp[3] / fd[3]) : -99,
+              (unsigned long long)tc[3]);
+    if (tcalls && (tcalls % 2000) == 0)
+      LOG_A(PHY, "SENSING: PRGTIME2 symbol-to-symbol correlation |rho| / mean angle / rms per-grant angle (rad): nrb<=4 %.3f/%.3f/%.3f "
+                 "5-32 %.3f/%.3f/%.3f 33-128 %.3f/%.3f/%.3f >128 %.3f/%.3f/%.3f (dsym=%d)\n",
+            p1[0] > 0 ? hypot(cr[0], ci[0]) / sqrt(p1[0] * p2[0]) : -1, atan2(ci[0], cr[0]), na[0] ? sqrt(ang2[0] / na[0]) : -1,
+            p1[1] > 0 ? hypot(cr[1], ci[1]) / sqrt(p1[1] * p2[1]) : -1, atan2(ci[1], cr[1]), na[1] ? sqrt(ang2[1] / na[1]) : -1,
+            p1[2] > 0 ? hypot(cr[2], ci[2]) / sqrt(p1[2] * p2[2]) : -1, atan2(ci[2], cr[2]), na[2] ? sqrt(ang2[2] / na[2]) : -1,
+            p1[3] > 0 ? hypot(cr[3], ci[3]) / sqrt(p1[3] * p2[3]) : -1, atan2(ci[3], cr[3]), na[3] ? sqrt(ang2[3] / na[3]) : -1,
+            nr_dl_chest_cur_sym - last[sl].sym);
+    }
+    last[sl].nl = nr_dl_chest_cur_nl; last[sl].sym = nr_dl_chest_cur_sym; last[sl].epoch = nr_dl_chest_delay_epoch;
+    last[sl].rb0 = fa->first_rb; last[sl].nrb = fa->num_rbs;
+    memcpy(last[sl].x, x, sizeof(x[0]) * np);
+    pthread_mutex_unlock(&tmu);
+  }
+  { /* frequency profile over all coherent estimates (neighbour |delta|^2 < half the power): per 16-RB bin, LS power and mismatch */
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static double bp[18], bd[18];
+    static uint64_t bn[18], calls;
+    double p0 = 0, d0 = 0;
+    for (int i = 0; i + 1 < np; i++) {
+      p0 += x[i][0] * x[i][0] + x[i][1] * x[i][1];
+      const double dr = x[i + 1][0] - x[i][0], di = x[i + 1][1] - x[i][1];
+      d0 += dr * dr + di * di;
+    }
+    if (np > 1 && d0 < 0.5 * p0) {
+      pthread_mutex_lock(&mu);
+      for (int i = 0; i + 1 < np; i++) {
+        const int b = (fa->first_rb + i / 3) / 16;
+        if (b >= 18) continue;
+        const double dr = x[i + 1][0] - x[i][0], di = x[i + 1][1] - x[i][1];
+        bp[b] += x[i][0] * x[i][0] + x[i][1] * x[i][1];
+        bd[b] += dr * dr + di * di;
+        bn[b]++;
+      }
+      if ((++calls % 4000) == 0) {
+        char buf[1024];
+        int o = 0;
+        buf[0] = 0;
+        for (int b = 0; b < 18 && o < 1000; b++) {
+          if (bn[b] && bd[b] > 0)
+            o += snprintf(buf + o, sizeof(buf) - o, " rb%d:n=%llu,pw=%.1fdB,snr=%.1fdB", b * 16, (unsigned long long)bn[b],
+                          10 * log10(bp[b] / bn[b]), 10 * log10(2.0 * bp[b] / bd[b]));
+        }
+        LOG_A(PHY, "SENSING: PRGPROF calls=%llu%s\n", (unsigned long long)calls, buf);
+      }
+      pthread_mutex_unlock(&mu);
+    }
+  }
+  if (fa->num_rbs < 32) return;
+  static _Atomic unsigned n;
+  if ((atomic_fetch_add(&n, 1) % 64) != 0) return;
+  double win = 0, cls[4] = {0}, pwr = 0, sr = 0, si = 0;
+  int nwin = 0, ncls[4] = {0};
+  for (int i = 0; i + 1 < np; i++) {
+    const double dr = x[i + 1][0] - x[i][0], di = x[i + 1][1] - x[i][1], d2 = dr * dr + di * di;
+    sr += x[i + 1][0] * x[i][0] + x[i + 1][1] * x[i][1];
+    si += x[i + 1][1] * x[i][0] - x[i + 1][0] * x[i][1];
+    if ((i % 3) != 2) { win += d2; nwin++; }
+    else { const int b = (fa->first_rb + i / 3 + 1) % 4; cls[b] += d2; ncls[b]++; }
+  }
+  for (int i = 0; i < np; i++) pwr += x[i][0] * x[i][0] + x[i][1] * x[i][1];
+  pwr /= np;
+  win = nwin ? win / nwin : 0;
+  double snr[4];
+  const int W[4] = {1, 2, 4, 1000};
+  for (int w = 0; w < 4; w++) {
+    double res = 0, sig = 0;
+    for (int r0 = 0; r0 < fa->num_rbs; r0 += W[w]) {
+      const int a = 3 * r0, b = 3 * (r0 + W[w] < fa->num_rbs ? r0 + W[w] : fa->num_rbs);
+      double mr = 0, mi = 0;
+      for (int i = a; i < b; i++) { mr += x[i][0]; mi += x[i][1]; }
+      mr /= (b - a); mi /= (b - a);
+      for (int i = a; i < b; i++) { const double er = x[i][0] - mr, ei = x[i][1] - mi; res += er * er + ei * ei; }
+      sig += (mr * mr + mi * mi) * (b - a);
+    }
+    snr[w] = res > 0 ? 10 * log10(sig / res) : 99;
+  }
+  LOG_A(PHY, "SENSING: PRGDIAG rb=%d+%d est_delay=%d phase_step=%.4f rad pwr=%.0f | |d|^2/pwr within-PRB=%.4f boundary (r+1)%%4=0:%.4f 1:%.4f "
+             "2:%.4f 3:%.4f | windowed-mean SNR dB W1=%.1f W2=%.1f W4=%.1f Wall=%.1f\n",
+        fa->first_rb, fa->num_rbs, delay->est_delay, atan2(si, sr), pwr, win / pwr, ncls[0] ? cls[0] / ncls[0] / pwr : -1,
+        ncls[1] ? cls[1] / ncls[1] / pwr : -1, ncls[2] ? cls[2] / ncls[2] / pwr : -1, ncls[3] ? cls[3] / ncls[3] / pwr : -1, snr[0],
+        snr[1], snr[2], snr[3]);
+}
+
 static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
                                               c16_t *rxF,
                                               c16_t *pil,
@@ -1061,6 +1200,7 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
   }
   int delay_idx = get_delay_idx(delay->est_delay, MAX_DELAY_COMP);
   c16_t *dl_delay_table = frame_parms->delay_table[delay_idx];
+  prg_diag(frame_parms, dl_ls_est, dl_delay_table, idx, freq_alloc, delay);
 
   for (int pilot_cnt = 0; pilot_cnt < idx >> 1; pilot_cnt++) {
     int k = pilot_cnt << 1;
@@ -1394,6 +1534,8 @@ static void nr_pdsch_chest_ant_task(void *arg)
   delay_t delay = {0};
   nr_dl_chest_diag_request = a->diag_request;
   nr_dl_chest_cur_ant = a->aarx;
+  nr_dl_chest_cur_nl = a->nl;
+  nr_dl_chest_cur_sym = a->symbol;
   t_gpu_delay_pending = a->gpu_delay_ok;
   t_gpu_delay_val = a->gpu_delay;
   if (a->config_type == NFAPI_NR_DMRS_TYPE1 && a->ue->chest_freq == 0) {
