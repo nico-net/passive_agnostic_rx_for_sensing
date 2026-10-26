@@ -656,7 +656,12 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
       int readBlockSize = get_samples_per_slot(slot_rx, fp);
       int tmp = nrue_ru_read(UE, timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
       UEscopeCopy(UE, ueTimeDomainSamplesBeforeSync, rxp[0], sizeof(c16_t), 1, readBlockSize, 0);
-      AssertFatal(readBlockSize == tmp, "");
+      /* A UHD overflow returns a short read here instead of readBlockSize -- an AssertFatal on
+       * that killed the whole process (measured: "received N samples out of M" then abort,
+       * reproducible at 217 PRB / 80 MHz). Log and continue: this acquisition window is bad,
+       * but the process surviving to retry is strictly better than a hard crash. */
+      if (readBlockSize != tmp)
+        LOG_W(PHY, "[short read] acquisition got %d of %d RF samples (recoverable)\n", tmp, readBlockSize);
 
       if (IS_SOFTMODEM_RFSIM) {
         int slot_tx = (slot_rx + duration_rx_to_tx) % fp->slots_per_frame;
@@ -961,7 +966,10 @@ void *UE_thread(void *arg)
     int tmp = nrue_ru_read(UE, &rx_timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
     metadata meta = {.slot =  curMsg.proc.nr_slot_rx, .frame =  curMsg.proc.frame_rx};
     UEscopeCopyWithMetadata(UE, ueTimeDomainSamples, rxp[0] - firstSymSamp, sizeof(c16_t), 1, readBlockSize, 0, &meta);
-    AssertFatal(readBlockSize == tmp, "");
+    /* Same short-read-after-overflow fault as the acquisition-path read above -- see that
+       comment. Log and continue instead of aborting the process. */
+    if (readBlockSize != tmp)
+      LOG_W(PHY, "[short read] slot got %d of %d RF samples (recoverable)\n", tmp, readBlockSize);
     struct timespec current_time;
     if (clock_gettime(CLOCK_REALTIME, &current_time)) {
       LOG_E(PHY, "clock_gettime failed\n");
