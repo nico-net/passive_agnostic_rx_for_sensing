@@ -6067,17 +6067,17 @@ TEST(UlLayoutFit, CellBwpSplitSurvivesNonGrantDcisInTheBank)
   std::vector<nr_ul_layout_dci_t> clean = Ull273Bank(600, 0, false);
   np = nr_ul_layout_fit_prefix(clean.data(), (int)clean.size(), 43, 20, cand, 9, pre, 8);
   EXPECT_TRUE(Ull273Has(pre, np));
-  // 8 % non-grant DCIs: 43 % of their 16-bit values are invalid RIVs, so the 98 % validity test fails; the cell BWP split stays
+  // 8 % non-grant DCIs: 43 % of their 16-bit values are invalid RIVs; the cell BWP split is a hypothesis whatever the statistics say
   std::vector<nr_ul_layout_dci_t> dirty = Ull273Bank(600, 8, false);
   np = nr_ul_layout_fit_prefix(dirty.data(), (int)dirty.size(), 43, 20, cand, 9, pre, 8);
   EXPECT_TRUE(Ull273Has(pre, np));
-  // not the first candidate (no SIB1 / carrier prior for 273): the strict rule applies, the dirty bank loses the split
-  const uint16_t other[] = {245, 217, 273};
-  np = nr_ul_layout_fit_prefix(dirty.data(), (int)dirty.size(), 43, 20, other, 3, pre, 8);
-  EXPECT_FALSE(Ull273Has(pre, np));
-  // a field that is not a RIV at all (uniform 16 bits: 57 % valid) never qualifies, prior or not
+  // the same for a field that carries no RIV structure at all: the PUSCH CRC, not the statistics, discards it
   std::vector<nr_ul_layout_dci_t> rnd = Ull273Bank(600, 0, true);
   np = nr_ul_layout_fit_prefix(rnd.data(), (int)rnd.size(), 43, 20, cand, 9, pre, 8);
+  EXPECT_TRUE(Ull273Has(pre, np));
+  // a BWP size that is neither the first nor the largest candidate is not added by the prior rule
+  const uint16_t other[] = {245, 217, 189};
+  np = nr_ul_layout_fit_prefix(dirty.data(), (int)dirty.size(), 43, 20, other, 3, pre, 8);
   EXPECT_FALSE(Ull273Has(pre, np));
 }
 
@@ -6189,7 +6189,7 @@ TEST(UlLayoutFit, EntropyRankedPrefixAndFitReadAreCoherent)
   nr_ul_layout_prefix_t pre[6];
   int np = nr_ul_layout_fit_prefix(b.data(), (int)b.size(), 44, mo, cand, 5, pre, 6);
   np = nr_ul_layout_fit_prefix(b.data(), (int)b.size(), 44, mo, cand, 5, pre, 6);
-  ASSERT_EQ(np, 1);
+  ASSERT_GE(np, 1);  // the statistical split first; the widths of the prior BWP sizes (first and largest candidate) are appended as hypotheses
   EXPECT_EQ(pre[0].bwp_ind, 1);
   EXPECT_EQ(pre[0].riv, 15);
   EXPECT_EQ(pre[0].tda, 3);
@@ -6352,6 +6352,123 @@ TEST(UlLayoutLock, CrcResolvesAnAmbiguousOffsetAndOnlyACrcPassLocksIt)
   }
   EXPECT_GT(n, 150);
   EXPECT_EQ(ok, n);
+  nr_ul_layout_lock_reset();
+}
+
+// ---- 273 PRB cell whose uplink bank is dominated by wide grants that end at the last PRB: for odd N the RIV of S + L = N is N(N-L+1) + L - 1, whose
+// LSB is the constant 1. [MEASURED, sens6 OTA lab, i7R4_lab_20261026_021625: the gNB's grants give RIV-LSB p1 = 0.96 / 1.00 / 0.98 / 0.85 in four
+// windows] the RIV-LSB entropy gate (0.05..0.95) dropped the cell's own split, so no candidate carried the 273 BWP and the layout never locked.
+namespace {
+struct UllWide {
+  std::mt19937 rng{99};
+  int8_t ndi[4][16];
+  int k = 0;
+  UllWide() { memset(ndi, 0, sizeof(ndi)); }
+  nr_ul_layout_dci_t next(UllFree::Truth *t)
+  {
+    static const int dci_slots[4] = {6, 7, 16, 17};
+    const int u = (int)(rng() % 2), pid = (int)(rng() % 4);
+    const bool retx = rng() % 4 == 0;
+    if (!retx) ndi[u][pid] ^= 1;
+    const bool wide = rng() % 10 < 7;
+    const uint8_t rv = retx ? 2 : 0, mcs = wide ? 25 : (uint8_t)(rng() % 8);
+    static const int wideL[5] = {266, 238, 265, 268, 259};  // end-aligned at PRB 273 (the scheduler's wide grants): for odd N the RIV LSB is constant 1
+    const int L = wide ? wideL[rng() % 5] : 6, S = wide ? 273 - L : (int)(rng() % (273 - L + 1));
+    uint64_t v = 0;
+    auto put = [&](uint32_t x, int w) { v = (v << w) | (x & ((1u << w) - 1u)); };
+    put(0, 1); put(UllRiv(273, S, L), 16); put(0, 3); put(mcs, 5); put(ndi[u][pid], 1); put(rv, 2);
+    put(pid, 4); put(3, 2); put(1, 2); put(0, 3); put(0, 2); put(0, 1); put(1, 1);
+    *t = {mcs, (uint8_t)ndi[u][pid], rv, (uint8_t)pid, (uint16_t)S, (uint16_t)L};
+    nr_ul_layout_dci_t d;
+    d.rnti = (uint16_t)(0x4600 + u);
+    d.slot = (long)(50 + k / 4) * 20 + dci_slots[k % 4];
+    k++;
+    d.p = nr_dci_bits_from_u64(v);
+    return d;
+  }
+};
+const nr_ul_layout_cell_t kWideCell = {.carrier_rb = 273, .dl_bwp_size = 273, .pci = 2, .mu = 1, .typeA_pos = 0, .slots_per_frame = 20,
+                                       .sib1_ul_start = 0, .sib1_ul_size = 273, .sib1_ul_dl = 1};
+int UllWideFeed(const nr_ul_layout_dci_t &d, nr_pdcch_blind_ul_result_t *tr)
+{
+  nr_pdcch_blind_ul_result_t out;
+  for (int s2 = 0; s2 < 7; s2++) {
+    nr_ul_layout_note_pdcch_slot((d.slot / 20) * 20 + s2);
+    nr_ul_layout_note_pdcch_slot((d.slot / 20) * 20 + 10 + s2);
+  }
+  nr_ul_layout_on_dci(d.rnti, 43, d.slot, d.p, &kWideCell, &out);
+  return nr_ul_layout_crc_trials(d.rnti, 43, d.slot, d.p, &kWideCell, tr, NR_UL_LAYOUT_MAX_TRIALS);
+}
+}  // namespace
+
+TEST(UlLayoutFit, WideGrantBankKeepsTheCellBwpSplitAndTheTrueOffsetLeadsTheRanking)
+{
+  UllWide g;
+  UllFree::Truth t;
+  std::vector<nr_ul_layout_dci_t> b;
+  for (int i = 0; i < 600; i++) b.push_back(g.next(&t));
+  int offs[NR_UL_LAYOUT_MAX_CAND];
+  float rs[NR_UL_LAYOUT_MAX_CAND];
+  const int n = nr_ul_layout_rank_mcs(b.data(), (int)b.size(), 43, offs, rs, NR_UL_LAYOUT_MAX_CAND);
+  ASSERT_GE(n, 2);
+  EXPECT_EQ(offs[0], 20);  // constant-zero blocks no longer tie with the HARQ block
+  EXPECT_GT(rs[0], rs[1]);
+  const uint16_t cand[] = {273, 272, 271, 270, 269, 268, 245, 217, 189, 162, 107, 79};
+  nr_ul_layout_prefix_t pre[8];
+  const int np = nr_ul_layout_fit_prefix(b.data(), (int)b.size(), 43, 20, cand, 12, pre, 8);
+  bool has = false;
+  for (int i = 0; i < np; i++) has |= pre[i].bwp_ind == 0 && pre[i].riv == 16 && pre[i].n_max == 273 && pre[i].tda == 3;
+  EXPECT_TRUE(has);
+}
+
+TEST(UlLayoutLock, WideGrantBankLocksTheCellBwpOnACrcPass)
+{
+  nr_ul_layout_lock_reset();
+  UllWide g;
+  UllFree::Truth t;
+  nr_pdcch_blind_ul_result_t tr[NR_UL_LAYOUT_MAX_TRIALS];
+  for (int i = 0; i < 400; i++) UllWideFeed(g.next(&t), tr);
+  nr_ul_layout_eval_once();
+  bool locked = false;
+  for (int i = 0; i < 40000 && !locked; i++) {
+    const nr_ul_layout_dci_t d = g.next(&t);
+    const int nt = UllWideFeed(d, tr);
+    for (int q = 0; q < nt; q++) {
+      const bool truth = nr_ul_layout_is_trial(&tr[q]) && tr[q].mcs == t.mcs && tr[q].ndi == t.ndi && tr[q].rv == t.rv &&
+                         tr[q].harq_pid == t.pid && tr[q].num_rb == t.len && tr[q].start_rb + tr[q].bwp_start == t.start;
+      nr_ul_layout_crc_verdict(&tr[q], truth, truth ? 6000 : 0, 1, truth ? 1 : 0, d.slot);  // a decode passes only if the layout reads the grant right
+    }
+    if (i % 32 == 0) nr_ul_layout_eval_once();
+    locked = !nr_ul_layout_provisional(43) && !nr_ul_layout_searching();
+  }
+  EXPECT_TRUE(locked);
+  nr_ul_layout_lock_reset();
+}
+
+// A provisional fit rests on the bank of its time. When the traffic later makes the statistics significant, the strict fit must replace it
+// (the good on-air runs lock through it; r2in1 / r2in2 / i7R4 stayed on a provisional candidate from the first few hundred DCIs).
+TEST(UlLayoutLock, StrictFitReplacesAProvisionalOneWhenTheStatisticsBecomeSignificant)
+{
+  nr_ul_layout_lock_reset();
+  UllFree free_gen;
+  UllFree::Truth ft;
+  nr_pdcch_blind_ul_result_t out, tr[NR_UL_LAYOUT_MAX_TRIALS];
+  for (int i = 0; i < 400; i++) UllFeed(free_gen.next(&ft), tr);
+  nr_ul_layout_eval_once();
+  ASSERT_TRUE(nr_ul_layout_provisional(44));
+  UllTimGen g;
+  UlTruth t;
+  const nr_ul_layout_cell_t cell = kFreeCell;
+  for (int i = 0; i < 1500; i++) {
+    for (int s2 = 0; s2 < 18; s2++)
+      if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(5000 + i * 20 + s2);
+    const nr_ul_layout_dci_t d = g.next(&t);
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+    if (i % 32 == 0) nr_ul_layout_eval_once();
+  }
+  nr_ul_layout_eval_once();
+  EXPECT_FALSE(nr_ul_layout_provisional(44));
+  EXPECT_TRUE(nr_ul_layout_read_fitted(0x4000, 44, nr_dci_bits_from_u64(0x123456789ull), &out));  // the strict fit is read
   nr_ul_layout_lock_reset();
 }
 
@@ -6645,7 +6762,10 @@ TEST(UlLayoutLock, CrcGuardNeedsEvidenceForCrc16AndLocksOnCrc24)
   ASSERT_GE(n, 1);
   const uint64_t used0 = t[0].hyp_generation >> 40 & 0xfff, used1 = t[1].hyp_generation >> 40 & 0xfff;
   int pk = -1;
-  for (int i = 0; i < n; i++) { const uint64_t e = t[i].hyp_generation >> 40 & 0xfff; if (e != used0 && e != used1) pk = i; }
+  for (int i = 0; i < n; i++) { /* a fresh hypothesis: another BWP than the locked one */
+    const uint64_t e = t[i].hyp_generation >> 40 & 0xfff;
+    if (e != used0 && e != used1 && (t[i].bwp_start != o.bwp_start || t[i].bwp_size != o.bwp_size)) pk = i;
+  }
   ASSERT_GE(pk, 0);
   const nr_pdcch_blind_ul_result_t fresh = t[pk];
   nr_ul_layout_crc_verdict(&fresh, true, 63, 1, 1, 200);
