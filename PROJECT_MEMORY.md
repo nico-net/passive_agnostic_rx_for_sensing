@@ -2361,6 +2361,34 @@ NOT validated on the DGX — run a DGX T10 / TIM+Vodafone A/B before trusting it
 - NIC IRQs must stay on CPU 0 (spreading them over 0-2 broke the X410 stream in 5 s); watch `rx_out_of_buffer`.
 
 
+**2026-10-25/26 lab decode work (merged into adaptive-rx-UL-DL by fast-forward to `c0736a228e`, 2026-10-26).**
+All `[MEASURED, sens6 OTA, sens4 lab cell, 273 PRB, 4 RX, gain 36]` unless noted; per-RNTI DCI recall with
+`groundtruth.py match_clock` (the old single-offset `groundtruth:` line is wrong after RX slot jumps). Runbook:
+`docs/superpowers/experiments/LAB-ESPERIMENTI-IT.md` + `scripts/`. Run-to-run variance is large: ≥ 2 alternated runs per arm.
+- RX gain 36 (config): 49 clips DL slots (ADC at the X4xx full scale 8191 after rxshift=2; `ADCCLASS`, `32b9ad5e71`); 42→36 signal
+  and noise drop together (DM-RS SNR ~30 dB, signal-proportional floor ~-30 dB); 30 is thermal-limited.
+- Discovery: false CORESET aliases (same nID, overlapping geometry) → re-expression arbiter + alias eviction (`0443cdc466`,
+  `d22ba5e1af`, races `1e4ade914e`/`0c282f5a11`); bank = 1 in every run since. Reconfiguration storm (absence ≠ evidence,
+  `8590209d86`); CRC-falsifiable UL lock (`45c0a1838f`); cell DCI 1_1 length hint by corroborating locks (`0e4028574c`: one spurious
+  length lock had stopped the bank pass, DL recall 0.20-0.45 → 0.97-0.99).
+- DL: in-slot SFO correction, eps from the timing loop + DM-RS slope, referenced to the SSB centre (`6859f63e2e`, `4a1e19f8ac`,
+  `176afaf312`, `84d2a1f46a`, `333701f996`; eps ≈ +3.8 ppm). Rank-2 equaliser clipped in int16 mode 2 → exact mode 3 when nbRx > nl
+  (`cac200ad51`; rank 2 MCS 24-27 0.14/0.03/0.005 → 0.59/0.57/0.36). 256QAM LLR normaliser squeezed the lattice to 2.5-5 LSB for the
+  int8 LDPC → Qm-aware target (`2bb691c386`; rank-1 wide 0.27 → 0.61; rank-4 A/B 2 v 2: better at every width). The 2-layer target
+  change `fb32f74de7` HURT on air (0.63 → 0.33) and is NOT merged. After the fixes, MCS 24-27: rank 1 0.66-0.79 / 0.76-0.78 / 0.61
+  (≤32 / 33-128 / >128 RB), rank 2 0.30-0.63 / 0.30-0.65 / 0.10-0.47, rank 4 ~0.1 narrow and ~0 wide (MCS 20-23: 0.52-0.57 narrow).
+  Wide rank 4 is consistent with 4x4 conditioning at the RX position (WIDE-RANK4-20261025.md), not proven.
+- UL: data-id order DL-confirmed PDSCH id → PCI → PDCCH id, lock only on a decisive pass (`77db2342cd`, `4a2aa5a144`, `26fd85e7dc`);
+  UL SFO in every UL FEP + blind UCI-on-PUSCH by default (`7abb385049`, `82ba091f5c`, `aa4bc71549`); run-time UL branch selection
+  instead of the fixed branch 0 (`55502ec544`); CRC-decided layout fit (`cd9407e795`, `c0736a228e`: strict fit retried while
+  provisional, the cell-BWP RIV split always a hypothesis, trial budget per verdict). Layout locked in 4/4 runs after `c0736a228e`
+  (3 of the 6 runs before failed). UL CRC ≤8 RB 0.81-0.97, >64 RB 0.36-0.96 by run.
+- OPEN: (1) run-to-run variance at equal SNR (rank-2 DL 0.08-0.61, UL wide 0.09-0.96; one run collapsed in both directions);
+  hypothesis: X410 LMX2572 LO synthesiser (init failed 3 times overnight) — check the PLL lock sensors per run. (2) CSI-RS slot fix
+  (CDM-aware scoring + blind ZP-CSI-RS + CRC arbiter) unfinished, uncommitted in worktree s6-csirs. (3) DGX validation of all of
+  the above not done; rfsim gate not run on the merged tree. (4) OAI UE CSI-part-2 placement fixed upstream in 2026.w33 (`44190828cc`),
+  not applied (UE/fixture only; the receiver tries both placements).
+
 ### 15.0 Site change (2026-09-30) — read first
 
 - **Update 2026-10-02:** an X410 OTA session is scheduled from **2026-10-03** (operator); it will be the first air
