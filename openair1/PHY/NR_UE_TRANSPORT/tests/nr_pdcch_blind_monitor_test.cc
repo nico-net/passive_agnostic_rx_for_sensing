@@ -5737,16 +5737,17 @@ TEST(UlUeIds, TwoUesAndRntiReuseKeepConfirmedIdsSeparate) {
   dl.cfg[NR_UEP_DCI_LEN_DL].value=52;
   dl.cfg[NR_UEP_DCI_LEN_DL].verif=NR_UEV_TRUSTED;
   dl.cfg[NR_UEP_PDSCH_SCR_ID].value=512;
+  dl.cfg[NR_UEP_PDSCH_SCR_ID].source=NR_UES_OBSERVATION;
   dl.cfg[NR_UEP_PDCCH_SCR_ID].value=768;
   nr_ue_ul_ticket_t a{1,4,0,0x101},b{1,4,0,0x102};
   nr_pusch_passive_ul_ids_seed(&a,&dl,415);
   nr_pusch_passive_ul_ids_seed(&b,&dl,415);
   uint16_t dmrs=0,data=0;
   nr_pusch_passive_ul_ids_current(a.rnti,0,415,&dmrs,&data);
-  EXPECT_EQ(dmrs,415); EXPECT_EQ(data,415);
+  EXPECT_EQ(dmrs,415); EXPECT_EQ(data,512); /* the DL-CRC-confirmed PDSCH data id is the first UL data hypothesis */
   nr_pusch_passive_ul_ids_failed(&a);
   nr_pusch_passive_ul_ids_current(a.rnti,0,415,&dmrs,&data);
-  EXPECT_EQ(dmrs,415); EXPECT_EQ(data,512);
+  EXPECT_EQ(dmrs,415); EXPECT_EQ(data,415); /* then the cell default */
   nr_pusch_passive_ul_ids_confirm(&a,0,900,901,8000,1);
   nr_pusch_passive_ul_ids_confirm(&b,0,700,701,8000,1);
   ASSERT_TRUE(nr_pusch_passive_ul_ids_get(&a,0,&dmrs,&data));
@@ -5760,6 +5761,48 @@ TEST(UlUeIds, TwoUesAndRntiReuseKeepConfirmedIdsSeparate) {
   EXPECT_FALSE(nr_pusch_passive_ul_ids_get(&reused,0,&dmrs,&data));
   nr_pusch_passive_ul_ids_confirm(&a,0,900,901,8000,1);
   EXPECT_FALSE(nr_pusch_passive_ul_ids_get(&reused,0,&dmrs,&data));
+  nr_pusch_passive_ul_ids_reset_all();
+}
+/* TS 38.331: dataScramblingIdentityPUSCH and dataScramblingIdentityPDSCH are separate fields. The DL-confirmed id is only the first
+ * UL hypothesis: a UL id that differs is found by the PCI default / the other priors / the walk, and only a decisive UL CRC pass locks. */
+TEST(UlIds, DlConfirmedDataIdIsFirstHypothesisNeverAssumed) {
+  nr_pusch_passive_ul_ids_reset_all();
+  nr_ue_ctx_t dl{};
+  dl.identity_gen=1; dl.incarnation=0;
+  dl.cfg[NR_UEP_DCI_LEN_DL].value=52;
+  dl.cfg[NR_UEP_DCI_LEN_DL].verif=NR_UEV_TRUSTED;
+  dl.cfg[NR_UEP_PDSCH_SCR_ID].value=512;
+  dl.cfg[NR_UEP_PDSCH_SCR_ID].source=NR_UES_OBSERVATION;
+  dl.cfg[NR_UEP_PDSCH_SCR_ID].verif=NR_UEV_TRUSTED;
+  dl.cfg[NR_UEP_PDCCH_SCR_ID].value=768;
+  nr_ue_ul_ticket_t a{1,4,0,0x301};
+  nr_pusch_passive_ul_ids_seed(&a,&dl,415);
+  uint16_t dmrs=0,data=0;
+  nr_pusch_passive_ul_ids_current(a.rnti,0,415,&dmrs,&data);
+  EXPECT_EQ(data,512);
+  nr_pusch_passive_ul_ids_failed(&a);
+  nr_pusch_passive_ul_ids_current(a.rnti,0,415,&dmrs,&data);
+  EXPECT_EQ(data,415);
+  nr_pusch_passive_ul_ids_failed(&a);
+  nr_pusch_passive_ul_ids_current(a.rnti,0,415,&dmrs,&data);
+  EXPECT_EQ(data,768);
+  uint16_t id=0;
+  /* a CRC16 pass of the DL id is not decisive: no lock */
+  nr_pusch_passive_ul_ids_confirm(&a,0,415,512,100,10);
+  EXPECT_FALSE(nr_pusch_passive_ul_data_id_locked(a.rnti,&id));
+  /* the UL id differs from the DL id: a decisive CRC24 pass of the PCI default locks the PCI, not the DL id */
+  nr_pusch_passive_ul_ids_confirm(&a,0,415,415,8000,11);
+  ASSERT_TRUE(nr_pusch_passive_ul_data_id_locked(a.rnti,&id));
+  EXPECT_EQ(id,415);
+  nr_pusch_passive_ul_ids_current(a.rnti,0,415,&dmrs,&data);
+  EXPECT_EQ(data,415);
+  /* a DL id that is not CRC-verified (hint) or out of the 0..1023 range is not a hypothesis */
+  nr_pusch_passive_ul_ids_reset_all();
+  dl.cfg[NR_UEP_PDSCH_SCR_ID].verif=NR_UEV_HINT;
+  nr_ue_ul_ticket_t b{1,4,0,0x302};
+  nr_pusch_passive_ul_ids_seed(&b,&dl,415);
+  nr_pusch_passive_ul_ids_current(b.rnti,0,415,&dmrs,&data);
+  EXPECT_EQ(data,415);
   nr_pusch_passive_ul_ids_reset_all();
 }
 /* The per-RNTI data-id lock takes only decisive evidence: a CRC24 TB, or a CRC16 pass repeated on another slot; it does not
@@ -5983,6 +6026,61 @@ struct UllGen {
 };
 }  // namespace
 
+// The prefix split of the cell's own BWP (273 PRB: 16-bit RIV, no BWP indicator, 3-bit TDRA, MCS at bit 20; DCI 43 bits) survives a
+// bank that also holds DCIs which are not grants of this layout; a random field never qualifies. [MEASURED, sens6 OTA lab cell,
+// ulintb2_lab_20261025_214624 / valD2_lab_20261025_221820: mcs_off 20 found, prefixes {245,162}, the 273 split missing]
+static std::vector<nr_ul_layout_dci_t> Ull273Bank(int n, int junk_pct, bool random_riv)
+{
+  std::mt19937 rng(777);
+  std::vector<nr_ul_layout_dci_t> b;
+  for (int i = 0; i < n; i++) {
+    uint64_t v = 0;
+    auto put = [&](uint32_t x, int w) { v = (v << w) | (x & ((1u << w) - 1u)); };
+    if ((int)(rng() % 100) < junk_pct) {
+      v = ((uint64_t)rng() << 32 | rng()) & ((1ull << 43) - 1);
+    } else {
+      const int L = (rng() % 10) ? 3 : 1 + (int)(rng() % 120);
+      const int S = (int)(rng() % (273 - L + 1));
+      put(0, 1); put(random_riv ? (rng() & 0xFFFF) : UllRiv(273, S, L), 16); put(3, 3); put(rng() % 28, 5);
+      put(rng() & 1, 1); put((rng() % 12) ? 0 : 2, 2); put(rng() % 16, 4); put(3, 2); put(1, 2); put(0, 3);
+      put(0, 2); put(0, 1); put(1, 1);  // 43 bits
+    }
+    nr_ul_layout_dci_t d;
+    d.rnti = 0x4603;
+    d.slot = 1000 + i;
+    d.p = nr_dci_bits_from_u64(v);
+    b.push_back(d);
+  }
+  return b;
+}
+static bool Ull273Has(const nr_ul_layout_prefix_t *pre, int np)
+{
+  for (int i = 0; i < np; i++) if (pre[i].bwp_ind == 0 && pre[i].riv == 16 && pre[i].n_max == 273) return true;
+  return false;
+}
+TEST(UlLayoutFit, CellBwpSplitSurvivesNonGrantDcisInTheBank)
+{
+  const uint16_t cand[] = {273, 272, 271, 270, 245, 217, 189, 162, 106};
+  nr_ul_layout_prefix_t pre[8];
+  int np = 0;
+  // clean bank: unchanged behaviour, the true split is listed
+  std::vector<nr_ul_layout_dci_t> clean = Ull273Bank(600, 0, false);
+  np = nr_ul_layout_fit_prefix(clean.data(), (int)clean.size(), 43, 20, cand, 9, pre, 8);
+  EXPECT_TRUE(Ull273Has(pre, np));
+  // 8 % non-grant DCIs: 43 % of their 16-bit values are invalid RIVs, so the 98 % validity test fails; the cell BWP split stays
+  std::vector<nr_ul_layout_dci_t> dirty = Ull273Bank(600, 8, false);
+  np = nr_ul_layout_fit_prefix(dirty.data(), (int)dirty.size(), 43, 20, cand, 9, pre, 8);
+  EXPECT_TRUE(Ull273Has(pre, np));
+  // not the first candidate (no SIB1 / carrier prior for 273): the strict rule applies, the dirty bank loses the split
+  const uint16_t other[] = {245, 217, 273};
+  np = nr_ul_layout_fit_prefix(dirty.data(), (int)dirty.size(), 43, 20, other, 3, pre, 8);
+  EXPECT_FALSE(Ull273Has(pre, np));
+  // a field that is not a RIV at all (uniform 16 bits: 57 % valid) never qualifies, prior or not
+  std::vector<nr_ul_layout_dci_t> rnd = Ull273Bank(600, 0, true);
+  np = nr_ul_layout_fit_prefix(rnd.data(), (int)rnd.size(), 43, 20, cand, 9, pre, 8);
+  EXPECT_FALSE(Ull273Has(pre, np));
+}
+
 TEST(UlLayoutLock, RivWidthsAndDecode)
 {
   EXPECT_EQ(nr_ul_layout_riv_bits(216), 15);
@@ -6120,6 +6218,159 @@ TEST(UlLayoutFit, EntropyRankedPrefixAndFitReadAreCoherent)
   }
   EXPECT_GT(n, 150);
   EXPECT_EQ(ok, n);
+  nr_ul_layout_lock_reset();
+}
+
+// ---- ULFIT-CRC: the MCS-offset statistics are traffic dependent. A scheduler that picks HARQ ids freely (38.321 mandates no
+// step 1..3) leaves no significant offset; the ranked offsets then become hypotheses that only a PUSCH CRC pass can lock.
+namespace {
+struct UllFree {  // the PCI 415 layout of UllGen with free HARQ ids: pid uniform per grant, NDI toggled for new data (RV 0), kept for a retransmission (RV 2)
+  std::mt19937 rng{4242};
+  int8_t ndi[8][16];
+  int k = 0;
+  UllFree() { memset(ndi, 0, sizeof(ndi)); }
+  struct Truth { uint8_t mcs, ndi, rv, pid; uint16_t start, len; };
+  nr_ul_layout_dci_t next(Truth *t)
+  {
+    static const int dci_slots[4] = {6, 7, 16, 17};
+    const int u = (int)(rng() % 8), pid = (int)(rng() % 16);
+    const bool retx = rng() % 4 == 0;
+    if (!retx) ndi[u][pid] ^= 1;
+    const uint8_t rv = retx ? 2 : 0, mcs = (uint8_t)(rng() % 11);
+    const int L = (rng() % 10) ? 3 : 1 + (int)(rng() % 120);
+    const int S = (int)(rng() % (216 - L + 1));
+    uint64_t v = 0;
+    auto put = [&](uint32_t x, int w) { v = (v << w) | (x & ((1u << w) - 1u)); };
+    put(0, 1); put(1, 1); put(UllRiv(216, S, L), 15); put(0, 4); put(mcs, 5); put(ndi[u][pid], 1); put(rv, 2);
+    put(pid, 4); put(3, 2); put(1, 2); put(0, 3); put(0, 2); put(0, 1); put(1, 1);
+    *t = {mcs, (uint8_t)ndi[u][pid], rv, (uint8_t)pid, (uint16_t)S, (uint16_t)L};
+    nr_ul_layout_dci_t d;
+    d.rnti = (uint16_t)(0x4000 + u);
+    d.slot = (long)(50 + k / 4) * 20 + dci_slots[k % 4];
+    k++;
+    d.p = nr_dci_bits_from_u64(v);
+    return d;
+  }
+};
+const nr_ul_layout_cell_t kFreeCell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0, .slots_per_frame = 20};
+// one DCI into the module (slot occupancy as the live cell: slots 0-6 / 10-16 carry PDCCH); returns the trial grants booked for it
+int UllFeed(const nr_ul_layout_dci_t &d, nr_pdcch_blind_ul_result_t *tr, int *on_dci_rc = nullptr)
+{
+  nr_pdcch_blind_ul_result_t out;
+  for (int s2 = 0; s2 < 7; s2++) {
+    nr_ul_layout_note_pdcch_slot((d.slot / 20) * 20 + s2);
+    nr_ul_layout_note_pdcch_slot((d.slot / 20) * 20 + 10 + s2);
+  }
+  const int rc = nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &kFreeCell, &out);
+  if (on_dci_rc) *on_dci_rc = rc;
+  return nr_ul_layout_crc_trials(d.rnti, 44, d.slot, d.p, &kFreeCell, tr, NR_UL_LAYOUT_MAX_TRIALS);
+}
+bool UllReadsTruth(const nr_pdcch_blind_ul_result_t &g, const UllFree::Truth &t)
+{
+  return g.mcs == t.mcs && g.ndi == t.ndi && g.rv == t.rv && g.harq_pid == t.pid && g.num_rb == t.len && g.start_rb + g.bwp_start == t.start;
+}
+}  // namespace
+
+TEST(UlLayoutFit, FreeHarqIdsLeaveNoSignificantOffsetButTheRankingKeepsTheTruth)
+{
+  UllFree g;
+  UllFree::Truth t;
+  std::vector<nr_ul_layout_dci_t> b;
+  for (int i = 0; i < 400; i++) b.push_back(g.next(&t));
+  float sc = 0, sec = 0;
+  EXPECT_EQ(nr_ul_layout_fit_mcs(b.data(), (int)b.size(), 44, &sc, &sec), -1);  // the statistics alone do not decide
+  int offs[NR_UL_LAYOUT_MAX_CAND];
+  float rs[NR_UL_LAYOUT_MAX_CAND];
+  const int n = nr_ul_layout_rank_mcs(b.data(), (int)b.size(), 44, offs, rs, NR_UL_LAYOUT_MAX_CAND);
+  ASSERT_EQ(n, NR_UL_LAYOUT_MAX_CAND);
+  int rank = -1;
+  for (int i = 0; i < n; i++) if (offs[i] == 21) rank = i;
+  EXPECT_GE(rank, 0);
+  EXPECT_LT(rank, 3);
+  for (int i = 1; i < n; i++) EXPECT_GE(rs[i - 1], rs[i]);
+  // clear statistics: the ranking agrees with the significant offset
+  UllGen g2;
+  std::vector<nr_ul_layout_dci_t> c;
+  for (int i = 0; i < 400; i++) c.push_back(g2.next());
+  EXPECT_EQ(nr_ul_layout_rank_mcs(c.data(), (int)c.size(), 44, offs, rs, 3), 3);
+  EXPECT_EQ(offs[0], 21);
+}
+
+TEST(UlLayoutLock, CrcResolvesAnAmbiguousOffsetAndOnlyACrcPassLocksIt)
+{
+  nr_ul_layout_lock_reset();
+  UllFree g;
+  UllFree::Truth t;
+  nr_pdcch_blind_ul_result_t tr[NR_UL_LAYOUT_MAX_TRIALS];
+  int rc = 0;
+  for (int i = 0; i < 400; i++) {
+    UllFeed(g.next(&t), tr, &rc);
+    EXPECT_EQ(rc, 0);
+  }
+  nr_ul_layout_eval_once();
+  ASSERT_TRUE(nr_ul_layout_provisional(44));  // fitted on the ranking prior, not locked
+  // no CRC verdict at all: whatever the statistics say, nothing locks, no DM-RS probe is booked and the fit is not read
+  nr_pdcch_blind_ul_result_t fr;
+  for (int i = 0; i < 6000; i++) {
+    const nr_ul_layout_dci_t d = g.next(&t);
+    UllFeed(d, tr, &rc);
+    EXPECT_NE(rc, 1);
+    EXPECT_NE(rc, 2);
+    EXPECT_FALSE(nr_ul_layout_read_fitted(d.rnti, 44, d.p, &fr));
+    if (i % 32 == 0) nr_ul_layout_eval_once();
+  }
+  EXPECT_TRUE(nr_ul_layout_provisional(44));
+  // a single CRC16 pass (small TB, one slot) is chance level: still no lock
+  bool one = false;
+  for (int i = 0; i < 20000 && !one; i++) { /* the rotation reads the truth layout once per pass over the hypothesis space: ~4600 DCIs here */
+    const nr_ul_layout_dci_t d = g.next(&t);
+    const int nt = UllFeed(d, tr);
+    for (int q = 0; q < nt && !one; q++)
+      if (nr_ul_layout_is_trial(&tr[q]) && UllReadsTruth(tr[q], t)) { nr_ul_layout_crc_verdict(&tr[q], true, 800, 1, 1, d.slot); one = true; }
+    if (i % 32 == 0) nr_ul_layout_eval_once();
+  }
+  EXPECT_TRUE(one);
+  EXPECT_TRUE(nr_ul_layout_provisional(44));
+  // the PUSCH decoder passes only when the layout reads the grant correctly: a decisive CRC24 pass locks that offset
+  bool locked = false;
+  for (int i = 0; i < 30000 && !locked; i++) {
+    const nr_ul_layout_dci_t d = g.next(&t);
+    const int nt = UllFeed(d, tr);
+    for (int q = 0; q < nt; q++)
+      if (nr_ul_layout_is_trial(&tr[q]) && UllReadsTruth(tr[q], t)) nr_ul_layout_crc_verdict(&tr[q], true, 6000, 1, 1, d.slot);
+    if (i % 32 == 0) nr_ul_layout_eval_once();
+    locked = !nr_ul_layout_provisional(44);
+  }
+  ASSERT_TRUE(locked);
+  int ok = 0, n = 0;
+  for (int i = 0; i < 200; i++) {
+    const nr_ul_layout_dci_t d = g.next(&t);
+    nr_pdcch_blind_ul_result_t out;
+    if (nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &kFreeCell, &out) != 1) continue;
+    n++;
+    ok += UllReadsTruth(out, t);
+  }
+  EXPECT_GT(n, 150);
+  EXPECT_EQ(ok, n);
+  nr_ul_layout_lock_reset();
+}
+
+TEST(UlLayoutLock, SignificantStatisticsStayAStrictNonProvisionalFit)
+{
+  nr_ul_layout_lock_reset();
+  UllTimGen g;
+  UlTruth t;
+  nr_pdcch_blind_ul_result_t out;
+  const nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 923, .mu = 1, .typeA_pos = 0, .slots_per_frame = 20};
+  for (int i = 0; i < 300; i++) {
+    for (int s2 = 0; s2 < 18; s2++)
+      if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
+    const nr_ul_layout_dci_t d = g.next(&t);
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+  }
+  nr_ul_layout_eval_once();
+  EXPECT_FALSE(nr_ul_layout_provisional(44));
+  EXPECT_TRUE(nr_ul_layout_read_fitted(0x4000, 44, nr_dci_bits_from_u64(0x123456789ull), &out));  // fitted and read, as before
   nr_ul_layout_lock_reset();
 }
 

@@ -46,6 +46,7 @@ extern uint64_t *nr_ss_gpu_ptr(void);
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/system.h" // threadCreate
@@ -420,6 +421,8 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     const bool ul_retry_wanted = !job.cfr_only && !out.skip && out.status == NR_PUSCH_PASSIVE_CRC_FAIL &&
                                  ul_retry_snr_ok(&job.grant, out.snr_db) && job.grant.num_rb <= 12;
     clock_gettime(CLOCK_THREAD_CPUTIME_ID,&grant_cpu_end);
+    if (nr_ul_layout_is_trial(&job.grant)) /* CRC trials of the layout fit are optional work: they draw on the same per-second share as the UCI search */
+      nr_pusch_passive_optional_charge((uint64_t)((grant_cpu_end.tv_sec-grant_cpu_start.tv_sec)*1000000000LL+(grant_cpu_end.tv_nsec-grant_cpu_start.tv_nsec)));
     if (!nr_cfg_epoch_work_current()) {
       if (pipeline) nr_pusch_passive_decode_capture_release(idx);
       continue;
@@ -845,6 +848,35 @@ int nr_pusch_passive_queue_real_pending(void)
   const int n = g_cursor.count;
   pthread_mutex_unlock(&g_lock);
   return n;
+}
+
+static _Atomic uint64_t g_opt_win_start_ns, g_opt_win_used_ns;
+static uint64_t opt_share_ns_per_s(void)
+{
+  static _Atomic uint64_t share;
+  uint64_t v = atomic_load_explicit(&share, memory_order_relaxed);
+  if (!v) {
+    const char *c = getenv("ISAC_PUSCH_CORES");
+    const long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    v = (c && *c) ? 1000000000ull : 1000000000ull / (uint64_t)(ncpu > 0 ? ncpu : 1);
+    atomic_store_explicit(&share, v, memory_order_relaxed);
+  }
+  return v;
+}
+bool nr_pusch_passive_optional_share_left(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, w0 = atomic_load_explicit(&g_opt_win_start_ns, memory_order_relaxed);
+  if (now - w0 > 1000000000ull) {
+    atomic_store_explicit(&g_opt_win_start_ns, now, memory_order_relaxed);
+    atomic_store_explicit(&g_opt_win_used_ns, 0, memory_order_relaxed);
+  }
+  return atomic_load_explicit(&g_opt_win_used_ns, memory_order_relaxed) < opt_share_ns_per_s();
+}
+void nr_pusch_passive_optional_charge(uint64_t ns)
+{
+  atomic_fetch_add_explicit(&g_opt_win_used_ns, ns, memory_order_relaxed);
 }
 
 bool nr_pusch_passive_rescue_allowed(void)

@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include "PHY/TOOLS/nr_gpu_platform.h"
 #include "nr_srs_passive.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_reconf_rules.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
@@ -7765,9 +7766,13 @@ constdiag_done:;
           if (ull == 2 && nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(&ull_g, source_absolute_slot);
           /* ISAC_UL_LOCK_CRC_FIRST=1: real PUSCH decode jobs under the top-K layout hypotheses (CRC pass = lock) */
           nr_pdcch_blind_ul_result_t ull_t[NR_UL_LAYOUT_MAX_TRIALS];
-          const int nt = nr_ul_layout_crc_trials(cand_task[ti].rnti_min, cand_task[ti].dci_length, source_absolute_slot,
-                                                 cand_task[ti].ul_out.raw_payload, &ull_cell2, ull_t,
-                                                 NR_UL_LAYOUT_MAX_TRIALS);
+          /* trials of a ranked (not yet significant) MCS offset are optional work: booked only while no real grant waits in the PUSCH queue and
+           * the run-time per-second CPU share (core plan) is not spent */
+          const int nt = (nr_ul_layout_provisional(cand_task[ti].dci_length) && !(nr_pusch_passive_rescue_allowed() && nr_pusch_passive_optional_share_left()))
+                             ? 0
+                             : nr_ul_layout_crc_trials(cand_task[ti].rnti_min, cand_task[ti].dci_length, source_absolute_slot,
+                                                       cand_task[ti].ul_out.raw_payload, &ull_cell2, ull_t,
+                                                       NR_UL_LAYOUT_MAX_TRIALS);
           for (int q = 0; q < nt && nr_cfg_epoch_work_current(); q++) nr_pusch_grant_book_add(&ull_t[q], source_absolute_slot);
         }
         nr_pdcch_blind_ul_result_t ull_fit;

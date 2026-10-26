@@ -113,6 +113,62 @@ int nr_ul_layout_fit_mcs(const nr_ul_layout_dci_t *b, int n, uint16_t len, float
   return bo;
 }
 
+/* Ranking prior for the MCS block offset (used only when the significance test above leaves no unique winner; the CRC then decides).
+ * Score = pid-step fraction + RV==0 fraction + NDI/RV consistency fraction. The pid-step term (1..3) is a habit of some schedulers, not
+ * a rule (TS 38.212 / 38.321 let the gNB use any HARQ process id), so it is only one of three terms and carries no requirement here.
+ * The consistency term is the 38.321 NDI rule itself: when a HARQ process id comes back for the same RNTI, the NDI is toggled for new
+ * data (RV 0 first) and kept for a retransmission (RV != 0). A constant field fails it (same NDI, RV 0), random bits meet it half of
+ * the time, the true block almost always. */
+static float mcs_rank_score(const nr_ul_layout_dci_t *b, int n, uint16_t len, int o)
+{
+  uint16_t rn[64];
+  int8_t last[64];
+  long last_slot[64];
+  int8_t ndi_of[64][16];
+  int nr = 0, ok = 0, pairs = 0, rv0 = 0, cons = 0, cpairs = 0;
+  for (int i = 0; i < n; i++) {
+    const uint32_t pid = fld(&b[i].p, len, o + 8, 4), rv = fld(&b[i].p, len, o + 6, 2), ndi = fld(&b[i].p, len, o + 5, 1);
+    rv0 += rv == 0;
+    int k = 0;
+    while (k < nr && rn[k] != b[i].rnti) k++;
+    if (k == nr) {
+      if (nr == 64) continue;
+      rn[nr] = b[i].rnti;
+      last[nr] = -1;
+      memset(ndi_of[nr], -1, sizeof(ndi_of[nr]));
+      nr++;
+    }
+    if (last[k] >= 0 && last_slot[k] != b[i].slot) {
+      const int d = ((int)pid - last[k] + 16) % 16;
+      pairs++;
+      ok += d >= 1 && d <= 3;
+    }
+    if (ndi_of[k][pid] >= 0 && last_slot[k] != b[i].slot) {
+      cpairs++;
+      cons += (ndi != (uint32_t)ndi_of[k][pid]) == (rv == 0);
+    }
+    ndi_of[k][pid] = (int8_t)ndi;
+    last[k] = (int8_t)pid;
+    last_slot[k] = b[i].slot;
+  }
+  return (pairs ? (float)ok / pairs : 0.f) + (float)rv0 / (n ? n : 1) + (cpairs ? (float)cons / cpairs : 0.f);
+}
+
+int nr_ul_layout_rank_mcs(const nr_ul_layout_dci_t *b, int n, uint16_t len, int *offs, float *score, int cap)
+{
+  if (!b || n <= 0 || !offs || !score || cap < 1) return 0;
+  int m = 0;
+  for (int o = 2; o + 12 <= len; o++) {
+    const float s = mcs_rank_score(b, n, len, o);
+    if (m == cap && s <= score[cap - 1]) continue;
+    int j = m < cap ? m++ : cap - 1;
+    for (; j > 0 && score[j - 1] < s; j--) { score[j] = score[j - 1]; offs[j] = offs[j - 1]; }
+    score[j] = s;
+    offs[j] = o;
+  }
+  return m;
+}
+
 static float bit_entropy(float p)
 {
   return (p <= 0.f || p >= 1.f) ? 0.f : -(p * log2f(p) + (1.f - p) * log2f(1.f - p));
@@ -151,7 +207,17 @@ int nr_ul_layout_fit_prefix(const nr_ul_layout_dci_t *b, int n, uint16_t len, in
         int valid = 0;
         const uint64_t lim = (uint64_t)nmax * (nmax + 1) / 2;
         for (int k = 0; k < n; k++) valid += fld(&b[k].p, len, 1 + bw, w) < lim;
-        if ((float)valid < 0.98f * n) continue;
+        if ((float)valid < 0.98f * n) {
+          /* A bank also holds DCIs that are not UL grants of this layout (false alarms, other RNTIs' formats): a few percent of
+           * them make a wide RIV (w = 16: 43 % of random values are invalid) fail the 98 % test although every real grant is valid
+           * [MEASURED, sens6 OTA lab cell, ulintb2_lab_20261025_214624 / valD2_lab_20261025_221820: the fit found mcs_off 20 but its
+           * prefixes were {245, 162} only, the cell's 273 split missing, so the 273 hypothesis had no layout and every grant was
+           * read with a wrong BWP]. The split of the BWP the receiver already expects first (cand_n[0]: the SIB1 UL BWP, else the
+           * carrier) therefore stays a hypothesis down to the midpoint between a perfect bank and a random field (a uniform w-bit
+           * value is valid with p = lim / 2^w); the PUSCH CRC decides among the hypotheses. */
+          const double prand = (double)lim / (double)(1ull << w);
+          if (!(n_cand > 0 && nmax == cand_n[0] && (double)valid >= 0.5 * (1.0 + prand) * n)) continue;
+        }
         if (cnt < cap) {
           /* entropy (bits) of the TDRA + hopping bits this split leaves: a TDRA / hopping field is near-constant, a RIV LSB
            * is uniform, so the split that absorbed a RIV LSB into TDRA (riv one bit too short) carries ~1 bit more */
@@ -300,6 +366,10 @@ typedef struct {
   long first_slot, fit_slot, lock_slot;
   uint32_t last_eval_count;
   bool fitted;
+  bool prov;      /* the fit rests on a ranking prior (no significant MCS offset): only a CRC pass may lock it; probes, votes and fit-reads stay off */
+  int cand[NR_UL_LAYOUT_MAX_CAND], ncand, cand_i; /* ranked MCS offsets of a provisional fit, the one under CRC test */
+  uint32_t prov_ctr0, prov_budget;  /* g_var_ctr when the candidate went under test; trial rounds it gets */
+  uint32_t prov_rot;                /* candidates abandoned */
   int mcs_off;
   float mcs_score, mcs_second;
   int npre;
@@ -539,7 +609,7 @@ static void apply_variant(nr_pdcch_blind_ul_opts_t *o, int var)
 /* caller holds mu: build the locked opts of one fitted length once the BWP is locked */
 static void lock_length_locked(len_state_t *ls, long now_slot)
 {
-  if (!ls->fitted || ls->locked || g_locked_hyp < 0) return;
+  if (!ls->fitted || ls->prov || ls->locked || g_locked_hyp < 0) return; /* a provisional fit locks only through a CRC pass */
   const hyp_state_t *H = &g_hyp[g_locked_hyp];
   const int w = nr_ul_layout_riv_bits(H->n);
   const nr_ul_layout_prefix_t *pre = NULL;
@@ -758,14 +828,130 @@ static void seed_lock_locked(long slot)
     }
 }
 static pthread_mutex_t eval_mu = PTHREAD_MUTEX_INITIALIZER; /* serializes eval passes (static scratch below) */
+
+typedef struct {
+  nr_ul_layout_prefix_t pre[NR_UL_LAYOUT_MAX_PRE];
+  int npre;
+  nr_ul_layout_tail_t tail[NR_UL_LAYOUT_MAX_TAIL];
+  int ntail;
+  uint8_t k2row[16];
+  bool k2ok;
+} fit_chain_t;
+
+/* prefix, tail and k2 of one MCS offset hypothesis (no lock held; eval_mu serializes the static scratch) */
+static void fit_chain(const nr_ul_layout_dci_t *snap, int n, uint16_t len, int mo, const uint32_t *occ, int spf,
+                      const uint16_t *cn, int nc, fit_chain_t *c)
+{
+  memset(c, 0, sizeof(*c));
+  c->npre = mo > 0 ? nr_ul_layout_fit_prefix(snap, n, len, mo, cn, nc, c->pre, NR_UL_LAYOUT_MAX_PRE) : 0;
+  c->ntail = c->npre > 0 ? nr_ul_layout_fit_tail(snap, n, len, &c->pre[0], c->tail, NR_UL_LAYOUT_MAX_TAIL) : 0;
+  /* k2 per TDRA index (indices read with the first prefix; all prefixes share the TDRA position only when their
+   * bwp_ind + riv agree, so the first one is the reference) */
+  c->k2ok = c->npre > 0;
+  if (c->npre > 0) {
+    static uint32_t hist[16][160];
+    memset(hist, 0, sizeof(hist));
+    for (int i = 0; i < n; i++) {
+      const uint32_t idx = fld(&snap[i].p, len, 1 + c->pre[0].bwp_ind + c->pre[0].riv, c->pre[0].tda);
+      if (idx < 16 && spf > 0) hist[idx][snap[i].slot % spf]++;
+    }
+    for (int r = 0; r < 16; r++) {
+      uint32_t tot = 0;
+      for (int s = 0; s < spf; s++) tot += hist[r][s];
+      if (tot < 32) continue;
+      c->k2row[r] = (uint8_t)nr_ul_layout_infer_k2(occ, hist[r], spf);
+      if (!c->k2row[r]) c->k2ok = false;
+    }
+    if (!c->k2row[0]) for (int r = 0; r < 16 && !c->k2row[0]; r++) c->k2row[0] = c->k2row[r];
+    if (!c->k2row[0]) c->k2ok = false;
+  }
+}
+
+/* caller holds mu: the k2 inference of this DCI length found no free slot; the TDRA table is the cell's, so another length's fitted k2 applies */
+static void k2_borrow_locked(len_state_t *ls, fit_chain_t *c)
+{
+  if (c->npre <= 0 || c->k2ok) return;
+  for (int o = 0; o < g_nlen && !c->k2ok; o++)
+    if (&g_len[o] != ls && g_len[o].fitted && g_len[o].k2row[0]) {
+      for (int r = 0; r < 16; r++) if (!c->k2row[r]) c->k2row[r] = g_len[o].k2row[r] ? g_len[o].k2row[r] : g_len[o].k2row[0];
+      c->k2ok = true;
+      LOG_I(PHY, "SENSING: ULLAYOUT K2_BORROW len=%u from len=%u k2_row0=%u\n", ls->len, g_len[o].len, c->k2row[0]);
+    }
+}
+
+/* caller holds mu: trial rounds a provisional candidate gets: one full pass of the CRC-first rotation (BWP windows x 2 data-id
+ * rounds x variants) over the hypotheses its prefix opens, so the budget follows the hypothesis space, not a constant */
+static uint32_t prov_budget_locked(const len_state_t *ls)
+{
+  int nr = 0;
+  for (int h = 0; h < g_nhyp; h++) nr += pre_for_hyp(ls, h) >= 0;
+  const uint32_t nwin = g_cell.sib1_ul_cfg ? 1u : (uint32_t)(nr + 2) / 3u;
+  const uint32_t vc = (uint32_t)nr_ul_variant_count(true, true, true, ls->ntail > 0 && ls->tail[0].tp);
+  return 2u * vc * (nwin ? nwin : 1u);
+}
+
+bool nr_ul_layout_provisional(uint16_t len)
+{
+  bool r = false;
+  pthread_mutex_lock(&mu);
+  for (int l = 0; l < g_nlen; l++) if (g_len[l].len == len && g_len[l].fitted && g_len[l].prov && !g_len[l].locked) r = true;
+  pthread_mutex_unlock(&mu);
+  return r;
+}
+
+/* caller holds mu: adopt `c` as the layout of ls (strict: significant offset; prov: ranked candidate under CRC test) */
+static void commit_fit_locked(len_state_t *ls, const fit_chain_t *c, int mo, float sc, float sec, int n, long fit_slot, bool prov)
+{
+  ls->mcs_off = mo;
+  ls->mcs_score = sc;
+  ls->mcs_second = sec;
+  ls->npre = c->npre;
+  memcpy(ls->pre, c->pre, sizeof(ls->pre));
+  ls->ntail = c->ntail;
+  memcpy(ls->tail, c->tail, sizeof(ls->tail));
+  memcpy(ls->k2row, c->k2row, sizeof(ls->k2row));
+  ls->fitted = true;
+  ls->prov = prov;
+  ls->chosen_tail = -1;
+  memset(ls->ev, 0, sizeof(ls->ev)); /* evidence of an abandoned candidate does not carry over */
+  ls->fit_slot = fit_slot;
+  build_hyps_locked();
+  if (prov) {
+    ls->prov_ctr0 = g_var_ctr;
+    ls->prov_budget = prov_budget_locked(ls);
+  }
+  char pr[512];
+  int u = 0;
+  for (int k = 0; k < c->npre && u < (int)sizeof(pr); k++) /* snprintf returns the untruncated length: stop at full */
+    u += snprintf(pr + u, sizeof(pr) - u, "%s{bwp_ind=%u riv=%u tda=%u fh=%u Nmax=%u}", k ? "," : "", c->pre[k].bwp_ind,
+                  c->pre[k].riv, c->pre[k].tda, c->pre[k].fh, c->pre[k].n_max);
+  char t0[160], t1[160] = "-";
+  tail_str(&c->tail[0], t0, sizeof(t0));
+  if (c->ntail > 1) tail_str(&c->tail[1], t1, sizeof(t1));
+  LOG_A(PHY, "SENSING: ULLAYOUT FIT len=%u dcis=%d mcs_off=%d score=%.2f second=%.2f prefixes=[%s] k2_row0=%u"
+             " tails=%d best[%s] next[%s] bwp_hyps=%d first_abs=%ld fit_abs=%ld%s\n",
+        ls->len, n, mo, sc, sec, pr, c->k2row[0], c->ntail, t0, t1, g_nhyp, ls->first_slot, ls->fit_slot,
+        prov ? " PROVISIONAL(CRC decides)" : "");
+  if (prov) {
+    LOG_A(PHY, "SENSING: ULLAYOUT FIT_PROV len=%u cand=%d/%d mcs_off=%d budget=%u rotations=%u\n", ls->len, ls->cand_i + 1,
+          ls->ncand, mo, ls->prov_budget, ls->prov_rot);
+    return; /* no probe vote, fit-read or vote lock on a ranking prior: the CRC trials lock it (crc_lock_locked) */
+  }
+  seed_lock_locked(ls->fit_slot);
+  lock_length_locked(ls, ls->fit_slot);
+}
+
 void nr_ul_layout_eval_once(void)
 {
   pthread_mutex_lock(&eval_mu);
   static nr_ul_layout_dci_t snap[NR_UL_LAYOUT_BANK];
   for (int l = 0; l < NR_UL_LAYOUT_MAX_LEN; l++) {
     pthread_mutex_lock(&mu);
-    if (l >= g_nlen || g_len[l].fitted || g_len[l].count < FIT_MIN || g_len[l].count - g_len[l].last_eval_count < 64
-        || !g_have_cell) {
+    const bool in = l < g_nlen && g_have_cell;
+    const bool want_fit = in && !g_len[l].fitted && g_len[l].count >= FIT_MIN && g_len[l].count - g_len[l].last_eval_count >= 64;
+    /* a provisional candidate whose trial budget is spent without a CRC lock gives way to the next ranked one */
+    const bool want_rot = in && g_len[l].fitted && g_len[l].prov && !g_len[l].locked && g_var_ctr - g_len[l].prov_ctr0 >= g_len[l].prov_budget;
+    if (!want_fit && !want_rot) {
       pthread_mutex_unlock(&mu);
       continue;
     }
@@ -782,77 +968,83 @@ void nr_ul_layout_eval_once(void)
     const int spf = g_cell.slots_per_frame;
     uint16_t cn[64];
     const int nc = cand_list(cn, 64);
+    int cand[NR_UL_LAYOUT_MAX_CAND], ncand = 0, from = 0;
+    if (want_rot) {
+      ncand = ls->ncand;
+      memcpy(cand, ls->cand, sizeof(cand));
+      from = ls->cand_i + 1;
+    }
     pthread_mutex_unlock(&mu);
 
-    float sc = 0.f, sec = 0.f;
-    const int mo = nr_ul_layout_fit_mcs(snap, n, len, &sc, &sec);
-    nr_ul_layout_prefix_t pre[NR_UL_LAYOUT_MAX_PRE];
-    const int npre = mo > 0 ? nr_ul_layout_fit_prefix(snap, n, len, mo, cn, nc, pre, NR_UL_LAYOUT_MAX_PRE) : 0;
-    nr_ul_layout_tail_t tail[NR_UL_LAYOUT_MAX_TAIL];
-    const int ntail = npre > 0 ? nr_ul_layout_fit_tail(snap, n, len, &pre[0], tail, NR_UL_LAYOUT_MAX_TAIL) : 0;
-    /* k2 per TDRA index (indices read with the first prefix; all prefixes share the TDRA position only when their
-     * bwp_ind + riv agree, so the first one is the reference) */
-    uint8_t k2row[16] = {0};
-    bool k2ok = npre > 0;
-    if (npre > 0) {
-      static uint32_t hist[16][160];
-      memset(hist, 0, sizeof(hist));
-      for (int i = 0; i < n; i++) {
-        const uint32_t idx = fld(&snap[i].p, len, 1 + pre[0].bwp_ind + pre[0].riv, pre[0].tda);
-        if (idx < 16 && spf > 0) hist[idx][snap[i].slot % spf]++;
+    float sc = 0.f, sec = 0.f, rs[NR_UL_LAYOUT_MAX_CAND] = {0};
+    int mo = -1;
+    bool strict = false;
+    if (want_fit) {
+      mo = nr_ul_layout_fit_mcs(snap, n, len, &sc, &sec);
+      strict = mo > 0;
+    }
+    if (strict) {
+      fit_chain_t c;
+      fit_chain(snap, n, len, mo, occ, spf, cn, nc, &c);
+      pthread_mutex_lock(&mu);
+      if (gen == g_gen && !ls->fitted) {
+        k2_borrow_locked(ls, &c);
+        if (c.npre > 0 && c.ntail > 0 && c.k2ok) {
+          commit_fit_locked(ls, &c, mo, sc, sec, n, snap[n - 1].slot, false);
+        } else {
+          ls->mcs_off = mo;
+          ls->mcs_score = sc;
+          ls->mcs_second = sec;
+          LOG_I(PHY, "SENSING: ULLAYOUT FIT len=%u dcis=%d not yet: mcs_off=%d (%.2f/%.2f) prefixes=%d tails=%d k2=%d\n", len, n, mo,
+                sc, sec, c.npre, c.ntail, c.k2ok);
+        }
       }
-      for (int r = 0; r < 16; r++) {
-        uint32_t tot = 0;
-        for (int s = 0; s < spf; s++) tot += hist[r][s];
-        if (tot < 32) continue;
-        k2row[r] = (uint8_t)nr_ul_layout_infer_k2(occ, hist[r], spf);
-        if (!k2row[r]) k2ok = false;
-      }
-      if (!k2row[0]) for (int r = 0; r < 16 && !k2row[0]; r++) k2row[0] = k2row[r];
-      if (!k2row[0]) k2ok = false;
+      pthread_mutex_unlock(&mu);
+      continue;
+    }
+    /* No unique significant offset (traffic-dependent statistics): the ranked offsets become CRC-tested hypotheses. */
+    if (!want_rot || from >= ncand) { /* first ranking, or the list is exhausted: rank again on the current bank */
+      ncand = nr_ul_layout_rank_mcs(snap, n, len, cand, rs, NR_UL_LAYOUT_MAX_CAND);
+      from = 0;
+    } else {
+      for (int i = 0; i < ncand; i++) rs[i] = 0.f;
     }
     pthread_mutex_lock(&mu);
-    if (gen == g_gen && !ls->fitted && !k2ok && npre > 0) {
-      /* the k2 inference of this DCI length found no free slot (returned 0); the TDRA table is the cell's, so another length's fitted k2 applies */
-      for (int o = 0; o < g_nlen && !k2ok; o++)
-        if (o != l && g_len[o].fitted && g_len[o].k2row[0]) {
-          for (int r = 0; r < 16; r++) if (!k2row[r]) k2row[r] = g_len[o].k2row[r] ? g_len[o].k2row[r] : g_len[o].k2row[0];
-          k2ok = true;
-          LOG_I(PHY, "SENSING: ULLAYOUT K2_BORROW len=%u from len=%u k2_row0=%u\n", len, g_len[o].len, k2row[0]);
-        }
-    }
-    if (gen == g_gen && !ls->fitted) {
-      ls->mcs_off = mo;
-      ls->mcs_score = sc;
-      ls->mcs_second = sec;
-      if (mo > 0 && npre > 0 && ntail > 0 && k2ok) {
-        ls->npre = npre;
-        memcpy(ls->pre, pre, sizeof(pre));
-        ls->ntail = ntail;
-        memcpy(ls->tail, tail, sizeof(tail));
-        memcpy(ls->k2row, k2row, sizeof(k2row));
-        ls->fitted = true;
-        ls->fit_slot = snap[n - 1].slot;
-        build_hyps_locked();
-        char pr[512];
-        int u = 0;
-        for (int k = 0; k < npre && u < (int)sizeof(pr); k++) /* snprintf returns the untruncated length: stop at full */
-          u += snprintf(pr + u, sizeof(pr) - u, "%s{bwp_ind=%u riv=%u tda=%u fh=%u Nmax=%u}", k ? "," : "",
-                        pre[k].bwp_ind, pre[k].riv, pre[k].tda, pre[k].fh, pre[k].n_max);
-        char t0[160], t1[160] = "-";
-        tail_str(&tail[0], t0, sizeof(t0));
-        if (ntail > 1) tail_str(&tail[1], t1, sizeof(t1));
-        LOG_A(PHY, "SENSING: ULLAYOUT FIT len=%u dcis=%d mcs_off=%d score=%.2f second=%.2f prefixes=[%s] k2_row0=%u"
-                   " tails=%d best[%s] next[%s] bwp_hyps=%d first_abs=%ld fit_abs=%ld\n",
-              len, n, mo, sc, sec, pr, k2row[0], ntail, t0, t1, g_nhyp, ls->first_slot, ls->fit_slot);
-        seed_lock_locked(ls->fit_slot);
-        lock_length_locked(ls, ls->fit_slot);
-      } else {
-        LOG_I(PHY, "SENSING: ULLAYOUT FIT len=%u dcis=%d not yet: mcs_off=%d (%.2f/%.2f) prefixes=%d tails=%d k2=%d\n", len,
-              n, mo, sc, sec, npre, ntail, k2ok);
-      }
+    if (gen != g_gen || (want_fit && ls->fitted) || (want_rot && (!ls->fitted || ls->locked || !ls->prov))) {
+      pthread_mutex_unlock(&mu);
+      continue;
     }
     pthread_mutex_unlock(&mu);
+    bool done = false;
+    for (int i = from; i < ncand && !done; i++) {
+      fit_chain_t c;
+      fit_chain(snap, n, len, cand[i], occ, spf, cn, nc, &c);
+      if (c.npre <= 0 || c.ntail <= 0) continue;
+      pthread_mutex_lock(&mu);
+      if (gen == g_gen && !ls->locked && (want_fit ? !ls->fitted : ls->prov)) {
+        k2_borrow_locked(ls, &c);
+        if (c.k2ok) {
+          if (want_rot) ls->prov_rot++;
+          memcpy(ls->cand, cand, sizeof(ls->cand));
+          ls->ncand = ncand;
+          ls->cand_i = i;
+          commit_fit_locked(ls, &c, cand[i], rs[i], i + 1 < ncand ? rs[i + 1] : 0.f, n, snap[n - 1].slot, true);
+          done = true;
+        }
+      }
+      pthread_mutex_unlock(&mu);
+    }
+    if (!done && want_fit) {
+      pthread_mutex_lock(&mu);
+      LOG_I(PHY, "SENSING: ULLAYOUT FIT len=%u dcis=%d not yet: mcs_off=%d (%.2f/%.2f) ranked=%d, none with prefix+tail+k2\n", len, n, mo, sc, sec, ncand);
+      pthread_mutex_unlock(&mu);
+    } else if (!done && want_rot) { /* every ranked offset failed its chain: rank again at the next budget */
+      pthread_mutex_lock(&mu);
+      ls->prov_ctr0 = g_var_ctr;
+      ls->ncand = 0;
+      ls->cand_i = -1;
+      pthread_mutex_unlock(&mu);
+    }
   }
   pthread_mutex_unlock(&eval_mu);
 }
@@ -871,7 +1063,7 @@ bool nr_ul_layout_read_fitted(uint16_t rnti, uint16_t len, nr_dci_bits_t payload
   nr_pdcch_blind_ul_opts_t o;
   pthread_mutex_lock(&mu);
   const len_state_t *ls = NULL;
-  for (int l = 0; l < g_nlen; l++) if (g_len[l].len == len && g_len[l].fitted && !g_len[l].locked) ls = &g_len[l];
+  for (int l = 0; l < g_nlen; l++) if (g_len[l].len == len && g_len[l].fitted && !g_len[l].locked && !g_len[l].prov) ls = &g_len[l];
   if (!ls || ls->npre < 1 || ls->ntail < 1) { pthread_mutex_unlock(&mu); return false; }
   const nr_ul_layout_prefix_t *p0 = &ls->pre[0];
   const uint16_t start = (g_cell.sib1_ul_size == p0->n_max && g_cell.sib1_ul_start + p0->n_max <= g_cell.carrier_rb)
@@ -938,7 +1130,7 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
     out->hyp_generation = NR_UL_LAYOUT_TAG | gen;
     return 1;
   }
-  if (ls->fitted && g_locked_hyp < 0 && g_nhyp > 0) {
+  if (ls->fitted && !ls->prov && g_locked_hyp < 0 && g_nhyp > 0) {
     const nr_ul_layout_prefix_t *p0 = &ls->pre[0];
     const uint32_t idx = fld(&payload, len, 1 + p0->bwp_ind + p0->riv, p0->tda);
     const uint8_t k2 = idx < 16 && ls->k2row[idx] ? ls->k2row[idx] : ls->k2row[0];
@@ -1297,6 +1489,7 @@ static void crc_lock_locked(int li, int h, int k, int t, int var, long slot)
   ls->opts = o;
   ls->chosen_tail = t;
   ls->locked = true;
+  ls->prov = false; /* the CRC evidence rule (decisive pass, or CRC16 in >= 2 slots) resolved the ranked candidate */
   ls->lock_decisive = 0;
   ls->lock_slot = slot;
   ls->crc_fail_run = 0;
@@ -1418,8 +1611,8 @@ void nr_ul_layout_stats_dump(void)
   char ls[256];
   int w = 0;
   for (int l = 0; l < g_nlen && w < (int)sizeof(ls) - 64; l++)
-    w += snprintf(ls + w, sizeof(ls) - w, " len%u[dcis=%u fit=%d lock=%d probes=%u gold=%u cdm1=%u cdm2=%u trials=%u crc_ok=%u crc_locks=%u susp=%u dec=%u evlock=%u]",
-                  g_len[l].len, g_len[l].count, g_len[l].fitted, g_len[l].locked, g_len[l].probes, g_len[l].gold,
+    w += snprintf(ls + w, sizeof(ls) - w, " len%u[dcis=%u fit=%d prov=%d cand=%d/%d rot=%u lock=%d probes=%u gold=%u cdm1=%u cdm2=%u trials=%u crc_ok=%u crc_locks=%u susp=%u dec=%u evlock=%u]",
+                  g_len[l].len, g_len[l].count, g_len[l].fitted, g_len[l].prov, g_len[l].cand_i + 1, g_len[l].ncand, g_len[l].prov_rot, g_len[l].locked, g_len[l].probes, g_len[l].gold,
                   g_len[l].cdm1, g_len[l].cdm2, g_len[l].trials, g_len[l].crc_ok, g_len[l].crc_locks, g_len[l].ev_susp, g_len[l].ev_dec, g_len[l].ev_lock);
   char sgn[400] = "";
   { /* top-4 hypotheses by detections; "x>y" = a-only(row, leader) / b-only(leader, row) discordant probes */

@@ -37,6 +37,7 @@ extern "C" {
 #define NR_UL_LAYOUT_MAX_LEN 4
 #define NR_UL_LAYOUT_MAX_PRE 8
 #define NR_UL_LAYOUT_MAX_TAIL 4
+#define NR_UL_LAYOUT_MAX_CAND 8 /* ranked MCS-offset hypotheses kept for CRC resolution */
 #define NR_UL_LAYOUT_BANK 1024
 
 typedef struct {
@@ -185,6 +186,12 @@ int nr_ul_layout_riv_bits(int n_bwp);
 bool nr_ul_layout_riv(uint32_t riv, int n_bwp, uint16_t *start, uint16_t *len);
 /* MSB offset of the MCS field by the HARQ/RV statistics. Returns the offset or -1; score = best, *second = runner-up. */
 int nr_ul_layout_fit_mcs(const nr_ul_layout_dci_t *b, int n, uint16_t len, float *score, float *second);
+/* Ranking prior for the MCS block offset, best first (scores in `score`, descending): used when nr_ul_layout_fit_mcs() finds no unique
+ * significant offset. Does not require the HARQ id to step by 1..3. Returns the count (<= cap). The CRC trials decide among them. */
+int nr_ul_layout_rank_mcs(const nr_ul_layout_dci_t *b, int n, uint16_t len, int *offs, float *score, int cap);
+/* true while length `len` runs on a ranked (not significant) MCS offset that no CRC pass has confirmed yet: its trial bookings are
+ * optional work (the caller books them only while the PUSCH queue is idle). */
+bool nr_ul_layout_provisional(uint16_t len);
 /* Prefix splits consistent with mcs_off. cand_n: candidate N_BWP values (fitting the carrier). Returns count. */
 int nr_ul_layout_fit_prefix(const nr_ul_layout_dci_t *b, int n, uint16_t len, int mcs_off, const uint16_t *cand_n,
                             int n_cand, nr_ul_layout_prefix_t *out, int cap);
