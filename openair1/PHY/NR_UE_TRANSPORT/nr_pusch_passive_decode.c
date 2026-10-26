@@ -24,6 +24,7 @@
 #include "nr_pusch_gpu_fep.h" // GPU port of the UL FEP below
 #include "nr_gpu_pass_ul.h" // the whole PUSCH decode as one GPU graph (Fix A+D: the UL path)
 #include "PHY/NR_TRANSPORT/nr_ulsch_passive_branch.h"
+#include "PHY/NR_TRANSPORT/nr_ul_branch_select.h"
 #include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
 
 #include "nr_pusch_passive_decode.h"
@@ -1686,46 +1687,16 @@ static uint32_t uci_grant_budget_us(const NR_DL_FRAME_PARMS *fp)
 {
   return uci_slot_us(fp) * (NR_PUSCH_PASSIVE_QUEUE_MARGIN_SLOTS - 1);
 }
-static uint64_t uci_share_ns_per_s(void)
-{
-  static _Atomic uint64_t share;
-  uint64_t v = atomic_load_explicit(&share, memory_order_relaxed);
-  if (!v) {
-    const char *c = getenv("ISAC_PUSCH_CORES");
-    const long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
-    v = (c && *c) ? 1000000000ull : 1000000000ull / (uint64_t)(ncpu > 0 ? ncpu : 1);
-    atomic_store_explicit(&share, v, memory_order_relaxed);
-  }
-  return v;
-}
-static _Atomic uint64_t g_uci_win_start_ns, g_uci_win_used_ns;
 static uint64_t uci_cpu_ns(void)
 {
   struct timespec ts;
   clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
-static uint64_t uci_wall_ns(void)
-{
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
 /* Any UCI search (the learned hypotheses as well) only within the per-second share, so a stretch of failing grants -- all
  * of them searched -- cannot take CPU the DL needs; the exploration additionally only on an idle queue. */
-static bool uci_share_left(void)
-{
-  const uint64_t now = uci_wall_ns(), w0 = atomic_load_explicit(&g_uci_win_start_ns, memory_order_relaxed);
-  if (now - w0 > 1000000000ull) {
-    atomic_store_explicit(&g_uci_win_start_ns, now, memory_order_relaxed);
-    atomic_store_explicit(&g_uci_win_used_ns, 0, memory_order_relaxed);
-  }
-  return atomic_load_explicit(&g_uci_win_used_ns, memory_order_relaxed) < uci_share_ns_per_s();
-}
-static void uci_explore_charge(uint64_t ns)
-{
-  atomic_fetch_add_explicit(&g_uci_win_used_ns, ns, memory_order_relaxed);
-}
+static bool uci_share_left(void) { return nr_pusch_passive_optional_share_left(); }
+static void uci_explore_charge(uint64_t ns) { nr_pusch_passive_optional_charge(ns); }
 
 static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                                           int      ctx,
@@ -1945,8 +1916,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         in.N = symsz; in.symbols_per_slot = sps; in.n_rb_ul = fp->N_RB_UL; in.first_carrier_offset = fp->first_carrier_offset; in.ncp_normal = fp->Ncp == NR_NORMAL; in.nb_rx = nant;
         in.passive = IS_PASSIVE_RX_MODE(get_softmodem_params());
         {
-          in.keep = in.passive && nant > 1 ? 0 : -1; /* ISAC_RX_MRC_MODE=1: branch 0 */
-          in.timing_keep = in.keep;
+          in.keep = in.passive && nant > 1 ? nr_ulsch_passive_branch_keep(nant) : -1; /* measured per-branch DM-RS power: all, one, or -2 = the CPU path decides */
+          in.timing_keep = in.keep >= 0 ? in.keep : -1;
         }
         for (int a = 0; a < nant; a++) {
           in.iq[a] = (const int16_t *)sn->iq[a];
@@ -1966,7 +1937,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           in.gate_thr_db = in.gate_on ? (float)(rq_ - NR_SNR_GATE_MARGIN_DB) : 0.f;
         }
         in.want_est = nr_srs_passive_enabled() || nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS);
-        int ul_go_ = in.tbs_bits && in.bg;
+        int ul_go_ = in.tbs_bits && in.bg && in.keep != -2; /* -2: the per-branch measurement is not decided (too few grants, or a mixed set): the CPU path measures per grant */
         if (ul_go_ && !ul_shadow) { /* per-path choice (nr_gpu_path.h): SHARED -> the pass (no change); DISCRETE -> alternating trial, then GPU or CPU */
           int pst_ = nr_gpu_path_state(NR_GPU_PATH_PASS_UL);
           if (pst_ == NR_GPU_PATH_UNSET)

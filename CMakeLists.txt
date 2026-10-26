@@ -3099,6 +3099,12 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_pdsch_chest_key)
   add_test(NAME test_nr_pdsch_chest_key COMMAND ./test_nr_pdsch_chest_key)
 
+  add_executable(test_nr_ul_branch_select ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ul_branch_select_test.cc)
+  target_include_directories(test_nr_ul_branch_select PRIVATE ${OPENAIR1_DIR} ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_ul_branch_select PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_ul_branch_select)
+  add_test(NAME test_nr_ul_branch_select COMMAND ./test_nr_ul_branch_select)
+
   add_executable(test_nr_llr_norm ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_llr_norm_test.cc)
   target_include_directories(test_nr_llr_norm PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_llr_norm PRIVATE GTest::gtest GTest::gtest_main)

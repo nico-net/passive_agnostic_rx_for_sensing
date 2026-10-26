@@ -177,7 +177,7 @@ static void nr_pusch_antenna_processing(void *arg)
         }
 
         c16_t ch16 = {.r = (int16_t)ch.r, .i = (int16_t)ch.i};
-        *max_ch = max(abs(ch.r), abs(ch.i));
+        *max_ch = max(*max_ch, max(abs(ch.r), abs(ch.i)));
         for (int k = pilot_cnt << 1; k < (pilot_cnt << 1) + 4; k++) {
           ul_ls_est[k] = ch16;
         }
@@ -290,7 +290,7 @@ static void nr_pusch_antenna_processing(void *arg)
         c16_t ch1 = c16mulShift(*pil, rx[(k0 + n + 1) % symbolSize], 15);
         pil++;
         c16_t ch = c16addShift(ch0, ch1, 1);
-        *max_ch = max(abs(ch.r), abs(ch.i));
+        *max_ch = max(*max_ch, max(abs(ch.r), abs(ch.i)));
         multadd_real_four_symbols_vector_complex_scalar(filt8_rep4, ch, &ul_ls_est[n]);
         ul_ls_est[n + 4] = ch;
         ul_ls_est[n + 5] = ch;
@@ -342,7 +342,7 @@ static void nr_pusch_antenna_processing(void *arg)
 
       for (int pilot_cnt = 6; pilot_cnt < 6 * (nb_rb_pusch - 1); pilot_cnt += 6) {
         ch = c32x16cumulVectVectWithSteps(pilot, &pil_offset, 1, rxF, &re_offset, 2, symbolSize, 6);
-        *max_ch = max(abs(ch.r), abs(ch.i));
+        *max_ch = max(*max_ch, max(abs(ch.r), abs(ch.i)));
 
 #if NO_INTERP
         for (c16_t *end = ul_ch + 12; ul_ch < end; ul_ch++)
@@ -426,7 +426,7 @@ static void nr_pusch_antenna_processing(void *arg)
         re_offset = (re_offset + 5) % symbolSize;
 
         ch = c16x32div(ch0, 4);
-        *max_ch = max(abs(ch.r), abs(ch.i));
+        *max_ch = max(*max_ch, max(abs(ch.r), abs(ch.i)));
 
 #if NO_INTERP
         for (c16_t *end = ul_ch + 12; ul_ch < end; ul_ch++)
@@ -646,6 +646,10 @@ int nr_pusch_channel_estimation(PHY_VARS_gNB *gNB,
     *max_ch = max(*max_ch, max_ch_arr[aarx]);
     noise_amp2 += noise_amp2_arr[aarx];
     nest_count += nest_count_arr[aarx];
+    if (aarx < 8 && pusch_vars) { /* per-branch noise: the passive receiver's dead-branch test (nr_ul_branch_select.h) */
+      pusch_vars->ul_noise_amp2[aarx] += noise_amp2_arr[aarx];
+      pusch_vars->ul_noise_cnt[aarx] += (uint32_t)nest_count_arr[aarx];
+    }
   }
   /* The active gNB retains its existing arrival-time aggregation. Passive RX
    * uses this result to move its FFT window, so a weak antenna's large positive
@@ -654,7 +658,7 @@ int nr_pusch_channel_estimation(PHY_VARS_gNB *gNB,
   if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
     int peak_power[nb_antennas_rx];
     for (int a=0;a<nb_antennas_rx;++a) peak_power[a]=delay_arr[a].delay_max_val;
-    const int keep=nb_antennas_rx>1 ? 0 : -1; /* ISAC_RX_MRC_MODE=1: branch 0 */
+    const int keep=-1; /* the branch of the strongest measured CIR peak (the combiner's branch set follows the per-branch DM-RS power, nr_ul_branch_select.h) */
     const int best=nr_ulsch_passive_timing_branch(nb_antennas_rx,keep,peak_power);
     if (best>=0) *delay=delay_arr[best];
   } else {
