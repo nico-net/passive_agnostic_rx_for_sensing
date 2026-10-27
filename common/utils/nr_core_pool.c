@@ -50,6 +50,8 @@ struct nr_pool {
   _Atomic int nwait[NR_POOL_NPRIO]; /* lock-free view for should_yield */
   int cnt[NR_POOL_NPRIO];           /* current leases per class */
   int cnt_dl;                       /* of the DECODE leases, the DL ones */
+  int chan_demand;                  /* tokens the channelizer asked for (0 = none registered) */
+  bool chan_tok[NR_POOL_MAX_TOKENS]; /* the r reserved tokens (fastest first): CHAN's own, nobody else is placed on them while r > 0 */
   cpu_set_t poolset, home;
   bool have_home;
   pid_t member[256];
@@ -102,6 +104,40 @@ nr_pool_cfg_t nr_pool_cfg_default_n(int n)
   if (n < NR_POOL_PROMO_MIN_TOKENS) c.age_ns[NR_POOL_DISC] = c.age_ns[NR_POOL_HOUSE] = 0;
   return c;
 }
+
+/* CHAN bounds (header, CHAN CLASS). Pure functions of N and the demand. */
+int nr_pool_chan_cap_n(int n) { return n > 2 ? n - 2 : 1; }
+int nr_pool_chan_reserved_n(int n, int demand)
+{
+  if (n <= 2 || demand <= 0) return 0;
+  return demand < n - 2 ? demand : n - 2;
+}
+static void dispatch(nr_pool_t *p, uint64_t now);
+static int chan_res(const nr_pool_t *p) { return nr_pool_chan_reserved_n(p->n, p->chan_demand); }
+/* Urgency rank (smaller = more urgent): CHAN first, then the classes in index order. */
+static const int g_order[NR_POOL_NPRIO] = {NR_POOL_CHAN, NR_POOL_SCAN, NR_POOL_DECODE, NR_POOL_RETRY, NR_POOL_DISC, NR_POOL_HOUSE};
+static int urgency(int prio) { return prio == NR_POOL_CHAN ? -1 : prio; }
+static bool per_cell(int prio) { return prio != NR_POOL_CHAN; }
+void nr_pool_set_chan_demand(nr_pool_t *p, int tokens)
+{
+  if (!p) return;
+  pthread_mutex_lock(&p->mu);
+  p->chan_demand = tokens < 0 ? 0 : tokens;
+  /* The reserved tokens are fixed cores (the fastest ones, then the lowest index): a CHAN worker keeps its core between blocks, so a lease costs no
+   * affinity change (a migrating sched_setaffinity costs ~110 us on the DGX [Bench, DGX GB10, shared host, n=5000], half a block period). */
+  memset(p->chan_tok, 0, sizeof(p->chan_tok));
+  for (int k = chan_res(p); k > 0; k--) {
+    int best = -1;
+    for (int i = 0; i < p->n; i++)
+      if (!p->chan_tok[i] && (best < 0 || p->cap[i] > p->cap[best])) best = i;
+    if (best >= 0) p->chan_tok[best] = true;
+  }
+  dispatch(p, nr_pool_now_ns()); /* a lowered demand frees tokens for waiters */
+  pthread_mutex_unlock(&p->mu);
+}
+int nr_pool_chan_demand(const nr_pool_t *p) { return p ? p->chan_demand : 0; }
+int nr_pool_chan_cap(const nr_pool_t *p) { return p ? nr_pool_chan_cap_n(p->n) : 0; }
+int nr_pool_chan_reserved(const nr_pool_t *p) { return p ? chan_res(p) : 0; }
 
 nr_pool_t *nr_pool_create(const int *cores, const int *capacity, int n, const nr_pool_cfg_t *cfg)
 {
@@ -196,10 +232,13 @@ static int active_cells(const nr_pool_t *p, int cell, uint64_t now)
  * reduce to the global rule: identical to the single-cell pool. */
 static bool class_ok(const nr_pool_t *p, int prio, bool promoted, bool ul, int cell, uint64_t now)
 {
-  const int n = p->n;
-  if (p->nfree <= 0) return false;
+  if (prio == NR_POOL_CHAN) return p->nfree > 0 && p->cnt[NR_POOL_CHAN] < (chan_res(p) > 0 ? chan_res(p) : nr_pool_chan_cap_n(p->n));
+  /* The tokens reserved for the channelizer and not held by it right now stay free for it; every other class works on N-r tokens (r = 0: unchanged). */
+  const int res = chan_res(p), idle = res > p->cnt[NR_POOL_CHAN] ? res - p->cnt[NR_POOL_CHAN] : 0;
+  if (p->nfree - idle <= 0) return false;
   if (promoted) return true;
-  const int busy = n - p->nfree, low = p->cnt[NR_POOL_RETRY] + p->cnt[NR_POOL_DISC] + p->cnt[NR_POOL_HOUSE];
+  const int n = p->n - res;
+  const int busy = p->n - p->nfree - p->cnt[NR_POOL_CHAN], low = p->cnt[NR_POOL_RETRY] + p->cnt[NR_POOL_DISC] + p->cnt[NR_POOL_HOUSE];
   const int lim1 = n > 1 ? n - 1 : 1, lim2 = n > 2 ? n - 2 : 1;
   bool ulw = false; /* a UL decode is queued: DL gives up its last core (cap N-2) so the freed token goes to UL */
   if (prio == NR_POOL_DECODE && !ul)
@@ -231,14 +270,18 @@ static bool class_ok(const nr_pool_t *p, int prio, bool promoted, bool ul, int c
 /* Big cores to the urgent classes, small ones to the rest; the thread's previous token wins ties (cache). */
 static int pick_token(const nr_pool_t *p, int prio, bool promoted, int last)
 {
-  const bool hi = prio <= NR_POOL_DECODE || promoted;
+  const bool hi = prio <= NR_POOL_DECODE || prio == NR_POOL_CHAN || promoted;
+  const bool chan = prio == NR_POOL_CHAN;
   int best = -1;
   long bs = 0;
-  for (int i = 0; i < p->n; i++) {
-    if (p->busy[i]) continue;
-    const long s = (hi ? p->cap[i] : -p->cap[i]) * 2 + (i == last);
-    if (best < 0 || s > bs) best = i, bs = s;
-  }
+  for (int pass = 0; pass < 2 && best < 0; pass++)
+    for (int i = 0; i < p->n; i++) {
+      if (p->busy[i]) continue;
+      /* pass 0: CHAN only on the reserved tokens, every other class only off them; pass 1 (nothing there is free): any free token */
+      if (pass == 0 && p->chan_tok[i] != chan) continue;
+      const long s = chan ? (i == last ? 1000000L : 0) + p->cap[i] : (hi ? p->cap[i] : -p->cap[i]) * 2 + (i == last);
+      if (best < 0 || s > bs) best = i, bs = s;
+    }
   return best;
 }
 
@@ -258,14 +301,17 @@ static void wq_remove(nr_pool_t *p, waiter_t *x)
 static waiter_t *select_waiter(nr_pool_t *p, uint64_t now, bool *promoted)
 {
   waiter_t *best = NULL;
-  for (waiter_t *w = p->wq_head; w; w = w->next) /* starvation bound first: the oldest overdue waiter */
+  /* starvation bound first: the oldest overdue waiter, but never into the tokens reserved for the channelizer and not held by it right now */
+  const int res = chan_res(p), idle = res > p->cnt[NR_POOL_CHAN] ? res - p->cnt[NR_POOL_CHAN] : 0;
+  for (waiter_t *w = p->wq_head; w && p->nfree - idle > 0; w = w->next)
     if (overdue(p, w, now) && (!best || w->t_enq < best->t_enq)) best = w;
   if (best) {
     *promoted = true;
     return best;
   }
   *promoted = false;
-  for (int pr = 0; pr < NR_POOL_NPRIO; pr++) {
+  for (int oi = 0; oi < NR_POOL_NPRIO; oi++) {
+    const int pr = g_order[oi];
     /* Per cell (in round-robin order after the one served last) the best grantable waiter: oldest deadline. Then, between cells, the lowest decayed
      * token-time usage U_c; a tie (within NR_POOL_USAGE_TIE_NS) goes to the cell met first in round-robin order. A capped waiter does not block others. */
     waiter_t *bw = NULL;
@@ -301,17 +347,18 @@ static void grant(nr_pool_t *p, waiter_t *w, int tok, uint64_t now, bool promote
   p->nfree--;
   p->cnt[w->prio]++;
   if (w->prio == NR_POOL_DECODE && !w->ul) p->cnt_dl++, p->cell_dl[w->cell]++;
-  cell_touch(p, w->cell, now);
-  p->cell_run[w->cell]++;
+  if (per_cell(w->prio)) cell_touch(p, w->cell, now), p->cell_run[w->cell]++;
   w->tok = tok;
   const uint64_t wait = now > w->t_enq ? now - w->t_enq : 0; /* now may predate a waiter that queued while an older dispatch ran */
   p->st.leases[w->prio]++;
   if (wait > 2000) p->st.waited[w->prio]++;
   if (promoted) p->st.promoted[w->prio]++;
   if (wait > p->st.wait_max_ns[w->prio]) p->st.wait_max_ns[w->prio] = wait;
-  p->st.leases_cell[w->cell]++;
-  if (wait > 2000) p->st.waited_cell[w->cell]++;
-  if (wait > p->st.wait_max_ns_cell[w->cell]) p->st.wait_max_ns_cell[w->cell] = wait;
+  if (per_cell(w->prio)) {
+    p->st.leases_cell[w->cell]++;
+    if (wait > 2000) p->st.waited_cell[w->cell]++;
+    if (wait > p->st.wait_max_ns_cell[w->cell]) p->st.wait_max_ns_cell[w->cell] = wait;
+  }
   if (wait > 50000000ull) { /* a lease wait this long: show who held the tokens (rate-limited) */
     static _Atomic int n_wait;
     if (atomic_fetch_add(&n_wait, 1) < 40)
@@ -322,7 +369,7 @@ static void grant(nr_pool_t *p, waiter_t *w, int tok, uint64_t now, bool promote
   int b = 0;
   while (us && b < NR_POOL_WAIT_BINS - 1) us >>= 1, b++;
   p->st.wait_hist[w->prio][b]++;
-  p->st.wait_hist_cell[w->cell][b]++;
+  if (per_cell(w->prio)) p->st.wait_hist_cell[w->cell][b]++;
 }
 
 static void dispatch(nr_pool_t *p, uint64_t now)
@@ -333,7 +380,7 @@ static void dispatch(nr_pool_t *p, uint64_t now)
     if (!w) break;
     wq_remove(p, w);
     atomic_fetch_sub_explicit(&p->nwait[w->prio], 1, memory_order_relaxed);
-    p->cell_wait[w->cell]--;
+    if (per_cell(w->prio)) p->cell_wait[w->cell]--;
     grant(p, w, pick_token(p, w->prio, pro, w->last), now, pro);
     pthread_cond_signal(w->cv); /* under the lock: w lives on the waiter's stack until it sees tok >= 0 under the same lock */
   }
@@ -381,7 +428,7 @@ static int lease(nr_pool_t *p, int prio, int cell, uint64_t deadline, bool block
   if (!block) { /* grant only if no more urgent waiter could take this token */
     bool ahead = false;
     for (const waiter_t *q = p->wq_head; q; q = q->next)
-      if (q->prio < prio && class_ok(p, q->prio, false, q->ul, q->cell, now)) ahead = true;
+      if (urgency(q->prio) < urgency(prio) && class_ok(p, q->prio, false, q->ul, q->cell, now)) ahead = true;
     if (ahead || !class_ok(p, prio, false, ul, cell, now)) {
       pthread_mutex_unlock(&p->mu);
       return -1;
@@ -393,8 +440,10 @@ static int lease(nr_pool_t *p, int prio, int cell, uint64_t deadline, bool block
     p->wq_tail = &w;
     p->nwq++;
     atomic_fetch_add_explicit(&p->nwait[prio], 1, memory_order_relaxed);
-    p->cell_wait[cell]++;
-    if (now > p->cell_act[cell]) p->cell_act[cell] = now;
+    if (per_cell(prio)) {
+      p->cell_wait[cell]++;
+      if (now > p->cell_act[cell]) p->cell_act[cell] = now;
+    }
     dispatch(p, now); /* grants the best grantable waiter, possibly this one: a capped higher class must not hold a free token idle */
     const uint64_t age = p->cfg.age_ns[prio];
     while (w.tok < 0) {
@@ -433,6 +482,7 @@ void nr_pool_release(nr_pool_t *p)
   const uint64_t now = nr_pool_now_ns();
   const int tok = tl.tok, prio = tl.prio, rcell = tl.cell;
   const bool was_ul = tl.ul;
+  const bool sticky = prio == NR_POOL_CHAN && p->chan_tok[tok]; /* a reserved token is CHAN's alone: the worker stays on it between blocks */
   tl.pool = NULL;
   tl.tok = -1;
   if (now - tl.t_grant > 20000000ull) { /* a lease held this long means the holder blocked on something: name it (rate-limited) */
@@ -446,21 +496,20 @@ void nr_pool_release(nr_pool_t *p)
   p->nfree++;
   p->cnt[prio]--;
   if (prio == NR_POOL_DECODE && !was_ul) p->cnt_dl--, p->cell_dl[rcell]--;
-  cell_touch(p, rcell, now);
-  p->cell_run[rcell]--;
+  if (per_cell(prio)) cell_touch(p, rcell, now), p->cell_run[rcell]--;
   p->st.hold_ns[prio] += now - tl.t_grant;
-  p->st.hold_ns_cell[rcell] += now - tl.t_grant;
+  if (per_cell(prio)) p->st.hold_ns_cell[rcell] += now - tl.t_grant;
   p->st.busy_ns += now - tl.t_grant;
   dispatch(p, now);
   pthread_mutex_unlock(&p->mu);
-  go_home(p); /* a wake-up from now on lands on the home lane, not on a core that is somebody else's */
+  if (!(prio == NR_POOL_CHAN && sticky)) go_home(p); /* a wake-up from now on lands on the home lane, not on a core that is somebody else's */
 }
 
 bool nr_pool_should_yield(const nr_pool_t *p, int prio)
 {
   if (!p) return false;
-  for (int i = 0; i < prio && i < NR_POOL_NPRIO; i++)
-    if (atomic_load_explicit(&((nr_pool_t *)p)->nwait[i], memory_order_relaxed) > 0) return true;
+  for (int i = 0; i < NR_POOL_NPRIO; i++)
+    if (urgency(i) < urgency(prio) && atomic_load_explicit(&((nr_pool_t *)p)->nwait[i], memory_order_relaxed) > 0) return true;
   return false;
 }
 
@@ -499,16 +548,18 @@ static uint64_t hist_q_us(const uint64_t *h, double q)
 
 int nr_pool_stats_line(nr_pool_t *p, char *buf, int len)
 {
-  static const char *const nm[NR_POOL_NPRIO] = {"scan", "decode", "retry", "disc", "house"};
+  static const char *const nm[NR_POOL_NPRIO] = {"scan", "decode", "retry", "disc", "house", "chan"};
   nr_pool_stats_t s;
   nr_pool_stats(p, &s);
   int o = snprintf(buf, (size_t)len, "SENSING: CORE_POOL n=%d yields=%lu gpu_gives=%lu nested=%lu enforced=%lu", p ? p->n : 0, (unsigned long)s.yields,
                 (unsigned long)s.gpu_gives, (unsigned long)s.nested, (unsigned long)s.enforced);
-  for (int i = 0; i < NR_POOL_NPRIO && o < len; i++)
+  for (int i = 0; i < NR_POOL_NPRIO && o < len; i++) {
+    if (i == NR_POOL_CHAN && !s.leases[i]) continue; /* no channelizer: the line is the pre-CHAN one */
     o += snprintf(buf + o, (size_t)(len - o), " %s[n=%lu waited=%lu promo=%lu wait_us p50<=%lu p99<=%lu max=%lu]", nm[i],
                   (unsigned long)s.leases[i], (unsigned long)s.waited[i], (unsigned long)s.promoted[i],
                   (unsigned long)hist_q_us(s.wait_hist[i], 0.5), (unsigned long)hist_q_us(s.wait_hist[i], 0.99),
                   (unsigned long)(s.wait_max_ns[i] / 1000));
+  }
   /* Per-cell blocks, one per cell that has leased, only once a cell other than 0 has: with cell 0 alone the line is byte-identical to the
    * single-cell pool. Grammar: " cell<c>[n=<leases> waited=<waited> hold_ms=<token-time> wait_us p50<=<> p99<=<> max=<>]". */
   bool multi = false;
@@ -695,6 +746,15 @@ int nr_pool_site_float_acquire(int prio, int cell, uint64_t enq_ns)
 }
 void nr_pool_site_float_release(void) { nr_pool_site_release(); }
 bool nr_pool_site_float_yield(void) { return nr_pool_site_float_merged() && nr_pool_yield(g_site); }
+int nr_pool_site_chan_acquire(int blocking)
+{
+  nr_pool_t *p = nr_pool_site();
+  if (!p) return -1;
+  return blocking ? nr_pool_acquire(p, NR_POOL_CHAN, 0, 0) : nr_pool_try_acquire(p, NR_POOL_CHAN, 0, 0);
+}
+void nr_pool_site_chan_release(void) { nr_pool_site_release(); }
+void nr_pool_site_chan_set_demand(int tokens) { nr_pool_set_chan_demand(nr_pool_site(), tokens); }
+int nr_pool_site_chan_max(void) { return nr_pool_chan_cap(nr_pool_site()); }
 int nr_pool_site_filter_core(int core)
 {
   if (core >= 0 && g_site && nr_pool_core_in_pool(g_site, core)) {

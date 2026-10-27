@@ -13,6 +13,11 @@
 //   NO FLAGS: the float mode and the layout are bench COMMAND-LINE arguments after the four positional ones (a bench may take arguments; the receiver may not):
 //     float=none|sep|merged   lane=<cpu list>  prod=<cpu>  pool=<cpu list>  noage  ulbg_chunk_ms=<ms>  cells=<k>  cellscale=<a,b,..>  cfs
 //   The old BENCH_FLOAT / BENCH_LANE / BENCH_PROD / BENCH_POOL / BENCH_NOAGE / BENCH_ULBG_CHUNK_MS environment variables are still read when the argument is absent.
+// CHANPOOL (channelizer workers as class CHAN): arguments chan=<k> (workers; 0 = none, the default) chan_msps=<capture MS/s per channel> chan_nch=<channels>
+//   chan_per_thread_msps=<measured single-thread backend rate, MS/s per channel (test_iq_chan --bench)> chan_block=<samples, default 65536> chan_demand (word: register the
+//   demand = k with the pool, i.e. the reserved-tokens policy; without it CHAN leases are just the top class). Model: every block period, each of the k workers leases
+//   CHAN (blocking), spins its share of the block work (work per block = block x nch / (per_thread_rate x nch) / k per worker), releases; a block is LATE when the last worker
+//   finished more than one period after the block arrived (the channelizer shortfall: the wideband ring backs up). Offered CHAN load is reported.
 // usage: bench_nr_core_pool <first_core> <n_cores> <load_scale> <seconds> [cfs] [float=..] [lane=..] [prod=..] [pool=..] [noage] [ulbg_chunk_ms=..] [cells=..] [cellscale=..]
 //   default: the pool with n_cores tokens. cfs: no pool, every consumer thread pinned round-robin to the n_cores cores (time-sharing, SCHED_OTHER).
 #include <algorithm>
@@ -179,6 +184,33 @@ static void float_thread(nr_pool_t *p, const FSpec *f, FStat *st, bool merged, c
   st->wait = w; st->str = s; st->cpu_ns = cpu; st->jobs = w.size();
 }
 
+struct ChanStat { std::mutex m; std::vector<uint64_t> wait; uint64_t blocks = 0, late = 0; std::vector<uint64_t> done; };
+static void chan_worker(nr_pool_t *p, int idx, int k, uint64_t period_ns, uint64_t work_ns, uint64_t t_begin, ChanStat *cs)
+{
+  std::vector<uint64_t> w, d;
+  uint64_t late = 0, blocks = 0;
+  for (uint64_t arr = t_begin + period_ns; !g_stop; arr += period_ns) {
+    timespec ts{(time_t)(arr / 1000000000ull), (long)(arr % 1000000000ull)};
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
+    if (g_stop) break;
+    nr_pool_acquire(p, NR_POOL_CHAN, 0, arr);
+    const uint64_t t0 = nr_pool_now_ns();
+    spin_for(work_ns / (uint64_t)k);
+    nr_pool_release(p);
+    const uint64_t t1 = nr_pool_now_ns();
+    w.push_back(t0 - arr);
+    d.push_back(t1 - arr);
+    blocks++;
+    late += t1 - arr > period_ns;
+    (void)idx;
+  }
+  std::lock_guard<std::mutex> g(cs->m);
+  cs->wait.insert(cs->wait.end(), w.begin(), w.end());
+  cs->done.insert(cs->done.end(), d.begin(), d.end());
+  cs->blocks += blocks;
+  cs->late += late;
+}
+
 // wait = arrival -> job start (queue + token); lat = arrival -> done; miss = lat > deadline; drop = never started by the end of the run
 static void report(Q *Qp)
 {
@@ -269,6 +301,18 @@ int main(int argc, char **argv)
     while (!g_stop) { spin_for(200000); hbusy += 200000; std::this_thread::sleep_for(std::chrono::nanoseconds(400000 + r() % 1200000)); }
   });
   std::mt19937 rng(1);
+  const int chan_k = arg_of("chan") ? atoi(arg_of("chan")) : 0;
+  ChanStat cst;
+  std::vector<std::thread> cth;
+  uint64_t chan_period = 0, chan_work = 0;
+  if (chan_k > 0) {
+    const double msps = arg_of("chan_msps") ? atof(arg_of("chan_msps")) : 245.76, pt = arg_of("chan_per_thread_msps") ? atof(arg_of("chan_per_thread_msps")) : 133.0;
+    const double block = arg_of("chan_block") ? atof(arg_of("chan_block")) : 65536.0;
+    chan_period = (uint64_t)(block / (msps * 1e6) * 1e9);
+    chan_work = (uint64_t)(block / (pt * 1e6) * 1e9); // one thread's time for one block (all channels and cells of the load)
+    if (has_word("chan_demand")) nr_pool_set_chan_demand(p, chan_k);
+    for (int i = 0; i < chan_k; i++) cth.emplace_back(chan_worker, p, i, chan_k, chan_period, chan_work, nr_pool_now_ns(), &cst);
+  }
   auto push = [&](Q &q, uint64_t svc) {
     const double j = 0.8 + 0.4 * (double)(rng() % 1000) / 1000.0;
     { std::lock_guard<std::mutex> l(q.m); q.d.push_back({nr_pool_now_ns(), (uint64_t)((double)svc * j)}); }
@@ -292,6 +336,7 @@ int main(int argc, char **argv)
     }
   }
   g_stop = true;
+  for (auto &t : cth) t.join();
   for (Q *q : all_q()) { std::lock_guard<std::mutex> l(q->m); q->cv.notify_all(); }
   for (auto &t : th) t.join();
   for (auto &t : dt) t.join();
@@ -318,6 +363,15 @@ int main(int argc, char **argv)
     double got = 0, off = 0;
     for (size_t i = 0; i < nf; i++) got += fst[i].cpu_ns / 1e9 / secs, off += kF[i % nf0].duty;
     printf("  FLOAT cells=%d cpu_got=%.2f cpu_offered=%.2f ratio=%.2f\n", ncell, got, off, off > 0 ? got / off : 0.0);
+  }
+  if (chan_k > 0) {
+    auto &w = cst.wait; auto &x = cst.done;
+    std::sort(w.begin(), w.end()); std::sort(x.begin(), x.end());
+    auto q = [](std::vector<uint64_t> &v, double f) { return v.empty() ? 0.0 : v[std::min(v.size() - 1, (size_t)(f * (double)v.size()))] / 1000.0; };
+    printf("  CHAN k=%d demand=%s period_us=%.1f work_us_per_block=%.1f offered_cores=%.2f leases=%zu lease_wait_us p50=%.0f p99=%.0f max=%.0f | done_us p50=%.0f p99=%.0f max=%.0f | late_worker_blocks=%lu/%lu (shortfall %.4f%%)\n",
+           chan_k, has_word("chan_demand") ? "k" : "none", (double)chan_period / 1000.0, (double)chan_work / 1000.0, (double)chan_work / (double)chan_period, w.size(), q(w, .5), q(w, .99),
+           w.empty() ? 0.0 : w.back() / 1000.0, q(x, .5), q(x, .99), x.empty() ? 0.0 : x.back() / 1000.0, (unsigned long)cst.late, (unsigned long)cst.blocks,
+           cst.blocks ? 100.0 * (double)cst.late / (double)cst.blocks : 0.0);
   }
   char line[1024];
   nr_pool_stats_line(p, line, sizeof(line));

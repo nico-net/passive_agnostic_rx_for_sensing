@@ -535,6 +535,88 @@ static int test_threads_needed(void)
   return 0;
 }
 
+
+/* ---------------------------------------------------------------- CHANPOOL: workers under core-pool leases (fake pool: a counted semaphore) */
+static _Atomic int g_ls_hold, g_ls_max, g_ls_cap = 2, g_ls_acq, g_ls_rel, g_ls_demand, g_ls_blk;
+static int fake_acquire(void *ctx, int blocking)
+{
+  (void)ctx;
+  for (;;) {
+    int h = atomic_load(&g_ls_hold);
+    if (h < atomic_load(&g_ls_cap)) {
+      if (atomic_compare_exchange_weak(&g_ls_hold, &h, h + 1)) {
+        if (h + 1 > atomic_load(&g_ls_max)) atomic_store(&g_ls_max, h + 1);
+        atomic_fetch_add(&g_ls_acq, 1);
+        if (blocking) atomic_fetch_add(&g_ls_blk, 1);
+        return 0;
+      }
+      continue;
+    }
+    if (!blocking) return -1;
+    sched_yield();
+  }
+}
+static void fake_release(void *ctx) { (void)ctx; atomic_fetch_sub(&g_ls_hold, 1); atomic_fetch_add(&g_ls_rel, 1); }
+static void fake_demand(void *ctx, int t) { (void)ctx; atomic_store(&g_ls_demand, t); }
+static int fake_max(void *ctx) { (void)ctx; return atomic_load(&g_ls_cap); }
+
+static int test_lease(void)
+{
+  const iq_chan_lease_t hk = {.acquire = fake_acquire, .release = fake_release, .demand = fake_demand, .max_tokens = fake_max};
+  iq_chan_set_lease(&hk);
+  CHECK(iq_chan_lease_max_tokens() == 2, "max tokens from the hook");
+  CHECK(iq_chan_lease_acquire(0) == IQ_CHAN_LEASE_HELD && iq_chan_lease_acquire(0) == IQ_CHAN_LEASE_HELD && iq_chan_lease_acquire(0) == IQ_CHAN_LEASE_DENIED, "non-blocking denial at the cap");
+  iq_chan_lease_release(IQ_CHAN_LEASE_HELD); iq_chan_lease_release(IQ_CHAN_LEASE_HELD); iq_chan_lease_release(IQ_CHAN_LEASE_DENIED); iq_chan_lease_release(IQ_CHAN_LEASE_NONE);
+  CHECK(atomic_load(&g_ls_hold) == 0, "release of DENIED / NONE is a no-op");
+  const int saved = g_k;
+  int rc = 0;
+  for (g_k = 1; g_k <= 4 && !rc; g_k += 3) { /* 1: only worker 0 leases; 4 workers on a 2-token pool: helpers are denied, worker 0 always runs */
+    atomic_store(&g_ls_max, 0);
+    rc |= test_equiv(122.88e6, 65536, 4, 0); /* bit-exact against the oracle with leases */
+    rc |= test_thread_live();                /* live add / remove / retune while leased, thread running */
+    CHECK(atomic_load(&g_ls_max) <= 2, "never more than the cap held: %d", atomic_load(&g_ls_max));
+  }
+  g_k = saved;
+  if (rc) return rc;
+  CHECK(atomic_load(&g_ls_acq) > 0 && atomic_load(&g_ls_blk) > 0, "worker 0 leased per block (%d leases, %d blocking)", atomic_load(&g_ls_acq), atomic_load(&g_ls_blk));
+  CHECK(atomic_load(&g_ls_acq) == atomic_load(&g_ls_rel) && atomic_load(&g_ls_hold) == 0, "every lease released: %d/%d held %d", atomic_load(&g_ls_acq), atomic_load(&g_ls_rel), atomic_load(&g_ls_hold));
+  /* never across a wait for input: a running channelizer with NO input holds nothing, sampled while it polls */
+  shm_iq_ring_t in;
+  CHECK(shm_iq_ring_create(&in, SHM_IQ_BACKING_ANON, "t_lease", NCH, 1 << 21, 122.88e6, 3.6e9, 0) == 0, "ring");
+  iq_chan_cfg_t cfg = {.in = &in, .block = 16384};
+  iq_chan_t *c = iq_chan_create(&cfg);
+  CHECK(c, "create");
+  iq_chan_entry_t e = {.shift_hz = 7.3e6, .decim = 2, .passband_hz = pb_of(122.88e6, 2)};
+  CHECK(iq_chan_cell_add(c, &e) >= 0, "add");
+  CHECK(iq_chan_start_k(c, NULL, 0, 3) == 0, "start");
+  int held_idle = 0;
+  for (int i = 0; i < 200; ++i) { held_idle += atomic_load(&g_ls_hold) != 0; struct timespec w = {0, 500000}; nanosleep(&w, NULL); }
+  CHECK(held_idle == 0, "idle channelizer holds a lease in %d of 200 samples", held_idle);
+  iq_chan_stop(c);
+  /* demand: iq_chan_start derives k and registers it; stop clears it */
+  iq_chan_load_t l = {.in_rate = 122.88e6, .nch = NCH, .n_cells = 1};
+  l.cell[0].decim = 2; l.cell[0].shifted = 1; l.cell[0].passband_hz = pb_of(122.88e6, 2);
+  iq_chan_destroy(c);
+  shm_iq_ring_detach(&in);
+  shm_iq_ring_t in2;
+  CHECK(shm_iq_ring_create(&in2, SHM_IQ_BACKING_ANON, "t_lease2", NCH, 1 << 21, 122.88e6, 3.6e9, 0) == 0, "ring2");
+  iq_chan_cfg_t cfg2 = {.in = &in2, .load_hint = &l};
+  iq_chan_t *c2 = iq_chan_create(&cfg2);
+  CHECK(c2 && iq_chan_cell_add(c2, &e) >= 0, "create2");
+  atomic_store(&g_ls_demand, -1);
+  CHECK(iq_chan_start(c2, NULL, 0) == 0, "start derived");
+  iq_chan_stats_t st;
+  iq_chan_stats(c2, &st);
+  CHECK(atomic_load(&g_ls_demand) == st.threads && st.threads >= 1 && st.threads <= 2, "demand %d = threads %d (ceiling = the pool's CHAN bound 2)", atomic_load(&g_ls_demand), st.threads);
+  iq_chan_stop(c2);
+  CHECK(atomic_load(&g_ls_demand) == 0, "stop clears the demand");
+  iq_chan_destroy(c2);
+  shm_iq_ring_detach(&in2);
+  iq_chan_set_lease(NULL);
+  printf("PASS lease: per-block CHAN leases (worker 0 blocking, helpers non-blocking and denied at the cap), bit-exact with leases, nothing held while idle, demand registered / cleared\n");
+  return 0;
+}
+
 /* ---------------------------------------------------------------- soak and bench */
 static uint64_t host_ring_budget(void)
 {
@@ -835,6 +917,7 @@ int main(int argc, char **argv)
   g_k = 1;
   fail |= test_limits();
   fail |= test_backends();
+  fail |= test_lease();
   printf(fail ? "FAILED\n" : "ALL OK\n");
   return fail;
 }

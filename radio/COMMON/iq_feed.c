@@ -241,13 +241,17 @@ int iq_feed_format(iq_feed_t *f, char *buf, size_t n)
 {
   iq_feed_stats_t s;
   iq_feed_stats(f, &s);
+  char ls[96] = ""; /* core-pool lease of the channelizer workers (CHANPOOL); empty without leases, so the line is unchanged then */
+  if (s.chan.lease_blocks || s.chan.lease_denied)
+    snprintf(ls, sizeof(ls), " chan_lease=%llu/denied=%llu/wait_max_us=%llu", (unsigned long long)s.chan.lease_blocks, (unsigned long long)s.chan.lease_denied,
+             (unsigned long long)(s.chan.lease_wait_max_ns / 1000));
   size_t o = (size_t)snprintf(buf, n,
                               "MPCI_FEED rate=%.0f centre_hz=%.0f reads=%llu samples=%llu short=%llu gaps=%llu frozen=%llu read_err=%llu chan_overruns=%llu chan_discont=%llu "
-                              "chan_lag_max=%llu threads=%d/%d backend=%s cells=",
+                              "chan_lag_max=%llu threads=%d/%d backend=%s%s cells=",
                               f->cfg.rate, f->cfg.centre_hz, (unsigned long long)s.reads, (unsigned long long)s.samples, (unsigned long long)s.short_reads,
                               (unsigned long long)s.ts_gaps, (unsigned long long)s.ts_frozen, (unsigned long long)s.read_errors,
                               (unsigned long long)s.chan.overruns, (unsigned long long)s.chan.discont, (unsigned long long)s.chan.lag_max, s.chan.threads,
-                              s.chan.threads_needed, s.chan.backend ? s.chan.backend : "-");
+                              s.chan.threads_needed, s.chan.backend ? s.chan.backend : "-", ls);
   int first = 1;
   for (int id = 0; id < IQ_CHAN_MAX_CELLS && o < n; ++id) {
     iq_feed_cell_stats_t c;
