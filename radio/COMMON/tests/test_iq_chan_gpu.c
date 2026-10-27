@@ -224,6 +224,37 @@ static int test_select(int discrete)
   return 0;
 }
 
+/* core-pool leases (MPCI-CHANPOOL hooks): the GPU backend leases for its CPU side only, releases before the GPU wait, registers a demand of 1 */
+static int g_held, g_held_max, g_acq, g_rel, g_dem = -1;
+static int fk_acq(void *c, int b) { (void)c; (void)b; g_acq++; if (++g_held > g_held_max) g_held_max = g_held; return 0; }
+static void fk_rel(void *c) { (void)c; g_rel++; g_held--; }
+static void fk_dem(void *c, int t) { (void)c; g_dem = t; }
+static int fk_max(void *c) { (void)c; return 2; }
+static int test_lease(void)
+{
+  const iq_chan_lease_t L = {fk_acq, fk_rel, fk_dem, fk_max, NULL};
+  iq_chan_set_lease(&L);
+  shm_iq_ring_t in;
+  CHECK(shm_iq_ring_create(&in, SHM_IQ_BACKING_ANON, NULL, 2, 1 << 20, 122.88e6, 3.6e9, 1) == 0, "ring");
+  iq_chan_cfg_t cfg = {.in = &in, .block = 65536, .backend = A->backend};
+  iq_chan_t *c = iq_chan_create(&cfg);
+  CHECK(c, "create");
+  iq_chan_entry_t e = {.shift_hz = 5e6, .decim = 4, .passband_hz = 10e6};
+  CHECK(iq_chan_cell_add(c, &e) >= 0, "add");
+  iq_chan_seek(c, 0);
+  int16_t *b[2];
+  for (int a = 0; a < 2; ++a) b[a] = calloc(65536, 4);
+  void *bufs[2] = {b[0], b[1]};
+  for (int k = 0; k < 6; ++k) { shm_iq_ring_write(&in, 77 + (int64_t)k * 65536, bufs, 65536, 2); CHECK(iq_chan_step(c) == 1, "step"); }
+  CHECK(g_acq >= 6 && g_acq == g_rel && g_held == 0 && g_held_max == 1 && g_dem == 1, "leases acq %d rel %d max %d demand %d", g_acq, g_rel, g_held_max, g_dem);
+  printf("LEASE gpu backend: %d CHAN leases over 6 blocks, all released, at most 1 held, demand 1 (%s tier)\n", g_acq, A->tier_shared() ? "shared" : "discrete");
+  iq_chan_destroy(c);
+  shm_iq_ring_detach(&in);
+  for (int a = 0; a < 2; ++a) free(b[a]);
+  iq_chan_set_lease(NULL);
+  return 0;
+}
+
 static int test_fence(void)
 {
   nr_gpu_rx_started();
@@ -297,6 +328,7 @@ int main(int argc, char **argv)
   test_in_chan();
   test_paused_slot();
   test_ledger();
+  test_lease();
   test_select(discrete);
   test_fence();
   printf("%s\n", g_fail ? "SOME FAILED" : "ALL OK");

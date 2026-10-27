@@ -166,6 +166,7 @@ struct GCtx {
   size_t bytes_dev, bytes_pin;
   GCell *slot[IQ_CHAN_MAX_CELLS];
   int place;
+  int demand_set; // the CPU-part demand (1 token) registered with the pool at the first run (the hooks are installed after create)
   iq_chan_gpu_stats_t stats;
 };
 
@@ -189,6 +190,14 @@ static int wait_event(cudaEvent_t e)
 }
 
 static int fence_ok(void) { return nr_gpu_allocations_allowed(); }
+
+// Core pool (MPCI-CHANPOOL): the CPU side of a run (phasors, launches, DISCRETE staging copies) holds a CHAN lease of the receiver's pool; the GPU wait does
+// not. The hooks live in iq_chan.c of the executable (weak: a host without them, e.g. a tool that only loads this module, runs unleased).
+extern "C" int iq_chan_lease_acquire(int blocking) __attribute__((weak));
+extern "C" void iq_chan_lease_release(int held) __attribute__((weak));
+extern "C" void iq_chan_lease_set_demand(int tokens) __attribute__((weak));
+static int lease_get(void) { return iq_chan_lease_acquire ? iq_chan_lease_acquire(1) : -1000; }
+static void lease_put(int h) { if (iq_chan_lease_release && h != -1000) iq_chan_lease_release(h); }
 
 // GPU budget: the channelizer is small (a few MB) and fixed once its cells are created: it commits its live bytes as module NR_GPU_MEM_CHAN (weight 0)
 // and a new allocation is admitted iff everything committed so far plus it fits the budget B (nr_gpu_membudget.h). It does not wait for the shares of
@@ -404,6 +413,8 @@ static int g_run(void *ctx, const int16_t *const *in, int n, int16_t *const *out
     any = 1;
   }
   if (!any) return 0;
+  if (!x->demand_set && iq_chan_lease_set_demand) { iq_chan_lease_set_demand(1); x->demand_set = 1; } // iq_chan_stop sends 0
+  int lease = lease_get();
   InP ip;
   if (x->shared) for (int a = 0; a < nch; ++a) ip.p[a] = in[a];
   else {
@@ -417,14 +428,18 @@ static int g_run(void *ctx, const int16_t *const *in, int n, int16_t *const *out
     enqueue_cell(x, c, ip, n, out + s * nch);
   }
   cudaEventRecord(x->e1, x->st);
+  lease_put(lease); // never across the GPU wait
   if (cudaGetLastError() != cudaSuccess || wait_event(x->e1)) return -1;
-  if (!x->shared)
+  if (!x->shared) {
+    lease = lease_get();
     for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s) {
       GCell *c = x->slot[s];
       if (!c || !out[s * nch] || (c->decim == 1 && c->shift == 0)) continue;
       const size_t row = (size_t)(x->g.block / c->decim);
       for (int a = 0; a < nch; ++a) memcpy(out[s * nch + a], c->out_h + (size_t)a * 2 * row, (size_t)(n / c->decim) * 4);
     }
+    lease_put(lease);
+  }
   float ms = 0;
   cudaEventElapsedTime(&ms, x->e0, x->e1);
   x->stats.runs++;
