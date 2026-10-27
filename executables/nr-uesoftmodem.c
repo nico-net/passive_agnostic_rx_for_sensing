@@ -26,6 +26,7 @@
 #include "PHY/defs_nr_UE.h"
 #include "PHY/TOOLS/nr_gpu_platform.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.h" /* NR_GPU_PASS_RING */
+#include "PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.h" /* MPCI-DBG3: per-cell pass registration */
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "common/utils/nr_dashboard.h"
 #include <limits.h>
@@ -658,8 +659,14 @@ static int mpci_cell_prealloc(void *ctx, int k, const nr_mgr_slot_t *slot)
     if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
       mpci_open_uectx(k);
   }
-  if (k > 0)
+  if (k > 0) {
     nr_pdcch_nid_gpu_start(ue->frame_parms.N_RB_DL); /* per-cell nID sweep on the cell's own grid (cell 0 started in main, unchanged) */
+    /* MPCI-DBG3: register the cell with the GPU decode pass that cell 0 warmed in nr_dl_gpu_warmup (G3/G3b: own HARQ slab, instance floor, its own FEP
+     * geometry when it differs; UL pass gate). Without it every grant of the cell fell back (fallback[cell], measured 2026-10-27 mp27e_P1: 45583 of
+     * 45583). Bound to cell k, before the RX fence; a module that is not up, or a geometry it cannot serve, leaves the cell on the old path (logged). */
+    if (nr_gpu_pass_active())
+      nr_gpu_pass_warmup(ue);
+  }
   nr_csirs_disc_pipeline_init(&ue->frame_parms);
   if (nr_csirs_disc_cell_prealloc(k, &ue->frame_parms, ue->frame_parms.nb_antennas_rx) != 0)
     LOG_W(PHY, "SENSING: CSIRS_DISC worker could not start; slot discovery feed disabled\n");

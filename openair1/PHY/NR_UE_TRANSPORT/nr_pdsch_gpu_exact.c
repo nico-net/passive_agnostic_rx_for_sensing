@@ -4,6 +4,7 @@
 #include "PHY/TOOLS/nr_stage_split.h"
 #include "nr_pdsch_gpu_exact.h"
 #include "nr_pdsch_gpu_fep.h"
+#include "nr_fep_selfcheck.h"
 #include "nr_pdsch_gpu_demod_host.h"
 #include "nr_pdsch_gpu_ldpc_host.h"
 #include "nr_pdsch_gpu_chest.h"
@@ -34,6 +35,7 @@ static nr_gpu_fep_cfg_t g_cfg0; /* MPCI G3b: the FEP geometry the module was ini
 static _Atomic int g_on;     /* the module's exact working set is up (also gates the chest / delay entries and the graph pass warm-up) */
 static _Atomic int g_fep_on; /* the FEP itself runs on the GPU: g_on and the per-path choice (nr_gpu_path.h, NR_GPU_PATH_FEP) */
 static _Atomic uint64_t g_calls, g_fallback, g_chk_ok, g_chk_bad, g_ns_sum, g_ns_max;
+static _Atomic uint64_t g_chk_void; /* MPCI-DBG3: self-check mismatches not confirmed on stable input (nr_fep_selfcheck.h) */
 static _Atomic uint64_t g_hist[16];
 
 /* now_ns: monotonic clock in nanoseconds (timing of GPU calls).
@@ -249,6 +251,65 @@ static int check_symbol(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slo
 static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, uint16_t mask, c16_t *rxdataF, size_t stride,
                      c16_t **rxdata, int try_only);
 
+/* MPCI-DBG3: the confirmation of a self-check mismatch (nr_fep_selfcheck.h): the CPU reference and a GPU re-run of the same (antenna, symbol),
+ * on the input as it is now. Thread-local scratch (the mismatch path only). */
+typedef struct {
+  PHY_VARS_NR_UE *ue;
+  const NR_DL_FRAME_PARMS *fp;
+  int slot, ant, sym;
+  c16_t **rxdata;
+  const int16_t *const *rx;
+  uint32_t ring_len, ring_offset;
+  const c16_t *rot;
+  size_t stride;
+  const uint32_t *sfo;
+  int kref;
+} recheck_t;
+static int recheck_cpu(void *ctx, void *out)
+{
+  const recheck_t *c = (const recheck_t *)ctx;
+  static __thread c16_t *buf;
+  static __thread size_t buf_n;
+  const size_t n = (size_t)c->fp->nb_antennas_rx * c->fp->samples_per_slot_wCP;
+  if (buf_n < n) {
+    free(buf);
+    buf = aligned_alloc(64, ((n * sizeof(c16_t) + 63) / 64) * 64);
+    buf_n = buf ? n : 0;
+  }
+  if (!buf)
+    return -1;
+  nr_slot_fep_ant(c->ue, c->fp, c->slot, c->sym, c->ant, (c16_t(*)[c->fp->samples_per_slot_wCP])buf, link_type_dl, 0, c->rxdata);
+  memcpy(out, buf + (size_t)c->ant * c->fp->samples_per_slot_wCP + (size_t)c->sym * c->fp->ofdm_symbol_size, sizeof(c16_t) * c->fp->ofdm_symbol_size);
+  return 0;
+}
+static int recheck_gpu(void *ctx, void *out)
+{
+  const recheck_t *c = (const recheck_t *)ctx;
+  static __thread c16_t *buf;
+  static __thread size_t buf_n;
+  const size_t n = (size_t)c->fp->nb_antennas_rx * c->stride;
+  if (buf_n < n) {
+    free(buf);
+    buf = aligned_alloc(64, ((n * sizeof(c16_t) + 63) / 64) * 64);
+    buf_n = buf ? n : 0;
+  }
+  if (!buf || !g_fn)
+    return -1;
+  if (g_fn(c->rx, c->ring_len, c->ring_offset, 0.0, (const int16_t *)c->rot, (uint16_t)(1u << c->sym), (int16_t *)buf, c->stride, 0, c->sfo, c->kref) != 0)
+    return -1;
+  memcpy(out, buf + (size_t)c->ant * c->stride + (size_t)c->sym * c->fp->ofdm_symbol_size, sizeof(c16_t) * c->fp->ofdm_symbol_size);
+  return 0;
+}
+static int mismatch_confirmed(const recheck_t *c)
+{
+  static __thread c16_t *s;
+  if (!s && !(s = aligned_alloc(64, sizeof(c16_t) * 3 * NR_MAX_OFDM_SYMBOL_SIZE)))
+    return 1; /* cannot confirm: the mismatch stands (the path's behaviour before the confirmation) */
+  if (c->fp->ofdm_symbol_size > NR_MAX_OFDM_SYMBOL_SIZE)
+    return 1;
+  return nr_fep_selfcheck_confirm(recheck_cpu, recheck_gpu, (void *)c, sizeof(c16_t) * c->fp->ofdm_symbol_size, s) == NR_FEP_SELFCHECK_CONFIRMED;
+}
+
 /* nr_pdsch_gpu_exact_fep_ranges: GPU exact FEP for PDSCH symbol ranges.
  *   How it works: Returns -1 when the GPU path is off. Builds a 14-bit symbol mask from the ranges and calls exact_run with try_only = 0.
  *   ISAC_* flags read: none.
@@ -333,6 +394,20 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
     const int k = (int)(n % np);
     nr_sfo_pin(sfo_q);
     ok = check_symbol(ue, fp, slot, pairs[k][0], pairs[k][1], rxdataF, rxdata);
+    if (!ok) { /* MPCI-DBG3: confirm on input that stays put before turning the path off (nr_fep_selfcheck.h) */
+      const recheck_t rc_ctx = {.ue = ue, .fp = fp, .slot = slot, .ant = pairs[k][0], .sym = pairs[k][1], .rxdata = rxdata, .rx = rx,
+                                .ring_len = 2u * fp->samples_per_frame, .ring_offset = get_samples_slot_timestamp(fp, slot), .rot = rot,
+                                .stride = stride, .sfo = sfo_on ? sfo_dphi : NULL,
+                                .kref = nr_sfo_kref(fp->ofdm_symbol_size, fp->first_carrier_offset, fp->ssb_start_subcarrier)};
+      if (!mismatch_confirmed(&rc_ctx)) {
+        nr_sfo_pin(INT64_MIN);
+        const uint64_t v = atomic_fetch_add_explicit(&g_chk_void, 1, memory_order_relaxed) + 1;
+        if (v <= 10 || v % 1000 == 0)
+          LOG_W(PHY, "SENSING: GPU_EXACT_FEP self-check mismatch at slot %d NOT confirmed (the IQ moved under the check: GPU re-run equals the CPU "
+                     "reference on stable input, or the input kept moving; void %lu): GPU FEP stays on, CPU FEP for this slot\n", slot, (unsigned long)v);
+        return -1;
+      }
+    }
     nr_sfo_pin(INT64_MIN);
     atomic_fetch_add_explicit(ok ? &g_chk_ok : &g_chk_bad, 1, memory_order_relaxed);
     if (!ok) {
