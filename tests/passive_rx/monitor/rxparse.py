@@ -357,7 +357,51 @@ def is_receiver_wide(line):
 # One process runs N cells on one capture: the capture/channelizer facts are receiver-wide, the rest is per cell. Field sets are the
 # printf formats of the C sources (nr_cell_admit.c, iq_span.c, iq_feed.c, nr_cell_mgr.c, nr_cell_life.c, nr-uesoftmodem.c, nr-ue.c,
 # shm_iq.c, nr_core_layout.c, nr_core_pool). No flag: the aggregate fills only when such lines (or "[c<k>] " tags) are present.
-MPCI_LINE = re.compile(r"MPCI_|SHMIQ_|CORE_P|SFO reset")
+MPCI_LINE = re.compile(r"MPCI_|SHMIQ_|CORE_P|SFO reset|CELL_(?:CPU|Q|TIMING|GPU|BUDGET|SUM)\b|LDPC_ITER|CHAN_CELL|SLOT_CELL")
+# MPCI-DASH section 5 per-cell lines (formats: common/utils/nr_cell_dash.h, nr_core_pool.c, radio/COMMON/iq_feed.c)
+DASH_TOKENS = {"CELL_CPU": "cpu", "CELL_Q": "q", "LDPC_ITER": "ldpc", "CELL_TIMING": "timing", "CELL_GPU": "gpu", "CHAN_CELL": "chan",
+               "CELL_BUDGET": "budget", "SLOT_CELL": "slot", "CELL_SUM": "sum"}
+# window-delta fields summed over the run (total), and fields whose run maximum is kept (peak); [group.]field names
+DASH_TOT = {"q": ("scan.drop_full", "scan.drop_stale", "pdsch.drop_full", "pdsch.drop_stale", "pusch.drop_full", "pusch.drop_stale"),
+            "ldpc": ("tb", "cb"), "timing": ("discont", "resync"), "gpu": ("calls", "fallback"), "slot": ("slots", "late_slots"),
+            "sum": ("grants", "drops", "disc"), "chan": ("blocks", "out_samples", "overruns_seen"), "cpu": ("n",)}
+DASH_PEAK = {"q": ("scan.max_lag_win", "pdsch.max_lag_win", "pusch.max_lag_win"), "cpu": ("wait_p99_us", "tokens_avg"), "slot": ("proc_max", "proc_p99"),
+             "chan": ("write_us_max", "lag_now"), "ldpc": ("at_cap_pct", "cb_fail_pct")}
+DASH_SERIES = {"cpu": ("share_pct", "tokens_avg", "wait_p99_us"), "sum": ("decode_ok_pct", "cb_crc_pct", "tokens_avg")}
+DASH_SERIES_CAP = 240
+_NUM = re.compile(r"-?\d+(?:\.\d+)?$")
+_GRP = re.compile(r"(\w+)\[([^\]]*)\]")
+_GKV = re.compile(r"(\w+)(?:<=|=)(-?\d+(?:\.\d+)?)")
+_ITH = re.compile(r"it_hist\[[^\]]*\]=([\d,]+)")
+
+
+def _dnum(v):
+    if _NUM.match(v):
+        return float(v) if "." in v else int(v)
+    return v
+
+
+def parse_dash(tok, tail):
+    """One CELL_* / LDPC_ITER / SLOT_CELL / CHAN_CELL line (tail = after the token) -> flat dict of numbers and strings.
+    Bracket groups become '<group>.<key>' (scan.drop_full, pdsch.depth_now, cell1.hold_ms ...); the pool 'wait_us p50<= p99<= max=' of a
+    cell block and the 'proc_us p50<= p99<= max=' of SLOT_CELL become wait_*/proc_*; it_hist[..]=a,b,.. becomes the list 'it_hist'."""
+    d = {}
+    m = _ITH.search(tail)
+    if m:
+        d["it_hist"] = [int(x) for x in m[1].split(",")]
+        tail = tail[:m.start()] + tail[m.end():]
+    for g, inner in _GRP.findall(tail):
+        for a, b in _GKV.findall(inner):
+            d["%s.%s" % (g, a)] = _dnum(b)
+    flat = _GRP.sub(" ", tail)
+    if tok == "SLOT_CELL":
+        m = re.search(r"proc_us p50<=(\d+) p99<=(\d+) max=(\d+)", flat)
+        if m:
+            d["proc_p50"], d["proc_p99"], d["proc_max"] = int(m[1]), int(m[2]), int(m[3])
+            flat = flat[:m.start()] + flat[m.end():]
+    for a, b in KV.findall(flat):
+        d[a] = _dnum(b)
+    return d
 KV = re.compile(r"(\w+)=(\[[^\]]*\]|\S+)")
 FEED_CELL_CAP = 600
 
@@ -426,6 +470,12 @@ class MpciAgg:
         self.discont = {"n": 0, "skipped_in": 0, "last_new_pos": None}
         self.overrun = {"n": 0, "skipped_in": 0}
         self.shmiq_notes = []
+        self.shmiq_unattributed = {"discont": 0, "overrun": 0}   # lines whose cell= names no known ring id (old pid<n> form)
+        self.dash = {}                      # k -> {"cpu"|"q"|"ldpc"|"timing"|"gpu"|"chan"|"budget"|"slot"|"sum": {"last", "n", "tot", "peak"}}
+        self.dash_series = {}               # k -> {"cpu"|"sum": deque of {field: value}}
+        self.budget_proc = {}               # CELL_BUDGET scope=proc
+        self.pool_cell_blk = {}             # k -> newest per-cell "CORE_POOL cell=<k> pci=<pci> cell<k>[..]" block (F1)
+        self.dash_n = 0
         self._raw_k = -1
         self._pool_seq = 0
 
@@ -451,6 +501,9 @@ class MpciAgg:
         elif body.startswith("SHMIQ_"):
             tok, _, tail = body.partition(" ")
             self._shmiq(tok, tail, t)
+        elif body.partition(" ")[0] in DASH_TOKENS:
+            tok, _, tail = body.partition(" ")
+            self._dash(kk, tok, tail, t)
         elif body.startswith("CORE_P"):
             tok, _, tail = body.partition(" ")
             if tok == "CORE_POOL:":
@@ -459,6 +512,30 @@ class MpciAgg:
                 self._pool(kk, tail)
             elif tok == "CORE_PLAN":
                 self._plan(tail)
+
+    # ---- MPCI-DASH per-cell lines
+    def _dash(self, k, tok, tail, t):
+        name = DASH_TOKENS[tok]
+        d = parse_dash(tok, tail)
+        self.seen = True
+        self.dash_n += 1
+        if name == "budget" and d.get("scope") == "proc":
+            self.budget_proc = d
+            return
+        c = d.get("cell")
+        c = c if isinstance(c, int) else k
+        e = self.dash.setdefault(c, {}).setdefault(name, {"n": 0, "tot": {}, "peak": {}})
+        e["n"] += 1
+        e["last"] = d
+        for f in DASH_TOT.get(name, ()):
+            if isinstance(d.get(f), (int, float)):
+                e["tot"][f] = e["tot"].get(f, 0) + d[f]
+        for f in DASH_PEAK.get(name, ()):
+            if isinstance(d.get(f), (int, float)):
+                e["peak"][f] = max(e["peak"].get(f, d[f]), d[f])
+        if name in DASH_SERIES:
+            sr = self.dash_series.setdefault(c, {}).setdefault(name, deque(maxlen=DASH_SERIES_CAP))
+            sr.append(dict({f: d.get(f) for f in DASH_SERIES[name]}, t=t))
 
     # ---- MPCI_*
     def _mpci_admit(self, k, tail, t):
@@ -604,6 +681,20 @@ class MpciAgg:
                 s["n"] += 1
                 s["max_ms"] = max(s["max_ms"], int(m[2]))
             return
+        if tail.startswith("cell="):
+            # F1 (N>1): one block per cell, "cell=<k> pci=<pci> cell<k>[n= waited= hold_ms= wait_us p50<= p99<= max=]"
+            m = re.match(r"cell=(\d+) pci=(-?\d+) cell\d+\[([^\]]*)\]", tail)
+            if m:
+                g = {a: int(b) for a, b in re.findall(r"(\w+)=(\d+)", m[3])}
+                for a, b in re.findall(r"(p\d+)<=(\d+)", m[3]):
+                    g["wait_" + a] = int(b)
+                if "max" in g:
+                    g["wait_max"] = g.pop("max")
+                self._pool_seq += 1
+                g["seq"], g["pci"] = self._pool_seq, int(m[2])
+                self.pool_cell_blk[int(m[1])] = g
+                self.seen = True
+            return
         if not tail.startswith("n="):
             return
         head = tail.split("[", 1)[0]
@@ -624,9 +715,21 @@ class MpciAgg:
         self.pool_lines_n[k] = self.pool_lines_n.get(k, 0) + 1
 
     # ---- SHMIQ_*
+    def _ring_of(self, d):
+        """P0: cell=<ring id> (e.g. pci415) names the ring; the old form cell=pid<n> names the process -> None (caller falls back)."""
+        c = d.get("cell")
+        if not c or c.startswith("pid") and c[3:].isdigit():
+            return None
+        hit = [r for r in self.rings if r.get("tag") == c or r.get("id") == c]
+        return hit[0] if len(hit) == 1 else None
+
     def _shmiq(self, tok, tail, t):
         d = _kv(tail)
         if tok == "SHMIQ_TUNE":
+            r = self._ring_of(d)
+            if r is not None:
+                r["tune_n"] = r.get("tune_n", 0) + 1
+                r["tune_last"] = {"rx_hz": _fl(d.get("rx_hz")), "shift_hz": _fl(d.get("shift_hz")), "decim": _int(d.get("decim")), "epoch": _int(d.get("epoch"))}
             c = _fl(d.get("ring_center_hz"))
             if c is None:
                 return
@@ -641,22 +744,39 @@ class MpciAgg:
         elif tok == "SHMIQ_READY":
             m = re.search(r"producer_pid=(\d+) radio=(\S+)(?: time_source=(\d+))?", tail)
             self.seen = True
-            self.rings.append({"idx": len(self.rings), "name": d.get("ring"), "pid": d.get("cell"), "channels": d.get("channels"),
+            nm = (d.get("ring") or "").lstrip("/")
+            rid = nm[7:] if nm.startswith("nrcell_") and len(nm) > 7 else nm      # shm_iq_ring_id()
+            self.rings.append({"idx": len(self.rings), "name": d.get("ring"), "pid": d.get("cell"), "tag": d.get("cell"), "id": rid or None,
+                               "by_id": bool(rid) and d.get("cell") == rid, "channels": d.get("channels"),
                                "ring_rate": _fl(d.get("ring_rate")), "decim": _int(d.get("decim")), "taps": d.get("taps"),
                                "capacity": _int(d.get("capacity")), "producer_pid": _int(m[1]) if m else None,
                                "radio": m[2] if m else None, "time_source": _int(m[3]) if m and m[3] else None})
         elif tok == "SHMIQ_START":
-            if self.n_start < len(self.rings):
-                self.rings[self.n_start]["start_pos"] = _int(d.get("pos"))
+            r = self._ring_of(d)
+            if r is None and self.n_start < len(self.rings):
+                r = self.rings[self.n_start]
+            if r is not None:
+                r["start_pos"] = _int(d.get("pos"))
             self.n_start += 1
         elif tok == "SHMIQ_END":
-            # the line carries the process tag (pid<N>), not the ring: END lines are matched to rings by order (ring i closes i-th)
-            if self.n_end < len(self.rings):
+            # old form: the line carries the process tag (pid<N>), not the ring: END lines are matched to rings by order (ring i closes i-th)
+            # P0 form: cell=<ring id> names the ring
+            r = self._ring_of(d)
+            if r is None and self.n_end < len(self.rings):
                 r = self.rings[self.n_end]
+            if r is not None:
                 r["end"] = {x: _int(d.get(x)) for x in ("reads", "overruns", "dropped_in", "discont", "clipped")}
             self.n_end += 1
         elif tok == "SHMIQ_DISCONT" or tok == "SHMIQ_OVERRUN":
             a = self.discont if tok == "SHMIQ_DISCONT" else self.overrun
+            r = self._ring_of(d)
+            if r is not None:
+                key = "discont" if tok == "SHMIQ_DISCONT" else "overrun"
+                r[key + "_n"] = r.get(key + "_n", 0) + 1
+                r[key + "_skipped_in"] = r.get(key + "_skipped_in", 0) + _int(d.get("skipped_in"), 0)
+                r[key + "_last_new_pos"] = _int(d.get("new_pos"))
+            else:
+                self.shmiq_unattributed["discont" if tok == "SHMIQ_DISCONT" else "overrun"] += 1
             a["n"] += 1
             a["skipped_in"] += _int(d.get("skipped_in"), 0)
             if "new_pos" in d:
@@ -664,6 +784,17 @@ class MpciAgg:
         else:
             self.shmiq_notes.append("%s %s" % (tok, tail.strip()[:200]))
             del self.shmiq_notes[:-50]
+
+    def _pool_proc(self):
+        """The process-wide CORE_POOL line: with F1 (per-cell blocks printed on their own lines) the newest "n=" line has no cell<k> group."""
+        best = None
+        for pl in self.pool_line.values():
+            if best is None or pl["seq"] > best["seq"]:
+                best = pl
+        if best is None:
+            return None
+        grp = {g: v for g, v in (best.get("groups") or {}).items() if not re.fullmatch(r"cell\d+", g)}
+        return dict({a: b for a, b in best.items() if a != "groups"}, groups=grp, split=bool(self.pool_cell_blk) and len(grp) == len(best.get("groups") or {}))
 
     # ---- views
     def active(self, attributed=False):
@@ -674,6 +805,7 @@ class MpciAgg:
         if not self.active(attributed):
             return None
         idxs = set(self.slots) | set(self.cell_events) | set(self.rt) | set(self.sfo) | set(self.pool_line) | (set(self.long_lease) | set(self.long_wait)) - {-1}
+        idxs |= set(self.dash) | set(self.pool_cell_blk)
         idxs |= {s.cell_idx for s in states}
         ids = {}
         for kx, s in self.slots.items():
@@ -713,7 +845,16 @@ class MpciAgg:
                 g = (pl.get("groups") or {}).get("cell%d" % kx)
                 if g is not None:
                     newest = g
+            if kx in self.pool_cell_blk:                          # F1 form: the cell's own "CORE_POOL cell=<k>" line
+                newest = self.pool_cell_blk[kx]
             row["pool_cell"] = newest
+            dsh = self.dash.get(kx)
+            row["dash"] = dsh
+            row["dash_series"] = {n: list(v) for n, v in (self.dash_series.get(kx) or {}).items()} or None
+            if dsh and pci is None:
+                pci = next((x["last"].get("pci") for x in dsh.values() if isinstance(x["last"].get("pci"), int) and x["last"]["pci"] >= 0), None)
+                row["pci"] = pci
+                row["label"] = "PCI %s (c%d)" % (pci if pci is not None else "?", kx)
             rows.append(row)
         checks = []
         f = self.feed
@@ -738,9 +879,11 @@ class MpciAgg:
             "capture": {"span": self.span, "span_events": self.span_events[-10:], "radio": self.radio, "feed_started": self.feed_started,
                         "feed": self.feed, "feed_n": self.feed_n, "feed_peak": self.feed_peak_all, "feed_series": list(self.feed_series), "feed_events": self.feed_events[-10:],
                         "rings": self.rings, "tunes": [dict(self.tunes[i], ring=i) for i in sorted(self.tunes)],
-                        "discont": self.discont, "overrun": self.overrun, "shmiq_notes": self.shmiq_notes[-10:]},
+                        "discont": self.discont, "overrun": self.overrun, "shmiq_notes": self.shmiq_notes[-10:],
+                        "shmiq_unattributed": self.shmiq_unattributed, "budget_proc": self.budget_proc},
             "life": self.life, "life_events": self.life_events[-10:],
-            "core": {"long_lease": self.long_lease.get(-1), "long_wait": self.long_wait.get(-1), "plan": self.core_plan, "plan_notes": self.core_plan_notes, "pool_cores": self.pool_cores},
+            "dash": {"n": self.dash_n, "budget_proc": self.budget_proc, "pool_cells_new_form": bool(self.pool_cell_blk)},
+            "core": {"pool_proc": self._pool_proc(), "long_lease": self.long_lease.get(-1), "long_wait": self.long_wait.get(-1), "plan": self.core_plan, "plan_notes": self.core_plan_notes, "pool_cores": self.pool_cores},
             "cells": rows, "checks": checks, "attributed": bool(attributed),
         }
 

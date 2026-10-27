@@ -301,5 +301,109 @@ class Payload(unittest.TestCase):
         self.assertIn("navMpci", h)
 
 
+SYNTH = os.path.join(PR, "mpci", "fixtures", "synth_dash_2cell.txt")
+
+
+def synth_state():
+    st = rxparse.RunState()
+    with open(SYNTH, newline="") as f:
+        for l in f.read().split("\n"):
+            st.feed_line(l)
+    return st
+
+
+class DashLines(unittest.TestCase):
+    """MPCI-DASH section 5 lines (P0 ring id, F1 split pool line, CELL_CPU/Q, LDPC_ITER, CELL_TIMING, CELL_GPU, CHAN_CELL, CELL_BUDGET, SLOT_CELL,
+    CELL_SUM). Fixture: SYNTHETIC format-only (strings from the C format strings, invented numbers; no receiver run)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.v = synth_state().mpci_view()
+        cls.c0, cls.c1 = cls.v["cells"]
+
+    def test_cells_labelled_from_slot_lines(self):
+        self.assertEqual([c["label"] for c in self.v["cells"]], ["PCI 415 (c0)", "PCI 923 (c1)"])
+
+    def test_cpu(self):
+        l0, l1 = self.c0["dash"]["cpu"]["last"], self.c1["dash"]["cpu"]["last"]
+        self.assertEqual((l0["share_pct"], l0["tokens_avg"], l0["fair_pct"], l0["n"]), (31.5, 1.1, 50.0, 1800))
+        self.assertEqual((l1["share_pct"], l1["wait_p99_us"], l1["ul.n"], l1["scan.hold_ms"]), (60.0, 16, 2, 2800))
+        self.assertEqual(self.c0["dash"]["cpu"]["n"], 2)
+        self.assertEqual([w["share_pct"] for w in self.c0["dash_series"]["cpu"]], [25.0, 31.5])
+
+    def test_queues_totals_and_peaks(self):
+        q = self.c1["dash"]["q"]
+        self.assertEqual(q["last"]["scan.drop_full"], 60)
+        self.assertEqual(q["last"]["pdsch.depth_now"], 3)
+        self.assertEqual(q["tot"]["scan.drop_full"], 90)
+        self.assertEqual(q["peak"]["scan.max_lag_win"], 12)
+
+    def test_ldpc_hist(self):
+        l = self.c1["dash"]["ldpc"]["last"]
+        self.assertEqual(l["it_hist"], [2, 4, 6, 4, 2, 1, 1])
+        self.assertEqual((l["tb"], l["cb"], l["at_cap_pct"], l["mean_it"]), (20, 80, 5.0, 3.1))
+
+    def test_timing_gpu_slot_sum(self):
+        t = self.c1["dash"]["timing"]["last"]
+        self.assertEqual((t["sfo_eps_ppm"], t["cfo_hz"], t["shift_next"], t["discont"], t["resync"]), (-1.5, -120, -2, 4, 2))
+        self.assertEqual(self.c1["dash"]["timing"]["tot"], {"discont": 6, "resync": 3})
+        g = self.c1["dash"]["gpu"]["last"]
+        self.assertEqual((g["active"], g["calls"], g["fallback"], g["fallback_pct"], g["gpu_mem_mb"], g["pin_mb"]), (1, 100, 10, 10.0, 4, 5))
+        self.assertNotIn("gpu", self.c0["dash"])
+        s = self.c1["dash"]["slot"]["last"]
+        self.assertEqual((s["proc_p50"], s["proc_p99"], s["proc_max"], s["late_slots"], s["cpu"]), (256, 256, 3500, 3, 7))
+        m = self.c1["dash"]["sum"]["last"]
+        self.assertEqual((m["state"], m["decode_ok_pct"], m["grants"], m["cb_crc_pct"], m["drops"], m["disc"], m["tokens_avg"]),
+                         ("TRACKING", 90.0, 100, 95.0, 12, 2, 0.5))
+        self.assertEqual(self.c0["dash"]["sum"]["tot"]["grants"], 200)
+
+    def test_chan_cell_and_budget(self):
+        ch = self.c1["dash"]["chan"]["last"]
+        self.assertEqual((ch["ring"], ch["lag_now"], ch["overruns_seen"], ch["paused"], ch["write_us_max"]), ("pci923", 1024, 1, 0, 240))
+        b = self.c0["dash"]["budget"]["last"]
+        self.assertEqual((b["ram_admit_mb"], b["gpu_admit_mb"], b["gpu_now_mb"], b["pin_now_mb"], b["tokens_fair"]), (1200, 800, 300, 20, 4.0))
+        self.assertEqual(self.v["capture"]["budget_proc"], {"scope": "proc", "cells": 2, "host_budget_mb": 20000, "host_used_mb": 6000,
+                                                          "headroom_mb": 14000, "avail_now_mb": 15000, "rss_mb": 5000})
+
+    def test_f1_pool_split(self):
+        self.assertTrue(self.v["dash"]["pool_cells_new_form"])
+        pp = self.v["core"]["pool_proc"]
+        self.assertEqual((pp["n"], pp["nested"], pp["split"]), (4, 200, True))
+        self.assertEqual(sorted(pp["groups"]), ["decode", "disc", "house", "retry", "scan"])
+        self.assertEqual((self.c0["pool_cell"]["n"], self.c0["pool_cell"]["pci"], self.c0["pool_cell"]["hold_ms"]), (4000, 415, 1800))
+        self.assertEqual((self.c1["pool_cell"]["n"], self.c1["pool_cell"]["wait_p99"], self.c1["pool_cell"]["wait_max"]), (12000, 16, 1845))
+
+    def test_p0_rings_attributed_by_id(self):
+        r0, r1 = self.c0["ring"], self.c1["ring"]
+        self.assertEqual((r0["id"], r0["by_id"], r1["id"]), ("pci415", True, "pci923"))
+        self.assertEqual((r0["discont_n"], r1["discont_n"]), (2, 1))
+        self.assertEqual((r0["tune_n"], r1["tune_n"]), (1, 2))
+        self.assertEqual(r1["tune_last"]["shift_hz"], 240.0)
+        # END lines are in reverse ring order in the fixture: attribution is by id, not by order
+        self.assertEqual((r0["end"]["reads"], r1["end"]["reads"]), (1000, 900))
+        self.assertEqual(self.v["capture"]["shmiq_unattributed"], {"discont": 0, "overrun": 0})
+        self.assertEqual(self.v["capture"]["discont"]["n"], 3)
+
+    def test_old_pid_form_falls_back(self):
+        # old OTA fixture: cell=pid<n>: no per-ring attribution, no dash rows, END by order
+        v = view("P1")
+        self.assertTrue(all(not r.get("by_id") for r in v["capture"]["rings"]))
+        self.assertTrue(all("discont_n" not in r for r in v["capture"]["rings"]))
+        self.assertTrue(all(c["dash"] is None for c in v["cells"]))
+        self.assertEqual(v["dash"]["n"], 0)
+        self.assertFalse(v["dash"]["pool_cells_new_form"])
+        self.assertTrue(all(r.get("end") for r in v["capture"]["rings"]))
+
+    def test_n1_unchanged(self):
+        for k in ("S1", "TN1"):
+            self.assertIsNone(state(k).mpci_view(), k)
+
+    def test_html_has_dash_panel(self):
+        with open(os.path.join(HERE, "monitor.html")) as f:
+            h = f.read()
+        for tok in ("dashRows", "CELL_BUDGET scope=proc", "Per-cell load side by side"):
+            self.assertIn(tok, h)
+
+
 if __name__ == "__main__":
     unittest.main()
