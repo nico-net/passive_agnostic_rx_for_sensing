@@ -348,6 +348,7 @@ const iq_chan_backend_t *iq_chan_backend_select(const iq_chan_load_t *load)
 /* ================================================================ channelizer */
 typedef struct {
   int used, passthrough;
+  int paused; /* G6: the entry is kept (filters, ring, consumers) but not computed; its ring is marked away so its consumers wait */
   iq_chan_entry_t e;
   void *state;
   shm_iq_ring_t out;
@@ -355,7 +356,7 @@ typedef struct {
   uint64_t ring_bytes;
 } cell_t;
 
-enum { OP_ADD = 1, OP_REMOVE, OP_RETUNE };
+enum { OP_ADD = 1, OP_REMOVE, OP_RETUNE, OP_PAUSE, OP_RESUME };
 typedef struct {
   int kind, slot;
   cell_t cell;          /* ADD: the prepared cell; REMOVE: the removed cell handed back */
@@ -375,6 +376,7 @@ struct iq_chan {
   int16_t *outp[IQ_CHAN_MAX_CELLS * SHM_IQ_MAX_CH];
   cell_t cell[IQ_CHAN_MAX_CELLS];
   unsigned nused;
+  unsigned npaused; /* entries in use but paused (G6) */
   _Atomic uint64_t pos; /* read by iq_chan_pos() from other threads */
   uint64_t epoch;
   int pos_valid, seek_pending, base_valid;
@@ -472,9 +474,25 @@ static void apply_op(iq_chan_t *c, op_t *op)
   } else if (op->kind == OP_REMOVE) {
     op->cell = *x;
     op->cell.state = c->be->retire(c->ctx, op->slot);
+    if (x->paused) __atomic_sub_fetch(&c->npaused, 1, __ATOMIC_RELAXED);
     memset(x, 0, sizeof(*x));
     __atomic_sub_fetch(&c->nused, 1, __ATOMIC_RELAXED);
     memset(&c->outp[op->slot * (int)c->nch], 0, c->nch * sizeof(c->outp[0]));
+  } else if (op->kind == OP_PAUSE) {
+    if (!x->paused) {
+      x->paused = 1;
+      __atomic_add_fetch(&c->npaused, 1, __ATOMIC_RELAXED);
+      shm_iq_ring_set_away(&x->out, UINT64_MAX >> 1); /* no writes until resumed: its consumers wait instead of declaring the producer lost */
+      fprintf(stderr, "IQ_CHAN_PAUSE cell=%s\n", x->e.tag);
+    }
+  } else if (op->kind == OP_RESUME) {
+    if (x->paused) {
+      x->paused = 0;
+      __atomic_sub_fetch(&c->npaused, 1, __ATOMIC_RELAXED);
+      c->be->reset(c->ctx, op->slot); /* the skipped input is gone: start from a fresh history; the next write is a forward gap (timestamp jump) */
+      shm_iq_ring_return(&x->out, entry_centre(c, &x->e));
+      fprintf(stderr, "IQ_CHAN_RESUME cell=%s\n", x->e.tag);
+    }
   } else if (op->kind == OP_RETUNE) {
     x->e.shift_hz = op->shift_hz;
     x->e.centre_hz = op->centre_hz;
@@ -607,6 +625,25 @@ int iq_chan_cell_retune(iq_chan_t *c, int id, double shift_hz, double centre_hz)
   return rc;
 }
 
+static int submit_simple(iq_chan_t *c, int id, int kind)
+{
+  if (!c || id < 0 || id >= IQ_CHAN_MAX_CELLS) return -EINVAL;
+  pthread_mutex_lock(&c->api_mu);
+  int rc = -ENOENT;
+  if (c->cell[id].used) {
+    op_t op; /* no allocation: pause / resume run after the receiver's RX fence */
+    memset(&op, 0, sizeof(op));
+    op.kind = kind; op.slot = id;
+    submit_op(c, &op);
+    rc = 0;
+  }
+  pthread_mutex_unlock(&c->api_mu);
+  return rc;
+}
+int iq_chan_cell_pause(iq_chan_t *c, int id) { return submit_simple(c, id, OP_PAUSE); }
+int iq_chan_cell_resume(iq_chan_t *c, int id) { return submit_simple(c, id, OP_RESUME); }
+int iq_chan_cell_paused(const iq_chan_t *c, int id) { return c && id >= 0 && id < IQ_CHAN_MAX_CELLS && c->cell[id].used ? __atomic_load_n(&c->cell[id].paused, __ATOMIC_RELAXED) : -1; }
+
 shm_iq_ring_t *iq_chan_cell_ring(iq_chan_t *c, int id)
 {
   return c && id >= 0 && id < IQ_CHAN_MAX_CELLS && c->cell[id].used ? &c->cell[id].out : NULL;
@@ -659,7 +696,7 @@ int iq_chan_step(iq_chan_t *c)
     c->base_tick = h->base_tick;
     c->base_valid = 1;
   }
-  if (!c->nused) { /* no entry: consume nothing; follow the live edge so a new entry starts at the newest data (unless a seek set the start) */
+  if (c->nused == c->npaused) { /* no entry (or all paused): consume nothing; follow the live edge so a new entry starts at the newest data (unless a seek set the start) */
     if (!c->seek_pending) { c->pos = head - head % ALIGN_SAMPLES; c->pos_valid = 1; }
     return 0;
   }
@@ -669,13 +706,13 @@ int iq_chan_step(iq_chan_t *c)
     const uint64_t t0 = now_ns();
     update_max(&c->lag_max, atomic_load(&h->head) - c->pos);
     for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s)
-      for (unsigned a = 0; a < c->nch; ++a) c->outp[s * (int)c->nch + (int)a] = c->cell[s].used && !c->cell[s].passthrough ? c->cell[s].obuf[a] : NULL;
+      for (unsigned a = 0; a < c->nch; ++a) c->outp[s * (int)c->nch + (int)a] = c->cell[s].used && !c->cell[s].paused && !c->cell[s].passthrough ? c->cell[s].obuf[a] : NULL;
     if (c->be->run(c->ctx, (const int16_t *const *)c->raw, c->block, c->outp)) { fprintf(stderr, "IQ_CHAN_ERR backend %s run failed\n", c->be->name); return -1; }
     const uint64_t t1 = now_ns();
     atomic_fetch_add(&c->run_ns, t1 - t0);
     for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s) {
       cell_t *x = &c->cell[s];
-      if (!x->used) continue;
+      if (!x->used || x->paused) continue;
       void *bufs[SHM_IQ_MAX_CH];
       for (unsigned a = 0; a < c->nch; ++a) bufs[a] = x->passthrough ? (void *)c->raw[a] : (void *)x->obuf[a];
       /* output timestamps are (base_tick + ring_pos) / decim, the formula of shm_iq.c */
@@ -765,7 +802,7 @@ int iq_chan_start(iq_chan_t *c, const int *cpus, int ncpus)
     memset(&l, 0, sizeof(l));
     l.in_rate = c->in_rate; l.nch = c->nch;
     for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s)
-      if (c->cell[s].used) {
+      if (c->cell[s].used && !c->cell[s].paused) {
         l.cell[l.n_cells].decim = c->cell[s].e.decim; l.cell[l.n_cells].passband_hz = c->cell[s].e.passband_hz;
         l.cell[l.n_cells].shifted = c->cell[s].e.shift_hz != 0 || c->cell[s].e.centre_hz > 0; l.n_cells++;
       }
@@ -813,7 +850,7 @@ void iq_chan_stats(const iq_chan_t *c, iq_chan_stats_t *st)
   st->overruns = atomic_load(&c->overruns); st->discont = atomic_load(&c->discont); st->dropped_in = atomic_load(&c->dropped_in);
   st->run_ns = atomic_load(&c->run_ns); st->lag_max = atomic_load(&c->lag_max); st->step_gap_max_ns = atomic_load(&c->step_gap_max_ns); st->epochs = atomic_load(&c->epochs); st->work_ns = atomic_load(&c->work_ns); st->work_max_ns = atomic_load(&c->work_max_ns);
   st->threads = c->threads ? c->threads : 1; st->threads_needed = c->threads_needed ? c->threads_needed : 1; st->capacity_sps = c->capacity_sps;
-  st->n_cells = __atomic_load_n(&c->nused, __ATOMIC_RELAXED); st->backend = c->be->name;
+  st->n_cells = __atomic_load_n(&c->nused, __ATOMIC_RELAXED); st->n_paused = __atomic_load_n(&c->npaused, __ATOMIC_RELAXED); st->backend = c->be->name;
 }
 
 void iq_chan_destroy(iq_chan_t *c)

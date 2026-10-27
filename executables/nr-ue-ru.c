@@ -129,6 +129,89 @@ int nrue_add_cell_ru(const nrUE_cell_params_t *cell, const nrUE_RU_params_t *ru)
   return k;
 }
 
+/* multi-PCI G6: with a radio and several cells, the configured radio is not a cell's RU any more: it is the wideband capture device of the in-process
+ * channelizer (the "feed"), and every cell (cell 0 too) reads its own ring. The radio's RU parameters are kept here, the device lives outside the RU
+ * table and is stopped / ended by the shutdown coordinator with the RUs. Never used at N = 1. */
+static nrUE_RU_params_t s_feed_ru;
+static bool s_feed_ru_set;
+static openair0_device_t s_feed_dev;
+static openair0_config_t s_feed_cfg;
+
+int nrue_ru_make_ring(int ru_id, const char *ring)
+{
+  if (ru_id < 0 || ru_id >= nrue_ru_count || !ring)
+    return -1;
+  if (!s_feed_ru_set) {
+    s_feed_ru = nrue_rus[ru_id];
+    s_feed_ru_set = true;
+  }
+  nrue_rus[ru_id].sdr_addrs = strdup(ring);
+  s_ru_ring[ru_id] = true;
+  return 0;
+}
+
+/* the feed device's configuration: the radio RU's parameters (address, subdevices, clock, gains of the configuration) and the capture of the plan.
+ * Same steps as nrue_init_openair0 for an RU, with the capture rate / centre / channels instead of one cell's. */
+openair0_config_t *nrue_feed_config(double rate, double centre_hz, int nch)
+{
+  if (!s_feed_ru_set || nrue_cell_count < 1)
+    return NULL;
+  const NR_DL_FRAME_PARMS *fp = &nrue_cell_fp[0];
+  openair0_config_t *cfg = &s_feed_cfg;
+  memset(cfg, 0, sizeof(*cfg));
+  cfg->sample_rate = rate;
+  cfg->duplex_mode = fp->frame_type == TDD ? duplex_mode_TDD : duplex_mode_FDD;
+  cfg->ru_id = MAX_CARDS; /* not an RU of the table */
+  cfg->num_rb_dl = 0;    /* the capture is not one cell's grid */
+  cfg->tx_num_channels = min(4, fp->nb_antennas_tx);
+  cfg->rx_num_channels = nch;
+  nr_rf_card_config_freq(cfg, (uint64_t)llround(centre_hz), (uint64_t)llround(centre_hz), 0);
+  nr_rf_card_config_gain(cfg);
+  cfg->configFilename = get_softmodem_params()->rf_config_file;
+  cfg->sdr_addrs = s_feed_ru.sdr_addrs;
+  cfg->tx_subdev = s_feed_ru.tx_subdev;
+  cfg->rx_subdev = s_feed_ru.rx_subdev;
+  cfg->clock_source = s_feed_ru.clock_source;
+  cfg->time_source = s_feed_ru.time_source;
+  cfg->tune_offset = s_feed_ru.tune_offset;
+  LOG_I(PHY, "HW: Configuring the wideband capture device, sample_rate %f, rx num_channels %d, centre %.0f Hz\n", cfg->sample_rate, cfg->rx_num_channels, centre_hz);
+  return cfg;
+}
+
+int nrue_feed_load(void)
+{
+  if (!nr_shutdown_radio_enter(1))
+    return -1;
+  s_feed_dev.host_type = RAU_HOST;
+  const int r = openair0_device_load(&s_feed_dev, &s_feed_cfg);
+  nr_shutdown_radio_leave();
+  return r;
+}
+
+int nrue_feed_start(void)
+{
+  if (!nr_shutdown_radio_enter(1))
+    return -1;
+  const int r = s_feed_dev.trx_start_func ? s_feed_dev.trx_start_func(&s_feed_dev) : -1;
+  nr_shutdown_radio_leave();
+  return r;
+}
+
+/* the feed's read (iq_feed_read_fn) under the shared lifetime gate: -1 during shutdown */
+int nrue_feed_read(void *ctx, int64_t *ts, void **buf, int n, int nch)
+{
+  (void)ctx;
+  if (!nr_shutdown_radio_enter(0))
+    return -1;
+  openair0_timestamp_t t = 0;
+  const int r = s_feed_dev.trx_read_func ? s_feed_dev.trx_read_func(&s_feed_dev, &t, buf, n, nch) : -1;
+  nr_shutdown_radio_leave();
+  *ts = (int64_t)t;
+  return r;
+}
+
+const openair0_config_t *nrue_feed_cfg(void) { return &s_feed_cfg; }
+
 /* load the shm_iq consumer device for a ring RU (load_lib() would load the configured device) */
 static int nrue_ru_load_ring_device(openair0_device_t *dev, openair0_config_t *cfg)
 {
@@ -785,6 +868,8 @@ void nrue_ru_shutdown_stop(void)
   for (int i = 0; i < MAX_CARDS; i++)
     if (openair0_dev[i].trx_stop_func)
       openair0_dev[i].trx_stop_func(&openair0_dev[i]);
+  if (s_feed_dev.trx_stop_func) /* G6: the wideband capture device (never loaded at N = 1) */
+    s_feed_dev.trx_stop_func(&s_feed_dev);
 }
 
 /* The shutdown coordinator holds the exclusive device lifetime gate here. */
@@ -793,6 +878,8 @@ void nrue_ru_shutdown(void)
   for (int i = 0; i < MAX_CARDS; i++)
     if (openair0_dev[i].trx_end_func)
       openair0_dev[i].trx_end_func(&openair0_dev[i]);
+  if (s_feed_dev.trx_end_func) /* G6: the wideband capture device last: the cells' ring devices are ended first */
+    s_feed_dev.trx_end_func(&s_feed_dev);
 }
 
 /* nrue_ru_start: public: starts all radio devices under the exclusive radio lifetime gate (nr_shutdown_radio_enter(1)). Returns the start result, or -1 when shutdown is in progress.

@@ -20,6 +20,14 @@ void nrue_set_ru_cell_id(int ru_id, int cell_id);
 void nrue_set_ru_params(configmodule_interface_t *cfg);
 /* multi-PCI A8: append a cell with its own ring-consumer RU (shm_iq device on ru->sdr_addrs); returns the cell id or -1 */
 int nrue_add_cell_ru(const nrUE_cell_params_t *cell, const nrUE_RU_params_t *ru);
+/* multi-PCI G6 (wideband capture through the in-process channelizer): RU ru_id becomes a ring consumer of `ring` (its radio parameters are kept for the
+ * capture device); the capture device: its configuration, load (device_init) and start under the exclusive radio gate, its read under the shared gate */
+int nrue_ru_make_ring(int ru_id, const char *ring);
+openair0_config_t *nrue_feed_config(double rate, double centre_hz, int nch);
+int nrue_feed_load(void);
+int nrue_feed_start(void);
+int nrue_feed_read(void *ctx, int64_t *ts, void **buf, int n, int nch);
+const openair0_config_t *nrue_feed_cfg(void);
 
 void nrue_init_openair0(void);
 

@@ -1516,6 +1516,70 @@ static void usrp_ring_join(usrp_state_t *s)
 
 static void trx_usrp_finish_rx(usrp_state_t *s);
 
+/* MPCI G6: the receiver serves several cells from ONE wideband capture (radio -> wideband ring -> in-process channelizer -> per-cell rings). The capture
+ * rate is chosen from what THIS device streams: right after make(), usrp_wide_plan() asks the receiver (dlsym, as for the host-RAM plan) whether a
+ * wideband plan is pending (nr_radio_wide_wanted() != 0; never at N = 1, nothing is queried or logged then) and hands it the device's RX rate set
+ * (get_rx_rates of channel 0) intersected with the rates this driver configures (its sample-rate table below: a rate it has no row for would exit),
+ * the analog bandwidth range and the channel count. The receiver's planner (radio/COMMON/iq_span.h) writes the capture rate and centre into the config. */
+static bool usrp_rate_configured(const usrp_state_t *s, int type, double r)
+{
+  (void)s;
+  static const double xn[] = {245.76e6, 184.32e6, 122.88e6, 92.16e6, 61.44e6, 46.08e6, 30.72e6, 23.04e6, 15.36e6, 7.68e6, 1.92e6};
+  static const double b2[] = {46.08e6, 30.72e6, 23.04e6, 15.36e6, 7.68e6, 1.92e6};
+  const bool big = type == USRP_X300_DEV || type == USRP_N300_DEV || type == USRP_X400_DEV;
+  const double *t = big ? xn : b2;
+  const size_t n = big ? sizeof(xn) / sizeof(xn[0]) : sizeof(b2) / sizeof(b2[0]);
+  for (size_t i = 0; i < n; i++)
+    if (fabs(t[i] - r) < 1.0)
+      return true;
+  return false;
+}
+static void usrp_wide_plan(usrp_state_t *s, int type, openair0_config_t *cfg)
+{
+  int (*wanted)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "nr_radio_wide_wanted");
+  typedef int (*plan_fn)(openair0_config_t *, const double *, const double *, const double *, int, double, int);
+  plan_fn plan = (plan_fn)dlsym(RTLD_DEFAULT, "nr_radio_wide_plan");
+  if (!wanted || !plan || !wanted())
+    return;
+  std::vector<double> lo, hi, st;
+  double analog = 0;
+  int nrx = 0;
+  try {
+    const uhd::meta_range_t rr = s->usrp->get_rx_rates(0);
+    /* candidates: every configured rate the device can make (a discrete point of a range, or on a range's step grid) */
+    static const double cand[] = {245.76e6, 184.32e6, 122.88e6, 92.16e6, 61.44e6, 46.08e6, 30.72e6, 23.04e6, 15.36e6, 7.68e6, 1.92e6};
+    for (double c : cand) {
+      if (!usrp_rate_configured(s, type, c))
+        continue;
+      for (const auto &r : rr) {
+        const double eps = 1e-6 * c;
+        if (c < r.start() - eps || c > r.stop() + eps)
+          continue;
+        if (r.step() > 0) {
+          const double k = (c - r.start()) / r.step();
+          if (fabs(k - std::floor(k + 0.5)) > 1e-6)
+            continue;
+        }
+        lo.push_back(c);
+        hi.push_back(c);
+        st.push_back(0);
+        break;
+      }
+    }
+    try {
+      analog = s->usrp->get_rx_bandwidth_range(0).stop();
+    } catch (...) {
+      analog = 0;
+    }
+    nrx = (int)s->usrp->get_rx_num_channels();
+  } catch (const std::exception &e) {
+    LOG_W(HW, "SENSING: MPCI_RADIO rate set query failed (%s): the receiver keeps its provisional capture\n", e.what());
+    return;
+  }
+  LOG_I(HW, "SENSING: MPCI_RADIO device rates %zu usable (of the driver's table), analog_bw_mhz=%.1f rx_channels=%d\n", lo.size(), analog / 1e6, nrx);
+  plan(cfg, lo.data(), hi.data(), st.data(), (int)lo.size(), analog, nrx);
+}
+
 /* trx_usrp_start_impl: starts the USRP RX stream: one-time GPIO setup, wait for the next PPS, timed START_CONTINUOUS at PPS+1 s, UHD thread re-pinning, and the RX ring.
  *   Stops a running stream first (trx_usrp_finish_rx). Returns 0, or -1 when the PPS wait is cancelled or expires. Callers: trx_usrp_start() (exception-safe wrapper) and the device start hook.
  */
@@ -3036,6 +3100,7 @@ extern "C" {
 
     s->usrp = uhd::usrp::multi_usrp::make(args);
     if (!usrp_repin_uhd_threads("after make")) return -1;
+    usrp_wide_plan(s, device->type, &openair0_cfg[0]); /* MPCI G6: no-op unless the receiver plans a wideband capture */
 
   if (device->type==USRP_X300_DEV) {
     openair0_cfg[0].rx_gain_calib_table = calib_table_x310;
