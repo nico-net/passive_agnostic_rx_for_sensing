@@ -30,6 +30,7 @@
 #include "PHY/NR_REFSIG/sss_nr.h"
 #include "PHY/NR_UE_TRANSPORT/cic_filter_nr.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pss_decim.h"
+#include "common/utils/nr_cell.h"
 #include <string.h>
 
 // #define DBG_PSS_NR
@@ -175,7 +176,10 @@ static int cmp_pss_peak(const void *a, const void *b)
 /* Passive only: decimated float PSS search for the initial-sync full search (see nr_pss_decim.h): ~60x less work than the
  * 4096-tap int16 search and no dot_product() floor-shift bias on weak inputs. K=8: non-coherent fold of the decimated profile
  * over captures on the absolute 20 ms grid, acc = acc*(1-1/K) + new; SSS/PBCH CRC still decide on the newest capture. */
-static nr_pss_fold_t s_pss_fold; /* initial sync only (single GSCN, sync actor) */
+/* initial sync only (single GSCN). PER_CELL (mpci DBG2): two cells' scans (Tpool workers, bound to the queuing cell by nr_scan_ssb) used to
+ * reset and re-size ONE fold with their own period while the other wrote into it (heap overflow / use after free). */
+NR_CELL_STATIC(nr_pss_fold_t, s_pss_fold);
+#define s_pss_fold NR_CELL_REF(s_pss_fold)
 
 static nr_pss_info_t pss_search_decim(const pss_search_t *p, int D, int pss_index_start, int pss_index_end)
 {

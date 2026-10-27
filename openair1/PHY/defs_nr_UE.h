@@ -521,6 +521,7 @@ typedef struct {
   int pssCorrAvgPower;
   int adjust_rxgain;
   task_ans_t *ans;
+  int cell; /* mpci: cell of the sync actor that queued this scan; the Tpool worker runs the scan bound to it */
 } nr_ue_ssb_scan_t;
 
 typedef struct {

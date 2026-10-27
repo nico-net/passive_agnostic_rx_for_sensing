@@ -14,6 +14,7 @@
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "SCHED_NR_UE/defs.h"
 #include "common/utils/nr/nr_common.h"
+#include "common/utils/nr_cell.h"
 
 #include <math.h>
 #include <time.h>
@@ -397,6 +398,9 @@ static void nr_scan_ssb(void *arg)
    */
 
   nr_ue_ssb_scan_t *ssbInfo = (nr_ue_ssb_scan_t *)arg;
+  /* mpci: Tpool workers serve every cell; the scan runs bound to the cell that queued it (per-cell PSS fold, log tag), restored at the end */
+  const int prev_cell = nr_cell_idx();
+  nr_cell_bind(ssbInfo->cell);
   c16_t **rxdata = ssbInfo->rxdata;
 
   // ---- PER-CHANNEL RMS AT ACQUISITION (2026-08-06) ------------------------------------------
@@ -558,12 +562,13 @@ static void nr_scan_ssb(void *arg)
     }
   }
 
+  nr_cell_bind(prev_cell);
   completed_task_ans(ssbInfo->ans);
 }
 
 /* Absolute sample index of the first sample of the capture being scanned (UE_synch sets it before each search, -1 when
  * unknown). Lets the PSS accumulator folds PSS profiles of successive captures on the cell's 20 ms grid. */
-int64_t nr_initial_sync_capture_start = -1;
+__thread int64_t nr_initial_sync_capture_start = -1; /* per thread = per cell: set and read on the cell's sync actor (UE_synch) */
 
 /* (passive only, WEAKSYNC 2026-10-11): align the receiver RB grid to the cell's CRB grid. CORESET#0, PDCCH
  * and PDSCH REs sit on 12-subcarrier RBs counted from the receiver grid, while the cell's CRB boundary lies k_SSB (in
@@ -749,7 +754,8 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
      * never going to arrive. */
     for (int k = 0; k < n; k++) {
       nr_ue_ssb_scan_t *ssbInfo = &ssb_info[base + k];
-      *ssbInfo = (nr_ue_ssb_scan_t){.gscnInfo = gscnInfo[base + k],
+      *ssbInfo = (nr_ue_ssb_scan_t){.cell = nr_cell_idx(),
+                                    .gscnInfo = gscnInfo[base + k],
                                     .fp = &scan_fp,
                                     .proc = proc,
                                     .syncRes.cell_detected = false,

@@ -32,6 +32,7 @@
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 #include "executables/softmodem-common.h"
+#include "common/utils/nr_cell.h"
 
 /// One configured monitor resource: its CSI-RS PDU plus a (period, offset) occurrence rule.
 typedef struct {
@@ -45,10 +46,18 @@ typedef struct {
 /* Reserve two phases for each discovery confirmation, in addition to the
  * unchanged manually configured bank. Used only in passive-rx mode. */
 enum { DISC_MONITOR_CAPACITY = NR_CSIRS_MONITOR_MAX + 64 };
-static nr_csirs_monitor_res_t g_monitors[DISC_MONITOR_CAPACITY];
-static int                    g_n_monitors = 0;
-static int                    g_parsed     = 0;
-static pthread_mutex_t        g_monitor_lock = PTHREAD_MUTEX_INITIALIZER;
+/* PER_CELL (mpci DBG2): the monitor bank of one cell. Its users run bound to the cell (slot thread / DL actors, the cell's CSI-RS search,
+ * the cell's epoch listener). The [sensing] csirs_monitor list is parsed by the start-up thread (cell 0, the command-line cell) only:
+ * a manually configured resource is a resource of that cell's grid. */
+typedef nr_csirs_monitor_res_t g_monitors_t[DISC_MONITOR_CAPACITY];
+NR_CELL_STATIC(g_monitors_t, g_monitors);
+#define g_monitors NR_CELL_REF(g_monitors)
+NR_CELL_STATIC(int, g_n_monitors);
+#define g_n_monitors NR_CELL_REF(g_n_monitors)
+NR_CELL_STATIC(int, g_parsed);
+#define g_parsed NR_CELL_REF(g_parsed)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_monitor_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_monitor_lock NR_CELL_REF(g_monitor_lock)
 
 /* same_geometry: true when two CSI-RS PDUs describe the same resource: row, frequency domain, symbols, CDM, density, RB extent and scrambling ID.
  *   Used to find a monitor entry (static or dynamic) before adding or removing one. Callers: nr_csirs_monitor_add_dynamic(), nr_csirs_monitor_remove_dynamic().
