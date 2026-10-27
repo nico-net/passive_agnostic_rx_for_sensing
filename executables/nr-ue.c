@@ -54,6 +54,7 @@ int nr_ue_rx_synced_g = 0;
 /// Defined in nr_adjust_synch_ue.c -- freezes the timing integrator during a stream outage. Per cell (A8): nr_ue_cell_clock.h.
 #include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h"
 #include "common/utils/nr_cell.h"
+#include "common/utils/nr_cell_dash.h" /* MPCI-DASH P6 CELL_TIMING / P8 SLOT_CELL formatters (lines only when nr_cell_count() > 1) */
 
 // TEMPORARY DIAGNOSTIC (2026-08-05): receive-buffer producer/consumer lag measurement. See
 // PBCH_TRACKING_BUFFER_HANDOVER.md -- PHY-domain diagnostics have exhausted what they can show
@@ -348,6 +349,7 @@ static void UE_synch(void *arg) {
     }
 
     LOG_I(PHY, "Got synch: hw_slot_offset %d, carrier off %d Hz\n", hw_slot_offset, freq_offset);
+    nr_dash_note_sync(); /* MPCI-DASH P6: sync event counter and time of this cell (an event, not a per-slot cost) */
 
     /* new cell or new timing epoch: the SFO estimate is relative to the clock of the gNB tracked before (frame reads are only
      * noted while is_synchronized, so nothing races this reset) */
@@ -926,6 +928,20 @@ void nr_ue_timing_mutation_log(const char *what, long before, long after, const 
  * Reports absolute RF power straight off the just-read time-domain slot buffer, which is
  * independent of frame/symbol alignment: it therefore separates "the signal went away" from "the
  * receiver is looking in the wrong place", which no other instrument here can do. */
+/* MPCI-DASH P6/P8 (CELL_TIMING, SLOT_CELL): per-cell window state of the two lines, all touched only by the cell's slot thread. The slot histogram is written once per
+ * slot (a log2 bin increment, only when more than one cell runs); the lines are printed from the RFCENSUS tick, at most once per 10 s per cell. */
+NR_CELL_STATIC(nr_dash_slot_t, g_dash_slot);
+#define g_dash_slot NR_CELL_REF(g_dash_slot)
+NR_CELL_STATIC(nr_dash_slot_t, g_dash_slot_prev);
+#define g_dash_slot_prev NR_CELL_REF(g_dash_slot_prev)
+NR_CELL_STATIC(nr_dash_timing_t, g_dash_tim_prev);
+#define g_dash_tim_prev NR_CELL_REF(g_dash_tim_prev)
+NR_CELL_STATIC(nr_dash_win_t, g_dash_win_slot);
+#define g_dash_win_slot NR_CELL_REF(g_dash_win_slot)
+NR_CELL_STATIC(nr_dash_win_t, g_dash_win_tim);
+#define g_dash_win_tim NR_CELL_REF(g_dash_win_tim)
+NR_CELL_STATIC(uint64_t, g_dash_last_ns);
+#define g_dash_last_ns NR_CELL_REF(g_dash_last_ns)
 /* Census state is per cell (A8): each cell censuses its own stream. Declaration-only conversion (nr_cell.h). */
 NR_CELL_STATIC(double, g_census_pow);
 #define g_census_pow NR_CELL_REF(g_census_pow)
@@ -1697,9 +1713,11 @@ void *UE_thread(void *arg)
      * checks or the decoder/sensing consumers. */
     if (oai_exit || tmp < 0)
       break;
+    uint64_t dash_t0_ns = 0; /* MPCI-DASH P8: the slot's post-read time (the diag_ts below); used only when more than one cell runs */
     {
       struct timespec diag_ts;
       clock_gettime(CLOCK_REALTIME, &diag_ts);
+      dash_t0_ns = (uint64_t)diag_ts.tv_sec * 1000000000ull + (uint64_t)diag_ts.tv_nsec;
       atomic_store_explicit(&nr_ue_diag_producer_absolute_slot, absolute_slot, memory_order_relaxed);
       nr_es_progress_publish(&nr_es_progress, absolute_slot, fp->symbols_per_slot); /* the slot is complete: early-start progress and the PDSCH slot gate */
       nr_slot_gate_complete(&nr_slot_gate, absolute_slot);
@@ -1763,6 +1781,7 @@ void *UE_thread(void *arg)
         // samples belong to. The anchor remains for ordinary coarse errors and must not conceal
         // stream loss. Event-driven, no line cap.
         s_rxts_discont_total++;
+        nr_dash_note_discont(); /* MPCI-DASH P6: per-cell event counter read by CELL_TIMING / CELL_SUM */
         const long long jump = (long long)rx_timestamp - (long long)expected;
         LOG_E(PHY,
               "SENSING: RXDISCONT abs_slot=%d frame=%d slot=%d expected=%llu actual=%llu "
@@ -2081,6 +2100,29 @@ void *UE_thread(void *arg)
               "ref=%.2f bad=%d shiftForNextFrame=%d max_pos_acc=%d frame=%d\n",
               g_census_slots, g_census_ssb_slots, pbch_ok, pbch_fail, w, s_ref, s_bad,
               shiftForNextFrame, UE->max_pos_acc, curMsg.proc.frame_rx);
+        if (nr_cell_count() > 1) { /* MPCI-DASH P6 CELL_TIMING + P8 SLOT_CELL: this cell's lines, on its own thread, at most once per 10 s per cell (the first tick opens the windows) */
+          struct timespec dts;
+          clock_gettime(CLOCK_MONOTONIC, &dts);
+          const uint64_t dnow = (uint64_t)dts.tv_sec * 1000000000ull + (uint64_t)dts.tv_nsec;
+          if (!g_dash_last_ns || dnow - g_dash_last_ns >= 10000000000ull) {
+            g_dash_last_ns = dnow;
+            const int dcell = nr_cell_idx(), dpci = nr_passive_metrics_pci_of(dcell);
+            uint64_t sn = 0, sns = 0, dn = 0;
+            nr_dash_event_counters(dcell, &sn, &sns, &dn);
+            nr_dash_timing_t tcur = {.sfo_eps_ppm = nr_sfo_eps() * 1e6, .cfo_hz = (int)UE->freq_offset, .max_pos_acc = UE->max_pos_acc, .shift_next = shiftForNextFrame,
+                                     .sync_age_s = sns && dnow >= sns ? (double)(dnow - sns) / 1e9 : -1.0, .discont = dn, .resync = sn};
+            char dl[400];
+            if (nr_dash_fmt_cell_timing(dl, sizeof(dl), nr_cell_count(), dcell, dpci, nr_dash_win_tick(&g_dash_win_tim, dnow), &tcur, &g_dash_tim_prev) > 0)
+              LOG_A(PHY, "%s\n", dl);
+            g_dash_tim_prev = tcur;
+            nr_dash_slot_t scur = g_dash_slot;
+            if (nr_dash_fmt_slot_cell(dl, sizeof(dl), nr_cell_count(), dcell, dpci, nr_dash_win_tick(&g_dash_win_slot, dnow), 10000000ull / (uint64_t)nb_slot_frame, sched_getcpu(),
+                                      &scur, &g_dash_slot_prev) > 0)
+              LOG_A(PHY, "%s\n", dl);
+            g_dash_slot_prev = scur;
+            g_dash_slot.max_ns = 0; /* the window maximum restarts */
+          }
+        }
         /* ANTPOW: raw per-antenna receive power and its dB spread, to be read ALONGSIDE RXBRANCH's
          * pw[]. If these are flat and pw[] is not, the imbalance is in the estimation path, not the
          * antennas. */
@@ -2293,6 +2335,20 @@ void *UE_thread(void *arg)
     if (UE->is_synchronized)
       stream_status = STREAM_STATUS_SYNCED;
     tx_wait_for_dlsch[slot] = 0;
+    if (dash_t0_ns && nr_cell_count() > 1) { /* MPCI-DASH P8: this slot's processing time (post-read to hand-off), one clock read and one histogram increment; none at N = 1 */
+      struct timespec dts;
+      clock_gettime(CLOCK_REALTIME, &dts);
+      const uint64_t t1 = (uint64_t)dts.tv_sec * 1000000000ull + (uint64_t)dts.tv_nsec;
+      if (t1 >= dash_t0_ns && t1 - dash_t0_ns < 10000000000ull) { /* a stepped wall clock reads as no sample */
+        const uint64_t dt = t1 - dash_t0_ns;
+        g_dash_slot.slots++;
+        g_dash_slot.hist[nr_dash_us_bin(dt, NR_DASH_SLOT_BINS)]++;
+        if (dt > g_dash_slot.max_ns)
+          g_dash_slot.max_ns = dt;
+        if (dt > 10000000ull / (uint64_t)nb_slot_frame)
+          g_dash_slot.late++;
+      }
+    }
   }
   /* A UE owner must never disappear while main is still waiting for ITTI. */
   nr_shutdown_request(nr_shutdown_requested() ? nr_shutdown_status() : 3);

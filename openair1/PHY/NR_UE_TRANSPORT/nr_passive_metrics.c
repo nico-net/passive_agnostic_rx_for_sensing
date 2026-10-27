@@ -55,6 +55,39 @@ void nr_passive_metrics_set_pci(int pci)
   if (c == 0)
     atomic_store_explicit(&nr_passive_metrics_pci, pci, memory_order_relaxed);
 }
+/* MPCI-DASH P6/P9: per-cell sync / discontinuity event counters of the cell's receive thread (events, not per slot), read by the CELL_TIMING and CELL_SUM lines.
+ * Bumped from the cell-bound thread (nr_cell_idx()); the sync age is the CLOCK_MONOTONIC ns of the last "Got synch". */
+NR_CELL_STATIC(_Atomic uint64_t, nr_dash_ev_sync_n);
+NR_CELL_STATIC(_Atomic uint64_t, nr_dash_ev_sync_ns);
+NR_CELL_STATIC(_Atomic uint64_t, nr_dash_ev_disc_n);
+void nr_dash_note_sync(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  const int c = nr_cell_idx();
+  atomic_store_explicit(&nr_dash_ev_sync_ns_cells[c], (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, memory_order_relaxed);
+  atomic_fetch_add_explicit(&nr_dash_ev_sync_n_cells[c], 1, memory_order_relaxed);
+}
+void nr_dash_note_discont(void)
+{
+  atomic_fetch_add_explicit(&nr_dash_ev_disc_n_cells[nr_cell_idx()], 1, memory_order_relaxed);
+}
+void nr_dash_event_counters(int cell, uint64_t *sync_n, uint64_t *sync_ns, uint64_t *disc_n)
+{
+  const int c = cell >= 0 && cell < NR_CELL_MAX ? cell : 0;
+  *sync_n = atomic_load_explicit(&nr_dash_ev_sync_n_cells[c], memory_order_relaxed);
+  *sync_ns = atomic_load_explicit(&nr_dash_ev_sync_ns_cells[c], memory_order_relaxed);
+  *disc_n = atomic_load_explicit(&nr_dash_ev_disc_n_cells[c], memory_order_relaxed);
+}
+/* MPCI-DASH: the PCI of cell `cell` (cell 0 = the global, as in collect), -1 until its PBCH lock; for the per-cell log lines that carry pci= explicitly */
+int nr_passive_metrics_pci_of(int cell)
+{
+  if (cell <= 0)
+    return atomic_load_explicit(&nr_passive_metrics_pci, memory_order_relaxed);
+  if (cell >= NR_CELL_MAX)
+    return -1;
+  return atomic_load_explicit(&nr_passive_metrics_pci_slot_cells[cell], memory_order_relaxed);
+}
 /* Filled by Task A3; weak so this file links before A3 lands. */
 __attribute__((weak)) void nr_passive_obs_stats(uint64_t *pushed, uint64_t *written, uint64_t *dropped)
 {

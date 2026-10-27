@@ -310,6 +310,7 @@ static void grant(nr_pool_t *p, waiter_t *w, int tok, uint64_t now, bool promote
   if (promoted) p->st.promoted[w->prio]++;
   if (wait > p->st.wait_max_ns[w->prio]) p->st.wait_max_ns[w->prio] = wait;
   p->st.leases_cell[w->cell]++;
+  p->st.leases_cell_cls[w->cell][w->prio == NR_POOL_DECODE && w->ul ? NR_POOL_CLS_UL : w->prio]++; /* under p->mu like every counter here */
   if (wait > 2000) p->st.waited_cell[w->cell]++;
   if (wait > p->st.wait_max_ns_cell[w->cell]) p->st.wait_max_ns_cell[w->cell] = wait;
   if (wait > 50000000ull) { /* a lease wait this long: show who held the tokens (rate-limited) */
@@ -450,6 +451,7 @@ void nr_pool_release(nr_pool_t *p)
   p->cell_run[rcell]--;
   p->st.hold_ns[prio] += now - tl.t_grant;
   p->st.hold_ns_cell[rcell] += now - tl.t_grant;
+  p->st.hold_ns_cell_cls[rcell][prio == NR_POOL_DECODE && was_ul ? NR_POOL_CLS_UL : prio] += now - tl.t_grant;
   p->st.busy_ns += now - tl.t_grant;
   dispatch(p, now);
   pthread_mutex_unlock(&p->mu);
@@ -497,29 +499,103 @@ static uint64_t hist_q_us(const uint64_t *h, double q)
   return 1ull << (NR_POOL_WAIT_BINS - 1);
 }
 
-int nr_pool_stats_line(nr_pool_t *p, char *buf, int len)
+static const char *const k_cls_nm[NR_POOL_NPRIO] = {"scan", "decode", "retry", "disc", "house"};
+
+/* the process-wide part: header + one block per class */
+static int pool_line_proc(const nr_pool_stats_t *sp, const nr_pool_t *p, char *buf, int len)
 {
-  static const char *const nm[NR_POOL_NPRIO] = {"scan", "decode", "retry", "disc", "house"};
-  nr_pool_stats_t s;
-  nr_pool_stats(p, &s);
+  const nr_pool_stats_t s = *sp;
   int o = snprintf(buf, (size_t)len, "SENSING: CORE_POOL n=%d yields=%lu gpu_gives=%lu nested=%lu enforced=%lu", p ? p->n : 0, (unsigned long)s.yields,
                 (unsigned long)s.gpu_gives, (unsigned long)s.nested, (unsigned long)s.enforced);
   for (int i = 0; i < NR_POOL_NPRIO && o < len; i++)
-    o += snprintf(buf + o, (size_t)(len - o), " %s[n=%lu waited=%lu promo=%lu wait_us p50<=%lu p99<=%lu max=%lu]", nm[i],
+    o += snprintf(buf + o, (size_t)(len - o), " %s[n=%lu waited=%lu promo=%lu wait_us p50<=%lu p99<=%lu max=%lu]", k_cls_nm[i],
                   (unsigned long)s.leases[i], (unsigned long)s.waited[i], (unsigned long)s.promoted[i],
                   (unsigned long)hist_q_us(s.wait_hist[i], 0.5), (unsigned long)hist_q_us(s.wait_hist[i], 0.99),
                   (unsigned long)(s.wait_max_ns[i] / 1000));
+  return o;
+}
+
+/* one per-cell block, " cell<c>[n=<leases> waited=<waited> hold_ms=<token-time> wait_us p50<=<> p99<=<> max=<>]" */
+static int pool_block_cell(const nr_pool_stats_t *s, int c, char *buf, int len)
+{
+  return snprintf(buf, (size_t)len, " cell%d[n=%lu waited=%lu hold_ms=%lu wait_us p50<=%lu p99<=%lu max=%lu]", c, (unsigned long)s->leases_cell[c],
+                  (unsigned long)s->waited_cell[c], (unsigned long)(s->hold_ns_cell[c] / 1000000ull), (unsigned long)hist_q_us(s->wait_hist_cell[c], 0.5),
+                  (unsigned long)hist_q_us(s->wait_hist_cell[c], 0.99), (unsigned long)(s->wait_max_ns_cell[c] / 1000));
+}
+
+int nr_pool_stats_line(nr_pool_t *p, char *buf, int len)
+{
+  nr_pool_stats_t s;
+  nr_pool_stats(p, &s);
+  int o = pool_line_proc(&s, p, buf, len);
   /* Per-cell blocks, one per cell that has leased, only once a cell other than 0 has: with cell 0 alone the line is byte-identical to the
    * single-cell pool. Grammar: " cell<c>[n=<leases> waited=<waited> hold_ms=<token-time> wait_us p50<=<> p99<=<> max=<>]". */
   bool multi = false;
   for (int c = 1; c < NR_POOL_MAX_CELLS; c++) multi |= s.leases_cell[c] != 0;
   for (int c = 0; multi && c < NR_POOL_MAX_CELLS && o < len; c++) {
     if (!s.leases_cell[c]) continue;
-    o += snprintf(buf + o, (size_t)(len - o), " cell%d[n=%lu waited=%lu hold_ms=%lu wait_us p50<=%lu p99<=%lu max=%lu]", c, (unsigned long)s.leases_cell[c],
-                  (unsigned long)s.waited_cell[c], (unsigned long)(s.hold_ns_cell[c] / 1000000ull), (unsigned long)hist_q_us(s.wait_hist_cell[c], 0.5),
-                  (unsigned long)hist_q_us(s.wait_hist_cell[c], 0.99), (unsigned long)(s.wait_max_ns_cell[c] / 1000));
+    o += pool_block_cell(&s, c, buf + o, len - o);
   }
   return o;
+}
+
+int nr_pool_stats_line_proc(nr_pool_t *p, char *buf, int len)
+{
+  nr_pool_stats_t s;
+  nr_pool_stats(p, &s);
+  return pool_line_proc(&s, p, buf, len);
+}
+
+int nr_pool_stats_line_cell(nr_pool_t *p, int cell, int pci, char *buf, int len)
+{
+  if (cell < 0 || cell >= NR_POOL_MAX_CELLS) return 0;
+  nr_pool_stats_t s;
+  nr_pool_stats(p, &s);
+  if (!s.leases_cell[cell]) return 0;
+  int o = snprintf(buf, (size_t)len, "SENSING: CORE_POOL cell=%d pci=%d", cell, pci);
+  if (o < len) o += pool_block_cell(&s, cell, buf + o, len - o);
+  return o;
+}
+
+/* P1 CELL_CPU. "SENSING: CELL_CPU cell=<k> pci=<pci> win_ms=<ms> tokens_avg=<hold/win> share_pct=<cell hold / pool hold> fair_pct=<100/cells>
+ * wait_p99_us=<cell, window> n=<leases in window> scan[hold_ms= n=] decode[..] retry[..] disc[..] house[..] ul[..]"; all values are window deltas of the cumulative pool counters. */
+int nr_pool_cell_cpu_line(nr_pool_t *p, int cell, int pci, int n_cells, uint64_t now_ns, nr_pool_cpu_win_t *w, char *buf, int len)
+{
+  if (!p || !w || n_cells <= 1 || cell < 0 || cell >= NR_POOL_MAX_CELLS || len <= 0) return 0;
+  nr_pool_stats_t s;
+  nr_pool_stats(p, &s);
+  nr_pool_cpu_win_t cur;
+  memset(&cur, 0, sizeof(cur));
+  cur.t_ns = now_ns;
+  cur.busy_ns = s.busy_ns;
+  for (int i = 0; i < NR_POOL_NCLS; i++) cur.cls_hold_ns[i] = s.hold_ns_cell_cls[cell][i], cur.cls_leases[i] = s.leases_cell_cls[cell][i];
+  cur.cell_hold_ns = s.hold_ns_cell[cell];
+  cur.cell_leases = s.leases_cell[cell];
+  cur.cell_waited = s.waited_cell[cell];
+  memcpy(cur.wait_hist, s.wait_hist_cell[cell], sizeof(cur.wait_hist));
+  cur.primed = 1;
+  const nr_pool_cpu_win_t prev = *w;
+  *w = cur;
+  if (!prev.primed || now_ns <= prev.t_ns) return 0; /* the first trigger only opens the window */
+  const uint64_t win_ns = now_ns - prev.t_ns, hold = cur.cell_hold_ns - prev.cell_hold_ns, pool = cur.busy_ns - prev.busy_ns;
+  uint64_t dh[NR_POOL_WAIT_BINS];
+  for (int b = 0; b < NR_POOL_WAIT_BINS; b++) dh[b] = cur.wait_hist[b] - prev.wait_hist[b];
+  int o = snprintf(buf, (size_t)len, "SENSING: CELL_CPU cell=%d pci=%d win_ms=%lu tokens_avg=%.2f share_pct=%.1f fair_pct=%.1f wait_p99_us=%lu n=%lu", cell, pci,
+                   (unsigned long)(win_ns / 1000000ull), (double)hold / (double)win_ns, pool ? 100.0 * (double)hold / (double)pool : 0.0, 100.0 / (double)n_cells,
+                   (unsigned long)hist_q_us(dh, 0.99), (unsigned long)(cur.cell_leases - prev.cell_leases));
+  for (int i = 0; i < NR_POOL_NCLS && o < len; i++)
+    o += snprintf(buf + o, (size_t)(len - o), " %s[hold_ms=%lu n=%lu]", i == NR_POOL_CLS_UL ? "ul" : k_cls_nm[i],
+                  (unsigned long)((cur.cls_hold_ns[i] - prev.cls_hold_ns[i]) / 1000000ull), (unsigned long)(cur.cls_leases[i] - prev.cls_leases[i]));
+  return o < len ? o : len - 1;
+}
+
+uint64_t nr_pool_cell_hold_ns(nr_pool_t *p, int cell)
+{
+  if (!p || cell < 0 || cell >= NR_POOL_MAX_CELLS) return 0;
+  pthread_mutex_lock(&p->mu);
+  const uint64_t h = p->st.hold_ns_cell[cell];
+  pthread_mutex_unlock(&p->mu);
+  return h;
 }
 
 /* ---- exclusivity (header (a)) ---- */

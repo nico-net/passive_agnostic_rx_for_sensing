@@ -47,6 +47,8 @@ enum { NR_POOL_SCAN = 0, NR_POOL_DECODE, NR_POOL_RETRY, NR_POOL_DISC, NR_POOL_HO
 #define NR_POOL_F_UL 0x100
 #define NR_POOL_MAX_TOKENS 32
 #define NR_POOL_MAX_CELLS 16
+#define NR_POOL_CLS_UL NR_POOL_NPRIO
+#define NR_POOL_NCLS (NR_POOL_NPRIO + 1)
 #define NR_POOL_WAIT_BINS 24 /* log2(us) histogram of the lease wait: bin b = [2^(b-1), 2^b) us, bin 0 = < 1 us */
 
 typedef struct {
@@ -62,6 +64,8 @@ typedef struct {
   /* per cell (B1): all classes together */
   uint64_t leases_cell[NR_POOL_MAX_CELLS], waited_cell[NR_POOL_MAX_CELLS], wait_max_ns_cell[NR_POOL_MAX_CELLS], hold_ns_cell[NR_POOL_MAX_CELLS];
   uint64_t wait_hist_cell[NR_POOL_MAX_CELLS][NR_POOL_WAIT_BINS];
+  /* per cell and class (MPCI-DASH P1): index = class, NR_POOL_CLS_UL for first-pass UL decodes (they are DECODE leases with the UL flag; the DECODE column is DL only) */
+  uint64_t leases_cell_cls[NR_POOL_MAX_CELLS][NR_POOL_NCLS], hold_ns_cell_cls[NR_POOL_MAX_CELLS][NR_POOL_NCLS];
 } nr_pool_stats_t;
 
 typedef struct nr_pool nr_pool_t;
@@ -94,6 +98,21 @@ bool nr_pool_should_yield(const nr_pool_t *, int prio);
 bool nr_pool_yield(nr_pool_t *);
 void nr_pool_stats(nr_pool_t *, nr_pool_stats_t *out);
 int nr_pool_stats_line(nr_pool_t *, char *buf, int len); /* one log line: per class leases, wait p50/p99/max, busy cores */
+/* F1 (MPCI-DASH): the same line split in its two owners. _proc: the process-wide part (n= yields= ... house[...]) WITHOUT the per-cell blocks, printed by one owner
+ * per process. _cell: ONE per-cell block, "SENSING: CORE_POOL cell=<cell> pci=<pci> cell<cell>[n= waited= hold_ms= wait_us p50<= p99<= max=]", printed by
+ * each cell's own thread; returns 0 (nothing written) when that cell has not leased. nr_pool_stats_line = _proc + every cell block (N=1: _proc only). */
+int nr_pool_stats_line_proc(nr_pool_t *, char *buf, int len);
+int nr_pool_stats_line_cell(nr_pool_t *, int cell, int pci, char *buf, int len);
+/* P1 CELL_CPU: window state of one cell's line (owned by the caller, one per cell) and the formatter. The first call only primes the window (returns 0);
+ * n_cells <= 1 returns 0 and writes nothing. Grammar in nr_core_pool.c. */
+typedef struct {
+  uint64_t t_ns, busy_ns;
+  uint64_t cls_hold_ns[NR_POOL_NCLS], cls_leases[NR_POOL_NCLS], cell_hold_ns, cell_leases, cell_waited;
+  uint64_t wait_hist[NR_POOL_WAIT_BINS];
+  int primed;
+} nr_pool_cpu_win_t;
+int nr_pool_cell_cpu_line(nr_pool_t *, int cell, int pci, int n_cells, uint64_t now_ns, nr_pool_cpu_win_t *win, char *buf, int len);
+uint64_t nr_pool_cell_hold_ns(nr_pool_t *, int cell); /* cumulative token-time (ns) of the cell, all classes (MPCI-DASH P9) */
 int nr_pool_size(const nr_pool_t *);
 int nr_pool_core_of(const nr_pool_t *, int token);
 

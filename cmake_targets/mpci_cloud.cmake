@@ -84,6 +84,15 @@ if(ENABLE_TESTS)
       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/passive_rx/monitor)
   endif()
 endif()
+# MPCI-DASH section 3.1 log lines (F1 pool split, P1 CELL_CPU, P2/P4/P5/P6/P7/P8/P9 formatters): gating at N=1, window deltas, exact formats. nr_core_pool.c is compiled in
+# directly as in test_nr_core_pool (pinning off in the test). P3 CHAN_CELL is checked in test_iq_feed (cmake_targets/mpci_gpu.cmake), P0 in test_shm_iq.
+if(ENABLE_TESTS)
+  add_executable(test_nr_cell_dash ${CMAKE_SOURCE_DIR}/common/utils/tests/test_nr_cell_dash.cpp ${CMAKE_SOURCE_DIR}/common/utils/nr_core_pool.c)
+  target_include_directories(test_nr_cell_dash PRIVATE ${CMAKE_SOURCE_DIR}/common/utils)
+  target_link_libraries(test_nr_cell_dash PRIVATE GTest::gtest GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_cell_dash)
+  add_test(NAME test_nr_cell_dash COMMAND test_nr_cell_dash)
+endif()
 # ---- end C-DASH ----
 
 # ---- D1 ----

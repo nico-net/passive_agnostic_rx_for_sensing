@@ -138,6 +138,8 @@ void nr_pdcch_passive_queue_side_stats(uint64_t *posted, uint64_t *taken);
 int nr_passive_lag_bin(long lag);
 /// Scan occasions by lag at dequeue, and the ISAC_SCANQ_FRESH newest-first picks.
 void nr_pdcch_passive_queue_lag_hist(uint64_t out[NR_PASSIVE_LAG_BINS], uint64_t *fresh_picks);
+/** MPCI-DASH P4: the largest lag (slots) a consumer saw since the previous call of this function, then reset (calling cell). */
+uint64_t nr_pdcch_passive_queue_lag_win_take(void);
 
 void nr_pdcch_passive_queue_stop(void);
 void *nr_pdcch_passive_queue_epoch_counter(void);

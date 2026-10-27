@@ -93,6 +93,11 @@ typedef struct {
 /* PCI of the locked cell, -1 before PBCH lock. Written by nr-ue.c (relaxed), read by collect (relaxed). */
 extern _Atomic int nr_passive_metrics_pci;
 #endif
+/* MPCI-DASH P6/P9: event counters of cell `cell` (sync = "Got synch", discont = RXDISCONT) and the CLOCK_MONOTONIC ns of its last sync (0 = never); the notes act on the calling thread's cell */
+void nr_dash_note_sync(void);
+void nr_dash_note_discont(void);
+void nr_dash_event_counters(int cell, uint64_t *sync_n, uint64_t *sync_ns, uint64_t *disc_n);
+int nr_passive_metrics_pci_of(int cell); /* PCI of cell `cell`, -1 unknown (MPCI-DASH per-cell lines) */
 /* Serialize to one JSON object (no newline). Returns bytes written (excl. NUL) or -1 if buf too small. */
 int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t n);
 /* Fill a snapshot from all live getters (receiver side). */

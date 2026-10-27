@@ -26,6 +26,10 @@ struct iq_feed {
   _Atomic int running, stop;
   int thread_started, chan_started;
   char tag[IQ_CHAN_MAX_CELLS][32];
+  /* MPCI-DASH P3: window state of CHAN_CELL (one slot per entry id; touched only by the manager tick that formats the lines) */
+  struct { uint64_t blocks, out, write_ns, ov; } dprev[IQ_CHAN_MAX_CELLS];
+  uint64_t dprev_t_ns, dprev_run_ns;
+  int dprimed;
 };
 
 static void *alloc_samples(size_t n)
@@ -258,6 +262,48 @@ int iq_feed_format(iq_feed_t *f, char *buf, size_t n)
   }
   if (first && o < n) o += (size_t)snprintf(buf + o, n - o, "-");
   return (int)(o < n ? o : n - 1);
+}
+
+int iq_feed_format_chan_cells(iq_feed_t *f, uint64_t now_ns, const iq_feed_cell_ref_t *refs, int nrefs, char *buf, size_t cap)
+{
+  if (!f || !refs || !buf || !cap) return 0;
+  buf[0] = 0;
+  if (nrefs < 2) return 0; /* one cell: no line (and no window kept) */
+  if (nrefs > IQ_CHAN_MAX_CELLS) nrefs = IQ_CHAN_MAX_CELLS;
+  iq_feed_stats_t fs;
+  iq_feed_stats(f, &fs);
+  iq_chan_cell_stats_t cs[IQ_CHAN_MAX_CELLS];
+  iq_feed_cell_stats_t ps[IQ_CHAN_MAX_CELLS];
+  int ok[IQ_CHAN_MAX_CELLS];
+  uint64_t out_tot = 0;
+  const int primed = f->dprimed && now_ns > f->dprev_t_ns;
+  for (int i = 0; i < nrefs; ++i) {
+    ok[i] = refs[i].id >= 0 && refs[i].id < IQ_CHAN_MAX_CELLS && iq_chan_cell_stats(f->chan, refs[i].id, &cs[i]) == 0 && iq_feed_cell_stats(f, refs[i].id, &ps[i]) == 0;
+    if (ok[i] && cs[i].out_samples >= f->dprev[refs[i].id].out) out_tot += cs[i].out_samples - f->dprev[refs[i].id].out;
+  }
+  const uint64_t win_ns = primed ? now_ns - f->dprev_t_ns : 0;
+  const uint64_t run_d = fs.chan.run_ns >= f->dprev_run_ns ? fs.chan.run_ns - f->dprev_run_ns : 0;
+  size_t o = 0;
+  for (int i = 0; i < nrefs; ++i) {
+    if (!ok[i]) continue;
+    const int id = refs[i].id;
+    typeof(f->dprev[0]) *p = &f->dprev[id];
+    if (primed) {
+      const uint64_t blk = cs[i].blocks >= p->blocks ? cs[i].blocks - p->blocks : 0, out = cs[i].out_samples >= p->out ? cs[i].out_samples - p->out : 0;
+      const uint64_t wns = cs[i].write_ns >= p->write_ns ? cs[i].write_ns - p->write_ns : 0, ov = ps[i].overruns >= p->ov ? ps[i].overruns - p->ov : 0;
+      const int w = snprintf(buf + o, cap - o, "%sSENSING: CHAN_CELL cell=%d pci=%d ring=%s win_ms=%llu blocks=%llu out_samples=%llu write_us_mean=%.1f write_us_max=%llu "
+                             "run_us_attrib=%llu lag_now=%llu overruns_seen=%llu paused=%d", o ? "\n" : "", refs[i].cell, refs[i].pci, ps[i].tag,
+                             (unsigned long long)(win_ns / 1000000ull), (unsigned long long)blk, (unsigned long long)out, blk ? (double)wns / (double)blk / 1000.0 : 0.0,
+                             (unsigned long long)(cs[i].write_max_ns / 1000), (unsigned long long)(out_tot ? (uint64_t)((double)run_d * (double)out / (double)out_tot / 1000.0) : 0),
+                             (unsigned long long)ps[i].lag, (unsigned long long)ov, ps[i].paused);
+      if (w > 0) o = o + (size_t)w < cap ? o + (size_t)w : cap - 1;
+    }
+    p->blocks = cs[i].blocks; p->out = cs[i].out_samples; p->write_ns = cs[i].write_ns; p->ov = ps[i].overruns;
+  }
+  f->dprev_t_ns = now_ns;
+  f->dprev_run_ns = fs.chan.run_ns;
+  f->dprimed = 1;
+  return (int)o;
 }
 
 iq_feed_mode_t iq_feed_input_mode(int n_cells, const char *device_name, int sim_or_replay)

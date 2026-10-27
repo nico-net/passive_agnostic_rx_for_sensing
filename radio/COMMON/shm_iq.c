@@ -214,12 +214,22 @@ static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
   return n;
 }
 
+/* ring id for log lines: the ring name without the leading '/' and without the manager's "nrcell_" prefix; never empty */
+void shm_iq_ring_id(const char *name, char *out, size_t cap)
+{
+  if (name[0] == '/') name++;
+  if (!strncmp(name, "nrcell_", 7) && name[7]) name += 7;
+  snprintf(out, cap, "%s", *name ? name : "ring");
+}
+
 int device_init(openair0_device_t *d, openair0_config_t *cfg)
 {
   shm_state *s = calloc(1, sizeof(*s));
   AssertFatal(s, "SHMIQ allocation\n");
   const char *name = cfg->sdr_addrs && *cfg->sdr_addrs ? cfg->sdr_addrs : "isac_iq";
-  snprintf(s->tag, sizeof(s->tag), "pid%d", (int)getpid());
+  /* MPCI-DASH P0 (F2): cell= is the ring id (the ring "nrcell_<id>" the manager made for the cell, e.g. pci415), not the process id, so the per-ring
+   * DISCONT/TUNE/END lines of a multi-cell process are attributable; a ring not named nrcell_<id> keeps its whole name */
+  shm_iq_ring_id(name, s->tag, sizeof(s->tag));
   const double attach_s = ATTACH_S;
   const uint64_t t0 = shm_iq_now_ns();
   /* wait for the producer's ring and its first sample (base_tick is set by the first write); a ring the producer marked away before its first write (G6: a cell

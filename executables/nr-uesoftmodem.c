@@ -95,6 +95,11 @@ unsigned short config_frames[4] = {2,9,11,13};
 #include "common/utils/nr_core_plan.h"
 #include "common/utils/nr_core_layout.h"
 #include "common/utils/nr_cell.h"
+#include "common/utils/nr_cell_dash.h" /* MPCI-DASH P2 CELL_GPU / P7 CELL_BUDGET formatters (lines only when nr_cell_count() > 1) */
+#include "PHY/TOOLS/nr_gpu_memstat.h"
+#include "common/utils/nr_core_pool.h" /* nr_pool_site / nr_pool_size (CELL_BUDGET tokens_fair) */
+#include "PHY/NR_UE_TRANSPORT/nr_passive_metrics.h" /* nr_passive_metrics_pci_of (cell= pci= of the per-cell lines) */
+#include "PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cell_prealloc.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_cell.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_cell_prealloc.h"
@@ -613,6 +618,21 @@ static void mpci_feed_log(void)
   char line[2048];
   iq_feed_format(g_feed_obj, line, sizeof(line));
   LOG_I(PHY, "SENSING: %s\n", line);
+  if (nr_cell_count() > 1) { /* MPCI-DASH P3: one CHAN_CELL line per served cell (the feed exists on the multi-cell path only; the first call opens the windows) */
+    iq_feed_cell_ref_t refs[NR_CELL_MAX];
+    int n = 0;
+    for (int k = 0; k < g_ncells && k < NR_CELL_MAX; k++) {
+      const nr_mgr_slot_t *sl = nr_cell_mgr_slot(&g_cells.mgr, k);
+      if (g_feed_entry[k] < 0 || !sl || !sl->active)
+        continue;
+      const int lp = nr_passive_metrics_pci_of(k);
+      refs[n++] = (iq_feed_cell_ref_t){.id = g_feed_entry[k], .cell = k, .pci = lp >= 0 ? lp : sl->desc.pci};
+    }
+    char cl[IQ_CHAN_MAX_CELLS * 400];
+    if (iq_feed_format_chan_cells(g_feed_obj, mpci_now_ns(), refs, n, cl, sizeof(cl)) > 0)
+      for (char *sp = NULL, *ln = strtok_r(cl, "\n", &sp); ln; ln = strtok_r(NULL, "\n", &sp))
+        LOG_I(PHY, "%s\n", ln);
+  }
 }
 /* run time: does the cell of slot k (its current inventory description) fit the running capture? */
 static int mpci_feed_fits(int k, const nr_cell_desc_t *d, iq_span_cell_plan_t *o)
@@ -709,6 +729,8 @@ static void mpci_cell_retune(void *ctx, int k, const nr_cell_mgr_event_t *ev)
     LOG_W(PHY, "SENSING: MPCI_SPAN cell=%d id=%s new centre %.0f %s the running capture\n", k, ev->id, ev->desc.centre_hz, fits ? "inside" : "outside (unserved after a retune)");
   }
 }
+static void mpci_dash_gpu_log(void);
+static void mpci_dash_budget_log(void);
 /* the inventory control thread (one owner of the manager): re-reads cells.json once a second, hysteresis tick */
 static void *mpci_control_thread(void *arg)
 {
@@ -720,8 +742,12 @@ static void *mpci_control_thread(void *arg)
       LOG_W(PHY, "SENSING: MPCI_INVENTORY rejected update: %s (previous inventory kept)\n", err);
     nr_cell_life_poll(&g_cells, r == 1 ? &g_inv_watch.inv : NULL, mpci_now_ns());
     static int s_feed_tick;
-    if (++s_feed_tick % 10 == 0)
-      mpci_feed_log(); /* G6: MPCI_FEED every 10 s */
+    if (++s_feed_tick % 10 == 0) {
+      mpci_feed_log(); /* G6: MPCI_FEED every 10 s (+ MPCI-DASH P3 CHAN_CELL) */
+      mpci_dash_gpu_log(); /* MPCI-DASH P2 CELL_GPU, every 10 s */
+    }
+    if (s_feed_tick % 30 == 0)
+      mpci_dash_budget_log(); /* MPCI-DASH P7 CELL_BUDGET, every 30 s */
     for (int i = 0; i < 10 && !oai_exit; i++)
       usleep(100000);
   }
@@ -736,6 +762,78 @@ static void mpci_for_each_cell(void (*fn)(int cell))
     fn(k);
   }
   nr_cell_bind(prev);
+}
+/* MPCI-DASH P2 CELL_GPU and P7 CELL_BUDGET: per-cell lines from the manager thread, once per cell with the thread bound to it (mpci_for_each_cell: the [c<k>] tag is the cell
+ * the line is about, and cell=/pci= are in the line anyway). Only when more than one cell is served; counters and memory books are read, nothing is measured on a hot path. */
+static nr_dash_gpu_t s_dash_gpu_prev[NR_CELL_MAX];
+static nr_dash_win_t s_dash_gpu_win[NR_CELL_MAX];
+static uint64_t s_dash_now_ns;
+static int mpci_dash_pci(int k, const nr_mgr_slot_t *sl)
+{
+  const int lp = nr_passive_metrics_pci_of(k);
+  return lp >= 0 ? lp : sl->desc.pci;
+}
+static void mpci_dash_cell_gpu(int k)
+{
+  const nr_mgr_slot_t *sl = nr_cell_mgr_slot(&g_cells.mgr, k);
+  if (k >= NR_CELL_MAX || !sl || !sl->active)
+    return;
+  nr_dash_gpu_t cur;
+  memset(&cur, 0, sizeof(cur));
+  nr_gpu_pass_dl_cell_counters(k, &cur.calls, &cur.fallback, &cur.active);
+  cur.mem_dev_b = nr_gpu_memstat_cell_bytes(k, 0);
+  cur.mem_pin_b = nr_gpu_memstat_cell_bytes(k, 1);
+  cur.mem_mgd_b = nr_gpu_memstat_cell_bytes(k, 2);
+  char l[320];
+  if (nr_dash_fmt_cell_gpu(l, sizeof(l), nr_cell_count(), k, mpci_dash_pci(k, sl), nr_dash_win_tick(&s_dash_gpu_win[k], s_dash_now_ns), &cur, &s_dash_gpu_prev[k]) > 0)
+    LOG_A(PHY, "%s\n", l);
+  s_dash_gpu_prev[k] = cur;
+}
+static void mpci_dash_cell_budget(int k)
+{
+  const nr_mgr_slot_t *sl = nr_cell_mgr_slot(&g_cells.mgr, k);
+  if (k >= NR_CELL_MAX || !sl || !sl->active)
+    return;
+  nr_dash_budget_t b = {.ram_admit_mb = -1, .gpu_admit_mb = -1};
+  const nr_admit_plan_t *pl = &g_cells.mgr.plan; /* the plan's per-cell rows are in admission order: the cell of slot k is the served row of rank k */
+  for (int i = 0; i < pl->n && i < NR_ADMIT_PLAN_MAX; i++)
+    if (pl->cell[i].served && pl->cell[i].order == k) {
+      b.ram_admit_mb = (long long)(pl->cell[i].host_bytes >> 20);
+      b.gpu_admit_mb = (long long)(pl->cell[i].gpu_bytes >> 20);
+    }
+  b.gpu_now_mb = (long long)((nr_gpu_memstat_cell_bytes(k, 0) + nr_gpu_memstat_cell_bytes(k, 2)) >> 20);
+  b.pin_now_mb = (long long)(nr_gpu_memstat_cell_bytes(k, 1) >> 20);
+  b.tokens_fair = nr_pool_site() ? (double)nr_pool_size(nr_pool_site()) / (double)nr_cell_count() : 0.0;
+  char l[320];
+  if (nr_dash_fmt_cell_budget(l, sizeof(l), nr_cell_count(), k, mpci_dash_pci(k, sl), &b) > 0)
+    LOG_A(PHY, "%s\n", l);
+}
+static void mpci_dash_gpu_log(void)
+{
+  if (nr_cell_count() <= 1)
+    return;
+  s_dash_now_ns = mpci_now_ns();
+  mpci_for_each_cell(mpci_dash_cell_gpu);
+}
+static void mpci_dash_budget_log(void)
+{
+  if (nr_cell_count() <= 1)
+    return;
+  const size_t tot = nr_host_membudget_total(), used = nr_host_membudget_committed(), head = nr_host_membudget_headroom(), avail = nr_host_membudget_live_avail();
+  long long rss_mb = -1;
+  FILE *sf = fopen("/proc/self/statm", "r");
+  if (sf) {
+    long sz = 0, res = 0;
+    if (fscanf(sf, "%ld %ld", &sz, &res) == 2)
+      rss_mb = (long long)res * (long long)sysconf(_SC_PAGESIZE) / (1024 * 1024);
+    fclose(sf);
+  }
+#define DASH_MB(x) ((x) == SIZE_MAX ? -1LL : (long long)((x) >> 20))
+  char l[320];
+  if (nr_dash_fmt_budget_proc(l, sizeof(l), nr_cell_count(), DASH_MB(tot), DASH_MB(used), DASH_MB(head), DASH_MB(avail), rss_mb) > 0)
+    LOG_A(PHY, "%s\n", l);
+#undef DASH_MB
+  mpci_for_each_cell(mpci_dash_cell_budget);
 }
 static void mpci_stop_nid(int k) { (void)k; nr_pdcch_nid_gpu_stop(); }
 static void mpci_stop_pusch(int k) { (void)k; if (nr_pusch_passive_pipeline_enabled()) nr_pusch_passive_queue_stop(); }

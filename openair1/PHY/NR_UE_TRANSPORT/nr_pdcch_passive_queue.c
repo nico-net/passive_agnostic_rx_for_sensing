@@ -50,6 +50,7 @@
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_job_epoch.h"
 #include "common/utils/nr_cell.h"
+#include "nr_passive_metrics.h" /* nr_passive_metrics_pci_of (MPCI-DASH per-cell lines) */
 
 /* Monotonic slot counter published by the RF producer; the same source nr_pdsch_passive_queue uses,
  * so the two staleness checks are on one clock. */
@@ -123,6 +124,10 @@ NR_CELL_STATIC(_Atomic uint64_t, g_dropped_epoch);
 #define g_dropped_epoch NR_CELL_REF(g_dropped_epoch)
 NR_CELL_STATIC(_Atomic uint64_t, g_max_lag);
 #define g_max_lag NR_CELL_REF(g_max_lag)
+NR_CELL_STATIC(_Atomic uint64_t, g_max_lag_win); /* MPCI-DASH P4: worst lag since the last CELL_Q line (reset at read) */
+#define g_max_lag_win NR_CELL_REF(g_max_lag_win)
+NR_CELL_STATIC(nr_pool_cpu_win_t, g_dash_cpu_win); /* MPCI-DASH P1: window of this cell's CELL_CPU line; touched only by the consumer that crosses the 4000-occasion mark */
+#define g_dash_cpu_win NR_CELL_REF(g_dash_cpu_win)
 
 /* P99: lag (producer slot - occasion slot) at dequeue, bins < 2/4/8/12/16/18/24/32/inf slots (nr_pdcch_passive_queue_lag_hist) */
 typedef _Atomic uint64_t g_lag_hist_cell_t[NR_PASSIVE_LAG_BINS];
@@ -271,6 +276,11 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
            && !atomic_compare_exchange_weak_explicit(&g_max_lag, &cur_max, (uint64_t)lag, memory_order_relaxed,
                                                      memory_order_relaxed))
       ;
+    {
+      uint64_t w = atomic_load_explicit(&g_max_lag_win, memory_order_relaxed); /* one relaxed load, a CAS only on a new window maximum */
+      while (lag > (long)w && !atomic_compare_exchange_weak_explicit(&g_max_lag_win, &w, (uint64_t)lag, memory_order_relaxed, memory_order_relaxed))
+        ;
+    }
     atomic_fetch_add_explicit(&g_lag_hist[nr_passive_lag_bin(lag)], 1, memory_order_relaxed);
     /* an early job's slot is still being read: its CORESET symbols are in, the producer counter is one behind */
     if (!nr_passive_samples_valid(prod, job.early_sym ? job.absolute_slot - 1 : job.absolute_slot, slots_per_frame)) {
@@ -327,8 +337,21 @@ NR_CELL_STATIC(h_cell_t, h);
           }
           if (nr_pool_site()) {
             char pl[900];
-            nr_pool_stats_line(nr_pool_site(), pl, sizeof(pl));
-            LOG_A(PHY, "%s\n", pl);
+            if (nr_cell_count() <= 1) { /* one cell: the line of before, byte for byte */
+              nr_pool_stats_line(nr_pool_site(), pl, sizeof(pl));
+              LOG_A(PHY, "%s\n", pl);
+            } else {
+              /* MPCI-DASH F1: the pool is one process-wide object, so its class blocks are printed ONCE per process (cell 0 owns them: the primary cell is
+               * always served) and every cell prints only its own per-cell block (cell=<k> pci=<pci> named in the line, tagged by its own thread), instead
+               * of every cell's scan thread printing the same shared counters with its own tag. P1 CELL_CPU follows with the cell's class split. */
+              const int cell = nr_cell_idx(), pci = nr_passive_metrics_pci_of(cell);
+              if (cell == 0 && nr_pool_stats_line_proc(nr_pool_site(), pl, sizeof(pl)) > 0)
+                LOG_A(PHY, "%s\n", pl);
+              if (nr_pool_stats_line_cell(nr_pool_site(), cell, pci, pl, sizeof(pl)) > 0)
+                LOG_A(PHY, "%s\n", pl);
+              if (nr_pool_cell_cpu_line(nr_pool_site(), cell, pci, nr_cell_count(), t1, &g_dash_cpu_win, pl, sizeof(pl)) > 0)
+                LOG_A(PHY, "%s\n", pl);
+            }
           }
           LOG_A(PHY, "SENSING: SCAN_E2E occ=%lu wait_us p50<=%d p90<=%d p99<=%d run_us p50<=%d p90<=%d p99<=%d "
                      "pre_us p50<=%d p90<=%d p99<=%d q_us p50<=%d p90<=%d p99<=%d\n",
@@ -505,6 +528,11 @@ void nr_pdcch_passive_queue_get_stats(nr_pdcch_passive_queue_stats_t *out)
   out->dropped_stale = atomic_load_explicit(&g_dropped_stale, memory_order_relaxed);
   out->dropped_epoch = atomic_load_explicit(&g_dropped_epoch, memory_order_relaxed);
   out->max_lag_slots = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
+}
+
+uint64_t nr_pdcch_passive_queue_lag_win_take(void)
+{
+  return atomic_exchange_explicit(&g_max_lag_win, 0, memory_order_relaxed);
 }
 
 void nr_pdcch_passive_queue_stop(void)
