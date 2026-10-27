@@ -1,0 +1,1 @@
+FAIL me_TN1_1_220653 [solver] n_solved=18>=1.0 solve_s=6.804<=10.0 post_solve_crc=56.07<99.8(FAIL) post_solve_tr=3576<5000.0(FAIL) crc_floor=29.74<93.4(FAIL) drop_full=0.9431<=2.5

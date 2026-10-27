@@ -1,0 +1,2 @@
+me_TN1_1_220653.run.log.gz
+  log: pci=923 sib1=1 bank=1 csirs=3 PDSCHQ ok/dec=52188/175461 (29.7%) stale=1240 EVM ok/n=2172/9694 rnti_ok=19 check_bad_max=0 pdtim_sum p50/p90/p99=(5, 1095, 3085) shm(ovr,drop_in,disc)=- eof=0

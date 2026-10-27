@@ -1,0 +1,2 @@
+me_TN1_1_220653.run.log.gz DL FAIL(lat) n_real=3326 tot_p50=1511 tot_p99=14646 tot_p999=22706 crc_all=63.7 n_q=1202 crc_q=98.2 unqualified_low_snr=272 unqualified_retx=0 unqualified_floor=1852 drops_pct=0.7 skipped=0 recovered=1 recovered_tot_p99=3358
+me_TN1_1_220653.run.log.gz UL FAIL(lat,crc) n_real=1920 tot_p50=704 tot_p99=6765 tot_p999=10562 crc_all=0.0 n_q=0 crc_q=None unqualified_low_snr=1893 unqualified_retx=27 unqualified_floor=0 drops_pct=0.0 skipped=0 recovered=0 recovered_tot_p99=None

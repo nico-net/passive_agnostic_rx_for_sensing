@@ -3,7 +3,7 @@
    mpci_runsum.py LOG...         one block per log
    mpci_runsum.py --arms DIR     every arm directory under DIR (ue_*.log + mem.tsv + gpu.tsv of fanout_replay.sh)
 One log of a single-process multi-cell receiver carries "[c<k>] " line prefixes (task D2): it is summarised per cell, one block under
-a "== cell <k>" header each, automatically. Unprefixed logs: output unchanged.
+a "== cell <k>" header each, automatically ("== cell <k> (PCI <n>)" plus a counts line when the log names its cells: cellsel.cell_info). Unprefixed logs: output unchanged.
 Fields: sync PCI, MIB/SIB1 counts, CORESET bank adds, CSI-RS confirmations, last PDSCHQ line, EVMGRANT CRC, GPU_EXACT check_bad,
 PDTIMPCT sum percentiles, SHMIQ_END counters; per arm: min MemAvailable, per process CPU s / peak RSS / anon, GPU MiB."""
 import os, re, sys
@@ -15,9 +15,7 @@ import cellsel
 def summ(path, cell=None):
     r = dict(pci=None, mib=0, sib1=0, bank_add=0, csirs_conf=0, q=None, evm=0, evm_ok=0, rnti_ok=set(), check_bad={}, pdtim=None,
              shm_end=None, overrun_lines=0, discont_lines=0, lost=0, eof=0)
-    with open(path, 'rb') as fh:
-        lines = [raw.decode('utf-8', 'replace') for raw in fh]
-    for l in cellsel.prepare(lines, cell, path):
+    for l in cellsel.prepare(cellsel.read_lines(path, text=False), cell, path):
         if 'Initial sync successful, PCI:' in l and r['pci'] is None:
             r['pci'] = int(re.search(r'PCI: (\d+)', l).group(1))
         elif 'MIB fields' in l: r['mib'] += 1
@@ -61,15 +59,22 @@ def line(name, r):
 
 def summ_all(path):
     """-> [(cell or None, line text)]: one entry per cell of a multi-cell log, one for an unprefixed log."""
-    cs = cellsel.log_cells(path)
-    return [(None, summ(path))] if cs is None else [(k, summ(path, k)) for k in cs]
+    info = cellsel.cell_info(path)
+    if info is None:
+        return [(None, summ(path))]
+    out = [(k, summ(path, k)) for k in info['cells']]
+    if info['pci']:
+        for k, r in out: r['label'], r['counts'] = info['pci'].get(k), info['counts'][k]
+    return out
 
 
 def show(name, path, indent=''):
     for k, r in summ_all(path):
         if k is not None:
-            print(indent + "== cell %d" % k)
+            print(indent + cellsel.cell_header(k, r.get('label')))
         print(line(name, r))
+        if 'counts' in r:
+            print(indent + "  cell pci=%s %s" % (r['label'], cellsel.counts_line(r['counts'])))
 
 
 def arms(root):
