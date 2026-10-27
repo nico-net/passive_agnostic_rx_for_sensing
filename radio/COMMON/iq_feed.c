@@ -56,7 +56,9 @@ iq_feed_t *iq_feed_create(const iq_feed_cfg_t *cfg)
   for (unsigned a = 0; a < cfg->nch; ++a)
     if (!(f->stage[a] = alloc_samples((size_t)block + 16))) { errno = ENOMEM; goto fail; }
   shm_iq_ring_prefault(&f->wide); /* page faults belong to start-up */
-  iq_chan_cfg_t cc = {.in = &f->wide, .block = block, .backend = cfg->backend, .load_hint = cfg->load_hint,
+  /* G5: the channelizer block is the caller's when given, else the channelizer's own default (the backend's block hint; the CPU backend: the same 65536 rule as
+   * the radio reads above), so a GPU backend runs larger blocks than the radio reads */
+  iq_chan_cfg_t cc = {.in = &f->wide, .block = cfg->block, .backend = cfg->backend, .load_hint = cfg->load_hint,
                       .out_ring_budget_bytes = cfg->narrow_budget_bytes};
   if (!(f->chan = iq_chan_create(&cc))) goto fail;
   return f;

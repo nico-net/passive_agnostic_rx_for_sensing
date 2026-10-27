@@ -335,13 +335,15 @@ void iq_chan_set_selector(iq_chan_select_fn fn, void *user)
   pthread_mutex_unlock(&g_be_mu);
 }
 
+/* G5: without an installed selector the CHAN path decides (iq_chan_gpu_sel.c in the same library, R5; CPU when the process has no GPU platform) */
+extern const iq_chan_backend_t *iq_chan_path_select(const iq_chan_load_t *load);
 const iq_chan_backend_t *iq_chan_backend_select(const iq_chan_load_t *load)
 {
   pthread_mutex_lock(&g_be_mu);
   iq_chan_select_fn fn = g_sel;
   void *u = g_sel_user;
   pthread_mutex_unlock(&g_be_mu);
-  const iq_chan_backend_t *b = fn ? fn(load, u) : NULL;
+  const iq_chan_backend_t *b = fn ? fn(load, u) : load ? iq_chan_path_select(load) : NULL;
   return b ? b : &iq_chan_backend_cpu;
 }
 
@@ -411,15 +413,21 @@ iq_chan_t *iq_chan_create(const iq_chan_cfg_t *cfg)
   const shm_iq_hdr_t *h = c->in.hdr;
   c->nch = h->channels;
   c->in_rate = h->rate;
+  c->be = cfg->backend ? cfg->backend : iq_chan_backend_select(cfg->load_hint); /* G5: chosen first, its block hint sizes the default block */
   c->block = cfg->block;
   if (c->block <= 0) {
-    c->block = IQ_CHAN_DEFAULT_BLOCK;
+    const int hint = c->be->block_hint ? c->be->block_hint(c->in_rate) : 0;
+    c->block = hint >= ALIGN_SAMPLES && hint % ALIGN_SAMPLES == 0 ? hint : IQ_CHAN_DEFAULT_BLOCK;
     while (c->block > 4096 && (uint64_t)c->block > h->capacity / 8) c->block /= 2;
   }
   if (c->block < ALIGN_SAMPLES || c->block % ALIGN_SAMPLES || (uint64_t)c->block > h->capacity / 2) { errno = EINVAL; goto fail; }
-  c->be = cfg->backend ? cfg->backend : iq_chan_backend_select(cfg->load_hint);
   const iq_chan_geom_t g = {.in_rate = c->in_rate, .nch = c->nch, .block = c->block};
   c->ctx = c->be->create(&g);
+  if (!c->ctx && !cfg->backend && c->be != &iq_chan_backend_cpu) { /* G5: a selected (not named) backend that cannot start: the CPU backend */
+    fprintf(stderr, "IQ_CHAN_WARN backend %s could not be created: cpu backend\n", c->be->name);
+    c->be = &iq_chan_backend_cpu;
+    c->ctx = c->be->create(&g);
+  }
   if (!c->ctx) { errno = ENOMEM; goto fail; }
   for (unsigned a = 0; a < c->nch; ++a) {
     c->raw[a] = alloc_samples((size_t)c->block);
@@ -678,6 +686,27 @@ static void update_max(_Atomic uint64_t *m, uint64_t v)
   while (v > o && !atomic_compare_exchange_weak(m, &o, v)) {}
 }
 
+/* G5: block [pos, pos + n) in place: 0 = p[] point into the ring (available, not overwritten, contiguous), 1 = not yet written, -1 = overwritten, 2 = wraps */
+static int ring_direct(const shm_iq_ring_t *r, uint64_t pos, int n, unsigned nch, const int16_t **p)
+{
+  const shm_iq_hdr_t *h = r->hdr;
+  const uint64_t cap = h->capacity, head = atomic_load_explicit(&h->head, memory_order_acquire);
+  if (pos + (uint64_t)n > head) return 1;
+  if (pos < atomic_load(&h->valid_from) || head - pos > cap) return -1;
+  const uint64_t i = pos & (cap - 1);
+  if (i + (uint64_t)n > cap) return 2;
+  for (unsigned a = 0; a < nch; ++a) p[a] = r->data[a] + 2 * i;
+  return 0;
+}
+/* after an in-place read: the same check shm_iq_ring_copy makes after its copy */
+static int ring_still_valid(const shm_iq_ring_t *r, uint64_t pos)
+{
+  const shm_iq_hdr_t *h = r->hdr;
+  atomic_thread_fence(memory_order_acquire);
+  const uint64_t reserve = atomic_load_explicit(&h->reserve, memory_order_relaxed);
+  return !(reserve - pos > h->capacity || pos < atomic_load(&h->valid_from));
+}
+
 int iq_chan_step(iq_chan_t *c)
 {
   { const uint64_t t = now_ns(); if (c->last_step_ns) update_max(&c->step_gap_max_ns, t - c->last_step_ns); c->last_step_ns = t; }
@@ -700,21 +729,32 @@ int iq_chan_step(iq_chan_t *c)
     if (!c->seek_pending) { c->pos = head - head % ALIGN_SAMPLES; c->pos_valid = 1; }
     return 0;
   }
-  const int r = shm_iq_ring_copy(&c->in, c->pos, c->block, c->nch, c->raw);
+  /* G5: a backend that reads its input in place (direct_in, the GPU backend on a SHARED tier) gets the ring's own memory when the block does not wrap;
+   * otherwise (and for the CPU backend) the block is copied as before. The in-place read is validated after run() like shm_iq_ring_copy validates its copy. */
+  const int16_t *inp[SHM_IQ_MAX_CH];
+  int any_pt = 0; /* a zero-shift decim-1 entry publishes the input block itself: it needs the copy (the ring slot may be rewritten after the check) */
+  for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s) any_pt |= c->cell[s].used && !c->cell[s].paused && c->cell[s].passthrough;
+  const int direct = !any_pt && c->be->direct_in && c->be->direct_in(c->ctx) && ring_direct(&c->in, c->pos, c->block, c->nch, inp) == 0;
+  int r = direct ? 0 : shm_iq_ring_copy(&c->in, c->pos, c->block, c->nch, c->raw);
+  if (!direct)
+    for (unsigned a = 0; a < c->nch; ++a) inp[a] = c->raw[a];
   if (r == 0 && atomic_load(&h->rf_epoch) != c->epoch) return 0; /* retune during the copy: redo with the new shifts (the copied samples are old-tuned) */
+  const uint64_t t0 = now_ns();
   if (r == 0) {
-    const uint64_t t0 = now_ns();
     update_max(&c->lag_max, atomic_load(&h->head) - c->pos);
     for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s)
       for (unsigned a = 0; a < c->nch; ++a) c->outp[s * (int)c->nch + (int)a] = c->cell[s].used && !c->cell[s].paused && !c->cell[s].passthrough ? c->cell[s].obuf[a] : NULL;
-    if (c->be->run(c->ctx, (const int16_t *const *)c->raw, c->block, c->outp)) { fprintf(stderr, "IQ_CHAN_ERR backend %s run failed\n", c->be->name); return -1; }
+    if (c->be->run(c->ctx, inp, c->block, c->outp)) { fprintf(stderr, "IQ_CHAN_ERR backend %s run failed\n", c->be->name); return -1; }
     const uint64_t t1 = now_ns();
     atomic_fetch_add(&c->run_ns, t1 - t0);
+    if (direct && !ring_still_valid(&c->in, c->pos)) r = -1; /* overwritten while the backend read it in place: the overrun path below */
+  }
+  if (r == 0) {
     for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s) {
       cell_t *x = &c->cell[s];
       if (!x->used || x->paused) continue;
       void *bufs[SHM_IQ_MAX_CH];
-      for (unsigned a = 0; a < c->nch; ++a) bufs[a] = x->passthrough ? (void *)c->raw[a] : (void *)x->obuf[a];
+      for (unsigned a = 0; a < c->nch; ++a) bufs[a] = x->passthrough ? (void *)inp[a] : (void *)x->obuf[a];
       /* output timestamps are (base_tick + ring_pos) / decim, the formula of shm_iq.c */
       shm_iq_ring_write(&x->out, (int64_t)(((uint64_t)c->base_tick + c->pos) / (uint64_t)x->e.decim), bufs, c->block / x->e.decim, c->nch);
     }

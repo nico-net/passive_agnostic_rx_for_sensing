@@ -69,6 +69,12 @@ typedef struct iq_chan_backend {
   size_t (*capacity)(const iq_chan_load_t *load);
   /* Optional: run() on k threads including the caller (worker i pinned to cpus[i % ncpus]); results must not depend on k. NULL = single thread only. */
   int (*set_workers)(void *ctx, int k, const int *cpus, int ncpus);
+  /* Optional (G5): samples per channel per run() this backend wants for a ring of `rate` when the config leaves the block to the channelizer
+   * (cfg.block 0); iq_chan clips it to an eighth of the ring as the default. NULL = IQ_CHAN_DEFAULT_BLOCK. */
+  int (*block_hint)(double rate);
+  /* Optional (G5): 1 = run() may read its input in place in the wideband ring (in[] then point into ring memory, valid only during the call; the channelizer
+   * validates the block after the call and treats an overwrite as an overrun). NULL / 0 = the input is a copy. */
+  int (*direct_in)(void *ctx);
 } iq_chan_backend_t;
 
 extern const iq_chan_backend_t iq_chan_backend_cpu;

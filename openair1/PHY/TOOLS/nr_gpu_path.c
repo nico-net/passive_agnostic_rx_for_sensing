@@ -10,9 +10,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const char *const g_names[NR_GPU_PATH_N] = {"fep", "chest", "demod", "ldpc_dl", "ldpc_ul", "pass_dl", "pass_ul", "ul_fep"};
+static const char *const g_names[NR_GPU_PATH_N] = {"fep", "chest", "demod", "ldpc_dl", "ldpc_ul", "pass_dl", "pass_ul", "ul_fep", "chan"};
 static const char *const g_env[NR_GPU_PATH_N] = {"NR_GPU_PATH_FEP",     "NR_GPU_PATH_CHEST",   "NR_GPU_PATH_DEMOD",   "NR_GPU_PATH_LDPC_DL",
-                                                 "NR_GPU_PATH_LDPC_UL", "NR_GPU_PATH_PASS_DL", "NR_GPU_PATH_PASS_UL", "NR_GPU_PATH_UL_FEP"};
+                                                 "NR_GPU_PATH_LDPC_UL", "NR_GPU_PATH_PASS_DL", "NR_GPU_PATH_PASS_UL", "NR_GPU_PATH_UL_FEP",
+                                                 "NR_GPU_PATH_CHAN"};
 enum { MAX_SAMPLES = 64 };
 
 const char *nr_gpu_path_name(nr_gpu_path_t p) { return (unsigned)p < NR_GPU_PATH_N ? g_names[p] : "?"; }
