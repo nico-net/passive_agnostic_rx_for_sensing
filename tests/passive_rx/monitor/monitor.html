@@ -63,6 +63,7 @@ nav { width: 210px; flex: none; background: var(--surface); border-right: 1px so
 nav a { display: flex; gap: 8px; align-items: center; padding: 7px 10px; border-radius: 6px; text-decoration: none; color: var(--text); }
 nav a.on { background: var(--surface-2); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent); }
 nav a .ico { width: 18px; text-align: center; }
+nav a[hidden] { display: none; }
 nav .sep { border-top: 1px solid var(--border); margin: 8px 4px; }
 main { flex: 1; min-width: 0; padding: 16px; }
 .page { display: none; }
@@ -180,6 +181,7 @@ details summary { cursor: pointer; color: var(--accent-ink); }
   <a href="#ul" data-p="ul"><span class="ico">&#8593;</span>Uplink (UL)</a>
   <a href="#sensing" data-p="sensing"><span class="ico">&#8776;</span>Sensing export</a>
   <a href="#cell" data-p="cell"><span class="ico">&#9673;</span>Cell information</a>
+  <a href="#mpci" data-p="mpci" id="navMpci" hidden><span class="ico">&#9783;</span>Cells &amp; capture</a>
   <a href="#settings" data-p="settings"><span class="ico">&#9881;</span>Settings</a>
   <div class="sep"></div>
   <a href="#perf" data-p="perf"><span class="ico">&#9201;</span>Performance &amp; timing</a>
@@ -196,6 +198,7 @@ details summary { cursor: pointer; color: var(--accent-ink); }
   <section class="page" id="p-ul"></section>
   <section class="page" id="p-sensing"></section>
   <section class="page" id="p-cell"></section>
+  <section class="page" id="p-mpci"></section>
   <section class="page" id="p-settings"></section>
   <section class="page" id="p-perf"></section>
   <section class="page" id="p-spectrum"></section>
@@ -225,6 +228,14 @@ const HELP = {
   drop_full: ["Full drops", "Jobs evicted because the queue was full (scan queue = PDCCH scanning, PDSCH queue = data decoding).", "% of queued", "Scan queue <= 2.5 % (4-RX gate).", "ISAC_METRICS scanq_drop_full, pdschq_drop_full"],
   pdcch: ["PDCCH monitoring", "Occasions = slots the control channel was searched; candidates = blind decode attempts; accepted DCIs = candidates passing CRC and all false-positive gates.", "count", "Occasions must grow steadily; flat = no slots reach the monitor.", "blind PDCCH monitor summary line, ISAC_METRICS pdcch_*"],
   rnti_table: ["Per-RNTI table", "One row per user identity (RNTI) the receiver recovered from control messages.", "-", "-", "per-grant source"],
+  mpci_admit: ["Admission", "How many of the wanted cells the host can serve at once (memory, GPU, nID window), and why one was left out.", "cells / MB", "Good: every wanted cell served, no refuse.", "run.log MPCI_ADMIT"],
+  mpci_span: ["Capture span", "The one wideband capture that covers every served cell: centre, rate, and each cell's decimation and frequency shift inside it.", "MHz / MS/s", "Good: served = all cells, none unserved.", "run.log MPCI_SPAN, MPCI_RADIO"],
+  mpci_feed: ["Channelizer feed", "The reader pulls the capture from the radio and the channelizer cuts one narrowband stream per cell. Overruns mean a cell's ring was written faster than it was drained.", "count / samples", "Good: no gaps, frozen timestamps or read errors; overruns stay at 0 or small.", "run.log MPCI_FEED"],
+  mpci_rt: ["Slot thread core", "CPU core of the cell's real-time slot thread, chosen by the core plan.", "core id", "Informational.", "run.log MPCI_RT"],
+  mpci_life: ["Cell lifecycle", "Cells activated at start, and later add / retire / retune events from the inventory.", "count", "Informational.", "run.log MPCI_LIFE, MPCI_CELL"],
+  sfo: ["SFO reset", "The sampling-frequency-offset tracker restarted for this cell, with the reason and the offset it had reached.", "ppm", "A few at start are normal; repeats after a stream discontinuity mean samples were lost.", "run.log SFO reset (<reason>)"],
+  core_pool: ["Core pool", "Shared worker cores leased to every cell. Per-cell blocks show how often a cell waited for a core.", "leases / us", "Good: low waited share, short waits.", "run.log CORE_PLAN, CORE_POOL"],
+  shmiq: ["IQ ring (SHMIQ)", "Shared-memory ring that carries one cell's narrowband IQ from the channelizer to its receiver slot. A discontinuity means the reader skipped samples.", "count", "Good: 0 overruns; few discontinuities.", "run.log SHMIQ_READY, SHMIQ_TUNE, SHMIQ_DISCONT, SHMIQ_END"],
   retry: ["Recovery / retry share", "Share of decode bodies that were retries or solver probes rather than first real decodes.", "%", "Low is better; probes are part of blind interpretation.", "PDTIMCLS real/retry/probe counts"],
   ul_lock: ["UL layout lock", "The receiver must learn the uplink bandwidth part (size and start) before it can place PUSCH; it does that from DCI 0_1 statistics and confirms with PUSCH CRC.", "-", "LOCKED is best; PROVISIONAL = size known, start not CRC-confirmed.", "run.log ULLAYOUT LOCK / BWP_LOCK / CRC_LOCK / PRIOR_* / STATS"],
   pusch: ["PUSCH CRC-OK", "Uplink transport blocks whose CRC passed out of attempts.", "%", "Needs UL lock and enough UL path gain.", "pusch_passive[...] line, ISAC_METRICS pusch_try/pusch_crc_ok"],
@@ -263,7 +274,7 @@ const GLOSSARY = [
   ["Evidence labels", "Every number carries where it came from (OTA, replay, rfsim, synthetic). Results of different hosts, cells, bandwidths or commits are never merged."],
   ["dBFS", "Power relative to the converter's full scale; 0 dBFS = clipping."],
 ];
-const PAGES = ["home", "dl", "ul", "sensing", "cell", "settings", "perf", "spectrum", "history", "logs", "glossary"];
+const PAGES = ["home", "dl", "ul", "sensing", "cell", "mpci", "settings", "perf", "spectrum", "history", "logs", "glossary"];
 
 /* ------------------------------------------------------------------ settings (per viewer, localStorage) */
 const DEF = { refresh: 2, latUnit: "ms", theme: "auto", tiles: { radio: true, sync: true, dl: true, ul: true, decode: true, compute: true },
@@ -456,6 +467,7 @@ function render() {
   const opts = (m.cells || []).map((k) => `<option value="${esc(k)}">${esc(ST.snap.cells[k] ? ST.snap.cells[k].label : k)}</option>`).join("");
   if (cs.dataset.opts !== opts) { cs.innerHTML = opts || `<option value="">no cell yet</option>`; cs.dataset.opts = opts; }
   cs.value = m.cell || "";
+  $("#navMpci").hidden = !ST.snap.mpci;
   $("#replay").classList.toggle("on", !m.live);
   if (!m.live && m.duration) { const sl = $("#rpSlider"); sl.max = Math.ceil(m.duration); if (replayT != null) sl.value = replayT; }
   $("#rpTime").textContent = replayT != null ? `t = ${ft(replayT)} of ${ft(m.duration)}` : `whole run (${ft(m.duration)})`;
@@ -713,6 +725,83 @@ function hlLog(lines) {
 RENDER.glossary = (el) => {
   el.innerHTML = `<h2>Glossary</h2><p class="lead">The terms used on this dashboard, in plain language.</p><div class="card"><dl class="gl">${GLOSSARY.map(([t, d]) => `<dt>${esc(t)}</dt><dd>${esc(d)}</dd>`).join("")}</dl></div>
     <div class="card"><h3>Metric help (same text as the (i) buttons)</h3><dl class="gl">${Object.values(HELP).map((h) => `<dt>${esc(h[0])}</dt><dd>${esc(h[1])} <i>Unit:</i> ${esc(h[2])}. <i>Good/bad:</i> ${esc(h[3])} <i>Source:</i> ${esc(h[4])}.</dd>`).join("")}</dl></div>`;
+};
+
+/* ------------------------------------------------------------------ multi-PCI: one panel per cell + the shared capture / channelizer */
+const mhz = (hz) => isNum(hz) ? (hz / 1e6).toFixed(3) + " MHz" : "n/a";
+const kvs = (rows) => `<div class="kv">${rows.filter((r) => r).map(([k, v, h]) => `<span class="k">${esc(k)} ${h ? info(h) : ""}</span><span>${v == null || v === "" ? "n/a" : v}</span>`).join("")}</div>`;
+function poolBlock(g) {
+  return g ? `${fint(g.n)} leases, ${fint(g.waited)} waited, hold ${fint(g.hold_ms)} ms; wait p50 &le; ${fint(g.wait_p50)} µs, p99 &le; ${fint(g.wait_p99)} µs, max ${fint(g.wait_max)} µs` : "n/a";
+}
+function cellPanel(c, M) {
+  const s = c.slot || {}, f = c.feed || {}, pk = c.feed_peak || {}, rg = c.ring || {}, e = rg.end || {}, sf = c.sfo, pl = c.pool || {}, ll = c.long_lease, lw = c.long_wait, sp = c.span;
+  const chan = c.unserved ? stBadge("warn", "unserved: " + c.unserved) : f.paused ? stBadge("warn", "paused") : pk.ov ? stBadge("warn", pk.ov + " overruns") : sp || c.feed ? stBadge("ok", "served") : stBadge("idle", "no feed line");
+  return `<div class="card" data-cell-panel="${esc(c.cell)}"><h3>${esc(c.label)} ${chan}</h3>
+    <div class="small">id <code>${esc(c.id || "n/a")}</code> &middot; ${esc(c.pci_state)} &middot; log lines tagged <code>[c${c.cell}]</code></div>
+    ${kvs([
+      ["Centre frequency", mhz(s.centre_hz)], ["SSB index / carrier", `${s.ssb == null ? "n/a" : s.ssb} / ${s.n_rb == null ? "n/a" : s.n_rb + " PRB"}`],
+      ["Measured CFO", isNum(s.cfo_hz) ? fint(s.cfo_hz) + " Hz" : "n/a"], ["RX antennas", s.nb_rx], ["IQ ring", s.ring ? `<code>${esc(s.ring)}</code>` : (rg.name ? `<code>${esc(rg.name)}</code>` : "n/a")],
+      ["Slot thread core", c.rt_core == null ? "not reported" : c.rt_core, "mpci_rt"],
+      ["Channel", sp ? `decimation ${sp.decim}, shift ${sp.shift_mhz >= 0 ? "+" : ""}${sp.shift_mhz.toFixed(3)} MHz` : c.unserved ? "unserved (" + esc(c.unserved) + ")" : "n/a", "mpci_span"],
+      ["Channelizer (peak over run)", c.feed_peak ? `overruns ${fint(pk.ov)}, dropped ${fint(pk.drop)}, lag ${fint(pk.lag)}` : "n/a", "mpci_feed"],
+      ["Channelizer (last line)", c.feed ? `overruns ${fint(f.ov)}, dropped ${fint(f.drop)}, lag ${fint(f.lag)}${f.paused ? ", paused" : ""}` : "n/a"],
+      ["SFO resets", sf ? `${fint(sf.n)} (${Object.entries(sf.by_reason).map(([r, n]) => esc(r) + " " + fint(n)).join(", ")}); last previous eps ${fmt(sf.last_eps_ppm, 3, "ppm")}, max |eps| ${fmt(sf.max_abs_eps_ppm, 3, "ppm")}` : "none logged", "sfo"],
+      ["Core pool (this cell's lines)", c.pool ? `${fint(pl.n)} cores, ${fint(pl.yields)} yields, ${fint(pl.nested)} nested, ${fint(pl.enforced)} enforced` : "n/a", "core_pool"],
+      ["Core pool, cell block", poolBlock(c.pool_cell)],
+      ["Long leases / waits", `${ll ? fint(ll.n) + " leases (max " + fint(ll.max_ms) + " ms; " + Object.entries(ll.by_name).map(([a, b]) => esc(a) + " " + b).join(", ") + ")" : "0 leases"}; ${lw ? fint(lw.n) + " waits (max " + fint(lw.max_ms) + " ms)" : "0 waits"}`],
+      ["Ring consumer at exit", c.ring ? `${fint(e.reads)} reads, ${fint(e.overruns)} overruns, ${fint(e.discont)} discontinuities, ${fint(e.dropped_in)} input samples dropped` : "n/a", "shmiq"],
+    ])}
+    ${(c.events || []).length ? `<div class="small">Cell manager: ${(c.events).map((x) => esc(x.event) + " (" + esc(x.reason) + ")").join(", ")}</div>` : ""}</div>`;
+}
+RENDER.mpci = (el) => {
+  const M = sn().mpci;
+  if (!M) { el.innerHTML = `<h2>Cells &amp; capture</h2>` + empty("Single-cell run", "This log has no multi-PCI lines (MPCI_*, SHMIQ_*, [c<k>] tags): the pages for one cell show everything."); return; }
+  const cp = M.capture, sp = cp.span || {}, fd = cp.feed || {}, st = cp.feed_started || {}, ad = M.admit || {}, rd = cp.radio || {}, pk = cp.feed_peak || {};
+  let h = `<h2>Cells &amp; capture</h2><p class="lead">One receiver process, ${M.cells.length} cell(s) on one capture. Each panel below is one cell, labelled with its PCI; the capture card is shared by all of them. Numbers of different cells are never merged.</p>`;
+  if (M.checks.length) h += `<div class="notice">${M.checks.map((x) => `<div><span class="ico-${x.level}"></span> ${esc(x.text)}</div>`).join("")}</div>`;
+  h += `<div class="grid2">${M.cells.map((c) => cellPanel(c, M)).join("")}</div>`;
+  h += `<div class="card"><h3>All cells side by side</h3>` + table([
+    { k: "label", t: "Cell" }, { k: "centre", t: "Centre MHz", num: true, f: (v) => fmt(v, 3) }, { k: "ssb", t: "SSB", num: true }, { k: "cfo", t: "CFO Hz", num: true, f: fint },
+    { k: "decim", t: "Decim", num: true }, { k: "shift", t: "Shift MHz", num: true, f: (v) => fmt(v, 3) }, { k: "ov", t: "Ch. overruns (peak)", num: true, f: fint }, { k: "drop", t: "Ch. dropped (peak)", num: true, f: fint },
+    { k: "lag", t: "Ch. lag (peak)", num: true, f: fint }, { k: "sfo", t: "SFO resets", num: true, f: fint }, { k: "ring_discont", t: "Ring discont.", num: true, f: fint }, { k: "rt", t: "RT core", num: true },
+  ], M.cells.map((c) => ({ label: c.label, centre: isNum((c.slot || {}).centre_hz) ? c.slot.centre_hz / 1e6 : null, ssb: (c.slot || {}).ssb, cfo: (c.slot || {}).cfo_hz, decim: c.span ? c.span.decim : null,
+    shift: c.span ? c.span.shift_mhz : null, ov: (c.feed_peak || {}).ov, drop: (c.feed_peak || {}).drop, lag: (c.feed_peak || {}).lag, sfo: c.sfo ? c.sfo.n : 0,
+    ring_discont: c.ring && c.ring.end ? c.ring.end.discont : null, rt: c.rt_core })), { name: "mpci_cells", full: true }) + `</div>`;
+  h += `<h2 style="margin-top:18px">Capture &amp; channelizer ${info("mpci_feed")}</h2>`;
+  h += `<div class="grid2"><div class="card"><h3>Admission ${info("mpci_admit")}</h3>` + (ad.cells == null ? empty("No MPCI_ADMIT line", "Printed once before the radio starts when an inventory is given.") :
+    `<div class="kpis">${kpi("Cells served", `${ad.cells} of ${ad.n}`)}${kpi("Binding limit", esc(ad.reason))}${kpi("Refused", ad.refuse ? "yes" : "no")}</div>` +
+    kvs([["Host memory budget / used", `${fint(ad.host_budget_mb)} / ${fint(ad.host_used_mb)} MB`], ["GPU memory budget / used", ad.gpu_budget_mb < 0 ? `unlimited / ${fint(ad.gpu_used_mb)} MB` : `${fint(ad.gpu_budget_mb)} / ${fint(ad.gpu_used_mb)} MB`],
+      ["nID window", ad.nid_window], ["Unserved cells", (ad.unserved || []).length ? (ad.unserved).map((u) => `${esc(u.cell)}: ${esc(u.reason)}`).join(", ") : "none"]])) +
+    ((M.admit_notes || []).length ? `<div class="small">${M.admit_notes.map(esc).join("<br>")}</div>` : "") + `</div>`;
+  h += `<div class="card"><h3>Capture span ${info("mpci_span")}</h3>` + (sp.ok == null ? empty("No MPCI_SPAN line", "Printed once when the capture is planned.") :
+    `<div class="kpis">${kpi("Served", `${sp.served}/${sp.n_cells}`)}${kpi("Centre", mhz(sp.centre_hz))}${kpi("Capture rate", isNum(sp.rate) ? fmt(sp.rate / 1e6, 2, "MS/s") : "n/a")}</div>` +
+    kvs([["Usable bandwidth", fmt(sp.usable_mhz, 3, "MHz")], ["Span", `${fmt(sp.span_lo_mhz, 3)} .. ${fmt(sp.span_hi_mhz, 3)} MHz`], ["RX channels", sp.n_rx], ["Cells (decimation, shift)", (sp.cells || []).map((c) => `${esc(c.id)} d${c.decim} ${c.shift_mhz >= 0 ? "+" : ""}${c.shift_mhz.toFixed(3)} MHz`).join("; ") || "none"],
+      ["Unserved", (sp.unserved || []).length ? sp.unserved.map((u) => `${esc(u.id)}: ${esc(u.reason)}`).join(", ") : "none"], ["Plan ok", sp.ok ? "yes" : "no"]])) +
+    kvs([["Radio", rd.device_rates == null ? "n/a" : `${rd.device_rates} usable rates, analog bandwidth ${fmt(rd.analog_bw_mhz, 1, "MHz")}, ${rd.rx_channels} RX channels`]]) +
+    ((cp.span_events || []).length ? `<div class="small">${cp.span_events.map((x) => esc(x.text)).join("<br>")}</div>` : "") + `</div></div>`;
+  h += `<div class="card"><h3>Channelizer (MPCI_FEED) ${info("mpci_feed")}</h3>` + (!cp.feed_n && st.threads == null ? empty("No MPCI_FEED line", "Printed at start and every 20 s while several cells share one capture.") :
+    `<div class="kpis">${kpi("Threads", st.threads == null ? (fd.threads_run == null ? "n/a" : `${fd.threads_run}/${fd.threads_need}`) : `${fd.threads_run == null ? st.threads : fd.threads_run}/${fd.threads_need == null ? st.needed : fd.threads_need}`)}${kpi("Backend", esc(fd.backend || "n/a"))}${kpi("Reader reads", fint(fd.reads))}${kpi("Overruns (peak)", fint(pk.chan_overruns))}${kpi("Max lag (peak)", fint(pk.chan_lag_max))}${kpi("Gaps / frozen", `${fint(pk.gaps)} / ${fint(pk.frozen)}`)}${kpi("Read errors", fint(pk.read_err))}</div>` +
+    kvs([["Reader CPU / channelizer CPUs", `${st.reader_cpu == null ? "n/a" : st.reader_cpu} / ${st.chan_cpus == null ? "n/a" : st.chan_cpus}`], ["Capacity", st.capacity_msps == null ? "n/a" : fmt(st.capacity_msps, 1, "MS/s")], ["Samples read", fint(fd.samples)], ["Short reads", fint(fd.short)],
+      ["Channel discontinuities", fint(fd.chan_discont)], ["Periodic lines", cp.feed_n]]) +
+    `<div class="small">Counters reset when the channelizer stops: the last periodic line is a shutdown snapshot, so peaks over the run are shown.</div>` +
+    `<div class="grid2">${lineChart({ title: "channelizer overruns", series: [{ name: "overruns", pts: cp.feed_series.map((w, i) => [isNum(w.t) ? w.t : i, w.chan_overruns]) }], ylab: "cumulative overruns", fmtX: (v) => isNum(cp.feed_series[0] && cp.feed_series[0].t) ? ft(v) : "#" + Math.round(v), height: 170, emptyTitle: "No MPCI_FEED series" })}` +
+    lineChart({ title: "channel lag", series: M.cells.filter((c) => c.id).map((c, i) => ({ name: c.label, pts: cp.feed_series.map((w, j) => [isNum(w.t) ? w.t : j, ((w.cells || {})[c.id] || {}).lag]) })), ylab: "per-cell lag (samples)", fmtX: (v) => isNum(cp.feed_series[0] && cp.feed_series[0].t) ? ft(v) : "#" + Math.round(v), height: 170, emptyTitle: "No MPCI_FEED series" }) + `</div>`) +
+    ((cp.feed_events || []).length ? `<div class="small">${cp.feed_events.map((x) => esc(x.text)).join("<br>")}</div>` : "") + `</div>`;
+  h += `<div class="card"><h3>IQ rings (SHMIQ) ${info("shmiq")}</h3>` + table([
+    { k: "name", t: "Ring" }, { k: "channels", t: "RX ch" }, { k: "ring_rate", t: "Ring rate MS/s", num: true, f: (v) => fmt(v / 1e6, 3) }, { k: "decim", t: "Decim", num: true }, { k: "tune_n", t: "Retunes", num: true, f: fint },
+    { k: "shift", t: "Last shift Hz", num: true, f: fint }, { k: "reads", t: "Reads", num: true, f: fint }, { k: "overruns", t: "Overruns", num: true, f: fint }, { k: "dropped", t: "Dropped in", num: true, f: fint },
+    { k: "discont", t: "Discont.", num: true, f: fint }, { k: "clipped", t: "Clipped", num: true, f: fint }, { k: "producer", t: "Producer pid", num: true },
+  ], cp.rings.map((r, i) => { const t = (cp.tunes || []).find((x) => x.ring === i) || {}, e = r.end || {}; return { name: r.name, channels: r.channels, ring_rate: r.ring_rate, decim: r.decim, tune_n: t.n, shift: t.last ? t.last.shift_hz : null,
+      reads: e.reads, overruns: e.overruns, dropped: e.dropped_in, discont: e.discont, clipped: e.clipped, producer: r.producer_pid }; }), { name: "mpci_rings", emptyTitle: "No SHMIQ_READY line", emptyWhy: "This run did not read IQ from rings." }) +
+    `<div class="small">SHMIQ_DISCONT lines carry the process tag, not the ring: ${fint(cp.discont.n)} seen in total (${fint(cp.discont.skipped_in)} input samples skipped), ${fint(cp.overrun.n)} SHMIQ_OVERRUN; per-ring discontinuities are the SHMIQ_END counts (END lines are matched to rings in creation order).</div></div>`;
+  const cr = M.core || {}, pn = cr.plan || {}, lf = M.life || {};
+  h += `<div class="grid2"><div class="card"><h3>Core plan &amp; pool ${info("core_pool")}</h3>` + kvs([
+    ["Core pool", cr.pool_cores ? `${cr.pool_cores.length} cores: ${cr.pool_cores.join(" ")}` : "n/a"],
+    ["Long leases / waits (untagged, receiver-wide)", `${cr.long_lease ? fint(cr.long_lease.n) + " leases (max " + fint(cr.long_lease.max_ms) + " ms; " + Object.entries(cr.long_lease.by_name).map(([a, b]) => esc(a) + " " + b).join(", ") + ")" : "0 leases"}; ${cr.long_wait ? fint(cr.long_wait.n) + " waits (max " + fint(cr.long_wait.max_ms) + " ms)" : "0 waits"}`],
+    ["CORE_PLAN", pn.host ? `host ${esc(pn.host)}, mode ${esc(pn.mode)}, W ${pn.W}, RT ${pn.rt}, pool ${esc(pn.pool)}${pn.rt_cells && pn.rt_cells.length ? ", RT cores per cell " + pn.rt_cells.join(",") : ""}` : "no CORE_PLAN line in this log"]]) + `</div>
+    <div class="card"><h3>Cell lifecycle ${info("mpci_life")}</h3>` + kvs([["Activated", lf.cells == null ? "n/a" : `${lf.cells} cell(s), ${lf.prepared} prepared of ${lf.nmax} (N max)`], ["Primary cell", esc(lf.primary || "n/a")]]) +
+    ((M.life_events || []).length ? `<div class="small">${M.life_events.map((x) => esc(x.text)).join("<br>")}</div>` : "") + `</div></div>`;
+  el.innerHTML = h;
 };
 
 RENDER.settings = (el) => {

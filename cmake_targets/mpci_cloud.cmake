@@ -71,6 +71,21 @@ if(ENABLE_TESTS)
 endif()
 # ---- end D2 ----
 
+# ---- C-DASH ----
+# Per-cell scorers (ANSI-prefixed cell tags, gz read, per-cell counts, N=1 byte-identical) and the multi-PCI monitor page over the OTA fixtures.
+if(ENABLE_TESTS)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME test_mpci_percell_scorers
+      COMMAND ${Python3_EXECUTABLE} -m unittest -v test_percell_scorers
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci)
+    add_test(NAME test_mpci_dash_monitor
+      COMMAND ${Python3_EXECUTABLE} -m unittest -v test_mpci_dash
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/passive_rx/monitor)
+  endif()
+endif()
+# ---- end C-DASH ----
+
 # ---- D1 ----
 # Cell inventory v1 (strict parser + atomic-file watcher) and the cell manager. nr_cell.c is compiled directly (these tests do not link LOG; as in A1).
 # nr_cell_admit (static lib, B3 block) + nr_host_membudget.c as in test_nr_cell_admit. MPCI_INV_DIR is the fixture directory (a path, not a behaviour switch).
