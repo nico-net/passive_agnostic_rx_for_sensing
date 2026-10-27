@@ -42,7 +42,10 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-enum { NR_POOL_SCAN = 0, NR_POOL_DECODE, NR_POOL_RETRY, NR_POOL_DISC, NR_POOL_HOUSE, NR_POOL_NPRIO };
+/* NR_POOL_CHAN (mpci CHANPOOL): the channelizer's CPU workers. Its index is the last one (stats arrays) but its URGENCY is the highest of the pool:
+ * an IQ overrun of the wideband ring breaks every cell, a late decode one grant. It is bounded (see the CHAN block below), never promoted by age and
+ * charges no cell (it works for all of them; its demand is taken off the pool size the per-cell fair share is computed on). */
+enum { NR_POOL_SCAN = 0, NR_POOL_DECODE, NR_POOL_RETRY, NR_POOL_DISC, NR_POOL_HOUSE, NR_POOL_CHAN, NR_POOL_NPRIO };
 /* OR into prio for first-pass UL decodes (own cap: all decode + low <= N-1; DL is counted separately and yields its last core to a waiting UL, see (b)). */
 #define NR_POOL_F_UL 0x100
 #define NR_POOL_MAX_TOKENS 32
@@ -143,6 +146,28 @@ bool nr_pool_site_float_merged(void);      /* the site pool exists and is large 
 int nr_pool_site_float_acquire(int prio, int cell, uint64_t enq_ns);
 void nr_pool_site_float_release(void);     /* no-op when the caller holds no lease */
 bool nr_pool_site_float_yield(void);       /* chunk boundary of a long job: give the token to a more urgent waiter, re-acquire; false when not merged / nothing waits */
+
+/* CHAN CLASS (mpci CHANPOOL). The in-process channelizer (radio/COMMON/iq_chan) leases its worker threads from the pool, one CHAN lease per processing
+ * block per worker, never across a wait for input. Rules (all functions of the token count N and the registered demand, no constant of a host):
+ *  - urgency: CHAN is served before SCAN, DECODE and the low classes, never preempts a running lease (nothing here does), and is never promoted.
+ *  - bound: CHAN holds at most chan_cap(N) = max(1, N-2) tokens (the DL decode and the scan reserve keep the other two), and no more than the demand.
+ *  - demand: the channelizer registers the tokens it needs (nr_pool_set_chan_demand: threads from iq_chan_threads_needed, i.e. capture rate x channels
+ *    x cells over the measured backend rate). The reserved part r = min(demand, chan_cap) is taken off N for every other class: the caps (DL N-1, scan
+ *    reserve, low N-2), the per-cell DL share max(1, N-1-(A-1)) and the admission of promoted waiters all use N-r tokens, and r tokens stay free for CHAN
+ *    whenever it is not holding them, so a CHAN lease normally does not wait at all. Demand 0 (no channelizer): every formula is the pre-CHAN one.
+ *  - cells: a CHAN lease charges no cell and counts in no cell's activity; the sharing between cells is the share of N-r.
+ *  - topology: CHAN is an urgent class for the core choice (fast cores first on a hybrid host, by the same cpu_capacity the pool already reads).
+ *  - try variant: helper workers use the non-blocking form (a denied helper skips the block; worker 0 always blocks and guarantees progress). */
+void nr_pool_set_chan_demand(nr_pool_t *, int tokens); /* 0 clears */
+int nr_pool_chan_demand(const nr_pool_t *);
+int nr_pool_chan_cap(const nr_pool_t *);               /* most CHAN leases at once: max(1, N-2) */
+int nr_pool_chan_reserved(const nr_pool_t *);          /* r = min(demand, N-2) when N > 2, else 0 */
+int nr_pool_chan_cap_n(int tokens);                    /* pure */
+int nr_pool_chan_reserved_n(int tokens, int demand);   /* pure */
+int nr_pool_site_chan_acquire(int blocking);           /* core, or -1 (no pool / not granted); CHAN class, deadline = now */
+void nr_pool_site_chan_release(void);
+void nr_pool_site_chan_set_demand(int tokens);
+int nr_pool_site_chan_max(void);                       /* chan_cap of the site pool, 0 when none */
 #ifdef __cplusplus
 }
 #endif

@@ -169,12 +169,14 @@ static void sort_pool(const ctx_t *x, int *v, int m)
   }
 }
 
-static void build_core(const nr_cl_topo_t *t, const nr_cl_over_t *o, int nc, nr_core_layout_t *L)
+static void build_core(const nr_cl_topo_t *t, const nr_cl_over_t *o, int nc, bool feed, nr_core_layout_t *L)
 {
   nr_cl_over_t none;
   if (!o) nr_cl_over_none(&none), o = &none;
   memset(L, 0, sizeof(*L));
   L->n_cells = nc;
+  L->feed = -1;
+  L->feed_req = feed;
   for (int i = 0; i < NR_CL_MAX_CELLS; i++) L->rt_cell[i] = -1;
   L->rt = L->ring = L->uhd = L->gpu = L->uss = L->nid = L->dashboard = L->anchor = -1;
   ctx_t x = {.t = t, .n = t->ncpu > NR_CL_MAX_CPUS ? NR_CL_MAX_CPUS : (t->ncpu < 0 ? 0 : t->ncpu), .rt = -1, .maxcap = 1};
@@ -232,7 +234,8 @@ static void build_core(const nr_cl_topo_t *t, const nr_cl_over_t *o, int nc, nr_
   /* cells 1..nc-1: one more RT reader each, same candidate chain as the first one (isolated RT set, else general CPUs minus the anchor
    * and the radio IO); with >= 8 general CPUs the SMT sibling of a reader is only taken when nothing else is left */
   L->rt_cell[0] = L->rt;
-  for (int k = 1; k < nc && L->rt >= 0; k++) {
+  const int nread = nc + (feed ? 1 : 0); /* the feed reader (when planned) is reader number nc */
+  for (int k = 1; k < nread && L->rt >= 0; k++) {
     int got = -1;
     for (int stage = 0; stage < 2 && got < 0; stage++)
       for (int pass = count(C, n) >= 8 ? 0 : 1; pass < 2 && got < 0; pass++) {
@@ -245,11 +248,12 @@ static void build_core(const nr_cl_topo_t *t, const nr_cl_over_t *o, int nc, nr_
         }
         if (count(cand, n)) got = best_rt(&x, cand);
       }
-    L->rt_cell[k] = got;
+    if (k < nc) L->rt_cell[k] = got; else L->feed = got;
   }
   if (L->rt >= 0) R[L->rt] = 1;
   for (int k = 1; k < nc; k++)
     if (L->rt_cell[k] >= 0) R[L->rt_cell[k]] = 1;
+  if (L->feed >= 0) R[L->feed] = 1;
   if (L->ring >= 0) R[L->ring] = 1;
   for (int c = 0; c < n; c++) R[c] |= L->uhd_mask[c];
   /* W = the general CPUs minus the RT set (and its SMT siblings on hosts with >= 8 CPUs) */
@@ -377,26 +381,28 @@ static bool hostable(const nr_core_layout_t *L)
     if (L->rt_cell[k] < 0) return false;
   return L->npool >= NR_CL_MIN_POOL;
 }
-int nr_cl_max_cells(const nr_cl_topo_t *t, const nr_cl_over_t *o)
+static int max_cells_f(const nr_cl_topo_t *t, const nr_cl_over_t *o, bool feed)
 {
   nr_core_layout_t S;
   int m = 0;
   nr_cl_over_t none;
   if (!o) nr_cl_over_none(&none), o = &none;
   for (int k = 1; k <= NR_CL_MAX_CELLS; k++) {
-    build_core(t, o, k, &S);
+    build_core(t, o, k, feed, &S);
     if (!hostable(&S)) break;
     m = k;
   }
   return m;
 }
-int nr_cl_build_n(const nr_cl_topo_t *t, const nr_cl_over_t *o, int nc, nr_core_layout_t *L)
+int nr_cl_max_cells(const nr_cl_topo_t *t, const nr_cl_over_t *o) { return max_cells_f(t, o, false); }
+int nr_cl_build_nf(const nr_cl_topo_t *t, const nr_cl_over_t *o, int nc, bool feed, nr_core_layout_t *L)
 {
   nc = nc < 1 ? 1 : nc > NR_CL_MAX_CELLS ? NR_CL_MAX_CELLS : nc;
-  build_core(t, o, nc, L);
-  L->max_cells = nr_cl_max_cells(t, o);
+  build_core(t, o, nc, feed, L);
+  L->max_cells = max_cells_f(t, o, feed);
   return hostable(L) ? 0 : 1;
 }
+int nr_cl_build_n(const nr_cl_topo_t *t, const nr_cl_over_t *o, int nc, nr_core_layout_t *L) { return nr_cl_build_nf(t, o, nc, false, L); }
 int nr_cl_build(const nr_cl_topo_t *t, const nr_cl_over_t *o, nr_core_layout_t *L)
 {
   nr_cl_build_n(t, o, 1, L);
@@ -464,6 +470,10 @@ int nr_cl_format(const nr_cl_topo_t *t, const nr_core_layout_t *L, char *buf, si
     int o = snprintf(cells, sizeof(cells), " cells=%d rt_cells=", L->n_cells);
     for (int k = 0; k < L->n_cells && o + 8 < (int)sizeof(cells); k++) o += snprintf(cells + o, sizeof(cells) - (size_t)o, "%s%d", k ? "," : "", L->rt_cell[k]);
     snprintf(cells + o, sizeof(cells) - (size_t)o, " max_cells=%d", L->max_cells);
+  }
+  if (L->feed_req) {
+    const size_t o = strlen(cells);
+    snprintf(cells + o, sizeof(cells) - o, " feed=%d", L->feed);
   }
   return snprintf(buf, len,
                   "SENSING: CORE_PLAN host=%s cpus=%d online=%s allowed=%s isolated=%s nohz_full=%s cap=%s smt=%d llc=%d numa=%d gpu_node=%d"
@@ -622,20 +632,22 @@ static nr_cl_topo_t g_topo;
 static nr_core_layout_t g_lay;
 static bool g_active;
 
-static void activate(const nr_cl_topo_t *t, const nr_cl_over_t *o, int n_cells)
+static void activate(const nr_cl_topo_t *t, const nr_cl_over_t *o, int n_cells, bool feed)
 {
   if (t != &g_topo) g_topo = *t;
-  nr_cl_build_n(&g_topo, o, n_cells, &g_lay);
+  nr_cl_build_nf(&g_topo, o, n_cells, feed, &g_lay);
   g_active = true;
 }
-void nr_core_layout_set_for_test(const nr_cl_topo_t *t, const nr_cl_over_t *o) { activate(t, o, 1); }
+void nr_core_layout_set_for_test(const nr_cl_topo_t *t, const nr_cl_over_t *o) { activate(t, o, 1, false); }
 
 static const char *const g_keys[] = {"ISAC_UE_RT_CORE", "ISAC_PDSCH_CORES", "ISAC_PUSCH_CORES", "ISAC_FLOAT_CORES", "ISAC_GPU_CHECK_CORES",
                                      "ISAC_GPU_WORKER_CORE", "ISAC_PDCCH_USS_CORE", "ISAC_PDCCH_NID_GPU_CORE", "ISAC_DASHBOARD_CORE",
                                      "ISAC_UHD_CTRL_CORES", "ISAC_USRP_RING_CORE"};
 static bool g_pin_nocap;
 void nr_core_layout_init(bool passive, bool radio) { nr_core_layout_init_n(passive, radio, 1); }
-void nr_core_layout_init_n(bool passive, bool radio, int n_cells)
+void nr_core_layout_init_n(bool passive, bool radio, int n_cells) { nr_core_layout_init_nf(passive, radio, n_cells, false); }
+int nr_core_layout_feed_cpu(void) { return g_active && g_lay.feed_req ? g_lay.feed : -1; }
+void nr_core_layout_init_nf(bool passive, bool radio, int n_cells, bool feed)
 {
   if (!passive || g_active) return;
   const char *off = getenv("ISAC_CORE_PLAN");
@@ -646,7 +658,7 @@ void nr_core_layout_init_n(bool passive, bool radio, int n_cells)
   static nr_cl_over_t o;
   nr_cl_topo_read(&g_topo, radio);
   nr_cl_over_from_env(&o);
-  activate(&g_topo, &o, n_cells);
+  activate(&g_topo, &o, n_cells, feed && n_cells > 1);
   const char *pn = getenv("ISAC_CORE_PIN_NOCAP");
   g_pin_nocap = !(pn && !strcmp(pn, "0"));
   char line[4096];

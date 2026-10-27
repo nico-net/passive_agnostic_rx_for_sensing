@@ -401,3 +401,16 @@ if(ENABLE_TESTS)
   endif()
 endif()
 # ---- end DBG2 ----
+
+# ---- CHANPOOL ----
+# CHAN class of the core pool (the channelizer's workers lease tokens): pool unit test (injects the site pool, hence its own binary).
+if(ENABLE_TESTS)
+  add_executable(test_nr_core_pool_chan
+    ${CMAKE_SOURCE_DIR}/common/utils/tests/test_nr_core_pool_chan.cpp
+    ${CMAKE_SOURCE_DIR}/common/utils/nr_core_pool.c)
+  target_include_directories(test_nr_core_pool_chan PRIVATE ${CMAKE_SOURCE_DIR}/common/utils)
+  target_link_libraries(test_nr_core_pool_chan PRIVATE GTest::gtest GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_core_pool_chan)
+  add_test(NAME test_nr_core_pool_chan COMMAND test_nr_core_pool_chan)
+endif()
+# ---- end CHANPOOL ----

@@ -76,6 +76,8 @@ typedef struct {
   int W, anchor;
   int n_cells;                 /* cells the plan was built for (1 = single cell, the historical layout) */
   int rt_cell[NR_CL_MAX_CELLS]; /* RT reader (slot thread) of each cell, -1 = none found; rt_cell[0] == rt */
+  bool feed_req;               /* a wideband feed reader (G6 radio -> ring thread) was planned; feed = its CPU, -1 = none found (the reader then floats on the home lane) */
+  int feed;                    /* the feed reader: one more RT-like I/O reader after rt_cell[], same ranking; -1 when not requested */
   int max_cells;               /* most cells this host can host with every reader distinct and pool >= NR_CL_MIN_POOL (0: not even one) */
   int rt, ring, uhd, gpu, uss, nid, dashboard; /* -1 = none / unpinned */
   int npool, pool[NR_CL_MAX_POOL];             /* ordered tokens */
@@ -101,6 +103,10 @@ int nr_cl_build(const nr_cl_topo_t *, const nr_cl_over_t *, nr_core_layout_t *);
  * Returns 0 when all n_cells readers exist and the pool has >= NR_CL_MIN_POOL tokens, else 1 (the layout is still filled best effort;
  * cells without a reader have rt_cell = -1; n_cells > max_cells). */
 int nr_cl_build_n(const nr_cl_topo_t *, const nr_cl_over_t *, int n_cells, nr_core_layout_t *);
+/* As nr_cl_build_n plus, when `feed`, ONE MORE reader after the cells' readers for the wideband feed (radio read -> wideband ring: a real-time I/O thread,
+ * as the cells' slot threads are): taken by the same ranking and off the same W, so the pool, lane and housekeeping are built on the reduced W. The CORE_PLAN
+ * line then carries " feed=<cpu>". feed = false is nr_cl_build_n exactly (struct and line). */
+int nr_cl_build_nf(const nr_cl_topo_t *, const nr_cl_over_t *, int n_cells, bool feed, nr_core_layout_t *);
 /* Most cells the host can host (the value of nr_core_layout_t.max_cells), for the admission model. */
 int nr_cl_max_cells(const nr_cl_topo_t *, const nr_cl_over_t *);
 /* The CORE_PLAN line (without trailing newline). */
@@ -118,6 +124,10 @@ void nr_cl_over_from_env(nr_cl_over_t *);
 void nr_core_layout_init(bool passive, bool radio);
 /* Same with the cell count the caller decided (the CORE_PLAN line then lists the extra readers when n_cells > 1). */
 void nr_core_layout_init_n(bool passive, bool radio, int n_cells);
+/* Same, with the wideband feed reader planned (nr_cl_build_nf); the receiver passes feed = (several cells && a radio). feed = false is nr_core_layout_init_n. */
+void nr_core_layout_init_nf(bool passive, bool radio, int n_cells, bool feed);
+/* The feed reader's CPU of the active plan: -1 when inactive / not planned / not found. */
+int nr_core_layout_feed_cpu(void);
 /* threadCreate: true when an explicit affinity is applied although the process has no CAP_SYS_NICE (layout active and
  * ISAC_CORE_PIN_NOCAP != 0). */
 bool nr_core_layout_pin_nocap(void);

@@ -94,6 +94,7 @@ unsigned short config_frames[4] = {2,9,11,13};
 #include "actor.h"
 #include "common/utils/nr_core_plan.h"
 #include "common/utils/nr_core_layout.h"
+#include "common/utils/nr_core_pool.h"
 #include "common/utils/nr_cell.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cell_prealloc.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_cell.h"
@@ -588,22 +589,27 @@ static void mpci_feed_rings(void)
         wide >> 20, g_ncells, bytes >> 20);
 }
 
-/* after the RX fence: the radio stream, then the reader (pinned to the first pool CPU, RT low) and the channelizer (k derived on the next pool CPUs) */
+static int mpci_chan_acquire(void *ctx, int blocking) { (void)ctx; return nr_pool_site_chan_acquire(blocking); }
+static void mpci_chan_release(void *ctx) { (void)ctx; nr_pool_site_chan_release(); }
+static void mpci_chan_demand(void *ctx, int tokens) { (void)ctx; nr_pool_site_chan_set_demand(tokens); }
+static int mpci_chan_max(void *ctx) { (void)ctx; return nr_pool_site_chan_max(); }
+/* after the RX fence: the radio stream, then the reader (core plan feed role, RT low) and the channelizer (k derived; workers lease class CHAN of the core pool) */
 static void mpci_feed_start(void)
 {
   if (!g_feed_obj)
     return;
   if (mpci_feed_on_rt(mpci_feed_start_thread, "feed_start") != 0)
     mpci_feed_fail("the capture device did not start");
-  const nr_core_layout_t *L = nr_core_layout();
-  const int reader = L && L->npool > 0 ? L->pool[0] : -1;
-  const int *cc = L && L->npool > 1 ? L->pool + 1 : NULL;
-  const int ncc = L && L->npool > 1 ? L->npool - 1 : 0;
-  if (iq_feed_start(g_feed_obj, reader, OAI_PRIORITY_RT_LOW, cc, ncc) != 0)
+  /* CHANPOOL: the reader is a real-time I/O thread on the core plan's feed role (nr_core_layout_init_nf); the channelizer's workers lease class CHAN of the
+   * core pool per block (no CPU of their own, nothing pinned here). Without a plan (ISAC_CORE_PLAN=0) the reader floats on the home lane. */
+  static const iq_chan_lease_t lease = {.acquire = mpci_chan_acquire, .release = mpci_chan_release, .demand = mpci_chan_demand, .max_tokens = mpci_chan_max};
+  iq_chan_set_lease(&lease);
+  const int reader = nr_core_layout_feed_cpu();
+  if (iq_feed_start(g_feed_obj, reader, OAI_PRIORITY_RT_LOW, NULL, 0) != 0)
     mpci_feed_fail("the feed threads did not start");
   iq_feed_stats_t st;
   iq_feed_stats(g_feed_obj, &st);
-  LOG_I(PHY, "SENSING: MPCI_FEED started reader_cpu=%d chan_cpus=%d threads=%d needed=%d capacity_msps=%.1f backend=%s\n", reader, ncc, st.chan.threads,
+  LOG_I(PHY, "SENSING: MPCI_FEED started reader_cpu=%d chan=pool(max %d) threads=%d needed=%d capacity_msps=%.1f backend=%s\n", reader, nr_pool_site_chan_max(), st.chan.threads,
         st.chan.threads_needed, st.chan.capacity_sps / 1e6, st.chan.backend);
 }
 static void mpci_feed_log(void)
@@ -875,7 +881,7 @@ int main(int argc, char **argv)
     /* multi-PCI (A8): the cells to serve (inventory + admission) before the core plan, which gives each one its RT reader. No inventory: 1, and
      * nr_core_layout_init_n(.., 1) is nr_core_layout_init (byte-identical CORE_PLAN line). */
     g_ncells = mpci_plan_cells(argc, argv, radio);
-    nr_core_layout_init_n(true, radio, g_ncells);
+    nr_core_layout_init_nf(true, radio, g_ncells, radio && g_ncells > 1); /* CHANPOOL: several cells on a radio = a wideband feed reader in the plan */
     setenv("ISAC_LOG_ASYNC", "1", 0); setenv("ISAC_CSIRS_DISC", "1", 0); setenv("ISAC_GPU_BUDGET", "1", 0); setenv("ISAC_RECONF", "1", 0); /* read by shared code (LDPC pool, GPU budget) */
     /* USRP driver (hardware radio shared with the gNB): site defaults of the receiver */
     setenv("ISAC_RX_RECOVER", "1", 0); setenv("ISAC_USRP_START_TIMEOUT_MS", "2200", 0);
