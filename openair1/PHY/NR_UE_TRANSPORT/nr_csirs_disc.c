@@ -42,6 +42,7 @@ extern void nr_csirs_blind_rt_discovery_disable(void) __attribute__((weak));
 extern int nr_csirs_blind_rt_discovery_prepare(const NR_DL_FRAME_PARMS *) __attribute__((weak));
 extern void nr_csirs_blind_rt_discovery_init(void) __attribute__((weak));
 extern void nr_csirs_blind_rt_discovery_reset(void) __attribute__((weak));
+extern void nr_csirs_blind_rt_cell_prealloc(void) __attribute__((weak));
 extern void nr_csirs_monitor_remove_dynamic_all(void) __attribute__((weak));
 extern void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *) __attribute__((weak));
 extern void nr_csirs_disc_td_feed_params(uint32_t *, uint32_t *) __attribute__((weak));
@@ -331,6 +332,7 @@ static void init_once(void)
  */
 void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp)
 {
+  if (nr_csirs_blind_rt_cell_prealloc) nr_csirs_blind_rt_cell_prealloc(); /* the calling (bound) cell's CSI-RS search heap, before the RX fence */
   if (nr_csirs_disc_enabled()) {
     pthread_once(&g_once, init_once);
     const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load();

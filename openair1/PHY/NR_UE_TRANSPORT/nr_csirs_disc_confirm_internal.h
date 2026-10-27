@@ -5,7 +5,10 @@
  * Lifecycle: prepare before RX, drain on csirsDisc only, reset under state lock. */
 #define DISC_CONFIRM_QUEUE 128
 #define DISC_CONFIRM_RESERVE 128
-static struct {
+/* PER_CELL (mpci DBG2): the confirm queue and the discovery export of one cell (see the note in nr_csirs_blind_rt.c); the three
+ * objects above 64 KiB (frame parameters, worker UE, compact fallback) are cell heap objects allocated before the RX fence
+ * (nr_csirs_blind_rt_discovery_prepare / nr_csirs_blind_rt_cell_prealloc). */
+typedef struct {
   unsigned state; /* 0 free, 1 producer, 2 ready/owned by the sole consumer */
   uint64_t ticket, epoch;
   uint32_t absolute_slot;
@@ -14,32 +17,67 @@ static struct {
   bool raw;
   nr_csirs_disc_fep_slot_t fep;
   c16_t *iq;
-} discovery_queue[DISC_CONFIRM_QUEUE + DISC_CONFIRM_RESERVE];
-static uint16_t discovery_due[640], discovery_pending[640];
-static uint64_t discovery_ticket, discovery_epoch;
-static uint64_t discovery_birth[NR_CSIRS_BLIND_MAX_CAND];
+} discovery_queue_ent_t;
+typedef discovery_queue_ent_t discovery_queue_t[DISC_CONFIRM_QUEUE + DISC_CONFIRM_RESERVE];
+NR_CELL_STATIC(discovery_queue_t, discovery_queue);
+#define discovery_queue NR_CELL_REF(discovery_queue)
+typedef uint16_t discovery_slots_t[640];
+NR_CELL_STATIC(discovery_slots_t, discovery_due);
+#define discovery_due NR_CELL_REF(discovery_due)
+NR_CELL_STATIC(discovery_slots_t, discovery_pending);
+#define discovery_pending NR_CELL_REF(discovery_pending)
+NR_CELL_STATIC(uint64_t, discovery_ticket);
+#define discovery_ticket NR_CELL_REF(discovery_ticket)
+NR_CELL_STATIC(uint64_t, discovery_epoch);
+#define discovery_epoch NR_CELL_REF(discovery_epoch)
+typedef uint64_t discovery_birth_t[NR_CSIRS_BLIND_MAX_CAND];
+NR_CELL_STATIC(discovery_birth_t, discovery_birth);
+#define discovery_birth NR_CELL_REF(discovery_birth)
 static __thread uint64_t discovery_consumed_ticket;
-static NR_DL_FRAME_PARMS discovery_frame;
-static bool discovery_queue_ready,discovery_disabled;
-/* nr_csirs_blind_rt_discovery_disable: disables the discovery path for the process (discovery_disabled) and marks the queue ready so that producers stop enqueuing.
+NR_CELL_STATIC_HEAP(NR_DL_FRAME_PARMS, discovery_frame); /* 1.4 MB; first touched by the prepare (before the RX fence) */
+#define discovery_frame NR_CELL_HEAP_REF(NR_DL_FRAME_PARMS, discovery_frame)
+NR_CELL_STATIC(bool, discovery_queue_ready);
+#define discovery_queue_ready NR_CELL_REF(discovery_queue_ready)
+NR_CELL_STATIC(bool, discovery_disabled);
+#define discovery_disabled NR_CELL_REF(discovery_disabled)
+/* nr_csirs_blind_rt_discovery_disable: disables the discovery path of the calling cell (discovery_disabled) and marks the queue ready so that producers stop enqueuing.
  *   Called by nr_csirs_disc_pipeline_init() through a weak symbol when the GPU pipeline could not be prepared.
  */
 void nr_csirs_blind_rt_discovery_disable(void) {discovery_disabled=true;discovery_queue_ready=true;}
 static __thread bool discovery_consuming;
 static __thread uint64_t discovery_consumed_epoch;
 static __thread uint16_t discovery_copied_symbols;
-static c16_t *discovery_storage;
+NR_CELL_STATIC(c16_t *, discovery_storage);
+#define discovery_storage NR_CELL_REF(discovery_storage)
 extern const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void) __attribute__((weak));
 extern uint32_t get_samples_slot_timestamp(const NR_DL_FRAME_PARMS *,unsigned) __attribute__((weak));
 #pragma weak nr_slot_fep_fo_override_hz
 #pragma weak nr_csirs_disc_alloc_unified
-static const nr_csirs_disc_gpu_ops_t *discovery_gpu;
-static size_t discovery_iq_stride;
-static nr_csirs_disc_fep_cfg_t discovery_fep_cfg;
-static nr_csirs_disc_ring_t discovery_fep_ring;
-static int16_t discovery_compact_fallback[NR_CSIRS_DISC_MAX_ANT*14*24*NR_CSIRS_DISC_MAX_RB] __attribute__((aligned(64)));
-static int16_t *discovery_compact=discovery_compact_fallback;
-static bool discovery_device_scoring;
+NR_CELL_STATIC(const nr_csirs_disc_gpu_ops_t *, discovery_gpu);
+#define discovery_gpu NR_CELL_REF(discovery_gpu)
+NR_CELL_STATIC(size_t, discovery_iq_stride);
+#define discovery_iq_stride NR_CELL_REF(discovery_iq_stride)
+NR_CELL_STATIC(nr_csirs_disc_fep_cfg_t, discovery_fep_cfg);
+#define discovery_fep_cfg NR_CELL_REF(discovery_fep_cfg)
+NR_CELL_STATIC(nr_csirs_disc_ring_t, discovery_fep_ring);
+#define discovery_fep_ring NR_CELL_REF(discovery_fep_ring)
+typedef int16_t discovery_compact_fallback_t[NR_CSIRS_DISC_MAX_ANT*14*24*NR_CSIRS_DISC_MAX_RB];
+NR_CELL_STATIC_HEAP(discovery_compact_fallback_t, discovery_compact_fallback); /* 739 KB (calloc: 16-byte aligned; read/written with memcpy only) */
+#define discovery_compact_fallback NR_CELL_HEAP_REF(discovery_compact_fallback_t, discovery_compact_fallback)
+NR_CELL_STATIC(int16_t *, discovery_compact); /* NULL = the cell's fallback buffer (disc_compact) */
+#define discovery_compact NR_CELL_REF(discovery_compact)
+static int16_t *disc_compact(void)
+{
+  if(!discovery_compact) discovery_compact=discovery_compact_fallback;
+  return discovery_compact;
+}
+/* nr_csirs_blind_rt_cell_prealloc: allocates the calling cell's heap objects of the CSI-RS search that a slot can reach without a discovery
+ *   prepare (the compact fallback of the GPU confirm). Called bound to the cell before the RX fence by nr_csirs_disc_pipeline_init() (weak). */
+void nr_csirs_blind_rt_cell_prealloc(void) {(void)disc_compact();}
+NR_CELL_STATIC(bool, discovery_device_scoring);
+#define discovery_device_scoring NR_CELL_REF(discovery_device_scoring)
+NR_CELL_STATIC_HEAP(PHY_VARS_NR_UE, discovery_worker_ue); /* 5.7 MB: the drain's scoring context (frame parameters of the cell) */
+#define discovery_worker_ue NR_CELL_HEAP_REF(PHY_VARS_NR_UE, discovery_worker_ue)
 /* discovery_symbols: returns the 14-bit mask of OFDM symbols that a CSI-RS candidate's mapping occupies (its symbol set from get_csi_mapping_parms).
  *   Pure function. Callers: discovery_publish(), discovery_enqueue(), discovery_gpu_score() and nr_csirs_blind_rt.c (score_candidate).
  */
@@ -52,12 +90,16 @@ static uint16_t discovery_symbols(const nr_csirs_candidate_t *c)
 }
 /* Immutable export snapshots. Readers reserve a buffer before touching it;
  * writer never waits for a DL reader and can defer publication to next drain. */
-static struct {
+typedef struct {
   unsigned users;
   int n;
   struct { fapi_nr_dl_config_csirs_pdu_rel15_t p; uint16_t period, phase[2]; int nphase; } resource[2*NR_CSIRS_BLIND_DISC_MAX_CONF];
-} discovery_exports[3];
-static unsigned discovery_active;
+} discovery_export_t;
+typedef discovery_export_t discovery_exports_t[3];
+NR_CELL_STATIC(discovery_exports_t, discovery_exports);
+#define discovery_exports NR_CELL_REF(discovery_exports)
+NR_CELL_STATIC(unsigned, discovery_active);
+#define discovery_active NR_CELL_REF(discovery_active)
 /* discovery_export: copies the exported CSI-RS resources that occur on `slot` (up to max) from the active immutable export snapshot.
  *   Readers reserve the snapshot with a user count and never block the publisher; the writer switches the active buffer. Returns the count.
  *   Callers: nr_csirs_blind_rt_observed_nzp() and nr_csirs_blind_rt_rate_match_all() when discovery is queued.
@@ -208,9 +250,10 @@ int nr_csirs_blind_rt_discovery_prepare(const NR_DL_FRAME_PARMS *fp)
     if(!discovery_compact) return -1;
   }
   discovery_frame=*fp;
+  NR_CELL_HEAP_PREALLOC(PHY_VARS_NR_UE, discovery_worker_ue, nr_cell_idx()); /* the drain runs after the RX fence */
   if(discovery_gpu && discovery_gpu->device_alloc) {
     discovery_fep_ring=(nr_csirs_disc_ring_t){.n_ant=fp->nb_antennas_rx,.n_rb=fp->N_RB_DL,
-      .slots_per_frame=fp->slots_per_frame,.capacity=1,.grid_base=discovery_compact,
+      .slots_per_frame=fp->slots_per_frame,.capacity=1,.grid_base=disc_compact(),
       .slot_stride=(size_t)fp->nb_antennas_rx*14*24*fp->N_RB_DL};
     discovery_fep_ring.device_grid=discovery_gpu->device_alloc(discovery_fep_ring.slot_stride*2);
     if(!discovery_fep_ring.device_grid) return -1;
@@ -296,7 +339,7 @@ static void discovery_pack(const NR_DL_FRAME_PARMS *fp,const c16_t *rx,uint16_t 
 {
   int nk=12*fp->N_RB_DL,first=nk<fp->ofdm_symbol_size-fp->first_carrier_offset?nk:fp->ofdm_symbol_size-fp->first_carrier_offset;
   for(int a=0;a<fp->nb_antennas_rx;++a) for(int l=0;l<14;++l) if(symbols&(1u<<l)) {
-    int16_t *dst=discovery_compact+((size_t)a*14+l)*2*nk;
+    int16_t *dst=disc_compact()+((size_t)a*14+l)*2*nk;
     const c16_t *src=rx+(size_t)a*fp->samples_per_slot_wCP+l*fp->ofdm_symbol_size;
     memcpy(dst,src+fp->first_carrier_offset,first*sizeof(c16_t));
     if(first<nk) memcpy(dst+2*first,src,(nk-first)*sizeof(c16_t));
@@ -309,8 +352,8 @@ static void discovery_pack(const NR_DL_FRAME_PARMS *fp,const c16_t *rx,uint16_t 
 int nr_csirs_blind_rt_discovery_drain(void)
 {
   if(discovery_disabled || !discovery_queue_ready) return 0;
-  static PHY_VARS_NR_UE worker_ue;
-  worker_ue.frame_parms=discovery_frame;
+  PHY_VARS_NR_UE *const worker_ue=&discovery_worker_ue;
+  worker_ue->frame_parms=discovery_frame;
   int done=0;
   /* A finite quantum lets ingest and discovery make progress under load. */
   for(int q=0;q<32;++q) {
@@ -338,7 +381,7 @@ int nr_csirs_blind_rt_discovery_drain(void)
       discovery_consumed_ticket=discovery_queue[at].ticket;
       discovery_consumed_epoch=discovery_queue[at].epoch;
       discovery_consuming=true;discovery_copied_symbols=discovery_queue[at].symbols;
-      nr_csirs_blind_rt_slot(&worker_ue,discovery_queue[at].slot,discovery_queue[at].absolute_slot,
+      nr_csirs_blind_rt_slot(worker_ue,discovery_queue[at].slot,discovery_queue[at].absolute_slot,
           (c16_t (*)[discovery_frame.samples_per_slot_wCP])discovery_queue[at].iq);
       discovery_consuming=false;
     }
@@ -356,7 +399,7 @@ static int discovery_gpu_score(const NR_DL_FRAME_PARMS *fp,const nr_csirs_candid
 {
   const nr_csirs_disc_gpu_ops_t *ops=nr_csirs_disc_gpu_load?nr_csirs_disc_gpu_load():NULL;
   if(!ops || !ops->confirm) return -1;
-  int16_t *compact=discovery_compact;
+  int16_t *compact=disc_compact();
   uint16_t symbols=discovery_symbols(c);
   int nk=12*fp->N_RB_DL;
   if(!(discovery_consuming && discovery_device_scoring)) discovery_pack(fp,rx,symbols);

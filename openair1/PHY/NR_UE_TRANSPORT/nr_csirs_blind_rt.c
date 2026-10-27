@@ -24,6 +24,7 @@ extern void nr_passive_acq_note_carrier_from_rs(const char *evidence) __attribut
 
 #include "PHY/nr_phy_common/inc/nr_phy_common.h"
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -41,7 +42,14 @@ extern void nr_csirs_monitor_remove_dynamic(const fapi_nr_dl_config_csirs_pdu_re
 /* Weak for the standalone blind-search fixture; the receiver links the epoch owner. */
 __attribute__((weak)) void nr_cfg_epoch_note_csirs_map_change(void);
 __attribute__((weak)) bool nr_cfg_reconf_enabled(void);
-static nr_csirs_observer_t g_csirs_obs;
+/* ---- per-cell state (mpci DBG2, common/utils/nr_cell.h) ----
+ * Every object of the CSI-RS search below is the state of ONE cell's receive path (search banks, confirmations, export, ZP queue,
+ * confirm queue of nr_csirs_disc_confirm_internal.h). Its users run bound to the cell: the slot thread and DL actors (A8 binding),
+ * the cell's csirsDisc worker (drain, discovery feed), the PDSCH consumers (rate matching, ZP grant evidence). A process-wide copy let
+ * cell k's discovery prepare (another grid) disable cell 0's confirm queue and let cell 0's confirmed resources reach cell k's grid.
+ * The extern csirs_disc_* counters stay PROCESS (aggregate telemetry). */
+NR_CELL_STATIC(nr_csirs_observer_t, g_csirs_obs);
+#define g_csirs_obs NR_CELL_REF(g_csirs_obs)
 /* DL processing can use multiple workers, and rate matching is read by decode workers. */
 static __thread bool *g_disc_fep_map;
 uint64_t csirs_disc_readmit_skipped;
@@ -50,7 +58,8 @@ uint64_t csirs_disc_confirm_wait_max_us;
 uint64_t csirs_disc_confirm_cpu_scores,csirs_disc_confirm_gpu_scores;
 /* Standalone FD dump fixtures do not link the PHY FEP. */
 #pragma weak nr_slot_fep
-static pthread_mutex_t g_csirs_state_lock = PTHREAD_MUTEX_INITIALIZER;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_csirs_state_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_csirs_state_lock NR_CELL_REF(g_csirs_state_lock)
 /* nr_csirs_blind_rt_discovery_init: one-time setup of the CSI-RS search state lock with priority inheritance, so a low-priority holder cannot starve a real-time actor.
  *   Re-creates g_csirs_state_lock as PTHREAD_PRIO_INHERIT; falls back to a plain mutex when the attribute is unsupported.
  *   Called by nr_csirs_disc.c (init_once) before the discovery worker and the DL actors start.
@@ -59,10 +68,11 @@ void nr_csirs_blind_rt_discovery_init(void)
 {
   pthread_mutexattr_t attr;
   if(pthread_mutexattr_init(&attr)) return;
-  if(!pthread_mutexattr_setprotocol(&attr,PTHREAD_PRIO_INHERIT)
-      && !pthread_mutex_destroy(&g_csirs_state_lock)) {
-    if(pthread_mutex_init(&g_csirs_state_lock,&attr)) pthread_mutex_init(&g_csirs_state_lock,NULL);
-  }
+  if(!pthread_mutexattr_setprotocol(&attr,PTHREAD_PRIO_INHERIT))
+    for(int cell=0;cell<NR_CELL_MAX;++cell) /* one-time (pthread_once), before any cell thread uses its lock */
+      if(!pthread_mutex_destroy(&g_csirs_state_lock_cells[cell])) {
+        if(pthread_mutex_init(&g_csirs_state_lock_cells[cell],&attr)) pthread_mutex_init(&g_csirs_state_lock_cells[cell],NULL);
+      }
   pthread_mutexattr_destroy(&attr);
 }
 static void discovery_publish(void);
@@ -72,7 +82,8 @@ static void discovery_mark_admitted(int);
  *   Used with __attribute__((cleanup)) in nr_csirs_blind_rt_slot() and nr_csirs_blind_rt_rate_match_all(). A NULL lock is a no-op.
  */
 static void csirs_unlock(pthread_mutex_t **lock) { if (*lock) { discovery_publish(); pthread_mutex_unlock(*lock); } }
-static int g_reconf = -1;
+NR_CELL_STATIC_INIT(int, g_reconf, -1);
+#define g_reconf NR_CELL_REF(g_reconf)
 static uint64_t now_us(void)
 {
   struct timespec ts;
@@ -110,19 +121,33 @@ static void map_changed(void)
 #define NR_CSIRS_BLIND_RT_MAX_PORTS 32
 #define NR_CSIRS_BLIND_RT_ALL_PORTS 32
 
-static nr_csirs_blind_state_t g_st;
-static nr_csirs_blind_state_t g_zp;      /* zero-power search over the same candidates */
+NR_CELL_STATIC(nr_csirs_blind_state_t, g_st);
+#define g_st NR_CELL_REF(g_st)
+NR_CELL_STATIC(nr_csirs_blind_state_t, g_zp); /* zero-power search over the same candidates */
+#define g_zp NR_CELL_REF(g_zp)
 static void fill_pdu(const nr_csirs_candidate_t *c, uint8_t csi_type, fapi_nr_dl_config_csirs_pdu_rel15_t *out);
-static int g_disc = -1;
-static float g_disc_strength[NR_CSIRS_BLIND_MAX_CAND];
-static uint8_t g_disc_probe[NR_CSIRS_BLIND_MAX_CAND][2];
-static uint32_t g_disc_visits[NR_CSIRS_BLIND_MAX_CAND][2];
-static uint32_t g_disc_scored_slot[NR_CSIRS_BLIND_MAX_CAND];
-static struct {
+NR_CELL_STATIC_INIT(int, g_disc, -1);
+#define g_disc NR_CELL_REF(g_disc)
+typedef float g_disc_strength_t[NR_CSIRS_BLIND_MAX_CAND];
+NR_CELL_STATIC(g_disc_strength_t, g_disc_strength);
+#define g_disc_strength NR_CELL_REF(g_disc_strength)
+typedef uint8_t g_disc_probe_t[NR_CSIRS_BLIND_MAX_CAND][2];
+NR_CELL_STATIC(g_disc_probe_t, g_disc_probe);
+#define g_disc_probe NR_CELL_REF(g_disc_probe)
+typedef uint32_t g_disc_visits_t[NR_CSIRS_BLIND_MAX_CAND][2];
+NR_CELL_STATIC(g_disc_visits_t, g_disc_visits);
+#define g_disc_visits NR_CELL_REF(g_disc_visits)
+typedef uint32_t g_disc_scored_slot_t[NR_CSIRS_BLIND_MAX_CAND];
+NR_CELL_STATIC(g_disc_scored_slot_t, g_disc_scored_slot);
+#define g_disc_scored_slot NR_CELL_REF(g_disc_scored_slot)
+typedef struct {
   nr_csirs_candidate_t candidate;
   uint16_t period, off[2];
   uint8_t n_off;
-} g_disc_export[NR_CSIRS_BLIND_MAX_CAND];
+} g_disc_export_ent_t;
+typedef g_disc_export_ent_t g_disc_export_t[NR_CSIRS_BLIND_MAX_CAND];
+NR_CELL_STATIC(g_disc_export_t, g_disc_export);
+#define g_disc_export NR_CELL_REF(g_disc_export)
 
 /* nzp_observer_score: re-scores one confirmed NZP CSI-RS occasion and reports whether the observer revoked it (reconfiguration detection).
  *   Only active with reconfiguration (g_reconf). Revocation removes the dynamic CSI-RS from the monitor; inconclusive scores (between the noise and confirmation bars) do not revoke.
@@ -158,14 +183,25 @@ static bool nzp_observer_score(int idx, uint32_t slot, double rho)
         }
   return false;
 }
-static double   g_zp_null[64];
-static int      g_zp_null_n, g_zp_null_w;
-static int      g_on = -1;      /* -1 = not read, 0 = off, 1 = on */
-static int      g_conf_logged;   /* g_st confirmations already logged */
+typedef double g_zp_null_t[64];
+NR_CELL_STATIC(g_zp_null_t, g_zp_null);
+#define g_zp_null NR_CELL_REF(g_zp_null)
+NR_CELL_STATIC(int, g_zp_null_n);
+#define g_zp_null_n NR_CELL_REF(g_zp_null_n)
+NR_CELL_STATIC(int, g_zp_null_w);
+#define g_zp_null_w NR_CELL_REF(g_zp_null_w)
+NR_CELL_STATIC_INIT(int, g_on, -1); /* -1 = not read, 0 = off, 1 = on */
+#define g_on NR_CELL_REF(g_on)
+NR_CELL_STATIC(int, g_conf_logged); /* g_st confirmations already logged */
+#define g_conf_logged NR_CELL_REF(g_conf_logged)
 /* Candidate-indexed counters survive export-bank compaction. Diagnostic details are capped;
  * every confirmation still carries its complete bounded epoch history in the normal log. */
-static uint32_t g_zp_logged[NR_CSIRS_BLIND_MAX_CAND];
-static uint8_t g_zp_events[NR_CSIRS_BLIND_MAX_CAND];
+typedef uint32_t g_zp_logged_t[NR_CSIRS_BLIND_MAX_CAND];
+NR_CELL_STATIC(g_zp_logged_t, g_zp_logged);
+#define g_zp_logged NR_CELL_REF(g_zp_logged)
+typedef uint8_t g_zp_events_t[NR_CSIRS_BLIND_MAX_CAND];
+NR_CELL_STATIC(g_zp_events_t, g_zp_events);
+#define g_zp_events NR_CELL_REF(g_zp_events)
 #define ZP_EVENT_LIMIT 32
 /* Diagnostic lifetime state is indexed by immutable candidate index, never export-bank position.
  * Neither evidence epochs nor export compaction/reset may clear this accounting. */
@@ -177,10 +213,13 @@ static const char *const zp_maint_names[ZPM_OUTCOMES] = {
   "duplicate", "setup_invalid", "rho_unscorable", "score_invalid",
   "population_unknown", "population_suppressed", "qualified_hole", "occupied"
 };
-static struct {
+typedef struct {
   uint64_t scheduled, reached, outcome[ZPM_OUTCOMES];
   uint32_t first_slot, last_slot;
-} g_zp_maint[NR_CSIRS_BLIND_MAX_CAND];
+} g_zp_maint_ent_t;
+typedef g_zp_maint_ent_t g_zp_maint_t[NR_CSIRS_BLIND_MAX_CAND];
+NR_CELL_STATIC(g_zp_maint_t, g_zp_maint); /* 90 KB per cell, BSS: also read by diagnostics of any slot (no fence-gated heap) */
+#define g_zp_maint NR_CELL_REF(g_zp_maint)
 
 static void zp_maint_summary(int idx)
 {
@@ -240,10 +279,16 @@ static void zp_maint_end(int idx, uint32_t slot, bool duplicate, enum zp_maint_o
 }
 /* Diagnostic only: exact row-2 old-score/new-score disagreement, counted once per candidate
  * and absolute slot. One detailed line per candidate; aggregate uses the existing status cadence. */
-static struct { uint64_t count; uint32_t last_slot; } g_zp_geometry_veto[NR_CSIRS_BLIND_MAX_CAND];
-static uint64_t g_zp_geometry_veto_total;
-static int      g_armed;
-static uint64_t g_slots;
+typedef struct { uint64_t count; uint32_t last_slot; } g_zp_geometry_veto_ent_t;
+typedef g_zp_geometry_veto_ent_t g_zp_geometry_veto_t[NR_CSIRS_BLIND_MAX_CAND];
+NR_CELL_STATIC(g_zp_geometry_veto_t, g_zp_geometry_veto);
+#define g_zp_geometry_veto NR_CELL_REF(g_zp_geometry_veto)
+NR_CELL_STATIC(uint64_t, g_zp_geometry_veto_total);
+#define g_zp_geometry_veto_total NR_CELL_REF(g_zp_geometry_veto_total)
+NR_CELL_STATIC(int, g_armed);
+#define g_armed NR_CELL_REF(g_armed)
+NR_CELL_STATIC(uint64_t, g_slots);
+#define g_slots NR_CELL_REF(g_slots)
 
 /* discovery_empty_state: resets one CSI-RS search state (candidate population, confirmations, counters) to empty; confirmed and pinned indices are set to -1.
  *   Caller: nr_csirs_blind_rt_add_discovered(), nr_csirs_blind_rt_discovery_reset() and nr_csirs_blind_rt_slot() (first arm, discovery mode).
@@ -474,8 +519,13 @@ void nr_csirs_blind_rt_discovery_reset(void)
  * threshold would have to be recalibrated per deployment for occupancy, gain and bandwidth --
  * exactly the kind of constant this project replaces with a measured one. */
 #define NULLWIN 64
-static double   g_null[NULLWIN];
-static int      g_null_n, g_null_w;
+typedef double g_null_t[NULLWIN];
+NR_CELL_STATIC(g_null_t, g_null);
+#define g_null NR_CELL_REF(g_null)
+NR_CELL_STATIC(int, g_null_n);
+#define g_null_n NR_CELL_REF(g_null_n)
+NR_CELL_STATIC(int, g_null_w);
+#define g_null_w NR_CELL_REF(g_null_w)
 
 /* DECODED-GRANT ZP EVIDENCE (G5 review of 060edd290c, Important 1). The passive PDSCH decode consumers score
  * every ZP entry they were handed against the grant's own PRBs (nr_pdsch_passive_decode.c) and post it here.
@@ -483,16 +533,26 @@ static int      g_null_n, g_null_w;
  * nr_csirs_blind_rt_slot(), the only writer of g_zp. ponytail: bounded queue, overflow counted and dropped --
  * one decoded grant per ZP occasion is enough and the drain runs every slot. */
 #define ZP_GRANT_QUEUE 64
-static pthread_mutex_t g_zp_grant_lock = PTHREAD_MUTEX_INITIALIZER;
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_zp_grant_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_zp_grant_lock NR_CELL_REF(g_zp_grant_lock)
 typedef struct {
   uint32_t slot;
   fapi_nr_dl_config_csirs_pdu_rel15_t zp;
   double score;
 } zp_grant_ev_t;
-static zp_grant_ev_t g_zp_grant_q[ZP_GRANT_QUEUE];
-static int g_zp_grant_qn;
-static uint64_t g_zp_grant_dropped; /* written under g_zp_grant_lock */
-static uint64_t g_zp_grant_dropped_seen, g_zp_grant_applied, g_zp_grant_contradictions; /* scan thread only */
+typedef zp_grant_ev_t g_zp_grant_q_t[ZP_GRANT_QUEUE];
+NR_CELL_STATIC(g_zp_grant_q_t, g_zp_grant_q);
+#define g_zp_grant_q NR_CELL_REF(g_zp_grant_q)
+NR_CELL_STATIC(int, g_zp_grant_qn);
+#define g_zp_grant_qn NR_CELL_REF(g_zp_grant_qn)
+NR_CELL_STATIC(uint64_t, g_zp_grant_dropped); /* written under g_zp_grant_lock */
+#define g_zp_grant_dropped NR_CELL_REF(g_zp_grant_dropped)
+NR_CELL_STATIC(uint64_t, g_zp_grant_dropped_seen); /* scan thread only */
+#define g_zp_grant_dropped_seen NR_CELL_REF(g_zp_grant_dropped_seen)
+NR_CELL_STATIC(uint64_t, g_zp_grant_applied);
+#define g_zp_grant_applied NR_CELL_REF(g_zp_grant_applied)
+NR_CELL_STATIC(uint64_t, g_zp_grant_contradictions);
+#define g_zp_grant_contradictions NR_CELL_REF(g_zp_grant_contradictions)
 
 void nr_csirs_blind_rt_zp_grant_evidence(uint32_t pdsch_absolute_slot, const fapi_nr_dl_config_csirs_pdu_rel15_t *zp,
                                          double score)
@@ -787,7 +847,8 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   int occurring[NR_CSIRS_BLIND_DISC_MAX_CONF];
   const int n = nr_csirs_blind_zp_due(&g_zp, absolute_slot, occurring, NR_CSIRS_BLIND_MAX_CONF);
   /* Preserve the T14 four-score admission rotation on the worker. */
-  static unsigned s_conf_rot;
+  NR_CELL_STATIC(unsigned, s_conf_rot);
+#define s_conf_rot NR_CELL_REF(s_conf_rot)
   int budget = g_disc > 0 ? 4 : 1 << 30;
   const unsigned rot0 = g_disc > 0 ? s_conf_rot++ : 0;
   for (int kk = 0; kk < n && budget > 0; kk++) {
