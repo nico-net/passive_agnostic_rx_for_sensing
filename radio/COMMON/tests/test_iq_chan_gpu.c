@@ -146,6 +146,70 @@ static int test_in_chan(void)
   return 0;
 }
 
+/* catch-up batching: 12 blocks already waiting are taken in fewer runs (8 + 4 here), output equal to block-by-block iq_ddc within 1 LSB, timestamps continuous */
+static int test_batch(void)
+{
+  const double rate = 245.76e6;
+  const unsigned NCH = 2;
+  const int block = 65536, nb = 12;
+  shm_iq_ring_t in;
+  CHECK(shm_iq_ring_create(&in, SHM_IQ_BACKING_ANON, NULL, NCH, 1 << 21, rate, 3.72e9, 2) == 0, "ring");
+  iq_chan_cfg_t cfg = {.in = &in, .block = block, .backend = A->backend};
+  iq_chan_t *c = iq_chan_create(&cfg);
+  CHECK(c, "create");
+  const int dec[2] = {2, 8};
+  const double sh[2] = {-39.99e6, 39.99e6};
+  shm_iq_ring_t v[2];
+  iq_ddc_t ref[2][2];
+  for (int k = 0; k < 2; ++k) {
+    iq_chan_entry_t e = {.shift_hz = sh[k], .decim = dec[k], .passband_hz = 0.4 * rate / dec[k]};
+    const int id = iq_chan_cell_add(c, &e);
+    CHECK(id >= 0, "add");
+    CHECK(shm_iq_ring_view(&v[k], iq_chan_cell_ring(c, id)) == 0, "view");
+    for (unsigned a = 0; a < NCH; ++a) { iq_ddc_init(&ref[k][a], rate, dec[k], 0.4 * rate / dec[k], IQ_CHAN_DEFAULT_ATTEN_DB); iq_ddc_set_shift(&ref[k][a], sh[k]); }
+  }
+  int16_t *all[NCH];
+  uint32_t s = 7;
+  for (unsigned a = 0; a < NCH; ++a) {
+    all[a] = malloc((size_t)block * nb * 4);
+    for (int i = 0; i < 2 * block * nb; ++i) { s = s * 1664525u + 1013904223u; all[a][i] = (int16_t)((int)(s >> 20) - 2048); }
+  }
+  iq_chan_seek(c, 0);
+  for (int b = 0; b < nb; ++b) {
+    void *bufs[NCH];
+    for (unsigned a = 0; a < NCH; ++a) bufs[a] = all[a] + 2 * (size_t)b * block;
+    shm_iq_ring_write(&in, 500 + (int64_t)b * block, bufs, block, NCH);
+  }
+  int runs = 0;
+  while (iq_chan_step(c) == 1) runs++;
+  iq_chan_stats_t st;
+  iq_chan_stats(c, &st);
+  CHECK(st.in_samples == (uint64_t)nb * block, "consumed %llu", (unsigned long long)st.in_samples);
+  long maxd = 0, nd = 0, tot = 0;
+  for (int k = 0; k < 2; ++k) {
+    const int no = block * nb / dec[k];
+    int16_t *want = malloc((size_t)no * 4), *got[NCH];
+    for (unsigned a = 0; a < NCH; ++a) got[a] = malloc((size_t)no * 4);
+    CHECK(shm_iq_ring_copy(&v[k], 0, no, NCH, got) == 0, "copy");
+    CHECK(atomic_load(&v[k].hdr->gaps) == 0, "no gap");
+    for (unsigned a = 0; a < NCH; ++a) {
+      for (int b = 0; b < nb; ++b) iq_ddc_process(&ref[k][a], all[a] + 2 * (size_t)b * block, block, want + 2 * (size_t)b * (block / dec[k]));
+      for (int i = 0; i < 2 * no; ++i) { const long d = labs((long)got[a][i] - want[i]); maxd = d > maxd ? d : maxd; nd += d != 0; tot++; }
+      free(got[a]); iq_ddc_free(&ref[k][a]);
+    }
+    free(want);
+    shm_iq_ring_detach(&v[k]);
+  }
+  printf("BATCH 12 waiting blocks in %d runs (catch-up), 2 cells decim 2/8 at -/+39.99 MHz, 2 ch, 245.76 MS/s: max_abs_diff=%ld LSB differing=%ld/%ld\n", runs, maxd, nd, tot);
+  if (A->tier_shared()) CHECK(runs < nb && runs >= 2, "batched (%d runs)", runs);
+  else CHECK(runs == nb, "DISCRETE: copied blocks, one per run (%d runs)", runs); /* batching needs the in-place read */
+  CHECK(maxd <= 1 && nd * 1000 <= tot, "batch equality");
+  for (unsigned a = 0; a < NCH; ++a) free(all[a]);
+  iq_chan_destroy(c);
+  shm_iq_ring_detach(&in);
+  return 0;
+}
+
 /* a NULL output (paused slot) is not computed: its phase does not advance, so after "resume" (reset) it equals a fresh filter */
 static int test_paused_slot(void)
 {
@@ -326,6 +390,7 @@ int main(int argc, char **argv)
   test_selfcheck(6160);
   test_selfcheck(1040);
   test_in_chan();
+  test_batch();
   test_paused_slot();
   test_ledger();
   test_lease();

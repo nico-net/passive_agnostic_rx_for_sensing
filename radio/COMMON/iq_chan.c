@@ -420,6 +420,7 @@ struct iq_chan {
   unsigned nch;
   double in_rate;
   int block;
+  int batch; /* G5: blocks per run() at most (the backend's max_batch, clipped to an eighth of the ring); 1 = one block */
   int16_t *raw[SHM_IQ_MAX_CH];
   int16_t *outp[IQ_CHAN_MAX_CELLS * SHM_IQ_MAX_CH];
   cell_t cell[IQ_CHAN_MAX_CELLS];
@@ -466,11 +467,15 @@ iq_chan_t *iq_chan_create(const iq_chan_cfg_t *cfg)
   }
   if (c->block < ALIGN_SAMPLES || c->block % ALIGN_SAMPLES || (uint64_t)c->block > h->capacity / 2) { errno = EINVAL; goto fail; }
   c->be = cfg->backend ? cfg->backend : iq_chan_backend_select(cfg->load_hint);
-  const iq_chan_geom_t g = {.in_rate = c->in_rate, .nch = c->nch, .block = c->block};
+  c->batch = 1;
+  while (c->batch * 2 <= c->be->max_batch && (uint64_t)c->block * (uint64_t)(c->batch * 2) <= h->capacity / 8) c->batch *= 2;
+  iq_chan_geom_t g = {.in_rate = c->in_rate, .nch = c->nch, .block = c->block * c->batch};
   c->ctx = c->be->create(&g);
   if (!c->ctx && !cfg->backend && c->be != &iq_chan_backend_cpu) { /* G5: a selected (not named) backend that cannot start: the CPU backend */
     fprintf(stderr, "IQ_CHAN_WARN backend %s could not be created: cpu backend\n", c->be->name);
     c->be = &iq_chan_backend_cpu;
+    c->batch = 1;
+    g.block = c->block;
     c->ctx = c->be->create(&g);
   }
   if (!c->ctx) { errno = ENOMEM; goto fail; }
@@ -607,7 +612,7 @@ int iq_chan_cell_add(iq_chan_t *c, const iq_chan_entry_t *e)
   /* narrow ring: sized from the budget (the host-RAM plan), never fewer than 8 blocks so a reader that lags a few blocks is not an overrun */
   const double rate_out = c->in_rate / e->decim;
   uint64_t need = 1;
-  while (need < 8 * (uint64_t)(c->block / e->decim)) need <<= 1;
+  while (need < 8 * (uint64_t)(c->block * c->batch / e->decim)) need <<= 1; /* G5: a batched run writes batch blocks at once */
   const double tms = c->cfg.out_target_ms > 0 ? c->cfg.out_target_ms : SHM_IQ_RING_NARROW_TARGET_MS;
   uint64_t cap = shm_iq_ring_plan_capacity(c->budget_left, rate_out, c->nch, 1, tms, SHM_IQ_RING_NARROW_FLOOR_MS);
   if (cap < need) cap = (c->budget_left == SIZE_MAX || shm_iq_ring_bytes(c->nch, need) <= c->budget_left) ? need : 0;
@@ -620,7 +625,7 @@ int iq_chan_cell_add(iq_chan_t *c, const iq_chan_entry_t *e)
   shm_iq_ring_prefault(&x->out); /* page faults belong to start-up, not to the block loop */
   x->ring_bytes = shm_iq_ring_bytes(c->nch, x->out.hdr->capacity);
   for (unsigned a = 0; a < c->nch; ++a) {
-    x->obuf[a] = alloc_samples((size_t)(c->block / e->decim));
+    x->obuf[a] = alloc_samples((size_t)(c->block * c->batch / e->decim));
     if (!x->obuf[a]) rc = -ENOMEM;
   }
   x->state = rc == -ENOMEM ? NULL : c->be->prepare(c->ctx, &x->e);
@@ -779,8 +784,16 @@ int iq_chan_step(iq_chan_t *c)
   const int16_t *inp[SHM_IQ_MAX_CH];
   int any_pt = 0; /* a zero-shift decim-1 entry publishes the input block itself: it needs the copy (the ring slot may be rewritten after the check) */
   for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s) any_pt |= c->cell[s].used && !c->cell[s].paused && c->cell[s].passthrough;
-  const int direct = !any_pt && c->be->direct_in && c->be->direct_in(c->ctx) && ring_direct(&c->in, c->pos, c->block, c->nch, inp) == 0;
-  int r = direct ? 0 : shm_iq_ring_copy(&c->in, c->pos, c->block, c->nch, c->raw);
+  int n = c->block;
+  int direct = !any_pt && c->be->direct_in && c->be->direct_in(c->ctx);
+  if (direct && c->batch > 1) { /* G5 catch-up: as many whole blocks (a power of two, <= batch) as are already waiting, read in place */
+    const uint64_t avail = atomic_load_explicit(&h->head, memory_order_acquire) - c->pos;
+    while (n * 2 <= c->block * c->batch && (uint64_t)n * 2 <= avail) n *= 2;
+    while (n > c->block && ring_direct(&c->in, c->pos, n, c->nch, inp) == 2) n /= 2; /* the batch would wrap the ring: fewer blocks */
+  }
+  direct = direct && ring_direct(&c->in, c->pos, n, c->nch, inp) == 0;
+  if (!direct) n = c->block;
+  int r = direct ? 0 : shm_iq_ring_copy(&c->in, c->pos, n, c->nch, c->raw);
   if (!direct)
     for (unsigned a = 0; a < c->nch; ++a) inp[a] = c->raw[a];
   if (r == 0 && atomic_load(&h->rf_epoch) != c->epoch) return 0; /* retune during the copy: redo with the new shifts (the copied samples are old-tuned) */
@@ -789,7 +802,7 @@ int iq_chan_step(iq_chan_t *c)
     update_max(&c->lag_max, atomic_load(&h->head) - c->pos);
     for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s)
       for (unsigned a = 0; a < c->nch; ++a) c->outp[s * (int)c->nch + (int)a] = c->cell[s].used && !c->cell[s].paused && !c->cell[s].passthrough ? c->cell[s].obuf[a] : NULL;
-    if (c->be->run(c->ctx, inp, c->block, c->outp)) { fprintf(stderr, "IQ_CHAN_ERR backend %s run failed\n", c->be->name); return -1; }
+    if (c->be->run(c->ctx, inp, n, c->outp)) { fprintf(stderr, "IQ_CHAN_ERR backend %s run failed\n", c->be->name); return -1; }
     const uint64_t t1 = now_ns();
     atomic_fetch_add(&c->run_ns, t1 - t0);
     if (direct && !ring_still_valid(&c->in, c->pos)) r = -1; /* overwritten while the backend read it in place: the overrun path below */
@@ -801,14 +814,14 @@ int iq_chan_step(iq_chan_t *c)
       void *bufs[SHM_IQ_MAX_CH];
       for (unsigned a = 0; a < c->nch; ++a) bufs[a] = x->passthrough ? (void *)inp[a] : (void *)x->obuf[a];
       /* output timestamps are (base_tick + ring_pos) / decim, the formula of shm_iq.c */
-      shm_iq_ring_write(&x->out, (int64_t)(((uint64_t)c->base_tick + c->pos) / (uint64_t)x->e.decim), bufs, c->block / x->e.decim, c->nch);
+      shm_iq_ring_write(&x->out, (int64_t)(((uint64_t)c->base_tick + c->pos) / (uint64_t)x->e.decim), bufs, n / x->e.decim, c->nch);
     }
     const uint64_t dt = now_ns() - t0;
-    c->pos += (uint64_t)c->block;
+    c->pos += (uint64_t)n;
     c->seek_pending = 0;
     shm_iq_ring_consumer_update(&c->in, c->in_cons, c->pos);
     atomic_fetch_add(&c->blocks, 1);
-    atomic_fetch_add(&c->in_samples, (uint64_t)c->block);
+    atomic_fetch_add(&c->in_samples, (uint64_t)n);
     atomic_fetch_add(&c->work_ns, dt);
     update_max(&c->work_max_ns, dt);
     return 1;
