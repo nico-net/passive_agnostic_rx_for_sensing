@@ -48,3 +48,24 @@ if(ENABLE_TESTS AND ENABLE_LDPC_CUDA)
   set_tests_properties(test_nr_gpu_pass_geo_discrete PROPERTIES ENVIRONMENT "NR_GPU_PASS_DISCRETE=1;CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_RETURN_CODE 77)
 endif()
 # ---- end G3b ----
+
+# ---- G6 ----
+# Radio -> wideband ring -> in-process channelizer -> per-cell rings: the span/rate planner (iq_span) and the feed (iq_feed) join the in-process IQ library;
+# the receiver links it (the cell rings are registered in its anonymous-ring registry, which the dlopen'd shm_iq device shares through -rdynamic).
+target_sources(mpci_iq PRIVATE ${CMAKE_SOURCE_DIR}/radio/COMMON/iq_span.c ${CMAKE_SOURCE_DIR}/radio/COMMON/iq_feed.c)
+target_link_libraries(nr-uesoftmodem PRIVATE mpci_iq)
+if(ENABLE_TESTS)
+  add_executable(test_iq_span ${CMAKE_SOURCE_DIR}/radio/COMMON/tests/test_iq_span.c ${CMAKE_SOURCE_DIR}/common/utils/nr_cell_inventory.c)
+  target_include_directories(test_iq_span PRIVATE ${CMAKE_SOURCE_DIR}/common/utils ${CMAKE_SOURCE_DIR}/openair1)
+  target_link_libraries(test_iq_span PRIVATE mpci_iq m)
+  add_dependencies(tests test_iq_span)
+  add_test(NAME test_iq_span COMMAND test_iq_span ${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci/inventory/live_tuned_20261023.json)
+  add_executable(test_iq_feed ${CMAKE_SOURCE_DIR}/radio/COMMON/tests/test_iq_feed.c)
+  target_include_directories(test_iq_feed PRIVATE ${CMAKE_SOURCE_DIR}/radio/COMMON ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS)
+  set_target_properties(test_iq_feed PROPERTIES ENABLE_EXPORTS ON)
+  target_link_libraries(test_iq_feed PRIVATE mpci_iq log_headers m dl pthread rt)
+  add_dependencies(test_iq_feed shm_iq)
+  add_dependencies(tests test_iq_feed)
+  add_test(NAME test_iq_feed COMMAND test_iq_feed $<TARGET_FILE:shm_iq>)
+endif()
+# ---- end G6 ----

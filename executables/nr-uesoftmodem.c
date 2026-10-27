@@ -101,6 +101,8 @@ unsigned short config_frames[4] = {2,9,11,13};
 #include "PHY/NR_UE_TRANSPORT/nr_ul_cell_prealloc.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_disc_cell.h"
 #include <math.h>
+#include "radio/COMMON/iq_feed.h"
+#include "radio/COMMON/iq_span.h"
 
 THREAD_STRUCT thread_struct;
 nrUE_params_t nrUE_params = {0};
@@ -241,13 +243,63 @@ static void set_fp_options(int cell_id, int ru_id)
  * IQ ring "nrcell_<inventory id>" through the shm_iq consumer device, its own RT slot thread (decision F2 (a), core = the core plan's
  * rt_cell[k]) and all its threads bound to its cell. No option, no environment variable: no inventory, or an inventory that adds no served
  * cell, is the single-cell receiver, byte for byte (only the MPCI_ADMIT / CORE_PLAN lines are added when an inventory exists).
- * Input: the cells' rings must already be published (configured device "shm_iq": an out-of-process publisher, e.g. the file publisher
- * tests/passive_rx/mpci/mpci_file_pub). The in-process channelizer feed from a radio (C2 iq_chan) is NOT wired here (open item): with a
- * radio device the receiver logs MPCI_INPUT and serves the started cell only. N = 1 keeps the direct radio path (no channelizer hop). */
+ * Input (iq_feed_input_mode): published rings (configured device "shm_iq": an out-of-process publisher, e.g. tests/passive_rx/mpci/mpci_file_pub), or
+ * (G6) a radio: ONE wideband capture whose centre and rate the planner derives from the admitted cells and the device's rate set (radio/COMMON/iq_span.h),
+ * read into an anonymous wideband ring, channelized in process (iq_chan) into one ring "nrcell_<id>" per cell (cell 0 too) - see the G6 block below.
+ * rfsim / offline replay with several cells: MPCI_INPUT, the started cell only. N = 1 keeps the direct radio path (no channelizer hop, no G6 code runs). */
 static nr_cell_life_t g_cells;
 static int g_ncells = 1; /* 1: the single-cell receiver; every N = 1 path below is the code of before */
 static nr_cell_inventory_watch_t g_inv_watch;
 static char g_uectx_path[PATH_MAX + 32]; /* cell 0's uectx path: cells k > 0 use nr_cell_path(k, ...) */
+
+/* ================================================================ G6: wideband capture through the in-process channelizer ================================
+ * Only when several cells are admitted and the input is a radio (g_feed). Order in main(): RU 0 becomes a ring consumer like the other cells
+ * (mpci_feed_rings_for_rus); after the per-cell frame parameters: the planner's provisional capture (no device rate set yet), the radio is loaded on an RT
+ * thread (as the RU start) and its driver re-plans with the device's own rate set (nr_radio_wide_plan, called back by usrp_lib); the radio ring plan
+ * (host RAM) at the capture rate, then the wideband ring and one channelizer entry per cell (served: running; outside the capture: created paused and
+ * logged unserved); after the RX fence: memory locked, radio started, reader + channelizer threads; then the cells' ring RUs start as in A8.
+ * At run time: a retired cell's entry is paused (the radio never stops), a re-admitted cell is resumed when it still fits the capture (no radio retune
+ * in G6: a cell outside it is logged and stays unserved); MPCI_FEED every 10 s (radio reads/gaps/frozen stamps, channelizer overruns and threads,
+ * per-cell ring overruns / drops / lag). */
+#define MPCI_FEED_RING "nrcell" /* cell rings are "nrcell_<inventory id>": the names A8's ring RUs read */
+static int g_feed;                                   /* 1: G6 path active */
+static iq_span_cell_t g_feed_cells[NR_CELL_MAX];
+static char g_feed_ids[NR_CELL_MAX][NR_INV_ID_MAX];
+static iq_span_dev_t g_feed_dev;                     /* the device's rate set as its driver reported it (n_ranges 0: not reported) */
+static iq_span_plan_t g_feed_plan;
+static int g_feed_wanted;                            /* a plan is pending for the radio driver's callback */
+static iq_feed_t *g_feed_obj;
+static int g_feed_entry[NR_CELL_MAX];
+
+/* the radio driver's callbacks (usrp_lib usrp_wide_plan, found with dlsym; exported by -rdynamic) */
+__attribute__((visibility("default"))) int nr_radio_wide_wanted(void) { return g_feed_wanted; }
+__attribute__((visibility("default"))) int nr_radio_wide_plan(openair0_config_t *cfg, const double *lo, const double *hi, const double *step, int n, double analog_bw_hz,
+                                                             int max_rx)
+{
+  if (!g_feed_wanted || !cfg)
+    return 0;
+  iq_span_dev_t d;
+  memset(&d, 0, sizeof(d));
+  for (int i = 0; i < n && i < IQ_SPAN_MAX_RANGES; i++)
+    d.range[d.n_ranges++] = (iq_rate_range_t){lo[i], hi[i], step[i]};
+  d.analog_bw_hz = analog_bw_hz;
+  d.max_rx = max_rx > 0 ? (unsigned)max_rx : 0;
+  if (d.n_ranges == 0) {
+    LOG_E(PHY, "SENSING: MPCI_SPAN the radio reports no usable rate: the capture cannot be planned\n");
+    return -1;
+  }
+  iq_span_plan_t p;
+  if (iq_span_plan(&d, g_feed_cells, g_ncells, &p) <= 0) {
+    LOG_E(PHY, "SENSING: MPCI_SPAN the radio cannot capture the started cell (reason %s)\n", iq_span_reason_name(p.cell[0].reason));
+    return -1;
+  }
+  g_feed_dev = d;
+  g_feed_plan = p;
+  cfg->sample_rate = p.rate;
+  for (int c = 0; c < cfg->rx_num_channels && c < 8; c++)
+    cfg->rx_freq[c] = p.centre_hz;
+  return 1;
+}
 
 static const char *mpci_argv_val(int argc, char **argv, const char *opt)
 {
@@ -358,10 +410,15 @@ static void mpci_check_input(void)
   char *devname = NULL;
   paramdef_t dp = {"name", NULL, 0, .strptr = &devname, .defstrval = "", TYPE_STRING, 0};
   config_get(config_get_if(), &dp, 1, "device");
-  const bool rings = devname && !strcmp(devname, "shm_iq");
-  if (!rings || IS_SOFTMODEM_RFSIM || getenv("ISAC_PASSIVE_REPLAY_INPUT") || getenv("ISAC_PASSIVE_REPLAY_CAPTURE")) {
-    LOG_W(PHY, "SENSING: MPCI_INPUT device=%s: cells beyond the started one need published rings (device shm_iq); the in-process channelizer feed "
-          "from a radio is not wired (A8 open item): serving the started cell only (%d admitted)\n", devname && *devname ? devname : "default", g_ncells);
+  const int sim = IS_SOFTMODEM_RFSIM || getenv("ISAC_PASSIVE_REPLAY_INPUT") || getenv("ISAC_PASSIVE_REPLAY_CAPTURE");
+  const iq_feed_mode_t m = iq_feed_input_mode(g_ncells, devname, sim);
+  if (m == IQ_FEED_WIDEBAND) { /* G6 */
+    g_feed = 1;
+    LOG_I(PHY, "SENSING: MPCI_INPUT device=%s: %d cells from one wideband capture through the in-process channelizer\n", devname && *devname ? devname : "default",
+          g_ncells);
+  } else if (m != IQ_FEED_RINGS) {
+    LOG_W(PHY, "SENSING: MPCI_INPUT device=%s: rfsim / offline replay input carries one cell: serving the started cell only (%d admitted)\n",
+          devname && *devname ? devname : "default", g_ncells);
     g_ncells = 1;
   }
 }
@@ -396,6 +453,174 @@ static void mpci_add_cell(int k)
   AssertFatal(id == k, "MPCI cell %d: RU slot %d\n", k, id);
   LOG_I(PHY, "SENSING: MPCI_CELL_SLOT cell=%d id=%s pci=%d centre_hz=%.0f n_rb=%d ssb=%d cfo_hz=%.0f nb_rx=%u ring=/%s\n", k, s->id, s->desc.pci,
         s->desc.centre_hz, c.N_RB_DL, c.ssb_start, s->desc.cfo_hz, ru.nb_rx, ring);
+}
+
+/* G6: every cell's RU (cell 0's too) reads its ring "nrcell_<id>"; the configured radio becomes the capture device */
+static void mpci_feed_rings_for_rus(void)
+{
+  if (!g_feed)
+    return;
+  const nr_mgr_slot_t *s0 = nr_cell_mgr_slot(&g_cells.mgr, 0);
+  char ring[NR_INV_ID_MAX + 8];
+  snprintf(ring, sizeof(ring), MPCI_FEED_RING "_%s", s0 && s0->id[0] ? s0->id : NR_CELL_LIFE_PRIMARY_ID);
+  AssertFatal(nrue_ru_make_ring(0, ring) == 0, "MPCI feed: RU 0 cannot become a ring consumer\n");
+}
+
+typedef struct { int rc; } mpci_feed_thr_t;
+static void *mpci_feed_load_thread(void *arg)
+{
+  ((mpci_feed_thr_t *)arg)->rc = nrue_feed_load();
+  return NULL;
+}
+static void *mpci_feed_start_thread(void *arg)
+{
+  ((mpci_feed_thr_t *)arg)->rc = nrue_feed_start();
+  return NULL;
+}
+/* run fn on a temporary RT thread placed like the RU start thread (UHD control threads inherit it) */
+static int mpci_feed_on_rt(void *(*fn)(void *), const char *name)
+{
+  mpci_feed_thr_t r = {.rc = -1};
+  pthread_t t;
+  threadCreate(&t, fn, &r, (char *)name, nr_core_plan_cpu(NR_CP_UHD, 0, -1), OAI_PRIORITY_RT_MAX);
+  pthread_join(t, NULL);
+  return r.rc;
+}
+static void mpci_feed_fail(const char *why)
+{
+  LOG_E(HW, "SENSING: MPCI_FEED %s; receiver exiting before RX\n", why);
+  nr_shutdown_request(EXIT_FAILURE);
+  nr_shutdown_finish();
+}
+
+/* after the per-cell frame parameters: the cells as the planner sees them, the provisional capture, the radio loaded (its driver re-plans) */
+static void mpci_feed_open(void)
+{
+  if (!g_feed)
+    return;
+  for (int k = 0; k < g_ncells; k++) {
+    const NR_DL_FRAME_PARMS *fp = nrue_get_cell_fp(k);
+    const nr_mgr_slot_t *sl = nr_cell_mgr_slot(&g_cells.mgr, k);
+    snprintf(g_feed_ids[k], sizeof(g_feed_ids[k]), "%s", sl && sl->id[0] ? sl->id : NR_CELL_LIFE_PRIMARY_ID);
+    g_feed_cells[k] = (iq_span_cell_t){.id = g_feed_ids[k], .centre_hz = (double)fp->dl_CarrierFreq, .n_rb = fp->N_RB_DL,
+                                       .scs_hz = 15e3 * (double)(1 << fp->numerology_index), .rate = fp->samples_per_subframe * 1e3,
+                                       .n_rx = (unsigned)fp->nb_antennas_rx};
+  }
+  /* provisional: any rate (a device whose driver does not report its rate set keeps this one; usrp_lib replaces it from the device) */
+  const iq_span_dev_t any = {0};
+  if (iq_span_plan(&any, g_feed_cells, g_ncells, &g_feed_plan) <= 0)
+    mpci_feed_fail("the started cell has no capture geometry");
+  openair0_config_t *cfg = nrue_feed_config(g_feed_plan.rate, g_feed_plan.centre_hz, (int)g_feed_plan.n_rx);
+  if (!cfg)
+    mpci_feed_fail("no radio parameters for the capture device");
+  g_feed_wanted = 1;
+  const int rc = mpci_feed_on_rt(mpci_feed_load_thread, "feed_load");
+  g_feed_wanted = 0;
+  if (rc != 0)
+    mpci_feed_fail("the capture device could not be loaded");
+  if (fabs(nrue_feed_cfg()->sample_rate - g_feed_plan.rate) > 1.0)
+    mpci_feed_fail("the device did not keep the planned capture rate");
+  char line[1536];
+  iq_span_format(&g_feed_plan, g_feed_cells, line, sizeof(line));
+  LOG_I(PHY, "SENSING: %s device_rates=%d analog_mhz=%.1f\n", line, g_feed_dev.n_ranges, g_feed_dev.analog_bw_hz / 1e6);
+  for (int k = 0; k < g_ncells; k++)
+    if (!g_feed_plan.cell[k].served)
+      LOG_W(PHY, "SENSING: MPCI_SPAN cell=%d id=%s unserved reason=%s: outside this capture (no radio retune); its slot waits on a paused ring\n", k, g_feed_ids[k],
+            iq_span_reason_name(g_feed_plan.cell[k].reason));
+}
+
+/* the bytes per ms of the radio's own decoupled ring at the capture (plan_usrp_ring) */
+static size_t mpci_feed_usrp_per_ms(void) { return (size_t)llround(g_feed_plan.rate / 1000.0) * g_feed_plan.n_rx * sizeof(int32_t); }
+
+/* the wideband ring (host-RAM plan: half of the headroom left after the radio ring, at most the 1 s target, never below the 100 ms floor) and the cell entries */
+static void mpci_feed_rings(void)
+{
+  if (!g_feed)
+    return;
+  const size_t hr = nr_host_membudget_headroom();
+  const size_t share = hr == SIZE_MAX ? SIZE_MAX : hr / 2;
+  const uint64_t cap = shm_iq_ring_plan_capacity(share, g_feed_plan.rate, g_feed_plan.n_rx, 1, SHM_IQ_RING_WIDE_TARGET_MS, SHM_IQ_RING_WIDE_FLOOR_MS);
+  if (!cap) {
+    char hm[768];
+    nr_host_membudget_format(hm, sizeof(hm));
+    LOG_E(HW, "SENSING: HOST_MEM REFUSE: the wideband ring floor (%d ms at %.2f MS/s x %u) does not fit the host budget (%s)\n", SHM_IQ_RING_WIDE_FLOOR_MS,
+          g_feed_plan.rate / 1e6, g_feed_plan.n_rx, hm);
+    printf("SENSING: HOST_MEM PLAN verdict=REFUSE wide_ring %s\n", hm);
+    fflush(stdout);
+    logTerm();
+    _exit(7);
+  }
+  const size_t wide = shm_iq_ring_bytes(g_feed_plan.n_rx, cap);
+  const size_t narrow = share == SIZE_MAX ? 0 : share - wide;
+  iq_chan_load_t load = {.in_rate = g_feed_plan.rate, .nch = g_feed_plan.n_rx};
+  for (int k = 0; k < g_ncells && load.n_cells < IQ_CHAN_MAX_CELLS; k++)
+    if (g_feed_plan.cell[k].served) {
+      load.cell[load.n_cells].decim = g_feed_plan.cell[k].decim;
+      load.cell[load.n_cells].shifted = g_feed_plan.cell[k].shift_hz != 0;
+      load.cell[load.n_cells].passband_hz = g_feed_plan.cell[k].passband_hz;
+      load.n_cells++;
+    }
+  static iq_chan_load_t s_load;
+  s_load = load;
+  const iq_feed_cfg_t fc = {.read = nrue_feed_read, .nch = g_feed_plan.n_rx, .rate = g_feed_plan.rate, .centre_hz = g_feed_plan.centre_hz, .name = MPCI_FEED_RING,
+                            .wide_capacity = cap, .narrow_budget_bytes = narrow, .load_hint = &s_load, .radio_id = nrue_feed_cfg()->sdr_addrs};
+  g_feed_obj = iq_feed_create(&fc);
+  if (!g_feed_obj)
+    mpci_feed_fail("the wideband ring / channelizer could not be created");
+  size_t bytes = wide;
+  for (int k = 0; k < g_ncells; k++) {
+    const iq_span_cell_plan_t *c = &g_feed_plan.cell[k];
+    int decim = c->decim;
+    if (!c->served) { /* paused entry on the cell's own rate when the capture rate makes it, so its RU can attach and wait */
+      const double q = g_feed_plan.rate / g_feed_cells[k].rate;
+      decim = (int)lround(q);
+      if (decim < 1 || decim > 16 || (decim & (decim - 1)) || fabs(q - decim) > 1e-9 * q)
+        mpci_feed_fail("a cell's sample rate is not the capture rate / 2^j: its RU could not even wait on a ring (remove it from the inventory)");
+    }
+    const double pb = c->served ? c->passband_hz : iq_ddc_cell_passband(g_feed_cells[k].n_rb, g_feed_cells[k].scs_hz, g_feed_cells[k].rate, 0);
+    g_feed_entry[k] = iq_feed_cell_add(g_feed_obj, g_feed_ids[k], g_feed_cells[k].centre_hz, decim, pb, !c->served);
+    if (g_feed_entry[k] < 0)
+      mpci_feed_fail("a cell ring does not fit the host-RAM plan");
+    bytes += shm_iq_ring_bytes(g_feed_plan.n_rx, iq_feed_cell_ring(g_feed_obj, g_feed_entry[k])->hdr->capacity);
+  }
+  nr_host_membudget_commit(NR_HOST_MEM_OTHER, bytes, 1.0);
+  LOG_I(HW, "SENSING: HOST_MEM wideband ring %llu samples (%.0f ms, %zu MB) + %d cell rings: %zu MB\n", (unsigned long long)cap, 1e3 * (double)cap / g_feed_plan.rate,
+        wide >> 20, g_ncells, bytes >> 20);
+}
+
+/* after the RX fence: the radio stream, then the reader (pinned to the first pool CPU, RT low) and the channelizer (k derived on the next pool CPUs) */
+static void mpci_feed_start(void)
+{
+  if (!g_feed_obj)
+    return;
+  if (mpci_feed_on_rt(mpci_feed_start_thread, "feed_start") != 0)
+    mpci_feed_fail("the capture device did not start");
+  const nr_core_layout_t *L = nr_core_layout();
+  const int reader = L && L->npool > 0 ? L->pool[0] : -1;
+  const int *cc = L && L->npool > 1 ? L->pool + 1 : NULL;
+  const int ncc = L && L->npool > 1 ? L->npool - 1 : 0;
+  if (iq_feed_start(g_feed_obj, reader, OAI_PRIORITY_RT_LOW, cc, ncc) != 0)
+    mpci_feed_fail("the feed threads did not start");
+  iq_feed_stats_t st;
+  iq_feed_stats(g_feed_obj, &st);
+  LOG_I(PHY, "SENSING: MPCI_FEED started reader_cpu=%d chan_cpus=%d threads=%d needed=%d capacity_msps=%.1f backend=%s\n", reader, ncc, st.chan.threads,
+        st.chan.threads_needed, st.chan.capacity_sps / 1e6, st.chan.backend);
+}
+static void mpci_feed_log(void)
+{
+  if (!g_feed_obj)
+    return;
+  char line[2048];
+  iq_feed_format(g_feed_obj, line, sizeof(line));
+  LOG_I(PHY, "SENSING: %s\n", line);
+}
+/* run time: does the cell of slot k (its current inventory description) fit the running capture? */
+static int mpci_feed_fits(int k, const nr_cell_desc_t *d, iq_span_cell_plan_t *o)
+{
+  iq_span_cell_t c = g_feed_cells[k];
+  if (d && d->centre_hz > 0)
+    c.centre_hz = d->centre_hz;
+  return iq_span_fit(&g_feed_dev, &g_feed_plan, &c, o);
 }
 
 /* per-cell uectx/1 writer of cell k > 0 (cell 0 opens its own in main, unchanged), opened on cell k's bound thread */
@@ -447,6 +672,16 @@ static int mpci_cell_start(void *ctx, int k, const nr_mgr_slot_t *slot, int reac
   if (reactivation) {
     LOG_W(PHY, "SENSING: MPCI_LIFE cell=%d id=%s back in the inventory: its slot thread was kept running (no run-time teardown, A8 open item)\n", k,
           slot ? slot->id : "-");
+    if (g_feed_obj && k < NR_CELL_MAX && g_feed_entry[k] >= 0) { /* G6: re-admission = resume its channelizer entry if it still fits the capture */
+      iq_span_cell_plan_t o;
+      const int same = !slot || fabs(slot->desc.centre_hz - g_feed_cells[k].centre_hz) < 1.0;
+      if (same && mpci_feed_fits(k, slot ? &slot->desc : NULL, &o)) {
+        iq_feed_cell_resume(g_feed_obj, g_feed_entry[k]);
+        LOG_I(PHY, "SENSING: MPCI_FEED cell=%d id=%s resumed (radio not stopped)\n", k, slot ? slot->id : "-");
+      } else
+        LOG_W(PHY, "SENSING: MPCI_SPAN cell=%d id=%s %s: unserved (no radio retune at run time)\n", k, slot ? slot->id : "-",
+              same ? "outside the running capture" : "comes back at another centre than its slot was built for");
+    }
     return 0;
   }
   LOG_I(PHY, "Intializing UE Threads for instance %d ...\n", k);
@@ -458,12 +693,19 @@ static void mpci_cell_retire(void *ctx, int k, const nr_mgr_slot_t *slot)
   (void)ctx;
   LOG_W(PHY, "SENSING: MPCI_LIFE cell=%d id=%s retired by the inventory: its slot thread keeps running (run-time teardown is an A8 open item)\n", k,
         slot ? slot->id : "-");
+  if (g_feed_obj && k < NR_CELL_MAX && g_feed_entry[k] >= 0 && iq_feed_cell_pause(g_feed_obj, g_feed_entry[k]) == 0) /* G6: its channelizer entry stops */
+    LOG_I(PHY, "SENSING: MPCI_FEED cell=%d id=%s paused (radio not stopped)\n", k, slot ? slot->id : "-");
 }
 static void mpci_cell_retune(void *ctx, int k, const nr_cell_mgr_event_t *ev)
 {
   (void)ctx;
   LOG_W(PHY, "SENSING: MPCI_LIFE cell=%d id=%s retune requested centre_hz %.0f -> %.0f cfo_hz %.0f -> %.0f: not applied at run time (A8 open item)\n", k,
         ev->id, ev->prev_centre_hz, ev->desc.centre_hz, ev->prev_cfo_hz, ev->desc.cfo_hz);
+  if (g_feed_obj && k < NR_CELL_MAX) { /* G6: the capture verdict for the new centre (the channelizer entry follows the cell's UE tuning, which is not retuned) */
+    iq_span_cell_plan_t o;
+    const int fits = mpci_feed_fits(k, &ev->desc, &o);
+    LOG_W(PHY, "SENSING: MPCI_SPAN cell=%d id=%s new centre %.0f %s the running capture\n", k, ev->id, ev->desc.centre_hz, fits ? "inside" : "outside (unserved after a retune)");
+  }
 }
 /* the inventory control thread (one owner of the manager): re-reads cells.json once a second, hysteresis tick */
 static void *mpci_control_thread(void *arg)
@@ -475,6 +717,9 @@ static void *mpci_control_thread(void *arg)
     if (r < 0)
       LOG_W(PHY, "SENSING: MPCI_INVENTORY rejected update: %s (previous inventory kept)\n", err);
     nr_cell_life_poll(&g_cells, r == 1 ? &g_inv_watch.inv : NULL, mpci_now_ns());
+    static int s_feed_tick;
+    if (++s_feed_tick % 10 == 0)
+      mpci_feed_log(); /* G6: MPCI_FEED every 10 s */
     for (int i = 0; i < 10 && !oai_exit; i++)
       usleep(100000);
   }
@@ -589,7 +834,8 @@ static void plan_usrp_ring(const NR_DL_FRAME_PARMS *fp)
   const int ms = e ? atoi(e) : 0;
   if (ms <= 0 || ms > 5000 || IS_SOFTMODEM_RFSIM || getenv("ISAC_PASSIVE_REPLAY_INPUT") || getenv("ISAC_PASSIVE_REPLAY_CAPTURE"))
     return;
-  const size_t per_ms = (size_t)fp->samples_per_subframe * fp->nb_antennas_rx * sizeof(int32_t); /* one subframe = 1 ms */
+  /* one subframe = 1 ms; G6: the radio streams the wideband capture, not the cell */
+  const size_t per_ms = g_feed ? mpci_feed_usrp_per_ms() : (size_t)fp->samples_per_subframe * fp->nb_antennas_rx * sizeof(int32_t);
   const long lo = ms < 100 ? ms : 100;
   const long got = nr_host_membudget_size(NR_HOST_MEM_USRP, 50, 0, per_ms, lo, ms);
   if (!got) {
@@ -756,6 +1002,7 @@ int main(int argc, char **argv)
   nrue_set_cell_params(uniqCfg);
   for (int k = 1; k < g_ncells; k++)
     mpci_add_cell(k); /* A8: cell k and its ring-consumer RU */
+  mpci_feed_rings_for_rus(); /* G6: cell 0 reads its ring too; the radio is the capture device */
 
   init_NR_UE(NB_UE_INST,
              get_nrUE_params()->uecap_file,
@@ -899,7 +1146,9 @@ int main(int argc, char **argv)
   PHY_VARS_NR_UE *disc_ue = nrPHY_vars_UE_g[0][0];
   /* Strong reference: the feed reaches the pipeline through a weak symbol, which alone does not
    * pull nr_csirs_disc.o out of the static PHY archive (the hook stayed NULL, zero batches). */
+  mpci_feed_open(); /* G6: capture plan and the radio loaded (its driver re-plans with the device's rate set) */
   plan_usrp_ring(&disc_ue->frame_parms); /* host-RAM budget: the USRP ring is reserved first (the radio needs it), before any module sizes itself */
+  mpci_feed_rings(); /* G6: the wideband ring and the cell rings, next in the host-RAM plan */
   nr_dl_gpu_warmup(disc_ue);
   nr_pdcch_nid_gpu_start(disc_ue->frame_parms.N_RB_DL);
   if (g_ncells > 1) {
@@ -949,11 +1198,16 @@ int main(int argc, char **argv)
   nr_gpu_rx_started(); /* All migrated CUDA allocation/registration ends before RX. */
   if (g_ncells > 1)
     nr_cell_alloc_fence(); /* A8: no cell object is allocated after this (nr_cell.h); N = 1 keeps the lazy first-touch of before */
+  if (g_feed) { /* G6: memory locked before the radio streams, then the capture runs before the cells' ring RUs attach (they wait for its first samples) */
+    lock_memory_to_ram();
+    mpci_feed_start();
+  }
   nrue_init_openair0();
 
 
 
-  lock_memory_to_ram();
+  if (!g_feed)
+    lock_memory_to_ram();
 
   if (IS_SOFTMODEM_DOSCOPE) {
     load_softscope("nr", nrPHY_vars_UE_g[0][0]);
@@ -1024,6 +1278,10 @@ int main(int argc, char **argv)
   nr_shutdown_request(0);
   nr_shutdown_wait_radio();
   nr_shutdown_step("radio_released_before_worker_joins");
+  if (g_feed_obj) { /* G6: the radio is released: the reader has left on its failed read; stop the channelizer, final counters */
+    iq_feed_stop(g_feed_obj);
+    mpci_feed_log();
+  }
 
   if (nrPHY_vars_UE_g) {
     for (int inst = 0; inst < NB_UE_INST; inst++) {

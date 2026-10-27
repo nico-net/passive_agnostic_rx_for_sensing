@@ -111,6 +111,7 @@ typedef struct {
   uint64_t lag_max;                  /* largest backlog (ring head - read position, samples) seen when a block was taken */
   uint64_t step_gap_max_ns;          /* longest time between two iq_chan_step() calls that processed or polled */
   unsigned n_cells;
+  unsigned n_paused;                 /* entries kept but paused (iq_chan_cell_pause) */
   const char *backend;
   int threads, threads_needed;       /* running / needed to keep real time with margin; threads < threads_needed is a shortfall */
   double capacity_sps;               /* measured capacity (samples/s per channel) of the load at start with `threads` threads: the admission input */
@@ -122,6 +123,13 @@ void iq_chan_destroy(iq_chan_t *c);                                  /* stops th
 int iq_chan_cell_add(iq_chan_t *c, const iq_chan_entry_t *e);
 int iq_chan_cell_remove(iq_chan_t *c, int id);
 int iq_chan_cell_retune(iq_chan_t *c, int id, double shift_hz, double centre_hz); /* same decim/passband; resets that entry's history, bumps its ring epoch */
+/* G6: run-time removal / re-admission of a cell without stopping the radio and without allocating (all entries are created before the receiver's RX
+ * fence). pause: the entry stops being computed at the next block boundary, its filters, ring and consumers stay; the ring is marked away (the consumers
+ * wait instead of declaring the producer lost). resume: history reset, ring epoch bumped; the next write is a forward gap (one timestamp jump for the
+ * consumers). Both return 0, -ENOENT (no such entry) or -EINVAL; pausing a paused entry / resuming a running one is a no-op. paused(): 1/0, -1 no entry. */
+int iq_chan_cell_pause(iq_chan_t *c, int id);
+int iq_chan_cell_resume(iq_chan_t *c, int id);
+int iq_chan_cell_paused(const iq_chan_t *c, int id);
 shm_iq_ring_t *iq_chan_cell_ring(iq_chan_t *c, int id);              /* the narrow ring (producer handle); consumers call shm_iq_ring_view() on it */
 /* Position: where reading starts (default: the newest data, aligned to 16). Seek is for replay and tests: reading from index `pos`. */
 void iq_chan_seek(iq_chan_t *c, uint64_t pos);

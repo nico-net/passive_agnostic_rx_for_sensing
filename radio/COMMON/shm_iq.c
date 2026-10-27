@@ -35,6 +35,7 @@ typedef struct {
   char tag[32], ring_name[64];
   uint64_t radio_off;
   uint64_t radio_next_ns;
+  _Atomic int stopping; /* G6: trx_stop_func called (shutdown / RX restart): a waiting read returns -1 instead of waiting for the producer */
 } shm_state;
 
 #define ATTACH_S 30.0
@@ -107,9 +108,19 @@ static int gain(openair0_device_t *d, openair0_config_t *cfg)
 
 static int idle(openair0_device_t *d) { (void)d; return 0; }
 
+/* trx_stop_func: the receiver stops its radios (SIGINT shutdown, RX restart). A consumer of a ring whose producer stops with it would otherwise wait up to
+ * the producer-lost limit in read_iq; it returns -1 at once instead (the receiver's own read path then stops cleanly). start() re-arms it. */
+static int stop(openair0_device_t *d)
+{
+  shm_state *s = d->priv;
+  if (s) atomic_store(&s->stopping, 1);
+  return 0;
+}
+
 static int start(openair0_device_t *d)
 {
   shm_state *s = d->priv;
+  atomic_store(&s->stopping, 0);
   uint64_t h = atomic_load(&s->ring.hdr->head);
   s->pos = h - h % (uint64_t)s->decim; /* live: start at the newest data */
   fprintf(stderr, "SHMIQ_START cell=%s pos=%" PRIu64 "\n", s->tag, s->pos);
@@ -166,6 +177,7 @@ static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
   }
   relay_radio(s, d->openair0_cfg);
   for (;;) {
+    if (atomic_load(&s->stopping)) return -1;
     uint64_t ep = atomic_load(&h->rf_epoch);
     if (ep != s->epoch) { s->epoch = ep; retune(s, d->openair0_cfg); }
     int r = shm_iq_ring_copy(&s->ring, s->pos, m, s->channels, s->raw);
@@ -210,8 +222,10 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
   snprintf(s->tag, sizeof(s->tag), "pid%d", (int)getpid());
   const double attach_s = ATTACH_S;
   const uint64_t t0 = shm_iq_now_ns();
-  /* wait for the producer's ring and its first sample (base_tick is set by the first write) */
-  while (shm_iq_ring_attach(&s->ring, name) != 0 || atomic_load(&s->ring.hdr->head) == 0) {
+  /* wait for the producer's ring and its first sample (base_tick is set by the first write); a ring the producer marked away before its first write (G6: a cell
+   * entry created paused, e.g. outside the capture span) is attached at once: its reads wait until the producer writes */
+  while (shm_iq_ring_attach(&s->ring, name) != 0
+         || (atomic_load(&s->ring.hdr->head) == 0 && !(s->ring.hdr->version >= 2 && atomic_load(&s->ring.hdr->away)))) {
     if (s->ring.hdr) shm_iq_ring_detach(&s->ring);
     AssertFatal(shm_iq_now_ns() - t0 < (uint64_t)(attach_s * 1e9), "SHMIQ no ring /%s after %.0f s\n", name, attach_s);
     usleep(10000);
@@ -238,7 +252,7 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
   d->priv = s; d->openair0_cfg = cfg; d->type = NONE_DEV;
   for (unsigned c = 0; c < s->channels; ++c) cfg->rx_gain_offset[c] = 0;
   cfg->tx_sample_advance = 0;
-  d->trx_start_func = start; d->trx_stop_func = idle;
+  d->trx_start_func = start; d->trx_stop_func = stop;
   d->trx_get_stats_func = idle; d->trx_reset_stats_func = idle;
   d->trx_end_func = finish; d->trx_set_freq_func = tune;
   d->trx_set_gains_func = gain; d->trx_write_func = no_tx;
