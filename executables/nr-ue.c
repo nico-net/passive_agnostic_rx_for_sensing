@@ -301,7 +301,7 @@ static void UE_synch(void *arg) {
         ret = nr_initial_sync(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn);
       }
     } else {
-      extern int64_t nr_initial_sync_capture_start;
+      extern __thread int64_t nr_initial_sync_capture_start;
       nr_initial_sync_capture_start = (int64_t)syncD->capture_end - 2LL * fp->samples_per_frame;
       ret = nr_initial_sync(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn);
       nr_initial_sync_capture_start = -1;
