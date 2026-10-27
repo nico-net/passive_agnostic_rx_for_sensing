@@ -1,7 +1,7 @@
 #!/bin/bash
 # g5_wide_replay.sh: MPCI G5 in-context bench -- ONE nr-uesoftmodem process, TWO cells decoding (Vodafone PCI 415 + TIM PCI 923), file input, no radio.
 #   arm gpu|cpu: the receiver's WIDEBAND path (G6: "radio" -> wideband ring -> in-process channelizer -> cell rings), the "radio" being the shm_iq device
-#               reading a POSIX ring that tests/passive_rx/mpci/mpci_file_pub fills, at real time, from the synthetic 245.76 MS/s x 4 capture made by
+#               reading a POSIX ring that tests/passive_rx/mpci/g5_fast_pub (mpci_file_pub's arguments; mpci_file_pub itself reaches only ~0.23x real time at 245.76 MS/s x 4) fills, at real time, from the synthetic 245.76 MS/s x 4 capture made by
 #               g5_make_wideband.py from the two single-cell day captures (centre 3720 MHz: the plan of the 2026-10-27 OTA, pci415:d2:-39.990,
 #               pci923:d2:+39.990). The configured device is named "shm" with loader shlibversion "_iq" (= libshm_iq.so): any device name but
 #               "shm_iq" is a radio for iq_feed_input_mode, so the receiver takes the wideband path; configuration of the test bed only.
@@ -43,7 +43,7 @@ for kv in "${envs[@]}"; do case "$kv" in ISAC_USRP_*|ISAC_UHD_*|ISAC_RX_RECOVER*
 [ "$arm" = cpu ] && base+=("NR_GPU_PATH_CHAN=cpu")
 export CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps
 exec 9>/tmp/td_measure.lock; flock -x 9
-nice -n 10 "$B/mpci_file_pub" "$SPEED" "$((DUR + 90))" "${PUBSRC[@]}" > "$R/pub.log" 2>&1 &
+nice -n 10 "$B/g5_fast_pub" "$SPEED" "$((DUR + 90))" "${PUBSRC[@]}" > "$R/pub.log" 2>&1 &
 PUB=$!
 trap 'kill -INT $PUB 2>/dev/null || true' EXIT
 for i in $(seq 1 150); do n=$(grep -c "^MPCI_PUB ring=" "$R/pub.log" 2>/dev/null || true); [ "${n:-0}" -ge "${#PUBSRC[@]}" ] && break; sleep 0.2; done

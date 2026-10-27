@@ -100,4 +100,10 @@ if(ENABLE_LDPC_CUDA)
                          SKIP_RETURN_CODE 77)
   endif()
 endif()
+if(ENABLE_TESTS)
+  # in-context bench fixture: real-time file publisher (mpci_file_pub arguments) for 245.76 MS/s x 4 RX
+  add_executable(g5_fast_pub ${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci/g5_fast_pub.c)
+  target_link_libraries(g5_fast_pub PRIVATE mpci_iq m pthread rt)
+  add_dependencies(tests g5_fast_pub)
+endif()
 # ---- end G5 ----
