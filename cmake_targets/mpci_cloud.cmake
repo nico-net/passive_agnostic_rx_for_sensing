@@ -366,3 +366,38 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_core_pool_float COMMAND test_nr_core_pool_float)
 endif()
 # ---- end B5 ----
+
+# ---- DBG2 ----
+# Per-cell CSI-RS search / confirm queue / monitor bank (2-cell replay root cause 1, MPCI-DBG2-20261026.md): two cells with different grids,
+# one thread re-binding and two bound threads; a disable or a confirmed resource of one cell never reaches the other. Plain C (PHY VLAs);
+# the test includes nr_csirs_blind_rt.c (as tests/nr_csirs_blind_rt_test_bridge.c does) and links the same PHY sources as
+# test_nr_csirs_blind_search; LOG (in UTIL) brings nr_cell.c.
+if(ENABLE_TESTS)
+  set(DBG2_TR ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
+  add_executable(test_nr_csirs_cell_iso
+    ${DBG2_TR}/tests/nr_csirs_cell_iso_test.c
+    ${DBG2_TR}/nr_csirs_observer.c
+    ${DBG2_TR}/nr_csirs_monitor.c
+    ${DBG2_TR}/nr_csirs_blind_search.c
+    ${DBG2_TR}/nr_csirs_disc_sweep.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/nr_phy_common/src/nr_phy_common_csirs.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/refsig.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/nr_gen_mod_table.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/MODULATION/nr_modulation.c
+    ${CMAKE_SOURCE_DIR}/common/utils/ds/hashtable.c)
+  target_include_directories(test_nr_csirs_cell_iso PRIVATE ${DBG2_TR} ${DBG2_TR}/tests)
+  target_link_libraries(test_nr_csirs_cell_iso PRIVATE nr_phy_common nr_common UTIL ${CMAKE_DL_LIBS} pthread m)
+  add_dependencies(tests test_nr_csirs_cell_iso)
+  add_test(NAME test_nr_csirs_cell_iso COMMAND test_nr_csirs_cell_iso)
+  # Per-cell PDCCH nID sweep (root cause 2): two cells on the fake device module of test_nr_pdcch_nid_worker (pdcch_nid_fake).
+  if(TARGET pdcch_nid_fake)
+    add_executable(test_nr_pdcch_nid_cells ${DBG2_TR}/tests/nr_pdcch_nid_cells_test.cc)
+    target_include_directories(test_nr_pdcch_nid_cells PRIVATE ${DBG2_TR})
+    target_link_libraries(test_nr_pdcch_nid_cells PRIVATE nr_pdcch_nid_worker m)
+    add_dependencies(test_nr_pdcch_nid_cells pdcch_nid_fake)
+    add_dependencies(tests test_nr_pdcch_nid_cells)
+    add_test(NAME test_nr_pdcch_nid_cells COMMAND test_nr_pdcch_nid_cells)
+    set_tests_properties(test_nr_pdcch_nid_cells PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
+  endif()
+endif()
+# ---- end DBG2 ----

@@ -101,11 +101,11 @@ executables/nr-uesoftmodem.c	247	g_cells	file_static	nr_cell_life_t	PROCESS	A8	A
 executables/nr-uesoftmodem.c	248	g_ncells	file_static	int	PROCESS	A8	A8: number of served cells
 executables/nr-uesoftmodem.c	249	g_inv_watch	file_static	nr_cell_inventory_watch_t	PROCESS	A8	A8: cells.json watcher (one control thread)
 executables/nr-uesoftmodem.c	250	g_uectx_path	file_static	char[PATH_MAX + 32]	PROCESS	A8	A8: cell 0 uectx path; cells k>0 derive theirs with nr_cell_path
-executables/nr-uesoftmodem.c	544	trigger_deregistration::deregistration_sent	func_static	bool	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	555	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
-executables/nr-uesoftmodem.c	568	NB_UE_INST	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	569	uniqCfg	global	configmodule_interface_t *	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	570	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	547	trigger_deregistration::deregistration_sent	func_static	bool	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	558	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
+executables/nr-uesoftmodem.c	571	NB_UE_INST	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	572	uniqCfg	global	configmodule_interface_t *	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	573	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_COLS	global	constexpr uint32_t	CONST	G1	auto
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_ROWS	global	constexpr uint32_t	CONST	G1	auto
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_Z	global	constexpr uint32_t	CONST	G1	auto
@@ -223,42 +223,86 @@ openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	878	nr_rx_pdcch_symbol::s_dq_left	func_sta
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	950	nr_rx_pdcch_symbol::s_shift_log_left	func_static	_Atomic int	PROCESS	A3	log/dashboard state
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	1129	nr_dci_decoding_procedure::s_si_try	func_static	uint32_t [converted]	PER_CELL	A3	converted by A3; block-scope row first tabled by the A4 audit-tool fix
 openair1/PHY/NR_UE_TRANSPORT/dci_nr.c	1131	nr_dci_decoding_procedure::s_si_hit	func_static	uint32_t [converted]	PER_CELL	A3	converted by A3; block-scope row first tabled by the A4 audit-tool fix
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	61	pipeline_ready	file_static	bool [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	63	g_ring_capacity	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	66	g_el_on	file_static	bool [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	68	g_el	file_static	nr_gpu_elastic_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	74	g_once	file_static	pthread_once_t	PROCESS	A7	one-time init (GPU ops, process hook, epoch subscription, hypothesis-table warm-up) via pthread_once; touches no cell state
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	75	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	77	g_metrics	file_static	nr_csirs_disc_metrics_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	79	pipeline_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	83	cache	file_static	sweep_cache_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	85	cache_count	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	87	g_evidence_epoch	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	93	evidence_retry	file_static	evidence_retry_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	95	evidence_retries	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	109	qualified	file_static	qualified_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	111	qualified_count	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	115	q_strength	file_static	q_strength_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	118	q_was	file_static	q_was_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	120	rl_epoch	file_static	bool [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	123	rl_known	file_static	rl_known_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	126	rl_pending	file_static	rl_pending_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	128	rl_known_n	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	130	rl_pending_n	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	132	cache_grid	file_static	const int16_t * [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	134	cache_written	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	231	g_el_demand	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	233	g_el_rb	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	235	g_el_ant	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	237	g_el_per_slot	file_static	size_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	239	g_el_host_per_slot	file_static	size_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	385	rl_st	file_static	nr_csirs_rl_t [converted]	PER_CELL	A7	rate-limit state machine follows the cell stream clock
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	387	rl_cfg	file_static	nr_csirs_rl_cfg_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	389	rl_init	file_static	bool [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	391	rl_wait_log	file_static	uint64_t [converted]	PER_CELL	A7	log timer on the cell stream clock (was auto-PROCESS)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	465	gate_logged	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	467	gate_has_logged	file_static	bool [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	469	nr_csirs_disc_test_sweep_limit	global	int	PROCESS	A7	test knob (hypotheses swept per batch), set by tests before a run, read-only in production
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	51	g_csirs_obs	file_static	nr_csirs_observer_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	54	g_disc_fep_map	tls	bool *	TLS	DBG2	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	55	csirs_disc_readmit_skipped	global	uint64_t	PROCESS	DBG2	aggregate telemetry counters (extern, printed in CSIRS_DISC FEP): summed over cells by design
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	56	csirs_disc_confirm_drops	global	uint64_t	PROCESS	DBG2	aggregate telemetry counters (extern, printed in CSIRS_DISC FEP): summed over cells by design
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	57	csirs_disc_confirm_wait_max_us	global	uint64_t	PROCESS	DBG2	aggregate telemetry counters (extern, printed in CSIRS_DISC FEP): summed over cells by design
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	58	csirs_disc_confirm_cpu_scores	global	uint64_t	PROCESS	DBG2	aggregate telemetry counters (extern, printed in CSIRS_DISC FEP): summed over cells by design
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	58	csirs_disc_confirm_gpu_scores	global	uint64_t	PROCESS	DBG2	aggregate telemetry counters (extern, printed in CSIRS_DISC FEP): summed over cells by design
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	61	g_csirs_state_lock	file_static	pthread_mutex_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	85	g_reconf	file_static	int [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	124	g_st	file_static	nr_csirs_blind_state_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	126	g_zp	file_static	nr_csirs_blind_state_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	129	g_disc	file_static	int [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	132	g_disc_strength	file_static	g_disc_strength_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	135	g_disc_probe	file_static	g_disc_probe_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	138	g_disc_visits	file_static	g_disc_visits_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	141	g_disc_scored_slot	file_static	g_disc_scored_slot_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	149	g_disc_export	file_static	g_disc_export_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	187	g_zp_null	file_static	g_zp_null_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	189	g_zp_null_n	file_static	int [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	191	g_zp_null_w	file_static	int [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	193	g_on	file_static	int [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	195	g_conf_logged	file_static	int [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	200	g_zp_logged	file_static	g_zp_logged_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	203	g_zp_events	file_static	g_zp_events_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	212	zp_maint_names	file_static	const char *const[ZPM_OUTCOMES]	CONST	DBG2	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	221	g_zp_maint	file_static	g_zp_maint_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	284	g_zp_geometry_veto	file_static	g_zp_geometry_veto_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	286	g_zp_geometry_veto_total	file_static	uint64_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	288	g_armed	file_static	int [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	290	g_slots	file_static	uint64_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	523	g_null	file_static	g_null_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	525	g_null_n	file_static	int [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	527	g_null_w	file_static	int [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	536	g_zp_grant_lock	file_static	pthread_mutex_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	544	g_zp_grant_q	file_static	g_zp_grant_q_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	546	g_zp_grant_qn	file_static	int [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	548	g_zp_grant_dropped	file_static	uint64_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	550	g_zp_grant_dropped_seen	file_static	uint64_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	552	g_zp_grant_applied	file_static	uint64_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	554	g_zp_grant_contradictions	file_static	uint64_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	850	nr_csirs_blind_rt_slot::s_conf_rot	func_static	unsigned [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	1021	score_candidate::t_refbuf	tls	c16_t *[NR_CSIRS_BLIND_RT_MAX_PORTS]	TLS	DBG2	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	1022	score_candidate::t_refbuf_re	tls	uint32_t	TLS	DBG2	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c	1373	csirs_full_dmrs_clash::num_l0	func_static	const uint8_t[18]	CONST	DBG2	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	62	pipeline_ready	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	64	g_ring_capacity	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	67	g_el_on	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	69	g_el	file_static	nr_gpu_elastic_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	75	g_once	file_static	pthread_once_t	PROCESS	A7	one-time init (GPU ops, process hook, epoch subscription, hypothesis-table warm-up) via pthread_once; touches no cell state
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	76	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	78	g_metrics	file_static	nr_csirs_disc_metrics_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	80	pipeline_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	84	cache	file_static	sweep_cache_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	86	cache_count	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	88	g_evidence_epoch	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	94	evidence_retry	file_static	evidence_retry_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	96	evidence_retries	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	110	qualified	file_static	qualified_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	112	qualified_count	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	116	q_strength	file_static	q_strength_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	119	q_was	file_static	q_was_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	121	rl_epoch	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	124	rl_known	file_static	rl_known_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	127	rl_pending	file_static	rl_pending_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	129	rl_known_n	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	131	rl_pending_n	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	133	cache_grid	file_static	const int16_t * [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	135	cache_written	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	232	g_el_demand	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	234	g_el_rb	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	236	g_el_ant	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	238	g_el_per_slot	file_static	size_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	240	g_el_host_per_slot	file_static	size_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	387	rl_st	file_static	nr_csirs_rl_t [converted]	PER_CELL	A7	rate-limit state machine follows the cell stream clock
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	389	rl_cfg	file_static	nr_csirs_rl_cfg_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	391	rl_init	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	393	rl_wait_log	file_static	uint64_t [converted]	PER_CELL	A7	log timer on the cell stream clock (was auto-PROCESS)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	467	gate_logged	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	469	gate_has_logged	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	471	nr_csirs_disc_test_sweep_limit	global	int	PROCESS	A7	test knob (hypotheses swept per batch), set by tests before a run, read-only in production
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	10	once	file_static	pthread_once_t	PROCESS	A7	GPU module loader (dlopen once per process)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	11	raw_ops	file_static	nr_csirs_disc_gpu_ops_t	PROCESS	A7	GPU module entry points, filled once by load_module (one CUDA context)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	12	public_ops	file_static	nr_csirs_disc_gpu_ops_t	PROCESS	A7	guarded GPU ops table, filled once with raw_ops
@@ -266,6 +310,30 @@ openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	13	breaker_lock	file_static
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	14	retry_after_ms	file_static	uint64_t	PROCESS	A7	GPU circuit breaker (shared device)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	15	failures	file_static	unsigned	PROCESS	A7	GPU circuit breaker (shared device)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	221	g_gpu_disabled	file_static	volatile int	PROCESS	A7	process-wide GPU-off switch set by pipeline_init on a GPU preallocation failure; the GPU module (G) holds ONE workspace, so per-cell disable needs G per-cell GPU state (site listed in MPCI-A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	22	discovery_queue	file_static	discovery_queue_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	25	discovery_due	file_static	discovery_slots_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	27	discovery_pending	file_static	discovery_slots_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	29	discovery_ticket	file_static	uint64_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	31	discovery_epoch	file_static	uint64_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	34	discovery_birth	file_static	discovery_birth_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	36	discovery_consumed_ticket	tls	uint64_t	TLS	DBG2	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	37	discovery_frame	file_static	NR_DL_FRAME_PARMS [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	39	discovery_queue_ready	file_static	bool [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	41	discovery_disabled	file_static	bool [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	47	discovery_consuming	tls	bool	TLS	DBG2	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	48	discovery_consumed_epoch	tls	uint64_t	TLS	DBG2	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	49	discovery_copied_symbols	tls	uint16_t	TLS	DBG2	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	50	discovery_storage	file_static	c16_t * [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	56	discovery_gpu	file_static	const nr_csirs_disc_gpu_ops_t * [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	58	discovery_iq_stride	file_static	size_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	60	discovery_fep_cfg	file_static	nr_csirs_disc_fep_cfg_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	62	discovery_fep_ring	file_static	nr_csirs_disc_ring_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	65	discovery_compact_fallback	file_static	discovery_compact_fallback_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	67	discovery_compact	file_static	int16_t * [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	77	discovery_device_scoring	file_static	bool [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	79	discovery_worker_ue	file_static	PHY_VARS_NR_UE [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	99	discovery_exports	file_static	discovery_exports_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	101	discovery_active	file_static	unsigned [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	23	nr_csirs_disc_periods	global	const uint16_t[NR_CSIRS_DISC_NUM_PERIODS]	CONST	A7	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	25	nr_csirs_disc_alloc_unified	global	void * (*)(size_t bytes)	PROCESS	A7	GPU allocator hook, set once by load_module
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c	26	nr_csirs_disc_free_unified	global	void (*)(void *ptr)	PROCESS	A7	GPU allocator hook, set once by load_module
@@ -346,6 +414,11 @@ openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	56	csirs_disc_rl_skipped	global	
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	58	burst_end	file_static	long [converted]	PER_CELL	A7	converted (A7)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	203	feed_origin	file_static	long [converted]	PER_CELL	A7	converted (A7)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c	283	warned	file_static	bool [converted]	PER_CELL	A7	log-once flag of the CPU fallback, per cell (moved to file scope for the audit)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c	53	g_monitors	file_static	g_monitors_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c	55	g_n_monitors	file_static	int [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c	57	g_parsed	file_static	int [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c	59	g_monitor_lock	file_static	pthread_mutex_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c	219	nr_csirs_monitor_due_ex::snapshot	tls	fapi_nr_dl_config_csirs_pdu_rel15_t[DISC_MONITOR_CAPACITY]	TLS	DBG2	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe.c	116	g_gmu	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
 openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe.c	119	g_grants	file_static	g_grants_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe.c	121	g_gn	file_static	unsigned [converted]	PER_CELL	A4	converted: state of one cell's receive path
@@ -1166,17 +1239,17 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c	28	s_attempts	file_static	_At
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c	30	s_screen_pass	file_static	_Atomic unsigned long long [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c	32	s_accepted	file_static	_Atomic unsigned long long [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c	88	nr_pdcch_joint_live_decode::warned	func_static	atomic_flag	PROCESS	A4	capability warning (dci_length > 64 unsupported), identical for all cells
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	23	g	file_static	struct {}	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	63	elastic_policy	file_static	struct {}	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	123	worker::names	func_static	const char *[]	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	209	policy	file_static	struct {}	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	50	g_nid	file_static	nr_nid_gpu_state_t [converted]	PER_CELL	G4	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	70	elastic_policy	file_static	struct {}	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	130	worker::names	func_static	const char *[]	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	216	policy	file_static	struct {}	UNCLASSIFIED	G4	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	CELLS	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	CHUNK	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	IDS	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	TIMERS	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	25	CAND_CAP	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	25	STAT	global	constexpr int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	947	ops	global	const nr_pdcch_nid_ops_t	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	951	ops	global	const nr_pdcch_nid_ops_t	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	72	g_ring	file_static	g_ring_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	74	g_depth	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c	76	g_head	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
@@ -2207,6 +2280,8 @@ openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	90	g_started	file_static	bool [conve
 openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	94	g_learned	file_static	g_learned_cell_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	96	g_nlearned	file_static	int [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	101	load_env::done	func_static	_Atomic int	PROCESS	A6	one-time env load guard (process env, prints the banner once)
+openair1/PHY/NR_UE_TRANSPORT/pss_nr.c	181	s_pss_fold	file_static	nr_pss_fold_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/pss_nr.c	456	pss_search_time_nr::debug_cnt	func_static	int	PROCESS	DBG2	debug print limiter only
 openair1/PHY/TOOLS/calibration_scope.c	17	rx_antenna_colors	global	const FL_COLOR[4]	CONST	A8	auto
 openair1/PHY/TOOLS/calibration_scope.c	18	water_colors	global	const FL_COLOR[4]	CONST	A8	auto
 openair1/PHY/TOOLS/dB_routines.c	9	dB_table	file_static	const int8_t[256]	CONST	A8	auto

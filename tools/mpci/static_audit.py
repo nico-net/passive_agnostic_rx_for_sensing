@@ -49,6 +49,10 @@ GLOBS = [
     "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_ul_*.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_passive_*.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc*.c",
+    "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c",  # DBG2: CSI-RS search / confirm queue (the first glob missed it)
+    "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h",  # DBG2: included by nr_csirs_blind_rt.c
+    "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c",   # DBG2: CSI-RS monitor bank
+    "openair1/PHY/NR_UE_TRANSPORT/pss_nr.c",             # DBG2: PSS fold of the initial sync
     "openair1/PHY/NR_UE_TRANSPORT/dci_nr.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe*.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c",
@@ -583,6 +587,10 @@ OWNER_RULES = [
     ("openair1/PHY/CODING/*", "G1"),
     ("openair1/PHY/TOOLS/nr_host_membudget*", "B3"),
     ("openair1/PHY/TOOLS/nr_admit*", "B3"),
+    ("*/nr_csirs_blind_rt.c", "DBG2"),
+    ("*/nr_csirs_disc_confirm_internal.h", "DBG2"),
+    ("*/nr_csirs_monitor.c", "DBG2"),
+    ("*/pss_nr.c", "DBG2"),
     ("*/nr_csirs_disc_feed.c", "A7"),
     ("*/nr_csirs_disc_td.c", "A7"),
     ("*/nr_csirs_disc*", "A7"),
