@@ -9,6 +9,7 @@
 #include "PHY/TOOLS/nr_gpu_budget.h"
 #include "PHY/TOOLS/nr_gpu_elastic.h"
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
 #include <dlfcn.h>
 #include <errno.h>
 #include <time.h>
@@ -20,7 +21,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-static struct {
+/* PER_CELL (mpci DBG2): one nID sweep (device window, batches, duty, published records) per cell. A process-wide instance served the
+ * first cell's grid only, and a second cell's batches reset its duty and records on every geometry change (and its records reached the
+ * other cell). Users run bound to the cell: the producer (CORESET map, slot path), the consumer feedback/records (PDCCH monitor), the
+ * ACQMISS rearm (traffic probe worker); the worker is created bound to the cell that started it. */
+typedef struct {
  pthread_mutex_t mu;
  pthread_cond_t cv;
  pthread_t thread;
@@ -41,7 +46,9 @@ static struct {
  _Atomic bool running;
  nr_gpu_elastic_t el; /* on-demand window: base = what the memory budget share holds (T6b), full = the requested window */
  int win_passes;      /* passes since the window was (re)started: the window is full when this reaches el.cur */
-} g = {.mu=PTHREAD_MUTEX_INITIALIZER,.cv=PTHREAD_COND_INITIALIZER,.producer=-1};
+} nr_nid_gpu_state_t;
+NR_CELL_STATIC_INIT(nr_nid_gpu_state_t, g_nid, {.mu=PTHREAD_MUTEX_INITIALIZER,.cv=PTHREAD_COND_INITIALIZER,.producer=-1});
+#define g NR_CELL_REF(g_nid)
 
 bool nr_pdcch_nid_gpu_enabled(void) {return true;}
 bool nr_pdcch_nid_gpu_running(void) {return atomic_load_explicit(&g.running,memory_order_acquire);}
@@ -261,7 +268,7 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  if(core<0)for(int j=CPU_SETSIZE-1;j>=0;j--)if(CPU_ISSET(j,&allowed)){core=j;break;}
  if(core<0 || !CPU_ISSET(core,&allowed))rc=-1;
  else {CPU_SET(core,&pin);rc|=pthread_attr_setaffinity_np(&attr,sizeof(pin),&pin);}
- if(!rc)rc=pthread_create(&g.thread,&attr,worker,NULL);
+ if(!rc)rc=nr_cell_thread_create(&g.thread,&attr,worker,NULL,nr_cell_idx()); /* the worker serves the starting cell */
  pthread_attr_destroy(&attr);
  if(rc)goto fail;
  atomic_store_explicit(&g.running,true,memory_order_release);

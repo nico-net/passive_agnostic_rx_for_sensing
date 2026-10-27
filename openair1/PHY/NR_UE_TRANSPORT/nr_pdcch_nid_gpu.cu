@@ -588,7 +588,10 @@ static_assert(sizeof(Device)==NR_GPU_CELL_NID_DEVICE_BYTES,"nr_gpu_cell.h NR_GPU
 size_t window_bytes(int rb,int dur,int window) {return nr_gpu_cell_nid_window_dev_bytes(rb,dur,window);}
 size_t fixed_bytes() {return nr_gpu_cell_nid_fixed_bytes();}
 void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
- if(nr_dl_gpu_sealed)return nullptr; // one pre-RX context per module lifetime
+ // One context per cell, all before RX (mpci DBG2): the module fence sealed by an earlier cell's create() is lifted for this create only while the
+ // platform still allows allocations (nr_gpu_allocation_guard: until the RX seal); with RX running no context is created (N=1: the first create, unchanged).
+ const bool was_sealed=nr_dl_gpu_sealed;
+ if(was_sealed && !nr_gpu_allocation_guard())return nullptr;
  if(rb<6 || rb>275 || dur<1 || dur>3 || window<1 || window>NR_PDCCH_NID_MAX_WINDOW)return nullptr;
  {
   // T6b: the window (batches kept for the evidence integration) from the shared memory budget: the requested one when it fits (GB10: unchanged), down to 5.
@@ -604,6 +607,7 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
   nr_gpu_membudget_commit(NR_GPU_MEM_PDCCH_NID,fixed+window_bytes(rb,dur,(int)w),(double)w/window);
   window=(int)w;
  }
+ nr_dl_gpu_sealed=false;
  Context *c=new Context{};c->rb=rb;c->dur=dur;c->window=window;
  NrMsScope ms_(NR_MS_PDCCH_NID,NR_MS_SHARED); // GPUMEM: the window independent workspace is SHARED; the staging and the window buffers are PER_CELL of the creating thread's cell
  c->cell=nr_gpu_memstat_host_cell();
@@ -676,7 +680,7 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  if(cudaStreamSynchronize(c->stream)!=cudaSuccess)goto fail;
  nr_dl_gpu_sealed=true;
  *staging=c->staging;return c;
-fail: destroy(c);return nullptr;
+fail: destroy(c);nr_dl_gpu_sealed=was_sealed;return nullptr;
 }
 // On-demand window (nr_gpu_elastic.h): resize(ctx, 0) -> the current window; resize(ctx, w) -> the window reached, between the current one and w.
 // Growing takes the extra bytes from the shared budget's headroom (as many batches as fit, none: the window stays and the denial is counted); an allocation failure

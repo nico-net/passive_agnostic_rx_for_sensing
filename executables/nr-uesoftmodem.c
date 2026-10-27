@@ -427,6 +427,8 @@ static int mpci_cell_prealloc(void *ctx, int k, const nr_mgr_slot_t *slot)
     if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
       mpci_open_uectx(k);
   }
+  if (k > 0)
+    nr_pdcch_nid_gpu_start(ue->frame_parms.N_RB_DL); /* per-cell nID sweep on the cell's own grid (cell 0 started in main, unchanged) */
   nr_csirs_disc_pipeline_init(&ue->frame_parms);
   if (nr_csirs_disc_cell_prealloc(k, &ue->frame_parms, ue->frame_parms.nb_antennas_rx) != 0)
     LOG_W(PHY, "SENSING: CSIRS_DISC worker could not start; slot discovery feed disabled\n");
@@ -490,6 +492,7 @@ static void mpci_for_each_cell(void (*fn)(int cell))
   }
   nr_cell_bind(prev);
 }
+static void mpci_stop_nid(int k) { (void)k; nr_pdcch_nid_gpu_stop(); }
 static void mpci_stop_pusch(int k) { (void)k; if (nr_pusch_passive_pipeline_enabled()) nr_pusch_passive_queue_stop(); }
 /* shutdown of one cell's consumers (bound to it): the single-cell sequence of before */
 static void mpci_stop_cell_queues(int k)
@@ -1053,7 +1056,7 @@ int main(int argc, char **argv)
    * consumers and discovery workers have returned. */
   mpci_for_each_cell(mpci_stop_cell_queues); /* A8: every cell's consumers, bound to the cell; N = 1: cell 0, the sequence of before */
   nr_shutdown_step("discovery_stop_begin");
-  nr_pdcch_nid_gpu_stop();
+  mpci_for_each_cell(mpci_stop_nid); /* every cell's nID sweep, bound to the cell; N = 1: cell 0, as before */
   if (g_ncells > 1)
     for (int k = g_ncells - 1; k >= 0; k--)
       nr_csirs_disc_cell_release(k);
