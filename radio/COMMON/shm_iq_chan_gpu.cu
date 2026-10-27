@@ -645,19 +645,10 @@ static void g_set_placement(int p) { g_place = p == IQ_CHAN_GPU_PLACE_RT || p ==
 static int g_placement(void) { return g_place ? g_place : default_place(); }
 static void g_stats(void *ctx, iq_chan_gpu_stats_t *st) { *st = ctx ? ((GCtx *)ctx)->stats : iq_chan_gpu_stats_t{}; }
 
-// about 1 ms of signal per run (smallest power of two >= rate x 1 ms, at least the CPU default): every run pays a few launches and one polled wait;
-// [Bench, DGX GB10 idle]: 4 cells at 245.76 MS/s x 4 went from 1.3x (65536) to about 2x real time (262144); the cost is about 1 ms more latency to the cells.
-static int g_block_hint(double rate)
-{
-  int b = IQ_CHAN_DEFAULT_BLOCK;
-  while (b < (1 << 24) && (double)b < rate * 1e-3) b *= 2;
-  return b;
-}
-
 static int g_direct_in(void *ctx) { return ctx && ((GCtx *)ctx)->shared; } // SHARED: the kernels read the wideband ring in place
 
 static const iq_chan_backend_t g_backend = {
-  "gpu", g_create, g_destroy, g_prepare, g_release, g_install, g_retire, g_set_shift, g_reset, g_run, g_capacity, NULL, g_block_hint, g_direct_in,
+  "gpu", g_create, g_destroy, g_prepare, g_release, g_install, g_retire, g_set_shift, g_reset, g_run, g_capacity, NULL, g_direct_in,
 };
 static const iq_chan_gpu_api_t g_api = {IQ_CHAN_GPU_ABI, &g_backend, g_available, g_tier_shared, g_compare, g_bytes, g_bench, g_set_placement, g_placement, g_stats};
 

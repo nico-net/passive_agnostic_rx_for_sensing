@@ -459,14 +459,13 @@ iq_chan_t *iq_chan_create(const iq_chan_cfg_t *cfg)
   const shm_iq_hdr_t *h = c->in.hdr;
   c->nch = h->channels;
   c->in_rate = h->rate;
-  c->be = cfg->backend ? cfg->backend : iq_chan_backend_select(cfg->load_hint); /* G5: chosen first, its block hint sizes the default block */
   c->block = cfg->block;
   if (c->block <= 0) {
-    const int hint = c->be->block_hint ? c->be->block_hint(c->in_rate) : 0;
-    c->block = hint >= ALIGN_SAMPLES && hint % ALIGN_SAMPLES == 0 ? hint : IQ_CHAN_DEFAULT_BLOCK;
+    c->block = IQ_CHAN_DEFAULT_BLOCK;
     while (c->block > 4096 && (uint64_t)c->block > h->capacity / 8) c->block /= 2;
   }
   if (c->block < ALIGN_SAMPLES || c->block % ALIGN_SAMPLES || (uint64_t)c->block > h->capacity / 2) { errno = EINVAL; goto fail; }
+  c->be = cfg->backend ? cfg->backend : iq_chan_backend_select(cfg->load_hint);
   const iq_chan_geom_t g = {.in_rate = c->in_rate, .nch = c->nch, .block = c->block};
   c->ctx = c->be->create(&g);
   if (!c->ctx && !cfg->backend && c->be != &iq_chan_backend_cpu) { /* G5: a selected (not named) backend that cannot start: the CPU backend */
