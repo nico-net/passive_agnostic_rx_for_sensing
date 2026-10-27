@@ -14,7 +14,7 @@
  * Environment (read once per path, at nr_gpu_path_begin()):
  *   NR_GPU_PATH_SELECT=auto|bench|off  auto (default): measure on DISCRETE only; bench: also on SHARED; off: no selection (GPU wherever the
  *                                       module is ready: the behaviour before this layer).
- *   NR_GPU_PATH_<NAME>=gpu|cpu|auto    per path (NAME = FEP, CHEST, DEMOD, LDPC_DL, LDPC_UL, PASS_DL, PASS_UL, UL_FEP): forces the choice
+ *   NR_GPU_PATH_<NAME>=gpu|cpu|auto    per path (NAME = FEP, CHEST, DEMOD, LDPC_DL, LDPC_UL, PASS_DL, PASS_UL, UL_FEP, CHAN): forces the choice
  *                                       (gpu still needs a ready GPU module; logged reason=env).
  *   NR_GPU_PATH_TRIAL=<n>               samples per side for a decision (default 8, 2..64).
  *   NR_GPU_PATH_MARGIN=<x>              the GPU wins iff median_gpu < x * median_cpu (default 1.0, 0.1..10).
@@ -35,6 +35,7 @@ typedef enum {
   NR_GPU_PATH_PASS_DL, /* DL graph pass (GPUPASS) */
   NR_GPU_PATH_PASS_UL, /* UL graph pass */
   NR_GPU_PATH_UL_FEP,  /* UL standalone FEP */
+  NR_GPU_PATH_CHAN,    /* multi-cell channelizer backend (radio/COMMON iq_chan, G5): begun only when > 1 cell is served from one wideband capture */
   NR_GPU_PATH_N
 } nr_gpu_path_t;
 

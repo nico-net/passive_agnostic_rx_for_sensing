@@ -13,11 +13,13 @@ extern "C" {
  *   Weights follow the 273 PRB 4 RX census on the 8 GB RTX 4060 Ti [MEASURED, device MB]: csirs ~3460 at 640 slots (fixed 1380 incl. 178 scratch and ~480 local memory of refine_kernel, 3.25 per slot; floor 160 slots = 1900),
  *   ldpc pool 620, ldpc cb0 874, td_cb0 556, pdcch_nid 776, pass 361, graphs up to 2048: about proportional to need, csirs raised so its floor fits an 8 GB card, pass raised to cover its instances + HARQ, graphs take their share plus whatever
  *   the other modules did not use (nr_gpu_membudget_graph_bytes). */
+/* NR_GPU_MEM_CHAN (G5, the GPU channelizer of a multi-cell wideband capture): weight 0, it takes its bytes from the headroom (nr_gpu_membudget_dyn_acquire) and is
+ * absent from the SENSING: GPU_MEM line until it holds some (the single-cell line is unchanged). */
 typedef enum { NR_GPU_MEM_CSIRS, NR_GPU_MEM_LDPC_POOL, NR_GPU_MEM_LDPC_CB0, NR_GPU_MEM_TD_CB0, NR_GPU_MEM_PDCCH_NID, NR_GPU_MEM_PASS, NR_GPU_MEM_GRAPH,
-               NR_GPU_MEM_N } nr_gpu_mem_module_t;
+               NR_GPU_MEM_CHAN, NR_GPU_MEM_N } nr_gpu_mem_module_t;
 #define NR_GPU_MB_RESERVE ((size_t)768 << 20)
-static const int nr_gpu_mem_weight[NR_GPU_MEM_N] = {36, 8, 11, 7, 10, 8, 20};
-static const char *const nr_gpu_mem_name[NR_GPU_MEM_N] = {"csirs", "ldpc_pool", "ldpc_cb0", "td_cb0", "pdcch_nid", "pass", "graph"};
+static const int nr_gpu_mem_weight[NR_GPU_MEM_N] = {36, 8, 11, 7, 10, 8, 20, 0};
+static const char *const nr_gpu_mem_name[NR_GPU_MEM_N] = {"csirs", "ldpc_pool", "ldpc_cb0", "td_cb0", "pdcch_nid", "pass", "graph", "chan"};
 /* Pure functions (no CUDA, no state). */
 static inline size_t nr_gpu_membudget_calc(size_t free_at_probe)
 {

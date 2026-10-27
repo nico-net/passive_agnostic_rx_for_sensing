@@ -47,6 +47,7 @@ typedef enum {
   NR_MS_PDCCH_NID,      /* nr_pdcch_nid_gpu.cu */
   NR_MS_POLAR,          /* nr_polar_sc_cuda.cu */
   NR_MS_EXACT,          /* nr_pdsch_gpu_exact_fep.cuh, nr_gpu_green.h probes */
+  NR_MS_CHAN,           /* radio/COMMON/shm_iq_chan_gpu.cu: the GPU channelizer backend (G5; only with > 1 cell from one wideband capture) */
   NR_MS_MOD_N
 } nr_ms_module_t;
 typedef enum { NR_MS_SHARED = 0, NR_MS_PER_CELL = 1 } nr_ms_scope_t;

@@ -69,3 +69,41 @@ if(ENABLE_TESTS)
   add_test(NAME test_iq_feed COMMAND test_iq_feed $<TARGET_FILE:shm_iq>)
 endif()
 # ---- end G6 ----
+
+# ---- G5 ----
+# GPU backend of the in-process channelizer (radio/COMMON/shm_iq_chan_gpu.cu, kernels of the T0 import), dlopen'd by the CHAN path selector of mpci_iq
+# (iq_chan_gpu_sel.c: no CUDA link dependency of the receiver). The selector is part of mpci_iq in every build; without the module it keeps the CPU backend.
+target_sources(mpci_iq PRIVATE ${CMAKE_SOURCE_DIR}/radio/COMMON/iq_chan_gpu_sel.c)
+target_include_directories(mpci_iq PRIVATE ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS)
+target_link_libraries(mpci_iq PUBLIC ${CMAKE_DL_LIBS})
+if(ENABLE_LDPC_CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  include(${CMAKE_SOURCE_DIR}/cmake_targets/nr_gpu_arch.cmake)
+  nr_gpu_enable_cuda() # CUDA is enabled in openair1/PHY/CODING's scope only; this file is included at the top level
+  nr_gpu_architectures("${LDPC_CUDA_ARCH}" G5_CUDA_ARCHS)
+  add_library(shm_iq_chan_gpu MODULE ${CMAKE_SOURCE_DIR}/radio/COMMON/shm_iq_chan_gpu.cu ${CMAKE_SOURCE_DIR}/radio/COMMON/iq_ddc.c)
+  set_target_properties(shm_iq_chan_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR} CUDA_ARCHITECTURES "${G5_CUDA_ARCHS}" POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(shm_iq_chan_gpu PRIVATE ${CMAKE_SOURCE_DIR}/radio/COMMON ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT
+                             ${CUDAToolkit_INCLUDE_DIRS})
+  target_link_libraries(shm_iq_chan_gpu PRIVATE nr_gpu_platform CUDA::cudart m pthread)
+  add_dependencies(nr-uesoftmodem-optional-modules shm_iq_chan_gpu)
+  if(ENABLE_TESTS)
+    add_executable(test_iq_chan_gpu ${CMAKE_SOURCE_DIR}/radio/COMMON/tests/test_iq_chan_gpu.c)
+    target_include_directories(test_iq_chan_gpu PRIVATE ${CMAKE_SOURCE_DIR}/radio/COMMON ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS)
+    target_link_libraries(test_iq_chan_gpu PRIVATE mpci_iq nr_gpu_platform ${CMAKE_DL_LIBS} m pthread)
+    set_target_properties(test_iq_chan_gpu PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+    add_dependencies(test_iq_chan_gpu shm_iq_chan_gpu)
+    add_dependencies(tests test_iq_chan_gpu)
+    add_test(NAME test_iq_chan_gpu COMMAND test_iq_chan_gpu WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    add_test(NAME test_iq_chan_gpu_discrete COMMAND test_iq_chan_gpu --discrete WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(test_iq_chan_gpu test_iq_chan_gpu_discrete PROPERTIES ENVIRONMENT "CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps"
+                         SKIP_RETURN_CODE 77)
+  endif()
+endif()
+if(ENABLE_TESTS)
+  # in-context bench fixture: real-time file publisher (mpci_file_pub arguments) for 245.76 MS/s x 4 RX
+  add_executable(g5_fast_pub ${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci/g5_fast_pub.c)
+  target_link_libraries(g5_fast_pub PRIVATE mpci_iq m pthread rt)
+  add_dependencies(tests g5_fast_pub)
+endif()
+# ---- end G5 ----

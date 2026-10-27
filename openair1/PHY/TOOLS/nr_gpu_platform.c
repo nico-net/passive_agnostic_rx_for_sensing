@@ -577,9 +577,9 @@ size_t nr_gpu_membudget_graph_bytes(void)
   if (B == SIZE_MAX) return SIZE_MAX;
   size_t g = nr_gpu_membudget_share_of(B, NR_GPU_MEM_GRAPH);
   pthread_mutex_lock(&mu);
-  for (int m = 0; m < NR_GPU_MEM_N - 1; m++) {
+  for (int m = 0; m < NR_GPU_MEM_N; m++) { /* every module but the graph itself (it was the last one before NR_GPU_MEM_CHAN, weight 0) */
     const size_t sh = nr_gpu_membudget_share_of(B, (nr_gpu_mem_module_t)m);
-    if (mb.committed[m] && mb.bytes[m] < sh) g += sh - mb.bytes[m];
+    if (m != NR_GPU_MEM_GRAPH && mb.committed[m] && mb.bytes[m] < sh) g += sh - mb.bytes[m];
   }
   pthread_mutex_unlock(&mu);
   return g;
@@ -594,9 +594,9 @@ static size_t headroom_locked(size_t B)
     if (mb.committed[m]) u = mb.bytes[m];
     else if (m == NR_GPU_MEM_GRAPH) { /* graph cap = its share + the unused part of the other shares */
       u = nr_gpu_membudget_share_of(B, NR_GPU_MEM_GRAPH);
-      for (int o = 0; o < NR_GPU_MEM_N - 1; o++) {
+      for (int o = 0; o < NR_GPU_MEM_N; o++) {
         const size_t sh = nr_gpu_membudget_share_of(B, (nr_gpu_mem_module_t)o);
-        if (mb.committed[o] && mb.bytes[o] < sh) u += sh - mb.bytes[o];
+        if (o != NR_GPU_MEM_GRAPH && mb.committed[o] && mb.bytes[o] < sh) u += sh - mb.bytes[o];
       }
     } else
       u = nr_gpu_membudget_share_of(B, (nr_gpu_mem_module_t)m);
@@ -664,6 +664,8 @@ int nr_gpu_membudget_format(char *out, size_t n)
   pthread_mutex_lock(&mu);
   for (int m = 0; m < NR_GPU_MEM_N && k > 0 && (size_t)k < n; m++) {
     const size_t sh = nr_gpu_membudget_share_of(B, (nr_gpu_mem_module_t)m);
+    if (!nr_gpu_mem_weight[m] && !mb.committed[m] && !mb.grows[m] && !mb.denied[m] && !mb.dyn[m])
+      continue; /* a weight-0 module (chan) is listed only once it took memory: the line of a receiver without it is unchanged */
     if (mb.committed[m])
       k += snprintf(out + k, n - k, " %s=%lluMB/share=%lldMB/scale=%.3f%s", nr_gpu_mem_name[m], (unsigned long long)(mb.bytes[m] >> 20),
                     sh == SIZE_MAX ? -1LL : (long long)(sh >> 20), mb.scale[m], mb.bytes[m] ? "" : "(CPU)");

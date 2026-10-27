@@ -16,7 +16,7 @@ static uint64_t g_tot_cur[NR_MS_KIND_N], g_tot_peak[NR_MS_KIND_N], g_tot_n;
 static __thread uint32_t t_tag; /* 0 = NR_MS_UNTAGGED / SHARED */
 
 static const char *const g_names[NR_MS_MOD_N] = {"untagged", "platform", "pass", "pass_graph", "pdsch_fep", "pdsch_demod", "pdsch_ldpc", "pdcch_fep", "pusch_fep",
-                                                 "ldpc_dec", "ldpc_cb0", "td_cb0", "csirs", "pdcch_nid", "polar", "exact"};
+                                                 "ldpc_dec", "ldpc_cb0", "td_cb0", "csirs", "pdcch_nid", "polar", "exact", "chan"};
 const char *nr_gpu_memstat_name(int mod) { return mod >= 0 && mod < NR_MS_MOD_N ? g_names[mod] : "?"; }
 
 static void peak_max(uint64_t *p, uint64_t v)

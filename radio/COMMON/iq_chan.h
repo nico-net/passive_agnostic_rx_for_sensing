@@ -69,6 +69,13 @@ typedef struct iq_chan_backend {
   size_t (*capacity)(const iq_chan_load_t *load);
   /* Optional: run() on k threads including the caller (worker i pinned to cpus[i % ncpus]); results must not depend on k. NULL = single thread only. */
   int (*set_workers)(void *ctx, int k, const int *cpus, int ncpus);
+  /* Optional (G5): 1 = run() may read its input in place in the wideband ring (in[] then point into ring memory, valid only during the call; the channelizer
+   * validates the block after the call and treats an overwrite as an overrun). NULL / 0 = the input is a copy. */
+  int (*direct_in)(void *ctx);
+  /* Optional (G5): catch-up batching. A backend whose cost is mostly per call (GPU launches and one wait) may be handed up to max_batch blocks in one run() when
+   * that much input is already waiting (never more than is there: a channelizer at the live edge runs one block, so its first output is as early as with one
+   * block); geom.block is then block x max_batch. The output is the same as block by block. 0 or 1 = one block per run. */
+  int max_batch;
 } iq_chan_backend_t;
 
 extern const iq_chan_backend_t iq_chan_backend_cpu;
