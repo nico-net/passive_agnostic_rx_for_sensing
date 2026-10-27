@@ -173,4 +173,10 @@ int iq_chan_set_threads(iq_chan_t *c, int k, const int *cpus, int ncpus); /* k b
 int iq_chan_start_k(iq_chan_t *c, const int *cpus, int ncpus, int k); /* explicit k (tests, benches) */         /* optional affinity list (the core plan's channelizer CPU); NULL = unpinned */
 void iq_chan_stop(iq_chan_t *c);
 void iq_chan_stats(const iq_chan_t *c, iq_chan_stats_t *st);
+/* MPCI-DASH P3: what the channelizer thread spent writing the cell's narrow ring (the backend run() serves all cells in one call and is not separable per cell: its total
+ * is iq_chan_stats_t.run_ns). Cumulative; write_max_ns is the maximum since the previous call (reset at read, one reader). 0, or -1 when the entry does not exist. */
+typedef struct {
+  uint64_t blocks, out_samples, write_ns, write_max_ns;
+} iq_chan_cell_stats_t;
+int iq_chan_cell_stats(const iq_chan_t *c, int id, iq_chan_cell_stats_t *st);
 #endif

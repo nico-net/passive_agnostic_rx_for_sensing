@@ -71,6 +71,30 @@ if(ENABLE_TESTS)
 endif()
 # ---- end D2 ----
 
+# ---- C-DASH ----
+# Per-cell scorers (ANSI-prefixed cell tags, gz read, per-cell counts, N=1 byte-identical) and the multi-PCI monitor page over the OTA fixtures.
+if(ENABLE_TESTS)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME test_mpci_percell_scorers
+      COMMAND ${Python3_EXECUTABLE} -m unittest -v test_percell_scorers
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci)
+    add_test(NAME test_mpci_dash_monitor
+      COMMAND ${Python3_EXECUTABLE} -m unittest -v test_mpci_dash
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/passive_rx/monitor)
+  endif()
+endif()
+# MPCI-DASH section 3.1 log lines (F1 pool split, P1 CELL_CPU, P2/P4/P5/P6/P7/P8/P9 formatters): gating at N=1, window deltas, exact formats. nr_core_pool.c is compiled in
+# directly as in test_nr_core_pool (pinning off in the test). P3 CHAN_CELL is checked in test_iq_feed (cmake_targets/mpci_gpu.cmake), P0 in test_shm_iq.
+if(ENABLE_TESTS)
+  add_executable(test_nr_cell_dash ${CMAKE_SOURCE_DIR}/common/utils/tests/test_nr_cell_dash.cpp ${CMAKE_SOURCE_DIR}/common/utils/nr_core_pool.c)
+  target_include_directories(test_nr_cell_dash PRIVATE ${CMAKE_SOURCE_DIR}/common/utils)
+  target_link_libraries(test_nr_cell_dash PRIVATE GTest::gtest GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_cell_dash)
+  add_test(NAME test_nr_cell_dash COMMAND test_nr_cell_dash)
+endif()
+# ---- end C-DASH ----
+
 # ---- D1 ----
 # Cell inventory v1 (strict parser + atomic-file watcher) and the cell manager. nr_cell.c is compiled directly (these tests do not link LOG; as in A1).
 # nr_cell_admit (static lib, B3 block) + nr_host_membudget.c as in test_nr_cell_admit. MPCI_INV_DIR is the fixture directory (a path, not a behaviour switch).

@@ -6,7 +6,10 @@ required_snr_db = 10*log10(2**SE - 1) + IMPL_LOSS_DB, SE = Qm*R/1024 (TS 38.214 
 shortcut: Shannon gap + fixed 1.5 dB loss, not a calibrated BLER curve; recalibrate from Task 2's CRC-vs-margin curve.
 usage: goal_metrics.py [--margin 2.0] [--json] run.log...
 A log of a multi-cell receiver (lines prefixed "[c<k>] ") is scored per cell, automatically: one independent result block per cell
-("== cell <k>" header; JSON {"run":..., "cells": {"<k>": {...}}}), never a merged number. Unprefixed or one-cell logs: unchanged."""
+("== cell <k> (PCI <n>)" header; JSON {"run":..., "cells": {"<k>": {...}}}), never a merged number. Unprefixed or one-cell logs: unchanged.
+Each block also carries the PCI ("?" / null when the log does not name the cell: MPCI_CELL / ISAC_METRICS) and a "CELL" line with the cellsel.counts()
+facts (C-RNTI grants, CRC ok, length locks, ULDCI, SI grants, syncs, RXDISCONT); JSON: "pci", "counts" per cell and "untagged" (process-wide lines).
+.gz logs are read directly."""
 import json, math, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -90,8 +93,7 @@ def summary(acc):
 
 def parse_run(path, margin=2.0, cell=None):
     dl, ul = empty(), empty()
-    with open(path, errors='replace') as fh:
-        lines = cellsel.prepare(fh.readlines(), cell, path)
+    lines = cellsel.prepare(cellsel.read_lines(path), cell, path)
     # ISAC_PDSCH_RECOVERY_ASYNC logs EVMGRANT for the first pass (crc=0) and a RECOVLATE line when a retry arm rescues it later: credit it.
     rec = {m.group(1, 2): int(m.group(3)) if m.group(3) else -1 for m in (RECOV.search(r) for r in lines if 'RECOVLATE' in r) if m}
     dl['recovered'] = 0
@@ -154,16 +156,22 @@ if __name__ == '__main__':
             s = r[d]
             print(f"{p} {d.upper()} {verdict(s)} " + ' '.join(f"{k}={v:.1f}" if isinstance(v, float) else f"{k}={v}" for k, v in s.items()))
     for p in args:
-        cs = cellsel.log_cells(p)
-        if cs is None:
+        info = cellsel.cell_info(p)
+        if info is None:
             r = parse_run(p, margin)
             if as_json:
                 print(json.dumps({'run': p, **r}))
             else:
                 show(p, r)
-        elif as_json:
-            print(json.dumps({'run': p, 'cells': {str(k): parse_run(p, margin, k) for k in cs}}))
-        else:
-            for k in cs:
-                print(f"== cell {k}")
-                show(p, parse_run(p, margin, k))
+            continue
+        rs = {k: parse_run(p, margin, k) for k in info['cells']}
+        for k, r in rs.items():
+            r['pci'] = info['pci'].get(k); r['counts'] = info['counts'][k]
+        if as_json:
+            print(json.dumps({'run': p, 'cells': {str(k): r for k, r in rs.items()}, 'untagged': info['untagged']}))
+            continue
+        for k, r in rs.items():
+            print(cellsel.cell_header(k, info['pci'].get(k)))
+            show(p, r)
+            print(f"{p} CELL pci={r['pci']} {cellsel.counts_line(r['counts'])}")
+        print(f"{p} UNTAGGED (process-wide, in no cell) {cellsel.counts_line(info['untagged'])}")

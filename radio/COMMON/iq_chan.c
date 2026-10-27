@@ -402,6 +402,8 @@ typedef struct {
   shm_iq_ring_t out;
   int16_t *obuf[SHM_IQ_MAX_CH];
   uint64_t ring_bytes;
+  /* MPCI-DASH P3: written by the channelizer thread only (relaxed __atomic ops), read by iq_chan_cell_stats(); st_write_max_ns is a window maximum reset by the reader */
+  uint64_t st_blocks, st_out, st_write_ns, st_write_max_ns;
 } cell_t;
 
 enum { OP_ADD = 1, OP_REMOVE, OP_RETUNE, OP_PAUSE, OP_RESUME };
@@ -814,7 +816,13 @@ int iq_chan_step(iq_chan_t *c)
       void *bufs[SHM_IQ_MAX_CH];
       for (unsigned a = 0; a < c->nch; ++a) bufs[a] = x->passthrough ? (void *)inp[a] : (void *)x->obuf[a];
       /* output timestamps are (base_tick + ring_pos) / decim, the formula of shm_iq.c */
+      const uint64_t w0 = now_ns(); /* P3: two clock reads per cell per input block */
       shm_iq_ring_write(&x->out, (int64_t)(((uint64_t)c->base_tick + c->pos) / (uint64_t)x->e.decim), bufs, n / x->e.decim, c->nch);
+      const uint64_t wd = now_ns() - w0;
+      __atomic_fetch_add(&x->st_blocks, 1, __ATOMIC_RELAXED);
+      __atomic_fetch_add(&x->st_out, (uint64_t)(n / x->e.decim), __ATOMIC_RELAXED);
+      __atomic_fetch_add(&x->st_write_ns, wd, __ATOMIC_RELAXED);
+      if (wd > __atomic_load_n(&x->st_write_max_ns, __ATOMIC_RELAXED)) __atomic_store_n(&x->st_write_max_ns, wd, __ATOMIC_RELAXED);
     }
     const uint64_t dt = now_ns() - t0;
     c->pos += (uint64_t)n;
@@ -945,6 +953,17 @@ void iq_chan_stop(iq_chan_t *c)
   c->running = 0;
   if (c->op) { apply_op(c, c->op); c->op = NULL; atomic_store(&c->op_pending, 0); pthread_cond_broadcast(&c->cv); } /* a command raced with the stop */
   pthread_mutex_unlock(&c->mu);
+}
+
+int iq_chan_cell_stats(const iq_chan_t *c, int id, iq_chan_cell_stats_t *st)
+{
+  if (!c || !st || id < 0 || id >= IQ_CHAN_MAX_CELLS || !c->cell[id].used) return -1;
+  cell_t *x = (cell_t *)&c->cell[id];
+  st->blocks = __atomic_load_n(&x->st_blocks, __ATOMIC_RELAXED);
+  st->out_samples = __atomic_load_n(&x->st_out, __ATOMIC_RELAXED);
+  st->write_ns = __atomic_load_n(&x->st_write_ns, __ATOMIC_RELAXED);
+  st->write_max_ns = __atomic_exchange_n(&x->st_write_max_ns, 0, __ATOMIC_RELAXED);
+  return 0;
 }
 
 void iq_chan_stats(const iq_chan_t *c, iq_chan_stats_t *st)

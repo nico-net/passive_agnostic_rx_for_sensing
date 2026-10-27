@@ -622,6 +622,12 @@ NR_CELL_STATIC(_Atomic uint64_t, g_dropped_epoch);
 #define g_dropped_epoch NR_CELL_REF(g_dropped_epoch)
 NR_CELL_STATIC(_Atomic uint64_t, g_max_lag);
 #define g_max_lag NR_CELL_REF(g_max_lag)
+/* MPCI-DASH P5 LDPC_ITER: per-cell iteration census of the decoded TBs (see nr_dash_ldpc_t): [0] tb, [1] cb_tried, [2] cb_ok, [3] it_sum, [4..] class histogram */
+typedef _Atomic uint64_t g_dash_ldpc_cell_t[4 + NR_DASH_IT_BINS];
+NR_CELL_STATIC(g_dash_ldpc_cell_t, g_dash_ldpc);
+#define g_dash_ldpc NR_CELL_REF(g_dash_ldpc)
+NR_CELL_STATIC(_Atomic uint64_t, g_max_lag_win); /* MPCI-DASH P4: worst lag since the last CELL_Q line (reset at read) */
+#define g_max_lag_win NR_CELL_REF(g_max_lag_win)
 
 NR_CELL_STATIC(_Atomic int, g_running);
 #define g_running NR_CELL_REF(g_running)
@@ -1517,6 +1523,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
      * high, the consumer pool is still too small for the offered rate. ---- */
     long prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
     const long lag  = prod - job.absolute_slot;
+    {
+      uint64_t w = atomic_load_explicit(&g_max_lag_win, memory_order_relaxed); /* MPCI-DASH P4: window maximum, a CAS only on a new maximum */
+      while (lag > (long)w && !atomic_compare_exchange_weak_explicit(&g_max_lag_win, &w, (uint64_t)lag, memory_order_relaxed, memory_order_relaxed))
+        ;
+    }
     if (lag > (long)atomic_load_explicit(&g_max_lag, memory_order_relaxed)) {
       uint64_t prev = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
       if (owned) {
@@ -1963,6 +1974,14 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         atomic_fetch_add_explicit(&g_cb_ok, dec.cb_ok, memory_order_relaxed);
         atomic_fetch_add_explicit(&g_cb_tried, dec.cb_tried, memory_order_relaxed);
         atomic_fetch_add_explicit(&g_cb_total, dec.cb_total, memory_order_relaxed);
+        const int ib = nr_dash_it_bin(dec.ldpc_it_max, dec.ldpc_it_cap); /* MPCI-DASH P5: relaxed adds only (printed by the cell's summary block when N > 1) */
+        if (ib >= 0) {
+          atomic_fetch_add_explicit(&g_dash_ldpc[0], 1, memory_order_relaxed);
+          atomic_fetch_add_explicit(&g_dash_ldpc[1], dec.cb_tried, memory_order_relaxed);
+          atomic_fetch_add_explicit(&g_dash_ldpc[2], dec.cb_ok, memory_order_relaxed);
+          atomic_fetch_add_explicit(&g_dash_ldpc[3], dec.ldpc_it_sum, memory_order_relaxed);
+          atomic_fetch_add_explicit(&g_dash_ldpc[4 + ib], 1, memory_order_relaxed);
+        }
       }
       atomic_fetch_add_explicit(&g_rnti_dec[job.rnti], 1, memory_order_relaxed);
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
@@ -2880,6 +2899,23 @@ void nr_pdsch_passive_queue_p99_dump(void)
   LOG_I(PHY, "SENSING: P99AGE slots(<2/4/8/12/16/18/24/32/inf) pdsch_enq_real=[%s] pdsch_enq_probe=[%s] scan_deq=[%s] "
         "scanq_fresh=%lu retry_chains=%lu retry_yields=%lu retry_gated=%lu\n", a[0], a[1], a[2], (unsigned long)fresh,
         (unsigned long)chains, (unsigned long)yields, (unsigned long)gated);
+}
+
+/* nr_pdsch_passive_queue_ldpc_dash: MPCI-DASH P5, the cumulative LDPC iteration census of the calling cell's decoded TBs. */
+void nr_pdsch_passive_queue_ldpc_dash(nr_dash_ldpc_t *out)
+{
+  out->tb = atomic_load_explicit(&g_dash_ldpc[0], memory_order_relaxed);
+  out->cb_tried = atomic_load_explicit(&g_dash_ldpc[1], memory_order_relaxed);
+  out->cb_ok = atomic_load_explicit(&g_dash_ldpc[2], memory_order_relaxed);
+  out->it_sum = atomic_load_explicit(&g_dash_ldpc[3], memory_order_relaxed);
+  for (int i = 0; i < NR_DASH_IT_BINS; i++)
+    out->hist[i] = atomic_load_explicit(&g_dash_ldpc[4 + i], memory_order_relaxed);
+}
+
+/* nr_pdsch_passive_queue_lag_win_take: MPCI-DASH P4, the largest producer-minus-job lag (slots) since the previous call, then reset. */
+uint64_t nr_pdsch_passive_queue_lag_win_take(void)
+{
+  return atomic_exchange_explicit(&g_max_lag_win, 0, memory_order_relaxed);
 }
 
 /* nr_pdsch_passive_queue_get_stats: copies the queue statistics (latency histograms, drop reasons, queued/decoded/CRC counts, batches) into *out.

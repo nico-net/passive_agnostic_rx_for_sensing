@@ -57,6 +57,7 @@
 #ifndef NR_PDSCH_PASSIVE_QUEUE_H
 #define NR_PDSCH_PASSIVE_QUEUE_H
 
+#include "common/utils/nr_cell_dash.h" /* nr_dash_ldpc_t (MPCI-DASH P5) */
 #include <stdbool.h>
 #include <stdint.h>
 #include "nr_dci_bits.h"
@@ -216,6 +217,10 @@ int nr_pdsch_passive_coreset_dmrs_top(int key, int *out3);
 void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
 /** P99: non-probe jobs waiting for a consumer (0 when not running); ISAC_PDSCH_RETRY_YIELD backlog test. */
 int nr_pdsch_passive_queue_backlog_real(void);
+/** MPCI-DASH P4: the largest lag (slots) a consumer saw since the previous call of this function, then reset (calling cell). */
+uint64_t nr_pdsch_passive_queue_lag_win_take(void);
+/** MPCI-DASH P5: cumulative LDPC iteration census of the calling cell's decoded TBs (counters bumped once per decoded TB). */
+void nr_pdsch_passive_queue_ldpc_dash(nr_dash_ldpc_t *out);
 /** P99: P99AGE summary line (ISAC_PDTIM_CLASS=1 only). */
 void nr_pdsch_passive_queue_p99_dump(void);
 /** P99: ISAC_PDSCH_RETRY_YIELD counters (nr_pdsch_passive_decode.c): recovery chains started, chains cut by a backlog,

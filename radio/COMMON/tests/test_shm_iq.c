@@ -267,9 +267,28 @@ static int test_fanout_rate(const char *lib, double fs, double offA, double rA, 
   return 0;
 }
 
+/* MPCI-DASH P0 (F2): the cell= tag of the SHMIQ_* lines is the ring id (the manager's "nrcell_<id>" ring without its prefix), not "pid<getpid()>" */
+static int test_ring_id(const char *lib)
+{
+  void *h = dlopen(lib, RTLD_NOW);
+  CHECK(h, "dlopen %s", dlerror());
+  void (*rid)(const char *, char *, size_t) = (void (*)(const char *, char *, size_t))dlsym(h, "shm_iq_ring_id");
+  CHECK(rid, "shm_iq_ring_id");
+  char t[32];
+  rid("nrcell_pci415", t, sizeof(t)); CHECK(!strcmp(t, "pci415"), "manager ring -> id (%s)", t);
+  rid("/nrcell_pci923", t, sizeof(t)); CHECK(!strcmp(t, "pci923"), "leading slash (%s)", t);
+  rid("isac_iq", t, sizeof(t)); CHECK(!strcmp(t, "isac_iq"), "other ring keeps its name (%s)", t);
+  rid("nrcell_", t, sizeof(t)); CHECK(!strcmp(t, "nrcell_"), "prefix alone is not an id (%s)", t);
+  rid("", t, sizeof(t)); CHECK(!strcmp(t, "ring"), "never empty (%s)", t);
+  rid("nrcell_abcdefghijklmnopqrstuvwxyz0123456789", t, sizeof(t)); CHECK(strlen(t) == 31 && !strncmp(t, "abcdefghij", 10), "truncated safely (%s)", t);
+  CHECK(!strstr(t, "pid"), "no pid tag");
+  printf("ring id tag: nrcell_<id> -> <id>, other names kept, never pid<n>\n");
+  return 0;
+}
+
 static int test_fanout(const char *lib)
 {
-  int f = test_passband(lib) | test_fanout_rate(lib, FS, 30e6, 61.44e6, 40e6, -25e6, 30.72e6, 20e6);
+  int f = test_passband(lib) | test_ring_id(lib) | test_fanout_rate(lib, FS, 30e6, 61.44e6, 40e6, -25e6, 30.72e6, 20e6);
   /* 245.76 MS/s ring: 80 MHz cell at 122.88 (D=2) and 20 MHz cell at 30.72 (D=8) at different shifts */
   return f | test_fanout_rate(lib, 245.76e6, 60e6, 122.88e6, 80e6, -60e6, 30.72e6, 20e6);
 }

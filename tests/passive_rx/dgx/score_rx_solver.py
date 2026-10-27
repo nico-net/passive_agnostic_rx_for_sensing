@@ -8,7 +8,7 @@ reopens, postconv window) no longer exist. This scorer takes them from the solve
   post_solve_tr   full decodes after the solve                                               >= GATE_POSTSOLVE_MIN (5000)
   crc_floor, drop_full  unchanged (overall PDSCHQ CRC >= 93.4, scan-queue drops <= 2.5 %)
 usage: score_rx_solver.py [--json] [--gate] <arm dir>...
-A multi-cell log (lines prefixed "[c<k>] ") is scored per cell automatically (header "== cell <k>", JSON {"arm":..., "cells": {...}})."""
+A multi-cell log (lines prefixed "[c<k>] ") is scored per cell automatically (header "== cell <k>", JSON {"arm":..., "cells": {...}}); the header carries "(PCI <n>)" ("?" when unknown), a counts line, and the JSON "pci"/"counts" keys."""
 import json, os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import score_rx
@@ -22,10 +22,9 @@ def score(arm, cell=None):
     rxd = os.path.join(arm, "rx") if os.path.isdir(os.path.join(arm, "rx")) else arm
     last = None
     try:
-        with open(os.path.join(rxd, "rx.log"), errors="replace") as f:
-            for l in cellsel.prepare([score_rx.ANSI.sub("", x) for x in f], cell, os.path.join(rxd, "rx.log")):
-                if "PDSCH_SOLVER per-rnti" in l:
-                    last = score_rx.ANSI.sub("", l)
+        for l in cellsel.prepare([score_rx.ANSI.sub("", x) for x in cellsel.read_lines(os.path.join(rxd, "rx.log"))], cell, os.path.join(rxd, "rx.log")):
+            if "PDSCH_SOLVER per-rnti" in l:
+                last = score_rx.ANSI.sub("", l)
     except FileNotFoundError:
         pass
     rn = []
@@ -61,7 +60,7 @@ if __name__ == "__main__":
             if do_gate:
                 line, ok = gate(s)
                 if k is not None:
-                    print("== cell %d" % k)
+                    print(score_rx.cell_head(k, s))
                 print(line); rc |= 0 if ok else 1
             elif k is None:
                 print(json.dumps(s, sort_keys=True))

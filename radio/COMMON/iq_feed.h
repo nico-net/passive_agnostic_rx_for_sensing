@@ -72,6 +72,14 @@ void iq_feed_stats(const iq_feed_t *f, iq_feed_stats_t *st);
 int iq_feed_cell_stats(iq_feed_t *f, int id, iq_feed_cell_stats_t *st); /* 0, or -1 no entry */
 /* "MPCI_FEED rate=.. centre_hz=.. reads=.. short=.. gaps=.. frozen=.. read_err=.. chan_overruns=.. chan_lag_max=.. threads=k/need cells=<tag>:ov=..,drop=..,lag=..[,paused];.." */
 int iq_feed_format(iq_feed_t *f, char *buf, size_t n);
+/* MPCI-DASH P3 CHAN_CELL: one line per cell ref, '\n'-separated, written to buf (NUL terminated), the bytes written returned: "SENSING: CHAN_CELL cell=<k> pci=<pci> ring=<tag> win_ms=<ms>
+ * blocks=<D> out_samples=<D> write_us_mean=<> write_us_max=<window> run_us_attrib=<D> lag_now=<samples> overruns_seen=<D> paused=<0|1>". run_us_attrib is the channelizer's
+ * backend run() time of the window split over the cells by their output samples (one backend call serves all cells): an attribution, not a measurement per cell. With fewer than two refs
+ * (one cell) nothing is written and 0 is returned; the first call only opens the windows (0). The caller passes the entry id, the cell index and the PCI (-1 unknown) of each cell. */
+typedef struct {
+  int id, cell, pci;
+} iq_feed_cell_ref_t;
+int iq_feed_format_chan_cells(iq_feed_t *f, uint64_t now_ns, const iq_feed_cell_ref_t *refs, int nrefs, char *buf, size_t cap);
 
 /* Which input path a receiver with `n_cells` admitted cells takes (pure; the N = 1 invariant: one cell is always the direct radio path). */
 typedef enum {

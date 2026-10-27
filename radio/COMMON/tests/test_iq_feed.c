@@ -198,6 +198,43 @@ static int test_two_cells(int frozen, int short_every)
   return 0;
 }
 
+/* MPCI-DASH P3: CHAN_CELL lines. One line per cell with cell=/pci=/ring= named, window deltas, nothing at one cell, nothing on the first (window opening) call */
+static int test_chan_cell(void)
+{
+  fake_t fk = {0};
+  iq_feed_t *f = make_feed(&fk, "g6chc", 1 << 20);
+  CHECK(f, "create");
+  iq_span_plan_t p;
+  plan_pair(&p);
+  const int a = iq_feed_cell_add(f, "pci415", CENTRE + p.cell[0].shift_hz, p.cell[0].decim, p.cell[0].passband_hz, 0);
+  const int b = iq_feed_cell_add(f, "pci403", CENTRE + p.cell[1].shift_hz, p.cell[1].decim, p.cell[1].passband_hz, 0);
+  CHECK(a >= 0 && b >= 0, "add");
+  iq_chan_seek(iq_feed_chan(f), 0);
+  iq_feed_cell_ref_t refs[2] = {{a, 0, 415}, {b, 1, 403}};
+  char buf[2048];
+  memset(buf, 'X', sizeof(buf));
+  CHECK(iq_feed_format_chan_cells(f, 1000000000ull, refs, 1, buf, sizeof(buf)) == 0 && buf[0] == 0, "one cell: no line");
+  CHECK(iq_feed_format_chan_cells(f, 1000000000ull, refs, 2, buf, sizeof(buf)) == 0 && buf[0] == 0, "the first call only opens the window");
+  run(f, 20);
+  const int nb = (int)(fk.pos / BLOCK);
+  const int n = iq_feed_format_chan_cells(f, 3000000000ull, refs, 2, buf, sizeof(buf));
+  CHECK(n > 0 && n == (int)strlen(buf), "two cells: lines (%d)", n);
+  char *nl = strchr(buf, '\n');
+  CHECK(nl, "two lines");
+  *nl = 0;
+  char want[160];
+  snprintf(want, sizeof(want), "SENSING: CHAN_CELL cell=0 pci=415 ring=pci415 win_ms=2000 blocks=%d out_samples=%d ", nb, nb * BLOCK / p.cell[0].decim);
+  CHECK(!strncmp(buf, want, strlen(want)), "line 0: %s (want prefix %s)", buf, want);
+  snprintf(want, sizeof(want), "SENSING: CHAN_CELL cell=1 pci=403 ring=pci403 win_ms=2000 blocks=%d out_samples=%d ", nb, nb * BLOCK / p.cell[1].decim);
+  CHECK(!strncmp(nl + 1, want, strlen(want)), "line 1: %s (want prefix %s)", nl + 1, want);
+  CHECK(strstr(buf, " write_us_mean=") && strstr(buf, " run_us_attrib=") && strstr(buf, " lag_now=") && strstr(buf, " overruns_seen=0 paused=0"), "fields: %s", buf);
+  /* the next window starts from here: nothing processed, zero blocks */
+  CHECK(iq_feed_format_chan_cells(f, 5000000000ull, refs, 2, buf, sizeof(buf)) > 0 && strstr(buf, " blocks=0 out_samples=0 "), "next window: %s", buf);
+  iq_feed_destroy(f);
+  printf("  CHAN_CELL lines: 2 cells, 1 cell none, priming call none\n");
+  return 0;
+}
+
 static int test_gap_and_error(void)
 {
   fake_t fk = {.gap_at = 11, .gap_len = 5 * BLOCK, .fail_at = 30};
@@ -401,6 +438,7 @@ int main(int argc, char **argv)
   fail |= test_two_cells(1, 0);
   fail |= test_two_cells(0, 3);
   fail |= test_two_cells(1, 4);
+  fail |= test_chan_cell();
   fail |= test_gap_and_error();
   fail |= test_pause_resume();
   fail |= test_threads();

@@ -151,6 +151,8 @@ void nr_pusch_passive_queue_note_unready(void);
 bool nr_pusch_passive_queue_enqueue(const nr_pusch_passive_job_t *job);
 
 void nr_pusch_passive_queue_get_stats(nr_pusch_passive_queue_stats_t *out);
+/** MPCI-DASH P4: the largest lag (slots) a consumer saw since the previous call of this function, then reset (calling cell). */
+uint64_t nr_pusch_passive_queue_lag_win_take(void);
 /// ULQ: real (non-probe) grants waiting in the queue; 0 when the priority queue is off.
 int nr_pusch_passive_queue_real_pending(void);
 /// ULQ: true when optional rescue decodes (UCI explore, UL_RETRY) may run now (ISAC_UL_SPARE_RESCUE).

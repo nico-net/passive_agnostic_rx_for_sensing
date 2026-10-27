@@ -1,0 +1,57 @@
+# SYNTHETIC format-only fixture (no receiver run): MPCI-DASH section 5 lines, 2 cells (c0 PCI 415, c1 PCI 923). Strings follow the C format strings / test_nr_cell_dash.cpp; numbers are invented.
+[0mSENSING: MPCI_CELL_SLOT cell=0 id=pci415 pci=415 centre_hz=3680010000 n_rb=106 ssb=1171 cfo_hz=-4827 nb_rx=4 ring=/nrcell_pci415
+[0mSENSING: MPCI_CELL_SLOT cell=1 id=pci923 pci=923 centre_hz=3759990000 n_rb=217 ssb=233 cfo_hz=-4832 nb_rx=4 ring=/nrcell_pci923
+[0mSHMIQ_READY cell=pci415 ring=/nrcell_pci415 channels=4/4 ring_rate=122880000 decim=1 taps=0,0 capacity=16777216 producer_pid=1735113 radio=type=x4xx,addr=192.168.10.2 time_source=1
+[0mSHMIQ_READY cell=pci923 ring=/nrcell_pci923 channels=4/4 ring_rate=122880000 decim=1 taps=0,0 capacity=16777216 producer_pid=1735113 radio=type=x4xx,addr=192.168.10.2 time_source=1
+SHMIQ_START cell=pci923 pos=32768
+[0mSHMIQ_TUNE cell=pci923 rx_hz=3759990000.000 ring_center_hz=3759990000.000 shift_hz=0.000 decim=1 epoch=0
+SHMIQ_START cell=pci415 pos=32768
+[0mSHMIQ_TUNE cell=pci415 rx_hz=3680010000.000 ring_center_hz=3680010000.000 shift_hz=0.000 decim=1 epoch=0
+SHMIQ_TUNE cell=pci923 rx_hz=3759990240.000 ring_center_hz=3759990000.000 shift_hz=240.000 decim=1 epoch=0
+[0m[c0] [32m[PHY]    SENSING: CORE_POOL n=4 yields=0 gpu_gives=0 nested=100 enforced=2 scan[n=4000 waited=3 promo=0 wait_us p50<=1 p99<=1 max=40] decode[n=2000 waited=0 promo=0 wait_us p50<=1 p99<=1 max=0] retry[n=0 waited=0 promo=0 wait_us p50<=0 p99<=0 max=0] disc[n=10 waited=1 promo=0 wait_us p50<=1 p99<=16 max=96] house[n=0 waited=0 promo=0 wait_us p50<=0 p99<=0 max=0]
+[0m[c0] [32m[PHY]    SENSING: CORE_POOL cell=0 pci=415 cell0[n=2000 waited=5 hold_ms=900 wait_us p50<=1 p99<=1 max=200]
+[0m[c0] [32m[PHY]    SENSING: CELL_CPU cell=0 pci=415 win_ms=10000 tokens_avg=0.90 share_pct=25.0 fair_pct=50.0 wait_p99_us=1 n=900 scan[hold_ms=300 n=400] decode[hold_ms=150 n=100] retry[hold_ms=0 n=0] disc[hold_ms=3 n=5] house[hold_ms=0 n=0] ul[hold_ms=50 n=20]
+[0m[c0] [32m[PHY]    SENSING: CELL_Q cell=0 pci=415 win_ms=10000 scan[depth_now=2 age_p50_slots<=1 age_p99_slots<=4 max_lag_win=5 drop_full=0 drop_stale=0 drop_epoch=0] pdsch[depth_now=0 max_lag_win=3 drop_full=0 drop_stale=1 drop_epoch=0] pusch[max_lag_win=0 drop_full=0 drop_stale=0 drop_epoch=0]
+[0m[c0] [32m[PHY]    SENSING: LDPC_ITER cell=0 pci=415 win_ms=10000 tb=10 cb=40 it_hist[1,2,3,4-6,7-10,11+,cap]=1,2,3,2,1,0,1 at_cap_pct=10.0 cb_fail_pct=10.0 mean_it=2.00
+[0m[c0] [32m[PHY]    SENSING: CELL_TIMING cell=0 pci=415 win_ms=10000 sfo_eps_ppm=0.250 cfo_hz=-4827 max_pos_acc=2 shift_next=0 sync_age_s=12.3 discont=0 resync=0
+[0m[c0] [32m[PHY]    SENSING: SLOT_CELL cell=0 pci=415 win_ms=10000 slot_us=500 slots=20000 proc_us p50<=128 p99<=256 max=1800 late_slots=0 cpu=6
+[0m[c0] [32m[PHY]    SENSING: CELL_SUM cell=0 pci=415 win_ms=10000 state=TRACKING decode_ok_pct=99.0 grants=100 cb_crc_pct=97.0 drops=0 disc=0 tokens_avg=0.90
+[0m[c1] [32m[PHY]    SENSING: CORE_POOL cell=1 pci=923 cell1[n=6000 waited=5 hold_ms=2600 wait_us p50<=1 p99<=16 max=1845]
+[0m[c1] [32m[PHY]    SENSING: CELL_CPU cell=1 pci=923 win_ms=10000 tokens_avg=2.60 share_pct=65.0 fair_pct=50.0 wait_p99_us=16 n=6000 scan[hold_ms=1400 n=2000] decode[hold_ms=600 n=1000] retry[hold_ms=0 n=0] disc[hold_ms=0 n=0] house[hold_ms=0 n=0] ul[hold_ms=0 n=2]
+[0m[c1] [32m[PHY]    SENSING: CELL_Q cell=1 pci=923 win_ms=10000 scan[depth_now=7 age_p50_slots<=4 age_p99_slots<=8 max_lag_win=12 drop_full=30 drop_stale=7 drop_epoch=0] pdsch[depth_now=3 max_lag_win=6 drop_full=10 drop_stale=3 drop_epoch=0] pusch[max_lag_win=0 drop_full=0 drop_stale=0 drop_epoch=0]
+[0m[c1] [32m[PHY]    SENSING: LDPC_ITER cell=1 pci=923 win_ms=10000 tb=20 cb=80 it_hist[1,2,3,4-6,7-10,11+,cap]=2,4,6,4,2,1,1 at_cap_pct=5.0 cb_fail_pct=12.5 mean_it=3.10
+[0m[c1] [32m[PHY]    SENSING: CELL_TIMING cell=1 pci=923 win_ms=10000 sfo_eps_ppm=-1.500 cfo_hz=-120 max_pos_acc=4 shift_next=-2 sync_age_s=12.3 discont=2 resync=1
+[0m[c1] [32m[PHY]    SENSING: CELL_GPU cell=1 pci=923 win_ms=10000 active=1 calls=100 fallback=10 fallback_pct=10.0 gpu_mem_mb=4 pin_mb=5
+[0m[c1] [32m[PHY]    SENSING: SLOT_CELL cell=1 pci=923 win_ms=10000 slot_us=500 slots=20000 proc_us p50<=256 p99<=256 max=3500 late_slots=3 cpu=7
+[0m[c1] [32m[PHY]    SENSING: CELL_SUM cell=1 pci=923 win_ms=10000 state=TRACKING decode_ok_pct=90.0 grants=100 cb_crc_pct=95.0 drops=12 disc=2 tokens_avg=0.50
+[0mSENSING: CHAN_CELL cell=0 pci=415 ring=pci415 win_ms=10000 blocks=37500 out_samples=614400000 write_us_mean=12.5 write_us_max=90 run_us_attrib=400000 lag_now=512 overruns_seen=0 paused=0
+[0mSENSING: CHAN_CELL cell=1 pci=923 ring=pci923 win_ms=10000 blocks=37500 out_samples=614400000 write_us_mean=13.1 write_us_max=120 run_us_attrib=410000 lag_now=1024 overruns_seen=0 paused=0
+[0mSENSING: CELL_BUDGET scope=cell cell=0 pci=415 ram_admit_mb=1200 gpu_admit_mb=800 gpu_now_mb=300 pin_now_mb=20 tokens_fair=4.00
+[0mSENSING: CELL_BUDGET scope=cell cell=1 pci=923 ram_admit_mb=1500 gpu_admit_mb=900 gpu_now_mb=350 pin_now_mb=25 tokens_fair=4.00
+[0mSENSING: CELL_BUDGET scope=proc cells=2 host_budget_mb=20000 host_used_mb=3000 headroom_mb=17000 avail_now_mb=15000 rss_mb=2500
+[0m[c0] [32m[PHY]    SENSING: CORE_POOL n=4 yields=0 gpu_gives=0 nested=200 enforced=2 scan[n=8000 waited=3 promo=0 wait_us p50<=1 p99<=1 max=40] decode[n=4000 waited=0 promo=0 wait_us p50<=1 p99<=1 max=0] retry[n=0 waited=0 promo=0 wait_us p50<=0 p99<=0 max=0] disc[n=10 waited=1 promo=0 wait_us p50<=1 p99<=16 max=96] house[n=0 waited=0 promo=0 wait_us p50<=0 p99<=0 max=0]
+[0m[c0] [32m[PHY]    SENSING: CORE_POOL cell=0 pci=415 cell0[n=4000 waited=10 hold_ms=1800 wait_us p50<=1 p99<=1 max=200]
+[0m[c0] [32m[PHY]    SENSING: CELL_CPU cell=0 pci=415 win_ms=10000 tokens_avg=1.10 share_pct=31.5 fair_pct=50.0 wait_p99_us=1 n=1800 scan[hold_ms=600 n=800] decode[hold_ms=300 n=200] retry[hold_ms=0 n=0] disc[hold_ms=3 n=5] house[hold_ms=0 n=0] ul[hold_ms=100 n=40]
+[0m[c0] [32m[PHY]    SENSING: CELL_Q cell=0 pci=415 win_ms=10000 scan[depth_now=2 age_p50_slots<=1 age_p99_slots<=4 max_lag_win=10 drop_full=2 drop_stale=0 drop_epoch=0] pdsch[depth_now=0 max_lag_win=3 drop_full=0 drop_stale=1 drop_epoch=0] pusch[max_lag_win=0 drop_full=0 drop_stale=0 drop_epoch=0]
+[0m[c0] [32m[PHY]    SENSING: LDPC_ITER cell=0 pci=415 win_ms=10000 tb=10 cb=40 it_hist[1,2,3,4-6,7-10,11+,cap]=1,2,3,2,1,0,2 at_cap_pct=20.0 cb_fail_pct=10.0 mean_it=2.00
+[0m[c0] [32m[PHY]    SENSING: CELL_TIMING cell=0 pci=415 win_ms=10000 sfo_eps_ppm=0.250 cfo_hz=-4827 max_pos_acc=2 shift_next=0 sync_age_s=12.3 discont=0 resync=0
+[0m[c0] [32m[PHY]    SENSING: SLOT_CELL cell=0 pci=415 win_ms=10000 slot_us=500 slots=20000 proc_us p50<=128 p99<=256 max=3600 late_slots=1 cpu=6
+[0m[c0] [32m[PHY]    SENSING: CELL_SUM cell=0 pci=415 win_ms=10000 state=TRACKING decode_ok_pct=98.5 grants=100 cb_crc_pct=97.0 drops=1 disc=0 tokens_avg=0.90
+[0m[c1] [32m[PHY]    SENSING: CORE_POOL cell=1 pci=923 cell1[n=12000 waited=10 hold_ms=5200 wait_us p50<=1 p99<=16 max=1845]
+[0m[c1] [32m[PHY]    SENSING: CELL_CPU cell=1 pci=923 win_ms=10000 tokens_avg=2.40 share_pct=60.0 fair_pct=50.0 wait_p99_us=16 n=12000 scan[hold_ms=2800 n=4000] decode[hold_ms=1200 n=2000] retry[hold_ms=0 n=0] disc[hold_ms=0 n=0] house[hold_ms=0 n=0] ul[hold_ms=0 n=2]
+[0m[c1] [32m[PHY]    SENSING: CELL_Q cell=1 pci=923 win_ms=10000 scan[depth_now=7 age_p50_slots<=4 age_p99_slots<=8 max_lag_win=12 drop_full=60 drop_stale=7 drop_epoch=0] pdsch[depth_now=3 max_lag_win=6 drop_full=10 drop_stale=3 drop_epoch=0] pusch[max_lag_win=0 drop_full=0 drop_stale=0 drop_epoch=0]
+[0m[c1] [32m[PHY]    SENSING: LDPC_ITER cell=1 pci=923 win_ms=10000 tb=20 cb=80 it_hist[1,2,3,4-6,7-10,11+,cap]=2,4,6,4,2,1,1 at_cap_pct=5.0 cb_fail_pct=12.5 mean_it=3.10
+[0m[c1] [32m[PHY]    SENSING: CELL_TIMING cell=1 pci=923 win_ms=10000 sfo_eps_ppm=-1.500 cfo_hz=-120 max_pos_acc=4 shift_next=-2 sync_age_s=12.3 discont=4 resync=2
+[0m[c1] [32m[PHY]    SENSING: CELL_GPU cell=1 pci=923 win_ms=10000 active=1 calls=100 fallback=10 fallback_pct=10.0 gpu_mem_mb=4 pin_mb=5
+[0m[c1] [32m[PHY]    SENSING: SLOT_CELL cell=1 pci=923 win_ms=10000 slot_us=500 slots=20000 proc_us p50<=256 p99<=256 max=3500 late_slots=3 cpu=7
+[0m[c1] [32m[PHY]    SENSING: CELL_SUM cell=1 pci=923 win_ms=10000 state=TRACKING decode_ok_pct=90.0 grants=100 cb_crc_pct=95.0 drops=12 disc=2 tokens_avg=0.50
+[0mSENSING: CHAN_CELL cell=0 pci=415 ring=pci415 win_ms=10000 blocks=37500 out_samples=614400000 write_us_mean=12.5 write_us_max=180 run_us_attrib=400000 lag_now=512 overruns_seen=0 paused=0
+[0mSENSING: CHAN_CELL cell=1 pci=923 ring=pci923 win_ms=10000 blocks=37500 out_samples=614400000 write_us_mean=13.1 write_us_max=240 run_us_attrib=410000 lag_now=1024 overruns_seen=1 paused=0
+[0mSENSING: CELL_BUDGET scope=cell cell=0 pci=415 ram_admit_mb=1200 gpu_admit_mb=800 gpu_now_mb=300 pin_now_mb=20 tokens_fair=4.00
+[0mSENSING: CELL_BUDGET scope=cell cell=1 pci=923 ram_admit_mb=1500 gpu_admit_mb=900 gpu_now_mb=350 pin_now_mb=25 tokens_fair=4.00
+[0mSENSING: CELL_BUDGET scope=proc cells=2 host_budget_mb=20000 host_used_mb=6000 headroom_mb=14000 avail_now_mb=15000 rss_mb=5000
+[0mSHMIQ_DISCONT cell=pci415 skipped_in=134278103 new_pos=383909888
+[0mSHMIQ_DISCONT cell=pci923 skipped_in=134278273 new_pos=383909888
+[0mSHMIQ_DISCONT cell=pci415 skipped_in=134257805 new_pos=599851008
+SHMIQ_END cell=pci923 reads=900 overruns=0 dropped_in=134278273 discont=1 clipped=0
+SHMIQ_END cell=pci415 reads=1000 overruns=0 dropped_in=268535908 discont=2 clipped=3

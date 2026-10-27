@@ -1,0 +1,1 @@
+FAIL me_TN1_1_220653 [postconv] n_contexts=0<2.0(FAIL) postconv_crc=None<99.8(FAIL) postconv_decoded=None<5000.0(FAIL) reopens=0<=0.0 ttc_tda0=None>39.0(FAIL) ttc_tda2=None>77.0(FAIL) crc_floor=29.74<93.4(FAIL) drop_full=0.9431<=2.5

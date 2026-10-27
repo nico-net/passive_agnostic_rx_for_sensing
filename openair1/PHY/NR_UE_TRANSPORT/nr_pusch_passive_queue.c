@@ -161,6 +161,8 @@ NR_CELL_STATIC_INIT(_Atomic uint64_t, g_dropped_snapshot, 0);
 #define g_dropped_snapshot NR_CELL_REF(g_dropped_snapshot)
 NR_CELL_STATIC_INIT(_Atomic uint64_t, g_max_lag, 0);
 #define g_max_lag NR_CELL_REF(g_max_lag)
+NR_CELL_STATIC_INIT(_Atomic uint64_t, g_max_lag_win, 0); /* MPCI-DASH P4: worst lag since the last CELL_Q line (reset at read) */
+#define g_max_lag_win NR_CELL_REF(g_max_lag_win)
 
 NR_CELL_STATIC_INIT(_Atomic int, g_running, 0);
 #define g_running NR_CELL_REF(g_running)
@@ -337,6 +339,11 @@ static void *nr_pusch_passive_queue_thread(void *arg)
      * indistinguishably from a weak channel. Count it, never "decode anyway and hope". ---- */
     const long prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
     const long lag  = prod - job.absolute_slot;
+    {
+      uint64_t w = atomic_load_explicit(&g_max_lag_win, memory_order_relaxed); /* MPCI-DASH P4: window maximum, a CAS only on a new maximum */
+      while (lag > (long)w && !atomic_compare_exchange_weak_explicit(&g_max_lag_win, &w, (uint64_t)lag, memory_order_relaxed, memory_order_relaxed))
+        ;
+    }
     if (lag > (long)atomic_load_explicit(&g_max_lag, memory_order_relaxed)) {
       atomic_store_explicit(&g_max_lag, (uint64_t)(lag > 0 ? lag : 0), memory_order_relaxed);
     }
@@ -881,6 +888,11 @@ void nr_pusch_passive_queue_get_stats(nr_pusch_passive_queue_stats_t *out)
   out->dropped_unready = atomic_load_explicit(&g_dropped_unready, memory_order_relaxed);
   out->dropped_snapshot = atomic_load_explicit(&g_dropped_snapshot, memory_order_relaxed);
   out->max_lag_slots = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
+}
+
+uint64_t nr_pusch_passive_queue_lag_win_take(void)
+{
+  return atomic_exchange_explicit(&g_max_lag_win, 0, memory_order_relaxed);
 }
 
 void nr_pusch_passive_queue_stop(void)

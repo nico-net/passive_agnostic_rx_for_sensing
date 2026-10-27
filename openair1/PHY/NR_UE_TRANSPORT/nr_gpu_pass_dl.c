@@ -223,8 +223,20 @@ static void census(void)
         (unsigned long)G.gate[15], (unsigned long)G.why[WHY_SEGFAIL], (unsigned long)G.why[WHY_C32], (unsigned long)G.why[WHY_Z], (unsigned long)G.why[WHY_G], (unsigned long)G.why[WHY_CLASS]);
 }
 
+/* MPCI-DASH P2 CELL_GPU: host-side per-cell counters (indexed by the calling thread's cell; the pass is entered on the cell's bound thread): DL pass calls and host refusals.
+ * One relaxed add each; the device-side times of the pass are not attributable per cell without a CUDA change (see the report). */
+static _Atomic uint64_t g_cell_calls[NR_CELL_MAX], g_cell_fb[NR_CELL_MAX];
+void nr_gpu_pass_dl_cell_counters(int cell, uint64_t *calls, uint64_t *fallback, int *active)
+{
+  const int c = cell >= 0 && cell < NR_CELL_MAX ? cell : 0;
+  *calls = atomic_load_explicit(&g_cell_calls[c], memory_order_relaxed);
+  *fallback = atomic_load_explicit(&g_cell_fb[c], memory_order_relaxed);
+  *active = nr_gpu_pass_dl_cell_ready(c) ? 1 : 0;
+}
+
 static int fb(int why)
 {
+  atomic_fetch_add_explicit(&g_cell_fb[nr_cell_idx()], 1, memory_order_relaxed);
   const uint64_t n = atomic_fetch_add_explicit(&G.fb[why], 1, memory_order_relaxed) + 1;
   if (n == 1)
     LOG_A(PHY, "SENSING: GPUPASS first fallback: %s\n", fb_name[why]);
@@ -643,6 +655,7 @@ int nr_gpu_pass_dl_hq_xfer(int down, const uint16_t *blk, int16_t *d, int C, int
 }
 int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
 {
+  atomic_fetch_add_explicit(&g_cell_calls[nr_cell_idx()], 1, memory_order_relaxed);
   memset(nr_gp_tt, 0, sizeof(nr_gp_tt));
   if (!nr_gpu_pass_active())
     return fb(FB_OFF);

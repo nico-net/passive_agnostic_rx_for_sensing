@@ -193,6 +193,15 @@ def golden(name):
         return f.read()
 
 
+def cnt(g):
+    """Expected counts of the mixed log's cell fed by cell_<g>.log (independent of the log tagging: counts of the source lines)."""
+    return cellsel.counts(read("cell_%s.log" % g))
+
+
+def cline(g):
+    return cellsel.counts_line(cnt(g))
+
+
 class Scorers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -223,8 +232,10 @@ class Scorers(unittest.TestCase):
         gm = os.path.join(PR, "goal_metrics.py")
         r = run(gm, self.mixed)
         self.assertEqual(r.returncode, 0, r.stderr)
-        want = "== cell 0\n" + golden("golden_goal_metrics_a.txt").replace("mpci/fixtures/cell_a.log", self.mixed) \
-            + "== cell 1\n" + golden("golden_goal_metrics_b.txt").replace("mpci/fixtures/cell_b.log", self.mixed)
+        # always-on per-cell extras: PCI label ("?" = the log names no cell), CELL counts line per cell, one UNTAGGED line
+        want = "".join("== cell %d (PCI ?)\n%s%s CELL pci=None %s\n" % (k, golden("golden_goal_metrics_%s.txt" % g).replace("mpci/fixtures/cell_%s.log" % g, self.mixed),
+                                                                     self.mixed, cline(g)) for k, g in ((0, "a"), (1, "b"))) \
+            + "%s UNTAGGED (process-wide, in no cell) %s\n" % (self.mixed, cellsel.counts_line(cellsel.counts([GPU_LINE])))
         self.assertEqual(r.stdout, want)
         r = run(gm, "--json", self.mixed)
         d = json.loads(r.stdout)
@@ -232,7 +243,9 @@ class Scorers(unittest.TestCase):
         for k, g in (("0", "a"), ("1", "b")):
             ref = json.loads(golden("golden_goal_metrics_%s.json" % g))
             ref.pop("run")
+            ref.update(pci=None, counts=cnt(g))
             self.assertEqual(d["cells"][k], ref)
+        self.assertEqual(d["untagged"], cellsel.counts([GPU_LINE]))
         self.assertNotEqual(d["cells"]["0"], d["cells"]["1"])
 
     def test_goal_metrics_unprefixed_byte_identical(self):
@@ -249,7 +262,7 @@ class Scorers(unittest.TestCase):
         for script, args, gold in (("score_rx.py", ("--gate",), "golden_score_rx_gate_%s.txt"),
                                    ("score_rx_solver.py", ("--gate",), "golden_score_rx_solver_gate_%s.txt")):
             r = self._arm_run(script, self.arms["mixed"], *args)
-            want = "".join("== cell %d\n%s" % (k, golden(gold % g).replace("arm_%s" % g, "mixed")) for k, g in ((0, "a"), (1, "b")))
+            want = "".join("== cell %d (PCI ?)\n  cell pci=None %s\n%s" % (k, cline(g), golden(gold % g).replace("arm_%s" % g, "mixed")) for k, g in ((0, "a"), (1, "b")))
             self.assertEqual(r.stdout, want, script)
             self.assertEqual(r.returncode, 1)                       # worst cell: both FAIL on the fixtures
         for script, gold in (("score_rx.py", "golden_score_rx_%s.json"), ("score_rx_solver.py", "golden_score_rx_solver_%s.json")):
@@ -258,7 +271,7 @@ class Scorers(unittest.TestCase):
             d = json.loads(r.stdout)
             self.assertEqual(d["arm"], "mixed")
             for k, g in (("0", "a"), ("1", "b")):
-                ref = json.loads(golden(gold % g)); ref["arm"] = "mixed"
+                ref = json.loads(golden(gold % g)); ref["arm"] = "mixed"; ref.update(pci=None, counts=cnt(g))
                 self.assertEqual(d["cells"][k], ref, (script, k))
 
     def test_gate_exit_is_worst_cell(self):
@@ -267,9 +280,9 @@ class Scorers(unittest.TestCase):
         r = subprocess.run([sys.executable, os.path.join(PR, "dgx", "score_rx.py"), "--gate", "mixed"], capture_output=True, text=True,
                            cwd=self.tmp, env=env)
         lines = r.stdout.splitlines()
-        self.assertEqual(lines[0], "== cell 0")
-        self.assertTrue(lines[1].startswith("FAIL") or lines[1].startswith("PASS"))
-        self.assertEqual(r.returncode, 0 if all(l.startswith("PASS") for l in lines if not l.startswith("==")) else 1)
+        self.assertEqual(lines[0], "== cell 0 (PCI ?)")
+        self.assertTrue(lines[1].startswith("  cell pci=None ") and lines[2][:4] in ("FAIL", "PASS"))
+        self.assertEqual(r.returncode, 0 if all(l.startswith("PASS") for l in lines if not l.startswith(("==", "  cell pci="))) else 1)
 
     def test_score_rx_unprefixed_byte_identical(self):
         for script, args, gold in (("score_rx.py", ("--json",), "golden_score_rx_%s.json"), ("score_rx.py", ("--gate",), "golden_score_rx_gate_%s.txt"),
@@ -292,7 +305,7 @@ class Scorers(unittest.TestCase):
             self.assertEqual(r.stdout, golden("golden_runsum_%s.txt" % g))
         r = run(rs, self.mixed)
         self.assertEqual(r.returncode, 0, r.stderr)
-        want = self.mixed + "\n== cell 0\n" + golden("golden_runsum_a.txt").split("\n", 1)[1] + "== cell 1\n" + golden("golden_runsum_b.txt").split("\n", 1)[1]
+        want = self.mixed + "\n" + "".join("== cell %d (PCI ?)\n%s  cell pci=None %s\n" % (k, golden("golden_runsum_%s.txt" % g).split("\n", 1)[1], cline(g)) for k, g in ((0, "a"), (1, "b")))
         self.assertEqual(r.stdout, want)
 
 

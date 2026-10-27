@@ -39,8 +39,7 @@ def score(arm, cell=None):
              contexts=[], ttc_by_tda={}, n_contexts=0, reopens=0, ldpc_zero_tb=None, postconv_t_s=None, postconv_decoded=None,
              postconv_crc_pct=None, search_crc_pct=None)
     try:
-        with open(os.path.join(rxd, "rx.log"), errors="replace") as f:
-            lines = cellsel.prepare([ANSI.sub("", l) for l in f], cell, os.path.join(rxd, "rx.log"))
+        lines = cellsel.prepare([ANSI.sub("", l) for l in cellsel.read_lines(os.path.join(rxd, "rx.log"))], cell, os.path.join(rxd, "rx.log"))
     except FileNotFoundError:
         lines = []
     first_seen, convs, trials, samples = {}, [], {}, []
@@ -164,15 +163,29 @@ def gate_line(s, env=os.environ):
         return "%s=%s%s%s%s" % (n, vs, op if p else {">=": "<", "<=": ">"}[op], lim, "" if p else "(FAIL)")
     return ("PASS " if ok else "FAIL ") + s["arm"] + " [" + env.get("GATE_MODE", GATE_DEFAULTS["GATE_MODE"]) + "] " + " ".join(fmt(x) for x in c), ok
 
+def arm_info(arm):
+    """cellsel.cell_info() of a multi-cell rx.log (lines prefixed "[c<k>] "), else None."""
+    rxd = os.path.join(arm, "rx") if os.path.isdir(os.path.join(arm, "rx")) else arm
+    return cellsel.cell_info(os.path.join(rxd, "rx.log"))
+
 def arm_cells(arm):
     """Cells of a multi-cell rx.log (lines prefixed "[c<k>] "), else None."""
-    rxd = os.path.join(arm, "rx") if os.path.isdir(os.path.join(arm, "rx")) else arm
-    return cellsel.log_cells(os.path.join(rxd, "rx.log"))
+    i = arm_info(arm)
+    return i and i["cells"]
 
 def per_cell(arm, fn):
-    """-> [(cell or None, fn(arm, cell))]: one entry for an unprefixed / one-cell log, one per cell otherwise (never merged)."""
-    cs = arm_cells(arm)
-    return [(None, fn(arm, None))] if cs is None else [(k, fn(arm, k)) for k in cs]
+    """-> [(cell or None, fn(arm, cell))]: one entry for an unprefixed / one-cell log, one per cell otherwise (never merged).
+    Each cell's dict gets "pci" (None when the log does not name the cell: MPCI_CELL / ISAC_METRICS) and "counts" (cellsel.counts)."""
+    i = arm_info(arm)
+    if i is None:
+        return [(None, fn(arm, None))]
+    out = [(k, fn(arm, k)) for k in i["cells"]]
+    for k, s in out:
+        s["pci"], s["counts"] = i["pci"].get(k), i["counts"][k]
+    return out
+
+def cell_head(k, s):
+    return cellsel.cell_header(k, s.get("pci")) + ("\n  cell pci=%s %s" % (s["pci"], cellsel.counts_line(s["counts"])) if "counts" in s else "")
 
 if __name__ == "__main__":
     gate = "--gate" in sys.argv
@@ -184,7 +197,7 @@ if __name__ == "__main__":
             if gate:
                 line, ok = gate_line(s)
                 if k is not None:
-                    print("== cell %d" % k)
+                    print(cell_head(k, s))
                 print(line); rc |= 0 if ok else 1
             elif k is None:
                 print(json.dumps(s, sort_keys=True))

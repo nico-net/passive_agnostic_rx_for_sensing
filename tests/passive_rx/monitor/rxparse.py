@@ -326,6 +326,7 @@ def classify_ssname(name):
 CELL_TAG = re.compile(r"^((?:\x1b?\[[0-9;]*m)*(?:\d+(?:\.\d+)? )?)\[c(\d+)\] ")
 # Receiver-wide line types: radio-level facts of the one X410 claim, shown once in receiver-wide cards and mirrored to
 # every cell's page whatever prefix the printing thread carried (radio threads are bound to no cell).
+ANSI = re.compile(r"\x1b?\[[0-9;]*m")
 WIDE_TOKENS = ("CHPOW", "RFSTALL", "RFCENSUS", "RFTSDISC")
 
 
@@ -335,6 +336,11 @@ def split_cell(line):
         return None, line
     m = CELL_TAG.match(line)
     if not m:
+        if "[" in line[:64] and ("\x1b" in line[:64] or "[0m" in line[:64]):      # colour codes between timestamp and tag
+            clean = ANSI.sub("", line)
+            m = CELL_TAG.match(clean)
+            if m:
+                return int(m.group(2)), m.group(1) + clean[m.end():]
         return None, line
     return int(m.group(2)), m.group(1) + line[m.end():]
 
@@ -347,6 +353,541 @@ def is_receiver_wide(line):
     return "RFCHAN ch" in line or "CMDLINE:" in line
 
 
+# --------------------------------------------------------------------------- multi-PCI receiver lines (MPCI_*, SHMIQ_*, CORE_*, SFO reset)
+# One process runs N cells on one capture: the capture/channelizer facts are receiver-wide, the rest is per cell. Field sets are the
+# printf formats of the C sources (nr_cell_admit.c, iq_span.c, iq_feed.c, nr_cell_mgr.c, nr_cell_life.c, nr-uesoftmodem.c, nr-ue.c,
+# shm_iq.c, nr_core_layout.c, nr_core_pool). No flag: the aggregate fills only when such lines (or "[c<k>] " tags) are present.
+MPCI_LINE = re.compile(r"MPCI_|SHMIQ_|CORE_P|SFO reset|CELL_(?:CPU|Q|TIMING|GPU|BUDGET|SUM)\b|LDPC_ITER|CHAN_CELL|SLOT_CELL")
+# MPCI-DASH section 5 per-cell lines (formats: common/utils/nr_cell_dash.h, nr_core_pool.c, radio/COMMON/iq_feed.c)
+DASH_TOKENS = {"CELL_CPU": "cpu", "CELL_Q": "q", "LDPC_ITER": "ldpc", "CELL_TIMING": "timing", "CELL_GPU": "gpu", "CHAN_CELL": "chan",
+               "CELL_BUDGET": "budget", "SLOT_CELL": "slot", "CELL_SUM": "sum"}
+# window-delta fields summed over the run (total), and fields whose run maximum is kept (peak); [group.]field names
+DASH_TOT = {"q": ("scan.drop_full", "scan.drop_stale", "pdsch.drop_full", "pdsch.drop_stale", "pusch.drop_full", "pusch.drop_stale"),
+            "ldpc": ("tb", "cb"), "timing": ("discont", "resync"), "gpu": ("calls", "fallback"), "slot": ("slots", "late_slots"),
+            "sum": ("grants", "drops", "disc"), "chan": ("blocks", "out_samples", "overruns_seen"), "cpu": ("n",)}
+DASH_PEAK = {"q": ("scan.max_lag_win", "pdsch.max_lag_win", "pusch.max_lag_win"), "cpu": ("wait_p99_us", "tokens_avg"), "slot": ("proc_max", "proc_p99"),
+             "chan": ("write_us_max", "lag_now"), "ldpc": ("at_cap_pct", "cb_fail_pct")}
+DASH_SERIES = {"cpu": ("share_pct", "tokens_avg", "wait_p99_us"), "sum": ("decode_ok_pct", "cb_crc_pct", "tokens_avg")}
+DASH_SERIES_CAP = 240
+_NUM = re.compile(r"-?\d+(?:\.\d+)?$")
+_GRP = re.compile(r"(\w+)\[([^\]]*)\]")
+_GKV = re.compile(r"(\w+)(?:<=|=)(-?\d+(?:\.\d+)?)")
+_ITH = re.compile(r"it_hist\[[^\]]*\]=([\d,]+)")
+
+
+def _dnum(v):
+    if _NUM.match(v):
+        return float(v) if "." in v else int(v)
+    return v
+
+
+def parse_dash(tok, tail):
+    """One CELL_* / LDPC_ITER / SLOT_CELL / CHAN_CELL line (tail = after the token) -> flat dict of numbers and strings.
+    Bracket groups become '<group>.<key>' (scan.drop_full, pdsch.depth_now, cell1.hold_ms ...); the pool 'wait_us p50<= p99<= max=' of a
+    cell block and the 'proc_us p50<= p99<= max=' of SLOT_CELL become wait_*/proc_*; it_hist[..]=a,b,.. becomes the list 'it_hist'."""
+    d = {}
+    m = _ITH.search(tail)
+    if m:
+        d["it_hist"] = [int(x) for x in m[1].split(",")]
+        tail = tail[:m.start()] + tail[m.end():]
+    for g, inner in _GRP.findall(tail):
+        for a, b in _GKV.findall(inner):
+            d["%s.%s" % (g, a)] = _dnum(b)
+    flat = _GRP.sub(" ", tail)
+    if tok == "SLOT_CELL":
+        m = re.search(r"proc_us p50<=(\d+) p99<=(\d+) max=(\d+)", flat)
+        if m:
+            d["proc_p50"], d["proc_p99"], d["proc_max"] = int(m[1]), int(m[2]), int(m[3])
+            flat = flat[:m.start()] + flat[m.end():]
+    for a, b in KV.findall(flat):
+        d[a] = _dnum(b)
+    return d
+KV = re.compile(r"(\w+)=(\[[^\]]*\]|\S+)")
+FEED_CELL_CAP = 600
+
+
+def _fl(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _kv(s):
+    """key=value pairs of a log line; [..] values stay one token."""
+    return {k: v for k, v in KV.findall(s)}
+
+
+def _kvn(s, ints=(), floats=()):
+    d = _kv(s)
+    for k in ints:
+        if k in d:
+            d[k] = _int(d[k], d[k])
+    for k in floats:
+        if k in d:
+            try:
+                d[k] = float(d[k])
+            except ValueError:
+                pass
+    return d
+
+
+class MpciAgg:
+    """Receiver-wide aggregate of the multi-PCI lines, keyed by cell index k ([c<k>] tag, MPCI_CELL slot=, MPCI_RT cell=)."""
+
+    def __init__(self):
+        self.seen = False
+        self.admit = {}
+        self.admit_notes = []
+        self.span = {}
+        self.span_events = []
+        self.radio = {}
+        self.feed_started = {}
+        self.feed = {}                      # last periodic MPCI_FEED
+        self.feed_n = 0
+        self.feed_series = deque(maxlen=FEED_CELL_CAP)
+        self.feed_peak = {}                 # tag -> max ov / drop / lag over the run (the last line is the shutdown snapshot, counters reset)
+        self.feed_peak_all = {}             # max chan_overruns / chan_lag_max / gaps / frozen / read_err over the run
+        self.feed_events = []
+        self.life = {}
+        self.life_events = []
+        self.slots = {}                     # k -> MPCI_CELL_SLOT fields
+        self.cell_events = {}               # k -> [MPCI_CELL records]
+        self.rt = {}                        # k -> core
+        self.sfo = {}                       # k -> {"n", "by_reason", "last_eps_ppm", "max_abs_eps_ppm"}
+        self.core_plan = {}
+        self.core_plan_notes = []
+        self.pool_cores = None
+        self.pool_line = {}                 # k -> last "CORE_POOL n=.." line, parsed
+        self.pool_lines_n = {}
+        self.long_lease = {}                # k -> {"n", "max_ms", "by_name": {name: n}}
+        self.long_wait = {}                 # k -> {"n", "max_ms"}
+        self.rings = []                     # SHMIQ_READY order
+        self.tune_centres = []              # distinct ring_center_hz in order of first TUNE (ring i = i-th READY)
+        self.tunes = {}                     # centre index -> {"n", "last", "max_abs_shift_hz"}
+        self.n_start = 0
+        self.n_end = 0
+        self.discont = {"n": 0, "skipped_in": 0, "last_new_pos": None}
+        self.overrun = {"n": 0, "skipped_in": 0}
+        self.shmiq_notes = []
+        self.shmiq_unattributed = {"discont": 0, "overrun": 0}   # lines whose cell= names no known ring id (old pid<n> form)
+        self.dash = {}                      # k -> {"cpu"|"q"|"ldpc"|"timing"|"gpu"|"chan"|"budget"|"slot"|"sum": {"last", "n", "tot", "peak"}}
+        self.dash_series = {}               # k -> {"cpu"|"sum": deque of {field: value}}
+        self.budget_proc = {}               # CELL_BUDGET scope=proc
+        self.pool_cell_blk = {}             # k -> newest per-cell "CORE_POOL cell=<k> pci=<pci> cell<k>[..]" block (F1)
+        self.dash_n = 0
+        self._raw_k = -1
+        self._pool_seq = 0
+
+    # ---- entry
+    def ingest(self, k, rest, t):
+        """k: cell index of the [c<k>] tag (None = untagged = cell 0); rest: the line without the tag."""
+        kk = 0 if k is None else k
+        self._raw_k = -1 if k is None else k       # pool "long" lines of the lease threads are untagged: kept receiver-wide (-1)
+        if "SFO reset" in rest:
+            self._sfo(kk, rest)
+            return
+        i = rest.find("SENSING: ")
+        body = rest[i + 9:] if i >= 0 else rest
+        body = body.lstrip()
+        if "[0m" in body or "[3" in body:
+            body = re.sub(r"\x1b?\[[0-9;]*m", "", body)
+        if body.startswith("MPCI_"):
+            tok, _, tail = body.partition(" ")
+            h = getattr(self, "_" + tok.lower(), None)
+            if h:
+                self.seen = True
+                h(kk, tail, t)
+        elif body.startswith("SHMIQ_"):
+            tok, _, tail = body.partition(" ")
+            self._shmiq(tok, tail, t)
+        elif body.partition(" ")[0] in DASH_TOKENS:
+            tok, _, tail = body.partition(" ")
+            self._dash(kk, tok, tail, t)
+        elif body.startswith("CORE_P"):
+            tok, _, tail = body.partition(" ")
+            if tok == "CORE_POOL:":
+                self._pool_cores(tail)
+            elif tok == "CORE_POOL":
+                self._pool(kk, tail)
+            elif tok == "CORE_PLAN":
+                self._plan(tail)
+
+    # ---- MPCI-DASH per-cell lines
+    def _dash(self, k, tok, tail, t):
+        name = DASH_TOKENS[tok]
+        d = parse_dash(tok, tail)
+        self.seen = True
+        self.dash_n += 1
+        if name == "budget" and d.get("scope") == "proc":
+            self.budget_proc = d
+            return
+        c = d.get("cell")
+        c = c if isinstance(c, int) else k
+        e = self.dash.setdefault(c, {}).setdefault(name, {"n": 0, "tot": {}, "peak": {}})
+        e["n"] += 1
+        e["last"] = d
+        for f in DASH_TOT.get(name, ()):
+            if isinstance(d.get(f), (int, float)):
+                e["tot"][f] = e["tot"].get(f, 0) + d[f]
+        for f in DASH_PEAK.get(name, ()):
+            if isinstance(d.get(f), (int, float)):
+                e["peak"][f] = max(e["peak"].get(f, d[f]), d[f])
+        if name in DASH_SERIES:
+            sr = self.dash_series.setdefault(c, {}).setdefault(name, deque(maxlen=DASH_SERIES_CAP))
+            sr.append(dict({f: d.get(f) for f in DASH_SERIES[name]}, t=t))
+
+    # ---- MPCI_*
+    def _mpci_admit(self, k, tail, t):
+        if tail.startswith("skipped") or "bad_arguments" in tail:
+            self.admit_notes.append(tail.strip()[:200])
+            m = re.search(r"cells=(\d+) of (\d+)", tail)
+            if m:
+                self.admit = {"cells": int(m[1]), "n": int(m[2]), "reason": "bad_arguments", "refuse": 1, "unserved": []}
+            return
+        d = _kvn(tail, ints=("refuse", "host_budget_mb", "host_used_mb", "gpu_budget_mb", "gpu_used_mb", "nid_window"))
+        m = re.search(r"cells=(\d+) of (\d+)", tail)
+        if m:
+            d["cells"], d["n"] = int(m[1]), int(m[2])
+        u = re.search(r"unserved=\[([^\]]*)\]", tail)
+        d["unserved"] = [dict(zip(("cell", "reason"), x.split(":", 1))) for x in u[1].split()] if u else []
+        self.admit = d
+
+    def _mpci_span(self, k, tail, t):
+        if not tail.startswith("ok="):
+            self.span_events.append({"t": t, "text": tail.strip()[:240]})
+            return
+        d = _kvn(tail, ints=("ok", "n_rx", "device_rates"), floats=("centre_hz", "rate", "usable_mhz", "analog_mhz"))
+        m = re.search(r"span_mhz=\[([-\d.]+)\.\.([-\d.]+)\]", tail)
+        if m:
+            d["span_lo_mhz"], d["span_hi_mhz"] = float(m[1]), float(m[2])
+            d.pop("span_mhz", None)
+        m = re.search(r"served=(\d+)/(\d+)", tail)
+        if m:
+            d["served"], d["n_cells"] = int(m[1]), int(m[2])
+        cells = []
+        for x in (d.get("cells") or "-").split(","):
+            p = x.split(":")
+            if len(p) == 3:
+                cells.append({"id": p[0], "decim": _int(p[1].lstrip("d"), 1), "shift_mhz": float(p[2])})
+        d["cells"] = cells
+        d["unserved"] = [dict(zip(("id", "reason"), x.split(":", 1))) for x in d.get("unserved", "-").split(",") if ":" in x]
+        self.span = d
+
+    def _mpci_radio(self, k, tail, t):
+        m = re.search(r"rates (\d+) usable.*analog_bw_mhz=([\d.]+) rx_channels=(\d+)", tail)
+        if m:
+            self.radio = {"device_rates": int(m[1]), "analog_bw_mhz": float(m[2]), "rx_channels": int(m[3])}
+
+    def _mpci_feed(self, k, tail, t):
+        if tail.startswith("started"):
+            self.feed_started = _kvn(tail, ints=("reader_cpu", "chan_cpus", "threads", "needed"), floats=("capacity_msps",))
+            return
+        if not tail.startswith("rate="):
+            self.feed_events.append({"t": t, "text": tail.strip()[:240]})
+            return
+        d = _kvn(tail, ints=("reads", "samples", "short", "gaps", "frozen", "read_err", "chan_overruns", "chan_discont", "chan_lag_max"),
+                 floats=("rate", "centre_hz"))
+        m = re.search(r"threads=(\d+)/(\d+)", tail)
+        if m:
+            d["threads_run"], d["threads_need"] = int(m[1]), int(m[2])
+        cells = {}
+        for x in (d.get("cells") or "-").split(";"):
+            tag, _, kvs = x.partition(":")
+            if kvs:
+                c = _kvn(kvs.replace(",", " "), ints=("ov", "drop", "lag"))
+                c["paused"] = "paused" in kvs.split(",")
+                cells[tag] = c
+        d["cells"] = cells
+        d["t"] = t
+        self.feed = d
+        self.feed_n += 1
+        self.feed_series.append({"t": t, **{x: d.get(x) for x in ("reads", "gaps", "frozen", "read_err", "chan_overruns", "chan_lag_max")},
+                                 "cells": {g: {x: c.get(x) for x in ("ov", "drop", "lag")} for g, c in cells.items()}})
+        for x in ("chan_overruns", "chan_lag_max", "gaps", "frozen", "read_err", "short"):
+            if isinstance(d.get(x), int):
+                self.feed_peak_all[x] = max(self.feed_peak_all.get(x, 0), d[x])
+        for g, c in cells.items():
+            pk = self.feed_peak.setdefault(g, {"ov": 0, "drop": 0, "lag": 0})
+            for x in ("ov", "drop", "lag"):
+                if isinstance(c.get(x), int):
+                    pk[x] = max(pk[x], c[x])
+
+    def _mpci_rt(self, k, tail, t):
+        m = re.search(r"cell=(\d+) slot thread core=(\d+)", tail)
+        if m:
+            self.rt[int(m[1])] = int(m[2])
+
+    def _mpci_life(self, k, tail, t):
+        if tail.startswith("activated"):
+            d = _kvn(tail, ints=("cells", "prepared", "nmax"))
+            self.life = d
+            return
+        self.life_events.append(dict(_kv(tail), t=t, text=tail.strip()[:240]))
+        del self.life_events[:-100]
+
+    def _mpci_cell(self, k, tail, t):
+        d = _kvn(tail, ints=("slot", "pci", "ssb"), floats=("centre_hz", "cfo_hz", "prev_centre_hz", "prev_cfo_hz"))
+        if isinstance(d.get("slot"), int):
+            self.cell_events.setdefault(d["slot"], []).append(dict(d, t=t))
+
+    def _mpci_cell_slot(self, k, tail, t):
+        d = _kvn(tail, ints=("cell", "pci", "ssb", "n_rb", "nb_rx"), floats=("centre_hz", "cfo_hz"))
+        if isinstance(d.get("cell"), int):
+            self.slots[d["cell"]] = d
+
+    # ---- SFO
+    def _sfo(self, k, rest):
+        m = re.search(r"SFO reset \(([^)]*)\); previous eps ([-+]?[\d.]+) ppm", rest)
+        if not m:
+            return
+        s = self.sfo.setdefault(k, {"n": 0, "by_reason": {}, "last_eps_ppm": None, "max_abs_eps_ppm": 0.0})
+        s["n"] += 1
+        s["by_reason"][m[1]] = s["by_reason"].get(m[1], 0) + 1
+        s["last_eps_ppm"] = float(m[2])
+        s["max_abs_eps_ppm"] = max(s["max_abs_eps_ppm"], abs(float(m[2])))
+
+    # ---- cores
+    def _plan(self, tail):
+        if not tail.startswith("host="):
+            self.core_plan_notes.append(tail.strip()[:200])
+            return
+        d = _kv(tail)
+        for key in ("cpus", "smt", "llc", "numa", "gpu_node", "rt_cap", "radio", "W", "rt", "ring", "n", "dashboard", "gpu", "uss", "nid", "cells",
+                    "max_cells"):
+            if key in d:
+                d[key] = _int(d[key], d[key])
+        d["rt_cells"] = [_int(x) for x in d["rt_cells"].split(",")] if d.get("rt_cells") else []
+        self.core_plan = d
+
+    def _pool_cores(self, tail):
+        m = re.match(r"(\d+) cores:((?: \d+)*)", tail)
+        if m:
+            self.pool_cores = [int(x) for x in m[2].split()]
+
+    def _pool(self, k, tail):
+        if tail.startswith("long lease"):
+            m = re.match(r"long lease (\S+) class=(\d+) held_ms=(\d+)", tail)
+            if m:
+                s = self.long_lease.setdefault(self._raw_k, {"n": 0, "max_ms": 0, "by_name": {}})
+                s["n"] += 1
+                s["max_ms"] = max(s["max_ms"], int(m[3]))
+                s["by_name"][m[1]] = s["by_name"].get(m[1], 0) + 1
+            return
+        if tail.startswith("long wait"):
+            m = re.match(r"long wait class=(\d+) waited_ms=(\d+)", tail)
+            if m:
+                s = self.long_wait.setdefault(self._raw_k, {"n": 0, "max_ms": 0})
+                s["n"] += 1
+                s["max_ms"] = max(s["max_ms"], int(m[2]))
+            return
+        if tail.startswith("cell="):
+            # F1 (N>1): one block per cell, "cell=<k> pci=<pci> cell<k>[n= waited= hold_ms= wait_us p50<= p99<= max=]"
+            m = re.match(r"cell=(\d+) pci=(-?\d+) cell\d+\[([^\]]*)\]", tail)
+            if m:
+                g = {a: int(b) for a, b in re.findall(r"(\w+)=(\d+)", m[3])}
+                for a, b in re.findall(r"(p\d+)<=(\d+)", m[3]):
+                    g["wait_" + a] = int(b)
+                if "max" in g:
+                    g["wait_max"] = g.pop("max")
+                self._pool_seq += 1
+                g["seq"], g["pci"] = self._pool_seq, int(m[2])
+                self.pool_cell_blk[int(m[1])] = g
+                self.seen = True
+            return
+        if not tail.startswith("n="):
+            return
+        head = tail.split("[", 1)[0]
+        # "scan[n=1 waited=2 promo=0 wait_us p50<=1 p99<=1 max=147]" - the group name is the last word before "["
+        d = {a: int(b) for a, b in re.findall(r"(\w+)=(\d+)", head.rsplit(" ", 1)[0] if "[" in tail else head)}
+        groups = {}
+        for name, inner in re.findall(r"(\w+)\[([^\]]*)\]", tail):
+            g = {a: int(b) for a, b in re.findall(r"(\w+)=(\d+)", inner)}
+            for a, b in re.findall(r"(p\d+)<=(\d+)", inner):
+                g["wait_" + a] = int(b)
+            if "max" in g:
+                g["wait_max"] = g.pop("max")
+            groups[name] = g
+        d["groups"] = groups
+        self._pool_seq += 1
+        d["seq"] = self._pool_seq
+        self.pool_line[k] = d
+        self.pool_lines_n[k] = self.pool_lines_n.get(k, 0) + 1
+
+    # ---- SHMIQ_*
+    def _ring_of(self, d):
+        """P0: cell=<ring id> (e.g. pci415) names the ring; the old form cell=pid<n> names the process -> None (caller falls back)."""
+        c = d.get("cell")
+        if not c or c.startswith("pid") and c[3:].isdigit():
+            return None
+        hit = [r for r in self.rings if r.get("tag") == c or r.get("id") == c]
+        return hit[0] if len(hit) == 1 else None
+
+    def _shmiq(self, tok, tail, t):
+        d = _kv(tail)
+        if tok == "SHMIQ_TUNE":
+            r = self._ring_of(d)
+            if r is not None:
+                r["tune_n"] = r.get("tune_n", 0) + 1
+                r["tune_last"] = {"rx_hz": _fl(d.get("rx_hz")), "shift_hz": _fl(d.get("shift_hz")), "decim": _int(d.get("decim")), "epoch": _int(d.get("epoch"))}
+            c = _fl(d.get("ring_center_hz"))
+            if c is None:
+                return
+            if c not in self.tune_centres:
+                self.tune_centres.append(c)
+            i = self.tune_centres.index(c)
+            s = self.tunes.setdefault(i, {"n": 0, "last": None, "max_abs_shift_hz": 0.0, "centre_hz": c})
+            s["n"] += 1
+            sh = _fl(d.get("shift_hz")) or 0.0
+            s["last"] = {"rx_hz": _fl(d.get("rx_hz")), "shift_hz": sh, "decim": _int(d.get("decim")), "epoch": _int(d.get("epoch"))}
+            s["max_abs_shift_hz"] = max(s["max_abs_shift_hz"], abs(sh))
+        elif tok == "SHMIQ_READY":
+            m = re.search(r"producer_pid=(\d+) radio=(\S+)(?: time_source=(\d+))?", tail)
+            self.seen = True
+            nm = (d.get("ring") or "").lstrip("/")
+            rid = nm[7:] if nm.startswith("nrcell_") and len(nm) > 7 else nm      # shm_iq_ring_id()
+            self.rings.append({"idx": len(self.rings), "name": d.get("ring"), "pid": d.get("cell"), "tag": d.get("cell"), "id": rid or None,
+                               "by_id": bool(rid) and d.get("cell") == rid, "channels": d.get("channels"),
+                               "ring_rate": _fl(d.get("ring_rate")), "decim": _int(d.get("decim")), "taps": d.get("taps"),
+                               "capacity": _int(d.get("capacity")), "producer_pid": _int(m[1]) if m else None,
+                               "radio": m[2] if m else None, "time_source": _int(m[3]) if m and m[3] else None})
+        elif tok == "SHMIQ_START":
+            r = self._ring_of(d)
+            if r is None and self.n_start < len(self.rings):
+                r = self.rings[self.n_start]
+            if r is not None:
+                r["start_pos"] = _int(d.get("pos"))
+            self.n_start += 1
+        elif tok == "SHMIQ_END":
+            # old form: the line carries the process tag (pid<N>), not the ring: END lines are matched to rings by order (ring i closes i-th)
+            # P0 form: cell=<ring id> names the ring
+            r = self._ring_of(d)
+            if r is None and self.n_end < len(self.rings):
+                r = self.rings[self.n_end]
+            if r is not None:
+                r["end"] = {x: _int(d.get(x)) for x in ("reads", "overruns", "dropped_in", "discont", "clipped")}
+            self.n_end += 1
+        elif tok == "SHMIQ_DISCONT" or tok == "SHMIQ_OVERRUN":
+            a = self.discont if tok == "SHMIQ_DISCONT" else self.overrun
+            r = self._ring_of(d)
+            if r is not None:
+                key = "discont" if tok == "SHMIQ_DISCONT" else "overrun"
+                r[key + "_n"] = r.get(key + "_n", 0) + 1
+                r[key + "_skipped_in"] = r.get(key + "_skipped_in", 0) + _int(d.get("skipped_in"), 0)
+                r[key + "_last_new_pos"] = _int(d.get("new_pos"))
+            else:
+                self.shmiq_unattributed["discont" if tok == "SHMIQ_DISCONT" else "overrun"] += 1
+            a["n"] += 1
+            a["skipped_in"] += _int(d.get("skipped_in"), 0)
+            if "new_pos" in d:
+                a["last_new_pos"] = _int(d.get("new_pos"))
+        else:
+            self.shmiq_notes.append("%s %s" % (tok, tail.strip()[:200]))
+            del self.shmiq_notes[:-50]
+
+    def _pool_proc(self):
+        """The process-wide CORE_POOL line: with F1 (per-cell blocks printed on their own lines) the newest "n=" line has no cell<k> group."""
+        best = None
+        for pl in self.pool_line.values():
+            if best is None or pl["seq"] > best["seq"]:
+                best = pl
+        if best is None:
+            return None
+        grp = {g: v for g, v in (best.get("groups") or {}).items() if not re.fullmatch(r"cell\d+", g)}
+        return dict({a: b for a, b in best.items() if a != "groups"}, groups=grp, split=bool(self.pool_cell_blk) and len(grp) == len(best.get("groups") or {}))
+
+    # ---- views
+    def active(self, attributed=False):
+        return self.seen or attributed
+
+    def view(self, states, attributed=False):
+        """JSON-able per-cell + capture view, or None when the log has no multi-PCI lines (N=1 renders as before)."""
+        if not self.active(attributed):
+            return None
+        idxs = set(self.slots) | set(self.cell_events) | set(self.rt) | set(self.sfo) | set(self.pool_line) | (set(self.long_lease) | set(self.long_wait)) - {-1}
+        idxs |= set(self.dash) | set(self.pool_cell_blk)
+        idxs |= {s.cell_idx for s in states}
+        ids = {}
+        for kx, s in self.slots.items():
+            ids[s.get("id")] = kx
+        rows = []
+        for kx in sorted(idxs):
+            sl = self.slots.get(kx, {})
+            ev = self.cell_events.get(kx, [])
+            st = next((s for s in states if s.cell_idx == kx), None)
+            pci = sl.get("pci")
+            if pci is None and ev:
+                pci = ev[-1].get("pci")
+            if pci is None and st is not None and st.cur_pci is not None:
+                pci = st.cur_pci
+            cid = sl.get("id") or (ev[-1].get("id") if ev else None)
+            ring = None
+            if sl.get("ring"):
+                ring = next((r for r in self.rings if r["name"] == sl["ring"]), None)
+            if ring is None and ev and kx < len(self.rings):      # no SLOT line for this cell: ring by creation order (= cell order)
+                taken = {s.get("ring") for s in self.slots.values()}
+                if self.rings[kx]["name"] not in taken:
+                    ring = self.rings[kx]
+            if not sl and ev:                                     # MPCI_CELL carries centre and CFO when the SLOT line is missing
+                sl = {"centre_hz": ev[-1].get("centre_hz"), "cfo_hz": ev[-1].get("cfo_hz"), "ring": ring["name"] if ring else None}
+            feed = (self.feed.get("cells") or {}).get(cid) if cid else None
+            row = {"cell": kx, "pci": pci, "id": cid, "label": "PCI %s (c%d)" % (pci if pci is not None else "?", kx),
+                   "slot": {x: sl.get(x) for x in ("centre_hz", "n_rb", "ssb", "cfo_hz", "nb_rx", "ring")},
+                   "events": [{x: e.get(x) for x in ("event", "reason", "centre_hz", "ssb", "cfo_hz", "t")} for e in ev[-5:]],
+                   "rt_core": self.rt.get(kx), "feed": feed, "feed_peak": self.feed_peak.get(cid) if cid else None, "ring": ring,
+                   "span": next((c for c in self.span.get("cells", []) if c["id"] == cid), None),
+                   "unserved": next((u["reason"] for u in self.span.get("unserved", []) if u["id"] == cid), None),
+                   "sfo": self.sfo.get(kx), "pool": self.pool_line.get(kx), "long_lease": self.long_lease.get(kx),
+                   "long_wait": self.long_wait.get(kx), "pci_state": ("synced" if st is not None and st.cur_pci is not None else "no sync")}
+            # the pool's own per-cell block (cell<k>[n= waited= hold_ms=..]) from the newest CORE_POOL line of any tag
+            newest = None
+            for pl in sorted(self.pool_line.values(), key=lambda x: x["seq"]):
+                g = (pl.get("groups") or {}).get("cell%d" % kx)
+                if g is not None:
+                    newest = g
+            if kx in self.pool_cell_blk:                          # F1 form: the cell's own "CORE_POOL cell=<k>" line
+                newest = self.pool_cell_blk[kx]
+            row["pool_cell"] = newest
+            dsh = self.dash.get(kx)
+            row["dash"] = dsh
+            row["dash_series"] = {n: list(v) for n, v in (self.dash_series.get(kx) or {}).items()} or None
+            if dsh and pci is None:
+                pci = next((x["last"].get("pci") for x in dsh.values() if isinstance(x["last"].get("pci"), int) and x["last"]["pci"] >= 0), None)
+                row["pci"] = pci
+                row["label"] = "PCI %s (c%d)" % (pci if pci is not None else "?", kx)
+            rows.append(row)
+        checks = []
+        f = self.feed
+        if f:
+            for key, txt in (("gaps", "timestamp gaps"), ("frozen", "frozen timestamps"), ("read_err", "read errors"),
+                             ("short", "short reads"), ("chan_overruns", "channelizer overruns")):
+                if self.feed_peak_all.get(key):
+                    checks.append({"level": "warn", "text": "%s %s in the capture feed" % (self.feed_peak_all[key], txt)})
+            for tag, c in (f.get("cells") or {}).items():
+                if self.feed_peak.get(tag, {}).get("ov"):
+                    checks.append({"level": "warn", "text": "%s: %s channel overruns" % (tag, self.feed_peak[tag]["ov"])})
+                if c.get("paused"):
+                    checks.append({"level": "warn", "text": "%s: channel paused" % tag})
+        if self.admit.get("refuse"):
+            checks.append({"level": "bad", "text": "admission refused (reason %s)" % self.admit.get("reason")})
+        for u in self.admit.get("unserved", []):
+            checks.append({"level": "warn", "text": "admission: cell %s unserved (%s)" % (u.get("cell"), u.get("reason"))})
+        for u in self.span.get("unserved", []):
+            checks.append({"level": "warn", "text": "capture span: %s unserved (%s)" % (u.get("id"), u.get("reason"))})
+        return {
+            "admit": self.admit, "admit_notes": self.admit_notes,
+            "capture": {"span": self.span, "span_events": self.span_events[-10:], "radio": self.radio, "feed_started": self.feed_started,
+                        "feed": self.feed, "feed_n": self.feed_n, "feed_peak": self.feed_peak_all, "feed_series": list(self.feed_series), "feed_events": self.feed_events[-10:],
+                        "rings": self.rings, "tunes": [dict(self.tunes[i], ring=i) for i in sorted(self.tunes)],
+                        "discont": self.discont, "overrun": self.overrun, "shmiq_notes": self.shmiq_notes[-10:],
+                        "shmiq_unattributed": self.shmiq_unattributed, "budget_proc": self.budget_proc},
+            "life": self.life, "life_events": self.life_events[-10:],
+            "dash": {"n": self.dash_n, "budget_proc": self.budget_proc, "pool_cells_new_form": bool(self.pool_cell_blk)},
+            "core": {"pool_proc": self._pool_proc(), "long_lease": self.long_lease.get(-1), "long_wait": self.long_wait.get(-1), "plan": self.core_plan, "plan_notes": self.core_plan_notes, "pool_cores": self.pool_cores},
+            "cells": rows, "checks": checks, "attributed": bool(attributed),
+        }
+
+
 class RunState:
     """Everything learned from one run. Single-threaded: the caller serialises feed_* and snapshot()."""
 
@@ -356,6 +897,7 @@ class RunState:
         self._parent = parent
         self.children = {}
         self.attributed = False        # a "[c<k>] " prefix was seen: counters are per cell, not receiver-wide
+        self.mpci = MpciAgg() if parent is None else None      # multi-PCI lines (receiver-wide aggregate, router only)
         self._wide_lines = deque(maxlen=400)
         self.lines = 0
         self.events = deque(maxlen=EVENT_CAP)
@@ -461,6 +1003,8 @@ class RunState:
         k, rest = split_cell(line)
         if k is not None:
             self.attributed = True
+        if self.mpci is not None and MPCI_LINE.search(rest):
+            self.mpci.ingest(k, rest, t)
         if is_receiver_wide(rest):
             self._wide_lines.append((rest, t))
             self._feed_own(rest, t)
@@ -1061,6 +1605,10 @@ class RunState:
                 out[k]["DL"]["dec_us"] = lg.snap(self.t_last, top=0)["dec_us"]
         return out
 
+    def mpci_view(self):
+        root = self._parent or self
+        return root.mpci.view(root.cell_states(), root.attributed) if root.mpci is not None else None
+
     def snapshot(self):
         m = self.metrics_last or {}
         stages = []
@@ -1123,6 +1671,7 @@ class RunState:
             "csirs_metrics": {k: m.get(k) for k in ("csirs_candidates", "csirs_confirmed", "csirs_revoked", "zp_exported",
                                                     "zp_revoked", "csirs_time_to_confirm_resources")},
             "events": sorted(self.events, key=lambda e: -1.0 if e["t"] is None else e["t"]), "events_dropped": self.events_dropped,
+            "mpci": self.mpci_view(),
             "config": {"cmdline": self.cmdline, "cfg_path": self.cfg_path, "env": self.env},
         }
 

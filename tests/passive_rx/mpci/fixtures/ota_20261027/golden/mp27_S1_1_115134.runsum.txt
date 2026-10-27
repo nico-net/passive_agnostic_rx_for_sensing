@@ -1,0 +1,2 @@
+mp27_S1_1_115134.run.log.gz
+  log: pci=415 sib1=1 bank=2 csirs=57 PDSCHQ ok/dec=30293/86880 (34.9%) stale=523 EVM ok/n=1557/11059 rnti_ok=27 check_bad_max=0 pdtim_sum p50/p90/p99=(5, 575, 1345) shm(ovr,drop_in,disc)=- eof=0

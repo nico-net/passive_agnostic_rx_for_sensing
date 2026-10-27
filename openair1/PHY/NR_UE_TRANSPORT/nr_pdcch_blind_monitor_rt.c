@@ -10241,6 +10241,92 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
       nr_pdsch_passive_queue_p99_dump(); /* P99: ISAC_PDTIM_CLASS=1 only */
       if (nr_admit_on()) { char as[640]; nr_admit_stats(as, sizeof as); LOG_A(PHY, "SENSING: %s\n", as); }
     }
+    /* MPCI-DASH P4 CELL_Q, P5 LDPC_ITER, P9 CELL_SUM: this cell's windowed queue / LDPC / roll-up lines on the summary cadence, only when more than one cell runs (the
+     * lines do not exist at N = 1). Every input is a read of a counter that already exists here; the first summary of a cell opens the windows and prints nothing. */
+    if (sum_due && nr_cell_count() > 1) {
+      NR_CELL_STATIC(nr_dash_q_t, dq_prev);
+#define dq_prev NR_CELL_REF(dq_prev)
+      NR_CELL_STATIC(nr_dash_ldpc_t, dl_prev);
+#define dl_prev NR_CELL_REF(dl_prev)
+      NR_CELL_STATIC(nr_dash_sum_t, ds_prev);
+#define ds_prev NR_CELL_REF(ds_prev)
+      NR_CELL_STATIC(nr_dash_win_t, dq_win);
+#define dq_win NR_CELL_REF(dq_win)
+      NR_CELL_STATIC(nr_dash_win_t, dl_win);
+#define dl_win NR_CELL_REF(dl_win)
+      NR_CELL_STATIC(nr_dash_win_t, ds_win);
+#define ds_win NR_CELL_REF(ds_win)
+      typedef uint64_t dq_hist_t[NR_PASSIVE_LAG_BINS];
+      NR_CELL_STATIC(dq_hist_t, dq_lag_prev);
+#define dq_lag_prev NR_CELL_REF(dq_lag_prev)
+      struct timespec dts;
+      clock_gettime(CLOCK_MONOTONIC, &dts);
+      const uint64_t dnow = (uint64_t)dts.tv_sec * 1000000000ull + (uint64_t)dts.tv_nsec;
+      const int dcell = nr_cell_idx(), dpci = nr_passive_metrics_pci_of(dcell), dn = nr_cell_count();
+      char dl[640];
+      /* P4: the three queues of the cell (retry has no queue of its own: its yields are the PDSCH ones) */
+      nr_dash_q_t qc;
+      memset(&qc, 0, sizeof(qc));
+      nr_pdcch_passive_queue_stats_t dsq;
+      memset(&dsq, 0, sizeof(dsq));
+      nr_pdcch_passive_queue_get_stats(&dsq);
+      qc.scan.depth = nr_pdcch_passive_queue_backlog();
+      {
+        static const int edge[NR_PASSIVE_LAG_BINS] = {2, 4, 8, 12, 16, 18, 24, 32, 9999}; /* upper bounds of the lag bins; 9999 = beyond the last edge */
+        uint64_t lh[NR_PASSIVE_LAG_BINS], fresh = 0, dh[NR_PASSIVE_LAG_BINS], tot = 0, cum = 0;
+        nr_pdcch_passive_queue_lag_hist(lh, &fresh);
+        for (int b = 0; b < NR_PASSIVE_LAG_BINS; b++)
+          tot += dh[b] = nr_dash_d(lh[b], dq_lag_prev[b]);
+        qc.scan.age_p50 = qc.scan.age_p99 = tot ? 0 : -1; /* no dequeue in the window: no percentile (the field is left out of the line) */
+        for (int b = 0, g50 = 0, g99 = 0; b < NR_PASSIVE_LAG_BINS && tot; b++) {
+          cum += dh[b];
+          if (!g50 && (double)cum >= 0.5 * (double)tot) qc.scan.age_p50 = edge[b], g50 = 1;
+          if (!g99 && (double)cum >= 0.99 * (double)tot) qc.scan.age_p99 = edge[b], g99 = 1;
+        }
+        memcpy(dq_lag_prev, lh, sizeof(dq_lag_prev));
+      }
+      qc.scan.lag_win = nr_pdcch_passive_queue_lag_win_take();
+      qc.scan.drop_full = dsq.dropped_full, qc.scan.drop_stale = dsq.dropped_stale, qc.scan.drop_epoch = dsq.dropped_epoch;
+      nr_pdsch_passive_queue_stats_t pq;
+      memset(&pq, 0, sizeof(pq));
+      nr_pdsch_passive_queue_get_stats(&pq);
+      qc.pdsch.depth = nr_pdsch_passive_queue_backlog_real();
+      qc.pdsch.age_p50 = qc.pdsch.age_p99 = -1;
+      qc.pdsch.lag_win = nr_pdsch_passive_queue_lag_win_take();
+      qc.pdsch.drop_full = pq.dropped_full, qc.pdsch.drop_stale = pq.dropped_stale, qc.pdsch.drop_epoch = pq.dropped_epoch;
+      nr_pusch_passive_queue_stats_t uq;
+      memset(&uq, 0, sizeof(uq));
+      nr_pusch_passive_queue_get_stats(&uq);
+      qc.pusch.depth = qc.pusch.age_p50 = qc.pusch.age_p99 = -1;
+      qc.pusch.lag_win = nr_pusch_passive_queue_lag_win_take();
+      qc.pusch.drop_full = uq.dropped_full, qc.pusch.drop_stale = uq.dropped_stale, qc.pusch.drop_epoch = uq.dropped_epoch;
+      if (nr_dash_fmt_cell_q(dl, sizeof(dl), dn, dcell, dpci, nr_dash_win_tick(&dq_win, dnow), &qc, &dq_prev) > 0)
+        LOG_A(PHY, "%s\n", dl);
+      dq_prev = qc;
+      /* P5 */
+      nr_dash_ldpc_t lc;
+      nr_pdsch_passive_queue_ldpc_dash(&lc);
+      if (nr_dash_fmt_ldpc_iter(dl, sizeof(dl), dn, dcell, dpci, nr_dash_win_tick(&dl_win, dnow), &lc, &dl_prev) > 0)
+        LOG_A(PHY, "%s\n", dl);
+      dl_prev = lc;
+      /* P9 */
+      uint64_t esn = 0, esns = 0, edn = 0;
+      nr_dash_event_counters(dcell, &esn, &esns, &edn);
+      const nr_passive_acq_snapshot_t acq = nr_passive_acq_snapshot();
+      const nr_dash_sum_t sc = {.state = nr_passive_acq_state_name(acq.state), .decoded = pq.decoded, .crc_ok = pq.crc_ok, .cb_tried = pq.cb_tried, .cb_ok = pq.cb_ok,
+                                .drops = dsq.dropped_full + dsq.dropped_stale + pq.dropped_full + pq.dropped_stale, .discont = edn,
+                                .hold_ns = nr_pool_cell_hold_ns(nr_pool_site(), dcell)};
+      if (nr_dash_fmt_cell_sum(dl, sizeof(dl), dn, dcell, dpci, nr_dash_win_tick(&ds_win, dnow), &sc, &ds_prev) > 0)
+        LOG_A(PHY, "%s\n", dl);
+      ds_prev = sc;
+#undef dq_prev
+#undef dl_prev
+#undef ds_prev
+#undef dq_win
+#undef dl_win
+#undef ds_win
+#undef dq_lag_prev
+    }
     /* Explicit acquisition/discovery state (Gate 4/5 groundwork). Every input is a read of a
      * counter/boolean that ALREADY exists at this point -- no new measurement, no control-flow
      * change. Transitions log themselves at LOG_A inside nr_passive_acq_update(); the heartbeat

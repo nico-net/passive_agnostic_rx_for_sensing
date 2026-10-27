@@ -1,0 +1,2 @@
+mp27_S1_1_115134.run.log.gz DL FAIL(lat) n_real=4317 tot_p50=2203 tot_p99=24990 tot_p999=41131 crc_all=45.7 n_q=1506 crc_q=85.4 unqualified_low_snr=403 unqualified_retx=0 unqualified_floor=2408 drops_pct=0.6 skipped=0 recovered=540 recovered_tot_p99=41028
+mp27_S1_1_115134.run.log.gz UL FAIL(lat,crc,drops) n_real=0 tot_p50=None tot_p99=None tot_p999=None crc_all=None n_q=0 crc_q=None unqualified_low_snr=0 unqualified_retx=0 unqualified_floor=0 drops_pct=None skipped=0 recovered=0 recovered_tot_p99=None
