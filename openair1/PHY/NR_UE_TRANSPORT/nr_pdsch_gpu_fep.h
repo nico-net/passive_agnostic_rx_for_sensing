@@ -65,7 +65,10 @@ typedef struct {
   uint16_t run_mask;            ///< graph pass: symbols this replay transforms (0 = sym_mask); must be a subset of the captured sym_mask (the grid is baked, the other blocks return at once)
   const uint32_t *sfo_dphi;     ///< symbols_per_slot SFO steps (PHY/MODULATION/nr_sfo_state.h nr_sfo_slot_dphi); NULL = none
   int sfo_kref;                 ///< SFO reference subcarrier (nr_sfo_kref)
+  int geo;                      ///< MPCI G3b: FEP geometry id (nr_pdsch_gpu_fep_geo_add); 0 = the cfg of init (every N = 1 caller, zero-initialised)
 } nr_gpu_fep_job_t;
+/** MPCI G3b: register another cell's FEP geometry for the graph pass (see nr_pdsch_gpu_fep.cu). Returns the id for nr_gpu_fep_job_t.geo (an equal geometry returns the existing one), -1 = refused. */
+typedef int (*nr_gpu_fep_geo_add_fn)(const nr_gpu_fep_cfg_t *cfg);
 /* GPUPASS contract (graph-capturable): call nr_pdsch_gpu_fep_stage on the HOST first (waits until the slot's previous pass has finished
  * reading it, then copies the IQ window -- DISCRETE only -- and the per-slot origin/rotation into pinned staging; returns the slot,
  * 0 <= slot < NR_GPU_PASS_RING), then launch or replay nr_pdsch_gpu_fep_dev(j, rxF, slot, stream), which only enqueues device work (H2D

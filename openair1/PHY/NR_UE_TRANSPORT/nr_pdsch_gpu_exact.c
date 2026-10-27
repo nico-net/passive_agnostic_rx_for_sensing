@@ -21,6 +21,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
+#include "common/utils/nr_cell.h"
 
 typedef int (*exact_fn_t)(const int16_t *const *, uint32_t, uint32_t, double, const int16_t *, uint16_t, int16_t *, size_t, int, const uint32_t *, int);
 static exact_fn_t g_fn;
@@ -29,6 +30,7 @@ static int (*g_delay_fn)(const int16_t *const *, int, int *);
 static nr_gpu_chest_fn g_chest_fn; /* GPU-DEMOD stage 2 */
 static nr_gpu_stage_stats_fn g_stage_stats; /* Q4: census of the staged DISCRETE runs of the module (NULL on a module without it) */
 static _Atomic uint64_t g_delay_rows, g_delay_calls, g_delay_cpu, g_delay_checked, g_delay_bad;
+static nr_gpu_fep_cfg_t g_cfg0; /* MPCI G3b: the FEP geometry the module was initialised with (cell 0); another cell of a different geometry runs the CPU FEP here (the pass carries its own geometry) */
 static _Atomic int g_on;     /* the module's exact working set is up (also gates the chest / delay entries and the graph pass warm-up) */
 static _Atomic int g_fep_on; /* the FEP itself runs on the GPU: g_on and the per-path choice (nr_gpu_path.h, NR_GPU_PATH_FEP) */
 static _Atomic uint64_t g_calls, g_fallback, g_chk_ok, g_chk_bad, g_ns_sum, g_ns_max;
@@ -102,6 +104,7 @@ int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
                                 .n_rb_dl = fp->N_RB_DL,
                                 .samples_per_ms = fp->samples_per_subframe,
                                 .ofdm_offset_divisor = (int)fp->ofdm_offset_divisor};
+  g_cfg0 = cfg;
   if (!api || !g_fn || api->init(&cfg) != 0) {
     LOG_W(PHY, "SENSING: GPU_EXACT_FEP requested but libpdsch_gpu.so is unavailable -- CPU FEP\n");
     nr_gpu_path_begin(NR_GPU_PATH_FEP, 0, NR_GPU_PATH_MEASURE_NONE);
@@ -281,6 +284,9 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
 {
   /* The CPU FEP de-rotates a frequency offset only with --cont-fo-comp or a per-branch FO; the GPU
    * does not reproduce that rotation, so those slots stay on the CPU. */
+  if (nr_cell_idx() != 0 && (fp->nb_antennas_rx != g_cfg0.nant || fp->ofdm_symbol_size != g_cfg0.ofdm_symbol_size || fp->nb_prefix_samples != g_cfg0.nb_prefix_samples ||
+                             fp->nb_prefix_samples0 != g_cfg0.nb_prefix_samples0 || fp->first_carrier_offset != g_cfg0.first_carrier_offset || fp->N_RB_DL != g_cfg0.n_rb_dl))
+    return -1; /* the exact FEP of the module is cell 0's geometry (n_rb_dl, first carrier offset and CP lengths are kernel arguments): the CPU FEP is bit-exact for the other cell */
   bool fo = ue->cont_fo_comp != 0 || !ue->is_synchronized;
   for (int a = 0; a < fp->nb_antennas_rx && !fo; a++)
     fo = nr_ue_get_branch_fo_hz(a) != 0.0;

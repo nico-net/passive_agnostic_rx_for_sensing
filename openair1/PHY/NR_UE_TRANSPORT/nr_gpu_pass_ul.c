@@ -181,10 +181,18 @@ NR_CELL_STATIC(ul_ctx_arr_t, g_ulctx)
 #define g_ulctx NR_CELL_REF(g_ulctx)
 /* cells registered with the pass module for the UL (cell 0 is up with the module: U.on) */
 static _Atomic int g_ul_cell_on[NR_CELL_MAX];
+static _Atomic int g_ul_cell_nbrx[NR_CELL_MAX]; /* MPCI G3b: RX antennas of the cell's FEP geometry; 0 = those of cell 0 (U.nbrx) */
 void nr_gpu_pass_ul_cell_enable(int cell)
 {
   if (cell > 0 && cell < NR_CELL_MAX)
     atomic_store(&g_ul_cell_on[cell], 1);
+}
+void nr_gpu_pass_ul_cell_enable_nb(int cell, int nbrx)
+{
+  if (cell > 0 && cell < NR_CELL_MAX) {
+    atomic_store(&g_ul_cell_nbrx[cell], nbrx);
+    atomic_store(&g_ul_cell_on[cell], 1);
+  }
 }
 
 int nr_gpu_pass_ul_active(void) { return atomic_load_explicit(&U.on, memory_order_relaxed); }
@@ -346,7 +354,7 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
     return fb(in->rv != 0 ? FB_RV : FB_SCOPE);
   if (cell != 0 && !atomic_load_explicit(&g_ul_cell_on[cell], memory_order_relaxed))
     return fb(FB_CELL); /* a further cell uses the pass only after nr_gpu_pass_cell_init + nr_gpu_pass_ul_cell_enable */
-  if (in->nb_rx != U.nbrx || in->N != 4096 || in->symbols_per_slot != 14 || in->num_rb < 1 || in->num_rb > 273 || in->start_symbol < 0 || in->num_symbols < 1 ||
+  if (in->nb_rx != (cell != 0 && atomic_load_explicit(&g_ul_cell_nbrx[cell], memory_order_relaxed) ? atomic_load_explicit(&g_ul_cell_nbrx[cell], memory_order_relaxed) : U.nbrx) || in->N != 4096 || in->symbols_per_slot != 14 || in->num_rb < 1 || in->num_rb > 273 || in->start_symbol < 0 || in->num_symbols < 1 ||
       in->start_symbol + in->num_symbols > 14 || !in->symbol_rot || in->ctx < 0 || in->ctx >= UL_CTX || in->keep >= in->nb_rx)
     return fb(FB_CELL);
   if (in->qam_mod_order != 2 && in->qam_mod_order != 4 && in->qam_mod_order != 6 && in->qam_mod_order != 8)
@@ -530,6 +538,31 @@ int nr_gpu_pass_ul_run(const nr_gpu_pass_ul_in_t *in, nr_gpu_pass_ul_out_t *out)
 /* ------------------------------------------------------------------ warm-up ------------------------------------------------------------------ */
 static int g_warm_budget = 160;
 void nr_gpu_pass_ul_test_budget(int classes) { g_warm_budget = classes; }
+
+/* MPCI G3b: the PUSCH classes of a further cell's FEP geometry (the same list as the first cell's, the PRB classes up to max_nrb_class only), captured through `warmf` (bound to the geometry by the caller).
+ * Returns the classes made. */
+int nr_gpu_pass_ul_warm_geo(nr_gpu_pass_warm_fn warmf, int max_nrb_class)
+{
+  if (!warmf || !U.try_)
+    return 0;
+  static const int nd[] = {2, 1};
+  static const int nrbs[] = {136, 217, 96, 48, 24, 12, 6, 273};
+  int made = 0;
+  for (int di = 0; di < 2; di++)
+    for (int ni = 0; ni < 8 && made < g_warm_budget; ni++) {
+      if (nr_gpu_pass_nrb_class(nrbs[ni]) > max_nrb_class)
+        continue;
+      const int cmax = nrbs[ni] * 132 * 8 * 93 / 100 / 8400 + 1;
+      for (int ncb = 1; ncb <= 32 && made < g_warm_budget; ncb <<= 1) {
+        if (ncb / 2 >= cmax)
+          break;
+        const nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(nrbs[ni]), 13, 1, 6, (uint16_t)nd[di], (uint16_t)ncb, 0, 0, 1};
+        if (warmf(&sh, 0, 0, 0) == 0)
+          made++;
+      }
+    }
+  return made;
+}
 
 int nr_gpu_pass_ul_warm(void *h, int nbrx, int fp32)
 {

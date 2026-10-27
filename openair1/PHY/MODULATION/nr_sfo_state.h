@@ -41,6 +41,11 @@ void nr_sfo_reset(void);
  * of NR_SFO_WINDOW/4 frames has been read. A normal per-frame timing correction is NOT such an event. Logs one line. Jobs that pinned
  * their eps (nr_sfo_pin) keep it. */
 void nr_sfo_resync(const char *reason);
+/* multi-PCI: the state is per cell. The calls without a cell argument act on the calling thread's cell (nr_cell_idx(); the timing loop,
+ * FEP and decode threads of a cell are bound to it). nr_sfo_resync_cell resets only that cell (the line then names the cell when the
+ * caller is not that cell's thread); nr_sfo_resync_all is the process-wide stream loss (shared radio): every active cell. */
+void nr_sfo_resync_cell(int cell, const char *reason);
+void nr_sfo_resync_all(const char *reason);
 /* timing loop, once per frame: samples read beyond samples_per_frame (negative = fewer) */
 void nr_sfo_note_frame_read(int extra_samples, int samples_per_frame);
 /* DM-RS cross-check: the residual eps measured on an already corrected slot (weight in [0,1], e.g. grant coherence) */
