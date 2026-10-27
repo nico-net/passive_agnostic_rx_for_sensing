@@ -702,3 +702,81 @@ TEST(CoreLayoutN, ProcessPlanWithCellCount)
   EXPECT_EQ(nr_core_layout()->n_cells, 1);
   EXPECT_STREQ(nr_core_layout_env_default("ISAC_UE_RT_CORE"), "5");
 }
+
+// ---- CHANPOOL: the wideband feed reader as one more RT-like I/O reader of the plan ----
+TEST(CoreLayoutFeed, NoFeedIsTheHistoricalBuilderByteForByte)
+{
+  for (bool radio : {false, true}) {
+    Topo T = dgx(radio);
+    for (int n : {1, 2, 3}) {
+      nr_core_layout_t a, b;
+      nr_cl_build_n(&T.t, nullptr, n, &a);
+      nr_cl_build_nf(&T.t, nullptr, n, false, &b);
+      char la[4096], lb[4096];
+      nr_cl_format(&T.t, &a, la, sizeof(la));
+      nr_cl_format(&T.t, &b, lb, sizeof(lb));
+      EXPECT_STREQ(la, lb);
+      EXPECT_EQ(b.feed, -1);
+      EXPECT_FALSE(b.feed_req);
+      EXPECT_EQ(std::string(lb).find("feed="), std::string::npos);
+    }
+  }
+}
+
+TEST(CoreLayoutFeed, DgxTwoCellsFeedReaderIsDistinctFastAndOffThePool)
+{ // [DGX GB10 fixture, reconstructed] 2 cells + feed
+  Topo T = dgx(true);
+  nr_core_layout_t L, L0;
+  nr_cl_build_n(&T.t, nullptr, 2, &L0);
+  EXPECT_EQ(nr_cl_build_nf(&T.t, nullptr, 2, true, &L), 0);
+  ASSERT_TRUE(L.feed_req);
+  ASSERT_GE(L.feed, 0);
+  EXPECT_NE(L.feed, L.rt_cell[0]);
+  EXPECT_NE(L.feed, L.rt_cell[1]);
+  EXPECT_NE(L.feed, L.ring);
+  EXPECT_NE(L.feed, L.uhd);
+  EXPECT_FALSE(L.uhd_mask[L.feed]);
+  EXPECT_GE(T.t.cap[L.feed] * 10, T.t.cap[L.rt_cell[1]] * 9) << "same ranking as the cells' readers: a fast CPU while one is left";
+  for (int i = 0; i < L.npool; i++) EXPECT_NE(L.pool[i], L.feed);
+  EXPECT_FALSE(L.lane[L.feed] || L.hk[L.feed] || L.home[L.feed]);
+  EXPECT_EQ(L.W, L0.W - 1); // one more reader off the same W
+  EXPECT_EQ(L.rt_cell[0], L0.rt_cell[0]);
+  EXPECT_EQ(L.rt_cell[1], L0.rt_cell[1]);
+  char line[4096];
+  nr_cl_format(&T.t, &L, line, sizeof(line));
+  EXPECT_NE(std::string(line).find(" feed=" + std::to_string(L.feed)), std::string::npos) << line;
+  expect_inside(L, T);
+}
+
+TEST(CoreLayoutFeed, SmallHostsKeepAnOpenFeedReaderOrNone)
+{ // [4-cpu cloud x86 fixture]: no CPU left -> feed = -1 (the reader floats on the home lane), never a pool or RT cpu
+  Topo T(4);
+  nr_core_layout_t L;
+  nr_cl_build_nf(&T.t, nullptr, 2, true, &L);
+  ASSERT_TRUE(L.feed_req);
+  if (L.feed >= 0) {
+    EXPECT_NE(L.feed, L.rt_cell[0]);
+    EXPECT_NE(L.feed, L.rt_cell[1]);
+    for (int i = 0; i < L.npool; i++) EXPECT_NE(L.pool[i], L.feed);
+  }
+}
+
+TEST(CoreLayoutFeed, HybridSens6LikeHost)
+{ // [sens6 x86 fixture: 14 cpus, isolcpus 1-2 (radio IO), no hybrid]: feed taken from the general CPUs, not the isolated radio IO ones
+  Topo T(14);
+  T.iso(1, 2).radio(true);
+  nr_core_layout_t L;
+  nr_cl_build_nf(&T.t, nullptr, 2, true, &L);
+  if (L.feed >= 0) {
+    EXPECT_FALSE(T.t.isolated[L.feed] && (L.feed == L.ring || L.feed == L.uhd));
+    EXPECT_NE(L.feed, L.rt_cell[0]);
+    EXPECT_NE(L.feed, L.rt_cell[1]);
+  }
+}
+
+TEST(CoreLayoutFeed, ProcessPlanAccessor)
+{
+  Topo T = dgx(true);
+  EXPECT_EQ(nr_core_layout_feed_cpu(), -1); // inactive or not planned
+  (void)T;
+}

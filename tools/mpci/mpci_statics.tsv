@@ -2,32 +2,33 @@
 # Regenerate with `static_audit.py --write`: class/owner/note of existing rows are preserved.
 file	line	symbol	kind	type	class	owner	note
 common/utils/nr_core_layout.c	25	nr_cl_mode_name::n	func_static	const char *const[]	CONST	B1	auto
-common/utils/nr_core_layout.c	621	g_topo	file_static	nr_cl_topo_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	622	g_lay	file_static	nr_core_layout_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	623	g_active	file_static	bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	633	g_keys	file_static	const char *const[]	CONST	B1	auto
-common/utils/nr_core_layout.c	636	g_pin_nocap	file_static	bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	646	nr_core_layout_init_n::o	func_static	nr_cl_over_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	683	nr_core_layout_filter_cpu::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	692	nr_core_layout_env_default::chk	func_static	char[256][256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	692	nr_core_layout_env_default::lane	func_static	char[256][256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	692	nr_core_layout_env_default::one	func_static	char[256][6][16]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	692	nr_core_layout_env_default::pool	func_static	char[256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_layout.c	692	nr_core_layout_env_default::uhd	func_static	char[256][256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	65	tl	tls	struct {}	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	71	tl_cv	tls	pthread_cond_t	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	72	tl_last	tls	int	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	76	g_test_clock	file_static	uint64_t (*)(void)	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	316	grant::n_wait	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	353	tl_tid::t	tls	pid_t	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	439	nr_pool_release::n_long	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	502	nr_pool_stats_line::nm	func_static	const char *const[NR_POOL_NPRIO]	CONST	B1	auto
-common/utils/nr_core_pool.c	583	g_site	file_static	nr_pool_t *	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	584	g_once	file_static	pthread_once_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	667	g_site_test	file_static	_Atomic bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	701	nr_pool_site_filter_core::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	708	tl_give	tls	int	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	777	nr_pool_site_enforce_tick::next	func_static	_Atomic uint64_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	631	g_topo	file_static	nr_cl_topo_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	632	g_lay	file_static	nr_core_layout_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	633	g_active	file_static	bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	643	g_keys	file_static	const char *const[]	CONST	B1	auto
+common/utils/nr_core_layout.c	646	g_pin_nocap	file_static	bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	658	nr_core_layout_init_nf::o	func_static	nr_cl_over_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	695	nr_core_layout_filter_cpu::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	704	nr_core_layout_env_default::chk	func_static	char[256][256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	704	nr_core_layout_env_default::lane	func_static	char[256][256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	704	nr_core_layout_env_default::one	func_static	char[256][6][16]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	704	nr_core_layout_env_default::pool	func_static	char[256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_layout.c	704	nr_core_layout_env_default::uhd	func_static	char[256][256]	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	67	tl	tls	struct {}	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	73	tl_cv	tls	pthread_cond_t	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	74	tl_last	tls	int	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	78	g_test_clock	file_static	uint64_t (*)(void)	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	118	g_order	file_static	const int[NR_POOL_NPRIO]	CONST	B1	auto
+common/utils/nr_core_pool.c	363	grant::n_wait	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	400	tl_tid::t	tls	pid_t	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	489	nr_pool_release::n_long	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	551	nr_pool_stats_line::nm	func_static	const char *const[NR_POOL_NPRIO]	CONST	B1	auto
+common/utils/nr_core_pool.c	634	g_site	file_static	nr_pool_t *	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	635	g_once	file_static	pthread_once_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	718	g_site_test	file_static	_Atomic bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	761	nr_pool_site_filter_core::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	768	tl_give	tls	int	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	837	nr_pool_site_enforce_tick::next	func_static	_Atomic uint64_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 executables/nr-ue-ru.c	22	s_band_scan_c	file_static	uint64_t[NRUE_BAND_SCAN_MAX]	PROCESS	A8	band-wide search of the started cell (no -C): process mode, cell 0 only
 executables/nr-ue-ru.c	23	s_band_scan_i	file_static	int	PROCESS	A8	band-wide search of the started cell (no -C): process mode, cell 0 only
 executables/nr-ue-ru.c	23	s_band_scan_n	file_static	int	PROCESS	A8	band-wide search of the started cell (no -C): process mode, cell 0 only
@@ -91,35 +92,36 @@ executables/nr-ue.c	2013	UE_thread::s_fires	func_static	long [converted]	PER_CEL
 executables/nr-ue.c	2122	UE_thread::cn	func_static	const char *const[3]	CONST	A8	auto
 executables/nr-ue.c	2224	UE_thread::s_reinits	func_static	int	PROCESS	A8	full device re-init budget: nrue_ru_reinit re-opens every RU (radio-wide)
 executables/nr-uesoftmodem.c	64	config_frames	global	unsigned short[4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	107	thread_struct	global	THREAD_STRUCT	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	108	nrUE_params	global	nrUE_params_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	112	RC	global	RAN_CONTEXT_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	113	oai_exit	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	115	downlink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	116	uplink_frequency_offset	global	int64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	117	sidelink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	120	cpuf	global	double	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	178	fo_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	178	ssb_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	250	g_cells	file_static	nr_cell_life_t	PROCESS	A8	A8: cell lifecycle (owner of the cell manager; one control thread)
-executables/nr-uesoftmodem.c	251	g_ncells	file_static	int	PROCESS	A8	A8: number of served cells
-executables/nr-uesoftmodem.c	252	g_inv_watch	file_static	nr_cell_inventory_watch_t	PROCESS	A8	A8: cells.json watcher (one control thread)
-executables/nr-uesoftmodem.c	253	g_uectx_path	file_static	char[PATH_MAX + 32]	PROCESS	A8	A8: cell 0 uectx path; cells k>0 derive theirs with nr_cell_path
-executables/nr-uesoftmodem.c	265	g_feed	file_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	266	g_feed_cells	file_static	iq_span_cell_t[NR_CELL_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	267	g_feed_ids	file_static	char[NR_CELL_MAX][NR_INV_ID_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	268	g_feed_dev	file_static	iq_span_dev_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	269	g_feed_plan	file_static	iq_span_plan_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	270	g_feed_wanted	file_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	271	g_feed_obj	file_static	iq_feed_t *	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	272	g_feed_entry	file_static	int[NR_CELL_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	563	mpci_feed_rings::s_load	func_static	iq_chan_load_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	722	mpci_control_thread::s_feed_tick	func_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	792	trigger_deregistration::deregistration_sent	func_static	bool	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	803	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
-executables/nr-uesoftmodem.c	816	NB_UE_INST	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	817	uniqCfg	global	configmodule_interface_t *	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	818	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	108	thread_struct	global	THREAD_STRUCT	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	109	nrUE_params	global	nrUE_params_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	113	RC	global	RAN_CONTEXT_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	114	oai_exit	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	116	downlink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	117	uplink_frequency_offset	global	int64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	118	sidelink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	121	cpuf	global	double	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	179	fo_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	179	ssb_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	251	g_cells	file_static	nr_cell_life_t	PROCESS	A8	A8: cell lifecycle (owner of the cell manager; one control thread)
+executables/nr-uesoftmodem.c	252	g_ncells	file_static	int	PROCESS	A8	A8: number of served cells
+executables/nr-uesoftmodem.c	253	g_inv_watch	file_static	nr_cell_inventory_watch_t	PROCESS	A8	A8: cells.json watcher (one control thread)
+executables/nr-uesoftmodem.c	254	g_uectx_path	file_static	char[PATH_MAX + 32]	PROCESS	A8	A8: cell 0 uectx path; cells k>0 derive theirs with nr_cell_path
+executables/nr-uesoftmodem.c	266	g_feed	file_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	267	g_feed_cells	file_static	iq_span_cell_t[NR_CELL_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	268	g_feed_ids	file_static	char[NR_CELL_MAX][NR_INV_ID_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	269	g_feed_dev	file_static	iq_span_dev_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	270	g_feed_plan	file_static	iq_span_plan_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	271	g_feed_wanted	file_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	272	g_feed_obj	file_static	iq_feed_t *	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	273	g_feed_entry	file_static	int[NR_CELL_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	564	mpci_feed_rings::s_load	func_static	iq_chan_load_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	605	mpci_feed_start::lease	func_static	const iq_chan_lease_t	CONST	A8	auto
+executables/nr-uesoftmodem.c	728	mpci_control_thread::s_feed_tick	func_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	798	trigger_deregistration::deregistration_sent	func_static	bool	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	809	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
+executables/nr-uesoftmodem.c	822	NB_UE_INST	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	823	uniqCfg	global	configmodule_interface_t *	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	824	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_COLS	global	constexpr uint32_t	CONST	G1	auto
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_ROWS	global	constexpr uint32_t	CONST	G1	auto
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_Z	global	constexpr uint32_t	CONST	G1	auto
@@ -2664,11 +2666,16 @@ openair1/SCHED_NR_UE/phy_procedures_nr_ue.c	973	nr_process_pbch_symbol::s_fftadd
 openair1/SCHED_NR_UE/phy_procedures_nr_ue.c	1071	nr_process_pbch_symbol::s_sat_left	func_static	int	PROCESS	A8	log budget (log text only)
 openair1/SCHED_NR_UE/phy_procedures_nr_ue.c	1233	pbch_process::s_track_log_left	func_static	int	PROCESS	A8	log/dashboard state
 radio/COMMON/common_lib.c	26	devtype_names	global	const char *const[MAX_RF_DEV_TYPE]	CONST	G5	auto
-radio/COMMON/iq_chan.c	223	iq_chan_backend_cpu	global	const iq_chan_backend_t	CONST	G5	auto
-radio/COMMON/iq_chan.c	301	g_be_mu	file_static	pthread_mutex_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-radio/COMMON/iq_chan.c	302	g_be	file_static	const iq_chan_backend_t *[MAX_BACKENDS]	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-radio/COMMON/iq_chan.c	303	g_sel	file_static	iq_chan_select_fn	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-radio/COMMON/iq_chan.c	304	g_sel_user	file_static	void *	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/iq_chan.c	32	g_lease	file_static	iq_chan_lease_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/iq_chan.c	33	g_ls_blocks	file_static	_Atomic uint64_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/iq_chan.c	33	g_ls_denied	file_static	_Atomic uint64_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/iq_chan.c	33	g_ls_wait_max	file_static	_Atomic uint64_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/iq_chan.c	33	g_ls_wait_ns	file_static	_Atomic uint64_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/iq_chan.c	269	iq_chan_backend_cpu	global	const iq_chan_backend_t	CONST	G5	auto
+radio/COMMON/iq_chan.c	347	g_be_mu	file_static	pthread_mutex_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/iq_chan.c	348	g_be	file_static	const iq_chan_backend_t *[MAX_BACKENDS]	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/iq_chan.c	349	g_sel	file_static	iq_chan_select_fn	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/iq_chan.c	350	g_sel_user	file_static	void *	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 radio/COMMON/iq_ddc.c	18	g_force_scalar	file_static	int	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 radio/COMMON/shm_iq_ring.c	64	g_reg_mu	file_static	pthread_mutex_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 radio/COMMON/shm_iq_ring.c	65	g_reg	file_static	anon_t *[ANON_REG_MAX]	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)

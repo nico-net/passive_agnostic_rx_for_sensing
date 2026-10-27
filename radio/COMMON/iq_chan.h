@@ -80,6 +80,28 @@ typedef const iq_chan_backend_t *(*iq_chan_select_fn)(const iq_chan_load_t *load
 void iq_chan_set_selector(iq_chan_select_fn fn, void *user);         /* NULL restores the default */
 const iq_chan_backend_t *iq_chan_backend_select(const iq_chan_load_t *load); /* the selector's answer; default: the CPU backend */
 
+/* CORE-POOL LEASE (mpci CHANPOOL). The CPU parts of a channelizer (the CPU backend's worker threads; the CPU-side steps of a GPU backend, never its waits for the
+ * device) run under a lease of the receiver's core pool, class CHAN (common/utils/nr_core_pool.h): one lease per processing block per worker, taken after the
+ * block is known to exist and released before the worker waits for the next one. This module does not link the pool: the receiver installs the lease hooks once,
+ * before iq_chan_start() (function hooks, no flag). Without hooks (tests, standalone tools) the workers run unleased and nothing below changes.
+ *   acquire(ctx, blocking): >= 0 granted (the core), < 0 not granted (non-blocking only; a blocking acquire waits). release(ctx): gives it back.
+ *   demand(ctx, tokens): the tokens the channelizer needs (threads_needed of its measured load); 0 on stop. max_tokens(ctx): the most CHAN leases at once. */
+typedef struct {
+  int (*acquire)(void *ctx, int blocking);
+  void (*release)(void *ctx);
+  void (*demand)(void *ctx, int tokens);
+  int (*max_tokens)(void *ctx);
+  void *ctx;
+} iq_chan_lease_t;
+void iq_chan_set_lease(const iq_chan_lease_t *l); /* NULL removes the hooks; not while a channelizer runs */
+/* For backends: IQ_CHAN_LEASE_DENIED (non-blocking, no token now: skip this block), IQ_CHAN_LEASE_NONE (no hooks: proceed unleased, release is a no-op),
+ * IQ_CHAN_LEASE_HELD (proceed, release when the block is done). The wait of a blocking acquire and the denials are counted in iq_chan_stats_t. */
+enum { IQ_CHAN_LEASE_DENIED = 0, IQ_CHAN_LEASE_NONE = 1, IQ_CHAN_LEASE_HELD = 2 };
+int iq_chan_lease_acquire(int blocking);
+void iq_chan_lease_release(int held);
+void iq_chan_lease_set_demand(int tokens);        /* no-op without hooks; a GPU backend sets its CPU-part demand here */
+int iq_chan_lease_max_tokens(void);               /* 0 without hooks */
+
 /* Self-bench of the CPU backend on this host: one thread, synthetic noise, `seconds` of wall time, no ring. Used for the capacity input of admission. */
 typedef struct {
   double seconds, blocks, samples_per_s, rt_factor; /* samples/s per channel consumed; rt_factor = samples_per_s / in_rate */
@@ -114,6 +136,8 @@ typedef struct {
   unsigned n_paused;                 /* entries kept but paused (iq_chan_cell_pause) */
   const char *backend;
   int threads, threads_needed;       /* running / needed to keep real time with margin; threads < threads_needed is a shortfall */
+  uint64_t lease_blocks, lease_denied;                /* CHAN leases taken (blocks x workers) / helper requests denied (skipped block); 0 without hooks */
+  uint64_t lease_wait_ns, lease_wait_max_ns;          /* time spent waiting inside blocking acquires (total, longest) */
   double capacity_sps;               /* measured capacity (samples/s per channel) of the load at start with `threads` threads: the admission input */
 } iq_chan_stats_t;
 

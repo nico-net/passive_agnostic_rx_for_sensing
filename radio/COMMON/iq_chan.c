@@ -28,6 +28,38 @@ static void *alloc_samples(size_t n_samples)
   return aligned_alloc(64, bytes);
 }
 
+/* ================================================================ core-pool lease (CHANPOOL, see iq_chan.h) */
+static iq_chan_lease_t g_lease;
+static _Atomic uint64_t g_ls_blocks, g_ls_denied, g_ls_wait_ns, g_ls_wait_max;
+void iq_chan_set_lease(const iq_chan_lease_t *l)
+{
+  if (l) g_lease = *l; else memset(&g_lease, 0, sizeof(g_lease));
+  atomic_store(&g_ls_blocks, 0); atomic_store(&g_ls_denied, 0); atomic_store(&g_ls_wait_ns, 0); atomic_store(&g_ls_wait_max, 0);
+}
+int iq_chan_lease_acquire(int blocking)
+{
+  if (!g_lease.acquire) return IQ_CHAN_LEASE_NONE;
+  const uint64_t t0 = blocking ? now_ns() : 0;
+  if (g_lease.acquire(g_lease.ctx, blocking) < 0) {
+    atomic_fetch_add_explicit(&g_ls_denied, 1, memory_order_relaxed);
+    return blocking ? IQ_CHAN_LEASE_NONE : IQ_CHAN_LEASE_DENIED; /* a blocking acquire that fails means the pool is gone: run unleased */
+  }
+  atomic_fetch_add_explicit(&g_ls_blocks, 1, memory_order_relaxed);
+  if (blocking) {
+    const uint64_t w = now_ns() - t0;
+    atomic_fetch_add_explicit(&g_ls_wait_ns, w, memory_order_relaxed);
+    uint64_t m = atomic_load_explicit(&g_ls_wait_max, memory_order_relaxed);
+    while (w > m && !atomic_compare_exchange_weak_explicit(&g_ls_wait_max, &m, w, memory_order_relaxed, memory_order_relaxed)) {}
+  }
+  return IQ_CHAN_LEASE_HELD;
+}
+void iq_chan_lease_release(int held)
+{
+  if (held == IQ_CHAN_LEASE_HELD && g_lease.release) g_lease.release(g_lease.ctx);
+}
+void iq_chan_lease_set_demand(int tokens) { if (g_lease.demand) g_lease.demand(g_lease.ctx, tokens); }
+int iq_chan_lease_max_tokens(void) { return g_lease.max_tokens ? g_lease.max_tokens(g_lease.ctx) : 0; }
+
 /* ================================================================ CPU backend */
 typedef struct {
   iq_ddc_t d[SHM_IQ_MAX_CH];
@@ -82,10 +114,22 @@ static void *worker_main(void *arg)
   uint64_t seen = W_GEN(atomic_load(&x->w));
   int spins = 0;
   for (;;) {
-    const uint64_t g = W_GEN(atomic_load_explicit(&x->w, memory_order_acquire));
-    if (g != seen) { seen = g; spins = 0; drain_jobs(x); continue; }
+    const uint64_t wv = atomic_load_explicit(&x->w, memory_order_acquire);
+    const uint64_t g = W_GEN(wv);
+    if (g != seen) {
+      seen = g;
+      spins = 0;
+      /* A helper leases a token per block, and only for a block that still has unclaimed jobs; denied = skip the block (worker 0 always runs it). The lease is
+       * released before the wait for the next block: never held across a wait for input. */
+      if (W_IDX(wv) < W_N(wv)) {
+        const int h = iq_chan_lease_acquire(0);
+        if (h != IQ_CHAN_LEASE_DENIED) { drain_jobs(x); iq_chan_lease_release(h); }
+      }
+      continue;
+    }
     if (atomic_load(&x->quit)) return NULL;
-    if (++spins < 4000) sched_yield();
+    /* leased: the idle wait runs on the home lane, not on a core of its own, so it is short (the sleep granularity is far below a block) */
+    if (++spins < (g_lease.acquire ? 100 : 4000)) sched_yield();
     else { struct timespec w = {0, 50000}; nanosleep(&w, NULL); }
   }
 }
@@ -204,12 +248,14 @@ static int cpu_run(void *ctx, const int16_t *const *in, int n, int16_t *const *o
     if (!c || !out[s * x->g.nch]) continue;
     for (unsigned a = 0; a < c->nch; ++a) { x->job_slot[par][nj] = (uint8_t)s; x->job_ch[par][nj] = (uint8_t)a; ++nj; }
   }
+  const int lh = iq_chan_lease_acquire(1); /* worker 0 blocks for its token (class CHAN is served first and r tokens are reserved for it) and keeps it until the block is done */
   x->in = in; x->outp = out; x->n = n;
   atomic_store(&x->err, 0);
   atomic_store_explicit(&x->pending, nj, memory_order_relaxed);
   atomic_store_explicit(&x->w, gen << 20 | (uint64_t)nj << 10, memory_order_release); /* publishes the job list, in/out/n, pending, err */
   drain_jobs(x);
-  while (atomic_load_explicit(&x->pending, memory_order_acquire) > 0) __asm__ __volatile__("" ::: "memory"); /* only jobs that were claimed */
+  while (atomic_load_explicit(&x->pending, memory_order_acquire) > 0) __asm__ __volatile__("" ::: "memory"); /* only jobs that were claimed (by leased workers) */
+  iq_chan_lease_release(lh);
   return atomic_load(&x->err) ? -1 : 0;
 }
 
@@ -810,17 +856,20 @@ int iq_chan_start(iq_chan_t *c, const int *cpus, int ncpus)
   int k = 1;
   c->threads_needed = 1; c->capacity_sps = 0;
   iq_chan_bench_t b;
+  if (c->be == &iq_chan_backend_cpu) iq_chan_lease_set_demand(1); /* the benches below run under the same leases (reserved fixed core: no affinity change per block) */
   if (l.n_cells && c->be == &iq_chan_backend_cpu && iq_chan_cpu_bench(&l, c->block, 0.2, &b) == 0) {
-    const int have = ncpus > 0 && cpus ? ncpus : 1, units = (int)(l.n_cells * l.nch), ceil_k = have < units ? have : units;
+    const int lease_max = iq_chan_lease_max_tokens(); /* with the core pool the ceiling is what CHAN may hold, and no worker is pinned by us */
+    const int have = lease_max > 0 ? lease_max : ncpus > 0 && cpus ? ncpus : 1, units = (int)(l.n_cells * l.nch), ceil_k = have < units ? have : units;
     const int need0 = iq_chan_threads_needed(&l, b.samples_per_s * 1e-6, IQ_CHAN_MARGIN);
     k = need0 < ceil_k ? need0 : ceil_k;
     c->capacity_sps = b.samples_per_s;
+    iq_chan_lease_set_demand(ceil_k);
     /* Scaling is not linear (jobs are cell x channel and cells differ in cost): measure the capacity with k threads and add threads while it is below the margin,
      * up to the cpus given and the number of jobs. */
     for (;;) {
       if (k > 1) {
         iq_chan_bench_t bk;
-        if (iq_chan_cpu_bench_k(&l, c->block, 0.2, k, cpus && ncpus > 1 ? cpus + 1 : NULL, ncpus > 1 ? ncpus - 1 : 0, &bk)) break;
+        if (iq_chan_cpu_bench_k(&l, c->block, 0.2, k, cpus && ncpus > 1 && lease_max <= 0 ? cpus + 1 : NULL, ncpus > 1 && lease_max <= 0 ? ncpus - 1 : 0, &bk)) break;
         c->capacity_sps = bk.samples_per_s;
       }
       if (c->capacity_sps >= IQ_CHAN_MARGIN * c->in_rate || k >= ceil_k) break;
@@ -830,6 +879,7 @@ int iq_chan_start(iq_chan_t *c, const int *cpus, int ncpus)
     if (k < c->threads_needed)
       fprintf(stderr, "IQ_CHAN_SHORTFALL threads_needed=%d threads=%d capacity=%.1f MS/s in_rate=%.2f MS/s\n", c->threads_needed, k, c->capacity_sps * 1e-6, c->in_rate * 1e-6);
   }
+  if (c->be == &iq_chan_backend_cpu) iq_chan_lease_set_demand(k); /* the pool takes k tokens off the share of the other classes (a GPU backend registers its own CPU-part demand) */
   return iq_chan_start_k(c, cpus, ncpus, k);
 }
 
@@ -838,6 +888,7 @@ void iq_chan_stop(iq_chan_t *c)
   if (!c->running) return;
   atomic_store(&c->stop, 1);
   pthread_join(c->th, NULL);
+  iq_chan_lease_set_demand(0);
   pthread_mutex_lock(&c->mu);
   c->running = 0;
   if (c->op) { apply_op(c, c->op); c->op = NULL; atomic_store(&c->op_pending, 0); pthread_cond_broadcast(&c->cv); } /* a command raced with the stop */
@@ -849,6 +900,8 @@ void iq_chan_stats(const iq_chan_t *c, iq_chan_stats_t *st)
   st->blocks = atomic_load(&c->blocks); st->in_samples = atomic_load(&c->in_samples);
   st->overruns = atomic_load(&c->overruns); st->discont = atomic_load(&c->discont); st->dropped_in = atomic_load(&c->dropped_in);
   st->run_ns = atomic_load(&c->run_ns); st->lag_max = atomic_load(&c->lag_max); st->step_gap_max_ns = atomic_load(&c->step_gap_max_ns); st->epochs = atomic_load(&c->epochs); st->work_ns = atomic_load(&c->work_ns); st->work_max_ns = atomic_load(&c->work_max_ns);
+  st->lease_blocks = atomic_load(&g_ls_blocks); st->lease_denied = atomic_load(&g_ls_denied);
+  st->lease_wait_ns = atomic_load(&g_ls_wait_ns); st->lease_wait_max_ns = atomic_load(&g_ls_wait_max);
   st->threads = c->threads ? c->threads : 1; st->threads_needed = c->threads_needed ? c->threads_needed : 1; st->capacity_sps = c->capacity_sps;
   st->n_cells = __atomic_load_n(&c->nused, __ATOMIC_RELAXED); st->n_paused = __atomic_load_n(&c->npaused, __ATOMIC_RELAXED); st->backend = c->be->name;
 }
