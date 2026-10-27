@@ -175,14 +175,13 @@ def arm_cells(arm):
 
 def per_cell(arm, fn):
     """-> [(cell or None, fn(arm, cell))]: one entry for an unprefixed / one-cell log, one per cell otherwise (never merged).
-    A log that names its cells (MPCI_CELL / ISAC_METRICS) adds "pci" and "counts" (cellsel.counts) to each cell's dict."""
+    Each cell's dict gets "pci" (None when the log does not name the cell: MPCI_CELL / ISAC_METRICS) and "counts" (cellsel.counts)."""
     i = arm_info(arm)
     if i is None:
         return [(None, fn(arm, None))]
     out = [(k, fn(arm, k)) for k in i["cells"]]
-    if i["pci"]:
-        for k, s in out:
-            s["pci"], s["counts"] = i["pci"].get(k), i["counts"][k]
+    for k, s in out:
+        s["pci"], s["counts"] = i["pci"].get(k), i["counts"][k]
     return out
 
 def cell_head(k, s):

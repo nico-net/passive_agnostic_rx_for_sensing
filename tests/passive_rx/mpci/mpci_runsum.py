@@ -3,7 +3,7 @@
    mpci_runsum.py LOG...         one block per log
    mpci_runsum.py --arms DIR     every arm directory under DIR (ue_*.log + mem.tsv + gpu.tsv of fanout_replay.sh)
 One log of a single-process multi-cell receiver carries "[c<k>] " line prefixes (task D2): it is summarised per cell, one block under
-a "== cell <k>" header each, automatically ("== cell <k> (PCI <n>)" plus a counts line when the log names its cells: cellsel.cell_info). Unprefixed logs: output unchanged.
+a "== cell <k>" header each, automatically ("== cell <k> (PCI <n>)", "(PCI ?)" when the log does not name the cell, plus a counts line: cellsel.cell_info). Unprefixed logs: output unchanged.
 Fields: sync PCI, MIB/SIB1 counts, CORESET bank adds, CSI-RS confirmations, last PDSCHQ line, EVMGRANT CRC, GPU_EXACT check_bad,
 PDTIMPCT sum percentiles, SHMIQ_END counters; per arm: min MemAvailable, per process CPU s / peak RSS / anon, GPU MiB."""
 import os, re, sys
@@ -63,8 +63,7 @@ def summ_all(path):
     if info is None:
         return [(None, summ(path))]
     out = [(k, summ(path, k)) for k in info['cells']]
-    if info['pci']:
-        for k, r in out: r['label'], r['counts'] = info['pci'].get(k), info['counts'][k]
+    for k, r in out: r['label'], r['counts'] = info['pci'].get(k), info['counts'][k]
     return out
 
 

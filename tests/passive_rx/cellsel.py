@@ -18,7 +18,8 @@ cell_info(path) -> None for an unprefixed / one-cell log, else {cells, pci, coun
            lines carrying their own cell index), else the first tagged ISAC_METRICS "pci" of the cell. Empty when the log has no such line.
   counts   {cell: counts(tagged lines of that cell)}; untagged = counts(untagged lines): process-wide lines (radio, GPU callbacks, MPCI_*) belong
            to no cell, are never added to a cell and are reported apart, so nothing is counted twice.
-Scorers print the PCI label and the counts only when pci is known (an mpci-main log); other multi-cell logs keep their plain blocks."""
+Every scorer prints, for EVERY multi-cell log, the header "== cell k (PCI n)" ("== cell k (PCI ?)" when the log does not name the cell),
+the counts line, the UNTAGGED line and the JSON keys pci (null when unknown) / counts / untagged. N=1 (untagged / one-cell) output is unchanged."""
 import gzip
 import re
 import sys
@@ -157,7 +158,7 @@ def cell_info(path):
 
 
 def cell_header(k, pci=None):
-    return "== cell %d" % k + (" (PCI %d)" % pci if pci is not None else "")
+    return "== cell %d (PCI %s)" % (k, "?" if pci is None else pci)
 
 
 def counts_line(c):

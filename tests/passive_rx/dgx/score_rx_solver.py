@@ -8,7 +8,7 @@ reopens, postconv window) no longer exist. This scorer takes them from the solve
   post_solve_tr   full decodes after the solve                                               >= GATE_POSTSOLVE_MIN (5000)
   crc_floor, drop_full  unchanged (overall PDSCHQ CRC >= 93.4, scan-queue drops <= 2.5 %)
 usage: score_rx_solver.py [--json] [--gate] <arm dir>...
-A multi-cell log (lines prefixed "[c<k>] ") is scored per cell automatically (header "== cell <k>", JSON {"arm":..., "cells": {...}}); a log that names its cells adds "(PCI <n>)", a counts line and "pci"/"counts" keys."""
+A multi-cell log (lines prefixed "[c<k>] ") is scored per cell automatically (header "== cell <k>", JSON {"arm":..., "cells": {...}}); the header carries "(PCI <n>)" ("?" when unknown), a counts line, and the JSON "pci"/"counts" keys."""
 import json, os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import score_rx

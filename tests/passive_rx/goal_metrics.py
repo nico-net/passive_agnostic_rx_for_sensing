@@ -7,8 +7,8 @@ shortcut: Shannon gap + fixed 1.5 dB loss, not a calibrated BLER curve; recalibr
 usage: goal_metrics.py [--margin 2.0] [--json] run.log...
 A log of a multi-cell receiver (lines prefixed "[c<k>] ") is scored per cell, automatically: one independent result block per cell
 ("== cell <k> (PCI <n>)" header; JSON {"run":..., "cells": {"<k>": {...}}}), never a merged number. Unprefixed or one-cell logs: unchanged.
-When the log names its cells (MPCI_CELL / ISAC_METRICS) each block also carries the PCI and a "CELL" line with the cellsel.counts() facts
-(C-RNTI grants, CRC ok, length locks, ULDCI, SI grants, syncs, RXDISCONT); JSON: "pci", "counts" per cell and "untagged" (process-wide lines).
+Each block also carries the PCI ("?" / null when the log does not name the cell: MPCI_CELL / ISAC_METRICS) and a "CELL" line with the cellsel.counts()
+facts (C-RNTI grants, CRC ok, length locks, ULDCI, SI grants, syncs, RXDISCONT); JSON: "pci", "counts" per cell and "untagged" (process-wide lines).
 .gz logs are read directly."""
 import json, math, os, re, sys
 
@@ -164,18 +164,14 @@ if __name__ == '__main__':
             else:
                 show(p, r)
             continue
-        named = bool(info['pci'])
         rs = {k: parse_run(p, margin, k) for k in info['cells']}
-        if named:
-            for k, r in rs.items():
-                r['pci'] = info['pci'].get(k); r['counts'] = info['counts'][k]
+        for k, r in rs.items():
+            r['pci'] = info['pci'].get(k); r['counts'] = info['counts'][k]
         if as_json:
-            print(json.dumps({'run': p, 'cells': {str(k): r for k, r in rs.items()}, **({'untagged': info['untagged']} if named else {})}))
+            print(json.dumps({'run': p, 'cells': {str(k): r for k, r in rs.items()}, 'untagged': info['untagged']}))
             continue
         for k, r in rs.items():
             print(cellsel.cell_header(k, info['pci'].get(k)))
             show(p, r)
-            if named:
-                print(f"{p} CELL pci={r['pci']} {cellsel.counts_line(r['counts'])}")
-        if named:
-            print(f"{p} UNTAGGED (process-wide, in no cell) {cellsel.counts_line(info['untagged'])}")
+            print(f"{p} CELL pci={r['pci']} {cellsel.counts_line(r['counts'])}")
+        print(f"{p} UNTAGGED (process-wide, in no cell) {cellsel.counts_line(info['untagged'])}")

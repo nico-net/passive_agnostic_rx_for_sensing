@@ -97,6 +97,8 @@ class PerCell(unittest.TestCase):
             self.assertEqual(txt.count(" CELL pci="), 2)
             self.assertEqual(txt.count(" DL "), 2)
             self.assertEqual(txt.count(" UL "), 2)
+            self.assertEqual(txt.count(" UNTAGGED "), 1)
+            self.assertIn("untagged", d)
 
     def test_runsum(self):
         for name, want in EXPECT.items():
@@ -118,6 +120,94 @@ class PerCell(unittest.TestCase):
                     g = run(script, "--gate", name, cwd=d)
                     self.assertEqual(re.findall(r"^== cell (\d) \(PCI (\d+)\)$", g, re.M), [(str(k), str(v[0])) for k, v in want.items()])
                     self.assertEqual(g.count("\n  cell pci="), 2)
+
+
+SYNTH = os.path.join(HERE, "fixtures", "synth_2cell_ul.txt")
+# per cell: (PCI, UL n_real, UL CRC ok, UL n_q, UL drops %, probe=1 lines that must NOT count)
+SYNTH_EXPECT = {0: (415, 6, 4, 4, 3.0, 3), 1: (923, 9, 2, 2, 6.0, 4)}
+
+
+class SyntheticUL(unittest.TestCase):
+    """Per-cell UL scoring on fixtures/synth_2cell_ul.txt. P1/Q1 hold no UL line and S1's UL lines are all probe=1, so no real log exercises
+    per-cell UL. The fixture is built from REAL UL_E2E / UL_PUSCH_CRC / PUSCHQ2 line formats of me_TN1_1_220653 (probe=0 lines; probe=1 lines
+    kept as probes), prefixed "\\x1b[0m[c<k>] \\x1b[32m", with MPCI_CELL lines for PCI 415 (c0) and 923 (c1). SYNTHETIC edits: ok=1 and snr_db=30.0 on some
+    probe=0 CRC lines (every real probe=0 line is ok=0), ok=1 on every probe=1 CRC line (a probe counted by mistake shows at once), PUSCHQ2
+    real[queued full] / real_stale set to 100/3/0 (c0) and 200/10/2 (c1). Different counts per cell so a mix-up cannot pass."""
+
+    def hand(self, k, probe):
+        """Independent of the scorers: substring counts on the tagged lines of cell k -> (CRC lines, CRC ok, E2E lines)."""
+        crc = ok = e2e = 0
+        with open(SYNTH) as f:
+            for l in f:
+                l = ANSI.sub("", l)
+                if "[c%d] " % k not in l or (" probe=%d" % probe) not in l:
+                    continue
+                if "UL_PUSCH_CRC" in l:
+                    crc += 1
+                    ok += " ok=1 " in l
+                elif "UL_E2E" in l:
+                    e2e += 1
+        return crc, ok, e2e
+
+    def test_fixture_shape(self):
+        for k, (pci, n, ok, nq, drops, probes) in SYNTH_EXPECT.items():
+            self.assertEqual(self.hand(k, 0), (n, ok, n))
+            self.assertEqual(self.hand(k, 1), (probes, probes, probes))     # every probe CRC line carries ok=1
+
+    def test_goal_metrics_ul_per_cell(self):
+        d = json.loads(run("goal_metrics.py", "--json", SYNTH))
+        self.assertEqual(sorted(d["cells"]), ["0", "1"])
+        for k, (pci, n, ok, nq, drops, probes) in SYNTH_EXPECT.items():
+            c = d["cells"][str(k)]
+            ul = c["ul"]
+            self.assertEqual(c["pci"], pci)
+            self.assertEqual((ul["n_real"], ul["n_q"], ul["drops_pct"]), (n, nq, drops), k)
+            self.assertAlmostEqual(ul["crc_all"], 100.0 * ok / n)           # probe=1 lines (all ok=1) are excluded
+            self.assertEqual(ul["crc_q"], 100.0)
+            self.assertEqual(ul["unqualified_low_snr"], n - nq)
+            self.assertEqual(ul["skipped"], 0)
+            self.assertIsNotNone(ul["tot_p99"])
+            self.assertEqual(c["dl"]["n_real"], 0)
+            self.assertEqual(sum(c["counts"].values()), 0)                 # UL CRC / E2E lines are not C-RNTI / SI facts
+        self.assertEqual(sum(d["untagged"].values()), 0)
+        # the two cells' UL latency sets differ (no mixing)
+        self.assertNotEqual(d["cells"]["0"]["ul"]["tot_p50"], d["cells"]["1"]["ul"]["tot_p50"])
+        txt = run("goal_metrics.py", SYNTH)
+        self.assertEqual(re.findall(r"^== cell (\d) \(PCI (\d+)\)$", txt, re.M), [("0", "415"), ("1", "923")])
+        self.assertEqual(len(re.findall(r" UL \S+ n_real=6 ", txt)), 1)
+        self.assertEqual(len(re.findall(r" UL \S+ n_real=9 ", txt)), 1)
+
+    def test_other_scorers_split_cells(self):
+        txt = run("mpci/mpci_runsum.py", SYNTH)
+        for k, v in SYNTH_EXPECT.items():
+            self.assertIn("== cell %d (PCI %d)\n" % (k, v[0]), txt)
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "synth", "rx"))
+            shutil.copy(SYNTH, os.path.join(d, "synth", "rx", "rx.log"))
+            for script, args in (("dgx/score_rx.py", ("--json",)), ("dgx/score_rx_solver.py", ())):
+                j = json.loads(run(script, *args, "synth", cwd=d))
+                self.assertEqual(sorted(j["cells"]), ["0", "1"])
+                for k, v in SYNTH_EXPECT.items():
+                    self.assertEqual(j["cells"][str(k)]["pci"], v[0])
+                    self.assertEqual(sum(j["cells"][str(k)]["counts"].values()), 0)
+
+
+class UnnamedCells(unittest.TestCase):
+    """A multi-cell log without MPCI_CELL / ISAC_METRICS: extras are still printed, PCI shown as '?' / null."""
+
+    def test_unknown_pci_marker(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "u.log")
+            with open(SYNTH) as f, open(p, "w") as o:
+                o.writelines(l for l in f if not l.startswith("MPCI_CELL"))
+            txt = run("goal_metrics.py", p)
+            self.assertEqual(re.findall(r"^== cell (\d) \(PCI \?\)$", txt, re.M), ["0", "1"])
+            self.assertEqual(txt.count(" CELL pci=None "), 2)
+            self.assertEqual(txt.count(" UNTAGGED "), 1)
+            j = json.loads(run("goal_metrics.py", "--json", p))
+            self.assertEqual([j["cells"][k]["pci"] for k in "01"], [None, None])
+            self.assertIn("untagged", j)
+            self.assertIn("== cell 0 (PCI ?)\n", run("mpci/mpci_runsum.py", p))
 
 
 class N1Identical(unittest.TestCase):
