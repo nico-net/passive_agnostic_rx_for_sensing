@@ -241,10 +241,14 @@ int iq_feed_format(iq_feed_t *f, char *buf, size_t n)
 {
   iq_feed_stats_t s;
   iq_feed_stats(f, &s);
-  char ls[96] = ""; /* core-pool lease of the channelizer workers (CHANPOOL); empty without leases, so the line is unchanged then */
+  char ls[160] = ""; /* core-pool lease of the channelizer workers (CHANPOOL); empty without leases, so the line is unchanged then */
   if (s.chan.lease_blocks || s.chan.lease_denied)
     snprintf(ls, sizeof(ls), " chan_lease=%llu/denied=%llu/wait_max_us=%llu", (unsigned long long)s.chan.lease_blocks, (unsigned long long)s.chan.lease_denied,
              (unsigned long long)(s.chan.lease_wait_max_ns / 1000));
+  /* G5: the channelizer's worst step gap and block work (where a full-ring overrun comes from) */
+  char gs[64];
+  snprintf(gs, sizeof(gs), " chan_gap_max_ms=%.1f chan_work_max_ms=%.1f", s.chan.step_gap_max_ns * 1e-6, s.chan.work_max_ns * 1e-6);
+  if (strlen(ls) + strlen(gs) < sizeof(ls)) strcat(ls, gs);
   size_t o = (size_t)snprintf(buf, n,
                               "MPCI_FEED rate=%.0f centre_hz=%.0f reads=%llu samples=%llu short=%llu gaps=%llu frozen=%llu read_err=%llu chan_overruns=%llu chan_discont=%llu "
                               "chan_lag_max=%llu threads=%d/%d backend=%s%s cells=",

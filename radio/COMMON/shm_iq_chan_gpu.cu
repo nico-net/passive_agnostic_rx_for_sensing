@@ -166,6 +166,7 @@ struct GCtx {
   size_t bytes_dev, bytes_pin;
   GCell *slot[IQ_CHAN_MAX_CELLS];
   int place;
+  double last_slow_ms;
   int demand_set; // the CPU-part demand (1 token) registered with the pool at the first run (the hooks are installed after create)
   iq_chan_gpu_stats_t stats;
 };
@@ -429,7 +430,9 @@ static int g_run(void *ctx, const int16_t *const *in, int n, int16_t *const *out
   }
   cudaEventRecord(x->e1, x->st);
   lease_put(lease); // never across the GPU wait
+  const double w1 = mono_ms();
   if (cudaGetLastError() != cudaSuccess || wait_event(x->e1)) return -1;
+  const double w2 = mono_ms();
   if (!x->shared) {
     lease = lease_get();
     for (int s = 0; s < IQ_CHAN_MAX_CELLS; ++s) {
@@ -442,9 +445,16 @@ static int g_run(void *ctx, const int16_t *const *in, int n, int16_t *const *out
   }
   float ms = 0;
   cudaEventElapsedTime(&ms, x->e0, x->e1);
+  const double wall = mono_ms() - w0;
   x->stats.runs++;
   x->stats.gpu_ms += ms;
-  x->stats.wall_ms += mono_ms() - w0;
+  x->stats.wall_ms += wall;
+  if (wall > x->stats.wall_max_ms) x->stats.wall_max_ms = wall;
+  // a slow run (> 50 ms: 5 % of the about 1 s wideband ring) is named, at most once per second, with where the time went
+  if (wall > 50.0 && w2 - x->last_slow_ms > 1000.0) {
+    x->last_slow_ms = w2;
+    fprintf(stderr, "IQ_CHAN_GPU_SLOW run_ms=%.1f launch_ms=%.1f wait_ms=%.1f gpu_ms=%.1f runs=%ld\n", wall, w1 - w0, w2 - w1, ms, x->stats.runs);
+  }
   return 0;
 }
 

@@ -44,6 +44,7 @@ typedef struct {
 typedef struct {
   long runs;
   double gpu_ms, wall_ms; /* sums over every run() */
+  double wall_max_ms;     /* longest run() (launch + wait); a run above 50 ms also prints IQ_CHAN_GPU_SLOW (at most once per second) */
 } iq_chan_gpu_stats_t;
 
 typedef struct {
