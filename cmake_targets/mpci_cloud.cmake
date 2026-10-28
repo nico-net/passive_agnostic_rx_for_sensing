@@ -449,3 +449,27 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_fep_selfcheck COMMAND test_nr_fep_selfcheck)
 endif()
 # ---- end DBG3 ----
+
+# ---- FEEDSTART ----
+# Multi-cell start-up in the receiver's order without a radio (fake full-rate device behind the real radio lifetime gate, iq_feed reader + channelizer with
+# CHAN leases of a real core pool, shm_iq ring devices attached under the exclusive gate), repeated starts with varied thread timing; CPU and GPU backends.
+if(ENABLE_TESTS)
+  add_executable(test_iq_feed_start ${CMAKE_SOURCE_DIR}/radio/COMMON/tests/test_iq_feed_start.c ${CMAKE_SOURCE_DIR}/common/utils/nr_shutdown.c
+                 ${CMAKE_SOURCE_DIR}/common/utils/nr_core_pool.c)
+  target_include_directories(test_iq_feed_start PRIVATE ${CMAKE_SOURCE_DIR}/radio/COMMON ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS ${CMAKE_SOURCE_DIR}/common/utils)
+  set_target_properties(test_iq_feed_start PROPERTIES ENABLE_EXPORTS ON RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+  target_link_libraries(test_iq_feed_start PRIVATE mpci_iq log_headers m ${CMAKE_DL_LIBS} pthread rt)
+  if(ENABLE_LDPC_CUDA)
+    target_compile_definitions(test_iq_feed_start PRIVATE FEEDSTART_GPU)
+    target_link_libraries(test_iq_feed_start PRIVATE nr_gpu_platform)
+    add_dependencies(test_iq_feed_start shm_iq_chan_gpu)
+  endif()
+  add_dependencies(test_iq_feed_start shm_iq)
+  add_dependencies(tests test_iq_feed_start)
+  add_test(NAME test_iq_feed_start_cpu COMMAND test_iq_feed_start $<TARGET_FILE:shm_iq> cpu 50 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_test(NAME test_iq_feed_start_gpu COMMAND test_iq_feed_start $<TARGET_FILE:shm_iq> gpu 50 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_iq_feed_start_cpu test_iq_feed_start_gpu PROPERTIES RUN_SERIAL ON TIMEOUT 600)
+  set_tests_properties(test_iq_feed_start_gpu PROPERTIES ENVIRONMENT "CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps"
+                       SKIP_RETURN_CODE 77)
+endif()
+# ---- end FEEDSTART ----
