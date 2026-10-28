@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 struct iq_feed {
   iq_feed_cfg_t cfg;
@@ -25,6 +26,7 @@ struct iq_feed {
   pthread_t th;
   _Atomic int running, stop;
   int thread_started, chan_started;
+  double live_ms;
   char tag[IQ_CHAN_MAX_CELLS][32];
   /* MPCI-DASH P3: window state of CHAN_CELL (one slot per entry id; touched only by the manager tick that formats the lines) */
   struct { uint64_t blocks, out, write_ns, ov; } dprev[IQ_CHAN_MAX_CELLS];
@@ -187,6 +189,42 @@ static void *reader_main(void *p)
   return NULL;
 }
 
+static uint64_t mono_ns(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+/* every running cell ring holds its first block (paused entries are away: live at once); polled, no lock held (see iq_feed.h, iq_feed_start) */
+static int all_live(iq_feed_t *f)
+{
+  for (int id = 0; id < IQ_CHAN_MAX_CELLS; ++id) {
+    const shm_iq_ring_t *r = iq_chan_cell_ring(f->chan, id);
+    if (r && iq_chan_cell_paused(f->chan, id) != 1 && !shm_iq_ring_live(r)) return 0;
+  }
+  return 1;
+}
+static int wait_live(iq_feed_t *f)
+{
+  const uint64_t t0 = mono_ns();
+  for (;;) {
+    if (all_live(f)) {
+      f->live_ms = (double)(mono_ns() - t0) * 1e-6;
+      return 0;
+    }
+    if (!atomic_load(&f->running)) return -EIO;
+    if (f->cfg.cancelled && f->cfg.cancelled()) return -ECANCELED;
+    if (mono_ns() - t0 > (uint64_t)(IQ_FEED_LIVE_TIMEOUT_S * 1e9)) {
+      fprintf(stderr, "IQ_FEED_NOT_LIVE no first block in every cell ring after %.0f s (reads=%llu): the feed is stopped\n", IQ_FEED_LIVE_TIMEOUT_S,
+              (unsigned long long)atomic_load(&f->reads));
+      return -ETIMEDOUT;
+    }
+    struct timespec w = {0, 1000000};
+    nanosleep(&w, NULL);
+  }
+}
+
 int iq_feed_start(iq_feed_t *f, int reader_cpu, int reader_prio, const int *chan_cpus, int n_chan_cpus)
 {
   if (!f || f->thread_started) return -EINVAL;
@@ -210,7 +248,9 @@ int iq_feed_start(iq_feed_t *f, int reader_cpu, int reader_prio, const int *chan
   pthread_attr_destroy(&at);
   if (rc) { free(a); atomic_store(&f->running, 0); return -rc; }
   f->thread_started = 1;
-  return 0;
+  rc = wait_live(f);
+  if (rc) iq_feed_stop(f);
+  return rc;
 }
 
 void iq_feed_stats(const iq_feed_t *f, iq_feed_stats_t *st)
@@ -218,7 +258,7 @@ void iq_feed_stats(const iq_feed_t *f, iq_feed_stats_t *st)
   memset(st, 0, sizeof(*st));
   st->reads = atomic_load(&f->reads); st->samples = atomic_load(&f->samples); st->short_reads = atomic_load(&f->short_reads);
   st->read_errors = atomic_load(&f->read_errors); st->ts_gaps = atomic_load(&f->ts_gaps); st->ts_frozen = atomic_load(&f->ts_frozen);
-  st->staged = atomic_load(&f->staged); st->frozen = f->frozen; st->running = atomic_load(&f->running);
+  st->staged = atomic_load(&f->staged); st->frozen = f->frozen; st->running = atomic_load(&f->running); st->live_ms = f->live_ms;
   iq_chan_stats(f->chan, &st->chan);
 }
 

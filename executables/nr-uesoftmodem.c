@@ -570,7 +570,8 @@ static void mpci_feed_rings(void)
   static iq_chan_load_t s_load;
   s_load = load;
   const iq_feed_cfg_t fc = {.read = nrue_feed_read, .nch = g_feed_plan.n_rx, .rate = g_feed_plan.rate, .centre_hz = g_feed_plan.centre_hz, .name = MPCI_FEED_RING,
-                            .wide_capacity = cap, .narrow_budget_bytes = narrow, .load_hint = &s_load, .radio_id = nrue_feed_cfg()->sdr_addrs};
+                            .wide_capacity = cap, .narrow_budget_bytes = narrow, .load_hint = &s_load, .radio_id = nrue_feed_cfg()->sdr_addrs,
+                            .cancelled = nr_shutdown_requested};
   g_feed_obj = iq_feed_create(&fc);
   if (!g_feed_obj)
     mpci_feed_fail("the wideband ring / channelizer could not be created");
@@ -611,12 +612,21 @@ static void mpci_feed_start(void)
   static const iq_chan_lease_t lease = {.acquire = mpci_chan_acquire, .release = mpci_chan_release, .demand = mpci_chan_demand, .max_tokens = mpci_chan_max};
   iq_chan_set_lease(&lease);
   const int reader = nr_core_layout_feed_cpu();
-  if (iq_feed_start(g_feed_obj, reader, OAI_PRIORITY_RT_LOW, NULL, 0) != 0)
+  /* MPCI-FEEDSTART: returns once every running cell ring holds its first block, so the RU start below (exclusive radio gate, shm_iq device_init waiting for
+   * that block) never waits for the reader, which needs the same gate for every radio read */
+  const int rc = iq_feed_start(g_feed_obj, reader, OAI_PRIORITY_RT_LOW, NULL, 0);
+  if (rc == -ECANCELED)
+    return; /* shutdown requested during start-up: the RU start sees it and the receiver finishes */
+  if (rc == -EIO)
+    mpci_feed_fail("the radio read failed before every cell ring had its first block");
+  if (rc == -ETIMEDOUT)
+    mpci_feed_fail("the cell rings had no first block within the start-up limit (the radio delivered nothing or the channelizer wrote nothing)");
+  if (rc != 0)
     mpci_feed_fail("the feed threads did not start");
   iq_feed_stats_t st;
   iq_feed_stats(g_feed_obj, &st);
-  LOG_I(PHY, "SENSING: MPCI_FEED started reader_cpu=%d chan=pool(max %d) threads=%d needed=%d capacity_msps=%.1f backend=%s\n", reader, nr_pool_site_chan_max(), st.chan.threads,
-        st.chan.threads_needed, st.chan.capacity_sps / 1e6, st.chan.backend);
+  LOG_I(PHY, "SENSING: MPCI_FEED started reader_cpu=%d chan=pool(max %d) threads=%d needed=%d capacity_msps=%.1f backend=%s live_ms=%.1f reads=%llu\n", reader,
+        nr_pool_site_chan_max(), st.chan.threads, st.chan.threads_needed, st.chan.capacity_sps / 1e6, st.chan.backend, st.live_ms, (unsigned long long)st.reads);
 }
 static void mpci_feed_log(void)
 {

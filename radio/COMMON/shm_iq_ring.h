@@ -118,6 +118,10 @@ int shm_iq_ring_commit(shm_iq_ring_t *r, int64_t tick, int got);
 void shm_iq_ring_new_epoch(shm_iq_ring_t *r, double center_hz);
 
 double shm_iq_ring_center(const shm_iq_ring_t *r);
+/* MPCI-FEEDSTART: 1 when a consumer can start on this ring without waiting for its producer: the first sample is written (head > 0; head never goes back)
+ * or the producer marked it away (v2+: a ring paused from birth; reads wait). shm_iq's device_init waits for exactly this; iq_feed_start returns only once
+ * every running cell ring of the feed is live, so the cells' RU start (under the exclusive radio gate) never waits for the feed reader. */
+int shm_iq_ring_live(const shm_iq_ring_t *r);
 /* Producer (v2 metadata). radio_id may be NULL. */
 void shm_iq_ring_set_meta(shm_iq_ring_t *r, const char *radio_id, unsigned time_source);
 /* Producer: time-shared window leaves (until_ns = expected return, CLOCK_MONOTONIC) / returns (new run + epoch bump;

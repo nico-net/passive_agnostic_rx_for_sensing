@@ -138,13 +138,25 @@ static void *ru_start(void *p)
 
 static const iq_chan_backend_t *g_backend;
 
-/* iq_feed_start with the stream start placed after the feed threads exist (see one_start). The reader may already be blocked in its first read: it
- * waits until t0 is known (a radio before its first packet), so t0 is published atomically. */
-static int iq_feed_start_t0(iq_feed_t *f, radio_t *r, int pps_delay_us)
+/* The radio's timed stream start: sample 0 exists pps_delay after the feed threads exist (the reader is created right after the channelizer's start-up
+ * bench; the X410 starts at the next PPS + 1 s, so the receiver never meets a tighter case). Runs on its own thread, like the radio: iq_feed_start may wait
+ * for the stream (MPCI-FEEDSTART), the stream does not wait for iq_feed_start. Until t0 is published the fake device's read blocks. */
+typedef struct {
+  iq_feed_t *f;
+  radio_t *r;
+  int pps_delay_us;
+} pps_t;
+static void *pps_main(void *p)
 {
-  const int rc = iq_feed_start(f, -1, 0, NULL, 0);
-  __atomic_store_n(&r->t0_ns, now_ns() + (uint64_t)pps_delay_us * 1000ull, __ATOMIC_RELEASE);
-  return rc;
+  pps_t *x = p;
+  iq_feed_stats_t st;
+  for (int k = 0; k < 200000; ++k) { /* <= 10 s: a feed whose threads never start fails in iq_feed_start */
+    iq_feed_stats(x->f, &st);
+    if (st.running) break;
+    usleep(50);
+  }
+  __atomic_store_n(&x->r->t0_ns, now_ns() + (uint64_t)x->pps_delay_us * 1000ull, __ATOMIC_RELEASE);
+  return NULL;
 }
 
 /* one start: 0 = pass; a stall exits the process */
@@ -175,7 +187,11 @@ static int one_start(dev_init_fn init, const geom_t *g, int i, int reader_delay_
    * channelizer's start-up bench); the test puts sample 0 at the moment the feed threads exist + pps_delay, which is the tightest case the receiver meets.
    * Until then the fake device's read blocks (as a radio before its first packet). */
   r.t0_ns = UINT64_MAX / 2;
-  const int rc = iq_feed_start_t0(f, &r, pps_delay_us);
+  pps_t px = {.f = f, .r = &r, .pps_delay_us = pps_delay_us};
+  pthread_t pth;
+  pthread_create(&pth, NULL, pps_main, &px);
+  const int rc = iq_feed_start(f, -1, 0, NULL, 0);
+  pthread_join(pth, NULL);
   if (rc) { fprintf(stderr, "FAIL start %d: iq_feed_start %d\n", i, rc); return 1; }
   pthread_t th;
   const uint64_t t_ru = now_ns();
