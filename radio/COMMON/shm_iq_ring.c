@@ -224,6 +224,12 @@ void shm_iq_ring_set_meta(shm_iq_ring_t *r, const char *radio_id, unsigned time_
   r->hdr->time_source = time_source;
 }
 
+int shm_iq_ring_live(const shm_iq_ring_t *r)
+{
+  const shm_iq_hdr_t *h = r->hdr;
+  return h && (atomic_load(&h->head) != 0 || (h->version >= 2 && atomic_load(&h->away)));
+}
+
 void shm_iq_ring_set_away(shm_iq_ring_t *r, uint64_t until_ns)
 {
   atomic_store(&r->hdr->dwell_until_ns, until_ns);

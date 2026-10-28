@@ -35,6 +35,7 @@ typedef struct {
   const iq_chan_backend_t *backend; /* NULL = iq_chan_backend_select(load_hint) */
   const iq_chan_load_t *load_hint;
   const char *radio_id;         /* for the ring metadata (may be NULL) */
+  int (*cancelled)(void);       /* optional: 1 = the process is shutting down (the receiver: nr_shutdown_requested); ends iq_feed_start's wait early */
 } iq_feed_cfg_t;
 
 typedef struct iq_feed iq_feed_t;
@@ -43,6 +44,7 @@ typedef struct {
   uint64_t reads, samples, short_reads, read_errors, ts_gaps, ts_frozen, staged;
   int frozen;                   /* frozen-stamp mode detected */
   int running;                  /* reader thread alive */
+  double live_ms;               /* iq_feed_start: from the threads' start until every running cell ring held its first block (0 before) */
   iq_chan_stats_t chan;
 } iq_feed_stats_t;
 
@@ -64,7 +66,14 @@ shm_iq_ring_t *iq_feed_wide_ring(iq_feed_t *f);
 iq_chan_t *iq_feed_chan(iq_feed_t *f);
 /* One radio read into the wideband ring on the calling thread (the reader thread's body; tests). 1 = samples published, -1 = read error. */
 int iq_feed_step(iq_feed_t *f);
-/* Start the reader thread (pinned to reader_cpu >= 0, SCHED_FIFO prio when > 0 and allowed) and the channelizer (iq_chan_start on chan_cpus: k derived). */
+/* Start the reader thread (pinned to reader_cpu >= 0, SCHED_FIFO prio when > 0 and allowed) and the channelizer (iq_chan_start on chan_cpus: k derived), then
+ * wait until the feed is LIVE: every running (not paused) cell ring holds its first block (shm_iq_ring_live). The wait holds no lock: the reader keeps
+ * draining the radio and the channelizer keeps writing, whatever the threads' timing. MPCI-FEEDSTART: the cells' RUs are started afterwards under the
+ * exclusive radio gate, and their shm_iq device_init waits for exactly that state; started before it, the RU start held the gate the reader needs for
+ * every radio read (nrue_feed_read) while it waited for a write only the reader can cause: a start-up deadlock (OTA 2026-10-27/28, reads=0, usrp ring full).
+ * Returns 0 (live), or with the threads stopped: -EIO the reader stopped (radio read error) first, -ECANCELED cfg.cancelled() said so, -ETIMEDOUT not live
+ * within IQ_FEED_LIVE_TIMEOUT_S (the shm_iq attach limit), or the thread start error. */
+#define IQ_FEED_LIVE_TIMEOUT_S 30.0
 int iq_feed_start(iq_feed_t *f, int reader_cpu, int reader_prio, const int *chan_cpus, int n_chan_cpus);
 /* Stop the reader (it leaves at its next read: the caller stops the radio first, so a blocked read returns) and the channelizer. */
 void iq_feed_stop(iq_feed_t *f);

@@ -234,8 +234,7 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
   const uint64_t t0 = shm_iq_now_ns();
   /* wait for the producer's ring and its first sample (base_tick is set by the first write); a ring the producer marked away before its first write (G6: a cell
    * entry created paused, e.g. outside the capture span) is attached at once: its reads wait until the producer writes */
-  while (shm_iq_ring_attach(&s->ring, name) != 0
-         || (atomic_load(&s->ring.hdr->head) == 0 && !(s->ring.hdr->version >= 2 && atomic_load(&s->ring.hdr->away)))) {
+  while (shm_iq_ring_attach(&s->ring, name) != 0 || !shm_iq_ring_live(&s->ring)) {
     if (s->ring.hdr) shm_iq_ring_detach(&s->ring);
     AssertFatal(shm_iq_now_ns() - t0 < (uint64_t)(attach_s * 1e9), "SHMIQ no ring /%s after %.0f s\n", name, attach_s);
     usleep(10000);
