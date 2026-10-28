@@ -438,3 +438,14 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_core_pool_chan COMMAND test_nr_core_pool_chan)
 endif()
 # ---- end CHANPOOL ----
+
+# ---- DBG3 ----
+# GPU exact FEP self-check confirmation (a mismatch disables the path only when it repeats on input that stays put): pure header test.
+if(ENABLE_TESTS)
+  add_executable(test_nr_fep_selfcheck ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/tests/nr_fep_selfcheck_test.cc)
+  target_include_directories(test_nr_fep_selfcheck PRIVATE ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_fep_selfcheck PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_fep_selfcheck)
+  add_test(NAME test_nr_fep_selfcheck COMMAND test_nr_fep_selfcheck)
+endif()
+# ---- end DBG3 ----
