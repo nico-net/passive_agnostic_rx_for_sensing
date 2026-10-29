@@ -259,6 +259,7 @@ void nr_sl_rf_card_config_freq(PHY_VARS_NR_UE *ue,
     @param ptrs_re_per_slot
 */
 uint32_t nr_dlsch_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol);
+int nr_dlsch_csi_drop_dmrs_overlap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config);
 int nr_dlsch_csi_rb_extent(void);
 uint32_t nr_dlsch_csi_rb_mask(const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol, int crb);
 /* CSI-FULL: virtual BWP RB -> physical BWP PRB of a segmented grant (NULL = identity). */

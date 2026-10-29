@@ -999,19 +999,19 @@ openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	65	nr_pdsch_decode_sign_err
 openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	65	nr_pdsch_decode_signs	tls	uint64_t	TLS	AUDIT	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	66	nr_dlsch_chest_per_symbol	tls	int	TLS	AUDIT	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	68	nr_dlsch_used_branch	tls	int	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	240	nr_dlsch_csi_extent_override	tls	int	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	247	nr_dlsch_csi_rb_extent::s	func_static	int	PROCESS	AUDIT	log/one-shot budget of the demodulator (function-local), shared by cells
-openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	254	nr_dlsch_csi_prb_map	tls	const uint16_t *	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	255	nr_dlsch_csi_prb_map_n	tls	int	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	283	nr_dlsch_csi_erase	tls	fapi_nr_dl_config_csirs_pdu_rel15_t[NFAPI_MAX_NUM_CSI_RATEMATCH]	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	284	nr_dlsch_csi_erase_n	tls	int	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	517	nr_dlsch_extract_geometry::f1	tls	NR_DL_FRAME_PARMS *	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	1195	nr_rx_pdsch::t_mrc_nb_rx	tls	int	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	1196	nr_rx_pdsch::t_mrc_rx_index	tls	int	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	1197	nr_rx_pdsch::t_mrc_live_mask	tls	int	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	1198	nr_rx_pdsch::t_mrc_mode	tls	int	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	1199	nr_rx_pdsch::t_mrc_env	tls	int	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	1232	nr_rx_pdsch::s_qm	func_static	int	PROCESS	AUDIT	log/one-shot budget of the demodulator (function-local), shared by cells
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	285	nr_dlsch_csi_extent_override	tls	int	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	292	nr_dlsch_csi_rb_extent::s	func_static	int	PROCESS	AUDIT	log/one-shot budget of the demodulator (function-local), shared by cells
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	299	nr_dlsch_csi_prb_map	tls	const uint16_t *	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	300	nr_dlsch_csi_prb_map_n	tls	int	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	328	nr_dlsch_csi_erase	tls	fapi_nr_dl_config_csirs_pdu_rel15_t[NFAPI_MAX_NUM_CSI_RATEMATCH]	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	329	nr_dlsch_csi_erase_n	tls	int	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	562	nr_dlsch_extract_geometry::f1	tls	NR_DL_FRAME_PARMS *	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	1240	nr_rx_pdsch::t_mrc_nb_rx	tls	int	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	1241	nr_rx_pdsch::t_mrc_rx_index	tls	int	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	1242	nr_rx_pdsch::t_mrc_live_mask	tls	int	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	1243	nr_rx_pdsch::t_mrc_mode	tls	int	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	1244	nr_rx_pdsch::t_mrc_env	tls	int	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	1277	nr_rx_pdsch::s_qm	func_static	int	PROCESS	AUDIT	log/one-shot budget of the demodulator (function-local), shared by cells
 openair1/PHY/NR_UE_TRANSPORT/nr_dmrs_nid_solve.c	14	s_x2mask	file_static	uint32_t[NSTREAM]	PROCESS	AUDIT	x1/x2 Gold-sequence start tables built once (pthread_once), cell independent
 openair1/PHY/NR_UE_TRANSPORT/nr_dmrs_nid_solve.c	15	s_x1	file_static	uint8_t[NSTREAM]	PROCESS	AUDIT	x1/x2 Gold-sequence start tables built once (pthread_once), cell independent
 openair1/PHY/NR_UE_TRANSPORT/nr_dmrs_nid_solve.c	16	s_once	file_static	pthread_once_t	PROCESS	AUDIT	x1/x2 Gold-sequence start tables built once (pthread_once), cell independent
@@ -2540,16 +2540,17 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4108	passive_decode_body_
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4370	t_pdcch_rm_crb	tls	uint8_t[275]	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4421	t_stg	tls	struct {}	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4428	stg_snapshot::map	func_static	const int[4]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4500	g_ry_chains	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4502	g_ry_yields	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4504	g_ry_gated	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4507	g_ry_try	file_static	g_ry_try_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4510	g_ry_ok	file_static	g_ry_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4513	g_ry_seen	file_static	g_ry_seen_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4963	gw_cb0_params::alts	func_static	const int[3]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5105	g_cb0_ldpc	file_static	LDPC_decoderfunc_t *	PROCESS	A5	CB0 CPU LDPC function pointer loaded once by pthread_once (stateless)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5106	g_cb0_ldpc_once	file_static	pthread_once_t	PROCESS	A5	pthread_once guarding the process-wide libldpc.so load
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5136	nr_pdsch_passive_gw_cb_decode_iter::blk	tls	uint8_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4460	passive_decode_body::csi_dmrs_drop_n	func_static	_Atomic unsigned	UNCLASSIFIED	A5	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4512	g_ry_chains	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4514	g_ry_yields	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4516	g_ry_gated	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4519	g_ry_try	file_static	g_ry_try_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4522	g_ry_ok	file_static	g_ry_ok_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4525	g_ry_seen	file_static	g_ry_seen_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4975	gw_cb0_params::alts	func_static	const int[3]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5117	g_cb0_ldpc	file_static	LDPC_decoderfunc_t *	PROCESS	A5	CB0 CPU LDPC function pointer loaded once by pthread_once (stateless)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5118	g_cb0_ldpc_once	file_static	pthread_once_t	PROCESS	A5	pthread_once guarding the process-wide libldpc.so load
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	5148	nr_pdsch_passive_gw_cb_decode_iter::blk	tls	uint8_t *	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	124	g_owned_iq	file_static	g_owned_iq_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	127	g_latency	file_static	g_latency_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	130	g_drop_reason	file_static	g_drop_reason_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC

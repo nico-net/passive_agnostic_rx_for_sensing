@@ -209,6 +209,51 @@ static uint32_t csi_resource_re_map(const fapi_nr_dl_config_csirs_pdu_rel15_t *c
   }
 }
 
+/* dlsch_dmrs_re_bitmap: the 12-bit RE pattern of the DM-RS of one RB on a DM-RS symbol, for the grant's DM-RS type and CDM groups; the
+ *   same table nr_dlsch_extract_rbs() uses. */
+static uint32_t dlsch_dmrs_re_bitmap(const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg)
+{
+  uint32_t b = 0xfff;
+  if (cfg->dmrsConfigType == NFAPI_NR_DMRS_TYPE1 && cfg->n_dmrs_cdm_groups == 1)
+    b = 0x555;
+  if (cfg->dmrsConfigType == NFAPI_NR_DMRS_TYPE2 && cfg->n_dmrs_cdm_groups == 1)
+    b = 0xc3;
+  if (cfg->dmrsConfigType == NFAPI_NR_DMRS_TYPE2 && cfg->n_dmrs_cdm_groups == 2)
+    b = 0x3cf;
+  return b;
+}
+
+/* nr_dlsch_csi_drop_dmrs_overlap: removes from dlsch_config every CSI-RS rate-matching resource whose REs fall on a DM-RS RE of the grant.
+ *   A gNB never configures such an overlap (TS 38.214 5.1.4.1), so a passive hypothesis (blind CSI-RS discovery, other cell's resource,
+ *   retry arm with a swapped CDM-group count) that produces one is false. nr_dlsch_extract_rbs() asserts on it; the passive receiver
+ *   must never die on a hypothesis, so it calls this before every decode body. Returns the number of resources dropped.
+ *   Caller: passive_decode_body(). Stock UE path is unchanged (it does not call this). */
+int nr_dlsch_csi_drop_dmrs_overlap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config)
+{
+  const uint32_t dmrs = dlsch_dmrs_re_bitmap(dlsch_config);
+  int kept = 0, dropped = 0;
+  const int n = dlsch_config->numCsiRsForRateMatching;
+  for (int i = 0; i < n; i++) {
+    fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu = &dlsch_config->csiRsForRateMatching[i];
+    bool bad = false;
+    for (int sym = 0; sym < 14 && !bad; sym++) {
+      if (!((dlsch_config->dlDmrsSymbPos >> sym) & 1) || !overlap_csi_symbol(csi_pdu, sym))
+        continue;
+      const uint32_t m = csi_resource_re_map(csi_pdu);
+      bad = (m & dmrs) != 0;
+    }
+    if (bad) {
+      dropped++;
+      continue;
+    }
+    if (kept != i)
+      dlsch_config->csiRsForRateMatching[kept] = *csi_pdu;
+    kept++;
+  }
+  dlsch_config->numCsiRsForRateMatching = (uint8_t)kept;
+  return dropped;
+}
+
 /* nr_dlsch_csi_overlap_bitmap: builds the CSI-RS RE exclusion bitmap of one OFDM symbol: low 16 bits = even RBs, high 16 bits = odd RBs (12 bits each).
  *   Ors the RE map of every rate-matching CSI-RS resource whose symbols include `symbol`, placed by its frequency density.
  *   No env flag (the RB-extent refinement is in nr_dlsch_csi_rb_mask()). Callers: nr_rx_pdsch(), nr_dlsch_csi_unav_res(), nr_ssb_rate_match.c, nr_pdsch_passive_decode.c.

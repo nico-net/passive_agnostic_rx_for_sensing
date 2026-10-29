@@ -4454,6 +4454,18 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                             nr_pdsch_passive_decode_result_t *out)
 {
+  {
+    /* A CSI-RS rate-matching resource on the grant's DM-RS REs is a false hypothesis (never configured by a gNB):
+     * drop it instead of letting nr_dlsch_extract_rbs() assert. Rate-limited. */
+    static _Atomic unsigned csi_dmrs_drop_n;
+    const int dropped = nr_dlsch_csi_drop_dmrs_overlap(dlsch_config);
+    if (dropped) {
+      const unsigned c = atomic_fetch_add_explicit(&csi_dmrs_drop_n, 1, memory_order_relaxed);
+      if (c < 10 || (c % 1000) == 0)
+        LOG_A(PHY, "SENSING: CSI_RM_REFUTED rnti=0x%04x dropped=%d CSI-RS resource(s) overlapping the DM-RS REs (cdm=%u type=%u dmrs_sym=0x%x) #%u\n",
+              grant->rnti, dropped, dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType, dlsch_config->dlDmrsSymbPos, c + 1);
+    }
+  }
   struct timespec tb;
   if (g_pdtim_on > 0)
     clock_gettime(CLOCK_MONOTONIC, &tb);
