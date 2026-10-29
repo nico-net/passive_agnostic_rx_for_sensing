@@ -78,12 +78,33 @@ const nr_mgr_slot_t *nr_cell_mgr_slot(const nr_cell_mgr_t *m, int slot)
   return (slot >= 0 && slot < m->nmax) ? &m->slot[slot] : NULL;
 }
 
-static int free_slot(const nr_cell_mgr_t *m)
+static int free_slot(const nr_cell_mgr_t *m, const char *id, const nr_cell_desc_t *d, int *any_free)
 {
-  for (int i = 0; i < m->nmax; i++)
-    if (!m->slot[i].active)
-      return i;
-  return -1;
+  int first = -1, same = -1;
+  *any_free = 0;
+  for (int i = 0; i < m->nmax; i++) {
+    if (m->slot[i].active)
+      continue;
+    *any_free = 1;
+    if (m->cfg.slot_fit && !m->cfg.slot_fit(m->cfg.slot_fit_ctx, i, d))
+      continue;
+    if (first < 0)
+      first = i;
+    if (same < 0 && id && m->last_id[i][0] && !strcmp(m->last_id[i], id))
+      same = i;
+  }
+  return same >= 0 ? same : first;
+}
+int nr_cell_mgr_release(nr_cell_mgr_t *m, int slot)
+{
+  if (!m || slot < 0 || slot >= m->nmax || !m->slot[slot].active)
+    return -1;
+  m->slot[slot].active = 0;
+  m->slot[slot].pending_retire = 0;
+  m->slot[slot].id[0] = 0;
+  m->last_id[slot][0] = 0;
+  m->n_active--;
+  return 0;
 }
 static int refused_idx(const nr_cell_mgr_t *m, const char *id)
 {
@@ -155,9 +176,11 @@ int nr_cell_mgr_apply(nr_cell_mgr_t *m, const nr_cell_inventory_t *inv, int64_t 
       const nr_inv_cell_t *ic = &inv->cell[i];
       if (ic->desc.state == NR_CELLD_LOST || prio(ic->desc.state) != cls || nr_cell_mgr_find(m, ic->id) >= 0)
         continue;
-      int s = free_slot(m);
+      int any_free = 0;
+      int s = free_slot(m, ic->id, &ic->desc, &any_free);
       int ri = refused_idx(m, ic->id);
       if (s < 0) {
+        const char *why = any_free ? "no_slot_fits" : nr_admit_reason_name(m->full_reason);
         if (ri < 0 || m->refused[ri].reason != m->full_reason) {
           if (ri < 0 && m->n_refused < NR_ADMIT_PLAN_MAX) {
             ri = m->n_refused++;
@@ -165,7 +188,7 @@ int nr_cell_mgr_apply(nr_cell_mgr_t *m, const nr_cell_inventory_t *inv, int64_t 
           }
           if (ri >= 0)
             m->refused[ri].reason = m->full_reason;
-          emit(m, NR_MGR_EV_REFUSE, -1, ic->id, &ic->desc, 0, 0, m->cfg.pass1_ssb, 0, m->full_reason, nr_admit_reason_name(m->full_reason), NULL);
+          emit(m, NR_MGR_EV_REFUSE, -1, ic->id, &ic->desc, 0, 0, m->cfg.pass1_ssb, 0, m->full_reason, why, NULL);
           events++;
         }
         continue;
@@ -202,6 +225,7 @@ int nr_cell_mgr_tick(nr_cell_mgr_t *m, int64_t now_ns)
     int ssb = sl->ssb;
     const char *cause = sl->pending_retire == 1 ? "lost" : "removed";
     void *st = sl->state;
+    snprintf(m->last_id[s], sizeof m->last_id[s], "%s", id);
     sl->active = 0;
     sl->pending_retire = 0;
     sl->id[0] = 0;

@@ -195,6 +195,7 @@ static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
     /* a live producer may be stalled for tens of seconds (RFSTALL device reload, initial sync): keep waiting up to 60 s */
     /* time-shared window (v2): the producer is tuned elsewhere until dwell_until_ns; only then does the timeout start */
     const int away = h->version >= 2 && atomic_load(&h->away); /* before dwell_until: the producer stores them in the other order */
+    if (away && atomic_load(&h->dwell_until_ns) >= SHM_IQ_AWAY_PAUSED) return SHM_IQ_READ_PAUSED; /* MPCI-LIVE: the producer paused this cell: no data, nothing to wait for */
     const int away_wait = away && now < atomic_load(&h->dwell_until_ns) + s->timeout_ns;
     if (!away_wait && stale > s->timeout_ns && ((kill(pid, 0) != 0 && errno == ESRCH) || stale > 60000000000ull)) {
       fprintf(stderr, "SHMIQ_PRODUCER_LOST cell=%s pid=%d pos=%" PRIu64 "\n", s->tag, (int)atomic_load(&h->producer_pid), s->pos);

@@ -49,6 +49,11 @@ int nrue_ru_radio_fo(void);
 int nrue_ru_rx_fullscale(const PHY_VARS_NR_UE *UE); /* int16 full scale of the received samples: 32767 >> the driver's rx_fullscale_shift */
 int nrue_ru_adjust_rx_gain(PHY_VARS_NR_UE *UE, int gain_change);
 int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int num_antennas);
+/* MPCI-LIVE: ring RUs (multi-cell). A paused cell's slot thread is parked outside the radio gate; wake it after a resume. Retune: the cell's ring RU to a new centre. */
+void nrue_ru_ring_wake(void);
+int nrue_ru_ring_parked(int cell);
+int nrue_ru_ring_set_centre(int cell, double centre_hz);
+int nrue_feed_recentre(double centre_hz, void (*after)(void *), void *arg); /* MPCI-LIVE: capture device LO, same rate */
 int nrue_ru_write(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **buff, int nsamps, int num_antennas, int flags);
 int nrue_ru_write_reorder(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **txp, int nsamps, int nbAnt, int flags);
 void nrue_ru_write_reorder_clear_context(PHY_VARS_NR_UE *UE);

@@ -108,6 +108,10 @@ int iq_chan_lease_acquire(int blocking);
 void iq_chan_lease_release(int held);
 void iq_chan_lease_set_demand(int tokens);        /* no-op without hooks; a GPU backend sets its CPU-part demand here */
 int iq_chan_lease_max_tokens(void);               /* 0 without hooks */
+/* MPCI-LIVE: the CHAN demand follows the running entries. iq_chan_demand_for() is the pure rule (see iq_chan.c); the channelizer applies it after every add / remove /
+ * pause / resume when its CPU backend registered a demand at iq_chan_start. iq_chan_demand(): the demand registered now (0: none). */
+int iq_chan_demand_for(int k0, int n0, int running, int threads);
+
 
 /* Self-bench of the CPU backend on this host: one thread, synthetic noise, `seconds` of wall time, no ring. Used for the capacity input of admission. */
 typedef struct {
@@ -173,6 +177,7 @@ int iq_chan_set_threads(iq_chan_t *c, int k, const int *cpus, int ncpus); /* k b
 int iq_chan_start_k(iq_chan_t *c, const int *cpus, int ncpus, int k); /* explicit k (tests, benches) */         /* optional affinity list (the core plan's channelizer CPU); NULL = unpinned */
 void iq_chan_stop(iq_chan_t *c);
 void iq_chan_stats(const iq_chan_t *c, iq_chan_stats_t *st);
+int iq_chan_demand(const iq_chan_t *c);
 /* MPCI-DASH P3: what the channelizer thread spent writing the cell's narrow ring (the backend run() serves all cells in one call and is not separable per cell: its total
  * is iq_chan_stats_t.run_ns). Cumulative; write_max_ns is the maximum since the previous call (reset at read, one reader). 0, or -1 when the entry does not exist. */
 typedef struct {

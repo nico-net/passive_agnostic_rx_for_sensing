@@ -61,6 +61,9 @@ void iq_feed_destroy(iq_feed_t *f);                   /* stops everything; cell 
 int iq_feed_cell_add(iq_feed_t *f, const char *tag, double centre_hz, int decim, double passband_hz, int paused);
 int iq_feed_cell_pause(iq_feed_t *f, int id);
 int iq_feed_cell_resume(iq_feed_t *f, int id);
+int iq_feed_cell_retune(iq_feed_t *f, int id, double centre_hz); /* MPCI-LIVE */
+int iq_feed_set_centre(iq_feed_t *f, double centre_hz);           /* MPCI-LIVE: after the radio LO moved (same rate) */
+double iq_feed_centre(const iq_feed_t *f);
 shm_iq_ring_t *iq_feed_cell_ring(iq_feed_t *f, int id);
 shm_iq_ring_t *iq_feed_wide_ring(iq_feed_t *f);
 iq_chan_t *iq_feed_chan(iq_feed_t *f);

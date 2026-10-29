@@ -221,6 +221,152 @@ TEST(NrCellLife, LostRetiresAfterHysteresisThenReactivates)
   nr_cell_set_count(1);
 }
 
+// ---- MPCI-LIVE (A12): spare slots, slot fit, freed slots, admission re-evaluation ----
+static int count_ev(const Rec &r, const std::string &pre)
+{
+  int n = 0;
+  for (auto &e : r.ev)
+    n += e.rfind(pre, 0) == 0;
+  return n;
+}
+static int count_log(const Rec &r, const char *sub)
+{
+  int n = 0;
+  for (auto &l : r.logs)
+    n += l.find(sub) != std::string::npos;
+  return n;
+}
+static nr_cell_inventory_t two_cells()
+{
+  nr_cell_inventory_t in;
+  memset(&in, 0, sizeof in);
+  in.cell[in.n++] = icell("i403", 3630.0e6, 403);
+  return in;
+}
+
+TEST(NrCellLife, LiveSpareSlotIsPreparedThenTakenByACellAddedAtRunTime)
+{
+  Rec r;
+  nr_cell_life_t L;
+  nr_host_caps_t c = caps(8);
+  nr_cell_mgr_cfg_t mc = mcfg();
+  nr_cell_life_ops_t o = ops(&r);
+  nr_cell_desc_t p = desc(3680.01e6, 415);
+  nr_cell_inventory_t in = two_cells();
+  ASSERT_EQ(3, nr_cell_life_plan_spare(&L, &mc, &c, &o, &p, &in, 1000, 1)); // started cell + 1 inventory cell + 1 spare
+  ASSERT_EQ(2, nr_cell_life_activate(&L, &in, 0)); // the spare is started (its threads) but is no served cell
+  EXPECT_EQ(3, count_ev(r, "prealloc"));
+  EXPECT_EQ(3, count_ev(r, "start"));
+  EXPECT_TRUE(nr_cell_life_is_spare(&L, 2));
+  EXPECT_FALSE(nr_cell_life_started(&L, 2));        // threads run, no cell yet
+  EXPECT_EQ(2, nr_cell_mgr_active(&L.mgr));          // the placeholder was released: the slot is free and prepared
+  EXPECT_GE(count_log(r, "spare=1"), 1);
+  EXPECT_GE(count_log(r, "event=spare_prepared"), 1);
+  EXPECT_TRUE(nr_cell_life_prepared(&L, 2));
+  r.ev.clear();
+  nr_cell_inventory_t later = in;
+  later.cell[later.n++] = icell("n999", 3650.0e6, 999);
+  nr_cell_life_poll(&L, &later, 10);
+  ASSERT_EQ(1u, r.ev.size());
+  EXPECT_EQ("start 2 bound=2 fenced=1 re=1 id=n999", r.ev[0]); // a prepared slot, bound to its cell, no allocation
+  EXPECT_TRUE(nr_cell_life_started(&L, 2));
+  EXPECT_GE(count_log(r, "event=activate_spare"), 1);
+  EXPECT_GE(count_log(r, "live=add"), 1); // B3 re-evaluated for the new cell set
+  // the cell leaves and comes back: the same slot
+  r.ev.clear();
+  nr_cell_inventory_t gone = in;
+  nr_cell_life_poll(&L, &gone, 100);
+  nr_cell_life_poll(&L, NULL, 1200);
+  ASSERT_EQ(1u, r.ev.size());
+  EXPECT_EQ("retire 2 bound=2 id=n999", r.ev[0]);
+  nr_cell_life_poll(&L, &later, 2000);
+  ASSERT_EQ(2u, r.ev.size());
+  EXPECT_EQ("start 2 bound=2 fenced=1 re=1 id=n999", r.ev[1]);
+  nr_cell_set_count(1);
+}
+
+TEST(NrCellLife, LiveNoSpareForASingleCellAndDroppedForPublishedRings)
+{
+  Rec r;
+  nr_cell_life_t L;
+  nr_host_caps_t c = caps(8);
+  nr_cell_mgr_cfg_t mc = mcfg();
+  nr_cell_life_ops_t o = ops(&r);
+  nr_cell_desc_t p = desc(3680.01e6, 415);
+  nr_cell_inventory_t none;
+  memset(&none, 0, sizeof none);
+  EXPECT_EQ(1, nr_cell_life_plan_spare(&L, &mc, &c, &o, &p, &none, 1000, 2)); // one cell: the single-cell receiver, no placeholder
+  nr_cell_inventory_t in = two_cells();
+  Rec r2;
+  nr_cell_life_ops_t o2 = ops(&r2);
+  ASSERT_EQ(4, nr_cell_life_plan_spare(&L, &mc, &c, &o2, &p, &in, 1000, 2));
+  ASSERT_EQ(4, nr_cell_life_admit(&L, &in, 0));
+  EXPECT_EQ(2, nr_cell_life_drop_spares(&L));
+  ASSERT_EQ(2, nr_cell_life_prepare(&L));
+  EXPECT_EQ(2, count_ev(r2, "prealloc"));
+  EXPECT_EQ(2, nr_cell_life_start(&L));
+  nr_cell_set_count(1);
+}
+
+static int fit_only_106(void *ctx, int slot, const nr_cell_desc_t *d)
+{
+  (void)ctx;
+  (void)slot;
+  return d->n_rb == 0 || d->n_rb == 106;
+}
+TEST(NrCellLife, LiveASlotCarriesOnlyACellOfItsPreparedGrid)
+{
+  Rec r;
+  nr_cell_life_t L;
+  nr_host_caps_t c = caps(8);
+  nr_cell_mgr_cfg_t mc = mcfg();
+  mc.slot_fit = fit_only_106;
+  nr_cell_life_ops_t o = ops(&r);
+  nr_cell_desc_t p = desc(3680.01e6, 415);
+  nr_cell_inventory_t in = two_cells();
+  ASSERT_EQ(3, nr_cell_life_plan_spare(&L, &mc, &c, &o, &p, &in, 1000, 1));
+  ASSERT_EQ(2, nr_cell_life_activate(&L, &in, 0));
+  r.ev.clear();
+  nr_cell_inventory_t later = in;
+  later.cell[later.n] = icell("w51", 3650.0e6, 51);
+  later.cell[later.n].desc.n_rb = 51; // another grid than the prepared slots
+  later.n++;
+  nr_cell_life_poll(&L, &later, 10);
+  EXPECT_TRUE(r.ev.empty());                            // no slot fits: nothing starts
+  EXPECT_FALSE(nr_cell_life_started(&L, 2));
+  later.cell[later.n - 1].desc.n_rb = 106;              // the front end corrected the grid
+  nr_cell_life_poll(&L, &later, 20);
+  ASSERT_EQ(1u, r.ev.size());
+  EXPECT_EQ("start 2 bound=2 fenced=1 re=1 id=w51", r.ev[0]);
+  nr_cell_set_count(1);
+}
+
+TEST(NrCellLife, LiveARetireFreesASlotForACellRefusedForLackOfOne)
+{
+  Rec r;
+  nr_cell_life_t L;
+  nr_host_caps_t c = caps(2); // two cells at most
+  nr_cell_mgr_cfg_t mc = mcfg();
+  nr_cell_life_ops_t o = ops(&r);
+  nr_cell_desc_t p = desc(3680.01e6, 415);
+  nr_cell_inventory_t in = two_cells();
+  ASSERT_EQ(2, nr_cell_life_plan(&L, &mc, &c, &o, &p, &in, 1000));
+  ASSERT_EQ(2, nr_cell_life_activate(&L, &in, 0));
+  r.ev.clear();
+  nr_cell_inventory_t three = in;
+  three.cell[three.n++] = icell("n999", 3650.0e6, 999);
+  nr_cell_life_poll(&L, &three, 10); // refused: no free slot
+  EXPECT_TRUE(r.ev.empty());
+  nr_cell_inventory_t gone = three;
+  gone.cell[0].desc.state = NR_CELLD_LOST; // i403 lost
+  nr_cell_life_poll(&L, &gone, 20);
+  nr_cell_life_poll(&L, NULL, 2000); // retire, and in the same tick the refused cell takes the slot
+  ASSERT_EQ(2u, r.ev.size());
+  EXPECT_EQ("retire 1 bound=1 id=i403", r.ev[0]);
+  EXPECT_EQ("start 1 bound=1 fenced=1 re=1 id=n999", r.ev[1]);
+  nr_cell_set_count(1);
+}
+
 TEST(NrCellLife, ZZRealFenceAddIntoUnpreparedSlotIsNotStarted)
 {
   Rec r;

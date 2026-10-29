@@ -107,3 +107,19 @@ if(ENABLE_TESTS)
   add_dependencies(tests g5_fast_pub)
 endif()
 # ---- end G5 ----
+
+# ---- LIVE ----
+# MPCI-LIVE (A12): live cell changes. iq_live (decisions/order), ru_park (slot thread parked outside the radio gate, tuning mailbox, per-cell quiesce registry).
+target_sources(mpci_iq PRIVATE ${CMAKE_SOURCE_DIR}/radio/COMMON/iq_live.c ${CMAKE_SOURCE_DIR}/radio/COMMON/ru_park.c)
+if(ENABLE_TESTS)
+  # nr-ue-ru.c is compiled stand-alone by test_nr_shutdown: it needs the park module
+  target_sources(test_nr_shutdown PRIVATE ${CMAKE_SOURCE_DIR}/radio/COMMON/ru_park.c)
+  add_executable(test_iq_live ${CMAKE_SOURCE_DIR}/radio/COMMON/tests/test_iq_live.c)
+  target_include_directories(test_iq_live PRIVATE ${CMAKE_SOURCE_DIR}/radio/COMMON ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS)
+  set_target_properties(test_iq_live PROPERTIES ENABLE_EXPORTS ON)
+  target_link_libraries(test_iq_live PRIVATE mpci_iq log_headers m dl pthread rt)
+  add_dependencies(test_iq_live shm_iq)
+  add_dependencies(tests test_iq_live)
+  add_test(NAME test_iq_live COMMAND test_iq_live $<TARGET_FILE:shm_iq>)
+endif()
+# ---- end LIVE ----
