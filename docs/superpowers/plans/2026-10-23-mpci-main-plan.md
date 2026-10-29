@@ -694,3 +694,9 @@ deferred (host needed by another user; captures around 17:40 or later) and must 
 - `openair1/PHY/TOOLS/nr_gpu_bgq.h`: each queued item carries the pusher's cell; the worker binds to it and leases for it. Closes the "GPU-check queue takes its first caller's cell" item.
 - `nr_csirs_disc_fp_prealloc/release` (history arrays before the fence); DCI 1_1/0_1 resolvers in `nr_pdcch_cell_prealloc`. Closes the A7 "history arrays allocated lazily ... possibly after the fence" item.
 - `tools/mpci/mpci_audit_files.txt` + `static_audit.py --coverage/--add-coverage`: the audit covers every source of nr-uesoftmodem and its runtime libraries, and headers with state. `static_audit_check` in ctest is `--strict`.
+
+### R15. Plan closed (2026-10-29 evening, operator)
+mpci/int-1029c merged (05b240a12b). Gates: integration OTA functional pass; A9 replay EQUIVALENT (n=3), rfsim within spread; V2a CRC floor +
+drop_full pass (postconv unreachable on every build); V3 functional pass, P1/P3 FAIL. O1-O3 move to the DL/UL session's OTA campaigns; S1-S3
+to sens6 (PROJECT_MEMORY §32.4); UL HARQ soft combining after UL decodes. P1/P2/P3 become the acceptance of the DL/UL decode-time work, done on
+mpci-main; mpci-main merges into main only when they hold on air (PROJECT_MEMORY §32.5).
