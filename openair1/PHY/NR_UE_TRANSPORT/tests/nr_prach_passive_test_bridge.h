@@ -18,6 +18,8 @@ void test_prach_json(int relation, char *line, uint32_t capacity);
 void test_prach_floor_reset(void);
 int test_prach_floor(int fdm, int gain_db, int energy);
 void test_prach_reset(void);
+void test_prach_bind(int cell);
+uint64_t test_prach_drops(void);
 void test_prach_run_slot(int delay_samples, int msg1_fdm, int mode);
 void test_prach_run_stitched_slot(int phase_shift);
 void test_prach_drain(void);

@@ -673,6 +673,38 @@ static void mpci_open_uectx(int k)
     LOG_W(PHY, "SENSING: UE context writer/state could not be opened (cell %d)\n", k);
 }
 
+/* CELLFEAT: the per-cell sensing services of cell k (bound to it, before the RX fence): the heap objects of the PRACH / SRS state, then the sense-API session
+ * (rings, writer, files), the passive PRACH worker and the passive SRS searcher. Cell 0 of a single-cell receiver keeps the old place (after the radio start). */
+static void mpci_cell_sensing_open(int k, PHY_VARS_NR_UE *ue)
+{
+  nr_prach_passive_cell_prealloc(k);
+  nr_srs_passive_cell_prealloc(k);
+  if (g_ncells <= 1)
+    return;
+  nr_isac_start();
+  nr_prach_passive_start();
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+    nr_srs_passive_start(ue);
+}
+/* CELLFEAT: the cell's session record, once its radio is up (the start hook; the session rings were allocated in the prealloc hook) */
+static void mpci_cell_sensing_session(int k)
+{
+  if (!nr_sense_enabled())
+    return;
+  PHY_VARS_NR_UE *sense_ue = nrPHY_vars_UE_g[k][0];
+  const openair0_config_t *sense_cfg = &openair0_cfg_g[sense_ue->rf_map.card];
+  nr_sense_emit_session(&sense_ue->frame_parms, sense_cfg->rx_gain[sense_ue->rf_map.chain] - sense_cfg->rx_gain_offset[sense_ue->rf_map.chain]);
+}
+/* CELLFEAT shutdown of one cell's sensing services (bound to it; cell 0 last, mpci_for_each_cell runs the highest cell first): the PRACH worker is
+ * drained, the SRS searcher stopped, the sense-API session closed. N = 1: the old sequence on cell 0. */
+static void mpci_stop_cell_sensing(int k)
+{
+  (void)k;
+  nr_prach_passive_flush();
+  nr_srs_passive_stop();
+  nr_isac_stop();
+}
+
 /* prealloc hook (bound to cell k, before the RX fence): every per-cell heap object, the per-cell module starts that allocate */
 static int mpci_cell_prealloc(void *ctx, int k, const nr_mgr_slot_t *slot)
 {
@@ -700,6 +732,7 @@ static int mpci_cell_prealloc(void *ctx, int k, const nr_mgr_slot_t *slot)
   nr_csirs_disc_pipeline_init(&ue->frame_parms);
   if (nr_csirs_disc_cell_prealloc(k, &ue->frame_parms, ue->frame_parms.nb_antennas_rx) != 0)
     LOG_W(PHY, "SENSING: CSIRS_DISC worker could not start; slot discovery feed disabled\n");
+  mpci_cell_sensing_open(k, ue); /* CELLFEAT: this cell's sense-API session, passive PRACH and SRS (heap objects first, then the sessions' rings and workers) */
   if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_pusch_passive_pipeline_enabled()) {
     const nr_pdcch_blind_monitor_cfg_t *ul_cfg = nr_pdcch_blind_monitor_get_cfg();
     if (ul_cfg && ul_cfg->ul_pusch_decode) {
@@ -729,6 +762,7 @@ static int mpci_cell_start(void *ctx, int k, const nr_mgr_slot_t *slot, int reac
     }
     return 0;
   }
+  mpci_cell_sensing_session(k);
   LOG_I(PHY, "Intializing UE Threads for instance %d ...\n", k);
   init_NR_UE_threads(nrPHY_vars_UE_g[k][0]);
   return 0;
@@ -1165,7 +1199,12 @@ int main(int argc, char **argv)
     nrue_set_ru_cell_id(ru_id, cell_id);
 
     set_fp_options(cell_id, ru_id);
-    nr_isac_set_rx_antennas(nrue_get_cell_fp(cell_id)->nb_antennas_rx);
+    {
+      const int prev_cell = nr_cell_idx(); /* CELLFEAT: the antenna count of the cell's own sense-API session */
+      nr_cell_bind(cell_id);
+      nr_isac_set_rx_antennas(nrue_get_cell_fp(cell_id)->nb_antennas_rx);
+      nr_cell_bind(prev_cell);
+    }
     if (IS_SA_MODE(get_softmodem_params()) || get_softmodem_params()->sl_mode)
       nr_init_frame_parms_ue_sa(nrue_get_cell_fp(cell_id), nrue_get_cell(cell_id));
   }
@@ -1279,6 +1318,8 @@ int main(int argc, char **argv)
     /* A8: per cell, bound to it: heap objects, CSI-RS discovery, PDCCH monitor / uectx (k > 0), PUSCH queue; then the cell count (LOG tag) */
     nr_cell_life_prepare(&g_cells);
   } else {
+  nr_prach_passive_cell_prealloc(0); /* CELLFEAT: the PRACH / SRS buffers are allocated here (before the memory lock), as the static arrays of before were in the image */
+  nr_srs_passive_cell_prealloc(0);
   nr_csirs_disc_pipeline_init(&disc_ue->frame_parms);
   if (nr_csirs_disc_start(&disc_ue->frame_parms, disc_ue->frame_parms.nb_antennas_rx) != 0)
     LOG_W(PHY, "SENSING: CSIRS_DISC worker could not start; slot discovery feed disabled\n");
@@ -1362,15 +1403,12 @@ int main(int argc, char **argv)
     nr_shutdown_finish();
 
   // Launch the sensing engine consumer thread before the DL workers start producing CFR snapshots.
-  nr_isac_start();
-  if (nr_sense_enabled()) {
-    PHY_VARS_NR_UE *sense_ue = nrPHY_vars_UE_g[0][0];
-    const openair0_config_t *sense_cfg = &openair0_cfg_g[sense_ue->rf_map.card];
-    nr_sense_emit_session(&sense_ue->frame_parms,
-                          sense_cfg->rx_gain[sense_ue->rf_map.chain] - sense_cfg->rx_gain_offset[sense_ue->rf_map.chain]);
+  if (g_ncells == 1) { /* N > 1: every cell's session, PRACH and SRS were opened in its prealloc hook (before the fence) and its start hook emits the session record */
+    nr_isac_start();
+    mpci_cell_sensing_session(0);
+    nr_prach_passive_start();
+    if (IS_PASSIVE_RX_MODE(get_softmodem_params())) nr_srs_passive_start(nrPHY_vars_UE_g[0][0]);
   }
-  nr_prach_passive_start();
-  if (IS_PASSIVE_RX_MODE(get_softmodem_params())) nr_srs_passive_start(nrPHY_vars_UE_g[0][0]);
 
   if (g_ncells > 1) {
     nr_cell_life_start(&g_cells); /* A8: each cell's RT slot thread, created bound to its cell */
@@ -1446,9 +1484,7 @@ int main(int argc, char **argv)
   nr_shutdown_step("thread_pool_stopped");
 
   // All slot producers have joined. Drain the PRACH worker before closing records.
-  nr_prach_passive_flush();
-  nr_srs_passive_stop();
-  nr_isac_stop();
+  mpci_for_each_cell(mpci_stop_cell_sensing); /* CELLFEAT: per cell, highest first (cell 0 last); N = 1: the sequence of before */
   nr_shutdown_step("sensing_stopped");
 
   mpci_for_each_cell(mpci_close_cell_outputs); /* A8: per cell; N = 1: cell 0, the sequence of before */

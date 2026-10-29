@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <string>
+#include <thread>
 #include "nr_prach_passive_test_bridge.h"
 
 class PassivePrach : public ::testing::Test {
@@ -199,4 +200,92 @@ TEST_F(PassivePrach, PrachRsRecordFields)
   EXPECT_NE(std::string(line).find("\"rar_match\":false"), std::string::npos);
   test_prach_json(-1, line, sizeof(line));
   EXPECT_NE(std::string(line).find("\"rar_match\":null,\"rar_rapid\":null,\"rar_ta\":null"), std::string::npos);
+}
+
+/* ---- mpci CELLFEAT: every cell has its own PRACH state and worker (cell A's output does not change when cell B runs) ---- */
+namespace {
+void seed_floor(int cell)
+{
+  test_prach_bind(cell);
+  for (int i = 0; i < 8; ++i) test_prach_floor(0, 0, 0);
+}
+/* the run time is the only field that differs between two runs of the same input */
+std::string stable(std::string r)
+{
+  const auto p = r.find("\"t_mono_ns\":");
+  if (p != std::string::npos) r.erase(p, r.find(',', p) - p + 1);
+  return r;
+}
+std::string solo_record(int cell, int delay)
+{
+  test_prach_bind(cell);
+  test_prach_reset();
+  seed_floor(cell);
+  test_prach_run_slot(delay, 1, 0);
+  test_prach_drain();
+  test_prach_finish();
+  return stable(test_prach_record());
+}
+}
+
+TEST(PassivePrachCells, InterleavedOnOneThreadEqualSoloRuns)
+{
+  test_prach_init();
+  const std::string a = solo_record(0, 32), b = solo_record(1, 8);
+  ASSERT_NE(a.find("\"source\":\"prach\""), std::string::npos) << a;
+  ASSERT_NE(b.find("\"source\":\"prach\""), std::string::npos) << b;
+  ASSERT_NE(a, b) << "the two cells must see different input";
+  for (int c = 0; c < 2; ++c) { test_prach_bind(c); test_prach_reset(); seed_floor(c); }
+  test_prach_bind(0);
+  test_prach_run_slot(32, 1, 0);
+  test_prach_bind(1);
+  test_prach_run_slot(8, 1, 0);
+  test_prach_drain();
+  test_prach_finish();
+  const std::string b2 = stable(test_prach_record());
+  test_prach_bind(0);
+  test_prach_drain();
+  test_prach_finish();
+  const std::string a2 = stable(test_prach_record());
+  EXPECT_EQ(a2, a);
+  EXPECT_EQ(b2, b);
+  test_prach_bind(0);
+}
+
+TEST(PassivePrachCells, TwoBoundThreadsEqualSoloRuns)
+{
+  test_prach_init();
+  const std::string a = solo_record(0, 32), b = solo_record(1, 8);
+  for (int c = 0; c < 2; ++c) { test_prach_bind(c); test_prach_reset(); seed_floor(c); }
+  test_prach_bind(0);
+  std::string a2, b2;
+  auto run = [](int cell, int delay, std::string *out) {
+    test_prach_bind(cell);
+    test_prach_run_slot(delay, 1, 0);
+    test_prach_drain();
+    test_prach_finish();
+    *out = stable(test_prach_record());
+  };
+  std::thread t0(run, 0, 32, &a2), t1(run, 1, 8, &b2);
+  t0.join();
+  t1.join();
+  EXPECT_EQ(a2, a);
+  EXPECT_EQ(b2, b);
+}
+
+TEST(PassivePrachCells, SkippedOccasionIsCountedOnItsCellOnly)
+{
+  test_prach_init();
+  for (int c = 0; c < 2; ++c) { test_prach_bind(c); test_prach_reset(); }
+  test_prach_bind(1);
+  const uint64_t before0 = (test_prach_bind(0), test_prach_skipped());
+  test_prach_bind(1);
+  test_prach_run_slot(-1, 1, 2); /* mixed slot with DL symbols: skipped */
+  EXPECT_EQ(test_prach_skipped(), 1u);
+  test_prach_bind(0);
+  EXPECT_EQ(test_prach_skipped(), before0) << "the skip of cell 1 must not show on cell 0";
+  test_prach_finish();
+  test_prach_bind(1);
+  test_prach_finish();
+  test_prach_bind(0);
 }
