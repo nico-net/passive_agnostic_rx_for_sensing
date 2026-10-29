@@ -247,6 +247,9 @@ typedef struct {
   /* Explicit diagnostic/snapshot readback; production never calls this. */
   int (*readback)(const nr_csirs_disc_ring_t *);
   int (*upload_symbols)(nr_csirs_disc_ring_t *, uint16_t symbols);
+  /* G4B: gives back the calling cell's GPU workspaces (retired for good). Not part of the guarded table: use nr_csirs_disc_gpu_cell_free(). */
+  void (*cell_free)(void);
+  void (*sweep_cell_free)(void);
 } nr_csirs_disc_gpu_ops_t;
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GPU module */
 /* CPU-side loader, gated by the test-only ISAC_CSIRS_DISC_BACKEND=auto|cpu|gpu.
@@ -254,6 +257,9 @@ const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GP
  * The module exports gpu_ops above, plus nr_csirs_disc_gpu_alloc_unified/_free_unified; the loader installs them
  * into the core hooks nr_csirs_disc_alloc_unified/_free_unified (function pointers, see U1 above). */
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void);
+/* G4B: frees the GPU workspaces (streams, plans, buffers, resident history) of the calling thread's cell in both GPU modules, when the cell is retired for good
+ * (nr_csirs_disc_stop). Not on an A12 pause. Takes the discovery ticket, so it waits for an in-flight chunk. Does nothing when the modules were never loaded; idempotent. */
+void nr_csirs_disc_gpu_cell_free(void);
 /* T6b: switches the GPU discovery off for the process (memory budget or an allocation failure): nr_csirs_disc_gpu_load() returns NULL from then on and the CPU path runs. */
 void nr_csirs_disc_gpu_disable(void);
 /* host-RAM budget: the ring got fewer slots than the GPU share chose (nr_csirs_disc_start); becomes the capacity and the elastic base */

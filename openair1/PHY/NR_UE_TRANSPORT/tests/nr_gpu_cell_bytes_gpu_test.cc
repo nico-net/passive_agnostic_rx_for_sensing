@@ -150,7 +150,7 @@ int child(const std::string &kind, int rb, int rx)
     std::snprintf(note, sizeof note, "kinds=harq pass_shared_dev=%llu pass_shared_pin=%llu pass_graphs=%llu", (unsigned long long)sh.cur[0], (unsigned long long)sh.cur[1], (unsigned long long)pg.ngraph);
     return done(NR_MS_PASS, nr_gpu_cell_mem(&p, NR_GPU_CELL_HARQ), note);
   }
-  if (kind == "csirs") {
+  if (kind == "csirs" || kind == "csirs_free") {
     void *h = dlopen("./libcsirs_disc_gpu.so", RTLD_NOW | RTLD_LOCAL);
     void *hs = dlopen("./libnr_csirs_disc_gpu_sweep.so", RTLD_NOW | RTLD_LOCAL);
     if (!h || !hs) return emit("csirs", rb, rx, 0, 0, 0, 0, 0, "skip", std::string("no CSI-RS modules: ") + ([] { const char *e = dlerror(); return e ? e : "?"; })());
@@ -162,6 +162,22 @@ int child(const std::string &kind, int rb, int rx)
     const size_t stride = 14 * ((size_t)g.fft + (size_t)(g.fft / 128 * 9) + (size_t)(g.fft / 128 * (9 + (1 << g.mu))));
     if (o->prepare(rb, g.n_rx, cap, g.fft, stride) < 0) return emit("csirs", rb, rx, 0, 0, 0, 0, 0, "skip", "csirs prepare refused");
     if (sweep(rb, g.n_rx, cap) < 0) return emit("csirs", rb, rx, 0, 0, 0, 0, 0, "skip", "csirs sweep prepare refused");
+    if (kind == "csirs_free") {
+      /* G4B: a cell retired for good gives every GPU workspace back (both modules), idempotently; a re-prepare then works again */
+      auto f1 = (void (*)(void))dlsym(h, "nr_csirs_disc_gpu_cell_free");
+      auto f2 = (void (*)(void))dlsym(hs, "nr_csirs_disc_gpu_sweep_cell_free");
+      if (!f1 || !f2) return emit("csirs_free", rb, rx, 0, 0, 0, 0, 0, "fail", "no cell_free symbols");
+      mod(NR_MS_CSIRS, NR_MS_PER_CELL, &s);
+      const uint64_t before = s.cur[NR_MS_DEV];
+      f2(); f1(); f2(); f1();
+      mod(NR_MS_CSIRS, NR_MS_PER_CELL, &s);
+      const uint64_t after = s.cur[NR_MS_DEV];
+      const bool re = o->prepare(rb, g.n_rx, cap, g.fft, stride) >= 0 && sweep(rb, g.n_rx, cap) >= 0;
+      mod(NR_MS_CSIRS, NR_MS_PER_CELL, &s);
+      char fn[200];
+      std::snprintf(fn, sizeof fn, "before=%llu after=%llu reprepared=%llu", (unsigned long long)before, (unsigned long long)after, (unsigned long long)s.cur[NR_MS_DEV]);
+      return emit("csirs_free", rb, rx, after, 0, 0, 0, 0, before > 0 && after == 0 && re && s.cur[NR_MS_DEV] > 0 ? "ok" : "mismatch", fn);
+    }
     nr_gpu_cell_mem_t e = nr_gpu_cell_mem(&p, NR_GPU_CELL_CSIRS_FIXED);
     e.dev += (size_t)cap * nr_gpu_cell_mem(&p, NR_GPU_CELL_CSIRS_SLOT).dev;
     e.dev -= (size_t)512 << 20; // the model's local-memory term is a driver reservation, not an allocation
@@ -204,7 +220,7 @@ TEST_P(CellBytesGpu, LedgerEqualsFormula)
     }
   EXPECT_EQ(6, checked);
 }
-INSTANTIATE_TEST_SUITE_P(Kinds, CellBytesGpu, testing::Values("fep", "pdcch_fep", "nid", "harq", "csirs"));
+INSTANTIATE_TEST_SUITE_P(Kinds, CellBytesGpu, testing::Values("fep", "pdcch_fep", "nid", "harq", "csirs", "csirs_free"));
 
 int main(int argc, char **argv)
 {

@@ -37,8 +37,14 @@ static inline int nr_gpu_disc_cell()
 /* RAII: holds the ticket for the scope (recursive per thread: an inner scope of the holder only counts). Without the platform library it does nothing. */
 struct NrGpuDiscTicket {
   bool held = false;
-  explicit NrGpuDiscTicket(bool bulk = false)
+  explicit NrGpuDiscTicket(bool bulk = false, bool defer = false)
   {
+    if (!defer) take(bulk);
+  }
+  /* take: acquires a ticket constructed with defer (after the host-side work of the scope: allocations, host staging) */
+  void take(bool bulk = false)
+  {
+    if (held) return;
     if (bulk ? nr_gpu_disc_ticket_acquire_bulk != nullptr : nr_gpu_disc_ticket_acquire != nullptr) {
       (bulk ? nr_gpu_disc_ticket_acquire_bulk : nr_gpu_disc_ticket_acquire)(nr_gpu_disc_cell());
       held = true;
@@ -111,10 +117,10 @@ static inline int nr_gpu_chunked(NrGpuChunker &c, long total, Launch launch, Wai
       const long need = (long)(((uint64_t)(total - first) + left - 1) / left);
       if (need > n) n = need < total - first ? need : total - first;
     }
+    admit(); /* G4B: host-side wait for the RT grant, before the ticket: the ticket is held across device work only */
     const uint64_t tk_t0 = now();
     NrGpuDiscTicket ticket(true); /* G4: one discovery chunk on the device at a time, whatever the number of cells; released after the drain below */
     tk_wait += now() - tk_t0;
-    admit();
     const uint64_t t0 = now();
     int rc = launch(first, n);
     if (rc) return rc;

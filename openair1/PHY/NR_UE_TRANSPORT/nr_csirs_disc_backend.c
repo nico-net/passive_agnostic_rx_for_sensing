@@ -162,6 +162,7 @@ static void *open_sibling(const char *name)
  *   Also takes the unified-memory allocator hooks when both are exported. Modules stay loaded for the process lifetime.
  *   Called only through pthread_once from nr_csirs_disc_gpu_load().
  */
+static int g_modules_loaded;
 static void load_module(void)
 {
   void *fp_handle = open_sibling("libcsirs_disc_gpu.so");
@@ -176,6 +177,7 @@ static void load_module(void)
       raw_ops.accumulate = module_ops->accumulate;
       raw_ops.lattice = module_ops->lattice;
       raw_ops.device_alloc=module_ops->device_alloc;raw_ops.device_free=module_ops->device_free;
+      raw_ops.cell_free = (void (*)(void))dlsym(fp_handle, "nr_csirs_disc_gpu_cell_free");
       raw_ops.prepare=module_ops->prepare;raw_ops.detect=module_ops->detect;raw_ops.reset=module_ops->reset;raw_ops.readback=module_ops->readback;raw_ops.upload_symbols=module_ops->upload_symbols;
     }
     void *(*alloc)(size_t) = (void *(*)(size_t))dlsym(fp_handle, "nr_csirs_disc_gpu_alloc_unified");
@@ -191,11 +193,13 @@ static void load_module(void)
     raw_ops.confirm=dlsym(sweep_handle,"nr_csirs_disc_gpu_confirm_entry");
     raw_ops.refine=dlsym(sweep_handle,"nr_csirs_disc_gpu_refine_entry");
     raw_ops.sweep_prepare=dlsym(sweep_handle,"nr_csirs_disc_gpu_sweep_prepare");
+    raw_ops.sweep_cell_free = (void (*)(void))dlsym(sweep_handle, "nr_csirs_disc_gpu_sweep_cell_free");
     raw_ops.sweep = (int (*)(const nr_csirs_disc_ring_t *, const nr_csirs_disc_hyp_t *, int,
                              const nr_csirs_disc_sweep_cfg_t *, nr_csirs_disc_win_t *))
         dlsym(sweep_handle, "nr_csirs_disc_gpu_sweep_entry");
   }
   public_ops=raw_ops;
+  __atomic_store_n(&g_modules_loaded, 1, __ATOMIC_RELEASE);
 
   public_ops.footprints = raw_ops.footprints ? guarded_footprints : NULL;
   public_ops.normalize = raw_ops.normalize ? guarded_normalize : NULL;
@@ -204,6 +208,17 @@ static void load_module(void)
   public_ops.accumulate = raw_ops.accumulate ? guarded_accumulate : NULL;
   public_ops.lattice = raw_ops.lattice ? guarded_lattice : NULL;
   public_ops.sweep = raw_ops.sweep ? guarded_sweep : NULL;
+}
+
+/* nr_csirs_disc_gpu_cell_free: see nr_csirs_disc.h (G4B). Independent of the disable switch and the breaker: a cell whose GPU discovery was switched off still owns what it prepared. */
+void nr_csirs_disc_gpu_cell_free(void)
+{
+  if (!__atomic_load_n(&g_modules_loaded, __ATOMIC_ACQUIRE))
+    return;
+  if (raw_ops.sweep_cell_free)
+    raw_ops.sweep_cell_free();
+  if (raw_ops.cell_free)
+    raw_ops.cell_free();
 }
 
 /* nr_csirs_disc_gpu_ops: returns the guarded GPU operations table, or NULL when no GPU module provides footprints or sweep.
