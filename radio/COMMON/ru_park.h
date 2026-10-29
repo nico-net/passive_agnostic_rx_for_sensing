@@ -42,6 +42,17 @@ typedef struct {
 void ru_tune_post(int cell, const ru_tune_t *t);
 int ru_tune_take(int cell, ru_tune_t *t); /* 1 and *t filled when a request was pending (cleared), else 0 */
 
+/* A10 cell identity: the PCI the cell's descriptor (cells.json) names for the cell served by UE instance `cell`, or -1 when the descriptor does not know it (and for every
+ * cell of a receiver without an inventory). Written by the control thread / the cell start hooks BEFORE the cell's tuning is posted, read by the cell's sync job: the sync pins
+ * its PSS N_ID_2 and SSS N_ID_1 to this value, so a co-channel cell on the same SSB can never be locked in its place. Nothing here is a tuning knob: the value is the descriptor's own. */
+void ru_cell_want_pci_set(int cell, int pci); /* pci < 0 = unknown */
+int ru_cell_want_pci(int cell);               /* -1 = unknown */
+/* Rate limit for the per-cell sync identity lines: 1 when `window_ns` has passed since the last 1 returned for (cell, kind) (kind 0..RU_WANT_KINDS-1), else 0. now_ns is any
+ * monotonic ns clock. The first call of a (cell, kind) returns 1. */
+#define RU_WANT_KINDS 2
+int ru_cell_sync_note_due(int cell, int kind, long long now_ns, long long window_ns);
+void ru_cell_want_reset(void); /* tests */
+
 /* Per-cell quiesce / resume registry (MPCI-LIVE). A module with per-cell sessions that outlive the cell's data (PRACH, SRS, sense-API session, dashboard sense view)
  * registers once (at its per-cell prealloc, before the fence); the receiver calls ru_cell_quiesce(cell) when a cell is retired (after its channelizer entry is paused) and
  * ru_cell_resume(cell) when the slot takes a cell again (after it is served). Hooks run on the control thread, bound to the cell (nr_cell_bind), must not allocate

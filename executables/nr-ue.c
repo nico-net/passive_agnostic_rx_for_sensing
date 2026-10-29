@@ -225,6 +225,8 @@ void init_nr_ue_vars(PHY_VARS_NR_UE *ue, uint8_t UE_id)
  * \param arg is a pointer to a \ref PHY_VARS_NR_UE structure.
  */
 
+#define MPCI_SYNC_NOTE_WINDOW_NS 10000000000LL /* A10: the identity lines of a cell are rate-limited to one per 10 s window and kind */
+
 typedef struct {
   PHY_VARS_NR_UE *UE;
   UE_nr_rxtx_proc_t proc;
@@ -247,6 +249,13 @@ static void UE_synch(void *arg) {
   syncData_t *syncD = (syncData_t *)arg;
   PHY_VARS_NR_UE *UE = syncD->UE;
   UE->is_synchronized = 0;
+
+  /* A10 cell identity: when the cell's descriptor (cells.json) names a PCI, every search of this job (initial, re-acquisition after loss, SFO rebase, live re-add) pins its
+   * PSS N_ID_2 and SSS N_ID_1 to it (the existing target_Nid_cell pin), so a stronger co-channel cell on the same SSB is never locked in its place; the target cell may be
+   * weaker. Without a descriptor PCI (-1, and always at N = 1 without an inventory) nothing changes. */
+  const int want_pci = ru_cell_want_pci(UE->Mod_id);
+  if (want_pci >= 0)
+    UE->target_Nid_cell = want_pci;
 
   if (UE->target_Nid_cell != -1) {
     LOG_W(NR_PHY, "Starting re-sync detection for target Nid_cell %i\n", UE->target_Nid_cell);
@@ -308,6 +317,22 @@ static void UE_synch(void *arg) {
       ret = nr_initial_sync(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn);
       nr_initial_sync_capture_start = -1;
     }
+  }
+
+  if (want_pci >= 0 && ret.cell_detected && fp->Nid_cell != want_pci) {
+    /* cannot happen while the pin holds (the SSS search tests the pinned N_ID_1 only); a lock on any other PCI is never accepted */
+    struct timespec nt;
+    clock_gettime(CLOCK_MONOTONIC, &nt);
+    if (ru_cell_sync_note_due(UE->Mod_id, 0, (long long)nt.tv_sec * 1000000000LL + nt.tv_nsec, MPCI_SYNC_NOTE_WINDOW_NS))
+      LOG_W(NR_PHY, "SENSING: MPCI_SYNC cell=%d want=%d got=%d rejected (descriptor PCI; scanning continues)\n", UE->Mod_id, want_pci, fp->Nid_cell);
+    ret.cell_detected = false;
+  } else if (want_pci >= 0 && !ret.cell_detected) {
+    struct timespec nt;
+    clock_gettime(CLOCK_MONOTONIC, &nt);
+    if (ru_cell_sync_note_due(UE->Mod_id, 1, (long long)nt.tv_sec * 1000000000LL + nt.tv_nsec, MPCI_SYNC_NOTE_WINDOW_NS))
+      LOG_W(NR_PHY, "SENSING: MPCI_SYNC cell=%d want=%d not found in this search (pinned to the descriptor PCI; scanning continues)\n", UE->Mod_id, want_pci);
+  } else if (want_pci >= 0) {
+    LOG_I(NR_PHY, "SENSING: MPCI_SYNC cell=%d want=%d got=%d locked\n", UE->Mod_id, want_pci, fp->Nid_cell);
   }
 
   if (ret.cell_detected) {
@@ -610,7 +635,7 @@ static void apply_live_tune(PHY_VARS_NR_UE *UE, const ru_tune_t *t)
   init_symbol_rotation(fp);
   clean_UE_harq(UE);
   UE->is_synchronized = 0;
-  UE->target_Nid_cell = -1; /* any cell: the slot may now serve another PCI than the one it locked before */
+  UE->target_Nid_cell = -1; /* the slot may now serve another PCI than the one it locked before; UE_synch() pins the descriptor's PCI again when it names one (A10) */
   nr_sfo_resync_cell(UE->Mod_id, "live cell change"); /* this cell only */
 }
 

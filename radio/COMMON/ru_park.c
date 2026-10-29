@@ -91,6 +91,31 @@ int ru_tune_take(int cell, ru_tune_t *t)
   return had;
 }
 
+static atomic_int g_want_pci1[RU_PARK_MAX_CELLS]; /* PCI + 1, 0 = unknown (zero-initialised = unknown) */
+static atomic_llong g_note_ns[RU_PARK_MAX_CELLS][RU_WANT_KINDS];
+static atomic_int g_note_seen[RU_PARK_MAX_CELLS][RU_WANT_KINDS];
+
+void ru_cell_want_pci_set(int cell, int pci) { atomic_store(&g_want_pci1[slot_of(cell)], pci >= 0 ? pci + 1 : 0); }
+int ru_cell_want_pci(int cell) { return atomic_load(&g_want_pci1[slot_of(cell)]) - 1; }
+int ru_cell_sync_note_due(int cell, int kind, long long now_ns, long long window_ns)
+{
+  const int c = slot_of(cell), k = kind >= 0 && kind < RU_WANT_KINDS ? kind : 0;
+  if (!atomic_load(&g_note_seen[c][k]) || now_ns - atomic_load(&g_note_ns[c][k]) >= window_ns) {
+    atomic_store(&g_note_ns[c][k], now_ns);
+    atomic_store(&g_note_seen[c][k], 1);
+    return 1;
+  }
+  return 0;
+}
+void ru_cell_want_reset(void)
+{
+  for (int i = 0; i < RU_PARK_MAX_CELLS; i++) {
+    atomic_store(&g_want_pci1[i], 0);
+    for (int k = 0; k < RU_WANT_KINDS; k++)
+      atomic_store(&g_note_seen[i][k], 0);
+  }
+}
+
 static ru_cell_hook_t g_hooks[RU_CELL_HOOKS_MAX];
 static int g_nhooks;
 static pthread_mutex_t g_hook_mu = PTHREAD_MUTEX_INITIALIZER;
