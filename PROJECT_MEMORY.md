@@ -5210,7 +5210,8 @@ wt/rr-mpci-iliad .../ILIAD-PDSCH-20261027.md, and the Codex notes passive_agnost
 
 Branch `mpci-main` (worktree /home/nicola/NICOLA/wt/rr-mpci-main; local HEAD 719dd249d3, origin far behind; push only with the operator's
 OK). Full plan with per-task files and STOP criteria: `docs/superpowers/plans/2026-10-23-mpci-main-plan.md` on mpci-main (sections C, D, R13,
-R14). Main merges into mpci-main only; multi-PCI code never goes into main (this section is documentation only).
+R14). Main merges into mpci-main; mpci-main merges into main only when the decode-time goal of §32.5 is met on air (operator decision
+2026-10-29 evening; until then this section is documentation only on main).
 
 Rules (operator, in force for every task): NO FLAGS (no new env var, CLI option or behaviour-changing -D switch, not even test seams); full
 portability and agnosticity (derive from the device and the host, no cell tuning, hypotheses stay falsifiable); N=1 behaviour and log
@@ -5290,3 +5291,44 @@ Tasks (plan docs/superpowers/plans/2026-10-23-mpci-main-plan.md phase (iii)):
   unleasable threads of two cells: check RXDISCONT/ULSTALL); MPCI_ADMIT_POOL consistent; label [SIM VERIFIED, sens6 x86_64 RTX 4060 Ti].
 - S3: partly done by Q4 (staged entries); remaining: graph pass (pass_dl / pass_ul) on DISCRETE, decided by the per-path trial. Own plan.
 Also pending there: Stage 1 Task 9 sens6 validation (memory sens6-task9-pending). sens6 frozen paths stay frozen (CLAUDE.md).
+
+### 32.5 Plan closed 2026-10-29 evening; next: DL/UL decode-time work ON mpci-main (operator decision)
+State: mpci-main 05b240a12b = mpci/int-1029c merged (A10, A11, B6, audit cleanup, lazy workers parked before the fence, pool derive, per-cell
+CB0 bucket, G4b, CSI-RS/DM-RS overlap fix, A9 + V3 harnesses). Not pushed. Items 1-4 of §32.3 done; 5 (push) waits for the operator.
+Gates [per cell, never pooled]:
+- Integration OTA (campaign mpci_eve_20261029_20261029_172349, ota_runs/mpe29_*): 10 OTA runs + P1 replay, 0 assertions, clean SIGINT
+  stops [MEASURED, DGX+X410 34B2AF1, daytime 17:28-18:36]. A10: every cell locked its descriptor PCI (MPCI_SYNC mismatch 0, rejected 0).
+  A11: RECOV worker started and DECODETDRA on every cell. Lazy workers: no prepare/start failure. Live: 403 retired/re-added without radio
+  stop, 415 unaffected; the run-time add of 923 was refused by admission:pool, so the out-of-span path was NOT exercised.
+  Crash found and fixed during the campaign: Assertion dmrs_rb_bitmap & csi_res_even in nr_dlsch_extract_rbs (retry arm CSI-RS mask on the
+  DM-RS REs) -> ce78720228 drops the overlapping hypothesis (CSI_RM_REFUTED; 0 lines in the campaign, cause INFERRED from code).
+- A9 N=1 equivalence: replay EQUIVALENT (n=3 per arm, 415 capture, ota_runs/a9_20261029b/replay) [REPLAY, DGX]; rfsim metrics within
+  spread (CRC 96.5 vs 96.5 %). Comparator fixed for build identity, signs, data-dependent field sets, argv echo wrap (6c9ad377dc).
+  N=1 log fix: the TD_CB0 per-cell split prints only with > 1 cell (9eb4797320). Discovery order (which CORESET first) varies run to run
+  and flips the global DMRS_ID PDSCH line (415 vs 249, both per-CORESET correct): not a behaviour change.
+- V2a: postconv part unreachable on every build (no "Technique D CONVERGED" since the solver; ref fails it too); CRC floor and drop_full
+  pass in all 6 arms (ref 96.11-96.89 % / 0.04-0.31 %, cand 96.22-97.05 % / 0.02-1.02 %) [MEASURED, DGX rfsim 106 PRB 4 RX]. Known shutdown
+  race: `Assertion (tmp == writeBlockSize)` in RU_write at the 420 s stop (3/4 cand, 0/2 ref, also csd/single-int 10-24): rfsim gNB gone
+  before the UE stops; pre-existing, exit path only, not fixed.
+- V3 (tests/passive_rx/mpci/mpci_replay.sh, c3610 = WindTre 508 + Iliad 403 at 122.88 MS/s, n=3 interleaved, SPEED 1): functional PASS
+  (check_bad 0, channelizer overruns 0, CRC_q 100 % both cells, drops <= 1.3 %); P1 FAIL (508 p50 2.27x / p99 2.80x solo; 403 p50 1.51x,
+  UL p50 1.42x), P3 FAIL (busy cores 6.9 vs 4.2 solo403 = 1.7x). Solo508 runs had 57-58 SHMIQ_OVERRUN (direct N=1 path), so its baseline
+  is contaminated. [MEASURED, DGX replay c3610 l0942_c3610x8, replays/mpci_replay_20261029_201958]
+- O1-O3: folded into the DL/UL session's OTA campaigns (operator 2026-10-29): O1 (508 + co-channel) never run; O2/O3 ran as the 6-min
+  integration runs (415+403 instead of 508+403; 30-min runs pending). S1-S3: on sens6 later (§32.4). UL HARQ soft combining: after UL decodes.
+Core pool vs targets [MEASURED, OTA above]: 2-cell p50 +18..+52 % over solo (403: +136..+153 %), stale 2-7 %, scan drop_full 11-43 %
+(923 solo already 14 %). Facts: per-grant CPU stage time p50 5 us solo and pair (GPU pass), so the extra latency is waiting; pool 9 cores for
+2 cells vs 6 solo (4.5 per cell); decode waited 38 % vs 15 % of leases, disc wait p99 33 vs 8 ms, house 131 vs 33 ms; MPCI_ADMIT_POOL
+meas_cells=0 load=0.00 in every 2-cell run (the measured-demand admission never measured: runs on the 2-token floor; defect); DISC_TICKET
+~50 % contended, pace 12 s per cell (G4b expected ~0). Binding resource not proven (cores vs GPU sharing vs queueing): discriminating
+experiment = 2-cell replay SPEED 1 with a larger pool in a test build (no runtime flag), STOP when p50 is within +30 % or the cause is named.
+
+**Decode-time goal (acceptance for the DL/UL work and for merging mpci-main into main), on air, daytime, per cell:**
+- P2 absolute: DL decode p50 about 1 ms, p99 < 5 ms, every grant decoded (big / multi-layer too), drops <= 4 % (goals 2026-10-17/21);
+  never trade CRC for latency (decoded PDSCH feeds sensing).
+- P1 relative at N=2: each cell's DL p50 and p99 within +30 % of its own interleaved solo run, CRC_q >= 95 % of solo, drops <= solo + 1 pt.
+- P3: busy cores of the 2-cell process <= 1.25x the single-cell process.
+Today [MEASURED, DGX+X410, daytime 2026-10-29]: solo 415 p50 1.8-2.2 ms / p99 15.8-19.9 ms, 923 1.9 / 7.5 ms, 403 1.2 / 4.7 ms: solo misses P2
+too, so the work starts single-cell. Where: the DL/UL session works on mpci-main (A9: N=1 equivalent to main, so single-cell results hold
+for main); every main push is merged into mpci-main (plan F10) with A9 + V2a; mpci-main -> main when P2 holds solo and P1/P3 hold at N=2.
+First items: §31 (DL health, UL, DCI 1_1), the core-pool facts above, the measured-demand defect, the out-of-span add check, O1-O3.
