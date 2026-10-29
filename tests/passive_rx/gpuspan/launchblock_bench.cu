@@ -166,7 +166,7 @@ int main(int argc, char **argv)
     else if (mode.rfind("adapt", 0) == 0) { /* AFTER: the production chunker, kms ms of work as kms*10 units of 100 us, stream drained between chunks */
       static NrGpuChunker ck;
       nr_gpu_chunked(ck, (long)kms * 10, [&](long, long n) { spin<<<1, 1, 0, disc>>>(n * 100000LL, nullptr); return (int)cudaGetLastError(); },
-                     [&]() { sync_ev(disc); return 0; }); }
+                     [&]() { sync_ev(disc); return 0; }, []() { return (uint64_t)0; }); } /* no GPU span: the host time of the chunk is its run time */
     else if (mode.rfind("chunkq", 0) == 0) { for (int i = 0; i < kms; i++) spin<<<1, 1, 0, disc>>>(1000000, nullptr); sync_ev(disc); }
     else if (mode.rfind("chunk", 0) == 0) { const int n = kms; for (int i = 0; i < n; i++) { spin<<<1, 1, 0, disc>>>(1000000, nullptr); sync_ev(disc); } } /* same total time in 1 ms kernels, wait after each */
     kwin.push_back({a, now_us()});

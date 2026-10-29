@@ -20,6 +20,11 @@ bool nr_prach_passive_occasion(int config_index, int frame, int slot, int mu, fr
 int nr_prach_passive_rar_relation(int frame, int slot, int start_symbol, int fdm,
                                   int preamble, uint16_t ra_rnti, uint8_t rapid);
 void nr_prach_passive_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc);
+/* Per-cell (mpci CELLFEAT): start / process / rar / flush / metrics / gain_changed act on the calling thread's cell (nr_cell_idx()). The cell's worker is
+ * created bound to it. nr_prach_passive_cell_prealloc(cell) runs once per admitted cell before the RX fence (its large buffers; no-op when the PRACH
+ * source is not configured). */
+void nr_prach_passive_cell_prealloc(int cell);
+void nr_prach_passive_cell_pause(int cell, bool pause); /* retired cell: process() returns at once; no allocation */
 void nr_prach_passive_start(void); /* call before UE slot threads start */
 void nr_prach_passive_rar(uint16_t ra_rnti, uint8_t rapid, uint16_t ta, uint64_t abs_slot);
 typedef struct { uint8_t rapid; uint16_t ta; } nr_prach_rar_entry_t;

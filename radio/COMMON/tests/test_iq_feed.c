@@ -405,14 +405,11 @@ static int test_device(const char *lib)
   rd_t x = {.d = &dz, .ret = 99};
   pthread_t th;
   pthread_create(&th, NULL, blocked_read, &x);
-  usleep(100000);
-  CHECK(x.ret == 99, "read waits on a paused ring");
-  dz.trx_stop_func(&dz);
-  pthread_join(th, NULL);
-  CHECK(x.ret == -1, "stop releases the waiting read");
+  pthread_join(th, NULL); /* MPCI-LIVE: a ring paused by its producer returns SHM_IQ_READ_PAUSED at once (no wait; the receiver parks the slot thread outside its radio gate) */
+  CHECK(x.ret == SHM_IQ_READ_PAUSED, "read on a paused ring returns PAUSED, got %d", x.ret);
   dz.trx_end_func(&dz);
   iq_feed_destroy(f);
-  printf("  shm_iq device reads its cell ring bit-exact on the cell clock; paused ring attach + stop OK\n");
+  printf("  shm_iq device reads its cell ring bit-exact on the cell clock; paused ring attach + PAUSED read OK\n");
   return 0;
 }
 

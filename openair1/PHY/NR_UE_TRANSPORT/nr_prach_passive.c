@@ -3,6 +3,8 @@
  * existing gNB correlator, then export only detections. No receiver state is
  * changed by an overheard RAR. */
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_core_pool.h"
+#include "common/utils/nr_cell.h"
 #include "nr_prach_passive.h"
 
 #include <math.h>
@@ -36,6 +38,7 @@ static pthread_t test_slot_tid, test_worker_tid;
 #define nr_pdcch_sib1_prior_get() (&test_prior)
 #define nr_cfg_ignore_sib1() test_ignore_sib1
 #define nr_cfg_reconf_enabled() false
+#define nr_isac_source_configured(s) 1
 #endif
 
 #define PRACH_PENDING 64
@@ -59,17 +62,39 @@ typedef struct {
   int frame, slot, ra_slot, slots_per_frame, fdm, symbol, preamble, energy, delay_samples, pci;
 } prach_detection_t;
 
-static prach_detection_t pending[PRACH_PENDING]; /* worker owns this until joined */
-static unsigned pending_head;
-/* RAR worker publishes one packed, complete observation per cell. The low 24
- * slot bits cover an SFN cycle; the join compares modulo 1024 frames. */
-static _Atomic uint64_t rar_events[PRACH_RAR_RING];
-static _Atomic unsigned rar_head;
-static c16_t prach_xu[64][839];
-static c16_t prach_freq[PRACH_MAX_RX][NUMBER_OF_NR_RU_PRACH_OCCASIONS_MAX][NR_PRACH_SEQ_LEN_L];
-static c16_t prev_tail[PRACH_MAX_RX][PRACH_PREFIX];
-static uint64_t prev_tail_slot = UINT64_MAX;
-static int cached_root = -1, cached_count, cached_short;
+/* ---- per-cell PRACH state (mpci CELLFEAT, common/utils/nr_cell.h) ----
+ * Every admitted cell has its own detection pending list, RAR ring, noise floors, job queue and worker (created bound to the cell by
+ * nr_prach_passive_start, which the cell's start hook calls on the cell's thread). The large buffers (sequence table, frequency buffers, the
+ * stitch tail, the job queue: ~70 MB at 4 RX) are NR_CELL_STATIC_HEAP objects pre-allocated before the RX fence by nr_prach_passive_cell_prealloc
+ * (only when the PRACH source is configured). The worker owns pending[] until it is joined; the RAR ring is written by the PDSCH queue thread of the
+ * same cell (bound) and read by the worker. */
+typedef prach_detection_t prach_pending_t[PRACH_PENDING];
+NR_CELL_STATIC(prach_pending_t, pending)
+#define pending NR_CELL_REF(pending)
+NR_CELL_STATIC(unsigned, pending_head)
+#define pending_head NR_CELL_REF(pending_head)
+typedef _Atomic uint64_t prach_rar_ring_t[PRACH_RAR_RING];
+NR_CELL_STATIC(prach_rar_ring_t, rar_events)
+#define rar_events NR_CELL_REF(rar_events)
+NR_CELL_STATIC(_Atomic unsigned, rar_head)
+#define rar_head NR_CELL_REF(rar_head)
+typedef c16_t prach_xu_t[64][839];
+NR_CELL_STATIC_HEAP(prach_xu_t, prach_xu)
+#define prach_xu NR_CELL_HEAP_REF(prach_xu_t, prach_xu)
+typedef c16_t prach_freq_t[PRACH_MAX_RX][NUMBER_OF_NR_RU_PRACH_OCCASIONS_MAX][NR_PRACH_SEQ_LEN_L];
+NR_CELL_STATIC_HEAP(prach_freq_t, prach_freq)
+#define prach_freq NR_CELL_HEAP_REF(prach_freq_t, prach_freq)
+typedef c16_t prach_tail_t[PRACH_MAX_RX][PRACH_PREFIX];
+NR_CELL_STATIC_HEAP(prach_tail_t, prev_tail)
+#define prev_tail NR_CELL_HEAP_REF(prach_tail_t, prev_tail)
+NR_CELL_STATIC_INIT(uint64_t, prev_tail_slot, UINT64_MAX)
+#define prev_tail_slot NR_CELL_REF(prev_tail_slot)
+NR_CELL_STATIC_INIT(int, cached_root, -1)
+#define cached_root NR_CELL_REF(cached_root)
+NR_CELL_STATIC(int, cached_count)
+#define cached_count NR_CELL_REF(cached_count)
+NR_CELL_STATIC(int, cached_short)
+#define cached_short NR_CELL_REF(cached_short)
 #define PRACH_FLOOR_HISTORY 32
 #define PRACH_FLOOR_SEED 8
 typedef struct {
@@ -77,7 +102,9 @@ typedef struct {
   unsigned count, next;
   int gain_db;
 } prach_floor_t;
-static prach_floor_t floors[8]; /* one noise floor per frequency occasion */
+typedef prach_floor_t prach_floors_t[8]; /* one noise floor per frequency occasion */
+NR_CELL_STATIC(prach_floors_t, floors)
+#define floors NR_CELL_REF(floors)
 typedef struct {
   NR_DL_FRAME_PARMS fp;
   int frame, start_slot, current_slot, n_rx, nta, sample_base, gain_db;
@@ -90,15 +117,63 @@ typedef struct {
   c16_t samples[PRACH_MAX_RX][PRACH_WINDOW];
 } prach_job_t;
 
-static prach_job_t jobs[PRACH_QUEUE];
-static pthread_mutex_t job_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t job_cv = PTHREAD_COND_INITIALIZER;
-static pthread_t job_thread;
-static bool worker_started, worker_stop;
-static atomic_flag producer_busy = ATOMIC_FLAG_INIT;
-static unsigned job_read, job_write;
-static _Atomic uint64_t prach_us, prach_occasions, prach_drops, prach_skipped;
-static _Atomic int observed_gain_db = INT32_MIN;
+typedef prach_job_t prach_jobs_t[PRACH_QUEUE];
+NR_CELL_STATIC_HEAP(prach_jobs_t, jobs)
+#define jobs NR_CELL_HEAP_REF(prach_jobs_t, jobs)
+NR_CELL_STATIC_INIT(pthread_mutex_t, job_mu, PTHREAD_MUTEX_INITIALIZER)
+#define job_mu NR_CELL_REF(job_mu)
+NR_CELL_STATIC_INIT(pthread_cond_t, job_cv, PTHREAD_COND_INITIALIZER)
+#define job_cv NR_CELL_REF(job_cv)
+NR_CELL_STATIC(pthread_t, job_thread)
+#define job_thread NR_CELL_REF(job_thread)
+NR_CELL_STATIC(bool, worker_started)
+#define worker_started NR_CELL_REF(worker_started)
+NR_CELL_STATIC(bool, worker_stop)
+#define worker_stop NR_CELL_REF(worker_stop)
+NR_CELL_STATIC(atomic_flag, producer_busy)
+#define producer_busy NR_CELL_REF(producer_busy)
+NR_CELL_STATIC(unsigned, job_read)
+#define job_read NR_CELL_REF(job_read)
+NR_CELL_STATIC(unsigned, job_write)
+#define job_write NR_CELL_REF(job_write)
+NR_CELL_STATIC(_Atomic bool, prach_paused) /* MPCI-INT: the cell is retired (nr_prach_passive_cell_pause) */
+#define prach_paused NR_CELL_REF(prach_paused)
+NR_CELL_STATIC(_Atomic uint64_t, prach_us)
+#define prach_us NR_CELL_REF(prach_us)
+NR_CELL_STATIC(_Atomic uint64_t, prach_occasions)
+#define prach_occasions NR_CELL_REF(prach_occasions)
+NR_CELL_STATIC(_Atomic uint64_t, prach_drops)
+#define prach_drops NR_CELL_REF(prach_drops)
+NR_CELL_STATIC(_Atomic uint64_t, prach_skipped)
+#define prach_skipped NR_CELL_REF(prach_skipped)
+NR_CELL_STATIC_INIT(_Atomic int, observed_gain_db, INT32_MIN)
+#define observed_gain_db NR_CELL_REF(observed_gain_db)
+
+/* Before the RX fence, once per admitted cell: the cell's large buffers. No-op when the PRACH source is not configured (nothing touches them then). */
+void nr_prach_passive_cell_prealloc(int cell)
+{
+  if (!nr_isac_source_configured(NR_ISAC_SRC_PRACH)) return;
+  NR_CELL_HEAP_PREALLOC(prach_xu_t, prach_xu, cell);
+  NR_CELL_HEAP_PREALLOC(prach_freq_t, prach_freq, cell);
+  NR_CELL_HEAP_PREALLOC(prach_tail_t, prev_tail, cell);
+  NR_CELL_HEAP_PREALLOC(prach_jobs_t, jobs, cell);
+}
+
+/* Pause / resume the PRACH pipeline of `cell` (hook of a retired / re-activated cell). No allocation; the worker, its queue and the pending list stay. On resume the
+ * stitch tail is invalidated (the stream has a forward gap): the producer flag is taken so a slot in flight is not raced; if it is busy the invalidation is skipped
+ * and the first occasion needing the tail is skipped by the continuity test (prev_tail_slot + 1 + slot != now). */
+void nr_prach_passive_cell_pause(int cell, bool pause)
+{
+  if (cell < 0 || cell >= NR_CELL_MAX) return;
+  const int prev = nr_cell_idx();
+  nr_cell_bind(cell);
+  atomic_store_explicit(&prach_paused, pause, memory_order_release);
+  if (!pause && !atomic_flag_test_and_set_explicit(&producer_busy, memory_order_acquire)) {
+    prev_tail_slot = UINT64_MAX;
+    atomic_flag_clear_explicit(&producer_busy, memory_order_release);
+  }
+  nr_cell_bind(prev);
+}
 
 void nr_prach_passive_gain_changed(int gain_db)
 {
@@ -420,16 +495,18 @@ static void process_job(const prach_job_t *job)
   atomic_fetch_add_explicit(&prach_occasions, processed, memory_order_relaxed);
 }
 
-static void *prach_worker(void *unused)
+static void *prach_worker(void *arg)
 {
-  (void)unused;
+  nr_cell_bind((int)(intptr_t)arg); /* the worker serves the cell that started it (nr_core_plan_create has no cell argument) */
   pthread_mutex_lock(&job_mu);
   for (;;) {
     while (job_read == job_write && !worker_stop) pthread_cond_wait(&job_cv, &job_mu);
     if (job_read == job_write && worker_stop) break;
     prach_job_t *job = &jobs[job_read % PRACH_QUEUE];
     pthread_mutex_unlock(&job_mu);
+    nr_pool_site_float_acquire(NR_POOL_HOUSE, nr_cell_idx(), 0); /* mpci B5: one HOUSE lease per job (bound cell); no-op when the float lane is not merged */
     process_job(job);
+    nr_pool_site_float_release();
     pthread_mutex_lock(&job_mu);
     ++job_read;
     pthread_cond_broadcast(&job_cv);
@@ -444,7 +521,7 @@ void nr_prach_passive_start(void)
   if (!nr_isac_prach_enabled()) return;
   pthread_mutex_lock(&job_mu);
   if (!worker_started && !worker_stop) {
-    if (nr_core_plan_create(&job_thread, NULL, prach_worker, NULL, -1))
+    if (nr_core_plan_create(&job_thread, NULL, prach_worker, (void *)(intptr_t)nr_cell_idx(), -1))
       LOG_W(PHY, "SENSING: passive PRACH worker could not start; occasions will be dropped\n");
     else {
       worker_started = true;
@@ -506,7 +583,8 @@ static void process_slot(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const uint64_t now = ((uint64_t)proc->hfn_rx * 1024 + proc->frame_rx) * fp->slots_per_frame + proc->nr_slot_rx;
   if (fp->frame_type == FDD) {
-    static bool warned_fdd;
+    NR_CELL_STATIC(bool, warned_fdd)
+#define warned_fdd NR_CELL_REF(warned_fdd)
     if (!warned_fdd) {
       warned_fdd = true;
       LOG_I(PHY, "PRACH passive inactive: FDD not supported\n");
@@ -516,7 +594,8 @@ static void process_slot(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
   if (nr_cfg_ignore_sib1()) return;
   const nr_pdcch_sib1_prior_t *prior = nr_pdcch_sib1_prior_get();
   if (!prior || !prior->rach_valid) {
-    static bool warned;
+    NR_CELL_STATIC(bool, warned)
+#define warned NR_CELL_REF(warned)
     if (!warned) {
       warned = true;
       LOG_I(PHY, "SENSING: passive PRACH inactive until SIB1 RACH config is available\n");
@@ -543,7 +622,8 @@ static void process_slot(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
     nr_prach_passive_occasion_t previous;
     if (nr_prach_passive_occasion(prior->prach_config_index, (proc->frame_rx + 1023) % 1024,
                                   previous_start, fp->numerology_index, fp->freq_range, &previous)) {
-      static bool warned_boundary;
+      NR_CELL_STATIC(bool, warned_boundary)
+#define warned_boundary NR_CELL_REF(warned_boundary)
       atomic_fetch_add_explicit(&prach_skipped, (uint64_t)cfg->num_prach_fd_occasions * previous.num_occasions,
                                 memory_order_relaxed);
       if (!warned_boundary) {
@@ -629,6 +709,7 @@ static void process_slot(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 void nr_prach_passive_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
   if (!nr_isac_prach_enabled()) return;
+  if (atomic_load_explicit(&prach_paused, memory_order_acquire)) return; /* retired cell: no job, no count */
   if (atomic_flag_test_and_set_explicit(&producer_busy, memory_order_acquire)) {
     atomic_fetch_add_explicit(&prach_drops, 1, memory_order_relaxed);
     return;

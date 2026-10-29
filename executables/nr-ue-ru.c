@@ -18,6 +18,7 @@
 #include "common/utils/nr/nr_common.h"     // nr_band_scan_windows
 #include "common/utils/nr_cell.h"
 #include "common/utils/load_module_shlib.h"
+#include "radio/COMMON/ru_park.h"
 #define NRUE_BAND_SCAN_MAX 64
 static uint64_t s_band_scan_c[NRUE_BAND_SCAN_MAX];
 static int s_band_scan_n = 0, s_band_scan_i = -1;
@@ -211,6 +212,22 @@ int nrue_feed_read(void *ctx, int64_t *ts, void **buf, int n, int nch)
 }
 
 const openair0_config_t *nrue_feed_cfg(void) { return &s_feed_cfg; }
+
+/* MPCI-LIVE: move the capture device's LO to a new centre at the SAME rate (a re-planned span that every served cell still fits). Shared gate: like every per-call device
+ * operation (the radio readers stay inside it; the driver's tune is thread-safe against its streamer). `after` runs right after the tune, still inside the gate, before the
+ * reader can publish the next read: the receiver starts the new wideband run there (iq_feed_set_centre). Returns 0, -1 (shutdown / no device / tune failed). */
+int nrue_feed_recentre(double centre_hz, void (*after)(void *), void *arg)
+{
+  if (!s_feed_dev.trx_set_freq_func || !(centre_hz > 0) || !nr_shutdown_radio_enter(0))
+    return -1;
+  const uint64_t c = (uint64_t)llround(centre_hz);
+  nr_rf_card_config_freq(&s_feed_cfg, c, c, 0);
+  const int r = s_feed_dev.trx_set_freq_func(&s_feed_dev, &s_feed_cfg);
+  if (r == 0 && after)
+    after(arg);
+  nr_shutdown_radio_leave();
+  return r;
+}
 
 /* load the shm_iq consumer device for a ring RU (load_lib() would load the configured device) */
 static int nrue_ru_load_ring_device(openair0_device_t *dev, openair0_config_t *cfg)
@@ -722,6 +739,10 @@ static int nrue_ru_read_impl(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestam
   const bool inject_failure = false;
 #endif
   int ret = inject_failure ? -1 : dev->trx_read_func(dev, &tmp_timestamp, buff, nsamps, num_antennas);
+  if (ret == RU_PARK_PAUSED && s_ru_ring[UE->rf_map.card]) { /* MPCI-LIVE: the cell's ring is paused: no data, not an error (nrue_ru_read parks the caller outside the gate) */
+    *ptimestamp = 0;
+    return RU_PARK_PAUSED;
+  }
   if (ret < 0) {
     *ptimestamp = 0;
     bool was_stopping = nr_shutdown_requested();
@@ -743,6 +764,10 @@ static int nrue_ru_read_impl(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestam
 
       openair0_timestamp_t retry_timestamp;
       int got = dev->trx_read_func(dev, &retry_timestamp, retry_buf, nsamps - ret, num_antennas);
+      if (got == RU_PARK_PAUSED && s_ru_ring[UE->rf_map.card]) { /* paused mid-read: the partial block is dropped, a gap follows the resume */
+        *ptimestamp = 0;
+        return RU_PARK_PAUSED;
+      }
       if (got < 0 || (got > 0 && have_timestamp && retry_timestamp != first_timestamp + ret)) {
         *ptimestamp = 0;
         bool was_stopping = nr_shutdown_requested();
@@ -969,14 +994,58 @@ int nrue_ru_adjust_rx_gain(PHY_VARS_NR_UE *UE, int gain_change)
 }
 
 /* nrue_ru_read: public: reads samples under the shared gate; sets *ptimestamp to 0 first and returns the sample count, or -1 during shutdown or on fault. Callers: nr-ue.c read loop, phy_procedures_nr_ue.c and the passive queues. */
+typedef struct {
+  PHY_VARS_NR_UE *UE;
+  openair0_timestamp_t *ts;
+  void **buff;
+  int nsamps, nant;
+} nrue_read_args_t;
+static int nrue_ru_read_once(void *p)
+{
+  nrue_read_args_t *a = p;
+  return nrue_ru_read_impl(a->UE, a->ts, a->buff, a->nsamps, a->nant);
+}
+static int nrue_gate_enter(void *c, int excl) { (void)c; return nr_shutdown_radio_enter(excl != 0); }
+static void nrue_gate_leave(void *c) { (void)c; nr_shutdown_radio_leave(); }
+static int nrue_gate_stopping(void *c) { (void)c; return nr_shutdown_requested(); }
+
 int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int num_antennas)
 {
   *ptimestamp = 0;
+  if (s_ru_ring[UE->rf_map.card]) {
+    /* MPCI-LIVE: a ring RU whose cell is paused parks the slot thread OUTSIDE the radio gate (ru_park_read), so the exclusive gate users (restart, reinit, stop)
+     * never wait for a read that cannot complete. A live ring: one shared-gate read exactly as below. Never reached at N = 1 (no ring RU). */
+    static const ru_park_gate_t gate = {.enter = nrue_gate_enter, .leave = nrue_gate_leave, .stopping = nrue_gate_stopping};
+    nrue_read_args_t a = {UE, ptimestamp, buff, nsamps, num_antennas};
+    return ru_park_read(&gate, UE->Mod_id, nrue_ru_read_once, &a);
+  }
   if (!nr_shutdown_radio_enter(0))
     return -1;
   int result = nrue_ru_read_impl(UE, ptimestamp, buff, nsamps, num_antennas);
   nr_shutdown_radio_leave();
   return result;
+}
+
+/* MPCI-LIVE: wake a parked slot thread (after its ring resumed / a retune), and the parked state for the MPCI_LIFE lines. */
+void nrue_ru_ring_wake(void) { ru_park_wake(); }
+int nrue_ru_ring_parked(int cell) { return ru_park_parked(cell); }
+
+/* MPCI-LIVE: retune the ring RU of cell `cell` to a new cell centre (the cell's ring was retuned by the channelizer first: its ring centre is the new one, so the
+ * consumer's mixer shift is the difference of this tuning to the ring's, i.e. 0). The caller guarantees that the cell's slot thread is parked (ru_park: no read is inside
+ * the device); the SHARED gate is enough (the exclusive one would starve behind the radio readers of a reader-preferring rwlock). Returns 0, -1. */
+int nrue_ru_ring_set_centre(int cell, double centre_hz)
+{
+  if (cell < 0 || cell >= nrue_ru_count || !s_ru_ring[cell] || centre_hz <= 0)
+    return -1;
+  if (!nr_shutdown_radio_enter(0))
+    return -1;
+  openair0_config_t *cfg = &openair0_cfg_g[cell];
+  openair0_device_t *dev = &openair0_dev[cell];
+  const uint64_t c = (uint64_t)llround(centre_hz);
+  nr_rf_card_config_freq(cfg, c, c, 0);
+  const int rc = dev->trx_set_freq_func ? dev->trx_set_freq_func(dev, cfg) : -1;
+  nr_shutdown_radio_leave();
+  return rc;
 }
 
 /* nrue_ru_write: public: writes samples under the shared gate; returns the write result, or -1 during shutdown. Callers: nr-ue.c and radio/COMMON/common_lib.c. */

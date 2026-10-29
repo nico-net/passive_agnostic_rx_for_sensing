@@ -125,7 +125,7 @@ static void *worker(void *unused)
    int due=nr_gpu_discovery_due(&duty,nr_gpu_budget_now_us(),epoch,
        !geometry_changed && g.result.count>0,!geometry_changed && g.all_verified,unexplained,1000ull*g.acquire_ms,
        1000ull*g.maintain_ms,1000ull*g.recheck_ms);
-   nr_gpu_budget_discovery_prefer(duty.mode==NR_GPU_DISC_ACQUIRE); /* OTATAIL: acquisition goes before CSI-RS discovery */
+   nr_gpu_budget_discovery_prefer_cell(nr_cell_idx(),duty.mode==NR_GPU_DISC_ACQUIRE); /* OTATAIL: acquisition goes before CSI-RS discovery */
    if(logged_mode!=duty.mode) {
     static const char *names[]={"ACQUIRE","MAINTAIN","PAUSED"};
     LOG_A(PHY,"SENSING: PDCCH_NID_GPU mode %s -> %s epoch=%u published=%d verified=%d wake=%d\n",
@@ -209,7 +209,7 @@ failed:
   atomic_store_explicit(&g.running,false,memory_order_release);
   break;
  }
- nr_gpu_budget_discovery_prefer(0);
+ nr_gpu_budget_discovery_prefer_cell(nr_cell_idx(),0);
  return NULL;
 }
 /* Policy of the sweep: 3-symbol evidence, 10-batch window of 64 snapshots, duty ACQUIRE 5 s / MAINTAIN 500 ms / recheck 250 ms. Only the unit test overrides it (before start()). */
@@ -267,7 +267,11 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  int core=env_int("ISAC_PDCCH_NID_GPU_CORE",core_def,-1,CPU_SETSIZE-1);
  if(core<0)for(int j=CPU_SETSIZE-1;j>=0;j--)if(CPU_ISSET(j,&allowed)){core=j;break;}
  if(core<0 || !CPU_ISSET(core,&allowed))rc=-1;
- else {CPU_SET(core,&pin);rc|=pthread_attr_setaffinity_np(&attr,sizeof(pin),&pin);}
+ else if(nr_cell_idx()>0 && !getenv("ISAC_PDCCH_NID_GPU_CORE")) {
+  /* G4: the nID core of the plan serves cell 0. Another cell's worker floats over the thread's allowed set (SCHED_OTHER, low duty) instead of piling onto the same single core;
+   * an explicit ISAC_PDCCH_NID_GPU_CORE still pins every worker (operator choice). The core pool (B1b/B5) can lease a per-cell core on top. */
+  rc|=pthread_attr_setaffinity_np(&attr,sizeof(allowed),&allowed);core=-1;
+ } else {CPU_SET(core,&pin);rc|=pthread_attr_setaffinity_np(&attr,sizeof(pin),&pin);}
  if(!rc)rc=nr_cell_thread_create(&g.thread,&attr,worker,NULL,nr_cell_idx()); /* the worker serves the starting cell */
  pthread_attr_destroy(&attr);
  if(rc)goto fail;

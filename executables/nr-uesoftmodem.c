@@ -110,6 +110,10 @@ unsigned short config_frames[4] = {2,9,11,13};
 #include <math.h>
 #include "radio/COMMON/iq_feed.h"
 #include "radio/COMMON/iq_span.h"
+#include "radio/COMMON/iq_live.h"
+#include "radio/COMMON/ru_park.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_api.h"
+#include <stdatomic.h>
 
 THREAD_STRUCT thread_struct;
 nrUE_params_t nrUE_params = {0};
@@ -256,6 +260,9 @@ static void set_fp_options(int cell_id, int ru_id)
  * rfsim / offline replay with several cells: MPCI_INPUT, the started cell only. N = 1 keeps the direct radio path (no channelizer hop, no G6 code runs). */
 static nr_cell_life_t g_cells;
 static int g_ncells = 1; /* 1: the single-cell receiver; every N = 1 path below is the code of before */
+static iq_live_t g_live; /* MPCI-LIVE: the live state of the slots (control thread) */
+static int g_live_on;   /* ... initialised: the control thread runs */
+static int g_nplan = 1;  /* MPCI-LIVE: slots that hold a cell at start (0..g_nplan-1); the slots above are spares: prepared, no cell, ring paused */
 static nr_cell_inventory_watch_t g_inv_watch;
 static char g_uectx_path[PATH_MAX + 32]; /* cell 0's uectx path: cells k > 0 use nr_cell_path(k, ...) */
 
@@ -296,7 +303,7 @@ __attribute__((visibility("default"))) int nr_radio_wide_plan(openair0_config_t 
     return -1;
   }
   iq_span_plan_t p;
-  if (iq_span_plan(&d, g_feed_cells, g_ncells, &p) <= 0) {
+  if (iq_span_plan(&d, g_feed_cells, g_nplan, &p) <= 0) {
     LOG_E(PHY, "SENSING: MPCI_SPAN the radio cannot capture the started cell (reason %s)\n", iq_span_reason_name(p.cell[0].reason));
     return -1;
   }
@@ -338,6 +345,7 @@ static int mpci_cell_prealloc(void *ctx, int k, const nr_mgr_slot_t *slot);
 static int mpci_cell_start(void *ctx, int k, const nr_mgr_slot_t *slot, int reactivation);
 static void mpci_cell_retire(void *ctx, int k, const nr_mgr_slot_t *slot);
 static void mpci_cell_retune(void *ctx, int k, const nr_cell_mgr_event_t *ev);
+static int mpci_slot_fit(void *ctx, int slot, const nr_cell_desc_t *d);
 static void mpci_log(void *ctx, const char *line)
 {
   (void)ctx;
@@ -402,10 +410,19 @@ static int mpci_plan_cells(int argc, char **argv, bool radio)
   mc.pass1_k_ssb = 0;                      /* pass 2 from the log is not wired in A8 */
   const nr_cell_life_ops_t ops = {.prealloc = mpci_cell_prealloc, .start = mpci_cell_start, .retire = mpci_cell_retire, .retune = mpci_cell_retune,
                                   .log = mpci_log};
-  const int n = nr_cell_life_plan(&g_cells, &mc, &caps, &ops, &p, &g_inv_watch.inv, 1000.0);
+  mc.slot_fit = mpci_slot_fit; /* MPCI-LIVE: a free slot carries a cell only when the cell has the slot's prepared grid */
+  /* MPCI-LIVE: with a radio (several cells from one capture) spare slots are prepared with the cells (admission decides how many fit; they are admitted last); a
+   * single-cell inventory never gets one. mpci_check_input() drops them again when the input turns out to be published rings. */
+  const int n = nr_cell_life_plan_spare(&g_cells, &mc, &caps, &ops, &p, &g_inv_watch.inv, 1000.0, radio ? NR_CELL_LIFE_SPARE_DEFAULT : 0);
   if (n <= 1)
     return 1;
   const int added = nr_cell_life_admit(&g_cells, &g_inv_watch.inv, mpci_now_ns());
+  int real = 0;
+  for (int i = 0; i < added; i++)
+    real += !nr_cell_life_is_spare(&g_cells, nr_cell_life_admitted(&g_cells, i));
+  g_nplan = real > 0 ? real : 1;
+  for (int i = 0; i < added; i++) /* the spares are admitted last: slots 0..g_nplan-1 hold the cells */
+    AssertFatal(!nr_cell_life_is_spare(&g_cells, nr_cell_life_admitted(&g_cells, i)) || nr_cell_life_admitted(&g_cells, i) >= g_nplan, "MPCI spare slot below a cell slot\n");
   return added > 1 ? added : 1;
 }
 
@@ -427,6 +444,12 @@ static void mpci_check_input(void)
     LOG_W(PHY, "SENSING: MPCI_INPUT device=%s: rfsim / offline replay input carries one cell: serving the started cell only (%d admitted)\n",
           devname && *devname ? devname : "default", g_ncells);
     g_ncells = 1;
+  } else { /* published rings: nobody publishes a ring for a spare slot */
+    const int dropped = nr_cell_life_drop_spares(&g_cells);
+    if (dropped > 0) {
+      g_ncells -= dropped;
+      LOG_I(PHY, "SENSING: MPCI_LIFE %d spare slot(s) dropped: the input is published rings\n", dropped);
+    }
   }
 }
 
@@ -515,7 +538,7 @@ static void mpci_feed_open(void)
   }
   /* provisional: any rate (a device whose driver does not report its rate set keeps this one; usrp_lib replaces it from the device) */
   const iq_span_dev_t any = {0};
-  if (iq_span_plan(&any, g_feed_cells, g_ncells, &g_feed_plan) <= 0)
+  if (iq_span_plan(&any, g_feed_cells, g_nplan, &g_feed_plan) <= 0)
     mpci_feed_fail("the started cell has no capture geometry");
   openair0_config_t *cfg = nrue_feed_config(g_feed_plan.rate, g_feed_plan.centre_hz, (int)g_feed_plan.n_rx);
   if (!cfg)
@@ -530,10 +553,12 @@ static void mpci_feed_open(void)
   char line[1536];
   iq_span_format(&g_feed_plan, g_feed_cells, line, sizeof(line));
   LOG_I(PHY, "SENSING: %s device_rates=%d analog_mhz=%.1f\n", line, g_feed_dev.n_ranges, g_feed_dev.analog_bw_hz / 1e6);
-  for (int k = 0; k < g_ncells; k++)
+  for (int k = 0; k < g_nplan; k++)
     if (!g_feed_plan.cell[k].served)
-      LOG_W(PHY, "SENSING: MPCI_SPAN cell=%d id=%s unserved reason=%s: outside this capture (no radio retune); its slot waits on a paused ring\n", k, g_feed_ids[k],
+      LOG_W(PHY, "SENSING: MPCI_SPAN cell=%d id=%s unserved reason=%s: outside this capture (a run-time change may re-plan it, MPCI_LIFE); its slot waits on a paused ring\n", k, g_feed_ids[k],
             iq_span_reason_name(g_feed_plan.cell[k].reason));
+  for (int k = g_nplan; k < g_ncells; k++)
+    LOG_I(PHY, "SENSING: MPCI_LIFE cell=%d id=%s spare slot prepared (grid of the started cell, ring paused): a cell added at run time takes it\n", k, g_feed_ids[k]);
 }
 
 /* the bytes per ms of the radio's own decoupled ring at the capture (plan_usrp_ring) */
@@ -635,6 +660,15 @@ static void mpci_feed_log(void)
   char line[2048];
   iq_feed_format(g_feed_obj, line, sizeof(line));
   LOG_I(PHY, "SENSING: %s\n", line);
+  if (g_live_on) { /* MPCI-LIVE: slot states, the capture in force, the slot threads parked outside the radio gate, the CHAN demand */
+    char lv[600];
+    iq_live_format(&g_live, lv, sizeof(lv));
+    char pk[80] = "";
+    for (int k = 0, o = 0; k < g_ncells && o < (int)sizeof(pk) - 8; k++)
+      if (nrue_ru_ring_parked(k))
+        o += snprintf(pk + o, sizeof(pk) - (size_t)o, "%s%d", o ? "," : "", k);
+    LOG_I(PHY, "SENSING: %s parked=%s chan_demand=%d\n", lv, pk[0] ? pk : "-", iq_chan_demand(iq_feed_chan(g_feed_obj)));
+  }
   if (nr_cell_count() > 1) { /* MPCI-DASH P3: one CHAN_CELL line per served cell (the feed exists on the multi-cell path only; the first call opens the windows) */
     iq_feed_cell_ref_t refs[NR_CELL_MAX];
     int n = 0;
@@ -651,13 +685,154 @@ static void mpci_feed_log(void)
         LOG_I(PHY, "%s\n", ln);
   }
 }
-/* run time: does the cell of slot k (its current inventory description) fit the running capture? */
-static int mpci_feed_fits(int k, const nr_cell_desc_t *d, iq_span_cell_plan_t *o)
+/* ================================================================ MPCI-LIVE: live cell changes (plan task A12) ===================================
+ * The inventory control thread applies what the manager reports (retire after the hysteresis, an add into a slot prepared before the fence, a retune) through
+ * radio/COMMON/iq_live.c, which decides and orders; the hooks below are its actions on the real objects. Everything exists since start-up (cells, rings, entries, UE
+ * instances, threads): nothing is allocated here. Without a radio feed (published rings) there is no channelizer to move: the cell's ring belongs to its publisher; a
+ * retire / add only logs and wakes the slot thread (a ring its publisher paused parks the thread outside the radio gate: ru_park). */
+
+/* the cell of slot k as the inventory describes it, completed with the slot's grid: the UE's --ssb is derived from the SSB frequency exactly as at start */
+static int mpci_cell_ssb(int k, const nr_cell_desc_t *d, int dflt)
 {
-  iq_span_cell_t c = g_feed_cells[k];
-  if (d && d->centre_hz > 0)
-    c.centre_hz = d->centre_hz;
-  return iq_span_fit(&g_feed_dev, &g_feed_plan, &c, o);
+  const NR_DL_FRAME_PARMS *fp = nrue_get_cell_fp(k);
+  if (d->ssb_hz > 0 && fp->N_RB_DL > 0) {
+    const double scs = 15e3 * (double)(1 << fp->numerology_index);
+    const long ssb = lround(6.0 * fp->N_RB_DL - 120.0 - (d->centre_hz - d->ssb_hz) / scs);
+    if (ssb >= 0 && ssb + 240 <= 12L * fp->N_RB_DL)
+      return (int)ssb;
+  }
+  return dflt;
+}
+static iq_live_tune_t mpci_tune_of(int k, const nr_cell_desc_t *d, int ssb_dflt)
+{
+  return (iq_live_tune_t){.centre_hz = d->centre_hz, .cfo_hz = d->cfo_hz, .ssb = mpci_cell_ssb(k, d, ssb_dflt), .n_rb = d->n_rb,
+                          .scs_hz = d->scs_khz > 0 ? d->scs_khz * 1e3 : 0, .n_rx = d->n_rx > 0 ? (unsigned)d->n_rx : 0};
+}
+/* the manager's slot choice: only a slot with the cell's grid (prepared before the fence, fixed since) can carry it */
+static int mpci_slot_fit(void *ctx, int slot, const nr_cell_desc_t *d)
+{
+  (void)ctx;
+  if (!g_live_on || slot <= 0 || slot >= g_ncells)
+    return 1;
+  const NR_DL_FRAME_PARMS *fp = nrue_get_cell_fp(slot);
+  if (d->n_rb > 0 && d->n_rb != fp->N_RB_DL)
+    return 0;
+  if (d->scs_khz > 0 && fabs(d->scs_khz * 1e3 - 15e3 * (double)(1 << fp->numerology_index)) > 1.0)
+    return 0;
+  if (d->n_rx > 0 && d->n_rx > (int)fp->nb_antennas_rx)
+    return 0;
+  return 1;
+}
+
+static void mpci_live_log(void *ctx, const char *line)
+{
+  (void)ctx;
+  LOG_I(PHY, "SENSING: %s\n", line);
+}
+static int mpci_live_pause(void *ctx, int k)
+{
+  (void)ctx;
+  if (!g_feed_obj || g_feed_entry[k] < 0)
+    return 0;
+  const int rc = iq_feed_cell_pause(g_feed_obj, g_feed_entry[k]);
+  LOG_I(PHY, "SENSING: MPCI_FEED cell=%d id=%s paused (radio not stopped) rc=%d\n", k, g_feed_ids[k], rc);
+  return rc;
+}
+static int mpci_live_resume(void *ctx, int k)
+{
+  (void)ctx;
+  if (!g_feed_obj || g_feed_entry[k] < 0)
+    return 0;
+  const int rc = iq_feed_cell_resume(g_feed_obj, g_feed_entry[k]);
+  LOG_I(PHY, "SENSING: MPCI_FEED cell=%d id=%s resumed (radio not stopped) rc=%d\n", k, g_feed_ids[k], rc);
+  return rc;
+}
+static int mpci_live_chan_retune(void *ctx, int k, double centre_hz)
+{
+  (void)ctx;
+  if (!g_feed_obj || g_feed_entry[k] < 0)
+    return 0;
+  return iq_feed_cell_retune(g_feed_obj, g_feed_entry[k], centre_hz);
+}
+/* the cell's slot thread must be parked (its entry is paused) before its ring RU is retuned: no read may be inside the device */
+static int mpci_live_wait_parked(int k)
+{
+  for (int i = 0; i < 3000 && !oai_exit; i++) { /* 3 s: a slot thread finishes its slot, then reads and finds the ring paused */
+    if (nrue_ru_ring_parked(k))
+      return 0;
+    usleep(1000);
+  }
+  LOG_W(PHY, "SENSING: MPCI_LIFE cell=%d id=%s slot thread did not park within 3 s: tuning not applied\n", k, g_feed_ids[k]);
+  return -1;
+}
+static int mpci_live_ue_retune(void *ctx, int k, const iq_live_tune_t *t)
+{
+  (void)ctx;
+  if (!g_feed_obj)
+    return 0;
+  if (mpci_live_wait_parked(k))
+    return -1;
+  if (fabs(t->centre_hz - g_feed_cells[k].centre_hz) > 0.5 && nrue_ru_ring_set_centre(k, t->centre_hz)) {
+    LOG_W(PHY, "SENSING: MPCI_LIFE cell=%d id=%s ring RU retune to %.0f Hz failed\n", k, g_feed_ids[k], t->centre_hz);
+    return -1;
+  }
+  g_feed_cells[k].centre_hz = t->centre_hz;
+  ru_tune_t rq = {.centre_hz = t->centre_hz, .cfo_hz = t->cfo_hz, .ssb = t->ssb};
+  ru_tune_post(k, &rq);
+  return 0;
+}
+static void mpci_live_wake(void *ctx)
+{
+  (void)ctx;
+  nrue_ru_ring_wake();
+}
+static void mpci_live_set_centre_cb(void *arg)
+{
+  iq_feed_set_centre(g_feed_obj, *(double *)arg);
+}
+static int mpci_live_recentre(void *ctx, double centre_hz)
+{
+  (void)ctx;
+  if (!g_feed_obj)
+    return -1;
+  double c = centre_hz;
+  const int rc = nrue_feed_recentre(centre_hz, mpci_live_set_centre_cb, &c);
+  LOG_W(PHY, "SENSING: MPCI_SPAN radio recentre %.0f -> %.0f Hz at rate %.0f (bounded radio retune, every served cell resyncs once): %s\n", g_live.plan.centre_hz, centre_hz,
+        g_live.plan.rate, rc == 0 ? "done" : "FAILED, capture unchanged");
+  return rc;
+}
+static void mpci_live_span_changed(void *ctx, const iq_span_plan_t *p)
+{
+  (void)ctx;
+  g_feed_plan.centre_hz = p->centre_hz;
+  g_feed_plan.usable_hz = p->usable_hz;
+  g_feed_plan.lo_hz = p->lo_hz;
+  g_feed_plan.hi_hz = p->hi_hz;
+}
+
+/* after the per-cell frame parameters and the feed plan: the live state of every slot */
+static void mpci_live_init(void)
+{
+  if (g_ncells <= 1)
+    return;
+  if (g_feed_obj) {
+    const iq_live_ops_t ops = {.chan_pause = mpci_live_pause, .chan_resume = mpci_live_resume, .chan_retune = mpci_live_chan_retune, .ue_retune = mpci_live_ue_retune,
+                               .wake = mpci_live_wake, .radio_recentre = mpci_live_recentre, .span_changed = mpci_live_span_changed, .log = mpci_live_log};
+    iq_live_init(&g_live, &g_feed_dev, &g_feed_plan, &ops);
+    for (int k = 0; k < g_ncells; k++) {
+      const NR_DL_FRAME_PARMS *fp = nrue_get_cell_fp(k);
+      const iq_live_tune_t geom = {.n_rb = fp->N_RB_DL, .scs_hz = 15e3 * (double)(1 << fp->numerology_index), .n_rx = (unsigned)fp->nb_antennas_rx};
+      iq_live_tune_t cur = geom;
+      cur.centre_hz = g_feed_cells[k].centre_hz;
+      cur.cfo_hz = nrPHY_vars_UE_g[k][0]->initial_fo;
+      cur.ssb = fp->ssb_start_subcarrier;
+      iq_live_slot_prepare(&g_live, k, g_feed_ids[k], &geom, &cur, g_feed_cells[k].rate, k < g_nplan);
+    }
+    char l[600];
+    iq_live_format(&g_live, l, sizeof(l));
+    LOG_I(PHY, "SENSING: %s\n", l);
+  }
+  g_live_on = 1;
 }
 
 /* per-cell uectx/1 writer of cell k > 0 (cell 0 opens its own in main, unchanged), opened on cell k's bound thread */
@@ -671,6 +846,63 @@ static void mpci_open_uectx(int k)
     nr_cfg_epoch_subscribe(nr_ue_ctx_on_epoch);
   else
     LOG_W(PHY, "SENSING: UE context writer/state could not be opened (cell %d)\n", k);
+}
+
+/* CELLFEAT: the per-cell sensing services of cell k (bound to it, before the RX fence): the heap objects of the PRACH / SRS state, then the sense-API session
+ * (rings, writer, files), the passive PRACH worker and the passive SRS searcher. Cell 0 of a single-cell receiver keeps the old place (after the radio start). */
+/* MPCI-INT: the per-cell sensing services follow the cell's retire / re-activation (ru_park.h registry): pause = producers stop feeding the cell's PRACH / SRS /
+ * sense session, nothing is allocated or closed (closing stays in mpci_stop_cell_sensing); resume = they feed again. The dashboard (nr_dashboard.c) is a launcher of one
+ * process reading every cell's files and holds no per-cell state, so it has no hook. */
+static void mpci_sensing_quiesce(void *ctx, int cell)
+{
+  (void)ctx;
+  nr_sense_cell_pause(cell, true);
+  nr_prach_passive_cell_pause(cell, true);
+  nr_srs_passive_cell_pause(cell, true);
+  LOG_I(PHY, "SENSING: MPCI_PARK cell=%d sense-session, PRACH and SRS paused (sessions kept open)\n", cell);
+}
+static void mpci_sensing_resume(void *ctx, int cell)
+{
+  (void)ctx;
+  nr_srs_passive_cell_pause(cell, false);
+  nr_prach_passive_cell_pause(cell, false);
+  nr_sense_cell_pause(cell, false);
+  LOG_I(PHY, "SENSING: MPCI_PARK cell=%d sense-session, PRACH and SRS resumed\n", cell);
+}
+static void mpci_cell_sensing_open(int k, PHY_VARS_NR_UE *ue)
+{
+  nr_prach_passive_cell_prealloc(k);
+  nr_srs_passive_cell_prealloc(k);
+  if (g_ncells <= 1)
+    return;
+  static atomic_int hook_registered; /* PROCESS: one registration for all cells (prealloc runs once per cell, bound to it) */
+  if (!atomic_exchange(&hook_registered, 1)) {
+    const ru_cell_hook_t h = {.name = "cellfeat", .quiesce = mpci_sensing_quiesce, .resume = mpci_sensing_resume, .ctx = NULL};
+    if (ru_cell_hook_register(&h) != 0)
+      LOG_W(PHY, "SENSING: MPCI_PARK hook registry full; retired cells keep their sensing services running\n");
+  }
+  nr_isac_start();
+  nr_prach_passive_start();
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+    nr_srs_passive_start(ue);
+}
+/* CELLFEAT: the cell's session record, once its radio is up (the start hook; the session rings were allocated in the prealloc hook) */
+static void mpci_cell_sensing_session(int k)
+{
+  if (!nr_sense_enabled())
+    return;
+  PHY_VARS_NR_UE *sense_ue = nrPHY_vars_UE_g[k][0];
+  const openair0_config_t *sense_cfg = &openair0_cfg_g[sense_ue->rf_map.card];
+  nr_sense_emit_session(&sense_ue->frame_parms, sense_cfg->rx_gain[sense_ue->rf_map.chain] - sense_cfg->rx_gain_offset[sense_ue->rf_map.chain]);
+}
+/* CELLFEAT shutdown of one cell's sensing services (bound to it; cell 0 last, mpci_for_each_cell runs the highest cell first): the PRACH worker is
+ * drained, the SRS searcher stopped, the sense-API session closed. N = 1: the old sequence on cell 0. */
+static void mpci_stop_cell_sensing(int k)
+{
+  (void)k;
+  nr_prach_passive_flush();
+  nr_srs_passive_stop();
+  nr_isac_stop();
 }
 
 /* prealloc hook (bound to cell k, before the RX fence): every per-cell heap object, the per-cell module starts that allocate */
@@ -700,6 +932,7 @@ static int mpci_cell_prealloc(void *ctx, int k, const nr_mgr_slot_t *slot)
   nr_csirs_disc_pipeline_init(&ue->frame_parms);
   if (nr_csirs_disc_cell_prealloc(k, &ue->frame_parms, ue->frame_parms.nb_antennas_rx) != 0)
     LOG_W(PHY, "SENSING: CSIRS_DISC worker could not start; slot discovery feed disabled\n");
+  mpci_cell_sensing_open(k, ue); /* CELLFEAT: this cell's sense-API session, passive PRACH and SRS (heap objects first, then the sessions' rings and workers) */
   if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_pusch_passive_pipeline_enabled()) {
     const nr_pdcch_blind_monitor_cfg_t *ul_cfg = nr_pdcch_blind_monitor_get_cfg();
     if (ul_cfg && ul_cfg->ul_pusch_decode) {
@@ -710,25 +943,25 @@ static int mpci_cell_prealloc(void *ctx, int k, const nr_mgr_slot_t *slot)
   return 0;
 }
 
-/* start hook (bound to cell k): the cell's RT slot thread and stats thread */
+/* start hook (bound to cell k): the cell's RT slot thread and stats thread; reactivation: the slot's threads exist (a retired cell's slot, or a spare), so the slot
+ * takes the cell now (MPCI-LIVE: iq_live_add) */
 static int mpci_cell_start(void *ctx, int k, const nr_mgr_slot_t *slot, int reactivation)
 {
   (void)ctx;
   if (reactivation) {
-    LOG_W(PHY, "SENSING: MPCI_LIFE cell=%d id=%s back in the inventory: its slot thread was kept running (no run-time teardown, A8 open item)\n", k,
-          slot ? slot->id : "-");
-    if (g_feed_obj && k < NR_CELL_MAX && g_feed_entry[k] >= 0) { /* G6: re-admission = resume its channelizer entry if it still fits the capture */
-      iq_span_cell_plan_t o;
-      const int same = !slot || fabs(slot->desc.centre_hz - g_feed_cells[k].centre_hz) < 1.0;
-      if (same && mpci_feed_fits(k, slot ? &slot->desc : NULL, &o)) {
-        iq_feed_cell_resume(g_feed_obj, g_feed_entry[k]);
-        LOG_I(PHY, "SENSING: MPCI_FEED cell=%d id=%s resumed (radio not stopped)\n", k, slot ? slot->id : "-");
-      } else
-        LOG_W(PHY, "SENSING: MPCI_SPAN cell=%d id=%s %s: unserved (no radio retune at run time)\n", k, slot ? slot->id : "-",
-              same ? "outside the running capture" : "comes back at another centre than its slot was built for");
+    if (g_live_on && g_feed_obj && slot) {
+      const iq_live_tune_t t = mpci_tune_of(k, &slot->desc, slot->ssb);
+      const int st = iq_live_add(&g_live, k, slot->id, &t);
+      LOG_I(PHY, "SENSING: MPCI_LIFE cell=%d id=%s back in the inventory: slot %s\n", k, slot->id, st == IQ_LIVE_SERVED ? "served" : "unserved (logged above)");
+      ru_cell_resume(k);
+    } else {
+      LOG_I(PHY, "SENSING: MPCI_LIFE cell=%d id=%s back in the inventory: its ring belongs to its publisher; the slot thread is woken\n", k, slot ? slot->id : "-");
+      ru_cell_resume(k); /* quiesce is called on this path too (mpci_cell_retire), so the resume must be */
+      nrue_ru_ring_wake();
     }
     return 0;
   }
+  mpci_cell_sensing_session(k);
   LOG_I(PHY, "Intializing UE Threads for instance %d ...\n", k);
   init_NR_UE_threads(nrPHY_vars_UE_g[k][0]);
   return 0;
@@ -736,21 +969,30 @@ static int mpci_cell_start(void *ctx, int k, const nr_mgr_slot_t *slot, int reac
 static void mpci_cell_retire(void *ctx, int k, const nr_mgr_slot_t *slot)
 {
   (void)ctx;
-  LOG_W(PHY, "SENSING: MPCI_LIFE cell=%d id=%s retired by the inventory: its slot thread keeps running (run-time teardown is an A8 open item)\n", k,
-        slot ? slot->id : "-");
-  if (g_feed_obj && k < NR_CELL_MAX && g_feed_entry[k] >= 0 && iq_feed_cell_pause(g_feed_obj, g_feed_entry[k]) == 0) /* G6: its channelizer entry stops */
-    LOG_I(PHY, "SENSING: MPCI_FEED cell=%d id=%s paused (radio not stopped)\n", k, slot ? slot->id : "-");
+  if (g_live_on && g_feed_obj) {
+    iq_live_remove(&g_live, k, "retired");
+    ru_cell_quiesce(k); /* per-cell sessions registered by other modules (PRACH / SRS / sense session / dashboard view) */
+    const int n = iq_live_retry(&g_live); /* what the capture could not carry before may fit the smaller set now */
+    char l[600];
+    iq_live_format(&g_live, l, sizeof(l));
+    LOG_I(PHY, "SENSING: MPCI_LIFE cell=%d id=%s retired by the inventory (retry served %d): %s\n", k, slot ? slot->id : "-", n, l);
+  } else {
+    ru_cell_quiesce(k);
+    LOG_I(PHY, "SENSING: MPCI_LIFE cell=%d id=%s retired by the inventory: the ring belongs to its publisher (a paused ring parks the slot thread outside the radio gate)\n", k,
+          slot ? slot->id : "-");
+  }
 }
 static void mpci_cell_retune(void *ctx, int k, const nr_cell_mgr_event_t *ev)
 {
   (void)ctx;
-  LOG_W(PHY, "SENSING: MPCI_LIFE cell=%d id=%s retune requested centre_hz %.0f -> %.0f cfo_hz %.0f -> %.0f: not applied at run time (A8 open item)\n", k,
-        ev->id, ev->prev_centre_hz, ev->desc.centre_hz, ev->prev_cfo_hz, ev->desc.cfo_hz);
-  if (g_feed_obj && k < NR_CELL_MAX) { /* G6: the capture verdict for the new centre (the channelizer entry follows the cell's UE tuning, which is not retuned) */
-    iq_span_cell_plan_t o;
-    const int fits = mpci_feed_fits(k, &ev->desc, &o);
-    LOG_W(PHY, "SENSING: MPCI_SPAN cell=%d id=%s new centre %.0f %s the running capture\n", k, ev->id, ev->desc.centre_hz, fits ? "inside" : "outside (unserved after a retune)");
-  }
+  if (g_live_on && g_feed_obj) {
+    const iq_live_tune_t t = mpci_tune_of(k, &ev->desc, ev->ssb);
+    const int st = iq_live_retune(&g_live, k, &t);
+    LOG_I(PHY, "SENSING: MPCI_LIFE cell=%d id=%s retune requested centre_hz %.0f -> %.0f cfo_hz %.0f -> %.0f ssb %d: slot state %d\n", k, ev->id, ev->prev_centre_hz,
+          ev->desc.centre_hz, ev->prev_cfo_hz, ev->desc.cfo_hz, t.ssb, st);
+  } else
+    LOG_W(PHY, "SENSING: MPCI_LIFE cell=%d id=%s retune requested centre_hz %.0f -> %.0f: not applied (the ring belongs to its publisher)\n", k, ev->id, ev->prev_centre_hz,
+          ev->desc.centre_hz);
 }
 static void mpci_dash_gpu_log(void);
 static void mpci_dash_budget_log(void);
@@ -764,6 +1006,16 @@ static void *mpci_control_thread(void *arg)
     if (r < 0)
       LOG_W(PHY, "SENSING: MPCI_INVENTORY rejected update: %s (previous inventory kept)\n", err);
     nr_cell_life_poll(&g_cells, r == 1 ? &g_inv_watch.inv : NULL, mpci_now_ns());
+    {
+      static int s_parked[NR_CELL_MAX]; /* MPCI-LIVE: edges of the slot threads parked outside the radio gate (a paused ring: backlog read first, then PAUSED) */
+      for (int k = 0; k < g_ncells && k < NR_CELL_MAX; k++) {
+        const int pk = nrue_ru_ring_parked(k);
+        if (pk != s_parked[k]) {
+          s_parked[k] = pk;
+          LOG_I(PHY, "SENSING: MPCI_LIFE cell=%d slot thread %s (ring paused: read returned PAUSED, radio gate not held; parks=%lu)\n", k, pk ? "PARKED" : "running again", ru_park_waits(k));
+        }
+      }
+    }
     static int s_feed_tick;
     if (++s_feed_tick % 10 == 0) {
       mpci_feed_log(); /* G6: MPCI_FEED every 10 s (+ MPCI-DASH P3 CHAN_CELL) */
@@ -1165,7 +1417,12 @@ int main(int argc, char **argv)
     nrue_set_ru_cell_id(ru_id, cell_id);
 
     set_fp_options(cell_id, ru_id);
-    nr_isac_set_rx_antennas(nrue_get_cell_fp(cell_id)->nb_antennas_rx);
+    {
+      const int prev_cell = nr_cell_idx(); /* CELLFEAT: the antenna count of the cell's own sense-API session */
+      nr_cell_bind(cell_id);
+      nr_isac_set_rx_antennas(nrue_get_cell_fp(cell_id)->nb_antennas_rx);
+      nr_cell_bind(prev_cell);
+    }
     if (IS_SA_MODE(get_softmodem_params()) || get_softmodem_params()->sl_mode)
       nr_init_frame_parms_ue_sa(nrue_get_cell_fp(cell_id), nrue_get_cell(cell_id));
   }
@@ -1279,6 +1536,8 @@ int main(int argc, char **argv)
     /* A8: per cell, bound to it: heap objects, CSI-RS discovery, PDCCH monitor / uectx (k > 0), PUSCH queue; then the cell count (LOG tag) */
     nr_cell_life_prepare(&g_cells);
   } else {
+  nr_prach_passive_cell_prealloc(0); /* CELLFEAT: the PRACH / SRS buffers are allocated here (before the memory lock), as the static arrays of before were in the image */
+  nr_srs_passive_cell_prealloc(0);
   nr_csirs_disc_pipeline_init(&disc_ue->frame_parms);
   if (nr_csirs_disc_start(&disc_ue->frame_parms, disc_ue->frame_parms.nb_antennas_rx) != 0)
     LOG_W(PHY, "SENSING: CSIRS_DISC worker could not start; slot discovery feed disabled\n");
@@ -1362,17 +1621,15 @@ int main(int argc, char **argv)
     nr_shutdown_finish();
 
   // Launch the sensing engine consumer thread before the DL workers start producing CFR snapshots.
-  nr_isac_start();
-  if (nr_sense_enabled()) {
-    PHY_VARS_NR_UE *sense_ue = nrPHY_vars_UE_g[0][0];
-    const openair0_config_t *sense_cfg = &openair0_cfg_g[sense_ue->rf_map.card];
-    nr_sense_emit_session(&sense_ue->frame_parms,
-                          sense_cfg->rx_gain[sense_ue->rf_map.chain] - sense_cfg->rx_gain_offset[sense_ue->rf_map.chain]);
+  if (g_ncells == 1) { /* N > 1: every cell's session, PRACH and SRS were opened in its prealloc hook (before the fence) and its start hook emits the session record */
+    nr_isac_start();
+    mpci_cell_sensing_session(0);
+    nr_prach_passive_start();
+    if (IS_PASSIVE_RX_MODE(get_softmodem_params())) nr_srs_passive_start(nrPHY_vars_UE_g[0][0]);
   }
-  nr_prach_passive_start();
-  if (IS_PASSIVE_RX_MODE(get_softmodem_params())) nr_srs_passive_start(nrPHY_vars_UE_g[0][0]);
 
   if (g_ncells > 1) {
+    mpci_live_init(); /* MPCI-LIVE: the slots' live state (before any hook of the control thread can run) */
     nr_cell_life_start(&g_cells); /* A8: each cell's RT slot thread, created bound to its cell */
     pthread_t mpci_ctl;
     if (pthread_create(&mpci_ctl, NULL, mpci_control_thread, NULL) == 0)
@@ -1446,9 +1703,7 @@ int main(int argc, char **argv)
   nr_shutdown_step("thread_pool_stopped");
 
   // All slot producers have joined. Drain the PRACH worker before closing records.
-  nr_prach_passive_flush();
-  nr_srs_passive_stop();
-  nr_isac_stop();
+  mpci_for_each_cell(mpci_stop_cell_sensing); /* CELLFEAT: per cell, highest first (cell 0 last); N = 1: the sequence of before */
   nr_shutdown_step("sensing_stopped");
 
   mpci_for_each_cell(mpci_close_cell_outputs); /* A8: per cell; N = 1: cell 0, the sequence of before */

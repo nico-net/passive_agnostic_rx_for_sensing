@@ -9,6 +9,7 @@
 #include <string>
 #include <sstream>
 #include <tuple>
+#include <thread>
 #include <vector>
 #include <unistd.h>
 extern "C" {
@@ -16,6 +17,7 @@ extern "C" {
 #include "nr_sense_api.h"
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
 configmodule_interface_t *uniqCfg = nullptr;
 void exit_function(const char *, const char *, int, const char *, int) { abort(); }
 }
@@ -347,4 +349,37 @@ TEST_F(Adapter, NewUlSourcesRequireExplicitTokens) {
     nr_isac_stop();
     end_configmodule(uniqCfg); uniqCfg=nullptr;
   }
+}
+
+/* mpci CELLFEAT: one export session per cell, cell 0 on the configured names, cell k on its own files. */
+TEST_F(Adapter, SessionsArePerCellWithOwnFiles) {
+  init(cfg(1,"ssb,csi_rs"));
+#ifdef SENSE_ADAPTER_ON
+  constexpr size_t frame_bytes=48+36+4*12*8;
+  submit(NR_ISAC_SRC_SSB);
+  std::thread cell1([&] {
+    nr_cell_bind(1);
+    EXPECT_FALSE(nr_isac_enabled()) << "cell 1 has not started its session";
+    nr_isac_set_rx_antennas(4); nr_isac_start();
+    EXPECT_TRUE(nr_isac_enabled());
+    EXPECT_TRUE(nr_isac_source_enabled(NR_ISAC_SRC_SSB));
+    submit(NR_ISAC_SRC_SSB); submit(NR_ISAC_SRC_CSI_RS);
+    nr_isac_stop();
+    EXPECT_FALSE(nr_isac_enabled());
+  });
+  submit(NR_ISAC_SRC_CSI_RS);
+  cell1.join();
+  EXPECT_TRUE(nr_isac_enabled()) << "stopping cell 1 must not stop cell 0";
+  EXPECT_TRUE(nr_isac_source_configured(NR_ISAC_SRC_SSB)) << "the parsed configuration survives a non-primary stop";
+  submit(NR_ISAC_SRC_SSB);
+  nr_isac_stop();
+  EXPECT_EQ(read(cfr).size(),3*frame_bytes);
+  EXPECT_EQ(read(dir+"/cfr.cell1").size(),2*frame_bytes);
+  EXPECT_TRUE(std::filesystem::exists(dir+"/records.cell1"));
+  EXPECT_NE(read(dir+"/records").find("\"type\":\"session\""),std::string::npos);
+  EXPECT_NE(read(dir+"/records.cell1").find("\"type\":\"session\""),std::string::npos);
+  EXPECT_FALSE(nr_isac_source_configured(NR_ISAC_SRC_SSB)) << "the primary's stop drops the configuration";
+#else
+  EXPECT_FALSE(nr_isac_enabled());
+#endif
 }

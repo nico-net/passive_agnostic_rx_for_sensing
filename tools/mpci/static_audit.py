@@ -52,6 +52,13 @@ GLOBS = [
     "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c",  # DBG2: CSI-RS search / confirm queue (the first glob missed it)
     "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h",  # DBG2: included by nr_csirs_blind_rt.c
     "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c",   # DBG2: CSI-RS monitor bank
+    "openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c",   # CELLFEAT: passive PRACH (per cell)
+    "openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c",     # CELLFEAT: passive SRS (per cell)
+    "openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c",       # CELLFEAT: sense-API session (per cell)
+    "openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c",   # CELLFEAT: record formatters / session identity
+    "openair1/PHY/NR_UE_ISAC/nr_isac.cc",                # CELLFEAT: sensing adapter (per-cell session, process configuration)
+    "openair1/PHY/NR_UE_ISAC/nr_isac_stub.c",
+    "common/utils/nr_dashboard.c",                       # CELLFEAT: dashboard launcher (process service)
     "openair1/PHY/NR_UE_TRANSPORT/pss_nr.c",             # DBG2: PSS fold of the initial sync
     "openair1/PHY/NR_UE_TRANSPORT/dci_nr.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe*.c",
@@ -525,6 +532,15 @@ def scan_text(rel, src):
                 i += 1
                 continue
             if FUNC_TAIL.search(tt) and not re.match(r"^(struct|union|enum|class)\b", tt):
+                # converted objects (NR_CELL_STATIC*(...), no ';') glued in front of the function header are objects of their own
+                for mc in re.finditer(r"\bNR_CELL_STATIC(?:_INIT|_HEAP)?\s*\(", tt):
+                    k, d = mc.end() - 1, 0
+                    while k < len(tt):
+                        d += (tt[k] == "(") - (tt[k] == ")")
+                        if d == 0:
+                            break
+                        k += 1
+                    emit(parse_statement(tt[mc.start():k + 1])[0], buf_start, None)
                 body(i + 1, j, function_name(tt))
                 buf_start = None
                 i = j + 1
@@ -587,6 +603,12 @@ OWNER_RULES = [
     ("openair1/PHY/CODING/*", "G1"),
     ("openair1/PHY/TOOLS/nr_host_membudget*", "B3"),
     ("openair1/PHY/TOOLS/nr_admit*", "B3"),
+    ("*/nr_prach_passive.c", "CELLFEAT"),
+    ("*/nr_srs_passive.c", "CELLFEAT"),
+    ("*/nr_sense_api.c", "CELLFEAT"),
+    ("*/nr_sense_records.c", "CELLFEAT"),
+    ("openair1/PHY/NR_UE_ISAC/*", "CELLFEAT"),
+    ("common/utils/nr_dashboard.c", "CELLFEAT"),
     ("*/nr_csirs_blind_rt.c", "DBG2"),
     ("*/nr_csirs_disc_confirm_internal.h", "DBG2"),
     ("*/nr_csirs_monitor.c", "DBG2"),

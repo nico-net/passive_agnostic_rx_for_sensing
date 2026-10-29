@@ -77,6 +77,30 @@ static void order_fixed(const nr_cell_life_t *L, const nr_cell_inventory_t *inv,
   o->n = w;
 }
 
+int nr_cell_life_is_spare_id(const char *id)
+{
+  return id && !strncmp(id, NR_CELL_LIFE_SPARE_PREFIX, sizeof(NR_CELL_LIFE_SPARE_PREFIX) - 1) && id[sizeof(NR_CELL_LIFE_SPARE_PREFIX) - 1] >= '0' &&
+         id[sizeof(NR_CELL_LIFE_SPARE_PREFIX) - 1] <= '9';
+}
+
+/* the placeholders of the first inventory: the started cell's grid, lowest priority (NEW, after every real cell) */
+static void append_spares(const nr_cell_life_t *L, nr_cell_inventory_t *o)
+{
+  int real = 0;
+  for (int i = 0; i < o->n; i++)
+    real += o->cell[i].desc.state != NR_CELLD_LOST;
+  if (real < 2) /* a single cell is the single-cell receiver: no placeholder, no multi-cell machinery */
+    return;
+  for (int j = 1; j <= L->n_spare_wanted && o->n < NR_ADMIT_PLAN_MAX; j++) {
+    nr_inv_cell_t *c = &o->cell[o->n++];
+    memset(c, 0, sizeof *c);
+    snprintf(c->id, sizeof c->id, NR_CELL_LIFE_SPARE_PREFIX "%d", j);
+    c->desc = L->primary;
+    c->desc.pci = -1;
+    c->desc.state = NR_CELLD_NEW;
+  }
+}
+
 static int run_hook_start(nr_cell_life_t *L, int cell, int reactivation)
 {
   const nr_mgr_slot_t *s = nr_cell_mgr_slot(&L->mgr, cell);
@@ -99,16 +123,47 @@ static void on_event(void *ctx, const nr_cell_mgr_event_t *ev)
       if (L->collecting) {
         if (L->n_pending < NR_CELL_MAX)
           L->pending_add[L->n_pending++] = k;
+        if (k >= 0 && k < NR_CELL_MAX)
+          L->spare[k] = nr_cell_life_is_spare_id(ev->id);
         return;
       }
       if (k < 0 || k >= NR_CELL_MAX || !L->prepared[k]) {
         snprintf(line, sizeof line, "MPCI_LIFE cell=%d id=%s event=add not_started reason=not_prepared_before_fence", k, ev->id);
         llog(L, line);
+        if (k >= 0)
+          nr_cell_mgr_release(&L->mgr, k);
         return;
       }
-      if (run_hook_start(L, k, 1) == 0) {
-        snprintf(line, sizeof line, "MPCI_LIFE cell=%d id=%s event=reactivate", k, ev->id);
+      /* B3 again for the cell set as it would be now (the slot is prepared; admission may still say no) */
+      {
+        nr_cell_desc_t d[NR_CELL_MAX];
+        int n = 0;
+        for (int s = 0; s < NR_CELL_MAX && n < NR_CELL_MAX; s++) {
+          const nr_mgr_slot_t *sl = nr_cell_mgr_slot(&L->mgr, s);
+          if (sl && sl->active)
+            d[n++] = sl->desc;
+        }
+        nr_admit_plan_t pl;
+        char fm[640];
+        const int served = nr_cell_admit_plan(&L->caps, d, n, &pl);
+        nr_admit_plan_format(&pl, fm, sizeof fm);
+        snprintf(line, sizeof line, "%s live=add cell=%d id=%s", fm, k, ev->id);
         llog(L, line);
+        if (served < n || pl.refuse) {
+          snprintf(line, sizeof line, "MPCI_LIFE cell=%d id=%s event=add not_started reason=admission:%s", k, ev->id, nr_admit_reason_name(pl.binding));
+          llog(L, line);
+          nr_cell_mgr_release(&L->mgr, k);
+          return;
+        }
+      }
+      if (run_hook_start(L, k, 1) == 0) {
+        snprintf(line, sizeof line, "MPCI_LIFE cell=%d id=%s event=%s", k, ev->id, L->spare[k] ? "activate_spare" : "reactivate");
+        llog(L, line);
+        L->spare[k] = 0; /* the slot now holds a real cell */
+      } else {
+        snprintf(line, sizeof line, "MPCI_LIFE cell=%d id=%s event=add not_started reason=slot_hook_refused", k, ev->id);
+        llog(L, line);
+        nr_cell_mgr_release(&L->mgr, k);
       }
       return;
     case NR_MGR_EV_RETUNE:
@@ -141,8 +196,8 @@ static void on_event(void *ctx, const nr_cell_mgr_event_t *ev)
   }
 }
 
-int nr_cell_life_plan(nr_cell_life_t *L, const nr_cell_mgr_cfg_t *cfg, const nr_host_caps_t *caps, const nr_cell_life_ops_t *ops,
-                      const nr_cell_desc_t *primary, const nr_cell_inventory_t *inv, double tol_hz)
+int nr_cell_life_plan_spare(nr_cell_life_t *L, const nr_cell_mgr_cfg_t *cfg, const nr_host_caps_t *caps, const nr_cell_life_ops_t *ops,
+                            const nr_cell_desc_t *primary, const nr_cell_inventory_t *inv, double tol_hz, int n_spare)
 {
   if (!L || !cfg || !caps || !primary)
     return -1;
@@ -151,11 +206,14 @@ int nr_cell_life_plan(nr_cell_life_t *L, const nr_cell_mgr_cfg_t *cfg, const nr_
     L->ops = *ops;
   L->primary = *primary;
   L->match_tol_hz = tol_hz;
+  L->caps = *caps;
+  L->n_spare_wanted = n_spare > 0 ? n_spare : 0;
   nr_cell_inventory_t o;
   int matched = -1;
   if (nr_cell_life_order(primary, inv, tol_hz, &o, &matched) < 1)
     return -1;
   snprintf(L->primary_id, sizeof L->primary_id, "%s", o.cell[0].id);
+  append_spares(L, &o);
   nr_cell_desc_t wanted[NR_ADMIT_PLAN_MAX];
   int nw = 0;
   for (int i = 0; i < o.n; i++)
@@ -175,18 +233,43 @@ int nr_cell_life_plan(nr_cell_life_t *L, const nr_cell_mgr_cfg_t *cfg, const nr_
   return n;
 }
 
+int nr_cell_life_plan(nr_cell_life_t *L, const nr_cell_mgr_cfg_t *cfg, const nr_host_caps_t *caps, const nr_cell_life_ops_t *ops,
+                      const nr_cell_desc_t *primary, const nr_cell_inventory_t *inv, double tol_hz)
+{
+  return nr_cell_life_plan_spare(L, cfg, caps, ops, primary, inv, tol_hz, 0);
+}
+
 int nr_cell_life_admit(nr_cell_life_t *L, const nr_cell_inventory_t *inv, int64_t now_ns)
 {
   if (!L || L->n < 1 || L->phase != 0)
     return -1;
   nr_cell_inventory_t o;
   order_fixed(L, inv, &o);
+  append_spares(L, &o);
   L->collecting = 1;
   L->n_pending = 0;
   nr_cell_mgr_apply(&L->mgr, &o, now_ns);
   L->collecting = 0;
   L->phase = 1;
   return L->n_pending;
+}
+
+int nr_cell_life_drop_spares(nr_cell_life_t *L)
+{
+  if (!L || L->phase != 1)
+    return 0;
+  int w = 0, dropped = 0;
+  for (int i = 0; i < L->n_pending; i++) {
+    const int k = L->pending_add[i];
+    if (L->spare[k]) {
+      nr_cell_mgr_release(&L->mgr, k);
+      L->spare[k] = 0;
+      dropped++;
+    } else
+      L->pending_add[w++] = k;
+  }
+  L->n_pending = w;
+  return dropped;
 }
 
 int nr_cell_life_prepare(nr_cell_life_t *L)
@@ -218,6 +301,16 @@ int nr_cell_life_prepare(nr_cell_life_t *L)
     }
   if (top >= 1)
     nr_cell_set_count(top);
+  /* a placeholder was admitted only to be prepared: its slot is free now (the manager hands it to the next cell that fits), its UE instance and ring stay */
+  for (int i = 0; i < L->n_pending; i++) {
+    const int k = L->pending_add[i];
+    if (L->spare[k] && L->prepared[k]) {
+      const nr_mgr_slot_t *sl = nr_cell_mgr_slot(&L->mgr, k);
+      snprintf(line, sizeof line, "MPCI_LIFE cell=%d id=%s event=spare_prepared (slot free for a cell added at run time)", k, sl ? sl->id : "-");
+      llog(L, line);
+      nr_cell_mgr_release(&L->mgr, k);
+    }
+  }
   L->phase = 2;
   return n_prep;
 }
@@ -227,21 +320,30 @@ int nr_cell_life_start(nr_cell_life_t *L)
   if (!L || L->phase != 2)
     return -1;
   char line[256];
-  int started = 0, n_prep = 0;
+  int started = 0, n_prep = 0, n_spare = 0;
   for (int k = 0; k < NR_CELL_MAX; k++)
     n_prep += L->prepared[k];
   for (int i = 0; i < L->n_pending; i++) {
     const int k = L->pending_add[i];
     if (!L->prepared[k])
       continue;
-    if (run_hook_start(L, k, 0) == 0)
-      started++;
-    else {
+    if (run_hook_start(L, k, 0) == 0) {
+      if (L->spare[k]) {
+        L->started[k] = 0; /* threads run, no cell yet */
+        n_spare++;
+      } else
+        started++;
+    } else {
       snprintf(line, sizeof line, "MPCI_LIFE cell=%d event=start_failed", k);
       llog(L, line);
     }
   }
   snprintf(line, sizeof line, "MPCI_LIFE activated cells=%d prepared=%d of nmax=%d primary=%s", started, n_prep, L->n, L->primary_id);
+  if (n_spare) {
+    char sp[64];
+    snprintf(sp, sizeof sp, " spare=%d", n_spare);
+    strncat(line, sp, sizeof line - strlen(line) - 1);
+  }
   llog(L, line);
   L->phase = 3;
   L->activated = 1;
@@ -263,9 +365,17 @@ int nr_cell_life_poll(nr_cell_life_t *L, const nr_cell_inventory_t *inv, int64_t
   if (inv) {
     nr_cell_inventory_t o;
     order_fixed(L, inv, &o);
+    L->last_inv = *inv;
+    L->have_last = 1;
     ev += nr_cell_mgr_apply(&L->mgr, &o, now_ns);
   }
-  ev += nr_cell_mgr_tick(&L->mgr, now_ns);
+  const int ret = nr_cell_mgr_tick(&L->mgr, now_ns);
+  ev += ret;
+  if (ret > 0 && L->have_last) { /* a slot was freed: cells refused for lack of one get it now (MPCI-LIVE) */
+    nr_cell_inventory_t o;
+    order_fixed(L, &L->last_inv, &o);
+    ev += nr_cell_mgr_apply(&L->mgr, &o, now_ns);
+  }
   return ev;
 }
 

@@ -1,6 +1,7 @@
 #include "nr_prach_passive_test_bridge.h"
 #include "PHY/defs_gNB.h"
 #include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
+#include "common/utils/nr_cell.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include "PHY/NR_TRANSPORT/nr_transport_proto.h"
 #include "common/config/config_userapi.h"
@@ -101,19 +102,28 @@ int test_prach_floor(int fdm, int gain_db, int energy)
   return nr_prach_passive_floor_test(fdm, gain_db, energy);
 }
 
-static char captured_record[2048];
+/* the record a cell's PRACH worker pushed (the worker is bound to its cell, so nr_cell_idx() names it); cell 0 = the one record of before */
+static char captured_cell_record[NR_CELL_MAX][2048];
 bool __wrap_nr_sense_enabled(void) { return true; }
 bool __wrap_nr_sense_push_record(const char *line)
 {
-  snprintf(captured_record, sizeof(captured_record), "%s", line);
+  snprintf(captured_cell_record[nr_cell_idx()], sizeof(captured_cell_record[0]), "%s", line);
   return true;
 }
 void test_prach_reset(void)
 {
   nr_prach_passive_test_reset();
-  captured_record[0] = 0;
+  captured_cell_record[nr_cell_idx()][0] = 0;
 }
-const char *test_prach_record(void) { return captured_record; }
+void test_prach_bind(int cell) { nr_cell_bind(cell); }
+void test_prach_pause(int cell, int pause) { nr_prach_passive_cell_pause(cell, pause != 0); }
+uint64_t test_prach_drops(void)
+{
+  uint64_t us, drops, skipped;
+  nr_prach_passive_metrics(&us, &drops, &skipped);
+  return drops;
+}
+const char *test_prach_record(void) { return captured_cell_record[nr_cell_idx()]; }
 void test_prach_drain(void) { nr_prach_passive_test_drain(); }
 void test_prach_finish(void) { nr_prach_passive_flush(); }
 void test_prach_threads(unsigned *slot_calls, unsigned *worker_calls, int *same_thread)

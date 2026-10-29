@@ -344,6 +344,26 @@ CFR_SOURCES = ("ssb", "csirs", "pdsch_dmrs", "pdsch_data", "pusch_dmrs", "pusch_
 CFR_POINTS = 256
 
 
+class CellReader:
+    """Feeds a per-cell export file (records.cell<k>.jsonl / cfr.cell<k>) into the state of cell k (RunState._child(k)), so the Sensing export page of that cell
+    shows its own records and frames (mpci CELLFEAT: one sense-API session per cell)."""
+
+    def __init__(self, inner, k):
+        self.inner, self.k = inner, k
+        self.path = inner.path
+
+    def read(self, state, t_limit=None):
+        return self.inner.read(state._child(self.k), t_limit)
+
+    @property
+    def skipped(self):
+        return getattr(self.inner, "skipped", 0)
+
+    @property
+    def bad(self):
+        return getattr(self.inner, "bad", 0)
+
+
 class CfrReader:
     """NRCF v1 stream (Sensing API v2, §21): headers for every frame, strided IQ for the frames shown."""
 
@@ -408,12 +428,27 @@ class CfrReader:
         return n > 0
 
 
+CELL_FILE = re.compile(r"\.cell(\d+)(?=\.|$)")      # per-cell export names of the receiver: records.cell1.jsonl, cfr.cell1 (nr_sense_cell_file)
+
+
 def _first(d, patterns):
     for p in patterns:
-        hits = sorted(glob.glob(os.path.join(d, p)), key=lambda q: -os.path.getsize(q))
+        hits = sorted((q for q in glob.glob(os.path.join(d, p)) if not CELL_FILE.search(os.path.basename(q))),
+                      key=lambda q: -os.path.getsize(q))
         if hits:
             return hits[0]
     return None
+
+
+def _cells(d, patterns):
+    """{k: path} of the per-cell copies (cell k > 0) of a file family: the receiver writes cell 0 on the configured name and cell k on <name>.cell<k><ext>."""
+    out = {}
+    for p in patterns:
+        for q in sorted(glob.glob(os.path.join(d, p)), key=lambda q: -os.path.getsize(q)):
+            m = CELL_FILE.search(os.path.basename(q))
+            if m and int(m.group(1)) > 0:
+                out.setdefault(int(m.group(1)), q)
+    return out
 
 
 def discover(run_dir):
@@ -425,6 +460,8 @@ def discover(run_dir):
         "obs": _first(d, ("obs.jsonl", "*obs*.jsonl")),
         "records": _first(d, ("records.jsonl", "*records*.jsonl", "sense*.jsonl")),
         "cfr": _first(d, ("cfr.bin", "*.nrcf", "*cfr*.bin", "*cfr*")),
+        "records_cells": _cells(d, ("*records*.jsonl", "sense*.jsonl")),
+        "cfr_cells": _cells(d, ("*cfr*",)),
         "cmd": _first(d, ("cmd.txt", "cmdline.txt")),
         "env": _first(d, ("env.txt", "*.env")),
         "label": _first(d, ("label.txt", "evidence.txt", "EVIDENCE")),
@@ -578,6 +615,10 @@ class Run:
                 self.readers.append(JsonlReader(files[key], live, kind))
         if files.get("cfr"):
             self.readers.append(CfrReader(files["cfr"], live))
+        for k, path in sorted((files.get("records_cells") or {}).items()):
+            self.readers.append(CellReader(JsonlReader(path, live, "sense"), k))
+        for k, path in sorted((files.get("cfr_cells") or {}).items()):
+            self.readers.append(CellReader(CfrReader(path, live), k))
         self.state.t0_ns = self._first_t()
         self._static_config()
 
