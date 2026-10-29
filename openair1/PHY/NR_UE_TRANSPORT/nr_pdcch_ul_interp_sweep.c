@@ -23,6 +23,7 @@
 #include "nr_pdcch_ul_interp_sweep.h"
 #include "common/utils/LOG/log.h"
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 #include "common/utils/nr_cell.h"
 bool nr_pusch_tda_legal(int mapping_type, int S, int L)
@@ -116,6 +117,28 @@ int nr_pdcch_ul_interp_sweep_generate_pinned(nr_hyp_t *out, int cap, int S, int 
                 memcpy(out[n++].bytes, &h, sizeof(h));
               }
             }
+  return n;
+}
+
+int nr_pdcch_ul_interp_sweep_generate_hint(nr_hyp_t *out, int cap, int S, int L, int mapping_type)
+{
+  if (!out || cap <= 0) return NR_HYP_SWEEP_INVALID;
+  nr_hyp_t *generic = calloc(NR_HYP_SWEEP_MAX_RAW, sizeof(*generic));
+  if (!generic) return NR_HYP_SWEEP_INVALID;
+  const int ng = nr_pdcch_ul_interp_sweep_generate(generic, NR_HYP_SWEEP_MAX_RAW);
+  if (ng < 0) { free(generic); return ng; }
+  int n = nr_pdcch_ul_interp_sweep_generate_pinned(out, cap, S, L, mapping_type);
+  if (n == NR_HYP_SWEEP_INVALID) n = 0; /* bad or stale hint is not grounds for discarding the generic search */
+  if (n < 0) { free(generic); return n; }
+  for (int i = 0; i < ng; i++) {
+    bool found = false;
+    for (int j = 0; j < n && !found; j++)
+      found = out[j].len == generic[i].len && memcmp(out[j].bytes, generic[i].bytes, generic[i].len) == 0;
+    if (found) continue;
+    if (n == cap || n == NR_HYP_SWEEP_MAX_RAW) { free(generic); return NR_HYP_SWEEP_RAW_OVERFLOW; }
+    out[n++] = generic[i];
+  }
+  free(generic);
   return n;
 }
 

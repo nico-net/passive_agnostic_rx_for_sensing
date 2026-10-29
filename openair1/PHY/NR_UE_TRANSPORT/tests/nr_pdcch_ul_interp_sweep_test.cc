@@ -25,6 +25,16 @@
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_pdcch_ul_interp_sweep.h"
+#include "nr_pusch_ul_energy.h"
+}
+TEST(UlEnergy, AllocationUsesBwpOriginAndFftWrap) {
+  std::vector<c16_t> fft(128);
+  const int first_carrier = 100;
+  for (int p = 5; p < 7; ++p)
+    for (int k = 0; k < 12; ++k) fft[(first_carrier + 12 * p + k) % 128] = c16_t{3, 4};
+  EXPECT_DOUBLE_EQ(nr_pusch_ul_allocation_energy(fft.data(), 128, first_carrier, 8, 3, 2, 2), 300.0);
+  EXPECT_DOUBLE_EQ(nr_pusch_ul_allocation_energy(fft.data(), 128, first_carrier, 8, 0, 2, 2), 0.0);
+  EXPECT_DOUBLE_EQ(nr_pusch_ul_allocation_energy(fft.data(), 128, first_carrier, 8, 7, 1, 2), 0.0);
 }
 TEST(UlInterpSweep, CatalogueAndObservedIndexIsolation) {
   std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
@@ -43,6 +53,22 @@ TEST(UlInterpSweep, CatalogueAndObservedIndexIsolation) {
   EXPECT_EQ(o.tda_k2[0],9); EXPECT_EQ(o.tda_k2[2],4); EXPECT_EQ(o.tda_length[2],14);
   EXPECT_EQ(o.harq_pid_bits,5);
   EXPECT_FALSE(nr_pdcch_ul_interp_sweep_apply(&raw[found],3,&o));
+}
+
+TEST(UlInterpSweep, EnergyHintNeverRemovesGenericHypotheses) {
+  std::vector<nr_hyp_t> generic(NR_HYP_SWEEP_MAX_RAW), hinted(NR_HYP_SWEEP_MAX_RAW);
+  const int ng = nr_pdcch_ul_interp_sweep_generate(generic.data(), generic.size());
+  const int nh = nr_pdcch_ul_interp_sweep_generate_hint(hinted.data(), hinted.size(), 5, 6, 1);
+  ASSERT_EQ(ng, 640);
+  ASSERT_GT(nh, ng);
+  for (int i = 0; i < ng; ++i) {
+    bool found = false;
+    for (int j = 0; j < nh && !found; ++j)
+      found = generic[i].len == hinted[j].len && memcmp(generic[i].bytes, hinted[j].bytes, generic[i].len) == 0;
+    EXPECT_TRUE(found) << "generic candidate " << i;
+  }
+  EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate_hint(hinted.data(), hinted.size(), 10, 10, 1), ng);
+  EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate_hint(hinted.data(), ng, 5, 6, 1), NR_HYP_SWEEP_RAW_OVERFLOW);
 }
 /* CONTRACT CHANGED: NR_HYP_SWEEP_MAX_CLASSES was unified with NR_HYP_SWEEP_MAX_RAW
  * (nr_hyp_sweep.h) so a live UL search stops refusing permanently whenever finite-sample class

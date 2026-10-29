@@ -56,6 +56,8 @@ int nr_pdcch_ul_interp_sweep_generate(nr_hyp_t *, int);
  *  -- both, when the (S,L) span is ambiguous per the note above, so a guess is never latched as a
  *  false certainty). Returns NR_HYP_SWEEP_INVALID if no mapping type admits (S,L) at all. */
 int nr_pdcch_ul_interp_sweep_generate_pinned(nr_hyp_t *out, int cap, int S, int L, int mapping_type);
+/* A pin is an ordering hint: the returned set also contains every generic candidate. */
+int nr_pdcch_ul_interp_sweep_generate_hint(nr_hyp_t *out, int cap, int S, int L, int mapping_type);
 
 /** Occupied-symbol span (S = first, L = length) from a per-symbol RX energy profile covering one
  *  slot (index 0..13). The DM-RS ENERGY oracle itself -- there is no DM-RS-SEQUENCE oracle here
@@ -68,11 +70,9 @@ int nr_pdcch_ul_interp_sweep_generate_pinned(nr_hyp_t *out, int cap, int S, int 
  *  all-zero / noise-only profile, or a bad threshold). */
 bool nr_pusch_ul_energy_span(const double energy[14], double rel_thresh, int *S, int *L);
 
-/** One cell-wide pin (this file already assumes a single UL BWP/TDRA table -- same simplification
- *  as tda_count/tda_start elsewhere in this module). Set once a caller has established (S,L) with
- *  confidence and never overwritten after that -- "the oracle prunes on the first observation", the
- *  same rule the DL DM-RS oracle already uses (see nr_pdsch_passive_queue.c's dmrs_oracle_measure()
- *  callers). mapping_type is derived by the setter from (S,L) via nr_pusch_tda_legal() against BOTH
+/** One cell-wide, first-observation energy hint. It is not CRC-verified and must never be used to
+ *  remove generic timing candidates. It may become stale across grants or configuration changes.
+ *  mapping_type is derived by the setter from (S,L) via nr_pusch_tda_legal() against BOTH
  *  mapping types, not guessed from S alone -- see NR_PUSCH_MAPPING_EITHER above -- so it can never
  *  disagree with, or be more certain than, the (S,L) it was pinned from.
  *  Thread-safe: multiple UL consumer threads may call this concurrently (claimed with a single CAS

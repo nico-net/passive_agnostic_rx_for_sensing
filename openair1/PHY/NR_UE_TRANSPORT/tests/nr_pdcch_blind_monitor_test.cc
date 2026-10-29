@@ -3797,6 +3797,25 @@ TEST_F(BlindPdcchTest, UlJointSearchRetainsBaselineTimingAsAnUnvalidatedHypothes
   EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().interp_winners,0);
   nr_pdcch_ul_discovery_reset();
 }
+TEST_F(BlindPdcchTest, UlJointEnergyHintDoesNotExcludeOtherTimings)
+{
+  nr_pdcch_ul_discovery_reset();
+  nr_pusch_ul_dmrs_pin_reset();
+  nr_pusch_ul_dmrs_pin_set(5, 6);
+  bool generic = false, hint = false;
+  for (int i = 0; i < 50000 && !(generic && hint); ++i) {
+    nr_pdcch_blind_ul_result_t g{};
+    if (!JointTpProbe(i, &g)) continue;
+    if (g.transform_precoding && g.start_symbol == 0 && g.num_symbols == 14 && g.k2 == 1) generic = true;
+    if (g.transform_precoding && g.start_symbol == 5 && g.num_symbols == 6) hint = true;
+    nr_pdcch_ul_discovery_feedback(&g, false);
+  }
+  EXPECT_TRUE(generic);
+  EXPECT_TRUE(hint);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().interp_refusals, 0u);
+  nr_pdcch_ul_discovery_reset();
+  nr_pusch_ul_dmrs_pin_reset();
+}
 TEST_F(BlindPdcchTest, UlJointCatalogDeduplicatesRowsAndRefusesWholeOverflow)
 {
   for(int retained=0;retained<2;++retained) {

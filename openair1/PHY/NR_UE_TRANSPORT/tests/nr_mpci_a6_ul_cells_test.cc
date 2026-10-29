@@ -14,6 +14,7 @@
 extern "C" {
 #include "common/utils/nr_cell.h"
 #include "nr_pdcch_ul_layout_lock.h"
+#include "nr_pdcch_ul_interp_sweep.h"
 #include "nr_pusch_passive_ul_ids.h"
 #include "nr_pusch_ul_bgdisc.h"
 #include "nr_ul_cell_prealloc.h"
@@ -442,6 +443,31 @@ TEST(MpciLazy, WorkersParkedPerCellBeforeTheFenceAndArmedLater)
   for (int i = 0; i < 300 && g_ran_rnti_cell1 != 0x5555; i++) usleep(10000);
   EXPECT_EQ(g_ran_rnti_cell1.load(), 0x5555);
   { Bind b(1); nr_ul_bgdisc_stop(); }
+}
+
+TEST(MpciUlEnergyHint, CellPinsStayIndependentAndKeepGenericCatalogue)
+{
+  { Bind b(0); nr_pusch_ul_dmrs_pin_reset(); nr_pusch_ul_dmrs_pin_set(5, 6); }
+  { Bind b(1); nr_pusch_ul_dmrs_pin_reset(); nr_pusch_ul_dmrs_pin_set(0, 14); }
+  for (int cell = 0; cell < 2; ++cell) {
+    Bind b(cell);
+    int S = -1, L = -1, mapping = -1;
+    ASSERT_TRUE(nr_pusch_ul_dmrs_pin_get(&S, &L, &mapping));
+    EXPECT_EQ(S, cell == 0 ? 5 : 0);
+    EXPECT_EQ(L, cell == 0 ? 6 : 14);
+    std::vector<nr_hyp_t> generic(NR_HYP_SWEEP_MAX_RAW), all(NR_HYP_SWEEP_MAX_RAW);
+    const int ng = nr_pdcch_ul_interp_sweep_generate(generic.data(), generic.size());
+    const int n = nr_pdcch_ul_interp_sweep_generate_hint(all.data(), all.size(), S, L, mapping);
+    ASSERT_GE(n, ng);
+    for (int i = 0; i < ng; ++i) {
+      bool found = false;
+      for (int j = 0; j < n && !found; ++j)
+        found = all[j].len == generic[i].len && memcmp(all[j].bytes, generic[i].bytes, generic[i].len) == 0;
+      ASSERT_TRUE(found) << "cell " << cell << " candidate " << i;
+    }
+  }
+  { Bind b(0); nr_pusch_ul_dmrs_pin_reset(); }
+  { Bind b(1); EXPECT_TRUE(nr_pusch_ul_dmrs_pin_get(nullptr, nullptr, nullptr)); nr_pusch_ul_dmrs_pin_reset(); }
 }
 
 int main(int argc, char **argv)

@@ -259,11 +259,10 @@ static int generate_joint(nr_hyp_t *out, const apply_ctx_t *ctx)
 {
   nr_hyp_t *catalog=calloc(NR_HYP_SWEEP_MAX_RAW,sizeof(*catalog));
   if(!catalog) return NR_HYP_SWEEP_INVALID;
-  /* Gap item 2 (PUSCH TDRA type B): once the DM-RS energy oracle has pinned (S,L), cross the FULL
-   * legal set at that point instead of the curated catalogue; curated list until a pin exists. */
+  /* An energy observation is a hint, not proof: preserve the generic catalogue too. */
   int pin_s=0,pin_l=0,pin_map=0;
   const int ni=nr_pusch_ul_dmrs_pin_get(&pin_s,&pin_l,&pin_map)
-      ? nr_pdcch_ul_interp_sweep_generate_pinned(catalog,NR_HYP_SWEEP_MAX_RAW,pin_s,pin_l,pin_map)
+      ? nr_pdcch_ul_interp_sweep_generate_hint(catalog,NR_HYP_SWEEP_MAX_RAW,pin_s,pin_l,pin_map)
       : nr_pdcch_ul_interp_sweep_generate(catalog,NR_HYP_SWEEP_MAX_RAW);
   const int nt=ctx->opts.tda_count?ctx->opts.tda_count:16;
   int n=0;

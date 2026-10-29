@@ -49,6 +49,7 @@
 #include "PHY/defs_RU.h"          // RU_RX_SLOT_DEPTH -- the gNB rxdataF ring depth
 #include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h" // blind UL DM-RS identity estimate (nr_dmrs_id_init/_accumulate/_decide/_set_range)
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.h" // nr_pusch_passive_queue_running()
+#include "nr_pusch_ul_energy.h"
 #include "nr_pusch_passive_queue_cursor.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/NR_TRANSPORT/nr_transport_proto.h"
@@ -1732,13 +1733,8 @@ static void ul_dmrs_energy_oracle_observe(const nr_pdcch_blind_ul_result_t *g, c
   uint16_t local_mask = 0;
   for (int sym = s0; sym < s1 && sym < 14; sym++) {
     const c16_t *row = &gnb->common_vars.rxdataF[0][slot_off + sym * symsz];
-    double e = 0;
-    for (int p = g->start_rb; p < g->start_rb + g->num_rb && p < fp->N_RB_UL; p++)
-      for (int r = 0; r < 12; r++) {
-        const int k = (fp->first_carrier_offset + p * NR_NB_SC_PER_RB + r) % fp->ofdm_symbol_size;
-        e += (double)row[k].r * row[k].r + (double)row[k].i * row[k].i;
-      }
-    local_profile[sym] = (g->num_rb > 0) ? e / g->num_rb : e; /* per-PRB average: comparable across grants */
+    local_profile[sym] = nr_pusch_ul_allocation_energy(row, fp->ofdm_symbol_size, fp->first_carrier_offset,
+                                                       fp->N_RB_UL, g->bwp_start, g->start_rb, g->num_rb);
     local_mask |= (uint16_t)(1u << sym);
   }
   int S = -1, L = -1;
