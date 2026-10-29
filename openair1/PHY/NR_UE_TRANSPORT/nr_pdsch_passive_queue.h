@@ -256,6 +256,9 @@ void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_tic
 /// Stop and join the consumer. Called from the monitor's own teardown.
 void nr_pdsch_passive_queue_stop(void);
 
+/// Recovery lane of the calling cell's queue (A11): 0 = none (arms off), 1 = own worker thread, 2 = no worker, arms run inline on the consumers.
+int nr_pdsch_passive_queue_recov_state(void);
+
 #ifdef __cplusplus
 }
 #endif

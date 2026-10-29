@@ -338,6 +338,64 @@ TEST(MpciA5Prealloc, PreallocIsIdempotentAndPerCell)
   SUCCEED();
 }
 
+// ---------------------------------------------------------------- A11: the PDSCH queue of EVERY cell arms its own recovery worker
+// (8/8 two-cell OTA runs printed "[c1] RECOV worker FAILED to start": no retry/recovery arms for cell > 0). Two synthetic UEs, the real queue_start of each
+// cell on its own bound thread, both queues alive at once; then a failed first pass of cell 1 goes to cell 1's worker (the queue's run/feedback hooks run
+// for it), and cell 0's worker sees nothing. [OFFLINE VERIFIED, unit, aarch64 DGX]
+extern "C" int nr_a11_queue_up(int cell);
+extern "C" void nr_a11_queue_down(int cell);
+extern "C" void nr_pdsch_passive_queue_recov_fb_stats(uint64_t out[3]);
+extern "C" int nr_pdsch_passive_queue_recov_state(void);
+TEST(MpciA11Queue, EveryCellStartsItsRecoveryWorkerAndRunsItsArms)
+{
+  std::atomic<int> up{0}, release{0};
+  int state[2] = {-9, -9};
+  uint64_t fb_before[2][3] = {}, fb_after[2][3] = {};
+  unsigned long sub[2] = {}, sub0[2] = {};
+  auto submitted = [] {
+    char b[256];
+    nr_pdsch_recovery_stats(b, sizeof b);
+    const char *p = strstr(b, "submitted=");
+    return p ? strtoul(p + 10, nullptr, 10) : ~0ul;
+  };
+  auto cell_thread = [&](int k) {
+    nr_cell_bind(k);
+    state[k] = nr_a11_queue_up(k);
+    up++;
+    while (up < 2) std::this_thread::sleep_for(std::chrono::milliseconds(1)); // both queues alive at once
+    nr_pdsch_passive_queue_recov_fb_stats(fb_before[k]);
+    sub0[k] = submitted(); // counters of earlier tests in this process stay in the cell's slot: compare deltas
+    if (k == 1) { // a failed first pass of cell 1: its job goes to cell 1's worker
+      void *slot = nr_pdsch_recovery_acquire();
+      ASSERT_NE(slot, nullptr);
+      nr_recov_key_t key = {0x4601, 2, 1, 1000, 0x1f};
+      ASSERT_EQ(nr_pdsch_recovery_submit(&key, slot), 0);
+    }
+    for (int i = 0; i < 400; i++) {
+      uint64_t fb[3];
+      nr_pdsch_passive_queue_recov_fb_stats(fb);
+      if (k == 0 || fb[0] + fb[1] + fb[2] > fb_before[k][0] + fb_before[k][1] + fb_before[k][2]) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    nr_pdsch_passive_queue_recov_fb_stats(fb_after[k]);
+    sub[k] = submitted();
+    release++;
+    while (release < 2) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    nr_a11_queue_down(k);
+  };
+  std::thread t0(cell_thread, 0), t1(cell_thread, 1);
+  t0.join();
+  t1.join();
+  EXPECT_EQ(state[0], 1) << "cell 0: own recovery worker";
+  EXPECT_EQ(state[1], 1) << "cell 1: own recovery worker (was: FAILED to start)";
+  EXPECT_EQ(sub[0] - sub0[0], 0ul) << "cell 0 got no job";
+  EXPECT_EQ(sub[1] - sub0[1], 1ul);
+  const uint64_t d1 = fb_after[1][0] + fb_after[1][1] + fb_after[1][2] - fb_before[1][0] - fb_before[1][1] - fb_before[1][2];
+  const uint64_t d0 = fb_after[0][0] + fb_after[0][1] + fb_after[0][2] - fb_before[0][0] - fb_before[0][1] - fb_before[0][2];
+  EXPECT_EQ(d1, 1ul) << "cell 1's worker ran the queue's recovery hooks for its job: exactly one verdict";
+  EXPECT_EQ(d0, 0ul);
+}
+
 } // namespace
 
 extern "C" configmodule_interface_t *uniqCfg = nullptr;

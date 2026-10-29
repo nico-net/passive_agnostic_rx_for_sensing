@@ -34,6 +34,14 @@ void nr_pdsch_recovery_set_job_bytes(size_t n); /* job slot size; call before st
 /* depth <= 0: ISAC_PDSCH_RECOVERY_Q (default 32); cores NULL: ISAC_PDSCH_RECOVERY_CORES, else 10-14 minus the launcher's pinned cores (unpinned nice 10 if none left). Idempotent. 0 = running. */
 int  nr_pdsch_recovery_start(int depth, const char *cores);
 void nr_pdsch_recovery_stop(void);
+/* A11: build the calling cell's arrays and park its worker thread BEFORE the RX fence / mlockall (the cell manager's prealloc, bound to the cell); the later
+ * nr_pdsch_recovery_start only arms it. 0 = ready (or already built); -1 = failed, nr_pdsch_recovery_last_error() names the step. job_bytes as set_job_bytes. */
+int  nr_pdsch_recovery_prepare(size_t job_bytes);
+/* "step=<what> errno=<n> (<text>)" of the last failing prepare/start of the calling cell, "none" otherwise */
+const char *nr_pdsch_recovery_last_error(void);
+/* Cell without a worker: run one job's arms on the calling thread (feedback and done hook delivered, once). The slot is the caller's, never from acquire. */
+void nr_pdsch_recovery_run_inline(void *job, const nr_recov_key_t *k);
+uint64_t nr_pdsch_recovery_inline_runs(void);
 /* Free job slot (zero-copy handoff target), or NULL: stopping or the lock busy (never waits; counted dropped_full). Queue full: the OLDEST queued job is dropped
  * (counted dropped_old; its FAIL feedback and done hook run here, once) and its slot returned, so the newest failure always gets a place. The job the worker is running is never touched. */
 void *nr_pdsch_recovery_acquire(void);
