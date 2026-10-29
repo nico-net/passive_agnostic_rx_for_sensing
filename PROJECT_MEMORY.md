@@ -5147,3 +5147,124 @@ Soak (SA, 900 s): CRC flat at 94 %, no crash, no BWP unresolve. 29/30 runs resol
 - Memory use over a long soak was not sampled.
 - Search-space hash elimination (TS 38.213 Y_{p,n}) is not implemented; UL grant discovery (29.1) is still open.
 
+
+## 31. Open findings 2026-10-28/29 (DL health, UL, DCI 1_1) — PARKED until the multi-PCI plan is finished; re-measure and fix then
+
+Operator decision 2026-10-29: finish the multi-PCI implementation plan first; then re-measure everything below on the merged tree and fix it.
+All numbers are single runs unless stated; never pool cells. Logs under /home/nicola/NICOLA/ota_runs/ (sw28_*, mp28m_*, il28_*, td28_*,
+codex_*, mf_*, me_*). Full write-ups: wt/rr-mpci-main docs/superpowers/reports/csd/DL-HEALTH-20261029.md (uncommitted file),
+wt/rr-fix-uldiag .../FIX-UL-DMRS-DIAG-20261028.md, wt/rr-fix-tda .../FIX-TDA-EXPLORE-20261028.md, wt/rr-fix-dci11 .../FIX-DCI11-EVIDENCE-20261028.md,
+wt/rr-mpci-iliad .../ILIAD-PDSCH-20261027.md, and the Codex notes passive_agnostic_rx_for_sensing/ul-dl-investigation.md (untracked).
+
+### 31.1 DL health [MEASURED, DGX+X410 34B2AF1, 2026-10-26..28, per cell]
+1. 2-cell CPU pool starvation: second cell loses 5.8-28 % PDSCH jobs as stale (solo <= 1.3 %), PDCCH scan queue drop_full 8-49 % (solo <= 6 %),
+   queue wait p50 0.5-2.4 ms vs 0.13 ms; decode body unchanged; pool 7 tokens for 2 cells vs 6 solo; DMRS_SCAN jobs 30-81 ms. Replays at
+   SPEED 0.25 hide it (use 1.0).
+2. No cell-identity check at sync: nr-ue.c:208 target_Nid_cell=-1, first SSS candidate with PBCH CRC wins; 2/24 cell starts locked a co-channel
+   PCI (415->380 sw28_P1 c0; 403->27 mp28m_Q1 c1) and decoded nothing. The rx_sss_nr PCI pin exists but is not set from cells.json.
+3. Vodafone acquisition never escalates: codex_existing_vodafone_213018 / codex_uldld_vodafone_212520 (21:20-21:30) 370-393 scans detected=0,
+   same binary/CFO seed that synced in the morning; input +10-12 dB; no CFO sweep / ACQ_FAIL. Cause open (wideband burst edge? CFO?).
+4. Cell index > 0 has no PDSCH recovery worker: `[c1] RECOV worker FAILED to start` in 8/8 two-cell runs (nr_pdsch_passive_queue.c:2604
+   returns -1, cause not logged) -> no retry arms for c1 -> Vodafone as c1 crc_q 68-70 % vs 85-95 %.
+5. Vodafone DCI 1_1 TDRA row never learnt (TDAFIELD rows=0 det=0); 22-51 % of its CRC-ok grants come only from the S0/S1 retry arm, recovered
+   late (p99 ~31 ms) -> drives solo p99 15-20 ms. Feed retry-arm successes to the field learner (fix/tda-explore does exploration).
+6. Iliad (51 PRB, FFT 1024): no GPU pass (no bit-exact GPU DFT twin at N=1024) -> CPU only; CRC 17-37 %; first SOLVED 16-111 s.
+7. CORESET discovery latency 2-37 s; the "DCI length unresolved" geometry walk is unbounded (337 walks in mp28m_S1) -> order by evidence,
+   stop once a bank entry is locked.
+8. CUDA stalls cascade into IQ ring overruns (0.94 s blocked launch in mp28m_P2 -> 5 overrun pairs); discovery kernels overrun slices
+   (p50 9-15 ms, p99 28-57 ms). No IQ-ring consumer may block on CUDA.
+9. Vodafone solo scan queue 6.0 % full + 2.9 % stale (> 2.5 % gate). Vodafone bank also decodes co-channel PCIs 249/380 (counted as 415).
+10. WindTre 508: syncs, 3 dedicated CORESETs, 0 PDSCH layouts solved.
+11. 2-cell, cells swapped (sw28_*): Vodafone has 10.0 % late slots whether cell 0 or 1 (2 slots per frame, periodic, cause open); being
+    cell 0 costs tail (p99 27.6 vs 11-12.5 ms as c1); both cells ~2x solo p50.
+
+### 31.2 UL [MEASURED + CODE-READ]
+- UL CRC passes at DEIB: Iliad 0/31115 (il28_B2), Vodafone 1/193207, TIM 5-6/229k-253k. UL DCIs are decoded; slot/k2 checked consistent.
+- Codex fixes (branch fix/ul-dl-safety-main 4fc8cb589d, twin fix/ul-dl-safety-mpci 6b6aae34a6; merged into fix/ul-dmrs-diag a22f2522b2):
+  UL DM-RS energy oracle ignored bwp_start; first energy (S,L) pin replaced the generic UL TDRA catalogue forever (now a hint); DFT-s-OFDM
+  DM-RS table read before its index assert. Reviewed correct; they do not explain Iliad (UL BWP start 0). Open: hint+generic union can
+  overflow the joint-engine cap (RAW_OVERFLOW refusal).
+- New diagnostic UL_DMRS_DIAG (fix/ul-dmrs-diag a22f2522b2, rfsim-validated, not yet on air): claimed vs unclaimed DM-RS energy, control
+  floor, best timing/RB/symbol/slot offsets -> separates wrong place / decode defect / UE too weak. OTA plan + decision rule in its report.
+- Open items to confirm/fix (the agent was stopped mid-work; UNCOMMITTED edits remain in wt/rr-fix-uldiag on 8 files):
+  1. TIM: 46930 attempts rejected `transform precoding with an N_RB that is not 2^a 3^b 5^c` -> our DCI 0_1 FDRA/TP reading is wrong on those
+     grants (a gNB never schedules that); must refute the layout, not skip.
+  2. `no-chance SNR gate` rejects 70436/81296 (TIM) and 10816 (Iliad) before LDPC; the gate inherits all geometry assumptions.
+  3. Frequency hopping: flag forwarded but no second-hop RB computation in the passive demod/chest.
+  4. UL_DMRS_PIN S=0 L=14 latched on TIM and Iliad; needs aging/reset.
+  5. TA: 1600 samples applied on TIM, 400 on Iliad — check estimate/sign/units/per-UE.
+  6. Iliad UL DM-RS SNR at the -30 dB floor on 65-97 % of attempts (Vodafone/TIM 4-24 %).
+
+### 31.3 DCI 1_1 / PDSCH layout [MEASURED, OTA il28_* 2026-10-28 12:33-13:07, Iliad solo]
+- The 4 bits after the FDRA bitmap (Iliad bits 15-18) are read by nobody in the solved layouts 4167/4169; C-RNTI CRC by their value:
+  0 -> 17-35 %, 0100 -> 0-12.8 %, 0011 -> 0 %. The resolver enumerates TDRA width 0-4 and the total width of the optional fields
+  (VRB-PRB, bundling, rate-match indicator, ZP CSI-RS trigger) but does not apply them individually (Codex).
+- TDRA learner (Fix A, always on): accepted only late in 2/6 runs; when learnt (B1, value 01 -> S2 L12) value 0100 CRC 0.4 % -> 24 %.
+  fix/tda-explore 61242966e5: blind width + bounded exploration of rows for a starved value + demotion; unit-verified only; OTA A/B
+  (run_tda_ab_20261028.sh, builds ready) was stopped by the operator before completing.
+- fix/dci11-layout-evidence 66e14eee27 (DM-RS identity coherence evidence, null-calibrated): refutes classes on real data and never the true
+  one, but no measurable gain live (Iliad first solve 10-50 s with or without it); PARKED, not merged.
+- Hard RV0 refutation: rejected by the operator (gNB-behaviour assumption).
+
+## 32. Multi-PCI implementation plan (single process, one CUDA context, N cells) — status and remaining order, 2026-10-29
+
+Branch `mpci-main` (worktree /home/nicola/NICOLA/wt/rr-mpci-main; local HEAD 719dd249d3, origin far behind; push only with the operator's
+OK). Full plan with per-task files and STOP criteria: `docs/superpowers/plans/2026-10-23-mpci-main-plan.md` on mpci-main (sections C, D, R13,
+R14). Main merges into mpci-main only; multi-PCI code never goes into main (this section is documentation only).
+
+Rules (operator, in force for every task): NO FLAGS (no new env var, CLI option or behaviour-changing -D switch, not even test seams); full
+portability and agnosticity (derive from the device and the host, no cell tuning, hypotheses stay falsifiable); N=1 behaviour and log
+output unchanged; agents on Sonnet; evidence labels per cell, never pooled; OTA daytime, interleaved arms, SIGINT only.
+
+### 32.1 Done (merged into mpci-main unless stated)
+- Per-cell state: A1 seam (NR_CELL_STATIC/NR_CELL_REF, nr_cell_idx() TLS, nr_cell_thread_create), A2 static audit
+  (tools/mpci/static_audit.py, mpci_statics.tsv), A3 acquisition/config/metrics, A4 PDCCH, A5 PDSCH, A6 PUSCH/UL, A7 CSI-RS host side,
+  A8 cell slots in the receiver main (cells.json -> admission -> prealloc -> nr_cell_alloc_fence -> bound starts, retire/re-add).
+- Cores: B1 pool fair share per cell (+B1b DISC lease), B2 derived core plan (no hardcoded cores), B3 admission nr_cell_admit, B4 derived
+  SM plan, B5 float lane leased from the pool; CHAN class (pool-leased CPU channelizer).
+- IQ path: C1 ring transport, C2/C2b CPU channelizer (k derived workers), G5 GPU channelizer in the receiver context, G6 one wideband
+  capture (245.76 / 122.88 MS/s) -> in-process channelizer -> per-cell shm_iq rings; feed-start gate deadlock fixed; per-cell SFO.
+- GPU: G1 memory ledger (GPUMEM, per-cell sizing in admission), G2 SM partition from the derived plan, G3 per-cell GPU state / instance
+  quota / HARQ slab, G3b GPU pass per FEP geometry; dbg3: cell > 0 registered with the GPU pass.
+- Observability: D1 cell manager + inventory, D2 per-cell log tag and multi-cell dashboard (CELL_* lines).
+- Evidence so far: 2-cell replay both cells 99.9 % GPU pass, per-cell decode p50/p99 within +5 % of solo [REPLAY VERIFIED, DGX, 0.25x,
+  240 s, 415+403]; OTA 415+923 from one 245.76 MS/s capture, GPU channelizer, 0-1 overruns, both cells find C-RNTIs [MEASURED, DGX+X410
+  34B2AF1, 2026-10-27/28]. Gates V3 and O1-O3 not passed yet.
+
+### 32.2 Finished on branches, being integrated (mpci/int-1029 off mpci-main 9b8ac16d2b, worktree wt/rr-mpci-int1)
+- mpci/c-cellfeat 8d051d001b: PRACH, SRS, the sensing session and the dashboard per cell (were cell-0-only).
+- mpci/c-live a69ead9472 (A12): cells.json add/remove/retune applied at run time; spare slot prepared before the fence (radio, >= 2 cells;
+  same grid only); retired cell parks on its paused ring, re-add resyncs [REPLAY, DGX, 0.25x, n=1]; ru_cell_hook quiesce/resume
+  (radio/COMMON/ru_park.h); MPCI_ADMIT now counts the spare (cells=3 of 3 for a 2-cell radio start). Radio retune untested on air.
+- mpci/g-g4 328c8aa92b (G4): per-cell CSI-RS discovery GPU workspaces, single-flight discovery ticket, RT-aware duty cap (only with >= 2
+  discovering cells), per-cell membudget; RT launches never > 1 ms at 0/1/2 cells [Bench, DGX GB10, shared host]; 2-cell replay CHUNK_SLOW
+  14 -> 0 [REPLAY VERIFIED, DGX, 0.25x, 240 s]. NOT met: cell 0 discovery counters ~2/3 of solo with 2 cells (solo spread itself 31-98
+  CONFIRMED). Report wt/rr-mpci-g4/docs/superpowers/reports/csd/MPCI-G4-20261029.md.
+- Integration also does: cellfeat modules register ru_cell_hook (pause, never close, the sensing session); g_gpu_disabled in
+  nr_csirs_disc_backend.c per cell (CUDA breaker stays process-wide); nr_csirs_disc_cell_prealloc per cell (spare slot too) before the
+  fence; scripts parsing MPCI_ADMIT. Then build, ctest, 2-cell replay, live remove/re-add replay, N=1 replay.
+
+### 32.3 Remaining, in order (operator decision 2026-10-29; plan R14)
+1. **Integration OTA** of mpci/int-1029: 2-cell runs (415+923 at 245.76, 415+403 at 122.88) interleaved with solos; per cell: overruns,
+   GPU pass, decode p50/p99, C-RNTI CRC, PRACH/SRS/sense/dashboard lines; live remove / re-add / out-of-span add on air
+   (MPCI-LIVE-20261029.md). Then merge into mpci-main.
+2. **Admission vs pool (B6) with A10 and A11:**
+   - B6: 2-cell starvation (stale PDSCH 5.8-28 %, scan drop_full 8-49 %, pool wait p50 0.5-2.4 ms [MEASURED, OTA 2026-10-28]); size the
+     pool by the admitted cells' demand within the host's cores, split long DMRS_SCAN jobs, drop low-value work first, admission weighs
+     decode demand vs pool, CHAN demand recomputed on pause/resume; book the PRACH heap (~70 MB) and sense rings (~53 MiB) per cell in B3.
+     STOP: 2-cell OTA stale <= 2 %, drop_full <= 2.5 %, per-cell p50 within +30 % of solo; replays at SPEED 1.0.
+   - A10 cell-identity check at sync: the cell's sync pins the cells.json PCI (nr-ue.c:208 sets target_Nid_cell=-1 today; 2/24 starts
+     locked a co-channel PCI 415->380, 403->27), re-scan on mismatch. STOP: unit test with two SSBs; OTA 10/10 starts match cells.json.
+   - A11 PDSCH recovery worker per cell (`[c1] RECOV worker FAILED to start` in 8/8 two-cell runs, nr_pdsch_passive_queue.c:2604).
+     STOP: worker started for every cell; DECODETDRA lines for c1; Vodafone as c1 crc_q within spread of c0.
+3. **Audit cleanup:** widen the audit file list (unscanned files with state), classify the remaining G1 rows (54: LDPC pool and cb0
+   contexts, job carries cell) and G4 rows, bind leftover pool tasks to their cell, GPU-check queue cell (takes its first caller's cell
+   today), footprint history nr_csirs_disc_fp.c allocated before the fence. STOP: static_audit --check rc 0 with no UNCLASSIFIED row.
+4. **Validation gates** (plan section D): A9 N=1 equivalence suite; V2a DGX rfsim 4-RX gate after the merges; V3 2-cell replay gate
+   (P1/P3 per cell, G4 discovery criteria, check_bad 0, 0 overruns); O1 single operator 2 PCIs, O2 2 operators at 122.88 MS/s, O3 Vodafone
+   415 + TIM 923 at 245.76 MS/s for 30 min (0 overflows/overruns), all daytime; S1-S3 sens6 build / 2-cell CPU-only / discrete GPU.
+5. **Push mpci-main** (ask the operator).
+6. **Re-measure and fix §31** (DL health, UL, DCI 1_1) on the merged tree.
+7. **UL HARQ soft combining (C3 contract + G8 GPU slab keyed by cell, RNTI, HARQ pid, cleared on NDI toggle): LAST**, only once the UL
+   pipeline decodes OTA after the §31.2 fixes; combining needs first transmissions that decode.
+O4 (400 MHz) is outside this plan.
