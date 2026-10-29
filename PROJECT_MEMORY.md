@@ -5270,3 +5270,19 @@ output unchanged; agents on Sonnet; evidence labels per cell, never pooled; OTA 
 7. **UL HARQ soft combining (C3 contract + G8 GPU slab keyed by cell, RNTI, HARQ pid, cleared on NDI toggle): LAST**, only once the UL
    pipeline decodes OTA after the §31.2 fixes; combining needs first transmissions that decode.
 O4 (400 MHz) is outside this plan.
+
+### 32.4 sens6 work (operator decision 2026-10-29: done later ON sens6, by a session running there)
+Facts [CODE-READ, SENS6-READINESS-20261021; MEASURED sens6 snapshot 2026-09-30]: x86_64, 14 CPUs isolcpus=2-3, 14 GiB RAM, RTX 4060 Ti 8 GB
+(discrete, sm_89, weak FP64), driver 580.178.04, nvcc 12.4.131. The discrete GPU is refused at the platform gate (nr_gpu_platform.c:171-187),
+so every GPU decode module reports not ready and the CPU DL decode path runs; the default `89;121` arch list fails on nvcc 12.4
+(cudaGetDriverEntryPointByVersion needs >= 12.5, nr_gpu_pass_graph.cu:1099; green contexts compiled out < 12.5); the 34-SM split skips
+split-2; 14 GiB with mlockall and 4 GiB hugepages is the tight budget (B6 books PRACH ~70 MB + sense rings ~53 MiB + DCI resolvers 8 MB per
+cell). Tasks (plan docs/superpowers/plans/2026-10-23-mpci-main-plan.md phase (iii)):
+- S1: sens6 build (CPU-only ENABLE_LDPC_CUDA=OFF, or nvcc >= 12.5 with LDPC_CUDA_ARCH=89), ctest, the 106-PRB rfsim bed 4 RX with the derived
+  core plan (log CORE_POOL N, GPU_PLATFORM DISCRETE ... CPU fallback). STOP: N=1 equivalence on sens6 rfsim (tests/passive_rx/mpci/n1_equiv.sh
+  rfsim with a sens6 reference: references never cross host classes); pool N derived, not 3-5 by accident.
+- S2: 2-cell CPU-path simulation on sens6 at <= 106 PRB per cell (file publisher fixture tests/passive_rx/mpci/mpci_file_pub.c, no radio).
+  STOP: both cells sync and decode in one process within RAM; B6 admission (MPCI_ADMIT_POOL) consistent with the 14-CPU host; P3 reported;
+  label [SIM VERIFIED, sens6 x86_64 RTX 4060 Ti, CPU decode path].
+- S3: discrete-GPU backend for the decode pass (DISCRETE memory model, per-grant PCIe copies, fake-device tests). Own plan; out of the merge gate.
+Also pending there: Stage 1 Task 9 sens6 validation (memory sens6-task9-pending). sens6 frozen paths stay frozen (CLAUDE.md).
