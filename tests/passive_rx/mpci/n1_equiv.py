@@ -56,6 +56,7 @@ HEX = re.compile(r"0x[0-9a-fA-F]+")
 NUM = re.compile(r"(?:(?<=[\s=(\[:])[-+]|(?<!\d)-)?\d+(?:\.\d+)?")  # a leading sign is data, not structure ("a+b" keeps its +)
 NLIST = re.compile(r"(?:N[ ,]){2,}N")
 MAXT = 150
+ARGV = re.compile(r'^\S*"\s*$|^\S*" "')
 # build identity that differs between any two builds and says nothing about behaviour: worktree/run paths, branch name and hash of the Version line
 BUILDID = re.compile(r"/home/\S*?/(?:wt|ota_runs)/\S+|Branch: \S+|Hash: \S+")
 # lines whose field set depends on the data (which counters are non-zero): one template per prefix
@@ -66,6 +67,8 @@ def norm(line):
     """Line template: colour, harness timestamp and [cK] tag stripped, hex ids -> H, numbers -> N, number lists -> N+, cut at MAXT."""
     _, l = cellsel.split(line)
     l = ANSI.sub("", l)
+    if ARGV.match(l):  # a wrapped fragment of the shutdown echo of the command line: where it wraps depends on the build path length
+        return ""
     l = TS.sub("", l, count=1).strip()
     l = BUILDID.sub("B", l)
     l = HEX.sub("H", l)
