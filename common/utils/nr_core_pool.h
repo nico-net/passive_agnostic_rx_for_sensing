@@ -206,7 +206,13 @@ int nr_pool_site_chan_max(void);                       /* chan_cap of the site p
  * nr_pool_shed_tiers_n: pure. urgent = waiters in SCAN + DECODE + RETRY, free = tokens free now (CHAN's idle reserve excluded), active = active cells.
  * Returns k: the tiers 0..k-1 are shed (k = min(tiers, urgent waiters) when free == 0 and active >= 2, else 0). */
 int nr_pool_shed_tiers_n(int urgent, int free_tokens, int active);
-bool nr_pool_promo_allowed_n(int tokens_eff, int active); /* pure, see nr_core_pool.c */
+bool nr_pool_promo_allowed_m(double tokens_eff, double essential_demand); /* pure: tokens_eff - measured essential demand of the active cells >= 1 token */
+/* Measured demand of one cell in tokens (decayed token-time per second, half-life 2 s): ess = SCAN + DECODE + RETRY + UL, shed = DISC + HOUSE. Returns 1 when measured, 0 (zeros) when the
+ * cell was observed for less than a quarter of the half-life. nr_pool_essential_wait: fraction of SCAN / DECODE / RETRY leases that waited since the pool exists, -1 under 100 leases. */
+int nr_pool_cell_demand(nr_pool_t *, int cell, double *ess, double *shed);
+double nr_pool_essential_wait(nr_pool_t *);
+int nr_pool_site_cell_demand(int cell, double *ess, double *shed);
+double nr_pool_site_essential_wait(void);
 int nr_pool_shed_tiers(nr_pool_t *);
 void nr_pool_shed_note(nr_pool_t *, int tier);   /* counts one skipped job in stats.shed[tier] */
 int nr_pool_active_cells(nr_pool_t *);           /* cells with a lease / waiter now or within the last 100 ms (>= 1) */

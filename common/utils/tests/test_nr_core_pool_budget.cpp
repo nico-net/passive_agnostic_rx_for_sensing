@@ -72,15 +72,14 @@ std::vector<std::unique_ptr<Holder>> fill_all(nr_pool_t *p, int busy, int cells)
 }
 } // namespace
 
-TEST(PoolBudget, PromotionRuleIsPure)
+TEST(PoolBudget, PromotionRuleIsPureAndMeasured)
 {
-  EXPECT_TRUE(nr_pool_promo_allowed_n(6, 1)); // the single-cell default (NR_POOL_PROMO_MIN_TOKENS = 6)
-  EXPECT_FALSE(nr_pool_promo_allowed_n(5, 1));
-  EXPECT_TRUE(nr_pool_promo_allowed_n(12, 2));
-  EXPECT_FALSE(nr_pool_promo_allowed_n(11, 2));
-  EXPECT_FALSE(nr_pool_promo_allowed_n(9, 2)); // DGX, 2 cells, CHAN reserve 1: 10 - 1 = 9 tokens, 4 each
-  EXPECT_TRUE(nr_pool_promo_allowed_n(18, 3));
-  EXPECT_TRUE(nr_pool_promo_allowed_n(6, 0)); // active < 1 counts as 1
+  EXPECT_TRUE(nr_pool_promo_allowed_m(6, 1.9)); // one token of headroom over the measured essential demand
+  EXPECT_TRUE(nr_pool_promo_allowed_m(6, 5.0));
+  EXPECT_FALSE(nr_pool_promo_allowed_m(6, 5.1));
+  EXPECT_FALSE(nr_pool_promo_allowed_m(9, 8.5)); // DGX, 2 cells, CHAN reserve 1: 9 tokens
+  EXPECT_TRUE(nr_pool_promo_allowed_m(9, 3.8));
+  EXPECT_FALSE(nr_pool_promo_allowed_m(4, 4.0));
 }
 
 TEST(PoolBudget, ShedTiersArePureAndMonotone)
@@ -270,31 +269,51 @@ TEST(PoolBudget, StatsGrammarOfTheCorePoolLineIsUnchanged)
   EXPECT_EQ(std::string(line).find("tier"), std::string::npos) << line;
 }
 
+namespace {
+std::atomic<uint64_t> g_vnow{1000000000ull};
+uint64_t vclock() { return g_vnow.load(); }
+} // namespace
+
 // pause / resume of a cell (A12 hooks): the channelizer's reserved token goes back with the demand (nr_pool_set_chan_demand(0)), and a cell that stopped leasing
 // stops counting as active after the active window (100 ms): the promotion bound and the shed gate follow the cells that really run.
-TEST(PoolBudget, PausedCellGivesBackTheChanTokenAndThePromotionBoundFollows)
+TEST(PoolBudget, PromotionFollowsTheMeasuredDemandNotAFixedTokenCount)
 {
-  for (int phase = 0; phase < 2; phase++) { // phase 0: 12 tokens, CHAN reserve 1 -> 11 / 2 = 5 per cell: blocked; phase 1: the cell paused, demand 0 -> 12 / 2 = 6: allowed
-    nr_pool_t *p = mk_derived(12);
-    PoolGuard g{p};
-    nr_pool_set_chan_demand(p, 1);
-    if (phase == 1) nr_pool_set_chan_demand(p, 0);
-    EXPECT_EQ(nr_pool_chan_reserved(p), phase == 0 ? 1 : 0);
-    auto fill = fill_all(p, phase == 0 ? 11 : 12, 2);
-    ASSERT_EQ(nr_pool_active_cells(p), 2);
-    std::atomic<int> seq{0};
-    Holder disc(p, NR_POOL_DISC, 1, &seq);
-    wait_until([&] { return nr_pool_total_waiting(p) == 1; });
-    usleep(40000);
-    Holder scan(p, NR_POOL_SCAN, 0, &seq);
-    wait_until([&] { return nr_pool_total_waiting(p) == 2; });
-    fill[0]->release();
-    wait_until([&] { return scan.state == 1 || disc.state == 1; });
-    if (phase == 0) { EXPECT_EQ(scan.state, 1); EXPECT_EQ(disc.state, 0); }
-    else { EXPECT_EQ(disc.state, 1) << "the pool is back to 6 tokens per cell: the aged discovery waiter is promoted again"; EXPECT_EQ(scan.state, 0); }
-    for (auto &h : fill) h->release();
-    scan.release();
-    disc.release();
+  // phase 0: two active cells whose demand is not measured yet: sheddable work does not jump the queue (blocked), 12 tokens and a CHAN reserve of 1.
+  // phase 1: both cells measured at ~0.5 token (virtual clock), no reserve: 12 - 1.0 >= 1 token of headroom, the aged discovery waiter is promoted again.
+  for (int phase = 0; phase < 2; phase++) {
+    if (phase == 1) { nr_pool_set_clock_for_test(vclock); g_vnow = 1000000000ull; }
+    {
+      nr_pool_t *p = mk_derived(12);
+      PoolGuard g{p};
+      if (phase == 0) nr_pool_set_chan_demand(p, 1);
+      EXPECT_EQ(nr_pool_chan_reserved(p), phase == 0 ? 1 : 0);
+      if (phase == 1) {
+        for (int c = 0; c < 2; c++) {
+          ASSERT_GE(nr_pool_acquire(p, NR_POOL_SCAN, c, 0), 0);
+          g_vnow += 600000000ull;
+          nr_pool_release(p);
+        }
+        double e, sh;
+        ASSERT_EQ(nr_pool_cell_demand(p, 0, &e, &sh), 1);
+        ASSERT_EQ(nr_pool_cell_demand(p, 1, &e, &sh), 1);
+      }
+      auto fill = fill_all(p, phase == 0 ? 11 : 12, 2);
+      ASSERT_EQ(nr_pool_active_cells(p), 2);
+      std::atomic<int> seq{0};
+      Holder disc(p, NR_POOL_DISC, 1, &seq);
+      wait_until([&] { return nr_pool_total_waiting(p) == 1; });
+      if (phase == 0) usleep(40000); else g_vnow += 40000000ull;
+      Holder scan(p, NR_POOL_SCAN, 0, &seq);
+      wait_until([&] { return nr_pool_total_waiting(p) == 2; });
+      fill[0]->release();
+      wait_until([&] { return scan.state == 1 || disc.state == 1; });
+      if (phase == 0) { EXPECT_EQ(scan.state, 1); EXPECT_EQ(disc.state, 0); }
+      else { EXPECT_EQ(disc.state, 1) << "measured headroom: the aged discovery waiter is promoted"; EXPECT_EQ(scan.state, 0); }
+      for (auto &h : fill) h->release();
+      scan.release();
+      disc.release();
+    }
+    if (phase == 1) nr_pool_set_clock_for_test(nullptr);
   }
 }
 
@@ -309,4 +328,34 @@ TEST(PoolBudget, ACellThatStoppedLeasingStopsCountingAfterTheActiveWindow)
   { Holder a(p, NR_POOL_SCAN, 0, nullptr, false); wait_until([&] { return a.state == 1; }); }
   usleep(20000);
   EXPECT_EQ(nr_pool_active_cells(p), 1);
+}
+
+// measured demand: a cell that held one token for 0.5 s of a 1.0 s window uses 0.5 tokens; essential and sheddable classes are apart; unobserved cells are not measured
+TEST(PoolBudget, CellDemandIsMeasuredFromTheLeaseHoldTime)
+{
+  nr_pool_set_clock_for_test(vclock);
+  g_vnow = 1000000000ull;
+  nr_pool_t *p = mk_explicit(6);
+  PoolGuard g{p};
+  double e = -1, s = -1;
+  EXPECT_EQ(nr_pool_cell_demand(p, 0, &e, &s), 0);
+  EXPECT_EQ(e, 0.0);
+  ASSERT_GE(nr_pool_acquire(p, NR_POOL_DECODE, 0, 0), 0);
+  g_vnow += 500000000ull;
+  nr_pool_release(p);
+  ASSERT_GE(nr_pool_acquire(p, NR_POOL_DISC, 1, 0), 0);
+  g_vnow += 250000000ull;
+  nr_pool_release(p);
+  g_vnow += 250000000ull; // 1.0 s since cell 0 first ran
+  EXPECT_EQ(nr_pool_cell_demand(p, 0, &e, &s), 1);
+  EXPECT_NEAR(e, 0.5, 0.05);
+  EXPECT_NEAR(s, 0.0, 1e-9);
+  EXPECT_EQ(nr_pool_cell_demand(p, 1, &e, &s), 1); // cell 1: 0.25 s of DISC over its 0.5 s window
+  EXPECT_NEAR(e, 0.0, 1e-9);
+  EXPECT_GT(s, 0.3);
+  EXPECT_EQ(nr_pool_cell_demand(p, 2, &e, &s), 0); // never ran
+  g_vnow += 60000000000ull; // a quiet minute: the demand decays away
+  EXPECT_EQ(nr_pool_cell_demand(p, 0, &e, &s), 1);
+  EXPECT_LT(e, 0.01);
+  nr_pool_set_clock_for_test(nullptr);
 }

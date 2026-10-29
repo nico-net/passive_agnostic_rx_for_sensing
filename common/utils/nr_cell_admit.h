@@ -20,9 +20,9 @@ extern "C" {
  *     A cell is served iff, with it added, (a) the count stays below NR_CELL_MAX and the core limit, (b) the channelizer budget holds, (c) the GPU modules of
  *     every served cell still reach their floors and the GPU total fits, (d) the host modules (fixed arenas + floors of the scalable ones) still reach their
  *     floors for every served cell and the committed host bytes stay under the hard limit. A module that was ready before the newcomer must stay ready.
- *     (e) B6: the core pool holds the decode demand of the served cells (nr_cell_pool_demand): 2 tokens per cell (a DECODE token and the scan reserve) and the
+ *     (e) B6: the core pool holds the decode demand of the served cells (nr_cell_pool_demand, measured on the running cells): 2 tokens per cell (a DECODE token and the scan reserve) and the
  *     probability that a lease has to wait (Erlang C of the pool tokens left after the channelizer's reserve, offered load = sum of the demands) stays at or below what
- *     a single cell measured on the same pool design (NR_ADMIT_POOL_WAIT_TARGET). Skipped when the host gives no pool table (pool_tokens[] zero).
+ *     the running cells measurably get now (pool_meas_wait, never below the model of the running state). Skipped when the host gives no pool table (pool_tokens[] zero).
  *     The first failing check in the order max, cores, pool, channelizer, gpu_mem, ram names the reason. A refused cell never changes the others.
  *   - The scalable shares (everything above the fixed arenas) are split among the served cells by nr_cell_desc_t.weight. */
 typedef enum { NR_ADMIT_OK = 0, NR_ADMIT_CORES = 1, NR_ADMIT_RAM = 2, NR_ADMIT_GPU_MEM = 3, NR_ADMIT_CHANNELIZER = 4, NR_ADMIT_MAX = 5, NR_ADMIT_LOST = 6, NR_ADMIT_POOL = 7 } nr_admit_reason_t;
@@ -30,7 +30,6 @@ typedef enum { NR_ADMIT_OK = 0, NR_ADMIT_CORES = 1, NR_ADMIT_RAM = 2, NR_ADMIT_G
 #define NR_ADMIT_UNLIMITED_CELLS (-1)
 #define NR_ADMIT_POOL_K 16 /* = NR_CELL_MAX: cells the pool table covers */
 /* B6 pool model constants, sources in nr_cell_admit.c */
-#define NR_ADMIT_POOL_WAIT_TARGET 0.062
 /* What the device reports. Every field comes from a probe or a derivation layer; none is a constant of a host. */
 typedef struct {
   size_t mem_avail;          /* min(MemAvailable, cgroup headroom) as nr_host_probe_t.avail; SIZE_MAX = unknown (unlimited) */
@@ -49,6 +48,12 @@ typedef struct {
    * 0 = unknown: the pool check is skipped for that count. chan_tokens = tokens the in-process channelizer reserves from the pool while >= 2 cells are served. */
   int pool_tokens[NR_ADMIT_POOL_K + 1];
   int chan_tokens;
+  /* B6 measured pool state (filled from the running receiver by nr_pool_cell_demand / nr_pool_essential_wait; pool_meas_n = 0: nothing running or measured yet).
+   * pool_meas_ess[i] = measured essential demand (tokens) of running cell i, pool_meas_grid[i] = its n_rb x n_rx x scs/30 (nr_cell_pool_grid),
+   * pool_meas_wait = fraction of the essential leases that waited so far, < 0 unknown (set -1 by the filler; a zeroed struct reads as 0 = no wait seen). */
+  int pool_meas_n;
+  double pool_meas_ess[NR_ADMIT_POOL_K], pool_meas_grid[NR_ADMIT_POOL_K];
+  double pool_meas_wait;
   /* B6 per-cell host bytes that the cell features added (CELLFEAT): the PRACH heap (0 = PRACH source not configured) and the sense-API rings (a sink is open when
    * sense_frames > 0: frame ring sense_frames x (48 + 3 re + 3 + 8 ant re) bytes, record ring sense_rec_slots x 4096; sense_max_re 46200 / frames 32 / slots 1024 are the defaults) */
   size_t prach_heap_bytes;
@@ -79,6 +84,9 @@ typedef struct {
   size_t gpu_budget, gpu_used, gpu_shared;    /* GPU B, planned committed (served cells + shared modules, graph excluded), shared modules */
   int pool_checked;            /* B6: the pool check ran for the served set (caps carried a pool table) */
   int pool_tokens_eff;         /* pool tokens of the served set minus the channelizer's reserve */
+  int pool_meas_n;             /* running cells the measurement covered */
+  double pool_meas_load, pool_meas_wait;
+  double pool_target, pool_unit, pool_model_now; /* wait target derived from the running cells, tokens per grid unit measured, Erlang C of the running state */
   double pool_load, pool_wait; /* offered decode load of the served set (tokens) and the modelled probability that a lease waits */
   int nid_window;              /* shared PDCCH nID context window (batches), 0 off */
   size_t gpu_graph_bytes;      /* what is left for the split-graph executables (capped), 0 when the floor does not fit */
@@ -89,17 +97,15 @@ int nr_cell_cost(const nr_cell_desc_t *c, const nr_host_caps_t *caps, nr_cell_co
 /* Plan: returns the number of served cells (>= 0), or -1 for NULL / n < 0 / n > NR_ADMIT_PLAN_MAX. n == 0: empty plan. */
 int nr_cell_admit_plan(const nr_host_caps_t *caps, const nr_cell_desc_t *cells, int n, nr_admit_plan_t *plan);
 const char *nr_admit_reason_name(int reason);
-/* B6. Decode demand of one cell in pool tokens (CPU time of its SCAN + DECODE + RETRY + UL leases per second): the anchor [MEASURED, DGX GB10 + X410, OTA 2026-10-28,
- * 217 PRB 4 RX 30 kHz, mean token-time of SCAN + DECODE + RETRY + UL per cell from the CELL_CPU lines: 1.93 over 12 cell rows of mp28m_P1-P3 and sw28_P2/R1/R2, range 1.65-2.22;
- * tools/mpci/pool_accounting.py] is NR_ADMIT_POOL_DEMAND_REF; a cell with a larger
- * n_rb x n_rx x slots/s product is charged proportionally, a smaller one as the anchor (no measurement below it: the conservative side). Placeholders: 0. */
-#define NR_ADMIT_POOL_DEMAND_REF 1.9
-double nr_cell_pool_demand(const nr_cell_desc_t *c);
+/* B6. Decode demand of one cell in pool tokens, derived from the running receiver: the essential token-time per second the running cells were measured to use (pool_meas_*)
+ * per unit of n_rb x n_rx x scs/30, times this cell's own grid. 0 when nothing is measured (the caller then checks the structural floor only). Placeholders: 0. */
+double nr_cell_pool_grid(const nr_cell_desc_t *c); /* n_rb x n_rx x scs/30; 0 for NULL / placeholder */
+double nr_cell_pool_demand(const nr_host_caps_t *caps, const nr_cell_desc_t *c);
 /* Erlang C: probability that a request finds all `servers` busy, for `load` erlangs. 1.0 when load >= servers; 0 for load <= 0. */
 double nr_pool_wait_prob(int servers, double load);
 /* Host bytes of the per-cell PRACH heap and sense rings as the plan books them (for the tests and the report) */
 size_t nr_cell_sense_ring_bytes(int frames, int max_re, int rec_slots, int ant);
-/* "MPCI_ADMIT_POOL cells=<n> tokens_eff=<..> load=<..> wait_pct=<..> target_pct=<..>"; 0 when the plan did not run the pool check */
+/* "MPCI_ADMIT_POOL cells=<n> tokens_eff=<..> load=<..> wait_pct=<..> target_pct=<..> meas_cells=<..> meas_load=<..> unit=<tokens per grid unit> meas_wait_pct=<..> model_now_pct=<..>"; 0 when the plan did not run the pool check */
 int nr_admit_pool_format(const nr_admit_plan_t *plan, char *out, size_t n);
 /* "MPCI_ADMIT cells=<served> of <n> reason=<binding|none> refuse=<0|1> host_budget_mb=.. host_used_mb=.. gpu_budget_mb=.. gpu_used_mb=.. nid_window=.. unserved=[i:reason ...]" */
 int nr_admit_plan_format(const nr_admit_plan_t *plan, char *out, size_t n);

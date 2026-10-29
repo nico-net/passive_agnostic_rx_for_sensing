@@ -146,6 +146,11 @@ static void on_event(void *ctx, const nr_cell_mgr_event_t *ev)
         }
         nr_admit_plan_t pl;
         char fm[640];
+        if (L->ops.pool_measure) {
+          L->caps.pool_meas_n = 0;
+          L->caps.pool_meas_wait = -1.0;
+          L->ops.pool_measure(L->ops.ctx, &L->caps);
+        }
         const int served = nr_cell_admit_plan(&L->caps, d, n, &pl);
         nr_admit_plan_format(&pl, fm, sizeof fm);
         snprintf(line, sizeof line, "%s live=add cell=%d id=%s", fm, k, ev->id);

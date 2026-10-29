@@ -165,28 +165,52 @@ double nr_pool_wait_prob(int servers, double load)
   const double rho = load / (double)servers;
   return b / (1.0 - rho * (1.0 - b));
 }
-double nr_cell_pool_demand(const nr_cell_desc_t *c)
+double nr_cell_pool_grid(const nr_cell_desc_t *c)
 {
   if (!c || c->placeholder) return 0.0;
   geom_t g;
   geom_of(c, &g);
-  const double slots_rel = (double)g.scs / 30.0;
-  const double rel = (double)g.n_rb * (double)g.rx * slots_rel / (217.0 * 4.0); /* anchor: 217 PRB, 4 RX, 30 kHz */
-  return NR_ADMIT_POOL_DEMAND_REF * (rel > 1.0 ? rel : 1.0);
+  return (double)g.n_rb * (double)g.rx * ((double)g.scs / 30.0);
 }
-/* The pool check of the served set `set[0..ns)`: 2 tokens per cell of the pool left after the channelizer's reserve, and the wait probability of the offered load
- * within NR_ADMIT_POOL_WAIT_TARGET [MEASURED, DGX GB10 solo, mp28m_S1/S2 2026-10-28: decode leases that waited 4.5 % / 6.2 % on 6 tokens]. Model check [INFERRED]: Erlang C of
- * 6 tokens at 2.7 erlangs (the per-cell total token-time of the 2-cell runs, taken as the solo proxy: solo logs carry no hold time) is 6.5 %; of the 2-cell runs
- * (7 tokens - 1 CHAN = 6, 5.5 erlangs) 78 % against 64-68 % of the decode / scan leases that waited. Only the essential classes (SCAN, DECODE, RETRY, UL) are offered
- * load: DISC / HOUSE work is sheddable and runs on what is left. */
-static int pool_eval(const nr_host_caps_t *k, const nr_cell_desc_t *cells, const int *set, int ns, int *eff, double *load, double *wait)
+/* Measured essential token-time per second of the running cells per unit of grid; 0 when nothing is measured. */
+static double pool_unit(const nr_host_caps_t *k, double *meas_load)
 {
-  *eff = 0; *load = 0; *wait = 0;
+  double e = 0, g = 0;
+  const int m = k->pool_meas_n < 0 ? 0 : k->pool_meas_n > NR_ADMIT_POOL_K ? NR_ADMIT_POOL_K : k->pool_meas_n;
+  for (int i = 0; i < m; i++) e += k->pool_meas_ess[i], g += k->pool_meas_grid[i];
+  if (meas_load) *meas_load = e;
+  return m > 0 && g > 0 ? e / g : 0.0;
+}
+double nr_cell_pool_demand(const nr_host_caps_t *k, const nr_cell_desc_t *c)
+{
+  return k ? pool_unit(k, NULL) * nr_cell_pool_grid(c) : 0.0;
+}
+/* The pool check of the served set `set[0..ns)`, every input measured on the running receiver:
+ *  - structural floor: 2 tokens per cell of the pool left after the channelizer's reserve (a DECODE token and the scan reserve);
+ *  - load: the measured essential demand per unit of n_rb x n_rx x scs/30 of the running cells (pool_meas_*), times each cell's own grid (the newcomer is charged
+ *    by its grid ratio against the running ones); sheddable DISC / HOUSE work is not offered load;
+ *  - wait: Erlang C of that load on the tokens left. Target = the wait the running cells deliver now (their measured essential wait fraction, never below the Erlang C of
+ *    the running state itself): adding the cell must not take the modelled wait above it.
+ * Nothing running or measured (first cell, or a plan made before any lease): only the floor applies, the wait stays 0 and unit 0 is logged. */
+static int pool_eval(const nr_host_caps_t *k, const nr_cell_desc_t *cells, const int *set, int ns, int *eff, double *load, double *wait, double *target, double *unit,
+                     double *model_now)
+{
+  *eff = 0; *load = 0; *wait = 0; *target = 0; *unit = 0; *model_now = 0;
   if (ns < 1 || ns > NR_ADMIT_POOL_K || k->pool_tokens[ns] <= 0) return -1; /* no table for this count: not checked */
   *eff = k->pool_tokens[ns] - (ns >= 2 && k->chan_tokens > 0 ? k->chan_tokens : 0);
-  for (int i = 0; i < ns; i++) *load += nr_cell_pool_demand(&cells[set[i]]);
+  double mload = 0;
+  *unit = pool_unit(k, &mload);
+  if (*eff < 2 * ns) return 0;
+  if (*unit <= 0.0) return 1;
+  for (int i = 0; i < ns; i++) *load += nr_cell_pool_demand(k, &cells[set[i]]);
   *wait = nr_pool_wait_prob(*eff, *load);
-  return (*eff >= 2 * ns && *wait <= NR_ADMIT_POOL_WAIT_TARGET) ? 1 : 0;
+  const int m = k->pool_meas_n;
+  if (m >= 1 && m <= NR_ADMIT_POOL_K && k->pool_tokens[m] > 0) {
+    const int eff_now = k->pool_tokens[m] - (m >= 2 && k->chan_tokens > 0 ? k->chan_tokens : 0);
+    *model_now = nr_pool_wait_prob(eff_now, mload);
+  }
+  *target = k->pool_meas_wait > *model_now ? k->pool_meas_wait : *model_now;
+  return *wait <= *target + 1e-12 ? 1 : 0;
 }
 
 int nr_cell_cost(const nr_cell_desc_t *c, const nr_host_caps_t *caps, nr_cell_cost_t *out)
@@ -376,7 +400,7 @@ int nr_cell_admit_plan(const nr_host_caps_t *caps, const nr_cell_desc_t *cells, 
   memset(&cur, 0, sizeof cur);
   double chan_load = 0;
   int pe = 0;
-  double pl = 0, pw = 0;
+  double pl = 0, pw = 0, pt = 0, pu = 0, pn = 0;
   const unsigned req = required_mask(caps);
   for (int oi = 0; oi < no; oi++) {
     const int ci = order[oi];
@@ -397,7 +421,7 @@ int nr_cell_admit_plan(const nr_host_caps_t *caps, const nr_cell_desc_t *cells, 
     } else {
       if (ns >= NR_CELL_MAX) reason = NR_ADMIT_MAX;
       else if (caps->max_cells != NR_ADMIT_UNLIMITED_CELLS && ns >= (caps->max_cells < 1 ? 1 : caps->max_cells)) reason = NR_ADMIT_CORES;
-      else if (pool_eval(caps, cells, set, ns + 1, &pe, &pl, &pw) == 0) reason = NR_ADMIT_POOL;
+      else if (pool_eval(caps, cells, set, ns + 1, &pe, &pl, &pw, &pt, &pu, &pn) == 0) reason = NR_ADMIT_POOL;
       else if (G[ci].shifted && caps->chan_budget_msps >= 0 && chan_load + (double)G[ci].fs / 1e6 > caps->chan_budget_msps + 1e-9) reason = NR_ADMIT_CHANNELIZER;
       else {
         /* gpu: the newcomer and every cell that had its device ring keep it, the shared nID context stays ready, the total fits */
@@ -421,7 +445,10 @@ int nr_cell_admit_plan(const nr_host_caps_t *caps, const nr_cell_desc_t *cells, 
     }
     set[ns++] = ci;
     cur = nxt;
-    if (pool_eval(caps, cells, set, ns, &pe, &pl, &pw) >= 0) { plan->pool_checked = 1; plan->pool_tokens_eff = pe; plan->pool_load = pl; plan->pool_wait = pw; }
+    if (pool_eval(caps, cells, set, ns, &pe, &pl, &pw, &pt, &pu, &pn) >= 0) {
+      plan->pool_checked = 1; plan->pool_tokens_eff = pe; plan->pool_load = pl; plan->pool_wait = pw; plan->pool_target = pt; plan->pool_unit = pu; plan->pool_model_now = pn;
+      plan->pool_meas_n = caps->pool_meas_n; pool_unit(caps, &plan->pool_meas_load); plan->pool_meas_wait = caps->pool_meas_wait;
+    }
     if (G[ci].shifted) chan_load += (double)G[ci].fs / 1e6;
     plan->cell[ci].served = 1;
     plan->cell[ci].reason = NR_ADMIT_OK;
@@ -443,8 +470,9 @@ int nr_cell_admit_plan(const nr_host_caps_t *caps, const nr_cell_desc_t *cells, 
 int nr_admit_pool_format(const nr_admit_plan_t *p, char *out, size_t n)
 {
   if (!p->pool_checked) return 0;
-  return snprintf(out, n, "MPCI_ADMIT_POOL cells=%d tokens_eff=%d load=%.2f wait_pct=%.1f target_pct=%.1f", p->n_served, p->pool_tokens_eff, p->pool_load, 100.0 * p->pool_wait,
-                  100.0 * NR_ADMIT_POOL_WAIT_TARGET);
+  return snprintf(out, n, "MPCI_ADMIT_POOL cells=%d tokens_eff=%d load=%.2f wait_pct=%.1f target_pct=%.1f meas_cells=%d meas_load=%.2f unit=%.5f meas_wait_pct=%.1f model_now_pct=%.1f",
+                  p->n_served, p->pool_tokens_eff, p->pool_load, 100.0 * p->pool_wait, 100.0 * p->pool_target, p->pool_meas_n, p->pool_meas_load, p->pool_unit,
+                  100.0 * p->pool_meas_wait, 100.0 * p->pool_model_now);
 }
 
 int nr_admit_plan_format(const nr_admit_plan_t *p, char *out, size_t n)

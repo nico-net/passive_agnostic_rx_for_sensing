@@ -19,6 +19,7 @@ extern "C" {
 #include "nr_td_cb0_fixture.h"
 #include "nr_td_cb0_sched.h"
 #include "nr_td_cb0_wire.h"
+#include "common/utils/nr_cell.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_td_cb0_adapter.h"
 #include "nr_pdsch_config_sweep.h"
@@ -314,6 +315,49 @@ TEST(Cb0Sched, BudgetSizesAndTokenBucket)
   s.tokens_us = 0;
   EXPECT_FALSE(nr_td_cb0_sched_admit(&s, 2000, 1, 0, &planned)); /* 1 us later: 6 tokens < 360 */
   EXPECT_TRUE(nr_td_cb0_sched_admit(&s, 2000 + 61000, 1, 0, &planned)); /* +61 us: 6 + 366 */
+}
+
+TEST(Cb0Sched, CpuShareIsPerCellAndSplitsTheProcessCap)
+{
+  EXPECT_DOUBLE_EQ(nr_td_cb0_share_pct(30, 1), 30.0); /* one cell: the process cap, unchanged */
+  EXPECT_DOUBLE_EQ(nr_td_cb0_share_pct(30, 0), 30.0);
+  EXPECT_DOUBLE_EQ(nr_td_cb0_share_pct(30, 2), 15.0);
+  EXPECT_DOUBLE_EQ(nr_td_cb0_share_pct(30, 3), 10.0);
+  nr_td_cb0_sched_t a, b;
+  nr_td_cb0_sched_init(&a, 10000, nr_td_cb0_share_pct(30, 2), 20, 8);
+  nr_td_cb0_sched_init(&b, 10000, nr_td_cb0_share_pct(30, 2), 20, 8);
+  double planned;
+  /* cell a drains its bucket; cell b still holds its own full one */
+  a.tokens_us = 0; a.last_ns = 1000;
+  b.tokens_us = b.cap_us; b.last_ns = 1000;
+  EXPECT_FALSE(nr_td_cb0_sched_admit(&a, 1000, 10, 1, &planned));
+  EXPECT_TRUE(nr_td_cb0_sched_admit(&b, 1000, 10, 1, &planned));
+  /* refill at the cell's share: 15 % of 20 CPUs = 3 CPU-us per us */
+  nr_td_cb0_sched_account(&b, planned, 0, 0, 0, 0, 0, 0);
+  a.tokens_us = 0;
+  nr_td_cb0_sched_admit(&a, 1000 + 10000, 0, 0, &planned);
+  EXPECT_NEAR(a.tokens_us, 3.0 * 10.0, 1e-6);
+  /* a cell paused: the other one takes the whole cap back */
+  nr_td_cb0_sched_set_cpu_pct(&b, nr_td_cb0_share_pct(30, 1));
+  EXPECT_DOUBLE_EQ(b.cpu_pct, 30.0);
+}
+
+TEST_F(Cb0Wire, TwoCellsHaveOwnBucketsAndHalfTheCapEach)
+{
+  nr_cell_set_count(2);
+  nr_cell_bind(0);
+  EXPECT_DOUBLE_EQ(nr_td_cb0_wire_cell_share_pct(), 15.0);
+  nr_td_cb0_wire_test_set_tokens(0.0); /* cell 0 spends its bucket */
+  nr_cell_bind(1);
+  EXPECT_DOUBLE_EQ(nr_td_cb0_wire_cell_share_pct(), 15.0);
+  nr_td_cb0_wire_test_set_tokens(1234.0); /* cell 1 keeps its own */
+  nr_cell_bind(0);
+  nr_td_cb0_wire_cell_pause(1, true); /* cell 1 paused: cell 0 gets the whole cap */
+  EXPECT_DOUBLE_EQ(nr_td_cb0_wire_cell_share_pct(), 30.0);
+  nr_td_cb0_wire_cell_pause(1, false);
+  EXPECT_DOUBLE_EQ(nr_td_cb0_wire_cell_share_pct(), 15.0);
+  nr_cell_set_count(1);
+  EXPECT_DOUBLE_EQ(nr_td_cb0_wire_cell_share_pct(), 30.0);
 }
 
 TEST(Cb0Sched, AdmissibilityTable)
