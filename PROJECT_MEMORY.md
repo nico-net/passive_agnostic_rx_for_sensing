@@ -5272,17 +5272,21 @@ output unchanged; agents on Sonnet; evidence labels per cell, never pooled; OTA 
 O4 (400 MHz) is outside this plan.
 
 ### 32.4 sens6 work (operator decision 2026-10-29: done later ON sens6, by a session running there)
-Facts [CODE-READ, SENS6-READINESS-20261021; MEASURED sens6 snapshot 2026-09-30]: x86_64, 14 CPUs isolcpus=2-3, 14 GiB RAM, RTX 4060 Ti 8 GB
-(discrete, sm_89, weak FP64), driver 580.178.04, nvcc 12.4.131. The discrete GPU is refused at the platform gate (nr_gpu_platform.c:171-187),
-so every GPU decode module reports not ready and the CPU DL decode path runs; the default `89;121` arch list fails on nvcc 12.4
-(cudaGetDriverEntryPointByVersion needs >= 12.5, nr_gpu_pass_graph.cu:1099; green contexts compiled out < 12.5); the 34-SM split skips
-split-2; 14 GiB with mlockall and 4 GiB hugepages is the tight budget (B6 books PRACH ~70 MB + sense rings ~53 MiB + DCI resolvers 8 MB per
-cell). Tasks (plan docs/superpowers/plans/2026-10-23-mpci-main-plan.md phase (iii)):
-- S1: sens6 build (CPU-only ENABLE_LDPC_CUDA=OFF, or nvcc >= 12.5 with LDPC_CUDA_ARCH=89), ctest, the 106-PRB rfsim bed 4 RX with the derived
-  core plan (log CORE_POOL N, GPU_PLATFORM DISCRETE ... CPU fallback). STOP: N=1 equivalence on sens6 rfsim (tests/passive_rx/mpci/n1_equiv.sh
-  rfsim with a sens6 reference: references never cross host classes); pool N derived, not 3-5 by accident.
-- S2: 2-cell CPU-path simulation on sens6 at <= 106 PRB per cell (file publisher fixture tests/passive_rx/mpci/mpci_file_pub.c, no radio).
-  STOP: both cells sync and decode in one process within RAM; B6 admission (MPCI_ADMIT_POOL) consistent with the 14-CPU host; P3 reported;
-  label [SIM VERIFIED, sens6 x86_64 RTX 4060 Ti, CPU decode path].
-- S3: discrete-GPU backend for the decode pass (DISCRETE memory model, per-grant PCIe copies, fake-device tests). Own plan; out of the merge gate.
+Facts (corrected 2026-10-29 from rr-orchestration/SENS6-SURVIVAL-20261029.md [CODE-READ]; host facts [MEASURED, sens6 snapshot / COREPLAN-20261024]):
+x86_64, 14 CPUs, isolcpus + nohz_full 1-2 since the 10-24 reboot (fixtures for both 1-2 and 2-3 exist), 14 GiB RAM, RTX 4060 Ti 8 GB
+(discrete, sm_89, weak FP64), nvcc 12.4. The discrete GPU is NOT refused any more: nr_gpu_choose_model (nr_gpu_platform.c:67-72) gives tier
+DISCRETE (reason hmm_pcie) and the Q4 port (sens6/dgpu-q4, on main) runs the staged entries (FEP, delay, chest, demod, DL/UL LDPC pools, UL
+FEP): 66 GPU ctests, 61 pass, 5 skip by design [MEASURED, sens6 @8f7e053986, Q4-DISCRETE-273-20261024]. nvcc 12.4 builds with the default
+arch list (nr_gpu_architectures drops 121, keeps 89 + PTX; nr_drv_sym uses cuGetProcAddress_v2 below 12.5). Still true: green contexts
+compiled out below 12.5 (no SM split on sens6); 14 GiB with mlockall + hugepages is tight (per cell: PRACH ~70 MB + sense rings ~53 MiB +
+DCI resolvers 8 MB + parked workers). Survival check 2026-10-29: merging mpci-main into main loses no sens6 code (all removed lines are
+mechanical per-cell conversions) [CODE-READ]; not yet run on sens6.
+Tasks (plan docs/superpowers/plans/2026-10-23-mpci-main-plan.md phase (iii)):
+- S1: build mpci-main on sens6 (default arch list, nvcc 12.4), ctest, 106-PRB rfsim bed 4 RX with the derived core plan; N=1 equivalence
+  (tests/passive_rx/mpci/n1_equiv.sh rfsim, with a sens6 reference: references never cross host classes); include a PCI-pinned single-cell
+  check (A10 changed the pinned PSS search: best of 3 peaks); pool N derived, not 3-5 by accident.
+- S2: 2-cell CPU/GPU-path simulation on sens6 at <= 106 PRB per cell (file publisher tests/passive_rx/mpci/mpci_file_pub.c, no radio).
+  STOP: both cells sync and decode in one process within RAM; B6 at N>=2 on 14 CPUs (pool ~9-10 tokens, one home CPU left for the
+  unleasable threads of two cells: check RXDISCONT/ULSTALL); MPCI_ADMIT_POOL consistent; label [SIM VERIFIED, sens6 x86_64 RTX 4060 Ti].
+- S3: partly done by Q4 (staged entries); remaining: graph pass (pass_dl / pass_ul) on DISCRETE, decided by the per-path trial. Own plan.
 Also pending there: Stage 1 Task 9 sens6 validation (memory sens6-task9-pending). sens6 frozen paths stay frozen (CLAUDE.md).
