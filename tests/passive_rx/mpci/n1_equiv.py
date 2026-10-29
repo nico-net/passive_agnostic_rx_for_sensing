@@ -53,13 +53,13 @@ WHITELIST = [
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TS = re.compile(r"^\d+(?:\.\d+)? ")
 HEX = re.compile(r"0x[0-9a-fA-F]+")
-NUM = re.compile(r"-?\d+(?:\.\d+)?")
+NUM = re.compile(r"(?:(?<=[\s=(\[:])[-+]|(?<!\d)-)?\d+(?:\.\d+)?")  # a leading sign is data, not structure ("a+b" keeps its +)
 NLIST = re.compile(r"(?:N[ ,]){2,}N")
 MAXT = 150
 # build identity that differs between any two builds and says nothing about behaviour: worktree/run paths, branch name and hash of the Version line
-BUILDID = re.compile(r"/home/\S*?/(?:wt|ota_runs)/\S+|Branch: \S+|Hash: \S+|\b[0-9a-f]{10,40}\b")
+BUILDID = re.compile(r"/home/\S*?/(?:wt|ota_runs)/\S+|Branch: \S+|Hash: \S+")
 # lines whose field set depends on the data (which counters are non-zero): one template per prefix
-FIELDSET = re.compile(r"^(.*?SENSING: (?:PDSCH_SOLVER why|SEGIDXC?|PDSCHQ per-rnti|SEARCH_SPACE INFERRED))\b.*")
+FIELDSET = re.compile(r"^(.*?SENSING: (?:PDSCH_SOLVER why|SEGIDXC?|PDSCHQ per-rnti|SEARCH_SPACE INFERRED|BOOTTABLE))\b.*")
 
 
 def norm(line):
