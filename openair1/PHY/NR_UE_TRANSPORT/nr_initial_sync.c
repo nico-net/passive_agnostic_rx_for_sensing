@@ -281,6 +281,59 @@ static void do_time_to_freq(nr_ssb_search_params_t *params, uint32_t sample_offs
   }
 }
 
+/* ssb_try_candidate: one PSS candidate of nr_search_ssb_common(): frequency-offset compensation (relative to what the previous candidate left applied in `f_off_to_comp`), SSB symbols to the frequency domain
+ * (params->rxdataF), SSS detection (params->sss_res). Returns 1 when the SSS stage accepted the candidate, 0 when not, -1 when the SSB would extend beyond the capture. */
+static int ssb_try_candidate(nr_ssb_search_params_t *params, const pss_detection_result_t *pss_res, int *f_off_to_comp)
+{
+  int freq_offset_pss = pss_res->freq_offset;
+  int sync_pos = pss_res->pos;
+
+  const int ssb_time_offset = sync_pos - params->nb_prefix_samples;
+
+#ifdef DEBUG_INITIAL_SYNCH
+  LOG_I(PHY, "Initial sync : Estimated PSS position %d, Nid2 %d, ssb time offset %d\n", sync_pos, pss_res->nid2, ssb_time_offset);
+#endif
+
+  // Check that SSB fits within buffer
+  if (ssb_time_offset + NR_N_SYMBOLS_SSB * (params->ofdm_symbol_size + params->nb_prefix_samples) >= params->rxdata_size) {
+    LOG_D(PHY,
+          "SSB extends beyond buffer boundary (sync_pos %d, ssb_time_offset %d, buffer_size %d)\n",
+          sync_pos,
+          ssb_time_offset,
+          params->rxdata_size);
+    return -1;
+  }
+
+  // Apply frequency offset compensation if requested
+  if (params->apply_freq_offset && freq_offset_pss != 0) {
+    (*f_off_to_comp) += freq_offset_pss;
+    compensate_freq_offset(params->rxdata, params->nb_antennas_rx, params->rxdata_size, (*f_off_to_comp), params->sampling_rate);
+    (*f_off_to_comp) *= -1;
+  }
+
+  // Extract SSB symbols to frequency domain
+  // Symbol ordering: 0=PSS, 1=PBCH, 2=SSS, 3=PBCH
+  do_time_to_freq(params, ssb_time_offset);
+
+  // Perform SSS detection
+  nr_sss_params_t p_sss = (nr_sss_params_t){.nb_antennas_rx = params->nb_antennas_rx,
+                                            .samples_per_slot_wCP = params->samples_per_slot_wCP,
+                                            .ofdm_symbol_size = params->ofdm_symbol_size,
+                                            .first_carrier_offset = params->first_carrier_offset,
+                                            .ssb_start_subcarrier = params->ssb_start_subcarrier,
+                                            .subcarrier_spacing = params->subcarrier_spacing,
+                                            .exclude_nid_cells = params->exclude_nid_cells,
+                                            .num_exclude_nid_cells = params->num_exclude_nid_cells};
+
+  c16_t(*rxdataF)[params->nb_antennas_rx][params->ofdm_symbol_size] =
+      (c16_t(*)[params->nb_antennas_rx][params->ofdm_symbol_size])params->rxdataF;
+  /* passive: a pinned target PCI also pins N_ID_1; else N_ID_2 only */
+  const int s_multi = IS_PASSIVE_RX_MODE(get_softmodem_params());
+  params->sss_res = rx_sss_nr(&p_sss, (pss_detection_result_t *)pss_res, s_multi && params->target_nid_cell >= 0 ? params->target_nid_cell : -1, rxdataF);
+
+  return params->sss_res.success && params->sss_res.nid_cell >= 0;
+}
+
 /*
  * Common SSB search function used by both initial sync and neighbor cell search
  */
@@ -317,66 +370,49 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
   // and it takes into account the values already applied previously during the loop.
   int f_off_to_comp = 0;
 
+  /* A10: a search pinned to a PCI (the cell's descriptor) is handed up to three PSS peaks of the pinned N_ID_2 (the wanted cell's own, and the leakage peaks of stronger co-channel SSBs of other N_ID_2): the
+   * candidate whose pinned SSS metric is the best wins. A blind search keeps the first accepted candidate. */
+  const bool pinned = params->target_nid_cell >= 0;
+  bool have_best = false;
+  int best_p = -1, last_ok_p = -1;
+  pss_detection_result_t best_pss = {0};
+  sss_detection_result_t best_sss = {0};
+
   for (int p = 0; p < NUMBER_PSS_SEQUENCE; p++) {
     pss_detection_result_t *pss_res = &pss_info.pss_elem_info[p];
     if (!pss_res->success)
       continue;
 
-    int freq_offset_pss = pss_res->freq_offset;
-    int sync_pos = pss_res->pos;
-
-    const int ssb_time_offset = sync_pos - params->nb_prefix_samples;
-
-#ifdef DEBUG_INITIAL_SYNCH
-    LOG_I(PHY, "Initial sync : Estimated PSS position %d, Nid2 %d, ssb time offset %d\n", sync_pos, p, ssb_time_offset);
-#endif
-
-    // Check that SSB fits within buffer
-    if (ssb_time_offset + NR_N_SYMBOLS_SSB * (params->ofdm_symbol_size + params->nb_prefix_samples) >= params->rxdata_size) {
-      LOG_D(PHY,
-            "SSB extends beyond buffer boundary (sync_pos %d, ssb_time_offset %d, buffer_size %d)\n",
-            sync_pos,
-            ssb_time_offset,
-            params->rxdata_size);
+    const int r = ssb_try_candidate(params, pss_res, &f_off_to_comp);
+    if (r < 0) {
+      if (pinned)
+        continue;
       return false;
     }
-
-    // Apply frequency offset compensation if requested
-    if (params->apply_freq_offset && freq_offset_pss != 0) {
-      f_off_to_comp += freq_offset_pss;
-      compensate_freq_offset(params->rxdata, params->nb_antennas_rx, params->rxdata_size, f_off_to_comp, params->sampling_rate);
-      f_off_to_comp *= -1;
-    }
-
-    // Extract SSB symbols to frequency domain
-    // Symbol ordering: 0=PSS, 1=PBCH, 2=SSS, 3=PBCH
-    do_time_to_freq(params, ssb_time_offset);
-
-    // Perform SSS detection
-    nr_sss_params_t p_sss = (nr_sss_params_t){.nb_antennas_rx = params->nb_antennas_rx,
-                                              .samples_per_slot_wCP = params->samples_per_slot_wCP,
-                                              .ofdm_symbol_size = params->ofdm_symbol_size,
-                                              .first_carrier_offset = params->first_carrier_offset,
-                                              .ssb_start_subcarrier = params->ssb_start_subcarrier,
-                                              .subcarrier_spacing = params->subcarrier_spacing,
-                                              .exclude_nid_cells = params->exclude_nid_cells,
-                                              .num_exclude_nid_cells = params->num_exclude_nid_cells};
-
-    c16_t(*rxdataF)[params->nb_antennas_rx][params->ofdm_symbol_size] =
-        (c16_t(*)[params->nb_antennas_rx][params->ofdm_symbol_size])params->rxdataF;
-    /* passive: a pinned target PCI also pins N_ID_1; else N_ID_2 only */
-    const int s_multi = IS_PASSIVE_RX_MODE(get_softmodem_params());
-    params->sss_res = rx_sss_nr(&p_sss, pss_res, s_multi && params->target_nid_cell >= 0 ? params->target_nid_cell : -1, rxdataF);
-
-    if (!params->sss_res.success || params->sss_res.nid_cell < 0) {
+    if (r == 0)
       continue;
-    }
 
-    params->pss_res = *pss_res;
-    return true;
+    if (!pinned) {
+      params->pss_res = *pss_res;
+      return true;
+    }
+    last_ok_p = p;
+    if (!have_best || params->sss_res.metric > best_sss.metric) {
+      have_best = true;
+      best_p = p;
+      best_pss = *pss_res;
+      best_sss = params->sss_res;
+    }
   }
 
-  return false;
+  if (!have_best)
+    return false;
+  if (best_p != last_ok_p) /* the frequency-domain symbols and the compensation in force belong to the last accepted candidate: redo the best one */
+    if (ssb_try_candidate(params, &best_pss, &f_off_to_comp) <= 0)
+      return false;
+  params->sss_res = best_sss;
+  params->pss_res = best_pss;
+  return true;
 }
 
 /* nr_scan_ssb: worker body of one GSCN of the initial cell search: generates the PSS for the raster point, correlates it with the capture (per antenna, with the energy-ordered antennas), and decodes the SSB candidates it finds.

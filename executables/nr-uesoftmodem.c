@@ -909,8 +909,8 @@ static void mpci_stop_cell_sensing(int k)
 static int mpci_cell_prealloc(void *ctx, int k, const nr_mgr_slot_t *slot)
 {
   (void)ctx;
-  (void)slot;
   PHY_VARS_NR_UE *ue = nrPHY_vars_UE_g[k][0];
+  ru_cell_want_pci_set(k, slot ? slot->desc.pci : -1); /* A10: the cell's sync pins the descriptor's PCI (before the slot thread's first search) */
   nr_passive_reconf_rules_cell_prealloc(k);
   nr_passive_ue_ctx_cell_prealloc(k);
   nr_pdcch_cell_prealloc(k);
@@ -949,6 +949,7 @@ static int mpci_cell_start(void *ctx, int k, const nr_mgr_slot_t *slot, int reac
 {
   (void)ctx;
   if (reactivation) {
+    ru_cell_want_pci_set(k, slot ? slot->desc.pci : -1); /* A10: before the tuning is posted, so the re-acquisition pins the re-added cell's PCI */
     if (g_live_on && g_feed_obj && slot) {
       const iq_live_tune_t t = mpci_tune_of(k, &slot->desc, slot->ssb);
       const int st = iq_live_add(&g_live, k, slot->id, &t);
@@ -985,6 +986,7 @@ static void mpci_cell_retire(void *ctx, int k, const nr_mgr_slot_t *slot)
 static void mpci_cell_retune(void *ctx, int k, const nr_cell_mgr_event_t *ev)
 {
   (void)ctx;
+  ru_cell_want_pci_set(k, ev->desc.pci); /* A10: before the retune is posted (the re-acquisition after it pins the descriptor's PCI) */
   if (g_live_on && g_feed_obj) {
     const iq_live_tune_t t = mpci_tune_of(k, &ev->desc, ev->ssb);
     const int st = iq_live_retune(&g_live, k, &t);

@@ -51,53 +51,53 @@ executables/nr-ue-ru.c	1018	nrue_ru_read::gate	func_static	const ru_park_gate_t	
 executables/nr-ue-ru.c	1084	nrue_ru_test_device::ru	func_static	nrUE_RU_params_t	PROCESS	A8	test fixture (NRUE_RU_SHUTDOWN_TEST)
 executables/nr-ue-ru.c	1085	nrue_ru_test_device::cell	func_static	nrUE_cell_params_t	PROCESS	A8	test fixture (NRUE_RU_SHUTDOWN_TEST)
 executables/nr-ue.c	6	nr_ue_rx_synced_g	global	int	PROCESS	A8	read by the USRP driver (dlsym) to bound pre-sync radio restarts: radio-wide, set when any cell syncs
-executables/nr-ue.c	460	RU_write::deadline_warning_rate_limit	func_static	unsigned int	PROCESS	A8	log rate limit (log text only)
-executables/nr-ue.c	850	readFrame::ring_epoch_get	func_static	uint64_t (*)(void)	PROCESS	A8	dlsym cache of the radio ring epoch function (same symbol for all cells)
-executables/nr-ue.c	851	readFrame::ring_epoch_checked	func_static	bool	PROCESS	A8	dlsym cache of the radio ring epoch function (same symbol for all cells)
-executables/nr-ue.c	923	nr_ue_rebase_epoch	file_static	_Atomic int [converted]	PER_CELL	A8	converted A8: timing rebase epoch of the cell
-executables/nr-ue.c	929	nr_ue_diag_rf_timestamp	file_static	_Atomic long [converted]	PER_CELL	A8	converted A8: stream position / consumed samples of the cell
-executables/nr-ue.c	931	nr_ue_diag_samples_consumed	file_static	_Atomic long [converted]	PER_CELL	A8	converted A8: stream position / consumed samples of the cell
-executables/nr-ue.c	937	nr_ue_timing_mutation_log::left	func_static	int	PROCESS	A8	log budget (log text only)
-executables/nr-ue.c	960	g_dash_slot	file_static	nr_dash_slot_t [converted]	PER_CELL	A8	MPCI-DASH: per-cell window/counter state of the dashboard lines
-executables/nr-ue.c	962	g_dash_slot_prev	file_static	nr_dash_slot_t [converted]	PER_CELL	A8	MPCI-DASH: per-cell window/counter state of the dashboard lines
-executables/nr-ue.c	964	g_dash_tim_prev	file_static	nr_dash_timing_t [converted]	PER_CELL	A8	MPCI-DASH: per-cell window/counter state of the dashboard lines
-executables/nr-ue.c	966	g_dash_win_slot	file_static	nr_dash_win_t [converted]	PER_CELL	A8	MPCI-DASH: per-cell window/counter state of the dashboard lines
-executables/nr-ue.c	968	g_dash_win_tim	file_static	nr_dash_win_t [converted]	PER_CELL	A8	MPCI-DASH: per-cell window/counter state of the dashboard lines
-executables/nr-ue.c	970	g_dash_last_ns	file_static	uint64_t [converted]	PER_CELL	A8	MPCI-DASH: per-cell window/counter state of the dashboard lines
-executables/nr-ue.c	973	g_census_pow	file_static	double [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	975	g_census_pow_n	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	989	g_census_pow_ant	file_static	g_census_dant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1000	g_census_pw2_ant	file_static	g_census_dant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1002	g_census_clip_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1005	g_census_peak_ant	file_static	g_census_iant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1007	g_census_hot_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1011	g_cls_n	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	1013	g_cls_clip	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	1015	g_cls_hot	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	1017	g_cls_pw	file_static	g_cls_d_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	1019	g_cls_tn	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	1021	g_cls_tclip	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	1023	g_cls_thot	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
-executables/nr-ue.c	1025	g_census_fs	file_static	int [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1027	g_census_smp_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1029	g_census_pw2_n	file_static	uint64_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1035	g_pwr_ref_fn	file_static	double (*)(int)	PROCESS	A8	dlsym cache of the radio power reference (radio-wide)
-executables/nr-ue.c	1036	g_pwr_ref_looked_up	file_static	int	PROCESS	A8	dlsym cache of the radio power reference (radio-wide)
-executables/nr-ue.c	1045	g_census_pow_ant_n	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1047	g_census_ssb_slots	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1049	g_census_slots	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
-executables/nr-ue.c	1492	UE_thread::s_band_scan_attempts	func_static	int	PROCESS	A8	band-wide search of the started cell (process mode, cell 0 only)
-executables/nr-ue.c	1789	UE_thread::s_rxts_prev_consumed	func_static	long [converted]	PER_CELL	A8	converted A8: stream continuity of the cell
-executables/nr-ue.c	1791	UE_thread::s_rxts_discont_total	func_static	long [converted]	PER_CELL	A8	converted A8: stream continuity of the cell
-executables/nr-ue.c	1793	UE_thread::ring_epoch_get	func_static	uint64_t (*)(void)	PROCESS	A8	dlsym cache (same symbol for all cells)
-executables/nr-ue.c	1794	UE_thread::ring_epoch_checked	func_static	int	PROCESS	A8	dlsym cache flag
-executables/nr-ue.c	1795	UE_thread::ring_epoch_seen	func_static	uint64_t [converted]	PER_CELL	A8	converted A8: last ring epoch seen by this cell slot thread
-executables/nr-ue.c	1797	UE_thread::ring_epoch_seen_valid	func_static	bool [converted]	PER_CELL	A8	converted A8: last ring epoch seen by this cell slot thread
-executables/nr-ue.c	2072	UE_thread::s_ref	func_static	double [converted]	PER_CELL	A8	converted A8: signal reference of the cell stream
-executables/nr-ue.c	2074	UE_thread::s_bad	func_static	int [converted]	PER_CELL	A8	converted A8
-executables/nr-ue.c	2076	UE_thread::s_fires	func_static	long [converted]	PER_CELL	A8	converted A8
-executables/nr-ue.c	2208	UE_thread::cn	func_static	const char *const[3]	CONST	A8	auto
-executables/nr-ue.c	2310	UE_thread::s_reinits	func_static	int	PROCESS	A8	full device re-init budget: nrue_ru_reinit re-opens every RU (radio-wide)
+executables/nr-ue.c	485	RU_write::deadline_warning_rate_limit	func_static	unsigned int	PROCESS	A8	log rate limit (log text only)
+executables/nr-ue.c	875	readFrame::ring_epoch_get	func_static	uint64_t (*)(void)	PROCESS	A8	dlsym cache of the radio ring epoch function (same symbol for all cells)
+executables/nr-ue.c	876	readFrame::ring_epoch_checked	func_static	bool	PROCESS	A8	dlsym cache of the radio ring epoch function (same symbol for all cells)
+executables/nr-ue.c	948	nr_ue_rebase_epoch	file_static	_Atomic int [converted]	PER_CELL	A8	converted A8: timing rebase epoch of the cell
+executables/nr-ue.c	954	nr_ue_diag_rf_timestamp	file_static	_Atomic long [converted]	PER_CELL	A8	converted A8: stream position / consumed samples of the cell
+executables/nr-ue.c	956	nr_ue_diag_samples_consumed	file_static	_Atomic long [converted]	PER_CELL	A8	converted A8: stream position / consumed samples of the cell
+executables/nr-ue.c	962	nr_ue_timing_mutation_log::left	func_static	int	PROCESS	A8	log budget (log text only)
+executables/nr-ue.c	985	g_dash_slot	file_static	nr_dash_slot_t [converted]	PER_CELL	A8	MPCI-DASH: per-cell window/counter state of the dashboard lines
+executables/nr-ue.c	987	g_dash_slot_prev	file_static	nr_dash_slot_t [converted]	PER_CELL	A8	MPCI-DASH: per-cell window/counter state of the dashboard lines
+executables/nr-ue.c	989	g_dash_tim_prev	file_static	nr_dash_timing_t [converted]	PER_CELL	A8	MPCI-DASH: per-cell window/counter state of the dashboard lines
+executables/nr-ue.c	991	g_dash_win_slot	file_static	nr_dash_win_t [converted]	PER_CELL	A8	MPCI-DASH: per-cell window/counter state of the dashboard lines
+executables/nr-ue.c	993	g_dash_win_tim	file_static	nr_dash_win_t [converted]	PER_CELL	A8	MPCI-DASH: per-cell window/counter state of the dashboard lines
+executables/nr-ue.c	995	g_dash_last_ns	file_static	uint64_t [converted]	PER_CELL	A8	MPCI-DASH: per-cell window/counter state of the dashboard lines
+executables/nr-ue.c	998	g_census_pow	file_static	double [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1000	g_census_pow_n	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1014	g_census_pow_ant	file_static	g_census_dant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1025	g_census_pw2_ant	file_static	g_census_dant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1027	g_census_clip_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1030	g_census_peak_ant	file_static	g_census_iant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1032	g_census_hot_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1036	g_cls_n	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	1038	g_cls_clip	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	1040	g_cls_hot	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	1042	g_cls_pw	file_static	g_cls_d_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	1044	g_cls_tn	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	1046	g_cls_tclip	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	1048	g_cls_thot	file_static	g_cls_u_t [converted]	PER_CELL	A8	converted A8: ADC class census of the cell stream
+executables/nr-ue.c	1050	g_census_fs	file_static	int [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1052	g_census_smp_ant	file_static	g_census_uant_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1054	g_census_pw2_n	file_static	uint64_t [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1060	g_pwr_ref_fn	file_static	double (*)(int)	PROCESS	A8	dlsym cache of the radio power reference (radio-wide)
+executables/nr-ue.c	1061	g_pwr_ref_looked_up	file_static	int	PROCESS	A8	dlsym cache of the radio power reference (radio-wide)
+executables/nr-ue.c	1070	g_census_pow_ant_n	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1072	g_census_ssb_slots	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1074	g_census_slots	file_static	long [converted]	PER_CELL	A8	converted A8: RF census of the cell stream
+executables/nr-ue.c	1517	UE_thread::s_band_scan_attempts	func_static	int	PROCESS	A8	band-wide search of the started cell (process mode, cell 0 only)
+executables/nr-ue.c	1814	UE_thread::s_rxts_prev_consumed	func_static	long [converted]	PER_CELL	A8	converted A8: stream continuity of the cell
+executables/nr-ue.c	1816	UE_thread::s_rxts_discont_total	func_static	long [converted]	PER_CELL	A8	converted A8: stream continuity of the cell
+executables/nr-ue.c	1818	UE_thread::ring_epoch_get	func_static	uint64_t (*)(void)	PROCESS	A8	dlsym cache (same symbol for all cells)
+executables/nr-ue.c	1819	UE_thread::ring_epoch_checked	func_static	int	PROCESS	A8	dlsym cache flag
+executables/nr-ue.c	1820	UE_thread::ring_epoch_seen	func_static	uint64_t [converted]	PER_CELL	A8	converted A8: last ring epoch seen by this cell slot thread
+executables/nr-ue.c	1822	UE_thread::ring_epoch_seen_valid	func_static	bool [converted]	PER_CELL	A8	converted A8: last ring epoch seen by this cell slot thread
+executables/nr-ue.c	2097	UE_thread::s_ref	func_static	double [converted]	PER_CELL	A8	converted A8: signal reference of the cell stream
+executables/nr-ue.c	2099	UE_thread::s_bad	func_static	int [converted]	PER_CELL	A8	converted A8
+executables/nr-ue.c	2101	UE_thread::s_fires	func_static	long [converted]	PER_CELL	A8	converted A8
+executables/nr-ue.c	2233	UE_thread::cn	func_static	const char *const[3]	CONST	A8	auto
+executables/nr-ue.c	2335	UE_thread::s_reinits	func_static	int	PROCESS	A8	full device re-init budget: nrue_ru_reinit re-opens every RU (radio-wide)
 executables/nr-uesoftmodem.c	65	config_frames	global	unsigned short[4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
 executables/nr-uesoftmodem.c	118	thread_struct	global	THREAD_STRUCT	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
 executables/nr-uesoftmodem.c	119	nrUE_params	global	nrUE_params_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
@@ -127,16 +127,16 @@ executables/nr-uesoftmodem.c	286	g_feed_entry	file_static	int[NR_CELL_MAX]	PROCE
 executables/nr-uesoftmodem.c	595	mpci_feed_rings::s_load	func_static	iq_chan_load_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
 executables/nr-uesoftmodem.c	637	mpci_feed_start::lease	func_static	const iq_chan_lease_t	CONST	A8	auto
 executables/nr-uesoftmodem.c	878	mpci_cell_sensing_open::hook_registered	func_static	atomic_int	PROCESS	A8	MPCI-INT: one cellfeat quiesce/resume hook registration per process
-executables/nr-uesoftmodem.c	1010	mpci_control_thread::s_parked	func_static	int[NR_CELL_MAX]	PROCESS	A12	MPCI-LIVE: written by the one control thread only
-executables/nr-uesoftmodem.c	1019	mpci_control_thread::s_feed_tick	func_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	1043	s_dash_gpu_prev	file_static	nr_dash_gpu_t[NR_CELL_MAX]	PROCESS	A8	log/dashboard state
-executables/nr-uesoftmodem.c	1044	s_dash_gpu_win	file_static	nr_dash_win_t[NR_CELL_MAX]	PROCESS	A8	log/dashboard state
-executables/nr-uesoftmodem.c	1045	s_dash_now_ns	file_static	uint64_t	PROCESS	A8	log/dashboard state
-executables/nr-uesoftmodem.c	1165	trigger_deregistration::deregistration_sent	func_static	bool	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	1176	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
-executables/nr-uesoftmodem.c	1189	NB_UE_INST	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	1190	uniqCfg	global	configmodule_interface_t *	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	1191	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	1012	mpci_control_thread::s_parked	func_static	int[NR_CELL_MAX]	PROCESS	A12	MPCI-LIVE: written by the one control thread only
+executables/nr-uesoftmodem.c	1021	mpci_control_thread::s_feed_tick	func_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	1045	s_dash_gpu_prev	file_static	nr_dash_gpu_t[NR_CELL_MAX]	PROCESS	A8	log/dashboard state
+executables/nr-uesoftmodem.c	1046	s_dash_gpu_win	file_static	nr_dash_win_t[NR_CELL_MAX]	PROCESS	A8	log/dashboard state
+executables/nr-uesoftmodem.c	1047	s_dash_now_ns	file_static	uint64_t	PROCESS	A8	log/dashboard state
+executables/nr-uesoftmodem.c	1167	trigger_deregistration::deregistration_sent	func_static	bool	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	1178	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
+executables/nr-uesoftmodem.c	1191	NB_UE_INST	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	1192	uniqCfg	global	configmodule_interface_t *	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	1193	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_COLS	global	constexpr uint32_t	CONST	G1	auto
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_ROWS	global	constexpr uint32_t	CONST	G1	auto
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_Z	global	constexpr uint32_t	CONST	G1	auto
@@ -2443,8 +2443,8 @@ openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	90	g_started	file_static	bool [conve
 openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	94	g_learned	file_static	g_learned_cell_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	96	g_nlearned	file_static	int [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_ul_nid_bg.c	101	load_env::done	func_static	_Atomic int	PROCESS	A6	one-time env load guard (process env, prints the banner once)
-openair1/PHY/NR_UE_TRANSPORT/pss_nr.c	181	s_pss_fold	file_static	nr_pss_fold_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/pss_nr.c	456	pss_search_time_nr::debug_cnt	func_static	int	PROCESS	DBG2	debug print limiter only
+openair1/PHY/NR_UE_TRANSPORT/pss_nr.c	203	s_pss_fold	file_static	nr_pss_fold_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
+openair1/PHY/NR_UE_TRANSPORT/pss_nr.c	517	pss_search_time_nr::debug_cnt	func_static	int	PROCESS	DBG2	debug print limiter only
 openair1/PHY/TOOLS/calibration_scope.c	17	rx_antenna_colors	global	const FL_COLOR[4]	CONST	A8	auto
 openair1/PHY/TOOLS/calibration_scope.c	18	water_colors	global	const FL_COLOR[4]	CONST	A8	auto
 openair1/PHY/TOOLS/dB_routines.c	9	dB_table	file_static	const int8_t[256]	CONST	A8	auto
@@ -2844,9 +2844,12 @@ radio/COMMON/ru_park.c	14	g_wake_seq	file_static	unsigned long	PROCESS	G5	proces
 radio/COMMON/ru_park.c	70	g_tune_pending	file_static	atomic_int[RU_PARK_MAX_CELLS]	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 radio/COMMON/ru_park.c	71	g_tune	file_static	ru_tune_t[RU_PARK_MAX_CELLS]	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 radio/COMMON/ru_park.c	72	g_tune_mu	file_static	pthread_mutex_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-radio/COMMON/ru_park.c	94	g_hooks	file_static	ru_cell_hook_t[RU_CELL_HOOKS_MAX]	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-radio/COMMON/ru_park.c	95	g_nhooks	file_static	int	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-radio/COMMON/ru_park.c	96	g_hook_mu	file_static	pthread_mutex_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/ru_park.c	94	g_want_pci1	file_static	atomic_int[RU_PARK_MAX_CELLS]	PROCESS	G5	A10: array indexed by cell (descriptor PCI / log rate limit of each cell), atomics, written by the control thread, read by the cell's sync job
+radio/COMMON/ru_park.c	95	g_note_ns	file_static	atomic_llong[RU_PARK_MAX_CELLS][RU_WANT_KINDS]	PROCESS	G5	A10: array indexed by cell (descriptor PCI / log rate limit of each cell), atomics, written by the control thread, read by the cell's sync job
+radio/COMMON/ru_park.c	96	g_note_seen	file_static	atomic_int[RU_PARK_MAX_CELLS][RU_WANT_KINDS]	PROCESS	G5	A10: array indexed by cell (descriptor PCI / log rate limit of each cell), atomics, written by the control thread, read by the cell's sync job
+radio/COMMON/ru_park.c	119	g_hooks	file_static	ru_cell_hook_t[RU_CELL_HOOKS_MAX]	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/ru_park.c	120	g_nhooks	file_static	int	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+radio/COMMON/ru_park.c	121	g_hook_mu	file_static	pthread_mutex_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 radio/COMMON/shm_iq_chan_gpu.cu	138	g_place	file_static	int	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 radio/COMMON/shm_iq_chan_gpu.cu	206	g_mb_mu	file_static	pthread_mutex_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 radio/COMMON/shm_iq_chan_gpu.cu	207	g_mb_live	file_static	size_t	PROCESS	G5	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)

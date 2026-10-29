@@ -173,6 +173,28 @@ static int cmp_pss_peak(const void *a, const void *b)
 *
 *********************************************************************/
 
+/* pss_more_peaks: A10. indices of up to `want` maxima of v[0..n), the first `have` already in idx[] (the global maximum), each at least `excl` indices from every other; returns the count.
+ * Used only by a PSS search pinned to one N_ID_2 (the descriptor's PCI): a stronger co-channel cell of another N_ID_2 leaks a correlation peak of its own SSB that can exceed the wanted weaker cell's
+ * peak, so the pinned search reports the next peaks too and the caller keeps the one whose pinned SSS metric is the best. */
+static int pss_more_peaks(const double *v, int n, int excl, int *idx, int have, int want)
+{
+  while (have < want) {
+    int best = -1;
+    for (int m = 0; m < n; m++) {
+      bool ok = true;
+      for (int j = 0; j < have && ok; j++)
+        ok = abs(m - idx[j]) >= excl;
+      if (ok && (best < 0 || v[m] > v[best]))
+        best = m;
+    }
+    if (best < 0 || v[best] <= 0)
+      break;
+    idx[have++] = best;
+  }
+  return have;
+}
+#define PSS_PINNED_PEAKS 3 /* = NUMBER_PSS_SEQUENCE: the unused result slots of a pinned search carry the further peaks */
+
 /* Passive only: decimated float PSS search for the initial-sync full search (see nr_pss_decim.h): ~60x less work than the
  * 4096-tap int16 search and no dot_product() floor-shift bias on weak inputs. K=8: non-coherent fold of the decimated profile
  * over captures on the absolute 20 ms grid, acc = acc*(1-1/K) + new; SSS/PBCH CRC still decide on the newest capture. */
@@ -226,6 +248,7 @@ static nr_pss_info_t pss_search_decim(const pss_search_t *p, int D, int pss_inde
         mbest = m;
     }
     double avg = sum / (npos ? npos : 1), peak = pr[mbest];
+    const float *sel = pr; /* the profile the reported peak comes from (A10: the further peaks of a pinned search are taken from the same one) */
     if (raw) {
       int rbest = 0;
       double rsum = 0;
@@ -241,42 +264,60 @@ static nr_pss_info_t pss_search_decim(const pss_search_t *p, int D, int pss_inde
         mbest = rbest;
         peak = rpeak;
         avg = ravg;
+        sel = raw;
       }
-      free(raw);
     } else {
       LOG_I(PHY, "SENSING: PSS_DECIM nid2=%d peak/avg=%.1f dB\n", s, 10 * log10((peak + 1e-30) / (avg + 1e-30)));
     }
-    /* full-rate float refinement around the decimated peak, 4-sample grid as the stock search */
-    int pos = 0;
-    double best = -1;
-    for (int n = max(0, (s0 + mbest * D - 2 * D) & ~3); n <= s0 + mbest * D + 2 * D && n < p->rxdata_length; n += 4) {
-      double c = 0;
-      for (int ar = 0; ar < p->nb_antennas_rx; ar++) {
-        double re, im;
-        nr_pss_cdot((const int16_t *)pssTime[s], (const int16_t *)&p->rxdata[ar][n], N, &re, &im);
-        c += re * re + im * im;
-      }
-      if (c > best) {
-        best = c;
-        pos = n;
+    /* A10: a search pinned to one N_ID_2 (full search) also reports the next peaks, one SSB apart, in the unused result slots */
+    int pk_m[PSS_PINNED_PEAKS] = {mbest};
+    double pk_peak[PSS_PINNED_PEAKS] = {peak};
+    int npk = 1;
+    if (p->target_Nid_cell >= 0 && pss_index_end - pss_index_start == 1) {
+      double *vd = malloc(sizeof(double) * (npos ? npos : 1));
+      if (vd) {
+        for (int m = 0; m < npos; m++)
+          vd[m] = sel[m];
+        npk = pss_more_peaks(vd, npos, (4 * (N + p->nb_prefix_samples)) / D + 1, pk_m, 1, PSS_PINNED_PEAKS);
+        for (int k = 1; k < npk; k++)
+          pk_peak[k] = vd[pk_m[k]];
+        free(vd);
       }
     }
-    pss_detection_result_t *r = &info.pss_elem_info[count++];
-    *r = (pss_detection_result_t){.nid2 = s,
-                                  .pos = pos,
-                                  .peak = (int)lround(10 * log10(peak + 1e-30)),
-                                  .avg = (int)lround(10 * log10(avg + 1e-30)),
-                                  .success = !((p->target_Nid_cell == -1 && peak < ratio_min * avg) || pos < p->nb_prefix_samples)};
-    if (p->fo_flag && r->success) { /* same estimator as the stock path, float, summed over the branches */
-      double xr = 0, xi = 0;
-      for (int ar = 0; ar < p->nb_antennas_rx; ar++) {
-        double r1r, r1i, r2r, r2i;
-        nr_pss_cdot((const int16_t *)pssTime[s], (const int16_t *)&p->rxdata[ar][pos], N / 2, &r1r, &r1i);
-        nr_pss_cdot((const int16_t *)(pssTime[s] + N / 2), (const int16_t *)&p->rxdata[ar][pos + N / 2], N / 2, &r2r, &r2i);
-        xr += r1r * r2r + r1i * r2i;
-        xi += r1r * r2i - r1i * r2r;
+    free(raw);
+    for (int k = 0; k < npk; k++) {
+      /* full-rate float refinement around the decimated peak, 4-sample grid as the stock search */
+      int pos = 0;
+      double best = -1;
+      for (int n = max(0, (s0 + pk_m[k] * D - 2 * D) & ~3); n <= s0 + pk_m[k] * D + 2 * D && n < p->rxdata_length; n += 4) {
+        double c = 0;
+        for (int ar = 0; ar < p->nb_antennas_rx; ar++) {
+          double re, im;
+          nr_pss_cdot((const int16_t *)pssTime[s], (const int16_t *)&p->rxdata[ar][n], N, &re, &im);
+          c += re * re + im * im;
+        }
+        if (c > best) {
+          best = c;
+          pos = n;
+        }
       }
-      r->freq_offset = (int)(atan2(xi, xr) / M_PI * p->subcarrier_spacing);
+      pss_detection_result_t *r = &info.pss_elem_info[count++];
+      *r = (pss_detection_result_t){.nid2 = s,
+                                    .pos = pos,
+                                    .peak = (int)lround(10 * log10(pk_peak[k] + 1e-30)),
+                                    .avg = (int)lround(10 * log10(avg + 1e-30)),
+                                    .success = !((p->target_Nid_cell == -1 && pk_peak[k] < ratio_min * avg) || pos < p->nb_prefix_samples)};
+      if (p->fo_flag && r->success) { /* same estimator as the stock path, float, summed over the branches */
+        double xr = 0, xi = 0;
+        for (int ar = 0; ar < p->nb_antennas_rx; ar++) {
+          double r1r, r1i, r2r, r2i;
+          nr_pss_cdot((const int16_t *)pssTime[s], (const int16_t *)&p->rxdata[ar][pos], N / 2, &r1r, &r1i);
+          nr_pss_cdot((const int16_t *)(pssTime[s] + N / 2), (const int16_t *)&p->rxdata[ar][pos + N / 2], N / 2, &r2r, &r2i);
+          xr += r1r * r2r + r1i * r2i;
+          xi += r1r * r2i - r1i * r2r;
+        }
+        r->freq_offset = (int)(atan2(xi, xr) / M_PI * p->subcarrier_spacing);
+      }
     }
   }
   if (fold)
@@ -351,6 +392,9 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
     const int stride = p->window_radius == 0 && p->search_stride >= 4 && p->search_stride <= 256
                            ? p->search_stride & ~3 : 4;
     int positions = 0;
+    /* A10: a search pinned to one N_ID_2 (full search, four-sample grid) also reports the next peaks, one SSB apart, in the unused result slots */
+    const bool multi = p->target_Nid_cell >= 0 && pss_index_end - pss_index_start == 1 && p->window_radius == 0 && stride == 4;
+    double *cv = multi ? malloc(sizeof(double) * ((size_t)(end > first ? (end - first) / stride : 0) + 2)) : NULL;
     for (int n = first; n < end; n += stride) { //
       positions++;
       int64_t pss_corr_ue = 0;
@@ -365,6 +409,8 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
 
       /* calculate the absolute value of sync_corr[n] */
       avg += pss_corr_ue;
+      if (cv)
+        cv[positions - 1] = (double)pss_corr_ue;
       if (pss_corr_ue > peak_value) {
         peak_value = pss_corr_ue;
         peak_position = n;
@@ -396,6 +442,20 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
     }
 
     avg /= positions ? positions : 1;
+    int pk_n[PSS_PINNED_PEAKS] = {(peak_position - first) / stride};
+    int64_t pk_v[PSS_PINNED_PEAKS] = {peak_value};
+    int npk = 1;
+    if (cv) {
+      npk = pss_more_peaks(cv, positions, (4 * (p->ofdm_symbol_size + p->nb_prefix_samples)) / stride + 1, pk_n, 1, PSS_PINNED_PEAKS);
+      for (int k = 1; k < npk; k++)
+        pk_v[k] = (int64_t)cv[pk_n[k]];
+      free(cv);
+    }
+    for (int pk = 0; pk < npk; pk++) {
+    if (pk > 0) { /* further peaks of a pinned search (the first keeps the exact position found above) */
+      peak_position = first + pk_n[pk] * stride;
+      peak_value = pk_v[pk];
+    }
     bool pss_not_found = (p->target_Nid_cell == -1 && peak_value < 5 * avg) 
                          || peak_position < p->nb_prefix_samples;
     pss_info.pss_elem_info[pss_count] = (pss_detection_result_t){
@@ -436,6 +496,7 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
 
     pss_info.pss_elem_info[pss_count].freq_offset = ffo_est * p->subcarrier_spacing; // Absolute value of frequency offset
     pss_count++;
+    }
   }
 
   // Sort array in descending order using pss_peak as sorting criterion.
