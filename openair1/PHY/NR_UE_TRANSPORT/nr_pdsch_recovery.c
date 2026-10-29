@@ -7,6 +7,7 @@
 #pragma weak nr_core_layout /* unit tests link this file without the utils library: no plan */
 #include "common/utils/nr_core_pool.h"
 #include "nr_recov_yield.h"
+#include <errno.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -86,10 +87,28 @@ NR_CELL_STATIC(_Atomic uint64_t, g_dropped_old);
 typedef _Atomic uint64_t g_late_arr_t[LATE_BINS];
 NR_CELL_STATIC(g_late_arr_t, g_late);
 #define g_late NR_CELL_REF(g_late)
-NR_CELL_STATIC(bool, g_nice);
-#define g_nice NR_CELL_REF(g_nice)
 NR_CELL_STATIC(bool, g_mu_init);
 #define g_mu_init NR_CELL_REF(g_mu_init)
+/* A11: a cell's worker thread exists from the prepare/start that built it (g_thr_live) and processes jobs once armed (g_run). The thread is built
+ * before the RX fence / mlockall by nr_pdsch_recovery_prepare (the cell manager's prealloc) or, for a late or test start, by nr_pdsch_recovery_start. */
+NR_CELL_STATIC(bool, g_thr_live);
+#define g_thr_live NR_CELL_REF(g_thr_live)
+typedef char g_cores_arr_t[64];
+NR_CELL_STATIC(g_cores_arr_t, g_cores_buf);
+#define g_cores_buf NR_CELL_REF(g_cores_buf) /* the explicit core list given to start (empty = the plan) */
+typedef char g_err_arr_t[96];
+NR_CELL_STATIC(g_err_arr_t, g_err);
+#define g_err NR_CELL_REF(g_err) /* the last failing step of start/prepare: "step errno=N (text)" */
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_amu, PTHREAD_MUTEX_INITIALIZER);
+#define g_amu NR_CELL_REF(g_amu) /* the arm hand-off of a parked worker: a plain mutex/cond of its own, so a wake never takes g_mu (a requeue-PI wake hands g_mu to the worker and a consumer's trylock would fail) */
+NR_CELL_STATIC_INIT(pthread_cond_t, g_acv, PTHREAD_COND_INITIALIZER);
+#define g_acv NR_CELL_REF(g_acv)
+NR_CELL_STATIC(int, g_astate);
+#define g_astate NR_CELL_REF(g_astate) /* 0 parked, 1 armed, 2 quit before it was armed */
+NR_CELL_STATIC(size_t, g_built_bytes);
+#define g_built_bytes NR_CELL_REF(g_built_bytes) /* job slot size the prepared arrays were built with */
+NR_CELL_STATIC(_Atomic uint64_t, g_inline_runs);
+#define g_inline_runs NR_CELL_REF(g_inline_runs)
 static __thread uint64_t t_cur_ns; /* submit time of the job the worker is running */
 static __thread void *t_cur_job; /* job the worker is on */
 static __thread bool t_fb_done;
@@ -226,10 +245,68 @@ void nr_pdsch_recovery_test_lock(int on)
   else pthread_mutex_unlock(&g_mu);
 }
 
+/* One job, whoever runs it: the worker thread (lease = the core-pool RETRY lease of the worker's cell, the idle wait bounded by g_idle_wait_ns) or a consumer
+ * that has no worker (nr_pdsch_recovery_run_inline: it already holds its pool lease, never waits for first-pass work). Delivers the held-back feedback once. */
+static void process_job(const entry_t *e, bool lease, uint64_t idle_wait_ns)
+{
+  t_cur_job = e->job;
+  t_fb_done = false;
+  if (g_exp_fn && g_exp_fn(&e->k)) {
+    atomic_fetch_add_explicit(&g_expd, 1, memory_order_relaxed);
+    feedback(&e->k, NR_RECOV_FB_FAIL_NOCREDIT);
+  } else if (stale(&e->k)) { /* a newer slot of this process is known: do not even run the arms */
+    atomic_fetch_add_explicit(&g_stale, 1, memory_order_relaxed);
+    feedback(&e->k, NR_RECOV_FB_FAIL);
+  } else if (!nr_recov_wait_idle(g_busy_fn, now_ns, nap_100us, idle_wait_ns)) {
+    /* a first-pass decode still waits after the bounded wait: the lane yields, no arm runs; the failure verdict stands and its feedback is delivered once */
+    atomic_fetch_add_explicit(&g_yielded, 1, memory_order_relaxed);
+    feedback(&e->k, NR_RECOV_FB_FAIL);
+  } else if (g_run_fn) {
+    t_cur_ns = e->t_ns;
+    if (lease) nr_pool_site_acquire(NR_POOL_RETRY, nr_cell_idx(), 0); /* core pool: async rescue arms, after the first-pass decodes; the lease is the worker's cell's (A11: was cell 0) */
+    const int r = g_run_fn(e->job, &e->k);
+    if (lease) nr_pool_site_release();
+    if (r == 2) {
+      atomic_fetch_add_explicit(&g_expd, 1, memory_order_relaxed);
+      feedback(&e->k, NR_RECOV_FB_FAIL_NOCREDIT);
+    } else { /* nothing rescued (0) / abandoned (3, config epoch changed) / handled: the verdict is delivered unless publish already did */
+      feedback(&e->k, NR_RECOV_FB_FAIL);
+    }
+    t_cur_ns = 0;
+  } else {
+    feedback(&e->k, NR_RECOV_FB_FAIL);
+  }
+  t_cur_job = NULL;
+  if (g_done_fn) g_done_fn(e->job);
+}
+
+/* Affinity of the armed worker: the explicit cores given to start, else the plan's recovery CPUs minus the launcher's pinned cores; none usable (or the kernel
+ * refuses the set) = unpinned at nice 10, logged. Applied by the worker itself so a refusal is seen here, not ignored by the creator. */
+static void worker_place(void)
+{
+  cpu_set_t set;
+  pick_cores(&set, g_cores_buf[0] ? g_cores_buf : NULL);
+  bool nice = CPU_COUNT(&set) == 0;
+  if (!nice && sched_setaffinity(0, sizeof(set), &set) != 0) {
+    char m[160];
+    snprintf(m, sizeof m, "RECOV worker: affinity to %d cpu(s) refused (errno %d, %s): unpinned at nice 10", CPU_COUNT(&set), errno, strerror(errno));
+    extern void nr_pdsch_recovery_log_warn(const char *) __attribute__((weak)); /* nr_pdsch_passive_queue.c: the cell-tagged log */
+    if (nr_pdsch_recovery_log_warn) nr_pdsch_recovery_log_warn(m);
+    else fprintf(stderr, "SENSING: %s\n", m);
+    nice = true;
+  }
+  if (nice) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
+}
+
 static void *worker(void *arg)
 {
-  nr_cell_bind((int)(intptr_t)arg); /* mpci A5: one worker per cell, bound to the cell that started it: run/expired/feedback hooks see that cell's queue state */
-  if (g_nice) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
+  (void)arg; /* bound to the cell that built it by nr_cell_thread_create: run/expired/feedback hooks see that cell's queue state */
+  pthread_mutex_lock(&g_amu);
+  while (g_astate == 0) pthread_cond_wait(&g_acv, &g_amu); /* prepared before the fence: parked until the cell's queue arms it */
+  const int st = g_astate;
+  pthread_mutex_unlock(&g_amu);
+  if (st == 2) return NULL; /* stopped before it was ever armed */
+  worker_place();
   extern void nr_pdsch_recovery_thread_prewarm(void) __attribute__((weak)); /* nr_pdsch_passive_queue.c */
   if (nr_pdsch_recovery_thread_prewarm) nr_pdsch_recovery_thread_prewarm();
   pthread_mutex_lock(&g_mu);
@@ -240,42 +317,19 @@ static void *worker(void *arg)
     g_head = (g_head + 1) % g_depth;
     g_n--;
     pthread_mutex_unlock(&g_mu);
-    t_cur_job = e.job;
-    t_fb_done = false;
-    if (g_exp_fn && g_exp_fn(&e.k)) {
-      atomic_fetch_add_explicit(&g_expd, 1, memory_order_relaxed);
-      feedback(&e.k, NR_RECOV_FB_FAIL_NOCREDIT);
-    } else if (stale(&e.k)) { /* a newer slot of this process is known: do not even run the arms */
-      atomic_fetch_add_explicit(&g_stale, 1, memory_order_relaxed);
-      feedback(&e.k, NR_RECOV_FB_FAIL);
-    } else if (!nr_recov_wait_idle(g_busy_fn, now_ns, nap_100us, g_idle_wait_ns)) {
-      /* a first-pass decode still waits after the bounded wait: the lane yields, no arm runs; the failure verdict stands and its feedback is delivered once */
-      atomic_fetch_add_explicit(&g_yielded, 1, memory_order_relaxed);
-      feedback(&e.k, NR_RECOV_FB_FAIL);
-    } else if (g_run_fn) {
-      t_cur_ns = e.t_ns;
-      nr_pool_site_acquire(NR_POOL_RETRY, 0, 0); /* core pool: async rescue arms, after the first-pass decodes */
-      const int r = g_run_fn(e.job, &e.k);
-      nr_pool_site_release();
-      if (r == 2) {
-        atomic_fetch_add_explicit(&g_expd, 1, memory_order_relaxed);
-        feedback(&e.k, NR_RECOV_FB_FAIL_NOCREDIT);
-      } else { /* nothing rescued (0) / abandoned (3, config epoch changed) / handled: the verdict is delivered unless publish already did */
-        feedback(&e.k, NR_RECOV_FB_FAIL);
-      }
-      t_cur_ns = 0;
-    } else {
-      feedback(&e.k, NR_RECOV_FB_FAIL);
-    }
-    t_cur_job = NULL;
-    if (g_done_fn) g_done_fn(e.job);
+    process_job(&e, true, g_idle_wait_ns);
     pthread_mutex_lock(&g_mu);
     g_free[g_nfree++] = (int)(((char *)e.job - g_slots) / (ptrdiff_t)g_slot_bytes);
   }
   pthread_mutex_unlock(&g_mu);
   return NULL;
 }
-int nr_pdsch_recovery_start(int depth, const char *cores)
+static void set_err(const char *step, int e)
+{
+  snprintf(g_err, sizeof(g_err), "step=%s errno=%d (%s)", step, e, strerror(e));
+}
+const char *nr_pdsch_recovery_last_error(void) { return g_err[0] ? g_err : "none"; }
+static void mu_init_once(void)
 {
   if (!g_mu_init) { /* first call: priority-inheritance mutex */
     pthread_mutexattr_t ma;
@@ -285,63 +339,102 @@ int nr_pdsch_recovery_start(int depth, const char *cores)
     pthread_mutexattr_destroy(&ma);
     g_mu_init = true;
   }
-  pthread_mutex_lock(&g_mu);
-  if (g_run) {
-    pthread_mutex_unlock(&g_mu);
-    return 0;
-  }
-  if (depth <= 0) {
-    depth = 32;
-  }
-  if (depth < 1) depth = 1;
+}
+/* Arrays + parked worker thread of the calling cell (g_mu held). -1 = failed, g_err names the step. */
+static int build_locked(int depth)
+{
+  if (depth <= 0) depth = 32;
   if (depth > RQ_MAX) depth = RQ_MAX;
   free(g_q); free(g_free); free(g_slots); /* left over from a previous run */
   g_q = calloc((size_t)depth, sizeof(entry_t));
-  g_free = calloc((size_t)depth, sizeof(int));
-  g_slots = aligned_alloc(64, (size_t)depth * g_slot_bytes);
+  if (!g_q) set_err("alloc queue", ENOMEM);
+  g_free = g_q ? calloc((size_t)depth, sizeof(int)) : NULL;
+  if (g_q && !g_free) set_err("alloc free-list", ENOMEM);
+  g_slots = g_free ? aligned_alloc(64, (size_t)depth * g_slot_bytes) : NULL;
+  if (g_free && !g_slots) set_err("alloc job slots", ENOMEM);
   atomic_fetch_add(&g_allocs, 3);
   if (!g_q || !g_free || !g_slots) {
     free(g_q); free(g_free); free(g_slots);
     g_q = NULL; g_free = NULL; g_slots = NULL;
-    pthread_mutex_unlock(&g_mu);
     return -1;
   }
   memset(g_slots, 0, (size_t)depth * g_slot_bytes);
   g_nfree = depth;
   for (int i = 0; i < depth; i++) g_free[i] = depth - 1 - i;
-  cpu_set_t set;
-  pick_cores(&set, cores);
-  g_nice = CPU_COUNT(&set) == 0;
   g_depth = depth; g_head = g_n = 0; g_stop = false;
+  g_built_bytes = g_slot_bytes;
+  pthread_mutex_lock(&g_amu);
+  g_astate = 0;
+  pthread_mutex_unlock(&g_amu);
   pthread_attr_t at; /* explicit SCHED_OTHER: do not inherit an RT policy from the starting thread */
   pthread_attr_init(&at);
   pthread_attr_setinheritsched(&at, PTHREAD_EXPLICIT_SCHED);
   pthread_attr_setschedpolicy(&at, SCHED_OTHER);
-  const int prc = pthread_create(&g_th, &at, worker, (void *)(intptr_t)nr_cell_idx());
+  nr_pool_site_home_attr(&at); /* a starter that holds a pool lease (a single core) must not pass that mask on to the worker */
+  const int prc = nr_cell_thread_create(&g_th, &at, worker, NULL, nr_cell_idx()); /* one worker per cell, bound to the cell that builds it */
   pthread_attr_destroy(&at);
   if (prc) {
+    set_err("pthread_create", prc); /* pthread_create returns the error, errno is not set */
     free(g_q); free(g_free); free(g_slots);
     g_q = NULL; g_free = NULL; g_slots = NULL;
+    return -1;
+  }
+  g_thr_live = true;
+  pthread_setname_np(g_th, "pdschRecov");
+  return 0;
+}
+int nr_pdsch_recovery_prepare(size_t job_bytes)
+{
+  mu_init_once();
+  nr_pdsch_recovery_set_job_bytes(job_bytes);
+  pthread_mutex_lock(&g_mu);
+  g_err[0] = 0;
+  const int rc = (g_thr_live || g_run) ? 0 : build_locked(0);
+  pthread_mutex_unlock(&g_mu);
+  return rc;
+}
+int nr_pdsch_recovery_start(int depth, const char *cores)
+{
+  mu_init_once();
+  pthread_mutex_lock(&g_mu);
+  if (g_run) {
+    pthread_mutex_unlock(&g_mu);
+    return 0;
+  }
+  g_err[0] = 0;
+  if (g_thr_live && g_built_bytes != g_slot_bytes) { /* prepared with another job size (tests): rebuild, the parked worker has done nothing yet */
+    pthread_mutex_unlock(&g_mu);
+    nr_pdsch_recovery_stop();
+    pthread_mutex_lock(&g_mu);
+  }
+  snprintf(g_cores_buf, sizeof(g_cores_buf), "%s", cores ? cores : "");
+  if (!g_thr_live && build_locked(depth) != 0) { /* not prepared before the fence: build now */
     pthread_mutex_unlock(&g_mu);
     return -1;
   }
-  g_run = true;
+  g_run = true; /* arm: the parked worker places itself and starts taking jobs */
   pthread_mutex_unlock(&g_mu);
-  pthread_setname_np(g_th, "pdschRecov");
-  if (CPU_COUNT(&set)) pthread_setaffinity_np(g_th, sizeof(set), &set); /* policy stays SCHED_OTHER nice 0 */
+  pthread_mutex_lock(&g_amu);
+  g_astate = 1;
+  pthread_cond_broadcast(&g_acv);
+  pthread_mutex_unlock(&g_amu);
   return 0;
 }
 void nr_pdsch_recovery_stop(void)
 {
   pthread_mutex_lock(&g_mu);
-  if (!g_run) {
+  if (!g_run && !g_thr_live) {
     pthread_mutex_unlock(&g_mu);
     return;
   }
   g_stop = true; /* acquire/submit refuse from now on */
   pthread_cond_broadcast(&g_cv);
   pthread_mutex_unlock(&g_mu);
-  pthread_join(g_th, NULL);
+  pthread_mutex_lock(&g_amu);
+  if (g_astate == 0) g_astate = 2; /* a worker that was never armed leaves */
+  pthread_cond_broadcast(&g_acv);
+  pthread_mutex_unlock(&g_amu);
+  if (g_thr_live) pthread_join(g_th, NULL);
   pthread_mutex_lock(&g_mu);
   while (g_n) { /* the worker drains before it exits; anything a racing submit left gets its failure verdict here */
     entry_t e = g_q[g_head];
@@ -351,8 +444,19 @@ void nr_pdsch_recovery_stop(void)
     if (g_done_fn) g_done_fn(e.job);
   }
   g_run = false; /* the arrays stay allocated (freed by the next start): a slot still held by a caller can be released safely */
+  g_thr_live = false;
   pthread_mutex_unlock(&g_mu);
 }
+/* A11 fallback for a cell without a worker: the calling consumer runs the job's arms itself, now (no queue, no wait for first-pass work: it yields when some
+ * waits), and the held-back feedback is delivered here once. The job slot belongs to the caller (not the module's pool). */
+void nr_pdsch_recovery_run_inline(void *job, const nr_recov_key_t *k)
+{
+  atomic_fetch_add_explicit(&g_sub, 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_inline_runs, 1, memory_order_relaxed);
+  const entry_t e = {*k, job, now_ns()};
+  process_job(&e, false, 0);
+}
+uint64_t nr_pdsch_recovery_inline_runs(void) { return atomic_load_explicit(&g_inline_runs, memory_order_relaxed); }
 void *nr_pdsch_recovery_acquire(void)
 {
   if (pthread_mutex_trylock(&g_mu) != 0) { /* busy: never wait on the worker, the caller keeps the job and feeds the failure itself */

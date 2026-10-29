@@ -1322,10 +1322,22 @@ NR_CELL_STATIC_INIT(pthread_mutex_t, g_rsnap_mu, PTHREAD_MUTEX_INITIALIZER);
 #define g_rsnap_mu NR_CELL_REF(g_rsnap_mu)
 NR_CELL_STATIC(bool, g_recov_ok);
 #define g_recov_ok NR_CELL_REF(g_recov_ok) /* snapshot pool allocated and the worker running */
+/* A11 fallback: a cell whose recovery worker could not start runs the arms of its failed grants on the consumer itself (bounded: RECOV_INL_MAX jobs per
+ * slot group, none while first-pass work waits), instead of dropping them silently. The slots are the consumers' own (RECOV_INL_MAX each). */
+#define RECOV_INL_MAX 2
+NR_CELL_STATIC(bool, g_recov_inline);
+#define g_recov_inline NR_CELL_REF(g_recov_inline)
+NR_CELL_STATIC(recov_wjob_t *, g_inl_pool);
+#define g_inl_pool NR_CELL_REF(g_inl_pool)
 NR_CELL_STATIC(_Atomic uint64_t, g_recov_nosnap);
 #define g_recov_nosnap NR_CELL_REF(g_recov_nosnap)
 static void recov_group_handoff(int idx, recov_wjob_t *const slots[], const nr_recov_key_t keys[], int n);
 bool nr_pdsch_passive_first_pass_waiting(void); /* TAIL-FIX, defined below */
+
+void nr_pdsch_recovery_log_warn(const char *m) /* the recovery module (no LOG dependency) reports through the cell-tagged log */
+{
+  LOG_W(PHY, "SENSING: %s\n", m);
+}
 
 /* ISAC_PDSCH_PIN_PREWARM_ALL=1: the pdschRecov worker pins its decode buffers at its start, like the consumers (else at its first rescue) */
 int nr_pdsch_pin_prewarm_all(void);
@@ -1780,7 +1792,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     int nr_pdsch_passive_path_trial_side(void);
     nr_pdsch_passive_path_trial_reset();
     const uint64_t dec_t0 = now_ns();
-    nr_pdsch_passive_recov_mode(g_recov_ok && owned && !job.layout_probe ? 1 : 0); /* RECOVERY_ASYNC: arms go to pdschRecov (owned IQ only: the snapshot is handed off) */
+    nr_pdsch_passive_recov_mode((g_recov_ok || g_recov_inline) && owned && !job.layout_probe ? 1 : 0); /* RECOVERY_ASYNC: arms go to pdschRecov (owned IQ only: the snapshot is handed off) */
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
     const bool recov_deferred = nr_pdsch_passive_recov_deferred();
@@ -1847,7 +1859,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
      * Submit failed (ring full): not held, the failure is fed here as without the flag. */
     bool recov_hold = false;
     if (recov_deferred && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL) {
-      recov_wjob_t *wj = nr_pdsch_recovery_acquire(); /* preallocated slot; NULL = full / busy, counted dropped_full */
+      recov_wjob_t *wj = g_recov_ok ? nr_pdsch_recovery_acquire() /* preallocated slot; NULL = full / busy, counted dropped_full */
+                         : (g_recov_inline && n_rpend < RECOV_INL_MAX) ? &g_inl_pool[idx * RECOV_INL_MAX + n_rpend] : NULL; /* no worker: the consumer's own slot */
       if (wj) {
         wj->job = job;
         wj->snap = NULL;
@@ -2328,6 +2341,10 @@ static void recov_feedback(void *p, const nr_recov_key_t *k, int outcome)
       nr_pdsch_config_sweep_observe_qm(&job->sweep_ticket, job->grant.mcs, dec->qm_measured);
   }
 }
+int nr_pdsch_passive_queue_recov_state(void)
+{
+  return g_recov_ok ? 1 : g_recov_inline ? 2 : 0;
+}
 void nr_pdsch_passive_queue_recov_fb_stats(uint64_t out[3])
 {
   for (int i = 0; i < 3; i++) out[i] = atomic_load_explicit(&g_recov_fb[i], memory_order_relaxed);
@@ -2360,6 +2377,16 @@ static void recov_group_handoff(int idx, recov_wjob_t *const slots[], const nr_r
   }
   for (int i = 0; i < n; i++) {
     slots[i]->snap = sn;
+    if (g_recov_inline) { /* no worker for this cell: the arms run here, now (the consumer's slot, never the module's pool) */
+      if (sn) {
+        nr_pdsch_recovery_run_inline(slots[i], &keys[i]);
+      } else {
+        atomic_fetch_add_explicit(&g_recov_nosnap, 1, memory_order_relaxed);
+        recov_feedback(&slots[i]->job, &keys[i], NR_RECOV_FB_FAIL);
+        recov_done(slots[i]);
+      }
+      continue;
+    }
     if (!sn || nr_pdsch_recovery_submit(&keys[i], slots[i])) {
       atomic_fetch_add_explicit(&g_recov_nosnap, 1, memory_order_relaxed);
       recov_feedback(&slots[i]->job, &keys[i], NR_RECOV_FB_FAIL);
@@ -2604,12 +2631,22 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     g_recov_ok = ok && nr_pdsch_recovery_start(0, NULL) == 0;
     LOG_A(PHY, "SENSING: RECOV worker %s (%d snapshot holders, %d/%d buffers host-pinned, pin %s)\n", g_recov_ok ? "started" : "FAILED to start",
           g_rsnap_n, n_pinned, g_rsnap_n * ue->frame_parms.nb_antennas_rx, nr_pdsch_gpu_host_pin_enabled() ? "on" : "off");
+    if (!g_recov_ok) { /* A11: say which step failed (the line above is the one the logs are grepped for), then do not drop the arms silently */
+      LOG_E(PHY, "SENSING: RECOV worker start failed: %s\n", ok ? nr_pdsch_recovery_last_error() : "step=snapshot holders alloc errno=12 (Cannot allocate memory)");
+      g_inl_pool = ok ? calloc((size_t)n_consumers * RECOV_INL_MAX, sizeof(recov_wjob_t)) : NULL;
+      g_recov_inline = g_inl_pool != NULL;
+      if (g_recov_inline)
+        LOG_W(PHY, "SENSING: RECOV worker unavailable: the retry/recovery arms run inline on the consumers (at most %d per slot group, none while first-pass work waits)\n",
+              RECOV_INL_MAX);
+      else
+        LOG_E(PHY, "SENSING: RECOV worker unavailable and no inline slots: the retry/recovery arms are OFF for this cell\n");
+    }
   } else if (nr_pdsch_recovery_enabled()) {
     LOG_W(PHY, "SENSING: async recovery needs the owned IQ: recovery stays inline\n");
   }
   LOG_I(PHY, "SENSING: passive PDSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1);
-  if (!g_recov_ok && nr_host_membudget_commit && g_rsnap_n > 0) nr_host_membudget_commit(NR_HOST_MEM_SNAP, 0, 0.0); /* holders not used */
+  if (!g_recov_ok && !g_recov_inline && nr_host_membudget_commit && g_rsnap_n > 0) nr_host_membudget_commit(NR_HOST_MEM_SNAP, 0, 0.0); /* holders not used */
   return true;
 }
 
@@ -2958,6 +2995,7 @@ void nr_pdsch_passive_queue_stop(void)
     return;
   }
   g_recov_ok = false; /* consumers defer nothing from here on */
+  g_recov_inline = false;
   atomic_store_explicit(&g_stop, 1, memory_order_release);
   pthread_mutex_lock(&g_lock);
   pthread_cond_broadcast(&g_cv);
@@ -2977,6 +3015,8 @@ void nr_pdsch_passive_queue_stop(void)
   if (nr_pdsch_recovery_enabled()) {
     char rs[200];
     nr_pdsch_recovery_stop();
+    free(g_inl_pool); /* consumers joined above: no inline slot is in use */
+    g_inl_pool = NULL;
     nr_pdsch_recovery_stats(rs, sizeof rs);
     uint64_t fb[3];
     nr_pdsch_passive_queue_recov_fb_stats(fb);
@@ -2996,6 +3036,10 @@ void nr_pdsch_passive_queue_cell_prealloc(int cell)
   NR_CELL_HEAP_PREALLOC(g_rnti_ok_arr_t, g_rnti_ok, cell);
   NR_CELL_HEAP_PREALLOC(g_ring_arr_t, g_ring, cell);
   NR_CELL_HEAP_PREALLOC(g_pending_arr_t, g_pending, cell);
+  /* A11: the cell's recovery worker (arrays + parked thread) is built here, before the RX fence and mlockall, when the queue will use one (same condition as
+   * nr_pdsch_passive_queue_start); the queue start only arms it. A failure is logged with its step and left to the start, which retries and falls back inline. */
+  if (nr_cell_idx() == cell && nr_pdsch_recovery_enabled() && nr_csirs_disc_enabled() && nr_pdsch_recovery_prepare(sizeof(recov_wjob_t)) != 0)
+    LOG_W(PHY, "SENSING: RECOV worker prepare failed before the fence: %s (the queue start retries)\n", nr_pdsch_recovery_last_error());
 }
 
 void nr_pdsch_cell_prealloc(int cell)
