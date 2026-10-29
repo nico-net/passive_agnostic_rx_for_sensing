@@ -677,3 +677,12 @@ R12. **NO FLAGS (operator, 2026-10-25).** Supersedes Global Constraint 4's test-
 - **A11 PDSCH recovery worker per cell:** `[c1] RECOV worker FAILED to start` in 8/8 two-cell runs (nr_pdsch_passive_queue.c:2604) -> no retry arms for cell > 0; log the failing step, make the worker per-cell correct, run the arms inline when no worker. STOP: "RECOV worker started" for every cell; DECODETDRA lines for c1; Vodafone as c1 crc_q within run-to-run spread of c0.
 - **B6 pool vs N-cell demand (with admission):** 2-cell starvation (stale PDSCH 5.8-28 %, scan drop_full 8-49 %, wait p50 0.5-2.4 ms); size the pool by the admitted cells' demand within the host's cores, split long DMRS_SCAN jobs, drop low-value work first, admission weighs decode demand vs pool, CHAN demand recomputed on pause/resume. STOP: 2-cell OTA stale <= 2 %, drop_full <= 2.5 %, per-cell p50 within +30 % of solo; replays at SPEED 1.0.
 - **A12 live cell changes applied:** cell add/remove/retune from cells.json applied at run time (today logged only), radio retune when a cell is outside the capture span.
+
+### R14. Order after the integration OTA (operator decision 2026-10-29)
+1. Integration OTA of mpci/int-1029 (cellfeat + A12 live + G4): 2-cell runs alternated with solo, live add/remove on air.
+2. Admission vs pool: B6, with A10 (cell-identity check) and A11 (per-cell recovery worker) from R13.
+3. Audit cleanup: widen the audit file list, classify the remaining G1/G4 rows, bind leftover pool tasks to their cell, GPU-check queue cell.
+4. Validation gates: A9 N=1 suite, V3 2-cell replay gate, O1-O4 on air, S1-S3 sens6 / CPU-only / discrete GPU.
+5. Push mpci-main (operator OK required).
+6. Re-measure and fix PROJECT_MEMORY §31 (DL health, UL, DCI 1_1).
+7. C3/G8 UL HARQ soft combining: only after the §31.2 UL fixes give a working UL pipeline (UL CRC decoding OTA); combining needs first transmissions that decode.
