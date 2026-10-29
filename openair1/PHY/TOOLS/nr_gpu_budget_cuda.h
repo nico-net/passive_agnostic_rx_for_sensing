@@ -4,6 +4,7 @@
 #include "nr_gpu_cuda.h"
 #include "nr_gpu_budget.h"
 #include "nr_gpu_wait.h"
+#include "nr_gpu_memstat.h"
 #include <cmath>
 #include <cstdio>
 #include <thread>
@@ -31,6 +32,9 @@ struct NrGpuDiscoverySlice {
       else std::this_thread::yield();
     }
     if(rc<0)return cudaErrorNotReady;
+    /* G4: the slice (events, submit and the polled drain) holds the process-wide discovery ticket of nr_gpu_budget.c: one discovery slice of any cell on the device at a time.
+     * Taken after the budget admission, so a cell waiting for pacing does not hold it; waits its turn (ACQUIRE-state cells first, then least used). */
+    nr_gpu_disc_ticket_acquire_bulk(nr_gpu_memstat_host_cell());
     cudaError_t e=cudaEventRecord(first,stream);
     if(e==cudaSuccess)e=submit();
     if(e==cudaSuccess)e=cudaEventRecord(last,stream);
@@ -43,6 +47,7 @@ struct NrGpuDiscoverySlice {
       fprintf(stderr,"GPU_DISCOVERY_SLICE operation=%s cuda=%s elapsed_ms=%.6f\n",name,cudaGetErrorString(e),ms);
     if(e!=cudaSuccess)nr_gpu_budget_fault();
     nr_gpu_budget_discovery_end(nr_gpu_budget_now_us(),(uint64_t)ceil(ms*1000.0));
+    nr_gpu_disc_ticket_release();
     return e;
   }
 };

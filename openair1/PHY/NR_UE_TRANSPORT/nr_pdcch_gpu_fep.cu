@@ -30,6 +30,10 @@
 #include <cstring>
 
 static int g_init_state;
+/* G4: this module is ONE resident context (one cfg, one rxdataF slot, one stream) of a shadow check (ISAC_PDCCH_GPU_FEP, default off; its LLRs never feed a decode). It serves the cell that
+ * initialised it; another cell's calls fail (-1) and that cell keeps its CPU LLRs, instead of two cells overwriting the same resident slot. One cell: unchanged. */
+static int g_owner_cell = -1;
+static inline bool owner_cell() { return g_owner_cell == nr_gpu_memstat_host_cell(); }
 
 #define CK(x)                                                                                     \
   do {                                                                                             \
@@ -227,7 +231,8 @@ static int allocate_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
 static int api_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
 {
   if (!cfg) return -1;
-  if (g_init_state) return g_init_state == 1 && !memcmp(cfg, &g_cfg, sizeof(*cfg)) ? 0 : -1;
+  if (g_init_state) return g_init_state == 1 && owner_cell() && !memcmp(cfg, &g_cfg, sizeof(*cfg)) ? 0 : -1;
+  g_owner_cell = nr_gpu_memstat_host_cell();
   g_init_state = -1; /* a failed attempt cannot retry while RX is running */
   const int rc = allocate_init(cfg);
   if (!rc) g_init_state = 1;
@@ -252,7 +257,7 @@ static int api_upload_slot(const int16_t *const *rxdataF_symb, int max_duration)
   const auto t0 = std::chrono::steady_clock::now();
   const int N = g_cfg.ofdm_symbol_size, nant = g_cfg.nant;
   const int dur = std::min(max_duration, MAX_DUR);
-  if (g_init_state != 1 || max_duration < 1 || max_duration > MAX_DUR) return -1;
+  if (g_init_state != 1 || !owner_cell() || max_duration < 1 || max_duration > MAX_DUR) return -1;
   NrGpuRtScope rt; if(!rt.admitted)return -1;
   if (nr_dl_gpu_radio_mode && !nr_dl_gpu_budget_take(&g_budget,
       (size_t)nant * dur * N * (sizeof(int16_t) * 2 + 2 * sizeof(float2)) + 3 * g_llr_cap * sizeof(int16_t))) return -1;
@@ -303,7 +308,7 @@ static int64_t run_chunk(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, uint
 
 static int64_t api_pdcch_llr(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, size_t llr_cap)
 {
-  if (g_init_state != 1 || !jobs || !llr_out || n < 0) return -1;
+  if (g_init_state != 1 || !owner_cell() || !jobs || !llr_out || n < 0) return -1;
   NrGpuRtScope rt; if(!rt.admitted)return -1;
   const auto t0 = std::chrono::steady_clock::now();
   int64_t written = 0;

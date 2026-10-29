@@ -6,6 +6,7 @@
 #include <string>
 #include "PHY/TOOLS/nr_gpu_membudget.h"
 #include "PHY/TOOLS/nr_gpu_elastic.h"
+#include "PHY/TOOLS/nr_gpu_memstat.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_disc_mem.h"
 namespace {
 constexpr size_t MB = (size_t)1 << 20;
@@ -230,4 +231,39 @@ TEST(Elastic, UnlimitedBudgetNeverDeniesAndGb10StaysAtFullSize) {
     EXPECT_EQ(1, nr_gpu_membudget_dyn_acquire(NR_GPU_MEM_CSIRS, (size_t)1 << 40));
   }
   nr_gpu_membudget_test_reset();
+}
+
+/* G4: csirs and pdcch_nid commit per cell (the module figure is the sum), each cell sizes against share / active cells; the other modules and one cell are unchanged. */
+namespace {
+int g_test_cell = 0;
+int test_cell_fn() { return g_test_cell; }
+}
+TEST(MemBudget, PerCellModulesCommitPerCellAndSplitTheShare) {
+  setenv("NR_GPU_MEM_BUDGET_MB", "10000", 1);
+  nr_gpu_membudget_test_reset();
+  nr_gpu_memstat_set_cell_fn_for_test(test_cell_fn);
+  const size_t sh_csirs = nr_gpu_membudget_share(NR_GPU_MEM_CSIRS), sh_pass = nr_gpu_membudget_share(NR_GPU_MEM_PASS);
+  nr_gpu_membudget_test_cells(2);
+  EXPECT_EQ(sh_csirs / 2, nr_gpu_membudget_share(NR_GPU_MEM_CSIRS));
+  EXPECT_EQ(nr_gpu_membudget_share_of(nr_gpu_membudget_total(), NR_GPU_MEM_PDCCH_NID) / 2, nr_gpu_membudget_share(NR_GPU_MEM_PDCCH_NID));
+  EXPECT_EQ(sh_pass, nr_gpu_membudget_share(NR_GPU_MEM_PASS)); /* process-wide module: not split */
+  g_test_cell = 0; nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS, 100 * MB, 1.0);
+  g_test_cell = 1; nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS, 60 * MB, 0.5);
+  EXPECT_EQ(160 * MB, nr_gpu_membudget_committed_total());
+  g_test_cell = 0; nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS, 80 * MB, 1.0); /* a re-commit replaces that cell's figure only */
+  EXPECT_EQ(140 * MB, nr_gpu_membudget_committed_total());
+  g_test_cell = 1; nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS, 0, 0.0);      /* cell 1 fell back to the CPU */
+  EXPECT_EQ(80 * MB, nr_gpu_membudget_committed_total());
+  /* a process-wide module keeps ONE figure whatever the cell */
+  g_test_cell = 1; nr_gpu_membudget_commit(NR_GPU_MEM_PASS, 50 * MB, 1.0);
+  g_test_cell = 0; nr_gpu_membudget_commit(NR_GPU_MEM_PASS, 70 * MB, 1.0);
+  EXPECT_EQ(150 * MB, nr_gpu_membudget_committed_total());
+  /* one cell: the commit replaces, the share is whole */
+  nr_gpu_membudget_test_reset(); nr_gpu_membudget_test_cells(0); g_test_cell = 0;
+  nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS, 100 * MB, 1.0); nr_gpu_membudget_commit(NR_GPU_MEM_CSIRS, 90 * MB, 1.0);
+  EXPECT_EQ(90 * MB, nr_gpu_membudget_committed_total());
+  EXPECT_EQ(sh_csirs, nr_gpu_membudget_share(NR_GPU_MEM_CSIRS));
+  nr_gpu_memstat_set_cell_fn_for_test(nullptr);
+  nr_gpu_membudget_test_reset();
+  unsetenv("NR_GPU_MEM_BUDGET_MB");
 }

@@ -35,8 +35,24 @@ void nr_gpu_budget_discovery_end(uint64_t now_us, uint64_t gpu_us);
 void nr_gpu_budget_fault(void);
 /* OTATAIL: a discovery user that must not be starved (the nID sweep in ACQUIRE) raises prefer; other discovery
  * users (CSI-RS) do not start a slice while it is raised. */
-void nr_gpu_budget_discovery_prefer(int on);
-int nr_gpu_budget_discovery_preferred(void);
+void nr_gpu_budget_discovery_prefer(int on);        /* cell 0 (single-cell receiver) */
+void nr_gpu_budget_discovery_prefer_cell(int cell, int on); /* G4: one flag per cell; the ticket below grants a cell that prefers first */
+int nr_gpu_budget_discovery_preferred(void);        /* any cell */
+
+/* G4: process-wide single-flight discovery ticket. A discovery GPU slice of ANY cell (one kernel chunk with its drain, or one copy/launch
+ * with its drain) holds it, so at most one discovery chunk is on the device however many cells discover; between chunks the device is idle for
+ * the pending body launch of the real-time graphs (nr_gpu_chunk.h). Waiters are served: cells that prefer (ACQUIRE state) first, then the cell
+ * with the least recent discovery GPU time (usage with a one second half life), then arrival order. Recursive per thread (an inner acquire of the
+ * holder only counts). When two or more cells discovered within the last two seconds the held time is also paced to the duty budget (pct of wall
+ * time per discovering cell, so k cells are capped at min(100, k*pct) %); one cell alone is never paced and never waits (N=1 unchanged). Always on (independent of ISAC_GPU_BUDGET).
+ * release() pairs with the innermost acquire of the calling thread and is a no-op without one. */
+void nr_gpu_disc_ticket_acquire(int cell);      /* short hold: FEP, copy, launch with its drain */
+void nr_gpu_disc_ticket_acquire_bulk(int cell); /* kernel chunk of the search: served after short holders, paced to the duty budget */
+void nr_gpu_disc_ticket_release(void);
+typedef struct {
+  uint64_t grants, contended, wait_us, wait_max_us, held_us, held_max_us, pace_us;
+} nr_gpu_disc_ticket_stats_t;
+void nr_gpu_disc_ticket_stats(int cell, nr_gpu_disc_ticket_stats_t *out);
 typedef struct {
   double gpu_budget_used_pct;
   uint64_t discovery_yields, rt_gpu_wait_max_us, rt_gpu_fallbacks, discovery_overruns;
@@ -50,6 +66,8 @@ int nr_gpu_discovery_due(nr_gpu_discovery_duty_t *, uint64_t now, uint64_t epoch
                          uint64_t acquire_us, uint64_t maintain_us, uint64_t recheck_us);
 #ifdef NR_GPU_BUDGET_TEST
 void nr_gpu_budget_test_reset(unsigned pct);
+void nr_gpu_disc_ticket_test_rt_frac(double f);
+void nr_gpu_disc_ticket_test_reset(unsigned pct, uint64_t (*clock_us)(void));
 #endif
 #ifdef __cplusplus
 }

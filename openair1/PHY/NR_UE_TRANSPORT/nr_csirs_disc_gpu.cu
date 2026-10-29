@@ -2,6 +2,8 @@
 #include "nr_csirs_disc_fp_internal.h"
 #include <cuda_runtime.h>
 #include <mutex>
+#include <atomic>
+#include <cufft.h>
 #include "PHY/TOOLS/nr_gpu_memstat_cuda.cuh"
 #include "nr_gpu_green.h"
 #include "../TOOLS/nr_gpu_cuda.h"
@@ -12,12 +14,31 @@
 #include <cstring>
 #include <algorithm>
 
+/* G4: several cells discover in one process. Every piece of GPU state of this module (stream, FEP / accumulate / lattice / FFT workspaces, the resident detector) belongs to a CELL
+ * (CellWs below, allocated at the cell's prepare before the RX fence, sized from that cell's N_RB / antennas / capacity and booked under that cell in the GPU ledger), and every
+ * GPU slice of every cell holds the process-wide discovery ticket (nr_gpu_chunk.h, nr_gpu_budget.c): at most one discovery chunk / copy / FFT is on the device at a time, so the
+ * device is idle between any two for the real-time graphs' pending body launch. The cell is the calling thread's (the cell's discovery worker is bound to it); an unbound
+ * thread uses cell 0, whose mutexes still make that safe. One cell: cell 0, the same calls in the same order as before (the tickets are uncontended). */
+template<class T> struct Buffer {
+  T *p=nullptr;size_t capacity=0;uint32_t tag=0; /* tag: ledger tag the bytes were booked under (nr_gpu_memstat.h) */
+  ~Buffer() = default; /* no CUDA call after runtime teardown at exit() (T26, see nr_csirs_disc_gpu_sweep.cu) */
+/* reserve: Buffer<T>::reserve: grows the device buffer to at least n elements (freeing the old one); returns false on allocation failure.
+ *   Member of the template Buffer used by the FEP and accumulation workspaces.
+ */
+  bool reserve(size_t n) {
+    if(n<=capacity) return true;
+    if(p) {cudaFree(p);nr_gpu_memstat_release_tag(tag,NR_MS_DEV,capacity*sizeof(T));}
+    p=nullptr;capacity=0;
+    if(nr_ms_malloc(&p,n*sizeof(T))!=cudaSuccess) return false;
+    tag=nr_gpu_memstat_current();capacity=n;return true;
+  }
+};
 /* Dedicated nonblocking stream; the host completion is a sleeping poll (nr_gpu_wait.h): neither CUDA's default spin-wait (a whole core) nor an
  * interrupt-based wait (it holds the real-time graphs' body launches) while kernels execute. */
 struct DiscoveryStream {
   cudaStream_t stream=nullptr;cudaEvent_t done=nullptr;
-/* init: creates the discovery CUDA stream (non-blocking) and its blocking-sync completion event; returns false when either creation fails.
- *   Member of DiscoveryStream. Called once from nr_csirs_disc_gpu_ops().
+/* init: creates the discovery CUDA stream (non-blocking) and its completion event; returns false when either creation fails.
+ *   Member of DiscoveryStream. Called once per cell from nr_csirs_disc_gpu_ops() / prepare_host().
  */
   bool init() {
     if(stream && done) return true;
@@ -25,25 +46,61 @@ struct DiscoveryStream {
         && cudaEventCreateWithFlags(&done,cudaEventDisableTiming)==cudaSuccess;
   }
 };
-static DiscoveryStream discovery_stream;
-/* disc_stream: returns the discovery worker's CUDA stream (all discovery kernels and copies run on it). */
-static cudaStream_t disc_stream() {return discovery_stream.stream;}
-/* disc_wait: records the completion event on the discovery stream and blocks the calling CPU thread until the queued work has finished.
- *   Blocking sync (not spin) so that the single discovery CPU is not consumed while kernels run. Returns the CUDA status.
- */
-static cudaError_t disc_wait() {
-  cudaError_t rc=cudaEventRecord(discovery_stream.done,disc_stream());
-  return rc==cudaSuccess?nr_gpu_wait_event(discovery_stream.done):rc;
+struct FepWorkspace {
+  Buffer<cufftComplex> work;
+  Buffer<nr_csirs_disc_fep_slot_t> desc;
+  Buffer<short2> shift,td;
+  cufftHandle plan=0,single_plan=0;int last_fft=0,last_ant=0;bool lut_ready=false;
+};
+namespace resident {struct State;}
+struct FftState {cufftHandle plan=0;int last_fft=0,last_transforms=0;cufftComplex *work=nullptr;size_t capacity=0;uint32_t work_tag=0;};
+struct CellWs {
+  DiscoveryStream ds;
+  FepWorkspace fep;
+  FftState fft;
+  Buffer<int16_t> acc_grid;Buffer<nr_csirs_disc_slot_meta_t> acc_meta;Buffer<uint32_t> acc_x;Buffer<uint8_t> acc_excl; /* accumulate_host */
+  Buffer<uint64_t> lat_ps,lat_pq,lat_dc;Buffer<uint16_t> lat_dm;                                                          /* lattice_host */
+  std::mutex fft_mu,fep_mu,acc_mu,lat_mu;
+  NrGpuChunker c_unpack{1,0,"c_unpack"},c_extract{1,0,"c_extract"};
+  NrGpuChunker c_norm{1,0,"c_norm"},c_pool{1,0,"c_pool"},c_acc{1,0,"c_acc"},c_lp{1,0,"c_lp"},c_ls{1,0,"c_ls"},c_seg{1,0,"c_seg"};
+  resident::State *res=nullptr; /* the resident detector of the cell (allocated by resident::state()) */
+};
+static std::atomic<CellWs *> g_ws[NR_GPU_DISC_CELLS];
+static std::mutex g_ws_mu;
+/* ws: the calling thread's cell workspace, created on first use (host memory only; the cell's prepare_host does it before the RX fence). */
+static CellWs &ws()
+{
+  const int c=nr_gpu_disc_cell();
+  CellWs *w=g_ws[c].load(std::memory_order_acquire);
+  if(!w) {
+    std::lock_guard<std::mutex> g(g_ws_mu);
+    w=g_ws[c].load(std::memory_order_relaxed);
+    if(!w) {w=new CellWs();g_ws[c].store(w,std::memory_order_release);}
+  }
+  return *w;
 }
-/* disc_copy: asynchronous memcpy on the discovery stream followed by disc_wait(); returns the CUDA status of the copy. */
+/* disc_stream: returns the discovery worker's CUDA stream of the calling cell (all discovery kernels and copies of the cell run on it). */
+static cudaStream_t disc_stream() {return ws().ds.stream;}
+/* disc_wait: records the completion event on the discovery stream and polls until the queued work has finished (the CPU of the discovery worker is not consumed while kernels run). Returns the CUDA status. */
+static cudaError_t disc_wait() {
+  CellWs &w=ws();
+  cudaError_t rc=cudaEventRecord(w.ds.done,w.ds.stream);
+  return rc==cudaSuccess?nr_gpu_wait_event(w.ds.done):rc;
+}
+/* disc_copy: asynchronous memcpy on the discovery stream followed by disc_wait(), under the discovery ticket; returns the CUDA status of the copy. */
 static cudaError_t disc_copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
+  NrGpuDiscTicket ticket;
   /* wait for queued kernels first: a copy queued behind a long kernel stalls other streams' copies [MEASURED, DGX 300-400 ms] */
   {cudaError_t f=disc_wait();if(f!=cudaSuccess) return f;}
   cudaError_t rc=cudaMemcpyAsync(dst,src,n,kind,disc_stream());
   return rc==cudaSuccess?disc_wait():rc;
 }
-/* disc_zero: asynchronous memset of n bytes on the discovery stream (no wait); the caller waits before reading the result. */
-static cudaError_t disc_zero(void *dst,int value,size_t n) {return cudaMemsetAsync(dst,value,n,disc_stream());}
+/* disc_zero: memset of n bytes on the discovery stream, drained under the discovery ticket (the memset of a history is up to a few hundred MB: it must not overlap another cell's chunk). */
+static cudaError_t disc_zero(void *dst,int value,size_t n) {
+  NrGpuDiscTicket ticket;
+  cudaError_t rc=cudaMemsetAsync(dst,value,n,disc_stream());
+  return rc==cudaSuccess?disc_wait():rc;
+}
 /* disc_chunks: runs a kernel over `blocks` blocks in chunks of about 1 ms with the stream drained in between (nr_gpu_chunk.h): a long discovery kernel would hold
  *   the device-side body launch of the real-time pass graphs. launch(first,n) enqueues blocks [first,first+n) (the kernel adds `first` to blockIdx.x). The blocks are independent, so the result is unchanged. */
 template<class L> static cudaError_t disc_chunks(NrGpuChunker &c,long blocks,L launch)
@@ -130,13 +187,14 @@ static int fold_gpu(void *opaque,int p,uint64_t *sum,uint64_t *sq)
   Fold *f=(Fold *)opaque;uint64_t *ds=nullptr,*dq=nullptr;
   size_t bytes=(size_t)p*f->nr*sizeof(*sum);int ret=-1;
   NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: per-call scratch of the footprint search, freed below
+  NrGpuDiscTicket ticket; // G4: kernel + drain of this cell hold the discovery ticket
   if(nr_ms_malloc(&ds,bytes)!=cudaSuccess || nr_ms_malloc(&dq,bytes)!=cudaSuccess) goto done;
   if(disc_zero(ds,0,bytes)!=cudaSuccess || disc_zero(dq,0,bytes)!=cudaSuccess) goto done;
   fold_kernel<<<(f->nr+127)/128,128,0,disc_stream()>>>(f->x,f->meta,f->nt,f->nr,p,ds,dq);
   if(cudaGetLastError()!=cudaSuccess || disc_copy(sum,ds,bytes,cudaMemcpyDeviceToHost)!=cudaSuccess ||
       disc_copy(sq,dq,bytes,cudaMemcpyDeviceToHost)!=cudaSuccess) goto done;
   ret=0;
-done: nr_ms_free(ds,bytes);nr_ms_free(dq,bytes);return ret;
+done: ticket.drop();nr_ms_free(ds,bytes);nr_ms_free(dq,bytes);return ret;
 }
 /* footprints: GPU footprint detector for one batch: uploads the ring grid and metadata, normalises and pools it on the device, then runs the CPU cluster search with fold_gpu() for the statistics.
  *   Returns the footprint count, or -1. Frees its device buffers. Installed in the ops table as the detect-footprints entry (nr_csirs_disc_backend.c calls it through load_module).
@@ -150,6 +208,7 @@ static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t
   size_t gb=(size_t)r->capacity*r->slot_stride*sizeof(int16_t), xb=(size_t)f.nt*f.nr*sizeof(uint32_t);
   /* Explicit-copy baseline accepts ordinary malloc or unified U1 rings. */
   NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: per-call scratch, freed below
+  NrGpuDiscTicket ticket; // G4
   if(nr_ms_malloc(&grid,gb)!=cudaSuccess || nr_ms_malloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
      nr_ms_malloc(&f.x,xb)!=cudaSuccess) goto done;
   if(disc_copy(grid,r->grid_base,gb,cudaMemcpyHostToDevice)!=cudaSuccess ||
@@ -163,8 +222,9 @@ static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t
   if(cudaGetLastError()!=cudaSuccess) goto done;
   pool<<<(r->capacity*168*tiles+127)/128,128,0,disc_stream()>>>(f.x,r->capacity,r->n_rb,tiles);
   if(cudaGetLastError()!=cudaSuccess || disc_wait()!=cudaSuccess) goto done;
+  ticket.drop(); // the cluster search is host work (fold_gpu takes the ticket per fold)
   ret=nr_disc_fp_cluster(r,cfg,out,max_out,fold_gpu,&f);
-done: nr_ms_free(grid,gb);nr_ms_free(f.meta,r->capacity*sizeof(*f.meta));nr_ms_free(f.x,xb);nr_ms_free(excl,(size_t)14*12*r->n_rb);return ret;
+done: ticket.drop();nr_ms_free(grid,gb);nr_ms_free(f.meta,r->capacity*sizeof(*f.meta));nr_ms_free(f.x,xb);nr_ms_free(excl,(size_t)14*12*r->n_rb);return ret;
 }
 /* normalize_host: GPU normalisation of a ring into the host output array (the ops table's normalise entry): upload, normalize and pool kernels, then a copy back.
  *   Returns 0, or -1 on failure. Keeps the output layout of nr_disc_fp_normalize().
@@ -177,6 +237,7 @@ static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_c
   size_t gb=(size_t)r->capacity*r->slot_stride*sizeof(int16_t), xb=(size_t)f.nt*f.nr*sizeof(uint32_t);
   /* Explicit-copy baseline accepts ordinary malloc or unified U1 rings. */
   NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: per-call scratch, freed below
+  NrGpuDiscTicket ticket; // G4
   if(nr_ms_malloc(&grid,gb)!=cudaSuccess || nr_ms_malloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
      nr_ms_malloc(&f.x,xb)!=cudaSuccess) goto done;
   if(disc_copy(grid,r->grid_base,gb,cudaMemcpyHostToDevice)!=cudaSuccess ||
@@ -191,7 +252,7 @@ static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_c
   pool<<<(r->capacity*168*tiles+127)/128,128,0,disc_stream()>>>(f.x,r->capacity,r->n_rb,tiles);
   if(cudaGetLastError()!=cudaSuccess || disc_wait()!=cudaSuccess) goto done;
   ret=disc_copy(out,f.x,xb,cudaMemcpyDeviceToHost)==cudaSuccess?0:-1;
-done: nr_ms_free(grid,gb);nr_ms_free(f.meta,r->capacity*sizeof(*f.meta));nr_ms_free(f.x,xb);nr_ms_free(excl,(size_t)14*12*r->n_rb);return ret;
+done: ticket.drop();nr_ms_free(grid,gb);nr_ms_free(f.meta,r->capacity*sizeof(*f.meta));nr_ms_free(f.x,xb);nr_ms_free(excl,(size_t)14*12*r->n_rb);return ret;
 }
 static int lattice_host(int,int,uint64_t,const uint64_t *,const uint64_t *,const uint64_t *,const uint64_t *,const uint64_t *,uint16_t *);
 static int fep_host(const nr_csirs_disc_fep_cfg_t *,const nr_csirs_disc_fep_slot_t *,int,nr_csirs_disc_ring_t *,int);
@@ -211,6 +272,7 @@ static int readback(const nr_csirs_disc_ring_t *r) {
 static int upload_symbols(nr_csirs_disc_ring_t *r,uint16_t symbols)
 {
   if(!r->device_grid) return -1;
+  NrGpuDiscTicket ticket; // G4: the copies and their drain
   for(int a=0;a<r->n_ant;++a) for(int l=0;l<14;++l) if(symbols&(1u<<l)) {
     size_t at=((size_t)a*14+l)*24*r->n_rb;
     if(cudaMemcpyAsync(r->device_grid+at,r->grid_base+at,24*r->n_rb*sizeof(int16_t),cudaMemcpyHostToDevice,disc_stream())!=cudaSuccess) return -1;
@@ -248,7 +310,7 @@ static void lmem_prereserve(void);
 extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
 {
   if(!nr_gpu_module_ready()) return nullptr; // CPU tier: no device, module/arch mismatch or forced CPU (the caller keeps the CPU path)
-  if(!discovery_stream.init()) return nullptr;
+  if(!ws().ds.init()) return nullptr;
   lmem_prereserve();
   int devices=0;if(cudaGetDeviceCount(&devices)!=cudaSuccess || devices<1) return nullptr;
   static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host,fft_host,fep_host,accumulate_host,lattice_host,device_alloc,device_free,prepare_host,resident::detect,resident::reset,nullptr,nullptr,nullptr,readback,upload_symbols};return &ops;
@@ -301,12 +363,13 @@ __global__ static void fft_pack(const cufftComplex *in, short2 *out, size_t n, f
  */
 static int fft_host(int fft, int transforms, const int16_t *in, int16_t *out)
 {
-  static std::mutex mutex;
-  std::lock_guard<std::mutex> guard(mutex);
-  static cufftHandle plan;
-  static int last_fft, last_transforms;
-  static cufftComplex *work;
-  static size_t capacity;
+  CellWs &cw=ws();
+  std::lock_guard<std::mutex> guard(cw.fft_mu);
+  NrGpuDiscTicket ticket; // G4: the unpack / FFT / pack and their drain hold the discovery ticket
+  cufftHandle &plan=cw.fft.plan;
+  int &last_fft=cw.fft.last_fft,&last_transforms=cw.fft.last_transforms;
+  cufftComplex *&work=cw.fft.work;
+  size_t &capacity=cw.fft.capacity;
   if (fft<=0 || transforms<=0 || !in || !out) return -1;
   const size_t n=(size_t)fft*transforms;
   if (last_fft!=fft || last_transforms!=transforms) {
@@ -317,7 +380,7 @@ static int fft_host(int fft, int transforms, const int16_t *in, int16_t *out)
     last_fft=fft;last_transforms=transforms;
   }
   if (capacity<n) {
-    static uint32_t work_tag;
+    uint32_t &work_tag=cw.fft.work_tag;
     NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: the batched FFT scratch (grows, never shrinks)
     if (work) {cudaFree(work);nr_gpu_memstat_release_tag(work_tag,NR_MS_DEV,capacity*sizeof(*work));}
     work=nullptr;capacity=0;
@@ -436,33 +499,12 @@ __global__ static void fep_extract(nr_csirs_disc_fep_cfg_t cfg,const nr_csirs_di
   grid[(size_t)((first+t)%capacity)*stride+id%stride]=x;
 }
 
-template<class T> struct Buffer {
-  T *p=nullptr;size_t capacity=0;uint32_t tag=0; /* tag: ledger tag the bytes were booked under (nr_gpu_memstat.h) */
-  ~Buffer() = default; /* static objects: no CUDA call after runtime teardown at exit() (T26, see nr_csirs_disc_gpu_sweep.cu) */
-/* reserve: Buffer<T>::reserve: grows the device buffer to at least n elements (freeing the old one); returns false on allocation failure.
- *   Member of the template Buffer used by the FEP and accumulation workspaces.
- */
-  bool reserve(size_t n) {
-    if(n<=capacity) return true;
-    if(p) {cudaFree(p);nr_gpu_memstat_release_tag(tag,NR_MS_DEV,capacity*sizeof(T));}
-    p=nullptr;capacity=0;
-    if(nr_ms_malloc(&p,n*sizeof(T))!=cudaSuccess) return false;
-    tag=nr_gpu_memstat_current();capacity=n;return true;
-  }
-};
-struct FepWorkspace {
-  Buffer<cufftComplex> work;
-  Buffer<nr_csirs_disc_fep_slot_t> desc;
-  Buffer<short2> shift,td;
-  cufftHandle plan=0,single_plan=0;int last_fft=0,last_ant=0;bool lut_ready=false;
-};
-static FepWorkspace fep_workspace;
 /* fep_prepare: prepares the FEP workspace for a carrier (once per FFT size and antenna count): loads the sine LUT, creates the batch and single-slot cuFFT plans, and reserves the buffers.
  *   Returns 0, or -1 on failure. Called by fep_host() and prepare_host().
  */
 static int fep_prepare(int fft,int ant,size_t stride)
 {
-  auto &f=fep_workspace;
+  auto &f=ws().fep;
   NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: FEP workspace (batch x antennas x FFT) of the preparing cell
   if(!f.lut_ready) {
     short host[129];for(int i=0;i<=128;++i) host[i]=(short)round(sin(3.14159265358979323846*i/256)*16384);
@@ -487,7 +529,8 @@ static int fep_prepare(int fft,int ant,size_t stride)
 static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slot_t *slots,
                     int n,nr_csirs_disc_ring_t *ring,int first)
 {
-  static std::mutex mutex;std::lock_guard<std::mutex> guard(mutex);
+  CellWs &cw=ws();std::lock_guard<std::mutex> guard(cw.fep_mu);
+  auto &fep_workspace=cw.fep;
   auto &work=fep_workspace.work;auto &desc=fep_workspace.desc;auto &shift=fep_workspace.shift;
   auto &plan=fep_workspace.plan;
   if(!c || !slots || !ring || n<1 || n>NR_CSIRS_DISC_DEFAULT_BATCH || c->fft<128 || c->fft%128
@@ -504,10 +547,13 @@ static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slo
   size_t active=(size_t)n*c->n_ant*14*c->fft;
   if(active<count && disc_zero(work.p+active,0,(count-active)*sizeof(cufftComplex))!=cudaSuccess) return -1;
   nr_csirs_disc_fep_cfg_t cfg=*c;cfg.timeshift=(int16_t *)shift.p;
-  static NrGpuChunker c_unpack{1,0,"c_unpack"}; static NrGpuChunker c_extract{1,0,"c_extract"};
+  NrGpuChunker &c_unpack=cw.c_unpack,&c_extract=cw.c_extract;
   if(disc_chunks(c_unpack,(long)n*14,[&](long f,long k){fep_unpack<<<k,128,0,disc_stream()>>>(cfg,desc.p,work.p,(int)f);})!=cudaSuccess) return -1;
-  if(cufftExecC2C(n==1?fep_workspace.single_plan:plan,work.p,work.p,CUFFT_FORWARD)!=CUFFT_SUCCESS) { /* the FFT of one batch is not chunked (cuFFT plan batch): about 0.7-5 ms [MEASURED gsV2N] */
-    disc_wait();return -1;
+  { /* the FFT of one batch is not chunked (cuFFT plan batch): about 0.7-5 ms [MEASURED gsV2N]; G4: it holds the discovery ticket until it has drained */
+    NrGpuDiscTicket ticket;
+    if(cufftExecC2C(n==1?fep_workspace.single_plan:plan,work.p,work.p,CUFFT_FORWARD)!=CUFFT_SUCCESS || disc_wait()!=cudaSuccess) {
+      disc_wait();return -1;
+    }
   }
   size_t out=(size_t)n*c->n_ant*14*12*c->n_rb;
   short2 *dst=(short2 *)(ring->device_grid?ring->device_grid:ring->grid_base);
@@ -539,10 +585,10 @@ __global__ static void accumulate_kernel(const uint32_t *x,const nr_csirs_disc_s
 static int accumulate_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,
                             uint64_t *sum,uint64_t *sq,uint64_t *s80,uint64_t *s64,uint64_t *total,uint64_t *totalq)
 {
-  static std::mutex mutex;std::lock_guard<std::mutex> guard(mutex);
-  static Buffer<int16_t> grid;static Buffer<nr_csirs_disc_slot_meta_t> meta;
-  static Buffer<uint32_t> x;static Buffer<uint8_t> excl;
+  CellWs &cw=ws();std::lock_guard<std::mutex> guard(cw.acc_mu);
+  auto &grid=cw.acc_grid;auto &meta=cw.acc_meta;auto &x=cw.acc_x;auto &excl=cw.acc_excl;
   if(!nr_disc_fp_valid(r)) return -1;
+  NrGpuDiscTicket ticket; // G4: the batch (normalise, pool, accumulate) and its drain hold the discovery ticket
   NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: explicit-copy staging of the accumulator (grows)
   int tiles=(r->n_rb+15)/16,nr=14*12*r->n_rb+168*tiles;
   size_t gb=(size_t)r->capacity*r->slot_stride,xb=(size_t)r->capacity*nr;
@@ -636,9 +682,9 @@ __global__ static void lattice_screen(int p,int tiles,uint64_t nt,const uint64_t
 static int lattice_host(int rb,int p,uint64_t nt,const uint64_t *counts,const uint64_t *sum,
                          const uint64_t *sq,const uint64_t *total,const uint64_t *totalq,uint16_t *masks)
 {
-  static std::mutex mutex;std::lock_guard<std::mutex> guard(mutex);
-  static Buffer<uint64_t> ps,pq,dc;
-  static Buffer<uint16_t> dm;
+  CellWs &cw=ws();std::lock_guard<std::mutex> guard(cw.lat_mu);
+  auto &ps=cw.lat_ps;auto &pq=cw.lat_pq;auto &dc=cw.lat_dc;auto &dm=cw.lat_dm;
+  NrGpuDiscTicket ticket; // G4
   int tiles=(rb+15)/16,pooled=168*tiles,nr=14*12*rb+pooled;
   size_t count=(size_t)p*14*tiles*6;
   NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: lattice screen scratch (grows)
@@ -660,8 +706,10 @@ static int lattice_host(int rb,int p,uint64_t nt,const uint64_t *counts,const ui
 static int prepare_host(int rb,int ant,int capacity,int fft,size_t stride)
 {
   NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: the resident detector and FEP workspace of this cell (sized from rb, ant, capacity)
+  if(!ws().ds.init()) return -1; // this cell's stream and completion event (before the RX fence)
+  NrGpuDiscTicket ticket; // G4: the warm-up of this cell holds the discovery ticket (a cell added while another discovers waits its turn)
   if(!resident::prepare(rb,ant,capacity) || fep_prepare(fft,ant,stride)<0) return -1;
-  auto &f=fep_workspace;
+  auto &f=ws().fep;
   // Exercise plans and kernel local storage before RX, including the large
   // per-symbol segmentation frame. Subsequent calls only clear retained state.
   nr_csirs_disc_fep_slot_t descriptors[NR_CSIRS_DISC_DEFAULT_BATCH]={};
@@ -678,12 +726,12 @@ static int prepare_host(int rb,int ant,int capacity,int fft,size_t stride)
   if(cufftExecC2C(f.plan,f.work.p,f.work.p,CUFFT_FORWARD)!=CUFFT_SUCCESS
      || cufftExecC2C(f.single_plan,f.work.p,f.work.p,CUFFT_FORWARD)!=CUFFT_SUCCESS) return -1;
   size_t n=(size_t)NR_CSIRS_DISC_DEFAULT_BATCH*ant*14*12*rb;
-  fep_extract<<<(n+255)/256,256,0,disc_stream()>>>(cfg,f.desc.p,f.work.p,(short2 *)resident::state.grid.p,100,100,0);
+  fep_extract<<<(n+255)/256,256,0,disc_stream()>>>(cfg,f.desc.p,f.work.p,(short2 *)resident::state().grid.p,100,100,0);
   int16_t dummy=0;nr_csirs_disc_slot_meta_t meta={};nr_csirs_disc_fp_t out[128];
   nr_csirs_disc_ring_t ring={};ring.n_ant=ant;ring.n_rb=rb;ring.capacity=1;ring.slots_per_frame=20;
   ring.slot_stride=(size_t)ant*14*24*rb;ring.grid_base=&dummy;ring.meta=&meta;
   if(resident::detect(&ring,nullptr,out,128,false)<0) return -1;
-  auto &h=resident::state;int tiles=(rb+15)/16,nr=14*12*rb+168*tiles;
+  auto &h=resident::state();int tiles=(rb+15)/16,nr=14*12*rb+168*tiles;
   if(disc_zero(h.meta.p,0,sizeof(meta))!=cudaSuccess || disc_zero(h.x.p,0,nr*4)!=cudaSuccess) return -1;
   normalize<<<(rb*14+127)/128,128,0,disc_stream()>>>(h.grid.p,h.meta.p,ring.slot_stride,1,ant,rb,0,nullptr,h.x.p,tiles,1);
   pool<<<(168*tiles+127)/128,128,0,disc_stream()>>>(h.x.p,1,rb,tiles);
