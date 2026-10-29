@@ -16,6 +16,7 @@ extern "C" {
 #include "nr_pdcch_ul_layout_lock.h"
 #include "nr_pusch_passive_ul_ids.h"
 #include "nr_pusch_ul_bgdisc.h"
+#include "nr_ul_cell_prealloc.h"
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 #include "executables/softmodem-common.h"
@@ -407,6 +408,39 @@ TEST(MpciA6UlBgdisc, WorkerAndStatsPerCell)
   EXPECT_EQ(g_ran_rnti_cell0.load(), 0x1111) << "cell 1's job ran on cell 0's worker";
   EXPECT_EQ(g_bad_cell.load(), 0);
   { Bind b(0); nr_ul_bgdisc_stop(); }
+  { Bind b(1); nr_ul_bgdisc_stop(); }
+}
+
+// MPCI-LAZY: the lazily started workers are created parked per cell BEFORE the fence; the first use only arms them; a late start (after stop) still works.
+TEST(MpciLazy, WorkersParkedPerCellBeforeTheFenceAndArmedLater)
+{
+  for (int cell = 0; cell < 2; cell++) {
+    Bind b(cell);
+    nr_ul_layout_cell_prealloc(cell);
+    nr_ul_bgdisc_cell_prealloc(cell);
+    nr_pdcch_uss_tracker_cell_prealloc(cell);
+  }
+  for (int cell = 0; cell < 2; cell++) {
+    EXPECT_EQ(nr_ul_layout_parked_state(cell), 1) << "ul_layout eval, cell " << cell;
+    EXPECT_EQ(nr_ul_bgdisc_parked_state(cell), 1) << "ulBgDisc, cell " << cell;
+    EXPECT_EQ(nr_pdcch_uss_tracker_parked_state(cell), 1) << "ussTracker, cell " << cell;
+  }
+  // arming: cell 1's ulBgDisc runs a job through the parked worker (bound to cell 1), cell 0's stays parked
+  std::vector<c16_t> iq(4096);
+  { Bind b(1); ASSERT_EQ(nr_ul_bgdisc_start(4, nullptr), 0); }  // queue up, no worker: the parked thread stays parked
+  g_ran_rnti_cell0 = 0; g_ran_rnti_cell1 = 0; g_bad_cell = 0;
+  { Bind b(1); const nr_ul_bgdisc_job_t j = Job(0x4444, iq); ASSERT_EQ(nr_ul_bgdisc_submit(&j), 1); ASSERT_EQ(nr_ul_bgdisc_start(4, Runner), 0); }
+  for (int i = 0; i < 300 && g_ran_rnti_cell1 == 0; i++) usleep(10000);
+  EXPECT_EQ(g_ran_rnti_cell1.load(), 0x4444);
+  EXPECT_EQ(nr_ul_bgdisc_parked_state(1), 2);
+  EXPECT_EQ(nr_ul_bgdisc_parked_state(0), 1);
+  EXPECT_EQ(g_ran_rnti_cell0.load(), 0);
+  EXPECT_EQ(g_bad_cell.load(), 0);
+  { Bind b(1); nr_ul_bgdisc_stop(); }
+  // a late start (re-add after stop): no parked thread left, the old lazy start still works
+  { Bind b(1); ASSERT_EQ(nr_ul_bgdisc_start(4, nullptr), 0); const nr_ul_bgdisc_job_t j = Job(0x5555, iq); ASSERT_EQ(nr_ul_bgdisc_submit(&j), 1); ASSERT_EQ(nr_ul_bgdisc_start(4, Runner), 0); }
+  for (int i = 0; i < 300 && g_ran_rnti_cell1 != 0x5555; i++) usleep(10000);
+  EXPECT_EQ(g_ran_rnti_cell1.load(), 0x5555);
   { Bind b(1); nr_ul_bgdisc_stop(); }
 }
 

@@ -11,6 +11,7 @@ extern "C" {
 
 /* All heap objects of the PDCCH monitor modules of `cell` (calls the two per-file functions below). Idempotent, thread safe. */
 void nr_pdcch_cell_prealloc(int cell);
+int nr_pdcch_workers_parked_state(int cell, int which); /* which: 0 janon, 1 disc, 2 nid; 0 none, 1 parked, 2 armed */
 void nr_pdcch_blind_monitor_cell_prealloc(int cell); /* nr_pdcch_blind_monitor.c: the lookahead lane table */
 void nr_pdcch_coreset_bank_cell_prealloc(int cell);  /* nr_pdcch_coreset_bank.c: the verified and dormant CORESET banks */
 

@@ -101,6 +101,7 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <time.h>
 #include <sched.h>
 #include <sys/prctl.h>
@@ -283,6 +284,8 @@ NR_CELL_STATIC_INIT(pthread_cond_t, g_dq_cv, PTHREAD_COND_INITIALIZER);
 #define g_dq_cv NR_CELL_REF(g_dq_cv)
 NR_CELL_STATIC(pthread_t, g_dq_thr);
 #define g_dq_thr NR_CELL_REF(g_dq_thr)
+NR_CELL_STATIC(nr_cell_parked_t, g_dq_parked); /* lazy-thread audit: buffers + parked worker built in nr_pdsch_passive_queue_cell_prealloc (before the fence) */
+#define g_dq_parked NR_CELL_REF(g_dq_parked)
 NR_CELL_STATIC(_Atomic uint64_t, g_dscan_dropped);
 #define g_dscan_dropped NR_CELL_REF(g_dscan_dropped)
 /* dmrs_scan_run: the scan itself (cache fill, votes, log); rx = the DM-RS symbol per antenna. */
@@ -357,8 +360,9 @@ static bool dmrs_scan_submit(uint16_t rnti, int64_t abs_slot, int nr_slot, int s
   if (nant <= 0 || nant > 8 || N <= 0 || N > DSCAN_MAXN) return false;
   pthread_mutex_lock(&g_dq_mu);
   if (!g_dq_started) {
-    for (int i = 0; i < DSCAN_Q; i++) g_dq[i].buf = malloc((size_t)8 * DSCAN_MAXN * 2 * sizeof(int16_t));
+    for (int i = 0; i < DSCAN_Q; i++) if (!g_dq[i].buf) g_dq[i].buf = malloc((size_t)8 * DSCAN_MAXN * 2 * sizeof(int16_t)); /* normally built by the prealloc */
     for (int i = 0; i < DSCAN_Q; i++) if (!g_dq[i].buf) { pthread_mutex_unlock(&g_dq_mu); return false; }
+    if (nr_cell_parked_arm(&g_dq_parked) != 0) /* not prepared (failed prepare, late start): the old lazy start */
     threadCreate(&g_dq_thr, dmrs_scan_worker, (void *)(intptr_t)nr_cell_idx(), "dmrsScan", nr_pool_site_float_merged() ? -1 : nr_env_list_nth("ISAC_DMRS_SCAN_CORE", 0, -1), 0); /* mpci B5: merged float lane = leases, no pin */
     g_dq_started = true;
   }
@@ -3032,6 +3036,15 @@ void nr_pdsch_passive_queue_stop(void)
 /* mpci A5: allocates cell `cell`'s heap objects (zeroed) before the RX fence; see nr_pdsch_cell_prealloc.h */
 void nr_pdsch_passive_queue_cell_prealloc(int cell)
 {
+  { /* lazy-thread audit: dmrsScan ring buffers + parked worker of this cell (the first scan job only arms it) */
+    int ok = 1;
+    for (int i = 0; i < DSCAN_Q; i++) {
+      if (!g_dq_cells[cell][i].buf) g_dq_cells[cell][i].buf = malloc((size_t)8 * DSCAN_MAXN * 2 * sizeof(int16_t));
+      if (!g_dq_cells[cell][i].buf) ok = 0;
+    }
+    if (!ok) LOG_E(PHY, "[c%d] dmrsScan prepare failed before the fence: step=malloc errno=%d (%s)\n", cell, errno, strerror(errno));
+    else (void)nr_cell_parked_prepare(&g_dq_parked_cells[cell], "dmrsScan", dmrs_scan_worker, (void *)(intptr_t)cell, cell);
+  }
   NR_CELL_HEAP_PREALLOC(g_rnti_dec_arr_t, g_rnti_dec, cell);
   NR_CELL_HEAP_PREALLOC(g_rnti_ok_arr_t, g_rnti_ok, cell);
   NR_CELL_HEAP_PREALLOC(g_ring_arr_t, g_ring, cell);

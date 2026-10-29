@@ -475,11 +475,22 @@ static void tables_init(void)
 /* tracker_init: one-time setup (pthread_once): builds the table of allowed USS hash positions per CORESET size and starts the tracker worker.
  *   Disables the tracker when the worker cannot be started. Callers: the USS tracker entry points in this file.
  */
+static void *tracker_worker(void *cell_arg);
+NR_CELL_STATIC(nr_cell_parked_t, g_parked); /* lazy-thread audit: worker parked before the fence (nr_pdcch_uss_tracker_cell_prealloc), tracker_init arms it */
+int nr_pdcch_uss_tracker_parked_state(int cell) { return nr_cell_parked_state(&g_parked_cells[cell]); }
+void nr_pdcch_uss_tracker_cell_prealloc(int cell)
+{
+  (void)nr_cell_parked_prepare(&g_parked_cells[cell], "ussTracker", tracker_worker, (void *)(intptr_t)cell, cell);
+}
 static void tracker_init(void)
 {
   g_enabled = true;
   tables_init();
-  if (g_enabled && nr_core_plan_create(&g_thread, NULL, tracker_worker, (void *)(intptr_t)nr_cell_idx(), nr_core_plan_cpu(NR_CP_USS, 0, -1)) == 0) {
+  if (g_enabled && nr_cell_parked_arm(&g_parked_cells[nr_cell_idx()]) == 0) {
+    g_thread = nr_cell_parked_thread(&g_parked_cells[nr_cell_idx()]);
+    g_thread_started = true;
+    LOG_A(PHY, "SENSING: USS_TRACK enabled: bounded producer, asynchronous 65535-RNTI hash scorer\n");
+  } else if (g_enabled && nr_core_plan_create(&g_thread, NULL, tracker_worker, (void *)(intptr_t)nr_cell_idx(), nr_core_plan_cpu(NR_CP_USS, 0, -1)) == 0) {
     g_thread_started = true;
     LOG_A(PHY, "SENSING: USS_TRACK enabled: bounded producer, asynchronous 65535-RNTI hash scorer\n");
   } else {

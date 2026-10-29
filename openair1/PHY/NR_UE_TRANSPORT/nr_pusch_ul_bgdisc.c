@@ -110,6 +110,15 @@ static void *worker(void *arg)
   return NULL;
 }
 
+NR_CELL_STATIC(nr_cell_parked_t, g_parked); /* lazy-thread audit: created parked before the fence, nr_ul_bgdisc_start only arms it */
+#define g_parked NR_CELL_REF(g_parked)
+void nr_ul_bgdisc_cell_prealloc(int cell)
+{
+  (void)nr_cell_parked_prepare(&g_parked_cells[cell], "ulBgDisc", worker, NULL, cell);
+}
+
+int nr_ul_bgdisc_parked_state(int cell) { return nr_cell_parked_state(&g_parked_cells[cell]); }
+
 void nr_ul_bgdisc_step(void) { nr_pool_site_float_yield(); }
 
 int nr_ul_bgdisc_start(int depth, nr_ul_bgdisc_run_fn run)
@@ -124,7 +133,8 @@ int nr_ul_bgdisc_start(int depth, nr_ul_bgdisc_run_fn run)
   pthread_mutex_unlock(&g_lock);
   if (!go) return 0;
   g_run = run;
-  if (nr_cell_thread_create(&g_thr, NULL, worker, NULL, -1)) return -1; /* the worker serves the cell of the caller */
+  if (nr_cell_parked_arm(&g_parked) == 0) g_thr = nr_cell_parked_thread(&g_parked);
+  else if (nr_cell_thread_create(&g_thr, NULL, worker, NULL, -1)) return -1; /* not prepared / restart: the old lazy start (cell of the caller) */
   pthread_setname_np(g_thr, "ulBgDisc");
   g_run_active = 1;
   return 0;
