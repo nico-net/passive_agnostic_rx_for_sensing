@@ -68,6 +68,7 @@ int nr_pdsch_gpu_chest_pass_inputs(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *
 int nr_fattails_pin_all(void); /* always 1: pin and pre-populate every GPU-read host buffer */
 int nr_gpu_check_async_every(void);
 int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name); /* one SCHED_OTHER nice-19 worker draining q */
+int nr_bgq_prepare(nr_bgq_t *q, unsigned cap, const char *name, int cell); /* parked worker built before the fence; nr_bgq_start then only arms it */
 int nr_gpu_check_async_room(void);
 int nr_gpu_check_async_submit(nr_bgq_fn fn, void *job);
 void nr_gpu_check_async_drop(void);
