@@ -686,3 +686,5 @@ R12. **NO FLAGS (operator, 2026-10-25).** Supersedes Global Constraint 4's test-
 5. Push mpci-main (operator OK required).
 6. Re-measure and fix PROJECT_MEMORY §31 (DL health, UL, DCI 1_1).
 7. C3/G8 UL HARQ soft combining: only after the §31.2 UL fixes give a working UL pipeline (UL CRC decoding OTA); combining needs first transmissions that decode.
+Update 2026-10-29 15:xx (operator): mpci/int-1029 merged into mpci-main (3110334ccb) on replay evidence; the integration OTA (item 1) is
+deferred (host needed by another user; captures around 17:40 or later) and must run before item 6 (§31 fixes). Items 2-4 proceed now.
