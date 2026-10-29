@@ -72,10 +72,13 @@ static void cfg_locked(void)
   if (g_cfg_done)
     return;
   g_cfg_done = true;
+  char share[64] = ""; /* the per-cell split is printed only with more than one cell: at N=1 the line stays as before */
+  if (nr_cell_count() > 1)
+    snprintf(share, sizeof(share), " (process cap %.0f / %d active cells)", g_cpu_pct, active_cells_locked());
   LOG_A(PHY,
-        "SENSING: TD_CB0 wiring on: B=%d budget=%.0f us/grant cpu_pct=%.0f (process cap %.0f / %d active cells) ncpu=%d threads=%d B0=%d rank_max=%d "
+        "SENSING: TD_CB0 wiring on: B=%d budget=%.0f us/grant cpu_pct=%.0f%s ncpu=%d threads=%d B0=%d rank_max=%d "
         "backend=%d engine_wired=%d\n",
-        g_sched.b_target, g_sched.budget_us, g_sched.cpu_pct, g_cpu_pct, active_cells_locked(), g_sched.ncpu, g_threads, nr_td_cb0_sched_B(&g_sched), g_rank_max,
+        g_sched.b_target, g_sched.budget_us, g_sched.cpu_pct, share, g_sched.ncpu, g_threads, nr_td_cb0_sched_B(&g_sched), g_rank_max,
         nr_td_cb0_backend_mode(), nr_td_cb0a_engine_wired() ? 1 : 0);
 }
 

@@ -56,6 +56,10 @@ HEX = re.compile(r"0x[0-9a-fA-F]+")
 NUM = re.compile(r"-?\d+(?:\.\d+)?")
 NLIST = re.compile(r"(?:N[ ,]){2,}N")
 MAXT = 150
+# build identity that differs between any two builds and says nothing about behaviour: worktree/run paths, branch name and hash of the Version line
+BUILDID = re.compile(r"/home/\S*?/(?:wt|ota_runs)/\S+|Branch: \S+|Hash: \S+|\b[0-9a-f]{10,40}\b")
+# lines whose field set depends on the data (which counters are non-zero): one template per prefix
+FIELDSET = re.compile(r"^(.*?SENSING: (?:PDSCH_SOLVER why|SEGIDXC?|PDSCHQ per-rnti|SEARCH_SPACE INFERRED))\b.*")
 
 
 def norm(line):
@@ -63,10 +67,12 @@ def norm(line):
     _, l = cellsel.split(line)
     l = ANSI.sub("", l)
     l = TS.sub("", l, count=1).strip()
+    l = BUILDID.sub("B", l)
     l = HEX.sub("H", l)
     l = NUM.sub("N", l)
     l = NLIST.sub("N+", l)
     l = re.sub(r"\s+", " ", l)
+    l = FIELDSET.sub(r"\1 ...", l)
     return l[:MAXT]
 
 
