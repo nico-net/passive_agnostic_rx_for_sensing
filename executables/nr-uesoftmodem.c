@@ -96,6 +96,7 @@ unsigned short config_frames[4] = {2,9,11,13};
 #include "common/utils/nr_core_plan.h"
 #include "common/utils/nr_core_layout.h"
 #include "common/utils/nr_core_pool.h"
+#include "openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h"
 #include "common/utils/nr_cell.h"
 #include "common/utils/nr_cell_dash.h" /* MPCI-DASH P2 CELL_GPU / P7 CELL_BUDGET formatters (lines only when nr_cell_count() > 1) */
 #include "PHY/TOOLS/nr_gpu_memstat.h"
@@ -344,6 +345,23 @@ static int mpci_run_dir(char *out, size_t n)
 static int mpci_cell_prealloc(void *ctx, int k, const nr_mgr_slot_t *slot);
 static int mpci_cell_start(void *ctx, int k, const nr_mgr_slot_t *slot, int reactivation);
 static void mpci_cell_retire(void *ctx, int k, const nr_mgr_slot_t *slot);
+/* B6 admission input: the essential token demand measured on the running cells of the site pool and the essential wait fraction of the pool (nothing is a constant) */
+static void mpci_pool_measure(void *ctx, nr_host_caps_t *caps)
+{
+  (void)ctx;
+  int m = 0;
+  for (int k = 0; k < NR_CELL_MAX && m < NR_ADMIT_POOL_K; k++) {
+    const nr_mgr_slot_t *sl = nr_cell_mgr_slot(&g_cells.mgr, k);
+    double e = 0, sh = 0;
+    if (sl && sl->active && nr_pool_site_cell_demand(k, &e, &sh)) {
+      caps->pool_meas_ess[m] = e;
+      caps->pool_meas_grid[m] = nr_cell_pool_grid(&sl->desc);
+      m++;
+    }
+  }
+  caps->pool_meas_n = m;
+  caps->pool_meas_wait = nr_pool_site_essential_wait();
+}
 static void mpci_cell_retune(void *ctx, int k, const nr_cell_mgr_event_t *ev);
 static int mpci_slot_fit(void *ctx, int slot, const nr_cell_desc_t *d);
 static void mpci_log(void *ctx, const char *line)
@@ -403,13 +421,26 @@ static int mpci_plan_cells(int argc, char **argv, bool radio)
   caps.consumers = lay.npool < 1 ? 1 : lay.npool > 6 ? 6 : lay.npool;
   caps.depth = 8 * caps.consumers;
   caps.csirs_enabled = caps.recovery_enabled = caps.gw_enabled = 1;
+  /* B6: the core pool against the decode demand of k cells: the pool the layout gives k cells (reader per cell, the wideband feed reader when k > 1 on a radio),
+   * the channelizer's reserve (its CHAN lease; 1 is the demand the GPU backend registers, the CPU backend asks for more), and the per-cell arenas the cell features
+   * add (PRACH heap, sense rings at the [sensing] defaults: the configuration is not loaded yet, so the bound is booked whether or not the sources are on). */
+  for (int k = 1; k <= NR_ADMIT_POOL_K && k <= NR_CL_MAX_CELLS; k++) {
+    nr_core_layout_t lk;
+    nr_cl_build_nf(&topo, &over, k, radio && k > 1, &lk);
+    caps.pool_tokens[k] = lk.npool;
+  }
+  caps.chan_tokens = radio ? 1 : 0;
+  caps.prach_heap_bytes = nr_prach_passive_cell_heap_bytes();
+  caps.sense_frames = 32;      /* cfr_ring_frames default */
+  caps.sense_max_re = 46200;   /* cfr_max_re default */
+  caps.sense_rec_slots = 1024; /* rec_ring_slots default */
   nr_cell_mgr_cfg_t mc;
   memset(&mc, 0, sizeof(mc));
   mc.grid_n_rb = p.n_rb > 0 ? p.n_rb : 106; /* OAI default -r */
   mc.pass1_ssb = ssb > 0 ? ssb : 516;      /* OAI default --ssb */
   mc.pass1_k_ssb = 0;                      /* pass 2 from the log is not wired in A8 */
   const nr_cell_life_ops_t ops = {.prealloc = mpci_cell_prealloc, .start = mpci_cell_start, .retire = mpci_cell_retire, .retune = mpci_cell_retune,
-                                  .log = mpci_log};
+                                  .pool_measure = mpci_pool_measure, .log = mpci_log};
   mc.slot_fit = mpci_slot_fit; /* MPCI-LIVE: a free slot carries a cell only when the cell has the slot's prepared grid */
   /* MPCI-LIVE: with a radio (several cells from one capture) spare slots are prepared with the cells (admission decides how many fit; they are admitted last); a
    * single-cell inventory never gets one. mpci_check_input() drops them again when the input turns out to be published rings. */
@@ -859,11 +890,13 @@ static void mpci_sensing_quiesce(void *ctx, int cell)
   nr_sense_cell_pause(cell, true);
   nr_prach_passive_cell_pause(cell, true);
   nr_srs_passive_cell_pause(cell, true);
+  nr_td_cb0_wire_cell_pause(cell, true); /* its share of the CB0 CPU cap goes to the other cells */
   LOG_I(PHY, "SENSING: MPCI_PARK cell=%d sense-session, PRACH and SRS paused (sessions kept open)\n", cell);
 }
 static void mpci_sensing_resume(void *ctx, int cell)
 {
   (void)ctx;
+  nr_td_cb0_wire_cell_pause(cell, false);
   nr_srs_passive_cell_pause(cell, false);
   nr_prach_passive_cell_pause(cell, false);
   nr_sense_cell_pause(cell, false);
@@ -909,8 +942,8 @@ static void mpci_stop_cell_sensing(int k)
 static int mpci_cell_prealloc(void *ctx, int k, const nr_mgr_slot_t *slot)
 {
   (void)ctx;
-  (void)slot;
   PHY_VARS_NR_UE *ue = nrPHY_vars_UE_g[k][0];
+  ru_cell_want_pci_set(k, slot ? slot->desc.pci : -1); /* A10: the cell's sync pins the descriptor's PCI (before the slot thread's first search) */
   nr_passive_reconf_rules_cell_prealloc(k);
   nr_passive_ue_ctx_cell_prealloc(k);
   nr_pdcch_cell_prealloc(k);
@@ -949,6 +982,7 @@ static int mpci_cell_start(void *ctx, int k, const nr_mgr_slot_t *slot, int reac
 {
   (void)ctx;
   if (reactivation) {
+    ru_cell_want_pci_set(k, slot ? slot->desc.pci : -1); /* A10: before the tuning is posted, so the re-acquisition pins the re-added cell's PCI */
     if (g_live_on && g_feed_obj && slot) {
       const iq_live_tune_t t = mpci_tune_of(k, &slot->desc, slot->ssb);
       const int st = iq_live_add(&g_live, k, slot->id, &t);
@@ -985,6 +1019,7 @@ static void mpci_cell_retire(void *ctx, int k, const nr_mgr_slot_t *slot)
 static void mpci_cell_retune(void *ctx, int k, const nr_cell_mgr_event_t *ev)
 {
   (void)ctx;
+  ru_cell_want_pci_set(k, ev->desc.pci); /* A10: before the retune is posted (the re-acquisition after it pins the descriptor's PCI) */
   if (g_live_on && g_feed_obj) {
     const iq_live_tune_t t = mpci_tune_of(k, &ev->desc, ev->ssb);
     const int st = iq_live_retune(&g_live, k, &t);

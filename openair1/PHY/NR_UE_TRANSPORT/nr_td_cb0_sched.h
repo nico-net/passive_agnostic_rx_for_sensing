@@ -121,6 +121,10 @@ typedef struct {
  * measured at 4 RX]: the estimator replaces it with the measured build cost after the first batches. */
 #define NR_TD_CB0_SIG_US_INIT 6000.0
 #define NR_TD_CB0_BUDGET_US_DEFAULT 20000.0 /* ISAC_TD_CB0_BUDGET_US default: ~1 new geometry (2 signatures) + ~20 CB0 at 4 RX */
+/* Per-cell share of the process CPU cap: process_pct / active cells (>= 1), clamped to 100. */
+double nr_td_cb0_share_pct(double process_pct, int active_cells);
+/* Change the CPU share of an initialised bucket; tokens and capacity are kept. */
+void nr_td_cb0_sched_set_cpu_pct(nr_td_cb0_sched_t *s, double cpu_pct);
 void nr_td_cb0_sched_init(nr_td_cb0_sched_t *s, double budget_us, double cpu_pct, int ncpu, int max_iter);
 /* Fix the items per grant (0 = budget-derived); sets the bucket capacity accordingly. */
 void nr_td_cb0_sched_set_b(nr_td_cb0_sched_t *s, int b_target);

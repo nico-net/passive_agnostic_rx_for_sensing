@@ -286,3 +286,112 @@ TEST(RecoveryOrder, FirstArmIsTdraToggle)
   n = nr_pdsch_recovery_arm_order(0x0d, o); /* CSI|CDM|wide: no S toggle */
   EXPECT_EQ(1, o[0]);
 }
+
+/* A11: every cell has its own recovery worker (the module's state is per cell). The workers of two cells run side by side; each runs its own hooks
+ * only; starting cell 1 late (after cell 0 is running) works; a restart after stop works. [OFFLINE VERIFIED, unit] */
+extern "C" {
+#include "common/utils/nr_cell.h"
+}
+static std::atomic<int> g_cell_ran[2];
+static int run_cell(void *, const nr_recov_key_t *)
+{
+  g_cell_ran[nr_cell_idx()]++; /* the worker is bound to its cell: nr_cell_idx() is the cell that started it */
+  return 1;
+}
+static int start_cell(int cell)
+{
+  nr_cell_bind(cell);
+  nr_pdsch_recovery_set_job_bytes(256);
+  nr_pdsch_recovery_set_hooks(run_cell, exp_hook, fb_hook, done_hook);
+  nr_pdsch_recovery_set_busy_hook(nullptr);
+  return nr_pdsch_recovery_start(0, nullptr);
+}
+TEST(RecoveryCells, EveryCellStartsItsOwnWorker)
+{
+  g_expired = false;
+  for (auto &f : g_fb) f = 0;
+  g_cell_ran[0] = g_cell_ran[1] = 0;
+  int rc0 = -9, rc1 = -9, sub1 = -9;
+  unsigned long base0 = 0;
+  std::thread t0([&] { rc0 = start_cell(0); base0 = field("submitted"); });
+  t0.join();
+  /* cell 1 starts late, from another thread, while cell 0's worker is up */
+  std::thread t1([&] {
+    rc1 = start_cell(1);
+    nr_recov_key_t k = {};
+    k.rnti = 0x4601;
+    sub1 = submit(k);
+  });
+  t1.join();
+  EXPECT_EQ(rc0, 0);
+  EXPECT_EQ(rc1, 0);
+  EXPECT_EQ(sub1, 0);
+  for (int i = 0; i < 400 && g_cell_ran[1] == 0; i++) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  EXPECT_EQ(g_cell_ran[1].load(), 1);
+  EXPECT_EQ(g_cell_ran[0].load(), 0) << "cell 0's worker must not see cell 1's job";
+  std::thread t2([&] {
+    nr_cell_bind(1);
+    EXPECT_EQ(field("submitted"), 1ul);
+    nr_pdsch_recovery_stop();
+    EXPECT_EQ(start_cell(1), 0) << "restart after stop";
+    nr_pdsch_recovery_stop();
+  });
+  t2.join();
+  std::thread t3([&] {
+    nr_cell_bind(0);
+    EXPECT_EQ(field("submitted"), base0) << "cell 0 got no job of cell 1";
+    nr_pdsch_recovery_stop();
+  });
+  t3.join();
+}
+
+/* A11: a start that cannot create the thread fails with the failing step and errno (not a bare -1), leaves the module restartable, and the caller can run the
+ * arms inline. The failure is a real one: RLIMIT_NPROC at 1 makes pthread_create return EAGAIN (an unprivileged process; the test skips otherwise). */
+#include <sys/resource.h>
+static std::thread::id g_inline_tid;
+static int run_inline_hook(void *, const nr_recov_key_t *)
+{
+  g_inline_tid = std::this_thread::get_id();
+  g_ran++;
+  return 0;
+}
+TEST_F(Recovery, ThreadCreateFailureNamesTheStepAndInlineRunsTheArms)
+{
+  struct rlimit old, lim;
+  ASSERT_EQ(getrlimit(RLIMIT_NPROC, &old), 0);
+  lim = old;
+  lim.rlim_cur = 1;
+  if (setrlimit(RLIMIT_NPROC, &lim) != 0) GTEST_SKIP() << "cannot lower RLIMIT_NPROC";
+  const int rc = nr_pdsch_recovery_start(4, "0");
+  const std::string err = nr_pdsch_recovery_last_error();
+  setrlimit(RLIMIT_NPROC, &old);
+  if (rc == 0) GTEST_SKIP() << "privileged: pthread_create is not limited";
+  EXPECT_EQ(rc, -1);
+  EXPECT_NE(err.find("pthread_create"), std::string::npos) << err;
+  EXPECT_NE(err.find("errno=11"), std::string::npos) << err; /* EAGAIN */
+  EXPECT_EQ(nr_pdsch_recovery_acquire(), nullptr) << "no worker: nothing is queued";
+  /* the caller's fallback: the arms of the failed grant run on the calling (consumer) thread, feedback and done once, never queued */
+  nr_pdsch_recovery_set_hooks(run_inline_hook, exp_hook, fb_hook, done_hook);
+  g_ran = 0; g_done = 0;
+  for (auto &f : g_fb) f = 0;
+  alignas(64) char job[64] = {0};
+  nr_recov_key_t k{0x4601, 1, 0, 9000, 0x1f};
+  nr_pdsch_recovery_run_inline(job, &k);
+  EXPECT_EQ(g_ran.load(), 1);
+  EXPECT_EQ(g_inline_tid, std::this_thread::get_id());
+  EXPECT_EQ(g_fb[0] + g_fb[1] + g_fb[2], 1);
+  EXPECT_EQ(g_done.load(), 1);
+  EXPECT_EQ(nr_pdsch_recovery_inline_runs(), 1ul);
+  /* first-pass work waiting: the inline lane yields (no arm), failure verdict delivered once */
+  const unsigned long y0 = field("yielded");
+  nr_pdsch_recovery_set_busy_hook([] { return true; });
+  nr_recov_key_t k2{0x4601, 1, 0, 9001, 0x1f};
+  g_ran = 0;
+  nr_pdsch_recovery_run_inline(job, &k2);
+  EXPECT_EQ(g_ran.load(), 0);
+  EXPECT_EQ(field("yielded"), y0 + 1);
+  EXPECT_EQ(g_fb[0] + g_fb[1] + g_fb[2], 2);
+  nr_pdsch_recovery_set_busy_hook(nullptr);
+  /* and the module still starts once threads can be created again */
+  EXPECT_EQ(nr_pdsch_recovery_start(4, "0"), 0);
+}

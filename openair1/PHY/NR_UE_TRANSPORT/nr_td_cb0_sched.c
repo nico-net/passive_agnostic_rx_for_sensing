@@ -118,6 +118,15 @@ int nr_td_cb0_subset_select(uint64_t seed, int64_t abs_slot, const uint64_t *gke
   return c;
 }
 
+double nr_td_cb0_share_pct(double process_pct, int active_cells)
+{
+  const double p = process_pct / (double)(active_cells < 1 ? 1 : active_cells);
+  return p > 100.0 ? 100.0 : p;
+}
+void nr_td_cb0_sched_set_cpu_pct(nr_td_cb0_sched_t *s, double cpu_pct)
+{
+  s->cpu_pct = cpu_pct > 0 ? (cpu_pct > 100 ? 100 : cpu_pct) : 30.0;
+}
 void nr_td_cb0_sched_init(nr_td_cb0_sched_t *s, double budget_us, double cpu_pct, int ncpu, int max_iter)
 {
   memset(s, 0, sizeof(*s));

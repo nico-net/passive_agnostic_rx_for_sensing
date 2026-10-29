@@ -30,6 +30,7 @@ typedef struct {
   double window_centre_hz; /* centre of that window, 0 unknown */
   int weight;              /* share of the scalable budgets among served cells; <= 0 means 1 */
   int state;               /* nr_cell_desc_state_t */
+  int placeholder;         /* B6: a spare slot's descriptor (nr_cell_life): prepared like a cell, runs nothing, so it carries no CPU demand */
 } nr_cell_desc_t;
 static inline void nr_cell_desc_init(nr_cell_desc_t *c)
 {

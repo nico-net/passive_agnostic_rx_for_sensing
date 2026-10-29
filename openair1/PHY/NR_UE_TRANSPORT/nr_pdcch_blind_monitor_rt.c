@@ -79,6 +79,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_dci11_pin.h"               // R30 item 2 / R32: pure pin/rotate/giveup decision
 
 #include <string.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <limits.h>
 #include <dlfcn.h>
@@ -593,10 +594,15 @@ static void *nid_worker(void *arg)
 }
 #undef cj
 #undef job
+NR_CELL_STATIC(nr_cell_parked_t, g_nid_parked); /* lazy-thread audit: created parked before the fence (nr_pdcch_cell_prealloc), the first submit only arms it */
 static void nid_start_thread(void)
 {
   pthread_t th;
-  if (nr_cell_thread_create(&th, NULL, nid_worker, NULL, -1) == 0) {
+  if (nr_cell_parked_arm(&g_nid_parked_cells[nr_cell_idx()]) == 0) {
+    th = nr_cell_parked_thread(&g_nid_parked_cells[nr_cell_idx()]);
+    pthread_setname_np(th, "nid_solver");
+    pthread_detach(th);
+  } else if (nr_cell_thread_create(&th, NULL, nid_worker, NULL, -1) == 0) { /* not prepared (failed prepare, late start): the old lazy start */
     pthread_setname_np(th, "nid_solver");
     pthread_detach(th);
   }
@@ -2882,14 +2888,20 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
 /* janon_start: one-time setup of the joint-anon queue (256 items) and start of the detached worker thread.
  *   Called only through pthread_once from janon_submit(); does nothing if the allocation fails.
  */
+NR_CELL_STATIC(nr_cell_parked_t, g_janon_parked); /* parked before the fence, see nr_pdcch_cell_prealloc */
 static void janon_start(void)
 {
-  g_janon_cap = 256;
-  g_janon_q = calloc((size_t)g_janon_cap, sizeof(janon_item_t));
+  if (g_janon_q == NULL) { /* not built by the per-cell prealloc (late start / failed prealloc): the old lazy build */
+    g_janon_cap = 256;
+    g_janon_q = calloc((size_t)g_janon_cap, sizeof(janon_item_t));
+  }
   if (g_janon_q == NULL)
     return;
   pthread_t th;
-  nr_core_plan_create(&th, NULL, janon_worker, (void *)(intptr_t)nr_cell_idx(), -1);
+  if (nr_cell_parked_arm(&g_janon_parked_cells[nr_cell_idx()]) == 0)
+    th = nr_cell_parked_thread(&g_janon_parked_cells[nr_cell_idx()]);
+  else
+    nr_core_plan_create(&th, NULL, janon_worker, (void *)(intptr_t)nr_cell_idx(), -1);
   pthread_detach(th);
   LOG_A(PHY, "SENSING: JOINT_ANON_ASYNC worker started (queue %d items)\n", g_janon_cap);
 }
@@ -4812,10 +4824,12 @@ static void *disc_worker(void *arg)
   }
   return NULL;
 }
+NR_CELL_STATIC(nr_cell_parked_t, g_disc_parked); /* parked before the fence, see nr_pdcch_cell_prealloc */
 static void disc_start(void)
 {
   pthread_t th;
-  if (nr_core_plan_create(&th, NULL, disc_worker, (void *)(intptr_t)nr_cell_idx(), -1) == 0) pthread_detach(th);
+  if (nr_cell_parked_arm(&g_disc_parked_cells[nr_cell_idx()]) == 0) pthread_detach(nr_cell_parked_thread(&g_disc_parked_cells[nr_cell_idx()]));
+  else if (nr_core_plan_create(&th, NULL, disc_worker, (void *)(intptr_t)nr_cell_idx(), -1) == 0) pthread_detach(th);
 }
 /* Scan side. A poll job is coalesced while one is still queued (idempotent); a step job is always queued. */
 static void disc_submit(const PHY_VARS_NR_UE *ue, bool step, uint64_t token, uint64_t slot, bool prescreen)
@@ -10616,6 +10630,11 @@ void nr_pdcch_blind_monitor_rt_final_stats(void)
 
 /* nr_pdcch_cell_prealloc: allocates the heap objects of the PDCCH monitor modules of `cell` (this file, nr_pdcch_blind_monitor.c,
  * nr_pdcch_coreset_bank.c). The receiver main calls it once per active cell, incl. cell 0, before nr_cell_alloc_fence(). */
+/* parked-worker state (0 none, 1 parked, 2 armed) of the lazily started PDCCH workers of `cell`: which 0 janon, 1 disc, 2 nid (tests / diagnostics) */
+int nr_pdcch_workers_parked_state(int cell, int which)
+{
+  return nr_cell_parked_state(which == 0 ? &g_janon_parked_cells[cell] : which == 1 ? &g_disc_parked_cells[cell] : &g_nid_parked_cells[cell]);
+}
 void nr_pdcch_cell_prealloc(int cell)
 {
   NR_CELL_HEAP_PREALLOC(g_cj_ring_cell_t, g_cj_ring, cell);
@@ -10625,6 +10644,21 @@ void nr_pdcch_cell_prealloc(int cell)
   NR_CELL_HEAP_PREALLOC(g_janon_hits_cell_t, g_janon_hits, cell);
   NR_CELL_HEAP_PREALLOC(nr_pbwp_t, g_pbwp, cell);
   NR_CELL_HEAP_PREALLOC(occ1_walk_tog_cell_t, occ1_walk_tog, cell);
+  /* mpci audit: the DCI 1_1 / 0_1 layout resolvers (~4 MB each, zeroed = nothing armed: n_hyp 0 reads exactly like the NULL of before) were calloc'd at the first arm,
+   * i.e. after the RX fence and the memory lock, once per cell. A failed allocation here leaves the slot NULL and the first arm retries (and fails closed) as before. */
+  /* lazy-thread audit (MPCI-LAZY): the janon queue and the three lazily started workers (janon, disc, nid) are built and parked here, before the fence;
+   * the first use only arms them. A failure is logged with its step/errno and leaves the old lazy start as the degraded path. */
+  if (g_janon_q_cells[cell] == NULL) {
+    g_janon_cap_cells[cell] = 256;
+    g_janon_q_cells[cell] = calloc((size_t)g_janon_cap_cells[cell], sizeof(janon_item_t));
+    if (g_janon_q_cells[cell] == NULL) LOG_E(PHY, "[c%d] JOINT_ANON prepare failed before the fence: step=calloc errno=%d (%s)\n", cell, errno, strerror(errno));
+  }
+  if (g_janon_q_cells[cell] != NULL)
+    (void)nr_cell_parked_prepare(&g_janon_parked_cells[cell], "pdcchJanon", janon_worker, (void *)(intptr_t)cell, cell);
+  (void)nr_cell_parked_prepare(&g_disc_parked_cells[cell], "pdcchDisc", disc_worker, (void *)(intptr_t)cell, cell);
+  (void)nr_cell_parked_prepare(&g_nid_parked_cells[cell], "nid_solver", nid_worker, NULL, cell);
+  dci11_resolver_ensure(&g_dci11_resolver_cells[cell], "DCI11_LAYOUT");
+  dci11_resolver_ensure(&g_dci01_resolver_cells[cell], "DCI01_LAYOUT");
   nr_pdcch_blind_monitor_cell_prealloc(cell);
   nr_pdcch_coreset_bank_cell_prealloc(cell);
 }

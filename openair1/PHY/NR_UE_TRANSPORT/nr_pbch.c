@@ -6,6 +6,7 @@
  * \brief Top-level routines for generating and decoding  the PBCH/BCH physical/transport channel V8.6 2009-03
  */
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_cell.h"
 #include "PHY/defs_nr_UE.h"
 #include "PHY/CODING/coding_extern.h"
 #include "PHY/sse_intrin.h"
@@ -288,8 +289,11 @@ static __thread int g_pbch_have_good;
 /* Cross-thread reference, deliberately NOT __thread: acquisition and tracking run on different
  * threads, and in a failing run tracking never succeeds, so the only "known good" decode available
  * to compare against is acquisition's. Benign last-writer-wins race, acceptable for a diagnostic. */
-static pbch_sym_diag_t g_pbch_ref[4];
-static volatile int g_pbch_have_ref;
+typedef pbch_sym_diag_t g_pbch_ref_arr_t[4];
+NR_CELL_STATIC(g_pbch_ref_arr_t, g_pbch_ref)
+#define g_pbch_ref NR_CELL_REF(g_pbch_ref)
+NR_CELL_STATIC(volatile int, g_pbch_have_ref)
+#define g_pbch_have_ref NR_CELL_REF(g_pbch_have_ref) /* mpci audit: the reference is the calling cell's own acquisition decode */
 
 void nr_pbch_diag_snapshot_reference(void)
 {
@@ -303,8 +307,10 @@ void nr_pbch_diag_snapshot_reference(void)
  * cleared by the RF/PBCH census in nr-ue.c, and are the ONLY signal that catches both observed
  * loss-of-lock modes: an RF stream stall (power collapses) AND a timing-loop runaway (power stays
  * healthy while the FFT window walks off). */
-unsigned long g_nr_pbch_ok;
-unsigned long g_nr_pbch_fail;
+NR_CELL_STATIC(unsigned long, g_nr_pbch_ok)
+#define g_nr_pbch_ok NR_CELL_REF(g_nr_pbch_ok) /* mpci audit: per cell (read and cleared by the cell's own RF/PBCH census); was extern, no other user */
+NR_CELL_STATIC(unsigned long, g_nr_pbch_fail)
+#define g_nr_pbch_fail NR_CELL_REF(g_nr_pbch_fail)
 
 void nr_pbch_diag_counts(unsigned long *ok, unsigned long *fail)
 {

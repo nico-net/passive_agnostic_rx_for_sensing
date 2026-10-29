@@ -18,7 +18,7 @@ SIZE_MAX = (1 << 64) - 1
 NR_CELL_MAX = 16
 PLAN_MAX = 64
 OK, CORES, RAM, GPU_MEM, CHANNELIZER, MAX, LOST = range(7)
-REASON = ["none", "cores", "ram", "gpu_mem", "channelizer", "max", "lost"]
+REASON = ["none", "cores", "ram", "gpu_mem", "channelizer", "max", "lost", "pool"]
 NEW, ACQUIRE, MAINTAIN, LOSTST = range(4)
 R_SNAP, R_CSIRS, R_TD, R_GW, R_GSLOTS = 1, 2, 4, 8, 16
 

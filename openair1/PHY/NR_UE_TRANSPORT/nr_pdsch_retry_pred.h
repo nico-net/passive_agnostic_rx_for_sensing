@@ -15,11 +15,15 @@ using std::memory_order_relaxed;
 #endif
 #include <stdbool.h>
 #include <stdint.h>
+#include "common/utils/nr_cell.h"
 
 #define NR_RETRY_PRED_SLOTS 256
 #define NR_RETRY_PRED_MIN 2
 typedef struct { NR_RP_ATOMIC(uint32_t) v; } nr_retry_pred_t; /* rnti << 8 | streak (0..255) */
-static nr_retry_pred_t g_nr_retry_pred[NR_RETRY_PRED_SLOTS];
+/* mpci audit: an RNTI is only unique within its cell, so the memory is the cell's (the calling thread's cell, nr_cell_idx()) */
+typedef nr_retry_pred_t g_nr_retry_pred_arr_t[NR_RETRY_PRED_SLOTS];
+NR_CELL_STATIC(g_nr_retry_pred_arr_t, g_nr_retry_pred)
+#define g_nr_retry_pred NR_CELL_REF(g_nr_retry_pred)
 
 /* nr_retry_pred_hit: the arm rescued this RNTI (after the plain reading failed, or as the predicted first try): streak + 1. */
 static inline void nr_retry_pred_hit(uint16_t rnti)

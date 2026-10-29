@@ -8,6 +8,7 @@
 typedef struct {
   void* args;
   void (*func)(void* args);
+  int cell; /* mpci audit: cell index of the thread that pushed the task (stamped by pushTpool); the worker binds itself to it while it runs the task. 0 for every single-cell caller */
 } task_t;
 
 #endif

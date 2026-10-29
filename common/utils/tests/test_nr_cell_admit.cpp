@@ -435,3 +435,209 @@ TEST(NrCellAdmit, FormatLine)
   EXPECT_NE(nullptr, strstr(line, "MPCI_ADMIT cells=1 of 2 reason=gpu_mem refuse=0"));
   EXPECT_NE(nullptr, strstr(line, "unserved=[1:gpu_mem]"));
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// B6: the core pool against the decode demand of the served cells; the PRACH heap and the sense rings booked per cell.
+// Host = DGX GB10 fixture with the pool the layout gives k cells (nr_cl_build_nf, 2026-10-29: 6 / 10 / 9 / 8 / 7 tokens for 1..5 cells, wideband feed) and the
+// channelizer's one reserved token. Before B6 the same layout gave 2 cells 7 tokens (MEASURED on air).
+static nr_host_caps_t dgx_pool(bool old_layout = false)
+{
+  nr_host_caps_t c = dgx();
+  const int now[] = {0, 6, 10, 9, 8, 7}, was[] = {0, 6, 7, 7, 6, 6};
+  for (int k = 1; k <= 5; k++) c.pool_tokens[k] = old_layout ? was[k] : now[k];
+  c.chan_tokens = 1;
+  // one running 217 PRB 4 RX 30 kHz cell, measured by the pool: 1.9 essential tokens, 6.2 % of the essential leases waited (the numbers of the DGX OTA 2026-10-28, now INPUTS)
+  c.pool_meas_n = 1; c.pool_meas_ess[0] = 1.9; c.pool_meas_grid[0] = 217.0 * 4.0; c.pool_meas_wait = 0.062;
+  return c;
+}
+TEST(NrCellAdmitPool, ErlangCMatchesTheMeasuredEnds)
+{
+  EXPECT_DOUBLE_EQ(nr_pool_wait_prob(6, 0), 0.0);
+  EXPECT_DOUBLE_EQ(nr_pool_wait_prob(6, 6), 1.0);
+  EXPECT_DOUBLE_EQ(nr_pool_wait_prob(0, 1), 1.0);
+  EXPECT_NEAR(nr_pool_wait_prob(1, 0.5), 0.5, 1e-12); // M/M/1: P(wait) = rho
+  EXPECT_NEAR(nr_pool_wait_prob(2, 1.0), 1.0 / 3.0, 1e-12); // textbook value
+  // solo, 6 tokens, 2.7 erlangs (the 2-cell per-cell total taken as the solo proxy, [INFERRED]): 6.5 % modelled against 3.9-6.2 % of decode / scan leases that waited [MEASURED, DGX, mp28m_S1/S2]
+  EXPECT_NEAR(nr_pool_wait_prob(6, 2.7), 0.065, 0.003);
+  // 2 cells, 7 tokens - 1 reserved, 5.5 erlangs: 78 % modelled against 64 % / 68 % measured [mp28m_P2]
+  EXPECT_NEAR(nr_pool_wait_prob(6, 5.5), 0.78, 0.01);
+  for (int c = 1; c < 12; c++)
+    for (double a = 0.5; a < c; a += 0.5) {
+      EXPECT_LE(nr_pool_wait_prob(c + 1, a), nr_pool_wait_prob(c, a) + 1e-12) << "more servers never wait more";
+      EXPECT_LE(nr_pool_wait_prob(c, a), nr_pool_wait_prob(c, a + 0.25) + 1e-12) << "more load never waits less";
+    }
+}
+
+TEST(NrCellAdmitPool, DemandIsMeasuredAndScalesWithTheNewCellsOwnGrid)
+{
+  nr_cell_desc_t c;
+  nr_cell_desc_init(&c);
+  c.n_rb = 217; c.scs_khz = 30; c.n_rx = 4;
+  nr_host_caps_t k = dgx_pool();
+  EXPECT_NEAR(nr_cell_pool_demand(&k, &c), 1.9, 1e-9);
+  c.n_rb = 106; // scaled down too: no clamp at an anchor any more, the ratio of the grids is the charge
+  EXPECT_NEAR(nr_cell_pool_demand(&k, &c), 1.9 * 106.0 / 217.0, 1e-9);
+  c.n_rb = 273;
+  EXPECT_NEAR(nr_cell_pool_demand(&k, &c), 1.9 * 273.0 / 217.0, 1e-9);
+  c.n_rb = 217; c.scs_khz = 60; // twice the slots per second
+  EXPECT_NEAR(nr_cell_pool_demand(&k, &c), 3.8, 1e-9);
+  c.scs_khz = 30; c.n_rx = 2;
+  EXPECT_NEAR(nr_cell_pool_demand(&k, &c), 0.95, 1e-9);
+  k.pool_meas_ess[0] = 3.8; // the running cell measured twice as busy: the newcomer is charged twice
+  c.n_rx = 4;
+  EXPECT_NEAR(nr_cell_pool_demand(&k, &c), 3.8, 1e-9);
+  c.placeholder = 1; // a spare slot runs nothing
+  EXPECT_DOUBLE_EQ(nr_cell_pool_demand(&k, &c), 0.0);
+  EXPECT_DOUBLE_EQ(nr_cell_pool_demand(&k, nullptr), 0.0);
+  nr_host_caps_t none = dgx_pool();
+  none.pool_meas_n = 0; // nothing running or measured: no charge to derive
+  c.placeholder = 0;
+  EXPECT_DOUBLE_EQ(nr_cell_pool_demand(&none, &c), 0.0);
+}
+
+TEST(NrCellAdmitPool, NothingMeasuredChecksTheFloorOnly)
+{
+  nr_host_caps_t c = dgx_pool();
+  c.pool_meas_n = 0; // the first plan of a process: no lease has run
+  int ns;
+  nr_admit_plan_t p = plan_of(c, cells(3, 217), &ns);
+  EXPECT_EQ(ns, 3); // 9 - ... tokens of the 3-cell layout - 1 = 8 >= 2 x 3
+  EXPECT_DOUBLE_EQ(p.pool_load, 0.0);
+  EXPECT_DOUBLE_EQ(p.pool_unit, 0.0);
+  c.pool_tokens[3] = 5; // eff 4 < 6: the structural floor still refuses
+  p = plan_of(c, cells(3, 217), &ns);
+  EXPECT_EQ(ns, 2);
+  EXPECT_EQ(p.cell[2].reason, NR_ADMIT_POOL);
+}
+
+TEST(NrCellAdmitPool, WaitTargetFollowsTheMeasuredWaitOfTheRunningCells)
+{
+  nr_host_caps_t c = dgx_pool();
+  int ns;
+  c.pool_meas_wait = 0.30; // the running cell already waits a lot: a second one that models below that is let in
+  nr_admit_plan_t p = plan_of(c, cells(2, 217), &ns);
+  EXPECT_EQ(ns, 2);
+  EXPECT_NEAR(p.pool_target, 0.30, 1e-12);
+  c.pool_meas_wait = 0.0; // never waited: the target is the Erlang C of the running state (6 tokens, 1.9 erlangs)
+  const double model = nr_pool_wait_prob(6, 1.9);
+  p = plan_of(c, cells(2, 217), &ns);
+  EXPECT_NEAR(p.pool_model_now, model, 1e-12);
+  EXPECT_EQ(ns, nr_pool_wait_prob(9, 3.8) <= model ? 2 : 1);
+  c.pool_meas_wait = -1.0; // unknown: the model alone
+  p = plan_of(c, cells(2, 217), &ns);
+  EXPECT_NEAR(p.pool_target, model, 1e-12);
+}
+
+TEST(NrCellAdmitPool, DgxServesTwoCellsOfThe217PrbClassAndReportsTheThird)
+{
+  const nr_host_caps_t c = dgx_pool();
+  int ns;
+  nr_admit_plan_t p = plan_of(c, cells(3, 217), &ns);
+  EXPECT_EQ(ns, 2);
+  EXPECT_TRUE(p.cell[0].served);
+  EXPECT_TRUE(p.cell[1].served);
+  EXPECT_FALSE(p.cell[2].served);
+  EXPECT_EQ(p.cell[2].reason, NR_ADMIT_POOL);
+  EXPECT_EQ(p.binding, NR_ADMIT_POOL);
+  EXPECT_STREQ("pool", nr_admit_reason_name(p.cell[2].reason));
+  ASSERT_TRUE(p.pool_checked);
+  EXPECT_EQ(p.pool_tokens_eff, 9); // 10 tokens of the 2-cell layout - the channelizer's 1
+  EXPECT_NEAR(p.pool_load, 3.8, 1e-9);
+  EXPECT_LE(p.pool_wait, p.pool_target);
+  char l[512];
+  EXPECT_GT(nr_admit_pool_format(&p, l, sizeof l), 0);
+  EXPECT_NE(nullptr, strstr(l, "MPCI_ADMIT_POOL cells=2 tokens_eff=9 load=3.80 wait_pct=1.8 target_pct=6.2 meas_cells=1 meas_load=1.90 unit=0.00219 meas_wait_pct=6.2 model_now_pct=")) << l;
+  char m[1024];
+  nr_admit_plan_format(&p, m, sizeof m);
+  EXPECT_NE(nullptr, strstr(m, "MPCI_ADMIT cells=2 of 3 reason=pool refuse=0")) << m; // the MPCI_ADMIT grammar is unchanged
+  EXPECT_NE(nullptr, strstr(m, "unserved=[2:pool]")) << m;
+}
+
+TEST(NrCellAdmitPool, ThePoolOfBeforeB6WouldNotHaveServedTheSecondCellHealthy)
+{ // 7 tokens - 1 = 6 for 2 cells of 1.9 erlangs of essential work: modelled 24 % waits; the measured run had 64-68 % of the leases waiting with the sheddable work on top
+  const nr_host_caps_t c = dgx_pool(true);
+  int ns;
+  nr_admit_plan_t p = plan_of(c, cells(2, 217), &ns);
+  EXPECT_EQ(ns, 1);
+  EXPECT_EQ(p.cell[1].reason, NR_ADMIT_POOL);
+}
+
+TEST(NrCellAdmitPool, PrimaryAlwaysServedAndNoTableMeansNoCheck)
+{
+  nr_host_caps_t c = dgx_pool();
+  c.pool_tokens[1] = 1; // a pool far too small even for the primary: it is served as today (nothing else can make the process refuse)
+  int ns;
+  nr_admit_plan_t p = plan_of(c, cells(1, 217), &ns);
+  EXPECT_EQ(ns, 1);
+  EXPECT_TRUE(p.cell[0].served);
+  nr_host_caps_t none = dgx();                     // no pool table (caps of before): the check is skipped, 4 cells by the core limit
+  p = plan_of(none, cells(5, 217), &ns);
+  EXPECT_EQ(ns, 4);
+  EXPECT_FALSE(p.pool_checked);
+  EXPECT_EQ(p.cell[4].reason, NR_ADMIT_CORES);
+  char l[64];
+  EXPECT_EQ(nr_admit_pool_format(&p, l, sizeof l), 0);
+}
+
+TEST(NrCellAdmitPool, TwoTokensPerCellIsTheFloorAndCoresComeFirst)
+{
+  nr_host_caps_t c = dgx_pool();
+  for (int k = 1; k <= 5; k++) c.pool_tokens[k] = 4 + k; // eff = 3 + k... for k >= 2: 4 + k - 1
+  int ns;
+  nr_admit_plan_t p = plan_of(c, cells(5, 51), &ns); // 51 PRB cells are charged the anchor demand
+  for (int i = 0; i < p.n; i++)
+    if (p.cell[i].served) { EXPECT_GE(p.pool_tokens_eff, 2 * p.n_served); }
+  c.max_cells = 1;
+  p = plan_of(c, cells(3, 217), &ns);
+  EXPECT_EQ(ns, 1);
+  EXPECT_EQ(p.cell[1].reason, NR_ADMIT_CORES) << "the core limit is named before the pool";
+}
+
+TEST(NrCellAdmitPool, SpareSlotsCarryNoDemand)
+{
+  nr_host_caps_t c = dgx_pool();
+  std::vector<nr_cell_desc_t> v = cells(3, 217);
+  v[2].placeholder = 1; // a spare slot appended to a 2-cell inventory
+  v[2].state = NR_CELLD_NEW;
+  int ns;
+  nr_admit_plan_t p = plan_of(c, v, &ns);
+  EXPECT_EQ(ns, 3);
+  EXPECT_EQ(p.pool_tokens_eff, 8); // the 3-cell layout (9 tokens) - 1
+  EXPECT_NEAR(p.pool_load, 3.8, 1e-9);
+  EXPECT_LE(p.pool_wait, p.pool_target);
+}
+
+TEST(NrCellAdmitPool, PrachHeapAndSenseRingsAreBookedPerCell)
+{
+  // the sense rings at the [sensing] defaults, 4 RX: 53.4 MiB [MEASURED, MPCI-CELLFEAT-20261029 "about 53 MiB"]
+  const size_t sense = nr_cell_sense_ring_bytes(32, 46200, 1024, 4);
+  EXPECT_GE(sense, 53 * MIB);
+  EXPECT_LT(sense, 54 * MIB);
+  EXPECT_EQ(nr_cell_sense_ring_bytes(0, 46200, 1024, 4), 0u);
+  EXPECT_EQ(nr_cell_sense_ring_bytes(32, 46200, 1024, 0), 0u);
+  EXPECT_GT(nr_cell_sense_ring_bytes(32, 46200, 1024, 4), nr_cell_sense_ring_bytes(32, 46200, 1024, 1)) << "scales with the antennas";
+  nr_host_caps_t a = dgx(), b = dgx();
+  b.prach_heap_bytes = 70 * MIB + 400 * 1024; // the PRACH heap is a build constant (~70 MB)
+  b.sense_frames = 32; b.sense_max_re = 46200; b.sense_rec_slots = 1024;
+  a.mem_avail = b.mem_avail = SIZE_MAX; // unlimited: the scalable shares do not move, the difference is exactly the booked arenas
+  int na, nb;
+  nr_admit_plan_t pa = plan_of(a, cells(2, 106), &na), pb = plan_of(b, cells(2, 106), &nb);
+  ASSERT_EQ(na, 2);
+  ASSERT_EQ(nb, 2);
+  for (int i = 0; i < 2; i++) EXPECT_EQ(pb.cell[i].host_bytes, pa.cell[i].host_bytes + b.prach_heap_bytes + sense) << i;
+  nr_cell_cost_t ca, cb;
+  nr_cell_desc_t d = cells(1, 106)[0];
+  ASSERT_EQ(nr_cell_cost(&d, &a, &ca), 0);
+  ASSERT_EQ(nr_cell_cost(&d, &b, &cb), 0);
+  EXPECT_EQ(cb.host_fixed, ca.host_fixed + b.prach_heap_bytes + sense);
+  // booked on a small host: the second cell no longer fits where it did before
+  nr_host_caps_t s = cloud4();
+  s.max_cells = NR_ADMIT_UNLIMITED_CELLS;
+  s.mem_avail = 6000 * MIB;
+  int n0, n1;
+  nr_admit_plan_t p0 = plan_of(s, cells(4, 217), &n0);
+  s.prach_heap_bytes = 400 * MIB; // exaggerated on purpose to show the effect on a small host
+  nr_admit_plan_t p1 = plan_of(s, cells(4, 217), &n1);
+  EXPECT_LE(n1, n0);
+  (void)p0; (void)p1;
+}

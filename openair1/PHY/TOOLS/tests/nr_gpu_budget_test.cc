@@ -213,7 +213,9 @@ TEST(DiscTicket, SingleCellIsNeverPacedOrBlocked) {
   EXPECT_EQ(st.pace_us,0u);EXPECT_EQ(st.contended,0u);EXPECT_LT(ms,200*0.1*8+50); /* 200 x 100 us holds, generous scheduling slack */
 }
 TEST(DiscTicket, TwoCellsBulkIsPacedToTheDutyBudgetShortIsNot) {
+  nr_gpu_budget_test_reset(30);
   nr_gpu_disc_ticket_test_reset(30,nullptr); /* 30 % per cell, two cells: capped at 60 %, a bulk hold of h is followed by h x 40/60 of idle */
+  EXPECT_EQ(nr_gpu_budget_rt_begin(),1);     /* G4B: the pace protects RT work in flight */
   nr_gpu_disc_ticket_test_rt_frac(0.9);      /* the RT work keeps the device 90 % busy: the cap is max(60, 100-90) */
   /* both cells have used the ticket: the pacing is on */
   nr_gpu_disc_ticket_acquire(0);nr_gpu_disc_ticket_release();
@@ -226,7 +228,73 @@ TEST(DiscTicket, TwoCellsBulkIsPacedToTheDutyBudgetShortIsNot) {
   nr_gpu_disc_ticket_acquire_bulk(1);nr_gpu_disc_ticket_release(); /* bulk: waits the pace of the 20 ms hold */
   const double bulk_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-t0).count();
   EXPECT_GE(bulk_ms,48.0);
+  nr_gpu_budget_rt_end();
   nr_gpu_disc_ticket_stats_t st;nr_gpu_disc_ticket_stats(0,&st);EXPECT_GE(st.pace_us,19000u);EXPECT_LE(st.pace_us,21000u);
+}
+/* ---- G4B: fake clock, no waiting: the ticket never blocks in these (one thread, sequential), so the pace stored in the stats is the whole story ---- */
+static uint64_t g_fake_us;
+static uint64_t fake_clock(void) {return g_fake_us;}
+/* two cells alternate bulk chunks of 1 ms on an idle device (no RT user, any measured RT share): nobody waits, nobody is paced, each cell gets exactly half of the chunks (= its solo
+ * rate when the device is the only limit) and the summed device time is the whole wall time */
+TEST(DiscTicketG4B, IdleDeviceTwoCellsEachGetTheirShareNoPace) {
+  nr_gpu_budget_test_reset(30);
+  nr_gpu_disc_ticket_test_reset(30,fake_clock);
+  nr_gpu_disc_ticket_test_rt_frac(0.0);
+  g_fake_us=1000000;
+  for(int i=0;i<1000;++i) {
+    const int cell=i&1;
+    nr_gpu_disc_ticket_acquire_bulk(cell);g_fake_us+=1000;nr_gpu_disc_ticket_release();
+  }
+  nr_gpu_disc_ticket_stats_t a,b;nr_gpu_disc_ticket_stats(0,&a);nr_gpu_disc_ticket_stats(1,&b);
+  EXPECT_EQ(a.grants,500u);EXPECT_EQ(b.grants,500u);
+  EXPECT_EQ(a.pace_us+b.pace_us,0u);EXPECT_EQ(a.wait_us+b.wait_us,0u);
+  EXPECT_EQ(a.held_us+b.held_us,g_fake_us-1000000);
+  nr_gpu_disc_ticket_test_reset(30,nullptr);
+}
+/* a measured RT share left over from earlier (smoothing never reaches exactly 0) does not pace an idle device: no RT user in flight = no pace, and a residual 0.3 % rounds to cap 100 */
+TEST(DiscTicketG4B, ResidualRtShareNeverThrottlesAnIdleDeviceOrRoundsTo99) {
+  for(int rt_in_flight=0;rt_in_flight<2;++rt_in_flight) {
+    nr_gpu_budget_test_reset(30);
+    nr_gpu_disc_ticket_test_reset(30,fake_clock);
+    nr_gpu_disc_ticket_test_rt_frac(0.003);
+    g_fake_us=5000000;
+    if(rt_in_flight)EXPECT_EQ(nr_gpu_budget_rt_begin(),1);
+    for(int i=0;i<4;++i) {nr_gpu_disc_ticket_acquire_bulk(i&1);g_fake_us+=1000;nr_gpu_disc_ticket_release();}
+    if(rt_in_flight)nr_gpu_budget_rt_end();
+    nr_gpu_disc_ticket_stats_t a,b;nr_gpu_disc_ticket_stats(0,&a);nr_gpu_disc_ticket_stats(1,&b);
+    EXPECT_EQ(a.pace_us+b.pace_us,0u) << "rt_in_flight=" << rt_in_flight;
+  }
+  nr_gpu_disc_ticket_test_reset(30,nullptr);
+}
+/* the k*30 floor can only RAISE the cap: at a low RT share the cap follows the idle time (rt 10 % -> cap 90, pace = h x 10/90), not the 60 % floor; RT busy 90 % -> floor 60 as before */
+TEST(DiscTicketG4B, CapFollowsMeasuredIdleTimeAndFloorOnlyRaises) {
+  struct {double rt;uint64_t expect_us;} row[]={{0.10,111},{0.50,666},{0.90,666}}; /* held 1000 us: 1000*(100-cap)/cap, cap = max(60, 100-rt) */
+  for(auto &r:row) {
+    nr_gpu_budget_test_reset(30);
+    nr_gpu_disc_ticket_test_reset(30,fake_clock);
+    g_fake_us=9000000;
+    nr_gpu_disc_ticket_acquire(0);nr_gpu_disc_ticket_release();g_fake_us+=10;
+    nr_gpu_disc_ticket_acquire(1);nr_gpu_disc_ticket_release();
+    nr_gpu_disc_ticket_test_rt_frac(r.rt);
+    EXPECT_EQ(nr_gpu_budget_rt_begin(),1);
+    nr_gpu_disc_ticket_acquire_bulk(0);g_fake_us+=1000;nr_gpu_disc_ticket_release();
+    nr_gpu_budget_rt_end();
+    nr_gpu_disc_ticket_stats_t a;nr_gpu_disc_ticket_stats(0,&a);
+    EXPECT_NEAR((double)a.pace_us,(double)r.expect_us,2.0) << "rt=" << r.rt;
+  }
+  nr_gpu_disc_ticket_test_reset(30,nullptr);
+}
+/* fair order between cells in the same state: with both cells waiting behind a holder, the one that used the device less is served first whatever the arrival order */
+TEST(DiscTicketG4B, SameStateCellsAlternateByLeastUse) {
+  nr_gpu_disc_ticket_test_reset(100,nullptr);
+  nr_gpu_disc_ticket_acquire(1);hold_us(20000);nr_gpu_disc_ticket_release(); /* cell 1 has used the device, cell 0 not */
+  std::vector<int> order;std::mutex mu;
+  nr_gpu_disc_ticket_acquire(3);
+  auto spawn=[&](int cell) {return std::thread([&,cell] {nr_gpu_disc_ticket_acquire_bulk(cell);{std::lock_guard<std::mutex> g(mu);order.push_back(cell);}nr_gpu_disc_ticket_release();});};
+  std::thread t1=spawn(1);std::this_thread::sleep_for(std::chrono::milliseconds(20)); /* cell 1 arrives first */
+  std::thread t0=spawn(0);std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  nr_gpu_disc_ticket_release();t0.join();t1.join();
+  ASSERT_EQ(order.size(),2u);EXPECT_EQ(order[0],0);EXPECT_EQ(order[1],1);
 }
 TEST(DiscTicket, PreferringCellFirstThenLeastUsedThenArrival) {
   nr_gpu_disc_ticket_test_reset(100,nullptr);

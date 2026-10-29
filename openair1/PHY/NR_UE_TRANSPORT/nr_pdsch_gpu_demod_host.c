@@ -32,6 +32,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <time.h>
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 #include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"
@@ -751,15 +752,24 @@ static _Atomic uint64_t g_bg_ns, g_bg_ns_max, g_bg_n;
 typedef struct {
   nr_bgq_t *q;
   char name[16];
+  int aff; /* parked start: the worker sets its own affinity (the creation attributes did it before) */
 } bg_arg_t;
 /* mpci B5: float-lane lease of one background item (DISC class, the cell that started the queue); no-ops when the float lane is not merged */
 static void bg_lease_in(int cell) { nr_pool_site_float_acquire(NR_POOL_DISC, cell, 0); }
+static void bg_cores(cpu_set_t *cs, char *list, size_t nlist);
 static void bg_lease_out(void) { nr_pool_site_float_release(); }
 static void *bg_main(void *a)
 {
   bg_arg_t *arg = a;
   setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
   pthread_setname_np(pthread_self(), arg->name);
+  if (arg->aff) {
+    cpu_set_t cs;
+    char list[128];
+    bg_cores(&cs, list, sizeof(list));
+    if (CPU_COUNT(&cs) && !nr_pool_site_float_merged() && pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs) != 0)
+      LOG_W(PHY, "SENSING: background worker %s: affinity %s refused, keeps the home mask\n", arg->name, list);
+  }
   if (!strcmp(arg->name, "dmrsIdBg")) nr_bg_lane_enter(NULL); /* only the discovery worker; gpuCheckBg is a verifier */
   nr_passive_tpool_inline = true; /* never push the CPU reference's tasks to the RT thread pool */
   nr_dl_chest_cpu_ref = true;     /* the reference estimator stays on the CPU (no GPU delay pre-pass) */
@@ -768,10 +778,92 @@ static void *bg_main(void *a)
   return NULL;
 }
 
+/* the core list of the background lane (ISAC_GPU_CHECK_CORES, else the plan's check lane, else the legacy little cores 10-14) */
+static void bg_cores(cpu_set_t *cs, char *list, size_t nlist)
+{
+  CPU_ZERO(cs);
+  const char *e = getenv("ISAC_GPU_CHECK_CORES");
+  char buf[128];
+  /* unset: the plan's check-lane mask when a core plan is active (an empty mask = unpinned), else the legacy DGX little cores 10-14 (ISAC_CORE_PLAN=0) */
+  const char *pv = (!(e && *e) && nr_core_layout_active && nr_core_layout_env_default && nr_core_layout_active()) ? nr_core_layout_env_default("ISAC_GPU_CHECK_CORES") : NULL;
+  snprintf(buf, sizeof(buf), "%s", e && *e ? e : pv ? pv : "10-14");
+  snprintf(list, nlist, "%s", buf);
+  char *sv = NULL;
+  for (char *t = strtok_r(buf, ",", &sv); t; t = strtok_r(NULL, ",", &sv)) {
+    int a = -1, b = -1;
+    if (sscanf(t, "%d-%d", &a, &b) != 2)
+      b = a = atoi(t);
+    for (int k = a; k >= 0 && k <= b && k < CPU_SETSIZE; k++)
+      CPU_SET(k, cs);
+  }
+}
+
+/* lazy-thread audit (MPCI-LAZY): a queue's worker thread (and its argument) can be created PARKED before the fence / mlockall by nr_bgq_prepare; nr_bgq_start then only arms it.
+ * A queue that was not prepared (failed prepare, restart) starts the old way. The parked thread places itself (affinity set in bg_main) instead of through the creation attributes. */
+typedef struct {
+  nr_cell_parked_t p;
+  nr_bgq_t *q;
+  char name[16];
+} bgp_t;
+static pthread_mutex_t g_bgp_mu = PTHREAD_MUTEX_INITIALIZER;
+static bgp_t *g_bgp[64];
+static bgp_t *bgp_find(nr_bgq_t *q)
+{
+  bgp_t *r = NULL;
+  pthread_mutex_lock(&g_bgp_mu);
+  for (int i = 0; i < 64 && !r; i++)
+    if (g_bgp[i] && g_bgp[i]->q == q)
+      r = g_bgp[i];
+  pthread_mutex_unlock(&g_bgp_mu);
+  return r;
+}
+int nr_bgq_prepare(nr_bgq_t *q, unsigned cap, const char *name, int cell)
+{
+  if (bgp_find(q))
+    return 0;
+  bgp_t *bp = calloc(1, sizeof(*bp));
+  bg_arg_t *arg = calloc(1, sizeof(*arg));
+  if (!bp || !arg) {
+    free(bp);
+    free(arg);
+    LOG_E(PHY, "[c%d] background worker %s prepare failed before the fence: step=calloc errno=%d (%s)\n", cell, name, errno, strerror(errno));
+    return -1;
+  }
+  nr_bgq_init(q, cap);
+  q->cell = cell;
+  q->lease_in = bg_lease_in;
+  q->lease_out = bg_lease_out;
+  arg->q = q;
+  arg->aff = 1;
+  snprintf(arg->name, sizeof(arg->name), "%s", name);
+  snprintf(bp->name, sizeof(bp->name), "%s", name);
+  bp->q = q;
+  if (nr_cell_parked_prepare(&bp->p, name, bg_main, arg, cell) != 0) {
+    free(bp);
+    free(arg);
+    return -1;
+  }
+  pthread_mutex_lock(&g_bgp_mu);
+  int i = 0;
+  while (i < 64 && g_bgp[i]) i++;
+  if (i < 64) g_bgp[i] = bp;
+  pthread_mutex_unlock(&g_bgp_mu);
+  return i < 64 ? 0 : -1; /* a full table leaves the parked thread unreachable: harmless, the old start runs */
+}
+
 /* One SCHED_OTHER nice-19 worker draining q, on the cores ISAC_GPU_CHECK_CORES (default the plan's check lane; legacy without a plan: the little cores 10-14).
  * 0 = started. Also used by nr_pdsch_passive_queue.c (FATTAILS ISAC_PDSCH_DMRS_ID_ASYNC). */
 int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
 {
+  bgp_t *bp = bgp_find(q);
+  if (bp && nr_cell_parked_arm(&bp->p) == 0) { /* prepared before the fence: arm only */
+    cpu_set_t cs0;
+    char list0[128];
+    bg_cores(&cs0, list0, sizeof(list0));
+    pthread_detach(nr_cell_parked_thread(&bp->p));
+    LOG_A(PHY, "SENSING: background worker %s started: queue %u, cores %s, SCHED_OTHER nice 19\n", name, q->cap, list0);
+    return 0;
+  }
   nr_bgq_init(q, cap);
   bg_arg_t *arg = calloc(1, sizeof(*arg));
   if (!arg)
@@ -782,21 +874,8 @@ int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
   q->lease_out = bg_lease_out;
   snprintf(arg->name, sizeof(arg->name), "%s", name);
   cpu_set_t cs;
-  CPU_ZERO(&cs);
-  const char *e = getenv("ISAC_GPU_CHECK_CORES");
-  char buf[128], list[128];
-  /* unset: the plan's check-lane mask when a core plan is active (an empty mask = unpinned), else the legacy DGX little cores 10-14 (ISAC_CORE_PLAN=0) */
-  const char *pv = (!(e && *e) && nr_core_layout_active && nr_core_layout_env_default && nr_core_layout_active()) ? nr_core_layout_env_default("ISAC_GPU_CHECK_CORES") : NULL;
-  snprintf(buf, sizeof(buf), "%s", e && *e ? e : pv ? pv : "10-14");
-  snprintf(list, sizeof(list), "%s", buf);
-  char *sv = NULL;
-  for (char *t = strtok_r(buf, ",", &sv); t; t = strtok_r(NULL, ",", &sv)) {
-    int a = -1, b = -1;
-    if (sscanf(t, "%d-%d", &a, &b) != 2)
-      b = a = atoi(t);
-    for (int k = a; k >= 0 && k <= b && k < CPU_SETSIZE; k++)
-      CPU_SET(k, &cs);
-  }
+  char list[128];
+  bg_cores(&cs, list, sizeof(list));
   pthread_attr_t at;
   pthread_attr_init(&at);
   pthread_attr_setinheritsched(&at, PTHREAD_EXPLICIT_SCHED); /* the creator is an RT consumer: do not inherit FIFO */
@@ -810,8 +889,10 @@ int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
   pthread_attr_destroy(&at);
   if (rc == 0)
     pthread_detach(th);
-  else
+  else {
     free(arg);
+    LOG_E(PHY, "SENSING: background worker %s: step=pthread_create errno=%d (%s)\n", name, rc, strerror(rc));
+  }
   LOG_A(PHY, "SENSING: background worker %s %s: queue %u, cores %s, SCHED_OTHER nice 19\n", name, rc ? "FAILED" : "started", q->cap, list);
   return rc ? -1 : 0;
 }

@@ -531,8 +531,12 @@ static void reset_locked(void)
 }
 
 /* Allocate cell `cell`'s heap objects (call for every active cell before nr_cell_alloc_fence(); cell 0 included). */
+static void *eval_thread(void *arg);
+NR_CELL_STATIC(nr_cell_parked_t, g_eval_parked); /* lazy-thread audit: eval thread parked before the fence, ul_layout_start_thread arms it */
+int nr_ul_layout_parked_state(int cell) { return nr_cell_parked_state(&g_eval_parked_cells[cell]); }
 void nr_ul_layout_cell_prealloc(int cell)
 {
+  (void)nr_cell_parked_prepare(&g_eval_parked_cells[cell], "ulLayoutEval", eval_thread, NULL, cell);
   NR_CELL_HEAP_PREALLOC(g_only_cell_t, g_only, cell);
   NR_CELL_HEAP_PREALLOC(g_len_cell_t, g_len, cell);
 }
@@ -1291,6 +1295,10 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
 
 static void ul_layout_start_thread(void)
 {
+  if (nr_cell_parked_arm(&g_eval_parked_cells[nr_cell_idx()]) == 0) {
+    pthread_detach(nr_cell_parked_thread(&g_eval_parked_cells[nr_cell_idx()]));
+    return;
+  }
   pthread_t th;
   pthread_attr_t at;
   pthread_attr_init(&at);

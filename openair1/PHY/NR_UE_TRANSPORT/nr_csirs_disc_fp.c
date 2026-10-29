@@ -186,6 +186,10 @@ uint64_t csirs_disc_gpu_detect_batches, csirs_disc_cpu_detect_batches; /* PROCES
 uint64_t csirs_disc_gpu_lattice_calls, csirs_disc_cpu_lattice_calls;
 NR_CELL_STATIC(bool, history_unified);
 #define history_unified NR_CELL_REF(history_unified)
+NR_CELL_STATIC(int, history_arrays_nr); /* geometry (values per row, pooled tiles) of the arrays the cell's history holds; 0 = none allocated */
+#define history_arrays_nr NR_CELL_REF(history_arrays_nr)
+NR_CELL_STATIC(int, history_arrays_pool);
+#define history_arrays_pool NR_CELL_REF(history_arrays_pool)
 /* history_alloc: allocates a zeroed uint64 array of count entries for the cumulative history, in unified memory when the GPU history is used.
  *   Caller: detect() (bootstrap of the history).
  */
@@ -500,7 +504,42 @@ int nr_csirs_disc_footprints_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_d
 }
 
 #ifndef NR_CSIRS_DISC_GPU_MODULE
-/* nr_csirs_disc_detect_reset: clears the cumulative footprint history and the GPU detector state (frees the history groups and arrays).
+/* history_gpu_mode: true when the cumulative history lives in unified memory (the GPU module accumulates into it). Same predicate detect() uses. */
+static bool history_gpu_mode(const nr_csirs_disc_gpu_ops_t *ops)
+{
+  return ops && ops->accumulate && nr_csirs_disc_alloc_unified && nr_csirs_disc_free_unified;
+}
+
+/* history_release_arrays: frees the five-plus arrays of the cell's history (host or unified, as allocated) and clears the allocation record. */
+static void history_release_arrays(void)
+{
+  history_free(history.sum80);history_free(history.sum64);
+  history_free(history.sum);history_free(history.sq);history_free(history.total);history_free(history.totalq);free(history.exclude);
+  history.sum80=history.sum64=history.sum=history.sq=history.total=history.totalq=NULL;history.exclude=NULL;
+  history_unified=false;
+  history_arrays_nr=history_arrays_pool=0;
+}
+
+/* history_arrays_ensure: the history arrays of the cell for a ring of n_rb RBs (nr = 14*12*n_rb + pool values per slot-residue row). Keeps the arrays when they already have this
+ *   geometry and memory kind (zeroed by the reset), otherwise frees and allocates them. Allocating here after the RX fence is the lazy path of old; nr_csirs_disc_fp_prealloc() runs it
+ *   before the fence for every cell, so a reset or a re-bootstrap on the cell's own geometry never allocates. Returns 0 or -1 (nothing kept).
+ *   Callers: nr_csirs_disc_fp_prealloc(), detect().
+ */
+static int history_arrays_ensure(int nr, int pool, bool gpu)
+{
+  if(history.sum && history_arrays_nr==nr && history_arrays_pool==pool && history_unified==gpu) return 0;
+  history_release_arrays();
+  history_unified=gpu;
+  history.sum=history_alloc((size_t)640*nr);history.sq=history_alloc((size_t)640*pool);
+  history.sum80=history_alloc((size_t)80*nr);history.sum64=history_alloc((size_t)64*nr);
+  history.total=history_alloc(nr);history.totalq=history_alloc(nr);history.exclude=calloc(nr-pool,1);
+  if(!history.sum80 || !history.sum64 || !history.sum || !history.sq || !history.total || !history.totalq || !history.exclude) {history_release_arrays();return -1;}
+  history_arrays_nr=nr;history_arrays_pool=pool;
+  return 0;
+}
+
+/* nr_csirs_disc_detect_reset: clears the cumulative footprint history and the GPU detector state. The history groups are freed; the arrays are kept (zeroed) for the
+ *   cell's geometry, so a reset never allocates (it runs on the discovery worker after the RX fence). nr_csirs_disc_fp_release() frees them.
  *   Called when the ring epoch, geometry or exclusion mask changes, after an overrun, and by the tests.
  */
 void nr_csirs_disc_detect_reset(void)
@@ -508,10 +547,49 @@ void nr_csirs_disc_detect_reset(void)
   const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load();
   if(gpu && gpu->reset) gpu->reset();
   for(int i=0;i<4;++i) free(history.groups[i]);
-  history_free(history.sum80);history_free(history.sum64);
-  history_free(history.sum);history_free(history.sq);history_free(history.total);history_free(history.totalq);free(history.exclude);
-  history_unified=false;
+  /* keep the arrays, remember their geometry, zero them */
+  history_t kept=history;
+  const int knr=history_arrays_nr,kpool=history_arrays_pool;
+  const bool kuni=history_unified;
   memset(&history,0,sizeof(history));
+  if(kept.sum) {
+    const size_t nr=(size_t)knr,pool=(size_t)kpool;
+    memset(kept.sum,0,640*nr*sizeof(uint64_t));memset(kept.sq,0,640*pool*sizeof(uint64_t));
+    memset(kept.sum80,0,80*nr*sizeof(uint64_t));memset(kept.sum64,0,64*nr*sizeof(uint64_t));
+    memset(kept.total,0,nr*sizeof(uint64_t));memset(kept.totalq,0,nr*sizeof(uint64_t));memset(kept.exclude,0,nr-pool);
+    history.sum=kept.sum;history.sq=kept.sq;history.sum80=kept.sum80;history.sum64=kept.sum64;history.total=kept.total;history.totalq=kept.totalq;history.exclude=kept.exclude;
+    history_arrays_nr=knr;history_arrays_pool=kpool;history_unified=kuni;
+  } else {
+    history_unified=false;history_arrays_nr=history_arrays_pool=0;
+  }
+}
+
+/* nr_csirs_disc_fp_prealloc: allocates the calling cell's footprint history arrays for a ring of n_rb RBs, before the RX fence (the first detect() used to allocate them lazily,
+ *   after the fence and the mlockall). Nothing to allocate when the GPU module detects on the resident IQ without a host history (ops->detect: the production GPU path never touches it).
+ *   Returns 0 or -1 (allocation failed: detect() retries lazily, as before). Caller: nr_csirs_disc_start().
+ */
+int nr_csirs_disc_fp_prealloc(int n_rb)
+{
+  const nr_csirs_disc_gpu_ops_t *ops=nr_csirs_disc_gpu_load();
+  if(n_rb<=0 || n_rb>NR_CSIRS_DISC_MAX_RB) return -1;
+  if(ops && ops->detect) return 0;
+  nr_csirs_disc_ring_t r={.n_rb=n_rb};
+  return history_arrays_ensure(14*12*n_rb+POOL(&r),POOL(&r),history_gpu_mode(ops));
+}
+
+/* nr_csirs_disc_fp_history_bytes: bytes of history arrays the calling cell holds (0 = none allocated). Read-only; for the tests and the ledger. */
+size_t nr_csirs_disc_fp_history_bytes(void)
+{
+  if(!history.sum) return 0;
+  const size_t nr=(size_t)history_arrays_nr,pool=(size_t)history_arrays_pool;
+  return (640*nr+640*pool+80*nr+64*nr+2*nr)*sizeof(uint64_t)+(nr-pool);
+}
+
+/* nr_csirs_disc_fp_release: frees everything the calling cell's history holds (arrays included). Caller: nr_csirs_disc_stop(). */
+void nr_csirs_disc_fp_release(void)
+{
+  nr_csirs_disc_detect_reset();
+  history_release_arrays();
 }
 
 NR_CELL_STATIC(bool, warned); /* CPU detector fallback logged once per cell */
@@ -636,7 +714,7 @@ static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c
     if(rc>=0) {__atomic_fetch_add(&csirs_disc_gpu_detect_batches,1,__ATOMIC_RELAXED);__atomic_fetch_add(&csirs_disc_gpu_lattice_calls,1,__ATOMIC_RELAXED);}
     return rc; /* resident IQ cannot be silently scored through a stale host mirror */
   }
-  bool gpu=ops && ops->accumulate && nr_csirs_disc_alloc_unified && nr_csirs_disc_free_unified;
+  bool gpu=history_gpu_mode(ops);
   int nr=14*12*r->n_rb+POOL(r);
   uint16_t symbols=cfg?cfg->excl_sym_mask_any:0;
   bool changed=h->grid && (h->grid!=r->grid_base || h->n_rb!=r->n_rb || h->n_ant!=r->n_ant ||
@@ -648,11 +726,7 @@ static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c
   if(!h->grid) {
     /* Bootstrap the available snapshot after reset; older IQ is unavailable. */
     h->written=r->written>(uint64_t)r->capacity?r->written-r->capacity:0;
-    history_unified=gpu;
-    h->sum=history_alloc((size_t)640*nr);h->sq=history_alloc((size_t)640*POOL(r));
-    h->sum80=history_alloc((size_t)80*nr);h->sum64=history_alloc((size_t)64*nr);
-    h->total=history_alloc(nr);h->totalq=history_alloc(nr);h->exclude=calloc(nr-POOL(r),1);
-    if(!h->sum80 || !h->sum64 || !h->sum || !h->sq || !h->total || !h->totalq || !h->exclude) {nr_csirs_disc_detect_reset();return -1;}
+    if(history_arrays_ensure(nr,POOL(r),gpu)<0) {nr_csirs_disc_detect_reset();return -1;}
     h->grid=r->grid_base;h->nr=nr;h->n_rb=r->n_rb;h->n_ant=r->n_ant;
     h->capacity=r->capacity;h->stride=r->slot_stride;h->symbols=symbols;h->ops=gpu?ops:NULL;
     if(cfg && cfg->excl_re) memcpy(h->exclude,cfg->excl_re,nr-POOL(r));

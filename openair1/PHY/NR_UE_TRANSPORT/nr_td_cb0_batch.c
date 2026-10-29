@@ -8,6 +8,7 @@
  */
 #define _GNU_SOURCE
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_cell.h"
 #include "nr_td_cb0_batch.h"
 #include <dlfcn.h>
 #include <pthread.h>
@@ -284,6 +285,7 @@ typedef struct {
   uint32_t Emax;
   atomic_int next;
   int refs, finished; /* pool bookkeeping (under g_pool.m) */
+  int cell;           /* mpci audit: the cell of the caller; a pool worker binds itself to it while it works on this job */
 } cb0_job_t;
 
 /* Per-thread scratch, grown on demand and kept (pool workers and callers reuse it: no allocation per batch). */
@@ -369,7 +371,9 @@ static void *cb0_pool_main(void *arg)
         pthread_cond_wait(&g_pool.cv, &g_pool.m);
     }
     j->refs++;
+    const int jcell = j->cell;
     pthread_mutex_unlock(&g_pool.m);
+    if (jcell != nr_cell_idx()) nr_cell_bind(jcell); /* the pool serves every cell: the job names its own */
     const int d = cb0_work(j);
     pthread_mutex_lock(&g_pool.m);
     j->finished += d;
@@ -411,6 +415,7 @@ static void cb0_run(cb0_job_t *j, int threads)
   atomic_init(&j->next, 0);
   j->refs = 0;
   j->finished = 0;
+  j->cell = nr_cell_idx();
   const int helpers = (threads < j->n ? threads : j->n) - 1; /* the caller is one of the T threads */
   bool queued = false;
   if (helpers > 0) {

@@ -11,6 +11,11 @@ void nr_ul_layout_cell_prealloc(int cell); /* nr_pdcch_ul_layout_lock.c: g_len (
 void nr_ul_config_disc_cell_prealloc(int cell); /* nr_pdcch_ul_config_disc.c: g_ue (1.1 MiB) */
 void nr_ul_discovery_cell_prealloc(int cell);   /* nr_pdcch_ul_discovery.c: g_contexts (NR_PDCCH_BLIND_MAX_UE x 2.3 MiB, calloc: pages are touched lazily) */
 void nr_ul_nid_bg_cell_prealloc(int cell);      /* nr_ul_nid_bg.c: g_rnti (132 KiB) */
+void nr_ul_bgdisc_cell_prealloc(int cell);      /* nr_pusch_ul_bgdisc.c: parked ulBgDisc worker */
+void nr_pdcch_uss_tracker_cell_prealloc(int cell); /* nr_pdcch_uss_tracker.c: parked ussTracker worker */
+int nr_ul_bgdisc_parked_state(int cell);        /* 0 none, 1 parked, 2 armed */
+int nr_ul_layout_parked_state(int cell);
+int nr_pdcch_uss_tracker_parked_state(int cell);
 /* All of the above for one cell (A8 calls this once per active cell, cell 0 included, before nr_cell_alloc_fence()). */
 static inline void nr_ul_cell_prealloc_all(int cell)
 {
@@ -18,6 +23,8 @@ static inline void nr_ul_cell_prealloc_all(int cell)
   nr_ul_config_disc_cell_prealloc(cell);
   nr_ul_discovery_cell_prealloc(cell);
   nr_ul_nid_bg_cell_prealloc(cell);
+  nr_ul_bgdisc_cell_prealloc(cell);
+  nr_pdcch_uss_tracker_cell_prealloc(cell);
 }
 #ifdef __cplusplus
 }

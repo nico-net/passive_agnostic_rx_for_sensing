@@ -235,6 +235,43 @@ class CheckMode(unittest.TestCase):
         # the committed table must cover the repo (same as the ctest check)
         self.assertEqual(sa.main(["--check"]), 0)
 
+    def test_repo_has_no_unclassified_row(self):
+        # mpci audit cleanup: the gate is --strict (the ctest static_audit_check)
+        self.assertEqual(sa.main(["--strict"]), 0)
+
+    def test_audit_file_list_widens_the_scan(self):
+        # a file outside the GLOBS is scanned once it is listed in mpci_audit_files.txt; unlisted it is invisible
+        other = os.path.join(self.d, "common/utils")
+        os.makedirs(other)
+        with open(os.path.join(other, "extra.c"), "w") as fh:
+            fh.write("static int widened;\n")
+        self.assertNotIn("common/utils/extra.c", sa.files(self.d))
+        saved = sa.AUDIT_FILES
+        try:
+            lst = os.path.join(self.d, "audit_files.txt")
+            with open(lst, "w") as fh:
+                fh.write("# comment\ncommon/utils/extra.c  # trailing\nmissing/file.c\n")
+            sa.AUDIT_FILES = lst
+            self.assertIn("common/utils/extra.c", sa.files(self.d))
+            self.assertNotIn("missing/file.c", sa.files(self.d))  # a listed file that does not exist is ignored
+            self.assertEqual(self.run_main("--write"), 0)
+            self.assertIn(("common/utils/extra.c", "widened", "file_static"), sa.read_table(self.t))
+            self.assertEqual(sa.owner_of("common/utils/extra.c"), "AUDIT")
+        finally:
+            sa.AUDIT_FILES = saved
+
+    def test_header_with_static_state_is_reported(self):
+        # a static in a header is one copy per including unit: receiver_headers() finds it, a header of tables and prototypes is not reported
+        d = os.path.join(self.d, "common/utils")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "state.h"), "w") as fh:
+            fh.write("static int per_unit_counter;\nstatic inline int f(void){ static int calls; return ++calls; }\n")
+        with open(os.path.join(d, "tables.h"), "w") as fh:
+            fh.write("static const int tab[2] = {1, 2};\ntypedef struct s s_t;\nint proto(int);\n")
+        got = sa.receiver_headers(self.d, ["common/utils/x.c"])
+        self.assertIn("common/utils/state.h", got)
+        self.assertNotIn("common/utils/tables.h", got)
+
 
 if __name__ == "__main__":
     unittest.main()

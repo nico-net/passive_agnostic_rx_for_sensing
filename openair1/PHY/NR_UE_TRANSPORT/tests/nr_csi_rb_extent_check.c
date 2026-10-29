@@ -127,6 +127,32 @@ int main(void)
   n = nr_dlsch_csi_unav_res(&cfg, &fa);
   CHECK(n == 50, "legacy density 0.5: %u REs (want 50)", n);
 
+  /* A CSI-RS resource on the grant's DM-RS REs is a false hypothesis: dropped, others kept in order (no AssertFatal). */
+  {
+    fapi_nr_dl_config_dlsch_pdu_rel15_t d;
+    memset(&d, 0, sizeof(d));
+    d.dmrsConfigType = NFAPI_NR_DMRS_TYPE1;
+    d.n_dmrs_cdm_groups = 1;
+    d.dlDmrsSymbPos = 1u << 4; /* DM-RS on symbol 4 */
+    d.numCsiRsForRateMatching = 3;
+    trs(&d.csiRsForRateMatching[0], 0, 52, 8, 0x1, 3); /* symbol 8: no DM-RS there, kept */
+    trs(&d.csiRsForRateMatching[1], 0, 52, 4, 0x1, 3); /* symbol 4 k=0,4,8 on type-1 DM-RS 0x555: dropped */
+    trs(&d.csiRsForRateMatching[2], 52, 52, 9, 0x1, 3); /* kept, must move to slot 1 */
+    CHECK(nr_dlsch_csi_drop_dmrs_overlap(&d) == 1 && d.numCsiRsForRateMatching == 2, "overlap dropped: %u", d.numCsiRsForRateMatching);
+    CHECK(d.csiRsForRateMatching[0].symb_l0 == 8 && d.csiRsForRateMatching[1].symb_l0 == 9 && d.csiRsForRateMatching[1].start_rb == 52,
+          "survivors keep order");
+    CHECK(nr_dlsch_csi_drop_dmrs_overlap(&d) == 0 && d.numCsiRsForRateMatching == 2, "idempotent");
+    /* the same resource without DM-RS on its symbol is untouched; the surviving set no longer trips the extractor's check */
+    d.dlDmrsSymbPos = 1u << 2;
+    d.numCsiRsForRateMatching = 1;
+    trs(&d.csiRsForRateMatching[0], 0, 52, 4, 0x1, 3);
+    CHECK(nr_dlsch_csi_drop_dmrs_overlap(&d) == 0 && d.numCsiRsForRateMatching == 1, "no DM-RS on the symbol: kept");
+    /* the CDM-group swap of a retry arm changes the DM-RS REs: type-2, 1 group (0xc3) vs RE 0 resource overlaps; k=4 only (0x10) does not */
+    d.dmrsConfigType = NFAPI_NR_DMRS_TYPE2;
+    d.dlDmrsSymbPos = 1u << 4;
+    CHECK(nr_dlsch_csi_drop_dmrs_overlap(&d) == 1 && d.numCsiRsForRateMatching == 0, "type-2 overlap dropped");
+  }
+
   printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
   return failures ? 1 : 0;
 }

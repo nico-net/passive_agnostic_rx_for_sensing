@@ -160,6 +160,12 @@ int nr_csirs_disc_detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_c
  * Full-ring inputs evaluate all groups. Legacy detect remains exact/capped at 32. */
 int nr_csirs_disc_detect_candidates(const nr_csirs_disc_ring_t *,const nr_csirs_disc_fp_cfg_t *,nr_csirs_disc_fp_t *,int);
 void nr_csirs_disc_detect_reset(void);
+/* The footprint history arrays of the calling thread's cell (nr_csirs_disc_fp.c). nr_csirs_disc_detect_reset() keeps them (zeroed); the first detect() used to allocate them
+ * lazily, after the RX fence. prealloc: before the fence, from nr_csirs_disc_start() (0, or -1 when n_rb is out of range or the allocation failed: detect() then retries lazily).
+ * release: frees everything, from nr_csirs_disc_stop(). */
+int nr_csirs_disc_fp_prealloc(int n_rb);
+void nr_csirs_disc_fp_release(void);
+size_t nr_csirs_disc_fp_history_bytes(void); /* bytes of history arrays the calling cell holds (0 = none) */
 
 /* U3 (nr_csirs_disc_hyp.c) */
 int nr_csirs_disc_hypotheses(const nr_csirs_disc_fp_t *fps, int n_fp, nr_csirs_disc_hyp_t *out, int max_out);
@@ -241,6 +247,9 @@ typedef struct {
   /* Explicit diagnostic/snapshot readback; production never calls this. */
   int (*readback)(const nr_csirs_disc_ring_t *);
   int (*upload_symbols)(nr_csirs_disc_ring_t *, uint16_t symbols);
+  /* G4B: gives back the calling cell's GPU workspaces (retired for good). Not part of the guarded table: use nr_csirs_disc_gpu_cell_free(). */
+  void (*cell_free)(void);
+  void (*sweep_cell_free)(void);
 } nr_csirs_disc_gpu_ops_t;
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GPU module */
 /* CPU-side loader, gated by the test-only ISAC_CSIRS_DISC_BACKEND=auto|cpu|gpu.
@@ -248,6 +257,9 @@ const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GP
  * The module exports gpu_ops above, plus nr_csirs_disc_gpu_alloc_unified/_free_unified; the loader installs them
  * into the core hooks nr_csirs_disc_alloc_unified/_free_unified (function pointers, see U1 above). */
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void);
+/* G4B: frees the GPU workspaces (streams, plans, buffers, resident history) of the calling thread's cell in both GPU modules, when the cell is retired for good
+ * (nr_csirs_disc_stop). Not on an A12 pause. Takes the discovery ticket, so it waits for an in-flight chunk. Does nothing when the modules were never loaded; idempotent. */
+void nr_csirs_disc_gpu_cell_free(void);
 /* T6b: switches the GPU discovery off for the process (memory budget or an allocation failure): nr_csirs_disc_gpu_load() returns NULL from then on and the CPU path runs. */
 void nr_csirs_disc_gpu_disable(void);
 /* host-RAM budget: the ring got fewer slots than the GPU share chose (nr_csirs_disc_start); becomes the capacity and the elastic base */

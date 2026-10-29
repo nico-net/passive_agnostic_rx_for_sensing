@@ -258,6 +258,13 @@ struct State {
   const int16_t *identity=nullptr;
   int rb=0,ant=0,capacity=0,round=0;
   uint16_t symbols=0;uint8_t host_exclude[14*12*NR_CSIRS_DISC_MAX_RB]={};
+  /* release_all: G4B: gives every device buffer back and forgets the history (cell retired for good) */
+  void release_all()
+  {
+    sum.release();sq.release();s80.release();s64.release();total.release();totalq.release();ps.release();pq.release();dc.release();
+    x.release();meta.release();grid.release();exclude.release();masks.release();raw.release();groups.release();count.release();scr.release();sizes.release();
+    memset(counts,0,sizeof(counts));nt=written=0;identity=nullptr;round=0;symbols=0;rb=ant=capacity=0;
+  }
   candidate_t all[CAND_CAP],groups_h[4*CAND_CAP]; /* host scratch of finish_host() / detect(): per cell (they were function statics shared by every caller) */
 };
 /* state: the resident detector of the calling cell (G4: one per cell; created on first use, in the cell's prepare before the RX fence). */

@@ -15,6 +15,7 @@
  */
 
 #include "nr_dci_history.h"
+#include "common/utils/nr_cell.h"
 #include "nr_passive_cfg_epoch.h"
 #include <stdlib.h>
 #include <string.h>
@@ -366,8 +367,11 @@ int nr_dci_hist_on_confirm(nr_dci_hist_t *h, uint16_t rnti, uint32_t abs_slot, u
   return calls;
 }
 
-static nr_dci_hist_t g_hist;
-static pthread_once_t g_once = PTHREAD_ONCE_INIT;
+/* mpci audit: the DCI history of the cell the calling thread serves (the BC9 evidence of one cell is never another cell's) */
+NR_CELL_STATIC(nr_dci_hist_t, g_hist)
+#define g_hist NR_CELL_REF(g_hist)
+NR_CELL_STATIC_INIT(pthread_once_t, g_once, PTHREAD_ONCE_INIT)
+#define g_once NR_CELL_REF(g_once)
 static void g_init(void) { nr_dci_hist_init(&g_hist, 0); }
 nr_dci_hist_t *nr_dci_hist_global(void)
 {

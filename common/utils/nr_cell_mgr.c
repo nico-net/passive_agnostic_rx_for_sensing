@@ -51,6 +51,8 @@ int nr_cell_mgr_plan(nr_cell_mgr_t *m, const nr_cell_mgr_cfg_t *cfg, const nr_ho
   else
     snprintf(line, sizeof line, "MPCI_ADMIT cells=0 of %d reason=bad_arguments", n_wanted);
   mlog(m, line);
+  if (served >= 0 && nr_admit_pool_format(&m->plan, line, sizeof line) > 0)
+    mlog(m, line); /* B6: the pool check of the served set (a separate line: the MPCI_ADMIT grammar is unchanged) */
   if (served < 1 || m->plan.refuse)
     return -1;
   if (served > NR_CELL_MAX)

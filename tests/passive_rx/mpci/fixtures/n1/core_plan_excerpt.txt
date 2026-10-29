@@ -1,0 +1,1 @@
+SENSING: CORE_PLAN host=spark-74c3 cpus=20 isolated=15-19 dpdk=none irq=0-14 nohz_full=15-19 allowed=0-14 -> ue[0]:5 uhd_ctrl[0]:7 dl[0]:8 ul[0]:9 sync[0]:0 scan[0]:6(user) uss[0]:1 pool[0]:2 stats[0]:3

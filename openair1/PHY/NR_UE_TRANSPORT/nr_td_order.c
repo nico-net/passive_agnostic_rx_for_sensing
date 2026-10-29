@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_td_order.h"
+#include "common/utils/nr_cell.h"
 #include "nr_pdsch_qm_oracle.h"
 #include <pthread.h>
 #include <string.h>
@@ -56,9 +57,18 @@ nr_td_census_t nr_td_census_deftab(int pos, int tda_index, const nr_pdsch_cfg_hy
   return nr_td_default_table_a(tda_index + 1, pos, &t) && tdra_hyp_eq(&t, h) ? NR_TD_CENSUS_MATCH : NR_TD_CENSUS_MISMATCH;
 }
 static pthread_mutex_t g_census_lock = PTHREAD_MUTEX_INITIALIZER;
-static nr_td_tdra_t g_sib1_store[NR_TD_MAX_SIB1_TDRA];
-static int g_sib1_store_n;
-static uint64_t g_census_sib1[3][3], g_census_def[3][3];
+/* mpci audit: the SIB1 TDRA list and the census belong to the cell whose SIB1 / DCIs they come from (g_census_lock only serialises) */
+typedef nr_td_tdra_t g_sib1_store_arr_t[NR_TD_MAX_SIB1_TDRA];
+NR_CELL_STATIC(g_sib1_store_arr_t, g_sib1_store)
+#define g_sib1_store NR_CELL_REF(g_sib1_store)
+NR_CELL_STATIC(int, g_sib1_store_n)
+#define g_sib1_store_n NR_CELL_REF(g_sib1_store_n)
+typedef uint64_t g_census_sib1_arr_t[3][3];
+NR_CELL_STATIC(g_census_sib1_arr_t, g_census_sib1)
+#define g_census_sib1 NR_CELL_REF(g_census_sib1)
+typedef uint64_t g_census_def_arr_t[3][3];
+NR_CELL_STATIC(g_census_def_arr_t, g_census_def)
+#define g_census_def NR_CELL_REF(g_census_def)
 void nr_td_sib1_store_set(const nr_td_tdra_t *list, int n)
 {
   pthread_mutex_lock(&g_census_lock);

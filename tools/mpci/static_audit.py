@@ -17,6 +17,9 @@ Usage (from anywhere):
                                it is the gate once A3-A8 have classified every PER_CELL candidate)
   static_audit.py --summary    print the per-file and per-class counts only
   --macros                     list file-scope macro invocations the scanner skipped (diagnostics)
+  --coverage BUILD_DIR         exit 1 if a source file of nr-uesoftmodem or of a runtime-loaded library of its build (ninja -t inputs of RECEIVER_TARGETS in
+                               BUILD_DIR) is neither in GLOBS nor in mpci_audit_files.txt (mpci audit, plan R14 item 3); lists the uncovered files
+  --add-coverage BUILD_DIR     append those files to mpci_audit_files.txt (then run --write and classify the new rows)
 
 What counts as const: `static const int x`, `static const char *const p`, constexpr. NOT const: `static const char *p`
 (the pointer is mutable), `static const char *names[]` (array of mutable pointers). A converted object
@@ -82,6 +85,14 @@ GLOBS = [
     "radio/COMMON/*.c",
     "radio/COMMON/*.cu",
 ]
+# Receiver build targets: nr-uesoftmodem and every library it dlopens at run time (coding / LDPC / GPU modules, radio devices, config backends). The sources of these
+# targets (ninja -t inputs, repository files only) must all be scanned: either matched by GLOBS above or listed in AUDIT_FILES.
+RECEIVER_TARGETS = [
+    "nr-uesoftmodem", "oai_usrpdevif", "rfsimulator", "params_libconfig", "params_yaml", "libcoding.so", "libldpc.so", "libldpc_orig.so", "libldpc_cuda.so",
+    "libcsirs_disc_gpu.so", "libnr_csirs_disc_gpu_sweep.so", "libpdsch_gpu.so", "libpdcch_nid_gpu.so", "libpdcch_gpu.so", "libpolar_gpu.so",
+    "libtd_cb0_gpu.so", "libdfts.so", "libnr_gpu_platform.so", "libshm_iq.so", "libshm_iq_chan_gpu.so", "liboai_iqplayer.so",
+]
+AUDIT_FILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mpci_audit_files.txt")
 EXCLUDE_DIRS = ("ref/", "tests/", "/tests/", "/test/", "tests/passive_rx/")
 
 
@@ -103,7 +114,53 @@ def files(root):
                 rel = os.path.join(gdir, f)
                 if in_scope(rel) and rel not in out:
                     out.append(rel)
+    if os.path.exists(AUDIT_FILES):
+        with open(AUDIT_FILES) as f:
+            for ln in f:
+                rel = ln.split("#")[0].strip()
+                if rel and rel not in out and in_scope(rel) and os.path.isfile(os.path.join(root, rel)):
+                    out.append(rel)
     return sorted(out)
+
+
+def receiver_sources(root, build_dir):
+    """Repository source files (c/cc/cpp/cu) of the receiver targets in build_dir, repo-relative, from `ninja -t inputs`."""
+    build_dir = os.path.abspath(build_dir)
+    srcs = set()
+    for t in RECEIVER_TARGETS:
+        r = subprocess.run(["ninja", "-C", build_dir, "-t", "inputs", t], capture_output=True, text=True)
+        if r.returncode != 0:
+            continue  # target not configured in this build (optional library)
+        for ln in r.stdout.splitlines():
+            ln = ln.strip()
+            if ln.endswith((".c", ".cc", ".cpp", ".cu")):
+                p = os.path.normpath(os.path.join(build_dir, ln))
+                if p.startswith(root + os.sep) and not p.startswith(build_dir + os.sep):
+                    srcs.add(os.path.relpath(p, root))
+    return sorted(s for s in srcs if in_scope(s) and not s.startswith("ref/"))
+
+
+def receiver_headers(root, srcs):
+    """Headers in the directories of the receiver sources that DEFINE state (file-scope / function-local statics, thread-locals): a static in a header is one copy per
+    translation unit, invisible to a scan of the .c files. Returns repo-relative paths. Declarations that the text scanner reads as objects (function-pointer typedef
+    parameters, struct forward declarations: kind `global`) are ignored; real header definitions are static/thread-local."""
+    out = []
+    dirs = sorted({os.path.dirname(f) for f in srcs})
+    for d in dirs:
+        full = os.path.join(root, d)
+        if not os.path.isdir(full):
+            continue
+        for f in sorted(os.listdir(full)):
+            if not f.endswith((".h", ".hpp", ".cuh")):
+                continue
+            rel = os.path.join(d, f)
+            if not in_scope(rel):
+                continue
+            with open(os.path.join(root, rel), errors="replace") as fh:
+                objs, _ = scan_text(rel, fh.read())
+            if any(o.cls_auto != "CONST" and o.kind in ("file_static", "func_static", "tls") for o in dedupe(objs)):
+                out.append(rel)
+    return out
 
 
 # ------------------------------------------------------------------ text cleaning
@@ -634,7 +691,7 @@ def owner_of(rel):
     for g, o in OWNER_RULES:
         if fnmatch.fnmatch(rel, g):
             return o
-    return "A8"
+    return "AUDIT"  # files added by the audit coverage widening (mpci_audit_files.txt)
 
 
 PROCESS_FILES = (
@@ -726,7 +783,32 @@ def main(argv=None):
     g.add_argument("--strict", action="store_true")
     g.add_argument("--summary", action="store_true")
     ap.add_argument("--macros", action="store_true")
+    ap.add_argument("--coverage", metavar="BUILD_DIR")
+    ap.add_argument("--add-coverage", metavar="BUILD_DIR")
     a = ap.parse_args(argv)
+    if a.coverage or a.add_coverage:
+        covered = set(files(a.root))
+        bd = a.coverage or a.add_coverage
+        srcs = receiver_sources(a.root, bd)
+        missing = [f for f in srcs if f not in covered]
+        missing += [h for h in receiver_headers(a.root, srcs) if h not in covered]
+        if a.add_coverage:
+            known = set()
+            if os.path.exists(AUDIT_FILES):
+                with open(AUDIT_FILES) as f:
+                    known = {ln.split("#")[0].strip() for ln in f}
+            with open(AUDIT_FILES, "a") as f:
+                if not known:
+                    f.write("# mpci audit: receiver sources (nr-uesoftmodem and its runtime libraries) outside the GLOBS of static_audit.py; one repo-relative path per line.\n"
+                            "# Regenerate/extend with `static_audit.py --add-coverage <build dir>`, then `--write` and classify the new rows.\n")
+                for m in missing:
+                    f.write(m + "\n")
+            print("added %d files" % len(missing))
+            return 0
+        for m in missing:
+            print("NOT SCANNED: " + m, file=sys.stderr)
+        print("coverage: %d receiver source files covered, %d not scanned" % (len(covered), len(missing)))
+        return 1 if missing else 0
     objs, macros = scan_tree(a.root)
     old = read_table(a.table)
     if a.macros:

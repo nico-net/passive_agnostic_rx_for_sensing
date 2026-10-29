@@ -27,7 +27,11 @@
 #define NR_POOL_ACTIVE_WINDOW_NS 100000000ull
 /* Below this many tokens DISC and HOUSE age promotion is off (FLOAT-LANE-POOL-20261021 section 3: at 3-4 tokens promotion cost DL p99 +2.5 ms and
  * UL miss 57 % at overload [Bench, DGX, synthetic spin jobs]; with promotion off decode is back within +0.5 ms). Applies to the default config. */
-#define NR_POOL_PROMO_MIN_TOKENS 6
+#define NR_POOL_PROMO_MIN_TOKENS 6 /* only the N=1 default config (nr_pool_cfg_default_n) still uses it; the multi-cell promotion rule is measured (promo_blocked) */
+/* Half-life of the measured per-cell token demand (essential and sheddable classes apart): long enough to average the slot-to-slot bursts, short enough to follow a load change. */
+#define NR_POOL_DEMAND_HALFLIFE_NS 2000000000ull
+/* A demand estimate needs at least this much observed time (a quarter of the half-life) before it is reported as measured. */
+#define NR_POOL_DEMAND_MIN_AGE_NS (NR_POOL_DEMAND_HALFLIFE_NS / 4)
 
 typedef struct waiter {
   int prio, cell, tok, last;
@@ -51,6 +55,7 @@ struct nr_pool {
   int cnt[NR_POOL_NPRIO];           /* current leases per class */
   int cnt_dl;                       /* of the DECODE leases, the DL ones */
   int chan_demand;                  /* tokens the channelizer asked for (0 = none registered) */
+  bool dyn_promo;                   /* B6: config derived (cfg == NULL at create): DISC/HOUSE promotion also follows the tokens per active cell, see promo_blocked() */
   bool chan_tok[NR_POOL_MAX_TOKENS]; /* the r reserved tokens (fastest first): CHAN's own, nobody else is placed on them while r > 0 */
   cpu_set_t poolset, home;
   bool have_home;
@@ -61,6 +66,9 @@ struct nr_pool {
   int cell_run[NR_POOL_MAX_CELLS], cell_dl[NR_POOL_MAX_CELLS], cell_wait[NR_POOL_MAX_CELLS];
   double cell_u[NR_POOL_MAX_CELLS];
   uint64_t cell_t[NR_POOL_MAX_CELLS], cell_act[NR_POOL_MAX_CELLS];
+  /* measured demand per cell: decayed token-ns of the essential (SCAN, DECODE, RETRY, UL) and the sheddable (DISC, HOUSE) classes, last update, first lease */
+  double dem_ess[NR_POOL_MAX_CELLS], dem_shed[NR_POOL_MAX_CELLS];
+  uint64_t dem_t[NR_POOL_MAX_CELLS], dem_t0[NR_POOL_MAX_CELLS];
 };
 
 /* The calling thread's lease (a thread holds at most one). */
@@ -139,6 +147,45 @@ int nr_pool_chan_demand(const nr_pool_t *p) { return p ? p->chan_demand : 0; }
 int nr_pool_chan_cap(const nr_pool_t *p) { return p ? nr_pool_chan_cap_n(p->n) : 0; }
 int nr_pool_chan_reserved(const nr_pool_t *p) { return p ? chan_res(p) : 0; }
 
+/* ---- B6: shed value order (header, SHED) ---- */
+static bool cell_active(const nr_pool_t *p, int c, uint64_t now);
+int nr_pool_shed_tiers_n(int urgent, int free_tokens, int active)
+{
+  if (active < 2 || free_tokens > 0 || urgent <= 0) return 0;
+  return urgent < NR_POOL_SHED_TIERS ? urgent : NR_POOL_SHED_TIERS;
+}
+int nr_pool_active_cells(nr_pool_t *p)
+{
+  if (!p) return 1;
+  const uint64_t now = nr_pool_now_ns();
+  pthread_mutex_lock(&p->mu);
+  int a = 0;
+  for (int c = 0; c < NR_POOL_MAX_CELLS; c++) a += cell_active(p, c, now);
+  pthread_mutex_unlock(&p->mu);
+  return a < 1 ? 1 : a;
+}
+int nr_pool_shed_tiers(nr_pool_t *p)
+{
+  if (!p) return 0;
+  const uint64_t now = nr_pool_now_ns();
+  pthread_mutex_lock(&p->mu);
+  int A = 0;
+  for (int c = 0; c < NR_POOL_MAX_CELLS; c++) A += cell_active(p, c, now);
+  const int res = chan_res(p), idle = res > p->cnt[NR_POOL_CHAN] ? res - p->cnt[NR_POOL_CHAN] : 0;
+  const int urgent = atomic_load_explicit(&p->nwait[NR_POOL_SCAN], memory_order_relaxed) + atomic_load_explicit(&p->nwait[NR_POOL_DECODE], memory_order_relaxed)
+                     + atomic_load_explicit(&p->nwait[NR_POOL_RETRY], memory_order_relaxed);
+  const int k = nr_pool_shed_tiers_n(urgent, p->nfree - idle, A);
+  pthread_mutex_unlock(&p->mu);
+  return k;
+}
+void nr_pool_shed_note(nr_pool_t *p, int tier)
+{
+  if (!p || tier < 0 || tier >= NR_POOL_SHED_TIERS) return;
+  pthread_mutex_lock(&p->mu);
+  p->st.shed[tier]++;
+  pthread_mutex_unlock(&p->mu);
+}
+
 nr_pool_t *nr_pool_create(const int *cores, const int *capacity, int n, const nr_pool_cfg_t *cfg)
 {
   if (!cores || n < 1 || n > NR_POOL_MAX_TOKENS) return NULL;
@@ -146,6 +193,7 @@ nr_pool_t *nr_pool_create(const int *cores, const int *capacity, int n, const nr
   if (!p) return NULL;
   pthread_mutex_init(&p->mu, NULL);
   p->cfg = cfg ? *cfg : nr_pool_cfg_default_n(n); /* an explicit cfg is a deliberate override: used as given */
+  p->dyn_promo = cfg == NULL;
   p->n = p->nfree = n;
   for (int i = 0; i < NR_POOL_NPRIO; i++) p->rr[i] = NR_POOL_MAX_CELLS - 1; /* cell 0 is served first */
   CPU_ZERO(&p->poolset);
@@ -181,24 +229,66 @@ int nr_pool_total_waiting(const nr_pool_t *p)
   return w;
 }
 
+static int active_cells(const nr_pool_t *p, int cell, uint64_t now);
+static double demand_decay(uint64_t dt, uint64_t hl); /* 2^(-dt/hl) */
+static bool cell_active(const nr_pool_t *p, int c, uint64_t now);
+/* Measured demand of one cell in tokens (token-time per second, decayed mean). ess: SCAN + DECODE + RETRY + UL; shed: DISC + HOUSE. Returns 1 when the cell has been observed
+ * for at least NR_POOL_DEMAND_MIN_AGE_NS (the estimate divides by the observed window while the window is shorter than the decay horizon), else 0. Caller holds p->mu. */
+static int cell_demand_locked(const nr_pool_t *p, int c, uint64_t now, double *ess, double *shed)
+{
+  *ess = *shed = 0;
+  if (c < 0 || c >= NR_POOL_MAX_CELLS || !p->dem_t0[c] || now <= p->dem_t0[c] || now - p->dem_t0[c] < NR_POOL_DEMAND_MIN_AGE_NS) return 0;
+  const double lam = 0.6931471805599453 / (double)NR_POOL_DEMAND_HALFLIFE_NS;
+  const uint64_t dt = now > p->dem_t[c] ? now - p->dem_t[c] : 0;
+  const double d = demand_decay(dt, NR_POOL_DEMAND_HALFLIFE_NS);
+  const double norm = 1.0 - demand_decay(now - p->dem_t0[c], NR_POOL_DEMAND_HALFLIFE_NS); /* the observed window as a share of the steady-state window */
+  if (norm <= 0) return 0;
+  *ess = p->dem_ess[c] * d * lam / norm;
+  *shed = p->dem_shed[c] * d * lam / norm;
+  return 1;
+}
+/* Pure rule. Age promotion lets a DISC / HOUSE waiter take the reserve token of the urgent classes; it is only affordable while the tokens the cells can work on
+ * (tokens_eff = N - the channelizer's reserve) exceed the MEASURED essential demand of the active cells by at least one token of headroom. */
+bool nr_pool_promo_allowed_m(double tokens_eff, double essential_demand)
+{
+  return tokens_eff - essential_demand >= 1.0;
+}
+static bool promo_blocked(const nr_pool_t *p, int cell, uint64_t now)
+{
+  if (!p->dyn_promo) return false;
+  const int res = chan_res(p), A = active_cells(p, cell, now);
+  if (A <= 1 && res == 0) return false; /* the single-cell pool: n < 6 is already handled by the default config */
+  double dem = 0;
+  for (int c = 0; c < NR_POOL_MAX_CELLS; c++) {
+    if (!(c == cell || cell_active(p, c, now))) continue;
+    double e, s;
+    if (!cell_demand_locked(p, c, now, &e, &s)) return true; /* an active cell not measured yet: sheddable work does not jump the queue */
+    dem += e;
+  }
+  return !nr_pool_promo_allowed_m((double)(p->n - res), dem);
+}
 static bool overdue(const nr_pool_t *p, const waiter_t *w, uint64_t now)
 {
   const uint64_t a = p->cfg.age_ns[w->prio];
-  return a && now > w->t_enq && now - w->t_enq >= a;
+  if (!(a && now > w->t_enq && now - w->t_enq >= a)) return false;
+  /* value order under overload (B6): discovery and housekeeping are shed first, they are not promoted into the tokens decode and scan need */
+  if ((w->prio == NR_POOL_DISC || w->prio == NR_POOL_HOUSE) && promo_blocked(p, w->cell, now)) return false;
+  return true;
 }
 
 /* Per-cell bookkeeping (under p->mu). U_c is the exponentially decayed token-time of cell c: dU/dt = run_c - U/tau, tau = halflife/ln 2. */
 /* 2^(-dt/half-life) without libm: whole half-lives by halving, the rest by a Taylor series of exp(-x), x < ln 2 (error < 1e-8). */
-static double decay_factor(uint64_t dt)
+static double demand_decay(uint64_t dt, uint64_t hl)
 {
-  const uint64_t k = dt / NR_POOL_USAGE_HALFLIFE_NS;
+  const uint64_t k = dt / hl;
   if (k >= 64) return 0.0;
-  const double x = (double)(dt % NR_POOL_USAGE_HALFLIFE_NS) / (double)NR_POOL_USAGE_HALFLIFE_NS * 0.6931471805599453;
+  const double x = (double)(dt % hl) / (double)hl * 0.6931471805599453;
   double term = 1.0, sum = 1.0;
   for (int i = 1; i <= 9; i++) term *= -x / i, sum += term;
   for (uint64_t i = 0; i < k; i++) sum *= 0.5;
   return sum;
 }
+static double decay_factor(uint64_t dt) { return demand_decay(dt, NR_POOL_USAGE_HALFLIFE_NS); }
 static double cell_decay(const nr_pool_t *p, int c, uint64_t now)
 {
   const double tau = (double)NR_POOL_USAGE_HALFLIFE_NS / 0.6931471805599453;
@@ -502,6 +592,14 @@ void nr_pool_release(nr_pool_t *p)
   if (per_cell(prio)) {
     p->st.hold_ns_cell[rcell] += now - tl.t_grant;
     p->st.hold_ns_cell_cls[rcell][prio == NR_POOL_DECODE && was_ul ? NR_POOL_CLS_UL : prio] += now - tl.t_grant;
+    { /* measured demand: decayed token-time per cell, essential classes apart from the sheddable ones */
+      const double d = demand_decay(now > p->dem_t[rcell] ? now - p->dem_t[rcell] : 0, NR_POOL_DEMAND_HALFLIFE_NS);
+      const double h = (double)(now - tl.t_grant);
+      if (!p->dem_t0[rcell]) p->dem_t0[rcell] = tl.t_grant ? tl.t_grant : now;
+      p->dem_ess[rcell] = p->dem_ess[rcell] * d + (prio == NR_POOL_DISC || prio == NR_POOL_HOUSE ? 0.0 : h);
+      p->dem_shed[rcell] = p->dem_shed[rcell] * d + (prio == NR_POOL_DISC || prio == NR_POOL_HOUSE ? h : 0.0);
+      if (now > p->dem_t[rcell]) p->dem_t[rcell] = now;
+    }
   }
   p->st.busy_ns += now - tl.t_grant;
   dispatch(p, now);
@@ -833,6 +931,42 @@ int nr_pool_site_chan_acquire(int blocking)
   return blocking ? nr_pool_acquire(p, NR_POOL_CHAN, 0, 0) : nr_pool_try_acquire(p, NR_POOL_CHAN, 0, 0);
 }
 void nr_pool_site_chan_release(void) { nr_pool_site_release(); }
+int nr_pool_site_shed_tiers(void) { return g_site ? nr_pool_shed_tiers(g_site) : 0; }
+void nr_pool_site_shed_note(int tier) { nr_pool_shed_note(g_site, tier); }
+int nr_pool_site_active_cells(void) { return g_site ? nr_pool_active_cells(g_site) : 1; }
+int nr_pool_cell_demand(nr_pool_t *p, int cell, double *ess, double *shed)
+{
+  double e = 0, s = 0;
+  int ok = 0;
+  if (p) {
+    pthread_mutex_lock(&p->mu);
+    ok = cell_demand_locked(p, cell, nr_pool_now_ns(), &e, &s);
+    pthread_mutex_unlock(&p->mu);
+  }
+  if (ess) *ess = e;
+  if (shed) *shed = s;
+  return ok;
+}
+double nr_pool_essential_wait(nr_pool_t *p)
+{
+  nr_pool_stats_t st;
+  memset(&st, 0, sizeof st);
+  if (!p) return -1.0;
+  nr_pool_stats(p, &st);
+  uint64_t l = 0, w = 0;
+  for (int i = 0; i < NR_POOL_NPRIO; i++)
+    if (i == NR_POOL_SCAN || i == NR_POOL_DECODE || i == NR_POOL_RETRY) l += st.leases[i], w += st.waited[i];
+  return l >= 100 ? (double)w / (double)l : -1.0;
+}
+int nr_pool_site_cell_demand(int cell, double *ess, double *shed) { return nr_pool_cell_demand(g_site, cell, ess, shed); }
+double nr_pool_site_essential_wait(void) { return nr_pool_essential_wait(g_site); }
+void nr_pool_site_shed_counts(uint64_t out[NR_POOL_SHED_TIERS])
+{
+  nr_pool_stats_t st;
+  memset(&st, 0, sizeof(st));
+  if (g_site) nr_pool_stats(g_site, &st);
+  for (int i = 0; i < NR_POOL_SHED_TIERS; i++) out[i] = st.shed[i];
+}
 void nr_pool_site_chan_set_demand(int tokens) { nr_pool_set_chan_demand(nr_pool_site(), tokens); }
 int nr_pool_site_chan_max(void) { return nr_pool_chan_cap(nr_pool_site()); }
 int nr_pool_site_filter_core(int core)

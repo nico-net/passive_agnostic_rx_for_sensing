@@ -2,6 +2,7 @@
 /* Runtime wiring of the CB0 elimination channel: see nr_td_cb0_wire.h. */
 #define _GNU_SOURCE
 #include "nr_td_cb0_wire.h"
+#include "common/utils/nr_cell.h"
 #include "nr_passive_cfg_epoch.h"
 #include <pthread.h>
 #include <stdatomic.h>
@@ -19,23 +20,65 @@ static bool g_cfg_done;
 static const int g_threads = 8, g_rank_max = 4;
 static double g_cpu_pct = 30; /* host CPU share cap of the token bucket (test hook: nr_td_cb0_wire_test_cpu_pct) */
 static bool g_autoreg = true;  /* test hook: false = never auto-register the CUDA CB0 adapter */
-static nr_td_cb0_sched_t g_sched;
+/* The token bucket (host CPU share cap) is per cell: each cell's cap is the process cap / active cells, so one cell cannot spend another's share. Active = cells of the
+ * process minus the paused ones (A12 quiesce / resume hooks); recomputed lazily at every use and on the hooks. */
+NR_CELL_STATIC(nr_td_cb0_sched_t, g_sched_c)
+#define g_sched NR_CELL_REF(g_sched_c)
+static bool g_sched_ok[NR_CELL_MAX];
+static unsigned g_paused; /* atomic: the hooks run under the registry lock and must not take g_lock */     /* bit k: cell k quiesced */
+static int active_cells_locked(void)
+{
+  int n = nr_cell_count();
+  if (n > NR_CELL_MAX) n = NR_CELL_MAX;
+  n -= __builtin_popcount(__atomic_load_n(&g_paused, __ATOMIC_RELAXED) & ((1u << n) - 1u));
+  return n < 1 ? 1 : n;
+}
+static void share_locked(void)
+{
+  const int c = nr_cell_idx();
+  const double pct = nr_td_cb0_share_pct(g_cpu_pct, active_cells_locked());
+  if (!g_sched_ok[c]) {
+    const long nc = sysconf(_SC_NPROCESSORS_ONLN);
+    nr_td_cb0_sched_init(&g_sched, NR_TD_CB0_BUDGET_US_DEFAULT, pct, nc > 0 ? (int)nc : 1, 8);
+    nr_td_cb0_sched_set_b(&g_sched, NR_TD_CB0_B_DEFAULT);
+    g_sched_ok[c] = true;
+  } else if (g_sched.cpu_pct != pct) {
+    nr_td_cb0_sched_set_cpu_pct(&g_sched, pct);
+  }
+}
+static void cfg_locked(void);
+double nr_td_cb0_wire_cell_share_pct(void)
+{
+  pthread_mutex_lock(&g_lock);
+  cfg_locked();
+  const double v = g_sched.cpu_pct;
+  pthread_mutex_unlock(&g_lock);
+  return v;
+}
+/* A12 hooks (registered by the receiver, radio/COMMON/ru_park.h ru_cell_hook_register): a quiesced cell's share goes to the others, a resumed one takes it back. Lock-free. */
+void nr_td_cb0_wire_cell_pause(int cell, bool paused)
+{
+  if (cell < 0 || cell >= 32) return;
+  if (paused) __atomic_fetch_or(&g_paused, 1u << cell, __ATOMIC_RELAXED);
+  else __atomic_fetch_and(&g_paused, ~(1u << cell), __ATOMIC_RELAXED);
+}
 static bool g_dec_registered;
 static bool g_freeze; /* test hook: the cost estimates stay at their initial values */
 static bool g_unlimited; /* test hook: the token bucket admits every grant */
 
 static void cfg_locked(void)
 {
+  share_locked(); /* this cell's bucket, its share of the process cap now */
   if (g_cfg_done)
     return;
   g_cfg_done = true;
-  const long nc = sysconf(_SC_NPROCESSORS_ONLN);
-  nr_td_cb0_sched_init(&g_sched, NR_TD_CB0_BUDGET_US_DEFAULT, g_cpu_pct, nc > 0 ? (int)nc : 1, 8);
-  nr_td_cb0_sched_set_b(&g_sched, NR_TD_CB0_B_DEFAULT);
+  char share[64] = ""; /* the per-cell split is printed only with more than one cell: at N=1 the line stays as before */
+  if (nr_cell_count() > 1)
+    snprintf(share, sizeof(share), " (process cap %.0f / %d active cells)", g_cpu_pct, active_cells_locked());
   LOG_A(PHY,
-        "SENSING: TD_CB0 wiring on: B=%d budget=%.0f us/grant cpu_pct=%.0f ncpu=%d threads=%d B0=%d rank_max=%d "
+        "SENSING: TD_CB0 wiring on: B=%d budget=%.0f us/grant cpu_pct=%.0f%s ncpu=%d threads=%d B0=%d rank_max=%d "
         "backend=%d engine_wired=%d\n",
-        g_sched.b_target, g_sched.budget_us, g_sched.cpu_pct, g_sched.ncpu, g_threads, nr_td_cb0_sched_B(&g_sched), g_rank_max,
+        g_sched.b_target, g_sched.budget_us, g_sched.cpu_pct, share, g_sched.ncpu, g_threads, nr_td_cb0_sched_B(&g_sched), g_rank_max,
         nr_td_cb0_backend_mode(), nr_td_cb0a_engine_wired() ? 1 : 0);
 }
 
@@ -81,7 +124,10 @@ typedef struct {
   uint64_t seed;
   uint32_t grants, adm, items, elim, alarms;
 } ctx_row_t;
-static ctx_row_t g_ctx[CTX_TAB];
+/* mpci audit: the CONVERGED-suffix diagnostics table follows the contexts of the calling cell (a seed of two cells may coincide); g_lock serialises */
+typedef ctx_row_t g_ctx_arr_t[CTX_TAB];
+NR_CELL_STATIC(g_ctx_arr_t, g_ctx)
+#define g_ctx NR_CELL_REF(g_ctx)
 static ctx_row_t *ctx_row_locked(uint64_t seed)
 {
   const uint32_t h = (uint32_t)(seed % CTX_TAB);
@@ -583,6 +629,8 @@ void nr_td_cb0_wire_reset(void)
   pthread_mutex_lock(&g_lock);
   g_cfg_done = false;
   g_dec_registered = false;
+  memset(g_sched_ok, 0, sizeof(g_sched_ok));
+  g_paused = 0;
   memset(g_ctx, 0, sizeof(g_ctx));
   pthread_mutex_unlock(&g_lock);
   atomic_store(&s_grants, 0);

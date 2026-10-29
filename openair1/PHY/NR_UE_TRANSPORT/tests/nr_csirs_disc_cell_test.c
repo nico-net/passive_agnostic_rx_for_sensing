@@ -516,6 +516,38 @@ static void test_prealloc(void)
   ue_free(&ub);
 }
 
+/* ---------------------------------------------------------------- T4: footprint history arrays (mpci audit)
+ * The history arrays are allocated by nr_csirs_disc_fp_prealloc (before the RX fence), kept (zeroed) by nr_csirs_disc_detect_reset and freed by nr_csirs_disc_fp_release;
+ * two cells with different carriers hold different, independent arrays. The test runs with the CPU backend (no GPU detect), the path that uses the history. */
+static void test_fp_history(void)
+{
+  nr_cell_bind(9);
+  CHECK(nr_csirs_disc_fp_history_bytes() == 0);
+  CHECK(nr_csirs_disc_fp_prealloc(0) == -1); /* out of range */
+  CHECK(nr_csirs_disc_fp_prealloc(24) == 0);
+  const size_t a = nr_csirs_disc_fp_history_bytes();
+  CHECK(a > 0);
+  nr_cell_bind(10);
+  CHECK(nr_csirs_disc_fp_history_bytes() == 0); /* cell 9's arrays are not cell 10's */
+  CHECK(nr_csirs_disc_fp_prealloc(106) == 0);
+  const size_t b = nr_csirs_disc_fp_history_bytes();
+  CHECK(b > a); /* sized from the cell's own N_RB */
+  nr_cell_bind(9);
+  CHECK(nr_csirs_disc_fp_history_bytes() == a);
+  nr_csirs_disc_detect_reset(); /* keeps the arrays: a reset on the discovery worker never allocates */
+  CHECK(nr_csirs_disc_fp_history_bytes() == a);
+  CHECK(nr_csirs_disc_fp_prealloc(24) == 0 && nr_csirs_disc_fp_history_bytes() == a); /* idempotent */
+  nr_cell_bind(10);
+  CHECK(nr_csirs_disc_fp_history_bytes() == b);
+  nr_csirs_disc_fp_release();
+  CHECK(nr_csirs_disc_fp_history_bytes() == 0);
+  nr_cell_bind(9);
+  CHECK(nr_csirs_disc_fp_history_bytes() == a); /* releasing cell 10 leaves cell 9 alone */
+  nr_csirs_disc_fp_release();
+  CHECK(nr_csirs_disc_fp_history_bytes() == 0);
+  nr_cell_bind(0);
+}
+
 int main(void)
 {
   setenv("ISAC_CSIRS_DISC_BACKEND", "cpu", 1); /* existing test selector of the CPU reference */
@@ -526,6 +558,7 @@ int main(void)
   test_detector();
   test_td();
   test_prealloc();
+  test_fp_history();
   /* after the RX fence an inactive cell answers without touching its (never allocated) heap slot */
   nr_cell_alloc_fence();
   nr_cell_bind(15);
