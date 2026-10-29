@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_core_pool.h"
+#include "common/utils/nr_cell.h"
 #include "nr_srs_passive.h"
 #include "nr_srs_fep.h"
 #include "nr_sense_ul.h"
@@ -39,8 +41,14 @@ typedef struct {
   double fo_hz;
   int64_t sample[6];
 } srs_job_t;
-static struct {
-  pthread_mutex_t lock;
+/* ---- per-cell passive SRS state (mpci CELLFEAT, common/utils/nr_cell.h) ----
+ * One blind SRS searcher per cell: its queue, events, hint, tracks (nr_srs_blind_t) and worker (created bound to the cell by nr_srs_passive_start on the
+ * cell's thread). The state (~110 KB: 4 jobs with their symbol windows + the event ring) is a NR_CELL_STATIC_HEAP object pre-allocated for every admitted
+ * cell before the RX fence (nr_srs_passive_cell_prealloc), also when SRS is not enabled: the producers (PUSCH / PDCCH threads) read sr.active on every
+ * call. The lock is a per-cell static (an all-zero heap object would only be a valid mutex by the glibc layout). */
+NR_CELL_STATIC_INIT(pthread_mutex_t, srs_lock, PTHREAD_MUTEX_INITIALIZER)
+#define srs_lock NR_CELL_REF(srs_lock)
+typedef struct {
   pthread_t thread;
   _Atomic bool active;
   _Atomic uint64_t dropped, elapsed_us;
@@ -61,7 +69,15 @@ static struct {
   srs_event_t events[SRS_EVENTS]; unsigned event_count;
   nr_srs_candidate_t hint; bool have_hint;
   uint64_t stamp; bool stamp_valid;
-} sr={.lock=PTHREAD_MUTEX_INITIALIZER};
+} srs_state_t;
+NR_CELL_STATIC_HEAP(srs_state_t, sr_state)
+#define sr NR_CELL_HEAP_REF(srs_state_t, sr_state)
+
+/* Before the RX fence, once per admitted cell. */
+void nr_srs_passive_cell_prealloc(int cell)
+{
+  NR_CELL_HEAP_PREALLOC(srs_state_t, sr_state, cell);
+}
 
 static bool srs_budget_checkpoint(struct timespec *cpu_begin)
 {
@@ -87,17 +103,17 @@ static void process_srs(srs_job_t *job)
   if(sr.stamp_valid && stamp!=sr.stamp) {nr_srs_blind_reset(sr.search);sr.have_hint=false;}
   sr.stamp=stamp;sr.stamp_valid=true;
   if(job->n_rb!=sr.grid.n_rb || job->first_carrier_offset!=sr.grid.first_carrier_offset) {
-    pthread_mutex_lock(&sr.lock);
+    pthread_mutex_lock(&srs_lock);
     sr.grid.n_rb=job->n_rb;sr.grid.first_carrier_offset=job->first_carrier_offset;
     bool refreshed=nr_srs_refresh_grid(sr.search,&sr.grid);
-    pthread_mutex_unlock(&sr.lock);
+    pthread_mutex_unlock(&srs_lock);
     if(!refreshed) return;
     sr.have_hint=false;
   }
   srs_event_t events[SRS_EVENTS];unsigned event_count;
-  pthread_mutex_lock(&sr.lock);
+  pthread_mutex_lock(&srs_lock);
   event_count=sr.event_count;memcpy(events,sr.events,event_count*sizeof(*events));sr.event_count=0;
-  pthread_mutex_unlock(&sr.lock);
+  pthread_mutex_unlock(&srs_lock);
   for(unsigned i=0;i<event_count;i++) {
     srs_event_t *e=&events[i];
     if(job->meta.reconf && e->stamp!=stamp) continue;
@@ -210,17 +226,20 @@ static void process_srs(srs_job_t *job)
   }
   if(tracking && !budget_exhausted) nr_srs_confirmed_miss(sr.search,job->meta.abs_slot,seen,nseen);
 }
-static void *srs_worker(void *unused)
+static void *srs_worker(void *arg)
 {
+  nr_cell_bind((int)(intptr_t)arg); /* the worker serves the cell that started it (nr_core_plan_create has no cell argument) */
   for(;;) {
-    pthread_mutex_lock(&sr.lock);
+    pthread_mutex_lock(&srs_lock);
     bool done=sr.stop && sr.count==0;
     srs_job_t *job=sr.count?&sr.jobs[sr.tail]:NULL;
-    pthread_mutex_unlock(&sr.lock);
+    pthread_mutex_unlock(&srs_lock);
     if(done) break;
     if(!job) {struct timespec ts={.tv_nsec=1000000};nanosleep(&ts,NULL);continue;}
     struct timespec begin,end;clock_gettime(CLOCK_THREAD_CPUTIME_ID,&begin);
+    nr_pool_site_float_acquire(NR_POOL_HOUSE, nr_cell_idx(), 0); /* mpci B5: one HOUSE lease per job (bound cell); no-op when the float lane is not merged */
     process_srs(job);
+    nr_pool_site_float_release();
     clock_gettime(CLOCK_THREAD_CPUTIME_ID,&end);
     const uint64_t elapsed_ns=(int64_t)(end.tv_sec-begin.tv_sec)*1000000000+end.tv_nsec-begin.tv_nsec;
     atomic_fetch_add(&sr.elapsed_us,elapsed_ns/1000);
@@ -228,7 +247,7 @@ static void *srs_worker(void *unused)
     atomic_store(&sr.backoff_skip,sr.idle.backoff_skip);
     atomic_store(&sr.budget_skip,sr.idle.budget_skip);
     atomic_store(&sr.idle_resets,sr.idle.resets);
-    pthread_mutex_lock(&sr.lock);sr.tail=(sr.tail+1)%SRS_DEPTH;sr.count--;pthread_mutex_unlock(&sr.lock);
+    pthread_mutex_lock(&srs_lock);sr.tail=(sr.tail+1)%SRS_DEPTH;sr.count--;pthread_mutex_unlock(&srs_lock);
   }
   return NULL;
 }
@@ -270,7 +289,7 @@ void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
   LOG_W(PHY,"SENSING: blind SRS sequence hopping v=1 is unsupported\n");
   sr.samples_per_second=1000.0*fp->samples_per_subframe;
   sr.cfr_max_re=max_re;sr.export_ant=antennas==1?1:sr.grid.n_ant;
-  if(!ok || nr_core_plan_create(&sr.thread,NULL,srs_worker,NULL, -1)) {
+  if(!ok || nr_core_plan_create(&sr.thread,NULL,srs_worker,(void *)(intptr_t)nr_cell_idx(), -1)) {
     nr_srs_blind_destroy(sr.search);sr.search=NULL;free(sr.freq);free(sr.cfr);free(sr.k);free(sr.l);
     for(int i=0;i<SRS_DEPTH;i++) {free(sr.jobs[i].raw);sr.jobs[i].raw=NULL;}
     return;
@@ -280,28 +299,28 @@ void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
 void nr_srs_passive_stop(void)
 {
   if(!atomic_exchange_explicit(&sr.active,false,memory_order_acq_rel)) return;
-  pthread_mutex_lock(&sr.lock);sr.stop=true;pthread_mutex_unlock(&sr.lock);
+  pthread_mutex_lock(&srs_lock);sr.stop=true;pthread_mutex_unlock(&srs_lock);
   pthread_join(sr.thread,NULL);
-  pthread_mutex_lock(&sr.lock);
+  pthread_mutex_lock(&srs_lock);
   nr_srs_blind_destroy(sr.search);sr.search=NULL;free(sr.freq);free(sr.cfr);free(sr.k);free(sr.l);
   for(int i=0;i<SRS_DEPTH;i++) {free(sr.jobs[i].raw);sr.jobs[i].raw=NULL;}
-  pthread_mutex_unlock(&sr.lock);
+  pthread_mutex_unlock(&srs_lock);
   LOG_I(PHY,"SENSING: SRS queue dropped=%lu\n",(unsigned long)atomic_load(&sr.dropped));
 }
 void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_slot)
 {
   if(!nr_srs_passive_enabled()) return;
-  if(pthread_mutex_trylock(&sr.lock)) {atomic_fetch_add(&sr.dropped,1);return;}
-  if(!atomic_load_explicit(&sr.active,memory_order_relaxed) || ue!=sr.owner) {pthread_mutex_unlock(&sr.lock);return;}
+  if(pthread_mutex_trylock(&srs_lock)) {atomic_fetch_add(&sr.dropped,1);return;}
+  if(!atomic_load_explicit(&sr.active,memory_order_relaxed) || ue!=sr.owner) {pthread_mutex_unlock(&srs_lock);return;}
   const NR_DL_FRAME_PARMS *fp=&ue->frame_parms;
   if(sr.count==SRS_DEPTH || fp->ofdm_symbol_size!=sr.grid.fft_size
       || fp->slots_per_subframe!=sr.slots_per_subframe || fp->nb_antennas_rx!=sr.grid.n_ant || 1000.0*fp->samples_per_subframe!=sr.samples_per_second || fp->frame_type!=TDD || fp->ofdm_offset_divisor==0) {
-    atomic_fetch_add(&sr.dropped,1);pthread_mutex_unlock(&sr.lock);return;
+    atomic_fetch_add(&sr.dropped,1);pthread_mutex_unlock(&srs_lock);return;
   }
   nr_srs_grid_t captured=sr.grid;captured.n_rb=fp->N_RB_UL;captured.first_carrier_offset=fp->first_carrier_offset;
-  if(!nr_srs_valid_capture_grid(&captured)) {atomic_fetch_add(&sr.dropped,1);pthread_mutex_unlock(&sr.lock);return;}
+  if(!nr_srs_valid_capture_grid(&captured)) {atomic_fetch_add(&sr.dropped,1);pthread_mutex_unlock(&srs_lock);return;}
   /* Process the preceding slot so all +/-400 windows are already in RX memory. */
-  if(!abs_slot) {pthread_mutex_unlock(&sr.lock);return;}
+  if(!abs_slot) {pthread_mutex_unlock(&srs_lock);return;}
   abs_slot--;if(--slot<0) {slot=fp->slots_per_frame-1;frame=(frame+1023)%1024;}
   uint16_t mask=0;
   const fapi_nr_tdd_table_t *t=&ue->nrUE_config.tdd_table;
@@ -309,7 +328,7 @@ void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_s
     const fapi_nr_max_tdd_periodicity_t *sl=&t->max_tdd_periodicity_list[slot%t->tdd_period_in_slots];
     for(int l=8;l<14;l++) if(sl->max_num_of_symbol_per_slot_list[l].slot_config==1) mask|=1u<<l;
   }
-  if(!mask) {pthread_mutex_unlock(&sr.lock);return;}
+  if(!mask) {pthread_mutex_unlock(&srs_lock);return;}
   srs_job_t *job=&sr.jobs[sr.head];job->mask=mask;
   job->n_rb=fp->N_RB_UL;job->first_carrier_offset=fp->first_carrier_offset;
   memcpy(job->rot,fp->symbol_rotation[link_type_ul],sizeof(job->rot));
@@ -337,20 +356,20 @@ void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_s
       if(n<win) memcpy(dst+n,ue->common_vars.rxdata[a],(win-n)*sizeof(c16_t));
     }
   }
-  sr.head=(sr.head+1)%SRS_DEPTH;sr.count++;pthread_mutex_unlock(&sr.lock);
+  sr.head=(sr.head+1)%SRS_DEPTH;sr.count++;pthread_mutex_unlock(&srs_lock);
 }
 
 static void post_event(const srs_event_t *event)
 {
   if(!nr_srs_passive_enabled()) return;
-  if(pthread_mutex_trylock(&sr.lock)) {atomic_fetch_add(&sr.dropped,1);return;}
+  if(pthread_mutex_trylock(&srs_lock)) {atomic_fetch_add(&sr.dropped,1);return;}
   if(atomic_load_explicit(&sr.active,memory_order_relaxed)) {
     if(sr.event_count<SRS_EVENTS) {
       sr.events[sr.event_count]=*event;
       sr.events[sr.event_count++].stamp=nr_cfg_reconf_enabled()?nr_cfg_epoch_cfr_stamp():0;
     } else atomic_fetch_add(&sr.dropped,1);
   }
-  pthread_mutex_unlock(&sr.lock);
+  pthread_mutex_unlock(&srs_lock);
 }
 void nr_srs_passive_trigger(uint16_t rnti,uint64_t slot,unsigned request)
 {

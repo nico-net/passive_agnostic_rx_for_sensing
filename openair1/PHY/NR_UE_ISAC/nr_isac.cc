@@ -24,6 +24,7 @@
 #include "nr_sense_api.h"
 #include "nr_sense_records.h"
 #include "nr_passive_cfg_epoch.h"
+#include "common/utils/nr_cell.h"
 #include <algorithm>
 #include <atomic>
 #include <climits>
@@ -40,14 +41,25 @@ namespace {
 // One full 275-PRB, 14-symbol carrier.
 constexpr uint32_t max_re = 275 * 12 * 14;
 /* Masks use the receiver enum; source_map preserves the CFR wire IDs. */
-std::atomic<unsigned> active_sources{0};
+/* PROCESS (parsed once from the [sensing] section before any cell thread runs; read-only afterwards): the configuration, the source list and the
+ * session identity are the same for every cell. */
 unsigned configured_sources;
 bool initialized, configured, reconf;
-uint32_t receiver_antennas = 1, cfr_antennas;
+uint32_t cfr_antennas;
 uint32_t subslot_symbols, subslot_min_re;
 float subslot_min_snr_db;
-nr_sense_cfg_t cfg{};
-std::string records_path, cfr_path, endpoint, rx_id, rx_array;
+nr_sense_cfg_t base_cfg{};
+std::string base_records_path, base_cfr_path, base_endpoint, rx_id, rx_array;
+/* PER_CELL (mpci CELLFEAT): which sources run on the cell, its RX antenna count and its export session (own files / endpoint, derived from the
+ * configured ones with nr_sense_cell_file / nr_sense_cell_endpoint; cell 0 keeps the configured names byte for byte). */
+struct CellSession {
+  std::atomic<unsigned> active_sources{0};
+  uint32_t receiver_antennas = 1;
+  nr_sense_cfg_t cfg{};
+  std::string records_path, cfr_path, endpoint;
+};
+NR_CELL_STATIC(CellSession, cell_session)
+CellSession &cs() { return cell_session_cells[nr_cell_idx()]; }
 
 paramdef_t parameter(const char *name, int type)
 {
@@ -277,11 +289,9 @@ extern "C" void nr_isac_init(void)
     LOG_E(PHY, "SENSING: invalid CFR or record ring, RE, or antenna limit\n");
     return;
   }
-  records_path = rec ? rec : ""; cfr_path = cfr ? cfr : ""; endpoint = ep ? ep : "";
+  base_records_path = rec ? rec : ""; base_cfr_path = cfr ? cfr : ""; base_endpoint = ep ? ep : "";
   rx_id = id ? id : ""; rx_array = array ? array : "";
-  cfg = {records_path.empty() ? nullptr : records_path.c_str(),
-         cfr_path.empty() ? nullptr : cfr_path.c_str(), endpoint.empty() ? nullptr : endpoint.c_str(),
-         (uint32_t)frames, (uint32_t)re, (uint32_t)records, 1};
+  base_cfg = {nullptr, nullptr, nullptr, (uint32_t)frames, (uint32_t)re, (uint32_t)records, 1};
   configured_sources = source_mask(sources);
   if (!configured_sources) {
     const std::string fallback = legacy_source ? legacy_source : "csi_rs";
@@ -297,39 +307,60 @@ extern "C" void nr_isac_init(void)
 extern "C" void nr_isac_start(void)
 {
   if (!configured || nr_sense_enabled()) return;
-  cfg.cfr_max_ant = cfr_antennas ? std::min(cfr_antennas,receiver_antennas) : receiver_antennas;
-  if (!cfg.records_path && !cfg.cfr_path && !cfg.endpoint)
+  CellSession &c = cs();
+  const int cell = nr_cell_idx();
+  /* the cell's session names: cell 0 = the configured ones unchanged; cell k > 0 = per-cell files / endpoint */
+  char path[4096];
+  nr_sense_cell_file(cell, base_records_path.c_str(), path, sizeof(path)); c.records_path = path;
+  nr_sense_cell_file(cell, base_cfr_path.c_str(), path, sizeof(path)); c.cfr_path = path;
+  if (nr_sense_cell_endpoint(cell, base_endpoint.c_str(), path, sizeof(path)) == 0) c.endpoint = path;
+  else {
+    c.endpoint.clear();
+    LOG_W(PHY, "SENSING: cell %d: no per-cell name for the sensing endpoint '%s'; this cell exports to its files only\n", cell, base_endpoint.c_str());
+  }
+  c.cfg = base_cfg;
+  c.cfg.records_path = c.records_path.empty() ? nullptr : c.records_path.c_str();
+  c.cfg.cfr_path = c.cfr_path.empty() ? nullptr : c.cfr_path.c_str();
+  c.cfg.endpoint = c.endpoint.empty() ? nullptr : c.endpoint.c_str();
+  c.cfg.cfr_max_ant = cfr_antennas ? std::min(cfr_antennas, c.receiver_antennas) : c.receiver_antennas;
+  if (!c.cfg.records_path && !c.cfg.cfr_path && !c.cfg.endpoint)
     LOG_W(PHY, "SENSING: no records_path/cfr_path is set; CFR frames will be counted as no_sink\n");
-  if (nr_sense_open(&cfg) != 0) {
+  if (nr_sense_open(&c.cfg) != 0) {
     LOG_E(PHY, "SENSING: cannot open export API\n");
     return;
   }
   nr_sense_set_session_identity(rx_id.empty() ? nullptr : rx_id.c_str(), rx_array.empty() ? nullptr : rx_array.c_str());
   nr_sense_emit_session(nullptr, NAN);
-  active_sources.store(configured_sources, std::memory_order_release);
+  c.active_sources.store(configured_sources, std::memory_order_release);
 }
 
 extern "C" void nr_isac_set_rx_antennas(uint32_t antennas)
 {
-  if (antennas >= 1 && antennas <= 8) receiver_antennas = std::max(receiver_antennas,antennas);
+  if (antennas >= 1 && antennas <= 8) cs().receiver_antennas = std::max(cs().receiver_antennas, antennas);
+}
+
+extern "C" int nr_isac_source_configured(int source)
+{
+  return configured && source >= 0 && source < NR_ISAC_SRC_COUNT && (configured_sources & (1u << source));
 }
 
 extern "C" void nr_isac_stop(void)
 {
-  active_sources.store(0, std::memory_order_release);
+  cs().active_sources.store(0, std::memory_order_release);
   nr_sense_close();
-  initialized = configured = false;
-  receiver_antennas = 1;
+  cs().receiver_antennas = 1;
+  /* the process configuration is dropped with the primary cell's stop (the last of the shutdown loop, cells run highest first) */
+  if (nr_cell_idx() == 0) initialized = configured = false;
 }
-extern "C" int nr_isac_enabled(void) { return active_sources.load(std::memory_order_acquire) != 0; }
+extern "C" int nr_isac_enabled(void) { return cs().active_sources.load(std::memory_order_acquire) != 0; }
 extern "C" int nr_isac_source(void)
 {
-  unsigned mask = active_sources.load(std::memory_order_acquire);
+  unsigned mask = cs().active_sources.load(std::memory_order_acquire);
   return mask ? __builtin_ctz(mask) : NR_ISAC_SRC_CSI_RS;
 }
 extern "C" int nr_isac_source_enabled(int source)
 {
-  unsigned mask = active_sources.load(std::memory_order_acquire);
+  unsigned mask = cs().active_sources.load(std::memory_order_acquire);
   return source >= 0 && source < NR_ISAC_SRC_COUNT && (mask & (1u << source));
 }
 extern "C" int nr_isac_prach_enabled(void)
@@ -359,11 +390,11 @@ extern "C" void nr_isac_submit_cfr_multi_meta(uint32_t slot_idx, float slot_frac
   const uint64_t stamp = reconf ? nr_cfg_epoch_cfr_stamp() : 0;
   const int dedicated = reconf ? int(nr_cfg_epoch_dedicated_current()) : -1;
   bool truncated=false;
-  const int n_export_ant=std::min(nof_ant,cfg.cfr_max_ant);
+  const int n_export_ant=std::min(nof_ant,cs().cfg.cfr_max_ant);
   const uint64_t frame_id=nr_sense_push_cfr_u32(source_map[source], n_export_ant, h, ant_stride_re, nof_re, k_abs, l_sym,
                     slot_idx, slot_frac, noise_var, stamp >> 32, (uint32_t)stamp, &truncated);
   nr_sense_rs_meta_t m{};
-  m.rnti=0; m.start_rb=-1; m.nb_rb=-1; m.n_re=std::min(nof_re,cfg.cfr_max_re);
+  m.rnti=0; m.start_rb=-1; m.nb_rb=-1; m.n_re=std::min(nof_re,cs().cfg.cfr_max_re);
   m.n_ant=n_export_ant; m.ports=-1; m.ssb_index=-1; m.k_ssb=-1;
   m.noise_var=noise_var; m.slot_frac=slot_frac; m.abs_slot=slot_idx;
   m.frame=carrier && carrier->slots_per_frame ? (slot_idx/carrier->slots_per_frame)%1024 : -1;

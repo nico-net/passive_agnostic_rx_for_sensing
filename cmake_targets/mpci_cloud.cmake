@@ -473,3 +473,47 @@ if(ENABLE_TESTS)
                        SKIP_RETURN_CODE 77)
 endif()
 # ---- end FEEDSTART ----
+
+# ---- CELLFEAT ----
+# Per-cell PRACH / SRS / sense-API session (mpci CELLFEAT, MPCI-CELLFEAT-20261029.md). The PRACH and adapter interleave tests are cases of the existing
+# test_nr_prach_passive / test_nr_isac_adapter binaries; the sense-API session and the SRS searcher get their own binaries here.
+if(ENABLE_TESTS)
+  set(CF_TR ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
+  add_executable(test_mpci_cellfeat_sense ${CF_TR}/tests/nr_mpci_cellfeat_sense_test.cc)
+  target_include_directories(test_mpci_cellfeat_sense PRIVATE ${CMAKE_SOURCE_DIR})
+  target_link_libraries(test_mpci_cellfeat_sense PRIVATE nr_sense_api GTest::gtest GTest::gtest_main pthread)
+  add_dependencies(tests test_mpci_cellfeat_sense)
+  add_test(NAME test_mpci_cellfeat_sense COMMAND test_mpci_cellfeat_sense)
+
+  add_executable(test_mpci_cellfeat_srs
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/MODULATION/slot_fep_nr.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/MODULATION/nr_sfo_state.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/nr_dmrs_rx.c
+    ${CF_TR}/nr_srs_attribution.c
+    ${CF_TR}/nr_srs_estimate.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_TRANSPORT/srs_rx.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_ESTIMATION/nr_ul_channel_estimation.c
+    ${CF_TR}/nr_srs_export.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/dmrs_nr.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/nr_phy_common/src/nr_phy_common_srs.c
+    ${CF_TR}/nr_srs_blind.c
+    ${CF_TR}/nr_srs_passive.c
+    ${CF_TR}/tests/nr_mpci_cellfeat_srs_test.cc
+    ${CF_TR}/tests/nr_srs_blind_fixture.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/ul_ref_seq_nr.c)
+  target_link_libraries(test_mpci_cellfeat_srs PRIVATE nr_sense_api nr_phy_common PHY_COMMON nr_common nr_fapi_p5 asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs UTIL CONFIG_LIB GTest::gtest_main)
+  target_compile_options(test_mpci_cellfeat_srs PRIVATE -ffunction-sections -fdata-sections -fvisibility=hidden)
+  target_compile_definitions(test_mpci_cellfeat_srs PRIVATE NR_SRS_EXPORT_ON)
+  target_link_options(test_mpci_cellfeat_srs PRIVATE -Wl,--gc-sections -Wl,--wrap=nr_sense_enabled -Wl,--wrap=nr_isac_source_enabled)
+  target_include_directories(test_mpci_cellfeat_srs PRIVATE ${CF_TR} ${CMAKE_SOURCE_DIR}/openair1)
+  add_dependencies(tests test_mpci_cellfeat_srs)
+  add_test(NAME test_mpci_cellfeat_srs COMMAND test_mpci_cellfeat_srs)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME test_mpci_cellfeat_monitor
+      COMMAND ${Python3_EXECUTABLE} -m unittest -v test_mpci_cellfeat
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/passive_rx/monitor)
+  endif()
+endif()
+# ---- end CELLFEAT ----

@@ -24,6 +24,10 @@
  * cfr_ring_frames, cfr_max_re, cfr_antennas; rx_id/rx_array are session metadata only.
  * Legacy source and subslot keys retain receiver behavior; retired algorithm keys warn once.
  * start opens the exporter; stop drains and closes it after producers stop.
+ * Multi-PCI (mpci CELLFEAT): the session state is per cell. nr_isac_init parses [sensing] once (process); nr_isac_start / nr_isac_stop /
+ * nr_isac_set_rx_antennas and every submit act on the session of the calling thread's cell (nr_cell_idx()); cell k > 0 writes its own
+ * records / CFR files and endpoint (nr_sense_cell_file / nr_sense_cell_endpoint), cell 0 the configured names. nr_isac_stop of cell 0 also
+ * drops the parsed configuration (so it must run last).
  * Disabled calls are no-ops. Submit calls copy once and never block, allocate or do I/O;
  * a full ring drops the frame and counts it. Every call creates an independent frame.
  * h is antenna-major interleaved float IQ; ant_stride_re counts complex RE.
@@ -76,6 +80,9 @@ int nr_isac_enabled(void);
 int nr_isac_source(void);
 
 int nr_isac_source_enabled(int source);
+/* Configured (parsed [sensing] sources), whether or not a cell's session is open yet. Process-wide; used before the RX fence to pre-allocate the
+ * per-cell buffers of the PRACH / SRS sources. */
+int nr_isac_source_configured(int source);
 /* PRACH is record-only. PRACH/SRS require explicit sources tokens. */
 int nr_isac_prach_enabled(void);
 

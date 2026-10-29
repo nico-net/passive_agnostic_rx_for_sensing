@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* Standalone, bounded export writer. Producers only copy into preallocated slots. */
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_cell.h"
 #include "nr_sense_api.h"
 #include "nr_sense_records.h"
 /* The standalone core test links without the receiver record module. The receiver
@@ -13,6 +14,7 @@ __attribute__((weak)) int nr_sense_rs_to_json(nr_sense_src_t, const nr_sense_rs_
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #include "common/utils/LOG/log.h"
@@ -23,32 +25,96 @@ __attribute__((weak)) int nr_sense_rs_to_json(nr_sense_src_t, const nr_sense_rs_
 #define FRAME_HEADER 48u
 #define RECORD_BYTES 4096u
 #define MAX_ANT 8
-static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_once_t mu_once = PTHREAD_ONCE_INIT;
-static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
-static _Atomic bool active, closed_seen, pause_writer, fail_writes;
-static _Atomic uint32_t write_chunk, writer_limit, written_items;
-static _Atomic uint64_t after_close;
-static bool opened, stopping, no_sink;
-static uint8_t *frames;
-static uint32_t *frame_lengths, frame_cap, frame_re, frame_ant, frame_stride, frame_head, frame_count;
-static char *records;
-static uint32_t *record_lengths, record_cap, record_head, record_count;
+/* ---- per-cell sense-API session (mpci CELLFEAT, common/utils/nr_cell.h) ----
+ * One export session per cell: its own rings, writer thread, files / endpoint and counters. Every producer is a thread bound to its cell
+ * (slot thread, queue consumers, the PRACH / SRS workers), the writer is created bound to the cell that opened the session. With one cell
+ * (cell 0) the session is the single static session of before. The record schema carries "pci" in every record and has no optional-field
+ * version, so a consumer tells the cells apart by the per-cell file / endpoint (nr_isac.cc derives them with nr_cell_path /
+ * nr_sense_cell_endpoint; cell 0 keeps the configured names). */
+typedef _Atomic uint64_t sense_cost_t[4][NR_SENSE_SRC_COUNT];
+NR_CELL_STATIC_INIT(pthread_mutex_t, mu, PTHREAD_MUTEX_INITIALIZER)
+#define mu NR_CELL_REF(mu)
+NR_CELL_STATIC_INIT(pthread_once_t, mu_once, PTHREAD_ONCE_INIT)
+#define mu_once NR_CELL_REF(mu_once)
+NR_CELL_STATIC_INIT(pthread_cond_t, cv, PTHREAD_COND_INITIALIZER)
+#define cv NR_CELL_REF(cv)
+NR_CELL_STATIC(_Atomic bool, active)
+#define active NR_CELL_REF(active)
+NR_CELL_STATIC(_Atomic bool, closed_seen)
+#define closed_seen NR_CELL_REF(closed_seen)
+NR_CELL_STATIC(_Atomic bool, pause_writer)
+#define pause_writer NR_CELL_REF(pause_writer)
+NR_CELL_STATIC(_Atomic bool, fail_writes)
+#define fail_writes NR_CELL_REF(fail_writes)
+NR_CELL_STATIC(_Atomic uint32_t, write_chunk)
+#define write_chunk NR_CELL_REF(write_chunk)
+NR_CELL_STATIC(_Atomic uint32_t, writer_limit)
+#define writer_limit NR_CELL_REF(writer_limit)
+NR_CELL_STATIC(_Atomic uint32_t, written_items)
+#define written_items NR_CELL_REF(written_items)
+NR_CELL_STATIC(_Atomic uint64_t, s_after_close)
+#define s_after_close NR_CELL_REF(s_after_close)
+NR_CELL_STATIC(bool, opened)
+#define opened NR_CELL_REF(opened)
+NR_CELL_STATIC(bool, stopping)
+#define stopping NR_CELL_REF(stopping)
+NR_CELL_STATIC(bool, no_sink)
+#define no_sink NR_CELL_REF(no_sink)
+NR_CELL_STATIC(uint8_t *, frames)
+#define frames NR_CELL_REF(frames)
+NR_CELL_STATIC(uint32_t *, frame_lengths)
+#define frame_lengths NR_CELL_REF(frame_lengths)
+NR_CELL_STATIC(uint32_t, frame_cap)
+#define frame_cap NR_CELL_REF(frame_cap)
+NR_CELL_STATIC(uint32_t, frame_re)
+#define frame_re NR_CELL_REF(frame_re)
+NR_CELL_STATIC(uint32_t, frame_ant)
+#define frame_ant NR_CELL_REF(frame_ant)
+NR_CELL_STATIC(uint32_t, frame_stride)
+#define frame_stride NR_CELL_REF(frame_stride)
+NR_CELL_STATIC(uint32_t, frame_head)
+#define frame_head NR_CELL_REF(frame_head)
+NR_CELL_STATIC(uint32_t, frame_count)
+#define frame_count NR_CELL_REF(frame_count)
+NR_CELL_STATIC(char *, records)
+#define records NR_CELL_REF(records)
+NR_CELL_STATIC(uint32_t *, record_lengths)
+#define record_lengths NR_CELL_REF(record_lengths)
+NR_CELL_STATIC(uint32_t, record_cap)
+#define record_cap NR_CELL_REF(record_cap)
+NR_CELL_STATIC(uint32_t, record_head)
+#define record_head NR_CELL_REF(record_head)
+NR_CELL_STATIC(uint32_t, record_count)
+#define record_count NR_CELL_REF(record_count)
 typedef struct {
   nr_sense_rs_meta_t meta;
   uint64_t frame_id;
   nr_sense_src_t src;
   char csirs_resource[256], srs_attribution[256];
 } rs_job_t;
-static rs_job_t *rs_jobs;
-static uint8_t *record_binary;
-static int cfr_fd = -1, record_fd = -1;
-static pthread_t worker;
-static uint64_t next_id;
-static nr_sense_stats_t stats;
-static _Atomic uint64_t cost_ns[4][NR_SENSE_SRC_COUNT], cost_count[4][NR_SENSE_SRC_COUNT];
+NR_CELL_STATIC(rs_job_t *, rs_jobs)
+#define rs_jobs NR_CELL_REF(rs_jobs)
+NR_CELL_STATIC(uint8_t *, record_binary)
+#define record_binary NR_CELL_REF(record_binary)
+NR_CELL_STATIC_INIT(int, cfr_fd, -1)
+#define cfr_fd NR_CELL_REF(cfr_fd)
+NR_CELL_STATIC_INIT(int, record_fd, -1)
+#define record_fd NR_CELL_REF(record_fd)
+NR_CELL_STATIC(pthread_t, worker)
+#define worker NR_CELL_REF(worker)
+NR_CELL_STATIC(uint64_t, next_id)
+#define next_id NR_CELL_REF(next_id)
+NR_CELL_STATIC(nr_sense_stats_t, stats)
+#define stats NR_CELL_REF(stats)
+NR_CELL_STATIC(sense_cost_t, cost_ns)
+#define cost_ns NR_CELL_REF(cost_ns)
+NR_CELL_STATIC(sense_cost_t, cost_count)
+#define cost_count NR_CELL_REF(cost_count)
 #ifdef NR_SENSE_HAVE_ZMQ
-static void *zmq_context, *zmq_pub;
+NR_CELL_STATIC(void *, zmq_context)
+#define zmq_context NR_CELL_REF(zmq_context)
+NR_CELL_STATIC(void *, zmq_pub)
+#define zmq_pub NR_CELL_REF(zmq_pub)
 #endif
 
 static void init_mu(void)
@@ -118,7 +184,7 @@ static bool write_item(int fd, const void *buf, size_t len)
 }
 static void *run_writer(void *arg)
 {
-  (void)arg;
+  nr_cell_bind((int)(intptr_t)arg); /* the writer serves the cell that opened the session (nr_core_plan_create has no cell argument) */
   bool last_frame=false;
   for (;;) {
     pthread_mutex_lock(&mu);
@@ -206,7 +272,7 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
     next_id=0; memset(&stats,0,sizeof(stats));
     for (int k=0;k<4;k++) for (int s=0;s<NR_SENSE_SRC_COUNT;s++) { atomic_store(&cost_ns[k][s],0); atomic_store(&cost_count[k][s],0); }
     stopping=false; opened=true;
-    atomic_store(&after_close,0); atomic_store(&closed_seen,false);
+    atomic_store(&s_after_close,0); atomic_store(&closed_seen,false);
     atomic_store_explicit(&active,true,memory_order_release);
     pthread_mutex_unlock(&mu); return 0;
   }
@@ -243,8 +309,8 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
   next_id=0; memset(&stats,0,sizeof(stats));
   for (int k=0;k<4;k++) for (int s=0;s<NR_SENSE_SRC_COUNT;s++) { atomic_store(&cost_ns[k][s],0); atomic_store(&cost_count[k][s],0); }
   stopping=false; opened=true; atomic_store(&written_items,0);
-  atomic_store(&after_close,0); atomic_store(&closed_seen,false);
-  if (nr_core_plan_create(&worker,NULL,run_writer,NULL, -1) != 0) { opened=false; goto fail; }
+  atomic_store(&s_after_close,0); atomic_store(&closed_seen,false);
+  if (nr_core_plan_create(&worker,NULL,run_writer,(void *)(intptr_t)nr_cell_idx(), -1) != 0) { opened=false; goto fail; }
   atomic_store_explicit(&active,true,memory_order_release);
   pthread_mutex_unlock(&mu);
   return 0;
@@ -298,14 +364,14 @@ static uint64_t push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant
                          float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated)
 {
   if (truncated) *truncated=false;
-  if (!nr_sense_enabled()) { if (atomic_load(&closed_seen)) atomic_fetch_add(&after_close,1); return 0; }
+  if (!nr_sense_enabled()) { if (atomic_load(&closed_seen)) atomic_fetch_add(&s_after_close,1); return 0; }
   if (src<0 || src>=NR_SENSE_SRC_COUNT || n_ant<1 || n_ant>frame_ant || n_re<1 || ant_stride<n_re || !iq || !k_abs || !l_sym) {
     nr_sense_reject_cfr(); return 0;
   }
   const bool cut=(uint32_t)n_re>frame_re;
   const uint32_t keep=cut ? frame_re : (uint32_t)n_re;
   pthread_mutex_lock(&mu);
-  if (!opened) { pthread_mutex_unlock(&mu); atomic_fetch_add(&after_close,1); return 0; }
+  if (!opened) { pthread_mutex_unlock(&mu); atomic_fetch_add(&s_after_close,1); return 0; }
   if (no_sink) { stats.cfr_no_sink++; pthread_mutex_unlock(&mu); return 0; }
   if (frame_count==frame_cap) {
     if (wide) for(uint32_t i=0;i<keep;i++)
@@ -368,11 +434,11 @@ uint64_t nr_sense_push_cfr_u32(nr_sense_src_t src, int n_ant, const float *iq, i
 }
 bool nr_sense_push_record(const char *json_line)
 {
-  if (!nr_sense_enabled()) { if (atomic_load(&closed_seen)) atomic_fetch_add(&after_close,1); return false; }
+  if (!nr_sense_enabled()) { if (atomic_load(&closed_seen)) atomic_fetch_add(&s_after_close,1); return false; }
   if (!json_line) { pthread_mutex_lock(&mu); stats.rec_dropped++; pthread_mutex_unlock(&mu); return false; }
   const size_t len=strnlen(json_line,RECORD_BYTES);
   pthread_mutex_lock(&mu);
-  if (!opened) { pthread_mutex_unlock(&mu); atomic_fetch_add(&after_close,1); return false; }
+  if (!opened) { pthread_mutex_unlock(&mu); atomic_fetch_add(&s_after_close,1); return false; }
   if (no_sink) { stats.rec_dropped++; pthread_mutex_unlock(&mu); return false; }
   if (len>=RECORD_BYTES-1 || memchr(json_line,'\n',len) || record_count==record_cap) { stats.rec_dropped++; pthread_mutex_unlock(&mu); return false; }
   const uint32_t at=(record_head+record_count)%record_cap;
@@ -411,7 +477,7 @@ void nr_sense_stats(nr_sense_stats_t *out)
 {
   if (!out) return;
   pthread_mutex_lock(&mu); *out=stats; pthread_mutex_unlock(&mu);
-  out->after_close=atomic_load(&after_close);
+  out->after_close=atomic_load(&s_after_close);
   for (int s=0;s<NR_SENSE_SRC_COUNT;s++) {
     out->prod_ns[s]=atomic_load(&cost_ns[NR_SENSE_COST_PROD][s]);
     out->pack_ns[s]=atomic_load(&cost_ns[NR_SENSE_COST_PACK][s]);
@@ -422,6 +488,46 @@ void nr_sense_stats(nr_sense_stats_t *out)
     out->rec_count+=atomic_load(&cost_count[NR_SENSE_COST_REC][s]);
     out->write_count+=atomic_load(&cost_count[NR_SENSE_COST_WRITE][s]);
   }
+}
+/* Per-cell output names (mpci CELLFEAT). Cell 0 (and an empty name) is returned byte for byte; cell k > 0 gets nr_cell_path()'s name, except
+ * that a file name without extension that is not an existing directory gets ".cell<k>" appended (nr_cell_path would turn it into a directory
+ * name that the open() of the session cannot create). */
+void nr_sense_cell_file(int cell, const char *def, char *out, size_t n)
+{
+  if (!out || !n) return;
+  out[0] = 0;
+  if (!def) return;
+  if (cell <= 0 || !*def) { snprintf(out, n, "%s", def); return; }
+  const char *slash = strrchr(def, '/'), *base = slash ? slash + 1 : def, *dot = strrchr(base, '.');
+  struct stat st;
+  if ((!dot || dot == base) && !(stat(def, &st) == 0 && S_ISDIR(st.st_mode))) { snprintf(out, n, "%s.cell%d", def, cell); return; }
+  nr_cell_path(cell, def, out, n);
+}
+/* Endpoint of cell k > 0 from the configured one: ipc:// and inproc:// names like a file, tcp://host:port -> port + k. Returns 0 (out set; "" for an
+ * empty endpoint), -1 when no per-cell name can be derived (cell k then runs without the endpoint; the caller logs it). */
+int nr_sense_cell_endpoint(int cell, const char *ep, char *out, size_t n)
+{
+  if (!out || !n) return -1;
+  out[0] = 0;
+  if (!ep || !*ep) return 0;
+  if (cell <= 0) { snprintf(out, n, "%s", ep); return 0; }
+  if (!strncmp(ep, "ipc://", 6)) {
+    char f[512];
+    nr_sense_cell_file(cell, ep + 6, f, sizeof(f));
+    snprintf(out, n, "ipc://%s", f);
+    return 0;
+  }
+  if (!strncmp(ep, "inproc://", 9)) { snprintf(out, n, "%s.cell%d", ep, cell); return 0; }
+  if (!strncmp(ep, "tcp://", 6)) {
+    const char *colon = strrchr(ep, ':');
+    char *end = NULL;
+    const long port = colon ? strtol(colon + 1, &end, 10) : -1;
+    if (colon && end != colon + 1 && end && !*end && port > 0 && port + cell <= 65535) {
+      snprintf(out, n, "%.*s:%ld", (int)(colon - ep), ep, port + cell);
+      return 0;
+    }
+  }
+  return -1;
 }
 void nr_sense_test_pause_writer(bool pause)
 {
