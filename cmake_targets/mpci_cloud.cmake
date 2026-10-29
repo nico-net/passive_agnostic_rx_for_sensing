@@ -78,6 +78,9 @@ if(ENABLE_TESTS)
     add_test(NAME test_mpci_percell_scorers
       COMMAND ${Python3_EXECUTABLE} -m unittest -v test_percell_scorers
       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci)
+    add_test(NAME test_mpci_n1_equiv
+      COMMAND ${Python3_EXECUTABLE} -m unittest -v test_n1_equiv
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci)
     add_test(NAME test_mpci_dash_monitor
       COMMAND ${Python3_EXECUTABLE} -m unittest -v test_mpci_dash
       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/passive_rx/monitor)
