@@ -1247,6 +1247,11 @@ static void coreset_dmrs_observe(const cdmrs_obs_t *o, const c16_t *row, int blo
  * ~65 % of the PDSCH consumers' CPU time. */
 NR_CELL_STATIC(nr_bgq_t, g_cdmrs_q);
 #define g_cdmrs_q NR_CELL_REF(g_cdmrs_q)
+/* lazy-thread audit: the dmrsIdBg worker of `cell` is created parked (before the fence); cdmrs_async_on's nr_bgq_start only arms it */
+static void cdmrs_prepare(int cell)
+{
+  (void)nr_bgq_prepare(&g_cdmrs_q_cells[cell], 8, "dmrsIdBg", cell);
+}
 static int cdmrs_async_on(void)
 {
   NR_CELL_STATIC_INIT(int, on, -1);
@@ -3036,6 +3041,7 @@ void nr_pdsch_passive_queue_stop(void)
 /* mpci A5: allocates cell `cell`'s heap objects (zeroed) before the RX fence; see nr_pdsch_cell_prealloc.h */
 void nr_pdsch_passive_queue_cell_prealloc(int cell)
 {
+  cdmrs_prepare(cell);
   { /* lazy-thread audit: dmrsScan ring buffers + parked worker of this cell (the first scan job only arms it) */
     int ok = 1;
     for (int i = 0; i < DSCAN_Q; i++) {

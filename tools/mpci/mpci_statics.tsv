@@ -99,10 +99,9 @@ common/utils/nr/nr_common.c	162	nr_bandtable	global	const nr_bandentry_t[]	CONST
 common/utils/nr/nr_common.c	253	sync_raster	global	const sync_raster_t[]	CONST	AUDIT	auto
 common/utils/nr/nr_common.c	1180	long_prach_dur	file_static	uint8_t[4]	CONST	AUDIT	NR constant tables (long PRACH duration, ...), never written
 common/utils/nr_bg_lane.c	20	nr_bg_lane_cores::warned	func_static	int	PROCESS	AUDIT	log rate-limit flag of the background lane core lookup
-common/utils/nr_cell.c	12	nr_cell_tls_idx_	tls	int	TLS	AUDIT	existing thread-local
-common/utils/nr_cell.c	13	nr_cell_count_	global	int	PROCESS	AUDIT	cell seam: process-wide cell count and allocation fence (written once by the cell manager / main)
-common/utils/nr_cell.c	14	g_fence	file_static	volatile int	PROCESS	AUDIT	cell seam: process-wide cell count and allocation fence (written once by the cell manager / main)
-common/utils/nr_cell.c	82	nr_cell_parked_prepare::init_mu	func_static	pthread_mutex_t	PROCESS	AUDIT	MPCI-LAZY: guards the one-time init of a parked-worker record (the records themselves are per cell)
+common/utils/nr_cell.c	11	nr_cell_tls_idx_	tls	int	TLS	AUDIT	existing thread-local
+common/utils/nr_cell.c	12	nr_cell_count_	global	int	PROCESS	AUDIT	cell seam: process-wide cell count and allocation fence (written once by the cell manager / main)
+common/utils/nr_cell.c	13	g_fence	file_static	volatile int	PROCESS	AUDIT	cell seam: process-wide cell count and allocation fence (written once by the cell manager / main)
 common/utils/nr_cell_admit.c	350	nr_admit_reason_name::n	func_static	const char *const[]	CONST	AUDIT	auto
 common/utils/nr_core_layout.c	25	nr_cl_mode_name::n	func_static	const char *const[]	CONST	B1	auto
 common/utils/nr_core_layout.c	666	g_topo	file_static	nr_cl_topo_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
@@ -2134,43 +2133,45 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_P2	global	constexpr 
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1049	EVM_P3	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1050	A	global	template <class	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu	1055	V2	global	template <class A> struct	PROCESS	G3	libpdsch_gpu.so demod module: contexts per pass instance, staging per DISCRETE context; shared by all cells (instances are quota-ed per cell in nr_gpu_pass_graph.cu)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	61	g_init	file_static	nr_gpu_demod_init_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	62	g_run	file_static	nr_gpu_demod_run_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	63	g_release	file_static	nr_gpu_demod_release_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	64	g_evm_wait	file_static	nr_gpu_demod_evm_wait_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	65	g_defer	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	71	t_def	tls	defer_t *	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	72	t_defer_ok	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	73	g_on	file_static	_Atomic int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	78	g_oldpath_off	file_static	_Atomic int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	79	g_check	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_calls	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_chk_bad	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_chk_ok	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_ns_geo	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_ns_gpu	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_ns_max	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_ns_sum	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	81	g_refuse	file_static	_Atomic uint64_t[16]	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	82	g_stage_stats	file_static	nr_gpu_stage_stats_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	83	t_stage_full	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	84	g_evm_close	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	84	g_evm_far	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	84	g_evm_maxrel	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	330	t_qmode	tls	int	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	336	refuse::s_env	func_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	388	geo_tls::g	tls	geo_tls_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	607	build_job::s_nvfac	func_static	double	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	746	g_bgq	file_static	nr_bgq_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	747	g_bg_once	file_static	pthread_once_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	748	g_bg_every	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	749	g_bg_n	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	749	g_bg_ns	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	749	g_bg_ns_max	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	914	bg_demod_run::cpu	tls	chk_tls_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	914	bg_demod_run::gpu	tls	chk_tls_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1151	nr_pdsch_gpu_demod_grant::k	tls	chk_tls_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1271	nr_pdsch_gpu_demod_pass_variant::none	func_static	const nr_ssb_rm_mask_t	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	62	g_init	file_static	nr_gpu_demod_init_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	63	g_run	file_static	nr_gpu_demod_run_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	64	g_release	file_static	nr_gpu_demod_release_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	65	g_evm_wait	file_static	nr_gpu_demod_evm_wait_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	66	g_defer	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	72	t_def	tls	defer_t *	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	73	t_defer_ok	tls	int	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	74	g_on	file_static	_Atomic int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	79	g_oldpath_off	file_static	_Atomic int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	80	g_check	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	81	g_calls	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	81	g_chk_bad	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	81	g_chk_ok	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	81	g_ns_geo	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	81	g_ns_gpu	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	81	g_ns_max	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	81	g_ns_sum	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	82	g_refuse	file_static	_Atomic uint64_t[16]	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	83	g_stage_stats	file_static	nr_gpu_stage_stats_fn	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	84	t_stage_full	tls	int	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	85	g_evm_close	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	85	g_evm_far	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	85	g_evm_maxrel	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	331	t_qmode	tls	int	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	337	refuse::s_env	func_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	389	geo_tls::g	tls	geo_tls_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	608	build_job::s_nvfac	func_static	double	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	747	g_bgq	file_static	nr_bgq_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	748	g_bg_once	file_static	pthread_once_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	749	g_bg_every	file_static	int	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	750	g_bg_n	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	750	g_bg_ns	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	750	g_bg_ns_max	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	808	g_bgp_mu	file_static	pthread_mutex_t	PROCESS	G3	MPCI-LAZY: registry of the parked bgq workers (queue pointer -> parked record), process wide, lock-guarded; the queues themselves are per cell
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	809	g_bgp	file_static	bgp_t *[64]	PROCESS	G3	MPCI-LAZY: registry of the parked bgq workers (queue pointer -> parked record), process wide, lock-guarded; the queues themselves are per cell
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	995	bg_demod_run::cpu	tls	chk_tls_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	995	bg_demod_run::gpu	tls	chk_tls_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1232	nr_pdsch_gpu_demod_grant::k	tls	chk_tls_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1352	nr_pdsch_gpu_demod_pass_variant::none	func_static	const nr_ssb_rm_mask_t	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	28	g_fn	file_static	exact_fn_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	29	g_stats	file_static	void (*)(int *, uint64_t *, uint64_t *)	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	30	g_delay_fn	file_static	int (*)(const int16_t *const *, int, int *)	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
@@ -2655,42 +2656,42 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1079	g_bc9_tdd_cache_lock	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1138	nr_pdsch_passive_bc9_confirm::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1175	nr_pdsch_passive_oracle_inline::s_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1248	g_cdmrs_q	file_static	nr_bgq_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1252	cdmrs_async_on::on	func_static	int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1316	g_rsnap	file_static	g_rsnap_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1319	g_rsnap_free	file_static	g_rsnap_free_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1321	g_rsnap_nfree	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1323	g_rsnap_n	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1325	g_rsnap_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1327	g_recov_ok	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1332	g_recov_inline	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC (A11: per-cell recovery worker lifecycle / inline fallback)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1334	g_inl_pool	file_static	recov_wjob_t * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC (A11: per-cell recovery worker lifecycle / inline fallback)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1336	g_recov_nosnap	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1654	nr_pdsch_passive_queue_thread::s_gate_n	func_static	_Atomic uint32_t	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1672	nr_pdsch_passive_queue_thread::s_oracle_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1697	nr_pdsch_passive_queue_thread::s_probe_tick	func_static	_Atomic uint32_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1699	nr_pdsch_passive_queue_thread::t_probe	tls	c16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1744	nr_pdsch_passive_queue_thread::s_k0_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1805	nr_pdsch_passive_queue_thread::s_left	func_static	_Atomic int	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1945	nr_pdsch_passive_queue_thread::s_probe_n	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1947	nr_pdsch_passive_queue_thread::s_probe_ok	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2038	nr_pdsch_passive_queue_thread::s_dl_scr_confirmed	func_static	bool [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2140	nr_pdsch_passive_queue_thread::s_dl_dmrs_nid	func_static	_Atomic int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2311	t_recov_dec	tls	const nr_pdsch_passive_decode_result_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2313	g_recov_fb	file_static	g_recov_fb_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2409	recov_run::rxF	tls	c16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2671	g_pending	file_static	g_pending_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2674	g_pending_ns	file_static	g_pending_ns_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2676	g_n_pending	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2681	g_pending_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2683	g_batches	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2685	g_batches_multi	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2742	nr_a2e_ts	tls	uint64_t[9]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2743	nr_a2e_bank	tls	int8_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2743	nr_a2e_kind	tls	int8_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2744	nr_a2e_stg	tls	uint32_t[NR_A2E_STG]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2780	nr_pdsch_passive_queue_enqueue::c_	func_static	_Atomic unsigned long	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2797	g_age_hist	file_static	g_age_hist_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2799	g_dropped_probe	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1257	cdmrs_async_on::on	func_static	int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1321	g_rsnap	file_static	g_rsnap_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1324	g_rsnap_free	file_static	g_rsnap_free_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1326	g_rsnap_nfree	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1328	g_rsnap_n	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1330	g_rsnap_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1332	g_recov_ok	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1337	g_recov_inline	file_static	bool [converted]	PER_CELL	A5	converted: NR_CELL_STATIC (A11: per-cell recovery worker lifecycle / inline fallback)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1339	g_inl_pool	file_static	recov_wjob_t * [converted]	PER_CELL	A5	converted: NR_CELL_STATIC (A11: per-cell recovery worker lifecycle / inline fallback)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1341	g_recov_nosnap	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1659	nr_pdsch_passive_queue_thread::s_gate_n	func_static	_Atomic uint32_t	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1677	nr_pdsch_passive_queue_thread::s_oracle_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1702	nr_pdsch_passive_queue_thread::s_probe_tick	func_static	_Atomic uint32_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1704	nr_pdsch_passive_queue_thread::t_probe	tls	c16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1749	nr_pdsch_passive_queue_thread::s_k0_log	func_static	_Atomic int	PROCESS	A5	log/dashboard state
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1810	nr_pdsch_passive_queue_thread::s_left	func_static	_Atomic int	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1950	nr_pdsch_passive_queue_thread::s_probe_n	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1952	nr_pdsch_passive_queue_thread::s_probe_ok	func_static	_Atomic uint64_t [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2043	nr_pdsch_passive_queue_thread::s_dl_scr_confirmed	func_static	bool [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2145	nr_pdsch_passive_queue_thread::s_dl_dmrs_nid	func_static	_Atomic int [converted]	PER_CELL	A5	 block-scope, converted by A5; tabled after the A4 scanner fix
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2316	t_recov_dec	tls	const nr_pdsch_passive_decode_result_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2318	g_recov_fb	file_static	g_recov_fb_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2414	recov_run::rxF	tls	c16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2676	g_pending	file_static	g_pending_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC_HEAP, allocated by nr_pdsch_*_cell_prealloc before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2679	g_pending_ns	file_static	g_pending_ns_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2681	g_n_pending	file_static	int [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2686	g_pending_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2688	g_batches	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2690	g_batches_multi	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2747	nr_a2e_ts	tls	uint64_t[9]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2748	nr_a2e_bank	tls	int8_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2748	nr_a2e_kind	tls	int8_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2749	nr_a2e_stg	tls	uint32_t[NR_A2E_STG]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2785	nr_pdsch_passive_queue_enqueue::c_	func_static	_Atomic unsigned long	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2802	g_age_hist	file_static	g_age_hist_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2804	g_dropped_probe	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c	45	nr_rbg_size::lim	func_static	const int[4]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c	45	nr_rbg_size::p1	func_static	const int[4][4]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c	45	nr_rbg_size::p2	func_static	const int[4][4]	CONST	A5	auto
