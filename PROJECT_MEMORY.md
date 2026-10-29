@@ -5260,6 +5260,9 @@ output unchanged; agents on Sonnet; evidence labels per cell, never pooled; OTA 
 3. **Audit cleanup:** widen the audit file list (unscanned files with state), classify the remaining G1 rows (54: LDPC pool and cb0
    contexts, job carries cell) and G4 rows, bind leftover pool tasks to their cell, GPU-check queue cell (takes its first caller's cell
    today), footprint history nr_csirs_disc_fp.c allocated before the fence. STOP: static_audit --check rc 0 with no UNCLASSIFIED row.
+   DONE on branch mpci/c-audit (2026-10-29, report docs/superpowers/reports/csd/MPCI-AUDIT-20261029.md, [OFFLINE VERIFIED, DGX GB10 unit]): 555 receiver sources + 14 headers scanned (+1158 rows, 0 UNCLASSIFIED, the ctest gate is --strict),
+   56 PER_CELL rows converted in 11 files (PDSCH config sweep, DM-RS scan, SIB1 TDRA store, PBCH counters, DCI history, x-overhead, retry predictor, ...), the 54 G1 rows = process-wide pool keyed by job, tpool / CB0-pool / GPU-check-queue tasks run as
+   the cell that pushed them, footprint history and the two DCI resolvers allocated before the fence; lazily started workers are listed for the OTA. Not merged yet.
 4. **Validation gates** (plan section D): A9 N=1 equivalence suite; V2a DGX rfsim 4-RX gate after the merges; V3 2-cell replay gate
    (P1/P3 per cell, G4 discovery criteria, check_bad 0, 0 overruns); O1 single operator 2 PCIs, O2 2 operators at 122.88 MS/s, O3 Vodafone
    415 + TIM 923 at 245.76 MS/s for 30 min (0 overflows/overruns), all daytime; S1-S3 sens6 build / 2-cell CPU-only / discrete GPU.

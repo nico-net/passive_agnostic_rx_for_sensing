@@ -2,6 +2,7 @@
 /* Runtime wiring of the CB0 elimination channel: see nr_td_cb0_wire.h. */
 #define _GNU_SOURCE
 #include "nr_td_cb0_wire.h"
+#include "common/utils/nr_cell.h"
 #include "nr_passive_cfg_epoch.h"
 #include <pthread.h>
 #include <stdatomic.h>
@@ -81,7 +82,10 @@ typedef struct {
   uint64_t seed;
   uint32_t grants, adm, items, elim, alarms;
 } ctx_row_t;
-static ctx_row_t g_ctx[CTX_TAB];
+/* mpci audit: the CONVERGED-suffix diagnostics table follows the contexts of the calling cell (a seed of two cells may coincide); g_lock serialises */
+typedef ctx_row_t g_ctx_arr_t[CTX_TAB];
+NR_CELL_STATIC(g_ctx_arr_t, g_ctx)
+#define g_ctx NR_CELL_REF(g_ctx)
 static ctx_row_t *ctx_row_locked(uint64_t seed)
 {
   const uint32_t h = (uint32_t)(seed % CTX_TAB);

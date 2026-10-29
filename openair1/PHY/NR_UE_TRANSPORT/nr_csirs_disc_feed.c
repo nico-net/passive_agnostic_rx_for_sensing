@@ -78,6 +78,8 @@ static struct {
 extern const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void) __attribute__((weak));
 extern bool nr_csirs_disc_pipeline_ready(void) __attribute__((weak));
 extern void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp) __attribute__((weak));
+extern int nr_csirs_disc_fp_prealloc(int n_rb) __attribute__((weak));
+extern void nr_csirs_disc_fp_release(void) __attribute__((weak));
 extern int nr_csirs_disc_ring_capacity(void) __attribute__((weak));
 extern void nr_host_membudget_commit(nr_host_mem_module_t m, size_t bytes, double scale) __attribute__((weak));
 
@@ -589,6 +591,9 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
   }
   if (nr_csirs_disc_ring_init(&g_worker.ring, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, true) != 0)
     goto fail;
+  /* the footprint history of the cell (CPU / accumulate path only), before the RX fence: the first detect() must not allocate */
+  if (nr_csirs_disc_fp_prealloc && nr_csirs_disc_fp_prealloc(fp->N_RB_DL) != 0)
+    fprintf(stderr, "[PHY] SENSING: CSIRS_DISC footprint history preallocation failed; allocated at the first detect\n");
   const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load?nr_csirs_disc_gpu_load():NULL;
   if(gpu && gpu->device_alloc) {
     g_worker.ring.device_grid=gpu->device_alloc((size_t)capacity*g_worker.ring.slot_stride*2);
@@ -646,6 +651,7 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
 fail:
   if (nr_host_membudget_commit) { nr_csirs_disc_cell_host_commit(NR_HOST_MEM_CSIRS, 0, 0.0); nr_csirs_disc_cell_host_commit(NR_HOST_MEM_TD, 0, 0.0); }
   if (nr_csirs_disc_td_free) nr_csirs_disc_td_free();
+  if (nr_csirs_disc_fp_release) nr_csirs_disc_fp_release();
   nr_csirs_disc_ring_free(&g_worker.snapshot);
   nr_csirs_disc_ring_free(&g_worker.ring);
   pthread_cond_destroy(&g_worker.wake_cv);
@@ -672,6 +678,7 @@ void nr_csirs_disc_stop(void)
     pthread_join(g_worker.thread, NULL);
   atomic_store_explicit(&g_worker.running, false, memory_order_release);
   if (nr_csirs_disc_td_free) nr_csirs_disc_td_free();
+  if (nr_csirs_disc_fp_release) nr_csirs_disc_fp_release();
   nr_csirs_disc_ring_free(&g_worker.snapshot);
   nr_csirs_disc_ring_free(&g_worker.ring);
   if (g_worker.synchronization_ready) {

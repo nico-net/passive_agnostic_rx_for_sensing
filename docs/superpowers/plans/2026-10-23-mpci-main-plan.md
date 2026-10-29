@@ -688,3 +688,9 @@ R12. **NO FLAGS (operator, 2026-10-25).** Supersedes Global Constraint 4's test-
 7. C3/G8 UL HARQ soft combining: only after the §31.2 UL fixes give a working UL pipeline (UL CRC decoding OTA); combining needs first transmissions that decode.
 Update 2026-10-29 15:xx (operator): mpci/int-1029 merged into mpci-main (3110334ccb) on replay evidence; the integration OTA (item 1) is
 deferred (host needed by another user; captures around 17:40 or later) and must run before item 6 (§31 fixes). Items 2-4 proceed now.
+
+### Audit cleanup (2026-10-29, branch mpci/c-audit, MPCI-AUDIT-20261029.md) — seam changes and closed cross-task sites
+- `common/utils/threadPool/task.h`: `task_t` gains `int cell` (additive; `pushTpool` stamps `nr_cell_idx()`, the worker binds before `func`). `thread-pool` links `LOG` (nr_cell.c). Closes "threads that call converted per-cell APIs ... cb0 pool workers" of the A3 list for the shared Tpool and the CB0 pool.
+- `openair1/PHY/TOOLS/nr_gpu_bgq.h`: each queued item carries the pusher's cell; the worker binds to it and leases for it. Closes the "GPU-check queue takes its first caller's cell" item.
+- `nr_csirs_disc_fp_prealloc/release` (history arrays before the fence); DCI 1_1/0_1 resolvers in `nr_pdcch_cell_prealloc`. Closes the A7 "history arrays allocated lazily ... possibly after the fence" item.
+- `tools/mpci/mpci_audit_files.txt` + `static_audit.py --coverage/--add-coverage`: the audit covers every source of nr-uesoftmodem and its runtime libraries, and headers with state. `static_audit_check` in ctest is `--strict`.

@@ -160,6 +160,12 @@ int nr_csirs_disc_detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_c
  * Full-ring inputs evaluate all groups. Legacy detect remains exact/capped at 32. */
 int nr_csirs_disc_detect_candidates(const nr_csirs_disc_ring_t *,const nr_csirs_disc_fp_cfg_t *,nr_csirs_disc_fp_t *,int);
 void nr_csirs_disc_detect_reset(void);
+/* The footprint history arrays of the calling thread's cell (nr_csirs_disc_fp.c). nr_csirs_disc_detect_reset() keeps them (zeroed); the first detect() used to allocate them
+ * lazily, after the RX fence. prealloc: before the fence, from nr_csirs_disc_start() (0, or -1 when n_rb is out of range or the allocation failed: detect() then retries lazily).
+ * release: frees everything, from nr_csirs_disc_stop(). */
+int nr_csirs_disc_fp_prealloc(int n_rb);
+void nr_csirs_disc_fp_release(void);
+size_t nr_csirs_disc_fp_history_bytes(void); /* bytes of history arrays the calling cell holds (0 = none) */
 
 /* U3 (nr_csirs_disc_hyp.c) */
 int nr_csirs_disc_hypotheses(const nr_csirs_disc_fp_t *fps, int n_fp, nr_csirs_disc_hyp_t *out, int max_out);

@@ -17,12 +17,11 @@ endif()
 # ---- end A1 ----
 
 # ---- A2 ----
-# Static audit: scanner unit tests + table check (new object => fail). `--strict` (UNCLASSIFIED => fail) is NOT enabled yet:
-# it becomes the gate when A3-A8 have classified every PER_CELL candidate.
+# Static audit: scanner unit tests + table check (new object => fail, UNCLASSIFIED row => fail: --strict is the gate since the audit cleanup, mpci/c-audit).
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
   add_test(NAME test_static_audit_scanner COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/mpci/test_static_audit.py)
-  add_test(NAME static_audit_check COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/mpci/static_audit.py --check)
+  add_test(NAME static_audit_check COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/mpci/static_audit.py --strict)
 endif()
 # ---- end A2 ----
 
@@ -455,7 +454,7 @@ if(ENABLE_TESTS)
     ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c
     ${CMAKE_SOURCE_DIR}/common/utils/nr_core_pool.c)
   target_include_directories(test_nr_dmrs_scan_slice PRIVATE ${CMAKE_SOURCE_DIR}/common/utils ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(test_nr_dmrs_scan_slice PRIVATE GTest::gtest GTest::gtest_main m pthread)
+  target_link_libraries(test_nr_dmrs_scan_slice PRIVATE GTest::gtest GTest::gtest_main m pthread LOG)
   add_dependencies(tests test_nr_dmrs_scan_slice)
   add_test(NAME test_nr_dmrs_scan_slice COMMAND test_nr_dmrs_scan_slice)
 endif()
@@ -539,3 +538,24 @@ if(ENABLE_TESTS)
   endif()
 endif()
 # ---- end CELLFEAT ----
+
+# ---- AUDIT (mpci/c-audit) ----
+# Interleave test of the modules the audit cleanup converted to cell-indexed statics (SIB1 TDRA store, x-overhead, DCI history, DM-RS identity votes, sweep
+# certification). Same sources and libraries as test_nr_dci_history plus the converted modules; nr_cell.c comes with LOG.
+if(ENABLE_TESTS)
+  set(AUD_SRC ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
+  add_executable(test_mpci_audit_interleave
+    ${AUD_SRC}/tests/nr_mpci_audit_interleave_test.cc
+    ${AUD_SRC}/nr_dci_history.c
+    ${AUD_SRC}/nr_pdsch_config_sweep.c
+    ${AUD_SRC}/nr_td_fieldbook.c
+    ${AUD_SRC}/nr_pdsch_qm_oracle.c
+    ${AUD_SRC}/nr_td_order.c
+    ${AUD_SRC}/nr_pdsch_xoverhead.c
+    ${AUD_SRC}/nr_pdsch_dmrs_scan.c)
+  target_include_directories(test_mpci_audit_interleave PRIVATE ${AUD_SRC} ${AUD_SRC}/tests)
+  target_link_libraries(test_mpci_audit_interleave PRIVATE nr_passive_cfg_epoch MAC_NR_COMMON nr_common UTIL LOG asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest pthread m)
+  add_dependencies(tests test_mpci_audit_interleave)
+  add_test(NAME test_mpci_audit_interleave COMMAND test_mpci_audit_interleave)
+endif()
+# ---- end AUDIT ----

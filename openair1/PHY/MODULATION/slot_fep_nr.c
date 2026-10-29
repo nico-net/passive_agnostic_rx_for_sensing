@@ -3,6 +3,7 @@
  */
 
 #include "PHY/defs_gNB.h"
+#include "common/utils/nr_cell.h"
 #include "PHY/defs_nr_common.h"
 #include <math.h>
 #include "modulation_UE.h"
@@ -96,7 +97,10 @@ __thread double nr_slot_fep_fo_override_hz = NAN;
  * Plain doubles, no atomics: this is a slowly-varying calibration, a torn or stale read costs one
  * slot of slightly-wrong de-rotation and self-corrects on the next update. All-zero (the default)
  * is bit-identical to the previous behaviour. */
-static double g_branch_fo_hz[NR_MAX_BRANCH_FO];
+/* mpci audit: per RX branch of the calling cell (the branch-FO diagnostic, ISAC_RX_BRANCH_FO, stays unset; never enabled at rank > 1) */
+typedef double g_branch_fo_hz_arr_t[NR_MAX_BRANCH_FO];
+NR_CELL_STATIC(g_branch_fo_hz_arr_t, g_branch_fo_hz)
+#define g_branch_fo_hz NR_CELL_REF(g_branch_fo_hz)
 
 void nr_ue_set_branch_fo_hz(int ant, double hz)
 {

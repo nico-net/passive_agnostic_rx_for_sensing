@@ -8,6 +8,7 @@
 
 
 #include <stdio.h>
+#include "common/utils/nr_cell.h"
 #include <math.h>
 
 /* exe */
@@ -809,7 +810,9 @@ static int nr_ue_process_dci_dl_10_p_rnti(NR_UE_MAC_INST_t *mac,
                                           fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_pdu,
                                           const NR_UE_DL_BWP_t *current_DL_BWP)
 {
-  static NR_UE_DL_HARQ_STATUS_t prnti_harq;
+  /* mpci audit: the P-RNTI codeword scratch of the calling cell (persistent like the old static, one per cell) */
+  NR_CELL_STATIC(NR_UE_DL_HARQ_STATUS_t, prnti_harq)
+  #define prnti_harq NR_CELL_REF(prnti_harq)
 
   const int nb_rb_oh = mac->sc_info.xOverhead_PDSCH ? 6 * (1 + *mac->sc_info.xOverhead_PDSCH) : 0;
   const int nb_re_dmrs = ((dlsch_pdu->dmrsConfigType == NFAPI_NR_DMRS_TYPE1) ? 6 : 4) * dlsch_pdu->n_dmrs_cdm_groups;

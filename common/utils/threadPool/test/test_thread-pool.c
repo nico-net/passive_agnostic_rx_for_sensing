@@ -14,6 +14,7 @@
 #include "log.h"
 #include "task_ans.h"
 #include "notified_fifo.h"
+#include "common/utils/nr_cell.h"
 
 void displayList(notifiedFIFO_t *nf)
 {
@@ -44,6 +45,18 @@ void processing(void *arg)
   usleep(in->sleepTime);
   // printf("done: %d, %s, in thr %ld\n",in->id, in->txt,pthread_self() );
   completed_task_ans(in->task_ans);
+}
+
+/* mpci audit: a task runs as the cell that pushed it (the workers serve every cell) */
+struct cellProbe {
+  int seen;
+  task_ans_t *ans;
+};
+static void cellProbeFn(void *arg)
+{
+  struct cellProbe *p = (struct cellProbe *)arg;
+  p->seen = nr_cell_idx();
+  completed_task_ans(p->ans);
 }
 
 int main()
@@ -124,6 +137,24 @@ int main()
          dur / 1000,
          cumulProcessTime / 1000,
          (dur - cumulProcessTime) / (1000 * nb_jobs));
+  /* cell binding of pool tasks: pushed from cell 3, cell 0, cell 7 and back to a worker that has just run another cell */
+  {
+    const int cells[] = {3, 0, 7, 3, 7, 0, 0, 7};
+    const int n = sizeof(cells) / sizeof(cells[0]);
+    task_ans_t ans;
+    init_task_ans(&ans, n);
+    struct cellProbe probe[sizeof(cells) / sizeof(cells[0])];
+    for (int i = 0; i < n; i++) {
+      probe[i] = (struct cellProbe){.seen = -1, .ans = &ans};
+      nr_cell_bind(cells[i]);
+      pushTpool(&pool, (task_t){.args = &probe[i], .func = cellProbeFn});
+    }
+    nr_cell_bind(0);
+    join_task_ans(&ans);
+    for (int i = 0; i < n; i++)
+      AssertFatal(probe[i].seen == cells[i], "pool task %d ran as cell %d, pushed from cell %d\n", i, probe[i].seen, cells[i]);
+    printf("tpool cell binding: OK\n");
+  }
   abortTpool(&pool);
   return 0;
 }

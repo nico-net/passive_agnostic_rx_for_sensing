@@ -10,6 +10,7 @@
 #include "thread-pool.h"
 #include "bounded_notified_fifo.h"
 #include <sys/sysinfo.h>
+#include "common/utils/nr_cell.h"
 
 typedef struct {
   tpool_t* tpool;
@@ -19,6 +20,7 @@ typedef struct {
 void pushTpool(tpool_t* tpool, task_t task)
 {
   DevAssert(tpool != NULL);
+  task.cell = nr_cell_idx(); /* the task runs as the cell that pushed it (a worker serves every cell) */
   if (tpool->len_thr == 0) {
     task.func(task.args);
     return;
@@ -42,6 +44,8 @@ void pushTpool(tpool_t* tpool, task_t task)
 void pushTpool_mask(tpool_t* tpool, task_t task, uint64_t mask)
 {
   DevAssert(tpool != NULL);
+  if (task.func != NULL || task.args != NULL)
+    task.cell = nr_cell_idx(); /* the pool-stop sentinel keeps cell 0 */
   if (tpool->len_thr == 0) {
     task.func(task.args);
     return;
@@ -111,6 +115,8 @@ static void* worker_thread(void* arg)
       pushTpool_mask(tpool, (task_t){.args = NULL, .func = NULL}, tpool->dead_mask);
       break;
     }
+    if (ret.t.cell != nr_cell_idx())
+      nr_cell_bind(ret.t.cell);
     ret.t.func(ret.t.args);
   }
 

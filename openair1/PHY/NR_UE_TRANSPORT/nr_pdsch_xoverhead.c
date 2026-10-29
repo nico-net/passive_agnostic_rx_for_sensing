@@ -24,8 +24,11 @@
 #include <pthread.h>
 #include <string.h>
 #include <stdio.h>
+#include "common/utils/nr_cell.h"
 
-static nr_pdsch_xoverhead_state_t g_st;
+/* mpci audit: the x-overhead evidence is the cell's (it follows that cell's own PDSCH-ServingCellConfig); g_lock only serialises. */
+NR_CELL_STATIC(nr_pdsch_xoverhead_state_t, g_st)
+#define g_st NR_CELL_REF(g_st)
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void nr_pdsch_xoverhead_reset(uint16_t assumed)

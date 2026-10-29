@@ -29,6 +29,11 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include "common/utils/LOG/log.h"
+#include "common/utils/nr_cell.h"
+
+/* mpci audit: the sweep state is the cell's learning (per-RNTI contexts, the cell-wide observations and prior, the field book, the BC9 certification epoch and the
+ * census counters), so every such object is cell-indexed (NR_CELL_STATIC). Process-wide: g_lock / g_tmpl_lock (they only serialise), the catalog template cache g_tmpl
+ * (read-only catalogs keyed by (typeA, legality), copied into a context), the recycled spare state, the recovery policy, the test hooks and the legacy g_sweep API. */
 
 /* OBSERVABILITY (2026-09-17). This module had NO logging at all, which made its central claim --
  * "a cell-wide prior is only published once two DISTINCT RNTIs converge on the same fields" --
@@ -457,11 +462,19 @@ typedef struct {
   uint64_t cert_clock;
   bool typeb_seen; /* R30 item 1: this RNTI's DM-RS oracle has shown a mask type A cannot explain */
 } rnti_ctx_t;
-static rnti_ctx_t g_rnti[RNTI_CTX_MAX];
-static obs_set_t g_obs;   /* cell-wide: observations two RNTIs agree on */
-static prior_t   g_prior; /* cell-wide: a prior two RNTIs converged on */
-static uint64_t g_generation, g_clock;
-static _Atomic uint64_t g_cert_epoch; /* BC9 M5: moves when a persisted certification / exclusion may disappear */
+typedef rnti_ctx_t g_rnti_arr_t[RNTI_CTX_MAX];
+NR_CELL_STATIC(g_rnti_arr_t, g_rnti)
+#define g_rnti NR_CELL_REF(g_rnti)
+NR_CELL_STATIC(obs_set_t, g_obs)
+#define g_obs NR_CELL_REF(g_obs) /* cell-wide: observations two RNTIs agree on */
+NR_CELL_STATIC(prior_t, g_prior)
+#define g_prior NR_CELL_REF(g_prior) /* cell-wide: a prior two RNTIs converged on */
+NR_CELL_STATIC(uint64_t, g_generation)
+#define g_generation NR_CELL_REF(g_generation)
+NR_CELL_STATIC(uint64_t, g_clock)
+#define g_clock NR_CELL_REF(g_clock)
+NR_CELL_STATIC(_Atomic uint64_t, g_cert_epoch)
+#define g_cert_epoch NR_CELL_REF(g_cert_epoch) /* BC9 M5: moves when a persisted certification / exclusion may disappear */
 
 /* MEASURED OTA 2026-09-25, lab cell: pure LRU-by-touch evicted the ONE real, continuously-scheduled
  * RNTI 5 times in a 200s run ("SWEEP: new per-RNTI context rnti=0x4768" x5), each eviction wiping its
@@ -693,7 +706,10 @@ static uint64_t obs_sig(const obs_set_t *own)
   }
   return h;
 }
-static uint64_t g_typeb_appends, g_typeb_latches; /* BC7b M1 diagnostics (g_lock) */
+NR_CELL_STATIC(uint64_t, g_typeb_appends)
+#define g_typeb_appends NR_CELL_REF(g_typeb_appends)
+NR_CELL_STATIC(uint64_t, g_typeb_latches)
+#define g_typeb_latches NR_CELL_REF(g_typeb_latches) /* BC7b M1 diagnostics (g_lock) */
 
 /* Append a k0 layer: every hypothesis of the lowest-k0 layer present, with k0 replaced. The lowest
  * layer holds every (S,L,mask,table) tuple of the catalog: prior/table prunes are k0-agnostic, and a
@@ -1134,7 +1150,11 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
 }
 
 /* ---- CB0 elimination channel (see the header contract) ---- */
-static _Atomic uint64_t g_cb0_alarms, g_cb0_rej[NR_TD_CB0_X_COUNT];
+NR_CELL_STATIC(_Atomic uint64_t, g_cb0_alarms)
+#define g_cb0_alarms NR_CELL_REF(g_cb0_alarms)
+typedef _Atomic uint64_t g_cb0_rej_arr_t[NR_TD_CB0_X_COUNT];
+NR_CELL_STATIC(g_cb0_rej_arr_t, g_cb0_rej)
+#define g_cb0_rej NR_CELL_REF(g_cb0_rej)
 /* sensitivity rank of a decoder code: CB0 side (0 = never admissible) and TB side (unknown = blocks every batch) */
 static inline int cb0_sens(uint8_t d) { return d == NR_TD_DEC_CPU ? 1 : d == NR_TD_DEC_CUDA ? 2 : 0; }
 static inline int tb_sens(uint8_t d) { return d == NR_TD_DEC_CPU ? 1 : d == NR_TD_DEC_CUDA ? 2 : 3; }
@@ -1763,11 +1783,14 @@ int nr_pdsch_config_sweep_add_k0_layer_excl(nr_pdsch_config_sweep_state_t *st, u
 /* All shared accesses, including winner publication and reset, use one short mutex. */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 /* ---- fb2 field book (all under g_lock). Mode 2 = reversible pruning (0 only via the test hook). ---- */
-static nr_td_fieldbook_t g_fb;
-static int g_fb_mode = -1; /* -1 = not read yet */
-static uint32_t g_fb_identity_gen;
+NR_CELL_STATIC(nr_td_fieldbook_t, g_fb)
+#define g_fb NR_CELL_REF(g_fb)
+static int g_fb_mode = -1; /* -1 = not read yet (PROCESS: the mode is the same for every cell, read once) */
+NR_CELL_STATIC(uint32_t, g_fb_identity_gen)
+#define g_fb_identity_gen NR_CELL_REF(g_fb_identity_gen)
 static void sweep_epoch_listener(const nr_cfg_epoch_snapshot_t *s);
-static bool g_sweep_subscribed;
+NR_CELL_STATIC(bool, g_sweep_subscribed)
+#define g_sweep_subscribed NR_CELL_REF(g_sweep_subscribed) /* the epoch service is per cell: each cell subscribes its own listener */
 static void sweep_subscribe_locked(void)
 {
   if (!g_sweep_subscribed && nr_cfg_reconf_enabled()) {
@@ -1807,7 +1830,16 @@ static void fb_epoch_locked(const nr_cfg_epoch_snapshot_t *s)
   g_fb.epoch = s->epoch;
   g_fb_identity_gen = s->identity_gen;
 }
-static uint64_t g_fb_promotions, g_fb_withdrawals, g_fb_failopens, g_fb_pruned_ctx, g_fb_untrusted_ctx;
+NR_CELL_STATIC(uint64_t, g_fb_promotions)
+#define g_fb_promotions NR_CELL_REF(g_fb_promotions)
+NR_CELL_STATIC(uint64_t, g_fb_withdrawals)
+#define g_fb_withdrawals NR_CELL_REF(g_fb_withdrawals)
+NR_CELL_STATIC(uint64_t, g_fb_failopens)
+#define g_fb_failopens NR_CELL_REF(g_fb_failopens)
+NR_CELL_STATIC(uint64_t, g_fb_pruned_ctx)
+#define g_fb_pruned_ctx NR_CELL_REF(g_fb_pruned_ctx)
+NR_CELL_STATIC(uint64_t, g_fb_untrusted_ctx)
+#define g_fb_untrusted_ctx NR_CELL_REF(g_fb_untrusted_ctx)
 static const char *const g_fb_name[NR_TD_F_COUNT] = {"tdra", "dmrs_add_pos", "dmrs_max_len"};
 static int fb_mode_locked(void)
 {
@@ -1867,9 +1899,15 @@ typedef struct {
  * the ~70,000 the full catalog costs if it is not. */
 #define PRIOR_PROBATION 2000
 
-static sweep_context_t g_contexts[NR_PDSCH_SWEEP_MAX_CONTEXTS];
-static nr_pdsch_sweep_reporter_t g_reporter;
-static uint32_t g_config_epoch, g_identity_gen;
+typedef sweep_context_t g_contexts_arr_t[NR_PDSCH_SWEEP_MAX_CONTEXTS];
+NR_CELL_STATIC(g_contexts_arr_t, g_contexts)
+#define g_contexts NR_CELL_REF(g_contexts)
+NR_CELL_STATIC(nr_pdsch_sweep_reporter_t, g_reporter)
+#define g_reporter NR_CELL_REF(g_reporter)
+NR_CELL_STATIC(uint32_t, g_config_epoch)
+#define g_config_epoch NR_CELL_REF(g_config_epoch)
+NR_CELL_STATIC(uint32_t, g_identity_gen)
+#define g_identity_gen NR_CELL_REF(g_identity_gen)
 static void sweep_epoch_locked(const nr_cfg_epoch_snapshot_t *s);
 static void sweep_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
 {
@@ -1889,7 +1927,14 @@ static bool context_live(const sweep_context_t *c)
  * "never converged" report needs answered first, and nothing in the log could answer it -- the
  * new-context line is capped at 20 and the evidence line fires only on a pass or every 10000 outcomes
  * of one context, i.e. never on a context that lives a few grants. */
-static uint64_t g_st_created, g_st_scored, g_st_stale, g_st_reindexed;
+NR_CELL_STATIC(uint64_t, g_st_created)
+#define g_st_created NR_CELL_REF(g_st_created)
+NR_CELL_STATIC(uint64_t, g_st_scored)
+#define g_st_scored NR_CELL_REF(g_st_scored)
+NR_CELL_STATIC(uint64_t, g_st_stale)
+#define g_st_stale NR_CELL_REF(g_st_stale)
+NR_CELL_STATIC(uint64_t, g_st_reindexed)
+#define g_st_reindexed NR_CELL_REF(g_st_reindexed)
 
 /* A prune compacts st->hyp[] in place (or a probation restore rebuilds it), so every outstanding ticket
  * names an index that now belongs to another hypothesis. Retire them: a new generation makes
@@ -2040,7 +2085,11 @@ static void context_catalog(sweep_context_t *c, const rnti_ctx_t *r)
       nr_pdsch_config_sweep_add_k0_layer(c->state, (uint8_t)k);
 }
 
-static uint64_t g_excl_removed[2], g_excl_refused; /* BC9 diagnostics (g_lock) */
+typedef uint64_t g_excl_removed_arr_t[2];
+NR_CELL_STATIC(g_excl_removed_arr_t, g_excl_removed)
+#define g_excl_removed NR_CELL_REF(g_excl_removed)
+NR_CELL_STATIC(uint64_t, g_excl_refused)
+#define g_excl_refused NR_CELL_REF(g_excl_refused) /* BC9 diagnostics (g_lock) */
 static inline bool cert_admits(const sweep_context_t *c, const nr_pdsch_cfg_hypothesis_t *h)
 {
   if (c->k0_cert && !(h->k0 <= 32 && (c->k0_cert >> h->k0 & 1)))
@@ -2717,7 +2766,12 @@ int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint64_t 
 }
 
 /* TD_EXCL census helpers (g_lock held). */
-static uint64_t g_td_excl_restarts, g_td_excl_truncs, g_td_excl_alarms;
+NR_CELL_STATIC(uint64_t, g_td_excl_restarts)
+#define g_td_excl_restarts NR_CELL_REF(g_td_excl_restarts)
+NR_CELL_STATIC(uint64_t, g_td_excl_truncs)
+#define g_td_excl_truncs NR_CELL_REF(g_td_excl_truncs)
+NR_CELL_STATIC(uint64_t, g_td_excl_alarms)
+#define g_td_excl_alarms NR_CELL_REF(g_td_excl_alarms)
 static unsigned phase_count(const sweep_context_t *c)
 {
   return (unsigned)(__builtin_popcountll(c->dci_phase[0]) + __builtin_popcountll(c->dci_phase[1]) + __builtin_popcountll(c->dci_phase[2]));

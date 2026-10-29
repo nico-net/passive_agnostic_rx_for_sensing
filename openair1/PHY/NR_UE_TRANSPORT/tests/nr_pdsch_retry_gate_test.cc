@@ -59,3 +59,36 @@ TEST(GpuCheckQueue, InProgressCountsAsBusy)
   nr_bgq_run_one(&q);
   EXPECT_TRUE(nr_bgq_room(&q));
 }
+
+/* mpci audit: every item of the (process-wide) check queue runs as the cell that pushed it, whatever cell started the queue or ran the worker before. */
+static int g_seen[8], g_nseen;
+static int g_lease_cell[8], g_nlease;
+static void bgq_cell_item(void *) { g_seen[g_nseen++] = nr_cell_idx(); }
+static void bgq_lease_in(int cell) { g_lease_cell[g_nlease++] = cell; }
+static void bgq_lease_out(void) {}
+TEST(GpuCheckQueue, ItemRunsAsItsCell)
+{
+  nr_bgq_t q;
+  nr_bgq_init(&q, 4);
+  q.lease_in = bgq_lease_in;
+  q.lease_out = bgq_lease_out;
+  q.cell = 0; /* the starter of the queue is cell 0 */
+  g_nseen = g_nlease = 0;
+  int dummy = 0;
+  nr_cell_bind(1);
+  EXPECT_EQ(nr_bgq_push(&q, bgq_cell_item, &dummy), 0);
+  nr_cell_bind(0);
+  EXPECT_EQ(nr_bgq_push(&q, bgq_cell_item, &dummy), 0);
+  nr_cell_bind(3);
+  EXPECT_EQ(nr_bgq_push(&q, bgq_cell_item, &dummy), 0);
+  nr_cell_bind(0); /* the worker thread starts unbound */
+  for (int k = 0; k < 3; k++) nr_bgq_run_one(&q);
+  ASSERT_EQ(g_nseen, 3);
+  EXPECT_EQ(g_seen[0], 1);
+  EXPECT_EQ(g_seen[1], 0);
+  EXPECT_EQ(g_seen[2], 3);
+  EXPECT_EQ(g_lease_cell[0], 1); /* the lease is the item's cell, not the starter's */
+  EXPECT_EQ(g_lease_cell[1], 0);
+  EXPECT_EQ(g_lease_cell[2], 3);
+  nr_cell_bind(0);
+}

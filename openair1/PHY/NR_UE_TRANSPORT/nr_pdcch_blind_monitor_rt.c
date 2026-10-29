@@ -10625,6 +10625,10 @@ void nr_pdcch_cell_prealloc(int cell)
   NR_CELL_HEAP_PREALLOC(g_janon_hits_cell_t, g_janon_hits, cell);
   NR_CELL_HEAP_PREALLOC(nr_pbwp_t, g_pbwp, cell);
   NR_CELL_HEAP_PREALLOC(occ1_walk_tog_cell_t, occ1_walk_tog, cell);
+  /* mpci audit: the DCI 1_1 / 0_1 layout resolvers (~4 MB each, zeroed = nothing armed: n_hyp 0 reads exactly like the NULL of before) were calloc'd at the first arm,
+   * i.e. after the RX fence and the memory lock, once per cell. A failed allocation here leaves the slot NULL and the first arm retries (and fails closed) as before. */
+  dci11_resolver_ensure(&g_dci11_resolver_cells[cell], "DCI11_LAYOUT");
+  dci11_resolver_ensure(&g_dci01_resolver_cells[cell], "DCI01_LAYOUT");
   nr_pdcch_blind_monitor_cell_prealloc(cell);
   nr_pdcch_coreset_bank_cell_prealloc(cell);
 }

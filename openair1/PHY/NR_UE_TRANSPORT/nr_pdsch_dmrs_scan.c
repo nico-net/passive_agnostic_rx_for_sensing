@@ -4,7 +4,9 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include "common/utils/nr_cell.h"
 
+/* mpci audit: the identity pool, the per-RNTI votes and the base-rate table are the cell's evidence (each cell scans its own PDSCH); the three mutexes only serialise. */
 #define WWORDS 3 /* 12 bits per RB x NR_DMRS_SCAN_CHUNK RBs = 192 bits */
 
 /* mpci B6: a full scan runs under one DISC lease of the core pool (the dmrsScan worker of nr_pdsch_passive_queue.c) and one chunk of it is 65536 identities x 2 n_SCID,
@@ -162,8 +164,12 @@ static int chunks_of(const int16_t *const *rx, int nant, int N, int fco, int n_r
 
 /* cell-wide pool of identities found by full scans (any UE), re-tested cheaply by nr_dmrs_scan_slot_pool() */
 #define POOL_MAX 32
-static struct { int nid, nscid; } g_pool[POOL_MAX];
-static int g_npool;
+typedef struct { int nid, nscid; } g_pool_t;
+typedef g_pool_t g_pool_arr_t[POOL_MAX];
+NR_CELL_STATIC(g_pool_arr_t, g_pool)
+#define g_pool NR_CELL_REF(g_pool)
+NR_CELL_STATIC(int, g_npool)
+#define g_npool NR_CELL_REF(g_npool)
 static pthread_mutex_t g_pmu = PTHREAD_MUTEX_INITIALIZER;
 static void pool_add(int nid, int nscid)
 {
@@ -282,7 +288,9 @@ typedef struct {
   int64_t seen[VOTE_SEEN];
   int nid[VOTE_IDS], votes[VOTE_IDS];
 } vote_t;
-static vote_t g_v[VOTE_RNTIS];
+typedef vote_t g_v_arr_t[VOTE_RNTIS];
+NR_CELL_STATIC(g_v_arr_t, g_v)
+#define g_v NR_CELL_REF(g_v)
 static pthread_mutex_t g_vmu = PTHREAD_MUTEX_INITIALIZER;
 /* SOLVERCOVER: cell-wide base rate of every identity, over the distinct voted slots. A slot
  * votes its hits for every RNTI scheduled in it, so an identity present in most slots of the cell (a background/always-on
@@ -291,10 +299,19 @@ static pthread_mutex_t g_vmu = PTHREAD_MUTEX_INITIALIZER;
  * every RNTI, and the busiest UE's id took the other slot, so a UE's own id often never became a hypothesis. */
 #define BASE_IDS 512
 #define BASE_SEEN 64
-static struct { int nid, slots; } g_base[BASE_IDS];
-static int g_nbase, g_base_slots;
-static int64_t g_base_seen[BASE_SEEN];
-static int g_base_seen_n;
+typedef struct { int nid, slots; } g_base_t;
+typedef g_base_t g_base_arr_t[BASE_IDS];
+NR_CELL_STATIC(g_base_arr_t, g_base)
+#define g_base NR_CELL_REF(g_base)
+NR_CELL_STATIC(int, g_nbase)
+#define g_nbase NR_CELL_REF(g_nbase)
+NR_CELL_STATIC(int, g_base_slots)
+#define g_base_slots NR_CELL_REF(g_base_slots)
+typedef int64_t g_base_seen_arr_t[BASE_SEEN];
+NR_CELL_STATIC(g_base_seen_arr_t, g_base_seen)
+#define g_base_seen NR_CELL_REF(g_base_seen)
+NR_CELL_STATIC(int, g_base_seen_n)
+#define g_base_seen_n NR_CELL_REF(g_base_seen_n)
 bool nr_dmrs_scan_contrast_on(void) { return true; }
 /* base_count: counts the hits of one slot cell-wide, once per distinct slot (g_vmu held) */
 static void base_count(int64_t abs_slot, const nr_dmrs_scan_hit_t *hits, int n)
