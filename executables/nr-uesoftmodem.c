@@ -403,6 +403,19 @@ static int mpci_plan_cells(int argc, char **argv, bool radio)
   caps.consumers = lay.npool < 1 ? 1 : lay.npool > 6 ? 6 : lay.npool;
   caps.depth = 8 * caps.consumers;
   caps.csirs_enabled = caps.recovery_enabled = caps.gw_enabled = 1;
+  /* B6: the core pool against the decode demand of k cells: the pool the layout gives k cells (reader per cell, the wideband feed reader when k > 1 on a radio),
+   * the channelizer's reserve (its CHAN lease; 1 is the demand the GPU backend registers, the CPU backend asks for more), and the per-cell arenas the cell features
+   * add (PRACH heap, sense rings at the [sensing] defaults: the configuration is not loaded yet, so the bound is booked whether or not the sources are on). */
+  for (int k = 1; k <= NR_ADMIT_POOL_K && k <= NR_CL_MAX_CELLS; k++) {
+    nr_core_layout_t lk;
+    nr_cl_build_nf(&topo, &over, k, radio && k > 1, &lk);
+    caps.pool_tokens[k] = lk.npool;
+  }
+  caps.chan_tokens = radio ? 1 : 0;
+  caps.prach_heap_bytes = nr_prach_passive_cell_heap_bytes();
+  caps.sense_frames = 32;      /* cfr_ring_frames default */
+  caps.sense_max_re = 46200;   /* cfr_max_re default */
+  caps.sense_rec_slots = 1024; /* rec_ring_slots default */
   nr_cell_mgr_cfg_t mc;
   memset(&mc, 0, sizeof(mc));
   mc.grid_n_rb = p.n_rb > 0 ? p.n_rb : 106; /* OAI default -r */

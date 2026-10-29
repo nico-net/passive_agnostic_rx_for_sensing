@@ -11,6 +11,7 @@
 #include <vector>
 extern "C" {
 #include "nr_core_layout.h"
+#include "nr_core_pool.h" // NR_POOL_FLOAT_MERGE_MIN_TOKENS (macro only: the layout test does not link the pool)
 }
 
 namespace {
@@ -631,7 +632,7 @@ TEST(CoreLayoutN, ReadersFollowTheSingleReaderRanking)
     EXPECT_EQ(L.mode, NR_CL_COMPACT);
     EXPECT_EQ(L.uhd, 15);
     EXPECT_EQ(L.ring, 16);
-    EXPECT_EQ(L.npool, 6);
+    EXPECT_EQ(L.npool, 9); /* B6: sized by demand: W - home(2) = 9 of the 4 x 6 the cells would ask (was 6 with the 5-CPU lane) */
     char line[4096];
     nr_cl_format(&T.t, &L, line, sizeof(line));
     EXPECT_NE(std::string(line).find(" cells=4 rt_cells=5,6,7,8 max_cells=12"), std::string::npos) << line;
@@ -779,4 +780,96 @@ TEST(CoreLayoutFeed, ProcessPlanAccessor)
   Topo T = dgx(true);
   EXPECT_EQ(nr_core_layout_feed_cpu(), -1); // inactive or not planned
   (void)T;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// B6: the pool sized by the admitted cells' demand within the host's cores. Fixtures are the synthetic hosts above (labelled in each test).
+TEST(CoreLayoutPool, HomeSetAndDemandRulesArePure)
+{
+  EXPECT_EQ(nr_cl_home_cpus(11, 1), 1); // FLOAT-LANE-POOL: 1 below W = 12
+  EXPECT_EQ(nr_cl_home_cpus(12, 1), 2);
+  EXPECT_EQ(nr_cl_home_cpus(40, 1), 2);
+  EXPECT_EQ(nr_cl_home_cpus(11, 2), 1); // ceil(0.4 x 2) = 1
+  EXPECT_EQ(nr_cl_home_cpus(11, 3), 2); // ceil(0.4 x 3) = 2
+  EXPECT_EQ(nr_cl_home_cpus(11, 6), 3); // ceil(0.4 x 6) = 3: each cell has its own actors and callbacks
+  EXPECT_EQ(nr_cl_pool_for_cells(12, 1, 6), 6) << "one cell: the plan's own pool";
+  EXPECT_EQ(nr_cl_pool_for_cells(12, 2, 6), 10) << "W - home";
+  EXPECT_EQ(nr_cl_pool_for_cells(30, 2, 6), 12) << "capped by the demand of two cells (2 x the one-cell pool)";
+  EXPECT_EQ(nr_cl_pool_for_cells(60, 2, 31), 32) << "capped at NR_CL_MAX_POOL";
+  EXPECT_EQ(nr_cl_pool_for_cells(2, 4, 6), 0) << "never negative";
+}
+
+TEST(CoreLayoutPool, DgxTwoToFourCellsGetTheirDemandNotTheFiveCpuLane)
+{ // [DGX GB10 fixture, reconstructed]. Measured on air with the old rule: 2 cells + feed = 7 tokens (CORE_POOL: 8 9 1 2 3 4 10).
+  Topo T = dgx(true);
+  struct { int n; bool feed; int W, npool; } e[] = {{2, false, 13, 11}, {2, true, 12, 10}, {3, true, 11, 9}, {4, true, 10, 8}, {5, true, 9, 7}};
+  for (auto &x : e) {
+    nr_core_layout_t L;
+    nr_cl_build_nf(&T.t, nullptr, x.n, x.feed, &L);
+    EXPECT_EQ(L.W, x.W) << x.n;
+    EXPECT_EQ(L.npool, x.npool) << x.n << " feed " << x.feed;
+    EXPECT_EQ(L.npool, nr_cl_pool_for_cells(L.W, x.n, 6)) << "the pure rule is the layout";
+    EXPECT_GE(L.npool, NR_POOL_FLOAT_MERGE_MIN_TOKENS) << "floats lease the pool";
+    // the lane is the home set: lane = home = hk = check = recov, gpu / uss / nid unpinned (as SMALL), nothing of it in the pool
+    EXPECT_EQ(mask(L.lane), mask(L.home));
+    EXPECT_EQ(mask(L.hk), mask(L.home));
+    EXPECT_EQ(mask(L.check), mask(L.home));
+    EXPECT_EQ(mask(L.recov), mask(L.home));
+    int nh = 0;
+    for (int c = 0; c < T.t.ncpu; c++) nh += L.home[c];
+    EXPECT_EQ(nh, nr_cl_home_cpus(L.W, x.n));
+    EXPECT_TRUE(L.home[L.anchor]) << "the housekeeping anchor stays";
+    EXPECT_EQ(L.gpu, -1);
+    EXPECT_EQ(L.uss, -1);
+    EXPECT_EQ(L.nid, -1);
+    expect_inside(L, T);
+    nr_core_layout_t S;
+    nr_cl_build_n(&T.t, nullptr, 1, &S);
+    EXPECT_GT(L.npool * 2, S.npool * 1) << "more than a cell's share of the one-cell pool";
+  }
+}
+
+TEST(CoreLayoutPool, OneCellAndSmallHostsKeepTheHistoricalRules)
+{
+  Topo T = dgx(true);
+  nr_core_layout_t L;
+  nr_cl_build_n(&T.t, nullptr, 1, &L);
+  expect_dgx_layout(L, true); // N = 1: 6 tokens, 5-CPU lane, GPU worker 10, USS 12, nID 13
+  // 8 general cpus (cloud / small x86): two cells would leave W - home < NR_POOL_FLOAT_MERGE_MIN_TOKENS tokens: no merged float lane, the lane rules stay
+  Topo S(6);
+  nr_core_layout_t M;
+  nr_cl_build_n(&S.t, nullptr, 2, &M);
+  EXPECT_LT(M.W - nr_cl_home_cpus(M.W, 2), NR_POOL_FLOAT_MERGE_MIN_TOKENS);
+  EXPECT_LT(M.npool, NR_POOL_FLOAT_MERGE_MIN_TOKENS);
+  EXPECT_GE(M.max_cells, 1);
+}
+
+TEST(CoreLayoutPool, NeverFewerTokensThanTheLaneRulesAndNeverMoreThanTheDemand)
+{
+  for (auto &f : fixtures())
+    for (int n = 2; n <= 4; n++) {
+      nr_core_layout_t L, S;
+      nr_cl_build_n(&f.T.t, nullptr, n, &L);
+      nr_cl_build_n(&f.T.t, nullptr, 1, &S);
+      if (L.mode == NR_CL_SMALL || L.W < 1) continue;
+      const int old_np = L.mode == NR_CL_SEP ? L.W - NR_CL_LANE - NR_CL_SEP_HK : L.W - (L.W >= 10 ? 4 : L.W >= 8 ? 3 : 2) - (L.anchor >= 0 ? 1 : 0);
+      EXPECT_GE(L.npool, old_np < NR_CL_MAX_POOL ? old_np : NR_CL_MAX_POOL) << f.name << " n=" << n;
+      const bool demand = L.npool > old_np;
+      if (demand) {
+        EXPECT_LE(L.npool, n * S.npool) << f.name << " n=" << n;
+        EXPECT_LE(L.npool, L.W - nr_cl_home_cpus(L.W, n)) << f.name << " n=" << n;
+      }
+    }
+}
+
+TEST(CoreLayoutPool, SurplusAboveTheDemandJoinsTheHomeSet)
+{ // [synthetic 64-cpu host, 2 NUMA nodes]: two cells ask for at most NR_CL_MAX_POOL tokens, the rest of W is home, not an idle exclusive core
+  Topo T = big64();
+  nr_core_layout_t L;
+  nr_cl_build_n(&T.t, nullptr, 2, &L);
+  EXPECT_EQ(L.npool, NR_CL_MAX_POOL);
+  int nh = 0;
+  for (int c = 0; c < T.t.ncpu; c++) nh += L.home[c];
+  EXPECT_EQ(nh, L.W - L.npool);
+  EXPECT_GE(nh, nr_cl_home_cpus(L.W, 2));
 }

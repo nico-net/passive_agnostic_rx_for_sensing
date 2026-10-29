@@ -51,6 +51,7 @@ struct nr_pool {
   int cnt[NR_POOL_NPRIO];           /* current leases per class */
   int cnt_dl;                       /* of the DECODE leases, the DL ones */
   int chan_demand;                  /* tokens the channelizer asked for (0 = none registered) */
+  bool dyn_promo;                   /* B6: config derived (cfg == NULL at create): DISC/HOUSE promotion also follows the tokens per active cell, see promo_blocked() */
   bool chan_tok[NR_POOL_MAX_TOKENS]; /* the r reserved tokens (fastest first): CHAN's own, nobody else is placed on them while r > 0 */
   cpu_set_t poolset, home;
   bool have_home;
@@ -139,6 +140,45 @@ int nr_pool_chan_demand(const nr_pool_t *p) { return p ? p->chan_demand : 0; }
 int nr_pool_chan_cap(const nr_pool_t *p) { return p ? nr_pool_chan_cap_n(p->n) : 0; }
 int nr_pool_chan_reserved(const nr_pool_t *p) { return p ? chan_res(p) : 0; }
 
+/* ---- B6: shed value order (header, SHED) ---- */
+static bool cell_active(const nr_pool_t *p, int c, uint64_t now);
+int nr_pool_shed_tiers_n(int urgent, int free_tokens, int active)
+{
+  if (active < 2 || free_tokens > 0 || urgent <= 0) return 0;
+  return urgent < NR_POOL_SHED_TIERS ? urgent : NR_POOL_SHED_TIERS;
+}
+int nr_pool_active_cells(nr_pool_t *p)
+{
+  if (!p) return 1;
+  const uint64_t now = nr_pool_now_ns();
+  pthread_mutex_lock(&p->mu);
+  int a = 0;
+  for (int c = 0; c < NR_POOL_MAX_CELLS; c++) a += cell_active(p, c, now);
+  pthread_mutex_unlock(&p->mu);
+  return a < 1 ? 1 : a;
+}
+int nr_pool_shed_tiers(nr_pool_t *p)
+{
+  if (!p) return 0;
+  const uint64_t now = nr_pool_now_ns();
+  pthread_mutex_lock(&p->mu);
+  int A = 0;
+  for (int c = 0; c < NR_POOL_MAX_CELLS; c++) A += cell_active(p, c, now);
+  const int res = chan_res(p), idle = res > p->cnt[NR_POOL_CHAN] ? res - p->cnt[NR_POOL_CHAN] : 0;
+  const int urgent = atomic_load_explicit(&p->nwait[NR_POOL_SCAN], memory_order_relaxed) + atomic_load_explicit(&p->nwait[NR_POOL_DECODE], memory_order_relaxed)
+                     + atomic_load_explicit(&p->nwait[NR_POOL_RETRY], memory_order_relaxed);
+  const int k = nr_pool_shed_tiers_n(urgent, p->nfree - idle, A);
+  pthread_mutex_unlock(&p->mu);
+  return k;
+}
+void nr_pool_shed_note(nr_pool_t *p, int tier)
+{
+  if (!p || tier < 0 || tier >= NR_POOL_SHED_TIERS) return;
+  pthread_mutex_lock(&p->mu);
+  p->st.shed[tier]++;
+  pthread_mutex_unlock(&p->mu);
+}
+
 nr_pool_t *nr_pool_create(const int *cores, const int *capacity, int n, const nr_pool_cfg_t *cfg)
 {
   if (!cores || n < 1 || n > NR_POOL_MAX_TOKENS) return NULL;
@@ -146,6 +186,7 @@ nr_pool_t *nr_pool_create(const int *cores, const int *capacity, int n, const nr
   if (!p) return NULL;
   pthread_mutex_init(&p->mu, NULL);
   p->cfg = cfg ? *cfg : nr_pool_cfg_default_n(n); /* an explicit cfg is a deliberate override: used as given */
+  p->dyn_promo = cfg == NULL;
   p->n = p->nfree = n;
   for (int i = 0; i < NR_POOL_NPRIO; i++) p->rr[i] = NR_POOL_MAX_CELLS - 1; /* cell 0 is served first */
   CPU_ZERO(&p->poolset);
@@ -181,10 +222,29 @@ int nr_pool_total_waiting(const nr_pool_t *p)
   return w;
 }
 
+static int active_cells(const nr_pool_t *p, int cell, uint64_t now);
+/* B6: pure rule. Age promotion lets a DISC / HOUSE waiter take the reserve token of the urgent classes; it is only affordable while every active cell has at
+ * least NR_POOL_PROMO_MIN_TOKENS tokens of its own to work on (the single-cell rule of nr_pool_cfg_default_n, per cell). The channelizer's reserved tokens are
+ * not available to the cells (tokens_eff = N - r). With one active cell and no CHAN reserve this is exactly "N >= 6", i.e. the default config of before. */
+bool nr_pool_promo_allowed_n(int tokens_eff, int active)
+{
+  if (active < 1) active = 1;
+  return tokens_eff / active >= NR_POOL_PROMO_MIN_TOKENS;
+}
+static bool promo_blocked(const nr_pool_t *p, int cell, uint64_t now)
+{
+  if (!p->dyn_promo) return false;
+  const int res = chan_res(p), A = active_cells(p, cell, now);
+  if (A <= 1 && res == 0) return false; /* the single-cell pool: n < 6 is already handled by the default config */
+  return !nr_pool_promo_allowed_n(p->n - res, A);
+}
 static bool overdue(const nr_pool_t *p, const waiter_t *w, uint64_t now)
 {
   const uint64_t a = p->cfg.age_ns[w->prio];
-  return a && now > w->t_enq && now - w->t_enq >= a;
+  if (!(a && now > w->t_enq && now - w->t_enq >= a)) return false;
+  /* value order under overload (B6): discovery and housekeeping are shed first, they are not promoted into the tokens decode and scan need */
+  if ((w->prio == NR_POOL_DISC || w->prio == NR_POOL_HOUSE) && promo_blocked(p, w->cell, now)) return false;
+  return true;
 }
 
 /* Per-cell bookkeeping (under p->mu). U_c is the exponentially decayed token-time of cell c: dU/dt = run_c - U/tau, tau = halflife/ln 2. */
@@ -833,6 +893,16 @@ int nr_pool_site_chan_acquire(int blocking)
   return blocking ? nr_pool_acquire(p, NR_POOL_CHAN, 0, 0) : nr_pool_try_acquire(p, NR_POOL_CHAN, 0, 0);
 }
 void nr_pool_site_chan_release(void) { nr_pool_site_release(); }
+int nr_pool_site_shed_tiers(void) { return g_site ? nr_pool_shed_tiers(g_site) : 0; }
+void nr_pool_site_shed_note(int tier) { nr_pool_shed_note(g_site, tier); }
+int nr_pool_site_active_cells(void) { return g_site ? nr_pool_active_cells(g_site) : 1; }
+void nr_pool_site_shed_counts(uint64_t out[NR_POOL_SHED_TIERS])
+{
+  nr_pool_stats_t st;
+  memset(&st, 0, sizeof(st));
+  if (g_site) nr_pool_stats(g_site, &st);
+  for (int i = 0; i < NR_POOL_SHED_TIERS; i++) out[i] = st.shed[i];
+}
 void nr_pool_site_chan_set_demand(int tokens) { nr_pool_set_chan_demand(nr_pool_site(), tokens); }
 int nr_pool_site_chan_max(void) { return nr_pool_chan_cap(nr_pool_site()); }
 int nr_pool_site_filter_core(int core)

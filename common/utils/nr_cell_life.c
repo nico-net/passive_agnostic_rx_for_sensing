@@ -98,6 +98,7 @@ static void append_spares(const nr_cell_life_t *L, nr_cell_inventory_t *o)
     c->desc = L->primary;
     c->desc.pci = -1;
     c->desc.state = NR_CELLD_NEW;
+    c->desc.placeholder = 1;
   }
 }
 

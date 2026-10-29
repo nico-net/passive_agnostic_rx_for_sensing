@@ -159,6 +159,8 @@ void nr_prach_passive_cell_prealloc(int cell)
   NR_CELL_HEAP_PREALLOC(prach_jobs_t, jobs, cell);
 }
 
+size_t nr_prach_passive_cell_heap_bytes(void) { return sizeof(prach_xu_t) + sizeof(prach_freq_t) + sizeof(prach_tail_t) + sizeof(prach_jobs_t); }
+
 /* Pause / resume the PRACH pipeline of `cell` (hook of a retired / re-activated cell). No allocation; the worker, its queue and the pending list stay. On resume the
  * stitch tail is invalidated (the stream has a forward gap): the producer flag is taken so a slot in flight is not raced; if it is busy the invalidation is skipped
  * and the first occasion needing the tail is skipped by the continuity test (prev_tail_slot + 1 + slot != now). */

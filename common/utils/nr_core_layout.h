@@ -107,6 +107,12 @@ int nr_cl_build_n(const nr_cl_topo_t *, const nr_cl_over_t *, int n_cells, nr_co
  * as the cells' slot threads are): taken by the same ranking and off the same W, so the pool, lane and housekeeping are built on the reduced W. The CORE_PLAN
  * line then carries " feed=<cpu>". feed = false is nr_cl_build_n exactly (struct and line). */
 int nr_cl_build_nf(const nr_cl_topo_t *, const nr_cl_over_t *, int n_cells, bool feed, nr_core_layout_t *);
+/* B6 (pool sized by demand). nr_cl_home_cpus: CPUs kept for the threads that cannot lease a pool token. nr_cl_pool_for_cells: pool tokens of n cells on W
+ * general CPUs given the pool of the one-cell plan: min(W - home, n x solo_pool, NR_CL_MAX_POOL); n = 1 returns solo_pool. nr_cl_build_n with n >= 2 uses
+ * it when it gives more tokens than the SEP / COMPACT lane rules and the pool stays >= NR_POOL_FLOAT_MERGE_MIN_TOKENS (floats lease the pool): the lane is then
+ * the home set (as in SMALL mode: lane = home = hk = check = recov, gpu / uss / nid unpinned) and the surplus above the demand joins it. n = 1: unchanged. */
+int nr_cl_home_cpus(int W, int n_cells);
+int nr_cl_pool_for_cells(int W, int n_cells, int solo_pool);
 /* Most cells the host can host (the value of nr_core_layout_t.max_cells), for the admission model. */
 int nr_cl_max_cells(const nr_cl_topo_t *, const nr_cl_over_t *);
 /* The CORE_PLAN line (without trailing newline). */
