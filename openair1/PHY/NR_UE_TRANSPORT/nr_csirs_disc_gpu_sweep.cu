@@ -12,6 +12,7 @@
 #include <cstring>
 #include <vector>
 #include <mutex>
+#include <atomic>
 #include <climits>
 
 namespace {
@@ -279,10 +280,30 @@ struct Workspace {
   Device<RefineAcc> acc;
   Device<double> terms; /* refine: per-unit contributions of one chunk, [unit][NR_CSIRS_DISC_MAX_RB] (row 1: signal then weight arrays) */
   int rb=0,ant=0,capacity=0;
-} workspace;
-static std::mutex workspace_mutex;
+  /* G4: the state of one CELL (see wsp()) */
+  std::mutex mu;                              /* serialises the entry points of the cell */
+  NrGpuChunker c_sweep{1,0,"c_sweep"},c_refine{1,0,"c_refine"};
+  std::vector<short2> stage;                  /* confirm: the energy rows copied back */
+};
+/* G4: several cells discover in one process. The sweep workspace (streams, event, device buffers, mapping, cumulative evidence bank, chunk adaptation) belongs to a cell, allocated
+ * at the cell's prepare (before the RX fence) from that cell's N_RB / antennas / capacity and booked under that cell; every GPU slice holds the process-wide discovery ticket
+ * (nr_gpu_chunk.h). The cell is the calling thread's (nr_gpu_memstat_host_cell); an unbound thread uses cell 0. Cell 0 alone behaves as before. */
+static std::atomic<Workspace *> g_wsp[NR_GPU_DISC_CELLS];
+static std::mutex g_wsp_mu;
+static Workspace &wsp()
+{
+  const int c=nr_gpu_disc_cell();
+  Workspace *w=g_wsp[c].load(std::memory_order_acquire);
+  if(!w) {
+    std::lock_guard<std::mutex> g(g_wsp_mu);
+    w=g_wsp[c].load(std::memory_order_relaxed);
+    if(!w) {w=new Workspace();g_wsp[c].store(w,std::memory_order_release);}
+  }
+  return *w;
+}
+#define workspace wsp()
 extern "C" int nr_gpu_budget_rt_large_active(void) __attribute__((weak)); // the executable's nr_gpu_budget.c (weak: the module is dlopen'd)
-/* pick_stream: start of a job (workspace_mutex held): the low-SM stream while a large real grant is in flight, else the normal one. The previous job is synchronised first, so no queued kernel ever sees the switch. */
+/* pick_stream: start of a job (the cell workspace mutex held): the low-SM stream while a large real grant is in flight, else the normal one. The previous job is synchronised first, so no queued kernel ever sees the switch. */
 static void pick_stream()
 {
   auto &w=workspace;
@@ -297,7 +318,7 @@ static int prepare(int rb,int ant,int capacity)
 {
   auto &w=workspace;
   if(w.rb>=rb && w.ant>=ant && w.capacity>=capacity) return 0;
-  NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: the sweep workspace (one process-wide, grow-only: booked to the cell that grew it; G3/G4 make it per cell)
+  NrMsScope ms_(NR_MS_CSIRS,NR_MS_PER_CELL); // GPUMEM: the sweep workspace of the calling cell (grow-only), booked to that cell
   if(!w.stream_hi){
     if(!nr_gpu_green_stream(&w.stream_hi,0,false) && cudaStreamCreateWithFlags(&w.stream_hi,cudaStreamNonBlocking)!=cudaSuccess) return -1;
     if(!nr_gpu_green_stream(&w.stream_lo,0,false,-1)) w.stream_lo=nullptr;
@@ -311,7 +332,7 @@ static int prepare(int rb,int ant,int capacity)
      || !w.ds.alloc(capacity) || !w.di.alloc(capacity) || !w.dz.alloc((size_t)1024*160*capacity)
      || !w.dmean.alloc(1024*160) || !w.dw.alloc(1) || !w.meta.alloc(capacity)
      || !w.acc.alloc(1) || !w.terms.alloc((size_t)capacity*ant*32*NR_CSIRS_DISC_MAX_RB) || !w.refined.alloc(1) || !w.result.alloc(1)) return -1;
-  w.mapping.resize(maps);w.slots.reserve(capacity);w.indices.reserve(capacity);w.mean.resize(1024*160);
+  w.mapping.resize(maps);w.slots.reserve(capacity);w.indices.reserve(capacity);w.mean.resize(1024*160);w.stage.reserve((size_t)14*12*rb); /* confirm: host rows, no allocation after the RX fence */
   w.rb=rb;w.ant=ant;w.capacity=capacity;return 0;
 }
 /* complete: records the workspace stream's completion event and blocks the calling CPU thread until the queued work finished; returns the CUDA status.
@@ -323,6 +344,7 @@ static cudaError_t complete() {
 }
 /* copy: asynchronous memcpy on the workspace stream followed by complete(); returns the CUDA status. */
 static cudaError_t copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
+  NrGpuDiscTicket ticket; /* G4 */
   /* wait for queued kernels first: a copy queued behind a long kernel stalls other streams' copies [MEASURED, DGX 300-400 ms] */
   {cudaError_t f=complete();if(f!=cudaSuccess) return f;}
   cudaError_t rc=cudaMemcpyAsync(dst,src,n,kind,workspace.stream);
@@ -398,6 +420,7 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
     }
     std::fill(mean.begin(), mean.begin()+nc, 0);
     if (entry && slots.empty() && entry->count) {
+      NrGpuDiscTicket ticket; /* G4: the launch and the copy that drains it */
       reduce_scores<<<1,256,0,stream>>>(history,c,h,entry->count,dw.p);
       if (cudaGetLastError()!=cudaSuccess || copy(out+h,dw.p,sizeof(*out),cudaMemcpyDeviceToHost)!=cudaSuccess)
         return -1;
@@ -407,19 +430,24 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
       nr_csirs_disc_sweep_winner(mean.data(), &c, h, slots.size(), out + h);
       continue;
     }
-    if((complete()!=cudaSuccess)
-       || cudaMemcpyAsync(dm.p,map.re,map.n_re*sizeof(*map.re),cudaMemcpyHostToDevice,stream)!=cudaSuccess
-       || cudaMemcpyAsync(ds.p,slots.data(),slots.size()*sizeof(int),cudaMemcpyHostToDevice,stream)!=cudaSuccess
-       || cudaMemcpyAsync(w.di.p,indices.data(),indices.size()*sizeof(int),cudaMemcpyHostToDevice,stream)!=cudaSuccess) return -1;
-    size_t packed=(size_t)slots.size()*r->n_ant*map.n_re;
-    gather<<<(packed+255)/256,256,0,stream>>>(grid,r->slot_stride/2,dm.p,map.n_re,w.di.p,slots.size(),r->n_ant,r->n_rb,dx.p);
+    {
+      NrGpuDiscTicket ticket; /* G4: the uploads and the gather, drained, are one discovery slice */
+      if((complete()!=cudaSuccess)
+         || cudaMemcpyAsync(dm.p,map.re,map.n_re*sizeof(*map.re),cudaMemcpyHostToDevice,stream)!=cudaSuccess
+         || cudaMemcpyAsync(ds.p,slots.data(),slots.size()*sizeof(int),cudaMemcpyHostToDevice,stream)!=cudaSuccess
+         || cudaMemcpyAsync(w.di.p,indices.data(),indices.size()*sizeof(int),cudaMemcpyHostToDevice,stream)!=cudaSuccess) return -1;
+      size_t packed=(size_t)slots.size()*r->n_ant*map.n_re;
+      gather<<<(packed+255)/256,256,0,stream>>>(grid,r->slot_stride/2,dm.p,map.n_re,w.di.p,slots.size(),r->n_ant,r->n_rb,dx.p);
+      if(cudaGetLastError()!=cudaSuccess || complete()!=cudaSuccess) return -1;
+    }
     auto device_map = map;
     device_map.re = dm.p;
-    static NrGpuChunker c_sweep{1,0,"c_sweep"};
+    NrGpuChunker &c_sweep=w.c_sweep;
     if (chunks(c_sweep, nc, [&](long f, long n) {
           sweep<<<dim3(n, slots.size()), 128, 0, stream>>>(device_map, dx.p, ds.p, r->n_ant, r->slots_per_frame, c, dz.p, (int)f, nc);
         }) != cudaSuccess) return -1;
     int previous=nr_csirs_disc_evidence_previous(entry,slots.size());
+    NrGpuDiscTicket ticket_tail; /* G4: average, reduce and the result copy, drained, are one discovery slice */
     if (entry) average_scores<true><<<(nc + 255) / 256, 256, 0, stream>>>(dz.p, nc, slots.size(), dmean.p, history, previous);
     else average_scores<false><<<(nc + 255) / 256, 256, 0, stream>>>(dz.p, nc, slots.size(), dmean.p);
     if (cudaGetLastError() != cudaSuccess) return -1;
@@ -428,6 +456,7 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
         || cudaMemcpyAsync(out + h, dw.p, sizeof(*out), cudaMemcpyDeviceToHost, stream) != cudaSuccess
         || complete() != cudaSuccess)
       return -1;
+    ticket_tail.drop();
     if (entry) {
       for (int i:indices) entry->last_slot=std::max(entry->last_slot,r->meta[i].abs_slot);
       entry->count=slots.size()+previous;
@@ -694,9 +723,11 @@ static cudaError_t refine_launch(const nr_csirs_disc_ring_t &ring,const nr_csirs
   /* The refinement was ONE single-thread kernel of 24 ms on average and up to 652 ms [MEASURED gsV2N]; chunked it was still serial (0.46 ms per unit idle, 1.3 ms on replay, 375 ms per call at
    * 32 units per chunk). Each unit is now one CTA (refine_chunk): the units of a chunk run in parallel and the additions into the evidence keep the unit order, so the result is bit-identical. */
   auto &w=workspace;
-  static NrGpuChunker c_refine{1,0,"c_refine"};
-  if(total<=0) {refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,0,LONG_MAX,true);return cudaGetLastError();}
-  if(total>(long)(w.terms.capacity/NR_CSIRS_DISC_MAX_RB/(h.row==1?2:1))) {refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,0,LONG_MAX,true);return cudaGetLastError();} /* more units than the term buffer: serial */
+  NrGpuChunker &c_refine=w.c_refine;
+  /* G4: the serial (not chunked) tail kernels hold the discovery ticket until drained */
+  auto serial=[&]() {NrGpuDiscTicket ticket;refine_kernel<<<1,1,0,s>>>(ring,h,win,map,w.refined.p,w.result.p,w.acc.p,0,LONG_MAX,true);cudaError_t e=cudaGetLastError();return e==cudaSuccess?complete():e;};
+  if(total<=0) return serial();
+  if(total>(long)(w.terms.capacity/NR_CSIRS_DISC_MAX_RB/(h.row==1?2:1))) return serial(); /* more units than the term buffer: serial */
   return chunks(c_refine,total,[&](long f,long n) {refine_chunk(ring,h,win,map,s,f,n,f+n>=total);});
 }
 
@@ -751,7 +782,7 @@ extern "C" int nr_csirs_disc_gpu_sweep_entry(const nr_csirs_disc_ring_t *r, cons
 {
   if (!nr_gpu_module_ready()) return -1; // CPU tier: the caller falls back to the CPU sweep
   try {
-    std::lock_guard<std::mutex> guard(workspace_mutex);
+    std::lock_guard<std::mutex> guard(workspace.mu);
     pick_stream();
     int rc=run(r, hyps, nh, cfg, out);
     if (rc<0) memset(&workspace.evidence,0,sizeof(workspace.evidence));
@@ -768,8 +799,9 @@ extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
 {
   if (!nr_gpu_module_ready()) return -1;
   try {
-    std::lock_guard<std::mutex> guard(workspace_mutex);
+    std::lock_guard<std::mutex> guard(workspace.mu);
     pick_stream();
+    NrGpuDiscTicket ticket; /* G4: the warm-up of this cell holds the discovery ticket */
     {
       /* On-demand ring (PHY/TOOLS/nr_gpu_elastic.h): a smaller ring than the workspace was sized for gives the per-slot buffers back and re-allocates them at the new size
        * (the first call, before RX, never takes this path: capacity is 0 then). */
@@ -807,7 +839,7 @@ extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
 extern "C" int nr_csirs_disc_gpu_refine_entry(const nr_csirs_disc_ring_t *r,nr_csirs_disc_hyp_t *h,const nr_csirs_disc_win_t *win)
 {
   try {
-    std::lock_guard<std::mutex> guard(workspace_mutex);
+    std::lock_guard<std::mutex> guard(workspace.mu);
     pick_stream();
     if(prepare(r->n_rb,r->n_ant,r->capacity)<0) return -1;
     auto &w=workspace;nr_csirs_disc_hyp_t full=*h;full.rb_start=0;full.n_rb=r->n_rb;
@@ -831,7 +863,7 @@ extern "C" int nr_csirs_disc_gpu_refine_entry(const nr_csirs_disc_ring_t *r,nr_c
 extern "C" int nr_csirs_disc_gpu_confirm_entry(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_hyp_t *h,int id,double scores[5])
 {
   try {
-    std::lock_guard<std::mutex> guard(workspace_mutex);
+    std::lock_guard<std::mutex> guard(workspace.mu);
     pick_stream();
     nr_csirs_disc_sweep_cfg_t cfg={id,1,1,32,1};nr_csirs_disc_win_t win={};
     if(run(r,h,1,&cfg,&win)!=1) return -1;
@@ -842,7 +874,8 @@ extern "C" int nr_csirs_disc_gpu_confirm_entry(const nr_csirs_disc_ring_t *r,con
      * body launches (nr_gpu_chunk.h). They need only the one or two symbol rows of the first antenna: copy those and run the same function on the host. */
     {
       const int rows=h->row==5?2:1;const size_t rowlen=(size_t)12*r->n_rb;
-      static std::vector<short2> stage;stage.assign(14*rowlen,short2{0,0});
+      auto &stage=w.stage;stage.assign(14*rowlen,short2{0,0});
+      NrGpuDiscTicket ticket; /* G4: the row copy and its drain */
       if(h->symb_l0<0 || h->symb_l0+rows>14 || cudaMemcpyAsync(stage.data()+h->symb_l0*rowlen,grid+h->symb_l0*rowlen,rows*rowlen*sizeof(short2),cudaMemcpyDeviceToHost,workspace.stream)!=cudaSuccess
          || complete()!=cudaSuccess) return -1;
       energies(stage.data(),r->n_rb,*h,map,scores);

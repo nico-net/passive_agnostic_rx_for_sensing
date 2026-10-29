@@ -3,6 +3,7 @@
 #include "../../NR_UE_TRANSPORT/nr_pdcch_nid_chunks.h"
 #include <gtest/gtest.h>
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -170,4 +171,98 @@ TEST(GpuBudget, LargeGrantCounter) {
   EXPECT_EQ(nr_gpu_budget_rt_large_active(),2);
   nr_gpu_budget_rt_large_end();nr_gpu_budget_rt_large_end();nr_gpu_budget_rt_large_end(); /* extra end clamps at 0 */
   EXPECT_EQ(nr_gpu_budget_rt_large_active(),0);
+}
+
+/* ---- G4: the process-wide discovery ticket ---- */
+#include <chrono>
+static void hold_us(int us) {std::this_thread::sleep_for(std::chrono::microseconds(us));}
+TEST(DiscTicket, RecursiveAndReleaseWithoutAcquireIsNoop) {
+  nr_gpu_disc_ticket_test_reset(30,nullptr);
+  nr_gpu_disc_ticket_release();
+  nr_gpu_disc_ticket_acquire(0);
+  nr_gpu_disc_ticket_acquire_bulk(0);
+  nr_gpu_disc_ticket_acquire(0);
+  nr_gpu_disc_ticket_release();nr_gpu_disc_ticket_release();nr_gpu_disc_ticket_release();
+  nr_gpu_disc_ticket_stats_t st;nr_gpu_disc_ticket_stats(0,&st);
+  EXPECT_EQ(st.grants,1u);  /* the inner acquires only counted */
+  nr_gpu_disc_ticket_acquire(0);nr_gpu_disc_ticket_release();
+  nr_gpu_disc_ticket_stats(0,&st);EXPECT_EQ(st.grants,2u);
+}
+TEST(DiscTicket, AtMostOneHolderAmongCells) {
+  nr_gpu_disc_ticket_test_reset(100,nullptr);
+  std::atomic<int> in{0},max_in{0},grants{0};std::vector<std::thread> th;
+  for(int cell=0;cell<4;++cell)th.emplace_back([&,cell] {
+    for(int i=0;i<150;++i) {
+      if(i&1)nr_gpu_disc_ticket_acquire_bulk(cell);else nr_gpu_disc_ticket_acquire(cell);
+      int v=++in;int m=max_in.load();while(v>m && !max_in.compare_exchange_weak(m,v)) {}
+      hold_us(50);--in;++grants;
+      nr_gpu_disc_ticket_release();
+    }
+  });
+  for(auto &t:th)t.join();
+  EXPECT_EQ(max_in.load(),1);EXPECT_EQ(grants.load(),600);
+  uint64_t g=0;for(int c=0;c<4;++c) {nr_gpu_disc_ticket_stats_t st;nr_gpu_disc_ticket_stats(c,&st);g+=st.grants;EXPECT_EQ(st.grants,150u);}
+  EXPECT_EQ(g,600u);
+}
+TEST(DiscTicket, SingleCellIsNeverPacedOrBlocked) {
+  nr_gpu_disc_ticket_test_reset(30,nullptr);
+  auto t0=std::chrono::steady_clock::now();
+  for(int i=0;i<200;++i) {nr_gpu_disc_ticket_acquire_bulk(0);hold_us(100);nr_gpu_disc_ticket_release();}
+  const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-t0).count();
+  nr_gpu_disc_ticket_stats_t st;nr_gpu_disc_ticket_stats(0,&st);
+  EXPECT_EQ(st.pace_us,0u);EXPECT_EQ(st.contended,0u);EXPECT_LT(ms,200*0.1*8+50); /* 200 x 100 us holds, generous scheduling slack */
+}
+TEST(DiscTicket, TwoCellsBulkIsPacedToTheDutyBudgetShortIsNot) {
+  nr_gpu_disc_ticket_test_reset(30,nullptr); /* 30 % per cell, two cells: capped at 60 %, a bulk hold of h is followed by h x 40/60 of idle */
+  nr_gpu_disc_ticket_test_rt_frac(0.9);      /* the RT work keeps the device 90 % busy: the cap is max(60, 100-90) */
+  /* both cells have used the ticket: the pacing is on */
+  nr_gpu_disc_ticket_acquire(0);nr_gpu_disc_ticket_release();
+  nr_gpu_disc_ticket_acquire(1);nr_gpu_disc_ticket_release();
+  auto t0=std::chrono::steady_clock::now();
+  nr_gpu_disc_ticket_acquire_bulk(0);hold_us(30000);nr_gpu_disc_ticket_release(); /* pace 20 ms */
+  nr_gpu_disc_ticket_acquire(1);nr_gpu_disc_ticket_release(); /* short: not paced */
+  const double short_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-t0).count();
+  EXPECT_LT(short_ms,45.0);
+  nr_gpu_disc_ticket_acquire_bulk(1);nr_gpu_disc_ticket_release(); /* bulk: waits the pace of the 20 ms hold */
+  const double bulk_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-t0).count();
+  EXPECT_GE(bulk_ms,48.0);
+  nr_gpu_disc_ticket_stats_t st;nr_gpu_disc_ticket_stats(0,&st);EXPECT_GE(st.pace_us,19000u);EXPECT_LE(st.pace_us,21000u);
+}
+TEST(DiscTicket, PreferringCellFirstThenLeastUsedThenArrival) {
+  nr_gpu_disc_ticket_test_reset(100,nullptr);
+  /* cell 2 used the device a lot, cell 1 a little */
+  nr_gpu_disc_ticket_acquire(2);hold_us(30000);nr_gpu_disc_ticket_release();
+  nr_gpu_disc_ticket_acquire(1);hold_us(1000);nr_gpu_disc_ticket_release();
+  std::vector<int> order;std::mutex mu;
+  nr_gpu_disc_ticket_acquire(3); /* main holds; the waiters queue behind it */
+  auto waiter=[&](int cell) {return std::thread([&,cell] {
+    nr_gpu_disc_ticket_acquire(cell);{std::lock_guard<std::mutex> g(mu);order.push_back(cell);}nr_gpu_disc_ticket_release();});};
+  std::vector<std::thread> th;
+  th.push_back(waiter(2));hold_us(5000);th.push_back(waiter(1));hold_us(5000);th.push_back(waiter(0));hold_us(5000);
+  nr_gpu_budget_discovery_prefer_cell(2,1); /* cell 2 in ACQUIRE jumps the queue */
+  nr_gpu_disc_ticket_release();
+  for(auto &t:th)t.join();
+  ASSERT_EQ(order.size(),3u);
+  EXPECT_EQ(order[0],2);  /* prefer */
+  EXPECT_EQ(order[1],0);  /* never used: least usage */
+  EXPECT_EQ(order[2],1);
+  EXPECT_EQ(nr_gpu_budget_discovery_preferred(),1);
+  nr_gpu_budget_discovery_prefer_cell(2,0);EXPECT_EQ(nr_gpu_budget_discovery_preferred(),0);
+}
+/* the cap leaves the idle device free: paced only while the RT work is keeping it busy */
+static uint64_t pace_after_two_cells(bool rt_busy) {
+  nr_gpu_budget_test_reset(30);
+  nr_gpu_disc_ticket_test_reset(30,nullptr);
+  if(rt_busy) {EXPECT_EQ(nr_gpu_budget_rt_begin(),1);}
+  const auto t0=std::chrono::steady_clock::now();
+  while(std::chrono::steady_clock::now()-t0<std::chrono::milliseconds(900)) {
+    for(int cell=0;cell<2;++cell) {nr_gpu_disc_ticket_acquire_bulk(cell);hold_us(1000);nr_gpu_disc_ticket_release();}
+  }
+  if(rt_busy)nr_gpu_budget_rt_end();
+  nr_gpu_disc_ticket_stats_t a,b;nr_gpu_disc_ticket_stats(0,&a);nr_gpu_disc_ticket_stats(1,&b);
+  return a.pace_us+b.pace_us;
+}
+TEST(DiscTicket, PacedOnlyWhileRtKeepsTheDeviceBusy) {
+  EXPECT_EQ(pace_after_two_cells(false),0u);
+  EXPECT_GT(pace_after_two_cells(true),0u);
 }

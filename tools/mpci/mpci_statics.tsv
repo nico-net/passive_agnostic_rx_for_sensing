@@ -397,45 +397,24 @@ openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	186	csirs_disc_cpu_lattice_calls
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	186	csirs_disc_gpu_lattice_calls	global	uint64_t	PROCESS	A7	extern aggregate telemetry (atomics)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	187	history_unified	file_static	bool [converted]	PER_CELL	A7	converted (A7)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	517	warned	file_static	bool [converted]	PER_CELL	A7	log-once flag of the CPU fallback, per cell (moved to file scope for the audit)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	28	discovery_stream	file_static	DiscoveryStream	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	52	disc_chunks::span	tls	NrGpuSpan	TLS	G4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	223	g_led	file_static	struct LedgerEnt {}[1024]	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	224	g_led_mu	file_static	std::mutex	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	242	g_segment_blocks	file_static	int	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	242	g_segment_scratch	file_static	int	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	254	nr_csirs_disc_gpu_ops::ops	func_static	const nr_csirs_disc_gpu_ops_t	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	304	fft_host::mutex	func_static	std::mutex	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	306	fft_host::plan	func_static	cufftHandle	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	307	fft_host::last_fft	func_static	int	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	307	fft_host::last_transforms	func_static	int	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	308	fft_host::work	func_static	cufftComplex *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	309	fft_host::capacity	func_static	size_t	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	320	fft_host::work_tag	func_static	uint32_t	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	341	sin_lut	global	short[129] [device]	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	459	fep_workspace	file_static	FepWorkspace	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	490	fep_host::mutex	func_static	std::mutex	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	542	accumulate_host::mutex	func_static	std::mutex	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	543	accumulate_host::grid	func_static	Buffer<int16_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	543	accumulate_host::meta	func_static	Buffer<nr_csirs_disc_slot_meta_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	544	accumulate_host::excl	func_static	Buffer<uint8_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	544	accumulate_host::x	func_static	Buffer<uint32_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	639	lattice_host::mutex	func_static	std::mutex	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	640	lattice_host::dc	func_static	Buffer<uint64_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	640	lattice_host::pq	func_static	Buffer<uint64_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	640	lattice_host::ps	func_static	Buffer<uint64_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	641	lattice_host::dm	func_static	Buffer<uint16_t>	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	701	lmem_prereserve::done	func_static	bool	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	55	State	global	struct	CONST	G4	scanner false positive: forward declaration of the type resident::State (no object); the detector lives per cell in CellWs::res
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	68	g_ws	file_static	std::atomic<CellWs *>[NR_GPU_DISC_CELLS]	PER_CELL	G4	G4: explicitly cell-indexed table of the per-cell workspaces (stream, FEP/accumulate/lattice/FFT buffers, chunkers, detector); cell = the calling thread (nr_gpu_disc_cell); workspaces are heap, created in the cell prepare before the RX fence
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	69	g_ws_mu	file_static	std::mutex	PROCESS	G4	G4: guards only the creation of a cell workspace
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	109	disc_chunks::span	tls	NrGpuSpan	TLS	G4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	285	g_led	file_static	struct LedgerEnt {}[1024]	PROCESS	G4	GPU ledger side table keyed by device/pinned address, independent of the cell (the tag recorded in the row is the cell's)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	286	g_led_mu	file_static	std::mutex	PROCESS	G4	guards g_led
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	304	g_segment_blocks	file_static	int	PROCESS	G4	one device: decided once at the first ops() from the SM count and the csirs memory share (lmem_prereserve), read-only afterwards
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	304	g_segment_scratch	file_static	int	PROCESS	G4	one device: decided once at the first ops() (lmem_prereserve), read-only afterwards
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	316	nr_csirs_disc_gpu_ops::ops	func_static	const nr_csirs_disc_gpu_ops_t	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	404	sin_lut	global	short[129] [device]	CONST	G4	device constant table, identical bytes whichever cell loads it (fep_prepare of every cell writes the same values)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	749	lmem_prereserve::done	func_static	bool	PROCESS	G4	one-time device local-memory reservation
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	5	CAND_CAP	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	5	GPU_CAND_CAP	global	constexpr int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	243	finish_host::all	func_static	candidate_t[CAND_CAP]	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	247	state	global	struct State {}	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	323	detect::periods	func_static	const int[]	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	345	detect::groups_h	func_static	candidate_t[4*CAND_CAP]	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	41	words_max	global	constexpr int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	265	workspace	global	struct Workspace {}	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	283	workspace_mutex	file_static	std::mutex	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	335	chunks::span	tls	NrGpuSpan	TLS	G4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	845	nr_csirs_disc_gpu_confirm_entry::stage	func_static	std::vector<short2>	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	333	detect::periods	func_static	const int[]	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	42	words_max	global	constexpr int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	291	g_wsp	file_static	std::atomic<Workspace *>[NR_GPU_DISC_CELLS]	PER_CELL	G4	G4: explicitly cell-indexed table of the per-cell sweep workspaces (streams, event, device buffers, mapping, cumulative evidence bank, chunkers, mutex); heap, created in the cell prepare before the RX fence
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	292	g_wsp_mu	file_static	std::mutex	PROCESS	G4	G4: guards only the creation of a cell workspace
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	357	chunks::span	tls	NrGpuSpan	TLS	G4	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	21	row_rules	file_static	const row_rule_t[18]	CONST	A7	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	50	table	file_static	table_entry_t *	PROCESS	A7	legal-hypothesis table, built once under pthread_once (rows 1-18 of 38.211 Table 7.4.1.5.3-1), read-only afterwards, identical for every cell
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c	51	table_n	file_static	int	PROCESS	A7	legal table (build once, read-only)
@@ -488,10 +467,10 @@ openair1/PHY/NR_UE_TRANSPORT/nr_early_start.c	9	nr_es_progress_cells	global	nr_e
 openair1/PHY/NR_UE_TRANSPORT/nr_early_start.c	10	nr_es_done_cells	global	nr_es_done_t[NR_CELL_MAX]	PER_CELL	A8	converted A8: one instance per cell (array indexed by nr_cell_idx() through the header macro)
 openair1/PHY/NR_UE_TRANSPORT/nr_early_start.c	11	nr_slot_gate_cells	global	nr_slot_gate_t[NR_CELL_MAX]	PER_CELL	A8	converted A8: one instance per cell (array indexed by nr_cell_idx() through the header macro)
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_cell.c	57	nr_gpu_cell_kind_name::n	func_static	const char *const[NR_GPU_CELL_KIND_N]	CONST	G1	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	16	g_dft	file_static	nr_isa_dftfn_t	UNCLASSIFIED	G1	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	16	g_idft	file_static	nr_isa_dftfn_t	UNCLASSIFIED	G1	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	17	g_origin	file_static	char[600]	UNCLASSIFIED	G1	
-openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	18	g_once	file_static	pthread_once_t	UNCLASSIFIED	G1	
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	16	g_dft	file_static	nr_isa_dftfn_t	PROCESS	G1	host DFT references of the ISA twin self-test, resolved once (pthread_once), identical for every cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	16	g_idft	file_static	nr_isa_dftfn_t	PROCESS	G1	host DFT references of the ISA twin self-test, resolved once (pthread_once), identical for every cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	17	g_origin	file_static	char[600]	PROCESS	G1	host DFT references of the ISA twin self-test, resolved once (pthread_once), identical for every cell
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_ref.c	18	g_once	file_static	pthread_once_t	PROCESS	G1	host DFT references of the ISA twin self-test, resolved once (pthread_once), identical for every cell
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_isa_twin.cuh	70	X_INV_SQRT2	file_static	const short	CONST	G1	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	42	fb_name	file_static	const char *const[FB_N]	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c	45	jobp_tls	tls	nr_gpu_pass_job_t *	TLS	G3	existing thread-local
@@ -1286,30 +1265,31 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c	92	wide_probes	file_sta
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c	94	learn_restricted	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c	96	learn_full	file_static	_Atomic uint64_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c	109	cell_seen	file_static	cell_seen_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	32	g_init_state	file_static	int	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	43	MAX_ANT	file_static	const int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	44	MAX_DUR	file_static	const int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	45	MAX_PILOTS_PER_JOB	file_static	const int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	46	GOLD_WORDS	file_static	const int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	47	MAX_JOBS	file_static	const int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	48	RE_PER_RB_OUT_DMRS	file_static	const int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	50	g_cfg	file_static	nr_gpu_pdcch_fep_cfg_t	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	51	g_d_rxF	file_static	float2 *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	52	g_h_rxF_stage	file_static	float2 *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	53	g_d_jobs	file_static	nr_gpu_pdcch_job_t *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	53	g_h_jobs	file_static	nr_gpu_pdcch_job_t *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	54	g_d_gold	file_static	uint32_t *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	55	g_d_ls	file_static	float2 *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	56	g_d_llr	file_static	int16_t *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	56	g_h_llr	file_static	int16_t *	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	57	g_llr_cap	file_static	size_t	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	58	g_stream	file_static	cudaStream_t	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	59	g_llr_us	file_static	double	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	59	g_upload_us	file_static	double	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	60	g_llr_scale	file_static	float	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	157	k_llr_pdcch::DATA_KR	func_static	const int[9]	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	188	g_budget	file_static	nr_dl_gpu_budget_t	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	350	g_api	file_static	const nr_gpu_pdcch_fep_api_t	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	32	g_init_state	file_static	int	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	35	g_owner_cell	file_static	int	PROCESS	G4	G4: owner cell of the ONE resident shadow-check context (other cells get -1 and keep CPU LLRs)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	47	MAX_ANT	file_static	const int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	48	MAX_DUR	file_static	const int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	49	MAX_PILOTS_PER_JOB	file_static	const int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	50	GOLD_WORDS	file_static	const int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	51	MAX_JOBS	file_static	const int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	52	RE_PER_RB_OUT_DMRS	file_static	const int	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	54	g_cfg	file_static	nr_gpu_pdcch_fep_cfg_t	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	55	g_d_rxF	file_static	float2 *	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	56	g_h_rxF_stage	file_static	float2 *	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	57	g_d_jobs	file_static	nr_gpu_pdcch_job_t *	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	57	g_h_jobs	file_static	nr_gpu_pdcch_job_t *	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	58	g_d_gold	file_static	uint32_t *	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	59	g_d_ls	file_static	float2 *	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	60	g_d_llr	file_static	int16_t *	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	60	g_h_llr	file_static	int16_t *	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	61	g_llr_cap	file_static	size_t	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	62	g_stream	file_static	cudaStream_t	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	63	g_llr_us	file_static	double	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	63	g_upload_us	file_static	double	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	64	g_llr_scale	file_static	float	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	161	k_llr_pdcch::DATA_KR	func_static	const int[9]	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	192	g_budget	file_static	nr_dl_gpu_budget_t	PROCESS	G4	G4: ONE resident context of a shadow check (ISAC_PDCCH_GPU_FEP, default off, never feeds a decode); bound to the cell that initialised it, other cells' calls fail and keep their CPU LLRs (g_owner_cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu	355	g_api	file_static	const nr_gpu_pdcch_fep_api_t	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_parity.cuh	98	PDCCH_PAR_MAX_RB	file_static	const int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_parity.cuh	98	PDCCH_PAR_THREADS	file_static	const int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c	25	s_cache	file_static	struct {}[JOINT_CACHE_N]	PROCESS	A4	polar model cache keyed by shape (A, nid, L, pre); a model is a pure function of its key, so sharing across cells is exact
@@ -1320,9 +1300,9 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c	30	s_screen_pass	file_static	
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c	32	s_accepted	file_static	_Atomic unsigned long long [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c	88	nr_pdcch_joint_live_decode::warned	func_static	atomic_flag	PROCESS	A4	capability warning (dci_length > 64 unsupported), identical for all cells
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	50	g_nid	file_static	nr_nid_gpu_state_t [converted]	PER_CELL	G4	converted (DBG2): state of one cell's receive path
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	70	elastic_policy	file_static	struct {}	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	130	worker::names	func_static	const char *[]	UNCLASSIFIED	G4	
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	216	policy	file_static	struct {}	UNCLASSIFIED	G4	
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	70	elastic_policy	file_static	struct {}	PROCESS	G4	window policy constants, changed only by tests before start; the same for every cell
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	130	worker::names	func_static	const char *[]	CONST	G4	mode name strings
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c	216	policy	file_static	struct {}	PROCESS	G4	sweep duty policy constants, changed only by tests before start; the same for every cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	CELLS	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	CHUNK	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu	23	IDS	global	constexpr int	CONST	G4	auto
@@ -2504,35 +2484,57 @@ openair1/PHY/TOOLS/lte_ue_scope.c	20	form_stats_l2	global	FD_stats_form *	PROCES
 openair1/PHY/TOOLS/lte_ue_scope.c	21	title	global	char[255]	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
 openair1/PHY/TOOLS/lte_ue_scope.c	22	scope_enb_num_ue	global	unsigned char	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
 openair1/PHY/TOOLS/lte_ue_scope.c	23	forms_thread	file_static	pthread_t	PROCESS	A8	GUI scope (off on the receiver, cell 0 only)
-openair1/PHY/TOOLS/nr_gpu_budget.c	10	once	file_static	pthread_once_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	11	enabled	file_static	int	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	12	deadline	file_static	unsigned	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	12	pct	file_static	unsigned	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	16	owner	file_static	_Atomic unsigned	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	17	fault	file_static	_Atomic int	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	18	fallbacks	file_static	_Atomic uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	18	next_us	file_static	_Atomic uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	18	overruns	file_static	_Atomic uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	18	used_us	file_static	_Atomic uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	18	wait_max	file_static	_Atomic uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	18	yields	file_static	_Atomic uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	19	job_start	tls	uint64_t	TLS	G4	existing thread-local
-openair1/PHY/TOOLS/nr_gpu_budget.c	26	slice_start	file_static	uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	26	start_us	file_static	uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	29	buckets	file_static	uint64_t[1001]	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	29	window_tick	file_static	uint64_t[1001]	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	29	window_used	file_static	uint64_t[1001]	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	76	large_active	file_static	_Atomic int	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_budget.c	147	prefer	file_static	_Atomic int	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	11	once	file_static	pthread_once_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	12	enabled	file_static	int	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	13	deadline	file_static	unsigned	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	13	pct	file_static	unsigned	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	17	owner	file_static	_Atomic unsigned	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	19	rt_busy_since	file_static	_Atomic uint64_t	PROCESS	G4	G4: RT-busy share measured for the discovery ticket cap; process-wide (one device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	19	rt_busy_total	file_static	_Atomic uint64_t	PROCESS	G4	G4: RT-busy share measured for the discovery ticket cap; process-wide (one device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	20	fault	file_static	_Atomic int	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	21	fallbacks	file_static	_Atomic uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	21	next_us	file_static	_Atomic uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	21	overruns	file_static	_Atomic uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	21	used_us	file_static	_Atomic uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	21	wait_max	file_static	_Atomic uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	21	yields	file_static	_Atomic uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	22	job_start	tls	uint64_t	TLS	G4	existing thread-local
+openair1/PHY/TOOLS/nr_gpu_budget.c	29	slice_start	file_static	uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	29	start_us	file_static	uint64_t	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	32	buckets	file_static	uint64_t[1001]	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	32	window_tick	file_static	uint64_t[1001]	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	32	window_used	file_static	uint64_t[1001]	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	86	large_active	file_static	_Atomic int	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	159	prefer	file_static	_Atomic int[TK_CELLS]	PROCESS	G4	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	175	tk_mu	file_static	pthread_mutex_t	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	176	tk_cv	file_static	pthread_cond_t	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	177	tk_once	file_static	pthread_once_t	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	178	tk_hbulk	file_static	int	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	178	tk_hcell	file_static	int	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	178	tk_held	file_static	int	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	179	tk_grant_us	file_static	uint64_t	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	179	tk_next_us	file_static	uint64_t	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	179	tk_report_us	file_static	uint64_t	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	179	tk_seq	file_static	uint64_t	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	180	tk_usage	file_static	double[TK_CELLS]	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	181	tk_last_use	file_static	uint64_t[TK_CELLS][TK_CELLS]	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	181	tk_usage_t	file_static	uint64_t[TK_CELLS]	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	182	tk_wait	file_static	tk_waiter_t *	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	183	tk_st	file_static	nr_gpu_disc_ticket_stats_t[TK_CELLS]	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	184	tk_clock	file_static	uint64_t (*)(void)	PROCESS	G4	G4 discovery ticket: process-wide by design (one device, one discovery stream clock); per-cell state is indexed by the cell argument (tk_usage, tk_st, prefer[])
+openair1/PHY/TOOLS/nr_gpu_budget.c	185	tk_depth	tls	int	TLS	G4	existing thread-local
+openair1/PHY/TOOLS/nr_gpu_budget.c	224	tk_rt_frac	file_static	double	PROCESS	G4	G4: RT-busy share measured for the discovery ticket cap; process-wide (one device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	225	tk_rt_busy	file_static	uint64_t	PROCESS	G4	G4: RT-busy share measured for the discovery ticket cap; process-wide (one device)
+openair1/PHY/TOOLS/nr_gpu_budget.c	225	tk_rt_t	file_static	uint64_t	PROCESS	G4	G4: RT-busy share measured for the discovery ticket cap; process-wide (one device)
 openair1/PHY/TOOLS/nr_gpu_mem.c	9	g_force_discrete	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_gpu_mem.c	12	g_fail_after	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_memstat.c	14	g_slot	file_static	slot_t[NR_MS_MOD_N][1 + NR_GPU_MEMSTAT_CELLS]	UNCLASSIFIED	G1	
-openair1/PHY/TOOLS/nr_gpu_memstat.c	15	g_tot_cur	file_static	uint64_t[NR_MS_KIND_N]	UNCLASSIFIED	G1	
-openair1/PHY/TOOLS/nr_gpu_memstat.c	15	g_tot_n	file_static	uint64_t[NR_MS_KIND_N]	UNCLASSIFIED	G1	
-openair1/PHY/TOOLS/nr_gpu_memstat.c	15	g_tot_peak	file_static	uint64_t[NR_MS_KIND_N][NR_MS_KIND_N]	UNCLASSIFIED	G1	
+openair1/PHY/TOOLS/nr_gpu_memstat.c	14	g_slot	file_static	slot_t[NR_MS_MOD_N][1 + NR_GPU_MEMSTAT_CELLS]	PROCESS	G1	the GPU ledger: process-wide table already indexed by (module, scope, cell); g_cell_fn is the test hook of the cell lookup
+openair1/PHY/TOOLS/nr_gpu_memstat.c	15	g_tot_cur	file_static	uint64_t[NR_MS_KIND_N]	PROCESS	G1	the GPU ledger: process-wide table already indexed by (module, scope, cell); g_cell_fn is the test hook of the cell lookup
+openair1/PHY/TOOLS/nr_gpu_memstat.c	15	g_tot_n	file_static	uint64_t[NR_MS_KIND_N]	PROCESS	G1	the GPU ledger: process-wide table already indexed by (module, scope, cell); g_cell_fn is the test hook of the cell lookup
+openair1/PHY/TOOLS/nr_gpu_memstat.c	15	g_tot_peak	file_static	uint64_t[NR_MS_KIND_N][NR_MS_KIND_N]	PROCESS	G1	the GPU ledger: process-wide table already indexed by (module, scope, cell); g_cell_fn is the test hook of the cell lookup
 openair1/PHY/TOOLS/nr_gpu_memstat.c	16	t_tag	tls	uint32_t	TLS	G1	existing thread-local
 openair1/PHY/TOOLS/nr_gpu_memstat.c	18	g_names	file_static	const char *const[NR_MS_MOD_N]	CONST	G1	auto
-openair1/PHY/TOOLS/nr_gpu_memstat.c	41	g_cell_fn	file_static	int (*)(void)	UNCLASSIFIED	G1	
+openair1/PHY/TOOLS/nr_gpu_memstat.c	41	g_cell_fn	file_static	int (*)(void)	PROCESS	G1	the GPU ledger: process-wide table already indexed by (module, scope, cell); g_cell_fn is the test hook of the cell lookup
 openair1/PHY/TOOLS/nr_gpu_module.c	5	nr_gpu_built_archs	global	const char[]	CONST	G1	auto
 openair1/PHY/TOOLS/nr_gpu_module.c	6	once	file_static	pthread_once_t	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_gpu_module.c	7	ready	file_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
@@ -2559,7 +2561,9 @@ openair1/PHY/TOOLS/nr_gpu_platform.c	28	logger	file_static	void (*)(int, const c
 openair1/PHY/TOOLS/nr_gpu_platform.c	37	live	file_static	allocation *	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_gpu_platform.c	188	probe_ptx	file_static	const char[]	CONST	G1	auto
 openair1/PHY/TOOLS/nr_gpu_platform.c	387	nr_gpu_rx_started::logged	func_static	int	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-openair1/PHY/TOOLS/nr_gpu_platform.c	538	mb	file_static	struct {}	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+openair1/PHY/TOOLS/nr_gpu_platform.c	543	mb_test_cells	file_static	int	PROCESS	G1	test hook
+openair1/PHY/TOOLS/nr_gpu_platform.c	551	mbc	file_static	struct {}	PROCESS	G1	G4 membudget: per-cell commits of the per-cell modules (csirs, pdcch_nid) summed into mb.bytes; process-wide ledger
+openair1/PHY/TOOLS/nr_gpu_platform.c	552	mb	file_static	struct {}	PROCESS	G1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_host_membudget.c	13	host_weight	file_static	const int[NR_HOST_MEM_N]	CONST	B3	auto
 openair1/PHY/TOOLS/nr_host_membudget.c	195	mu	file_static	pthread_mutex_t	PROCESS	B3	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 openair1/PHY/TOOLS/nr_host_membudget.c	196	st	file_static	struct {}	PROCESS	B3	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)

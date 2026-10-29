@@ -2,12 +2,22 @@
 /* How long does ONE CSI-RS discovery chunk take (cudaEvent time), alone and next to a synthetic load? Bench only, no production change: the
  * production .cu is #included so its anonymous-namespace kernels, streams and green contexts are the real ones.
  * Sites: c_sweep and c_refine (nr_csirs_disc_gpu_sweep.cu, -DBENCH_SWEEP), c_seg (nr_csirs_disc_gpu.cu + cluster.cuh, -DBENCH_SEG).
- * Build: nvcc -O2 -std=c++17 -arch=native -DBENCH_SWEEP|-DBENCH_SEG -I<repo>/openair1/PHY/NR_UE_TRANSPORT -I<repo>/openair1/PHY -I<repo>/openair1 -I<repo>/common/utils -I<repo>
-*       -o disc_unit_bench_{sweep,seg} disc_unit_bench.cu [sweep: also .../nr_csirs_disc_sweep.c; seg: -lcufft    Run: disc_unit_bench_sweep [reps] */
+ * G4 (BENCH_LB): the multi-cell LAUNCH-BLOCK mode. The real-time side of launchblock_bench.cu (4 DL + 1 UL green-context threads launching a graph with a conditional node every
+ *   ~300 us) runs next to K "cells": K threads, each with its own workspace / stream (ws(), the cell of the thread), flooding the production chunker (disc_chunks: the 32-unit floor, the
+ *   admission, the process-wide discovery ticket) with 27 ms units (synthetic spin kernels, the c_seg shape: 32-thread CTAs on the discovery SMs). Link nr_gpu_budget.c (compiled as C) to
+ *   have the ticket; without it the K cells run unserialised (the contrast). Reports the RT launch gap p50/p99/p99.9/max and the counts > 1 ms / > 5 ms, in and out of discovery chunks.
+ *   Usage: disc_unit_bench_lb CELLS [seconds=20] [unit_ms=27] [units_per_call=280]       (CELLS = 0: RT only)
+ * Build: nvcc -O2 -std=c++17 -arch=native -DBENCH_SWEEP|-DBENCH_SEG|-DBENCH_LB -I<repo>/openair1/PHY/NR_UE_TRANSPORT -I<repo>/openair1/PHY -I<repo>/openair1 -I<repo>/common/utils -I<repo>
+*       -o disc_unit_bench_{sweep,seg,lb} disc_unit_bench.cu [sweep: also .../nr_csirs_disc_sweep.c; seg, lb: -lcufft; lb: gcc -c .../TOOLS/nr_gpu_budget.c -o nr_gpu_budget.o, add it    Run: disc_unit_bench_sweep [reps] */
 #ifdef BENCH_SWEEP
 #include "nr_csirs_disc_gpu_sweep.cu"
 #else
 #include "nr_csirs_disc_gpu.cu"
+#endif
+#ifdef BENCH_LB
+#define main launchblock_bench_main
+#include "launchblock_bench.cu"
+#undef main
 #endif
 #include <chrono>
 #include <thread>
@@ -23,6 +33,14 @@ int nr_disc_fp_cluster(const nr_csirs_disc_ring_t *, const nr_csirs_disc_fp_cfg_
 #endif
 
 static bool g_quick = false; /* argv[2] = "quick": no load modes */
+#ifdef BENCH_LB
+#ifdef BENCH_NOTICKET
+#include "noticket.h" /* the contrast run: the discovery chunks of the cells are not serialised */
+#endif
+static thread_local int t_cell = 0;
+extern "C" int nr_gpu_module_ready(void) { return 1; } /* a device is present (nr_gpu_module.c in the receiver) */
+extern "C" int nr_gpu_memstat_host_cell(void) { return t_cell; } /* the bench's cell of the calling thread (the production modules ask the platform library) */
+#endif
 #ifdef BENCH_SWEEP
 #define MODES (g_quick ? std::vector<int>{0} : std::vector<int>{0, 1, 2, 3, 4})
 #else
@@ -92,7 +110,62 @@ template<class F> static void report(const char *site, const char *what, int rep
   }
 }
 
-#ifdef BENCH_SWEEP
+#if defined(BENCH_LB)
+int main(int argc, char **argv)
+{
+  const int cells = argc > 1 ? atoi(argv[1]) : 2;
+  const double secs = argc > 2 ? atof(argv[2]) : 20;
+  const int unit_ms = argc > 3 ? atoi(argv[3]) : 27;
+  const long units = argc > 4 ? atol(argv[4]) : 280;
+  CK(cudaSetDevice(0)); CK(cudaFree(0));
+  const int NR = 5; Rt rt[NR];
+  for (int i = 0; i < NR; i++) {
+    if (!nr_gpu_green_stream(&rt[i].s, 0, true, i == NR - 1 ? NR_GREEN_UL_IDX : 0)) CK(cudaStreamCreateWithFlags(&rt[i].s, cudaStreamNonBlocking));
+    CK(cudaMalloc(&rt[i].d, 4096)); CK(cudaHostAlloc(&rt[i].hp, 4096, cudaHostAllocPortable));
+    if (!build_cond(rt[i].s, rt[i].d, rt[i].hp, true, &rt[i].ge)) { fprintf(stderr, "cond graph failed\n"); return 2; }
+    CK(cudaGraphLaunch(rt[i].ge, rt[i].s)); CK(cudaStreamSynchronize(rt[i].s));
+  }
+  struct CellRun { std::vector<double> call_ms; std::vector<std::pair<double, double>> chunk; uint64_t chunks = 0; };
+  std::vector<CellRun> cr(cells > 0 ? cells : 1);
+  std::atomic<int> ready{0};
+  std::vector<std::thread> th, dth;
+  for (int c = 0; c < cells; c++) dth.emplace_back([&, c] {
+    t_cell = c; CK(cudaSetDevice(0));
+    if (!ws().ds.init()) { fprintf(stderr, "cell %d stream init failed\n", c); exit(2); }
+    ++ready;
+    NrGpuChunker &ck = ws().c_seg; /* the production chunker of the cell's detector */
+    const long long ns = (long long)unit_ms * 1000000;
+    while (!stop) {
+      const double t0 = now_us(); const uint64_t k0 = ck.chunks;
+      cudaError_t e = disc_chunks(ck, units, [&](long, long k) { const double a = now_us(); spin<<<(unsigned)k, 32, 0, disc_stream()>>>(ns, nullptr); cr[c].chunk.push_back({a, 0}); });
+      (void)e;
+      cr[c].call_ms.push_back((now_us() - t0) / 1000); cr[c].chunks += ck.chunks - k0;
+    }
+  });
+  while (ready < cells) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  for (int i = 0; i < NR; i++) th.emplace_back(rt_thread, &rt[i]);
+  std::this_thread::sleep_for(std::chrono::duration<double>(secs));
+  stop = true;
+  for (auto &t : th) t.join();
+  for (auto &t : dth) t.join();
+  /* a chunk window = [launch time, next chunk launch of the same cell): conservative upper bound of its busy period (the drain ends it) */
+  std::vector<std::pair<double, double>> kwin;
+  for (auto &c : cr) for (size_t i = 0; i < c.chunk.size(); i++) kwin.push_back({c.chunk[i].first, i + 1 < c.chunk.size() ? c.chunk[i + 1].first : c.chunk[i].first + unit_ms * 1000.0});
+  std::vector<float> call, span, callin; size_t over1 = 0, over5 = 0, over5in = 0, sover5 = 0;
+  for (int i = 0; i < NR; i++) for (size_t j = 0; j < rt[i].call.size(); j++) {
+    const float v = rt[i].call[j]; call.push_back(v); span.push_back(rt[i].span[j]);
+    bool in = false; for (auto &w : kwin) if (rt[i].at[j] >= w.first && rt[i].at[j] <= w.second) { in = true; break; }
+    if (in) callin.push_back(v);
+    over1 += v > 1000; over5 += v > 5000; over5in += (v > 5000 && in); sover5 += rt[i].span[j] > 5000;
+  }
+  printf("LB cells=%d ticket=%s unit_ms=%d units/call=%ld secs=%.0f\n", cells, nr_gpu_disc_ticket_acquire_bulk ? "yes" : "no", unit_ms, units, secs);
+  pct("launch", call); pct("launch_in", callin); pct("launch>done", span);
+  printf("  RT launch calls > 1 ms: %zu of %zu ; > 5 ms: %zu (%zu inside a discovery chunk window) ; launch->done > 5 ms: %zu\n", over1, call.size(), over5, over5in, sover5);
+  for (int c = 0; c < cells; c++) { std::vector<double> m = cr[c].call_ms; if (m.empty()) continue; auto r = med(m);
+    printf("  cell %d: calls %zu chunks %lu call median %.1f ms p90 %.1f max %.1f\n", c, m.size(), (unsigned long)cr[c].chunks, r[0], r[1], r[2]); }
+  return 0;
+}
+#elif defined(BENCH_SWEEP)
 int main(int argc, char **argv)
 {
   g_quick = argc > 2 && !strcmp(argv[2], "quick");
@@ -179,7 +252,7 @@ int main(int argc, char **argv)
   g_quick = argc > 2 && !strcmp(argv[2], "quick");
   const int reps = argc > 1 ? atoi(argv[1]) : 15, RB = 217, TILES = (RB + 15) / 16, NR = 14 * 12 * RB + 168 * TILES, POOLED = 168 * TILES;
   CK(cudaSetDevice(0));
-  if (!discovery_stream.init()) { fprintf(stderr, "stream init failed\n"); return 2; }
+  if (!ws().ds.init()) { fprintf(stderr, "stream init failed\n"); return 2; }
   lmem_prereserve();
   cudaStream_t s = disc_stream();
   const int NT = 100;

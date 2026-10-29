@@ -50,8 +50,9 @@ static inline long nr_gpu_membudget_fit(size_t share, size_t fixed, size_t per_u
 /* Process-wide state (nr_gpu_platform.c). */
 size_t nr_gpu_membudget_total(void);                          /* B, bytes; SIZE_MAX = unlimited. NR_GPU_MEM_BUDGET_MB overrides free_at_probe (diagnostic, logged) */
 size_t nr_gpu_membudget_committed_total(void);                 /* sum of every module's committed + dynamic bytes (the host budget deducts it on unified memory) */
-size_t nr_gpu_membudget_share(nr_gpu_mem_module_t m);         /* bytes; SIZE_MAX = unlimited */
-void nr_gpu_membudget_commit(nr_gpu_mem_module_t m, size_t bytes, double scale); /* the size the module chose (report, graph remainder); bytes 0 = not ready */
+size_t nr_gpu_membudget_share(nr_gpu_mem_module_t m);         /* bytes; SIZE_MAX = unlimited. The per-cell modules (csirs, pdcch_nid) get share / active cells (G4) */
+void nr_gpu_membudget_commit(nr_gpu_mem_module_t m, size_t bytes, double scale); /* the size the module chose (report, graph remainder); bytes 0 = not ready.
+                                                                                  * G4: csirs / pdcch_nid commit per CELL (the calling thread's) and the module's figure is the sum over cells */
 size_t nr_gpu_membudget_graph_bytes(void);                    /* graph share + (share - committed) of every module that committed less than its share; floor 0 */
 /* On-demand growth (nr_gpu_elastic.h): bytes a module may still take beyond what every module committed = B - sum(committed, uncommitted modules at their share, graph at its
  * actual bytes once committed, else its cap) - sum(dynamic grants). SIZE_MAX = unlimited. */
@@ -63,6 +64,7 @@ size_t nr_gpu_membudget_dyn_bytes(nr_gpu_mem_module_t m);              /* bytes 
 void nr_gpu_membudget_dyn_counts(nr_gpu_mem_module_t m, uint64_t *grows, uint64_t *shrinks, uint64_t *denied);
 int nr_gpu_membudget_format(char *out, size_t n);             /* "budget_mb=.. csirs=<mb>/<scale> ..." for the SENSING: GPU_MEM line */
 void nr_gpu_membudget_test_reset(void);
+void nr_gpu_membudget_test_cells(int n); /* test hook: the active cell count (0 = the host process's nr_cell_count_) */
 #ifdef __cplusplus
 }
 #endif

@@ -535,6 +535,20 @@ void nr_gpu_test_set_probe(int (*probe)(void)) { probe_hook=probe; }
 #endif
 
 /* ---- shared device-memory budget (T6b), see nr_gpu_membudget.h ---- */
+/* G4: the two modules whose device memory is per CELL (one CSI-RS discovery workspace / ring and one nID window per cell) commit per cell: the module's figure is the SUM of the cells'
+ * (the headroom, the SENSING: GPU_MEM line and the unified host deduction see the whole), and each cell sizes itself against share / cells (nr_gpu_membudget_share). The other modules are
+ * process-wide (pass instances, graphs, LDPC pools, TD cb0) and keep one figure. One cell: cell 0, share and figure exactly as before. */
+#define MB_CELLS NR_GPU_MEMSTAT_CELLS
+static int mb_percell(nr_gpu_mem_module_t m) { return m == NR_GPU_MEM_CSIRS || m == NR_GPU_MEM_PDCCH_NID; }
+static int mb_test_cells;
+void nr_gpu_membudget_test_cells(int n) { mb_test_cells = n; }
+static int mb_cell_count(void)
+{
+  if (mb_test_cells) return mb_test_cells;
+  const int *p = (const int *)dlsym(RTLD_DEFAULT, "nr_cell_count_"); /* the host process (common/utils/nr_cell.c); absent = one cell */
+  return p && *p > 1 ? *p : 1;
+}
+static struct { size_t cbytes[NR_GPU_MEM_N][MB_CELLS]; unsigned char ccommitted[NR_GPU_MEM_N][MB_CELLS]; } mbc;
 static struct { size_t bytes[NR_GPU_MEM_N]; double scale[NR_GPU_MEM_N]; int committed[NR_GPU_MEM_N]; int logged;
                size_t dyn[NR_GPU_MEM_N]; uint64_t grows[NR_GPU_MEM_N], shrinks[NR_GPU_MEM_N], denied[NR_GPU_MEM_N]; } mb;
 size_t nr_gpu_membudget_total(void)
@@ -562,13 +576,24 @@ size_t nr_gpu_membudget_committed_total(void)
 }
 size_t nr_gpu_membudget_share(nr_gpu_mem_module_t m)
 {
-  return m < NR_GPU_MEM_N ? nr_gpu_membudget_share_of(nr_gpu_membudget_total(), m) : 0;
+  if (m >= NR_GPU_MEM_N) return 0;
+  const size_t sh = nr_gpu_membudget_share_of(nr_gpu_membudget_total(), m);
+  const int n = mb_percell(m) ? mb_cell_count() : 1;
+  return sh == SIZE_MAX || n <= 1 ? sh : sh / (size_t)n; /* per-cell modules: an equal part per active cell */
 }
 void nr_gpu_membudget_commit(nr_gpu_mem_module_t m, size_t bytes, double scale)
 {
   if (m >= NR_GPU_MEM_N) return;
+  const int cell = mb_percell(m) ? nr_gpu_memstat_host_cell() : 0;
   pthread_mutex_lock(&mu);
-  mb.bytes[m] = bytes; mb.scale[m] = scale; mb.committed[m] = 1;
+  if (mb_percell(m) && cell >= 0 && cell < MB_CELLS) {
+    mbc.cbytes[m][cell] = bytes; mbc.ccommitted[m][cell] = 1;
+    size_t sum = 0;
+    for (int c = 0; c < MB_CELLS; c++) sum += mbc.cbytes[m][c];
+    mb.bytes[m] = sum;
+  } else
+    mb.bytes[m] = bytes;
+  mb.scale[m] = scale; mb.committed[m] = 1;
   pthread_mutex_unlock(&mu);
 }
 size_t nr_gpu_membudget_graph_bytes(void)
@@ -682,5 +707,7 @@ void nr_gpu_membudget_test_reset(void)
 {
   pthread_mutex_lock(&mu);
   memset(&mb, 0, sizeof(mb));
+  memset(&mbc, 0, sizeof(mbc));
+  mb_test_cells = 0;
   pthread_mutex_unlock(&mu);
 }

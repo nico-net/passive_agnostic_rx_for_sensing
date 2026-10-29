@@ -8,7 +8,10 @@
  * (host wait) between chunks: the GPU is idle for a moment, the pending body launch goes through. The chunk size is adapted per call site from the
  * measured GPU run time of the previous chunk (events on the stream: nr_gpu_wait.h NrGpuSpan), never its host wall time: on air every chunk carried a fixed 1-1.5 ms of
  * launch / wake-up / scheduling latency under real-time load (ab_p*, ab_g* 2026-10-21), more than the target, so a wall-time rule kept chunks at 2 units and a
- * 1-s call became 10-19 s. A call is also capped at NR_GPU_CHUNK_MAX_CALLS chunks. Header-only, no CUDA dependency. */
+ * 1-s call became 10-19 s. A call is also capped at NR_GPU_CHUNK_MAX_CALLS chunks. Header-only, no CUDA dependency.
+ * G4 (several cells in one process): every chunk, with its drain, holds the process-wide discovery ticket (NrGpuDiscTicket below), so the chunks of all cells
+ * are serialised on the device: at most one discovery chunk (about NR_GPU_CHUNK_TARGET_US, floor 32 units) is ever in flight and the device is idle between
+ * any two, for the pending body launch of the real-time graphs. */
 #include <stdint.h>
 #include <chrono>
 #include <cstdio>
@@ -18,6 +21,34 @@
 #define NR_GPU_ADMIT_MAX_US 100
 #define NR_GPU_CHUNK_MAX_CALLS 64 /* fail-safe: chunks per call; beyond it the rest runs in the remaining budget of chunks, whatever their length */
 extern "C" int nr_gpu_budget_rt_active(void) __attribute__((weak)); /* the executable's nr_gpu_budget.c; weak: the discovery modules are dlopen'd */
+/* G4: the process-wide discovery ticket (nr_gpu_budget.c, nr_gpu_budget.h). Weak like the above: a bench or test that does not link the platform library runs
+ * without it (one caller, nothing to serialise). Every discovery GPU slice of every cell holds it: one kernel chunk with its drain (bulk), or one copy / launch /
+ * FFT with its drain (short). The cell is the calling thread's (the discovery worker of a cell is bound to it: nr_gpu_memstat_host_cell). */
+extern "C" void nr_gpu_disc_ticket_acquire(int) __attribute__((weak));
+extern "C" void nr_gpu_disc_ticket_acquire_bulk(int) __attribute__((weak));
+extern "C" void nr_gpu_disc_ticket_release(void) __attribute__((weak));
+extern "C" int nr_gpu_memstat_host_cell(void) __attribute__((weak));
+#define NR_GPU_DISC_CELLS 16 /* = NR_CELL_MAX = NR_GPU_MEMSTAT_CELLS */
+static inline int nr_gpu_disc_cell()
+{
+  const int c = nr_gpu_memstat_host_cell ? nr_gpu_memstat_host_cell() : 0;
+  return c >= 0 && c < NR_GPU_DISC_CELLS ? c : 0;
+}
+/* RAII: holds the ticket for the scope (recursive per thread: an inner scope of the holder only counts). Without the platform library it does nothing. */
+struct NrGpuDiscTicket {
+  bool held = false;
+  explicit NrGpuDiscTicket(bool bulk = false)
+  {
+    if (bulk ? nr_gpu_disc_ticket_acquire_bulk != nullptr : nr_gpu_disc_ticket_acquire != nullptr) {
+      (bulk ? nr_gpu_disc_ticket_acquire_bulk : nr_gpu_disc_ticket_acquire)(nr_gpu_disc_cell());
+      held = true;
+    }
+  }
+  void drop() { if (held && nr_gpu_disc_ticket_release) nr_gpu_disc_ticket_release(); held = false; }
+  ~NrGpuDiscTicket() { drop(); }
+  NrGpuDiscTicket(const NrGpuDiscTicket &) = delete;
+  NrGpuDiscTicket &operator=(const NrGpuDiscTicket &) = delete;
+};
 
 struct NrGpuChunker {
   long per = 1;           /* units (blocks, slots, ...) per chunk, adapted */
@@ -59,13 +90,18 @@ static inline int nr_gpu_chunked(NrGpuChunker &c, long total, Launch launch, Wai
 {
   const uint64_t call_t0 = now();
   const uint64_t chunks0 = c.chunks;
-  uint64_t gpu_sum = 0;
-  struct SlowCall { NrGpuChunker &c; uint64_t t0, k0; long total; Now now; uint64_t &gpu_sum; ~SlowCall() {
-    const uint64_t us = now() - t0;
+  uint64_t gpu_sum = 0, tk_wait = 0; /* tk_wait: time spent waiting for the discovery ticket (another cell's chunk on the device) */
+  struct SlowCall { NrGpuChunker &c; uint64_t t0, k0; long total; Now now; uint64_t &gpu_sum; uint64_t &tk_wait; ~SlowCall() {
+    /* a wait for the other cells' chunks (G4) is not this call's slowness: counted out when it is over 1 ms (one cell: never, the line is unchanged) */
+    const uint64_t wall = now() - t0, us = tk_wait > 1000 && wall > tk_wait ? wall - tk_wait : wall;
     /* always on: one stderr line per call longer than 200 ms: chunk count, wall time, summed GPU time, last chunk size and GPU time of the slow call sites */
-    if (us > 200000) fprintf(stderr, "[GPU] CHUNK_SLOW site=%s total_units=%ld chunks=%lu wall_us=%lu gpu_us=%lu per_end=%ld last_chunk_gpu_us=%lu\n", c.name, total,
-                             (unsigned long)(c.chunks - k0), (unsigned long)us, (unsigned long)gpu_sum, c.per, (unsigned long)c.gpu_us);
-  } } slow_call{c, call_t0, chunks0, total, now, gpu_sum};
+    if (us > 200000) {
+      fprintf(stderr, "[GPU] CHUNK_SLOW site=%s total_units=%ld chunks=%lu wall_us=%lu gpu_us=%lu per_end=%ld last_chunk_gpu_us=%lu", c.name, total,
+              (unsigned long)(c.chunks - k0), (unsigned long)wall, (unsigned long)gpu_sum, c.per, (unsigned long)c.gpu_us);
+      if (tk_wait > 1000) fprintf(stderr, " ticket_wait_us=%lu", (unsigned long)tk_wait);
+      fputc('\n', stderr);
+    }
+  } } slow_call{c, call_t0, chunks0, total, now, gpu_sum, tk_wait};
   for (long first = 0; first < total;) {
     const long per = c.per > c.min ? c.per : c.min;
     long n = per < total - first ? per : total - first;
@@ -75,6 +111,9 @@ static inline int nr_gpu_chunked(NrGpuChunker &c, long total, Launch launch, Wai
       const long need = (long)(((uint64_t)(total - first) + left - 1) / left);
       if (need > n) n = need < total - first ? need : total - first;
     }
+    const uint64_t tk_t0 = now();
+    NrGpuDiscTicket ticket(true); /* G4: one discovery chunk on the device at a time, whatever the number of cells; released after the drain below */
+    tk_wait += now() - tk_t0;
     admit();
     const uint64_t t0 = now();
     int rc = launch(first, n);
