@@ -407,6 +407,42 @@ static int test_demand(void)
   return 0;
 }
 
+
+/* mpci B6: a backend other than the CPU one (the GPU backend registers its one-token CPU part itself) also gives the reserved token back while no entry runs, and takes it
+ * again on the first resume. The fake backend is the CPU backend under another address, so the channelizer takes the non-CPU branch of iq_chan_start. */
+static iq_chan_backend_t g_fake_gpu_be;
+static int test_demand_gpu_style(void)
+{
+  CHECK(iq_chan_demand_for(1, 2, 2, 1) == 1 && iq_chan_demand_for(1, 2, 1, 1) == 1 && iq_chan_demand_for(1, 2, 0, 1) == 0 && iq_chan_demand_for(1, 0, 1, 1) == 1, "pure rule, one token");
+  static const iq_chan_lease_t lease = {.acquire = l_acq, .release = l_rel, .demand = l_dem, .max_tokens = l_max};
+  iq_chan_set_lease(&lease);
+  g_fake_gpu_be = iq_chan_backend_cpu;
+  g_fake_gpu_be.name = "fake-gpu";
+  g_demand = 0;
+  g_demand_calls = 0;
+  fake_t fk = {.pace_us = 250};
+  iq_feed_cfg_t cfg = {.read = fake_read, .read_ctx = &fk, .nch = NCH, .rate = RATE, .centre_hz = BASE, .name = "demgpu", .wide_capacity = 1 << 22, .block = BLOCK,
+                       .backend = &g_fake_gpu_be, .radio_id = "fake"};
+  iq_feed_t *f = iq_feed_create(&cfg);
+  CHECK(f, "feed");
+  int e[2];
+  for (int k = 0; k < 2; ++k) e[k] = iq_feed_cell_add(f, k == 0 ? "g0" : "g1", BASE + 10e6 * k, 4, iq_ddc_cell_passband(51, 30e3, CELL_RATE, 0), 0);
+  CHECK(e[0] >= 0 && e[1] >= 0, "entries");
+  CHECK(iq_feed_start(f, -1, 0, NULL, 0) == 0, "feed start");
+  CHECK(iq_chan_demand(iq_feed_chan(f)) == 1, "one token while entries run: %d", iq_chan_demand(iq_feed_chan(f)));
+  iq_feed_cell_pause(f, e[1]);
+  CHECK(iq_chan_demand(iq_feed_chan(f)) == 1, "one entry still runs");
+  iq_feed_cell_pause(f, e[0]);
+  CHECK(iq_chan_demand(iq_feed_chan(f)) == 0 && g_demand == 0 && g_demand_calls >= 1, "every entry paused: the token goes back to the cells (calls %d)", g_demand_calls);
+  iq_feed_cell_resume(f, e[1]);
+  CHECK(iq_chan_demand(iq_feed_chan(f)) == 1 && g_demand == 1, "first resume takes it again: %d", g_demand);
+  iq_feed_stop(f);
+  iq_feed_destroy(f);
+  iq_chan_set_lease(NULL);
+  printf("  CHAN demand (non-CPU backend) 1 -> 0 -> 1\n");
+  return 0;
+}
+
 /* ---------------------------------------------------------------- per-cell quiesce registry */
 static int q_n[2], r_n[2];
 static void q1(void *c, int cell) { (void)c; q_n[0] += 1 + cell * 10; }
@@ -425,7 +461,8 @@ static int test_hooks(void)
 int main(int argc, char **argv)
 {
   struct { const char *n; int (*f)(void); } t[] = {{"state machine", test_state_machine}, {"replan accept/refuse", test_replan}, {"real feed", test_real_feed},
-                                                    {"CHAN demand", test_demand}, {"cell hooks", test_hooks}};
+                                                    {"CHAN demand", test_demand}, {"CHAN demand non-CPU backend", test_demand_gpu_style},
+                                                    {"cell hooks", test_hooks}};
   for (unsigned i = 0; i < sizeof(t) / sizeof(t[0]); ++i) {
     printf("test_iq_live: %s\n", t[i].n);
     if (t[i].f()) return 1;

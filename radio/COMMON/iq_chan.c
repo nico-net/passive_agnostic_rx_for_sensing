@@ -601,7 +601,7 @@ static void free_cell_buffers(iq_chan_t *c, cell_t *x)
 /* MPCI-LIVE (CHANPOOL open item: "demand is not recomputed when cells pause/resume"): the CHAN demand registered at start is k threads for the entries that ran then. With
  * fewer running entries the channelizer needs proportionally fewer reserved tokens (pure rule: ceil(k0 x running / running at start), at least 1 while one entry runs, 0 when
  * every entry is paused, never more than the threads that exist); the pool then gives the tokens back to the other classes. Applied on the caller's thread of
- * add / remove / pause / resume (never inside a block). Only the CPU backend registered a demand (demand_k0 > 0); a GPU backend keeps its own. */
+ * add / remove / pause / resume (never inside a block). The CPU backend registers k threads, a GPU backend its one-token CPU part (B6: k0 = 1, so the reservation is released while no entry runs). */
 int iq_chan_demand_for(int k0, int n0, int running, int threads)
 {
   if (k0 <= 0 || running <= 0) return 0;
@@ -970,6 +970,10 @@ int iq_chan_start(iq_chan_t *c, const int *cpus, int ncpus)
   if (c->be == &iq_chan_backend_cpu) {
     iq_chan_lease_set_demand(k); /* the pool takes k tokens off the share of the other classes (a GPU backend registers its own CPU-part demand) */
     c->demand_k0 = k; c->demand_n0 = (int)l.n_cells; c->demand_now = k;
+  } else {
+    /* mpci B6: a GPU backend registers its one-token CPU part itself (at its first block). The reservation still follows the running entries: with every entry
+     * paused (all cells retired) nothing is channelized and the reserved token goes back to the cells; the first resume takes it again (demand_recompute). */
+    c->demand_k0 = 1; c->demand_n0 = (int)l.n_cells; c->demand_now = 1;
   }
   const int rc = iq_chan_start_k(c, cpus, ncpus, k);
   if (rc) c->demand_k0 = 0;

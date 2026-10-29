@@ -7,6 +7,19 @@
 
 #define WWORDS 3 /* 12 bits per RB x NR_DMRS_SCAN_CHUNK RBs = 192 bits */
 
+/* mpci B6: a full scan runs under one DISC lease of the core pool (the dmrsScan worker of nr_pdsch_passive_queue.c) and one chunk of it is 65536 identities x 2 n_SCID,
+ * 10-65 ms of one core [MEASURED, DGX OTA 2026-10-28: DMRS_SCAN full mean 30-81 ms]. Held in one piece it keeps a token from the urgent classes for that long (no
+ * preemption). The identity loop therefore offers the token to a more urgent waiter every `step` identities: nr_pool_site_float_yield() returns the lease and takes
+ * one again only when a SCAN / DECODE / RETRY waiter exists, and is a no-op when there is no merged pool (it is resolved weakly: a binary without the core pool
+ * scans in one piece, as before). The slice is a fixed amount of work, not of time: step identities x chunk RBs = 4096 identity-RBs, 0.2-0.3 ms of one core
+ * (the chunk size of the pool bench, CORE-POOL-20261020), so a waiter is served within one slice whatever the chunk width. The result does not depend on it. */
+extern bool nr_pool_site_float_yield(void) __attribute__((weak));
+#define DMRS_SCAN_SLICE_WORK 4096
+static inline void scan_slice_point(void)
+{
+  if (nr_pool_site_float_yield) (void)nr_pool_site_float_yield();
+}
+
 static uint32_t c_init_of(int symbols_per_slot, int slot, int symbol, int nid, int nscid)
 {
   const uint64_t t = (((uint64_t)symbols_per_slot * slot + symbol + 1) * (((uint64_t)nid << 1) + 1)) << 17;
@@ -75,7 +88,9 @@ bool nr_dmrs_scan_chunk(const int16_t *const *rx, int nant, int N, int fco, int 
   }
   float best = -1, best2 = -1; /* squared |S| */
   int bnid = -1, bns = 0;
+  const int step = DMRS_SCAN_SLICE_WORK / nrb > 16 ? DMRS_SCAN_SLICE_WORK / nrb : 16;
   for (int nid = 0; nid < 65536; nid++) {
+    if (nid && nid % step == 0) scan_slice_point();
     float nid_best = -1;
     int nid_ns = 0;
     for (int ns = 0; ns < 2; ns++) {
@@ -167,11 +182,13 @@ int nr_dmrs_scan_slot(const int16_t *const *rx, int nant, int N, int fco, int n_
   chunk_t ch[64];
   const int nch = chunks_of(rx, nant, N, fco, n_rb, ch, 64);
   int nh = 0;
-  for (int c = 0; c < nch && c < max_chunks && nh < max_hits; c++)
+  for (int c = 0; c < nch && c < max_chunks && nh < max_hits; c++) {
+    scan_slice_point();
     if (nr_dmrs_scan_chunk(rx, nant, N, fco, slot, symbol, symbols_per_slot, ch[c].rb0, ch[c].nrb, &hits[nh])) {
       pool_add(hits[nh].nid, hits[nh].nscid);
       nh++;
     }
+  }
   return nh;
 }
 
@@ -190,6 +207,7 @@ int nr_dmrs_scan_slot_pool(const int16_t *const *rx, int nant, int N, int fco, i
   const int nch = chunks_of(rx, nant, N, fco, n_rb, ch, 64);
   int nh = 0;
   for (int c = 0; c < nch && c < max_chunks && nh < max_hits; c++) {
+    scan_slice_point();
     uint16_t crb[NR_DMRS_SCAN_CHUNK];
     for (int q = 0; q < ch[c].nrb; q++) crb[q] = (uint16_t)(ch[c].rb0 + q);
     float b1 = -1, b2 = -1;

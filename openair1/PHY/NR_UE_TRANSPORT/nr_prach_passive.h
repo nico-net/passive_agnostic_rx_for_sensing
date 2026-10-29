@@ -2,6 +2,7 @@
 #ifndef NR_PRACH_PASSIVE_H
 #define NR_PRACH_PASSIVE_H
 
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include "PHY/defs_nr_UE.h"
@@ -24,6 +25,8 @@ void nr_prach_passive_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
  * created bound to it. nr_prach_passive_cell_prealloc(cell) runs once per admitted cell before the RX fence (its large buffers; no-op when the PRACH
  * source is not configured). */
 void nr_prach_passive_cell_prealloc(int cell);
+/* Bytes nr_prach_passive_cell_prealloc allocates per cell when the PRACH source is configured (a build constant; the admission model books it per cell). */
+size_t nr_prach_passive_cell_heap_bytes(void);
 void nr_prach_passive_cell_pause(int cell, bool pause); /* retired cell: process() returns at once; no allocation */
 void nr_prach_passive_start(void); /* call before UE slot threads start */
 void nr_prach_passive_rar(uint16_t ra_rnti, uint8_t rapid, uint16_t ta, uint64_t abs_slot);

@@ -439,6 +439,28 @@ if(ENABLE_TESTS)
 endif()
 # ---- end CHANPOOL ----
 
+# ---- B6 ----
+# Core pool against the demand of N cells: promotion / shed value order (pool + the admission gate nr_admit.c, which reaches the pool through weak symbols).
+if(ENABLE_TESTS)
+  add_executable(test_nr_core_pool_budget
+    ${CMAKE_SOURCE_DIR}/common/utils/tests/test_nr_core_pool_budget.cpp
+    ${CMAKE_SOURCE_DIR}/common/utils/nr_core_pool.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS/nr_admit.c)
+  target_include_directories(test_nr_core_pool_budget PRIVATE ${CMAKE_SOURCE_DIR}/common/utils ${CMAKE_SOURCE_DIR}/openair1/PHY/TOOLS)
+  target_link_libraries(test_nr_core_pool_budget PRIVATE GTest::gtest GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_core_pool_budget)
+  add_test(NAME test_nr_core_pool_budget COMMAND test_nr_core_pool_budget)
+  add_executable(test_nr_dmrs_scan_slice
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_dmrs_scan_slice_test.cc
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c
+    ${CMAKE_SOURCE_DIR}/common/utils/nr_core_pool.c)
+  target_include_directories(test_nr_dmrs_scan_slice PRIVATE ${CMAKE_SOURCE_DIR}/common/utils ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_dmrs_scan_slice PRIVATE GTest::gtest GTest::gtest_main m pthread)
+  add_dependencies(tests test_nr_dmrs_scan_slice)
+  add_test(NAME test_nr_dmrs_scan_slice COMMAND test_nr_dmrs_scan_slice)
+endif()
+# ---- end B6 ----
+
 # ---- DBG3 ----
 # GPU exact FEP self-check confirmation (a mismatch disables the path only when it repeats on input that stays put): pure header test.
 if(ENABLE_TESTS)

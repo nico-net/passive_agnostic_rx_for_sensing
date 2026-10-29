@@ -52,6 +52,8 @@ enum { NR_POOL_SCAN = 0, NR_POOL_DECODE, NR_POOL_RETRY, NR_POOL_DISC, NR_POOL_HO
 #define NR_POOL_MAX_CELLS 16
 #define NR_POOL_CLS_UL NR_POOL_NPRIO
 #define NR_POOL_NCLS (NR_POOL_NPRIO + 1)
+/* B6 value order of the work that can be shed under overload (see the SHED block at the end of this header). */
+#define NR_POOL_SHED_TIERS 3
 #define NR_POOL_WAIT_BINS 24 /* log2(us) histogram of the lease wait: bin b = [2^(b-1), 2^b) us, bin 0 = < 1 us */
 
 typedef struct {
@@ -64,6 +66,7 @@ typedef struct {
   uint64_t wait_max_ns[NR_POOL_NPRIO], hold_ns[NR_POOL_NPRIO];
   uint64_t wait_hist[NR_POOL_NPRIO][NR_POOL_WAIT_BINS];
   uint64_t busy_ns; /* sum of lease hold time over all tokens */
+  uint64_t shed[NR_POOL_SHED_TIERS]; /* B6: background jobs skipped by the admission gate per value tier (not in the CORE_POOL line; ADMIT line) */
   /* per cell (B1): all classes together */
   uint64_t leases_cell[NR_POOL_MAX_CELLS], waited_cell[NR_POOL_MAX_CELLS], wait_max_ns_cell[NR_POOL_MAX_CELLS], hold_ns_cell[NR_POOL_MAX_CELLS];
   uint64_t wait_hist_cell[NR_POOL_MAX_CELLS][NR_POOL_WAIT_BINS];
@@ -187,6 +190,31 @@ int nr_pool_site_chan_acquire(int blocking);           /* core, or -1 (no pool /
 void nr_pool_site_chan_release(void);
 void nr_pool_site_chan_set_demand(int tokens);
 int nr_pool_site_chan_max(void);                       /* chan_cap of the site pool, 0 when none */
+
+/* SHED (mpci B6, value order under overload). The pool never drops a job (no preemption); what it can do is (1) not promote background waiters into the
+ * tokens the urgent classes need (promo_blocked in nr_core_pool.c: DISC / HOUSE age promotion needs >= NR_POOL_PROMO_MIN_TOKENS tokens per active cell) and
+ * (2) tell the background producers that the pool is saturated, so they skip a job the next one supersedes instead of queueing it: nr_pool_shed_tiers().
+ * The value order, from what each consumer already knows (the FLOAT-LANE-POOL inventory: its latency sensitivity, whether it is speculative, whether a
+ * skipped job loses data), lowest value first:
+ *   tier 0  housekeeping: UL background discovery (HOUSE; no consumer waits for it)
+ *   tier 1  CSI-RS discovery, DM-RS identity verifier (DISC; drop / defer is built into both, nothing decodes from them)
+ *   tier 2  anonymous DCI search, PDCCH nID acquisition sweep (DISC; speculative / re-run every 250 ms in maintenance)
+ * Not shed, ever: decode of a found grant (DECODE), retry (RETRY), the PDCCH scan (SCAN: it is the discovery of grants, and its own queue drops the oldest
+ * occasion), and the decode-gating helpers of DISC (DM-RS scan, USS hash, solver probes): they decide whether a grant can be decoded at all, and PDSCH
+ * CRC is never traded for latency (the payload feeds sensing). Shedding is on only while the pool serves >= 2 active cells and the urgent classes are
+ * waiting with no free token; one cell keeps the behaviour of before.
+ * nr_pool_shed_tiers_n: pure. urgent = waiters in SCAN + DECODE + RETRY, free = tokens free now (CHAN's idle reserve excluded), active = active cells.
+ * Returns k: the tiers 0..k-1 are shed (k = min(tiers, urgent waiters) when free == 0 and active >= 2, else 0). */
+int nr_pool_shed_tiers_n(int urgent, int free_tokens, int active);
+bool nr_pool_promo_allowed_n(int tokens_eff, int active); /* pure, see nr_core_pool.c */
+int nr_pool_shed_tiers(nr_pool_t *);
+void nr_pool_shed_note(nr_pool_t *, int tier);   /* counts one skipped job in stats.shed[tier] */
+int nr_pool_active_cells(nr_pool_t *);           /* cells with a lease / waiter now or within the last 100 ms (>= 1) */
+/* Site pool wrappers: 0 / no-op when the site pool was never built (they never build it) or is a single-cell pool. */
+int nr_pool_site_shed_tiers(void);
+void nr_pool_site_shed_note(int tier);
+int nr_pool_site_active_cells(void);                 /* 1 when no site pool */
+void nr_pool_site_shed_counts(uint64_t out[NR_POOL_SHED_TIERS]);
 #ifdef __cplusplus
 }
 #endif

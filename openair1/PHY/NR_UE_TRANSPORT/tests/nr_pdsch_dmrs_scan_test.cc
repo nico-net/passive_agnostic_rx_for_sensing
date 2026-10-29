@@ -46,6 +46,10 @@ std::vector<std::vector<int16_t>> noise_grid(std::mt19937 &rng, double sigma)
 }
 }  // namespace
 
+/* mpci B6: the scan offers its core-pool token between slices of work (the library resolves nr_pool_site_float_yield weakly; this strong definition counts the offers) */
+static unsigned g_yield_calls;
+extern "C" bool nr_pool_site_float_yield(void) { g_yield_calls++; return false; }
+
 TEST(PdschDmrsScan, GoldRefFirstBits)
 {
   /* c_init = 0: x2 = 0, c(n) = x1(n + 1600); x1 from x1(0) = 1 is periodic with a fixed, nonzero window */
@@ -365,4 +369,36 @@ TEST(ScanCost2, FlagSemantics)
 {
   /* the umbrella is read once per process: only check the accessor is consistent and pure */
   EXPECT_EQ(nr_scan2_on(NR_SCAN2_UL), nr_scan2_on(NR_SCAN2_UL));
+}
+
+/* B6: a full-scan chunk is cut into slices of a fixed amount of work (4096 identity-RBs, 0.2-0.3 ms of one core), so a more urgent waiter of the core pool is served
+ * within a slice whatever the chunk width; the result does not depend on the slicing. */
+TEST(PdschDmrsScan, ChunkOffersItsTokenEverySliceOfWork)
+{
+  nr_dmrs_scan_reset();
+  std::mt19937 rng(11);
+  auto g = noise_grid(rng, 20);
+  plant(g, 1677, 0, 160, 16, rng, 400);
+  plant(g, 272, 0, 8, 8, rng, 400);
+  std::vector<const int16_t *> rx;
+  for (auto &a : g) rx.push_back(a.data());
+  const struct { int rb0, nrb, expect; } e[] = {{160, 16, 255}, {8, 8, 127}, {8, 4, 63}, {8, 2, 31}}; /* 65536 / (4096 / nrb) - 1 offers inside the identity loop */
+  for (auto &x : e) {
+    nr_dmrs_scan_hit_t h;
+    g_yield_calls = 0;
+    const bool hit = nr_dmrs_scan_chunk(rx.data(), NANT, N, FCO, SLOT, SYM, 14, x.rb0, x.nrb, &h);
+    EXPECT_EQ(g_yield_calls, (unsigned)x.expect) << "nrb " << x.nrb;
+    if (x.nrb == 16) { EXPECT_TRUE(hit); EXPECT_EQ(h.nid, 1677); }
+    if (x.nrb == 8) { EXPECT_TRUE(hit); EXPECT_EQ(h.nid, 272); }
+  }
+  /* slot scan: one offer before each chunk, plus the slices; the hits are those of an unsliced scan */
+  nr_dmrs_scan_hit_t hits[NR_DMRS_SCAN_MAX_HITS];
+  g_yield_calls = 0;
+  const int n = nr_dmrs_scan_slot(rx.data(), NANT, N, FCO, NRB, SLOT, SYM, 14, 6, hits, NR_DMRS_SCAN_MAX_HITS);
+  ASSERT_EQ(n, 2);
+  EXPECT_GE(g_yield_calls, (1u + 255u) + (1u + 127u)) << "an offer before each chunk and the slices of each (the 16-RB and the 8-RB chunk)";
+  bool a = false, b = false;
+  for (int i = 0; i < n; i++) { a |= hits[i].nid == 1677; b |= hits[i].nid == 272; }
+  EXPECT_TRUE(a);
+  EXPECT_TRUE(b);
 }

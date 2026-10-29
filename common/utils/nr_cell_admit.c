@@ -78,10 +78,22 @@ static void geom_of(const nr_cell_desc_t *c, geom_t *g)
 
 /* ---- host module sizes (the receiver's own expressions) ---- */
 static size_t h_iq_set(const geom_t *g) { return 2 * g->spf * sizeof(int16_t) * 2 * (size_t)g->rx; }           /* [CODE nr_pdsch_passive_queue.c:2353 iq_set = 2 x samples_per_frame x sizeof(c16) x nb_antennas_rx] */
-static size_t h_queue(const geom_t *g, const nr_host_caps_t *k)                                                /* [CODE nr_pdsch_passive_queue.c:2355] */
+/* B6: what the cell features added per cell [CODE openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:281-289 nr_sense_open: frame ring + record ring; MEASURED MPCI-CELLFEAT-20261029
+ * "~53 MiB at 4 RX / 106 PRB": 32 x 1617051 + 1024 x 4096 = 53.4 MiB with the defaults]. The record job and length arrays are a few hundred KB more and not booked. */
+size_t nr_cell_sense_ring_bytes(int frames, int max_re, int rec_slots, int ant)
+{
+  if (frames <= 0 || max_re <= 0 || rec_slots <= 0 || ant <= 0) return 0;
+  const size_t stride = 48u + 3 * (size_t)max_re + 3 + 8 * (size_t)ant * (size_t)max_re;
+  return (size_t)frames * stride + (size_t)rec_slots * 4096u;
+}
+static size_t h_extra(const geom_t *g, const nr_host_caps_t *k) /* PRACH heap [CODE nr_prach_passive.c:47-50,120: 4 jobs x 4 RX x 1100000 samples x 4 B = 70.4 MB, a build constant] + sense rings */
+{
+  return k->prach_heap_bytes + nr_cell_sense_ring_bytes(k->sense_frames, k->sense_max_re, k->sense_rec_slots, g->rx);
+}
+static size_t h_queue(const geom_t *g, const nr_host_caps_t *k)                                                /* [CODE nr_pdsch_passive_queue.c:2355] + B6 per-cell feature arenas */
 {
   const size_t cons = k->consumers < 1 ? 1 : (size_t)k->consumers;
-  return cons * ((size_t)g->rx * g->rxdf * 4 + (k->csirs_enabled ? h_iq_set(g) : 0));
+  return cons * ((size_t)g->rx * g->rxdf * 4 + (k->csirs_enabled ? h_iq_set(g) : 0)) + h_extra(g, k);
 }
 static size_t h_csirs_slot(const geom_t *g) { return (size_t)g->rx * H_NSYM * 24 * (size_t)g->n_rb * sizeof(int16_t); } /* [CODE nr_csirs_disc_feed.c:504, TD front end: no snapshot ring] */
 static size_t h_td_bytes(const geom_t *g, int cap)                                                             /* [CODE nr_csirs_disc_td.c:82-88 nr_csirs_disc_td_bytes] */
@@ -140,6 +152,41 @@ static size_t g_graph_cap(size_t free_bytes)
   if (q < G_GRAPH_CAP_MIN_MIB * MIB) q = G_GRAPH_CAP_MIN_MIB * MIB;
   if (q > G_GRAPH_CAP_MAX_MIB * MIB) q = G_GRAPH_CAP_MAX_MIB * MIB;
   return q;
+}
+
+/* ---- B6: core pool vs decode demand ---- */
+/* Erlang C by the Erlang B recursion (stable for any server count). */
+double nr_pool_wait_prob(int servers, double load)
+{
+  if (load <= 0.0) return 0.0;
+  if (servers < 1 || load >= (double)servers) return 1.0;
+  double b = 1.0;
+  for (int i = 1; i <= servers; i++) b = load * b / ((double)i + load * b);
+  const double rho = load / (double)servers;
+  return b / (1.0 - rho * (1.0 - b));
+}
+double nr_cell_pool_demand(const nr_cell_desc_t *c)
+{
+  if (!c || c->placeholder) return 0.0;
+  geom_t g;
+  geom_of(c, &g);
+  const double slots_rel = (double)g.scs / 30.0;
+  const double rel = (double)g.n_rb * (double)g.rx * slots_rel / (217.0 * 4.0); /* anchor: 217 PRB, 4 RX, 30 kHz */
+  return NR_ADMIT_POOL_DEMAND_REF * (rel > 1.0 ? rel : 1.0);
+}
+/* The pool check of the served set `set[0..ns)`: 2 tokens per cell of the pool left after the channelizer's reserve, and the wait probability of the offered load
+ * within NR_ADMIT_POOL_WAIT_TARGET [MEASURED, DGX GB10 solo, mp28m_S1/S2 2026-10-28: decode leases that waited 4.5 % / 6.2 % on 6 tokens]. Model check [INFERRED]: Erlang C of
+ * 6 tokens at 2.7 erlangs (the per-cell total token-time of the 2-cell runs, taken as the solo proxy: solo logs carry no hold time) is 6.5 %; of the 2-cell runs
+ * (7 tokens - 1 CHAN = 6, 5.5 erlangs) 78 % against 64-68 % of the decode / scan leases that waited. Only the essential classes (SCAN, DECODE, RETRY, UL) are offered
+ * load: DISC / HOUSE work is sheddable and runs on what is left. */
+static int pool_eval(const nr_host_caps_t *k, const nr_cell_desc_t *cells, const int *set, int ns, int *eff, double *load, double *wait)
+{
+  *eff = 0; *load = 0; *wait = 0;
+  if (ns < 1 || ns > NR_ADMIT_POOL_K || k->pool_tokens[ns] <= 0) return -1; /* no table for this count: not checked */
+  *eff = k->pool_tokens[ns] - (ns >= 2 && k->chan_tokens > 0 ? k->chan_tokens : 0);
+  for (int i = 0; i < ns; i++) *load += nr_cell_pool_demand(&cells[set[i]]);
+  *wait = nr_pool_wait_prob(*eff, *load);
+  return (*eff >= 2 * ns && *wait <= NR_ADMIT_POOL_WAIT_TARGET) ? 1 : 0;
 }
 
 int nr_cell_cost(const nr_cell_desc_t *c, const nr_host_caps_t *caps, nr_cell_cost_t *out)
@@ -300,8 +347,8 @@ static void eval_set(const nr_host_caps_t *k, const geom_t *G, const int *w, con
 
 const char *nr_admit_reason_name(int r)
 {
-  static const char *const n[] = {"none", "cores", "ram", "gpu_mem", "channelizer", "max", "lost"};
-  return r >= 0 && r <= NR_ADMIT_LOST ? n[r] : "?";
+  static const char *const n[] = {"none", "cores", "ram", "gpu_mem", "channelizer", "max", "lost", "pool"};
+  return r >= 0 && r <= NR_ADMIT_POOL ? n[r] : "?";
 }
 
 int nr_cell_admit_plan(const nr_host_caps_t *caps, const nr_cell_desc_t *cells, int n, nr_admit_plan_t *plan)
@@ -328,6 +375,8 @@ int nr_cell_admit_plan(const nr_host_caps_t *caps, const nr_cell_desc_t *cells, 
   eval_t cur, nxt;
   memset(&cur, 0, sizeof cur);
   double chan_load = 0;
+  int pe = 0;
+  double pl = 0, pw = 0;
   const unsigned req = required_mask(caps);
   for (int oi = 0; oi < no; oi++) {
     const int ci = order[oi];
@@ -348,6 +397,7 @@ int nr_cell_admit_plan(const nr_host_caps_t *caps, const nr_cell_desc_t *cells, 
     } else {
       if (ns >= NR_CELL_MAX) reason = NR_ADMIT_MAX;
       else if (caps->max_cells != NR_ADMIT_UNLIMITED_CELLS && ns >= (caps->max_cells < 1 ? 1 : caps->max_cells)) reason = NR_ADMIT_CORES;
+      else if (pool_eval(caps, cells, set, ns + 1, &pe, &pl, &pw) == 0) reason = NR_ADMIT_POOL;
       else if (G[ci].shifted && caps->chan_budget_msps >= 0 && chan_load + (double)G[ci].fs / 1e6 > caps->chan_budget_msps + 1e-9) reason = NR_ADMIT_CHANNELIZER;
       else {
         /* gpu: the newcomer and every cell that had its device ring keep it, the shared nID context stays ready, the total fits */
@@ -371,6 +421,7 @@ int nr_cell_admit_plan(const nr_host_caps_t *caps, const nr_cell_desc_t *cells, 
     }
     set[ns++] = ci;
     cur = nxt;
+    if (pool_eval(caps, cells, set, ns, &pe, &pl, &pw) >= 0) { plan->pool_checked = 1; plan->pool_tokens_eff = pe; plan->pool_load = pl; plan->pool_wait = pw; }
     if (G[ci].shifted) chan_load += (double)G[ci].fs / 1e6;
     plan->cell[ci].served = 1;
     plan->cell[ci].reason = NR_ADMIT_OK;
@@ -387,6 +438,13 @@ int nr_cell_admit_plan(const nr_host_caps_t *caps, const nr_cell_desc_t *cells, 
     plan->gpu_budget = cur.gB; plan->gpu_used = cur.gused; plan->gpu_shared = cur.gshared; plan->nid_window = cur.nid; plan->gpu_graph_bytes = cur.graph;
   }
   return ns;
+}
+
+int nr_admit_pool_format(const nr_admit_plan_t *p, char *out, size_t n)
+{
+  if (!p->pool_checked) return 0;
+  return snprintf(out, n, "MPCI_ADMIT_POOL cells=%d tokens_eff=%d load=%.2f wait_pct=%.1f target_pct=%.1f", p->n_served, p->pool_tokens_eff, p->pool_load, 100.0 * p->pool_wait,
+                  100.0 * NR_ADMIT_POOL_WAIT_TARGET);
 }
 
 int nr_admit_plan_format(const nr_admit_plan_t *p, char *out, size_t n)

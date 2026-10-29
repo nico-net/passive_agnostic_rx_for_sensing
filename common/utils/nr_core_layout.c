@@ -169,6 +169,25 @@ static void sort_pool(const ctx_t *x, int *v, int m)
   }
 }
 
+/* B6: CPUs of the home set (threads that cannot lease a token: OAI actors, ITTI, timers, CUDA callbacks, the dashboard). One CPU below W = 12, two from there
+ * (FLOAT-LANE-POOL-20261021 section 3 and 5: the unleasable threads need about 0.25-0.4 core in total [MEASURED, DGX replay]); and at least ceil(0.4 x cells), the
+ * upper end of that figure per cell, because each cell has its own actors and callbacks. */
+int nr_cl_home_cpus(int W, int n_cells)
+{
+  const int base = W < 12 ? 1 : 2, need = (2 * (n_cells < 1 ? 1 : n_cells) + 4) / 5;
+  return base > need ? base : need;
+}
+/* B6: pool tokens of n cells on W general CPUs. Each cell needs what the one-cell plan of the host gives it (solo_pool tokens: the pool the single-cell design was
+ * measured healthy with), at most W minus the home set is available, and never more than NR_CL_MAX_POOL. One cell: solo_pool itself. */
+int nr_cl_pool_for_cells(int W, int n_cells, int solo_pool)
+{
+  if (n_cells <= 1) return solo_pool;
+  int np = W - nr_cl_home_cpus(W, n_cells);
+  if (np > n_cells * solo_pool) np = n_cells * solo_pool;
+  if (np > NR_CL_MAX_POOL) np = NR_CL_MAX_POOL;
+  return np < 0 ? 0 : np;
+}
+
 static void build_core(const nr_cl_topo_t *t, const nr_cl_over_t *o, int nc, bool feed, nr_core_layout_t *L)
 {
   nr_cl_over_t none;
@@ -270,7 +289,19 @@ static void build_core(const nr_cl_topo_t *t, const nr_cl_over_t *o, int nc, boo
   L->anchor = count(C, n) >= 3 ? first(Wm, n) : -1;
   L->mode = W >= NR_CL_SEP_MIN_W ? NR_CL_SEP : W > NR_CL_SMALL_MAX_W ? NR_CL_COMPACT : NR_CL_SMALL;
   unsigned char taken[NR_CL_MAX_CPUS] = {0};
-  if (L->mode != NR_CL_SMALL) {
+  /* B6: with several cells the pool is sized by their demand within W (nr_cl_pool_for_cells). The float workers lease the pool (B5), so the dedicated lane of
+   * the SEP / COMPACT rules (5 / 4 CPUs) only needs the home set of the threads that cannot lease; the rest goes to the pool, up to what the cells need.
+   * One cell, or a host where the merged pool would not exist (fewer than NR_POOL_FLOAT_MERGE_MIN_TOKENS tokens), keeps the historical rules byte for byte. */
+  int nh = 1, pool_cap = NR_CL_MAX_POOL;
+  bool by_demand = false;
+  if (nc >= 2 && L->mode != NR_CL_SMALL) {
+    nr_core_layout_t S;
+    build_core(t, o, 1, false, &S); /* the one-cell plan of this host: what a cell needs to run healthy (its pool) */
+    const int old_np = (L->mode == NR_CL_SEP ? W - NR_CL_LANE - NR_CL_SEP_HK : W - (W >= 10 ? 4 : W >= 8 ? 3 : 2) - (L->anchor >= 0 ? 1 : 0));
+    const int np = nr_cl_pool_for_cells(W, nc, S.npool);
+    if (np > old_np && W - nr_cl_home_cpus(W, nc) >= NR_POOL_FLOAT_MERGE_MIN_TOKENS) by_demand = true, nh = nr_cl_home_cpus(W, nc), pool_cap = np;
+  }
+  if (L->mode != NR_CL_SMALL && !by_demand) {
     /* SEP: lane 5 + housekeeping 3 (anchor + leftovers); COMPACT: lane 4/3/2 + housekeeping = anchor */
     const int nlane = L->mode == NR_CL_SEP ? NR_CL_LANE : W >= 10 ? 4 : W >= 8 ? 3 : 2;
     const int nhk = L->mode == NR_CL_SEP ? NR_CL_SEP_HK : (L->anchor >= 0 ? 1 : 0);
@@ -305,7 +336,11 @@ static void build_core(const nr_cl_topo_t *t, const nr_cl_over_t *o, int nc, boo
       pick(&x, Wm, 1, false, false, H, NULL);
     unsigned char cand[NR_CL_MAX_CPUS];
     for (int c = 0; c < n; c++) cand[c] = Wm[c] && !H[c];
-    L->npool = W > 1 ? pick(&x, cand, NR_CL_MAX_POOL, true, true, taken, L->pool) : 0;
+    if (nh > 1) { /* by demand: the rest of the home set from the far / small CPUs (the lane order) */
+      pick(&x, cand, nh - 1, false, false, H, NULL);
+      for (int c = 0; c < n; c++) cand[c] = Wm[c] && !H[c];
+    }
+    L->npool = W > 1 ? pick(&x, cand, pool_cap, true, true, taken, L->pool) : 0;
     sort_pool(&x, L->pool, L->npool);
     for (int c = 0; c < n; c++) {
       if (Wm[c] && !H[c] && !taken[c]) H[c] = 1;
