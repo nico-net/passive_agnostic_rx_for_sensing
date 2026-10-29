@@ -663,6 +663,9 @@ fail:
   return -1;
 }
 
+/* weak: the unit tests link the feed without the GPU backend */
+void nr_csirs_disc_gpu_cell_free(void) __attribute__((weak));
+
 /* nr_csirs_disc_stop: stops the discovery worker (sets stop, wakes it, joins) and frees the TD front end and both rings; idempotent when not running.
  *   Callers: executables/nr-uesoftmodem.c (teardown and the start-failure path).
  */
@@ -681,6 +684,7 @@ void nr_csirs_disc_stop(void)
   if (nr_csirs_disc_fp_release) nr_csirs_disc_fp_release();
   nr_csirs_disc_ring_free(&g_worker.snapshot);
   nr_csirs_disc_ring_free(&g_worker.ring);
+  if (nr_csirs_disc_gpu_cell_free) nr_csirs_disc_gpu_cell_free(); /* G4B: the cell is retired for good (stop, not an A12 pause): its GPU workspaces go back */
   if (g_worker.synchronization_ready) {
     pthread_cond_destroy(&g_worker.wake_cv);
     pthread_mutex_destroy(&g_worker.wake_lock);

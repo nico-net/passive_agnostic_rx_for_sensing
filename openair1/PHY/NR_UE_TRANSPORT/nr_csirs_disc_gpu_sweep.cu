@@ -795,6 +795,26 @@ extern "C" int nr_csirs_disc_gpu_sweep_entry(const nr_csirs_disc_ring_t *r, cons
 /* nr_csirs_disc_gpu_sweep_prepare: GPU warm-up entry (C ABI): prepares the sweep workspace and runs the sweep, reduction, refinement and energy kernels once on a dummy slot, so that no CUDA allocation happens during RX.
  *   Returns 0, or -1 on failure. Called by nr_csirs_disc_pipeline_init() through the ops table. Catches C++ exceptions.
  */
+/* nr_csirs_disc_gpu_sweep_cell_free: G4B: gives back every GPU object of the calling thread's cell sweep workspace (streams, event, device buffers, mapping, evidence bank) when the cell is
+ *   retired for good (never on a pause). The cell's entry mutex first, then the discovery ticket (an in-flight chunk is waited for); idempotent; the next prepare of the cell re-creates it. */
+extern "C" void nr_csirs_disc_gpu_sweep_cell_free(void)
+{
+  Workspace &w=wsp();
+  std::lock_guard<std::mutex> lk(w.mu);
+  NrGpuDiscTicket ticket;
+  if(w.stream) nr_gpu_wait_stream(w.stream);
+  if(w.stream_hi && w.stream_hi!=w.stream) nr_gpu_wait_stream(w.stream_hi);
+  if(w.stream_lo && w.stream_lo!=w.stream) nr_gpu_wait_stream(w.stream_lo);
+  w.dm.release();w.dx.release();w.grid.release();w.ds.release();w.di.release();w.result.release();w.dz.release();w.dmean.release();w.dw.release();
+  w.meta.release();w.refined.release();w.acc.release();w.terms.release();
+  if(w.done) cudaEventDestroy(w.done);
+  if(w.stream_lo) cudaStreamDestroy(w.stream_lo);
+  if(w.stream_hi) cudaStreamDestroy(w.stream_hi);
+  w.done=nullptr;w.stream=w.stream_hi=w.stream_lo=nullptr;
+  std::vector<nr_csirs_disc_re_t>().swap(w.mapping);std::vector<int>().swap(w.slots);std::vector<int>().swap(w.indices);
+  std::vector<float>().swap(w.mean);std::vector<short2>().swap(w.stage);
+  w.evidence={};w.rb=w.ant=w.capacity=0;
+}
 extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
 {
   if (!nr_gpu_module_ready()) return -1;

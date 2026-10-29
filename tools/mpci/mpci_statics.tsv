@@ -869,7 +869,8 @@ openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	12	public_ops	file_static	n
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	13	breaker_lock	file_static	pthread_mutex_t	PROCESS	A7	GPU device circuit breaker: one device/context, a failing GPU affects every cell; G owns per-cell GPU health
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	14	retry_after_ms	file_static	uint64_t	PROCESS	A7	GPU circuit breaker (shared device)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	15	failures	file_static	unsigned	PROCESS	A7	GPU circuit breaker (shared device)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	224	g_gpu_disabled	file_static	volatile int [converted]	PER_CELL	A7	per-cell GPU-off switch (MPCI-INT): set/read on the cell's bound thread; the breaker stays process-wide
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	165	g_modules_loaded	file_static	int	PROCESS	A7	GPU modules are dlopen'd once per process (pthread_once); read by the per-cell GPU free (G4B)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	239	g_gpu_disabled	file_static	volatile int [converted]	PER_CELL	A7	per-cell GPU-off switch (MPCI-INT): set/read on the cell's bound thread; the breaker stays process-wide
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	22	discovery_queue	file_static	discovery_queue_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	25	discovery_due	file_static	discovery_slots_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	27	discovery_pending	file_static	discovery_slots_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
@@ -912,20 +913,20 @@ openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	187	history_unified	file_static	
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	189	history_arrays_nr	file_static	int [converted]	PER_CELL	A7	converted (mpci audit): NR_CELL_STATIC, indexed by the calling thread's cell
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	191	history_arrays_pool	file_static	int [converted]	PER_CELL	A7	converted (mpci audit): NR_CELL_STATIC, indexed by the calling thread's cell
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c	595	warned	file_static	bool [converted]	PER_CELL	A7	log-once flag of the CPU fallback, per cell (moved to file scope for the audit)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	55	State	global	struct	CONST	G4	scanner false positive: forward declaration of the type resident::State (no object); the detector lives per cell in CellWs::res
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	68	g_ws	file_static	std::atomic<CellWs *>[NR_GPU_DISC_CELLS]	PER_CELL	G4	G4: explicitly cell-indexed table of the per-cell workspaces (stream, FEP/accumulate/lattice/FFT buffers, chunkers, detector); cell = the calling thread (nr_gpu_disc_cell); workspaces are heap, created in the cell prepare before the RX fence
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	69	g_ws_mu	file_static	std::mutex	PROCESS	G4	G4: guards only the creation of a cell workspace
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	109	disc_chunks::span	tls	NrGpuSpan	TLS	G4	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	285	g_led	file_static	struct LedgerEnt {}[1024]	PROCESS	G4	GPU ledger side table keyed by device/pinned address, independent of the cell (the tag recorded in the row is the cell's)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	286	g_led_mu	file_static	std::mutex	PROCESS	G4	guards g_led
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	304	g_segment_blocks	file_static	int	PROCESS	G4	one device: decided once at the first ops() from the SM count and the csirs memory share (lmem_prereserve), read-only afterwards
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	304	g_segment_scratch	file_static	int	PROCESS	G4	one device: decided once at the first ops() (lmem_prereserve), read-only afterwards
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	316	nr_csirs_disc_gpu_ops::ops	func_static	const nr_csirs_disc_gpu_ops_t	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	404	sin_lut	global	short[129] [device]	CONST	G4	device constant table, identical bytes whichever cell loads it (fep_prepare of every cell writes the same values)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	749	lmem_prereserve::done	func_static	bool	PROCESS	G4	one-time device local-memory reservation
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	61	State	global	struct	CONST	G4	scanner false positive: forward declaration of the type resident::State (no object); the detector lives per cell in CellWs::res
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	74	g_ws	file_static	std::atomic<CellWs *>[NR_GPU_DISC_CELLS]	PER_CELL	G4	G4: explicitly cell-indexed table of the per-cell workspaces (stream, FEP/accumulate/lattice/FFT buffers, chunkers, detector); cell = the calling thread (nr_gpu_disc_cell); workspaces are heap, created in the cell prepare before the RX fence
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	75	g_ws_mu	file_static	std::mutex	PROCESS	G4	G4: guards only the creation of a cell workspace
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	115	disc_chunks::span	tls	NrGpuSpan	TLS	G4	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	292	g_led	file_static	struct LedgerEnt {}[1024]	PROCESS	G4	GPU ledger side table keyed by device/pinned address, independent of the cell (the tag recorded in the row is the cell's)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	293	g_led_mu	file_static	std::mutex	PROCESS	G4	guards g_led
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	311	g_segment_blocks	file_static	int	PROCESS	G4	one device: decided once at the first ops() from the SM count and the csirs memory share (lmem_prereserve), read-only afterwards
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	311	g_segment_scratch	file_static	int	PROCESS	G4	one device: decided once at the first ops() (lmem_prereserve), read-only afterwards
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	324	nr_csirs_disc_gpu_ops::ops	func_static	const nr_csirs_disc_gpu_ops_t	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	412	sin_lut	global	short[129] [device]	CONST	G4	device constant table, identical bytes whichever cell loads it (fep_prepare of every cell writes the same values)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu	784	lmem_prereserve::done	func_static	bool	PROCESS	G4	one-time device local-memory reservation
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	5	CAND_CAP	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	5	GPU_CAND_CAP	global	constexpr int	CONST	G4	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	333	detect::periods	func_static	const int[]	CONST	G4	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh	340	detect::periods	func_static	const int[]	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	42	words_max	global	constexpr int	CONST	G4	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	291	g_wsp	file_static	std::atomic<Workspace *>[NR_GPU_DISC_CELLS]	PER_CELL	G4	G4: explicitly cell-indexed table of the per-cell sweep workspaces (streams, event, device buffers, mapping, cumulative evidence bank, chunkers, mutex); heap, created in the cell prepare before the RX fence
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu	292	g_wsp_mu	file_static	std::mutex	PROCESS	G4	G4: guards only the creation of a cell workspace

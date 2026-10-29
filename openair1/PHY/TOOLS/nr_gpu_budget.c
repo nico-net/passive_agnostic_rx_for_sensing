@@ -223,6 +223,7 @@ static void tk_wait_until(uint64_t until_us,uint64_t now) {
  * cap is never below 100 - (RT-busy share of wall time, measured over the last 250 ms windows, smoothed). RT idle: no pacing at all (replay, quiet cell). */
 static double tk_rt_frac;
 static uint64_t tk_rt_t,tk_rt_busy;
+static int tk_rt_in_flight(void) {return (atomic_load(&owner)&~DISC_OWNER)!=0;}
 static unsigned tk_cap(uint64_t now,int active) {
   if(now-tk_rt_t>=250000ull) {
     uint64_t busy=atomic_load(&rt_busy_total);
@@ -235,7 +236,7 @@ static unsigned tk_cap(uint64_t now,int active) {
     tk_rt_t=now;tk_rt_busy=busy;
   }
   unsigned cap=(unsigned)active*pct>100u?100u:(unsigned)active*pct;
-  const unsigned idle=tk_rt_frac>=1.0?0u:(unsigned)(100.0*(1.0-tk_rt_frac));
+  const unsigned idle=tk_rt_frac>=1.0?0u:(unsigned)(100.0*(1.0-tk_rt_frac)+0.5); /* rounded: a residual 0.3 % of RT time is not a 99 % cap */
   return idle>cap?idle:cap;
 }
 static void tk_acquire(int cell,int bulk) {
@@ -252,7 +253,8 @@ static void tk_acquire(int cell,int bulk) {
     const uint64_t now=tk_now();
     uint64_t until=0;
     if(!tk_held) {
-      if(bulk && now<tk_next_us)until=tk_next_us;
+      /* G4B: the pace protects the RT work, so it holds a bulk waiter back only while an RT user is in flight; an idle device is never throttled. Re-checked every ms. */
+      if(bulk && now<tk_next_us && tk_rt_in_flight())until=tk_next_us<now+1000ull?tk_next_us:now+1000ull;
       else if(tk_best(&w,now))break;
     }
     waited=1;
@@ -282,7 +284,7 @@ void nr_gpu_disc_ticket_release(void) {
   int active=0;
   for(int k=0;k<TK_CELLS;++k)if(tk_last_use[k] && now-tk_last_use[k]<2000000ull)++active;
   const unsigned cap=tk_cap(now,active);
-  if(tk_hbulk && active>=2 && cap<100 && cap>0) {
+  if(tk_hbulk && active>=2 && cap<100 && cap>0 && tk_rt_in_flight()) { /* G4B: no RT user in flight = idle device = no pace */
     const uint64_t pace=held*(100-cap)/cap;
     tk_next_us=now+pace;st->pace_us+=pace;
   }
