@@ -51,6 +51,7 @@ NR_CELL_STATIC_INIT(pthread_mutex_t, srs_lock, PTHREAD_MUTEX_INITIALIZER)
 typedef struct {
   pthread_t thread;
   _Atomic bool active;
+  _Atomic bool paused; /* MPCI-INT: retired cell (nr_srs_passive_cell_pause) */
   _Atomic uint64_t dropped, elapsed_us;
   _Atomic uint64_t pregate_skip, backoff_skip, budget_skip, idle_resets;
   nr_srs_idle_t idle;
@@ -91,7 +92,20 @@ static bool srs_budget_checkpoint(struct timespec *cpu_begin)
   return nr_srs_cpu_allow(&sr.idle,now,1000000);
 }
 
-bool nr_srs_passive_enabled(void) { return atomic_load_explicit(&sr.active,memory_order_relaxed); }
+bool nr_srs_passive_enabled(void) { return atomic_load_explicit(&sr.active,memory_order_relaxed) && !atomic_load_explicit(&sr.paused,memory_order_relaxed); }
+/* Pause / resume the SRS searcher of `cell` (hook of a retired / re-activated cell). No allocation: the producers see enabled()==false while paused, the worker idles
+ * on its empty queue and the searcher state is kept. On resume the pending observation events (older than the gap) are dropped under the lock. */
+void nr_srs_passive_cell_pause(int cell,bool pause)
+{
+  if(cell<0 || cell>=NR_CELL_MAX) return;
+  const int prev=nr_cell_idx();
+  nr_cell_bind(cell);
+  if(sr_state_cellp[cell]) { /* preallocated for every admitted cell */
+    atomic_store_explicit(&sr.paused,pause,memory_order_release);
+    if(!pause) {pthread_mutex_lock(&srs_lock);sr.event_count=0;pthread_mutex_unlock(&srs_lock);}
+  }
+  nr_cell_bind(prev);
+}
 
 static void process_srs(srs_job_t *job)
 {

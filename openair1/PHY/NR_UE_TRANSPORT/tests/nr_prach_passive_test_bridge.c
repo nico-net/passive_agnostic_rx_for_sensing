@@ -116,6 +116,7 @@ void test_prach_reset(void)
   captured_cell_record[nr_cell_idx()][0] = 0;
 }
 void test_prach_bind(int cell) { nr_cell_bind(cell); }
+void test_prach_pause(int cell, int pause) { nr_prach_passive_cell_pause(cell, pause != 0); }
 uint64_t test_prach_drops(void)
 {
   uint64_t us, drops, skipped;

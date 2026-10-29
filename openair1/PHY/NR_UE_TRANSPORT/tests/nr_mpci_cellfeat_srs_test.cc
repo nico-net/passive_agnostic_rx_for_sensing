@@ -135,3 +135,23 @@ TEST_F(CellFeatSrs, TwoBoundThreadsKeepSeparateCounters)
     EXPECT_LE(metrics().dropped - b[c].dropped, uint64_t(n[c] - 64 + 2)) << "cell " << c;
   }
 }
+
+/* MPCI-INT: pause = the producers see the cell disabled (nothing queued, nothing counted), the searcher and the other cell stay; resume = enabled again. */
+TEST_F(CellFeatSrs, PauseHidesTheCellFromProducersAndResumes)
+{
+  start_both();
+  nr_cell_bind(1);
+  const Dropped b1 = metrics();
+  nr_srs_passive_cell_pause(1, true);
+  EXPECT_FALSE(nr_srs_passive_enabled());
+  for (int i = 0; i < 70; i++) nr_srs_passive_trigger(300 + i, 5, 1);
+  EXPECT_LE(metrics().dropped - b1.dropped, 2u) << "a paused cell queues nothing (no overflow drops)";
+  nr_cell_bind(0);
+  EXPECT_TRUE(nr_srs_passive_enabled()) << "cell 0 unaffected";
+  nr_srs_passive_cell_pause(1, false);
+  nr_cell_bind(1);
+  EXPECT_TRUE(nr_srs_passive_enabled());
+  for (int i = 0; i < 70; i++) nr_srs_passive_trigger(400 + i, 5, 1);
+  EXPECT_GE(metrics().dropped - b1.dropped, 6u) << "resumed: events are queued again (overflow counts)";
+  nr_cell_bind(0);
+}

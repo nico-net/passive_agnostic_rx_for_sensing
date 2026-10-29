@@ -11,6 +11,7 @@ struct PHY_VARS_NR_UE_s;
  * nr_srs_passive_cell_prealloc(cell) runs once per admitted cell before the RX fence (also when SRS is off: the producers read the active flag). */
 void nr_srs_passive_cell_prealloc(int cell);
 /* Start/stop outside RX workers; capture is allocation-free, try-lock/drop. */
+void nr_srs_passive_cell_pause(int cell, bool pause); /* retired cell: producers see enabled()==false; state kept, no allocation */
 void nr_srs_passive_start(struct PHY_VARS_NR_UE_s *ue);
 void nr_srs_passive_stop(void);
 void nr_srs_passive_capture(struct PHY_VARS_NR_UE_s *ue, int frame, int slot, uint64_t abs_slot);

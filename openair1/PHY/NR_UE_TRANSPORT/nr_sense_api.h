@@ -66,6 +66,7 @@ typedef struct {
 void nr_sense_stats(nr_sense_stats_t *out);
 /* The session is per cell: every call below acts on the session of the calling thread's cell (nr_cell_idx()). */
 void nr_sense_cell_file(int cell, const char *def, char *out, size_t n);
+void nr_sense_cell_pause(int cell, bool pause); /* session kept open; nr_sense_enabled() of that cell is false while paused */
 int nr_sense_cell_endpoint(int cell, const char *ep, char *out, size_t n);
 /* Deterministic fault hooks for the standalone unit test; call from its controlling thread. */
 void nr_sense_test_pause_writer(bool pause);

@@ -289,3 +289,24 @@ TEST(PassivePrachCells, SkippedOccasionIsCountedOnItsCellOnly)
   test_prach_finish();
   test_prach_bind(0);
 }
+
+/* MPCI-INT: a paused (retired) cell's PRACH pipeline does nothing and counts nothing; the other cell is unaffected; resume feeds again. */
+TEST(PassivePrachCells, PausedCellIgnoresSlotsAndResumes)
+{
+  test_prach_init();
+  for (int c = 0; c < 2; ++c) { test_prach_bind(c); test_prach_reset(); }
+  test_prach_bind(1);
+  test_prach_pause(1, 1);
+  test_prach_run_slot(-1, 1, 2); /* would be a skipped occasion */
+  EXPECT_EQ(test_prach_skipped(), 0u) << "paused cell: slot ignored";
+  test_prach_bind(0);
+  test_prach_run_slot(-1, 1, 2);
+  EXPECT_EQ(test_prach_skipped(), 1u) << "cell 0 keeps working while cell 1 is paused";
+  test_prach_bind(1);
+  test_prach_pause(1, 0);
+  test_prach_run_slot(-1, 1, 2);
+  EXPECT_EQ(test_prach_skipped(), 1u) << "resumed";
+  test_prach_finish();
+  test_prach_bind(0);
+  test_prach_finish();
+}

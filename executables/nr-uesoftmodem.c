@@ -112,6 +112,8 @@ unsigned short config_frames[4] = {2,9,11,13};
 #include "radio/COMMON/iq_span.h"
 #include "radio/COMMON/iq_live.h"
 #include "radio/COMMON/ru_park.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_api.h"
+#include <stdatomic.h>
 
 THREAD_STRUCT thread_struct;
 nrUE_params_t nrUE_params = {0};
@@ -848,12 +850,37 @@ static void mpci_open_uectx(int k)
 
 /* CELLFEAT: the per-cell sensing services of cell k (bound to it, before the RX fence): the heap objects of the PRACH / SRS state, then the sense-API session
  * (rings, writer, files), the passive PRACH worker and the passive SRS searcher. Cell 0 of a single-cell receiver keeps the old place (after the radio start). */
+/* MPCI-INT: the per-cell sensing services follow the cell's retire / re-activation (ru_park.h registry): pause = producers stop feeding the cell's PRACH / SRS /
+ * sense session, nothing is allocated or closed (closing stays in mpci_stop_cell_sensing); resume = they feed again. The dashboard (nr_dashboard.c) is a launcher of one
+ * process reading every cell's files and holds no per-cell state, so it has no hook. */
+static void mpci_sensing_quiesce(void *ctx, int cell)
+{
+  (void)ctx;
+  nr_sense_cell_pause(cell, true);
+  nr_prach_passive_cell_pause(cell, true);
+  nr_srs_passive_cell_pause(cell, true);
+  LOG_I(PHY, "SENSING: MPCI_PARK cell=%d sense-session, PRACH and SRS paused (sessions kept open)\n", cell);
+}
+static void mpci_sensing_resume(void *ctx, int cell)
+{
+  (void)ctx;
+  nr_srs_passive_cell_pause(cell, false);
+  nr_prach_passive_cell_pause(cell, false);
+  nr_sense_cell_pause(cell, false);
+  LOG_I(PHY, "SENSING: MPCI_PARK cell=%d sense-session, PRACH and SRS resumed\n", cell);
+}
 static void mpci_cell_sensing_open(int k, PHY_VARS_NR_UE *ue)
 {
   nr_prach_passive_cell_prealloc(k);
   nr_srs_passive_cell_prealloc(k);
   if (g_ncells <= 1)
     return;
+  static atomic_int hook_registered; /* PROCESS: one registration for all cells (prealloc runs once per cell, bound to it) */
+  if (!atomic_exchange(&hook_registered, 1)) {
+    const ru_cell_hook_t h = {.name = "cellfeat", .quiesce = mpci_sensing_quiesce, .resume = mpci_sensing_resume, .ctx = NULL};
+    if (ru_cell_hook_register(&h) != 0)
+      LOG_W(PHY, "SENSING: MPCI_PARK hook registry full; retired cells keep their sensing services running\n");
+  }
   nr_isac_start();
   nr_prach_passive_start();
   if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
@@ -929,6 +956,7 @@ static int mpci_cell_start(void *ctx, int k, const nr_mgr_slot_t *slot, int reac
       ru_cell_resume(k);
     } else {
       LOG_I(PHY, "SENSING: MPCI_LIFE cell=%d id=%s back in the inventory: its ring belongs to its publisher; the slot thread is woken\n", k, slot ? slot->id : "-");
+      ru_cell_resume(k); /* quiesce is called on this path too (mpci_cell_retire), so the resume must be */
       nrue_ru_ring_wake();
     }
     return 0;

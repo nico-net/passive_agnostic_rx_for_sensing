@@ -136,6 +136,8 @@ NR_CELL_STATIC(unsigned, job_read)
 #define job_read NR_CELL_REF(job_read)
 NR_CELL_STATIC(unsigned, job_write)
 #define job_write NR_CELL_REF(job_write)
+NR_CELL_STATIC(_Atomic bool, prach_paused) /* MPCI-INT: the cell is retired (nr_prach_passive_cell_pause) */
+#define prach_paused NR_CELL_REF(prach_paused)
 NR_CELL_STATIC(_Atomic uint64_t, prach_us)
 #define prach_us NR_CELL_REF(prach_us)
 NR_CELL_STATIC(_Atomic uint64_t, prach_occasions)
@@ -155,6 +157,22 @@ void nr_prach_passive_cell_prealloc(int cell)
   NR_CELL_HEAP_PREALLOC(prach_freq_t, prach_freq, cell);
   NR_CELL_HEAP_PREALLOC(prach_tail_t, prev_tail, cell);
   NR_CELL_HEAP_PREALLOC(prach_jobs_t, jobs, cell);
+}
+
+/* Pause / resume the PRACH pipeline of `cell` (hook of a retired / re-activated cell). No allocation; the worker, its queue and the pending list stay. On resume the
+ * stitch tail is invalidated (the stream has a forward gap): the producer flag is taken so a slot in flight is not raced; if it is busy the invalidation is skipped
+ * and the first occasion needing the tail is skipped by the continuity test (prev_tail_slot + 1 + slot != now). */
+void nr_prach_passive_cell_pause(int cell, bool pause)
+{
+  if (cell < 0 || cell >= NR_CELL_MAX) return;
+  const int prev = nr_cell_idx();
+  nr_cell_bind(cell);
+  atomic_store_explicit(&prach_paused, pause, memory_order_release);
+  if (!pause && !atomic_flag_test_and_set_explicit(&producer_busy, memory_order_acquire)) {
+    prev_tail_slot = UINT64_MAX;
+    atomic_flag_clear_explicit(&producer_busy, memory_order_release);
+  }
+  nr_cell_bind(prev);
 }
 
 void nr_prach_passive_gain_changed(int gain_db)
@@ -691,6 +709,7 @@ static void process_slot(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 void nr_prach_passive_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
   if (!nr_isac_prach_enabled()) return;
+  if (atomic_load_explicit(&prach_paused, memory_order_acquire)) return; /* retired cell: no job, no count */
   if (atomic_flag_test_and_set_explicit(&producer_busy, memory_order_acquire)) {
     atomic_fetch_add_explicit(&prach_drops, 1, memory_order_relaxed);
     return;

@@ -99,43 +99,44 @@ executables/nr-ue.c	2076	UE_thread::s_fires	func_static	long [converted]	PER_CEL
 executables/nr-ue.c	2208	UE_thread::cn	func_static	const char *const[3]	CONST	A8	auto
 executables/nr-ue.c	2310	UE_thread::s_reinits	func_static	int	PROCESS	A8	full device re-init budget: nrue_ru_reinit re-opens every RU (radio-wide)
 executables/nr-uesoftmodem.c	65	config_frames	global	unsigned short[4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	116	thread_struct	global	THREAD_STRUCT	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	117	nrUE_params	global	nrUE_params_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	121	RC	global	RAN_CONTEXT_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	122	oai_exit	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	124	downlink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	125	uplink_frequency_offset	global	int64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	126	sidelink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	129	cpuf	global	double	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	187	fo_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	187	ssb_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	259	g_cells	file_static	nr_cell_life_t	PROCESS	A8	A8: cell lifecycle (owner of the cell manager; one control thread)
-executables/nr-uesoftmodem.c	260	g_ncells	file_static	int	PROCESS	A8	A8: number of served cells
-executables/nr-uesoftmodem.c	261	g_live	file_static	iq_live_t	PROCESS	A12	MPCI-LIVE: one capture / one control thread per process; written at start and by the control thread only
-executables/nr-uesoftmodem.c	262	g_live_on	file_static	int	PROCESS	A12	MPCI-LIVE: one capture / one control thread per process; written at start and by the control thread only
-executables/nr-uesoftmodem.c	263	g_nplan	file_static	int	PROCESS	A12	MPCI-LIVE: one capture / one control thread per process; written at start and by the control thread only
-executables/nr-uesoftmodem.c	264	g_inv_watch	file_static	nr_cell_inventory_watch_t	PROCESS	A8	A8: cells.json watcher (one control thread)
-executables/nr-uesoftmodem.c	265	g_uectx_path	file_static	char[PATH_MAX + 32]	PROCESS	A8	A8: cell 0 uectx path; cells k>0 derive theirs with nr_cell_path
-executables/nr-uesoftmodem.c	277	g_feed	file_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	278	g_feed_cells	file_static	iq_span_cell_t[NR_CELL_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	279	g_feed_ids	file_static	char[NR_CELL_MAX][NR_INV_ID_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	280	g_feed_dev	file_static	iq_span_dev_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	281	g_feed_plan	file_static	iq_span_plan_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	282	g_feed_wanted	file_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	283	g_feed_obj	file_static	iq_feed_t *	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	284	g_feed_entry	file_static	int[NR_CELL_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	593	mpci_feed_rings::s_load	func_static	iq_chan_load_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	635	mpci_feed_start::lease	func_static	const iq_chan_lease_t	CONST	A8	auto
-executables/nr-uesoftmodem.c	982	mpci_control_thread::s_parked	func_static	int[NR_CELL_MAX]	UNCLASSIFIED	A8	
-executables/nr-uesoftmodem.c	991	mpci_control_thread::s_feed_tick	func_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	1015	s_dash_gpu_prev	file_static	nr_dash_gpu_t[NR_CELL_MAX]	PROCESS	A8	log/dashboard state
-executables/nr-uesoftmodem.c	1016	s_dash_gpu_win	file_static	nr_dash_win_t[NR_CELL_MAX]	PROCESS	A8	log/dashboard state
-executables/nr-uesoftmodem.c	1017	s_dash_now_ns	file_static	uint64_t	PROCESS	A8	log/dashboard state
-executables/nr-uesoftmodem.c	1137	trigger_deregistration::deregistration_sent	func_static	bool	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	1148	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
-executables/nr-uesoftmodem.c	1161	NB_UE_INST	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	1162	uniqCfg	global	configmodule_interface_t *	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	1163	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	118	thread_struct	global	THREAD_STRUCT	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	119	nrUE_params	global	nrUE_params_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	123	RC	global	RAN_CONTEXT_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	124	oai_exit	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	126	downlink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	127	uplink_frequency_offset	global	int64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	128	sidelink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	131	cpuf	global	double	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	189	fo_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	189	ssb_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	261	g_cells	file_static	nr_cell_life_t	PROCESS	A8	A8: cell lifecycle (owner of the cell manager; one control thread)
+executables/nr-uesoftmodem.c	262	g_ncells	file_static	int	PROCESS	A8	A8: number of served cells
+executables/nr-uesoftmodem.c	263	g_live	file_static	iq_live_t	PROCESS	A12	MPCI-LIVE: one capture / one control thread per process; written at start and by the control thread only
+executables/nr-uesoftmodem.c	264	g_live_on	file_static	int	PROCESS	A12	MPCI-LIVE: one capture / one control thread per process; written at start and by the control thread only
+executables/nr-uesoftmodem.c	265	g_nplan	file_static	int	PROCESS	A12	MPCI-LIVE: one capture / one control thread per process; written at start and by the control thread only
+executables/nr-uesoftmodem.c	266	g_inv_watch	file_static	nr_cell_inventory_watch_t	PROCESS	A8	A8: cells.json watcher (one control thread)
+executables/nr-uesoftmodem.c	267	g_uectx_path	file_static	char[PATH_MAX + 32]	PROCESS	A8	A8: cell 0 uectx path; cells k>0 derive theirs with nr_cell_path
+executables/nr-uesoftmodem.c	279	g_feed	file_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	280	g_feed_cells	file_static	iq_span_cell_t[NR_CELL_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	281	g_feed_ids	file_static	char[NR_CELL_MAX][NR_INV_ID_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	282	g_feed_dev	file_static	iq_span_dev_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	283	g_feed_plan	file_static	iq_span_plan_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	284	g_feed_wanted	file_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	285	g_feed_obj	file_static	iq_feed_t *	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	286	g_feed_entry	file_static	int[NR_CELL_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	595	mpci_feed_rings::s_load	func_static	iq_chan_load_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	637	mpci_feed_start::lease	func_static	const iq_chan_lease_t	CONST	A8	auto
+executables/nr-uesoftmodem.c	878	mpci_cell_sensing_open::hook_registered	func_static	atomic_int	PROCESS	A8	MPCI-INT: one cellfeat quiesce/resume hook registration per process
+executables/nr-uesoftmodem.c	1010	mpci_control_thread::s_parked	func_static	int[NR_CELL_MAX]	PROCESS	A12	MPCI-LIVE: written by the one control thread only
+executables/nr-uesoftmodem.c	1019	mpci_control_thread::s_feed_tick	func_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	1043	s_dash_gpu_prev	file_static	nr_dash_gpu_t[NR_CELL_MAX]	PROCESS	A8	log/dashboard state
+executables/nr-uesoftmodem.c	1044	s_dash_gpu_win	file_static	nr_dash_win_t[NR_CELL_MAX]	PROCESS	A8	log/dashboard state
+executables/nr-uesoftmodem.c	1045	s_dash_now_ns	file_static	uint64_t	PROCESS	A8	log/dashboard state
+executables/nr-uesoftmodem.c	1165	trigger_deregistration::deregistration_sent	func_static	bool	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	1176	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
+executables/nr-uesoftmodem.c	1189	NB_UE_INST	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	1190	uniqCfg	global	configmodule_interface_t *	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	1191	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_COLS	global	constexpr uint32_t	CONST	G1	auto
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_ROWS	global	constexpr uint32_t	CONST	G1	auto
 openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu	43	MAX_Z	global	constexpr uint32_t	CONST	G1	auto
@@ -356,7 +357,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	12	public_ops	file_static	n
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	13	breaker_lock	file_static	pthread_mutex_t	PROCESS	A7	GPU device circuit breaker: one device/context, a failing GPU affects every cell; G owns per-cell GPU health
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	14	retry_after_ms	file_static	uint64_t	PROCESS	A7	GPU circuit breaker (shared device)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	15	failures	file_static	unsigned	PROCESS	A7	GPU circuit breaker (shared device)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	221	g_gpu_disabled	file_static	volatile int	PROCESS	A7	process-wide GPU-off switch set by pipeline_init on a GPU preallocation failure; the GPU module (G) holds ONE workspace, so per-cell disable needs G per-cell GPU state (site listed in MPCI-A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	224	g_gpu_disabled	file_static	volatile int [converted]	PER_CELL	A7	per-cell GPU-off switch (MPCI-INT): set/read on the cell's bound thread; the breaker stays process-wide
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	22	discovery_queue	file_static	discovery_queue_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	25	discovery_due	file_static	discovery_slots_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h	27	discovery_pending	file_static	discovery_slots_t [converted]	PER_CELL	DBG2	converted (DBG2): state of one cell's receive path
@@ -2119,15 +2120,16 @@ openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	jobs	file_static	prach_jobs_
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	observed_gain_db	file_static	_Atomic int [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	prach_drops	file_static	_Atomic uint64_t [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	prach_occasions	file_static	_Atomic uint64_t [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
+openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	prach_paused	file_static	_Atomic bool [converted]	PER_CELL	CELLFEAT	MPCI-INT: cell retired, PRACH process() returns at once
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	prach_skipped	file_static	_Atomic uint64_t [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	prach_us	file_static	_Atomic uint64_t [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	producer_busy	file_static	atomic_flag [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	worker_started	file_static	bool [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	worker_stop	file_static	bool [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
-openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	201	get_nr_prach_duration::duration	func_static	const int[]	CONST	CELLFEAT	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	568	process_slot::warned_fdd	func_static	bool [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
-openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	579	process_slot::warned	func_static	bool [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
-openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	607	process_slot::warned_boundary	func_static	bool [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
+openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	219	get_nr_prach_duration::duration	func_static	const int[]	CONST	CELLFEAT	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	586	process_slot::warned_fdd	func_static	bool [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
+openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	597	process_slot::warned	func_static	bool [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
+openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	625	process_slot::warned_boundary	func_static	bool [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	39	g_da_try	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	41	g_da_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c	43	g_da_rej_seg	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
@@ -2395,6 +2397,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	35	mu_once	file_static	pthread_once_
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	35	no_sink	file_static	bool [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	35	opened	file_static	bool [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	35	pause_writer	file_static	_Atomic bool [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	35	paused	file_static	_Atomic bool [converted]	PER_CELL	CELLFEAT	MPCI-INT: cell retired, session kept open; nr_sense_enabled() false while paused
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	35	record_cap	file_static	uint32_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	35	record_count	file_static	uint32_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	35	record_head	file_static	uint32_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
@@ -2405,24 +2408,24 @@ openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	35	stopping	file_static	bool [conver
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	35	write_chunk	file_static	_Atomic uint32_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	35	writer_limit	file_static	_Atomic uint32_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	35	written_items	file_static	_Atomic uint32_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	95	cfr_fd	file_static	int [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	95	cost_count	file_static	sense_cost_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	95	cost_ns	file_static	sense_cost_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	95	next_id	file_static	uint64_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	95	record_binary	file_static	uint8_t * [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	95	record_fd	file_static	int [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	95	rs_jobs	file_static	rs_job_t * [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	95	stats	file_static	nr_sense_stats_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	95	worker	file_static	pthread_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	95	zmq_context	file_static	void * [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	95	zmq_pub	file_static	void * [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	291	nr_sense_open::warned_no_zmq	func_static	bool	PROCESS	CELLFEAT	log once per process (build without ZMQ)
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	97	cfr_fd	file_static	int [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	97	cost_count	file_static	sense_cost_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	97	cost_ns	file_static	sense_cost_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	97	next_id	file_static	uint64_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	97	record_binary	file_static	uint8_t * [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	97	record_fd	file_static	int [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	97	rs_jobs	file_static	rs_job_t * [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	97	stats	file_static	nr_sense_stats_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	97	worker	file_static	pthread_t [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	97	zmq_context	file_static	void * [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	97	zmq_pub	file_static	void * [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	293	nr_sense_open::warned_no_zmq	func_static	bool	PROCESS	CELLFEAT	log once per process (build without ZMQ)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c	69	nr_sense_rs_to_json::names	func_static	const char *[]	CONST	CELLFEAT	constant name table (a pointer array declared without const on the pointers)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c	133	receiver_array	file_static	const char *	PROCESS	CELLFEAT	session identity (rx_id / rx_array) from the [sensing] section: the same strings for every cell, set by each cell at its start
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c	133	receiver_id	file_static	const char *	PROCESS	CELLFEAT	session identity (rx_id / rx_array) from the [sensing] section: the same strings for every cell, set by each cell at its start
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	49	srs_lock	file_static	pthread_mutex_t [converted]	PER_CELL	CELLFEAT	per-cell passive SRS searcher state (CELLFEAT)
-openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	73	sr_state	file_static	srs_state_t [converted]	PER_CELL	CELLFEAT	per-cell passive SRS searcher state (CELLFEAT)
-openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	133	process_srs::offsets	func_static	const int[]	CONST	CELLFEAT	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	74	sr_state	file_static	srs_state_t [converted]	PER_CELL	CELLFEAT	per-cell passive SRS searcher state (CELLFEAT)
+openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	147	process_srs::offsets	func_static	const int[]	CONST	CELLFEAT	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	82	g	global	Ctx	PROCESS	A8	one GPU CB0 batch context and budget per process (G3: jobs must carry the cell)
 openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	83	budget	global	nr_dl_gpu_budget_t	PROCESS	A8	one GPU CB0 batch context and budget per process (G3: jobs must carry the cell)
 openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu	206	api	global	const nr_td_cb0_gpu_api_t	CONST	A8	auto

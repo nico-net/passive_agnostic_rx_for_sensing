@@ -218,7 +218,11 @@ const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
  *   NULL when ISAC_CSIRS_DISC_BACKEND is "cpu" (test hook). Returns NULL while the breaker is open.
  *   Callers: nr_csirs_disc.c (pipeline init and batches), nr_csirs_disc_feed.c (ring allocation and worker), nr_csirs_disc_td.c and the confirmation internals.
  */
-static volatile int g_gpu_disabled;
+/* g_gpu_disabled is per cell (MPCI-INT, G4 decision 7): set by pipeline_init on the cell's bound thread when ITS GPU preallocation failed, read by gpu_load() on the same
+ * thread; the time-based breaker above stays process-wide (CUDA failures are device-level). */
+#include "common/utils/nr_cell.h"
+NR_CELL_STATIC(volatile int, g_gpu_disabled);
+#define g_gpu_disabled NR_CELL_REF(g_gpu_disabled)
 void nr_csirs_disc_gpu_disable(void) { g_gpu_disabled = 1; }
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void)
 {

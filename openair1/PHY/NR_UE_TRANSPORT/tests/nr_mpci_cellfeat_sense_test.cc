@@ -192,3 +192,34 @@ TEST(CellFeatSense, PerCellNamesKeepCellZeroBytes)
   EXPECT_STREQ(e, "");
   EXPECT_EQ(nr_sense_cell_endpoint(1, "udp://x", e, sizeof(e)), -1);
 }
+
+/* MPCI-INT: pause keeps the session open (files, writer), producers see it disabled; the other cell is unaffected; resume writes again into the same files. */
+TEST(CellFeatSense, PauseKeepsSessionOpenAndResumeAppends)
+{
+  Dir d;
+  std::string r0 = d.f("0.rec"), r1 = d.f("1.rec");
+  nr_sense_cfg_t c0{r0.c_str(), nullptr, nullptr, 4, 8, 16, 1}, c1{r1.c_str(), nullptr, nullptr, 4, 8, 16, 1};
+  nr_cell_bind(0);
+  ASSERT_EQ(nr_sense_open(&c0), 0);
+  nr_cell_bind(1);
+  ASSERT_EQ(nr_sense_open(&c1), 0);
+  EXPECT_TRUE(nr_sense_push_record("{\"x\":1}"));
+  nr_sense_cell_pause(1, true);
+  EXPECT_FALSE(nr_sense_enabled());
+  EXPECT_FALSE(nr_sense_push_record("{\"x\":2}"));
+  nr_sense_stats_t s{};
+  nr_sense_stats(&s);
+  EXPECT_EQ(s.after_close, 0u) << "paused is not closed";
+  nr_cell_bind(0);
+  EXPECT_TRUE(nr_sense_enabled());
+  EXPECT_TRUE(nr_sense_push_record("{\"y\":1}"));
+  nr_sense_cell_pause(1, false);
+  nr_cell_bind(1);
+  EXPECT_TRUE(nr_sense_enabled());
+  EXPECT_TRUE(nr_sense_push_record("{\"x\":3}"));
+  nr_sense_close();
+  nr_cell_bind(0);
+  nr_sense_close();
+  EXPECT_EQ(slurp(r1), "{\"x\":1}\n{\"x\":3}\n");
+  EXPECT_EQ(slurp(r0), "{\"y\":1}\n");
+}

@@ -19,6 +19,7 @@ void test_prach_floor_reset(void);
 int test_prach_floor(int fdm, int gain_db, int energy);
 void test_prach_reset(void);
 void test_prach_bind(int cell);
+void test_prach_pause(int cell, int pause);
 uint64_t test_prach_drops(void);
 void test_prach_run_slot(int delay_samples, int msg1_fdm, int mode);
 void test_prach_run_stitched_slot(int phase_shift);

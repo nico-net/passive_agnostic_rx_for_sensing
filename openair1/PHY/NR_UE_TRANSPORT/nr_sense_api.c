@@ -40,6 +40,8 @@ NR_CELL_STATIC_INIT(pthread_cond_t, cv, PTHREAD_COND_INITIALIZER)
 #define cv NR_CELL_REF(cv)
 NR_CELL_STATIC(_Atomic bool, active)
 #define active NR_CELL_REF(active)
+NR_CELL_STATIC(_Atomic bool, paused) /* MPCI-INT: the cell is retired; the session stays open, producers are told "disabled" (nr_sense_cell_pause) */
+#define paused NR_CELL_REF(paused)
 NR_CELL_STATIC(_Atomic bool, closed_seen)
 #define closed_seen NR_CELL_REF(closed_seen)
 NR_CELL_STATIC(_Atomic bool, pause_writer)
@@ -351,7 +353,16 @@ void nr_sense_close(void)
   frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; record_binary=NULL;
   pthread_mutex_unlock(&mu);
 }
-bool nr_sense_enabled(void) { return atomic_load_explicit(&active,memory_order_acquire); }
+bool nr_sense_enabled(void) { return atomic_load_explicit(&active,memory_order_acquire) && !atomic_load_explicit(&paused,memory_order_acquire); }
+/* Pause / resume the export session of `cell` (hook of a retired / re-activated cell): no allocation, no close; the producers see nr_sense_enabled() false while paused. */
+void nr_sense_cell_pause(int cell, bool pause)
+{
+  if (cell<0 || cell>=NR_CELL_MAX) return;
+  const int prev=nr_cell_idx();
+  nr_cell_bind(cell);
+  atomic_store_explicit(&paused,pause,memory_order_release);
+  nr_cell_bind(prev);
+}
 
 void nr_sense_reject_cfr(void)
 {
