@@ -89,6 +89,10 @@ void nr_td_cb0_wire_reset(void);
 /* Test hooks: freeze the cost estimates; this thread's last planned set (context indices; -1 = no active plan) and its
  * pre-decode reasons. */
 void nr_td_cb0_wire_test_freeze(bool on);
+/* A12 quiesce / resume of a cell: the process CPU cap is split over the cells that are not paused (each cell has its own token bucket). */
+void nr_td_cb0_wire_cell_pause(int cell, bool paused);
+/* The CPU share (percent of the host) of the calling cell's bucket now. */
+double nr_td_cb0_wire_cell_share_pct(void);
 int nr_td_cb0_wire_test_last_set(int *idx, int max);
 uint32_t nr_td_cb0_wire_test_last_reasons(void);
 /* Test hooks: admit every grant (bucket off); set the bucket's tokens (CPU-us, capped at its capacity). */

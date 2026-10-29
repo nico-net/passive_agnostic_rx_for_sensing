@@ -102,7 +102,7 @@ common/utils/nr_bg_lane.c	20	nr_bg_lane_cores::warned	func_static	int	PROCESS	AU
 common/utils/nr_cell.c	11	nr_cell_tls_idx_	tls	int	TLS	AUDIT	existing thread-local
 common/utils/nr_cell.c	12	nr_cell_count_	global	int	PROCESS	AUDIT	cell seam: process-wide cell count and allocation fence (written once by the cell manager / main)
 common/utils/nr_cell.c	13	g_fence	file_static	volatile int	PROCESS	AUDIT	cell seam: process-wide cell count and allocation fence (written once by the cell manager / main)
-common/utils/nr_cell_admit.c	350	nr_admit_reason_name::n	func_static	const char *const[]	CONST	AUDIT	auto
+common/utils/nr_cell_admit.c	374	nr_admit_reason_name::n	func_static	const char *const[]	CONST	AUDIT	auto
 common/utils/nr_core_layout.c	25	nr_cl_mode_name::n	func_static	const char *const[]	CONST	B1	auto
 common/utils/nr_core_layout.c	666	g_topo	file_static	nr_cl_topo_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 common/utils/nr_core_layout.c	667	g_lay	file_static	nr_core_layout_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
@@ -124,21 +124,21 @@ common/utils/nr_core_plan.c	331	test_critical_set	file_static	bool	PROCESS	AUDIT
 common/utils/nr_core_plan.c	342	nr_core_plan_is_critical::lists	func_static	const char *const[]	CONST	AUDIT	auto
 common/utils/nr_core_plan.c	381	g_inherited	file_static	cpu_set_t	PROCESS	AUDIT	core plan derived from the host (roles, inherited mask): process-wide by design (B2)
 common/utils/nr_core_plan.c	382	g_have_inherited	file_static	int	PROCESS	AUDIT	core plan derived from the host (roles, inherited mask): process-wide by design (B2)
-common/utils/nr_core_pool.c	68	tl	tls	struct {}	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	74	tl_cv	tls	pthread_cond_t	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	75	tl_last	tls	int	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	79	g_test_clock	file_static	uint64_t (*)(void)	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	119	g_order	file_static	const int[NR_POOL_NPRIO]	CONST	B1	auto
-common/utils/nr_core_pool.c	424	grant::n_wait	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	461	tl_tid::t	tls	pid_t	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	550	nr_pool_release::n_long	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	613	k_cls_nm	file_static	const char *const[NR_POOL_NPRIO]	CONST	B1	MPCI-DASH: constant table
-common/utils/nr_core_pool.c	774	g_site	file_static	nr_pool_t *	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	775	g_once	file_static	pthread_once_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	858	g_site_test	file_static	_Atomic bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	911	nr_pool_site_filter_core::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	918	tl_give	tls	int	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	987	nr_pool_site_enforce_tick::next	func_static	_Atomic uint64_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	75	tl	tls	struct {}	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	81	tl_cv	tls	pthread_cond_t	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	82	tl_last	tls	int	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	86	g_test_clock	file_static	uint64_t (*)(void)	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	126	g_order	file_static	const int[NR_POOL_NPRIO]	CONST	B1	auto
+common/utils/nr_core_pool.c	454	grant::n_wait	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	491	tl_tid::t	tls	pid_t	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	580	nr_pool_release::n_long	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	651	k_cls_nm	file_static	const char *const[NR_POOL_NPRIO]	CONST	B1	MPCI-DASH: constant table
+common/utils/nr_core_pool.c	812	g_site	file_static	nr_pool_t *	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	813	g_once	file_static	pthread_once_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	896	g_site_test	file_static	_Atomic bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	975	nr_pool_site_filter_core::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	982	tl_give	tls	int	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	1051	nr_pool_site_enforce_tick::next	func_static	_Atomic uint64_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 common/utils/nr_shutdown.c	20	radio_released	file_static	atomic_int	PROCESS	AUDIT	shutdown coordination (request flag, watchdog, radio release): one per process
 common/utils/nr_shutdown.c	20	requested	file_static	atomic_int	PROCESS	AUDIT	shutdown coordination (request flag, watchdog, radio release): one per process
 common/utils/nr_shutdown.c	21	requested_ns	file_static	atomic_ulong	PROCESS	AUDIT	shutdown coordination (request flag, watchdog, radio release): one per process
@@ -252,44 +252,44 @@ executables/nr-ue.c	2101	UE_thread::s_fires	func_static	long [converted]	PER_CEL
 executables/nr-ue.c	2233	UE_thread::cn	func_static	const char *const[3]	CONST	A8	auto
 executables/nr-ue.c	2335	UE_thread::s_reinits	func_static	int	PROCESS	A8	full device re-init budget: nrue_ru_reinit re-opens every RU (radio-wide)
 executables/nr-uesoftmodem.c	65	config_frames	global	unsigned short[4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	118	thread_struct	global	THREAD_STRUCT	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	119	nrUE_params	global	nrUE_params_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	123	RC	global	RAN_CONTEXT_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	124	oai_exit	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	126	downlink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	127	uplink_frequency_offset	global	int64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	128	sidelink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	131	cpuf	global	double	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	189	fo_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	189	ssb_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	261	g_cells	file_static	nr_cell_life_t	PROCESS	A8	A8: cell lifecycle (owner of the cell manager; one control thread)
-executables/nr-uesoftmodem.c	262	g_ncells	file_static	int	PROCESS	A8	A8: number of served cells
-executables/nr-uesoftmodem.c	263	g_live	file_static	iq_live_t	PROCESS	A12	MPCI-LIVE: one capture / one control thread per process; written at start and by the control thread only
-executables/nr-uesoftmodem.c	264	g_live_on	file_static	int	PROCESS	A12	MPCI-LIVE: one capture / one control thread per process; written at start and by the control thread only
-executables/nr-uesoftmodem.c	265	g_nplan	file_static	int	PROCESS	A12	MPCI-LIVE: one capture / one control thread per process; written at start and by the control thread only
-executables/nr-uesoftmodem.c	266	g_inv_watch	file_static	nr_cell_inventory_watch_t	PROCESS	A8	A8: cells.json watcher (one control thread)
-executables/nr-uesoftmodem.c	267	g_uectx_path	file_static	char[PATH_MAX + 32]	PROCESS	A8	A8: cell 0 uectx path; cells k>0 derive theirs with nr_cell_path
-executables/nr-uesoftmodem.c	279	g_feed	file_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	280	g_feed_cells	file_static	iq_span_cell_t[NR_CELL_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	281	g_feed_ids	file_static	char[NR_CELL_MAX][NR_INV_ID_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	282	g_feed_dev	file_static	iq_span_dev_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	283	g_feed_plan	file_static	iq_span_plan_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	284	g_feed_wanted	file_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	285	g_feed_obj	file_static	iq_feed_t *	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	286	g_feed_entry	file_static	int[NR_CELL_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	608	mpci_feed_rings::s_load	func_static	iq_chan_load_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	650	mpci_feed_start::lease	func_static	const iq_chan_lease_t	CONST	A8	auto
-executables/nr-uesoftmodem.c	891	mpci_cell_sensing_open::hook_registered	func_static	atomic_int	PROCESS	A8	MPCI-INT: one cellfeat quiesce/resume hook registration per process
-executables/nr-uesoftmodem.c	1025	mpci_control_thread::s_parked	func_static	int[NR_CELL_MAX]	PROCESS	A12	MPCI-LIVE: written by the one control thread only
-executables/nr-uesoftmodem.c	1034	mpci_control_thread::s_feed_tick	func_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
-executables/nr-uesoftmodem.c	1058	s_dash_gpu_prev	file_static	nr_dash_gpu_t[NR_CELL_MAX]	PROCESS	A8	log/dashboard state
-executables/nr-uesoftmodem.c	1059	s_dash_gpu_win	file_static	nr_dash_win_t[NR_CELL_MAX]	PROCESS	A8	log/dashboard state
-executables/nr-uesoftmodem.c	1060	s_dash_now_ns	file_static	uint64_t	PROCESS	A8	log/dashboard state
-executables/nr-uesoftmodem.c	1180	trigger_deregistration::deregistration_sent	func_static	bool	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	1191	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
-executables/nr-uesoftmodem.c	1204	NB_UE_INST	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	1205	uniqCfg	global	configmodule_interface_t *	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
-executables/nr-uesoftmodem.c	1206	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	119	thread_struct	global	THREAD_STRUCT	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	120	nrUE_params	global	nrUE_params_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	124	RC	global	RAN_CONTEXT_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	125	oai_exit	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	127	downlink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	128	uplink_frequency_offset	global	int64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	129	sidelink_frequency	global	uint64_t[MAX_NUM_CCs][4]	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	132	cpuf	global	double	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	190	fo_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	190	ssb_given	file_static	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	262	g_cells	file_static	nr_cell_life_t	PROCESS	A8	A8: cell lifecycle (owner of the cell manager; one control thread)
+executables/nr-uesoftmodem.c	263	g_ncells	file_static	int	PROCESS	A8	A8: number of served cells
+executables/nr-uesoftmodem.c	264	g_live	file_static	iq_live_t	PROCESS	A12	MPCI-LIVE: one capture / one control thread per process; written at start and by the control thread only
+executables/nr-uesoftmodem.c	265	g_live_on	file_static	int	PROCESS	A12	MPCI-LIVE: one capture / one control thread per process; written at start and by the control thread only
+executables/nr-uesoftmodem.c	266	g_nplan	file_static	int	PROCESS	A12	MPCI-LIVE: one capture / one control thread per process; written at start and by the control thread only
+executables/nr-uesoftmodem.c	267	g_inv_watch	file_static	nr_cell_inventory_watch_t	PROCESS	A8	A8: cells.json watcher (one control thread)
+executables/nr-uesoftmodem.c	268	g_uectx_path	file_static	char[PATH_MAX + 32]	PROCESS	A8	A8: cell 0 uectx path; cells k>0 derive theirs with nr_cell_path
+executables/nr-uesoftmodem.c	280	g_feed	file_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	281	g_feed_cells	file_static	iq_span_cell_t[NR_CELL_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	282	g_feed_ids	file_static	char[NR_CELL_MAX][NR_INV_ID_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	283	g_feed_dev	file_static	iq_span_dev_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	284	g_feed_plan	file_static	iq_span_plan_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	285	g_feed_wanted	file_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	286	g_feed_obj	file_static	iq_feed_t *	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	287	g_feed_entry	file_static	int[NR_CELL_MAX]	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	626	mpci_feed_rings::s_load	func_static	iq_chan_load_t	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	668	mpci_feed_start::lease	func_static	const iq_chan_lease_t	CONST	A8	auto
+executables/nr-uesoftmodem.c	911	mpci_cell_sensing_open::hook_registered	func_static	atomic_int	PROCESS	A8	MPCI-INT: one cellfeat quiesce/resume hook registration per process
+executables/nr-uesoftmodem.c	1045	mpci_control_thread::s_parked	func_static	int[NR_CELL_MAX]	PROCESS	A12	MPCI-LIVE: written by the one control thread only
+executables/nr-uesoftmodem.c	1054	mpci_control_thread::s_feed_tick	func_static	int	PROCESS	G6	G6 wideband capture (one radio, one channelizer per process): set before RX by main, read by the control thread
+executables/nr-uesoftmodem.c	1078	s_dash_gpu_prev	file_static	nr_dash_gpu_t[NR_CELL_MAX]	PROCESS	A8	log/dashboard state
+executables/nr-uesoftmodem.c	1079	s_dash_gpu_win	file_static	nr_dash_win_t[NR_CELL_MAX]	PROCESS	A8	log/dashboard state
+executables/nr-uesoftmodem.c	1080	s_dash_now_ns	file_static	uint64_t	PROCESS	A8	log/dashboard state
+executables/nr-uesoftmodem.c	1200	trigger_deregistration::deregistration_sent	func_static	bool	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	1211	trigger_deregistration::m	func_static	const char[]	CONST	A8	auto
+executables/nr-uesoftmodem.c	1224	NB_UE_INST	global	int	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	1225	uniqCfg	global	configmodule_interface_t *	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
+executables/nr-uesoftmodem.c	1226	nrLDPC_coding_interface	global	nrLDPC_coding_interface_t	PROCESS	A8	process configuration / OAI globals (command line, config module, LDPC interface, exit flag): identical for every cell
 executables/softmodem-common.c	20	parallel_config	global	char *	PROCESS	A8	softmodem command-line parameters and run mode: process-wide, identical for every cell
 executables/softmodem-common.c	21	worker_config	global	char *	PROCESS	A8	softmodem command-line parameters and run mode: process-wide, identical for every cell
 executables/softmodem-common.c	22	usrp_tx_thread	global	int	PROCESS	A8	softmodem command-line parameters and run mode: process-wide, identical for every cell
@@ -3218,24 +3218,26 @@ openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	20	g_rank_max	file_static	const in
 openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	20	g_threads	file_static	const int	CONST	AUDIT	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	21	g_cpu_pct	file_static	double	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
 openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	22	g_autoreg	file_static	bool	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	23	g_sched	file_static	nr_td_cb0_sched_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	24	g_dec_registered	file_static	bool	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	25	g_freeze	file_static	bool	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	26	g_unlimited	file_static	bool	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	76	s_adm	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	76	s_batches	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	76	s_be_cpu	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	76	s_be_gpu	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	76	s_budget	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	76	s_cpu_us	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	76	s_grants	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	76	s_inadm	file_static	_Atomic uint64_t[NR_TD_CB0_R_COUNT]	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	76	s_items	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	76	s_not_testable	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	87	g_ctx	file_static	g_ctx_arr_t [converted]	PER_CELL	AUDIT	converted (mpci audit): NR_CELL_STATIC, indexed by the calling thread's cell
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	139	t_plan	tls	plan_t *	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	225	nr_td_cb0_wire_pre::s_warned	func_static	_Atomic int	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
-openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	537	nr_td_cb0_wire_converged_suffix::buf	tls	char[160]	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	25	g_sched_c	file_static	nr_td_cb0_sched_t [converted]	PER_CELL	POOLDERIVE	MPCI-POOLDERIVE: the CB0 token bucket and cost estimate are per cell (each cell caps at the process CPU cap / active cells)
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	25	g_sched_ok	file_static	bool[NR_CELL_MAX]	PER_CELL	POOLDERIVE	MPCI-POOLDERIVE: per-cell bucket initialised flag (indexed by cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	28	g_paused	file_static	unsigned	PROCESS	POOLDERIVE	MPCI-POOLDERIVE: bitmask of quiesced cells (A12 hook), atomic, indexed by cell; only used to count the active cells
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	64	g_dec_registered	file_static	bool	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	65	g_freeze	file_static	bool	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	66	g_unlimited	file_static	bool	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	114	s_adm	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	114	s_batches	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	114	s_be_cpu	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	114	s_be_gpu	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	114	s_budget	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	114	s_cpu_us	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	114	s_grants	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	114	s_inadm	file_static	_Atomic uint64_t[NR_TD_CB0_R_COUNT]	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	114	s_items	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	114	s_not_testable	file_static	_Atomic uint64_t	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	125	g_ctx	file_static	g_ctx_arr_t [converted]	PER_CELL	AUDIT	converted (mpci audit): NR_CELL_STATIC, indexed by the calling thread's cell
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	177	t_plan	tls	plan_t *	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	263	nr_td_cb0_wire_pre::s_warned	func_static	_Atomic int	PROCESS	AUDIT	mpci audit: CB0 wiring: configuration read once, host CPU-share token bucket (g_sched, a cap on the host's CPUs, so shared by the cells) with its cost estimates, aggregate counters and test hooks. The per-context diagnostics table g_ctx is PER_CELL
+openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c	575	nr_td_cb0_wire_converged_suffix::buf	tls	char[160]	TLS	AUDIT	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_td_gate.c	6	k_req	file_static	const float[3][32]	CONST	AUDIT	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c	27	g_pool_lock	file_static	pthread_mutex_t	PROCESS	AUDIT	mpci audit: recycled grant-work buffer pool (size classes, sealed before RX) and aggregate counters / timing histograms: buffers carry no cell state
 openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c	28	g_pool	file_static	gw_hdr_t *[GW_POOL_CLASSES]	PROCESS	AUDIT	mpci audit: recycled grant-work buffer pool (size classes, sealed before RX) and aggregate counters / timing histograms: buffers carry no cell state

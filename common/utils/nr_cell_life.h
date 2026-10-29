@@ -35,6 +35,7 @@ typedef struct {
   int (*start)(void *ctx, int cell, const nr_mgr_slot_t *slot, int reactivation); /* after the fence and nr_cell_set_count */
   void (*retire)(void *ctx, int cell, const nr_mgr_slot_t *slot);
   void (*retune)(void *ctx, int cell, const nr_cell_mgr_event_t *ev);
+  void (*pool_measure)(void *ctx, nr_host_caps_t *caps);            /* before every run-time admission: fill caps->pool_meas_* from the running receiver */
   void (*log)(void *ctx, const char *line);                         /* NULL: printf */
   void *ctx;
 } nr_cell_life_ops_t;
