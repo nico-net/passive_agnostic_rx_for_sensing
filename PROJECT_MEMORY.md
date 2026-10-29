@@ -5264,6 +5264,8 @@ output unchanged; agents on Sonnet; evidence labels per cell, never pooled; OTA 
    (P1/P3 per cell, G4 discovery criteria, check_bad 0, 0 overruns); O1 single operator 2 PCIs, O2 2 operators at 122.88 MS/s, O3 Vodafone
    415 + TIM 923 at 245.76 MS/s for 30 min (0 overflows/overruns), all daytime; S1-S3 sens6 build / 2-cell CPU-only / discrete GPU.
 5. **Push mpci-main** (ask the operator).
+   Update 2026-10-29: mpci/int-1029 merged into mpci-main (3110334ccb) on replay evidence; the integration OTA (item 1) is deferred
+   (host needed by another user) and runs before item 6.
 6. **Re-measure and fix §31** (DL health, UL, DCI 1_1) on the merged tree.
 7. **UL HARQ soft combining (C3 contract + G8 GPU slab keyed by cell, RNTI, HARQ pid, cleared on NDI toggle): LAST**, only once the UL
    pipeline decodes OTA after the §31.2 fixes; combining needs first transmissions that decode.
