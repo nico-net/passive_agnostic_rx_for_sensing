@@ -25,6 +25,7 @@ int nr_ue_rx_synced_g = 0;
 #include "common/utils/nr_core_plan.h"
 #include <pthread.h>
 #include "executables/nr-ue-ru.h"
+#include "radio/COMMON/ru_park.h" // MPCI-LIVE: tuning mailbox
 #include "common/utils/nr_shutdown.h"
 #include "executables/nr-uesoftmodem.h"
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
@@ -585,6 +586,32 @@ static uint64_t get_carrier_frequency(const int N_RB, const int mu, const uint32
   const uint64_t bw = (NR_NB_SC_PER_RB * N_RB) * MU_SCS(mu);
   const uint64_t carrier_freq = (pointA_freq_khz + bw / 2) * 1000;
   return carrier_freq;
+}
+
+/* MPCI-LIVE: the cell this UE instance serves was retuned by the control thread (live cell change: a cell added into this prepared slot, or a served cell whose centre,
+ * SSB or CFO changed; its channelizer entry was paused while the request was posted, so the sample stream has a forward gap and the timing loop has already re-acquired /
+ * is about to). Applied here, on the slot thread, outside any acquisition: the same fields the MAC sync request path sets, nothing allocated. The grid (N_RB, numerology,
+ * antennas) is the slot's prepared one: the control thread only posts tunings that keep it. */
+static void apply_live_tune(PHY_VARS_NR_UE *UE, const ru_tune_t *t)
+{
+  NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
+  const int64_t ul_off = (int64_t)fp->ul_CarrierFreq - (int64_t)fp->dl_CarrierFreq;
+  const uint64_t dl = (uint64_t)llround(t->centre_hz);
+  LOG_I(NR_PHY, "SENSING: MPCI_LIFE cell=%d live tune: centre %lu -> %lu Hz, ssb %u -> %d, initial_fo %.0f -> %.0f Hz; cell state cleared, re-acquiring\n", UE->Mod_id,
+        (unsigned long)fp->dl_CarrierFreq, (unsigned long)dl, (unsigned)fp->ssb_start_subcarrier, t->ssb, UE->initial_fo, t->cfo_hz);
+  for (int i = 0; i < get_nrUE_params()->num_dl_actors; i++)
+    flush_actor(UE->dl_actors + i);
+  for (int i = 0; i < get_nrUE_params()->num_ul_actors; i++)
+    flush_actor(UE->ul_actors + i);
+  fp->dl_CarrierFreq = dl;
+  fp->ul_CarrierFreq = (uint64_t)((int64_t)dl + ul_off);
+  fp->ssb_start_subcarrier = (uint16_t)t->ssb;
+  UE->initial_fo = t->cfo_hz;
+  init_symbol_rotation(fp);
+  clean_UE_harq(UE);
+  UE->is_synchronized = 0;
+  UE->target_Nid_cell = -1; /* any cell: the slot may now serve another PCI than the one it locked before */
+  nr_sfo_resync_cell(UE->Mod_id, "live cell change"); /* this cell only */
 }
 
 static int handle_sync_req_from_mac(PHY_VARS_NR_UE *UE)
@@ -1426,6 +1453,23 @@ void *UE_thread(void *arg)
     }
 
     AssertFatal(!syncRunning, "At this point synchronization can't be running\n");
+    {
+      ru_tune_t live_tune; /* MPCI-LIVE: a retune posted for this cell while its slot thread was parked */
+      if (ru_tune_take(UE->Mod_id, &live_tune)) {
+        apply_live_tune(UE, &live_tune);
+        stream_status = STREAM_STATUS_UNSYNC;
+        nr_rx_continuity_reset(&rx_continuity);
+        shiftForNextFrame = 0;
+        UE->max_pos_acc = 0;
+        UE->max_pos_iir = 0;
+        rx_recover_start = (struct timespec){0}; /* a different cell may be behind this ring: no fast re-acquisition of the old PCI */
+        rx_recover_fast_tries = 0;
+        rx_recover_old_target = -1;
+        atomic_store_explicit(&nr_ue_pending_rebase_valid, 0, memory_order_relaxed);
+        decoded_frame_rx = MAX_FRAME_NUMBER - 1;
+        trashed_frames = 0;
+      }
+    }
 
     if (!UE->is_synchronized) {
       if (rx_recover_on && rx_recover_start.tv_sec && rx_recover_fast_tries >= 2)

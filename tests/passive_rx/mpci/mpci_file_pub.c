@@ -8,6 +8,9 @@
  * usage: mpci_file_pub <speed> <seconds> <ring>=<dir>,<samples>,<first_tick>,<channels>,<rate>,<centre_hz>,<shift> [<ring>=... ...]
  *   speed    fraction of real time (e.g. 0.25, as the raw_iq replays), seconds = wall time to publish (the capture loops, each loop
  *            starts a new run: the consumers see a stream discontinuity), shift = right shift of the samples (the raw_iq replays use 2).
+ * MPCI-LIVE: an argument "watch=<path of cells.json>" (before the sources) makes the publisher follow the inventory like the in-process channelizer does: a ring whose
+ * id ("nrcell_<id>") no longer appears in the file is paused (marked away until SHM_IQ_AWAY_PAUSED: its consumer's read returns PAUSED, the receiver parks the slot
+ * thread), a ring whose id is back is resumed (new run: a forward gap). The file is polled twice a second; the match is a plain text search for "\"<id>\"".
  * Stops on SIGINT/SIGTERM, removes its rings. Arguments of a test tool, not options of the receiver. */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -37,6 +40,7 @@ typedef struct {
   shm_iq_ring_t r;
   int16_t *buf[SHM_IQ_MAX_CH];
   uint64_t tick, loops, written;
+  int paused;
 } pub_t;
 
 static int parse(const char *a, pub_t *p)
@@ -76,7 +80,13 @@ int main(int argc, char **argv)
   }
   pub_t P[MAX_SRC];
   int n = 0;
-  for (int i = 3; i < argc && n < MAX_SRC; i++, n++) {
+  const char *watch = NULL;
+  int first = 3;
+  if (argc > 3 && !strncmp(argv[3], "watch=", 6)) {
+    watch = argv[3] + 6;
+    first = 4;
+  }
+  for (int i = first; i < argc && n < MAX_SRC; i++, n++) {
     memset(&P[n], 0, sizeof(P[n]));
     if (parse(argv[i], &P[n])) {
       fprintf(stderr, "bad source '%s'\n", argv[i]);
@@ -107,7 +117,34 @@ int main(int argc, char **argv)
   fflush(stdout);
   const double t0 = now_s();
   double published_s = 0; /* signal time published so far (all rings advance together, on the first ring's rate) */
+  double next_watch = 0;
   while (!g_stop && now_s() - t0 < secs) {
+    if (watch && now_s() >= next_watch) { /* follow the inventory: pause the rings of cells that left it, resume those that came back */
+      next_watch = now_s() + 0.5;
+      static char txt[65536];
+      FILE *fp = fopen(watch, "r");
+      size_t len = fp ? fread(txt, 1, sizeof(txt) - 1, fp) : 0;
+      if (fp)
+        fclose(fp);
+      txt[len] = 0;
+      for (int i = 0; fp && i < n; i++) {
+        pub_t *p = &P[i];
+        char key[96];
+        snprintf(key, sizeof(key), "\"%s\"", strncmp(p->ring, "nrcell_", 7) ? p->ring : p->ring + 7);
+        const int present = strstr(txt, key) != NULL;
+        if (!present && !p->paused) {
+          shm_iq_ring_set_away(&p->r, SHM_IQ_AWAY_PAUSED);
+          p->paused = 1;
+          printf("MPCI_PUB ring=/%s paused (left the inventory)\n", p->ring);
+          fflush(stdout);
+        } else if (present && p->paused) {
+          shm_iq_ring_return(&p->r, p->centre);
+          p->paused = 0;
+          printf("MPCI_PUB ring=/%s resumed (back in the inventory)\n", p->ring);
+          fflush(stdout);
+        }
+      }
+    }
     for (int i = 0; i < n; i++) {
       pub_t *p = &P[i];
       const int want = (int)llround((double)BLOCK * p->rate / P[0].rate);
@@ -121,8 +158,9 @@ int main(int argc, char **argv)
         if (got <= 0)
           continue;
       }
-      shm_iq_ring_write(&p->r, (int64_t)p->tick, (void *const *)p->buf, got, p->channels);
-      p->tick += (uint64_t)got;
+      if (!p->paused)
+        shm_iq_ring_write(&p->r, (int64_t)p->tick, (void *const *)p->buf, got, p->channels);
+      p->tick += (uint64_t)got; /* a paused ring's clock keeps running: the resume is a forward gap */
       p->written += (uint64_t)got;
     }
     published_s += (double)BLOCK / P[0].rate;

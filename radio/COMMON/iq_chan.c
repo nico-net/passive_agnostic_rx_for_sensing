@@ -447,6 +447,7 @@ struct iq_chan {
   uint64_t last_step_ns;
   int threads, threads_needed;
   double capacity_sps;
+  int demand_k0, demand_n0, demand_now; /* MPCI-LIVE: CPU backend: the threads and running entries at start (the registered demand), and the demand registered now */
 };
 
 iq_chan_t *iq_chan_create(const iq_chan_cfg_t *cfg)
@@ -542,7 +543,7 @@ static void apply_op(iq_chan_t *c, op_t *op)
     if (!x->paused) {
       x->paused = 1;
       __atomic_add_fetch(&c->npaused, 1, __ATOMIC_RELAXED);
-      shm_iq_ring_set_away(&x->out, UINT64_MAX >> 1); /* no writes until resumed: its consumers wait instead of declaring the producer lost */
+      shm_iq_ring_set_away(&x->out, SHM_IQ_AWAY_PAUSED); /* no writes until resumed: its consumers wait instead of declaring the producer lost */
       fprintf(stderr, "IQ_CHAN_PAUSE cell=%s\n", x->e.tag);
     }
   } else if (op->kind == OP_RESUME) {
@@ -597,6 +598,30 @@ static void free_cell_buffers(iq_chan_t *c, cell_t *x)
   for (unsigned a = 0; a < c->nch; ++a) { free(x->obuf[a]); x->obuf[a] = NULL; }
 }
 
+/* MPCI-LIVE (CHANPOOL open item: "demand is not recomputed when cells pause/resume"): the CHAN demand registered at start is k threads for the entries that ran then. With
+ * fewer running entries the channelizer needs proportionally fewer reserved tokens (pure rule: ceil(k0 x running / running at start), at least 1 while one entry runs, 0 when
+ * every entry is paused, never more than the threads that exist); the pool then gives the tokens back to the other classes. Applied on the caller's thread of
+ * add / remove / pause / resume (never inside a block). Only the CPU backend registered a demand (demand_k0 > 0); a GPU backend keeps its own. */
+int iq_chan_demand_for(int k0, int n0, int running, int threads)
+{
+  if (k0 <= 0 || running <= 0) return 0;
+  int d = n0 > 0 ? (int)(((long)k0 * running + n0 - 1) / n0) : k0;
+  if (d < 1) d = 1;
+  if (threads > 0 && d > threads) d = threads;
+  return d;
+}
+static void demand_recompute(iq_chan_t *c)
+{
+  if (c->demand_k0 <= 0 || !c->running) return;
+  const unsigned nused = __atomic_load_n(&c->nused, __ATOMIC_RELAXED), npaused = __atomic_load_n(&c->npaused, __ATOMIC_RELAXED);
+  const int d = iq_chan_demand_for(c->demand_k0, c->demand_n0, (int)(nused - npaused), c->threads);
+  if (d == c->demand_now) return;
+  c->demand_now = d;
+  iq_chan_lease_set_demand(d);
+  fprintf(stderr, "IQ_CHAN_DEMAND tokens=%d running=%u/%u at_start=%d/%d\n", d, nused - npaused, nused, c->demand_k0, c->demand_n0);
+}
+int iq_chan_demand(const iq_chan_t *c) { return c ? c->demand_now : 0; }
+
 int iq_chan_cell_add(iq_chan_t *c, const iq_chan_entry_t *e)
 {
   if (!c || !e) return -EINVAL;
@@ -640,6 +665,7 @@ int iq_chan_cell_add(iq_chan_t *c, const iq_chan_entry_t *e)
   }
   if (c->budget_left != SIZE_MAX) c->budget_left -= x->ring_bytes;
   submit_op(c, op);
+  demand_recompute(c);
   rc = slot;
   free(op);
 out:
@@ -657,6 +683,7 @@ int iq_chan_cell_remove(iq_chan_t *c, int id)
     if (!op) { pthread_mutex_unlock(&c->api_mu); return -ENOMEM; }
     op->kind = OP_REMOVE; op->slot = id;
     submit_op(c, op);
+    demand_recompute(c);
     c->be->release(c->ctx, op->cell.state);
     free_cell_buffers(c, &op->cell);
     if (c->budget_left != SIZE_MAX) c->budget_left += op->cell.ring_bytes;
@@ -695,6 +722,7 @@ static int submit_simple(iq_chan_t *c, int id, int kind)
     memset(&op, 0, sizeof(op));
     op.kind = kind; op.slot = id;
     submit_op(c, &op);
+    demand_recompute(c);
     rc = 0;
   }
   pthread_mutex_unlock(&c->api_mu);
@@ -939,8 +967,13 @@ int iq_chan_start(iq_chan_t *c, const int *cpus, int ncpus)
     if (k < c->threads_needed)
       fprintf(stderr, "IQ_CHAN_SHORTFALL threads_needed=%d threads=%d capacity=%.1f MS/s in_rate=%.2f MS/s\n", c->threads_needed, k, c->capacity_sps * 1e-6, c->in_rate * 1e-6);
   }
-  if (c->be == &iq_chan_backend_cpu) iq_chan_lease_set_demand(k); /* the pool takes k tokens off the share of the other classes (a GPU backend registers its own CPU-part demand) */
-  return iq_chan_start_k(c, cpus, ncpus, k);
+  if (c->be == &iq_chan_backend_cpu) {
+    iq_chan_lease_set_demand(k); /* the pool takes k tokens off the share of the other classes (a GPU backend registers its own CPU-part demand) */
+    c->demand_k0 = k; c->demand_n0 = (int)l.n_cells; c->demand_now = k;
+  }
+  const int rc = iq_chan_start_k(c, cpus, ncpus, k);
+  if (rc) c->demand_k0 = 0;
+  return rc;
 }
 
 void iq_chan_stop(iq_chan_t *c)
@@ -949,6 +982,7 @@ void iq_chan_stop(iq_chan_t *c)
   atomic_store(&c->stop, 1);
   pthread_join(c->th, NULL);
   iq_chan_lease_set_demand(0);
+  c->demand_k0 = c->demand_now = 0;
   pthread_mutex_lock(&c->mu);
   c->running = 0;
   if (c->op) { apply_op(c, c->op); c->op = NULL; atomic_store(&c->op_pending, 0); pthread_cond_broadcast(&c->cv); } /* a command raced with the stop */

@@ -21,6 +21,12 @@
 extern "C" {
 #endif
 #define NR_CELL_LIFE_PRIMARY_ID "primary" /* id of the started cell when the inventory does not list it */
+/* MPCI-LIVE: spare slots. When the first inventory holds >= 2 cells, up to `n_spare` placeholder cells ("spare1", ...) with the started cell's grid are admitted with them, so
+ * the slots are prepared before the fence (UE instance, RU on its ring, threads) and a cell that appears later takes one at run time without any allocation. A placeholder
+ * is released from the manager right after the prepare (the slot is then free and prepared), and its slot thread is started like any other (it parks on the paused ring).
+ * Admission (B3) decides how many of them fit the host: a spare is admitted last, so it is the first thing a tight host drops. */
+#define NR_CELL_LIFE_SPARE_PREFIX "spare"
+#define NR_CELL_LIFE_SPARE_DEFAULT 1 /* policy: one cell of headroom */
 
 typedef struct {
   /* All hooks may be NULL. They run with the calling thread bound to `cell`. */
@@ -47,6 +53,12 @@ typedef struct {
   /* activation collects the ADD events of the first inventory here (hooks run after the manager returns) */
   int pending_add[NR_CELL_MAX], n_pending;
   int collecting;
+  /* MPCI-LIVE */
+  nr_host_caps_t caps;         /* the caps of the plan, for the admission re-evaluation at every run-time add */
+  int n_spare_wanted;          /* placeholders asked for (only used when the first inventory holds >= 2 cells) */
+  int spare[NR_CELL_MAX];      /* slot was admitted as a placeholder */
+  nr_cell_inventory_t last_inv; /* last accepted inventory: re-applied when a retire frees a slot (cells refused for lack of one) */
+  int have_last;
 } nr_cell_life_t;
 
 /* Pure: the inventory as the manager must see it. out->cell[0] is the primary cell (state MAINTAIN, so the manager puts it in slot 0): the
@@ -58,6 +70,14 @@ int nr_cell_life_order(const nr_cell_desc_t *primary, const nr_cell_inventory_t 
 /* Once, before the fence. `inv` may be NULL (no inventory). Returns N_max (>= 1) or -1 (the plan refuses the primary / bad arguments). */
 int nr_cell_life_plan(nr_cell_life_t *L, const nr_cell_mgr_cfg_t *cfg, const nr_host_caps_t *caps, const nr_cell_life_ops_t *ops,
                       const nr_cell_desc_t *primary, const nr_cell_inventory_t *inv, double tol_hz);
+/* Same, with `n_spare` placeholder slots (see NR_CELL_LIFE_SPARE_*): nr_cell_life_plan == nr_cell_life_plan_spare(.., 0). */
+int nr_cell_life_plan_spare(nr_cell_life_t *L, const nr_cell_mgr_cfg_t *cfg, const nr_host_caps_t *caps, const nr_cell_life_ops_t *ops,
+                            const nr_cell_desc_t *primary, const nr_cell_inventory_t *inv, double tol_hz, int n_spare);
+int nr_cell_life_is_spare_id(const char *id);
+static inline int nr_cell_life_is_spare(const nr_cell_life_t *L, int cell) { return cell >= 0 && cell < NR_CELL_MAX && L->spare[cell]; }
+static inline int nr_cell_life_prepared(const nr_cell_life_t *L, int cell) { return cell >= 0 && cell < NR_CELL_MAX && L->prepared[cell]; }
+/* Before the prepare: forget the placeholders (the input turned out to be published rings, which a spare cannot have). Returns how many were dropped. */
+int nr_cell_life_drop_spares(nr_cell_life_t *L);
 /* Activation in three steps (the receiver runs them at three points of its start-up), each once and in this order:
  *   admit:   ADD events of the first inventory -> the slot of every served cell is known (nr_cell_mgr_slot); returns the number of cells added.
  *   prepare: prealloc hook of each added cell (bound) -> fence hook -> nr_cell_set_count(highest prepared slot + 1); returns the prepared count.

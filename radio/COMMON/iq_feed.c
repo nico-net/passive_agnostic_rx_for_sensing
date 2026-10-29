@@ -108,6 +108,21 @@ int iq_feed_cell_add(iq_feed_t *f, const char *tag, double centre_hz, int decim,
 }
 int iq_feed_cell_pause(iq_feed_t *f, int id) { return f ? iq_chan_cell_pause(f->chan, id) : -EINVAL; }
 int iq_feed_cell_resume(iq_feed_t *f, int id) { return f ? iq_chan_cell_resume(f->chan, id) : -EINVAL; }
+/* MPCI-LIVE: retune one entry to a new cell centre inside the running capture (shift = centre - the capture's centre); resets that entry's history, bumps its ring epoch */
+int iq_feed_cell_retune(iq_feed_t *f, int id, double centre_hz)
+{
+  if (!f || !(centre_hz > 0)) return -EINVAL;
+  return iq_chan_cell_retune(f->chan, id, centre_hz - shm_iq_ring_center(&f->wide), centre_hz);
+}
+/* MPCI-LIVE: the radio's LO moved to `centre_hz` (same rate; the caller retuned the device under its exclusive gate): the wideband ring starts a new run with the new
+ * centre; the channelizer recomputes every entry's shift (entries are given by absolute centre), resets their histories and bumps every cell ring's epoch. */
+int iq_feed_set_centre(iq_feed_t *f, double centre_hz)
+{
+  if (!f || !(centre_hz > 0)) return -EINVAL;
+  shm_iq_ring_new_epoch(&f->wide, centre_hz);
+  return 0;
+}
+double iq_feed_centre(const iq_feed_t *f) { return f ? shm_iq_ring_center(&f->wide) : 0; }
 shm_iq_ring_t *iq_feed_cell_ring(iq_feed_t *f, int id) { return f ? iq_chan_cell_ring(f->chan, id) : NULL; }
 shm_iq_ring_t *iq_feed_wide_ring(iq_feed_t *f) { return f ? &f->wide : NULL; }
 iq_chan_t *iq_feed_chan(iq_feed_t *f) { return f ? f->chan : NULL; }

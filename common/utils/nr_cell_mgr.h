@@ -62,6 +62,10 @@ typedef struct {
   size_t slot_state_bytes;     /* size of the per-slot object allocated before the fence (0: none) */
   void (*log)(void *ctx, const char *line); /* NULL: printf to stdout */
   void *log_ctx;
+  /* MPCI-LIVE: may slot `slot` (prepared before the fence, with a fixed grid) carry the cell `d`? NULL: any free slot does. A free slot is chosen among those that fit,
+   * preferring the one that last held the same id (its per-cell state is the cell's own). When free slots exist but none fits the cell is refused (cause "no_slot_fits"). */
+  int (*slot_fit)(void *ctx, int slot, const nr_cell_desc_t *d);
+  void *slot_fit_ctx;
   /* The grid the receiver is STARTED with in pass 1 (inputs from its actual start configuration, not constants of the manager). All three required (> 0). */
   int grid_n_rb;               /* -r: N_RB of the started grid (used for a cell whose n_rb_hint is null) */
   int pass1_ssb;               /* --ssb the receiver is started with while k_SSB is unknown: SSB first subcarrier in the started grid */
@@ -84,6 +88,7 @@ typedef struct {
   nr_mgr_slot_t slot[NR_CELL_MAX];
   nr_mgr_refused_t refused[NR_ADMIT_PLAN_MAX];
   int n_refused;
+  char last_id[NR_CELL_MAX][NR_INV_ID_MAX]; /* MPCI-LIVE: the id a slot held last (kept after a retire) */
 } nr_cell_mgr_t;
 
 /* Call once, before nr_cell_alloc_fence(). `wanted` = the cells the process would like to serve (descriptors of the first inventory, or a
@@ -104,6 +109,8 @@ int nr_cell_mgr_tick(nr_cell_mgr_t *m, int64_t now_ns);
  * PCI mismatch / cell has no ssb_hz or gscn. *ssb_out and *centre_out (may be NULL) receive the refined values whenever the result is >= 0. */
 int nr_cell_mgr_pass2_from_log(nr_cell_mgr_t *m, const char *id, const char *log, size_t len, int64_t now_ns, int *ssb_out, double *centre_out);
 
+/* MPCI-LIVE: free a slot without an event (a spare placeholder admitted only to be prepared before the fence). 0, or -1 when the slot is not active. */
+int nr_cell_mgr_release(nr_cell_mgr_t *m, int slot);
 int nr_cell_mgr_nmax(const nr_cell_mgr_t *m);
 int nr_cell_mgr_active(const nr_cell_mgr_t *m);          /* cells holding a slot (incl. those pending retire) */
 int nr_cell_mgr_find(const nr_cell_mgr_t *m, const char *id); /* slot or -1 */

@@ -127,6 +127,11 @@ void shm_iq_ring_set_meta(shm_iq_ring_t *r, const char *radio_id, unsigned time_
 /* Producer: time-shared window leaves (until_ns = expected return, CLOCK_MONOTONIC) / returns (new run + epoch bump;
  * `away` clears at the next write). */
 void shm_iq_ring_set_away(shm_iq_ring_t *r, uint64_t until_ns);
+/* MPCI-LIVE: a producer that paused a cell's ring for good (until it resumes it, not a time-shared dwell) marks it away until SHM_IQ_AWAY_PAUSED. A consumer that
+ * sees this does not wait for data: the shm_iq device's read returns SHM_IQ_READ_PAUSED at once (no data, no error) so the receiver can park the cell's slot thread
+ * outside the radio lifetime gate (radio/COMMON/ru_park.h). Any shorter dwell is a time-shared window and keeps the old behaviour (the read waits). */
+#define SHM_IQ_AWAY_PAUSED (UINT64_MAX >> 1)
+#define SHM_IQ_READ_PAUSED (-2)
 void shm_iq_ring_return(shm_iq_ring_t *r, double center_hz);
 
 /* Consumer: copy samples [pos, pos+n) of the first `channels` ring channels to dst[c] (sc16, n samples each).
