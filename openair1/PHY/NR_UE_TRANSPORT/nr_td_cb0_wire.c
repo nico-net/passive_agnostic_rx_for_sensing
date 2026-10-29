@@ -46,6 +46,7 @@ static void share_locked(void)
     nr_td_cb0_sched_set_cpu_pct(&g_sched, pct);
   }
 }
+static void cfg_locked(void);
 double nr_td_cb0_wire_cell_share_pct(void)
 {
   pthread_mutex_lock(&g_lock);

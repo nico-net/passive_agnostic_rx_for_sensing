@@ -19,6 +19,7 @@ extern "C" {
 #include "nr_td_cb0_fixture.h"
 #include "nr_td_cb0_sched.h"
 #include "nr_td_cb0_wire.h"
+#include "common/utils/nr_cell.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_td_cb0_adapter.h"
 #include "nr_pdsch_config_sweep.h"

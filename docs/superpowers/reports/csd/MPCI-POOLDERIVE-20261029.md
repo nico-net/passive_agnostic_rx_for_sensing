@@ -26,7 +26,7 @@ nr_td_cb0_wire.c: `g_sched` is NR_CELL_STATIC/NR_CELL_REF; each cell's cpu_pct =
 
 ## Tests [TEST]
 test_nr_cell_admit 27/27, test_nr_core_pool_budget 13/13 (new: measured demand from hold time with the virtual clock, promotion follows measured demand), test_nr_cell_life 10, test_nr_cell_mgr 14,
-test_nr_core_pool, test_nr_core_layout 41 pass. cb0: Cb0Sched.CpuShareIsPerCellAndSplitsTheProcessCap + Cb0Wire.TwoCellsHaveOwnBucketsAndHalfTheCapEach (see build status in the final message).
+test_nr_core_pool, test_nr_core_layout 41 pass. cb0: Cb0Sched.CpuShareIsPerCellAndSplitsTheProcessCap + Cb0Wire.TwoCellsHaveOwnBucketsAndHalfTheCapEach pass (full test_nr_td_cb0_wire passes; nr-uesoftmodem links).
 static_audit --write/--check rc 0, 0 UNCLASSIFIED. sens6 frozen gate clean.
 
 ## OTA lines to check [NOT RUN]
