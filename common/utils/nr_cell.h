@@ -70,6 +70,28 @@ void nr_cell_bind(int idx);
  * Returns pthread_create's result (EINVAL/ENOMEM for the wrapper). cell >= NR_CELL_MAX is fatal. */
 int nr_cell_thread_create(pthread_t *t, const pthread_attr_t *attr, void *(*fn)(void *), void *arg, int cell);
 
+/* Parked worker (mpci lazy-thread audit, group C): a per-cell worker whose thread is created BEFORE nr_cell_alloc_fence / mlockall and only armed later.
+ * prepare(): creates the thread (bound to `cell`, detached), which sleeps until armed; a failure is logged with its step and errno and returns the errno
+ *            (nothing stays half built; a later prepare may retry). Idempotent while prepared. `what` names the worker in the log.
+ * arm():     0 = the parked thread now runs fn(arg) (the unchanged worker body), -1 = nothing was prepared (or already armed): the caller starts the worker the old
+ *            lazy way (late start / re-add after stop, or a failed prepare), so no work is silently dropped.
+ * state: opaque; zero-initialised static storage is a valid "not prepared" value. */
+typedef struct {
+  pthread_mutex_t mu;
+  pthread_cond_t cv;
+  void *(*fn)(void *);
+  void *arg;
+  int state; /* 0 none, 1 parked, 2 armed */
+  int cell;
+  const char *what;
+  int inited;
+  pthread_t th;
+} nr_cell_parked_t;
+int nr_cell_parked_prepare(nr_cell_parked_t *p, const char *what, void *(*fn)(void *), void *arg, int cell);
+int nr_cell_parked_arm(nr_cell_parked_t *p);
+pthread_t nr_cell_parked_thread(const nr_cell_parked_t *p); /* the parked thread (valid after prepare) */
+int nr_cell_parked_state(const nr_cell_parked_t *p); /* 0 none, 1 parked, 2 armed (tests) */
+
 /* Per-cell path from the default host-global path `def`. cell 0: `def` copied unchanged.
  * cell k > 0 (tag "cell<k>"): file with extension  /tmp/a.txt -> /tmp/a.cell<k>.txt ;
  *                             no extension / directory  /tmp/passive_rx -> /tmp/passive_rx/cell<k>.

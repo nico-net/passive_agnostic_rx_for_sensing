@@ -67,9 +67,14 @@ typedef nid_rnti_t g_rnti_cell_t[RNTI_CAP];
 NR_CELL_STATIC_HEAP(g_rnti_cell_t, g_rnti); /* 132 KiB per cell */
 #define g_rnti NR_CELL_HEAP_REF(g_rnti_cell_t, g_rnti)
 /* Allocate cell `cell`'s heap objects (call for every active cell before nr_cell_alloc_fence(); cell 0 included). */
+static void *worker(void *a);
+NR_CELL_STATIC(nr_cell_parked_t, g_parked); /* lazy-thread audit: the worker thread is created parked here (before the fence), nr_ul_nid_bg_start only arms it */
+#define g_parked NR_CELL_REF(g_parked)
 void nr_ul_nid_bg_cell_prealloc(int cell)
 {
   NR_CELL_HEAP_PREALLOC(g_rnti_cell_t, g_rnti, cell);
+  if (nr_ul_nid_bg_enabled()) /* the same condition as the start; a disabled feature gets no thread */
+    (void)nr_cell_parked_prepare(&g_parked_cells[cell], "ulNidBg", worker, NULL, cell);
 }
 NR_CELL_STATIC_INIT(pthread_mutex_t, g_lock, PTHREAD_MUTEX_INITIALIZER);
 #define g_lock NR_CELL_REF(g_lock)
@@ -641,13 +646,17 @@ void nr_ul_nid_bg_start(nr_ul_nid_hyp_fn fn, nr_ul_nid_prep_fn prep)
   g_fn = nr_ul_nid_bg_iq_enabled() ? fn : NULL;
   g_prep = nr_ul_nid_bg_iq_enabled() ? prep : NULL;
   pthread_mutex_unlock(&g_lock);
-  pthread_attr_t at;
+  if (nr_cell_parked_arm(&g_parked) == 0) { /* prepared before the fence: arm only */
+    g_thr = nr_cell_parked_thread(&g_parked);
+    return;
+  }
+  pthread_attr_t at; /* not prepared (failed prepare, restart after stop): the old lazy start */
   pthread_attr_init(&at);
   pthread_attr_setinheritsched(&at, PTHREAD_EXPLICIT_SCHED); /* never inherit SCHED_FIFO from the PUSCH worker */
   struct sched_param sp = {0};
   pthread_attr_setschedpolicy(&at, SCHED_OTHER);
   pthread_attr_setschedparam(&at, &sp);
-  if (nr_cell_thread_create(&g_thr, &at, worker, NULL, -1)) /* the worker serves the cell of the caller */ LOG_E(PHY, "SENSING: UL_NID_BG worker not started\n");
+  if (nr_cell_thread_create(&g_thr, &at, worker, NULL, -1)) /* the worker serves the cell of the caller */ LOG_E(PHY, "SENSING: UL_NID_BG worker not started: step=thread_create (no parked worker)\n");
   pthread_attr_destroy(&at);
 }
 void nr_ul_nid_bg_stop(void)
