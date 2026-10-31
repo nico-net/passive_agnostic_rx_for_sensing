@@ -1765,6 +1765,12 @@ void nr_pdsch_ptrs_processing(int nbRx,
                              gold,
                              (int16_t *)&phase_per_symbol[symbol],
                              &ptrs_re_symbol[symbol]);
+      /* pduBitmap bit 2 (passive blind PT-RS, "exclusion only"): the PT-RS REs are compacted out above, but the phase estimate
+       * correlated against the gold reference is not applied: identity, like a DM-RS symbol. */
+      if (dlsch_config->pduBitmap & 0x4) {
+        phase_per_symbol[symbol].r = INT16_MAX;
+        phase_per_symbol[symbol].i = 0;
+      }
     }
 
     /* For last OFDM symbol at each antenna perform interpolation and compensation for the slot*/

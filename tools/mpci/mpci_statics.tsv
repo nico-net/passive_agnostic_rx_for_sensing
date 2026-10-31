@@ -2727,6 +2727,10 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c	19	nr_ptrs_density_k	global	co
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c	20	nr_ptrs_density_l	global	const uint8_t[NR_PTRS_DENSITY_N]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c	150	nr_ptrs_sweep_arm::kK	func_static	const uint8_t[NR_PTRS_ARMS]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c	151	nr_ptrs_sweep_arm::kL	func_static	const uint8_t[NR_PTRS_ARMS]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1810	t_ptrs_detect_only	tls	bool	TLS	A5	existing thread-local pattern: PT-RS detector arm request
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1811	t_ptrs_det	tls	nr_ptrs_det_t	TLS	A5	existing thread-local pattern: PT-RS detector verdict
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_detect.c	23	kL	file_static	const uint8_t[3]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_detect.c	185	nr_ptrs_class_index::edge	func_static	const unsigned[NR_PTRS_NRB_BANDS - 1]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c	9	nr_pdsch_qm_of_mcs::first4	func_static	const uint8_t[3]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c	9	nr_pdsch_qm_of_mcs::first6	func_static	const uint8_t[3][3]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c	9	nr_pdsch_qm_of_mcs::first8	func_static	const uint8_t[3][3]	CONST	A5	auto

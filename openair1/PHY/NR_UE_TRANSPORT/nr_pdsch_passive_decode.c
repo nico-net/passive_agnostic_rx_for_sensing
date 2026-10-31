@@ -89,6 +89,7 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "PHY/TOOLS/nr_gpu_path.h" // per-path GPU/CPU choice (GPUPASS trial on DISCRETE)
 #include "PHY/MODULATION/modulation_UE.h" // nr_slot_fep, nr_slot_fep_ant
 #include "nr_pdsch_ptrs_unav.h"
+#include "nr_pdsch_ptrs_detect.h"
 #include "nr_pdsch_prb_set.h" // nr_prb_segments, nr_prb_gather_index (non-contiguous PRB sets)
 #include "nr_pdsch_host_fast.h" // NEON unscramble
 #include "nr_arm_sweep.h" // generic per-RNTI Wilson pick/latch core shared by the VRB-L and PRG sweeps
@@ -802,7 +803,8 @@ static uint8_t nr_prg_arm_value(int arm) { return arm == 2 ? 4 : (arm == 1 ? 2 :
  * data-identity decision. SI-/RA-/P-RNTI grants never get a slot (rnti_sweepable()): those identities
  * are not UEs and carry no dedicated RRC configuration. ~2.1 KB/slot, 135 KB of BSS. */
 #define RNTI_DEC_MAX 64
-typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_vrbl_sweep_t vrbl; nr_prg_sweep_t prg; nr_scrambling_id_sweep_t data_id; } rnti_dec_t;
+/* ptrs[]: the blind PT-RS evidence per (MCS band, N_RB band) -- presence depends on MCS and N_RB (TS 38.214 5.1.6.3), see nr_pdsch_ptrs_detect.h (+~3.6 KB/slot). */
+typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_vrbl_sweep_t vrbl; nr_prg_sweep_t prg; nr_scrambling_id_sweep_t data_id; nr_ptrs_class_t ptrs[NR_PTRS_CLASS_N]; } rnti_dec_t;
 typedef rnti_dec_t g_rnti_dec_arr_t[RNTI_DEC_MAX];
 NR_CELL_STATIC_HEAP(g_rnti_dec_arr_t, g_rnti_dec);
 #define g_rnti_dec NR_CELL_HEAP_REF(g_rnti_dec_arr_t, g_rnti_dec)
@@ -846,6 +848,9 @@ static bool rnti_dec_evidence(const rnti_dec_t *r)
 {
   if (r->nl || r->data_id.n > 0 || r->prg.explore || r->prg.s.latched >= 0 || r->vrbl.latched >= 0)
     return true;
+  for (int c = 0; c < NR_PTRS_CLASS_N; c++)
+    if (r->ptrs[c].latched >= 0 || r->ptrs[c].det_hit)
+      return true;
   uint32_t tr = 0;
   for (int a = 0; a < NR_ARM_SWEEP_MAX; a++)
     tr += r->vrbl.tr[a] + r->prg.s.tr[a];
@@ -881,6 +886,8 @@ static rnti_dec_t *rnti_dec_find(uint16_t rnti, bool create)
   r->touched = ++g_rnti_dec_clock;
   r->vrbl.latched = -1; // tr/ok already zeroed by the memset above
   nr_arm_sweep_gated_init(&r->prg);
+  for (int c = 0; c < NR_PTRS_CLASS_N; c++)
+    nr_ptrs_class_init(&r->ptrs[c]);
   return r;
 }
 static rnti_dec_t *rnti_dec(uint16_t rnti) { return rnti_dec_find(rnti, true); }
@@ -1026,6 +1033,65 @@ static int rnti_prg_feed(uint16_t rnti, int arm, bool tb_ok, bool link_ok, bool 
   *explore_started = !was && p->explore;
   pthread_mutex_unlock(&g_ptrs_lock);
   return latched;
+}
+
+/* ---- BLIND PT-RS (D3): per-(RNTI, MCS band, N_RB band) evidence, accessors under g_ptrs_lock. ----
+ * Only dedicated-class grants (sweepable) have a class; SI/RA/P-RNTI carry no PT-RS. */
+enum { PTRS_PLAN_NONE = 0, PTRS_PLAN_APPLY = 1 };
+/* PTRS_PLAN_APPLY when the class is latched 'present' with a modal detector hypothesis: *h is the PT-RS configuration to decode with. */
+static int rnti_ptrs_plan(uint16_t rnti, unsigned mcs, unsigned nb_rb, nr_ptrs_hyp_t *h, int *mode)
+{
+  int plan = PTRS_PLAN_NONE;
+  pthread_mutex_lock(&g_ptrs_lock);
+  const nr_ptrs_class_t *c = &rnti_dec(rnti)->ptrs[nr_ptrs_class_index(mcs, nb_rb)];
+  if (c->latched == 1 && nr_ptrs_class_hyp(c, h)) {
+    plan = PTRS_PLAN_APPLY;
+    *mode = nr_ptrs_class_best_mode(c);
+  }
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return plan;
+}
+static bool rnti_ptrs_should_detect(uint16_t rnti, unsigned mcs, unsigned nb_rb)
+{
+  pthread_mutex_lock(&g_ptrs_lock);
+  const bool d = nr_ptrs_class_should_detect(&rnti_dec(rnti)->ptrs[nr_ptrs_class_index(mcs, nb_rb)]);
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return d;
+}
+/* Feeds the detector run; returns the class's modal hypothesis in *h (false: none yet). */
+static bool rnti_ptrs_det_feed(uint16_t rnti, unsigned mcs, unsigned nb_rb, const nr_ptrs_det_t *d, nr_ptrs_hyp_t *h, int *mode)
+{
+  if (!nr_cfg_epoch_work_current()) return false;
+  pthread_mutex_lock(&g_ptrs_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_ptrs_lock); return false; }
+  nr_ptrs_class_t *c = &rnti_dec(rnti)->ptrs[nr_ptrs_class_index(mcs, nb_rb)];
+  nr_ptrs_class_det_feed(c, d);
+  const bool have = c->latched != 0 && nr_ptrs_class_hyp(c, h);
+  *mode = c->latched == 1 ? nr_ptrs_class_best_mode(c) : nr_ptrs_class_pick_mode(c);
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return have;
+}
+static void rnti_ptrs_crc_feed(uint16_t rnti, unsigned mcs, unsigned nb_rb, int mode, bool tb_ok)
+{
+  if (!nr_cfg_epoch_work_current()) return;
+  pthread_mutex_lock(&g_ptrs_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_ptrs_lock); return; }
+  nr_ptrs_class_t *c = &rnti_dec(rnti)->ptrs[nr_ptrs_class_index(mcs, nb_rb)];
+  const int before = c->latched;
+  nr_ptrs_class_crc_feed(c, mode, tb_ok);
+  if (c->latched != before)
+    LOG_A(PHY, "SENSING: PTRS_CLASS rnti=0x%04x mcs=%u rb=%u latched %d -> %d (ok/tr without %u/%u cpe %u/%u excl-only %u/%u, detector %u/%u)\n", rnti, mcs,
+          nb_rb, before, c->latched, c->ok[0], c->tr[0], c->ok[1], c->tr[1], c->ok[2], c->tr[2], c->det_hit, c->det_n);
+  pthread_mutex_unlock(&g_ptrs_lock);
+}
+/* Sets the PDU's PT-RS fields from h (the demodulator's PTRSFreqDensity is K itself, PTRSTimeDensity log2 L, PTRSReOffset k_RE_ref).
+ * mode 2 adds pduBitmap bit 2 (PTRS_EXCL_ONLY): the PT-RS REs leave the data and G, but the PT-RS phase estimate is not applied. */
+static void ptrs_apply_hyp(fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, const nr_ptrs_hyp_t *h, int mode)
+{
+  pdu->pduBitmap |= mode == 2 ? 0x5 : 0x1;
+  pdu->PTRSFreqDensity = h->K;
+  pdu->PTRSTimeDensity = (uint8_t)(h->L == 4 ? 2 : (h->L == 2 ? 1 : 0));
+  pdu->PTRSReOffset = h->k_re;
 }
 
 /* A segmented (prg 2/4) arm that cannot decode this grant at all (PT-RS, CSI-RS parity, bad list) is a
@@ -1741,6 +1807,9 @@ static __thread bool t_gw_used = false, t_gw_ready = false; /* last decode: LLRs
 /* Reruns (equivalence checks, the lazy computation): no learning-state side effect -- no PT-RS / PRG
  * pick, no HARQ soft combining, no sweep feed, no LBRM latch, no BRANCHFO commit, no HARQ record. */
 static __thread bool t_quiet = false;
+/* BLIND PT-RS (D3): the detector arm runs a body that stops after the FEP (and its sample-lifetime check) and leaves the verdict here. */
+static __thread bool t_ptrs_detect_only = false;
+static __thread nr_ptrs_det_t t_ptrs_det;
 static __thread bool t_last_hq_retx = false; /* last decode combined a retransmission into a soft buffer */
 
 /* Published with each entry: what the skipped stages produced that the rest of the decode reads. */
@@ -2685,8 +2754,16 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
 
   // ---- Scope: mirror nr_isac_pdsch_data_aided_submit()'s own guards. Decoding a grant whose
   // reconstruction we could not use anyway is pure CPU cost. ----
-  /* PT-RS grants are refused: the density is RRC-only, invisible to a passive receiver, and G cannot be computed without it. */
-  if (dlsch_config->pduBitmap & 0x1) {
+  /* A PT-RS grant needs its (K, L, k_RE_ref): the blind detector sets them (nr_pdsch_ptrs_detect.h, the retry arm below).
+   * pduBitmap&1 without a valid triple, or on the segmented (PRG/VRB) path whose virtual layout the PT-RS positions do not
+   * follow, is refused as before. G then excludes the PT-RS REs (TS 38.212 5.4.2.1: N_PTRS). */
+  uint32_t ptrs_unav = 0;
+  if ((dlsch_config->pduBitmap & 0x1) && !seg_path && (dlsch_config->PTRSFreqDensity == 2 || dlsch_config->PTRSFreqDensity == 4)
+      && dlsch_config->PTRSTimeDensity <= 2 && dlsch_config->PTRSReOffset < 12)
+    ptrs_unav = nr_pdsch_ptrs_unav_res((uint16_t)freq_alloc->num_rbs, dlsch_config->start_symbol, dlsch_config->number_symbols,
+                                       (uint16_t)(dlsch_config->dlDmrsSymbPos & 0x3FFFu), dlsch_config->PTRSFreqDensity,
+                                       (uint8_t)(1u << dlsch_config->PTRSTimeDensity), 1);
+  if ((dlsch_config->pduBitmap & 0x1) && ptrs_unav == 0) {
     { static _Atomic unsigned long c_ = 0;
       const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
       if (n_ == 1 || (n_ % 200) == 0)
@@ -2926,8 +3003,16 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   const uint8_t tbl_lbrm = grant->mcs_table_lbrm >= 0 ? (uint8_t)grant->mcs_table_lbrm : grant->mcs_table;
   dlsch_config->tbslbrm = nr_compute_tbslbrm(tbl_lbrm, bw_lbrm, (uint8_t)nl_tbslbrm);
 
+  if (ptrs_unav && (csi_unav || ssb_unav) && !t_ptrs_detect_only) {
+    /* the PT-RS compaction in nr_pdsch_ptrs_processing() indexes the symbol's REs before any SSB / CSI-RS REs were removed: fail closed */
+    { static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_A(PHY, "SENSING: PDSCH UNSUP@ptrs+rm n=%lu (PT-RS grant overlapping SSB/CSI-RS rate matching)\n", n_); }
+    return out->status;
+  }
   const uint32_t G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
-                              csi_unav + ssb_unav,
+                              csi_unav + ssb_unav + ptrs_unav,
                               cw->qamModOrder, cw->Nl);
   if (G == 0) {
     { static _Atomic unsigned long c_ = 0;
@@ -3374,6 +3459,14 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       if (n_ == 1 || (n_ % 200) == 0)
         LOG_A(PHY, "SENSING: PDSCH UNSUP@1625 n=%lu\n", n_); }
     return out->status; /* overwritten IQ is not CRC evidence */
+  }
+  if (t_ptrs_detect_only) { /* blind PT-RS detector on the transformed slot; no channel estimate, no demodulation, no LDPC */
+    const int re0 = (fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB) % fp->ofdm_symbol_size;
+    nr_ptrs_detect((const int16_t *)&rxdataF[0][0], fp->nb_antennas_rx, fp->samples_per_slot_wCP, fp->ofdm_symbol_size, re0,
+                   freq_alloc->num_rbs, grant->rnti, dlsch_config->start_symbol, dlsch_config->number_symbols,
+                   (uint16_t)(dlsch_config->dlDmrsSymbPos & 0x3FFFu), NR_PTRS_DET_ALPHA, &t_ptrs_det);
+    out->status = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
+    return out->status;
   }
   for (int i = 0; !gpu_llr && !gw_ready && grant->source_absolute_slot >= 0 && i < dlsch_config->numCsiRsForRateMatching; i++) {
     if (dlsch_config->csiRsForRateMatching[i].csi_type != 2)
@@ -4718,6 +4811,21 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   /* nr_pdsch_retry_pred.h: the S toggle (arm 2) runs first, learnt per RNTI; the final re-decode of the plain reading after every arm failed is
    * skipped (it repeats the first body bit for bit; its only effect was to restore *out). */
   nr_pdsch_passive_decode_status_t st;
+  /* BLIND PT-RS (D3): a class (RNTI, MCS band, N_RB band) latched 'PT-RS present' decodes with the detected (K, L, k_RE_ref) from the first body on. */
+  const bool pr_class = !t_quiet && !t_probe_first_seg && !t_gw_capture && !t_llr_ovr && rnti_sweepable(grant->rnti, grant->rnti_class)
+                        && !(dlsch_config->pduBitmap & 0x1) && freq_alloc->num_rbs >= 4 && freq_alloc->prg == 0
+                        && freq_alloc->last_rb - freq_alloc->first_rb + 1 == freq_alloc->num_rbs;
+  bool pr_applied = false;
+  int pr_mode = 0;
+  if (pr_class) {
+    nr_ptrs_hyp_t ph;
+    if (rnti_ptrs_plan(grant->rnti, grant->mcs, freq_alloc->num_rbs, &ph, &pr_mode) == PTRS_PLAN_APPLY) {
+      ptrs_apply_hyp(dlsch_config, &ph, pr_mode);
+      pr_applied = true;
+    } else {
+      pr_mode = 0;
+    }
+  }
   if (t_recov_mode == 2) {
     /* RECOVERY_ASYNC worker: the consumer's first pass already failed; the arms below each re-demodulate from the IQ snapshot with their own
      * configuration and use nothing of that pass but its FO (the job's FO override) -- so no first body here. */
@@ -4731,6 +4839,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   }
   }
   if (out->skip) return st; /* no-chance gate: verdict is final, nothing to retry */
+  if ((pr_class || pr_applied) && t_recov_mode != 2 && grant->rv == 0
+      && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
+    rnti_ptrs_crc_feed(grant->rnti, grant->mcs, freq_alloc->num_rbs, pr_mode, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
   if (t_rm_ctx && t_rm_ctx->arb && t_recov_mode != 1)
     st = rm_arb_step(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out, st, t_recov_mode != 2);
   if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && grant->dci11 && grant->rnti_class == 0) nr_retry_pred_miss(grant->rnti);
@@ -4830,6 +4941,77 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   if (t_recov_mode == 1) { /* RECOVERY_ASYNC: every arm below runs on the worker; the failed first pass stands */
     t_recov_deferred = true;
     return st;
+  }
+  /* ---- BLIND PT-RS arm (D3). The plain body failed on a first transmission of a C-RNTI grant that was decoded without PT-RS: run the
+   * signal detector on the transformed slot (a body that stops after the FEP), feed the class's evidence, and decode again with the
+   * class's modal (K, L, k_RE_ref) -- G then excludes the PT-RS REs. The TB CRC arbitrates (rnti_ptrs_crc_feed): the class latches
+   * 'present' once the with-PT-RS decodes beat the without-PT-RS ones; a class whose detector stays silent latches 'absent' and is
+   * re-probed 1 in 16. Costs one FEP per failed grant of an undecided class, on the recovery lane. */
+  if (pr_class && !pr_applied && grant->rv == 0 && !t_gw_used && ry_arm_worth(RY_ARMS - 1)) {
+    if (t_recov_mode == 2 && !ry_wait_idle()) return st;
+    if (t_recov_mode != 2 && (ry_backlog() > 0 || dec_now_ns() - t_dec_t0_ns > RETRY_BUDGET_NS)) {
+      atomic_fetch_add_explicit(&g_ry_yields, 1, memory_order_relaxed);
+    } else {
+      nr_ptrs_hyp_t ph;
+      int ph_mode = 1;
+      bool have = false;
+      const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
+      const bool saved_quiet = t_quiet;
+      const double saved_fo_override = nr_slot_fep_fo_override_hz;
+      nr_slot_fep_fo_override_hz = t_last_fep_fo;
+      t_quiet = true;
+      if (rnti_ptrs_should_detect(grant->rnti, grant->mcs, freq_alloc->num_rbs)) {
+        fapi_nr_dl_config_dlsch_pdu_rel15_t dcfg = original;
+        const nr_ptrs_hyp_t dummy = {2, 1, 0}; /* only to keep this body on the CPU stage path; the body stops after the FEP */
+        ptrs_apply_hyp(&dcfg, &dummy, 1);
+        memset(&t_ptrs_det, 0, sizeof(t_ptrs_det));
+        t_ptrs_detect_only = true;
+        t_decode_tdra_attempt = 9 + 64 * 91;
+        (void)passive_decode_body(ue, proc, &dcfg, freq_alloc, grant, rxdataF, out);
+        t_ptrs_detect_only = false;
+        if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)NR_PDSCH_PASSIVE_DECODE_CRC_FAIL); }
+        const nr_ptrs_det_t d = t_ptrs_det;
+        if (d.pairs > 0) {
+          have = rnti_ptrs_det_feed(grant->rnti, grant->mcs, freq_alloc->num_rbs, &d, &ph, &ph_mode);
+          if (!have && d.fired) { ph = d.hyp; have = true; } /* a single strong detection is tried once; the class needs repeated votes to keep it */
+          LOG_I(PHY, "SENSING: PTRS_DET rnti=0x%04x fs=%d.%d mcs=%d rb=%d fired=%d K=%u L=%u k=%u log10p=%.1f pairs=%u class_hyp=%d\n", grant->rnti,
+                proc->frame_rx, proc->nr_slot_rx, grant->mcs, freq_alloc->num_rbs, d.fired, d.hyp.K, d.hyp.L, d.hyp.k_re, d.log10_p, d.pairs, have);
+        }
+        *out = out_plain;
+      } else {
+        pthread_mutex_lock(&g_ptrs_lock);
+        const nr_ptrs_class_t *pc = &rnti_dec(grant->rnti)->ptrs[nr_ptrs_class_index(grant->mcs, freq_alloc->num_rbs)];
+        have = pc->latched != 0 && nr_ptrs_class_hyp(pc, &ph);
+        ph_mode = nr_ptrs_class_pick_mode(pc);
+        pthread_mutex_unlock(&g_ptrs_lock);
+      }
+      bool recovered = false;
+      if (have) {
+        fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = original;
+        ptrs_apply_hyp(&cfg, &ph, ph_mode);
+        t_decode_tdra_attempt = 10 + 64 * 91;
+        const nr_pdsch_passive_decode_status_t st2 = passive_decode_body(ue, proc, &cfg, freq_alloc, grant, rxdataF, out);
+        if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st2); }
+        recovered = st2 == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+        if (st2 == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st2 == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)
+          rnti_ptrs_crc_feed(grant->rnti, grant->mcs, freq_alloc->num_rbs, ph_mode, recovered);
+        atomic_fetch_add_explicit(&g_ry_try[RY_ARMS - 1], 1, memory_order_relaxed);
+        if (recovered) {
+          atomic_fetch_add_explicit(&g_ry_ok[RY_ARMS - 1], 1, memory_order_relaxed);
+          *dlsch_config = cfg;
+          out->config_recovered = true;
+          st = st2;
+        } else {
+          *out = out_plain;
+        }
+        LOG_I(PHY, "SENSING: PTRS_ARM rnti=0x%04x fs=%d.%d mcs=%d rb=%d K=%u L=%u k=%u mode=%d ok=%d\n", grant->rnti, proc->frame_rx, proc->nr_slot_rx,
+              grant->mcs, freq_alloc->num_rbs, ph.K, ph.L, ph.k_re, ph_mode, recovered);
+      }
+      nr_slot_fep_fo_override_hz = saved_fo_override;
+      t_quiet = saved_quiet;
+      t_decode_tdra_attempt = 0;
+      if (recovered) return st;
+    }
   }
   const bool try_start = dlsch_config->start_symbol <= 1
                          && dlsch_config->start_symbol + dlsch_config->number_symbols == 14;

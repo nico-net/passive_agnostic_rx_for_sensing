@@ -206,6 +206,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_detect.c
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_rm_genie.c
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c
