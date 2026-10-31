@@ -21,6 +21,11 @@ for a in $ARMS; do
     A3b_bwp_pci_dl255)     E=(RXCONF=$BW DLSLOTS=255);;
     A3c_bwp_pci_dl255_tbl1) E=(RXCONF=$BW DLSLOTS=255 RXENV=ISAC_UL_MCS_TABLE=1);;
     T0_nocfg_table0)       E=(UECAP=$H/uecap_ports1_noqam256.cfg ULTAB=0);;  # UE cap without PUSCH 256QAM: truth table 0, fully blind
+    A3d_bwp_delay300)      E=(RXCONF=$BW GNBCONF=$H/ul_rfsim_gnb.delay300.cfg);;  # G1 bed: the UE UL reaches the gNB RX (and so the tap) 300 samples late (stock rfsimulator offset, gNB side only)
+    A5d_nocfg_delay300)    E=(GNBCONF=$H/ul_rfsim_gnb.delay300.cfg);;
+    A3s_bwp_shift300)      E=(RXCONF=$BW RFSIM_UL_TAP_SHIFT=300);;  # G1 bed: ONLY the UL stream the passive receiver gets (the tap) is 300 samples late; gNB<->UE link untouched (radio/rfsimulator RFSIM_UL_TAP_SHIFT, test bed)
+    A5s_nocfg_shift300)    E=(RFSIM_UL_TAP_SHIFT=300);;
+    A5t_nocfg_shift700)    E=(RFSIM_UL_TAP_SHIFT=700);;
     A4_bwp_ids)            E=(RXCONF=$BW TBIDS=249:324);;
     A5_nocfg_pci)          E=();;
     A6_layout_tp)          E=(RXCONF=$H/ul_rfsim_rx.forced.tp.cfg RXENV=ISAC_UL_FORCE_OPTS=1 "ULENV=$FORCED_ENV" TBTP=1 ULBW=100 TBVARY=);;

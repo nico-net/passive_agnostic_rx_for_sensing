@@ -214,6 +214,7 @@ typedef struct {
   int accept_count;
   uint64_t tap_next;
   uint64_t tap_delay;
+  uint64_t tap_ul_shift; // test bed only (env RFSIM_UL_TAP_SHIFT=N samples): the UL is written N samples later into the tap stream, i.e. it reaches the passive receiver N samples late while the gNB<->UE link is untouched
   std::vector<std::vector<c16_t>> tap_dl, tap_ul;
 } rfsimulator_state_t;
 #define TAP_RING (1u << 23)
@@ -1527,7 +1528,7 @@ static void tap_send(rfsimulator_state_t *t, openair0_timestamp_t ts, void **ul,
   mutexlock(t->Sockmutex);
   for (int a = 0; a < nbAnt && a < (int)t->tap_ul.size(); a++)
     for (int k = 0; k < nsamps; k++)
-      t->tap_ul[a][(ts + k) & (TAP_RING - 1)] = ((c16_t *)ul[a])[k];
+      t->tap_ul[a][(ts + k + t->tap_ul_shift) & (TAP_RING - 1)] = ((c16_t *)ul[a])[k];
   { // UL energy census (per 100 slot-reads): tells whether the UE UL reaches the gNB RX at all
     static double eul[20]; static uint64_t nul[20]; static int calls;
     const int slot = (int)(((uint64_t)ts / (uint64_t)(t->sample_rate / 2000)) % 20); // 30 kHz numerology only (diagnostic)
@@ -1825,6 +1826,7 @@ extern "C" __attribute__((__visibility__("default"))) int device_init(openair0_d
   if (rfsimulator->role == SIMU_ROLE_SERVER && getenv("RFSIM_UL_TAP")) {
     rfsimulator->tap_after = atoi(getenv("RFSIM_UL_TAP"));
     rfsimulator->tap_delay = (uint64_t)(rfsimulator->sample_rate / 100); // 10 ms
+    rfsimulator->tap_ul_shift = getenv("RFSIM_UL_TAP_SHIFT") ? (uint64_t)strtoull(getenv("RFSIM_UL_TAP_SHIFT"), NULL, 10) : 0;
     const int na = rfsimulator->tx_num_channels; // DL antenna count = header.nbAnt the tap sees
     rfsimulator->tap_dl.assign(na, std::vector<c16_t>(TAP_RING, c16_t{0, 0}));
     rfsimulator->tap_ul.assign(na, std::vector<c16_t>(TAP_RING, c16_t{0, 0}));
