@@ -95,6 +95,7 @@ typedef struct {
   uint32_t g_ulsch;
   unsigned cb_tests, tb_tests;
   int u_lo, u_hi;         /* the U interval the last code block admitted (-1: not scanned) */
+  bool provisional;       /* TBS <= 3824: a 16-bit-CRC pass under a hypothesis not yet confirmed by a second grant of the RNTI; ok stays false */
   bool no_rm_uci;         /* the last code block decodes with no UCI RE removed: no rate-matched UCI in this grant */
 } nr_uci_search_out_t;
 

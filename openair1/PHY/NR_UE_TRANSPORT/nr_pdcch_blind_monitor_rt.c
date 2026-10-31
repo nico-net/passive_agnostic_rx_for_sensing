@@ -7546,6 +7546,108 @@ constdiag_done:;
       }
       idx2 += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * rb->L[c] * 6;
     }
+    /* ---- UL grants of the dedicated BWP (PROJECT_MEMORY 29.1). The UL (DCI 0_1) length sweep ran only in the main pass, per CORESET geometry and per UE whose
+     * DL length is resolved, so a UE in a dedicated BWP never got UL grant discovery. The same hashed length rotation and the same per-RNTI length contexts now
+     * run on this pass's geometry, keyed by it (never by the main pass's key) and by the tracker entry's RNTI; the mapping hypothesis must be the one that has
+     * produced CRC-accepted DCIs here (a wrong demapping would feed the sweep noise). Then every RNTI with a resolved UL length gets its 0_1 task per candidate. */
+    int p2_voted = -1;
+    {
+      uint32_t bv2 = 0;
+      for (int i = 0; i <= p2n && i < 32; i++) {
+        const uint32_t v2 = atomic_load_explicit(&g_p2_votes[i], memory_order_relaxed);
+        if (v2 > bv2) { bv2 = v2; p2_voted = i; }
+      }
+      if (bv2 < 3) p2_voted = -1;
+    }
+    if (ul_sweep_enabled && ul_ss_possible && n_known_ul > 0 && nc_b > 0 && (int)p2h == p2_voted
+        && (!cfg->autodiscover || nr_pdcch_blind_monitor_autodiscover_extent_verified())) {
+      uint64_t g2 = UINT64_C(0x70617373325f756c); /* "pass2_ul": a seed no main-pass key shares */
+      {
+        const int f2[] = {cs_start, cs_n, cs_dur, cs_ref, cs_nid, (int)ue->frame_parms.Nid_cell};
+        for (unsigned i = 0; i < sizeof(f2) / sizeof(f2[0]); ++i)
+          g2 = (g2 ^ (uint32_t)f2[i]) * UINT64_C(1099511628211);
+        if (!g2) g2 = 1;
+      }
+      uint16_t ul2_rnti[2 * NR_PDCCH_BLIND_MAX_UE], ul2_len[2 * NR_PDCCH_BLIND_MAX_UE];
+      int n_ul2 = 0;
+      pthread_mutex_lock(&ul_length_lock);
+      nr_pdcch_dci_length_bank_t *b2 = nr_pdcch_dci_length_store_get(&g_ul_length_store, g2, NULL);
+      uint64_t pk = (uint64_t)abs_slot + UINT64_C(0x9e3779b97f4a7c15);
+      pk = (pk ^ (pk >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+      pk = (pk ^ (pk >> 27)) * UINT64_C(0x94d049bb133111eb);
+      pk ^= pk >> 31;
+      uint16_t boot2 = 0;
+      for (int k = 0; k < n_known_ul && !boot2; ++k) { /* a UE proven by its own DL decodes whose UL length is unresolved on this geometry */
+        const uint16_t r = known_ul[(pk + (uint64_t)k) % (uint64_t)n_known_ul];
+        if (!dl_resolved(r)) continue;
+        const nr_pdcch_dci_length_context_t *cx = nr_pdcch_dci_length_context(b2, g2, r);
+        if (!cx->found[0] && !cx->exhausted) boot2 = r;
+      }
+      nr_pdcch_dci_length_context_t *c2 = boot2 ? nr_pdcch_dci_length_context(b2, g2, boot2) : NULL;
+      if (c2) {
+        nr_pdcch_autodiscover_cand_t cands2[64];
+        int cnt2 = 0, off2 = 0;
+        for (int c = 0; c < nc_b && cnt2 < 64; ++c) {
+          cands2[cnt2++] = (nr_pdcch_autodiscover_cand_t){.e_rx = &s_pdcch_e_rx2[off2], .L = rb->L[c], .cce = rb->CCE[c]};
+          off2 += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * rb->L[c] * 6;
+        }
+        const uint16_t scr2 = cs_nid >= 0 ? boot2 : rb->coreset.scrambling_rnti;
+        const nr_pdcch_autodiscover_sweep_ctx_t gctx2 = {.cand = cands2, .n_cand = cnt2, .scrambling_rnti = scr2,
+                                                         .dmrs_scrambling_id = rb->coreset.pdcch_dmrs_scrambling_id};
+        uint8_t skip2[64] = {0};
+        for (int i = 0; i < cnt2; ++i) /* the empty-CCE screen of the main sweep */
+          skip2[i] = joint_anon_score((const int16_t *)cands2[i].e_rx, cands2[i].L * 108) < nbs_cfar_score_min(cands2[i].L * 108, 2.33);
+        const bool audit2 = ((((uint32_t)abs_slot * 0x9E3779B1u) >> 20) % 64u) == 0;
+        atomic_fetch_add_explicit(&g_scan2.ul_sweeps, 1, memory_order_relaxed);
+        const bool gpu2 = sweep_gpu_prefill(&gctx2, &c2->state, dci_len_min(), dci_len_max());
+        ul_length_ctx_t lc2 = {.cand = cands2, .count = cnt2, .rnti = boot2, .scrambling_rnti = scr2,
+                               .dmrs_id = rb->coreset.pdcch_dmrs_scrambling_id, .bank_key = g2, .abs_slot = abs_slot,
+                               .gpu_ctx = gpu2 ? &gctx2 : NULL, .skip = skip2, .audit = audit2};
+        c2->state.excluded_len = 0;
+        const int found2 = nr_pdcch_dci_length_sweep_feed_budget(&c2->state, ul_length_score, &lc2, cnt2, dci_len_min(), dci_len_max(), boot2, 0, 0);
+        int supported2 = 0;
+        for (int len = dci_len_min(); len <= dci_len_max(); ++len)
+          if (c2->state.n_distinct[len] > 1 && c2->state.bootstrap_hits[len] >= 3) ++supported2;
+        if (found2 > 0 && supported2 == 1 && c2->state.n_distinct[found2] > 1 && c2->state.bootstrap_hits[found2] >= 3) {
+          if (nr_ue_ctx_enabled()) {
+            nr_ue_ctx_on_param(boot2, NR_UEP_DCI_LEN_UL, found2, NR_UEV_TRUSTED, NR_UEC_RELOCK, cfg_abs_slot);
+            nr_ue_ctx_on_param(boot2, NR_UEP_DCI_LEN_STATE, NR_LEN_LOCKED, NR_UEV_TRUSTED, NR_UEC_CONVERGED, cfg_abs_slot);
+          }
+          if (reconf_lengths_enabled()) nr_pdcch_dci_length_context_lock(c2, found2);
+          else c2->found[0] = found2;
+          LOG_A(PHY, "UL automatic DCI length locked: %d rnti=0x%x (dedicated-BWP CORESET %d+%d x%d, occasions=%d polar_decodes=%llu)\n", found2, boot2,
+                cs_start, cs_n, cs_dur, c2->state.occasions_fed, (unsigned long long)c2->state.decodes);
+          nr_pdcch_ul_bank_note(g2, boot2, found2, abs_slot, true);
+          ul_cell_len_note(boot2, found2);
+          nr_pdcch_dci_length_bank_converged(b2, boot2, found2);
+        } else if (c2->state.occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
+          c2->state.occasions_fed = 0; /* a PROVEN UE (dl_resolved) keeps trying, as in the main pass */
+        }
+      }
+      for (int k = 0; k < n_known_ul && n_ul2 < 2 * NR_PDCCH_BLIND_MAX_UE; ++k) {
+        const nr_pdcch_dci_length_context_t *cx = nr_pdcch_dci_length_context(b2, g2, known_ul[k]);
+        if (cx->found[0] > 0 && (!reconf_lengths_enabled() || cx->len_state != NR_LEN_SUSPECT))
+          for (int j = 0; j < (reconf_lengths_enabled() ? 2 : 1); ++j)
+            if (cx->found[j] && n_ul2 < 2 * NR_PDCCH_BLIND_MAX_UE) {
+              ul2_rnti[n_ul2] = known_ul[k];
+              ul2_len[n_ul2++] = (uint16_t)cx->found[j];
+            }
+      }
+      pthread_mutex_unlock(&ul_length_lock);
+      int off3 = 0;
+      for (int c = 0; c < nc_b; c++) {
+        for (int ri = 0; ri < n_ul2 && nof_tasks < cap; ++ri) {
+          cand_task[nof_tasks] = (nr_pdcch_blind_cand_task_t){
+              .e_rx = &s_pdcch_e_rx2[off3], .L = rb->L[c], .dci_length = ul2_len[ri], .dmrs_typeA_position = (uint8_t)cfg->dmrs_typeA_position,
+              .rnti_min = ul2_rnti[ri], .rnti_max = ul2_rnti[ri], .scrambling_rnti = cs_nid >= 0 ? ul2_rnti[ri] : rb->coreset.scrambling_rnti,
+              .alternate_scrambling_rnti = cs_nid >= 0 ? 0 : ul2_rnti[ri], .dmrs_scrambling_id = rb->coreset.pdcch_dmrs_scrambling_id,
+              .frame = proc->frame_rx, .slot = proc->nr_slot_rx, .cce = rb->CCE[c], .format = NR_BLIND_DCI_FORMAT_1_1,
+              .ul_scan = 1, .ul_opts = &ul_opts, .ul_auto = 1};
+          nof_tasks++;
+        }
+        off3 += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * rb->L[c] * 6;
+      }
+    }
   }
 #undef s_p2_geom
 #undef s_p2_hyp

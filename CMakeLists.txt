@@ -2278,6 +2278,7 @@ if (ENABLE_TESTS)
   add_test(NAME test_nr_pusch_uci_csi COMMAND nr_pusch_ucisim -n 3 -s 40 -S 40.1 -a 0 -b 14 -U 0,1,1,2 -r 273 -R 273 -m 16 -v 1 --uci 2,9,7,9,0,0,3)
   add_test(NAME test_nr_pusch_uci_ack_csi COMMAND nr_pusch_ucisim -n 3 -s 40 -S 40.1 -a 0 -b 14 -U 0,1,1,2 -r 106 -R 106 -m 24 -v 1 --uci 4,11,7,13,0,0,3)
   add_test(NAME test_nr_pusch_uci_csi2_oai COMMAND nr_pusch_ucisim -n 3 -s 40 -S 40.1 -a 0 -b 14 -U 0,1,1,2 -r 273 -R 273 -m 16 -v 1 --uci 2,9,7,9,6,9,3)
+  add_test(NAME test_nr_pusch_uci_small COMMAND nr_pusch_ucisim -n 4 -s 40 -S 40.1 -r 6 -R 106 -m 4 -v 1 --uci 4,9,0,0,0,0,3)
   add_test(NAME test_nr_pusch_uci_narrow COMMAND nr_pusch_ucisim -n 3 -s 40 -S 40.1 -r 106 -R 106 -m 9 -v 1 --uci 6,9,0,0,0,0,3)
   add_test(NAME test_nr_pusch_ra0_qpsk COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 2 -R 106 -m 9 -v 1)
   add_test(NAME test_nr_pusch_ra0_qam16 COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 2 -R 106 -m 16 -v 1)
@@ -2773,6 +2774,23 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_ul_rules PRIVATE GTest::gtest GTest::gtest_main)
   add_dependencies(tests test_nr_ul_rules)
   add_test(NAME test_nr_ul_rules COMMAND ./test_nr_ul_rules)
+
+  add_executable(test_nr_ul_ids_evict
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ul_ids_evict_test.cc)
+  target_include_directories(test_nr_ul_ids_evict PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_ul_ids_evict PRIVATE nr_pdcch_blind_monitor MAC_NR_COMMON
+    asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs crc_byte UTIL GTest::gtest m)
+  add_dependencies(tests test_nr_ul_ids_evict)
+  add_test(NAME test_nr_ul_ids_evict COMMAND ./test_nr_ul_ids_evict)
+
+  add_executable(test_nr_uci_small
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_uci_small_test.cc
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_uci_small_stubs.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_uci_blind.c)
+  target_include_directories(test_nr_uci_small PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT ${OPENAIR_DIR})
+  target_link_libraries(test_nr_uci_small PRIVATE UTIL GTest::gtest GTest::gtest_main m pthread)
+  add_dependencies(tests test_nr_uci_small)
+  add_test(NAME test_nr_uci_small COMMAND ./test_nr_uci_small)
 
   add_executable(test_nr_pusch_solver
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pusch_solver_test.cc

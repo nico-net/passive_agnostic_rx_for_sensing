@@ -55,6 +55,7 @@ typedef struct {
   uint16_t data_priors[3]; /* dataScramblingIdentityPUSCH hypotheses, best first (see nr_pusch_passive_ul_ids_seed) */
   uint8_t n_priors, n_data_priors, confirmed_mask, trial;
   uint32_t failed_grants; /* U7: one bounded data-ID candidate per failed grant */
+  uint64_t last_seen; /* g_ue_ids_clock at the last seed/confirm/failure of this RNTI (LRU eviction) */
   bool used;
 } ul_ids_ue_t;
 typedef ul_ids_ue_t g_ue_ids_cell_t[UL_IDS_UE_CAP];
@@ -62,6 +63,10 @@ NR_CELL_STATIC(g_ue_ids_cell_t, g_ue_ids);
 #define g_ue_ids NR_CELL_REF(g_ue_ids)
 NR_CELL_STATIC_INIT(pthread_mutex_t, g_ue_ids_lock, PTHREAD_MUTEX_INITIALIZER);
 #define g_ue_ids_lock NR_CELL_REF(g_ue_ids_lock)
+NR_CELL_STATIC(uint64_t, g_ue_ids_clock); /* monotonic use counter, under g_ue_ids_lock */
+#define g_ue_ids_clock NR_CELL_REF(g_ue_ids_clock)
+NR_CELL_STATIC(_Atomic uint64_t, g_ue_ids_evicted);
+#define g_ue_ids_evicted NR_CELL_REF(g_ue_ids_evicted)
 NR_CELL_STATIC(_Atomic uint64_t, g_ue_ids_dropped);
 #define g_ue_ids_dropped NR_CELL_REF(g_ue_ids_dropped)
 uint64_t nr_pusch_passive_ul_ids_dropped(void)
@@ -166,6 +171,36 @@ static void prior_add(ul_ids_ue_t *s,int64_t value)
   for(int i=0;i<s->n_priors;i++) if(s->priors[i]==value) return;
   if(s->n_priors<3) s->priors[s->n_priors++]=(uint16_t)value;
 }
+/* Table full: the entry to recycle. A RNTI without any CRC pass (confirmed_mask == 0: a false DCI, a short-lived UE, a
+ * TC-RNTI that never decoded) goes first, least recently seen first; only when every entry holds a CRC-proven identity does the
+ * least recently seen proven one go. Before this a full table silently dropped every later UE (g_ue_ids_dropped). Caller holds
+ * g_ue_ids_lock. The victim's data-ID lock (separate, RRC-level fact) is kept. */
+static ul_ids_ue_t *nr_pusch_passive_ul_ids_victim_locked(void)
+{
+  ul_ids_ue_t *v=NULL;
+  for(int i=0;i<UL_IDS_UE_CAP;i++) {
+    ul_ids_ue_t *c=&g_ue_ids[i];
+    const bool cp=c->confirmed_mask!=0, vp=v && v->confirmed_mask!=0;
+    if(!v || (!cp && vp) || (cp==vp && c->last_seen<v->last_seen)) v=c;
+  }
+  if(v) {
+    LOG_A(PHY, "SENSING: UL ids table full: evicting rnti=0x%04x (%s, last seen %llu ticks ago)\n", v->ticket.rnti,
+          v->confirmed_mask ? "CRC-proven" : "no CRC pass", (unsigned long long)(g_ue_ids_clock-v->last_seen));
+    memset(v,0,sizeof(*v));
+    atomic_fetch_add_explicit(&g_ue_ids_evicted,1,memory_order_relaxed);
+  }
+  return v;
+}
+uint64_t nr_pusch_passive_ul_ids_evicted(void)
+{ return atomic_load_explicit(&g_ue_ids_evicted,memory_order_relaxed); }
+bool nr_pusch_passive_ul_ids_has(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_ue_ids_lock);
+  bool f=false;
+  for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && g_ue_ids[i].ticket.rnti==rnti) f=true;
+  pthread_mutex_unlock(&g_ue_ids_lock);
+  return f;
+}
 void nr_pusch_passive_ul_ids_seed(const nr_ue_ul_ticket_t *t,const nr_ue_ctx_t *dl,uint16_t pci)
 {
   if(!nr_pusch_passive_ul_ue_state_enabled() || !t || !dl ||
@@ -177,8 +212,10 @@ void nr_pusch_passive_ul_ids_seed(const nr_ue_ul_ticket_t *t,const nr_ue_ctx_t *
   ul_ids_ue_t *s=NULL;
   for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && g_ue_ids[i].ticket.rnti==t->rnti) {s=&g_ue_ids[i];break;}
   if(!s) for(int i=0;i<UL_IDS_UE_CAP;i++) if(!g_ue_ids[i].used) {s=&g_ue_ids[i];break;}
+  if(!s) s=nr_pusch_passive_ul_ids_victim_locked();
   if(s) {
     if(!s->used || !same_ticket(&s->ticket,t)) {memset(s,0,sizeof(*s));s->ticket=*t;s->used=true;}
+    s->last_seen=++g_ue_ids_clock;
     prior_add(s,pci);
     prior_add(s,dl->cfg[NR_UEP_PDSCH_SCR_ID].value);
     prior_add(s,dl->cfg[NR_UEP_PDCCH_SCR_ID].value);
@@ -228,6 +265,7 @@ void nr_pusch_passive_ul_ids_confirm(const nr_ue_ul_ticket_t *t,uint8_t nscid,ui
     g_ue_ids[i].dmrs_id[nscid&1]=dmrs_id;
     g_ue_ids[i].data_id=data_id;
     g_ue_ids[i].confirmed_mask|=1u<<(nscid&1);
+    g_ue_ids[i].last_seen=++g_ue_ids_clock;
     break;
   }
   data_lock_ok_locked(t->rnti, data_id);
@@ -283,6 +321,7 @@ void nr_pusch_passive_ul_ids_failed(const nr_ue_ul_ticket_t *t)
   if(!nr_pusch_passive_ul_ue_state_enabled() || !t) return;
   pthread_mutex_lock(&g_ue_ids_lock);
   for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && same_ticket(&g_ue_ids[i].ticket,t)) {
+    g_ue_ids[i].last_seen=++g_ue_ids_clock;
     if(!g_ue_ids[i].confirmed_mask && g_ue_ids[i].n_priors>1)
       g_ue_ids[i].trial=(g_ue_ids[i].trial+1)%(g_ue_ids[i].n_priors*g_ue_ids[i].n_priors);
     if(!g_ue_ids[i].confirmed_mask && g_ue_ids[i].failed_grants<UINT32_MAX)

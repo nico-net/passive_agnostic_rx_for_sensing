@@ -1161,3 +1161,71 @@ int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+/* U6/(6b): weak timing observations of one RNTI accumulate across grants per arrival window; noise does not. */
+static nr_pusch_ul_disc_delay_t weak_obs(double ratio)
+{
+  nr_pusch_ul_disc_delay_t d = {};
+  d.valid = true;
+  d.ratio = ratio;
+  d.dof = 2;
+  d.trials = 64;
+  return d;
+}
+
+TEST(UlTimingEvidence, WeakUeConvergesAcrossGrantsAtOneArrivalWindow)
+{
+  nr_pusch_ul_disc_reset();
+  const nr_pusch_ul_disc_delay_t d = weak_obs(6.0);
+  EXPECT_FALSE(nr_pusch_ul_disc_delay_accept(&d, 1.0, NULL)) << "one grant alone is not decisive";
+  int grants = 0, adv = 0;
+  double b = 1;
+  bool ok = false;
+  int n = 0;
+  for (; n < 12 && !ok; n++)
+    ok = nr_pusch_ul_disc_timing_evidence(0x4601, 1613 + (n % 3) - 1, &d, 1000 + 20 * n, 1.0, &grants, &adv, &b);
+  EXPECT_TRUE(ok);
+  EXPECT_GE(n, 3) << "needs several grants";
+  EXPECT_LE(n, 6);
+  EXPECT_NEAR(adv, 1613, 1);
+  EXPECT_LE(b, 1e-6);
+}
+
+TEST(UlTimingEvidence, NoiseAtRandomWindowsNeverAccumulates)
+{
+  nr_pusch_ul_disc_reset();
+  const nr_pusch_ul_disc_delay_t d = weak_obs(3.0);
+  int grants = 0, adv = 0;
+  double b = 1;
+  for (int n = 0; n < 400; n++)
+    EXPECT_FALSE(nr_pusch_ul_disc_timing_evidence(0x4602, 1000 + (n * 37) % 900, &d, 1000 + 20 * n, 1.0, &grants, &adv, &b));
+}
+
+TEST(UlTimingEvidence, EvidenceDecaysAndSameSlotCountsOnce)
+{
+  nr_pusch_ul_disc_reset();
+  const nr_pusch_ul_disc_delay_t d = weak_obs(6.0);
+  int grants = 0, adv = 0;
+  double b = 1;
+  for (int i = 0; i < 20; i++) /* the same slot again and again: one observation */
+    EXPECT_FALSE(nr_pusch_ul_disc_timing_evidence(0x4603, 1613, &d, 5000, 1.0, &grants, &adv, &b));
+  EXPECT_EQ(grants, 1);
+  /* observations far apart in time decay away before they can add up */
+  nr_pusch_ul_disc_reset();
+  bool ok = false;
+  for (int n = 0; n < 12; n++)
+    ok |= nr_pusch_ul_disc_timing_evidence(0x4604, 1613, &d, 1000 + 20000 * n, 1.0, &grants, &adv, &b);
+  EXPECT_FALSE(ok);
+}
+
+TEST(UlTimingEvidence, RntisAreIndependent)
+{
+  nr_pusch_ul_disc_reset();
+  const nr_pusch_ul_disc_delay_t d = weak_obs(6.0);
+  int grants = 0, adv = 0;
+  double b = 1;
+  bool ok = false;
+  for (int n = 0; n < 12; n++) /* alternating RNTIs: neither reaches the bound before 3 own grants */
+    ok |= nr_pusch_ul_disc_timing_evidence(n % 2 ? 0x4605 : 0x4606, 1613, &d, 1000 + 20 * n, 1.0, &grants, &adv, &b) && n < 4;
+  EXPECT_FALSE(ok);
+}

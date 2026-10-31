@@ -75,6 +75,10 @@ void nr_pusch_passive_ul_ids_reset_all(void);
 /* Test hook: the ISAC_UL_UE_STATE/ISAC_UL_PUSCH_CHAIN flags are cached on first use; tests that setenv must re-read. */
 void nr_pusch_passive_ul_ids_flags_reset_for_test(void);
 uint64_t nr_pusch_passive_ul_ids_dropped(void);
+/* Entries recycled by the LRU rule when the 64-entry table was full (no-CRC-pass RNTIs first, then least recently seen). */
+uint64_t nr_pusch_passive_ul_ids_evicted(void);
+/* Test/diagnostic: is a table entry held for this RNTI. */
+bool nr_pusch_passive_ul_ids_has(uint16_t rnti);
 
 /* Read-only view of the UL DM-RS identity estimate for one nSCID (0 or 1). Read the decision with
  * nr_dmrs_id_2stage_decided() (acquire, inline -- no estimator symbol needed); the rest is diagnostic. */

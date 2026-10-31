@@ -30,7 +30,7 @@ extern "C" {
 #define NR_UL_LAYOUT_TAG   (UINT64_C(1) << 62) /* hyp_generation of a grant read with the locked layout */
 #define NR_UL_LAYOUT_PROBE (UINT64_C(1) << 61) /* ... of a DM-RS probe (never decoded) */
 #define NR_UL_LAYOUT_TRIAL (UINT64_C(1) << 60) /* ... of a CRC-first trial: a real PUSCH decode under one layout hypothesis;
-                                                  bits 40..51 = hypothesis (bwp hyp | prefix<<6 | tail<<9), low 40 = gen */
+                                                  bits 40..59 = hypothesis (bwp hyp | prefix<<8 | tail<<11 | variant<<13), low 40 = gen */
 #define NR_UL_LAYOUT_GEN_MASK ((UINT64_C(1) << 40) - 1)
 #define NR_UL_LAYOUT_MAX_TRIALS 4
 #define NR_UL_LAYOUT_MAX_HYP 192 /* 64 until BLINDFIX F6: the hypothesis index is 8 bits in a trial tag */

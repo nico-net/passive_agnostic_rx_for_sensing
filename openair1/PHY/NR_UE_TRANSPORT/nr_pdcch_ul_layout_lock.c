@@ -687,13 +687,16 @@ static void tail_str(const nr_ul_layout_tail_t *t, char *s, size_t n)
 }
 
 /* variant = vt | k2d << 3 | tda << 4: vt = forced MCS table + 1 (0 = keep), k2d = k2 + 1 on every TDRA row,
- * tda = 0: every row S0 L14 type A; 1: every row S0 L13 type B (UL slot with the last symbol left to SRS) */
+ * tda = row of nr_ul_tda_row() forced on every TDRA row (0: S0 L14 type A, 1: S0 L13 type B -- UL slot with the last symbol left to SRS --, 2..7 the other
+ * default-table / SRS-aware allocations); bits 4..6 */
 static void apply_variant(nr_pdcch_blind_ul_opts_t *o, int var)
 {
   if ((var & 7) > 0) o->mcs_table = (uint8_t)((var & 7) - 1);
+  const int tda = (var >> 4) & 7;
+  const nr_ul_tda_row_t row = nr_ul_tda_row(tda);
   for (int i = 0; i < o->tda_count && i < 16; i++) {
     if (var & 8) o->tda_k2[i]++;
-    if (var & 16) { o->tda_start[i] = 0; o->tda_length[i] = 13; o->tda_mapping[i] = 1; }
+    if (tda) { o->tda_start[i] = row.s; o->tda_length[i] = row.l; o->tda_mapping[i] = row.map; }
   }
 }
 
@@ -1529,6 +1532,8 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
         const uint32_t ix = vctr * (uint32_t)nvj + (uint32_t)j;
         int tbl, k2d, tda;
         nr_ul_variant_get((int)(ix % (uint32_t)cnt), true, true, true, ls->tail[t].tp, &tbl, &k2d, &tda);
+        /* no decisive CRC pass for this length yet: one cycle in four tries the other allocations (nr_ul_tda_row 2..7) instead of the two-row core */
+        if (!ls->ev_dec) tda = nr_ul_variant_tda_round(ix / (uint32_t)cnt, tda);
         const int var = (tbl + 1) | k2d << 3 | tda << 4;
         const int h = rk[i], k = pre_for_hyp_sel(ls, h, (int)(vctr / ((uint32_t)vcmax * (uint32_t)(ntl ? ntl : 1))));
         if (ls->locked && g_locked_hyp == h && ls->chosen_tail == t && ls->chosen_var == var) continue; /* the failing layout itself */
@@ -1593,9 +1598,10 @@ int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, ui
   if (nr > 0 && g_cell.sib1_ul_cfg && g_hyp[rk[0]].n == g_cell.sib1_ul_size && g_hyp[rk[0]].start == g_cell.sib1_ul_start) nr = 1; /* a CONFIGURED UL BWP is certain (as in the CRC trials) */
   uint32_t tot = 0, base[2] = {0, 0};
   int nt = ls->ntail < 2 ? ls->ntail : 2;
+  const int rows = ls->ev_dec ? 2 : NR_UL_TDA_ROWS; /* all allocations until a decisive CRC pass of this length; then the two-row core */
   for (int t = 0; t < nt; t++) {
     base[t] = tot;
-    tot += (uint32_t)nr * (uint32_t)nr_ul_variant_count(true, true, true, ls->tail[t].tp) * (uint32_t)ap_n;
+    tot += (uint32_t)nr * (uint32_t)nr_ul_variant_count_rows(true, true, rows, ls->tail[t].tp) * (uint32_t)ap_n;
   }
   if (total) *total = tot;
   const uint64_t gen = g_gen & NR_UL_LAYOUT_GEN_MASK;
@@ -1605,12 +1611,12 @@ int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, ui
     const uint32_t ix = (first + c) % tot;
     int t = nt - 1;
     while (t > 0 && ix < base[t]) t--;
-    const int cnt = nr_ul_variant_count(true, true, true, ls->tail[t].tp);
+    const int cnt = nr_ul_variant_count_rows(true, true, rows, ls->tail[t].tp);
     const uint32_t r = ix - base[t];
     const int i = (int)(r / (uint32_t)(cnt * ap_n)), v = (int)((r / (uint32_t)ap_n) % (uint32_t)cnt), ai = (int)(r % (uint32_t)ap_n);
     const int cur_ap = cur_addpos_locked(), addpos = ai == 0 ? cur_ap : (cur_ap + ai) % 3; /* the current reading first, then the other dmrs-AdditionalPosition values */
     int tbl, k2d, tda;
-    nr_ul_variant_get(v, true, true, true, ls->tail[t].tp, &tbl, &k2d, &tda);
+    nr_ul_variant_get_rows(v, true, true, rows, ls->tail[t].tp, &tbl, &k2d, &tda);
     const int var = (tbl + 1) | k2d << 3 | tda << 4;
     const int h = rk[i], k = pre_for_hyp(ls, h);
     nr_pdcch_blind_ul_opts_t o;
@@ -1638,7 +1644,7 @@ void nr_ul_layout_trial_add(const nr_pdcch_blind_ul_result_t *g, uint32_t n)
   int li = -1;
   for (int l = 0; l < g_nlen; l++) if (g_len[l].len == g->dci_length) li = l;
   if (li >= 0 && (g->hyp_generation & NR_UL_LAYOUT_GEN_MASK) == (g_gen & NR_UL_LAYOUT_GEN_MASK))
-    ev_slot_locked(&g_len[li], (uint32_t)((g->hyp_generation >> 40) & 0x7ffff))->trials += n;
+    ev_slot_locked(&g_len[li], (uint32_t)((g->hyp_generation >> 40) & 0xfffff))->trials += n;
   pthread_mutex_unlock(&g_mu);
 }
 
@@ -1718,8 +1724,8 @@ void nr_ul_layout_crc_verdict(const nr_pdcch_blind_ul_result_t *g, bool ok, uint
     len_state_t *ls = &g_len[li];
     if (nr_ul_layout_is_trial(g)) {
       if (ls->fitted && ls->prov && !ls->locked) ls->prov_done++;
-      const unsigned e = (unsigned)((g->hyp_generation >> 40) & 0x7ffff);
-      const int h = e & 255, k = (e >> 8) & 7, t = (e >> 11) & 3, var = (e >> 13) & 63;
+      const unsigned e = (unsigned)((g->hyp_generation >> 40) & 0xfffff);
+      const int h = e & 255, k = (e >> 8) & 7, t = (e >> 11) & 3, var = (e >> 13) & 127;
       if (ok) {
         const bool decisive = tbs_bits > 3824 || (nseg > 1 && seg_ok == nseg);
         if (ls->locked && g_locked_hyp == h && ls->chosen_tail == t && ls->chosen_var == var) { ls->crc_ok++; ls->crc_fail_run = 0; ls->lock_decisive += decisive; }
@@ -1749,10 +1755,10 @@ void nr_ul_layout_nid_verdict(const nr_pdcch_blind_ul_result_t *g, bool keep_tab
     for (int l = 0; l < g_nlen; l++) if (g_len[l].len == g->dci_length) li = l;
     if (li >= 0) {
       const len_state_t *ls = &g_len[li];
-      uint64_t e = (g->hyp_generation >> 40) & 0x7ffff;
-      const uint64_t var = (e >> 13) & 63, cur = ls->locked ? (uint64_t)(ls->chosen_var & 7) : (uint64_t)(g_lat_var & 7);
-      e = (e & ~(63ull << 13)) | (((var & ~7ull) | cur) << 13);
-      t.hyp_generation = (g->hyp_generation & ~(0x7ffffull << 40)) | (e << 40);
+      uint64_t e = (g->hyp_generation >> 40) & 0xfffff;
+      const uint64_t var = (e >> 13) & 127, cur = ls->locked ? (uint64_t)(ls->chosen_var & 7) : (uint64_t)(g_lat_var & 7);
+      e = (e & ~(127ull << 13)) | (((var & ~7ull) | cur) << 13);
+      t.hyp_generation = (g->hyp_generation & ~(0xfffffull << 40)) | (e << 40);
     }
     pthread_mutex_unlock(&g_mu);
   }
