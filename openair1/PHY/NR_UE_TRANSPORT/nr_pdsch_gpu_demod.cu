@@ -570,7 +570,7 @@ template <typename R = double> __global__ void k_align(__grid_constant__ const J
 /* ---- PHASE-TRACK (nr_pdsch_phase_track.h): channel time interpolation (pass only: the estimate is on the device) and the per-symbol CPE tracker. Both evaluate the CPU's expression
  * tree (nr_pdsch_phase_track.c): the interpolation block (pair, branch, 48 subcarriers) forms the integer correlation sum (exact in any order), the phasor and every RE of every symbol between
  * the pair; k_cpe gives each 48-RE chunk of a symbol to one thread (sequential, RE order, like the CPU), then adds the chunk partials in chunk order. ---- */
-constexpr int TI_MAXD = 4; /* DM-RS symbols of a grant */
+#define TI_MAXD 4 /* DM-RS symbols of a grant */
 template <typename R> __global__ void k_tinterp(__grid_constant__ const JobK jk_)
 {
   const nr_gpu_demod_job_t &j = NRD_JOB(jk_);

@@ -13,7 +13,7 @@
  *   IE      exact LLR formula with OUR chest estimates (est_all) and the true noise variance (isolates the chest from the demod arithmetic)
  *   IT_cpu16 / IT_cpu30   ideal LLRs through the CPU LDPC decoder
  * Every verdict is per code block (no CB-failure abort) and per TB (all code blocks). Output: CSV lines R,... (one per cfg, SNR, variant) and S,... (LLR statistics of A, genie SNR).
- * usage: nr_linklevel_bench <cfg,cfg,..|all> [trial_scale] [snr_step] ; run from the build directory (./libpdsch_gpu.so, ./libldpc.so). */
+ * usage: nr_linklevel_bench <cfg,cfg,..|all> [trial_scale] [snr_step] [snr_lo snr_hi] [dj_mode] [dj_align] [dj_cpe] [dj_tint] [cfo_hz] ; run from the build directory (./libpdsch_gpu.so, ./libldpc.so). */
 #include "nr_gpu_pass_fixture.h"
 #include <map>
 #include <string>
@@ -940,6 +940,9 @@ int main(int argc, char **argv)
   GpuPassFixture::ldpc_it = 16;
   GpuPassFixture::dj_mode = argc > 6 ? atoi(argv[6]) : 2; /* default: MRC over all 4 branches */
   GpuPassFixture::dj_align = argc > 7 ? atoi(argv[7]) : 2;
+  GpuPassFixture::dj_cpe = argc > 8 ? atoi(argv[8]) : 0;  /* PHASE-TRACK A/B: 1 = the per-symbol CPE tracker (the product default) */
+  GpuPassFixture::cfo_hz = argc > 10 ? atof(argv[10]) : 0.0; /* residual CFO on the received samples (Hz) */
+  GpuPassFixture::dj_tint = argc > 9 ? atoi(argv[9]) : 0; /* 1 = the DM-RS time interpolation (the product default) */
   std::unique_ptr<GpuPassFixture::Pass> P(new GpuPassFixture::Pass);
   bool pass_ok = false;
   for (const Cfg &c : all) {

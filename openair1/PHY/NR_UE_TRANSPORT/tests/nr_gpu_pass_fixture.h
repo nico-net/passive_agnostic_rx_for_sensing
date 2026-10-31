@@ -154,6 +154,8 @@ class GpuPassFixture {
    * [1 1; 1 -1; 1 j; 1 -j], no delayed tap), so the post-combining SNR per layer is exactly noise_db + 10 log10(nant); htrue keeps H of every data RE ([ant][layer][RE]) for ideal-receiver references;
    * ldpc_it = iteration cap of decode_llr's GPU LDPC jobs; no_abort = decode_llr checks every code block (no NR_CB_FAIL_LIMIT abort), so seg_ok is a true per-block verdict;
    * last_lin = the int8 LDPC inputs decode_llr built (C x NR_GPU_LDPC_DEV_IN_STRIDE) for a CPU decoder cross-check */
+  static inline double cfo_hz = 0; /* PHASE-TRACK: a residual carrier offset on the received samples (phase ramp over the slot) */
+  static inline int dj_cpe = 0, dj_tint = 0; /* PHASE-TRACK knobs of the test fixture (bench CLI): the product sets both in the passive receiver */
   static inline int chan_mode = 0, ldpc_it = 8, dj_mode = 0, dj_align = 0; /* dj_mode / dj_align: the demod job's MRC branch mode (0 = branch 0 only, 1 = best branch, 2 = all branches, 3 = threshold) and ISAC_RX_MRC_ALIGN */
   static inline bool no_abort = false;
   /* RANK1COMB (test-only knobs, defaults = the former behaviour): chan_mode 2 = flat Rayleigh, unit power per (ant, layer) re-drawn per fixture; 3 = two-tap Rayleigh (powers 0.6 / 0.4, delay 4..36 FFT samples = 32..290 ns), i.e. frequency selective;
@@ -385,7 +387,8 @@ class GpuPassFixture {
         const cd rc(f.rot[2 * l] / 32767.0, f.rot[2 * l + 1] / 32767.0);
         const int ncp = l == 0 ? NCP0 : NCP, start = l == 0 ? 0 : NCP0 + N + (l - 1) * (N + NCP);
         for (int n = 0; n < ncp + N; n++) {
-          const cd s = v[(n - ncp + N) % N] * rc;
+          cd s = v[(n - ncp + N) % N] * rc;
+          if (cfo_hz != 0.0) s *= std::polar(1.0, 2 * M_PI * cfo_hz * (double)(start + n) / (30e3 * N));
           td[2 * (start + n)] = s.real();
           td[2 * (start + n) + 1] = s.imag();
         }
@@ -497,7 +500,7 @@ class GpuPassFixture {
           gy[2 * (sy * ext + i)] = (int16_t)((f.fco_ + 12 * (f.start_rb + f.bwp) + i) % N); /* rxdataF index; estimates are indexed from the grant's first RE (segmented: the virtual allocation at PRB 0) */
           gy[2 * (sy * ext + i) + 1] = 1;
           gh[2 * (sy * ext + i)] = (int16_t)i;
-          gh[2 * (sy * ext + i) + 1] = (int16_t)((sy < 7 || f.ndm < 2 ? f.dm_sym[0] : f.dm_sym[1]) + 1);
+          gh[2 * (sy * ext + i) + 1] = (int16_t)((dj_tint && f.ndm >= 2 && f.segs.empty() ? sy : sy < 7 || f.ndm < 2 ? f.dm_sym[0] : f.dm_sym[1]) + 1);
         }
       nr_gpu_buf_h2d_async(&geo, 0, geo.bytes, s);
       dj.nbRx = f.nant_; dj.nl = f.nl; dj.qm = f.qm; dj.N = N;
@@ -516,6 +519,9 @@ class GpuPassFixture {
       dj.comp = sc; dj.mag = sc + bn; dj.magb = sc + 2 * bn; dj.magr = sc + 3 * bn;
       dj.thr_coef = std::pow(10.0, -1.2);
       dj.mode = dj_mode; dj.align = dj_align;
+      dj.cpe = dj_cpe; dj.tint_dm = 0;
+      for (int d = 0; d < f.ndm; d++) dj.tint_dm |= (uint16_t)(1u << f.dm_sym[d]);
+      if (dj_tint && f.ndm >= 2 && f.segs.empty()) { dj.tint = 1; dj.tint_cols = 12 * f.nrb; }
       dj.qam_mode = f.nl >= 2 ? 3 : 0; dj.mag_per_layer = 1; dj.m3_nvfac = std::pow(10.0, 2.1);
       if (nvar_fixed >= 0) dj.nvar = (uint32_t)nvar_fixed;
       lj.BG = 2; lj.R = 15; lj.Z = 64; lj.K = 640; lj.it_max = 8;
@@ -1042,7 +1048,7 @@ class GpuPassFixture {
         gy[2 * (sy * ext + i)] = (int16_t)((fco_ + 12 * (start_rb + bwp) + i) % N);
         gy[2 * (sy * ext + i) + 1] = 1;
         gh[2 * (sy * ext + i)] = (int16_t)i;
-        gh[2 * (sy * ext + i) + 1] = (int16_t)((sy < 7 || ndm < 2 ? dm_sym[0] : dm_sym[1]) + 1);
+        gh[2 * (sy * ext + i) + 1] = (int16_t)((dj_tint && ndm >= 2 && segs.empty() ? sy : sy < 7 || ndm < 2 ? dm_sym[0] : dm_sym[1]) + 1);
       }
     }
     if (!segs.empty()) { /* the graph reads the real rxdataF: the virtual allocation's index map composed with the old path's gather (what nr_gpu_pass_dl.c does) */
@@ -1055,6 +1061,9 @@ class GpuPassFixture {
     }
     d.thr_coef = std::pow(10.0, -1.2);
     d.mode = dj_mode; d.align = dj_align;
+    d.cpe = dj_cpe; d.tint_dm = 0;
+    for (int q = 0; q < ndm; q++) d.tint_dm |= (uint16_t)(1u << dm_sym[q]);
+    if (dj_tint && ndm >= 2 && segs.empty()) { d.tint = 1; d.tint_cols = 12 * nrb; }
     d.qam_mode = nl >= 2 ? 3 : 0; d.mag_per_layer = 1; d.m3_nvfac = std::pow(10.0, 2.1); /* as Pass::setup */
     j.geo_y = gy; j.geo_h = gh;
     llr_pass.assign(tb.G + 64, 0);
