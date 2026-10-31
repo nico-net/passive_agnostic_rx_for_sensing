@@ -11,6 +11,7 @@
 #include <math.h>
 #include "PHY/defs_nr_UE.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
+#include "PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.h"
 #include "PHY/NR_REFSIG/sss_nr.h"
 #include "executables/nr-uesoftmodem.h"
 #include "common/config/config_load_configmodule.h"
@@ -168,8 +169,14 @@ static void add_ssb(double *re, double *im, int pci, double amp, int s0)
 typedef struct {
   bool found;
   int pci, pos;
+  int fo_pss, fo_sss;
+  int n_alt, alt_pci[3], alt_pos[3]; /* A3: every accepted candidate of a blind pass, strongest SSS metric first */
+  int32_t alt_metric[3];
+  int sel_pci, sel_pos; /* after nr_search_ssb_select(1) */
+  bool sel_ok;
 } lock_t;
 
+static bool g_fo; /* A1 test: the estimators run (fo_flag) and the PSS estimate is compensated in place, as in nr_scan_ssb() */
 static bool g_decim; /* the decimated float PSS path of the passive full search (production) or the stock int16 search */
 static lock_t search(const c16_t *cap, int target)
 {
@@ -202,8 +209,8 @@ static lock_t search(const c16_t *cap, int target)
       .target_nid_cell = target,
       .exclude_nid_cells = NULL,
       .num_exclude_nid_cells = 0,
-      .apply_freq_offset = false,
-      .fo_flag = false,
+      .apply_freq_offset = g_fo,
+      .fo_flag = g_fo,
       .rxdataF = rxdataF,
       .pssTime = pssTime,
       .pss_decim = g_decim,
@@ -212,6 +219,19 @@ static lock_t search(const c16_t *cap, int target)
   if (l.found) {
     l.pci = p.sss_res.nid_cell;
     l.pos = p.pss_res.pos;
+    l.fo_pss = p.pss_res.freq_offset;
+    l.fo_sss = p.sss_res.freq_offset;
+    l.n_alt = p.n_alt;
+    for (int a = 0; a < p.n_alt; a++) {
+      l.alt_pci[a] = p.alt_sss[a].nid_cell;
+      l.alt_pos[a] = p.alt_pss[a].pos;
+      l.alt_metric[a] = p.alt_sss[a].metric;
+    }
+    if (p.n_alt > 1) {
+      l.sel_ok = nr_search_ssb_select(&p, 1);
+      l.sel_pci = p.sss_res.nid_cell;
+      l.sel_pos = p.pss_res.pos;
+    }
   }
   return l;
 }
@@ -247,6 +267,7 @@ static void pair(int strong, int weak)
   CHECK(blind.pos == s_strong + CP, "blind lock position %d, expected %d", blind.pos, s_strong + CP);
 
   const lock_t pw = search(cap, weak);
+  CHECK(pw.n_alt == 1, "pinned search keeps its single best, n_alt=%d", pw.n_alt);
   printf("  pinned %d -> found=%d pci=%d pos=%d\n", weak, pw.found, pw.pci, pw.pos);
   CHECK(pw.found && pw.pci == weak, "pinned search must lock the weaker wanted cell %d, got found=%d pci=%d", weak, pw.found, pw.pci);
   CHECK(pw.pos == s_weak + CP, "pinned lock position %d, expected %d", pw.pos, s_weak + CP);
@@ -271,6 +292,58 @@ static void pair(int strong, int weak)
   const lock_t p1 = search(one, weak);
   CHECK(p1.found && p1.pci == weak && p1.pos == s_weak + CP, "single cell, pinned: found=%d pci=%d pos=%d", p1.found, p1.pci, p1.pos);
   free(one);
+}
+
+/* A1: a seed beyond the estimators' reach (> SCS) does not lock the pinned search; the escalation ladder around the seed does (a seed within reach locks at rung 0: clean synthetic). The capture carries cell `pci` rotated by `cfo_hz`; each rung compensates its hypothesis exactly as nr_scan_ssb() does. */
+static void cfo_escalation(int pci, int cfo_hz)
+{
+  const int s0 = 60000;
+  c16_t *cap = make_capture(pci, -1, 4.0, 0, s0, 0);
+  NR_DL_FRAME_PARMS fp;
+  make_fp(&fp);
+  const int n = fp.samples_per_frame;
+  const double fs = fp.samples_per_subframe * 1000.0;
+  int h[NR_ACQ_LADDER_MAX];
+  const int nh = nr_acq_cfo_ladder(0, 30000, (int)NR_ACQ_CFO_MAX_HZ, h, NR_ACQ_LADDER_MAX);
+  int first = -1;
+  c16_t *x = calloc(n + FFT, sizeof(c16_t));
+  for (int k = 0; k < nh && first < 0; k++) {
+    for (int i = 0; i < n; i++) {
+      const double a = 2.0 * M_PI * (double)(cfo_hz - h[k]) * (double)i / fs; /* true CFO rotates the signal, the rung removes its hypothesis */
+      x[i].r = (int16_t)lrint(cap[i].r * cos(a) - cap[i].i * sin(a));
+      x[i].i = (int16_t)lrint(cap[i].r * sin(a) + cap[i].i * cos(a));
+    }
+    const lock_t l = search(x, pci);
+    printf("  cfo %d rung %d (%d Hz): found=%d pci=%d fo_pss=%d fo_sss=%d\n", cfo_hz, k, h[k], l.found, l.pci, l.fo_pss, l.fo_sss);
+    /* the scan accepts a rung by PBCH CRC, which needs the end-to-end CFO (hypothesis + PSS + SSS estimates) to be right to ~2 kHz */
+    if (l.found && l.pci == pci && l.pos == s0 + CP && abs(cfo_hz - (h[k] + l.fo_pss + l.fo_sss)) <= 2000)
+      first = k;
+  }
+  /* a seed within the estimators' reach (|offset| < SCS) locks at once (first == 0); beyond it only a ladder rung does */
+  CHECK(first >= 0 && (abs(cfo_hz) < 30000 ? first == 0 : first > 0), "cfo %d: lock rung first=%d", cfo_hz, first);
+  if (first > 0)
+    printf("  cfo %d locked at rung %d (%d Hz)\n", cfo_hz, first, h[first]);
+  free(x);
+  free(cap);
+}
+
+/* A3: two cells both accepted by the blind pass (weaker one 4 dB down): the pass keeps both, strongest SSS metric first, both PCIs reported, and the second can be selected */
+static void inventory(int strong, int weak)
+{
+  const int s_strong = 40000, s_weak = 190000;
+  c16_t *cap = make_capture(strong, weak, 4.0, 2.5, s_strong, s_weak);
+  const lock_t b = search(cap, -1);
+  printf("inventory strong=%d weak=%d: found=%d pci=%d n_alt=%d\n", strong, weak, b.found, b.pci, b.n_alt);
+  CHECK(b.found && b.pci == strong, "blind must choose the stronger %d, got %d", strong, b.pci);
+  CHECK(b.n_alt == 2, "both cells must be reported, n_alt=%d", b.n_alt);
+  if (b.n_alt == 2) {
+    CHECK(b.alt_pci[0] == strong && b.alt_pci[1] == weak, "inventory %d %d", b.alt_pci[0], b.alt_pci[1]);
+    CHECK(b.alt_metric[0] > b.alt_metric[1], "SSS metric order %d %d", (int)b.alt_metric[0], (int)b.alt_metric[1]);
+    CHECK(b.sel_ok && b.sel_pci == weak && b.sel_pos == s_weak + CP, "select(1): ok=%d pci=%d pos=%d", b.sel_ok, b.sel_pci, b.sel_pos);
+  }
+  const lock_t pw = search(cap, weak); /* pinned behaviour unchanged: the wanted cell, one result */
+  CHECK(pw.found && pw.pci == weak && pw.n_alt == 1, "pinned: found=%d pci=%d n_alt=%d", pw.found, pw.pci, pw.n_alt);
+  free(cap);
 }
 
 static void registry(void)
@@ -309,6 +382,14 @@ int main(void)
     pair(380, 415); /* 2026-10-28 sw28_P1 c0: the wanted 415 was weaker than the co-channel 380 */
     pair(27, 403);  /* mp28m_Q1 c1: the wanted 403 was weaker than the co-channel 27 */
   }
+  g_decim = 1;
+  inventory(380, 415);
+  inventory(27, 403);
+  inventory(415, 380); /* the weaker cell has the higher N_ID_2 order */
+  g_fo = true;
+  cfo_escalation(415, 40000);
+  cfo_escalation(403, -47000);
+  cfo_escalation(415, 9000);
   registry();
   if (failures) {
     printf("test_nr_sync_pin: %d FAILURES\n", failures);

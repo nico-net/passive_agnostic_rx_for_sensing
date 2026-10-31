@@ -583,6 +583,12 @@ typedef struct {
   // Output parameters
   pss_detection_result_t pss_res;
   sss_detection_result_t sss_res;
+  /* A3: a blind search (target_nid_cell < 0) keeps EVERY accepted (PSS, SSS) candidate of the pass, strongest SSS metric first; pss_res/sss_res are alt[0]. The caller walks
+   * them with nr_search_ssb_select() until a PBCH CRC passes. A pinned search leaves n_alt = 1 (its own best-of-pinned selection). comp_state: the CFO compensation in force. */
+  int n_alt;
+  pss_detection_result_t alt_pss[3];
+  sss_detection_result_t alt_sss[3];
+  int comp_state;
 } nr_ssb_search_params_t;
 
 typedef struct nr_phy_data_tx_s {
