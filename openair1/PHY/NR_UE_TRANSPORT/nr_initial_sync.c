@@ -371,12 +371,14 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
   int f_off_to_comp = 0;
 
   /* A10: a search pinned to a PCI (the cell's descriptor) is handed up to three PSS peaks of the pinned N_ID_2 (the wanted cell's own, and the leakage peaks of stronger co-channel SSBs of other N_ID_2): the
-   * candidate whose pinned SSS metric is the best wins. A blind search keeps the first accepted candidate. */
+   * candidate whose pinned SSS metric is the best wins.
+   * A3: a blind search used to take the FIRST accepted candidate (N_ID_2 order), so a band with two cells locked either at random. It now collects every accepted (PSS, SSS) candidate of the pass,
+   * orders them by SSS metric and keeps them in params->alt_* for the caller's PBCH CRC walk. */
   const bool pinned = params->target_nid_cell >= 0;
-  bool have_best = false;
-  int best_p = -1, last_ok_p = -1;
-  pss_detection_result_t best_pss = {0};
-  sss_detection_result_t best_sss = {0};
+  pss_detection_result_t cand_pss[NUMBER_PSS_SEQUENCE];
+  sss_detection_result_t cand_sss[NUMBER_PSS_SEQUENCE];
+  int n_cand = 0;
+  params->n_alt = 0;
 
   for (int p = 0; p < NUMBER_PSS_SEQUENCE; p++) {
     pss_detection_result_t *pss_res = &pss_info.pss_elem_info[p];
@@ -384,34 +386,47 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
       continue;
 
     const int r = ssb_try_candidate(params, pss_res, &f_off_to_comp);
-    if (r < 0) {
-      if (pinned)
-        continue;
-      return false;
-    }
-    if (r == 0)
+    if (r <= 0)
       continue;
-
-    if (!pinned) {
-      params->pss_res = *pss_res;
-      return true;
-    }
-    last_ok_p = p;
-    if (!have_best || params->sss_res.metric > best_sss.metric) {
-      have_best = true;
-      best_p = p;
-      best_pss = *pss_res;
-      best_sss = params->sss_res;
-    }
+    cand_pss[n_cand] = *pss_res;
+    cand_sss[n_cand] = params->sss_res;
+    n_cand++;
   }
 
-  if (!have_best)
+  if (n_cand == 0)
     return false;
-  if (best_p != last_ok_p) /* the frequency-domain symbols and the compensation in force belong to the last accepted candidate: redo the best one */
-    if (ssb_try_candidate(params, &best_pss, &f_off_to_comp) <= 0)
+  /* strongest SSS metric first (stable) */
+  const int last_nid2 = cand_pss[n_cand - 1].nid2;
+  for (int a = 1; a < n_cand; a++)
+    for (int b = a; b > 0 && cand_sss[b].metric > cand_sss[b - 1].metric; b--) {
+      const pss_detection_result_t tp = cand_pss[b]; cand_pss[b] = cand_pss[b - 1]; cand_pss[b - 1] = tp;
+      const sss_detection_result_t ts = cand_sss[b]; cand_sss[b] = cand_sss[b - 1]; cand_sss[b - 1] = ts;
+    }
+  if (cand_pss[0].nid2 != last_nid2) /* the frequency-domain symbols and the compensation in force belong to the last accepted candidate: redo the best one */
+    if (ssb_try_candidate(params, &cand_pss[0], &f_off_to_comp) <= 0)
       return false;
-  params->sss_res = best_sss;
-  params->pss_res = best_pss;
+  params->comp_state = f_off_to_comp;
+  params->sss_res = cand_sss[0];
+  params->pss_res = cand_pss[0];
+  params->n_alt = pinned ? 1 : n_cand;
+  for (int a = 0; a < params->n_alt; a++) {
+    params->alt_pss[a] = cand_pss[a];
+    params->alt_sss[a] = cand_sss[a];
+  }
+  return true;
+}
+
+bool nr_search_ssb_select(nr_ssb_search_params_t *params, int idx)
+{
+  if (idx < 0 || idx >= params->n_alt)
+    return false;
+  int f_off_to_comp = params->comp_state;
+  const pss_detection_result_t pss = params->alt_pss[idx];
+  if (ssb_try_candidate(params, &pss, &f_off_to_comp) <= 0)
+    return false;
+  params->comp_state = f_off_to_comp;
+  params->sss_res = params->alt_sss[idx];
+  params->pss_res = pss;
   return true;
 }
 
@@ -530,74 +545,94 @@ static void nr_scan_ssb(void *arg)
       continue;
     }
 
-    ssbInfo->pssCorrAvgPower = search_params.pss_res.avg;
-    ssbInfo->pssCorrPeakPower = search_params.pss_res.peak;
-    ssbInfo->ssbOffset = search_params.pss_res.pos - search_params.nb_prefix_samples;
-    ssbInfo->nidCell = search_params.sss_res.nid_cell;
+    /* A3: walk the SSS-ranked candidates of a blind pass until a PBCH CRC passes (candidate 0 is already selected); every detected PCI is logged */
+    const int n_try = search_params.n_alt > 0 ? search_params.n_alt : 1;
+    int chosen_alt = -1;
+    for (int alt = 0; alt < n_try; alt++) {
+      if (alt > 0 && !nr_search_ssb_select(&search_params, alt))
+        continue;
+      ssbInfo->syncRes.cell_detected = true;
+      ssbInfo->pssCorrAvgPower = search_params.pss_res.avg;
+      ssbInfo->pssCorrPeakPower = search_params.pss_res.peak;
+      ssbInfo->ssbOffset = search_params.pss_res.pos - search_params.nb_prefix_samples;
+      ssbInfo->nidCell = search_params.sss_res.nid_cell;
 
 #ifdef DEBUG_INITIAL_SYNCH
-    LOG_I(PHY,
-          "TDD Normal prefix: sss detection result; %d, CellId %d metric %d, phase %d, measured offset %d\n",
-          ssbInfo->syncRes.cell_detected,
-          ssbInfo->nidCell,
-          sss_metric,
-          sss_phase,
-          ssbInfo->syncRes.rx_offset);
+      LOG_I(PHY,
+            "TDD Normal prefix: sss detection result; %d, CellId %d metric %d, phase %d, measured offset %d\n",
+            ssbInfo->syncRes.cell_detected,
+            ssbInfo->nidCell,
+            sss_metric,
+            sss_phase,
+            ssbInfo->syncRes.rx_offset);
 #endif
-    ssbInfo->freqOffset = initial_freq_offset + search_params.pss_res.freq_offset + search_params.sss_res.freq_offset;
+      ssbInfo->freqOffset = initial_freq_offset + search_params.pss_res.freq_offset + search_params.sss_res.freq_offset;
 
-    if (ssbInfo->syncRes.cell_detected) { // we got sss channel
-      ssbInfo->syncRes.cell_detected = nr_pbch_detection(ssbInfo->proc,
-                                                         ssbInfo->fp,
-                                                         ssbInfo->nidCell,
-                                                         1,
-                                                         ssbInfo->gscnInfo.ssbFirstSC,
-                                                         &ssbInfo->halfFrameBit,
-                                                         &ssbInfo->ssbIndex,
-                                                         &ssbInfo->symbolOffset,
-                                                         &ssbInfo->pbchResult,
-                                                         rxdataF); // start pbch detection at first symbol after pss
-      /* passive: every SSS candidate PCI gets its own PBCH CRC; all are reported, the first that decodes in SSS
-       * order is kept (strongest verified cell). A pinned target PCI restricts the search to that PCI instead. */
-      const sss_detection_result_t *sr = &search_params.sss_res;
-      if (sr->ncand > 1) {
-        char cb[192];
-        int o = snprintf(cb, sizeof(cb), "%d:%d:%s", sr->cand_pci[0], sr->cand_metric[0],
-                         ssbInfo->syncRes.cell_detected ? "crc_ok" : "crc_fail");
-        for (int c = 1; c < sr->ncand && c < 3; c++) {
-          int hfb = 0, ssbi = 0, symo = 0;
-          fapiPbch_t pr = {0};
-          const bool ok = nr_pbch_detection(ssbInfo->proc, ssbInfo->fp, sr->cand_pci[c], 1, ssbInfo->gscnInfo.ssbFirstSC,
-                                            &hfb, &ssbi, &symo, &pr, rxdataF);
-          o += snprintf(cb + o, sizeof(cb) - o, " %d:%d:%s", sr->cand_pci[c], sr->cand_metric[c], ok ? "crc_ok" : "crc_fail");
-          if (ok && !ssbInfo->syncRes.cell_detected) {
-            ssbInfo->syncRes.cell_detected = true;
-            ssbInfo->nidCell = sr->cand_pci[c];
-            ssbInfo->halfFrameBit = hfb;
-            ssbInfo->ssbIndex = ssbi;
-            ssbInfo->symbolOffset = symo;
-            ssbInfo->pbchResult = pr;
+      if (ssbInfo->syncRes.cell_detected) { // we got sss channel
+        ssbInfo->syncRes.cell_detected = nr_pbch_detection(ssbInfo->proc,
+                                                           ssbInfo->fp,
+                                                           ssbInfo->nidCell,
+                                                           1,
+                                                           ssbInfo->gscnInfo.ssbFirstSC,
+                                                           &ssbInfo->halfFrameBit,
+                                                           &ssbInfo->ssbIndex,
+                                                           &ssbInfo->symbolOffset,
+                                                           &ssbInfo->pbchResult,
+                                                           rxdataF); // start pbch detection at first symbol after pss
+        /* passive: every SSS candidate PCI gets its own PBCH CRC; all are reported, the first that decodes in SSS
+         * order is kept (strongest verified cell). A pinned target PCI restricts the search to that PCI instead. */
+        const sss_detection_result_t *sr = &search_params.sss_res;
+        if (sr->ncand > 1) {
+          char cb[192];
+          int o = snprintf(cb, sizeof(cb), "%d:%d:%s", sr->cand_pci[0], sr->cand_metric[0],
+                           ssbInfo->syncRes.cell_detected ? "crc_ok" : "crc_fail");
+          for (int c = 1; c < sr->ncand && c < 3; c++) {
+            int hfb = 0, ssbi = 0, symo = 0;
+            fapiPbch_t pr = {0};
+            const bool ok = nr_pbch_detection(ssbInfo->proc, ssbInfo->fp, sr->cand_pci[c], 1, ssbInfo->gscnInfo.ssbFirstSC,
+                                              &hfb, &ssbi, &symo, &pr, rxdataF);
+            o += snprintf(cb + o, sizeof(cb) - o, " %d:%d:%s", sr->cand_pci[c], sr->cand_metric[c], ok ? "crc_ok" : "crc_fail");
+            if (ok && !ssbInfo->syncRes.cell_detected) {
+              ssbInfo->syncRes.cell_detected = true;
+              ssbInfo->nidCell = sr->cand_pci[c];
+              ssbInfo->halfFrameBit = hfb;
+              ssbInfo->ssbIndex = ssbi;
+              ssbInfo->symbolOffset = symo;
+              ssbInfo->pbchResult = pr;
+            }
           }
+          LOG_I(NR_PHY, "SENSING: SSB_MULTI_PCI gscn=%d frame=%d cand(pci:sss:pbch)=[%s] chosen=%d\n", ssbInfo->gscnInfo.gscn,
+                frame_id, cb, ssbInfo->syncRes.cell_detected ? ssbInfo->nidCell : -1);
         }
-        LOG_I(NR_PHY, "SENSING: SSB_MULTI_PCI gscn=%d frame=%d cand(pci:sss:pbch)=[%s] chosen=%d\n", ssbInfo->gscnInfo.gscn,
-              frame_id, cb, ssbInfo->syncRes.cell_detected ? ssbInfo->nidCell : -1);
+        if (!ssbInfo->syncRes.cell_detected)
+          LOG_I(NR_PHY,
+                "SENSING: SCAN_PBCH_FAIL gscn=%d ssb_sc=%d ssb_ref=%.0f frame=%d pci=%d pss_peak=%d pss_avg=%d "
+                "fo_seed=%d fo_pss=%d fo_sss=%d pos=%d\n",
+                ssbInfo->gscnInfo.gscn, ssbInfo->gscnInfo.ssbFirstSC, ssbInfo->gscnInfo.ssRef, frame_id,
+                ssbInfo->nidCell, search_params.pss_res.peak, search_params.pss_res.avg, initial_freq_offset,
+                search_params.pss_res.freq_offset, search_params.sss_res.freq_offset, search_params.pss_res.pos);
+        if (ssbInfo->syncRes.cell_detected) {
+          uint32_t rsrp_avg = nr_ue_calculate_ssb_rsrp(ssbInfo->fp, rxdataF[2], ssbInfo->gscnInfo.ssbFirstSC);
+          int rsrp_db_per_re = 10 * log10(rsrp_avg);
+          ssbInfo->adjust_rxgain = TARGET_RX_POWER - rsrp_db_per_re;
+          LOG_I(PHY, "pbch rx ok. rsrp:%d dB/RE, adjust_rxgain:%d dB\n", rsrp_db_per_re, ssbInfo->adjust_rxgain);
+        }
       }
-      if (!ssbInfo->syncRes.cell_detected)
-        LOG_I(NR_PHY,
-              "SENSING: SCAN_PBCH_FAIL gscn=%d ssb_sc=%d ssb_ref=%.0f frame=%d pci=%d pss_peak=%d pss_avg=%d "
-              "fo_seed=%d fo_pss=%d fo_sss=%d pos=%d\n",
-              ssbInfo->gscnInfo.gscn, ssbInfo->gscnInfo.ssbFirstSC, ssbInfo->gscnInfo.ssRef, frame_id,
-              ssbInfo->nidCell, search_params.pss_res.peak, search_params.pss_res.avg, initial_freq_offset,
-              search_params.pss_res.freq_offset, search_params.sss_res.freq_offset, search_params.pss_res.pos);
       if (ssbInfo->syncRes.cell_detected) {
-        uint32_t rsrp_avg = nr_ue_calculate_ssb_rsrp(ssbInfo->fp, rxdataF[2], ssbInfo->gscnInfo.ssbFirstSC);
-        int rsrp_db_per_re = 10 * log10(rsrp_avg);
-        ssbInfo->adjust_rxgain = TARGET_RX_POWER - rsrp_db_per_re;
-        LOG_I(PHY, "pbch rx ok. rsrp:%d dB/RE, adjust_rxgain:%d dB\n", rsrp_db_per_re, ssbInfo->adjust_rxgain);
+        chosen_alt = alt;
+        break;
       }
     }
+    if (search_params.n_alt > 1) {
+      char inv[200];
+      int o = 0;
+      for (int a = 0; a < search_params.n_alt && o < (int)sizeof(inv) - 40; a++)
+        o += snprintf(inv + o, sizeof(inv) - o, "%s%d:%d:peak%d", a ? " " : "", search_params.alt_sss[a].nid_cell, search_params.alt_sss[a].metric,
+                      search_params.alt_pss[a].peak);
+      LOG_I(NR_PHY, "SENSING: SSB_INVENTORY gscn=%d frame=%d cand(pci:sss:pss)=[%s] chosen=%d\n", ssbInfo->gscnInfo.gscn, frame_id, inv,
+            chosen_alt >= 0 ? ssbInfo->nidCell : -1);
+    }
   }
-
   nr_cell_bind(prev_cell);
   completed_task_ans(ssbInfo->ans);
 }
@@ -675,6 +710,19 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
     cfo_limit_hz = (int)floor(max_hz);
     cfo_bins = (int)ceil((max_hz + fabs((double)ue->initial_fo)) / fp->subcarrier_spacing);
   }
+  /* A1: a pinned start (--ssb/--initial-fo) used to try its single seed forever; a seed at the edge of the capture range (or on the PSS/SSS alias) never locked
+   * (Vodafone 370 scans, 923 534 scans with PSS 15-20 dB over the average). The seed is the CENTRE of the search: after NR_ACQ_PINNED_ESCALATE_AFTER failed
+   * full scans of this cell, each scan runs the ladder around it. The per-cell failure count is reset by a lock. */
+  NR_CELL_STATIC(int, s_pinned_fail);
+#define s_pinned_fail NR_CELL_REF(s_pinned_fail)
+  int ladder[NR_ACQ_LADDER_MAX], n_ladder = 0;
+  const bool pinned_start = !auto_acquire && IS_PASSIVE_RX_MODE(get_softmodem_params()) && pss_window_frame < 0;
+  const bool escalate = pinned_start && s_pinned_fail >= NR_ACQ_PINNED_ESCALATE_AFTER;
+  if (escalate) {
+    n_ladder = nr_acq_cfo_ladder(ue->initial_fo, (int)fp->subcarrier_spacing, (int)NR_ACQ_CFO_MAX_HZ, ladder, NR_ACQ_LADDER_MAX);
+    LOG_I(NR_PHY, "ISAC_ACQ_ESCALATE seed_hz=%d failed_scans=%d hypotheses=%d\n", ue->initial_fo, s_pinned_fail, n_ladder);
+  }
+  int locked_coarse = ue->initial_fo, locked_trial = 0;
 
 
   /* Peak scratch memory, not parallelism, is the binding constraint on this scan.
@@ -766,7 +814,8 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
   /* Search integer-SCS ambiguities on fresh private copies, then let the
    * existing PSS/SSS estimators refine CFO. Only PBCH CRC accepts a hypothesis.
    * This increases work, not scratch memory, and never retunes the radio. */
-  for (int trial = 0; trial <= 2 * cfo_bins && !res; ++trial) {
+  const int n_trials = escalate ? n_ladder : 2 * cfo_bins + 1;
+  for (int trial = 0; trial < n_trials && !res; ++trial) {
     /* Probe starts at zero; handoff starts at this run's PBCH-derived CFO.
      * Fresh PBCH CRC still accepts every trial, including the initial seed. */
     /* SIGNED arithmetic: fp->subcarrier_spacing is uint32_t, so the -1 direction would be promoted to
@@ -774,10 +823,10 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
      * abs() guard. The search then only probes the POSITIVE hypotheses. */
     const int scs_hz = (int)fp->subcarrier_spacing;
     const int step = ((trial + 1) / 2) * scs_hz;
-    const int coarse_offset = ue->initial_fo + ((trial & 1) ? step : -step);
+    const int coarse_offset = escalate ? ladder[trial] : ue->initial_fo + ((trial & 1) ? step : -step);
     if (auto_acquire && abs(coarse_offset) > cfo_limit_hz)
       continue;
-    if (auto_acquire)
+    if (auto_acquire || escalate)
       LOG_I(NR_PHY, "ISAC_ACQ_CFO_TRIAL coarse_hz=%d\n", coarse_offset);
   for (int base = 0; base < numGscn && !res; base += batch) {
 
@@ -797,7 +846,7 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
                                     .syncRes.cell_detected = false,
                                     .nFrames = scan_nframes,
                                     .foFlag = ue->UE_fo_compensation,
-                                    .freqOffset = auto_acquire ? coarse_offset : ue->initial_fo,
+                                    .freqOffset = (auto_acquire || escalate) ? coarse_offset : ue->initial_fo,
                                     .targetNidCell = ue->target_Nid_cell};
       ssbInfo->pssWindowCenter = pss_window_center;
       ssbInfo->pssWindowRadius = pss_window_radius;
@@ -868,8 +917,11 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
               ssbInfo->pssCorrPeakPower,
               ssbInfo->pssCorrAvgPower);
         // take the first cell detected
-        if (!res)
+        if (!res) {
           res = ssbInfo;
+          locked_coarse = (auto_acquire || escalate) ? coarse_offset : ue->initial_fo;
+          locked_trial = trial;
+        }
       }
       if (ssbInfo->rxdata) {
         for (int ant = 0; ant < scan_fp.nb_antennas_rx; ant++) {
@@ -888,6 +940,17 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
 
   } // coarse CFO hypotheses
 
+  if (pinned_start) {
+    if (res) {
+      if (escalate)
+        LOG_I(NR_PHY, "ISAC_ACQ_LOCK_OFFSET seed_hz=%d locked_coarse_hz=%d delta_hz=%d trial=%d of %d pci=%d\n", ue->initial_fo, locked_coarse,
+              locked_coarse - ue->initial_fo, locked_trial, n_ladder, res->nidCell);
+      s_pinned_fail = 0;
+    } else {
+      s_pinned_fail++;
+    }
+  }
+#undef s_pinned_fail
   clock_gettime(CLOCK_MONOTONIC, &scan_t1);
   LOG_I(NR_PHY, "SENSING: SYNC_SCAN ms=%.1f gscn=%d ant=%d frames=%d decim=%s detected=%d\n",
         (scan_t1.tv_sec - scan_t0.tv_sec) * 1e3 + (scan_t1.tv_nsec - scan_t0.tv_nsec) / 1e6, numGscn, scan_fp.nb_antennas_rx,

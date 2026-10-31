@@ -206,6 +206,8 @@ nr_initial_sync_t nr_initial_sync_fast(UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE *
   @return true if SSB was successfully detected, false otherwise
 */
 bool nr_search_ssb_common(nr_ssb_search_params_t *params);
+/* A3: make candidate idx (< params->n_alt) of a finished blind nr_search_ssb_common() the current one: redoes its CFO compensation and SSB symbols (params->rxdataF), sets pss_res/sss_res. */
+bool nr_search_ssb_select(nr_ssb_search_params_t *params, int idx);
 
 /*!
   \brief This function gets the carrier frequencies either from FP or command-line-set global variables, depending on the

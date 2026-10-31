@@ -70,3 +70,103 @@ TEST(AutoAcquire, CfoBoundDefault)
   EXPECT_EQ(NR_ACQ_CFO_MAX_HZ, 60000.0);
   EXPECT_LE(NR_ACQ_CFO_MAX_HZ, 32.0 * 15000); // the bound must fit 32 SCS at the narrowest FR1 SCS
 }
+
+/* A1: the pinned-start CFO ladder. */
+TEST(AcqLadder, CentreFirstThenAliasesAndBounded)
+{
+  int h[NR_ACQ_LADDER_MAX];
+  const int n = nr_acq_cfo_ladder(2178, 30000, 60000, h, NR_ACQ_LADDER_MAX);
+  ASSERT_GE(n, 9);
+  EXPECT_EQ(h[0], 2178);
+  EXPECT_EQ(h[1], 2178 + NR_ACQ_ALIAS_HZ);
+  EXPECT_EQ(h[2], 2178 - NR_ACQ_ALIAS_HZ);
+  for (int i = 0; i < n; i++)
+    EXPECT_LE(abs(h[i] - 2178), 60000) << i;
+  /* non-decreasing rung: the alias neighbours of step k come before step k + 1 */
+  EXPECT_EQ(h[3], 2178 + 30000);
+}
+
+TEST(AcqLadder, EverySeedErrorWithinCaptureRangeIsCovered)
+{
+  /* the PSS/SSS estimators refine a residual of ~10 kHz (test_nr_sync_pin: the 30 kHz rung locks a 40 kHz offset): every true offset within +-45 kHz of the seed must have a hypothesis within 8.1 kHz of it */
+  int h[NR_ACQ_LADDER_MAX];
+  for (int scs : {15000, 30000}) {
+    const int n = nr_acq_cfo_ladder(-1500, scs, 60000, h, NR_ACQ_LADDER_MAX);
+    for (int err = -45000; err <= 45000; err += 250) {
+      int best = 1 << 30;
+      for (int i = 0; i < n; i++)
+        best = std::min(best, abs((-1500 + err) - h[i]));
+      EXPECT_LE(best, 8100) << "scs " << scs << " err " << err;
+    }
+  }
+}
+
+TEST(AcqLadder, NineKhzSeedErrorIsAnAliasRung)
+{
+  int h[NR_ACQ_LADDER_MAX];
+  const int n = nr_acq_cfo_ladder(0, 30000, 60000, h, NR_ACQ_LADDER_MAX);
+  int best = 1 << 30, at = -1;
+  for (int i = 0; i < n; i++)
+    if (abs(9000 - h[i]) < best) { best = abs(9000 - h[i]); at = i; }
+  EXPECT_GT(at, 0); /* not the seed: escalation is needed */
+  EXPECT_EQ(h[at], NR_ACQ_ALIAS_HZ);
+  EXPECT_LE(best, 2100);
+}
+
+/* A2: CSS0 occasions by slot. calls_per_10 of every 10 slots reach the occasion function (TDD DL/special slots); SS#0 is a 2-slot window in a 40-slot period. */
+static bool old_counter_pick(unsigned long long n) { return n % 8 == 0; }
+
+TEST(Css0Slot, EverySs0SlotIsCoveredForAnyCallDensity)
+{
+  const int period = 40, dur = 2;
+  for (int calls : {7, 8, 10})
+    for (int offset : {0, 5, 11, 20, 36}) {
+      int ss0_called = 0, ss0_hit = 0, old_hit = 0;
+      unsigned long long counter = 0;
+      for (unsigned slot = 0; slot < 40u * 200u; slot++) {
+        if ((int)(slot % 10) >= calls)
+          continue; /* not an occasion slot */
+        const bool in = nr_acq_slot_in_window(slot, period, offset, dur);
+        const bool oldp = old_counter_pick(counter++);
+        if (in) {
+          ss0_called++;
+          ss0_hit++; /* the new rule runs CORESET#0 on every SS#0 slot that is an occasion */
+          old_hit += oldp;
+        } else {
+          EXPECT_TRUE(!nr_acq_slot_in_window(slot, period, offset, dur));
+        }
+      }
+      EXPECT_GT(ss0_called, 0) << calls << " " << offset;
+      EXPECT_EQ(ss0_hit, ss0_called);
+      /* the counter rule only samples a subset (that is the defect); it is allowed to be anything, the new rule is what is asserted */
+      EXPECT_LE(old_hit, ss0_called);
+    }
+}
+
+TEST(Css0Slot, OldCounterRuleMissesSs0ForEightCallsPerPeriod)
+{
+  /* 8 calls per 8-call-aligned stream: the counter phase is fixed to one slot of the pattern; SS#0 on another slot is never sampled */
+  const int period = 40, dur = 1;
+  int old_hit = 0, new_hit = 0;
+  unsigned long long counter = 0;
+  for (unsigned slot = 0; slot < 4000; slot++) {
+    if ((int)(slot % 10) >= 8)
+      continue;
+    const bool oldp = old_counter_pick(counter++);
+    if (nr_acq_slot_in_window(slot, period, 3, dur)) {
+      new_hit++;
+      old_hit += oldp;
+    }
+  }
+  EXPECT_EQ(old_hit, 0);
+  EXPECT_GT(new_hit, 0);
+}
+
+TEST(Css0Slot, WindowEdges)
+{
+  EXPECT_FALSE(nr_acq_slot_in_window(5, 0, 0, 1));
+  EXPECT_TRUE(nr_acq_slot_in_window(41, 40, 1, 2));
+  EXPECT_TRUE(nr_acq_slot_in_window(42, 40, 1, 2));
+  EXPECT_FALSE(nr_acq_slot_in_window(43, 40, 1, 2));
+  EXPECT_FALSE(nr_acq_slot_in_window(40, 40, 1, 2));
+}

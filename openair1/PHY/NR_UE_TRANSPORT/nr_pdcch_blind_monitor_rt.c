@@ -59,6 +59,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
+#include "PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.h" // nr_acq_slot_in_window (A2)
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.h" // Phase 3 Technique C
 #include "PHY/NR_UE_TRANSPORT/nr_passive_bwp.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
@@ -5476,26 +5477,27 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * the SearchSpace, while CoreSetType continues to control the physical DM-RS reference. */
   bool css0_occasion = (cfg->dci10_ss_type == NR_BLIND_SS_COMMON);
   {
-    const int s_css0_every = 8; /* 1 occasion in 8 on CORESET#0 */
     if (cfg->autodiscover) {
       const nr_pdcch_blind_monitor_cfg_t *css0 = nr_pdcch_blind_monitor_css0_cfg();
-      if (css0 != NULL) {
-        NR_CELL_STATIC(_Atomic uint64_t, s_occ);
-#define s_occ NR_CELL_REF(s_occ)
-        const uint64_t n = atomic_fetch_add_explicit(&s_occ, 1, memory_order_relaxed);
-        if ((n % (uint64_t)s_css0_every) == 0) {
+      if (css0 != NULL && proc != NULL) {
+        /* A2: the occasion is chosen by the SLOT, never by a call counter. The old `counter % 8` sampled one fixed phase of the occasion stream: when the number of occasions per
+         * TDD period is a multiple of 8 (7/8/10 per period occur) the same slots were hit forever, and SS#0's two slots per period could be missed for good (candidate cause of the
+         * WindTre 508 SIB1 drop). CORESET#0 is monitored in EVERY slot of the MIB-derived SS#0 window (the locked SSB index is in offset/period); a window that covers the whole
+         * period (nothing to separate) falls back to one slot in 8 by slot number. */
+        const uint32_t gslot = (uint32_t)proc->frame_rx * (uint32_t)ue->frame_parms.slots_per_frame + (uint32_t)proc->nr_slot_rx;
+        const bool full_window = css0->ss_monitoring_slot_periodicity <= (css0->ss_duration > 0 ? css0->ss_duration : 1);
+        if (full_window ? (gslot % 8u) == 0 : nr_acq_slot_in_window(gslot, css0->ss_monitoring_slot_periodicity, css0->ss_monitoring_slot_offset, css0->ss_duration)) {
           cfg = css0;
           css0_occasion = true;
           NR_CELL_STATIC(_Atomic uint64_t, s_css0_runs);
 #define s_css0_runs NR_CELL_REF(s_css0_runs)
           const uint64_t r = atomic_fetch_add_explicit(&s_css0_runs, 1, memory_order_relaxed) + 1;
           if (r == 1 || (r % 20000) == 0)
-            LOG_A(PHY, "SENSING: CSS0 interleave: %llu occasions on CORESET#0 (1 in %d)\n",
-                  (unsigned long long)r, s_css0_every);
+            LOG_A(PHY, "SENSING: CSS0 interleave: %llu occasions on CORESET#0 (SS0 slots: period=%d offset=%d dur=%d)\n",
+                  (unsigned long long)r, css0->ss_monitoring_slot_periodicity, css0->ss_monitoring_slot_offset, css0->ss_duration);
         }
 #undef s_css0_runs
       }
-#undef s_occ
     }
   }
 
