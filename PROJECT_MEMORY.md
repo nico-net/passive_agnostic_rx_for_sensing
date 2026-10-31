@@ -5531,3 +5531,38 @@ files); base = build_base_4986799f18. Analysis scripts: session scratchpad dirs 
 9. Link UL V3 into the integration build. Integration branch from mpci-main: candidate + 1-8 + UL V3. Unit tests, rfsim gate, then SOLO OTA on
    415/923/403(targeted)/508, interleaved vs candidate, repeated as needed. 508: extra old-vs-candidate pairs.
 10. Tomorrow: 2-PCI OTA. Later: 403 multi-PCI RNTI loss, SHMIQ_OVERRUN stalls, admission measurement.
+
+## 37. Integration mpci-int-1031 — audit fixes D1-D11, U2-U6, A1-A3, S3-S6, gate (2026-10-31 evening; NOT on air yet)
+Audit: docs/WEAKNESS_AUDIT_20261031.md in the main checkout (untracked; [CODE-READ] + verified by hand where stated). Operator decisions 2026-10-31:
+paper framing = multi-PCI receiver; ground truth only on the sens6 OCUDU bed; latency target DL p50 ~1 ms, p99 < 7 ms per cell; implement all DL
+fixes now; full UL push; predictive items (USS hash pruning, HARQ retx anticipation, periodic SRS/CG/PUCCH tracking, compute pre-staging) start
+once DL and UL are closed.
+- Saved first (no behaviour change): wip/mpci-dl-cand-20261031 (the §34-§36 DL candidate), wip/mpci-bigtb-cand-20261031, wip/mpci-ul-cand-20261031,
+  wip/ul-rules-20261031 (the stopped 10-28 UL agent's edits). Worktrees rr-mpci-main/-bigtb/-ul now sit on those wip branches.
+- Branch mpci-int-1031 (worktree wt/rr-int-1031) = DL candidate + normalised min-sum LDPC + V3 UL alias resolver/UL_DMRS_DIAG/RFSIM_UL_TAP_SHIFT
+  + fix(ul) energy-hint safety (mpci twin) + UL rules (TA midpoint seed, TP N_RB refutation, cap overflow, pin aging, hopping -> unsupported;
+  converted per cell) + sensing-on OTA cfg tests/passive_rx/dgx/ue.passive.ota.sense.dgx.cfg + the eight fix1031/* branches:
+  - phase (D1/D2): phase-aligned DM-RS time interpolation per branch for every Nl + blind per-symbol CPE, CPU and GPU (k_tinterp, k_cpe bit-exact).
+    [OFFLINE VERIFIED, DGX unit/bench] Nl2 64QAM 13 dB flat: TB fail 114/132 -> 24/132 at 150 Hz residual CFO, 48/132 -> 17/132 at 0 Hz.
+  - ptrs (D3): sequence-free PT-RS detector (symbol-pair correlation, 72 hypotheses), per-RNTI/class CRC-arbitrated mode, G excludes PT-RS REs
+    (CPU path; GPU gate still refuses PT-RS). No PT-RS grant decoded end to end yet.
+  - irc (D4): Ledoit-Wolf DM-RS-residual whitening before mode-3 MMSE, Nl 2..4 (Nl 1 unchanged). Bench +4.4/+3.2/+0.8 dB (Nl 2/3/4, INR 10 dB).
+  - rm (D5): CRC-arbitrated per-RNTI CSI-RS/TRS rate-matching sets (OWN/ALL_CONF/ALL_FOOT/ALL_WIDE/NONE), fragment merge, DCI RM-indicator/ZP keys.
+    FOUND: decode entry overwrote every SLOTPHASE variant's CSI-RS list (only trims were ever tested -> 0/16 in §36.2); fixed (grant.rm_fixed).
+  - solver (D10/D11/D6): first-decode seed by a learnt slot-phase period (20/40/80/160); PARK v2 binomial SPRT (noise parks in ~32 draws);
+    tests/pdsch_cb_all_offline.c (all-CB diagnostic, not run on a dump yet).
+  - ulcov (U3/U4/U6/U2): UCI search for CRC16 TBs (+TP) with 2-grant confirmation; 8 extra UL TDRA rows by CRC; UL sweep on the second-pass
+    CORESET; UE-ID LRU eviction; SIB1 n-TimingAdvanceOffset; per-RNTI timing evidence accumulated across grants. NOT done: TP by CRC per RNTI.
+  - acq (A1-A3): CFO ladder (seed, +-7.04 kHz alias, +-k SCS) after 3 failed pinned scans; CSS0 on every MIB-derived SS0 slot (no call counter);
+    blind SSB inventory ranked by SSS metric (SSB_INVENTORY). Test runs: export ISAC_SIB1_CACHE=0.
+  - sense (S3-S6, P3): per-record rx_cfo_applied_hz / rx_shift_cum_samples / rx_shift_count / rx_gain_db, hyper-frame slot clock everywhere, per-source
+    sense_cfr_exported_/drop_ and sense_unexported_* counters, PUSCH data-aided noise_var measured, DM-RS port/type stamped; score_rx.py
+    GATE_MODE=solver (default via auto); read_sense.py --coherence.
+- Tests [OFFLINE VERIFIED, DGX aarch64, mpci-int-1031 @bc3fec11e2]: full ctest 361/371; failures = known ARM (dft_test, test_nr_modulation,
+  ra0_qam256, ldpc_cuda_pool_cpu, ssb_rate_match_prod), UlAlias.TrackedSeedOnAliasIsCorrected (§36.8), nr_td_sim_test (pre-existing),
+  GpuPassCells.HarqSlabsAreSeparate (also fails on the untouched base build today: host-GPU-state dependent). static_audit --check rc 0.
+  test_nr_csirs_disc_fp needs ~460 s (use --timeout >= 600).
+- Gate [MEASURED, DGX rfsim 106 PRB 4 RX, 420 s, n=2, heavy lock, @bc3fec11e2]: PASS 2/2 (solver mode): first SOLVED ttc 3.5/4.6 s, postsolve CRC
+  100.00/100.00 % over 51900/51628 grants, overall CRC 96.95/96.06 %, drop_full 0.0069/0.0047 %, resets after SOLVED 0. Upper bound, not OTA.
+- Next: replay A/B (base 4986799f18 vs int) on the frozen captures; rfsim with the sensing cfg (records produced, CPU/drop budget); then daytime
+  SOLO OTA 415/923/403(targeted)/508 interleaved, per-cell, sensing on; UL via UL_DMRS_DIAG on air + sens6 OCUDU bed for UL truth.
