@@ -138,9 +138,12 @@ void nr_pusch_first_crc_result(const nr_pdcch_blind_ul_result_t *g,
  *
  * N_TA itself (the per-UE advance the gNB commands) is NOT here and cannot be: it appears in no
  * DCI. It is the residual the operator supplies or a search finds. */
-static int32_t n_ta_offset_samples(const NR_DL_FRAME_PARMS *fp)
+static int32_t n_ta_offset_samples(const PHY_VARS_NR_UE *ue)
 {
-  return (int32_t)(((uint64_t)25600 * (uint64_t)fp->samples_per_subframe) / (4096ull * 480ull));
+  /* the SIB1 n-TimingAdvanceOffset when the MAC applied the cell's SIB1 configuration (the same call sets phy_cell_id, a uint8_t), else the FR1 TDD default */
+  const bool applied = ue->nrUE_config.cell_config.phy_cell_id == (uint8_t)ue->frame_parms.Nid_cell;
+  return nr_ul_nta_tc_to_samples(nr_ul_nta_offset_tc(ue->nrUE_config.cell_config.N_TA_offset, applied, 25600),
+                                 ue->frame_parms.samples_per_subframe);
 }
 
 static void passive_ul_deliver(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
@@ -149,7 +152,7 @@ static void passive_ul_deliver(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc
 {
   const nr_pdcch_blind_ul_result_t g=*grant;
   int32_t ta = (cfg->ul_ta_offset_samples != 0) ? cfg->ul_ta_offset_samples
-                                                 : n_ta_offset_samples(&ue->frame_parms);
+                                                 : n_ta_offset_samples(ue);
   nr_ue_ul_ticket_t ul_ticket={0};
   const bool ul_ticket_valid=nr_ue_ctx_ul_ticket(g.rnti,&ul_ticket);
   /* U4 admission is tied to the DL lock. A C-RNTI-shaped blind hit alone

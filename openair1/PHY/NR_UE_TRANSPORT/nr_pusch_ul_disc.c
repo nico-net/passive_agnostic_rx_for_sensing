@@ -16,6 +16,9 @@
 #define UL_DISC_FAMILY (65536.0 * 2.0 * 2.0 * 32.0)
 #define UL_DISC_ALPHA 1.0e-6
 #define UL_DISC_EVIDENCE 4
+#define UL_DISC_TM 3          /* arrival-window candidates accumulated per RNTI (nr_pusch_ul_disc_timing_evidence) */
+#define UL_DISC_TM_TOL 4.0    /* samples: observations of one candidate agree within this (the closed-form delay is read to a fraction of it) */
+#define UL_DISC_TM_TAU 600.0  /* slots: e-folding time of the accumulated evidence */
 typedef struct {
   uint16_t rnti;
   bool used, timed;
@@ -24,6 +27,7 @@ typedef struct {
   uint32_t scan_cursor;
   nr_pusch_ul_disc_result_t found;
   struct { int id, nscid, type, grants; bool used; double x, dof, ln_trials; int64_t last_slot; } ev[UL_DISC_EVIDENCE]; /* DM-RS identity evidence without a CRC */
+  struct { bool used; double a1, x, dof, ln_trials; int grants; int64_t last_slot, obs_slot; } tm[UL_DISC_TM]; /* arrival-window evidence without a per-grant bound */
 } ul_disc_track_t;
 typedef ul_disc_track_t tracks_cell_t[UL_DISC_TRACKS];
 NR_CELL_STATIC(tracks_cell_t, tracks);
@@ -113,6 +117,59 @@ int nr_pusch_ul_disc_timing_seed(uint16_t rnti, int nominal_advance, long abs_sl
   if (!t->timed && !cell_mode(&correction)) correction = 0;
   pthread_mutex_unlock(&track_lock);
   return nominal_advance + correction;
+}
+
+/* Per-RNTI accumulation of weak timing observations. One grant of a weak UE reads the apparent arrival (a1 = window advance minus the closed-form
+ * delay) with an evidence ratio too low for the 1e-6 bound alone; observations that agree on a1 within UL_DISC_TM_TOL are summed non-coherently
+ * (x = dof * ratio, the same statistic as nr_pusch_ul_disc_id_evidence) with an e-folding decay of UL_DISC_TM_TAU slots, so that a UE that is
+ * heard repeatedly converges while noise (random a1 per grant) does not: the first observation of a candidate pays the union over its grant's delay
+ * trials, each later one only the positions inside the candidate window, and the bound is taken on the summed candidate over the UL_DISC_TM candidates. `family` is the number of identity hypotheses the observations were drawn from. The same absolute slot counts once. */
+bool nr_pusch_ul_disc_timing_evidence(uint16_t rnti, int a1, const nr_pusch_ul_disc_delay_t *d, int64_t abs_slot, double family,
+                                      int *grants, int *adv, double *bound)
+{
+  if (grants) *grants = 0;
+  if (bound) *bound = 1;
+  if (!d || !d->valid || !isfinite(d->ratio)) return false;
+  pthread_mutex_lock(&track_lock);
+  ul_disc_track_t *t = track(rnti);
+  int k = -1, free_k = -1, weak_k = -1;
+  double weak_v = INFINITY;
+  for (int i = 0; i < UL_DISC_TM; ++i) {
+    if (!t->tm[i].used) { if (free_k < 0) free_k = i; continue; }
+    const double dt = (double)(abs_slot - t->tm[i].last_slot);
+    if (dt > 0 && t->tm[i].last_slot != INT64_MIN) { /* decay to now */
+      const double f = exp(-dt / UL_DISC_TM_TAU);
+      t->tm[i].x *= f; t->tm[i].dof *= f; t->tm[i].ln_trials *= f;
+    }
+    if (fabs((double)a1 - t->tm[i].a1) <= UL_DISC_TM_TOL) k = i;
+    const double v = t->tm[i].x - t->tm[i].dof;
+    if (v < weak_v) { weak_v = v; weak_k = i; }
+    if (dt > 0) t->tm[i].last_slot = abs_slot;
+  }
+  if (k < 0) {
+    k = free_k >= 0 ? free_k : weak_k;
+    memset(&t->tm[k], 0, sizeof(t->tm[k]));
+    t->tm[k] = (typeof(t->tm[k])){.used = true, .a1 = a1, .last_slot = abs_slot, .obs_slot = INT64_MIN};
+  }
+  typeof(t->tm[k]) *e = &t->tm[k];
+  if (e->obs_slot != abs_slot) { /* the same slot seen twice is one observation */
+    const double x = d->dof * d->ratio, w0 = e->x - e->dof > 0 ? e->x - e->dof : 0, w1 = x - d->dof > 0 ? x - d->dof : 0;
+    e->a1 = (w0 + w1) > 0 ? (e->a1 * w0 + (double)a1 * w1) / (w0 + w1) : (double)a1; /* excess-power weighted mean of the candidate */
+    e->x += x;
+    e->dof += d->dof;
+    /* the first observation picks the candidate among all the delay positions of its grant (union over its trials); a later grant only counts when its
+     * maximum falls into that candidate's window, which costs the positions inside the window, not the grant's whole range */
+    e->ln_trials += e->grants ? log(2.0 * UL_DISC_TM_TOL + 1.0) : log(d->trials > 1 ? d->trials : 1);
+    e->grants++;
+    e->obs_slot = abs_slot;
+  }
+  const double ln = nr_pusch_ul_disc_evidence_ln_bound(e->x, e->dof, e->ln_trials, e->grants > 1 ? family * UL_DISC_TM : family);
+  const bool confirmed = ln <= log(UL_DISC_ALPHA);
+  if (grants) *grants = e->grants;
+  if (bound) *bound = exp(ln);
+  if (adv) *adv = (int)lrint(e->a1);
+  pthread_mutex_unlock(&track_lock);
+  return confirmed;
 }
 
 static void timing_update_locked_in(uint16_t rnti, int nominal_advance, int measured_advance, long abs_slot)
@@ -687,7 +744,7 @@ void nr_pusch_ul_disc_timing_resolve(const nr_pusch_ul_disc_timing_in_t *in, nr_
     if (bi < 0) continue;
     const double family = (in->cached_id >= 0 && in->prior[bi] == in->cached_id) ? 1.0 : (double)in->nprior;
     if (!nr_pusch_ul_disc_delay_accept(&best, family, NULL)) {
-      if (w == 0) { out->undec = true; out->undec_idx = bi; out->undec_d = best; }
+      if (w == 0) { out->undec = true; out->undec_idx = bi; out->undec_d = best; out->undec_a0 = a0; }
       continue;
     }
     const int a1 = a0 - (int)lrint(best.delay);

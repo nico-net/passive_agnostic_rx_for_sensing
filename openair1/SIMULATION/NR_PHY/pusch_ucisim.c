@@ -32,7 +32,7 @@ NR_UE_CELL_CLOCK_DEFINE_REBASE();
 static nfapi_nr_ue_pusch_uci_t g_uci;
 static bool g_uci_on;
 static PHY_VARS_NR_UE *g_ue;
-static unsigned g_trials, g_fail, g_learned_hits, g_explored_hits;
+static unsigned g_trials, g_fail, g_learned_hits, g_explored_hits, g_held_ok;
 static uint32_t g_truth_ack, g_truth_csi1, g_truth_csi2, g_truth_rvd;
 
 void ucisim_tx(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_data_tx_t *phy_data, c16_t **txp)
@@ -149,6 +149,9 @@ int ucisim_rx(PHY_VARS_gNB *gnb, int frame, int slot, NR_UL_IND_t *ind)
     agree = tot ? (double)same / tot : 0;
     free(map); free(lo); free(hi); free(olo); free(ohi);
   }
+  /* TBS <= 3824 (CRC16): the first CRC pass under a UCI hypothesis is held (provisional) and only a second grant of the RNTI delivers it */
+  const bool small = p->pusch_data.tb_size * 8u <= 3824;
+  const bool held = g_uci_on && small && so.provisional && !so.ok && !plain_ok;
   bool payload = false;
   const bool ok = g_uci_on ? so.ok : plain_ok;
   if (ok && g_ue) {
@@ -156,11 +159,11 @@ int ucisim_rx(PHY_VARS_gNB *gnb, int frame, int slot, NR_UL_IND_t *ind)
   }
   const bool counts = !g_uci_on || (so.c.q_csi1 == g_truth_csi1 && so.c.q_csi2 == g_truth_csi2
                                      && (g_uci.harq_ack_bit_length <= 2 ? so.c.q_rvd == g_truth_rvd : so.c.q_ack == g_truth_ack));
-  const bool learned_ok = g_trials == 0 || !g_uci_on || so.learned;
+  const bool learned_ok = g_trials == 0 || !g_uci_on || so.learned || small;
   /* Two footprints that read the codeword the same way except for a few REs (e.g. CSI parts 1/2 of 9/8 vs 8/9 REs in one
    * symbol, both interleaved over it) are not separable by any CRC: the decode is right either way. Counted as the same. */
   const bool layout_ok = counts || agree >= 0.999;
-  const bool pass = ok && payload && layout_ok && learned_ok && (!g_uci_on || g_uci.harq_ack_bit_length <= 2 || g_uci.csi_payload.p1_bits || !plain_ok);
+  const bool pass = held ? g_held_ok++ == 0 : ok && payload && layout_ok && learned_ok && (!g_uci_on || g_uci.harq_ack_bit_length <= 2 || g_uci.csi_payload.p1_bits || !plain_ok);
   g_trials++;
   g_fail += !pass;
   g_learned_hits += so.learned;

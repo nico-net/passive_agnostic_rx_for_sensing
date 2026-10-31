@@ -332,9 +332,22 @@ typedef struct {
   uint8_t csi2_map;                  /* the CSI part 2 placement this UE uses (nr_uci_hyp_t.csi2_map) */
   uint32_t hits;
 } lrn_csi_t;
+/* A TB with a 16-bit CRC (TBS <= 3824) passing under a UCI hypothesis that was not yet seen to pass on another grant of the
+ * same RNTI: held here, never delivered, until a second grant's pass is consistent with it (same HARQ-ACK class, a HARQ-ACK
+ * beta offset both counts allow, same CSI parts). */
+#define LRN_PEND 4
+typedef struct {
+  bool used;
+  uint8_t cls; /* 0: HARQ-ACK of <= 2 bits (reserved REs), 1: rate-matched */
+  uint8_t o1, b1, o2, b2, csi2_map;
+  uint16_t bmask; /* HARQ-ACK beta indices (table 9.3-1) giving this pass's RE count for some O of its range */
+  uint32_t age;
+} lrn_pend_t;
 typedef struct {
   uint16_t rnti;
   uint32_t used;
+  lrn_pend_t pend[LRN_PEND];
+  bool punct_conf; /* a small TB passed twice with HARQ-ACK of <= 2 bits and no CSI: such passes are delivered at once */
   lrn_csi_t csi[LRN_CSI];
   int n_csi;
   uint16_t ack_mask;    /* beta indices (table 9.3-1) consistent with every rate-matched HARQ-ACK win; 0 = none yet */
@@ -404,6 +417,22 @@ void nr_pusch_uci_blind_stats(uint64_t out[6])
     out[i] = atomic_load_explicit(&g_st[i], memory_order_relaxed);
 }
 
+/* HARQ-ACK beta indices (rate-matched range of o_ack) consistent with the observed count c->q_ack on this geometry. */
+static uint16_t ack_beta_mask(const nr_uci_geom_t *g, const nr_uci_hyp_t *h, const nr_uci_counts_t *c)
+{
+  uint32_t s1, s2;
+  sums(g, &s1, &s2);
+  const unsigned olo = h->o_ack <= 11 ? 3 : 12, ohi = h->o_ack <= 11 ? 11 : UCI_MAX_O_ACK;
+  uint16_t mask = 0;
+  for (int b = 0; b < 16; b++)
+    for (unsigned o = olo; o <= ohi; o++)
+      if (q_count(o, k_beta_ack[b], k_alpha[h->alpha], g->sum_k, s1, s2, 0) == c->q_ack) {
+        mask |= (uint16_t)(1u << b);
+        break;
+      }
+  return mask;
+}
+
 /* Record a confirmed win: the CSI products as intervals consistent with the observed counts, the HARQ-ACK beta set. */
 static void learn(uint16_t rnti, const nr_uci_geom_t *g, const nr_uci_hyp_t *h, const nr_uci_counts_t *c)
 {
@@ -454,14 +483,7 @@ static void learn(uint16_t rnti, const nr_uci_geom_t *g, const nr_uci_hyp_t *h, 
   }
   if (h->o_ack > 2) {
     /* every beta of the same O range that gives the same count for some O of the range is consistent */
-    const unsigned olo = h->o_ack <= 11 ? 3 : 12, ohi = h->o_ack <= 11 ? 11 : UCI_MAX_O_ACK;
-    uint16_t mask = 0;
-    for (int b = 0; b < 16; b++)
-      for (unsigned o = olo; o <= ohi; o++)
-        if (q_count(o, k_beta_ack[b], k_alpha[h->alpha], g->sum_k, s1, s2, 0) == c->q_ack) {
-          mask |= (uint16_t)(1u << b);
-          break;
-        }
+    const uint16_t mask = ack_beta_mask(g, h, c);
     e->ack_mask = e->ack_mask ? (uint16_t)(e->ack_mask & mask) : mask;
     if (!e->ack_mask)
       e->ack_mask = mask; /* the UE's configuration changed: start over */
@@ -845,18 +867,118 @@ static bool search_explore(srch_t *s, lrn_t *e_snapshot, uint32_t explore_seq)
   return false;
 }
 
+/* ---- TBS <= 3824: a TB with a 16-bit CRC (TS 38.212 7.2.1), one code block ---------------------------------------------
+ * The CRC alone arbitrates here and passes 1 in 65536 wrong hypotheses; every failing grant tries many. In a DDDSU pattern
+ * nearly every PUSCH carries the HARQ-ACK of 3-4 DL slots, so a small grant fails by rate matching when its HARQ-ACK is
+ * ignored. A bounded set is tried -- HARQ-ACK of <= 2 bits (reserved REs), rate-matched HARQ-ACK over the O values and the
+ * 16 beta offsets of TS 38.213 table 9.3-1, each distinct RE count once, plus the CSI parts learned from this RNTI's CRC24
+ * wins -- and a pass is only DELIVERED once a second grant of the same RNTI passes under a consistent hypothesis (same
+ * HARQ-ACK class, a common HARQ-ACK beta, same CSI parts; the beta test is on the sets of betas that give each pass's RE
+ * count, because the same beta gives different counts on different widths). The first pass is held as pending. The state a
+ * confirmed pass creates (learn()) is then also used by later small grants, delivered directly once two passes stand behind it. */
+static bool small_confirm(const srch_t *s, const nr_uci_hyp_t *h, const nr_uci_counts_t *c)
+{
+  const uint8_t cls = h->o_ack > 2;
+  const uint16_t mask = cls ? ack_beta_mask(&s->in->geom, h, c) : 0xffffu;
+  bool confirmed = false;
+  pthread_mutex_lock(&g_lrn_lock);
+  lrn_t *e = lrn_get_locked(s->in->rnti, true);
+  if (!cls && !h->o_csi1 && e->punct_conf) {
+    pthread_mutex_unlock(&g_lrn_lock);
+    return true;
+  }
+  lrn_pend_t *free_p = NULL, *old_p = &e->pend[0];
+  for (int i = 0; i < LRN_PEND && !confirmed; i++) {
+    lrn_pend_t *p = &e->pend[i];
+    if (!p->used) {
+      free_p = free_p ? free_p : p;
+      continue;
+    }
+    if (p->age < old_p->age)
+      old_p = p;
+    if (p->cls == cls && p->o1 == h->o_csi1 && p->b1 == h->b_csi1 && p->o2 == h->o_csi2 && p->b2 == h->b_csi2 &&
+        p->csi2_map == h->csi2_map && (p->bmask & mask)) {
+      memset(p, 0, sizeof(*p));
+      confirmed = true;
+      e->punct_conf |= !cls && !h->o_csi1;
+    }
+  }
+  if (!confirmed) {
+    lrn_pend_t *p = free_p ? free_p : old_p;
+    *p = (lrn_pend_t){.used = true, .cls = cls, .o1 = h->o_csi1, .b1 = h->b_csi1, .o2 = h->o_csi2, .b2 = h->b_csi2,
+                      .csi2_map = h->csi2_map, .bmask = mask, .age = ++g_lrn_clock};
+  }
+  pthread_mutex_unlock(&g_lrn_lock);
+  return confirmed;
+}
+
+/* One hypothesis of the small-TB set: true = the TB is delivered (CRC pass and confirmed). */
+static bool small_try(srch_t *s, const nr_uci_hyp_t *h)
+{
+  nr_uci_counts_t c;
+  if (!nr_uci_counts(&s->in->geom, h, &c) || c.u_re >= s->N || !tb_test(s, h, &c))
+    return false;
+  if (small_confirm(s, h, &c))
+    return true;
+  s->out->ok = false;
+  s->out->provisional = true;
+  return false;
+}
+
+static bool search_small(srch_t *s, const lrn_t *e)
+{
+  uint8_t oo[UCI_MAX_O_ACK];
+  const int no = ack_o_order(s, e, oo, 6);
+  const int ncsi = e ? e->n_csi : 0;
+  for (int ci = -1; ci < ncsi && !over_budget(s); ci++) {
+    nr_uci_hyp_t h = {.alpha = e ? e->alpha : 3, .b_ack = k_ack_order[0]};
+    if (ci >= 0) {
+      h.o_csi1 = e->csi[ci].o1;
+      h.b_csi1 = e->csi[ci].b1;
+      h.o_csi2 = e->csi[ci].o2;
+      h.b_csi2 = e->csi[ci].b2;
+      h.csi2_map = e->csi[ci].csi2_map;
+    }
+    h.o_ack = 2; /* HARQ-ACK of <= 2 bits: reserved REs (with CSI: the CSI alone when no ACK is pending, same footprint class) */
+    if (small_try(s, &h))
+      return true;
+    uint32_t tried[6 * 16];
+    int nt = 0;
+    for (int i = 0; i < no && !over_budget(s); i++)
+      for (int bi = 0; bi < 16 && !over_budget(s); bi++) {
+        const int b = k_ack_order[bi];
+        if (ci >= 0 && e->ack_mask && !(e->ack_mask >> b & 1))
+          continue;
+        h.o_ack = oo[i];
+        h.b_ack = (uint8_t)b;
+        nr_uci_counts_t c;
+        if (!nr_uci_counts(&s->in->geom, &h, &c))
+          continue;
+        bool dup = false;
+        for (int t = 0; t < nt && !dup; t++)
+          dup = tried[t] == c.q_ack;
+        if (dup || c.u_re >= s->N)
+          continue;
+        tried[nt++] = c.q_ack;
+        if (small_try(s, &h))
+          return true;
+      }
+  }
+  return false;
+}
+
 void nr_pusch_uci_blind_search(const nr_uci_search_in_t *in, nr_uci_search_out_t *out)
 {
   memset(out, 0, sizeof(*out));
   out->u_lo = out->u_hi = -1;
   if (!in || !in->llr || !in->work || !in->tb || in->G == 0 || in->tbs_bits == 0 || in->geom.rb == 0 || in->geom.qm == 0 || in->geom.nl == 0)
     return;
-  /* Only a TB with a 24-bit CRC (TBS > 3824 bits, TS 38.212 7.2.1) can decide among hypotheses: a 16-bit CRC passes 1 in
-   * 65536 wrong ones, and every failing grant tries several. On air, searching CRC16 TBs too reported footprints of up to
-   * 360 RE on 3-PRB grants -- chance passes -- after 1.1 M TB tests in 300 s ([MEASURED, sens6 OTA lab,
-   * ulint1_lab_20261025_211640]). Such grants keep the plain decode's verdict. */
-  if (in->tbs_bits <= 3824)
-    return;
+  /* A TB with a 24-bit CRC (TBS > 3824 bits, TS 38.212 7.2.1) decides among hypotheses by itself. A 16-bit CRC passes 1 in
+   * 65536 wrong ones, and every failing grant tries several: searching CRC16 TBs with a single pass as the criterion reported
+   * footprints of up to 360 RE on 3-PRB grants -- chance passes -- after 1.1 M TB tests in 300 s ([MEASURED, sens6 OTA lab,
+   * ulint1_lab_20261025_211640]). Such TBs are searched over a small set and delivered only once a second grant of the RNTI
+   * confirms the hypothesis (search_small). */
+  const bool small = in->tbs_bits <= 3824;
   srch_t s;
   memset(&s, 0, sizeof(s));
   s.in = in;
@@ -905,6 +1027,27 @@ void nr_pusch_uci_blind_search(const nr_uci_search_in_t *in, nr_uci_search_out_t
   s.budget_ns = (uint64_t)(in->budget_us ? in->budget_us : 1) * 1000ull;
   /* the learned step tries a short, fixed list (each learned CSI part x its HARQ-ACK options): the grant's budget bounds it */
   const uint64_t keep = s.budget_ns;
+  if (small) {
+    /* learned state exists only from a CRC24 win or a two-grant CRC16 confirmation (learn() is called from nowhere else): its hypotheses are delivered
+     * on one pass, as for the large TBs */
+    if (have && snap.wins >= 1 && search_learned(&s, &snap)) {
+      out->learned = true;
+      atomic_fetch_add_explicit(&g_st[2], 1, memory_order_relaxed);
+      learn(in->rnti, &g, &out->h, &out->c);
+      return;
+    }
+    if (!in->explore)
+      return;
+    atomic_fetch_add_explicit(&g_st[1], 1, memory_order_relaxed);
+    s.t0_ns = cpu_ns();
+    s.budget_ns = keep;
+    out->ok = false;
+    if (!search_small(&s, have ? &snap : NULL))
+      return;
+    atomic_fetch_add_explicit(&g_st[3], 1, memory_order_relaxed);
+    learn(in->rnti, &g, &out->h, &out->c);
+    return;
+  }
   if (have && search_learned(&s, &snap)) {
     out->learned = true;
     atomic_fetch_add_explicit(&g_st[2], 1, memory_order_relaxed);

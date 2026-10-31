@@ -1544,6 +1544,10 @@ NR_CELL_STATIC_INIT(_Atomic unsigned long, cf_idconf, 0);
 #define cf_idconf NR_CELL_REF(cf_idconf)
 NR_CELL_STATIC_INIT(_Atomic unsigned long, cf_alias, 0);
 #define cf_alias NR_CELL_REF(cf_alias)
+NR_CELL_STATIC_INIT(_Atomic unsigned long, cf_tmev, 0); /* timing accepted by accumulated evidence (worker) */
+#define cf_tmev NR_CELL_REF(cf_tmev)
+NR_CELL_STATIC_INIT(_Atomic unsigned long, dec_cf_tmev, 0); /* ... inline */
+#define dec_cf_tmev NR_CELL_REF(dec_cf_tmev)
 NR_CELL_STATIC_INIT(_Atomic unsigned long, dec_cf_tried, 0);
 #define dec_cf_tried NR_CELL_REF(dec_cf_tried)
 NR_CELL_STATIC_INIT(_Atomic unsigned long, dec_cf_moved, 0);
@@ -1652,6 +1656,15 @@ static int ul_bg_run(const nr_ul_bgdisc_job_t *j)
           found = true;
           atomic_fetch_add_explicit(&cf_idconf, 1, memory_order_relaxed);
         }
+        /* the same weak read also accumulates as TIMING evidence across this RNTI's grants (non-coherent per arrival window, decaying): a weak UE converges
+         * instead of waiting for one grant strong enough to be decisive alone. The accepted advance trains the tracker (the seed of the next grants); the
+         * cached hypothesis is not stored from it (the identity may still be unconfirmed). */
+        int ngt = 0, advt = 0; double fbt = 1;
+        if (nr_pusch_ul_disc_timing_evidence(g.rnti, res.undec_a0 - (int)lrint(res.undec_d.delay), &res.undec_d, (int64_t)j->abs_slot, (double)nprior, &ngt, &advt, &fbt)
+            && abs(advt - j->ta_offset) <= 2048) {
+          nr_pusch_ul_disc_timing_update_ev(g.rnti, j->ta_offset, advt, (long)j->abs_slot);
+          atomic_fetch_add_explicit(&cf_tmev, 1, memory_order_relaxed);
+        }
       }
       if (locked) {
         const int a1 = res.ta, bi = res.idx;
@@ -1671,10 +1684,11 @@ static int ul_bg_run(const nr_ul_bgdisc_job_t *j)
       if (!locked) ta = seed;
       const unsigned long nj = atomic_load_explicit(&cf_jobs, memory_order_relaxed);
       if (nj % 500 == 1)
-        LOG_I(PHY, "SENSING: UL_TIMING_CF jobs=%lu timing_accepted=%lu fep=%lu verify_fail=%lu id_evidence_confirmed=%lu alias_switched=%lu inline_tried=%lu inline_moved=%lu\n", nj,
+        LOG_I(PHY, "SENSING: UL_TIMING_CF jobs=%lu timing_accepted=%lu fep=%lu verify_fail=%lu id_evidence_confirmed=%lu alias_switched=%lu inline_tried=%lu inline_moved=%lu tm_evidence=%lu/%lu\n", nj,
               (unsigned long)atomic_load_explicit(&cf_acc, memory_order_relaxed), (unsigned long)atomic_load_explicit(&cf_fep, memory_order_relaxed),
               (unsigned long)atomic_load_explicit(&cf_vfail, memory_order_relaxed), (unsigned long)atomic_load_explicit(&cf_idconf, memory_order_relaxed),
-              (unsigned long)atomic_load_explicit(&cf_alias, memory_order_relaxed), (unsigned long)atomic_load_explicit(&dec_cf_tried, memory_order_relaxed), (unsigned long)atomic_load_explicit(&dec_cf_moved, memory_order_relaxed));
+              (unsigned long)atomic_load_explicit(&cf_alias, memory_order_relaxed), (unsigned long)atomic_load_explicit(&dec_cf_tried, memory_order_relaxed), (unsigned long)atomic_load_explicit(&dec_cf_moved, memory_order_relaxed),
+              (unsigned long)atomic_load_explicit(&cf_tmev, memory_order_relaxed), (unsigned long)atomic_load_explicit(&dec_cf_tmev, memory_order_relaxed));
     }
   }
   const int s1 = g.start_symbol + g.num_symbols < sps ? g.start_symbol + g.num_symbols : sps;
@@ -2292,8 +2306,23 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       for (int a_ = 0; a_ < nant; ++a_) cg_.rx[a_] = &gnb->common_vars.rxdataF[a_][slot_off];
       nr_pusch_ul_disc_delay_t cd_;
       atomic_fetch_add_explicit(&dec_cf_tried, 1, memory_order_relaxed);
-      if (nr_pusch_ul_disc_delay_closed(&cg_, (uint16_t)(1u << fs_), g->dmrs_config_type, g->nscid, g->ul_dmrs_scrambling_id, &cd_) &&
-          nr_pusch_ul_disc_delay_accept(&cd_, 1.0, NULL)) {
+      const bool cf_ok_ = nr_pusch_ul_disc_delay_closed(&cg_, (uint16_t)(1u << fs_), g->dmrs_config_type, g->nscid, g->ul_dmrs_scrambling_id, &cd_);
+      if (cf_ok_ && !nr_pusch_ul_disc_delay_accept(&cd_, 1.0, NULL) && !nr_ul_layout_is_trial(g)) {
+        /* not decisive alone (a weak UE): accumulate across this RNTI's grants (nr_pusch_ul_disc_timing_evidence). What the worker drops (bg_expired) is still
+         * evaluated here, so every grant that reaches the decode contributes. An accumulated acceptance moves the window and trains the tracker's seed. */
+        int ng_ = 0, adv_ = 0; double fb_ = 1;
+        if (nr_pusch_ul_disc_timing_evidence(g->rnti, ul_sample_offset - (int)lrint(cd_.delay), &cd_, (int64_t)abs_slot, 1.0, &ng_, &adv_, &fb_)
+            && abs(adv_ - ta_offset_samples) <= 2048) {
+          nr_pusch_ul_disc_timing_update_ev(g->rnti, ta_offset_samples, adv_, (long)abs_slot);
+          atomic_fetch_add_explicit(&dec_cf_tmev, 1, memory_order_relaxed);
+          if (adv_ - ul_sample_offset > PASSIVE_UL_DELAY_TOL || adv_ - ul_sample_offset < -PASSIVE_UL_DELAY_TOL) {
+            atomic_fetch_add_explicit(&dec_cf_moved, 1, memory_order_relaxed);
+            ul_sample_offset = adv_;
+            out->ta_applied_samples = adv_;
+            PASSIVE_UL_FEP(ul_sample_offset, 2);
+          }
+        }
+      } else if (cf_ok_ && nr_pusch_ul_disc_delay_accept(&cd_, 1.0, NULL)) {
         const int dd_ = (int)lrint(cd_.delay);
         int new_ta_ = nr_sense_ul_ta_refined(ul_sample_offset, dd_);
         /* comb-2 pilots read the delay modulo fft/2: the default (the read, i.e. the candidate nearest to where this window looked, the answer the former estimator
@@ -2829,7 +2858,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * exploration only while the PUSCH queue is idle and within a run-time CPU allowance (uci_share_left), so real-time work is never
    * displaced. A failed search restores the codeword and the plain decode's verdict. */
   if (rc == 0 && hp_crc_failed(ulsch) && out->G > 0 && !hq_retx && !ldpc_hopeless && out->G <= PASSIVE_UL_UCI_CAP
-      && g->rv == 0 && !g->transform_precoding && tbs > 3824 /* a CRC24 TB: see nr_pusch_uci_blind_search */ && uci_share_left()) {
+      && g->rv == 0 && uci_share_left() /* CRC16 TBs (<= 3824 bits) are searched under a two-grant confirmation, DFT-s-OFDM too: nr_pusch_uci_blind_search */) {
     const uint32_t full_bits = out->G;
     int16_t *original = g_scratch[ctx].uci ? g_scratch[ctx].uci : NULL;
     if (original) {

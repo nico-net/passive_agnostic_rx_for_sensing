@@ -96,6 +96,10 @@ bool nr_pusch_ul_disc_delay_accept(const nr_pusch_ul_disc_delay_t *d, double fam
 bool nr_pusch_ul_disc_id_evidence(uint16_t rnti, int id, int nscid, int dmrs_type, const nr_pusch_ul_disc_delay_t *d, int64_t abs_slot, double family,
                                   int *grants, double *false_alarm_bound);
 /* a timing measurement already accepted by an evidence bound trains the trackers (no score threshold) */
+/* Weak timing observations of one RNTI accumulated across grants (non-coherent sum per candidate arrival window a1 = window advance - delay, decaying):
+ * true when the summed candidate reaches the 1e-6 bound over `family` identity hypotheses; *adv = the accepted advance. See nr_pusch_ul_disc.c. */
+bool nr_pusch_ul_disc_timing_evidence(uint16_t rnti, int a1, const nr_pusch_ul_disc_delay_t *d, int64_t abs_slot, double family,
+                                      int *grants, int *adv, double *bound);
 void nr_pusch_ul_disc_timing_update_ev(uint16_t rnti, int nominal_advance, int measured_advance, long abs_slot);
 
 /* ---- G1 timing resolver (the worker branch of ul_bg_run, with the FEP injected so that a unit test can drive it with synthetic time-domain bursts) ----
@@ -130,6 +134,7 @@ typedef struct {
   bool undec;       /* first window: best id not decisive alone (evidence for the id may still accumulate) */
   int undec_idx;
   nr_pusch_ul_disc_delay_t undec_d;
+  int undec_a0;     /* the window advance undec_d was read at */
   int feps, vfail;
 } nr_pusch_ul_disc_timing_out_t;
 void nr_pusch_ul_disc_timing_resolve(const nr_pusch_ul_disc_timing_in_t *in, nr_pusch_ul_disc_timing_out_t *out);

@@ -3024,10 +3024,12 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1534	cf_jobs	file_static	
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1536	cf_acc	file_static	_Atomic unsigned long [converted]	PER_CELL	G1	closed-form UL timing telemetry counter (log only), one per cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1538	cf_fep	file_static	_Atomic unsigned long [converted]	PER_CELL	G1	closed-form UL timing telemetry counter (log only), one per cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1540	cf_vfail	file_static	_Atomic unsigned long [converted]	PER_CELL	G1	closed-form UL timing telemetry counter (log only), one per cell
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1547	cf_tmev	file_static	_Atomic unsigned long [converted]	PER_CELL	ulcov	timing-evidence telemetry counter (log only), one per cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1542	cf_idconf	file_static	_Atomic unsigned long [converted]	PER_CELL	G1	closed-form UL timing telemetry counter (log only), one per cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1544	cf_alias	file_static	_Atomic unsigned long [converted]	PER_CELL	G1	closed-form UL timing: jobs whose comb-2 alias window verified better (log only), one per cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1544	dec_cf_tried	file_static	_Atomic unsigned long [converted]	PER_CELL	G1	closed-form UL timing telemetry counter (log only), one per cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1546	dec_cf_moved	file_static	_Atomic unsigned long [converted]	PER_CELL	G1	closed-form UL timing telemetry counter (log only), one per cell
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c	1549	dec_cf_tmev	file_static	_Atomic unsigned long [converted]	PER_CELL	ulcov	timing-evidence telemetry counter (log only), one per cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	27	g_book	file_static	nr_passive_ul_book_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	29	g_book_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c	31	g_parked	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
@@ -3096,6 +3098,8 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	45	g_ul_dmrs_id_lock	file
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	61	g_ue_ids	file_static	g_ue_ids_cell_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	63	g_ue_ids_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	65	g_ue_ids_dropped	file_static	_Atomic uint64_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	66	g_ue_ids_clock	file_static	uint64_t [converted]	PER_CELL	ulcov	LRU use counter of the UL UE-ID table (under g_ue_ids_lock), one per cell
+openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	68	g_ue_ids_evicted	file_static	_Atomic uint64_t [converted]	PER_CELL	ulcov	UE-ID table eviction counter, one per cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	89	g_data_lock	file_static	g_data_lock_cell_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	98	g_data_pending	file_static	g_data_pending_cell_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c	100	g_data_pending_next	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
