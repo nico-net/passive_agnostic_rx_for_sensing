@@ -6,6 +6,7 @@
 #include <string.h>
 #include <pthread.h>
 
+#include "nr_ul_ta_rules.h"
 #include "nr_pusch_passive_monitor_rt.h"
 #include "nr_pusch_passive_decode.h"
 #include "nr_pdcch_blind_monitor_rt.h"
@@ -164,8 +165,8 @@ static void passive_ul_deliver(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc
       nr_pusch_passive_ul_ids_seed(&ul_ticket,&dl,ue->frame_parms.Nid_cell);
       if (cfg->ul_ta_offset_samples == 0 && dl.ul.ta_command_valid &&
           dl.ul.ta_mu == ue->frame_parms.numerology_index)
-        ta += (int32_t)(((int64_t)dl.ul.ta_command_units * ue->frame_parms.samples_per_subframe) /
-                        (1920 << dl.ul.ta_mu));
+        ta = nr_ul_ta_seed(ta, (int32_t)(((int64_t)dl.ul.ta_command_units * ue->frame_parms.samples_per_subframe) /
+                                         (1920 << dl.ul.ta_mu)));
     }
   }
   const nr_ue_ul_update_t ul_update={.dci_len=g.dci_length,

@@ -24,6 +24,7 @@
 #include "common/utils/LOG/log.h"
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <time.h>
 #include <string.h>
 #include "common/utils/nr_cell.h"
 bool nr_pusch_tda_legal(int mapping_type, int S, int L)
@@ -135,7 +136,7 @@ int nr_pdcch_ul_interp_sweep_generate_hint(nr_hyp_t *out, int cap, int S, int L,
     for (int j = 0; j < n && !found; j++)
       found = out[j].len == generic[i].len && memcmp(out[j].bytes, generic[i].bytes, generic[i].len) == 0;
     if (found) continue;
-    if (n == cap || n == NR_HYP_SWEEP_MAX_RAW) { free(generic); return NR_HYP_SWEEP_RAW_OVERFLOW; }
+    if (n >= cap || n >= NR_HYP_SWEEP_MAX_RAW) break; /* capacity-safe: the pinned rows lead, the lowest-priority generic tail is what is dropped (never a refusal) */
     out[n++] = generic[i];
   }
   free(generic);
@@ -181,7 +182,10 @@ NR_CELL_STATIC(int, g_ul_dmrs_pin_L);
 NR_CELL_STATIC(int, g_ul_dmrs_pin_mapping);
 #define g_ul_dmrs_pin_mapping NR_CELL_REF(g_ul_dmrs_pin_mapping)
 
-void nr_pusch_ul_dmrs_pin_set(int S, int L)
+NR_CELL_STATIC(_Atomic uint64_t, g_ul_dmrs_pin_ns); /* when the pin was latched (CLOCK_MONOTONIC ns), for aging */
+#define g_ul_dmrs_pin_ns NR_CELL_REF(g_ul_dmrs_pin_ns)
+
+void nr_pusch_ul_dmrs_pin_set_at(int S, int L, uint64_t now_ns)
 {
   if (!nr_cfg_epoch_work_current()) return;
   /* First observation wins and is never overwritten -- same rule the DL DM-RS oracle already uses.
@@ -202,9 +206,25 @@ void nr_pusch_ul_dmrs_pin_set(int S, int L)
   g_ul_dmrs_pin_S = S;
   g_ul_dmrs_pin_L = L;
   g_ul_dmrs_pin_mapping = (legal_a && legal_b) ? NR_PUSCH_MAPPING_EITHER : (legal_a ? 0 : 1);
+  atomic_store_explicit(&g_ul_dmrs_pin_ns, now_ns, memory_order_relaxed);
   atomic_store_explicit(&g_ul_dmrs_pin_valid, UL_PIN_VALID, memory_order_release);
   LOG_A(PHY, "SENSING: UL_DMRS_PIN S=%d L=%d mapping=%s (from energy occupancy)\n", S, L,
         g_ul_dmrs_pin_mapping == NR_PUSCH_MAPPING_EITHER ? "A|B" : (g_ul_dmrs_pin_mapping ? "B" : "A"));
+}
+
+void nr_pusch_ul_dmrs_pin_set(int S, int L)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  nr_pusch_ul_dmrs_pin_set_at(S, L, (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec);
+}
+
+bool nr_pusch_ul_dmrs_pin_expire(uint64_t now_ns, uint64_t ttl_ns)
+{
+  int expected = UL_PIN_VALID;
+  if (atomic_load_explicit(&g_ul_dmrs_pin_valid, memory_order_acquire) != UL_PIN_VALID) return false;
+  if (now_ns - atomic_load_explicit(&g_ul_dmrs_pin_ns, memory_order_relaxed) < ttl_ns) return false;
+  return atomic_compare_exchange_strong_explicit(&g_ul_dmrs_pin_valid, &expected, UL_PIN_EMPTY, memory_order_acq_rel, memory_order_relaxed);
 }
 
 bool nr_pusch_ul_dmrs_pin_get(int *S, int *L, int *mapping_type)

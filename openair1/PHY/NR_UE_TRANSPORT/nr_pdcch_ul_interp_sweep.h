@@ -79,6 +79,11 @@ bool nr_pusch_ul_energy_span(const double energy[14], double rel_thresh, int *S,
  *  on the validity flag before any field is written; a losing caller's own (S,L) is simply
  *  discarded, which is correct under "first observation wins"). */
 void nr_pusch_ul_dmrs_pin_set(int S, int L);
+/** The same with the caller's clock (ns, any monotonic origin). */
+void nr_pusch_ul_dmrs_pin_set_at(int S, int L, uint64_t now_ns);
+/** Aging: clears the pin when it is older than ttl_ns, so a hint latched once cannot persist forever across a changing grant mix; the
+ *  next observation latches a fresh one. True when it cleared. A reader racing the clear may see one stale hint (it is an ordering aid only). */
+bool nr_pusch_ul_dmrs_pin_expire(uint64_t now_ns, uint64_t ttl_ns);
 /** True and fills S/L/mapping_type (any pointer may be NULL) iff a pin exists. Thread-safe. */
 bool nr_pusch_ul_dmrs_pin_get(int *S, int *L, int *mapping_type);
 /** Test/reset hook: clears the pin (as if nothing had ever been measured). NOT thread-safe against

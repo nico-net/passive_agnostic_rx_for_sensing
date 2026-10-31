@@ -68,7 +68,14 @@ TEST(UlInterpSweep, EnergyHintNeverRemovesGenericHypotheses) {
     EXPECT_TRUE(found) << "generic candidate " << i;
   }
   EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate_hint(hinted.data(), hinted.size(), 10, 10, 1), ng);
-  EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate_hint(hinted.data(), ng, 5, 6, 1), NR_HYP_SWEEP_RAW_OVERFLOW);
+  /* capacity-safe: a union that does not fit is truncated at the lowest-priority generic tail, never refused, and the pinned rows lead */
+  std::vector<nr_hyp_t> pinned(NR_HYP_SWEEP_MAX_RAW);
+  const int np = nr_pdcch_ul_interp_sweep_generate_pinned(pinned.data(), pinned.size(), 5, 6, 1);
+  ASSERT_GT(np, 0);
+  std::vector<nr_hyp_t> small(ng);
+  EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate_hint(small.data(), ng, 5, 6, 1), ng);
+  for (int i = 0; i < np; ++i)
+    EXPECT_TRUE(small[i].len == pinned[i].len && memcmp(small[i].bytes, pinned[i].bytes, pinned[i].len) == 0) << "pinned row " << i << " must lead";
 }
 /* CONTRACT CHANGED: NR_HYP_SWEEP_MAX_CLASSES was unified with NR_HYP_SWEEP_MAX_RAW
  * (nr_hyp_sweep.h) so a live UL search stops refusing permanently whenever finite-sample class
@@ -354,5 +361,20 @@ TEST(UlDmrsPin, ConcurrentSetIsNeverTornEvenUnderContention) {
     const int expected_m = (legal_a && legal_b) ? NR_PUSCH_MAPPING_EITHER : (legal_a ? 0 : 1);
     EXPECT_EQ(m, expected_m);
   }
+  nr_pusch_ul_dmrs_pin_reset();
+}
+
+TEST(UlDmrsPin, AgesOutSoAStaleHintCannotPersist) {
+  nr_pusch_ul_dmrs_pin_reset();
+  nr_pusch_ul_dmrs_pin_set_at(2, 12, 1000);
+  int S = -1;
+  EXPECT_FALSE(nr_pusch_ul_dmrs_pin_expire(1500, 1000)); // younger than the ttl
+  EXPECT_TRUE(nr_pusch_ul_dmrs_pin_get(&S, nullptr, nullptr));
+  EXPECT_TRUE(nr_pusch_ul_dmrs_pin_expire(2500, 1000));
+  EXPECT_FALSE(nr_pusch_ul_dmrs_pin_get(nullptr, nullptr, nullptr));
+  EXPECT_FALSE(nr_pusch_ul_dmrs_pin_expire(9000, 1000)); // nothing to clear
+  nr_pusch_ul_dmrs_pin_set_at(0, 14, 9000); // a fresh observation latches again
+  ASSERT_TRUE(nr_pusch_ul_dmrs_pin_get(&S, nullptr, nullptr));
+  EXPECT_EQ(S, 0);
   nr_pusch_ul_dmrs_pin_reset();
 }

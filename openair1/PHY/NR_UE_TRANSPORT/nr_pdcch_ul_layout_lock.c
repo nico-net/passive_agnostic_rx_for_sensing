@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* UL-LAYOUT: blind UL BWP / DCI 0_1 layout lock. See the header for the method. */
+#include "nr_ul_tp_rules.h"
 #include "nr_pdcch_ul_layout_lock.h"
 #include "nr_ul_trial_variant.h"
 #include "nr_pdsch_prb_set.h" /* NR_FDRA_TYPE1 */
@@ -414,6 +415,7 @@ typedef struct {
   uint8_t k2row[16];
   uint32_t gold, gctl, cdm1, cdm2, probes;
   uint32_t crc_ok, crc_fail_run, trials, crc_locks;
+  uint32_t tp_ill, tp_ok; /* TP tail readings under the leading BWP: spec-illegal / legal N_RB (nr_ul_tp_rules.h) */
   uint32_t lock_decisive; /* decisive PUSCH CRC passes (CRC24 / all CB CRCs) of the CURRENT lock: 0 = the lock rests on votes or chance-level CRC16 passes only */
   bool locked;
   nr_pdcch_blind_ul_opts_t opts;
@@ -477,6 +479,8 @@ NR_CELL_STATIC(uint32_t, g_discarded);
 #define g_discarded NR_CELL_REF(g_discarded)
 NR_CELL_STATIC(uint32_t, g_tied);
 #define g_tied NR_CELL_REF(g_tied)
+NR_CELL_STATIC(uint64_t, g_tp_spec_refuted); /* TP readings refuted by the 38.211 N_RB rule; guarded by g_mu */
+#define g_tp_spec_refuted NR_CELL_REF(g_tp_spec_refuted)
 NR_CELL_STATIC(uint32_t, g_votes_total);
 #define g_votes_total NR_CELL_REF(g_votes_total)
 NR_CELL_STATIC(uint32_t, g_probes_fed);
@@ -710,7 +714,7 @@ static void lock_length_locked(len_state_t *ls, long now_slot)
   int best = 0, best_key = 1 << 30;
   for (int i = 0; i < ls->ntail; i++) {
     const nr_ul_layout_tail_t *t = &ls->tail[i];
-    const int key = (cdm_ev && t->cdm != cdm_ev ? 1000 : 0) + (cp_ev && t->tp ? 100 : 0) + t->cost;
+    const int key = (cdm_ev && t->cdm != cdm_ev ? 1000 : 0) + (cp_ev && t->tp ? 100 : 0) + (t->tp && nr_ul_tp_tail_refuted(ls->tp_ill, ls->tp_ok) ? 1000 : 0) + t->cost;
     if (key < best_key) { best_key = key; best = i; }
   }
   int addpos = 1, mx = (int)g_addpos[1]; /* dmrs-AdditionalPosition 1 unless the probes say otherwise */
@@ -1428,6 +1432,7 @@ static bool trial_opts_locked(const len_state_t *ls, int h, int k, int t, int va
 }
 
 /* caller holds mu: evidence slot of hypothesis e (created; the entry with the fewest passes is evicted when full) */
+static uint64_t g_tp_spec_refuted; /* guarded by mu */
 static typeof(((len_state_t *)0)->ev[0]) *ev_slot_locked(len_state_t *ls, uint32_t e)
 {
   int v = 0;
@@ -1529,7 +1534,12 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
         const int h = rk[i], k = pre_for_hyp_sel(ls, h, (int)(vctr / ((uint32_t)vcmax * (uint32_t)(ntl ? ntl : 1))));
         if (ls->locked && g_locked_hyp == h && ls->chosen_tail == t && ls->chosen_var == var) continue; /* the failing layout itself */
         nr_pdcch_blind_ul_opts_t o;
+        if (ls->tail[t].tp && nr_ul_tp_tail_refuted(ls->tp_ill, ls->tp_ok)) continue; /* refuted by the width rule below */
         if (!trial_opts_locked(ls, h, k, t, var, &o) || !nr_pdcch_blind_extract_01(payload, len, rnti, &o, &out[n])) continue;
+        if (out[n].transform_precoding) {
+          if (!nr_ul_tp_nrb_legal(out[n].num_rb)) { if (i == 0) ls->tp_ill++; g_tp_spec_refuted++; continue; } /* spec exclusion (38.211 6.3.1.4), counted, not decoded */
+          if (i == 0) ls->tp_ok++;
+        }
         /* the data-scrambling-ID walk moves on every failed decode, so a wrong table would never meet the right ID: every other round of
          * the variant rotation pins the walking trials to the PCI default (and keeps them out of the walk) */
         if (out[n].data_id_advance && ((ix / (uint32_t)cnt) & 1u) == 0) {
@@ -1605,7 +1615,12 @@ int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, ui
     const int var = (tbl + 1) | k2d << 3 | tda << 4;
     const int h = rk[i], k = pre_for_hyp(ls, h);
     nr_pdcch_blind_ul_opts_t o;
+    if (ls->tail[t].tp && nr_ul_tp_tail_refuted(ls->tp_ill, ls->tp_ok)) continue;
     if (!trial_opts_ap_locked(ls, h, k, t, var, addpos, &o) || !nr_pdcch_blind_extract_01(payload, len, rnti, &o, &out[n])) continue;
+    if (out[n].transform_precoding) {
+      if (!nr_ul_tp_nrb_legal(out[n].num_rb)) { if (i == 0) ls->tp_ill++; g_tp_spec_refuted++; continue; }
+      if (i == 0) ls->tp_ok++;
+    }
     out[n].data_scrambling_id = g_cell.pci;
     out[n].data_id_advance = false;
     out[n].hyp_generation = NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_TRIAL | ((uint64_t)(uint32_t)(h | k << 8 | t << 11 | var << 13) << 40) | gen;
@@ -1784,9 +1799,9 @@ void nr_ul_layout_stats_dump(void)
     snprintf(sgn + q, sizeof(sgn) - q, " ]");
   }
   LOG_A(PHY, "SENSING: ULLAYOUT STATS bwp=%s%u@%u probes[booked=%u fed=%u skipped=%u] votes=%u ctl_votes=%u discarded=%u tied=%u hyps=%d"
-             " tally[%s ]%s%s\n",
+             " tally[%s ]%s%s tp_spec_refuted=%lu\n",
         g_locked_hyp >= 0 ? "LOCKED " : "searching ", g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0,
         g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_probes_booked, g_probes_fed, g_probes_skipped, g_votes_total, g_ctl_votes,
-        g_discarded, g_tied, g_nhyp, v, w ? ls : "", sgn);
+        g_discarded, g_tied, g_nhyp, v, w ? ls : "", sgn, (unsigned long)g_tp_spec_refuted);
   pthread_mutex_unlock(&g_mu);
 }

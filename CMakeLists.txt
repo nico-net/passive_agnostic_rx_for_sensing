@@ -2767,6 +2767,13 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_ul_dmrs_diag)
   add_test(NAME test_nr_ul_dmrs_diag COMMAND ./test_nr_ul_dmrs_diag)
 
+  add_executable(test_nr_ul_rules
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ul_rules_test.cc)
+  target_include_directories(test_nr_ul_rules PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_ul_rules PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_ul_rules)
+  add_test(NAME test_nr_ul_rules COMMAND ./test_nr_ul_rules)
+
   add_executable(test_nr_pusch_solver
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pusch_solver_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_solver.c

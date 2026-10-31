@@ -6004,6 +6004,7 @@ TEST(UlReadyDci01, UlSchIndicatorZeroAndFormat1AreRejected)
 // Synthetic bank in the PCI 415 shape (docs/superpowers/reports/csd/ULLAYOUT.md): length 44 = id 0 | BWP ind 1 (=1) |
 // RIV 15 (N=216) | TDRA 4 (=0) | MCS | NDI | RV | HARQ | DAI 2 | TPC 2 | ant 3 | SRS 2 | DM-RS init 1 | UL-SCH 1, DCIs in
 // slots 6, 7, 16, 17 of a DDDDDDDSUU x2 frame. Written field by field, not through any receiver packer.
+#include "nr_ul_tp_rules.h"
 #include "nr_pdcch_ul_layout_lock.h"
 extern "C" {
 #include "nr_pdcch_sib1_prior.h"
@@ -6632,6 +6633,34 @@ int UllTrials(UllGen &g, const nr_ul_layout_cell_t &cell, nr_pdcch_blind_ul_resu
   return 0;
 }
 }  // namespace
+
+TEST(UlLayoutLock, TransformPrecodingTrialsNeverCarryAnIllegalWidth)
+{
+  /* TS 38.211 6.3.1.4: a DFT-s-OFDM reading with N_RB != 2^a 3^b 5^c is refuted by the specification and is not emitted as a trial (the
+   * TIM run spent 46930 probe decodes on exactly these) */
+  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                              .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216};
+  nr_ul_layout_lock_reset();
+  UllGen g2;
+  UllFit(g2, cell);
+  nr_pdcch_blind_ul_result_t t[NR_UL_LAYOUT_MAX_TRIALS], h[64];
+  int tp_seen = 0, all = 0;
+  for (int i = 0; i < 400; i++) {
+    nr_pdcch_blind_ul_result_t o;
+    const nr_ul_layout_dci_t d = g2.next();
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o);
+    int n = nr_ul_layout_crc_trials(d.rnti, 44, d.slot, d.p, &cell, t, NR_UL_LAYOUT_MAX_TRIALS);
+    for (int k = 0; k < n; k++, all++)
+      if (t[k].transform_precoding) { tp_seen++; EXPECT_TRUE(nr_ul_tp_nrb_legal(t[k].num_rb)) << t[k].num_rb; }
+    uint32_t tot = 0, next = 0;
+    n = nr_ul_layout_hyp_list(d.rnti, 44, d.p, 0, 8, 1, h, 64, &tot, &next);
+    for (int k = 0; k < n; k++, all++)
+      if (h[k].transform_precoding) { tp_seen++; EXPECT_TRUE(nr_ul_tp_nrb_legal(h[k].num_rb)) << h[k].num_rb; }
+  }
+  EXPECT_GT(all, 0);
+  RecordProperty("tp_trials", tp_seen);
+  nr_ul_layout_lock_reset();
+}
 
 TEST(UlLayoutLock, CrcFirstLocksAtOnceSib1RankedFirstAndRelocks)
 {

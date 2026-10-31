@@ -1722,10 +1722,29 @@ NR_CELL_STATIC(g_ul_energy_profile_cell_t, g_ul_energy_profile);
 #define g_ul_energy_profile NR_CELL_REF(g_ul_energy_profile)
 NR_CELL_STATIC(uint16_t, g_ul_energy_seen_mask);
 #define g_ul_energy_seen_mask NR_CELL_REF(g_ul_energy_seen_mask)
+NR_CELL_STATIC(_Atomic uint32_t, g_ul_pin_seen_epoch); /* dedicated epoch the pin/profile belong to */
+#define g_ul_pin_seen_epoch NR_CELL_REF(g_ul_pin_seen_epoch)
 
 static void ul_dmrs_energy_oracle_observe(const nr_pdcch_blind_ul_result_t *g, const NR_DL_FRAME_PARMS *fp,
                                           PHY_VARS_gNB *gnb, int slot_off, int symsz)
 {
+  {
+    /* AGING: the pin is an ordering hint from the first span seen; it expires after a fixed time or when the dedicated configuration epoch
+     * changes, and the profile it came from restarts with it. */
+    struct timespec ts_;
+    clock_gettime(CLOCK_MONOTONIC, &ts_);
+    const uint64_t now_ns = (uint64_t)ts_.tv_sec * 1000000000ull + (uint64_t)ts_.tv_nsec;
+    const uint32_t ep = (uint32_t)nr_cfg_epoch_dedicated_current();
+    bool restart = ep != atomic_exchange_explicit(&g_ul_pin_seen_epoch, ep, memory_order_relaxed);
+    if (restart) nr_pusch_ul_dmrs_pin_reset();
+    restart |= nr_pusch_ul_dmrs_pin_expire(now_ns, 10ull * 1000000000ull);
+    if (restart) {
+      pthread_mutex_lock(&g_ul_energy_lock);
+      memset(g_ul_energy_profile, 0, sizeof(g_ul_energy_profile));
+      g_ul_energy_seen_mask = 0;
+      pthread_mutex_unlock(&g_ul_energy_lock);
+    }
+  }
   if (nr_pusch_ul_dmrs_pin_get(NULL, NULL, NULL))
     return;
   const int s0 = g->start_symbol, s1 = g->start_symbol + g->num_symbols;
@@ -1879,6 +1898,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
 
   if (ue == NULL || g == NULL || !g->plausible) {
     out->reject_reason = "no plausible grant";
+    return false;
+  }
+  if (g->frequency_hopping && !cfr_only) {
+    /* TS 38.214 6.3: the second hop sits at RB_start + RB_offset (offset bits taken from the FDRA field, offsets from RRC) and neither the channel
+     * estimate nor the demodulator of this path moves to it. Decoding both hops from the first-hop PRBs is a guaranteed failure that would count as a
+     * CRC verdict against a correct layout, so the grant is reported unsupported (no verdict). */
+    out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+    out->reject_reason = "intra-slot frequency hopping: second hop not demodulated";
     return false;
   }
   /* the ids / MCS table / BWP size the background search confirmed for this RNTI */
@@ -3134,7 +3161,8 @@ static void ul_dmrs_diag_maybe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, const 
   }
   nr_ul_dmrs_diag_out_t r;
   if (ok && nr_ul_dmrs_diag_run(&in, &r) && r.valid) {
-    /* the UE's commanded N_TA (Msg2/MAC CE) in receiver samples, -1 when unknown (log only) */
+    /* the UE's commanded N_TA (Msg2/MAC CE) in receiver samples, -1 when unknown: the advance a receiver sitting AT the UE would need is
+     * ta_nom + ta_cmd, one at the gNB ta_nom, in between ta_nom + ta_cmd/2 (UL arrival = N_TA_offset + N_TA/2 + (d_gNB->rx - d_UE->rx)) */
     int ta_cmd = -1;
     nr_ue_ctx_t dl_;
     if (nr_ue_ctx_try_get(g->rnti, &dl_) && dl_.ul.ta_command_valid && dl_.ul.ta_mu == fp->numerology_index)
