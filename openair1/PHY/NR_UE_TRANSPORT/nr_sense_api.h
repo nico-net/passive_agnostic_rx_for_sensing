@@ -57,7 +57,7 @@ static inline void nr_sense_prod_scope_stop(nr_sense_prod_scope_t *scope)
   }
 }
 typedef struct {
-  uint64_t cfr_pushed, cfr_dropped[NR_SENSE_SRC_COUNT], cfr_rejected, cfr_no_sink;
+  uint64_t cfr_pushed, cfr_pushed_src[NR_SENSE_SRC_COUNT], cfr_dropped[NR_SENSE_SRC_COUNT], cfr_rejected, cfr_no_sink;
   uint64_t rec_pushed, rec_dropped, io_errors, zmq_drops, truncated, after_close;
   uint64_t prod_ns[NR_SENSE_SRC_COUNT], pack_ns[NR_SENSE_SRC_COUNT];
   uint64_t rec_ns, write_ns, prod_count[NR_SENSE_SRC_COUNT], pack_count[NR_SENSE_SRC_COUNT];

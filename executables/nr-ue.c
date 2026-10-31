@@ -1782,6 +1782,13 @@ void *UE_thread(void *arg)
      * checks or the decoder/sensing consumers. */
     if (oai_exit || tmp < 0)
       break;
+    /* sensing receiver state (S3/S4): per-slot sample counter at the slot start, the CFO compensation applied (digital + radio tuning), and the
+     * window step of a frame boundary (taken after this slot is noted: it moves the NEXT slot's samples) */
+    if (nr_sense_enabled()) {
+      nr_sense_rx_note_slot((uint64_t)absolute_slot, (int64_t)rx_timestamp - firstSymSamp,
+                            (UE->cont_fo_comp ? UE->dl_Doppler_shift + UE->freq_offset : 0.0) + nrue_ru_radio_fo());
+      nr_sense_rx_note_shift(-iq_shift_to_apply);
+    }
     uint64_t dash_t0_ns = 0; /* MPCI-DASH P8: the slot's post-read time (the diag_ts below); used only when more than one cell runs */
     {
       struct timespec diag_ts;

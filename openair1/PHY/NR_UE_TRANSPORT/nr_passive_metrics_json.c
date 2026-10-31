@@ -74,21 +74,25 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
   if (cb0_json(m, cb0, sizeof(cb0)) < 0)
     return -1;
   static const char *const source[] = {"ssb","csirs","pdsch_dmrs","pdsch_data","pusch_dmrs","pusch_data","prach","srs"};
-  char sense_cost[2048];
+  char sense_cost[4096];
   size_t cost_len=0;
   for (int s=0;s<NR_SENSE_SRC_COUNT;s++) {
     int z=snprintf(sense_cost+cost_len,sizeof(sense_cost)-cost_len,
       ",\"sense_prod_us_%s\":%" PRIu64 ",\"sense_pack_us_%s\":%" PRIu64
-      ",\"sense_prod_count_%s\":%" PRIu64 ",\"sense_pack_count_%s\":%" PRIu64,
+      ",\"sense_prod_count_%s\":%" PRIu64 ",\"sense_pack_count_%s\":%" PRIu64
+      ",\"sense_cfr_exported_%s\":%" PRIu64 ",\"sense_cfr_drop_%s\":%" PRIu64,
       source[s],m->sense_prod_us[s],source[s],m->sense_pack_us[s],
-      source[s],m->sense_prod_count[s],source[s],m->sense_pack_count[s]);
+      source[s],m->sense_prod_count[s],source[s],m->sense_pack_count[s],
+      source[s],m->sense_cfr_exported_src[s],source[s],m->sense_cfr_drop_src[s]);
     if (z<0 || (size_t)z>=sizeof(sense_cost)-cost_len) return -1;
     cost_len+=(size_t)z;
   }
   int cost_z=snprintf(sense_cost+cost_len,sizeof(sense_cost)-cost_len,
     ",\"sense_rec_us\":%" PRIu64 ",\"sense_write_us\":%" PRIu64
-    ",\"sense_rec_count\":%" PRIu64 ",\"sense_write_count\":%" PRIu64,
-    m->sense_rec_us,m->sense_write_us,m->sense_rec_count,m->sense_write_count);
+    ",\"sense_rec_count\":%" PRIu64 ",\"sense_write_count\":%" PRIu64
+    ",\"sense_unexported_pdsch_data\":%" PRIu64 ",\"sense_unexported_pusch_data\":%" PRIu64,
+    m->sense_rec_us,m->sense_write_us,m->sense_rec_count,m->sense_write_count,
+    m->sense_unexported_pdsch_data,m->sense_unexported_pusch_data);
   if (cost_z<0 || (size_t)cost_z>=sizeof(sense_cost)-cost_len) return -1;
   int w = snprintf(buf, n,
       "{\"schema\":%d,\"t_mono_ns\":%" PRIu64 ",\"abs_slot\":%" PRId64 ",\"pci\":%d,\"acq_state\":\"%s\","

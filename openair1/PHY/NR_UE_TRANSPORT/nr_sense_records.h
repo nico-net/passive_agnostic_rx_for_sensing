@@ -38,7 +38,45 @@ typedef struct nr_sense_rs_meta_s {
   bool srs_confirmed, srs_timing_cs_ambiguous;
   float srs_delay_ambiguity_samples;
   const char *srs_attribution;
+  /* Receiver state in force when the record's slot was read (nr_sense_rx_state_lookup, stamped by nr_sense_emit_rs).
+   * rx_state_valid=false -> the four fields print as null. rx_shift_cum_samples: FFT-window/timing steps summed since the
+   * session started, positive = the read window moved later in the stream; a step changes the CFR phase of subcarrier k by
+   * 2*pi*k*step/N between two slots, so coherent processing must restart where rx_shift_count changes. */
+  bool rx_state_valid;
+  double rx_cfo_hz;
+  int64_t rx_shift_cum_samples;
+  uint32_t rx_shift_count;
+  float rx_gain_db;
 } nr_sense_rs_meta_t;
+
+/* Hyper-frame-extended slot index (the producer's un-wrapped absolute_slot): ((hfn*1024)+frame)*slots_per_frame+slot.
+ * frame_rx alone wraps every 10.24 s. */
+static inline uint64_t nr_sense_abs_slot_hfn(uint32_t hfn, uint32_t frame, uint32_t slot, uint32_t slots_per_frame)
+{ return ((uint64_t)hfn * 1024u + frame) * slots_per_frame + slot; }
+/* Same index for a caller that has no hfn but knows the producer's current un-wrapped counter `prod`: the value of the slot
+ * (frame, slot) that is closest below `prod` (the pipeline lag stays far under one wrap, 1024 frames). prod < 0 -> wrapped value. */
+static inline uint64_t nr_sense_abs_slot_align(int64_t prod, uint32_t frame, uint32_t slot, uint32_t slots_per_frame)
+{
+  const int64_t wrap = (int64_t)slots_per_frame * 1024, fd = (int64_t)frame * slots_per_frame + slot;
+  if (prod < 0) return (uint64_t)fd;
+  const int64_t lag = (((prod - fd) % wrap) + wrap) % wrap;
+  return prod - lag < 0 ? (uint64_t)fd : (uint64_t)(prod - lag);
+}
+
+/* Per-cell receiver state, written once per slot by the receive thread and looked up by slot index from any thread. */
+typedef struct {
+  int64_t rx_ts;            /* sample counter (RF timestamp) at the start of the slot's read */
+  double cfo_hz;            /* digital DL frequency compensation applied to that slot (0 when none is applied) */
+  int64_t shift_cum;        /* cumulative window shift, samples */
+  uint32_t shift_count;     /* number of non-zero window steps so far */
+} nr_sense_rx_state_t;
+void nr_sense_rx_note_slot(uint64_t abs_slot, int64_t rx_ts, double cfo_hz);
+void nr_sense_rx_note_shift(int samples);   /* a window step of `samples` (positive = later) taken at a frame boundary; 0 is ignored */
+void nr_sense_rx_note_gain(double rx_gain_db);
+void nr_sense_rx_reset(void);               /* new session: counters back to 0 */
+/* true when the slot is in the ring (exact per-slot state); false -> *out holds the latest state with rx_ts -1 */
+bool nr_sense_rx_state_lookup(uint64_t abs_slot, nr_sense_rx_state_t *out);
+double nr_sense_rx_gain(void);
 
 typedef struct {
   int epoch, identity_gen, dedicated_epoch;

@@ -425,7 +425,7 @@ static uint64_t push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant
   const uint64_t id=++next_id;
   put64(p+8,id);
   nr_sense_cost_add(NR_SENSE_COST_PACK,src,nr_sense_now_ns()-t_pack);
-  frame_lengths[at]=(uint32_t)off; frame_count++; stats.cfr_pushed++;
+  frame_lengths[at]=(uint32_t)off; frame_count++; stats.cfr_pushed++; stats.cfr_pushed_src[src]++;
   if (cut) stats.truncated++;
   if (truncated) *truncated=cut;
   pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);

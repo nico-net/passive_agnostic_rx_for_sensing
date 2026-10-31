@@ -2,7 +2,10 @@
 # Regression gate: N x GATE_SECS (default 420) s 106-PRB fully agnostic baseline, 4 RX (operator 2026-10-04: 4 RX for all tests;
 # RXEXTRA default "--ue-nb-ant-rx 4"), default receiver flags = the fastest combination (GrantWork + CB0 elimination +
 # fb2, CB0 backend auto). Exit 0 iff all pass.
-# GATE_MODE=postconv (default, operator option a): PASS iff, per run, ALL of
+# GATE_MODE=auto (default): solver, unless the log has Technique D CONVERGED lines and no PDSCH_SOLVER SOLVED line (then postconv).
+# GATE_MODE=solver: PASS iff n_solved >= GATE_NSOLVED_MIN (1), first-SOLVED ttc <= GATE_SOLVE_FIRST_MAX (PROVISIONAL 60 s), postsolve_crc >= GATE_POSTSOLVE_CRC_MIN (99.8)
+#   over postsolve_decoded >= GATE_POSTSOLVE_MIN_DEC (5000) grants after the last SOLVED, resets_after <= GATE_RESETS_MAX (0), crc_floor, drop_full (as below).
+# GATE_MODE=postconv (operator option a; pre-solver logs): PASS iff, per run, ALL of
 #   n_contexts          >= GATE_NCTX_MIN         (2: distinct (rnti,tda) contexts; reopens counted separately)
 #   postconv_crc        >= GATE_POSTCONV_CRC_MIN (99.8; CRC after the last context first converged)
 #   postconv_decoded    >= GATE_POSTCONV_MIN_DEC (5000 grants in that window)

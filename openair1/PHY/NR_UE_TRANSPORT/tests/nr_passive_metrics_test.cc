@@ -18,6 +18,8 @@ TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   m.sense_pack_us[NR_SENSE_SRC_PDSCH_DATA]=45;
   m.sense_prod_count[NR_SENSE_SRC_PDSCH_DATA]=6;
   m.sense_rec_us=78; m.sense_write_us=90;
+  m.sense_cfr_drop_src[NR_SENSE_SRC_PUSCH_DATA]=3; m.sense_cfr_exported_src[NR_SENSE_SRC_PDSCH_DATA]=57000;
+  m.sense_unexported_pdsch_data=897; m.sense_unexported_pusch_data=5;
   char buf[8192];
   const int n = nr_passive_metrics_to_json(&m, buf, sizeof(buf));
   ASSERT_GT(n, 0);
@@ -35,6 +37,10 @@ TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   EXPECT_NE(s.find("\"sense_prod_us_pdsch_data\":123,\"sense_pack_us_pdsch_data\":45"), std::string::npos);
   EXPECT_NE(s.find("\"sense_prod_count_pdsch_data\":6"), std::string::npos);
   EXPECT_NE(s.find("\"sense_rec_us\":78,\"sense_write_us\":90"), std::string::npos);
+  EXPECT_NE(s.find("\"sense_cfr_drop_pusch_data\":3"), std::string::npos);
+  EXPECT_NE(s.find("\"sense_cfr_exported_pdsch_data\":57000"), std::string::npos);
+  EXPECT_NE(s.find("\"sense_cfr_drop_srs\":0"), std::string::npos);
+  EXPECT_NE(s.find("\"sense_unexported_pdsch_data\":897,\"sense_unexported_pusch_data\":5"), std::string::npos);
   EXPECT_NE(s.find("\"scanq_drop_epoch\":0"), std::string::npos);
   EXPECT_NE(s.find("\"pdcch_inline_drop_epoch\":0"), std::string::npos);
   EXPECT_NE(s.find("\"pdschq_drop_epoch\":0"), std::string::npos);

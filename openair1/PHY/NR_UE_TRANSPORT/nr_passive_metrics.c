@@ -266,11 +266,17 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     nr_sense_stats(&sense);
     for (int source = 0; source < NR_SENSE_SRC_COUNT; ++source) {
       m->sense_cfr_drop += sense.cfr_dropped[source];
+      m->sense_cfr_drop_src[source] = sense.cfr_dropped[source];
+      m->sense_cfr_exported_src[source] = sense.cfr_pushed_src[source];
       m->sense_prod_us[source]=sense.prod_ns[source]/1000;
       m->sense_pack_us[source]=sense.pack_ns[source]/1000;
       m->sense_prod_count[source]=sense.prod_count[source];
       m->sense_pack_count[source]=sense.pack_count[source];
     }
+    m->sense_unexported_pdsch_data = m->pdschq_crc_ok > m->sense_cfr_exported_src[NR_SENSE_SRC_PDSCH_DATA]
+        ? m->pdschq_crc_ok - m->sense_cfr_exported_src[NR_SENSE_SRC_PDSCH_DATA] : 0;
+    m->sense_unexported_pusch_data = m->pusch_crc_ok > m->sense_cfr_exported_src[NR_SENSE_SRC_PUSCH_DATA]
+        ? m->pusch_crc_ok - m->sense_cfr_exported_src[NR_SENSE_SRC_PUSCH_DATA] : 0;
     m->sense_rec_drop = sense.rec_dropped;
     m->sense_io_errors = sense.io_errors;
     m->sense_cfr_no_sink = sense.cfr_no_sink;

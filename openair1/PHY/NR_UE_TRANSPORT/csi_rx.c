@@ -1040,7 +1040,7 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
                                  .dl_center_hz    = frame_parms->dl_CarrierFreq,
                                  .pci             = frame_parms->Nid_cell,
                                  .slots_per_frame = frame_parms->slots_per_frame};
-    const uint32_t slot_idx = (uint32_t)(proc->frame_rx * frame_parms->slots_per_frame + proc->nr_slot_rx);
+    const uint32_t slot_idx = (uint32_t)nr_sense_abs_slot_hfn(proc->hfn_rx, proc->frame_rx, proc->nr_slot_rx, frame_parms->slots_per_frame); /* hyper-frame extended, as every source */
     char resource[128];
     snprintf(resource, sizeof resource, "row=%u,fd=%u,l0=%u,density=%u,period=unknown",
              (unsigned)csirs_config_pdu->row, (unsigned)csirs_config_pdu->freq_domain,

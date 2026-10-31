@@ -17,6 +17,13 @@ Post-convergence keys (added for the postconv regression gate; legacy keys uncha
                   Samples are ~20 s apart, so up to ~20 s of post-convergence grants are excluded (conservative).
   search_crc_pct  CRC over everything up to that sample (search phase, includes <= ~20 s of post-conv grants).
   ldpc_zero_tb    zero_tb of the last LDPCDIAG line.
+
+Solver keys (the gate that matches the blind PDSCH solver; Technique D CONVERGED lines no longer exist, PROJECT_MEMORY 32.5):
+  solved[]        one entry per RNTI with a "PDSCH_SOLVER rnti=R SOLVED by" line: rnti, solved_s (first SOLVED), ttc_s (solved_s minus the first log line mentioning rnti=R),
+                  n_solves (> 1 = re-solved after a reset)
+  n_solved        len(solved);  solve_first_s / solve_first_ttc_s  the earliest SOLVED line and its ttc;  solve_last_s  the LAST SOLVED line of any RNTI
+  postsolve_*     CRC and decoded count of the cumulative PDSCHQ counters from the first sample at or after solve_last_s to the last sample (same sampling rule as postconv_*)
+  solver_resets   lines that reopen a solved/pruned layout ("reopening"); solver_resets_after = those logged after the last SOLVED line (by line order)
 """
 import json, os, re, sys
 
@@ -37,14 +44,21 @@ def score(arm, cell=None):
              n_converged=0, bank_len=None, ldpc_ok=None, ldpc_seg_fail=None, pdsch_decoded=None, pdsch_crc_ok=None,
              crc_pct=None, scanq_queued=None, scanq_drop_full=None, drop_full_pct=None, cpu_pct=None, max_rss_kb=None,
              contexts=[], ttc_by_tda={}, n_contexts=0, reopens=0, ldpc_zero_tb=None, postconv_t_s=None, postconv_decoded=None,
-             postconv_crc_pct=None, search_crc_pct=None)
+             postconv_crc_pct=None, search_crc_pct=None, solved=[], n_solved=0, solve_first_s=None, solve_first_ttc_s=None,
+             solve_last_s=None, postsolve_t_s=None, postsolve_decoded=None, postsolve_crc_pct=None, solver_resets=0, solver_resets_after=0)
     try:
         lines = cellsel.prepare([ANSI.sub("", l) for l in cellsel.read_lines(os.path.join(rxd, "rx.log"))], cell, os.path.join(rxd, "rx.log"))
     except FileNotFoundError:
         lines = []
     first_seen, convs, trials, samples = {}, [], {}, []
-    for l in lines:
+    solves, resets = [], []   # (rnti, t, line index); line index of each reset
+    for i, l in enumerate(lines):
         t = _t(l)
+        m = re.search(r"PDSCH_SOLVER rnti=(0x[0-9a-fA-F]+) SOLVED by", l)
+        if m:
+            solves.append((m.group(1), t, i))
+        if "PDSCH_SOLVER" in l and "reopening" in l:
+            resets.append(i)
         for r in re.findall(r"rnti=(0x[0-9a-fA-F]+)", l):
             if t is not None and r not in first_seen:
                 first_seen[r] = t
@@ -99,6 +113,26 @@ def score(arm, cell=None):
         if v is not None:
             s["ttc_by_tda"][str(tda)] = max(v, s["ttc_by_tda"].get(str(tda), v))
     s["n_contexts"] = len(seen)
+    for r, t, _ in sorted(solves, key=lambda x: x[2]):
+        e = next((x for x in s["solved"] if x["rnti"] == r), None)
+        if e is None:
+            s["solved"].append(dict(rnti=r, solved_s=t, n_solves=1, ttc_s=round(t - first_seen[r], 3) if t is not None and r in first_seen else None))
+        else:
+            e["n_solves"] += 1
+    s["n_solved"] = len(s["solved"])
+    s["solver_resets"] = len(resets)
+    if solves:
+        first = min(s["solved"], key=lambda x: (x["solved_s"] is None, x["solved_s"] or 0))
+        s["solve_first_s"], s["solve_first_ttc_s"] = first["solved_s"], first["ttc_s"]
+        last_i = max(x[2] for x in solves)
+        s["solve_last_s"] = next(x[1] for x in solves if x[2] == last_i)
+        s["solver_resets_after"] = sum(1 for i in resets if i > last_i)
+        if samples and s["solve_last_s"] is not None:
+            base = next((x for x in sorted(samples) if x[0] >= s["solve_last_s"]), None)
+            fin = max(samples)
+            if base and fin[1] > base[1]:
+                s["postsolve_t_s"], s["postsolve_decoded"] = base[0], fin[1] - base[1]
+                s["postsolve_crc_pct"] = round(100.0 * (fin[2] - base[2]) / (fin[1] - base[1]), 2)
     if convs and samples:
         t_all = max(c["conv_s"] for c in s["contexts"])
         base = next((x for x in sorted(samples) if x[0] >= t_all), None)
@@ -120,11 +154,22 @@ def score(arm, cell=None):
     return s
 
 # Gate defaults, calibrated in README.txt ("Postconv gate calibration"); each overridable via the env var named.
-GATE_DEFAULTS = dict(GATE_MODE="postconv", GATE_NCTX_MIN="2", GATE_POSTCONV_CRC_MIN="99.8", GATE_POSTCONV_MIN_DEC="5000", GATE_REOPENS_MAX="0", GATE_TTC_MAX_TDA0="39",
-                     GATE_TTC_MAX_TDA2="77", GATE_CRC_FLOOR="93.4", GATE_DROP_MAX="2.5", GATE_CRC_MIN="98.0")
+GATE_DEFAULTS = dict(GATE_MODE="auto", GATE_NCTX_MIN="2", GATE_POSTCONV_CRC_MIN="99.8", GATE_POSTCONV_MIN_DEC="5000", GATE_REOPENS_MAX="0", GATE_TTC_MAX_TDA0="39",
+                     GATE_TTC_MAX_TDA2="77", GATE_CRC_FLOOR="93.4", GATE_DROP_MAX="2.5", GATE_CRC_MIN="98.0",
+                     GATE_NSOLVED_MIN="1", GATE_SOLVE_FIRST_MAX="60", GATE_POSTSOLVE_CRC_MIN="99.8", GATE_POSTSOLVE_MIN_DEC="5000", GATE_RESETS_MAX="0")
+
+def gate_mode(s, env=os.environ):
+    """GATE_MODE=solver|postconv|legacy as given; the default "auto" is solver, except for a log that has Technique D CONVERGED lines and no SOLVED line
+    (a pre-solver log), which is judged by postconv."""
+    mode = env.get("GATE_MODE", GATE_DEFAULTS["GATE_MODE"])
+    if mode == "auto":
+        return "postconv" if s["n_converged"] and not s["n_solved"] else "solver"
+    return mode
 
 def evaluate_gate(s, env=os.environ):
-    """-> (ok, [(name, value, op, limit, passed)]). GATE_MODE=legacy: n_converged>=1, overall CRC>=GATE_CRC_MIN,
+    """-> (ok, [(name, value, op, limit, passed)]). GATE_MODE=solver (default via auto): n_solved >= GATE_NSOLVED_MIN, time from the first sighting of the RNTI to its first
+    SOLVED <= GATE_SOLVE_FIRST_MAX (PROVISIONAL 60 s: 33.9 s measured on rfsim, no rfsim re-run since), CRC after the last SOLVED >= GATE_POSTSOLVE_CRC_MIN over >= GATE_POSTSOLVE_MIN_DEC
+    grants, solver resets after the last SOLVED <= GATE_RESETS_MAX (0), crc_floor, drop_full. GATE_MODE=legacy: n_converged>=1, overall CRC>=GATE_CRC_MIN,
     drop_full<=GATE_DROP_MAX (the pre-K39 criterion). GATE_MODE=postconv (default): see GATE_DEFAULTS.
     A converged tda with no GATE_TTC_MAX_TDA<n> bound is unbounded (only tda0 and tda2 have defaults)."""
     def g(k):
@@ -132,12 +177,16 @@ def evaluate_gate(s, env=os.environ):
             return float(env.get(k, GATE_DEFAULTS[k]))
         except ValueError:
             raise SystemExit("%s=%r is not a number" % (k, env.get(k)))
-    mode = env.get("GATE_MODE", GATE_DEFAULTS["GATE_MODE"])
+    mode = gate_mode(s, env)
     ge = lambda n, v, lim: (n, v, ">=", lim, v is not None and v >= lim)
     le = lambda n, v, lim: (n, v, "<=", lim, v is not None and v <= lim)
     drop = le("drop_full", s["drop_full_pct"], g("GATE_DROP_MAX"))
     if mode == "legacy":
         c = [ge("n_converged", s["n_converged"], 1), ge("crc", s["crc_pct"], g("GATE_CRC_MIN")), drop]
+    elif mode == "solver":
+        c = [ge("n_solved", s["n_solved"], g("GATE_NSOLVED_MIN")), le("solve_ttc", s["solve_first_ttc_s"], g("GATE_SOLVE_FIRST_MAX")),
+             ge("postsolve_crc", s["postsolve_crc_pct"], g("GATE_POSTSOLVE_CRC_MIN")), ge("postsolve_decoded", s["postsolve_decoded"], g("GATE_POSTSOLVE_MIN_DEC")),
+             le("resets_after", s["solver_resets_after"], g("GATE_RESETS_MAX")), ge("crc_floor", s["crc_pct"], g("GATE_CRC_FLOOR")), drop]
     elif mode == "postconv":
         c = [ge("n_contexts", s["n_contexts"], g("GATE_NCTX_MIN")), ge("postconv_crc", s["postconv_crc_pct"], g("GATE_POSTCONV_CRC_MIN")),
              ge("postconv_decoded", s["postconv_decoded"], g("GATE_POSTCONV_MIN_DEC")), le("reopens", s["reopens"], g("GATE_REOPENS_MAX"))]
@@ -152,7 +201,7 @@ def evaluate_gate(s, env=os.environ):
         c += [le("ttc_tda" + t, s["ttc_by_tda"].get(t), bounds[t]) for t in tdas if t in bounds]
         c += [ge("crc_floor", s["crc_pct"], g("GATE_CRC_FLOOR")), drop]
     else:
-        raise SystemExit("unknown GATE_MODE=%r (postconv|legacy)" % mode)
+        raise SystemExit("unknown GATE_MODE=%r (auto|solver|postconv|legacy)" % mode)
     return all(x[4] for x in c), c
 
 def gate_line(s, env=os.environ):
@@ -161,7 +210,7 @@ def gate_line(s, env=os.environ):
         n, v, op, lim, p = x
         vs = "None" if v is None else (("%.4f" % v) if n == "drop_full" else ("%.3f" % v) if n.startswith("ttc") else ("%.2f" % v) if isinstance(v, float) else str(v))
         return "%s=%s%s%s%s" % (n, vs, op if p else {">=": "<", "<=": ">"}[op], lim, "" if p else "(FAIL)")
-    return ("PASS " if ok else "FAIL ") + s["arm"] + " [" + env.get("GATE_MODE", GATE_DEFAULTS["GATE_MODE"]) + "] " + " ".join(fmt(x) for x in c), ok
+    return ("PASS " if ok else "FAIL ") + s["arm"] + " [" + gate_mode(s, env) + "] " + " ".join(fmt(x) for x in c), ok
 
 def arm_info(arm):
     """cellsel.cell_info() of a multi-cell rx.log (lines prefixed "[c<k>] "), else None."""
