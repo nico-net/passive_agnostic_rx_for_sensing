@@ -4692,8 +4692,8 @@ static bool extract_11_impl(const nr_pdcch_blind_raw_result_t *raw, uint16_t dci
   const uint32_t time_domain_assignment = read_field(payload, &pos, f.tda);
   (void)read_field(payload, &pos, f.vrb);          // vrb-to-prb mapping
   (void)read_field(payload, &pos, f.prb_bundling); // prb bundling size indicator
-  (void)read_field(payload, &pos, f.rate_match);   // rate matching indicator
-  (void)read_field(payload, &pos, f.zp_csirs);     // zp csi-rs trigger
+  const uint32_t rm_ind = read_field(payload, &pos, f.rate_match);   // rate matching indicator (value learnt against the TB CRC, nr_csirs_rm_arb.h)
+  const uint32_t zp_trig = read_field(payload, &pos, f.zp_csirs);    // zp csi-rs trigger (same)
   const uint32_t mcs = read_field(payload, &pos, 5);
   const uint32_t ndi = read_field(payload, &pos, 1);
   const uint32_t rv  = read_field(payload, &pos, 2);
@@ -4706,6 +4706,8 @@ static bool extract_11_impl(const nr_pdcch_blind_raw_result_t *raw, uint16_t dci
   const uint32_t antenna_ports = read_field(payload, &pos, f.ant_ports);
   (void)read_field(payload, &pos, f.tci);          // TCI
   out->srs_request = read_field(payload, &pos, f.srs); // SRS request
+  out->rm_ind = (uint8_t)rm_ind;
+  out->zp_trig = (uint8_t)zp_trig;
   (void)read_field(payload, &pos, f.cbg);          // CBGTI + CBGFI
   const uint32_t dmrs_seq_init = read_field(payload, &pos, 1);
 
