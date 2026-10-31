@@ -1791,6 +1791,52 @@ extern "C" int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu
   return nr_pdsch_gpu_chest_dev_at(j, 0, n, est_dev, nvar_dev, slot, stream);
 }
 
+/* GPUPERF bench (tests/nr_pdsch_phase_gpu_bench.cc): k_irc over a synthetic grant (nprb PRBs, nl layers, nb RX, 2 DM-RS symbols, type 1) on random LS / estimate rows, `reps` launches, microseconds per
+ * launch into *us; acc (device, nr_irc_sum_t [NR_IRC_NG_MAX]) holds the sums of one launch afterwards. Own buffers, no module state. 0 or -1. */
+__global__ void k_bench_irc_fill(short2 *p, size_t n, uint32_t seed)
+{
+  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) {
+    uint32_t v = (uint32_t)i * 2654435761u + seed;
+    v ^= v >> 15; v *= 2246822519u; v ^= v >> 13; v *= 3266489917u; v ^= v >> 16;
+    p[i] = make_short2((short)((int)(v % 801) - 400), (short)((int)((v >> 12) % 801) - 400));
+  }
+}
+extern "C" int nr_pdsch_gpu_bench_irc(int nprb, int nl, int nb, int reps, void *acc, float *us)
+{
+  if (nprb < 1 || nprb > 275 || nl < 1 || nl > 4 || nb < 2 || nb > 4 || reps < 1 || !acc || !us) return -1;
+  const int nrows = 2 * nl * nb;
+  short2 *ls = nullptr, *out = nullptr;
+  nr_gpu_chest_row_t *rows = nullptr, rh[64] = {};
+  if (nrows > 64 || cudaMalloc((void **)&ls, (size_t)nrows * 4096 * sizeof(short2)) != cudaSuccess) return -1;
+  if (cudaMalloc((void **)&out, (size_t)nrows * 4096 * sizeof(short2)) != cudaSuccess || cudaMalloc((void **)&rows, sizeof(rh)) != cudaSuccess) return -1;
+  k_bench_irc_fill<<<256, 256>>>(ls, (size_t)nrows * 4096, 5u);
+  k_bench_irc_fill<<<256, 256>>>(out, (size_t)nrows * 4096, 6u);
+  for (int r = 0; r < nrows; r++) {
+    rh[r].out = (int16_t *)(out + (size_t)r * 4096);
+    rh[r].nb_rb = nprb;
+    rh[r].type = 1;
+  }
+  cudaMemcpy(rows, rh, sizeof(rh), cudaMemcpyHostToDevice);
+  cudaMemset(acc, 0, sizeof(nr_irc_sum_t) * NR_IRC_NG_MAX);
+  cudaEvent_t e0, e1;
+  cudaEventCreate(&e0);
+  cudaEventCreate(&e1);
+  const dim3 g(nrows / nb, nr_irc_groups_of(nprb));
+  for (int r = -2; r < reps; r++) {
+    if (r == 0) cudaEventRecord(e0);
+    nrch::k_irc<<<g, 128>>>(rows, ls, nb, (unsigned long long *)acc);
+  }
+  cudaEventRecord(e1);
+  cudaEventSynchronize(e1);
+  float ms = 0.f;
+  cudaEventElapsedTime(&ms, e0, e1);
+  *us = 1000.f * ms / (float)reps;
+  cudaEventDestroy(e0);
+  cudaEventDestroy(e1);
+  cudaFree(ls); cudaFree(out); cudaFree(rows);
+  return cudaGetLastError() == cudaSuccess ? 0 : -1;
+}
+
 /* GPUPASS: LS rows per pass the chest can take (the graph classes are limited to it) */
 extern "C" int nr_pdsch_gpu_pass_ls_rows(void) { return PASS_LS_ROWS; }
 

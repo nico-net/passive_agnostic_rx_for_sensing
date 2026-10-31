@@ -29,6 +29,8 @@
 #define NRPT_CONSTS_DEFINED
 #define NRPT_BLK 48          /* subcarriers per phase block of the interpolation (and per partial sum of the CPE statistic) */
 #define NRPT_MAXCH 72        /* >= ceil(MAX_EXT / NRPT_BLK) for 275 PRB */
+#define NRPT_CPE_BLK 12      /* REs per partial sum of the CPE statistic (GPUPERF: 12 instead of the interpolation's 48 = four times the chunks, so the GPU spreads a symbol over the device and each thread's sequential chain is 12 REs) */
+#define NRPT_CPE_MAXCH 276   /* >= ceil(MAX_EXT / NRPT_CPE_BLK) for 275 PRB */
 #ifndef NRPT_MIN_RE
 #define NRPT_MIN_RE 48       /* fewest valid REs of a symbol the CPE statistic is formed from */
 #endif
@@ -75,12 +77,18 @@ NRPT_FN void NRPT(blend_phasor)(NRPT_T t, NRPT_T cd, NRPT_T sd, NRPT_T *ur, NRPT
   }
 }
 
-/* one RE: h(t) = ((1 - t) ha + t hb e^{-j Delta}) u, rounded to int16 (saturated: the blend of two int16 values turned by a unit phasor cannot leave +-32768 * sqrt 2, the clamp is for that corner) */
-NRPT_FN struct nrd_c16 NRPT(interp_re)(struct nrd_c16 ha, struct nrd_c16 hb, NRPT_T t, NRPT_T cd, NRPT_T sd, NRPT_T ur, NRPT_T ui)
+/* GPUPERF: hb conj(e^{j Delta}), the part of the interpolation that does not depend on the symbol (hoisted out of the symbol loop of the GPU kernel; same operations as before) */
+NRPT_FN void NRPT(interp_rot)(struct nrd_c16 hb, NRPT_T cd, NRPT_T sd, NRPT_T *br, NRPT_T *bi)
+{
+  *br = NRPT_FMA((NRPT_T)hb.r, cd, (NRPT_T)hb.i * sd);
+  *bi = NRPT_FMA((NRPT_T)hb.i, cd, -((NRPT_T)hb.r * sd));
+}
+
+/* one RE: h(t) = ((1 - t) ha + t hb e^{-j Delta}) u, rounded to int16 (saturated: the blend of two int16 values turned by a unit phasor cannot leave +-32768 * sqrt 2, the clamp is for that corner);
+ * (br, bi) = interp_rot(hb) */
+NRPT_FN struct nrd_c16 NRPT(interp_blend)(struct nrd_c16 ha, NRPT_T br, NRPT_T bi, NRPT_T t, NRPT_T ur, NRPT_T ui)
 {
   const NRPT_T w = (NRPT_T)1 - t;
-  const NRPT_T br = NRPT_FMA((NRPT_T)hb.r, cd, (NRPT_T)hb.i * sd);  /* hb conj(e^{j Delta}) */
-  const NRPT_T bi = NRPT_FMA((NRPT_T)hb.i, cd, -((NRPT_T)hb.r * sd));
   const NRPT_T mr = NRPT_FMA(w, (NRPT_T)ha.r, t * br);
   const NRPT_T mi = NRPT_FMA(w, (NRPT_T)ha.i, t * bi);
   const NRPT_T or_ = NRPT_FMA(mr, ur, -(mi * ui));
@@ -94,29 +102,40 @@ NRPT_FN struct nrd_c16 NRPT(interp_re)(struct nrd_c16 ha, struct nrd_c16 hb, NRP
   return o;
 }
 
-/* zero-forcing solve of one RE: x = (H^H H)^-1 H^H y by Gauss-Jordan without pivoting (H^H H is Hermitian positive definite). yr/yi [a], hr/hi [l][a] are the int16 values as numbers.
- * 0 when the RE is ill-conditioned (a pivot below NRPT_COND_MIN of the largest diagonal): the CPE statistic does not take it. */
-NRPT_FN int NRPT(zf)(int nl, int nb, const NRPT_T *yr, const NRPT_T *yi, const NRPT_T hr[4][4], const NRPT_T hi[4][4], NRPT_T *xr, NRPT_T *xi)
+NRPT_FN struct nrd_c16 NRPT(interp_re)(struct nrd_c16 ha, struct nrd_c16 hb, NRPT_T t, NRPT_T cd, NRPT_T sd, NRPT_T ur, NRPT_T ui)
+{
+  NRPT_T br, bi;
+  NRPT(interp_rot)(hb, cd, sd, &br, &bi);
+  return NRPT(interp_blend)(ha, br, bi, t, ur, ui);
+}
+
+/* zero-forcing solve of one RE: x = (H^H H)^-1 H^H y by Gauss-Jordan without pivoting (H^H H is Hermitian positive definite). yr/yi [a], hr/hi [l][a] are the int16 values (as int).
+ * 0 when the RE is ill-conditioned (a pivot below NRPT_COND_MIN of the largest diagonal): the CPE statistic does not take it.
+ * GPUPERF: H^H H and H^H y are formed in integers (|sum| <= 2^33, exact), converted once, and only the upper triangle is formed (the lower one is its exact conjugate). In double this is bit for bit
+ * what the former chain of fused multiply-adds on the int16 values gave (every product and partial sum is an integer below 2^53, so each fma was exact), at a tenth of the FP64 instructions. */
+NRPT_FN int NRPT(zf)(int nl, int nb, const int *yr, const int *yi, const int hr[4][4], const int hi[4][4], NRPT_T *xr, NRPT_T *xi)
 {
   NRPT_T gr[4][5], gi[4][5];
   NRPT_T gmax = (NRPT_T)0;
   for (int l = 0; l < nl; l++) {
-    for (int k = 0; k < nl; k++) {
-      NRPT_T sr = (NRPT_T)0, si = (NRPT_T)0;
+    for (int k = l; k < nl; k++) {
+      long long sr = 0, si = 0;
       for (int a = 0; a < nb; a++) { /* conj(h_l) h_k */
-        sr = NRPT_FMA(hr[l][a], hr[k][a], NRPT_FMA(hi[l][a], hi[k][a], sr));
-        si = NRPT_FMA(hr[l][a], hi[k][a], NRPT_FMA(-hi[l][a], hr[k][a], si));
+        sr += (long long)hr[l][a] * hr[k][a] + (long long)hi[l][a] * hi[k][a];
+        si += (long long)hr[l][a] * hi[k][a] - (long long)hi[l][a] * hr[k][a];
       }
-      gr[l][k] = sr;
-      gi[l][k] = si;
+      gr[l][k] = (NRPT_T)sr;
+      gi[l][k] = (NRPT_T)si;
+      gr[k][l] = (NRPT_T)sr;
+      gi[k][l] = (NRPT_T)(-si);
     }
-    NRPT_T br = (NRPT_T)0, bi = (NRPT_T)0;
+    long long br = 0, bi = 0;
     for (int a = 0; a < nb; a++) { /* conj(h_l) y */
-      br = NRPT_FMA(hr[l][a], yr[a], NRPT_FMA(hi[l][a], yi[a], br));
-      bi = NRPT_FMA(hr[l][a], yi[a], NRPT_FMA(-hi[l][a], yr[a], bi));
+      br += (long long)hr[l][a] * yr[a] + (long long)hi[l][a] * yi[a];
+      bi += (long long)hr[l][a] * yi[a] - (long long)hi[l][a] * yr[a];
     }
-    gr[l][nl] = br;
-    gi[l][nl] = bi;
+    gr[l][nl] = (NRPT_T)br;
+    gi[l][nl] = (NRPT_T)bi;
     gmax = gr[l][l] > gmax ? gr[l][l] : gmax;
   }
   if (!(gmax > (NRPT_T)0))
