@@ -17,7 +17,8 @@
 #define SOLVER_MAX_IDS 2048     /* layouts of one reading kept with a pending probe (the candidate set a pass creates) */
 #define COVERAGE_IDS 64         /* layouts of a reading whose trial counts stand for it in the coverage search (cost bound: the
                                  * counts are kept per layout id, and a reading of the full standard space can hold thousands) */
-#define SOLVER_PHASES 20          /* slot phases: one 10 ms frame at 30 kHz; TDD patterns divide it */
+#define SOLVER_PHASES 160         /* slot-phase resolution: periods of 20, 40, 80 and 160 slots (10..80 ms at 30 kHz) all divide it */
+#define SOLVER_PER0 20            /* phase period until the cell's passes show a longer one: one 10 ms frame at 30 kHz */
 #define SOLVER_PHASE_FAIL 8       /* full decodes without one pass at a phase (the RNTI decodes elsewhere) before its (S, L) is searched */
 #define SOLVER_CAND_TRIES 96      /* confirmation probes before an unconfirmed candidate is dropped */
 #define BM_BYTES (NR_PDSCH_SOLVER_MAX_LAYOUTS / 8)
@@ -54,7 +55,7 @@ typedef struct {
   uint8_t add_pos;
   int8_t table;
   int8_t S_by_tda[16];
-  /* SOLVERPHASE: (S, L) of a solved RNTI per slot phase (abs slot mod SOLVER_PHASES) where its full decodes fail while it decodes
+  /* SOLVERPHASE: (S, L) of a solved RNTI per slot phase (abs slot mod the cell phase period g_per) where its full decodes fail while it decodes
    * elsewhere: a TDD special slot allocation the DCI's TDA index (tda_bits = 0 layouts: none) cannot tell from a full slot */
   int8_t ov_S[SOLVER_PHASES], ov_L[SOLVER_PHASES];
   uint32_t ph_tr[SOLVER_PHASES], ph_ok[SOLVER_PHASES], ov_cur[SOLVER_PHASES];
@@ -165,11 +166,17 @@ NR_CELL_STATIC(uint32_t, g_nse_logs);
 #define g_nse_solve_n NR_CELL_REF(g_nse_solve_n)
 #define g_nse_logs NR_CELL_REF(g_nse_logs)
 #define LAYOUT_RECOVER 32 /* failed CRC probes after which a pruned layout set is reopened once */
-/* FIRSTSLOT: CRC passes of the cell by slot phase (abs slot mod SOLVER_PHASES) and start symbol S (full-length allocations): the TDD pattern fixes
+/* FIRSTSLOT: CRC passes of the cell by slot phase (abs slot mod the cell period g_per, census at SOLVER_PHASES) and start symbol S (full-length allocations): the TDD pattern fixes
  * which S a slot phase carries, whatever the RNTI, so a new RNTI's seeded probe takes the S the phase's passes show (under g_mu). */
 typedef uint32_t g_phs_arr_t[SOLVER_PHASES][4];
 NR_CELL_STATIC(g_phs_arr_t, g_phs);
 #define g_phs NR_CELL_REF(g_phs)
+/* D10: the phase period of the cell (slots), learnt from those passes: the smallest of 20/40/80/160 under which every slot phase shows one S. A TDD
+ * pattern of 20 ms (two patterns) or a CSI-RS period of 40 slots makes the phases differ at 40 (OTA 923); a constant 20 folds them together. */
+NR_CELL_STATIC(int, g_per);
+#define g_per NR_CELL_REF(g_per)
+static inline int per_now(void) { return g_per ? g_per : SOLVER_PER0; }
+static inline int ph_of(uint64_t abs) { return (int)(abs % (uint64_t)per_now()); }
 NR_CELL_STATIC(nr_pdsch_solver_hq_fn, g_hq_fn);
 #define g_hq_fn NR_CELL_REF(g_hq_fn) /* DCIRV */
 NR_CELL_STATIC(void *, g_hq_ctx);
@@ -196,6 +203,15 @@ NR_CELL_STATIC(bool, t_ov);
 #define t_ov NR_CELL_REF(t_ov) /* SOLVERPHASE: variants being emitted are phase-override ones */
 NR_CELL_STATIC(int, t_L);
 #define t_L NR_CELL_REF(t_L) /* length of the variants being emitted (0 = 14 - S); set by plan_known under g_mu */
+
+/* nr_pdsch_solver_phase_period: the learnt slot-phase period of the cell (see g_per). Callers: tests, the replay diagnostic. */
+int nr_pdsch_solver_phase_period(void)
+{
+  pthread_mutex_lock(&g_mu);
+  const int P = per_now();
+  pthread_mutex_unlock(&g_mu);
+  return P;
+}
 
 /* nr_pdsch_solver_enabled: Callers: nr_pdsch_passive_decode.c (probe-c1 switch), nr_pdcch_blind_monitor_rt.c (RNTI routing). */
 bool nr_pdsch_solver_enabled(void)
@@ -232,6 +248,7 @@ void nr_pdsch_solver_reset(void)
   memset(g_nse_ref, 0, sizeof(g_nse_ref));
   memset(g_nse_gate, 0, sizeof(g_nse_gate));
   memset(g_phs, 0, sizeof(g_phs));
+  g_per = SOLVER_PER0;
   memset(g_nse_solve, 0, sizeof(g_nse_solve));
   g_nse_solve_n = 0;
   atomic_store(&g_nse_gm[0], 0);
@@ -1135,16 +1152,71 @@ static void plan_coverage(solver_rnti_t *r, nr_pdsch_solver_var_t *out, int *n, 
  *   Uses the learnt S for the TDA index and table when known; otherwise tries the four start symbols and the candidate tables as probes.
  *   Phase 1 (solved) emits counted decodes; phase 0 emits probes. Callers: nr_pdsch_solver_plan_slot().
  */
-/* phase_S: the start symbol most CRC passes of the cell show at this slot phase (ties: the lower index of kS order), -1 = no pass yet. g_mu held. */
+/* phase_S: the start symbol most CRC passes of the cell show at this slot phase (ties: the lower index of kS order), -1 = no pass yet. The census
+ * is kept at 160 slots and folded by the cell period. g_mu held. */
 static int phase_S(int ph)
 {
   int best = -1;
   uint32_t bn = 0;
   for (int k = 0; k < 4; k++) {
     const int sv = kS[k];
-    if (g_phs[ph][sv] > bn) { bn = g_phs[ph][sv]; best = sv; }
+    uint32_t c = 0;
+    for (int b = ph; b < SOLVER_PHASES; b += per_now()) c += g_phs[b][sv];
+    if (c > bn) { bn = c; best = sv; }
   }
   return best;
+}
+
+/* phase_conflict: whether folding the census by period P puts two slot phases with different start symbols on one phase. A census bucket speaks when
+ * it has >= 2 passes and one S holds >= 2/3 of them. */
+static bool phase_conflict(int P)
+{
+  for (int q = 0; q < P; q++) {
+    int seen = -1;
+    for (int b = q; b < SOLVER_PHASES; b += P) {
+      uint32_t tot = 0, mx = 0;
+      int mxs = -1;
+      for (int k = 0; k < 4; k++) {
+        tot += g_phs[b][k];
+        if (g_phs[b][k] > mx) { mx = g_phs[b][k]; mxs = k; }
+      }
+      if (tot < 2 || mx * 3 < tot * 2) continue;
+      if (seen >= 0 && seen != mxs) return true;
+      seen = mxs;
+    }
+  }
+  return false;
+}
+
+/* period_grow: moves the phase period to P (a multiple of the old one) and spreads each RNTI's per-phase tables over the finer phases (a learnt phase
+ * stays learnt on each phase it now covers). g_mu held. */
+static void period_grow(int P)
+{
+  const int old = per_now();
+  for (int i = 0; i < SOLVER_RNTIS; i++) {
+    solver_rnti_t *r = &g_r[i];
+    if (!r->used) continue;
+    for (int q = old; q < P; q++) {
+      r->ov_S[q] = r->ov_S[q % old];
+      r->ov_L[q] = r->ov_L[q % old];
+      r->ph_tr[q] = r->ph_tr[q % old];
+      r->ph_ok[q] = r->ph_ok[q % old];
+      r->ov_cur[q] = r->ov_cur[q % old];
+    }
+  }
+  LOG_A(PHY, "SENSING: PDSCH_SOLVER cell slot-phase period %d -> %d slots (CRC passes of different start symbols share a phase at %d)\n", old, P, old);
+  g_per = P;
+}
+
+/* phase_census_note: one CRC pass (full-length allocation) with start symbol S at slot abs; lengthens the phase period while the census conflicts.
+ * g_mu held. */
+static void phase_census_note(uint64_t abs, int S)
+{
+  uint32_t *c = &g_phs[abs % SOLVER_PHASES][S];
+  if (*c < UINT32_MAX) (*c)++;
+  int P = per_now();
+  while (P < SOLVER_PHASES && phase_conflict(P)) P *= 2;
+  if (P > per_now()) period_grow(P);
 }
 static void plan_known(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t phase, int reading,
                        const nr_pdsch_solver_reading_t *rd, int l0, int rep, uint8_t add_pos, int8_t table,
@@ -1300,7 +1372,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   const bool thin = !r->solved && !csirs_slot && search_backoff(r) && !dmrs_supported(rd, n_rd); /* A1: 7 grants in 8 of a long unsuccessful search */
   if (r->solved) {
     int ri = -1;
-    const int ph = (int)(ctx->now_abs % SOLVER_PHASES);
+    const int ph = ph_of(ctx->now_abs);
     for (int i = 0; i < n_rd; i++)
       if (has_id(&rd[i], r->rep)) { ri = i; break; }
     if (ri < 0) {
@@ -1486,7 +1558,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
        * base 43 of 56). (2) the tuple's rep stands for a set of layouts (cand_bm) that two CRC passes did not separate; the readings carrying
        * most of that set are seeded too (2 more), as the refinement of a solved RNTI does, instead of the rep's reading alone. */
       const int tda_s = tda_of(sd->src->rep, payload) & 15;
-      const int sph = phase_S((int)(ctx->now_abs % SOLVER_PHASES));
+      const int sph = phase_S(ph_of(ctx->now_abs));
       int8_t Sm[16], Lm[16];
       memcpy(Sm, sd->src->S_by_tda, sizeof(Sm));
       memcpy(Lm, sd->src->L_by_tda, sizeof(Lm));
@@ -1787,7 +1859,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     return;
   }
   solver_rnti_t *r = &g_r[p->slot];
-  if (crc_ok && p->S < 4 && p->L == 14u - p->S && !p->ov) g_phs[p->abs % SOLVER_PHASES][p->S]++;
+  if (crc_ok && p->S < 4 && p->L == 14u - p->S && !p->ov) phase_census_note(p->abs, (int)p->S);
   if (r->used && p->phase == 0 && !r->solved && !crc_ok && r->layout_failures < UINT32_MAX)
     r->layout_failures++;
   if (r->used && p->phase == 0 && p->probe && !r->solved) /* the Bonferroni count of the significance test */
@@ -1801,7 +1873,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
   if (p->probe && crc_ok) g_st.probe_ok++;
   if (!p->probe && crc_ok) g_st.full_ok++;
   if (r->used && p->phase == 1 && r->solved && p->ov) { /* SOLVERPHASE (fallback, see plan): its passes are (S, L) evidence */
-    const int ph = (int)(p->abs % SOLVER_PHASES);
+    const int ph = ph_of(p->abs);
     if (crc_ok) { /* DCI11-RESOLVER: the representative must map this allocation through its TDA field like every other pass */
       add_ev(r, p->payload, p->S, p->L);
       const int old_rep = r->rep;
@@ -1827,8 +1899,8 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
   }
   if (r->used && p->phase == 1 && r->solved && !p->ov) {
     if (!p->probe) {
-      r->ph_tr[p->abs % SOLVER_PHASES]++;
-      if (crc_ok) r->ph_ok[p->abs % SOLVER_PHASES]++;
+      r->ph_tr[ph_of(p->abs)]++;
+      if (crc_ok) r->ph_ok[ph_of(p->abs)]++;
       r->full_tr++;
       if (crc_ok) {
         r->full_ok++;

@@ -3396,6 +3396,13 @@ if(ENABLE_TESTS)
                                   ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_tbs_tools.c)
   target_link_libraries(pdsch_cb_offline PRIVATE nr_common crc_byte UTIL ${CMAKE_DL_LIBS})
   set_target_properties(pdsch_cb_offline PROPERTIES ENABLE_EXPORTS ON) # libldpc.so resolves cpu_meas_enabled here
+  # D6: every code block of one dump record with the OFDM symbols it covers (diagnostic, not a test; NR_CB_FAIL_LIMIT hides this at run time)
+  add_executable(pdsch_cb_all_offline ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/pdsch_cb_all_offline.c
+                                      ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c
+                                      ${OPENAIR1_DIR}/PHY/CODING/nr_segmentation.c
+                                      ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_tbs_tools.c)
+  target_link_libraries(pdsch_cb_all_offline PRIVATE nr_common crc_byte UTIL ${CMAKE_DL_LIBS})
+  set_target_properties(pdsch_cb_all_offline PROPERTIES ENABLE_EXPORTS ON) # libldpc.so resolves cpu_meas_enabled here
   # NR_CB_FAIL_LIMIT: the TB abort rule on the real CPU LDPC decoder (./libldpc.so); `test_nr_cb_abort bench` = old vs new CPU cost of a failing 30-block TB
   add_executable(test_nr_cb_abort ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_cb_abort_test.c)
   target_link_libraries(test_nr_cb_abort PRIVATE nr_common crc_byte UTIL m ${CMAKE_DL_LIBS})
