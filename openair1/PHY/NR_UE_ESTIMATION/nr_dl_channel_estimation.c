@@ -14,6 +14,7 @@ __thread bool nr_passive_tpool_inline; /* ISAC_PDSCH_INLINE_POOL, nr_passive_tpo
 #include <string.h>
 #include "SCHED_NR_UE/defs.h"
 #include "nr_estimation.h"
+#include "PHY/NR_UE_TRANSPORT/nr_irc_cov.h"
 #include "PHY/NR_REFSIG/nr_refsig.h"
 #include "PHY/NR_REFSIG/dmrs_nr.h"
 #include "PHY/NR_REFSIG/ptrs_nr.h"
@@ -1670,6 +1671,96 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
      * the over-confidence this fix exists to remove. */
     *nvar = (nvar_ant_count > 0) ? (uint32_t)(nvar_acc / (uint64_t)nvar_ant_count) : 0;
   }
+}
+
+/* D4 IRC (2026-10-31): the grant's DM-RS interference + noise covariance across the RX branches, from the same least-squares residual the noise estimate uses
+ * (LS of the pilot pair against the final estimate, nr_pdsch_channel_estimation's nvar), summed per RB group over every DM-RS symbol and layer as exact integers
+ * (nr_irc_sum_t) and turned into whitening matrices by nr_irc_final(). The CPU chest, the GPU exact chest and a chest-cache hit all leave the same final estimate in
+ * dl_ch_estimates, so this runs after any of them on the unmodified estimate. Linear-interpolation chest only (ue->chest_freq == 0); returns 1 and fills `out` when at
+ * least one group is usable, else 0 with out->valid = 0 (the scalar noise model). freq_alloc: the band the estimate covers, grant_alloc: the grant's own PRBs
+ * (groups are proportional to the grant's packed REs, as in the demod). ports[l]: the DM-RS port of layer l. */
+int nr_pdsch_irc_cov(PHY_VARS_NR_UE *ue,
+                     const UE_nr_rxtx_proc_t *proc,
+                     const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch,
+                     const freq_alloc_bitmap_t *freq_alloc,
+                     const freq_alloc_bitmap_t *grant_alloc,
+                     int nl,
+                     const unsigned short *ports,
+                     uint32_t dmrs_symbols,
+                     uint32_t pdsch_est_size,
+                     int32_t dl_ch_estimates[][pdsch_est_size],
+                     int rxdataFsize,
+                     c16_t rxdataF[][rxdataFsize],
+                     nr_irc_grant_t *out)
+{
+  NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const int nb = fp->nb_antennas_rx;
+  out->valid = 0;
+  /* the estimate must start at the grant's first RB (slot-share bands only widen upward) and the grant must be contiguous: then estimate index k = packed data RE k */
+  if (nb < 2 || nb > 4 || nl < 1 || nl > 4 || ue->chest_freq != 0 || grant_alloc->num_rbs < 1 || freq_alloc->first_rb != grant_alloc->first_rb
+      || grant_alloc->last_rb - grant_alloc->first_rb + 1 != grant_alloc->num_rbs || freq_alloc->num_rbs < grant_alloc->num_rbs)
+    return 0;
+  const int N = fp->ofdm_symbol_size;
+  const int nre = 12 * grant_alloc->num_rbs;
+  const int ng = nr_irc_groups_of_re(nre);
+  nr_irc_sum_t sum[NR_IRC_NG_MAX];
+  memset(sum, 0, sizeof(sum));
+  const int config_type = dlsch->dmrsConfigType;
+  const int rb_offset = freq_alloc->first_rb + (dlsch->refPoint ? 0 : dlsch->BWPStart);
+  const int nb_rb_pdsch = freq_alloc->last_rb - freq_alloc->first_rb + 1;
+  const int bwp_start_subcarrier = fp->first_carrier_offset + (dlsch->BWPStart + freq_alloc->first_rb) * 12;
+  const int rep = config_type == NFAPI_NR_DMRS_TYPE1 ? 4 : 6; /* every LS value is repeated over the subcarriers it represents */
+  c16_t pilot[3280] __attribute__((aligned(16)));
+  c16_t ls[4][N] __attribute__((aligned(32)));
+  const float beta_dmrs_pdsch = get_beta_dmrs(dlsch->n_dmrs_cdm_groups, config_type == NFAPI_NR_DMRS_TYPE2);
+  const int16_t dmrs_scaling = (int16_t)((1 / beta_dmrs_pdsch) * (1 << 14));
+  for (int symbol = 0; symbol < fp->symbols_per_slot; symbol++) {
+    if (!((dmrs_symbols >> symbol) & 1))
+      continue;
+    const uint32_t *gold = nr_gold_pdsch(fp->N_RB_DL, fp->symbols_per_slot, dlsch->dlDmrsScramblingId, dlsch->nscid, proc->nr_slot_rx, symbol);
+    for (int l = 0; l < nl; l++) {
+      const int8_t delta = get_delta(ports[l], config_type);
+      nr_pdsch_dmrs_rx(fp->Ncp, gold, pilot, 1000 + ports[l], 0, nb_rb_pdsch + rb_offset, config_type, dmrs_scaling);
+      int idx = 0;
+      for (int a = 0; a < nb; a++) {
+        const c16_t *rxF = &rxdataF[a][N * symbol + delta];
+        idx = config_type == NFAPI_NR_DMRS_TYPE1
+                  ? chest_ls_type1(fp, rxF, &pilot[6 * rb_offset], bwp_start_subcarrier, freq_alloc, dlsch->BWPSize, ls[a])
+                  : chest_ls_type2(fp, rxF, &pilot[4 * rb_offset], bwp_start_subcarrier, freq_alloc, dlsch->BWPSize, ls[a]);
+      }
+      /* every estimate subcarrier of the band: the groups are 96 subcarriers from the grant's first RB, whatever the band (as the GPU's k_irc) */
+      for (int k = 0; k < idx; k += rep) {
+        int er[4], ei[4];
+        for (int a = 0; a < nb; a++) {
+          const c16_t *h = (const c16_t *)&dl_ch_estimates[l * nb + a][N * symbol];
+          er[a] = (int)ls[a][k].r - (int)h[k].r;
+          ei[a] = (int)ls[a][k].i - (int)h[k].i;
+        }
+        nr_irc_sum_t *g = &sum[nr_irc_group_of((unsigned)k, 1u, 1u)]; /* nre_sym == nre_full: k / 96 */
+        for (int a = 0; a < nb; a++)
+          for (int b = 0; b < nb; b++) {
+            g->re[a][b] += (long long)er[a] * er[b] + (long long)ei[a] * ei[b];
+            g->im[a][b] += (long long)ei[a] * er[b] - (long long)er[a] * ei[b];
+          }
+        g->n++;
+      }
+    }
+  }
+  out->nb = nb;
+  out->ng = ng;
+  out->nre = nre;
+  out->active = 0;
+  double gain = 0.0;
+  for (int g = 0; g < ng; g++) {
+    nr_irc_final(&sum[g], nb, &out->w[g * NR_IRC_WSTRIDE]);
+    if (out->w[g * NR_IRC_WSTRIDE + 20] > 0.5) {
+      out->active++;
+      gain += out->w[g * NR_IRC_WSTRIDE + 22];
+    }
+  }
+  out->gain_db = out->active ? 10.0 * log10(gain / out->active) : 0.0;
+  out->valid = out->active > 0;
+  return out->valid;
 }
 
 /*******************************************************************

@@ -246,7 +246,7 @@ M3Sym m3_make(int nl, int nrx, int len, double sigma, uint32_t seed)
   return s;
 }
 double m3_run(const M3Sym &s, int shift, uint32_t nvar, double nvfac, int16_t qa, int16_t qb, int16_t qr, std::vector<int16_t> &z,
-              std::vector<int16_t> &mg)
+              std::vector<int16_t> &mg, const double *wg = nullptr, int nre_full = 0)
 {
   z.assign(2 * s.nl * s.len, 0);
   mg.assign(3 * 2 * s.nl * s.len, 0);
@@ -260,7 +260,7 @@ double m3_run(const M3Sym &s, int shift, uint32_t nvar, double nvfac, int16_t qa
     m1[r] = &mg[(1 * s.nl + r) * 2 * s.len];
     m2[r] = &mg[(2 * s.nl + r) * 2 * s.len];
   }
-  return nr_mmse3_symbol(s.nl, s.nrx, s.len, yr, hr, shift, nvar, nvfac, qa, qb, qr, zr, m0, m1, m2);
+  return nr_mmse3_symbol_w(s.nl, s.nrx, s.len, yr, hr, shift, nvar, nvfac, qa, qb, qr, zr, m0, m1, m2, wg, nre_full);
 }
 } // namespace
 
@@ -380,9 +380,14 @@ TEST(MmseExact, Mode3IllConditionedOutputResolution)
 /* MMSE3GPU: the GPU mode 3 (libpdsch_gpu.so, ISAC_PDSCH_GPU_EXACT_DEMOD_MMSE3) against nr_mmse3_symbol, bit for bit, on a
  * synthetic 13-symbol grant per (Nl, Qm). Skipped without the module or a device (the module is built next to this test). */
 #include <dlfcn.h>
+#include <cstring>
 #include "nr_pdsch_gpu_demod.h"
 #include "../../TOOLS/nr_gpu_mem.h"
-TEST(MmseExact, GpuMode3BitExact)
+static void gpu_mode3_bit_exact(bool irc);
+TEST(MmseExact, GpuMode3BitExact) { gpu_mode3_bit_exact(false); }
+/* D4 IRC: the same with a whitening matrix per RB group (3 groups, the middle one inactive = scalar): the GPU's nr_irc_whiten_re / group mapping against the CPU's */
+TEST(MmseExact, GpuMode3IrcBitExact) { gpu_mode3_bit_exact(true); }
+static void gpu_mode3_bit_exact(bool irc)
 {
   void *plat = dlopen("./libnr_gpu_platform.so", RTLD_NOW | RTLD_GLOBAL); /* the module's nr_gpu_* imports (the softmodem links it) */
   if (!plat)
@@ -400,7 +405,28 @@ TEST(MmseExact, GpuMode3BitExact)
   if (init(4) != 0)
     GTEST_SKIP() << "nr_pdsch_gpu_demod_init failed (no CUDA device?)";
   const int N = 512, nrx = 4, len = 288, ext = (len + 15) & ~15, buf = ext, first = 1, nsym = 13;
-  long tot_bad = 0, tot = 0;
+  long tot_bad = 0, tot = 0, irc_differs = 0; /* irc_differs: outputs that the whitening changed against the scalar model (the test must be able to fail) */
+  double wg[3 * NR_IRC_WSTRIDE]; /* IRC: groups from a random spatially correlated covariance, group 1 without samples */
+  {
+    std::mt19937 rg(77);
+    std::normal_distribution<double> g(0.0, 1.0);
+    for (int q = 0; q < 3; q++) {
+      nr_irc_sum_t sm;
+      std::memset(&sm, 0, sizeof(sm));
+      if (q != 1)
+        for (int t = 0; t < 200; t++) {
+          long long er[4], ei[4];
+          const double c = g(rg), d = g(rg);
+          for (int a = 0; a < nrx; a++) { er[a] = std::llround(2.0 * g(rg) + 6.0 * c * (a + 1) / 4.0); ei[a] = std::llround(2.0 * g(rg) + 6.0 * d * (a + 1) / 4.0); }
+          for (int a = 0; a < nrx; a++)
+            for (int b = 0; b < nrx; b++) { sm.re[a][b] += er[a] * er[b] + ei[a] * ei[b]; sm.im[a][b] += ei[a] * er[b] - er[a] * ei[b]; }
+          sm.n++;
+        }
+      nr_irc_final(&sm, nrx, wg + q * NR_IRC_WSTRIDE);
+    }
+    EXPECT_EQ(wg[20], 1.0);
+    EXPECT_EQ(wg[NR_IRC_WSTRIDE + 20], 0.0);
+  }
   for (int nl = 2; nl <= 4; nl++)
     for (int qm = 2; qm <= 8; qm += 2) {
       std::vector<int16_t> rx(2 * nrx * 14 * N), est(2 * nl * nrx * 14 * N), gy(2 * 14 * ext), gh(2 * 14 * ext);
@@ -438,6 +464,7 @@ TEST(MmseExact, GpuMode3BitExact)
       j.comp = comp.data(); j.mag = mag.data(); j.magb = magb.data(); j.magr = magr.data(); j.llr = llr.data();
       j.thr_coef = std::pow(10.0, -1.2);
       j.qam_mode = 3; j.mag_per_layer = 1; j.nvar = 40; j.m3_nvfac = std::pow(10.0, 2.1);
+      if (irc) { j.irc_w = wg; j.irc_ng = 3; j.irc_nre = len; }
       ASSERT_EQ(run(&j), 0);
       rel(j.ctx);
       long bad = 0;
@@ -445,7 +472,12 @@ TEST(MmseExact, GpuMode3BitExact)
         const int16_t qa = qm == 4 ? 20724 : qm == 6 ? 20225 : qm == 8 ? 20106 : 0, qb = qm == 6 ? 10112 : qm == 8 ? 10053 : 0,
                       qr = qm == 8 ? 5026 : 0; /* QAM16_n1 ... QAM256_n3 */
         std::vector<int16_t> z, mg;
-        m3_run(sy[m - first], j.log2_maxh, j.nvar, j.m3_nvfac, qa, qb, qr, z, mg);
+        m3_run(sy[m - first], j.log2_maxh, j.nvar, j.m3_nvfac, qa, qb, qr, z, mg, irc ? wg : nullptr, irc ? 288 : 0);
+        if (irc) {
+          std::vector<int16_t> z0, mg0;
+          m3_run(sy[m - first], j.log2_maxh, j.nvar, j.m3_nvfac, qa, qb, qr, z0, mg0);
+          for (size_t q = 0; q < z.size(); q++) irc_differs += z[q] != z0[q];
+        }
         for (int r = 0; r < nl; r++)
           for (int i = 0; i < 2 * len; i++) {
             const size_t row = ((size_t)m * NR_GPU_DEMOD_MAX_NL + r) * buf * 2 + i;
@@ -462,6 +494,8 @@ TEST(MmseExact, GpuMode3BitExact)
     }
   std::printf("GPU mode 3 vs CPU nr_mmse3_symbol: %ld of %ld int16 outputs differ\n", tot_bad, tot);
   EXPECT_EQ(tot_bad, 0);
+  if (irc)
+    EXPECT_GT(irc_differs, 0);
 }
 
 /* RANK2-WEAK: two layers alternate one modulation symbol per layer in the LLR buffer. A layer 10 dB down (weak layer = index 1) must

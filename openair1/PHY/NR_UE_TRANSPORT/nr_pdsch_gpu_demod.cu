@@ -74,6 +74,8 @@ struct Shared { /* mapped: written by the GPU, read by the host after the stream
   unsigned level_done; /* GPUFUSE: k_level blocks finished (the last one runs the decision) */
   double m3_s2[NSYM], m3_gain[NSYM]; /* MMSE3GPU: mode-3 noise variance and output gain per symbol (k_mmse3_prep) */
   float m3_s2f[NSYM], m3_gainf[NSYM]; /* the same for the FP32 instantiation (GPU pass on sm_89) */
+  float irc_gain_db; /* D4 IRC (k_irc_final): mean whitening gain estimate over the usable groups */
+  int irc_active;
   nr_gpu_evm_sym_t evm[NSYM];
   nr_gpu_xdiag_t xd; /* XDIAG: equaliser-output error sums of k_tail (zeroed per symbol in k_mask_pw) */
   float cpe[NSYM][4]; /* PHASE-TRACK: the CPE (rad) k_cpe applied per symbol and layer, 0 = none (counters only) */
@@ -86,6 +88,8 @@ struct Ctx {
   nrd_c16 *hy, *hh;   /* pinned host copies of y/h for the CPU EVM fallback (ISAC_PDSCH_GPU_EXACT_DEMOD_EVM=0) */
   cudaStream_t s2;           /* EVM chain, concurrent with compensation/MMSE/LLR */
   cudaEvent_t fork, join; /* fork/join of the EVM chain on s2 */
+  nr_irc_sum_t *irc_acc; /* D4 IRC, graph pass: the DM-RS covariance sums of the pass in flight (nr_pdsch_gpu_chest_irc_at adds, k_irc_final consumes) */
+  double *irc_d, *irc_h; /* D4 IRC: the host-run path's whitening matrices (nr_pdsch_gpu_demod_run), device copy and pinned staging, NR_IRC_NG_MAX x NR_IRC_WSTRIDE R values */
   Shared *sh;  /* pinned host copy, filled by one DMA at the end */
   Shared *dsh; /* device copy the kernels use (host-pinned memory is uncached for the GPU) */
 };
@@ -1194,6 +1198,45 @@ __device__ __forceinline__ int m3_exact(int nl, int nb, const int16_t (&hre)[4][
 {
   return nr_mmse_exact_re_f(nl, nb, hre, him, yre, yim, sc, s2, xre, xim, ainv, r);
 }
+__device__ __forceinline__ void nr_irc_final_t(const nr_irc_sum_t *s, int nb, double *w) { nr_irc_final(s, nb, w); }
+__device__ __forceinline__ void nr_irc_final_t(const nr_irc_sum_t *s, int nb, float *w) { nr_irc_final_f(s, nb, w); }
+/* D4 IRC: the same with the group's whitening (w == nullptr: the scalar model, the functions above) */
+__device__ __forceinline__ int m3_exact_w(int nl, int nb, const double *w, const int16_t (&hre)[4][4], const int16_t (&him)[4][4], const int16_t (&yre)[4], const int16_t (&yim)[4],
+                                          double sc, double s2, double *xre, double *xim, double *ainv, double *r)
+{
+  return nr_mmse_exact_re_w(nl, nb, w, hre, him, yre, yim, sc, s2, xre, xim, ainv, r);
+}
+__device__ __forceinline__ int m3_exact_w(int nl, int nb, const float *w, const int16_t (&hre)[4][4], const int16_t (&him)[4][4], const int16_t (&yre)[4], const int16_t (&yim)[4],
+                                          float sc, float s2, float *xre, float *xim, float *ainv, float *r)
+{
+  return nr_mmse_exact_re_w_f(nl, nb, w, hre, him, yre, yim, sc, s2, xre, xim, ainv, r);
+}
+__device__ __forceinline__ void m3_re_w(int nl, int nb, const double *w, const int16_t (&hre)[4][4], const int16_t (&him)[4][4], const int16_t (&yre)[4], const int16_t (&yim)[4],
+                                        double sc, double s2, double gain, int16_t qa, int16_t qb, int16_t qr, int16_t (&z)[4][2], int16_t (&mg)[4][3])
+{
+  nr_mmse3_re_w(nl, nb, w, hre, him, yre, yim, sc, s2, gain, qa, qb, qr, z, mg);
+}
+__device__ __forceinline__ void m3_re_w(int nl, int nb, const float *w, const int16_t (&hre)[4][4], const int16_t (&him)[4][4], const int16_t (&yre)[4], const int16_t (&yim)[4],
+                                        float sc, float s2, float gain, int16_t qa, int16_t qb, int16_t qr, int16_t (&z)[4][2], int16_t (&mg)[4][3])
+{
+  nr_mmse3_re_w_f(nl, nb, w, hre, him, yre, yim, sc, s2, gain, qa, qb, qr, z, mg);
+}
+/* the group's whitening matrix for packed RE i of symbol m (nullptr: no IRC for this grant) */
+template <typename R> __device__ __forceinline__ const R *m3_wgroup(const nr_gpu_demod_job_t &j, int m, uint32_t i)
+{
+  if (!j.irc_w || j.irc_ng <= 0)
+    return nullptr;
+  return (const R *)j.irc_w + (size_t)nr_irc_group_of(i, j.nre[m], (unsigned)j.irc_nre) * NR_IRC_WSTRIDE;
+}
+template <typename R> __device__ __forceinline__ R m3_nf_mean(const nr_gpu_demod_job_t &j)
+{
+  if (!j.irc_w || j.irc_ng <= 0)
+    return (R)1;
+  R f = 0;
+  for (int g = 0; g < j.irc_ng; g++)
+    f += ((const R *)j.irc_w)[g * NR_IRC_WSTRIDE + 21];
+  return f / (R)j.irc_ng;
+}
 __device__ __forceinline__ double m3_gain_of(double e, int n, double sc) { return nr_mmse3_gain(e, n, sc); }
 __device__ __forceinline__ float m3_gain_of(float e, int n, float sc) { return nr_mmse3_gain_f(e, n, sc); }
 __device__ __forceinline__ void m3_re(int nl, int nb, const int16_t (&hre)[4][4], const int16_t (&him)[4][4], const int16_t (&yre)[4], const int16_t (&yim)[4], double sc, double s2,
@@ -1256,7 +1299,7 @@ template <typename R = double> __global__ void k_mmse3_prep(__grid_constant__ co
     int16_t hre[4][4], him[4][4], yre[4], yim[4];
     m3_load(j, y, h, m, (uint32_t)(4 * k), nl, hre, him, yre, yim);
     R xre[4], xim[4], ainv[4], r = 0;
-    okf[k] = (unsigned char)m3_exact(nl, nb, hre, him, yre, yim, sc, (R)0, xre, xim, ainv, &r);
+    okf[k] = (unsigned char)m3_exact_w(nl, nb, m3_wgroup<R>(j, m, (uint32_t)(4 * k)), hre, him, yre, yim, sc, (R)0, xre, xim, ainv, &r);
     rs[k] = okf[k] ? r : (R)0;
   }
   __syncthreads();
@@ -1271,7 +1314,7 @@ template <typename R = double> __global__ void k_mmse3_prep(__grid_constant__ co
     }
     R s2 = 0;
     if (nb <= nl) {
-      s2 = (R)NRD_NVAR(j) * sc * m3_nvfac_of<R>(j);
+      s2 = (R)NRD_NVAR(j) * sc * m3_nvfac_of<R>(j) * m3_nf_mean<R>(j);
     } else {
       R res = 0;
       int nres = 0;
@@ -1293,13 +1336,42 @@ template <int NL, typename R> __device__ __forceinline__ void re_mmse3(const nr_
   const int16_t qr = j.qm == 8 ? NRD_QAM256_n3 : 0;
   int16_t hre[4][4], him[4][4], yre[4], yim[4], z[4][2], mg[4][3];
   m3_load(j, y, h, m, i, NL, hre, him, yre, yim);
-  m3_re(NL, j.nbRx, hre, him, yre, yim, ldexpR(R(), -sh->d.log2_maxh), m3_s2_of<R>(sh, m), m3_gain_at<R>(sh, m), qa, qb, qr, z, mg);
+  m3_re_w(NL, j.nbRx, m3_wgroup<R>(j, m, i), hre, him, yre, yim, ldexpR(R(), -sh->d.log2_maxh), m3_s2_of<R>(sh, m), m3_gain_at<R>(sh, m), qa, qb, qr, z, mg);
   for (int r = 0; r < NL; r++) {
     const size_t row = ((size_t)m * NR_GPU_DEMOD_MAX_NL + r) * j.buf + i;
     ((nrd_c16 *)j.comp)[row] = nrd_c16{z[r][0], z[r][1]};
     ((nrd_c16 *)j.mag)[row] = nrd_c16{mg[r][0], mg[r][0]};
     ((nrd_c16 *)j.magb)[row] = nrd_c16{mg[r][1], mg[r][1]};
     ((nrd_c16 *)j.magr)[row] = nrd_c16{mg[r][2], mg[r][2]};
+  }
+}
+
+/* D4 IRC, graph pass: one thread per group turns the integer sums of nr_pdsch_gpu_chest_irc_at into the group's whitening (nr_irc_final, the CPU's function in the instantiation of
+ * the pass), thread 0 the mean gain estimate over the usable groups. A group without samples (a segmented grant, a skipped chest) comes out inactive = the scalar model. */
+template <typename R> __global__ void k_irc_final(__grid_constant__ const JobK jk_, const nr_irc_sum_t *acc, R *w, Shared *sh)
+{
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
+  __shared__ R gsum[NR_IRC_NG_MAX];
+  __shared__ int act[NR_IRC_NG_MAX];
+  const int g = threadIdx.x;
+  if (g < NR_IRC_NG_MAX) {
+    nr_irc_sum_t s = acc[g];
+    if (j.nbRx < 2 || j.nl < 1 || j.nl > j.nbRx)
+      s.n = 0;
+    nr_irc_final_t(&s, j.nbRx, w + (size_t)g * NR_IRC_WSTRIDE);
+    act[g] = w[(size_t)g * NR_IRC_WSTRIDE + 20] > (R)0.5 ? 1 : 0;
+    gsum[g] = act[g] ? w[(size_t)g * NR_IRC_WSTRIDE + 22] : (R)0;
+  }
+  __syncthreads();
+  if (g == 0) {
+    R t = 0;
+    int n = 0;
+    for (int q = 0; q < NR_IRC_NG_MAX; q++) {
+      t += gsum[q];
+      n += act[q];
+    }
+    sh->irc_active = n;
+    sh->irc_gain_db = n ? 10.0f * log10f((float)t / (float)n) : 0.0f;
   }
 }
 
@@ -2061,6 +2133,9 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
         || nr_ms_malloc((void **)&x.part, sizeof(double) * NSYM * EVM_NCH * EVM_P) != cudaSuccess
         || nr_ms_malloc((void **)&x.sum, sizeof(double) * NSYM * EVM_P) != cudaSuccess
         || nr_ms_malloc((void **)&x.xs, sizeof(double2) * NSYM * 4 * EXT) != cudaSuccess
+        || nr_ms_malloc((void **)&x.irc_acc, sizeof(nr_irc_sum_t) * NR_IRC_NG_MAX) != cudaSuccess
+        || nr_ms_malloc((void **)&x.irc_d, sizeof(double) * NR_IRC_NG_MAX * NR_IRC_WSTRIDE) != cudaSuccess
+        || nr_ms_malloc_host((void **)&x.irc_h, sizeof(double) * NR_IRC_NG_MAX * NR_IRC_WSTRIDE) != cudaSuccess
         || nr_ms_malloc((void **)&x.dsh, sizeof(Shared)) != cudaSuccess
         || nr_ms_malloc_host((void **)&x.sh, sizeof(Shared)) != cudaSuccess
 ) {
@@ -2151,6 +2226,26 @@ extern "C" int nr_pdsch_gpu_demod_stage_init(int nbRx, int N, uint32_t ext_max)
   g_stg_n = n;
   fprintf(stderr, "SENSING: GPU_EXACT_DEMOD staged (DISCRETE): %d contexts x (%zu KB device + %zu KB pinned)\n", n, (in_b + out_b) >> 10, (in_b + out_b) >> 10);
   return 0;
+}
+
+/* D4 IRC: a caller-supplied whitening (host double matrices, nr_irc_final) -> the context's staging in the instantiation's type, H2D on `s`, and the job's pointer to the device copy */
+static void irc_stage_in(Ctx &x, const nr_gpu_demod_job_t &j, nr_gpu_demod_job_t &jj, cudaStream_t s)
+{
+  if (j.irc_w && j.irc_ng > 0 && j.irc_ng <= NR_IRC_NG_MAX && jj.qam_mode == 3 && jj.nl >= 2) {
+    const size_t n = (size_t)j.irc_ng * NR_IRC_WSTRIDE;
+    if (jj.demod_fp32)
+      for (size_t q = 0; q < n; q++)
+        ((float *)x.irc_h)[q] = (float)((const double *)j.irc_w)[q];
+    else
+      memcpy(x.irc_h, j.irc_w, n * sizeof(double));
+    cudaMemcpyAsync(x.irc_d, x.irc_h, n * (jj.demod_fp32 ? sizeof(float) : sizeof(double)), cudaMemcpyHostToDevice, s);
+    jj.irc_w = x.irc_d;
+    jj.irc_ng = j.irc_ng;
+    jj.irc_nre = j.irc_nre;
+  } else {
+    jj.irc_w = nullptr;
+    jj.irc_ng = 0;
+  }
 }
 
 /* GPUFUSE: compensation + MMSE + kappa + LLRs, one launch (shared by nr_pdsch_gpu_demod_run and nr_pdsch_gpu_demod_dev) */
@@ -2261,6 +2356,7 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
     cudaMemcpyAsync(g_stg[c].in.dev, g_stg[c].in.host, P.in_n, cudaMemcpyHostToDevice, x.s);
     h2d_b = P.in_n;
   }
+  irc_stage_in(x, *j, jj, x.s);
   const int gx = (int)((jj.ext + 127) / 128);
   k_gather<<<dim3(gx, NSYM), 128, 0, x.s>>>(K(jj), x.y, x.h);
   k_level<<<jj.nl * jj.nbRx, 256, 0, x.s>>>(K(jj), x.h, x.dsh); /* + the decision (last block) */
@@ -2372,6 +2468,7 @@ extern "C" int nr_pdsch_gpu_demod_dev(const nr_gpu_demod_job_t *j, nr_gpu_buf_t 
   nr_gpu_demod_job_t jj = *j;
   jj.llr = (int16_t *)llr_dev->dev;
   jj.m3_nvfac_f = (float)jj.m3_nvfac;
+  irc_stage_in(x, *j, jj, s);
   const int gx = (int)((jj.ext + 127) / 128);
   launch_tinterp(jj, s);
   k_gather<<<dim3(gx, NSYM), 128, 0, s>>>(K(jj), x.y, x.h);
@@ -2397,6 +2494,7 @@ extern "C" int nr_pdsch_gpu_demod_pass_set(int inst, const nr_gpu_demod_job_t *j
   memcpy(g_jb[inst].host, j, sizeof(JobK));
   ((nr_gpu_demod_job_t *)g_jb[inst].host)->m3_nvfac_f = (float)j->m3_nvfac;
   if (j->nvar_dev) ((nr_gpu_demod_job_t *)g_jb[inst].host)->nvar_ant_dev = j->nvar_dev + NVAR_ANT_DELTA;
+  ((nr_gpu_demod_job_t *)g_jb[inst].host)->irc_w = j->irc_ng > 0 ? g_ctx[CTX + inst].irc_d : nullptr; /* D4 IRC: the instance's matrices (k_irc_final) */
   ((nr_gpu_demod_job_t *)g_jb[inst].host)->jref = (const nr_gpu_demod_job_t *)g_jb[inst].dev;
   return 0;
 }
@@ -2413,7 +2511,12 @@ extern "C" int nr_pdsch_gpu_demod_pass_dev(int inst, const nr_gpu_demod_job_t *j
   jj.nvar_ant_dev = nvar_dev + NVAR_ANT_DELTA;
   jj.m3_nvfac_f = (float)jj.m3_nvfac;
   jj.jref = (const nr_gpu_demod_job_t *)g_jb[inst].dev;
+  jj.irc_w = jj.irc_ng > 0 ? x.irc_d : nullptr;
   if (nr_gpu_buf_h2d_async(&g_jb[inst], 0, sizeof(JobK), s) != 0) return -1;
+  if (jj.irc_ng > 0) { /* D4 IRC: the DM-RS covariance sums the chest left (nr_pdsch_gpu_chest_irc_at) -> the whitening of the grant, before the extraction */
+    if (jj.demod_fp32) k_irc_final<float><<<1, 64, 0, s>>>(K(jj), x.irc_acc, (float *)x.irc_d, x.dsh);
+    else k_irc_final<double><<<1, 64, 0, s>>>(K(jj), x.irc_acc, x.irc_d, x.dsh);
+  }
   const int gx = (int)((jj.ext + 127) / 128);
   launch_tinterp(jj, s);
   k_gather<<<dim3(gx, NSYM), 128, 0, s>>>(K(jj), x.y, x.h);
@@ -2482,6 +2585,8 @@ extern "C" void nr_pdsch_gpu_demod_pass_out(int inst, nr_gpu_demod_job_t *j)
   j->used_branch = d.used_branch;
   j->mrc_rx_index = d.mrc_rx_index;
   j->mrc_nb_rx = d.mrc_nb_rx;
+  j->irc_active = j->irc_ng > 0 ? x.sh->irc_active : 0;
+  j->irc_gain_db = x.sh->irc_gain_db;
   memcpy(j->kappa_sz, x.sh->kap_sz, sizeof(j->kappa_sz));
   memcpy(j->kappa_sm, x.sh->kap_sm, sizeof(j->kappa_sm));
   memcpy(j->cpe_phi, x.sh->cpe, sizeof(j->cpe_phi));
@@ -2490,4 +2595,10 @@ extern "C" void nr_pdsch_gpu_demod_pass_out(int inst, nr_gpu_demod_job_t *j)
   if (j->want_evm)
     memcpy(j->evm, x.sh->evm, sizeof(j->evm));
   j->evm_pending = 0;
+}
+
+/* D4 IRC: the device accumulator of graph instance `inst` (nr_gpu_pass_graph.cu zeroes it and nr_pdsch_gpu_chest_irc_at adds into it, per pass) */
+extern "C" void *nr_pdsch_gpu_irc_acc(int inst)
+{
+  return g_ok && inst >= 0 && inst < PASS_INST ? (void *)g_ctx[CTX + inst].irc_acc : nullptr;
 }

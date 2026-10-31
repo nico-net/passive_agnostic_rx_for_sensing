@@ -164,6 +164,8 @@ typedef struct {
   uint8_t              dmrs_path;    ///< 0 none (-99), 1 CPU chest, 2 GPU exact chest, 3 GPU graph pass, 4 chest cache (EVMGRANT dsp=)
   float                layer_snr_db[4]; ///< HIGHMCS: per-layer decision-directed SNR (dB), -99 = n/a (EVMGRANT snr_l=)
   int8_t               l2maxh;       ///< MRCBUG diag: the fixed-point output shift of this decode (EVMGRANT l2=)
+  float                irc_gain_db;  ///< D4 IRC: whitening gain estimate (dB, mean over the groups with a usable DM-RS covariance), -99 = scalar noise model (EVMGRANT irc=)
+  uint8_t              irc_groups;   ///< D4 IRC: groups whose covariance was usable
   float                zabs;         ///< MRCBUG diag: mean |Re z|,|Im z| of the int16 equaliser output in LSB (EVMGRANT zabs=)
   uint8_t              evm_nbrx;
   uint16_t             evm_nsym;

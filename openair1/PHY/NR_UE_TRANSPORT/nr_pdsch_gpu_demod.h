@@ -91,6 +91,9 @@ typedef struct nr_gpu_demod_job_s {
   double m3_nvfac; /* mode 3, nbRx <= nl: s2 = nvar x m3_nvfac (pow(10, ISAC_PDSCH_MMSE_EXACT_NVAR_DB / 10), host libm as the CPU) */
   uint32_t nvar_ant[4];                   /* rank-1 mode 3: the chest's per-RX DM-RS residual noise (nr_dl_chest_nvar_ant) = the branch weights of the noise-weighted MRC; all 0 = no weighting */
   const uint32_t *nvar_ant_dev;           /* GPUPASS: non-null = the per-RX noise is read from here (the chest post's nvar_ant), `nvar_ant` above is ignored (set by the module from nvar_dev) */
+  const void *irc_w;                      /* D4 IRC: device-accessible whitening matrices of the DM-RS interference covariance, irc_ng groups of NR_IRC_WSTRIDE values (double,
+                                           * or float when demod_fp32), nr_irc_final(); null = scalar noise model. Mode 3 (qam_mode 3, nl >= 2) only. */
+  int irc_ng, irc_nre; /* groups, and the REs of a full symbol of the grant (the group of a data RE: nr_irc_group_of) */
   const uint32_t *nvar_dev;               /* GPUPASS: non-null = nvar is read from here when the kernels run (the chest post's output), `nvar` above is ignored */
   const struct nr_gpu_demod_job_s *jref;  /* GPUPASS: non-null = the kernels read the job from here instead of their by-value copy (graph replay: the job is rewritten
                                            * between replays; the by-value copy is that of the capture). Device-accessible, at least offsetof(evm) bytes. */
@@ -101,6 +104,8 @@ typedef struct nr_gpu_demod_job_s {
   /* outputs */
   int32_t log2_maxh;
   int used_branch_set, used_branch, mrc_rx_index, mrc_nb_rx;
+  float irc_gain_db; /* D4 IRC, graph pass: mean whitening gain estimate over the usable groups (valid when irc_active > 0) */
+  int irc_active;    /* groups whose DM-RS covariance was usable */
   int64_t kappa_sz[NR_GPU_DEMOD_NSYM][NR_GPU_DEMOD_MAX_NL], kappa_sm[NR_GPU_DEMOD_NSYM][NR_GPU_DEMOD_MAX_NL];
   /* extraction buffers after the branch mask and the MRC alignment (host-readable while the job's context is held) */
   const int16_t *y_ext; /* c16 [14][NR_GPU_DEMOD_MAX_RX][NR_GPU_DEMOD_MAX_EXT] */

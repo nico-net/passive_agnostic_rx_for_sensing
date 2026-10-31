@@ -5,6 +5,7 @@
  * nr_gpu_mem_test_force_discrete, so the same fixture runs both memory models. Later tasks extend it (from_shape(...)). */
 #ifndef NR_GPU_PASS_FIXTURE_H
 #define NR_GPU_PASS_FIXTURE_H
+#include "nr_mmse_exact.h"
 #include <dlfcn.h>
 #include <cuda_runtime.h>
 #include <chrono>
@@ -1140,6 +1141,51 @@ class GpuPassFixture {
   typedef struct { int16_t r, i; } c16;
   std::vector<int16_t> geo_buf, geo_real, rxF_ref; /* rxF_ref: the exact FEP of the stage path, [ant][14][N] c16 */
   /* the Task 2 stage path with the CPU steps between the stages = the exact path of today; fills s (tb must hold the TB bytes) */
+  /* D4 IRC of the old (stage) path: the DM-RS residual covariance of the contiguous grant, on the host from the chest job's rows (the LS of each row against its estimate, one vector per LS value, the RX rows
+   * of one (DM-RS symbol, layer) together) -> nr_irc_final per group, as nr_pdsch_irc_cov does for the CPU chest. Returns the groups (0 = scalar model: not mode 3, a segmented grant). */
+  int irc_stage(Pass &P, double *w, int *nre_full) const
+  {
+    if (nl < 2 || !segs.empty()) return 0;
+    auto host = [&](const void *p) -> const int16_t * { /* a device pointer of the pass buffers -> its host mirror */
+      for (const nr_gpu_buf_t *b : {&P.rxF, &P.est, &P.pil}) {
+        const char *d = (const char *)b->dev, *q = (const char *)p;
+        if (q >= d && q < d + b->bytes) return (const int16_t *)((const char *)b->host + (q - d));
+      }
+      return (const int16_t *)p;
+    };
+    const int nre = 12 * nrb, ng = nr_irc_groups_of_re(nre);
+    std::vector<nr_irc_sum_t> sum((size_t)NR_IRC_NG_MAX);
+    memset(sum.data(), 0, sizeof(nr_irc_sum_t) * sum.size());
+    auto mulshift15 = [](int ar, int ai, int br, int bi, int &rr, int &ri) { rr = (ar * br - ai * bi) >> 15; ri = (ar * bi + ai * br) >> 15; };
+    for (int pr = 0; pr < ndm * nl; pr++) {
+      const nr_gpu_chest_row_t &r0 = P.cjv[0].rows[(size_t)pr * nant_];
+      const int rep = dtype == 1 ? 4 : 6, band = 12 * r0.nb_rb;
+      for (int k = 0; k < band; k += rep) {
+        int er[4], ei[4];
+        for (int a = 0; a < nant_; a++) {
+          const nr_gpu_chest_row_t &R = P.cjv[0].rows[(size_t)pr * nant_ + a];
+          const int16_t *rx = host(R.rxF), *pl = host(R.pil), *es = host(R.out);
+          int q, ia, ib;
+          if (dtype == 1) { q = k >> 2; ia = R.k0 + 4 * q; ib = ia + 2; } else { q = k / 6; ia = R.k0 + 6 * q; ib = ia + 1; }
+          int lr, li, rr, ri;
+          mulshift15(pl[4 * q], pl[4 * q + 1], rx[2 * (ia % N)], rx[2 * (ia % N) + 1], lr, li);
+          mulshift15(pl[4 * q + 2], pl[4 * q + 3], rx[2 * (ib % N)], rx[2 * (ib % N) + 1], rr, ri);
+          er[a] = (int)(int16_t)((lr + rr) >> 1) - es[2 * k];
+          ei[a] = (int)(int16_t)((li + ri) >> 1) - es[2 * k + 1];
+        }
+        nr_irc_sum_t &g = sum[(size_t)nr_irc_group_of((unsigned)k, 1u, 1u)];
+        for (int a = 0; a < nant_; a++)
+          for (int b = 0; b < nant_; b++) {
+            g.re[a][b] += (long long)er[a] * er[b] + (long long)ei[a] * ei[b];
+            g.im[a][b] += (long long)ei[a] * er[b] - (long long)er[a] * ei[b];
+          }
+        g.n++;
+      }
+    }
+    for (int g = 0; g < ng; g++) nr_irc_final(&sum[(size_t)g], nant_, w + (size_t)g * NR_IRC_WSTRIDE);
+    *nre_full = nre;
+    return ng;
+  }
   int run_stage_path(nr_gpu_pass_result_t *s)
   {
     bool ok = false;
@@ -1230,6 +1276,12 @@ class GpuPassFixture {
     P.dj.nvar = nvar;
     for (int a = 0; a < 4; a++) P.dj.nvar_ant[a] = nvant_off || nl != 1 ? 0u : s->nvar_ant[a]; /* the rank-1 noise-weighted MRC's per-RX noise (what the passive decode publishes in nr_dl_chest_nvar_ant) */
     if (is_probe) horizon(P.dj, probe_last, qm, nl); /* the LLRs past the horizon stay 0 (load() cleared the buffer), as the body's cleared buffer */
+    double irc_w[NR_IRC_NG_MAX * NR_IRC_WSTRIDE];
+    int irc_nre = 0;
+    const int irc_ng = irc_stage(P, irc_w, &irc_nre); /* D4 IRC: the old path's own covariance (host), the job reads it in place */
+    P.dj.irc_w = irc_ng ? irc_w : nullptr;
+    P.dj.irc_ng = irc_ng;
+    P.dj.irc_nre = irc_nre;
     if (m.demod(&P.dj, &P.llrb, st)) return -1;
     nr_gpu_buf_d2h_async(&P.llrb, 0, P.llrb.bytes, st);
     if (cudaStreamSynchronize(st)) return -1;

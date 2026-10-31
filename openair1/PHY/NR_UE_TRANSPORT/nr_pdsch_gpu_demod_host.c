@@ -23,6 +23,7 @@
 #include "nr_pdsch_gpu_demod.h"
 #include "nr_pdsch_evm_acc.h"
 #include "nr_qam_mode.h"
+#include "nr_irc_cov.h"
 #include "nr_agnostic_v2.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
 #include "common/utils/LOG/log.h"
@@ -666,6 +667,13 @@ static int build_job(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
     if (s_nvfac < 0.0)
       s_nvfac = pow(10.0, 21.0 / 10.0);
     j->m3_nvfac = s_nvfac;
+  }
+  j->irc_w = NULL; /* D4 IRC: the grant's DM-RS interference whitening (nr_irc_grant, set by the passive decode on this thread), mode 3 only */
+  j->irc_ng = 0;
+  if (j->qam_mode == 3 && nr_irc_grant.valid && nr_irc_grant.nb == (int)c->ue->frame_parms.nb_antennas_rx) {
+    j->irc_w = nr_irc_grant.w;
+    j->irc_ng = nr_irc_grant.ng;
+    j->irc_nre = nr_irc_grant.nre;
   }
   j->mag_per_layer = nl >= 2 && j->qam_mode >= 2; /* modes 2 and 3: per-layer thresholds */
   j->wide_mrc = nr_pdsch_decode_wide_mrc;
