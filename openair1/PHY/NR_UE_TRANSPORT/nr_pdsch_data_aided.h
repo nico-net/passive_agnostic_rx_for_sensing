@@ -21,7 +21,8 @@
 
 /*! \file openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h
  * \brief ISAC data-aided PDSCH source: reconstruct the transmitted symbols X from a CRC-verified
- * transport block and submit Ĥ[k] = Y[k]/X[k] at every data RE.
+ * transport block and submit Ĥ[k] = Y[k]/X[k] at every data RE (Nl = 1), or the per-layer least-squares
+ * estimate Ĥ_l (Nl = 2..4, one frame per layer, nr_pdsch_mimo_ls.h).
  *
  * This is the body of what used to be phy_procedures_nr_ue.c's static
  * nr_isac_pdsch_data_aided_tap(), lifted verbatim into its own translation unit (2026-07-30) so the
@@ -60,8 +61,9 @@ extern __thread uint64_t nr_isac_abs_slot_override;
  *   - `tb_bytes` is a CRC-VERIFIED payload in the TX encoder's own B = A + TB-CRC format (i.e. a
  *     decoder's `harq->b`). Feeding it a failed decode reconstructs the WRONG X and injects
  *     high-power garbage across every range bin -- the single worst failure mode this source has.
- *   - single layer (`cw->Nl == 1`), no PTRS, no CSI-RS rate-matching overlap: the RE enumeration
+ *   - no PTRS, no CSI-RS rate-matching overlap (refused through decode_G): the RE enumeration
  *     treats every RE of a non-DM-RS symbol inside the allocation as plain data.
+ * Nl = 2..4 exports one CFR frame per layer (records carry layer/n_layers and the layer's single DM-RS port); Nl > 4 contributes nothing.
  *
  * No-ops if ISAC or the pdsch_data source is disabled.
  *

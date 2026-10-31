@@ -420,6 +420,7 @@ extern "C" void nr_isac_submit_cfr_multi_meta(uint32_t slot_idx, float slot_frac
     m.ta_applied_valid=detail->ta_applied_valid;
     m.transform_precoding=detail->transform_precoding; m.dmrs_type=detail->dmrs_type;
     m.dmrs_add_pos=detail->dmrs_add_pos; m.dmrs_n_scid=detail->dmrs_n_scid;
+    m.layer_idx1=detail->layer_idx1; m.n_layers=detail->n_layers;
   }
   m.truncated=truncated;
   nr_sense_emit_rs(source_map[source],&m,frame_id);

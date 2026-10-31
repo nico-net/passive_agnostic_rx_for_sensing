@@ -172,6 +172,22 @@ TEST(SenseRecords, UlRsRecordSelfContained)
   EXPECT_NE(strstr(line,"\"dmrs_n_scid\":1"),nullptr);
 }
 
+TEST(SenseRecords, PdschLayerFrameKeys)
+{
+  nr_sense_rs_meta_t m{};
+  m.rnti=77; m.ports=1; m.port_mask=2; m.dmrs_type=1; m.dmrs_add_pos=-1; m.dmrs_n_scid=0;
+  char single[2048], layer[2048];
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DATA,&m,1,single,sizeof single),0);
+  EXPECT_EQ(strstr(single,"\"layer\""),nullptr);      // single-layer records are unchanged
+  EXPECT_EQ(strstr(single,"\"n_layers\""),nullptr);
+  m.layer_idx1=2; m.n_layers=3;
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DATA,&m,1,layer,sizeof layer),0);
+  EXPECT_NE(strstr(layer,"\"layer\":1"),nullptr);
+  EXPECT_NE(strstr(layer,"\"n_layers\":3"),nullptr);
+  EXPECT_NE(strstr(layer,"\"port_mask\":2"),nullptr);
+  EXPECT_NE(strstr(layer,"\"source\":\"pdsch_data\""),nullptr);
+}
+
 TEST(SenseRecords, NullsForUnknown)
 {
   nr_passive_obs_t o{};

@@ -203,6 +203,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.c
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_mimo_ls.c
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c
