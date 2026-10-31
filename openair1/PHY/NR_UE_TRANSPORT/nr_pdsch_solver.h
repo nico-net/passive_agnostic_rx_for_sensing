@@ -67,6 +67,9 @@ void nr_pdsch_solver_set_tda_fn(nr_pdsch_solver_tda_fn fn, void *ctx);
 
 /** Solved RNTI: its representative layout (>= 0), else -1. A solved caller parses only that layout. */
 int nr_pdsch_solver_rep(uint16_t rnti);
+
+/** Slot-phase period (slots: 20, 40, 80 or 160) the cell's CRC passes of full-length allocations show; 20 until they conflict. Learnt, never set. */
+int nr_pdsch_solver_phase_period(void);
 /** ISAC_PDSCH_SOLVER_LAYOUT_RECOVER=N (default off): after N credited failed search probes,
  * reopen the active FDRA families' pruned layouts for this RNTI, including post-solve refinement. */
 bool nr_pdsch_solver_reopen_layouts(uint16_t rnti);

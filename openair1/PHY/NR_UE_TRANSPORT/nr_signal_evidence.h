@@ -24,6 +24,8 @@
 #define NSE_BETA 0.01          /* error rate of both boundaries (the operator-visible false-park / false-un-park bound) */
 #define NSE_THIN_MAX_SHIFT 4   /* re-test at most 1 grant in 16 */
 #define NSE_PRING 128
+#define NSE_EXC_P 0.05         /* PARK v2 exceedance: a draw with P0(X >= x) below this */
+#define NSE_H1_RATE 0.3        /* PARK v2 H1: a decode that sees the RNTI's DM-RS exceeds in at least this fraction of its draws */
 
 typedef struct {
   uint32_t h[NSE_BINS];
@@ -33,6 +35,7 @@ typedef struct {
   uint32_t since;
   float pr[NSE_PRING]; /* p of the decodes that passed their CRC (the H1 shape) */
   int pr_n, pr_pos;
+  float h0;        /* fraction of the reference with p_single < NSE_EXC_P: the exceedance rate of noise as this estimator gives it */
 } nse_ref_t;
 
 static inline int nse_bin(float db)
@@ -61,6 +64,17 @@ static inline void nse_ref_recompute(nse_ref_t *R)
   for (int b = 0; b < mu; b++) l += R->h[b];
   R->mu_bin = mu;
   R->left = l + R->h[mu] / 2;
+  /* h0: the mirrored upper tail and the 0.5 dB bins make P0(p < NSE_EXC_P) a little above NSE_EXC_P (0.08 on a Gaussian cell); the test's null rate is
+   * the one this reference shows for its own samples, same formula as nse_p_single, so the SPRT drift stays that of noise vs signal */
+  double lm[NSE_BINS], c = 0.0, ex = 0.0;
+  for (int b = 0; b < NSE_BINS; b++) { lm[b] = c + 0.5 * R->h[b]; c += R->h[b]; }
+  const double tot = 2.0 * (double)R->left + 1.0;
+  for (int b = 0; b < NSE_BINS; b++) {
+    const int mb = 2 * mu - b;
+    const double p = b <= mu ? 1.0 - lm[b] / tot : ((mb >= 0 ? lm[mb] : 0.0) + 0.5) / tot;
+    if (p < NSE_EXC_P) ex += R->h[b];
+  }
+  R->h0 = (float)(ex / (double)R->n);
 }
 
 static inline void nse_ref_add(nse_ref_t *R, float db)
@@ -126,10 +140,15 @@ static inline double nse_h1_shape(const nse_ref_t *R)
   return a < 0.1 ? 0.1 : a > 0.9 ? 0.9 : a;
 }
 
+/* D11 PARK v2: each draw is a binomial exceedance event, x = (p_single < NSE_EXC_P). Noise (H0) exceeds at rate h0 = R->h0 (NSE_EXC_P by construction of p, measured on the reference); a
+ * decode that sees the RNTI's DM-RS (H1) exceeds at a rate >= NSE_H1_RATE. The Bernoulli SPRT step is ln(h1/h0) on an exceedance and
+ * ln((1-h1)/(1-h0)) otherwise: about -0.3 per non-exceeding draw, so the floor ln(NSE_BETA) is reached in ~20 draws of pure noise (the Beta(a,1) test it
+ * replaces drifted -0.005 per draw for a <= 0.9: ~900 draws). */
+
 /* Per RNTI, one sequential test per hypothesis class (a hash of DM-RS ports, CDM groups, layers and scrambling identity of the decode: every
  * hypothesis class the search tries). The RNTI is parked when EVERY class it was decoded under has reached the noise boundary (and not climbed back to 0 since); it is un-parked when any class
- * climbs back. Per class a decode is one independent draw (the same grant/class is counted once) with p = p_single; LLR += ln a + (a - 1) ln p,
- * clipped to [ln BETA, -ln BETA]. If a class carries the RNTI's DM-RS (the H1 of the cell), P(its LLR ever reaches ln BETA) <= BETA (Wald), so
+ * climbs back. Per class a decode is one independent draw (the same grant/class is counted once) with p = p_single; LLR += ln(h1/h0) if p < NSE_EXC_P else
+ * ln((1-h1)/(1-h0)), clipped to [ln BETA, -ln BETA]. If a class carries the RNTI's DM-RS (rate >= h1), P(its LLR ever reaches ln BETA) <= BETA (Wald), so
  * P(park | some hypothesis sees the RNTI) <= BETA; weak signals that stay on one class accumulate across grants, which the per-grant maximum over
  * hypotheses cannot do. */
 #define NSE_CLASSES 32
@@ -140,6 +159,7 @@ typedef struct {
   uint32_t floor_hit;         /* classes whose test reached the noise boundary and has not climbed back to 0 since */
   uint64_t last_abs;          /* last grant while parked (re-test counter) */
   bool parked, proven;        /* proven: the RNTI is solved (its decodes are not noise draws) */
+  bool had_pass;              /* a TB CRC pass of this RNTI (or its solution) was ever seen: it carries a decodable signal and is never parked */
   uint8_t pk_neg;             /* negative re-test grants while parked */
   uint32_t n_obs, n_park;
 } nse_rnti_t;
@@ -152,9 +172,18 @@ typedef enum { NSE_NONE = 0, NSE_PARKED, NSE_UNPARKED } nse_event_t;
 static inline nse_event_t nse_note(nse_rnti_t *s, nse_ref_t *R, uint64_t abs, uint32_t cls, float comb_db, bool real_pass, bool solved, bool cover_ok)
 {
   s->proven = solved;
+  if (real_pass || solved) s->had_pass = true;
+  if (s->parked && s->had_pass) { /* a CRC pass (or a proven DM-RS) of a parked RNTI: it decodes, start over */
+    s->parked = false;
+    s->pk_neg = 0;
+    memset(s->llr, 0, sizeof s->llr);
+    s->floor_hit = 0;
+    if (real_pass) nse_ref_note_pass(R, comb_db);
+    return NSE_UNPARKED;
+  }
   if (real_pass) nse_ref_note_pass(R, comb_db);
   else if (!solved) nse_ref_add(R, comb_db);
-  if (!nse_h1_ready(R)) return NSE_NONE;
+  if (!nse_ref_ready(R)) return NSE_NONE;
   const unsigned c = (cls * 2654435761u) >> 27; /* 0..31 */
   const double lo = log(NSE_BETA), hi = -lo;
   const bool fresh = !((s->seen >> c) & 1u);
@@ -162,9 +191,9 @@ static inline nse_event_t nse_note(nse_rnti_t *s, nse_ref_t *R, uint64_t abs, ui
   if (fresh) { s->seen |= 1u << c; s->llr[c] = s->parked ? (float)lo : 0.f; }
   s->cabs[c] = abs;
   s->n_obs++;
-  const double a = nse_h1_shape(R);
-  const double p = nse_p_single(R, comb_db);
-  double l = (double)s->llr[c] + log(a) + (a - 1.0) * log(p);
+  const bool exc = nse_p_single(R, comb_db) < NSE_EXC_P;
+  const double h0 = R->h0 < NSE_EXC_P ? NSE_EXC_P : R->h0 > 0.15 ? 0.15 : R->h0;
+  double l = (double)s->llr[c] + (exc ? log(NSE_H1_RATE / h0) : log((1.0 - NSE_H1_RATE) / (1.0 - h0)));
   l = l > hi ? hi : l < lo ? lo : l;
   s->llr[c] = (float)l;
   if (l <= lo) s->floor_hit |= 1u << c;
@@ -179,7 +208,7 @@ static inline nse_event_t nse_note(nse_rnti_t *s, nse_ref_t *R, uint64_t abs, ui
       s->floor_hit = 0;
       ev = NSE_UNPARKED;
     }
-  } else if (l <= lo && cover_ok) {
+  } else if (l <= lo && cover_ok && !s->had_pass) {
     if ((s->floor_hit & s->seen) == s->seen) { s->parked = true; s->pk_neg = 0; s->last_abs = abs; s->n_park++; ev = NSE_PARKED; }
   }
   return ev;
