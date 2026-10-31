@@ -4091,3 +4091,11 @@ radio/rfsimulator/simulator.cpp	1532	tap_send::eul	func_static	double[20]	PROCES
 radio/rfsimulator/simulator.cpp	1532	tap_send::nul	func_static	uint64_t[20]	PROCESS	AUDIT	rfsimulator device commands and read bookkeeping: one simulated radio per process
 radio/rfsimulator/simulator.cpp	1709	rfsimulator_read_beams::average	func_static	double	PROCESS	AUDIT	rfsimulator device commands and read bookkeeping: one simulated radio per process
 radio/rfsimulator/simulator.cpp	1711	rfsimulator_read_beams::calls	func_static	int	PROCESS	AUDIT	rfsimulator device commands and read bookkeeping: one simulated radio per process
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arb.c	18	nr_rm_dmrs_clash::num_l0	func_static	const uint8_t[18]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arb.c	153	nr_rm_build::fp	tls	pdu_t[2[NR_RM_MAXL]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arb.c	153	nr_rm_build::pool	tls	pdu_t[2 * NR_RM_MAXL]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arb.c	153	nr_rm_build::w2	tls	pdu_t[2[2 * NR_RM_MAXL]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arb.c	153	nr_rm_build::wide	tls	pdu_t[2[2 * NR_RM_MAXL]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arb.c	230	g_rm	file_static	rm_tab_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC, state of one cell (fix1031/rm: per-RNTI rate-matching vote table)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arb.c	232	g_rm_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC, state of one cell (fix1031/rm: per-RNTI rate-matching vote table)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	4389	t_rm_ctx	tls	rm_ctx_t *	TLS	A5	existing thread-local
