@@ -122,6 +122,7 @@ typedef struct {
   uint8_t  tda_k0;   ///< slots between the DCI and this PDSCH under the TDA-field row (0 = same slot)
   uint8_t  pm_pos1, pm_nbits, pm_hyp; ///< PMEXPLORE: pre-MCS window (start + 1, 0 = none), width, hypothesis decoded (NR_PM_HYP_*)
   uint8_t  rm_ind, zp_trig; ///< DCI 1_1 rate-matching indicator / ZP-CSI-RS trigger values (0 = no such field): key of the CRC-learnt rate-matching set (nr_csirs_rm_arb.h)
+  bool     rm_fixed;        ///< the caller set the CSI-RS rate-matching list itself (SLOTPHASE variant probe): decode entry keeps it, no RM arbitration
 } nr_pdsch_passive_grant_t;
 
 /// Pick this RNTI's current DCI 1_1 interleaved VRB-to-PRB bundle-size hypothesis (2 or 4). The

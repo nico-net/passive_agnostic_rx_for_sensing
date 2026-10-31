@@ -9638,6 +9638,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
               dl.csiRsForRateMatching[dl.numCsiRsForRateMatching++] = *c;
           }
         }
+        bool sp_rm = false; /* SLOTPHASE variant replaced/extended the CSI-RS rate-matching list: the decode must keep it (grant.rm_fixed) */
         if (!var[v].probe && var[v].token && nr_slotphase_active()) { /* SLOTPHASE: at a phase whose strong grants fail, this full decode is the probe of a variant */
           const uint32_t sp_slot = abs_slot + tf_k0; /* the PDSCH slot */
           if (nr_slotphase_covers(sp_slot)) {
@@ -9655,8 +9656,11 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
               fapi_nr_dl_config_csirs_pdu_rel15_t sp_est[NR_SPR_MAXPAT];
               const int sp_ne = nr_slotphase_est_patterns(sp_slot, sp_est, NR_SPR_MAXPAT);
               slotphase_apply(&dl, &sp, sp_seed, sp_n, sp_est, sp_ne, cfg->dmrs_typeA_position + 2, var[v].add_pos);
-            } else if (sp.kind != NR_SP_CTRL)
+              sp_rm = true;
+            } else if (sp.kind != NR_SP_CTRL) {
               slotphase_apply(&dl, &sp, sp_seed, sp_n, sp_foot, sp_nf, cfg->dmrs_typeA_position + 2, var[v].add_pos);
+              sp_rm = sp.kind != NR_SP_TRIM;
+            }
           }
         }
         freq_alloc_bitmap_t fa = set_bitmap_from_start_size(o->start_rb, o->num_rb);
@@ -9696,7 +9700,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
                                              .tda_pos1 = tf_pos1, .tda_n = tf_n, .tda_addpos = var[v].add_pos, .tda_last = tf_last,
                                              .tda_S = {tf_S[0], tf_S[1]}, .tda_L = {tf_L[0], tf_L[1]}, .tda_k0 = tf_k0,
                                              .pm_pos1 = pm_pos1, .pm_nbits = pm_nbits, .pm_hyp = pm_h,
-                                             .rm_ind = o->rm_ind, .zp_trig = o->zp_trig};
+                                             .rm_ind = o->rm_ind, .zp_trig = o->zp_trig, .rm_fixed = sp_rm};
         nr_pdsch_passive_job_t job;
         memset(&job, 0, sizeof(job));
         job.dlsch_pdu = dl;

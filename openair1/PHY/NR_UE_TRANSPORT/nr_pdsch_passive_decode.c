@@ -4452,10 +4452,15 @@ static nr_pdsch_passive_decode_status_t passive_decode_entry(PHY_VARS_NR_UE *ue,
   nr_csirs_rm_candidates(pdsch_slot, dlsch_config->dlDmrsScramblingId, (uint16_t)dlsch_config->dlDmrsSymbPos, dlsch_config->BWPStart,
                          dlsch_config->BWPSize, &rm.cs);
   rm.first = 0;
-  rm.arb = rm.cs.n > 1 && grant->rnti_class == 0 && !t_probe_first_seg && !t_quiet && !t_llr_ovr && !t_gw_capture;
-  if (rm.cs.n > 1 && grant->rnti_class == 0)
+  /* a SLOTPHASE variant probe carries its own rate-matching list (the monitor built it): overwriting it here made every CSI-RS variant decode
+   * with the default list, so the variants could never pass (0/16 on air, PROJECT_MEMORY §36.2) */
+  rm.arb = !grant->rm_fixed && rm.cs.n > 1 && grant->rnti_class == 0 && !t_probe_first_seg && !t_quiet && !t_llr_ovr && !t_gw_capture;
+  if (!grant->rm_fixed && rm.cs.n > 1 && grant->rnti_class == 0)
     rm.first = nr_rm_arb_first(grant->rnti, grant->rm_ind, grant->zp_trig, &rm.cs);
-  nr_csirs_rm_apply(dlsch_config, &rm.cs, rm.first);
+  if (!grant->rm_fixed)
+    nr_csirs_rm_apply(dlsch_config, &rm.cs, rm.first);
+  else
+    nr_dlsch_csi_erase_set(NULL, 0); /* the variant's list is the whole rate-matching view: no erasure left over from the previous grant */
   t_rm_ctx = &rm;
   const nr_pdsch_passive_decode_status_t st = passive_decode_retry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
   t_rm_ctx = rm_prev;
