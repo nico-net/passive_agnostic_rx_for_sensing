@@ -95,6 +95,7 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the UL decoder
 #include "nr_csirs_blind_search.h" // nr_csirs_blind_re_energy / nr_csirs_blind_zp_grant_score
 #include "nr_csirs_blind_rt.h" // nr_csirs_blind_rt_zp_grant_evidence
+#include "nr_pdsch_passive_slotphase.h" // nr_slotphase_strong (rm_arb_step)
 #include "PHY/NR_REFSIG/nr_refsig.h" // nr_gold_pdsch, nr_pdsch_dmrs_rx (ZP grant evidence: own-DM-RS presence)
 #include "PHY/MODULATION/nr_sfo_state.h" // SFO eps of the GPU pass vs the old path
 #include "PHY/NR_TRANSPORT/nr_sch_dmrs.h" // get_delta
@@ -4379,6 +4380,14 @@ gpu_llr_ready:;
   return out->status;
 }
 
+/* fix1031/rm: per-decode rate-matching arbitration context (see nr_csirs_rm_arb.h); t_rm_ctx is the innermost passive_decode_entry's. */
+typedef struct {
+  nr_rm_cands_t cs;
+  int first; ///< candidate index of the first decode
+  bool arb;  ///< this decode may vote and try alternates (dedicated C-RNTI grant, not a probe / trial / capture)
+} rm_ctx_t;
+static __thread rm_ctx_t *t_rm_ctx;
+
 static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
                                                              const UE_nr_rxtx_proc_t *proc,
                                                              fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -4434,8 +4443,23 @@ static nr_pdsch_passive_decode_status_t passive_decode_entry(PHY_VARS_NR_UE *ue,
     nr_csirs_full_validate(ue, proc, dlsch_config, freq_alloc, grant, rxdataF);
     t_quiet = false;
   }
-  nr_csirs_full_apply(dlsch_config, (uint32_t)(proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx));
-  return passive_decode_retry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  /* fix1031/rm (nr_csirs_rm_arb.h): the grant's rate-matching view is the adopted candidate of its (RNTI, slot class, DCI RM-indicator / ZP-trigger)
+   * key, else the former own-DM-RS-ID rule; a strong-DM-RS failure tries the other candidates in rm_arb_step(). The context lives on this frame
+   * (a nested decode of the GrantWork compute path has its own). */
+  rm_ctx_t rm;
+  rm_ctx_t *const rm_prev = t_rm_ctx;
+  const uint32_t pdsch_slot = (uint32_t)(proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx);
+  nr_csirs_rm_candidates(pdsch_slot, dlsch_config->dlDmrsScramblingId, (uint16_t)dlsch_config->dlDmrsSymbPos, dlsch_config->BWPStart,
+                         dlsch_config->BWPSize, &rm.cs);
+  rm.first = 0;
+  rm.arb = rm.cs.n > 1 && grant->rnti_class == 0 && !t_probe_first_seg && !t_quiet && !t_llr_ovr && !t_gw_capture;
+  if (rm.cs.n > 1 && grant->rnti_class == 0)
+    rm.first = nr_rm_arb_first(grant->rnti, grant->rm_ind, grant->zp_trig, &rm.cs);
+  nr_csirs_rm_apply(dlsch_config, &rm.cs, rm.first);
+  t_rm_ctx = &rm;
+  const nr_pdsch_passive_decode_status_t st = passive_decode_retry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  t_rm_ctx = rm_prev;
+  return st;
 }
 
 static __thread uint8_t t_pdcch_rm_crb[275]; /* WIDE-S0: per-CRB exclusion handed to nr_ssb_rm_extra by pdcch_rm_arm() */
@@ -4626,6 +4650,58 @@ void nr_pdsch_retry_yield_stats(uint64_t *chains, uint64_t *yields, uint64_t *ga
   *gated = atomic_load_explicit(&g_ry_gated, memory_order_relaxed);
 }
 
+/* rm_arb_step: called after the first body of a grant. Records its CRC as a vote of the candidate it used; on a failure with a strong DM-RS
+ * (the SNR its MCS needs + the SLOTPHASE margin: the failure is structural, not noise) decodes the other candidates in vote order until one passes the
+ * TB CRC. A pass becomes the grant's result (config_recovered) and a vote against the candidate that failed; none: the plain view stands. */
+static nr_pdsch_passive_decode_status_t rm_arb_step(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                                    const freq_alloc_bitmap_t *freq_alloc, const nr_pdsch_passive_grant_t *grant,
+                                                    c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], nr_pdsch_passive_decode_result_t *out,
+                                                    nr_pdsch_passive_decode_status_t st, bool first_ran)
+{
+  rm_ctx_t *const r = t_rm_ctx;
+  const int nl = (int)out->cw.Nl > 2 ? 2 : (int)out->cw.Nl;
+  const bool strong = nr_slotphase_strong(out->dmrs_snr.comb_db, (int)grant->mcs, (int)grant->mcs_table, nl, (int)grant->rv, grant->scr_dedicated, false);
+  if (first_ran)
+    nr_rm_arb_note(grant->rnti, grant->rm_ind, grant->zp_trig, &r->cs, r->first, -1, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, strong);
+  if (st != NR_PDSCH_PASSIVE_DECODE_CRC_FAIL || !strong || !RETRY_ARMS_OK())
+    return st;
+  const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
+  const nr_pdsch_passive_decode_result_t out_plain = *out;
+  const bool saved_quiet = t_quiet;
+  const double saved_fo_override = nr_slot_fep_fo_override_hz;
+  nr_slot_fep_fo_override_hz = t_last_fep_fo;
+  t_quiet = true; /* trials do not teach the unrelated sweeps */
+  unsigned tried = 1u << r->first;
+  bool ok = false;
+  for (int k; !ok && (k = nr_rm_arb_next(grant->rnti, grant->rm_ind, grant->zp_trig, &r->cs, tried)) >= 0;) {
+    tried |= 1u << k;
+    if (t_recov_mode != 2 && dec_now_ns() - t_dec_t0_ns > RETRY_BUDGET_NS)
+      break;
+    fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = original;
+    nr_csirs_rm_apply(&cfg, &r->cs, k);
+    const nr_pdsch_passive_decode_status_t s2 = passive_decode_body(ue, proc, &cfg, freq_alloc, grant, rxdataF, out);
+    if (t_gw_owner) {
+      t_gw_owner = false;
+      nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)s2);
+    }
+    ok = s2 == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+    if (ok) {
+      *dlsch_config = cfg;
+      out->config_recovered = true;
+      nr_rm_arb_note(grant->rnti, grant->rm_ind, grant->zp_trig, &r->cs, k, first_ran ? r->first : -1, true, strong);
+      st = s2;
+    }
+  }
+  nr_slot_fep_fo_override_hz = saved_fo_override;
+  t_quiet = saved_quiet;
+  if (!ok) { /* the plain view stands, including the demodulator's erase list */
+    *dlsch_config = original;
+    *out = out_plain;
+    nr_csirs_rm_apply(dlsch_config, &r->cs, r->first);
+  }
+  return st;
+}
+
 static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE *ue,
                                                              const UE_nr_rxtx_proc_t *proc,
                                                              fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -4650,6 +4726,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry_impl(PHY_VARS_NR_UE
   }
   }
   if (out->skip) return st; /* no-chance gate: verdict is final, nothing to retry */
+  if (t_rm_ctx && t_rm_ctx->arb && t_recov_mode != 1)
+    st = rm_arb_step(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out, st, t_recov_mode != 2);
   if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && grant->dci11 && grant->rnti_class == 0) nr_retry_pred_miss(grant->rnti);
   const nr_pdsch_passive_decode_result_t out_plain = *out; 
   const nr_pdsch_passive_decode_status_t st_plain = st;

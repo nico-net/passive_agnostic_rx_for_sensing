@@ -226,6 +226,8 @@ typedef struct {
   nr_dci_bits_t    payload;
   uint16_t         dci_len;   ///< TIMRM diagnostic: payload width of `payload` (filled by the format-1_1 extraction; 0 elsewhere)
   uint8_t srs_request; ///< raw DCI 1_1 SRS request; zero for fallback formats
+  uint8_t rm_ind;      ///< raw DCI 1_1 rate-matching indicator (0 when the layout has no such field); keys the CRC-learnt rate-matching set
+  uint8_t zp_trig;     ///< raw DCI 1_1 ZP-CSI-RS trigger (0 when the layout has no such field); same use
 } nr_pdcch_blind_result_t;
 
 /// Deployment facts a blind receiver cannot read off the air but CAN read off the gNB's own

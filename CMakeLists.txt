@@ -3382,6 +3382,12 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdsch_solver PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdsch_solver)
   add_test(NAME test_nr_pdsch_solver COMMAND ./test_nr_pdsch_solver)
+  add_executable(test_nr_csirs_rm_arb ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_rm_arb_test.cc
+                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arb.c)
+  target_include_directories(test_nr_csirs_rm_arb PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_csirs_rm_arb PRIVATE UTIL GTest::gtest GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_csirs_rm_arb)
+  add_test(NAME test_nr_csirs_rm_arb COMMAND ./test_nr_csirs_rm_arb)
   add_executable(test_nr_pdsch_slotphase ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_slotphase_test.cc
                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_slotphase.c
                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_slotphase_resid.c)

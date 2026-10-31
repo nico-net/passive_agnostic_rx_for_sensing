@@ -14,6 +14,8 @@
 
 #include "nr_csirs_blind_rt.h"
 #include "nr_re_pattern.h"
+#include "nr_csirs_rm_arb.h"
+#include "nr_csirs_rm_arb.c" /* compiled into this unit: the fixtures that #include this file need no extra source (tests/nr_csirs_blind_rt_test_bridge.c) */
 #include "nr_pdsch_passive_decode.h" /* CSIFULLAB */
 /* Weak: unit-test targets link this file without the acquisition state. */
 extern void nr_passive_acq_note_carrier_from_rs(const char *evidence) __attribute__((weak));
@@ -1539,26 +1541,6 @@ static int rate_match_all_n(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_
  * forbids the overlap; nr_dlsch_extract_rbs() asserts on it). The CSI-RS-to-cell association by scramblingID is a
  * measured property of this network, not a TS requirement. RB extent: nr_dlsch_csi_rb_extent() (TS 38.211 7.4.1.5.3). */
 extern void nr_dlsch_csi_erase_set(const fapi_nr_dl_config_csirs_pdu_rel15_t *list, int n) __attribute__((weak));
-static bool csirs_full_same_geometry(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, const fapi_nr_dl_config_csirs_pdu_rel15_t *b)
-{
-  return a->row == b->row && a->freq_domain == b->freq_domain && a->symb_l0 == b->symb_l0 && a->symb_l1 == b->symb_l1
-         && a->cdm_type == b->cdm_type && a->freq_density == b->freq_density && a->start_rb == b->start_rb
-         && a->nr_of_rbs == b->nr_of_rbs;
-}
-static bool csirs_full_dmrs_clash(const fapi_nr_dl_config_csirs_pdu_rel15_t *c, uint16_t dmrs_mask)
-{
-  static const uint8_t num_l0[18] = {1, 1, 1, 1, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 4, 2, 2, 4};
-  if (c->row < 1 || c->row > 18)
-    return true;
-  for (int k = 0; k < num_l0[c->row - 1]; k++)
-    if ((dmrs_mask >> (c->symb_l0 + k)) & 1)
-      return true;
-  if (c->row == 13 || c->row == 14 || c->row == 16 || c->row == 17)
-    for (int k = 0; k < 2; k++)
-      if ((dmrs_mask >> (c->symb_l1 + k)) & 1)
-        return true;
-  return false;
-}
 /* Every confirmed resource (any slot), NZP then ZP: the population's TRS RB blocks. */
 static int full_all_confirmed(fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
 {
@@ -1590,13 +1572,6 @@ static int full_all_confirmed(fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
   pthread_mutex_unlock(&g_csirs_state_lock);
   return n;
 }
-static bool full_rb_overlap_half(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, const fapi_nr_dl_config_csirs_pdu_rel15_t *b)
-{
-  const int lo = a->start_rb > b->start_rb ? a->start_rb : b->start_rb;
-  const int hi = a->start_rb + a->nr_of_rbs < b->start_rb + b->nr_of_rbs ? a->start_rb + a->nr_of_rbs : b->start_rb + b->nr_of_rbs;
-  const int m = a->nr_of_rbs < b->nr_of_rbs ? a->nr_of_rbs : b->nr_of_rbs;
-  return hi - lo > 0 && 2 * (hi - lo) >= m;
-}
 /* TS 38.214 5.1.6.1.1: a TRS (NZP-CSI-RS-ResourceSet with trs-Info) is
  * row 1, density 3, and its resources come in pairs in one slot at symbols l and l+4 (l in {4,5,6}) with one
  * frequency allocation, period and slot. Discovery confirms the members independently, so in a short run one
@@ -1621,8 +1596,8 @@ static int full_add_trs_pairs(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, i
       continue;
     bool c_in = false, p_in = false;
     for (int i = 0; i < n_all; i++) {
-      c_in |= csirs_full_same_geometry(&all[i], &conf[j]) && all[i].scramb_id == conf[j].scramb_id;
-      p_in |= csirs_full_same_geometry(&all[i], &p) && all[i].scramb_id == p.scramb_id;
+      c_in |= nr_rm_same_geometry(&all[i], &conf[j]) && all[i].scramb_id == conf[j].scramb_id;
+      p_in |= nr_rm_same_geometry(&all[i], &p) && all[i].scramb_id == p.scramb_id;
     }
     if (c_in && !p_in && n_all < max) all[n_all++] = p;
     if (p_in && !c_in && n_all < max) all[n_all++] = conf[j];
@@ -1631,7 +1606,6 @@ static int full_add_trs_pairs(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, i
 }
 /* A block member c is inferred into this slot only from a resource a that occurs in it AND was measured co-scheduled with c
  * in >= 2 slots of the 640-slot window (a network that never co-schedules its TRS resources gets no inference). */
-static bool full_rb_overlap_half(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, const fapi_nr_dl_config_csirs_pdu_rel15_t *b);
 static int full_add_block(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, int n_conf, fapi_nr_dl_config_csirs_pdu_rel15_t *all,
                           int n_all, int max)
 {
@@ -1642,9 +1616,9 @@ static int full_add_block(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, int n
       continue;
     bool present = false, block = false;
     for (int i = 0; i < n_all && !present; i++)
-      present = csirs_full_same_geometry(&all[i], c) && all[i].scramb_id == c->scramb_id;
+      present = nr_rm_same_geometry(&all[i], c) && all[i].scramb_id == c->scramb_id;
     for (int i = 0; i < n0 && !block; i++) {
-      block = all[i].row == 1 && all[i].freq_density == 3 && all[i].csi_type != 2 && full_rb_overlap_half(&all[i], c);
+      block = all[i].row == 1 && all[i].freq_density == 3 && all[i].csi_type != 2 && nr_rm_rb_overlap_half(&all[i], c);
       if (block && discovery_cooccur(&all[i], c) < 2)
         block = false;
     }
@@ -1659,33 +1633,45 @@ static int full_add_block(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, int n
  * own only, not with nothing, not with every resource; population-249 grants fail when the 415/748 block (not
  * theirs) is removed. I.e. each cell rate-matches its own TRS and the co-channel neighbour's TRS in its RB block
  * (ZP protection), and transmits data on the other blocks' TRS REs. Everything else in the slot -> erase list. */
+static int full_gather(uint32_t slot, fapi_nr_dl_config_csirs_pdu_rel15_t *conf, int *n_conf, fapi_nr_dl_config_csirs_pdu_rel15_t *all)
+{
+  *n_conf = full_all_confirmed(conf, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  int n_all = rate_match_all_n(slot, all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  n_all = full_add_trs_pairs(conf, *n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  return full_add_block(conf, *n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+}
 static void full_select(uint32_t slot, uint16_t pop, uint16_t dmrs_mask, fapi_nr_dl_config_csirs_pdu_rel15_t *sel, int *nsel,
                         int max_sel, fapi_nr_dl_config_csirs_pdu_rel15_t *er, int *ner, int max_er)
 {
   fapi_nr_dl_config_csirs_pdu_rel15_t conf[2 * NR_CSIRS_BLIND_DISC_MAX_CONF], all[2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
-  const int n_conf = full_all_confirmed(conf, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
-  int n_all = rate_match_all_n(slot, all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
-  n_all = full_add_trs_pairs(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
-  n_all = full_add_block(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
-  *nsel = 0;
-  if (ner) *ner = 0;
-  for (int i = 0; i < n_all; i++) {
-    if (csirs_full_dmrs_clash(&all[i], dmrs_mask))
-      continue;
-    bool in = all[i].scramb_id == pop;
-    for (int j = 0; j < n_conf && !in; j++)
-      in = conf[j].scramb_id == pop && conf[j].csi_type != 2 && full_rb_overlap_half(&conf[j], &all[i]);
-    fapi_nr_dl_config_csirs_pdu_rel15_t *list = in ? sel : er;
-    int *nl = in ? nsel : ner;
-    const int mx = in ? max_sel : max_er;
-    if (!list || !nl || (!in && all[i].csi_type == 2))
-      continue;
-    bool dup = false;
-    for (int j = 0; j < *nl && !dup; j++)
-      dup = csirs_full_same_geometry(&list[j], &all[i]);
-    if (!dup && *nl < mx)
-      list[(*nl)++] = all[i];
-  }
+  int n_conf;
+  const int n_all = full_gather(slot, conf, &n_conf, all);
+  nr_rm_select_own(conf, n_conf, all, n_all, pop, dmrs_mask, sel, nsel, max_sel, er, ner, max_er);
+}
+/* The candidate family of one grant (nr_csirs_rm_arb.h): the former own-ID rule as candidate 0, the rest from the same slot lists plus the discovery
+ * footprints of the slot. Thread-safe like full_select. */
+int nr_csirs_rm_candidates(uint32_t slot, uint16_t pop, uint16_t dmrs_mask, uint16_t bwp_start, uint16_t bwp_size, nr_rm_cands_t *cs)
+{
+  fapi_nr_dl_config_csirs_pdu_rel15_t conf[2 * NR_CSIRS_BLIND_DISC_MAX_CONF], all[2 * NR_CSIRS_BLIND_DISC_MAX_CONF], foot[NR_RM_MAXL];
+  uint32_t fid[NR_RM_MAXL];
+  int n_conf;
+  const int n_all = full_gather(slot, conf, &n_conf, all);
+  const int n_foot = nr_csirs_blind_rt_footprints_at(slot, foot, fid, NR_RM_MAXL);
+  nr_rm_build(conf, n_conf, all, n_all, foot, n_foot, pop, dmrs_mask, bwp_start, bwp_size, cs);
+  return cs->n;
+}
+/* Makes candidate @p k the grant's rate-matching view: its rate-match list into cfg, its erase list into the demodulator's thread state. */
+void nr_csirs_rm_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, const nr_rm_cands_t *cs, int k)
+{
+  if (!cfg || !cs || k < 0 || k >= cs->n)
+    return;
+  const nr_rm_cand_t *c = &cs->c[k];
+  const int n = c->n_sel < NFAPI_MAX_NUM_CSI_RATEMATCH ? c->n_sel : NFAPI_MAX_NUM_CSI_RATEMATCH;
+  for (int i = 0; i < n; i++)
+    cfg->csiRsForRateMatching[i] = c->sel[i];
+  cfg->numCsiRsForRateMatching = (uint8_t)n;
+  if (nr_dlsch_csi_erase_set) /* weak: fixtures link this file without the demodulator */
+    nr_dlsch_csi_erase_set(c->er, c->n_er);
 }
 int nr_csirs_full_rate_match(uint32_t pdsch_absolute_slot, uint16_t population_id, uint16_t dmrs_mask,
                              fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)

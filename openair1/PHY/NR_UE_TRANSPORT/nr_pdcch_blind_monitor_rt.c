@@ -9695,7 +9695,8 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
                                              .dci_w = {tf_pos1 ? rw->payload.w[0] : o->payload.w[0], tf_pos1 ? rw->payload.w[1] : o->payload.w[1]},
                                              .tda_pos1 = tf_pos1, .tda_n = tf_n, .tda_addpos = var[v].add_pos, .tda_last = tf_last,
                                              .tda_S = {tf_S[0], tf_S[1]}, .tda_L = {tf_L[0], tf_L[1]}, .tda_k0 = tf_k0,
-                                             .pm_pos1 = pm_pos1, .pm_nbits = pm_nbits, .pm_hyp = pm_h};
+                                             .pm_pos1 = pm_pos1, .pm_nbits = pm_nbits, .pm_hyp = pm_h,
+                                             .rm_ind = o->rm_ind, .zp_trig = o->zp_trig};
         nr_pdsch_passive_job_t job;
         memset(&job, 0, sizeof(job));
         job.dlsch_pdu = dl;

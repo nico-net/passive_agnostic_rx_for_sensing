@@ -28,6 +28,7 @@
 
 #include "PHY/defs_nr_UE.h"
 #include "nr_passive_metrics.h"
+#include "nr_csirs_rm_arb.h"
 
 /** Score one candidate against this slot. Safe to call every slot; no-ops unless enabled.
  * `rxdataF` is the frequency-domain slot buffer the monitor already holds. */
@@ -84,6 +85,11 @@ int nr_csirs_full_rate_match(uint32_t pdsch_absolute_slot, uint16_t population_i
 /** CSI-FULL: replace @p cfg's CSI-RS rate-matching list with nr_csirs_full_rate_match() for its own DM-RS
  *  scrambling ID. */
 void nr_csirs_full_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, uint32_t pdsch_absolute_slot);
+/** fix1031/rm: the candidate rate-matching family of a grant (nr_csirs_rm_arb.h) for PDSCH slot @p slot: candidate 0 is exactly what
+ *  nr_csirs_full_apply() sets. Returns cs->n. */
+int nr_csirs_rm_candidates(uint32_t slot, uint16_t pop, uint16_t dmrs_mask, uint16_t bwp_start, uint16_t bwp_size, nr_rm_cands_t *cs);
+/** Makes candidate @p k of @p cs the rate-matching view of @p cfg (rate-match list) and of the demodulator (erase list, thread state). */
+void nr_csirs_rm_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, const nr_rm_cands_t *cs, int k);
 int nr_csirs_full_enabled(void);
 #include "nr_pdsch_passive_decode.h"
 /** CSI-FULL A/B diagnostic: removed, no-op kept for the caller. */

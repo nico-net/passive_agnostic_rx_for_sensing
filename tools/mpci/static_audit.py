@@ -53,6 +53,7 @@ GLOBS = [
     "openair1/PHY/NR_UE_TRANSPORT/nr_passive_*.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc*.c",
     "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c",  # DBG2: CSI-RS search / confirm queue (the first glob missed it)
+    "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arb.c",    # fix1031/rm: included by nr_csirs_blind_rt.c
     "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_confirm_internal.h",  # DBG2: included by nr_csirs_blind_rt.c
     "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c",   # DBG2: CSI-RS monitor bank
     "openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c",   # CELLFEAT: passive PRACH (per cell)
