@@ -728,6 +728,8 @@ static const MlCfg MLC[] = {
     {"n3q4lo", 3, 48, 4, 378}, {"n4q4lo", 4, 48, 4, 378}, {"n3q4hi", 3, 48, 4, 616}, {"n4q4hi", 4, 48, 4, 616},
     {"n3q2", 3, 48, 2, 490}, {"n4q2", 4, 48, 2, 490},
     {"n3q6", 3, 48, 6, 490}, {"n4q6", 4, 48, 6, 490},
+    /* BIGTB (test-only): 2 layers 64QAM at table-2 MCS 13 / 16 rates, small and big TB, and 2-layer 256QAM */
+    {"n2q6", 2, 48, 6, 567}, {"n2q6b", 2, 120, 6, 567}, {"n2q6h", 2, 48, 6, 719}, {"n2q6hb", 2, 120, 6, 719}, {"n2q6l", 2, 200, 6, 567}, {"n2q8", 2, 48, 8, 822}, {"n2q8b", 2, 100, 8, 822},
 };
 struct MlScn { const char *nm; int chan; double rx, tx; };
 static const MlScn MLS[] = {
@@ -922,6 +924,12 @@ int main(int argc, char **argv)
       mk("m4", 4, 250, 1, false), mk("m9", 9, 100, 1, false), mk("m16", 16, 100, 1, false), mk("m22", 22, 100, 1, false), mk("m27", 27, 100, 1, false),
       mk("L22", 22, 250, 1, false),
       mk("d9", 9, 50, 2, false), mk("d22", 22, 50, 2, false), mk("d16", 16, 50, 2, false),
+      /* BIGTB (test-only): the OTA failure region -- 64QAM / 256QAM at the rates of table-2 MCS 12..19 / 20..24, small to large TB (C 3 .. 30), 1 and 2 layers.
+       * {name, mcs (unused), qm, nrb, nl, R*1024, single}; qm is explicit here because mk() derives it from the 64QAM table. */
+      Cfg{"q6s", 0, 6, 20, 1, 567, false}, Cfg{"q6m", 0, 6, 100, 1, 567, false}, Cfg{"q6l", 0, 6, 273, 1, 567, false},
+      Cfg{"q6s2", 0, 6, 20, 2, 567, false}, Cfg{"q6m2", 0, 6, 100, 2, 567, false}, Cfg{"q6l2", 0, 6, 273, 2, 567, false},
+      Cfg{"q6l2h", 0, 6, 273, 2, 719, false}, Cfg{"q6m2h", 0, 6, 100, 2, 719, false},
+      Cfg{"q8m", 0, 8, 100, 1, 822, false}, Cfg{"q8l", 0, 8, 273, 1, 822, false}, Cfg{"q8m2", 0, 8, 100, 2, 822, false}, Cfg{"q8l2", 0, 8, 150, 2, 822, false},
   };
   std::string sel = argc > 1 ? argv[1] : "all";
   const double tscale = argc > 2 ? atof(argv[2]) : 1.0;

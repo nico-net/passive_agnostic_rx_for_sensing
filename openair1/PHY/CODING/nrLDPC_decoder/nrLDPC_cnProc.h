@@ -937,6 +937,8 @@ static inline void nrLDPC_cnProc_group_2pass_512(simde__m512i *cnProcBuf,
             simde__m512i   out_mag   = simde_mm512_min_epu8(
                                            simde_mm512_mask_blend_epi8(eq_mask, vmin1, vmin2),
                                            maxLLR);
+            /* normalised min-sum, alpha ~ 3/4: m - (m >> 2) (BIGTB: removes the over-estimation of plain min-sum) */
+            out_mag = simde_mm512_sub_epi8(out_mag, simde_mm512_and_si512(simde_mm512_srli_epi16(out_mag, 2), simde_mm512_set1_epi8(0x3f)));
             simde__m512i   other_xor = simde_mm512_xor_si512(vsgn_xor, vk);
             simde__mmask64 neg_mask  = simde_mm512_cmpgt_epi8_mask(zeros, other_xor);
             simde__m512i   neg_out   = simde_mm512_sub_epi8(zeros, out_mag);
@@ -991,6 +993,8 @@ static inline void nrLDPC_cnProc_group_2pass(simde__m256i *cnProcBuf,
             simde__m256i out_mag = simde_mm256_min_epu8(
                                        simde_mm256_blendv_epi8(vmin1, vmin2, mask),
                                        maxLLR);
+            /* normalised min-sum, alpha ~ 3/4: m - (m >> 2) */
+            out_mag = simde_mm256_sub_epi8(out_mag, simde_mm256_and_si256(simde_mm256_srli_epi16(out_mag, 2), simde_mm256_set1_epi8(0x3f)));
             simde__m256i other_xor = simde_mm256_xor_si256(vsgn_xor, vk);
             simde__m256i sign_mask = simde_mm256_cmpgt_epi8(zeros, other_xor);
             cnProcBufRes[k * off + i] = simde_mm256_sub_epi8(
@@ -1046,6 +1050,8 @@ static inline void nrLDPC_cnProc_group_2pass_128(simde__m128i *cnProcBuf,
             simde__m128i out_mag = simde_mm_min_epu8(
                                        simde_mm_blendv_epi8(vmin1, vmin2, mask),
                                        maxLLR);
+            /* normalised min-sum, alpha ~ 3/4: m - (m >> 2) */
+            out_mag = simde_mm_sub_epi8(out_mag, simde_mm_and_si128(simde_mm_srli_epi16(out_mag, 2), simde_mm_set1_epi8(0x3f)));
             simde__m128i other_xor = simde_mm_xor_si128(vsgn_xor, vk);
             simde__m128i sign_mask = simde_mm_cmpgt_epi8(zeros, other_xor);
             cnProcBufRes[k * off + i] = simde_mm_sub_epi8(

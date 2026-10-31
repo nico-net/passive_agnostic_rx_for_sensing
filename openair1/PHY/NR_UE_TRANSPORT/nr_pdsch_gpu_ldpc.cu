@@ -137,7 +137,8 @@ __device__ __forceinline__ unsigned cn_item(const Graph &G, int Z, int z, int e0
     for (int k = 0; k < D; k++)
       if (k < deg) {
         const unsigned a = v[k] < 0 ? (unsigned)(-(int)v[k]) : (unsigned)v[k];
-        const int mag = (int)min(a == m1 ? m2 : m1, 127u);
+        const unsigned mm = min(a == m1 ? m2 : m1, 127u);
+        const int mag = (int)(mm - (mm >> 2)); /* normalised min-sum, identical to nrLDPC_cnProc.h */
         const bool neg = ((sx ^ (uint8_t)v[k]) & 0x80) != 0;
         c2v[(e0 + k) * Z + z] = (int8_t)(neg ? -mag : mag);
       }
@@ -329,7 +330,8 @@ __device__ __forceinline__ uint32_t cn_item4(const Graph &G, int Z, int z, int e
     if (k < deg) {
       const uint32_t a = abs4(v[k]);
       const uint32_t eq = __vcmpeq4(a, m1);
-      const uint32_t mag = __vminu4((m2 & eq) | (m1 & ~eq), 0x7f7f7f7fu);
+      uint32_t mag = __vminu4((m2 & eq) | (m1 & ~eq), 0x7f7f7f7fu);
+      mag -= (mag >> 2) & 0x3f3f3f3fu; /* normalised min-sum m - (m >> 2), identical to nrLDPC_cnProc.h */
       const uint32_t s = sx ^ v[k];
       const uint32_t neg = __vcmpne4(s & 0x80808080u, 0u); /* 0xff where the other inputs' sign is negative */
       *(uint32_t *)(c2v + (e0 + k) * Z + z) = (__vneg4(mag) & neg) | (mag & ~neg);
