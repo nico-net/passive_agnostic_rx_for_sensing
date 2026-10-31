@@ -1,4 +1,5 @@
 #include "nr_sense_records.h"
+#include "nr_sense_noise_est.h"
 #include <gtest/gtest.h>
 #include <cstdlib>
 #include <cstring>
@@ -6,6 +7,7 @@
 #include <atomic>
 #include <fstream>
 #include <string>
+#include <vector>
 #include <unistd.h>
 #include "PHY/defs_nr_common.h"
 #include "nr_passive_ue_ctx.h"
@@ -303,4 +305,88 @@ TEST(SenseRecords, PrachSrsEpochStampedAtCapture)
     EXPECT_NE(line.find("\"t_mono_ns\":123"),std::string::npos);
   }
   unlink(path);
+}
+
+TEST(SenseRecords, AbsSlotHyperFrame)
+{
+  /* mu=1: 20 slots per frame; frame 0 of hyper-frame 1 follows frame 1023 of hyper-frame 0 */
+  EXPECT_EQ(nr_sense_abs_slot_hfn(0,1023,19,20), 1023u*20+19);
+  EXPECT_EQ(nr_sense_abs_slot_hfn(1,0,0,20), 1024u*20);
+  EXPECT_EQ(nr_sense_abs_slot_hfn(1,0,0,20), nr_sense_abs_slot_hfn(0,1023,19,20)+1);
+  /* a deferred caller with the producer counter a few slots ahead: lands on the slot's own un-wrapped value, across the wrap too */
+  const int64_t prod=1024*20+3;
+  EXPECT_EQ(nr_sense_abs_slot_align(prod,1023,18,20), 1023u*20+18);
+  EXPECT_EQ(nr_sense_abs_slot_align(prod,0,2,20), 1024u*20+2);
+  EXPECT_EQ(nr_sense_abs_slot_align(5*1024*20+7,17,4,20), 4u*1024*20+17*20+4);
+  EXPECT_EQ(nr_sense_abs_slot_align(-1,17,4,20), 17u*20+4);
+}
+
+TEST(SenseRecords, RxStateRingAndShifts)
+{
+  nr_sense_rx_reset();
+  nr_sense_rx_note_slot(100,1000000,12.5);
+  nr_sense_rx_note_shift(0);                 /* ignored */
+  nr_sense_rx_note_shift(-3);
+  nr_sense_rx_note_slot(101,1015000,12.5);
+  nr_sense_rx_note_shift(5);
+  nr_sense_rx_note_slot(102,1030000,-4.0);
+  nr_sense_rx_state_t s;
+  ASSERT_TRUE(nr_sense_rx_state_lookup(100,&s));
+  EXPECT_EQ(s.rx_ts,1000000); EXPECT_EQ(s.shift_count,0u); EXPECT_EQ(s.shift_cum,0); EXPECT_DOUBLE_EQ(s.cfo_hz,12.5);
+  ASSERT_TRUE(nr_sense_rx_state_lookup(101,&s));
+  EXPECT_EQ(s.shift_count,1u); EXPECT_EQ(s.shift_cum,-3);
+  ASSERT_TRUE(nr_sense_rx_state_lookup(102,&s));
+  EXPECT_EQ(s.shift_count,2u); EXPECT_EQ(s.shift_cum,2); EXPECT_DOUBLE_EQ(s.cfo_hz,-4.0);
+  /* an unknown slot falls back to the latest state, without a timestamp */
+  EXPECT_FALSE(nr_sense_rx_state_lookup(5000,&s));
+  EXPECT_EQ(s.rx_ts,-1); EXPECT_EQ(s.shift_count,2u); EXPECT_DOUBLE_EQ(s.cfo_hz,-4.0);
+  /* a slot one ring-turn later overwrites its entry */
+  nr_sense_rx_note_slot(100+1024,2000000,0);
+  EXPECT_FALSE(nr_sense_rx_state_lookup(100,&s));
+  nr_sense_rx_reset();
+}
+
+TEST(SenseRecords, RsCarriesReceiverStateAndDmrsFields)
+{
+  nr_sense_rs_meta_t m{};
+  m.abs_slot=1024ull*20+3; m.rx_ts=123456789012ll; m.ports=2; m.port_mask=0x3; m.dmrs_type=2; m.dmrs_n_scid=1;
+  m.rx_state_valid=true; m.rx_cfo_hz=-37.25; m.rx_shift_cum_samples=-12; m.rx_shift_count=4; m.rx_gain_db=38;
+  char line[2048];
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DMRS,&m,1,line,sizeof line),0);
+  EXPECT_NE(strstr(line,"\"abs_slot\":20483"),nullptr);
+  EXPECT_NE(strstr(line,"\"rx_ts\":123456789012"),nullptr);
+  EXPECT_NE(strstr(line,"\"rx_cfo_applied_hz\":-37.25"),nullptr);
+  EXPECT_NE(strstr(line,"\"rx_shift_cum_samples\":-12,\"rx_shift_count\":4"),nullptr);
+  EXPECT_NE(strstr(line,"\"rx_gain_db\":38"),nullptr);
+  EXPECT_NE(strstr(line,"\"dir\":\"DL\""),nullptr);
+  EXPECT_NE(strstr(line,"\"dmrs_type\":2"),nullptr);   /* DL DM-RS records carry them too */
+  EXPECT_NE(strstr(line,"\"dmrs_n_scid\":1"),nullptr);
+  EXPECT_NE(strstr(line,"\"ports\":2"),nullptr);
+  nr_sense_rs_meta_t u{}; u.ports=-1; u.dmrs_type=-1;
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_SSB,&u,0,line,sizeof line),0);
+  EXPECT_NE(strstr(line,"\"rx_cfo_applied_hz\":null"),nullptr);
+  EXPECT_NE(strstr(line,"\"rx_shift_cum_samples\":null,\"rx_shift_count\":null"),nullptr);
+  EXPECT_NE(strstr(line,"\"dmrs_type\":null"),nullptr);
+}
+
+TEST(SenseRecords, NoiseEstimateFromSecondDifference)
+{
+  /* smooth channel (constant + linear phase ramp) plus complex noise of known variance */
+  const uint32_t n=4000, nant=2;
+  std::vector<float> h(2*nant*n);
+  std::vector<uint32_t> k(n), l(n);
+  uint32_t seed=1;
+  auto gauss=[&]() { double s=0; for (int i=0;i<12;i++) { seed=seed*1664525u+1013904223u; s+=(seed>>8)/16777216.0; } return s-6.0; };
+  const double sigma2=0.04;
+  for (uint32_t i=0;i<n;i++) { k[i]=i%600; l[i]=i/600; }
+  for (uint32_t a=0;a<nant;a++) for (uint32_t i=0;i<n;i++) {
+    const double ph=0.02*k[i];
+    h[2*(a*n+i)]  =(float)(2.0*cos(ph)+sqrt(sigma2/2)*gauss());
+    h[2*(a*n+i)+1]=(float)(2.0*sin(ph)+sqrt(sigma2/2)*gauss());
+  }
+  const float nv=nr_sense_h_noise_var(h.data(),k.data(),l.data(),n,n,nant);
+  EXPECT_NEAR(nv,sigma2,0.15*sigma2);
+  /* no three adjacent subcarriers -> unknown, not a placeholder */
+  for (uint32_t i=0;i<n;i++) k[i]=3*i;
+  EXPECT_TRUE(std::isnan(nr_sense_h_noise_var(h.data(),k.data(),l.data(),n,n,nant)));
 }

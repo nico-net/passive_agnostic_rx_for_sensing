@@ -380,8 +380,9 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                .slots_per_frame = fp->slots_per_frame};
   const nr_sense_rs_meta_t rs_meta = {.rnti=rnti,
     .start_rb=dlsch_config->BWPStart+freq_alloc->first_rb, .nb_rb=freq_alloc->num_rbs,
-    .ports=-1, .ssb_index=-1, .k_ssb=-1, .ta_est_samples=-1,
-    .transform_precoding=-1, .dmrs_type=-1, .dmrs_add_pos=-1, .dmrs_n_scid=-1};
+    .ports=__builtin_popcount((unsigned)dlsch_config->dmrs_ports), .port_mask=(int)dlsch_config->dmrs_ports, .ssb_index=-1, .k_ssb=-1,
+    .ta_est_samples=-1, .transform_precoding=-1,
+    .dmrs_type=dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2 ? 2 : 1, .dmrs_add_pos=-1, .dmrs_n_scid=dlsch_config->nscid};
   /* Slow-time index for the CPI grid. `proc->frame_rx` WRAPS at 1024, so the obvious
    * frame*slots_per_frame + slot wraps every 20480 slots. In-line that was benign: submissions
    * arrived in strict slot order and a wrap was just a discontinuity between CPIs. Once the decode

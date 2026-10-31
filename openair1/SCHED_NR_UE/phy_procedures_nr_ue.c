@@ -1143,7 +1143,8 @@ int nr_process_pbch_symbol(
     // ever reached cpi_slots rows to close. Found live 2026-09-04 (Task 4: zero "SENSING: CPI #"
     // lines over a 150 s ssb-only capture, root-caused by inspecting the retired engine + the
     // csi_rs tap's slot_idx computation for comparison).
-    const uint32_t ssb_abs_slot = (uint32_t)(proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx);
+    /* hyper-frame extended (the producer's un-wrapped slot clock shared by every source): frame_rx alone wraps every 10.24 s */
+    const uint32_t ssb_abs_slot = (uint32_t)nr_sense_abs_slot_hfn(proc->hfn_rx, proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame);
     const nr_sense_rs_meta_t rs_meta = {.start_rb=k_ssb >= 0 ? (ssb_start_subcarrier-k_ssb)/12 : -1,
                                       .nb_rb=NR_PBCH_NUM_RB,
                                       .ports=-1, .ssb_index=ssbIndex, .k_ssb=k_ssb,

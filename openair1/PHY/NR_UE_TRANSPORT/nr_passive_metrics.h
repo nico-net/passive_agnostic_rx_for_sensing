@@ -61,6 +61,10 @@ typedef struct {
   uint64_t srs_us, srs_jobs_dropped;
   uint64_t srs_pregate_skip, srs_backoff_skip, srs_budget_skip, srs_idle_resets;
   uint64_t obs_pushed, obs_written, obs_dropped; // filled by Task A3, 0 until then
+  /* per source: CFR frames exported / dropped on a full ring (the all-source totals are sense_cfr_drop and the sum of the exported); sense_unexported_*:
+   * CRC-passing transport blocks (pdschq_crc_ok / pusch_crc_ok) minus CFR frames exported by the data-aided source (saturating) -- decoded but not exported */
+  uint64_t sense_cfr_exported_src[NR_SENSE_SRC_COUNT], sense_cfr_drop_src[NR_SENSE_SRC_COUNT];
+  uint64_t sense_unexported_pdsch_data, sense_unexported_pusch_data;
   uint64_t sense_cfr_drop, sense_rec_drop, sense_io_errors, sense_cfr_no_sink;
   uint64_t sense_prod_us[NR_SENSE_SRC_COUNT], sense_pack_us[NR_SENSE_SRC_COUNT];
   uint64_t sense_prod_count[NR_SENSE_SRC_COUNT], sense_pack_count[NR_SENSE_SRC_COUNT];

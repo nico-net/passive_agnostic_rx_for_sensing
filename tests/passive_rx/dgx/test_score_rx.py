@@ -196,5 +196,72 @@ class Gate(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0); self.assertIn("GATE_TTC_MAX_TDA0", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
 
+SOLVER_FIXTURE = os.path.join(HERE, "fixtures", "solver_synth_rx.txt")   # [SYNTHETIC]: real log-line formats, invented numbers
+
+class SolverGate(unittest.TestCase):
+    make_arm = ScoreRx.make_arm
+    score = ScoreRx.score
+
+    def fixture_arm(self, extra=""):
+        with open(SOLVER_FIXTURE) as f:
+            return self.make_arm(f.read() + extra)
+
+    def test_solver_keys(self):
+        s = self.score(self.fixture_arm())
+        self.assertEqual(s["n_solved"], 2)
+        self.assertEqual([x["rnti"] for x in s["solved"]], ["0x1234", "0x4321"])
+        self.assertAlmostEqual(s["solve_first_s"], 16.25)
+        self.assertAlmostEqual(s["solve_first_ttc_s"], 2.103, places=3)      # 16.250 - first line mentioning rnti=0x1234 (14.147)
+        self.assertAlmostEqual(s["solved"][1]["ttc_s"], 1.6, places=3)       # 24.100 - 22.500
+        self.assertAlmostEqual(s["solve_last_s"], 24.1)
+        self.assertAlmostEqual(s["postsolve_t_s"], 40.0)                     # first PDSCHQ sample at/after the last SOLVED
+        self.assertEqual(s["postsolve_decoded"], 7000)
+        self.assertAlmostEqual(s["postsolve_crc_pct"], 99.86, places=2)      # (14070-7080)/(14100-7100)
+        self.assertEqual(s["solver_resets"], 0); self.assertEqual(s["solver_resets_after"], 0)
+        self.assertEqual(s["n_converged"], 0)                                # no Technique D line is needed
+
+    def test_default_gate_is_solver_and_passes(self):
+        rc, line = _gate_cli(self.fixture_arm(), dict(GATE_CRC_FLOOR="80"))
+        self.assertEqual(rc, 0, line); self.assertIn("[solver]", line)
+        for k in ("n_solved=2", "solve_ttc=2.10", "postsolve_crc=99.86", "postsolve_decoded=7000", "resets_after=0", "drop_full="):
+            self.assertIn(k, line)
+
+    def test_each_solver_criterion_can_fail(self):
+        base = dict(GATE_CRC_FLOOR="80")
+        for over, key in ((dict(GATE_NSOLVED_MIN="3"), "n_solved"), (dict(GATE_SOLVE_FIRST_MAX="2"), "solve_ttc"),
+                          (dict(GATE_POSTSOLVE_CRC_MIN="99.9"), "postsolve_crc"), (dict(GATE_POSTSOLVE_MIN_DEC="8000"), "postsolve_decoded"),
+                          (dict(GATE_DROP_MAX="0.1"), "drop_full"), (dict(GATE_CRC_FLOOR="99.9"), "crc_floor")):
+            rc, line = _gate_cli(self.fixture_arm(), dict(base, **over))
+            self.assertEqual(rc, 1, (key, line)); self.assertIn(key + "=", line.split("FAIL", 1)[1])
+
+    def test_reset_after_last_solved_fails(self):
+        extra = "61.0 [PHY]    SENSING: PDSCH_SOLVER rnti=0x1234 solution never decoded a full TB in 256 grants: reopening\n"
+        s = self.score(self.fixture_arm(extra))
+        self.assertEqual(s["solver_resets"], 1); self.assertEqual(s["solver_resets_after"], 1)
+        rc, line = _gate_cli(self.fixture_arm(extra), dict(GATE_CRC_FLOOR="80"))
+        self.assertEqual(rc, 1); self.assertIn("resets_after=1>0", line)
+
+    def test_reset_followed_by_resolve_is_not_after_last_solved(self):
+        extra = ("30.0 [PHY]    SENSING: PDSCH_SOLVER rnti=0x1234 reopening pruned layouts after 40 failed CRC probes\n"
+                 "35.0 [PHY]    SENSING: PDSCH_SOLVER rnti=0x1234 SOLVED by 2 CRC16 + 0 CRC24 passes, P(chance)=1.5e-05 over 31+0 probes: layout 2 (3 consistent) add_pos=1 table=0 S[tda 2]=1 scr=1\n")
+        s = self.score(self.fixture_arm(extra))
+        self.assertEqual(s["solver_resets"], 1); self.assertEqual(s["solver_resets_after"], 0)
+        self.assertEqual(s["solved"][0]["n_solves"], 2)
+        self.assertAlmostEqual(s["solve_last_s"], 35.0)   # window moves to the re-solve (the log is not time-ordered here: line order rules)
+
+    def test_no_solved_line_fails(self):
+        rc, line = _gate_cli(self.make_arm("5.0 [PHY]    Initial sync successful, PCI: 0\n20.0 [PHY]    SENSING: PDSCHQ queued=1 decoded=1 crc_ok=1 (100.0%)\n"))
+        self.assertEqual(rc, 1); self.assertIn("[solver]", line); self.assertIn("n_solved=0<1", line)
+
+    def test_old_log_without_solved_lines_still_uses_postconv(self):
+        rc, line = _gate_cli(Gate.good(self), dict(GATE_CRC_FLOOR="80", GATE_POSTCONV_CRC_MIN="98.0", GATE_POSTCONV_MIN_DEC="1"))
+        self.assertEqual(rc, 0, line); self.assertIn("[postconv]", line)
+
+    def test_explicit_modes_are_kept(self):
+        rc, line = _gate_cli(self.fixture_arm(), dict(GATE_MODE="legacy"))
+        self.assertIn("[legacy]", line)
+        rc, line = _gate_cli(self.fixture_arm(), dict(GATE_MODE="postconv", GATE_CRC_FLOOR="80"))
+        self.assertEqual(rc, 1); self.assertIn("n_contexts=0<2", line)
+
 if __name__ == "__main__":
     unittest.main()

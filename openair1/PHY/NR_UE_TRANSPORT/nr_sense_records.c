@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_sense_records.h"
+#include "common/utils/nr_cell.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_ue_ctx.h"
 #include "PHY/defs_nr_common.h"
@@ -7,6 +8,7 @@
 #include <inttypes.h>
 #include <math.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -95,11 +97,16 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
   signed_optional(&j,"ta_est_samples",m->ta_est_samples,ul && (src==NR_SENSE_SRC_SRS || m->ta_est_samples>=0));
   quoted(&j,"k_abs_convention","crb0_point_a");
   integer(&j,"freq_hopping",-1); real(&j,"cfo_est_hz",NAN);
+  /* receiver state at the record's slot (null when the slot was not noted): CFO the receiver applied, window-shift totals, RX gain */
+  real(&j,"rx_cfo_applied_hz",m->rx_state_valid ? m->rx_cfo_hz : NAN);
+  if (m->rx_state_valid) put(&j,",\"rx_shift_cum_samples\":%" PRId64 ",\"rx_shift_count\":%" PRIu32,m->rx_shift_cum_samples,m->rx_shift_count);
+  else put(&j,",\"rx_shift_cum_samples\":null,\"rx_shift_count\":null");
+  real(&j,"rx_gain_db",m->rx_state_valid ? m->rx_gain_db : NAN);
   signed_optional(&j,"ta_applied_samples",m->ta_applied_samples,ul && m->ta_applied_valid);
   integer(&j,"transform_precoding",ul?m->transform_precoding:-1);
-  integer(&j,"dmrs_type",ul?m->dmrs_type:-1);
-  integer(&j,"dmrs_add_pos",ul?m->dmrs_add_pos:-1);
-  integer(&j,"dmrs_n_scid",ul?m->dmrs_n_scid:-1);
+  integer(&j,"dmrs_type",m->dmrs_type);
+  integer(&j,"dmrs_add_pos",m->dmrs_add_pos);
+  integer(&j,"dmrs_n_scid",m->dmrs_n_scid);
   quoted(&j,"ul_timing_ref",ul?"dl_frame":NULL);
   integer(&j,"preamble",src==NR_SENSE_SRC_PRACH?m->prach_preamble:-1);
   real(&j,"energy",src==NR_SENSE_SRC_PRACH?m->prach_energy:NAN);
@@ -128,6 +135,79 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
   quoted(&j,"attribution",src==NR_SENSE_SRC_SRS?m->srs_attribution:NULL);
   put(&j,"}");
   return j.bad ? -1 : (int)j.w;
+}
+
+/* ---- per-cell receiver state (S3/S4): one entry per slot, indexed by slot&(RING-1), written by the receive thread only ---- */
+#define RX_RING 1024
+typedef struct {
+  _Atomic uint64_t slot_plus1;   /* abs_slot+1; 0 = being written / empty (seqlock) */
+  _Atomic int64_t ts, shift_cum;
+  _Atomic uint64_t cfo_bits;
+  _Atomic uint32_t shift_count;
+} rx_slot_t;
+typedef struct {
+  rx_slot_t ring[RX_RING];
+  _Atomic int64_t shift_cum;
+  _Atomic uint32_t shift_count;
+  _Atomic uint64_t gain_bits;
+  _Atomic uint64_t last_cfo_bits;
+} rx_state_t;
+NR_CELL_STATIC(rx_state_t, rx_st)
+#define rx_st NR_CELL_REF(rx_st)
+static uint64_t dbits(double v) { uint64_t b; memcpy(&b,&v,8); return b; }
+static double bitsd(uint64_t b) { double v; memcpy(&v,&b,8); return v; }
+void nr_sense_rx_note_slot(uint64_t abs_slot, int64_t rx_ts, double cfo_hz)
+{
+  rx_slot_t *e=&rx_st.ring[abs_slot&(RX_RING-1)];
+  atomic_store_explicit(&e->slot_plus1,0,memory_order_relaxed);
+  atomic_thread_fence(memory_order_release);
+  atomic_store_explicit(&e->ts,rx_ts,memory_order_relaxed);
+  atomic_store_explicit(&e->cfo_bits,dbits(cfo_hz),memory_order_relaxed);
+  atomic_store_explicit(&e->shift_cum,atomic_load_explicit(&rx_st.shift_cum,memory_order_relaxed),memory_order_relaxed);
+  atomic_store_explicit(&e->shift_count,atomic_load_explicit(&rx_st.shift_count,memory_order_relaxed),memory_order_relaxed);
+  atomic_store_explicit(&rx_st.last_cfo_bits,dbits(cfo_hz),memory_order_relaxed);
+  atomic_store_explicit(&e->slot_plus1,abs_slot+1,memory_order_release);
+}
+void nr_sense_rx_note_shift(int samples)
+{
+  if (!samples) return;
+  atomic_fetch_add_explicit(&rx_st.shift_cum,samples,memory_order_relaxed);
+  atomic_fetch_add_explicit(&rx_st.shift_count,1,memory_order_relaxed);
+}
+void nr_sense_rx_note_gain(double db) { atomic_store_explicit(&rx_st.gain_bits,dbits(db),memory_order_relaxed); }
+double nr_sense_rx_gain(void) { return bitsd(atomic_load_explicit(&rx_st.gain_bits,memory_order_relaxed)); }
+void nr_sense_rx_reset(void)
+{
+  atomic_store_explicit(&rx_st.shift_cum,0,memory_order_relaxed);
+  atomic_store_explicit(&rx_st.shift_count,0,memory_order_relaxed);
+}
+bool nr_sense_rx_state_lookup(uint64_t abs_slot, nr_sense_rx_state_t *out)
+{
+  rx_slot_t *e=&rx_st.ring[abs_slot&(RX_RING-1)];
+  const uint64_t s1=atomic_load_explicit(&e->slot_plus1,memory_order_acquire);
+  if (s1==abs_slot+1) {
+    nr_sense_rx_state_t r={.rx_ts=atomic_load_explicit(&e->ts,memory_order_relaxed),
+      .cfo_hz=bitsd(atomic_load_explicit(&e->cfo_bits,memory_order_relaxed)),
+      .shift_cum=atomic_load_explicit(&e->shift_cum,memory_order_relaxed),
+      .shift_count=atomic_load_explicit(&e->shift_count,memory_order_relaxed)};
+    atomic_thread_fence(memory_order_acquire);
+    if (atomic_load_explicit(&e->slot_plus1,memory_order_relaxed)==s1) { *out=r; return true; }
+  }
+  out->rx_ts=-1;
+  out->cfo_hz=bitsd(atomic_load_explicit(&rx_st.last_cfo_bits,memory_order_relaxed));
+  out->shift_cum=atomic_load_explicit(&rx_st.shift_cum,memory_order_relaxed);
+  out->shift_count=atomic_load_explicit(&rx_st.shift_count,memory_order_relaxed);
+  return false;
+}
+/* Fills the receiver-state fields of a record about to be emitted from the ring entry of its slot; rx_ts only when the caller has none. */
+static void stamp_rx_state(nr_sense_rs_meta_t *m)
+{
+  if (m->rx_state_valid || m->abs_slot==0) return;
+  nr_sense_rx_state_t s;
+  if (!nr_sense_rx_state_lookup(m->abs_slot,&s)) return; /* slot never noted (or older than the ring): unknown stays null, no guess */
+  m->rx_state_valid=true; m->rx_cfo_hz=s.cfo_hz; m->rx_shift_cum_samples=s.shift_cum;
+  m->rx_shift_count=s.shift_count; m->rx_gain_db=(float)nr_sense_rx_gain();
+  if (m->rx_ts<0) m->rx_ts=s.rx_ts;
 }
 
 static const char *receiver_id, *receiver_array;
@@ -186,6 +266,7 @@ void nr_sense_emit_grant_meta(const nr_passive_obs_t *o, const nr_sense_grant_me
   const uint64_t t_rec=nr_sense_now_ns();
   nr_sense_grant_meta_t m=in?*in:unknown_grant();
   if (!m.stamp_valid) stamp(&m.epoch,&m.identity_gen,&m.dedicated_epoch);
+  if (m.rx_ts<0 && o->abs_slot) { nr_sense_rx_state_t s; if (nr_sense_rx_state_lookup(o->abs_slot,&s)) m.rx_ts=s.rx_ts; }
   if (nr_ue_ctx_enabled()) {
     nr_ue_ctx_t ctx={0};
     if (nr_ue_ctx_try_get(o->rnti,&ctx)) {
@@ -208,6 +289,7 @@ void nr_sense_emit_rs(nr_sense_src_t src, const nr_sense_rs_meta_t *in, uint64_t
   nr_sense_rs_meta_t m=*in;
   if (!m.stamp_valid) stamp(&m.epoch,&m.identity_gen,&m.dedicated_epoch);
   if (!m.t_mono_ns) m.t_mono_ns=mono_ns();
+  stamp_rx_state(&m);
   if ((!m.csirs_resource || strnlen(m.csirs_resource,256)<256) &&
       (!m.srs_attribution || strnlen(m.srs_attribution,256)<256)) {
     if (nr_sense_push_rs_binary(src,&m,frame_id)>=0) return;
