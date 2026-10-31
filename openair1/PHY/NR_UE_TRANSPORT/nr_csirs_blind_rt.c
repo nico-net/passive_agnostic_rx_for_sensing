@@ -15,6 +15,7 @@
 #include "nr_csirs_blind_rt.h"
 #include "nr_re_pattern.h"
 #include "nr_csirs_rm_arb.h"
+#include "nr_csirs_rm_arb.c" /* compiled into this unit: the fixtures that #include this file need no extra source (tests/nr_csirs_blind_rt_test_bridge.c) */
 #include "nr_pdsch_passive_decode.h" /* CSIFULLAB */
 /* Weak: unit-test targets link this file without the acquisition state. */
 extern void nr_passive_acq_note_carrier_from_rs(const char *evidence) __attribute__((weak));

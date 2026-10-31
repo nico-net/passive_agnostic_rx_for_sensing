@@ -1009,7 +1009,6 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c
-  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_rm_arb.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c
