@@ -1432,7 +1432,6 @@ static bool trial_opts_locked(const len_state_t *ls, int h, int k, int t, int va
 }
 
 /* caller holds mu: evidence slot of hypothesis e (created; the entry with the fewest passes is evicted when full) */
-static uint64_t g_tp_spec_refuted; /* guarded by mu */
 static typeof(((len_state_t *)0)->ev[0]) *ev_slot_locked(len_state_t *ls, uint32_t e)
 {
   int v = 0;
