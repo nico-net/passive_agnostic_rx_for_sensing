@@ -17,6 +17,39 @@
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
+
+/* PHASE-TRACK (nr_pdsch_phase_track.h): the arithmetic shared with the CPU (nr_pdsch_phase_track.c), instantiated in double (bit-exact class) and float (FP32 class). This file is built with
+ * --fmad=false, so a*b+c is fused only where written NRPT_FMA. */
+#define NRPT_T double
+#define NRPT_S _d
+#define NRPT_FN static __device__ __forceinline__
+#define NRPT_FMA(a, b, c) __fma_rn((a), (b), (c))
+#define NRPT_DIV(a, b) __ddiv_rn((a), (b))
+#define NRPT_SQRT(a) __dsqrt_rn(a)
+#define NRPT_RND(v) llround(v)
+#include "nr_pdsch_phase_track_impl.h"
+#undef NRPT_T
+#undef NRPT_S
+#undef NRPT_FN
+#undef NRPT_FMA
+#undef NRPT_DIV
+#undef NRPT_SQRT
+#undef NRPT_RND
+#define NRPT_T float
+#define NRPT_S _f
+#define NRPT_FN static __device__ __forceinline__
+#define NRPT_FMA(a, b, c) __fmaf_rn((a), (b), (c))
+#define NRPT_DIV(a, b) __fdiv_rn((a), (b))
+#define NRPT_SQRT(a) __fsqrt_rn(a)
+#define NRPT_RND(v) llroundf(v)
+#include "nr_pdsch_phase_track_impl.h"
+#undef NRPT_T
+#undef NRPT_S
+#undef NRPT_FN
+#undef NRPT_FMA
+#undef NRPT_DIV
+#undef NRPT_SQRT
+#undef NRPT_RND
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -43,6 +76,7 @@ struct Shared { /* mapped: written by the GPU, read by the host after the stream
   float m3_s2f[NSYM], m3_gainf[NSYM]; /* the same for the FP32 instantiation (GPU pass on sm_89) */
   nr_gpu_evm_sym_t evm[NSYM];
   nr_gpu_xdiag_t xd; /* XDIAG: equaliser-output error sums of k_tail (zeroed per symbol in k_mask_pw) */
+  float cpe[NSYM][4]; /* PHASE-TRACK: the CPE (rad) k_cpe applied per symbol and layer, 0 = none (counters only) */
 };
 struct Ctx {
   cudaStream_t s;
@@ -529,6 +563,237 @@ template <typename R = double> __global__ void k_align(__grid_constant__ const J
       const R hr2 = fmaR((R)v.r, q.r, -((R)v.i * q.i)); /* fnmsub d, h.r, c, (h.i*sn) */
       const R hi2 = fmaR((R)v.r, q.i, (R)v.i * q.r);  /* fmadd d, h.r, sn, (h.i*c) */
       row[i] = nrd_c16{(int16_t)roundR(hr2), (int16_t)roundR(hi2)};          /* lround, then (int16_t) wraps */
+    }
+  }
+}
+
+/* ---- PHASE-TRACK (nr_pdsch_phase_track.h): channel time interpolation (pass only: the estimate is on the device) and the per-symbol CPE tracker. Both evaluate the CPU's expression
+ * tree (nr_pdsch_phase_track.c): the interpolation block (pair, branch, 48 subcarriers) forms the integer correlation sum (exact in any order), the phasor and every RE of every symbol between
+ * the pair; k_cpe gives each 48-RE chunk of a symbol to one thread (sequential, RE order, like the CPU), then adds the chunk partials in chunk order. ---- */
+constexpr int TI_MAXD = 4; /* DM-RS symbols of a grant */
+template <typename R> __global__ void k_tinterp(__grid_constant__ const JobK jk_)
+{
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
+  if (!j.tint)
+    return;
+  const int c = blockIdx.x, a = blockIdx.y, p = blockIdx.z, t = threadIdx.x; /* block c of branch a, DM-RS index p (the pair p, p + 1; p = 0 / nd - 1 also hold the outer symbols) */
+  const int ncol = j.tint_cols, N = j.N;
+  int dsym[TI_MAXD], nd = 0;
+  for (int m = 0; m < 14 && nd < TI_MAXD; m++)
+    if ((j.tint_dm >> m) & 1)
+      dsym[nd++] = m;
+  if (nd < 2 || p >= nd || a >= j.nbRx || c * NRPT_BLK >= ncol)
+    return;
+  const int k1 = (c + 1) * NRPT_BLK < ncol ? (c + 1) * NRPT_BLK : ncol;
+  const int col = c * NRPT_BLK + t;
+  nrd_c16 *est = (nrd_c16 *)j.est;
+  const int s0 = j.start_symbol, s1 = j.start_symbol + j.nb_symbols;
+  if (p + 1 < nd) { /* the pair (p, p + 1): its phase, then the symbols strictly between */
+    __shared__ long long red[2][64];
+    long long cr = 0, ci = 0;
+    if (t < NRPT_BLK && col < k1)
+      for (int l = 0; l < j.nl; l++) {
+        const nrd_c16 *row = est + (size_t)(l * j.nbRx + a) * j.est_stride;
+        const nrd_c16 ha = row[(size_t)dsym[p] * N + col], hb = row[(size_t)dsym[p + 1] * N + col];
+        cr += (long long)hb.r * ha.r + (long long)hb.i * ha.i;
+        ci += (long long)hb.i * ha.r - (long long)hb.r * ha.i;
+      }
+    red[0][t] = cr;
+    red[1][t] = ci;
+    __syncthreads();
+    for (int k = 32; k > 0; k >>= 1) {
+      if (t < k) {
+        red[0][t] += red[0][t + k];
+        red[1][t] += red[1][t + k];
+      }
+      __syncthreads();
+    }
+    R dc, ds;
+    if constexpr (std::is_same<R, double>::value) nrpt_delta_phasor_d((double)red[0][0], (double)red[1][0], &dc, &ds);
+    else nrpt_delta_phasor_f((float)red[0][0], (float)red[1][0], &dc, &ds);
+    if (t >= NRPT_BLK || col >= k1)
+      return;
+    for (int m = dsym[p] + 1; m < dsym[p + 1]; m++) {
+      if (m < s0 || m >= s1)
+        continue;
+      const R tt = divR((R)(m - dsym[p]), (R)(dsym[p + 1] - dsym[p]));
+      R ur, ui;
+      if constexpr (std::is_same<R, double>::value) nrpt_blend_phasor_d(tt, dc, ds, &ur, &ui);
+      else nrpt_blend_phasor_f(tt, dc, ds, &ur, &ui);
+      for (int l = 0; l < j.nl; l++) {
+        nrd_c16 *row = est + (size_t)(l * j.nbRx + a) * j.est_stride;
+        const nrd_c16 ha = row[(size_t)dsym[p] * N + col], hb = row[(size_t)dsym[p + 1] * N + col];
+        if constexpr (std::is_same<R, double>::value) row[(size_t)m * N + col] = nrpt_interp_re_d(ha, hb, tt, dc, ds, ur, ui);
+        else row[(size_t)m * N + col] = nrpt_interp_re_f(ha, hb, tt, dc, ds, ur, ui);
+      }
+    }
+  }
+  if (t >= NRPT_BLK || col >= k1 || (p != 0 && p != nd - 1))
+    return;
+  /* hold: before the first DM-RS symbol the first one, after the last the last one */
+  for (int m = s0; m < s1 && m < 14; m++) {
+    if ((j.tint_dm >> m) & 1)
+      continue;
+    const int src = (p == 0 && m < dsym[0]) ? dsym[0] : (p == nd - 1 && m > dsym[nd - 1]) ? dsym[nd - 1] : -1;
+    if (src < 0)
+      continue;
+    for (int l = 0; l < j.nl; l++) {
+      nrd_c16 *row = est + (size_t)(l * j.nbRx + a) * j.est_stride;
+      row[(size_t)m * N + col] = row[(size_t)src * N + col];
+    }
+  }
+}
+
+template <typename R> __device__ __forceinline__ int cpe_zf(const nr_gpu_demod_job_t &j, const nrd_c16 *y, const nrd_c16 *h, int m, int a0, int nb, uint32_t i, R *xr, R *xi)
+{
+  R yr[4], yi[4], hr[4][4], hi[4][4];
+  for (int a = 0; a < nb; a++) {
+    const nrd_c16 yv = y[((size_t)m * NR_GPU_DEMOD_MAX_RX + a0 + a) * EXT + i];
+    yr[a] = (R)yv.r;
+    yi[a] = (R)yv.i;
+    for (int l = 0; l < j.nl; l++) {
+      const nrd_c16 hv = h[((size_t)m * 16 + l * j.nbRx + a0 + a) * EXT + i];
+      hr[l][a] = (R)hv.r;
+      hi[l][a] = (R)hv.i;
+    }
+  }
+  if constexpr (std::is_same<R, double>::value) return nrpt_zf_d(j.nl, nb, yr, yi, hr, hi, xr, xi);
+  else return nrpt_zf_f(j.nl, nb, yr, yi, hr, hi, xr, xi);
+}
+
+template <typename R> __global__ void k_cpe(__grid_constant__ const JobK jk_, const nrd_c16 *y, nrd_c16 *h, Shared *sh)
+{
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
+  const int m = blockIdx.x, t = threadIdx.x;
+  if (!j.cpe || !(j.sym_mask >> m & 1) || ((j.tint_dm >> m) & 1))
+    return;
+  if (t < 4)
+    sh->cpe[m][t] = 0.f; /* a stale value of the previous grant must not reach the counters */
+  const nrd_decision d = sh->d;
+  const int a0 = d.mrc_rx_index, nb = d.mrc_nb_rx, nl = j.nl;
+  const uint32_t nre = j.nre[m];
+  if (nl < 1 || nl > 4 || nb < 1 || a0 + nb > 4 || nre < NRPT_MIN_RE || nre > (uint32_t)EXT)
+    return;
+  const uint32_t nch = (nre + NRPT_BLK - 1) / NRPT_BLK;
+  __shared__ R s_p[MAXCH][4][4]; /* per chunk and layer: pass 1 (power), pass 2 (Sr, Si, Q) */
+  __shared__ uint32_t s_n[MAXCH][4];
+  __shared__ R s_g[4], s_cr[4], s_ci[4];
+  __shared__ int s_ok[4];
+  if ((uint32_t)t < nch) {
+    R pp[4] = {(R)0, (R)0, (R)0, (R)0};
+    uint32_t pn = 0;
+    const uint32_t i1 = (t + 1) * NRPT_BLK < nre ? (t + 1) * NRPT_BLK : nre;
+    for (uint32_t i = t * NRPT_BLK; i < i1; i++) {
+      R xr[4], xi[4];
+      if (!cpe_zf<R>(j, y, h, m, a0, nb, i, xr, xi))
+        continue;
+      for (int l = 0; l < nl; l++) {
+        if constexpr (std::is_same<R, double>::value) pp[l] = pp[l] + nrpt_pow2_d(xr[l], xi[l]);
+        else pp[l] = pp[l] + nrpt_pow2_f(xr[l], xi[l]);
+      }
+      pn++;
+    }
+    for (int l = 0; l < nl; l++)
+      s_p[t][0][l] = pp[l];
+    s_n[t][0] = pn;
+  }
+  __syncthreads();
+  if (t == 0) {
+    R pw[4] = {(R)0, (R)0, (R)0, (R)0};
+    uint32_t npw = 0;
+    for (uint32_t c = 0; c < nch; c++) {
+      for (int l = 0; l < nl; l++)
+        pw[l] = pw[l] + s_p[c][0][l];
+      npw += s_n[c][0];
+    }
+    for (int l = 0; l < nl; l++)
+      s_g[l] = pw[l] > (R)0 && npw > 0 ? divR((R)1, divR(pw[l], (R)npw)) : (R)0;
+  }
+  __syncthreads();
+  if ((uint32_t)t < nch) {
+    R pr[4] = {(R)0, (R)0, (R)0, (R)0}, pi[4] = {(R)0, (R)0, (R)0, (R)0}, pq[4] = {(R)0, (R)0, (R)0, (R)0};
+    uint32_t pn[4] = {0, 0, 0, 0};
+    const uint32_t i1 = (t + 1) * NRPT_BLK < nre ? (t + 1) * NRPT_BLK : nre;
+    for (uint32_t i = t * NRPT_BLK; i < i1; i++) {
+      R xr[4], xi[4];
+      if (!cpe_zf<R>(j, y, h, m, a0, nb, i, xr, xi))
+        continue;
+      for (int l = 0; l < nl; l++) {
+        R tr, ti, tq;
+        int ok;
+        if constexpr (std::is_same<R, double>::value) ok = s_g[l] > (R)0 && nrpt_term4_d(xr[l], xi[l], s_g[l], &tr, &ti, &tq);
+        else ok = s_g[l] > (R)0 && nrpt_term4_f(xr[l], xi[l], s_g[l], &tr, &ti, &tq);
+        if (ok) {
+          pr[l] = pr[l] + tr;
+          pi[l] = pi[l] + ti;
+          pq[l] = pq[l] + tq;
+          pn[l]++;
+        }
+      }
+    }
+    for (int l = 0; l < nl; l++) {
+      s_p[t][1][l] = pr[l];
+      s_p[t][2][l] = pi[l];
+      s_p[t][3][l] = pq[l];
+      s_n[t][l] = pn[l];
+    }
+  }
+  __syncthreads();
+  if (t == 0) {
+    R sr[4] = {(R)0, (R)0, (R)0, (R)0}, si[4] = {(R)0, (R)0, (R)0, (R)0}, q[4] = {(R)0, (R)0, (R)0, (R)0};
+    uint32_t n[4] = {0, 0, 0, 0};
+    for (uint32_t c = 0; c < nch; c++)
+      for (int l = 0; l < nl; l++) {
+        sr[l] = sr[l] + s_p[c][1][l];
+        si[l] = si[l] + s_p[c][2][l];
+        q[l] = q[l] + s_p[c][3][l];
+        n[l] += s_n[c][l];
+      }
+    R cr[4], ci[4];
+    int ok[4], nok = 0;
+    for (int l = 0; l < nl; l++) {
+      if constexpr (std::is_same<R, double>::value) ok[l] = nrpt_cpe_decide_d(sr[l], si[l], q[l], n[l], &cr[l], &ci[l]);
+      else ok[l] = nrpt_cpe_decide_f(sr[l], si[l], q[l], n[l], &cr[l], &ci[l]);
+      nok += ok[l];
+    }
+    if (nl > 1 && nok < nl) { /* pooled estimate for the layers without a significant one */
+      R pr2 = (R)0, pi2 = (R)0, pq2 = (R)0;
+      uint32_t pn2 = 0;
+      for (int l = 0; l < nl; l++) {
+        pr2 = pr2 + sr[l];
+        pi2 = pi2 + si[l];
+        pq2 = pq2 + q[l];
+        pn2 += n[l];
+      }
+      R pcr, pci;
+      int pok;
+      if constexpr (std::is_same<R, double>::value) pok = nrpt_cpe_decide_d(pr2, pi2, pq2, pn2, &pcr, &pci);
+      else pok = nrpt_cpe_decide_f(pr2, pi2, pq2, pn2, &pcr, &pci);
+      if (pok)
+        for (int l = 0; l < nl; l++)
+          if (!ok[l]) {
+            cr[l] = pcr;
+            ci[l] = pci;
+            ok[l] = 1;
+          }
+    }
+    for (int l = 0; l < 4; l++) {
+      s_ok[l] = l < nl ? ok[l] : 0;
+      s_cr[l] = l < nl ? cr[l] : (R)1;
+      s_ci[l] = l < nl ? ci[l] : (R)0;
+      sh->cpe[m][l] = l < nl && ok[l] ? atan2f((float)ci[l], (float)cr[l]) : 0.f; /* counters only */
+    }
+  }
+  __syncthreads();
+  for (int l = 0; l < nl; l++) {
+    if (!s_ok[l])
+      continue;
+    for (int a = a0; a < a0 + nb; a++) {
+      nrd_c16 *row = h + ((size_t)m * 16 + l * j.nbRx + a) * EXT;
+      for (uint32_t i = t; i < nre; i += blockDim.x) {
+        if constexpr (std::is_same<R, double>::value) row[i] = nrpt_rot_re_d(row[i], s_cr[l], s_ci[l]);
+        else row[i] = nrpt_rot_re_f(row[i], s_cr[l], s_ci[l]);
+      }
     }
   }
 }
@@ -1820,6 +2085,10 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
   k_gather<<<dim3(1, NSYM), 32, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h);
   k_mask_pw<<<NSYM, 256, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
   k_align<double><<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
+  k_cpe<double><<<NSYM, 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
+  k_cpe<float><<<NSYM, 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
+  k_tinterp<double><<<1, 64, 0, g_ctx[0].s>>>(K(j));
+  k_tinterp<float><<<1, 64, 0, g_ctx[0].s>>>(K(j));
   k_tail<0><<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
   k_tail<1><<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
   k_level<<<1, 256, 0, g_ctx[0].s>>>(K(j), g_ctx[0].h, g_ctx[0].dsh);
@@ -1924,6 +2193,19 @@ static void launch_align(const nr_gpu_demod_job_t &jj, Ctx &x, cudaStream_t s)
   if (jj.demod_fp32) k_align<float><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
   else k_align<double><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
 }
+/* PHASE-TRACK: the CPE tracker of every data symbol (after the branch weighting and alignment, before the combiner); a block per symbol, a thread per 48-RE chunk */
+static void launch_cpe(const nr_gpu_demod_job_t &jj, Ctx &x, cudaStream_t s)
+{
+  if (jj.demod_fp32) k_cpe<float><<<NSYM, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  else k_cpe<double><<<NSYM, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+}
+/* PHASE-TRACK: the channel time interpolation into the data-symbol planes of the (device) estimate; a block per (48 subcarriers, branch, DM-RS symbol). Launched ahead of k_gather. */
+static void launch_tinterp(const nr_gpu_demod_job_t &jj, cudaStream_t s)
+{
+  const dim3 g(MAXCH, jj.nbRx > 0 ? jj.nbRx : 1, TI_MAXD);
+  if (jj.demod_fp32) k_tinterp<float><<<g, 64, 0, s>>>(K(jj));
+  else k_tinterp<double><<<g, 64, 0, s>>>(K(jj));
+}
 
 extern "C" void nr_pdsch_gpu_demod_release(int c)
 {
@@ -1985,6 +2267,7 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
   k_mask_pw<<<NSYM, 256, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
   if (jj.nl == 1 && jj.align)
     launch_align(jj, x, x.s);
+  launch_cpe(jj, x, x.s);
   if (jj.want_evm) {
     cudaStream_t es = x.s2;
     cudaEventRecord(x.fork, x.s);
@@ -2064,6 +2347,7 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
   j->mrc_nb_rx = d.mrc_nb_rx;
   memcpy(j->kappa_sz, x.sh->kap_sz, sizeof(j->kappa_sz));
   memcpy(j->kappa_sm, x.sh->kap_sm, sizeof(j->kappa_sm));
+  memcpy(j->cpe_phi, x.sh->cpe, sizeof(j->cpe_phi));
   if (j->want_kappa)
     memcpy(&j->xd, &x.sh->xd, sizeof(j->xd));
   if (jj.want_evm && !defer)
@@ -2089,11 +2373,13 @@ extern "C" int nr_pdsch_gpu_demod_dev(const nr_gpu_demod_job_t *j, nr_gpu_buf_t 
   jj.llr = (int16_t *)llr_dev->dev;
   jj.m3_nvfac_f = (float)jj.m3_nvfac;
   const int gx = (int)((jj.ext + 127) / 128);
+  launch_tinterp(jj, s);
   k_gather<<<dim3(gx, NSYM), 128, 0, s>>>(K(jj), x.y, x.h);
   k_level<<<jj.nl * jj.nbRx, 256, 0, s>>>(K(jj), x.h, x.dsh);
   k_mask_pw<<<NSYM, 256, 0, s>>>(K(jj), x.y, x.h, x.dsh);
   if (jj.nl == 1 && jj.align)
     launch_align(jj, x, s);
+  launch_cpe(jj, x, s);
   launch_tail(jj, x, s, gx);
   return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
 }
@@ -2129,11 +2415,13 @@ extern "C" int nr_pdsch_gpu_demod_pass_dev(int inst, const nr_gpu_demod_job_t *j
   jj.jref = (const nr_gpu_demod_job_t *)g_jb[inst].dev;
   if (nr_gpu_buf_h2d_async(&g_jb[inst], 0, sizeof(JobK), s) != 0) return -1;
   const int gx = (int)((jj.ext + 127) / 128);
+  launch_tinterp(jj, s);
   k_gather<<<dim3(gx, NSYM), 128, 0, s>>>(K(jj), x.y, x.h);
   k_level<<<jj.nl * jj.nbRx, 256, 0, s>>>(K(jj), x.h, x.dsh);
   k_mask_pw<<<NSYM, 256, 0, s>>>(K(jj), x.y, x.h, x.dsh);
   if (jj.nl == 1 && jj.align)
     launch_align(jj, x, s);
+  launch_cpe(jj, x, s);
   if (jj.want_evm) { /* the EVM chain on its own branch, as in nr_pdsch_gpu_demod_run */
     cudaEventRecord(x.fork, s);
     cudaStreamWaitEvent(es, x.fork, 0);
@@ -2196,6 +2484,7 @@ extern "C" void nr_pdsch_gpu_demod_pass_out(int inst, nr_gpu_demod_job_t *j)
   j->mrc_nb_rx = d.mrc_nb_rx;
   memcpy(j->kappa_sz, x.sh->kap_sz, sizeof(j->kappa_sz));
   memcpy(j->kappa_sm, x.sh->kap_sm, sizeof(j->kappa_sm));
+  memcpy(j->cpe_phi, x.sh->cpe, sizeof(j->cpe_phi));
   if (j->want_kappa)
     memcpy(&j->xd, &x.sh->xd, sizeof(j->xd));
   if (j->want_evm)

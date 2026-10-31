@@ -39,6 +39,9 @@ typedef struct {
   int xd_qm;
   double xd_e[4], xd_n[4], xd_nm[4], xd_p[4], xd_s[4];
   float xd_ge[72], xd_gn[72];
+  /* PHASE-TRACK (nr_pdsch_phase_track.h): per (data symbol, layer) the CPE the tracker applied: sum of |phi| in rad (0 for not applied), count of (symbol, layer) pairs evaluated, count rotated */
+  double cpe_abs;
+  uint32_t cpe_n, cpe_app;
 } nr_pdsch_evm_acc_t;
 extern __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc;
 /* RESID (nr_slotphase_resid.h): the position-keyed layer-0 decision-directed error of the GPU equaliser output (k_tail, nr_gpu_xdiag_t rs_e / rs_n), per symbol, of the decode(s) this

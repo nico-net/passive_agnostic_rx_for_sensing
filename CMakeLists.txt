@@ -979,6 +979,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_psbch_rx.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_psbch_tx.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_phase_track.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ulsch_coding.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dlsch_decoding.c
   ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_prach_common.c
@@ -1145,6 +1146,8 @@ add_library(PHY_NR_NO_AVX_256 ${PHY_NR_SRC})
 target_link_libraries(PHY_NR_NO_AVX_256 nr_phy_common nr_common)
 target_compile_definitions(PHY_NR_NO_AVX_256 PUBLIC USE_128BIT)
 
+# PHASE-TRACK: explicit fma() only, so the CPU result is bit-identical to the GPU twin (nr_pdsch_gpu_demod.cu, --fmad=false)
+set_source_files_properties(${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_phase_track.c PROPERTIES COMPILE_OPTIONS -ffp-contract=off)
 add_library(PHY_NR_UE ${PHY_NR_UE_SRC})
 target_link_libraries(PHY_NR_UE PUBLIC nr_gpu_platform)
 if(ENABLE_LDPC_CUDA)
@@ -2538,6 +2541,14 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdsch_gpu_demod PRIVATE nr_phy_common UTIL)
   add_dependencies(tests test_nr_pdsch_gpu_demod)
   add_test(NAME test_nr_pdsch_gpu_demod COMMAND ./test_nr_pdsch_gpu_demod)
+
+  # PHASE-TRACK (D1/D2): time interpolation + per-symbol CPE tracker, synthetic CFO slot
+  add_executable(test_nr_pdsch_phase_track ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_phase_track_test.cc
+                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_phase_track.c)
+  target_include_directories(test_nr_pdsch_phase_track PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_phase_track PRIVATE m)
+  add_dependencies(tests test_nr_pdsch_phase_track)
+  add_test(NAME test_nr_pdsch_phase_track COMMAND ./test_nr_pdsch_phase_track)
 
   add_executable(test_nr_pdsch_recovery ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_recovery_test.cc
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c
