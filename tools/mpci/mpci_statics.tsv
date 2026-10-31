@@ -996,6 +996,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	55	nr_dlsch_forced_mask	tls
 openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	56	nr_dlsch_mrc_mode_override	tls	int	TLS	AUDIT	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	57	nr_dlsch_irc_override	tls	int	TLS	AUDIT	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	58	nr_irc_dmrs_cov	tls	nr_irc_cov_t	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	59	nr_irc_grant	tls	nr_irc_grant_t	TLS	D4	the decode thread's DM-RS interference whitening, cleared at the start of every decode (thread-local: no cross-cell state)
 openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	59	nr_pdsch_chest_occ_override	tls	int	TLS	AUDIT	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	60	nr_pdsch_decode_wide_mrc	tls	bool	TLS	AUDIT	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c	61	nr_mmse2_diag	tls	nr_mmse2_diag_t	TLS	AUDIT	existing thread-local

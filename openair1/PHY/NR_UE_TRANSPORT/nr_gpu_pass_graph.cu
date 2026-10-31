@@ -15,6 +15,7 @@
 #include "nr_pdsch_gpu_demod.h"
 #include "nr_pdsch_gpu_ldpc.h"
 #include "nr_gpu_pass_post.h"
+#include "nr_mmse_exact.h" /* D4 IRC: nr_irc_sum_t, nr_irc_groups_of */
 #include "nr_llr_norm.h" /* nr_llr_norm_target: the host rule k_norm_sum mirrors */
 #include "nr_gpu_pass_cap.h"
 #include "PHY/TOOLS/nr_gpu_membudget.h"
@@ -57,6 +58,8 @@ int nr_pdsch_gpu_chest_stage_at(const nr_gpu_chest_job_t *j, int n, int slot);
 int nr_pdsch_gpu_pass_ls_rows(void);
 int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, int slot, void *stream);
 int nr_pdsch_gpu_chest_dev_at(const nr_gpu_chest_job_t *j, int r0, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, int slot, void *stream);
+int nr_pdsch_gpu_chest_irc_at(const nr_gpu_chest_job_t *j, int r0, int n, int nb, int nrb_max, void *acc, int slot, void *stream); /* D4 IRC */
+void *nr_pdsch_gpu_irc_acc(int inst);
 int nr_pdsch_gpu_demod_pass_set(int inst, const nr_gpu_demod_job_t *j);
 int nr_pdsch_gpu_demod_pass_dev(int inst, const nr_gpu_demod_job_t *jcap, nr_gpu_buf_t *llr_dev, const uint32_t *nvar_dev, void *stream, void *stream2);
 void nr_pdsch_gpu_demod_pass_out(int inst, nr_gpu_demod_job_t *j);
@@ -604,6 +607,7 @@ static void synth_job(const Key &k, nr_gpu_pass_job_t *j, std::vector<int16_t> &
   d.mag_per_layer = k.nl >= 2 && k.qmode >= 2;
   d.qam_mode = k.nl >= 2 ? k.qmode : 0;
   d.m3_nvfac = pow(10.0, 2.1);
+  d.irc_ng = (k.nl >= 2 && k.qmode == 3) ? 1 : 0; /* D4 IRC: the captured D graph runs the covariance finalize iff mode 3 (the real count is set per grant) */
   d.want_evm = k.evm;
   d.evm_fp64 = !(k.fp32 & 1);
   d.demod_fp32 = (k.fp32 >> 1) & 1;
@@ -796,6 +800,13 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
   dj.comp = sc; dj.mag = sc + I.bn; dj.magb = sc + 2 * I.bn; dj.magr = sc + 3 * I.bn;
   dj.llr = (int16_t *)I.llr.dev;
   dj.nvar = 0;
+  { /* D4 IRC: contiguous grants; segmented ones keep the scalar noise model (their sums stay zero). nre_full: the REs of a full data symbol of the grant (not of the chest band) */
+    unsigned nre_full = 0;
+    for (int m = 0; m < NSYM; m++)
+      nre_full = std::max<unsigned>(nre_full, dj.nre[m]);
+    dj.irc_nre = (int)nre_full;
+    dj.irc_ng = (dj.qam_mode == 3 && nl >= 2 && !j->nseg && nre_full) ? nr_irc_groups_of_re((int)nre_full) : 0;
+  }
   dj.nvar_dev = (const uint32_t *)((char *)I.res.dev + offsetof(ResBlk, post.nvar));
   dj.evm_defer = 0;
   if (nr_pdsch_gpu_demod_pass_set(I.id, &dj) != 0) return -1;
@@ -874,9 +885,13 @@ static int enqueue(Inst &I, const Key &k, const nr_gpu_pass_job_t *sj, cudaStrea
     /* the chest rows in C chunks of whole (DM-RS symbol, layer) groups (SEG128; one chunk otherwise): chest then compose per chunk, the scratch rows reused in stream order */
     const int gpc = c_groups_per_chunk(k), ng = k.ndmrs * k.nl, grp = (k.nseg ? k.nseg : 1) * nbRx;
     if (gpc < 1 || (gpc < ng && !k.nseg)) return -1;
+    /* D4 IRC: the DM-RS covariance sums of the pass (multi-layer, contiguous grants; a segmented class leaves them zero = the scalar noise model) */
+    void *const irc = k.nl >= 2 && nbRx >= 2 ? nr_pdsch_gpu_irc_acc(I.id) : nullptr;
+    if (irc && cudaMemsetAsync(irc, 0, sizeof(nr_irc_sum_t) * NR_IRC_NG_MAX, s) != cudaSuccess) return -1;
     for (int g0 = 0; g0 < ng; g0 += gpc) {
       const int gn = std::min(gpc, ng - g0);
       if (nr_pdsch_gpu_chest_dev_at(I.cj, g0 * grp, gn * grp, k.nseg ? &I.segsc : &I.est, &I.nvar, I.id, s) != 0) return -1;
+      if (irc && !k.nseg && nr_pdsch_gpu_chest_irc_at(I.cj, g0 * grp, gn * grp, nbRx, k.nrb, irc, I.id, s) != 0) return -1;
       if (k.nseg) k_seg_compose<<<gn * nbRx, 256, 0, s>>>((const short2 *)I.segsc.dev, (short2 *)I.est.dev, I.PBd(), k.nseg, k.nl, nbRx, g0);
     }
     if (full && nr_gpu_pass_launch_chest_post_p(I.PBd() ? &I.PBd()->post : nullptr, &I.RBd()->post, s) != 0) return -1;

@@ -39,6 +39,7 @@
  */
 
 #include "nr_pdsch_passive_decode.h"
+#include "nr_irc_cov.h"
 #include "nr_snr_gate.h"
 #include "nr_recov_yield.h"
 #include "nr_hq_retry.h"
@@ -80,6 +81,10 @@ static void gp_thread_prewarm(void);
  * inside an #ifdef __cplusplus block, and a declaration placed there is silently invisible to C. */
 #define NR_DL_CHEST_MAX_ANT 8
 extern __thread uint32_t nr_dl_chest_nvar_ant[];
+int nr_pdsch_irc_cov(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch, const freq_alloc_bitmap_t *freq_alloc,
+                     const freq_alloc_bitmap_t *grant_alloc, int nl,
+                     const unsigned short *ports, uint32_t dmrs_symbols, uint32_t pdsch_est_size, int32_t dl_ch_estimates[][pdsch_est_size], int rxdataFsize,
+                     c16_t rxdataF[][rxdataFsize], nr_irc_grant_t *out); /* nr_dl_channel_estimation.c, D4 IRC */
 extern __thread int nr_dl_chest_only_ant;
 extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read the estimate at the data symbol itself
 
@@ -2575,9 +2580,11 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   t_ldpc_it_max = 0; t_ldpc_it_cap = 0; t_ldpc_it_sum = 0;
   t_cb_ok = t_cb_tried = t_cb_total = 0;
   t_cb_map = 0;
+  nr_irc_grant.valid = 0; /* D4 IRC: this grant's DM-RS whitening is set below, after the channel estimate */
   NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), NULL);
   t_fep_done_ns = 0;
   memset(out, 0, sizeof(*out));
+  out->irc_gain_db = -99.f; /* D4 IRC: n/a until a path sets it */
   for (int l = 0; l < 4; l++)
     out->psinr_db[l] = out->snrx_db[l] = -99.f;
   out->sdisp_p10_db = out->sdisp_std_db = -99.f;
@@ -3620,6 +3627,15 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     }
   }
   nr_dlsch_chest_per_symbol = 0;
+  /* D4 IRC (default on): the DM-RS interference covariance of this grant, from the estimate just made (or restored from the cache) and the received DM-RS. Contiguous
+   * single-segment allocations with every branch estimated; anything else keeps the scalar noise model. */
+  if (!seg_path && chest_only < 0 && cw->Nl > 0 && fp->nb_antennas_rx >= 2) {
+    unsigned short irc_ports[4];
+    for (int l = 0; l < (int)cw->Nl && l < 4; l++)
+      irc_ports[l] = get_dmrs_port(l, dlsch_config->dmrs_ports);
+    nr_pdsch_irc_cov(ue, proc, &chest_cfg, &chest_alloc, freq_alloc, cw->Nl < 4 ? cw->Nl : 4, irc_ports, dmrs_full, pdsch_est_size, pdsch_dl_ch_estimates,
+                     fp->samples_per_slot_wCP, rxdataF, &nr_irc_grant);
+  }
   /* SFO cross-check (PHY/MODULATION/nr_sfo_state.h). On a real grant (no probe, no trial) with two or more DM-RS symbols the channel and the
    * precoder are static over the slot, so between the first and the last DM-RS estimate a common phase is residual CFO and a phase SLOPE across
    * subcarriers is residual timing drift: the eps the FEP did not remove. Weighted LS fit of the per-4-RB phase against the signed subcarrier,
@@ -3783,6 +3799,8 @@ gpu_llr_ready:;
     if (out->dmrs_snr.pw_db > -90.f)
       out->dmrs_snr.pw_db += (float)(20.0 * log10(2.0 * get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2)));
     out->dmrs_path = 3;
+    out->irc_gain_db = t_gpp->demod.irc_active ? t_gpp->demod.irc_gain_db : -99.f; /* D4 IRC of the graph pass (k_irc_final) */
+    out->irc_groups = (uint8_t)t_gpp->demod.irc_active;
     if (out->dmrs_snr.comb_db > -90.f)
       memcpy(out->psinr_db, t_gpp->r.psinr_db, sizeof(out->psinr_db));
     dmrs_first = t_gpp->dmrs_first; dmrs_last = t_gpp->dmrs_last;
@@ -3953,6 +3971,10 @@ gpu_llr_ready:;
   nr_dlsch_csi_prb_map_n = 0;
   pdtim_add(PDTIM_DEMOD, pdt_dem);
   out->l2maxh = (int8_t)log2_maxh; /* MRCBUG diag (EVMGRANT l2=) */
+  if (!gp_ok) { /* D4 IRC (EVMGRANT irc=): the CPU chest's covariance; the graph pass reports its own */
+    out->irc_gain_db = nr_irc_grant.valid ? (float)nr_irc_grant.gain_db : -99.f;
+    out->irc_groups = nr_irc_grant.valid ? (uint8_t)nr_irc_grant.active : 0;
+  }
   /* MRCBUG diag (EVMGRANT zabs=): mean |Re z|, |Im z| of the int16 equaliser output in LSB (the stream the LLRs are cut from;
    * CPU demod, 1 layer, 0 = n/a). Replay b 2026-10-13: median 143-196 (single branch) vs 73-89 (4-branch MRC), p10 32. */
   out->zabs = 0.f;

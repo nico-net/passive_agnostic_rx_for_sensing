@@ -2,6 +2,7 @@
 #include "nr_pdsch_gpu_fep.h"
 #include "../TOOLS/nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include "nr_pdsch_gpu_chest.h"
+#include "nr_mmse_exact.h" /* D4 IRC: nr_irc_sum_t, nr_irc_group_of */
 #include "PHY/TOOLS/nr_gpu_mem.h"
 #include "PHY/TOOLS/nr_gpu_memstat_cuda.cuh"
 #include "nr_gpu_cell.h"
@@ -1480,6 +1481,47 @@ __global__ void k_fir(const Par j, const nr_gpu_chest_row_t *rows, const short2 
     if (j.acc) j.acc[blockIdx.x] = red[0];
   }
 }
+/* D4 IRC (2026-10-31): the DM-RS interference covariance of the DL graph pass. After k_fir the LS scratch rows still hold the pilot-pair LS values and the estimate rows the
+ * final estimate, so the residual of nr_pdsch_channel_estimation's noise estimate (LS - estimate, one vector per LS value, across the nb RX rows of one (DM-RS symbol, layer))
+ * is added to the per-group integer sums acc[g] (nr_irc_sum_t, order independent: bit-equal to the CPU's nr_pdsch_irc_cov). Block (p, g): row set p, group g (96 estimate subcarriers); the rows of a chunk are ordered (DM-RS symbol, layer, antenna), nb consecutive rows per pair. */
+__global__ void k_irc(const nr_gpu_chest_row_t *rows, const short2 *ls, int nb, unsigned long long *acc)
+{
+  const int p = blockIdx.x, g = blockIdx.y, nre = 12 * rows[p * nb].nb_rb;
+  const int rep = rows[p * nb].type == 1 ? 4 : 6;
+  const int klo = 12 * NR_IRC_GRP_PRB * g, khi = min(nre, klo + 12 * NR_IRC_GRP_PRB); /* the group's estimate subcarriers; a group past the row's band has none */
+  long long v[33];
+  for (int q = 0; q < 33; q++)
+    v[q] = 0;
+  for (int k = ((klo + rep - 1) / rep) * rep + threadIdx.x * rep; k < khi; k += blockDim.x * rep) {
+    int er[4], ei[4];
+    for (int a = 0; a < nb; a++) {
+      const short2 l = ls[(size_t)(p * nb + a) * 4096 + k], h = ((const short2 *)rows[p * nb + a].out)[k];
+      er[a] = (int)l.x - h.x;
+      ei[a] = (int)l.y - h.y;
+    }
+    for (int a = 0; a < nb; a++)
+      for (int b = 0; b < nb; b++) {
+        v[a * 4 + b] += (long long)er[a] * er[b] + (long long)ei[a] * ei[b];
+        v[16 + a * 4 + b] += (long long)ei[a] * er[b] - (long long)er[a] * ei[b];
+      }
+    v[32]++;
+  }
+  __shared__ long long red[8][33];
+  for (int q = 0; q < 33; q++) {
+    for (int off = 16; off > 0; off >>= 1)
+      v[q] += __shfl_down_sync(0xffffffffu, v[q], off);
+    if ((threadIdx.x & 31) == 0)
+      red[threadIdx.x >> 5][q] = v[q];
+  }
+  __syncthreads();
+  if (threadIdx.x < 33) {
+    long long t = 0;
+    for (int w = 0; w < (int)(blockDim.x >> 5); w++)
+      t += red[w][threadIdx.x];
+    if (t)
+      atomicAdd(acc + (size_t)g * (sizeof(nr_irc_sum_t) / sizeof(long long)) + threadIdx.x, (unsigned long long)t); /* two's complement: negative sums add correctly */
+  }
+}
 } // namespace nrch
 #define NR_GPU_PASS_UL_CHEST
 #include "nr_gpu_pass_ul.cuh"
@@ -1733,6 +1775,16 @@ extern "C" int nr_pdsch_gpu_chest_dev_at(const nr_gpu_chest_job_t *j, int r0, in
   nrch::k_fir<<<n, 256, 0, s>>>(par, rows, g_pass_ls[slot], dout, (unsigned *)(dbase + 3 * NR_GPU_CHEST_MAX_ROWS) + r0);
   if (cudaPeekAtLastError() != cudaSuccess) return -1;
   return pass_slot_done(g_pass_cev[slot], s) == cudaSuccess ? 0 : -1;
+}
+/* D4 IRC: after nr_pdsch_gpu_chest_dev_at(j, r0, n, ...) on the same stream and slot (the LS scratch still holds that call's rows): adds the residual covariance of the n rows, nb RX
+ * rows per (DM-RS symbol, layer), of a contiguous grant (nb_rb of its rows, at most nrb_max PRBs) to acc (nr_irc_sum_t [NR_IRC_NG_MAX], device, zeroed by the caller). Graph-capturable. 0 or -1. */
+extern "C" int nr_pdsch_gpu_chest_irc_at(const nr_gpu_chest_job_t *j, int r0, int n, int nb, int nrb_max, void *acc, int slot, void *stream)
+{
+  if (g_init_state != 1 || !g_exact_ok || !j || !acc || nb < 2 || nb > 4 || n < nb || n % nb || r0 < 0 || r0 + n > j->n_rows || n > PASS_LS_ROWS || nrb_max < 1
+      || 12 * nrb_max > 4096 || j->type == 3 || slot < 0 || slot >= PASS_SLOTS)
+    return -1;
+  nrch::k_irc<<<dim3(n / nb, nr_irc_groups_of(nrb_max)), 128, 0, (cudaStream_t)stream>>>(g_pass_rd[slot] + r0, g_pass_ls[slot], nb, (unsigned long long *)acc);
+  return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
 }
 extern "C" int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, int slot, void *stream)
 {

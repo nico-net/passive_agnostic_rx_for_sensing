@@ -28,6 +28,30 @@
 #define NR_MMSE_HD static inline
 #endif
 
+/* D4 IRC: per-group sums of the DM-RS LS residual outer products (exact integers) and the layout of a group's whitening matrix, see nr_mmse_exact_body.h */
+#define NR_IRC_NG_MAX 36  /* groups per grant: 275 PRB / NR_IRC_GRP_PRB */
+#define NR_IRC_GRP_PRB 8
+#define NR_IRC_WSTRIDE 24 /* wr[10], wi[10], active flag, noise_fac, gain estimate, spare */
+#define NR_IRC_TRI(a, k) ((a) * ((a) + 1) / 2 + (k))
+typedef struct {
+  long long re[4][4], im[4][4]; /* sum_t Re/Im e_a conj(e_b) */
+  long long n;                  /* residual vectors summed */
+} nr_irc_sum_t;
+/* Groups are NR_IRC_GRP_PRB PRBs = 96 estimate subcarriers wide, counted from the grant's first RB (the estimate index k of the chest: the CPU chest and the GPU chest rows see the same k, whatever
+ * band the estimate covers). The group of RE i of a data symbol with nre_sym packed REs, in a grant whose full symbols have nre_full: DM-RS symbols carry fewer data REs, so i is scaled back to k. */
+NR_MMSE_HD int nr_irc_groups_of_re(int nre)
+{
+  const int g = (nre + 12 * NR_IRC_GRP_PRB - 1) / (12 * NR_IRC_GRP_PRB);
+  return g < 1 ? 1 : g > NR_IRC_NG_MAX ? NR_IRC_NG_MAX : g;
+}
+NR_MMSE_HD int nr_irc_groups_of(int nprb) { return nr_irc_groups_of_re(12 * nprb); }
+NR_MMSE_HD int nr_irc_group_of(unsigned i, unsigned nre_sym, unsigned nre_full)
+{
+  const unsigned k = nre_sym == 0 ? 0u : nre_sym == nre_full ? i : (unsigned)(((unsigned long long)i * nre_full) / nre_sym);
+  const unsigned g = k / (12u * NR_IRC_GRP_PRB);
+  return g < (unsigned)NR_IRC_NG_MAX ? (int)g : NR_IRC_NG_MAX - 1;
+}
+
 #define NR_MMSE_NM(x) x
 #define NR_MMSE_R double
 #define NR_MMSE_SQRT sqrt
@@ -55,9 +79,20 @@
  * and re_mmse3). Rows are interleaved c16 (re, im): y[a], h[r * nrx + a], and the outputs comp/mag/magb/magr[r]. Noise
  * variance s2: the ZF residual ||y - H x||^2 of every 4th RE over the nrx - nl free dimensions when nrx > nl, else
  * nvar x nvfac. Output gain: nr_mmse3_gain(). Returns s2 (2^-shift units). */
-static inline double nr_mmse3_symbol(int nl, int nrx, int length, const int16_t *const *y, const int16_t *const *h, int shift,
-                                     uint32_t nvar, double nvfac, int16_t qa, int16_t qb, int16_t qr, int16_t *const *comp,
-                                     int16_t *const *mag, int16_t *const *magb, int16_t *const *magr)
+/* Mean of the groups' noise_fac (w[21]) over a grant: the factor of the nvar-based s2 of a square channel (nrx == nl) */
+static inline double nr_irc_mean_noise_fac(const double *wg, int ng)
+{
+  double f = 0.0;
+  for (int g = 0; g < ng; g++)
+    f += wg[g * NR_IRC_WSTRIDE + 21];
+  return ng > 0 ? f / ng : 1.0;
+}
+
+/* D4: the same with the DM-RS interference whitening (wg: groups of NR_IRC_WSTRIDE doubles from nr_irc_final, nre_full = REs of a full symbol of the grant; NULL = scalar noise model). Both passes, the
+ * residual that gives s2 and the solve, run on the whitened samples; wg == NULL is bit-identical to the former function. */
+static inline double nr_mmse3_symbol_w(int nl, int nrx, int length, const int16_t *const *y, const int16_t *const *h, int shift, uint32_t nvar,
+                                       double nvfac, int16_t qa, int16_t qb, int16_t qr, int16_t *const *comp, int16_t *const *mag,
+                                       int16_t *const *magb, int16_t *const *magr, const double *wg, int nre_full)
 {
   const double sc = ldexp(1.0, -shift); /* mode 2's units: G and b in |h|^2 >> shift */
   double gd = 0.0; /* integer sums, exact in double */
@@ -74,7 +109,7 @@ static inline double nr_mmse3_symbol(int nl, int nrx, int length, const int16_t 
   const double gain = nr_mmse3_gain(gd, length, sc);
   double s2 = 0.0;
   if (nrx <= nl)
-    s2 = (double)nvar * sc * nvfac;
+    s2 = (double)nvar * sc * nvfac * (wg ? nr_irc_mean_noise_fac(wg, nr_irc_groups_of_re(nre_full)) : 1.0);
   for (int pass = nrx > nl ? 0 : 1; pass < 2; pass++) {
     double res = 0.0;
     int nres = 0;
@@ -88,15 +123,16 @@ static inline double nr_mmse3_symbol(int nl, int nrx, int length, const int16_t 
           him[r][a] = h[r * nrx + a][2 * i + 1];
         }
       }
+      const double *w = wg ? wg + (size_t)nr_irc_group_of((unsigned)i, (unsigned)length, (unsigned)nre_full) * NR_IRC_WSTRIDE : 0;
       if (pass == 0) {
         double xre[4], xim[4], ainv[4], e = 0.0;
-        const int ok = nr_mmse_exact_re(nl, nrx, hre, him, yre, yim, sc, 0.0, xre, xim, ainv, &e);
+        const int ok = nr_mmse_exact_re_w(nl, nrx, w, hre, him, yre, yim, sc, 0.0, xre, xim, ainv, &e);
         res += ok ? e : 0.0;
         nres += ok;
         continue;
       }
       int16_t z[4][2], mg[4][3];
-      nr_mmse3_re(nl, nrx, hre, him, yre, yim, sc, s2, gain, qa, qb, qr, z, mg);
+      nr_mmse3_re_w(nl, nrx, w, hre, him, yre, yim, sc, s2, gain, qa, qb, qr, z, mg);
       for (int r = 0; r < nl; r++) {
         comp[r][2 * i] = z[r][0];
         comp[r][2 * i + 1] = z[r][1];
@@ -109,5 +145,12 @@ static inline double nr_mmse3_symbol(int nl, int nrx, int length, const int16_t 
       s2 = nres > 0 ? res / ((double)nres * (nrx - nl)) * sc : 0.0;
   }
   return s2;
+}
+
+static inline double nr_mmse3_symbol(int nl, int nrx, int length, const int16_t *const *y, const int16_t *const *h, int shift,
+                                     uint32_t nvar, double nvfac, int16_t qa, int16_t qb, int16_t qr, int16_t *const *comp,
+                                     int16_t *const *mag, int16_t *const *magb, int16_t *const *magr)
+{
+  return nr_mmse3_symbol_w(nl, nrx, length, y, h, shift, nvar, nvfac, qa, qb, qr, comp, mag, magb, magr, 0, 0);
 }
 #endif

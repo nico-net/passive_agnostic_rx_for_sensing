@@ -56,6 +56,7 @@ __thread int nr_dlsch_forced_mask = -1;
 __thread int nr_dlsch_mrc_mode_override = -1;
 __thread int nr_dlsch_irc_override = -1; /* T26d ISAC_RX_MRC_PER_RNTI: per-grant IRC mode (set by the passive decode), -1 = none */
 __thread nr_irc_cov_t nr_irc_dmrs_cov; /* IRC mode 4, nr_irc_cov.h */
+__thread nr_irc_grant_t nr_irc_grant;  /* D4 IRC: the grant's DM-RS whitening (valid = 0 unless the passive decode set it for this grant), nr_irc_cov.h */
 __thread int nr_pdsch_chest_occ_override = -1; /* T26d ISAC_CHEST_OCC_AB, nr_pdsch_passive_decode.c */
 __thread bool nr_pdsch_decode_wide_mrc; /* CRC-validated passive recovery only */
 __thread nr_mmse2_diag_t nr_mmse2_diag;
@@ -899,7 +900,10 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
       mbr[r] = (int16_t *)dl_ch_magb[r];
       mrr[r] = (int16_t *)dl_ch_magr[r];
     }
-    (void)nr_mmse3_symbol(nl, n_rx, length, yr, hr, shift, noise_var, pow(10.0, 21.0 / 10.0), qa, qb, qr, zr, mr, mbr, mrr);
+    /* D4 IRC: the DM-RS covariance whitening of the grant (passive decode, default on; scalar noise model when absent or unusable) */
+    const int irc = nr_irc_grant.valid && nr_irc_grant.nb == n_rx;
+    (void)nr_mmse3_symbol_w(nl, n_rx, length, yr, hr, shift, noise_var, pow(10.0, 21.0 / 10.0), qa, qb, qr, zr, mr, mbr, mrr, irc ? nr_irc_grant.w : NULL,
+                            irc ? nr_irc_grant.nre : 0);
     return;
   }
 

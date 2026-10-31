@@ -3135,6 +3135,12 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_llr_norm)
   add_test(NAME test_nr_llr_norm COMMAND ./test_nr_llr_norm)
 
+  add_executable(test_nr_irc ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_irc_test.cc)
+  target_include_directories(test_nr_irc PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_irc PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_irc)
+  add_test(NAME test_nr_irc COMMAND ./test_nr_irc)
+
   add_executable(test_nr_pdsch_qm_oracle ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_qm_oracle_test.cc
                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c)
   target_include_directories(test_nr_pdsch_qm_oracle PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
