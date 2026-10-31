@@ -25,6 +25,7 @@ extern "C" {
 #include "nr_pdsch_solver.h"
 #include "nr_pdsch_recovery.h"
 #include "nr_pdsch_cell_prealloc.h"
+int nr_pdsch_passive_harqc_state(uint16_t rnti, uint8_t pid, uint8_t ndi); /* nr_pdsch_passive_decode.h */
 /* nr_pdsch_passive_decode.h pulls the whole PHY: only the evidence entry points used here */
 uint16_t nr_pdsch_passive_data_id_current(uint16_t rnti, uint16_t pci, int dmrs_id, bool advance_ok);
 void nr_pdsch_passive_data_id_feed(uint16_t rnti, bool tb_crc_ok);
@@ -262,7 +263,11 @@ TEST(MpciA5Harq, SameRntiAndHarqIdInTwoCellsNeverCombine)
   nr_cell_bind(kCellA);
   ASSERT_EQ(nr_pdsch_passive_harqc_test(0, 0x4601, 3, 1, 0, 2000), 0);
   EXPECT_EQ(nr_pdsch_passive_harqc_test(1, 0x4601, 3, 1, 2, 2000), 1) << "cell A: the retransmission combines";
+  EXPECT_EQ(nr_pdsch_passive_harqc_state(0x4601, 3, 1), 2) << "cell A: the failed TB is held, the monitor lets its retransmission through";
+  EXPECT_EQ(nr_pdsch_passive_harqc_state(0x4601, 3, 0), 0) << "another NDI is another TB: nothing known";
+  EXPECT_EQ(nr_pdsch_passive_harqc_state(0x4601, 4, 1), 0) << "another HARQ process: nothing known";
   nr_cell_bind(kCellB);
+  EXPECT_EQ(nr_pdsch_passive_harqc_state(0x4601, 3, 1), 0) << "cell B: the store is per cell";
   EXPECT_EQ(nr_pdsch_passive_harqc_test(2, 0, 0, 0, 0, 0), 0) << "cell B's store is empty";
   EXPECT_EQ(nr_pdsch_passive_harqc_test(1, 0x4601, 3, 1, 2, 2000), 0) << "cell B: same (rnti, pid), nothing stored in this cell: first transmission, no combine";
   nr_cell_bind(0);

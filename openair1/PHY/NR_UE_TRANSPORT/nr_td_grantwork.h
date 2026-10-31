@@ -115,6 +115,8 @@ int nr_td_grantwork_publish(nr_td_grantwork_t *gw, uint64_t sig, const int16_t *
                             const void *meta, uint32_t meta_len);
 /* Owner gives up: the entry becomes FAILED with `status` (sticky: the same inputs fail the same way). */
 void nr_td_grantwork_abandon(nr_td_grantwork_t *gw, uint64_t sig, int status);
+/* Owner steps back without a verdict (its decode ran elsewhere, e.g. on the GPU pass): the entry returns to EMPTY and stays computable lazily. Releases the compute lock. */
+void nr_td_grantwork_unclaim(nr_td_grantwork_t *gw, uint64_t sig);
 
 /* Shared FEP state (protected by the compute lock: call only between acquire(OWNER) and publish/abandon).
  * The owner transforms only the symbols it needs ([S, S+L) + DM-RS); later computes extend the mask lazily.

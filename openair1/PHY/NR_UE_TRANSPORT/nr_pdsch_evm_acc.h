@@ -34,8 +34,26 @@ typedef struct {
   /* DECODE-RES: decision-directed error per allocation-relative RB on symbols 0, 1 and 3 (row 0/1/2), layer 0, no DM-RS on those symbols */
   float err_rb[3][276];
   uint16_t n_rb[3][276];
+  /* XDIAG (GPU demod, k_tail sums folded by nr_pdsch_gpu_demod_host.c): decision-directed error of the equaliser output the LLRs are cut from, per layer. Lattice mode:
+   * xd_e = sum |z/u - slice|^2, xd_n = REs; moment mode (QPSK, multi-layer): xd_nm REs, xd_p sum |z|^2, xd_s sum |Re z| + |Im z|; xd_ge / xd_gn: layer 0 per group of 48 packed REs */
+  int xd_qm;
+  double xd_e[4], xd_n[4], xd_nm[4], xd_p[4], xd_s[4];
+  float xd_ge[72], xd_gn[72];
 } nr_pdsch_evm_acc_t;
 extern __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc;
+/* RESID (nr_slotphase_resid.h): the position-keyed layer-0 decision-directed error of the GPU equaliser output (k_tail, nr_gpu_xdiag_t rs_e / rs_n), per symbol, of the decode(s) this
+ * thread ran since the queue worker cleared it. `want` is set by the worker (nr_slotphase_resid_want) only for decodes of a flagged slot phase and for a bounded reference budget; the
+ * GPU demod then fills `e` / `n` (summed over the decode's demod calls) and sets `valid`. Keys: see NR_GPU_RS_KEYS in nr_pdsch_gpu_demod.h (48 position keys, then 36 buckets of 8 CRBs). */
+#define NR_RESID_NSYM 14
+#define NR_RESID_KEYS 48
+#define NR_RESID_BKT 36
+#define NR_RESID_N (NR_RESID_KEYS + NR_RESID_BKT)
+typedef struct {
+  int want, valid;
+  float e[NR_RESID_NSYM][NR_RESID_N];
+  uint32_t n[NR_RESID_NSYM][NR_RESID_N];
+} nr_pdsch_resid_t;
+extern __thread nr_pdsch_resid_t nr_pdsch_resid;
 /* LLRZERO ISAC_MMSE2_DIAG=1: per-grant, per-layer statistics of nr_dlsch_mmse mode 2 (CPU path only). Zeroed per decode, printed as MMSE2DIAG. */
 typedef struct {
   int on, shift, nl, qm, gain_k;

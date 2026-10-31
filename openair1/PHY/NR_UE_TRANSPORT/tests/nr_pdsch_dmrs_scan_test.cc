@@ -186,6 +186,41 @@ static void VoteCell(void)
     if (!busy && !quiet) nr_dmrs_scan_vote(0x4000 + (int)(s % 5), s, h, n);
   }
 }
+TEST(PdschDmrsScan, DecodesProveTheRightIdentityAndDemoteAWrongOne)
+{
+  /* PCI 923 OTA 2026-10-30: a UE's top-2 voted ids were often ids of OTHER UEs; its decodes measure DM-RS SNR ~ -6 dB under a wrong id and
+   * +4..+7 dB under its own. The decode evidence reorders the list so the third-voted id gets its turn. */
+  nr_dmrs_scan_reset();
+  nr_dmrs_scan_hit_t a = {1001, 0, 0, 16, 0.9f, 0.4f}, b = {1002, 0, 0, 16, 0.9f, 0.4f}, c = {1003, 0, 0, 16, 0.9f, 0.4f};
+  for (int s = 0; s < 12; s++) {
+    nr_dmrs_scan_hit_t h[3] = {a, b, c};
+    nr_dmrs_scan_vote(0x6100, 200 + s, h, s < 6 ? 2 : 3); /* 1001 and 1002 voted most, 1003 less */
+  }
+  int ids[2];
+  ASSERT_EQ(nr_dmrs_scan_rnti_ids(0x6100, ids, 2), 2);
+  EXPECT_EQ(nr_dmrs_scan_rnti_id_quality(0x6100), 1) << "untested";
+  for (int i = 0; i < 8; i++) { nr_dmrs_scan_note_decode(0x6100, 1001, -6.f); nr_dmrs_scan_note_decode(0x6100, 1002, -5.5f); }
+  EXPECT_EQ(nr_dmrs_scan_rnti_id_quality(0x6100), 1) << "1003 is still untested";
+  ASSERT_EQ(nr_dmrs_scan_rnti_ids(0x6100, ids, 2), 2);
+  EXPECT_EQ(ids[0], 1003) << "the untested id goes ahead of two ids the decodes prove wrong";
+  for (int i = 0; i < 4; i++) nr_dmrs_scan_note_decode(0x6100, 1003, 5.f);
+  EXPECT_EQ(nr_dmrs_scan_rnti_id_quality(0x6100), 2);
+  ASSERT_EQ(nr_dmrs_scan_rnti_ids(0x6100, ids, 2), 2);
+  EXPECT_EQ(ids[0], 1003);
+  nr_dmrs_scan_reset();
+}
+
+TEST(PdschDmrsScan, AFullVoteTableMakesRoomForANewRnti)
+{
+  nr_dmrs_scan_reset();
+  nr_dmrs_scan_hit_t a = {2001, 0, 0, 16, 0.9f, 0.4f};
+  for (int r = 0; r < 300; r++)
+    for (int s = 0; s < 3; s++) nr_dmrs_scan_vote((uint16_t)(0x7000 + r), 1000 * r + s, &a, 1);
+  int ids[2];
+  EXPECT_GE(nr_dmrs_scan_rnti_ids(0x7000 + 299, ids, 2), 1) << "the 300th RNTI still gets its identity";
+  nr_dmrs_scan_reset();
+}
+
 TEST(PdschDmrsScan, ContrastRanksTheUesOwnIdentityAboveCellWideOnes)
 {
   int ids[2];

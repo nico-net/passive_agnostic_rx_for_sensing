@@ -81,5 +81,7 @@ bool nr_tdd_slot_has_downlink(const nr_tdd_config_t *cfg, uint32_t absolute_slot
  * PDSCH possible). Only common UL symbols restrict: dedicated TDD configuration cannot turn them into DL, while
  * flexible symbols may carry a DCI-scheduled PDSCH (TS 38.213 11.1), so they are never excluded. */
 int nr_tdd_pdsch_last_symbol(const nr_tdd_config_t *cfg, uint32_t absolute_slot);
+/* Leading DL symbols of the slot: 14 in a DL slot (and without a valid pattern), nrofDownlinkSymbols in the mixed slot, 0 in an UL or flexible slot. */
+int nr_tdd_pdsch_dl_symbols(const nr_tdd_config_t *cfg, uint32_t absolute_slot);
 
 #endif /* __NR_TDD_PATTERN_H__ */

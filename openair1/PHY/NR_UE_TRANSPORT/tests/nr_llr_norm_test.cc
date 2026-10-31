@@ -293,6 +293,90 @@ TEST(MmseExact, Mode3SymbolKnownNoise)
   }
 }
 
+
+/* RANK34 2026-10-31: output resolution of mode 3 on an ill-conditioned 4x4 channel. The output gain (nr_mmse3_gain) is set by the STRONGEST layer, so the
+ * post-equaliser unit amplitude of a weak layer is a few LSB and the int16 rounding of z and of the thresholds becomes an error floor that does not shrink with the
+ * SNR (link-level bench nr_linklevel_bench ml: 4 layers, 16QAM, RX correlation 0.95, 48 PRB: the chain needed 28.4 dB for 10 % TB BLER against 24.1 dB for the same
+ * float MMSE on the same inputs; with the gain 4x larger 24.7 dB [MEASURED DGX GB10 test]). Here: 4 RX, 4 layers, 16QAM, Kronecker RX correlation 0.95 (exponential),
+ * |h| ~ 300 LSB, 28 dB per RX and layer; the hard-decision bit errors of the int16 chain must stay within 1.3x of the unrounded double MMSE on the same inputs. */
+TEST(MmseExact, Mode3IllConditionedOutputResolution)
+{
+  std::mt19937 rng(5);
+  std::normal_distribution<double> g(0.0, 1.0);
+  const int nl = 4, nrx = 4, len = 2400, shift = 8;
+  const double rho = 0.95, amp = 300.0, sigma = 7.9; /* complex noise variance 2 sigma^2 = 125 (= nvar 1 x nvfac 10^2.1) */
+  double L[4][4] = {};
+  for (int i = 0; i < nrx; i++)
+    for (int j = 0; j <= i; j++) {
+      double v = std::pow(rho, i - j);
+      for (int k = 0; k < j; k++) v -= L[i][k] * L[j][k];
+      L[i][j] = i == j ? std::sqrt(v) : v / L[j][j];
+    }
+  M3Sym s{nl, nrx, len, std::vector<int16_t>(2 * nrx * len), std::vector<int16_t>(2 * nl * nrx * len), std::vector<int>(nl * len), std::vector<int>(nl * len)};
+  std::vector<int> ir(nl * len), ii(nl * len); /* 16QAM level indices 0..3 -> -3 -1 1 3 */
+  const double lv[4] = {-3, -1, 1, 3}, nrm = 1.0 / std::sqrt(10.0);
+  for (int i = 0; i < len; i++) {
+    double hr[4][4], hi[4][4]; /* [layer][rx] */
+    for (int r = 0; r < nl; r++) {
+      double gr[4], gi[4];
+      for (int a = 0; a < nrx; a++) { gr[a] = g(rng) / 1.41; gi[a] = g(rng) / 1.41; }
+      for (int a = 0; a < nrx; a++) {
+        double cr = 0, ci = 0;
+        for (int b = 0; b <= a; b++) { cr += L[a][b] * gr[b]; ci += L[a][b] * gi[b]; }
+        hr[r][a] = amp * cr; hi[r][a] = amp * ci;
+      }
+    }
+    for (int r = 0; r < nl; r++) {
+      ir[r * len + i] = (int)(rng() & 3); ii[r * len + i] = (int)(rng() & 3);
+    }
+    for (int a = 0; a < nrx; a++) {
+      double ar = 0, ai = 0;
+      for (int r = 0; r < nl; r++) {
+        const int16_t qr = (int16_t)lround(hr[r][a]), qi = (int16_t)lround(hi[r][a]);
+        s.h[(r * nrx + a) * 2 * len + 2 * i] = qr;
+        s.h[(r * nrx + a) * 2 * len + 2 * i + 1] = qi;
+        const double xr = lv[ir[r * len + i]] * nrm, xi = lv[ii[r * len + i]] * nrm;
+        ar += qr * xr - qi * xi;
+        ai += qr * xi + qi * xr;
+      }
+      s.y[a * 2 * len + 2 * i] = (int16_t)lround(ar + sigma * g(rng));
+      s.y[a * 2 * len + 2 * i + 1] = (int16_t)lround(ai + sigma * g(rng));
+    }
+  }
+  std::vector<int16_t> z, mg;
+  const double s2 = m3_run(s, shift, 1, std::pow(10.0, 2.1), 20724, 0, 0, z, mg);
+  /* the unrounded double reference: same inputs, same s2, z = x / [A^-1]_ll, threshold mu = (1 - s2 [A^-1]_ll) / [A^-1]_ll * 2/sqrt(10) */
+  const double sc = std::ldexp(1.0, -shift);
+  long bad_chain = 0, bad_ref = 0, n = 0;
+  for (int i = 0; i < len; i++) {
+    int16_t hre[4][4], him[4][4], yre[4], yim[4];
+    for (int a = 0; a < nrx; a++) {
+      yre[a] = s.y[a * 2 * len + 2 * i]; yim[a] = s.y[a * 2 * len + 2 * i + 1];
+      for (int r = 0; r < nl; r++) { hre[r][a] = s.h[(r * nrx + a) * 2 * len + 2 * i]; him[r][a] = s.h[(r * nrx + a) * 2 * len + 2 * i + 1]; }
+    }
+    double xre[4], xim[4], ainv[4];
+    ASSERT_TRUE(nr_mmse_exact_re(nl, nrx, hre, him, yre, yim, sc, s2, xre, xim, ainv, nullptr));
+    for (int r = 0; r < nl; r++) {
+      const double mu = (1.0 - s2 * ainv[r]) / ainv[r], thr = mu * 20724.0 / 32768.0;
+      const int tr = ir[r * len + i], ti = ii[r * len + i];
+      const double ref[2] = {xre[r] / ainv[r], xim[r] / ainv[r]};
+      const double ch[2] = {(double)z[r * 2 * len + 2 * i], (double)z[r * 2 * len + 2 * i + 1]};
+      const int tv[2] = {tr, ti};
+      const double thc = (double)mg[(0 * nl + r) * 2 * len + 2 * i];
+      for (int c = 0; c < 2; c++) {
+        const bool sign1 = tv[c] >= 2, inner = tv[c] == 1 || tv[c] == 2;
+        bad_ref += (ref[c] > 0) != sign1;
+        bad_ref += ((thr - std::fabs(ref[c])) > 0) != inner;
+        bad_chain += (ch[c] > 0) != sign1;
+        bad_chain += ((thc - std::fabs(ch[c])) > 0) != inner;
+        n += 2;
+      }
+    }
+  }
+  std::printf("MmseExact ill-conditioned 4x4 16QAM: bit errors int16 chain %ld, unrounded double %ld of %ld (gain %.0f)\n", bad_chain, bad_ref, n, nr_mmse3_gain(1.0, 1, 1.0));
+  EXPECT_LE(bad_chain, bad_ref * 13 / 10 + 20) << "the int16 output resolution costs bit errors on a weak layer";
+}
+
 /* MMSE3GPU: the GPU mode 3 (libpdsch_gpu.so, ISAC_PDSCH_GPU_EXACT_DEMOD_MMSE3) against nr_mmse3_symbol, bit for bit, on a
  * synthetic 13-symbol grant per (Nl, Qm). Skipped without the module or a device (the module is built next to this test). */
 #include <dlfcn.h>

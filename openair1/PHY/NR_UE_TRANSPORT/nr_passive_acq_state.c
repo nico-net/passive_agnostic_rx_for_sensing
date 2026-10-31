@@ -250,6 +250,18 @@ bool nr_passive_acq_tdd_pdsch_last_symbols(uint32_t dci_abs_slot, int mu, int n,
     last[k] = (int8_t)nr_tdd_pdsch_last_symbol(&t, dci_abs_slot + (uint32_t)k);
   return true;
 }
+bool nr_passive_acq_tdd_pdsch_dl_symbols(uint32_t dci_abs_slot, int mu, int n, int8_t *dl)
+{
+  pthread_mutex_lock(&g_lock);
+  const nr_tdd_config_t t = g_tdd;
+  const int ref_mu = g_tdd_ref_mu;
+  pthread_mutex_unlock(&g_lock);
+  if (!t.valid || ref_mu < 0 || ref_mu != mu || dl == NULL || n <= 0)
+    return false;
+  for (int k = 0; k < n; k++)
+    dl[k] = (int8_t)nr_tdd_pdsch_dl_symbols(&t, dci_abs_slot + (uint32_t)k);
+  return true;
+}
 uint32_t nr_passive_acq_tdd_period_slots(int mu)
 {
   pthread_mutex_lock(&g_lock);

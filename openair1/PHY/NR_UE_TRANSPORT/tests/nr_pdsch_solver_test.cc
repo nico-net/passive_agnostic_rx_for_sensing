@@ -1,6 +1,7 @@
 // T26b grant solver (nr_pdsch_solver.c): spec helpers and the search -> candidate -> solved state machine against a
 // simulated cell whose CRC oracle passes only the true (reading, S per TDA index, add_pos, table).
 #include <cstdlib>
+#include <algorithm>
 #include <atomic>
 #include <random>
 #include <thread>
@@ -10,6 +11,7 @@ extern "C" {
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 #include "nr_pdsch_solver.h"
+#include "nr_signal_evidence.h"
 }
 extern "C" configmodule_interface_t *uniqCfg = nullptr;
 extern "C" void exit_function(const char *file, const char *function, const int line, const char *s, const int assert)
@@ -789,6 +791,201 @@ TEST(TdaField, NsaCellLearnsRowsFromCrcPasses)
   EXPECT_EQ(nr_tda_field_rows(16, v1, 49, 9, 2, S, L, &det), 0); /* S0 L14 does not fit a mixed slot; nothing learnt there */
 }
 
+TEST(TdaField, DedicatedListWiderThanTwoBitsIsLearntFromCrcPasses)
+{
+  /* PCI 415 on air (2026-10-29): SIB1 gives 8 common rows (S1/S2 only, field width 3), the C-RNTI DCIs follow a dedicated list
+   * whose row S0 L14 is not among them; bit 16 = 1 <=> S0 L14 decodes. The learner must not be held to the common list's width. */
+  nr_tda_field_reset();
+  const uint8_t S8[8] = {1, 1, 1, 1, 2, 2, 2, 2}, L8[8] = {13, 12, 6, 4, 12, 11, 5, 3};
+  nr_tda_field_set_rows(S8, L8, 8);
+  const nr_dci_bits_t v0 = tf_bits("1100000000100000000000000100011000110010010011000"), v1 = tf_bits("1100000000100000100000000100011000110010010011000");
+  uint8_t S[2], L[2];
+  bool det = true;
+  EXPECT_EQ(nr_tda_field_rows(16, v1, 49, 13, 2, S, L, &det), 0); /* full slot, nothing learnt: the solver's reading stands */
+  EXPECT_FALSE(det);
+  for (int i = 0; i < 30; i++) { nr_tda_field_note_ok(16, v0, 49, false, 1, 13); nr_tda_field_note_ok(16, v1, 49, false, 0, 14); }
+  EXPECT_EQ(nr_tda_field_rows(16, v1, 49, 13, 2, S, L, &det), 1);
+  EXPECT_TRUE(det);
+  EXPECT_EQ(S[0], 0); EXPECT_EQ(L[0], 14); /* the learnt row, not a common-list row */
+  EXPECT_EQ(nr_tda_field_rows(16, v0, 49, 13, 2, S, L, &det), 1);
+  EXPECT_EQ(S[0], 1); EXPECT_EQ(L[0], 13);
+}
+
+TEST(TdaField, FourBitFieldIsLearnt)
+{
+  /* a 16-row dedicated list: values 4 and 5 of bits 16..19 name different rows; their 1..3-bit prefixes are equal */
+  nr_tda_field_reset();
+  const nr_dci_bits_t a = tf_bits("1100000000100000010000000100011000110010010011000"), b = tf_bits("1100000000100000010100000100011000110010010011000");
+  EXPECT_EQ(nr_dci_bits_field(&a, 49, 16, 4), 4u);
+  EXPECT_EQ(nr_dci_bits_field(&b, 49, 16, 4), 5u);
+  for (int i = 0; i < 30; i++) { nr_tda_field_note_ok(16, a, 49, false, 2, 12); nr_tda_field_note_ok(16, b, 49, false, 0, 14); }
+  uint8_t S[2], L[2];
+  bool det = false;
+  EXPECT_EQ(nr_tda_field_rows(16, b, 49, 13, 2, S, L, &det), 1);
+  EXPECT_TRUE(det);
+  EXPECT_EQ(S[0], 0); EXPECT_EQ(L[0], 14);
+  EXPECT_EQ(nr_tda_field_rows(16, a, 49, 13, 2, S, L, &det), 1);
+  EXPECT_EQ(S[0], 2); EXPECT_EQ(L[0], 12);
+}
+
+TEST(TdaField, ANewCellForgetsTheLearntFieldButKeepsItsSib1Rows)
+{
+  nr_tda_field_reset();
+  const uint8_t S3[3] = {1, 1, 1}, L3[3] = {13, 5, 3};
+  nr_tda_field_set_rows(S3, L3, 3);
+  const nr_dci_bits_t v0 = tf_bits("1100000000100000000000000100011000110010010011000"), v1 = tf_bits("1100000000100000100000000100011000110010010011000");
+  for (int i = 0; i < 30; i++) { nr_tda_field_note_ok(16, v0, 49, false, 1, 13); nr_tda_field_note_ok(16, v1, 49, false, 0, 14); }
+  uint8_t S[2], L[2];
+  bool det = false;
+  ASSERT_EQ(nr_tda_field_rows(16, v1, 49, 13, 2, S, L, &det), 1);
+  ASSERT_TRUE(det);
+  nr_tda_field_forget();
+  EXPECT_EQ(nr_tda_field_rows(16, v1, 49, 13, 2, S, L, &det), 0); /* full slot, nothing learnt for this cell yet */
+  EXPECT_FALSE(det);
+  EXPECT_EQ(nr_tda_field_rows(16, v1, 49, 9, 2, S, L, &det), 2); /* the SIB1 rows are still the mixed-slot prior */
+  EXPECT_EQ(L[0], 5);
+}
+
+TEST(TdaField, AValueThatNeverPassesFindsItsCrossSlotRow)
+{
+  /* PCI 415 shape (2026-10-30 OTA): 7 DL slots, special slot 7 (6 DL symbols, 4 UL), UL 8-9. The DCIs of slot 6 carry TDRA values the two
+   * learnt rows do not explain and never pass at K0 = 0. Exploration walks the TDD-legal candidates on those grants; the first CRC pass is learnt. */
+  nr_tda_field_reset();
+  const uint8_t S8[8] = {1, 1, 1, 1, 2, 2, 2, 2}, L8[8] = {13, 12, 6, 4, 12, 11, 5, 3};
+  nr_tda_field_set_rows(S8, L8, 8);
+  const nr_dci_bits_t v0 = tf_bits("1100000000100000000000000100011000110010010011000"), v4 = tf_bits("1100000000100000100000000100011000110010010011000"),
+                      v2 = tf_bits("1100000000100000010000000100011000110010010011000");
+  EXPECT_EQ(nr_dci_bits_field(&v2, 49, 16, 3), 2u);
+  for (int i = 0; i < 30; i++) { nr_tda_field_note_ok(16, v0, 49, false, 1, 13); nr_tda_field_note_ok(16, v4, 49, false, 0, 14); }
+  const int8_t last6[3] = {13, 9, -1}, dl6[3] = {14, 6, 0}; /* DCI in slot 6: slot 7 is the special slot, slot 8 UL */
+  uint8_t S[2], L[2], K0[2];
+  bool det = false;
+  ASSERT_EQ(nr_tda_field_rows_k0(16, v2, 49, last6, dl6, 2, S, L, K0, &det), 1) << "no evidence yet: the SIB1 row of value 2 (a guess)";
+  EXPECT_TRUE(det);
+  EXPECT_EQ(K0[0], 0); EXPECT_EQ(S[0], 1); EXPECT_EQ(L[0], 6);
+  for (int i = 0; i < 32; i++) nr_tda_field_note_result(16, v2, 49, false, false);
+  bool found = false;
+  for (int i = 0; i < 12 && !found; i++) {
+    ASSERT_EQ(nr_tda_field_rows_k0(16, v2, 49, last6, dl6, 2, S, L, K0, &det), 1);
+    ASSERT_LE(K0[0], 1) << "slot 8 is UL: no K0 = 2 candidate";
+    ASSERT_LE(S[0] + L[0] - 1, K0[0] ? 9 : 13) << "every candidate fits its slot";
+    if (K0[0] == 1 && S[0] == 1 && L[0] == 5) { /* the transmitter's row: CRC pass */
+      nr_tda_field_note_ok_k0(16, v2, 49, false, 1, 5, 1);
+      found = true;
+    } else
+      nr_tda_field_note_result(16, v2, 49, false, false);
+  }
+  ASSERT_TRUE(found) << "the candidate list holds K0 1, S 1, L 5 (ends at the last DL symbol of the special slot)";
+  for (int i = 0; i < 3; i++) {
+    ASSERT_EQ(nr_tda_field_rows_k0(16, v2, 49, last6, dl6, 2, S, L, K0, &det), 1);
+    EXPECT_EQ(K0[0], 1); EXPECT_EQ(S[0], 1); EXPECT_EQ(L[0], 5);
+  }
+  ASSERT_EQ(nr_tda_field_rows_k0(16, v0, 49, last6, dl6, 2, S, L, K0, &det), 1);
+  EXPECT_EQ(K0[0], 0); EXPECT_EQ(S[0], 1); EXPECT_EQ(L[0], 13); /* the learnt same-slot rows are untouched */
+}
+
+TEST(PmExplore, AnUnreadBitThatNeverPassesFindsInterleavedMapping)
+{
+  /* PCI 415 (2026-10-30 OTA DCIBITS): the one pre-MCS bit at 19 (after a 3-bit TDRA field at 16) never passes when 1 (0/379). */
+  nr_tda_field_forget();
+  const nr_dci_bits_t b0 = tf_bits("1100000000100000000000000100011000110010010011000"), b1 = tf_bits("1100000000100000000100000100011000110010010011000");
+  EXPECT_EQ(nr_dci_bits_field(&b1, 49, 19, 1), 1u);
+  EXPECT_EQ(nr_pm_hyp(19, 1, b1, 49), NR_PM_HYP_PLAIN) << "no evidence: plain";
+  for (int i = 0; i < 40; i++) { nr_pm_note_result(19, 1, b0, 49, NR_PM_HYP_PLAIN, i % 2); nr_pm_note_result(19, 1, b1, 49, NR_PM_HYP_PLAIN, false); }
+  EXPECT_EQ(nr_pm_hyp(19, 1, b0, 49), NR_PM_HYP_PLAIN) << "value 0 passes plain";
+  const int h1 = nr_pm_hyp(19, 1, b1, 49), h2 = nr_pm_hyp(19, 1, b1, 49);
+  EXPECT_NE(h1, NR_PM_HYP_PLAIN);
+  EXPECT_NE(h1, h2) << "the hypotheses are tried in turn";
+  nr_pm_note_result(19, 1, b1, 49, NR_PM_HYP_ILV2, false);
+  nr_pm_note_result(19, 1, b1, 49, NR_PM_HYP_ILV4, true);
+  for (int i = 0; i < 3; i++) EXPECT_EQ(nr_pm_hyp(19, 1, b1, 49), NR_PM_HYP_ILV4) << "learnt";
+  nr_tda_field_forget();
+  EXPECT_EQ(nr_pm_hyp(19, 1, b1, 49), NR_PM_HYP_PLAIN) << "a new cell starts over";
+}
+
+TEST(TdaField, AnUndetectedFieldBootstrapsFromADeadValue)
+{
+  /* PCI 403 (2026-10-30 OTA): no SIB1 list, field at bit 15; value 0 = S1 L13 passes, value 1 = S2 L12 is never tried by the reading or
+   * the S toggle, so it never passes and the field is never detected. Exploration before detection finds it. */
+  nr_tda_field_reset();
+  const nr_dci_bits_t v0 = tf_bits("110000000010000000000000010001100011001001001100"), v1 = tf_bits("110000000010000100000000010001100011001001001100");
+  EXPECT_EQ(nr_dci_bits_field(&v1, 48, 15, 1), 1u);
+  for (int i = 0; i < 10; i++) { nr_tda_field_note_ok(15, v0, 48, false, 1, 13); nr_tda_field_note_result(15, v0, 48, false, true); }
+  const int8_t last[3] = {13, 13, 13}, dl[3] = {14, 14, 14};
+  uint8_t S[2], L[2], K0[2];
+  bool det = true;
+  for (int i = 0; i < 31; i++) nr_tda_field_note_result(15, v1, 48, false, false);
+  EXPECT_EQ(nr_tda_field_rows_k0(15, v1, 48, last, dl, 2, S, L, K0, &det), 0) << "31 failures: not yet";
+  EXPECT_FALSE(det);
+  nr_tda_field_note_result(15, v1, 48, false, false);
+  ASSERT_EQ(nr_tda_field_rows_k0(15, v1, 48, last, dl, 2, S, L, K0, &det), 1);
+  EXPECT_FALSE(det);
+  EXPECT_EQ(K0[0], 0); EXPECT_EQ(S[0], 2); EXPECT_EQ(L[0], 12) << "the untried start symbol first";
+  for (int i = 0; i < 8; i++) nr_tda_field_note_ok_k0(15, v1, 48, false, 2, 12, 0);
+  ASSERT_EQ(nr_tda_field_rows_k0(15, v1, 48, last, dl, 2, S, L, K0, &det), 1);
+  EXPECT_TRUE(det) << "two values, two rows: rule (b) detects the field";
+  EXPECT_EQ(S[0], 2); EXPECT_EQ(L[0], 12);
+  ASSERT_EQ(nr_tda_field_rows_k0(15, v0, 48, last, dl, 2, S, L, K0, &det), 1);
+  EXPECT_EQ(S[0], 1); EXPECT_EQ(L[0], 13);
+}
+
+TEST(TdaField, AnUndetectedWiderFieldBootstrapsFromItsSecondBit)
+{
+  /* PCI 403 (2026-10-30 OTA, DCIBITS): bit 15 is always 0, bit 16 = 1 never passes (0/1396), value 0 passes rarely (436/6604); a
+   * second reading of the same DCIs puts the field at bit 14. The 2-bit value 01 must be explored. */
+  nr_tda_field_reset();
+  const nr_dci_bits_t v0 = tf_bits("110000000010000000000000010001100011001001001100"), v1 = tf_bits("110000000010000010000000010001100011001001001100");
+  ASSERT_EQ(nr_dci_bits_field(&v1, 48, 15, 1), 0u);
+  ASSERT_EQ(nr_dci_bits_field(&v1, 48, 16, 1), 1u);
+  const int8_t last[3] = {13, 13, 13}, dl[3] = {14, 14, 14};
+  uint8_t S[2], L[2], K0[2];
+  bool det = true;
+  for (int i = 0; i < 400; i++) {
+    nr_tda_field_note_dci(15, i % 5 ? v0 : v1, 48, false);
+    nr_tda_field_note_dci(14, i % 5 ? v0 : v1, 48, false);
+    if (i % 5) {
+      const bool ok = i % 10 == 1;
+      if (ok) nr_tda_field_note_ok(15, v0, 48, false, 1, 13);
+      nr_tda_field_note_result(15, v0, 48, false, ok);
+      nr_tda_field_note_result(14, v0, 48, false, ok);
+    } else {
+      nr_tda_field_note_result(15, v1, 48, false, false);
+      nr_tda_field_note_result(14, v1, 48, false, false);
+    }
+  }
+  ASSERT_EQ(nr_tda_field_rows_k0(15, v1, 48, last, dl, 2, S, L, K0, &det), 1);
+  EXPECT_FALSE(det);
+  EXPECT_EQ(S[0], 2); EXPECT_EQ(L[0], 12);
+}
+
+TEST(TdaField, AStrayPassDoesNotHideADeadValue)
+{
+  /* PCI 403 (2026-10-30 OTA, learner dump): value 01 passed ONCE (S1 L13, the solver's reading) in 1453 decodes, value 00 1 in 13. The
+   * stray pass neither makes the value alive nor a learnt row; the explored row's third pass detects the field and is then used. */
+  nr_tda_field_reset();
+  const nr_dci_bits_t v0 = tf_bits("110000000010000000000000010001100011001001001100"), v1 = tf_bits("110000000010000010000000010001100011001001001100");
+  const int8_t last[3] = {13, 13, 13}, dl[3] = {14, 14, 14};
+  uint8_t S[2], L[2], K0[2];
+  bool det = true;
+  for (int i = 0; i < 260; i++) {
+    const bool ok = i % 13 == 0;
+    if (ok) nr_tda_field_note_ok(15, v0, 48, false, 1, 13);
+    nr_tda_field_note_result(15, v0, 48, false, ok);
+  }
+  nr_tda_field_note_ok(15, v1, 48, false, 1, 13); /* the stray pass */
+  nr_tda_field_note_result(15, v1, 48, false, true);
+  for (int i = 0; i < 300; i++) nr_tda_field_note_result(15, v1, 48, false, false);
+  ASSERT_EQ(nr_tda_field_rows_k0(15, v1, 48, last, dl, 2, S, L, K0, &det), 1);
+  EXPECT_FALSE(det);
+  EXPECT_EQ(S[0], 2); EXPECT_EQ(L[0], 12) << "explored, not the stray row";
+  for (int i = 0; i < 3; i++) { nr_tda_field_note_ok_k0(15, v1, 48, false, 2, 12, 0); nr_tda_field_note_result(15, v1, 48, false, true); }
+  ASSERT_EQ(nr_tda_field_rows_k0(15, v1, 48, last, dl, 2, S, L, K0, &det), 1);
+  EXPECT_TRUE(det) << "three passes of the explored row detect the field";
+  EXPECT_EQ(S[0], 2); EXPECT_EQ(L[0], 12);
+  ASSERT_EQ(nr_tda_field_rows_k0(15, v0, 48, last, dl, 2, S, L, K0, &det), 1);
+  EXPECT_EQ(S[0], 1); EXPECT_EQ(L[0], 13);
+}
+
 TEST(TdaField, UncorrelatedBitIsNotAccepted)
 {
   nr_tda_field_reset();
@@ -845,13 +1042,13 @@ TEST(PdschSolver, FullTableReusesOnlyIdleEntries)
 {
   nr_pdsch_solver_reset();
   nr_pdsch_solver_set_now(10000);
-  for (int i = 0; i < 64; i++) EXPECT_GT(PlanProbes((uint16_t)(0x4000 + i), 8), 0);
+  for (int i = 0; i < NR_PDSCH_SOLVER_RNTIS; i++) EXPECT_GT(PlanProbes((uint16_t)(0x4000 + i), 8), 0);
   nr_pdsch_solver_set_now(12000);
-  EXPECT_EQ(PlanProbes(0x5000, 8), 0); /* all active within 2 s: refused */
+  EXPECT_EQ(PlanProbes(0x6000, 8), 0); /* all active within 2 s: refused */
   nr_pdsch_solver_set_now(14500);
-  for (int i = 1; i < 64; i++) PlanProbes((uint16_t)(0x4000 + i), 8); /* 0x4000 stays idle */
-  EXPECT_GT(PlanProbes(0x5000, 8), 0); /* reuses 0x4000's entry */
-  EXPECT_EQ(PlanProbes(0x5001, 8), 0); /* nothing else idle */
+  for (int i = 1; i < NR_PDSCH_SOLVER_RNTIS; i++) PlanProbes((uint16_t)(0x4000 + i), 8); /* 0x4000 stays idle */
+  EXPECT_GT(PlanProbes(0x6000, 8), 0); /* reuses 0x4000's entry */
+  EXPECT_EQ(PlanProbes(0x6001, 8), 0); /* nothing else idle */
   nr_pdsch_solver_reset();
 }
 
@@ -1116,4 +1313,548 @@ TEST(ProbeGate, ConcurrentPlannersShareTheBucketAndUnusedProbesReturn)
   EXPECT_EQ(nr_probe_gate_reserve(&g, 3, -1, 24, &rb), 4) << "no ring: tokens refill at 0.5/slot up to the burst";
   nr_probe_gate_release(&g, &rb);
   EXPECT_NEAR(g.tokens, 4.0, 1e-9);
+}
+
+
+/* ---- PARK (nr_signal_evidence.h): decode effort follows the DM-RS evidence of the RNTI against the cell's own noise floor ---- */
+namespace {
+struct ParkSim {
+  std::mt19937 rng{12345};
+  nse_ref_t R;
+  double noise_mu = -7.0, noise_sd = 2.5, pass_mu = 3.0, pass_sd = 4.0; // real signals of the cell: 3 +- 4 dB (weakest tenth: -2.1 dB)
+  double g(double mu, double sd) { return std::normal_distribution<double>(mu, sd)(rng); }
+  ParkSim()
+  {
+    memset(&R, 0, sizeof R);
+    for (int i = 0; i < 6000; i++) nse_ref_add(&R, (float)g(noise_mu, noise_sd)); // decodes of unsolved RNTIs: wrong hypotheses
+    for (int i = 0; i < 60; i++) nse_ref_note_pass(&R, (float)g(pass_mu, pass_sd)); // TB passes of solved RNTIs
+  }
+  /* one grant of an RNTI decoded under K = 14 hypothesis classes; class 0 carries the RNTI at sig_mu (< -90: no class sees it) */
+  nse_event_t grant(nse_rnti_t *s, uint64_t abs, double sig_mu, int K = 14, bool cover = true)
+  {
+    nse_event_t last = NSE_NONE;
+    for (int h = 0; h < K; h++) {
+      const double v = (h == 0 && sig_mu > -90.0) ? g(sig_mu, noise_sd) : g(noise_mu, noise_sd);
+      const nse_event_t e = nse_note(s, &R, abs, (uint32_t)h, (float)v, false, false, cover);
+      if (e != NSE_NONE) last = e;
+    }
+    return last;
+  }
+};
+} // namespace
+
+TEST(Park, NoiseFloorRntiIsParkedWithinBoundedGrants)
+{
+  int parked = 0, worst = 0;
+  double mean = 0;
+  const int trials = 200;
+  for (int t = 0; t < trials; t++) {
+    ParkSim sim;
+    sim.rng.seed(1000 + t);
+    nse_rnti_t s;
+    memset(&s, 0, sizeof s);
+    int at = -1;
+    for (int k = 1; k <= 300 && at < 0; k++) {
+      sim.grant(&s, (uint64_t)k, -100.0);
+      if (s.parked) at = k;
+    }
+    if (at > 0) { parked++; mean += at; worst = std::max(worst, at); }
+  }
+  printf("[PARK] noise-floor RNTI: parked %d/%d, mean %.1f grants, worst %d\n", parked, trials, mean / std::max(parked, 1), worst);
+  EXPECT_GE(parked, trials * 99 / 100);
+  EXPECT_LE(mean / std::max(parked, 1), 40.0);
+}
+
+TEST(Park, WeakButRealRntiIsNotParkedBeyondTheErrorRate)
+{
+  // a signal on one of 14 classes: the weakest tenth of the cell's real signals, and a typical one; 500 grants each
+  const double lvl[2] = {3.0 - 1.2816 * 4.0, 3.0};
+  for (int c = 0; c < 2; c++) {
+    int fp = 0;
+    const int trials = 300;
+    for (int t = 0; t < trials; t++) {
+      ParkSim sim;
+      sim.rng.seed(5000 + t);
+      nse_rnti_t s;
+      memset(&s, 0, sizeof s);
+      bool ever = false;
+      for (int k = 1; k <= 500; k++) { sim.grant(&s, (uint64_t)k, lvl[c]); ever |= s.parked; }
+      fp += ever;
+    }
+    printf("[PARK] real RNTI at %.1f dB: ever parked in %d/%d (%.1f %%), design bound beta = %.0f %%\n", lvl[c], fp, trials, 100.0 * fp / trials,
+           100.0 * NSE_BETA);
+    EXPECT_LE(fp, (int)(trials * 3 * NSE_BETA)) << "level " << lvl[c];
+  }
+}
+
+TEST(Park, ParkedRntiGainingSignalIsUnparkedWithinTheBound)
+{
+  int unparked = 0, worst = 0;
+  double mean = 0;
+  const int trials = 100;
+  for (int t = 0; t < trials; t++) {
+    ParkSim sim;
+    sim.rng.seed(9000 + t);
+    nse_rnti_t s;
+    memset(&s, 0, sizeof s);
+    uint64_t abs = 0;
+    for (int k = 0; k < 300 && !s.parked; k++) sim.grant(&s, ++abs, -100.0);
+    ASSERT_TRUE(s.parked);
+    // the UE turns toward us: the weakest tenth level; only the re-tested grants are decoded
+    int at = -1;
+    for (uint32_t gno = 1; gno <= 4000 && at < 0; gno++) {
+      if (!nse_due(&s, gno)) continue;
+      sim.grant(&s, ++abs, 3.0 - 1.2816 * 4.0);
+      if (!s.parked) at = (int)gno;
+    }
+    if (at > 0) { unparked++; mean += at; worst = std::max(worst, at); }
+  }
+  printf("[PARK] un-park after the UE gains signal: %d/%d, mean %.0f grants, worst %d (thinning cap 1 in %d)\n", unparked, trials,
+         mean / std::max(unparked, 1), worst, 1 << NSE_THIN_MAX_SHIFT);
+  EXPECT_EQ(unparked, trials);
+  EXPECT_LE(worst, 2000);
+}
+
+TEST(Park, NoDecisionWithoutMeasuredReferenceShapeOrSearchCoverage)
+{
+  ParkSim sim;
+  nse_rnti_t s;
+  memset(&s, 0, sizeof s);
+  for (int k = 1; k <= 400; k++) sim.grant(&s, (uint64_t)k, -100.0, 14, false); // the search has not covered the hypotheses yet
+  EXPECT_FALSE(s.parked);
+  nse_ref_t small;
+  memset(&small, 0, sizeof small); // below the reference sample size, no TB passes seen
+  nse_rnti_t s2;
+  memset(&s2, 0, sizeof s2);
+  for (int k = 1; k <= 100; k++)
+    for (int h = 0; h < 14; h++) nse_note(&s2, &small, (uint64_t)k, (uint32_t)h, -7.f, false, false, true);
+  EXPECT_FALSE(s2.parked);
+  ParkSim sim2;
+  sim2.R.pr_n = 0; // pool ready but no real signal seen in this cell: the alternative is unknown
+  nse_rnti_t s3;
+  memset(&s3, 0, sizeof s3);
+  for (int k = 1; k <= 400; k++) sim2.grant(&s3, (uint64_t)k, -100.0);
+  EXPECT_FALSE(s3.parked);
+}
+
+TEST(Park, ASolvedRntisDecodesNeverJoinTheNoiseReference)
+{
+  ParkSim sim;
+  const uint64_t n0 = sim.R.n;
+  nse_rnti_t s;
+  memset(&s, 0, sizeof s);
+  for (int k = 1; k <= 50; k++) nse_note(&s, &sim.R, (uint64_t)k, 0, 12.f, true, true, true);
+  EXPECT_EQ(sim.R.n, n0);
+  EXPECT_FALSE(s.parked);
+}
+
+TEST(Park, GateMarginIsTightenedOnlyByTheCellsOwnDecodes)
+{
+  nse_gate_t G;
+  memset(&G, 0, sizeof G);
+  EXPECT_DOUBLE_EQ(nse_gate_margin(&G, 5.0), 5.0) << "no data: the design margin";
+  std::mt19937 rng(7);
+  for (int i = 0; i < 20000; i++) { // margins -5..15 dB, CRC passes only from margin 0 up (probability 0.5)
+    const double m = -5.0 + 20.0 * (rng() % 100000) / 100000.0;
+    nse_gate_note(&G, m, m >= 0.0 && (rng() & 1));
+  }
+  const double M = nse_gate_margin(&G, 5.0);
+  printf("[PARK] cell-measured gate margin %.1f dB (design 5.0)\n", M);
+  EXPECT_LE(M, 0.0 + 1e-9);
+  EXPECT_GE(M, -1.0) << "passes begin at margin 0: the safe region ends there";
+  nse_gate_t H;
+  memset(&H, 0, sizeof H);
+  for (int i = 0; i < 20000; i++) nse_gate_note(&H, -4.5 + 0.5 * (i % 3), (i % 50) == 0); // passes at margin -4.5: nothing to gate
+  EXPECT_DOUBLE_EQ(nse_gate_margin(&H, 5.0), 5.0);
+}
+
+TEST(Park, SolverParksANoiseRntiThinsItsSearchAndKeepsRetesting)
+{
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(77);
+  Cell cell; // one RNTI solves, and its TB passes show the cell what a real signal looks like
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? cell.truth : cell.wrong).push_back((uint16_t)i);
+  ASSERT_GT(RunCell(cell, 0x8f5a, -1, 400, rng), 0);
+  auto noise = [&] { return (float)std::normal_distribution<double>(-7.0, 2.5)(rng); };
+  auto real = [&] { return (float)std::normal_distribution<double>(3.0, 4.0)(rng); };
+  const uint16_t layout = 10;
+  nr_pdsch_solver_reading_t rd0 = {&layout, 1, 16, 1, 1, 2};
+  // background RNTIs fill the cell's noise reference (never solved: wrong hypotheses)
+  for (uint16_t r = 0x2001; r < 0x2001 + 30; r++) {
+    nr_dci_bits_t p = {{42, 0, 0}};
+    nr_pdsch_solver_set_now(10);
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(r, p, 49, 2, 2, &rd0, 1, 8, v);
+    for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, false, true);
+    for (int k = 0; k < 120; k++) nr_pdsch_solver_note_dmrs(r, 10, (uint32_t)(k % 14), noise(), false, true, 2, 0, false);
+  }
+  for (int k = 0; k < 20; k++) nr_pdsch_solver_note_dmrs(0x8f5a, 5, 0, real(), true, false, 2, 0, true);
+  const uint16_t victim = 0x9f52;
+  const uint16_t lay2 = 11;
+  nr_pdsch_solver_reading_t rd = {&lay2, 1, 16, 1, 1, 2};
+  int planned_active = 0, planned_parked = 0, parked_grants = 0;
+  for (int g = 1; g <= 4000; g++) {
+    nr_dci_bits_t p = {{(uint64_t)g, 0, 0}};
+    nr_pdsch_solver_set_now((uint64_t)(100 + g));
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const bool was_parked = nr_pdsch_solver_parked(victim);
+    const int n = nr_pdsch_solver_plan(victim, p, 49, 2, 2, &rd, 1, 8, v);
+    (was_parked ? planned_parked : planned_active) += n > 0;
+    parked_grants += was_parked;
+    for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, false, true);
+    for (int h = 0; h < n * 2; h++) nr_pdsch_solver_note_dmrs(victim, (uint64_t)(100 + g), (uint32_t)(h % 14), noise(), false, true, 2, 0, false);
+  }
+  printf("[PARK] solver: active grants planned %d, parked grants %d of which re-tested %d\n", planned_active, parked_grants, planned_parked);
+  EXPECT_TRUE(nr_pdsch_solver_parked(victim));
+  EXPECT_GT(parked_grants, 1500);
+  EXPECT_GT(planned_parked, 0) << "never to zero: periodic re-test";
+  EXPECT_LT(planned_parked * 8, parked_grants) << "thinned";
+  EXPECT_FALSE(nr_pdsch_solver_parked(0x8f5a)) << "a solved RNTI with signal is never parked";
+}
+
+/* ===== A1 / A2 / A3: time to the first CRC of a NEW RNTI (SEEDBACKOFF, SEEDTUPLES, pool identities) =====
+ * [SIMULATED] cells: RRC templates (layout set, add_pos, MCS table, S per TDA index, DM-RS scrambling) and RNTIs on them; a probe passes
+ * the CRC iff it carries its RNTI's template on all of: reading, S, add_pos, table (Qm, R) and scrambling. */
+namespace {
+struct Tmpl {
+  std::vector<uint16_t> truth;
+  int add_pos, table;
+  int S_true[2];
+};
+struct Sim {
+  std::vector<uint16_t> wrong;
+  std::vector<Tmpl> t;
+  int key = 7;
+  std::vector<uint16_t> alt;   // the CORESET / CSI-RS ids the caller offers every RNTI (non-own list)
+};
+struct SimOut { int first_crc = -1, solved = -1, probes = 0, probes_after_200 = 0; };
+// Runs one RNTI of template `ti` whose DM-RS scrambling is `scr` for up to max_grants grants. own_after >= 0: the blind scan delivers
+// the RNTI's own identity `scr` from that grant on (own mode); pool: the cell's pool ids offered to the planner while the RNTI has none.
+SimOut SimRnti(const Sim &s, uint16_t rnti, int ti, int32_t scr, int own_after, const std::vector<int32_t> &pool, int max_grants,
+               std::mt19937 &rng, float fit = -1.f, bool full_after = false)
+{
+  std::vector<nr_pdsch_solver_reading_t> rd;
+  rd.push_back({s.wrong.data(), (int)s.wrong.size(), 16, 1, 1, 0, fit});
+  for (auto &t : s.t) rd.push_back({t.truth.data(), (int)t.truth.size(), 16, 1, 1, 0, fit});
+  SimOut o;
+  static uint64_t now = 1000;
+  for (int g = 0; g < max_grants; g++) {
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    const int tda = (int)(p.w[0] & 1);
+    const uint8_t mcs = (g % 3 == 0) ? 2 : 0;
+    const bool own = own_after >= 0 && g >= own_after;
+    const int32_t one[1] = {scr};
+    if (own) nr_pdsch_solver_set_alt_scr32(s.key, one, 1, true, true);
+    else nr_pdsch_solver_set_alt_scr(s.key, s.alt.data(), (int)s.alt.size(), false);
+    if (!own) nr_pdsch_solver_set_pool_ids(pool.data(), (int)pool.size());
+    nr_pdsch_solver_set_now(now += 7);
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(rnti, p, 49, mcs, 2, rd.data(), (int)rd.size(), 8, v);
+    const bool solved_before = nr_pdsch_solver_rep(rnti) >= 0;
+    for (int i = 0; i < n; i++) {
+      int qa, ra, qb, rb;
+      nr_pdsch_solver_mcs_qr(v[i].table, mcs, &qa, &ra);
+      nr_pdsch_solver_mcs_qr(s.t[ti].table, mcs, &qb, &rb);
+      const bool ok = v[i].reading == 1 + ti && v[i].S == s.t[ti].S_true[tda] && v[i].add_pos == s.t[ti].add_pos && qa == qb && ra == rb
+                      && v[i].scr == scr;
+      if (v[i].probe) { o.probes++; if (o.solved < 0 && g >= 200) o.probes_after_200++; }
+      if (ok && v[i].probe && o.first_crc < 0) o.first_crc = g + 1;
+      nr_pdsch_solver_feedback(v[i].token, ok && (v[i].probe || full_after || solved_before), true);
+    }
+    if (o.solved < 0 && nr_pdsch_solver_rep(rnti) >= 0) { o.solved = g + 1; if (!full_after) break; }
+  }
+  return o;
+}
+// brings `n` RNTIs of template ti to solved with >= 20 CRC-proven full TBs each (they seed the cell); scr(k) = the k-th RNTI's scrambling
+void SolvePopulation(const Sim &s, uint16_t base, int ti, int n, int32_t (*scr)(int), std::mt19937 &rng)
+{
+  for (int k = 0; k < n; k++) {
+    const SimOut o = SimRnti(s, (uint16_t)(base + k), ti, scr(k), 0, {}, 60, rng, -1.f, true);
+    ASSERT_GT(o.solved, 0) << "population RNTI " << k;
+  }
+}
+int32_t scr_415(int) { return 415; }
+int32_t scr_249(int) { return 249; }
+int32_t scr_ue(int k) { return (101 + 37 * k) | (424 << 16); }  // 923-like: DM-RS id per UE, data id = PCI + 1 form
+Sim MakeSim()
+{
+  Sim s;
+  for (int i = 30; i < 130; i++) s.wrong.push_back((uint16_t)i);
+  Tmpl a, b;
+  for (int i = 10; i < 15; i++) a.truth.push_back((uint16_t)i);
+  for (int i = 20; i < 25; i++) b.truth.push_back((uint16_t)i);
+  a.add_pos = 1; a.table = 1; a.S_true[0] = 1; a.S_true[1] = 0;
+  b.add_pos = 2; b.table = 0; b.S_true[0] = 0; b.S_true[1] = 2;
+  s.t = {a, b};
+  return s;
+}
+void Stats(const char *tag, std::vector<int> v, int never)
+{
+  std::sort(v.begin(), v.end());
+  printf("[A123] %s: first CRC grant p50 %d p90 %d max %d, never %d of %zu\n", tag, v.empty() ? -1 : v[v.size() / 2],
+         v.empty() ? -1 : v[v.size() * 9 / 10], v.empty() ? -1 : v.back(), never, v.size() + never);
+}
+} // namespace
+
+// 415-like: two RRC templates with two cell-wide identities (6 RNTIs on T0 / scr 415, 4 on T1 / scr 249). New RNTIs of either template.
+TEST(SeedNewRnti, TwoTemplateCellFindsBothTemplatesFromTheFirstGrants)
+{
+  Sim s = MakeSim();
+  s.alt = {415, 249};
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_hq_fn(nullptr, nullptr); // an earlier test may have left the HARQ verifier
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(501);
+  SolvePopulation(s, 0x1000, 0, 6, scr_415, rng);
+  SolvePopulation(s, 0x1100, 1, 4, scr_249, rng);
+  std::vector<int> f[2];
+  int never[2] = {0, 0};
+  for (int ti = 0; ti < 2; ti++)
+    for (int k = 0; k < 20; k++) {
+      const SimOut o = SimRnti(s, (uint16_t)(0x2000 + 32 * ti + k), ti, ti ? 249 : 415, -1, {}, 400, rng);
+      if (o.first_crc > 0) f[ti].push_back(o.first_crc); else never[ti]++;
+    }
+  Stats("415-like T0 new RNTIs", f[0], never[0]);
+  Stats("415-like T1 new RNTIs", f[1], never[1]);
+  EXPECT_EQ(never[0] + never[1], 0);
+  std::sort(f[1].begin(), f[1].end());
+  ASSERT_FALSE(f[1].empty());
+  EXPECT_LE(f[1][f[1].size() * 9 / 10], 10) << "the minority template (4 of 10 RNTIs) is seeded within a few grants";
+  nr_pdsch_solver_set_alt_scr(-1, nullptr, 0, false);
+  nr_pdsch_solver_reset();
+}
+
+// 403-like: one template, one cell-wide identity. A pool of other ids must not slow it down (cell-wide identity: the pool is not used).
+TEST(SeedNewRnti, CellWideIdentityIgnoresThePool)
+{
+  Sim s = MakeSim();
+  s.alt = {415, 249};
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_hq_fn(nullptr, nullptr); // an earlier test may have left the HARQ verifier
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(502);
+  SolvePopulation(s, 0x1000, 0, 5, scr_415, rng);
+  std::vector<int> a, b;
+  const std::vector<int32_t> pool = {5000, 6000, 7000, 8000, 9000};
+  for (int k = 0; k < 20; k++) {
+    a.push_back(SimRnti(s, (uint16_t)(0x2000 + k), 0, 415, -1, {}, 400, rng).first_crc);
+    b.push_back(SimRnti(s, (uint16_t)(0x2100 + k), 0, 415, -1, pool, 400, rng).first_crc);
+  }
+  Stats("403-like without pool", a, 0);
+  Stats("403-like with pool", b, 0);
+  std::sort(a.begin(), a.end());
+  std::sort(b.begin(), b.end());
+  EXPECT_GT(a[0], 0);
+  EXPECT_LE(b[b.size() / 2], 2);
+  EXPECT_LE(b[b.size() * 9 / 10], a[a.size() * 9 / 10] + 1);
+  nr_pdsch_solver_reset();
+}
+
+// 923-like: per-UE DM-RS identity. The pool offers the identities the cell has shown; the scan delivers the RNTI's own after 20 grants.
+TEST(SeedNewRnti, PerUeIdentityIsFoundInThePoolBeforeTheScanAnswers)
+{
+  Sim s = MakeSim();
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_hq_fn(nullptr, nullptr); // an earlier test may have left the HARQ verifier
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(503);
+  SolvePopulation(s, 0x1000, 0, 6, scr_ue, rng);
+  std::vector<int32_t> pool;
+  for (int k = 0; k < 6; k++) pool.push_back(101 + 37 * k);
+  pool.push_back(4000); pool.push_back(4100);
+  std::vector<int> in_pool, with_scan_only;
+  for (int k = 0; k < 6; k++) { // a returning UE: new RNTI, an identity the cell has shown (the k-th of the pool)
+    in_pool.push_back(SimRnti(s, (uint16_t)(0x2000 + k), 0, scr_ue(k), 20, pool, 400, rng).first_crc);
+  }
+  for (int k = 0; k < 6; k++) { // a new UE: identity not in the pool; only the scan (grant 20) can bring it
+    with_scan_only.push_back(SimRnti(s, (uint16_t)(0x2100 + k), 0, (9000 + 11 * k) | (424 << 16), 20, pool, 400, rng).first_crc);
+  }
+  Stats("923-like id in pool", in_pool, 0);
+  Stats("923-like id not in pool (scan at grant 20)", with_scan_only, 0);
+  std::sort(in_pool.begin(), in_pool.end());
+  std::sort(with_scan_only.begin(), with_scan_only.end());
+  EXPECT_GT(in_pool[0], 0);
+  EXPECT_LT(in_pool[in_pool.size() - 1], 20) << "found by the pool before the scan's first answer";
+  EXPECT_GE(with_scan_only[0], 20) << "an identity nobody has shown still waits for the scan";
+  EXPECT_GT(with_scan_only[0], 0);
+  nr_pdsch_solver_reset();
+}
+
+// A1: once the coverage search is thinned (>= 200 probes, no DM-RS support) the seeded probe still runs every grant, at most one probe.
+TEST(SeedNewRnti, BackoffThinsOnlyTheCoverageSearch)
+{
+  Sim s = MakeSim();
+  s.alt = {415};
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_hq_fn(nullptr, nullptr); // an earlier test may have left the HARQ verifier
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(504);
+  SolvePopulation(s, 0x1000, 0, 4, scr_415, rng);
+  // a RNTI that spends 200+ probes on a layout nobody reads (no DM-RS support: fit < 0), then its true template appears
+  Sim noise = s;
+  noise.t = {s.t[0]};
+  const int32_t kWrongScr = 77;
+  const SimOut burn = SimRnti(noise, 0x3000, 0, kWrongScr, -1, {}, 600, rng); // never passes (wrong scr): burns probes
+  EXPECT_EQ(burn.first_crc, -1);
+  EXPECT_GE(burn.probes, 200);
+  int with_probe = 0, over_one = 0, total = 0;
+  std::vector<nr_pdsch_solver_reading_t> rd = {{s.wrong.data(), (int)s.wrong.size(), 16, 1, 1, 0, -1.f},
+                                               {s.t[0].truth.data(), (int)s.t[0].truth.size(), 16, 1, 1, 0, -1.f}};
+  nr_pdsch_solver_set_alt_scr(s.key, s.alt.data(), 1, false);
+  for (int g = 0; g < 800; g++) {
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(0x3000, p, 49, 0, 2, rd.data(), 2, 8, v);
+    int seeded = 0;
+    for (int i = 0; i < n; i++) {
+      seeded += v[i].reading == 1 && v[i].scr == 415;
+      nr_pdsch_solver_feedback(v[i].token, false, true);
+    }
+    total += n;
+    with_probe += n > 0;
+    over_one += n > 1 && g % 8 != 0;
+  }
+  printf("[A123] backoff window: grants with a probe %d of 800, probes %d, thinned grants with >1 probe %d\n", with_probe, total, over_one);
+  EXPECT_EQ(with_probe, 800) << "the seeded probe runs on every grant";
+  EXPECT_LE(over_one, 800 / 8) << "more than one probe only on the 1 grant in 8 that keeps the coverage search";
+  nr_pdsch_solver_reset();
+}
+
+// Bounded cost: solved RNTIs plan the same probes whatever the seeds (only unsolved RNTIs seed), and a parked noise RNTI stays thinned.
+TEST(SeedNewRnti, SolvedRntisPlanNoSeedProbes)
+{
+  Sim s = MakeSim();
+  s.alt = {415, 249};
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_hq_fn(nullptr, nullptr); // an earlier test may have left the HARQ verifier
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(505);
+  SolvePopulation(s, 0x1000, 0, 6, scr_415, rng);
+  SolvePopulation(s, 0x1100, 1, 4, scr_249, rng);
+  // steady state: 10 solved RNTIs, 300 grants each, probes per grant (refinement and phase probes only)
+  std::vector<nr_pdsch_solver_reading_t> rd = {{s.t[0].truth.data(), (int)s.t[0].truth.size(), 16, 1, 1, 0, -1.f}};
+  int probes = 0, grants = 0;
+  for (int g = 0; g < 300; g++)
+    for (int k = 0; k < 6; k++) {
+      nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+      nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+      nr_pdsch_solver_set_alt_scr(s.key, s.alt.data(), 2, false);
+      const int n = nr_pdsch_solver_plan((uint16_t)(0x1000 + k), p, 49, 0, 2, rd.data(), 1, 8, v);
+      for (int i = 0; i < n; i++) {
+        probes += v[i].probe;
+        nr_pdsch_solver_feedback(v[i].token, true, true);
+      }
+      grants++;
+    }
+  printf("[A123] solved RNTIs: %d probes over %d grants\n", probes, grants);
+  EXPECT_EQ(probes, 0) << "a solved RNTI with one reading plans full decodes only";
+  nr_pdsch_solver_reset();
+}
+
+// The PARK design composes: a parked noise RNTI stays thinned even when the cell has seed tuples (its re-test grants take the backoff).
+TEST(SeedNewRnti, ParkedNoiseRntiStaysThinnedWithSeedsAvailable)
+{
+  Sim s = MakeSim();
+  s.alt = {415, 249};
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_hq_fn(nullptr, nullptr); // an earlier test may have left the HARQ verifier
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(506);
+  SolvePopulation(s, 0x1000, 0, 6, scr_415, rng);
+  auto noise = [&] { return (float)std::normal_distribution<double>(-7.0, 2.5)(rng); };
+  auto real = [&] { return (float)std::normal_distribution<double>(3.0, 4.0)(rng); };
+  const uint16_t layout = 10;
+  nr_pdsch_solver_reading_t rd0 = {&layout, 1, 16, 1, 1, 2};
+  for (uint16_t r = 0x2001; r < 0x2001 + 30; r++) {
+    nr_dci_bits_t p = {{42, 0, 0}};
+    nr_pdsch_solver_set_now(10);
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(r, p, 49, 2, 2, &rd0, 1, 8, v);
+    for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, false, true);
+    for (int k = 0; k < 120; k++) nr_pdsch_solver_note_dmrs(r, 10, (uint32_t)(k % 14), noise(), false, true, 2, 0, false);
+  }
+  for (int k = 0; k < 20; k++) nr_pdsch_solver_note_dmrs(0x1000, 5, 0, real(), true, false, 2, 0, true);
+  const uint16_t victim = 0x9f52;
+  std::vector<nr_pdsch_solver_reading_t> rd = {{s.wrong.data(), (int)s.wrong.size(), 16, 1, 1, 2, -1.f},
+                                               {s.t[0].truth.data(), (int)s.t[0].truth.size(), 16, 1, 1, 2, -1.f}};
+  int probes_active = 0, probes_parked = 0, parked_grants = 0, planned_parked = 0, active_grants = 0;
+  for (int g = 1; g <= 4000; g++) {
+    nr_dci_bits_t p = {{(uint64_t)g, 0, 0}};
+    nr_pdsch_solver_set_now((uint64_t)(100 + g));
+    nr_pdsch_solver_set_alt_scr(s.key, s.alt.data(), 2, false);
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const bool was_parked = nr_pdsch_solver_parked(victim);
+    const int n = nr_pdsch_solver_plan(victim, p, 49, 2, 2, rd.data(), 2, 8, v);
+    (was_parked ? probes_parked : probes_active) += n;
+    parked_grants += was_parked;
+    active_grants += !was_parked;
+    planned_parked += was_parked && n > 0;
+    for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, false, true);
+    for (int h = 0; h < n * 2; h++) nr_pdsch_solver_note_dmrs(victim, (uint64_t)(100 + g), (uint32_t)(h % 14), noise(), false, true, 2, 0, false);
+  }
+  printf("[A123] parked noise RNTI with seeds: active grants %d probes %d; parked grants %d probes %d on %d grants\n", active_grants,
+         probes_active, parked_grants, probes_parked, planned_parked);
+  EXPECT_GT(parked_grants, 1500);
+  EXPECT_LT(planned_parked * 8, parked_grants) << "thinned";
+  EXPECT_LE(probes_parked, 8 * planned_parked);
+  nr_pdsch_solver_reset();
+}
+
+/* FIRSTSLOT [SIMULATED]: the start symbol of a grant is fixed by the slot phase (TDD pattern), not by the DCI's tda value. The population's tda-keyed
+ * S maps are then whatever phases they solved at; a new RNTI's first seeded probe must still carry the phase's S. Reading 1 (truth) has a twin
+ * reading 2 holding the other half of the rep's ambiguity set: the twin is the true one for this cell (rep unrefined), it must be seeded too. */
+namespace {
+int PhaseS(uint64_t abs) { return ((abs % 20) % 3 == 0) ? 1 : 0; }
+// one grant of RNTI `rnti`; returns true when a probe on the true reading/S/scr passed in this grant
+bool PhaseGrant(const Sim &s, const std::vector<nr_pdsch_solver_reading_t> &rd, int true_rd, uint16_t rnti, int32_t scr, std::mt19937 &rng,
+                uint64_t &now, bool full_after, bool *solved_out)
+{
+  nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+  const uint8_t mcs = 0;
+  nr_pdsch_solver_set_alt_scr(s.key, s.alt.data(), (int)s.alt.size(), false);
+  nr_pdsch_solver_set_now(now += 7);
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+  const int n = nr_pdsch_solver_plan(rnti, p, 49, mcs, 2, rd.data(), (int)rd.size(), 8, v);
+  const bool solved_before = nr_pdsch_solver_rep(rnti) >= 0;
+  bool hit = false;
+  for (int i = 0; i < n; i++) {
+    int qa, ra, qb, rb;
+    nr_pdsch_solver_mcs_qr(v[i].table, mcs, &qa, &ra);
+    nr_pdsch_solver_mcs_qr(s.t[0].table, mcs, &qb, &rb);
+    const bool ok = v[i].reading == true_rd && v[i].S == PhaseS(now) && v[i].add_pos == s.t[0].add_pos && qa == qb && ra == rb && v[i].scr == scr;
+    hit |= ok && v[i].probe;
+    nr_pdsch_solver_feedback(v[i].token, ok && (v[i].probe || full_after || solved_before), true);
+  }
+  *solved_out = nr_pdsch_solver_rep(rnti) >= 0;
+  return hit;
+}
+} // namespace
+
+TEST(SeedNewRnti, FirstSeededProbeCarriesThePhaseStartSymbol)
+{
+  Sim s = MakeSim();
+  s.alt = {415};
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_hq_fn(nullptr, nullptr);
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(777);
+  std::vector<nr_pdsch_solver_reading_t> rd;
+  rd.push_back({s.wrong.data(), (int)s.wrong.size(), 16, 1, 1, 0, -1.f});
+  rd.push_back({s.t[0].truth.data(), (int)s.t[0].truth.size(), 16, 1, 1, 0, -1.f});
+  uint64_t now = 1000;
+  for (int k = 0; k < 8; k++) { // the population: solved, with >= 20 full decodes each
+    bool solved = false;
+    int g = 0;
+    for (; g < 400 && !(solved && g > 60); g++) PhaseGrant(s, rd, 1, (uint16_t)(0x1000 + k), 415, rng, now, true, &solved);
+    ASSERT_TRUE(solved) << "population RNTI " << k;
+  }
+  int first_grant_pass = 0, new_rntis = 40;
+  for (int k = 0; k < new_rntis; k++) {
+    bool solved = false;
+    first_grant_pass += PhaseGrant(s, rd, 1, (uint16_t)(0x2000 + k), 415, rng, now, false, &solved);
+  }
+  printf("[FIRSTSLOT] new RNTIs passing in their very first grant: %d of %d\n", first_grant_pass, new_rntis);
+  EXPECT_GE(first_grant_pass, new_rntis * 3 / 4) << "the first-slot seed must carry the slot phase's start symbol";
+  nr_pdsch_solver_reset();
 }

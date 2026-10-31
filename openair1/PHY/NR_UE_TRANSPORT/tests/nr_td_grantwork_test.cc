@@ -197,6 +197,23 @@ TEST(GrantWork, OwnerPublishThenReady)
   nr_td_grantwork_release(gw);
 }
 
+TEST(GrantWork, UnclaimLeavesEntryEmptyAndComputable)
+{
+  Fixture f;
+  nr_td_grantwork_t *gw = f.begin();
+  nr_td_gw_llr_view_t v;
+  ASSERT_EQ(nr_td_grantwork_acquire(gw, 11, &v), NR_TD_GW_ACQ_OWNER);
+  nr_td_grantwork_unclaim(gw, 12); /* not the owner of that signature: no effect */
+  nr_td_grantwork_unclaim(gw, 11); /* the main decode ran on the GPU pass: steps back, no verdict */
+  nr_td_grantwork_unclaim(gw, 11); /* idempotent */
+  EXPECT_EQ(nr_td_grantwork_get_llr(gw, 11, nullptr, &v), NR_TD_GW_OK); /* not FAILED: computed lazily, once */
+  EXPECT_EQ(f.calls.load(), 1);
+  EXPECT_EQ(nr_td_grantwork_get_llr(gw, 11, nullptr, &v), NR_TD_GW_OK);
+  EXPECT_EQ(f.calls.load(), 1);
+  EXPECT_EQ(nr_td_grantwork_acquire(gw, 11, &v), NR_TD_GW_ACQ_READY);
+  nr_td_grantwork_release(gw);
+}
+
 TEST(GrantWork, ConcurrentReadersComputeOnce)
 {
   Fixture f;

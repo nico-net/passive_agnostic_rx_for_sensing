@@ -13,6 +13,7 @@
 /*! \file openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c */
 
 #include "nr_csirs_blind_rt.h"
+#include "nr_re_pattern.h"
 #include "nr_pdsch_passive_decode.h" /* CSIFULLAB */
 /* Weak: unit-test targets link this file without the acquisition state. */
 extern void nr_passive_acq_note_carrier_from_rs(const char *evidence) __attribute__((weak));
@@ -108,9 +109,17 @@ static nr_csirs_resource_t resource_key(const nr_csirs_blind_state_t *s, int k, 
       .freq_domain = c->freq_domain, .start_rb = c->start_rb, .nr_of_rbs = c->nr_of_rbs,
       .symb_l0 = c->symb_l0};
 }
+/* map_changed: the observer saw a confirmed resource disappear or a new one replace it. It is counted and logged, NOT raised as a cell
+ * epoch: the decode reads the CSI-RS map live (nr_csirs_full_apply at the PDSCH slot) and a revoked resource already leaves the monitor
+ * on its own (nzp_observer_score). As an epoch it dropped every queued PDSCH job stamped with the old epoch and made CSI-RS discovery wipe
+ * the whole confirmed set (PCI 415 OTA 2026-10-30: 23-96 such epochs per 300 s, 11-24 discovery restarts; grants decoded while the own TRS
+ * set was incomplete failed 704 of 704). */
+NR_CELL_STATIC(_Atomic uint32_t, g_map_changes);
+#define g_map_changes NR_CELL_REF(g_map_changes)
 static void map_changed(void)
 {
-  if (nr_cfg_epoch_note_csirs_map_change) nr_cfg_epoch_note_csirs_map_change();
+  const uint32_t n = atomic_fetch_add_explicit(&g_map_changes, 1, memory_order_relaxed) + 1;
+  if (n <= 8 || (n % 64) == 0) LOG_A(PHY, "SENSING: CSIRS_BLIND map change #%u (observer; no cell epoch)\n", n);
 }
 
 /* Reference planes actually allocated. NZP scores plane 0; ZP scores their occupancy union.
@@ -126,6 +135,7 @@ NR_CELL_STATIC(nr_csirs_blind_state_t, g_st);
 NR_CELL_STATIC(nr_csirs_blind_state_t, g_zp); /* zero-power search over the same candidates */
 #define g_zp NR_CELL_REF(g_zp)
 static void fill_pdu(const nr_csirs_candidate_t *c, uint8_t csi_type, fapi_nr_dl_config_csirs_pdu_rel15_t *out);
+static void prov_note(const nr_csirs_candidate_t *c, uint16_t period, const uint16_t off[2], int n);
 NR_CELL_STATIC_INIT(int, g_disc, -1);
 #define g_disc NR_CELL_REF(g_disc)
 typedef float g_disc_strength_t[NR_CSIRS_BLIND_MAX_CAND];
@@ -163,7 +173,9 @@ static bool nzp_observer_score(int idx, uint32_t slot, double rho)
       for (int k = 0; k < g_st.n_conf; ++k)
         if (g_st.conf_idx[k] == idx) {
           const nr_csirs_resource_t key = resource_key(&g_st, k, false);
-          /* Scores between the noise bar and the confirmation bar are inconclusive. */
+          /* Scores between the noise bar and the confirmation bar are inconclusive: they neither count as a hit nor as a miss (noise is
+           * z ~ 1.0, a weak real TRS burst scores 2-2.5 on air and dips under 2 in a fade). Only a clear miss (z < 1.5) counts. */
+          if (rho >= 1.5 && rho < 2.0) return false;
           const bool revoked = nr_csirs_observer_due(&g_csirs_obs, &key, slot, rho >= 2.0);
           if (revoked && g_disc > 0 && nr_csirs_monitor_remove_dynamic) {
             fapi_nr_dl_config_csirs_pdu_rel15_t pdu = {0};
@@ -289,6 +301,43 @@ NR_CELL_STATIC(int, g_armed);
 #define g_armed NR_CELL_REF(g_armed)
 NR_CELL_STATIC(uint64_t, g_slots);
 #define g_slots NR_CELL_REF(g_slots)
+
+/* SLOTPHASE provisional seeds: every discovery WINNER that was admitted to the search (confirmed or not), with its lattice. The PDSCH job builder
+ * offers the ones occurring in a flagged slot phase to nr_pdsch_passive_slotphase.c, whose CRC arbitration decides whether they are rate-matched
+ * around (the per-slot confirm never accepted the multi-port resources of PCI 923: OTA 2026-10-30). Own mutex (leaf), never the search lock.
+ * g_sp_gen changes whenever a seed or the exported confirmed set changes. */
+#define NR_CSIRS_PROV_MAX 32
+typedef struct {
+  fapi_nr_dl_config_csirs_pdu_rel15_t pdu;
+  uint16_t period, off[2];
+  uint8_t n_off;
+  uint32_t id;
+} g_prov_ent_t;
+typedef struct { g_prov_ent_t seed[NR_CSIRS_PROV_MAX]; int n; uint32_t next_id; } g_prov_t;
+NR_CELL_STATIC(g_prov_t, g_prov);
+#define g_prov NR_CELL_REF(g_prov)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_prov_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_prov_lock NR_CELL_REF(g_prov_lock)
+NR_CELL_STATIC(_Atomic uint32_t, g_prov_gen);
+#define g_prov_gen NR_CELL_REF(g_prov_gen)
+NR_CELL_STATIC(uint64_t, g_prov_export_hash); /* hash of the last published export (discovery_publish, under the search lock) */
+#define g_prov_export_hash NR_CELL_REF(g_prov_export_hash)
+
+/* SLOTPHASE energy footprints: the latest NR_CSIRS_FOOT_MAX footprints discovery detected (the CSIRS_DISC FOOTPRINT lines), per cell, with the
+ * (period, offset) lattice they were seen on. They are RE sets (symbol mask x subcarrier mask x RB range) that no CSI-RS row may express; the
+ * SLOTPHASE arbitration offers them as generic RE-pattern rate-match entries (nr_re_pattern.h). Own leaf mutex. */
+#define NR_CSIRS_FOOT_MAX 32
+typedef struct {
+  uint16_t sym, sc, rb_start, n_rb, period, offset;
+  uint8_t density;
+  uint32_t id, seq;
+  float strength;
+} g_foot_ent_t;
+typedef struct { g_foot_ent_t e[NR_CSIRS_FOOT_MAX]; int n; uint32_t seq; } g_foot_t;
+NR_CELL_STATIC(g_foot_t, g_foot);
+#define g_foot NR_CELL_REF(g_foot)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_foot_lock, PTHREAD_MUTEX_INITIALIZER);
+#define g_foot_lock NR_CELL_REF(g_foot_lock)
 
 /* discovery_empty_state: resets one CSI-RS search state (candidate population, confirmations, counters) to empty; confirmed and pinned indices are set to -1.
  *   Caller: nr_csirs_blind_rt_add_discovered(), nr_csirs_blind_rt_discovery_reset() and nr_csirs_blind_rt_slot() (first arm, discovery mode).
@@ -433,10 +482,130 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csir
       states[j]->seed_offset2[at] = offsets[1];
       states[j]->seed_n_off[at] = n;
     }
+    prov_note(&g_st.cand[at], period, offsets, n);
   }
   discovery_publish();
   pthread_mutex_unlock(&g_csirs_state_lock);
   return at;
+}
+
+/* prov_note: records (or updates) the seed of an admitted discovery candidate for the SLOTPHASE arbitration. Leaf lock; the gen changes only
+ * when the stored seed does. Caller: nr_csirs_blind_rt_add_discovered(). */
+static void prov_note(const nr_csirs_candidate_t *c, uint16_t period, const uint16_t off[2], int n)
+{
+  fapi_nr_dl_config_csirs_pdu_rel15_t pdu;
+  fill_pdu(c, 1, &pdu);
+  pthread_mutex_lock(&g_prov_lock);
+  int at = -1;
+  for (int i = 0; i < g_prov.n && at < 0; i++) {
+    const fapi_nr_dl_config_csirs_pdu_rel15_t *q = &g_prov.seed[i].pdu;
+    const int qe = q->start_rb + q->nr_of_rbs, pe = pdu.start_rb + pdu.nr_of_rbs;
+    const bool extent = (q->start_rb <= pdu.start_rb && qe >= pe) || (pdu.start_rb <= q->start_rb && pe >= qe)
+                        || (abs((int)q->start_rb - (int)pdu.start_rb) <= 4 && abs(qe - pe) <= 4);
+    if (extent && q->row == pdu.row && q->freq_domain == pdu.freq_domain && q->symb_l0 == pdu.symb_l0 && q->symb_l1 == pdu.symb_l1
+        && q->cdm_type == pdu.cdm_type && q->freq_density == pdu.freq_density && q->scramb_id == pdu.scramb_id)
+      at = i;
+  }
+  if (at < 0 && g_prov.n < NR_CSIRS_PROV_MAX) {
+    at = g_prov.n++;
+    g_prov.seed[at].id = ++g_prov.next_id;
+    g_prov.seed[at].pdu = pdu;
+    g_prov.seed[at].period = 0;
+    atomic_fetch_add_explicit(&g_prov_gen, 1, memory_order_relaxed);
+  }
+  if (at >= 0) {
+    g_prov_ent_t *s = &g_prov.seed[at];
+    const uint16_t o1 = n > 1 ? off[1] : 0;
+    if (pdu.nr_of_rbs > s->pdu.nr_of_rbs) s->pdu = pdu;
+    if (s->period != period || s->off[0] != off[0] || s->off[1] != o1 || s->n_off != n) {
+      s->period = period;
+      s->off[0] = off[0];
+      s->off[1] = o1;
+      s->n_off = (uint8_t)n;
+      atomic_fetch_add_explicit(&g_prov_gen, 1, memory_order_relaxed);
+    }
+  }
+  pthread_mutex_unlock(&g_prov_lock);
+}
+/* nr_csirs_blind_rt_seeds_at: the discovery seeds (NZP geometry, confirmed or not) whose lattice has an occasion in @p slot, in admission order, with
+ *   their stable nonzero ids. Caller: nr_pdcch_blind_monitor_rt.c (SLOTPHASE planning of a flagged phase). */
+int nr_csirs_blind_rt_seeds_at(uint32_t slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, uint32_t *ids, int max)
+{
+  int n = 0;
+  pthread_mutex_lock(&g_prov_lock);
+  for (int i = 0; i < g_prov.n && n < max; i++) {
+    const g_prov_ent_t *s = &g_prov.seed[i];
+    if (s->period && (slot % s->period == s->off[0] || (s->n_off == 2 && slot % s->period == s->off[1]))) {
+      out[n] = s->pdu;
+      ids[n++] = s->id;
+    }
+  }
+  pthread_mutex_unlock(&g_prov_lock);
+  return n;
+}
+/* nr_csirs_blind_rt_slotphase_gen: changes when a seed or the exported confirmed set changed (the SLOTPHASE counters were measured under another map). */
+uint32_t nr_csirs_blind_rt_slotphase_gen(void) { return atomic_load_explicit(&g_prov_gen, memory_order_relaxed); }
+
+/* nr_csirs_blind_rt_note_footprint: stores (or refreshes) one detected energy footprint; the oldest one is replaced when the store is full.
+ *   Does not change the SLOTPHASE generation (variants are keyed by the footprint id, a new one simply becomes a new variant). Caller: nr_csirs_disc_process(). */
+void nr_csirs_blind_rt_note_footprint(const nr_csirs_disc_fp_t *f)
+{
+  if (!f || !f->period || !f->sym_mask || !f->sc_mask || !f->n_rb)
+    return;
+  uint64_t h = 1469598103934665603ull;
+  const uint32_t key[] = {f->sym_mask, f->sc_mask, f->density, f->rb_start, f->n_rb, f->period, f->offset};
+  for (unsigned i = 0; i < sizeof(key) / sizeof(key[0]); i++) {
+    h ^= key[i];
+    h *= 1099511628211ull;
+  }
+  const uint32_t id = (uint32_t)(h ^ (h >> 32)) | 1u;
+  pthread_mutex_lock(&g_foot_lock);
+  int at = -1;
+  for (int i = 0; i < g_foot.n && at < 0; i++)
+    if (g_foot.e[i].id == id && g_foot.e[i].sym == f->sym_mask && g_foot.e[i].sc == f->sc_mask && g_foot.e[i].rb_start == f->rb_start
+        && g_foot.e[i].n_rb == f->n_rb && g_foot.e[i].period == f->period && g_foot.e[i].offset == f->offset && g_foot.e[i].density == f->density)
+      at = i;
+  if (at < 0) {
+    if (g_foot.n < NR_CSIRS_FOOT_MAX)
+      at = g_foot.n++;
+    else {
+      at = 0;
+      for (int i = 1; i < g_foot.n; i++)
+        if (g_foot.e[i].seq < g_foot.e[at].seq) at = i;
+    }
+    g_foot_ent_t *e = &g_foot.e[at];
+    e->sym = f->sym_mask; e->sc = f->sc_mask; e->rb_start = f->rb_start; e->n_rb = f->n_rb; e->period = f->period; e->offset = f->offset;
+    e->density = f->density; e->id = id;
+  }
+  g_foot.e[at].seq = ++g_foot.seq;
+  g_foot.e[at].strength = f->strength;
+  pthread_mutex_unlock(&g_foot_lock);
+}
+/* nr_csirs_blind_rt_footprints_at: the stored footprints whose lattice has an occasion in @p slot (slot % period == offset), as generic RE-pattern PDUs
+ *   (nr_re_pattern.h), strongest first, with their stable nonzero ids. Caller: nr_pdcch_blind_monitor_rt.c (SLOTPHASE planning of a flagged phase). */
+int nr_csirs_blind_rt_footprints_at(uint32_t slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, uint32_t *ids, int max)
+{
+  int pick[NR_CSIRS_FOOT_MAX], m = 0, n = 0;
+  pthread_mutex_lock(&g_foot_lock);
+  for (int i = 0; i < g_foot.n; i++)
+    if (g_foot.e[i].period && slot % g_foot.e[i].period == g_foot.e[i].offset)
+      pick[m++] = i;
+  for (int a = 1; a < m; a++) { /* stable insertion sort, strongest first */
+    const int v = pick[a];
+    int b = a;
+    while (b > 0 && g_foot.e[pick[b - 1]].strength < g_foot.e[v].strength) {
+      pick[b] = pick[b - 1];
+      b--;
+    }
+    pick[b] = v;
+  }
+  for (int a = 0; a < m && n < max; a++) {
+    const g_foot_ent_t *e = &g_foot.e[pick[a]];
+    nr_re_pattern_make(&out[n], e->sym, e->sc, e->density, e->rb_start, e->n_rb);
+    ids[n++] = e->id;
+  }
+  pthread_mutex_unlock(&g_foot_lock);
+  return n;
 }
 
 /* nr_csirs_blind_rt_discovery_confirmed: true when a discovered hypothesis matches a confirmed NZP resource of the search (same geometry, period and an offset phase).
@@ -511,6 +680,14 @@ void nr_csirs_blind_rt_discovery_reset(void)
     g_conf_logged = 0;
     g_slots = 0;
     discovery_queue_reset();
+    pthread_mutex_lock(&g_prov_lock);
+    memset(&g_prov.seed, 0, sizeof(g_prov.seed));
+    g_prov.n = 0;
+    pthread_mutex_unlock(&g_prov_lock);
+    pthread_mutex_lock(&g_foot_lock);
+    memset(&g_foot, 0, sizeof(g_foot));
+    pthread_mutex_unlock(&g_foot_lock);
+    atomic_fetch_add_explicit(&g_prov_gen, 1, memory_order_relaxed);
     discovery_publish();
   }
   pthread_mutex_unlock(&g_csirs_state_lock);

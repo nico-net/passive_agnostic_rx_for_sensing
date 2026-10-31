@@ -331,7 +331,11 @@ enum { RF_OFF, RF_NL, RF_QM, RF_PTRS, RF_FORCED, RF_ENV, RF_OVERRIDE, RF_MODE, R
 static __thread int t_qmode; /* refuse() -> gpu_grant(): the resolved multi-layer qam_mode */
 static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coef, int *align, int *l2d)
 {
-  const int s_mode = 1, s_align = 2, s_l2d = 0; /* frozen ISAC_RX_MRC_MODE / _ALIGN; L2MAXH_DELTA_NL2 is nr_l2maxh_delta() */
+  /* rank-1 combining: MRC over the live branches (mode 3, branches within s_min_db of the best). It reduces to the best branch on a rig
+   * with dead branches and combines every healthy one otherwise; the former best-branch-only default (mode 1, chosen on a rig with two
+   * dead branches) cost ~6 dB on four healthy branches (OTA 2026-10-30, DGX+X410: rank-1 CRC at equal DM-RS margin 3-6 dB 5-28 % mode 1
+   * vs 31-47 % mode 3 on PCI 415/923/403). _ALIGN frozen; L2MAXH_DELTA_NL2 is nr_l2maxh_delta() */
+  const int s_mode = 3, s_align = 2, s_l2d = 0;
   const double s_min_db = 12.0;
   /* the CPU path's v2 agnostic receiver is not reproduced by the GPU */
   static int s_env = -1;
@@ -507,6 +511,43 @@ static void evm_fold(const nr_gpu_evm_sym_t *E, int nl, int qm, int m)
   ea->nbrx = E->nb;
 }
 
+/* XDIAG: one symbol's equaliser-output error sums (k_tail, nr_gpu_xdiag_t) into nr_pdsch_evm_acc; lattice mode as for Qm > 2 or one layer, else the QPSK moments */
+static void xd_fold(const nr_gpu_xdiag_t *X, int m, int nl, int qm)
+{
+  nr_pdsch_evm_acc_t *ea = &nr_pdsch_evm_acc;
+  const bool lat = qm > 2 || nl == 1;
+  ea->xd_qm = qm;
+  for (int l = 0; l < nl && l < 4; l++) {
+    if (lat) {
+      ea->xd_e[l] += (double)X->e[m][l];
+      ea->xd_n[l] += (double)X->ll[m][l];
+    } else {
+      ea->xd_nm[l] += (double)X->ll[m][l];
+      ea->xd_p[l] += (double)X->ll[m][4 + l];
+      ea->xd_s[l] += (double)X->ll[m][8 + l];
+    }
+  }
+  if (lat)
+    for (int g = 0; g < NR_GPU_XD_NG; g++) {
+      ea->xd_ge[g] += X->eg[m][g];
+      ea->xd_gn[g] += X->ng[m][g];
+    }
+}
+
+/* RESID: one symbol's position-keyed layer-0 error (k_tail rs_e / rs_n) into this thread's nr_pdsch_resid (only for a job built with want_resid) */
+_Static_assert(NR_RESID_N == NR_GPU_RS_N && NR_RESID_NSYM == NR_GPU_DEMOD_NSYM, "nr_pdsch_resid_t mirrors nr_gpu_xdiag_t's RESID block");
+static void rs_fold(const nr_gpu_xdiag_t *X, int m, int nl, int qm)
+{
+  if (!(qm > 2 || nl == 1) || m < 0 || m >= NR_RESID_NSYM) /* lattice mode only */
+    return;
+  nr_pdsch_resid_t *r = &nr_pdsch_resid;
+  for (int q = 0; q < NR_RESID_N; q++) {
+    r->e[m][q] += X->rs_e[m][q];
+    r->n[m][q] += X->rs_n[m][q];
+  }
+  r->valid = 1;
+}
+
 /* EVM partial sums and kappa of every demodulated symbol into nr_pdsch_evm_acc, in nr_rx_pdsch()'s symbol order */
 static void post_fold(const nr_gpu_demod_job_t *jp, const NR_UE_DLSCH_t *dlsch, int nl, int qm, int nbRx, int start, int last, uint32_t rx_size_symbol)
 {
@@ -533,6 +574,10 @@ static void post_fold(const nr_gpu_demod_job_t *jp, const NR_UE_DLSCH_t *dlsch, 
           nr_pdsch_evm_acc.kappa_n++;
         }
       }
+    if (jp->want_kappa)
+      xd_fold(&jp->xd, m, nl, qm);
+    if (jp->want_kappa && jp->want_resid)
+      rs_fold(&jp->xd, m, nl, qm);
   }
 }
 
@@ -598,6 +643,9 @@ static int build_job(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   j->magr = (int16_t *)magr;
   j->llr = llr;
   j->mode = mode;
+  memset(j->nvar_ant, 0, sizeof(j->nvar_ant)); /* rank-1 mode 3: the per-RX chest noise = the noise weights of the MRC (as the CPU's t_mrc_wq); nl >= 2 does not use it */
+  if (nl == 1)
+    memcpy(j->nvar_ant, nr_dl_chest_nvar_ant, sizeof(j->nvar_ant));
   j->thr_coef = thr_coef;
   j->l2_delta = l2d;
   j->align = align;
@@ -613,6 +661,9 @@ static int build_job(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   j->mag_per_layer = nl >= 2 && j->qam_mode >= 2; /* modes 2 and 3: per-layer thresholds */
   j->wide_mrc = nr_pdsch_decode_wide_mrc;
   j->want_kappa = nr_pdsch_evm_acc.armed;
+  j->want_resid = nr_pdsch_evm_acc.armed && nr_pdsch_resid.want; /* RESID: flagged slot phase / reference budget only; 0 on every other grant */
+  j->rs_k0 = fp->first_carrier_offset;
+  j->rs_n = fp->ofdm_symbol_size;
   j->want_evm = nr_pdsch_evm_acc.armed; /* GPU float EVM, also for Nl = 3, 4 (frozen _EVM_NL34=1) */
   j->evm_fp64 = 0;
   j->evm_erase = nr_dlsch_csi_erase_n > 0;

@@ -292,7 +292,7 @@ endif()
 # workload X on one cell and a different Y on another (one re-binding thread, two bound threads) and compares each with its solo run; it links
 # the receiver libraries (like nr_dlsim) because the decode evidence and the HARQ store live in nr_pdsch_passive_decode.c.
 if(ENABLE_TESTS)
-  foreach(t test_nr_pdsch_solver test_nr_pdsch_recovery)
+  foreach(t test_nr_pdsch_solver test_nr_pdsch_recovery test_nr_pdsch_slotphase)
     if(TARGET ${t})
       target_link_libraries(${t} PRIVATE LOG)
     endif()

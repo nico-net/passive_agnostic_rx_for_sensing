@@ -158,6 +158,55 @@ static uint64_t hash64(const void *p, size_t n) { uint64_t h = 14695981039346656
 /* The segmented graph pass equals the old segmented path for the same grant (Task 2 stages as the passive body runs them for a segmented grant: the chest per segment into scratch
  * rows, each estimate parked at its data offset, the width-weighted nvar, the demod against the gathered virtual allocation, then the CPU steps): TB bytes, CRC verdict, nvar and the
  * per-antenna nvar, the layer-0 estimate rows (every segment's chest result incl. its delay compensation, laid out in data order) and, on a CRC failure, the LLRs the retry arms get. */
+/* RANK1COMB: the rank-1 mode-3 combiner with per-RX noise weights (nvar_ant_dev of the graph pass = the stage path's job nvar_ant) on branches whose noise is 0/3/6/10 dB apart:
+ * the graph decodes exactly what the stage path does, and the weighted combiner decodes grants the equal-noise sum (nvar_ant 0) loses. */
+TEST(GpuPassDl, Rank1NoiseWeightedMrcGraphEqualsStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try);
+  ASSERT_TRUE(pass_ready(m));
+  const int sj_mode = GpuPassFixture::dj_mode, sj_align = GpuPassFixture::dj_align, sch = GpuPassFixture::chan_mode;
+  const double snoise = GpuPassFixture::noise_db;
+  GpuPassFixture::dj_mode = 3; /* the graph class of a fixture job has no phase alignment (ALIGN is part of the class) */
+  GpuPassFixture::dj_align = 0;
+  GpuPassFixture::chan_mode = 1;
+  const double off[4] = {0, 3, 6, 10};
+  for (int a = 0; a < 4; a++) GpuPassFixture::rx_noise_off_db[a] = off[a];
+  int w_ok = 0, u_ok = 0, n = 0;
+  for (auto shape : GpuPassFixture::warm_shapes()) {
+    if (shape.nl != 1 || shape.qm != 4) continue;
+    for (int seed = 0; seed < 4; seed++) {
+      GpuPassFixture::noise_db = 11.0 - 6.02 - 10 * std::log10(1 + 0.5 + 0.25 + 0.1); /* axis (noise-only optimal combining) Es/N0 11 dB */
+      GpuPassFixture fx = GpuPassFixture::from_shape(shape, 21 + seed);
+      ASSERT_TRUE(fx.tb_ok_built);
+      fx.bind();
+      std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55), ub(fx.tb.A / 8 + 64, 0x33);
+      nr_gpu_pass_result_t g{}, s{}, u{};
+      g.tb = gb.data(); s.tb = sb.data(); u.tb = ub.data();
+      ASSERT_EQ(0, m.pass_try(fx.job, &g));
+      GpuPassFixture::nvant_off = false;
+      ASSERT_EQ(0, fx.run_stage_path(&s));
+      const std::vector<int16_t> llr_w = fx.llr_ref;
+      GpuPassFixture::nvant_off = true;
+      ASSERT_EQ(0, fx.run_stage_path(&u));
+      GpuPassFixture::nvant_off = false;
+      EXPECT_NE(llr_w, fx.llr_ref) << "the noise weights change the LLRs (unequal noise)";
+      EXPECT_EQ(s.need_cpu, g.need_cpu);
+      EXPECT_EQ(s.tb_ok, g.tb_ok) << "graph vs stage path, nrb " << shape.nrb_class << " seed " << seed;
+      EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok)));
+      n++; w_ok += s.tb_ok; u_ok += u.tb_ok;
+    }
+  }
+  printf("GpuPassDl.Rank1NoiseWeightedMrc: %d grants at 11 dB axis SNR: weighted decodes %d, equal-noise sum %d\n", n, w_ok, u_ok);
+  EXPECT_GE(w_ok, u_ok);
+  EXPECT_GT(w_ok, 0);
+  GpuPassFixture::dj_mode = sj_mode; GpuPassFixture::dj_align = sj_align; GpuPassFixture::chan_mode = sch; GpuPassFixture::noise_db = snoise;
+  for (int a = 0; a < 4; a++) GpuPassFixture::rx_noise_off_db[a] = 0;
+}
 TEST(GpuPassDl, SegmentedGraphEqualsStagePath) {
   if (!have_gpu()) GTEST_SKIP();
   pass_model();
@@ -727,6 +776,65 @@ TEST(GpuPassDl, EvmBranchGraph) {
   int valid = 0;
   for (int sy : fx.data_syms) valid += dout->evm[sy].valid != 0;
   EXPECT_EQ((int)fx.data_syms.size(), valid) << "the EVM chain of the graph produced no sums";
+}
+
+/* RESID (nr_gpu_pass.h job want_resid, k_tail): the position-keyed layer-0 error is the same quantity as the packed-group sums (eg / ng), keyed by the RE's own (CRB mod 4, subcarrier)
+ * from geo_y; and a job without want_resid leaves the table alone. */
+TEST(GpuPassDl, ResidKeysFollowTheRePosition) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try && m.pass_warm) << "libpdsch_gpu.so has no nr_gpu_pass_dl_try";
+  ASSERT_TRUE(pass_ready(m));
+  const nr_gpu_pass_shape_t sh = GpuPassFixture::warm_shapes()[4 * 4 * 1 + 4 * 1 + 1]; // nrb 48, nl 2, qm 4
+  ASSERT_EQ(0, m.pass_warm(&sh, 3, 0, /*evm=*/1));
+  GpuPassFixture fx = GpuPassFixture::from_shape(sh, 5);
+  ASSERT_TRUE(fx.tb_ok_built);
+  fx.bind();
+  std::vector<uint8_t> t1(fx.tb.A / 8 + 64);
+  nr_gpu_pass_result_t r1{};
+  r1.tb = t1.data();
+  std::unique_ptr<nr_gpu_demod_job_t> dout(new nr_gpu_demod_job_t());
+  r1.demod_out = dout.get();
+  fx.job->dj.want_evm = 1;
+  fx.job->dj.want_kappa = 1;
+  fx.job->dj.evm_fp64 = 0;
+  fx.job->dj.want_resid = 1;
+  fx.job->dj.rs_k0 = fx.fco_;
+  fx.job->dj.rs_n = GpuPassFixture::N;
+  ASSERT_EQ(0, m.pass_try(fx.job, &r1));
+  const int len = 12 * fx.nrb;
+  for (int sy : fx.data_syms) {
+    uint32_t nk[NR_GPU_RS_KEYS] = {0}, nb[NR_GPU_RS_BKT] = {0}, tot_k = 0, tot_b = 0, tot_g = 0;
+    for (int i = 0; i < len; i++) { // the fixture's contiguous allocation: RE i is CRB start_rb + bwp + i / 12, subcarrier i % 12
+      const int crb = fx.start_rb + fx.bwp + i / 12;
+      nk[i % 12 + 12 * (crb & 3)]++;
+      nb[crb >> 3]++;
+    }
+    double e_keys = 0.0, e_bkt = 0.0, e_grp = 0.0;
+    for (int q = 0; q < NR_GPU_RS_KEYS; q++) {
+      EXPECT_EQ(nk[q], dout->xd.rs_n[sy][q]) << "sym " << sy << " key " << q;
+      tot_k += dout->xd.rs_n[sy][q];
+      e_keys += dout->xd.rs_e[sy][q];
+    }
+    for (int q = 0; q < NR_GPU_RS_BKT; q++) {
+      EXPECT_EQ(nb[q], dout->xd.rs_n[sy][NR_GPU_RS_KEYS + q]) << "sym " << sy << " bucket " << q;
+      tot_b += dout->xd.rs_n[sy][NR_GPU_RS_KEYS + q];
+      e_bkt += dout->xd.rs_e[sy][NR_GPU_RS_KEYS + q];
+    }
+    for (int g = 0; g < NR_GPU_XD_NG; g++) {
+      tot_g += (uint32_t)(dout->xd.ng[sy][g] + 0.5f);
+      e_grp += dout->xd.eg[sy][g];
+    }
+    EXPECT_EQ((uint32_t)len, tot_k);
+    EXPECT_EQ(tot_k, tot_b);
+    EXPECT_EQ(tot_k, tot_g);
+    EXPECT_NEAR(e_keys, e_grp, 1e-3 * (1.0 + e_grp)) << "sym " << sy;
+    EXPECT_NEAR(e_bkt, e_grp, 1e-3 * (1.0 + e_grp)) << "sym " << sy;
+  }
 }
 
 /* Stage parity of the launch-only DL entry points: the same slot through FEP -> chest -> demod -> LDPC on one stream, once with the

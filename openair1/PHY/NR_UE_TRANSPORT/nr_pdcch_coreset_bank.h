@@ -76,6 +76,12 @@ typedef struct {
   uint32_t alias_hits, own_hits; /* accepts re-expressible by an older entry / not (eviction evidence) */
   uint64_t alias_slot;
   uint8_t state;
+  /* Downstream (PDSCH) certification, 2026-10-30 B1/B2: grants = non-duplicate DL grants this entry produced, passes = dedicated TB CRC passes
+   * credited to it (through the RNTI -> source-entry map). A CRC-valid DCI proves a PDCCH, only a passing TB proves it belongs to this cell's data. */
+  uint32_t grants, passes;
+  uint64_t born_slot;
+  uint8_t serial;    /* stable id (entries move on compaction); 0 = none */
+  uint8_t probation; /* same nID and RB footprint as a live entry, other symbol: admitted without its own CRC evidence (B1) */
 } nr_pdcch_discovered_coreset_t;
 
 #include <pthread.h>
@@ -133,6 +139,25 @@ bool nr_pdcch_coreset_bank_explains(const nr_pdcch_blind_monitor_cfg_t *c, int c
 /* An accept of bank entry `index` at candidate (cce, al): counts it as re-expressible by an older entry or not; an entry whose accepts (at least two, distinct
  * slots) are all re-expressible by older entries is an alias and is evicted. */
 void nr_pdcch_coreset_bank_note_alias(int index, uint64_t slot, int cce, int al);
+/* ---- Downstream PDSCH certification (B1/B2). Statistics are on "TB CRC passes per grant" with Wilson bounds; no cell constants. ---- */
+#define NR_PDCCH_CERT_Z 3.09      /* one-sided 99.9 % */
+#define NR_PDCCH_CERT_ALPHA 1e-3  /* chance of seeing no pass at a competitor's lower-bound rate (same level as the solver's CRC significance) */
+/* Wilson score interval of k successes in n trials at z; n = 0 gives [0, 1]. */
+void nr_pdcch_cert_wilson(uint32_t k, uint32_t n, double z, double *lo, double *hi);
+/* True when n grants without one pass are significantly fewer than a rate p_lo would give: (1 - p_lo)^n < alpha. Pure. */
+bool nr_pdcch_cert_zero_pass_significant(uint32_t n, double p_lo, double alpha);
+/* A non-duplicate DL grant of bank entry `index` (credits it as the source of `rnti`'s next TB outcomes). Caller: accept_dup(). */
+void nr_pdcch_coreset_bank_note_grant(int index, uint16_t rnti);
+/* One dedicated TB outcome for `rnti` (credit goes to the entry that last produced a grant for it). Caller: nr_pdsch_passive_crc_note(). */
+void nr_pdcch_coreset_bank_note_pdsch(uint16_t rnti, bool dedicated, bool crc_ok);
+/* Entry has at least one downstream TB CRC pass (and is not on probation). Entry index as nr_pdcch_coreset_bank_entry(). */
+bool nr_pdcch_coreset_bank_certified(int index);
+/* Some live entry with this scrambling ID is certified (feeds the GPU nID duty: an uncertified bank does not pause the search). */
+bool nr_pdcch_coreset_bank_nid_certified(int nid);
+/* A retired (nID, RB footprint) may not be re-admitted before its backoff (slots) expires; the dwell queue skips such geometries. */
+bool nr_pdcch_coreset_bank_readmit_blocked(int nid, int grid_rb, int groups);
+/* Retire entries with grants and no pass that a competitor's pass rate excludes (done inside tick; exposed for tests). Returns the number retired. */
+int nr_pdcch_coreset_bank_assess(uint64_t slot);
 void nr_pdcch_coreset_bank_tick(uint64_t slot, bool traffic_elsewhere,
                                 uint32_t t_stale_slots, uint32_t t_remove_slots);
 void nr_pdcch_coreset_bank_dispatch_enter(void);

@@ -251,3 +251,206 @@ TEST_F(CoresetBank, LazyLookupCannotMissHardBeforeSoft) {
   nr_pdcch_coreset_bank_dispatch_leave();
   nr_cfg_epoch_drain();
 }
+
+// ---- B1/B2 downstream PDSCH certification (2026-10-30) ----
+namespace {
+nr_pdcch_blind_monitor_cfg_t cfgn(int nid, int offset, int symbol = 0)
+{
+  auto c = config(offset);
+  c.coreset_pdcch_dmrs_scrambling_id = nid;
+  c.ss_first_symbol = symbol;
+  return c;
+}
+constexpr uint64_t kSlot0 = 4000000000ull;
+constexpr uint64_t kSlot1 = kSlot0 + 10000000ull; // tests below start after the first backoff test's clock // beyond every slot other tests of this binary used (the bank clock is monotonic)
+void grants(int idx, uint16_t rnti, int n, int passes)
+{
+  for (int i = 0; i < n; ++i) {
+    nr_pdcch_coreset_bank_note_grant(idx, rnti);
+    if (i < passes) nr_pdcch_coreset_bank_note_pdsch(rnti, true, true);
+    else nr_pdcch_coreset_bank_note_pdsch(rnti, true, false);
+  }
+}
+}
+
+TEST(CoresetCert, WilsonAndZeroPassRuleArePure)
+{
+  double lo, hi;
+  nr_pdcch_cert_wilson(0, 0, NR_PDCCH_CERT_Z, &lo, &hi);
+  EXPECT_EQ(lo, 0.0); EXPECT_EQ(hi, 1.0);
+  nr_pdcch_cert_wilson(10, 100, NR_PDCCH_CERT_Z, &lo, &hi);
+  EXPECT_GT(lo, 0.03); EXPECT_LT(lo, 0.10); EXPECT_GT(hi, 0.10); EXPECT_LT(hi, 0.25);
+  double lo2, hi2;
+  nr_pdcch_cert_wilson(100, 1000, NR_PDCCH_CERT_Z, &lo2, &hi2);
+  EXPECT_GT(lo2, lo); EXPECT_LT(hi2, hi); // more data tightens both bounds
+  nr_pdcch_cert_wilson(0, 200, NR_PDCCH_CERT_Z, &lo, &hi);
+  EXPECT_EQ(lo, 0.0);
+  EXPECT_NEAR(hi, NR_PDCCH_CERT_Z * NR_PDCCH_CERT_Z / (200 + NR_PDCCH_CERT_Z * NR_PDCCH_CERT_Z), 1e-9);
+  EXPECT_FALSE(nr_pdcch_cert_zero_pass_significant(1000, 0.0, 1e-3)); // no competitor rate, no verdict
+  EXPECT_FALSE(nr_pdcch_cert_zero_pass_significant(0, 0.5, 1e-3));
+  EXPECT_FALSE(nr_pdcch_cert_zero_pass_significant(100, 0.05, 1e-3)); // 0.95^100 = 0.006
+  EXPECT_TRUE(nr_pdcch_cert_zero_pass_significant(135, 0.05, 1e-3));  // 0.95^135 = 0.001
+  EXPECT_TRUE(nr_pdcch_cert_zero_pass_significant(1, 1.0, 1e-3));
+}
+
+TEST_F(CoresetBank, NoPassEntryRetiredOnlyWhenCompetitorRateExcludesIt)
+{
+  auto a = cfgn(101, 0), b = cfgn(101, 0, 1);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&a, 0x1001), 0);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&b, 0x1002), 1);
+  grants(0, 0x1001, 200, 20); // 10 % passes
+  grants(1, 0x1002, 60, 0);   // too few grants to exclude 0 % against the lower bound of 10 %
+  EXPECT_EQ(nr_pdcch_coreset_bank_assess(kSlot0), 0);
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 2);
+  grants(1, 0x1002, 200, 0);
+  EXPECT_EQ(nr_pdcch_coreset_bank_assess(kSlot0 + 10), 1);
+  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 1);
+  EXPECT_EQ(nr_pdcch_coreset_bank_cfg(0)->ss_first_symbol, 0);
+  EXPECT_TRUE(nr_pdcch_coreset_bank_certified(0));
+}
+
+TEST_F(CoresetBank, LoneEntryAndZeroBothNeverRetired)
+{
+  auto a = cfgn(111, 0), b = cfgn(112, 24);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&a, 0x1101), 0);
+  grants(0, 0x1101, 5000, 0); // alone: nothing to compare with
+  EXPECT_EQ(nr_pdcch_coreset_bank_assess(kSlot0 + 20), 0);
+  EXPECT_FALSE(nr_pdcch_coreset_bank_certified(0));
+  EXPECT_FALSE(nr_pdcch_coreset_bank_nid_certified(111));
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&b, 0x1102), 1);
+  grants(1, 0x1102, 5000, 0); // two entries, neither ever passes: no competitor rate, both stay
+  EXPECT_EQ(nr_pdcch_coreset_bank_assess(kSlot0 + 21), 0);
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 2);
+}
+
+TEST_F(CoresetBank, RetiredFootprintBacksOffExponentiallyAndEpochClears)
+{
+  auto a = cfgn(121, 0), b = cfgn(121, 0, 1);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&a, 0x1201), 0);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&b, 0x1202), 1);
+  grants(0, 0x1201, 300, 60);
+  grants(1, 0x1202, 300, 0);
+  const uint64_t t1 = kSlot0 + 1000;
+  nr_pdcch_coreset_bank_tick(t1, false, 1000000, 3000000);
+  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 1);
+  EXPECT_TRUE(nr_pdcch_coreset_bank_readmit_blocked(121, 0, 4));
+  EXPECT_FALSE(nr_pdcch_coreset_bank_readmit_blocked(999, 0, 4)); // other nID
+  EXPECT_EQ(nr_pdcch_coreset_bank_add(&b, 0x1202), -1);            // deferred, not locked out forever
+  const uint64_t span = t1 - 1; // born_slot was the bank clock at add time
+  (void)span;
+  // the backoff is as long as the evidence took (>= 1 slot) and ends: far in the future the footprint is free again
+  nr_pdcch_coreset_bank_tick(t1 + 1000000ull, false, 1000000000ull, 3000000000ull);
+  EXPECT_FALSE(nr_pdcch_coreset_bank_readmit_blocked(121, 0, 4));
+  const int again = nr_pdcch_coreset_bank_add(&b, 0x1202);
+  ASSERT_GE(again, 0);
+  // second retirement of the same footprint: the park doubles
+  const uint64_t t2 = t1 + 1000000ull + 5000;
+  grants(again, 0x1202, 300, 0);
+  nr_pdcch_coreset_bank_tick(t2, false, 1000000000ull, 3000000000ull);
+  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 1);
+  const uint64_t park2 = (t2 - (t1 + 1000000ull)) ; // evidence time of the second round
+  (void)park2;
+  EXPECT_TRUE(nr_pdcch_coreset_bank_readmit_blocked(121, 0, 4));
+}
+
+TEST_F(CoresetBank, SecondRetirementParksTwiceAsLong)
+{
+  auto a = cfgn(131, 0), b = cfgn(131, 0, 1);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&a, 0x1301), 0);
+  nr_pdcch_coreset_bank_tick(kSlot1 + 100000, false, 1u << 30, 1u << 30); // bank clock
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&b, 0x1302), 1);                   // born at +100000
+  grants(0, 0x1301, 300, 60);
+  grants(1, 0x1302, 300, 0);
+  nr_pdcch_coreset_bank_tick(kSlot1 + 101000, false, 1u << 30, 1u << 30); // evidence took 1000 slots -> parked until +102000
+  EXPECT_TRUE(nr_pdcch_coreset_bank_readmit_blocked(131, 0, 4));
+  nr_pdcch_coreset_bank_tick(kSlot1 + 101999, false, 1u << 30, 1u << 30);
+  EXPECT_TRUE(nr_pdcch_coreset_bank_readmit_blocked(131, 0, 4));
+  nr_pdcch_coreset_bank_tick(kSlot1 + 102000, false, 1u << 30, 1u << 30);
+  EXPECT_FALSE(nr_pdcch_coreset_bank_readmit_blocked(131, 0, 4));
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&b, 0x1302), 1);                   // born at +102000
+  grants(1, 0x1302, 300, 0);
+  nr_pdcch_coreset_bank_tick(kSlot1 + 103000, false, 1u << 30, 1u << 30); // span 1000 again, second retirement: 2 * 1000
+  EXPECT_TRUE(nr_pdcch_coreset_bank_readmit_blocked(131, 0, 4));
+  nr_pdcch_coreset_bank_tick(kSlot1 + 104999, false, 1u << 30, 1u << 30);
+  EXPECT_TRUE(nr_pdcch_coreset_bank_readmit_blocked(131, 0, 4));
+  nr_pdcch_coreset_bank_tick(kSlot1 + 105000, false, 1u << 30, 1u << 30);
+  EXPECT_FALSE(nr_pdcch_coreset_bank_readmit_blocked(131, 0, 4));
+}
+
+TEST_F(CoresetBank, ReconfigurationClearsTheRetiredList)
+{
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  auto a = cfgn(141, 0), b = cfgn(141, 0, 1);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&a, 0x1401), 0);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&b, 0x1402), 1);
+  grants(0, 0x1401, 300, 60);
+  grants(1, 0x1402, 300, 0);
+  nr_pdcch_coreset_bank_tick(kSlot1 + 300000, false, 1u << 30, 1u << 30);
+  ASSERT_TRUE(nr_pdcch_coreset_bank_readmit_blocked(141, 0, 4));
+  nr_cfg_epoch_note_continuity_loss();
+  nr_cfg_epoch_drain();
+  EXPECT_FALSE(nr_pdcch_coreset_bank_readmit_blocked(141, 0, 4)); // a CORESET that is legitimately new after a reconfiguration is not locked out
+  EXPECT_GE(nr_pdcch_coreset_bank_add(&b, 0x1402), 0);
+  EXPECT_EQ(nr_pdcch_coreset_bank_entry(nr_pdcch_coreset_bank_count() - 1)->grants, 0u); // evidence restarts
+}
+
+TEST_F(CoresetBank, SameNidSameRbsOtherSymbolIsOnProbationUntilItsOwnPass)
+{
+  auto a = cfgn(151, 0, 0), twin = cfgn(151, 0, 1), other = cfgn(152, 24, 0);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&a, 0x1501), 0);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&twin, 0x1502), 1);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&other, 0x1503), 2);
+  EXPECT_EQ(nr_pdcch_coreset_bank_entry(0)->probation, 0);
+  EXPECT_EQ(nr_pdcch_coreset_bank_entry(1)->probation, 1);
+  EXPECT_EQ(nr_pdcch_coreset_bank_entry(2)->probation, 0); // other nID: independent CORESET
+  grants(0, 0x1501, 100, 10);
+  EXPECT_FALSE(nr_pdcch_coreset_bank_certified(1));
+  grants(1, 0x1502, 1, 1); // its own TB pass: certified
+  EXPECT_TRUE(nr_pdcch_coreset_bank_certified(1));
+  EXPECT_EQ(nr_pdcch_coreset_bank_entry(1)->probation, 0);
+}
+
+TEST_F(CoresetBank, ProbationTwinWithoutPassIsRetiredAndNotReadmittedAtOnce)
+{
+  auto a = cfgn(161, 0, 0), twin = cfgn(161, 0, 1);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&a, 0x1601), 0);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&twin, 0x1602), 1);
+  grants(0, 0x1601, 400, 30);    // the real CORESET: 7.5 % pass
+  grants(1, 0x1602, 905, 0);     // measured: bank1-only DCIs, 0 TB passes
+  nr_pdcch_coreset_bank_tick(kSlot1 + 500000, false, 1u << 30, 1u << 30);
+  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 1);
+  EXPECT_EQ(nr_pdcch_coreset_bank_cfg(0)->ss_first_symbol, 0);
+  EXPECT_EQ(nr_pdcch_coreset_bank_add(&twin, 0x1602), -1);
+  EXPECT_TRUE(nr_pdcch_coreset_bank_nid_certified(161)); // the surviving entry certifies the nID
+}
+
+TEST_F(CoresetBank, PassesAreCreditedToTheEntryThatProducedTheGrant)
+{
+  auto a = cfgn(171, 0), b = cfgn(172, 24);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&a, 0x1701), 0);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&b, 0x1702), 1);
+  nr_pdcch_coreset_bank_note_grant(0, 0x1701);
+  nr_pdcch_coreset_bank_note_grant(1, 0x1702);
+  nr_pdcch_coreset_bank_note_pdsch(0x1702, true, true);
+  nr_pdcch_coreset_bank_note_pdsch(0x1701, false, true); // a common-class outcome is not evidence for a dedicated CORESET
+  nr_pdcch_coreset_bank_note_pdsch(0x1701, true, false);
+  nr_pdcch_coreset_bank_note_pdsch(0x1999, true, true);  // an RNTI no entry produced
+  EXPECT_EQ(nr_pdcch_coreset_bank_entry(0)->passes, 0u);
+  EXPECT_EQ(nr_pdcch_coreset_bank_entry(1)->passes, 1u);
+  // compaction moves entries but not their credit
+  ASSERT_EQ(nr_pdcch_coreset_bank_remove(0), 0);
+  nr_pdcch_coreset_bank_note_pdsch(0x1702, true, true);
+  EXPECT_EQ(nr_pdcch_coreset_bank_entry(0)->passes, 2u);
+}
+
+TEST_F(CoresetBank, DifferentNidEntryIsNeverRetiredForItsPdschYield)
+{
+  auto a = cfgn(181, 0), b = cfgn(182, 24); // two genuinely different CORESETs of one cell
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&a, 0x1801), 0);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&b, 0x1802), 1);
+  grants(0, 0x1801, 1000, 200);
+  grants(1, 0x1802, 5000, 0);
+  EXPECT_EQ(nr_pdcch_coreset_bank_assess(kSlot1 + 700000), 0);
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 2);
+}

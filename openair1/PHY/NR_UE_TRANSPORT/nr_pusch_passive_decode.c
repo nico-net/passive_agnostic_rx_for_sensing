@@ -2026,7 +2026,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         { /* no-chance gate inside the graph (nr_snr_gate.h): required SNR - 5 dB; probes / trials, transform-precoded grants and retransmissions (rv != 0 never reaches this pass) are never gated */
           const double rq_ = nr_required_snr_db(pg.mcs, pg.mcs_table);
           in.gate_on = !pg.transform_precoding && !nr_ul_layout_is_probe(g) && !nr_ul_layout_is_trial(g) && nr_snr_gate_applies(false, true, pg.rv, true) && isfinite(rq_);
-          in.gate_thr_db = in.gate_on ? (float)(rq_ - NR_SNR_GATE_MARGIN_DB) : 0.f;
+          in.gate_thr_db = in.gate_on ? (float)(rq_ - nr_snr_gate_margin_db(1)) : 0.f;
         }
         in.want_est = nr_srs_passive_enabled() || nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS);
         int ul_go_ = in.tbs_bits && in.bg && in.keep != -2; /* -2: the per-branch measurement is not decided (too few grants, or a mixed set): the CPU path measures per grant */
@@ -2558,7 +2558,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * combining is on (its soft bits are needed). Transform-precoded grants (pi/2-BPSK tables) are not covered by the table. */
   if (!t_solver_probe && !g->transform_precoding && isfinite(pvp->ul_dmrs_snr_db)
       && nr_snr_gate_applies(nr_ul_layout_is_probe(g) || nr_ul_layout_is_trial(g), true, g->rv, true)
-      && nr_snr_no_chance(pvp->ul_dmrs_snr_db, g->mcs, g->mcs_table)) {
+      && nr_snr_no_chance_dir(pvp->ul_dmrs_snr_db, g->mcs, g->mcs_table, 1)) {
     out->skip = 1;
     out->snr_db = pvp->ul_dmrs_snr_db;
     out->tbs_bytes = tbs >> 3;

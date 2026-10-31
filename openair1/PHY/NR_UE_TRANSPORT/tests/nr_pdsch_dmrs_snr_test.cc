@@ -113,3 +113,31 @@ TEST(DmrsSnr, RefExcludesGrantAndWraps)
   printf("per grant (ref + 4 antennas): %.2f us\n", us);
   EXPECT_LT(us, 20.0);
 }
+
+// PSINR: predicted post-MMSE SINR from the estimate and the chest noise. One layer = MRC (sum of the per-antenna SNRs); two orthogonal layers keep their own
+// SNR; two identical-channel layers (rank 1 channel) cannot both be above the one-layer SNR.
+TEST(Psinr, MrcOrthogonalAndRankDeficient)
+{
+  const int nrb = 20, n = 12 * nrb;
+  // sigma^2 = 2 nres / c with type 1 c = 0.72: nres = 0.36 sigma^2; sigma^2 = 1000
+  const uint32_t nres[4] = {360, 360, 360, 360};
+  auto row = [&](double re, double im) { std::vector<int16_t> v(2 * n); for (int k = 0; k < n; k++) { v[2 * k] = (int16_t)re; v[2 * k + 1] = (int16_t)im; } return v; };
+  const std::vector<int16_t> a = row(100, 0);  // |h|^2 = 10^4 -> 10 dB per antenna
+  const std::vector<int16_t> z = row(0, 0);
+  const int16_t *h[4][4] = {{0}};
+  float o[4];
+  for (int r = 0; r < 4; r++) h[0][r] = a.data();
+  nr_psinr_fill(o, h, 1, 4, n, nres, 1);
+  EXPECT_NEAR(o[0], 10.0 + 10.0 * std::log10(4.0), 0.05); // MRC of 4 antennas: 16.02 dB
+  EXPECT_EQ(o[1], -99.f);
+  for (int r = 0; r < 4; r++) { h[0][r] = r < 2 ? a.data() : z.data(); h[1][r] = r < 2 ? z.data() : a.data(); }
+  nr_psinr_fill(o, h, 2, 4, n, nres, 1);
+  EXPECT_NEAR(o[0], 10.0 + 10.0 * std::log10(2.0), 0.05); // orthogonal layers: 2 antennas each, 13.01 dB
+  EXPECT_NEAR(o[1], o[0], 0.05);
+  for (int r = 0; r < 4; r++) { h[0][r] = a.data(); h[1][r] = a.data(); }
+  nr_psinr_fill(o, h, 2, 4, n, nres, 1);
+  EXPECT_LT(o[0], 1.0); // identical channels: the two layers are not separable (SINR ~ 0 dB or below)
+  h[1][3] = nullptr;
+  nr_psinr_fill(o, h, 2, 4, n, nres, 1);
+  EXPECT_EQ(o[0], -99.f);
+}

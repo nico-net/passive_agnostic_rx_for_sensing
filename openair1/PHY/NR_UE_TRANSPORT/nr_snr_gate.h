@@ -10,6 +10,20 @@
 
 #define NR_SNR_GATE_MARGIN_DB 5.0
 #define NR_SNR_GATE_IMPL_LOSS_DB 1.5
+/* Cell-measured margin (nr_signal_evidence.h nse_gate_margin, fed by nr_pdsch_solver_note_dmrs): NR_SNR_GATE_MARGIN_DB is the design margin used until
+ * the cell's own ungated decodes bound the CRC pass rate below a tighter one (Wilson upper bound <= 0.2 %); never looser than the design margin.
+ * The weak reference keeps binaries that do not link the solver (unit tests) on the design margin. ul: PUSCH statistics (separate from DL). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern double nr_snr_gate_margin_db_cell(int ul) __attribute__((weak));
+#ifdef __cplusplus
+}
+#endif
+static inline double nr_snr_gate_margin_db(int ul)
+{
+  return nr_snr_gate_margin_db_cell ? nr_snr_gate_margin_db_cell(ul) : NR_SNR_GATE_MARGIN_DB;
+}
 
 typedef struct { unsigned char qm; float r1024; } nr_snr_gate_mcs_t;
 static const nr_snr_gate_mcs_t nr_snr_gate_t64[] = {
@@ -33,11 +47,13 @@ static inline double nr_required_snr_db(int mcs, int tbl)
 }
 
 /* snr_db: DM-RS SNR (dB) of the grant, DL comb or UL snr_db; <= -90 or non-finite = no estimate, never gated */
-static inline bool nr_snr_no_chance(double snr_db, int mcs, int tbl)
+static inline bool nr_snr_no_chance_dir(double snr_db, int mcs, int tbl, int ul)
 {
   const double req = nr_required_snr_db(mcs, tbl);
-  return isfinite(snr_db) && snr_db > -90.0 && isfinite(req) && snr_db < req - NR_SNR_GATE_MARGIN_DB;
+  return isfinite(snr_db) && snr_db > -90.0 && isfinite(req) && snr_db < req - nr_snr_gate_margin_db(ul);
 }
+
+static inline bool nr_snr_no_chance(double snr_db, int mcs, int tbl) { return nr_snr_no_chance_dir(snr_db, mcs, tbl, 0); }
 
 /* whether a grant is exempt from the gate: probes (discovery), SI/P/RA grants, and, with HARQ combining on, retransmissions (their soft bits are needed) */
 static inline bool nr_snr_gate_applies(bool probe, bool dedicated, int rv, bool harq_combine)

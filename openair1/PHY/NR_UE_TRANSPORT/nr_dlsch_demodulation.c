@@ -11,6 +11,7 @@
 #include "nr_phy_common.h"
 #include "PHY/defs_nr_UE.h"
 #include "nr_transport_proto_ue.h"
+#include "nr_re_pattern.h" // generic RE-pattern rate-match entries (SLOTPHASE)
 #include "PHY/sse_intrin.h"
 #include "T.h"
 #include "bits.h"
@@ -27,6 +28,7 @@
 #include "nr_irc_cov.h"
 #include "nr_mmse_exact.h"
 #include "nr_qam_mode.h"
+#include "nr_mrc_weights.h"
 #include <time.h>
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_nr_interface.h"
@@ -60,6 +62,7 @@ __thread nr_mmse2_diag_t nr_mmse2_diag;
 __thread int nr_dlsch_eq_override = -1; /* T26d ISAC_RX_EQ_AB: multi-layer equaliser per grant, 0 fixed MMSE, 1 float MMSE, 2 ML (nl 2, Qm<=6) */
 __thread int nr_dlsch_qam_mode_override = -1; /* QAM-FIX: per-decode ISAC_PDSCH_MMSE_MODE (-1 = env), set by the passive decode A/B */
 __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc; /* ISAC_PDSCH_EVM_GRANT, see nr_pdsch_evm_acc.h */
+__thread nr_pdsch_resid_t nr_pdsch_resid;     /* RESID slot-phase estimator input, see nr_pdsch_evm_acc.h */
 /* DECODE-FIX: compare the diagnostic float ZF's QPSK signs with the actual
  * fixed-point soft path. The EVM measurement precedes channel compensation. */
 __thread uint64_t nr_pdsch_decode_signs, nr_pdsch_decode_sign_errors;
@@ -141,6 +144,8 @@ int nr_dlsch_planned_branch(int nbRx, int nl)
 
 static bool overlap_csi_symbol(fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu, int symbol)
 {
+  if (nr_re_pattern_is(csi_pdu)) /* generic RE pattern (nr_re_pattern.h) */
+    return symbol >= 0 && symbol < 14 && ((nr_re_pattern_sym(csi_pdu) >> symbol) & 1);
   int num_l0 [18] = {1, 1, 1, 1, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 4, 2, 2, 4};
   for (int s = 0; s < num_l0[csi_pdu->row - 1]; s++) {
     if (symbol == csi_pdu->symb_l0 + s)
@@ -162,6 +167,8 @@ static bool overlap_csi_symbol(fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu, int
  */
 static uint32_t csi_resource_re_map(const fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu)
 {
+  if (nr_re_pattern_is(csi_pdu)) /* generic RE pattern: the subcarrier mask as is */
+    return nr_re_pattern_sc(csi_pdu);
   int num_k[18] = {1, 1, 1, 1, 1, 4, 2, 2, 6, 3, 4, 4, 3, 3, 3, 4, 4, 4};
   {
 
@@ -1240,13 +1247,15 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   static __thread int t_mrc_nb_rx = 0;
   static __thread int t_mrc_rx_index = 0;
   static __thread int t_mrc_live_mask = 0xF; // which receive branches feed the combiner (mode 3)
+  static __thread int t_mrc_wact = 0; // mode 3, rank 1: per-branch noise weights active for this TB (decided at first_symbol_flag with the live mask)
+  static __thread uint16_t t_mrc_wq[4] = {32768, 32768, 32768, 32768}; // Q15 amplitude weights sqrt(nmin / nvar_a) of the live branches (nr_mrc_noise_wq15)
   static __thread int t_mrc_mode = -1;
   static __thread int t_mrc_env = -1; /* T26d: ISAC_RX_MRC_MODE as configured; t_mrc_mode = per-grant effective mode */
   const double t_mrc_min_db = 12.0;
   if (t_mrc_env >= 0) /* already resolved: apply the per-grant override (nr_dlsch_mrc_mode_override, -1 = none) */
     t_mrc_mode = nr_dlsch_mrc_mode_override >= 0 ? nr_dlsch_mrc_mode_override : t_mrc_env;
   if (t_mrc_mode < 0) {
-    t_mrc_mode = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 1 : 0; /* frozen ISAC_RX_MRC_MODE=1 */
+    t_mrc_mode = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? 3 : 0; /* live-branch MRC (see refuse() in nr_pdsch_gpu_demod_host.c) */
     t_mrc_env = t_mrc_mode;
     if (nr_dlsch_mrc_mode_override >= 0) t_mrc_mode = nr_dlsch_mrc_mode_override;
   }
@@ -1557,6 +1566,11 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
        * their estimates, so charging it log2(nbRx) bits would spend 2 bits of LLR dynamic range to
        * protect a sum that only ever has popcount(live_mask) non-zero terms. */
       int contributing = mrc_nb_rx;
+      /* PER-BRANCH NOISE-WEIGHTED MRC (rank 1, mode 3, no forced branch / mask): the live branches are scaled (h and y, below) by sqrt(nmin / nvar_a) from the chest's
+       * per-RX DM-RS residual noise, so the integer combiner computes sum h_a* y_a / nvar_a with thresholds sum |h_a|^2 / nvar_a. Same decision as nrd_decide(). */
+      t_mrc_wact = 0;
+      if (nbRx == 4 && t_mrc_mode == 3 && nr_dlsch_forced_mask < 0 && nr_dlsch_forced_branch < 0)
+        t_mrc_wact = nr_mrc_noise_wq15(nbRx, t_mrc_live_mask, nr_dl_chest_nvar_ant, nb_re_pdsch, t_mrc_wq);
       /* The live-branch count must follow the mask WHOEVER set it. Gating this on t_mrc_mode == 3
        * alone meant the subset scan (which drives the same live_mask through nr_dlsch_force_mask()
        * while mode stays 0) got a shift sized for FOUR contributing branches even when one was
@@ -1565,7 +1579,9 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
        * describes. Measured 2026-09-08: every one of the 15 subsets read 0 % CRC, including {0},
        * on transport blocks the primary path decoded at 87.7 %. Same class as the nvar bug fixed
        * the same day -- a correction that knew about mode 3 but not about forced_mask. */
-      if (nbRx == 4 && (t_mrc_mode == 3 || nr_dlsch_forced_mask >= 0)) {
+      if (t_mrc_wact) {
+        nr_mrc_weighted_headroom(nbRx, t_mrc_live_mask, avg, t_mrc_wq, &avgs, &contributing); /* the weighted sum's headroom (nrd_decide) */
+      } else if (nbRx == 4 && (t_mrc_mode == 3 || nr_dlsch_forced_mask >= 0)) {
         contributing = 0;
         for (int aarx = 0; aarx < nbRx; aarx++) {
           if (t_mrc_live_mask & (1 << aarx)) {
@@ -1620,6 +1636,19 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     for (int aarx = 0; aarx < nbRx; aarx++) {
       if (!(t_mrc_live_mask & (1 << aarx))) {
         memset(chFext[0][aarx], 0, rx_size_symbol * sizeof(c16_t));
+      }
+    }
+  }
+  /* Noise-weighted MRC (decided at first_symbol_flag): every symbol, the live branches' h AND y scaled by their Q15 weight (nrd_scale_q15 on the GPU, k_mask_pw). */
+  if (nl == 1 && nbRx == 4 && t_mrc_wact && t_mrc_mode == 3 && nr_dlsch_forced_mask < 0 && nr_dlsch_forced_branch < 0) {
+    for (int aarx = 0; aarx < nbRx; aarx++) {
+      if (!(t_mrc_live_mask & (1 << aarx)) || t_mrc_wq[aarx] == 32768)
+        continue;
+      for (uint32_t i = 0; i < rx_size_symbol; i++) {
+        chFext[0][aarx][i].r = nr_mrc_scale_q15(chFext[0][aarx][i].r, t_mrc_wq[aarx]);
+        chFext[0][aarx][i].i = nr_mrc_scale_q15(chFext[0][aarx][i].i, t_mrc_wq[aarx]);
+        rxdataF_ext[aarx][i].r = nr_mrc_scale_q15(rxdataF_ext[aarx][i].r, t_mrc_wq[aarx]);
+        rxdataF_ext[aarx][i].i = nr_mrc_scale_q15(rxdataF_ext[aarx][i].i, t_mrc_wq[aarx]);
       }
     }
   }

@@ -5335,3 +5335,199 @@ Today [MEASURED, DGX+X410, daytime 2026-10-29]: solo 415 p50 1.8-2.2 ms / p99 15
 too, so the work starts single-cell. Where: the DL/UL session works on mpci-main (A9: N=1 equivalent to main, so single-cell results hold
 for main); every main push is merged into mpci-main (plan F10) with A9 + V2a; mpci-main -> main when P2 holds solo and P1/P3 hold at N=2.
 First items: §31 (DL health, UL, DCI 1_1), the core-pool facts above, the measured-demand defect, the out-of-span add check, O1-O3.
+
+## 33. UL gaps and the timing-advance problem — re-measured 2026-10-30 (to start from when the UL work begins; supersedes §31.2 where they differ)
+Sources: [MEASURED, DGX+X410 34B2AF1 OTA 2026-10-29 mpe29_* runs, per cell] and [CODE, mpci-main 4986799f18]; audit reports in the
+2026-10-30 session scratchpad (ul_audit/REPORT.md, ul_audit2/REPORT.md). UL work is serial after DL (operator 2026-10-30).
+- **DCI 0_1 is read correctly** (refutes §31.2 item 1 as a field-offset bug): raw-bit sweep ("UL raw sample" lines, nr_pdcch_ul_discovery.c:442,
+  first 8 novel payloads per RNTI) puts the MCS/NDI/RV/HARQ window at the locked mcs_off on 415 (len 44, off 21) and 923 (len 42/44, off 20);
+  new-TB rv=0 99.2 % (415) / 99.9 % (403) / 96.7 % (923); CRC passes at MCS 27 3 PRB (415) and MCS 15 3 PRB (403). "MCS 27 / 3 PRB" is real
+  scheduler content (56 of 79 busy RNTIs on 415). The MCS start is the fitted mcs_off; widths only split it into BWP-ind/RIV/TDRA/FH.
+- **Funnel (real grants, probe=0)**: 415 145,334 -> no-chance gate 96.5 % -> CRC ok 1; 923 71,644 -> gate 13.9 %, LDPC-fail 79 % (56,594 of
+  them transform-precoded, tbl3) -> CRC ok 0; 403 20,145 -> gate 87.7 % -> CRC ok 1. Median UL DM-RS SNR -7.7 / -9.0 / -15.6 dB (4-RX mean).
+  The gate (nr_snr_gate.h:12-48, Shannon(MCS)+1.5-5 dB; TP exempt) is lenient and correct: >10 dB short for 136,673/140,272 (415). It reports
+  that the claimed place/ID/timing holds no signal. QPSK grants near the requirement also fail (491 on 415, 0 pass): not a high-order-QAM issue.
+- **TA / per-UE timing = the lead.** Fixed TA 1600 samples on every 415/923 attempt, 400 on 403 (§31.2 item 5); the only >= 10 dB grants on 415
+  (120 of 145,300) have TA 1640-1649. The per-UE search exists (background worker, nr_pusch_passive_decode.c ~1555-1600: radius 2048 coarse 128 /
+  tracked 256 step 64, refine 16; accept score >= 0.35 + nr_pusch_ul_disc_accept) but on 415: submitted 5,516, bg_expired 2,814 (51 %), done
+  2,702, ~80 hypotheses cached (UL_BGDISC lines) -> estimated delay 0 on 84 % of attempts. Two causes: the worker does not keep up (IQ snapshot
+  expires; float-lane lease, ISAC_UL_NID_BG_CPU_PCT=10), and the timing score needs the UL DM-RS scrambling ID, which is never confirmed
+  (UL_NID_STATS confirmed=0 in all runs) -> joint (TA, ID) search or an ID-free timing metric needed. Seed from DL: the overheard RAR / TA Command
+  CE (nr_passive_mac_ta.h) gives the gNB's TA per UE; plus the UE->receiver geometry offset is unknown (passive position) -> search around it.
+- **Other UL gaps**:
+  - Transform precoding chosen on 923 (tail fit by cost, only the N_RB check validates) with 0 passes; P3S415 1,128 real TP N_RB rejects.
+  - UL BWP locked on the prior with 0 votes / 0 probes (923 217@0, 403 51@0); 415 216@1 with 13 votes vs 3.
+  - UE-ID table cap 64 without eviction (nr_pusch_passive_ul_ids.c:56, 175-193): 415 saw 129 RNTIs, 88,248 UL_UE_IDS drops.
+  - UL TDRA catalogue: every row S=0 L=14 mapping A (nr_pdcch_ul_layout_lock.c:294-297), unknown K2 rows copy row 0; UL_DMRS_PIN latched S0 L14.
+  - MCS table: tbl1 only via CRC-first trial variants; DM-RS type/maxLength fixed 1/1.
+  - Not handled: rank > 1 (refused, nr_pusch_passive_decode.c:1874), TPMI/precoding (precoding_info forced 0), frequency hopping (second hop),
+    PT-RS (pdu zeroed), beta offsets (read, dropped); UCI on PUSCH searched only for TBS > 3824 CP-OFDM; tbslbrm 0 in the GPU pass; LDPC <= 8 it.
+  - HARQ: rv != 0 with no history refused 3,570 (415) / 4,020 (923); UL_HARQ_COMBINE exists (off in the merged defaults? check).
+- **Order proposed for the UL work**: (1) per-UE timing: keep the worker up (budget, snapshot lifetime) + ID-free or joint timing metric + DL TA seed;
+  (2) then re-measure the funnel; (3) TP decision by CRC, not cost; (4) BWP lock by evidence; (5) UE-ID eviction; (6) UL TDRA rows; (7) rank/TPMI/hopping.
+
+## 34. DL decode health and discovery — measured and fixed 2026-10-30 (session on mpci-main 4986799f18; fixes UNCOMMITTED in this worktree until validated)
+OTA: [MEASURED, DGX+X410 34B2AF1, 2026-10-30 daytime, interleaved base (build_base_4986799f18) vs candidate, single cell, 300 s, MPCI_20261025.env
++ ISAC_PDSCH_CORES=6,7,8,9,3,4,1,2 on both arms (pool 8 instead of 6, the existing operator override)]. Campaign scripts ota/run_dlfix{,2,3,4,5}_20261030.sh.
+- **TDRA field learner (415)**: SIB1 gives 8 common rows -> field width 3; tf_eval tried widths 1..2 only -> never detected; rows learnt from CRC
+  (dedicated list differs from SIB1). Fix: widths 1..4 (list width first), learnt (K0,S,L) rows first, exploration of a value that never passes
+  (TDD-legal candidates, untested start symbols first), and BOOTSTRAP exploration before detection (403: value 1 = S2 L12 was found only by
+  RNTI luck). Result 415: p99 14-20 -> 6.9-8.5 ms, crc_q 83-92 -> 93.7-94.5 %, late TDRA rescues 10-17k -> ~10/run; exploration learnt
+  "value=2 -> K0=0 S=2 L=12" (b1=1 grants 0/1444 -> 45 %). The cross-slot (K0=1) hypothesis was REFUTED by the CRC.
+- **Retransmissions**: real rv!=0 retransmissions exist (2-12 % of solved grants, varies); now decoded when the HARQ store holds the failed earlier
+  transmission (45 % pass on 415); a FAILED retransmission is neutral evidence (solver/link-health/data-id/TDRA tallies), else it unsettles layouts.
+- **Rank > 1 / big grants**: at post-eq margin >= 6 dB, >=8-CB grants 97-100 %, Nl3 97-100 %, Qm6 94-100 % (= small grants). Rank 4 decodes 100 %
+  in the bed (cross-coupled 4x4, OTA env); on air its per-layer SINR stays ~1 dB at good DM-RS SNR -> [INFERRED] ill-conditioned effective channel
+  at the passive location. Bed-only open: rank-2 256QAM fails ~1/3 at 31 dB (ports 1000/1001 OCC, cdm=1).
+- **TRS rate matching (415 wideband)**: CSI-RS discovery's own observer revoked weak TRS bursts (z < 2 for 4 occasions) -> CSIRS_MAP_CHANGE epoch ->
+  nr_csirs_disc epoch_listener wiped the whole confirmed set (only RX_RECOVERY exempt); 11-24 rebuilds/run; grants with an incomplete own TRS set
+  failed 704/704; every epoch also dropped all queued PDSCH jobs (nr_passive_job_epoch_old). Fix: map change logged only (no epoch), inconclusive
+  band 1.5 <= z < 2, discovery keeps exports on SOFT epochs except DEDICATED_CHANGE_SUSPECTED.
+- **Discovery (923)**: DM-RS vote table 128 entries never evicted; solver table 64 vs 109-132 active RNTIs (28-50 solved RNTIs evicted/run); the
+  2-id shortlist often held other UEs' ids (per-UE ids on 923); fixed 200-probe backoff. Fix: tables 256 (+LRU for votes), IDQUAL ranking from the
+  decodes' measured DM-RS SNR (right id +4..+7 dB, wrong ~ -6 dB), backoff never on a proven id, after 64 probes when all ids are wrong.
+- **DCI fields (operator point)**: DCIBITS tally per bit of the TDRA+pre-MCS window (log line "SENSING: DCIBITS"). The single pre-MCS bit of 415
+  is 0/379 when 1 -> PMEXPLORE tries interleaved VRB-to-PRB (L 2/4) on those grants (result pending).
+- **Reconfiguration**: solver + TDRA learner had no epoch handling -> reset on a new cell identity (HARD_RESET only). Bed harness
+  tests/passive_rx/reconf_bed/ (S0 same restart, S1 PCI, S2 TDD/SS0, S3 rank/MCS; the passive rfsim client reconnects to a restarted gNB).
+- **Decode-time tail**: 75-77 % of the >= p99 tail are failed decodes at it=16 (35 % of decode time). An iteration cap would lose 1.7-2.7 % of
+  passes; a stagnation-based early stop was measured and REJECTED (§35).
+- Known pre-existing test failures re-checked on the baseline: test_nr_ssb_rate_match_prod (harness predates CSI-FULL always-on: the decoder rebuilds
+  its CSI RM list from the blind state; LDPC hook not reached), test_ldpc_cuda_pool_cpu (segfault, baseline too), PdschSolverPhase.Mixed* only
+  fails when run alone (order dependence).
+
+## 35. DL internal SNR loss, slot-phase rate matching, TDRA stray pass, LDPC early stop — measured 2026-10-30 afternoon (UNCOMMITTED; A/B ota/run_dlfix6_20261030.sh)
+[MEASURED DGX+X410 OTA 2026-10-30, per cell, runs et*/eu*/ev*/ew*/sp* 415/923/403; link level = [MEASURED DGX GB10 test nr_linklevel_bench]]
+- **Rank-1 combining was best-branch only (~6 dB loss)**: frozen ISAC_RX_MRC_MODE=1 (s_mode in nr_pdsch_gpu_demod_host.c refuse(), t_mrc_mode in
+  nr_dlsch_demodulation.c) = one RX branch for Nl=1; chosen on the sens6 rig (two dead branches). DGX+X410 branches are healthy (per-RX DM-RS SNR
+  within 0-6 dB; RX0 noise floor +2.2-2.8 dB on every run). Evidence: predicted MMSE SINR - real-path SNR = 6.1 dB (415 Nl1); rank-1 CRC at equal
+  pre-combining DM-RS margin 3-6 dB: 5-28 % mode 1 vs 31-47 % mode 3 (415/923/403). The per-RNTI comb race (comb_pick) counted multi-layer grants
+  (mode is ignored for Nl>=2) and spent 1 grant in 8 on mode 1. FIX: default mode 3 (MRC over branches within 12 dB of the best; = best branch on a
+  rig with dead branches), comb_pick always the default. OPEN: even mode 3 rank-1 trails Nl2 at equal margin (~40 % vs ~78 % at 3-6 dB): one scalar
+  noise variance for all branches (RX0 noisier) -> per-branch noise weighting / IRC (CPU prototype exists, nr_dlsch_irc_override) next.
+- **After the equaliser the chain is near-ideal** (AWGN, 4 RX, flat, Qm 2-6, 1-2 layers, 1-16 CB): our GPU pass is 0.5-1.0 dB from exact-LLR
+  (chest 0.2-0.35 dB, 0.66 at 250 PRB; int16 demod 0.3-0.45 dB at Nl1); power-of-two LLR norm shift neutral; LLR x2^j flat for j=-1..+1, no
+  saturation (clip <= 0.8 %); GPU int8 LDPC == OAI CPU LDPC at 16 it (30 it +0.1-0.4 dB). Bench: openair1/PHY/NR_UE_TRANSPORT/tests/nr_linklevel_bench.cc.
+- **New permanent EVMGRANT fields**: psinr= (predicted post-MMSE SINR per layer from chest H and per-RX noise), snrx= (DD SNR on the real int16
+  equaliser output, GPU path), sdisp=p10,std (within-grant), cbmap= (per-CB CRC; untried CBs after NR_CB_FAIL_LIMIT=5 failures read 0: only
+  CBs 0-4 are unbiased). psinr is biased vs snrx by Qm (+4.7 dB Qm2 .. -2.2 dB Qm6 on 415): use differences within a Qm only. CB0 passes 5-8 points
+  less than CB1-4 on 415 (2 on 923) at real-path margin >= 3 dB (first symbols, CORESET side) -- small, open.
+- **Slot-phase rate matching**: 923 abs%40 in {8,18} = 0 % CRC at strong DM-RS in all runs (multi-port NZP CSI-RS seen by discovery as WINNER/
+  FOOTPRINT, never CONFIRMED -> not rate matched -> misaligned). 403/415 slot%10==6 = TDD special slot, partial loss (nsym 11 12-58 % vs nsym 10
+  79-93 %). FIX (new nr_pdsch_passive_slotphase.{c,h}, nr_re_pattern.h): per-cell CRC evidence per abs%P (P 10..160) flags a phase (Wilson upper
+  bound < half the cell rate, n >= 30); at a flagged phase each grant is decoded with one CRC-arbitrated variant (discovery seeds, per-RE footprint
+  patterns -- generic csi_type 3 {symbol mask, 12-bit sc mask, RB range/density} honoured by every decode path, bit-exact vs CSI-RS PDUs -- and
+  end-symbol trims L-1..L-3); adopt >= 3 passes beating control, drop/revoke. OTA (sp923a/b): flags 40/8 and 40/18 within minutes; seed-only
+  variants failed 0/16 each (footprint/trim variants: A/B pending).
+- **TDRA stray pass (403)**: value 01 passed ONCE in 1453 decodes (stray) -> zero-pass rules never explored, one pass = "learnt row". FIX: tf_dead =
+  >= 32 decodes and 8x below a sibling's pass rate (or 0 passes); a row needs 3 passes (TF_ROW_MIN), then strays drop and the rate window restarts;
+  the first explored pass of a dead value supersedes strays; boot_w lets rule (b) detect with 3 passes. ev403: detected w=2, value 01 15 % (was
+  0.04 %), crc_q 98.1 % (86-88 before), p99 3.0 ms; sp403 crc_q 97.4 %.
+- **LDPC early stop: REJECTED and REMOVED** (no code left). A syndrome-stagnation rule lost 0 of ~43k sampled converging CBs and would save 19-59 %
+  of failing CBs' iterations, BUT CRC-only passes (CRC ok on a snapshot whose syndrome is not 0; the host CRC-checks every iteration's snapshot)
+  are 1.2-1.3 % of CB passes after iteration 8 (415 1051/82739, 923 570/47682) and the trace cannot show whether the stop would cut them.
+  Do not retry without a joint (stop-point, CRC-hit) measurement; never trade CRC for latency.
+- **Discovery/layout health** (no defect in identity, Nl==popcount(ports), RB in BWP, TBS physical): strong-DM-RS-all-fail class 7-8 % (415), 10-13 %
+  (923, mostly the slot phases above); 403: one unreceivable RNTI took 80 % of decode records in a run (15 passes / 157k probes, DM-RS at noise floor
+  for every hypothesis) -> OPEN: park RNTIs whose best DM-RS over all hypotheses is at the noise floor (backoff on evidence, not probe count);
+  first-CRC latency per new RNTI 9-32 s p90 on 403 -> OPEN: seed new RNTIs with layouts already solved in the cell.
+- Build note: libpdsch_gpu.so is a runtime module, not a dependency of nr-uesoftmodem: always build target pdsch_gpu.
+- **Check the synced PCI of every OTA run before comparing** (ISAC_METRICS "pci"): on 2026-10-30 evening the 3630 MHz tune ("403") synced PCI 27 in
+  all four d6L403 runs (and ew403, d2L403c2), and the 3680.01 MHz tune ("415") synced PCI 442 in d6V415c1 -- the receiver correctly decodes the
+  strongest cell; such runs are a different cell and must be excluded/relabelled (they looked like a "foreign CORESET 52320" and a CRC regression).
+
+## 36. DL closure attempt, big grants, real-time test, multi-PCI OTA, plan to "DL perfect" — 2026-10-31 (mpci-main 4986799f18 + UNCOMMITTED §34/§35 candidate)
+Evidence: [MEASURED DGX+X410 34B2AF1 OTA 2026-10-31, 4 RX, per cell, never pooled] unless labelled. Candidate = this worktree's build/ (uncommitted DL
+files); base = build_base_4986799f18. Analysis scripts: session scratchpad dirs ota_dl7/, dlclose/, big/, rt/, bigtb/, mpci_ota/ (not in git).
+
+### 36.1 Operator decisions 2026-10-31 (binding until changed)
+- Latency is NOT the target now: decode everything decodable. Keep NR_CB_FAIL_LIMIT = 5 (a TB is declared failed only after 5 failed CBs).
+- All OTA = mpci-main, SOLO cells (N=1). Multi-PCI (2 PCIs) only after DL is done (next day). No separate UL OTA: UL fixes are linked into the same
+  build and tested together with DL.
+- Target: big grants (> 128 PRB) decoded; "sensing messages" = everything decodable: PDSCH, PUSCH, PRACH, SRS -- each counted.
+- New permanent logs (no flags): missed-grant counter = CRC fail although SNR >= required(Qm, R, Nl) + 2 dB; per-cell CB-CRC statistics by class.
+- PT-RS handled a priori (not only if proven). PARK must work. Receiver must not depend on SIB1. Work is for an academic paper: every claim labelled.
+
+### 36.2 OTA dl7 (ota_runs/dl7_20261031_065710, 16 runs, n=2 per build; 403/PCI27 n=1)
+- 415: cand crc_q 98.2/97.9 vs base 69.7/96.4 (base b1 stuck on RNTI 0x16ac port 0x2); p99 11.1/11.8 vs 12.8/8.1 ms. Tail = queue wait behind big TBs.
+- 923: CRC unchanged; p99 3.1/3.9 vs 4.0/7.4 ms. Slots abs%40 8/18 still ~40 % both builds (SLOTPHASE flags them, all variants 0/16).
+- PARK 0 lines, RETIRE 0. Rank-1 combiner (§35 mode 3): no measurable gain vs healthy base on 415.
+- First decode on 415 WORSE: median 34-38 ms cand vs 0 base (first-slot pass 4-5 % vs 23-30 %). Cause: seed S taken from tda-keyed S_by_tda but S
+  is slot-phase keyed (match 11/60, 15/71 cand vs 43/56 base) + wrong rep layout (2060 family cdm=1 vs true cdm=2). FIX written in nr_pdsch_solver.c
+  (g_phs[phase][S] CRC-pass census; seed emits phase-majority S first) + test SeedNewRnti.FirstSeededProbeCarriesThePhaseStartSymbol: UNBUILT
+  (build dir build_firstdec). Second test for the wrong-rep part missing.
+- Closing stats (first-pass CRC): 415 88 %, 923 86 %, 403 22 %; 64QAM 22/48/7 %; 256QAM ~0 everywhere; DM-RS SNR p50 17.6/12.9/9.9 dB.
+- Iliad (3630 MHz tune) syncs the strongest PSS: PCI 27 or 403 depending on run -> target PCI 403 via the MPCI want list (works: 5/5 runs).
+- 508 WindTre: ~0 SIB1 today both builds; old build (rr-main-1026) 581 vs cand 36/6 SIB1 in w508_20261031 (n=1 each). Channel vs regression UNDECIDED.
+
+### 36.3 Real-time vs offline (user hypothesis "OAI fails real-time SDR big grants"): NO [MEASURED 415 only]
+- Same IQ replayed 0.25x vs 1.0x (shm ring g5_fast_pub, candidate build): per-grant CRC equal (day_4s 1631 grants 0.785/0.792, big 0.087/0.119 n=24;
+  3s 0.897/0.889; 12s_b 0.449/0.453). Live: 0 overflow, 0 stale_after_decode, 0 drop_full, PBCH 13750/13750, ADC clip 0.
+- Every big failure ends at the fixed it=16 cap (2726/2733). Only time-budget logic: RETRY_BUDGET_NS (recovery arms only).
+- Collapse follows Qm/MCS, not TB size: DM-RS 16-20 dB, TBS>=100k Nl2 Qm4 90-97 %, Nl2 Qm6 11-19 %.
+- Cap 30 (test knob NR_TEST_PDSCH_LDPC_ITERS) offline: Qm6 0.242 -> 0.300. Limit: offline big sample is tens of grants.
+
+### 36.4 Decoder: normalised min-sum (alpha 3/4) [MEASURED bench nr_linklevel_bench, AWGN, 50 TB/pt, 0.5 dB grid; branch mpci-bigtb]
+- TB BLER <= 10 % (product chain): 64QAM 16 CB 16.0 -> 15.5 dB (15.0 with 30 it); 16QAM 5 CB 10.5 -> 10.0 (9.5); 64QAM 7 CB Nl1/Nl2 15.0 -> 15.0 (14.5).
+- GPU == CPU after the change (test_nr_pdsch_gpu_ldpc mismatches=0). Qm8 bench configs crash (bench limit). Gain ~0.5 dB, ~1 dB with 30 it.
+
+### 36.5 Big grants > 128 PRB (first tx, dedicated, probe=0; candidate c1+c2)
+- 415: ~9.1k grants, ~45 % TB CRC; Nl2 Qm6 = 4.8k (53 %) at 11 % (CB 45 %). 923: ~2.0k, Nl2 Qm6 0.8k at 53 %. 403/508 have none.
+- Margin = psinr (predicted post-MMSE SINR per layer) - (Shannon(Qm*R) + 4.5 dB bench gap). Nl2 Qm6 with margin >= 2 dB: 87 % (415, n=250), 94 %
+  (923, n=417). 415 Nl2 Qm6 sits at psinr ~13.8 dB/layer vs ~15.5 needed [INFERRED: physics at the passive location, 17.6 dB comb - 3 dB split
+  - MMSE loss]. CAVEAT (§35): psinr is biased vs snrx by Qm (+4.7 Qm2 .. -2.2 dB Qm6), and snr_l/EVM (16.4 dB, EVM ~15 % flat across MCS) is
+  decision-directed -> the true per-layer SINR of Qm6 grants is between 13.8 and 16.4 dB: NOT settled. Must be settled with a genie
+  (re-encoded CRC-ok TB / passed CBs) SNR + LLR-calibration measurement before claiming "physics".
+- MISSED grants (margin >= 2 dB, CRC fail), mostly QPSK/16QAM: 415 Nl2 Qm2 222/1124 (80 % CRC), Nl1 Qm2 31/151; 923 Nl1 Qm2 24/90 (73 %). Almost all
+  are ALL-CB failures (structural, not noise). 415: slots %20 in {0,1,15,16} 53-69 % vs 94-100 % elsewhere; layout S 0/1, nsym 11/12, dmrsm 0x804.
+- Cause candidate [MEASURED footprints, INFERRED cause]: TRS. CSIRS_DISC FOOTPRINT on 415 shows density-3 TRS-like resources (sym 0x110/0x100/0x200,
+  sc 0x111/0x222/0x444/0x888) at offsets 15/16/20/21/35/36 of P=160 -- exactly the failing slots -- but fragmented into many footprints with
+  partial RB ranges (0:52, 128:52, 64:116 instead of 0:217). §34's TRS epoch fix is in the candidate; the fragmentation remains.
+
+### 36.6 PT-RS
+- Not handled at all: the per-RNTI PT-RS sweep was deleted in 3c3f9789bc (stage-2 cleanup); nr_pdsch_passive_ptrs_sweep_allow() is a no-op. When it
+  existed it never ran OTA (all PTRS_SWEEP arms 0/0 in every old log). nr_pdsch_ptrs_unav.{c,h} (RE count, 6 (K,L) densities) still exists.
+- CB evidence in failed big TBs (CB1-4 pass 62-73 %) argues the failing grants carry no PT-RS [INFERRED]; not proven per grant.
+
+### 36.7 Multi-PCI OTA (mpci_ota_20261031_093845, 17 runs, MPCI_20261025.env, n=2 per arm) -- P1 FAIL
+- 415 solo p50/p99 1362/8638 us -> N=2 (415+923) 3719/16967; 923 1409/7345 -> 3820/15056; 508 1729/4108 -> 2821/4777 (with 403).
+- 403 in any multi config: 0 RNTIs with a CRC-ok grant (solo 9-11) -> not diagnosed. CRC within ~3 points of solo for 415/923; drops 13-41 % in B/D.
+- Busy cores 0.70-0.92x the sum of solos, 1.68-1.80x the heavier solo. SHMIQ_OVERRUN storms at 245.76 MS/s on both rings at once (process-wide
+  stall, ~0.27 s). MPCI admission never measures (meas_cells=0). m2B: cell 923 never synced (no SSB in its c1 stream), fine in the 2 other runs.
+
+### 36.8 UL (branch mpci-ul, worktree wt/rr-mpci-ul)
+- Commit 07f130a163 "test(rfsim): RFSIM_UL_TAP_SHIFT ..." (only radio/rfsimulator/simulator.cpp; approved flag exception). Not pushed.
+- V3 alias resolver (CP + pilot coherence, Stouffer) builds; test_nr_pusch_ul_disc 23/24 (UlAlias.TrackedSeedOnAliasIsCorrected: 18-24/24 at
+  FFT 2048, 10-15/24 at 4096; never worse than old), test_nr_ul_dmrs_diag 7/7. rfsim 120 s: UL CRC 90.0 % bwp / 95.4 % nocfg (within spread).
+- UL OTA: the candidate decodes ~0 on air (923: 222k grants 0 OK; 403: 16 full_ok). UL tree never tested on air (one u1V415u1 run started by
+  mistake 11:39, exited by itself without sync).
+
+### 36.9 PARK (what it is, why it does not work)
+- Per-RNTI SPRT (nr_signal_evidence.h, nr_pdsch_solver.c nr_pdsch_solver_note_dmrs): H0 = no hypothesis sees the RNTI's DM-RS above the cell
+  noise floor. A parked RNTI keeps 1 re-test grant in 2^k (no probes) -> GPU time not wasted on inaudible UEs. OTA: 0 PARK lines: drift too weak
+  (H1 shape clamped at 0.9) -> ~850 grants per class to reach ln 0.01. Redesign required (decide in tens of grants, never park a decoding RNTI).
+
+### 36.10 Plan (order; each step has its stop condition)
+1. TRS/CSI-RS footprint consolidation + rate matching: merge fragmented footprints of one resource (full band, fixed sc offset, 2-slot pair),
+   apply to every grant in those slots. Offline check first on dl7 logs/raw IQ. Stop: margin-qualified QPSK/16QAM in 415 slots {0,1,15,16} and
+   923 abs%40 {8,18} >= 95 %.
+2. Genie SNR/LLR measurement (test-only tool, raw captures): true post-eq SINR per layer and LLR calibration on CRC-ok TBs / passed CBs; settles
+   psinr vs snrx (36.5) and where the dB go (chest / MMSE / LLR). Stop: per-stage loss table per Qm/Nl on 415.
+2b. Per-RNTI grant/transmission inference. First an offline measurement on dl7 logs (EVMGRANT rv/ndi/pid): missed-DCI rate per cell from HARQ
+   gaps (NDI toggled twice between observations, rv!=0 without its rv0), retx-after-failure probability and delay, periodic (SPS-like) grants per
+   RNTI, entropy of next-grant fields given history. Then, by value: (a) data-aided channel estimation -- re-modulate decoded CBs/TBs as extra
+   pilots, refine chest, re-decode failed CBs (~45 % of CBs pass in failed Nl2 Qm6 big TBs); (b) permanent missed-DCI counter (discovery
+   completeness without gNB logs); (c) DCI-less transmissions: DL SPS / UL configured grants learnt from activation DCI or repetition, decoded
+   blind with TB-CRC arbitration (coverage of "all sensing messages"); (d) keep LLRs of failed TBs where a retx is predicted (HARQ combining);
+   (e) predicted-field priors for PDCCH decoding and false-DCI rejection. Decoded retx of a known TB = perfect sensing reference.
+3. PT-RS a priori: RE accounting + phase tracking for the 6 densities, density detected from the signal (correlation), CRC-arbitrated fallback.
+4. Decoder: normalised min-sum + 30 iterations (latency not a constraint now). Keep NR_CB_FAIL_LIMIT 5.
+5. Logs: MISSED counter (psinr-based margin >= 2 dB; DM-RS and data SNR both logged) and DL CB-CRC summary per cell/class (Qm, Nl, PRB > 128, MCS);
+   same counters for PUSCH, PRACH, SRS.
+6. PARK v2 (SPRT with adaptive H1 from the cell's measured decodable-RNTI DM-RS distribution); verify OTA: parks inaudible RNTIs, 0 parked RNTIs
+   with CRC passes.
+7. First-decode fix: build (build_firstdec), unit test red/green, plus test for the rep-layout part.
+8. SIB1 independence: rfsim with SIB1 suppressed + OTA count of dedicated decodes in runs with 0 SIB1.
+9. Link UL V3 into the integration build. Integration branch from mpci-main: candidate + 1-8 + UL V3. Unit tests, rfsim gate, then SOLO OTA on
+   415/923/403(targeted)/508, interleaved vs candidate, repeated as needed. 508: extra old-vs-candidate pairs.
+10. Tomorrow: 2-PCI OTA. Later: 403 multi-PCI RNTI loss, SHMIQ_OVERRUN stalls, admission measurement.

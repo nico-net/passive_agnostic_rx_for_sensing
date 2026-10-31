@@ -105,6 +105,11 @@ void nr_pdsch_solver_set_alt_scr(int coreset_key, const uint16_t *ids, int n, bo
  * = DM-RS id and a different data scrambling id). own = the hypotheses are this RNTI's own (per-UE identities): the
  * CORESET's first solved scrambling is then NOT preferred over them. Not gated by ISAC_PDSCH_SOLVER_SCR. */
 void nr_pdsch_solver_set_alt_scr32(int coreset_key, const int32_t *ids, int n, bool first_is_decided, bool own);
+/** A3: identities (DM-RS scrambling ids, 0..65535) already seen in the cell, most frequent first (nr_dmrs_scan_pool_ids()), offered to an
+ * RNTI that has none of its own yet: the solver tries them first in the identity form its cell's solved RNTIs use when those RNTIs do not
+ * share one id (per-UE ids). Per scan consumer thread; cleared by nr_pdsch_solver_set_alt_scr*(), so call it after them. n <= NR_PDSCH_SOLVER_POOL_MAX. */
+#define NR_PDSCH_SOLVER_POOL_MAX 32
+void nr_pdsch_solver_set_pool_ids(const int32_t *ids, int n);
 /** Outcome of a variant: CRC of code block 0 (probe) or of the TB (full decode). credit=false: IQ expired, ignored. */
 void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit);
 
@@ -117,16 +122,30 @@ bool nr_pdsch_solver_mcs_qr(int table, int mcs, int *qm, int *r2);
  * are always kept (a few increments under the existing mutex); ISAC_PDSCH_SOLVER_WHY=1 logs them with the per-rnti report.
  * Caller-side reasons (before nr_pdsch_solver_plan_slot()) are noted with nr_pdsch_solver_note_skip(). */
 enum {
-  NR_PDSCH_SOLVER_WHY_GATE,     ///< rv != 0 / no defer / no decode wanted / per-occasion cap reached before planning
+  NR_PDSCH_SOLVER_WHY_GATE,     ///< no defer / no decode wanted before planning
   NR_PDSCH_SOLVER_WHY_LIVE,     ///< too many live DCI layouts (ISAC_PDSCH_SOLVER_MAX_LIVE)
   NR_PDSCH_SOLVER_WHY_BUDGET0,  ///< probe token bucket empty / ring too full: not planned
   NR_PDSCH_SOLVER_WHY_NOREAD,   ///< no layout parsed this DCI
   NR_PDSCH_SOLVER_WHY_THROTTLE, ///< a planned probe refused by the token bucket
   NR_PDSCH_SOLVER_WHY_CAP,      ///< a planned variant cut by the per-occasion decode cap
   NR_PDSCH_SOLVER_WHY_WEAK,     ///< ISAC_PDSCH_SOLVER_DMRS_PRIO: contended, and no reading carries the RNTI's own DM-RS
+  NR_PDSCH_SOLVER_WHY_GATE_RV,  ///< a solved RNTI's rv != 0 grant with no failed transmission of its TB held (first transmission not seen / evicted)
+  NR_PDSCH_SOLVER_WHY_GATE_RVOK,///< a solved RNTI's rv != 0 grant whose TB was already decoded
+  NR_PDSCH_SOLVER_WHY_GATE_CAP, ///< the per-occasion decode cap already reached before planning
   NR_PDSCH_SOLVER_WHY_CALLER_N
 };
 void nr_pdsch_solver_note_skip(uint16_t rnti, int why);
+/** PARK (2026-10-30): one decode (probe or full) of the RNTI's grant at signal slot abs_slot with its DM-RS comb SNR (dB; <= -90 = no estimate, ignored).
+ *  hyp: the decode's hypothesis class (any packing of DM-RS ports, CDM groups, layers, scrambling id). The cell's noise-floor reference is measured from the decodes of RNTIs that never solved; an RNTI whose every hypothesis class stays inside that
+ *  noise (one sequential probability ratio test per hypothesis class, error rate NSE_BETA, nr_signal_evidence.h) is parked: unsolved RNTIs are searched on 1 grant in 2^k (k <= 4),
+ *  solved RNTIs drop their probes (never their full decodes). gate_obs: an ungated real first-transmission decode of a dedicated grant; its margin to
+ *  the MCS requirement feeds the cell-measured no-chance margin (nr_snr_gate_margin_db). Logs "SENSING: PARK". */
+void nr_pdsch_solver_note_dmrs(uint16_t rnti, uint64_t abs_slot, uint32_t hyp, float comb_db, bool crc_ok, bool probe, int mcs, int tbl, bool gate_obs);
+bool nr_pdsch_solver_parked(uint16_t rnti);
+double nr_snr_gate_margin_db_cell(int ul);
+/** IDQUAL: the best class of the RNTI's DM-RS identities (2 proven by its decodes' DM-RS SNR, 1 untested, 0 all wrong, -1 none); steers the
+ *  search back-off (never backed off on a proven identity, after 64 probes when all are wrong, else after 200). */
+void nr_pdsch_solver_note_id_quality(uint16_t rnti, int q);
 /** ISAC_PDSCH_SOLVER_FAIRSHARE=1 (default off): fair per-RNTI share of the probe rate for unsolved RNTIs, and reuse of
  * the least recently active solver entry (idle >= 2 s) when the 64-RNTI table is full. */
 bool nr_pdsch_solver_fairshare_on(void);
@@ -160,6 +179,10 @@ void nr_pdsch_solver_note_rv_mismatch(uint16_t rnti);
 bool nr_pdsch_solver_hq_refuted(int n, int bad);
 bool nr_pdsch_solver_hq_verified(int n, int bad);
 
+/* RNTIs the solver tracks per cell (was 64: PCI 923 OTA 2026-10-30 carries 109-132 active RNTIs; at 64 solved RNTIs were evicted 28-50 times
+ * per 300 s and had to be solved again). The least recently active entry idle >= 2 s is reused when the table is full. */
+#define NR_PDSCH_SOLVER_RNTIS 256
+
 /* Fix A (ISAC_PDSCH_TDA_FIELD=1, default off): the DCI 1_1 time-domain-assignment field the layout solver aliases as pre-MCS bits
  * (tda_bits=0). Blind: W = ceil(log2(N)) of the SIB1 common TDRA list (else 1 or 2 bits learnt) at the position where the TDA
  * field would start; accepted only when its value depends on the TDD slot class (mixed slot) or on the (S,L) of CRC-passing
@@ -167,14 +190,35 @@ bool nr_pdsch_solver_hq_verified(int n, int bad);
  * row; with no list, the (S,L) learnt for (value, slot class) from CRC passes. No per-cell constants. Thread-safe. */
 bool nr_tda_field_on(void);
 void nr_tda_field_reset(void);
+void nr_tda_field_forget(void);
+int nr_tda_field_width(int pos); /* the detected TDRA field width at bit `pos`, 0 = undetected */
+
+/* PMEXPLORE: the DCI 1_1 bits between the TDRA field and MCS that the layout reads as one pre-MCS group (VRB-to-PRB, PRB bundling, rate
+ * matching, ZP CSI-RS trigger). A value of that window whose full decodes never pass (>= 32, none) names a field the decode does not honour;
+ * its grants try the hypotheses the receiver can apply instead (NR_PM_HYP_*: interleaved VRB-to-PRB mapping, bundle 2 or 4, TS 38.211
+ * 7.3.1.6), round robin, and the first CRC pass is learnt for that value. Keyed by (window start, width); per cell; thread-safe. */
+enum { NR_PM_HYP_PLAIN = 0, NR_PM_HYP_ILV2, NR_PM_HYP_ILV4, NR_PM_HYP_N };
+int nr_pm_hyp(int pos, int nbits, nr_dci_bits_t p, int len); /* the hypothesis this grant decodes with */
+void nr_pm_note_result(int pos, int nbits, nr_dci_bits_t p, int len, int hyp, bool ok); /* its first-pass outcome (rv0) */
+void nr_pm_forget(void); /* a new cell identity */ /* a new cell identity: the learnt field and rows (and the DCIBITS tally) go, the SIB1 rows stay */
 void nr_tda_field_set_rows(const uint8_t *S, const uint8_t *L, int n); /* SIB1 pdsch-ConfigCommon list (n < 2: no field) */
 /* One accepted C-RNTI DCI 1_1 (layout with tda_bits == 0, TDA window at bit `pos`); mixed = TDD slot with last PDSCH symbol < 13 */
 void nr_tda_field_note_dci(int pos, nr_dci_bits_t p, int len, bool mixed);
 /* A CRC-passing decode of such a DCI with (S, L) */
 void nr_tda_field_note_ok(int pos, nr_dci_bits_t p, int len, bool mixed, int S, int L);
+void nr_tda_field_note_ok_k0(int pos, nr_dci_bits_t p, int len, bool mixed, int S, int L, int k0); /* ... decoded K0 slots after the DCI */
+/* DCIBITS: the first-pass outcome of every full decode of such a DCI, tallied per bit of the window [pos, pos + 8) (the TDRA field and the
+ * pre-MCS fields the layout reads as one group: VRB-to-PRB, PRB bundling, rate matching, ZP CSI-RS trigger). A bit whose value changes the
+ * CRC rate names a field the decode must honour. Periodic log line "SENSING: DCIBITS". */
+void nr_tda_field_note_result(int pos, nr_dci_bits_t p, int len, bool mixed, bool ok);
 /* Candidate (S,L) rows for a DCI, best first, at most `max`; 0 = no override (use the solver's reading).
  * last = last PDSCH symbol of the slot (13 when no TDD pattern is known). *detected: the field was accepted. */
 int nr_tda_field_rows(int pos, nr_dci_bits_t p, int len, int last, int max, uint8_t *S, uint8_t *L, bool *detected);
+/* The same with cross-slot rows: last[k] / dl[k] = last PDSCH-able symbol (-1: no DL) / leading DL symbols of the slot K0 = k after the DCI,
+ * k = 0..2 (nr_passive_acq_tdd_pdsch_last_symbols / _dl_symbols). K0[i] is the slot offset of row i. A detected value whose grants never pass
+ * (>= 32 decodes) gets the next TDD-legal (K0, S, L) candidate per grant until one passes (then learnt). */
+int nr_tda_field_rows_k0(int pos, nr_dci_bits_t p, int len, const int8_t *last, const int8_t *dl, int max, uint8_t *S, uint8_t *L,
+                         uint8_t *K0, bool *detected);
 
 /* ISAC_RNTI_LAYOUT_CACHE=1 (default off): the layout set of a SOLVED RNTI for one grant context. `key` packs everything that changes
  * what a layout reads (DCI length, CORESET, slot class: TDD special/mixed slot vs full, CSI-RS slot, TDA-field mode); a context never

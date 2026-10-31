@@ -61,6 +61,9 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h" // P99: lag bins, scan lag histogram
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_solver.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_slotphase.h" // SLOTPHASE evidence of failing slot phases
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_evm_acc.h"               // RESID: nr_pdsch_resid (position-keyed equaliser residual)
+#include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"         // T26b grant solver feedback
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"    // MAC timing-advance parsers + this file's reporter
 #include "PHY/NR_UE_TRANSPORT/nr_passive_reconf_rules.h" // contention resolution identity, RRC processing delay
@@ -402,7 +405,9 @@ static void dmrs_scan_job(const NR_DL_FRAME_PARMS *fp, uint16_t rnti, int64_t ab
   /* a full 16-bit scan at most `rate` times per second of signal time; between them, only the identities full scans
    * already found (cell-wide pool) are re-tested, which costs a few ms and lets every slot of the RNTI vote */
   const int64_t gap = (int64_t)(1000 * fp->slots_per_subframe) / rate;
-  const bool full = !decided && abs_slot - g_scan_last_abs >= gap;
+  /* A3: an RNTI never scanned yet (no voted slot) gets a full scan on its first grant, outside the cell's rate limit: one scan per new
+   * RNTI (a scanned slot votes even without a hit, so it is once), instead of waiting for the next free full-scan slot */
+  const bool full = !decided && (abs_slot - g_scan_last_abs >= gap || nr_dmrs_scan_rnti_slots(rnti) == 0);
   if (full) g_scan_last_abs = abs_slot;
   c->abs = abs_slot; c->n = -1; c->nwait = 0; /* in progress: concurrent consumers of this slot do not vote (unless CONTRAST) */
   pthread_mutex_unlock(&g_scan_mu);
@@ -1802,8 +1807,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_passive_path_trial_reset();
     const uint64_t dec_t0 = now_ns();
     nr_pdsch_passive_recov_mode((g_recov_ok || g_recov_inline) && owned && !job.layout_probe ? 1 : 0); /* RECOVERY_ASYNC: arms go to pdschRecov (owned IQ only: the snapshot is handed off) */
+    /* RESID: only a control grant of a flagged phase that is collecting, and a bounded reference of other grants, ask the GPU demod for the position-keyed residual */
+    nr_pdsch_resid.valid = 0;
+    nr_pdsch_resid.want = !job.layout_probe && nr_slotphase_active() && nr_slotphase_resid_want(job.solver_token);
+    if (nr_pdsch_resid.want) {
+      memset(nr_pdsch_resid.e, 0, sizeof(nr_pdsch_resid.e));
+      memset(nr_pdsch_resid.n, 0, sizeof(nr_pdsch_resid.n));
+    }
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
+    nr_pdsch_resid.want = 0;
     const bool recov_deferred = nr_pdsch_passive_recov_deferred();
     nr_pdsch_passive_recov_mode(0);
     if (now_ns() - dec_t0 > 20000000ull) {
@@ -1907,9 +1920,19 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         }
 #undef E2E_US
       }
+      char xd_psinr[40], xd_snrx[40]; /* PSINR / XDIAG: Nl values each, -99.0 = n/a */
+      {
+        const int xnl = dec.cw.Nl >= 1 && dec.cw.Nl <= 4 ? (int)dec.cw.Nl : 1;
+        size_t pu = 0, xu = 0;
+        xd_psinr[0] = xd_snrx[0] = 0;
+        for (int l = 0; l < xnl; l++) {
+          pu += (size_t)snprintf(xd_psinr + pu, sizeof(xd_psinr) - pu, "%s%.1f", l ? "," : "", dec.psinr_db[l]);
+          xu += (size_t)snprintf(xd_snrx + xu, sizeof(xd_snrx) - xu, "%s%.1f", l ? "," : "", dec.snrx_db[l]);
+        }
+      }
       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
                  "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f probe=%d kappa=%.2f alpha=%.2f,%.2f,%.2f,%.2f "
-                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d itc=%d its=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f dmrs_snr=%.1f,%.1f,%.1f,%.1f,%.1f dmrs_pw=%.1f dmrs_ref=%.1f dsp=%u skip=%d gp=%u,%u,%u,%u,%u,%u,%u cb_ok=%u cb_tried=%u cb_total=%u%s%s%s\n",
+                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d itc=%d its=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f dmrs_snr=%.1f,%.1f,%.1f,%.1f,%.1f dmrs_pw=%.1f dmrs_ref=%.1f dsp=%u skip=%d gp=%u,%u,%u,%u,%u,%u,%u cb_ok=%u cb_tried=%u cb_total=%u%s%s%s psinr=%s snrx=%s sdisp=%.1f,%.1f cbmap=%llx S=%u dmrsm=0x%x\n",
             job.rnti, job.frame_rx, job.nr_slot_rx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.grant.mcs, job.grant.mcs_table,
             dec.cw.qamModOrder, dec.cw.Nl, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, dec.evm_nsym, dec.evm_pct,
             dec.evm_pct > 0.f ? -20.0 * log10(dec.evm_pct / 100.0) : 99.0, dec.br_snr_db[0], dec.br_snr_db[1], dec.br_snr_db[2],
@@ -1921,8 +1944,25 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
             dec.layer_snr_db[2], dec.layer_snr_db[3], (int)dec.l2maxh, dec.zabs,
             dec.dmrs_snr.snr_db[0], dec.dmrs_snr.snr_db[1], dec.dmrs_snr.snr_db[2], dec.dmrs_snr.snr_db[3], dec.dmrs_snr.comb_db, dec.dmrs_snr.pw_db,
             dec.dmrs_snr.ref_db, (unsigned)dec.dmrs_path, (int)dec.skip, nr_gp_tt[0], nr_gp_tt[1], nr_gp_tt[2], nr_gp_tt[3], nr_gp_tt[4], nr_gp_tt[5], nr_gp_tt[6],
-            (unsigned)dec.cb_ok, (unsigned)dec.cb_tried, (unsigned)dec.cb_total, gq, e2e, stg);
+            (unsigned)dec.cb_ok, (unsigned)dec.cb_tried, (unsigned)dec.cb_total, gq, e2e, stg, xd_psinr, xd_snrx, dec.sdisp_p10_db, dec.sdisp_std_db,
+            (unsigned long long)dec.cb_map, (unsigned)job.dlsch_pdu.start_symbol, (unsigned)job.dlsch_pdu.dlDmrsSymbPos);
       memset(nr_gp_tt, 0, sizeof(nr_gp_tt));
+      if (!dec.skip && job.grant.scr_dedicated && job.grant.rnti_class == 0 && dec.dmrs_snr.comb_db > -90.f) /* IDQUAL: probes and full decodes alike */
+        nr_dmrs_scan_note_decode(job.rnti, job.dlsch_pdu.dlDmrsScramblingId, dec.dmrs_snr.comb_db);
+      /* SLOTPHASE: the CRC of a strong-DM-RS first transmission is the cell-level evidence of the slot phase (and the outcome of the variant the
+       * builder tagged this decode with, by solver token) */
+      if (!dec.skip && nr_slotphase_strong(dec.dmrs_snr.comb_db, (int)job.grant.mcs, (int)job.grant.mcs_table, (int)dec.cw.Nl, (int)job.grant.rv,
+                                           job.rnti_class == 0, job.layout_probe))
+        nr_slotphase_note_ex((uint32_t)((long)job.frame_rx * slots_per_frame + job.nr_slot_rx), nr_csirs_blind_rt_slotphase_gen(), job.solver_token,
+                             st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, nr_pdsch_resid.valid ? (const float (*)[NR_SPR_N])nr_pdsch_resid.e : NULL,
+                             nr_pdsch_resid.valid ? (const uint32_t (*)[NR_SPR_N])nr_pdsch_resid.n : NULL);
+      /* PARK: every decode's DM-RS comb SNR feeds the cell's noise-floor reference and this RNTI's park test; ungated real first transmissions feed
+       * the cell-measured no-chance margin (nr_snr_gate_margin_db) */
+      nr_pdsch_solver_note_dmrs(job.rnti, (uint64_t)job.absolute_slot,
+                                (uint32_t)dec.dmrs_ports | ((uint32_t)dec.n_cdm << 8) | ((uint32_t)dec.cw.Nl << 12) | ((uint32_t)job.dlsch_pdu.dlDmrsScramblingId << 16),
+                                dec.dmrs_snr.comb_db, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.layout_probe,
+                                (int)job.grant.mcs, (int)job.grant.mcs_table,
+                                !dec.skip && !job.layout_probe && job.rnti_class == 0 && job.grant.rv == 0);
       if (dec.evm_pct > 0.f && !job.layout_probe)
         nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)), (int)job.mrc_mode, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     }
@@ -1932,12 +1972,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       /* A CRC pass is evidence even on IQ that expired meanwhile (overwritten samples cannot pass a CRC but by the
        * same chance any wrong hypothesis can); a FAILURE on expired IQ says nothing and is not credited. */
       const bool sv_ok = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+      /* A failed retransmission (rv != 0) says nothing about the layout or the identities: it fails whenever the soft sum it combines into
+       * is short (an earlier transmission missed or mis-decoded). Only its CRC pass is evidence, as for a probe's. */
+      const bool retx_fail = job.grant.rv != 0 && !sv_ok;
       LOG_A(PHY, "SENSING: PDSCH_SOLVER identity tok=%u rnti=0x%04x key=%d abs=%ld dmrs=%u data=%u nscid=%u crc=%d probe=%d\n",
               job.solver_token, job.rnti, job.coreset_key, (long)job.absolute_slot,
               job.dlsch_pdu.dlDmrsScramblingId, job.dlsch_pdu.dlDataScramblingId,
               job.dlsch_pdu.nscid, sv_ok, (int)job.layout_probe);
       nr_pdsch_solver_feedback(job.solver_token, sv_ok,
-                               (sv_ok || sv_credit) && nr_cfg_epoch_work_current() && st != NR_PDSCH_PASSIVE_DECODE_ERROR
+                               (sv_ok || (sv_credit && !retx_fail)) && nr_cfg_epoch_work_current() && st != NR_PDSCH_PASSIVE_DECODE_ERROR
                                    && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED);
     }
     if (!nr_cfg_epoch_work_current()) {
@@ -2011,7 +2054,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       /* Scrambling-identity walk eligibility + link health (final review I1): every decode path reports
        * here; the in-line decode in nr_pdcch_blind_monitor_rt.c makes the same call. */
-      if (!job.layout_probe && credit_ok && !recov_hold)
+      if (!job.layout_probe && credit_ok && !recov_hold && (job.grant.rv == 0 || st == NR_PDSCH_PASSIVE_DECODE_CRC_OK)) /* a failed retransmission is no evidence */
         nr_pdsch_passive_crc_note(job.rnti, job.grant.scr_dedicated, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       /* TIMING ADVANCE FROM AN OVERHEARD PDU (nr_passive_mac_ta.h). The payload of a CRC-verified
        * transport block was being discarded; a RAR carries the gNB's absolute advance for the UE it
@@ -2175,7 +2218,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * in nr_pdcch_blind_monitor_rt.c consulted when it chose this grant's dlDataScramblingId --
          * only for grants where that sweep's own candidate was actually used (data_id_advance),
          * so an attempt that used the PCI fallback never perturbs a sweep it did not use. */
-        if (job.data_id_advance && credit_ok && !recov_hold)
+        if (job.data_id_advance && credit_ok && !recov_hold && (job.grant.rv == 0 || crc))
           nr_pdsch_passive_data_id_feed(job.rnti, crc);
       }
 #undef s_dl_scr_confirmed
@@ -2321,7 +2364,7 @@ static void recov_feedback(void *p, const nr_recov_key_t *k, int outcome)
 {
   (void)k;
   const nr_pdsch_passive_job_t *job = p;
-  const bool ok = outcome == NR_RECOV_FB_RESCUED, credit = outcome != NR_RECOV_FB_FAIL_NOCREDIT;
+  const bool ok = outcome == NR_RECOV_FB_RESCUED, credit = outcome != NR_RECOV_FB_FAIL_NOCREDIT && (ok || job->grant.rv == 0); /* failed retransmission: no evidence */
   atomic_fetch_add_explicit(&g_recov_fb[outcome], 1, memory_order_relaxed);
   NR_CFG_EPOCH_WORK(job->config_epoch, &g_dropped_epoch);
   if (job->solver_token) nr_pdsch_solver_feedback(job->solver_token, ok, (ok || credit) && nr_cfg_epoch_work_current());

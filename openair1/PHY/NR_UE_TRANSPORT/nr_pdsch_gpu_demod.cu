@@ -13,6 +13,7 @@
 #include "PHY/TOOLS/nr_gpu_memstat_cuda.cuh"
 #include "nr_gpu_stage_census.h"
 #include "nr_mmse_exact.h" /* MMSE3GPU: mode 3, the CPU's own source */
+#include "nr_gpu_pass_post.h" /* nr_gpu_chest_post_out_t: nvar_ant sits behind nvar */
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
@@ -41,6 +42,7 @@ struct Shared { /* mapped: written by the GPU, read by the host after the stream
   double m3_s2[NSYM], m3_gain[NSYM]; /* MMSE3GPU: mode-3 noise variance and output gain per symbol (k_mmse3_prep) */
   float m3_s2f[NSYM], m3_gainf[NSYM]; /* the same for the FP32 instantiation (GPU pass on sm_89) */
   nr_gpu_evm_sym_t evm[NSYM];
+  nr_gpu_xdiag_t xd; /* XDIAG: equaliser-output error sums of k_tail (zeroed per symbol in k_mask_pw) */
 };
 struct Ctx {
   cudaStream_t s;
@@ -65,6 +67,15 @@ static inline const JobK &K(const nr_gpu_demod_job_t &j) { return *reinterpret_c
 /* the job a kernel works on: its by-value copy, or (graph replay) the job block jref points to */
 #define NRD_JOB(jk) (reinterpret_cast<const nr_gpu_demod_job_t *>(&(jk))->jref ? *reinterpret_cast<const nr_gpu_demod_job_t *>(&(jk))->jref : *reinterpret_cast<const nr_gpu_demod_job_t *>(&(jk)))
 #define NRD_NVAR(j) ((j).nvar_dev ? *(j).nvar_dev : (j).nvar)
+/* the per-RX chest noise of the noise-weighted rank-1 MRC: into nv[4] (4 values) */
+__device__ __forceinline__ void nrd_nvant(const nr_gpu_demod_job_t &j, uint32_t *nv)
+{
+  for (int a = 0; a < 4; a++)
+    nv[a] = j.nvar_ant_dev ? __ldcg(&j.nvar_ant_dev[a]) : j.nvar_ant[a];
+}
+/* the chest post's nvar_ant[4] relative to its nvar (the graph pass hands the demod a pointer to ResBlk.post.nvar) */
+constexpr size_t NVAR_ANT_DELTA = (offsetof(nr_gpu_chest_post_out_t, nvar_ant) - offsetof(nr_gpu_chest_post_out_t, nvar)) / sizeof(uint32_t);
+static_assert((offsetof(nr_gpu_chest_post_out_t, nvar_ant) - offsetof(nr_gpu_chest_post_out_t, nvar)) % sizeof(uint32_t) == 0, "nvar_ant alignment");
 static std::atomic<unsigned> g_busy{0};
 static int g_ok;
 
@@ -355,13 +366,15 @@ __global__ void k_level(__grid_constant__ const JobK jk_, const nrd_c16 *h, Shar
       avg[r] = __ldcg(&sh->avg[r]);
       med[r] = __ldcg(&sh->median[r]);
     }
-    nrd_decide(j.nl, j.nbRx, j.mode, j.thr_coef, j.l2_delta, j.shift_sum, avg, med, &sh->d);
+    uint32_t nv[4];
+    nrd_nvant(j, nv);
+    nrd_decide(j.nl, j.nbRx, j.mode, j.thr_coef, j.l2_delta, j.shift_sum, avg, med, nv, len, &sh->d);
     sh->level_done = 0;
   }
 }
 
 /* ---- mode-3 branch silencing (every symbol), then the per-symbol branch powers and reference of the alignment */
-__global__ void k_mask_pw(__grid_constant__ const JobK jk_, nrd_c16 *h, Shared *sh)
+__global__ void k_mask_pw(__grid_constant__ const JobK jk_, nrd_c16 *y, nrd_c16 *h, Shared *sh)
 {
   const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   __shared__ long long red[256];
@@ -372,12 +385,33 @@ __global__ void k_mask_pw(__grid_constant__ const JobK jk_, nrd_c16 *h, Shared *
     sh->kap_sz[m][t] = 0;
     sh->kap_sm[m][t] = 0;
   }
+  if (t < 4)
+    sh->xd.e[m][t] = 0.f;
+  if (t < 12)
+    sh->xd.ll[m][t] = 0;
+  for (int g = t; g < NR_GPU_XD_NG; g += blockDim.x) {
+    sh->xd.eg[m][g] = 0.f;
+    sh->xd.ng[m][g] = 0.f;
+  }
+  if (j.want_resid) /* RESID: block-uniform; untouched (and never read) otherwise */
+    for (int q = t; q < NR_GPU_RS_N; q += blockDim.x) {
+      sh->xd.rs_e[m][q] = 0.f;
+      sh->xd.rs_n[m][q] = 0u;
+    }
   const nrd_decision d = sh->d;
   if (j.nl == 1 && d.zero_mask)
     for (int a = 0; a < j.nbRx; a++)
       if (d.zero_mask >> a & 1)
         for (uint32_t i = t; i < j.ext; i += blockDim.x)
           h[((size_t)m * 16 + a) * EXT + i] = nrd_c16{0, 0};
+  if (j.nl == 1 && d.wactive) /* per-branch noise-weighted MRC: y and h of every live branch scaled by sqrt(nmin / nvar_a) (nrd_noise_wq), before the alignment and the combiner */
+    for (int a = 0; a < j.nbRx; a++)
+      if (d.live_mask >> a & 1 && d.wq[a] != 32768)
+        for (uint32_t i = t; i < j.ext; i += blockDim.x) {
+          nrd_c16 *hp = h + ((size_t)m * 16 + a) * EXT + i, *yp = y + ((size_t)m * NR_GPU_DEMOD_MAX_RX + a) * EXT + i;
+          *hp = nrd_scale_q15(*hp, d.wq[a]);
+          *yp = nrd_scale_q15(*yp, d.wq[a]);
+        }
   const int nre = j.nre[m];
   if (!(j.nl == 1 && d.mrc_nb_rx > 1 && nre >= 12 && j.align)) {
     if (t == 0)
@@ -1542,6 +1576,17 @@ __device__ __forceinline__ void re_llr(const nr_gpu_demod_job_t &j, int m, uint3
     }
 }
 
+/* XDIAG: |z/u - s|^2 of one equaliser output RE, s = the nearest point of the Qm-QAM lattice (odd integers per axis, +-(2^(Qm/2) - 1) at most) and u the lattice unit in the
+ * output's LSB; -1 = no usable unit. Float only (the FP32 instantiations of k_tail contain no FP64). */
+__device__ __forceinline__ float xd_err(nrd_c16 z, float u, int qm)
+{
+  if (!(u >= 1.0f))
+    return -1.0f;
+  const float lim = (float)((1 << (qm >> 1)) - 1), iu = 1.0f / u;
+  const float xr = (float)z.r * iu, xi = (float)z.i * iu;
+  const float sr = fminf(fmaxf(2.0f * floorf(0.5f * xr) + 1.0f, -lim), lim), si = fminf(fmaxf(2.0f * floorf(0.5f * xi) + 1.0f, -lim), lim);
+  return (xr - sr) * (xr - sr) + (xi - si) * (xi - si);
+}
 /* ---- GPUFUSE: compensation, multi-layer MMSE, kappa sums and LLRs of one RE in one launch (they are per-RE
  * independent; the thread that compensates RE i also equalises it and writes its LLRs). MM: 0 none (Nl = 1),
  * 1 QAM-FIX Nl = 2, 2/3 QAM-FIX Nl = 3/4, 4/5 stock MMSE Nl = 3/4, 6/7/8 MMSE3GPU mode 3 Nl = 2/3/4. The kappa sums are integers, so block sums plus
@@ -1601,6 +1646,128 @@ template <int MM, typename R = double> __global__ void k_tail(__grid_constant__ 
         atomicAdd((unsigned long long *)(k < 4 ? &sh->kap_sz[m][k] : &sh->kap_sm[m][k - 4]), (unsigned long long)s);
     }
   }
+  if (j.want_kappa) { /* XDIAG (EVMGRANT snrx= sdisp=): decision-directed error of the equaliser output the LLRs are cut from; block-uniform condition, float and integer sums only */
+    __shared__ float xf[8][4];
+    __shared__ long long xl[8][12];
+    const bool lat = j.qm > 2 || j.nl == 1; /* a lattice unit per RE exists (mag; QPSK of one layer: from |h|^2); else the moment form */
+    float fe[4] = {0.f, 0.f, 0.f, 0.f}, vg[4] = {0.f, 0.f, 0.f, 0.f};
+    long long vl[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
+    const uint32_t g0 = (blockIdx.x * blockDim.x + (threadIdx.x & ~31u)) / 48u; /* group of the warp's first RE; a warp spans two groups at most */
+    const int gi = (int)(i / 48u - g0);
+    float e0 = -1.f; /* RESID: layer-0 lattice error of this RE, -1 = none */
+    if (i < nre) {
+      float u0 = 0.f;
+      if (j.qm == 2 && j.nl == 1) { /* mag is not written for QPSK: the same sum re_comp builds it from, point amplitude = m / sqrt 2 */
+        const nrd_decision d = sh->d;
+        const nrd_c16 *chF = h + ((size_t)m * 16 + d.mrc_rx_index) * EXT;
+        int16_t mm = 0;
+        for (int a = 0; a < d.mrc_nb_rx; a++) {
+          const int16_t t = nrd_mag16(chF[(size_t)a * EXT + i], d.log2_maxh);
+          mm = a == 0 ? t : nrd_adds(mm, t);
+        }
+        u0 = (float)mm * 0.70710678f;
+      }
+#pragma unroll
+      for (int l = 0; l < 4; l++) {
+        if (l >= j.nl)
+          break;
+        const nrd_c16 z = ((const nrd_c16 *)j.comp)[((size_t)m * NR_GPU_DEMOD_MAX_NL + l) * j.buf + i];
+        if (lat) {
+          float u = u0;
+          if (j.qm > 2)
+            u = (float)((const nrd_c16 *)j.mag)[((size_t)m * NR_GPU_DEMOD_MAX_NL + (j.mag_per_layer ? l : 0)) * j.buf + i].r * (1.0f / (float)(1 << ((j.qm >> 1) - 1)));
+          const float e = xd_err(z, u, j.qm);
+          if (e >= 0.f) {
+            fe[l] += e;
+            vl[l] += 1;
+            if (l == 0) {
+              vg[gi] += e;
+              vg[2 + gi] += 1.f;
+              e0 = e;
+            }
+          }
+        } else {
+          const long long zr = z.r, zi = z.i;
+          vl[l] += 1;
+          vl[4 + l] += zr * zr + zi * zi;
+          vl[8 + l] += (zr < 0 ? -zr : zr) + (zi < 0 ? -zi : zi);
+        }
+      }
+    }
+    for (int off = 16; off > 0; off >>= 1) {
+#pragma unroll
+      for (int k = 0; k < 4; k++) {
+        fe[k] += __shfl_down_sync(0xffffffffu, fe[k], off);
+        vg[k] += __shfl_down_sync(0xffffffffu, vg[k], off);
+      }
+#pragma unroll
+      for (int k = 0; k < 12; k++)
+        vl[k] += __shfl_down_sync(0xffffffffu, vl[k], off);
+    }
+    if (lane == 0) {
+#pragma unroll
+      for (int k = 0; k < 4; k++)
+        xf[w][k] = fe[k];
+#pragma unroll
+      for (int k = 0; k < 12; k++)
+        xl[w][k] = vl[k];
+      if (vg[2] != 0.f) {
+        atomicAdd(&sh->xd.eg[m][g0], vg[0]);
+        atomicAdd(&sh->xd.ng[m][g0], vg[2]);
+      }
+      if (vg[3] != 0.f && g0 + 1 < NR_GPU_XD_NG) {
+        atomicAdd(&sh->xd.eg[m][g0 + 1], vg[1]);
+        atomicAdd(&sh->xd.ng[m][g0 + 1], vg[3]);
+      }
+    }
+    __syncthreads();
+    if (threadIdx.x < 16) {
+      const int k = threadIdx.x, nw = blockDim.x >> 5;
+      if (k < 4) {
+        float s = 0.f;
+        for (int q = 0; q < nw; q++)
+          s += xf[q][k];
+        if (k < j.nl && s != 0.f)
+          atomicAdd(&sh->xd.e[m][k], s);
+      } else {
+        long long s = 0;
+        for (int q = 0; q < nw; q++)
+          s += xl[q][k - 4];
+        if (((k - 4) & 3) < j.nl && s != 0)
+          atomicAdd((unsigned long long *)&sh->xd.ll[m][k - 4], (unsigned long long)s);
+      }
+    }
+    if (j.want_resid && lat) { /* RESID: the same layer-0 error keyed by the RE's position (CRB mod 4 x subcarrier) and by 8-CRB bucket; block-uniform; shared-memory histogram, one global atomic per used bin */
+      __shared__ float rse[NR_GPU_RS_N];
+      __shared__ unsigned rsn[NR_GPU_RS_N];
+      for (int q = threadIdx.x; q < NR_GPU_RS_N; q += blockDim.x) {
+        rse[q] = 0.f;
+        rsn[q] = 0u;
+      }
+      __syncthreads();
+      if (i < nre && e0 >= 0.f) {
+        const nrd_c16 py = ((const nrd_c16 *)j.geo_y)[(size_t)m * j.ext + i];
+        if (py.i) {
+          int rel = (int)(uint16_t)py.r - j.rs_k0;
+          if (rel < 0)
+            rel += j.rs_n;
+          const int crb = rel / 12, sc = rel - 12 * crb;
+          const int bk = crb >> 3 < NR_GPU_RS_BKT ? crb >> 3 : NR_GPU_RS_BKT - 1;
+          atomicAdd(&rse[sc + 12 * (crb & 3)], e0);
+          atomicAdd(&rsn[sc + 12 * (crb & 3)], 1u);
+          atomicAdd(&rse[NR_GPU_RS_KEYS + bk], e0);
+          atomicAdd(&rsn[NR_GPU_RS_KEYS + bk], 1u);
+        }
+      }
+      __syncthreads();
+      for (int q = threadIdx.x; q < NR_GPU_RS_N; q += blockDim.x)
+        if (rsn[q]) {
+          atomicAdd(&sh->xd.rs_e[m][q], rse[q]);
+          atomicAdd(&sh->xd.rs_n[m][q], rsn[q]);
+        }
+    }
+  }
   re_llr(j, m, i);
 }
 } // namespace nrdm
@@ -1651,7 +1818,7 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
   j.sym_mask = 0;
   j.ext = 16;
   k_gather<<<dim3(1, NSYM), 32, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h);
-  k_mask_pw<<<NSYM, 256, 0, g_ctx[0].s>>>(K(j), g_ctx[0].h, g_ctx[0].dsh);
+  k_mask_pw<<<NSYM, 256, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
   k_align<double><<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
   k_tail<0><<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
   k_tail<1><<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
@@ -1815,7 +1982,7 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
   const int gx = (int)((jj.ext + 127) / 128);
   k_gather<<<dim3(gx, NSYM), 128, 0, x.s>>>(K(jj), x.y, x.h);
   k_level<<<jj.nl * jj.nbRx, 256, 0, x.s>>>(K(jj), x.h, x.dsh); /* + the decision (last block) */
-  k_mask_pw<<<NSYM, 256, 0, x.s>>>(K(jj), x.h, x.dsh);
+  k_mask_pw<<<NSYM, 256, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
   if (jj.nl == 1 && jj.align)
     launch_align(jj, x, x.s);
   if (jj.want_evm) {
@@ -1897,6 +2064,8 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
   j->mrc_nb_rx = d.mrc_nb_rx;
   memcpy(j->kappa_sz, x.sh->kap_sz, sizeof(j->kappa_sz));
   memcpy(j->kappa_sm, x.sh->kap_sm, sizeof(j->kappa_sm));
+  if (j->want_kappa)
+    memcpy(&j->xd, &x.sh->xd, sizeof(j->xd));
   if (jj.want_evm && !defer)
     memcpy(j->evm, x.sh->evm, sizeof(j->evm));
   j->evm_pending = defer;
@@ -1922,7 +2091,7 @@ extern "C" int nr_pdsch_gpu_demod_dev(const nr_gpu_demod_job_t *j, nr_gpu_buf_t 
   const int gx = (int)((jj.ext + 127) / 128);
   k_gather<<<dim3(gx, NSYM), 128, 0, s>>>(K(jj), x.y, x.h);
   k_level<<<jj.nl * jj.nbRx, 256, 0, s>>>(K(jj), x.h, x.dsh);
-  k_mask_pw<<<NSYM, 256, 0, s>>>(K(jj), x.h, x.dsh);
+  k_mask_pw<<<NSYM, 256, 0, s>>>(K(jj), x.y, x.h, x.dsh);
   if (jj.nl == 1 && jj.align)
     launch_align(jj, x, s);
   launch_tail(jj, x, s, gx);
@@ -1941,6 +2110,7 @@ extern "C" int nr_pdsch_gpu_demod_pass_set(int inst, const nr_gpu_demod_job_t *j
   if (!pass_ok(inst, j)) return -1;
   memcpy(g_jb[inst].host, j, sizeof(JobK));
   ((nr_gpu_demod_job_t *)g_jb[inst].host)->m3_nvfac_f = (float)j->m3_nvfac;
+  if (j->nvar_dev) ((nr_gpu_demod_job_t *)g_jb[inst].host)->nvar_ant_dev = j->nvar_dev + NVAR_ANT_DELTA;
   ((nr_gpu_demod_job_t *)g_jb[inst].host)->jref = (const nr_gpu_demod_job_t *)g_jb[inst].dev;
   return 0;
 }
@@ -1954,13 +2124,14 @@ extern "C" int nr_pdsch_gpu_demod_pass_dev(int inst, const nr_gpu_demod_job_t *j
   nr_gpu_demod_job_t jj = *jcap;
   jj.llr = (int16_t *)llr_dev->dev;
   jj.nvar_dev = nvar_dev;
+  jj.nvar_ant_dev = nvar_dev + NVAR_ANT_DELTA;
   jj.m3_nvfac_f = (float)jj.m3_nvfac;
   jj.jref = (const nr_gpu_demod_job_t *)g_jb[inst].dev;
   if (nr_gpu_buf_h2d_async(&g_jb[inst], 0, sizeof(JobK), s) != 0) return -1;
   const int gx = (int)((jj.ext + 127) / 128);
   k_gather<<<dim3(gx, NSYM), 128, 0, s>>>(K(jj), x.y, x.h);
   k_level<<<jj.nl * jj.nbRx, 256, 0, s>>>(K(jj), x.h, x.dsh);
-  k_mask_pw<<<NSYM, 256, 0, s>>>(K(jj), x.h, x.dsh);
+  k_mask_pw<<<NSYM, 256, 0, s>>>(K(jj), x.y, x.h, x.dsh);
   if (jj.nl == 1 && jj.align)
     launch_align(jj, x, s);
   if (jj.want_evm) { /* the EVM chain on its own branch, as in nr_pdsch_gpu_demod_run */
@@ -2025,6 +2196,8 @@ extern "C" void nr_pdsch_gpu_demod_pass_out(int inst, nr_gpu_demod_job_t *j)
   j->mrc_nb_rx = d.mrc_nb_rx;
   memcpy(j->kappa_sz, x.sh->kap_sz, sizeof(j->kappa_sz));
   memcpy(j->kappa_sm, x.sh->kap_sm, sizeof(j->kappa_sm));
+  if (j->want_kappa)
+    memcpy(&j->xd, &x.sh->xd, sizeof(j->xd));
   if (j->want_evm)
     memcpy(j->evm, x.sh->evm, sizeof(j->evm));
   j->evm_pending = 0;

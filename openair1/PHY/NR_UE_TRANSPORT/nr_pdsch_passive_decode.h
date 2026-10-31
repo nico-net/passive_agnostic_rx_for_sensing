@@ -119,6 +119,8 @@ typedef struct {
   uint8_t  tda_pos1, tda_n, tda_addpos;
   int8_t   tda_last;
   uint8_t  tda_S[2], tda_L[2];
+  uint8_t  tda_k0;   ///< slots between the DCI and this PDSCH under the TDA-field row (0 = same slot)
+  uint8_t  pm_pos1, pm_nbits, pm_hyp; ///< PMEXPLORE: pre-MCS window (start + 1, 0 = none), width, hypothesis decoded (NR_PM_HYP_*)
 } nr_pdsch_passive_grant_t;
 
 /// Pick this RNTI's current DCI 1_1 interleaved VRB-to-PRB bundle-size hypothesis (2 or 4). The
@@ -171,6 +173,10 @@ typedef struct {
   uint16_t             ldpc_it_sum;  ///< RANK2-ITER: sum of numIter over the code blocks that decoded (EVMGRANT its=)
   uint8_t              skip;         ///< TAIL-FIX no-chance gate (nr_snr_gate.h): 1 = DM-RS SNR far below the MCS requirement, not demodulated / decoded / retried (EVMGRANT skip=)
   uint16_t             cb_ok, cb_tried, cb_total; ///< per-code-block CRC: blocks that passed / blocks the LDPC was started on (stops after NR_CB_FAIL_LIMIT failures) / blocks in the TB; 0 = no LDPC ran or a layout probe (EVMGRANT cb_ok= cb_tried= cb_total=)
+  float                psinr_db[4];  ///< PSINR: predicted post-MMSE SINR per layer from the chest estimate and noise (capacity mean over the grant), -99 = n/a (EVMGRANT psinr=)
+  float                snrx_db[4];   ///< XDIAG: decision-directed SNR per layer of the real equaliser output the LLRs are cut from (GPU demod, armed), -99 = n/a (EVMGRANT snrx=)
+  float                sdisp_p10_db, sdisp_std_db; ///< XDIAG: p10 and std (dB) of the per-group (48 packed REs) decision-directed SNR of layer 0 on that output, -99 = n/a (EVMGRANT sdisp=)
+  uint64_t             cb_map;       ///< per-code-block CRC result, bit r = block r passed (blocks >= 64 not shown; an untried block reads 0) (EVMGRANT cbmap=)
 } nr_pdsch_passive_decode_result_t;
 
 /**
@@ -285,6 +291,9 @@ void nr_pdsch_passive_crc_note(uint16_t rnti, bool dedicated, bool crc_ok);
 uint32_t nr_pdsch_passive_rnti_ded_fails(uint16_t rnti);
 /** nr_scr_link_healthy() over the DL outcomes noted above. */
 bool nr_pdsch_passive_link_healthy(uint16_t rnti);
+/** DL HARQ store state of (rnti, pid) for a grant with NDI `ndi` (a peek, no lock taken on the entry): 2 = a failed transmission of this TB is
+ *  held (a retransmission combines into it), 1 = this TB was decoded, 0 = nothing known (no entry, evicted, another NDI). Thread's cell. */
+int nr_pdsch_passive_harqc_state(uint16_t rnti, uint8_t pid, uint8_t ndi);
 
 /* ---- GPU front end (NR_GPU_FEP=1, libpdsch_gpu.so): the queue does FEP + chest + MMSE + LLR for a
  * whole slot on the GPU and hands each job its LLRs; nr_pdsch_passive_decode() then skips its own

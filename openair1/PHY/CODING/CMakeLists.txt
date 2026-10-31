@@ -257,6 +257,18 @@ if(ENABLE_LDPC_CUDA)
   target_link_libraries(nr_gpu_slot_bench PRIVATE ${CMAKE_DL_LIBS})
   set_target_properties(nr_gpu_slot_bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   add_dependencies(nr_gpu_slot_bench pdsch_gpu)
+  # LINKLEVEL: controlled-signal BLER of the DL GPU pass chain vs ideal-LLR / CPU-LDPC references (benchmark, not in the tests target; run from the build dir: ./nr_linklevel_bench all)
+  add_executable(nr_linklevel_bench ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_linklevel_bench.cc)
+  target_sources(nr_linklevel_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_pass_ul.c ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_pass_ul_ref.c ${OPENAIR1_DIR}/PHY/TOOLS/dfts_load.c
+    ${OPENAIR_DIR}/common/utils/ds/hashtable.c ${OPENAIR1_DIR}/PHY/MODULATION/nr_sfo_state.c)
+  target_link_libraries(nr_linklevel_bench PRIVATE nr_gpu_platform CUDA::cudart thread-pool LOG minimal_lib crc_byte UTIL PHY_NR PHY_NR_COMMON shlib_loader ${CMAKE_DL_LIBS} pthread m)
+  foreach(sym check_crc crc24a crc24b crc16 crcTableInit completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+    target_link_options(nr_linklevel_bench PRIVATE "LINKER:--undefined=${sym}")
+  endforeach()
+  set_target_properties(nr_linklevel_bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR} ENABLE_EXPORTS ON)
+  target_include_directories(nr_linklevel_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT ${OPENAIR1_DIR} ${OPENAIR_DIR} ${CUDAToolkit_INCLUDE_DIRS})
+  add_dependencies(nr_linklevel_bench pdsch_gpu dfts ldpc)
   add_dependencies(nr-uesoftmodem-optional-modules pdsch_gpu)
   # GPU DM-RS chest + QPSK LLR for the blind PDCCH CORESET-extent search (libpdcch_gpu.so,
   # independent ISAC_PDCCH_GPU_FEP=1 loader knob -- see nr_pdcch_gpu_fep.h). No cuFFT: FFT stays on

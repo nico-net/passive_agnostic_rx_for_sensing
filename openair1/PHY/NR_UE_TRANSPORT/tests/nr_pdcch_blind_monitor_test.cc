@@ -7021,3 +7021,118 @@ TEST(DlAdaptive, ExtractPreMatchesPlainExtract)
   EXPECT_GT(compared, 10000);
   EXPECT_GT(accepted, 100); /* the comparison is not only over rejects */
 }
+
+// ---- C1/C2 (2026-10-30): per-nID rejection budget with exponential backoff, NID_SOLVE lit windows as the only geometry ----
+namespace {
+uint64_t g_test_nid_mask = 0;
+bool test_nid_windows(int nid, uint64_t *mask)
+{
+  if (nid != 9020 && nid != 7777) return false;
+  *mask = g_test_nid_mask;
+  return g_test_nid_mask != 0;
+}
+}
+
+struct DiscoveredRejBudget : DiscoveredCoresets {
+  uint64_t slot = 1;
+  uint64_t t = 0; // occasions elapsed (dwell steps and idle polls)
+  void TearDown() override {
+    nr_pdcch_discovered_set_nid_window_hook(nullptr);
+    g_test_nid_mask = 0;
+    DiscoveredCoresets::TearDown();
+  }
+  // Runs until `want` dwells started or `max_it` iterations; returns the occasion count at each dwell start.
+  std::vector<uint64_t> run(const char *text, size_t want, int max_it) {
+    std::vector<uint64_t> starts;
+    for (int it = 0; it < max_it && starts.size() < want; ++it) {
+      FILE *f = fopen(path, "w");
+      fputs(text, f); fclose(f);
+      nr_pdcch_discovered_load(path); // refused while a dwell is active
+      nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+      if (nr_pdcch_discovered_snapshot(&c, &token, 217)) {
+        starts.push_back(t);
+        for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, slot++);
+        t += 4000;
+      } else {
+        for (int i = 0; i < 100; ++i) nr_pdcch_blind_monitor_discovered_poll();
+        t += 100;
+      }
+    }
+    return starts;
+  }
+};
+
+TEST_F(DiscoveredRejBudget, UnverifiableNidIsDwelledWithExponentiallyGrowingGaps) {
+  const char *text = "CORESET nid=9020 sym=0 dur=1 grid_rb=11 groups=34 L=0 R=0 shift=0\n";
+  const auto starts = run(text, 14, 400000);
+  ASSERT_GE(starts.size(), 8u);
+  // The nID's own queued geometries (cover, interleaved cover, the published line) are its free budget: they run back to back.
+  EXPECT_LE(starts[1] - starts[0], 4100u);
+  // After the budget every rejection parks it for twice the previous park: idle gaps double.
+  std::vector<int64_t> idle;
+  for (size_t i = 0; i + 1 < starts.size(); ++i) idle.push_back((int64_t)(starts[i + 1] - starts[i]) - 4000);
+  size_t first = 0;
+  while (first < idle.size() && idle[first] < 1000) ++first;
+  ASSERT_LT(first + 3, idle.size());
+  for (size_t i = first; i + 1 < idle.size(); ++i)
+    EXPECT_GE(idle[i + 1], 2 * idle[i] - 200) << "gap " << i;
+  // 14 dwells span far more than the 14 * 4000 occasions an unbudgeted queue would have taken
+  EXPECT_GT(starts.back(), 20u * 4000u);
+}
+
+TEST_F(DiscoveredRejBudget, NewNidSolveWindowEndsThePark) {
+  nr_pdcch_discovered_set_nid_window_hook(test_nid_windows);
+  g_test_nid_mask = 0x3ull << 2;
+  const char *text = "CORESET nid=9020 sym=0 dur=1 grid_rb=11 groups=3 L=0 R=0 shift=0\n";
+  auto starts = run(text, 10, 400000);
+  ASSERT_GE(starts.size(), 10u);
+  // parked now (the budget is spent): nothing starts on a plain reload
+  FILE *f = fopen(path, "w"); fputs(text, f); fclose(f);
+  ASSERT_TRUE(nr_pdcch_discovered_load(path));
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  // the solver lights another window of this nID: the evidence is new, the budget starts over
+  g_test_nid_mask |= 1ull << 5;
+  ASSERT_TRUE(nr_pdcch_discovered_load(path));
+  EXPECT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, 9020);
+}
+
+TEST_F(DiscoveredRejBudget, LitWindowHullIsTheOnlyPublishedGeometry) {
+  nr_pdcch_discovered_set_nid_window_hook(test_nid_windows);
+  g_test_nid_mask = 0x3ull << 2; // windows 2 and 3 = grid RBs 12..23
+  lines("CORESET nid=7777 sym=0 dur=1 grid_rb=100 groups=5 L=0 R=0 shift=0\n"
+        "CORESET nid=7777 sym=0 dur=1 grid_rb=12 groups=2 L=0 R=0 shift=0\n"
+        "CORESET nid=7777 sym=0 dur=1 grid_rb=0 groups=20 L=0 R=0 shift=0\n"
+        "CORESET nid=4242 sym=0 dur=1 grid_rb=100 groups=5 L=0 R=0 shift=0\n");
+  std::vector<std::pair<int, int>> seen;
+  for (int i = 0; i < 8; ++i) {
+    nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+    if (!nr_pdcch_discovered_snapshot(&c, &token, 217)) break;
+    if (c.coreset_pdcch_dmrs_scrambling_id == 7777) seen.push_back({c.coreset_rb_offset, c.coreset_freq_domain});
+    for (int s = 0; s < 4000; ++s) nr_pdcch_discovered_step(token, 1 + s + 4000 * i);
+  }
+  // the whole-carrier cover (36 groups) and the one published line inside the lit hull; the far line and the over-wide line are dropped
+  ASSERT_EQ(seen.size(), 2u);
+  EXPECT_EQ(seen[0].second, 36);
+  EXPECT_EQ(seen[1], std::make_pair(12, 2));
+}
+
+TEST_F(DiscoveredRejBudget, RetiredFootprintIsNotDwelledAgainDuringItsBackoff) {
+  nr_pdcch_blind_monitor_cfg_t a{}, b{};
+  a.bwp_size = b.bwp_size = 217; a.coreset_freq_domain = b.coreset_freq_domain = 36; a.coreset_duration = b.coreset_duration = 1;
+  a.dci_length_override = b.dci_length_override = 47;
+  a.coreset_pdcch_dmrs_scrambling_id = 111; b.coreset_pdcch_dmrs_scrambling_id = 222;
+  b.ss_first_symbol = 1;
+  b.coreset_pdcch_dmrs_scrambling_id = 111; // twin of a: same nID and RBs, next symbol
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&a, 0x1111), 0);
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&b, 0x2222), 1);
+  for (int i = 0; i < 400; ++i) { nr_pdcch_coreset_bank_note_grant(0, 0x1111); if (i < 40) nr_pdcch_coreset_bank_note_pdsch(0x1111, true, true); }
+  for (int i = 0; i < 900; ++i) nr_pdcch_coreset_bank_note_grant(1, 0x2222);
+  nr_pdcch_coreset_bank_tick(4000000000ull + 900000, false, 1u << 30, 1u << 30);
+  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 1);
+  // the GPU stage lists the twin again: it is not dwelt (and the real one is already banked)
+  lines("CORESET nid=111 sym=1 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+}

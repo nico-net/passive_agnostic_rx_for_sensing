@@ -1019,6 +1019,8 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_rm_genie.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_slotphase.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_slotphase_resid.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_recovery.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_record.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c
@@ -3364,6 +3366,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdsch_solver PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdsch_solver)
   add_test(NAME test_nr_pdsch_solver COMMAND ./test_nr_pdsch_solver)
+  add_executable(test_nr_pdsch_slotphase ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_slotphase_test.cc
+                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_slotphase.c
+                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_slotphase_resid.c)
+  target_include_directories(test_nr_pdsch_slotphase PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_slotphase PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_pdsch_slotphase)
+  add_test(NAME test_nr_pdsch_slotphase COMMAND ./test_nr_pdsch_slotphase)
   # offline CB0 decode of ISAC_PDSCH_LLR_DUMP records (not a test)
   add_executable(pdsch_cb_offline ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/pdsch_cb_offline.c
                                   ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c
@@ -3425,6 +3434,14 @@ if(ENABLE_TESTS)
     ${T_LIB} m pthread dl asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
   add_dependencies(tests test_nr_csi_rb_extent)
   add_test(NAME test_nr_csi_rb_extent COMMAND ./test_nr_csi_rb_extent)
+  # Generic RE-pattern rate-match entry (nr_re_pattern.h): equivalence with CSI-RS PDUs (bitmaps, masks, G, GPU/CPU RE index maps, erase list) and footprint patterns.
+  add_executable(test_nr_re_pattern ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_re_pattern_check.c)
+  target_link_libraries(test_nr_re_pattern PRIVATE
+    -Wl,--start-group PHY_NR_UE PHY_NR_PASSIVE_UL PHY_NR_COMMON PHY_COMMON nr_phy_common nr_common nr_pdcch_blind_monitor NR_UE_ISAC
+    SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB shlib_loader UTIL ds -Wl,--end-group
+    ${T_LIB} m pthread dl asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  add_dependencies(tests test_nr_re_pattern)
+  add_test(NAME test_nr_re_pattern COMMAND ./test_nr_re_pattern)
   # A10 cell identity at sync: the PSS/SSS search pinned to the descriptor PCI locks the weaker co-channel cell (nr_search_ssb_common + ru_park registry)
   add_executable(test_nr_sync_pin ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_sync_pin_check.c ${CMAKE_SOURCE_DIR}/radio/COMMON/ru_park.c)
   target_include_directories(test_nr_sync_pin PRIVATE ${CMAKE_SOURCE_DIR}/radio/COMMON)

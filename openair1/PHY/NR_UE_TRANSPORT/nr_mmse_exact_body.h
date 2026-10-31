@@ -100,11 +100,14 @@ NR_MMSE_HD int16_t NR_MMSE_NM(nr_mmse3_s16)(NR_MMSE_R v)
 }
 
 /* MMSE3GPU: mode-3 output gain from the strongest layer's energy sum_{i,a} |h|^2 over the symbol's length REs: its mean
- * G_ll (2^-shift units, sc) lands at 2^10 LSB */
+ * G_ll (2^-shift units, sc) lands at 2^12 LSB (was 2^10). RANK34 2026-10-31: the unit amplitude of a layer is mu_l * gain, so a layer 20-25 dB under the strongest one
+ * (4x4, RX correlation 0.95) had 2-4 LSB per constellation unit and the int16 rounding of z and of the thresholds was an SNR-independent error floor (4 layers 16QAM:
+ * 28.4 dB for 10 % TB BLER against 24.1 dB for the unrounded MMSE; 2^12: 24.7 dB; 2^14 no better) [MEASURED DGX GB10 test, nr_linklevel_bench ml]. 2^12 leaves 8x headroom
+ * over the strongest layer's mean for fades; no change within noise on i.i.d. Rayleigh and RX correlation 0.8. */
 NR_MMSE_FN NR_MMSE_R NR_MMSE_NM(nr_mmse3_gain)(NR_MMSE_R emax, int length, NR_MMSE_R sc)
 {
   const NR_MMSE_R gd = length > 0 ? emax * sc / length : ((NR_MMSE_R)0.0);
-  return gd > ((NR_MMSE_R)0.0) ? ((NR_MMSE_R)1024.0) / gd : ((NR_MMSE_R)1.0);
+  return gd > ((NR_MMSE_R)0.0) ? ((NR_MMSE_R)4096.0) / gd : ((NR_MMSE_R)1.0);
 }
 
 /* MMSE3GPU: mode-3 output of one RE: z_l = x_l / [A^-1]_ll * gain and the per-layer thresholds w_l q / 32768,

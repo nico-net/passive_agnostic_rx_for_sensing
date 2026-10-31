@@ -64,6 +64,11 @@ float nr_dmrs_scan_prb_score_gold(const int16_t *const *rx, int nant, int N, int
 void nr_dmrs_scan_vote(uint16_t rnti, int64_t abs_slot, const nr_dmrs_scan_hit_t *hits, int n);
 /** Up to max identities of rnti with >= NR_DMRS_SCAN_MIN_VOTES votes, most voted first. */
 int nr_dmrs_scan_rnti_ids(uint16_t rnti, int *ids, int max);
+/** IDQUAL: one decode of `rnti` under DM-RS identity `nid` measured `dmrs_snr_db` (combined DM-RS SNR). nr_dmrs_scan_rnti_ids() then ranks
+ *  identities whose decodes see the RNTI's DM-RS (median >= 0 dB over >= 4) first and those that see noise (median < -3 dB over >= 8) last. */
+void nr_dmrs_scan_note_decode(uint16_t rnti, int nid, float dmrs_snr_db);
+/** Best IDQUAL class among the RNTI's voted identities: 2 proven, 1 untested, 0 all proven wrong, -1 no identity. */
+int nr_dmrs_scan_rnti_id_quality(uint16_t rnti);
 /** ISAC_PDSCH_DMRS_ID_CONTRAST=1 (default off): nr_dmrs_scan_rnti_ids() ranks an RNTI's identities by contrast = share of
  * its voted slots carrying the id minus share of the cell's other voted slots carrying it (an id common to the whole cell
  * scores ~0, the UE's own id ~its detection rate) instead of by raw votes. Ids are only reordered, never dropped. */
@@ -75,6 +80,9 @@ bool nr_dmrs_scan_contrast_on(void);
 bool nr_dmrs_scan_rnti_decided(uint16_t rnti);
 /** Slots voted for rnti so far (0 = unknown RNTI). */
 int nr_dmrs_scan_rnti_slots(uint16_t rnti);
+/** A3: the distinct DM-RS identities of the cell-wide pool (earlier full scans, any UE), most frequent over the cell's voted slots first
+ * (ties: found first); up to max (<= the pool size, 32). Returns how many. Lets a new RNTI's first grants try identities the cell has shown. */
+int nr_dmrs_scan_pool_ids(int *ids, int max);
 void nr_dmrs_scan_reset(void);
 /** Reference TS 38.211 5.2.1 Gold bits c(n0 .. n0+n-1) of c_init, bit-serial (tests). */
 void nr_dmrs_scan_gold_ref(uint32_t c_init, int n0, int n, uint8_t *out);

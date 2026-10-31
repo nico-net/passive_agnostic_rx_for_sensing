@@ -150,6 +150,31 @@ class GpuPassFixture {
   static inline double noise_db = 20.0; /* SNR of small_grant()/from_shape() fixtures built from now on */
   static inline int widen_rb = 0;       /* v2 Task 2: contiguous fixtures built from now on estimate the channel over widen_rb more PRBs above the grant (the slot share's
                                          * widened band; the DM-RS is transmitted there too, the data is not) */
+  /* LINKLEVEL (test-only knobs, defaults = the former behaviour): chan_mode 1 = a controlled flat channel (every antenna gain 1 for layer 0; for 2 layers the orthogonal columns
+   * [1 1; 1 -1; 1 j; 1 -j], no delayed tap), so the post-combining SNR per layer is exactly noise_db + 10 log10(nant); htrue keeps H of every data RE ([ant][layer][RE]) for ideal-receiver references;
+   * ldpc_it = iteration cap of decode_llr's GPU LDPC jobs; no_abort = decode_llr checks every code block (no NR_CB_FAIL_LIMIT abort), so seg_ok is a true per-block verdict;
+   * last_lin = the int8 LDPC inputs decode_llr built (C x NR_GPU_LDPC_DEV_IN_STRIDE) for a CPU decoder cross-check */
+  static inline int chan_mode = 0, ldpc_it = 8, dj_mode = 0, dj_align = 0; /* dj_mode / dj_align: the demod job's MRC branch mode (0 = branch 0 only, 1 = best branch, 2 = all branches, 3 = threshold) and ISAC_RX_MRC_ALIGN */
+  static inline bool no_abort = false;
+  /* RANK1COMB (test-only knobs, defaults = the former behaviour): chan_mode 2 = flat Rayleigh, unit power per (ant, layer) re-drawn per fixture; 3 = two-tap Rayleigh (powers 0.6 / 0.4, delay 4..36 FFT samples = 32..290 ns), i.e. frequency selective;
+   * rx_noise_off_db[a] = noise of RX a in dB above noise_db (a large value = a dead branch: the branch carries only noise);
+   * intf_sir_db < 1e8 = one co-channel interferer (QPSK on every RE of the carrier, random spatial signature drawn per fixture, flat or, in chan_mode 3, two-tap) at that SIR: signal power per RX / interferer power per RX;
+   * intf_h = the interferer's channel on the grant's data REs [ant][RE] and intf_p its power (for the genie IRC reference); nvant_off = the stage path's demod job gets no per-RX noise (nvar_ant 0): the former equal-noise combiner */
+  static inline double rx_noise_off_db[4] = {0, 0, 0, 0};
+  static inline double rx_gain[4] = {1, 1, 1, 1}; /* signal gain of RX a (0 = a dead branch: noise only) */
+  static inline double intf_sir_db = 1e9;
+  static inline bool nvant_off = false;
+  /* RANK34 (test-only knobs, defaults = the former behaviour): chan_mode 4 = flat spatially correlated Rayleigh (Kronecker: RX correlation corr_rx, TX correlation corr_tx, exponential model rho^|i-j|),
+   * 5 = the same on two taps (0.6 / 0.4, common delay) = frequency selective; both drawn per fixture, unit power per (RX, layer) element on average */
+  static inline double corr_rx = 0.0, corr_tx = 0.0;
+  static inline double ring_gain = 40.0; /* amplitude gain between the frequency-domain symbols and the int16 ring (test only; the default is the former 40) */
+  std::vector<std::complex<double>> intf_h;
+  double intf_p = 0;
+  double ring_peak = 0; /* RANK34 diagnostics: peak |sample| of the int16 ring before the clamp, and the number of clamped samples */
+  long ring_clip = 0;
+  double rx_noise_sd[4] = {0, 0, 0, 0}; /* the per-RX noise standard deviation per real component actually used (frequency-domain units) */
+  std::vector<std::complex<double>> htrue;
+  std::vector<int8_t> last_lin;
   int chest_extra = 0;
   static inline int first_sym = 1;      /* first symbol of the grant (1: the DL tests; 0: a PUSCH that starts at the slot boundary, Task 7) */
   static inline int n_dm = 2;           /* DM-RS symbols of fixtures built from now on: 2 (symbols 2, 11) or 1 (symbol 2; review S6) */
@@ -224,7 +249,55 @@ class GpuPassFixture {
         g1[a][l] = cd(G(rng), G(rng)) * 0.1;
         dly[a][l] = 1 + (int)(U(rng) * 3);
       }
-    auto H = [&](int a, int l, int ks) { return g0[a][l] + g1[a][l] * std::polar(1.0, -2 * M_PI * ks * dly[a][l] / N); };
+    if (chan_mode == 2 || chan_mode == 3) {
+      for (int a = 0; a < na; a++)
+        for (int l = 0; l < nl; l++) {
+          const double p0 = chan_mode == 3 ? 0.6 : 1.0, p1 = chan_mode == 3 ? 0.4 : 0.0;
+          g0[a][l] = cd(G(rng), G(rng)) * std::sqrt(p0 / 2);
+          g1[a][l] = cd(G(rng), G(rng)) * std::sqrt(p1 / 2);
+          dly[a][l] = chan_mode == 3 ? 4 + (int)(U(rng) * 32) : 1;
+        }
+    }
+    if (chan_mode == 4 || chan_mode == 5) { /* RANK34: Kronecker-correlated Rayleigh, H = Lrx G Ltx^H per tap (exponential model R_ij = rho^|i-j|, unit power per element); mode 5 = two taps (0.6 / 0.4, one common delay 4..36 samples) */
+      auto chol = [](double rho, int n, double L[4][4]) {
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) L[i][j] = 0;
+        for (int i = 0; i < n; i++)
+          for (int j = 0; j <= i; j++) {
+            double v = std::pow(rho, i - j);
+            for (int k = 0; k < j; k++) v -= L[i][k] * L[j][k];
+            L[i][j] = i == j ? std::sqrt(std::max(v, 1e-12)) : v / L[j][j];
+          }
+      };
+      double Lr[4][4], Lt[4][4];
+      chol(corr_rx, na, Lr);
+      chol(corr_tx, nl, Lt);
+      const int ntap = chan_mode == 5 ? 2 : 1;
+      const int dcommon = 4 + (int)(U(rng) * 32);
+      for (int tap = 0; tap < ntap; tap++) {
+        const double pw = chan_mode == 5 ? (tap ? 0.4 : 0.6) : 1.0;
+        cd Gm[4][4], T[4][4];
+        for (int a = 0; a < na; a++) for (int l = 0; l < nl; l++) Gm[a][l] = cd(G(rng), G(rng)) * std::sqrt(0.5);
+        for (int a = 0; a < na; a++) /* T = Lrx G */
+          for (int l = 0; l < nl; l++) { T[a][l] = 0; for (int b = 0; b <= a; b++) T[a][l] += Lr[a][b] * Gm[b][l]; }
+        for (int a = 0; a < na; a++)
+          for (int l = 0; l < nl; l++) { /* (T Ltx^H)[a][l] = sum_k T[a][k] conj(Lt[l][k]) */
+            cd v = 0;
+            for (int k = 0; k <= l; k++) v += T[a][k] * Lt[l][k];
+            (tap ? g1 : g0)[a][l] = v * std::sqrt(pw);
+          }
+      }
+      for (int a = 0; a < na; a++) for (int l = 0; l < nl; l++) { dly[a][l] = dcommon; if (ntap == 1) g1[a][l] = 0; }
+    }
+    if (chan_mode == 1) {
+      static const cd cm[4][2] = {{1, 1}, {1, -1}, {1, cd(0, 1)}, {1, cd(0, -1)}};
+      for (int a = 0; a < na; a++)
+        for (int l = 0; l < nl; l++) { g0[a][l] = cm[a & 3][l & 1]; g1[a][l] = 0; }
+    }
+    auto H = [&](int a, int l, int ks) { return (a < 4 ? rx_gain[a] : 1.0) * (g0[a][l] + g1[a][l] * std::polar(1.0, -2 * M_PI * ks * dly[a][l] / N)); };
+    f.htrue.assign((size_t)na * nl * 12 * nrb, cd(0, 0));
+    for (int a = 0; a < na; a++)
+      for (int l = 0; l < nl; l++)
+        for (int i = 0; i < 12 * nrb; i++) f.htrue[((size_t)a * nl + l) * 12 * nrb + i] = H(a, l, 12 * (f.bwp + prb_of(i / 12)) + i % 12 - crb * 6);
     std::vector<cd> Y[NANT];
     for (auto &y : Y) y.assign((size_t)NSYM * N, 0);
     for (int d = 0; d < f.ndm; d++) {
@@ -260,6 +333,32 @@ class GpuPassFixture {
           for (int a = 0; a < na; a++) Y[a][(size_t)s * N + (fco + k) % N] += H(a, l, k - crb * 6) * x;
         }
       }
+    if (intf_sir_db < 1e8) { /* one co-channel interferer: own RNG so the signal / noise draws of the other knobs are unchanged */
+      std::mt19937 ri(seed * 7919u + 12345u);
+      std::normal_distribution<double> Gi(0, 1);
+      cd vi0[NANT], vi1[NANT];
+      int di[NANT];
+      for (int a = 0; a < na; a++) {
+        const double p0 = chan_mode == 3 ? 0.6 : 1.0, p1 = chan_mode == 3 ? 0.4 : 0.0;
+        vi0[a] = cd(Gi(ri), Gi(ri)) * std::sqrt(p0 / 2);
+        vi1[a] = cd(Gi(ri), Gi(ri)) * std::sqrt(p1 / 2);
+        di[a] = 4 + (int)(U(ri) * 32);
+      }
+      f.intf_p = std::pow(10.0, -intf_sir_db / 10);
+      const double amp = std::sqrt(f.intf_p);
+      for (int s = 0; s < NSYM; s++)
+        for (int k = 0; k < 12 * crb; k++) {
+          const cd sym(((ri() & 1) ? -1.0 : 1.0) / std::sqrt(2.0), ((ri() & 1) ? -1.0 : 1.0) / std::sqrt(2.0));
+          for (int a = 0; a < na; a++)
+            Y[a][(size_t)s * N + (fco + k) % N] += (vi0[a] + vi1[a] * std::polar(1.0, -2 * M_PI * (k - crb * 6) * di[a] / N)) * sym * amp;
+        }
+      f.intf_h.assign((size_t)na * 12 * nrb, cd(0, 0));
+      for (int a = 0; a < na; a++)
+        for (int i = 0; i < 12 * nrb; i++) {
+          const int k = 12 * (f.bwp + prb_of(i / 12)) + i % 12;
+          f.intf_h[(size_t)a * 12 * nrb + i] = (vi0[a] + vi1[a] * std::polar(1.0, -2 * M_PI * (k - crb * 6) * di[a] / N)) * amp;
+        }
+    }
     f.rot.resize(2 * NSYM);
     {
       const double Tc = 1 / 480e3 / 4096, Nu = 2048 * 64 / 2.0, Ncp0 = 16 * 64 + 144 * 64 / 2.0, Ncp1 = 144 * 64 / 2.0;
@@ -275,11 +374,13 @@ class GpuPassFixture {
     f.ring_offset = f.ring_len - 1000; /* the slot wraps around the ring end */
     const double noise_sd = std::pow(10, -noise_db / 20) / std::sqrt(2.0); /* 20 dB unless a test sets noise_db (Task 5 SNR sweep) */
     for (int a = 0; a < na; a++) {
-      for (auto &y : Y[a]) y += cd(G(rng), G(rng)) * noise_sd;
+      const double nsd_a = noise_sd * std::pow(10.0, (a < 4 ? rx_noise_off_db[a] : 0.0) / 20);
+      f.rx_noise_sd[a & 3] = nsd_a;
+      for (auto &y : Y[a]) y += cd(G(rng), G(rng)) * nsd_a;
       std::vector<double> td(2 * (SLOT + 64), 0.0);
       for (int l = 0; l < NSYM; l++) {
         std::vector<cd> v(Y[a].begin() + (size_t)l * N, Y[a].begin() + (size_t)(l + 1) * N);
-        for (auto &x : v) x *= 40.0;
+        for (auto &x : v) x *= ring_gain;
         ifft(v);
         const cd rc(f.rot[2 * l] / 32767.0, f.rot[2 * l + 1] / 32767.0);
         const int ncp = l == 0 ? NCP0 : NCP, start = l == 0 ? 0 : NCP0 + N + (l - 1) * (N + NCP);
@@ -292,6 +393,8 @@ class GpuPassFixture {
       f.ring[a].assign((size_t)2 * f.ring_len, 0);
       for (int n = 0; n < SLOT + 64; n++) {
         const size_t p = (f.ring_offset + n) % f.ring_len;
+        f.ring_peak = std::max(f.ring_peak, std::max(std::fabs(td[2 * n]), std::fabs(td[2 * n + 1])));
+        f.ring_clip += std::fabs(td[2 * n]) > 32767.0 || std::fabs(td[2 * n + 1]) > 32767.0;
         f.ring[a][2 * p] = (int16_t)std::lround(std::max(-32768.0, std::min(32767.0, td[2 * n])));
         f.ring[a][2 * p + 1] = (int16_t)std::lround(std::max(-32768.0, std::min(32767.0, td[2 * n + 1])));
       }
@@ -412,6 +515,7 @@ class GpuPassFixture {
       int16_t *sc = (int16_t *)scratch.dev;
       dj.comp = sc; dj.mag = sc + bn; dj.magb = sc + 2 * bn; dj.magr = sc + 3 * bn;
       dj.thr_coef = std::pow(10.0, -1.2);
+      dj.mode = dj_mode; dj.align = dj_align;
       dj.qam_mode = f.nl >= 2 ? 3 : 0; dj.mag_per_layer = 1; dj.m3_nvfac = std::pow(10.0, 2.1);
       if (nvar_fixed >= 0) dj.nvar = (uint32_t)nvar_fixed;
       lj.BG = 2; lj.R = 15; lj.Z = 64; lj.K = 640; lj.it_max = 8;
@@ -950,6 +1054,7 @@ class GpuPassFixture {
       gh = gy + 2 * NSYM * ext;
     }
     d.thr_coef = std::pow(10.0, -1.2);
+    d.mode = dj_mode; d.align = dj_align;
     d.qam_mode = nl >= 2 ? 3 : 0; d.mag_per_layer = 1; d.m3_nvfac = std::pow(10.0, 2.1); /* as Pass::setup */
     j.geo_y = gy; j.geo_h = gh;
     llr_pass.assign(tb.G + 64, 0);
@@ -1114,6 +1219,7 @@ class GpuPassFixture {
     est_all.assign((const int16_t *)P.est.host, (const int16_t *)P.est.host + P.est.bytes / 2); /* [layer][ant][14][N] c16: every layer, for the DM-RS SNR reference */
     s->nvar = nvar;
     P.dj.nvar = nvar;
+    for (int a = 0; a < 4; a++) P.dj.nvar_ant[a] = nvant_off || nl != 1 ? 0u : s->nvar_ant[a]; /* the rank-1 noise-weighted MRC's per-RX noise (what the passive decode publishes in nr_dl_chest_nvar_ant) */
     if (is_probe) horizon(P.dj, probe_last, qm, nl); /* the LLRs past the horizon stay 0 (load() cleared the buffer), as the body's cleared buffer */
     if (m.demod(&P.dj, &P.llrb, st)) return -1;
     nr_gpu_buf_d2h_async(&P.llrb, 0, P.llrb.bytes, st);
@@ -1163,7 +1269,7 @@ class GpuPassFixture {
       int8_t *l = lin_all.data() + (size_t)r * NR_GPU_LDPC_DEV_IN_STRIDE;
       for (int i = 0; i < Kc * Z; i++) { const int v = zv[(size_t)i]; l[i] = (int8_t)(v > 127 ? 127 : v < -128 ? -128 : v); }
       jobs[(size_t)r] = {};
-      jobs[(size_t)r].BG = (uint8_t)tb.BG; jobs[(size_t)r].R = first ? tb.R : tb.R2; jobs[(size_t)r].Z = (uint16_t)Z; jobs[(size_t)r].K = (uint16_t)K; jobs[(size_t)r].it_max = 8;
+      jobs[(size_t)r].BG = (uint8_t)tb.BG; jobs[(size_t)r].R = first ? tb.R : tb.R2; jobs[(size_t)r].Z = (uint16_t)Z; jobs[(size_t)r].K = (uint16_t)K; jobs[(size_t)r].it_max = (uint8_t)ldpc_it;
     }
     /* the standalone context takes NR_GPU_LDPC_MAX_JOBS blocks per launch (a TB with more is cut into launches, as nr_pdsch_gpu_ldpc_host.c does) */
     std::vector<uint8_t> snap_all((size_t)C * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX);
@@ -1183,6 +1289,7 @@ class GpuPassFixture {
                (size_t)NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX);
       }
     }
+    last_lin = lin_all;
     const int *res = res_all.data();
     const int KB = (K + 7) >> 3; /* a lifting size that is not a multiple of 4 gives K = Kb * Z of no whole number of bytes */
     if (getenv("GP_DEBUG"))
@@ -1212,7 +1319,7 @@ class GpuPassFixture {
       }
       if (!aborted && res[2 * r + 1]) { s->need_cpu = 1; }
       all = false;
-      if (!aborted && ++nfail >= NR_CB_FAIL_LIMIT) aborted = true;
+      if (!no_abort && !aborted && ++nfail >= NR_CB_FAIL_LIMIT) aborted = true;
     }
     s->tbs = (uint32_t)tb.A;
     s->tb_ok = 0;

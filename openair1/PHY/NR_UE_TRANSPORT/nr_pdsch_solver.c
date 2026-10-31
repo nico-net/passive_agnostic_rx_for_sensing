@@ -2,6 +2,8 @@
 #include "common/utils/nr_cell.h" /* mpci A5: per-cell state (NR_CELL_STATIC) */
 #include "nr_pdsch_cell_prealloc.h"
 #include "nr_pdsch_solver.h"
+#include "nr_signal_evidence.h"
+#include "nr_snr_gate.h"
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -10,7 +12,7 @@
 #include <string.h>
 #include "common/utils/LOG/log.h"
 
-#define SOLVER_RNTIS 64
+#define SOLVER_RNTIS NR_PDSCH_SOLVER_RNTIS
 #define SOLVER_PENDING 4096 /* FIFO-overwritten: probes dropped stale in the queue never report back */
 #define SOLVER_MAX_IDS 2048     /* layouts of one reading kept with a pending probe (the candidate set a pass creates) */
 #define COVERAGE_IDS 64         /* layouts of a reading whose trial counts stand for it in the coverage search (cost bound: the
@@ -24,9 +26,9 @@
 typedef struct { uint64_t key; uint32_t count; } coverage_entry_t;
 /* internal diagnostic reasons, after the caller-side NR_PDSCH_SOLVER_WHY_* ones */
 enum { W_PLAN = NR_PDSCH_SOLVER_WHY_CALLER_N, W_CSIRS, W_BACKOFF, W_WIDE, W_PROBES, W_POK, W_PFAIL,
-       W_PNOCRED, W_NOREP, W_N };
-static const char *const kWhy[W_N] = {"gate", "live", "budget0", "noread", "throttle", "cap", "weak", "plan", "csirs",
-                                      "backoff", "norb", "probes", "p_ok", "p_fail", "p_nocred", "norep"};
+       W_PNOCRED, W_NOREP, W_PARKED, W_N };
+static const char *const kWhy[W_N] = {"gate", "live", "budget0", "noread", "throttle", "cap", "weak", "g_rv", "g_rvok", "g_cap", "plan", "csirs",
+                                      "backoff", "norb", "probes", "p_ok", "p_fail", "p_nocred", "norep", "parked"};
 typedef struct { coverage_entry_t *entries; size_t cap, used; } solver_coverage_t;
 
 typedef struct {
@@ -69,7 +71,9 @@ typedef struct {
   uint32_t comb_try[4], comb_ok[4]; /* T26d: CRC per receiver {1 best branch, 3 MRC} */
   float snr_ema;           /* T26c: post-equalisation SNR (dB) EMA of this RNTI's full decodes, NAN-free: n_snr = 0 unknown */
   uint32_t n_snr;
-  uint32_t why[W_N];       /* SOLVERCOVER diagnostics (see NR_PDSCH_SOLVER_WHY_*) */
+  uint32_t why[W_N];
+  nse_rnti_t nse;          /* PARK: evidence that any hypothesis sees this RNTI's DM-RS above the cell's noise floor (nr_signal_evidence.h) */
+  int8_t id_q;             /* IDQUAL: best class of this RNTI's DM-RS identities (nr_dmrs_scan_rnti_id_quality): 2 proven, 1 untested, 0 wrong, -1 none */       /* SOLVERCOVER diagnostics (see NR_PDSCH_SOLVER_WHY_*) */
   uint64_t last_abs;       /* SOLVERCOVER: signal time of the last grant (activity, eviction) */
   double fcredit;          /* SOLVERCOVER fair share: this RNTI's share of the probe rate, in probes */
   uint64_t fc_abs;         /*   time of the last accrual (0 = never: cold start gets a full budget) */
@@ -123,6 +127,8 @@ typedef struct {
   bool decided;
   bool own; /* TIM-PDSCH: ids are this RNTI's own (nr_pdsch_solver_set_alt_scr32) */
   int8_t last_dl; /* SOLVERTDDEND: last DL symbol of the grant's slot from the broadcast TDD pattern (-1 = unknown) */
+  int32_t pool[NR_PDSCH_SOLVER_POOL_MAX]; /* A3: DM-RS ids already seen in the cell (nr_dmrs_scan pool), most frequent first; this grant's RNTI has none of its own */
+  int np;
 } solver_plan_ctx_t;
 static _Thread_local solver_plan_ctx_t t_plan_ctx = {.key = -1, .last_dl = -1}; /* per scan consumer */
 /* plan_ctx: the plan context (per scan consumer thread) that the grant planner reads its key, hash and slot time from. */
@@ -140,8 +146,30 @@ NR_CELL_STATIC(nr_pdsch_solver_tda_fn, g_tda_fn);
 NR_CELL_STATIC(void *, g_tda_ctx);
 #define g_tda_ctx NR_CELL_REF(g_tda_ctx)
 NR_CELL_STATIC(nr_pdsch_solver_stats_t, g_st);
+#define NSE_SOLVE_RING 32
+typedef nse_ref_t g_nse_ref_arr_t[1];
+NR_CELL_STATIC(g_nse_ref_arr_t, g_nse_ref); /* PARK: the cell's noise-floor reference and H1 shape (under g_mu) */
+typedef nse_gate_t g_nse_gate_arr_t[2];
+NR_CELL_STATIC(g_nse_gate_arr_t, g_nse_gate); /* no-chance margin statistics, [0] DL, [1] UL (under g_mu) */
+typedef _Atomic uint32_t g_nse_gm_arr_t[2];
+NR_CELL_STATIC(g_nse_gm_arr_t, g_nse_gm); /* published margin, 1/16 dB + 4096 (0 = design margin) */
+typedef uint32_t g_nse_solve_arr_t[NSE_SOLVE_RING];
+NR_CELL_STATIC(g_nse_solve_arr_t, g_nse_solve); /* probes spent by the last solved RNTIs before their solve (the cell's own search depth) */
+NR_CELL_STATIC(uint32_t, g_nse_solve_n);
+NR_CELL_STATIC(uint32_t, g_nse_logs);
 #define g_st NR_CELL_REF(g_st)
+#define g_nse_ref NR_CELL_REF(g_nse_ref)
+#define g_nse_gate NR_CELL_REF(g_nse_gate)
+#define g_nse_gm NR_CELL_REF(g_nse_gm)
+#define g_nse_solve NR_CELL_REF(g_nse_solve)
+#define g_nse_solve_n NR_CELL_REF(g_nse_solve_n)
+#define g_nse_logs NR_CELL_REF(g_nse_logs)
 #define LAYOUT_RECOVER 32 /* failed CRC probes after which a pruned layout set is reopened once */
+/* FIRSTSLOT: CRC passes of the cell by slot phase (abs slot mod SOLVER_PHASES) and start symbol S (full-length allocations): the TDD pattern fixes
+ * which S a slot phase carries, whatever the RNTI, so a new RNTI's seeded probe takes the S the phase's passes show (under g_mu). */
+typedef uint32_t g_phs_arr_t[SOLVER_PHASES][4];
+NR_CELL_STATIC(g_phs_arr_t, g_phs);
+#define g_phs NR_CELL_REF(g_phs)
 NR_CELL_STATIC(nr_pdsch_solver_hq_fn, g_hq_fn);
 #define g_hq_fn NR_CELL_REF(g_hq_fn) /* DCIRV */
 NR_CELL_STATIC(void *, g_hq_ctx);
@@ -187,7 +215,8 @@ void nr_pdsch_solver_set_tda_fn(nr_pdsch_solver_tda_fn fn, void *ctx)
   pthread_mutex_unlock(&g_mu);
 }
 
-/* nr_pdsch_solver_reset: Frees per-RNTI candidate bitmaps and coverage tables under g_mu. Callers: tests/nr_pdsch_solver_test.cc only. */
+/* nr_pdsch_solver_reset: Frees per-RNTI candidate bitmaps and coverage tables under g_mu. Callers: tests/nr_pdsch_solver_test.cc and the
+ * monitor's epoch listener on a new cell identity (HARD_RESET: nothing solved for the old cell holds). */
 void nr_pdsch_solver_reset(void)
 {
   pthread_mutex_lock(&g_mu);
@@ -200,6 +229,13 @@ void nr_pdsch_solver_reset(void)
   memset(g_p, 0, sizeof(g_p));
   memset(g_lcur, 0, sizeof(g_lcur));
   memset(&g_st, 0, sizeof(g_st));
+  memset(g_nse_ref, 0, sizeof(g_nse_ref));
+  memset(g_nse_gate, 0, sizeof(g_nse_gate));
+  memset(g_phs, 0, sizeof(g_phs));
+  memset(g_nse_solve, 0, sizeof(g_nse_solve));
+  g_nse_solve_n = 0;
+  atomic_store(&g_nse_gm[0], 0);
+  atomic_store(&g_nse_gm[1], 0);
   g_have_prior = false;
   g_n_key_scr = 0;
   pthread_mutex_unlock(&g_mu);
@@ -292,6 +328,7 @@ static solver_rnti_t *slot_of(uint16_t rnti, bool create, int *idx)
       g_r[i].table = -1;
       g_r[i].rm = -1;
       g_r[i].scr = g_r[i].cand_scr = -1;
+      g_r[i].id_q = -1; /* IDQUAL: no identity known yet (0 would read "all wrong") */
       memset(g_r[i].S_by_tda, -1, sizeof(g_r[i].S_by_tda));
       memset(g_r[i].L_by_tda, -1, sizeof(g_r[i].L_by_tda));
       memset(g_r[i].ov_S, -1, sizeof(g_r[i].ov_S));
@@ -546,6 +583,13 @@ int nr_pdsch_solver_fair_budget(uint16_t rnti, double rate_per_slot, bool conten
 }
 
 /* nr_pdsch_solver_note_skip: counts one caller-side reason why a grant of rnti was not planned / a variant not decoded. */
+void nr_pdsch_solver_note_id_quality(uint16_t rnti, int q)
+{
+  pthread_mutex_lock(&g_mu);
+  solver_rnti_t *r = slot_of(rnti, false, NULL);
+  if (r) r->id_q = (int8_t)q;
+  pthread_mutex_unlock(&g_mu);
+}
 void nr_pdsch_solver_note_skip(uint16_t rnti, int why)
 {
   if (why < 0 || why >= NR_PDSCH_SOLVER_WHY_CALLER_N) return;
@@ -585,6 +629,78 @@ bool nr_pdsch_solver_snr(uint16_t rnti, float *snr_db)
   return ok;
 }
 
+/* cover_ok: the search has spent at least as many probes on this RNTI as the cell's own solved RNTIs needed (p90 of the last 32 solves) -- a
+ * miss then means "no DM-RS", not "hypothesis not tried yet"; with fewer than 5 solves in the cell the former back-off depth (200) stands.
+ * g_mu held. */
+static bool nse_cover_ok(const solver_rnti_t *r)
+{
+  uint32_t n = g_nse_solve_n < NSE_SOLVE_RING ? g_nse_solve_n : NSE_SOLVE_RING, depth = 200;
+  if (n >= 5) {
+    uint32_t v[NSE_SOLVE_RING];
+    memcpy(v, g_nse_solve, n * sizeof(v[0]));
+    for (uint32_t i = 1; i < n; i++)
+      for (uint32_t j = i; j > 0 && v[j] < v[j - 1]; j--) { const uint32_t t = v[j]; v[j] = v[j - 1]; v[j - 1] = t; }
+    depth = v[(uint32_t)(0.9 * (n - 1) + 0.5)];
+  }
+  return r->n_probe >= depth;
+}
+
+/* nr_pdsch_solver_note_dmrs: one decode (probe or full) of an RNTI's grant with its DM-RS comb SNR (EVMGRANT dmrs_snr_comb). Feeds the cell's
+ *   noise-floor reference and the RNTI's park test (nr_signal_evidence.h); logs "SENSING: PARK" on a park / un-park (the first 32 of a cell, then
+ *   every 16th). gate_obs: an ungated real first-transmission decode of a dedicated grant: its (margin to the MCS requirement, CRC) feeds the
+ *   cell's no-chance margin. Caller: nr_pdsch_passive_queue.c after each decode. Takes g_mu. */
+void nr_pdsch_solver_note_dmrs(uint16_t rnti, uint64_t abs_slot, uint32_t hyp, float comb_db, bool crc_ok, bool probe, int mcs, int tbl, bool gate_obs)
+{
+  if (!(comb_db > -90.f) || !isfinite(comb_db)) return;
+  pthread_mutex_lock(&g_mu);
+  solver_rnti_t *r = slot_of(rnti, false, NULL);
+  if (r) {
+    nse_ref_t *R = &g_nse_ref[0];
+    const nse_event_t ev = nse_note(&r->nse, R, abs_slot, hyp, comb_db, crc_ok && !probe && r->solved, r->solved, nse_cover_ok(r));
+    if (ev != NSE_NONE && (g_nse_logs++ < 32 || (g_nse_logs % 16) == 0))
+      LOG_A(PHY, "SENSING: %s rnti=0x%04x evidence: all %d hypothesis classes tested as noise (SPRT, beta=%.2f) after %u decodes (parked %u x), probes=%u solved=%d "
+                 "noise_mode=%.1f dB pool=%llu H1_shape=%.2f retest 1 in %u grants\n", ev == NSE_PARKED ? "PARK" : "UNPARK", r->rnti,
+            __builtin_popcount(r->nse.seen), NSE_BETA, r->nse.n_obs, r->nse.n_park,
+            r->n_probe, (int)r->solved, NSE_LO_DB + NSE_BW_DB * (R->mu_bin + 0.5f), (unsigned long long)R->n, nse_h1_shape(R),
+            1u << (r->nse.pk_neg < NSE_THIN_MAX_SHIFT ? r->nse.pk_neg : NSE_THIN_MAX_SHIFT));
+    if (gate_obs && !probe) {
+      const double rq = nr_required_snr_db(mcs, tbl);
+      if (isfinite(rq)) {
+        nse_gate_t *G = &g_nse_gate[0];
+        nse_gate_note(G, (double)comb_db - rq, crc_ok);
+        uint32_t tot = 0;
+        for (int b = 0; b < NSE_G_BINS; b++) tot += G->tries[b];
+        if ((tot & 255u) == 0) {
+          const double M = nse_gate_margin(G, NR_SNR_GATE_MARGIN_DB);
+          const uint32_t q = (uint32_t)(lround(M * 16.0) + 4096);
+          if (atomic_exchange(&g_nse_gm[0], q) != q)
+            LOG_A(PHY, "SENSING: SNRGATE DL margin %.1f dB below the requirement (design %.1f), measured on %u ungated tries, Wilson upper bound of the pass rate below it <= %.3f\n",
+                  M, NR_SNR_GATE_MARGIN_DB, tot, NSE_G_EPS);
+        }
+      }
+    }
+  }
+  pthread_mutex_unlock(&g_mu);
+}
+
+/* nr_snr_gate_margin_db_cell: the cell-measured no-chance margin of nr_snr_gate.h (ul: 1 = PUSCH, never pooled with DL); the design margin
+ *   until the cell's own data allow a tighter one. Lock-free. Caller: nr_snr_gate_margin_db(). */
+double nr_snr_gate_margin_db_cell(int ul)
+{
+  const uint32_t q = atomic_load_explicit(&g_nse_gm[ul ? 1 : 0], memory_order_relaxed);
+  return q ? ((double)q - 4096.0) / 16.0 : NR_SNR_GATE_MARGIN_DB;
+}
+
+/* nr_pdsch_solver_parked: whether the RNTI is currently parked (tests / diagnostics). */
+bool nr_pdsch_solver_parked(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_mu);
+  const solver_rnti_t *r = slot_of(rnti, false, NULL);
+  const bool p = r && r->nse.parked;
+  pthread_mutex_unlock(&g_mu);
+  return p;
+}
+
 /* nr_pdsch_solver_set_alt_scr: publishes the scrambling-id hypotheses (ids[0..n-1], at most 16) of the CORESET of the next grant, with a hash of them.
  *   Writes the plan context (per thread, see plan_ctx). Caller: nr_pdcch_blind_monitor_rt.c before planning.
  */
@@ -601,6 +717,16 @@ void nr_pdsch_solver_set_alt_scr(int key, const uint16_t *ids, int n, bool first
   ctx->hash = h ^ (uint32_t)ctx->n;
   ctx->decided = first_is_decided && ctx->n > 0;
   ctx->own = false;
+  ctx->np = 0;
+}
+
+/* nr_pdsch_solver_set_pool_ids: A3. Publishes the DM-RS identities the cell has shown (cell-wide pool of the blind scan) as first
+ *   identities for the new RNTI of the grant about to be planned. Per consumer thread, cleared by set_alt_scr*(); call after them. */
+void nr_pdsch_solver_set_pool_ids(const int32_t *ids, int n)
+{
+  solver_plan_ctx_t *ctx = plan_ctx();
+  ctx->np = 0;
+  for (int i = 0; ids && i < n && ctx->np < NR_PDSCH_SOLVER_POOL_MAX; i++) ctx->pool[ctx->np++] = ids[i];
 }
 
 void nr_pdsch_solver_set_alt_scr32(int key, const int32_t *ids, int n, bool first_is_decided, bool own)
@@ -616,6 +742,7 @@ void nr_pdsch_solver_set_alt_scr32(int key, const int32_t *ids, int n, bool firs
   ctx->hash = h ^ (uint32_t)ctx->n;
   ctx->decided = first_is_decided && ctx->n > 0;
   ctx->own = own && ctx->n > 0;
+  ctx->np = 0;
 }
 
 /* nr_pdsch_solver_set_now: sets the absolute slot time (abs_slot, signal time) of the grant about to be planned, used for solve-time statistics.
@@ -677,25 +804,14 @@ NR_CELL_STATIC_INIT(int32_t, t_scr, -1);
 #define t_scr NR_CELL_REF(t_scr) /* T26c scrambling hypothesis for this grant (-1 default) */
 NR_CELL_STATIC(uint8_t, t_comb);
 #define t_comb NR_CELL_REF(t_comb) /* T26d combining mode for this grant's variants (0 = default) */
-/* Receivers in play per RNTI (frozen ISAC_RX_MRC_PER_RNTI=1): 1 best branch, 3 MRC. comb_k maps a receiver index to the id stored in the pending entry. */
-static uint8_t comb_k(int k) { return k ? 3 : 1; }
 static int comb_ci(uint8_t comb) { return comb == 3 ? 1 : comb == 4 ? 2 : comb >= 5 ? 3 : 0; }
-/* comb_pick: chooses the receiver id for one grant of an RNTI. Unsolved RNTIs always use the configured receiver (0).
- *   Solved RNTIs: best receiver by Laplace-smoothed CRC rate (r->comb_try/comb_ok, filled by nr_pdsch_solver_feedback()), exploring the other on 1 grant in 8.
- *   Caller: nr_pdsch_solver_plan_slot().
- */
+/* comb_pick: the receiver id for one grant of an RNTI: always the receiver default (0 = live-branch MRC for rank 1). A per-RNTI CRC race
+ * against the best-branch receiver counted multi-layer grants (where the mode does nothing) and spent 1 grant in 8 on a receiver ~6 dB worse
+ * on healthy branches (OTA 2026-10-30). comb_try/comb_ok keep counting per receiver for the PDSCH_SOLVER why line. Caller: nr_pdsch_solver_plan_slot(). */
 static uint8_t comb_pick(const solver_rnti_t *r)
 {
-  if (!r->solved) return 0; /* the layout search runs on the configured receiver only (alternating receivers while
-                            * unsolved multiplied the search space and starved whole populations: replays n3/n4) */
-  int best = 0;
-  double bp = -1.0;
-  for (int k = 0; k < 2; k++) {
-    const double p = (r->comb_ok[k] + 1.0) / (r->comb_try[k] + 2.0);
-    if (p > bp) { bp = p; best = k; }
-  }
-  if ((r->grants % 8u) == 7u) return comb_k(1 - best);
-  return comb_k(best);
+  (void)r;
+  return 0;
 }
 /* emit: appends one decode variant (reading, S, add_pos, table, probe flag, TDA) to out[] and books a pending entry carrying its feedback token.
  *   Skips the variant when S > l0 (DM-RS before the PDSCH start), when out[] is full, or when it duplicates an entry already in out[].
@@ -767,10 +883,79 @@ static bool dmrs_supported(const nr_pdsch_solver_reading_t *rd, int n)
  */
 static bool search_backoff(const solver_rnti_t *r)
 {
-  return !r->has_cand && r->n_probe >= 200u && (r->grants % 8u) != 0;
+  /* IDQUAL: the probe count alone cut off the ~45 % of RNTIs that need more than ~200 probes (PCI 923 OTA 2026-10-30: solved RNTIs needed
+   * a median 143-220, p90 540-874) and kept spending on RNTIs whose every identity shows noise. An identity whose decodes see the RNTI's
+   * DM-RS is never backed off; when every identity is proven wrong the search backs off after 64 probes (the scan may still bring a new one). */
+  if (r->has_cand || r->id_q == 2) return false;
+  return r->n_probe >= (r->id_q == 0 ? 64u : 200u) && (r->grants % 8u) != 0;
 }
 
 static const uint8_t kS[4] = {1, 0, 2, 3};
+
+/* A2 SEEDTUPLES. The cell's CRC-proven solutions grouped by layout tuple (representative layout, add_pos, MCS table, S per TDA index,
+ * identity form), strongest first: ranked by the NUMBER of promoted solved RNTIs sharing the tuple, ties by their summed full TB passes.
+ * Replaces the single "best" solution as the seed of a new RNTI: a cell with two RRC templates (PCI 415) has two tuples, both are tried
+ * in proportion to the RNTIs that use them. Two solutions are the same tuple when they agree wherever both know the field (-1 unknown).
+ * Under g_mu. Callers: nr_pdsch_solver_plan_slot(). */
+#define SEED_MAX 3 /* the group size of the former ctx->own source list (src[3]) */
+typedef struct { const solver_rnti_t *src; uint32_t n, ok; } seed_t;
+static bool seed_same(const solver_rnti_t *a, const solver_rnti_t *b)
+{
+  if (a->rep != b->rep || a->add_pos != b->add_pos || scr_form(a->scr) != scr_form(b->scr)) return false;
+  if (a->table >= 0 && b->table >= 0 && a->table != b->table) return false;
+  for (int i = 0; i < 16; i++)
+    if (a->S_by_tda[i] >= 0 && b->S_by_tda[i] >= 0 && a->S_by_tda[i] != b->S_by_tda[i]) return false;
+  return true;
+}
+static bool seed_eligible(const solver_rnti_t *q) { return q->used && q->solved && q->rep >= 0 && q->full_ok >= 1 && q->promoted; }
+static int seed_tuples(seed_t *top)
+{
+  seed_t g[SOLVER_RNTIS];
+  int ng = 0;
+  for (int k = 0; k < SOLVER_RNTIS; k++) {
+    const solver_rnti_t *q = &g_r[k];
+    if (!seed_eligible(q)) continue;
+    int j = 0;
+    while (j < ng && !seed_same(g[j].src, q)) j++;
+    if (j == ng) { g[ng].src = q; g[ng].n = 0; g[ng].ok = 0; ng++; }
+    g[j].n++;
+    g[j].ok += q->full_ok;
+    if (q->full_ok > g[j].src->full_ok) g[j].src = q; /* its most proven member represents the tuple (layouts refined, S map learnt) */
+  }
+  int nt = 0;
+  for (int j = 0; j < ng; j++) {
+    int pos = nt;
+    while (pos > 0 && (top[pos - 1].n < g[j].n || (top[pos - 1].n == g[j].n && top[pos - 1].ok < g[j].ok))) pos--;
+    if (pos >= SEED_MAX) continue;
+    for (int z = (nt < SEED_MAX ? nt : SEED_MAX - 1); z > pos; z--) top[z] = top[z - 1];
+    top[pos] = g[j];
+    if (nt < SEED_MAX) nt++;
+  }
+  return nt;
+}
+/* seed_cellwide: whether most solved members of tuple `t` that sit in CORESET `key` use one scrambling (a cell-wide / per-CORESET
+ * identity); that scrambling is then *scr. 1 = cell-wide (>= 2 members share it, a majority); 0 = per UE (PCI 923: the members'
+ * identities differ, a new RNTI's is not any of theirs); -1 = a single member, no evidence of sharing either way; -2 = no member in this
+ * CORESET (the caller keeps its CORESET-level scrambling logic). */
+static int seed_cellwide(const seed_t *t, int32_t key, int32_t *scr)
+{
+  int32_t cand = -1;
+  uint32_t c = 0, nk = 0, hit = 0;
+  for (int k = 0; k < SOLVER_RNTIS; k++) {
+    const solver_rnti_t *q = &g_r[k];
+    if (!seed_eligible(q) || q->key != key || !seed_same(t->src, q)) continue;
+    nk++;
+    if (c == 0) { cand = q->scr; c = 1; } else if (q->scr == cand) c++; else c--;
+  }
+  for (int k = 0; k < SOLVER_RNTIS; k++) {
+    const solver_rnti_t *q = &g_r[k];
+    hit += seed_eligible(q) && q->key == key && seed_same(t->src, q) && q->scr == cand;
+  }
+  *scr = cand;
+  if (nk == 0) return -2;
+  if (nk < 2) return -1;
+  return hit >= 2 && 2u * hit > nk;
+}
 
 /* has_id: true when a reading's layout list (ids) contains layout id. Linear scan over at most a few dozen ids.
  *   Caller: nr_pdsch_solver_plan_slot().
@@ -950,6 +1135,17 @@ static void plan_coverage(solver_rnti_t *r, nr_pdsch_solver_var_t *out, int *n, 
  *   Uses the learnt S for the TDA index and table when known; otherwise tries the four start symbols and the candidate tables as probes.
  *   Phase 1 (solved) emits counted decodes; phase 0 emits probes. Callers: nr_pdsch_solver_plan_slot().
  */
+/* phase_S: the start symbol most CRC passes of the cell show at this slot phase (ties: the lower index of kS order), -1 = no pass yet. g_mu held. */
+static int phase_S(int ph)
+{
+  int best = -1;
+  uint32_t bn = 0;
+  for (int k = 0; k < 4; k++) {
+    const int sv = kS[k];
+    if (g_phs[ph][sv] > bn) { bn = g_phs[ph][sv]; best = sv; }
+  }
+  return best;
+}
 static void plan_known(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t phase, int reading,
                        const nr_pdsch_solver_reading_t *rd, int l0, int rep, uint8_t add_pos, int8_t table,
                        const int8_t *S_by_tda, const int8_t *L_by_tda, int mcs, uint64_t dci, nr_dci_bits_t payload)
@@ -1101,6 +1297,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   t_learn_rm = false;
   t_scr = r->solved ? r->scr : -1;
   t_comb = comb_pick(r);
+  const bool thin = !r->solved && !csirs_slot && search_backoff(r) && !dmrs_supported(rd, n_rd); /* A1: 7 grants in 8 of a long unsuccessful search */
   if (r->solved) {
     int ri = -1;
     const int ph = (int)(ctx->now_abs % SOLVER_PHASES);
@@ -1172,11 +1369,16 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   } else if (csirs_slot) {
     r->why[W_CSIRS]++;
     /* no search on a slot carrying discovered CSI-RS: its rate matching is unknown, a miss would be false evidence */
-  } else if (search_backoff(r) && !dmrs_supported(rd, n_rd)) {
-    r->why[W_BACKOFF]++;
-    /* T26c: an RNTI whose search has spent 200 probes without a single CRC pass is searched on 1 grant in 8 only --
-     * the decode pool goes to RNTIs that decode */
+  } else if (r->nse.parked && !nse_due(&r->nse, r->grants) && !dmrs_supported(rd, n_rd)) {
+    r->why[W_PARKED]++; /* PARK: no hypothesis shows DM-RS above the cell's noise floor (statistical test); re-tested 1 grant in 2^k */
+  } else if (thin && r->nse.parked) {
+    r->why[W_BACKOFF]++; /* a parked RNTI stays thinned (PARK): its re-test grants take the old backoff, no seeded probe either */
   } else {
+    /* T26c: an RNTI whose search has spent 200 probes without a single CRC pass is searched on 1 grant in 8 only --
+     * the decode pool goes to RNTIs that decode. A1 SEEDBACKOFF: the backoff thins the coverage search (step 3) only; the candidate
+     * confirmation (step 1) and the seeded probe (step 2: one reading, one variant on the cell's solved tuples / pool ids) run on every
+     * grant, so a new RNTI whose layout the cell already knows is not delayed 8x once its search has spent its probes. */
+    if (thin) r->why[W_BACKOFF]++;
     /* 1. confirm a candidate: the reading sharing most layouts with it (under the candidate's own scrambling) */
     t_scr = r->has_cand ? r->cand_scr : -1;
     if (r->has_cand) {
@@ -1221,64 +1423,106 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     /* 2. the cell prior (another RNTI's solution), first. The CURRENT solution of the best
      * solved RNTI (most full TB CRC passes; layouts refined, S map and MCS table learnt since) instead of the snapshot
      * taken at the first solve -- gNBs configure UEs from one RRC template. Still confirmed by this RNTI's own 2 passes. */
-    const solver_rnti_t *best = NULL;
-    for (int k = 0; k < SOLVER_RNTIS; k++)
-        if (g_r[k].used && g_r[k].solved && g_r[k].rep >= 0 && g_r[k].full_ok >= 1 && g_r[k].promoted && (!best || g_r[k].full_ok > best->full_ok))
-          best = &g_r[k];
+    /* A2: up to SEED_MAX layout tuples (representative, add_pos, table, S map, identity form) of the cell's solved RNTIs, ranked by how many
+     * share them; each grant seeds one, in proportion to those counts. Each is still confirmed by this RNTI's own passes. */
+    seed_t seeds[SEED_MAX];
+    const int nseed = seed_tuples(seeds);
+    int ord[SEED_MAX] = {0, 1, 2};
+    uint32_t visit = 0;
+    if (nseed > 0) {
+      uint32_t tot = 0;
+      for (int j = 0; j < nseed; j++) tot += seeds[j].n;
+      const uint32_t pos = r->grants % tot;
+      uint32_t acc = 0;
+      int first = 0;
+      while (first < nseed - 1 && pos >= acc + seeds[first].n) acc += seeds[first++].n;
+      visit = (r->grants / tot) * seeds[first].n + (pos - acc); /* this tuple's visit count of the RNTI */
+      ord[0] = first;
+      for (int j = 0, w = 1; j < nseed; j++)
+        if (j != first) ord[w++] = j;
+    }
+    const int smax = thin && n + 1 < budget ? n + 1 : budget; /* A1: one variant while the coverage search is thinned */
+    const int32_t seed_scr0 = t_scr;
     bool ids_done = false;
-    if (ctx->own) { /* TIMSOLVE2: proven dims x each own identity in the proven form */
-      const solver_rnti_t *src[3];
-      int ns = 0;
-      for (int k = 0; k < SOLVER_RNTIS; k++) { /* CRC-proven solutions, most full CRC passes first, distinct reps */
-        const solver_rnti_t *q = &g_r[k];
-        if (!q->used || !q->solved || q->rep < 0 || q->full_ok < 1 || !q->promoted) continue;
-        int pos = ns;
-        bool dup = false;
-        for (int j = 0; j < ns; j++) dup |= src[j]->rep == q->rep;
-        if (dup) continue;
-        while (pos > 0 && src[pos - 1]->full_ok < q->full_ok) pos--;
-        if (pos >= 3) continue;
-        for (int j = (ns < 3 ? ns : 2); j > pos; j--) src[j] = src[j - 1];
-        src[pos] = q;
-        if (ns < 3) ns++;
-      }
-      int32_t hyp[16];
-      int nh = 0;
-      for (int q = 0; ns > 0 && q < ctx->n; q++)
-        if (scr_form(ctx->ids[q]) == scr_form(src[0]->scr)) hyp[nh++] = ctx->ids[q];
-      const int32_t saved = t_scr;
-      for (int h = 0; h < nh; h++) {
-        t_scr = hyp[(h + r->grants) % (uint32_t)nh]; /* rotate: a budget of 1 still covers every identity */
-        int used[3], nu = 0;
-        for (int j = 0; j < ns; j++)
+    if (ctx->own && nseed > 0) { /* TIMSOLVE2: proven dims x each own identity in the proven form */
+      for (int jj = 0; jj < nseed; jj++) {
+        const seed_t *sd = &seeds[ord[jj]];
+        int32_t hyp[16];
+        int nh = 0;
+        for (int q = 0; q < ctx->n; q++)
+          if (scr_form(ctx->ids[q]) == scr_form(sd->src->scr)) hyp[nh++] = ctx->ids[q];
+        for (int h = 0; h < nh; h++) {
+          t_scr = hyp[(h + r->grants) % (uint32_t)nh]; /* rotate: a budget of 1 still covers every identity */
           for (int i = 0; i < n_rd; i++)
-            if (has_id(&rd[i], src[j]->rep)) {
-              bool seen = false;
-              for (int u = 0; u < nu; u++) seen |= used[u] == i;
-              if (!seen) {
-                used[nu++] = i;
-                plan_known(out, &n, budget, slot, 0, i, rd, l0, src[j]->rep, src[j]->add_pos, src[j]->table, src[j]->S_by_tda, src[j]->L_by_tda,
-                           mcs, dci, payload);
-              }
+            if (has_id(&rd[i], sd->src->rep)) {
+              plan_known(out, &n, smax, slot, 0, i, rd, l0, sd->src->rep, sd->src->add_pos, sd->src->table, sd->src->S_by_tda,
+                         sd->src->L_by_tda, mcs, dci, payload);
               break;
             }
+        }
+        ids_done |= nh > 0;
       }
-      t_scr = saved;
-      ids_done = nh > 0;
+      t_scr = seed_scr0;
     }
     if (ids_done) {
       /* the proven dims were planned with the RNTI's own identities above */
-    } else if (best) {
+    } else if (nseed > 0) {
+      const seed_t *sd = &seeds[ord[0]];
+      int32_t cw_scr = -1;
+      const int cw = ctx->own ? -2 : seed_cellwide(sd, ctx->key, &cw_scr);
+      const int form = scr_form(sd->src->scr);
+      if (cw == 1) {
+        t_scr = cw_scr; /* the tuple's own identity (415: 2 templates = 2 identities) */
+      } else if ((cw == 0 || cw == -1) && ctx->np > 0 && form >= 0 && (cw == 0 || (visit & 1u))) {
+        /* A3: per-UE identities (or no evidence of sharing yet, then every other visit): the identities the cell has shown, most frequent
+         * first, in the tuple's identity form; cycled visit by visit */
+        const int32_t id = ctx->pool[(cw == 0 ? visit : visit / 2u) % (uint32_t)ctx->np];
+        t_scr = form == 0 ? id : (int32_t)((uint32_t)id | ((uint32_t)form << 16));
+      } else if (cw == -1) {
+        t_scr = cw_scr;
+      }
+      /* FIRSTSLOT: (1) the S of this slot phase (cell-wide CRC passes) first, then the tuple's own S -- a tda-keyed S copied from one member is
+       * right only at the phases that member learnt it at (OTA 415 2026-10-31: seed S matched the phase's S in 11-13 of 60-71 first slots,
+       * base 43 of 56). (2) the tuple's rep stands for a set of layouts (cand_bm) that two CRC passes did not separate; the readings carrying
+       * most of that set are seeded too (2 more), as the refinement of a solved RNTI does, instead of the rep's reading alone. */
+      const int tda_s = tda_of(sd->src->rep, payload) & 15;
+      const int sph = phase_S((int)(ctx->now_abs % SOLVER_PHASES));
+      int8_t Sm[16], Lm[16];
+      memcpy(Sm, sd->src->S_by_tda, sizeof(Sm));
+      memcpy(Lm, sd->src->L_by_tda, sizeof(Lm));
+      int rdi[3], nrd = 0;
       for (int i = 0; i < n_rd; i++)
-        if (has_id(&rd[i], best->rep)) {
-          plan_known(out, &n, budget, slot, 0, i, rd, l0, best->rep, best->add_pos, best->table, best->S_by_tda, best->L_by_tda, mcs, dci,
-                     payload);
-          break;
+        if (has_id(&rd[i], sd->src->rep)) { rdi[nrd++] = i; break; }
+      if (sd->src->cand_bm)
+        for (int e = 0; e < 2 && nrd < 3; e++) {
+          int bi = -1, bov = 0;
+          for (int i = 0; i < n_rd; i++) {
+            bool used = false;
+            for (int u = 0; u < nrd; u++) used |= rdi[u] == i;
+            if (used) continue;
+            int ov = 0;
+            for (int k = 0; k < rd[i].n_ids; k++) ov += bm_has(sd->src->cand_bm, rd[i].ids[k]);
+            if (ov > bov) { bov = ov; bi = i; }
+          }
+          if (bi < 0) break;
+          rdi[nrd++] = bi;
         }
+      for (int u = 0; u < nrd; u++) {
+        if (sph >= 0 && sph != Sm[tda_s]) {
+          int8_t S2[16], L2[16];
+          memcpy(S2, Sm, sizeof(S2));
+          memcpy(L2, Lm, sizeof(L2));
+          S2[tda_s] = (int8_t)sph;
+          L2[tda_s] = -1;
+          plan_known(out, &n, smax, slot, 0, rdi[u], rd, l0, sd->src->rep, sd->src->add_pos, sd->src->table, S2, L2, mcs, dci, payload);
+        }
+        plan_known(out, &n, smax, slot, 0, rdi[u], rd, l0, sd->src->rep, sd->src->add_pos, sd->src->table, Sm, Lm, mcs, dci, payload);
+      }
+      t_scr = seed_scr0;
     } else if (g_have_prior) {
       for (int i = 0; i < n_rd; i++)
         if (has_id(&rd[i], g_prior_rep)) {
-          plan_known(out, &n, budget, slot, 0, i, rd, l0, g_prior_rep, g_prior_add_pos, g_prior_table,
+          plan_known(out, &n, smax, slot, 0, i, rd, l0, g_prior_rep, g_prior_add_pos, g_prior_table,
                      g_prior_S_by_tda, g_prior_L_by_tda, mcs, dci, payload);
           break;
         }
@@ -1292,9 +1536,22 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       for (int b = a; b > 0 && rd[order[b]].fit > rd[order[b - 1]].fit; b--) {
         const int t = order[b]; order[b] = order[b - 1]; order[b - 1] = t;
       }
-    if (no == 0) r->why[W_WIDE]++;
-    if (no > 0) /* (S, add_pos) tiers over the readings: every reading gets all S in one go, because the true S changes from grant to grant with the TDA index */
+    if (no == 0 && !thin) r->why[W_WIDE]++;
+    if (no > 0 && !thin) /* (S, add_pos) tiers over the readings: every reading gets all S in one go, because the true S changes from grant to grant with the TDA index */
       plan_coverage(r, out, &n, budget, slot, rd, order, no, l0, dci, payload);
+  }
+  if (r->solved && r->nse.parked && !nse_due(&r->nse, r->grants)) { /* PARK: a solved RNTI whose DM-RS vanished keeps its full decodes, drops its probes */
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+      if (out[i].probe) {
+        pending_t *q = &g_p[out[i].token & (SOLVER_PENDING - 1)];
+        if (q->used && q->token == out[i].token) q->used = false;
+        r->why[W_PARKED]++;
+      } else {
+        out[m++] = out[i];
+      }
+    }
+    n = m;
   }
   for (int i = 0; i < n; i++) {
     out[i].probe ? g_st.probes++ : g_st.fulls++;
@@ -1465,6 +1722,7 @@ static void solve_now(solver_rnti_t *r, const pending_t *p, int kept)
   r->scr = p->scr;
   r->table = r->cand_table >= 0 ? r->cand_table : (p->table_disc ? (int8_t)p->table : -1);
   g_st.solved++;
+  g_nse_solve[g_nse_solve_n++ % NSE_SOLVE_RING] = r->n_probe;
   r->solved_abs = p->abs;
   memset(r->comb_try, 0, sizeof(r->comb_try)); /* receiver choice from post-solve decodes only (pre-solve probes */
   memset(r->comb_ok, 0, sizeof(r->comb_ok));   /*  fail for every receiver and biased the choice) */
@@ -1529,6 +1787,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     return;
   }
   solver_rnti_t *r = &g_r[p->slot];
+  if (crc_ok && p->S < 4 && p->L == 14u - p->S && !p->ov) g_phs[p->abs % SOLVER_PHASES][p->S]++;
   if (r->used && p->phase == 0 && !r->solved && !crc_ok && r->layout_failures < UINT32_MAX)
     r->layout_failures++;
   if (r->used && p->phase == 0 && p->probe && !r->solved) /* the Bonferroni count of the significance test */
@@ -1739,12 +1998,20 @@ void nr_pdsch_solver_stats(nr_pdsch_solver_stats_t *s)
 /* ---- Fix A: DCI 1_1 TDRA field (see nr_pdsch_solver.h) ---- */
 #define TF_NPOS 4
 #define TF_MIN 8 /* decisions need >= TF_MIN DCIs per class / OK decodes per value; purity >= 90 % */
-typedef struct { uint8_t S, L; uint32_t n; } tf_row_t;
+#define TF_WMAX 4 /* TS 38.212 7.3.1.2.2: the TDRA field is 0..4 bits (a list of up to 16 rows) */
+#define TF_EXPLORE_MIN 32 /* first-pass decodes of one value before its row may be called unknown (tf_dead) */
+#define TF_DEAD_RATIO 8   /* a value passing 8x less often than a sibling value has an unknown row */
+#define TF_ROW_MIN 3      /* CRC passes that establish a row (stray passes of other rows are then dropped) */
+#define TF_K0_MAX 2       /* rows searched up to K0 = 2 (the queue waits up to 3 ms for a future slot) */
+typedef struct { uint8_t S, L, k0; uint32_t n; } tf_row_t;
 typedef struct {
   int pos; /* -1 free */
-  uint32_t cls[2][4][2];      /* [w-1][value][mixed] accepted DCIs */
-  tf_row_t row[2][4][2][3];   /* [w-1][value][mixed] (S,L) of CRC-passing decodes */
-  uint8_t det_w;              /* 0 undetected, else the accepted width */
+  uint32_t cls[TF_WMAX][1 << TF_WMAX][2];    /* [w-1][value][mixed] accepted DCIs */
+  tf_row_t row[TF_WMAX][1 << TF_WMAX][2][3]; /* [w-1][value][mixed] (S,L,K0) of CRC-passing decodes */
+  uint32_t res[TF_WMAX][1 << TF_WMAX][2][2]; /* [w-1][value][mixed][0 decodes, 1 CRC ok]: first-pass outcomes (nr_tda_field_note_result) */
+  uint8_t cur[1 << TF_WMAX][2];              /* exploration cursor of a value whose row is unknown */
+  uint8_t det_w;                             /* 0 undetected, else the accepted width */
+  uint8_t boot_w;                            /* 0, else the width an undetected field was explored at (tf_eval accepts TF_ROW_MIN passes there) */
 } tf_pos_t;
 NR_CELL_STATIC_INIT(pthread_mutex_t, g_tf_mu, PTHREAD_MUTEX_INITIALIZER);
 #define g_tf_mu NR_CELL_REF(g_tf_mu)
@@ -1761,6 +2028,8 @@ NR_CELL_STATIC(int, g_tf_n);
 #define g_tf_n NR_CELL_REF(g_tf_n)
 NR_CELL_STATIC(int, g_tf_init);
 #define g_tf_init NR_CELL_REF(g_tf_init)
+NR_CELL_STATIC(int, g_tf_newrow_logs);
+#define g_tf_newrow_logs NR_CELL_REF(g_tf_newrow_logs)
 
 bool nr_tda_field_on(void)
 {
@@ -1779,6 +2048,24 @@ void nr_tda_field_reset(void)
   g_tf_init = 0; g_tf_n = 0;
   tf_init_locked();
   pthread_mutex_unlock(&g_tf_mu);
+}
+#define DB_W 8
+typedef uint32_t g_db_arr_t[DB_W][2][2]; /* [bit][value][0 = decodes, 1 = CRC ok] */
+NR_CELL_STATIC(g_db_arr_t, g_db);
+#define g_db NR_CELL_REF(g_db)
+NR_CELL_STATIC(uint32_t, g_db_n);
+#define g_db_n NR_CELL_REF(g_db_n)
+NR_CELL_STATIC(int, g_db_pos);
+#define g_db_pos NR_CELL_REF(g_db_pos)
+void nr_tda_field_forget(void)
+{
+  pthread_mutex_lock(&g_tf_mu);
+  memset(g_tf, 0, sizeof(g_tf));
+  g_tf_init = 0;
+  tf_init_locked();
+  g_db_n = 0;
+  pthread_mutex_unlock(&g_tf_mu);
+  nr_pm_forget(); /* the pre-MCS window learner of the same cell */
 }
 void nr_tda_field_set_rows(const uint8_t *S, const uint8_t *L, int n)
 {
@@ -1803,6 +2090,14 @@ static tf_pos_t *tf_get(int pos, bool create)
   g_tf[freei].pos = pos;
   return &g_tf[freei];
 }
+int nr_tda_field_width(int pos)
+{
+  pthread_mutex_lock(&g_tf_mu);
+  const tf_pos_t *t = tf_get(pos, false);
+  const int w = t ? t->det_w : 0;
+  pthread_mutex_unlock(&g_tf_mu);
+  return w;
+}
 /* dominant (S,L) of one (w, value, class) cell: returns its count, *tot the cell's total */
 static uint32_t tf_dom(const tf_pos_t *t, int wi, int v, int m, tf_row_t *best, uint32_t *tot)
 {
@@ -1824,7 +2119,7 @@ static uint32_t tf_dom_v(const tf_pos_t *t, int wi, int v, tf_row_t *best, uint3
       if (!r->n) continue;
       sum += r->n;
       int q = 0;
-      while (q < na && !(a[q].S == r->S && a[q].L == r->L)) q++;
+      while (q < na && !(a[q].S == r->S && a[q].L == r->L && a[q].k0 == r->k0)) q++;
       if (q == na) { a[na] = *r; a[na].n = 0; na++; }
       a[q].n += r->n;
     }
@@ -1832,14 +2127,31 @@ static uint32_t tf_dom_v(const tf_pos_t *t, int wi, int v, tf_row_t *best, uint3
   *tot = sum;
   return bn;
 }
+/* the row of value v is unknown: >= TF_EXPLORE_MIN first-pass decodes since its row was established and none passed (without a sibling
+ * requirement only if !need_sib), or a sibling value with >= TF_MIN passes passes TF_DEAD_RATIO times more often. PCI 403 OTA 2026-10-30:
+ * value 01 passed once in 1453 decodes (a stray pass) against 1 in 13 for value 00; a zero-pass rule never fired. */
+static bool tf_dead(const tf_pos_t *t, int wi, int v, int m, bool need_sib)
+{
+  const uint32_t *r = t->res[wi][v][m];
+  if (r[0] < TF_EXPLORE_MIN) return false;
+  if (r[1] == 0 && !need_sib) return true;
+  for (int u = 0; u < (1 << (wi + 1)); u++) {
+    const uint32_t *q = t->res[wi][u][m];
+    if (u != v && q[1] >= TF_MIN && (uint64_t)r[1] * q[0] * TF_DEAD_RATIO < (uint64_t)q[1] * r[0]) return true;
+  }
+  return false;
+}
 static void tf_eval(tf_pos_t *t)
 {
   if (t->det_w) return;
+  /* The SIB1 common list is only a prior: a dedicated pdsch-TimeDomainAllocationList replaces it for C-RNTI DCIs, with its own
+   * length (field width) and rows. Its width is tried first, then every width 1..TF_WMAX on CRC evidence (b). */
   const int wl = tf_list_w();
-  for (int w = 1; w <= 2 && !t->det_w; w++) {
-    if (g_tf_n > 0 && w != wl) continue;
+  for (int k = 0; k <= TF_WMAX && !t->det_w; k++) {
+    const int w = k == 0 ? wl : k;
+    if (w < 1 || w > TF_WMAX || (k > 0 && w == wl)) continue;
     const int wi = w - 1, nv = 1 << w;
-    if (g_tf_n > 0) { /* (a) value depends on the TDD slot class */
+    if (g_tf_n > 0 && w == wl) { /* (a) value depends on the TDD slot class */
       uint32_t tm = 0, to = 0, bm = 0, bo = 0; int dm = 0, dob = 0;
       for (int v = 0; v < nv; v++) {
         tm += t->cls[wi][v][1]; to += t->cls[wi][v][0];
@@ -1849,11 +2161,12 @@ static void tf_eval(tf_pos_t *t)
       if (tm >= TF_MIN && to >= TF_MIN && bm * 10 >= tm * 9 && bo * 10 >= to * 9 && dm != dob) t->det_w = (uint8_t)w;
     }
     if (!t->det_w) { /* (b) CRC-passing decodes of different values need different (S,L) */
-      tf_row_t r[4]; int q = 0; bool diff = false;
+      tf_row_t r[1 << TF_WMAX]; int q = 0; bool diff = false;
+      const uint32_t vmin = w == t->boot_w ? TF_ROW_MIN : TF_MIN; /* an explored value: its established row is the evidence */
       for (int v = 0; v < nv; v++) {
         uint32_t tot, bn = tf_dom_v(t, wi, v, &r[q], &tot);
-        if (tot >= TF_MIN && bn * 10 >= tot * 9) {
-          for (int k = 0; k < q; k++) diff |= r[k].S != r[q].S || r[k].L != r[q].L;
+        if (tot >= vmin && bn * 10 >= tot * 9) {
+          for (int k = 0; k < q; k++) diff |= r[k].S != r[q].S || r[k].L != r[q].L || r[k].k0 != r[q].k0;
           q++;
         }
       }
@@ -1870,7 +2183,7 @@ void nr_tda_field_note_dci(int pos, nr_dci_bits_t p, int len, bool mixed)
   pthread_mutex_lock(&g_tf_mu);
   tf_pos_t *t = tf_get(pos, true);
   if (t) {
-    for (int w = 1; w <= 2; w++)
+    for (int w = 1; w <= TF_WMAX; w++)
       if (pos + w <= len) t->cls[w - 1][nr_dci_bits_field(&p, len, pos, w)][mixed]++;
     tf_eval(t);
   }
@@ -1878,51 +2191,238 @@ void nr_tda_field_note_dci(int pos, nr_dci_bits_t p, int len, bool mixed)
 }
 void nr_tda_field_note_ok(int pos, nr_dci_bits_t p, int len, bool mixed, int S, int L)
 {
+  nr_tda_field_note_ok_k0(pos, p, len, mixed, S, L, 0);
+}
+void nr_tda_field_note_ok_k0(int pos, nr_dci_bits_t p, int len, bool mixed, int S, int L, int k0)
+{
   if (pos < 0 || len <= pos) return;
   pthread_mutex_lock(&g_tf_mu);
   tf_pos_t *t = tf_get(pos, true);
-  for (int w = 1; t && w <= 2; w++) {
+  for (int w = 1; t && w <= TF_WMAX; w++) {
     if (pos + w > len) continue;
     tf_row_t *c = t->row[w - 1][nr_dci_bits_field(&p, len, pos, w)][mixed];
     int k = 0;
-    while (k < 3 && !(c[k].n && c[k].S == S && c[k].L == L)) k++;
+    while (k < 3 && !(c[k].n && c[k].S == S && c[k].L == L && c[k].k0 == k0)) k++;
     if (k == 3) { /* new row: take a free slot, else replace the weakest */
+      const uint32_t v = (uint32_t)nr_dci_bits_field(&p, len, pos, w);
+      if (tf_dead(t, w - 1, (int)v, mixed, false)) { /* the first pass of an unknown-row value (exploration): it supersedes the stray rows */
+        for (int j = 0; j < 3; j++)
+          if (c[j].n < TF_ROW_MIN) c[j].n = 0;
+        t->res[w - 1][v][mixed][0] = t->res[w - 1][v][mixed][1] = 0;
+      }
       k = 0;
       for (int j = 1; j < 3; j++) if (c[j].n < c[k].n) k = j;
-      c[k].S = (uint8_t)S; c[k].L = (uint8_t)L; c[k].n = 0;
+      c[k].S = (uint8_t)S; c[k].L = (uint8_t)L; c[k].k0 = (uint8_t)k0; c[k].n = 0;
+      if (w == t->det_w && g_tf_newrow_logs < 64) { /* a new row of the detected field: the list or the exploration found it */
+        g_tf_newrow_logs++;
+        LOG_A(PHY, "SENSING: TDAFIELD row pos=%d w=%d value=%u mixed=%d -> K0=%d S=%d L=%d (value decodes/ok before %u/%u)\n", pos, w,
+              (unsigned)nr_dci_bits_field(&p, len, pos, w), (int)mixed, k0, S, L, t->res[w - 1][nr_dci_bits_field(&p, len, pos, w)][mixed][0],
+              t->res[w - 1][nr_dci_bits_field(&p, len, pos, w)][mixed][1]);
+      }
     }
-    c[k].n++;
+    if (++c[k].n == TF_ROW_MIN) { /* an established row: earlier stray passes of other rows go, and the value's pass rate restarts */
+      for (int j = 0; j < 3; j++)
+        if (j != k && c[j].n < TF_ROW_MIN) c[j].n = 0;
+      t->res[w - 1][nr_dci_bits_field(&p, len, pos, w)][mixed][0] = t->res[w - 1][nr_dci_bits_field(&p, len, pos, w)][mixed][1] = 0;
+    }
   }
   if (t) tf_eval(t);
   pthread_mutex_unlock(&g_tf_mu);
 }
+void nr_tda_field_note_result(int pos, nr_dci_bits_t p, int len, bool mixed, bool ok)
+{
+  if (pos < 0 || len <= pos) return;
+  char b[DB_W * 32 + TF_NPOS * 72];
+  int u = 0;
+  uint32_t n;
+  pthread_mutex_lock(&g_tf_mu);
+  tf_pos_t *t = tf_get(pos, true);
+  for (int w = 1; t && w <= TF_WMAX && pos + w <= len; w++) {
+    uint32_t *r = t->res[w - 1][nr_dci_bits_field(&p, len, pos, w)][mixed];
+    r[0]++;
+    r[1] += ok;
+  }
+  if (g_db_n == 0 || pos != g_db_pos) { memset(g_db, 0, sizeof(g_db)); g_db_n = 0; g_db_pos = pos; } /* a new window starts a new tally */
+  for (int k = 0; k < DB_W && pos + k < len; k++) {
+    const int v = (int)nr_dci_bits_field(&p, len, pos + k, 1);
+    g_db[k][v][0]++;
+    g_db[k][v][1] += ok;
+  }
+  n = ++g_db_n;
+  if (n % 4000 == 0) {
+    for (int k = 0; k < DB_W && pos + k < len; k++)
+      u += snprintf(b + u, sizeof(b) - u, " b%d=%u/%u|%u/%u", k, g_db[k][0][1], g_db[k][0][0], g_db[k][1][1], g_db[k][1][0]);
+    /* the learner's own view: every tracked window, its detected width and the 2-bit values' decodes/ok in full slots */
+    u += snprintf(b + u, sizeof(b) - u, " | tf");
+    for (int i = 0; i < TF_NPOS && u < (int)sizeof(b) - 64; i++)
+      if (g_tf[i].pos >= 0)
+        u += snprintf(b + u, sizeof(b) - u, " p%d/w%d=%u/%u,%u/%u,%u/%u,%u/%u", g_tf[i].pos, g_tf[i].det_w, g_tf[i].res[1][0][0][1],
+                      g_tf[i].res[1][0][0][0], g_tf[i].res[1][1][0][1], g_tf[i].res[1][1][0][0], g_tf[i].res[1][2][0][1],
+                      g_tf[i].res[1][2][0][0], g_tf[i].res[1][3][0][1], g_tf[i].res[1][3][0][0]);
+  }
+  pthread_mutex_unlock(&g_tf_mu);
+  if (u) LOG_A(PHY, "SENSING: DCIBITS pos=%d len=%d n=%u (bit k after pos: ok/decodes at value 0 | value 1; tf: window/width = 2-bit values ok/decodes)%s\n", pos, len, n, b);
+}
 int nr_tda_field_rows(int pos, nr_dci_bits_t p, int len, int last, int max, uint8_t *S, uint8_t *L, bool *detected)
+{
+  const int8_t lastk[TF_K0_MAX + 1] = {(int8_t)last, -1, -1}, dlk[TF_K0_MAX + 1] = {0, 0, 0};
+  uint8_t K0[2];
+  return nr_tda_field_rows_k0(pos, p, len, lastk, dlk, max, S, L, K0, detected);
+}
+/* The exploration candidates of one grant: for K0 = 0..TF_K0_MAX into a slot with downlink, mapping type A rows starting at S = 0..3 and
+ * ending at the slot's last DL symbol (dl - 1) or its last PDSCH-able symbol (last: flexible symbols included). Order: K0, S, end; the
+ * start symbols the decode already tries go last (S = 1 is the solver's usual reading, S = 0 its retry toggle), so S = 2, 3 come first. */
+static int tf_candidates(const int8_t *last, const int8_t *dl, tf_row_t *c, int max)
+{
+  int n = 0;
+  for (int k0 = 0; k0 <= TF_K0_MAX; k0++) {
+    int ends[2], ne = 0;
+    if (dl[k0] >= 3) ends[ne++] = dl[k0] - 1;
+    if (last[k0] >= 2 && (ne == 0 || last[k0] != ends[0])) ends[ne++] = last[k0];
+    const int kSo[4] = {2, 3, 0, 1};
+    for (int si = 0; si < 4; si++)
+      for (int e = 0, S0 = kSo[si]; e < ne && n < max; e++) {
+        const int Lc = ends[e] + 1 - S0;
+        if (Lc >= 3) c[n++] = (tf_row_t){.S = (uint8_t)S0, .L = (uint8_t)Lc, .k0 = (uint8_t)k0, .n = 0};
+      }
+  }
+  return n;
+}
+int nr_tda_field_rows_k0(int pos, nr_dci_bits_t p, int len, const int8_t *last, const int8_t *dl, int max, uint8_t *S, uint8_t *L,
+                         uint8_t *K0, bool *detected)
 {
   int n = 0;
   if (detected) *detected = false;
-  if (pos < 0 || len <= pos || max <= 0 || !S || !L) return 0;
-  const bool mixed = last < 13;
+  if (pos < 0 || len <= pos || max <= 0 || !S || !L || !K0 || !last || !dl) return 0;
+  const bool mixed = last[0] < 13;
   pthread_mutex_lock(&g_tf_mu);
   tf_pos_t *t = tf_get(pos, false);
   const int w = t ? t->det_w : 0;
   if (detected) *detected = w > 0;
-  if (g_tf_n > 0) {
-    if (!mixed && !w) goto out; /* an unconfirmed field in a full slot: keep the solver's reading */
-    const uint32_t v = w ? (uint32_t)nr_dci_bits_field(&p, len, pos, w) : 0xFFu;
-    if (v < (uint32_t)g_tf_n && g_tf_S[v] + g_tf_L[v] - 1 <= last) { S[n] = g_tf_S[v]; L[n] = g_tf_L[v]; n++; }
-    for (int r = 0; r < g_tf_n && n < max && !w; r++) { /* a detected field names the row: the other legal rows are tried only without it (<= 2 decodes) */
-      if (g_tf_S[r] + g_tf_L[r] - 1 > last) continue;
-      S[n] = g_tf_S[r]; L[n] = g_tf_L[r]; n++;
-    }
-  } else if (w) { /* no list (NSA): the (S,L) learnt for (value, slot class), CRC-arbitrated */
+  if (w) { /* a detected field: the (S,L,K0) learnt for (value, slot class), CRC-arbitrated, comes first (list or not) */
     const int v = (int)nr_dci_bits_field(&p, len, pos, w);
     tf_row_t b = {0}; uint32_t tot;
     const uint32_t bn = tf_dom(t, w - 1, v, mixed, &b, &tot);
-    if (bn >= 3 && bn * 10 >= tot * 8 && b.S + b.L - 1 <= last) { S[0] = b.S; L[0] = b.L; n = 1; }
+    const bool dead = tf_dead(t, w - 1, v, mixed, false);
+    if (bn && !dead && (bn >= TF_ROW_MIN || bn == tot) && bn * 10 >= tot * 8 && b.k0 <= TF_K0_MAX && last[b.k0] >= 0 && b.S + b.L - 1 <= last[b.k0]) {
+      S[0] = b.S; L[0] = b.L; K0[0] = b.k0; n = 1;
+    } else if (dead) {
+      /* a value whose grants never pass with the solver's reading names a row nobody learnt (a dedicated list row, a cross-slot K0):
+       * each of its grants tries the next TDD-legal candidate instead; the first CRC pass is learnt above. Costs no extra decode. */
+      tf_row_t c[4 * 2 * (TF_K0_MAX + 1)];
+      const int nc = tf_candidates(last, dl, c, (int)(sizeof(c) / sizeof(c[0])));
+      if (nc > 0) {
+        const tf_row_t r = c[t->cur[v][mixed]++ % nc];
+        S[0] = r.S; L[0] = r.L; K0[0] = r.k0; n = 1;
+      }
+    }
+  }
+  for (int wb = 1; t && !w && n == 0 && wb <= TF_WMAX && pos + wb <= len; wb++) {
+    /* BOOTSTRAP: an undetected field whose value v has an unknown row (tf_dead, a sibling value of the same width passing) is explored
+     * like a detected one (PCI 403 OTA 2026-10-30: value 1 = S2 L12 failed 475-6825 times per run, and the field was detected only when
+     * some RNTI happened to solve with an S = 2 layout). The explored row's TF_ROW_MIN-th pass makes rule (b) detect the field at wb. */
+    const int v = (int)nr_dci_bits_field(&p, len, pos, wb);
+    if (!tf_dead(t, wb - 1, v, mixed, true)) continue;
+    if (!t->boot_w) t->boot_w = (uint8_t)wb;
+    tf_row_t c[4 * 2 * (TF_K0_MAX + 1)];
+    const int nc = tf_candidates(last, dl, c, (int)(sizeof(c) / sizeof(c[0])));
+    if (nc > 0) {
+      const tf_row_t r = c[t->cur[v][mixed]++ % nc];
+      S[0] = r.S; L[0] = r.L; K0[0] = r.k0; n = 1;
+    }
+  }
+  if (g_tf_n > 0) {
+    if (n > 0) goto out;        /* a learnt or explored row names the grant: no second decode */
+    if (!mixed && !w) goto out; /* an unconfirmed field in a full slot: keep the solver's reading */
+    const int wl = tf_list_w();
+    const uint32_t v = w == wl ? (uint32_t)nr_dci_bits_field(&p, len, pos, w) : 0xFFu; /* the list row only at the list's width */
+    if (v < (uint32_t)g_tf_n && g_tf_S[v] + g_tf_L[v] - 1 <= last[0]) { S[n] = g_tf_S[v]; L[n] = g_tf_L[v]; K0[n] = 0; n++; }
+    for (int r = 0; r < g_tf_n && n < max && !w; r++) { /* a detected field names the row: the other legal rows are tried only without it (<= 2 decodes) */
+      if (g_tf_S[r] + g_tf_L[r] - 1 > last[0]) continue;
+      S[n] = g_tf_S[r]; L[n] = g_tf_L[r]; K0[n] = 0; n++;
+    }
   }
 out:
   pthread_mutex_unlock(&g_tf_mu);
   return n;
+}
+
+/* ---- PMEXPLORE (see nr_pdsch_solver.h) ---- */
+#define PM_NWIN 4
+#define PM_EXPLORE_MIN 32
+typedef struct {
+  int pos, nbits;                        /* -1: free */
+  uint32_t res[16][NR_PM_HYP_N][2];      /* [value][hyp][0 decodes, 1 CRC ok] */
+  int8_t learnt[16];                     /* hypothesis that passed for the value, -1 none */
+  uint8_t cur[16];
+} pm_win_t;
+typedef pm_win_t g_pm_arr_t[PM_NWIN];
+NR_CELL_STATIC(g_pm_arr_t, g_pm);
+#define g_pm NR_CELL_REF(g_pm)
+NR_CELL_STATIC(int, g_pm_init);
+#define g_pm_init NR_CELL_REF(g_pm_init)
+NR_CELL_STATIC(int, g_pm_logs);
+#define g_pm_logs NR_CELL_REF(g_pm_logs)
+static pm_win_t *pm_get(int pos, int nbits, bool create) /* g_tf_mu held */
+{
+  if (!g_pm_init) {
+    g_pm_init = 1;
+    for (int i = 0; i < PM_NWIN; i++) { g_pm[i].pos = -1; memset(g_pm[i].learnt, -1, sizeof(g_pm[i].learnt)); }
+  }
+  for (int i = 0; i < PM_NWIN; i++)
+    if (g_pm[i].pos == pos && g_pm[i].nbits == nbits) return &g_pm[i];
+  for (int i = 0; create && i < PM_NWIN; i++)
+    if (g_pm[i].pos < 0) {
+      memset(&g_pm[i], 0, sizeof(g_pm[i]));
+      memset(g_pm[i].learnt, -1, sizeof(g_pm[i].learnt));
+      g_pm[i].pos = pos; g_pm[i].nbits = nbits;
+      return &g_pm[i];
+    }
+  return NULL;
+}
+int nr_pm_hyp(int pos, int nbits, nr_dci_bits_t p, int len)
+{
+  if (pos < 0 || nbits < 1 || nbits > 4 || pos + nbits > len) return NR_PM_HYP_PLAIN;
+  const int v = (int)nr_dci_bits_field(&p, len, pos, nbits);
+  int h = NR_PM_HYP_PLAIN;
+  pthread_mutex_lock(&g_tf_mu);
+  pm_win_t *w = pm_get(pos, nbits, false);
+  if (w) {
+    if (w->learnt[v] >= 0)
+      h = w->learnt[v];
+    else if (w->res[v][NR_PM_HYP_PLAIN][0] >= PM_EXPLORE_MIN && w->res[v][NR_PM_HYP_PLAIN][1] == 0)
+      h = 1 + w->cur[v]++ % (NR_PM_HYP_N - 1); /* the plain reading never passes for this value: try the others in turn */
+  }
+  pthread_mutex_unlock(&g_tf_mu);
+  return h;
+}
+void nr_pm_note_result(int pos, int nbits, nr_dci_bits_t p, int len, int hyp, bool ok)
+{
+  if (pos < 0 || nbits < 1 || nbits > 4 || pos + nbits > len || hyp < 0 || hyp >= NR_PM_HYP_N) return;
+  const int v = (int)nr_dci_bits_field(&p, len, pos, nbits);
+  bool log = false;
+  uint32_t n0 = 0;
+  pthread_mutex_lock(&g_tf_mu);
+  pm_win_t *w = pm_get(pos, nbits, true);
+  if (w) {
+    w->res[v][hyp][0]++;
+    w->res[v][hyp][1] += ok;
+    if (ok && hyp != NR_PM_HYP_PLAIN && w->learnt[v] < 0 && w->res[v][NR_PM_HYP_PLAIN][1] == 0) {
+      w->learnt[v] = (int8_t)hyp;
+      n0 = w->res[v][NR_PM_HYP_PLAIN][0];
+      log = g_pm_logs++ < 32;
+    }
+  }
+  pthread_mutex_unlock(&g_tf_mu);
+  if (log)
+    LOG_A(PHY, "SENSING: PMEXPLORE learnt pos=%d bits=%d value=%d -> %s (plain decodes before %u, none passed)\n", pos, nbits, v,
+          hyp == NR_PM_HYP_ILV2 ? "interleaved VRB-to-PRB L=2" : "interleaved VRB-to-PRB L=4", n0);
+}
+void nr_pm_forget(void)
+{
+  pthread_mutex_lock(&g_tf_mu);
+  g_pm_init = 0;
+  pthread_mutex_unlock(&g_tf_mu);
 }
 
 /* ---- SOLVERGATE: probe admission as a reservation (see nr_pdsch_solver.h) ---- */

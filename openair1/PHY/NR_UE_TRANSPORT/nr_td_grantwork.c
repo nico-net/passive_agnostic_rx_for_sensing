@@ -411,6 +411,25 @@ void nr_td_grantwork_abandon(nr_td_grantwork_t *gw, uint64_t sig, int status)
     pthread_mutex_unlock(&gw->compute_lock);
 }
 
+/* nr_td_grantwork_unclaim: the owner gives the entry back EMPTY (not FAILED): another consumer may still claim and compute it lazily. Only the owning thread's COMPUTING entry. */
+void nr_td_grantwork_unclaim(nr_td_grantwork_t *gw, uint64_t sig)
+{
+  if (gw == NULL)
+    return;
+  pthread_mutex_lock(&gw->lock);
+  gw_entry_t *e = find(gw, sig);
+  const bool mine = e && e->state == E_COMPUTING && pthread_equal(e->owner, pthread_self());
+  if (mine) {
+    e->state = E_EMPTY;
+    if (e->computes > 0)
+      e->computes--;
+    pthread_cond_broadcast(&gw->cv);
+  }
+  pthread_mutex_unlock(&gw->lock);
+  if (mine)
+    pthread_mutex_unlock(&gw->compute_lock);
+}
+
 int nr_td_grantwork_get_llr(nr_td_grantwork_t *gw, uint64_t sig, const void *hint, nr_td_gw_llr_view_t *out)
 {
   if (gw == NULL || out == NULL)

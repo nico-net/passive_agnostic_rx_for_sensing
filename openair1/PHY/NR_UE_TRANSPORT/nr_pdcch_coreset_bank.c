@@ -31,6 +31,7 @@
 #include <stdatomic.h>
 #include <string.h>
 #include <pthread.h>
+#include <math.h>
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr_cell.h"
@@ -54,6 +55,8 @@ NR_CELL_STATIC(unsigned, g_dispatch_readers);
 #define g_dispatch_readers NR_CELL_REF(g_dispatch_readers)
 NR_CELL_STATIC(bool, g_compaction_pending);
 #define g_compaction_pending NR_CELL_REF(g_compaction_pending)
+NR_CELL_STATIC(uint64_t, g_bank_last_slot);
+#define g_bank_last_slot NR_CELL_REF(g_bank_last_slot)
 NR_CELL_STATIC(_Atomic bool, g_identity_reset_pending);
 #define g_identity_reset_pending NR_CELL_REF(g_identity_reset_pending)
 NR_CELL_STATIC(uint32_t, g_bank_epoch);
@@ -163,6 +166,7 @@ void nr_pdcch_coreset_bank_note_accept(int index, uint64_t slot)
   const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
   if (index >= 0 && index < n && g_coreset_bank[index].state != NR_CORESET_REMOVED) {
     nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[index];
+    if (slot > g_bank_last_slot) g_bank_last_slot = slot;
     if (slot > e->last_accept_slot)
       e->last_accept_slot = slot;
     if (e->accepts_window != UINT32_MAX)
@@ -228,6 +232,171 @@ void nr_pdcch_coreset_bank_decoded_clear(void)
   pthread_mutex_unlock(&g_decoded_lock);
 }
 
+/* ---- Downstream PDSCH certification (B1/B2, 2026-10-30) ----
+ * Measured OTA on PCI 403: the CORESET adopted differed between runs (nID 32896: 8-42 RNTIs solved; nID 52320: 0-5 solved, 342 TB passes in 38534 decodes) and a
+ * same-nID, same-RBs entry on the next symbol collected 150-905 grants with 0 passes. A CRC-valid DCI proves a PDCCH, not that this geometry carries this cell's
+ * data. Each entry therefore counts its non-duplicate grants and the TB CRC passes of those grants' RNTIs; an entry with grants and no pass is retired when another
+ * entry's Wilson lower pass rate makes "no pass in n grants" significant, and the retired footprint is re-admitted only after a backoff that doubles with each
+ * retirement (starting at the time the evidence took), reset by a configuration epoch. */
+#define NR_CERT_MAP 4096
+typedef struct { uint16_t rnti; uint8_t serial; } g_rnti_src_cell_t[NR_CERT_MAP];
+NR_CELL_STATIC(g_rnti_src_cell_t, g_rnti_src);
+#define g_rnti_src NR_CELL_REF(g_rnti_src)
+NR_CELL_STATIC(uint8_t, g_serial_next);
+#define g_serial_next NR_CELL_REF(g_serial_next)
+#define NR_RETIRED_MAX 16
+typedef struct { int nid, rb, groups; uint64_t until, span; uint8_t n; bool used; } retired_t;
+typedef retired_t g_retired_cell_t[NR_RETIRED_MAX];
+NR_CELL_STATIC(g_retired_cell_t, g_retired);
+#define g_retired NR_CELL_REF(g_retired)
+NR_CELL_STATIC(unsigned, g_retired_w);
+#define g_retired_w NR_CELL_REF(g_retired_w)
+
+void nr_pdcch_cert_wilson(uint32_t k, uint32_t n, double z, double *lo, double *hi)
+{
+  if (!n) { *lo = 0.0; *hi = 1.0; return; }
+  const double p = (double)k / n, z2 = z * z, d = 1.0 + z2 / n, c = p + z2 / (2.0 * n);
+  const double h = z * sqrt(p * (1.0 - p) / n + z2 / (4.0 * (double)n * n));
+  *lo = (c - h) / d > 0.0 ? (c - h) / d : 0.0;
+  *hi = (c + h) / d < 1.0 ? (c + h) / d : 1.0;
+}
+
+bool nr_pdcch_cert_zero_pass_significant(uint32_t n, double p_lo, double alpha)
+{
+  if (!n || p_lo <= 0.0) return false;
+  if (p_lo >= 1.0) return true;
+  return (double)n * log1p(-p_lo) < log(alpha);
+}
+
+static nr_pdcch_discovered_coreset_t *entry_by_serial_locked(uint8_t serial)
+{
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
+  for (int i = 0; serial && i < n; ++i)
+    if (g_coreset_bank[i].serial == serial && g_coreset_bank[i].state != NR_CORESET_REMOVED) return &g_coreset_bank[i];
+  return NULL;
+}
+
+void nr_pdcch_coreset_bank_note_grant(int index, uint16_t rnti)
+{
+  if (!rnti || !nr_cfg_epoch_work_current()) return;
+  pthread_mutex_lock(&g_coreset_bank_lock);
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
+  if (index >= 0 && index < n && g_coreset_bank[index].state != NR_CORESET_REMOVED) {
+    nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[index];
+    if (e->grants != UINT32_MAX) ++e->grants;
+    g_rnti_src[rnti % NR_CERT_MAP].rnti = rnti;
+    g_rnti_src[rnti % NR_CERT_MAP].serial = e->serial;
+  }
+  pthread_mutex_unlock(&g_coreset_bank_lock);
+}
+
+void nr_pdcch_coreset_bank_note_pdsch(uint16_t rnti, bool dedicated, bool crc_ok)
+{
+  if (!rnti || !dedicated || !crc_ok || !nr_cfg_epoch_work_current()) return;
+  pthread_mutex_lock(&g_coreset_bank_lock);
+  if (g_rnti_src[rnti % NR_CERT_MAP].rnti == rnti) {
+    nr_pdcch_discovered_coreset_t *e = entry_by_serial_locked(g_rnti_src[rnti % NR_CERT_MAP].serial);
+    if (e) {
+      if (e->passes != UINT32_MAX) ++e->passes;
+      if (e->probation) {
+        e->probation = 0;
+        LOG_A(PHY, "SENSING: CORESET bank CERTIFIED (probation entry) nid=%d offset=%d symbol=%d: own TB CRC pass rnti=0x%04x grants=%u\n",
+              e->cfg.coreset_pdcch_dmrs_scrambling_id, e->cfg.coreset_rb_offset, e->cfg.ss_first_symbol, rnti, e->grants);
+      }
+    }
+  }
+  pthread_mutex_unlock(&g_coreset_bank_lock);
+}
+
+bool nr_pdcch_coreset_bank_certified(int index)
+{
+  pthread_mutex_lock(&g_coreset_bank_lock);
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
+  const bool r = index >= 0 && index < n && g_coreset_bank[index].state != NR_CORESET_REMOVED
+                 && g_coreset_bank[index].passes > 0 && !g_coreset_bank[index].probation;
+  pthread_mutex_unlock(&g_coreset_bank_lock);
+  return r;
+}
+
+bool nr_pdcch_coreset_bank_nid_certified(int nid)
+{
+  pthread_mutex_lock(&g_coreset_bank_lock);
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
+  bool r = false;
+  for (int i = 0; i < n && !r; ++i)
+    r = g_coreset_bank[i].state != NR_CORESET_REMOVED && g_coreset_bank[i].cfg.coreset_pdcch_dmrs_scrambling_id == nid
+        && g_coreset_bank[i].passes > 0 && !g_coreset_bank[i].probation;
+  pthread_mutex_unlock(&g_coreset_bank_lock);
+  return r;
+}
+
+static bool rb_overlap(int a, int an, int b, int bn) { return a < b + bn && b < a + an; }
+
+static const retired_t *retired_match_locked(int nid, int rb, int groups)
+{
+  for (int i = 0; i < NR_RETIRED_MAX; ++i)
+    if (g_retired[i].used && g_retired[i].nid == nid && rb_overlap(rb, 6 * groups, g_retired[i].rb, 6 * g_retired[i].groups)
+        && g_bank_last_slot < g_retired[i].until)
+      return &g_retired[i];
+  return NULL;
+}
+
+bool nr_pdcch_coreset_bank_readmit_blocked(int nid, int grid_rb, int groups)
+{
+  pthread_mutex_lock(&g_coreset_bank_lock);
+  const bool r = retired_match_locked(nid, grid_rb, groups) != NULL;
+  pthread_mutex_unlock(&g_coreset_bank_lock);
+  return r;
+}
+
+/* Caller holds the bank lock and calls compact_removed() afterwards. */
+static int assess_locked(uint64_t slot)
+{
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
+  int retired = 0;
+  double lo[NR_PDCCH_DISCOVERED_CORESETS] = {0};
+  for (int i = 0; i < n; ++i) {
+    double hi;
+    if (g_coreset_bank[i].state != NR_CORESET_REMOVED)
+      nr_pdcch_cert_wilson(g_coreset_bank[i].passes, g_coreset_bank[i].grants, NR_PDCCH_CERT_Z, &lo[i], &hi);
+  }
+  for (int i = 0; i < n; ++i) {
+    nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[i];
+    if (e->state == NR_CORESET_REMOVED || e->passes || !e->grants || !e->probation) continue; /* only same-nID/same-RB twins are retirable: a different CORESET of the cell is never rejected for its PDSCH yield */
+    double ref = 0.0; /* strongest competitor's lower pass rate */
+    for (int j = 0; j < n; ++j)
+      if (j != i && g_coreset_bank[j].state != NR_CORESET_REMOVED && lo[j] > ref) ref = lo[j];
+    if (!nr_pdcch_cert_zero_pass_significant(e->grants, ref, NR_PDCCH_CERT_ALPHA)) continue;
+    LOG_A(PHY, "SENSING: CORESET bank RETIRE index=%d nid=%d offset=%d span=%d symbol=%d: %u grants, 0 TB CRC passes; competitor pass rate >= %.4f (P[no pass] < %.0e)\n",
+          i, e->cfg.coreset_pdcch_dmrs_scrambling_id, e->cfg.coreset_rb_offset, e->cfg.coreset_freq_domain * 6, e->cfg.ss_first_symbol,
+          e->grants, ref, NR_PDCCH_CERT_ALPHA);
+    /* backoff: the time the evidence took, doubled per repeat of the same footprint */
+    const int rb = e->cfg.bwp_start + e->cfg.coreset_rb_offset, groups = e->cfg.coreset_freq_domain, nid = e->cfg.coreset_pdcch_dmrs_scrambling_id;
+    retired_t *r = NULL;
+    for (int k = 0; k < NR_RETIRED_MAX && !r; ++k)
+      if (g_retired[k].used && g_retired[k].nid == nid && g_retired[k].rb == rb && g_retired[k].groups == groups) r = &g_retired[k];
+    if (!r) { r = &g_retired[g_retired_w++ % NR_RETIRED_MAX]; *r = (retired_t){.used = true, .nid = nid, .rb = rb, .groups = groups}; }
+    const uint64_t span = slot > e->born_slot ? slot - e->born_slot : 1;
+    r->span = r->span > span ? r->span : span;
+    if (r->n < 40) ++r->n;
+    r->until = slot + (r->span << (r->n - 1 < 20 ? r->n - 1 : 20));
+    e->state = NR_CORESET_REMOVED;
+    g_compaction_pending = true;
+    ++retired;
+  }
+  return retired;
+}
+
+int nr_pdcch_coreset_bank_assess(uint64_t slot)
+{
+  pthread_mutex_lock(&g_coreset_bank_lock);
+  if (slot > g_bank_last_slot) g_bank_last_slot = slot;
+  const int r = assess_locked(slot);
+  compact_removed();
+  pthread_mutex_unlock(&g_coreset_bank_lock);
+  return r;
+}
+
 void nr_pdcch_coreset_bank_note_dci(int index, uint64_t slot, uint16_t rnti, uint32_t payload_hash)
 {
   if (!nr_cfg_epoch_work_current()) return;
@@ -256,6 +425,8 @@ void nr_pdcch_coreset_bank_tick(uint64_t slot, bool traffic_elsewhere,
                                 uint32_t t_stale_slots, uint32_t t_remove_slots)
 {
   pthread_mutex_lock(&g_coreset_bank_lock);
+  if (slot > g_bank_last_slot) g_bank_last_slot = slot;
+  assess_locked(slot);
   const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
   bool any_accept = traffic_elsewhere;
   for (int i = 0; i < n; ++i)
@@ -585,6 +756,13 @@ int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t 
   for (int i = 0; i < n; ++i)
     if (g_coreset_bank[i].state != NR_CORESET_REMOVED && coreset_same_geometry(&g_coreset_bank[i].cfg, cfg)) { at = i; break; }
   if (at < 0) {
+    /* B1/B2: a footprint retired for lack of downstream CRC evidence waits out its backoff. */
+    if (retired_match_locked(cfg->coreset_pdcch_dmrs_scrambling_id, cfg->bwp_start + cfg->coreset_rb_offset, cfg->coreset_freq_domain)) {
+      LOG_A(PHY, "SENSING: multi-CORESET bank add deferred: nid=%d offset=%d span=%d symbol=%d was retired (no TB CRC evidence), backing off\n",
+            cfg->coreset_pdcch_dmrs_scrambling_id, cfg->coreset_rb_offset, cfg->coreset_freq_domain * 6, cfg->ss_first_symbol);
+      pthread_mutex_unlock(&g_coreset_bank_lock);
+      return -1;
+    }
     /* A narrow CCE-compatible subset can decode the same UE as its already banked CORESET. It is
      * useful evidence but not a second independent configuration; retaining every such alias can
      * fill the bounded bank before another UE is reached. */
@@ -610,6 +788,15 @@ int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t 
     g_coreset_bank[at].cfg.ss_monitoring_slot_periodicity = 1;
     g_coreset_bank[at].cfg.ss_monitoring_slot_offset = 0;
     g_coreset_bank[at].cfg.ss_duration = 1;
+    if (++g_serial_next == 0) g_serial_next = 1;
+    g_coreset_bank[at].serial = g_serial_next;
+    g_coreset_bank[at].born_slot = g_bank_last_slot;
+    for (int i = 0; i < n; ++i) { /* B1: same nID and RB footprint as a live entry (other symbol/mapping): its own TB CRC evidence is required */
+      const nr_pdcch_blind_monitor_cfg_t *o = &g_coreset_bank[i].cfg;
+      if (g_coreset_bank[i].state != NR_CORESET_REMOVED && o->coreset_pdcch_dmrs_scrambling_id == cfg->coreset_pdcch_dmrs_scrambling_id
+          && o->bwp_start + o->coreset_rb_offset == cfg->bwp_start + cfg->coreset_rb_offset && o->coreset_freq_domain == cfg->coreset_freq_domain)
+        g_coreset_bank[at].probation = 1;
+    }
     atomic_store_explicit(&g_coreset_bank_n, n + 1, memory_order_release);
     LOG_A(PHY, "SENSING: multi-CORESET bank add index=%d offset=%d span=%d symbol=%d mapping=%d/%d/%d len=%d\n",
           at, cfg->coreset_rb_offset, cfg->coreset_freq_domain * 6, cfg->ss_first_symbol,
@@ -641,6 +828,8 @@ static void bank_epoch_locked(const nr_cfg_epoch_snapshot_t *s)
     if (!g_identity_reset_pending) g_dormant_bank.identity_gen = g_bank_identity;
     g_bank_identity = s->identity_gen;
     g_identity_reset_pending = g_compaction_pending = true;
+    memset(g_retired, 0, sizeof(g_retired)); /* a new cell re-certifies from scratch */
+    memset(g_rnti_src, 0, sizeof(g_rnti_src));
     /* The RT remove hook only clears length banks and all TD contexts. Both
      * already isolate by identity_gen; invoking it here would destroy dormant
      * old-cell records (and potentially freshly opened new-cell contexts). */
@@ -655,7 +844,11 @@ static void bank_epoch_locked(const nr_cfg_epoch_snapshot_t *s)
       e->stale_proof_rnti = 0;
       e->stale_proof_slot = 0;
       e->accepts_window = 0;
+      e->grants = e->passes = 0; /* re-certify after a reconfiguration */
+      e->born_slot = g_bank_last_slot;
     }
+    memset(g_retired, 0, sizeof(g_retired)); /* a CORESET legitimately new after the reconfiguration is not locked out */
+    memset(g_rnti_src, 0, sizeof(g_rnti_src));
   }
 }
 static void bank_epoch_listener(const nr_cfg_epoch_snapshot_t *s)

@@ -251,6 +251,7 @@ typedef struct {
   uint8_t qm_valid;
   uint32_t nvar_ant[4];          /* the chest's per-antenna noise of the last DM-RS symbol and layer (what nr_dl_chest_nvar_ant holds after the old chest) */
   nr_dmrs_snr_t dsnr;            /* EVMGRANT dmrs_snr / dmrs_pw (LS units) / dmrs_ref of the last DM-RS symbol and layer, from the host copy of the estimate (no extra GPU work) */
+  float psinr_db[4];             /* EVMGRANT psinr=: predicted post-MMSE SINR per layer (nr_psinr_fill) from the host copy of the estimate, DIRECT memory model only; -99 = n/a */
   /* ---- Task 7 (UL pass): row = dmrs_index * nbRx + antenna */
   int32_t ul_log2_maxh;          /* the fixed-point scale of the equaliser */
   int32_t ul_avg[4];             /* channel level of the measurement symbol per antenna (kept branches only) */

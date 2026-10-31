@@ -123,6 +123,8 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 #include "nr_pdcch_uss_tracker.h"
 #include "nr_pdcch_joint_live.h"
 #include "nr_pdsch_solver.h"
+#include "nr_re_pattern.h" // generic RE-pattern rate-match entries (SLOTPHASE)
+#include "nr_pdsch_passive_slotphase.h" // SLOTPHASE: CRC-arbitrated provisional CSI-RS rate matching at failing slot phases
 #include "nr_pdsch_dmrs_scan.h"
 #include "nr_scancost.h"
 #include "nr_tdd_learn.h"
@@ -822,6 +824,61 @@ NR_CELL_STATIC(over500_cell_t, over500);
 #undef mx
 #undef over500
 #undef mu
+
+/* SLOTPHASE: applies the arbitrated variant of a flagged slot phase to a decode's rate-match list / length: the provisional seeds (NZP geometry from the
+ * discovery WINNERs occurring in this slot) added to the confirmed entries (NR_SP_UNION), instead of them (NR_SP_REPLACE), or one seed (NR_SP_SEED); the
+ * discovery energy footprints as generic RE patterns (nr_re_pattern.h): one instead of the confirmed set (NR_SP_FOOT), all of them instead of it
+ * (NR_SP_FUNION) or on top of it (NR_SP_FUNION_CONF); or the PDSCH ending sp->trim symbols earlier (NR_SP_TRIM: S kept, L - trim, the DM-RS positions of
+ * the shorter allocation). As for the confirmed entries, a seed that touches a DM-RS symbol of the grant is not applied (the standard forbids the
+ * overlap); a footprint loses its DM-RS symbols (the energy there is DM-RS, not a rate-match resource); a geometry the list already holds is not repeated.
+ * Caller: the dedicated-grant job builder (solver path). */
+static void slotphase_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *dl, const nr_slotphase_choice_t *sp,
+                            const fapi_nr_dl_config_csirs_pdu_rel15_t *seed, int n_seed,
+                            const fapi_nr_dl_config_csirs_pdu_rel15_t *foot, int n_foot, int dmrs_l0, int add_pos)
+{
+  static const uint8_t num_l0[18] = {1, 1, 1, 1, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 4, 2, 2, 4};
+  if (sp->kind == NR_SP_TRIM) {
+    if (sp->trim >= 1 && (int)dl->number_symbols - sp->trim >= NR_SLOTPHASE_MIN_NSYM) {
+      dl->number_symbols = (uint16_t)(dl->number_symbols - sp->trim);
+      dl->dlDmrsSymbPos = nr_pdsch_solver_dmrs_mask(dmrs_l0, dl->start_symbol, dl->number_symbols, add_pos);
+    }
+    return;
+  }
+  /* the measured patterns (NR_SP_EST / NR_SP_EST_CONF, nr_slotphase_est_patterns passed as `foot`) are applied exactly like the footprint union */
+  const int kind = sp->kind == NR_SP_EST ? NR_SP_FUNION : sp->kind == NR_SP_EST_CONF ? NR_SP_FUNION_CONF : sp->kind;
+  if (kind == NR_SP_REPLACE || kind == NR_SP_FOOT || kind == NR_SP_FUNION) dl->numCsiRsForRateMatching = 0;
+  if (kind == NR_SP_FOOT || kind == NR_SP_FUNION || kind == NR_SP_FUNION_CONF) {
+    for (int k = 0; k < n_foot; k++) {
+      if (kind == NR_SP_FOOT && k != sp->foot) continue;
+      fapi_nr_dl_config_csirs_pdu_rel15_t c = foot[k];
+      c.scramb_id = (uint16_t)(nr_re_pattern_sym(&c) & ~(uint32_t)dl->dlDmrsSymbPos & 0x3fffu);
+      bool skip = c.scramb_id == 0 || dl->numCsiRsForRateMatching >= NFAPI_MAX_NUM_CSI_RATEMATCH;
+      for (int i = 0; !skip && i < dl->numCsiRsForRateMatching; i++) {
+        const fapi_nr_dl_config_csirs_pdu_rel15_t *h = &dl->csiRsForRateMatching[i];
+        skip = h->csi_type == c.csi_type && h->scramb_id == c.scramb_id && h->freq_domain == c.freq_domain && h->freq_density == c.freq_density
+               && h->start_rb == c.start_rb && h->nr_of_rbs == c.nr_of_rbs;
+      }
+      if (!skip) dl->csiRsForRateMatching[dl->numCsiRsForRateMatching++] = c;
+    }
+    return;
+  }
+  for (int k = 0; k < n_seed; k++) {
+    if (sp->kind == NR_SP_SEED && k != sp->seed) continue;
+    const fapi_nr_dl_config_csirs_pdu_rel15_t *c = &seed[k];
+    bool skip = c->row < 1 || c->row > 18 || dl->numCsiRsForRateMatching >= NFAPI_MAX_NUM_CSI_RATEMATCH;
+    for (int q = 0; !skip && q < num_l0[c->row - 1]; q++)
+      skip = (dl->dlDmrsSymbPos >> (c->symb_l0 + q)) & 1;
+    if (!skip && (c->row == 13 || c->row == 14 || c->row == 16 || c->row == 17))
+      for (int q = 0; !skip && q < 2; q++)
+        skip = (dl->dlDmrsSymbPos >> (c->symb_l1 + q)) & 1;
+    for (int i = 0; !skip && i < dl->numCsiRsForRateMatching; i++) {
+      const fapi_nr_dl_config_csirs_pdu_rel15_t *h = &dl->csiRsForRateMatching[i];
+      skip = h->row == c->row && h->freq_domain == c->freq_domain && h->symb_l0 == c->symb_l0 && h->symb_l1 == c->symb_l1
+             && h->cdm_type == c->cdm_type && h->freq_density == c->freq_density && h->start_rb == c->start_rb && h->nr_of_rbs == c->nr_of_rbs;
+    }
+    if (!skip) dl->csiRsForRateMatching[dl->numCsiRsForRateMatching++] = *c;
+  }
+}
 
 static uint32_t blind_harq_tag(uint32_t abs_slot, uint16_t rnti, uint8_t harq_pid)
 {
@@ -1943,6 +2000,21 @@ static void length_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
   pthread_mutex_unlock(&ul_length_lock);
   if (nr_pdcch_ul_bank_enabled() || nr_pdcch_ul_config_disc_enabled())
     nr_pdcch_ul_config_disc_reset();
+  { /* the DL grant solver and the TDRA field learner hold what was solved for ONE cell: a new identity (HARD_RESET) starts them over. A softer
+     * epoch keeps them (RX recovery, CSI-RS map, a continuity gap): their own CRC feedback re-solves a layout that stops passing. */
+    NR_CELL_STATIC_INIT(uint32_t, solver_id, UINT32_MAX);
+#define solver_id NR_CELL_REF(solver_id)
+    if (s->identity_gen != solver_id) {
+      if (solver_id != UINT32_MAX) {
+        nr_pdsch_solver_reset();
+        nr_tda_field_forget();
+        nr_slotphase_reset();
+        LOG_A(PHY, "SENSING: PDSCH_SOLVER reset on new cell identity (identity_gen %u -> %u)\n", solver_id, s->identity_gen);
+      }
+      solver_id = s->identity_gen;
+    }
+#undef solver_id
+  }
   if (nr_ul_layout_lock_enabled()) {
     /* UL-LAYOUT: the lock is a property of the cell's dedicated configuration. Keep it across SOFT epochs (RX
      * recovery, CSI-RS map), drop it on a new identity or a suspected dedicated change. */
@@ -2042,9 +2114,22 @@ static void bank_reopen_geometry(const nr_pdcch_blind_monitor_cfg_t *cfg, void *
   nr_pdsch_config_sweep_reset_all();
 }
 
+/* OR of the lit-window masks of every (N_ID, reference) vote entry of `nid` (the discovered queue's rejection budget and geometry filter). */
+static bool nid_windows_hook(int nid, uint64_t *mask)
+{
+  bool have = false;
+  *mask = 0;
+  pthread_mutex_lock(&g_nid_lock);
+  for (int i = 0; i < 64; i++)
+    if (g_nid_votes[i].votes && g_nid_votes[i].nid == nid) { *mask |= g_nid_votes[i].win_mask; have = true; }
+  pthread_mutex_unlock(&g_nid_lock);
+  return have;
+}
+
 static void bank_register_reopen_hook(void)
 {
   nr_pdcch_coreset_bank_set_remove_hook(bank_reopen_geometry, NULL);
+  nr_pdcch_discovered_set_nid_window_hook(nid_windows_hook);
 }
 
 static uint64_t length_lookahead_key(const nr_pdcch_blind_monitor_cfg_t *cfg,
@@ -4615,6 +4700,7 @@ static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
     if (reconf_lengths_enabled())
       nr_pdcch_coreset_bank_note_accept(t_bank_index, t_bank_slot);
     nr_pdcch_coreset_bank_note_confirm(t_bank_index, t_bank_slot);
+    if (dir == 0) nr_pdcch_coreset_bank_note_grant(t_bank_index, rnti); /* B1/B2: the entry that produced this DL grant is credited with its TB outcomes */
   }
   return dup;
 }
@@ -9066,8 +9152,14 @@ NR_CELL_STATIC(s_scr_logged_cell_t, s_scr_logged);
       /* A solved RNTI's retransmission (rv != 0 under its representative, which `out` is) is not decoded on its own, as before.
        * An unsolved RNTI is NOT gated on one layout's rv any more: `out` is only some live layout's reading, so its rv said
        * nothing; each reading below is kept only if ITS OWN rv is 0 (a first-code-block probe needs a fresh TB). */
-      if (!defer || !want_decode || (rep >= 0 && out.rv != 0) || decodes_this_occasion >= cfg->pdsch_max_per_slot) {
-        nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_GATE);
+      /* A solved RNTI's retransmission (rv != 0 under its representative) is decoded when the HARQ store holds the failed earlier transmission of
+       * its TB (same pid and NDI): it combines into that soft sum. Alone it is mostly parity; a TB already decoded needs nothing. */
+      const int hq_state = rep >= 0 && out.rv != 0 ? nr_pdsch_passive_harqc_state(out.rnti, out.harq_pid, out.ndi) : 0;
+      if (!defer || !want_decode || (rep >= 0 && out.rv != 0 && hq_state != 2) || decodes_this_occasion >= cfg->pdsch_max_per_slot) {
+        nr_pdsch_solver_note_skip(out.rnti, !defer || !want_decode                        ? NR_PDSCH_SOLVER_WHY_GATE
+                                            : decodes_this_occasion >= cfg->pdsch_max_per_slot ? NR_PDSCH_SOLVER_WHY_GATE_CAP
+                                            : hq_state == 1                                    ? NR_PDSCH_SOLVER_WHY_GATE_RVOK
+                                                                                               : NR_PDSCH_SOLVER_WHY_GATE_RV);
         continue;
       }
       if (nr_a2e_trace()) nr_a2e_ts[7] = btim_now_ns(); /* solver reading pass starts */
@@ -9411,6 +9503,14 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
       else
         nr_pdsch_solver_set_alt_scr(cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, sv_alt, sv_nalt,
                                     sv_did >= 0 && sv_did != fp->Nid_cell);
+      if (rep < 0 && sv_nown == 0) { /* A3: no identity of its own yet: the identities the cell has already shown are tried first */
+        int pool_ids[NR_PDSCH_SOLVER_POOL_MAX];
+        int32_t pool32[NR_PDSCH_SOLVER_POOL_MAX];
+        const int np = nr_dmrs_scan_pool_ids(pool_ids, NR_PDSCH_SOLVER_POOL_MAX);
+        for (int q = 0; q < np; q++) pool32[q] = pool_ids[q];
+        nr_pdsch_solver_set_pool_ids(pool32, np);
+      }
+      if (rep < 0) nr_pdsch_solver_note_id_quality(out.rnti, nr_dmrs_scan_rnti_id_quality(out.rnti));
       int sv_kept = -1;
       if (sv_nown > 0) {
         nrd = dmrs_scan_filter_readings(ue, proc, cfg, out.rnti, sv_own, sv_nown, rparsed, rd, nrd, &sv_kept);
@@ -9464,39 +9564,50 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
         dl.dlDmrsSymbPos     = var[v].dmrs_mask;
         dl.mcs_table         = var[v].table;
         /* Fix A (ISAC_PDSCH_TDA_FIELD=1, default off): the TDRA field the layout solver aliased as pre-MCS bits, and the TDD-legal (S,L) rows. */
-        uint8_t tf_pos1 = 0, tf_n = 0, tf_S[2] = {0, 0}, tf_L[2] = {0, 0};
+        uint8_t tf_pos1 = 0, tf_n = 0, tf_S[2] = {0, 0}, tf_L[2] = {0, 0}, tf_K0[2] = {0, 0}, tf_k0 = 0;
+        uint8_t pm_pos1 = 0, pm_nbits = 0, pm_h = NR_PM_HYP_PLAIN; /* PMEXPLORE: the pre-MCS window of a detected TDRA field */
         int8_t tf_last = 13;
         if (rep >= 0 && !var[v].probe && nr_tda_field_on() && R != NULL && rep < (int)__atomic_load_n(&R->n_hyp, __ATOMIC_ACQUIRE)
             && R->off[rep].tda_bits == 0 && R->off[rep].tda < 200 && dlen == R->off[rep].total) {
-          int8_t lastv = 13;
-          if (!nr_passive_acq_tdd_pdsch_last_symbols((uint32_t)abs_slot, (int)fp->numerology_index, 1, &lastv)) lastv = 13;
+          int8_t lastk[3] = {13, 13, 13}, dlk[3] = {14, 14, 14}; /* the DCI's slot and the next two (cross-slot rows); unknown TDD: DL */
+          if (!nr_passive_acq_tdd_pdsch_last_symbols((uint32_t)abs_slot, (int)fp->numerology_index, 3, lastk)) lastk[0] = lastk[1] = lastk[2] = 13;
+          if (!nr_passive_acq_tdd_pdsch_dl_symbols((uint32_t)abs_slot, (int)fp->numerology_index, 3, dlk)) dlk[0] = dlk[1] = dlk[2] = 14;
+          const int8_t lastv = lastk[0];
           const int tpos = R->off[rep].tda;
           if (!tf_noted) {
             nr_tda_field_note_dci(tpos, rw->payload, dlen, lastv < 13);
             tf_noted = true;
           }
           bool tdet;
-          const int nc = nr_tda_field_rows(tpos, rw->payload, dlen, lastv, 2, tf_S, tf_L, &tdet);
+          const int nc = nr_tda_field_rows_k0(tpos, rw->payload, dlen, lastk, dlk, 2, tf_S, tf_L, tf_K0, &tdet);
           { /* TDAFIELD diagnostic: the first hooks, then 1 in 500 */
             NR_CELL_STATIC(_Atomic uint32_t, s_tfd);
 #define s_tfd NR_CELL_REF(s_tfd)
             const uint32_t q = atomic_fetch_add(&s_tfd, 1);
             if (q < 6 || q % 500 == 0)
-              LOG_A(PHY, "SENSING: TDAFIELD hook #%u rnti=0x%04x fs=%d.%d pos=%d last=%d rows=%d det=%d val=%u S=%u,%u L=%u,%u\n", q, out.rnti,
+              LOG_A(PHY, "SENSING: TDAFIELD hook #%u rnti=0x%04x fs=%d.%d pos=%d last=%d rows=%d det=%d val=%u S=%u,%u L=%u,%u k0=%u\n", q, out.rnti,
                     proc->frame_rx, proc->nr_slot_rx, tpos, (int)lastv, nc, (int)tdet, (unsigned)nr_dci_bits_field(&rw->payload, dlen, tpos, 2),
-                    nc > 0 ? tf_S[0] : 0, nc > 1 ? tf_S[1] : 0, nc > 0 ? tf_L[0] : 0, nc > 1 ? tf_L[1] : 0);
+                    nc > 0 ? tf_S[0] : 0, nc > 1 ? tf_S[1] : 0, nc > 0 ? tf_L[0] : 0, nc > 1 ? tf_L[1] : 0, nc > 0 ? tf_K0[0] : 0);
           }
 #undef s_tfd
           tf_pos1 = (uint8_t)(tpos + 1);
           tf_last = lastv;
           tf_n = (uint8_t)nc;
           const int tl0 = cfg->dmrs_typeA_position + 2;
-          if (nc > 0 && tf_S[0] <= tl0 && (tf_S[0] != dl.start_symbol || tf_L[0] != dl.number_symbols)) {
+          if (nc > 0 && tf_S[0] <= tl0 && (tf_S[0] != dl.start_symbol || tf_L[0] != dl.number_symbols || tf_K0[0] != 0)) {
             dl.start_symbol   = tf_S[0];
             dl.number_symbols = tf_L[0];
             dl.dlDmrsSymbPos  = nr_pdsch_solver_dmrs_mask(tl0, tf_S[0], tf_L[0], var[v].add_pos);
+            tf_k0 = tf_K0[0]; /* the PDSCH is tf_k0 slots after the DCI */
           }
-          if (nc > 1 && tf_S[1] > tl0) tf_n = 1;
+          if (nc > 1 && (tf_S[1] > tl0 || tf_K0[1] != 0 || tf_k0 != 0)) tf_n = 1; /* the same-slot retry row only for a same-slot grant */
+          const int tw = tdet ? nr_tda_field_width(tpos) : 0;
+          const int pw = tw ? (int)R->off[rep].mcs - (tpos + tw) : 0;
+          if (pw >= 1 && pw <= 4 && R->off[rep].fdra_mode == NR_FDRA_TYPE1 && !o->ra_type0) {
+            pm_pos1 = (uint8_t)(tpos + tw + 1);
+            pm_nbits = (uint8_t)pw;
+            pm_h = (uint8_t)nr_pm_hyp(tpos + tw, pw, rw->payload, dlen);
+          }
         }
         dl.mcs_table         = var[v].table;
         dl.pduBitmap         = 0;
@@ -9511,8 +9622,9 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
             dl.dlDataScramblingId = (uint16_t)((var[v].scr >> 16) - 1);
         }
         if (var[v].rm) {
-          const fapi_nr_dl_config_csirs_pdu_rel15_t *rm = sv_rm;
-          const int n_rm = sv_nrm;
+          fapi_nr_dl_config_csirs_pdu_rel15_t rm_k0[NFAPI_MAX_NUM_CSI_RATEMATCH];
+          const int n_rm = tf_k0 ? nr_csirs_blind_rt_rate_match_all(abs_slot + tf_k0 /* the PDSCH slot */, rm_k0, NR_CSI_RM_LEGACY_MAX) : sv_nrm;
+          const fapi_nr_dl_config_csirs_pdu_rel15_t *rm = tf_k0 ? rm_k0 : sv_rm;
           static const uint8_t num_l0[18] = {1, 1, 1, 1, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 4, 2, 2, 4};
           for (int k = 0; k < n_rm; k++) {
             const fapi_nr_dl_config_csirs_pdu_rel15_t *c = &rm[k];
@@ -9526,6 +9638,27 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
               dl.csiRsForRateMatching[dl.numCsiRsForRateMatching++] = *c;
           }
         }
+        if (!var[v].probe && var[v].token && nr_slotphase_active()) { /* SLOTPHASE: at a phase whose strong grants fail, this full decode is the probe of a variant */
+          const uint32_t sp_slot = abs_slot + tf_k0; /* the PDSCH slot */
+          if (nr_slotphase_covers(sp_slot)) {
+            fapi_nr_dl_config_csirs_pdu_rel15_t sp_seed[NR_SLOTPHASE_MAX_SEED], sp_foot[NR_SLOTPHASE_MAX_FOOT];
+            uint32_t sp_id[NR_SLOTPHASE_MAX_SEED], sp_fid[NR_SLOTPHASE_MAX_FOOT];
+            const int sp_n = nr_csirs_blind_rt_seeds_at(sp_slot, sp_seed, sp_id, NR_SLOTPHASE_MAX_SEED);
+            const int sp_nf = nr_csirs_blind_rt_footprints_at(sp_slot, sp_foot, sp_fid, NR_SLOTPHASE_MAX_FOOT);
+            int8_t sp_last = 13; /* last PDSCH symbol of that slot (SIB1 TDD pattern); unknown TDD (NSA, no SIB1): the slot may be partial */
+            const bool sp_tdd = nr_passive_acq_tdd_pdsch_last_symbols(sp_slot, (int)fp->numerology_index, 1, &sp_last);
+            const nr_slotphase_in_t sp_in = {.seed_ids = sp_id, .n_seeds = sp_n, .foot_ids = sp_fid, .n_foot = sp_nf, .foot = sp_foot,
+                                             .has_conf = dl.numCsiRsForRateMatching > 0, .nsym = dl.number_symbols,
+                                             .trim_ok = !sp_tdd || sp_last < 13};
+            const nr_slotphase_choice_t sp = nr_slotphase_plan(sp_slot, nr_csirs_blind_rt_slotphase_gen(), var[v].token, &sp_in);
+            if (sp.kind == NR_SP_EST || sp.kind == NR_SP_EST_CONF) {
+              fapi_nr_dl_config_csirs_pdu_rel15_t sp_est[NR_SPR_MAXPAT];
+              const int sp_ne = nr_slotphase_est_patterns(sp_slot, sp_est, NR_SPR_MAXPAT);
+              slotphase_apply(&dl, &sp, sp_seed, sp_n, sp_est, sp_ne, cfg->dmrs_typeA_position + 2, var[v].add_pos);
+            } else if (sp.kind != NR_SP_CTRL)
+              slotphase_apply(&dl, &sp, sp_seed, sp_n, sp_foot, sp_nf, cfg->dmrs_typeA_position + 2, var[v].add_pos);
+          }
+        }
         freq_alloc_bitmap_t fa = set_bitmap_from_start_size(o->start_rb, o->num_rb);
         if (o->ra_type0) {
           if (o->rbg_bwp_start != cfg->bwp_start || dl.BWPSize != cfg->bwp_size) {
@@ -9534,6 +9667,15 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
           }
           fa.n_prb_list = (uint16_t)nr_ra_type0_prbs(o->rbg_bitmap, o->rbg_bwp_start, dl.BWPSize, o->rbg_size,
                                                      fa.prb_list, NR_PRB_SET_MAX);
+          if (fa.n_prb_list == 0 || !nr_pdsch_passive_alloc_normalise(&fa, dl.BWPSize)) {
+            nr_pdsch_solver_feedback(var[v].token, false, false);
+            continue;
+          }
+          dl.start_rb = (uint16_t)fa.first_rb;
+          dl.number_rbs = (uint16_t)fa.num_rbs;
+        } else if (pm_h != NR_PM_HYP_PLAIN) { /* PMEXPLORE: interleaved VRB-to-PRB mapping, bundle 2 or 4 (TS 38.211 7.3.1.6) */
+          fa.n_prb_list = (uint16_t)nr_vrb_to_prb_interleaved(dl.BWPStart, dl.BWPSize, pm_h == NR_PM_HYP_ILV2 ? 2 : 4, o->start_rb, o->num_rb,
+                                                              fa.prb_list);
           if (fa.n_prb_list == 0 || !nr_pdsch_passive_alloc_normalise(&fa, dl.BWPSize)) {
             nr_pdsch_solver_feedback(var[v].token, false, false);
             continue;
@@ -9552,14 +9694,15 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
                                              .scr_dedicated = dl_dedicated, .dci_len = tf_pos1 ? dlen : o->dci_len, /* the TDA-field learner needs the raw payload */
                                              .dci_w = {tf_pos1 ? rw->payload.w[0] : o->payload.w[0], tf_pos1 ? rw->payload.w[1] : o->payload.w[1]},
                                              .tda_pos1 = tf_pos1, .tda_n = tf_n, .tda_addpos = var[v].add_pos, .tda_last = tf_last,
-                                             .tda_S = {tf_S[0], tf_S[1]}, .tda_L = {tf_L[0], tf_L[1]}};
+                                             .tda_S = {tf_S[0], tf_S[1]}, .tda_L = {tf_L[0], tf_L[1]}, .tda_k0 = tf_k0,
+                                             .pm_pos1 = pm_pos1, .pm_nbits = pm_nbits, .pm_hyp = pm_h};
         nr_pdsch_passive_job_t job;
         memset(&job, 0, sizeof(job));
         job.dlsch_pdu = dl;
         job.freq_alloc = fa;
         job.grant = gq;
-        { /* WIDE-S0: the common RBs of THIS DCI's PDCCH (its CCEs' REG bundles, same CCE-to-REG mapping as the demapper),
-           * for the TS 38.214 5.1.4.1 exclusion the decoder applies under ISAC_PDSCH_PDCCH_RM. Unset (nsym 0) if unmappable. */
+        if (!tf_k0) { /* WIDE-S0: the common RBs of THIS DCI's PDCCH (its CCEs' REG bundles, same CCE-to-REG mapping as the demapper),
+           * for the TS 38.214 5.1.4.1 exclusion the decoder applies under ISAC_PDSCH_PDCCH_RM. Unset (nsym 0) if unmappable; none cross-slot. */
           uint16_t prb[96];
           const int np = nr_pdcch_candidate_rbs(n_rb, rel15->coreset.duration, cfg->coreset_reg_bundle_size,
                                                 cfg->coreset_interleaver_size, cfg->coreset_shift_index,
@@ -9573,9 +9716,9 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
             job.grant.pdcch_nsym = (uint8_t)rel15->coreset.duration;
           }
         }
-        nr_pdsch_k0_slot(proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame, 0, &job.frame_rx, &job.nr_slot_rx);
+        nr_pdsch_k0_slot(proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame, tf_k0, &job.frame_rx, &job.nr_slot_rx);
         job.gNB_id = proc->gNB_id;
-        job.absolute_slot = source_absolute_slot;
+        job.absolute_slot = source_absolute_slot + tf_k0; /* the consumer waits for that slot's samples */
         job.rnti = out.rnti;
         job.rnti_class = out.rnti_class;
         job.harq_pid_tag = blind_harq_tag(abs_slot, out.rnti, o->harq_pid);

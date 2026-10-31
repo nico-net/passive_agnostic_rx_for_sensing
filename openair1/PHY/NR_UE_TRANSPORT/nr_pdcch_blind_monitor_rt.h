@@ -315,6 +315,8 @@ void nr_pdcch_blind_monitor_rt_final_stats(void);
 bool nr_pdcch_discovered_cover_enabled(void);
 /* Bank holds a verified entry of this nID/symbol/duration whose RB range overlaps [rb, rb + 6 groups). */
 bool nr_pdcch_discovered_cover_banked(int nid, int sym, int dur, int rb, int groups);
+/* NID_SOLVE lit-window set of an nID (bit w = grid RBs [6w, 6w+6)); registered by the RT unit, used by the discovered queue (C1/C2). Hook returns false when the nID is unknown. */
+void nr_pdcch_discovered_set_nid_window_hook(bool (*hook)(int nid, uint64_t *mask));
 /* ISAC_PDCCH_POINTA_REF=1 (TIM-ACQ, default off): dedicated (PDCCH-Config) CORESETs take CRB 0 = Point A from SIB1
  * instead of assuming that the receive grid starts at Point A. TS 38.211 7.4.1.3.2: their DM-RS index counts from
  * CRB 0; TS 38.213 10.1: their 6-RB groups are aligned to CRB 0. GPU nID discovery already indexes from Point A and

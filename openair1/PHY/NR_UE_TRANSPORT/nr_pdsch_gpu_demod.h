@@ -33,6 +33,24 @@ typedef struct {
   uint16_t n_rb[276];
 } nr_gpu_evm_sym_t;
 
+/* XDIAG (EVMGRANT snrx= sdisp=): sums over the equaliser output the LLRs are cut from (comp, in the units of mag), per symbol, accumulated by k_tail (armed grants only).
+ * Lattice mode (Qm > 2, or one layer: the QAM unit u per RE is mag / 2^(Qm/2 - 1), for QPSK m / sqrt 2 from |h|^2 as re_comp builds mag): e = sum |z/u - slice|^2.
+ * Moment mode (QPSK of a multi-layer solve, no per-RE unit): ll[4..7] = sum |z|^2, ll[8..11] = sum |Re z| + |Im z|. ll[0..3] = REs counted (both modes). */
+#define NR_GPU_XD_NG 72 /* groups of 48 packed REs per symbol: (NR_GPU_DEMOD_MAX_EXT + 47) / 48 rounded up */
+/* RESID (slot-phase RE-pattern estimator, nr_slotphase_resid.h): the same layer-0 lattice error as eg / ng, keyed by the RE's POSITION instead of its packed index. Position from the
+ * extraction index map (geo_y = rxdataF subcarrier k): rel = (k - rs_k0) mod rs_n, crb = rel / 12, sc = rel % 12. Key = sc + 12 * (crb & 3) (0..47), then NR_GPU_RS_BKT buckets of
+ * 8 CRBs (crb / 8) in rs_e / rs_n[NR_GPU_RS_KEYS ..]. Written only when the job has want_resid (flagged slot phases and a bounded reference budget; else untouched). */
+#define NR_GPU_RS_KEYS 48
+#define NR_GPU_RS_BKT 36
+#define NR_GPU_RS_N (NR_GPU_RS_KEYS + NR_GPU_RS_BKT)
+typedef struct {
+  float e[NR_GPU_DEMOD_NSYM][NR_GPU_DEMOD_MAX_NL];
+  long long ll[NR_GPU_DEMOD_NSYM][12];
+  float eg[NR_GPU_DEMOD_NSYM][NR_GPU_XD_NG], ng[NR_GPU_DEMOD_NSYM][NR_GPU_XD_NG]; /* layer 0, lattice mode: error sum and RE count per group */
+  float rs_e[NR_GPU_DEMOD_NSYM][NR_GPU_RS_N];    /* RESID: layer 0, lattice mode: error sum per position key / 8-CRB bucket */
+  uint32_t rs_n[NR_GPU_DEMOD_NSYM][NR_GPU_RS_N]; /* RESID: REs per position key / bucket */
+} nr_gpu_xdiag_t;
+
 typedef struct nr_gpu_demod_job_s {
   /* grant shape */
   int nbRx, nl, qm, N;
@@ -58,6 +76,8 @@ typedef struct nr_gpu_demod_job_s {
   int want_kappa;  /* EVM armed: per-symbol kappa sums */
   int want_evm;    /* EVM armed: GPU EVM partial sums (else the host runs its CPU copy of the EVM block) */
   int evm_erase;   /* nr_dlsch_csi_erase_n > 0 */
+  int want_resid;  /* RESID: k_tail also accumulates the position-keyed layer-0 error (xd.rs_e / rs_n); needs want_kappa */
+  int rs_k0, rs_n; /* RESID: fp->first_carrier_offset and fp->ofdm_symbol_size, to turn geo_y's subcarrier k into (CRB, sc) */
   int evm_fp64;    /* GPU EVM per-RE math in double (else float; sums always double) */
   float m3_nvfac_f; /* demod_fp32: (float)m3_nvfac, set by the launch entry points (no double reaches the float kernels) */
   int demod_fp32;  /* GPUPASS Task 5: the float instantiation of the align / multi-layer MMSE kernels (graph pass on an RTX 4070; not bit-exact, 0 = the bit-exact double one) */
@@ -65,6 +85,8 @@ typedef struct nr_gpu_demod_job_s {
                       3 (exact double MMSE, ISAC_PDSCH_GPU_EXACT_DEMOD_MMSE3=1) */
   uint32_t nvar;   /* nr_rx_pdsch()'s nvar (stock MMSE diagonal loading nvar >> 3) */
   double m3_nvfac; /* mode 3, nbRx <= nl: s2 = nvar x m3_nvfac (pow(10, ISAC_PDSCH_MMSE_EXACT_NVAR_DB / 10), host libm as the CPU) */
+  uint32_t nvar_ant[4];                   /* rank-1 mode 3: the chest's per-RX DM-RS residual noise (nr_dl_chest_nvar_ant) = the branch weights of the noise-weighted MRC; all 0 = no weighting */
+  const uint32_t *nvar_ant_dev;           /* GPUPASS: non-null = the per-RX noise is read from here (the chest post's nvar_ant), `nvar_ant` above is ignored (set by the module from nvar_dev) */
   const uint32_t *nvar_dev;               /* GPUPASS: non-null = nvar is read from here when the kernels run (the chest post's output), `nvar` above is ignored */
   const struct nr_gpu_demod_job_s *jref;  /* GPUPASS: non-null = the kernels read the job from here instead of their by-value copy (graph replay: the job is rewritten
                                            * between replays; the by-value copy is that of the capture). Device-accessible, at least offsetof(evm) bytes. */
@@ -80,6 +102,7 @@ typedef struct nr_gpu_demod_job_s {
   const int16_t *y_ext; /* c16 [14][NR_GPU_DEMOD_MAX_RX][NR_GPU_DEMOD_MAX_EXT] */
   const int16_t *h_ext; /* c16 [14][16][NR_GPU_DEMOD_MAX_EXT], row l * nbRx + a */
   nr_gpu_evm_sym_t evm[NR_GPU_DEMOD_NSYM];
+  nr_gpu_xdiag_t xd;     /* out, after evm: not part of the kernels' by-value job (offsetof(evm)) */
   int ctx;              /* context held by nr_pdsch_gpu_demod_run until nr_pdsch_gpu_demod_release */
 } nr_gpu_demod_job_t;
 

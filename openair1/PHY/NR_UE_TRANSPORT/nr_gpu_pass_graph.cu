@@ -2067,6 +2067,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     for (int a = 0; a < 4; a++) r->nvar_ant[a] = k.nseg > 1 ? rb.post.nvar_ant[a] : (a < nbRxJ ? q[a] : 0); /* segmented: the width-weighted mean the post kernel computed */
   }
   nr_dmrs_snr_init(&r->dsnr);
+  for (int a = 0; a < 4; a++) r->psinr_db[a] = -99.f;
   if (j->ndmrs > 0 && j->nl > 0) { /* last DM-RS symbol and layer, as nvar_ant; a segmented estimate is composed in data order, so [0, 12 nrb) is the grant's */
     const int m = j->dmrs_sym[j->ndmrs - 1], l = j->nl - 1;
     const int16_t *rows[4] = {0, 0, 0, 0};
@@ -2075,6 +2076,12 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
       rows[a] = gd ? (const int16_t *)I.gath.host + 2 * ((size_t)(2 * nbRxJ + a) * N)
                    : (const int16_t *)I.est.host + 2 * ((size_t)(l * nbRxJ + a) * NSYM * N + (size_t)m * N);
     nr_dmrs_snr_fill(&r->dsnr, rows, nbRxJ, 12 * j->nrb, r->nvar_ant, j->dmrs_type, 1.0);
+    if (!gd && j->nl <= 4) { /* PSINR: every layer of the same DM-RS symbol (the DISCRETE model copies only the last layer's rows) */
+      const int16_t *hr[4][4] = {{0}};
+      for (int ll = 0; ll < j->nl; ll++)
+        for (int a = 0; a < nbRxJ && a < 4; a++) hr[ll][a] = (const int16_t *)I.est.host + 2 * ((size_t)(ll * nbRxJ + a) * NSYM * N + (size_t)m * N);
+      nr_psinr_fill(r->psinr_db, hr, j->nl, nbRxJ, 12 * j->nrb, r->nvar_ant, j->dmrs_type);
+    }
     if (!j->nseg) r->dsnr.ref_db = nr_dmrs_ref_db(nr_gpu_model() == NR_GPU_MODEL_DISCRETE || !j->rxdataF ? (const int16_t *)I.rxF.host + 2 * (size_t)m * N : j->rxdataF + 2 * (size_t)m * N, N, j->car_k0, j->car_n, j->k0, 12 * j->nrb);
   }
   if (!r->need_cpu && (!r->tb_ok || j->llr_out_all) && j->llr_out)

@@ -8,6 +8,7 @@
 #include "nr_pdsch_gpu_exact.h"
 #include "nr_pdsch_gpu_demod_host.h"
 #include "nr_passive_cfg_epoch.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h" // nr_pdcch_coreset_bank_note_pdsch (B1/B2 downstream certification)
 #include "nr_passive_sample_lifetime.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
 #include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h" /* per-cell slot clock (A8): replaces the extern of the former process global */
@@ -503,6 +504,36 @@ static void evm_fill(nr_pdsch_passive_decode_result_t *out, const fapi_nr_dl_con
         out->br_snr_db[a] = (ea->sig[a] > 0.0 && ea->res[a] > 0.0) ? (float)(10.0 * log10(ea->sig[a] / ea->res[a])) : -99.f;
       for (int l = 0; l < 4; l++)
         out->layer_snr_db[l] = ea->err_layer[l] > 0.0 ? (float)(10.0 * log10(ea->ref_layer[l] / ea->err_layer[l])) : -99.f;
+      /* XDIAG snrx= / sdisp=: the sums of the GPU demod's k_tail on the real equaliser output (nr_pdsch_gpu_demod.cu); P0 = mean |lattice point|^2 in units of the lattice unit */
+      if (ea->xd_qm >= 2) {
+        const double p0 = 2.0 * ((double)(1u << ea->xd_qm) - 1.0) / 3.0;
+        for (int l = 0; l < 4; l++) {
+          if (ea->xd_n[l] > 0.0 && ea->xd_e[l] > 0.0) {
+            out->snrx_db[l] = (float)(10.0 * log10(p0 * ea->xd_n[l] / ea->xd_e[l]));
+          } else if (ea->xd_nm[l] > 0.0) { /* QPSK, multi-layer: the optimal common point amplitude a = s / (2 n), signal 2 a^2 n = s^2 / (2 n) */
+            const double sig = ea->xd_s[l] * ea->xd_s[l] / (2.0 * ea->xd_nm[l]), err = ea->xd_p[l] - sig;
+            if (sig > 0.0 && err > 0.0)
+              out->snrx_db[l] = (float)(10.0 * log10(sig / err));
+          }
+        }
+        float gs[72];
+        int ng = 0;
+        double sm = 0.0, sq = 0.0;
+        for (int g = 0; g < 72; g++)
+          if (ea->xd_gn[g] >= 24.f && ea->xd_ge[g] > 0.f) {
+            const float v = (float)(10.0 * log10(p0 * (double)ea->xd_gn[g] / (double)ea->xd_ge[g]));
+            int q = ng++;
+            while (q > 0 && gs[q - 1] > v) { gs[q] = gs[q - 1]; q--; }
+            gs[q] = v;
+            sm += v;
+            sq += (double)v * v;
+          }
+        if (ng >= 3) {
+          out->sdisp_p10_db = gs[(int)(0.1 * (ng - 1) + 0.5)];
+          const double mu = sm / ng, var = sq / ng - mu * mu;
+          out->sdisp_std_db = (float)sqrt(var > 0.0 ? var : 0.0);
+        }
+      }
     }
   }
 }
@@ -1034,6 +1065,7 @@ void nr_pdsch_passive_crc_note(uint16_t rnti, bool dedicated, bool crc_ok)
 {
   if (!nr_cfg_epoch_work_current()) return;
   nr_scr_link_note(&g_dl_scr_link, rnti, dedicated, crc_ok);
+  nr_pdcch_coreset_bank_note_pdsch(rnti, dedicated, crc_ok); /* B1/B2: downstream evidence for the CORESET bank entry that produced the grant */
   if (!dedicated)
     return;
   if (crc_ok) {
@@ -1071,6 +1103,7 @@ static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last
  * started on (decoding stops after NR_CB_FAIL_LIMIT failed blocks, so tried is biased toward the early blocks of a failing TB), blocks in the TB. Reset at the start of
  * every body; a layout probe leaves them 0. */
 static __thread uint16_t t_cb_ok = 0, t_cb_tried = 0, t_cb_total = 0;
+static __thread uint64_t t_cb_map = 0; /* EVMGRANT cbmap=: bit r = code block r passed its CRC (blocks >= 64 not shown), same lifetime as t_cb_ok */
 /* RANK2-ITER: LDPC iterations of the last body on this thread (EVMGRANT it= itc= its=): max OAI numIter over the code blocks (a block that hit the cap reports the cap;
  * 0 = no LDPC ran), the cap in force, and the sum over the code blocks that decoded. Reset at the start of every body. */
 static __thread uint8_t t_ldpc_it_max = 0, t_ldpc_it_cap = 0;
@@ -1845,6 +1878,21 @@ static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid)
   return e;
 }
 
+int nr_pdsch_passive_harqc_state(uint16_t rnti, uint8_t pid, uint8_t ndi)
+{
+  int r = 0;
+  pthread_mutex_lock(&g_harqc_lock);
+  for (int i = 0; i < NR_HARQC_N; i++) {
+    const harqc_entry_t *e = &g_harqc[i];
+    if (e->used && e->rnti == rnti && e->pid == pid) {
+      if (e->ndi == ndi && e->tbs != 0) r = e->soft_valid ? 2 : 1;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_harqc_lock);
+  return r;
+}
+
 /* A retry arm of the async lane passed CRC for (rnti, pid, ndi) first sent at job_slot: the failed first pass left a soft sum for that TB; it is dead now, so the entry is retired as for
  * a first-pass success (soft_valid false, device blocks back to the pool). Never allocates an entry. The entry lock is the busy flag: a consumer holds it for one decode, the worker waits for it
  * (bounded; on timeout the sum stays, harmless). A retransmission racing this either combined first (the clear then follows it) or finds the sum gone and decodes alone. */
@@ -2015,6 +2063,8 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
       t_cb_ok = (uint16_t)seg_ok;
       t_cb_tried = (uint16_t)seg_tried;
       t_cb_total = (uint16_t)TB_parameters.C;
+      for (uint32_t r = 0; r < C_dec && r < 64; r++)
+        t_cb_map |= (uint64_t)(TB_parameters.decodeSuccess[r] != 0) << r;
     }
     /* T26b: a probe of a ONE-code-block TB decodes that block with the TB CRC (CRC16/24A), but its outcome was never
      * recorded (only C > 1 set t_probe_seg_ok), so every single-CB probe read "failed" -- measured on the PCI 415
@@ -2463,6 +2513,8 @@ static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_
     t_cb_ok = (uint16_t)seg_ok;
     t_cb_tried = (uint16_t)seg_tried;
     t_cb_total = (uint16_t)g->C;
+    for (int r = 0; r < C_dec && r < 64; r++)
+      t_cb_map |= (uint64_t)(g->r.seg_ok[r] != 0) << r;
   }
   if (!t_probe_first_seg) {
     bool okv[NR_GPU_PASS_MAX_CB];
@@ -2522,9 +2574,13 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
 {
   t_ldpc_it_max = 0; t_ldpc_it_cap = 0; t_ldpc_it_sum = 0;
   t_cb_ok = t_cb_tried = t_cb_total = 0;
+  t_cb_map = 0;
   NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), NULL);
   t_fep_done_ns = 0;
   memset(out, 0, sizeof(*out));
+  for (int l = 0; l < 4; l++)
+    out->psinr_db[l] = out->snrx_db[l] = -99.f;
+  out->sdisp_p10_db = out->sdisp_std_db = -99.f;
   t_gw_used = t_gw_ready = false;
   t_last_hq_retx = false;
   out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
@@ -3008,7 +3064,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
             : ((t_probe_first_seg || probe_last_sym >= 0) && !gp_probe_cov) ? NR_GPU_PASS_GATE_PROBE
             : (t_share.on && !gp_share_cov) ? NR_GPU_PASS_GATE_SHARE
             : t_gw_ready ? NR_GPU_PASS_GATE_GW_READY
-            : (t_gw_used || t_gw_capture) ? NR_GPU_PASS_GATE_GW /* the GrantWork owner publishes the un-normalised LLRs of this geometry for other hypotheses; the pass only returns the normalised ones */
+            : t_gw_capture ? NR_GPU_PASS_GATE_GW /* the lazy computation publishes the un-normalised LLRs of a geometry; the pass only returns the normalised ones. A main decode that merely OWNS its entry does not gate: it goes to the pass and steps back below (gp_ok), or publishes on the CPU path when the pass does not take the grant */
             : t_llr_ovr != NULL ? NR_GPU_PASS_GATE_LLR_OVR
             : t_tb_force_cpu ? NR_GPU_PASS_GATE_FORCE_CPU
             : ((dlsch_config->pduBitmap & 0x1)) ? NR_GPU_PASS_GATE_PTRS
@@ -3040,7 +3096,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
      * retransmissions (rv != 0: HARQ soft bits are needed) are never gated. */
     const double gp_req = nr_required_snr_db(grant->mcs, grant->mcs_table);
     const bool gp_gate_on = nr_snr_gate_applies(t_probe_first_seg || probe_last_sym >= 0, grant->rnti_class == 0, grant->rv, true) && isfinite(gp_req);
-    const float gp_gate_thr = gp_gate_on ? (float)(gp_req - NR_SNR_GATE_MARGIN_DB) : 0.f;
+    const float gp_gate_thr = gp_gate_on ? (float)(gp_req - nr_snr_gate_margin_db(0)) : 0.f;
     share_chest_band(freq_alloc, dlsch_config, &gp_chest_fa, &gp_chest_cfg);
     /* DL HARQ soft combining in the pass: the same decision as passive_ldpc_decode (harq_retx_decide) on the same store; a probe is HARQ-neutral. The soft bits live in device blocks of the entry
      * (hqb_ensure); a stored sum that is still on the host (an earlier CPU decode) is uploaded first. Anything that cannot be arranged decodes without combining (counted) and leaves no stale sum. */
@@ -3189,6 +3245,11 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     if (gp_cmp || gp_fcmp)
       gp_he->soft_valid = false; /* a first transmission the old path decodes too: it must see a fresh process, not the sum the pass has just stored */
     atomic_store(&gp_he->busy, 0);
+  }
+  if (gp_ok && t_gw_owner) { /* the pass took this grant: it publishes no GrantWork entry; give it back EMPTY (other hypotheses compute it lazily, as for any grant without an owner) */
+    t_gw_owner = false;
+    t_gw_used = false;
+    nr_td_grantwork_unclaim(t_gw, t_gw_sig);
   }
   if (!gp_ok)
     nr_gpu_graph_call_dirty(); /* v2 Task 4: this body runs the stage path, which may rewrite rxdataF: the held instance's estimate is not reused */
@@ -3639,6 +3700,13 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       if (!seg_path)
         out->dmrs_snr.ref_db = nr_dmrs_ref_db((const int16_t *)&rxdataF[0][Nfft * dmrs_last], Nfft, fp->first_carrier_offset, 12 * fp->N_RB_DL,
                                               (fp->first_carrier_offset + (chest_cfg.BWPStart + chest_alloc.first_rb) * 12) % Nfft, 12 * nrb);
+      {
+        const int16_t *hr[4][4] = {{0}}; /* PSINR: every layer of the same DM-RS symbol */
+        for (int l = 0; l < cw->Nl && l < 4; l++)
+          for (int a = 0; a < nrx; a++)
+            hr[l][a] = (const int16_t *)&pdsch_dl_ch_estimates[l * fp->nb_antennas_rx + a][Nfft * dmrs_last];
+        nr_psinr_fill(out->psinr_db, hr, cw->Nl, nrx, 12 * nrb, nres, dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2 ? 2 : 1);
+      }
       out->dmrs_path = chest_hit ? 4 : ((seg_path ? gseg : gch) == 0) ? 2 : 1;
     }
   }
@@ -3715,6 +3783,8 @@ gpu_llr_ready:;
     if (out->dmrs_snr.pw_db > -90.f)
       out->dmrs_snr.pw_db += (float)(20.0 * log10(2.0 * get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2)));
     out->dmrs_path = 3;
+    if (out->dmrs_snr.comb_db > -90.f)
+      memcpy(out->psinr_db, t_gpp->r.psinr_db, sizeof(out->psinr_db));
     dmrs_first = t_gpp->dmrs_first; dmrs_last = t_gpp->dmrs_last;
     out->nvar = nvar;
     for (int a = 0; a < NR_DL_CHEST_MAX_ANT; a++)
@@ -4269,6 +4339,7 @@ gpu_llr_ready:;
   out->cb_ok = t_cb_ok;
   out->cb_tried = t_cb_tried;
   out->cb_total = t_cb_total;
+  out->cb_map = t_cb_map;
   /* GrantWork admissibility (fix round 1, I2): what the job's full decode did that CB0 from shared work does not. */
   if (t_gw != NULL && !t_quiet && !t_gw_capture) {
     uint32_t f = 0;
@@ -4819,9 +4890,15 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
                                                              nr_pdsch_passive_decode_result_t *out)
 {
   const nr_pdsch_passive_decode_status_t st = passive_decode_retry_impl(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-  if (grant->tda_pos1 && st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !t_probe_first_seg && !t_quiet && !t_gw_capture && grant->dci_len) {
+  if (grant->tda_pos1 && !t_probe_first_seg && !t_quiet && !t_gw_capture && grant->dci_len) {
     nr_dci_bits_t pl = {{grant->dci_w[0], grant->dci_w[1], 0}};
-    nr_tda_field_note_ok(grant->tda_pos1 - 1, pl, grant->dci_len, grant->tda_last < 13, dlsch_config->start_symbol, dlsch_config->number_symbols);
+    if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK)
+      nr_tda_field_note_ok_k0(grant->tda_pos1 - 1, pl, grant->dci_len, grant->tda_last < 13, dlsch_config->start_symbol,
+                              dlsch_config->number_symbols, grant->tda_k0);
+    if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->rv == 0)) /* a failed retransmission is no evidence */
+      nr_tda_field_note_result(grant->tda_pos1 - 1, pl, grant->dci_len, grant->tda_last < 13, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+    if (grant->pm_pos1 && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->rv == 0)))
+      nr_pm_note_result(grant->pm_pos1 - 1, grant->pm_nbits, pl, grant->dci_len, grant->pm_hyp, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
   }
   return st;
 }

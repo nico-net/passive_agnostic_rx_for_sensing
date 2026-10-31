@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <math.h>
 #ifdef __CUDACC__
 #define NR_DEMOD_HD __host__ __device__
 #else
@@ -264,9 +265,71 @@ NR_DEMOD_HD static inline int nrd_log2_approx(uint32_t x)
  * the host libm exactly as the CPU does, so thr = thr_coef * avg[best] is the same IEEE product. */
 struct nrd_decision {
   int mrc_rx_index, mrc_nb_rx, live_mask, zero_mask, log2_maxh, used_branch_set, used_branch;
+  int wactive;      /* rank-1 mode 3: the live branches are scaled (y and h) by wq[a] / 2^15 (per-branch noise-weighted MRC), 0 = no scaling */
+  uint16_t wq[4];
 };
+/* nr_mrc_noise_wq15() / nr_mrc_scale_q15() / nr_mrc_weighted_headroom() of nr_mrc_weights.h, the device twin (same IEEE double sqrt, same integer arithmetic) */
+NR_DEMOD_HD static inline int nrd_noise_wq(int nb, int live_mask, const uint32_t *nv, uint32_t nre, uint16_t *wq)
+{
+  double mean = 0, nvs[8];
+  int n = 0;
+  for (int a = 0; a < nb; a++)
+    wq[a] = 32768;
+  if (!nv || nb > 8)
+    return 0;
+  for (int a = 0; a < nb; a++) {
+    if (!(live_mask >> a & 1))
+      continue;
+    if (nv[a] == 0)
+      return 0;
+    mean += (double)nv[a];
+    n++;
+  }
+  if (n < 2)
+    return 0;
+  mean /= (double)n;
+  double S = 0;
+  for (int a = 0; a < nb; a++) {
+    if (!(live_mask >> a & 1))
+      continue;
+    const double d = (double)nv[a] / mean - 1.0;
+    S += d * d;
+  }
+  const double p = (double)(nre / 12 < 1 ? 1 : nre / 12);
+  double lam = 0;
+  if (S > 0) {
+    const double t = (2.0 * (double)(n - 1) * 0.5) / (p * S); /* NR_MRC_W_K * (n - 1) * NR_MRC_W_C / (p S) */
+    lam = t >= 1.0 ? 0.0 : 1.0 - t;
+  }
+  double nmin = 0;
+  for (int a = 0; a < nb; a++) {
+    if (!(live_mask >> a & 1))
+      continue;
+    nvs[a] = mean + lam * ((double)nv[a] - mean);
+    if (nmin == 0 || nvs[a] < nmin)
+      nmin = nvs[a];
+  }
+  int active = 0;
+  for (int a = 0; a < nb; a++) {
+    if (!(live_mask >> a & 1)) {
+      wq[a] = 0;
+      continue;
+    }
+    wq[a] = (uint16_t)floor(32768.0 * sqrt(nmin / nvs[a]) + 0.5);
+    active |= wq[a] != 32768;
+  }
+  return active;
+}
+NR_DEMOD_HD static inline struct nrd_c16 nrd_scale_q15(struct nrd_c16 v, uint16_t wq)
+{
+  struct nrd_c16 o;
+  o.r = (int16_t)(((int32_t)v.r * (int32_t)wq + 16384) >> 15);
+  o.i = (int16_t)(((int32_t)v.i * (int32_t)wq + 16384) >> 15);
+  return o;
+}
 NR_DEMOD_HD static inline void nrd_decide(int nl, int nbRx, int mode, double thr_coef, int l2_delta, int shift_sum,
                                           const int32_t *avg, const int32_t *median /* [nl*nbRx], the median rows when nl > 1 */,
+                                          const uint32_t *nvant /* the chest's per-RX noise (nr_dl_chest_nvar_ant), NULL = none: no weighting */, uint32_t nre_first /* REs of the first data symbol */,
                                           struct nrd_decision *d)
 {
   int avgs = 0;
@@ -279,6 +342,9 @@ NR_DEMOD_HD static inline void nrd_decide(int nl, int nbRx, int mode, double thr
   d->zero_mask = 0;
   d->used_branch_set = 0;
   d->used_branch = -1;
+  d->wactive = 0;
+  for (int a = 0; a < 4; a++)
+    d->wq[a] = 32768;
   if (nl == 1 && nbRx == 4) {
     int best = 0;
     for (int a = 1; a < nbRx; a++)
@@ -315,7 +381,21 @@ NR_DEMOD_HD static inline void nrd_decide(int nl, int nbRx, int mode, double thr
         avgs = avgs > median[l * nbRx + a] ? avgs : median[l * nbRx + a];
   if (nl == 1) {
     int contributing = d->mrc_nb_rx;
-    if (nbRx == 4 && mode == 3) {
+    if (nbRx == 4 && mode == 3 && nvant && (d->wactive = nrd_noise_wq(nbRx, d->live_mask, nvant, nre_first, d->wq))) {
+      /* per-branch noise weighting: the headroom of the weighted sum (nr_mrc_weighted_headroom) */
+      long long mx = 0, sum = 0;
+      int nlive = 0;
+      for (int a = 0; a < nbRx; a++)
+        if (d->live_mask & (1 << a)) {
+          const long long w = ((long long)avg[a] * d->wq[a] * d->wq[a]) >> 30;
+          mx = w > mx ? w : mx;
+          sum += w;
+          nlive++;
+        }
+      contributing = mx > 0 ? (int)((sum + mx / 2) / mx) : 1;
+      contributing = contributing < 1 ? 1 : contributing > nlive ? (nlive < 1 ? 1 : nlive) : contributing;
+      avgs = (int)mx;
+    } else if (nbRx == 4 && mode == 3) {
       contributing = 0;
       for (int a = 0; a < nbRx; a++)
         if (d->live_mask & (1 << a))

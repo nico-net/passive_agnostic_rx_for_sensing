@@ -51,6 +51,15 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *hyp, const nr_cs
 bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *hyp);
 /** Index of the confirmed NZP resource that is the same physical resource as hyp (tolerant to widening/merging), or -1. */
 int nr_csirs_blind_rt_discovery_match(const nr_csirs_disc_hyp_t *hyp);
+/** SLOTPHASE: discovery seeds (NZP, confirmed or not) with an occasion in @p slot, in admission order, with stable nonzero ids; returns the count (<= max). */
+int nr_csirs_blind_rt_seeds_at(uint32_t slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, uint32_t *ids, int max);
+/** SLOTPHASE: changes whenever a seed or the exported confirmed CSI-RS set changes. */
+uint32_t nr_csirs_blind_rt_slotphase_gen(void);
+/** SLOTPHASE: stores one detected discovery energy footprint (latest 32 per cell). */
+void nr_csirs_blind_rt_note_footprint(const nr_csirs_disc_fp_t *f);
+/** SLOTPHASE: the stored footprints with an occasion in @p slot (slot % period == offset) as generic RE-pattern PDUs (nr_re_pattern.h), strongest first,
+ *  with stable nonzero ids; returns the count (<= max). */
+int nr_csirs_blind_rt_footprints_at(uint32_t slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, uint32_t *ids, int max);
 /** Withdraw discovery-owned runtime state on cell epoch/synchronisation loss. */
 /* Startup only, before discovery worker/DL actors. */
 void nr_csirs_blind_rt_discovery_init(void);

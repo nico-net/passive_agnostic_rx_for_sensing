@@ -278,7 +278,7 @@ float nr_dmrs_scan_prb_score(const int16_t *const *rx, int nant, int N, int fco,
 }
 
 /* ---- per-RNTI votes ---- */
-#define VOTE_RNTIS 128
+#define VOTE_RNTIS 256 /* was 128 without eviction: on PCI 923 (109-132 active RNTIs per 300 s) every later RNTI got no identity at all */
 #define VOTE_IDS 8
 #define VOTE_SEEN 16
 typedef struct {
@@ -286,7 +286,10 @@ typedef struct {
   bool used;
   int slots;
   int64_t seen[VOTE_SEEN];
+  int64_t last;              /* last slot voted (LRU eviction) */
   int nid[VOTE_IDS], votes[VOTE_IDS];
+  /* IDQUAL: the DM-RS SNR the decodes of this RNTI measured under each identity (nr_dmrs_scan_note_decode): decodes, >= 0 dB, < -3 dB */
+  uint16_t q_n[VOTE_IDS], q_good[VOTE_IDS], q_bad[VOTE_IDS];
 } vote_t;
 typedef vote_t g_v_arr_t[VOTE_RNTIS];
 NR_CELL_STATIC(g_v_arr_t, g_v)
@@ -347,14 +350,25 @@ static vote_t *vote_of(uint16_t rnti, bool create)
 {
   for (int i = 0; i < VOTE_RNTIS; i++) if (g_v[i].used && g_v[i].rnti == rnti) return &g_v[i];
   if (!create) return NULL;
-  for (int i = 0; i < VOTE_RNTIS; i++)
-    if (!g_v[i].used) {
-      memset(&g_v[i], 0, sizeof(g_v[i]));
-      g_v[i].used = true; g_v[i].rnti = rnti;
-      for (int k = 0; k < VOTE_SEEN; k++) g_v[i].seen[k] = -1;
-      return &g_v[i];
-    }
-  return NULL;
+  int fr = -1;
+  for (int i = 0; i < VOTE_RNTIS && fr < 0; i++)
+    if (!g_v[i].used) fr = i;
+  for (int i = 0; i < VOTE_RNTIS && fr < 0; i++) /* full: the least recently voted RNTI makes room (RNTIs come and go) */
+    if (i == 0 || g_v[i].last < g_v[fr < 0 ? 0 : fr].last) fr = i;
+  if (fr < 0) fr = 0;
+  memset(&g_v[fr], 0, sizeof(g_v[fr]));
+  g_v[fr].used = true; g_v[fr].rnti = rnti;
+  for (int k = 0; k < VOTE_SEEN; k++) g_v[fr].seen[k] = -1;
+  return &g_v[fr];
+}
+/* IDQUAL class of identity slot q: 2 = its decodes see this RNTI's DM-RS (median >= 0 dB over >= 4), 0 = they see noise (median < -3 dB
+ * over >= 8), 1 = not known. Measured on PCI 923 OTA 2026-10-30: the right (DM-RS id, data id) pair of a solved RNTI has median DM-RS
+ * SNR +3.7..+7.3 dB, every other identity ~ -6 dB. */
+static int id_class(const vote_t *v, int q)
+{
+  if (v->q_n[q] >= 4 && 2u * v->q_good[q] > v->q_n[q]) return 2;
+  if (v->q_n[q] >= 8 && 2u * v->q_bad[q] > v->q_n[q]) return 0;
+  return 1;
 }
 
 void nr_dmrs_scan_vote(uint16_t rnti, int64_t abs_slot, const nr_dmrs_scan_hit_t *hits, int n)
@@ -366,6 +380,7 @@ void nr_dmrs_scan_vote(uint16_t rnti, int64_t abs_slot, const nr_dmrs_scan_hit_t
   if (v && !dup) {
     v->seen[v->slots % VOTE_SEEN] = abs_slot;
     v->slots++;
+    if (abs_slot > v->last) v->last = abs_slot;
     if (nr_dmrs_scan_contrast_on()) base_count(abs_slot, hits, n);
     for (int h = 0; h < n; h++) {
       int k = -1;
@@ -391,15 +406,44 @@ int nr_dmrs_scan_rnti_ids(uint16_t rnti, int *ids, int max)
   while (v && n < max) {
     int k = -1;
     const bool ct = nr_dmrs_scan_contrast_on(); /* reorder only: an id is never dropped, the TB CRC still decides */
+    /* IDQUAL first (an identity the decodes prove right, then untested, then one they prove wrong), then the vote order */
     for (int q = 0; q < VOTE_IDS; q++)
       if (!taken[q] && v->votes[q] >= NR_DMRS_SCAN_MIN_VOTES
-          && (k < 0 || (ct ? id_contrast(v, q) > id_contrast(v, k) : v->votes[q] > v->votes[k]))) k = q;
+          && (k < 0 || id_class(v, q) > id_class(v, k)
+              || (id_class(v, q) == id_class(v, k) && (ct ? id_contrast(v, q) > id_contrast(v, k) : v->votes[q] > v->votes[k])))) k = q;
     if (k < 0) break;
     taken[k] = true;
     ids[n++] = v->nid[k];
   }
   pthread_mutex_unlock(&g_vmu);
   return n;
+}
+
+void nr_dmrs_scan_note_decode(uint16_t rnti, int nid, float dmrs_snr_db)
+{
+  pthread_mutex_lock(&g_vmu);
+  vote_t *v = vote_of(rnti, false);
+  for (int q = 0; v && q < VOTE_IDS; q++)
+    if (v->votes[q] > 0 && v->nid[q] == nid) {
+      if (v->q_n[q] < 60000) {
+        v->q_n[q]++;
+        v->q_good[q] += dmrs_snr_db >= 0.f;
+        v->q_bad[q] += dmrs_snr_db < -3.f;
+      }
+      break;
+    }
+  pthread_mutex_unlock(&g_vmu);
+}
+
+int nr_dmrs_scan_rnti_id_quality(uint16_t rnti)
+{
+  int best = -1;
+  pthread_mutex_lock(&g_vmu);
+  const vote_t *v = vote_of(rnti, false);
+  for (int q = 0; v && q < VOTE_IDS; q++)
+    if (v->votes[q] >= NR_DMRS_SCAN_MIN_VOTES && id_class(v, q) > best) best = id_class(v, q);
+  pthread_mutex_unlock(&g_vmu);
+  return best;
 }
 
 bool nr_dmrs_scan_rnti_decided(uint16_t rnti)
@@ -423,6 +467,34 @@ int nr_dmrs_scan_rnti_slots(uint16_t rnti)
   const int s = v ? v->slots : 0;
   pthread_mutex_unlock(&g_vmu);
   return s;
+}
+
+int nr_dmrs_scan_pool_ids(int *ids, int max)
+{
+  int pid[POOL_MAX], np = 0, n = 0;
+  pthread_mutex_lock(&g_pmu);
+  for (int i = 0; i < g_npool; i++) {
+    bool dup = false;
+    for (int j = 0; j < np && !dup; j++) dup = pid[j] == g_pool[i].nid;
+    if (!dup) pid[np++] = g_pool[i].nid;
+  }
+  pthread_mutex_unlock(&g_pmu);
+  int cnt[POOL_MAX];
+  pthread_mutex_lock(&g_vmu);
+  for (int i = 0; i < np; i++) {
+    cnt[i] = 0;
+    for (int k = 0; k < g_nbase; k++) if (g_base[k].nid == pid[i]) { cnt[i] = g_base[k].slots; break; }
+  }
+  pthread_mutex_unlock(&g_vmu);
+  bool taken[POOL_MAX] = {false};
+  while (n < max && n < np) {
+    int k = -1;
+    for (int i = 0; i < np; i++)
+      if (!taken[i] && (k < 0 || cnt[i] > cnt[k])) k = i;
+    taken[k] = true;
+    ids[n++] = pid[k];
+  }
+  return n;
 }
 
 void nr_dmrs_scan_reset(void)

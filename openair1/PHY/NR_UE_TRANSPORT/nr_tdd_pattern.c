@@ -132,6 +132,19 @@ bool nr_tdd_slot_has_downlink(const nr_tdd_config_t *cfg, uint32_t absolute_slot
   return nr_tdd_slot_direction(cfg, absolute_slot) != NR_TDD_SLOT_UL;
 }
 
+int nr_tdd_pdsch_dl_symbols(const nr_tdd_config_t *cfg, uint32_t absolute_slot)
+{
+  if (cfg == NULL || !cfg->valid)
+    return 14;
+  const uint32_t total = (uint32_t)cfg->p1.period_slots + (uint32_t)cfg->p2.period_slots;
+  if (total == 0)
+    return 14;
+  const uint32_t s = absolute_slot % total;
+  const nr_tdd_pattern_t *p = s < cfg->p1.period_slots ? &cfg->p1 : &cfg->p2;
+  int dl, ul;
+  slot_shape(p, (uint16_t)(s < cfg->p1.period_slots ? s : s - cfg->p1.period_slots), &dl, &ul);
+  return dl;
+}
 int nr_tdd_pdsch_last_symbol(const nr_tdd_config_t *cfg, uint32_t absolute_slot)
 {
   if (cfg == NULL || !cfg->valid)

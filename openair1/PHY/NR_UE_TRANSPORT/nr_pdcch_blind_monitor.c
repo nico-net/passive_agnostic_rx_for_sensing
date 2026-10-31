@@ -1017,7 +1017,11 @@ typedef struct {
   nr_pdcch_blind_monitor_cfg_t cfg;
   struct { uint16_t rnti; int length; uint64_t slot; nr_dci_bits_t payload; } evidence[NR_PDCCH_BLIND_MAX_UE];
   uint64_t polls;
-  int rej_nid[32], n_rej; /* nIDs whose dwell was rejected this epoch (REJECTLAST) */
+  /* nIDs whose dwell was rejected this epoch (REJECTLAST) with their rejection budget (C1): budget = the geometries queued for the nID at its first rejection
+   * (one pass over them is free), then each further rejection parks the nID for twice the previous park, starting at one dwell; new evidence resets it. */
+  struct { int nid; uint32_t n_rej, budget; uint64_t until, mask; } rej[32];
+  int n_rej;
+  uint64_t clock; /* occasions seen by the discovered pass (dwell steps and idle polls) */
 } s_add_disc_cell_t;
 NR_CELL_STATIC(s_add_disc_cell_t, s_add_disc);
 #define s_add_disc NR_CELL_REF(s_add_disc)
@@ -1030,8 +1034,42 @@ NR_CELL_STATIC(s_add_disc_cell_t, s_add_disc);
 static bool disc_nid_rejected(int nid)
 {
   for (int i = 0; i < s_add_disc.n_rej; ++i)
-    if (s_add_disc.rej_nid[i] == nid) return true;
+    if (s_add_disc.rej[i].nid == nid) return true;
   return false;
+}
+/* The NID_SOLVE (algebraic GF(2) DM-RS solver) lit-window set of an nID: bit w = the 6-RB window [6w, 6w+6) of the grid held confirmed pilots of this scrambling ID
+ * (nr_pdcch_blind_monitor_rt.c nid_vote()). Registered by the RT unit; absent (unit tests, no solver) = no information. */
+static bool (*s_nid_win_hook)(int nid, uint64_t *mask);
+void nr_pdcch_discovered_set_nid_window_hook(bool (*hook)(int nid, uint64_t *mask)) { s_nid_win_hook = hook; }
+static uint64_t disc_nid_windows(int nid)
+{
+  uint64_t m = 0;
+  if (s_nid_win_hook && !s_nid_win_hook(nid, &m)) m = 0;
+  return m;
+}
+/* C1: true while the nID is parked. A new lit window (evidence the solver did not have when the nID was last rejected) ends the park and the budget. */
+static bool disc_rej_parked(int nid)
+{
+  for (int i = 0; i < s_add_disc.n_rej; ++i)
+    if (s_add_disc.rej[i].nid == nid) {
+      if (s_add_disc.rej[i].until <= s_add_disc.clock) return false;
+      if (disc_nid_windows(nid) & ~s_add_disc.rej[i].mask) {
+        LOG_A(PHY, "SENSING: discovered CORESET nid=%d unparked: new NID_SOLVE windows\n", nid);
+        s_add_disc.rej[i].n_rej = 0;
+        s_add_disc.rej[i].until = 0;
+        return false;
+      }
+      return true;
+    }
+  return false;
+}
+static void disc_rej_clear(int nid)
+{
+  for (int i = 0; i < s_add_disc.n_rej; ++i)
+    if (s_add_disc.rej[i].nid == nid) {
+      s_add_disc.rej[i] = s_add_disc.rej[--s_add_disc.n_rej];
+      return;
+    }
 }
 static void disc_prefer_untried(void)
 {
@@ -1225,6 +1263,21 @@ static bool discovered_load_stream(FILE *f)
   fclose(f);
   if (s_add_disc.n > 0)
     discovered_cover_queue();
+  /* C2: the solver's lit-window set is the only geometry of an nID it knows. A published line (raw, ng > 0) reaching beyond the hull of the lit windows
+   * (one window of slack) was measured to vary from dwell to dwell on an nID that never verifies; the whole-carrier cover lines (ng = 0) stay. */
+  if (s_nid_win_hook) {
+    int k = 0;
+    for (int i = 0; i < s_add_disc.n; ++i) {
+      const disc_coreset_t d = s_add_disc.line[i];
+      const uint64_t m = d.ng > 0 ? disc_nid_windows(d.nid) : 0;
+      if (m) {
+        const int lo = __builtin_ctzll(m), hi = 63 - __builtin_clzll(m);
+        if (d.rb < 6 * (lo - 1) || d.rb + 6 * d.ng > 6 * (hi + 2)) continue;
+      }
+      s_add_disc.line[k++] = d;
+    }
+    s_add_disc.n = k;
+  }
   return s_add_disc.n > 0;
 }
 
@@ -1235,6 +1288,7 @@ static bool discovered_additional_poll(void)
 {
   if (nr_cfg_reconf_enabled() && s_add_disc.epoch != nr_cfg_epoch_current())
     nr_pdcch_discovered_reset();
+  ++s_add_disc.clock;
   if (s_add_disc.active || s_add_disc.next < s_add_disc.n || (++s_add_disc.polls & 1023) != 1)
     return false;
   /* In-process GPU stage-1/2 (T17): bank its records too, not only the walk's catalogue hand-off. */
@@ -1268,6 +1322,10 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
   while (!s_add_disc.active && s_add_disc.next < s_add_disc.n) {
     disc_prefer_untried();
     disc_coreset_t dd = s_add_disc.line[s_add_disc.next];
+    if (disc_rej_parked(dd.nid)) { /* C1: rejection budget spent, backing off */
+      ++s_add_disc.next;
+      continue;
+    }
     const disc_coreset_t *d = &dd;
     /* The cover starts at CRB 0 (Point A), not at grid RB 0. */
     /* CARRIERGEOM: the SIB1 carrier [geom.start_rb, +n_rb) inside the grid replaces the grid as the BWP and
@@ -1309,6 +1367,11 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
     if (d->rb < lo || d->rb + d->ng * 6 > hi) {
       LOG_W(PHY, "SENSING: discovered CORESET %d/%d nid=%d rejected (outside carrier)\n",
             s_add_disc.next + 1, s_add_disc.n, d->nid);
+      ++s_add_disc.next;
+      continue;
+    }
+    /* B1/B2: a footprint retired for lack of downstream TB CRC evidence is not re-dwelt before its backoff expires. */
+    if (nr_pdcch_coreset_bank_readmit_blocked(d->nid, d->rb, d->ng)) {
       ++s_add_disc.next;
       continue;
     }
@@ -1375,12 +1438,35 @@ void nr_pdcch_discovered_step_ex(uint64_t token, uint64_t slot, bool prescreen_p
       || (s_add_disc.last_slot != UINT64_MAX && slot <= s_add_disc.last_slot)) return;
   s_add_disc.last_slot = slot;
   (void)prescreen_passed; /* every occasion counts: a rejected geometry must not wait for traffic */
+  ++s_add_disc.clock;
   if (++s_add_disc.occasions < NR_PDCCH_EXTENT_VERIFY_OCC) return;
   LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d rejected (no fresh CRC evidence in %d occasions)\n",
         s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, s_add_disc.occasions);
-  if (!disc_nid_rejected(s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id)
-      && s_add_disc.n_rej < (int)(sizeof(s_add_disc.rej_nid) / sizeof(s_add_disc.rej_nid[0])))
-    s_add_disc.rej_nid[s_add_disc.n_rej++] = s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id;
+  {
+    const int nid = s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id;
+    if (!disc_nid_rejected(nid) && s_add_disc.n_rej < (int)(sizeof(s_add_disc.rej) / sizeof(s_add_disc.rej[0]))) {
+      uint32_t budget = 0;
+      for (int i = 0; i < s_add_disc.n; ++i) budget += s_add_disc.line[i].nid == nid;
+      s_add_disc.rej[s_add_disc.n_rej].nid = nid;
+      s_add_disc.rej[s_add_disc.n_rej].n_rej = 0;
+      s_add_disc.rej[s_add_disc.n_rej].budget = budget ? budget : 1;
+      s_add_disc.rej[s_add_disc.n_rej].until = 0;
+      s_add_disc.rej[s_add_disc.n_rej++].mask = 0;
+    }
+    for (int i = 0; i < s_add_disc.n_rej; ++i)
+      if (s_add_disc.rej[i].nid == nid) {
+        const uint64_t m = disc_nid_windows(nid);
+        if (m & ~s_add_disc.rej[i].mask) s_add_disc.rej[i].n_rej = 0; /* new evidence since the last rejection: the budget starts over */
+        s_add_disc.rej[i].mask = m;
+        if (++s_add_disc.rej[i].n_rej > s_add_disc.rej[i].budget) {
+          const uint32_t k = s_add_disc.rej[i].n_rej - s_add_disc.rej[i].budget - 1;
+          s_add_disc.rej[i].until = s_add_disc.clock + ((uint64_t)s_add_disc.occasions << (k < 20 ? k : 20));
+          LOG_A(PHY, "SENSING: discovered CORESET nid=%d parked for %llu occasions (rejection %u, budget %u)\n", nid,
+                (unsigned long long)(s_add_disc.rej[i].until - s_add_disc.clock), s_add_disc.rej[i].n_rej, s_add_disc.rej[i].budget);
+        }
+        break;
+      }
+  }
   s_add_disc.active = false;
   ++s_add_disc.next;
 }
@@ -1449,6 +1535,7 @@ int nr_pdcch_discovered_observe_cand(uint64_t token, uint16_t rnti, uint64_t slo
         nr_pdcch_coreset_bank_note_accept(bank, slot);
         nr_pdcch_coreset_bank_note_confirm(bank, s_add_disc.evidence[i].slot); /* the earlier evidence DCI (same RNTI, other slot, other payload) */
         nr_pdcch_coreset_bank_note_confirm(bank, slot);
+        disc_rej_clear(c.coreset_pdcch_dmrs_scrambling_id);
         LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d VERIFIED -> bank add index=%d rnti=0x%04x len=%d\n",
               s_add_disc.next + 1, s_add_disc.n, c.coreset_pdcch_dmrs_scrambling_id, bank, rnti, length);
       } else {
@@ -1503,8 +1590,10 @@ static void nid_budget_feedback(void)
   bool verified=n>0;
   for(int i=0;i<n;++i) {
     const nr_pdcch_nid_record_t *r=records+i;
+    /* B1: a retired alias footprint is explained (it waits out its backoff). */
     const bool ok=nr_pdcch_coreset_bank_verified_footprint(r->grid_rb,r->groups,r->dur,r->sym,r->L,r->R,r->shift,r->nid)
-        || nr_pdcch_discovered_cover_banked(r->nid,r->sym,r->dur,r->grid_rb,r->groups);
+        || nr_pdcch_discovered_cover_banked(r->nid,r->sym,r->dur,r->grid_rb,r->groups)
+        || nr_pdcch_coreset_bank_readmit_blocked(r->nid,r->grid_rb,r->groups);
     verified&=ok;
   }
   nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),generation,verified,false);

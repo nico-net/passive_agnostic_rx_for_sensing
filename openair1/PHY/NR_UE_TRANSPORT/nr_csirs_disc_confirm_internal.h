@@ -216,6 +216,17 @@ static void discovery_publish(void)
         r->phase[0]=st->conf_off[k][0];r->phase[1]=st->conf_off[k][1];
       }
     }
+    { /* SLOTPHASE: a changed confirmed set voids the slot-phase counters measured under the old one */
+      uint64_t h=1469598103934665603ull;
+      for(int i=0;i<discovery_exports[b].n;++i) {
+        const __typeof__(discovery_exports[b].resource[0]) *r=&discovery_exports[b].resource[i];
+        const uint64_t w[7]={r->p.csi_type,((uint64_t)r->p.row<<16)|r->p.freq_domain,((uint64_t)r->p.symb_l0<<8)|r->p.symb_l1,
+                             ((uint64_t)r->p.cdm_type<<8)|r->p.freq_density,((uint64_t)r->p.start_rb<<16)|r->p.nr_of_rbs,
+                             ((uint64_t)r->period<<32)|r->phase[0],((uint64_t)r->nphase<<32)|r->phase[1]};
+        for(int q=0;q<7;++q) h=(h^w[q])*1099511628211ull;
+      }
+      if(h!=g_prov_export_hash) {g_prov_export_hash=h;atomic_fetch_add_explicit(&g_prov_gen,1,memory_order_relaxed);}
+    }
     __atomic_store_n(&discovery_exports[b].users,0,__ATOMIC_RELEASE);
     __atomic_store_n(&discovery_active,b,__ATOMIC_RELEASE);
     break;

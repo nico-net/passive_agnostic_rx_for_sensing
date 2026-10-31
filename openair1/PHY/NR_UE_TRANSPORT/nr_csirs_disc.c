@@ -37,6 +37,7 @@ extern void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn) __attribute__((we
 extern int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *, const nr_csirs_disc_win_t *)
     __attribute__((weak));
 extern bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *) __attribute__((weak));
+extern void nr_csirs_blind_rt_note_footprint(const nr_csirs_disc_fp_t *) __attribute__((weak)); /* SLOTPHASE footprint store */
 extern int nr_csirs_blind_rt_discovery_match(const nr_csirs_disc_hyp_t *) __attribute__((weak));
 extern void nr_csirs_blind_rt_discovery_disable(void) __attribute__((weak));
 extern int nr_csirs_blind_rt_discovery_prepare(const NR_DL_FRAME_PARMS *) __attribute__((weak));
@@ -197,8 +198,11 @@ static uint64_t cpu_us(void)
  */
 static void epoch_listener(const nr_cfg_epoch_snapshot_t *snapshot)
 {
+  /* Confirmed CSI-RS resources are cell configuration: a SOFT epoch (RX recovery, a short continuity gap, a BWP or CSI-RS map signal)
+   * keeps their exports, like the CORESET/RNTI banks; a HARD epoch (new identity, SIB1/MIB change, long gap) or a suspected dedicated
+   * reconfiguration withdraws them. */
   const bool rx_recovery = snapshot->last_class == NR_EPOCH_SOFT
-                        && snapshot->last_cause == NR_CAUSE_RX_RECOVERY;
+                        && snapshot->last_cause != NR_CAUSE_DEDICATED_CHANGE_SUSPECTED;
   pthread_mutex_lock(&pipeline_lock);
   cache_count=qualified_count=evidence_retries=0;cache_grid=NULL;cache_written=0;
   rl_epoch=true;rl_known_n=0;
@@ -514,6 +518,8 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
           fps[i].period,
           fps[i].offset,
           fps[i].strength);
+  for (int i = 0; i < n_fp; ++i)
+    if (nr_csirs_blind_rt_note_footprint) nr_csirs_blind_rt_note_footprint(&fps[i]); /* SLOTPHASE: the per-(period, offset) energy footprints */
 
   /* Keep all single-symbol row-1 views adjacent in priority order. */
   int n_views=n_fp;

@@ -61,6 +61,68 @@ static inline void nr_dmrs_snr_fill(nr_dmrs_snr_t *s, const int16_t *const rows[
   s->pw_db = nr_dmrs_db(pw0 * pw_ls_to_rx);
 }
 
+/* PSINR (EVMGRANT psinr=): the SINR per layer a linear MMSE equaliser would reach on the chest's own estimate, h[l][a] = smoothed estimate of layer l, antenna a (interleaved
+ * int16 of n REs; every entry needed, else out = -99), and the chest noise of each antenna, sigma_a^2 = 2 N_ls = 2 nres / c (nr_dmrs_snr_ant): with A = I + H^H S^-1 H,
+ * SINR_l = 1 / [A^-1]_ll - 1, i.e. log2(1 + SINR_l) = -log2 [A^-1]_ll. Taken at <= 32 REs spread over the grant; out[l] = 10 log10 of 2^mean(log2(1 + SINR_l)) - 1
+ * (the capacity mean), floored at -30 dB. Equal-power layers, no inter-cell term beyond what nres holds. */
+static inline void nr_psinr_fill(float out[4], const int16_t *h[4][4], int nl, int nrx, int n, const uint32_t nres[4], int dmrs_type)
+{
+  static const double c_res[3] = {1.0, 0.72, 0.59};
+  for (int l = 0; l < 4; l++) out[l] = -99.f;
+  if (nl < 1 || nl > 4 || nrx < 1 || nrx > 4 || n <= 0) return;
+  double iv[4];
+  for (int a = 0; a < nrx; a++) {
+    if (nres[a] == 0) return;
+    iv[a] = c_res[dmrs_type == 2 ? 2 : 1] / (2.0 * (double)nres[a]);
+  }
+  for (int l = 0; l < nl; l++)
+    for (int a = 0; a < nrx; a++)
+      if (!h[l][a]) return;
+  const int nprb = (n + 11) / 12, step = 12 * ((nprb + 31) / 32);
+  double cap[4] = {0.0, 0.0, 0.0, 0.0};
+  int ns = 0;
+  for (int k = step / 2; k < n; k += step) {
+    double mr[4][8], mi[4][8];
+    for (int p = 0; p < nl; p++) {
+      for (int q = 0; q < nl; q++) {
+        double sr = p == q ? 1.0 : 0.0, si = 0.0;
+        for (int a = 0; a < nrx; a++) { /* conj(h_p) h_q / sigma_a^2 */
+          const double pr = h[p][a][2 * k], pi = h[p][a][2 * k + 1], qr = h[q][a][2 * k], qi = h[q][a][2 * k + 1];
+          sr += (pr * qr + pi * qi) * iv[a];
+          si += (pr * qi - pi * qr) * iv[a];
+        }
+        mr[p][q] = sr;
+        mi[p][q] = si;
+        mr[p][nl + q] = p == q ? 1.0 : 0.0;
+        mi[p][nl + q] = 0.0;
+      }
+    }
+    bool ok = true; /* Gauss-Jordan of [A | I]; A Hermitian positive definite: real positive pivots, no row exchange */
+    for (int c = 0; c < nl && ok; c++) {
+      const double d = mr[c][c];
+      if (!(d > 0.0)) { ok = false; break; }
+      for (int q = 0; q < 2 * nl; q++) { mr[c][q] /= d; mi[c][q] /= d; }
+      for (int r = 0; r < nl; r++) {
+        if (r == c) continue;
+        const double fr = mr[r][c], fi = mi[r][c];
+        for (int q = 0; q < 2 * nl; q++) {
+          mr[r][q] -= fr * mr[c][q] - fi * mi[c][q];
+          mi[r][q] -= fr * mi[c][q] + fi * mr[c][q];
+        }
+      }
+    }
+    for (int l = 0; l < nl && ok; l++) ok = mr[l][nl + l] > 0.0;
+    if (!ok) continue;
+    for (int l = 0; l < nl; l++) cap[l] -= log2(mr[l][nl + l]);
+    ns++;
+  }
+  if (ns == 0) return;
+  for (int l = 0; l < nl; l++) {
+    const double s = exp2(cap[l] / ns) - 1.0;
+    out[l] = (float)(10.0 * log10(s > 1e-3 ? s : 1e-3));
+  }
+}
+
 /* mean |rx|^2 (dB) over the carrier REs [car_k0, car_k0 + car_n) mod N that lie outside the grant [g_k0, g_k0 + g_n) mod N; -99 if the grant is not inside the
  * carrier or nothing is left. rx: interleaved int16 of one symbol (N REs). */
 static inline float nr_dmrs_ref_db(const int16_t *rx, int N, int car_k0, int car_n, int g_k0, int g_n)
