@@ -25,6 +25,7 @@
 #include <complex.h>
 #include <math.h>
 #include "nr_pdsch_evm_acc.h"
+#include "nr_pdsch_phase_track.h"
 #include "nr_irc_cov.h"
 #include "nr_mmse_exact.h"
 #include "nr_qam_mode.h"
@@ -1697,6 +1698,29 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
        }
       }
     }
+  }
+
+  /* PHASE-TRACK (D2, nr_pdsch_phase_track.h): the common phase error of this data symbol, per layer, for every Nl. The interpolated channel (nr_pdsch_phase_tinterp) follows the phase
+   * between the DM-RS symbols; what is left (phase noise, the frequency error beyond the outermost pair) is estimated here from the ZF output of the symbol itself (blind clipped 4th-power
+   * statistic, gated by coherence and 1 sigma with a Wiener-like shrink, capped at 0.5 rad) and applied to the layer's channel columns before the combiner. After the branch weighting and the MRC alignment,
+   * exactly where the GPU twin (k_cpe) runs. Passive receiver only: the stock UE keeps its demodulator. */
+  if (!pilots && IS_PASSIVE_RX_MODE(get_softmodem_params()) && nl <= 4 && mrc_nb_rx >= 1 && mrc_rx_index + mrc_nb_rx <= 4 && nb_re_pdsch >= NRPT_MIN_RE
+      && nb_re_pdsch <= rx_size_symbol) {
+    c16_t *cpe_y[4] = {NULL, NULL, NULL, NULL};
+    c16_t *cpe_h[4][4] = {{NULL}};
+    for (int a = mrc_rx_index; a < mrc_rx_index + mrc_nb_rx; a++) {
+      cpe_y[a] = rxdataF_ext[a];
+      for (int l = 0; l < nl; l++)
+        cpe_h[l][a] = chFext[l][a];
+    }
+    double cpe_phi[4];
+    nr_pdsch_cpe_symbol(nl, mrc_rx_index, mrc_nb_rx, nb_re_pdsch, cpe_y, cpe_h, cpe_phi);
+    if (nr_pdsch_evm_acc.armed)
+      for (int l = 0; l < nl; l++) {
+        nr_pdsch_evm_acc.cpe_abs += fabs(cpe_phi[l]);
+        nr_pdsch_evm_acc.cpe_n++;
+        nr_pdsch_evm_acc.cpe_app += cpe_phi[l] != 0.0;
+      }
   }
 
   /* IRC (T26d prototype; only via the per-grant nr_dlsch_irc_override): MMSE-IRC for 1 layer by spatial whitening. Per chunk of 48 REs (4 RB) of this

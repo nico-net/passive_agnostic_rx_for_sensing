@@ -574,6 +574,12 @@ static void post_fold(const nr_gpu_demod_job_t *jp, const NR_UE_DLSCH_t *dlsch, 
           nr_pdsch_evm_acc.kappa_n++;
         }
       }
+    if (jp->cpe && !(jp->tint_dm >> m & 1) && jp->nre[m] >= 48) /* PHASE-TRACK counters: the (symbol, layer) pairs k_cpe evaluated and what it applied */
+      for (int l = 0; l < nl; l++) {
+        nr_pdsch_evm_acc.cpe_abs += fabs((double)jp->cpe_phi[m][l]);
+        nr_pdsch_evm_acc.cpe_n++;
+        nr_pdsch_evm_acc.cpe_app += jp->cpe_phi[m][l] != 0.f;
+      }
     if (jp->want_kappa)
       xd_fold(&jp->xd, m, nl, qm);
     if (jp->want_kappa && jp->want_resid)
@@ -649,6 +655,9 @@ static int build_job(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   j->thr_coef = thr_coef;
   j->l2_delta = l2d;
   j->align = align;
+  j->cpe = 1; /* PHASE-TRACK: nr_rx_pdsch() tracks the CPE in the passive receiver (the GPU demod is only reached from it) */
+  j->tint = 0; /* the graph pass sets it (nr_gpu_pass_dl.c); the standalone demod reads the CPU-interpolated estimate */
+  j->tint_dm = (uint16_t)(cfg->dlDmrsSymbPos & 0x3fff);
   j->shift_sum = 0;
   j->qam_mode = nl >= 2 ? t_qmode : 0;
   j->nvar = c->nvar;

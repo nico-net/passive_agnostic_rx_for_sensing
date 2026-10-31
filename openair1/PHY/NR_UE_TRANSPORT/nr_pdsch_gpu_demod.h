@@ -70,6 +70,10 @@ typedef struct nr_gpu_demod_job_s {
   double thr_coef; /* pow(10, -ISAC_RX_BRANCH_MIN_DB / 10) */
   int l2_delta;    /* ISAC_L2MAXH_DELTA */
   int align;       /* ISAC_RX_MRC_ALIGN */
+  int cpe;         /* PHASE-TRACK: the per-symbol CPE tracker of nr_rx_pdsch() (k_cpe); 1 in the passive receiver */
+  int tint;        /* PHASE-TRACK, graph pass only: k_tinterp interpolates the (device) estimate into the data-symbol planes first; the CPU does it into the host estimate */
+  int tint_cols;   /* tint: allocation-relative subcarriers of the estimate rows */
+  uint16_t tint_dm; /* the grant's DM-RS symbol mask (tint: the interpolation pairs; cpe: DM-RS symbols are not tracked) */
   int shift_sum;   /* ISAC_RX_MRC_SHIFT_SUM (MRCBUG): mode-3 headroom from the combined energy, not the branch count */
   int mag_per_layer;
   int wide_mrc;    /* nr_pdsch_decode_wide_mrc (1-layer QPSK recovery arm) */
@@ -103,6 +107,7 @@ typedef struct nr_gpu_demod_job_s {
   const int16_t *h_ext; /* c16 [14][16][NR_GPU_DEMOD_MAX_EXT], row l * nbRx + a */
   nr_gpu_evm_sym_t evm[NR_GPU_DEMOD_NSYM];
   nr_gpu_xdiag_t xd;     /* out, after evm: not part of the kernels' by-value job (offsetof(evm)) */
+  float cpe_phi[NR_GPU_DEMOD_NSYM][NR_GPU_DEMOD_MAX_NL]; /* out: PHASE-TRACK, the CPE (rad) k_cpe applied per symbol and layer, 0 = none (counters only) */
   int ctx;              /* context held by nr_pdsch_gpu_demod_run until nr_pdsch_gpu_demod_release */
 } nr_gpu_demod_job_t;
 

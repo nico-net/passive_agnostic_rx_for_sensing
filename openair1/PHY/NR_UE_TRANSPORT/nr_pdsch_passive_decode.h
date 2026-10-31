@@ -177,6 +177,7 @@ typedef struct {
   uint16_t             cb_ok, cb_tried, cb_total; ///< per-code-block CRC: blocks that passed / blocks the LDPC was started on (stops after NR_CB_FAIL_LIMIT failures) / blocks in the TB; 0 = no LDPC ran or a layout probe (EVMGRANT cb_ok= cb_tried= cb_total=)
   float                psinr_db[4];  ///< PSINR: predicted post-MMSE SINR per layer from the chest estimate and noise (capacity mean over the grant), -99 = n/a (EVMGRANT psinr=)
   float                snrx_db[4];   ///< XDIAG: decision-directed SNR per layer of the real equaliser output the LLRs are cut from (GPU demod, armed), -99 = n/a (EVMGRANT snrx=)
+  float                cpe_deg, cpe_frac, evsd_pct; ///< PHASE-TRACK: mean |CPE| the tracker applied per (data symbol, layer) in degrees (0 included), fraction of (symbol, layer) pairs rotated, std (percentage points) of the per-symbol EVM across the data symbols; -1 = n/a (EVMGRANT cpe= cpes= evsd=)
   float                sdisp_p10_db, sdisp_std_db; ///< XDIAG: p10 and std (dB) of the per-group (48 packed REs) decision-directed SNR of layer 0 on that output, -99 = n/a (EVMGRANT sdisp=)
   uint64_t             cb_map;       ///< per-code-block CRC result, bit r = block r passed (blocks >= 64 not shown; an untried block reads 0) (EVMGRANT cbmap=)
 } nr_pdsch_passive_decode_result_t;

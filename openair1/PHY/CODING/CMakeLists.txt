@@ -194,6 +194,15 @@ if(ENABLE_LDPC_CUDA)
   # Q4: without staging set up (the module is not initialised in this binary) a DISCRETE run still refuses before any CUDA call; the staged run itself is test_nr_pdsch_gpu_demod_discrete below
   add_test(NAME test_nr_pdsch_gpu_demod_unstaged_discrete COMMAND ./test_nr_pdsch_gpu_demod_model --gtest_filter=DemodTier.ForcedDiscreteRefuses WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   add_test(NAME test_nr_pdsch_gpu_demod_cpu COMMAND ./test_nr_pdsch_gpu_demod_model --gtest_filter=DemodTier.ForcedCpuRefuses WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  # PHASE-TRACK: k_cpe / k_tinterp of libpdsch_gpu.so against the CPU functions (nr_pdsch_phase_track.c), bit for bit; skipped without the module or a device
+  add_executable(test_nr_pdsch_phase_track_gpu ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_pdsch_phase_track_gpu_test.cc ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_phase_track.c)
+  set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_phase_track.c PROPERTIES COMPILE_OPTIONS -ffp-contract=off)
+  target_include_directories(test_nr_pdsch_phase_track_gpu PRIVATE ${OPENAIR_DIR} ${OPENAIR1_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_phase_track_gpu PRIVATE GTest::gtest_main CUDA::cudart ${CMAKE_DL_LIBS} m)
+  set_target_properties(test_nr_pdsch_phase_track_gpu PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_dependencies(test_nr_pdsch_phase_track_gpu pdsch_gpu nr_gpu_platform)
+  add_dependencies(tests test_nr_pdsch_phase_track_gpu)
+  add_test(NAME test_nr_pdsch_phase_track_gpu COMMAND ./test_nr_pdsch_phase_track_gpu WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   # CPU tier of the graph pass: nr_gpu_pass_init refuses (-1) before any CUDA call, so the receiver keeps the non-pass path; skipped without libpdsch_gpu.so
   add_executable(test_nr_gpu_pass_cpu ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_pass_cpu_test.cc)
   target_link_libraries(test_nr_gpu_pass_cpu PRIVATE GTest::gtest_main ${CMAKE_DL_LIBS})

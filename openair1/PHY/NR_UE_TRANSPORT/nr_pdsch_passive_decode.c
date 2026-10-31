@@ -85,6 +85,7 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 
 #include "PHY/CODING/coding_defs.h"
 #include "PHY/NR_REFSIG/dmrs_nr.h" // get_num_dmrs_re_per_rb, nr_chest_time_domain_avg
+#include "nr_pdsch_phase_track.h"
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
 #include "PHY/TOOLS/nr_gpu_path.h" // per-path GPU/CPU choice (GPUPASS trial on DISCRETE)
 #include "PHY/MODULATION/modulation_UE.h" // nr_slot_fep, nr_slot_fep_ant
@@ -506,6 +507,24 @@ static void evm_fill(nr_pdsch_passive_decode_result_t *out, const fapi_nr_dl_con
         out->br_snr_db[a] = (ea->sig[a] > 0.0 && ea->res[a] > 0.0) ? (float)(10.0 * log10(ea->sig[a] / ea->res[a])) : -99.f;
       for (int l = 0; l < 4; l++)
         out->layer_snr_db[l] = ea->err_layer[l] > 0.0 ? (float)(10.0 * log10(ea->ref_layer[l] / ea->err_layer[l])) : -99.f;
+      /* PHASE-TRACK cpe= cpes= evsd=: what the tracker applied and how flat the EVM is across the data symbols (the old hold demodulator grew with the distance from the DM-RS) */
+      if (ea->cpe_n > 0) {
+        out->cpe_deg = (float)(ea->cpe_abs / ea->cpe_n * 180.0 / M_PI);
+        out->cpe_frac = (float)((double)ea->cpe_app / ea->cpe_n);
+      }
+      {
+        double sm = 0.0, sq = 0.0;
+        int ns = 0;
+        for (int m = 0; m < 14; m++)
+          if (ea->ref_sym[m] > 0.0) {
+            const double v = sqrt(ea->err_sym[m] / ea->ref_sym[m]) * 100.0;
+            sm += v;
+            sq += v * v;
+            ns++;
+          }
+        if (ns >= 2)
+          out->evsd_pct = (float)sqrt(fmax(0.0, sq / ns - (sm / ns) * (sm / ns)));
+      }
       /* XDIAG snrx= / sdisp=: the sums of the GPU demod's k_tail on the real equaliser output (nr_pdsch_gpu_demod.cu); P0 = mean |lattice point|^2 in units of the lattice unit */
       if (ea->xd_qm >= 2) {
         const double p0 = 2.0 * ((double)(1u << ea->xd_qm) - 1.0) / 3.0;
@@ -2651,6 +2670,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   for (int l = 0; l < 4; l++)
     out->psinr_db[l] = out->snrx_db[l] = -99.f;
   out->sdisp_p10_db = out->sdisp_std_db = -99.f;
+  out->cpe_deg = out->cpe_frac = out->evsd_pct = -1.f;
   t_gw_used = t_gw_ready = false;
   t_last_hq_retx = false;
   out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
@@ -3714,6 +3734,20 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     }
   }
   nr_dlsch_chest_per_symbol = 0;
+  /* PHASE-TRACK (D1, nr_pdsch_phase_track.h): with two or more DM-RS symbols the data symbols between them get the phase-aligned linear interpolation of the two estimates (before: the
+   * previous DM-RS symbol's, up to 8 symbols old), written into the data symbol's own slot; nr_dlsch_chest_per_symbol makes nr_rx_pdsch and the GPU demod geometry read it there.
+   * Not for the segmented chest (one estimate per segment) nor a single-branch chest. The same interpolation runs in the GPU pass (k_tinterp). */
+  if (!seg_path && chest_only < 0 && dmrs_first >= 0 && dmrs_last > dmrs_first) {
+    c16_t *tirows[NR_PT_MAX_ROWS];
+    const int tirn = cw->Nl * fp->nb_antennas_rx;
+    if (tirn <= NR_PT_MAX_ROWS) {
+      for (int r = 0; r < tirn; r++)
+        tirows[r] = (c16_t *)pdsch_dl_ch_estimates[r];
+      if (nr_pdsch_phase_tinterp(tirows, cw->Nl, fp->nb_antennas_rx, fp->ofdm_symbol_size, chest_alloc.num_rbs * NR_NB_SC_PER_RB, dmrs_full,
+                                 dlsch_config->start_symbol, dlsch_config->start_symbol + dlsch_config->number_symbols))
+        nr_dlsch_chest_per_symbol = 1;
+    }
+  }
   /* SFO cross-check (PHY/MODULATION/nr_sfo_state.h). On a real grant (no probe, no trial) with two or more DM-RS symbols the channel and the
    * precoder are static over the slot, so between the first and the last DM-RS estimate a common phase is residual CFO and a phase SLOPE across
    * subcarriers is residual timing drift: the eps the FEP did not remove. Weighted LS fit of the per-4-RB phase against the signed subcarrier,

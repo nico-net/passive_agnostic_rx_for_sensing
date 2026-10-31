@@ -6,6 +6,7 @@
 #include "PHY/MODULATION/nr_sfo_state.h"
 #include "PHY/TOOLS/nr_gpu_membudget.h"
 #include "nr_gpu_pass_dl.h"
+extern __thread int nr_dlsch_chest_per_symbol; /* nr_dlsch_demodulation.c: read the estimate at the data symbol itself */
 #include "nr_gpu_pass_ul.h"
 #include "nr_pdsch_gpu_demod_host.h"
 #include "nr_pdsch_gpu_exact.h"
@@ -733,8 +734,15 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   nr_pdsch_gpu_demod_call_t call = {.ue = ue, .proc = in->proc, .dlsch = &dlsch, .freq_alloc = nseg > 0 ? &fa_virt : in->freq_alloc, .cfg = in->dlsch_config, .harq = &harq,
                                     .first_symbol = in->first_symbol, .probe_last_sym = in->probe ? in->probe_last_sym : -1, .est_size = in->est_size, .buf = in->rx_size_symbol,
                                     .rxdataF = (c16_t *)in->rxdataF, .scope = &scope, .ssb_rm = in->ssb_rm};
+  /* PHASE-TRACK (D1): with two or more DM-RS symbols (not the segmented chest) the pass interpolates the estimate into the data-symbol planes (k_tinterp, as nr_pdsch_phase_tinterp on the
+   * CPU), so the demod geometry must read the estimate at the data symbol itself (nr_dlsch_chest_per_symbol, what the CPU path sets after its interpolation). */
+  const bool tint_on = nseg == 0 && ndmrs >= 2;
+  nr_dlsch_chest_per_symbol = tint_on;
   if (nr_pdsch_gpu_demod_pass_job(&call, &j->dj, &j->geo_y, &j->geo_h) != 0)
     return fb(FB_DEMOD);
+  j->dj.tint = tint_on;
+  j->dj.tint_cols = 12 * nrb;
+  j->dj.tint_dm = (uint16_t)(in->dmrs_full & 0x3fff);
   j->llr_out_all = G.fp32; /* FP32: the shadow check of a CRC-OK pass compares LLR signs too */
   j->dj.demod_fp32 = G.fp32; /* the old GPU demod stays double; only the graph pass runs the float kernels */
   if (nr_pdsch_evm_acc.armed && !j->dj.want_evm) /* the EVM would need the CPU copy of the equaliser output */
