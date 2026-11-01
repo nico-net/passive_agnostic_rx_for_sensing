@@ -596,8 +596,9 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
 #define DA_COST_S 200e-6   /* worker CPU per grant, measured mean 170 us plus margin */
 #define DA_UTIL 0.25       /* a worker is not planned beyond this share of a core (nice 19 on a shared lane) */
 #define DA_STALL_S 0.05    /* queued-work horizon of a worker stall */
+#define DA_MIN_WORKERS 2   /* a nice-19 worker on the shared background lane is descheduled for 100 ms+ at a time [MEASURED DGX 2026-11-01: 415 shed 19 % with one worker at 2 % CPU]: a second worker covers the first's stalls */
 #define DA_NW_MAX 4
-#define DA_POOL 24 /* jobs per cell: >= DA_RATE_PEAK * DA_STALL_S = 21 */
+#define DA_POOL 32 /* jobs per cell: >= DA_RATE_PEAK * DA_STALL_S = 21, plus headroom (the free mask is 32 bits) */
 #define DA_TB_CAP (NR_MIMO_LS_MAX_NL * 65536) /* bytes: one layer, 273 PRB x 12 x 14 REs x 8 bits / 8 = 45.9 kB + CRC; Nl layers carry Nl times that */
 _Static_assert(DA_POOL <= NR_BGQ_MAX && DA_POOL <= 32, "the daBg queue cannot hold the pool");
 _Static_assert(DA_RATE_PEAK * DA_STALL_S <= DA_POOL, "pool shorter than the stall horizon");
@@ -612,6 +613,7 @@ typedef struct {
   double nvar;
   float dmrs_snr_db;
   uint64_t abs_slot;
+  uint64_t t_enq_ns; /* queue-wait stamp */
   c16_t *rx; /* nant x stride c16, the layout of the consumer's rxdataF; only the grant's region is written */
   uint8_t *tb;
   int idx;
@@ -623,7 +625,7 @@ typedef struct {
   int nant;
   _Atomic int ready;
   _Atomic uint64_t queued, dropped, done;
-  _Atomic uint32_t rr;
+  _Atomic uint64_t wait_hist[24]; /* enqueue -> worker start, log2(us) buckets */
   _Atomic uint64_t drop_pool, drop_queue, drop_geom; /* why: no free job / queue full or busy / a grant the snapshot cannot hold (or no pool) */
   _Atomic uint64_t run_ns, snap_ns; /* worker time of the tap / consumer time of the snapshot of the queued grants: saved = run - snap */
 } da_pool_t;
@@ -643,6 +645,9 @@ static int da_workers_planned(void)
 {
   int nw = (int)ceil(DA_RATE_PEAK * DA_COST_S / DA_UTIL);
   const int per_cell = nr_bgq_lane_cores() / (nr_cell_count() > 0 ? nr_cell_count() : 1);
+  if (nw > per_cell)
+    nw = per_cell;
+  nw = nw < DA_MIN_WORKERS ? DA_MIN_WORKERS : nw; /* stall cover, not CPU: still bounded by the lane's cores per cell below */
   if (nw > per_cell)
     nw = per_cell;
   return nw < 1 ? 1 : nw > DA_NW_MAX ? DA_NW_MAX : nw;
@@ -757,12 +762,31 @@ static uint64_t da_now_ns(void)
   return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 
+/* upper edge (us) of the log2 bucket holding quantile q of the queue waits */
+static unsigned long da_wait_q(const da_pool_t *P, double q)
+{
+  uint64_t tot = 0, c = 0;
+  for (int i = 0; i < 24; i++)
+    tot += atomic_load(&P->wait_hist[i]);
+  for (int i = 0; i < 24; i++) {
+    c += atomic_load(&P->wait_hist[i]);
+    if (tot && (double)c >= q * (double)tot)
+      return i ? 1ul << i : 0;
+  }
+  return 0;
+}
+
 static void da_run(void *arg)
 {
   da_job_t *j = arg;
   da_pool_t *P = &g_da; /* the worker was bound to the item's cell by nr_bgq_run_one */
   da_on_worker = true;
   const uint64_t t0 = da_now_ns();
+  {
+    const uint64_t w_us = (t0 - j->t_enq_ns) / 1000;
+    int b = w_us ? 64 - __builtin_clzll(w_us) : 0; /* 0, 1, 2-3, 4-7, ... us */
+    atomic_fetch_add(&P->wait_hist[b > 23 ? 23 : b], 1);
+  }
   nr_isac_abs_slot_override = j->abs_slot;
   nr_isac_pdsch_data_aided_submit(j->ue, &j->proc, &j->cw, &j->dlsch, &j->fa, j->rnti, j->tb, j->harq_tag, (const c16_t(*)[P->stride])j->rx, j->nvar, j->G,
                                   j->dmrs_snr_db);
@@ -772,8 +796,8 @@ static void da_run(void *arg)
   if (n == 1 || n % 2000 == 0) {
     uint64_t q, d_, d, sv;
     nr_isac_pdsch_data_aided_async_counts(&q, &d_, &d, &sv);
-    LOG_A(NR_PHY, "SENSING: DATA_AIDED_ASYNC done=%lu queued=%lu dropped=%lu(pool=%lu queue=%lu geom=%lu) consumer_us_saved=%lu\n", (unsigned long)d, (unsigned long)q, (unsigned long)d_,
-          (unsigned long)atomic_load(&P->drop_pool), (unsigned long)atomic_load(&P->drop_queue), (unsigned long)atomic_load(&P->drop_geom), (unsigned long)sv);
+    LOG_A(NR_PHY, "SENSING: DATA_AIDED_ASYNC done=%lu queued=%lu dropped=%lu(pool=%lu queue=%lu geom=%lu) qwait_us_p50<=%lu p99<=%lu consumer_us_saved=%lu\n", (unsigned long)d, (unsigned long)q, (unsigned long)d_,
+          (unsigned long)atomic_load(&P->drop_pool), (unsigned long)atomic_load(&P->drop_queue), (unsigned long)atomic_load(&P->drop_geom), da_wait_q(P, 0.5), da_wait_q(P, 0.99), (unsigned long)sv);
   }
   __atomic_fetch_or(&P->free_mask, 1u << j->idx, __ATOMIC_RELEASE);
 }
@@ -816,9 +840,15 @@ int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
   da_qs_t *Q = &g_da_qs;
   const int nq = Q->n;
   int qi = -1;
-  for (int k = 0, r = (int)(atomic_fetch_add(&P->rr, 1) % (uint32_t)(nq > 0 ? nq : 1)); k < nq && qi < 0; k++) /* next worker with room */
-    if (nr_bgq_room(&Q->q[(r + k) % nq]))
-      qi = (r + k) % nq;
+  unsigned best = ~0u;
+  for (int k = 0; k < nq; k++) { /* the worker with the shortest backlog: a descheduled worker's queue stops growing once the others are shorter */
+    nr_bgq_t *bq = &Q->q[k];
+    const unsigned depth = __atomic_load_n(&bq->n, __ATOMIC_RELAXED) + __atomic_load_n(&bq->run, __ATOMIC_RELAXED);
+    if (nr_bgq_room(bq) && depth < best) {
+      best = depth;
+      qi = k;
+    }
+  }
   if (qi < 0)
     return da_shed(&P->drop_queue);
   da_job_t *j = NULL;
@@ -853,6 +883,7 @@ int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
     j->dmrs_snr_db = dmrs_snr_db;
     j->abs_slot = nr_isac_abs_slot_override;
     memcpy(j->tb, tb_bytes, tb_n);
+    j->t_enq_ns = da_now_ns();
     if (nr_bgq_push(&Q->q[qi], da_run, j) == 0) {
       atomic_fetch_add(&P->snap_ns, da_now_ns() - t_snap0);
       atomic_fetch_add(&P->queued, 1);
