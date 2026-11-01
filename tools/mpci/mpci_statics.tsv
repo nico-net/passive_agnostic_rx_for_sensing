@@ -128,18 +128,17 @@ common/utils/nr_core_pool.c	75	tl	tls	struct {}	TLS	B1	existing thread-local
 common/utils/nr_core_pool.c	81	tl_cv	tls	pthread_cond_t	TLS	B1	existing thread-local
 common/utils/nr_core_pool.c	82	tl_last	tls	int	TLS	B1	existing thread-local
 common/utils/nr_core_pool.c	86	g_test_clock	file_static	uint64_t (*)(void)	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	127	g_order	file_static	const int[NR_POOL_NPRIO]	CONST	B1	auto
-common/utils/nr_core_pool.c	130	urgency::rank	func_static	const int[NR_POOL_NPRIO]	CONST	B1	auto
-common/utils/nr_core_pool.c	459	grant::n_wait	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	496	tl_tid::t	tls	pid_t	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	585	nr_pool_release::n_long	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	656	k_cls_nm	file_static	const char *const[NR_POOL_NPRIO]	CONST	B1	MPCI-DASH: constant table
-common/utils/nr_core_pool.c	817	g_site	file_static	nr_pool_t *	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	818	g_once	file_static	pthread_once_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	901	g_site_test	file_static	_Atomic bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	980	nr_pool_site_filter_core::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
-common/utils/nr_core_pool.c	987	tl_give	tls	int	TLS	B1	existing thread-local
-common/utils/nr_core_pool.c	1056	nr_pool_site_enforce_tick::next	func_static	_Atomic uint64_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	126	g_order	file_static	const int[NR_POOL_NPRIO]	CONST	B1	auto
+common/utils/nr_core_pool.c	454	grant::n_wait	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	491	tl_tid::t	tls	pid_t	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	580	nr_pool_release::n_long	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	651	k_cls_nm	file_static	const char *const[NR_POOL_NPRIO]	CONST	B1	MPCI-DASH: constant table
+common/utils/nr_core_pool.c	812	g_site	file_static	nr_pool_t *	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	813	g_once	file_static	pthread_once_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	896	g_site_test	file_static	_Atomic bool	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	975	nr_pool_site_filter_core::logged	func_static	_Atomic int	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
+common/utils/nr_core_pool.c	982	tl_give	tls	int	TLS	B1	existing thread-local
+common/utils/nr_core_pool.c	1051	nr_pool_site_enforce_tick::next	func_static	_Atomic uint64_t	PROCESS	B1	process-wide by design (core pool/layout, budgets, GPU platform/path registry, radio device)
 common/utils/nr_shutdown.c	20	radio_released	file_static	atomic_int	PROCESS	AUDIT	shutdown coordination (request flag, watchdog, radio release): one per process
 common/utils/nr_shutdown.c	20	requested	file_static	atomic_int	PROCESS	AUDIT	shutdown coordination (request flag, watchdog, radio release): one per process
 common/utils/nr_shutdown.c	21	requested_ns	file_static	atomic_ulong	PROCESS	AUDIT	shutdown coordination (request flag, watchdog, radio release): one per process
@@ -834,42 +833,42 @@ openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c	245	kRowPorts	file_static	c
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c	246	kRowNeedBits	file_static	const uint8_t[18]	CONST	AUDIT	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c	251	kFdBits	file_static	const uint8_t[]	CONST	AUDIT	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c	257	kDensities	file_static	const uint8_t[][3]	CONST	AUDIT	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	64	pipeline_ready	file_static	bool [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	66	g_ring_capacity	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	69	g_el_on	file_static	bool [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	71	g_el	file_static	nr_gpu_elastic_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	77	g_once	file_static	pthread_once_t	PROCESS	A7	one-time init (GPU ops, process hook, epoch subscription, hypothesis-table warm-up) via pthread_once; touches no cell state
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	78	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	80	g_metrics	file_static	nr_csirs_disc_metrics_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	82	pipeline_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	86	cache	file_static	sweep_cache_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	88	cache_count	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	90	g_evidence_epoch	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	96	evidence_retry	file_static	evidence_retry_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	98	evidence_retries	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	112	qualified	file_static	qualified_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	114	qualified_count	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	118	q_strength	file_static	q_strength_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	121	q_was	file_static	q_was_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	123	rl_epoch	file_static	bool [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	126	rl_known	file_static	rl_known_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	129	rl_pending	file_static	rl_pending_arr_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	131	rl_known_n	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	133	rl_pending_n	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	135	cache_grid	file_static	const int16_t * [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	137	cache_written	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	237	g_el_demand	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	239	g_el_rb	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	241	g_el_ant	file_static	int [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	243	g_el_per_slot	file_static	size_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	245	g_el_host_per_slot	file_static	size_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	392	rl_st	file_static	nr_csirs_rl_t [converted]	PER_CELL	A7	rate-limit state machine follows the cell stream clock
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	394	rl_cfg	file_static	nr_csirs_rl_cfg_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	396	rl_init	file_static	bool [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	398	rl_wait_log	file_static	uint64_t [converted]	PER_CELL	A7	log timer on the cell stream clock (was auto-PROCESS)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	472	gate_logged	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	474	gate_has_logged	file_static	bool [converted]	PER_CELL	A7	converted (A7)
-openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	476	nr_csirs_disc_test_sweep_limit	global	int	PROCESS	A7	test knob (hypotheses swept per batch), set by tests before a run, read-only in production
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	63	pipeline_ready	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	65	g_ring_capacity	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	68	g_el_on	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	70	g_el	file_static	nr_gpu_elastic_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	76	g_once	file_static	pthread_once_t	PROCESS	A7	one-time init (GPU ops, process hook, epoch subscription, hypothesis-table warm-up) via pthread_once; touches no cell state
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	77	g_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	79	g_metrics	file_static	nr_csirs_disc_metrics_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	81	pipeline_lock	file_static	pthread_mutex_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	85	cache	file_static	sweep_cache_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	87	cache_count	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	89	g_evidence_epoch	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	95	evidence_retry	file_static	evidence_retry_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	97	evidence_retries	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	111	qualified	file_static	qualified_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	113	qualified_count	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	117	q_strength	file_static	q_strength_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	120	q_was	file_static	q_was_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	122	rl_epoch	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	125	rl_known	file_static	rl_known_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	128	rl_pending	file_static	rl_pending_arr_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	130	rl_known_n	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	132	rl_pending_n	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	134	cache_grid	file_static	const int16_t * [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	136	cache_written	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	236	g_el_demand	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	238	g_el_rb	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	240	g_el_ant	file_static	int [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	242	g_el_per_slot	file_static	size_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	244	g_el_host_per_slot	file_static	size_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	391	rl_st	file_static	nr_csirs_rl_t [converted]	PER_CELL	A7	rate-limit state machine follows the cell stream clock
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	393	rl_cfg	file_static	nr_csirs_rl_cfg_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	395	rl_init	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	397	rl_wait_log	file_static	uint64_t [converted]	PER_CELL	A7	log timer on the cell stream clock (was auto-PROCESS)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	471	gate_logged	file_static	uint64_t [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	473	gate_has_logged	file_static	bool [converted]	PER_CELL	A7	converted (A7)
+openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c	475	nr_csirs_disc_test_sweep_limit	global	int	PROCESS	A7	test knob (hypotheses swept per batch), set by tests before a run, read-only in production
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	10	once	file_static	pthread_once_t	PROCESS	A7	GPU module loader (dlopen once per process)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	11	raw_ops	file_static	nr_csirs_disc_gpu_ops_t	PROCESS	A7	GPU module entry points, filled once by load_module (one CUDA context)
 openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c	12	public_ops	file_static	nr_csirs_disc_gpu_ops_t	PROCESS	A7	guarded GPU ops table, filled once with raw_ops
@@ -2058,7 +2057,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	101	g_vh	file_static	float[1
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	101	g_vm	file_static	float[136][7][136][7]	PROCESS	A4	lookup table, built once, cell independent
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	102	g_magic	file_static	uint32_t[136]	PROCESS	A4	lookup table, built once, cell independent
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	104	g_tables_once	file_static	pthread_once_t	PROCESS	A4	pthread_once guarding the one-time const table build
-openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	481	g_parked	file_static	nr_cell_parked_t [converted]	PER_CELL	A4	MPCI-LAZY: per-cell parked worker record, thread created bound to its cell before the fence
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c	479	g_parked	file_static	nr_cell_parked_t [converted]	PER_CELL	A4	MPCI-LAZY: per-cell parked worker record, thread created bound to its cell before the fence
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c	103	catalog_add_mapping_type::kK0	func_static	const uint8_t[]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c	104	catalog_add_mapping_type::kAddPos	func_static	const uint8_t[]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c	105	catalog_add_mapping_type::kMaxLen	func_static	const uint8_t[]	CONST	A5	auto
@@ -2207,12 +2206,12 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	817	g_bg_every	file_stati
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	818	g_bg_n	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	818	g_bg_ns	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	818	g_bg_ns_max	file_static	_Atomic uint64_t	PROCESS	G3	host side of the GPU demod: function pointers resolved once, counters and the one background queue of the process; a job carries its own cell where it matters (cdmrs_obs_t, A5)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	881	g_bgp_mu	file_static	pthread_mutex_t	PROCESS	G3	MPCI-LAZY: registry of the parked bgq workers (queue pointer -> parked record), process wide, lock-guarded; the queues themselves are per cell
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	882	g_bgp	file_static	bgp_t *[64]	PROCESS	G3	MPCI-LAZY: registry of the parked bgq workers (queue pointer -> parked record), process wide, lock-guarded; the queues themselves are per cell
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1076	bg_demod_run::cpu	tls	chk_tls_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1076	bg_demod_run::gpu	tls	chk_tls_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1313	nr_pdsch_gpu_demod_grant::k	tls	chk_tls_t	TLS	G3	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1433	nr_pdsch_gpu_demod_pass_variant::none	func_static	const nr_ssb_rm_mask_t	CONST	G3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	879	g_bgp_mu	file_static	pthread_mutex_t	PROCESS	G3	MPCI-LAZY: registry of the parked bgq workers (queue pointer -> parked record), process wide, lock-guarded; the queues themselves are per cell
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	880	g_bgp	file_static	bgp_t *[64]	PROCESS	G3	MPCI-LAZY: registry of the parked bgq workers (queue pointer -> parked record), process wide, lock-guarded; the queues themselves are per cell
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1074	bg_demod_run::cpu	tls	chk_tls_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1074	bg_demod_run::gpu	tls	chk_tls_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1311	nr_pdsch_gpu_demod_grant::k	tls	chk_tls_t	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c	1431	nr_pdsch_gpu_demod_pass_variant::none	func_static	const nr_ssb_rm_mask_t	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	28	g_fn	file_static	exact_fn_t	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	29	g_stats	file_static	void (*)(int *, uint64_t *, uint64_t *)	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c	30	g_delay_fn	file_static	int (*)(const int16_t *const *, int, int *)	PROCESS	G3	host binding of the exact-FEP/chest module: function pointers, counters and the DISCRETE host-pin ledger; process-wide. A second cell with another FEP geometry is refused by nr_pdsch_gpu_fep_init (cfg equality) and runs the CPU path
