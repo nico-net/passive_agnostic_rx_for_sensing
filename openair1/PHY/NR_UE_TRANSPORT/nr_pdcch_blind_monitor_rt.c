@@ -2368,6 +2368,8 @@ void nr_pdcch_blind_monitor_counters(uint64_t *occasions, uint64_t *candidates, 
   *accepts = NR_BLIND_CTR_GET(g_accepts);
   *accepts_c = NR_BLIND_CTR_GET(g_accepts_class[NR_BLIND_RNTI_CLASS_C]);
 }
+NR_CELL_STATIC(_Atomic uint64_t, g_enq_before_tap);
+#define g_enq_before_tap NR_CELL_REF(g_enq_before_tap) // grants enqueued ahead of their DM-RS CFR tap (the tap no longer delays the enqueue)
 NR_CELL_STATIC(_Atomic uint64_t, g_cfr_submits);
 #define g_cfr_submits NR_CELL_REF(g_cfr_submits) // final count that actually reached the ISAC engine, i.e. after
                                       // ALL gates (raw accept + energy + persistence + SNR)
@@ -9988,11 +9990,16 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
       grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "max-per-slot");
     if (!want_decode)
       grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "pdsch_decode=0");
-    if (!need_chest && defer && want_decode && !(rv0_drop(cfg, &out))
-        && decodes_this_occasion < cfg->pdsch_max_per_slot) {
-      /* Nothing on this thread needs the estimate, and the consumer makes its own -- so enqueue
-       * straight from the decoded DCI and skip the FEP + channel estimation entirely. Mirrors the
-       * job built on the normal path below; kept explicit rather than reached by a goto, which
+    /* The estimate gates the enqueue only through the post-estimation SNR gate (min_snr_lin > 0). With that gate off (this deployment: noise_gates ...:0:...) the normal
+     * path below enqueues unconditionally (num_sc >= 12, so snr_ok), and the only thing the estimate still feeds is the DM-RS CFR tap -- sensing work that sat BEFORE the
+     * enqueue and, with several accepts per occasion, delayed every grant behind it by one full-slot FEP + estimate (~100-136 us each; [MEASURED DGX 2026-11-01, PCI 415]
+     * arr2enq p50 517 us sensing off vs 764 us sensing on, decode time unchanged). So enqueue first and run the tap after: same job, same decode, same CFR rows, later. */
+    const bool enq_early = defer && want_decode && !(rv0_drop(cfg, &out)) && decodes_this_occasion < cfg->pdsch_max_per_slot && (!need_chest || !(cfg->min_snr_lin > 0.0f));
+    bool enq_done = false;
+    if (enq_early) {
+      /* Nothing on this thread needs the estimate BEFORE the enqueue, and the consumer makes its own -- so enqueue
+       * straight from the decoded DCI and skip the FEP + channel estimation entirely (need_chest: they run after it, for the tap).
+       * Mirrors the job built on the normal path below; kept explicit rather than reached by a goto, which
        * cannot legally jump into that nested block. */
       decodes_this_occasion++;
       const nr_pdsch_passive_grant_t grant_q = {.rnti           = out.rnti,
@@ -10033,13 +10040,16 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
       /* ... until a layout family is PREFERRED by its own code-block CRCs: from then on every
        * trial is a full decode (the rank-4 bed converged at 22k grants and then sat at 0 % CRC
        * because it kept probing -- a probe never reports a TB). */
-      job.layout_probe  = (cand_task[ti].dl_auto && g_dci11_state == 1
+      job.layout_probe  = (!need_chest && cand_task[ti].dl_auto && g_dci11_state == 1 /* the normal path never probed: unchanged */
                            && g_dci11_resolver->n_alive > NR_DCI11_STAGE2_MAX_ALIVE
                            && !atomic_load_explicit(&g_dl_layout_preferred, memory_order_relaxed)) ? 1 : 0;
-      atomic_fetch_add_explicit(&g_enq_class[0][out.rnti_class], 1, memory_order_relaxed);
-      ragrant_dump(&dlsch_pdu, &out, grant_mcs_table, css0_occasion, "deferred");
+      atomic_fetch_add_explicit(&g_enq_class[need_chest ? 1 : 0][out.rnti_class], 1, memory_order_relaxed);
+      ragrant_dump(&dlsch_pdu, &out, grant_mcs_table, css0_occasion, need_chest ? "normal" : "deferred");
       nr_pdsch_passive_queue_enqueue(&job);
-      continue;
+      if (!need_chest)
+        continue;
+      NR_BLIND_CTR_INC(g_enq_before_tap);
+      enq_done = true; /* the tap below runs; its decode section must not enqueue this grant again */
     }
 
     /* ---- Nothing below this point can be USED once the per-occasion decode cap is reached.
@@ -10055,7 +10065,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
      * direction: it is largest in the regime where receive-thread duty is already at the ~18 % PBCH
      * lock threshold. Bail out before the expensive work instead. `want_dmrs` still gets its
      * estimate because the DM-RS CFR tap is not subject to the decode cap. */
-    if (nr_sense_blind_skip_capped(dmrs_source, want_decode,
+    if (!enq_done && nr_sense_blind_skip_capped(dmrs_source, want_decode,
                                   decodes_this_occasion >= cfg->pdsch_max_per_slot)) {
       NR_BLIND_CTR_INC(g_dec_over_cap);
       continue;
@@ -10150,7 +10160,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
         // the LAST thing in the chain: an LDPC decode is an order of magnitude more expensive than
         // everything above it, so it only ever runs for a candidate that already survived the raw
         // energy, RNTI-persistence and post-estimation SNR gates. ----
-        if (want_decode && decodes_this_occasion < cfg->pdsch_max_per_slot) {
+        if (want_decode && !enq_done && decodes_this_occasion < cfg->pdsch_max_per_slot) {
           if (rv0_drop(cfg, &out)) {
             // A retransmission carries only an incremental-redundancy slice of the codeword and is
             // not self-decodable without the earlier round's soft bits -- which a receiver that
@@ -10434,7 +10444,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
          "SENSING: blind PDCCH monitor summary: occasions=%lu candidates=%lu accepts=%lu "
          "dci10[accepts=%lu C=%lu TC=%lu SI=%lu RA=%lu P=%lu] dci01[accepts=%lu rejects=%lu] "
          "dci00[accepts=%lu rejects=%lu] ulscan[sched=%lu crc_hit=%lu disc=%lu] "
-         "held[energy=%lu dmrs=%lu persist=%lu snr=%lu mismatch=%lu rnti_set=%lu] efloor=%.2f cfr_submits=%lu "
+         "held[energy=%lu dmrs=%lu persist=%lu snr=%lu mismatch=%lu rnti_set=%lu] efloor=%.2f cfr_submits=%lu enq_before_tap=%lu "
          "pdsch_decode[try=%lu crc_ok=%lu (%.1f%%) skip_rv=%lu unsup=%lu over_cap=%lu data_submits=%lu k0_wait=%lu] "
          "scanq[queued=%lu done=%lu drop_full=%lu drop_stale=%lu maxlag=%lu] "
          "dci_wide_probes=%lu last_reject=\"%s\" last_reject_rnti=0x%x\n",
@@ -10451,7 +10461,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
          (unsigned long)g_held_energy, (unsigned long)g_held_dmrs, (unsigned long)g_held_persist, (unsigned long)g_held_snr,
          (unsigned long)g_held_mismatch, (unsigned long)g_held_rnti_set,
          nr_pdcch_blind_energy_floor_get(NULL),
-         (unsigned long)g_cfr_submits,
+         (unsigned long)g_cfr_submits, (unsigned long)g_enq_before_tap,
          (unsigned long)g_dec_try, (unsigned long)g_dec_ok,
          g_dec_try ? (100.0 * (double)g_dec_ok / (double)g_dec_try) : 0.0,
          (unsigned long)g_dec_skip_rv, (unsigned long)g_dec_unsup, (unsigned long)g_dec_over_cap,
