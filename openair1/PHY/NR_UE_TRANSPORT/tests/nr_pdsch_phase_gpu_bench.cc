@@ -19,14 +19,14 @@ int main(int argc, char **argv)
   if (!init || !bd || !bi || init(4) != 0) { fprintf(stderr, "module not ready\n"); return 77; }
   void *acc = nullptr;
   cudaMalloc(&acc, sizeof(nr_irc_sum_t) * NR_IRC_NG_MAX);
-  printf("%-4s %-3s %-5s | %9s %9s %9s %9s | %9s\n", "PRB", "Nl", "prec", "tinterp", "cpe", "irc", "irc_final", "sum(us)");
+  printf("%-4s %-3s %-5s | %9s %9s %9s %9s | %9s %9s\n", "PRB", "Nl", "prec", "tinterp", "cpe", "irc", "irc_final", "sum(us)", "prod(us)"); /* prod: tinterp+irc_final fused + cpe + irc */
   for (int prb : {51, 106, 217, 273})
     for (int nl = 1; nl <= 4; nl++)
       for (int f32 = 0; f32 < 2; f32++) {
-        float u[3] = {0, 0, 0}, ui = 0;
+        float u[4] = {0, 0, 0, 0}, ui = 0;
         const int nb = 4;
         if (bi(prb, nl, nb, reps, acc, &ui) || bd(prb, nl, nb, f32, reps, acc, u)) { printf("%d %d: failed\n", prb, nl); continue; }
-        printf("%-4d %-3d %-5s | %9.1f %9.1f %9.1f %9.1f | %9.1f\n", prb, nl, f32 ? "float" : "dbl", u[0], u[1], ui, u[2], u[0] + u[1] + ui + u[2]);
+        printf("%-4d %-3d %-5s | %9.1f %9.1f %9.1f %9.1f | %9.1f %9.1f\n", prb, nl, f32 ? "float" : "dbl", u[0], u[1], ui, u[2], u[0] + u[1] + ui + u[2], u[3] + u[1] + ui);
       }
   return 0;
 }
