@@ -65,6 +65,38 @@ bool nr_srs_pregate(const nr_srs_grid_t *g,const int16_t *iq,int stride,uint16_t
   return false;
 }
 
+/* Time-domain comb gate. A symbol that carries only every K-th subcarrier (comb 2, 4, 8) is periodic with period N/K, hence with period N/2: x[n] = x[n+N/2].
+ * One complex lag-N/2 correlation per symbol and antenna (N/4 multiply-accumulates, no FFT) tells "a comb-like signal is present" from noise; every SRS comb passes it, the
+ * timing offset does not matter (a cyclic shift of a periodic signal is periodic) and the receive window may start anywhere inside the cyclic prefix. The mean of each half is removed
+ * first (DC / LO leakage correlates at every lag). Under white noise m*rho^2 of one (antenna, symbol) is ~Exp(1) (m = N/4 pairs), so the sum S over the K examined (antenna, symbol)
+ * pairs is ~Gamma(K,1); the gate opens at K + 8 sqrt(K), a pure CPU gate: a false open costs a frequency-domain scan, a false close costs a missed slot. */
+bool nr_srs_td_comb_gate(int fft_size,int n_ant,uint16_t mask,const int16_t *raw,int win,double *stat)
+{
+  if(stat) *stat=0;
+  if(!raw || fft_size<64 || (fft_size&1) || n_ant<1 || !(mask&0x3f00)) return false;
+  const int lag=fft_size/2,m=lag/2; /* the central N/4 pairs (samples N/8..3N/8 against 5N/8..7N/8): half the memory traffic, immune to a symbol boundary shifted by up to N/8 */
+  double sum=0;int k=0;
+  for(int a=0;a<n_ant;a++) for(int l=8;l<14;l++) {
+    if(!(mask&(1u<<l))) continue;
+    const int16_t *x=raw+2*((size_t)(a*6+l-8)*win+lag/4);
+    const int16_t *y=x+2*lag;
+    int64_t cr=0,ci=0,e1=0,e2=0,s1r=0,s1i=0,s2r=0,s2i=0;
+    for(int n=0;n<m;n++) {
+      const int32_t ar=x[2*n],ai=x[2*n+1],br=y[2*n],bi=y[2*n+1];
+      cr+=ar*br+ai*bi;ci+=ai*br-ar*bi;
+      e1+=ar*ar+ai*ai;e2+=br*br+bi*bi;
+      s1r+=ar;s1i+=ai;s2r+=br;s2i+=bi;
+    }
+    const double inv=1.0/m;
+    const double m1r=s1r*inv,m1i=s1i*inv,m2r=s2r*inv,m2i=s2i*inv;
+    const double ccr=cr-m*(m1r*m2r+m1i*m2i),cci=ci-m*(m1i*m2r-m1r*m2i);
+    const double v1=e1-m*(m1r*m1r+m1i*m1i),v2=e2-m*(m2r*m2r+m2i*m2i);
+    k++;
+    if(v1>0 && v2>0) sum+=m*(ccr*ccr+cci*cci)/(v1*v2);
+  }
+  if(stat) *stat=sum;
+  return k && sum>k+8.0*sqrt((double)k);
+}
 void nr_srs_idle_result(nr_srs_idle_t *idle,bool candidate)
 {
   if(candidate) {idle->empty=0;idle->interval=1;idle->resets++;return;}
@@ -381,6 +413,13 @@ void nr_srs_note_grant(nr_srs_blind_t *s,uint64_t slot,uint16_t mask,int start,i
   unsigned i=s->next_grant++%256;
   s->grants[i].slot=slot;s->grants[i].mask=mask;s->grants[i].start=start;
   s->grants[i].width=width;s->grants[i].valid=true;
+}
+/* Symbols of `slot` whose comb-like content a known PUSCH grant explains (its DM-RS symbols; the DCI 0_x grants are posted by the PUSCH monitor k2 slots ahead). */
+uint16_t nr_srs_grant_symbols(const nr_srs_blind_t *s,uint64_t slot)
+{
+  uint16_t m=0;
+  if(s) for(unsigned i=0;i<256;i++) if(s->grants[i].valid && s->grants[i].slot==slot) m|=s->grants[i].mask;
+  return m;
 }
 bool nr_srs_search_slot(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_srs_candidate_t *c,
                         const nr_srs_candidate_t *hint,uint64_t slot)

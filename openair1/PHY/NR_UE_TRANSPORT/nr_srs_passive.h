@@ -28,6 +28,7 @@ void nr_srs_passive_metrics(uint64_t *us,uint64_t *dropped,uint64_t *pregate,uin
                             uint64_t *budget,uint64_t *resets);
 bool nr_srs_passive_enabled(void);
 /* Periodic-resource tracker counters of the bound cell (SRS): predicted occasions, hits, misses, demotions, confirmations, audit hits, audits run. */
+void nr_srs_passive_gate_metrics(uint64_t *unexplained, uint64_t *pusch);
 void nr_srs_passive_periodic_metrics(nr_ptrack_counters_t *c, uint64_t *audits);
 #ifdef __cplusplus
 }

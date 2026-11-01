@@ -534,6 +534,33 @@ if(ENABLE_TESTS)
   target_include_directories(test_mpci_cellfeat_srs PRIVATE ${CF_TR} ${CMAKE_SOURCE_DIR}/openair1)
   add_dependencies(tests test_mpci_cellfeat_srs)
   add_test(NAME test_mpci_cellfeat_srs COMMAND test_mpci_cellfeat_srs)
+
+  # SRS production-path bed (fix1101/srsq): synthetic SRS through capture -> queue -> worker -> tracker -> export, with a modelled pool-lease stall
+  add_executable(test_nr_srs_production_path
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/MODULATION/slot_fep_nr.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/MODULATION/nr_sfo_state.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/nr_dmrs_rx.c
+    ${CF_TR}/nr_srs_attribution.c
+    ${CF_TR}/nr_srs_estimate.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_TRANSPORT/srs_rx.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_ESTIMATION/nr_ul_channel_estimation.c
+    ${CF_TR}/nr_srs_export.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/dmrs_nr.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/nr_phy_common/src/nr_phy_common_srs.c
+    ${CF_TR}/nr_srs_blind.c
+    ${CF_TR}/nr_periodic_track.c
+    ${CF_TR}/nr_srs_passive.c
+    ${CF_TR}/tests/nr_srs_production_path_test.cc
+    ${CF_TR}/tests/nr_srs_blind_fixture.c
+    ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/ul_ref_seq_nr.c)
+  target_link_libraries(test_nr_srs_production_path PRIVATE nr_sense_api nr_phy_common PHY_COMMON nr_common nr_fapi_p5 asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs UTIL CONFIG_LIB GTest::gtest_main)
+  target_compile_options(test_nr_srs_production_path PRIVATE -ffunction-sections -fdata-sections -fvisibility=hidden)
+  target_compile_definitions(test_nr_srs_production_path PRIVATE NR_SRS_EXPORT_ON)
+  target_link_options(test_nr_srs_production_path PRIVATE -Wl,--gc-sections -Wl,--wrap=nr_isac_source_enabled -Wl,--wrap=nr_pool_site_float_acquire)
+  target_include_directories(test_nr_srs_production_path PRIVATE ${CF_TR} ${CMAKE_SOURCE_DIR}/openair1)
+  add_dependencies(tests test_nr_srs_production_path)
+  add_test(NAME test_nr_srs_production_path COMMAND test_nr_srs_production_path)
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
     add_test(NAME test_mpci_cellfeat_monitor

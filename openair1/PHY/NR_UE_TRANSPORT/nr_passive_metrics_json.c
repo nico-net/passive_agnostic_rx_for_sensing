@@ -217,7 +217,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
                     ",\"periodic_%s_demoted\":%" PRIu64 ",\"periodic_%s_confirmed\":%" PRIu64 ",\"periodic_%s_audit_hit\":%" PRIu64,
                     ptype[i], m->periodic[i].predicted, ptype[i], m->periodic[i].hit, ptype[i], m->periodic[i].miss,
                     ptype[i], m->periodic[i].demoted, ptype[i], m->periodic[i].confirmed, ptype[i], m->periodic[i].audit_hit);
-    if (t > 0 && (size_t)t < sizeof(tail)) t += snprintf(tail + t, sizeof(tail) - (size_t)t, ",\"srs_audits\":%" PRIu64, m->srs_audits);
+    if (t > 0 && (size_t)t < sizeof(tail)) t += snprintf(tail + t, sizeof(tail) - (size_t)t, ",\"srs_audits\":%" PRIu64 ",\"srs_gate_open_unexplained\":%" PRIu64 ",\"srs_gate_open_pusch\":%" PRIu64, m->srs_audits, m->srs_gate_open_unexplained, m->srs_gate_open_pusch);
     if (t > 0 && (size_t)t < sizeof(tail))
       t += snprintf(tail + t, sizeof(tail) - (size_t)t, ",\"prach_occasions\":%" PRIu64 ",\"prach_detections\":%" PRIu64 ",\"prach_margin_max\":%d",
                     m->prach_occasions, m->prach_detections, m->prach_margin_max);

@@ -33,6 +33,8 @@ typedef struct {
   uint64_t eligible, backoff_skip, budget_skip, pregate_skip, scans, resets;
 } nr_srs_idle_t;
 bool nr_srs_pregate(const nr_srs_grid_t *g, const int16_t *iq, int stride, uint16_t ul_mask);
+/* raw: interleaved int16 IQ of [antenna][6 symbols (8..13)][win complex samples], each window starting at the nominal FFT start; see nr_srs_blind.c */
+bool nr_srs_td_comb_gate(int fft_size, int n_ant, uint16_t ul_mask, const int16_t *raw, int win, double *stat);
 bool nr_srs_idle_scan(nr_srs_idle_t *idle, uint64_t slot, bool evidence);
 void nr_srs_idle_result(nr_srs_idle_t *idle, bool candidate);
 bool nr_srs_cpu_allow(nr_srs_idle_t *idle, uint64_t now_ns, uint64_t estimate_ns);
@@ -59,6 +61,7 @@ bool nr_srs_group_cs_search(nr_srs_blind_t *s, const int16_t *iq, int stride,
 bool nr_srs_valid_capture_grid(const nr_srs_grid_t *g);
 bool nr_srs_refresh_grid(nr_srs_blind_t *s,const nr_srs_grid_t *g);
 bool nr_srs_sources_selected(const char *sources);
+uint16_t nr_srs_grant_symbols(const nr_srs_blind_t *s, uint64_t slot);
 void nr_srs_note_grant(nr_srs_blind_t *s, uint64_t slot, uint16_t dmrs_mask, int start_rb, int nb_rb);
 bool nr_srs_search_slot(nr_srs_blind_t *s, const int16_t *iq, int stride,
                         nr_srs_candidate_t *c, const nr_srs_candidate_t *hint, uint64_t slot);

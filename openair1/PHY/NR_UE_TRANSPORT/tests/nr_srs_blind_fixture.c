@@ -101,3 +101,19 @@ void srs_test_pusch_tp(const nr_srs_grid_t *g,const nr_srs_candidate_t *c,int16_
     ((c16_t *)iq)[a*14*g->fft_size+c->start_symbol*g->fft_size+bin]=(c16_t){dmrs[j].r/4,-dmrs[j].i/4};
   }
 }
+/* Cost bench (fix1101/srsq): ns per slot of `n_sym` symbol FFTs on `n_ant` antennas through the production FEP, the work of one undirected scan (6 symbols) or of a predicted occasion (2 symbols). */
+#include <time.h>
+double srs_test_fep_cost_ns(int fft,int n_ant,int n_sym,int reps)
+{
+  nr_srs_grid_t g={fft,fft-144,24,n_ant,14,20};
+  static c16_t shift[4096*2] __attribute__((aligned(32))),rot[224] __attribute__((aligned(32)));
+  c16_t *raw=aligned_alloc(32,fft*sizeof(c16_t)),*out=aligned_alloc(32,fft*sizeof(c16_t));
+  for(int i=0;i<fft;i++) {raw[i]=(c16_t){(i*7)%200-100,(i*13)%200-100};shift[i]=(c16_t){32767,0};}
+  for(int i=0;i<224;i++) rot[i]=(c16_t){32767,0};
+  struct timespec a,b;clock_gettime(CLOCK_MONOTONIC,&a);
+  for(int r=0;r<reps;r++) for(int an=0;an<n_ant;an++) for(int l=0;l<n_sym;l++)
+    nr_srs_fep_symbol(&g,2,shift,rot,1,8+l,0,15360,0,raw,out);
+  clock_gettime(CLOCK_MONOTONIC,&b);
+  free(raw);free(out);
+  return ((b.tv_sec-a.tv_sec)*1e9+(b.tv_nsec-a.tv_nsec))/reps;
+}
