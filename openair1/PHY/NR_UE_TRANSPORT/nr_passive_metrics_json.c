@@ -108,6 +108,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       "\"td_excl_restarts\":%" PRIu64 ",\"td_excl_truncs\":%" PRIu64 ",\"td_excl_restart_alarms\":%" PRIu64 ","
       "\"td_fb_promotions\":%" PRIu64 ",\"td_fb_withdrawals\":%" PRIu64 ",\"td_fb_failopens\":%" PRIu64 ",\"td_fb_pruned_contexts\":%" PRIu64 ",\"td_fb_untrusted_ctx\":%" PRIu64 "%s,"
       "\"ldpc_ok\":%" PRIu64 ",\"ldpc_seg_fail\":%" PRIu64 ",\"ldpc_tb_fail\":%" PRIu64 ",\"ldpc_zero_tb\":%" PRIu64 ","
+      "\"retx_combined\":%" PRIu64 ",\"retx_crc_ok\":%" PRIu64 ",\"retx_no_history\":%" PRIu64 ",\"retx_no_history_ok\":%" PRIu64 ",\"retx_refused\":%" PRIu64 ",\"evicted\":%" PRIu64 ","
       "\"ldpc_cuda_errors\":%" PRIu64 ",\"ldpc_cuda_fallbacks\":%" PRIu64 ",\"ldpc_cuda_poisoned\":%" PRIu64 ","
       "\"ldpc_cuda_disabled\":%" PRIu64 ",\"ldpc_cuda_breaker_trips\":%" PRIu64 ",\"ldpc_tb_cpu\":%" PRIu64 ",\"ldpc_tb_cuda\":%" PRIu64 ","
       "\"srs_us\":%" PRIu64 ",\"srs_jobs_dropped\":%" PRIu64 ","
@@ -137,6 +138,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       m->td_excl_restarts, m->td_excl_truncs, m->td_excl_restart_alarms,
       m->td_fb_promotions, m->td_fb_withdrawals, m->td_fb_failopens, m->td_fb_pruned_contexts, m->td_fb_untrusted_ctx, cb0,
       m->ldpc_ok, m->ldpc_seg_fail, m->ldpc_tb_fail, m->ldpc_zero_tb,
+      m->hq_retx_combined, m->hq_retx_crc_ok, m->hq_retx_no_history, m->hq_retx_no_history_ok, m->hq_retx_refused, m->hq_evicted,
       m->ldpc_cuda_errors, m->ldpc_cuda_fallbacks, m->ldpc_cuda_poisoned,
       m->ldpc_cuda_disabled, m->ldpc_cuda_breaker_trips, m->ldpc_tb_cpu, m->ldpc_tb_cuda,
       m->srs_us,m->srs_jobs_dropped,m->srs_pregate_skip,m->srs_backoff_skip,

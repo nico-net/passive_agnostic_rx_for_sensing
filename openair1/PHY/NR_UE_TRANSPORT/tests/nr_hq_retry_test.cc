@@ -155,3 +155,78 @@ TEST(PdschLdpcCap, IterSummary)
   EXPECT_EQ(mx, 0);
   EXPECT_EQ(sum, 0);
 }
+
+// ---- pred1101/harq: retransmission anticipation, eviction and the no-history gate ----
+
+TEST(HqAnticipation, NdiToggleEvictsAndRestarts)
+{
+  // a failed TB (ndi 1) is stored; the next grant of the pid toggled the NDI: a new TB, the stored sum is dead
+  EXPECT_TRUE(nr_hq_ndi_evicts(true, 1, 0));
+  EXPECT_EQ(nr_hq_retx_rule(true, 1, 1000, 0, 0, 1000, false), 0);   // restart, never combined
+  EXPECT_EQ(nr_hq_retx_rule(true, 1, 1000, 0, 2, 1000, false), 0);   // even at rv 2: another TB's parity must not be summed in
+  EXPECT_FALSE(nr_hq_ndi_evicts(true, 1, 1));                        // same NDI: a retransmission, kept
+  EXPECT_FALSE(nr_hq_ndi_evicts(false, 1, 0));                       // nothing live to drop
+  EXPECT_EQ(nr_hq_retx_rule(true, 1, 1000, 1, 2, 1000, false), 1);   // rv 2, same NDI, same TBS: combined
+}
+
+TEST(HqAnticipation, WindowIsAirTimeNotSlots)
+{
+  EXPECT_EQ(nr_hq_window_slots(10), 150);  // mu 0: 1 slot/ms
+  EXPECT_EQ(nr_hq_window_slots(20), 300);  // mu 1
+  EXPECT_EQ(nr_hq_window_slots(40), 600);  // mu 2
+  EXPECT_EQ(nr_hq_window_slots(0), 300);   // unknown frame: mu 1
+  const int64_t w = nr_hq_window_slots(20);
+  EXPECT_FALSE(nr_hq_expired(true, 1000, 1000 + w, w));      // exactly the window: kept
+  EXPECT_TRUE(nr_hq_expired(true, 1000, 1000 + w + 1, w));   // older: dropped
+  EXPECT_FALSE(nr_hq_expired(false, 1000, 100000, w));       // no live sum, nothing to drop
+  EXPECT_FALSE(nr_hq_expired(true, -1, 100000, w));          // unknown age (never stamped): kept, the LRU bounds it
+  EXPECT_FALSE(nr_hq_expired(true, 1000, -1, w));            // unknown now: no sweep
+}
+
+TEST(HqAnticipation, StoreLifecycle)
+{
+  // the per-pid sequence the decoder runs: first fails -> stored; retx combines; decoded -> retired; NDI toggle -> restart; expiry -> alone
+  struct Hq { bool valid = false; uint8_t ndi = 0; uint32_t tbs = 0; int64_t slot = -1; } e;
+  const int64_t w = nr_hq_window_slots(20);
+  int evicted = 0, combined = 0, alone = 0;
+  auto grant = [&](uint8_t ndi, uint8_t rv, uint32_t tbs, int64_t now, bool crc_ok) {
+    if (nr_hq_expired(e.valid, e.slot, now, w)) { e.valid = false; evicted++; }
+    const int d = nr_hq_retx_rule(e.valid, e.ndi, e.tbs, ndi, rv, tbs, false);
+    if (d == 0 && nr_hq_ndi_evicts(e.valid, e.ndi, ndi)) evicted++;
+    if (d > 0) combined++;
+    if (rv != 0 && d <= 0) alone++;
+    e.valid = !crc_ok; e.ndi = ndi; e.tbs = tbs; e.slot = now;
+  };
+  grant(1, 0, 4000, 100, false);   // first, fails: stored
+  grant(1, 2, 4000, 108, false);   // rv 2 combines (still failing)
+  grant(1, 3, 4000, 116, true);    // rv 3 combines and passes: retired
+  EXPECT_EQ(combined, 2);
+  EXPECT_FALSE(e.valid);
+  grant(0, 0, 4000, 130, false);   // new TB (NDI toggled), fails
+  grant(1, 0, 4000, 140, false);   // another new TB: the failed one is evicted by the toggle
+  EXPECT_EQ(evicted, 1);
+  grant(1, 3, 4000, 140 + w + 5, true); // its retransmission arrives after the window: no history, decoded alone
+  EXPECT_EQ(evicted, 2);
+  EXPECT_EQ(alone, 1);
+  EXPECT_EQ(combined, 2);
+}
+
+TEST(HqAnticipation, NoHistoryGate)
+{
+  // a retransmission with no stored sum is decoded alone iff its own bits hold the information
+  EXPECT_TRUE(nr_hq_alone_decodable(2, 3, 120.0));
+  EXPECT_TRUE(nr_hq_alone_decodable(2, 2, 120.0));    // BG2 low rate: rv 2 wraps over the systematic columns
+  EXPECT_FALSE(nr_hq_alone_decodable(1, 2, 700.0));   // BG1 high rate rv 2: parity only
+  EXPECT_FALSE(nr_hq_alone_decodable(0, 1, 500.0));
+  EXPECT_FALSE(nr_hq_alone_decodable(0, 4, 100.0));   // not an rv
+  // monotone in the rate: a lower rate never loses self-decodability
+  for (int bg = 0; bg <= 2; bg++)
+    for (int rv = 1; rv <= 3; rv++) {
+      bool seen_false = false;
+      for (double r = 30.0; r < 1000.0; r += 10.0) {
+        const bool ok = nr_hq_alone_decodable(bg, rv, r);
+        if (!ok) seen_false = true;
+        else EXPECT_FALSE(seen_false) << "bg " << bg << " rv " << rv << " r1024 " << r;
+      }
+    }
+}
