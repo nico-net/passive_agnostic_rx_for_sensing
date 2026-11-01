@@ -120,7 +120,7 @@ void nr_srs_passive_cell_pause(int cell,bool pause)
 static void srs_lease_in(void)
 {
   if(sr.leased) return;
-  nr_pool_site_float_acquire(NR_POOL_HOUSE, nr_cell_idx(), 0);
+  nr_pool_site_float_acquire(NR_POOL_SENSE, nr_cell_idx(), 0); /* sensing exporter class: promoted after 20 ms, ahead of DISC / HOUSE */
   sr.leased=true;
 }
 static void srs_lease_out(void)
