@@ -1,9 +1,20 @@
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_pdcch_uss_prune.h"
+#include "common/config/config_userapi.h"
+#include "common/platform_types.h"
+#include "common/utils/LOG/log.h"
+configmodule_interface_t *uniqCfg = nullptr;
+void exit_function(const char *file, const char *fn, const int line, const char *message, const int fatal)
+{
+  fprintf(stderr, "exit_function %s:%d %s: %s\n", file, line, fn, message);
+  exit(fatal ? 1 : 0);
+}
 }
 
 /* Reference values computed independently (python, TS 38.213 10.1 written out from the text). */
@@ -92,7 +103,7 @@ TEST(UssPrune, FitKeepsExactlyTheHashedSetAndPrunesTheRest)
           const bool truth = nr_uss_hash_in(kRntis[r], slot, cce, L, kN, kA, kM[li]);
           const bool adm = nr_uss_prune_admit(kGeom, kRntis[r], slot, cce, L, false);
           // never lose a position the true search space contains
-          if (truth) EXPECT_TRUE(adm) << "rnti " << r << " slot " << slot << " L " << L << " cce " << cce;
+          if (truth) { EXPECT_TRUE(adm) << "rnti " << r << " slot " << slot << " L " << L << " cce " << cce; }
           kept += adm;
           total++;
         }
@@ -199,13 +210,23 @@ TEST(UssPrune, ForcedUlSampleThatNoHypothesisSurvivesIsTakenBack)
 {
   learn();
   const int h0 = nr_uss_prune_hypotheses(kGeom);
-  const int slot = 12;
+  int slot = 12;
   int bad = -1;
+  for (; slot < 200 && bad < 0; slot++)
   for (int cce = 0; cce < kN && bad < 0; cce += 2)
     if (!nr_uss_hash_in(kRntis[1], slot, cce, 2, kN, kA, 8) && !nr_uss_hash_in(kRntis[1], slot, cce, 2, kN, 39827, 8)
         && !nr_uss_hash_in(kRntis[1], slot, cce, 2, kN, 39839, 8))
       bad = cce;
   ASSERT_GE(bad, 0);
+  slot--;
   EXPECT_FALSE(nr_uss_prune_note(kGeom, kRntis[1], slot, bad, 2, kN, true));
   EXPECT_EQ(nr_uss_prune_hypotheses(kGeom), h0);
+}
+
+int main(int argc, char **argv)
+{
+  logInit();
+  set_glog(OAILOG_ERR);
+  ::testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
 }

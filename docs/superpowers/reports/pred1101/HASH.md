@@ -27,7 +27,7 @@ and no counter.
 ## Tests
 `test_nr_pdcch_uss_prune` (tests/nr_pdcch_uss_prune_test.cc): Y_p,n and position examples against independently computed values,
 pruned set contains every true hashed position, audit admits all, audit slot density, per-RNTI demotion and re-promotion, geometry
-reset, forced UL sample take-back. Results: see below.
+reset, forced UL sample take-back. Results `[OFFLINE VERIFIED, DGX aarch64 unit]`: test_nr_pdcch_uss_prune 9/9, test_nr_pdcch_blind_monitor, test_mpci_*, static_audit_check and test_static_audit_scanner pass (mpci_statics.tsv regenerated: line numbers shifted, 4 new PER_CELL rows). Build: nr-uesoftmodem pdsch_gpu ldpc_cuda tests built (ninja -k 0, only the test link needed a main/logInit fix).
 
 ## Not verified
 No receiver, replay or OTA run. CRC non-regression on air is by construction (pruning only removes tasks the fit says cannot carry
