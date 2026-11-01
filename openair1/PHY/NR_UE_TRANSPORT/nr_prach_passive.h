@@ -40,6 +40,8 @@ void nr_prach_passive_diag(uint64_t *occasions, uint64_t *detections, int *margi
 /* Correlator statistics per occasion, dB/10 of the strongest preamble: all-zero or all-equal peaks mean a broken chain, peaks spread a few dB around floor_last mean an idle cell. */
 typedef struct {
   int peak_last, peak_min, peak_max, peak_mean, floor_last; /* floor_last: 25th percentile of the recent peaks, -1 until seeded */
+  int snap_db;                                              /* mean power of the last snapshot (antenna 0), dB/10 */
+  uint64_t snap_zero;                                       /* all-zero snapshots */
   uint64_t lb_tried, lb_found, lb_noring;                   /* RAR look-back: RAPIDs tested on a retained occasion, found, and RARs without a usable retained occasion */
   uint64_t peak_zero, seeded;                               /* occasions with no energy at all; occasions compared against a seeded floor */
 } nr_prach_passive_peaks_t;

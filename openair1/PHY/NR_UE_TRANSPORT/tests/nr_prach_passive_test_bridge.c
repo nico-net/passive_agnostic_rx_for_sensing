@@ -467,6 +467,8 @@ int test_prach_real_iq(const test_prach_real_cfg_t *cfg, test_prach_real_out_t *
   out->lb_tried = pk.lb_tried;
   out->lb_found = pk.lb_found;
   out->lb_noring = pk.lb_noring;
+  out->snap_zero = pk.snap_zero;
+  out->snap_db = pk.snap_db;
   for (int a = 0; a < RIQ_NRX; ++a) free(rx[a]);
   free(ue);
   return ok;

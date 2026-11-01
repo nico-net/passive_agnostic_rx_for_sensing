@@ -321,7 +321,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     m->prach_peak_last = pk.peak_last; m->prach_peak_min = pk.peak_min; m->prach_peak_max = pk.peak_max;
     m->prach_peak_mean = pk.peak_mean; m->prach_floor_last = pk.floor_last;
     m->prach_peak_zero = pk.peak_zero; m->prach_seeded = pk.seeded;
-    m->prach_lb_tried = pk.lb_tried; m->prach_lb_found = pk.lb_found; m->prach_lb_noring = pk.lb_noring;
+    m->prach_lb_tried = pk.lb_tried; m->prach_lb_found = pk.lb_found; m->prach_lb_noring = pk.lb_noring; m->prach_snap_zero = pk.snap_zero; m->prach_snap_db = pk.snap_db;
   }
   if (nr_csirs_blind_rt_metrics) nr_csirs_blind_rt_metrics(m);
   if (nr_csirs_disc_get_metrics) {

@@ -195,6 +195,12 @@ NR_CELL_STATIC(_Atomic uint64_t, prach_peak_sum)
 #define prach_peak_sum NR_CELL_REF(prach_peak_sum)
 NR_CELL_STATIC(_Atomic uint64_t, prach_seeded)
 #define prach_seeded NR_CELL_REF(prach_seeded)
+/* Input check of every snapshot (antenna 0, every 61st sample): mean power dB/10 and the count of all-zero snapshots. peak_zero with snap_zero == 0 means the
+ * correlator is dead; snap_zero == occasions means the live ring held no samples at that window. */
+NR_CELL_STATIC(_Atomic int, prach_snap_db)
+#define prach_snap_db NR_CELL_REF(prach_snap_db)
+NR_CELL_STATIC(_Atomic uint64_t, prach_snap_zero)
+#define prach_snap_zero NR_CELL_REF(prach_snap_zero)
 NR_CELL_STATIC(_Atomic uint64_t, prach_drops)
 #define prach_drops NR_CELL_REF(prach_drops)
 NR_CELL_STATIC(_Atomic uint64_t, prach_skipped)
@@ -255,6 +261,8 @@ void nr_prach_passive_diag_peaks(nr_prach_passive_peaks_t *p)
   p->floor_last = atomic_load_explicit(&prach_floor_last, memory_order_relaxed);
   p->peak_zero = atomic_load_explicit(&prach_peak_zero, memory_order_relaxed);
   p->seeded = atomic_load_explicit(&prach_seeded, memory_order_relaxed);
+  p->snap_db = atomic_load_explicit(&prach_snap_db, memory_order_relaxed);
+  p->snap_zero = atomic_load_explicit(&prach_snap_zero, memory_order_relaxed);
   p->lb_tried = atomic_load_explicit(&prach_lb_tried, memory_order_relaxed);
   p->lb_found = atomic_load_explicit(&prach_lb_found, memory_order_relaxed);
   p->lb_noring = atomic_load_explicit(&prach_lb_noring, memory_order_relaxed);
@@ -737,6 +745,13 @@ static void process_job(const prach_job_t *job)
     if (job->fo_hz[a] != 0.0 && job->n_samples > 0)
       derotate((c16_t *)job->samples[a], job->n_samples, job->fo_hz[a], 1000.0 * job->fp.samples_per_subframe);
   }
+  {
+    uint64_t pw = 0;
+    unsigned cnt = 0;
+    for (int i = 0; i < job->n_samples; i += 61, ++cnt) pw += (uint64_t)((int)job->samples[0][i].r * job->samples[0][i].r + (int)job->samples[0][i].i * job->samples[0][i].i);
+    if (pw == 0) atomic_fetch_add_explicit(&prach_snap_zero, 1, memory_order_relaxed);
+    atomic_store_explicit(&prach_snap_db, cnt ? dB_fixed_times10((uint32_t)(pw / cnt)) : 0, memory_order_relaxed);
+  }
   for (int fdm = 0; fdm < job->n_fdm; ++fdm) {
     const fapi_nr_num_prach_fd_occasions_t *fd = &job->fd[fdm];
     if (fd->num_root_sequences == 0 || fd->num_root_sequences > 64) continue;
@@ -1070,6 +1085,8 @@ void nr_prach_passive_test_reset(void)
   atomic_store(&prach_peak_zero, 0);
   atomic_store(&prach_peak_sum, 0);
   atomic_store(&prach_seeded, 0);
+  atomic_store(&prach_snap_db, 0);
+  atomic_store(&prach_snap_zero, 0);
   atomic_store(&prach_occasions, 0);
   atomic_store(&prach_us, 0);
   atomic_store(&prach_lb_tried, 0);

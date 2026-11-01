@@ -223,10 +223,10 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       t += snprintf(tail + t, sizeof(tail) - (size_t)t,
                     ",\"prach_peak_last\":%d,\"prach_peak_min\":%d,\"prach_peak_max\":%d,\"prach_peak_mean\":%d,\"prach_floor_last\":%d"
                     ",\"prach_peak_zero\":%" PRIu64 ",\"prach_seeded\":%" PRIu64
-                    ",\"prach_lookback_tried\":%" PRIu64 ",\"prach_lookback_found\":%" PRIu64 ",\"prach_lookback_noring\":%" PRIu64,
+                    ",\"prach_lookback_tried\":%" PRIu64 ",\"prach_lookback_found\":%" PRIu64 ",\"prach_lookback_noring\":%" PRIu64 ",\"prach_snap_zero\":%" PRIu64 ",\"prach_snap_db\":%d",
                     m->prach_peak_last, m->prach_peak_min == INT32_MAX ? 0 : m->prach_peak_min, m->prach_peak_max == INT32_MIN ? 0 : m->prach_peak_max,
                     m->prach_peak_mean, m->prach_floor_last, m->prach_peak_zero, m->prach_seeded,
-                    m->prach_lb_tried, m->prach_lb_found, m->prach_lb_noring);
+                    m->prach_lb_tried, m->prach_lb_found, m->prach_lb_noring, m->prach_snap_zero, m->prach_snap_db);
   }
   if (t < 0 || (size_t)t >= sizeof(tail)) return -1;
   const int z = snprintf(buf + w, n - (size_t)w, "%s%s}", discovery, tail);

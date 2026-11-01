@@ -57,7 +57,8 @@ typedef struct {
   int margin_max;
   int peak_last, floor_last, peak_max, peak_min, peak_mean;
   unsigned long peak_zero;
-  unsigned long lb_tried, lb_found, lb_noring;
+  unsigned long lb_tried, lb_found, lb_noring, snap_zero;
+  int snap_db;
   unsigned long us_per_occasion; /* worker time per correlated occasion (prach_us) */
   double noise_rms;         /* per-component rms of the occasion window, antenna 0 */
   char record[2048];

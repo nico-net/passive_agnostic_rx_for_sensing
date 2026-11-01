@@ -342,7 +342,7 @@ test_prach_real_cfg_t pci415(int preamble, int delay, double snr)
   c.t0 = 122160;       /* DL start of a 5 ms TDD period in the capture (power edge) */
   c.n_noise = 10;
   c.config_index = 3;
-  c.root = 22; c.zczc = 6; c.restricted = 0;
+  c.root = 700; c.zczc = 8; c.restricted = 0;
   c.msg1_fstart = 8; c.msg1_fdm = 0; c.ul_bwp_start = 81;
   c.preamble = preamble; c.delay = delay; c.snr_db = snr;
   return c;
@@ -410,6 +410,8 @@ TEST_F(PassivePrach, RealIqIdleCellStatistics)
   printf("PRACH_COST us_per_occasion %lu\n", (unsigned long)o.us_per_occasion);
   EXPECT_EQ(o.detections, 0ul);
   EXPECT_EQ(o.peak_zero, 0ul);
+  EXPECT_EQ(o.snap_zero, 0ul) << "the snapshot of the UL window must hold the capture's samples";
+  EXPECT_GT(o.snap_db, 250) << "UL window noise is ~21 LSB rms = 26 dB";
   EXPECT_GT(o.peak_max, o.peak_min) << "constant peaks mean a dead correlator";
   EXPECT_GT(o.floor_last, 0);
   EXPECT_LT(o.peak_max - o.floor_last, 80);
