@@ -49,6 +49,9 @@ static pthread_t test_slot_tid, test_worker_tid;
 #define PRACH_WINDOW 1100000
 #define PRACH_QUEUE 4
 
+/* Branch carrier offsets of the live receiver (modulation_UE.c); absent in the unit-test binary, where there are none. */
+double nr_ue_get_branch_fo_hz(int ant) __attribute__((weak));
+
 /* The two receive helpers use the same geometry; the copied variant indexes
  * from sample_base in a private buffer rather than the live frame ring. */
 void nr_prach_rx_sample_range(prach_item_t *p, NR_DL_FRAME_PARMS *fp, int nta, int *start, int *end);
@@ -108,7 +111,8 @@ NR_CELL_STATIC(prach_floors_t, floors)
 typedef struct {
   NR_DL_FRAME_PARMS fp;
   int frame, start_slot, current_slot, n_rx, nta, sample_base, gain_db;
-  int format_raw, n_fdm;
+  int format_raw, n_fdm, n_samples;
+  double fo_hz[PRACH_MAX_RX]; /* carrier offset the receiver removes from this branch (same total as the OFDM front end: common + branch) */
   uint8_t sequence_length, subcarrier_spacing, restricted_set;
   uint64_t abs_slot, mono_ns, epoch_stamp;
   uint32_t dedicated_epoch;
@@ -120,6 +124,34 @@ typedef struct {
 typedef prach_job_t prach_jobs_t[PRACH_QUEUE];
 NR_CELL_STATIC_HEAP(prach_jobs_t, jobs)
 #define jobs NR_CELL_HEAP_REF(prach_jobs_t, jobs)
+/* RAR look-back: the last PRACH_RETAIN processed occasions (de-rotated snapshot, copied by the worker after process_job) so a RAR decoded later can be matched
+ * to its occasion and its RAPID tested as a single hypothesis. Pre-allocated with the cell, no allocation after start; worker-only. */
+#define PRACH_RETAIN 2
+typedef prach_job_t prach_retain_t[PRACH_RETAIN];
+NR_CELL_STATIC_HEAP(prach_retain_t, retain)
+#define retain NR_CELL_HEAP_REF(prach_retain_t, retain)
+NR_CELL_STATIC(unsigned, retain_head)
+#define retain_head NR_CELL_REF(retain_head)
+typedef bool prach_valid_t[PRACH_RETAIN];
+NR_CELL_STATIC(prach_valid_t, retain_valid)
+#define retain_valid NR_CELL_REF(retain_valid)
+NR_CELL_STATIC(unsigned, lb_cursor)
+#define lb_cursor NR_CELL_REF(lb_cursor)
+typedef uint16_t prach_rar_tc_t[PRACH_RAR_RING];
+NR_CELL_STATIC(prach_rar_tc_t, rar_tc)
+#define rar_tc NR_CELL_REF(rar_tc)
+/* blind detections already exported (occasion abs slot, symbol, fdm, preamble): a look-back for the same RAPID is a duplicate */
+typedef uint64_t prach_keys_t[16];
+NR_CELL_STATIC(prach_keys_t, emitted_keys)
+#define emitted_keys NR_CELL_REF(emitted_keys)
+NR_CELL_STATIC(unsigned, emitted_head)
+#define emitted_head NR_CELL_REF(emitted_head)
+NR_CELL_STATIC(_Atomic uint64_t, prach_lb_tried)
+#define prach_lb_tried NR_CELL_REF(prach_lb_tried)
+NR_CELL_STATIC(_Atomic uint64_t, prach_lb_found)
+#define prach_lb_found NR_CELL_REF(prach_lb_found)
+NR_CELL_STATIC(_Atomic uint64_t, prach_lb_noring) /* a RAR whose occasion is no longer (or not) retained, or an unsupported (restricted-set) cell */
+#define prach_lb_noring NR_CELL_REF(prach_lb_noring)
 NR_CELL_STATIC_INIT(pthread_mutex_t, job_mu, PTHREAD_MUTEX_INITIALIZER)
 #define job_mu NR_CELL_REF(job_mu)
 NR_CELL_STATIC_INIT(pthread_cond_t, job_cv, PTHREAD_COND_INITIALIZER)
@@ -146,6 +178,23 @@ NR_CELL_STATIC(_Atomic uint64_t, prach_detections) /* occasions whose best pream
 #define prach_detections NR_CELL_REF(prach_detections)
 NR_CELL_STATIC(_Atomic int, prach_margin_max) /* best (energy - 25th-percentile floor), dB/10, over all seeded occasions; INT_MIN until seeded */
 #define prach_margin_max NR_CELL_REF(prach_margin_max)
+/* Per-occasion correlator statistics (dB/10 of the strongest preamble / delay of the occasion), to tell "no Msg1 on air" (peaks sit at the floor, spread
+ * a few dB) from "correlator broken" (peaks all equal / zero: fixed-point underflow, wrong window, dead antenna). peak_zero counts occasions whose best
+ * preamble had no energy at all. */
+NR_CELL_STATIC(_Atomic int, prach_peak_last)
+#define prach_peak_last NR_CELL_REF(prach_peak_last)
+NR_CELL_STATIC_INIT(_Atomic int, prach_peak_max, INT32_MIN)
+#define prach_peak_max NR_CELL_REF(prach_peak_max)
+NR_CELL_STATIC_INIT(_Atomic int, prach_peak_min, INT32_MAX)
+#define prach_peak_min NR_CELL_REF(prach_peak_min)
+NR_CELL_STATIC_INIT(_Atomic int, prach_floor_last, -1) /* 25th-percentile floor at the last seeded occasion; -1 until seeded */
+#define prach_floor_last NR_CELL_REF(prach_floor_last)
+NR_CELL_STATIC(_Atomic uint64_t, prach_peak_zero)
+#define prach_peak_zero NR_CELL_REF(prach_peak_zero)
+NR_CELL_STATIC(_Atomic uint64_t, prach_peak_sum)
+#define prach_peak_sum NR_CELL_REF(prach_peak_sum)
+NR_CELL_STATIC(_Atomic uint64_t, prach_seeded)
+#define prach_seeded NR_CELL_REF(prach_seeded)
 NR_CELL_STATIC(_Atomic uint64_t, prach_drops)
 #define prach_drops NR_CELL_REF(prach_drops)
 NR_CELL_STATIC(_Atomic uint64_t, prach_skipped)
@@ -161,9 +210,10 @@ void nr_prach_passive_cell_prealloc(int cell)
   NR_CELL_HEAP_PREALLOC(prach_freq_t, prach_freq, cell);
   NR_CELL_HEAP_PREALLOC(prach_tail_t, prev_tail, cell);
   NR_CELL_HEAP_PREALLOC(prach_jobs_t, jobs, cell);
+  NR_CELL_HEAP_PREALLOC(prach_retain_t, retain, cell);
 }
 
-size_t nr_prach_passive_cell_heap_bytes(void) { return sizeof(prach_xu_t) + sizeof(prach_freq_t) + sizeof(prach_tail_t) + sizeof(prach_jobs_t); }
+size_t nr_prach_passive_cell_heap_bytes(void) { return sizeof(prach_xu_t) + sizeof(prach_freq_t) + sizeof(prach_tail_t) + sizeof(prach_jobs_t) + sizeof(prach_retain_t); }
 
 /* Pause / resume the PRACH pipeline of `cell` (hook of a retired / re-activated cell). No allocation; the worker, its queue and the pending list stay. On resume the
  * stitch tail is invalidated (the stream has a forward gap): the producer flag is taken so a slot in flight is not raced; if it is busy the invalidation is skipped
@@ -194,6 +244,22 @@ void nr_prach_passive_diag(uint64_t *occasions, uint64_t *detections, int *margi
   *margin_max = atomic_load_explicit(&prach_margin_max, memory_order_relaxed);
 }
 
+/* The per-occasion correlator statistics (see prach_peak_last): peak_mean is over all correlated occasions, floor_last is -1 until a floor is seeded. */
+void nr_prach_passive_diag_peaks(nr_prach_passive_peaks_t *p)
+{
+  const uint64_t n = atomic_load_explicit(&prach_occasions, memory_order_relaxed);
+  p->peak_last = atomic_load_explicit(&prach_peak_last, memory_order_relaxed);
+  p->peak_min = atomic_load_explicit(&prach_peak_min, memory_order_relaxed);
+  p->peak_max = atomic_load_explicit(&prach_peak_max, memory_order_relaxed);
+  p->peak_mean = n ? (int)(atomic_load_explicit(&prach_peak_sum, memory_order_relaxed) / n) : 0;
+  p->floor_last = atomic_load_explicit(&prach_floor_last, memory_order_relaxed);
+  p->peak_zero = atomic_load_explicit(&prach_peak_zero, memory_order_relaxed);
+  p->seeded = atomic_load_explicit(&prach_seeded, memory_order_relaxed);
+  p->lb_tried = atomic_load_explicit(&prach_lb_tried, memory_order_relaxed);
+  p->lb_found = atomic_load_explicit(&prach_lb_found, memory_order_relaxed);
+  p->lb_noring = atomic_load_explicit(&prach_lb_noring, memory_order_relaxed);
+}
+
 void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped)
 {
   const uint64_t count = atomic_load_explicit(&prach_occasions, memory_order_relaxed);
@@ -215,11 +281,18 @@ static bool floor_detect(int fdm, int gain_db, int energy)
   if (f->count && f->gain_db != gain_db) *f = (prach_floor_t){0};
   f->gain_db = gain_db;
   bool detected = false;
+  atomic_store_explicit(&prach_peak_last, energy, memory_order_relaxed);
+  atomic_fetch_add_explicit(&prach_peak_sum, (uint64_t)(energy > 0 ? energy : 0), memory_order_relaxed);
+  if (energy <= 0) atomic_fetch_add_explicit(&prach_peak_zero, 1, memory_order_relaxed);
+  if (energy > atomic_load_explicit(&prach_peak_max, memory_order_relaxed)) atomic_store_explicit(&prach_peak_max, energy, memory_order_relaxed);
+  if (energy < atomic_load_explicit(&prach_peak_min, memory_order_relaxed)) atomic_store_explicit(&prach_peak_min, energy, memory_order_relaxed);
   if (f->count >= PRACH_FLOOR_SEED) {
     int sorted[PRACH_FLOOR_HISTORY];
     memcpy(sorted, f->energy, f->count * sizeof(int));
     qsort(sorted, f->count, sizeof(int), floor_compare);
     const int margin = energy - sorted[(f->count - 1) / 4];
+    atomic_store_explicit(&prach_floor_last, sorted[(f->count - 1) / 4], memory_order_relaxed);
+    atomic_fetch_add_explicit(&prach_seeded, 1, memory_order_relaxed);
     detected = margin >= 80; /* floor margin, dB/10 */
     int best = atomic_load_explicit(&prach_margin_max, memory_order_relaxed);
     if (best == 0 || margin > best) atomic_store_explicit(&prach_margin_max, margin ? margin : 1, memory_order_relaxed);
@@ -303,13 +376,19 @@ static int ra_slot(int slot, int mu, int format)
   return format < 4 ? slot >> mu : slot;
 }
 
-void nr_prach_passive_rar(uint16_t ra_rnti, uint8_t rapid, uint16_t ta, uint64_t abs_slot)
+static void rar_push(uint16_t ra_rnti, uint8_t rapid, uint16_t ta, uint64_t abs_slot, uint16_t tc_rnti)
 {
-  if (!nr_isac_prach_enabled()) return;
   const uint64_t packed = ((abs_slot & 0xffffffULL) << 40) | ((uint64_t)ra_rnti << 24)
                           | ((uint64_t)rapid << 16) | ta;
   const unsigned pos = atomic_fetch_add_explicit(&rar_head, 1, memory_order_relaxed);
+  rar_tc[pos % PRACH_RAR_RING] = tc_rnti;
   atomic_store_explicit(&rar_events[pos % PRACH_RAR_RING], packed, memory_order_release);
+}
+
+void nr_prach_passive_rar(uint16_t ra_rnti, uint8_t rapid, uint16_t ta, uint64_t abs_slot)
+{
+  if (!nr_isac_prach_enabled()) return;
+  rar_push(ra_rnti, rapid, ta, abs_slot, 0);
 }
 
 int nr_prach_passive_rar_entries(const uint8_t *tb, uint32_t len, nr_prach_rar_entry_t *out, int capacity)
@@ -323,7 +402,7 @@ int nr_prach_passive_rar_entries(const uint8_t *tb, uint32_t len, nr_prach_rar_e
       if (i + 8 > len) break; /* validated parser already checked this */
       const uint8_t *q = tb + i + 1;
       const uint16_t ta = ((q[0] & 0x7f) << 5) | ((q[1] >> 3) & 0x1f);
-      out[count++] = (nr_prach_rar_entry_t){sub & 0x3f, ta};
+      out[count++] = (nr_prach_rar_entry_t){sub & 0x3f, ta, (uint16_t)((q[5] << 8) | q[6])}; /* MAC RAR: R, TA(12), UL grant(27), TC-RNTI(16) */
       if (count == capacity) break;
       i += 8;
     } else {
@@ -340,7 +419,7 @@ void nr_prach_passive_rar_pdu(uint16_t ra_rnti, uint64_t abs_slot, const uint8_t
   nr_prach_rar_entry_t entries[64];
   const int count = nr_prach_passive_rar_entries(tb, len, entries, 64);
   for (int i = 0; i < count; ++i)
-    nr_prach_passive_rar(ra_rnti, entries[i].rapid, entries[i].ta, abs_slot);
+    rar_push(ra_rnti, entries[i].rapid, entries[i].ta, abs_slot, entries[i].tc_rnti);
 }
 
 static nr_sense_rs_meta_t detection_meta(const prach_detection_t *d, int relation, int rapid, int ta)
@@ -375,6 +454,7 @@ static void emit_detection(const prach_detection_t *d, uint64_t now)
       ta = v & 0xffff;
     }
   }
+  emitted_keys[emitted_head++ % 16] = (d->abs_slot << 24) | ((uint64_t)(d->symbol & 15) << 20) | ((uint64_t)(d->fdm & 15) << 16) | (uint64_t)d->preamble;
   const nr_sense_rs_meta_t meta=detection_meta(d,relation,rapid,ta);
 #ifdef NR_PASSIVE_PRACH_TEST
   atomic_fetch_add(&test_export_calls, 1);
@@ -441,6 +521,205 @@ static uint64_t mono_ns(void)
   return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
+/* x[n] *= exp(-j 2 pi fo n / fs), phase re-anchored in double every block. (nr_fo_compensation's table rotation drifts by up to ~1 kHz equivalent over a
+ * 98304-sample window, which is a whole preamble tone: fine for one OFDM symbol, not for a PRACH window.) */
+static void derotate(c16_t *x, int n, double fo_hz, double fs)
+{
+  enum { BLOCK = 256 };
+  const double w = 2.0 * M_PI * fo_hz / fs;
+  float tr[BLOCK], ti[BLOCK], cr[BLOCK], ci[BLOCK]; /* exp(+j w i) within a block, then times the block's start phasor */
+  for (int i = 0; i < BLOCK; ++i) {
+    tr[i] = (float)cos(w * i);
+    ti[i] = (float)sin(w * i);
+  }
+  for (int b = 0; b < n; b += BLOCK) {
+    const float br = (float)cos(w * b), bi = (float)sin(w * b);
+    const int len = b + BLOCK < n ? BLOCK : n - b;
+    c16_t *xb = x + b;
+    for (int i = 0; i < BLOCK; ++i) {
+      cr[i] = br * tr[i] - bi * ti[i];
+      ci[i] = br * ti[i] + bi * tr[i];
+    }
+    for (int i = 0; i < len; ++i) { /* x * conj(c): remove +fo */
+      const float re = xb[i].r * cr[i] + xb[i].i * ci[i], im = xb[i].i * cr[i] - xb[i].r * ci[i];
+      xb[i].r = (int16_t)(re > 32767.f ? 32767.f : re < -32768.f ? -32768.f : re);
+      xb[i].i = (int16_t)(im > 32767.f ? 32767.f : im < -32768.f ? -32768.f : im);
+    }
+  }
+}
+
+/* ---- RAR look-back ----
+ * A decoded RAR names the occasion (RA-RNTI: s_id, t_id, f_id) and the RAPID. "Is preamble v present on that occasion" is ONE hypothesis over the NCS2 delay
+ * bins of its zone, not 64 zones, so it needs far less than the blind 8 dB over the floor. Noise model per correlation bin: energy exponential with the mean
+ * of the occasion's own bins (trimmed to the lowest 95 %, so a preamble or a PUSCH burst does not raise it): P(bin > x) = exp(-x / mean). This is an UPPER
+ * bound of the tail for any number of RX branches combined (Gamma(k) with the same mean has a lighter tail), which keeps it valid when the branches share
+ * interferers (measured on the capture: effective k of 2-3, not 4). Threshold: NCS2 * exp(-x / mean) = pfa. */
+#define PRACH_LB_PFA 1e-3
+
+static int u32_compare(const void *a, const void *b)
+{
+  const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+  return (x > y) - (x < y);
+}
+
+/* Single-preamble test on a retained occasion. Returns 1 found, 0 absent, -1 not supported (restricted set). Unrestricted sets only: same preamble -> (root offset,
+ * cyclic shift) map and window as rx_nr_prach. */
+static int lookback_detect(const prach_job_t *rj, int fdm, int td, int rapid, int *energy, int *delay_samples)
+{
+  if (rj->restricted_set != 0 || fdm >= rj->n_fdm || td >= rj->occasion.num_occasions) return -1;
+  const fapi_nr_num_prach_fd_occasions_t *fd = &rj->fd[fdm];
+  if (fd->num_root_sequences == 0 || fd->num_root_sequences > 64) return -1;
+  const int N_ZC = rj->sequence_length == 0 ? 839 : 139;
+  const int NCS = get_NCS(fd->prach_zero_corr_conf, rj->format_raw, rj->restricted_set);
+  const int r = NCS ? N_ZC / NCS : 1;
+  const int root_off = rapid / r;
+  if (root_off >= fd->num_root_sequences) return -1;
+  if (cached_root != fd->prach_root_sequence_index || cached_count != fd->num_root_sequences || cached_short != rj->sequence_length) {
+    compute_nr_prach_seq(rj->sequence_length, fd->num_root_sequences, fd->prach_root_sequence_index, prach_xu);
+    cached_root = fd->prach_root_sequence_index;
+    cached_count = fd->num_root_sequences;
+    cached_short = rj->sequence_length;
+  }
+  int32_t *time_rx[PRACH_MAX_RX];
+  for (int a = 0; a < rj->n_rx; ++a) time_rx[a] = (int32_t *)rj->samples[a];
+  memset(prach_freq, 0, sizeof(prach_freq));
+  time_stats_t timing = {0};
+  prach_item_t item = {.frame = rj->frame, .slot = rj->start_slot, .num_slots = 1, .rootSequenceIndex = fd->prach_root_sequence_index,
+                       .numrootSequenceIndex = fd->num_root_sequences, .msg1_frequencystart = fd->k1, .mu = rj->subcarrier_spacing,
+                       .prach_sequence_length = rj->sequence_length, .restricted_set = rj->restricted_set,
+                       .numerology_index = rj->fp.numerology_index, .nb_rx = rj->n_rx, .Xu = prach_xu, .rx_prach = &timing,
+                       .prach_buf = prach_freq};
+  item.pdu.prach_format = rj->occasion.format;
+  item.pdu.prach_start_symbol = rj->occasion.start_symbol;
+  item.pdu.num_prach_ocas = rj->occasion.num_occasions;
+  item.pdu.num_ra = fdm;
+  item.pdu.num_cs = NCS;
+  nr_prach_rx_copied(&item, time_rx, (NR_DL_FRAME_PARMS *)&rj->fp, rj->nta, rj->sample_base);
+
+  const int dft_sz = N_ZC == 839 ? 1024 : 256, log2_sz = N_ZC == 839 ? 10 : 8;
+  c16_t *Xu = prach_xu[root_off];
+  uint32_t e[1024] = {0};
+  for (int aa = 0; aa < rj->n_rx; ++aa) {
+    c16_t prachF[1024] __attribute__((aligned(32))), tmp[1024] __attribute__((aligned(32)));
+    for (int k = 0; k < N_ZC; ++k) prachF[k] = c16MulConjShift(Xu[k], prach_freq[aa][td][k], 15);
+    memset(prachF + N_ZC, 0, sizeof(c16_t) * (dft_sz - N_ZC));
+    idft(get_idft(dft_sz), (int16_t *)prachF, (int16_t *)tmp, 1);
+    for (int i = 0; i < dft_sz; ++i) e[i] += squaredMod(tmp[i]);
+  }
+  uint32_t sorted[1024];
+  memcpy(sorted, e, sizeof(uint32_t) * dft_sz);
+  qsort(sorted, dft_sz, sizeof(uint32_t), u32_compare);
+  int shift = NCS ? (int)((N_ZC - (long)(rapid % r) * NCS % N_ZC) % N_ZC) : 0;
+  const int shift2 = shift == 0 ? 0 : (shift << log2_sz) / N_ZC;
+  int NCS2 = N_ZC == 839 ? (NCS << 10) / 839 : (NCS << 8) / 139;
+  if (NCS2 == 0) NCS2 = N_ZC;
+  uint32_t peak = 0;
+  int best = 0;
+  for (int i = 0; i < NCS2 && shift2 + i < dft_sz; ++i)
+    if (e[shift2 + i] > peak) {
+      peak = e[shift2 + i];
+      best = i;
+    }
+  const int n_trim = dft_sz - dft_sz / 20;
+  double mean = 0;
+  for (int i = 0; i < n_trim; ++i) mean += sorted[i];
+  mean /= n_trim;
+  if (mean <= 0 || peak == 0) return 0;
+  if (peak < mean * log(NCS2 / PRACH_LB_PFA)) return 0;
+  *energy = dB_fixed_times10((peak >> log2_sz) / rj->n_rx);
+  int d = best;
+  const int mu = rj->fp.numerology_index;
+  if (rj->sequence_length == 0) {
+    if (rj->occasion.format <= 2) d *= 3 * (1 << mu) / 2;
+    else if (rj->occasion.format == 3) d *= 3 * (1 << mu) / 8;
+  } else {
+    d /= 2;
+  }
+  *delay_samples = (int)lround((double)d * rj->fp.samples_per_subframe / (1920.0 * (1 << mu)));
+  return 1;
+}
+
+static void retain_job(const prach_job_t *job)
+{
+  if (job->n_samples <= 0) return;
+  const unsigned i = retain_head++ % PRACH_RETAIN;
+  prach_job_t *r = &retain[i];
+  memcpy(r, job, offsetof(prach_job_t, samples));
+  for (int a = 0; a < job->n_rx; ++a) memcpy(r->samples[a], job->samples[a], (size_t)job->n_samples * sizeof(c16_t));
+  retain_valid[i] = true;
+}
+
+static bool key_emitted(uint64_t oabs, int symbol, int fdm, int preamble)
+{
+  const uint64_t key = (oabs << 24) | ((uint64_t)(symbol & 15) << 20) | ((uint64_t)(fdm & 15) << 16) | (uint64_t)preamble;
+  for (int i = 0; i < 16; ++i)
+    if (emitted_keys[i] == key) return true;
+  return false;
+}
+
+/* Worker: every RAR seen since the last scan whose RAPID the blind path did not export is tested on its retained occasion. */
+static void lookback_scan(void)
+{
+  const unsigned count = atomic_load_explicit(&rar_head, memory_order_acquire);
+  if (count - lb_cursor > PRACH_RAR_RING) lb_cursor = count - PRACH_RAR_RING;
+  while (lb_cursor != count) {
+    const unsigned slot = lb_cursor++ % PRACH_RAR_RING;
+    const uint64_t v = atomic_load_explicit(&rar_events[slot], memory_order_acquire);
+    const uint16_t tc = rar_tc[slot];
+    const uint32_t rar_slot = (v >> 40) & 0xffffff;
+    const uint16_t rnti = (v >> 24) & 0xffff;
+    const int rapid = (v >> 16) & 0xff, ta = v & 0xffff;
+    bool covered = false, candidate = false;
+    for (unsigned back = 1; back <= PRACH_RETAIN && !covered; ++back) {
+      const unsigned idx = (retain_head - back) % PRACH_RETAIN;
+      if (retain_head < back || !retain_valid[idx]) continue;
+      const prach_job_t *rj = &retain[idx];
+      const uint64_t oabs = rj->abs_slot - (rj->current_slot - rj->start_slot);
+      const uint32_t age = rar_slot_age(oabs, rar_slot, rj->fp.slots_per_frame);
+      if (age > PRACH_RAR_WAIT_SLOTS) continue; /* the RAR is already decoded: it may be newer than this job's own slot */
+      const int ras = ra_slot(rj->start_slot, rj->fp.numerology_index, rj->occasion.format);
+      for (int fdm = 0; fdm < rj->n_fdm && !covered; ++fdm)
+        for (int td = 0; td < rj->occasion.num_occasions && !covered; ++td) {
+          const int symbol = rj->occasion.start_symbol + td * rj->occasion.duration;
+          if (nr_prach_passive_rar_relation(rj->frame, ras, symbol, fdm, rapid, rnti, rapid) != 1) continue;
+          candidate = true;
+          bool blind_has = key_emitted(oabs, symbol, fdm, rapid);
+          for (int pi = 0; pi < PRACH_PENDING && !blind_has; ++pi) /* a blind detection of the same RAPID is still waiting and will carry this RAR */
+            blind_has = pending[pi].valid && pending[pi].abs_slot == oabs && pending[pi].symbol == symbol && pending[pi].fdm == fdm
+                        && pending[pi].preamble == rapid;
+          if (blind_has) {
+            covered = true;
+            break;
+          }
+          int energy = 0, delay = 0;
+          atomic_fetch_add_explicit(&prach_lb_tried, 1, memory_order_relaxed);
+          const int r = lookback_detect(rj, fdm, td, rapid, &energy, &delay);
+          if (r < 0) atomic_fetch_add_explicit(&prach_lb_noring, 1, memory_order_relaxed);
+          if (r != 1) {
+            covered = true; /* the newest matching occasion answers; older ones are other frames of the same RA-RNTI */
+            continue;
+          }
+          atomic_fetch_add_explicit(&prach_lb_found, 1, memory_order_relaxed);
+          const prach_detection_t d = {
+              .valid = true, .abs_slot = oabs, .mono_ns = rj->mono_ns,
+              .epoch = rj->epoch_stamp == UINT64_MAX ? UINT32_MAX : rj->epoch_stamp >> 32, .identity_gen = rj->epoch_stamp,
+              .dedicated_epoch = rj->dedicated_epoch, .frame = rj->frame, .slot = rj->start_slot, .ra_slot = ras,
+              .slots_per_frame = rj->fp.slots_per_frame, .fdm = fdm, .symbol = symbol, .preamble = rapid, .energy = energy,
+              .delay_samples = delay, .pci = rj->fp.Nid_cell};
+          nr_sense_rs_meta_t meta = detection_meta(&d, 1, rapid, ta);
+          meta.rnti = tc; /* TC-RNTI of the RAR that named this RAPID */
+          emitted_keys[emitted_head++ % 16] = (oabs << 24) | ((uint64_t)(symbol & 15) << 20) | ((uint64_t)(fdm & 15) << 16) | (uint64_t)rapid;
+#ifdef NR_PASSIVE_PRACH_TEST
+          atomic_fetch_add(&test_export_calls, 1);
+#endif
+          nr_sense_emit_rs(NR_SENSE_SRC_PRACH, &meta, 0);
+          covered = true;
+        }
+    }
+    if (!candidate) atomic_fetch_add_explicit(&prach_lb_noring, 1, memory_order_relaxed);
+  }
+}
+
 static void process_job(const prach_job_t *job)
 {
 #ifdef NR_PASSIVE_PRACH_TEST
@@ -451,7 +730,13 @@ static void process_job(const prach_job_t *job)
   flush_pending(job->abs_slot);
   int32_t *time_rx[PRACH_MAX_RX];
   unsigned processed = 0;
-  for (int a = 0; a < job->n_rx; ++a) time_rx[a] = (int32_t *)job->samples[a];
+  for (int a = 0; a < job->n_rx; ++a) {
+    time_rx[a] = (int32_t *)job->samples[a];
+    /* The snapshot is raw receiver samples: remove the carrier offset exactly as the slot front end does. A 4.8 kHz offset is ~4 preamble tones
+     * (1.25 kHz): the ZC peak lands on another preamble index and delay (wrong RAPID / TA) and a fraction of a tone costs peak energy. */
+    if (job->fo_hz[a] != 0.0 && job->n_samples > 0)
+      derotate((c16_t *)job->samples[a], job->n_samples, job->fo_hz[a], 1000.0 * job->fp.samples_per_subframe);
+  }
   for (int fdm = 0; fdm < job->n_fdm; ++fdm) {
     const fapi_nr_num_prach_fd_occasions_t *fd = &job->fd[fdm];
     if (fd->num_root_sequences == 0 || fd->num_root_sequences > 64) continue;
@@ -511,6 +796,8 @@ static void process_job(const prach_job_t *job)
   atomic_fetch_add_explicit(&prach_us, elapsed_ns / 1000, memory_order_relaxed);
   nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_PRACH,elapsed_ns);
   atomic_fetch_add_explicit(&prach_occasions, processed, memory_order_relaxed);
+  retain_job(job);
+  lookback_scan(); /* after the retain: a RAR that overtook its own occasion's worker job is still resolved */
 }
 
 static void *prach_worker(void *arg)
@@ -564,6 +851,7 @@ void nr_prach_passive_flush(void)
   pthread_mutex_unlock(&job_mu);
   if (worker_started) pthread_join(job_thread, NULL);
   worker_started = false;
+  lookback_scan();
   for (int i = 0; i < PRACH_PENDING; ++i) {
     if (pending[i].valid) {
       emit_detection(&pending[i], pending[i].abs_slot + PRACH_RAR_WAIT_SLOTS);
@@ -619,6 +907,20 @@ static void process_slot(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
       LOG_I(PHY, "SENSING: passive PRACH inactive until SIB1 RACH config is available\n");
     }
     return;
+  }
+  {
+    NR_CELL_STATIC(bool, logged_cfg)
+#define logged_cfg NR_CELL_REF(logged_cfg)
+    const fapi_nr_prach_config_t *pc = &ue->nrUE_config.prach_config;
+    if (!logged_cfg && pc->num_prach_fd_occasions_list && pc->num_prach_fd_occasions) {
+      logged_cfg = true;
+      const nr_prach_info_t t = get_nr_prach_occasion_info_from_index(prior->prach_config_index, fp->freq_range, TDD);
+      LOG_I(PHY, "SENSING: PRACH CONFIG idx=%d format=0x%x L=%d scs_idx=%d root=%d n_roots=%d zczc=%d restricted=%d fdm=%d k1=%d start_sym=%d n_t_slot=%d dur=%d N_RB_UL=%d fs=%d\n",
+            prior->prach_config_index, (unsigned)t.format, pc->prach_sequence_length ? 139 : 839, pc->prach_sub_c_spacing,
+            pc->num_prach_fd_occasions_list[0].prach_root_sequence_index, pc->num_prach_fd_occasions_list[0].num_root_sequences,
+            pc->num_prach_fd_occasions_list[0].prach_zero_corr_conf, pc->restricted_set_config, pc->num_prach_fd_occasions,
+            pc->num_prach_fd_occasions_list[0].k1, (int)t.start_symbol, (int)t.N_t_slot, (int)t.N_dur, fp->N_RB_UL, fp->samples_per_subframe * 1000);
+    }
   }
   if (proc->nr_slot_rx == fp->slots_per_frame - 1 && fp->samples_per_frame >= PRACH_PREFIX) {
     for (int a = 0; a < fp->nb_antennas_rx && a < PRACH_MAX_RX; ++a)
@@ -700,6 +1002,9 @@ static void process_slot(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
   job->gain_db = observed_gain != INT32_MIN ? observed_gain : (int)ue->rx_total_gain_dB;
   job->format_raw = table.format & 0xff;
   job->n_fdm = cfg->num_prach_fd_occasions;
+  job->n_samples = last - first < 0 ? 0 : last - first;
+  const double common_fo = ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0;
+  for (int a = 0; a < n_rx; ++a) job->fo_hz[a] = common_fo + (nr_ue_get_branch_fo_hz ? nr_ue_get_branch_fo_hz(a) : 0.0);
   job->sequence_length = cfg->prach_sequence_length;
   job->subcarrier_spacing = cfg->prach_sub_c_spacing;
   job->restricted_set = cfg->restricted_set_config;
@@ -758,6 +1063,24 @@ void nr_prach_passive_test_reset(void)
   atomic_store(&prach_skipped, 0);
   atomic_store(&prach_detections, 0);
   atomic_store(&prach_margin_max, 0);
+  atomic_store(&prach_peak_last, 0);
+  atomic_store(&prach_peak_max, INT32_MIN);
+  atomic_store(&prach_peak_min, INT32_MAX);
+  atomic_store(&prach_floor_last, -1);
+  atomic_store(&prach_peak_zero, 0);
+  atomic_store(&prach_peak_sum, 0);
+  atomic_store(&prach_seeded, 0);
+  atomic_store(&prach_occasions, 0);
+  atomic_store(&prach_us, 0);
+  atomic_store(&prach_lb_tried, 0);
+  atomic_store(&prach_lb_found, 0);
+  atomic_store(&prach_lb_noring, 0);
+  memset(retain_valid, 0, sizeof(retain_valid));
+  retain_head = 0;
+  lb_cursor = atomic_load(&rar_head);
+  emitted_head = 0;
+  memset(emitted_keys, 0, sizeof(emitted_keys));
+  atomic_store(&prach_detections, 0);
   nr_prach_passive_start();
 }
 void nr_prach_passive_test_prior(int index, bool valid, bool ignore)

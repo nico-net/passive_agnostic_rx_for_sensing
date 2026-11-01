@@ -77,6 +77,7 @@ typedef struct {
   uint64_t sense_prod_count[NR_SENSE_SRC_COUNT], sense_pack_count[NR_SENSE_SRC_COUNT];
   uint64_t sense_rec_us, sense_write_us, sense_rec_count, sense_write_count;
   uint64_t prach_us, prach_drops, prach_skipped;
+  int prach_peak_last, prach_peak_min, prach_peak_max, prach_peak_mean, prach_floor_last; uint64_t prach_peak_zero, prach_seeded, prach_lb_tried, prach_lb_found, prach_lb_noring; /* per-occasion best-preamble peak and 25th-percentile floor, dB/10 (nr_prach_passive_diag_peaks) */
   uint64_t prach_occasions, prach_detections; int prach_margin_max; /* correlated occasions, floor-margin detections, best margin dB/10 (a Msg1 needs >= 80) */
   uint64_t csirs_candidates, csirs_confirmed, csirs_revoked, zp_exported, zp_revoked;
   uint64_t csirs_search_us, csirs_idsweep_us, csirs_confirm_us, csirs_cfr_us;

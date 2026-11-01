@@ -30,13 +30,20 @@ size_t nr_prach_passive_cell_heap_bytes(void);
 void nr_prach_passive_cell_pause(int cell, bool pause); /* retired cell: process() returns at once; no allocation */
 void nr_prach_passive_start(void); /* call before UE slot threads start */
 void nr_prach_passive_rar(uint16_t ra_rnti, uint8_t rapid, uint16_t ta, uint64_t abs_slot);
-typedef struct { uint8_t rapid; uint16_t ta; } nr_prach_rar_entry_t;
+typedef struct { uint8_t rapid; uint16_t ta; uint16_t tc_rnti; } nr_prach_rar_entry_t;
 int nr_prach_passive_rar_entries(const uint8_t *tb, uint32_t len, nr_prach_rar_entry_t *out, int capacity);
 /* Call only after nr_passive_mac_rar_ta has validated the whole transport block. */
 void nr_prach_passive_rar_pdu(uint16_t ra_rnti, uint64_t abs_slot, const uint8_t *tb, uint32_t len);
 void nr_prach_passive_flush(void);
 void nr_prach_passive_metrics(uint64_t *prach_us, uint64_t *prach_drops, uint64_t *prach_skipped);
 void nr_prach_passive_diag(uint64_t *occasions, uint64_t *detections, int *margin_max);
+/* Correlator statistics per occasion, dB/10 of the strongest preamble: all-zero or all-equal peaks mean a broken chain, peaks spread a few dB around floor_last mean an idle cell. */
+typedef struct {
+  int peak_last, peak_min, peak_max, peak_mean, floor_last; /* floor_last: 25th percentile of the recent peaks, -1 until seeded */
+  uint64_t lb_tried, lb_found, lb_noring;                   /* RAR look-back: RAPIDs tested on a retained occasion, found, and RARs without a usable retained occasion */
+  uint64_t peak_zero, seeded;                               /* occasions with no energy at all; occasions compared against a seeded floor */
+} nr_prach_passive_peaks_t;
+void nr_prach_passive_diag_peaks(nr_prach_passive_peaks_t *p);
 void nr_prach_passive_gain_changed(int gain_db);
 #ifdef NR_PASSIVE_PRACH_TEST
 int nr_prach_passive_rar_age_test(uint64_t detection_abs, uint64_t rar_abs, int slots_per_frame);

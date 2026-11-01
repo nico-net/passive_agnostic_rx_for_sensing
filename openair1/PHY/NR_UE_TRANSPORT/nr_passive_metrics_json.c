@@ -191,7 +191,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
     snprintf(discovery, sizeof(discovery), ",\"csirs_disc_readmit_skipped\":%" PRIu64,
              m->csirs_disc_readmit_skipped);
   /* tail keys: own bounded buffer, appended after every pre-existing key */
-  char tail[2048];
+  char tail[2560];
   int t = snprintf(tail, sizeof(tail), ",\"t_real_ns\":%" PRIu64 ",\"proc_utime_us\":%" PRIu64 ",\"proc_stime_us\":%" PRIu64
                    ",\"proc_maxrss_kb\":%" PRIu64 ",\"proc_minflt\":%" PRIu64 ",\"proc_majflt\":%" PRIu64,
                    m->t_real_ns, m->proc_utime_us, m->proc_stime_us, m->proc_maxrss_kb, m->proc_minflt, m->proc_majflt);
@@ -219,6 +219,14 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
     if (t > 0 && (size_t)t < sizeof(tail))
       t += snprintf(tail + t, sizeof(tail) - (size_t)t, ",\"prach_occasions\":%" PRIu64 ",\"prach_detections\":%" PRIu64 ",\"prach_margin_max\":%d",
                     m->prach_occasions, m->prach_detections, m->prach_margin_max);
+    if (t > 0 && (size_t)t < sizeof(tail))
+      t += snprintf(tail + t, sizeof(tail) - (size_t)t,
+                    ",\"prach_peak_last\":%d,\"prach_peak_min\":%d,\"prach_peak_max\":%d,\"prach_peak_mean\":%d,\"prach_floor_last\":%d"
+                    ",\"prach_peak_zero\":%" PRIu64 ",\"prach_seeded\":%" PRIu64
+                    ",\"prach_lookback_tried\":%" PRIu64 ",\"prach_lookback_found\":%" PRIu64 ",\"prach_lookback_noring\":%" PRIu64,
+                    m->prach_peak_last, m->prach_peak_min == INT32_MAX ? 0 : m->prach_peak_min, m->prach_peak_max == INT32_MIN ? 0 : m->prach_peak_max,
+                    m->prach_peak_mean, m->prach_floor_last, m->prach_peak_zero, m->prach_seeded,
+                    m->prach_lb_tried, m->prach_lb_found, m->prach_lb_noring);
   }
   if (t < 0 || (size_t)t >= sizeof(tail)) return -1;
   const int z = snprintf(buf + w, n - (size_t)w, "%s%s}", discovery, tail);

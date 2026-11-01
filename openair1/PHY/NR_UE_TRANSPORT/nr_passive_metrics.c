@@ -33,6 +33,7 @@
 #include "nr_pdcch_uss_prune.h"
 __attribute__((weak)) void nr_sense_stats(nr_sense_stats_t *out);
 __attribute__((weak)) void nr_prach_passive_diag(uint64_t *, uint64_t *, int *);
+__attribute__((weak)) void nr_prach_passive_diag_peaks(nr_prach_passive_peaks_t *);
 __attribute__((weak)) void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped);
 __attribute__((weak)) void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
 __attribute__((weak)) void nr_csirs_disc_get_metrics(nr_csirs_disc_metrics_t *m);
@@ -314,6 +315,14 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     nr_prach_passive_metrics(&m->prach_us, &m->prach_drops, &m->prach_skipped);
   if (nr_prach_passive_diag)
     nr_prach_passive_diag(&m->prach_occasions, &m->prach_detections, &m->prach_margin_max);
+  if (nr_prach_passive_diag_peaks) {
+    nr_prach_passive_peaks_t pk;
+    nr_prach_passive_diag_peaks(&pk);
+    m->prach_peak_last = pk.peak_last; m->prach_peak_min = pk.peak_min; m->prach_peak_max = pk.peak_max;
+    m->prach_peak_mean = pk.peak_mean; m->prach_floor_last = pk.floor_last;
+    m->prach_peak_zero = pk.peak_zero; m->prach_seeded = pk.seeded;
+    m->prach_lb_tried = pk.lb_tried; m->prach_lb_found = pk.lb_found; m->prach_lb_noring = pk.lb_noring;
+  }
   if (nr_csirs_blind_rt_metrics) nr_csirs_blind_rt_metrics(m);
   if (nr_csirs_disc_get_metrics) {
     nr_csirs_disc_metrics_t d;

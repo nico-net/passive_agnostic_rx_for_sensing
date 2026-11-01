@@ -77,7 +77,7 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
   common(&j,m->epoch,m->identity_gen,m->dedicated_epoch,(int64_t)m->abs_slot,m->frame,m->slot,
          m->t_mono_ns ? m->t_mono_ns : mono_ns(),m->rx_ts,m->pci);
   quoted(&j,"source",names[src]); quoted(&j,"dir",ul ? "UL" : "DL");
-  integer(&j,"rnti",src==NR_SENSE_SRC_SSB || src==NR_SENSE_SRC_CSIRS || src==NR_SENSE_SRC_PRACH || !m->rnti ? -1 : m->rnti);
+  integer(&j,"rnti",src==NR_SENSE_SRC_SSB || src==NR_SENSE_SRC_CSIRS || !m->rnti ? -1 : m->rnti);
   integer(&j,"start_rb",m->start_rb); integer(&j,"nb_rb",m->nb_rb);
   integer(&j,"n_re",m->n_re);
   put(&j,",\"l_syms\":[");

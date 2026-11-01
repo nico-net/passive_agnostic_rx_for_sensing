@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
+#include <unistd.h>
 #include <string>
+#include <string.h>
 #include <thread>
 #include "nr_prach_passive_test_bridge.h"
 
@@ -326,4 +328,134 @@ TEST(PassivePrachCells, PausedCellIgnoresSlotsAndResumes)
   test_prach_finish();
   test_prach_bind(0);
   test_prach_finish();
+}
+
+/* ---- real captured IQ + a synthetic preamble through the production slot hook ---- */
+namespace {
+const char *kCapture = "/home/nicola/NICOLA/ota_runs/raw_pci415_day_4s_1024_1001";
+/* pci 415 SIB1 (rx.log): DDDDDDDSUU, prach-ConfigurationIndex 3 (format 0, even frames, subframe 9), msg1-FDM 1, msg1-FrequencyStart 8;
+ * 217 PRB at 30 kHz, 122.88 Ms/s, 4 RX. Root / zeroCorrelationZoneConfig / UL BWP start are not in the logs: any valid values test the chain. */
+test_prach_real_cfg_t pci415(int preamble, int delay, double snr)
+{
+  test_prach_real_cfg_t c{};
+  c.capture_dir = kCapture;
+  c.t0 = 122160;       /* DL start of a 5 ms TDD period in the capture (power edge) */
+  c.n_noise = 10;
+  c.config_index = 3;
+  c.root = 22; c.zczc = 6; c.restricted = 0;
+  c.msg1_fstart = 8; c.msg1_fdm = 0; c.ul_bwp_start = 81;
+  c.preamble = preamble; c.delay = delay; c.snr_db = snr;
+  return c;
+}
+bool have_capture() { return access((std::string(kCapture) + "/rx0.sc16").c_str(), R_OK) == 0; }
+}
+
+/* The record's integer field after `key`, -1 when absent. */
+int field(const char *record, const char *key)
+{
+  const char *p = strstr(record, key);
+  return p ? atoi(p + strlen(key)) : -1;
+}
+
+/* A format-0 preamble at the cell's exact parameters, 4 RX, added to the real capture at 0..-10 dB per antenna sample (the window is 122.88 Ms/s wide
+ * and the preamble 1.05 MHz, so these are +20.7 dB higher in-band): the production slot hook must report the right preamble index and delay. */
+TEST_F(PassivePrach, RealIqDetectsInjectedPreamble)
+{
+  if (!have_capture()) GTEST_SKIP() << "capture not on this host";
+  const int preambles[] = {0, 17, 40, 63};
+  const int delays[] = {0, 300, 1500};
+  for (double snr : {-10.0, -5.0, 0.0})
+    for (int v : preambles)
+      for (int d : delays) {
+        test_prach_real_out_t o{};
+        auto c = pci415(v, d, snr);
+        ASSERT_TRUE(test_prach_real_iq(&c, &o));
+        EXPECT_EQ(o.records, 1) << "preamble " << v << " delay " << d << " snr " << snr;
+        EXPECT_EQ(field(o.record, "\"preamble\":"), v) << "snr " << snr << " delay " << d;
+        EXPECT_NEAR(field(o.record, "\"delay_samples\":"), d, 100) << "preamble " << v << " snr " << snr; /* one correlator bin = 96 samples */
+        EXPECT_GE(o.peak_last - o.floor_last, 80);
+        test_prach_reset();
+      }
+}
+
+/* The capture is not carrier-offset corrected (capture_info.json receiver_corrections_applied=false; the cell shows -4827 Hz). The receiver
+ * removes it per consumer; the PRACH snapshot has to as well, or the peak lands on another preamble index and delay. */
+TEST_F(PassivePrach, RealIqDetectsPreambleUnderCarrierOffset)
+{
+  if (!have_capture()) GTEST_SKIP() << "capture not on this host";
+  for (double cfo : {-4827.0, 700.0, 2500.0})
+    for (int v : {17, 40}) {
+      test_prach_real_out_t o{};
+      auto c = pci415(v, 300, -5.0);
+      c.cfo_hz = cfo;
+      c.rx_fo_hz = cfo;
+      ASSERT_TRUE(test_prach_real_iq(&c, &o));
+      printf("PRACH_COST_FO us_per_occasion %lu cfo %.0f peak %d..%d last %d floor %d occ %lu det %lu rec %d\n", o.us_per_occasion, cfo, o.peak_min, o.peak_max, o.peak_last, o.floor_last, o.occasions, o.detections, o.records);
+      EXPECT_EQ(o.records, 1) << cfo;
+      EXPECT_EQ(field(o.record, "\"preamble\":"), v) << "cfo " << cfo;
+      EXPECT_NEAR(field(o.record, "\"delay_samples\":"), 300, 150) << "cfo " << cfo;
+      test_prach_reset();
+    }
+}
+
+/* Noise only: every occasion reports its peak and the floor; an idle cell neither detects nor produces zero/constant peaks. */
+TEST_F(PassivePrach, RealIqIdleCellStatistics)
+{
+  if (!have_capture()) GTEST_SKIP() << "capture not on this host";
+  test_prach_real_out_t o{};
+  auto c = pci415(-1, 0, 0);
+  c.n_noise = 60;
+  ASSERT_TRUE(test_prach_real_iq(&c, &o));
+  EXPECT_EQ(o.records, 0);
+  printf("PRACH_COST us_per_occasion %lu\n", (unsigned long)o.us_per_occasion);
+  EXPECT_EQ(o.detections, 0ul);
+  EXPECT_EQ(o.peak_zero, 0ul);
+  EXPECT_GT(o.peak_max, o.peak_min) << "constant peaks mean a dead correlator";
+  EXPECT_GT(o.floor_last, 0);
+  EXPECT_LT(o.peak_max - o.floor_last, 80);
+}
+
+/* RAR look-back: below the blind threshold (8 dB over the idle floor of the best of 64 preambles x delays) but above the single-hypothesis threshold, the
+ * preamble is found only when a RAR names its RAPID on that occasion (TS 38.321 5.1.3). Per-antenna sample SNR: the level sits between the two thresholds. */
+TEST_F(PassivePrach, RealIqLookbackFindsWhatBlindMisses)
+{
+  if (!have_capture()) GTEST_SKIP() << "capture not on this host";
+  /* SNR search is not part of the product: the two levels bracket the thresholds measured on this capture */
+  bool found_window = false;
+  for (double snr : {-42.0, -40.0, -38.0, -36.0, -34.0, -33.0, -32.0, -31.0}) {
+    test_prach_real_out_t blind{}, look{};
+    auto c = pci415(17, 300, snr);
+    ASSERT_TRUE(test_prach_real_iq(&c, &blind));
+    test_prach_reset();
+    c.rar_on = 1; c.rar_rapid = 17; c.rar_ta = 20; c.rar_tc = 0x4a5b;
+    ASSERT_TRUE(test_prach_real_iq(&c, &look));
+    test_prach_reset();
+    printf("LB snr %.0f blind_records %d lookback_records %d tried %lu found %lu noring %lu peak %d floor %d\n", snr, blind.records, look.records, look.lb_tried, look.lb_found, look.lb_noring, look.peak_last, look.floor_last);
+    if (blind.records == 0 && look.records == 1) {
+      found_window = true;
+      EXPECT_EQ(field(look.record, "\"preamble\":"), 17);
+      EXPECT_EQ(field(look.record, "\"rar_ta\":"), 20);
+      EXPECT_EQ(field(look.record, "\"rnti\":"), 0x4a5b);
+      EXPECT_NE(std::string(look.record).find("\"rar_match\":true"), std::string::npos) << look.record;
+    }
+  }
+  EXPECT_TRUE(found_window) << "no SNR between the blind and the look-back threshold";
+}
+
+/* A RAR for a preamble that is NOT on the air must not be invented by the look-back (1e-3 false alarm per attempt, 4 RX, noise only). */
+TEST_F(PassivePrach, RealIqLookbackAbsentPreambleStaysAbsent)
+{
+  if (!have_capture()) GTEST_SKIP() << "capture not on this host";
+  int found = 0, tried = 0;
+  for (int v = 0; v < 12; ++v) {
+    test_prach_real_out_t o{};
+    auto c = pci415(-1, 0, 0);
+    c.n_noise = 8;
+    c.rar_on = 1; c.rar_rapid = v * 5; c.rar_ta = 10; c.rar_tc = 1;
+    ASSERT_TRUE(test_prach_real_iq(&c, &o)); /* nothing injected, a RAR names a preamble anyway */
+    found += o.lb_found; tried += o.lb_tried;
+    test_prach_reset();
+  }
+  EXPECT_EQ(found, 0);
+  EXPECT_EQ(tried, 12) << "every RAR must have been tested on its retained occasion";
 }
